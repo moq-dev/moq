@@ -4,16 +4,14 @@ import * as z from "@zod/mini";
 import * as Echo from "./echo";
 import * as Stats from "./stats";
 
-const fixtures = new URL("../../../rs/hang/fixtures/", import.meta.url);
-
 for (const [name, schema] of [
-	["stats-snapshot.json", Stats.SnapshotSchema],
-	["echo-snapshot.json", Echo.SnapshotSchema],
-	["stats-zero.json", Stats.SnapshotSchema],
-	["echo-zero.json", Echo.SnapshotSchema],
+	["../../../rs/hang/fixtures/stats-snapshot.json", Stats.SnapshotSchema],
+	["../../../rs/hang/fixtures/echo-snapshot.json", Echo.SnapshotSchema],
+	["../../../rs/hang/fixtures/stats-zero.json", Stats.SnapshotSchema],
+	["../../../rs/hang/fixtures/echo-zero.json", Echo.SnapshotSchema],
 ] as const) {
 	test(`shared Rust fixture ${name} round trips through JS`, async () => {
-		const input = await Bun.file(new URL(name, fixtures)).json();
+		const input = await Bun.file(new URL(name, import.meta.url)).json();
 		expect(JSON.parse(JSON.stringify(schema.parse(input)))).toEqual(input);
 	});
 }
@@ -63,7 +61,9 @@ test("unknown track fields are ignored and flattened snapshot extensions survive
 });
 
 test("shared invalid counters refuse instead of rounding", async () => {
-	const cases = (await Bun.file(new URL("snapshot-invalid.json", fixtures)).json()) as unknown[];
+	const cases = (await Bun.file(
+		new URL("../../../rs/hang/fixtures/snapshot-invalid.json", import.meta.url),
+	).json()) as unknown[];
 	for (const value of cases) expect(() => Stats.TrackSchema.parse(value)).toThrow();
 	for (const value of [
 		{ stalled: -1 },
