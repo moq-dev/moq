@@ -21,10 +21,16 @@ because it has a consumer now. The decisions are recorded in the
 
 - ✅ Decided 2026-10-15 (maintainer): general request updates, not a
   per-request token setter. Each `Route`/`Subscription` carries an
-  `Option<moq_net::Auth>` (name to be settled), and changing it triggers the
-  update automatically. Unset means the session's scope.
+  `Option<moq_net::Auth>`, and changing it triggers the update automatically.
+  Unset means the session's scope.
 - ✅ Decided 2026-10-15 (maintainer): outgoing tokens go through `add()`;
   #5148's `set_request_token` and its renewal sender are not carried forward.
+- ✅ Decided 2026-10-16 (maintainer, #5695): `auth::Handle::add()` returns
+  `auth::Auth`, a cloneable reference to one presented credential that stays
+  presented until its last reference drops; `Route::auth` and
+  `Subscription::auth` hold `Option<Auth>`. Not a cloneable `auth::Token`,
+  which conflates the credential bytes with the auth a request names, and
+  not credential bytes on the request, which bypass `add()`.
 - Renewing many live requests at once must not take one round trip per
   request: each request's update is its own in-flight step, polled beside the
   session's other announce and subscribe work, so new announcements and
@@ -44,8 +50,12 @@ because it has a consumer now. The decisions are recorded in the
   lite it names the auth registered through
   [Requests name their auth](/quest/m1/auth/request-auth-id.md), so the lite
   path follows that quest. A refused update ends only that request.
-- Settle the type and field names with the maintainer before implementing;
-  mirror them in `js/net` and the bindings.
+- Mirror `Auth`, `Route::auth` and `Subscription::auth` in `js/net` and the
+  bindings.
+- Open (2026-10-16): a `Route` lives on an origin shared by every session it
+  feeds, including a reconnecting connection's later sessions, while `add()`
+  belongs to one session's handle. Which sessions may present a route's
+  `Auth` is unsettled; see #5695.
 - Describe request renewal in `doc/concept/moq-lite.md`'s Authorization
   section, and in `doc/concept/standard.md`, which describes only incoming request
   tokens; the moq-transport path can land before the lite one.
