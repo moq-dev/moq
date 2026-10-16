@@ -38,8 +38,7 @@ Decided 2026-10-05 and 2026-10-07:
 - A request for a prefix with no members is held open at zero and reclaimed
   when its last consumer leaves.
 - A child leaves the one-level map after the frame carrying its closing
-  readout; its tail stays in the parent's rollup. Decide while implementing
-  whether a map with hundreds of children needs a cap or paging.
+  readout; its tail stays in the parent's rollup.
 - **Self counters.** A prefix track also carries cumulative counters for
   members at exactly the prefix, so a reader can show a broadcast that also has
   nested broadcasts. A reader can't derive them as the rollup less the current
@@ -51,7 +50,8 @@ Decided 2026-10-05 and 2026-10-07:
   upstream (node, epoch) hold and treats a decrease as that upstream's reset,
   so a merged prefix track never regresses within one downstream
   subscription. Test a join, a leave, and a restart under a held prefix.
-- **Hot path.** Keep it lock-free: a held prefix registers atomic
+- **Hot path.** Reopened in #5719: summing held prefixes per drain in
+  `moq-stats`, as presence does, may replace this. Keep it lock-free: a held prefix registers atomic
   accumulators, each entry caches its held ancestors (and the matching child
   slot in each), and an update bumps them in a loop, about twice the held
   depth per update. Registration and release reach existing entries without a
@@ -61,46 +61,34 @@ Decided 2026-10-05 and 2026-10-07:
 - Held prefixes have no cap: a hold is reclaimed when its last reader leaves,
   like presence tracks, whose cap was dropped for that reason (decided
   2026-10-12 in #5084).
-- Decide whether prefix tracks keep `.json.z` siblings. Update the
-  aggregator, `doc/concept/stats.md`, and `doc/bin/inspect.md`.
+- Update the aggregator, `doc/concept/stats.md`, and `doc/bin/inspect.md`.
 
 Decided 2026-10-12 (#5084): the map tracks are kept, not retired. Prefix
 tracks are added beside them so existing readers keep working, the same
 backwards-compatible shape stats-split took when it kept `sessions.json`.
 This supersedes the 2026-10-05 plan to retire the maps in the same release.
 
+Decided 2026-10-16 (#5719):
+
+- **Name.** `<path>/traffic.json`, where `<path>` is the full broadcast
+  prefix, as presence takes the full root, and a prefix outside the group is
+  refused. The last segment picks the kind and everything before it is the
+  key, like `<root>/presence.json`, so the name is injective without a
+  namespace segment. Tiers ride the payload, never the name, so one
+  subscription returns the whole prefix and no escaping rule is needed.
+- **Payload.** Keyed by tier like `totals.json`. Each tier entry carries the
+  rollup's `publisher` and `subscriber` at its top level, so a totals reader
+  reads the rollup unchanged, plus `self: {publisher, subscriber}` and
+  `children: {"<segment>": {publisher, subscriber}}`, keyed by the child's
+  next path segment.
+- **Encodings.** Plain and `.json.z` siblings, like every other stats track.
+- **No cap or paging on children.** `publisher.json` already carries every
+  path in the group uncapped and fails loud with `FrameTooLarge`; a prefix's
+  child map is a subset of that frame. A cap would make the rollup disagree
+  with its visible children.
+
 Public API: `moq-stats` producer and consumer types. Wire: stats track names
 and payloads.
-
-### Open decisions
-
-Implementation is blocked on the public wire shape. Recommended choices are
-listed first so the draft can resume without rediscovery:
-
-1. **One namespaced track per prefix (recommended):**
-   `prefix/<path>/traffic.json[.z]`, with tiers and both roles in the payload.
-   The fixed `prefix/` namespace makes path and tier labels unambiguous and one
-   subscription returns the complete prefix view. Alternatives are one track
-   per tier and role (more subscriptions and an escaping rule) or percent/base64
-   encoding either the tier or path (opaque names and another canonicalization
-   contract).
-2. **Keep both plain and compressed siblings (recommended):** match every
-   existing stats track and let old/simple readers use JSON while fleet readers
-   use the compressed snapshot. The alternative removes plain JSON for this new
-   track, reducing producer work but making inspection and consumers special
-   cases.
-3. **Do not truncate or page children initially (recommended):** benchmark the
-   complete map against fan-out and rely on the existing hard frame-size error
-   to fail loud. A deterministic cap silently makes the rollup disagree with
-   its visible children; paging adds ordering, snapshot-consistency, and request
-   lifecycle semantics before measurements show they are needed.
-
-After these are decided, put held-prefix accumulation in `moq-net`'s registry
-rather than walking every report row per held prefix in `moq-stats`: each
-`(path, tier)` entry should cache the currently held ancestors and child slots,
-so payload bumps stay lock-free and scale with path depth. The publisher owns
-the request lifecycle and serializes those snapshots; the aggregator applies
-its existing per-node reset baseline to each cumulative prefix value.
 
 ## Related
 
