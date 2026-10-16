@@ -599,16 +599,17 @@ fn zero_rtt_rejected_checkpoint_is_closed() {
 #[should_panic(expected = "checkpoint used on another connection")]
 fn checkpoint_from_another_connection() {
     let _guard = subscribe();
-    let mut pair = pair(true);
-    let (a, _) = pair.connect();
-    let (b, _) = pair.connect();
+    let mut first = pair(true);
+    let (first_ch, _) = first.connect();
+    let mut second = pair(true);
+    let (second_ch, _) = second.connect();
 
-    let s = pair.client_streams(a).open(Dir::Uni).unwrap();
-    let checkpoint = write(&mut pair, a, s);
-    let other = pair.client_streams(b).open(Dir::Uni).unwrap();
+    let s = first.client_streams(first_ch).open(Dir::Uni).unwrap();
+    let checkpoint = write(&mut first, first_ch, s);
+    let other = second.client_streams(second_ch).open(Dir::Uni).unwrap();
     assert_eq!(other, s);
-    pair.client_send(b, other).write(MSG).unwrap();
-    let _ = reset(&mut pair, b, checkpoint);
+    second.client_send(second_ch, other).write(MSG).unwrap();
+    let _ = reset(&mut second, second_ch, checkpoint);
 }
 
 /// A client remembers the server's support for 0-RTT, and may use it there.
