@@ -139,6 +139,52 @@ async fn dropping_the_workers_releases_the_port() {
 	assert!(owned.is_disjoint(&open_sockets()), "workers left the port bound");
 }
 
+/// Stopping a group closes its sessions on the wire. The endpoint driver dies
+/// with the worker's runtime, so a close still queued at that point never
+/// leaves, and the peer only notices at its idle timeout.
+#[tokio::test]
+async fn stopping_the_group_closes_its_sessions() {
+	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	let dir = tempfile::tempdir().unwrap();
+	let (cert, key) = certificate(dir.path());
+	let workers = bind_workers(listen_config(&cert, &key, 0), Default::default(), config(WORKERS)).unwrap();
+	let addr = workers.local_addr();
+	let fingerprints = workers.certificates().fingerprints();
+	let mut group = workers.split();
+	for member in group.members() {
+		member.serve(|server| async move {
+			let mut listener = server.listen().await.unwrap();
+			while let Some(request) = listener.accept().await {
+				tokio::spawn(async move {
+					let (_session, _driver) = request.ok().await.unwrap();
+					std::future::pending::<()>().await;
+				});
+			}
+		});
+	}
+
+	let mut connect = moq_tokio::connect::Config::default();
+	connect.tls.fingerprint = fingerprints;
+	connect.once = Some(true);
+	#[cfg(feature = "websocket")]
+	{
+		connect.websocket.enabled = Some(false);
+	}
+	// Far past the wait below, so only a close on the wire can end the session.
+	let mut quic = moq_tokio::quic::Config::default();
+	quic.idle_timeout = Some(std::time::Duration::from_secs(600));
+	quic.keep_alive = None;
+	let client = connect.init(quic).unwrap();
+	let url: url::Url = format!("https://{addr}/").parse().unwrap();
+	let session = client.connect(url).established().await.expect("connect");
+
+	group.shutdown().await;
+	tokio::time::timeout(std::time::Duration::from_secs(5), session.closed())
+		.await
+		.expect("the session must see the close")
+		.expect_err("a stopped server ends the session");
+}
+
 /// The future factory runs on the worker, so the future may hold local state
 /// across an await without making that state thread-safe, and spawn more of it
 /// onto the same task set.

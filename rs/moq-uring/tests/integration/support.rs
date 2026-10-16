@@ -3,7 +3,7 @@
 #![cfg(target_os = "linux")]
 #![allow(dead_code)]
 
-/// A self-signed localhost certificate on disk.
+/// A self-signed certificate on disk for `localhost` and `127.0.0.1`.
 pub struct Certs {
 	pub dir: tempfile::TempDir,
 	pub cert: std::path::PathBuf,
@@ -11,7 +11,7 @@ pub struct Certs {
 }
 
 pub fn certs() -> anyhow::Result<Certs> {
-	let signed = rcgen::generate_simple_self_signed(vec!["localhost".into()])?;
+	let signed = rcgen::generate_simple_self_signed(vec!["localhost".into(), "127.0.0.1".into()])?;
 	let dir = tempfile::tempdir()?;
 	let cert = dir.path().join("cert.pem");
 	let key = dir.path().join("key.pem");
