@@ -46,6 +46,18 @@ the sleep here.
 it with the exporter's paced tail draining, not the publisher's exit. Fixing
 this race alone does not resolve the failed-export timing above.
 
+Fixture cleanup on 2026-10-15: hold the publisher's stdin writer until its
+signal-driven exit, and mark interrupted output only after the follower enters
+linger and the stdout reader drains the queued tail. No scheduling sleep or
+stdin EOF decides whether the publication ended cleanly. The test pins the
+follower's log level for its lifecycle event.
+
+The separate historical failed-export timing failure remains open. On current
+main `0fc797747`, both named tests passed before these fixture changes under a
+loaded host (about 32): failed-export exited in 2.285 s and the interrupted
+case in 4.787 s. Those passes do not identify or resolve the historical cause.
+Reproduce and record the failed bound and process before changing that arm.
+
 Public API: none. Wire: none.
 
 ## Related

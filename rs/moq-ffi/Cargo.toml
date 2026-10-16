@@ -86,3 +86,7 @@ uniffi = { workspace = true, features = ["build"] }
 pollster = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
 web-transport-trait = { workspace = true }
+
+[target.'cfg(unix)'.dev-dependencies]
+# Process CPU time for the benchmark's baselines.
+libc = { workspace = true }

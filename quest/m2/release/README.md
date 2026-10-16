@@ -27,6 +27,7 @@ production stability proven merely because upstream artifacts published.
 ## Required
 
 - [Cut and publish](/quest/m2/release/cut.md) - independently executable after m1; release-triggered publication
+- [Published catalog readers](/quest/m2/release/catalog-readers.md) - released Go and JS clients accept the current Rust publisher's live catalog in smoke; an earlier release-line patch may satisfy it
 - [Published assets](/quest/m2/release/assets-release.md) - npm carries hostable worklets
 - [C++ publication](/quest/m2/release/cpp-release.md) - archives and matching OBS plugin publish and install
 - [Generated C publication](/quest/m2/release/c-publish.md) - released archives run the C samples and interop client

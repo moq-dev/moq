@@ -16,11 +16,72 @@
 //!
 //! Run with `cargo bench -p moq-net --features fuzz --bench announce`.
 
-use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use moq_net::{
-	Hop, Hops, PathOwned,
+	Hop, Hops, PathOwned, announce,
 	fuzz::{AnnounceWriter, Announced, decode_announces, encode_announces},
 };
+
+// Compile the actual private replay code, as the priority bench does for its queue.
+#[path = "../src/lite/replay.rs"]
+mod replay;
+
+/// The previous replay, retained here as a scaling reference.
+fn scanned(events: Vec<announce::Event>) -> Vec<announce::Announce> {
+	let mut initial: Vec<announce::Announce> = Vec::new();
+	for event in events {
+		let (update, active) = match event {
+			announce::Event::Start(update) | announce::Event::Update(update) | announce::Event::Restart(update) => {
+				(update, true)
+			}
+			announce::Event::End(update) => (update, false),
+		};
+		initial.retain(|held| held.prefix != update.prefix);
+		if active {
+			initial.push(update);
+		}
+	}
+	initial
+}
+
+fn initial(c: &mut Criterion) {
+	let mut group = c.benchmark_group("announce_replay");
+	for routes in [1, 64, 1024] {
+		for updates in [1, 8, 32] {
+			let events: Vec<_> = (0..updates)
+				.flat_map(|cost| {
+					(0..routes).map(move |route| {
+						announce::Event::Update(announce::Announce {
+							prefix: format!("route/{route}").into(),
+							captures: None,
+							route: moq_net::origin::Route::default().with_cost(cost),
+						})
+					})
+				})
+				.collect();
+			group.throughput(Throughput::Elements(events.len() as u64));
+			for indexed in [false, true] {
+				let name = if indexed { "indexed" } else { "scan" };
+				group.bench_function(format!("{name}/{routes}r_{updates}u"), |b| {
+					b.iter_batched(
+						|| events.clone(),
+						|events| {
+							let initial = if indexed {
+								replay::initial(events)
+							} else {
+								scanned(events)
+							};
+							assert_eq!(initial.len(), routes);
+							std::hint::black_box(initial);
+						},
+						BatchSize::PerIteration,
+					);
+				});
+			}
+		}
+	}
+	group.finish();
+}
 
 /// `(routes, churn)` shapes for the whole-stream measurements.
 const SHAPES: [(u64, u64); 4] = [(100, 0), (1_000, 0), (1_000, 1_000), (10_000, 1_000)];
@@ -152,5 +213,5 @@ fn bench(c: &mut Criterion) {
 	}
 }
 
-criterion_group!(benches, bench);
+criterion_group!(benches, bench, initial);
 criterion_main!(benches);

@@ -364,12 +364,16 @@ This document requests no registrations.
 # Changelog
 {:numbered="false"}
 
-## draft-lcurley-moq-e2ee-00
+## draft-lcurley-moq-e2ee-01
 {:numbered="false"}
 
 - Require internally minted producing epochs and consume-only bindings for discovered epochs.
 - Require canonical UUIDv7 epochs, carried on the route rather than in the path, leaving HKDF UUID inputs unchanged.
-- Initial `moq-e2ee-00` profile: out-of-band credential, opaque broadcast path with a publisher-minted epoch on its route, HKDF physical names and keys, AES-128-GCM payloads, identity bounds, typed failures, and shared primitive vectors.
+
+## draft-lcurley-moq-e2ee-00
+{:numbered="false"}
+
+- Initial `moq-e2ee-00` profile: out-of-band credential, opaque broadcast path with a publisher-minted epoch as its last segment, HKDF physical names and keys, AES-128-GCM payloads, identity bounds, typed failures, and shared primitive vectors.
 
 
 # Acknowledgments

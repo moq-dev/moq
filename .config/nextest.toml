@@ -31,6 +31,12 @@ default-filter = "not kind(bench)"
 filter = "package(moq-uring) | binary_id(moq-relay::runtime_uring) | (binary_id(moq-relay::embed) & test(/uring/))"
 test-group = "io-uring"
 
+# The binding benchmark runs many `MOQ_BENCH_SECONDS` budgets back to back, so its
+# length scales with the budget. It guards each round against a wedge itself.
+[[profile.default.overrides]]
+filter = "package(moq-ffi) & test(=bench::benchmark_ffi)"
+slow-timeout = { period = "60s" }
+
 [test-groups]
 io-uring = { max-threads = 4 }
 

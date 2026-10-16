@@ -30,6 +30,7 @@ pub mod session;
 mod settings;
 pub mod shutdown;
 pub mod stats;
+pub mod stun;
 #[cfg(test)]
 mod test_env;
 #[cfg(feature = "test-support")]

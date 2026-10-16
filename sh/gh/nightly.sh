@@ -17,7 +17,10 @@ run() {
 case "${1:-}" in
     rust)
         run just rs bench-latency
+        run just rs test -p moq-bench --release --run-ignored only \
+            -E 'test(benchmark_readiness_establishment)' --success-output immediate
         run just rs bench-playback
+        run just rs test -p moq-relay -E 'test(benchmark_stun_sources)' --run-ignored only --success-output immediate
         # Fuzz exposes moq-net's codec benches; it is not a feature of the other crates.
         run cargo bench --locked --no-fail-fast -p moq-net --features fuzz --bench '*' -- --test
         # Each kio routine once, including the contended bench's worker threads.
@@ -29,18 +32,22 @@ case "${1:-}" in
             --bench http_idle --bench auth --bench producer_tick --bench decode --bench aggregate \
             --bench catalog --bench ts_schedule --bench export --bench chunk_interleaving -- --test
         run just rs test -p moq-archive -p moq-mux --no-fail-fast \
-            -E 'test(benchmark_timeline_fetch_fanout) | test(benchmark_damage_pid_fanout)' \
+            -E 'test(benchmark_timeline_fetch_fanout) | test(benchmark_damage_pid_fanout) | test(benchmark_pes_staging)' \
+            --run-ignored only --success-output immediate
+        # Codecs are irrelevant to timebase reservation, so skip building them.
+        run just rs test -p moq-ffi --no-default-features -E 'test(benchmark_timebase_reservation_fanout)' \
             --run-ignored only --success-output immediate
         # moq-gst's catalog bench shares a target name with moq-mux's, so it runs on its own.
         run just rs bench-gst-catalog -- --quick
         run just rs test -p moq-cli -E 'test(benchmark_stream_import)' --run-ignored only --success-output immediate
         ;;
     js)
-        for benchmark in broadcasts request-ids requests forward reader frames varint lite-varint track interests; do
+        for benchmark in broadcasts request-ids requests forward reader frames varint lite-varint track interests priority; do
             run just js bench "$benchmark"
         done
         run just js catalog-bench
         run just js arrivals-bench
+        run just js p2p-bench
         run just js signals-bench
         ;;
     *)

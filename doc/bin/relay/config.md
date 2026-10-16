@@ -150,6 +150,34 @@ keep the connection open; a WebSocket upgrade hands its lifetime to MoQ.
 
 See [HTTP endpoints](/bin/relay/http).
 
+## \[stun]
+
+Applications can use the relay as an explicitly selected STUN server for WebRTC
+ICE. The listener has its own UDP port and is disabled unless configured:
+
+```toml
+[stun]
+bind = "[::]:3478"                  # Or --stun-bind / MOQ_STUN_BIND.
+```
+
+List `stun:relay.example.com:3478` in the application's ICE servers. Clients
+never infer a STUN server from their relay session. This provides Binding
+responses with the sender's mapped address, without TURN relaying or ICE
+signaling. It is plain STUN over UDP, so it needs no TLS certificate;
+`stuns:` (STUN over TLS) is not served.
+
+The private limits are 10 requests/second per source IP with a burst of 20,
+and 1000/second globally with a burst of 2000. The source table retains at most
+4096 IPs; an idle entry can be replaced once its two-second bucket has refilled.
+Excess, malformed, unsupported, and non-Binding datagrams receive no reply.
+The internal `/metrics` endpoint reports `moq_relay_stun_replies_total` and
+`moq_relay_stun_dropped_total` with `reason` values `source`, `global`,
+`capacity`, `invalid`, and `io`, only when this listener is configured.
+`io` counts replies that could not be sent; `moq_relay_stun_io_errors_total`
+also counts asynchronous peer errors reported while receiving. Peer network
+errors and interrupted calls leave the listener running; other local socket
+failures stop the relay.
+
 ## \[auth]
 
 ```toml

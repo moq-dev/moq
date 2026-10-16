@@ -4,7 +4,7 @@
 
 A public GitHub Pages site charts nightly benchmarks over time, so a
 regression or an optimization shows as a step in the trend. It carries the
-[binding benchmarks](/quest/m1/ffi-bench.md) and the existing nightly Rust
+[binding benchmarks](/bench/README.md) and the existing nightly Rust
 Criterion and JS benchmarks, and other sources can join without a new
 site.
 
@@ -37,7 +37,3 @@ Decided with the maintainer on 2026-10-15:
   `bench/README.md`.
 
 Public API: none. Wire: none.
-
-## Required
-
-- [Binding benchmark harness](/quest/m1/ffi-bench.md) - the first source the site charts

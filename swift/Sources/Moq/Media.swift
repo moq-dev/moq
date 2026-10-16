@@ -48,8 +48,41 @@ public enum Media {
     public typealias AudioInit = MoqAudioInit
     /// A video codec, its initialization bytes, label, and hints.
     public typealias VideoInit = MoqVideoInit
-    /// A container format and its leading bytes.
-    public typealias ContainerInit = MoqContainerInit
+    /// Shares one source's timestamp offset without keeping its broadcast open.
+    public final class Timebase: Sendable {
+        let ffi: MoqMediaTimebase
+        /// Create a shared source timebase owned by this broadcast.
+        public init(broadcast: BroadcastProducer) throws { ffi = try MoqMediaTimebase(broadcast: broadcast.ffi) }
+    }
+    /// A container format, its leading bytes, and an optional shared source timebase.
+    public struct ContainerInit: Sendable {
+        /// The container format.
+        public var format: ContainerFormat
+        /// The leading container bytes.
+        public var data: [UInt8]
+        /// A shared source timebase, or nil for an independent offset.
+        public var timebase: Timebase?
+        /// Configure a container's leading bytes and source timeline.
+        public init(format: ContainerFormat, data: [UInt8], timebase: Timebase? = nil) {
+            self.format = format
+            self.data = data
+            self.timebase = timebase
+        }
+        var ffi: MoqContainerInit { MoqContainerInit(format: format, data: data, timebase: timebase?.ffi) }
+    }
+    /// A byte-stream container format and an optional shared source timebase.
+    public struct ContainerStreamInit: Sendable {
+        /// The container format.
+        public var format: ContainerFormat
+        /// A shared source timebase, or nil for an independent offset.
+        public var timebase: Timebase?
+        /// Configure a container byte stream's source timeline.
+        public init(format: ContainerFormat, timebase: Timebase? = nil) {
+            self.format = format
+            self.timebase = timebase
+        }
+        var ffi: MoqContainerStreamInit { MoqContainerStreamInit(format: format, timebase: timebase?.ffi) }
+    }
     /// A track name, its container, and live delivery options.
     public typealias TrackConfig = MoqMediaTrackConfig
     /// A fetched group's name, sequence, container, and delivery options.
@@ -257,7 +290,7 @@ public enum Media {
 
         /// Import complete container chunks into this broadcast.
         public convenience init(broadcast: BroadcastProducer, initData: ContainerInit) throws {
-            self.init(try MoqMediaContainerProducer(broadcast: broadcast.ffi, init: initData))
+            self.init(try MoqMediaContainerProducer(broadcast: broadcast.ffi, init: initData.ffi))
         }
         init(_ ffi: MoqMediaContainerProducer) {
             self.ffi = ffi
@@ -295,8 +328,8 @@ public enum Media {
         let ffi: MoqMediaContainerStreamProducer
 
         /// Import a container byte stream into this broadcast.
-        public convenience init(broadcast: BroadcastProducer, format: ContainerFormat) throws {
-            self.init(try MoqMediaContainerStreamProducer(broadcast: broadcast.ffi, format: format))
+        public convenience init(broadcast: BroadcastProducer, initData: ContainerStreamInit) throws {
+            self.init(try MoqMediaContainerStreamProducer(broadcast: broadcast.ffi, init: initData.ffi))
         }
         init(_ ffi: MoqMediaContainerStreamProducer) {
             self.ffi = ffi
