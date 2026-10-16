@@ -62,7 +62,6 @@ cache limits remain separate; bitrate pacing composes with this memory cap.
 
 ## Required
 
-- [Retain connection credit](/quest/m1/quic/receive-credit.md) - native receivers own connection credit independently of stream reads
 - [Bound message assembly](/quest/m1/quic/receive-memory.md) - complete headers and frames return credit, and receiver priority cancellation restores progress
 - [A reset group keeps its header](/quest/m1/quic/group-reset.md) - a lite
   publisher resets a group with `RESET_STREAM_AT`, so its subscriber drops the

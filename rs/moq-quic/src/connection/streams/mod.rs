@@ -12,7 +12,7 @@ use crate::{Dir, StreamId, VarInt, connection::streams::state::get_or_insert_rec
 
 mod recv;
 use recv::Recv;
-pub use recv::{Chunks, ReadError, ReadableError};
+pub use recv::{Chunks, Credit, ReadError, ReadableError};
 
 mod send;
 pub(crate) use send::{ByteSlice, BytesArray};
