@@ -97,7 +97,7 @@ windows $BASE="":
 
 # Test the platform-sensitive crates on Windows, independent of the diff.
 windows-test:
-    just rs test -p moq-auth -p hang -p moq-tokio -p moq-sock
+    just rs test -p moq-auth -p hang -p moq-tokio -p moq-sock -p moq-relay
 
 # Run io_uring tests when the branch affects the relay or its dependencies.
 [positional-arguments]
