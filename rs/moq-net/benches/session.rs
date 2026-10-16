@@ -694,6 +694,9 @@ fn delivery(c: &mut Criterion, name: &str, shapes: impl IntoIterator<Item = Shap
 
 /// Small-group cost over independent publisher/viewer axes, with both egress request paths.
 fn group_cost(c: &mut Criterion) {
+	if std::env::var_os("SESSION_ALLOCS").is_some() || std::env::var_os("SESSION_EXPIRY_ONLY").is_some() {
+		return;
+	}
 	let shapes = [1, 16].into_iter().flat_map(|publishers| {
 		[1, 16, 64].into_iter().flat_map(move |viewers| {
 			[64, 1024 * 1024].into_iter().flat_map(move |window| {
