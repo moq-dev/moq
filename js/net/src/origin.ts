@@ -609,6 +609,27 @@ class OriginState {
 	// What backs the public `discovery` getter.
 	sessions = new Signal({ total: 0, discovery: 0 });
 
+	// The prefixes whose initial announcements a session is still delivering, counted. An
+	// announcement stream overlapping one has not caught up yet.
+	snapshots = new Signal(new Map<Path.Valid, number>());
+
+	/** Hold an initial set in flight under the absolute `prefix` until the returned dispose. */
+	addSnapshot(prefix: Path.Valid): Dispose {
+		this.snapshots.mutate((counts) => {
+			counts.set(prefix, (counts.get(prefix) ?? 0) + 1);
+		});
+		let landed = false;
+		return () => {
+			if (landed) return;
+			landed = true;
+			this.snapshots.mutate((counts) => {
+				const count = (counts.get(prefix) ?? 0) - 1;
+				if (count > 0) counts.set(prefix, count);
+				else counts.delete(prefix);
+			});
+		};
+	}
+
 	// The literal heads readers are watching, counted, as a trie: announcement streams and
 	// announced requests. Sessions ask their peer for announcements under the broadest of
 	// these and nothing else, and hear each change to that covering set as it happens, so a
@@ -1127,6 +1148,7 @@ export class Producer implements Table {
 			accepts: (prefix) => this.#scope.overlaps(Path.join(this.#scope.root, prefix)),
 			attach: (discovery) => this.#attach(discovery),
 			expect: () => this.#expect(),
+			snapshot: (prefix) => this.#state.addSnapshot(this.#scope.prefix(prefix)),
 			get requests() {
 				if (thisProducer.#scope === Scope.all) return thisProducer.#state.requests;
 				thisProducer.#requests ??= new Derived([thisProducer.#state.requests], (requests) =>
@@ -2017,7 +2039,22 @@ export class Consumer {
 				}
 				active = next;
 
-				await Signal.race(this.#state.local, this.#state.advertisedLocal, this.#state.routes, producer.closed);
+				// Caught up once no session is still delivering an initial set this stream sees.
+				let behind = false;
+				for (const prefix of this.#state.snapshots.peek().keys()) {
+					if (patterns.overlaps(Path.Pattern.subtree(prefix))) behind = true;
+				}
+				if (behind) producer.behind();
+				else producer.caughtUp();
+
+				await Signal.race(
+					this.#state.local,
+					this.#state.advertisedLocal,
+					this.#state.routes,
+					this.#state.snapshots,
+					producer.closed,
+				);
+
 				if (producer.closed.peek() !== undefined) return;
 			}
 		} catch {

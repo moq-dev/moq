@@ -164,6 +164,14 @@ export function forwardAnnounced(conn: Established, origin: OriginProducer): voi
 		};
 		interests.set(prefix, interest);
 
+		// The origin's readers under the prefix wait on this request's initial set. Released
+		// once the session stream has caught up, which it reports only after the last of those
+		// events is reported here.
+		const snapshot = originWire.snapshot(prefix);
+		const caughtUp = interest.announced.caughtUp.subscribe((caughtUp) => {
+			if (caughtUp) snapshot();
+		});
+
 		void (async () => {
 			let failure: unknown;
 			try {
@@ -176,7 +184,10 @@ export function forwardAnnounced(conn: Established, origin: OriginProducer): voi
 				// The session died mid-stream, or the peer refused or reset the request.
 				failure = err;
 			} finally {
+				caughtUp();
+				snapshot();
 				for (const reported of [...interest.reported]) unreport(interest, reported);
+
 				interest.announced.close();
 				interest.linger?.();
 				if (interests.get(prefix) === interest) interests.delete(prefix);

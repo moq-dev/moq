@@ -1,4 +1,4 @@
-import { expect, jest, spyOn, test } from "bun:test";
+import { expect, jest, onTestFinished, spyOn, test } from "bun:test";
 import { Milli } from "@moq/clock";
 import { Signal } from "@moq/signals";
 import type { Grant } from "../auth.ts";
@@ -19,6 +19,7 @@ import type * as Cluster from "./cluster.ts";
 import { toRequestCode } from "./error.ts";
 import { Fetch, FetchHeader } from "./fetch.ts";
 import { Frame, Group as GroupMessage } from "./object.ts";
+import { Parameters } from "./parameters.ts";
 import { toWire } from "./priority.ts";
 import { PublishDone } from "./publish.ts";
 import { PublishNamespace, PublishNamespaceUpdate } from "./publish_namespace.ts";
@@ -120,11 +121,13 @@ function publisher(
 		session,
 		cluster,
 		grant,
+		activeCount,
 	}: {
 		requiresSolicitation?: boolean;
 		session?: Session;
 		cluster?: Cluster.Hops;
 		grant?: Signal<Grant | undefined>;
+		activeCount?: boolean;
 	} = {},
 ): { pub: Publisher; origin: OriginProducer } {
 	const origin = new OriginProducer();
@@ -137,6 +140,7 @@ function publisher(
 			requiresSolicitation,
 			cluster,
 			grant,
+			activeCount,
 		}),
 		origin,
 	};
@@ -3153,4 +3157,56 @@ test("namespace updates move the prefix after acknowledgement", async () => {
 			await running;
 		}
 	}
+});
+
+/** MoQ Active Count: the REQUEST_OK counts the NAMESPACEs sent ahead of any change. */
+test("a counted answer names the NAMESPACEs that follow it", async () => {
+	for (const activeCount of [true, false]) {
+		const pair = createMockTransportPair(ALPN.DRAFT_19);
+		const { pub, origin } = publisher(pair.server, { requiresSolicitation: true, activeCount });
+		publish(origin, Path.from("a"));
+		publish(origin, Path.from("b"));
+
+		const subscription = await Stream.open(pair.client, { version: VERSION });
+		const accepted = await Stream.accept(pair.server, VERSION);
+		if (!accepted) throw new Error("the subscription stream was never accepted");
+		void pub.runSubscribeNamespace(new SubscribeNamespace({ requestId: 0n, namespace: Path.empty() }), accepted);
+
+		expect(await subscription.reader.u53()).toBe(RequestOk.id);
+		const ok = await RequestOk.decode(subscription.reader, VERSION);
+		expect(ok.parameters.activeCount).toBe(activeCount ? 2 : undefined);
+		const suffixes = [];
+		for (let i = 0; i < 2; i++) {
+			expect(await subscription.reader.u53()).toBe(SubscribeNamespaceEntry.id);
+			suffixes.push((await SubscribeNamespaceEntry.decode(subscription.reader, VERSION)).suffix);
+		}
+		expect(suffixes.sort()).toEqual([Path.from("a"), Path.from("b")]);
+
+		subscription.close();
+		origin.close();
+	}
+});
+
+/** ACTIVE_COUNT only answers SUBSCRIBE_NAMESPACE, so one on any other REQUEST_OK is a violation. */
+test("an ACTIVE_COUNT answering a PUBLISH_NAMESPACE closes the session", async () => {
+	const pair = createMockTransportPair(ALPN.DRAFT_19);
+	const { pub, origin } = publisher(pair.server, { activeCount: true });
+	const warn = spyOn(console, "warn").mockImplementation(() => void 0);
+	onTestFinished(() => warn.mockRestore());
+	void pub.runPublishNamespaces();
+	publish(origin, Path.from("a"));
+
+	const stream = await nextStream(pair.client);
+	if (!stream) throw new Error("no PUBLISH_NAMESPACE was sent");
+	expect(await readPublishNamespace(stream)).toBe(Path.from("a"));
+	const parameters = new Parameters();
+	parameters.activeCount = 0;
+	await stream.writer.u53(RequestOk.id);
+	await new RequestOk({ requestId: undefined, parameters }).encode(stream.writer, VERSION);
+
+	await Promise.race([
+		pair.server.closed,
+		new Promise((_resolve, reject) => setTimeout(() => reject(new Error("session stayed up")), 500)),
+	]);
+	origin.close();
 });

@@ -3,7 +3,7 @@
  *
  * @module
  */
-import { type GetPromise, Once, Signal } from "@moq/signals";
+import { type GetPromise, type Getter, Once, Signal } from "@moq/signals";
 import type { Route } from "./hop.js";
 import type * as Path from "./path.js";
 
@@ -61,6 +61,18 @@ export interface Options {
 class AnnounceState {
 	queue = new Signal<Event[]>([]);
 	closed = new Once<Error | null>();
+	caughtUp = new Signal(false);
+	// The queued events still to read before the stream counts as caught up, or undefined
+	// while the initial set is still arriving.
+	owed: number | undefined;
+	// A reader holds the last event it took before catching up until it asks for the next
+	// one, so whatever it does with that event lands before caught up flips.
+	reading = false;
+}
+
+// Caught up once nothing is owed and the reader has come back for more.
+function settle(state: AnnounceState) {
+	if (state.owed === 0 && !state.reading) state.caughtUp.set(true);
 }
 
 // Once.set throws on a second settle, and both ends of a stream can close independently.
@@ -70,6 +82,10 @@ function closeState(state: AnnounceState, abort?: Error) {
 	state.queue.mutate((queue) => {
 		queue.length = 0;
 	});
+	// Nothing more is coming, so nothing waiting on the boundary should hang.
+	state.owed = 0;
+	state.reading = false;
+	state.caughtUp.set(true);
 }
 
 /**
@@ -99,6 +115,31 @@ export class Producer {
 		this.#state.queue.mutate((queue) => {
 			queue.push(event);
 		});
+	}
+
+	/**
+	 * Marks the initial set as delivered: the stream catches up once the reader has taken
+	 * everything queued so far. A no-op until {@link behind} once marked.
+	 *
+	 * @internal
+	 */
+	caughtUp() {
+		const state = this.#state;
+		if (state.owed !== undefined) return;
+		state.owed = state.queue.peek().length;
+		settle(state);
+	}
+
+	/**
+	 * Takes caught up back until the next {@link caughtUp}, as when another initial set starts.
+	 *
+	 * @internal
+	 */
+	behind() {
+		const state = this.#state;
+		if (state.closed.peek() !== undefined) return;
+		state.owed = undefined;
+		state.caughtUp.set(false);
 	}
 
 	/** Closes the writer. Idempotent. */
@@ -135,6 +176,19 @@ export class Consumer {
 		makeConsumer = (state) => new Consumer(state);
 	}
 
+	/**
+	 * Whether the stream has delivered its source's initial announcements and the reader has
+	 * taken them, so a prefix not announced by now is absent rather than not yet heard of.
+	 *
+	 * Flips once the reader asks for the event after the last of them, and is true once
+	 * closed. Through a session, the initial set is the peer's view when it answered: exact
+	 * on versions that count it, best-effort on the rest. Reading an origin, it is every
+	 * attached session's initial set, so a reconnect takes it back until the new one lands.
+	 */
+	get caughtUp(): Getter<boolean> {
+		return this.#state.caughtUp;
+	}
+
 	/** The events as they arrive, until the stream closes. */
 	async *[Symbol.asyncIterator](): AsyncGenerator<Event, void, undefined> {
 		for (;;) {
@@ -146,9 +200,16 @@ export class Consumer {
 
 	/** Returns the next event, or undefined once the stream closes. */
 	async next(): Promise<Event | undefined> {
+		const state = this.#state;
+		state.reading = false;
+		settle(state);
 		for (;;) {
-			const announce = this.#state.queue.peek().shift();
-			if (announce) return announce;
+			const announce = state.queue.peek().shift();
+			if (announce) {
+				if (state.owed) state.owed -= 1;
+				if (!state.caughtUp.peek()) state.reading = true;
+				return announce;
+			}
 
 			const closed = this.#state.closed.peek();
 			if (closed instanceof Error) throw closed;

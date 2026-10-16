@@ -122,6 +122,7 @@ export class Connection implements Established {
 		publish,
 		solicit,
 		hidden = false,
+		activeCount = false,
 		cluster,
 		auth = false,
 		early = [],
@@ -144,6 +145,8 @@ export class Connection implements Established {
 		solicit?: boolean;
 		/** Whether the peer understands the HIDDEN parameter (MoQ Hidden). */
 		hidden?: boolean;
+		/** Whether both SETUPs declared MoQ Active Count. */
+		activeCount?: boolean;
 		/**
 		 * The Hop IDs this session declared (MoQ Cluster). `undefined` on a version that
 		 * cannot negotiate the extension, as is a `peer` the peer never declared.
@@ -208,6 +211,7 @@ export class Connection implements Established {
 			publish,
 			requiresSolicitation: solicit ?? false,
 			hidden,
+			activeCount,
 			cluster,
 			grant: this.#auth.grant,
 			ready: this.#auth.setupAnswered(),
@@ -220,6 +224,7 @@ export class Connection implements Established {
 			quic,
 			cluster,
 			hidden,
+			activeCount,
 			solicit,
 			goaway: this.#goaway,
 			grant: this.#auth.grant,

@@ -53,6 +53,11 @@ export interface OriginProducer {
 	): origin.Dynamic;
 	attach(discovery: boolean): Dispose;
 	expect(): Dispose;
+	/**
+	 * Hold the origin's announcement streams overlapping `prefix` short of caught up until
+	 * the returned dispose: a session holds one while its peer's initial set is in flight.
+	 */
+	snapshot(prefix: Path.Valid): Dispose;
 	readonly requests: Getter<ReadonlyMap<Path.Valid, origin.RequestSlot> | undefined>;
 	changed(): GetPromise<unknown>;
 	/** Whether sessions should answer the request with a blind subscription right now. */

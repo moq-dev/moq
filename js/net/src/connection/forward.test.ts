@@ -610,3 +610,47 @@ test("one failed request leaves the other routes live until the session ends", a
 	b.close();
 	origin.close();
 });
+
+test("an origin watcher catches up with the session's initial set, not before", async () => {
+	const origin = new OriginProducer();
+	const session = new FakeSession();
+	forwardAnnounced(session.session, origin);
+
+	const watch = origin.announced(Path.Pattern.subtree(Path.from("room")));
+	const events = record(watch);
+	await settle();
+	expect(watch.caughtUp.peek()).toBe(false);
+
+	const stream = session.stream("room/**");
+	start(stream, "room/cam");
+	await settle();
+	// The route is in, but the peer has not said the set is complete.
+	expect(events).toEqual(["start room/cam"]);
+	expect(watch.caughtUp.peek()).toBe(false);
+
+	stream.caughtUp();
+	await settle();
+	expect(watch.caughtUp.peek()).toBe(true);
+
+	watch.close();
+	session.die();
+	origin.close();
+});
+
+test("a session ending before its initial set lands stops holding the watcher", async () => {
+	const origin = new OriginProducer();
+	const session = new FakeSession();
+	forwardAnnounced(session.session, origin);
+
+	const watch = origin.announced();
+	record(watch);
+	await settle();
+	expect(watch.caughtUp.peek()).toBe(false);
+
+	session.die();
+	await settle();
+	expect(watch.caughtUp.peek()).toBe(true);
+
+	watch.close();
+	origin.close();
+});

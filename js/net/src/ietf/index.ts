@@ -1,3 +1,4 @@
+export * from "./active_count.ts";
 export * from "./adapter.ts";
 export * as Auth from "./auth.ts";
 export * as Cluster from "./cluster.ts";

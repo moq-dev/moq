@@ -266,6 +266,8 @@ export class Publisher {
 	// turns them off: there is no stream fallback. Released in close().
 	#datagramWriter?: WritableStreamDefaultWriter<Uint8Array>;
 	#hidden: boolean;
+	// Whether a SUBSCRIBE_NAMESPACE's REQUEST_OK counts the NAMESPACEs that follow it (MoQ Active Count).
+	#activeCount: boolean;
 
 	// The origin this session serves, borrowed: it outlives the session, and closing the
 	// session leaves its broadcasts alone. Namespaces go out as an unsolicited
@@ -300,6 +302,7 @@ export class Publisher {
 		publish,
 		requiresSolicitation,
 		hidden = false,
+		activeCount = false,
 		cluster,
 		grant = new Signal<Grant | undefined>(undefined),
 		ready = Promise.resolve(),
@@ -315,6 +318,8 @@ export class Publisher {
 		requiresSolicitation: boolean;
 		/** Whether the peer declared MoQ Hidden. */
 		hidden?: boolean;
+		/** Whether both SETUPs declared MoQ Active Count. */
+		activeCount?: boolean;
 		/** The Hop IDs the SETUP exchange settled (MoQ Cluster). */
 		cluster?: Cluster.Hops;
 		/** The union of our tokens' grants (MoQ Auth), which bounds what we publish. */
@@ -335,6 +340,7 @@ export class Publisher {
 		this.#publish = publish;
 		this.#requiresSolicitation = requiresSolicitation;
 		this.#hidden = hidden;
+		this.#activeCount = activeCount;
 		this.#advert = Cluster.advertise(cluster);
 		this.#datagramWriter = DatagramStream.datagramWriter(quic);
 	}
@@ -1166,18 +1172,27 @@ export class Publisher {
 			);
 		let updating = version >= Version.DRAFT_18 ? readUpdate() : undefined;
 		try {
-			// Send OK response
-			if (version === Version.DRAFT_14) {
-				await stream.writer.u53(SubscribeNamespaceOk.id);
-				const ok = new SubscribeNamespaceOk({ requestId: msg.requestId });
-				await ok.encode(stream.writer, version);
-			} else {
+			const answer = async (activeCount?: number) => {
+				if (version === Version.DRAFT_14) {
+					await stream.writer.u53(SubscribeNamespaceOk.id);
+					const ok = new SubscribeNamespaceOk({ requestId: msg.requestId });
+					await ok.encode(stream.writer, version);
+					return;
+				}
+				const parameters = new Parameters();
+				parameters.activeCount = activeCount;
 				await stream.writer.u53(RequestOk.id);
 				const ok = new RequestOk({
 					requestId: version === Version.DRAFT_15 || version === Version.DRAFT_16 ? msg.requestId : undefined,
+					parameters,
 				});
 				await ok.encode(stream.writer, version);
-			}
+			};
+
+			// MoQ Active Count: the OK counts what the first pass below sends, so it waits for
+			// that pass. Otherwise answer now.
+			let answered = !this.#activeCount;
+			if (answered) await answer();
 
 			// Hidden namespaces are left out unless the peer opted in (MoQ Hidden). Draft-16
 			// and later carry every remaining match. Draft-14/15 only add what the
@@ -1239,12 +1254,19 @@ export class Publisher {
 				});
 
 				const advertised = this.#advertised.peek();
+				const updated = advertised ? presented(prefix, advertised, carries) : new Map<Path.Valid, Advertised>();
+				// A fresh pass sends a NAMESPACE for every entry, ahead of any change.
+				if (!answered) {
+					answered = true;
+					await answer(updated.size);
+				}
 				if (!advertised) {
 					dispose();
 					break;
 				}
 
-				const outstanding = await this.#reconcile(ns, presented(prefix, advertised, carries), target);
+				const outstanding = await this.#reconcile(ns, updated, target);
+
 				retry = outstanding ? Math.min(retry ? retry * 2 : RETRY_BASE, RETRY_MAX) : 0;
 
 				// Wait for the next change, or for the peer to unsubscribe.
@@ -1587,7 +1609,7 @@ export class Publisher {
 					if (this.#session.version === Version.DRAFT_14) {
 						await PublishNamespaceOk.decode(stream.reader, this.#session.version);
 					} else {
-						await RequestOk.decode(stream.reader, this.#session.version);
+						this.#answered(await RequestOk.decode(stream.reader, this.#session.version));
 					}
 					return "held";
 				})(),
@@ -1604,6 +1626,17 @@ export class Publisher {
 			request?.abort(e);
 			return "dropped";
 		}
+	}
+
+	/**
+	 * Check a REQUEST_OK answering a PUBLISH_NAMESPACE. ACTIVE_COUNT only answers
+	 * SUBSCRIBE_NAMESPACE (MoQ Active Count), and the session closes over it here since the
+	 * caller only drops the advertisement.
+	 */
+	#answered(ok: RequestOk) {
+		if (ok.parameters.activeCount === undefined) return;
+		this.#session.close();
+		throw new ProtocolViolation("ACTIVE_COUNT on a PUBLISH_NAMESPACE answer");
 	}
 
 	/**
@@ -1650,7 +1683,7 @@ export class Publisher {
 					if (typeId !== RequestOk.id) {
 						throw new Error(`unexpected answer to the update: typeId=0x${typeId.toString(16)}`);
 					}
-					await RequestOk.decode(reader, version);
+					this.#answered(await RequestOk.decode(reader, version));
 					return "held";
 				})(),
 				ADVERTISE_TIMEOUT,

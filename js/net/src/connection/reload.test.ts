@@ -4,6 +4,7 @@ import { Effect, Signal } from "@moq/signals";
 import type { Producer as BroadcastProducer } from "../broadcast.ts";
 import { SessionCode, SessionError, StreamCode, toTransport } from "../error.ts";
 import { Route } from "../hop.ts";
+import { ALPN as IetfALPN } from "../ietf/version.ts";
 import * as Lite from "../lite/index.ts";
 import { createMockTransportPair } from "../mock.ts";
 import { Producer as OriginProducer } from "../origin.ts";
@@ -598,5 +599,66 @@ test("announced accepts a non-prefix scope before any session exists", () => {
 		announced.close();
 	} finally {
 		reload.close();
+	}
+});
+
+/**
+ * A watcher on the consume origin catches up only once the session has delivered the
+ * server's initial set, exactly on versions that count it (lite-05+, MoQ Active Count), and
+ * a reconnect takes it back until the next session's set lands.
+ */
+test("a watcher catches up with the server's initial set, and again after a reconnect", async () => {
+	for (const alpn of [Lite.ALPN_06, IetfALPN.DRAFT_19]) {
+		const original = globalThis.WebTransport;
+		const url = new URL("https://example.com/");
+
+		const serverOrigin = new OriginProducer();
+		const published = [publish(serverOrigin, Path.from("a")), publish(serverOrigin, Path.from("b"))];
+		const sessions: { abort: () => void }[] = [];
+		const stub = function StubWebTransport() {
+			const pair = createMockTransportPair(alpn);
+			void accept(pair.server, url, { publish: serverOrigin.consume() }).then((server) => {
+				sessions.push(server);
+			});
+			return pair.client;
+		};
+		globalThis.WebTransport = stub as unknown as typeof WebTransport;
+
+		const clientOrigin = new OriginProducer();
+		const reload = new Reload({
+			enabled: true,
+			url,
+			websocket: { enabled: false },
+			delay: { initial: Time.Milli(10), multiplier: 1, max: Time.Milli(10) },
+			consume: clientOrigin,
+		});
+		const watching = clientOrigin.announced();
+		const seen = new Set<string>();
+		void (async () => {
+			for await (const event of watching) {
+				if (event.kind === "end") seen.delete(event.prefix);
+				else seen.add(event.prefix);
+			}
+		})();
+
+		try {
+			// Nothing is connected yet, which is not the same as nothing being announced.
+			expect(watching.caughtUp.peek()).toBe(false);
+			await waitUntil(() => watching.caughtUp.peek());
+			expect([...seen].sort()).toEqual(["a", "b"]);
+
+			sessions[0]?.abort();
+			await waitUntil(() => !watching.caughtUp.peek());
+			await waitUntil(() => sessions.length > 1 && watching.caughtUp.peek());
+			expect([...seen].sort()).toEqual(["a", "b"]);
+		} finally {
+			watching.close();
+			reload.close();
+			clientOrigin.close();
+			for (const broadcast of published) broadcast.close();
+			serverOrigin.close();
+			for (const session of sessions) session.abort();
+			globalThis.WebTransport = original;
+		}
 	}
 });

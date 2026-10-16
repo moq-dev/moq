@@ -243,7 +243,23 @@ export class Reload {
 		// is recoverable (a new URL or a disable/re-enable starts another sequence), so a
 		// request must keep waiting rather than go unroutable in the gap.
 		if (this.consume) {
-			this.#signals.cleanup(wireOf(this.consume).expect());
+			const consume = wireOf(this.consume);
+			this.#signals.cleanup(consume.expect());
+			// Likewise, its announcement streams are not caught up while no session is there to
+			// deliver an initial set, so an empty table before the first connect, or during a
+			// reconnect, never reads as nothing being announced. The next session takes its own
+			// hold before this one is released. Taken now rather than in the effect, which runs
+			// a microtask later, after a watcher created alongside would already have caught up.
+			let hold = this.enabled.peek() ? consume.snapshot(Path.empty()) : undefined;
+			this.#signals.run((effect) => {
+				if (effect.get(this.enabled) && !effect.get(this.established)) {
+					hold ??= consume.snapshot(Path.empty());
+				} else {
+					hold?.();
+					hold = undefined;
+				}
+			});
+			this.#signals.cleanup(() => hold?.());
 		}
 
 		this.error = this.#error;
