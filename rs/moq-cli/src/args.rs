@@ -339,9 +339,38 @@ impl Invocation {
 		}
 
 		for command in &self.stages {
+			if let Command::Import(import) = command
+				&& import.stats
+				&& let Some(reason) = import.source.stats_refusal()
+			{
+				anyhow::bail!("--stats names a track in the catalog the import builds, but {reason}");
+			}
 			let Command::Export(export) = command else {
 				continue;
 			};
+			if let Some(sink) = export.sink.report() {
+				anyhow::ensure!(
+					export.catalog_format.is_none(),
+					"`export {sink}` reads no media, so it takes no --catalog-format"
+				);
+				anyhow::ensure!(
+					export.echo.is_none(),
+					"`export {sink}` reads no media to report on; remove --echo"
+				);
+			}
+			if export.echo.is_some() {
+				if export.sink.stdout().is_none()
+					&& let Some(sink) = export.sink.ignores_selection()
+				{
+					anyhow::bail!(
+						"--echo reports what a stdout container export reads, and `export {sink}` is not one"
+					);
+				}
+				anyhow::ensure!(
+					!matches!(export.catalog_format, Some(CatalogFormatArg::Msf)),
+					"--echo follows the hang catalog's `echo` section, which the MSF catalog does not carry"
+				);
+			}
 			if let Some(stdout) = export.sink.stdout() {
 				anyhow::ensure!(
 					stdout.linger.is_zero() || matches!(stdout.format, SubscribeFormat::Ts),
@@ -745,6 +774,11 @@ pub struct Import {
 	#[usage(long = "latency-max", hide = true)]
 	latency_max: Option<crate::duration::Duration>,
 
+	/// Name a stats track in the catalog and fill it with what each track has written, about
+	/// once a second while subscribed. The stdin imports only.
+	#[usage(long)]
+	pub stats: bool,
+
 	/// The single source feeding the Origin.
 	#[usage(subcommand)]
 	pub source: ImportSource,
@@ -825,6 +859,22 @@ impl ImportSource {
 			#[cfg(feature = "capture")]
 			Self::Capture(_) => Some("two `import capture` encoders never produce the same bytes"),
 			Self::Ts(_) | Self::Fmp4 | Self::Flv | Self::Hls(_) => None,
+		}
+	}
+
+	/// Why `--stats` can't report this source, or `None` when it can: the CLI builds the one
+	/// catalog of a stdin import, whose tracks `moq-mux` counts.
+	fn stats_refusal(&self) -> Option<&'static str> {
+		match self {
+			Self::Ts(args) if args.program == Some(TsProgram::All) => {
+				Some("`import ts --program all` builds a catalog per program")
+			}
+			Self::Hls(_) | Self::Rtmp(_) | Self::Srt(_) | Self::Rtc(_) | Self::Archive(_) => {
+				Some("the gateway and archive imports build their own catalogs")
+			}
+			#[cfg(feature = "capture")]
+			Self::Capture(_) => Some("`import capture` encodes, and its encoders do not count yet"),
+			_ => None,
 		}
 	}
 }
@@ -930,6 +980,12 @@ pub struct Export {
 	#[usage(flatten)]
 	pub select: crate::subscribe::SelectArgs,
 
+	/// Publish feedback where the broadcast's catalog solicits it: a `<NAME>.echo` broadcast
+	/// under the catalog's `echo` path, reporting what each rendition this export reads has
+	/// received. One path segment. The stdout container exports only.
+	#[usage(long)]
+	pub echo: Option<crate::report::EchoName>,
+
 	/// The single sink draining the Origin.
 	#[usage(subcommand)]
 	pub sink: ExportSink,
@@ -981,6 +1037,10 @@ pub enum ExportSink {
 	Rtc(crate::rtc::Args),
 	/// Record the broadcast into an object store until it ends.
 	Archive(crate::archive::ExportArgs),
+	/// Write the broadcast's stats snapshots to stdout as JSON lines.
+	Stats,
+	/// Write the feedback of every `.echo` broadcast under `--broadcast` to stdout as JSON lines.
+	Echo,
 }
 
 impl ExportSink {
@@ -994,12 +1054,23 @@ impl ExportSink {
 			Self::Srt(_) => "srt",
 			Self::Rtc(_) => "rtc",
 			Self::Archive(_) => "archive",
+			Self::Stats => "stats",
+			Self::Echo => "echo",
 		})
 	}
 
-	/// Whether this sink writes to stdout (the container formats).
+	/// The report sink's name: these read no media, so they skip catalog discovery.
+	fn report(&self) -> Option<&'static str> {
+		match self {
+			Self::Stats => Some("stats"),
+			Self::Echo => Some("echo"),
+			_ => None,
+		}
+	}
+
+	/// Whether this sink writes to stdout (the container formats and the report sinks).
 	pub fn is_stdout(&self) -> bool {
-		self.stdout().is_some()
+		self.stdout().is_some() || self.report().is_some()
 	}
 
 	/// The stdout container format and its options, when this sink writes to
@@ -1392,6 +1463,71 @@ mod tests {
 				let err = export(&[flag, sink].concat()).unwrap().validate().unwrap_err();
 				assert!(err.to_string().contains(flag[0]), "{sink:?} {flag:?}: {err}");
 			}
+		}
+	}
+
+	/// `--stats` goes where the CLI builds the one catalog it names a track in.
+	#[test]
+	fn stats_needs_a_catalog_the_cli_builds() {
+		let import = |source: &[&str]| {
+			let argv = [
+				"moq",
+				"--connect",
+				"http://relay",
+				"--broadcast",
+				"room",
+				"import",
+				"--stats",
+			];
+			Invocation::try_parse_from(argv.iter().chain(source).copied()).unwrap()
+		};
+		for source in [
+			["ts"].as_slice(),
+			&["fmp4"],
+			&["flv"],
+			&["avc3"],
+			&["ts", "--program", "1"],
+		] {
+			import(source).validate().unwrap();
+		}
+		for source in [
+			["ts", "--program", "all"].as_slice(),
+			&["hls", "http://origin/master.m3u8"],
+			&["rtmp", "--listen", "127.0.0.1:1935"],
+		] {
+			let err = import(source).validate().unwrap_err().to_string();
+			assert!(err.contains("--stats"), "{source:?}: {err}");
+		}
+	}
+
+	/// `--echo` reports what a stdout container export reads from a hang catalog, under one
+	/// path segment, and the report sinks read no media to report on.
+	#[test]
+	fn echo_needs_a_container_export_and_a_hang_catalog() {
+		for sink in ["ts", "fmp4", "mkv", "flv", "h264", "h265"] {
+			export(&["--echo", "alice", sink]).unwrap().validate().unwrap();
+		}
+		for sink in [["hls", "--listen", "127.0.0.1:8080"].as_slice(), &["stats"], &["echo"]] {
+			let err = export(&[["--echo", "alice"].as_slice(), sink].concat())
+				.unwrap()
+				.validate()
+				.unwrap_err();
+			assert!(err.to_string().contains("--echo"), "{sink:?}: {err}");
+		}
+		let err = export(&["--echo", "alice", "--catalog-format", "msf", "fmp4"])
+			.unwrap()
+			.validate()
+			.unwrap_err();
+		assert!(err.to_string().contains("MSF"), "{err}");
+		for name in ["", "a/b", ".", "..", "*"] {
+			assert!(export(&["--echo", name, "fmp4"]).is_err(), "`{name}` must be refused");
+		}
+		for sink in ["stats", "echo"] {
+			let err = export(&["--catalog-format", "hang", sink])
+				.unwrap()
+				.validate()
+				.unwrap_err();
+			assert!(err.to_string().contains("--catalog-format"), "{sink}: {err}");
 		}
 	}
 

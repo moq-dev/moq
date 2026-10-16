@@ -288,6 +288,8 @@ pub struct Producer<E: CatalogExt = ()> {
 	/// The minimum flush lateness across this catalog's renditions, which each rendition's
 	/// advertised `delay` is measured against.
 	baseline: super::estimate::Baseline,
+	/// What each media track minted under this catalog has written. See [`stats`](Self::stats).
+	sent: Arc<crate::stats::Registry<crate::stats::Sent>>,
 }
 
 // Manual Clone so a producer is cheaply clonable regardless of whether `E` is.
@@ -301,6 +303,7 @@ impl<E: CatalogExt> Clone for Producer<E> {
 			max_age: self.max_age,
 			bandwidth: self.bandwidth.clone(),
 			baseline: self.baseline.clone(),
+			sent: self.sent.clone(),
 		}
 	}
 }
@@ -468,6 +471,7 @@ impl<E: CatalogExt> Producer<E> {
 			max_age: config.max_age,
 			bandwidth: config.bandwidth,
 			baseline: Default::default(),
+			sent: Default::default(),
 		})
 	}
 
@@ -804,9 +808,11 @@ impl<E: CatalogExt> Producer<E> {
 	{
 		let mut catalog = self.clone();
 		let recorder = catalog.enroll(track.name(), timeline_hint)?;
+		let sent = self.sent(rendition.name());
 		let mut producer = crate::container::Producer::with_rendition(track, container, rendition)
 			.with_recorder(recorder)
-			.with_bandwidth(self.bandwidth.clone());
+			.with_bandwidth(self.bandwidth.clone())
+			.with_sent(sent);
 		if let Some(config) = config {
 			producer.set(config)?;
 		}
@@ -825,9 +831,27 @@ impl<E: CatalogExt> Producer<E> {
 	{
 		let mut catalog = self.clone();
 		let recorder = catalog.enroll(track.name(), None)?;
+		let sent = self.sent(track.name());
 		Ok(crate::container::Producer::new(track, container)
 			.with_recorder(recorder)
-			.with_bandwidth(self.bandwidth.clone()))
+			.with_bandwidth(self.bandwidth.clone())
+			.with_sent(sent))
+	}
+
+	/// The counters a track writing under catalog key `name` bumps, for one that writes its groups
+	/// by hand rather than through a [`container::Producer`](crate::container::Producer).
+	pub(crate) fn sent(&self, name: &str) -> Arc<crate::stats::Sent> {
+		self.sent.track(name)
+	}
+
+	/// What each media track minted under this catalog has written, keyed by its catalog key: the
+	/// rendition ID, or the track name for an `m2ts` or verbatim `mpegts` track.
+	///
+	/// Counters are cumulative for the life of the catalog, so a track that ended keeps its final
+	/// counts and a later track under the same key continues them. Fold this into a
+	/// [`hang::stats::Snapshot`] on the stats interval.
+	pub fn stats(&self) -> std::collections::BTreeMap<String, hang::stats::Rendition> {
+		self.sent.sent()
 	}
 
 	/// A fresh estimator whose `delay` is measured against this catalog's other renditions.

@@ -279,6 +279,11 @@ impl Subscribe {
 		})
 	}
 
+	/// The resolved broadcast, whose [`stats`](moq_mux::Source::stats) count what the export reads.
+	pub fn source(&self) -> &moq_mux::Source {
+		&self.source
+	}
+
 	/// Build the catalog stream, narrowed by the rendition selection flags. The
 	/// catalog source honors the requested format (e.g. compressed `HangZ` or `Msf`).
 	async fn stream(&self) -> anyhow::Result<catalog::Select<catalog::Consumer>> {

@@ -398,6 +398,37 @@ is a replacement. An export that fails while the broadcast stays up, such as on
 a codec TS cannot carry, exits 1 without lingering. Only `ts` can mark a break,
 so the other formats refuse `--linger`.
 
+## Stats and feedback
+
+`import --stats` names a stats track in the catalog and reports what each
+rendition has written, about once a second while someone subscribes, with the
+connection's RTT, estimated send rate, and loss. It covers the stdin imports;
+capture, the gateways, `archive`, and `ts --program all` refuse it.
+
+`export --echo <name>` answers a publisher that solicits feedback: under the
+catalog's `echo` path it publishes `<name>.echo`, reporting what each rendition
+the export reads has received and its newest arrival, until the export ends.
+The name is one path segment. It covers the stdout container exports and reads
+the solicitation from the hang catalog, so `--catalog-format msf` refuses it.
+
+The `stats` and `echo` sinks print reports as JSON lines. `export stats`
+follows one broadcast's stats track until the broadcast ends; `export echo`
+prints `{"broadcast", "feedback"}` for every `.echo` broadcast under
+`--broadcast` as they come and go.
+
+```bash
+moq ... --broadcast event import --stats ts < feed.ts
+moq ... --broadcast event export stats
+moq ... --broadcast event export --echo alice ts > out.ts
+moq ... --broadcast viewers export echo
+```
+
+Counters are cumulative for the life of the process: a rendition that ends
+keeps its final counts, and one that returns under the same ID continues them.
+An fMP4 import counts samples as frames. Encoder counters (`skipped`,
+`bitrate`) and playback feedback (`decoded`, `late`, `stalls`) are not reported
+yet. [Stats](/concept/stats#media-reports) has the schema.
+
 ## Debugging
 
 `RUST_LOG=debug` prints the negotiated version and every subscription.
