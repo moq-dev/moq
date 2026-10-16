@@ -38,6 +38,27 @@ final class SmokeTests: XCTestCase {
         }
     }
 
+    func testAscendingSubscriptionReadsACachedBacklogOldestFirst() async throws {
+        let broadcast = try BroadcastProducer()
+        let track = try broadcast.publishTrack(name: "backlog", info: TrackInfo(timescale: 1_000_000))
+        for ms: UInt64 in 0..<3 {
+            let group = try track.appendGroup()
+            try group.writeFrame(Data("x".utf8), timestampUs: ms * 1_000)
+            try group.finish()
+        }
+        let consumer = try track.consume(subscription: Subscription(
+            maxDelayUs: 10_000_000,
+            ranges: [Subscription.Range(start: .relative(groups: 2))],
+            order: .ascending
+        ))
+        var sequences: [UInt64] = []
+        for _ in 0..<3 {
+            let group = try await consumer.recvGroup()
+            sequences.append(try XCTUnwrap(group).sequence)
+        }
+        XCTAssertEqual(sequences, [0, 1, 2])
+    }
+
     /// An error's description is the Rust error message.
     func testErrorDescriptionIsRustMessage() {
         XCTAssertEqual(MoqError.Closed.description, "closed")

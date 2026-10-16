@@ -47,6 +47,7 @@ namespace moq::detail {
 namespace moq {
 
 // Every generated `moq::MoqFoo` is also `moq::Foo`. `just cpp check` fails when one is missing.
+using Anchor = MoqAnchor;
 using AnnounceConsumer = MoqAnnounceConsumer;
 using AnnouncedBroadcast = MoqAnnouncedBroadcast;
 using AudioCodec = MoqAudioCodec;
@@ -119,8 +120,10 @@ using MediaTrackConfig = MoqMediaTrackConfig;
 using MediaGroupConfig = MoqMediaGroupConfig;
 using MediaFrame = MoqMediaFrame;
 using OriginConfig = MoqOriginConfig;
+using Order = MoqOrder;
 using ProtocolError = MoqProtocolError;
 using QuicConfig = MoqQuicConfig;
+using Range = MoqRange;
 using Route = MoqRoute;
 using ServerConfig = MoqServerConfig;
 using ServerTls = MoqServerTls;

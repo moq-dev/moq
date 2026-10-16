@@ -49,6 +49,7 @@ from .subscribe import (
     VideoConsumer,
 )
 from .types import (
+    Anchor,
     AudioCodec,
     AudioDecoderOutput,
     AudioEncoderInput,
@@ -62,8 +63,10 @@ from .types import (
     ErrorScope,
     FetchGroupOptions,
     Frame,
+    Order,
     ProtocolError,
     ProtocolKind,
+    Range,
     Route,
     Subscription,
     TrackInfo,
@@ -78,6 +81,7 @@ from .types import (
 )
 
 __all__ = [
+    "Anchor",
     "Announce",
     "AnnounceConsumer",
     "AnnouncedBroadcast",
@@ -117,6 +121,8 @@ __all__ = [
     "OriginConsumer",
     "OriginDynamic",
     "OriginProducer",
+    "Order",
+    "Range",
     "Request",
     "Reservation",
     "Route",
