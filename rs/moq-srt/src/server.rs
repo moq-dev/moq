@@ -584,22 +584,26 @@ pub(crate) async fn serve_subscribe(
 		// program clock re-anchors the pacing rather than mapping the new timeline
 		// through the old anchor.
 		for (at, payload) in egress.push(&frame, subscriber.discontinuity(), moq_net::time::now()) {
-			let now = moq_net::time::now();
-			socket
-				.send((StdInstant::now() + at.saturating_duration_since(now), payload))
-				.await?;
+			socket.send((host_instant(at), payload)).await?;
 		}
 	}
 
 	if let Some((at, payload)) = egress.flush() {
-		let now = moq_net::time::now();
-		socket
-			.send((StdInstant::now() + at.saturating_duration_since(now), payload))
-			.await?;
+		socket.send((host_instant(at), payload)).await?;
 	}
 	socket.close().await?;
 
 	Ok(())
+}
+
+/// The std instant `at` names, since srt-tokio paces on std's clock. A late payload
+/// keeps its past instant, so TSBPD still sees its spacing from its neighbors.
+fn host_instant(at: Instant) -> StdInstant {
+	let (now, host) = (moq_net::time::now(), StdInstant::now());
+	match at.checked_duration_since(now) {
+		Some(ahead) => host + ahead,
+		None => host.checked_sub(now - at).unwrap_or(host),
+	}
 }
 
 /// Clamp a paced send instant up to the connection's first one, seeding that floor
@@ -661,6 +665,15 @@ mod tests {
 	use super::*;
 	use bytes::Bytes;
 	use std::time::Duration;
+
+	/// A late payload keeps its spacing on std's clock instead of collapsing onto now.
+	#[test]
+	fn a_late_payload_keeps_its_past_host_instant() {
+		let now = StdInstant::now();
+		let late = host_instant(moq_net::time::now() - Duration::from_millis(100));
+		assert!(late < now, "{late:?} should precede {now:?}");
+		assert!(host_instant(moq_net::time::now() + Duration::from_millis(100)) > now);
+	}
 
 	#[test]
 	fn send_buffer_uses_standard_srt_window() {

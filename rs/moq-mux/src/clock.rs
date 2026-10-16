@@ -33,10 +33,9 @@ fn moq_micros(wall: SystemTime) -> i128 {
 
 /// The host's wall clock, or `None` while it reads before the moq epoch (2020): unset.
 fn host_wall() -> Option<SystemTime> {
-	#[cfg(test)]
-	let now = HOST_WALL.get().unwrap_or_else(SystemTime::now);
-	#[cfg(not(test))]
 	let now = SystemTime::from(moq_clock::wall());
+	#[cfg(test)]
+	let now = HOST_WALL.get().unwrap_or(now);
 	(moq_micros(now) >= 0).then_some(now)
 }
 
@@ -325,12 +324,12 @@ mod tests {
 			moq_epoch() + Duration::from_secs(3)
 		);
 
-		moq_clock::sim::step_wall(moq_clock::Manual::WALL_START + Duration::from_secs(3600));
+		let stepped = moq_clock::Manual::WALL_START + Duration::from_secs(3600);
+		moq_clock::sim::step_wall(stepped);
 		assert_eq!(clock.wall(), wall, "a wall correction does not retime archived media");
-		let corrected = Clock::new();
-		assert_ne!(
-			corrected.wall(),
-			fresh.wall(),
+		assert_eq!(
+			Clock::new().wall(),
+			wall_clock(SystemTime::from(stepped) - Clock::LEAD).ok(),
 			"a new mapping samples the corrected wall"
 		);
 
@@ -395,7 +394,7 @@ mod tests {
 		let drift = clock
 			.wall_clock(now)
 			.unwrap()
-			.duration_since(SystemTime::now())
+			.duration_since(moq_clock::wall().into())
 			.unwrap_or_else(|err| err.duration());
 		assert!(drift < Duration::from_secs(1), "the first timestamp is live on arrival");
 
