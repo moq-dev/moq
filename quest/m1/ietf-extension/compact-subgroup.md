@@ -16,8 +16,10 @@ subgroup 0.
   for subgroup N > 0 is taken as subgroup 0 starting at object N, and if it
   opens the group it is forwarded downstream as subgroup 0. moq-test mode 1
   (one subgroup per object, compact form) hits this.
-- Refuse it the same way, with a regression test that fails today. A compact
-  stream with no objects names no subgroup; treat it as subgroup 0.
+- Refuse it the same way, with a regression test that fails today.
+- A compact stream that ends after its header names no subgroup, and the
+  stream grammar requires at least one object (draft-14 10.4, draft-19
+  11.4). Refuse it as malformed rather than reading it as subgroup 0.
 - Check whether NOT_SUPPORTED is a better stop code than INTERNAL_ERROR in
   every supported draft, and use it if so.
 - State in `doc/concept/standard.md` that only subgroup 0 is accepted.
