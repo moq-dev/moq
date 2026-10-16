@@ -77,12 +77,12 @@ have fixes on `main`: macOS tests (#5335), drill-sensitivity (#5338), loom
 
 ## Required
 
+- [Stitcher public relay smoke](/quest/m0/smoke-stitcher.md) - the first-party deployment is tested under an anonymous namespace and only on transports it serves
+
 - [qmux 0.5 upstream](/quest/m0/qmux-credit-backport-upstream.md) - old-release publication, independent of the main fix
 
 - [qmux release backport](/quest/m0/qmux-credit-backport.md) - adopt the 0.5 fix independently of the next breaking cut
 
-- [CDN smoke diagnosis](/quest/m0/smoke-cdn.md) - jsDelivr failures retain their response evidence and any first-party cause is fixed
-- [Public relay diagnosis](/quest/m0/smoke-relays.md) - optional failed cells get attributed causes and focused first-party follow-ups
 - [Lite SETUP backport](/quest/m0/lite-setup-backport.md) - `release` closes a moq-lite session on a repeated SETUP parameter or a second Setup Stream, in a later 0.14.x patch (#5521)
 - [Kotlin wrapper POM release](/quest/m0/kt-ffi-pom.md) - `dev.moq:moq` 0.5.2 ships from `release`, its POMs naming moq-ffi at `[0.4.3,0.5)`
 
