@@ -19,6 +19,11 @@ error lists and rerun.
 
 These land with the next breaking release, not the 2026-09-23 train.
 
+- **moq-mux's catalog consumer is opaque.** Construct `catalog::Consumer` with
+  `Consumer::new(broadcast, format).await` or convert an existing
+  `catalog::hang::Consumer` with `.into()`, then read it through `catalog::Stream`.
+  Its `Hang`, `Msf`, and `Closed` variants and `catalog::msf::Consumer::track`
+  are private.
 - **JS catalog ranking names its media kind.** Replace `Catalog.ranked(renditions)`
   with `Catalog.Video.ranked(renditions)`. `Catalog.Audio.ranked(renditions)`
   orders audio by enabled state, bitrate, sample rate, channel count, and name.
@@ -39,6 +44,13 @@ These land with the next breaking release, not the 2026-09-23 train.
 - **`cache::Pool::gc` takes a waiter.** In Rust, `gc(now)` is
   `gc(now, waiter)`, like `Driver::poll`: call it again when the waiter wakes,
   since a parked read can arm an earlier deadline than the one returned.
+- **Native background panics.** UniFFI reports `MoqError::Task` with a panic
+  reason, and C reports `MOQ_ERROR_PANIC`. Other objects keep running. Browser
+  WebAssembly still aborts on panic with the current toolchain.
+- **Accepted sessions return their driver task.** `moq_tokio::server::Request::ok()`
+  now returns `(session, driver)`. Await the supervised driver before classifying
+  the session close, so a driver panic reports `moq_tokio::Error::Panic` rather
+  than the cancellation its teardown leaves on a channel.
 - **A QUIC load-balancer nonce needs its server id.** `listen.lb_nonce`,
   `--listen-quic-lb-nonce`, and `MOQ_LISTEN_QUIC_LB_NONCE` without `lb_id` stop
   startup. Setting `lb_id` (or `lb_nonce`) and `load_balancer` together also
@@ -404,6 +416,16 @@ These land with the next breaking release, not the 2026-09-23 train.
   `next()` and `for await` over a snapshot consumer rather than relying on
   type errors. On an untimed track nothing marks a group stale, so a `next()`
   reader that falls behind replays the whole backlog where it used to skip it.
+- **`moq export ts --delay` defaults to 1 s and includes the send-ahead.** Each
+  frame still goes out up to the delay ahead of its decode time, now no further
+  than its decoder buffer holds, and that comes out of the same budget: the
+  output trails a TS source by the delay instead of twice it. With a multiplex
+  rate, video whose HRD declares a longer buffer delay than `--delay` stops the
+  export with the delay it needs named, so a broadcast feed run at
+  `--delay 500ms` needs `--delay 1s`. A source that sends every track at its
+  decode time (RTMP, a browser) trails by the delay plus the video's
+  send-ahead: 2 s at the new default, where `--delay 500ms` keeps the 1 s it
+  had. moq-srt egress runs at its SRT latency or 1 s, whichever is longer.
 
 ## Wire
 

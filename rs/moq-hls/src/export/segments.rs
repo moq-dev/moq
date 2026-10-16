@@ -15,8 +15,8 @@
 //! A segment is addressed by its reference's tag and its number (the `seg/{tag}.{segment}.m4s`
 //! URI); the number alone is its `EXT-X-MEDIA-SEQUENCE` and the recorder cursor's position. The
 //! same URI names the same span of content time on every rendition, on every edge, and after
-//! every reload. Each reference numbers segments by its own records, so a new reference starts a
-//! new numbering under its own tag rather than reusing the old one's URIs.
+//! every reload. A new reference lists its records under its own tag, continuing past the last
+//! advertised number rather than reusing the old one's URIs.
 
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -43,6 +43,8 @@ struct State {
 	rows: VecDeque<Row>,
 	/// The first listed segment, or the segment that would follow an empty trimmed window.
 	sequence: u64,
+	/// The newest discontinuity seen, retained when the playlist window becomes empty.
+	discontinuity: u64,
 	/// The timeline track ended: the broadcast is over (`EXT-X-ENDLIST`).
 	ended: bool,
 	/// Bumped whenever the window is cleared, so a latch on what it listed can tell it is stale.
@@ -67,9 +69,7 @@ impl Discontinuities {
 	/// The sequence of a record spanning `pts..end`, bumped if it doesn't continue the last one.
 	pub fn stamp(&mut self, pts: Duration, end: Duration) -> u64 {
 		// Tolerate sub-millisecond drift from timescale rounding.
-		let jumped = self
-			.last_end
-			.is_some_and(|last| pts.saturating_sub(last).max(last.saturating_sub(pts)) > Duration::from_millis(1));
+		let jumped = self.last_end.is_some_and(|last| !continues(last, pts));
 		if self.broken || jumped {
 			self.sequence += 1;
 		}
@@ -84,11 +84,16 @@ impl Discontinuities {
 	}
 }
 
+/// Whether two content boundaries coincide within the timeline's rounding tolerance.
+pub(crate) fn continues(end: Duration, pts: Duration) -> bool {
+	pts.saturating_sub(end).max(end.saturating_sub(pts)) <= Duration::from_millis(1)
+}
+
 /// The most segments a playlist window lists, however short they are.
 ///
 /// A fresh subscriber to a `moq-mux` timeline is only promised this many recent records (the
 /// checkpoint each timeline group restates), so an edge that joined long ago must not list more
-/// than one joining now, or the two would disagree on `EXT-X-MEDIA-SEQUENCE`. The dense-timeline
+/// source records than one joining now. The dense-timeline
 /// test fails if the two drift apart.
 pub(crate) const MAX_SEGMENTS: usize = 256;
 
@@ -133,8 +138,12 @@ pub(crate) fn tag(reference: &ReferenceKey) -> String {
 pub(crate) struct Row {
 	/// The reference timeline's record index, used to mirror exact window trims.
 	pub index: u64,
-	/// The segment number (its URI: `seg/{tag}.{segment}.m4s`), shared across renditions.
+	/// The reference record's sequence: its `EXT-X-MEDIA-SEQUENCE` and, with the reference's tag,
+	/// its URI (`seg/{tag}.{segment}.m4s`), shared across renditions.
 	pub segment: u64,
+	/// The DASH period start, the reference timestamp where its handoff landed; retained
+	/// even after the first row of the period is evicted.
+	pub period: moq_net::Timestamp,
 	/// The rendition the boundaries come from.
 	pub reference: Reference,
 	/// The reference record's frames, which the reference rendition serves as is.
@@ -162,7 +171,7 @@ impl Row {
 	}
 
 	/// Whether a player can start at this segment (see [`starts`]).
-	fn starts(&self) -> bool {
+	pub fn starts(&self) -> bool {
 		starts(&self.reference, self.keyframe, &self.frames.start)
 	}
 }
@@ -170,9 +179,11 @@ impl Row {
 /// A consistent read of the window, for rendering one playlist (the serve path only).
 #[cfg_attr(not(feature = "server"), allow(dead_code))]
 pub(crate) struct Window {
-	/// The `EXT-X-MEDIA-SEQUENCE` of the first listed segment: its aligned segment number, so
-	/// sequence numbers line up across renditions.
+	/// The `EXT-X-MEDIA-SEQUENCE` of the first listed segment: its source segment number, so
+	/// sequence numbers line up across renditions and edges.
 	pub sequence: u64,
+	/// The first listed discontinuity, or the newest seen when the window is empty.
+	pub discontinuity: u64,
 	/// Listed segments, oldest first.
 	pub segments: Vec<Row>,
 	/// Whether the timeline (and so the playlist) has ended.
@@ -195,6 +206,7 @@ impl State {
 	fn window(&self) -> Window {
 		Window {
 			sequence: self.sequence,
+			discontinuity: self.rows.front().map_or(self.discontinuity, |row| row.discontinuity),
 			segments: self.rows.iter().cloned().collect(),
 			ended: self.ended,
 		}
@@ -204,11 +216,10 @@ impl State {
 	///
 	/// Rows are complete the moment they arrive. Segments evicted from the front of the
 	/// window before the cursor reached them are skipped: the cursor resumes at the oldest
-	/// row still in the window. A row from another reference starts a new numbering, so it
-	/// follows `after` whatever its number.
-	fn next_after(&self, after: Option<&(Reference, u64)>) -> Next {
+	/// row still in the window. A reset starts a new window, whose numbers may restart lower.
+	fn next_after(&self, after: Option<&(u64, u64)>) -> Next {
 		let next = self.rows.iter().find(|r| match after {
-			Some((reference, after)) => r.reference != *reference || r.segment > *after,
+			Some((resets, after)) => *resets != self.resets || r.segment > *after,
 			None => true,
 		});
 		match next {
@@ -226,6 +237,7 @@ impl Producer {
 			state: kio::Producer::new(State {
 				rows: VecDeque::new(),
 				sequence: 0,
+				discontinuity: 0,
 				ended: false,
 				resets: 0,
 			}),
@@ -253,6 +265,7 @@ impl Producer {
 			state.sequence = row.segment;
 		}
 
+		state.discontinuity = row.discontinuity;
 		state.rows.push_back(row);
 
 		while let Some(window) = window {
@@ -270,22 +283,14 @@ impl Producer {
 		state.resets
 	}
 
-	/// Remove rows whose source timeline indices fall within `range`.
-	pub fn pop(&self, range: std::ops::Range<u64>) {
+	/// Retire the prefix through segment `through`, so the playlist stays consecutive.
+	pub fn retire(&self, through: u64) {
 		if let Ok(mut state) = self.state.write() {
-			let after = state
-				.rows
-				.iter()
-				.filter(|row| range.contains(&row.index))
-				.map(|row| row.segment.saturating_add(1))
-				.max();
-			state.rows.retain(|row| !range.contains(&row.index));
+			state.rows.retain(|row| row.segment > through);
 			state.sequence = state
 				.rows
 				.front()
-				.map(|row| row.segment)
-				.or(after)
-				.unwrap_or(state.sequence);
+				.map_or_else(|| state.sequence.max(through.saturating_add(1)), |row| row.segment);
 		}
 	}
 
@@ -418,8 +423,7 @@ impl Producer {
 
 /// A segment with its transmuxed media, yielded by a [`Consumer`].
 pub struct Segment {
-	/// The aligned segment number (its URI is `seg/{reference}.{segment}.m4s`), shared across the
-	/// broadcast's renditions.
+	/// The source segment number (its URI is `seg/{reference}.{segment}.m4s`), shared across renditions.
 	pub segment: u64,
 	/// The transmuxed CMAF fragment (`moof`+`mdat`), fetched on demand by [`Consumer::next`].
 	pub media: Bytes,
@@ -448,9 +452,9 @@ pub struct Segment {
 pub struct Consumer {
 	state: kio::Consumer<State>,
 	rendition: Arc<Rendition>,
-	/// Last fetched or skipped segment, with the reference numbering it; errors leave it unchanged
+	/// Last fetched or skipped segment, with its window reset epoch; errors leave it unchanged
 	/// so callers can retry.
-	after: Option<(Reference, u64)>,
+	after: Option<(u64, u64)>,
 	feed: Option<Feed>,
 }
 
@@ -486,7 +490,7 @@ impl Consumer {
 	/// fetch/transmux failure is returned, leaving the cursor to retry it on the next call.
 	pub async fn next(&mut self) -> Result<Option<Segment>> {
 		loop {
-			let Some(row) = kio::wait(|waiter| self.poll_next(waiter)).await else {
+			let Some((row, resets)) = kio::wait(|waiter| self.poll_next(waiter)).await else {
 				return Ok(None);
 			};
 			kio::wait(|waiter| self.rendition.poll_resolved(waiter, &row)).await;
@@ -495,7 +499,7 @@ impl Consumer {
 				return Ok(None);
 			}
 			let media = self.rendition.fetch(&row).await?;
-			self.after = Some((row.reference.clone(), row.segment));
+			self.after = Some((resets, row.segment));
 			if let Some(media) = media {
 				return Ok(Some(Segment {
 					segment: row.segment,
@@ -508,12 +512,12 @@ impl Consumer {
 		}
 	}
 
-	fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Option<Row>> {
+	fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Option<(Row, u64)>> {
 		self.poll_feed(waiter);
 		let poll = self
 			.state
 			.poll(waiter, |state| match state.next_after(self.after.as_ref()) {
-				Next::Ready(row) => Poll::Ready(Some(row)),
+				Next::Ready(row) => Poll::Ready(Some((row, state.resets))),
 				Next::Ended => Poll::Ready(None),
 				Next::Pending => Poll::Pending,
 			});
@@ -569,6 +573,7 @@ mod tests {
 		Row {
 			index: segment,
 			segment,
+			period: moq_net::Timestamp::ZERO,
 			reference: Arc::new((Kind::Video, "video".to_string(), "video".to_string())),
 			frames: hang::timeline::Position::group(group)..hang::timeline::Position::group(group + 1),
 			keyframe: true,
@@ -614,16 +619,14 @@ mod tests {
 	}
 
 	#[test]
-	fn source_window_pop_removes_playlist_rows() {
+	fn retiring_a_prefix_advances_the_playlist_sequence() {
 		let live = Producer::new();
 		let window = Some(Duration::from_secs(30));
 		for i in 0..4u64 {
-			let mut row = row(i, i, i * 2_000, 2_000);
-			row.index = i + 10;
-			live.push(row, window);
+			live.push(row(i, i, i * 2_000, 2_000), window);
 		}
 
-		live.pop(10..12);
+		live.retire(1);
 		let snapshot = live.window();
 		assert_eq!(snapshot.sequence, 2);
 		assert_eq!(
@@ -631,7 +634,7 @@ mod tests {
 			vec![2, 3]
 		);
 
-		live.pop(12..14);
+		live.retire(3);
 		let snapshot = live.window();
 		assert_eq!(snapshot.sequence, 4);
 		assert!(snapshot.segments.is_empty());
@@ -746,7 +749,7 @@ mod tests {
 			panic!("expected a segment");
 		};
 		assert_eq!(first.segment, 0);
-		let after = |segment| Some((first.reference.clone(), segment));
+		let after = |segment| Some((0, segment));
 		let Next::Ready(second) = live.state.read().next_after(after(0).as_ref()) else {
 			panic!("expected a segment");
 		};
@@ -760,8 +763,8 @@ mod tests {
 		assert!(matches!(live.state.read().next_after(after(1).as_ref()), Next::Ended));
 	}
 
-	/// A new reference numbers segments from its own records, so a cursor past a higher number of
-	/// the old reference still yields the new reference's rows.
+	/// A cleared window may restart its numbering lower, so a cursor past a higher number of the
+	/// old window still yields the new one's rows.
 	#[test]
 	fn a_new_reference_restarts_the_cursor() {
 		let live = Producer::new();
@@ -777,12 +780,40 @@ mod tests {
 			..row(0, 0, 0, 2_000)
 		};
 		live.push(switched, window);
-		let after = Some((old.reference.clone(), old.segment));
+		let after = Some((0, old.segment));
 		let Next::Ready(next) = live.state.read().next_after(after.as_ref()) else {
 			panic!("the new reference's first row follows");
 		};
 		assert_eq!(next.segment, 0);
 		assert_ne!(tag(&next.reference), tag(&old.reference), "its URLs carry another tag");
+	}
+
+	#[test]
+	fn a_handoff_continues_the_source_numbering_under_another_tag() {
+		let live = Producer::new();
+		let window = Some(Duration::from_secs(30));
+		let old = row(5, 5, 10_000, 2_000);
+		let old_reference = old.reference.clone();
+		live.push(old, window);
+		let switched = Row {
+			reference: Arc::new((Kind::Video, "other".into(), "other".into())),
+			period: moq_net::Timestamp::from_secs(12).unwrap(),
+			..row(6, 6, 12_000, 2_000)
+		};
+		live.push(switched, window);
+		assert_eq!(live.window().sequence, 5);
+		let Next::Ready(next) = live.state.read().next_after(Some(&(0, 5))) else {
+			panic!("the replacement's row follows");
+		};
+		assert_eq!(next.segment, 6);
+		assert_ne!(tag(&next.reference), tag(&old_reference));
+		assert!(matches!(live.state.read().next_after(Some(&(0, 6))), Next::Pending));
+		live.retire(5);
+		assert_eq!(live.window().sequence, 6);
+		assert!(live.row(&tag(&old_reference), 5).is_none());
+		live.retire(6);
+		assert!(live.window().segments.is_empty());
+		assert_eq!(live.window().sequence, 7);
 	}
 
 	#[test]

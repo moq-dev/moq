@@ -51,6 +51,7 @@ pub(super) struct PublisherConfig<S: crate::transport::poll::Session> {
 	pub client: bool,
 	/// Subscriptions the peer may hold at once (`session::Limits::subscriptions`).
 	pub subscriptions: crate::session::Slots,
+	pub fetches: crate::session::Slots,
 }
 
 /// Context shared by every control-stream child.
@@ -80,6 +81,7 @@ struct Shared<S: crate::transport::poll::Session> {
 	// Control streams still serving the peer data, which a draining close waits for.
 	owed: AtomicUsize,
 	interests: Interests,
+	fetches: crate::session::Slots,
 	// The send time an untimed track's frames carry on Lite05/06, which can't mark them
 	// untimed (see `wire_timestamp`).
 	runtime: crate::time::Clock,
@@ -201,6 +203,7 @@ impl<S: crate::transport::poll::Session> Publisher<S> {
 				peer_grant: config.peer_grant,
 				owed: AtomicUsize::new(0),
 				interests: Interests::new(config.subscriptions),
+				fetches: config.fetches,
 				runtime: config.runtime.clone(),
 				estimate: config.estimate,
 			}),
@@ -1400,6 +1403,8 @@ trait Request<S: crate::transport::poll::Session>: Sized {
 	const GRACEFUL: bool;
 	/// What the request counts as against the session's subscription cap while it is open.
 	const CHARGE: Option<Charge>;
+	/// Whether the incoming request holds an independent FETCH slot.
+	const FETCH: bool = false;
 	/// Whether the request stays open past its reply, keeping what serving it took, until
 	/// the requester closes its side.
 	const HOLDS: bool;
@@ -1456,6 +1461,7 @@ struct RequestServe<S: crate::transport::poll::Session, R: Request<S>> {
 	owing: bool,
 	// The request's place under the session's subscription cap.
 	_charged: Option<Charged>,
+	_fetch: Option<crate::session::Slot>,
 	// The latest update to arrive before the reply started. Each one replaces the last.
 	update: Option<R::Update>,
 	/// Ends the request, even mid-reply, once the session stops allowing its broadcast.
@@ -1500,6 +1506,7 @@ impl<S: crate::transport::poll::Session, R: Request<S>> RequestServe<S, R> {
 			state: RequestState::Decode,
 			owing: true,
 			_charged: None,
+			_fetch: None,
 			update: None,
 			gate: None,
 			absolute: Default::default(),
@@ -1568,6 +1575,18 @@ impl<S: crate::transport::poll::Session, R: Request<S>> RequestServe<S, R> {
 			match &mut self.state {
 				RequestState::Decode => {
 					let msg = ready!(stream.reader.poll_decode::<R::Message>(&mut cx))?;
+					if R::FETCH {
+						self._fetch = match self.shared.fetches.acquire() {
+							Ok(slot) => Some(slot),
+							Err(err) => {
+								self.shared.session.clone().close(
+									crate::lite::error::to_session_code(&crate::SessionError::from(&err)),
+									"too many fetches",
+								);
+								return Poll::Ready(Err(err));
+							}
+						};
+					}
 					let (broadcast, track) = R::target(&msg);
 					self.absolute = self.shared.origin.absolute(broadcast).to_owned();
 					self.track = track.to_string();
@@ -2062,6 +2081,7 @@ enum FetchServe {
 
 impl<S: crate::transport::poll::Session> Request<S> for FetchServe {
 	const KIND: &'static str = "fetch";
+	const FETCH: bool = true;
 	// The response carries no header, so a run cut short would read as whole.
 	const GRACEFUL: bool = false;
 	const CHARGE: Option<Charge> = None;
@@ -5146,6 +5166,7 @@ mod tests {
 			peer_grant: Default::default(),
 			client: false,
 			subscriptions: Default::default(),
+			fetches: Default::default(),
 			estimate: kio::Producer::default().weak(),
 		});
 
@@ -5316,6 +5337,7 @@ mod tests {
 			peer_grant: Default::default(),
 			client: false,
 			subscriptions: Default::default(),
+			fetches: Default::default(),
 			estimate: estimate.weak(),
 		});
 		ProbeServe::new(publisher.shared.clone(), publisher.runtime.clone(), stream)
@@ -5614,6 +5636,7 @@ mod tests {
 			peer_grant: Default::default(),
 			client: false,
 			subscriptions: Default::default(),
+			fetches: Default::default(),
 			estimate: kio::Producer::default().weak(),
 		});
 
@@ -5745,6 +5768,7 @@ mod tests {
 						goaway,
 						peer_hop: None,
 						subscriptions: Default::default(),
+						fetches: Default::default(),
 						auth: crate::auth::Handle::new(false),
 						peer_grant: Default::default(),
 						client: false,
@@ -5827,6 +5851,7 @@ mod tests {
 			peer_grant: Default::default(),
 			client: false,
 			subscriptions: Default::default(),
+			fetches: Default::default(),
 			estimate: kio::Producer::default().weak(),
 		});
 
@@ -5917,6 +5942,7 @@ mod tests {
 			goaway,
 			peer_hop: None,
 			subscriptions: Default::default(),
+			fetches: Default::default(),
 			auth: crate::auth::Handle::new(false),
 			peer_grant: Default::default(),
 			client: false,
@@ -6071,6 +6097,7 @@ mod tests {
 				goaway,
 				peer_hop: None,
 				subscriptions: crate::session::Slots::new(0),
+				fetches: Default::default(),
 				auth: crate::auth::Handle::new(false),
 				peer_grant: Default::default(),
 				client: false,
@@ -6085,6 +6112,95 @@ mod tests {
 				)]
 			);
 		}
+	}
+
+	/// Shared model demand never shares admission slots between wire FETCH streams.
+	#[moq_net_sim::test]
+	async fn coalesced_fetches_each_hold_their_own_slot() {
+		const VERSION: Version = Version::Lite06;
+		let origin = crate::origin::Config::new(Hop::new(1).unwrap()).produce();
+		let broadcast = origin.create_broadcast("room").unwrap();
+		let track = broadcast
+			.create_track("video", track::Info::default().with_timescale(None))
+			.unwrap();
+		let groups = track.dynamic();
+		broadcast.announce(Default::default()).unwrap();
+		let peer_setup = crate::lite::PeerSetup::new(false, crate::transport::Binding::InBand);
+		peer_setup.set(crate::lite::Setup::default());
+		let (_, goaway) = crate::goaway::Handle::new(true);
+		let publisher = Publisher::new(PublisherConfig {
+			runtime: crate::time::Clock::sim(),
+			session: ScriptedSession::new(Vec::new()),
+			origin: origin.consume(),
+			version: VERSION,
+			peer_setup,
+			goaway,
+			peer_hop: None,
+			auth: crate::auth::Handle::new(false),
+			peer_grant: Default::default(),
+			client: false,
+			subscriptions: crate::session::Slots::new(0),
+			fetches: crate::session::Slots::new(2),
+			estimate: kio::Producer::default().weak(),
+		});
+		let mut script = Vec::new();
+		lite::Fetch {
+			epoch: None,
+			broadcast: crate::Path::new("room"),
+			track: "video".into(),
+			priority: 0,
+			group: 7,
+			start_frame: 0,
+			end_frame: None,
+		}
+		.encode(&mut crate::coding::Encoder::new(&mut script, VERSION.into()), VERSION)
+		.unwrap();
+		let waiter = kio::Waiter::noop();
+		let mut held = Vec::new();
+		for count in 0..3 {
+			let mut session = ScriptedSession::new(script.clone());
+			let (send, recv) = futures::future::poll_fn(|cx| {
+				<ScriptedSession as crate::transport::poll::Session>::poll_open_bi(&mut session, cx)
+			})
+			.await
+			.unwrap();
+			let stream = Stream::<ScriptedSession, Version> {
+				writer: Writer::new(send, VERSION),
+				reader: crate::coding::Reader::new(recv, VERSION),
+			};
+			let mut request = RequestServe::<_, FetchServe>::new(publisher.shared.clone(), stream);
+			if count < 2 {
+				assert!(!drive(&mut request).await);
+				held.push(request);
+			} else {
+				assert!(matches!(
+					request.poll(&waiter),
+					Poll::Ready(Err(Error::TooManyRequests))
+				));
+			}
+		}
+		let _request = groups
+			.requested_group()
+			.now_or_never()
+			.expect("one shared fetch")
+			.unwrap();
+		assert!(
+			groups.requested_group().now_or_never().is_none(),
+			"same group coalesces in the model"
+		);
+		assert_eq!(
+			publisher.shared.session.log.closes(),
+			vec![(
+				crate::SessionError::TooManyRequests.to_code(),
+				"too many fetches".to_owned()
+			)]
+		);
+		assert!(publisher.shared.fetches.acquire().is_err());
+		drop(held.pop());
+		assert!(
+			publisher.shared.fetches.acquire().is_ok(),
+			"drop returns exactly one incoming slot"
+		);
 	}
 
 	/// A TRACK held open and the SUBSCRIBE for the same track are one interest, whichever
