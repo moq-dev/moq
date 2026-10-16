@@ -67,7 +67,3 @@ ignore an entry" rule, {{verbatim}}, {{rebuild}}, changelog -01) with the
 member, its timestamp meaning, and the fact that a consumer that predates
 it drops the track, plus the TS rows of `doc/lib/rs/moq-mux.md`. No JS
 change: nothing in `js/` interprets the section.
-
-## Related
-
-- [Raw stream types](/quest/m1/ts-reliability/stream-type.md) - unknown stream types are the other way a verbatim track fails export

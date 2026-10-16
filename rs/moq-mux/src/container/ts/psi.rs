@@ -36,15 +36,31 @@ pub(super) fn encode_pat(pat: &mpeg2ts::ts::payload::Pat) -> anyhow::Result<byte
 	finish_section(section)
 }
 
+/// An elementary stream to announce without interpreting its stream-type byte.
+pub(super) struct EncodeEs {
+	pub stream_type: u8,
+	pub elementary_pid: Pid,
+	pub descriptors: Vec<mpeg2ts::ts::Descriptor>,
+}
+
+/// A program map to encode, including stream types the decoder does not recognize.
+pub(super) struct EncodePmt {
+	pub program_num: u16,
+	pub pcr_pid: Option<Pid>,
+	pub version_number: mpeg2ts::ts::VersionNumber,
+	pub program_info: Vec<mpeg2ts::ts::Descriptor>,
+	pub es_info: Vec<EncodeEs>,
+}
+
 /// Encode a PMT, rejecting descriptor or table lengths that MPEG-TS cannot represent.
-pub(super) fn encode_pmt(pmt: &mpeg2ts::ts::payload::Pmt) -> anyhow::Result<bytes::Bytes> {
+pub(super) fn encode_pmt(pmt: &EncodePmt) -> anyhow::Result<bytes::Bytes> {
 	let mut section = vec![PMT_TABLE_ID, 0xb0, 0];
 	section.extend_from_slice(&pmt.program_num.to_be_bytes());
 	section.extend_from_slice(&[0xc1 | (pmt.version_number.as_u8() << 1), 0, 0]);
 	section.extend_from_slice(&(0xe000 | pmt.pcr_pid.map_or(0x1fff, |pid| pid.as_u16())).to_be_bytes());
 	encode_descriptors(&mut section, &pmt.program_info)?;
 	for stream in &pmt.es_info {
-		section.push(stream.stream_type as u8);
+		section.push(stream.stream_type);
 		section.extend_from_slice(&(0xe000 | stream.elementary_pid.as_u16()).to_be_bytes());
 		encode_descriptors(&mut section, &stream.descriptors)?;
 	}
@@ -397,9 +413,8 @@ mod test {
 
 	#[test]
 	fn pmt_encoding_rejects_unrepresentable_lengths() {
-		use mpeg2ts::ts::payload::Pmt;
 		use mpeg2ts::ts::{Descriptor, VersionNumber};
-		let mut pmt = Pmt {
+		let mut pmt = EncodePmt {
 			program_num: 1,
 			pcr_pid: None,
 			version_number: VersionNumber::default(),

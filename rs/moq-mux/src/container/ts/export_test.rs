@@ -1921,6 +1921,98 @@ async fn export_scte35_roundtrip() {
 	);
 }
 
+/// An opaque PMT byte is signalling, not a codec the exporter must recognize.
+#[tokio::test(start_paused = true)]
+async fn export_unknown_pes_stream_type() {
+	assert_unknown_stream_type(tscat::Framing::Pes).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn export_unknown_section_stream_type() {
+	assert_unknown_stream_type(tscat::Framing::Section).await;
+}
+
+async fn assert_unknown_stream_type(framing: tscat::Framing) {
+	const PID: u16 = 0x104;
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let mut catalog = crate::catalog::Producer::new(
+		&mut broadcast,
+		crate::catalog::Config::default().with_catalog(crate::catalog::hang::Catalog::<tscat::Ext>::default()),
+	)
+	.unwrap();
+	let reserved = catalog.reserve();
+	let track = broadcast
+		.unique_track(".opaque", hang::container::track_info(hang::catalog::PRIORITY.video))
+		.unwrap();
+	let mut entry = tscat::Track::new(PID);
+	entry.verbatim = Some(tscat::Verbatim::new(0x99, framing));
+	catalog
+		.modify()
+		.unwrap()
+		.ext
+		.mpegts
+		.tracks
+		.insert(track.name().into(), entry);
+	let mut producer = Producer::new(track, HangContainer::Legacy(crate::container::Kind::Data));
+	producer
+		.write(Frame {
+			timestamp: Timestamp::from_millis(1410).unwrap(),
+			duration: None,
+			payload: Bytes::from_static(CUE),
+			keyframe: true,
+		})
+		.unwrap();
+	producer.finish().unwrap();
+
+	// Import real media to supply the program clock without interpreting the opaque track.
+	let mut import = crate::container::ts::Import::new(broadcast, reserved);
+	import
+		.decode(&BytesMut::from(&include_bytes!("test_data/bbb.ts")[..]))
+		.unwrap();
+	import.finish().unwrap();
+	let ts = drain_with(
+		open_ts(
+			crate::source::announced(&consumer).await,
+			crate::catalog::CatalogFormat::Hang,
+		)
+		.await
+		.unwrap(),
+	)
+	.await;
+	assert_packet_aligned(&ts);
+	let packet = ts
+		.as_chunks::<188>()
+		.0
+		.iter()
+		.find(|packet| packet[1] & 0x40 != 0 && packet[1] & 0x1f == 0x10 && packet[2] == 0)
+		.expect("PMT on PID 0x1000");
+	let payload = 4 + if packet[3] & 0x20 != 0 {
+		1 + usize::from(packet[4])
+	} else {
+		0
+	};
+	let start = payload + 1 + usize::from(packet[payload]);
+	let length = 3 + (usize::from(packet[start + 1] & 0x0f) << 8 | usize::from(packet[start + 2]));
+	let section = &packet[start..start + length];
+	assert!(super::psi::crc_ok(section));
+	let pmt = super::psi::Pmt::parse(section).unwrap();
+	assert_eq!(
+		pmt.streams
+			.iter()
+			.find(|stream| stream.pid.as_u16() == PID)
+			.unwrap()
+			.stream_type,
+		0x99
+	);
+	assert!(
+		ts.as_chunks::<188>().0.iter().any(|packet| {
+			(u16::from(packet[1] & 0x1f) << 8 | u16::from(packet[2])) == PID && packet[3] & 0x10 != 0
+		}),
+		"opaque payload must also be emitted"
+	);
+}
+
 /// PES-framed verbatim round-trip: import `bbb.ts` (real H.264 + AAC, whose video
 /// supplies the media clock the exporter needs) alongside a private PES-framed
 /// stream (stream_type 0x06) carried verbatim, export to TS, then re-import and

@@ -32,10 +32,10 @@ use hang::catalog::{AudioCodec, AudioConfig, Container, VideoCodec, VideoConfig}
 use mpeg2ts::es::StreamId;
 use mpeg2ts::es::StreamType;
 use mpeg2ts::time::Timestamp as TsTimestamp;
-use mpeg2ts::ts::payload::{Bytes as TsBytes, Pat, Pes, Pmt, Section};
+use mpeg2ts::ts::payload::{Bytes as TsBytes, Pat, Pes, Section};
 use mpeg2ts::ts::{
-	AdaptationField, ContinuityCounter, Descriptor, EsInfo, Pid, ProgramAssociation, TransportScramblingControl,
-	TsHeader, TsPacket, TsPacketWriter, TsPayload, VersionNumber, WriteTsPacket,
+	AdaptationField, ContinuityCounter, Descriptor, Pid, ProgramAssociation, TransportScramblingControl, TsHeader,
+	TsPacket, TsPacketWriter, TsPayload, VersionNumber, WriteTsPacket,
 };
 
 use moq_net::Timestamp;
@@ -2022,21 +2022,19 @@ where
 			.iter()
 			.map(|t| {
 				let stream_type = match &t.kind {
-					Kind::Video(stream_type) => *stream_type,
-					Kind::Aac { .. } => StreamType::AdtsAac,
+					Kind::Video(stream_type) => *stream_type as u8,
+					Kind::Aac { .. } => StreamType::AdtsAac as u8,
 					// Opus rides private-data PES; the registration + extension descriptors
 					// below tell the demuxer it's Opus.
-					Kind::Opus { .. } => StreamType::from_u8(0x06).map_err(anyhow::Error::msg)?,
+					Kind::Opus { .. } => 0x06,
 					// Half-rate MPEG-2 BC audio (< 32 kHz) re-announces as 0x04; the full
 					// rates are MPEG-1 (0x03). The catalog sample rate came from the frame
 					// header, so the mapping is faithful.
-					Kind::Mp2 { sample_rate } if *sample_rate < 32000 => StreamType::Mpeg2HalvedSampleRateAudio,
-					Kind::Mp2 { .. } => StreamType::Mpeg1Audio,
-					Kind::Ac3 => StreamType::DolbyDigitalUpToSixChannelAudio,
-					Kind::Eac3 => StreamType::DolbyDigitalPlusUpTo16ChannelAudioForAtsc,
-					Kind::Verbatim { stream_type, .. } => {
-						StreamType::from_u8(*stream_type).map_err(anyhow::Error::msg)?
-					}
+					Kind::Mp2 { sample_rate } if *sample_rate < 32000 => StreamType::Mpeg2HalvedSampleRateAudio as u8,
+					Kind::Mp2 { .. } => StreamType::Mpeg1Audio as u8,
+					Kind::Ac3 => StreamType::DolbyDigitalUpToSixChannelAudio as u8,
+					Kind::Eac3 => StreamType::DolbyDigitalPlusUpTo16ChannelAudioForAtsc as u8,
+					Kind::Verbatim { stream_type, .. } => *stream_type,
 				};
 				// Prefer the descriptors captured verbatim on import; otherwise synthesize
 				// the ATSC Dolby registration so a fresh (non-TS) AC-3/E-AC-3 track is
@@ -2057,7 +2055,7 @@ where
 						_ => Vec::new(),
 					}
 				};
-				Ok(EsInfo {
+				Ok(super::psi::EncodeEs {
 					stream_type,
 					elementary_pid: Pid::new(t.pid)?,
 					descriptors,
@@ -2108,7 +2106,7 @@ where
 				program_map_pid: Pid::new(pmt_pid)?,
 			}],
 		};
-		let pmt = Pmt {
+		let pmt = super::psi::EncodePmt {
 			program_num: program_number,
 			pcr_pid: Some(Pid::new(pcr_pid)?),
 			version_number: self.version,

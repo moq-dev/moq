@@ -100,7 +100,6 @@ remain with their current quests.
 ## Required
 
 - [Plan: semantic fidelity](/quest/m1/ts-reliability/fidelity.md) - explicit profiles and PMT lifecycle contracts produce implementation quests
-- [Raw stream types](/quest/m1/ts-reliability/stream-type.md) - unknown stream types survive export instead of failing the PMT
 - [Whole-PES export](/quest/m1/ts-reliability/pes-export.md) - export writes `pesPacket` tracks byte for byte at their placement
 - [Whole-PES import](/quest/m1/ts-reliability/pes-import.md) - private PES travels whole at its source placement, a missing PTS stays missing, and the `pes` framing is deleted
 - [Section placement](/quest/m1/ts-reliability/section-placement.md) - sections share the PCR placement clock instead of the video PTS
