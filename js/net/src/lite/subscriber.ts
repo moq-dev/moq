@@ -1,4 +1,4 @@
-import { Milli, Nano } from "@moq/clock";
+import { Milli } from "@moq/clock";
 import { type Dispose, Effect, type GetPromise, type Getter, race, Signal } from "@moq/signals";
 import * as announce from "../announced.ts";
 import type { Grant } from "../auth.ts";
@@ -8,16 +8,7 @@ import type { Probe as ProbeStats } from "../connection/stats.ts";
 import { BroadcastCache } from "../consume.ts";
 import * as DatagramStream from "../datagram_stream.ts";
 import type * as Epoch from "../epoch.ts";
-import {
-	controlTimeout,
-	error,
-	ProtocolViolation,
-	reason,
-	StreamCode,
-	StreamError,
-	sessionCause,
-	unauthorized,
-} from "../error.ts";
+import { error, ProtocolViolation, reason, StreamCode, StreamError, sessionCause, unauthorized } from "../error.ts";
 import * as netGroup from "../group.ts";
 import { Cost, type Hop, MAX_HOPS, type Route, routesEqual, UNKNOWN_HOP } from "../hop.ts";
 import { groupBounds, hiddenBelow, scopeCaptures, scopeHead, scopeOverlaps } from "../internal.ts";
@@ -29,7 +20,7 @@ import * as Time from "../time.ts";
 import type * as track from "../track.ts";
 import { untilAborted } from "../util/abort.ts";
 import { LIMITS, type Limits, SlotMap, Slots } from "../util/limits.ts";
-import { TimeoutError, withTimeout } from "../util/timeout.ts";
+import { REQUEST_TIMEOUT_MS, Request, requestOptions } from "../util/request.ts";
 import { overrideBroadcastWire, wireOf } from "../wire.ts";
 import {
 	AnnounceHistory,
@@ -70,11 +61,8 @@ import {
 	waitsForSubscriberFin,
 } from "./version.ts";
 
-// Bound on how long stream-open plus the first response (SUBSCRIBE_OK on older
-// drafts, or TRACK_INFO on lite-05+) may take. Browsers cap concurrent QUIC streams
-// (Chrome ~100) and we open with waitUntilAvailable, so past the cap the open blocks
-// until the peer frees a slot. The timeout turns a stall into a clear error.
-export const SUBSCRIBE_SETUP_TIMEOUT_MS = 10_000;
+// Request streams refuse exhausted peer credit, with one deadline covering create and answer.
+export const SUBSCRIBE_SETUP_TIMEOUT_MS = REQUEST_TIMEOUT_MS;
 
 // Wire ceiling (2^62-1). A draining session stamps it on every live route so any other
 // candidate outranks it, while the route stays selectable as the last path. Matches Rust
@@ -279,7 +267,10 @@ export class Subscriber {
 		// to reset the stream, not just close our side of it.
 		let stream: Stream;
 		try {
-			stream = await Stream.open(this.#quic, { version: this.version });
+			const deadline = new Request();
+			stream = await deadline.wait(
+				deadline.open(Stream.open(this.#quic, { version: this.version, ...requestOptions })),
+			);
 		} catch (err: unknown) {
 			announced.close(error(err));
 			return;
@@ -702,23 +693,18 @@ export class Subscriber {
 		};
 		valid?.addEventListener("abort", retire);
 		if (valid?.aborted) retire();
-		const setup = this.#openSubscribe(state, msg, request, id, timescale);
+		const deadline = new Request();
+		const setup = this.#openSubscribe(state, msg, request, id, timescale, deadline);
 
 		let opened: { stream: Stream; entry: SubscribeEntry };
 		try {
-			opened = await withTimeout(
-				untilAborted(setup, valid),
-				Nano.fromMilli(Milli(SUBSCRIBE_SETUP_TIMEOUT_MS)),
-				`subscribe timed out after ${SUBSCRIBE_SETUP_TIMEOUT_MS}ms waiting for the first response (browser stream limit reached?)`,
-			);
+			opened = await deadline.wait(untilAborted(setup, valid));
 			console.debug(`subscribe ok: id=${id} broadcast=${broadcast} track=${request.name}`);
 		} catch (err) {
 			closeViolation(this.#quic, err);
 			// The setup outlived its deadline waiting for the first response: a control
 			// timeout, not content that arrived late. A revocation says so instead.
-			const e =
-				state.revoked ??
-				(err instanceof TimeoutError ? controlTimeout(err) : await sessionCause(this.#quic, err));
+			const e = state.revoked ?? (await sessionCause(this.#quic, err));
 			state.cancel.abort(e);
 			valid?.removeEventListener("abort", retire);
 			request.reject(e);
@@ -818,6 +804,7 @@ export class Subscriber {
 		request: track.Request,
 		id: bigint,
 		timescale: Signal<number | undefined>,
+		deadline: Request,
 	): Promise<{ stream: Stream; entry: SubscribeEntry }> {
 		state.cancel.signal.throwIfAborted();
 		let producer: track.Producer;
@@ -825,7 +812,13 @@ export class Subscriber {
 
 		if (supportsTrackStream(this.version)) {
 			// Fetch the immutable properties once via the TRACK stream.
-			const { info, stream } = await this.#trackInfo(msg.broadcast, msg.epoch, msg.track, state.cancel.signal);
+			const { info, stream } = await this.#trackInfo(
+				msg.broadcast,
+				msg.epoch,
+				msg.track,
+				state.cancel.signal,
+				deadline,
+			);
 			state.track = stream;
 			// The deadline passed as TRACK_INFO landed: the request is already rejected, so don't
 			// register it again or send its SUBSCRIBE.
@@ -858,7 +851,7 @@ export class Subscriber {
 		this.#subscribes.set(id, entry);
 		state.producer = producer;
 
-		state.stream = await Stream.open(this.#quic, { version: this.version });
+		state.stream = await deadline.open(Stream.open(this.#quic, { version: this.version, ...requestOptions }));
 		// The deadline passed while the open waited: the late-setup handler resets the stream, so
 		// don't send a SUBSCRIBE on it first.
 		state.cancel.signal.throwIfAborted();
@@ -883,6 +876,7 @@ export class Subscriber {
 		epoch: Epoch.Valid | undefined,
 		track: string,
 		signal?: AbortSignal,
+		deadline?: Request,
 	): Promise<{ info: TrackInfo; stream: Stream }> {
 		return this.#exchange(
 			{ version: this.version },
@@ -893,16 +887,26 @@ export class Subscriber {
 				return { info, stream };
 			},
 			signal,
+			deadline,
 		);
 	}
 
 	// Opens a stream and runs a request/response exchange on it, resetting the stream if `run`
 	// fails. Subscriber.close() or `signal` also resets it while `run` is pending, so a peer that
 	// never answers cannot hold it open, and a stream that opens after either is reset at once.
-	async #exchange<T>(options: OpenOptions, run: (stream: Stream) => Promise<T>, signal?: AbortSignal): Promise<T> {
+	async #exchange<T>(
+		options: OpenOptions,
+		run: (stream: Stream) => Promise<T>,
+		signal?: AbortSignal,
+		deadline?: Request,
+	): Promise<T> {
+		if (!deadline) {
+			const request = new Request();
+			return request.wait(this.#exchange(options, run, signal, request));
+		}
 		const closed = signal ? AbortSignal.any([this.#closed.signal, signal]) : this.#closed.signal;
 		closed.throwIfAborted();
-		const opening = Stream.open(this.#quic, options);
+		const opening = deadline.open(Stream.open(this.#quic, { ...options, ...requestOptions }));
 		let stream: Stream;
 		try {
 			stream = await untilAborted(opening, closed);
@@ -1043,7 +1047,10 @@ export class Subscriber {
 			// Lite has no FETCH_OK, so a publisher that never answers would hold the setup forever.
 			// Subscriber.close() closing the group releases every caller at any stage, and resets
 			// the streams the setup opened.
-			const setup = this.#fetchSetup(broadcast, consumed, track, sequence, priority, group, maxDelay);
+			const deadline = new Request();
+			const setup = deadline.wait(
+				this.#fetchSetup(broadcast, consumed, track, sequence, priority, group, deadline, maxDelay),
+			);
 			let accepted: { stream: Stream; info: TrackInfo };
 			try {
 				accepted = await untilAbandoned(group, setup);
@@ -1072,13 +1079,14 @@ export class Subscriber {
 		sequence: number,
 		priority: number,
 		group: netGroup.Producer,
+		deadline: Request,
 		maxDelay?: Milli,
 	): Promise<{ stream: Stream; info: TrackInfo }> {
 		const { epoch, valid } = consumed;
 		const cancel = new AbortController();
 		void group.closed.then((err) => cancel.abort(err ?? new StreamError(StreamCode.Cancel)));
 		const signal = valid ? AbortSignal.any([valid, cancel.signal]) : cancel.signal;
-		const answered = this.#trackInfo(broadcast, epoch, track, signal);
+		const answered = this.#trackInfo(broadcast, epoch, track, signal, deadline);
 		// Only the properties are needed, so the TRACK stream closes however the wait ends.
 		answered.then(
 			({ stream }) => stream.close(),
@@ -1103,6 +1111,7 @@ export class Subscriber {
 				return { stream, info };
 			},
 			signal,
+			deadline,
 		);
 	}
 
