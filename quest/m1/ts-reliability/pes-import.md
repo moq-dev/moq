@@ -24,7 +24,9 @@ round-trip test first.
   byte, interpolated between the PCRs on either side by byte position
   (ISO 13818-1 2.4.2.2): the PES start code's input offset against each
   PCR's reference byte, not packet boundaries, reusing the byte-offset
-  clock in `passthrough.rs`, shifted onto the catalog clock by the timebase
+  clock in `passthrough.rs`, with the PCR unwrapped into the era of the
+  anchored PTS (the 2^33 multiple nearest it, since PTS leads PCR by well
+  under half a wrap) so a start near the wrap does not split them, shifted onto the catalog clock by the timebase
   offset that shifts the PTS. A PES waits for the next PCR, within the
   existing `Retained` bound; it never spans a PCR discontinuity. The value
   depends only on the input bytes, so same-epoch importers agree. A program
@@ -80,7 +82,7 @@ Tests: generated fixtures (extend `test/ts/fragment_pes.py` or add a
 generator) for asynchronous KLV (stream_type 0x06, `KLVA` registration, no
 PTS) and synchronous KLV (stream_type 0x15, metadata_stream 0xFC, PTS),
 importer to track to exporter, asserting byte equality of each PES outside
-its rebased PTS and DTS. Cover PTS 0 versus no PTS, distinct PTS and DTS,
+its rebased PTS and DTS. Cover a start straddling the 33-bit wrap, PTS 0 versus no PTS, distinct PTS and DTS,
 data before the first video and between media, optional fields, special
 stream IDs, DVB AC-3 with several sync frames per PES, each refusal, and
 the refused `pes` catalog. Add a `just test ts --klv` arm with FFmpeg and
