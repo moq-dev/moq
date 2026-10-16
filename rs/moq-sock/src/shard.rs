@@ -731,8 +731,12 @@ fn attach(_socket: &UdpSocket, _count: u16) -> io::Result<()> {
 /// CID byte is reduced modulo the group size. Everything else returns an invalid
 /// index, which asks reuseport to use its 4-tuple hash. The packet starts at
 /// offset 0 because the kernel pulls the UDP header off before running this.
+///
+/// A load past the end of the datagram aborts the program with 0, which
+/// reuseport takes as member 0, so anything too short for every load is
+/// rejected first.
 #[cfg(target_os = "linux")]
-fn program(count: u16) -> [libc::sock_filter; 16] {
+fn program(count: u16) -> [libc::sock_filter; 18] {
 	/// Long-header form bit in the first byte of a QUIC packet.
 	const LONG_HEADER: u32 = 0x80;
 	/// Fixed bit on short headers. Greasing is disabled on sharded endpoints.
@@ -746,6 +750,8 @@ fn program(count: u16) -> [libc::sock_filter; 16] {
 	const LONG_DCID: u32 = 6;
 	/// A short header's destination connection ID follows the first byte.
 	const SHORT_DCID: u32 = 1;
+	/// The shortest datagram every load below stays inside.
+	const MIN_LEN: u32 = LONG_DCID + 1;
 
 	fn insn(code: u32, jt: u8, jf: u8, k: u32) -> libc::sock_filter {
 		libc::sock_filter {
@@ -757,6 +763,9 @@ fn program(count: u16) -> [libc::sock_filter; 16] {
 	}
 
 	[
+		// A = datagram length; too short to be QUIC uses the kernel hash.
+		insn(libc::BPF_LD | libc::BPF_W | libc::BPF_LEN, 0, 0, 0),
+		insn(libc::BPF_JMP | libc::BPF_JGE | libc::BPF_K, 0, 12, MIN_LEN),
 		// A = packet[0]
 		insn(libc::BPF_LD | libc::BPF_B | libc::BPF_ABS, 0, 0, 0),
 		// Long header? Jump to its version check.
@@ -1007,7 +1016,7 @@ mod tests {
 	}
 
 	/// Datagram protocols that share the port stay on the kernel's 4-tuple hash,
-	/// even when fields at the QUIC connection-ID offsets change.
+	/// even when fields at the QUIC connection-ID offsets change or are missing.
 	#[test]
 	#[cfg(target_os = "linux")]
 	fn non_quic_flows_stay_on_one_member() {
@@ -1035,13 +1044,19 @@ mod tests {
 			("dtls", [22, 0xfe, 0xfd, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
 		];
 		for (name, mut packet) in flows {
-			let sender = crate::bind::udp(crate::bind::Udp::new("127.0.0.1:0".parse().unwrap())).unwrap();
-			sender.send_to(&packet, group.addr()).unwrap();
 			let mut buf = [0; 64];
-			let owner = sockets
-				.iter()
-				.position(|socket| socket.recv_from(&mut buf).is_ok())
-				.expect("one member receives the flow");
+			// A flow hashed off member 0, so a filter that faults to index 0 shows up.
+			let (sender, owner) = (0..64)
+				.find_map(|_| {
+					let sender = crate::bind::udp(crate::bind::Udp::new("127.0.0.1:0".parse().unwrap())).unwrap();
+					sender.send_to(&packet, group.addr()).unwrap();
+					let owner = sockets
+						.iter()
+						.position(|socket| socket.recv_from(&mut buf).is_ok())
+						.expect("one member receives the flow");
+					(owner != 0).then_some((sender, owner))
+				})
+				.expect("a flow hashed off member 0");
 
 			for sequence in 2..18u8 {
 				packet[3] = sequence;
@@ -1053,6 +1068,12 @@ mod tests {
 					.recv_from(&mut buf)
 					.unwrap_or_else(|err| panic!("{name} packet {sequence} changed shards: {err}"));
 			}
+
+			// Too short to reach the connection-ID offsets the filter reads.
+			sender.send_to(&packet[..2], group.addr()).unwrap();
+			sockets[owner]
+				.recv_from(&mut buf)
+				.unwrap_or_else(|err| panic!("truncated {name} packet changed shards: {err}"));
 		}
 	}
 
@@ -1176,17 +1197,21 @@ mod tests {
 	#[cfg(target_os = "linux")]
 	fn the_program_branches_to_the_right_loads() {
 		let program = program(4);
-		assert_eq!(program.len(), 16);
+		assert_eq!(program.len(), 18);
 
-		// Instruction 1 falls through to the short-header checks, and jumps to
-		// the long-header version load at 9.
-		assert_eq!(program[1].jt, 7, "long header must land on the version load");
-		assert_eq!(program[1].jf, 0, "short header must fall through");
-		assert_eq!(program[3].k, 4, "short header reads the fourth CID byte");
-		assert_eq!(program[6].k, 1, "short header reads the shard byte");
-		assert_eq!(program[9].k, 1, "long header reads its version");
-		assert_eq!(program[13].k, 6, "long header reads past version and length");
-		assert_eq!(program[7].k, 4, "the short modulus is the group size");
-		assert_eq!(program[14].k, 4, "the long modulus is the group size");
+		// Instruction 1 sends a short datagram to the kernel-hash return at 14.
+		assert_eq!(program[1].k, 7, "every load must stay inside the datagram");
+		assert_eq!(program[1].jf, 12, "a short datagram must use the kernel hash");
+		assert_eq!(program[14].k, 4, "the kernel-hash return is out of range");
+		// Instruction 3 falls through to the short-header checks, and jumps to
+		// the long-header version load at 11.
+		assert_eq!(program[3].jt, 7, "long header must land on the version load");
+		assert_eq!(program[3].jf, 0, "short header must fall through");
+		assert_eq!(program[5].k, 4, "short header reads the fourth CID byte");
+		assert_eq!(program[8].k, 1, "short header reads the shard byte");
+		assert_eq!(program[11].k, 1, "long header reads its version");
+		assert_eq!(program[15].k, 6, "long header reads past version and length");
+		assert_eq!(program[9].k, 4, "the short modulus is the group size");
+		assert_eq!(program[16].k, 4, "the long modulus is the group size");
 	}
 }
