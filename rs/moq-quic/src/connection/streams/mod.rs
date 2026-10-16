@@ -18,7 +18,7 @@ use recv::Recv;
 mod saturated;
 mod schedule;
 pub use recv::{Chunks, Credit, ReadError, ReadableError};
-use schedule::Schedule;
+use schedule::{Next, Schedule};
 
 mod send;
 pub(crate) use send::{ByteSlice, BytesArray};
@@ -485,6 +485,47 @@ impl SendGroups<'_> {
     pub fn close_domain(&mut self, domain: SendDomain) {
         let index = domain.index(self.state.tag);
         self.state.pending.close_domain(index);
+    }
+}
+
+impl StreamsState {
+    /// Queue a datagram in `group` at `order`, within `budget` bytes of queued datagrams.
+    ///
+    /// Returns whether it stayed queued rather than being evicted itself.
+    ///
+    /// # Panics
+    /// - when `group` was opened on another connection
+    pub(crate) fn queue_datagram(
+        &mut self,
+        datagram: frame::Datagram,
+        group: Option<&SendGroup>,
+        order: i64,
+        budget: usize,
+    ) -> bool {
+        let group = group.map(|g| g.index(self.tag));
+        let frame = datagram.size(true);
+        self.pending
+            .push_datagram(group, order, datagram, frame, budget)
+    }
+
+    /// Drop queued datagrams with a payload over `max_payload` bytes, returning whether any was.
+    pub(crate) fn drop_oversized_datagrams(&mut self, max_payload: usize) -> bool {
+        self.pending.retain_datagrams(|datagram| {
+            let keep = datagram.data.len() <= max_payload;
+            if !keep {
+                trace!(
+                    "dropping {} byte datagram violating {} byte limit",
+                    datagram.data.len(),
+                    max_payload
+                );
+            }
+            keep
+        })
+    }
+
+    /// Frame bytes queued datagrams hold against the send buffer.
+    pub(crate) fn datagram_bytes(&self) -> usize {
+        self.pending.datagram_bytes()
     }
 }
 

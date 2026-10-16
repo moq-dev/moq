@@ -9,8 +9,8 @@ use rustc_hash::FxHashMap;
 use tracing::{debug, trace};
 
 use super::{
-    Credit, Recv, Retransmits, Schedule, Send, SendState, ShouldTransmit, StreamEvent, StreamHalf,
-    ThinRetransmits,
+    Credit, Next, Recv, Retransmits, Schedule, Send, SendState, ShouldTransmit, StreamEvent,
+    StreamHalf, ThinRetransmits,
 };
 use crate::{
     Dir, MAX_STREAM_COUNT, Side, StreamId, TransportError, VarInt,
@@ -20,6 +20,15 @@ use crate::{
     frame::{self, FrameStruct, StreamMetaVec},
     transport_parameters::TransportParameters,
 };
+
+/// The frames [`StreamsState::write_frames`] wrote into a packet.
+#[derive(Debug, Default)]
+pub(crate) struct WrittenFrames {
+    /// The STREAM frames, which are retransmitted when lost.
+    pub(crate) streams: StreamMetaVec,
+    /// How many DATAGRAM frames, which are not.
+    pub(crate) datagrams: u64,
+}
 
 /// Wrapper around `Recv` that facilitates reusing `Recv` instances
 #[derive(Debug)]
@@ -101,8 +110,8 @@ pub struct StreamsState {
     /// This differs from `self.send.len()` in that it does not include streams that the peer is
     /// permitted to open but which have not yet been opened.
     pub(super) send_streams: usize,
-    /// Streams with outgoing data queued, in the order to send them
-    pub(super) pending: Schedule<StreamId>,
+    /// Streams with outgoing data queued and outgoing datagrams, in the order to send them
+    pub(super) pending: Schedule<StreamId, frame::Datagram>,
 
     events: VecDeque<StreamEvent>,
     /// Streams blocked on connection-level flow control or stream window space
@@ -400,9 +409,16 @@ impl StreamsState {
         }
     }
 
-    /// Whether any stream data is queued, regardless of control frames
+    /// Whether any stream data or datagram is queued, regardless of control frames
+    #[cfg(test)]
     pub(crate) fn can_send_stream_data(&self) -> bool {
         !self.pending.is_empty()
+    }
+
+    /// Whether [`Self::write_frames`] would write a frame into `space` bytes: any queued
+    /// stream, or a queued datagram whose frame fits
+    pub(crate) fn can_send_frames(&self, space: usize) -> bool {
+        self.pending.can_send(space)
     }
 
     /// Whether MAX_STREAM_DATA frames could be sent for stream `id`
@@ -612,25 +628,40 @@ impl StreamsState {
         }
     }
 
-    pub(crate) fn write_stream_frames(
+    /// Write STREAM and DATAGRAM frames in schedule order until the packet is full.
+    ///
+    /// A datagram cannot be split, so one too large for the room left ends the packet and
+    /// leads the next one. Only when it would leave the packet empty, which a packet clamped
+    /// below the path MTU can, does it step aside for what fits behind it, since
+    /// [`Self::can_send_frames`] promised a frame.
+    pub(crate) fn write_frames(
         &mut self,
         buf: &mut Vec<u8>,
         max_buf_size: usize,
         fair: bool,
-    ) -> StreamMetaVec {
-        let mut stream_frames = StreamMetaVec::new();
+    ) -> WrittenFrames {
+        let mut written = WrittenFrames::default();
         while buf.len() + frame::Stream::SIZE_BOUND < max_buf_size {
-            if max_buf_size
-                .checked_sub(buf.len() + frame::Stream::SIZE_BOUND)
-                .is_none()
-            {
-                break;
-            }
-
             // Pop the next stream to send from. Reset streams leave the schedule, so every
             // stream in it has data or a FIN to send.
-            let Some(id) = self.pending.pop() else {
-                break;
+            let id = match self.pending.pop() {
+                None => break,
+                Some(Next::Stream(id)) => id,
+                Some(Next::Datagram(group)) => {
+                    let (_, frame) = self.pending.datagram(group);
+                    if buf.len() + frame > max_buf_size {
+                        if written.datagrams > 0 || !written.streams.is_empty() {
+                            break;
+                        }
+                        self.pending.defer_datagram(group);
+                        continue;
+                    }
+                    let datagram = self.pending.sent_datagram(group);
+                    trace!(len = datagram.data.len(), "DATAGRAM");
+                    datagram.encode(true, buf);
+                    written.datagrams += 1;
+                    continue;
+                }
             };
             let stream = self
                 .send
@@ -669,10 +700,11 @@ impl StreamsState {
             let requeue = stream.is_pending().then_some(stream.priority);
             self.pending
                 .sent(id, &mut stream.slot, buf.len() - start, requeue, fair);
-            stream_frames.push(meta);
+            written.streams.push(meta);
         }
 
-        stream_frames
+        self.pending.restore();
+        written
     }
 
     pub(crate) fn received_ack_of(&mut self, frame: frame::StreamMeta) {
@@ -1624,7 +1656,7 @@ mod tests {
         high.write(b"high").unwrap();
 
         let mut buf = Vec::with_capacity(40);
-        let meta = server.write_stream_frames(&mut buf, 40, true);
+        let meta = server.write_frames(&mut buf, 40, true).streams;
         assert_eq!(meta[0].id, id_high);
         assert_eq!(meta[1].id, id_mid);
         assert_eq!(meta[2].id, id_low);
@@ -1662,7 +1694,7 @@ mod tests {
             assert_eq!(low.write(b"low").unwrap(), 3);
 
             let mut buf = Vec::with_capacity(40);
-            let mut sent = server.write_stream_frames(&mut buf, 40, fair);
+            let mut sent = server.write_frames(&mut buf, 40, fair).streams;
             assert_eq!(sent.len(), 1);
             let lost = sent.pop().unwrap();
             assert_eq!(lost.id, id_low);
@@ -1684,7 +1716,7 @@ mod tests {
             assert_eq!(high.write(b"high").unwrap(), 4);
 
             buf.clear();
-            let sent = server.write_stream_frames(&mut buf, 40, fair);
+            let sent = server.write_frames(&mut buf, 40, fair).streams;
             assert_eq!(sent.len(), 2);
             assert_eq!(sent[0].id, id_high);
             assert_eq!(sent[0].offsets, 0..4);
@@ -1745,7 +1777,7 @@ mod tests {
         high.set_priority(-1).unwrap();
 
         let mut buf = Vec::with_capacity(1000);
-        let meta = server.write_stream_frames(&mut buf, 40, true);
+        let meta = server.write_frames(&mut buf, 40, true).streams;
         assert_eq!(meta.len(), 1);
         assert_eq!(meta[0].id, id_high);
 
@@ -1753,7 +1785,7 @@ mod tests {
         assert_eq!(server.pending.len(), 2);
 
         // Send the remaining data. The initial mid priority one should go first now
-        let meta = server.write_stream_frames(&mut buf, 1000, true);
+        let meta = server.write_frames(&mut buf, 1000, true).streams;
         assert_eq!(meta.len(), 2);
         assert_eq!(meta[0].id, id_mid);
         assert_eq!(meta[1].id, id_high);
@@ -1814,7 +1846,7 @@ mod tests {
             // loop until all the streams are written
             loop {
                 let buf_len = buf.len();
-                let meta = server.write_stream_frames(&mut buf, buf_len + 40, fair);
+                let meta = server.write_frames(&mut buf, buf_len + 40, fair).streams;
                 if meta.is_empty() {
                     break;
                 }
@@ -1885,7 +1917,7 @@ mod tests {
 
         // Write the first chunk of stream_a
         let buf_len = buf.len();
-        let meta = server.write_stream_frames(&mut buf, buf_len + 40, false);
+        let meta = server.write_frames(&mut buf, buf_len + 40, false).streams;
         assert!(!meta.is_empty());
         metas.extend(meta);
 
@@ -1902,7 +1934,7 @@ mod tests {
         // loop until all the streams are written
         loop {
             let buf_len = buf.len();
-            let meta = server.write_stream_frames(&mut buf, buf_len + 40, false);
+            let meta = server.write_frames(&mut buf, buf_len + 40, false).streams;
             if meta.is_empty() {
                 break;
             }
