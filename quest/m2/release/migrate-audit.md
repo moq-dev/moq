@@ -3,7 +3,7 @@
 ## Goal
 
 Every PR into `release` runs a check that diffs each published package's
-public API against its last release tag. A backport fails on any break; on
+public API against its last published version. A backport fails on any break; on
 the breaking cut PR the diff is reported for the auditor, who confirms every
 break, including those in surfaces the diff cannot see, has its `MIGRATE.md`
 entry before the cut merges.
@@ -26,6 +26,11 @@ Decided 2026-10-16 (maintainer interview):
   UniFFI interface diff for the bindings. Prefer maintained tools over
   hand-rolled diffing. Wire it into the workflow that runs on PRs into
   `release`, and add the audit step to CONTRIBUTING.md's Releases section.
+- Baseline is the last published artifact, not a git tag: `@moq/*` and
+  `moq-rs` publish without tags. Rust compares against crates.io
+  (cargo-semver-checks' default), JS against the npm tarball's declarations,
+  and the FFI interfaces against the published `moq-ffi` crate and the last
+  released C archive's `moq.h`.
 - Coverage: the report covers Rust crates, `@moq/*` declarations, and the
   generated FFI interfaces. A break only in a hand-written binding wrapper
   (`py/moq-rs`, `kt/moq`, `dart/moq`, `go/wrapper`, `swift`, `cpp/moq`,
