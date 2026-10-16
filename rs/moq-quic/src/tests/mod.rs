@@ -1422,8 +1422,10 @@ fn late_peer_params_make_streams_available() {
 
     pair.drive();
     assert!(
-        iter::from_fn(|| pair.server_conn_mut(server_ch).poll())
-            .any(|event| matches!(event, Event::Stream(StreamEvent::Available { dir: Dir::Uni })))
+        iter::from_fn(|| pair.server_conn_mut(server_ch).poll()).any(|event| matches!(
+            event,
+            Event::Stream(StreamEvent::Available { dir: Dir::Uni })
+        ))
     );
     assert!(pair.server_streams(server_ch).open(Dir::Uni).is_some());
 }
