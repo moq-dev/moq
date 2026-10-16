@@ -355,56 +355,58 @@ test("a page hide after give-up does not retry the refused URL", async () => {
 	}
 });
 
-test("a session rejected as unauthorized surfaces the code and stops retrying", async () => {
-	const original = globalThis.WebTransport;
-	const url = new URL("https://example.com/");
-	const closes: (Error | null)[] = [];
-	const stub = function StubWebTransport() {
-		const pair = createMockTransportPair(Lite.ALPN_06);
-		// Reject at the MoQ layer: accept the transport, then close with a code, the
-		// way a relay's Request::close does after it has already accepted the transport.
-		void accept(pair.server, url).then(() => {
-			pair.server.close({ closeCode: SessionCode.Unauthorized, reason: "unauthorized" });
-		});
-		return pair.client;
-	};
-	globalThis.WebTransport = stub as unknown as typeof WebTransport;
-
-	const reload = new Reload({
-		enabled: true,
-		url,
-		websocket: { enabled: false },
-		delay: { initial: Milli(1), multiplier: 2, max: Milli(1), timeout: Milli(0) },
-	});
-	const watch = new Effect();
-	watch.run((effect) => {
-		const conn = effect.get(reload.established);
-		if (conn) {
-			effect.spawn(async () => {
-				closes.push(await conn.closed);
+for (const code of [SessionCode.Unauthorized, SessionCode.Expired]) {
+	test(`a session rejected with ${code} surfaces the code and stops retrying`, async () => {
+		const original = globalThis.WebTransport;
+		const url = new URL("https://example.com/");
+		const closes: (Error | null)[] = [];
+		const stub = function StubWebTransport() {
+			const pair = createMockTransportPair(Lite.ALPN_06);
+			// Reject at the MoQ layer: accept the transport, then close with a code, the
+			// way a relay's Request::close does after it has already accepted the transport.
+			void accept(pair.server, url).then(() => {
+				pair.server.close({ closeCode: code, reason: "unauthorized" });
 			});
+			return pair.client;
+		};
+		globalThis.WebTransport = stub as unknown as typeof WebTransport;
+
+		const reload = new Reload({
+			enabled: true,
+			url,
+			websocket: { enabled: false },
+			delay: { initial: Milli(1), multiplier: 2, max: Milli(1), timeout: Milli(0) },
+		});
+		const watch = new Effect();
+		watch.run((effect) => {
+			const conn = effect.get(reload.established);
+			if (conn) {
+				effect.spawn(async () => {
+					closes.push(await conn.closed);
+				});
+			}
+		});
+
+		try {
+			// The code reaches the app rather than being flattened away, and because
+			// the code is specified rather than guessed at, the loop stops this URL
+			// instead of retrying credentials that cannot work. `timeout: 0` means unlimited
+			// retries, so `error` settling at all is what proves it stopped on the rejection.
+			await waitUntil(() => reload.error.peek() !== undefined);
+			const err = reload.error.peek();
+			expect(err).toBeInstanceOf(SessionError);
+			expect((err as SessionError).code).toBe(code);
+			expect(reload.closed.peek()).toBeUndefined();
+
+			// It still surfaced through the established session before the loop gave up.
+			expect(closes.find((e) => e instanceof SessionError)).toBeInstanceOf(SessionError);
+		} finally {
+			watch.close();
+			reload.close();
+			globalThis.WebTransport = original;
 		}
 	});
-
-	try {
-		// The code reaches the app rather than being flattened away, and because
-		// UNAUTHORIZED is specified rather than guessed at, the loop stops this URL
-		// instead of retrying credentials that cannot work. `timeout: 0` means unlimited
-		// retries, so `error` settling at all is what proves it stopped on the rejection.
-		await waitUntil(() => reload.error.peek() !== undefined);
-		const err = reload.error.peek();
-		expect(err).toBeInstanceOf(SessionError);
-		expect((err as SessionError).code).toBe(SessionCode.Unauthorized);
-		expect(reload.closed.peek()).toBeUndefined();
-
-		// It still surfaced through the established session before the loop gave up.
-		expect(closes.find((e) => e instanceof SessionError)).toBeInstanceOf(SessionError);
-	} finally {
-		watch.close();
-		reload.close();
-		globalThis.WebTransport = original;
-	}
-});
+}
 
 test("an unauthorized session close during setup stops retrying", async () => {
 	const original = globalThis.WebTransport;
