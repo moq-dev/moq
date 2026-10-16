@@ -136,17 +136,29 @@ impl<O: Output> Video<O> {
 						false
 					}
 					// Applied in delivery order, so the restart lands before the frame after it.
+					// An end declared before the loss still holds, as on the audio side: what
+					// follows comes from the replacement encoder and resumes the latest
+					// transition, while the media lost with the gap is discarded.
 					Some(Read::Gap { .. }) => {
-						let queued = buffers.iter().filter_map(|buffer| buffer.resumes);
-						for transition in end.take().map(|(_, transition)| transition).into_iter().chain(queued) {
+						let mut queued: Vec<_> = buffers.iter().filter_map(|buffer| buffer.resumes).collect();
+						let resumes = queued.pop();
+						for transition in queued {
 							role.abandon(transition);
 						}
 						revision.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 						role.gap();
 						buffers.clear();
 						buffers.push_back(Segment::default());
-						buffers.front_mut().unwrap().clear();
-						buffers.front_mut().unwrap().generation = before + 1;
+						let front = buffers.front_mut().unwrap();
+						front.clear();
+						front.generation = before + 1;
+						front.ended = resumes.is_some() || end.is_some();
+						if resumes.is_some() {
+							buffers.push_back(Segment {
+								resumes,
+								..Default::default()
+							});
+						}
 						self.presentation.lock().unwrap().video_restarted();
 						false
 					}

@@ -199,6 +199,8 @@ pub(super) struct Role {
 	changed: std::sync::Arc<tokio::sync::Notify>,
 	role: Kind,
 	mapping: std::sync::Mutex<Mapping>,
+	/// Whether a sink handed back for draining still plays up to the declared end.
+	retired: bool,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -239,7 +241,14 @@ impl Role {
 			changed,
 			role,
 			mapping: Default::default(),
+			retired: false,
 		}
+	}
+
+	/// Stop, keeping the declared end: the sink handed back still plays the tail
+	/// up to it. Dropping instead discards the tail with the end.
+	pub(super) fn retire(mut self) {
+		self.retired = true;
 	}
 
 	pub(super) fn map(&self, source: Timestamp) -> anyhow::Result<Timestamp> {
@@ -417,8 +426,10 @@ impl Drop for Role {
 	fn drop(&mut self) {
 		let own = self.role as usize;
 		if let Ok(mut presentation) = self.presentation.lock() {
-			// A declared end stays: the sink handed back still plays the tail up to it,
-			// and once it is past, nothing waits on it.
+			// A retired end stays until it is past; nothing waits on it after that.
+			if !self.retired {
+				presentation.ends[own] = None;
+			}
 			for pending in presentation
 				.transitions
 				.iter_mut()
@@ -747,6 +758,32 @@ mod tests {
 	}
 
 	#[tokio::test]
+	async fn a_cancelled_role_releases_its_declared_end() {
+		tokio::time::pause();
+		let now = tokio::time::Instant::now();
+		let presentation = std::sync::Arc::new(std::sync::Mutex::new(Presentation::new(DELAY)));
+		presentation
+			.lock()
+			.unwrap()
+			.audio(Duration::from_secs(10), DELAY, now.into_std());
+		let audio = Role::new(presentation.clone(), Default::default(), Kind::Audio);
+		let video = Role::new(presentation.clone(), Default::default(), Kind::Video);
+		audio.declare();
+		audio.end(ms(10_200)).unwrap();
+		// Cancelled with its sink, so nothing plays the tail.
+		drop(audio);
+		let transition = video.declare();
+		video.end(ms(10_000)).unwrap();
+		video.plan(transition, ms(0), None);
+		let resume = tokio::time::timeout(
+			DELAY + Duration::from_millis(150),
+			video.resume(transition, ms(0), None),
+		)
+		.await;
+		assert!(resume.is_ok(), "video waited for discarded audio");
+	}
+
+	#[tokio::test]
 	async fn a_closed_role_still_holds_its_declared_end() {
 		tokio::time::pause();
 		let now = tokio::time::Instant::now();
@@ -760,7 +797,7 @@ mod tests {
 		audio.declare();
 		audio.end(ms(10_200)).unwrap();
 		// The track closed, but its returned sink still plays the tail up to the end.
-		drop(audio);
+		audio.retire();
 		let transition = video.declare();
 		video.end(ms(10_000)).unwrap();
 		video.plan(transition, ms(0), None);
