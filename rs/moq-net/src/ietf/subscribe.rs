@@ -938,6 +938,24 @@ mod tests {
 		assert!(result.is_err());
 	}
 
+	/// Draft-16 registers Filter Types 0x1-0x4 and requires PROTOCOL_VIOLATION for any
+	/// other. Moxygen's `SubscribeRequest::make` defaults to its unregistered LargestGroup
+	/// (0xFA), so its interop client sends this exact SUBSCRIBE; refuse it rather than
+	/// guess a meaning.
+	#[test]
+	fn test_subscribe_v16_rejects_unregistered_filter_type() {
+		let subscribe = |filter_type: &[u8]| {
+			let mut bytes = vec![0x00]; // request_id
+			bytes.extend_from_slice(b"\x01\x0bnonexistent\x0dno-such-track"); // namespace, name
+			bytes.extend_from_slice(&[0x01, 0x21, filter_type.len() as u8]); // one SUBSCRIPTION_FILTER
+			bytes.extend_from_slice(filter_type);
+			decode_message::<Subscribe>(&bytes, Version::Draft16)
+		};
+
+		assert!(matches!(subscribe(&[0x40, 0xfa]), Err(DecodeError::InvalidValue)));
+		assert_eq!(subscribe(&[0x02]).unwrap().filter, Filter::NextObject);
+	}
+
 	#[test]
 	fn test_subscribe_update_v15_round_trip() {
 		let msg = SubscribeUpdate {

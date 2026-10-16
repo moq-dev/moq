@@ -72,6 +72,18 @@ test("a record numbered unlike its window index is refused", async () => {
 	broadcast.close();
 });
 
+test("an untimed record is refused", async () => {
+	const broadcast = new Broadcast.Producer();
+	const track = broadcast.createTrack("video.timeline.z", { timescale: Time.Timescale.MILLI });
+	const producer = new Json.Window.Producer<Record>({ track, compression: true });
+	const consumer = Consumer.subscribe(broadcast.consume(), archive(1000), "video");
+	producer.push({ value: { sequence: 0, start: { group: 0 }, end: { group: 1 } }, at: Time.Timestamp.now() });
+	await expect(consumer.next()).rejects.toThrow("timeline record 0 is untimed");
+	producer.finish();
+	consumer.close();
+	broadcast.close();
+});
+
 test("a track without a timeline is refused", () => {
 	const broadcast = new Broadcast.Producer();
 	expect(() => Consumer.subscribe(broadcast.consume(), archive(1000), "audio")).toThrow();

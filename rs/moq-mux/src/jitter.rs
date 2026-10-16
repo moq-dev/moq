@@ -26,6 +26,9 @@ pub(crate) struct Arrival<T> {
 	pub skip: u64,
 	/// Whether the frame decodes without the track's earlier frames.
 	pub sync: bool,
+	/// Whether it presents before the track's last sync frame, so it also references frames
+	/// before that one: an open GOP's leading picture.
+	pub leading: bool,
 	pub item: T,
 }
 
@@ -44,7 +47,7 @@ pub(crate) enum Push {
 	Queued,
 	/// It missed its deadline and was dropped; the track resumes at its next sync frame.
 	Late,
-	/// It was dropped because the track is waiting for a sync frame.
+	/// It was dropped because the track is waiting for a sync frame, or leads the one it resumed at.
 	Waiting,
 }
 
@@ -305,6 +308,8 @@ struct Track<T> {
 	generation: u64,
 	/// Frames are dropped until the next sync frame, and why.
 	waiting: Option<Wait>,
+	/// Why the track resumed at its last sync frame, whose leading frames are dropped too.
+	resumed: Option<Wait>,
 }
 
 /// Why a track waits for a sync frame.
@@ -528,6 +533,7 @@ impl<K: Ord + Clone, T> Buffer<K, T> {
 			skip: arrival.skip,
 			generation,
 			waiting: None,
+			resumed: None,
 		});
 		track.restart = arrival.restart;
 		track.skip = arrival.skip;
@@ -538,7 +544,11 @@ impl<K: Ord + Clone, T> Buffer<K, T> {
 				Push::Waiting
 			}
 			_ if track.waiting.is_some() && !arrival.sync => Push::Waiting,
+			_ if track.resumed.is_some() && arrival.leading => Push::Waiting,
 			Some(deadline) if arrival.arrived <= deadline || self.delay.is_zero() => {
+				if arrival.sync {
+					track.resumed = track.waiting;
+				}
 				track.waiting = None;
 				track
 					.queue
@@ -552,7 +562,7 @@ impl<K: Ord + Clone, T> Buffer<K, T> {
 				Push::Late
 			}
 		};
-		if push != Push::Queued && track.waiting == Some(Wait::Late) {
+		if push != Push::Queued && track.waiting.or(track.resumed) == Some(Wait::Late) {
 			self.dropped += 1;
 		}
 		push
@@ -862,7 +872,8 @@ impl<K: Ord + Clone, T> Buffer<K, T> {
 		self.acquire.is_none() && self.tracks.values().all(|track| track.queue.is_empty())
 	}
 
-	/// How many frames were dropped, late or waiting for a sync frame after one was.
+	/// How many frames were dropped, late or lost with one: waiting for a sync frame after it,
+	/// or leading the sync frame the track resumed at.
 	pub fn dropped(&self) -> u64 {
 		self.dropped
 	}
@@ -943,6 +954,7 @@ mod tests {
 			restart: 0,
 			skip: 0,
 			sync: true,
+			leading: false,
 			item,
 		}
 	}
@@ -1054,6 +1066,49 @@ mod tests {
 
 		tokio::time::advance(Duration::from_secs(1)).await;
 		assert_eq!(due(&mut buffer), ["v0", "a0", "a180", "v240"]);
+	}
+
+	/// The sync frame a track resumes at after a drop loses its leading frames too, since
+	/// they reference the dropped ones. The next sync frame's leading frames are kept.
+	#[tokio::test(start_paused = true)]
+	async fn a_resumed_sync_frame_drops_its_leading_frames() {
+		let start = Instant::now();
+		let mut buffer = Buffer::new(DELAY).replay();
+		let video = |arrived, decode, sync, leading, item| Arrival {
+			sync,
+			leading,
+			..arrival(arrived, decode, item)
+		};
+		buffer.push(1, video(start, 0, true, false, "v0")).unwrap();
+		let late = start + Duration::from_millis(200);
+		assert_eq!(
+			buffer.push(1, video(late, 40, false, false, "v40")).unwrap(),
+			Push::Late
+		);
+		assert_eq!(
+			buffer.push(1, video(late, 200, true, false, "v200")).unwrap(),
+			Push::Queued
+		);
+		assert_eq!(
+			buffer.push(1, video(late, 240, false, true, "v240")).unwrap(),
+			Push::Waiting
+		);
+		assert_eq!(
+			buffer.push(1, video(late, 280, false, false, "v280")).unwrap(),
+			Push::Queued
+		);
+		assert_eq!(
+			buffer.push(1, video(late, 320, true, false, "v320")).unwrap(),
+			Push::Queued
+		);
+		assert_eq!(
+			buffer.push(1, video(late, 360, false, true, "v360")).unwrap(),
+			Push::Queued
+		);
+		assert_eq!(buffer.dropped(), 2, "the leading frame was lost with the late one");
+
+		tokio::time::advance(Duration::from_secs(1)).await;
+		assert_eq!(due(&mut buffer), ["v0", "v200", "v280", "v320", "v360"]);
 	}
 
 	/// A restart before anything went out keeps the clock, so the tracks stay on one.
@@ -1377,6 +1432,7 @@ mod tests {
 				restart: 0,
 				skip: 0,
 				sync: true,
+				leading: false,
 				item: "v",
 			};
 			let held = buffer
@@ -1551,6 +1607,7 @@ mod tests {
 				restart: 0,
 				skip: 0,
 				sync: true,
+				leading: false,
 				item: "v",
 			};
 			match buffer.push(track, frame) {

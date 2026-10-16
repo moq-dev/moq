@@ -30,7 +30,7 @@ pub mod web;
 
 mod driver;
 
-pub use driver::{Connection, RecvStream, SendStream};
+pub use driver::{Connection, Credit, RecvStream, SendStream};
 pub use endpoint::Endpoint;
 
 /// The QUIC payload size every full datagram in a GSO train uses, and the

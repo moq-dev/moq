@@ -350,6 +350,11 @@ impl Connection {
 		drop(conn);
 		self.shared.kick();
 	}
+
+	/// Returns connection statistics.
+	pub fn stats(&self) -> moq_quic::ConnectionStats {
+		self.shared.conn.borrow().stats()
+	}
 }
 
 impl Clone for Connection {
