@@ -22,15 +22,18 @@ owns it or why it stays private.
 Enforce the marks in CI, or they drift. Narrowing makes the compiler
 reject unmarked reach, but a contributor can still restore `pub(crate)`
 without a comment. Add a check to the lint that `just check` and CI already
-run: every restricted visibility under `rs/moq-net/src/model/` broader than
-`pub(in crate::model)` (any `pub(crate)` or `pub(in crate)` spelling, and a
-`pub(super)` in `model/mod.rs`, whose parent is the crate root) must carry a
-marker
+run. It is an allowlist, not a list of bad spellings (`pub(in
+super::super)` from `model/group.rs` reaches `crate` too). Under
+`rs/moq-net/src/model/`, every restricted visibility fails without a marker
+unless it is `pub(self)`, `pub(super)` outside `model/mod.rs`, or a
+`pub(in ...)` path starting with `crate::model`. A marker is a
 comment from a fixed vocabulary (for example `// private: passthrough`,
 `tuning`, `capability gap`, `test`, or `// pending: <quest path>`). A
 `pending` mark must name a quest that still exists. Existence is enough
 because a finished quest is deleted in the PR that completes it (`quest
-guide`: "Finished quests are deleted"). The check is a grep. It
+guide`: "Finished quests are deleted"). The check is a grep, recommended
+over reading effective visibility from rustdoc JSON, which needs nightly
+and an unstable format for the same answer. It
 pairs with the narrowed visibility, so it does not need the compile probe.
 Each child's PR then deletes its `pending` marks as items go public, and the
 check fails if one is left behind.
