@@ -10,8 +10,8 @@ an entire application message to fit before more bytes arrive.
 
 ## Plan
 
-Decided in the 2026-10-10 receive-memory interview: use `moq-quic` after the
-fork switch, not a new feature in the frozen moq-dev/noq fork. This quest
+Decided in the 2026-10-10 receive-memory interview: use `moq-quic`, not a
+new feature in the frozen moq-dev/noq fork. This quest
 provides the transport primitive; [message assembly](/quest/m1/quic/receive-memory.md)
 activates it with the recovery policy needed for progress.
 
@@ -46,10 +46,6 @@ Public API: a native receive-credit ownership/observation seam, finalized
 with its consumer. Wire: existing QUIC flow-control and cancellation frames;
 no new MoQ message or negotiation. Browser and iroh receivers do not gain a
 capability their transports cannot provide.
-
-## Required
-
-- [Switch MoQ onto moq-quic](/quest/m1/quic/fork/switch.md) - both native adapters use the in-tree transport
 
 ## Related
 

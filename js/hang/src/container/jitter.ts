@@ -1,4 +1,4 @@
-import type { Time } from "@moq/net";
+import type { Milli } from "@moq/clock";
 
 // Implements the estimator in doc/concept/audio-jitter.md, which is normative. The design and
 // every constant come from WebRTC NetEq's underrun optimizer; this is written from the document,
@@ -57,7 +57,7 @@ export class Jitter {
 	#count = 0;
 
 	/** Fold one frame in: `arrival` on the receiver's monotonic clock, `media` its timestamp. */
-	observe(arrival: Time.Milli, media: Time.Milli): void {
+	observe(arrival: Milli, media: Milli): void {
 		// A reordered frame is measured but never joins the window: it arrived after a newer frame,
 		// so it can never be the fastest, and a later frame must not be measured against it.
 		if (media > this.#newest) {
@@ -107,13 +107,13 @@ export class Jitter {
 	}
 
 	/** The measured term: the upper edge of the bucket holding the 95th percentile. */
-	get measured(): Time.Milli {
+	get measured(): Milli {
 		let cumulative = 0;
 		for (let i = 0; i < BUCKETS; i++) {
 			cumulative += this.#histogram[i];
-			if (cumulative > QUANTILE) return ((i + 1) * BUCKET) as Time.Milli;
+			if (cumulative > QUANTILE) return ((i + 1) * BUCKET) as Milli;
 		}
-		return (BUCKETS * BUCKET) as Time.Milli;
+		return (BUCKETS * BUCKET) as Milli;
 	}
 
 	// `h = f*h + (1-f)*x`, where x is all weight on the observed bucket, or the prior when the

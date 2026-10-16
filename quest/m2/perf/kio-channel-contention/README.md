@@ -162,4 +162,3 @@ Decided (maintainer, 2026-10-14, per-thread follow-up):
 ## Related
 
 - [Relay profiling](/quest/m2/perf/lock-profile.md) - the lock-wait recipe that measures before and after
-- [Lock-wait CPU from switches](/quest/m2/perf/switch-cpu.md) - corrects the wait/CPU denominator these numbers use

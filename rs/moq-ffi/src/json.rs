@@ -194,9 +194,10 @@ impl MoqJsonSnapshotConsumer {
 	#[uniffi::constructor]
 	pub fn new(track: &MoqTrackConsumer, config: MoqJsonSnapshotConfig) -> Result<Arc<Self>, MoqError> {
 		let _guard = crate::ffi::enter();
-		let consumer = moq_json::snapshot::Consumer::<Value>::new(track.take()?, config.into());
+		let (track, driver) = track.take()?;
+		let consumer = moq_json::snapshot::Consumer::<Value>::new(track, config.into());
 		Ok(Arc::new(Self {
-			task: Task::new(SnapshotConsumer { inner: consumer }),
+			task: Task::new(SnapshotConsumer { inner: consumer }).supervised(driver),
 		}))
 	}
 
@@ -306,9 +307,10 @@ impl MoqJsonStreamConsumer {
 	#[uniffi::constructor]
 	pub fn new(track: &MoqTrackConsumer, config: MoqJsonStreamConfig) -> Result<Arc<Self>, MoqError> {
 		let _guard = crate::ffi::enter();
-		let consumer = moq_json::stream::Consumer::<Value>::new(track.take()?, config.into());
+		let (track, driver) = track.take()?;
+		let consumer = moq_json::stream::Consumer::<Value>::new(track, config.into());
 		Ok(Arc::new(Self {
-			task: Task::new(StreamConsumer { inner: consumer }),
+			task: Task::new(StreamConsumer { inner: consumer }).supervised(driver),
 		}))
 	}
 

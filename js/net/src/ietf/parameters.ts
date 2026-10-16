@@ -1,7 +1,9 @@
 import { ProtocolViolation } from "../error.ts";
+import type * as Path from "../path.ts";
 import type { Reader, Writer } from "../stream.ts";
 import * as Varint from "../varint.ts";
 import * as Filter from "./filter.ts";
+import * as Namespace from "./namespace.ts";
 import { AUTHORIZATION_TOKEN, type Token, tokenFromRequest, unique } from "./token.ts";
 import { type IetfVersion, Version } from "./version.ts";
 
@@ -247,7 +249,8 @@ type ControlMessage =
 	| "fetch"
 	| "request-ok"
 	| "request-update"
-	| "namespace";
+	| "namespace"
+	| "namespace-update";
 
 function draft20(version: IetfVersion): boolean {
 	return version >= Version.DRAFT_20;
@@ -313,6 +316,8 @@ function allows(message: ControlMessage, version: IetfVersion, id: bigint): bool
 				trackRange ||
 				newGroup
 			);
+		case "namespace-update":
+			return from18 && (auth || id === 0x34n);
 		case "subscribe-namespace":
 			return auth || (forward && legacyForward) || id === MSG_PARAM_HIDDEN;
 		case "publish":
@@ -367,12 +372,14 @@ const MSG_PARAM_REPEATABLE: readonly bigint[] = [
 	MSG_PARAM_TRACK_PROPERTY_FILTER,
 ];
 
-type MessageParamKind = "varint" | "uint8" | "bool" | "location" | "filter" | "bytes";
+type MessageParamKind = "varint" | "uint8" | "bool" | "location" | "filter" | "bytes" | "namespace";
 /** A `{Group, Object}` pair carried by a message parameter, such as LARGEST_OBJECT. */
 export type MessageLocation = { groupId: bigint; objectId: bigint };
 
 function getMessageParamKind(id: bigint): MessageParamKind {
 	switch (id) {
+		case 0x34n:
+			return "namespace";
 		case MSG_PARAM_DELIVERY_TIMEOUT:
 		case MSG_PARAM_FILL_TIMEOUT:
 		case MSG_PARAM_NEW_GROUP_REQUEST:
@@ -431,6 +438,8 @@ function encodeLocation({ groupId, objectId }: MessageLocation): Uint8Array {
 export class Parameters {
 	vars: Map<bigint, bigint>;
 	bytes: Map<bigint, Uint8Array>;
+	/** TRACK_NAMESPACE_PREFIX on a namespace update, decoded only. */
+	namespacePrefix: Path.Valid | undefined;
 	#locations: Map<bigint, MessageLocation>;
 	/** LOCATION_FILTER, kept decoded because its framing depends on the draft. */
 	#filter: Filter.Filter | undefined;
@@ -808,7 +817,13 @@ export class Parameters {
 			}
 
 			const filter = id === MSG_PARAM_SUBSCRIPTION_FILTER && params.#filter !== undefined;
-			if (params.vars.has(id) || params.bytes.has(id) || params.#locations.has(id) || filter) {
+			if (
+				params.vars.has(id) ||
+				params.bytes.has(id) ||
+				params.#locations.has(id) ||
+				filter ||
+				(id === 0x34n && params.namespacePrefix !== undefined)
+			) {
 				throw new Error(`duplicate message parameter id: ${id.toString()}`);
 			}
 
@@ -839,6 +854,9 @@ export class Parameters {
 					params.#locations.set(id, { groupId, objectId });
 					break;
 				}
+				case "namespace":
+					params.namespacePrefix = await Namespace.decode(r);
+					break;
 				case "filter":
 					params.#filter = await Filter.decodeParam(r, version);
 					break;

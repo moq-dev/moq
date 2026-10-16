@@ -1,4 +1,5 @@
 import { expect, jest, onTestFinished, spyOn, test } from "bun:test";
+import { Milli } from "@moq/clock";
 import { Once } from "@moq/signals";
 import type * as announce from "../announced.ts";
 import { ProtocolViolation, StreamCode, Stream as StreamError } from "../error.ts";
@@ -8,13 +9,13 @@ import { createMockTransportPair } from "../mock.ts";
 import * as Path from "../path.ts";
 import { Reader, Stream } from "../stream.ts";
 import { Tail } from "../tail.ts";
-import { Milli, Timescale, Timestamp } from "../time.ts";
+import { Timescale, Timestamp } from "../time.ts";
 import type * as track from "../track.ts";
 import { ControlStreamAdapter, NativeSession } from "./adapter.ts";
 import type * as Cluster from "./cluster.ts";
 import { Connection } from "./connection.ts";
 import { ObjectDatagram } from "./datagram.ts";
-import { encodeObjectExtensions, type GroupFlags, Group as GroupMessage } from "./object.ts";
+import { EndOfTrackProperties, encodeObjectExtensions, type GroupFlags, Group as GroupMessage } from "./object.ts";
 import type { Properties } from "./properties.ts";
 import { PublishNamespace, PublishNamespaceCancel, PublishNamespaceUpdate } from "./publish_namespace.ts";
 import { MaxRequestId, RequestError, RequestOk } from "./request.ts";
@@ -1084,6 +1085,30 @@ test("an object without a Timestamp on a TIMESCALE track is malformed", async ()
 	// The track can't be trusted past it, so it ends rather than skipping one group.
 	expect(track.closed.peek()).toBe(err as StreamError);
 	stop.mockRestore();
+});
+
+test("a draft-14 END_OF_TRACK carrying properties ends the subscription as unsupported", async () => {
+	// Delta 0, one unknown integer property, an empty payload, then END_OF_TRACK: standalone,
+	// and after a one-byte object.
+	const marker = [0, 2, 0x20, 7, 0, 4];
+	for (const wire of [marker, [0, 0, 1, 42, ...marker]]) {
+		const { subscriber, track } = await subscribeTrack({ version: Version.DRAFT_14 });
+		const reader = new Reader(undefined, new Uint8Array(wire), Version.DRAFT_14);
+		const stop = spyOn(reader, "stop");
+
+		await subscriber.handleGroup(stampedGroup(0), reader);
+
+		const err = stop.mock.calls[0][0];
+		expect(err).toBeInstanceOf(EndOfTrackProperties);
+		expect(track.closed.peek()).toBe(err as EndOfTrackProperties);
+		// The group before a trailing marker completes.
+		if (wire !== marker) {
+			const group = await track.ordered().nextGroup();
+			expect((await group?.readFrame())?.payload).toEqual(new Uint8Array([42]));
+			expect(await group?.closed).toBeNull();
+		}
+		stop.mockRestore();
+	}
 });
 
 test("older peer without priority property inherits wire priority 128", async () => {

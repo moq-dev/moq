@@ -13,14 +13,6 @@ use crate::ietf::Param;
 const PROP_TIMESCALE: u64 = 0x08;
 const PROP_TIMESTAMP: u64 = 0x10;
 
-/// The Timestamp id from draft-ietf-moq-loc-03, accepted on decode only.
-///
-/// Draft-03's body text and its IANA table disagreed (0x0A vs 0x06); this is the
-/// table's value, which is what we and other implementations shipped. Draft-04
-/// assigns 0x0A to Secure Objects private properties, so it is not accepted here.
-#[cfg(test)]
-const PROP_TIMESTAMP_DRAFT03: u64 = 0x06;
-
 /// Implementation limit for an object's extension (property) block, independent of the
 /// IETF draft. Checked at the length prefix, before the block is buffered.
 pub(super) const MAX_OBJECT_EXTENSIONS: usize = 64 * 1024;
@@ -448,16 +440,6 @@ mod tests {
 		let decoded = decode_time(&buf, Timescale::MILLI, Version::Draft18).unwrap();
 		assert_eq!(decoded.value(), 1234);
 		assert_eq!(decoded.scale(), Timescale::MILLI);
-	}
-
-	/// A peer on draft-ietf-moq-loc-03 wrote the Timestamp at 0x06; still decode it.
-	#[test]
-	fn test_object_time_decodes_draft03_timestamp() {
-		let buf = from_varints(&[PROP_TIMESTAMP_DRAFT03, 777], Version::Draft18);
-
-		let decoded = decode_time(&buf, Timescale::MICRO, Version::Draft18).unwrap();
-		assert_eq!(decoded.value(), 777);
-		assert_eq!(decoded.scale(), Timescale::MICRO);
 	}
 
 	/// No Timestamp property at all yields None.

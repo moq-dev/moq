@@ -37,13 +37,12 @@ regression and do not mask the question with sleeps, retries, or timeout
 changes.
 
 The retained paired run uses the existing workload lifecycle. A first run
-stopped on the already-planned [relay-port race](/quest/m2/perf/bench-relay-port.md);
+stopped on the relay-port race (fixed by #5636);
 the completed diagnostic used preflighted unique ports below the host's
 client ephemeral range, with no runtime retry. The benchmark CLI is unchanged.
 
-Driver-touching follow-ups still wait on the [hard fork](/quest/m1/quic/fork/README.md).
 The completed work changes only the Worker loop, Shared::push, observations,
-and their consumers, leaving `rs/moq-uring/src/quic/noq` alone.
+and their consumers, leaving the QUIC driver alone.
 
 ## Related
 
