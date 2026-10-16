@@ -285,7 +285,7 @@ mod tests {
 	/// A WebSocket peer that upgrades and never sends SETUP ends at the drain
 	/// deadline even with the SETUP timeout disabled, so its task does not
 	/// outlive the relay.
-	#[cfg(all(feature = "noq", feature = "websocket"))]
+	#[cfg(all(feature = "quic", feature = "websocket"))]
 	#[tokio::test]
 	async fn withheld_websocket_setup_ends_at_the_deadline() {
 		let window = Duration::from_secs(1);

@@ -66,7 +66,7 @@ the server, and the TLS knobs are gated out. The #2907 spike generated TS
 bigint and lets a handle be freed while one of its calls is pending.
 None of it has run in a browser.
 
-Measure on the [baseline harness](/quest/m2/rs2ts/spike.md):
+Measure on the [baseline harness](/test/wasm/README.md#backend-baseline):
 
 - Shipped size (compressed `.wasm` plus JS player and glue), cold start,
   first frame, per-frame CPU, and memory.
@@ -95,10 +95,6 @@ wins, that quest completes `moq-ffi`'s browser parity and generates the TS in CI
 `moq-wasm`'s deletion moves to [adoption](/quest/m2/rs2ts/wasm-adopt.md).
 
 Public API: none. Wire: none.
-
-## Required
-
-- [Browser backend baseline](/quest/m2/rs2ts/spike.md) - the harness and handwritten baseline every candidate runs on
 
 ## Related
 

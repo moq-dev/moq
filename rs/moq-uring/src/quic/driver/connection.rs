@@ -7,7 +7,7 @@ use std::task::{Context, Poll};
 use std::time::Instant;
 
 use bytes::Bytes;
-use moq_noq_proto::{ConnectionHandle, Dir, StreamId, VarInt};
+use moq_quic::{ConnectionHandle, Dir, StreamId, VarInt};
 use rustc_hash::FxHashMap;
 
 use super::super::{Error, SEGMENT};
@@ -28,7 +28,7 @@ const TRAIN_SEGMENTS: usize = 63;
 /// operation can mutate the connection, drop that borrow, and then register a
 /// waiter without ever holding both.
 pub(crate) struct Inner {
-	pub(crate) conn: RefCell<moq_noq_proto::Connection>,
+	pub(crate) conn: RefCell<moq_quic::Connection>,
 	pub(crate) state: RefCell<State>,
 	/// The worker driving this connection, which anything layered on it
 	/// (the WebTransport handshake, say) runs on too.
@@ -44,7 +44,7 @@ pub(crate) struct State {
 	established: bool,
 	establish_waiters: kio::WaiterList,
 
-	/// Whoever is waiting for a peer-initiated stream. noq-proto hands the
+	/// Whoever is waiting for a peer-initiated stream. moq-quic hands the
 	/// ids out in order, so the queue is its own.
 	accept_bi_waiters: kio::WaiterList,
 	accept_uni_waiters: kio::WaiterList,
@@ -55,7 +55,7 @@ pub(crate) struct State {
 	/// Per-stream read/write parking, keyed by stream id.
 	///
 	/// FxHash rather than SipHash on all four of these: they sit on the
-	/// driver's per-event path, and noq-proto assigns the ids.
+	/// driver's per-event path, and moq-quic assigns the ids.
 	readable: FxHashMap<StreamId, kio::WaiterList>,
 	writable: FxHashMap<StreamId, kio::WaiterList>,
 	/// Send streams waiting for their end: a FIN the peer acknowledged, or a
@@ -83,7 +83,7 @@ pub(crate) struct State {
 	dead: bool,
 
 	/// The close this side asked for, until the driver has put it on the wire.
-	/// noq raises no event for it, so this is what the terminal error is
+	/// moq-quic raises no event for it, so this is what the terminal error is
 	/// built from.
 	local_close: Option<(u64, String)>,
 }
@@ -191,13 +191,13 @@ impl Inner {
 
 	/// Start tracking send stream `id`, which a handle now owns.
 	///
-	/// Seeded from noq rather than empty: a peer can open a bidirectional
+	/// Seeded from moq-quic rather than empty: a peer can open a bidirectional
 	/// stream and stop it before the application ever accepts it, and that
-	/// event arrives with no handle to record it against. noq still knows,
+	/// event arrives with no handle to record it against. moq-quic still knows,
 	/// so a `poll_closed` on the fresh handle reports the stop instead of
 	/// waiting for an event that has already been and gone.
 	pub(crate) fn track(&self, id: StreamId) {
-		// Err means noq has no send half for the id, which is nothing to
+		// Err means moq-quic has no send half for the id, which is nothing to
 		// report either way.
 		let stopped = self.conn.borrow_mut().send_stream(id).stopped().ok().flatten();
 		self.state
@@ -242,11 +242,11 @@ impl Inner {
 	/// space, which needs the whole varint range.
 	pub(crate) fn close_code(&self, code: u64, reason: &str) {
 		self.conn.borrow_mut().close(
-			Instant::now(),
+			moq_clock::Instant::now(),
 			VarInt::from_u64(code).unwrap_or(VarInt::MAX),
 			Bytes::copy_from_slice(reason.as_bytes()),
 		);
-		// noq raises no event for a close the application asked for, so the
+		// moq-quic raises no event for a close the application asked for, so the
 		// terminal error is ours to publish. Not here though: the driver
 		// publishes it once it has staged the CONNECTION_CLOSE, so a caller
 		// that stops driving the worker the moment `poll_closed` resolves has
@@ -355,7 +355,7 @@ impl Clone for Connection {
 /// Build a connection's shared state and its driver.
 ///
 /// The driver future does timers, event sweeps, and egress; ingress arrives
-/// from the endpoint's demux task, which feeds noq-proto directly and
+/// from the endpoint's demux task, which feeds moq-quic directly and
 /// [kicks](Inner::kick) the driver. The caller spawns the future and reclaims
 /// the connection's bookkeeping once it resolves.
 pub(crate) fn launch(
@@ -363,7 +363,7 @@ pub(crate) fn launch(
 	socket: Rc<udp::Socket>,
 	endpoint: Weak<endpoint::Inner>,
 	key: ConnectionHandle,
-	conn: moq_noq_proto::Connection,
+	conn: moq_quic::Connection,
 ) -> (Shared, impl Future<Output = ()> + use<>) {
 	let shared = Rc::new(Inner {
 		conn: RefCell::new(conn),
@@ -443,7 +443,7 @@ pub(crate) async fn establish(shared: Shared, deadline: Option<Instant>) -> Resu
 		let handshake = conn
 			.crypto_session()
 			.handshake_data()
-			.and_then(|data| data.downcast::<moq_noq_proto::crypto::rustls::HandshakeData>().ok());
+			.and_then(|data| data.downcast::<moq_quic::crypto::rustls::HandshakeData>().ok());
 		let (alpn, server_name) = match handshake {
 			Some(data) => (
 				data.protocol.map(|proto| String::from_utf8_lossy(&proto).into_owned()),
@@ -451,11 +451,7 @@ pub(crate) async fn establish(shared: Shared, deadline: Option<Instant>) -> Resu
 			),
 			None => (None, None),
 		};
-		// Multipath is never negotiated here, so the first path is the only one.
-		let remote = conn
-			.network_path(moq_noq_proto::PathId::ZERO)
-			.expect("an established connection has its first path")
-			.remote();
+		let remote = conn.remote_address();
 		(alpn, server_name, remote)
 	};
 
@@ -563,7 +559,7 @@ impl web_transport_trait::poll::Session for Connection {
 				Poll::Ready(Ok(()))
 			}
 			// The send queue is full; a flush frees space.
-			Err(moq_noq_proto::SendDatagramError::Blocked(_)) => {
+			Err(moq_quic::SendDatagramError::Blocked(_)) => {
 				let mut state = self.shared.state.borrow_mut();
 				waiter.register(&mut state.datagram_send_waiters);
 				Poll::Pending
@@ -608,20 +604,16 @@ impl web_transport_trait::poll::Session for Connection {
 	}
 
 	fn stats(&self) -> impl web_transport_trait::Stats {
-		let (stats, path) = {
-			let mut conn = self.shared.conn.borrow_mut();
-			let stats = conn.stats();
-			let path = conn.path_stats(moq_noq_proto::PathId::ZERO).unwrap_or_default();
-			(stats, path)
-		};
+		let stats = self.shared.conn.borrow().stats();
 		Stats {
 			bytes_sent: stats.udp_tx.bytes,
 			bytes_received: stats.udp_rx.bytes,
-			bytes_lost: stats.lost_bytes,
+			bytes_lost: stats.path.lost_bytes,
 			packets_sent: stats.udp_tx.datagrams,
 			packets_received: stats.udp_rx.datagrams,
-			packets_lost: stats.lost_packets,
-			rtt: path.rtt,
+			packets_lost: stats.path.lost_packets,
+			rtt: stats.path.rtt,
+			bandwidth: stats.path.bandwidth_estimate,
 		}
 	}
 }
@@ -632,7 +624,7 @@ impl std::fmt::Debug for Connection {
 	}
 }
 
-/// A snapshot of noq-proto's counters in [`web_transport_trait::Stats`]
+/// A snapshot of moq-quic's counters in [`web_transport_trait::Stats`]
 /// shape.
 struct Stats {
 	bytes_sent: u64,
@@ -642,6 +634,8 @@ struct Stats {
 	packets_received: u64,
 	packets_lost: u64,
 	rtt: std::time::Duration,
+	/// The congestion controller's bandwidth estimate in bytes per second.
+	bandwidth: Option<u64>,
 }
 
 impl web_transport_trait::Stats for Stats {
@@ -673,24 +667,22 @@ impl web_transport_trait::Stats for Stats {
 		Some(self.rtt)
 	}
 
-	/// Nothing, because noq-proto exposes no delivery or pacing rate.
+	/// The congestion controller's bandwidth estimate, in bits per second.
 	///
-	/// The congestion window over the RTT is not a stand-in for one: BBR
-	/// deliberately holds about twice the bandwidth-delay product (nearly
-	/// three times it while starting up), so that number is a multiple of
-	/// what the path will carry, and moq-net feeds this straight into its
-	/// bandwidth allocator and PROBE. A missing sample is a state the model
-	/// already handles (`stats.estimated_send_rate` is an `Option`, and no
-	/// bandwidth producer is created without one); an inflated one is a rate
-	/// an encoder will chase.
+	/// BBR estimates the delivery rate; CUBIC offers none. The congestion
+	/// window over the RTT is not a stand-in: BBR deliberately holds about
+	/// twice the bandwidth-delay product, so that number is a multiple of what
+	/// the path will carry, and moq-net feeds this straight into its bandwidth
+	/// allocator and PROBE. A missing sample is a state the model already
+	/// handles; an inflated one is a rate an encoder will chase.
 	fn estimated_send_rate(&self) -> Option<u64> {
-		None
+		self.bandwidth.map(|bytes| bytes.saturating_mul(8))
 	}
 }
 
 /// The per-connection task: endpoint events, application events, timers, and
 /// packets out. Packets in come from the endpoint's demux task, which feeds
-/// noq-proto directly and kicks this driver.
+/// moq-quic directly and kicks this driver.
 struct Driver {
 	shared: Shared,
 	socket: Rc<udp::Socket>,
@@ -700,11 +692,11 @@ struct Driver {
 	endpoint: Weak<endpoint::Inner>,
 	key: ConnectionHandle,
 	deadline: crate::Timer,
-	/// Egress staging: noq-proto writes into a `Vec`, so a train is built
+	/// Egress staging: moq-quic writes into a `Vec`, so a train is built
 	/// here and copied into the socket's registered buffer.
 	scratch: Vec<u8>,
 	/// A CONNECTION_CLOSE has been handed to the socket. Not implied by a
-	/// flush that came back empty: noq paces the close like any other packet,
+	/// flush that came back empty: moq-quic paces the close like any other packet,
 	/// so it can sit behind a pacing timer after the application asked for it.
 	close_staged: bool,
 }
@@ -732,9 +724,9 @@ impl Driver {
 			}
 			// A closed connection still owes the peer its CONNECTION_CLOSE
 			// (and a retransmit for each packet that arrives after), so the
-			// driver runs until noq says the drain is over.
+			// driver runs until moq-quic says the drain is over.
 			if self.shared.conn.borrow().is_drained() {
-				// A close noq never managed to send (the server's
+				// A close moq-quic never managed to send (the server's
 				// anti-amplification limit can withhold it) ends here too.
 				self.publish_close();
 				return Poll::Ready(());
@@ -752,11 +744,12 @@ impl Driver {
 			// polling before the set would leave the firing to wake nobody
 			// (fatal on a dial nobody answers, where no ingress ever re-polls
 			// us).
-			self.deadline.set(self.shared.conn.borrow_mut().poll_timeout());
+			self.deadline
+				.set(self.shared.conn.borrow_mut().poll_timeout().map(super::to_std));
 			if self.deadline.poll(waiter).is_pending() {
 				return Poll::Pending;
 			}
-			self.shared.conn.borrow_mut().handle_timeout(Instant::now());
+			self.shared.conn.borrow_mut().handle_timeout(moq_clock::Instant::now());
 		}
 	}
 
@@ -791,25 +784,24 @@ impl Driver {
 
 			let mut state = self.shared.state.borrow_mut();
 			match event {
-				moq_noq_proto::Event::Connected => {
+				moq_quic::Event::Connected => {
 					state.established = true;
 					state.establish_waiters.wake();
 				}
-				moq_noq_proto::Event::ConnectionLost { reason } => state.fail(reason.into()),
-				moq_noq_proto::Event::DatagramReceived => state.datagram_recv_waiters.wake(),
-				moq_noq_proto::Event::DatagramsUnblocked => state.datagram_send_waiters.wake(),
-				moq_noq_proto::Event::HandshakeDataReady => {}
-				moq_noq_proto::Event::Stream(event) => sweep_stream(&mut state, event),
-				moq_noq_proto::Event::HandshakeConfirmed
-				| moq_noq_proto::Event::Path(_)
-				| moq_noq_proto::Event::NatTraversal(_) => {}
+				moq_quic::Event::ConnectionLost { reason } => state.fail(reason.into()),
+				moq_quic::Event::DatagramReceived => state.datagram_recv_waiters.wake(),
+				moq_quic::Event::DatagramsUnblocked => state.datagram_send_waiters.wake(),
+				moq_quic::Event::HandshakeDataReady => {}
+				moq_quic::Event::Stream(event) => sweep_stream(&mut state, event),
+				// Non-exhaustive upstream; nothing else needs a wakeup.
+				_ => {}
 			}
 		}
 	}
 
 	/// Publish the terminal error for a close this side asked for.
 	///
-	/// noq raises no event for it, so the driver is what reports it, and
+	/// moq-quic raises no event for it, so the driver is what reports it, and
 	/// only once the CONNECTION_CLOSE is staged (or the drain is over), since
 	/// an application is free to stop driving the worker the moment
 	/// `poll_closed` resolves. Staged is not delivered: the send is
@@ -832,7 +824,7 @@ impl Driver {
 			// Backpressure, or nothing left to stage.
 			Poll::Pending => return Poll::Pending,
 		}
-		// Requeue behind the other ready tasks. If noq is drained, the next
+		// Requeue behind the other ready tasks. If moq-quic is drained, the next
 		// poll costs one empty acquire and then parks normally.
 		waiter.waker().wake_by_ref();
 		Poll::Pending
@@ -858,27 +850,26 @@ impl Driver {
 				tx.len()
 			))));
 		}
-		let segments = std::num::NonZeroUsize::new(segments).expect("segments was checked above");
 
 		self.scratch.clear();
 		let (transmit, closing) = {
 			let mut conn = self.shared.conn.borrow_mut();
 			// Nothing to send, or paced; the buffer returns to the pool on drop.
-			let Some(transmit) = conn.poll_transmit(Instant::now(), segments, &mut self.scratch) else {
+			let Some(transmit) = conn.poll_transmit(moq_clock::Instant::now(), segments, &mut self.scratch) else {
 				return Poll::Pending;
 			};
-			// Once closed, noq transmits nothing but the CONNECTION_CLOSE.
+			// Once closed, moq-quic transmits nothing but the CONNECTION_CLOSE.
 			(transmit, conn.is_closed())
 		};
 
 		tx[..transmit.size].copy_from_slice(&self.scratch[..transmit.size]);
 		// A lone datagram is its own segment size, and the socket's GSO
-		// stride has to match what noq actually packed.
+		// stride has to match what moq-quic actually packed.
 		let transmit = udp::Transmit {
 			to: transmit.destination,
 			len: transmit.size,
 			segment: transmit.segment_size.unwrap_or(transmit.size),
-			ecn: transmit.ecn.map(super::ecn_from_noq),
+			ecn: transmit.ecn.map(super::ecn_from_quic),
 		};
 		if let Err(err) = tx.send(transmit) {
 			return Poll::Ready(Err(Error::Io(err.to_string())));
@@ -913,25 +904,25 @@ fn end(state: &mut State, id: StreamId, end: End) {
 }
 
 /// Apply one stream event to the parking tables.
-fn sweep_stream(state: &mut State, event: moq_noq_proto::StreamEvent) {
+fn sweep_stream(state: &mut State, event: moq_quic::StreamEvent) {
 	// Waking removes the entry: a still-interested poller re-registers on its
 	// next poll, so the maps only hold streams somebody is parked on.
 	match event {
-		moq_noq_proto::StreamEvent::Opened { dir: Dir::Bi } => state.accept_bi_waiters.wake(),
-		moq_noq_proto::StreamEvent::Opened { dir: Dir::Uni } => state.accept_uni_waiters.wake(),
-		moq_noq_proto::StreamEvent::Available { .. } => state.open_waiters.wake(),
-		moq_noq_proto::StreamEvent::Readable { id } => {
+		moq_quic::StreamEvent::Opened { dir: Dir::Bi } => state.accept_bi_waiters.wake(),
+		moq_quic::StreamEvent::Opened { dir: Dir::Uni } => state.accept_uni_waiters.wake(),
+		moq_quic::StreamEvent::Available { .. } => state.open_waiters.wake(),
+		moq_quic::StreamEvent::Readable { id } => {
 			if let Some(mut waiters) = state.readable.remove(&id) {
 				waiters.wake();
 			}
 		}
-		moq_noq_proto::StreamEvent::Writable { id } => {
+		moq_quic::StreamEvent::Writable { id } => {
 			if let Some(mut waiters) = state.writable.remove(&id) {
 				waiters.wake();
 			}
 		}
-		moq_noq_proto::StreamEvent::Finished { id } => end(state, id, End::Delivered),
-		moq_noq_proto::StreamEvent::Stopped { id, error_code } => {
+		moq_quic::StreamEvent::Finished { id } => end(state, id, End::Delivered),
+		moq_quic::StreamEvent::Stopped { id, error_code } => {
 			end(state, id, End::Stopped(error_code.into_inner()));
 			// A writer blocked on capacity has to learn it will never come.
 			if let Some(mut waiters) = state.writable.remove(&id) {
@@ -943,7 +934,7 @@ fn sweep_stream(state: &mut State, event: moq_noq_proto::StreamEvent) {
 
 #[cfg(test)]
 mod tests {
-	use moq_noq_proto::Side;
+	use moq_quic::Side;
 
 	use super::*;
 
