@@ -11,7 +11,7 @@
 //! See [`Client`] for connecting to relays and [`Server`] for accepting
 //! connections. The `mdns` feature finds peers to connect to on the local network.
 //!
-//! With `default-features = false`, the `noq` backend must be paired
+//! With `default-features = false`, the `quic` backend must be paired
 //! with the `aws-lc-rs` or `ring` crypto-provider feature. Every other subset
 //! compiles, including no transport at all: such a build cannot connect to
 //! anything, though a crypto provider on its own is still enough to configure TLS
@@ -22,7 +22,7 @@
 
 // The protocol crates need a compiled provider for reset and retry-token keys. A rustls provider
 // installed at runtime cannot supply constructors removed by their compile-time feature gates.
-#[cfg(all(feature = "noq", not(any(feature = "aws-lc-rs", feature = "ring"))))]
+#[cfg(all(feature = "quic", not(any(feature = "aws-lc-rs", feature = "ring"))))]
 compile_error!("a rustls QUIC backend requires a crypto provider: enable either the `aws-lc-rs` or `ring` feature");
 
 mod abort;
@@ -34,18 +34,16 @@ pub mod connect;
 pub mod connection;
 pub mod crypto;
 mod error;
-#[cfg(any(feature = "noq", feature = "tcp", feature = "websocket"))]
+#[cfg(any(feature = "quic", feature = "tcp", feature = "websocket"))]
 pub mod failover;
 #[cfg(feature = "jemalloc")]
 pub mod jemalloc;
 pub mod listen;
 mod log;
-#[cfg(feature = "noq")]
-pub mod noq;
 pub mod origin;
 pub mod panic;
 pub mod quic;
-#[cfg(any(feature = "noq", feature = "tcp", feature = "websocket"))]
+#[cfg(any(feature = "quic", feature = "tcp", feature = "websocket"))]
 mod resolve;
 #[cfg(feature = "_transport")]
 pub mod server;
@@ -60,7 +58,7 @@ pub mod unix;
 pub mod worker;
 // Resolving a `host:port` bind string is a QUIC-listener concern; the stream
 // listeners take a `SocketAddr`/path straight from their config.
-#[cfg(feature = "noq")]
+#[cfg(feature = "quic")]
 mod util;
 #[cfg(feature = "watch")]
 pub mod watch;

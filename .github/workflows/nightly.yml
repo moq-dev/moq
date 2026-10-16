@@ -57,7 +57,7 @@ jobs:
       fail-fast: false
       matrix:
         # Unset keys default to the plain dev shell, the Rust cache, no perf
-        # sampling, and nextest's default profile.
+        # sampling, no Chromium, and nextest's default profile.
         include:
           - name: Features
             recipe: rs features
@@ -80,6 +80,11 @@ jobs:
           - name: BBB rendition alignment
             recipe: pub check-bbb
             uncached: true
+          - name: Browser backend baseline
+            recipe: test wasm-baseline
+            chromium: true
+            artifact: wasm-backend-baseline
+            artifact-path: target/test
           - name: Audit
             recipe: rs audit
             uncached: true
@@ -123,6 +128,12 @@ jobs:
       - name: Allow perf kernel sampling
         if: matrix.perf
         run: sudo sysctl -w kernel.perf_event_paranoid=-1
+
+      # Playwright's Chromium isn't in the nix devShell; `--with-deps` installs
+      # its apt runtime libs, and the recipe's own install then no-ops.
+      - name: Playwright Chromium
+        if: matrix.chromium
+        run: nix develop --command bash -c "bun install --frozen-lockfile && bunx playwright install --with-deps chromium"
 
       - name: Run workload
         run: nix develop ${{ matrix.shell }} --command just ${{ matrix.recipe }}

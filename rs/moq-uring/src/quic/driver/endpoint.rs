@@ -1,6 +1,6 @@
-//! The noq endpoint: one socket, many noq-proto connections.
+//! The endpoint: one socket, many moq-quic connections.
 //!
-//! noq-proto's own [`moq_noq_proto::Endpoint`] is the routing table: it parses
+//! moq-quic's own [`moq_quic::Endpoint`] is the routing table: it parses
 //! each datagram, hands it to the connection its destination id names, mints
 //! and retires ids as peers consume them, and answers an unsupported version
 //! itself. What is left for us is the socket, the accept backlog, and a driver
@@ -17,7 +17,7 @@ use std::task::Poll;
 use std::time::Instant;
 
 use bytes::BytesMut;
-use moq_noq_proto::{ConnectionHandle, DatagramEvent, Incoming, Transmit};
+use moq_quic::{ConnectionHandle, DatagramEvent, Incoming, Transmit};
 use rustc_hash::FxHashMap;
 
 use super::super::{Error, endpoint::Config};
@@ -42,11 +42,11 @@ pub(crate) struct Inner {
 	socket: Rc<udp::Socket>,
 	local: SocketAddr,
 	/// The routing table, and the server configuration it accepts with.
-	endpoint: RefCell<moq_noq_proto::Endpoint>,
+	endpoint: RefCell<moq_quic::Endpoint>,
 	accepting: RefCell<Option<Accepting>>,
 	/// Every live connection, looked up per received datagram.
 	///
-	/// FxHash rather than SipHash: noq-proto hands out the handle, and it
+	/// FxHash rather than SipHash: moq-quic hands out the handle, and it
 	/// owns connection-id routing (and its hasher choices) itself, so nothing
 	/// a peer picks reaches this map.
 	conns: RefCell<FxHashMap<ConnectionHandle, connection::Shared>>,
@@ -91,7 +91,7 @@ impl Endpoint {
 		let server = match &config.server {
 			Some(server) => {
 				let mut server = super::server_config(server)?;
-				// noq buffers half-open handshakes itself, so it enforces
+				// moq-quic buffers half-open handshakes itself, so it enforces
 				// the same bound the accept queue does.
 				server.max_incoming(config.backlog);
 				Some(Arc::new(server))
@@ -101,7 +101,7 @@ impl Endpoint {
 		let accepting = server.is_some().then(|| Accepting { queue: VecDeque::new() });
 		// MTU discovery is off (the GSO pool sends fixed SEGMENT datagrams),
 		// so the endpoint has no reason to allow it either.
-		let endpoint = moq_noq_proto::Endpoint::new(super::endpoint_config(socket.shard())?, server, false);
+		let endpoint = moq_quic::Endpoint::new(super::endpoint_config(socket.shard())?, server, false);
 
 		let inner = Rc::new(Inner {
 			activity: config.activity,
@@ -165,7 +165,7 @@ impl Endpoint {
 			.inner
 			.endpoint
 			.borrow_mut()
-			.connect(Instant::now(), client, config.peer, &config.server_name)
+			.connect(moq_clock::Instant::now(), client, config.peer, &config.server_name)
 			.map_err(|err| Error::Quic(err.to_string()))?;
 		let shared = self.inner.launch(key, conn);
 		// Flush the Initial flight; the demux task takes it from here.
@@ -246,7 +246,7 @@ impl Inner {
 	/// Route every datagram in one receive, then kick the connections fed.
 	fn demux(self: &Rc<Self>, packet: &mut udp::Packet) {
 		let from = packet.from();
-		let ecn = packet.ecn().map(super::ecn_to_noq);
+		let ecn = packet.ecn().map(super::ecn_to_quic);
 		// Where the endpoint writes its own answers (version negotiation,
 		// retry, a refusal), reused across the whole receive.
 		let mut buf = Vec::new();
@@ -261,8 +261,9 @@ impl Inner {
 			// arrived on, so the four-tuple stays half known, exactly as it
 			// does on a platform without `IP_PKTINFO`.
 			let event = self.endpoint.borrow_mut().handle(
-				Instant::now(),
-				from.into(),
+				moq_clock::Instant::now(),
+				from,
+				None,
 				ecn,
 				BytesMut::from(&segment[..]),
 				&mut buf,
@@ -339,9 +340,14 @@ impl Inner {
 			return None;
 		};
 		buf.clear();
-		let now = Instant::now();
-		let deadline = self.handshake.timeout.and_then(|timeout| now.checked_add(timeout));
-		let accepted = self.endpoint.borrow_mut().accept(incoming, now, buf, None);
+		let deadline = self
+			.handshake
+			.timeout
+			.and_then(|timeout| Instant::now().checked_add(timeout));
+		let accepted = self
+			.endpoint
+			.borrow_mut()
+			.accept(incoming, moq_clock::Instant::now(), buf, None);
 		let (key, conn) = match accepted {
 			Ok(accepted) => accepted,
 			Err(err) => {
@@ -402,7 +408,7 @@ impl Inner {
 			to: transmit.destination,
 			len: transmit.size,
 			segment: transmit.segment_size.unwrap_or(transmit.size),
-			ecn: transmit.ecn.map(super::ecn_from_noq),
+			ecn: transmit.ecn.map(super::ecn_from_quic),
 		};
 		if let Err(err) = tx.send(transmit) {
 			tracing::debug!(%err, "failed to send an endpoint response");
@@ -410,7 +416,7 @@ impl Inner {
 	}
 
 	/// Register `conn`, spawn its driver, and arrange its teardown.
-	fn launch(self: &Rc<Self>, key: ConnectionHandle, conn: moq_noq_proto::Connection) -> connection::Shared {
+	fn launch(self: &Rc<Self>, key: ConnectionHandle, conn: moq_quic::Connection) -> connection::Shared {
 		let (shared, driver) = connection::launch(&self.owner, self.socket.clone(), Rc::downgrade(self), key, conn);
 		self.conns.borrow_mut().insert(key, shared.clone());
 
@@ -427,8 +433,8 @@ impl Inner {
 	pub(crate) fn on_connection_event(
 		&self,
 		key: ConnectionHandle,
-		event: moq_noq_proto::EndpointEvent,
-	) -> Option<moq_noq_proto::ConnectionEvent> {
+		event: moq_quic::EndpointEvent,
+	) -> Option<moq_quic::ConnectionEvent> {
 		self.endpoint.borrow_mut().handle_event(key, event)
 	}
 

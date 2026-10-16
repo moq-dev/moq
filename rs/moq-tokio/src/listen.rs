@@ -14,7 +14,7 @@ pub enum Bind {
 }
 
 impl Bind {
-	#[cfg(feature = "noq")]
+	#[cfg(feature = "quic")]
 	pub(crate) fn resolve(&self) -> std::io::Result<std::net::SocketAddr> {
 		match self {
 			Self::Addr(addr) => Ok(*addr),
@@ -186,11 +186,11 @@ pub struct Config {
 
 	/// IPv4 address advertised as the QUIC preferred_address.
 	///
-	/// Supporting clients (Chrome M131+, native noq) migrate to this address
+	/// Supporting clients (Chrome M131+, this crate) migrate to this address
 	/// shortly after the handshake completes. Typical use: handshake on an
 	/// anycast IP, steady-state on this host's unicast IP.
 	///
-	/// Honored by noq. Accept-only, which is why it lives
+	/// Honored by the QUIC backend. Accept-only, which is why it lives
 	/// here rather than in the shared [`crate::quic::Config`].
 	#[usage(
 		name = "listen-preferred-v4",
@@ -292,7 +292,7 @@ impl Default for Config {
 	}
 }
 
-#[cfg(feature = "noq")]
+#[cfg(feature = "quic")]
 pub(crate) use moq_sock::shard::Shard;
 /// One server's socket in a complete `SO_REUSEPORT` group.
 ///
@@ -527,7 +527,7 @@ impl Config {
 		(!timeout.is_zero() && std::time::Instant::now().checked_add(timeout).is_some()).then_some(timeout)
 	}
 
-	#[cfg(feature = "noq")]
+	#[cfg(feature = "quic")]
 	/// Return the effective QUIC-LB connection-ID encoding.
 	pub fn load_balancer(&self) -> Option<crate::quic::LoadBalancer> {
 		self.lb_id
@@ -666,7 +666,7 @@ mod tests {
 		assert!("relay.example.com:443:8443".parse::<Bind>().is_err());
 	}
 
-	#[cfg(feature = "noq")]
+	#[cfg(feature = "quic")]
 	#[test]
 	fn cli_load_balancer_survives_the_merge_round_trip() {
 		let config = config_from(["test", "--listen-quic-lb-id", "ab", "--listen-quic-lb-nonce", "9"]);
@@ -726,7 +726,7 @@ load_balancer = { id = "cd", nonce = 4 }
 	}
 
 	/// Programmatic configuration keeps the QUIC-LB id and nonce paired.
-	#[cfg(feature = "noq")]
+	#[cfg(feature = "quic")]
 	#[test]
 	fn load_balancer_is_a_single_typed_value() {
 		assert_eq!(Config::default().load_balancer(), None);

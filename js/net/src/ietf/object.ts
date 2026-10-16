@@ -262,6 +262,14 @@ export class ObjectIdGap extends Error {
 	}
 }
 
+/** A draft-14 END_OF_TRACK carried properties, which a track-level end has nowhere to keep. */
+export class EndOfTrackProperties extends Error {
+	constructor() {
+		super("END_OF_TRACK properties are unsupported");
+		this.name = "EndOfTrackProperties";
+	}
+}
+
 /** A moq-transport object inside a group stream. */
 export class Frame {
 	/** The object payload, or `undefined` for an end of group or end of track marker. */
@@ -335,11 +343,13 @@ export class Frame {
 		const delta = c.u53();
 
 		let timestamp: Timestamp | undefined;
+		let hasProperties = false;
 		if (flags.hasExtensions) {
 			const extensionsLength = c.u53();
 			if (extensionsLength > MAX_OBJECT_EXTENSIONS) {
 				throw new StreamError(StreamCode.MalformedTrack, { message: "object extensions exceed 64 KiB" });
 			}
+			hasProperties = extensionsLength !== 0;
 			// A track that declared no timescale is untimed, so its objects stay untimed even
 			// if one carries a Timestamp: there are no units to read it in.
 			if (timescale !== undefined) {
@@ -358,9 +368,14 @@ export class Frame {
 		}
 
 		const status = c.u53();
+		// Only draft 14 lets a status object carry properties.
+		if (status !== 0 && hasProperties && asIetf(c.version) !== Version.DRAFT_14) {
+			throw new ProtocolViolation(`status object ${status} carries properties`);
+		}
 
 		// Defined on every implemented draft, whether or not the header marks the group's end.
 		if (status === END_OF_TRACK) {
+			if (hasProperties) throw new EndOfTrackProperties();
 			const frame = new Frame({ endOfTrack: true });
 			frame.idDelta = delta;
 			return frame;

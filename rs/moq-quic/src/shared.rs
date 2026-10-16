@@ -45,10 +45,21 @@ impl EndpointEvent {
     pub fn is_drained(&self) -> bool {
         self.0 == EndpointEventInner::Drained
     }
+
+    /// Determine whether the connection has stopped being active
+    ///
+    /// Emitted once per connection, before [`Self::is_drained`]'s event: when the peer's close
+    /// arrives, or at the drain if it never does. Past it the peer has our close or never will,
+    /// so a shutdown can stop waiting without sitting out the closing period.
+    pub fn is_draining(&self) -> bool {
+        self.0 == EndpointEventInner::Draining
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum EndpointEventInner {
+    /// The connection has stopped being active; see [`EndpointEvent::is_draining`]
+    Draining,
     /// The connection has been drained
     Drained,
     /// The reset token and/or address eligible for generating resets has been updated

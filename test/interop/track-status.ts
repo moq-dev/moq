@@ -1,5 +1,6 @@
 // Answer Rust-encoded TRACK_STATUS requests with the JS publisher, returning each response.
 import assert from "node:assert/strict";
+import { Milli } from "@moq/clock";
 import { Producer as GroupProducer } from "../../js/net/src/group.ts";
 import { NativeSession } from "../../js/net/src/ietf/adapter.ts";
 import { Publisher } from "../../js/net/src/ietf/publisher.ts";
@@ -9,7 +10,7 @@ import { createMockTransportPair } from "../../js/net/src/mock.ts";
 import { Producer as OriginProducer } from "../../js/net/src/origin.ts";
 import * as Path from "../../js/net/src/path.ts";
 import { Stream } from "../../js/net/src/stream.ts";
-import { Milli, Timescale, Timestamp } from "../../js/net/src/time.ts";
+import { Timescale, Timestamp } from "../../js/net/src/time.ts";
 
 // Stdout is the response-byte channel back to Rust.
 console.debug = console.error;
