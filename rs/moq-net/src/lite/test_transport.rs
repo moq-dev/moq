@@ -40,6 +40,8 @@ impl crate::transport::Error for SinkError {
 #[derive(Clone, Default)]
 pub struct Log {
 	pub datagrams: Arc<Mutex<Vec<bytes::Bytes>>>,
+	/// The send group and order each datagram was sent with, beside [`Self::datagrams`].
+	datagram_ranks: Arc<Mutex<Vec<(Option<usize>, i64)>>>,
 	pub writes: Arc<Mutex<Vec<u8>>>,
 	pub resets: Arc<Mutex<Vec<u32>>>,
 	/// Every write, FIN and reset on every send stream, in call order. See [`Self::trail`].
@@ -114,6 +116,19 @@ impl Log {
 	/// order. [`Self::priorities`] keeps those of the streams outside every group.
 	pub fn orders(&self) -> Vec<(usize, i64)> {
 		self.orders.lock().unwrap().clone()
+	}
+
+	/// The send group and order of every datagram, as (group, order) in call order.
+	pub fn datagram_ranks(&self) -> Vec<(Option<usize>, i64)> {
+		self.datagram_ranks.lock().unwrap().clone()
+	}
+
+	fn record_datagram(&self, payload: bytes::Bytes, group: Option<&SinkGroup>, order: i64) {
+		self.datagrams.lock().unwrap().push(payload);
+		self.datagram_ranks
+			.lock()
+			.unwrap()
+			.push((group.map(|group| group.id), order));
 	}
 
 	/// The session-level closes, as (code, reason). A list rather than a last-value so
@@ -412,8 +427,14 @@ impl poll::Session for DeadStreamSession {
 		None
 	}
 
-	fn poll_send_datagram(&mut self, _cx: &mut Context<'_>, _payload: &[u8]) -> Poll<Result<(), Self::Error>> {
-		Poll::Ready(Ok(()))
+	fn send_datagram(
+		&mut self,
+		payload: bytes::Bytes,
+		group: Option<&SinkGroup>,
+		order: i64,
+	) -> Result<(), Self::Error> {
+		self.log.record_datagram(payload, group, order);
+		Ok(())
 	}
 
 	fn poll_recv_datagram(&mut self, _cx: &mut Context<'_>) -> Poll<Result<bytes::Bytes, Self::Error>> {
@@ -464,6 +485,8 @@ pub struct SinkSession {
 	unacked_fin: bool,
 	/// Set by [`Self::with_groups`].
 	groups: bool,
+	/// Set by [`Self::with_datagrams`]; zero disables datagrams.
+	datagram_size: usize,
 	/// The ALPN to report, for a test that needs a specific negotiated version rather
 	/// than the SETUP-negotiated fallback an absent one selects.
 	protocol: Option<&'static str>,
@@ -491,6 +514,12 @@ impl SinkSession {
 	/// Open send groups, as native QUIC does, recording them in the log.
 	pub fn with_groups(mut self) -> Self {
 		self.groups = true;
+		self
+	}
+
+	/// Accept datagrams up to `max_size` bytes, recording them in the log.
+	pub fn with_datagrams(mut self, max_size: usize) -> Self {
+		self.datagram_size = max_size;
 		self
 	}
 
@@ -612,8 +641,14 @@ impl poll::Session for SinkSession {
 		self.groups.then(|| SinkGroup::open(self.log.clone(), priority))
 	}
 
-	fn poll_send_datagram(&mut self, _cx: &mut Context<'_>, _payload: &[u8]) -> Poll<Result<(), Self::Error>> {
-		Poll::Ready(Ok(()))
+	fn send_datagram(
+		&mut self,
+		payload: bytes::Bytes,
+		group: Option<&SinkGroup>,
+		order: i64,
+	) -> Result<(), Self::Error> {
+		self.log.record_datagram(payload, group, order);
+		Ok(())
 	}
 
 	fn poll_recv_datagram(&mut self, _cx: &mut Context<'_>) -> Poll<Result<bytes::Bytes, Self::Error>> {
@@ -621,7 +656,7 @@ impl poll::Session for SinkSession {
 	}
 
 	fn max_datagram_size(&self) -> usize {
-		0
+		self.datagram_size
 	}
 
 	fn binding(&self) -> crate::transport::Binding {
@@ -937,13 +972,14 @@ impl poll::Session for ScriptedSession {
 		None
 	}
 
-	fn poll_send_datagram(&mut self, _cx: &mut Context<'_>, payload: &[u8]) -> Poll<Result<(), Self::Error>> {
-		self.log
-			.datagrams
-			.lock()
-			.unwrap()
-			.push(bytes::Bytes::copy_from_slice(payload));
-		Poll::Ready(Ok(()))
+	fn send_datagram(
+		&mut self,
+		payload: bytes::Bytes,
+		group: Option<&SinkGroup>,
+		order: i64,
+	) -> Result<(), Self::Error> {
+		self.log.record_datagram(payload, group, order);
+		Ok(())
 	}
 
 	fn poll_recv_datagram(&mut self, _cx: &mut Context<'_>) -> Poll<Result<bytes::Bytes, Self::Error>> {

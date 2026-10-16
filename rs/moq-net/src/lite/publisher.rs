@@ -3179,6 +3179,8 @@ struct Opens {
 impl<S: crate::transport::poll::Session> Subscription<S> {
 	/// Send one datagram best-effort over a QUIC datagram (lite-05 §6.4).
 	///
+	/// It goes in the subscription's send group, ranked like a stream carrying its group, so
+	/// it merges into the subscription's group order and wins a tie with that group's stream.
 	/// The datagram is dropped (there is no group fallback) if the encoded body doesn't fit the
 	/// transport's datagram limit or the send fails (congestion / no capacity right now).
 	/// Returns whether it was handed to the transport.
@@ -3213,7 +3215,8 @@ impl<S: crate::transport::poll::Session> Subscription<S> {
 			return false;
 		}
 
-		let _ = self.session.send_datagram(&body);
+		let order = crate::priority::in_group(datagram.sequence, 0, self.steer_seen.order);
+		let _ = self.session.send_datagram(body, self.group.as_ref(), order);
 		true
 	}
 
@@ -4580,6 +4583,38 @@ mod serve_group_test {
 		let mut flipped = log.orders()[2..].to_vec();
 		flipped.sort();
 		assert_eq!(flipped, [(0, 1), (1, -1)], "older groups first");
+	}
+
+	/// A datagram goes in its subscription's send group, ranked like the stream carrying
+	/// its group from the start, so the transport merges it into the group order.
+	#[moq_net_sim::test]
+	async fn datagrams_rank_within_their_subscription() {
+		let mut track = track::Producer::new(
+			Arc::new(broadcast::Info::default()),
+			"test",
+			crate::track::Info::timed(),
+		);
+		let subscriber = track.subscribe(track::Subscription::default().with_max_delay(Duration::from_secs(3600)));
+		let mut session = SinkSession::new(Log::default())
+			.with_groups()
+			.with_datagrams(1200)
+			.with_unacked_fin();
+		let log = session.log.clone();
+		let (mut run, mut writer, _) = lite_run(Version::Lite06, session.clone(), subscriber);
+		run.ctx.group = crate::transport::poll::Session::send_group(&mut session, 3);
+
+		write_group(&mut track, 0, 0);
+		let sequence = track
+			.append_datagram(Timestamp::from_millis(1).unwrap(), b"d".as_slice())
+			.unwrap();
+		{
+			let mut poll = std::pin::pin!(kio::wait(|waiter| run.poll(&mut writer, waiter)));
+			assert!(futures::poll!(poll.as_mut()).is_pending());
+		}
+		let order = crate::priority::in_group(sequence, 0, Order::Descending);
+		assert_eq!(log.datagram_ranks(), [(Some(0), order)]);
+		assert_eq!(log.orders(), [(0, 1)], "the stream for group 0 ranks below");
+		assert!(order > 1);
 	}
 
 	/// A group with more frames ready than one poll's budget drains over several polls,

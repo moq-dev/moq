@@ -254,6 +254,7 @@ impl<K: Copy, D> Schedule<K, D> {
     }
 
     /// Whether nothing is queued.
+    #[cfg(test)]
     pub(super) fn is_empty(&self) -> bool {
         self.ungrouped.is_empty() && self.backlogged == 0
     }

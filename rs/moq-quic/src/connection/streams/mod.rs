@@ -423,7 +423,8 @@ impl<'a> SendStream<'a> {
 /// A send group shares bytes with the other groups of its domain: a higher priority group
 /// preempts every lower one, and groups of equal priority get an equal share of bytes no
 /// matter how many streams each has queued. Domains share bytes equally whatever their
-/// groups' priorities. Streams outside any group go before all of it.
+/// groups' priorities. Streams outside any group go before all of it. A group's datagrams,
+/// from [`Datagrams::send`](crate::Datagrams::send), share its bytes in the same order.
 pub struct SendGroups<'a> {
     pub(super) state: &'a mut StreamsState,
 }

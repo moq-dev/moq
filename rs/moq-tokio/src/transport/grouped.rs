@@ -15,6 +15,17 @@ pub trait Grouped: web_transport_trait::Session<SendStream: GroupedSend> {
 		let _ = priority;
 		None
 	}
+
+	/// Send a datagram in `group` at `order`; a backend without groups ignores both.
+	fn send_datagram(
+		&self,
+		payload: bytes::Bytes,
+		group: Option<&<Self::SendStream as GroupedSend>::Group>,
+		order: i64,
+	) -> Result<(), Self::Error> {
+		let _ = (group, order);
+		web_transport_trait::Session::send_datagram(self, payload)
+	}
 }
 
 /// A backend send stream that may join its [`Grouped`] session's send groups.
