@@ -2846,8 +2846,9 @@ where
 			new_groups.subscribed(value, largest_group(&track, largest));
 		}
 		let dynamic_groups = track.info().dynamic_groups && super::subscribe::has_new_group_request(self.version);
-		// The aggregate request last read, so only a change is considered.
+		// The aggregate request last read, and the Largest Group it was last weighed at.
 		let mut asked = None;
+		let mut weighed = None;
 		// REQUEST_UPDATEs sent and not yet answered. Drafts 14-16 answer on the control
 		// stream by the update's own Request ID, which reaches no subscription, so only
 		// later drafts count them.
@@ -2882,7 +2883,7 @@ where
 					// whose head never arrives cannot hold every later group back.
 					if let Some(largest) = resuming
 						&& (poll_headed(&fill, waiter).is_ready()
-							|| largest.is_some_and(|largest| track.poll_past(largest.group, waiter).is_ready()))
+							|| largest.is_some_and(|largest| track.poll_past(Some(largest.group), waiter).is_ready()))
 					{
 						track.set_live(largest);
 						resuming = None;
@@ -2901,12 +2902,27 @@ where
 					// One REQUEST_UPDATE in flight at a time, which any MAX_REQUEST_UPDATES
 					// allows. Requests arriving meanwhile coalesce into the aggregate, read
 					// once its answer lands. Polled after the answers are read for that reason.
-					if dynamic_groups
-						&& unanswered.load(Ordering::Relaxed) == 0
-						&& let Poll::Ready(Ok(Some(request))) = track.poll_new_group(&mut asked, waiter)
-						&& new_groups.forward(request.value, largest_group(&track, largest))
-					{
-						return Poll::Ready(End::NewGroup(request.value));
+					if dynamic_groups && unanswered.load(Ordering::Relaxed) == 0 {
+						let mut changed = false;
+						while let Poll::Ready(Ok(_)) = track.poll_new_group(&mut asked, waiter) {
+							changed = true;
+						}
+						// A new group expires what was sent, so a request it does not answer
+						// is weighed again; one it answers is about to be cleared.
+						while let Some(request) = asked {
+							let now = largest_group(&track, largest);
+							let unmet = now.is_none_or(|now| request.first > now);
+							if changed || (unmet && now > weighed) {
+								changed = false;
+								weighed = now;
+								if new_groups.forward(request.value, now) {
+									return Poll::Ready(End::NewGroup(request.value));
+								}
+							}
+							if !unmet || track.poll_past(now, waiter).is_pending() {
+								break;
+							}
+						}
 					}
 					Poll::Pending
 				})
@@ -3398,7 +3414,7 @@ where
 
 		match type_id {
 			ietf::FetchOk::ID => {
-				let _msg: ietf::FetchOk = self.decode_response(&mut data)?;
+				let _msg = ietf::FetchOk::decode_msg(&mut data, self.version)?;
 				Ok(true)
 			}
 			ietf::FetchError::ID if self.version == Version::Draft14 => {
@@ -3413,19 +3429,6 @@ where
 		}
 	}
 
-	/// Decode an answer to one of our requests. A fault the draft makes session-wide, such
-	/// as a DYNAMIC_GROUPS above 1, closes the session rather than failing only the request.
-	fn decode_response<M: ietf::Message>(&self, data: &mut Decoder<'_>) -> Result<M, Error> {
-		M::decode_msg(data, self.version).map_err(|err| {
-			if let DecodeError::Session(code) = &err {
-				self.session
-					.clone()
-					.close(super::error::to_session_code(code), &err.to_string());
-			}
-			Error::Decode(err)
-		})
-	}
-
 	async fn read_subscribe_response(&self, stream: &mut Stream<S, Version>) -> Result<Option<Accepted>, Error> {
 		// Read type_id + size + body from the stream
 		let type_id = stream.reader.varint().await?;
@@ -3434,7 +3437,7 @@ where
 
 		match type_id {
 			ietf::SubscribeOk::ID => {
-				let msg: ietf::SubscribeOk = self.decode_response(&mut data)?;
+				let msg = ietf::SubscribeOk::decode_msg(&mut data, self.version)?;
 				tracing::debug!(message = ?msg, "received subscribe ok");
 				Ok(Some(Accepted {
 					alias: msg.track_alias,
@@ -3587,7 +3590,7 @@ where
 
 		let code = match type_id {
 			id if id == ietf::TrackStatusOk::id(self.version) => {
-				return self.decode_response(&mut data);
+				return Ok(ietf::TrackStatusOk::decode_msg(&mut data, self.version)?);
 			}
 			ietf::TRACK_STATUS_ERROR_14 if self.version == Version::Draft14 => {
 				ietf::SubscribeError::decode_msg(&mut data, self.version)?.error_code
@@ -4792,7 +4795,7 @@ where
 		let mut data = body.decoder(self.version);
 
 		match type_id {
-			ietf::FetchOk::ID => self.decode_response(&mut data),
+			ietf::FetchOk::ID => Ok(ietf::FetchOk::decode_msg(&mut data, self.version)?),
 			ietf::FetchError::ID if self.version == Version::Draft14 => {
 				let msg = ietf::FetchError::decode_msg(&mut data, self.version)?;
 				Err(request::from_code(msg.error_code, request::Kind::Fetch, self.version))
@@ -14497,39 +14500,46 @@ mod new_group_tests {
 		relay.serving.abort();
 	}
 
-	/// A DYNAMIC_GROUPS value above 1 is a PROTOCOL_VIOLATION (draft-22 section 10.6), which
-	/// closes the session rather than failing only the track.
+	/// A held request a new group does not answer goes upstream again: the group expired
+	/// the one sent, and the subscriber still waits.
 	#[moq_net_sim::test]
-	async fn dynamic_groups_above_one_closes_the_session() {
-		use crate::{coding::Encoder, ietf::Message as _, transport::poll::Session as _};
-
+	async fn a_request_past_a_new_group_is_sent_again() {
 		let (mut relay, _first) = relay(None).await;
 		let (mut stream, _) = relay.accept().await;
-		let mut body = Vec::new();
-		ietf::SubscribeOk {
-			request_id: None,
-			track_alias: 7,
-			largest: None,
-			properties: Default::default(),
-		}
-		.encode_msg(&mut Encoder::new(&mut body, VERSION.into()), VERSION)
-		.unwrap();
-		// The properties block ends the message: DYNAMIC_GROUPS (0x30) = 2.
-		body.extend([0x30, 0x02]);
-		let mut frame = u16::try_from(body.len()).unwrap().to_be_bytes().to_vec();
-		frame.extend(body);
-		stream.writer.varint(ietf::SubscribeOk::ID).await.unwrap();
-		stream.writer.write_all(&mut bytes::Bytes::from(frame)).await.unwrap();
+		accept(&mut stream, true, 5).await;
 
-		let closed = std::future::poll_fn(|cx| relay.peer.poll_closed(cx));
-		let err = moq_net_sim::timeout(Duration::from_secs(1), closed)
-			.await
-			.expect("the session stayed open");
-		let violation = super::super::error::to_session_code(&SessionError::ProtocolViolation);
-		assert!(
-			matches!(err, memory::Error::Session { code, .. } if code == violation),
-			"{err:?}"
-		);
+		let _a = subscribe(&relay.track, Some(9));
+		assert_eq!(update(&mut stream).await, Some(9));
+		answer(&mut stream).await;
+		quiet(&mut stream).await;
+
+		relay.land(6);
+		assert_eq!(update(&mut stream).await, Some(9));
+		answer(&mut stream).await;
+
+		// A group answering it ends the request.
+		relay.land(9);
+		quiet(&mut stream).await;
+		relay.serving.abort();
+	}
+
+	/// A 0 held at Largest Group 5 is answered by group 6, so that group asks nothing more,
+	/// even before the subscriber reads it and lets go of the request.
+	#[moq_net_sim::test]
+	async fn the_group_answering_a_zero_asks_nothing_more() {
+		let (mut relay, _first) = relay(None).await;
+		let (mut stream, _) = relay.accept().await;
+		accept(&mut stream, true, 5).await;
+
+		let _a = relay.track.subscribe(track::Subscription {
+			new_group: Some(crate::model::NewGroup::new(0, Some(5))),
+			..Default::default()
+		});
+		assert_eq!(update(&mut stream).await, Some(0));
+		answer(&mut stream).await;
+
+		relay.land(6);
+		quiet(&mut stream).await;
 		relay.serving.abort();
 	}
 
