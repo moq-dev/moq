@@ -678,7 +678,7 @@ impl crate::transport::Error for Error {
 	fn close_kind(&self) -> crate::transport::CloseKind {
 		match self {
 			Self::IdleTimeout => crate::transport::CloseKind::IdleTimeout,
-			Self::Closed => crate::transport::CloseKind::Closed,
+			// Closed also ends model handles and virtual streams, not just connections.
 			_ => crate::transport::CloseKind::Transport,
 		}
 	}
