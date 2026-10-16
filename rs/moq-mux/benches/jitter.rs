@@ -1,6 +1,5 @@
 //! The jitter buffer's clock steering swept over track count and how many floors the rate
 //! window holds.
-use std::task::Poll;
 use std::time::Duration;
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};

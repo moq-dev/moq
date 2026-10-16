@@ -189,10 +189,6 @@ struct Unit {
 	pid: u16,
 	/// The coarse deadline used by release windows and unpadded admission.
 	due: u128,
-	/// The due slot of its last frame. A PES that packs several is pushed once that frame is
-	/// muxed, so its window runs from there, as one frame's runs from when it is pushed: every
-	/// slot it may ride is laid out after it is queued, whenever the caller lays them.
-	settled: u128,
 	timing: Timing,
 	/// The slot after the unit pushed before it, which it may go out from even without a
 	/// window: nothing pushed later can be due sooner.
@@ -712,7 +708,6 @@ impl Schedule {
 		self.units.push_back(Unit {
 			pid,
 			due,
-			settled: slot(last),
 			timing,
 			start,
 			packets,
@@ -751,14 +746,14 @@ impl Schedule {
 		self.ended = false;
 	}
 
-	/// The first slot `unit` may go out in: [`ahead`] of its last frame's due slot, and never
-	/// before the slot after the unit pushed ahead of it needs.
+	/// The first slot `unit` may go out in: [`ahead`] of its due slot, and never before the
+	/// slot after the unit pushed ahead of it needs. A packed PES is due by its first frame.
 	fn release(&self, unit: &Unit) -> u128 {
 		if unit.late {
 			return 0;
 		}
 		let ahead = ahead(self.buffers.get(&unit.pid), self.window);
-		unit.settled.saturating_sub(ahead).min(unit.start)
+		unit.due.saturating_sub(ahead).min(unit.start)
 	}
 
 	/// The slot [`Self::next`] lays out next, with `known` as it would be given.
@@ -2493,5 +2488,42 @@ mod tests {
 			"the next PES starts at {}",
 			starts[1]
 		);
+	}
+
+	/// A packed PES must be whole by its first frame's decode time, so its send-ahead runs
+	/// from that frame's due slot, not its last's: here the PES needs over two slots at Rx.
+	#[test]
+	fn a_packed_pes_goes_out_ahead_of_its_first_frame() {
+		let mut schedule = Schedule::new(Duration::from_secs(1));
+		schedule.set_rate(Some(10_000_000));
+		schedule.set_buffer(
+			1,
+			Buffer {
+				rate: 2_000_000,
+				leak: None,
+				size: Some(12_896),
+				transport: 512,
+				reach: Duration::from_nanos(12_896 * 8 * 1_000_000_000 / 2_000_000),
+			},
+		);
+		schedule.set_buffer(2, VIDEO);
+		// Video pushed ahead of it starts the PES no earlier than its own due slot.
+		schedule.push(2, timing(3_160), unit(2, 2), true).unwrap();
+		let frames = (0..5).map(|i| (ms(3_200 + 32 * i), 2_560)).collect();
+		schedule
+			.push_frames(
+				1,
+				Timing {
+					by: ms(3_199),
+					decode: ms(3_200),
+				},
+				audio(12_800),
+				false,
+				frames,
+			)
+			.unwrap();
+		while schedule.queued() {
+			schedule.next(Some(u128::MAX)).unwrap();
+		}
 	}
 }
