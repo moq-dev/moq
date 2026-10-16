@@ -270,7 +270,8 @@ impl Future for ConnectionDriver {
             Ok(keep_going) => keep_going,
             // No route to the peer, so the handshake can never finish: fail it now rather than at
             // the handshake timeout, which lets a dial race move on to the next address. The
-            // cause reaches every waiter, so the driver ends cleanly instead of logging it again.
+            // driver keeps running until the closed connection drains, so the endpoint forgets it
+            // even while the application still holds a handle.
             Err(e) if moq_sock::udp::is_unreachable_err(&e) => {
                 if !conn.inner.is_closed() {
                     // Closed, so dropping the last handle cannot overwrite the cause.
@@ -279,7 +280,7 @@ impl Future for ConnectionDriver {
                         TransportError::new(TransportErrorCode::NO_VIABLE_PATH, e.to_string());
                     conn.terminate(cause.into(), &self.conn.shared);
                 }
-                return Poll::Ready(Ok(()));
+                true
             }
             Err(e) => {
                 // Transmit failed, so close the connection and clean state before returning the error.

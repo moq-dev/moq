@@ -2001,6 +2001,51 @@ async fn unreachable_sends_are_loss_once_established() {
     }
 }
 
+/// A handshake that fails on an unreachable peer still drains out of its endpoint while the
+/// application holds the connection, here a server's 0.5-RTT handle.
+#[tokio::test(start_paused = true)]
+async fn unreachable_handshake_drains_while_held() {
+    let _guard = subscribe();
+
+    let factory = EndpointFactory::new();
+    let key = PrivateKeyDer::Pkcs8(factory.cert.signing_key.serialize_der().into());
+    let server_config = crate::quic::driver::ServerConfig::with_single_cert(
+        vec![factory.cert.cert.der().clone()],
+        key,
+    )
+    .unwrap();
+    let outage = Arc::new(Outage::default());
+    outage.active.store(true, Ordering::SeqCst);
+    let server = Endpoint::new_with_abstract_socket(
+        EndpointConfig::default(),
+        Some(server_config),
+        Box::new(UnreachableSocket {
+            inner: localhost_socket(),
+            outage: outage.clone(),
+        }),
+    )
+    .unwrap();
+    let client = factory.endpoint();
+
+    let connecting = client
+        .connect(server.local_addr().unwrap(), "localhost")
+        .unwrap();
+    let incoming = server.accept().await.unwrap();
+    let conn = incoming.accept().unwrap().into_0rtt().unwrap();
+    // Stop the client retrying, which would only start new handshakes.
+    client.close(0u32.into(), b"done");
+    drop(connecting);
+
+    let crate::quic::driver::ConnectionError::TransportError(err) = conn.closed().await else {
+        panic!("expected a transport error");
+    };
+    assert_eq!(err.code, moq_quic::TransportErrorCode::NO_VIABLE_PATH);
+    timeout(Duration::from_secs(60), server.wait_idle())
+        .await
+        .expect("the failed connection never drained out of the endpoint");
+    drop(conn);
+}
+
 /// Whether [`UnreachableSocket`] is refusing sends, and a signal once it has refused one.
 #[derive(Debug, Default)]
 struct Outage {
