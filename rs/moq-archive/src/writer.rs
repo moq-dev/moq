@@ -1022,15 +1022,25 @@ fn malformed(track: &str, sequence: u64, err: impl std::fmt::Display) -> Error {
 
 /// The content time the newest committed record reached, in `timescale`, or `None` when nothing
 /// was recorded or the track is untimed.
+///
+/// Fails when any retained record's timing disagrees with its track's, so a resume never extends a
+/// mixed timeline.
 fn recorded_end(resume: &Resume, timescale: Option<Timescale>) -> Result<Option<u64>> {
-	let (Some(record), Some(timescale)) = (resume.checkpoint.records.last(), timescale) else {
+	let records = &resume.checkpoint.records;
+	if let Some(record) = records
+		.iter()
+		.find(|record| record.pts.is_some() != timescale.is_some() || record.duration.is_some() != timescale.is_some())
+	{
+		return Err(Error::Timeline(format!(
+			"record {} timing does not match its track",
+			record.sequence
+		)));
+	}
+	let (Some(record), Some(timescale)) = (records.last(), timescale) else {
 		return Ok(None);
 	};
 	let (Some(pts), Some(duration)) = (record.pts, record.duration) else {
-		return Err(Error::Timeline(format!(
-			"record {} is untimed on a timed track",
-			record.sequence
-		)));
+		unreachable!("checked above");
 	};
 	let millis = pts.checked_add(duration).ok_or(Error::Overflow)?;
 	let end = Timestamp::new(millis, TIMESCALE).map_err(|_| Error::Id(millis))?;
@@ -1324,6 +1334,34 @@ mod tests {
 		assert_eq!(sequences(&records), (0..4).collect::<Vec<_>>());
 		assert_eq!(groups(&records), (0..4).map(|s| (s, s)).collect::<Vec<_>>());
 		check_objects(&store, "data", &records).await;
+	}
+
+	/// A resume refuses a retained record whose timing disagrees with its track's, at any age.
+	#[test]
+	fn a_resume_refuses_mixed_timing() {
+		let resume = |records: Vec<Record>| Resume {
+			checkpoint: moq_json::window::Checkpoint {
+				range: 0..records.len() as u64,
+				records,
+			},
+			sequence: 0,
+			checkpoints: VecDeque::new(),
+		};
+		let timed = Record::new(1, 1_000, 1_000, Position::group(1), Position::group(2));
+		let untimed = Record::untimed(0, Position::group(0), Position::group(1));
+
+		let mixed = resume(vec![untimed.clone(), timed.clone()]);
+		assert!(matches!(
+			recorded_end(&mixed, Some(Timescale::MILLI)),
+			Err(Error::Timeline(_))
+		));
+		assert!(matches!(recorded_end(&mixed, None), Err(Error::Timeline(_))));
+
+		assert_eq!(recorded_end(&resume(vec![untimed]), None).unwrap(), None);
+		assert_eq!(
+			recorded_end(&resume(vec![timed]), Some(Timescale::MILLI)).unwrap(),
+			Some(2_000)
+		);
 	}
 
 	/// A DVR measures retention in content time, which an untimed track has none of.
