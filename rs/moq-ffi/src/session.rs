@@ -628,6 +628,7 @@ pub struct MoqConnectionStats {
 	/// The protocol version the connection negotiated, spelled like
 	/// [`MoqClientConfig::versions`]. Sampled with the rest, so a reconnect can't pair one
 	/// connection's version with another's numbers.
+	#[uniffi(default = None)]
 	pub version: Option<String>,
 }
 

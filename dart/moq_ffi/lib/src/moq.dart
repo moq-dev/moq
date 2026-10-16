@@ -2769,7 +2769,7 @@ class MoqConnectionStats {
     this.packetsSent,
     this.packetsReceived,
     this.packetsLost,
-    this.version,
+    this.version = null,
   });
 }
 
