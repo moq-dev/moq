@@ -7,8 +7,18 @@ pub(crate) fn rng() -> rand::rngs::ThreadRng {
     rand::rng()
 }
 
+/// A generator seeded straight from the OS, not the thread rng, so forked processes diverge
+///
+/// Panics if the OS random source fails.
+#[cfg(not(test))]
+pub(crate) fn std_rng() -> rand::rngs::StdRng {
+    use rand::SeedableRng;
+    rand::rngs::StdRng::try_from_rng(&mut rand::rngs::SysRng)
+        .expect("failed to seed random number generator from system")
+}
+
 #[cfg(test)]
-pub(crate) use seeded::{reseed, rng};
+pub(crate) use seeded::{reseed, rng, std_rng};
 
 #[cfg(test)]
 mod seeded {
@@ -29,6 +39,10 @@ mod seeded {
 
     pub(crate) fn rng() -> Thread {
         Thread
+    }
+
+    pub(crate) fn std_rng() -> StdRng {
+        StdRng::from_rng(&mut Thread)
     }
 
     /// A handle to this thread's seeded generator

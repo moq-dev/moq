@@ -56,7 +56,12 @@ fn priority_on_a_clean_path() {
             max_streams,
         },
     );
-    check(case(link(false), limits), |outcome| {
+    // Reads stamp arrival times, so a read every step catches an inversion within one interval
+    let cases = case(link(false), limits).prop_map(|case| Case {
+        read_interval: Duration::ZERO,
+        ..case
+    });
+    check(cases, |outcome| {
         prop_assert_eq!(outcome.prioritized, [true; 2]);
         Ok(())
     });

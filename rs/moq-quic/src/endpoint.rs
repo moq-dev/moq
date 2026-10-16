@@ -71,7 +71,7 @@ impl Endpoint {
         Self {
             rng: match config.rng_seed {
                 Some(seed) => StdRng::from_seed(seed),
-                None => StdRng::from_rng(&mut crate::entropy::rng()),
+                None => crate::entropy::std_rng(),
             },
             index: ConnectionIndex::default(),
             connections: Slab::new(),
