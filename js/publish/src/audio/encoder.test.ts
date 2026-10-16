@@ -1,8 +1,8 @@
 import { describe, expect, mock, spyOn, test } from "bun:test";
+import { Micro, Milli } from "@moq/clock";
 import * as Catalog from "@moq/hang/catalog";
 import * as Json from "@moq/json";
 import * as Moq from "@moq/net";
-import { Time } from "@moq/net";
 import { Signal } from "@moq/signals";
 import { Broadcast } from "../broadcast";
 import { Baseline } from "../jitter";
@@ -24,22 +24,22 @@ describe("resolve", () => {
 
 	test("defaults Opus to 20ms", () => {
 		const resolved = resolve(captured, "opus");
-		expect(resolved.frameDuration).toBe(Time.Micro(20_000));
+		expect(resolved.frameDuration).toBe(Micro(20_000));
 		expect(Number(resolved.catalog.warmup)).toBe(80);
 		expect(resolved.catalog.jitter).toBeUndefined();
 	});
 
 	// The exact frame duration does not imply encoder flush lateness.
 	test("keeps a 2.5ms Opus frame exact without a catalog hint", () => {
-		const resolved = resolve(captured, { mime: "opus", frameDuration: Time.Milli(2.5) });
-		expect(resolved.frameDuration).toBe(Time.Micro(2_500));
+		const resolved = resolve(captured, { mime: "opus", frameDuration: Milli(2.5) });
+		expect(resolved.frameDuration).toBe(Micro(2_500));
 		expect(resolved.catalog.jitter).toBeUndefined();
 	});
 
 	test("carries every Opus frame duration", () => {
 		for (const millis of [2.5, 5, 10, 20, 40, 60]) {
-			const resolved = resolve(captured, { mime: "opus", frameDuration: Time.Milli(millis) });
-			expect(resolved.frameDuration).toBe(Time.Micro(millis * 1000));
+			const resolved = resolve(captured, { mime: "opus", frameDuration: Milli(millis) });
+			expect(resolved.frameDuration).toBe(Micro(millis * 1000));
 		}
 	});
 
@@ -47,7 +47,7 @@ describe("resolve", () => {
 	// been advertised and the failure lands on a subscriber rather than the caller.
 	test("rejects a duration Opus cannot encode", () => {
 		for (const millis of [2.5005, 15, 0, -20]) {
-			expect(() => resolve(captured, { mime: "opus", frameDuration: Time.Milli(millis) })).toThrow();
+			expect(() => resolve(captured, { mime: "opus", frameDuration: Milli(millis) })).toThrow();
 		}
 	});
 
@@ -258,7 +258,7 @@ function configured(): Promise<AudioEncoderConfig> {
 
 // An Encoder wired to a fake capture feed, recording each written frame as [timestamp, payload bytes]
 // and how many frames each group carries.
-async function setup(baseline = new Baseline(), codec?: Codec, groupDuration?: Time.Milli) {
+async function setup(baseline = new Baseline(), codec?: Codec, groupDuration?: Milli) {
 	const configuring = configured();
 
 	const track = new Moq.Track.Producer("audio").accept({ timescale: Moq.Time.Timescale.MILLI });
@@ -333,7 +333,7 @@ test("a demand gap marks where submitted audio ends and drops the chunks held ac
 	let index = 0;
 	const push = async (count: number) => {
 		for (let i = 0; i < count; i++, index++) {
-			await feed.push({ timestamp: Time.Micro(18_699.6 + index * 20_000), channels: [new Float32Array(960)] });
+			await feed.push({ timestamp: Micro(18_699.6 + index * 20_000), channels: [new Float32Array(960)] });
 		}
 		await feed.drain();
 	};
@@ -370,7 +370,7 @@ test("disabling with a subscriber attached marks where submitted audio ends", as
 	let index = 0;
 	const push = async (count: number) => {
 		for (let i = 0; i < count; i++, index++) {
-			await feed.push({ timestamp: Time.Micro(20_000 + index * 20_000), channels: [new Float32Array(960)] });
+			await feed.push({ timestamp: Micro(20_000 + index * 20_000), channels: [new Float32Array(960)] });
 		}
 		await feed.drain();
 	};
@@ -435,7 +435,7 @@ test("closing with a subscriber attached marks the end once before the track clo
 	const { encoder, track, feed, written } = env;
 
 	for (let i = 0; i < 4; i++) {
-		await feed.push({ timestamp: Time.Micro(20_000 + i * 20_000), channels: [new Float32Array(960)] });
+		await feed.push({ timestamp: Micro(20_000 + i * 20_000), channels: [new Float32Array(960)] });
 	}
 	await feed.drain(); // two written, two held
 
@@ -458,7 +458,7 @@ test("a push completing several frames keeps the encoder running", async () => {
 
 	// Two 20ms Opus frames per push.
 	for (let index = 0; index < 3; index++) {
-		await feed.push({ timestamp: Time.Micro(18_699.6 + index * 40_000), channels: [new Float32Array(1920)] });
+		await feed.push({ timestamp: Micro(18_699.6 + index * 40_000), channels: [new Float32Array(1920)] });
 	}
 	await feed.drain();
 
@@ -474,13 +474,13 @@ test("a push completing several frames keeps the encoder running", async () => {
 // so the first frame after it opens a fresh one.
 test("a group duration packs frames until the minimum and restarts after a break", async () => {
 	using _webcodecs = installFakeWebCodecs();
-	using env = await setup(new Baseline(), undefined, Time.Milli(100));
+	using env = await setup(new Baseline(), undefined, Milli(100));
 	const { enabled, feed, written, groups, appended, writes } = env;
 
 	let index = 0;
 	const push = async (count: number) => {
 		for (let i = 0; i < count; i++, index++) {
-			await feed.push({ timestamp: Time.Micro(20_000 + index * 20_000), channels: [new Float32Array(960)] });
+			await feed.push({ timestamp: Micro(20_000 + index * 20_000), channels: [new Float32Array(960)] });
 		}
 		await feed.drain();
 	};
@@ -522,12 +522,12 @@ test("default audio groups carry twenty milliseconds", async () => {
 	] as const) {
 		using env = await setup(
 			new Baseline(),
-			{ mime: "opus", frameDuration: Time.Milli(frameMs) },
-			groupMs === undefined ? undefined : Time.Milli(groupMs),
+			{ mime: "opus", frameDuration: Milli(frameMs) },
+			groupMs === undefined ? undefined : Milli(groupMs),
 		);
 		for (let index = 0; index < packets * 2 + LaggingAudioEncoder.LAG; index++) {
 			await env.feed.push({
-				timestamp: Time.Micro(20_000 + index * frameMs * 1000),
+				timestamp: Micro(20_000 + index * frameMs * 1000),
 				channels: [new Float32Array(frameMs * 48)],
 			});
 		}
@@ -585,7 +585,7 @@ test("a rendition trailing the broadcast's earliest advertises delay", async () 
 		// Captured 100ms ago, with a clock origin that keeps timestamps nonnegative.
 		const start = performance.now() * 1000 - 100_000;
 		for (let index = 0; index < 4; index++) {
-			await feed.push({ timestamp: Time.Micro(start + index * 20_000), channels: [new Float32Array(960)] });
+			await feed.push({ timestamp: Micro(start + index * 20_000), channels: [new Float32Array(960)] });
 		}
 		await feed.drain();
 
@@ -615,7 +615,7 @@ test("settles when the codec settings can't resolve", async () => {
 	};
 	const encoder = new Encoder("audio", {
 		capture: capture as never,
-		codec: { mime: "opus", frameDuration: Time.Milli(15) },
+		codec: { mime: "opus", frameDuration: Milli(15) },
 	});
 
 	try {
@@ -626,7 +626,7 @@ test("settles when the codec settings can't resolve", async () => {
 
 		// A valid duration resolves, and the config keeps it settled.
 		const ready = encoder.out.catalog.changed();
-		encoder.codec.set({ mime: "opus", frameDuration: Time.Milli(20) });
+		encoder.codec.set({ mime: "opus", frameDuration: Milli(20) });
 		await ready;
 		await settle();
 		expect(encoder.out.catalog.peek()).toBeDefined();
@@ -650,7 +650,7 @@ test("refuses the rendition while the fade is invalid", async () => {
 		},
 		blocked: new Signal(false),
 	};
-	const encoder = new Encoder("audio", { capture: capture as never, fade: Time.Milli(-1) });
+	const encoder = new Encoder("audio", { capture: capture as never, fade: -1 as Milli });
 
 	try {
 		await settle();
@@ -659,20 +659,20 @@ test("refuses the rendition while the fade is invalid", async () => {
 		expect(error).toHaveBeenCalled();
 
 		const ready = encoder.out.catalog.changed();
-		encoder.fade.set(Time.Milli(0));
+		encoder.fade.set(Milli(0));
 		await ready;
 		expect(encoder.out.catalog.peek()).toBeDefined();
 
-		encoder.fade.set(Time.Milli(Number.NaN));
+		encoder.fade.set(Number.NaN as Milli);
 		await settle();
 		expect(encoder.out.catalog.peek()).toBeUndefined();
 
-		encoder.fade.set(Time.Milli(0));
+		encoder.fade.set(Milli(0));
 		await settle();
 		expect(encoder.out.catalog.peek()).toBeDefined();
 
 		// An endless ramp would never finish a mute.
-		encoder.fade.set(Time.Milli(Number.POSITIVE_INFINITY));
+		encoder.fade.set(Number.POSITIVE_INFINITY as Milli);
 		await settle();
 		expect(encoder.out.catalog.peek()).toBeUndefined();
 	} finally {
@@ -741,7 +741,7 @@ test("audio failure stays local through demand changes and capture format re-arm
 	const push = async (first: number, channels: number) => {
 		for (let i = 0; i < 3; i++) {
 			await feed.push({
-				timestamp: Time.Micro((first + i) * 20_000),
+				timestamp: Micro((first + i) * 20_000),
 				channels: Array.from({ length: channels }, () => new Float32Array(960)),
 			});
 		}
@@ -906,7 +906,7 @@ test("Opus description is probed with the exact live config before advertising",
 	LaggingAudioEncoder.description = (config) => new TextEncoder().encode(JSON.stringify(config));
 	using env = await setup(new Baseline(), {
 		mime: "opus",
-		frameDuration: Time.Milli(2.5),
+		frameDuration: Milli(2.5),
 		complexity: 3,
 		packetlossperc: 7,
 		useinbandfec: true,

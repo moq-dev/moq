@@ -15,13 +15,15 @@
  *
  * @module
  */
+
+import { Milli } from "@moq/clock";
 import * as Catalog from "@moq/hang/catalog";
 import * as Moq from "@moq/net";
 import { format, arrivals as readArrivals } from "./capture.ts";
 import type { Arrival } from "./schema.ts";
 
 /** How far back the relay may serve a group. Long, so a late group is recorded rather than dropped. */
-const MAX_DELAY = Moq.Time.Milli(10_000);
+const MAX_DELAY = Milli(10_000);
 
 /** What the recorder has, until the driver drains it. */
 export type Recorder = {

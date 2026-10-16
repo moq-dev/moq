@@ -21,6 +21,7 @@
 		"release": "bun ../common/release.ts"
 	},
 	"dependencies": {
+		"@moq/clock": "workspace:^",
 		"@moq/pattern": "workspace:^",
 		"@moq/qmux": "^0.3.3",
 		"@moq/signals": "workspace:*",

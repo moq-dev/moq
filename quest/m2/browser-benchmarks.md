@@ -9,8 +9,7 @@ microbenchmarks do not exercise.
 ## Plan
 
 Decided 2026-10-12: keep this broader transport/media suite in m2. The
-[backend baseline](/quest/m2/rs2ts/spike.md) adds the focused browser harness
-in m2, and each backend adoption includes its own comparison before switching.
+[backend baseline](/test/wasm/README.md#backend-baseline) provides the focused browser harness, and each backend adoption includes its own comparison before switching.
 Reuse that work here; backend adoption does not wait for this broader suite.
 
 The JS microbenchmarks already exist: the seven Bun sweeps in `js/net/bench`
@@ -20,7 +19,7 @@ group frame decode, lite-07 against lite-06 varints, fragmented `Reader`
 reads, track retention, and varint coding. This
 quest is only the real-browser half: conclusions come from an identified
 browser version on a real WebTransport connection. `test/wasm` validates
-browser interop but measures nothing. Reuse the existing relay/browser harness
+browser interop and retains focused backend samples. Reuse the existing relay/browser harness
 pieces and add a focused recipe with artifacts under the benchmark conventions.
 
 - Measure the `js/net/src/stream.ts` path in the browser over WebTransport,

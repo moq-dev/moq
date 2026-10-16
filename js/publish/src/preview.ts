@@ -1,4 +1,4 @@
-import { Time } from "@moq/net";
+import { Micro, Milli, type Second } from "@moq/clock";
 import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
 import * as Video from "@moq/video";
 import type { Fanout } from "./fanout";
@@ -245,7 +245,7 @@ export class Transcode {
 		decoder.configure({ codec: config.codec, optimizeForLatency: true });
 
 		// Re-key on the same cadence as the real encoder so the decoder can start and recover.
-		let lastKeyframe: Time.Micro | undefined;
+		let lastKeyframe: Micro | undefined;
 
 		effect.run((inner) => {
 			const fanout = inner.get(this.in.source);
@@ -269,11 +269,11 @@ export class Transcode {
 
 						// Mirror Encoder.serve: default to a 2s GOP unless the rendition overrides it.
 						const settings = this.in.settings.peek();
-						const interval = settings?.keyframeInterval ?? Time.Milli.fromSecond(2 as Time.Second);
+						const interval = settings?.keyframeInterval ?? Milli.fromSecond(2 as Second);
 
-						const timestamp = frame.timestamp as Time.Micro;
+						const timestamp = frame.timestamp as Micro;
 						const keyFrame =
-							lastKeyframe === undefined || lastKeyframe + Time.Micro.fromMilli(interval) <= timestamp;
+							lastKeyframe === undefined || lastKeyframe + Micro.fromMilli(interval) <= timestamp;
 						if (keyFrame) lastKeyframe = timestamp;
 
 						encoder.encode(frame, { keyFrame });

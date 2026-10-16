@@ -1,7 +1,6 @@
-import type { Time } from "@moq/net";
+import { Micro, Milli, Nano, now } from "@moq/clock";
 import * as Moq from "@moq/net";
 import { Effect, type Getter, type GetterInit, getter, Once, Signal } from "@moq/signals";
-
 import type { Format } from "./format";
 import { Jitter } from "./jitter";
 import type { BufferedRanges, ReceivedFrame } from "./types";
@@ -18,7 +17,7 @@ export interface ConsumerProps {
 	 * `maxDelay`; both measure the same budget, one on the wire and one as frames are read.
 	 */
 	// Read-only: a Getter (e.g. another component's output) is accepted directly.
-	maxDelay?: GetterInit<Time.Milli>;
+	maxDelay?: GetterInit<Milli>;
 }
 
 /** One item of a {@link Consumer.next} read, in delivery order. Mirrors Rust's `container::Read`. */
@@ -34,23 +33,23 @@ export type Read =
 	 * per-frame duration that is the last frame's timestamp, one frame early. `duration` runs to
 	 * where the next item resumes, so it also covers any declared pause in between.
 	 */
-	| { kind: "gap"; timestamp: Time.Micro; duration: Time.Micro }
+	| { kind: "gap"; timestamp: Micro; duration: Micro }
 	/**
 	 * The publisher declared that its media stops at `end`: it paused, switched source, or finished.
 	 * Frames that follow from the same `group` are the stopped encoder's final packets (an audio
 	 * codec's drain), whose output at or past `end` is padding. The next group starts fresh.
 	 */
-	| { kind: "end"; group: number; end: Time.Micro };
+	| { kind: "end"; group: number; end: Micro };
 
 interface Group {
 	consumer: Moq.Group.Consumer;
 	frames: ReceivedFrame[]; // decode order
 	empty: boolean; // no wire frame was published; empty groups mean nothing
 	media: boolean; // a decodable (non-marker) frame was buffered
-	start?: Time.Micro; // First decoded timestamp
-	minMedia?: Time.Micro; // Lowest decodable timestamp
-	latest?: Time.Micro; // The timestamp of the latest known frame
-	end?: Time.Micro; // The furthest presentation point so far, i.e. max(timestamp + duration)
+	start?: Micro; // First decoded timestamp
+	minMedia?: Micro; // Lowest decodable timestamp
+	latest?: Micro; // The timestamp of the latest known frame
+	end?: Micro; // The furthest presentation point so far, i.e. max(timestamp + duration)
 	done?: boolean; // Set when #runGroup finishes reading all frames
 	truncated?: boolean; // The missing tail becomes a gap after the buffered frames are delivered.
 }
@@ -60,7 +59,7 @@ interface Group {
 // to microseconds independently, so a genuinely contiguous boundary can be off by ~1µs (seen on 48kHz
 // audio). A real missing group spans ~one group duration (orders of magnitude larger), so 1ms cleanly
 // separates rounding noise from an actual gap.
-const CONTIGUITY_TOLERANCE = Moq.Time.Micro.fromMilli(1 as Time.Milli);
+const CONTIGUITY_TOLERANCE = Micro.fromMilli(1 as Milli);
 
 /**
  * True when `nextStart` continues the timeline that ends at `end`: it lands at or before `end`,
@@ -71,8 +70,8 @@ const CONTIGUITY_TOLERANCE = Moq.Time.Micro.fromMilli(1 as Time.Milli);
  * timeline, a start past `end` beyond the tolerance is a gap. Group starts are validated
  * separately; an overlapping endpoint is not a rewind.
  */
-function ptsContiguous(end: Time.Micro | undefined, nextStart: Time.Micro | undefined): boolean {
-	return end !== undefined && nextStart !== undefined && nextStart <= Moq.Time.Micro.add(end, CONTIGUITY_TOLERANCE);
+function ptsContiguous(end: Micro | undefined, nextStart: Micro | undefined): boolean {
+	return end !== undefined && nextStart !== undefined && nextStart <= end + CONTIGUITY_TOLERANCE;
 }
 
 /**
@@ -92,13 +91,13 @@ function continues(prev: Group, next: Group | undefined): next is Group {
 export class Consumer {
 	#track: Moq.Track.Subscriber;
 	#format: Format;
-	#maxDelay: Getter<Time.Milli>;
+	#maxDelay: Getter<Milli>;
 	#groups: Group[] = [];
 	#active?: number; // the active group sequence number
 	// Presentation end (max PTS + duration) of the group we most recently advanced past, so next()'s
 	// promotion guard can tell a timeline-continuous next group from one sitting after a gap.
 	// Maintained only via #recordPresented; see its comment for the invariant.
-	#presentedEnd?: Time.Micro;
+	#presentedEnd?: Micro;
 	// Group of the last media frame next() returned, so an endpoint after it reads as that frame's
 	// duration rather than a declared stop.
 	#mediaGroup?: number;
@@ -106,13 +105,13 @@ export class Consumer {
 	#lost = false;
 	// The furthest presentation point read so far: max(timestamp + duration), endpoints included.
 	// Undefined until the first item, so a loss before it is no gap.
-	#edge?: Time.Micro;
+	#edge?: Micro;
 	// The item a gap was returned ahead of.
 	#next?: Read;
 	// The first media timestamp of the latest delivered group, and its predecessor's start.
 	// Endpoints and later frames can overlap the next group without moving this floor.
-	#start?: { group: number; timestamp: Time.Micro };
-	#floor?: Time.Micro;
+	#start?: { group: number; timestamp: Micro };
+	#floor?: Micro;
 	// A group below the previous group start aborts the track.
 	#error?: Error;
 
@@ -124,14 +123,14 @@ export class Consumer {
 	readonly buffered: Getter<BufferedRanges> = this.#buffered;
 
 	#jitter = new Jitter();
-	#spread = new Signal<Time.Milli>(this.#jitter.measured);
+	#spread = new Signal<Milli>(this.#jitter.measured);
 	/**
 	 * How much buffer late arrivals need, measured as frames come off the transport.
 	 *
 	 * The measured term of doc/concept/audio-jitter.md, excluding the codec frame and any advertised
 	 * floor. Starts at the cold-start estimate before any frame arrives.
 	 */
-	readonly spread: Getter<Time.Milli> = this.#spread;
+	readonly spread: Getter<Milli> = this.#spread;
 
 	#signals = new Effect();
 	#closed = new Once<Error | null>();
@@ -141,7 +140,7 @@ export class Consumer {
 		if ("maxAge" in props) throw new TypeError("Consumer maxAge is unsupported; use maxDelay");
 		this.#track = track;
 		this.#format = props.format;
-		this.#maxDelay = getter(props.maxDelay ?? Moq.Time.Milli.zero);
+		this.#maxDelay = getter(props.maxDelay ?? Milli.zero);
 
 		this.#signals.spawn(this.#run.bind(this));
 		this.#signals.cleanup(() => {
@@ -206,7 +205,7 @@ export class Consumer {
 				const next = await group.consumer.readFrame();
 				if (!next) break;
 				group.empty = false;
-				const arrival = Moq.Time.Milli.now();
+				const arrival = Nano.toMilli(Nano(now()));
 
 				const decoded = this.#format.decode(next.payload, next.timestamp);
 
@@ -216,7 +215,7 @@ export class Consumer {
 					// Observed here, before any gap handling or age budget: a target derived from
 					// what survives the budget would only ever confirm the budget it was cut to.
 					if (!marker) {
-						this.#jitter.observe(arrival, Moq.Time.Milli.fromMicro(sample.timestamp));
+						this.#jitter.observe(arrival, Milli.fromMicro(sample.timestamp));
 						this.#spread.set(this.#jitter.measured);
 					}
 					const frame: ReceivedFrame = {
@@ -249,7 +248,7 @@ export class Consumer {
 						group.latest = frame.timestamp;
 					}
 
-					const end = (frame.timestamp + (frame.duration ?? 0)) as Time.Micro;
+					const end = (frame.timestamp + (frame.duration ?? 0)) as Micro;
 					if (group.end === undefined || end > group.end) {
 						group.end = end;
 					}
@@ -344,7 +343,7 @@ export class Consumer {
 		// This also handles gaps in group sequence numbers: if #active points to a missing
 		// group, the span proves the missing content is too old to wait for.
 		while (this.#groups.length >= 2) {
-			const threshold = Moq.Time.Micro.fromMilli(this.#maxDelay.peek());
+			const threshold = Micro.fromMilli(this.#maxDelay.peek());
 			const first = this.#groups[0];
 
 			// Check the difference between the earliest and latest known frames.
@@ -436,7 +435,7 @@ export class Consumer {
 		}
 	}
 
-	#abortIfRewound(group: Group, timestamp: Time.Micro): boolean {
+	#abortIfRewound(group: Group, timestamp: Micro): boolean {
 		const start = this.#start;
 		if (start === undefined) return false;
 		if (group.consumer.sequence <= start.group) return false;
@@ -499,7 +498,7 @@ export class Consumer {
 					const startup = this.#start === undefined;
 					const contiguous = ptsContiguous(this.#presentedEnd, head.frames.at(0)?.timestamp);
 					const empty = head.empty && head.consumer.done;
-					const maxDelay = Moq.Time.Micro.fromMilli(this.#maxDelay.peek());
+					const maxDelay = Micro.fromMilli(this.#maxDelay.peek());
 					const skipHole =
 						head.frames.length > 0 &&
 						(maxDelay === 0 ||
@@ -604,18 +603,16 @@ export class Consumer {
 		const edge = this.#edge;
 		const lost = this.#lost;
 		this.#lost = false;
-		this.#advance(
-			read.kind === "frame" ? Moq.Time.Micro.add(resume, read.frame.duration ?? Moq.Time.Micro.zero) : resume,
-		);
+		this.#advance(read.kind === "frame" ? Micro(resume + (read.frame.duration ?? Micro.zero)) : resume);
 		if (!lost || edge === undefined) return read;
 
 		// A next group may start before the edge (an overlapping endpoint), so the span bottoms out at zero.
-		const timestamp = Moq.Time.Micro.min(edge, resume);
+		const timestamp = Micro(Math.min(edge, resume));
 		this.#next = read;
-		return { kind: "gap", timestamp, duration: Moq.Time.Micro.sub(resume, timestamp) };
+		return { kind: "gap", timestamp, duration: Micro(resume - timestamp) };
 	}
 
-	#advance(end: Time.Micro): void {
+	#advance(end: Micro): void {
 		if (this.#edge === undefined || end > this.#edge) this.#edge = end;
 	}
 
@@ -628,13 +625,13 @@ export class Consumer {
 			const first = group.frames.at(0);
 			if (!first || group.latest === undefined) continue;
 
-			const start = Moq.Time.Milli.fromMicro(first.timestamp);
-			const end = Moq.Time.Milli.fromMicro(group.latest);
+			const start = Milli.fromMicro(first.timestamp);
+			const end = Milli.fromMicro(group.latest);
 
 			const last = ranges.at(-1);
 			const contiguous = prev?.done && prev.consumer.sequence + 1 === group.consumer.sequence;
 			if (last && (last.end >= start || contiguous)) {
-				last.end = Moq.Time.Milli.max(last.end, end);
+				last.end = Milli(Math.max(last.end, end));
 			} else {
 				ranges.push({ start, end });
 			}
