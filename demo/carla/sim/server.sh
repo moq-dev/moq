@@ -30,11 +30,15 @@ fi
 # nvidia-container-toolkit. Check its referenced entries and hook before pulling
 # the 8.6 GB image: a spec generated through a bare `nix shell` embeds an
 # unrooted store path that breaks after Nix GC even though the YAML still exists.
-# nvidia-ctk writes every device node, mount, and hook as a YAML list item
-# (`- path:` / `- hostPath:`), and the hook's `path:` is the only bare key.
-shopt -s nullglob
-specs=(/etc/cdi/*nvidia* /var/run/cdi/*nvidia* "${XDG_CONFIG_HOME:-$HOME/.config}"/cdi/*nvidia*)
-shopt -u nullglob
+# nvidia-ctk writes YAML by default, while NixOS's declarative generator writes
+# JSON. Accept both without depending on jq at service runtime.
+if [[ -n "${CARLA_CDI_SPEC:-}" ]]; then
+    specs=("$CARLA_CDI_SPEC")
+else
+    shopt -s nullglob
+    specs=(/etc/cdi/*nvidia* /var/run/cdi/*nvidia* "${XDG_CONFIG_HOME:-$HOME/.config}"/cdi/*nvidia*)
+    shopt -u nullglob
+fi
 
 valid_spec=
 for spec in "${specs[@]}"; do
@@ -50,14 +54,20 @@ for spec in "${specs[@]}"; do
             valid=0
             break
         fi
-    done < <(sed -nE 's/^[[:space:]]*(- )?(path|hostPath):[[:space:]]+([^[:space:]]+)[[:space:]]*$/\3/p' "$spec")
+    done < <(sed -nE \
+        -e 's/^[[:space:]]*(- )?(path|hostPath):[[:space:]]+([^[:space:]]+)[[:space:]]*$/\3/p' \
+        -e 's/^[[:space:]]*"(path|hostPath)":[[:space:]]*"([^"]+)",?[[:space:]]*$/\2/p' \
+        "$spec")
     while IFS= read -r hook; do
         hook_seen=1
         if [[ ! -x "$hook" ]]; then
             valid=0
             break
         fi
-    done < <(sed -nE 's/^[[:space:]]*(- )?path:[[:space:]]+([^[:space:]]*nvidia-(ctk|cdi-hook))[[:space:]]*$/\2/p' "$spec")
+    done < <(sed -nE \
+        -e 's/^[[:space:]]*(- )?path:[[:space:]]+([^[:space:]]*nvidia-(ctk|cdi-hook))[[:space:]]*$/\2/p' \
+        -e 's/^[[:space:]]*"path":[[:space:]]*"([^"]*nvidia-(ctk|cdi-hook))",?[[:space:]]*$/\1/p' \
+        "$spec")
     if [[ "$valid" -eq 1 && "$entry_seen" -eq 1 && "$hook_seen" -eq 1 ]]; then
         valid_spec="$spec"
         break

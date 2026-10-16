@@ -112,6 +112,7 @@
             rust-toolchain
             just
             git
+            git-lfs
             cmake
             pkg-config
             # Sets LIBCLANG_PATH + BINDGEN_EXTRA_CLANG_ARGS so ffmpeg-sys-next's

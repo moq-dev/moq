@@ -15,7 +15,7 @@ EOF
 chmod +x "$tmp/bin/podman"
 
 : >"$tmp/config/cdi/nvidia.yaml"
-if PATH="$tmp/bin:$PATH" XDG_CONFIG_HOME="$tmp/config" bash "$here/server.sh" >"$tmp/empty.out" 2>&1; then
+if PATH="$tmp/bin:$PATH" CARLA_CDI_SPEC="$tmp/config/cdi/nvidia.yaml" bash "$here/server.sh" >"$tmp/empty.out" 2>&1; then
     echo "empty CDI spec unexpectedly accepted" >&2
     exit 1
 fi
@@ -25,7 +25,7 @@ touch "$tmp/device"
 # The fixtures mirror nvidia-ctk's layout: entries are YAML list items, the
 # hook's path is a bare key under `- hookName:`.
 printf -- '- hostPath: %s\n  path: %s\n' "$tmp/device" "$tmp/missing/nvidia-ctk" >"$tmp/config/cdi/nvidia.yaml"
-if PATH="$tmp/bin:$PATH" XDG_CONFIG_HOME="$tmp/config" bash "$here/server.sh" >"$tmp/stale.out" 2>&1; then
+if PATH="$tmp/bin:$PATH" CARLA_CDI_SPEC="$tmp/config/cdi/nvidia.yaml" bash "$here/server.sh" >"$tmp/stale.out" 2>&1; then
     echo "stale CDI hook unexpectedly accepted" >&2
     exit 1
 fi
@@ -35,7 +35,31 @@ touch "$tmp/bin/nvidia-ctk"
 chmod +x "$tmp/bin/nvidia-ctk"
 printf -- '- hostPath: %s\n  path: %s\n' "$tmp/device" "$tmp/bin/nvidia-ctk" >"$tmp/config/cdi/nvidia.yaml"
 PATH="$tmp/bin:$PATH" \
-    XDG_CONFIG_HOME="$tmp/config" \
+    CARLA_CDI_SPEC="$tmp/config/cdi/nvidia.yaml" \
+    XDG_RUNTIME_DIR="$tmp/run" \
+    CARLA_TEST_PODMAN_ARGS="$tmp/podman.args" \
+    bash "$here/server.sh"
+
+# NixOS's declarative CDI generator emits JSON instead of nvidia-ctk's default
+# YAML. It receives the same stale-path validation before the launcher uses it.
+cat >"$tmp/config/cdi/nvidia.yaml" <<EOF
+{
+  "containerEdits": {
+    "mounts": [
+      {
+        "hostPath": "$tmp/device"
+      }
+    ],
+    "hooks": [
+      {
+        "path": "$tmp/bin/nvidia-ctk"
+      }
+    ]
+  }
+}
+EOF
+PATH="$tmp/bin:$PATH" \
+    CARLA_CDI_SPEC="$tmp/config/cdi/nvidia.yaml" \
     XDG_RUNTIME_DIR="$tmp/run" \
     CARLA_TEST_PODMAN_ARGS="$tmp/podman.args" \
     bash "$here/server.sh"

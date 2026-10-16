@@ -147,7 +147,7 @@ impl Worker {
 			let catalog =
 				moq_mux::codec::h264::config(&frame.payload).expect("an IDR carries its SPS");
 			let mut config = Config::new();
-			config.kind = Kind::Named("openh264".into());
+			config.kind = Kind::Named("nvdec".into());
 			config.output = Output::Cpu;
 			let decoder = Decoder::new(&catalog, &config).expect("open a decoder");
 			self.decoders
@@ -159,7 +159,7 @@ impl Worker {
 			.expect("the first packet of a rendition is an IDR");
 		expected.push_back((frame.frame, rgb));
 		let timestamp = moq_net::Timestamp::from_micros(frame.timestamp_us).unwrap();
-		// The software decoder may hold a picture back; match pictures to
+		// The decoder may hold a picture back; match pictures to
 		// packets in order rather than one for one.
 		for picture in decoder
 			.decode(&frame.payload, timestamp, frame.keyframe)
