@@ -737,8 +737,7 @@ fn cancelling_a_pending_web_handshake(send_settings: bool) {
 			let mut watch = conn.clone();
 			let mut control = None;
 			if send_settings {
-				use web_transport_trait::Stats as _;
-				let before = watch.stats().bytes_received().expect("receive stats");
+				let before = watch.stats().udp_rx.bytes;
 				let mut stream = std::future::poll_fn(|cx| peer.poll_open_uni(cx))
 					.await
 					.expect("control stream");
@@ -756,7 +755,7 @@ fn cancelling_a_pending_web_handshake(send_settings: bool) {
 				control = Some(stream);
 				within(&handle, "peer SETTINGS to arrive", async {
 					loop {
-						if watch.stats().bytes_received().expect("receive stats") > before {
+						if watch.stats().udp_rx.bytes > before {
 							break;
 						}
 						let mut tick = moq_uring::Timer::after(&handle, std::time::Duration::from_millis(10));

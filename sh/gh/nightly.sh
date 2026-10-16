@@ -24,8 +24,11 @@ case "${1:-}" in
             --run-ignored only --success-output immediate
         run just rs bench-feed-fetch
         run just rs test -p moq-relay -E 'test(benchmark_stun_sources)' --run-ignored only --success-output immediate
+        run just rs test -p moq-quic --release -E 'test(benchmark_receive_credit)' --run-ignored only --success-output immediate
         # Fuzz exposes moq-net's codec benches; it is not a feature of the other crates.
         run cargo bench --locked --no-fail-fast -p moq-net --features fuzz --bench '*' -- --test
+        # Exercise the optional thread-CPU clock as well as the normal elapsed-time smoke.
+        run env SESSION_CPU=1 cargo bench --locked -p moq-net --bench session -- session_delivery_group_cost_cpu --test
         # Each kio routine once, including the contended bench's worker threads.
         run cargo bench --locked --no-fail-fast -p kio --bench '*' -- --test
         # One invocation unifies this release build instead of rebuilding shared crates

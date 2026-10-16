@@ -26,6 +26,10 @@ pub enum SessionError {
 	#[error("unauthorized")]
 	Unauthorized,
 
+	/// The peer's token has expired. Retrying with refreshed credentials may succeed.
+	#[error("authorization token expired")]
+	Expired,
+
 	/// The peer broke a protocol rule; the session is unusable.
 	#[error("protocol violation")]
 	ProtocolViolation,
@@ -90,6 +94,7 @@ impl SessionError {
 			Self::Cancel => 0x0,
 			Self::Internal => 0x1,
 			Self::Unauthorized => 0x2,
+			Self::Expired => 0x18,
 			Self::ProtocolViolation => 0x3,
 			Self::InvalidRequestId => 0x4,
 			Self::KeyValueFormatting => 0x6,
@@ -116,6 +121,7 @@ impl SessionError {
 			0x0 => Self::Cancel,
 			0x1 => Self::Internal,
 			0x2 => Self::Unauthorized,
+			0x18 => Self::Expired,
 			0x3 => Self::ProtocolViolation,
 			0x4 => Self::InvalidRequestId,
 			0x6 => Self::KeyValueFormatting,
@@ -408,6 +414,10 @@ pub enum Error {
 	#[error("unauthorized")]
 	Unauthorized,
 
+	/// The authorization token has expired and can be refreshed.
+	#[error("authorization token expired")]
+	Expired,
+
 	/// A valid message arrived in a state where it is not allowed.
 	#[error("unexpected message")]
 	UnexpectedMessage,
@@ -589,6 +599,7 @@ impl From<&Error> for SessionError {
 			Error::Stream(_) => Self::Internal,
 			Error::Cancel | Error::Closed | Error::GoingAway | Error::SessionClosed => Self::Cancel,
 			Error::Unauthorized => Self::Unauthorized,
+			Error::Expired => Self::Expired,
 			Error::Unsupported => Self::Unsupported,
 			Error::Version | Error::UnknownAlpn(_) => Self::Version,
 			Error::TooManyParameters => Self::KeyValueFormatting,
@@ -640,8 +651,9 @@ impl From<&Error> for StreamError {
 			Error::FrameTooLarge => Self::FrameTooLarge,
 			Error::GroupTooLarge => Self::GroupTooLarge,
 			Error::TimestampMismatch => Self::TimestampMismatch,
-			// Losing access ends this stream, not the session.
-			Error::Unauthorized => Self::Unauthorized,
+			// Losing access ends this stream, not the session. A request can expire on its
+			// own (REQUEST_ERROR 0x5), and the stream registry has no expiry code.
+			Error::Unauthorized | Error::Expired => Self::Unauthorized,
 			Error::Timeout => Self::DeliveryTimeout,
 			Error::GoingAway => Self::GoingAway,
 			// Our own parse failure is, from the peer's side, a malformed track.
@@ -695,6 +707,7 @@ mod tests {
 			SessionError::Cancel,
 			SessionError::Internal,
 			SessionError::Unauthorized,
+			SessionError::Expired,
 			SessionError::ProtocolViolation,
 			SessionError::InvalidRequestId,
 			SessionError::KeyValueFormatting,
@@ -718,6 +731,7 @@ mod tests {
 
 		// The moq-transport codes we reuse must keep moq-transport's values.
 		assert_eq!(SessionError::Unauthorized.to_code(), 0x2);
+		assert_eq!(SessionError::Expired.to_code(), 0x18);
 		assert_eq!(SessionError::InvalidRequestId.to_code(), 0x4);
 		assert_eq!(SessionError::TooManyRequests.to_code(), 0x7);
 		assert_eq!(SessionError::GoawayTimeout.to_code(), 0x10);
@@ -739,6 +753,10 @@ mod tests {
 			SessionError::ProtocolViolation
 		);
 		assert_eq!(StreamError::from(&Error::UnexpectedStream), StreamError::Internal);
+
+		// An expired request (REQUEST_ERROR 0x5) relayed onto a stream ends only that
+		// request; SESSION_CLOSED would falsely tell the peer its session is going away.
+		assert_eq!(StreamError::from(&Error::Expired), StreamError::Unauthorized);
 	}
 
 	#[test]
