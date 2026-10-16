@@ -43,7 +43,6 @@ and the harness defaults to Cubic while production runs BBR3.
 ## Required
 
 - [Benchmarks](/quest/m1/quic/coverage/bench.md) - Criterion sweeps of stream scheduling, receive and reset, endpoint routing, and the wire codec, on the baseline
-- [Coverage report](/quest/m1/quic/coverage/report.md) - `just rs coverage <crate>` and a nightly lcov artifact, with no threshold
 - [Characterization tests](/quest/m1/quic/coverage/characterize.md) - golden scheduling order, and every uncovered frame, reset, limit, and endpoint path, on today's harness
 - [Fuzzing](/quest/m1/quic/coverage/fuzz.md) - a moq-net-style fuzz crate with the upstream parser targets, frame decode, and a connection op-sequence target, run nightly
 - [Seeded simulation](/quest/m1/quic/coverage/sim.md) - a deterministic, impaired network in `Pair`, BBR3 as the harness default, and property tests over random workloads

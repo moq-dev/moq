@@ -597,12 +597,14 @@ mod tests {
 	use super::*;
 
 	/// The length of the connection IDs a sharded endpoint issues.
+	#[cfg(target_os = "linux")]
 	const CID_LEN: usize = 8;
 
 	/// A connection ID shaped like a sharded endpoint's (see [the
 	/// encoding](super#the-encoding)): the first byte randomized within the
 	/// member's stride, so nothing but the reduction can be steering, and the
 	/// non-SRT marker set.
+	#[cfg(target_os = "linux")]
 	fn cid(shard: Shard) -> [u8; CID_LEN] {
 		use rand::RngExt;
 		let mut id: [u8; CID_LEN] = rand::random();
