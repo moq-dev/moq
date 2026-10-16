@@ -66,8 +66,14 @@ Rust items (`rs/moq-net/src/model/`), as they stood at b4eab0db1:
   discovery; public only if it survives.
 - `origin::Consumer::request` (lite publisher): remove the need; it is the
   body of the public `request_broadcast`.
-- `origin::Producer::empty`, `origin::Consumer::empty` (sessions): remove
-  the need; a scope with no patterns is the public equivalent.
+- `origin::Producer::empty`, `origin::Consumer::empty` (sessions): public.
+  A scope with no patterns is not an equivalent: `scope` refuses an empty
+  intersection with `Unauthorized`, which stays, since failing loud on a
+  scope that names nothing is the right default. The drivers fill an omitted
+  session half with an empty producer, and answer an out-of-scope announce
+  interest with an empty consumer, so a custom session needs the same
+  handles. Restructuring the drivers to run without a half is the
+  alternative, but it is a bigger change for no public gain.
 - `origin::Producer::stats`, `origin::Consumer::stats` (sessions): remove
   the need; the caller keeps the `stats::Session` it passed to the public
   `with_stats`.

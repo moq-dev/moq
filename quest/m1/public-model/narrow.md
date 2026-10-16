@@ -19,4 +19,15 @@ set. Use the epic's inventory method: narrow every `pub(crate)` in
 (and `--tests`) names, adding a one-line comment that says which child
 owns it or why it stays private.
 
+Enforce the marks in CI, or they drift. Narrowing makes the compiler
+reject unmarked reach, but a contributor can still restore `pub(crate)`
+without a comment. Add a check to the lint that `just check` and CI already
+run: every `pub(crate)` under `rs/moq-net/src/model/` must carry a marker
+comment from a fixed vocabulary (for example `// private: passthrough`,
+`tuning`, `capability gap`, `test`, or `// pending: <quest path>`). A
+`pending` mark must name a quest that still exists. The check is a grep. It
+pairs with the narrowed visibility, so it does not need the compile probe.
+Each child's PR then deletes its `pending` marks as items go public, and the
+check fails if one is left behind.
+
 No public API or wire change.
