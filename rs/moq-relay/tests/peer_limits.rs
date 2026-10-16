@@ -47,7 +47,12 @@ struct Seen {
 }
 
 /// Dial with an empty moq-lite SETUP, wait for the relay's SETUP, then probe.
-async fn probe(port: u16) -> Seen {
+///
+/// A peer waits for each stream's credit, since SETUP and the MAX_STREAMS
+/// queued before it can travel in separate packets. A viewer takes only the
+/// credit it holds once SETUP arrives: the relay widens before that, so any
+/// widening would already show.
+async fn probe(port: u16, peer: bool) -> Seen {
 	let mut connect = moq_tokio::connect::Config::default();
 	connect.tls.insecure = Some(true);
 	let mut tls = connect.tls.build().expect("tls config");
@@ -78,10 +83,17 @@ async fn probe(port: u16) -> Seen {
 
 	let mut streams = Vec::new();
 	while streams.len() < PROBE {
-		match conn.open_uni().now_or_never() {
-			Some(stream) => streams.push(stream.expect("open")),
-			None => break,
-		}
+		let open = conn.open_uni();
+		let stream = match peer {
+			true => tokio::time::timeout(TIMEOUT, open)
+				.await
+				.expect("peer stream credit timeout"),
+			false => match open.now_or_never() {
+				Some(stream) => stream,
+				None => break,
+			},
+		};
+		streams.push(stream.expect("open"));
 	}
 	let seen = Seen {
 		streams: streams.len(),
@@ -114,11 +126,11 @@ async fn peer_widens_and_viewer_does_not(mut relay: Relay, port: u16) {
 	});
 	let running = tokio::spawn(relay.run());
 
-	let peer = probe(port).await;
+	let peer = probe(port, true).await;
 	assert_eq!(peer.streams, PROBE, "a peer opens past the viewer stream limit");
 	assert!(peer.max_data > 0, "a peer's wider receive window is advertised");
 
-	let viewer = probe(port).await;
+	let viewer = probe(port, false).await;
 	assert!(
 		viewer.streams < PROBE && viewer.streams as u64 <= VIEWER_STREAMS + 1,
 		"a viewer keeps the stream limit, opened {}",

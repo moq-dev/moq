@@ -1721,11 +1721,13 @@ impl Request {
 		#[cfg(feature = "quic")]
 		if let Some(conn) = &self.quic {
 			use crate::quic::driver::VarInt;
+			// Windows first: each setter can flush on its own, and the stream credit is
+			// what a peer waits on, so it must not overtake the window.
+			conn.set_receive_window(VarInt::from_u64(limits.receive_window.get()).unwrap_or(VarInt::MAX));
+			conn.set_send_window(limits.send_window.get());
 			let streams = VarInt::from_u64(limits.max_streams.get()).unwrap_or(VarInt::MAX);
 			conn.set_max_concurrent_bi_streams(streams);
 			conn.set_max_concurrent_uni_streams(streams);
-			conn.set_receive_window(VarInt::from_u64(limits.receive_window.get()).unwrap_or(VarInt::MAX));
-			conn.set_send_window(limits.send_window.get());
 			return Ok(());
 		}
 		let _ = limits;

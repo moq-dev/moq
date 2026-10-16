@@ -102,9 +102,10 @@ receive_window = 671088640           # Connection-wide receive window (640 MiB).
 send_window = 671088640              # Unacknowledged outgoing data (640 MiB).
 ```
 
-`[peer.quic]` takes `[quic]`'s keys and replaces them for a peer's QUIC
-connection once its grant is known, before the SETUP reply. Links the relay
-dials get them from the handshake on. A link carrying a whole cluster is then
+`[peer.quic]` takes only `max_streams`, `receive_window`, and `send_window`;
+any other `[quic]` key is refused. They replace the `[quic]` values for a
+peer's QUIC connection once its grant is known, before the SETUP reply. Links
+the relay dials get them from the handshake on. A link carrying a whole cluster is then
 not throttled by `[quic]` limits sized for one viewer, for example
 `--peer-quic-max-streams=200000`. Peers over WebSocket, TCP, or iroh keep
 their transport's own limits.
