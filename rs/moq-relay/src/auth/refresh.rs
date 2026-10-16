@@ -180,8 +180,12 @@ impl Refresh {
 		if request.token().is_empty() {
 			// The connection's own lease answers an empty token while it lives, even
 			// after an earlier empty-token stream was withdrawn.
-			if self.owner.closed().now_or_never().is_some() {
-				request.reject(SessionError::Unauthorized, "connection credential ended");
+			if let Some(reason) = self.owner.closed().now_or_never() {
+				let code = match reason {
+					lease::Reason::Expired => SessionError::Expired,
+					_ => SessionError::Unauthorized,
+				};
+				request.reject(code, "connection credential ended");
 				return;
 			}
 			let unissued = self
@@ -384,7 +388,11 @@ impl Refresh {
 						Change::Grant(_) => lease::Reason::Narrowed,
 					};
 					if !withdrawn && let Some(issued) = credential.issued {
-						issued.revoke(SessionError::Unauthorized, reason.to_string());
+						let code = match &reason {
+							lease::Reason::Expired => SessionError::Expired,
+							_ => SessionError::Unauthorized,
+						};
+						issued.revoke(code, reason.to_string());
 					}
 					self.authorize();
 					if self.credentials.is_empty() {
@@ -499,7 +507,7 @@ mod tests {
 			tokio::spawn(moq_net::time::run(driver));
 			(tokio::spawn(async move {
 				let reason = lease.ended().await;
-				session.abort(moq_net::Error::Unauthorized);
+				session.abort(super::super::error(&reason));
 				lease.close(reason.clone(), Default::default());
 				reason
 			}),)
@@ -558,6 +566,10 @@ mod tests {
 			assert!(matches!(result, Err(moq_net::Error::Session(SessionError::Internal))));
 			tokio::time::advance(Duration::from_secs(5)).await;
 		}
+		assert!(matches!(
+			client.closed().await,
+			moq_net::Error::Session(SessionError::Expired)
+		));
 		assert_eq!(supervising.await.unwrap(), lease::Reason::Expired);
 		let lived = start.elapsed();
 		assert!(
