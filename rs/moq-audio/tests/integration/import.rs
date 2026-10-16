@@ -10,7 +10,7 @@ use moq_audio::{Format, Layout, decode};
 #[tokio::test]
 async fn ts_surround_opus_decodes() {
 	// A 440 Hz center channel in 5.1; see `import_opus_surround_catalog` in moq-mux.
-	let data = include_bytes!("../../moq-mux/src/container/ts/test_data/opus_5_1.ts");
+	let data = include_bytes!("../../../moq-mux/src/container/ts/test_data/opus_5_1.ts");
 
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let broadcast_consumer = broadcast.consume();
