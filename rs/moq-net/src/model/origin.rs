@@ -4591,6 +4591,8 @@ impl Request {
 }
 
 /// A claim answer being filled before its exact route is announced.
+///
+/// Dropping it unpublished refuses the request, as dropping a [`Request`] does.
 pub struct Prepared {
 	request: Request,
 	broadcast: broadcast::Producer,

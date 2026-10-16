@@ -666,7 +666,11 @@ async fn claim_restart(version: &str) {
 	assert_eq!(read(&mut returning).await, "new:0", "{version}");
 
 	pool.write("pool/q", "q:1");
-	assert_eq!(read(&mut sibling).await, "q:1", "{version}: the sibling lost its reader");
+	assert_eq!(
+		read(&mut sibling).await,
+		"q:1",
+		"{version}: the sibling lost its reader"
+	);
 }
 
 macro_rules! claim_restart_tests {
