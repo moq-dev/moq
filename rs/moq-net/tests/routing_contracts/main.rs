@@ -120,7 +120,10 @@ fn collected_incarnation_returns_only_while_its_retraction_is_in_flight() {
 	assert!(net.deliver(a, b), "the held update");
 	assert!(net.route(b, 7).is_some(), "the dead incarnation is back at b");
 	assert!(net.run());
-	assert!(net.route(c, 7).is_none(), "c's feasibility distance refuses b's copy");
+	// c drained its distance, so b's copy spreads to it, but the path ends at a,
+	// which let go: a stale dead end until the retraction lands, never a loop.
+	assert_eq!(net.route(c, 7).and_then(|route| route.next), Some(b));
+	assert!(net.route(a, 7).is_none());
 
 	net.release(a, b);
 	assert!(net.run());
@@ -134,14 +137,19 @@ fn collected_incarnation_returns_only_while_its_retraction_is_in_flight() {
 
 /// No route entry is not proof that no advertisement derived from this node's
 /// own is still in flight. b's echo from c waits on c's session while b loses
-/// its only entry, so dropping b's feasibility distance there lets the echo
-/// through and b routes via c while c still routes via b.
+/// its only entry. b keeps its feasibility distance until every neighbor it
+/// advertised to echoes the ROUTE_END back, so the queued echo is refused
+/// rather than letting b route via c while c still routes via b. A leaf never
+/// advertises the identity back, so only an explicit echo of the ROUTE_END,
+/// which it sends too, ends the drain. Once the echoes land nothing is left.
 #[test]
 fn collection_keeps_the_feasibility_distance_against_a_queued_echo() {
-	let (origin, b, c) = (0, 1, 2);
-	let mut net = Net::new(Config::default(), 3);
+	let (origin, b, c, leaf) = (0, 1, 2, 3);
+	let mut net = Net::new(Config::default(), 4);
+	net.leaf(leaf);
 	net.join(origin, b, 1);
 	net.join(b, c, 1);
+	net.join(b, leaf, 1);
 	net.hold(c, b);
 	net.originate(origin, 7, 0);
 	assert!(net.run());
@@ -149,9 +157,11 @@ fn collection_keeps_the_feasibility_distance_against_a_queued_echo() {
 	assert!(net.queued(c, b) > 0, "c's echo waits");
 
 	net.hold(b, c);
+	net.hold(leaf, b);
 	net.disconnect(origin, b);
 	assert!(!net.holds(b, 7));
 	net.collect(b, 7);
+	assert!(net.remembers(b, 7), "draining: the ROUTE_ENDs are not echoed yet");
 	assert!(net.deliver(c, b), "the echo of b's own advertisement");
 	assert!(net.route(b, 7).is_none(), "b refuses its own echo");
 	assert!(net.starved(b, 7));
@@ -159,11 +169,17 @@ fn collection_keeps_the_feasibility_distance_against_a_queued_echo() {
 	net.release(b, c);
 	net.release(c, b);
 	assert!(net.run());
-	for node in [b, c] {
+	assert!(net.queued_acks(leaf, b) > 0, "the leaf's echo waits");
+	assert!(net.remembers(b, 7), "the leaf may still hold b's advertisement");
+	net.release(leaf, b);
+	assert!(net.run());
+	for node in [b, c, leaf] {
 		assert!(
 			net.route(node, 7).is_none(),
 			"node {node} routes to an unreachable origin"
 		);
+		assert!(!net.holds(node, 7), "node {node}");
+		assert!(!net.remembers(node, 7), "node {node} keeps a drained distance");
 	}
 }
 

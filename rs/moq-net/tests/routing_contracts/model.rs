@@ -453,6 +453,8 @@ pub struct Retained {
 	/// Items in the per-session views a receiver keeps to apply the next batch.
 	pub heard: usize,
 	pub pending: usize,
+	/// Feasibility distances for identities a node does not serve.
+	pub distances: usize,
 }
 
 #[derive(Default)]
@@ -469,6 +471,10 @@ struct State {
 	filed: BTreeMap<(Node, Id), Id>,
 	fd: BTreeMap<Id, (u32, Metric)>,
 	sent: BTreeMap<(Node, Id), Reach>,
+	/// ROUTE_ENDs sent to each neighbor that it has not echoed back yet. Until
+	/// they all return, a neighbor may still hold this node's advertisement,
+	/// so the feasibility distance stays.
+	unacked: BTreeMap<(Node, Id), u32>,
 	pending: BTreeMap<Id, Pending>,
 	/// Identities whose own request [`Requests::Retries`] gave up on.
 	gave_up: BTreeSet<Id>,
@@ -588,6 +594,9 @@ pub struct Net {
 	/// `(at, peer)`: `peer` sent `at` a GOAWAY on their current session.
 	draining: BTreeSet<(Node, Node)>,
 	queues: BTreeMap<(Node, Node), VecDeque<Msg>>,
+	/// ROUTE_ENDs echoed back, on the stream of the route they end: unordered
+	/// against the echoing node's own routes in `queues`.
+	acks: BTreeMap<(Node, Node), VecDeque<Id>>,
 	held: BTreeSet<(Node, Node)>,
 	claims: Vec<Claim>,
 	hidden: BTreeSet<(Node, usize)>,
@@ -611,6 +620,7 @@ impl Net {
 			up: BTreeSet::new(),
 			draining: BTreeSet::new(),
 			queues: BTreeMap::new(),
+			acks: BTreeMap::new(),
 			held: BTreeSet::new(),
 			claims: Vec::new(),
 			hidden: BTreeSet::new(),
@@ -663,6 +673,7 @@ impl Net {
 		self.up.remove(&Self::pair(a, b));
 		for (x, y) in [(a, b), (b, a)] {
 			self.queues.remove(&(x, y));
+			self.acks.remove(&(x, y));
 			self.held.remove(&(x, y));
 			self.draining.remove(&(y, x));
 			let state = &mut self.nodes[y];
@@ -676,6 +687,8 @@ impl Net {
 				pending.from.remove(&x);
 			}
 			let state = &mut self.nodes[x];
+			// A closed session is an implicit echo: it held nothing past the close.
+			state.unacked.retain(|(n, _), _| *n != y);
 			state.sent.retain(|(n, _), _| *n != y);
 			state.sent_views.retain(|(n, _), _| *n != y);
 		}
@@ -818,8 +831,7 @@ impl Net {
 	}
 
 	/// Forget `id`'s routes and announcements at `node`. The feasibility
-	/// distance stays: an echo of `node`'s own advertisement can still be
-	/// queued on any session, and no local state proves it drained.
+	/// distance goes on its own once drained (see [`Net::advertise`]).
 	pub fn collect(&mut self, node: Node, id: Id) {
 		let state = &mut self.nodes[node];
 		state.rx.remove(&id);
@@ -865,6 +877,40 @@ impl Net {
 		true
 	}
 
+	/// Deliver one ROUTE_END echoed back from `from` to `to`, even if held.
+	pub fn deliver_ack(&mut self, from: Node, to: Node) -> bool {
+		let Some(id) = self.acks.get_mut(&(from, to)).and_then(VecDeque::pop_front) else {
+			return false;
+		};
+		let state = &mut self.nodes[to];
+		let left = state.unacked.get_mut(&(from, id)).expect("an echo answers a ROUTE_END");
+		*left -= 1;
+		if *left == 0 {
+			state.unacked.remove(&(from, id));
+		}
+		self.advertise(to);
+		true
+	}
+
+	/// The ROUTE_END echoes waiting from `from` to `to`.
+	pub fn queued_acks(&self, from: Node, to: Node) -> usize {
+		self.acks.get(&(from, to)).map_or(0, VecDeque::len)
+	}
+
+	/// Every directed session with an echo waiting, held or not.
+	pub fn busy_acks(&self) -> Vec<(Node, Node)> {
+		self.acks
+			.iter()
+			.filter(|(_, queue)| !queue.is_empty())
+			.map(|(key, _)| *key)
+			.collect()
+	}
+
+	/// Whether `node` keeps a feasibility distance for `id`.
+	pub fn remembers(&self, node: Node, id: Id) -> bool {
+		self.nodes[node].fd.contains_key(&id)
+	}
+
 	/// The messages waiting from `from` to `to`.
 	pub fn queued(&self, from: Node, to: Node) -> usize {
 		self.queues.get(&(from, to)).map_or(0, VecDeque::len)
@@ -894,11 +940,20 @@ impl Net {
 				.filter(|(key, queue)| !queue.is_empty() && !self.held.contains(key))
 				.map(|(key, _)| *key)
 				.collect();
-			if ready.is_empty() {
+			let acks: Vec<(Node, Node)> = self
+				.acks
+				.iter()
+				.filter(|(key, queue)| !queue.is_empty() && !self.held.contains(key))
+				.map(|(key, _)| *key)
+				.collect();
+			if ready.is_empty() && acks.is_empty() {
 				return true;
 			}
 			for (from, to) in ready {
 				self.deliver(from, to);
+			}
+			for (from, to) in acks {
+				self.deliver_ack(from, to);
 			}
 		}
 		false
@@ -949,6 +1004,11 @@ impl Net {
 	fn receive(&mut self, at: Node, from: Node, msg: Msg) {
 		match msg {
 			Msg::Route { id: named, reach } => {
+				// Echo every ROUTE_END once it is applied, filed or refused.
+				if reach.is_none() {
+					self.stats.route_msgs += 1;
+					self.acks.entry((at, from)).or_default().push_back(named);
+				}
 				let Some(id) = self.key(at, from, named) else {
 					return;
 				};
@@ -1270,7 +1330,10 @@ impl Net {
 					let state = &mut self.nodes[node];
 					match reach {
 						Some(reach) => state.sent.insert((peer, id), reach),
-						None => state.sent.remove(&(peer, id)),
+						None => {
+							*state.unacked.entry((peer, id)).or_default() += 1;
+							state.sent.remove(&(peer, id))
+						}
 					};
 					self.stats.route_msgs += 1;
 					self.queues
@@ -1309,6 +1372,19 @@ impl Net {
 					.push_back(Msg::Claims { id, view });
 			}
 		}
+		// Drop a feasibility distance once nothing here routes or advertises the
+		// identity and every neighbor echoed its ROUTE_END: no node then holds an
+		// advertisement from this one, so no older one can return as a loop.
+		let state = &mut self.nodes[node];
+		let busy: BTreeSet<Id> = state
+			.rx
+			.keys()
+			.chain(state.origins.keys())
+			.chain(state.sent.keys().map(|(_, id)| id))
+			.chain(state.unacked.keys().map(|(_, id)| id))
+			.copied()
+			.collect();
+		state.fd.retain(|id, _| busy.contains(id));
 		self.requests(node);
 		self.show(node);
 	}
@@ -1510,7 +1586,7 @@ impl Net {
 		Ok(())
 	}
 
-	/// Announcement state kept across every node.
+	/// Announcement and route state kept across every node.
 	pub fn retained(&self) -> Retained {
 		let mut out = Retained::default();
 		for state in &self.nodes {
@@ -1522,6 +1598,7 @@ impl Net {
 			}
 			out.heard += state.heard.values().map(|view| view.items.len()).sum::<usize>();
 			out.pending += state.pending.len();
+			out.distances += state.fd.keys().filter(|id| !state.origins.contains_key(id)).count();
 		}
 		out
 	}

@@ -639,7 +639,7 @@ fn announcement_cost_follows_sessions_and_live_claims() {
 /// change, sessions drop and return, messages are held and replayed out of
 /// step, the client changes interest, and an origin restarts with a fresh
 /// identity. Under every rule, selected routes never loop, even right after a
-/// collection. Under merged floors, every view is always some revision of the
+/// drained feasibility distance is dropped. Under merged floors, every view is always some revision of the
 /// origin's truth, nothing revives and nothing ends falsely, and once churn
 /// stops every node shows every live origin's current claims and holds
 /// nothing for a dead one. A node that collected an origin with no route left,
@@ -769,13 +769,19 @@ fn churn(rng: &mut XorShift, freshness: Freshness) -> Net {
 				net.reconnect(first + origin);
 			}
 			_ => {
+				// Echoed ROUTE_ENDs ride the route's own stream, so they interleave
+				// freely with the echoing node's routes.
 				for _ in 0..rng.next(6) {
-					let busy = net.busy();
+					let busy: Vec<(bool, usize, usize)> = (net.busy().into_iter().map(|(from, to)| (false, from, to)))
+						.chain(net.busy_acks().into_iter().map(|(from, to)| (true, from, to)))
+						.collect();
 					if busy.is_empty() {
 						break;
 					}
-					let (from, to) = busy[rng.next(busy.len() as u64) as usize];
-					net.deliver(from, to);
+					match busy[rng.next(busy.len() as u64) as usize] {
+						(false, from, to) => net.deliver(from, to),
+						(true, from, to) => net.deliver_ack(from, to),
+					};
 				}
 			}
 		}
@@ -796,8 +802,8 @@ fn churn(rng: &mut XorShift, freshness: Freshness) -> Net {
 	net
 }
 
-/// Collection keeps the feasibility distance, so an echo of a node's own
-/// advertisement still queued on some session is refused after it collects.
+/// A node drops a feasibility distance only once every neighbor echoed its
+/// ROUTE_END, so an older advertisement of its own never returns as a loop.
 fn loop_free(net: &Net) {
 	for id in (100..110).chain(200..210) {
 		for node in 0..RELAYS + 3 {
@@ -844,6 +850,10 @@ fn settled(net: &mut Net, label: &str) {
 		}
 		for id in (100..110).chain(200..210).filter(|id| !live.contains(id)) {
 			assert!(!net.holds(node, id), "{label}: node {node} holds dead {id}");
+			assert!(
+				!net.remembers(node, id),
+				"{label}: node {node} keeps dead {id}'s distance"
+			);
 		}
 	}
 	assert_eq!(net.retained().pending, 0, "{label}");

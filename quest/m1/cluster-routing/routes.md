@@ -50,7 +50,12 @@ The handoff contract below, decided 2026-10-16, settles claim freshness:
   closes with a floor, the origin revision as of which the stream's set for
   that route is complete.
   ROUTE_REQUEST (node id, seqno) travels
-  the other way on the same stream, toward the neighbour that sent the route.
+  the other way on the same stream, toward the neighbour that sent the route,
+  and so does the echo of every ROUTE_END: the receiver sends the same
+  ROUTE_END (Route ID) back once it has dropped the route, which tells the
+  sender no neighbour still holds its advertisement (see the handoff
+  contract). Every receiver echoes, clients included; a closed session
+  counts as the echo.
   The hop list leaves lite-07, and with it the
   `Hop Base`/`Hop Keep` compression.
 
@@ -64,6 +69,7 @@ The handoff contract below, decided 2026-10-16, settles claim freshness:
   ANNOUNCE_FLOOR route=0 revision=8
   ROUTE_UPDATE route=0 seqno=42 metric=inf      # held: unusable, still recovering
   ROUTE_END    route=0                          # let go: forget it on this stream
+  ROUTE_END    route=0                          # <- the receiver echoes it back
   ```
 - Scope route state to interested origins, not the CDN's whole node table.
   Send a route before any announcement referencing it. The handoff contract
@@ -111,8 +117,9 @@ The handoff contract below, decided 2026-10-16, settles claim freshness:
   `reconnect_without_restart_needs_a_seqno_advance`). A random identity alone
   does not keep a dead incarnation away. What bounds it is ordered sessions,
   state scoped to the session that delivered it, never advertising an
-  unreachable route, and keeping the feasibility distance through
-  collection: a collected incarnation then reappears only from a
+  unreachable route, and keeping the feasibility distance until every
+  ROUTE_END it sent is echoed back: a collected incarnation then reappears
+  only from a
   message already in flight on a live session, which delivers the retraction
   next (`collected_incarnation_returns_only_while_its_retraction_is_in_flight`).
   `cluster.id` stops naming a routing identity.
@@ -271,7 +278,7 @@ The handoff contract below, decided 2026-10-16, settles claim freshness:
   Clients receive only authorized, interested claims; opaque ids expose no
   backbone addresses, but are not themselves authorization. A client
   advertises nothing it receives, so it holds no feasibility distance and
-  falls back from P2P to the CDN at once.
+  falls back from P2P to the CDN at once. It still echoes every ROUTE_END.
 - Mixed versions: a lite-06 peer keeps today's path vector, translated at the
   relay that speaks both, for the rollout window only.
 
@@ -324,17 +331,24 @@ loss never reports an END:
   (`holds_retire_once_nothing_can_recover`). No promise is made of learning a
   withdrawal during a partition.
 - A node may collect an identity's views and floors once it holds no route
-  entry for it; correctness does not depend on when. It keeps the
-  feasibility distance: an echo of its own advertisement can still wait on
-  any session, and dropping the distance lets that echo form a loop
-  (`collection_keeps_the_feasibility_distance_against_a_queued_echo`).
+  entry for it; correctness does not depend on when. It drops the
+  feasibility distance once it also advertises the identity nowhere and
+  every neighbour has echoed each ROUTE_END it sent, or closed. Until then
+  an advertisement derived from its own can still wait on some session, and
+  accepting it loops; once all echoes are back no node holds its
+  advertisement, so dropping the distance is as safe as a fresh node joining
+  (`collection_keeps_the_feasibility_distance_against_a_queued_echo`). The
+  echo is per neighbour, not a diffusing computation: every other node
+  keeps its own distance. A stale route accepted after the drain dead-ends at
+  a node that let go, like any collected incarnation.
   After collection, or a process restart, a stale view returns only from a
   sender that has not yet received the withdrawal, and only until it does
   (`stale_replay_after_collection_lasts_only_until_the_withdrawal_behind_it`).
   Retained state is each session's last view, one merged view per held
-  identity with a floor per watched prefix, and one pending request per
-  origin; withdrawal history leaves nothing. One claim change costs one batch
-  per session carrying the route and one event per watching node
+  identity with a floor per watched prefix, one pending request per origin,
+  and a feasibility distance only while an identity is routed, advertised,
+  or draining; withdrawal history leaves nothing. One claim change costs one
+  batch per session carrying the route and one event per watching node
   (`announcement_cost_follows_sessions_and_live_claims`). Without split
   horizon a relay echoes an origin's claims back to it.
 - A fresh identity per restart also starts a fresh revision space; reusing
@@ -356,14 +370,14 @@ loss never reports an END:
 
   | Rule | Revivals | False ENDs | Re-announcements | Reader events | Claim KiB |
   | --- | --- | --- | --- | --- | --- |
-  | Next-hop authority | 373 | 444 | 376 | 8982 | 830 |
-  | Snapshot barrier | 224 | 163 | 249 | 9235 | 801 |
-  | Merged floors | 0 | 0 | 35 | 9203 | 779 |
+  | Next-hop authority | 383 | 445 | 391 | 9014 | 833 |
+  | Snapshot barrier | 238 | 173 | 265 | 9292 | 804 |
+  | Merged floors | 0 | 0 | 35 | 9199 | 779 |
 
   Merged floors' re-announcements follow an offline period or a collection,
   never a known withdrawal. Byte counts are estimates in virtual time.
 
-Decisions from the handoff proof, 1 to 5 settled with the maintainer 2026-10-16:
+Decided with the maintainer 2026-10-16, from the handoff proof:
 
 1. Floor encoding: ✅ ANNOUNCE_FLOOR (Route ID, revision) closes each batch,
    and ANNOUNCEs carry no revision. Rejected: a revision on every ANNOUNCE,
@@ -382,28 +396,30 @@ Decisions from the handoff proof, 1 to 5 settled with the maintainer 2026-10-16:
    entry remains, held entries included. `sweep_handoff` checks selected
    routes stay loop-free at every step; collecting while a neighbor's entry
    remains loops at once. Rejected: Babel's source GC timer.
-   Revised 2026-10-16 after review: the feasibility distance is not
-   collected. An empty route table does not prove that an echo of the node's
-   own advertisement has drained from every session, and accepting that echo
-   loops (`collection_keeps_the_feasibility_distance_against_a_queued_echo`).
-   Its growth is decision 6.
+   Revised after review: an empty route table does not prove that an echo of
+   the node's own advertisement has drained from every session, and
+   accepting that echo loops
+   (`collection_keeps_the_feasibility_distance_against_a_queued_echo`), so
+   the feasibility distance waits for decision 6.
 5. Seqno requests: ✅ one pending request per origin at every hop, resent on
    a next-hop change, with no timer and no hop count. Rejected: the
    bounded-retry sketch, which strands a quiet origin's node.
-6. Feasibility-distance retention: blocking, for the maintainer. Kept
-   through collection, the distance is a seqno and metric per identity the
-   node ever advertised, so it grows with identity churn (a fresh identity
-   per process or tab start) until the process restarts.
-   - (a) Accept it: about 16 bytes per dead identity, with no wire change.
-   - (b) A drain proof: a diffusing ack on ROUTE_END, sent only once every
-     route derived from the sender's advertisement has acked in turn, after
-     which the distance is dropped. A wire change, and a per-neighbor ack
-     alone is not enough, since an echo can return through other sessions.
-   - (c) A timer, as Babel's source GC does. It assumes stale echoes are gone
-     by then rather than proving it, which runs against the rule against
-     timeouts standing in for correctness.
-   - Recommendation: (a), then measure retained bytes per relay under
-     realistic churn before considering (b).
+6. Feasibility-distance retention: ✅ drain it. A receiver echoes every
+   ROUTE_END back on the same stream once applied, and a node drops the
+   distance once it routes and advertises the identity nowhere and every
+   echo is back, a closed session counting as one. Reusing ROUTE_END adds no
+   message type. The neighbour's own ROUTE_END cannot be the reply: a client
+   or a node whose copy is infeasible never starts a route back, so the
+   distance would leak for every identity sent to a client. A per-neighbour
+   echo is enough, with no diffusing computation: once none holds the
+   advertisement, no node selects through this one, and every other node
+   keeps its own distance. `sweep_handoff` interleaves echoes freely with
+   routes, stays loop-free at every step, and leaves no distance for a dead
+   identity; dropping the distance before the echoes return fails the queued
+   echo fixture. Rejected: keeping the distance forever, which grows with
+   publisher churn times uptime on every relay that saw an identity, about
+   16 bytes each, until a restart; and Babel's source GC timer, which
+   assumes stale echoes are gone by then rather than proving it.
 
 Why not a hold-down: #4644 retracted at once and re-announced a replacement
 after 1 s, which ended a downstream front whose only path ran through the
