@@ -456,6 +456,7 @@
     "test/wasm": {
       "name": "@moq/wasm-test",
       "dependencies": {
+        "@moq/clock": "workspace:*",
         "@moq/net": "workspace:*",
         "@moq/wasm": "workspace:*",
       },
