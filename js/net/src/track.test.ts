@@ -2402,14 +2402,30 @@ test("an explicit start floors an untimed track", () => {
 test("explicit and producer-cut drops survive outside the group cache", async () => {
 	const producer = new TrackProducer("video").accept({});
 	const reader = producer.subscribe({ maxDelay: Milli(60_000) });
-	hooks.dropTrackGroup(producer, 3);
-	expect(hooks.tryRecvGroup(reader, true)).toEqual({ kind: "drop", sequence: 3 });
+	hooks.dropTrackGroups(producer, 3, 4);
+	expect(hooks.tryRecvGroup(reader, true)).toEqual({ kind: "drop", start: 3, end: 4 });
 
 	const group = new GroupProducer(4);
 	producer.writeGroup(group);
 	group.close(new Error("cut"));
 	await settle();
-	expect(hooks.tryRecvGroup(reader, true)).toEqual({ kind: "drop", sequence: 4 });
+	expect(hooks.tryRecvGroup(reader, true)).toEqual({ kind: "drop", start: 4, end: 5 });
+
+	reader.close();
+	producer.close();
+});
+
+test("a wide drop is held and reported as one run", () => {
+	const producer = new TrackProducer("video").accept({});
+	const reader = producer.subscribe({ maxDelay: Milli(60_000) });
+	hooks.dropTrackGroups(producer, 2, 2 ** 40);
+	expect(hooks.tryRecvGroup(reader, true)).toEqual({ kind: "drop", start: 2, end: 2 ** 40 });
+
+	// A wider drop reports only what this cursor has not reported yet.
+	hooks.dropTrackGroups(producer, 1, 2 ** 40 + 2);
+	expect(hooks.tryRecvGroup(reader, true)).toEqual({ kind: "drop", start: 1, end: 2 });
+	expect(hooks.tryRecvGroup(reader, true)).toEqual({ kind: "drop", start: 2 ** 40, end: 2 ** 40 + 2 });
+	expect(hooks.tryRecvGroup(reader, true)).toEqual({ kind: "idle" });
 
 	reader.close();
 	producer.close();

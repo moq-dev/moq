@@ -11,7 +11,10 @@ import {
 	finalSequence,
 	groupBounds,
 	hooks,
+	insertRun,
 	type Recv,
+	type Run,
+	runGaps,
 	type TrackRequestOptions,
 	type TrackSequence,
 	type TrackSequences,
@@ -393,9 +396,10 @@ class TrackState {
 	/** The producer fanning into this sink, so a subscriber can mint a sibling of itself. */
 	producer?: Producer;
 	groups = new Signal<GroupConsumer[]>([]);
-	// Explicit upstream drops live outside the cache, so reclaim cannot erase a
-	// disposition a downstream publisher still has to forward.
-	drops = new Signal<number[]>([]);
+	// Sequences the upstream publisher gave up: an incoming SUBSCRIBE_DROP or a producer
+	// cut. Kept apart from the cache so reclaim cannot erase a disposition a downstream
+	// publisher still has to forward, and as runs so a wide DROP costs one entry.
+	drops = new Signal<Run[]>([]);
 	// Every group still in the producer's replay cache, including groups this
 	// subscriber already consumed, sorted by sequence. Drift anchors have the same
 	// lifetime as content. Sorted so the latency guard, evaluated per group and per
@@ -600,20 +604,12 @@ export class Producer {
 		};
 		hooks.bindSequence = bindProducerSequence;
 		hooks.cachedLargest = (producer) => producer.#largest();
-		hooks.dropTrackGroup = (producer, sequence) => producer.#drop(sequence);
+		hooks.dropTrackGroups = (producer, start, end) => producer.#drop(start, end);
 	}
 
-	#drop(sequence: number): void {
-		this.#recordDrop(this.#state, sequence);
-		for (const sink of this.#sinks) this.#recordDrop(sink, sequence);
-	}
-
-	#recordDrop(state: TrackState, sequence: number): void {
-		state.drops.mutate((drops) => {
-			if (drops.includes(sequence)) return;
-			drops.push(sequence);
-			drops.sort((a, b) => a - b);
-		});
+	#drop(start: number, end: number): void {
+		if (start >= end) return;
+		for (const state of [this.#state, ...this.#sinks]) state.drops.mutate((drops) => insertRun(drops, start, end));
 	}
 
 	/**
@@ -745,7 +741,7 @@ export class Producer {
 
 		this.#prune();
 		for (const entry of this.#cache) this.#mirror(entry, sink);
-		for (const sequence of this.#state.drops.peek()) this.#recordDrop(sink, sequence);
+		sink.drops.set(this.#state.drops.peek().map((run) => ({ ...run })));
 
 		sink.received.set(this.#received);
 		sink.end.set(this.#state.end.peek());
@@ -910,7 +906,8 @@ export class Producer {
 	#publish(group: GroupProducer): void {
 		const entry: CachedGroup = { group, mirrors: new Map<TrackState, GroupConsumer>(), arrived: performance.now() };
 		group.closed.then((closed) => {
-			if (closed instanceof Error && !(closed instanceof TooFarBehind)) this.#drop(group.sequence);
+			if (closed instanceof Error && !(closed instanceof TooFarBehind))
+				this.#drop(group.sequence, group.sequence + 1);
 		});
 		this.#cache.push(entry);
 		this.#cached.set(group.sequence, entry);
@@ -1196,9 +1193,9 @@ export class Subscriber {
 	// it to sequence order; whichever wins is the only one allowed from here on.
 	// Datagrams are a separate cursor and never commit.
 	#mode?: "arrival" | "ordered";
-	// Drop notifications are persistent track state, so remember which ones this
-	// subscription already forwarded without removing them for other subscribers.
-	#reportedDrops = new Set<number>();
+	// Drops are persistent track state, so remember which sequences this subscription
+	// already reported without removing them for other subscribers.
+	#reported: Run[] = [];
 	// The group the frame-level helpers are currently draining, acquired through the
 	// sequence cursor so frame reads and {@link Ordered.nextGroup} share one floor.
 	#frameGroup?: GroupConsumer;
@@ -1571,27 +1568,29 @@ export class Subscriber {
 	// Package-internal synchronous half of recvGroup. The lite publisher uses this so applying
 	// control state, popping the group, and positioning its frames are one JavaScript turn.
 	#tryRecvGroup(dispositions = false): Recv {
+		// The first part of `[from, to)` this cursor has not reported yet, now reported.
+		const report = (from: number, to: number): Recv | undefined => {
+			if (!dispositions) return undefined;
+			const [gap] = runGaps(this.#reported, from, to);
+			if (!gap) return undefined;
+			insertRun(this.#reported, gap.start, gap.end);
+			return { kind: "drop", ...gap };
+		};
+
 		const groups = this.#state.groups.peek();
 		const { start, end } = this.#cursor.peek();
 		while (groups.length > 0 && groups[0].sequence < start) {
 			const skipped = groups.shift();
 			if (!skipped) break;
-			const sequence = skipped.sequence;
 			skipped.close();
-			if (dispositions && !this.#reportedDrops.has(sequence)) {
-				this.#reportedDrops.add(sequence);
-				return { kind: "drop", sequence };
-			}
+			const dropped = report(skipped.sequence, skipped.sequence + 1);
+			if (dropped) return dropped;
 		}
-		for (const sequence of this.#state.drops.peek()) {
-			if (
-				sequence >= start &&
-				(end === undefined || sequence < end) &&
-				dispositions &&
-				!this.#reportedDrops.has(sequence)
-			) {
-				this.#reportedDrops.add(sequence);
-				return { kind: "drop", sequence };
+		if (dispositions) {
+			for (const run of this.#state.drops.peek()) {
+				if (end !== undefined && run.start >= end) break;
+				const dropped = report(Math.max(run.start, start), Math.min(run.end, end ?? run.end));
+				if (dropped) return dropped;
 			}
 		}
 		const drift = this.#drift();
@@ -1602,20 +1601,15 @@ export class Subscriber {
 			const group = groups[0];
 			if (!group || (end !== undefined && group.sequence >= end)) break;
 			groups.shift();
-			const abort = group.closed.peek();
-			if (dispositions && abort instanceof Error) {
-				if (dispositions && !this.#reportedDrops.has(group.sequence)) {
-					this.#reportedDrops.add(group.sequence);
-					return { kind: "drop", sequence: group.sequence };
-				}
+			if (dispositions && group.closed.peek() instanceof Error) {
+				const dropped = report(group.sequence, group.sequence + 1);
+				if (dropped) return dropped;
 				continue;
 			}
 			if (this.#isStale(group, drift)) {
 				group.close();
-				if (dispositions && !this.#reportedDrops.has(group.sequence)) {
-					this.#reportedDrops.add(group.sequence);
-					return { kind: "drop", sequence: group.sequence };
-				}
+				const dropped = report(group.sequence, group.sequence + 1);
+				if (dropped) return dropped;
 				continue;
 			}
 			return { kind: "group", group: this.#guard(group) };

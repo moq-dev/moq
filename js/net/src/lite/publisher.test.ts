@@ -17,7 +17,13 @@ import { Fetch } from "./fetch.ts";
 import { Group as GroupMessage } from "./group.ts";
 import { Probe as ProbeMessage } from "./probe.ts";
 import { Publisher } from "./publisher.ts";
-import { decodeSubscribeResponse, Subscribe, type SubscribeEnd, SubscribeUpdate } from "./subscribe.ts";
+import {
+	decodeSubscribeResponse,
+	decodeSubscribeResponseMaybe,
+	Subscribe,
+	type SubscribeEnd,
+	SubscribeUpdate,
+} from "./subscribe.ts";
 import { Track as TrackMessage } from "./track.ts";
 import { ALPN_05, ALPN_06, ALPN_07_WIP, Version } from "./version.ts";
 
@@ -692,6 +698,57 @@ test("lite draft-05: a late-arriving older group is still served", async () => {
 		// Group 2 lands after group 3 was already served.
 		sub.serve(2);
 		expect(await sub.servedSequence()).toBe(2);
+	} finally {
+		await sub.close();
+	}
+});
+
+// The SUBSCRIBE_DROP ranges, inclusive, a subscribe stream carried up to its FIN.
+async function drops(reader: Reader, version: Version): Promise<[number, number][]> {
+	const ranges: [number, number][] = [];
+	for (;;) {
+		const resp = await decodeSubscribeResponseMaybe(reader, version);
+		if (!resp) return ranges;
+		if ("drop" in resp) ranges.push([resp.drop.start, resp.drop.end]);
+	}
+}
+
+// A cut group is dropped as soon as the publisher gives it up, and the end sweep does not
+// name it again.
+test("lite draft-06: a cut group is dropped early, once", async () => {
+	const sub = await servedSubscription({ version: Version.DRAFT_06, startGroup: 0 });
+	try {
+		sub.serve(0);
+		expect(await sub.servedSequence()).toBe(0);
+		expect("start" in (await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_06))).toBe(true);
+
+		const cut = new GroupProducer(1);
+		sub.track.writeGroup(cut);
+		cut.close(new Error("cut"));
+		const resp = await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_06);
+		if (!("drop" in resp)) throw new Error("expected SUBSCRIBE_DROP");
+		expect([resp.drop.start, resp.drop.end]).toEqual([1, 1]);
+
+		sub.serve(2);
+		expect(await sub.servedSequence()).toBe(2);
+		sub.track.close();
+		expect(await drops(sub.client.reader, Version.DRAFT_06)).toEqual([]);
+	} finally {
+		await sub.close();
+	}
+});
+
+// An update that lowers the start below SUBSCRIBE_START asks for those groups too, so the
+// end sweep drops them, as the Rust publisher does.
+test("lite draft-06: an update lowering the start is swept at the end", async () => {
+	const sub = await servedSubscription({ version: Version.DRAFT_06, startGroup: 5 });
+	try {
+		sub.serve(5);
+		expect(await sub.servedSequence()).toBe(5);
+		await replayUpdate({ priority: 0, startGroup: 2 }).encode(sub.client.writer, Version.DRAFT_06);
+		await flush();
+		sub.track.close();
+		expect(await drops(sub.client.reader, Version.DRAFT_06)).toEqual([[2, 4]]);
 	} finally {
 		await sub.close();
 	}

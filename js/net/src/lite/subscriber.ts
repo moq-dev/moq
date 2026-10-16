@@ -1183,9 +1183,7 @@ export class Subscriber {
 				}
 			} else if ("drop" in resp) {
 				entry.tail.account(resp.drop.start, resp.drop.end + 1);
-				for (let sequence = resp.drop.start; sequence <= resp.drop.end; sequence++) {
-					hooks.dropTrackGroup(entry.track, sequence);
-				}
+				hooks.dropTrackGroups(entry.track, resp.drop.start, resp.drop.end + 1);
 			}
 		}
 	}

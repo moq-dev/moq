@@ -375,9 +375,9 @@ impl Subscriber {
 		}
 	}
 
-	/// Poll for an explicit drop from the serving copy.
+	/// Poll for sequences the serving copy gave up; see [`track::Subscriber::poll_drop`].
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
-	pub(crate) fn poll_drop(&mut self, waiter: &kio::Waiter) -> Poll<u64> {
+	pub(crate) fn poll_drop(&mut self, waiter: &kio::Waiter) -> Poll<std::ops::Range<u64>> {
 		let mut reader = self.reader();
 		let sub = ready!(reader.poll_serving(waiter));
 		match sub {

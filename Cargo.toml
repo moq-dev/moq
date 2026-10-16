@@ -211,6 +211,7 @@ percent-encoding = "2"
 pollster = "1.0"
 qmux = { version = "0.6.3", default-features = false }
 rand = "0.10.1"
+rangemap = "1.8"
 # default-features off so each consumer picks its own TLS backend and body
 # features; nothing here wants the default native-tls stack.
 reqwest = { version = "0.13", default-features = false }

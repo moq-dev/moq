@@ -47,9 +47,6 @@ pub(crate) struct Tail {
 	// final: a later, longer grace or a lowered floor cannot reopen it.
 	runs: Vec<Run>,
 	grace: Duration,
-	// Subscribers fold missing streams after grace. Publishers retain gaps until
-	// their end sweep can name every never-arrived sequence.
-	fold: bool,
 	streams: u64,
 	// Streams whose header arrived and that are still being read.
 	active: u64,
@@ -68,7 +65,6 @@ impl Default for Tail {
 		Self {
 			runs: Vec::new(),
 			grace: GRACE,
-			fold: true,
 			streams: 0,
 			active: 0,
 			waiting: Default::default(),
@@ -81,15 +77,6 @@ impl Tail {
 	pub fn new(grace: Duration) -> Self {
 		Self {
 			grace,
-			..Self::default()
-		}
-	}
-
-	/// A publisher ledger that never infers a missing group was delivered.
-	pub fn persistent(grace: Duration) -> Self {
-		Self {
-			grace,
-			fold: false,
 			..Self::default()
 		}
 	}
@@ -145,9 +132,6 @@ impl Tail {
 
 	/// Fold every gap older than the grace into the runs around it.
 	pub fn expire(&mut self, now: Instant) {
-		if !self.fold {
-			return;
-		}
 		let grace = self.grace;
 		for (gap, at) in self.folds() {
 			if at <= now {
@@ -218,25 +202,6 @@ impl Tail {
 			}
 			Some((gap, run.since.checked_add(self.grace)?))
 		})
-	}
-
-	/// The runs of `groups` not accounted for, in order.
-	pub fn gaps(&self, groups: Range<u64>) -> Vec<Range<u64>> {
-		let mut gaps = Vec::new();
-		let mut next = groups.start;
-		for run in &self.runs {
-			if next >= groups.end {
-				break;
-			}
-			if run.groups.start > next {
-				gaps.push(next..run.groups.start.min(groups.end));
-			}
-			next = next.max(run.groups.end);
-		}
-		if next < groups.end {
-			gaps.push(next..groups.end);
-		}
-		gaps
 	}
 
 	/// Data streams received, whether they finished or were reset.
