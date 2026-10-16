@@ -14,9 +14,12 @@ an inline fix.
 
 Decided in the 2026-10-16 plan with the maintainer:
 
-- **Baseline is `origin/main` at b30289127**, before the open rewrites
+- **Baseline is `origin/main` at b30289127**, before the rewrites
   (#5711 scheduler, #5690 reliable reset, #5735 receive memory, #5688
-  shard, #5674 peer limits) merge. The net lands first so each rewrite can
+  shard, #5674 peer limits) merge. #5690 and #5688 merged while this was
+  planned, so they take the merged-first comparison in
+  [the benchmarks](/quest/m1/quic/coverage/bench.md) and the
+  characterization tests are written against b30289127, then rebased. The net lands first so each rewrite can
   compare against it: benchmarks via `just bench` against the commit that
   lands them (Criterion only compares cases present at the base), tests by
   rebasing, where every behavior change shows up as a failing test to
