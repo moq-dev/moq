@@ -81,6 +81,7 @@ pub struct Relay {
 	stats: moq_stats::Producer,
 	internal: internal::Internal,
 	web: web::Web,
+	stun: Option<crate::stun::Server>,
 	addr: Option<std::net::SocketAddr>,
 	shutdown: shutdown::Observer,
 	shutdown_trigger: shutdown::Trigger,
@@ -306,6 +307,8 @@ impl Relay {
 		// starts them on its first accept.
 		let server = server.bind().await.context("failed to bind listeners")?;
 
+		let stun = crate::stun::Server::bind(config.stun).await?;
+
 		// Internal (ops) listener (plain HTTP, opt-in via `--internal-listen`) for
 		// /metrics + /health + /nodes, separate from the customer-facing web server. No-op
 		// when unconfigured. Every listener that performs a real accept(2) reports here,
@@ -319,6 +322,7 @@ impl Relay {
 			.with_listeners(web.accept_health())
 			.with_listeners(server.accept_health())
 			.bind()?;
+		let internal = internal.with_stun(stun.as_ref().map(|stun| stun.counters.clone()));
 		// Bound but not yet serving: registering here (rather than after the
 		// threads start) is what gives every worker a series from the first
 		// scrape, including one that is about to fail setup.
@@ -346,6 +350,7 @@ impl Relay {
 			stats,
 			internal,
 			web,
+			stun,
 			addr,
 			shutdown,
 			shutdown_trigger,
@@ -515,6 +520,7 @@ impl Relay {
 			cluster,
 			internal,
 			web,
+			stun,
 			shutdown,
 			shutdown_trigger,
 			signals,
@@ -662,9 +668,16 @@ impl Relay {
 			}
 		};
 
+		let stun = async move {
+			match stun {
+				Some(stun) => stun.run().await,
+				None => std::future::pending().await,
+			}
+		};
 		let result = tokio::select! {
 			Err(err) = started.run() => Err(err).context("cluster failed"),
 			Err(err) = web.serve(web_routes) => Err(err).context("web server failed"),
+			Err(err) = stun => Err(err).context("STUN server failed"),
 			Err(err) = internal.serve(internal_routes) => Err(err).context("internal server failed"),
 			Err(err) = serve_shared => Err(err).context("server failed"),
 			Err(err) = quic_workers => Err(err).context("QUIC workers failed"),
@@ -812,6 +825,34 @@ async fn serve_listening(
 
 #[cfg(test)]
 mod tests {
+	#[tokio::test]
+	async fn stun_listener_runs_with_the_relay_and_stops_with_it() {
+		use stun_types::message::{BINDING, Message, MessageWriteVec};
+		use stun_types::prelude::*;
+		let mut config = crate::Config::default();
+		config.listen.tcp.bind = Some("127.0.0.1:0".parse().unwrap());
+		config.stun.bind = Some("127.0.0.1:0".parse().unwrap());
+		let mut relay = super::Relay::load(config).await.unwrap().with_signals(false);
+		let _admissions = relay.admissions().unwrap();
+		let addr = relay.stun.as_ref().unwrap().addr();
+		let ready = relay.ready();
+		let shutdown = relay.shutdown_trigger().clone();
+		let running = tokio::spawn(relay.run());
+		ready.wait().await.unwrap();
+		let client = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+		let request = Message::builder_request(BINDING, MessageWriteVec::new()).finish();
+		client.send_to(&request, addr).await.unwrap();
+		let mut reply = [0; 44];
+		let (len, sender) = tokio::time::timeout(std::time::Duration::from_secs(5), client.recv_from(&mut reply))
+			.await
+			.unwrap()
+			.unwrap();
+		assert_eq!(sender, addr);
+		assert_eq!(len, 32);
+		shutdown.start();
+		running.await.unwrap().unwrap();
+	}
+
 	#[tokio::test(start_paused = true)]
 	async fn pending_handshake_cannot_extend_the_drain_deadline() {
 		use futures::FutureExt;

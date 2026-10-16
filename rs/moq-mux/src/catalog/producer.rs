@@ -1729,6 +1729,56 @@ mod test {
 		assert_eq!(snapshot.clock, catalog.clock().wall());
 	}
 
+	#[test]
+	fn sibling_broadcasts_share_a_clock_and_capture_time() {
+		use std::time::{Duration, Instant, SystemTime};
+
+		let captured = Instant::now();
+		let wall = SystemTime::UNIX_EPOCH + Duration::from_millis(hang::catalog::MOQ_EPOCH_UNIX_MILLIS + 60_000);
+		let clock = crate::Clock::at(captured, wall).unwrap();
+		let (origin, _driver) = moq_net::origin::Producer::new(Default::default());
+		let mut front = origin.create_broadcast("robot/front.hang").unwrap();
+		let mut rear = origin.create_broadcast("robot/rear.hang").unwrap();
+		let catalogs = [
+			Producer::new(&mut front, Config::default().with_clock(clock)).unwrap(),
+			Producer::new(&mut rear, Config::default().with_clock(clock)).unwrap(),
+		];
+		let mut broadcasts = [front, rear];
+		for (catalog, broadcast) in catalogs.iter().zip(&mut broadcasts) {
+			assert_eq!(catalog.snapshot().clock, clock.wall());
+			let timestamp = catalog.clock().capture(captured).unwrap();
+			let track = broadcast
+				.create_track("video", catalog.track_info(hang::catalog::PRIORITY.video))
+				.unwrap();
+			let mut video = catalog
+				.video(
+					track,
+					crate::catalog::hang::Container::Legacy(crate::container::Kind::Video),
+					VideoConfig::new(hang::catalog::VideoCodec::VP8),
+				)
+				.unwrap();
+			let mut consumer = video.consume();
+			video
+				.write(crate::container::Frame {
+					timestamp,
+					duration: None,
+					payload: Bytes::from_static(b"keyframe"),
+					keyframe: true,
+				})
+				.unwrap();
+			let waiter = kio::Waiter::noop();
+			let Poll::Ready(Ok(Some(mut group))) = consumer.poll_recv_group(&waiter) else {
+				panic!("captured group is published");
+			};
+			let Poll::Ready(Ok(Some(frame))) = group.poll_read_frame(&waiter) else {
+				panic!("captured frame is published");
+			};
+			let timestamp = frame.timestamp.expect("captured frame is timed");
+			assert_eq!(catalog.clock().wall_clock(timestamp).unwrap(), wall);
+			assert_eq!(catalog.snapshot().clock.unwrap().wall_clock(timestamp).unwrap(), wall);
+		}
+	}
+
 	/// How far `pts` lands from `clock`'s reading now, which is zero for a frame live on arrival.
 	fn lateness(clock: crate::Clock, pts: moq_net::Timestamp) -> std::time::Duration {
 		let now = clock.now().as_micros();

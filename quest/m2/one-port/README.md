@@ -75,7 +75,7 @@ decided.
 Decided 2026-10-08: the public STUN responder is left to P2P (m1), its
 only consumer. Here, a Binding request carrying USERNAME is an ICE check
 and goes to WebRTC; any other is dropped and counted. Decided 2026-10-13:
-the responder binds its own port ([relay STUN](/quest/m1/p2p/relay-stun.md)),
+the responder binds its own port ([relay STUN](/doc/bin/relay/config.md#stun)),
 so the shared port never answers public Binding requests.
 
 ### TCP
@@ -100,6 +100,5 @@ pre-accepted streams can stand behind.
 
 - [UDP demux](/quest/m1/p2p/udp-demux.md) - one socket carries QUIC, with a WebRTC hook for embedders; moved to m1 for native P2P
 - [Steer only QUIC by connection ID](/quest/m1/p2p/shard-steering.md) - QUIC-bit greasing goes off and the reuseport filter leaves RTP, SRT, and STUN flows on one shard each
-- [Relay STUN](/quest/m1/p2p/relay-stun.md) - the public STUN responder, on its own port
 - [One port on the io_uring workers](/quest/m2/uring-demux.md) - the io_uring workers host the UDP demux
 - [Stream sessions](/quest/m3/uring-tcp/README.md) - the io_uring workers that would host the TCP acceptor later

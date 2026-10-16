@@ -30,6 +30,29 @@ const audioConfig: Catalog.AudioConfig = {
 	container: { kind: "legacy" },
 };
 
+test("sibling broadcasts on one page advertise the same capture clock", async () => {
+	const origin = new Origin.Producer();
+	const camera = new Broadcast({ enabled: true, origin, name: Path.from("participant/camera.hang") });
+	const screen = new Broadcast({ enabled: true, origin, name: Path.from("participant/screen.hang") });
+	try {
+		camera.video("video").config.set(videoConfig);
+		screen.video("video").config.set(videoConfig);
+		await settle();
+		const cameraClock = (await readCatalog(camera))?.clock;
+		const screenClock = (await readCatalog(screen))?.clock;
+		if (!cameraClock || !screenClock) throw new Error("siblings must advertise their page clock");
+		expect(cameraClock).toEqual(screenClock);
+		const captured = 1_000_000;
+		expect(Catalog.wallClockTime(cameraClock, captured, 1_000_000)).toEqual(
+			Catalog.wallClockTime(screenClock, captured, 1_000_000),
+		);
+	} finally {
+		camera.close();
+		screen.close();
+		origin.close();
+	}
+});
+
 test("folds video and audio renditions into the catalog by full track name", async () => {
 	const broadcast = new Broadcast({ enabled: true, display: { width: 1920, height: 1080 }, flip: true });
 

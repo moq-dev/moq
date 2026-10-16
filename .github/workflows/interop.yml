@@ -15,6 +15,8 @@ on:
   pull_request:
     paths:
       - "test/lib/**"
+      - "test/p2p/**"
+      - "js/p2p/**"
       - "test/interop/**"
       - "test/max-age/**"
       - "test/portrait/**"
@@ -100,6 +102,11 @@ jobs:
       - name: Subscription termination interop
         if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
         run: nix develop --command just test bare-fin
+        shell: bash -leo pipefail {0}
+
+      - name: P2P data-channel transport
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        run: nix develop --command just test p2p
         shell: bash -leo pipefail {0}
 
       - name: Interop (full matrix)

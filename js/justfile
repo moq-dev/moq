@@ -106,3 +106,8 @@ clock-bench:
 audio-warmup-bench:
     bun install --frozen-lockfile
     bun watch/bench/warmup.ts
+
+# Sweep data-channel qmux stream count and payload size.
+p2p-bench:
+    bun install --frozen-lockfile
+    bun p2p/bench/transport.ts

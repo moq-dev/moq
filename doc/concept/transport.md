@@ -1,6 +1,6 @@
 ---
 title: Transport
-description: QUIC, WebTransport, the WebSocket fallback, raw QUIC, stream listeners, and iroh
+description: QUIC, WebTransport, the WebSocket fallback, raw QUIC, stream listeners, WebRTC data channels, and iroh
 ---
 
 # Transport
@@ -61,6 +61,15 @@ publishers use this to avoid UDP and certificate setup. Both listeners
 authenticate through the same JWT and public-access rules as QUIC, and the Unix
 socket can additionally allowlist the connecting process by uid, gid, or pid.
 See [stream listeners](/bin/relay/auth#stream-listeners).
+
+## WebRTC data channels (experimental)
+
+Applications that already negotiate a browser `RTCPeerConnection` can pass an
+[`@moq/p2p` transport](https://github.com/moq-dev/moq/tree/main/js/p2p) to
+`@moq/net`'s connect or accept. One reliable ordered data channel carries qmux
+records, with no datagrams. The application supplies signaling and ICE and
+keeps ownership of the peer connection; closing the transport closes only its
+channel. SCTP ordering means one lost packet can hold back every stream.
 
 ## iroh (peer-to-peer, experimental)
 
