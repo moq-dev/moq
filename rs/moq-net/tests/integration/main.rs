@@ -2,8 +2,8 @@
 //!
 //! Each `tests/*.rs` file is its own crate that links this package and its
 //! dependencies again, so add new integration tests here as a module.
-//! `loom.rs` and `wasm.rs` stay apart because they build for another cfg or
-//! target.
+//! `loom.rs`, `wasm.rs`, and `send.rs` stay apart because they build for
+//! another cfg, target, or toolchain.
 
 mod announce_covering_route;
 mod announce_to_serve;

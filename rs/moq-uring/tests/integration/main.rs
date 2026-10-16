@@ -5,6 +5,7 @@
 //! `allocations.rs` stays apart because its counting global allocator would
 //! apply to every test in the binary.
 
+mod credit;
 mod echo;
 mod ecn;
 mod endpoint;
