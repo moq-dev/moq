@@ -1,3 +1,4 @@
+import { Milli, Nano } from "@moq/clock";
 import { type Dispose, Effect, type GetPromise, type Getter, race, Signal } from "@moq/signals";
 import * as announce from "../announced.ts";
 import type { Grant } from "../auth.ts";
@@ -706,7 +707,7 @@ export class Subscriber {
 		try {
 			opened = await withTimeout(
 				untilAborted(setup, valid),
-				SUBSCRIBE_SETUP_TIMEOUT_MS,
+				Nano.fromMilli(Milli(SUBSCRIBE_SETUP_TIMEOUT_MS)),
 				`subscribe timed out after ${SUBSCRIBE_SETUP_TIMEOUT_MS}ms waiting for the first response (browser stream limit reached?)`,
 			);
 			console.debug(`subscribe ok: id=${id} broadcast=${broadcast} track=${request.name}`);
@@ -846,7 +847,7 @@ export class Subscriber {
 			// for a late group anyway. Already the smaller of the subscriber's and the track's.
 			tail: new Tail({
 				grace: () => {
-					const maxDelay = producer.subscription.peek()?.maxDelay ?? Time.Milli.zero;
+					const maxDelay = producer.subscription.peek()?.maxDelay ?? Milli.zero;
 					return maxDelay > 0 ? maxDelay : TAIL_GRACE_MS;
 				},
 			}),
@@ -931,7 +932,7 @@ export class Subscriber {
 			timescale: info.timescale,
 			// Publisher Max Age rides on the wire, so the local media-time budget
 			// matches what the upstream advertises (relays re-serve with the same bound).
-			maxAge: info.maxAge === undefined ? undefined : Time.Milli(info.maxAge),
+			maxAge: info.maxAge === undefined ? undefined : Milli(info.maxAge),
 			priority: info.priority,
 		};
 	}
@@ -1238,7 +1239,7 @@ export class Subscriber {
 		let lastSent: track.Subscription = {
 			priority: msg.priority,
 			order: msg.order,
-			maxDelay: Time.Milli(msg.maxDelay),
+			maxDelay: Milli(msg.maxDelay),
 			groups: {
 				start: msg.startGroup === undefined ? undefined : { included: msg.startGroup },
 				end: msg.endGroup === undefined ? undefined : { excluded: exclusiveGroupEnd(msg.endGroup) ?? 0 },
@@ -1484,7 +1485,7 @@ export class Subscriber {
 				if (!probe) break;
 				// Lite-03 carries no RTT; newer drafts retract it with a zero.
 				const prev = this.#probe.peek();
-				const rtt = probe.rtt !== undefined ? Time.Milli(probe.rtt) : undefined;
+				const rtt = probe.rtt !== undefined ? Milli(probe.rtt) : undefined;
 				this.#probe.set({
 					// `undefined` is the peer reporting "unknown"; a 0 would become a real ABR target.
 					estimatedRecvRate: probe.bitrate,

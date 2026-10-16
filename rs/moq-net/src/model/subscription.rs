@@ -1,6 +1,8 @@
+#[cfg(test)]
+use std::task::Poll;
+
 use std::{
 	ops::{Bound, RangeBounds, RangeFull, RangeTo, RangeToInclusive},
-	task::Poll,
 	time::Duration,
 };
 
@@ -107,14 +109,19 @@ pub struct Subscription {
 }
 
 /// A NEW_GROUP_REQUEST as one hop holds it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+///
+/// Subscribers' requests combine as the greatest: the one answered later, whose answer
+/// answers both. A value names its own answer, so a value at or past a 0's answer goes
+/// upstream in its place, and a 0 is kept only over values this hop already has. On a
+/// tie, the value says more upstream than a 0 does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct NewGroup {
-	/// The value as received, which is what goes upstream: the subscriber's largest known
-	/// group plus one, or 0 when it knows none.
-	pub value: u64,
 	/// The first group sequence that answers it here. A 0 is answered by the group after
 	/// the newest this hop held when it arrived, not by the one it is about to join.
 	pub first: u64,
+	/// The value as received, which is what goes upstream: the subscriber's largest known
+	/// group plus one, or 0 when it knows none.
+	pub value: u64,
 }
 
 impl NewGroup {
@@ -125,15 +132,7 @@ impl NewGroup {
 			(0, Some(latest)) => latest.saturating_add(1),
 			_ => value,
 		};
-		Self { value, first }
-	}
-
-	/// Two subscribers' requests as one: the one answered later, whose answer answers
-	/// both. A value names its own answer, so a value at or past a 0's answer goes upstream
-	/// in its place, and a 0 is kept only over values this hop already has.
-	fn merge(self, other: Self) -> Self {
-		// On a tie, the value says more upstream than a 0 does.
-		std::cmp::max_by_key(self, other, |request| (request.first, request.value != 0))
+		Self { first, value }
 	}
 }
 
@@ -222,6 +221,7 @@ impl Subscription {
 	// Fold this subscription into the running aggregate: Ready with the merged
 	// result when it demands more than `combined`, Pending when it's a subset
 	// (so callers can skip a redundant broadcast of the same aggregate).
+	#[cfg(test)]
 	pub(super) fn poll_combined(&self, combined: &Option<Subscription>) -> Poll<Subscription> {
 		let Some(combined) = combined else {
 			return Poll::Ready(self.clone());
@@ -240,10 +240,7 @@ impl Subscription {
 				(Order::Ascending, Order::Ascending) => Order::Ascending,
 				_ => Order::Descending,
 			},
-			new_group: match (self.new_group, combined.new_group) {
-				(Some(a), Some(b)) => Some(a.merge(b)),
-				(a, b) => a.or(b),
-			},
+			new_group: self.new_group.max(combined.new_group),
 		};
 
 		if &merged != combined {
@@ -403,6 +400,7 @@ pub(super) fn max_some<T: Ord>(a: Option<T>, b: Option<T>) -> Option<T> {
 /// The lower of two optional floors, `None` absorbing (no floor). The mirror of
 /// [`max_unbounded`]: both bounds only ever *restrict*, so a subscriber without one keeps
 /// the aggregate unrestricted.
+#[cfg(test)]
 pub(super) fn min_floored<T: Ord>(a: Option<T>, b: Option<T>) -> Option<T> {
 	match (a, b) {
 		(Some(a), Some(b)) => Some(a.min(b)),
@@ -411,6 +409,7 @@ pub(super) fn min_floored<T: Ord>(a: Option<T>, b: Option<T>) -> Option<T> {
 }
 
 /// The higher of two optional bounds, `None` absorbing (unbounded).
+#[cfg(test)]
 pub(super) fn max_unbounded<T: Ord>(a: Option<T>, b: Option<T>) -> Option<T> {
 	match (a, b) {
 		(Some(a), Some(b)) => Some(a.max(b)),
@@ -592,19 +591,19 @@ mod tests {
 		assert_eq!(zero, NewGroup { value: 0, first: 6 });
 		let nine = NewGroup::new(9, Some(5));
 		// A value past the 0's answer goes up instead, and its answer answers both.
-		assert_eq!(zero.merge(nine), nine);
-		assert_eq!(nine.merge(zero), nine);
+		assert_eq!(zero.max(nine), nine);
+		assert_eq!(nine.max(zero), nine);
 		// A value naming the 0's own answer is the same request, said precisely.
 		let six = NewGroup::new(6, Some(5));
-		assert_eq!(zero.merge(six), six);
-		assert_eq!(six.merge(zero), six);
+		assert_eq!(zero.max(six), six);
+		assert_eq!(six.max(zero), six);
 		// A value this hop already had is stale, so the 0 still asks.
 		let three = NewGroup::new(3, Some(5));
-		assert_eq!(zero.merge(three), zero);
-		assert_eq!(three.merge(zero), zero);
+		assert_eq!(zero.max(three), zero);
+		assert_eq!(three.max(zero), zero);
 		// Two 0s are answered by the later of their answers.
-		assert_eq!(zero.merge(NewGroup::new(0, Some(7))), NewGroup { value: 0, first: 8 });
+		assert_eq!(zero.max(NewGroup::new(0, Some(7))), NewGroup { value: 0, first: 8 });
 		// Otherwise the higher value.
-		assert_eq!(NewGroup::new(7, Some(5)).merge(nine), nine);
+		assert_eq!(NewGroup::new(7, Some(5)).max(nine), nine);
 	}
 }

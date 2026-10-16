@@ -21,7 +21,7 @@ export function normalizeSource(source: StreamTrack | SourceConfig): SourceConfi
  * A stream of frames from something that isn't a capture device.
  *
  * Frames are delivered in presentation order and are owned by the reader, which closes each one.
- * Stamp their timestamps against `performance.now() * 1000`, the same epoch capture uses, so audio
+ * Stamp their timestamps against `@moq/clock`'s `now()` in microseconds, the same epoch capture uses, so audio
  * and video stay in sync.
  */
 export interface FrameSource {

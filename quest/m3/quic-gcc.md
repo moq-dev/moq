@@ -34,10 +34,6 @@ bottleneck rates. State the boundary beside the result: netem cannot
 establish behavior against production cross traffic or real wifi and
 cellular loss.
 
-## Required
-
-- [Hard fork](/quest/m1/quic/fork/README.md) - the extension lands in `moq-quic`
-
 ## Related
 
 - [Per-stream deadlines](/quest/m2/quic-deadline.md) - the forward-delay estimate this measures against

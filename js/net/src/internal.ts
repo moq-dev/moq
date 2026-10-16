@@ -5,6 +5,7 @@
  *
  * @module
  */
+import type { Instant } from "@moq/clock";
 import type { Dispose, Getter } from "@moq/signals";
 import type { Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
 import type * as Epoch from "./epoch.ts";
@@ -223,10 +224,10 @@ export const hooks: {
 	/** Return a group's first timestamp, retained even after its first frame is read. */
 	groupTimestamp: (group: GroupConsumer) => Timestamp | undefined;
 	groupLatest: (group: GroupConsumer) => Timestamp | undefined;
-	/** Return when a group joined its track at this hop, in `performance.now()` milliseconds. */
-	groupArrived: (group: GroupConsumer) => number;
+	/** Return when a group joined its track at this hop, on the installed clock. */
+	groupArrived: (group: GroupConsumer) => Instant;
 	/** Record when a track's mirror of a group joined that track at this hop. */
-	arriveGroup: (group: GroupConsumer, at: number) => void;
+	arriveGroup: (group: GroupConsumer, at: Instant) => void;
 	/** Keep applying a subscription's drift policy after it hands a group out. */
 	expireGroup: (
 		group: GroupConsumer,
