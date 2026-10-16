@@ -196,122 +196,6 @@ struct Relay {
 	objects: VecDeque<Option<Arc<super::object::Fields>>>,
 	// Heap charged for this box, its fields, and the terminal object.
 	bytes: u64,
-	// The moq-transport subgroups other than 0, in arrival order. Its own channel, so a
-	// reader watching for the next one is not woken by every frame of subgroup 0.
-	subgroups: Option<kio::Producer<Subgroups>>,
-	// Whether subgroup 0, the public frames, arrived, is still expected, or never came.
-	zero: Zero,
-	// How many leading `subgroups` are known to have ended, while subgroup 0 is pending.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
-	settled: usize,
-	// The size limit every subgroup of the group shares, once it has more than one.
-	family: Option<Arc<Family>>,
-	// What this subgroup last reserved from `family`.
-	reserved: Usage,
-	// A subgroup other than 0, which also reserves its fixed overhead from `family`.
-	nested: bool,
-}
-
-/// Whether a relayed group's subgroup 0 exists.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-enum Zero {
-	/// Its frames are the group's public frames.
-	#[default]
-	Present,
-	/// Another subgroup opened the group first, and subgroup 0 may still come.
-	Pending,
-	/// Every other subgroup ended without it, so the group finished empty.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
-	Absent,
-}
-
-/// The moq-transport subgroups other than 0 that a relayed group carries.
-///
-/// Each is a group of its own, never inserted into the track, holding that subgroup's
-/// objects with their IDs, properties, end status, and header bits. Plain readers never
-/// see them.
-#[derive(Default)]
-pub(crate) struct Subgroups {
-	list: Vec<(u64, Box<dyn Subgroup>)>,
-	// The IDs in `list`, so refusing a duplicate does not scan it.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
-	ids: std::collections::HashSet<u64>,
-}
-
-/// How a moq-transport subgroup stream joins its group.
-#[cfg(feature = "async")]
-pub(crate) enum Relayed {
-	/// It writes the group's public frames.
-	Public(Producer),
-	/// It is kept beside them in a subgroup of its own, opened with [`Producer::subgroup`].
-	Beside(Producer),
-}
-
-/// Reads a relayed group's subgroups other than 0 as they arrive.
-#[cfg(feature = "async")]
-pub(crate) struct SubgroupReader {
-	subgroups: kio::Consumer<Subgroups>,
-	seen: usize,
-	expiry: Option<Arc<dyn Expiry>>,
-	stats: stats::Meter,
-}
-
-#[cfg(feature = "async")]
-impl SubgroupReader {
-	/// The next subgroup's ID and reader, or `None` once no producer is left to add one.
-	pub(crate) fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Option<(u64, Consumer)>> {
-		let next = self
-			.subgroups
-			.poll(waiter, |subgroups| match subgroups.list.get(self.seen) {
-				Some((id, group)) => Poll::Ready((*id, group.producer().consume())),
-				None => Poll::Pending,
-			});
-		match next {
-			Poll::Ready(Ok((id, mut group))) => {
-				self.seen += 1;
-				group.expiry = self.expiry.clone();
-				group.stats = self.stats.clone();
-				Poll::Ready(Some((id, group)))
-			}
-			Poll::Ready(Err(_)) => Poll::Ready(None),
-			Poll::Pending => Poll::Pending,
-		}
-	}
-}
-
-/// A subgroup's producer, behind a trait object: a group holding its own type directly
-/// would recurse without end when the compiler checks whether a future holding one is `Send`.
-trait Subgroup: Send + Sync + std::panic::UnwindSafe + std::panic::RefUnwindSafe {
-	fn producer(&self) -> &Producer;
-}
-
-impl Subgroup for Producer {
-	fn producer(&self) -> &Producer {
-		self
-	}
-}
-
-/// The size limit a group's subgroups count toward together.
-#[derive(Default)]
-struct Family {
-	total: kio::Lock<Usage>,
-}
-
-#[derive(Clone, Copy, Debug, Default)]
-struct Usage {
-	frames: usize,
-	bytes: u64,
-}
-
-impl Family {
-	/// Replace one subgroup's reservation with `usage`, returning the family's new total.
-	fn reserve(&self, reserved: &mut Usage, usage: Usage) -> Usage {
-		let mut total = self.total.lock();
-		total.frames = total.frames - reserved.frames + usage.frames;
-		total.bytes = total.bytes - reserved.bytes + usage.bytes;
-		*reserved = usage;
-		*total
-	}
 }
 
 /// The IETF header state that cannot be inferred from a plain frame list.
@@ -320,8 +204,6 @@ impl Family {
 pub(crate) struct Wire {
 	/// Object IDs differ from the public frame ordinals, so ordinal recovery cannot stitch.
 	pub sparse: bool,
-	/// The header's publisher priority, lower first, or `None` to inherit the track's.
-	pub priority: Option<u8>,
 	pub first_object: bool,
 	pub first_id: u64,
 	pub extensions: bool,
@@ -486,42 +368,14 @@ impl GroupState {
 		};
 	}
 
-	/// Whether adding `extra_frames` totaling `extra_bytes` would exceed the group budget,
-	/// which every subgroup of the group shares.
-	fn would_overflow(&mut self, extra_frames: usize, extra_bytes: u64) -> bool {
-		let usage = self.usage(extra_frames, extra_bytes);
-		let total = match self.relay.as_deref_mut() {
-			Some(Relay {
-				family: Some(family),
-				reserved,
-				..
-			}) => family.reserve(reserved, usage),
-			_ => usage,
-		};
-		total.frames > MAX_GROUP_FRAMES || total.bytes > MAX_CACHE_BYTES
-	}
-
-	/// What this subgroup holds once `extra_frames` totaling `extra_bytes` are added.
-	fn usage(&self, extra_frames: usize, extra_bytes: u64) -> Usage {
-		let relay = self.relay.as_deref();
-		let overhead = match relay.is_some_and(|relay| relay.nested) {
-			true => CACHE_OVERHEAD,
-			false => 0,
-		};
-		Usage {
-			frames: self.next_index.saturating_sub(self.offset).saturating_add(extra_frames),
-			bytes: self
+	/// Whether adding `extra_frames` totaling `extra_bytes` would exceed the group budget.
+	fn would_overflow(&self, extra_frames: usize, extra_bytes: u64) -> bool {
+		self.next_index.saturating_sub(self.offset).saturating_add(extra_frames) > MAX_GROUP_FRAMES
+			|| self
 				.cache
-				.saturating_add(relay.map_or(0, |relay| relay.bytes))
-				.saturating_add(overhead)
-				.saturating_add(extra_bytes),
-		}
-	}
-
-	/// Whether subgroup 0 is still expected.
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
-	fn zero_pending(&self) -> bool {
-		self.relay.as_ref().is_some_and(|relay| relay.zero == Zero::Pending)
+				.saturating_add(self.relay.as_ref().map_or(0, |relay| relay.bytes))
+				.saturating_add(extra_bytes)
+				> MAX_CACHE_BYTES
 	}
 
 	/// The relay state, charging its box the first time a group needs it.
@@ -609,10 +463,6 @@ impl GroupState {
 			relay.objects = VecDeque::new();
 			relay.bytes = size_of::<Relay>() as u64 + relay.end_object.as_ref().map_or(0, |fields| fields.heap());
 			self.charge.add(relay.bytes);
-			// What was released no longer counts toward the shared limit.
-			if let Some(family) = &relay.family {
-				family.reserve(&mut relay.reserved, Usage::default());
-			}
 		}
 	}
 }
@@ -691,23 +541,10 @@ struct Alive {
 	// eviction and expiry walks can weigh a candidate without taking the group lock
 	// they already hold the track lock over.
 	access: Arc<cache::Access>,
-	// A subgroup other than 0: the track does not hold it, so its abort is not the group's.
-	nested: bool,
 }
 
 impl Drop for Alive {
 	fn drop(&mut self) {
-		// No producer is left to add a subgroup, so readers watching for one can stop.
-		let subgroups = self
-			.state
-			.read()
-			.relay
-			.as_ref()
-			.and_then(|relay| relay.subgroups.clone());
-		if let Some(subgroups) = subgroups {
-			let _ = subgroups.close();
-		}
-
 		// See track::Alive: the last producer dropping without a clean finish releases
 		// the cached frames so a stale consumer can't pin their buffers forever. A
 		// finished group keeps its cache so consumers can drain.
@@ -801,127 +638,6 @@ impl Producer {
 		Ok(())
 	}
 
-	/// Let the group carry subgroups other than 0, before any reader can see it.
-	///
-	/// `pending` when another subgroup opens the group, so subgroup 0 may still come.
-	pub(crate) fn carry_subgroups(&self, pending: bool) -> Result<()> {
-		let mut state = modify(&self.state)?;
-		let relay = state.relay();
-		relay.subgroups = Some(kio::Producer::default());
-		if pending {
-			relay.zero = Zero::Pending;
-		}
-		Ok(())
-	}
-
-	/// Take the group's public frames for a subgroup 0 stream, when another subgroup
-	/// opened it first: `true` if they are its to write, `false` if the group already
-	/// finished without it, so it is kept beside them like any other subgroup.
-	/// [`Error::Duplicate`] when the group has its subgroup 0.
-	#[cfg(feature = "async")]
-	pub(crate) fn claim_zero(&self) -> Result<bool> {
-		let mut state = modify(&self.state)?;
-		let Some(relay) = state.relay.as_deref_mut() else {
-			return Err(Error::Duplicate);
-		};
-		match relay.zero {
-			Zero::Pending => {
-				relay.zero = Zero::Present;
-				Ok(true)
-			}
-			Zero::Absent => Ok(false),
-			Zero::Present => Err(Error::Duplicate),
-		}
-	}
-
-	/// Open subgroup `id` beside subgroup 0, with its own header state.
-	///
-	/// Its objects count toward this group's size limit, but it ends on its own: closes
-	/// never cascade between subgroups. [`Error::Duplicate`] if the subgroup is open.
-	#[cfg(feature = "async")]
-	pub(crate) fn subgroup(&self, id: u64, wire: Wire) -> Result<Self> {
-		let mut state = modify(&self.state)?;
-		// Subgroup 0 is the public frames, unless the group finished without it.
-		if id == 0 && state.relay.as_ref().is_none_or(|relay| relay.zero != Zero::Absent) {
-			return Err(Error::Duplicate);
-		}
-		let family = {
-			let usage = state.usage(0, 0);
-			let relay = state.relay();
-			match &relay.family {
-				Some(family) => family.clone(),
-				None => {
-					let family = Arc::new(Family::default());
-					family.reserve(&mut relay.reserved, usage);
-					relay.family = Some(family.clone());
-					family
-				}
-			}
-		};
-		let subgroups = state
-			.relay()
-			.subgroups
-			.get_or_insert_with(kio::Producer::default)
-			.clone();
-		let mut subgroups = subgroups.write().map_err(|_| Error::Dropped)?;
-		if subgroups.ids.contains(&id) {
-			return Err(Error::Duplicate);
-		}
-
-		// Each subgroup costs the group its fixed overhead, even one that never holds an object.
-		let mut reserved = Usage::default();
-		let usage = Usage {
-			frames: 0,
-			bytes: CACHE_OVERHEAD,
-		};
-		let total = family.reserve(&mut reserved, usage);
-		if total.frames > MAX_GROUP_FRAMES || total.bytes > MAX_CACHE_BYTES {
-			family.reserve(&mut reserved, Usage::default());
-			return Err(Error::GroupTooLarge);
-		}
-
-		let mut nested = Self::create(self.info, self.track.clone(), self.cache.clone(), true);
-		// Its payload counts toward the stream that delivered it, but it is not another group.
-		nested.stats = self.stats.clone();
-		{
-			let mut state = modify(&nested.state)?;
-			let relay = state.relay();
-			relay.wire = Some(wire);
-			relay.family = Some(family);
-			relay.reserved = reserved;
-			relay.nested = true;
-		}
-		subgroups.ids.insert(id);
-		subgroups.list.push((id, Box::new(nested.clone())));
-		Ok(nested)
-	}
-
-	/// Finish the group empty once every other subgroup ended without subgroup 0, which
-	/// is how plain readers see a group that never had one.
-	#[cfg(feature = "async")]
-	pub(crate) fn settle_zero(&self) {
-		let Ok(mut state) = self.state.write() else {
-			return;
-		};
-		if !state.zero_pending() {
-			return;
-		}
-		let relay = state.relay();
-		if let Some(subgroups) = &relay.subgroups {
-			let subgroups = subgroups.read();
-			// A subgroup never reopens, so each settle resumes where the last one stopped.
-			while let Some((_, subgroup)) = subgroups.list.get(relay.settled) {
-				let subgroup = subgroup.producer().state.read();
-				if subgroup.fin.is_none() && subgroup.abort.is_none() {
-					return;
-				}
-				relay.settled += 1;
-			}
-		}
-		relay.zero = Zero::Absent;
-		state.fin = Some(state.next_index);
-	}
-
 	/// Create a group producer bound to its parent track's [`track::Info`] and cache
 	/// account.
 	///
@@ -933,10 +649,6 @@ impl Producer {
 	/// Charges the group into `cache`, so its cached bytes count against the budget the
 	/// track evicts toward under memory pressure.
 	pub(crate) fn new(info: Info, track: track::Info, cache: Arc<cache::Track>) -> Self {
-		Self::create(info, track, cache, false)
-	}
-
-	fn create(info: Info, track: track::Info, cache: Arc<cache::Track>, nested: bool) -> Self {
 		let state = kio::Producer::<GroupState>::default();
 		let charge = cache.charge();
 		let access = charge.access();
@@ -946,7 +658,6 @@ impl Producer {
 			state: state.clone(),
 			aborted: AtomicBool::new(false),
 			access,
-			nested,
 		});
 		Self {
 			info,
@@ -1354,7 +1065,7 @@ impl Producer {
 		self.alive.aborted.store(true, Ordering::Release);
 		guard.release();
 		guard.close();
-		self.notify_aborted();
+		self.cache.aborted(self.sequence);
 	}
 
 	/// Abort a write that would grow the group past its budget, holding the lock already
@@ -1365,38 +1076,8 @@ impl Producer {
 		self.alive.aborted.store(true, Ordering::Release);
 		state.release();
 		state.close();
-		self.notify_aborted();
+		self.cache.aborted(self.sequence);
 		err
-	}
-
-	/// Tell the track's readers its group at this sequence is gone. A subgroup other than 0
-	/// is not the track's group, so its abort is not.
-	fn notify_aborted(&self) {
-		if !self.alive.nested {
-			self.cache.aborted(self.sequence);
-		}
-	}
-
-	/// Abort every subgroup other than 0 with `err`, for the cache dropping the whole group.
-	pub(crate) fn abort_subgroups(&self, err: &Error) {
-		let subgroups = self
-			.state
-			.read()
-			.relay
-			.as_ref()
-			.and_then(|relay| relay.subgroups.clone());
-		let Some(subgroups) = subgroups else {
-			return;
-		};
-		let list: Vec<Self> = subgroups
-			.read()
-			.list
-			.iter()
-			.map(|(_, group)| group.producer().clone())
-			.collect();
-		for group in list {
-			let _ = group.abort(err.clone());
-		}
 	}
 
 	/// Whether the group has been aborted (including pool eviction). The track's
@@ -1931,78 +1612,6 @@ impl Consumer {
 	#[cfg(feature = "async")]
 	pub(crate) fn end_object(&self) -> Option<Arc<super::object::Fields>> {
 		self.cursor.state.read().relay.as_ref()?.end_object.clone()
-	}
-
-	/// Whether a moq-transport peer relays the group, so its Object IDs need not be its
-	/// frame ordinals.
-	#[cfg(feature = "async")]
-	pub(crate) fn is_relayed(&self) -> bool {
-		let state = self.cursor.state.read();
-		state
-			.relay
-			.as_ref()
-			.is_some_and(|relay| relay.wire.is_some() || relay.subgroups.is_some())
-	}
-
-	/// Whether a FETCH can serve the group: one subgroup, its Object ID gaps all marked.
-	#[cfg(feature = "async")]
-	pub(crate) fn fetchable(&self) -> bool {
-		let state = self.cursor.state.read();
-		let Some(relay) = state.relay.as_ref() else {
-			return true;
-		};
-		relay.wire.as_ref().is_none_or(|wire| wire.fetchable)
-			&& relay
-				.subgroups
-				.as_ref()
-				.is_none_or(|subgroups| subgroups.read().list.is_empty())
-	}
-
-	/// Ready with subgroup 0's header state once it arrived, or `None` when the group has
-	/// no subgroup 0: another subgroup opened it, and it finished or failed without one.
-	#[cfg(feature = "async")]
-	pub(crate) fn poll_header(&self, waiter: &kio::Waiter) -> Poll<Option<Option<Wire>>> {
-		let res = self.cursor.state.poll(waiter, |state| {
-			let Some(relay) = state.relay.as_ref() else {
-				return Poll::Ready(Some(None));
-			};
-			let ended = state.fin.is_some() || state.abort.is_some();
-			match relay.zero {
-				Zero::Absent => Poll::Ready(None),
-				Zero::Pending if ended => Poll::Ready(None),
-				Zero::Pending => Poll::Pending,
-				// A group that never relays subgroups gets no header state later.
-				Zero::Present if relay.wire.is_some() || relay.subgroups.is_none() || ended => {
-					Poll::Ready(Some(relay.wire.clone()))
-				}
-				Zero::Present => Poll::Pending,
-			}
-		});
-		match res {
-			Poll::Ready(Ok(header)) => Poll::Ready(header),
-			Poll::Ready(Err(_)) => Poll::Ready(None),
-			Poll::Pending => Poll::Pending,
-		}
-	}
-
-	/// The reader of the group's subgroups other than 0, or `None` for a group that never
-	/// carries any. Each subgroup is read with this reader's budget and meter.
-	#[cfg(feature = "async")]
-	pub(crate) fn subgroups(&self) -> Option<SubgroupReader> {
-		let subgroups = self.cursor.state.read().relay.as_ref()?.subgroups.as_ref()?.consume();
-		Some(SubgroupReader {
-			subgroups,
-			seen: 0,
-			expiry: self.expiry.clone(),
-			stats: self.stats.clone(),
-		})
-	}
-
-	/// Whether the group finished with every object below `id`.
-	#[cfg(feature = "async")]
-	pub(crate) fn ends_before(&self, id: u64) -> bool {
-		let state = self.cursor.state.read();
-		state.fin.is_some() && state.wire().and_then(|wire| wire.last).is_none_or(|last| last < id)
 	}
 
 	/// Fill a private batch without losing metadata through the public frame view.
@@ -2794,7 +2403,6 @@ mod test {
 					extensions: true,
 					has_end: true,
 					fetchable: true,
-					priority: None,
 					last: None,
 				})
 				.unwrap();

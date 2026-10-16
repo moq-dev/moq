@@ -462,8 +462,6 @@ impl Slot {
 	/// Abort every copy this slot holds.
 	fn abort(&self, err: Error) {
 		for group in self.copies() {
-			// The cache drops the group whole, every subgroup with it.
-			group.abort_subgroups(&err);
 			let _ = group.clone().abort(err.clone());
 		}
 	}
@@ -1889,43 +1887,7 @@ impl Producer {
 
 	/// Create a new group with the given sequence number.
 	pub fn create_group(&self, group: group::Info) -> Result<group::Producer> {
-		self.insert(group, false, None)
-	}
-
-	/// Create or join a group a moq-transport session relays, for a stream carrying
-	/// `subgroup`.
-	///
-	/// A subgroup 0 stream writes the public frames, claiming a group another subgroup
-	/// opened first, and is [`Error::Duplicate`] beside a group that has one. Any other
-	/// subgroup, or a subgroup 0 the group already finished without, is kept beside them:
-	/// it joins the group here, or opens it to wait for subgroup 0.
-	#[cfg(feature = "async")]
-	pub(crate) fn create_relay_group(&self, group: group::Info, subgroup: u64) -> Result<group::Relayed> {
-		{
-			let state = self.modify()?;
-			let live = state
-				.lookup
-				.get(&group.sequence)
-				.map(|slot| &slot.group)
-				.filter(|live| !live.is_aborted());
-			if let Some(live) = live {
-				if subgroup != 0 {
-					return Ok(group::Relayed::Beside(live.clone()));
-				}
-				match live.claim_zero() {
-					Ok(true) => return Ok(group::Relayed::Public(live.clone())),
-					Ok(false) => return Ok(group::Relayed::Beside(live.clone())),
-					// It has its subgroup 0: a duplicate, unless it is a copy to replace.
-					Err(Error::Duplicate) => {}
-					Err(err) => return Err(err),
-				}
-			}
-		}
-		let created = self.insert(group, false, Some(subgroup != 0))?;
-		match subgroup {
-			0 => Ok(group::Relayed::Public(created)),
-			_ => Ok(group::Relayed::Beside(created)),
-		}
+		self.insert(group, false)
 	}
 
 	/// Create a group a session is receiving from a route, withheld from readers until
@@ -1937,7 +1899,7 @@ impl Producer {
 	/// that older group first.
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub(crate) fn receive_group(&self, group: group::Info) -> Result<group::Producer> {
-		self.insert(group, true, None)
+		self.insert(group, true)
 	}
 
 	/// Show a [`Self::receive_group`] group to readers: its first frame landed, or its
@@ -1949,9 +1911,7 @@ impl Producer {
 		}
 	}
 
-	/// `subgroups` lets the group carry subgroups other than 0 before readers see it,
-	/// waiting for subgroup 0 when `Some(true)`.
-	fn insert(&self, group: group::Info, pending: bool, subgroups: Option<bool>) -> Result<group::Producer> {
+	fn insert(&self, group: group::Info, pending: bool) -> Result<group::Producer> {
 		let mut state = self.modify()?;
 		if let Some(fin) = state.final_sequence()
 			&& group.sequence >= fin
@@ -1964,9 +1924,6 @@ impl Producer {
 		state.claim_sequence(group.sequence, 0)?;
 
 		let group = group::Producer::new(group, track, state.cache.clone()).with_meter(self.stats.meter());
-		if let Some(pending) = subgroups {
-			group.carry_subgroups(pending)?;
-		}
 		state.cap(&group)?;
 		state.commit_group(&group, pending);
 
@@ -11679,95 +11636,5 @@ mod test {
 			assert_eq!(drain_groups(&mut subscriber), [sequence]);
 		}
 		assert_eq!(subscriber.delivered_runs(), 1000);
-	}
-
-	/// The header state of a relayed subgroup starting at `first_id`.
-	#[cfg(feature = "async")]
-	fn subgroup_wire(first_id: u64) -> group::Wire {
-		group::Wire {
-			sparse: true,
-			priority: None,
-			first_object: true,
-			first_id,
-			extensions: false,
-			has_end: true,
-			fetchable: false,
-			last: None,
-		}
-	}
-
-	/// A group another subgroup opened still gives its public frames to subgroup 0.
-	#[test]
-	#[cfg(feature = "async")]
-	fn subgroup_zero_claims_a_group_another_subgroup_opened() {
-		let producer = track_producer("test", Info::default());
-		let mut subscriber = producer.subscribe(replay());
-		let info = group::Info { sequence: 0 };
-		let Ok(group::Relayed::Beside(parent)) = producer.create_relay_group(info, 1) else {
-			panic!("subgroup 1 is kept beside the public frames");
-		};
-		let nested = parent.subgroup(1, subgroup_wire(1)).unwrap();
-		assert!(matches!(parent.subgroup(1, subgroup_wire(1)), Err(Error::Duplicate)));
-		assert!(matches!(parent.subgroup(0, subgroup_wire(0)), Err(Error::Duplicate)));
-		nested.finish().unwrap();
-
-		let Ok(group::Relayed::Public(mut zero)) = producer.create_relay_group(info, 0) else {
-			panic!("subgroup 0 claims the public frames");
-		};
-		zero.write_frame(None, bytes::Bytes::from_static(b"zero")).unwrap();
-		zero.finish().unwrap();
-		parent.settle_zero();
-
-		let mut group = subscriber.recv_group().now_or_never().unwrap().unwrap().unwrap();
-		let frame = group.read_frame().now_or_never().unwrap().unwrap().unwrap();
-		assert_eq!(frame.payload, "zero");
-		assert!(group.read_frame().now_or_never().unwrap().unwrap().is_none());
-	}
-
-	/// Once every other subgroup ends without subgroup 0, the group finishes empty for
-	/// plain readers, and a late subgroup 0 is kept beside it.
-	#[test]
-	#[cfg(feature = "async")]
-	fn a_group_without_subgroup_zero_finishes_empty() {
-		let producer = track_producer("test", Info::default());
-		let info = group::Info { sequence: 0 };
-		let Ok(group::Relayed::Beside(parent)) = producer.create_relay_group(info, 1) else {
-			panic!("subgroup 1 is kept beside the public frames");
-		};
-		let nested = parent.subgroup(1, subgroup_wire(1)).unwrap();
-		parent.settle_zero();
-		assert!(!parent.is_finished(), "subgroup 1 is still open");
-		nested.finish().unwrap();
-		parent.settle_zero();
-		assert!(parent.is_finished());
-
-		let Ok(group::Relayed::Beside(again)) = producer.create_relay_group(info, 0) else {
-			panic!("a late subgroup 0 is kept beside the public frames");
-		};
-		again.subgroup(0, subgroup_wire(0)).unwrap();
-		let mut subgroups = parent.consume().subgroups().expect("the group carries subgroups");
-		let found: Vec<u64> = std::iter::from_fn(|| match subgroups.poll_next(&kio::Waiter::noop()) {
-			Poll::Ready(Some((id, _))) => Some(id),
-			_ => None,
-		})
-		.collect();
-		assert_eq!(found, [1, 0]);
-	}
-
-	/// Every subgroup draws on the group's one size limit, but only the one that
-	/// overflows it is refused.
-	#[test]
-	#[cfg(feature = "async")]
-	fn subgroups_share_the_group_size_limit() {
-		let producer = track_producer("test", Info::default());
-		let Ok(group::Relayed::Public(mut parent)) = producer.create_relay_group(group::Info { sequence: 0 }, 0) else {
-			panic!("subgroup 0 is the public frames");
-		};
-		let half = bytes::Bytes::from(vec![0u8; (group::MAX_CACHE_BYTES / 2) as usize]);
-		parent.write_frame(None, half.clone()).unwrap();
-		let mut nested = parent.subgroup(1, subgroup_wire(1)).unwrap();
-		assert!(matches!(nested.write_frame(None, half), Err(Error::GroupTooLarge)));
-		assert!(!parent.is_aborted());
-		parent.write_frame(None, bytes::Bytes::from_static(b"x")).unwrap();
 	}
 }

@@ -3480,6 +3480,11 @@ where
 	pub async fn recv_group(&mut self, stream: &mut Reader<S::RecvStream, Version>) -> Result<(), Error> {
 		let group: ietf::GroupHeader = stream.decode().await?;
 
+		if group.sub_group_id != 0 {
+			tracing::warn!(sub_group_id = %group.sub_group_id, "subgroup ID is not supported, dropping stream");
+			return Err(Error::Unsupported);
+		}
+
 		// SUBSCRIBE_OK or PUBLISH can be reordered behind this stream. Hold only the
 		// subgroup header while waiting so the data stream cannot consume flow control.
 		let aliases = self.state.lock().aliases.consume();
@@ -3546,11 +3551,8 @@ where
 			Err(err) => return Err(err),
 			Ok(opened) => opened,
 		};
-		let (producer, start, parent) = match opened {
-			Opened::Group(producer, start) => (producer, start, None),
-			// Another subgroup is its own group beside the public one, and starts wherever it
-			// starts: a fill or resume only ever covers subgroup 0.
-			Opened::Subgroup { parent, subgroup } => (subgroup, 0, Some(parent)),
+		let (producer, start) = match opened {
+			Opened::Group(producer, start) => (producer, start),
 			// A standalone terminal carries a Location, not a payload group.
 			Opened::EndOfTrack { object, properties } => {
 				return end_track(
@@ -3564,11 +3566,10 @@ where
 			}
 		};
 
-		if parent.is_none() && (passthrough || producer.wire().is_none()) {
+		if passthrough || producer.wire().is_none() {
 			let first_id = start.max(producer.frame_count() as u64);
 			producer.set_wire(group::Wire {
 				sparse: false,
-				priority: group.flags.has_priority.then_some(group.publisher_priority),
 				first_object: group.flags.first_object && first_id == start,
 				first_id,
 				extensions: group.flags.has_extensions,
@@ -3578,51 +3579,25 @@ where
 			})?;
 		}
 
-		// Declared first so it drops last, once the subgroup below has ended either way.
-		let _settle = parent.map(SettleZero);
 		// Guarded: this handler can be dropped at any await below, and a group producer
 		// that dies without a terminal leaves its consumer waiting on nothing.
 		let producer = crate::recv::Group::new(producer);
-		let res = self
-			.ingest_group(stream, &group, &track, &producer, timescale, resume.map(|_| start))
-			.await;
-		self.end_group(res, &group, &mut track, producer)
-	}
 
-	/// Read a subgroup stream's objects into `producer`, until the stream, the group, or
-	/// the track ends.
-	async fn ingest_group(
-		&self,
-		stream: &mut Reader<S::RecvStream, Version>,
-		group: &ietf::GroupHeader,
-		track: &track::Producer,
-		producer: &crate::recv::Group,
-		timescale: Option<Timescale>,
-		start: Option<u64>,
-	) -> Result<Ended, Error> {
-		let mut ingest = GroupIngest::new(self, group, timescale, start);
-		let mut writing = (**producer).clone();
-		kio::wait(|waiter| {
-			if let Poll::Ready(err) = track.poll_closed(waiter) {
-				return Poll::Ready(Err(err));
-			}
-			if let Poll::Ready(err) = producer.poll_closed(waiter) {
-				return Poll::Ready(Err(err));
-			}
-			ingest.poll(stream, &mut writing, waiter)
-		})
-		.await
-	}
+		let res = {
+			let mut ingest = GroupIngest::new(self, &group, timescale, resume.map(|_| start));
+			let mut writing = producer.clone();
+			kio::wait(|waiter| {
+				if let Poll::Ready(err) = track.poll_closed(waiter) {
+					return Poll::Ready(Err(err));
+				}
+				if let Poll::Ready(err) = producer.poll_closed(waiter) {
+					return Poll::Ready(Err(err));
+				}
+				ingest.poll(stream, &mut writing, waiter)
+			})
+			.await
+		};
 
-	/// Finish or abort a subgroup stream's group as its ingest ended, ending the track too
-	/// when the stream said so or proved it malformed.
-	fn end_group(
-		&self,
-		res: Result<Ended, Error>,
-		group: &ietf::GroupHeader,
-		track: &mut track::Producer,
-		producer: crate::recv::Group,
-	) -> Result<(), Error> {
 		match res {
 			Err(err @ (Error::Cancel | Error::Stream(crate::StreamError::Cancel))) => {
 				let _ = producer.abort(err);
@@ -3645,7 +3620,7 @@ where
 			Err(Error::MalformedTrack) => {
 				tracing::warn!(group = %producer.sequence, "malformed track");
 				let _ = producer.abort(Error::MalformedTrack);
-				let _ = track.clone().abort(Error::MalformedTrack);
+				let _ = track.abort(Error::MalformedTrack);
 				return Err(Error::MalformedTrack);
 			}
 			// The peer reset the stream, the transport failed, or the track went away.
@@ -3660,7 +3635,7 @@ where
 			Ok(Ended::Track { object, properties }) => {
 				let _ = producer.finish();
 				return end_track(
-					track,
+					&mut track,
 					track::Position {
 						group: group.group_id,
 						frame: object,
@@ -3756,24 +3731,9 @@ fn end_track(track: &mut track::Producer, end: track::Position, properties: bool
 enum Opened {
 	/// The group producer the stream writes into, and the Object ID it starts at.
 	Group(group::Producer, u64),
-	/// A subgroup other than 0, written beside its group's public frames.
-	Subgroup {
-		parent: group::Producer,
-		subgroup: group::Producer,
-	},
 	/// A standalone terminal marker, which creates no payload group, and whether it
 	/// carried properties.
 	EndOfTrack { object: u64, properties: bool },
-}
-
-/// Once a subgroup beside a group's public frames ends, finish them empty if every other
-/// subgroup ended without subgroup 0 arriving, which is how plain readers see such a group.
-struct SettleZero(group::Producer);
-
-impl Drop for SettleZero {
-	fn drop(&mut self) {
-		self.0.settle_zero();
-	}
 }
 
 /// How a subgroup stream ended cleanly.
@@ -3847,12 +3807,7 @@ where
 		let sequence = header.group_id;
 		// Stats (groups/frames/bytes) are counted in the model as the group is written,
 		// through the tagged `track::Producer`.
-		let info = group::Info { sequence };
-		// A subgroup 0 the group already finished without has no public frames to join.
-		let create = |track: &mut track::Producer| match track.create_relay_group(info, 0)? {
-			group::Relayed::Public(group) => Ok(group),
-			group::Relayed::Beside(_) => Err(Error::Duplicate),
-		};
+		let create = |track: &mut track::Producer| track.create_group(group::Info { sequence });
 
 		let peeked = match header.flags.has_extensions {
 			true => stream
@@ -3868,13 +3823,9 @@ where
 			Ok(first) => first,
 			// The header arrived, so the stream counts toward the track's end. Abort the
 			// group it named rather than let the track end clean without it. A fill that
-			// already holds the group reports it through its own producer. Another
-			// subgroup failing is only its own loss.
+			// already holds the group reports it through its own producer.
 			Err(err) => {
-				if !header.flags.has_subgroup_object
-					&& header.sub_group_id == 0
-					&& let Ok(group) = create(track)
-				{
+				if let Ok(group) = create(track) {
 					let _ = group.abort(err.clone());
 				}
 				return Err(err);
@@ -3887,41 +3838,10 @@ where
 			});
 		}
 
-		// The header names its subgroup, or says it is the first Object ID. A stream with no
-		// object names none, so it can only end subgroup 0.
-		let subgroup = match header.flags.has_subgroup_object {
-			true => first.map_or(0, |first| first.id),
-			false => header.sub_group_id,
-		};
-		let fill_outstanding = fill.read().outstanding();
-		// A fill or resume only ever covers subgroup 0's public frames.
-		if subgroup != 0 || (!fill_outstanding && resume.is_none()) {
-			let parent = match track.create_relay_group(info, subgroup)? {
-				// Without a fill or resume, a relay preserves the subgroup's first Object ID
-				// and FIRST_OBJECT claim independently. Plain readers see only frame ordinals.
-				group::Relayed::Public(group) => {
-					return Ok(Opened::Group(group, first.map_or(0, |first| first.id)));
-				}
-				group::Relayed::Beside(parent) => parent,
-			};
-			let subgroup = parent.subgroup(
-				subgroup,
-				group::Wire {
-					// Its frames are numbered from 0 while its objects need not be.
-					sparse: true,
-					priority: header.flags.has_priority.then_some(header.publisher_priority),
-					first_object: header.flags.first_object,
-					first_id: first.map_or(0, |first| first.id),
-					extensions: header.flags.has_extensions,
-					has_end: header.flags.has_end,
-					fetchable: false,
-					last: None,
-				},
-			)?;
-			return Ok(Opened::Subgroup { parent, subgroup });
-		}
+		// Without a fill or resume, a relay preserves the subgroup's first Object ID
+		// and FIRST_OBJECT claim independently. Plain readers see only frame ordinals.
 
-		if !fill_outstanding {
+		if !fill.read().outstanding() {
 			// The group a resumed subscription picks up partway through starts where it
 			// asked, and a stream with no objects is the end of a group complete there.
 			// A publisher sending more of it (a pre-draft-20 join asks for all of it) has
@@ -4791,7 +4711,6 @@ where
 			extensions: true,
 			has_end: true,
 			fetchable: true,
-			priority: None,
 			last: None,
 		})?;
 
@@ -5050,10 +4969,7 @@ fn open_fill_group(
 	head: &mut Option<(u64, u64, crate::recv::Group)>,
 	sequence: u64,
 ) -> Result<(), Error> {
-	// A fill only ever heads subgroup 0's public frames.
-	let group::Relayed::Public(producer) = track.create_relay_group(group::Info { sequence }, 0)? else {
-		return Err(Error::Duplicate);
-	};
+	let producer = track.create_group(group::Info { sequence })?;
 	producer.set_wire(group::Wire {
 		sparse: false,
 		first_object: true,
@@ -5061,7 +4977,6 @@ fn open_fill_group(
 		extensions: true,
 		has_end: true,
 		fetchable: true,
-		priority: None,
 		last: None,
 	})?;
 	*head = Some((sequence, 0, crate::recv::Group::new(producer)));
@@ -10998,55 +10913,17 @@ mod stitch_tests {
 		fetch: Option<(u64, u64)>,
 		timescale: Option<Timescale>,
 	) -> (Vec<u8>, crate::lite::test_transport::Log) {
-		let relayed = relay_streams(vec![script], ingress, egress, fetch, timescale).await;
-		let bytes = if fetch.is_some() {
-			relayed.streams.into_iter().flatten().collect()
-		} else {
-			relayed
-				.streams
-				.into_iter()
-				.find(|bytes| {
-					ietf::GroupHeader::decode(&mut Decoder::new(bytes, egress.into()), egress)
-						.is_ok_and(|header| header.group_id == SEQUENCE)
-				})
-				.expect("the relay emitted the group")
-		};
-		(bytes, relayed.log)
-	}
-
-	/// What a relay sent downstream for its ingress streams.
-	struct Relayed {
-		/// The bytes of every stream it wrote, in the order it opened them.
-		streams: Vec<Vec<u8>>,
-		log: crate::lite::test_transport::Log,
-		/// A plain reader of the relayed track, subscribed before the ingress landed.
-		reader: track::Subscriber,
-	}
-
-	/// Relay each script as its own ingress stream, in order, then SUBSCRIBE or FETCH the
-	/// track downstream.
-	async fn relay_streams(
-		scripts: Vec<Vec<u8>>,
-		ingress: Version,
-		egress: Version,
-		fetch: Option<(u64, u64)>,
-		timescale: Option<Timescale>,
-	) -> Relayed {
 		use crate::lite::test_transport::Sent;
 		let origin = crate::origin::Config::new(crate::Hop::new(2).unwrap()).produce();
 		let broadcast = origin.publish("room", crate::origin::Route::default()).unwrap();
 		let track = broadcast
 			.create_track("video", accepted_info(timescale, None, None))
 			.unwrap();
-		let reader = track.subscribe(None);
-		let count = scripts.len();
-		let mut h = Harness::with_timescale(Fill::Done, scripts, timescale);
+		let mut h = Harness::with_timescale(Fill::Done, vec![script], timescale);
 		h.subscriber.version = ingress;
 		h.subscriber.state.lock().subscribes.get_mut(&REQUEST).unwrap().producer = Some(track.clone());
-		for _ in 0..count {
-			let mut stream = h.stream().await.with_version(ingress);
-			h.subscriber.clone().recv_group(&mut stream).await.unwrap();
-		}
+		let mut stream = h.stream().await.with_version(ingress);
+		h.subscriber.clone().recv_group(&mut stream).await.unwrap();
 		track.finish().unwrap();
 
 		let mut downstream = ScriptedSession::per_stream(vec![vec![]]);
@@ -11134,11 +11011,18 @@ mod stitch_tests {
 				streams.entry(id).or_default().extend(bytes);
 			}
 		}
-		Relayed {
-			streams: streams.into_values().collect(),
-			log: downstream.log,
-			reader,
-		}
+		let bytes = if fetch.is_some() {
+			streams.into_values().flatten().collect()
+		} else {
+			streams
+				.into_values()
+				.find(|bytes| {
+					ietf::GroupHeader::decode(&mut Decoder::new(bytes, egress.into()), egress)
+						.is_ok_and(|header| header.group_id == SEQUENCE)
+				})
+				.expect("the relay emitted the group")
+		};
+		(bytes, downstream.log)
 	}
 
 	async fn relay_passthrough_stream(
@@ -11831,238 +11715,38 @@ mod stitch_tests {
 		}
 	}
 
-	/// A subgroup stream of [`SEQUENCE`] under `header`, then one object per Object ID
-	/// holding its ID as a single byte.
-	fn subgroup_stream(version: Version, header: ietf::GroupHeader, objects: &[u64]) -> Vec<u8> {
-		let mut bytes = Vec::new();
-		header
-			.encode(&mut Encoder::new(&mut bytes, version.into()), version)
-			.unwrap();
-		let mut previous = None;
-		for &id in objects {
-			let delta = previous.map_or(id, |previous| id - previous - 1);
-			previous = Some(id);
-			let mut encoder = Encoder::new(&mut bytes, version.into());
-			encoder.varint(delta).unwrap();
-			encoder.varint(1u64).unwrap();
-			bytes.push(u8::try_from(id).unwrap());
-		}
-		bytes
-	}
-
-	/// The header of a subgroup of [`SEQUENCE`], naming `subgroup` explicitly when nonzero.
-	fn subgroup_header(subgroup: u64, priority: Option<u8>, has_end: bool) -> ietf::GroupHeader {
+	/// A subgroup 1 stream costs only itself: the track's subgroup 0 stream still arrives.
+	#[moq_net_sim::test]
+	async fn a_non_zero_subgroup_leaves_the_track_flowing() {
+		let mut refused = Vec::new();
 		ietf::GroupHeader {
 			track_alias: ALIAS,
 			group_id: SEQUENCE,
-			sub_group_id: subgroup,
-			publisher_priority: priority.unwrap_or(0),
+			sub_group_id: 1,
+			publisher_priority: 0,
 			flags: ietf::GroupFlags {
-				has_subgroup: subgroup != 0,
-				has_end,
-				has_priority: priority.is_some(),
+				has_subgroup: true,
+				first_object: true,
 				..Default::default()
 			},
 		}
-	}
+		.encode(&mut crate::coding::Encoder::new(&mut refused, VERSION.into()), VERSION)
+		.unwrap();
 
-	/// A relayed subgroup stream of [`SEQUENCE`]: its header and the Object IDs it carried.
-	fn decode_subgroup(version: Version, bytes: &[u8]) -> Option<(ietf::GroupHeader, Vec<u64>)> {
-		let mut decoder = Decoder::new(bytes, version.into());
-		let header = ietf::GroupHeader::decode(&mut decoder, version).ok()?;
-		if header.group_id != SEQUENCE {
-			return None;
-		}
-		let mut ids: Vec<u64> = Vec::new();
-		while !decoder.is_empty() {
-			let delta = decoder.varint().unwrap();
-			let id = ids.last().map_or(delta, |previous| previous + delta + 1);
-			if header.flags.has_extensions {
-				decoder.bytes().unwrap();
-			}
-			assert_eq!(
-				decoder.varint().unwrap(),
-				1,
-				"{version}: object {id} is not a relayed payload"
-			);
-			assert_eq!(decoder.slice(1).unwrap(), &[u8::try_from(id).unwrap()]);
-			ids.push(id);
-		}
-		Some((header, ids))
-	}
+		let h = Harness::new(Fill::Done, vec![refused, tail_stream(SEQUENCE, 0, &[b"ok"])]);
+		let mut consumer = h.track.subscribe(None);
 
-	/// Every relayed subgroup of [`SEQUENCE`], keyed by subgroup ID.
-	fn relayed_subgroups(
-		version: Version,
-		relayed: &Relayed,
-	) -> std::collections::BTreeMap<u64, (ietf::GroupHeader, Vec<u64>)> {
-		let mut subgroups = std::collections::BTreeMap::new();
-		for (header, ids) in relayed
-			.streams
-			.iter()
-			.filter_map(|bytes| decode_subgroup(version, bytes))
-		{
-			let id = match header.flags.has_subgroup_object {
-				true => ids[0],
-				false => header.sub_group_id,
-			};
-			assert!(
-				subgroups.insert(id, (header, ids)).is_none(),
-				"{version}: subgroup {id} twice"
-			);
-		}
-		subgroups
-	}
+		let mut stream = h.stream().await;
+		let result = h.subscriber.clone().recv_group(&mut stream).await;
+		assert!(matches!(result, Err(Error::Unsupported)), "{result:?}");
 
-	/// The payload bytes of the next group a plain reader sees.
-	async fn plain_frames(reader: &mut track::Subscriber) -> Vec<u8> {
-		let (sequence, frames) = read_group(reader).await;
+		let mut stream = h.stream().await;
+		h.subscriber.clone().recv_group(&mut stream).await.unwrap();
+		let (sequence, frames) = read_group(&mut consumer).await;
 		assert_eq!(sequence, SEQUENCE);
-		frames.into_iter().flat_map(|(_, payload)| payload).collect()
-	}
-
-	/// moq-test mode 2: two subgroups split by priority, each on its own stream end to end,
-	/// whichever lands first. Plain readers see subgroup 0 alone, or an empty group once
-	/// subgroup 1 ended before subgroup 0 opened.
-	#[moq_net_sim::test]
-	async fn two_subgroups_relay_on_their_own_streams() {
-		for version in [Version::Draft14, Version::Draft16, VERSION] {
-			let zero = subgroup_stream(version, subgroup_header(0, Some(200), false), &[0, 2, 4]);
-			let one = subgroup_stream(version, subgroup_header(1, Some(201), true), &[1, 3, 5]);
-			for (scripts, plain) in [
-				(vec![zero.clone(), one.clone()], vec![0, 2, 4]),
-				(vec![one, zero], vec![]),
-			] {
-				let mut relayed = relay_streams(scripts, version, version, None, None).await;
-				assert!(relayed.log.resets().is_empty(), "{version}");
-				let subgroups = relayed_subgroups(version, &relayed);
-				assert_eq!(subgroups.keys().copied().collect::<Vec<_>>(), vec![0, 1], "{version}");
-
-				let (header, ids) = &subgroups[&0];
-				assert_eq!(header.publisher_priority, 200, "{version}");
-				assert!(!header.flags.has_end, "{version}");
-				assert!(!header.flags.has_subgroup && !header.flags.has_subgroup_object);
-				assert_eq!(ids, &[0, 2, 4]);
-
-				// Its first object names it, so the relay drops the explicit ID.
-				let (header, ids) = &subgroups[&1];
-				assert_eq!(header.publisher_priority, 201, "{version}");
-				assert!(header.flags.has_end, "{version}");
-				assert!(header.flags.has_subgroup_object, "{version}");
-				assert_eq!(ids, &[1, 3, 5]);
-
-				assert_eq!(plain_frames(&mut relayed.reader).await, plain, "{version}");
-				assert!(relayed.reader.recv_group().await.unwrap().is_none());
-			}
-		}
-	}
-
-	/// moq-test mode 1: every object in a subgroup of its own, named by its ID, with
-	/// END_OF_GROUP on the last alone.
-	#[moq_net_sim::test]
-	async fn a_subgroup_per_object_relays_in_the_compact_form() {
-		let scripts = (0..4)
-			.map(|id| {
-				let header = ietf::GroupHeader {
-					track_alias: ALIAS,
-					group_id: SEQUENCE,
-					sub_group_id: 0,
-					publisher_priority: 128,
-					flags: ietf::GroupFlags {
-						has_subgroup_object: true,
-						has_end: id == 3,
-						..Default::default()
-					},
-				};
-				subgroup_stream(VERSION, header, &[id])
-			})
-			.collect();
-		let mut relayed = relay_streams(scripts, VERSION, VERSION, None, None).await;
-		let subgroups = relayed_subgroups(VERSION, &relayed);
-		assert_eq!(subgroups.len(), 4);
-		for (id, (header, ids)) in subgroups {
-			assert_eq!(ids, vec![id]);
-			assert_eq!(header.publisher_priority, 128);
-			assert_eq!(header.flags.has_end, id == 3, "subgroup {id}");
-			assert!(!header.flags.has_subgroup, "subgroup {id} is not compact");
-			assert_eq!(header.flags.has_subgroup_object, id != 0);
-		}
-		assert_eq!(plain_frames(&mut relayed.reader).await, vec![0]);
-	}
-
-	/// A subgroup header that omits its priority inherits the track's, and the relay omits
-	/// it in turn wherever the draft allows.
-	#[moq_net_sim::test]
-	async fn an_omitted_subgroup_priority_stays_omitted() {
-		let default = super::super::priority::to_wire(accepted_info(None, None, None).priority);
-		let scripts = || {
-			vec![
-				subgroup_stream(Version::Draft15, subgroup_header(0, None, true), &[0]),
-				subgroup_stream(Version::Draft15, subgroup_header(1, None, true), &[1]),
-			]
-		};
-		for (egress, has_priority) in [(Version::Draft15, false), (Version::Draft14, true)] {
-			let relayed = relay_streams(scripts(), Version::Draft15, egress, None, None).await;
-			let subgroups = relayed_subgroups(egress, &relayed);
-			assert_eq!(subgroups.len(), 2, "{egress}");
-			for (header, _) in subgroups.values() {
-				assert_eq!(header.flags.has_priority, has_priority, "{egress}");
-				if has_priority {
-					assert_eq!(header.publisher_priority, default, "{egress}");
-				}
-			}
-		}
-	}
-
-	/// A second stream for a (group, subgroup) already relayed is refused alone.
-	#[moq_net_sim::test]
-	async fn a_duplicate_subgroup_is_refused() {
-		let one = subgroup_stream(VERSION, subgroup_header(1, Some(1), true), &[1]);
-		let h = Harness::with_timescale(
-			Fill::Done,
-			vec![
-				subgroup_stream(VERSION, subgroup_header(0, Some(1), true), &[0]),
-				one.clone(),
-				one,
-			],
-			None,
-		);
-		for _ in 0..2 {
-			let mut stream = h.stream().await;
-			h.subscriber.clone().recv_group(&mut stream).await.unwrap();
-		}
-		h.dispatch_refused().await;
-	}
-
-	/// FETCH cannot say which subgroup an object came from, so it refuses a group holding
-	/// more than subgroup 0.
-	#[moq_net_sim::test]
-	async fn a_fetch_of_a_group_with_subgroups_is_unsupported() {
-		let zero = subgroup_stream(VERSION, subgroup_header(0, Some(1), true), &[0, 1, 2]);
-		let one = subgroup_stream(VERSION, subgroup_header(1, Some(1), true), &[3]);
-		for (scripts, supported) in [(vec![zero.clone()], true), (vec![zero, one], false)] {
-			let relayed = relay_streams(scripts, VERSION, VERSION, Some((0, 3)), None).await;
-			let bytes: Vec<u8> = relayed.streams.into_iter().flatten().collect();
-			let mut decoder = Decoder::new(&bytes, VERSION.into());
-			if supported {
-				assert_eq!(decoder.varint().unwrap(), ietf::FetchOk::ID);
-			} else {
-				assert_eq!(decoder.varint().unwrap(), ietf::RequestError::ID);
-				assert_eq!(ietf::RequestError::decode(&mut decoder, VERSION).unwrap().error_code, 3);
-			}
-		}
-	}
-
-	/// A group published without subgroup 0 leaves plain readers an empty group, and the
-	/// relay invents no subgroup 0 stream for it.
-	#[moq_net_sim::test]
-	async fn a_group_without_subgroup_zero_relays_no_empty_stream() {
-		let one = subgroup_stream(VERSION, subgroup_header(1, Some(1), true), &[1]);
-		let mut relayed = relay_streams(vec![one], VERSION, VERSION, None, None).await;
-		let subgroups = relayed_subgroups(VERSION, &relayed);
-		assert_eq!(subgroups.keys().copied().collect::<Vec<_>>(), vec![1]);
-		assert_eq!(plain_frames(&mut relayed.reader).await, Vec::<u8>::new());
-		assert!(relayed.log.resets().is_empty());
+		assert_eq!(frames.len(), 1);
+		assert_eq!(frames[0].1, b"ok");
+		assert!(h.session.log.closes().is_empty());
 	}
 
 	/// A subgroup stream for `sequence` without extension headers, starting at object 0: the

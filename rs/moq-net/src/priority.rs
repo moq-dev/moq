@@ -18,7 +18,7 @@ use crate::track::Order;
 // - On remove from overflow: remove its priority-and-id key in O(log n)
 //
 // Priority ordering: higher track value = higher priority, then subscription, then
-// publisher priority, then group sequence in that subscription's own direction.
+// group sequence in that subscription's own direction.
 
 /// A group stream's rank: its subscription's track priority, the subscription it
 /// belongs to, its group sequence in that subscription's [`Order`], and the first object
@@ -34,15 +34,11 @@ use crate::track::Order;
 ///
 /// `start` only splits two streams of one group: the one starting earlier goes first,
 /// since the rest of a group is undecodable without its start.
-///
-/// Within a subscription, a moq-transport stream's `publisher` priority (lower first)
-/// ranks ahead of its group, as the draft orders them. Streams that never set one tie.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Priority {
 	track: u8,
 	subscribe: u64,
 	order: Order,
-	publisher: u8,
 	group: u64,
 	start: u64,
 }
@@ -54,7 +50,6 @@ impl Priority {
 			track,
 			subscribe,
 			order: Order::Descending,
-			publisher: 0,
 			group,
 			start: 0,
 		}
@@ -63,12 +58,6 @@ impl Priority {
 	/// Rank groups of the same subscription in `order` instead.
 	pub fn with_order(mut self, order: Order) -> Self {
 		self.order = order;
-		self
-	}
-
-	/// Rank a stream of the subscription by its publisher priority, lower first.
-	pub fn with_publisher(mut self, publisher: u8) -> Self {
-		self.publisher = publisher;
 		self
 	}
 
@@ -92,8 +81,6 @@ impl Ord for Priority {
 			// Only an update in flight leaves one subscription's groups in two orders, and
 			// keeping the two apart keeps the comparison total meanwhile.
 			.then((self.order == Order::Ascending).cmp(&(other.order == Order::Ascending)))
-			// A subgroup the publisher ranked ahead goes first, whatever its group.
-			.then(self.publisher.cmp(&other.publisher))
 			// The subscription's own direction: newest first sheds a congested backlog
 			// rather than the live edge, oldest first drains it.
 			.then(match self.order {

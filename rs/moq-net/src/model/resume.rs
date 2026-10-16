@@ -2119,7 +2119,6 @@ mod test {
 				extensions: false,
 				has_end: true,
 				fetchable: false,
-				priority: None,
 				last: None,
 			})
 			.unwrap();
@@ -2188,7 +2187,6 @@ mod test {
 				extensions: false,
 				has_end: true,
 				fetchable: false,
-				priority: None,
 				last: None,
 			})
 			.unwrap();
