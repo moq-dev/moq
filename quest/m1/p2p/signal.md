@@ -96,5 +96,4 @@ there is no equal-scope shortcut.
 ## Required
 
 - [Routes](/quest/m1/cluster-routing/routes.md) - the ROUTE_START node id the roster keys on
-- [Data channel transport](/quest/m1/p2p/transport.md)
 - [Peer grants](/quest/m1/p2p/peer-grant.md) - the node-bound, asymmetrically signed credential a direct session presents; HS256 keys issue none

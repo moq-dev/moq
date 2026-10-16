@@ -208,6 +208,32 @@ fn quick_client(redirect: moq_tokio::Redirect) -> moq_tokio::Client {
 	config.init(Default::default()).expect("failed to init client")
 }
 
+/// A protocol violation is a settled failure even after a successful session.
+#[tokio::test]
+async fn a_protocol_violation_ends_reconnect() {
+	let (port, mut sessions, task) = spawn_server().await;
+	let connection =
+		quick_client(Default::default()).connect(format!("tcp://127.0.0.1:{port}/").parse::<url::Url>().unwrap());
+	let first = sessions.recv().await.unwrap();
+	first.abort(moq_net::Error::ProtocolViolation);
+	let result = tokio::select! {
+		result = connection.closed() => result,
+		_ = sessions.recv() => panic!("redialed after a protocol violation"),
+		_ = tokio::time::sleep(Duration::from_secs(10)) => panic!("protocol failure did not end reconnect"),
+	};
+	task.abort();
+	let _ = task.await;
+	assert!(
+		matches!(
+			result,
+			Err(moq_tokio::Error::MoqNet(moq_net::Error::Session(
+				moq_net::SessionError::ProtocolViolation
+			)))
+		),
+		"{result:?}"
+	);
+}
+
 /// The default refuses a peer-selected host change, and the refusal ends the
 /// connection: the peer is leaving, so redialing the configured URL would ignore it.
 #[tokio::test]

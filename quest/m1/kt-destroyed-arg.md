@@ -35,4 +35,3 @@ Wire: none.
 ## Related
 
 - [Hard-fork the binding generator](/quest/m1/uniffi-fork.md) - inherits the template fix
-- [Kotlin JVM exit](/quest/m2/kt-jvm-exit.md) - another native crash in the Kotlin binding

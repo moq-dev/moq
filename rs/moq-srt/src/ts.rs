@@ -161,10 +161,14 @@ impl Publisher {
 	}
 }
 
+/// The least delay an egress muxes at, `moq export ts`'s default: the send-ahead that fills a
+/// receiver's buffers comes out of the delay, and a broadcast-sized CPB needs a second of it.
+const MIN_DELAY: Duration = Duration::from_secs(1);
+
 /// How an egress treats its broadcast ending or being replaced.
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct Options {
-	/// The muxer's jitter-buffer delay ([`Subscriber::new`]).
+	/// The muxer's delay, at least [`MIN_DELAY`] ([`Subscriber::new`]).
 	pub latency: Duration,
 	/// How long a return or stitched replacement has to supply its first catalog.
 	pub linger: Duration,
@@ -189,8 +193,8 @@ pub struct Subscriber {
 impl Subscriber {
 	/// Resolve the broadcast at `path` in the origin and prepare to mux it to TS.
 	///
-	/// `options.latency` is the muxer's jitter-buffer delay: each frame is muxed that long after
-	/// its decode time, a frame arriving later is dropped, and a stalled group is
+	/// `options.latency` is the muxer's delay, but no less than [`MIN_DELAY`]: the output runs
+	/// that far behind the source, a frame arriving later is dropped, and a stalled group is
 	/// skipped after half of it. We reuse the locally configured SRT receive latency for
 	/// it, the same budget an SRT hop gives a packet. It's the configured value,
 	/// not the handshake result (srt-tokio doesn't expose the negotiated latency),
@@ -210,7 +214,7 @@ impl Subscriber {
 		let broadcast = origin.request_broadcast(path, None).await?;
 		let source = moq_mux::Source::new(origin.clone(), broadcast);
 		let catalog = source.catalog::<ts::Ext>(moq_mux::catalog::CatalogFormat::Hang).await?;
-		let export = ts::Export::new(source, catalog).with_delay(options.latency);
+		let export = ts::Export::new(source, catalog).with_delay(options.latency.max(MIN_DELAY));
 		let follower = ts::Follower::new(export)?
 			.with_linger(options.linger)
 			.with_stitch(options.stitch);

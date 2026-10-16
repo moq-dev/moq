@@ -84,3 +84,7 @@ required-features = ["noq"]
 [[bench]]
 name = "session_lite"
 harness = false
+
+[[bench]]
+name = "worker_turns"
+harness = false

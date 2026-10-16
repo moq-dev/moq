@@ -504,3 +504,21 @@ fn a_request_never_joins_a_retiring_front() {
 		assert!(!resolved.is_closed(), "handed a front that is ending");
 	});
 }
+
+/// An abort racing the first parking poll must either be observed or wake the cursor.
+#[test]
+fn an_aborted_parked_group_releases_a_finished_track() {
+	model(|| {
+		let broadcast = broadcast::Info::new().produce();
+		let track = broadcast.create_track("parked", timed()).unwrap();
+		let group = track.append_group().unwrap();
+		group.clone().finish().unwrap();
+		let mut subscriber =
+			track.subscribe(moq_net::track::Subscription::default().with_start(moq_net::track::Position::group(0)));
+		subscriber.set_groups(..0);
+		track.finish().unwrap();
+		let aborting = thread::spawn(move || group.abort(Error::Old).unwrap());
+		assert!(block_on(subscriber.recv_group()).unwrap().is_none());
+		aborting.join().unwrap();
+	});
+}

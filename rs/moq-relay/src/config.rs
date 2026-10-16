@@ -80,6 +80,11 @@ pub struct Config {
 	#[serde(default)]
 	pub web: web::Config,
 
+	/// Optional public STUN Binding listener for application-selected ICE servers.
+	#[usage(flatten)]
+	#[serde(default)]
+	pub stun: crate::stun::Config,
+
 	/// Stats publishing configuration. Disabled unless `stats.enabled = true`.
 	#[usage(flatten)]
 	#[serde(default)]
@@ -148,6 +153,7 @@ impl Default for Config {
 			cluster: Default::default(),
 			auth: Default::default(),
 			web: Default::default(),
+			stun: Default::default(),
 			stats: Default::default(),
 			cache: Default::default(),
 			internal: Default::default(),
@@ -371,10 +377,36 @@ mod tests {
 	use crate::test_env::EnvGuard;
 
 	#[test]
+	fn stun_binding_merges_file_environment_and_cli() {
+		let _env = EnvGuard::clear(&["MOQ_STUN_BIND"]);
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("stun.toml");
+		std::fs::write(&path, "[stun]\nbind = \"127.0.0.1:3478\"\n").unwrap();
+		let file = Config::parse_and_merge([std::ffi::OsString::from("moq-relay"), path.clone().into()]).unwrap();
+		assert_eq!(file.stun.bind, Some("127.0.0.1:3478".parse().unwrap()));
+		let cli = Config::parse_and_merge([
+			std::ffi::OsString::from("moq-relay"),
+			path.into(),
+			"--stun-bind=127.0.0.1:3479".into(),
+		])
+		.unwrap();
+		assert_eq!(cli.stun.bind, Some("127.0.0.1:3479".parse().unwrap()));
+		// SAFETY: EnvGuard holds the shared lock until this variable is restored.
+		unsafe {
+			std::env::set_var("MOQ_STUN_BIND", "[::1]:3478");
+		}
+		let config = Config::parse_and_merge(["moq-relay"]).unwrap();
+		assert_eq!(config.stun.bind, Some("[::1]:3478".parse().unwrap()));
+		assert!(toml::from_str::<Config>("[stun]\nrate = 10").is_err());
+	}
+
+	#[test]
 	fn session_limits_merge_without_crossing_peer_policy() {
 		let _env = EnvGuard::clear(&[
 			"MOQ_SESSION_ANNOUNCES",
 			"MOQ_SESSION_SUBSCRIPTIONS",
+			"MOQ_SESSION_FETCHES",
+			"MOQ_PEER_FETCHES",
 			"MOQ_PEER_ANNOUNCES",
 			"MOQ_PEER_SUBSCRIPTIONS",
 		]);
@@ -382,7 +414,7 @@ mod tests {
 		let path = dir.path().join("limits.toml");
 		std::fs::write(
 			&path,
-			"[session]\nannounces = 7\nsubscriptions = 8\n[peer]\nannounces = 90\nsubscriptions = 91\n",
+			"[session]\nannounces = 7\nsubscriptions = 8\nfetches = 9\n[peer]\nannounces = 90\nsubscriptions = 91\nfetches = 92\n",
 		)
 		.unwrap();
 		let config = Config::parse_and_merge([std::ffi::OsString::from("moq-relay"), path.clone().into()]).unwrap();
@@ -390,17 +422,23 @@ mod tests {
 		assert_eq!(config.session.resolve().subscriptions, 8);
 		assert_eq!(config.peer.resolve().announces, 90);
 		assert_eq!(config.peer.resolve().subscriptions, 91);
+		assert_eq!(config.session.resolve().fetches, 9);
+		assert_eq!(config.peer.resolve().fetches, 92);
 		let config = Config::parse_and_merge([
 			std::ffi::OsString::from("moq-relay"),
 			path.into(),
 			"--session-announces=0".into(),
 			"--peer-subscriptions=1000".into(),
+			"--session-fetches=0".into(),
+			"--peer-fetches=2000".into(),
 		])
 		.unwrap();
 		assert_eq!(config.session.resolve().announces, 0);
 		assert_eq!(config.session.resolve().subscriptions, 8);
 		assert_eq!(config.peer.resolve().announces, 90);
 		assert_eq!(config.peer.resolve().subscriptions, 1000);
+		assert_eq!(config.session.resolve().fetches, 0);
+		assert_eq!(config.peer.resolve().fetches, 2000);
 	}
 
 	#[cfg(not(feature = "iroh"))]

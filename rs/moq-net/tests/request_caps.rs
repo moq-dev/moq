@@ -68,6 +68,7 @@ fn limits(announces: usize, subscriptions: usize) -> Limits {
 	let mut limits = Limits::default();
 	limits.announces = announces;
 	limits.subscriptions = subscriptions;
+	limits.fetches = 0;
 	limits
 }
 

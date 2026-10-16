@@ -37,12 +37,17 @@ Decided with the maintainer on 2026-10-13:
   `read_frame`, and one async read loop. Bind them with both generators side
   by side via `cfg_attr` in a spike crate, not in moq-ffi. The spike crate
   carries its own benchmarks, so it does not wait on the
-  [binding benchmark](/quest/m1/ffi-bench.md). It also builds for wasm32:
+  [binding benchmark](/bench/README.md). It also builds for wasm32:
   the browser comparison in #5478 reuses this slice for per-call numbers,
   so tell that quest if the crate's location or shape changes.
 - **Measure**: no-op and record call overhead, payload throughput across
   frame sizes from 100 B to 1 MB, and the cost of each async await.
   Re-measure UniFFI rather than trusting BoltFFI's numbers for it.
+  `just bench-ffi` gives UniFFI's numbers through the real moq-ffi. A known
+  UniFFI cost to weigh: Kotlin sync calls measured 11-22 us against 1.3 us
+  from Python on 2026-10-15, possibly from JNA's per-call structures
+  ([Kotlin calls](/quest/m1/kt-ffi-calls.md)); async wakeups may add a JVM
+  thread attach each, a separate suspect.
 - **Size table**: native library, generated bindings, and wasm plus JS glue
   (gzip), for both generators. Measure the native library with moq-ffi's
   default features on and off; the toggle changes nothing on wasm32, where

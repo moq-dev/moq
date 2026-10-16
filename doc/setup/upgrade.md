@@ -19,6 +19,10 @@ error lists and rerun.
 
 These land with the next breaking release, not the 2026-09-23 train.
 
+- **JS catalog ranking names its media kind.** Replace `Catalog.ranked(renditions)`
+  with `Catalog.Video.ranked(renditions)`. `Catalog.Audio.ranked(renditions)`
+  orders audio by enabled state, bitrate, sample rate, channel count, and name.
+  Both helpers put disabled renditions last.
 - **moq-tokio config durations are optional.** Wrap durations in `Some(...)` for
   connect `race`, `resolution_delay`, and `timeout`; listen `timeout`; QUIC
   `idle_timeout` and `keep_alive`; backoff `initial`, `max`, and `timeout`;
@@ -407,6 +411,16 @@ These land with the next breaking release, not the 2026-09-23 train.
   `next()` and `for await` over a snapshot consumer rather than relying on
   type errors. On an untimed track nothing marks a group stale, so a `next()`
   reader that falls behind replays the whole backlog where it used to skip it.
+- **`moq export ts --delay` defaults to 1 s and includes the send-ahead.** Each
+  frame still goes out up to the delay ahead of its decode time, now no further
+  than its decoder buffer holds, and that comes out of the same budget: the
+  output trails a TS source by the delay instead of twice it. With a multiplex
+  rate, video whose HRD declares a longer buffer delay than `--delay` stops the
+  export with the delay it needs named, so a broadcast feed run at
+  `--delay 500ms` needs `--delay 1s`. A source that sends every track at its
+  decode time (RTMP, a browser) trails by the delay plus the video's
+  send-ahead: 2 s at the new default, where `--delay 500ms` keeps the 1 s it
+  had. moq-srt egress runs at its SRT latency or 1 s, whichever is longer.
 
 ## Wire
 
