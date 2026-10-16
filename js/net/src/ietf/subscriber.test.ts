@@ -1100,6 +1100,12 @@ test("an END_OF_TRACK carrying properties ends the subscription as unsupported",
 		const err = stop.mock.calls[0][0];
 		expect(err).toBeInstanceOf(EndOfTrackProperties);
 		expect(track.closed.peek()).toBe(err as EndOfTrackProperties);
+		// The group before a trailing marker completes.
+		if (wire !== marker) {
+			const group = await track.ordered().nextGroup();
+			expect((await group?.readFrame())?.payload).toEqual(new Uint8Array([42]));
+			expect(await group?.closed).toBeNull();
+		}
 		stop.mockRestore();
 	}
 });

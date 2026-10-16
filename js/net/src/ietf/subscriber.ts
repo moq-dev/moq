@@ -1347,13 +1347,15 @@ export class Subscriber {
 				return;
 			}
 			if (e instanceof ObjectIdGap) console.warn(`unsupported object gap: ${reason(e)}`);
-			if (
+			if (e instanceof EndOfTrackProperties) {
+				// The group before the marker is complete; only the track's end can't be carried.
+				producer?.close();
+				track.close(e);
+			} else if (
 				e instanceof ProtocolViolation ||
-				e instanceof EndOfTrackProperties ||
 				(e instanceof StreamError && e.code === StreamCode.MalformedTrack)
 			) {
-				// The publisher broke the track's end or its content, or ended it in a way we
-				// cannot carry, which no later group can repair.
+				// The publisher broke the track's end or its content, which no later group can repair.
 				producer?.close(e);
 				track.close(e);
 			} else {
