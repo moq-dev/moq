@@ -1543,6 +1543,51 @@ mod tests {
 		assert_actions(front.step(Event::Closed), &[Action::End { err: Error::Dropped }]);
 	}
 
+	#[test]
+	fn deadline_index_matches_scan_across_track_transitions() {
+		use rand::{RngExt, SeedableRng};
+
+		let mut rng = rand::rngs::StdRng::seed_from_u64(0x66726f6e74);
+		let mut front = serving(remote(1), 100);
+		let mut now = Instant::now();
+		for _ in 0..4096 {
+			let track = name(&format!("track-{}", rng.random_range(0..32)));
+			let event = if !front.tracks.contains_key(&track) {
+				Event::TrackAssigned { track, now }
+			} else {
+				match rng.random_range(0..4) {
+					0 => Event::Used { track },
+					1 => Event::Unused { track, now },
+					2 => {
+						now += LINGER / 4;
+						Event::Deadline { now }
+					}
+					_ => Event::TrackInfo {
+						track,
+						source: 100,
+						closing: false,
+						result: Ok(info()),
+					},
+				}
+			};
+			for action in front.step(event) {
+				if let Action::Forget { track } = action {
+					front.step(Event::Forgotten { track });
+				}
+			}
+			let scanned: BTreeSet<_> = front
+				.tracks
+				.iter()
+				.filter_map(|(name, track)| match track.state {
+					TrackState::Parked { since } => Some((since + LINGER, name.clone())),
+					_ => None,
+				})
+				.collect();
+			assert_eq!(front.parked, scanned);
+			assert_eq!(front.next_deadline(), scanned.first().map(|(at, _)| *at));
+		}
+	}
+
 	/// Every sequence of events up to a small depth, over a small alphabet,
 	/// checked against the invariants the driver relies on.
 	#[test]
