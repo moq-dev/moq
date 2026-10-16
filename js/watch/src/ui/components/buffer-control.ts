@@ -1,18 +1,18 @@
-import * as Moq from "@moq/net";
+import { Milli } from "@moq/clock";
 import type { Effect } from "@moq/signals";
 import type { BufferedRanges } from "../..";
 import type MoqWatch from "../../element";
 
-const MIN_RANGE = Moq.Time.Milli(0);
-const RANGE_STEP = Moq.Time.Milli(10);
-const DEFAULT_MAX = Moq.Time.Milli(4000);
+const MIN_RANGE = Milli(0);
+const RANGE_STEP = Milli(10);
+const DEFAULT_MAX = Milli(4000);
 const LABEL_WIDTH = 48;
 
 function drawRanges(
 	canvas: HTMLCanvasElement,
 	ranges: BufferedRanges,
-	timestamp: Moq.Time.Milli | undefined,
-	max: Moq.Time.Milli,
+	timestamp: number | undefined,
+	max: Milli,
 	isBuffering: boolean,
 ) {
 	const ctx = canvas.getContext("2d");
@@ -41,8 +41,9 @@ function drawRanges(
 
 	for (let i = 0; i < ranges.length; i++) {
 		const range = ranges[i];
-		const startMs = Moq.Time.Milli(range.start - timestamp);
-		const endMs = Moq.Time.Milli(range.end - timestamp);
+		// Offsets from the playhead, negative for content already behind it.
+		const startMs = range.start - timestamp;
+		const endMs = range.end - timestamp;
 		const visibleStart = Math.max(0, startMs);
 		const visibleEnd = Math.min(endMs, max);
 
@@ -74,7 +75,7 @@ function drawRanges(
 	}
 }
 
-export function bufferControl(parent: Effect, watch: MoqWatch, max: Moq.Time.Milli = DEFAULT_MAX): HTMLElement {
+export function bufferControl(parent: Effect, watch: MoqWatch, max: Milli = DEFAULT_MAX): HTMLElement {
 	const wrapper = document.createElement("div");
 	wrapper.className = "buffer";
 
@@ -139,8 +140,8 @@ export function bufferControl(parent: Effect, watch: MoqWatch, max: Moq.Time.Mil
 		const trackWidth = rect.width - LABEL_WIDTH;
 		const x = Math.max(0, Math.min(clientX - rect.left - LABEL_WIDTH, trackWidth));
 		const ms = (x / trackWidth) * max;
-		const snapped = Moq.Time.Milli(Math.round(ms / RANGE_STEP) * RANGE_STEP);
-		const clamped = Moq.Time.Milli(Math.max(MIN_RANGE, Math.min(max, snapped)));
+		const snapped = Milli(Math.round(ms / RANGE_STEP) * RANGE_STEP);
+		const clamped = Milli(Math.max(MIN_RANGE, Math.min(max, snapped)));
 		watch.delay = clamped;
 	};
 
@@ -169,18 +170,18 @@ export function bufferControl(parent: Effect, watch: MoqWatch, max: Moq.Time.Mil
 	});
 
 	parent.event(viz, "keydown", (e) => {
-		let delta = Moq.Time.Milli(0);
+		let delta = 0;
 		if (e.key === "ArrowRight" || e.key === "ArrowUp") {
 			delta = RANGE_STEP;
 		} else if (e.key === "ArrowLeft" || e.key === "ArrowDown") {
-			delta = Moq.Time.Milli(-RANGE_STEP);
+			delta = -RANGE_STEP;
 		} else {
 			return;
 		}
 		e.preventDefault();
 		interact();
 		const current = watch.sync.out.jitter.peek();
-		const value = Moq.Time.Milli(Math.max(MIN_RANGE, Math.min(max, current + delta)));
+		const value = Milli(Math.max(MIN_RANGE, Math.min(max, current + delta)));
 		watch.delay = value;
 	});
 
