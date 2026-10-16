@@ -14484,6 +14484,24 @@ mod new_group_tests {
 		relay.serving.abort();
 	}
 
+	/// A request goes upstream on receipt only: groups that arrive without answering it
+	/// end its outstanding period but never send it again.
+	#[moq_net_sim::test]
+	async fn new_groups_do_not_resend_a_held_request() {
+		let (mut relay, _first) = relay(None).await;
+		let (mut stream, _) = relay.accept().await;
+		accept(&mut stream, true, 5).await;
+
+		let _a = subscribe(&relay.track, Some(9));
+		assert_eq!(update(&mut stream).await, Some(9));
+		answer(&mut stream).await;
+		for sequence in 6..=8 {
+			relay.land(sequence);
+			quiet(&mut stream).await;
+		}
+		relay.serving.abort();
+	}
+
 	/// A publisher that did not advertise DYNAMIC_GROUPS still sees a SUBSCRIBE's request,
 	/// which it ignores, and never a REQUEST_UPDATE carrying one.
 	#[moq_net_sim::test]
