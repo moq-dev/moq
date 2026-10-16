@@ -13,10 +13,12 @@ without another upload from the machine.
 
 A VPN plus separate video and control UDP flows can provide reachability, but the
 application still has to coordinate their delivery and congestion. With MoQ,
-tracks share a connection and its congestion budget. Give control higher priority
-than video, and keep each kind of data on a track with the framing it needs.
-Priority determines which queued data goes first; it does not guarantee a deadline
-or make a command safe to execute.
+tracks sent in the same direction share a connection and its congestion budget,
+so the machine can rank telemetry above its video. Priority only orders data
+queued at one sender: the operator's commands travel the other way, so they never
+compete with the machine's video, and priority does not guarantee a deadline or
+make a command safe to execute. Keep each kind of data on a track with the
+framing it needs.
 
 ## Choose the delivery shape
 
@@ -30,7 +32,9 @@ Use [`moq-json`](https://docs.rs/moq-json) snapshot mode for replaceable state. 
 starts a group with a full value and carries changes as deltas. A reader can skip
 to a newer group and reconstruct the current value. Stream mode puts an ordered
 log in one group; it reports a broken or rolled stream instead of silently
-presenting a gap as a complete log. These are framing choices, not a universal
+presenting a gap as a complete log. That group is bounded (8,192 records), and
+appends are refused once it fills, so a long-running operator opens a new command
+track, for example one per control session. These are framing choices, not a universal
 'reliable' switch on the session.
 
 Transport delivery is not command execution. An application that needs to know
