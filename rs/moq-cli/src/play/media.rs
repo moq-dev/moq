@@ -497,10 +497,11 @@ async fn play_audio<O: Output>(
 					None
 				}
 				Ok(Some(moq_audio::decode::Read::Frame { discontinuity, frame }))
-					if current
-						.replace(*discontinuity)
-						.is_some_and(|current| current != *discontinuity) =>
+					if current != Some(*discontinuity) =>
 				{
+					// The first frame continues nothing, unless a track joined while paused
+					// declared an end before it.
+					let first = current.replace(*discontinuity).is_none();
 					// Every end before this timeline was crossed. Only the last one has
 					// replacement media; the ones before it ended empty timelines.
 					let mut crossed = None;
@@ -512,13 +513,14 @@ async fn play_audio<O: Output>(
 							role.abandon(skipped);
 						}
 					}
-					Some(match crossed {
+					match crossed {
 						Some(transition) => {
 							role.plan(transition, frame.timestamp, Some(lead(delay, frame)));
-							Crossing::Resume(transition)
+							Some(Crossing::Resume(transition))
 						}
-						None => Crossing::Loss,
-					})
+						None if first => None,
+						None => Some(Crossing::Loss),
+					}
 				}
 				_ => None,
 			};
@@ -1024,6 +1026,59 @@ mod tests {
 		assert!(
 			short.is_disjoint(&new),
 			"the next timeline resumed on its own sink: {played:?}"
+		);
+	}
+
+	#[tokio::test]
+	async fn joining_a_paused_track_resumes_on_its_first_frame() {
+		tokio::time::pause();
+		let delay = Duration::from_millis(200);
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let track = broadcast
+			.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
+			.unwrap();
+		let mut producer = moq_mux::container::Producer::new(track, Container::Legacy(moq_mux::container::Kind::Audio));
+		for index in 0..3 {
+			producer.write(packet(index, 0.25)).unwrap();
+		}
+		producer.discontinuity().unwrap();
+		// Joins at the end marker: the stopped encoder's media is already behind it.
+		let mut options = moq_audio::decode::Options::new();
+		options.delay = Some(delay);
+		options.max_delay = delay;
+		options.start = moq_audio::decode::Start::Latest;
+		options.output.format = moq_audio::Format::F32;
+		let consumer = moq_audio::decode::Consumer::new(
+			&broadcast.consume(),
+			&AudioConfig::new(AudioCodec::Pcm, SAMPLE_RATE, 1),
+			"audio",
+			options,
+		)
+		.await
+		.unwrap();
+		let recorder = Recorder::default();
+		let playback = AudioPlayback {
+			changed: Default::default(),
+			speaker: recorder.clone(),
+			presentation: Arc::new(Mutex::new(Presentation::new(delay))),
+			latency: delay,
+			output: recorder.clone(),
+		};
+		let task = tokio::spawn(async move {
+			play_audio(consumer, playback).await.unwrap().finish().await;
+		});
+		tokio::task::yield_now().await;
+		for index in 3..6 {
+			producer.write(packet(index, 0.5)).unwrap();
+		}
+		producer.finish().unwrap();
+		task.await.unwrap();
+		let played = recorder.played();
+		let resumed: Vec<_> = played.iter().filter(|part| part.sample == 0.5).collect();
+		assert!(!resumed.is_empty(), "{played:?}");
+		assert!(
+			resumed.iter().all(|part| part.sink > 0),
+			"the replacement resumed its declared transition: {played:?}"
 		);
 	}
 
