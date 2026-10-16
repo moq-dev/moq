@@ -2671,10 +2671,21 @@ where
 			}
 		};
 
-		// Retirement cancels only the wait for an ID. On drafts 14-16 the peer grants
-		// MAX_REQUEST_ID credit back only for requests it receives, so an allocated ID is
-		// always sent; the response wait below cancels it if the source retired meanwhile.
-		let request_id = match validity.run(self.control.next_request_id(&self.runtime)).await {
+		// Retirement and revocation cancel only the wait for an ID. On drafts 14-16 the peer
+		// grants MAX_REQUEST_ID credit back only for requests it receives, so an allocated ID
+		// is always sent; the response wait below cancels it if either landed meanwhile.
+		let request_id = {
+			let mut credit = std::pin::pin!(self.control.next_request_id(&self.runtime));
+			kio::wait(|waiter| {
+				if gate.poll_denied(waiter).is_ready() {
+					return Poll::Ready(Err(Error::Unauthorized));
+				}
+				validity.check(waiter)?;
+				waiter.poll_future(credit.as_mut())
+			})
+			.await
+		};
+		let request_id = match request_id {
 			Ok(id) => id,
 			Err(err) => {
 				target.fail(err);
@@ -2797,7 +2808,8 @@ where
 			Gone,
 		}
 
-		let mut retired = false;
+		// A local terminal ended the wait, so the peer still holds the request to cancel.
+		let mut unanswered = false;
 		let setup = {
 			let mut response = std::pin::pin!(self.read_subscribe_response(&mut stream));
 			loop {
@@ -2807,8 +2819,12 @@ where
 						return Poll::Ready(Setup::Response(Err(err)));
 					}
 					if let Err(err) = validity.check(waiter) {
-						retired = true;
+						unanswered = true;
 						return Poll::Ready(Setup::Response(Err(err)));
+					}
+					if gate.poll_denied(waiter).is_ready() {
+						unanswered = true;
+						return Poll::Ready(Setup::Response(Err(Error::Unauthorized)));
 					}
 					// An answer that has already arrived wins over the local terminals. Both can
 					// be ready in one poll, and taking abandonment there would discard a response
@@ -2913,7 +2929,7 @@ where
 			}
 			Err(err) => {
 				tracing::debug!(%err, "subscribe response error");
-				if retired {
+				if unanswered {
 					self.cancel_subscribe(stream, request_id).await;
 				}
 				if let Some(pending) = self.take_pending(request_id) {
@@ -6883,6 +6899,149 @@ mod tests {
 			vec![crate::ietf::error::CANCELLED],
 			"and must stop the direction the publisher writes",
 		);
+	}
+
+	/// A subscriber whose grant from the peer covers everything until `auth.ended(0, ..)`
+	/// revokes it, with the token handle to hold meanwhile.
+	fn revocable_auth() -> (crate::auth::Handle, crate::auth::Auth) {
+		let auth = crate::auth::Handle::new(true);
+		let cred = auth.present(bytes::Bytes::from_static(b"cred"), true).unwrap();
+		auth.granted(0, crate::auth::Grant::all());
+		(auth, cred)
+	}
+
+	/// A grant revoked while the SUBSCRIBE waits for request-ID credit refuses the request
+	/// at once, not after the ten-second give-up.
+	#[moq_clock::test]
+	async fn a_revocation_never_waits_behind_subscribe_credit() {
+		for version in [Version::Draft14, Version::Draft15, Version::Draft16] {
+			// MAX_REQUEST_ID admits nothing, so the SUBSCRIBE waits for credit.
+			let session = crate::lite::test_transport::ScriptedSession::new(Vec::new());
+			let log = session.log.clone();
+			let (tasks, _task_set) = crate::util::TaskSet::new();
+			let (auth, _cred) = revocable_auth();
+			let mut subscriber = Subscriber::new(
+				crate::time::sim(),
+				session,
+				crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+				Control::new(Some(RequestId(1)), false),
+				None,
+				peer::PeerSetup::declared(peer::Peer::default()),
+				crate::Hop::new(1).unwrap(),
+				None,
+				version,
+				tasks,
+				Default::default(),
+			)
+			.with_auth(auth.clone());
+
+			let producer = crate::broadcast::Info::default().produce();
+			let mut dynamic = producer.dynamic();
+			let consumer = producer.consume();
+			let track = consumer.track("video").unwrap();
+			let subscription = track.subscribe(None);
+			let request = dynamic.requested_track().await.expect("no track requested");
+
+			let serving = moq_clock::sim::spawn(async move {
+				subscriber
+					.run_subscribe(Path::new("broadcast"), dynamic, None, request)
+					.await;
+			});
+			settle().await;
+			assert!(
+				log.writes.lock().unwrap().is_empty(),
+				"{version}: a SUBSCRIBE went out without credit"
+			);
+
+			auth.ended(0, Error::Session(SessionError::Unauthorized));
+			let result = moq_clock::timeout(Duration::from_secs(1), subscription)
+				.await
+				.unwrap_or_else(|_| panic!("{version}: the revocation waited behind the credit"));
+			assert!(
+				matches!(result, Err(Error::Unauthorized)),
+				"{version}: the request outlived its grant: {:?}",
+				result.err()
+			);
+			moq_clock::timeout(Duration::from_secs(1), serving)
+				.await
+				.unwrap_or_else(|_| panic!("{version}: run_subscribe outlived its grant"))
+				.unwrap();
+			assert!(
+				log.writes.lock().unwrap().is_empty(),
+				"{version}: nothing was sent without credit"
+			);
+			assert!(log.closes().is_empty(), "{version}: the session stays up");
+		}
+	}
+
+	/// A grant revoked while the SUBSCRIBE waits for its answer refuses the request and
+	/// cancels the subscribe at once, not once the peer answers.
+	#[moq_clock::test]
+	async fn a_revocation_never_waits_behind_subscribe_ok() {
+		for version in [Version::Draft14, Version::Draft16, Version::Draft18, Version::Draft22] {
+			// A peer that accepts the stream and then says nothing at all.
+			let session = crate::lite::test_transport::ScriptedSession::new(Vec::new());
+			let log = session.log.clone();
+			let (tasks, _task_set) = crate::util::TaskSet::new();
+			let (auth, _cred) = revocable_auth();
+			let mut subscriber = Subscriber::new(
+				crate::time::sim(),
+				session,
+				crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+				Control::new(None, false),
+				None,
+				peer::PeerSetup::declared(peer::Peer::default()),
+				crate::Hop::new(1).unwrap(),
+				None,
+				version,
+				tasks,
+				Default::default(),
+			)
+			.with_auth(auth.clone());
+
+			let producer = crate::broadcast::Info::default().produce();
+			let mut dynamic = producer.dynamic();
+			let consumer = producer.consume();
+			let track = consumer.track("video").unwrap();
+			let subscription = track.subscribe(None);
+			let request = dynamic.requested_track().await.expect("no track requested");
+
+			let serving = moq_clock::sim::spawn(async move {
+				subscriber
+					.run_subscribe(Path::new("broadcast"), dynamic, None, request)
+					.await;
+			});
+			// Let the SUBSCRIBE go out. No SUBSCRIBE_OK is coming.
+			settle().await;
+			assert!(occurrences(&log, &[ietf::Subscribe::ID as u8]) > 0, "{version}");
+
+			auth.ended(0, Error::Session(SessionError::Unauthorized));
+			let result = moq_clock::timeout(Duration::from_secs(1), subscription)
+				.await
+				.unwrap_or_else(|_| panic!("{version}: the revocation waited behind SUBSCRIBE_OK"));
+			assert!(
+				matches!(result, Err(Error::Unauthorized)),
+				"{version}: the request outlived its grant: {:?}",
+				result.err()
+			);
+			moq_clock::timeout(Duration::from_secs(1), serving)
+				.await
+				.unwrap_or_else(|_| panic!("{version}: run_subscribe outlived its grant"))
+				.unwrap();
+			// A subscribe revoked before SUBSCRIBE_OK must still be cancelled: by UNSUBSCRIBE
+			// where the draft has one, and by stopping the publisher's direction on every draft.
+			if subscriber_unsubscribes(version) {
+				assert!(occurrences(&log, &[ietf::Unsubscribe::ID as u8]) > 0, "{version}");
+			}
+			assert_eq!(log.stops(), vec![crate::ietf::error::CANCELLED], "{version}");
+			assert!(log.closes().is_empty(), "{version}: the session stays up");
+		}
+	}
+
+	/// Whether `version` cancels a subscription with an UNSUBSCRIBE message; draft-17
+	/// removed it.
+	fn subscriber_unsubscribes(version: Version) -> bool {
+		matches!(version, Version::Draft14 | Version::Draft15 | Version::Draft16)
 	}
 
 	/// An unanswered epochless request cannot prove which instance the peer resolved.
