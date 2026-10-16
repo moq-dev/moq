@@ -3,8 +3,8 @@
 ## Goal
 
 MoQ owns the QUIC features it needs in an in-tree stack, `moq-quic`, hard
-forked from quinn (see [the fork](/quest/m1/quic/fork/README.md) for why
-quinn and not noq). One core serves the tokio backend, the thread-per-core
+forked from quinn rather than noq, whose multipath, NAT traversal, and QAD
+MoQ never negotiates. One core serves the tokio backend, the thread-per-core
 `moq-uring` backend, and qmux; iroh stays on upstream noq. The features are
 BBR correctness, reliable stream resets, hierarchical stream scheduling with
 per-broadcast fairness, bounded incomplete-message memory, wider limits for
@@ -19,9 +19,9 @@ careful resume, and a receive-timestamps spike toward GCC live in
 ## Plan
 
 Decided in the 2026-09-30 plan: the moq-dev/noq soft fork is replaced by a
-hard fork of quinn in `rs/`, so every QUIC change here waits for
-[the fork](/quest/m1/quic/fork/README.md). moq-dev/noq is frozen to
-security patches for `release`.
+hard fork of quinn in `rs/`, where every QUIC change here lands.
+moq-dev/noq is frozen to security patches for `release` and archived once
+no released MoQ crate depends on it.
 
 Older quests say "the fork" or "noq"; read that as `moq-quic`. Their steps to
 publish a fork release, pin it, or offer a change upstream are superseded:
@@ -55,7 +55,6 @@ Decided in the 2026-09-30 audit: deadlines, qmux, BBR loss parity, ECN
 measurement, ACK progress, and the ACK hook moved to m2, since no m1 quest
 consumes them. Decided 2026-10-08: L4S and careful resume moved on to m3,
 and GCC shrank to a receive-timestamps spike, since none has a consumer.
-The BBR app-limited fixes land in `moq-quic` without waiting for the switch.
 
 Decided in the 2026-10-10 receive-memory plan: native message assembly holds
 connection credit until complete-unit handoff, while stream credit advances
@@ -67,7 +66,6 @@ cache limits remain separate; bitrate pacing composes with this memory cap.
 
 ## Required
 
-- [Hard fork](/quest/m1/quic/fork/README.md) - quinn in-tree as `moq-quic`, with BBR3 and lazy stream slots, and MoQ switched onto it
 - [Retain connection credit](/quest/m1/quic/receive-credit.md) - native receivers own connection credit independently of stream reads
 - [Bound message assembly](/quest/m1/quic/receive-memory.md) - complete headers and frames return credit, and receiver priority cancellation restores progress
 - [Reliable stream reset](/quest/m1/quic/reliable-reset.md) - `RESET_STREAM_AT`,

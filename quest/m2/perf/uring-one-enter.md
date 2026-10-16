@@ -41,7 +41,6 @@ stopped on the relay-port race (fixed by #5636);
 the completed diagnostic used preflighted unique ports below the host's
 client ephemeral range, with no runtime retry. The benchmark CLI is unchanged.
 
-Driver-touching follow-ups still wait on the [hard fork](/quest/m1/quic/fork/README.md).
 The completed work changes only the Worker loop, Shared::push, observations,
 and their consumers, leaving `rs/moq-uring/src/quic/noq` alone.
 

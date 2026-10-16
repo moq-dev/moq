@@ -47,10 +47,6 @@ retain the baseline and record why before exposing an ineffective option.
 Promoted from m2 on 2026-10-09 by maintainer priority: the viewer up-switch
 requires it.
 
-## Required
-
-- [Hard fork](/quest/m1/quic/fork/README.md) - the change lands in `moq-quic`, not the frozen fork
-
 ## Related
 
 - [Viewer up-switch](/quest/m2/viewer-upswitch.md) - the viewer side, which requires this

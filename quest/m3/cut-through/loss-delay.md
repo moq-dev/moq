@@ -39,10 +39,6 @@ Public API: an additive trait accessor. Wire: a new `moq-stats` field,
 additive on `main` since `Traffic` is `#[non_exhaustive]` and readers default
 missing fields.
 
-## Required
-
-- [Hard fork](/quest/m1/quic/fork/README.md) - the `moq-quic` assembler this counts in
-
 ## Related
 
 - [QoS](/quest/m1/qos/README.md) - the per-broadcast ingress conventions this follows

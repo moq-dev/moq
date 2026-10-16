@@ -49,10 +49,6 @@ Report CPU per Gbps, RSS, loss, and p99 latency via `just bench BASE` on
 Linux. The verdict names which levers ship and which qdisc, if any, relay
 hosts need.
 
-## Required
-
-- [Hard fork](/quest/m1/quic/fork/README.md) - the change lands in `moq-quic`, not the frozen fork
-
 ## Related
 
 - [QUIC I/O boundary](/quest/m2/quic-io-boundary.md) - redesigns the transmit buffers the pool lever would feed

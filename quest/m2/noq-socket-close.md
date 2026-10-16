@@ -17,10 +17,6 @@ sends are dropped and receives end. Test it there and replace moq-tokio's wrappe
 `TestReconnectAcrossRelayRestart` and moq-tokio's
 `close_releases_quic_socket` stay green.
 
-## Required
-
-- [Hard fork](/quest/m1/quic/fork/README.md) - imports the endpoint into moq-tokio
-
 ## Related
 
 - [Listener close](https://github.com/moq-dev/moq/pull/4087) - the local wrapper this replaces

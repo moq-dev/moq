@@ -23,7 +23,3 @@ Found in the 2026-09-30 fork planning; none needs a QUIC API change:
 
 The clock-read fix is [moq-uring on moq-clock](/quest/m1/time/uring.md).
 Measure with the echo benches and `just bench`. Paths above are pre-fork names.
-
-## Required
-
-- [Hard fork](/quest/m1/quic/fork/README.md) - the copies are removed on `moq-quic`, not the frozen fork

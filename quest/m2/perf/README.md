@@ -20,13 +20,11 @@ Planning quests can settle their contracts independently. Facts from the 2026-09
 hot-path survey, so quests don't re-litigate them:
 
 - Decided in the 2026-10-05 audit: perf quests that edit moq-uring's QUIC
-  driver (Run to quiescence) Require the
-  [hard fork](/quest/m1/quic/fork/README.md), so their before and after are
-  measured on `moq-quic` instead of being invalidated by the switch.
-- `moq-uring`'s only backend is noq. Every profile names its backend. The
+  driver (Run to quiescence) measure their before and after on `moq-quic`.
+- `moq-uring`'s only backend is `moq-quic`. Every profile names its backend. The
   historical quiche-flavor numbers cited in
   [Run to quiescence](/quest/m2/perf/uring-quiescence.md) and
-  [moq-uring on moq-clock](/quest/m1/time/uring.md) are re-measured on noq.
+  [moq-uring on moq-clock](/quest/m1/time/uring.md) are re-measured on `moq-quic`.
 - Cross-thread wakeups are already cheap: one futex word per worker, at most
   one `futex(FUTEX_WAKE)` per park cycle, wake bursts coalesce through the
   `kio::Tasks` bitset. No eventfd, no MSG_RING, by design (`SINGLE_ISSUER`).
