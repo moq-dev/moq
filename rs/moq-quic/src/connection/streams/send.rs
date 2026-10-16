@@ -91,8 +91,8 @@ impl Send {
     /// Update stream state due to a reset sent by the local application
     ///
     /// Data below `reliable_size` is still delivered; everything after it is abandoned. Returns
-    /// the Reliable Size of the reset frame to send now, or `None` while a peer without
-    /// RESET_STREAM_AT (`!at`) still has data below `reliable_size` to acknowledge, after which
+    /// the Reliable Size of the reset to send now, or `None` while a peer without RESET_STREAM_AT
+    /// (`!at`) still has data below `reliable_size` to acknowledge, after which
     /// [`take_held_reset`](Self::take_held_reset) releases it.
     pub(super) fn reset(
         &mut self,
@@ -114,22 +114,35 @@ impl Send {
             reliable_size,
             error_code,
             held: !send,
-            reset_acked: false,
+            acked: None,
         };
-        send.then_some(if at { reliable_size } else { 0 })
+        send.then_some(reliable_size)
     }
 
     /// Release a held RESET_STREAM once all the data it holds for has been acknowledged, returning
-    /// its Reliable Size of 0
+    /// its Reliable Size
     pub(super) fn take_held_reset(&mut self) -> Option<u64> {
-        let SendState::ResetSent { held, .. } = &mut self.state else {
+        let SendState::ResetSent {
+            held,
+            reliable_size,
+            ..
+        } = &mut self.state
+        else {
             return None;
         };
         if !*held || !self.pending.is_fully_acked() {
             return None;
         }
         *held = false;
-        Some(0)
+        Some(*reliable_size)
+    }
+
+    /// The Reliable Size this stream's reset delivers, if it was reset
+    pub(super) fn reliable_size(&self) -> Option<u64> {
+        match self.state {
+            SendState::ResetSent { reliable_size, .. } => Some(reliable_size),
+            _ => None,
+        }
     }
 
     /// Abandon the data a reset still delivers, returning the Reliable Size of 0 for the reset to
@@ -178,15 +191,26 @@ impl Send {
         })
     }
 
-    /// Handle acknowledgement of the reset frame
+    /// Handle acknowledgement of a reset frame sent while the Reliable Size was `reliable_size`
     ///
-    /// Returns whether the reset and all data below its Reliable Size have been acknowledged
-    pub(super) fn reset_acked(&mut self) -> bool {
-        let SendState::ResetSent { reset_acked, .. } = &mut self.state else {
+    /// Returns whether the current reset and all data below its Reliable Size have been
+    /// acknowledged
+    pub(super) fn reset_acked(&mut self, reliable_size: u64) -> bool {
+        let SendState::ResetSent { acked, .. } = &mut self.state else {
             return false;
         };
-        *reset_acked = true;
-        self.pending.is_fully_acked()
+        // Sizes only shrink, so the smallest one acknowledged is the latest
+        *acked = Some(acked.map_or(reliable_size, |acked| acked.min(reliable_size)));
+        self.is_reset_acked() && self.pending.is_fully_acked()
+    }
+
+    /// Whether the peer acknowledged a reset carrying the current Reliable Size, rather than one
+    /// that STOP_SENDING has since shrunk
+    fn is_reset_acked(&self) -> bool {
+        matches!(
+            self.state,
+            SendState::ResetSent { reliable_size, acked, .. } if acked == Some(reliable_size)
+        )
     }
 
     /// Handle STOP_SENDING
@@ -211,9 +235,7 @@ impl Send {
                 *finish_acked |= frame.fin;
                 *finish_acked && self.pending.is_fully_acked()
             }
-            SendState::ResetSent { reset_acked, .. } => {
-                *reset_acked && self.pending.is_fully_acked()
-            }
+            SendState::ResetSent { .. } => self.is_reset_acked() && self.pending.is_fully_acked(),
             SendState::Ready => false,
         }
     }
@@ -393,7 +415,8 @@ pub(super) enum SendState {
         reliable_size: u64,
         error_code: VarInt,
         held: bool,
-        reset_acked: bool,
+        /// The smallest Reliable Size an acknowledged reset frame carried
+        acked: Option<u64>,
     },
 }
 

@@ -326,7 +326,7 @@ pub struct Retransmits {
     pub(super) data_blocked: bool,
     pub(super) max_stream_id: [bool; 2],
     pub(super) streams_blocked: [bool; 2],
-    /// Each reset stream with the Reliable Size its frame carries, 0 for a plain RESET_STREAM
+    /// Each reset stream with the Reliable Size it delivers when its reset frame was sent
     pub(super) reset_stream: Vec<(StreamId, u64)>,
     pub(super) stop_sending: Vec<frame::StopSending>,
     pub(super) max_stream_data: FxHashSet<StreamId>,
