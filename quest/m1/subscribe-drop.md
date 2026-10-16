@@ -19,10 +19,9 @@ loop. Once a track ends, the Rust
 publisher on lite-05 and lite-06 names every sequence from its
 SUBSCRIBE_START to the end that the subscription never got (skipped,
 stale, or missing its head), just before its FIN. Still missing: groups
-reset before their header. JS publishers and drops sent as soon as a group is
-given up belong to [Early drops](/quest/m1/subscribe-drop-early.md), which
-also stops the end-of-track drops missing a gap the publisher aged out of its
-grace. lite-07 (still `moq-lite-07-wip`,
+reset before their header. Rust and JS publishers now send drops as soon as a
+group is given up, including gaps the publisher aged out of its grace.
+lite-07 (still `moq-lite-07-wip`,
 unpublished) removed SUBSCRIBE_DROP for a `Stream Count` on SUBSCRIBE_END
 (#4224).
 
@@ -95,10 +94,6 @@ subscribers both settle on SUBSCRIBE_DROP through the relay, so a group the
 publisher skipped or never opened ends the track without waiting out the
 grace. Decided in the 2026-09-30 audit: the case moved here so the basic
 tail interop could land first.
-
-## Required
-
-- [Early drops](/quest/m1/subscribe-drop-early.md) - Rust and JS publishers drop a sequence the moment they give it up, and forward an upstream drop
 
 ## Related
 

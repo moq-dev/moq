@@ -516,6 +516,7 @@ pub(crate) struct FetchOutcome {
 }
 
 impl TrackState {
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	fn dropped_in_range(&self, min: u64, end: Option<u64>, reported: &BTreeSet<u64>) -> Option<u64> {
 		let explicit = self
 			.drops
@@ -4016,6 +4017,7 @@ struct Cursor {
 struct DropCursor {
 	pending: BTreeSet<u64>,
 	/// Persistent track drops this cursor already reported.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	reported: BTreeSet<u64>,
 }
 
@@ -4061,6 +4063,7 @@ impl Cursor {
 		}
 	}
 
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	fn poll_drop(&mut self, waiter: &kio::Waiter) -> Poll<u64> {
 		if let Some(sequence) = self.drops.pending.pop_first() {
 			self.drops.reported.insert(sequence);
@@ -4703,6 +4706,7 @@ impl Subscriber {
 	}
 
 	/// Poll for a sequence this subscription gave up without serving.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub(crate) fn poll_drop(&mut self, waiter: &kio::Waiter) -> Poll<u64> {
 		match &mut self.inner {
 			Inner::Plain(cursor) => cursor.poll_drop(waiter),

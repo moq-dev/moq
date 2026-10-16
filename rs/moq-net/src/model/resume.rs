@@ -376,6 +376,7 @@ impl Subscriber {
 	}
 
 	/// Poll for an explicit drop from the serving copy.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub(crate) fn poll_drop(&mut self, waiter: &kio::Waiter) -> Poll<u64> {
 		let mut reader = self.reader();
 		let sub = ready!(reader.poll_serving(waiter));
