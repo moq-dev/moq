@@ -19,49 +19,73 @@ Rust items (`rs/moq-net/src/model/`), as they stood at b4eab0db1:
 
 - **Withheld groups** (`track::Producer::receive_group`, `reveal_group`,
   `group::Producer::is_started`; lite subscriber). **Decision**, reopened
-  for the maintainer 2026-10-16 after review:
-  - ~~Remove the need: `create_group` withholds every group until its first
-    frame or end.~~ Settled earlier, then reopened. It deadlocks a publisher
-    that creates a group and waits on `group::Producer::demand()` before
-    encoding (the documented "publish only while someone is watching"
-    pattern, also exposed by moq-ffi). Group demand counts readers of the
-    group, and no reader can reach a withheld group, so the first frame never
-    comes.
-  - Recommended: `create_group` stays visible at once, so its demand
-    works before the first frame. A public `track::Producer::receive_group`
-    returns a group that reveals itself on its first frame or its end. There
-    is no separate `reveal_group` call to forget, and `is_started` stays
-    private. Only a session writing a peer's groups uses it.
+  in review and settled 2026-10-16:
+  - ~~`create_group` withholds every group until its first frame or end.~~
+    It deadlocks a publisher that creates a group and waits on
+    `group::Producer::demand()` before encoding, since no reader can reach
+    a withheld group to demand it.
+  - A public `receive_group` that reveals itself on its first frame or end.
   - A public `receive_group` and `reveal_group` pair, as today.
-  - Withhold every group, but count a track subscriber that would receive
-    it as pre-frame group demand. This keeps one call but couples group
-    demand to track cursors.
+  - ✅ Drop withholding. Hiding a group from readers was never what fixed
+    #4914's rejoin bug: the model's judgments must not count a frameless
+    group as content. Derive that from each group's own state (first frame
+    opened, or ended) for every group, wherever the model asks it: the live
+    edge, successor and staleness, the rejoin wait (`shows`), `newest` and
+    `largest`, and `set_idle`. Every group joins arrival order when created,
+    so readers and group demand reach it before its first frame.
+    `create_group` is the only call; `receive_group`, `reveal_group`, and
+    `is_started` go. The group wakes its track once, on its first frame or
+    end, as `reveal` does today. Verified on a scratch branch at dd95d5804
+    for received groups: with arrival order immediate and the judgments
+    gated, the whole moq-net suite passes except the two tests that assert
+    the old design. Consequences:
+    - `largest()` stops reporting a frameless newest group as (N, 0) and
+      reports the last frame that exists. This touches
+      [Live largest location](/quest/m1/largest.md); align with it there.
+    - Regression guard: `rejoin_waits_for_the_answers_first_frame`
+      (`rs/moq-net/tests/rejoin.rs`, fails when the judgments count a
+      frameless group) and
+      `revealing_a_presented_group_wakes_a_read_it_expires` stay;
+      `a_withheld_group_holds_the_end` and
+      `a_withheld_group_that_ends_empty_releases_the_end` are rewritten to
+      "a frameless group does not count as content" rather than "a reader
+      cannot see it".
+    - Unverified: app-created groups on the derived path, and the JS
+      mirror. Check both here before landing.
 - **Owned frame writer** (`group::Producer::create_frame_owned`,
   `frame::ProducerOwned`; both subscribers, `coding/reader.rs`). A
   poll-driven wire driver cannot hold the borrowing `frame::Producer<'a>`
-  across polls. **Decision**, reopened for the maintainer 2026-10-16 after
-  review:
-  - Recommended: one owned `frame::Producer` that borrows nothing. The
-    runtime `Error::FrameOpen` refusal (`group.rs` already checks it in
-    three places) stays the guard. The borrowing `create_frame` and
-    `ProducerOwned` both go, and so does the stale "caller's promise" doc on
-    `create_frame_owned`.
+  across polls. **Decision**, reopened in review and settled 2026-10-16:
+  - One owned `frame::Producer` guarded only by the runtime
+    `Error::FrameOpen` refusal.
   - A second, public owned type (AGENTS.md's no-twins rule argues against
     it).
-  - ~~The frame writer consumes the `group::Producer` and hands it back when
-    the frame finishes, as a compile-time guarantee.~~ Settled earlier,
-    then reopened. `group::Producer` is publicly `Clone`, so a clone taken
-    before the frame opens can open a second one. The runtime check is the
-    real guard either way, as it already is for today's `&mut self`
-    borrow.
-  - Make the guarantee real: drop public `Clone` from `group::Producer`, or
-    add a unique write capability. Not recommended. The crate docs promise
-    every producer is cheaply cloneable into another writer, and the model
-    keeps clones of its own groups (track slots, abort), so this breaks a
-    crate-wide convention to replace a check that already works. Downstream
-    holders (moq-ffi, moq-e2ee, moq-transcode) already treat the group as
-    exclusive, so the breakage looks small, but no compile probe has
-    confirmed it.
+  - ✅ Make one open frame per group a compile-time guarantee. Drop public
+    `Clone` from `group::Producer`; the model and sessions keep a
+    crate-private duplicate. The chunked writer is owned:
+    `group::Producer::create_frame(self, info) -> Result<frame::Producer>`
+    aborts the group with the error on failure (an oversized frame, a
+    timestamp mismatch, or a closed group are bugs or protocol errors),
+    `frame::Producer::finish(self) -> Result<group::Producer>` hands it
+    back, and `frame.group()` gives read access (demand, info, closed)
+    while the frame is open. `write_frame(&mut self)` stays for one-shot
+    frames. The borrowing `create_frame` and `ProducerOwned` go, with the
+    stale "caller's promise" doc; `FrameOpen` stays only as a backstop for
+    crate-internal duplicates. `track::Producer` keeps `Clone`: several
+    writers creating groups is legitimate, and `claim_sequence` already
+    refuses a duplicate sequence.
+    - Compile probe at dd95d5804: 26 `group::Producer` clone sites, 16
+      model-internal and 7 in the sessions (kept by the crate-private
+      duplicate), and 3 outside the crate (2 in
+      `rs/moq-net/benches/track.rs`, 1 moq-ffi test), all trivial.
+    - The sessions clone to abort a group held elsewhere and to watch
+      demand or closure. If a third-party session needs to abort without
+      owning the writer, add a non-writing abort handle rather than
+      `Clone`.
+    - Pitfall: `group::Producer` derefs to the `Copy` `group::Info`, so a
+      downstream `producer.clone()` silently copies the `Info` and fails
+      later with a confusing "no method on `Info`" error. Say so in the
+      changelog, or drop the `Deref` for an `info()` getter.
 - The frame writer's write without a wake (today
   `frame::ProducerOwned::write`) and `notify`: stay private, "tunes the
   built-in sessions" (batches wakes per poll turn).
