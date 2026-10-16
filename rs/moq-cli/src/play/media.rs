@@ -15,7 +15,7 @@ use tokio::time::Instant;
 
 use super::args::Args;
 use super::output::{Output, Sink, Speaker};
-use super::playback::{Kind, Playback, joined};
+use super::playback::{Kind, Playback, Track, joined};
 use super::timeline::{AudioTimeline, Presentation, fit, timestamp};
 use super::video::Video;
 use super::window::Event;
@@ -167,7 +167,14 @@ impl<O: Output> Media<O> {
 							}
 							kind
 						});
-						playback.ended(ended);
+						// A disabled rendition's demand was taken to stop it; one still held
+						// means the track ended on its own.
+						let finished = match ended {
+							Some(Kind::Video) => video_demand.take().is_some(),
+							Some(Kind::Audio) => audio_demand.take().is_some(),
+							None => false,
+						};
+						playback.ended(ended, finished);
 					}
 					_ = tails.join_next(), if !tails.is_empty() => {}
 					// Followed for as long as it lasts, not just until something is
@@ -219,6 +226,11 @@ impl<O: Output> Media<O> {
 			if playback.wants(Kind::Video) {
 				playback.read(Kind::Video);
 				for (name, config) in snapshot.video.enabled() {
+					let reference = Track::of(config, name);
+					// A finished track has only its newest group left, which already played.
+					if playback.finished(&reference) {
+						continue;
+					}
 					// A rendition pointing at a broadcast we can't reach is that
 					// rendition's problem, not the catalog's: fall through to the
 					// next one like an unsupported codec does.
@@ -273,7 +285,7 @@ impl<O: Output> Media<O> {
 									},
 								)
 							});
-							playback.started(Kind::Video);
+							playback.started(Kind::Video, reference);
 							break;
 						}
 						Err(err) => {
@@ -287,6 +299,11 @@ impl<O: Output> Media<O> {
 			if playback.wants(Kind::Audio) {
 				playback.read(Kind::Audio);
 				for (name, config) in snapshot.audio.enabled() {
+					let reference = Track::of(config, name);
+					// A finished track has only its newest group left, which already played.
+					if playback.finished(&reference) {
+						continue;
+					}
 					let rendition = match source.resolve(config.broadcast.as_ref()).await {
 						Ok(rendition) => rendition,
 						Err(err) => {
@@ -330,7 +347,7 @@ impl<O: Output> Media<O> {
 									},
 								)
 							});
-							playback.started(Kind::Audio);
+							playback.started(Kind::Audio, reference);
 							break;
 						}
 						Err(err) => {
@@ -840,6 +857,34 @@ mod tests {
 			played(&recorder, NEW).0,
 			PACKET_DURATION * 10,
 			"the new broadcast did not play in full"
+		);
+	}
+
+	/// A catalog update lands while a track plays, then the track ends. The
+	/// player reads the newer snapshot, which still names the finished track, and
+	/// must not resubscribe to it and replay its newest group.
+	#[tokio::test]
+	async fn a_finished_track_is_not_replayed_after_a_catalog_update() {
+		tokio::time::pause();
+
+		let origin = moq_tokio::origin::spawn();
+		let (_broadcast, mut catalog, mut audio) = publish(&origin, Default::default());
+		let recorder = Recorder::default();
+		let player = tokio::spawn(media(&origin, Duration::from_millis(50), recorder.clone()).run());
+		write(&mut audio, 10, 0.25).await;
+		catalog
+			.mutate(|catalog| {
+				catalog.audio.renditions.get_mut("audio").unwrap().bitrate = Some(u64::from(SAMPLE_RATE) * 32);
+			})
+			.unwrap();
+		audio.finish().unwrap();
+
+		// The catalog stays open, so the player keeps following it.
+		settle(player, &recorder).await;
+		assert_eq!(
+			played(&recorder, 0.25).0,
+			PACKET_DURATION * 10,
+			"the finished track replayed"
 		);
 	}
 
