@@ -1817,6 +1817,12 @@ test("Frame refuses draft-14 END_OF_TRACK properties", async () => {
 	const wire = new Uint8Array([0, 2, 0x20, 7, 0, 4]);
 	const reader = new Reader(undefined, wire, Version.DRAFT_14);
 	await expect(reader.decode((c) => Frame.decode(c, flags, undefined))).rejects.toThrow(EndOfTrackProperties);
+
+	// From draft 15, no status object may carry properties at all.
+	for (const status of [3, 4]) {
+		const later = new Reader(undefined, new Uint8Array([0, 2, 0x20, 7, 0, status]), Version.DRAFT_15);
+		await expect(later.decode((c) => Frame.decode(c, flags, undefined))).rejects.toThrow(ProtocolViolation);
+	}
 });
 
 test("Frame decodes objects split at every byte", async () => {

@@ -1086,13 +1086,13 @@ test("an object without a Timestamp on a TIMESCALE track is malformed", async ()
 	stop.mockRestore();
 });
 
-test("an END_OF_TRACK carrying properties ends the subscription as unsupported", async () => {
+test("a draft-14 END_OF_TRACK carrying properties ends the subscription as unsupported", async () => {
 	// Delta 0, one unknown integer property, an empty payload, then END_OF_TRACK: standalone,
 	// and after a one-byte object.
 	const marker = [0, 2, 0x20, 7, 0, 4];
 	for (const wire of [marker, [0, 0, 1, 42, ...marker]]) {
-		const { subscriber, track } = await subscribeTrack();
-		const reader = new Reader(undefined, new Uint8Array(wire), VERSION);
+		const { subscriber, track } = await subscribeTrack({ version: Version.DRAFT_14 });
+		const reader = new Reader(undefined, new Uint8Array(wire), Version.DRAFT_14);
 		const stop = spyOn(reader, "stop");
 
 		await subscriber.handleGroup(stampedGroup(0), reader);
