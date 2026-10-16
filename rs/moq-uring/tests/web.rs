@@ -699,6 +699,8 @@ fn a_reset_stream_keeps_its_header_without_credit() {
 			let mut recv = accept.await.expect("the reset stream arrives").expect("accept_uni");
 			let err = recv.read_chunk(usize::MAX).await.expect_err("the server reset it");
 			assert!(matches!(err, moq_tokio::quic::web::ReadError::Reset(7)), "got {err:?}");
+			// Only now, so the close cannot overtake the reset stream.
+			session.close(CLOSE_CODE, CLOSE_REASON.as_bytes());
 			session.closed().await;
 		});
 	});
@@ -727,10 +729,6 @@ fn a_reset_stream_keeps_its_header_without_credit() {
 				.expect("open_uni");
 			send.reset(7);
 
-			std::future::poll_fn(|cx| filler.poll_closed(cx))
-				.await
-				.expect("filler closed");
-			session.close(CLOSE_CODE, CLOSE_REASON);
 			std::future::poll_fn(|cx| session.poll_closed(cx)).await;
 		})
 		.expect("worker");
