@@ -141,8 +141,9 @@ struct Open {
 /// Closed records queue until [`Iterator::next`] takes them.
 pub struct Segmenter {
 	config: Config,
-	/// Fixed nominal duration in wire units; absent until an unhinted track's first record closes.
-	declared: Option<u64>,
+	/// Fixed nominal duration; absent until an unhinted track's first record closes. Kept unrounded
+	/// so pacing hits a fractional-millisecond GOP's boundary; only the wire declaration rounds.
+	declared: Option<Duration>,
 	/// The number the next closed record gets.
 	sequence: u64,
 	open: Option<Open>,
@@ -167,10 +168,10 @@ impl Segmenter {
 	pub fn new(config: Config) -> Self {
 		let declared = match config.duration_hint.filter(|hint| !hint.is_zero()) {
 			Some(hint) => {
-				let hint = units(hint).max(1);
-				Some(hint.saturating_mul(units(config.duration_min).div_ceil(hint).max(1)))
+				let multiple = config.duration_min.as_nanos().div_ceil(hint.as_nanos()).max(1);
+				Some(hint.saturating_mul(u32::try_from(multiple).unwrap_or(u32::MAX)))
 			}
-			None if config.duration_min.is_zero() => Some(0),
+			None if config.duration_min.is_zero() => Some(Duration::ZERO),
 			None => None,
 		};
 		Self {
@@ -192,20 +193,18 @@ impl Segmenter {
 	/// The fixed nominal record duration, once known, in timeline units. An untimed track has no
 	/// duration to declare.
 	pub fn declared_duration(&self) -> Option<u64> {
-		self.declared.filter(|_| self.timed != Some(false))
+		self.declared.filter(|_| self.timed != Some(false)).map(units)
 	}
 
 	fn target(&self) -> Duration {
 		self.declared
-			.filter(|value| *value != 0)
-			.map(duration)
+			.filter(|value| !value.is_zero())
 			.unwrap_or(self.config.duration_min)
 	}
 
 	fn ceiling(&self) -> Duration {
 		self.declared
-			.filter(|value| *value != 0)
-			.map(duration)
+			.filter(|value| !value.is_zero())
 			.and_then(|value| value.checked_mul(DURATION_CEILING_MULTIPLIER))
 			.unwrap_or(DEFAULT_DURATION_CEILING)
 	}
@@ -408,8 +407,8 @@ impl Segmenter {
 				// The first record fixes an unhinted declaration. One closed early says nothing about
 				// the cadence, so the target falls back to the minimum.
 				self.declared.get_or_insert(match paced {
-					true => duration,
-					false => units(self.config.duration_min),
+					true => self::duration(duration),
+					false => self.config.duration_min,
 				});
 				Record::new(self.sequence, start, duration, open.start, end)
 			}
@@ -961,6 +960,25 @@ mod test {
 	fn a_hint_declares_its_smallest_multiple_at_or_past_the_minimum() {
 		let segmenter = Segmenter::new(Config::default().with_duration_hint(Duration::from_millis(1_500)));
 		assert_eq!(segmenter.declared_duration(), Some(4_500));
+	}
+
+	/// A 60-frame GOP at 29.97fps lasts 2002.002ms. Rounding the hint before multiplying would aim
+	/// at 4006ms, past the second GOP's end, and pace three GOPs per record instead of two.
+	#[test]
+	fn a_fractional_hint_paces_on_its_own_boundaries() {
+		let gop = Duration::from_nanos(2_002_002_002);
+		let mut video = Segmenter::new(Config::default().with_duration_hint(gop));
+		assert_eq!(video.declared_duration(), Some(4_005));
+		for group in 0..5 {
+			let pts = Timestamp::from_micros((gop * group as u32).as_micros() as u64).unwrap();
+			video.frame(at(group), pts, true).unwrap();
+			video.finish_group(group);
+		}
+
+		assert_eq!(
+			drain(&mut video),
+			vec![(0, 4_004, at(0), at(2)), (4_004, 4_004, at(2), at(4))]
+		);
 	}
 
 	#[test]
