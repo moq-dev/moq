@@ -1,9 +1,9 @@
-import { Time } from "@moq/net";
+import { Milli } from "@moq/clock";
 import { Producer } from "../src/arrivals";
 
 // Sweep open handles against each handle's unread backlog: a write should cost one push per
 // handle, never a slope in the backlog.
-const frame = { kind: "frame" as const, timestamp: Time.Milli(0), arrival: Time.Milli(0), late: false };
+const frame = { kind: "frame" as const, timestamp: Milli(0), arrival: Milli(0), late: false };
 const WRITES = 10_000;
 
 console.log("handles,backlog,ns_per_handle_write");

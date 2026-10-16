@@ -85,19 +85,17 @@ reasons, so later sessions don't reopen them:
   [moq-uring on moq-clock](/quest/m1/time/uring.md). The relay seam
   [bench-relay](/quest/m2/bench-relay.md) needed is
   [the relay seam](/quest/m1/time/relay-seam.md). Quests that already asked
-  for "mocked time" Require the core quest. moq-quic adopts the logical
-  instant in the [switch](/quest/m1/quic/fork/switch.md), which Requires the
-  crate.
+  for "mocked time" Require the core quest. moq-quic takes the logical
+  instant at its boundary.
 
 This milestone verifies the exported clock contract and production consumers
-needed by the QUIC switch and clustering regressions. Unrelated test/private
+needed by the in-tree QUIC stack and clustering regressions. Unrelated test/private
 cleanup and the global lint ratchet belong to
 [the follow-up sweep](/quest/m2/time-test-sweep.md).
 
 ## Required
 
 - [moq-net on moq-clock](/quest/m1/time/net.md) - moq-net, moq-mux, moq-stats, moq-room, and moq-ffi run on moq-clock and moq-net-sim is gone
-- [JS on @moq/clock](/quest/m1/time/js-migrate.md) - every JS package reads time only through `@moq/clock`
 - [Every crate on moq-clock](/quest/m1/time/crates.md) - every remaining crate reads time only through moq-clock, with controlled tests for the production/public API migrations
 - [moq-uring on moq-clock](/quest/m1/time/uring.md) - one clock read per worker turn and moq-clock's deadline queue replace the private timer heap
 - [The relay seam](/quest/m1/time/relay-seam.md) - one in-memory session and a generic `moq_relay::Connection`, so relay tests run on the sim

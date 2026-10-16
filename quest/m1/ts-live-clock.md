@@ -12,8 +12,8 @@ output from actual timing defects.
 Decided with the maintainer on 2026-10-11: investigate and fix this finding
 independently of the same-instance resume failure. Preserve strict publisher
 identity, the existing validation gates, and production negotiation defaults.
-Keep validation PR #5328 draft while its local readiness findings remain
-unresolved; a passing CI run alone does not explain the local failure.
+Validation PR #5328 has merged. Its passing CI does not explain this local
+failure; this follow-up owns the remaining reproduction and fix.
 
 The epoch-capable 120-second local run completed with publisher and exporter
 exit zero, but the grader reported -1382.60 ppm against its +/-30 ppm limit.

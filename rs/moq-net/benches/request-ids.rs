@@ -7,10 +7,10 @@ fn request_ids(c: &mut Criterion) {
 	group.sample_size(20);
 	group.warm_up_time(Duration::from_millis(200));
 	group.measurement_time(Duration::from_secs(1));
-	// Up to the production window, which the session sizes to twice its 110,000 caps.
+	// Up to the production window, which the session sizes to twice its 120,000 caps.
 	for mode in ["ordered", "reordered", "scattered"] {
 		for sessions in [1, 8, 32] {
-			for window in [8, 128, 220_000] {
+			for window in [8, 128, 240_000] {
 				let ids = ids(mode, window);
 				println!(
 					"admitted,{mode},{sessions},{window},{}",
@@ -38,7 +38,7 @@ fn request_history(c: &mut Criterion) {
 	group.measurement_time(Duration::from_secs(1));
 	for mode in ["ordered", "reordered", "scattered"] {
 		for sessions in [1, 8, 32] {
-			for requests in [8, 128, 220_000] {
+			for requests in [8, 128, 240_000] {
 				let ids = ids(mode, requests);
 				println!(
 					"admitted-modern,{mode},{sessions},{requests},{}",

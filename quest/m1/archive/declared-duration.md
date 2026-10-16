@@ -15,8 +15,10 @@ the catalog declares a usable target:
 
 - **Shape.** Each `timelines` entry becomes an object:
   `timelines: { video: { track: "video.timeline.z", duration: 4000 } }`, in
-  the archive `timescale`. The root `durationMax` goes away. This is a break in
-  place on this line, with no compatibility path. Update `rs/hang`,
+  the archive `timescale`. The root `durationMax` goes away. Check whether
+  this format has published before changing it and preserve published version
+  boundaries per the archive README; do not assume an in-place break is safe.
+  Update `rs/hang`,
   `drafts/draft-lcurley-moq-hang.md`, and every `durationMax` reference
   (grep it, including `doc/`), and the JS catalog schema
   (`js/hang/src/catalog/archive.ts`) in the same PR, since `@moq/watch` refuses

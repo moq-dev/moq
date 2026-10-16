@@ -27,7 +27,7 @@
     # The quest CLI, which also serves the quest guide and skills the stubs in
     # .claude/skills call. Bump the rev to upgrade them.
     quest = {
-      url = "github:kixelated/quest/b7027a3ded4b0a36505f40eb7ed788c1023e7a49";
+      url = "github:kixelated/quest/fa5f1fc9b49c8e7f5dd85af1aabead22f681ec01";
       inputs.nixpkgs.follows = "nixpkgs";
       inputs.flake-utils.follows = "flake-utils";
     };
@@ -251,6 +251,8 @@
           jq
           # Runs the moq.sh installer tests under a strict POSIX shell.
           dash
+          # Proves the temporary bench relay owns its TCP and UDP sockets.
+          lsof
         ];
 
         # Linters / formatters used by `just check` and `just fix`, which
@@ -332,13 +334,13 @@
         # `-kixelated.N` pre-release so they never collide with upstream's.
         uniffi-bindgen-dart = pkgs.rustPlatform.buildRustPackage rec {
           pname = "uniffi-bindgen-dart";
-          version = "0.3.1-kixelated.5+v0.32.0";
+          version = "0.3.1-kixelated.6+v0.32.0";
 
           src = pkgs.fetchFromGitHub {
             owner = "kixelated";
             repo = "uniffi-dart";
             rev = "v${version}";
-            hash = "sha256-MobLv4aov+ySk3X8bd6Sr5MLiXxCprkoFqEFt5xOerw=";
+            hash = "sha256-Ff5o3n4l1O578gJ5pInAqf6/MkM+lkwzovJtEffvpqk=";
           };
 
           # The upstream repository ignores Cargo.lock so cargo installs test

@@ -12,6 +12,11 @@ import { connect } from "./transport";
 // API both have: the group and frame primitives and the snapshot decoder, not the consumers above
 // them, whose shapes follow the checkout.
 
+// The released packages brand units under `Moq.Time`, the checkout's under @moq/clock: both are
+// plain numbers at runtime, so cast rather than call either brand.
+type FrameMicros = Parameters<typeof Container.Legacy.encodeFrame>[1];
+type TimestampMicros = Parameters<typeof Moq.Time.Timestamp.fromMicros>[0];
+
 /** Find the catalog's first video rendition, reading updates until one has it. */
 async function video(bc: Moq.Broadcast.Consumer): Promise<[string, Catalog.VideoConfig]> {
 	const track = bc.track("catalog.json").subscribe({ priority: Catalog.PRIORITY.catalog });
@@ -123,7 +128,7 @@ if (command === "sign") {
 	writeFileSync(args[0], JSON.stringify(catalog));
 	writeFileSync(
 		args[1],
-		Container.Legacy.encodeFrame(new TextEncoder().encode("compat-frame"), Moq.Time.Micro(1000001)),
+		Container.Legacy.encodeFrame(new TextEncoder().encode("compat-frame"), 1000001 as FrameMicros),
 	);
 } else if (command === "publish") {
 	install();
@@ -147,7 +152,7 @@ if (command === "sign") {
 	const group = track.appendGroup();
 	group.writeFrame({
 		payload: new TextEncoder().encode("compat-fetch"),
-		timestamp: Moq.Time.Timestamp.fromMicros(Moq.Time.Micro(1)),
+		timestamp: Moq.Time.Timestamp.fromMicros(1 as TimestampMicros),
 	});
 	group.close();
 	await connection.closed;

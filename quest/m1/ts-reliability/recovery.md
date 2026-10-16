@@ -43,5 +43,4 @@ and measured release timing as separate checks.
 ## Related
 
 - [Automated validation](/test/ts/README.md) - shared graders, profiles and known-bad controls
-- [Open-GOP leading pictures](/quest/m1/open-gop-leading-pictures.md) - trims after a gap
 - [Gradual recovery](/quest/m2/intra-refresh/README.md) - recovery counts and per-group warmup

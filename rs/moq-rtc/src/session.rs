@@ -28,6 +28,11 @@ use crate::{Error, Result, codec};
 /// ([`spawn_socket_reader`]).
 pub(crate) type Packet = (Vec<u8>, SocketAddr);
 
+pub(crate) struct Inbound {
+	pub packets: mpsc::Receiver<Packet>,
+	pub wire: crate::wire::Source,
+}
+
 /// Bound on a session's inbound datagram queue, sized like a socket buffer:
 /// past this, datagrams are dropped rather than buffered (WebRTC tolerates loss
 /// and a stalled session must not grow memory without limit).
@@ -125,7 +130,7 @@ pub struct Session {
 	/// Inbound datagrams routed to this session (demux on the server, a 1:1
 	/// reader on the client). `None` from `recv` means every sender dropped, so
 	/// the session is done.
-	inbound: mpsc::Receiver<Packet>,
+	inbound: Inbound,
 	role: MediaRole,
 	opened_media: HashSet<str0m::media::Mid>,
 	/// Egress write requests. `Some` only for [`MediaRole::Egress`]
@@ -147,7 +152,7 @@ impl Session {
 		rtc: Rtc,
 		socket: Arc<UdpSocket>,
 		locals: Vec<SocketAddr>,
-		inbound: mpsc::Receiver<Packet>,
+		inbound: Inbound,
 		sink: Box<dyn MediaSink>,
 	) -> Self {
 		Self {
@@ -169,7 +174,7 @@ impl Session {
 		rtc: Rtc,
 		socket: Arc<UdpSocket>,
 		locals: Vec<SocketAddr>,
-		inbound: mpsc::Receiver<Packet>,
+		inbound: Inbound,
 		mut source: EgressSource,
 	) -> Self {
 		let writes_rx = source.take_writes();
@@ -184,6 +189,10 @@ impl Session {
 			ingest_clock: IngestClock::default(),
 			egress_clock: EgressClock::default(),
 		}
+	}
+
+	pub(crate) fn wire(&self) -> crate::wire::Source {
+		self.inbound.wire.clone()
 	}
 
 	/// Open a locally offered media line after its answer has been applied.
@@ -230,7 +239,7 @@ impl Session {
 				Output::Timeout(t) => t,
 				Output::Transmit(t) => {
 					let dst = crate::net::to_family(t.destination, socket_v6);
-					if let Err(err) = self.socket.send_to(&t.contents, dst).await {
+					if let Err(err) = transmit(&self.socket, &self.inbound.wire, &t.contents, dst).await {
 						tracing::warn!(%err, %dst, "send failed");
 					}
 					continue;
@@ -274,7 +283,7 @@ impl Session {
 					crate::egress::dispatch(&mut self.rtc, req, wallclock);
 				}
 
-				packet = self.inbound.recv() => {
+				packet = self.inbound.packets.recv() => {
 					match packet {
 						Some((data, src)) => {
 							let now = Instant::now();
@@ -387,6 +396,12 @@ impl Session {
 		}
 		Ok(())
 	}
+}
+
+async fn transmit(socket: &UdpSocket, wire: &crate::wire::Source, data: &[u8], dst: SocketAddr) -> std::io::Result<()> {
+	let len = socket.send_to(data, dst).await?;
+	wire.sent(len);
+	Ok(())
 }
 
 /// Per-session clock that rebases each ingested track's raw RTP timestamps onto
@@ -678,15 +693,23 @@ pub(crate) fn advertised_candidates(advertise: &[SocketAddr], local: SocketAddr)
 /// Spawn a 1:1 reader pumping every datagram from `socket` into a channel, for
 /// the client paths (one socket per session, so no demux is needed). Mirrors the
 /// inbound side of `crate::server::mux` for a single session.
-pub fn spawn_socket_reader(socket: Arc<UdpSocket>) -> mpsc::Receiver<Packet> {
+pub fn spawn_socket_reader(socket: Arc<UdpSocket>) -> Inbound {
 	let (tx, rx) = mpsc::channel(SESSION_INBOX);
+	let wire = crate::wire::Source::new();
+	let source = wire.clone();
 	tokio::spawn(async move {
 		let mut buf = vec![0u8; 65_535];
 		loop {
-			match socket.recv_from(&mut buf).await {
+			let packet = tokio::select! {
+				biased;
+				_ = tx.closed() => break,
+				packet = socket.recv_from(&mut buf) => packet,
+			};
+			match packet {
 				// Bounded like a socket buffer: drop on full, stop once the
 				// session's receiver is gone.
 				Ok((len, src)) => {
+					source.received(len);
 					let src = crate::net::canonical(src);
 					if let Err(mpsc::error::TrySendError::Closed(_)) = tx.try_send((buf[..len].to_vec(), src)) {
 						break;
@@ -699,7 +722,7 @@ pub fn spawn_socket_reader(socket: Arc<UdpSocket>) -> mpsc::Receiver<Packet> {
 			}
 		}
 	});
-	rx
+	Inbound { packets: rx, wire }
 }
 
 #[cfg(test)]
@@ -711,6 +734,33 @@ mod tests {
 	use str0m::rtp::rtcp::SenderInfo;
 
 	use super::*;
+
+	#[tokio::test]
+	async fn wire_tx_counts_only_successful_udp_payload() {
+		let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+		let peer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+		let wire = crate::wire::Source::new();
+		let packet = [42; 73];
+		transmit(&socket, &wire, &packet, peer.local_addr().unwrap())
+			.await
+			.unwrap();
+		let mut buffer = [0; 100];
+		let (len, _) = tokio::time::timeout(Duration::from_secs(5), peer.recv_from(&mut buffer))
+			.await
+			.unwrap()
+			.unwrap();
+		assert_eq!(&buffer[..len], &packet);
+		assert_eq!(wire.stats(), crate::wire::Stats { tx: 73, rx: 0 });
+		// An oversized datagram is refused by UDP, never counted as sent.
+		assert!(
+			transmit(&socket, &wire, &vec![0; 65_536], peer.local_addr().unwrap())
+				.await
+				.is_err()
+		);
+		assert_eq!(wire.stats().tx, 73);
+		drop(socket);
+		assert_eq!(wire.stats().tx, 73);
+	}
 
 	#[test]
 	fn media_flow_respects_negotiated_direction() {

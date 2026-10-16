@@ -8,7 +8,7 @@ peer's reported ACK delay. Nothing MoQ builds on top needs private state.
 
 ## Plan
 
-The work lives in `moq-quic`, in-tree after [the fork](/quest/m1/quic/fork/README.md).
+The work lives in `moq-quic`.
 
 `moq-quic`'s `SendBuffer` (`connection/send_buffer.rs`) already tracks most
 of what is needed: the acknowledged range set (`acks`), the write offset, the
@@ -34,15 +34,15 @@ stream teardown: the accessor must not return a prefix that includes bytes the
 peer will never acknowledge, and a waiter for an offset beyond the final
 size must resolve with the reset instead of hanging.
 
+Decided 2026-10-16 (maintainer, #5690): the waiter is `Checkpoint::acked()`
+on the send-stream checkpoint that `RESET_STREAM_AT` already uses, so an
+acknowledged offset is named the same way a reliable reset's is.
+
 The `web-transport-moq` half of [the ACK hook](/quest/m2/quic-ack-hook.md)
 is in-tree too and can land in the same PR.
 
 Decided in the 2026-09-30 audit: moved to m2 with its consumers, the ACK
 hook and [frame-granularity starvation](/quest/m2/starvation-frames.md).
-
-## Required
-
-- [Hard fork](/quest/m1/quic/fork/README.md) - the accessor lands in `moq-quic`
 
 ## Related
 

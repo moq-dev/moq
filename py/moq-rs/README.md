@@ -262,7 +262,7 @@ Every handle whose cleanup is `cancel()` is an async context manager, so exiting
 - **`log_level(level="info")`**. Initialize logging for the underlying Rust layer (`"error"`, `"warn"`, `"info"`, `"debug"`, `"trace"`). Call once per process.
 - **`Error`**. The exception raised by all operations. Catch a specific case via its variants, e.g. `except moq.Error.AlreadyResponded:`, `except moq.Error.Cancelled:`, or `except moq.Error.Busy:` when a setter races an in-flight connect/listen/accept.
 - **`is_shutdown(err)`**. True for `Cancelled` and `Closed`, which arise from graceful shutdown rather than an actual failure. Use it to break out of an `async for` without treating the expected end-of-stream error as a problem.
-- **`is_auth(err)`**. True for `Unauthorized` (HTTP 401) and `Forbidden` (HTTP 403), and for a protocol Unauthorized session close. Retrying without new credentials won't help, so surface these rather than reconnect.
+- **`is_auth(err)`**. True for `Unauthorized` (HTTP 401), `Forbidden` (HTTP 403), and `Expired` (a request token expired), and for a protocol Unauthorized or Expired session close. Retrying without new credentials won't help, so surface these rather than reconnect.
 - **`protocol_error(err)`**. The structured protocol failure (session or stream scope, verbatim wire code, known kind) when the peer sent one.
 
 ## See Also

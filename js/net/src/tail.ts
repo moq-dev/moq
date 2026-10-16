@@ -1,5 +1,5 @@
+import { Instant, Milli, Nano, now, sleep } from "@moq/clock";
 import { type GetPromise, Signal } from "@moq/signals";
-import { Milli } from "./time.ts";
 
 /**
  * How long a subscriber waits for a group stream it cannot account for once the publisher
@@ -11,19 +11,14 @@ import { Milli } from "./time.ts";
  */
 export const TAIL_GRACE_MS = Milli(1000);
 
-// setTimeout truncates a longer delay to a signed 32-bit int and fires at once.
-const MAX_TIMEOUT_MS = 2 ** 31 - 1;
-
-// A run of accounted sequences `[start, end)`, and when the gap below it opened (in
-// `performance.now()` milliseconds), which is when its missing groups became late.
-type Run = { start: number; end: number; since: number };
+// A run of accounted sequences `[start, end)`, and when the gap below it opened, which is
+// when its missing groups became late.
+type Run = { start: number; end: number; since: Instant };
 
 /** How a {@link Tail} measures its grace. */
 export interface TailOptions {
 	/** How long to wait for a group that cannot be accounted for. Read each time it is needed. */
 	grace?: () => Milli;
-	/** The clock, in `performance.now()` milliseconds. */
-	now?: () => number;
 }
 
 /**
@@ -50,11 +45,9 @@ export class Tail {
 	#active = 0;
 	#changed = new Signal(0);
 	#grace: () => Milli;
-	#now: () => number;
 
 	constructor(options: TailOptions = {}) {
 		this.#grace = options.grace ?? (() => TAIL_GRACE_MS);
-		this.#now = options.now ?? (() => performance.now());
 	}
 
 	/** Group streams whose header arrived, whether they finished or were reset. */
@@ -88,12 +81,12 @@ export class Tail {
 	/** Restart the age of every gap reaching into `[start, end)`, which the demand newly asks for. */
 	demand(start: number, end: number): void {
 		if (start >= end) return;
-		const now = this.#now();
+		const at = now();
 		let below = 0;
 		this.#runs = this.#runs.map((run) => {
 			const reached = below < end && start < run.start;
 			below = run.end;
-			return reached ? { ...run, since: now } : run;
+			return reached ? { ...run, since: at } : run;
 		});
 	}
 
@@ -114,15 +107,16 @@ export class Tail {
 	 */
 	async settle(complete: () => boolean, closed: GetPromise<unknown>): Promise<void> {
 		// A gap that aged past the grace since the last insert is no longer waited for either.
-		this.#expire(this.#now());
+		this.#expire(now());
 
 		let expired = false;
-		const timer = setTimeout(
+		const timer = new AbortController();
+		void sleep(Nano.fromMilli(this.#grace()), { signal: timer.signal }).then(
 			() => {
 				expired = true;
 				this.#bump();
 			},
-			Math.min(this.#grace(), MAX_TIMEOUT_MS),
+			() => {},
 		);
 		try {
 			while (closed.peek() === undefined) {
@@ -130,14 +124,14 @@ export class Tail {
 				await Signal.race(this.#changed, closed);
 			}
 		} finally {
-			clearTimeout(timer);
+			timer.abort();
 		}
 	}
 
 	#account(start: number, end: number): void {
 		if (start >= end) return;
 
-		const now = this.#now();
+		const at = now();
 		const runs: Run[] = [];
 		let merged: Run | undefined;
 		let placed = false;
@@ -158,19 +152,19 @@ export class Tail {
 			}
 		}
 		// A run past every other one opens a new gap.
-		if (!placed) runs.push(merged ?? { start, end, since: now });
+		if (!placed) runs.push(merged ?? { start, end, since: at });
 		this.#runs = runs;
-		this.#expire(now);
+		this.#expire(at);
 		this.#bump();
 	}
 
 	// Fold every gap older than the grace into the runs around it.
-	#expire(now: number): void {
-		const grace = this.#grace();
+	#expire(at: Instant): void {
+		const grace = Nano.fromMilli(this.#grace());
 		const runs: Run[] = [];
 		for (const run of this.#runs) {
 			const below = runs.at(-1);
-			if (below && now - run.since >= grace) {
+			if (below && Instant.durationSince(at, run.since) >= grace) {
 				runs[runs.length - 1] = { ...below, end: run.end };
 			} else {
 				runs.push(run);

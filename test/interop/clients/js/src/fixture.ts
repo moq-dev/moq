@@ -12,8 +12,8 @@
  * @module
  */
 
+import { Milli, Nano } from "@moq/clock";
 import * as Moq from "@moq/net";
-import { Time } from "@moq/net";
 import * as Publish from "@moq/publish";
 import { Effect, Signal } from "@moq/signals";
 import type { Fault, FixtureState } from "./contract";
@@ -24,7 +24,7 @@ import * as Pattern from "./pattern";
 const MAX_BITRATE = 1_000_000;
 
 /** Short GOP so a late subscriber tunes in quickly and a rejoin is not dominated by keyframe wait. */
-const KEYFRAME_INTERVAL = Time.Milli(KEYFRAME_INTERVAL_MS);
+const KEYFRAME_INTERVAL = Milli(KEYFRAME_INTERVAL_MS);
 
 /** How far ahead the tone table is scheduled on the audio clock. */
 const SCHEDULE_AHEAD = 2; // seconds
@@ -182,7 +182,7 @@ export class Fixture {
 		};
 
 		schedule();
-		this.#signals.interval(schedule, (SCHEDULE_AHEAD * 1000) / 4);
+		this.#signals.interval(schedule, Nano.fromMilli(Milli((SCHEDULE_AHEAD * 1000) / 4)));
 	}
 
 	// Paint and request capture per pattern tick. Capture and encoding can finish later. The counter

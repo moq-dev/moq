@@ -45,7 +45,7 @@ var (
 	ErrTimeOverflow = ffi.ErrMoqErrorTimeOverflow
 	// ErrLogLevel matches an unparseable log level string passed to LogLevel.
 	ErrLogLevel = ffi.ErrMoqErrorLogLevel
-	// ErrTask matches a panic or cancellation in a background native task.
+	// ErrTask matches a panic in an owned background native task; cancellation is ErrCancelled.
 	ErrTask = ffi.ErrMoqErrorTask
 	// ErrJSON matches malformed JSON passed through the FFI API.
 	ErrJSON = ffi.ErrMoqErrorJson
@@ -69,6 +69,8 @@ var (
 	ErrUnauthorized = ffi.ErrMoqErrorUnauthorized
 	// ErrForbidden is returned when the relay rejects the session with HTTP 403.
 	ErrForbidden = ffi.ErrMoqErrorForbidden
+	// ErrExpired is returned when a request is refused because its authorization token expired.
+	ErrExpired = ffi.ErrMoqErrorExpired
 	// ErrNotFound is returned when the requested track or group is not available.
 	ErrNotFound = ffi.ErrMoqErrorNotFound
 	// ErrUnsupported is returned when the requested operation is not supported by this build or peer, however it is asked for.
@@ -97,13 +99,13 @@ func IsShutdown(err error) bool {
 }
 
 // IsAuthError reports whether err is an authentication/authorization failure
-// (HTTP 401/403, or a protocol Unauthorized session close).
+// (HTTP 401/403, an expired token, or a protocol Unauthorized or Expired session close).
 func IsAuthError(err error) bool {
-	if errors.Is(err, ErrUnauthorized) || errors.Is(err, ErrForbidden) {
+	if errors.Is(err, ErrUnauthorized) || errors.Is(err, ErrForbidden) || errors.Is(err, ErrExpired) {
 		return true
 	}
 	protocol, ok := ProtocolError(err)
-	return ok && protocol.Kind == ffi.MoqProtocolKindUnauthorized
+	return ok && (protocol.Kind == ffi.MoqProtocolKindUnauthorized || protocol.Kind == ffi.MoqProtocolKindExpired)
 }
 
 // ProtocolError reports the structured protocol failure, if err is one.

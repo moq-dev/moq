@@ -33,6 +33,8 @@ pub struct Subscribe<'a> {
 	/// Whether Objects are forwarded (FORWARD). We only serve forwarding subscriptions,
 	/// so a subscriber that asks for none is refused.
 	pub forward: bool,
+	/// Whether RENDEZVOUS_TIMEOUT asks to wait for a missing publisher; never sent.
+	pub rendezvous: bool,
 	/// Whether the request carried a Range Filter (0x25-0x28). We advertise no
 	/// MAX_FILTER_RANGES, so the request is refused rather than served unfiltered.
 	/// Never encoded; we send no range filters.
@@ -87,6 +89,7 @@ impl Message for Subscribe<'_> {
 					fill: None,
 					properties_wanted: true,
 					forward,
+					rendezvous: false,
 					range_filters: false,
 					authorization_token,
 				})
@@ -127,10 +130,8 @@ impl Message for Subscribe<'_> {
 				// Defaults to 1, so an absent parameter means the subscriber wants them.
 				let properties_wanted = include_properties.unwrap_or(true);
 
-				// The value is deliberately dropped: we always answer a SUBSCRIBE with what is
-				// published right now, which is the shorter timeout the draft lets a relay pick.
-				// We still have to parse it, or the parameter alone would kill the session.
-				let _ = rendezvous_timeout;
+				// A zero cap still distinguishes a requested wait from an immediate miss.
+				let rendezvous = rendezvous_timeout.is_some_and(|millis| millis > 0);
 
 				let subscriber_priority = subscriber_priority.unwrap_or(128);
 				let group_order = group_order.unwrap_or(GroupOrder::Descending);
@@ -148,6 +149,7 @@ impl Message for Subscribe<'_> {
 					properties_wanted,
 					// Absent means 1.
 					forward: forward.unwrap_or(true),
+					rendezvous,
 					range_filters,
 					authorization_token,
 				})
@@ -562,6 +564,7 @@ mod tests {
 			fill: None,
 			properties_wanted: true,
 			forward: true,
+			rendezvous: false,
 			range_filters: false,
 			authorization_token: None,
 		};
@@ -587,6 +590,7 @@ mod tests {
 			fill: None,
 			properties_wanted: true,
 			forward: true,
+			rendezvous: false,
 			range_filters: false,
 			authorization_token: None,
 		};
@@ -625,13 +629,14 @@ mod tests {
 	/// parse: failing to decode it takes the whole session down instead of answering the
 	/// SUBSCRIBE.
 	#[test]
-	fn rendezvous_timeout_is_accepted_and_ignored() {
+	fn rendezvous_timeout_retains_whether_a_wait_was_requested() {
 		for version in [Version::Draft17, Version::Draft18, Version::Draft19, Version::Draft20] {
 			for millis in [0, 5000] {
 				let encoded = subscribe_with_rendezvous(millis, version);
 				let msg: Subscribe = decode_message(&encoded, version)
 					.unwrap_or_else(|err| panic!("{version} rendezvous {millis}ms: {err}"));
 				assert_eq!(msg.track_name, "video");
+				assert_eq!(msg.rendezvous, millis > 0);
 			}
 		}
 	}
@@ -682,6 +687,7 @@ mod tests {
 			fill: None,
 			properties_wanted: true,
 			forward: true,
+			rendezvous: false,
 			range_filters: false,
 			authorization_token: None,
 		};
@@ -714,6 +720,7 @@ mod tests {
 			fill: None,
 			properties_wanted: true,
 			forward: true,
+			rendezvous: false,
 			range_filters: false,
 			authorization_token: None,
 		};
@@ -901,6 +908,7 @@ mod tests {
 				fill: None,
 				properties_wanted: wanted,
 				forward: true,
+				rendezvous: false,
 				range_filters: false,
 				authorization_token: None,
 			};
@@ -928,6 +936,24 @@ mod tests {
 
 		let result: Result<Subscribe, _> = decode_message(&invalid_bytes, Version::Draft14);
 		assert!(result.is_err());
+	}
+
+	/// Draft-16 registers Filter Types 0x1-0x4 and requires PROTOCOL_VIOLATION for any
+	/// other. Moxygen's `SubscribeRequest::make` defaults to its unregistered LargestGroup
+	/// (0xFA), so its interop client sends this exact SUBSCRIBE; refuse it rather than
+	/// guess a meaning.
+	#[test]
+	fn test_subscribe_v16_rejects_unregistered_filter_type() {
+		let subscribe = |filter_type: &[u8]| {
+			let mut bytes = vec![0x00]; // request_id
+			bytes.extend_from_slice(b"\x01\x0bnonexistent\x0dno-such-track"); // namespace, name
+			bytes.extend_from_slice(&[0x01, 0x21, filter_type.len() as u8]); // one SUBSCRIPTION_FILTER
+			bytes.extend_from_slice(filter_type);
+			decode_message::<Subscribe>(&bytes, Version::Draft16)
+		};
+
+		assert!(matches!(subscribe(&[0x40, 0xfa]), Err(DecodeError::InvalidValue)));
+		assert_eq!(subscribe(&[0x02]).unwrap().filter, Filter::NextObject);
 	}
 
 	#[test]
@@ -1030,6 +1056,7 @@ mod tests {
 			fill: None,
 			properties_wanted: true,
 			forward: true,
+			rendezvous: false,
 			range_filters: false,
 			authorization_token: None,
 		};
@@ -1093,6 +1120,7 @@ mod tests {
 			fill: None,
 			properties_wanted: true,
 			forward: true,
+			rendezvous: false,
 			range_filters: false,
 			authorization_token: None,
 		};
@@ -1372,6 +1400,7 @@ mod tests {
 			fill: None,
 			properties_wanted: false,
 			forward: true,
+			rendezvous: false,
 			range_filters: false,
 			authorization_token: None,
 		};
@@ -1434,6 +1463,7 @@ mod tests {
 				fill: None,
 				properties_wanted: true,
 				forward: false,
+				rendezvous: false,
 				range_filters: false,
 				authorization_token: None,
 			};

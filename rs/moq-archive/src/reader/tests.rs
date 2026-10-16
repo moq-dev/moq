@@ -48,9 +48,12 @@ impl Archive {
 
 	async fn encoder(&mut self, track: &str) -> &mut Encoder {
 		if !self.encoders.contains_key(track) {
-			self.store.put_info(track, &Info::new(1, 1000).unwrap()).await.unwrap();
 			self.store
-				.put_info(&timeline(track), &Info::new(0, 1000).unwrap())
+				.put_info(track, &Info::new(1, Some(1000)).unwrap())
+				.await
+				.unwrap();
+			self.store
+				.put_info(&timeline(track), &Info::new(0, Some(1000)).unwrap())
 				.await
 				.unwrap();
 			let config = window::ProducerConfig::default()
@@ -175,7 +178,7 @@ impl Archive {
 
 fn frame(track: &str, sequence: u64, index: u64) -> Frame {
 	Frame {
-		timestamp: sequence * 100 + index,
+		timestamp: Some(sequence * 100 + index),
 		payload: Bytes::from(format!("{track}/{sequence}/{index}")),
 	}
 }
@@ -212,7 +215,7 @@ fn expected(track: &str, sequence: u64, frames: std::ops::Range<u64>) -> Vec<(u6
 	frames
 		.map(|i| {
 			let frame = frame(track, sequence, i);
-			(frame.timestamp, frame.payload)
+			(frame.timestamp.unwrap(), frame.payload)
 		})
 		.collect()
 }
@@ -696,6 +699,89 @@ async fn timeline_tracks_are_republished_and_finished_on_request() {
 		}
 	}
 	assert_eq!(records, vec![0, 1]);
+}
+
+/// An untimed recording replays untimed: no media or timeline frame gains a timestamp.
+#[tokio::test]
+async fn an_untimed_recording_replays_untimed() {
+	let store = Store::new(Mock::memory(), "rec");
+	let source = broadcast::Info::new().produce();
+	let info = moq_net::track::Info::default().with_max_age(Duration::from_secs(3600));
+	let data = source.create_track("data", info).unwrap();
+	let writer = crate::Writer::new(store.clone(), source.consume(), Default::default())
+		.await
+		.unwrap();
+	writer
+		.control()
+		.track("data", moq_mux::timeline::Config::default())
+		.await
+		.unwrap();
+	for sequence in 0..2 {
+		let mut group = data.create_group(group::Info { sequence }).unwrap();
+		group.write_frame(None, format!("data/{sequence}")).unwrap();
+		group.finish().unwrap();
+	}
+	data.finish().unwrap();
+	source.close();
+	writer.run().await.unwrap();
+
+	let broadcast = broadcast::Info::new().produce();
+	let config = Config::new([("data".to_string(), timeline("data"))].into());
+	let reader = Reader::open(store, &broadcast, config).await.unwrap();
+	tokio::spawn(reader.serve());
+
+	let track = broadcast.consume().track("data").unwrap();
+	let mut group = track.fetch_group(1, group::Fetch::default()).await.unwrap();
+	assert_eq!(group.timescale(), None);
+	let frame = group.read_frame().await.unwrap().unwrap();
+	assert_eq!((frame.timestamp, frame.payload), (None, Bytes::from("data/1")));
+
+	let subscriber = broadcast
+		.consume()
+		.track(&timeline("data"))
+		.unwrap()
+		.subscribe(None)
+		.await
+		.unwrap();
+	assert_eq!(subscriber.info().timescale, None);
+	let mut timeline =
+		window::Consumer::<Record>::new(subscriber, window::ConsumerConfig::default().with_compression(true));
+	reader.finish().unwrap();
+	let mut records = Vec::new();
+	while let Some(event) = timeline.next().await.unwrap() {
+		if let window::Event::Push { value, .. } = event {
+			records.push(value);
+		}
+	}
+	assert_eq!(
+		records,
+		vec![
+			Record::untimed(0, Position::group(0), Position::group(1)),
+			Record::untimed(1, Position::group(1), Position::group(2)),
+		]
+	);
+}
+
+/// A record whose timing contradicts its timeline is not indexed, though its object is stored.
+#[tokio::test]
+async fn a_record_contradicting_its_timeline_is_not_indexed() {
+	let mut archive = Archive::new().await;
+	archive.add("video", 0..1, 1).await;
+	let stored = archive.record("video", Position::group(1), Position::group(2), 1).await;
+	let untimed = Record::untimed(stored.sequence, stored.start, stored.end);
+	let mut groups = archive.edit("video", &untimed, 0).await;
+	// The timeline envelope stays timed, as its `.info` declares.
+	for frame in groups.iter_mut().flat_map(|group| &mut group.frames) {
+		frame.timestamp = Some(100);
+	}
+	archive.timeline("video", untimed.sequence, groups).await;
+
+	let (broadcast, _reader) = open(&archive).await;
+	assert_eq!(
+		fetch(&broadcast, "video", 0, 0).await.unwrap(),
+		expected("video", 0, 0..1)
+	);
+	not_found(fetch(&broadcast, "video", 1, 0).await);
 }
 
 #[tokio::test]

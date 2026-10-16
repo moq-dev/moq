@@ -55,13 +55,9 @@ browser and one through moq-ffi.
 Public API: the shared rule in `moq_mux::rate` and whatever knobs the
 publishers expose for it. Wire: none; `enabled` already exists.
 
-## Required
-
-- [HLS reference handoff](/quest/m2/hls-reference-handoff.md) - HLS and DASH keep advancing when the reference rendition is disabled
-
 ## Related
 
 - [Ladder controller](/quest/m3/ladder/controller.md) - the same rung disable for generated transcode ladders
-- [Rendition preference](/quest/m1/rendition-preference.md) - viewer selection that drops disabled renditions before ranking the rest
+- [Rendition preference](/quest/m2/rendition-preference.md) - viewer selection that drops disabled renditions before ranking the rest
 - [OBS multitrack](/quest/m2/obs-multitrack.md) - OBS's native multitrack encoders as the renditions this disables
 - [Viewer up-switch](/quest/m2/viewer-upswitch.md) - the viewer side of moving between renditions as capacity changes

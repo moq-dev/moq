@@ -11,9 +11,9 @@
 //! position agrees with the values, and a pacing caller releases each slot at
 //! the instant it asserts. Video is carried as Annex-B, audio as ADTS AAC.
 //!
-//! Every frame is muxed a fixed delay after its decode time ([`Export::with_delay`]),
-//! so tracks interleave in `(DTS, PID)` order whatever the arrival skew between them,
-//! and the output keeps the source's pace.
+//! Every frame is muxed a fixed delay after its release time, its decode time less its
+//! send-ahead ([`Export::with_delay`]), so tracks interleave in one order whatever the
+//! arrival skew between them, and the output keeps the source's pace.
 //!
 //! Video flows through `ExportSource`, which normalizes every H.264/H.265
 //! source to length-prefixed NALU plus a resolved avcC/hvcC (parsing in-band
@@ -187,6 +187,13 @@ where
 	/// up before it ever configures video. `None` until the tables are built, and for
 	/// programs with no video track (nothing to align to).
 	video_start: Option<Timestamp>,
+	/// Whether a video frame has gone out since [`Self::video_start`] was set. Until one has,
+	/// what the other tracks release is dropped: a video track whose start group was cut
+	/// before it went out starts at its next keyframe instead ([`jitter::Buffer`]).
+	video_out: bool,
+	/// Frames dropped before the jitter buffer: ahead of the first video keyframe, or of their
+	/// codec config.
+	trimmed: u64,
 	/// Each elementary stream's access units and silence on the PCR returned ([`Self::stats`]).
 	liveness: super::import::Liveness,
 }
@@ -208,6 +215,8 @@ struct Pending {
 	restart: u64,
 	/// How many times its playhead had jumped, markers included ([`jitter::Arrival::skip`]).
 	skip: u64,
+	/// How many of those jumps cut a group short ([`jitter::Arrival::cut`]).
+	cut: u64,
 	/// The earliest the frame could have arrived: when its source was last found empty.
 	arrived: web_async::time::Instant,
 	/// When it was read: the latest it could have arrived.
@@ -219,11 +228,19 @@ struct Queued {
 	frame: Frame,
 	/// When the frame decodes: its DTS, else its PTS.
 	decode: Timestamp,
+	/// Where the jitter buffer orders it ([`Track::release_key`]).
+	key: Timestamp,
 	/// Authored decode timestamp, as [`PesUnit::dts`].
 	dts: Option<u64>,
 	/// The avcC/hvcC the frame was read under, for video.
 	description: Option<Bytes>,
+	/// The PES it may share ([`Track::pack_start`]).
+	pes: Option<PesStart>,
 }
+
+/// The PES an audio frame may share ([`Track::pack_start`]): the place of its first frame on
+/// the media timeline, and its [`Track::psi_slot`].
+type PesStart = (u128, Option<u128>);
 
 struct Track {
 	source: ExportSource,
@@ -235,9 +252,9 @@ struct Track {
 	empty: web_async::time::Instant,
 	/// The marker count the decode clock runs under.
 	restart: u64,
-	/// The marker and skip counts of the sources the track read before this one, so the
+	/// The marker, skip and cut counts of the sources the track read before this one, so the
 	/// counts keep rising across a resubscription.
-	base: (u64, u64),
+	base: (u64, u64, u64),
 	finished: bool,
 	pid: u16,
 	kind: Kind,
@@ -246,6 +263,16 @@ struct Track {
 	descriptors: Vec<catalog::Descriptor>,
 	/// Authors each video frame's DTS, holding the frames until it can.
 	clock: DecodeClock<(Pending, Option<Bytes>)>,
+	/// Loss counter at the last read, excluding declared ends.
+	recovery_gap: Option<u64>,
+	/// Leading pictures below the recovery keyframe have unavailable references, and whether
+	/// the track queued frames ahead of that keyframe, so dropping them leaves a hole.
+	leading_floor: Option<(Timestamp, bool)>,
+	/// The source's cut count at the last frame queued. A cut since clears what a track that
+	/// has not started holds.
+	held: Option<u64>,
+	/// The PTS of the last keyframe queued, which leading pictures present before.
+	keyframe: Option<Timestamp>,
 	/// What the catalog and the SPS declare about the video's reordering.
 	timing: Timing,
 	/// The receiver's buffers for an audio or verbatim track; video's come from [`Timing`].
@@ -254,6 +281,9 @@ struct Track {
 	ac3_carry: Option<Ac3Carry>,
 	/// The audio frames muxed into a PES that has yet to go out.
 	pack: Option<Pack>,
+	/// The last frame's decode time, its jitter buffer key ([`Self::release_key`]) and the PES
+	/// it may share.
+	released: Option<(Timestamp, Timestamp, Option<PesStart>)>,
 }
 
 /// Shared program state needed while reading one track.
@@ -261,6 +291,8 @@ struct Input<'a> {
 	waiting_for_header: bool,
 	video_start: Option<Timestamp>,
 	jitter: &'a mut jitter::Buffer<u16, Queued>,
+	/// Counts the frames dropped ahead of the tune-in point or their codec config.
+	trimmed: &'a mut u64,
 }
 
 impl Track {
@@ -271,16 +303,21 @@ impl Track {
 			pending: None,
 			empty: web_async::time::Instant::now(),
 			restart: 0,
-			base: (0, 0),
+			base: (0, 0, 0),
 			finished: false,
 			pid: 0,
 			kind,
 			descriptors: Vec::new(),
 			clock: DecodeClock::default(),
+			recovery_gap: None,
+			leading_floor: None,
+			held: None,
+			keyframe: None,
 			timing: Timing::default(),
 			buffer: None,
 			ac3_carry: None,
 			pack: None,
+			released: None,
 		}
 	}
 
@@ -302,6 +339,20 @@ impl Track {
 		let Kind::Video(stream_type) = self.kind else {
 			return self.push(name, pending, None, None, jitter);
 		};
+		// A declared endpoint increments both counters; only delivery loss arms recovery.
+		let gap = pending.skip.saturating_sub(pending.restart);
+		let recover = self.recovery_gap.replace(gap).is_none_or(|previous| previous != gap);
+		if pending.frame.keyframe {
+			let ahead = self.held == Some(pending.cut);
+			self.leading_floor = recover.then_some((pending.frame.timestamp, ahead));
+		}
+		if let Some((floor, ahead)) = self.leading_floor
+			&& pending.frame.timestamp < floor
+		{
+			jitter.lose(&self.pid, ahead);
+			return Ok(());
+		}
+		self.held = Some(pending.cut);
 		if pending.frame.keyframe {
 			self.timing.describe(stream_type, self.source.description(), name);
 		}
@@ -323,12 +374,14 @@ impl Track {
 			match self.source.poll_read(waiter)? {
 				Poll::Ready(Some(frame)) => {
 					if input.waiting_for_header && !self.source.header_ready() {
+						*input.trimmed += 1;
 						continue;
 					}
 					let pending = Pending {
 						frame,
 						restart: self.base.0 + self.source.markers(),
 						skip: self.base.1 + self.source.skips(),
+						cut: self.base.2 + self.source.cuts(),
 						arrived: self.empty,
 						read: web_async::time::Instant::now(),
 					};
@@ -337,6 +390,7 @@ impl Track {
 						&& !is_video && pending.restart == self.restart
 						&& pending.frame.timestamp < start
 					{
+						*input.trimmed += 1;
 						continue;
 					}
 					if input.waiting_for_header {
@@ -376,6 +430,7 @@ impl Track {
 			frame,
 			restart,
 			skip,
+			cut,
 			arrived,
 			read,
 		} = pending;
@@ -384,6 +439,7 @@ impl Track {
 				frame,
 				restart,
 				skip,
+				cut,
 				arrived,
 				read,
 			};
@@ -401,6 +457,7 @@ impl Track {
 				frame,
 				restart,
 				skip,
+				cut,
 				arrived,
 				read,
 			};
@@ -450,6 +507,43 @@ impl Track {
 		}
 	}
 
+	/// The bytes a PES of the track has for its frames, and how many frames of `len` bytes
+	/// that holds: B holds the PES header with the frames (ISO 13818-1 2.4.2.3).
+	fn fit(&self, len: usize) -> (usize, u128) {
+		let size = self
+			.buffer()
+			.and_then(|buffer| buffer.size)
+			.unwrap_or(0)
+			.saturating_sub(PES_PREFIX_LEN + PES_OPTIONAL_LEN);
+		(size, (size / len.max(1)).max(1) as u128)
+	}
+
+	/// The PSI repetition slot a PES of the track keeps to, if any. AAC with a program config
+	/// element repeats it in the first frame it muxes after the tables, which go out on
+	/// [`due`]'s grid; a PES that spanned a boundary of the grid could be muxed after the tables
+	/// and still go out ahead of them, where a receiver tuning in at the tables misses it.
+	fn psi_slot(&self, timestamp: Timestamp) -> Option<u128> {
+		matches!(&self.kind, Kind::Aac { config, .. } if config.program_config.is_some())
+			.then(|| slot(timestamp, PSI_INTERVAL))
+	}
+
+	/// The PES [`Export::pack`] may cut a frame of `payload` presented at `timestamp` into under
+	/// `delay`, if it packs the frame: as many frames as B holds from a place on the media
+	/// timeline that is a multiple of them, cut again where they would span more than half the
+	/// delay and at each [`Self::psi_slot`].
+	fn pack_start(&self, payload: &[u8], timestamp: Timestamp, delay: Duration) -> Option<PesStart> {
+		let (samples, rate) = self.samples(payload).filter(|_| !delay.is_zero())?;
+		let len = match self.kind {
+			Kind::Aac { .. } => adts::MIN_HEADER_LEN + payload.len(),
+			_ => payload.len(),
+		};
+		let place = place(timestamp, samples, rate);
+		let behind = place % self.fit(len).1;
+		let frame = 1_000_000_000 * u128::from(samples) / u128::from(rate);
+		let spans = (delay / 2).as_nanos() / frame.max(1) + 1;
+		Some((place - behind % spans, self.psi_slot(timestamp)))
+	}
+
 	/// How long a receiver takes to pass one of the track's packets on, so its last packet has
 	/// to arrive that long before it decodes. A packet's bytes reach a decoder buffer only once
 	/// they have drained through the T-STD buffers ahead of it (ISO 13818-1 2.4.2); without it
@@ -457,6 +551,55 @@ impl Track {
 	/// every fifth frame, arrives complete only after it decodes.
 	fn drain(&self) -> Duration {
 		self.buffer().unwrap_or(Buffer::SYSTEM).drain()
+	}
+
+	/// How far ahead of its decode time the track's units may go out under `delay`: as far
+	/// as [`schedule::ahead`] lets them, and nothing without a delay.
+	fn ahead(&self, delay: Duration) -> Duration {
+		if delay.is_zero() {
+			return Duration::ZERO;
+		}
+		let slots = schedule::ahead(self.buffer().as_ref(), schedule::slot(delay.as_nanos()));
+		PCR_INTERVAL * u32::try_from(slots).unwrap_or(u32::MAX)
+	}
+
+	/// Where the jitter buffer orders a frame decoding at `decode` under `delay`: at its release
+	/// time, [`Self::ahead`] before its decode time, so it reaches the schedule as the first slot
+	/// it may ride is laid, and a slot goes out the delay after the source's clock rather than a
+	/// delay later still. Keys run a delay past release times, which no send-ahead exceeds, so a
+	/// frame near the start of the timeline is not cut short of its send-ahead. The clock anchors
+	/// on the track sent latest against these keys, so every track keeps the whole delay to
+	/// arrive in. A send-ahead that grew (a new SPS declaring a larger CPB) releases no frame
+	/// before the one ahead of it.
+	///
+	/// An audio frame that shares a PES with the frame released before it takes that frame's
+	/// key, so the whole PES is in hand when its first slot is laid; the first frame released
+	/// of a PES (a joiner's may not be the PES's first) keeps its own. That costs no latency.
+	/// A TS source sends a PES's frames together, so they lose nothing. One that sends audio
+	/// at its decode time sends the later frames behind their key, so the clock still anchors
+	/// on the first, and they have that much less of the delay to arrive in.
+	fn release_key(
+		&mut self,
+		decode: Timestamp,
+		delay: Duration,
+		frame: &Frame,
+	) -> anyhow::Result<(Timestamp, Option<PesStart>)> {
+		let lead = delay.saturating_sub(self.ahead(delay));
+		let key = Duration::from(decode)
+			.checked_add(lead)
+			.context("MPEG-TS decode time past the end of the timeline")?;
+		let mut key = Timestamp::try_from(key)?;
+		let start = self.pack_start(&frame.payload, frame.timestamp, delay);
+		if let Some((last, previous, shared)) = self.released
+			&& decode >= last
+		{
+			key = match start.is_some() && shared == start {
+				true => previous,
+				false => key.max(previous),
+			};
+		}
+		self.released = Some((decode, key, start));
+		Ok((key, start))
 	}
 
 	/// Queue every held video frame whose DTS is settled, or all of them when `flush`.
@@ -492,6 +635,7 @@ impl Track {
 			frame,
 			restart,
 			skip,
+			cut,
 			arrived,
 			read,
 		} = pending;
@@ -499,22 +643,44 @@ impl Track {
 		let decode = dts
 			.and_then(|ticks| Timestamp::from_scale(ticks, 90_000).ok())
 			.unwrap_or(frame.timestamp);
+		let (key, pes) = self.release_key(decode, jitter.delay(), &frame)?;
+		let video = matches!(self.kind, Kind::Video(_));
+		let leading = video && !frame.keyframe && self.keyframe.is_some_and(|keyframe| frame.timestamp < keyframe);
+		if video && frame.keyframe {
+			self.keyframe = Some(frame.timestamp);
+		}
+		// Replaying anchors on the first frame, and the tracks arrive together rather than each
+		// sent ahead by its send-ahead: judged as arriving that much earlier, as a live source
+		// sends it, every track's first frames are on the clock whichever anchors it.
+		let ahead = match jitter.replaying() {
+			true => (Duration::from(decode) + jitter.delay()).saturating_sub(Duration::from(key)),
+			false => Duration::ZERO,
+		};
 		let arrival = Arrival {
-			arrived,
-			read,
-			decode,
+			arrived: arrived - ahead,
+			read: read - ahead,
+			decode: key,
 			restart,
 			skip,
-			sync: frame.keyframe || !matches!(self.kind, Kind::Video(_)),
+			cut,
+			sync: frame.keyframe || !video,
+			leading,
 			item: Queued {
 				frame,
 				decode,
+				key,
 				dts,
 				description,
+				pes,
 			},
 		};
 		if jitter.push(self.pid, arrival)? == Push::Late {
-			tracing::warn!(track = %name, dropped = jitter.dropped(), "frame missed its deadline; dropped");
+			tracing::warn!(
+				track = %name,
+				dropped = jitter.dropped(),
+				trimmed = jitter.trimmed(),
+				"frame missed its deadline; dropped"
+			);
 		}
 		Ok(())
 	}
@@ -559,6 +725,7 @@ impl Timing {
 	/// The receiver's buffers (H.222.0 2.14.3.1, 2.17.2): EB is the HRD's CPB, else the
 	/// level's; the transport buffer drains at Rx, scaled from the HRD's BitRate or else the
 	/// level's; and MB passes payload on into EB at the level's Rbx whatever the HRD declares.
+	/// EB reaches the HRD's buffer delay ahead, else what the level's CPB holds at its top rate.
 	fn buffer(&self) -> Option<Buffer> {
 		let level = self.level?;
 		let (bit_rate, cpb) = match self.hrd {
@@ -570,7 +737,14 @@ impl Timing {
 			leak: Some(level.leak),
 			size: Some(usize::try_from(cpb / 8).unwrap_or(usize::MAX)),
 			transport: 512,
+			reach: self.buffer_delay().unwrap_or_else(|| fill(level.cpb, level.leak)),
 		})
+	}
+
+	/// How long the HRD's CPB takes to fill at its rate: how far ahead of its decode time the
+	/// source may send a picture, so the export has to as well.
+	fn buffer_delay(&self) -> Option<Duration> {
+		self.hrd.map(|hrd| fill(hrd.cpb_size, hrd.bit_rate))
 	}
 
 	/// The least reorder delay and lookahead the SPS declares, in ticks, so two exporters agree
@@ -679,6 +853,8 @@ struct Pack {
 	unit: PesUnit,
 	/// When the first frame decodes, the PES's deadline.
 	decode: Timestamp,
+	/// The PES its frames share ([`Track::pack_start`]).
+	start: Option<PesStart>,
 	/// The frames' elementary stream bytes.
 	payload: Vec<u8>,
 	/// Each frame's decode nanoseconds and bytes, which leave the decoder buffer as it decodes.
@@ -928,6 +1104,8 @@ where
 			queue: VecDeque::new(),
 			liveness: Default::default(),
 			video_start: None,
+			video_out: false,
+			trimmed: 0,
 			mux_rate: None,
 			mux_rate_override: None,
 		}
@@ -959,23 +1137,33 @@ where
 		self
 	}
 
-	/// Mux each frame this long after its decode time, like an SRT receiver's TSBPD.
+	/// Mux each frame this long after its release time, like an SRT receiver's TSBPD: its
+	/// decode time less its send-ahead.
+	///
+	/// The send-ahead comes out of the same budget. A frame may go out up to the delay
+	/// ahead of its decode time, as far as its PID's decoder buffer holds and as early as the
+	/// receiver's buffers admit, so a heavy passage rides the slots before it. Its release
+	/// time is that far before its decode time, so it is muxed just as the first slot it may
+	/// ride is laid, and each slot goes out the delay after its own time on the source's
+	/// clock rather than a delay later still.
 	///
 	/// The clock is acquired before anything goes out: frames are held until a track starts
-	/// a new group, or for the delay at most, and the freshest of them sets the clock, so a
-	/// joiner runs at the delay from its first output. The output then keeps the source's
-	/// pace and muxes every track in `(DTS, PID)` order whatever the arrival skew between
-	/// them. A frame that arrives after its deadline is dropped, and a video track that
-	/// dropped one resumes at its next keyframe. A source whose clock runs further off ours than
-	/// 13818-1 lets the PCR follow fails the export once it has used half the delay, where a
-	/// brief network stall only drops what it made late. A stalled group is skipped once it falls
-	/// half the delay behind the newest content (see [`Consumer`](crate::container::Consumer)),
-	/// so the group after it still arrives with the other half to spare.
+	/// a new group, or for the delay at most, and the freshest of them against its release
+	/// time sets the clock, so a joiner runs at the delay from its first output and every
+	/// frame has the whole delay to arrive in. A source that sends its video its send-ahead
+	/// early, as a TS mux does, is trailed by the delay; one that sends every track at its
+	/// decode time, by the delay and the video's send-ahead. The output then keeps the
+	/// source's pace and muxes every track in `(release time, PID)` order whatever the
+	/// arrival skew between them. A frame that arrives after its deadline is dropped, and a
+	/// video track that dropped one resumes at its next keyframe. A source whose clock runs
+	/// further off ours than 13818-1 lets the PCR follow fails the export once it has used half
+	/// the delay, where a brief network stall only drops what it made late. A stalled group is
+	/// skipped once it falls half the delay behind the newest content (see
+	/// [`Consumer`](crate::container::Consumer)), so the group after it still arrives with
+	/// the other half to spare.
 	///
-	/// It is also how far ahead of its decode time a frame may go out, as early as the
-	/// receiver's buffers for its PID admit, so a heavy passage rides the slots before it
-	/// and the output trails the source by twice the delay. With a multiplex rate, a frame
-	/// that cannot arrive by its decode time fails the export. Defaults to
+	/// With a multiplex rate, a frame that cannot arrive by its decode time fails the export,
+	/// as does video whose HRD declares a buffer delay past the delay. Defaults to
 	/// [`Duration::ZERO`], which holds nothing and sends each frame by its decode time.
 	pub fn with_delay(mut self, delay: Duration) -> Self {
 		self.delay = delay;
@@ -1072,6 +1260,7 @@ where
 						&& track.pending.as_ref().is_some_and(|p| p.frame.timestamp < start)
 					{
 						track.pending = None;
+						self.trimmed += 1;
 					}
 				}
 			}
@@ -1124,22 +1313,26 @@ where
 				ready.generation >= self.generation,
 				"the jitter buffer released an older generation after a newer one"
 			);
-			let name = self
+			let (name, is_video) = self
 				.tracks
 				.iter()
 				.find(|(_, t)| t.pid == ready.track)
-				.map(|(name, _)| name.clone())
+				.map(|(name, t)| (name.clone(), matches!(t.kind, Kind::Video(_))))
 				.context("frame for an unknown PID")?;
-			self.last_timestamp = Some(ready.item.frame.timestamp);
-			let decode = ready.item.decode.as_nanos();
-			self.lay_before(decode)?;
-			self.mux(&name, ready.item)?;
-			if self.delay.is_zero() {
-				// Without a clock to lay slots on, a frame settles every slot before its own: a
-				// later frame decodes no earlier, so it can be due no earlier than this, less the
-				// longest drain of any track.
-				let drain = self.max_drain();
-				self.lay(Some(schedule::slot(decode.saturating_sub(drain.as_nanos()))))?;
+			if self.leads_video(is_video, ready.item.frame.timestamp) {
+				self.jitter.discard(&ready);
+			} else {
+				self.last_timestamp = Some(ready.item.frame.timestamp);
+				let decode = ready.item.decode.as_nanos();
+				self.lay_before(ready.item.key.as_nanos())?;
+				self.mux(&name, ready.item)?;
+				if self.delay.is_zero() {
+					// Without a clock to lay slots on, a frame settles every slot before its own: a
+					// later frame decodes no earlier, so it can be due no earlier than this, less the
+					// longest drain of any track.
+					let drain = self.max_drain();
+					self.lay(Some(schedule::slot(decode.saturating_sub(drain.as_nanos()))))?;
+				}
 			}
 			if self.queue.is_empty() {
 				// Releasing a due frame opens room in its source. Read it before parking:
@@ -1153,6 +1346,7 @@ where
 						waiting_for_header: false,
 						video_start: self.video_start,
 						jitter: &mut self.jitter,
+						trimmed: &mut self.trimmed,
 					},
 				)?;
 				if !finished && track.finished {
@@ -1160,6 +1354,12 @@ where
 						.set_ended(self.tracks.values().all(|track| track.finished));
 				}
 			}
+		}
+		// A PES's frames leave the jitter buffer together, under its first frame's key
+		// ([`Track::release_key`]), so with none due its pack is whole, and without slots
+		// running on an empty schedule nothing else would send it on before it is due.
+		if self.schedule.is_empty() {
+			self.flush_packs(|_, _| true)?;
 		}
 		self.lay_due(waiter)?;
 		if let Some(out) = self.pop() {
@@ -1261,6 +1461,7 @@ where
 			waiting_for_header: self.psi.is_none(),
 			video_start: self.video_start,
 			jitter: &mut self.jitter,
+			trimmed: &mut self.trimmed,
 		};
 		for (name, track) in &mut self.tracks {
 			track.fill(name, waiter, &mut input)?;
@@ -1507,8 +1708,10 @@ where
 				continue;
 			};
 			self.stale.remove(name);
+			// The new subscription counts as cutting whatever group the old one was reading.
 			track.base.0 += track.source.markers();
 			track.base.1 += track.source.skips() + 1;
+			track.base.2 += track.source.cuts() + 1;
 			track.source = source;
 			track.finished = false;
 			track.empty = web_async::time::Instant::now();
@@ -1532,6 +1735,15 @@ where
 	pub fn stats(&self) -> super::stats::Export {
 		let mut stats = super::stats::Export {
 			dropped: self.jitter.dropped(),
+			trimmed: self.jitter.trimmed() + self.trimmed,
+			gaps: self
+				.tracks
+				.values()
+				.map(|track| {
+					let skips = track.base.1 + track.source.skips();
+					skips - (track.base.0 + track.source.markers())
+				})
+				.sum(),
 			drift: self.jitter.drift().map(|drift| drift * 1e6),
 			out_of_tolerance: self.jitter.out_of_tolerance(),
 			..Default::default()
@@ -1665,6 +1877,36 @@ where
 			self.stale.insert(name.clone());
 		}
 		Ok(())
+	}
+
+	/// Whether a frame released at `timestamp` presents ahead of the video keyframe the stream
+	/// begins on ([`Self::video_start`]), and so is dropped. A video track whose start group
+	/// was cut before it went out starts at its next keyframe instead ([`jitter::Buffer`]), so
+	/// until video goes out the start is the earliest frame a video track holds. Video goes out
+	/// further ahead of its decode time than the other tracks, so what they release before it
+	/// presents ahead of it too.
+	fn leads_video(&mut self, is_video: bool, timestamp: Timestamp) -> bool {
+		let Some(start) = self.video_start else {
+			return false;
+		};
+		if is_video {
+			if !self.video_out {
+				self.video_out = true;
+				self.video_start = Some(start.max(timestamp));
+			}
+			return false;
+		}
+		if self.video_out {
+			return timestamp < start;
+		}
+		let next = self
+			.tracks
+			.values()
+			.filter(|track| matches!(track.kind, Kind::Video(_)))
+			.filter_map(|track| self.jitter.peek(&track.pid))
+			.map(|queued| queued.frame.timestamp)
+			.min();
+		timestamp < next.map_or(start, |next| next.max(start))
 	}
 
 	/// Discard what has not gone out and restart the program clock. Every rendition
@@ -1895,6 +2137,8 @@ where
 			decode,
 			dts,
 			description,
+			pes,
+			..
 		} = queued;
 		let is_video = matches!(self.tracks.get(name).context("missing track")?.kind, Kind::Video(_));
 		// Refresh PSI at keyframes or after the interval lapses.
@@ -2035,8 +2279,8 @@ where
 				};
 				// Only a delay leaves the frames time to wait for the ones after them.
 				let track = self.tracks.get(name).context("missing track")?;
-				if let Some(samples) = track.samples(&es_payload).filter(|_| !self.delay.is_zero()) {
-					return self.pack(name, unit, decode, out, es_payload, samples);
+				if let Some((samples, rate)) = track.samples(&es_payload).filter(|_| !self.delay.is_zero()) {
+					return self.pack(name, unit, decode, out, es_payload, (samples, rate, pes));
 				}
 				self.flush(name)?;
 				self.write_pes(&mut out, &unit, &es_payload)?;
@@ -2049,12 +2293,14 @@ where
 	/// it, and leave the tables muxed ahead of it to ride the next unit queued. A PES carries
 	/// frames while they run on from its PTS without a gap and fit the PID's decoder buffer
 	/// whole with its header, so it arrives by its first frame's decode time as one frame
-	/// would, and they span at most half the delay, so the PES has at least that long to go
-	/// out in.
+	/// would, and they span at most half the delay: its frames leave the jitter buffer with
+	/// its first ([`Track::release_key`]), so each keeps at least that much of the delay to
+	/// arrive in.
 	///
-	/// A PES starts at every frame whose place on the media timeline, counted in frames, is a
-	/// multiple of the frames the buffer holds, so exporters of the broadcast that joined at
-	/// different frames still cut the same PESs from the first such frame, like [`due`].
+	/// A PES carries only frames that left the jitter buffer together ([`Track::pack_start`]),
+	/// so it is whole however often the exporter is polled, and exporters of the broadcast that
+	/// joined at different frames still cut the same PESs from the first that starts one, like
+	/// [`due`].
 	fn pack(
 		&mut self,
 		name: &str,
@@ -2062,24 +2308,17 @@ where
 		decode: Timestamp,
 		tables: Vec<u8>,
 		payload: Vec<u8>,
-		(samples, rate): (u64, u32),
+		(samples, rate, start): (u64, u32, Option<PesStart>),
 	) -> anyhow::Result<()> {
 		let budget = self.budget().as_nanos();
 		let track = self.tracks.get(name).context("missing track")?;
-		// B holds the PES header with the frames (ISO 13818-1 2.4.2.3).
-		let size = track
-			.buffer()
-			.and_then(|buffer| buffer.size)
-			.unwrap_or(0)
-			.saturating_sub(PES_PREFIX_LEN + PES_OPTIONAL_LEN);
-		let fit = (size / payload.len().max(1)).max(1) as u128;
-		// Rounded, since a frame need not last whole microseconds: AAC's 1,024 samples at 48 kHz.
-		let frame = 1_000_000 * u128::from(samples);
-		let place = (unit.timestamp.as_micros() * u128::from(rate) + frame / 2) / frame;
+		let (size, fit) = track.fit(payload.len());
+		let place = place(unit.timestamp, samples, rate);
 		// A PTS is a whole 90 kHz tick, so the frames run on within one of where they end.
-		let joins = !place.is_multiple_of(fit)
+		let joins = start.is_some()
 			&& track.pack.as_ref().is_some_and(|pack| {
-				pack.rate == rate
+				pack.start == start
+					&& pack.rate == rate
 					&& pack.payload.len() + payload.len() <= size
 					&& decode.as_nanos().saturating_sub(pack.decode.as_nanos()) <= budget
 					&& pack.end().abs_diff(unit.timestamp.as_micros()) <= 12
@@ -2092,6 +2331,7 @@ where
 		let pack = track.pack.get_or_insert(Pack {
 			unit,
 			decode,
+			start,
 			payload: Vec::new(),
 			frames: Vec::new(),
 			samples: 0,
@@ -2100,9 +2340,8 @@ where
 		pack.frames.push((decode.as_nanos(), payload.len()));
 		pack.payload.extend_from_slice(&payload);
 		pack.samples += samples;
-		// The next frame starts a PES of its own anyway, and without slots running on an
-		// empty schedule, nothing would send this one on before it is due.
-		if (place + 1).is_multiple_of(fit) || self.schedule.is_empty() {
+		// The next frame starts a PES of its own anyway.
+		if (place + 1).is_multiple_of(fit) {
 			self.flush(name)?;
 		}
 		Ok(())
@@ -2168,6 +2407,19 @@ where
 		if let Some(buffer) = track.buffer() {
 			self.schedule.set_buffer(pid, buffer);
 		}
+		// A padded output cannot burst a picture late, so a CPB that the source may fill to
+		// its declared buffer delay needs that much send-ahead, all of it out of the delay.
+		if self.mux_rate.is_some()
+			&& let Some(needs) = track.timing.buffer_delay()
+		{
+			let slots = schedule::slot(needs.as_nanos());
+			anyhow::ensure!(
+				slots <= schedule::slot(self.delay.as_nanos()),
+				"MPEG-TS video on PID {pid} declares a {needs:.3?} decoder buffer delay (its HRD's CPB over its bit rate), past what a {:?} delay sends it ahead; raise the delay to {:?}",
+				self.delay,
+				PCR_INTERVAL * u32::try_from(slots).unwrap_or(u32::MAX),
+			);
+		}
 		let by = decode.as_nanos().saturating_sub(track.drain().as_nanos());
 		self.schedule.push_frames(
 			pid,
@@ -2190,21 +2442,29 @@ where
 	/// When the next grid slot is due on the jitter buffer's clock: once every frame that could
 	/// ride it has gone out of the jitter buffer, so its contents depend on the frames alone,
 	/// never on when they arrived, and the output keeps the clock's pace while media is queued
-	/// or still to decode. `None` without a delay, where frames settle the slots instead.
+	/// (in the schedule or still in the jitter buffer) or still to decode. `None` without a
+	/// delay, where frames settle the slots instead.
 	fn slot_due(&self) -> Option<(u128, web_async::time::Instant)> {
 		let (known, settled) = self.slot_settled()?;
 		let settled = Timestamp::from_micros(u64::try_from(settled / 1_000).ok()?).ok()?;
 		Some((known, self.jitter.at(settled)?))
 	}
 
-	/// The `known` that settles the next grid slot, and the decode time, in nanoseconds, by
-	/// which every frame that could ride it has gone out of the jitter buffer.
+	/// The `known` that settles the next grid slot, and the jitter buffer key, in nanoseconds,
+	/// by which every frame that could ride it has gone out of the jitter buffer. Keys run a
+	/// delay past release times ([`Track::release_key`]).
 	fn slot_settled(&self) -> Option<(u128, u128)> {
-		if self.delay.is_zero() || self.psi.is_none() || (self.schedule.is_empty() && !self.packing()) {
+		if self.delay.is_zero()
+			|| self.psi.is_none()
+			|| (self.schedule.is_empty() && !self.packing() && self.jitter.is_empty())
+		{
 			return None;
 		}
 		let (_, known) = self.schedule.upcoming()?;
-		Some((known, known * PCR_INTERVAL.as_nanos() + self.max_drain().as_nanos()))
+		Some((
+			known,
+			known * PCR_INTERVAL.as_nanos() + self.max_drain().as_nanos() + self.delay.as_nanos(),
+		))
 	}
 
 	/// Whether a track holds frames packed for a PES still to go out.
@@ -2212,10 +2472,11 @@ where
 		self.tracks.values().any(|track| track.pack.is_some())
 	}
 
-	/// Lay out every grid slot settled before a frame decoding at `decode` goes out, so frames
-	/// and slots follow each other in the same order however often the exporter is polled.
-	fn lay_before(&mut self, decode: u128) -> anyhow::Result<()> {
-		while let Some((known, _)) = self.slot_settled().filter(|&(_, settled)| settled < decode) {
+	/// Lay out every grid slot settled before a frame keyed `key` in the jitter buffer goes
+	/// out, so frames and slots follow each other in the same order however often the
+	/// exporter is polled.
+	fn lay_before(&mut self, key: u128) -> anyhow::Result<()> {
+		while let Some((known, _)) = self.slot_settled().filter(|&(_, settled)| settled < key) {
 			self.lay(Some(known))?;
 		}
 		Ok(())
@@ -2596,6 +2857,14 @@ fn adaptation_size(af: &AdaptationField) -> usize {
 	2 + if af.pcr.is_some() { 6 } else { 0 }
 }
 
+/// Where an audio frame of `samples` at `rate` presented at `timestamp` sits on the media
+/// timeline, counted in frames. Rounded, since a frame need not last whole microseconds:
+/// AAC's 1,024 samples at 48 kHz.
+fn place(timestamp: Timestamp, samples: u64, rate: u32) -> u128 {
+	let frame = 1_000_000 * u128::from(samples);
+	(timestamp.as_micros() * u128::from(rate) + frame / 2) / frame
+}
+
 /// The 33-bit wire timestamp field (90 kHz). DTS and PTS both wrap into it.
 const TS_TIMESTAMP_MASK: u64 = (1 << 33) - 1;
 
@@ -2726,8 +2995,16 @@ fn video_level(config: &VideoConfig, name: &str) -> Level {
 	})
 }
 
+/// How long `bits` take to arrive at `rate` bits per second: how far ahead of its decode
+/// time a decoder buffer that size, filling at that rate, holds a unit.
+fn fill(bits: u64, rate: u64) -> Duration {
+	let nanos = u128::from(bits) * 1_000_000_000 / u128::from(rate.max(1));
+	Duration::from_nanos(u64::try_from(nanos).unwrap_or(u64::MAX))
+}
+
 /// An audio stream's buffers in a receiver (H.222.0 2.4.2.3): by channel count for ADTS
-/// AAC (and Opus, which borrows them), 2 Mb/s and the codec's main buffer for the rest.
+/// AAC (and Opus, which borrows them), 2 Mb/s and the codec's main buffer for the rest. B
+/// reaches as far ahead as it takes to fill at Rx.
 fn audio_buffer(config: &AudioConfig, kind: &Kind) -> Buffer {
 	let by_channels = || match config.channel_count {
 		0..=2 => (2_000_000, 3_584),
@@ -2748,6 +3025,7 @@ fn audio_buffer(config: &AudioConfig, kind: &Kind) -> Buffer {
 		leak: None,
 		size: Some(size),
 		transport: 512,
+		reach: fill(size as u64 * 8, rate),
 	}
 }
 
@@ -2775,12 +3053,14 @@ fn verbatim_buffer(kind: &Kind, descriptors: &[catalog::Descriptor]) -> Option<B
 			leak: None,
 			size: Some(5_696),
 			transport: 512,
+			reach: fill(5_696 * 8, 2_000_000),
 		}),
 		TELETEXT_DESCRIPTOR => Some(Buffer {
 			rate: 6_750_000,
 			leak: None,
 			size: None,
 			transport: 480,
+			reach: Duration::ZERO,
 		}),
 		_ => None,
 	})
@@ -3219,6 +3499,7 @@ mod tests {
 				frame,
 				restart: 0,
 				skip: 0,
+				cut: 0,
 				arrived: now,
 				read: now,
 			};
@@ -3254,6 +3535,7 @@ mod tests {
 				leak: None,
 				size: None,
 				transport: 480,
+				reach: Duration::ZERO,
 			})
 		);
 		assert_eq!(verbatim_buffer(&kind, &[descriptor(0x0a)]), None);
