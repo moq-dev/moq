@@ -121,11 +121,11 @@ test("a sleep stays on its creation clock and abort releases it", async () => {
 	await first.advanceAsync(Nano(10));
 	await pending;
 	const abort = new AbortController();
-	const cancelled = sleep(Nano(100), abort.signal).catch((error: unknown) => error);
+	const cancelled = sleep(Nano(100), { signal: abort.signal }).catch((error: unknown) => error);
 	abort.abort();
 	expect(await cancelled).toHaveProperty("name", "AbortError");
 	await second.advanceAsync(Nano(100));
-	await expect(sleep(Nano.zero, abort.signal)).rejects.toHaveProperty("name", "AbortError");
+	await expect(sleep(Nano.zero, { signal: abort.signal })).rejects.toHaveProperty("name", "AbortError");
 });
 
 test("timeouts prefer ready work, propagate rejection, and expire on the manual deadline", async () => {
@@ -186,6 +186,17 @@ test("an interval cancels pending ticks, refuses concurrent ticks and stays clos
 	ticks.close();
 	expect(await pending).toHaveProperty("name", "AbortError");
 	await expect(ticks.tick()).rejects.toHaveProperty("name", "AbortError");
+});
+
+test("the host clock counts from the performance time origin", () => {
+	const before = performance.now();
+	const at = Nano.toMilli(Instant.durationSince(now(), Instant.zero));
+	expect(at).toBeGreaterThanOrEqual(before);
+	expect(at).toBeLessThanOrEqual(performance.now());
+});
+
+test("an unreferenced sleep still completes on the host", async () => {
+	await sleep(Nano.fromMilli(Milli(1)), { ref: false });
 });
 
 test("manual installation leaves the host's own timers real", async () => {
