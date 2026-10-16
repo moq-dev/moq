@@ -16,7 +16,8 @@ Decided in the 2026-09-30 plan:
 - **Scope is the Rust core plus adapters.** Port the prototype core and
   moq-dev/web-transport's TCP, TLS, WebSocket, and UDS adapters, ALPN
   negotiation, byte-stream framing, and socket stats (about 2.3k lines) onto
-  it, along with the `web-transport-trait` impl. The TypeScript `@moq/qmux`
+  it. Its session implements moq-net's `transport::poll` traits instead of
+  `web-transport-trait` ([Drop web-transport-trait](/quest/m2/drop-web-transport-trait.md)). The TypeScript `@moq/qmux`
   and `@moq/web-socket-stream` stay in moq-dev/web-transport with their own
   state machine and become the interop reference.
 - **All four wire versions stay**: draft-02, draft-01, draft-00, and the
