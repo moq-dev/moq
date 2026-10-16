@@ -35,7 +35,6 @@ Public API: none. Wire: none.
 
 ## Required
 
-- [TS resume late frames](/quest/m1/test-flakes-2/ts-resume-late-frames.md) - the same-instance TS resume test keeps its late frames, fixed in production or the fixture as the evidence says
 - [WebTransport close release](/quest/m1/test-flakes-2/interop-close-release.md) - a compatible published adapter contains the acknowledged-close fix
 - [Interop close code](/quest/m1/test-flakes-2/interop-close-code.md) - adopt that release so the browser reliably sees `unauthorized` for a refused session
 - [Auth refresh mocks time](/quest/m1/test-flakes-2/auth-refresh-mock-time.md) - moq-relay's auth refresh and fixed-lease tests measure a grant's life on one mocked clock
