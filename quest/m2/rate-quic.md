@@ -87,4 +87,4 @@ that a one-second rate window can also be the complete assembly allowance.
 - [Hard fork](/quest/m1/quic/fork/README.md) - the credit and pacer changes land in `moq-quic`
 - [Peer limits](/quest/m1/quic/peer-limits.md) - adds the runtime `set_limits(Limits)` seam and shrink-as-debt behavior this extends
 - [Bound message assembly](/quest/m1/quic/receive-memory.md) - separate retained memory from paced outstanding credit
-- [Bitrate claim](/quest/m2/rate-claim.md) - the cap this enforces
+- [Bitrate claim](/doc/bin/relay/auth.md#claims) - the cap this enforces

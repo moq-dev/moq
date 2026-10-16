@@ -5,7 +5,7 @@
 A relay session over the WebSocket fallback is held to its `publish.rate`
 and `subscribe.rate` like a QUIC session, and is admitted instead of refused.
 HTTP `/fetch` and `/announced` keep refusing capped tokens; see
-[the claim](/quest/m2/rate-claim.md).
+[the claim](/doc/bin/relay/auth.md#claims).
 
 ## Plan
 
@@ -38,7 +38,7 @@ live session applies.
 
 ## Required
 
-- [Bitrate claim](/quest/m2/rate-claim.md) - the cap this enforces
+- [Bitrate claim](/doc/bin/relay/auth.md#claims) - the cap this enforces
 
 ## Related
 
