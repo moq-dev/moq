@@ -23,3 +23,4 @@ Decided 2026-10-16 with the maintainer:
 ## Required
 
 - [Benchmarks](/quest/m1/quic/coverage/bench.md) - lands the no-op protection this replaces
+- [Fuzzing](/quest/m1/quic/coverage/fuzz.md) - lands the hidden `fuzz` module and the `connection` target this switches
