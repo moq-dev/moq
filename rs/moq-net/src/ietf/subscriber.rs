@@ -704,6 +704,14 @@ pub(super) fn subscribe_prefixes(origin: &origin::Producer) -> Vec<PathOwned> {
 	crate::model::interest_prefixes(&origin.allowed())
 }
 
+/// The initial set of a SUBSCRIBE_NAMESPACE still to read, under MoQ Active Count.
+struct Initial {
+	/// NAMESPACE messages still owed before the first change.
+	initial: u64,
+	/// Released once `initial` reaches zero.
+	snapshot: Option<crate::model::Snapshot>,
+}
+
 /// Resolve the subscription a data stream belongs to.
 ///
 /// SUBSCRIBE_OK can be reordered behind the stream it describes, so an alias we have not
@@ -995,10 +1003,15 @@ where
 	/// A failure here is per-prefix, so the caller decides what it means for the
 	/// session: [`is_protocol_violation`] separates the peer's fault (fatal) from a
 	/// stream of ours that simply died (survivable).
+	///
+	/// `snapshot` holds the origin's announce consumers under the prefix short of
+	/// caught up. It drops once the NAMESPACE messages MoQ Active Count promised are
+	/// in, on REQUEST_OK without the extension, or when no request goes out at all.
 	pub async fn run_subscribe_namespace<T: crate::transport::poll::Session>(
 		&mut self,
 		mut stream: Stream<T, Version>,
 		prefix: PathOwned,
+		snapshot: crate::model::Snapshot,
 	) -> Result<(), Error> {
 		// Hidden namespaces are requested too, as on moq-lite: the session mirrors the
 		// peer into the origin and each local reader opts in on its own. The parameter
@@ -1075,13 +1088,14 @@ where
 
 		tracing::debug!(%prefix, ?count, "subscribe_namespace ok");
 
-		// MoQ Active Count says how many NAMESPACE messages make up the initial set;
-		// nothing here needs that boundary, so it is only checked. A count the
-		// negotiation did not promise, or a missing one it did, is the peer breaking
-		// the extension.
+		// MoQ Active Count says how many NAMESPACE messages make up the initial set. A
+		// count the negotiation did not promise, or a missing one it did, is the peer
+		// breaking the extension. Without it, the answer is the best boundary there is.
 		if declared.active_count != count.is_some() {
 			return Err(Error::ProtocolViolation);
 		}
+		let initial = count.unwrap_or(0);
+		let snapshot = (initial > 0).then_some(snapshot);
 
 		// The extension changes the NAMESPACE encoding, so we can't parse one until
 		// the peer's SETUP says whether it negotiated.
@@ -1097,7 +1111,9 @@ where
 		//
 		// This is what moq-lite already does, where the equivalent map is a local whose
 		// guards drop.
-		let res = self.run_namespace_entries(&mut stream, &prefix, &peer, &mut live).await;
+		let res = self
+			.run_namespace_entries(&mut stream, &prefix, &peer, &mut live, Initial { initial, snapshot })
+			.await;
 		for path in live {
 			let _ = self.stop_announce(path, false);
 		}
@@ -1115,11 +1131,18 @@ where
 		prefix: &PathOwned,
 		peer: &cluster::Peer,
 		live: &mut std::collections::HashSet<PathOwned>,
+		mut initial: Initial,
 	) -> Result<(), Error> {
 		loop {
+			// Every counted NAMESPACE is in the origin by now, dropped ones included.
+			if initial.initial == 0 {
+				initial.snapshot = None;
+			}
 			let type_id = match stream.reader.varint_maybe().await? {
 				Some(id) => id,
-				None => break, // Stream closed
+				// A stream ending inside the counted set cut it short.
+				None if initial.initial > 0 => return Err(Error::ProtocolViolation),
+				None => break,
 			};
 			let body: ietf::Body = stream.reader.decode().await?;
 			let mut data = body.decoder(self.version);
@@ -1133,6 +1156,7 @@ where
 					if !data.is_empty() {
 						return Err(Error::WrongSize);
 					}
+					initial.initial = initial.initial.saturating_sub(1);
 					let path = prefix.join(&msg.suffix);
 					let Some(advert) = self.route(msg.cluster.as_ref(), peer) else {
 						// Looped back through us: forwarding it would extend the loop and
@@ -1168,6 +1192,8 @@ where
 						}
 					}
 				}
+				// Only NAMESPACE may come before the counted set is in.
+				ietf::NamespaceDone::ID if initial.initial > 0 => return Err(Error::ProtocolViolation),
 				ietf::NamespaceDone::ID => {
 					let msg = ietf::NamespaceDone::decode_msg(&mut data, self.version)?;
 					let path = prefix.join(&msg.suffix);
@@ -5543,7 +5569,8 @@ mod tests {
 		let prefix = namespaces.pop().unwrap();
 
 		let stream = Stream::open(&mut session.clone(), Version::Draft16).await.unwrap();
-		let mut run = std::pin::pin!(subscriber.run_subscribe_namespace(stream, prefix));
+		let mut run =
+			std::pin::pin!(subscriber.run_subscribe_namespace(stream, prefix, crate::model::Snapshot::landed()));
 		// Parks awaiting the peer's response; the request is already on the wire.
 		assert!(futures::poll!(run.as_mut()).is_pending());
 
@@ -5617,7 +5644,8 @@ mod tests {
 		let prefix = subscribe_prefixes(&subscriber.origin).pop().expect("one prefix");
 		let stream = Stream::open(&mut session.clone(), VERSION).await.unwrap();
 		// Parks on the read after the scripted NAMESPACE is consumed.
-		let mut run = std::pin::pin!(subscriber.run_subscribe_namespace(stream, prefix));
+		let mut run =
+			std::pin::pin!(subscriber.run_subscribe_namespace(stream, prefix, crate::model::Snapshot::landed()));
 		for _ in 0..100 {
 			// The result is deliberately ignored: a regressed mount lands out of scope
 			// and errors here, which the assertions below name far better than a poll
@@ -5684,12 +5712,152 @@ mod tests {
 
 			let stream = Stream::open(&mut session.clone(), VERSION).await.unwrap();
 			let res = subscriber
-				.run_subscribe_namespace(stream, crate::Path::new("").to_owned())
+				.run_subscribe_namespace(
+					stream,
+					crate::Path::new("").to_owned(),
+					crate::model::Snapshot::landed(),
+				)
 				.await;
 			assert!(
 				matches!(res, Err(Error::ProtocolViolation)),
 				"negotiated {negotiated}, count {count:?}: {res:?}"
 			);
+		}
+	}
+
+	/// The peer's REQUEST_OK carrying `active`, then a NAMESPACE per suffix, or a
+	/// NAMESPACE_DONE for one prefixed with `-`.
+	async fn counted_response(version: Version, active: Option<u64>, entries: &[&str]) -> Vec<u8> {
+		let log = crate::lite::test_transport::Log::default();
+		let mut writer = crate::coding::Writer::new(crate::lite::test_transport::SinkSend::new(log.clone()), version);
+		writer.varint(ietf::RequestOk::ID).await.unwrap();
+		writer
+			.encode(&ietf::RequestOk {
+				request_id: None,
+				active,
+			})
+			.await
+			.unwrap();
+		for entry in entries {
+			match entry.strip_prefix('-') {
+				Some(suffix) => {
+					writer.varint(ietf::NamespaceDone::ID).await.unwrap();
+					writer
+						.encode(&ietf::NamespaceDone {
+							suffix: crate::Path::new(suffix),
+						})
+						.await
+						.unwrap();
+				}
+				None => {
+					writer.varint(ietf::Namespace::ID).await.unwrap();
+					writer
+						.encode(&ietf::Namespace {
+							suffix: crate::Path::new(entry),
+							cluster: None,
+						})
+						.await
+						.unwrap();
+				}
+			}
+		}
+		let writes = log.writes.lock().unwrap();
+		writes.clone()
+	}
+
+	/// A root SUBSCRIBE_NAMESPACE on a fresh origin whose peer replays `session`, holding
+	/// the origin's snapshot as the session does.
+	fn counted_subscriber(
+		version: Version,
+		active_count: bool,
+		session: crate::lite::test_transport::ScriptedSession,
+	) -> (
+		Subscriber<crate::lite::test_transport::ScriptedSession>,
+		crate::origin::Consumer,
+		crate::model::Snapshot,
+	) {
+		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let consumer = origin.consume();
+		let snapshot = origin.snapshot("");
+		let (tasks, _task_set) = crate::util::TaskSet::new();
+		let peer_setup = peer::PeerSetup::default();
+		peer_setup.set(peer::Peer {
+			active_count,
+			..Default::default()
+		});
+		let subscriber = Subscriber::new(
+			crate::time::Clock::sim(),
+			session,
+			origin,
+			Control::new(None, false),
+			None,
+			peer_setup,
+			crate::Hop::new(1).unwrap(),
+			None,
+			version,
+			tasks,
+			Default::default(),
+		);
+		(subscriber, consumer, snapshot)
+	}
+
+	/// With MoQ Active Count, the origin catches up once the counted NAMESPACEs are in.
+	#[moq_net_sim::test]
+	async fn counted_namespaces_catch_up() {
+		const VERSION: Version = Version::Draft18;
+		for (entries, caught_up) in [(&["a"][..], false), (&["a", "b"][..], true)] {
+			let session =
+				crate::lite::test_transport::ScriptedSession::new(counted_response(VERSION, Some(2), entries).await);
+			let (mut subscriber, consumer, snapshot) = counted_subscriber(VERSION, true, session.clone());
+			let mut cursor = consumer.announced();
+			let stream = Stream::open(&mut session.clone(), VERSION).await.unwrap();
+			let mut run =
+				std::pin::pin!(subscriber.run_subscribe_namespace(stream, crate::Path::new("").to_owned(), snapshot));
+			for _ in 0..10 {
+				assert!(futures::poll!(run.as_mut()).is_pending());
+				settle().await;
+			}
+			for entry in entries {
+				cursor.assert_next_active(*entry);
+			}
+			assert_eq!(cursor.is_caught_up(), caught_up, "{entries:?}");
+		}
+	}
+
+	/// Without MoQ Active Count, REQUEST_OK is the best boundary there is.
+	#[moq_net_sim::test]
+	async fn an_uncounted_answer_catches_up_on_the_ok() {
+		const VERSION: Version = Version::Draft18;
+		let session = crate::lite::test_transport::ScriptedSession::new(counted_response(VERSION, None, &[]).await);
+		let (mut subscriber, consumer, snapshot) = counted_subscriber(VERSION, false, session.clone());
+		let cursor = consumer.announced();
+		assert!(!cursor.is_caught_up());
+		let stream = Stream::open(&mut session.clone(), VERSION).await.unwrap();
+		let mut run =
+			std::pin::pin!(subscriber.run_subscribe_namespace(stream, crate::Path::new("").to_owned(), snapshot));
+		for _ in 0..10 {
+			assert!(futures::poll!(run.as_mut()).is_pending());
+			settle().await;
+		}
+		assert!(cursor.is_caught_up());
+	}
+
+	/// A counted set cut short, by a NAMESPACE_DONE or the stream ending, is the peer's fault.
+	#[moq_net_sim::test]
+	async fn a_counted_set_cut_short_is_a_violation() {
+		const VERSION: Version = Version::Draft18;
+		for (entries, fin) in [(&["a", "-a"][..], false), (&["a"][..], true)] {
+			let session =
+				crate::lite::test_transport::ScriptedSession::new(counted_response(VERSION, Some(2), entries).await);
+			if fin {
+				session.close(crate::lite::test_transport::Close::Fin);
+			}
+			let (mut subscriber, _consumer, snapshot) = counted_subscriber(VERSION, true, session.clone());
+			let stream = Stream::open(&mut session.clone(), VERSION).await.unwrap();
+			let res = subscriber
+				.run_subscribe_namespace(stream, crate::Path::new("").to_owned(), snapshot)
+				.await;
+			assert!(matches!(res, Err(Error::ProtocolViolation)), "{entries:?}: {res:?}");
 		}
 	}
 
@@ -7242,7 +7410,11 @@ mod tests {
 
 		let stream = Stream::open(&mut session.clone(), VERSION).await.unwrap();
 		subscriber
-			.run_subscribe_namespace(stream, crate::Path::new("").to_owned())
+			.run_subscribe_namespace(
+				stream,
+				crate::Path::new("").to_owned(),
+				crate::model::Snapshot::landed(),
+			)
 			.await
 			.expect("a clean FIN is not an error");
 		settle().await;
@@ -7318,7 +7490,11 @@ mod tests {
 		);
 
 		let stream = Stream::open(&mut session.clone(), VERSION).await.unwrap();
-		let mut run = std::pin::pin!(subscriber.run_subscribe_namespace(stream, crate::Path::new("").to_owned()));
+		let mut run = std::pin::pin!(subscriber.run_subscribe_namespace(
+			stream,
+			crate::Path::new("").to_owned(),
+			crate::model::Snapshot::landed()
+		));
 		for _ in 0..100 {
 			assert!(
 				futures::poll!(run.as_mut()).is_pending(),

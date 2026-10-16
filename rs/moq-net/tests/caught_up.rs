@@ -1,0 +1,122 @@
+#![cfg(feature = "async")]
+
+//! A subscriber's announce consumers catch up once the session has delivered its
+//! peer's initial announcements: exactly on versions that mark the boundary, and
+//! on the answer, as a best effort, on the rest.
+
+mod support;
+
+use std::collections::BTreeSet;
+use std::time::Duration;
+
+use moq_net::{Hop, Version, announce, origin};
+use support::harness::{MockConnectOptions, connect_mock};
+
+/// Long enough, in virtual time, for anything in flight to reach the far side.
+const SETTLE: Duration = Duration::from_secs(1);
+
+fn produce_origin(hop: u64) -> origin::Producer {
+	let (producer, driver) = origin::Producer::new(origin::Config::new(Hop::new(hop).unwrap()));
+	support::harness::spawn(driver);
+	producer
+}
+
+/// Read events until the consumer catches up, returning the prefixes then announced.
+async fn read_until_caught_up(announced: &mut announce::Consumer) -> BTreeSet<String> {
+	let mut seen = BTreeSet::new();
+	while !announced.is_caught_up() {
+		let event = moq_net_sim::timeout(SETTLE, announced.next())
+			.await
+			.expect("caught up in time")
+			.expect("the cursor stays open");
+		match event {
+			announce::Event::Start(announce) | announce::Event::Restart(announce) => {
+				seen.insert(announce.prefix.to_string());
+			}
+			announce::Event::End(announce) => {
+				seen.remove(announce.prefix.as_str());
+			}
+			announce::Event::Update(_) => {}
+		}
+	}
+	seen
+}
+
+/// Connect a subscriber to a publisher holding two broadcasts, and return what its
+/// origin's consumer had read when it caught up.
+async fn caught_up(version: &str) -> BTreeSet<String> {
+	let publisher = produce_origin(1);
+	let a = publisher.create_broadcast("a").unwrap();
+	a.announce(Default::default()).unwrap();
+	let b = publisher.create_broadcast("b").unwrap();
+	b.announce(Default::default()).unwrap();
+
+	let subscriber = produce_origin(2);
+	let mut options = MockConnectOptions::new(version.parse::<Version>().unwrap());
+	options.server_publish = Some(publisher.consume());
+	options.client_subscribe = Some(subscriber.clone());
+	let _pair = connect_mock(options).await;
+
+	let mut announced = subscriber.consume().announced();
+	read_until_caught_up(&mut announced).await
+}
+
+fn both() -> BTreeSet<String> {
+	["a", "b"].into_iter().map(String::from).collect()
+}
+
+/// Every version that marks the boundary catches up with the whole initial set.
+#[moq_net_sim::test]
+async fn an_exact_boundary_catches_up_with_the_initial_set() {
+	for version in [
+		"moq-lite-05",
+		"moq-lite-06",
+		"moq-lite-07-wip",
+		"moq-transport-16",
+		"moq-transport-17",
+		"moq-transport-18",
+		"moq-transport-19",
+		"moq-transport-20",
+		"moq-transport-21",
+		"moq-transport-22",
+	] {
+		assert_eq!(caught_up(version).await, both(), "{version}");
+	}
+}
+
+/// Versions without a boundary still catch up, so nothing waiting on it hangs.
+#[moq_net_sim::test]
+async fn a_best_effort_boundary_still_catches_up() {
+	for version in ["moq-lite-03", "moq-lite-04", "moq-transport-14", "moq-transport-15"] {
+		caught_up(version).await;
+	}
+}
+
+/// A second session into the same origin, as a reconnect makes, catches up too: the
+/// consumer waits on every current session.
+#[moq_net_sim::test]
+async fn a_second_session_catches_up() {
+	let publisher = produce_origin(1);
+	let a = publisher.create_broadcast("a").unwrap();
+	a.announce(Default::default()).unwrap();
+
+	let subscriber = produce_origin(2);
+	let connect = || {
+		let mut options = MockConnectOptions::new("moq-lite-07-wip".parse::<Version>().unwrap());
+		options.server_publish = Some(publisher.consume());
+		options.client_subscribe = Some(subscriber.clone());
+		connect_mock(options)
+	};
+	let first = connect().await;
+	let mut announced = subscriber.consume().announced();
+	assert_eq!(
+		read_until_caught_up(&mut announced).await,
+		["a"].into_iter().map(String::from).collect()
+	);
+
+	let second = connect().await;
+	drop(first);
+	moq_net_sim::sleep(SETTLE).await;
+	read_until_caught_up(&mut announced).await;
+	drop(second);
+}
