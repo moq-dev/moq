@@ -17,7 +17,7 @@ check:
 
 # Run the binding benchmark with optimized Rust and Swift builds on macOS.
 bench:
-    MOQ_BENCH_DIR="${MOQ_BENCH_DIR:-$PWD/../target/bench/ffi}" MOQ_FFI_PROFILE=release bash ../sh/swift/check.sh --configuration release --filter FfiBench/testBenchmark
+    bash ../sh/swift/bench.sh
 
 # Release recipes run in the caller's directory, so a relative `--output` or
 # `--tarball` means what it would to the script itself.
