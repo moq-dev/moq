@@ -14,21 +14,35 @@
 //!   program has no video;
 //! - a PCR with `discontinuity_indicator` that jumps forward, since no group may hold a PCR
 //!   discontinuity;
-//! - the first PCR at least [`FALLBACK`] after the group's start, for a source that never marks
-//!   random access;
+//! - the first PCR at or past a line of a grid every [`FALLBACK`] on the PCR timeline, when no
+//!   random access point or flagged jump fell in the [`FALLBACK`] before the line, for a source
+//!   that marks random access rarely or never;
 //! - the first object that would take the group past [`GROUP_BYTES_MAX`] or
 //!   [`GROUP_OBJECTS_MAX`], so a long GOP cannot outgrow what a relay caches. Objects are never
 //!   split to meet the bound.
 //!
-//! Only the first of these makes a group a random access point, so any other start publishes
-//! [`random_access`](hang::catalog::M2ts::random_access) false from then on, as does any group
-//! carried while the layout allows no random access (more than one program or video stream). A
+//! A random access point or a jump counts against the grid at the PCR before it (its own PCR, if
+//! its packet carries one). Only the first kind of start makes a group a random access point. A
 //! group the PCR discontinuity starts is behind a break even when it is also a random access
 //! point.
 //!
 //! Bytes before the first group are dropped: until the PMT, a PCR, and a group start have all
-//! been seen there is no group to put them in. The track is byte-identical to the input from its
-//! first group on, and only from there. Bytes off the 188-byte packet grid are dropped too.
+//! been seen there is no group to put them in. A jump before the first group starts none, and a
+//! line of the grid starts it only once the importer has watched for random access through the
+//! whole [`FALLBACK`] before the line. The track is byte-identical to the input from its first
+//! group on, and only from there. Bytes off the 188-byte packet grid are dropped too.
+//!
+//! # The catalog section
+//!
+//! The section is written for each window of a grid every two seconds on the PCR timeline, once
+//! the clock passes it, and only for windows that start at or after the importer's first group:
+//! the catalog lists the track from the first such window on, or at the end of the input if that
+//! comes first. [`random_access`](hang::catalog::M2ts::random_access) is true when every group
+//! the window started is a random access point and the layout allowed random access throughout it
+//! (one program, one video stream); [`mux_rate`](hang::catalog::M2ts::mux_rate) is the rate the
+//! window was paced at, when the PCRs arrived unbroken across it and agree on one. An input that
+//! ends before its first window publishes the random access of everything it carried and the rate
+//! of the window in progress.
 //!
 //! # Timestamps
 //!
@@ -48,10 +62,11 @@
 //! one before ends the import: [`PcrRewindError`] without the flag, [`PcrRestartError`] with it,
 //! since a signalled restart is new content and needs a new broadcast. So does a jump that carries
 //! the PCR more than half a wrap (about 13.25 hours) from the clock's reading, since it lands a
-//! wrap back. The timeline therefore depends only on the bytes and the clock, and two importers of
-//! one feed whose timebases one shared epoch placed (see
-//! [`Timebase::place`](crate::catalog::Timebase::place)) publish identical objects wherever each
-//! started. Objects timed past the last PCR before a flagged jump smaller than their lead can land
+//! wrap back. The timeline therefore depends only on the bytes and the clock, and the grids above
+//! lie on it, so two importers of one feed whose timebases one shared epoch placed (see
+//! [`Timebase::place`](crate::catalog::Timebase::place)) publish identical objects, groups and
+//! sections wherever each started, from the later one's first group on (group sequence numbers
+//! aside). Objects timed past the last PCR before a flagged jump smaller than their lead can land
 //! after the first ones behind it; if one of them starts a group, the group behind the break would
 //! start before it, and the import ends there.
 
@@ -61,7 +76,7 @@ use bytes::BytesMut;
 use mpeg2ts::ts::{Pid, TsPacket};
 
 use super::import::{Framer, PatReader, SectionReassembler, adaptation_valid, discontinuity_indicator, pcr};
-use super::mux_rate::{Meter, PCR_WRAP};
+use super::mux_rate::{PCR_WRAP, WINDOW, Windows};
 use super::psi::{self, Pmt};
 
 /// The PCR clock, in Hz.
@@ -73,7 +88,8 @@ const PCR: crate::catalog::Wrap = crate::catalog::Wrap {
 	period: PCR_WRAP,
 };
 
-/// The longest a group runs without a random access point before a PCR starts the next.
+/// The spacing of the grid that cuts a source without frequent random access points, so no group
+/// runs much past two spacings.
 pub const FALLBACK: std::time::Duration = std::time::Duration::from_secs(1);
 const FALLBACK_TICKS: u64 = PCR_HZ;
 
@@ -179,8 +195,8 @@ pub struct PcrGapError {
 /// timestamped.
 pub struct Passthrough<E: crate::catalog::hang::CatalogExt = ()> {
 	catalog: crate::catalog::Producer<E>,
-	/// Held until the first group is written, so the first catalog already names the track with
-	/// its final `randomAccess`.
+	/// Held until the section is first written, so the first catalog already describes a whole
+	/// window.
 	reservation: Option<crate::catalog::Reserved<E>>,
 	/// Puts every PCR in its era and shifts every object's PCR time onto the catalog clock,
 	/// anchored by the first PCR.
@@ -219,19 +235,26 @@ pub struct Passthrough<E: crate::catalog::hang::CatalogExt = ()> {
 	/// A `discontinuity_indicator` on the clock PID, waiting for the PCR that it flags (normally
 	/// in the same packet).
 	pending_break: bool,
-	/// Before the first group: the PCR time the importer started waiting for a group start at.
-	waiting_since: Option<u64>,
+	/// The first PCR at which the clock's program was mapped: every random access point since
+	/// has been seen.
+	watching_since: Option<u64>,
+	/// The PCR the latest random access point or flagged jump counts against the grid at.
+	last_mark: Option<u64>,
 
 	/// The object being filled, from its first packet.
 	open: Option<Object>,
 	/// Closed objects waiting on the next PCR for their timestamps.
 	queue: VecDeque<Object>,
 	group: Option<Group>,
+	/// The PCR the first group started at.
+	first_mark: Option<u64>,
 	/// Whether every group so far started at a random access point, and the layout allowed random
-	/// access throughout.
+	/// access throughout: the section of an input that ends before its first window.
 	all_random_access: bool,
+	/// The same, for the window in progress.
+	window_random_access: bool,
 
-	mux_rate: Meter,
+	windows: Windows,
 }
 
 /// Owns the `m2ts` catalog section once written, removing it however the track ends, as the
@@ -273,6 +296,8 @@ struct Sample {
 struct Object {
 	/// Where the object's first byte sits in the input.
 	at: u64,
+	/// The PCR at or before the object's first packet, which places a group it starts on the grids.
+	mark: u64,
 	payload: BytesMut,
 	/// Why this object starts a group, if it does.
 	start: Option<Start>,
@@ -290,9 +315,8 @@ enum Start {
 	Full,
 }
 
+#[derive(Default)]
 struct Group {
-	/// The PCR time of the group's first byte.
-	ticks: u64,
 	bytes: u64,
 	objects: usize,
 }
@@ -329,12 +353,15 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 			mapped: false,
 			timebase: None,
 			pending_break: false,
-			waiting_since: None,
+			watching_since: None,
+			last_mark: None,
 			open: None,
 			queue: VecDeque::new(),
 			group: None,
+			first_mark: None,
 			all_random_access: true,
-			mux_rate: Meter::default(),
+			window_random_access: false,
+			windows: Windows::default(),
 		})
 	}
 
@@ -375,6 +402,9 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 		}
 		self.close_object();
 		self.drain_queue()?;
+		if self.section.is_none() && self.group.is_some() {
+			self.record(self.single && self.all_random_access, self.windows.partial())?;
+		}
 		self.reservation = None;
 		self.media.finish()?;
 		Ok(())
@@ -461,7 +491,7 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 		{
 			self.pmt_packet(pmt_pid, pkt)?;
 		}
-		self.mux_rate.packet();
+		self.windows.packet();
 
 		// A packet the demodulator flagged corrupt, or whose adaptation field overruns it, is
 		// carried like any other, but nothing is read from it.
@@ -481,6 +511,7 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 		}
 		if readable && self.access_pid == Some(pid) && random_access_indicator(pkt) && self.can_start() {
 			start = Some(Start::RandomAccess);
+			self.last_mark = self.last_pcr();
 		}
 
 		if start.is_some() || (clock && self.started()) {
@@ -491,6 +522,7 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 			payload.extend_from_slice(pkt);
 			self.open = Some(Object {
 				at,
+				mark: self.last_pcr().expect("an object follows a PCR"),
 				payload,
 				start,
 				discontinuity,
@@ -525,10 +557,9 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 				raw,
 				samples: VecDeque::from([Sample { at, ticks }]),
 			});
-			self.waiting_since = self.mapped.then_some(ticks);
-			if self.mux_rate.pcr(raw) {
-				self.record()?;
-			}
+			self.watching_since = self.mapped.then_some(ticks);
+			self.windows.pcr(ticks, false);
+			self.window_random_access = self.single;
 			return Ok(None);
 		};
 
@@ -551,16 +582,10 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 				raw,
 				samples: VecDeque::from([Sample { at, ticks }]),
 			});
-			if self.mux_rate.discontinuity() {
-				self.record()?;
-			}
-			if self.mux_rate.pcr(raw) {
-				self.record()?;
-			}
-			// The jump is not elapsed time, so the wait for the first group starts over.
-			if self.waiting_since.is_some() {
-				self.waiting_since = Some(ticks);
-			}
+			// An importer already running cuts here, so the jump counts against the grid even
+			// before this one's first group.
+			self.last_mark = Some(ticks);
+			self.end_window(ticks, true)?;
 			return Ok(self.started().then_some(Start::Discontinuity));
 		}
 
@@ -570,18 +595,39 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 			timebase.samples.pop_front();
 		}
 		self.drain_queue()?;
-		if self.mux_rate.pcr(raw) {
-			self.record()?;
+		self.end_window(ticks, false)?;
+		if self.mapped {
+			self.watching_since.get_or_insert(ticks);
 		}
 
-		let since = match &self.group {
-			Some(group) => Some(group.ticks),
-			None if self.mapped => Some(*self.waiting_since.get_or_insert(ticks)),
-			None => None,
+		// The first PCR at or past a line of the grid cuts there, unless a random access point or
+		// a jump fell in the spacing before the line. Before the first group, only a line whose
+		// whole spacing was watched may: an importer running since before would cut there too.
+		let line = ticks / FALLBACK_TICKS * FALLBACK_TICKS;
+		let crossed = last < line;
+		let marked = self.last_mark.is_some_and(|mark| mark + FALLBACK_TICKS >= line);
+		let watched = self.started() || self.watching_since.is_some_and(|since| since + FALLBACK_TICKS <= line);
+		Ok((crossed && !marked && watched && self.can_start()).then_some(Start::Fallback))
+	}
+
+	/// The section for the window a PCR at `ticks` ended, if it ended one: written once the window
+	/// starts at or after the first group, since every group start and layout change in it is
+	/// then one an importer running since before saw the same way.
+	fn end_window(&mut self, ticks: u64, broken: bool) -> anyhow::Result<()> {
+		let Some(ended) = self.windows.pcr(ticks, broken) else {
+			return Ok(());
 		};
-		Ok(since
-			.filter(|since| ticks.saturating_sub(*since) >= FALLBACK_TICKS && self.can_start())
-			.map(|_| Start::Fallback))
+		let random_access = std::mem::replace(&mut self.window_random_access, self.single);
+		if self.first_mark.is_some_and(|mark| mark <= ended.index * WINDOW) {
+			self.record(random_access, ended.rate)?;
+		}
+		Ok(())
+	}
+
+	/// The PCR the last packet followed, on the unwrapped timeline.
+	fn last_pcr(&self) -> Option<u64> {
+		let timebase = self.timebase.as_ref()?;
+		timebase.samples.back().map(|sample| sample.ticks)
 	}
 
 	/// Whether a group may start here: once the first one has, always; before it, only once the
@@ -628,12 +674,10 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 			}
 			if start != Start::RandomAccess || !self.single {
 				self.all_random_access = false;
+				self.window_random_access = false;
 			}
-			self.group = Some(Group {
-				ticks,
-				bytes: 0,
-				objects: 0,
-			});
+			self.first_mark.get_or_insert(object.mark);
+			self.group = Some(Group::default());
 		}
 
 		// Only an object that starts a group is ever opened before the first one.
@@ -646,25 +690,19 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 			payload: object.payload.freeze(),
 			keyframe: start.is_some(),
 		})?;
-		if start.is_some() {
-			self.record()?;
-			self.reservation = None;
-		}
 		Ok(())
 	}
 
-	/// Write the section to the catalog if it changed. Nothing is written before the first group.
-	fn record(&mut self) -> anyhow::Result<()> {
-		if self.group.is_none() && self.section.is_none() {
-			return Ok(());
-		}
+	/// Write the section to the catalog if it changed, and let the catalog publish.
+	fn record(&mut self, random_access: bool, mux_rate: Option<u64>) -> anyhow::Result<()> {
 		let mut section = hang::catalog::M2ts::new(self.media.name());
-		section.random_access = self.single && self.all_random_access;
-		section.mux_rate = self.mux_rate.published();
+		section.random_access = random_access;
+		section.mux_rate = mux_rate;
 		if self.section.as_ref().is_some_and(|written| written.written == section) {
 			return Ok(());
 		}
 		self.catalog.mutate(|catalog| catalog.m2ts = Some(section.clone()))?;
+		self.reservation = None;
 		match &mut self.section {
 			Some(written) => written.written = section,
 			None => {
@@ -777,11 +815,19 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 		self.access_pid = access_pid;
 		self.mapped = mapped;
 		self.single = single;
-		// The group in progress now carries what no random access point covers, and it stays cached.
-		if !single && self.started() {
-			self.all_random_access = false;
+		if !single {
+			self.window_random_access = false;
+			// The group in progress now carries what no random access point covers.
+			if self.started() {
+				self.all_random_access = false;
+			}
 		}
-		self.record()
+		// Unmapped, an importer that has not started misses random access points one that has
+		// sees, so its watch starts over.
+		if !mapped && !self.started() {
+			self.watching_since = None;
+		}
+		Ok(())
 	}
 }
 
