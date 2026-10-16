@@ -3,7 +3,7 @@
 ## Goal
 
 A measured decision on how `@moq/watch` moves its heavy lifting off the main
-thread, recorded by rewriting [Watch worker](/quest/m1/watch-worker.md). The
+thread, recorded by rewriting [Watch worker](/quest/m2/watch-worker.md). The
 jank harness and the N-player sweep that decided it land and run nightly; the
 prototypes themselves are discarded.
 
@@ -73,6 +73,6 @@ follow-up wires the capture worklet to the encoder worker with a
 
 ## Related
 
-- [Watch worker](/quest/m1/watch-worker.md) - the implementation this rewrites
+- [Watch worker](/quest/m2/watch-worker.md) - the implementation this rewrites
 - [Browser benchmarks](/quest/m2/browser-benchmarks.md) - artifact conventions; may absorb the harness later
 - [A/V clock](/quest/m1/av-clock.md) - the `Sync` shape the implementation moves; the prototype can pace against today's

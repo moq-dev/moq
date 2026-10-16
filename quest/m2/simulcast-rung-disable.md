@@ -58,6 +58,6 @@ publishers expose for it. Wire: none; `enabled` already exists.
 ## Related
 
 - [Ladder controller](/quest/m3/ladder/controller.md) - the same rung disable for generated transcode ladders
-- [Rendition preference](/quest/m1/rendition-preference.md) - viewer selection that drops disabled renditions before ranking the rest
+- [Rendition preference](/quest/m2/rendition-preference.md) - viewer selection that drops disabled renditions before ranking the rest
 - [OBS multitrack](/quest/m2/obs-multitrack.md) - OBS's native multitrack encoders as the renditions this disables
 - [Viewer up-switch](/quest/m2/viewer-upswitch.md) - the viewer side of moving between renditions as capacity changes

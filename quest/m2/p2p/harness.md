@@ -51,5 +51,5 @@ points.
 
 ## Required
 
-- [moq-cli joins](/quest/m1/p2p/cli.md)
-- [Signaling and policy](/quest/m1/p2p/signal.md)
+- [moq-cli joins](/quest/m2/p2p/cli.md)
+- [Signaling and policy](/quest/m2/p2p/signal.md)

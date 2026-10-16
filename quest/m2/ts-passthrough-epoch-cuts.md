@@ -17,7 +17,7 @@ importer's first PCR.
 ## Plan
 
 Decided 2026-10-13 by the maintainer: every group start is a function of
-the content and the [epoch's timeline](/quest/m1/epoch-anchor.md), never of
+the content and the [epoch's timeline](/quest/m2/epoch-anchor.md), never of
 when the importer started.
 
 - Fallback cuts fall on a grid of the epoch timeline, so an importer started
@@ -60,9 +60,9 @@ Public API: none.
 
 ## Required
 
-- [Epoch anchor](/quest/m1/epoch-anchor.md) - the timeline the grid sits on
+- [Epoch anchor](/quest/m2/epoch-anchor.md) - the timeline the grid sits on
 
 ## Related
 
-- [Same-epoch importers](/quest/m1/hop-aligned-import.md) - group sequences and the end-to-end pair
+- [Same-epoch importers](/quest/m2/hop-aligned-import.md) - group sequences and the end-to-end pair
 - [TS passthrough export](/quest/m2/ts-passthrough-export.md) - identical objects export as identical packets
