@@ -4714,6 +4714,7 @@ dependencies = [
  "aws-lc-rs",
  "bytes",
  "cpu-time",
+ "criterion",
  "fastbloom",
  "getrandom 0.4.3",
  "hex-literal",
