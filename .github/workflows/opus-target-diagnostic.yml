@@ -1,7 +1,6 @@
 name: Opus target diagnostic
-# Temporary quest-branch experiment; delete before the PR is ready.
-# Tests whether the near-zero stall follows the first row after a fresh cargo build
-# rather than the isolated ring.
+# Temporary quest-branch verification; delete before the PR is ready.
+# Plays the nightly's original failing order straight after a cold build, through the fixed run.sh.
 permissions:
   contents: read
 on:
@@ -12,21 +11,9 @@ concurrency:
   cancel-in-progress: true
 jobs:
   audio-quality:
-    name: ${{ matrix.name }}
+    name: isolated-first-cold-fixed
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 60
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          # Plain first, straight after the harness's own build: the ring nightly calls fine.
-          - name: plain-first-cold
-            prebuild: false
-            rings: plain,isolated
-          # Isolated first, with the build done and flushed to disk before the harness starts.
-          - name: isolated-first-synced
-            prebuild: true
-            rings: isolated,plain
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -42,27 +29,11 @@ jobs:
         uses: ./.github/actions/rust-cache
       - name: Playwright Chromium
         run: nix develop --command bash -c "bun install --frozen-lockfile && bunx playwright install --with-deps chromium"
-      - name: Prebuild and flush
-        if: ${{ matrix.prebuild }}
-        run: |
-          nix develop --command cargo build --locked -p moq-relay -p moq-cli -p moq-shaper
-          grep -E '^(Dirty|Writeback):' /proc/meminfo
-          time sync
-          grep -E '^(Dirty|Writeback):' /proc/meminfo
       - name: Audio quality
         run: |
           mkdir -p "$MOQ_TEST_RUNS"
-          (while true; do
-             printf '%s ' "$(date -u +%H:%M:%S.%N)"
-             grep -E '^(Dirty|Writeback):' /proc/meminfo | tr -s ' \n' ' '
-             printf '| io %s | cpu %s\n' "$(head -1 /proc/pressure/io 2>/dev/null)" "$(head -1 /proc/pressure/cpu 2>/dev/null)"
-             sleep 0.5
-           done) > "$MOQ_TEST_RUNS/pressure.log" 2>&1 &
           vmstat -t 1 > "$MOQ_TEST_RUNS/vmstat.log" 2>&1 &
-          status=0
-          nix develop --command just test audio-quality --profiles near-zero --codecs opus --rings ${{ matrix.rings }} --duration 60 --capture || status=$?
-          kill %1 %2 || true
-          exit $status
+          nix develop --command just test audio-quality --profiles near-zero --codecs opus --rings isolated,plain --duration 60 --capture --enforce
         shell: bash -leo pipefail {0}
         env:
           MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
@@ -71,7 +42,7 @@ jobs:
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: audio-quality-${{ matrix.name }}
+          name: audio-quality-run
           path: ${{ runner.temp }}/moq-test-runs/
           retention-days: 7
           if-no-files-found: ignore
