@@ -191,6 +191,8 @@ jobs:
   # Full platform coverage without rebuilding after every main queue merge.
   platform:
     uses: ./.github/workflows/platform.yml
+    with:
+      benchmarks: true
 
   # Plays the matrix in headless Chromium through moq-shaper and grades what the
   # listener heard against test/audio-quality/budgets.json. ARM64 like wasm.yml,
