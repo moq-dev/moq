@@ -1313,6 +1313,17 @@ mod test {
 	/// sitting above media can't starve it. Regression: the MSF and timeline tracks
 	/// were minted with no `Info` at all, so one broadcast advertised its hang catalog
 	/// at 100 and the same catalog in MSF at 0.
+	#[test]
+	fn msf_omits_media_report_discovery() {
+		let catalog =
+			hang::Catalog::<()>::from_str(include_str!("../../../hang/fixtures/catalog-stats-echo.json")).unwrap();
+		let msf = to_msf::<()>(&catalog, &moq_net::Path::empty());
+		let value = serde_json::to_value(msf).unwrap();
+		assert!(value.get("stats").is_none());
+		assert!(value.get("echo").is_none());
+		assert!(!value["tracks"].as_array().unwrap().is_empty());
+	}
+
 	#[tokio::test]
 	async fn non_media_tracks_rank_above_media() {
 		use hang::catalog::PRIORITY;

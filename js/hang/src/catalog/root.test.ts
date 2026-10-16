@@ -257,3 +257,11 @@ test("an ID used by both video and audio is refused", () => {
 	const parsed = RootSchema.parse({ video: { renditions: { main: avc } }, audio: { renditions: { main: opus } } });
 	expect(() => checkRenditions(parsed)).toThrow(DuplicateRendition);
 });
+
+test("shared stats and echo discovery round trips without changing old catalogs", async () => {
+	const fixture = await Bun.file(
+		new URL("../../../../rs/hang/fixtures/catalog-stats-echo.json", import.meta.url),
+	).json();
+	expect(RootSchema.parse(fixture)).toEqual(fixture);
+	expect(RootSchema.parse({})).toEqual({});
+});

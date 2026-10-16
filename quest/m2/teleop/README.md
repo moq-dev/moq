@@ -95,9 +95,6 @@ stating plainly because it is what a builder is comparing against.
   controller commands a vehicle at a time, with explicit handoff and a stated
   authorization boundary, parked in m3
 - [e2ee](/quest/m2/e2ee/README.md) - the answer for a protected control link
-- [Media stats](/quest/m2/stats/schema.md) - publisher-reported stats
-  on a catalog-announced track (moq#2734); teleop's latency instrumentation
-  extends those types rather than adding a second stats surface
 - [Video hardware validation](/quest/m3/video-hardware.md) - the VAAPI run
   that covers Intel ground robots and NUC companions
 - [CLI packaging](/quest/m2/cli-packaging.md) - ships the V4L2-M2M encoder the

@@ -1,0 +1,16 @@
+{
+  "transport": {
+    "rtt": 0,
+    "rate": 0,
+    "lostBytes": 0,
+    "lostPackets": 0,
+    "age": 0
+  },
+  "renditions": {
+    "reset": {},
+    "hd": {
+      "arrival": {},
+      "latency": 0
+    }
+  }
+}

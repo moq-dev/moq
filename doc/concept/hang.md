@@ -72,6 +72,22 @@ A few things the catalog can express beyond decoder config:
 - **Clock.** The optional root `clock` maps PTS zero to wall time so every media track and the archive index share one fixed epoch after timescale conversion. It is independent of `archive`, so a live-only publisher can expose wall-clock timing without creating a timeline. Publish independent sources as sibling broadcasts under one prefix, such as `robot/front.hang` and `robot/rear.hang`; each broadcast's audio and video entries are renditions of that source. In one Rust publisher, pass the same `moq_mux::Clock` to each `catalog::Config::with_clock`; JS publishers on one page already share the page clock. Consumers discover the siblings by prefix and align their timestamps through the advertised wall mapping; `@moq/watch` plays one broadcast at a time.
 - **Extensions.** The root is a loose object. Applications add their own sections (`scte35`, for example) next to the ones hang defines, optionally naming a track that carries the data. Every library exposes a way to write your section without clobbering the built-in ones, and readers ignore what they don't know.
 
+## Media reports
+
+A catalog may name a publisher snapshot track with `stats: { track }` and
+solicit viewer feedback with `echo: { path }`. Applications can use hang's
+shared Rust and JS snapshot schemas to exchange per-rendition delivery and
+playout measurements, alongside transport measurements. The echo path is
+relative to the catalog broadcast; an application assigns one `.echo` name
+per viewer and soliciting catalog, and controls the token rights under that
+prefix. Echo broadcasts carry `feedback.json` without a media catalog, so
+readers can filter them from playable content.
+
+These are schema and discovery primitives. The publishers and players do not
+automatically produce reports. MSF catalogs omit both sections. See
+[media stats](/concept/stats#media-reports) for the roles and the
+[hang draft](/draft/moq-hang#media-stats) for their contract.
+
 ## Text
 
 Captions and subtitles are their own tracks in a `text` section, not part of

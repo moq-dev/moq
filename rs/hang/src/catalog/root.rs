@@ -13,7 +13,8 @@ use serde::{Deserialize, Serialize};
 /// `archive` (each track's timeline and any durable recording), the optional `clock` (the
 /// broadcast's one wall-clock mapping), the data sections
 /// (`json`, `binary`) for application tracks that aren't media, and the optional `m2ts` (a
-/// transport stream carried whole).
+/// transport stream carried whole), plus `stats` naming the publisher's media snapshot track and
+/// `echo` soliciting viewer feedback under a relative broadcast prefix.
 /// Applications extend it with their own root sections (e.g. `scte35`) through `E`. The catalog
 /// does not deny unknown fields, so a base consumer ignores the extra sections and an extended
 /// catalog stays wire-compatible. See the `extension_roundtrip` test.
@@ -106,6 +107,12 @@ pub struct Catalog<E = ()> {
 	/// packets, verbatim. See [`M2ts`](crate::catalog::M2ts). Omitted from the wire when absent.
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub m2ts: Option<crate::catalog::M2ts>,
+
+	/// The publisher's optional media snapshot track.
+	pub stats: Option<crate::catalog::Stats>,
+
+	/// The optional prefix soliciting viewer feedback broadcasts.
+	pub echo: Option<crate::catalog::Echo>,
 
 	/// Application-defined root sections, flattened alongside the base catalog sections.
 	#[serde(flatten)]
