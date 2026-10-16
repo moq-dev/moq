@@ -1404,7 +1404,7 @@ impl RequestGrant {
 		grant: Option<&Self>,
 		body: F,
 	) -> impl std::future::Future<Output = std::result::Result<F::Output, Refusal>> + kio::MaybeSend {
-		crate::util::send(until(body, move |waiter| match grant {
+		crate::util::sendable(until(body, move |waiter| match grant {
 			Some(grant) => grant.poll_ended(waiter),
 			None => Poll::Pending,
 		}))

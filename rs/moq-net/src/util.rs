@@ -11,7 +11,7 @@ mod cell;
 pub(crate) use cell::SendCell;
 
 /// Prove a future's native Send bound here rather than inside every caller's future.
-pub(crate) fn send<F: Future + kio::MaybeSend>(future: F) -> impl Future<Output = F::Output> + kio::MaybeSend {
+pub(crate) fn sendable<F: Future + kio::MaybeSend>(future: F) -> impl Future<Output = F::Output> + kio::MaybeSend {
 	future
 }
 
@@ -57,12 +57,12 @@ fn future_task(mut task: MaybeSendBox<'static, ()>) -> MaybeSendTask {
 pub(crate) fn err_only<E>(
 	fut: impl Future<Output = Result<(), E>> + kio::MaybeSend,
 ) -> impl Future<Output = E> + kio::MaybeSend {
-	async move {
+	sendable(async move {
 		if let Err(err) = fut.await {
 			return err;
 		}
 		std::future::pending().await
-	}
+	})
 }
 
 /// Cloneable handle for submitting futures to a driver-owned [`TaskSet`].
