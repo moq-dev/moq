@@ -26,6 +26,7 @@ production stability proven merely because upstream artifacts published.
 
 ## Required
 
+- [API-diff check](/quest/m2/release/migrate-audit.md) - PRs into release diff the public API; backports refuse breaks, the cut confirms MIGRATE.md coverage
 - [Cut and publish](/quest/m2/release/cut.md) - independently executable after m1; release-triggered publication
 - [Published catalog readers](/quest/m2/release/catalog-readers.md) - released Go and JS clients accept the current Rust publisher's live catalog in smoke; an earlier release-line patch may satisfy it
 - [Published assets](/quest/m2/release/assets-release.md) - npm carries hostable worklets
