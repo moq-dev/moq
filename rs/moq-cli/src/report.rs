@@ -7,11 +7,13 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::convert::Infallible;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use anyhow::Context;
 use hang::moq_net;
 use moq_mux::catalog::{CatalogFormat, Stream};
+use moq_mux::container::ts;
 use moq_tokio::connection::Monitor;
 use tokio::io::AsyncWriteExt;
 
@@ -97,12 +99,28 @@ fn transport(connection: Option<&Monitor>, direction: Direction) -> hang::stats:
 	transport
 }
 
+/// The MPEG-TS sections a report carries beside its media counters, as the import or export
+/// loop that samples them last set them. Empty for every other container.
+#[derive(Clone, Default)]
+pub struct Sections(Arc<Mutex<ts::stats::Report>>);
+
+impl Sections {
+	pub fn set(&self, update: impl FnOnce(&mut ts::stats::Report)) {
+		update(&mut self.0.lock().unwrap_or_else(PoisonError::into_inner));
+	}
+
+	fn get(&self) -> ts::stats::Report {
+		self.0.lock().unwrap_or_else(PoisonError::into_inner).clone()
+	}
+}
+
 /// An import's stats track: what each of its tracks has written, from its catalog's counters,
-/// and the connection's transport.
+/// the connection's transport, and any MPEG-TS sections.
 pub struct Stats {
-	tracks: Pair<hang::stats::Snapshot>,
+	tracks: Pair<hang::stats::Snapshot<ts::stats::Report>>,
 	renditions: Box<dyn Fn() -> BTreeMap<String, hang::stats::Rendition> + Send>,
 	connection: Option<Monitor>,
+	sections: Sections,
 }
 
 impl Stats {
@@ -124,13 +142,20 @@ impl Stats {
 			tracks,
 			renditions: Box::new(move || catalog.stats()),
 			connection,
+			sections: Sections::default(),
 		})
 	}
 
-	fn snapshot(&self) -> hang::stats::Snapshot {
+	/// Where the import sets its MPEG-TS sections.
+	pub fn sections(&self) -> Sections {
+		self.sections.clone()
+	}
+
+	fn snapshot(&self) -> hang::stats::Snapshot<ts::stats::Report> {
 		let mut snapshot = hang::stats::Snapshot::default();
 		snapshot.transport = transport(self.connection.as_ref(), Direction::Send);
 		snapshot.renditions = (self.renditions)();
+		snapshot.ext = self.sections.get();
 		snapshot
 	}
 
@@ -178,20 +203,21 @@ struct Feedback {
 	path: moq_net::PathOwned,
 	// Held for the route: dropping it retracts the announcement.
 	_broadcast: moq_net::broadcast::Producer,
-	tracks: Pair<hang::echo::Snapshot>,
+	tracks: Pair<hang::echo::Snapshot<ts::stats::Report>>,
 }
 
 /// An export's solicited feedback: once its catalog carries an `echo` section, a
 /// `<prefix>/<name>.echo` broadcast whose `feedback.json` reports what each rendition the export
-/// reads has received, and the connection's transport. Each catalog update reconciles it: a
-/// removed section or a changed path retracts the broadcast it replaces. It follows the catalog
-/// of the instance the export first reads, and ends when the export does.
+/// reads has received, the connection's transport, and any MPEG-TS sections. Each catalog update
+/// reconciles it: a removed section or a changed path retracts the broadcast it replaces. It
+/// follows the catalog of the instance the export first reads, and ends when the export does.
 pub struct Echo {
 	origin: moq_net::origin::Producer,
 	source: moq_mux::Source,
 	format: CatalogFormat,
 	name: EchoName,
 	connection: Option<Monitor>,
+	sections: Sections,
 	feedback: Option<Feedback>,
 }
 
@@ -210,8 +236,14 @@ impl Echo {
 			format,
 			name,
 			connection,
+			sections: Sections::default(),
 			feedback: None,
 		}
+	}
+
+	/// Where the export sets its MPEG-TS sections.
+	pub fn sections(&self) -> Sections {
+		self.sections.clone()
 	}
 
 	/// Follow the catalog's `echo` section and write a snapshot every interval, for as long as the
@@ -286,6 +318,7 @@ impl Echo {
 		let mut snapshot = hang::echo::Snapshot::default();
 		snapshot.transport = transport(self.connection.as_ref(), Direction::Receive);
 		snapshot.renditions = self.source.stats();
+		snapshot.ext = self.sections.get();
 		feedback.tracks.update(&snapshot);
 	}
 

@@ -1734,20 +1734,18 @@ where
 	/// empty until the program tables are built. Cheap enough to poll per frame.
 	pub fn stats(&self) -> super::stats::Export {
 		let mut stats = super::stats::Export {
-			dropped: self.jitter.dropped(),
-			trimmed: self.jitter.trimmed() + self.trimmed,
-			gaps: self
-				.tracks
-				.values()
-				.map(|track| {
-					let skips = track.base.1 + track.source.skips();
-					skips - (track.base.0 + track.source.markers())
-				})
-				.sum(),
-			drift: self.jitter.drift().map(|drift| drift * 1e6),
-			out_of_tolerance: self.jitter.out_of_tolerance(),
+			release: super::stats::Release::of(&self.jitter),
 			..Default::default()
 		};
+		stats.release.trimmed += self.trimmed;
+		stats.release.gaps = self
+			.tracks
+			.values()
+			.map(|track| {
+				let skips = track.base.1 + track.source.skips();
+				skips - (track.base.0 + track.source.markers())
+			})
+			.sum();
 		if self.psi.is_none() {
 			return stats;
 		}

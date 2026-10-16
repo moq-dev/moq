@@ -113,7 +113,6 @@ remain with their current quests.
 
 - [Epoch anchor](/quest/m2/epoch-anchor.md) - shared identity across importers requires one source coordinate per epoch, derived from the epoch
 - [TS over RTP legs](/quest/m2/ts-rtp-egress.md) - TS identity alone is not ST 2022-7, which also needs matching RTP headers
-- [TS health counters](/quest/m2/ts-health-stats.md) - ingress and egress evidence need distinct monitoring points
 - [MSFTS mapping](/quest/m3/msfts-convergence.md) - document the exact equivalence and differences between the carriage modes
 
 - [TS passthrough export](/quest/m2/ts-passthrough-export.md) - a new mode that does not gate correctness of existing TS modes

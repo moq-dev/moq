@@ -162,11 +162,18 @@ pub(crate) struct Buffer<K, T> {
 	trimmed: u64,
 	/// Steps at which the source's clock ran further off ours than the clock may follow.
 	out_of_tolerance: u64,
+	/// The least time any frame arrived before its deadline in the last whole [`MARGIN`], in
+	/// seconds: negative for a frame that missed it.
+	margin: Option<f64>,
+	/// The [`MARGIN`] under way: when its first frame was read, and the least time to spare so far.
+	spare: Option<(Instant, f64)>,
 }
 
 /// How often the clock is steered, in our time: long enough that the floor covers a
 /// group's worth of frames sent ahead by different amounts.
 const STEER: Duration = Duration::from_secs(2);
+/// How long [`Buffer::margin`] takes the least of, in our time: a report's interval.
+const MARGIN: Duration = Duration::from_secs(1);
 /// How far back the floors are kept, in decode time: a spell of queueing shorter than half
 /// of it moves neither the rate nor the slack.
 const RATE_WINDOW: f64 = 600.0;
@@ -256,6 +263,9 @@ struct Steer<K> {
 	steered: f64,
 	/// The source's clock rate off ours, as last measured: positive runs fast.
 	source: Option<f64>,
+	/// How far the slack of the track sent latest sat off the delay, in seconds, as last
+	/// measured: the gap the clock pulls shut.
+	offset: Option<f64>,
 	/// What is left of the gap between the slack and the delay that the rate's first
 	/// measurement found, in seconds: what anchoring on frames that reached us late or early
 	/// left, which the rate did not cost.
@@ -270,6 +280,7 @@ impl<K> Default for Steer<K> {
 			tracks: BTreeMap::new(),
 			steered: 0.0,
 			source: None,
+			offset: None,
 			startup: None,
 		}
 	}
@@ -348,6 +359,8 @@ impl<K: Ord + Clone, T> Buffer<K, T> {
 			dropped: 0,
 			trimmed: 0,
 			out_of_tolerance: 0,
+			margin: None,
+			spare: None,
 		}
 	}
 
@@ -541,6 +554,9 @@ impl<K: Ord + Clone, T> Buffer<K, T> {
 	/// group its source cut short) takes everything the track holds with it, so its output starts on a
 	/// whole group at its next sync frame rather than on a group's cut-off start.
 	fn queue(&mut self, key: K, arrival: Arrival<T>, generation: u64, deadline: Option<Instant>, stale: bool) -> Push {
+		if let Some(deadline) = deadline.filter(|_| !stale && !self.delay.is_zero()) {
+			self.spare(arrival.read, since(arrival.arrived, deadline) as f64 / 1e9);
+		}
 		let track = self.tracks.entry(key).or_insert_with(|| Track {
 			queue: VecDeque::new(),
 			restart: arrival.restart,
@@ -595,6 +611,16 @@ impl<K: Ord + Clone, T> Buffer<K, T> {
 			}
 		}
 		push
+	}
+
+	/// Account for a frame read at `read` that arrived `spare` seconds before its deadline.
+	fn spare(&mut self, read: Instant, spare: f64) {
+		let window = self.spare.get_or_insert((read, spare));
+		window.1 = window.1.min(spare);
+		if read.saturating_duration_since(window.0) >= MARGIN {
+			self.margin = Some(window.1);
+			self.spare = None;
+		}
 	}
 
 	/// Whether a frame arriving at `arrived` and due at `deadline` is on the clock: not late,
@@ -718,6 +744,7 @@ impl<K: Ord + Clone, T> Buffer<K, T> {
 			});
 		let gap = at.clamp(low, high) + self.steer.steered;
 		self.steer.source = Some(rate);
+		self.steer.offset = Some(gap);
 		// The clock pulls the startup gap shut, so it shrinks with the gap and never reopens.
 		let startup = self.steer.startup.get_or_insert(gap);
 		*startup = startup.clamp(gap.min(0.0), gap.max(0.0));
@@ -955,6 +982,21 @@ impl<K: Ord + Clone, T> Buffer<K, T> {
 	pub fn out_of_tolerance(&self) -> u64 {
 		self.out_of_tolerance
 	}
+
+	/// The least time any frame arrived before its deadline in the last whole second of ours,
+	/// in seconds: negative for a frame that missed it. `None` until a second has passed with
+	/// a delay.
+	pub fn margin(&self) -> Option<f64> {
+		self.margin
+	}
+
+	/// How far the clock sits off the source's plus the delay, in seconds, as last measured:
+	/// positive holds the track sent latest longer than the delay, negative shorter. The
+	/// clock pulls it shut over [`RESPONSE`]. `None` until the clock has measured the source's
+	/// rate, as [`Self::drift`].
+	pub fn offset(&self) -> Option<f64> {
+		self.steer.offset
+	}
 }
 
 /// `nanos` after `at`, or before it if negative, if an instant holds it.
@@ -1079,6 +1121,39 @@ mod tests {
 		tokio::time::advance(Duration::from_millis(20)).await;
 		assert_eq!(due(&mut buffer), ["v40", "a40"], "a tie goes to the lower track");
 		assert!(buffer.is_empty());
+	}
+
+	/// The margin is the least any frame had to spare over a whole second, a frame that missed
+	/// its deadline included, and holds until the next second has passed.
+	#[tokio::test(start_paused = true)]
+	async fn the_margin_is_the_least_spare_over_a_second() {
+		let start = Instant::now();
+		let at = |ms: u64| start + Duration::from_millis(ms);
+		let mut buffer = Buffer::new(DELAY).replay();
+		assert_eq!(buffer.push(1, arrival(at(0), 0, "v0")).unwrap(), Push::Queued);
+		assert_eq!(buffer.push(1, arrival(at(30), 40, "v40")).unwrap(), Push::Queued);
+		// Due at 180 ms.
+		assert_eq!(buffer.push(1, arrival(at(200), 80, "v80")).unwrap(), Push::Late);
+		assert_eq!(buffer.margin(), None, "no second has passed");
+
+		assert_eq!(
+			buffer.push(1, arrival(at(1_000), 1_000, "v1000")).unwrap(),
+			Push::Queued
+		);
+		let margin = buffer.margin().expect("a second has passed");
+		assert!((margin + 0.020).abs() < 1e-6, "margin {margin} s");
+
+		assert_eq!(
+			buffer.push(1, arrival(at(1_500), 1_500, "v1500")).unwrap(),
+			Push::Queued
+		);
+		assert!(buffer.margin().unwrap() < 0.0, "held until the next second has passed");
+		assert_eq!(
+			buffer.push(1, arrival(at(2_500), 2_500, "v2500")).unwrap(),
+			Push::Queued
+		);
+		let margin = buffer.margin().unwrap();
+		assert!((margin - 0.100).abs() < 1e-6, "the next second was clean: {margin} s");
 	}
 
 	/// Two buffers fed the same frames with different arrival skew, every frame inside
@@ -1464,6 +1539,9 @@ mod tests {
 		out_of_tolerance: u64,
 		/// How far off the delay the frame the run failed on would have been held, in seconds.
 		off: f64,
+		/// The buffer's margin and offset at the end.
+		margin: Option<f64>,
+		offset: Option<f64>,
 	}
 
 	/// Feed `hours` of 2 fps frames from a source whose clock runs `ppm` slower than ours
@@ -1483,6 +1561,8 @@ mod tests {
 			clock_before: 0.0,
 			out_of_tolerance: 0,
 			off: 0.0,
+			margin: None,
+			offset: None,
 		};
 		let mut last: Option<(f64, Timestamp)> = None;
 		let mut stepped = false;
@@ -1547,6 +1627,8 @@ mod tests {
 		run.drift = buffer.drift();
 		run.clock = buffer.clock.map_or(0.0, |clock| clock.drift);
 		run.out_of_tolerance = buffer.out_of_tolerance();
+		run.margin = buffer.margin();
+		run.offset = buffer.offset();
 		run
 	}
 
@@ -1561,6 +1643,14 @@ mod tests {
 			let run = drift(ppm, 24.0, 16.0, |_| Duration::ZERO).await;
 			assert!(run.err.is_none(), "{ppm} ppm: {:?}", run.err);
 			assert!(run.worst <= bound, "{ppm} ppm: held {} s off the delay", run.worst);
+			// One track queued nowhere: every frame's spare is its slack, the delay and the offset.
+			let offset = run.offset.expect("an offset");
+			assert!(offset.abs() <= bound, "{ppm} ppm: offset {offset} s");
+			let margin = run.margin.expect("a margin");
+			assert!(
+				(margin - 0.5 - offset).abs() < 0.001,
+				"{ppm} ppm: margin {margin} s, offset {offset} s"
+			);
 			let drift = run.drift.expect("a measurement") * 1e6;
 			assert!((drift + ppm).abs() < 0.1, "{ppm} ppm: measured {drift} ppm");
 			assert!(
