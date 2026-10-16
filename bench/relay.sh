@@ -68,10 +68,9 @@ relay_config() {
 # A connect can succeed against somebody else's listener while our child is alive.
 # Check both sockets on the actual relay PID before treating that probe as readiness.
 relay_owns_port() {
-    local pid=$1 port=$2 tcp udp
-    tcp=$(ss -H -lnpt "sport = :$port") || return 1
-    udp=$(ss -H -lnpu "sport = :$port") || return 1
-    [[ $tcp == *"pid=$pid,"* && $udp == *"pid=$pid,"* ]] && kill -0 "$pid" 2>/dev/null
+    local pid=$1 port=$2
+    lsof -nP -a -p "$pid" -iTCP:"$port" -sTCP:LISTEN >/dev/null 2>&1 &&
+        lsof -nP -a -p "$pid" -iUDP:"$port" >/dev/null 2>&1
 }
 
 start_relay() {
@@ -93,8 +92,8 @@ start_relay() {
             ;;
     esac
 
-    if ! command -v ss >/dev/null; then
-        printf 'relay socket ownership requires ss; run through nix develop\n' >&2
+    if ! command -v lsof >/dev/null; then
+        printf 'relay socket ownership requires lsof; run through nix develop\n' >&2
         return 1
     fi
 

@@ -251,6 +251,8 @@
           jq
           # Runs the moq.sh installer tests under a strict POSIX shell.
           dash
+          # Proves the temporary bench relay owns its TCP and UDP sockets.
+          lsof
         ];
 
         # Linters / formatters used by `just check` and `just fix`, which
@@ -564,11 +566,8 @@
             ++ dartDeps
             ++ devTools
             ++ [ quest-cli ]
-            # perf records lock waits; ss proves the temporary relay owns its sockets.
-            ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
-              pkgs.perf
-              pkgs.iproute2
-            ];
+            # perf records relay worker off-CPU stacks for `just bench-lock`.
+            ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.perf ];
 
           # jemalloc's configure uses -O0 test builds, which conflict with
           # Nix's _FORTIFY_SOURCE hardening (requires -O).

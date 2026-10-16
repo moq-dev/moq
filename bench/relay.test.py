@@ -60,7 +60,7 @@ run_workload fixture ignored video
             self.assertEqual(result['host_window_start_ms'], result['throughput_window_start_ms'])
 
 
-@unittest.skipUnless(sys.platform == 'linux', 'relay process metrics and socket ownership require Linux')
+@unittest.skipUnless(sys.platform == 'linux', 'relay process metrics require Linux')
 class PortOwnership(unittest.TestCase):
     def run_shell(self, script, directory, relay, **env):
         process = subprocess.Popen(['bash', '-c', script, 'test', str(ROOT), str(directory), str(relay)],
