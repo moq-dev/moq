@@ -70,8 +70,9 @@ cache limits remain separate; bitrate pacing composes with this memory cap.
 - [Hard fork](/quest/m1/quic/fork/README.md) - quinn in-tree as `moq-quic`, with BBR3 and lazy stream slots, and MoQ switched onto it
 - [Retain connection credit](/quest/m1/quic/receive-credit.md) - native receivers own connection credit independently of stream reads
 - [Bound message assembly](/quest/m1/quic/receive-memory.md) - complete headers and frames return credit, and receiver priority cancellation restores progress
-- [Reliable stream reset](/quest/m1/quic/reliable-reset.md) - `RESET_STREAM_AT`,
-  so a reset WebTransport stream still delivers its header
+- [A reset group keeps its header](/quest/m1/quic/group-reset.md) - a lite
+  publisher resets a group with `RESET_STREAM_AT`, so its subscriber drops the
+  tail grace
 - [Hierarchical stream scheduling](/quest/m1/quic/scheduler.md) - strict
   subscription priority, fair buckets, and newest-first group order replace
   the lossy scalar; retransmits follow the same order

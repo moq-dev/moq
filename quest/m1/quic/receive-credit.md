@@ -39,7 +39,7 @@ Tests use the transport simulator and controlled time: stream credit advances
 while connection credit stays held, explicit release resumes the peer, and
 all terminal paths account once even when retained bytes outlive the stream.
 Cover a useful release smaller than the update threshold and compose with
-reliable reset when available. Wire adapter tests into CI and measure the
+reliable reset (`moq-quic`'s `Checkpoint::reset`). Wire adapter tests into CI and measure the
 accounting cost across stream counts and payload sizes.
 
 Public API: a native receive-credit ownership/observation seam, finalized
@@ -50,5 +50,4 @@ capability their transports cannot provide.
 ## Related
 
 - [Bound message assembly](/quest/m1/quic/receive-memory.md) - retains connection credit until a complete message is handed off
-- [Reliable stream reset](/quest/m1/quic/reliable-reset.md) - compose retained credit with reliable prefixes and final-size accounting
 - [Relay peers get wider limits](/quest/m1/quic/peer-limits.md) - runtime receive-window changes preserve retained-credit accounting
