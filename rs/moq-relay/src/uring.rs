@@ -701,7 +701,7 @@ async fn serve_connection(
 	};
 	let request = deadline
 		.bound(server.accept_request_lite(
-			std::time::Instant::now(),
+			moq_net::time::now(),
 			moq_uring::transport::Session::new(transport, binding),
 		))
 		.await

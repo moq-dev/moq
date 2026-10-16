@@ -126,7 +126,7 @@ impl Session {
 		// The driver holds no session clone, so dropping this `Session` still
 		// closes the transport and ends the spawned task.
 		let (inner, driver) = client
-			.connect(web_async::time::Instant::now(), transport)
+			.connect(moq_net::time::now(), transport)
 			.await
 			.map_err(js_err)?;
 		web_async::spawn(async move {

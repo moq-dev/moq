@@ -37,6 +37,9 @@
 //!
 //! Run with `cargo bench -p moq-net --bench session`.
 
+// Custom timings measure the real time the work took, not the ambient clock.
+#![allow(clippy::disallowed_methods)]
+
 #[path = "../tests/support/mod.rs"]
 mod support;
 
@@ -893,7 +896,7 @@ impl IdleRoom {
 	async fn measure(&self, iters: u64) -> Duration {
 		let start = Instant::now();
 		for _ in 0..iters {
-			tokio::time::sleep(Duration::from_secs(1)).await;
+			moq_clock::sleep(Duration::from_secs(1)).await;
 		}
 		start.elapsed()
 	}
@@ -950,7 +953,7 @@ fn withdrawal(c: &mut Criterion) {
 										.unwrap()
 								})
 								.collect();
-							while tokio::time::timeout(Duration::from_secs(1), announced.next())
+							while moq_clock::timeout(Duration::from_secs(1), announced.next())
 								.await
 								.is_ok()
 							{}
@@ -958,7 +961,7 @@ fn withdrawal(c: &mut Criterion) {
 							drop(live);
 							let mut retracted = 0;
 							while let Ok(Some(event)) =
-								tokio::time::timeout(Duration::from_secs(1), announced.next()).await
+								moq_clock::timeout(Duration::from_secs(1), announced.next()).await
 							{
 								assert!(matches!(event, moq_net::announce::Event::End(_)), "{event:?}");
 								retracted += 1;
