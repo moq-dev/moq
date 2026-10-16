@@ -14,6 +14,9 @@ it are deleted. `doc/setup/upgrade.md` tells C users how to move.
 
 ## Required
 
+- [Final hand-written C notice](/quest/m2/release/c-final-release.md) - published before deleting its source
+- [Generated C publication](/quest/m2/release/c-publish.md) - the replacement is available and verified
+
 - [C consumers](/quest/m1/c/consumers.md) - nothing in the repository still calls the hand-written ABI
 
 ## Related

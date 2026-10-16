@@ -44,6 +44,11 @@ stream credit is replenished on reads, independently of message completion.
 Do not remove or ignore the setting without benchmark evidence and a new
 maintainer decision. The connection memory allowance is the shared cap.
 
+Decided 2026-10-16: once [Segmented frames](/quest/m2/unbounded-groups/segmented-frames.md)
+lands, a frame payload releases credit per segment rather than per frame,
+so frames of any size never need a matching allowance. Do not build on
+whole-frame units beyond what that change replaces.
+
 Require that allowance to fit every supported encoded message, including
 framing and extensions. Validate configuration and align native defaults
 rather than discovering an impossible frame after receiving it. The current
@@ -99,6 +104,7 @@ separate guide quest is needed.
 
 ## Related
 
+- [Unbounded groups](/quest/m2/unbounded-groups/README.md) - removes the frame cap; frame payload credit becomes per segment
 - [Scope track priority](/quest/m1/track-priority-scope.md) - broadcast fairness domains and subscription priority semantics
 - [Hierarchical stream scheduling](/quest/m1/quic/scheduler.md) - share priority semantics without requiring sender-side recovery
 - [QUIC bitrate caps](/quest/m2/rate-quic.md) - pace credit grants inside the independently bounded memory allowance
