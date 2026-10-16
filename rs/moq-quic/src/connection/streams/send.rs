@@ -91,15 +91,15 @@ impl Send {
     /// Update stream state due to a reset sent by the local application
     ///
     /// Data below `reliable_size` is still delivered; everything after it is abandoned. Returns
-    /// the error code to send now, or `None` while a peer without RESET_STREAM_AT (`!at`) still
-    /// has data below `reliable_size` to acknowledge, after which
+    /// the Reliable Size of the reset frame to send now, or `None` while a peer without
+    /// RESET_STREAM_AT (`!at`) still has data below `reliable_size` to acknowledge, after which
     /// [`take_held_reset`](Self::take_held_reset) releases it.
     pub(super) fn reset(
         &mut self,
         error_code: VarInt,
         reliable_size: u64,
         at: bool,
-    ) -> Option<VarInt> {
+    ) -> Option<u64> {
         use SendState::*;
         let (DataSent { .. } | Ready) = self.state else {
             return None;
@@ -116,33 +116,30 @@ impl Send {
             held: !send,
             reset_acked: false,
         };
-        send.then_some(error_code)
+        send.then_some(if at { reliable_size } else { 0 })
     }
 
-    /// The error code of a held RESET_STREAM, once all the data it holds for has been acknowledged
-    pub(super) fn take_held_reset(&mut self) -> Option<VarInt> {
-        let SendState::ResetSent {
-            error_code, held, ..
-        } = &mut self.state
-        else {
+    /// Release a held RESET_STREAM once all the data it holds for has been acknowledged, returning
+    /// its Reliable Size of 0
+    pub(super) fn take_held_reset(&mut self) -> Option<u64> {
+        let SendState::ResetSent { held, .. } = &mut self.state else {
             return None;
         };
         if !*held || !self.pending.is_fully_acked() {
             return None;
         }
         *held = false;
-        Some(*error_code)
+        Some(0)
     }
 
-    /// Abandon the data a reset still delivers, returning the error code of the zero-sized reset
-    /// to send now
+    /// Abandon the data a reset still delivers, returning the Reliable Size of 0 for the reset to
+    /// send now
     ///
     /// For a peer that sent STOP_SENDING, which will not read it. This releases a held
     /// RESET_STREAM, and replaces a RESET_STREAM_AT whose data is still unacknowledged.
-    pub(super) fn abandon_reliable(&mut self) -> Option<VarInt> {
+    pub(super) fn abandon_reliable(&mut self) -> Option<u64> {
         let SendState::ResetSent {
             reliable_size,
-            error_code,
             held,
             ..
         } = &mut self.state
@@ -155,21 +152,17 @@ impl Send {
         *reliable_size = 0;
         *held = false;
         self.pending.truncate(0);
-        Some(*error_code)
+        Some(0)
     }
 
     /// The frame announcing this stream's reset, if it was reset
     ///
     /// It carries a Reliable Size only when the peer accepts RESET_STREAM_AT (`at`).
-    pub(super) fn reset_frame(
-        &self,
-        id: StreamId,
-        error_code: VarInt,
-        at: bool,
-    ) -> Option<frame::ResetStream> {
+    pub(super) fn reset_frame(&self, id: StreamId, at: bool) -> Option<frame::ResetStream> {
         let SendState::ResetSent {
             final_size,
             reliable_size,
+            error_code,
             ..
         } = self.state
         else {

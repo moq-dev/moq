@@ -1752,19 +1752,19 @@ impl Connection {
 
         // Update state for confirmed delivery of frames
         if let Some(retransmits) = info.retransmits.get() {
-            for (id, _) in retransmits.reset_stream.iter() {
-                self.streams.reset_acked(*id);
+            for &(id, reliable_size) in retransmits.reset_stream.iter() {
+                self.streams.reset_acked(id, reliable_size);
             }
         }
 
         for frame in info.stream_frames {
             let id = frame.id;
             // A reset held for a peer without RESET_STREAM_AT goes out once it holds the data
-            if let Some(error_code) = self.streams.received_ack_of(frame) {
+            if let Some(reliable_size) = self.streams.received_ack_of(frame) {
                 self.spaces[SpaceId::Data]
                     .pending
                     .reset_stream
-                    .push((id, error_code));
+                    .push((id, reliable_size));
             }
         }
     }
@@ -3132,11 +3132,12 @@ impl Connection {
                             "STOP_SENDING on unopened stream",
                         ));
                     }
-                    if let Some(error_code) = self.streams.received_stop_sending(id, error_code) {
+                    if let Some(reliable_size) = self.streams.received_stop_sending(id, error_code)
+                    {
                         self.spaces[SpaceId::Data]
                             .pending
                             .reset_stream
-                            .push((id, error_code));
+                            .push((id, reliable_size));
                     }
                 }
                 Frame::RetireConnectionId { sequence } => {

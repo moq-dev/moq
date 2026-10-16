@@ -585,18 +585,12 @@ impl Iter {
                 final_offset: self.bytes.get()?,
                 reliable_size: None,
             }),
-            FrameType::RESET_STREAM_AT => {
-                let frame = ResetStream {
-                    id: self.bytes.get()?,
-                    error_code: self.bytes.get()?,
-                    final_offset: self.bytes.get()?,
-                    reliable_size: Some(self.bytes.get()?),
-                };
-                if frame.reliable_size > Some(frame.final_offset) {
-                    return Err(IterErr::Malformed);
-                }
-                Frame::ResetStream(frame)
-            }
+            FrameType::RESET_STREAM_AT => Frame::ResetStream(ResetStream {
+                id: self.bytes.get()?,
+                error_code: self.bytes.get()?,
+                final_offset: self.bytes.get()?,
+                reliable_size: Some(self.bytes.get()?),
+            }),
             FrameType::CONNECTION_CLOSE => Frame::Close(Close::Connection(ConnectionClose {
                 error_code: self.bytes.get()?,
                 frame_type: {
@@ -1044,28 +1038,6 @@ mod test {
                     if *r == reliable_size
             );
         }
-    }
-
-    /// A Reliable Size past the Final Size is a FRAME_ENCODING_ERROR.
-    #[test]
-    fn reset_stream_at_beyond_final_size() {
-        let mut buf = Vec::new();
-        ResetStream {
-            id: StreamId(2),
-            error_code: VarInt(7),
-            final_offset: VarInt(9),
-            reliable_size: Some(VarInt(10)),
-        }
-        .encode(&mut buf);
-        let err = Iter::new(Bytes::from(buf))
-            .unwrap()
-            .next()
-            .unwrap()
-            .unwrap_err();
-        assert_eq!(
-            TransportError::from(err).code,
-            TransportErrorCode::FRAME_ENCODING_ERROR
-        );
     }
 
     #[test]

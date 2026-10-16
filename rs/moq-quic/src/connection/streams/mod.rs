@@ -375,8 +375,8 @@ impl<'a> SendStream<'a> {
         let buffered = stream.pending.buffered();
         let send = stream.reset(error_code, reliable_size, at);
         self.state.buffered_data -= buffered - stream.pending.buffered();
-        if let Some(error_code) = send {
-            self.pending.reset_stream.push((self.id, error_code));
+        if let Some(reliable_size) = send {
+            self.pending.reset_stream.push((self.id, reliable_size));
         }
 
         // Don't reopen an already-closed stream we haven't forgotten yet
