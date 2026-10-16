@@ -36,9 +36,6 @@ Decided in the 2026-09-30 audit: moved to m2. The seven correctness fixes
 already shipped, and this remaining gap has no observed impact on MoQ
 traffic yet.
 
-## Required
-
-- [BBR ACK cleanup](/quest/m2/bbr-ack-cleanup.md) - edits the same `bbr3/mod.rs` packet bookkeeping and lands first; this keeps the metadata it preserves
 
 ## Related
 

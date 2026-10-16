@@ -2050,10 +2050,16 @@ mod tests {
 		let mut options = Options::default();
 		options.session.announces = 2;
 		options.session.subscriptions = 3;
+		options.session.fetches = 4;
 		options.peer.announces = 20;
 		options.peer.subscriptions = 30;
+		options.peer.fetches = 40;
 		let cluster = Cluster::new(options).unwrap();
-		for (peer, upstream, expected) in [(false, false, (2, 3)), (true, false, (20, 30)), (true, true, (20, 30))] {
+		for (peer, upstream, expected) in [
+			(false, false, (2, 3, 4)),
+			(true, false, (20, 30, 40)),
+			(true, true, (20, 30, 40)),
+		] {
 			let mut grant = moq_auth::Grant::new(Default::default(), Default::default());
 			grant.peer = peer;
 			grant.upstream = upstream;
@@ -2061,7 +2067,7 @@ mod tests {
 			// A cluster-looking path alone never selects the peer policy.
 			let lease = auth::Lease::new("/.cluster/untrusted", consumer);
 			let limits = cluster.limits(&lease);
-			assert_eq!((limits.announces, limits.subscriptions), expected);
+			assert_eq!((limits.announces, limits.subscriptions, limits.fetches), expected);
 		}
 	}
 

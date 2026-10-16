@@ -1137,13 +1137,15 @@ async fn export_pcr_wraps_below_zero_at_start() {
 			.insert(track.name().to_string(), cfg);
 	}
 	let mut producer = Producer::new(track, HangContainer::Legacy(crate::container::Kind::Data));
+	// One group, so the exporter joining at the live edge reads it from the frame decoding in
+	// slot 0: audio goes out no earlier than its own slot.
 	for i in 0..4u64 {
 		producer
 			.write(Frame {
 				timestamp: Timestamp::from_micros(i * 20_000).unwrap(),
 				duration: None,
 				payload: Bytes::from_static(&[0x01, 0x02, 0x03, 0x04]),
-				keyframe: true,
+				keyframe: i == 0,
 			})
 			.unwrap();
 	}
@@ -5463,8 +5465,9 @@ async fn tune_in_does_not_wait_on_dropped_audio() {
 		rig.video(tick);
 	}
 	out.extend(poll_frames(&mut export));
-	// Past the keyframe's deadline, and far enough on that a later frame settles its slot.
-	tokio::time::advance(delay + Duration::from_micros(4 * VIDEO_US)).await;
+	// Past the audio's deadline, a delay on from the video's since audio is not sent ahead,
+	// and far enough on that a later frame settles its slot.
+	tokio::time::advance(2 * delay + Duration::from_micros(4 * VIDEO_US)).await;
 	out.extend(poll_frames(&mut export));
 	assert!(!out.is_empty(), "the tune-in waited on audio it had dropped");
 }
@@ -6483,7 +6486,13 @@ async fn pcr_stays_among_the_bytes_across_reordered_tracks() {
 		.with_delay(RECORDING_MAX_AGE);
 	let frames = drain_frames(&mut exporter).await;
 	let pcrs = media_pcrs(&frames);
-	assert!(pcrs.len() > 50, "expected the full feed, got {} PCRs", pcrs.len());
+	assert_eq!(exporter.dropped(), 0, "expected the full feed");
+	// The joiner reads the newest group, 400 ms of video sent at most its 375 ms reach early.
+	assert!(
+		pcrs.len() > 15,
+		"expected a clock across the group, got {} PCRs",
+		pcrs.len()
+	);
 
 	let gaps: Vec<usize> = pcrs.windows(2).map(|w| w[1].0 - w[0].0).collect();
 	assert_eq!(
@@ -7202,6 +7211,53 @@ async fn reordered_video_loses_nothing_on_a_clean_path() {
 		"the reorder delay settled before the clock started"
 	);
 	assert_on_time(&out);
+}
+
+/// Padded video whose HRD declares a longer buffer delay than the export's fails with its
+/// first picture, naming the delay it needs, rather than once the source fills its CPB and a
+/// picture misses its deadline. At that delay it runs.
+#[tokio::test(start_paused = true)]
+async fn padded_video_needs_the_delay_its_hrd_declares() {
+	use crate::codec::h264::fixtures::{PPS, SPS_HRD};
+
+	let waiter = kio::Waiter::noop();
+	for (delay, refused) in [(Duration::from_millis(500), true), (Duration::from_secs(1), false)] {
+		let mut rig = Reordered::new(SPS_HRD, PPS, &[]).await;
+		let mut export = rig.export(delay).await.with_mux_rate(2_000_000);
+		let start = tokio::time::Instant::now();
+		let mut out = Vec::new();
+		let mut failed = None;
+		'run: for tick in 0..TICKS / 2 {
+			tokio::time::sleep_until(start + Duration::from_micros(tick * VIDEO_US)).await;
+			rig.video(tick);
+			while rig.audio_before(tick + 1) {}
+			while let std::task::Poll::Ready(frame) = export.poll_next(&waiter) {
+				match frame {
+					Ok(Some(frame)) => out.push(frame),
+					Ok(None) => break,
+					Err(err) => {
+						failed = Some(err.to_string());
+						break 'run;
+					}
+				}
+			}
+		}
+		if refused {
+			let err = failed.expect("a 500 ms delay cannot send a 1 s CPB far enough ahead");
+			assert!(err.contains("raise the delay to 1s"), "{err}");
+			continue;
+		}
+		assert_eq!(failed, None, "a 1 s delay sends a 1 s CPB far enough ahead");
+		rig.finish();
+		out.extend(drain_frames(&mut export).await);
+		assert_eq!(export.dropped(), 0, "a clean path drops nothing");
+		assert_eq!(
+			video_timing(&out, ..).len() as u64,
+			TICKS / 2,
+			"every video frame went out"
+		);
+		assert_on_time(&out);
+	}
 }
 
 /// Two exporters of a broadcast padded to a multiplex rate, one joining a second late, lay the
