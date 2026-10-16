@@ -17,6 +17,7 @@ mod hls;
 mod moq;
 mod play;
 mod publish;
+mod report;
 mod rtc;
 mod rtmp;
 mod srt;
@@ -387,7 +388,7 @@ async fn run() -> anyhow::Result<()> {
 /// Which directions the stages need on the shared MoQ attachment.
 #[derive(Clone, Copy, Default)]
 pub struct Directions {
-	/// Any `import`: the Origin is published outward.
+	/// Any `import`, or an `export --echo`: the Origin is published outward.
 	pub publish: bool,
 	/// Any `export` or `play`: the Origin is filled from the network.
 	pub consume: bool,
@@ -396,8 +397,13 @@ pub struct Directions {
 impl Directions {
 	/// The union of what the stages need, so one attachment serves them all.
 	fn of(stages: &[Command]) -> Self {
+		let publishes = |stage: &Command| match stage {
+			Command::Import(_) => true,
+			Command::Export(export) => export.echo.is_some(),
+			_ => false,
+		};
 		Self {
-			publish: stages.iter().any(|stage| matches!(stage, Command::Import(_))),
+			publish: stages.iter().any(publishes),
 			consume: stages.iter().any(|stage| matches!(stage, Command::Export(_))),
 		}
 	}
@@ -563,9 +569,16 @@ async fn run_stages(moq: MoqSide, stages: Vec<Command>, net: Net) -> anyhow::Res
 					if import.source.stdin_format().is_some() {
 						claim("stdin", &mut stdin, &name)?;
 					}
-					if let Some(publish) =
-						spawn_import(&origin, import, name, epoch.clone(), bandwidth.clone(), &mut tasks)?
-					{
+					let monitor = connection.as_ref().map(moq_tokio::Connection::monitor);
+					if let Some(publish) = spawn_import(
+						&origin,
+						import,
+						name,
+						epoch.clone(),
+						bandwidth.clone(),
+						monitor,
+						&mut tasks,
+					)? {
 						locals.push(publish);
 					}
 				}
@@ -573,7 +586,8 @@ async fn run_stages(moq: MoqSide, stages: Vec<Command>, net: Net) -> anyhow::Res
 					if export.sink.is_stdout() {
 						claim("stdout", &mut stdout, &name)?;
 					}
-					spawn_export(&origin, export, name, &mut tasks)?;
+					let monitor = connection.as_ref().map(moq_tokio::Connection::monitor);
+					spawn_export(&origin, export, name, monitor, &mut tasks)?;
 				}
 				other => unreachable!("`{}` is not a stage", other.name()),
 			}
@@ -644,13 +658,15 @@ fn display_name(name: &str) -> &str {
 /// `ts --program all` mint their own per connection or program.
 ///
 /// Returns the pipeline that has to run on the caller's thread, for the sources
-/// that have one (the stdin containers and capture).
+/// that have one (the stdin containers and capture). `connection` supplies a
+/// `--stats` report's transport measurements.
 fn spawn_import(
 	origin: &moq_net::origin::Producer,
 	import: Import,
 	name: String,
 	epoch: moq_net::Epoch,
 	bandwidth: moq_net::bandwidth::Allocator,
+	connection: Option<moq_tokio::connection::Monitor>,
 	tasks: &mut JoinSet<anyhow::Result<()>>,
 ) -> anyhow::Result<Option<Publish>> {
 	if let ImportSource::Rtc(rtc) = &import.source
@@ -686,6 +702,11 @@ fn spawn_import(
 		} else {
 			let broadcast = origin.create_broadcast(&name).context("failed to create broadcast")?;
 			Publish::new(broadcast, &format, config)?
+		};
+		let publish = if import.stats {
+			publish.with_stats(connection)?
+		} else {
+			publish
 		};
 		// Media stays servable at EOF until it goes stale, the same max-age relays retain it for.
 		let mut publish = publish.linger(max_age.unwrap_or(hang::container::MAX_AGE));
@@ -752,10 +773,12 @@ fn spawn_import(
 }
 
 /// Route the shared Origin OUT to one stage's sink, filling it from the MoQ network.
+/// `connection` supplies an `--echo` report's transport measurements.
 fn spawn_export(
 	origin: &moq_net::origin::Producer,
 	export: Export,
 	name: String,
+	connection: Option<moq_tokio::connection::Monitor>,
 	tasks: &mut JoinSet<anyhow::Result<()>>,
 ) -> anyhow::Result<()> {
 	if let ExportSink::Rtc(rtc) = &export.sink
@@ -777,7 +800,8 @@ fn spawn_export(
 			select: export.select,
 		};
 		let consumer = origin.consume();
-		tasks.spawn(async move { run_stdout(consumer, name, args).await });
+		let echo = export.echo.map(|echo| (origin.clone(), echo, connection));
+		tasks.spawn(async move { run_stdout(consumer, name, args, echo).await });
 	} else {
 		match export.sink {
 			ExportSink::Hls(args) => {
@@ -826,6 +850,13 @@ fn spawn_export(
 					.unwrap_or_default();
 				tasks.spawn(archive::export(origin.consume(), name, format, args));
 			}
+			ExportSink::Stats => {
+				let name = require_broadcast(name, "export stats")?;
+				tasks.spawn(report::print_stats(origin.consume(), name));
+			}
+			ExportSink::Echo => {
+				tasks.spawn(report::print_echo(origin.consume(), name));
+			}
 			_ => unreachable!("container formats are handled by stdout_format above"),
 		}
 	}
@@ -833,8 +864,21 @@ fn spawn_export(
 	Ok(())
 }
 
-/// Subscribe to `name` from the Origin and write it to stdout.
-async fn run_stdout(consumer: moq_net::origin::Consumer, name: String, args: SubscribeArgs) -> anyhow::Result<()> {
+/// Where an `export --echo` publishes its feedback, under what name, and over which connection.
+type EchoTarget = (
+	moq_net::origin::Producer,
+	report::EchoName,
+	Option<moq_tokio::connection::Monitor>,
+);
+
+/// Subscribe to `name` from the Origin and write it to stdout, publishing feedback beside it
+/// where the catalog solicits it when `echo` is set.
+async fn run_stdout(
+	consumer: moq_net::origin::Consumer,
+	name: String,
+	args: SubscribeArgs,
+	echo: Option<EchoTarget>,
+) -> anyhow::Result<()> {
 	let catalog = args.catalog_format(&name);
 
 	// Confirm the broadcast is reachable and wait for it to be announced; `Subscribe` then
@@ -845,7 +889,17 @@ async fn run_stdout(consumer: moq_net::origin::Consumer, name: String, args: Sub
 		.await
 		.ok_or_else(|| anyhow::anyhow!("origin closed before broadcast `{name}` was announced"))?;
 
-	Subscribe::new(consumer, &name, catalog, args).await?.run().await
+	let subscribe = Subscribe::new(consumer, &name, catalog, args).await?;
+	let Some((origin, echo, connection)) = echo else {
+		return subscribe.run().await;
+	};
+	let mut echo = report::Echo::new(origin, subscribe.source().clone(), catalog, echo, connection);
+	let result = tokio::select! {
+		result = subscribe.run() => result,
+		never = echo.run() => match never {},
+	};
+	echo.finish();
+	result
 }
 
 /// Run until an endpoint ends, keeping all tasks alive while a signalled listener drains.

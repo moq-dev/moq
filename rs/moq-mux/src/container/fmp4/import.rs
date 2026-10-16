@@ -134,6 +134,9 @@ struct Fmp4Track<E: crate::catalog::hang::CatalogExt> {
 	/// hand, so this sits beside the estimator the same way it does on a
 	/// [`container::Producer`](crate::container::Producer).
 	claim: crate::catalog::Claim,
+
+	/// The samples and sample bytes the catalog reports this track has written.
+	sent: std::sync::Arc<crate::stats::Sent>,
 }
 
 impl<E: crate::catalog::hang::CatalogExt> Fmp4Track<E> {
@@ -339,6 +342,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 				}
 			};
 
+			let sent = self.catalog.sent(track.name());
 			self.tracks.insert(
 				track_id,
 				Fmp4Track {
@@ -354,6 +358,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 					pending_sequence: None,
 					estimator: Estimator::new(),
 					claim: crate::catalog::Claim::new(self.catalog.bandwidth()),
+					sent,
 				},
 			);
 		}
@@ -777,6 +782,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			let mut min_timestamp = None;
 			let mut max_end = None;
 			let mut contains_keyframe = false;
+			let mut keyframes = 0u64;
 			let total_samples: usize = traf.trun.iter().map(|t| t.entries.len()).sum();
 			let mut sample_index = 0usize;
 
@@ -842,6 +848,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 					};
 
 					contains_keyframe |= keyframe;
+					keyframes += u64::from(keyframe && track.kind == Kind::Video);
 
 					if min_timestamp.is_none_or(|min| timestamp <= min) {
 						min_timestamp = Some(timestamp);
@@ -1004,6 +1011,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			track.group = Some(g);
 
 			track.estimator.write(timestamp, fragment_len);
+			track.sent.add(total_samples as u64, track_mdat_data.len(), keyframes);
 			let end = max_end.ok_or(Error::MissingTrun)?;
 			if let Some(recorder) = track.recorder.as_mut() {
 				recorder.end(end);

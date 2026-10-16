@@ -97,6 +97,9 @@ pub struct Producer<C: Container, R = ()> {
 
 	/// The catalog rendition this media producer owns, when it was created through a catalog.
 	rendition: Option<Box<dyn Rendition<R>>>,
+
+	/// The counters the catalog reports for this track, when it was created through a catalog.
+	sent: Option<std::sync::Arc<crate::stats::Sent>>,
 }
 
 trait Rendition<R>: Send {
@@ -164,6 +167,7 @@ impl<C: Container> Producer<C> {
 			estimator: crate::catalog::Estimator::new(),
 			bandwidth: None,
 			rendition: None,
+			sent: None,
 		}
 	}
 }
@@ -200,6 +204,7 @@ where
 			estimator: rendition.estimator(),
 			bandwidth: None,
 			rendition: Some(Box::new(rendition)),
+			sent: None,
 		}
 	}
 
@@ -370,6 +375,21 @@ where
 		self
 	}
 
+	/// Count every frame this track writes into `sent`, which its catalog reports.
+	pub(crate) fn with_sent(mut self, sent: std::sync::Arc<crate::stats::Sent>) -> Self {
+		self.sent = Some(sent);
+		self
+	}
+
+	/// Count a written frame. Only video keyframes count as keyframes: elsewhere the bit only
+	/// marks where a group starts.
+	fn count(&self, bytes: usize, keyframe: bool) {
+		if let Some(sent) = &self.sent {
+			let keyframe = keyframe && self.container.kind() == Kind::Video;
+			sent.add(1, bytes, keyframe.into());
+		}
+	}
+
 	/// Raise the standing claim when the catalog estimate has a new peak.
 	fn claim(&mut self) {
 		let Some(bandwidth) = self.bandwidth.as_mut() else {
@@ -466,11 +486,13 @@ where
 			// group, a timestamp that won't convert) leaves the producer usable, and the estimate's
 			// extrema never fall, so counting one would inflate the catalog for good.
 			self.estimator.write(timestamp, bytes);
+			self.count(bytes, keyframe);
 			self.observe_end(timestamp, duration);
 		} else {
 			// Buffered frames are measured on the way in instead. The flush that eventually writes
 			// them takes the track down with it when it fails, so there is nothing to unwind.
 			self.estimator.write(frame.timestamp, frame.payload.len());
+			self.count(frame.payload.len(), frame.keyframe);
 			self.observe_end(frame.timestamp, frame.duration);
 			self.buffer.push(frame);
 
