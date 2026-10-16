@@ -58,7 +58,7 @@ async fn prepare(tracks: usize, frames: usize) -> (moq_mux::Source, moq_mux::cat
 	catalog.finish().unwrap();
 	let (origin, driver) = moq_net::origin::Producer::new(Default::default());
 	let driver = tokio::spawn(moq_net::time::run(driver));
-	let dynamic = origin.dynamic("", Default::default()).unwrap();
+	let dynamic = origin.dynamic_route("", Default::default()).unwrap();
 	let requests = tokio::spawn(async move {
 		while let Ok(request) = dynamic.requested_broadcast().await {
 			request.accept(consumer.clone());

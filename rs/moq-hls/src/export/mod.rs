@@ -3210,7 +3210,7 @@ mod tests {
 
 		let mut old_media = moq_net::broadcast::Info::new().produce();
 		let _old_track = write_routed_media(&mut old_media, OLD, recorder, 0);
-		let old_server = origin.dynamic("media", sibling_route(10)).unwrap();
+		let old_server = origin.dynamic_route("media", sibling_route(10)).unwrap();
 		settle().await;
 
 		let upstream = crate::resolved(&origin, "live").await;
@@ -3257,7 +3257,7 @@ mod tests {
 		assert!(early.next().await.unwrap().is_none(), "segment cursors end");
 
 		// A publisher serving the path afterwards, with rows recorded for it, is never bound.
-		let new_server = origin.dynamic("media", sibling_route(11)).unwrap();
+		let new_server = origin.dynamic_route("media", sibling_route(11)).unwrap();
 		let _ = rendition.snapshot();
 		assert!(
 			tokio::time::timeout(Duration::from_secs(1), new_server.requested_broadcast())
@@ -3293,7 +3293,7 @@ mod tests {
 
 		let mut media = moq_net::broadcast::Info::new().produce();
 		let _track = write_routed_media(&mut media, KEYFRAME, recorder, 0);
-		let server = origin.dynamic("media", sibling_route(10)).unwrap();
+		let server = origin.dynamic_route("media", sibling_route(10)).unwrap();
 		settle().await;
 
 		let upstream = crate::resolved(&origin, "live").await;
@@ -3356,7 +3356,7 @@ mod tests {
 
 		let mut media = moq_net::broadcast::Info::new().produce();
 		let _track = write_routed_media(&mut media, NEW, recorder, 0);
-		let server = origin.dynamic("media", sibling_route(11)).unwrap();
+		let server = origin.dynamic_route("media", sibling_route(11)).unwrap();
 		settle().await;
 
 		let upstream = crate::resolved(&origin, "live").await;
@@ -3395,7 +3395,7 @@ mod tests {
 
 		let mut old_media = moq_net::broadcast::Info::new().produce();
 		let _old_track = write_routed_media(&mut old_media, OLD, recorder, 0);
-		let old_server = origin.dynamic("media", sibling_route(10)).unwrap();
+		let old_server = origin.dynamic_route("media", sibling_route(10)).unwrap();
 		settle().await;
 
 		let upstream = crate::resolved(&origin, "live").await;
@@ -3416,7 +3416,7 @@ mod tests {
 			assert!(rendition.listed_segment(0).await.unwrap().is_none());
 		}
 
-		let new_server = origin.dynamic("media", sibling_route(11)).unwrap();
+		let new_server = origin.dynamic_route("media", sibling_route(11)).unwrap();
 		let mut new_media = moq_net::broadcast::Info::new().produce();
 		let recorder = catalog.enroll_test("video0").unwrap();
 		let _new_track = write_routed_media(&mut new_media, NEW, recorder, 6_000_000);
@@ -3448,7 +3448,7 @@ mod tests {
 		let recorder = catalog.enroll_test("video0").unwrap();
 		let mut media = moq_net::broadcast::Info::new().produce();
 		let track = write_routed_media(&mut media, OLD, recorder, 0);
-		let server = origin.dynamic("media", sibling_route(10)).unwrap();
+		let server = origin.dynamic_route("media", sibling_route(10)).unwrap();
 		settle().await;
 
 		let upstream = crate::resolved(&origin, "live").await;
@@ -3508,7 +3508,7 @@ mod tests {
 			.await
 			.expect("the catalog's rows are listed before the sibling resolves");
 
-		let server = origin.dynamic("media", sibling_route(10)).unwrap();
+		let server = origin.dynamic_route("media", sibling_route(10)).unwrap();
 		let _ = rendition.snapshot();
 		accept_sibling(&server, &media).await;
 		let served = rendition

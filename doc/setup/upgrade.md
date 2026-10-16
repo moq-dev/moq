@@ -19,6 +19,13 @@ error lists and rerun.
 
 These land with the next breaking release, not the 2026-09-23 train.
 
+- **A claim answers by publishing.** `origin.dynamic(prefix)` takes no route, in
+  Rust, JS, C, and every binding. Answer each request with `prepare(epoch)` (a
+  fresh `Epoch::mint()` per output run), fill the returned broadcast, then
+  `publish()`, which announces it at the exact path under that epoch. `accept`
+  is gone, and dropping a prepared answer refuses the request (JS:
+  `prepared.reject(err)`). A restarted output is a new epoch, so readers never
+  splice it onto the old one.
 - **moq-mux's catalog consumer is opaque.** Construct `catalog::Consumer` with
   `Consumer::new(broadcast, format).await` or convert an existing
   `catalog::hang::Consumer` with `.into()`, then read it through `catalog::Stream`.

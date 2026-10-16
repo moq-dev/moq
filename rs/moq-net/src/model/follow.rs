@@ -220,7 +220,7 @@ mod tests {
 		let epoch = Epoch::mint();
 
 		// A prefix above the path covers it.
-		let pool = origin.dynamic("pool", route(&epoch)).unwrap();
+		let pool = origin.dynamic_route("pool", route(&epoch)).unwrap();
 		assert_eq!(followed(&mut follow).await, ("start", "pool".into()));
 
 		// A route beneath the path serves another broadcast.
@@ -232,7 +232,7 @@ mod tests {
 		assert_eq!(followed(&mut follow).await, ("update", "pool/job".into()));
 
 		// The covering prefix no longer serves the path, so its changes are not seen.
-		pool.update(pool.route().with_cost(5)).unwrap();
+		pool.update_route(pool.route().with_cost(5)).unwrap();
 		quiet(&mut follow).await;
 
 		// Another instance at the path.
@@ -243,7 +243,7 @@ mod tests {
 		drop(exact);
 		assert_eq!(followed(&mut follow).await, ("restart", "pool".into()));
 
-		pool.update(pool.route().with_cost(9)).unwrap();
+		pool.update_route(pool.route().with_cost(9)).unwrap();
 		assert_eq!(followed(&mut follow).await, ("update", "pool".into()));
 
 		drop(pool);
@@ -255,7 +255,7 @@ mod tests {
 	#[moq_net_sim::test]
 	async fn follow_starts_on_the_serving_route_when_joining_late() {
 		let origin = Hop::new(1).unwrap().produce();
-		let _pool = origin.dynamic("pool", Route::default()).unwrap();
+		let _pool = origin.dynamic_route("pool", Route::default()).unwrap();
 		let _exact = origin.publish("pool/job", Route::default()).unwrap();
 
 		let mut follow = origin.consume().follow("pool/job").unwrap();
@@ -276,7 +276,7 @@ mod tests {
 		// Both land before the follower reads again, and the cursor delivers the prefix's start
 		// ahead of the path's end, but the path went unserved in between.
 		drop(exact);
-		let _pool = origin.dynamic("pool", route(&epoch)).unwrap();
+		let _pool = origin.dynamic_route("pool", route(&epoch)).unwrap();
 		assert_eq!(followed(&mut follow).await, ("end", "pool/job".into()));
 		assert_eq!(followed(&mut follow).await, ("start", "pool".into()));
 
@@ -297,7 +297,7 @@ mod tests {
 		assert_eq!(followed(&mut follow).await, ("start", "pool/job".into()));
 
 		let epoch = Epoch::mint();
-		let _pool = origin.dynamic("pool", route(&epoch)).unwrap();
+		let _pool = origin.dynamic_route("pool", route(&epoch)).unwrap();
 		exact.announce(route(&epoch)).unwrap();
 		assert_eq!(followed(&mut follow).await, ("restart", "pool/job".into()));
 
@@ -311,7 +311,7 @@ mod tests {
 		let origin = Hop::new(1).unwrap().produce();
 		let mut follow = origin.consume().follow("pool/job").unwrap();
 
-		let _pool = origin.dynamic("pool", Route::default()).unwrap();
+		let _pool = origin.dynamic_route("pool", Route::default()).unwrap();
 		assert_eq!(followed(&mut follow).await, ("start", "pool".into()));
 
 		let _exact = origin.publish("pool/job", Route::default()).unwrap();
@@ -327,7 +327,7 @@ mod tests {
 		let _chat = origin
 			.scope("", &chat)
 			.unwrap()
-			.dynamic("room/alice", Route::default())
+			.dynamic_route("room/alice", Route::default())
 			.unwrap();
 		let mut follow = origin.consume().follow("room/alice").unwrap();
 

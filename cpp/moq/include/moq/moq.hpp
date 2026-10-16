@@ -55,6 +55,7 @@ using AudioProducer = MoqAudioProducer;
 using Bandwidth = MoqBandwidth;
 using BroadcastConsumer = MoqBroadcastConsumer;
 using BroadcastDynamic = MoqBroadcastDynamic;
+using BroadcastPrepared = MoqBroadcastPrepared;
 using BroadcastProducer = MoqBroadcastProducer;
 using BroadcastRequest = MoqBroadcastRequest;
 using Client = MoqClient;

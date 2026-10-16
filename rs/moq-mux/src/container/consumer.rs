@@ -1898,7 +1898,7 @@ mod tests {
 		let origin = crate::source::produce_origin();
 		let hops = moq_net::Hops::try_from(vec![moq_net::Hop::new(10).unwrap()]).unwrap();
 		let first_route = origin
-			.dynamic(
+			.dynamic_route(
 				"live",
 				moq_net::origin::Route::default()
 					.with_epoch(epoch.clone())
@@ -1942,7 +1942,7 @@ mod tests {
 		let mut sources = Vec::new();
 		for sequence in 1..=4 {
 			let route = origin
-				.dynamic(
+				.dynamic_route(
 					"live",
 					moq_net::origin::Route::default()
 						.with_epoch(epoch.clone())

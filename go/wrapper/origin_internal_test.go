@@ -43,7 +43,7 @@ func TestDynamicKeepsTheOrigin(t *testing.T) {
 	defer cancel()
 
 	origin := NewOriginProducer()
-	dynamic, err := origin.Dynamic("", Route{})
+	dynamic, err := origin.Dynamic("")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -66,14 +66,15 @@ func TestDynamicKeepsTheOrigin(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RequestedBroadcast err = %v, want a request", err)
 	}
-	served, err := NewBroadcastProducer()
+	prepared, err := request.Prepare(MintEpoch())
+	if err != nil {
+		t.Fatal(err)
+	}
+	served, err := prepared.Publish()
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _ = served.Close() }()
-	if err := request.Accept(served); err != nil {
-		t.Fatal(err)
-	}
 
 	var res result
 	select {

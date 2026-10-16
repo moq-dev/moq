@@ -2053,7 +2053,7 @@ where
 		if self.going_away.is_set() {
 			route.cost = crate::origin::Cost::DRAIN;
 		}
-		entry.dynamic = Some(self.origin.dynamic(path, route)?);
+		entry.dynamic = Some(self.origin.dynamic_route(path, route)?);
 		entry.generation += 1;
 		tracing::info!(route = %self.origin.absolute(path), "namespace authorized again");
 		Ok(Some(entry.generation))
@@ -2104,7 +2104,7 @@ where
 				let entry = entry.into_mut();
 				entry.route = route.clone();
 				if let Some(dynamic) = &entry.dynamic {
-					dynamic.update(route)?;
+					dynamic.update_route(route)?;
 				}
 				Ok(())
 			}
@@ -2130,7 +2130,7 @@ where
 					return Ok(());
 				}
 				// Propagates Error::Unauthorized if the namespace is out of scope.
-				let dynamic = self.origin.dynamic(&path, route.clone())?;
+				let dynamic = self.origin.dynamic_route(&path, route.clone())?;
 
 				entry.insert(BroadcastState {
 					route,
@@ -2332,7 +2332,7 @@ where
 		}
 		entry.route.cost = crate::origin::Cost::DRAIN;
 		if let Some(dynamic) = &entry.dynamic {
-			let _ = dynamic.update(entry.route.clone());
+			let _ = dynamic.update_route(entry.route.clone());
 		}
 	}
 

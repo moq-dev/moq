@@ -122,7 +122,7 @@ fn bench_withdraw(c: &mut Criterion) {
 						.poll(moq_net::time::Instant::now(), &kio::Waiter::noop())
 						.unwrap();
 					let routes: Vec<_> = (0..publishers)
-						.map(|i| producer.dynamic(format!("room/{i}"), peer_route(9, 1)).unwrap())
+						.map(|i| producer.dynamic_route(format!("room/{i}"), peer_route(9, 1)).unwrap())
 						.collect();
 					let mut cursors: Vec<_> = (0..subscribers).map(|_| producer.consume().announced()).collect();
 					for cursor in &mut cursors {
@@ -257,7 +257,11 @@ fn bench_announce_duplicate(c: &mut Criterion) {
 			// Every peer announces the one path, each under its own hop chain so
 			// the entries are distinct routes rather than one re-priced in place.
 			let _routes: Vec<_> = (1..=duplicates)
-				.map(|peer| producer.dynamic(PATH, peer_route(peer as u64, INCUMBENT_COST)).unwrap())
+				.map(|peer| {
+					producer
+						.dynamic_route(PATH, peer_route(peer as u64, INCUMBENT_COST))
+						.unwrap()
+				})
 				.collect();
 			let mut cursors: Vec<announce::Consumer> = (0..subscribers)
 				.map(|_| consumer.clone().with_hidden(true).announced())
@@ -268,7 +272,7 @@ fn bench_announce_duplicate(c: &mut Criterion) {
 
 			b.iter(|| {
 				let handle = producer
-					.dynamic(PATH, peer_route(duplicates as u64 + 1, INCUMBENT_COST - 1))
+					.dynamic_route(PATH, peer_route(duplicates as u64 + 1, INCUMBENT_COST - 1))
 					.unwrap();
 				for cursor in &mut cursors {
 					cursor.next().now_or_never().flatten().expect("announce delivered");
@@ -301,13 +305,13 @@ fn bench_reprice_duplicate(c: &mut Criterion) {
 								&Patterns::from(Pattern::subtree(&format!("{PATH}/p{}", (peer - 1) % 2)).unwrap()),
 							)
 							.unwrap()
-							.dynamic(PATH, peer_route(peer as u64, incumbent_cost))
+							.dynamic_route(PATH, peer_route(peer as u64, incumbent_cost))
 							.unwrap()
 					})
 					.collect();
 				let challenger = duplicates as u64 + 1;
 				let route = producer
-					.dynamic(PATH, peer_route(challenger, incumbent_cost + 1))
+					.dynamic_route(PATH, peer_route(challenger, incumbent_cost + 1))
 					.unwrap();
 				let mut cursors: Vec<announce::Consumer> = (0..subscribers)
 					.map(|peer| {
@@ -327,7 +331,7 @@ fn bench_reprice_duplicate(c: &mut Criterion) {
 				}
 				b.iter(|| {
 					for cost in [incumbent_cost - 1, incumbent_cost + 1] {
-						route.update(peer_route(challenger, cost)).unwrap();
+						route.update_route(peer_route(challenger, cost)).unwrap();
 						for cursor in &mut cursors {
 							// The winner switches between epochless routes, which is another instance.
 							let event = cursor.next().now_or_never().flatten().expect("winner changed");
@@ -369,7 +373,7 @@ fn bench_announce_fronts(c: &mut Criterion) {
 			let (producer, mut driver) = origin::Producer::new(origin::Config::default());
 			let consumer = producer.consume();
 			// Served but never answered: every request under it parks a front.
-			let _served = producer.dynamic("room", origin::Route::default()).unwrap();
+			let _served = producer.dynamic_route("room", origin::Route::default()).unwrap();
 			let _requests: Vec<_> = (0..fronts)
 				.map(|i| consumer.request_broadcast(format!("room/{i}"), None))
 				.collect();
@@ -411,7 +415,7 @@ fn bench_serve_idle(c: &mut Criterion) {
 			let dynamics: Vec<_> = (0..routes)
 				.map(|i| {
 					producer
-						.dynamic(format!(".stats/p{}/node/edge{i}", i % 8), origin::Route::default())
+						.dynamic_route(format!(".stats/p{}/node/edge{i}", i % 8), origin::Route::default())
 						.unwrap()
 				})
 				.collect();
@@ -556,7 +560,7 @@ fn pool(members: usize, paths: usize, cursors: usize) -> Pool {
 	let consumer = producer.consume();
 	let cursors = (0..cursors).map(|_| consumer.announced()).collect();
 	let members: Vec<_> = (0..members)
-		.map(|i| producer.dynamic("pool", pool_route(POOL_HOP + i as u64)).unwrap())
+		.map(|i| producer.dynamic_route("pool", pool_route(POOL_HOP + i as u64)).unwrap())
 		.collect();
 	let waiter = kio::Waiter::noop();
 
@@ -615,7 +619,7 @@ fn bench_pool_churn(c: &mut Criterion) {
 				let waiter = kio::Waiter::noop();
 				let hop = POOL_HOP + members as u64;
 				b.iter(|| {
-					let joined = pool.producer.dynamic("pool", pool_route(hop)).unwrap();
+					let joined = pool.producer.dynamic_route("pool", pool_route(hop)).unwrap();
 					pool.driver.poll(moq_net::time::Instant::now(), &waiter).unwrap();
 					drop(joined);
 					pool.driver.poll(moq_net::time::Instant::now(), &waiter).unwrap();
@@ -643,7 +647,7 @@ fn bench_pool_cursors(c: &mut Criterion) {
 				let waiter = kio::Waiter::noop();
 				let hop = POOL_HOP + members as u64;
 				b.iter(|| {
-					let joined = pool.producer.dynamic("pool", pool_route(hop)).unwrap();
+					let joined = pool.producer.dynamic_route("pool", pool_route(hop)).unwrap();
 					pool.driver.poll(moq_net::time::Instant::now(), &waiter).unwrap();
 					drop(joined);
 					pool.driver.poll(moq_net::time::Instant::now(), &waiter).unwrap();

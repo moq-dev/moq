@@ -210,7 +210,7 @@ const nextEpoch = Epoch.parse("01900000-0000-7000-8000-000000000002");
 for (const pathCount of routeCounts) {
 	for (const readerCount of observerCounts) {
 		const origin = new Producer();
-		const dynamic = origin.dynamic(Path.from("room"), { epoch });
+		const dynamic = origin.dynamicRoute(Path.from("room"), { epoch });
 		const pending = dynamic.requested();
 		const requests = Array.from({ length: pathCount }, (_, index) =>
 			Array.from({ length: readerCount }, () => origin.consume().request(Path.from(`room/${index}`))),
