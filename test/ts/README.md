@@ -675,7 +675,7 @@ The round-trip rig explicitly negotiates `moq-lite-07-wip` on the relay,
 publisher and subscribers. Its publisher epochs allow acquisition to continue
 when a session is replaced. Production defaults remain unchanged: Lite-06
 cannot prove publisher identity across session replacement and must refuse a
-pending acquisition. `rs/moq-net/tests/catalog_acquisition.rs` covers both
+pending acquisition. `rs/moq-net/tests/integration/catalog_acquisition.rs` covers both
 outcomes deterministically in Rust CI, without retries or implicit `--stitch`.
 
 [`.github/workflows/ts.yml`](../../.github/workflows/ts.yml) is independent of
