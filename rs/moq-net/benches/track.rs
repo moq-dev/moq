@@ -860,8 +860,56 @@ fn bench_empty_run(c: &mut Criterion) {
 	group.finish();
 }
 
+/// Abort one non-prefix parked group, swept over backlog and capped subscribers.
+fn bench_parked_abort(c: &mut Criterion) {
+	let mut bench = c.benchmark_group("track_parked_abort");
+	bench.sample_size(10);
+	for readers in [1, 8, 64] {
+		for retained in [1u64, 64, 1024] {
+			bench.bench_function(BenchmarkId::new(readers.to_string(), retained), |b| {
+				b.iter_batched_ref(
+					|| {
+						let broadcast = broadcast::Producer::new(Default::default());
+						let track = broadcast.create_track("parked", timed()).unwrap();
+						let mut subscribers: Vec<_> = (0..readers)
+							.map(|_| {
+								let mut subscriber =
+									track.subscribe(track::Subscription::default().with_max_delay(AGED_BUDGET));
+								subscriber.set_groups(..0);
+								subscriber
+							})
+							.collect();
+						let groups: Vec<_> = (0..retained)
+							.map(|sequence| {
+								let mut group = track.create_group(moq_net::group::Info { sequence }).unwrap();
+								group.write_frame(Timestamp::ZERO, b"f".as_ref()).unwrap();
+								group.clone().finish().unwrap();
+								group
+							})
+							.collect();
+						for subscriber in &mut subscribers {
+							assert!(subscriber.poll_recv_group(&kio::Waiter::noop()).is_pending());
+						}
+						(broadcast, track, subscribers, groups)
+					},
+					|(_, _, subscribers, groups)| {
+						groups[retained as usize / 2].clone().abort(Error::Old).unwrap();
+						for subscriber in subscribers {
+							let res = subscriber.poll_recv_group(&kio::Waiter::noop());
+							assert!(res.is_pending());
+						}
+					},
+					BatchSize::PerIteration,
+				);
+			});
+		}
+	}
+	bench.finish();
+}
+
 criterion_group!(
 	benches,
+	bench_parked_abort,
 	bench_fanout,
 	bench_parallel_write,
 	bench_aborted_scan,

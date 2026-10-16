@@ -228,7 +228,7 @@ pub struct VideoConfig {
 	pub display_aspect_height: Option<u32>,
 
 	// TODO color space
-	/// The maximum bitrate of the video track, if known. It only rises.
+	/// The maximum bitrate of the video track, if known.
 	#[serde(default)]
 	pub bitrate: Option<u64>,
 
@@ -240,7 +240,7 @@ pub struct VideoConfig {
 	)]
 	pub enabled: bool,
 
-	/// The maximum frame rate of the video track, if known. It only rises.
+	/// The maximum frame rate of the video track, if known.
 	#[serde(default)]
 	pub framerate: Option<f64>,
 

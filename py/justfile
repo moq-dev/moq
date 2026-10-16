@@ -62,6 +62,13 @@ build:
     uv sync --locked --no-install-workspace
     just _develop
 
+# Run the binding benchmark's Python runner (see bench/README.md) on a release build.
+bench:
+    uv sync --locked --no-install-workspace
+    cd moq-ffi && uv run --no-sync maturin develop --locked --uv --release
+    uv pip install --no-deps -e moq-rs
+    uv run --no-sync python moq-rs/benches/ffi.py
+
 # Build the pure-python moq-rs wrapper sdist + wheel into py/dist (for release).
 # moq-ffi is built separately by maturin (see release-py.yml); the wrapper is
 

@@ -85,7 +85,11 @@ asks, not the target), so it adds no upstream subscription demand and still sees
 the target.
 Groups drain concurrently, so an earlier stalled group cannot hide a later arrival. Capture
 errors void the row. Capture adds local decoding and recording work; it is off by default and
-on in nightly so a run preserves the inputs for diagnosis.
+on in nightly so a run preserves the inputs for diagnosis. It also records native main-thread
+long tasks in `<tag>.longtasks.json`, on the same viewer clock. `--trace` implies capture and adds a
+Chromium GC timeline in `<tag>.trace.json` and sampled CPU profile in `<tag>.profile.json`.
+Tracing can perturb playback; compare it with a separate
+untraced control and never use traced rows to calibrate quality budgets.
 
 To replay a capture, put its arrivals and final environment configuration into the version 2
 `Trace` below, subtract the first arrival's `at` from every arrival and from the last sample's

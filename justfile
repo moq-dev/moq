@@ -46,6 +46,10 @@ dev:
 bench $BASE="":
     bench/run.sh "$BASE"
 
+# Benchmark the Rust, Go, Python, and Kotlin bindings against two Rust baselines.
+bench-ffi:
+    bench/ffi.sh
+
 # Measure audio group sizes across relay publisher/subscriber and fanout shapes.
 bench-audio:
     bench/run.sh --audio

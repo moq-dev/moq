@@ -769,7 +769,7 @@ export class Publisher {
 			const stream = await Writer.tryOpen(this.#quic, {
 				cancel: unsubscribed,
 				version: this.#session.version,
-				sendOrder: ranking.rank(group.sequence),
+				sendOrder: ranking.rank(group.sequence, slice.skip),
 				waitUntilAvailable: false,
 			});
 			if (!stream) {
@@ -778,7 +778,7 @@ export class Publisher {
 			}
 			streams.opened += 1;
 			// A REQUEST_UPDATE re-ranks the subscription, so a group already on the wire follows it.
-			ranking.add(stream, group.sequence);
+			ranking.add(stream, group.sequence, slice.skip);
 
 			const header = new GroupMessage({
 				trackAlias: requestId,
@@ -974,17 +974,18 @@ export class Publisher {
 
 			// A fill we cannot serve is reset right after its header, so it needs no rank.
 			const sequence = fill.kind === "group" ? Number(fill.sequence) : undefined;
+			const object = fill.kind === "group" ? Number(fill.skip) : 0;
 			stream = await Writer.tryOpen(this.#quic, {
 				cancel: unsubscribed,
 				version,
-				sendOrder: sequence === undefined ? undefined : ranking.rank(sequence),
+				sendOrder: sequence === undefined ? undefined : ranking.rank(sequence, object),
 			});
 			if (!stream) {
 				console.debug(`fill stream failed to open: fill=${requestId}`);
 				return;
 			}
 			streams.opened += 1;
-			if (sequence !== undefined) ranking.add(stream, sequence);
+			if (sequence !== undefined) ranking.add(stream, sequence, object);
 
 			await stream.u53(FetchHeader.type);
 			await new FetchHeader({ requestId }).encode(stream, version);

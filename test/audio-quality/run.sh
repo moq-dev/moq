@@ -34,6 +34,7 @@ OUT=""
 LIST=0
 ENFORCE=0
 CAPTURE=0
+TRACE=0
 PROFILE="${AQ_PROFILE:-debug}"
 
 split() {
@@ -94,6 +95,11 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         --capture)
+            CAPTURE=1
+            shift
+            ;;
+        --trace)
+            TRACE=1
             CAPTURE=1
             shift
             ;;
@@ -306,6 +312,7 @@ if [[ ${#ROWS[@]} -gt 0 ]]; then
         status=0
         capture_args=()
         [[ $CAPTURE -eq 0 ]] || capture_args=(--capture)
+        [[ $TRACE -eq 0 ]] || capture_args+=(--trace)
         harness_spawn "driver-$tag" "$HARNESS_RUN/driver-$tag.log" bun "$CLIENT/driver.ts" \
             --url "http://127.0.0.1:$SHAPER_PORT" \
             --fingerprint "$RELAY_URL/certificate.sha256" \

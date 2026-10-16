@@ -64,6 +64,7 @@ A bad shape costs a breaking change in every language, and the surface is huge.
 - A broadcast, track, or group name always means the same content. MoQ has no ETag-style invalidation, so a publisher that reuses a name for different content (such as restarting group numbers) is a bug; publish a new broadcast instead of working around it.
 - Avoid callback parameters. Return a handle, an event, or a Producer/Consumer split.
 - Avoid 4+ args; use a struct or object.
+- Prefer nesting related API, configuration, and structured output fields under their shared role.
 - Name by role, not today's implementation.
 - When a name or shape feels awkward, propose alternatives with a recommendation instead of shipping it.
 - Short names under a module namespace (`encode::Config`, not `EncoderConfig`). Mirror names across Rust, JS, and the bindings.

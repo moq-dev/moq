@@ -46,8 +46,10 @@ interop *args:
 
 # Nightly main vs newest installable registry releases: tokens, moq-lite session
 # versions, decoded catalogs/containers, and group FETCH. See interop/README.md.
-wire-compat:
-    ./interop/compat.sh
+# --remeasure also runs the planned breaks and rewrites them, as each release does.
+[positional-arguments]
+wire-compat *args:
+    ./interop/compat.sh "$@"
 
 # Paint a short-side transcode rung from a coded portrait through moq-watch.
 portrait:
@@ -115,6 +117,11 @@ audio-quality-record *args:
 drill-sensitivity *args:
     ./drill/sensitivity.sh "$@"
 
+# Select or run the PR's affected sensitivity mutations against its base.
+[positional-arguments]
+drill-pr mode base="":
+    python3 ./drill/pr.py "$@"
+
 # Round-trips a PCR-paced TS through a relay and checks the subscriber's `export
 # ts` output with FFmpeg, TSDuck and a custom analyzer (the T-STD buffer model, PCR
 # spacing and byte schedule). Flags: `--analyze-only file.ts`
@@ -128,6 +135,7 @@ drill-sensitivity *args:
 # Check the subscriber's MPEG-TS output for IRD compliance.
 [positional-arguments]
 ts *args:
+    python3 ./ts/fragment_pes.test.py
     python3 ./ts/pcr-timing.test.py
     ./ts/run.sh "$@"
 
@@ -184,3 +192,9 @@ bare-fin:
 # Explore JSON snapshot codec sequences with a fresh replayable seed.
 json-properties:
     bash json-properties.sh
+
+# Complete MoQ SETUP and transfer a frame over a real browser data-channel pair.
+p2p:
+    cd .. && bun install --frozen-lockfile
+    cd p2p && bunx playwright install chromium
+    cd p2p && bun test ./transport.browser.ts

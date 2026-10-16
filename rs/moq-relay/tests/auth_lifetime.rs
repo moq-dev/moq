@@ -160,7 +160,7 @@ async fn spawn_relay_with(
 			let conn = Connection::new(request, cluster.clone(), auth.clone()).with_id(id);
 			id += 1;
 			tokio::spawn(async move {
-				let _ = conn.run().await;
+				conn.run().await;
 			});
 		}
 	});
@@ -345,7 +345,7 @@ async fn spawn_quic_relay_with(
 		while let Some(request) = server.accept().await {
 			let conn = Connection::new(request, cluster.clone(), auth.clone());
 			tokio::spawn(async move {
-				let _ = conn.run().await;
+				conn.run().await;
 			});
 		}
 	});

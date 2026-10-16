@@ -238,6 +238,13 @@ impl Error {
 		match self {
 			#[cfg(feature = "websocket")]
 			Self::TransportRace { quic, websocket } => quic.is_terminal() && websocket.is_terminal(),
+			Self::MoqNet(err) => matches!(
+				moq_net::SessionError::from(err),
+				moq_net::SessionError::Unauthorized
+					| moq_net::SessionError::ProtocolViolation
+					| moq_net::SessionError::KeyValueFormatting
+					| moq_net::SessionError::InvalidRequestId
+			),
 			Self::Tls(err) => err.is_terminal(),
 			Self::NoBackend(_)
 			| Self::Deprecated(_)

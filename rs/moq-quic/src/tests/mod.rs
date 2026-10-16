@@ -3295,6 +3295,56 @@ fn lost_finished_after_initial_backoff() {
     assert!(elapsed < Duration::from_secs(1), "{elapsed:?}");
 }
 
+/// A lost ACK of a multi-datagram flight's head is repeated in the next packet the receiver
+/// sends in that space, so the sender learns the head arrived without waiting on another ACK.
+#[test]
+fn lost_handshake_ack_repeats_in_next_packet() {
+    let _guard = subscribe();
+    let (cert, key) = big_cert_and_key();
+    let mut pair = Pair::new(
+        Default::default(),
+        server_config_with_cert(cert.clone(), key),
+    );
+    pair.latency = Duration::from_millis(50);
+
+    pair.begin_connect(client_config_with_certs(vec![cert]));
+    pair.drive_client();
+    pair.time = pair.server.next_wakeup().unwrap();
+    pair.server.drive(pair.time, pair.client.addr);
+    // Only the head of the server's flight arrives. The rest, whether sent with it or paced
+    // out behind it, is lost.
+    let mut lost = pair.server.outbound.len() - 1;
+    pair.server.outbound.truncate(1);
+    pair.drive_server();
+    while pair.server.next_wakeup() < pair.client.next_wakeup() {
+        pair.time = pair.server.next_wakeup().unwrap();
+        pair.server.drive(pair.time, pair.client.addr);
+        lost += pair.server.outbound.len();
+        pair.server.outbound.clear();
+    }
+    assert!(lost > 0);
+    let server_ch = pair.server.assert_accept();
+
+    // The client ACKs the head, and that ACK is lost.
+    pair.time = pair.client.next_wakeup().unwrap();
+    pair.drive_client();
+    assert!(!pair.server.inbound.is_empty());
+    pair.server.inbound.clear();
+    let acks = pair.server_conn_mut(server_ch).stats().frame_rx.acks;
+
+    // The client's next packet is its PTO probe, which carries the ACK again.
+    while pair.server.inbound.is_empty() {
+        pair.time = pair.client.next_wakeup().unwrap();
+        pair.drive_client();
+    }
+    pair.time = pair.server.inbound.front().unwrap().0;
+    pair.drive_server();
+    assert_eq!(
+        pair.server_conn_mut(server_ch).stats().frame_rx.acks,
+        acks + 1
+    );
+}
+
 /// A short idle timeout does not cut the handshake to two Initial flights.
 ///
 /// Before an RTT sample the PTO is 999ms, so a 2s idle timeout is armed at 2997ms, while

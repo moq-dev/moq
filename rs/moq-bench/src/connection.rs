@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use moq_tokio::Status;
@@ -108,6 +108,7 @@ pub async fn run(ctx: Connection) {
 	};
 
 	let mut broadcasts = Vec::new();
+	let mut publishing = Vec::new();
 	let mut own = HashSet::new();
 	let mut tasks = JoinSet::new();
 
@@ -150,8 +151,9 @@ pub async fn run(ctx: Connection) {
 		// published and advertised.
 		broadcasts.push(broadcast);
 
-		let stats = stats.clone();
-		tasks.spawn(produce(connection, path, rolled, track, stats));
+		let published = Published::new(stats.clone());
+		publishing.push(Arc::downgrade(&published));
+		tasks.spawn(produce(connection, path, rolled, track, published));
 	}
 
 	let client = client.with_publisher(&publish).with_subscriber(consume.clone());
@@ -190,6 +192,9 @@ pub async fn run(ctx: Connection) {
 					if !connected {
 						connected = true;
 						stats.connections.fetch_add(1, Ordering::Relaxed);
+						for published in publishing.iter().filter_map(std::sync::Weak::upgrade) {
+							published.establish();
+						}
 					}
 				}
 				Ok(Status::Disconnected) => {
@@ -225,8 +230,9 @@ async fn produce(
 	path: String,
 	rolled: Rolled,
 	track: track::Producer,
-	stats: Arc<Stats>,
+	published: Arc<Published>,
 ) -> anyhow::Result<()> {
+	let stats = &published.stats;
 	let _gauge = Gauge::inc(&stats.broadcasts);
 
 	// Zero fps means an idle track: keep it published but never produce.
@@ -283,6 +289,9 @@ async fn produce(
 		}
 
 		group.finish()?;
+		if sequence == 0 {
+			published.establish();
+		}
 		sequence += 1;
 	}
 }
@@ -452,6 +461,7 @@ async fn drain(broadcast: broadcast::Consumer, max_delay: Duration, stats: &Stat
 	let mut track = broadcast.track(TRACK)?.subscribe(subscription).await?;
 	let mut gaps = GapTracker::new(stats);
 	let mut learned_shape = false;
+	let mut established = None;
 
 	// `recv_group` yields groups in arrival order, including out of sequence, so we
 	// can spot holes. `next_group` would silently drop late arrivals and hide them.
@@ -459,7 +469,12 @@ async fn drain(broadcast: broadcast::Consumer, max_delay: Duration, stats: &Stat
 		let sequence = group.sequence;
 		match read_group(&mut group, &mut learned_shape, stats).await {
 			// Only a group read end to end counts as delivered.
-			Ok(()) => gaps.complete(sequence),
+			Ok(()) => {
+				if established.is_none() {
+					established = Some(Gauge::inc(&stats.subscriptions_established));
+				}
+				gaps.complete(sequence);
+			}
 			// The relay failed this one group: `Error::Lagged` once we fall behind.
 			Err(err) => {
 				gaps.fail(sequence);
@@ -595,6 +610,35 @@ impl<'a> GapTracker<'a> {
 	}
 }
 
+/// Shared only while the producer lives; the connection keeps a weak handle.
+/// Connecting and completing the first group may race, but count this broadcast once.
+struct Published {
+	stats: Arc<Stats>,
+	established: AtomicBool,
+}
+
+impl Published {
+	fn new(stats: Arc<Stats>) -> Arc<Self> {
+		Arc::new(Self {
+			stats,
+			established: AtomicBool::new(false),
+		})
+	}
+	fn establish(&self) {
+		if !self.established.swap(true, Ordering::Relaxed) {
+			self.stats.broadcasts_established.fetch_add(1, Ordering::Relaxed);
+		}
+	}
+}
+
+impl Drop for Published {
+	fn drop(&mut self) {
+		if *self.established.get_mut() {
+			self.stats.broadcasts_established.fetch_sub(1, Ordering::Relaxed);
+		}
+	}
+}
+
 /// RAII counter: bumps a gauge on creation and restores it on drop, so a gauge
 /// reflects live state even when the owning task is aborted.
 struct Gauge<'a>(&'a AtomicU64);
@@ -615,6 +659,127 @@ impl Drop for Gauge<'_> {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[test]
+	fn a_broadcast_is_established_once_and_its_gauge_drops_with_the_producer() {
+		let stats = Arc::new(Stats::new(crate::stats::Targets {
+			broadcasts: 1,
+			..Default::default()
+		}));
+		let published = Published::new(stats.clone());
+		assert!(!stats.ready());
+		assert_eq!(stats.broadcasts_established.load(Ordering::Relaxed), 0);
+		published.establish(); // connected
+		published.establish(); // first group
+		assert_eq!(stats.broadcasts_established.load(Ordering::Relaxed), 1);
+		assert!(stats.ready());
+		drop(published);
+		assert_eq!(stats.broadcasts_established.load(Ordering::Relaxed), 0);
+		assert!(stats.ready());
+	}
+
+	#[tokio::test]
+	async fn a_subscription_is_established_only_after_a_complete_group() {
+		tokio::time::pause();
+		let stats = Arc::new(Stats::new(crate::stats::Targets {
+			subscriptions: 1,
+			..Default::default()
+		}));
+		let broadcast = broadcast::Info::new().produce();
+		let track = broadcast.create_track(TRACK, timed()).unwrap();
+		let consumer = broadcast.consume();
+		let task = {
+			let stats = stats.clone();
+			tokio::spawn(async move { drain(consumer, Duration::ZERO, &stats).await })
+		};
+		let mut failed = track.append_group().unwrap();
+		failed
+			.write_frame(moq_net::Timestamp::now(), Bytes::from_static(b"{}"))
+			.unwrap();
+		wait_for(&stats.frames_recv, 1).await;
+		assert!(!stats.ready());
+		assert_eq!(stats.subscriptions.load(Ordering::Relaxed), 1);
+		assert_eq!(stats.subscriptions_established.load(Ordering::Relaxed), 0);
+		failed.abort(moq_net::Error::Lagged).unwrap();
+		let mut complete = track.append_group().unwrap();
+		complete
+			.write_frame(moq_net::Timestamp::now(), Bytes::from_static(b"{}"))
+			.unwrap();
+		wait_for(&stats.frames_recv, 2).await;
+		assert!(!stats.ready());
+		complete.finish().unwrap();
+		wait_for(&stats.subscriptions_established, 1).await;
+		assert!(stats.ready());
+		track.finish().unwrap();
+		task.await.unwrap().unwrap();
+		assert_eq!(stats.subscriptions_established.load(Ordering::Relaxed), 0);
+		assert!(stats.ready());
+	}
+
+	#[tokio::test]
+	async fn an_idle_producer_counts_before_it_establishes() {
+		tokio::time::pause();
+		let stats = Arc::new(Stats::new(crate::stats::Targets {
+			broadcasts: 1,
+			..Default::default()
+		}));
+		let broadcast = broadcast::Info::new().produce();
+		let track = broadcast.create_track(TRACK, timed()).unwrap();
+		let published = Published::new(stats.clone());
+		let connection = Arc::downgrade(&published);
+		let task = tokio::spawn(produce(0, "bench/test".into(), rolled(0, 0, 0), track, published));
+		wait_for(&stats.broadcasts, 1).await;
+		assert_eq!(stats.broadcasts_established.load(Ordering::Relaxed), 0);
+		assert!(!stats.ready());
+		connection.upgrade().unwrap().establish();
+		assert_eq!(stats.broadcasts_established.load(Ordering::Relaxed), 1);
+		assert!(stats.ready());
+		task.abort();
+		assert!(task.await.unwrap_err().is_cancelled());
+		assert_eq!(stats.broadcasts.load(Ordering::Relaxed), 0);
+		assert_eq!(stats.broadcasts_established.load(Ordering::Relaxed), 0);
+		assert!(stats.ready());
+	}
+
+	/// Sweep connection count and the broadcast fan-out touched by connection establishment.
+	#[test]
+	#[ignore = "benchmark, run nightly"]
+	fn benchmark_readiness_establishment() {
+		for connections in [1, 16, 128] {
+			for broadcasts in [1, 16, 128] {
+				let count = connections * broadcasts;
+				let stats = Arc::new(Stats::new(crate::stats::Targets {
+					connections,
+					broadcasts: count,
+					subscriptions: 0,
+				}));
+				let publishers: Vec<_> = (0..connections)
+					.map(|_| {
+						(0..broadcasts)
+							.map(|_| Published::new(stats.clone()))
+							.collect::<Vec<_>>()
+					})
+					.collect();
+				let weak: Vec<Vec<_>> = publishers
+					.iter()
+					.map(|connection| connection.iter().map(Arc::downgrade).collect())
+					.collect();
+				let start = std::time::Instant::now();
+				for connection in &weak {
+					stats.connections.fetch_add(1, Ordering::Relaxed);
+					for published in connection.iter().filter_map(std::sync::Weak::upgrade) {
+						published.establish();
+					}
+				}
+				assert!(std::hint::black_box(stats.ready()));
+				println!(
+					"readiness connections={connections} broadcasts_per_connection={broadcasts} elapsed_ns={}",
+					start.elapsed().as_nanos()
+				);
+				assert_eq!(stats.broadcasts_established.load(Ordering::Relaxed), count);
+			}
+		}
+	}
 
 	/// A millisecond track: the frames written here carry timestamps.
 	fn timed() -> moq_net::track::Info {
@@ -653,7 +818,13 @@ mod tests {
 		let consumer = broadcast.consume();
 
 		// 10fps (100ms/frame), 8-byte frames, 2 payload frames per group.
-		let task = tokio::spawn(produce(7, "bench/test".into(), rolled(10, 8, 2), track, stats.clone()));
+		let task = tokio::spawn(produce(
+			7,
+			"bench/test".into(),
+			rolled(10, 8, 2),
+			track,
+			Published::new(stats.clone()),
+		));
 
 		// Advance past one full group (keyframe + 2 payload) into the next.
 		tokio::time::advance(Duration::from_millis(350)).await;
@@ -696,7 +867,13 @@ mod tests {
 		let track = broadcast.create_track(TRACK, timed()).unwrap();
 		let consumer = broadcast.consume();
 
-		let task = tokio::spawn(produce(0, "bench/test".into(), rolled(10, 4, 0), track, stats.clone()));
+		let task = tokio::spawn(produce(
+			0,
+			"bench/test".into(),
+			rolled(10, 4, 0),
+			track,
+			Published::new(stats.clone()),
+		));
 		tokio::time::advance(Duration::from_millis(250)).await;
 
 		let mut sub = consumer
@@ -733,7 +910,7 @@ mod tests {
 			"bench/test".into(),
 			rolled(10, 300, 0),
 			track,
-			stats.clone(),
+			Published::new(stats.clone()),
 		));
 		tokio::time::advance(Duration::from_millis(250)).await;
 
@@ -761,7 +938,13 @@ mod tests {
 		let consumer = broadcast.consume();
 
 		// 50 bytes is well under the serialized header (roughly 170 bytes).
-		let task = tokio::spawn(produce(3, "bench/test".into(), rolled(10, 50, 0), track, stats.clone()));
+		let task = tokio::spawn(produce(
+			3,
+			"bench/test".into(),
+			rolled(10, 50, 0),
+			track,
+			Published::new(stats.clone()),
+		));
 		tokio::time::advance(Duration::from_millis(250)).await;
 
 		let mut sub = consumer.track(TRACK).unwrap().subscribe(None).await.unwrap().ordered();

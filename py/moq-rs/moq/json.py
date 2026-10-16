@@ -9,6 +9,7 @@ as well as by name. Values are any JSON-serializable Python object.
 from __future__ import annotations
 
 import json
+from datetime import timedelta
 from typing import Any
 
 from moq_ffi import (
@@ -20,6 +21,7 @@ from moq_ffi import (
     MoqJsonStreamProducer,
 )
 
+from ._records import _opt_us
 from .publish import BroadcastProducer, TrackDemand, TrackProducer
 from .subscribe import TrackConsumer
 
@@ -56,9 +58,9 @@ class SnapshotProducer:
         """A watch-only handle to whether this track has subscribers."""
         return TrackDemand(self._inner.demand())
 
-    def update(self, value: Any) -> None:
+    def update(self, value: Any, *, timestamp: timedelta | None = None) -> None:
         """Publish a new value. A no-op if unchanged from the previous update."""
-        self._inner.update(json.dumps(value))
+        self._inner.update(json.dumps(value), _opt_us(timestamp, "timestamp"))
 
     def finish(self) -> None:
         """Finish the track, closing any open group."""
@@ -81,9 +83,9 @@ class StreamProducer:
         """A watch-only handle to whether this track has subscribers."""
         return TrackDemand(self._inner.demand())
 
-    def append(self, value: Any) -> None:
+    def append(self, value: Any, *, timestamp: timedelta | None = None) -> None:
         """Append one record to the log."""
-        self._inner.append(json.dumps(value))
+        self._inner.append(json.dumps(value), _opt_us(timestamp, "timestamp"))
 
     def finish(self) -> None:
         """Finish the track, closing the group."""

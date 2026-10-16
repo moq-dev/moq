@@ -62,8 +62,10 @@ jobs:
           - name: Features
             recipe: rs features
             profile: ci
-          - name: Go publisher runtime benchmark
-            recipe: go bench -benchtime=1x
+          - name: Binding benchmark
+            recipe: bench-ffi
+            artifact: bench-ffi
+            artifact-path: target/bench/ffi
           - name: Audio grouping relay benchmark
             recipe: bench-audio
           # Smoke-tests the capture path: exact off-CPU waits, resolved worker stacks and CPU.
@@ -126,6 +128,14 @@ jobs:
         run: nix develop ${{ matrix.shell }} --command just ${{ matrix.recipe }}
         env:
           NEXTEST_PROFILE: ${{ matrix.profile || 'default' }}
+
+      - name: Preserve results
+        if: ${{ matrix.artifact && !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact-path }}
+          retention-days: 45
 
   tests:
     name: Tests (${{ matrix.recipe }})
