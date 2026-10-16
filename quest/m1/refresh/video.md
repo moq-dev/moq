@@ -27,16 +27,21 @@ Decided 2026-10-16 (see the [epic](/quest/m1/refresh/README.md)).
   WebCodecs publisher, and let refresh-driven keyframes take over. The byte
   ratio already bounds the rate, and the floor would let a high-bitrate
   joiner download well past the ratio (maintainer, #5734 review).
-- Open: the default ratio for video tracks, and whether it is per rendition.
-  Measure the bytes a joiner downloads against the extra keyframes sent on
-  a representative stream, then pick a default; the maintainer decides.
+- Open, settled with the maintainer before any code: where the ratio is
+  configured (an encoder option, a rendition option, or a fixed default
+  with no public field), its default, and whether it varies per rendition.
+  The publishers create their tracks internally, so this decides how
+  `track::Info::refresh` gets populated. Measure the bytes a joiner
+  downloads against the extra keyframes sent on a representative stream,
+  then decide.
 - Docs: the encoder options in `doc/` that describe GOP length.
 
 Tests: a forced-keyframe test per backend that supports it, using simulated
 time where the encoder allows, and a browser test for `js/publish`. Each
 covers a ratio crossing within 500 ms of the previous keyframe.
 
-Public API: possibly an encoder config field for the ratio. Wire: none.
+Public API: set by the open decision above, either an encoder or rendition
+config field for the ratio, or none for a fixed default. Wire: none.
 
 ## Required
 
