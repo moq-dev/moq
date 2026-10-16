@@ -6,6 +6,10 @@ microbenchmarks stay beside their crates under `rs/*/benches`, while the
 
 `run.sh` owns builds, comparison rounds, and reporting. `relay.sh` owns the
 temporary relay lifecycle and load execution shared by each comparison mode.
+A temporary relay is ready only once its PID owns both the TCP listener and UDP
+socket on its assigned port. `lsof`, included in the Nix shell, verifies
+ownership. A collision uses the existing startup attempts; exhausted attempts
+fail with the relay log before any load starts.
 
 ## Commands
 
