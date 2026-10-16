@@ -103,6 +103,7 @@ impl Track {
 					let mut payload = None;
 					let mut id = None;
 					let mut settings = None;
+					let mut origin = None;
 					while !body.is_empty() {
 						let atom = Any::decode_maybe(&mut body)
 							.map_err(Error::from)?
@@ -114,6 +115,7 @@ impl Track {
 							b"payl" => &mut payload,
 							b"iden" => &mut id,
 							b"sttg" => &mut settings,
+							b"ctim" => &mut origin,
 							_ => return Err(Error::InvalidSubtitle("unsupported WebVTT cue box").into()),
 						};
 						if field.is_some() {
@@ -124,9 +126,14 @@ impl Track {
 					}
 					let payload = payload.ok_or(Error::InvalidSubtitle("missing WebVTT cue payload"))?;
 					// Inline timestamps sit on the source timeline, which only `ctim` anchors.
-					if text::has_timestamp(&payload) {
-						return Err(Error::InvalidSubtitle("inline WebVTT timestamps are unsupported").into());
-					}
+					let payload = if let Some(origin) = origin {
+						let origin = text::timestamp(&origin).map_err(Error::InvalidSubtitle)?;
+						text::rebase(&payload, start..end, origin).map_err(Error::InvalidSubtitle)?
+					} else if text::has_timestamp(&payload) {
+						return Err(Error::InvalidSubtitle("inline WebVTT timestamp has no cue origin").into());
+					} else {
+						payload
+					};
 					text::append(
 						&mut output,
 						Cue {
@@ -138,6 +145,13 @@ impl Track {
 						},
 					)
 					.map_err(Error::InvalidSubtitle)?;
+				}
+				b"vtta" => {
+					let value =
+						std::str::from_utf8(&body).map_err(|_| Error::InvalidSubtitle("invalid WebVTT UTF-8"))?;
+					if !value.is_empty() {
+						text::comments(&mut output, value).map_err(Error::InvalidSubtitle)?;
+					}
 				}
 				_ => return Err(Error::InvalidSubtitle("unsupported WebVTT sample box").into()),
 			}

@@ -4,23 +4,16 @@
 
 A binding moves a frame payload across the FFI with no per-byte loop: every
 copy on the path is a bulk copy, and the report counts them per direction.
-Proven by a payload benchmark in every wrapper (Python, Go,
-Kotlin, Swift, Dart, and C++) that runs nightly. The benchmark is the shared
-harness later binding performance quests reuse.
+Proven on the nightly [binding benchmark](/bench/README.md) in every
+wrapper (Python, Go, Kotlin, Swift, Dart, and C++).
 
 ## Plan
 
 Decided with the maintainer on 2026-10-13:
 
-- **Benchmark first.** Each wrapper gets a benchmark of payload throughput
-  and per-call cost: `write_frame` and `read_frame` on an in-process
-  publisher and subscriber (no network), frame sizes swept from 100 B to
-  1 MB, plus a no-op call and a record round trip. Add a Rust microbenchmark
-  of UniFFI's lift and lower for `Vec<u8>`. Wire them all into nightly CI.
-  Every wrapper, because each lowers bytes differently and a generator
-  regression only shows in its own language. The
-  [poll spike](/quest/m1/ffi-poll.md) and the
-  [size profile](/quest/m2/ffi-size-profile.md) reuse this harness.
+- **Benchmark first.** `just bench-ffi` ([bench/README.md](/bench/README.md))
+  measures every wrapper before and after. Add a Rust microbenchmark of
+  UniFFI's lift and lower for `Vec<u8>` here, beside the patch it proves.
 - **Bulk copy in the fork's core.** UniFFI lifts and lowers `Vec<u8>`
   through the generic `Vec<T>` path, one byte at a time with a bounds check
   each (`uniffi_core` `ffi_converter_impls.rs`), in both directions. That
@@ -49,4 +42,5 @@ type. Wire: none.
 
 ## Required
 
+- [Swift, Dart, and C++ benchmarks](/quest/m1/ffi-bench-wrappers.md) - the other three wrappers' numbers
 - [Hard fork](/quest/m1/uniffi-fork.md) - the repository the core patch lands in

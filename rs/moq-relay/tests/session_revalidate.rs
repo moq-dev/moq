@@ -179,7 +179,7 @@ impl Fixture {
 						.with_sessions(sessions.clone());
 					id += 1;
 					tokio::spawn(async move {
-						let _ = conn.run().await;
+						conn.run().await;
 					});
 				}
 			});

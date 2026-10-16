@@ -121,7 +121,7 @@ async fn node(id: u64, connect: Vec<Peer>) -> Node {
 		while let Some(request) = listener.accept().await {
 			let connection = Connection::new(request, serving.clone(), auth.clone());
 			sessions.spawn(async move {
-				let _ = connection.run().await;
+				connection.run().await;
 			});
 		}
 	});

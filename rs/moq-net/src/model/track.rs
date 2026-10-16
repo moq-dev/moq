@@ -262,7 +262,7 @@ pub(crate) struct TrackState {
 
 	// Datagrams in arrival order, bounded by `MAX_DATAGRAMS`. Shares the group
 	// sequence namespace but is otherwise independent.
-	datagrams: VecDeque<Datagram>,
+	datagrams: VecDeque<super::datagram::Stored>,
 
 	// Number of datagrams dropped off the front (over capacity), mapping a subscriber's absolute
 	// cursor to an index into `datagrams` (mirrors `offset` for groups).
@@ -569,7 +569,7 @@ impl TrackState {
 	/// Returns the datagram and its absolute index so the consumer can advance past it. A
 	/// consumer whose `index` has fallen behind `datagram_offset` (older datagrams dropped)
 	/// resumes at the oldest still-buffered datagram, skipping the lost ones.
-	fn poll_recv_datagram(&self, index: usize) -> Poll<Result<Option<(Datagram, usize)>>> {
+	fn poll_recv_datagram(&self, index: usize) -> Poll<Result<Option<(super::datagram::Stored, usize)>>> {
 		let start = index.saturating_sub(self.datagram_offset);
 		if self.readable()
 			&& let Some(datagram) = self.datagrams.get(start)
@@ -593,7 +593,7 @@ impl TrackState {
 	}
 
 	/// Push a datagram, dropping the oldest when the send buffer is full.
-	fn push_datagram(&mut self, datagram: Datagram) {
+	fn push_datagram(&mut self, datagram: super::datagram::Stored) {
 		if self.datagrams.len() == MAX_DATAGRAMS {
 			self.datagrams.pop_front();
 			self.datagram_offset += 1;
@@ -711,9 +711,8 @@ impl TrackState {
 	/// as though it were a live replacement.
 	fn live_edge(&self, cap: Option<u64>) -> Option<PresentationEdge> {
 		self.lookup
-			.range(..)
+			.range((Bound::Unbounded, cap.map_or(Bound::Unbounded, Bound::Excluded)))
 			.rev()
-			.filter(|(seq, _)| super::subscription::before_end(**seq, cap))
 			.find_map(|(_, slot)| {
 				if !slot.is_shown() {
 					return None;
@@ -1702,6 +1701,12 @@ impl TrackState {
 		producer.write().map_err(|r| r.abort.clone().unwrap_or(Error::Dropped))
 	}
 
+	/// Abort shared track state without extending its publisher lifetime.
+	pub(crate) fn abort(producer: &kio::Producer<Self>, err: Error) -> Result<()> {
+		commit_abort(Self::modify(producer)?, err);
+		Ok(())
+	}
+
 	/// Insert a group fetched for a [`group::Request`], setting the track's [`Info`]
 	/// if it isn't accepted yet. The group's timescale comes from that info, so a
 	/// fetch can serve an as-yet-unaccepted track (e.g. a relay with no live
@@ -1870,6 +1875,11 @@ impl Producer {
 		&self.broadcast
 	}
 
+	/// The properties this track was created with.
+	pub fn info(&self) -> &Info {
+		&self.info
+	}
+
 	/// Create a new group with the given sequence number.
 	pub fn create_group(&self, group: group::Info) -> Result<group::Producer> {
 		self.insert(group, false)
@@ -1976,11 +1986,14 @@ impl Producer {
 		}
 		state.advance(sequence);
 		meter.datagram(payload.len() as u64);
-		state.push_datagram(Datagram {
-			sequence,
-			timestamp,
-			payload,
-		});
+		state.push_datagram(
+			Datagram {
+				sequence,
+				timestamp,
+				payload,
+			}
+			.into(),
+		);
 		let cache = state.cache.clone();
 		drop(state);
 		cache.settle(None);
@@ -1998,28 +2011,36 @@ impl Producer {
 		timestamp: impl Into<Option<Timestamp>>,
 		payload: B,
 	) -> Result<()> {
-		let payload = payload.into_bytes();
-		if payload.len() > super::datagram::MAX_DATAGRAM_PAYLOAD {
+		self.insert_wire_datagram(
+			Datagram {
+				sequence,
+				timestamp: timestamp.into(),
+				payload: payload.into_bytes(),
+			}
+			.into(),
+		)
+	}
+
+	pub(crate) fn insert_wire_datagram(&mut self, mut datagram: super::datagram::Stored) -> Result<()> {
+		if datagram.payload.len() > super::datagram::MAX_DATAGRAM_PAYLOAD {
 			return Err(Error::FrameTooLarge);
 		}
-		// Resolved before the state guard borrows `self`.
 		let meter = self.stats.meter();
 		let mut state = self.modify()?;
-		// Normalize into the track's timescale, like frames (see `group::Producer::create_frame`).
 		let timescale = state.info.as_ref().unwrap().timescale;
-		let timestamp = group::on_track(timestamp.into(), timescale)?;
-		if let Some(fin) = state.final_sequence()
-			&& sequence >= fin
+		if !datagram
+			.wire
+			.as_ref()
+			.is_some_and(|wire| wire.status.is_some_and(|status| status != 0))
 		{
+			datagram.datagram.timestamp = group::on_track(datagram.timestamp, timescale)?;
+		}
+		if state.final_sequence().is_some_and(|fin| datagram.sequence >= fin) {
 			return Err(Error::Closed);
 		}
-		state.advance(sequence);
-		meter.datagram(payload.len() as u64);
-		state.push_datagram(Datagram {
-			sequence,
-			timestamp,
-			payload,
-		});
+		state.advance(datagram.sequence);
+		meter.datagram(datagram.payload.len() as u64);
+		state.push_datagram(datagram);
 		let cache = state.cache.clone();
 		drop(state);
 		cache.settle(None);
@@ -2241,8 +2262,7 @@ impl Producer {
 	/// [`finish`](Self::finish) is deliberately not terminal: it declares the final
 	/// sequence, and lower-numbered groups may still be written afterwards.
 	pub fn abort(self, err: Error) -> Result<()> {
-		commit_abort(self.modify()?, err);
-		Ok(())
+		TrackState::abort(&self.state, err)
 	}
 
 	/// Abort an unused track, returning the producer unchanged if consumers remain.
@@ -3163,6 +3183,9 @@ impl Consumer {
 	/// miss.
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub(crate) fn peek_group(&self, sequence: u64) -> Option<group::Consumer> {
+		if let Some(serving) = self.serving() {
+			return serving.peek_group(sequence);
+		}
 		let state = self.state.read();
 		let group = state.lookup.get(&sequence)?.serving();
 		if group.is_aborted() {
@@ -3919,6 +3942,7 @@ struct Cursor {
 	/// are parked here instead of dropped). Keyed by sequence so the lowest is
 	/// re-offered first.
 	parked: BTreeMap<u64, group::Consumer>,
+	aborts: Option<Box<super::aborts::Watch>>,
 	/// [`Self::end_sequence`], shared with the groups this cursor hands out so their
 	/// expiry measures drift against the same servable window after a cap moves.
 	///
@@ -3972,6 +3996,7 @@ impl Cursor {
 			next_sequence: Some(0),
 			end_sequence: None,
 			parked: BTreeMap::new(),
+			aborts: None,
 			drift_cap: kio::Producer::new(None),
 			stale: stats::Content::default(),
 			seek_pending: BTreeMap::new(),
@@ -4087,26 +4112,46 @@ impl Cursor {
 		}))
 	}
 
-	fn poll_recv_group(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<group::Consumer>>> {
-		// An eviction aborts a parked group without touching any cursor this
-		// subscriber polls, so each entry needs a waiter or this poll would never
-		// rerun. `poll_closed` observes-or-registers under one lock: `Pending`
-		// parks the waiter while the group is open (an open group cannot be
-		// aborted), and `Ready` means closed, where only an abort invalidates the
-		// entry. Checking `is_aborted` separately from the registration would leave
-		// a window where an abort lands between the two and wakes nobody.
-		let watch = |group: &group::Consumer| match group.poll_closed(waiter) {
-			Poll::Pending => true,
-			Poll::Ready(()) => !group.is_aborted(),
-		};
+	/// Hold a capped group without losing another copy's abort notification.
+	fn park(&mut self, consumer: group::Consumer, waiter: &kio::Waiter) {
+		let aborts = self
+			.aborts
+			.get_or_insert_with(|| Box::new(self.state.read().cache.watch_aborts()));
+		// Register before checking: an abort on either side of the check is
+		// observed now or queued for the next poll.
+		aborts.insert(consumer.sequence);
+		if consumer.is_aborted() {
+			if !self.parked.contains_key(&consumer.sequence) {
+				aborts.remove(consumer.sequence);
+			}
+		} else {
+			self.parked.insert(consumer.sequence, consumer);
+		}
+		aborts.register(waiter);
+	}
 
-		// A raised `start_at` drops parked groups it overtook, and eviction/expiry
-		// (which aborts a cached group) drops its parked entry. The latter is what
-		// bounds parking: a subscription capped indefinitely holds only what the
-		// track's cache policy still retains, not every group it ever observed.
-		let min_sequence = self.min_sequence;
-		self.parked
-			.retain(|sequence, group| *sequence >= min_sequence && watch(group));
+	fn poll_recv_group(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<group::Consumer>>> {
+		if let Some(aborts) = &self.aborts {
+			// A sequence may name both a live group and its fetched head. Only the
+			// consumer we parked decides whether this notification invalidates it.
+			for sequence in aborts.poll(waiter) {
+				if self.parked.get(&sequence).is_some_and(group::Consumer::is_aborted) {
+					self.parked.remove(&sequence);
+					aborts.remove(sequence);
+				}
+			}
+			// Each overtaken entry is removed once, rather than scanning every entry
+			// again for every delivered group.
+			while let Some((&sequence, _)) = self.parked.first_key_value()
+				&& sequence < self.min_sequence
+			{
+				self.parked.pop_first();
+				aborts.remove(sequence);
+			}
+			if self.parked.is_empty() {
+				self.aborts = None;
+			}
+		}
 
 		// One scan for the whole poll, so walking a backlog off stays linear in its size.
 		let drift = ready!(self.poll_drift(self.end_sequence, waiter))?;
@@ -4117,6 +4162,10 @@ impl Cursor {
 			let consumer = match self.parked.keys().next().copied() {
 				Some(sequence) if super::subscription::before_end(sequence, self.end_sequence) => {
 					let group = self.parked.remove(&sequence).expect("just looked it up");
+					self.aborts
+						.as_ref()
+						.expect("parked groups are watched")
+						.remove(sequence);
 					// A re-offer is a delivery: stamp it like a fresh hand-out.
 					group.cache_refresh();
 					group
@@ -4141,12 +4190,8 @@ impl Cursor {
 					// Park a group beyond the cap instead of dropping it, and keep scanning
 					// so an in-range group that arrived behind it still flows.
 					if !super::subscription::before_end(consumer.sequence, self.end_sequence) {
-						// Watch it from the moment it parks: the retain pass above already
-						// ran, so an entry admitted here would otherwise sit unwatched for
-						// the rest of this poll, and an abort could wake nobody.
-						if watch(&consumer) {
-							self.parked.insert(consumer.sequence, consumer);
-						}
+						self.park(consumer, waiter);
+
 						continue;
 					}
 					consumer
@@ -4165,11 +4210,11 @@ impl Cursor {
 
 	/// The next datagram inside this subscriber's range, dropping the ones outside it.
 	///
-	/// The range is the one groups get: the floor, the cap, and a start frame past 0, which
-	/// excludes the start group's only frame. A datagram is judged when the cursor reaches
+	/// The range is the one groups get: the floor, the cap, and the start Object ID.
+	/// Plain datagrams have Object ID 0. A datagram is judged when the cursor reaches
 	/// it, against the range in force then, and one outside it is gone for good: unlike a
 	/// group past the cap, nothing holds it for a later raise.
-	fn poll_recv_datagram(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Datagram>>> {
+	fn poll_recv_datagram(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<super::datagram::Stored>>> {
 		loop {
 			let Some((datagram, found_index)) =
 				ready!(self.poll(waiter, |state| state.poll_recv_datagram(self.datagram_index))?)
@@ -4179,11 +4224,10 @@ impl Cursor {
 			self.datagram_index = found_index + 1;
 
 			let sequence = datagram.sequence;
-			let mid_group = self
-				.subscription
-				.read()
-				.start
-				.is_some_and(|start| start.group == sequence && start.frame > 0);
+			let mid_group = self.subscription.read().start.is_some_and(|start| {
+				start.group == sequence
+					&& start.frame > datagram.wire.as_ref().and_then(|wire| wire.object_id).unwrap_or(0)
+			});
 			if sequence >= self.min_sequence
 				&& super::subscription::before_end(sequence, self.end_sequence)
 				&& !mid_group
@@ -4475,6 +4519,25 @@ impl Subscriber {
 	/// `Poll::Ready(Ok(None))` when the track is finished, `Poll::Ready(Err(e))` when the track
 	/// is aborted, or `Poll::Pending` when none is buffered yet.
 	pub fn poll_recv_datagram(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Datagram>>> {
+		loop {
+			let Some(datagram) = ready!(self.poll_recv_wire_datagram(waiter))? else {
+				return Poll::Ready(Ok(None));
+			};
+			if datagram
+				.wire
+				.as_ref()
+				.is_some_and(|wire| wire.status.is_some_and(|status| status != 0))
+			{
+				continue;
+			}
+			return Poll::Ready(Ok(Some(datagram.datagram)));
+		}
+	}
+
+	pub(crate) fn poll_recv_wire_datagram(
+		&mut self,
+		waiter: &kio::Waiter,
+	) -> Poll<Result<Option<super::datagram::Stored>>> {
 		let meter = self.stats.meter();
 		let res = match &mut self.inner {
 			Inner::Plain(cursor) => cursor.poll_recv_datagram(waiter),
@@ -10056,6 +10119,65 @@ mod test {
 		head.finish().unwrap();
 		assert_eq!(fetch.await.unwrap().index(), 0);
 		(live, head)
+	}
+
+	#[moq_net_sim::test]
+	#[cfg(feature = "async")]
+	async fn a_live_abort_does_not_remove_a_parked_fetched_head() {
+		let producer = track_producer("test", Info::timed());
+		let (live, _head) = live_group_with_head(&producer).await;
+		let mut subscriber = producer.subscribe(replay());
+		subscriber.set_groups(..0);
+		assert!(subscriber.poll_recv_group(&kio::Waiter::noop()).is_pending());
+		live.abort(Error::Cancel).unwrap();
+		assert!(subscriber.poll_recv_group(&kio::Waiter::noop()).is_pending());
+		subscriber.set_groups(..);
+		let mut group = subscriber.recv_group().await.unwrap().unwrap();
+		assert_eq!(
+			group.read_frame().await.unwrap().unwrap().payload,
+			bytes::Bytes::from_static(b"snapshot")
+		);
+	}
+
+	#[test]
+	fn an_aborted_candidate_keeps_the_parked_copy_watched() {
+		let producer = track_producer("test", Info::timed());
+		let live = producer.create_group(group::Info { sequence: 0 }).unwrap();
+		let mut subscriber = producer.subscribe(replay());
+		subscriber.set_groups(..0);
+		let waiter = kio::Waiter::noop();
+		assert!(subscriber.poll_recv_group(&waiter).is_pending());
+
+		// A second copy can abort after lookup but before the cursor parks it.
+		let candidate = group::Info { sequence: 0 }.produce();
+		let aborted = candidate.consume();
+		candidate.abort(Error::Old).unwrap();
+		let Inner::Plain(cursor) = &mut subscriber.inner else {
+			unreachable!()
+		};
+		cursor.park(aborted, &waiter);
+
+		live.abort(Error::Old).unwrap();
+		producer.finish().unwrap();
+		assert!(matches!(subscriber.poll_recv_group(&waiter), Poll::Ready(Ok(None))));
+	}
+
+	#[test]
+	fn an_abort_removes_a_non_prefix_parked_entry() {
+		let producer = track_producer("test", Info::timed());
+		let groups: Vec<_> = (0..3)
+			.map(|sequence| producer.create_group(group::Info { sequence }).unwrap())
+			.collect();
+		let mut subscriber = producer.subscribe(replay());
+		subscriber.set_groups(..0);
+		let waiter = kio::Waiter::noop();
+		assert!(subscriber.poll_recv_group(&waiter).is_pending());
+		groups[1].clone().abort(Error::Old).unwrap();
+		assert!(subscriber.poll_recv_group(&waiter).is_pending());
+		let Inner::Plain(cursor) = &subscriber.inner else {
+			unreachable!()
+		};
+		assert_eq!(cursor.parked.keys().copied().collect::<Vec<_>>(), vec![0, 2]);
 	}
 
 	/// The live copy ending early (its subscription went away) leaves a fetched head

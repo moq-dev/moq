@@ -260,8 +260,9 @@ fn config_from_sps(sps_nal: &[u8]) -> Result<hang::catalog::VideoConfig> {
 		.as_ref()
 		.and_then(super::sps_period)
 		.map(|(units, scale)| scale as f64 / units as f64);
-	config.display_aspect_width = vui_data.display_ratio_width;
-	config.display_aspect_height = vui_data.display_ratio_height;
+	let display_aspect = vui_data.display_aspect(head.width, head.height);
+	config.display_aspect_width = display_aspect.map(|(width, _)| width);
+	config.display_aspect_height = display_aspect.map(|(_, height)| height);
 	Ok(config)
 }
 
@@ -284,13 +285,13 @@ fn find_sps(payload: &[u8]) -> Option<Bytes> {
 
 #[derive(Default)]
 struct VuiData {
-	display_ratio_width: Option<u32>,
-	display_ratio_height: Option<u32>,
+	sample_aspect_width: Option<u32>,
+	sample_aspect_height: Option<u32>,
 }
 
 impl VuiData {
 	fn new(vui: &scuffle_h265::VuiParameters) -> Self {
-		let (display_ratio_width, display_ratio_height) = match &vui.aspect_ratio_info {
+		let (sample_aspect_width, sample_aspect_height) = match &vui.aspect_ratio_info {
 			// Extended SAR has explicit arbitrary values for width and height.
 			scuffle_h265::AspectRatioInfo::ExtendedSar { sar_width, sar_height } => {
 				(Some(*sar_width as u32), Some(*sar_height as u32))
@@ -302,10 +303,34 @@ impl VuiData {
 		};
 
 		VuiData {
-			display_ratio_width,
-			display_ratio_height,
+			sample_aspect_width,
+			sample_aspect_height,
 		}
 	}
+
+	/// The aspect a `width` by `height` picture is shown at, or none when its samples are square.
+	fn display_aspect(&self, width: u32, height: u32) -> Option<(u32, u32)> {
+		let (Some(sample_width), Some(sample_height)) = (self.sample_aspect_width, self.sample_aspect_height) else {
+			return None;
+		};
+		if sample_width == 0 || sample_height == 0 || sample_width == sample_height {
+			return None;
+		}
+		let shown_width = u64::from(width) * u64::from(sample_width);
+		let shown_height = u64::from(height) * u64::from(sample_height);
+		let divisor = gcd(shown_width, shown_height);
+		Some((
+			u32::try_from(shown_width / divisor).ok()?,
+			u32::try_from(shown_height / divisor).ok()?,
+		))
+	}
+}
+
+fn gcd(mut a: u64, mut b: u64) -> u64 {
+	while b != 0 {
+		(a, b) = (b, a % b);
+	}
+	a
 }
 
 fn aspect_ratio_from_idc(idc: scuffle_h265::AspectRatioIdc) -> Option<(u32, u32)> {
@@ -359,6 +384,32 @@ mod tests {
 		let mut ceiling = vec![0, 0, 0, 1];
 		ceiling.extend_from_slice(fixtures::SPS);
 		assert_eq!(config(&ceiling).unwrap().framerate, None);
+	}
+
+	/// Square samples carry no display aspect, so the picture is shown at its own size.
+	#[test]
+	fn square_samples_carry_no_display_aspect() {
+		let mut nvenc = vec![0, 0, 0, 1];
+		nvenc.extend_from_slice(fixtures::SPS_NVENC);
+		let config = config(&nvenc).unwrap();
+		assert_eq!((config.coded_width, config.coded_height), (Some(1280), Some(720)));
+		assert_eq!(
+			(config.display_aspect_width, config.display_aspect_height),
+			(None, None)
+		);
+	}
+
+	/// Non-square samples resolve to the whole picture's aspect: 1440x1080 at 4:3 is shown 16:9.
+	#[test]
+	fn anamorphic_samples_resolve_to_the_picture_aspect() {
+		let mut anamorphic = vec![0, 0, 0, 1];
+		anamorphic.extend_from_slice(fixtures::SPS_ANAMORPHIC);
+		let config = config(&anamorphic).unwrap();
+		assert_eq!((config.coded_width, config.coded_height), (Some(1440), Some(1080)));
+		assert_eq!(
+			(config.display_aspect_width, config.display_aspect_height),
+			(Some(16), Some(9))
+		);
 	}
 
 	/// An hvcC initializer resolves a config with the hvcC stored as `description`.

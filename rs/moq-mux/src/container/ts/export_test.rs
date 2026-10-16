@@ -229,7 +229,9 @@ async fn a_follower_keeps_hangz_after_catalog_eof() {
 		let mut config = moq_json::snapshot::Config::default();
 		config.compression = moq_json::Compression::Deflate;
 		let mut catalog = moq_json::snapshot::Producer::<Catalog>::new(track.clone(), config);
-		catalog.update(&Catalog::default()).unwrap();
+		catalog
+			.update(moq_net::Timed::from(&Catalog::default()).at(moq_net::Timestamp::now()))
+			.unwrap();
 		broadcast
 			.announce(moq_net::origin::Route::default().with_epoch(epoch.clone()))
 			.unwrap();

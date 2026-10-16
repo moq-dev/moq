@@ -85,7 +85,11 @@ an error; run it again to publish anew. A flagged MPEG-TS discontinuity that
 jumps forward continues the broadcast and is declared on the exported clock.
 
 MPEG-TS import carries H.264/H.265 and AAC/MP2/AC-3/E-AC-3, and passes SCTE-35
-and subtitle PIDs through as tracks. It takes one program: a multi-program
+and subtitle PIDs through as tracks. SCTE-35 cues wait for a media timestamp;
+input ending or declaring a clock break before that timestamp is refused.
+PES and untimed section staging share a bounded budget, so a source that never
+supplies a PES boundary or clock fails rather than retaining bytes indefinitely.
+It takes one program: a multi-program
 stream is refused until `--program` picks one, or `--program all` publishes
 each as its own broadcast (`event.hang` becomes `event/1.hang`,
 `event/2.hang`). A damaged packet is dropped on its own PID, so video freezes
@@ -164,7 +168,7 @@ Playback is behind the `play` feature, since it pulls in windowing and
 audio-device dependencies:
 
 ```bash
-cargo install moq-cli --no-default-features --features "iroh,noq,websocket,play"
+cargo install moq-cli --no-default-features --features "noq,websocket,play"
 ```
 
 `moq play` skips disabled renditions. If none are enabled, it waits for a later catalog. Disabling the current rendition stops it and selects an enabled replacement.
@@ -303,7 +307,10 @@ importer guarantees yet. Only `import fmp4`, `flv`, `hls`, and `ts` (one
 program, or `--passthrough`) accept it. The RTMP, SRT, and WHIP ingests and
 `import ts --program all` refuse it because they mint their own, and `import
 avc3`, `capture`, `rtc --connect`, `archive`, and `transcode` because their
-timestamps or bytes come from the instance rather than the input.
+timestamps or bytes come from the instance rather than the input. Each that
+accepts it announces once its input has declared its tracks (for `ts`, the
+first PMT), so a standby started ahead of its feed is never asked for tracks it
+cannot serve yet; empty input exits 1 without announcing.
 
 ## Cluster
 

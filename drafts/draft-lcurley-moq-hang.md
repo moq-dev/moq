@@ -166,14 +166,13 @@ A discontinuity marker is a delivery event, not a new epoch, and a system-clock 
 
 ## Track Identity {#identity}
 A track name always means the same content, so a catalog update never redefines an audio or video track.
-Each rendition field falls in one of three classes:
+A track's identity is the fields a consumer cannot change without reinitializing its decoder or demuxer: `codec`, `description`, and `container`, plus `displayAspectWidth` and `displayAspectHeight` for video and `sampleRate` and `numberOfChannels` for audio.
+A publisher MUST NOT change them for a track once a catalog lists it.
 
-- Identity: `codec`, `description`, and `container`, plus `sampleRate` and `numberOfChannels` for audio. A publisher MUST NOT change them for a track once a catalog lists it.
-- Ceilings: video `codedWidth` and `codedHeight` bound every picture the track carries, and `codec` names a profile and level that covers them. The picture size MAY change at any keyframe within both bounds, which a `description` carrying parameter sets rules out. A publisher MAY fill an absent ceiling once, and MUST NOT change it afterward.
-- Maxima: `bitrate` and `framerate` are the most the track has carried or is configured to carry. A publisher MAY raise them and MUST NOT lower them.
-
-Every other rendition field is live state that MAY change in any update within its own rules (`jitter` and `delay` never fall), as MAY the video section's `display`, `rotation`, and `flip`, which describe presentation rather than decoding.
-A publisher that changes an identity field or exceeds a ceiling MUST publish the media under a new track name, or as a new broadcast under a new Epoch {{moql}}.
+Every other rendition field is live state that MAY change in any update within its own rules (`jitter` and `delay` never fall), as MAY the video section's `display`, `rotation`, and `flip`.
+The picture size MAY change at any keyframe, which a `description` carrying parameter sets rules out, and `codec` names a profile and level that covers every picture the track carries.
+A publisher that changes an identity field MUST publish the media under a new track name, or as a new broadcast under a new Epoch {{moql}}.
+A rendition MAY keep its ID and name the new track with `track` ({{field-track}}), so a consumer follows the new name rather than reusing a decoder configured for the ID.
 A track name removed from the catalog MUST NOT return with a different identity.
 A consumer MAY configure a decoder once per track from the catalog.
 
@@ -209,8 +208,9 @@ type VideoDecoderConfigExtensions = {
 }
 ~~~
 
-`displayAspectWidth` and `displayAspectHeight` give the display aspect ratio of the media, stretching or shrinking the coded pixels.
-A consumer that understands neither field MUST assume square pixels, a 1:1 ratio.
+`displayAspectWidth` and `displayAspectHeight` give the aspect ratio the whole decoded picture is displayed at, as in WebCodecs' `VideoDecoderConfig`.
+They are not the sample (pixel) aspect ratio: a publisher with square samples omits them, and one with non-square samples sends the picture's aspect, such as 16:9 for a 1440x1080 picture with 4:3 samples.
+A consumer that understands neither field MUST display the decoded picture at its own shape.
 Both MUST be present together; a consumer that sees only one MUST ignore it.
 
 For example:
@@ -1123,7 +1123,7 @@ This document has no IANA actions.
 ## moq-hang-04
 {:numbered="false"}
 
-- Fixed a track's identity for its name ({{identity}}): codec, description, container, sample rate, and channel count never change; `codedWidth` and `codedHeight` are ceilings below which the picture resizes in band; `bitrate` and `framerate` are maxima that only rise. A change of identity takes a new track name or a new Epoch.
+- Fixed a track's identity for its name ({{identity}}): codec, description, container, display aspect, sample rate, and channel count never change, while every other field, including size, bitrate, and framerate, updates in place. A change of identity takes a new track name, which a rendition may name with `track` while keeping its ID, or a new Epoch.
 - Specified MSF text metadata preservation and refusal of unrepresentable text packaging during gateway conversion.
 - Specified conversion between relative broadcast references and MSF track namespaces without changing track identity, reading a namespace aligned with the catalog path's trailing segments as the catalog itself.
 
@@ -1147,6 +1147,7 @@ This document has no IANA actions.
 - Added an optional `epoch` to `.info`: the source route's Epoch, compared on resume so a restarted source fails enrollment.
 - Audio `sampleRate` and `numberOfChannels` describe the decoded output, so HE-AAC names its SBR rate and parametric stereo names two channels.
 - Added an optional `track` field to video, audio, text, `json`, and `binary` entries naming the track in its broadcast; the entry's key is its ID and names the track when `track` is absent. A consumer MUST reject a catalog using one ID for both a video and an audio rendition.
+- Defined video `displayAspectWidth` and `displayAspectHeight` as the whole picture's display aspect, not the sample aspect.
 
 ## moq-hang-03
 {:numbered="false"}

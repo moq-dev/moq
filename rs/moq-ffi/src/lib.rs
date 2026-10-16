@@ -60,3 +60,7 @@ pub extern "C" fn moq_ffi_shutdown() {
 // The test suite drives a native relay over a tokio runtime.
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod test;
+
+// The binding benchmark's Rust baselines; ignored unless `just bench-ffi` asks for them.
+#[cfg(all(test, unix))]
+mod bench;

@@ -36,6 +36,7 @@ const { values } = parseArgs({
 		tag: { type: "string" },
 		out: { type: "string" },
 		capture: { type: "boolean", default: false },
+		trace: { type: "boolean", default: false },
 	},
 });
 
@@ -51,10 +52,11 @@ if (
 	!out ||
 	!Number.isFinite(durationMs) ||
 	durationMs <= 0 ||
-	(ring !== "plain" && ring !== "isolated")
+	(ring !== "plain" && ring !== "isolated") ||
+	(values.trace && !values.capture)
 ) {
 	console.error(
-		"usage: driver.ts --url U --fingerprint F --broadcast B --page DIR --ring plain|isolated --tag T --out DIR [--delay auto] [--duration S>0] [--capture]",
+		"usage: driver.ts --url U --fingerprint F --broadcast B --page DIR --ring plain|isolated --tag T --out DIR [--delay auto] [--duration S>0] [--capture] [--trace]",
 	);
 	process.exit(2);
 }
@@ -129,8 +131,40 @@ const browser = await launch(["--autoplay-policy=no-user-gesture-required"]);
 let environment: Environment | undefined;
 let notes: string[] = [];
 let failed = false;
+let finishTrace: (() => Promise<void>) | undefined;
 try {
 	const page = await browser.newPage();
+	if (values.capture) {
+		await page.addInitScript(() => {
+			const tasks: { at: number; duration: number }[] = [];
+			Object.defineProperty(globalThis, "audioQualityLongTasks", { value: tasks });
+			new PerformanceObserver((entries) => {
+				for (const task of entries.getEntries()) tasks.push({ at: task.startTime, duration: task.duration });
+			}).observe({ type: "longtask", buffered: true });
+		});
+	}
+	if (values.trace) {
+		const session = await page.context().newCDPSession(page);
+		await session.send("Profiler.enable");
+		await session.send("Profiler.start");
+		const events: unknown[] = [];
+		session.on("Tracing.dataCollected", (event: { value: unknown[] }) => events.push(...event.value));
+		const complete = new Promise<void>((resolve) => session.once("Tracing.tracingComplete", () => resolve()));
+		await session.send("Tracing.start", {
+			categories: "disabled-by-default-v8.gc,blink.user_timing",
+			transferMode: "ReportEvents",
+		});
+		finishTrace = async () => {
+			finishTrace = undefined;
+			await session.send("Tracing.end");
+			await complete;
+			const { profile } = await session.send("Profiler.stop");
+			await Bun.write(join(out, `${tag}.profile.json`), JSON.stringify(profile));
+			await Bun.write(join(out, `${tag}.trace.json`), JSON.stringify({ traceEvents: events }));
+			await session.detach();
+		};
+	}
+
 	page.on("pageerror", (error) => console.error(`[page error] ${error.message}`));
 	await page.route(new URL("/certificate.sha256", url).href, (route) =>
 		route.fulfill({ body: hash, headers: { "access-control-allow-origin": "*" } }),
@@ -162,11 +196,26 @@ try {
 	// The context rate is only known once the graph exists, which is after the catalog.
 	environment = (await page.evaluate(() => globalThis.audioQuality.environment())) ?? environment;
 	notes = await page.evaluate(() => globalThis.audioQuality.notes());
+	if (values.capture) {
+		const tasks = await page.evaluate(
+			() =>
+				(globalThis as typeof globalThis & { audioQualityLongTasks: { at: number; duration: number }[] })
+					.audioQualityLongTasks,
+		);
+		await Bun.write(join(out, `${tag}.longtasks.json`), JSON.stringify(tasks));
+	}
+	await finishTrace?.();
 	await page.close();
 } catch (err) {
 	failed = true;
 	refuse("driver", err instanceof Error ? err.message : String(err));
 } finally {
+	try {
+		await finishTrace?.();
+	} catch (error) {
+		failed = true;
+		refuse("trace", error instanceof Error ? error.message : String(error));
+	}
 	await browser.close().catch(() => {});
 	server.stop(true);
 }

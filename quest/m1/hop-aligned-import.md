@@ -5,10 +5,9 @@
 Two importers publishing one path, such as a redundant pair sharing an
 explicit `--epoch`, and fed the same encoded stream publish identical tracks,
 so a relay can fail over between them. Today two `moq import ts` fed one
-forked stream break that contract twice: a standby refuses every track until
-it has parsed its PMT, which aborts every subscriber the moment it connects
-(#4352), and each numbers its groups from its own counter, so after a
-failover `export ts` sees a timestamp rewind and exits (#4354).
+forked stream break that contract: each numbers its groups from its own
+counter, so after a failover `export ts` sees a timestamp rewind and exits
+(#4354).
 
 ## Plan
 
@@ -56,9 +55,6 @@ proves, which fails at the first failover across a timestamp wrap.
   started later would reuse earlier group or record numbers for newer bytes.
   Their numbering and timestamps come from the epoch timeline and the
   content, never the instance or the live track.
-- An importer announces only once it knows its tracks: split out to
-  [announce once tracks are known](/quest/m1/import-announce-tracks.md)
-  (2026-10-13), which closes #4352.
 - Docs (the `--epoch` paragraph in `doc/bin/cli.md`, the `--epoch` doc
   comment) state the contract: one encoded stream fed to each publisher, no
   access to the live broadcast needed, and a wall mapping only as accurate as
@@ -79,7 +75,6 @@ stopping and restarting; repeat it with `--passthrough`.
 
 ## Required
 
-- [Announce once tracks are known](/quest/m1/import-announce-tracks.md) - a starting importer never answers `not found` for tracks its partner serves
 - [Epoch anchor](/quest/m1/epoch-anchor.md) - every importer derives one catalog clock and timestamp era from the epoch
 - [Raw TS cuts on the epoch timeline](/quest/m1/ts-passthrough-epoch-cuts.md) - passthrough groups start where every instance cuts
 

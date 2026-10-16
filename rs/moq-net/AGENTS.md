@@ -6,7 +6,7 @@ The wire layer. Generic over the transport and media-agnostic: the relay never i
 - Closes never cascade. Aborting a group must not tear down its track, broadcast, or siblings.
 - Sessions are caller-driven: `connect`/`accept` return `(Session, Driver)`. The `Driver` holds no `Session` clone, so spawning it never keeps the session alive.
 - Version matching: outside the crate branch on `is_lite()` / `is_ietf()` and `alpn()`; inside it match the draft enums. List old drafts explicitly and let the newest behavior be the fallthrough so future drafts fall forward.
-- Interop rule of thumb: respond to every feature a peer may use, but don't request new ones. Never emit or accept partial groups; a group starts at frame 0.
+- Interop rule of thumb: respond to every feature a peer may use, but don't request new ones. Never emit or accept partial groups; a group starts at frame 0. Exception: moq-transport passthrough forwards a mid-group start as the publisher sent it.
 - `Timestamp` is an instant with a scale, not a scalar. `checked_add`/`checked_sub` error on mismatched scales; `.convert()` first. `ZERO` is second-scale, so seed a max with `Option`, not `ZERO`.
 
 # Testing

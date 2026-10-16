@@ -83,8 +83,8 @@ fn frame_reaches_a_parked_subscriber() {
 /// the path where the producer takes the waiter list for group 1 and wakes outside
 /// the lock while group 2 is already being written.
 ///
-/// The subscription starts at group 0: an unfloored subscriber on an untimed track
-/// starts at the latest group, so one opened after both writes would only see the second.
+/// The subscription retains the backlog from group 0: a floor alone does not keep
+/// superseded groups within a zero delay budget.
 #[test]
 fn back_to_back_groups_arrive_in_order() {
 	model(|| {
@@ -101,7 +101,9 @@ fn back_to_back_groups_arrive_in_order() {
 			track.finish().expect("finish track");
 		});
 
-		let from_start = moq_net::track::Subscription::default().with_start(moq_net::track::Position::group(0));
+		let from_start = moq_net::track::Subscription::default()
+			.with_start(moq_net::track::Position::group(0))
+			.with_max_delay(std::time::Duration::MAX);
 		let mut subscriber = block_on(track_consumer.subscribe(from_start)).expect("subscribe");
 		let first = block_on(subscriber.recv_group()).expect("recv").expect("first group");
 		let second = block_on(subscriber.recv_group()).expect("recv").expect("second group");
@@ -500,5 +502,23 @@ fn a_request_never_joins_a_retiring_front() {
 		driver.poll(now, &waiter).unwrap();
 		let resolved = block_on(pending).expect("resolves");
 		assert!(!resolved.is_closed(), "handed a front that is ending");
+	});
+}
+
+/// An abort racing the first parking poll must either be observed or wake the cursor.
+#[test]
+fn an_aborted_parked_group_releases_a_finished_track() {
+	model(|| {
+		let broadcast = broadcast::Info::new().produce();
+		let track = broadcast.create_track("parked", timed()).unwrap();
+		let group = track.append_group().unwrap();
+		group.clone().finish().unwrap();
+		let mut subscriber =
+			track.subscribe(moq_net::track::Subscription::default().with_start(moq_net::track::Position::group(0)));
+		subscriber.set_groups(..0);
+		track.finish().unwrap();
+		let aborting = thread::spawn(move || group.abort(Error::Old).unwrap());
+		assert!(block_on(subscriber.recv_group()).unwrap().is_none());
+		aborting.join().unwrap();
 	});
 }

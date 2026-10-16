@@ -4,6 +4,7 @@
 #![cfg(unix)]
 
 use std::io::Cursor;
+use std::os::fd::AsRawFd;
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -11,7 +12,7 @@ use std::time::{Duration, Instant};
 use hang::moq_net;
 use moq_mux::container::ts;
 use mpeg2ts::ts::{ReadTsPacket, TsPacketReader, TsPayload};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin};
 use tokio::task::JoinHandle;
 
@@ -28,6 +29,8 @@ struct Export {
 	output: Output,
 	stdout: JoinHandle<std::io::Result<()>>,
 	stderr: JoinHandle<String>,
+	settled: Option<tokio::sync::oneshot::Receiver<()>>,
+	fence: tokio::sync::mpsc::UnboundedSender<tokio::sync::oneshot::Sender<usize>>,
 }
 
 impl Export {
@@ -115,45 +118,109 @@ fn export(relay: &Relay, linger: &str) -> Export {
 	export_with(relay, &[], &["--linger", linger])
 }
 
+/// A container both `import` and `export` speak, with a clip of it.
+#[derive(Clone, Copy)]
+struct Format {
+	name: &'static str,
+	clip: &'static [u8],
+	/// Bytes written every 150 ms, which keeps [`CLIP`] near real time.
+	chunk: usize,
+}
+
+const TS: Format = Format {
+	name: "ts",
+	clip: CLIP,
+	chunk: 188 * 40,
+};
+
+const FMP4: Format = Format {
+	name: "fmp4",
+	clip: AV1,
+	chunk: AV1.len(),
+};
+
 /// Start `moq <global> export ts <flags>`, collecting both pipes until they close.
 fn export_with(relay: &Relay, global: &[&str], flags: &[&str]) -> Export {
+	export_as(relay, global, TS, flags)
+}
+
+/// [`export_with`] in `format`.
+fn export_as(relay: &Relay, global: &[&str], format: Format, flags: &[&str]) -> Export {
 	let mut child = moq(relay, global)
-		.args(["export", "ts"])
+		.args(["export", format.name])
 		.args(flags)
+		.env("RUST_LOG", "warn,moq_mux::container::ts::follower=info")
 		.stdout(Stdio::piped())
 		.stderr(Stdio::piped())
 		.spawn()
 		.expect("spawn export");
-	let (output, stdout) = collect(child.stdout.take().expect("stdout"));
-	let mut stderr = child.stderr.take().expect("stderr");
+	let (output, stdout, fence) = collect(child.stdout.take().expect("stdout"));
+	let mut stderr = BufReader::new(child.stderr.take().expect("stderr"));
+	let (settle, settled) = tokio::sync::oneshot::channel();
 	let stderr = tokio::spawn(async move {
-		let mut errors = Vec::new();
-		stderr.read_to_end(&mut errors).await.expect("read export stderr");
-		String::from_utf8_lossy(&errors).into_owned()
+		let mut errors = String::new();
+		let mut settle = Some(settle);
+		loop {
+			let mut line = String::new();
+			if stderr.read_line(&mut line).await.expect("read export stderr") == 0 {
+				return errors;
+			}
+			errors.push_str(&line);
+			if line.contains("waiting for it to return")
+				&& let Some(settle) = settle.take()
+			{
+				let _ = settle.send(());
+			}
+		}
 	});
 	Export {
 		child,
 		output,
 		stdout,
 		stderr,
+		settled: Some(settled),
+		fence,
 	}
 }
 
 /// Collect everything `pipe` yields, retaining its completion before final assertions.
-fn collect(mut pipe: impl tokio::io::AsyncRead + Unpin + Send + 'static) -> (Output, JoinHandle<std::io::Result<()>>) {
+fn collect(
+	mut pipe: tokio::process::ChildStdout,
+) -> (
+	Output,
+	JoinHandle<std::io::Result<()>>,
+	tokio::sync::mpsc::UnboundedSender<tokio::sync::oneshot::Sender<usize>>,
+) {
 	let output = Output::default();
 	let sink = output.clone();
+	let (fence, mut requested) = tokio::sync::mpsc::unbounded_channel::<tokio::sync::oneshot::Sender<usize>>();
 	let task = tokio::spawn(async move {
 		let mut buf = vec![0; 64 * 1024];
 		loop {
-			let n = pipe.read(&mut buf).await?;
-			if n == 0 {
-				return Ok(());
+			tokio::select! {
+				n = pipe.read(&mut buf) => {
+					let n = n?;
+					if n == 0 { return Ok(()); }
+					sink.lock().unwrap().extend_from_slice(&buf[..n]);
+				}
+				Some(fence) = requested.recv() => {
+					// The follower entered linger only after each old stdout write and flush.
+					// This task owns the reader, so no read can race the queued-byte count.
+					let mut pending: libc::c_int = 0;
+					// SAFETY: the pipe is live and pending points to a writable c_int.
+					if unsafe { libc::ioctl(pipe.as_raw_fd(), libc::FIONREAD, &mut pending) } < 0 {
+						return Err(std::io::Error::last_os_error());
+					}
+					let mut tail = vec![0; pending as usize];
+					pipe.read_exact(&mut tail).await?;
+					let mut output = sink.lock().unwrap();
+					output.extend_from_slice(&tail);
+					let _ = fence.send(output.len());
+				}
 			}
-			sink.lock().unwrap().extend_from_slice(&buf[..n]);
 		}
 	});
-	(output, task)
+	(output, task, fence)
 }
 
 /// Start `moq import ts` and feed it the clip at about real time, handing stdin back
@@ -164,15 +231,20 @@ fn import(relay: &Relay) -> (Child, JoinHandle<ChildStdin>) {
 
 /// [`import`] with `global` flags, such as the session version or the epoch.
 fn import_with(relay: &Relay, global: &[&str]) -> (Child, JoinHandle<ChildStdin>) {
+	import_as(relay, global, TS)
+}
+
+/// [`import_with`] in `format`.
+fn import_as(relay: &Relay, global: &[&str], format: Format) -> (Child, JoinHandle<ChildStdin>) {
 	let mut child = moq(relay, global)
 		// A finished import lingers for its max-age; keep that short so the publisher exits promptly.
-		.args(["import", "--max-age", "1s", "ts"])
+		.args(["import", "--max-age", "1s", format.name])
 		.stdin(Stdio::piped())
 		.spawn()
 		.expect("spawn import");
 	let mut stdin = child.stdin.take().expect("stdin");
 	let feeding = tokio::spawn(async move {
-		for chunk in CLIP.chunks(188 * 40) {
+		for chunk in format.clip.chunks(format.chunk) {
 			stdin.write_all(chunk).await.expect("write stdin");
 			tokio::time::sleep(Duration::from_millis(150)).await;
 		}
@@ -189,11 +261,10 @@ async fn interrupt(mut child: Child, stdin: ChildStdin) {
 		.status()
 		.expect("kill");
 	assert!(status.success());
-	// The interrupted process exits once its stdin read returns; closing stdin any
-	// sooner could land first and finish the broadcast instead.
-	tokio::time::sleep(Duration::from_millis(500)).await;
+	// Keep stdin open until signal-driven shutdown exits. EOF would instead finish
+	// the broadcast cleanly and hide the interrupted-publication property.
+	assert!(wait(&mut child).await.success());
 	drop(stdin);
-	wait(&mut child).await;
 }
 
 async fn wait(child: &mut Child) -> std::process::ExitStatus {
@@ -320,8 +391,18 @@ async fn interrupted(export: &mut Export, publisher: (Child, JoinHandle<ChildStd
 	let stdin = feeding.await.unwrap();
 	export.output_past(0).await;
 	interrupt(publisher, stdin).await;
-	tokio::time::sleep(Duration::from_secs(1)).await;
-	export.output.lock().unwrap().len().next_multiple_of(188)
+	tokio::time::timeout(TIMEOUT, export.settled.take().expect("one interruption per export"))
+		.await
+		.expect("export never drained into linger")
+		.expect("export stopped before entering linger");
+	let (fence, drained) = tokio::sync::oneshot::channel();
+	export.fence.send(fence).expect("stdout reader is still running");
+	let len = tokio::time::timeout(TIMEOUT, drained)
+		.await
+		.expect("stdout reader never drained its queued tail")
+		.expect("stdout reader ended before its tail fence");
+	assert_eq!(len % 188, 0, "the drained output ends on a complete TS packet");
+	len
 }
 
 /// A restarted publisher is another instance, so the export does not splice it in: it exits 1
@@ -505,6 +586,78 @@ fn latest_pts(ts: &[u8]) -> u64 {
 		}
 	}
 	latest.expect("the capture carries PES timestamps")
+}
+
+/// A standby joining a live partner's epoch before its input has declared a track (for TS, a
+/// PMT) is never asked for the tracks the partner's exports hold, since it announces only once
+/// it can serve them (#4352), and the exports keep running. Input that ends before declaring any
+/// track fails rather than announcing an empty broadcast.
+async fn a_standby_before_its_tracks(global: &[&str], format: Format) {
+	let relay = relay().await;
+	let epoch = hang::moq_net::Epoch::mint().to_string();
+	let publish: Vec<&str> = global.iter().copied().chain(["--epoch", epoch.as_str()]).collect();
+	let (mut active, feeding) = import_as(&relay, &publish, format);
+	let mut first = export_as(&relay, global, format, &[]);
+	let mut second = export_as(&relay, global, format, &[]);
+	first.output_past(0).await;
+	second.output_past(0).await;
+
+	let mut standby = moq(&relay, &publish)
+		.args(["import", "--max-age", "1s", format.name])
+		.stdin(Stdio::piped())
+		.stderr(Stdio::piped())
+		.spawn()
+		.expect("spawn the standby");
+	let standby_stdin = standby.stdin.take().expect("stdin");
+	tokio::time::sleep(Duration::from_secs(2)).await;
+	assert!(
+		first.child.try_wait().unwrap().is_none(),
+		"the first export survives the standby"
+	);
+	assert!(
+		second.child.try_wait().unwrap().is_none(),
+		"the second export survives the standby"
+	);
+
+	drop(standby_stdin);
+	let status = wait(&mut standby).await;
+	let mut errors = String::new();
+	standby
+		.stderr
+		.take()
+		.unwrap()
+		.read_to_string(&mut errors)
+		.await
+		.unwrap();
+	assert!(
+		!errors.contains("not found"),
+		"the relay asked the standby for a track: {errors}"
+	);
+	assert!(!status.success(), "input with no track fails, got {status}: {errors}");
+	assert!(errors.contains("declared"), "the error says why: {errors}");
+
+	drop(feeding.await.unwrap());
+	assert!(wait(&mut active).await.success());
+	for export in [first, second] {
+		let (status, errors) = export.wait().await;
+		assert!(status.success(), "the export finishes cleanly, got {status}: {errors}");
+	}
+}
+
+#[tokio::test]
+async fn a_standby_before_its_pmt_leaves_the_exports_running() {
+	a_standby_before_its_tracks(&[], TS).await;
+}
+
+/// lite-07 carries the epoch, so this is the version on which the relay queries the standby.
+#[tokio::test]
+async fn a_standby_before_its_pmt_leaves_the_exports_running_on_lite_07() {
+	a_standby_before_its_tracks(&["--connect-version", LITE_07], TS).await;
+}
+
+#[tokio::test]
+async fn a_standby_before_its_init_segment_leaves_the_fmp4_exports_running_on_lite_07() {
+	a_standby_before_its_tracks(&["--connect-version", LITE_07], FMP4).await;
 }
 
 /// Subscriptions are sticky: a replacement announced while the old publisher stays up leaves

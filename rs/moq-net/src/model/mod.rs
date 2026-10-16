@@ -16,11 +16,13 @@ mod follow;
 // tested without a runtime.
 mod front;
 
+mod aborts;
 mod bytes;
 pub(crate) mod clock;
-mod datagram;
+pub(crate) mod datagram;
 mod delivered;
 mod expiry;
+pub(crate) mod object;
 mod requests;
 mod resume;
 mod subscription;
