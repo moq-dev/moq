@@ -47,7 +47,12 @@ Decided 2026-10-16 (see the [epic](/quest/m1/refresh/README.md)).
   `Subscription::new_group`:
   - DYNAMIC_GROUPS=1 on ingress becomes `refresh: Some(0)`.
   - `refresh.is_some()` advertises DYNAMIC_GROUPS=1 on egress.
-  - A downstream NEW_GROUP_REQUEST counts as a join under the ratio.
+  - A downstream NEW_GROUP_REQUEST counts as a join under the ratio, even
+    at a relay. This is a deliberate deviation from draft-22 §9.20.19,
+    which says a relay MUST forward it. Decided 2026-10-16 in the #5734
+    review: the ratio is the point of refresh, and every hop's cache holds
+    the same group. Document it under deviations in
+    `doc/concept/standard.md`.
   - The upstream IETF driver sends NEW_GROUP_REQUEST when `wanted` passes
     the largest group.
 
