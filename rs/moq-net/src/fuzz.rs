@@ -607,6 +607,7 @@ impl Default for Messages {
 				fill: None,
 				properties_wanted: false,
 				forward: true,
+				rendezvous: false,
 				range_filters: false,
 				authorization_token: None,
 			},

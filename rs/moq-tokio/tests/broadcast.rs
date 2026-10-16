@@ -72,7 +72,7 @@ async fn broadcast_test(scheme: &str, client_version: Option<&str>, server_versi
 	// ── run server and client concurrently ──────────────────────────
 	let server_handle = tokio::spawn(async move {
 		let request = server.accept().await.expect("no incoming connection");
-		let session = request.with_publisher(&pub_origin).ok().await?;
+		let (session, _driver) = request.with_publisher(&pub_origin).ok().await?;
 
 		// Keep producers alive so the subscriber can read data.
 		let _broadcast = broadcast;
@@ -191,7 +191,7 @@ async fn lite05_timestamp_roundtrip(scheme: &str) {
 
 	let server_handle = tokio::spawn(async move {
 		let request = server.accept().await.expect("no incoming connection");
-		let session = request.with_publisher(&pub_origin).ok().await?;
+		let (session, _driver) = request.with_publisher(&pub_origin).ok().await?;
 		let _broadcast = broadcast;
 		let _track = track;
 		let _ = session.closed().await;
@@ -314,7 +314,7 @@ async fn lite05_fetch_roundtrip(scheme: &str) {
 
 	let server_handle = tokio::spawn(async move {
 		let request = server.accept().await.expect("no incoming connection");
-		let session = request.with_publisher(&pub_origin).ok().await?;
+		let (session, _driver) = request.with_publisher(&pub_origin).ok().await?;
 		let _broadcast = broadcast;
 		let _track = track;
 		let _ = session.closed().await;
@@ -428,7 +428,7 @@ async fn transport_fetch_roundtrip(version: &str) {
 
 	let server_handle = tokio::spawn(async move {
 		let request = server.accept().await.expect("no incoming connection");
-		let session = request.with_publisher(&pub_origin).ok().await?;
+		let (session, _driver) = request.with_publisher(&pub_origin).ok().await?;
 		let _broadcast = broadcast;
 		let _track = track;
 		let _ = session.closed().await;
@@ -570,7 +570,7 @@ async fn lite05_fetch_during_subscribe(scheme: &str) {
 
 	let server_handle = tokio::spawn(async move {
 		let request = server.accept().await.expect("no incoming connection");
-		let session = request.with_publisher(&pub_origin).ok().await?;
+		let (session, _driver) = request.with_publisher(&pub_origin).ok().await?;
 		let _broadcast = broadcast;
 		let _track = track;
 		let _ = session.closed().await;
@@ -679,7 +679,7 @@ async fn broadcast_moq_lite_05_untimed_track() {
 
 	let server_handle = tokio::spawn(async move {
 		let request = server.accept().await.expect("accept");
-		let session = request.with_publisher(&pub_origin).ok().await?;
+		let (session, _driver) = request.with_publisher(&pub_origin).ok().await?;
 		let _broadcast = broadcast;
 		let _track = track;
 		let _ = session.closed().await;
@@ -783,7 +783,7 @@ async fn broadcast_moq_transport_20_current_group_join() {
 
 	let server_handle = tokio::spawn(async move {
 		let request = server.accept().await.expect("no incoming connection");
-		let session = request.with_publisher(&pub_origin).ok().await?;
+		let (session, _driver) = request.with_publisher(&pub_origin).ok().await?;
 		let _broadcast = broadcast;
 		let _track = track;
 		let _ = session.closed().await;
@@ -899,7 +899,7 @@ async fn announce_lifecycle_test(version: &str) {
 	let server_origin = pub_origin.clone();
 	let server_handle = tokio::spawn(async move {
 		let request = server.accept().await.expect("accept");
-		let session = request.with_publisher(&server_origin).ok().await?;
+		let (session, _driver) = request.with_publisher(&server_origin).ok().await?;
 		let _ = session.closed().await;
 		Ok::<_, anyhow::Error>(())
 	});
@@ -1073,7 +1073,7 @@ async fn broadcast_route_migration() {
 
 	let handle_a = tokio::spawn(async move {
 		let request = server_a.accept().await.expect("accept");
-		let session = request.with_publisher(&origin_a).ok().await?;
+		let (session, _driver) = request.with_publisher(&origin_a).ok().await?;
 		let _broadcast = broadcast_a;
 		let _track = track_a;
 		let _ = session.closed().await;
@@ -1081,7 +1081,7 @@ async fn broadcast_route_migration() {
 	});
 	let handle_b = tokio::spawn(async move {
 		let request = server_b.accept().await.expect("accept");
-		let session = request.with_publisher(&origin_b).ok().await?;
+		let (session, _driver) = request.with_publisher(&origin_b).ok().await?;
 		let _broadcast = broadcast_b;
 		let _track = track_b;
 		let _ = session.closed().await;
@@ -1220,7 +1220,7 @@ async fn rejoin_skips_a_stale_warm_cache(version: &str) {
 	let addr = server.local_addr().expect("local addr");
 	let server = tokio::spawn(async move {
 		let request = server.accept().await.expect("accept");
-		let session = request.with_publisher(&pub_origin).ok().await?;
+		let (session, _driver) = request.with_publisher(&pub_origin).ok().await?;
 		let _broadcast = broadcast;
 		let _track = track;
 		let _ = session.closed().await;
@@ -1340,7 +1340,7 @@ async fn rejoin_replays_a_current_warm_cache(version: &str, open: bool) {
 	let addr = server.local_addr().expect("local addr");
 	let server = tokio::spawn(async move {
 		let request = server.accept().await.expect("accept");
-		let session = request.with_publisher(&pub_origin).ok().await?;
+		let (session, _driver) = request.with_publisher(&pub_origin).ok().await?;
 		let _broadcast = broadcast;
 		let _track = track;
 		let _ = session.closed().await;
@@ -1467,7 +1467,7 @@ async fn route_reannounce_test(version: Option<&str>) {
 	let server_producer = producer.clone();
 	let handle = tokio::spawn(async move {
 		let request = server.accept().await.expect("accept");
-		let session = request.with_publisher(&origin).ok().await?;
+		let (session, _driver) = request.with_publisher(&origin).ok().await?;
 		let _producer = server_producer;
 		let _ = session.closed().await;
 		Ok::<_, anyhow::Error>(())
@@ -1772,7 +1772,7 @@ async fn max_age_test(version: &str, published: Option<Duration>) -> Option<Dura
 
 	let handle = tokio::spawn(async move {
 		let request = server.accept().await.expect("accept");
-		let session = request.with_publisher(&pub_origin).ok().await?;
+		let (session, _driver) = request.with_publisher(&pub_origin).ok().await?;
 		let _broadcast = broadcast;
 		let _track = track;
 		let _ = session.closed().await;
@@ -2111,7 +2111,7 @@ async fn broadcast_websocket() {
 		assert_eq!(request.path(), "");
 		// The dialed host reaches the server as the authority, like the QUIC transports.
 		assert_eq!(request.authority(), Some("localhost"));
-		let session = request.with_publisher(&pub_origin).ok().await?;
+		let (session, _driver) = request.with_publisher(&pub_origin).ok().await?;
 
 		let _broadcast = broadcast;
 		let _track = track;
@@ -2235,7 +2235,7 @@ async fn broadcast_websocket_fallback() {
 		assert_eq!(request.path(), "/admin");
 		assert_eq!(request.query(), Some("jwt=test"));
 		assert_eq!(request.url().and_then(url::Url::query), Some("jwt=test"));
-		let session = request.with_publisher(&pub_origin).ok().await?;
+		let (session, _driver) = request.with_publisher(&pub_origin).ok().await?;
 
 		let _broadcast = broadcast;
 		let _track = track;
@@ -2351,7 +2351,7 @@ async fn broadcast_websocket_uses_newest_version() {
 	let server_handle = tokio::spawn(async move {
 		let request = server.accept().await.expect("no incoming connection");
 		assert_eq!(request.transport(), moq_tokio::Transport::WebSocket);
-		let session = request.with_publisher(&pub_origin).ok().await?;
+		let (session, _driver) = request.with_publisher(&pub_origin).ok().await?;
 		assert_eq!(session.version(), expected_version, "server negotiated stale version");
 		let _broadcast = broadcast;
 		let _track = track;
@@ -2430,7 +2430,7 @@ async fn quic_driver_task_inherits_connection_span() {
 	let server_handle = tokio::spawn(
 		async move {
 			let request = server.accept().await.expect("no incoming connection");
-			let session = request.with_publisher(&pub_origin).ok().await?;
+			let (session, _driver) = request.with_publisher(&pub_origin).ok().await?;
 			let _broadcast = broadcast;
 			let _track = track;
 			let _ = session.closed().await;
@@ -2551,7 +2551,7 @@ async fn resubscribe_keeps_flowing_moq_lite_03() {
 
 	let server_handle = tokio::spawn(async move {
 		let request = server.accept().await.expect("accept");
-		let session = request.with_publisher(&pub_origin).ok().await?;
+		let (session, _driver) = request.with_publisher(&pub_origin).ok().await?;
 		let _ = session.closed().await;
 		Ok::<_, anyhow::Error>(())
 	});
@@ -2688,7 +2688,7 @@ async fn idle_subscription_releases_the_viewer_count() {
 
 	let server_handle = tokio::spawn(async move {
 		let request = server.accept().await.expect("accept");
-		let session = request.with_publisher(&pub_origin).with_stats(stats).ok().await?;
+		let (session, _driver) = request.with_publisher(&pub_origin).with_stats(stats).ok().await?;
 		let _broadcast = broadcast;
 		let _track = track;
 		let _ = session.closed().await;
@@ -2845,7 +2845,7 @@ async fn one_shot_goaway_ends_the_connection() {
 
 	let server_handle = tokio::spawn(async move {
 		let request = server.accept().await.expect("no incoming connection");
-		let session = request.ok().await?;
+		let (session, _driver) = request.ok().await?;
 
 		// No deadline, so nothing on the peer's side ever force-closes us.
 		session
@@ -2890,7 +2890,7 @@ async fn one_shot_connect_surfaces_the_session_close() {
 	let server_handle = tokio::spawn(async move {
 		while let Some(request) = server.accept().await {
 			server_accepts.fetch_add(1, Ordering::SeqCst);
-			let session = request.with_publisher(&pub_origin).ok().await?;
+			let (session, _driver) = request.with_publisher(&pub_origin).ok().await?;
 			session.abort(moq_net::Error::Cancel);
 		}
 		Ok::<_, anyhow::Error>(())
@@ -2949,7 +2949,7 @@ async fn a_dead_session_unannounces_while_the_reconnect_retries() {
 	let (session_tx, session_rx) = tokio::sync::oneshot::channel();
 	let server_handle = tokio::spawn(async move {
 		let request = server.accept().await.expect("accept");
-		let session = request.with_publisher(&server_pub).ok().await?;
+		let (session, _driver) = request.with_publisher(&server_pub).ok().await?;
 		let _ = session_tx.send(session);
 		std::future::pending::<()>().await;
 		Ok::<_, anyhow::Error>(())
@@ -3044,7 +3044,7 @@ async fn announce_interest_unauthorized_keeps_session_alive() {
 
 	let server_handle = tokio::spawn(async move {
 		let request = server.accept().await.expect("no incoming connection");
-		let session = request.with_publisher(publish).ok().await?;
+		let (session, _driver) = request.with_publisher(publish).ok().await?;
 		let _broadcast = broadcast;
 		let _track = track;
 		let _ = session.closed().await;
@@ -3136,7 +3136,7 @@ async fn wildcard_scope_test(version: &str, server_scope: &str) {
 
 	let server_handle = tokio::spawn(async move {
 		let request = server.accept().await.expect("no incoming connection");
-		let session = request.with_publisher(publish).ok().await?;
+		let (session, _driver) = request.with_publisher(publish).ok().await?;
 		let _broadcasts = broadcasts;
 		let _ = session.closed().await;
 		Ok::<_, anyhow::Error>(())
@@ -3251,7 +3251,7 @@ async fn publish_only_client_to_subscribe_only_server() {
 	let url: url::Url = format!("https://localhost:{}", addr.port()).parse().unwrap();
 
 	let server_handle = tokio::spawn(async move {
-		let session = server
+		let (session, _driver) = server
 			.accept()
 			.await
 			.expect("no incoming connection")
@@ -3423,7 +3423,7 @@ async fn goaway_test(scheme: &str, version: &str, expect_wire_timeout: bool) {
 	let (start_drain_tx, start_drain_rx) = tokio::sync::oneshot::channel::<()>();
 	let server_handle = tokio::spawn(async move {
 		let request = server.accept().await.expect("no incoming connection");
-		let session = request.with_publisher(&pub_origin).ok().await?;
+		let (session, _driver) = request.with_publisher(&pub_origin).ok().await?;
 
 		start_drain_rx.await.expect("drain signal");
 		session
@@ -3557,7 +3557,7 @@ async fn goaway_timeout_force_close_moq_transport_19_quic() {
 
 	let server_handle = tokio::spawn(async move {
 		let request = server.accept().await.expect("no incoming connection");
-		let session = request.with_publisher(&pub_origin).ok().await?;
+		let (session, _driver) = request.with_publisher(&pub_origin).ok().await?;
 
 		session
 			.drain()
@@ -3630,7 +3630,7 @@ async fn zero_initial_backoff_still_gives_up_on_a_flapping_peer() {
 	let server_handle = tokio::spawn(async move {
 		// Accept and immediately sever, over and over.
 		while let Some(request) = server.accept().await {
-			let session = request.with_publisher(&pub_origin).ok().await?;
+			let (session, _driver) = request.with_publisher(&pub_origin).ok().await?;
 			session.abort(moq_net::Error::Cancel);
 		}
 		Ok::<_, anyhow::Error>(())
@@ -3752,7 +3752,7 @@ async fn abort_carries_its_code_to_the_peer() {
 	let (reason_tx, reason_rx) = tokio::sync::oneshot::channel();
 	let server_handle = tokio::spawn(async move {
 		let request = server.accept().await.expect("no incoming connection");
-		let session = request.ok().await?;
+		let (session, _driver) = request.ok().await?;
 		let _ = reason_tx.send(session.closed().await);
 		Ok::<_, anyhow::Error>(())
 	});

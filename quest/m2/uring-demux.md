@@ -32,8 +32,8 @@ tokio, so non-QUIC datagrams cross to them on a `Send` channel, and their
 replies come back through a remote-send path into the owning worker's ring,
 which is what a fed `moq-rtc` takes as its `Transmit`
 ([WebRTC on the shared socket](/quest/m2/one-port/rtc-feed.md)). A flow
-pinned on one shard must keep landing there, which
-[steering only QUIC by connection ID](/quest/m1/p2p/shard-steering.md) guarantees.
+pinned on one shard keeps landing there because reuseport steers only QUIC by
+connection ID.
 
 Keep the cross-thread hop off the QUIC path: a QUIC datagram never leaves its
 worker. Bound the channel per class with a drop counter, as the tokio demux
@@ -50,7 +50,6 @@ off on the ring, from shard steering.
 ## Required
 
 - [UDP demux](/quest/m1/p2p/udp-demux.md) - the classifier and flow table this runs on the ring
-- [Steer only QUIC by connection ID](/quest/m1/p2p/shard-steering.md) - keeps each non-QUIC flow on one worker
 - [WebRTC on the shared socket](/quest/m2/one-port/rtc-feed.md) - the fed RTC socket and transmit contract the ring integrates
 - [SRT on the shared socket](/quest/m2/one-port/srt-demux.md) - the SRT state machines fed through the shared demux
 

@@ -29,7 +29,7 @@ async fn prepare(tracks: usize, frames: usize) -> (moq_mux::Source, moq_mux::cat
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
 	let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
-	let stream = moq_mux::catalog::Consumer::Hang(catalog.consume().unwrap());
+	let stream = moq_mux::catalog::Consumer::from(catalog.consume().unwrap());
 	let mut publishers = Vec::new();
 	for index in 0..tracks {
 		let track = broadcast

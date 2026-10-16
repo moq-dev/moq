@@ -259,7 +259,7 @@ async fn spawn_upstream(
 		while let Some(request) = server.accept().await {
 			// Serve the shared origin bidirectionally, like a relay peer would.
 			let scratch = moq_tokio::origin::spawn();
-			let session = match request.with_publisher(&origin).with_subscriber(scratch).ok().await {
+			let (session, _driver) = match request.with_publisher(&origin).with_subscriber(scratch).ok().await {
 				Ok(session) => session,
 				Err(err) => {
 					tracing::warn!(%err, "upstream accept failed");

@@ -150,7 +150,8 @@ ts-eit *args:
     ./ts/eit-roundtrip.sh "$@"
 
 # The T-STD model's controls: a broadcast capture must pass, and the same capture
-# delivered too slowly, too early, or in a burst must fail. Needs only TSDuck.
+# delivered too slowly, too early, or in a burst must fail. Needs TSDuck, plus
+# ffmpeg/ffprobe (libx264) for the generated references.
 ts-tstd:
     bash ./ts/tstd-controls.sh
 
@@ -198,3 +199,9 @@ p2p:
     cd .. && bun install --frozen-lockfile
     cd p2p && bunx playwright install chromium
     cd p2p && bun test ./transport.browser.ts
+
+# Retain complete backend assets, parity, and raw alternating browser samples.
+[positional-arguments]
+wasm-baseline *args:
+    MOQ_TEST_RUNS="${MOQ_TEST_RUNS:-../target/test/wasm-backend}" ./wasm/run.sh "$@"
+    MOQ_TEST_RUNS="${MOQ_TEST_RUNS:-../target/test/wasm-backend}" ./wasm/run.sh --baseline "$@"

@@ -82,7 +82,7 @@ timers, and UDP socket can be built without QUIC.
 Building without default features leaves the `quic` module out entirely.
 
 ```bash
-cargo test -p moq-uring --features quic
+just rs uring
 ```
 
 `moq-relay` enables it with `--features io-uring`.

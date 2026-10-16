@@ -72,22 +72,50 @@ def classify(stack):
     return 'mutex' if any(MUTEX.search(frame) for frame in stack) else 'futex'
 
 
-def reduce(names, intervals, before, after, window_ns):
-    """Sum each worker's off-CPU time by class, as a share of its CPU time."""
+def reduce(names, records, before, after):
+    """Sum waits and on-CPU intervals within the same recorded switch window."""
+    records = sorted((row for row in records if row[2] == EVENT or row[2].startswith('PERF_RECORD_SWITCH ')),
+                     key=lambda row: row[1])
+    if not records or records[0][1] == records[-1][1]:
+        raise ValueError('no recorded switch window')
+    start, end = records[0][1], records[-1][1]
+    intervals = waits(records, end)
     workers, idle, folded = {}, [], Counter()
     for tid, name in names.items():
+        own = [(at, event) for owner, at, event, _ in records if owner == tid]
+        switches = [(at, event.startswith('PERF_RECORD_SWITCH IN')) for at, event in own if event != EVENT]
+        if not switches:
+            # Schedstat spans perf startup too, so an advance cannot prove CPU in this window.
+            if after[tid] == before[tid]:
+                idle.append(name)
+                continue
+            raise ValueError(f'worker {name} ({tid}) has no switch records; CPU in the window is ambiguous')
         mine = [(wait, stack) for owner, wait, stack in intervals if owner == tid]
-        cpu = after[tid] - before[tid]
-        # Asleep for the whole window, such as a worker with no connections.
-        if not mine and cpu == 0:
-            idle.append(name)
-            continue
         if not mine:
-            raise ValueError(f'worker {name} ({tid}) ran but never switched out')
+            raise ValueError(f'worker {name} ({tid}) has switch records but no sampled switch-out')
+        # The first switch-out means the worker was running at the window start.
+        running, last, sampled, cpu = not switches[0][1], start, None, 0
+        for at, event in own:
+            if event == EVENT:
+                # waits() starts the off-CPU interval at the sample, which precedes the sideband OUT.
+                if running:
+                    sampled = at
+                continue
+            entering = event.startswith('PERF_RECORD_SWITCH IN')
+            if entering == running:
+                # An identical observation contributes no new interval. Distinct timestamps still refuse.
+                if at == last:
+                    continue
+                raise ValueError(f'worker {name} ({tid}) has nonalternating switch records')
+            if running:
+                cpu += (at if sampled is None else sampled) - last
+            running, last, sampled = entering, at, None
+        if running:
+            cpu += end - last
         if not any(re.search(r'\bmoq_|\bkio::', frame) for _, stack in mine for frame in stack):
             raise ValueError(f'worker {name} ({tid}) has no resolved MoQ frames; build with the profiling profile and frame pointers')
         if cpu <= 0:
-            raise ValueError(f'worker {name} ({tid}) has no advancing CPU counter')
+            raise ValueError(f'worker {name} ({tid}) has no recorded CPU interval')
         total = Counter()
         for wait, stack in mine:
             kind = classify(stack)
@@ -99,7 +127,7 @@ def reduce(names, intervals, before, after, window_ns):
                         'mutex_wait_per_cpu': total['mutex'] / cpu}
     if not workers:
         raise ValueError('no worker ran during the window')
-    return {'version': 2, 'window_ns': window_ns, 'workers': workers, 'idle': sorted(idle),
+    return {'version': 3, 'window_ns': end - start, 'workers': workers, 'idle': sorted(idle),
             'scope': 'exact off-CPU time blocked in a futex under std Mutex::lock_contended; spinning is excluded'}, folded
 
 
@@ -117,20 +145,20 @@ def record(pid, delay, duration, directory):
         raise ValueError(f'PID {pid} has no moq-uring-N or moq-quic-N workers')
     time.sleep(delay)
     data = directory / 'perf.data'
-    before, start = schedstat(pid, names), time.monotonic_ns()
+    before = schedstat(pid, names)
     # A period of 1 samples every switch-out. The sample fires in the outgoing thread, so -p
     # never sees a worker's switch-in; --switch-events records it. glibc's syscall wrapper
     # keeps no frame pointer, so frame-pointer unwinding drops its caller, lock_contended;
-    # DWARF unwinding keeps it. A monotonic clock lets open waits close at the window's end.
+    # DWARF unwinding keeps it. Switch timestamps bound CPU and open waits alike.
     # The default 512 KiB buffer drops samples at 16 workers; 2 MiB does not.
     subprocess.run(['perf', 'record', '--quiet', '--no-buildid-cache', '-e', EVENT, '-c', '1', '--call-graph', 'dwarf', '--switch-events',
                     '-k', 'monotonic', '-m', '2M', '-p', str(pid), '-o', str(data), '--', 'sleep', str(duration)], check=True)
-    after, end = schedstat(pid, names), time.monotonic_ns()
+    after = schedstat(pid, names)
     # Symbols come from the local binaries; never wait on a debuginfod server.
     script = subprocess.run(['perf', 'script', '-i', str(data), '--show-switch-events', '--show-lost-events', '--inline', '--ns',
                              '-F', 'tid,time,event,ip,sym,dso'], capture_output=True, text=True, check=True,
                             env=dict(os.environ, DEBUGINFOD_URLS=''))
-    result, folded = reduce(names, waits(parse(script.stdout), end), before, after, end - start)
+    result, folded = reduce(names, parse(script.stdout), before, after)
     (directory / 'lock.json').write_text(json.dumps(result, indent=2) + '\n')
     (directory / 'mutex.folded').write_text(''.join(f'{stack} {count}\n' for stack, count in folded.most_common()))
 

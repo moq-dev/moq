@@ -33,7 +33,15 @@ import { DuplicateTrackAlias, RetiredTrackAlias, TrackAliases } from "./aliases.
 import * as Cluster from "./cluster.ts";
 import { ObjectDatagram } from "./datagram.ts";
 import { requestReason, toRequestCode } from "./error.ts";
-import { decodeObjectTime, Frame, type Group as GroupMessage, hasFirstObjectBit, ObjectIdGap } from "./object.ts";
+import * as Namespace from "./namespace.ts";
+import {
+	decodeObjectTime,
+	EndOfTrackProperties,
+	Frame,
+	type Group as GroupMessage,
+	hasFirstObjectBit,
+	ObjectIdGap,
+} from "./object.ts";
 import { fromWire, toWire } from "./priority.ts";
 import { type Publish, PublishDone, PublishError, publishDoneClean } from "./publish.ts";
 import {
@@ -45,7 +53,7 @@ import {
 	PublishNamespaceUpdate,
 } from "./publish_namespace.ts";
 import { RequestError, RequestOk } from "./request.ts";
-import { finCancels } from "./request_stream.ts";
+import { finCancels, refuseReserved } from "./request_stream.ts";
 import { joinFilter, Subscribe, SubscribeError, SubscribeOk, Unsubscribe } from "./subscribe.ts";
 import {
 	PublishBlocked,
@@ -981,6 +989,10 @@ export class Subscriber {
 	 * @internal
 	 */
 	async runPublishNamespace(msg: PublishNamespace, stream: Stream) {
+		if (Namespace.reserved(msg.trackNamespace, this.#session.version)) {
+			await refuseReserved(stream, this.#session.version);
+			return;
+		}
 		const version = this.#session.version;
 		const path = msg.trackNamespace;
 
@@ -1176,6 +1188,10 @@ export class Subscriber {
 	 * @internal
 	 */
 	async runPublish(msg: Publish, stream: Stream) {
+		if (Namespace.reserved(msg.trackNamespace, this.#session.version)) {
+			await refuseReserved(stream, this.#session.version);
+			return;
+		}
 		const version = this.#session.version;
 
 		// We decline the method itself rather than this particular track, which would be
@@ -1331,7 +1347,14 @@ export class Subscriber {
 				return;
 			}
 			if (e instanceof ObjectIdGap) console.warn(`unsupported object gap: ${reason(e)}`);
-			if (e instanceof ProtocolViolation || (e instanceof StreamError && e.code === StreamCode.MalformedTrack)) {
+			if (e instanceof EndOfTrackProperties) {
+				// The group before the marker is complete; only the track's end can't be carried.
+				producer?.close();
+				track.close(e);
+			} else if (
+				e instanceof ProtocolViolation ||
+				(e instanceof StreamError && e.code === StreamCode.MalformedTrack)
+			) {
 				// The publisher broke the track's end or its content, which no later group can repair.
 				producer?.close(e);
 				track.close(e);

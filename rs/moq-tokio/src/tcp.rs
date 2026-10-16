@@ -405,7 +405,7 @@ mod tests {
 			assert_eq!(request.transport(), crate::Transport::Tcp);
 			assert_eq!(request.path(), "/room");
 			assert_eq!(request.query(), Some("jwt=credential"));
-			let session = request.ok().await.unwrap();
+			let (session, _driver) = request.ok().await.unwrap();
 			(server, session)
 		});
 
