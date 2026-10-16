@@ -1160,7 +1160,7 @@ This document has no IANA actions.
 - Replaced the broadcast's one aligned timeline with one timeline per track: the catalog `archive` entry's `track` became a `timelines` map from each indexed track, the catalog included, to its timeline track.
 - Required consumers to ignore an undecodable `archive` entry without rejecting the catalog.
 - Replaced the segment record with a per-track record: `sequence`, `pts`, `duration`, and a `start`/`end` range of group and frame positions, dropping cross-track pacing and completeness.
-- One cutting rule for every track: a record ends at the first group boundary past a minimum (2 seconds RECOMMENDED, zero for sparse data such as a catalog) and splits a group between frames at a maximum (10 seconds RECOMMENDED), so a group that never closes is indexed as it grows.
+- One cutting rule for every track: a record ends at the first group boundary past a minimum (4 seconds RECOMMENDED, zero for sparse data such as a catalog) and splits a group between frames once it stays open several declared durations, so a group that never closes is indexed as it grows.
 - Recording format version 2: each track stores record N at `segments/N`, beside its timeline's `segments/N`, with a `Frame Start` field in the segment object. Tracks commit and expire independently, and a DVR keeps each track's newest record.
 - Described deriving HLS and DASH at the edge from a reference rendition's records.
 - An edge keeps its derived-format video reference rendition while that rendition stays in the catalog; an audio reference yields once video has a timeline.
