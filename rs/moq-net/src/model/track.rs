@@ -1256,6 +1256,7 @@ impl TrackState {
 				head: None,
 			},
 		);
+		self.cache.wakes().arrived(sequence..=sequence);
 		if visible && !pending {
 			self.arrival.push_back((sequence, stamp));
 			self.landed(sequence);
@@ -1463,6 +1464,9 @@ impl TrackState {
 	fn set_start(&mut self, start_sequence: Option<u64>, pending: bool) {
 		self.start_sequence = start_sequence;
 		self.start_pending = pending;
+		if let Some(start) = start_sequence {
+			self.cache.wakes().arrived(..start);
+		}
 	}
 
 	/// Record the exclusive end, rejecting a second end, one that would orphan
@@ -1492,6 +1496,7 @@ impl TrackState {
 			}
 		}
 		self.end = Some(end);
+		self.cache.wakes().arrived(fin..);
 		Ok(())
 	}
 
@@ -3214,9 +3219,16 @@ impl Consumer {
 	/// feed starts past it or ends before it.
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub(crate) fn poll_landed(&self, sequence: u64, waiter: &kio::Waiter) -> Poll<Option<group::Consumer>> {
-		match self.state.poll(waiter, |state| state.landing(sequence)) {
-			Poll::Ready(Ok(group)) => Poll::Ready(group),
-			Poll::Ready(Err(_)) => Poll::Ready(None),
+		let state = self.state.read();
+		if let Poll::Ready(group) = state.landing(sequence) {
+			return Poll::Ready(group);
+		}
+		// Register under the track lock, so an insert cannot slip between the lookup
+		// and its exact-group registration. Closure has a separate channel waiter.
+		state.cache.wakes().watch_arrival(sequence, waiter);
+		drop(state);
+		match self.state.poll_closed(waiter) {
+			Poll::Ready(()) => Poll::Ready(None),
 			Poll::Pending => Poll::Pending,
 		}
 	}

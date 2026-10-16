@@ -53,7 +53,3 @@ track's latest group lost after rejoin.
 Decided 2026-10-13 (maintainer): the two draft-20 FETCH edge cases found on
 #5402 do not hold this cut; they land on `main` first and ship in a later 0.17
 patch.
-
-## Related
-
-- [Draft-20 FETCH edge cases](/quest/m1/fetch-edge-cases.md) - the main-first fixes that follow this cut in a later 0.17 patch
