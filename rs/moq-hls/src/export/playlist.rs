@@ -1,8 +1,8 @@
 //! Hand-written HLS media playlist generation.
 //!
 //! Each reference record defines one complete aligned segment with its own duration.
-//! URLs keep the source reference and record number; the HLS media sequence counts
-//! continuous playlist positions across handoffs. URIs are relative to the media playlist
+//! URLs carry the source reference and record number, and that number is the segment's
+//! `EXT-X-MEDIA-SEQUENCE`, so every edge derives it alone. URIs are relative to the media playlist
 //! (`/<broadcast>/<kind>/<rendition>/media.m3u8`), so they resolve against the rendition
 //! directory.
 

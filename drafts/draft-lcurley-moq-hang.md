@@ -829,10 +829,9 @@ The final record of an ended track has no successor; its `duration` runs to the 
 ## Derived Formats {#timeline-derived}
 Segmented formats such as HLS and DASH need one segment numbering across renditions, which per-track timelines do not provide on their own.
 An edge deriving one chooses the first enabled video rendition by name with a timeline, or the first such enabled audio rendition when there is none, and keeps a video choice while that rendition stays enabled in the catalog with its timeline; an audio choice yields to the first enabled video rendition with a timeline once there is one.
-When the reference changes, the edge resumes at a segment boundary both references share without replacing any segment already advertised.
-If no shared boundary remains at the advertised tail, it resumes at the next replacement boundary and signals the intervening gap with a discontinuity instead of changing an advertised segment.
-Segment URLs identify the reference and its record `sequence`, preserving their content across handoffs.
-The HLS media sequence continues across references, independently of their source record numbering; discontinuity sequences persist when older segments leave the playlist.
+Segment URLs identify the reference and its record `sequence`, and the HLS media sequence is that `sequence`, so every edge numbers a segment alike.
+When the reference changes, the edge resumes at the new reference's first record whose `sequence` exceeds the last advertised one and that starts no earlier than the advertised content ends, never changing an advertised segment; until such a record exists, the playlist holds.
+A record that skips sequences restarts the playlist with a discontinuity, since a playlist numbers its segments consecutively; a content gap before it is a discontinuity as well.
 DASH starts a new Period at a handoff and preserves absolute content timestamps through its presentation time offset.
 Another video rendition snaps each boundary to its nearest record that starts a group on a keyframe; a segment with no such record nearby has no content on that rendition (a gap; HLS `EXT-X-GAP`).
 Other renditions take the frames whose timestamps fall inside each segment's span.
@@ -1128,7 +1127,7 @@ This document has no IANA actions.
 ## moq-hang-04
 {:numbered="false"}
 
-- Derived HLS and DASH exports hand disabled references to enabled renditions, preserving source-addressed URLs with continuous HLS media sequences and separate DASH periods; an unaligned tail switches at the next replacement boundary with a discontinuity.
+- Derived HLS and DASH exports hand disabled references to enabled renditions at the first record numbered past the advertised ones, keeping the record `sequence` as the HLS media sequence and starting a DASH period.
 
 - Fixed a track's identity for its name ({{identity}}): codec, description, container, display aspect, sample rate, and channel count never change, while every other field, including size, bitrate, and framerate, updates in place. A change of identity takes a new track name, which a rendition may name with `track` while keeping its ID, or a new Epoch.
 - Specified MSF text metadata preservation and refusal of unrepresentable text packaging during gateway conversion.

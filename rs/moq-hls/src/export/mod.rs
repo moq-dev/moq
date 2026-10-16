@@ -12,8 +12,8 @@
 //! so edges that share the choice agree without the publisher cutting for HLS. The first choice
 //! is the first enabled video rendition, or enabled audio when there is no video. A video
 //! choice sticks while it stays enabled with a timeline; audio yields to enabled video. A
-//! handoff preserves source-addressed URLs and advances a separate continuous HLS sequence,
-//! starting a DASH period. Every other rendition resolves each segment against its own timeline.
+//! handoff continues past the last advertised record sequence, starting a DASH period. Every
+//! other rendition resolves each segment against its own timeline.
 //! An inline-parameter-set codec with no catalog `description` GETs one keyframe
 //! group on the first playlist render to build its init, then caches it.
 //!
@@ -448,8 +448,8 @@ async fn watch_catalog(
 /// The first choice is the first enabled video rendition with a timeline, falling back to
 /// enabled audio. Keep an enabled video choice while its timeline stays indexed, so a newly
 /// added rendition cannot take it over. Audio yields once enabled video becomes available.
-/// A handoff changes source numbering and starts a DASH period, while the separate HLS media
-/// sequence continues over the retained rows.
+/// A handoff resumes at the replacement's first record numbered past the last advertised one,
+/// and starts a DASH period.
 fn reference(catalog: &moq_mux::catalog::hang::Catalog, current: Option<&Reference>) -> Option<Reference> {
 	use hang::catalog::Reference as _;
 
@@ -1145,7 +1145,7 @@ mod tests {
 	}
 
 	#[tokio::test(start_paused = true)]
-	async fn disabled_reference_handoff_preserves_urls_and_continuous_media_sequence() {
+	async fn disabled_reference_handoff_continues_the_source_media_sequence() {
 		handoff(false).await;
 	}
 
@@ -1180,8 +1180,8 @@ mod tests {
 		for at in [0, 2, 4, 6] {
 			first_media.write(vp8_frame(at * 1_000_000, true)).unwrap();
 		}
-		// Its source sequence is one lower, but it shares the reference's 6s boundary.
-		for at in [2, 4, 6, 8] {
+		// Aligned groups number the same records, so the sibling continues at the 6s boundary.
+		for at in [0, 2, 4, 6, 8] {
 			sibling_media.write(vp8_frame(at * 1_000_000, true)).unwrap();
 		}
 		if history {
@@ -1210,8 +1210,10 @@ mod tests {
 		let new = segments::tag(&(Kind::Video, "video1".into(), "video1".into()));
 		let before = first_rendition.snapshot();
 		let mut cursor = sibling_rendition.segments();
-		assert_eq!(cursor.next().await.unwrap().unwrap().segment, 1);
-		assert_eq!(cursor.next().await.unwrap().unwrap().segment, 2);
+		// History lists the whole timeline; the live window starts at 2s.
+		for segment in u64::from(!history)..=2 {
+			assert_eq!(cursor.next().await.unwrap().unwrap().segment, segment);
+		}
 		let bytes = first_rendition.segment(&old, 2).await.unwrap().unwrap();
 		let mut disabled = video_config();
 		disabled.enabled = false;
@@ -1231,15 +1233,11 @@ mod tests {
 		let after = sibling_rendition.snapshot();
 		assert_eq!(
 			cursor.next().await.unwrap().unwrap().segment,
-			2,
+			3,
 			"the recorder advances once into the new reference"
 		);
 		assert_eq!(after.media_sequence, before.media_sequence + u64::from(!history));
-		assert_eq!(
-			after.segments.last().unwrap().segment,
-			2,
-			"URL numbers remain source-addressed"
-		);
+		assert_eq!(after.segments.last().unwrap().segment, 3, "the next source record");
 		assert!(after.segments.iter().any(|s| s.tag == old));
 		assert!(after.segments.iter().all(|s| !s.discontinuity));
 		assert_eq!(first_rendition.segment(&old, 2).await.unwrap().unwrap(), bytes);
@@ -1258,7 +1256,7 @@ mod tests {
 				.snapshot()
 				.segments
 				.last()
-				.is_none_or(|s| s.segment < 5)
+				.is_none_or(|s| s.segment < 6)
 			{
 				tokio::time::sleep(Duration::from_millis(10)).await;
 			}
@@ -1266,9 +1264,7 @@ mod tests {
 		.await
 		.unwrap();
 		let advanced = sibling_rendition.snapshot();
-		if !history {
-			assert_eq!(advanced.media_sequence, advanced.segments[0].segment + 1);
-		}
+		assert_eq!(advanced.media_sequence, advanced.segments[0].segment);
 		assert!(!advanced.finished);
 	}
 
@@ -1389,6 +1385,140 @@ mod tests {
 		);
 	}
 
+	// An edge that saw the handoff and one that started after it derive the same media sequence
+	// from the source, so their playlists agree once the old reference's rows leave the window.
+	#[tokio::test(start_paused = true)]
+	async fn edges_before_and_after_an_aligned_handoff_agree_on_the_playlist() {
+		edges_around_a_handoff(2_000).await;
+	}
+
+	// The replacement numbers its 1s records ahead of the old 2s ones: the edge that saw the
+	// handoff drops its advertised rows rather than renumbering the replacement's.
+	#[tokio::test(start_paused = true)]
+	async fn edges_before_and_after_a_handoff_ahead_agree_on_the_media_sequence() {
+		edges_around_a_handoff(1_000).await;
+	}
+
+	/// The old reference cuts 2s records through 6s; the replacement cuts `span_ms` records.
+	async fn edges_around_a_handoff(span_ms: u64) {
+		let origin = produce_origin();
+		let mut broadcast = origin.create_broadcast("live").unwrap();
+		broadcast.announce(Default::default()).unwrap();
+		settle().await;
+		let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+		catalog
+			.mutate(|catalog| {
+				for name in ["video0", "video1"] {
+					catalog.video.renditions.insert(name.into(), video_config());
+				}
+				catalog.archive = Some(archive(&["video0", "video1"]));
+			})
+			.unwrap();
+		let timeline = |name: &str| {
+			moq_mux::timeline::Producer::new(
+				broadcast
+					.create_track(hang::timeline::default_name(name), moq_mux::timeline::Producer::info())
+					.unwrap(),
+			)
+		};
+		let mut old = timeline("video0");
+		let mut new = timeline("video1");
+		let record = |sequence: u64| span(sequence, sequence * span_ms, span_ms, sequence);
+		for sequence in 0..3 {
+			old.push(&gop(sequence)).unwrap();
+		}
+		// The sibling's timeline runs past the old reference's last record, so that record resolves.
+		let mut next = 0;
+		while next * span_ms < 8_000 {
+			new.push(&record(next)).unwrap();
+			next += 1;
+		}
+		let resumed = 6_000 / span_ms;
+		let config = Config {
+			window: Duration::from_secs(4),
+			..Default::default()
+		};
+		let old_tag = segments::tag(&(Kind::Video, "video0".into(), "video0".into()));
+		let new_tag = segments::tag(&(Kind::Video, "video1".into(), "video1".into()));
+		async fn listed(rendition: &Rendition, tag: &str, segment: u64) -> playlist::Snapshot {
+			tokio::time::timeout(Duration::from_secs(5), async {
+				loop {
+					let snapshot = rendition.snapshot();
+					if snapshot
+						.segments
+						.last()
+						.is_some_and(|last| last.tag == tag && last.segment >= segment)
+					{
+						return snapshot;
+					}
+					tokio::time::sleep(Duration::from_millis(10)).await;
+				}
+			})
+			.await
+			.unwrap_or_else(|_| panic!("segment {segment} never listed"))
+		}
+		let listing = |snapshot: &playlist::Snapshot| -> Vec<(String, u64)> {
+			snapshot
+				.segments
+				.iter()
+				.map(|segment| (segment.tag.clone(), segment.segment))
+				.collect()
+		};
+
+		let saw = Broadcaster::new(crate::resolved(&origin, "live").await, config.clone());
+		saw.advertised().await;
+		let saw_video1 = saw.rendition(Kind::Video, "video1").unwrap();
+		listed(&saw_video1, &old_tag, 2).await;
+		catalog
+			.mutate(|catalog| catalog.video.renditions.get_mut("video0").unwrap().enabled = false)
+			.unwrap();
+		let handed = listed(&saw_video1, &new_tag, next - 1).await;
+		assert_eq!(handed.segments[0].segment, handed.media_sequence);
+		let resumed_at = handed.segments.iter().position(|s| s.tag == new_tag).unwrap();
+		assert_eq!(handed.segments[resumed_at].segment, resumed);
+		if resumed == 3 {
+			assert_eq!(
+				listing(&handed)[..resumed_at],
+				[(old_tag.clone(), 2)],
+				"the advertised row stays"
+			);
+			assert!(!handed.segments[resumed_at].discontinuity);
+		} else {
+			assert_eq!(resumed_at, 0, "positions 3..6 are skipped, so the old rows go");
+		}
+
+		let after = Broadcaster::new(crate::resolved(&origin, "live").await, config);
+		after.advertised().await;
+		let after_video1 = after.rendition(Kind::Video, "video1").unwrap();
+		let joined = listed(&after_video1, &new_tag, next - 1).await;
+		assert_eq!(joined.segments[0].segment, joined.media_sequence);
+		// Every segment number both edges list names the same playlist position.
+		for segment in &joined.segments {
+			if let Some(offset) = handed.segments.iter().position(|s| s.segment == segment.segment) {
+				assert_eq!(handed.media_sequence + offset as u64, segment.segment);
+			}
+		}
+
+		while next * span_ms < 12_000 {
+			new.push(&record(next)).unwrap();
+			next += 1;
+		}
+		let followed = listed(&saw_video1, &new_tag, next - 1).await;
+		let joined = listed(&after_video1, &new_tag, next - 1).await;
+		assert_eq!(listing(&followed), listing(&joined));
+		assert_eq!(
+			followed.media_sequence, joined.media_sequence,
+			"one numbering on every edge"
+		);
+		if resumed == 3 {
+			saw.build_inits().await;
+			after.build_inits().await;
+			let saw_playlist = saw_video1.media_playlist(None).unwrap();
+			assert!(saw_playlist.contains("#EXT-X-MEDIA-SEQUENCE:4\n"), "{saw_playlist}");
+			assert_eq!(saw_playlist, after_video1.media_playlist(None).unwrap());
+		}
+	}
+
 	#[tokio::test(start_paused = true)]
 	async fn history_handoff_keeps_following_the_original_sources_retention() {
 		let origin = produce_origin();
@@ -1418,10 +1548,8 @@ mod tests {
 		for sequence in 0..3 {
 			old.push(&gop(sequence)).unwrap();
 		}
-		for sequence in 0..3 {
-			let mut record = gop(sequence);
-			record.pts += 2_000;
-			new.push(&record).unwrap();
+		for sequence in 0..4 {
+			new.push(&gop(sequence)).unwrap();
 		}
 		let broadcaster = Broadcaster::new(
 			crate::resolved(&origin, "live").await,
@@ -1482,15 +1610,13 @@ mod tests {
 			"new-source pops do not remove old-source rows"
 		);
 		old.finish().unwrap();
-		let mut record = gop(3);
-		record.pts += 2_000;
-		new.push(&record).unwrap();
+		new.push(&gop(4)).unwrap();
 		tokio::time::timeout(Duration::from_secs(5), async {
 			while rendition
 				.snapshot()
 				.segments
 				.last()
-				.is_none_or(|segment| segment.segment < 3)
+				.is_none_or(|segment| segment.segment < 4)
 			{
 				tokio::time::sleep(Duration::from_millis(10)).await;
 			}
@@ -1498,7 +1624,7 @@ mod tests {
 		.await
 		.expect("past reference completion cannot end the new reference");
 		assert!(!rendition.snapshot().finished);
-		new.pop(1).unwrap();
+		new.pop(2).unwrap();
 		tokio::time::timeout(Duration::from_secs(5), async {
 			while rendition.snapshot().media_sequence != 4 {
 				tokio::time::sleep(Duration::from_millis(10)).await;
@@ -3735,15 +3861,12 @@ mod tests {
 				for at in 0..retained {
 					fanout.push(at, entry(at, at), &refs[0]);
 				}
-				let mut sequences = [retained, 0];
+				// Aligned references share record numbers, so every handoff continues seamlessly.
 				let started = std::time::Instant::now();
 				for at in retained..retained + 1_024 {
-					let index = (at % 2) as usize;
-					let reference = &refs[index];
-					let sequence = sequences[index];
-					sequences[index] += 1;
+					let reference = &refs[(at % 2) as usize];
 					fanout.select(Some(reference.clone()));
-					fanout.push(sequence, entry(sequence, at), reference);
+					fanout.push(at, entry(at, at), reference);
 				}
 				let elapsed = started.elapsed();
 				for rendition in renditions.snapshot() {

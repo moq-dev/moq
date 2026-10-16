@@ -13,10 +13,10 @@
 //!   frames (via [`Rendition`]), and yields the CMAF bytes.
 //!
 //! A segment is addressed by its reference's tag and its number (the `seg/{tag}.{segment}.m4s`
-//! URI); a separate continuous playlist sequence is the recorder cursor's position. The
+//! URI); the number alone is its `EXT-X-MEDIA-SEQUENCE` and the recorder cursor's position. The
 //! same URI names the same span of content time on every rendition, on every edge, and after
-//! every reload. Each reference numbers segments by its own records, so a new reference starts a
-//! new numbering under its own tag rather than reusing the old one's URIs.
+//! every reload. A new reference lists its records under its own tag, continuing past the last
+//! advertised number rather than reusing the old one's URIs.
 
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -138,10 +138,9 @@ pub(crate) fn tag(reference: &ReferenceKey) -> String {
 pub(crate) struct Row {
 	/// The reference timeline's record index, used to mirror exact window trims.
 	pub index: u64,
-	/// The segment number (its URI: `seg/{tag}.{segment}.m4s`), shared across renditions.
+	/// The reference record's sequence: its `EXT-X-MEDIA-SEQUENCE` and, with the reference's tag,
+	/// its URI (`seg/{tag}.{segment}.m4s`), shared across renditions.
 	pub segment: u64,
-	/// The continuous HLS playlist position, independent of the source numbering.
-	pub media_sequence: u64,
 	/// The DASH period start, retained even after the first row of the period is evicted.
 	pub period: Duration,
 	/// The rendition the boundaries come from.
@@ -179,8 +178,8 @@ impl Row {
 /// A consistent read of the window, for rendering one playlist (the serve path only).
 #[cfg_attr(not(feature = "server"), allow(dead_code))]
 pub(crate) struct Window {
-	/// The `EXT-X-MEDIA-SEQUENCE` of the first listed segment: its continuous position, so
-	/// sequence numbers line up across renditions.
+	/// The `EXT-X-MEDIA-SEQUENCE` of the first listed segment: its source segment number, so
+	/// sequence numbers line up across renditions and edges.
 	pub sequence: u64,
 	/// The first listed discontinuity, or the newest seen when the window is empty.
 	pub discontinuity: u64,
@@ -216,11 +215,10 @@ impl State {
 	///
 	/// Rows are complete the moment they arrive. Segments evicted from the front of the
 	/// window before the cursor reached them are skipped: the cursor resumes at the oldest
-	/// row still in the window. A handoff follows the continuous playlist position even
-	/// when the next source starts its own numbering lower. A reset starts a new window.
+	/// row still in the window. A reset starts a new window, whose numbers may restart lower.
 	fn next_after(&self, after: Option<&(u64, u64)>) -> Next {
 		let next = self.rows.iter().find(|r| match after {
-			Some((resets, after)) => *resets != self.resets || r.media_sequence > *after,
+			Some((resets, after)) => *resets != self.resets || r.segment > *after,
 			None => true,
 		});
 		match next {
@@ -256,14 +254,14 @@ impl Producer {
 		if let Some(back) = state.rows.back() {
 			// A backward jump in pts or segment number means the publisher restarted its timeline;
 			// the old window can't be stitched onto the new one, so start over.
-			if Duration::from(row.pts) < Duration::from(back.pts) || row.media_sequence <= back.media_sequence {
+			if Duration::from(row.pts) < Duration::from(back.pts) || row.segment <= back.segment {
 				tracing::warn!("timeline jumped backwards; resetting the playlist window");
 				state.rows.clear();
 				state.resets += 1;
 			}
 		}
 		if state.rows.is_empty() {
-			state.sequence = row.media_sequence;
+			state.sequence = row.segment;
 		}
 
 		state.discontinuity = row.discontinuity;
@@ -280,18 +278,18 @@ impl Producer {
 			}
 			state.rows.pop_front();
 		}
-		state.sequence = state.rows.front().unwrap().media_sequence;
+		state.sequence = state.rows.front().unwrap().segment;
 		state.resets
 	}
 
-	/// Retire the prefix through `through`, preserving every remaining row's playlist position.
+	/// Retire the prefix through segment `through`, so the playlist stays consecutive.
 	pub fn retire(&self, through: u64) {
 		if let Ok(mut state) = self.state.write() {
-			state.rows.retain(|row| row.media_sequence > through);
-			state.sequence = state.rows.front().map_or_else(
-				|| state.sequence.max(through.saturating_add(1)),
-				|row| row.media_sequence,
-			);
+			state.rows.retain(|row| row.segment > through);
+			state.sequence = state
+				.rows
+				.front()
+				.map_or_else(|| state.sequence.max(through.saturating_add(1)), |row| row.segment);
 		}
 	}
 
@@ -453,7 +451,7 @@ pub struct Segment {
 pub struct Consumer {
 	state: kio::Consumer<State>,
 	rendition: Arc<Rendition>,
-	/// Last fetched or skipped playlist position, with its window reset epoch; errors leave it unchanged
+	/// Last fetched or skipped segment, with its window reset epoch; errors leave it unchanged
 	/// so callers can retry.
 	after: Option<(u64, u64)>,
 	feed: Option<Feed>,
@@ -500,7 +498,7 @@ impl Consumer {
 				return Ok(None);
 			}
 			let media = self.rendition.fetch(&row).await?;
-			self.after = Some((resets, row.media_sequence));
+			self.after = Some((resets, row.segment));
 			if let Some(media) = media {
 				return Ok(Some(Segment {
 					segment: row.segment,
@@ -574,7 +572,6 @@ mod tests {
 		Row {
 			index: segment,
 			segment,
-			media_sequence: segment,
 			period: Duration::ZERO,
 			reference: Arc::new((Kind::Video, "video".to_string(), "video".to_string())),
 			frames: hang::timeline::Position::group(group)..hang::timeline::Position::group(group + 1),
@@ -765,8 +762,8 @@ mod tests {
 		assert!(matches!(live.state.read().next_after(after(1).as_ref()), Next::Ended));
 	}
 
-	/// A new reference numbers segments from its own records, so a cursor past a higher number of
-	/// the old reference still yields the new reference's rows.
+	/// A cleared window may restart its numbering lower, so a cursor past a higher number of the
+	/// old window still yields the new one's rows.
 	#[test]
 	fn a_new_reference_restarts_the_cursor() {
 		let live = Producer::new();
@@ -782,7 +779,7 @@ mod tests {
 			..row(0, 0, 0, 2_000)
 		};
 		live.push(switched, window);
-		let after = Some((0, old.media_sequence));
+		let after = Some((0, old.segment));
 		let Next::Ready(next) = live.state.read().next_after(after.as_ref()) else {
 			panic!("the new reference's first row follows");
 		};
@@ -791,29 +788,28 @@ mod tests {
 	}
 
 	#[test]
-	fn a_handoff_keeps_source_rows_and_advances_the_cursor_once() {
+	fn a_handoff_continues_the_source_numbering_under_another_tag() {
 		let live = Producer::new();
 		let window = Some(Duration::from_secs(30));
 		let old = row(5, 5, 10_000, 2_000);
 		let old_reference = old.reference.clone();
 		live.push(old, window);
 		let switched = Row {
-			media_sequence: 6,
 			reference: Arc::new((Kind::Video, "other".into(), "other".into())),
 			period: Duration::from_secs(12),
-			..row(0, 0, 12_000, 2_000)
+			..row(6, 6, 12_000, 2_000)
 		};
 		live.push(switched, window);
 		assert_eq!(live.window().sequence, 5);
 		let Next::Ready(next) = live.state.read().next_after(Some(&(0, 5))) else {
-			panic!("the new source's lower number still follows");
+			panic!("the replacement's row follows");
 		};
-		assert_eq!((next.segment, next.media_sequence), (0, 6));
+		assert_eq!(next.segment, 6);
+		assert_ne!(tag(&next.reference), tag(&old_reference));
 		assert!(matches!(live.state.read().next_after(Some(&(0, 6))), Next::Pending));
 		live.retire(5);
 		assert_eq!(live.window().sequence, 6);
 		assert!(live.row(&tag(&old_reference), 5).is_none());
-		assert_eq!(live.window().segments[0].segment, 0);
 		live.retire(6);
 		assert!(live.window().segments.is_empty());
 		assert_eq!(live.window().sequence, 7);

@@ -213,7 +213,7 @@ impl Fanout {
 		self.feed.lock().unwrap().window = None;
 	}
 
-	/// Select the next reference without discarding any advertised segment.
+	/// Select the next reference, whose records list only past the last advertised one.
 	pub fn select(&self, reference: Option<Reference>) {
 		let mut feed = self.feed.lock().unwrap();
 		feed.selection = Some(reference);
@@ -228,32 +228,39 @@ impl Fanout {
 		}
 		let pts = Duration::from(entry.pts);
 		let end = entry.end_time();
+		let mut skipped = false;
 		if let Some(last) = &feed.last {
-			if (feed.joining || last.reference != *reference) && pts < last.end && !segments::continues(last.end, pts) {
-				// A checkpoint can contain the new reference's earlier, differently numbered
-				// records. They must never replace content a player has already seen.
-				return;
-			}
-			if last.reference == *reference && (pts < Duration::from(last.pts) || entry.sequence <= last.segment) {
+			if feed.joining || last.reference != *reference {
+				// The media sequence is the source record sequence, so every edge derives it alone.
+				// A replacement resumes only past every advertised position and content time; a
+				// lagging one holds the playlist until its numbering catches up.
+				if entry.sequence <= last.segment || (pts < last.end && !segments::continues(last.end, pts)) {
+					return;
+				}
+				// HLS numbers a playlist's segments consecutively, so a replacement that skips
+				// positions cannot follow the advertised rows.
+				skipped = entry.sequence > last.segment + 1;
+			} else if pts < Duration::from(last.pts) || entry.sequence <= last.segment {
 				feed.history.clear();
 				feed.last = None;
 				feed.anchor = None;
 			}
 		}
 		feed.joining = false;
+		if skipped {
+			feed.history.clear();
+			feed.discontinuities.interrupt();
+			feed.targets.retain(|target| {
+				let Some(rendition) = target.upgrade() else {
+					return false;
+				};
+				rendition.clear();
+				true
+			});
+		}
 		if feed.anchor.is_none() {
 			feed.anchor = Some(SystemTime::now().checked_sub(end).unwrap_or(SystemTime::UNIX_EPOCH));
 		}
-		let media_sequence = feed.last.as_ref().map_or(entry.sequence, |last| {
-			let advance = if last.reference == *reference {
-				entry.sequence - last.segment
-			} else {
-				1
-			};
-			last.media_sequence
-				.checked_add(advance)
-				.expect("HLS media sequence overflow")
-		});
 		let period = feed.last.as_ref().map_or(Duration::ZERO, |last| {
 			if last.reference == *reference { last.period } else { pts }
 		});
@@ -261,7 +268,6 @@ impl Fanout {
 		let row = segments::Row {
 			index,
 			segment: entry.sequence,
-			media_sequence,
 			period,
 			reference: reference.clone(),
 			frames: entry.start..entry.end,
@@ -300,14 +306,14 @@ impl Fanout {
 			.history
 			.iter()
 			.filter(|row| row.reference == *reference && range.contains(&row.index))
-			.map(|row| row.media_sequence)
+			.map(|row| row.segment)
 			.max()
 		else {
 			return;
 		};
 		// HLS assigns consecutive positions within a playlist. Removing an interior row
 		// would renumber every later URI, so retention always retires a whole prefix.
-		feed.history.retain(|row| row.media_sequence > through);
+		feed.history.retain(|row| row.segment > through);
 		feed.targets.retain(|target| {
 			let Some(rendition) = target.upgrade() else {
 				return false;
@@ -630,22 +636,64 @@ mod tests {
 		Entry::decode(record, moq_net::Timescale::MILLI).unwrap()
 	}
 
-	#[test]
-	fn a_source_skip_preserves_the_handoff_period_and_missing_positions() {
+	fn handed_off(old_last: u64) -> (Fanout, Reference) {
 		let fanout = Producer::new(Duration::from_secs(30)).fanout();
 		let old = Arc::new((Kind::Video, "old".into(), "old".into()));
 		let new = Arc::new((Kind::Video, "new".into(), "new".into()));
 		fanout.select(Some(old.clone()));
-		fanout.push(5, entry(5, 10_000), &old);
+		fanout.push(old_last, entry(old_last, old_last * 2_000), &old);
 		fanout.select(Some(new.clone()));
-		fanout.push(1, entry(1, 12_000), &new);
-		fanout.skip(Some(&new));
-		fanout.push(4, entry(4, 18_000), &new);
+		(fanout, new)
+	}
+
+	fn rows(fanout: &Fanout) -> Vec<(u64, u64, Duration)> {
 		let feed = fanout.feed.lock().unwrap();
-		let last = feed.history.back().unwrap();
-		assert_eq!(last.media_sequence, 9);
-		assert_eq!(last.period, Duration::from_secs(12));
-		assert_eq!(last.discontinuity, 1);
+		feed.history
+			.iter()
+			.map(|row| (row.segment, row.discontinuity, row.period))
+			.collect()
+	}
+
+	#[test]
+	fn an_aligned_replacement_continues_the_source_numbering() {
+		let (fanout, new) = handed_off(5);
+		// The replacement's checkpoint restates records the old reference already advertised.
+		fanout.push(4, entry(4, 8_000), &new);
+		fanout.push(5, entry(5, 10_000), &new);
+		fanout.push(6, entry(6, 12_000), &new);
+		let period = Duration::from_secs(12);
+		assert_eq!(rows(&fanout), [(5, 0, Duration::ZERO), (6, 0, period)]);
+	}
+
+	#[test]
+	fn a_replacement_ahead_drops_the_advertised_rows() {
+		let (fanout, new) = handed_off(5);
+		fanout.push(8, entry(8, 16_000), &new);
+		assert_eq!(rows(&fanout), [(8, 1, Duration::from_secs(16))]);
+	}
+
+	#[test]
+	fn a_lagging_replacement_holds_until_its_numbering_passes_the_advertised_rows() {
+		let (fanout, new) = handed_off(5);
+		for sequence in [2, 3, 5] {
+			fanout.push(sequence, entry(sequence, 12_000 + sequence * 2_000), &new);
+			assert_eq!(rows(&fanout), [(5, 0, Duration::ZERO)], "record {sequence} holds");
+		}
+		fanout.push(6, entry(6, 24_000), &new);
+		assert_eq!(
+			rows(&fanout),
+			[(5, 0, Duration::ZERO), (6, 1, Duration::from_secs(24))],
+			"the skipped content time is a discontinuity"
+		);
+	}
+
+	#[test]
+	fn a_source_skip_preserves_the_handoff_period() {
+		let (fanout, new) = handed_off(5);
+		fanout.push(6, entry(6, 12_000), &new);
+		fanout.skip(Some(&new));
+		fanout.push(9, entry(9, 18_000), &new);
+		assert_eq!(rows(&fanout), [(9, 1, Duration::from_secs(12))]);
 	}
 
 	#[test]
@@ -677,22 +725,21 @@ mod tests {
 		fanout.skip(Some(&old));
 		fanout.skip(Some(&new));
 		fanout.push(0, entry(0, 0), &new);
-		fanout.push(4, entry(4, 12_000), &new);
+		fanout.push(6, entry(6, 12_000), &new);
 		{
 			let feed = fanout.feed.lock().unwrap();
 			assert_eq!(feed.history.len(), 2);
-			assert_eq!(feed.history.back().unwrap().media_sequence, 6);
-			assert_eq!(feed.history.back().unwrap().segment, 4);
+			assert_eq!(feed.history.back().unwrap().segment, 6);
 			assert!(!feed.ended);
 			assert_eq!(feed.history.back().unwrap().discontinuity, 0);
 		}
-		fanout.pop(0..4, &new);
+		fanout.pop(0..6, &new);
 		assert_eq!(fanout.feed.lock().unwrap().history.len(), 2);
 		fanout.pop(0..6, &old);
 		assert_eq!(fanout.feed.lock().unwrap().history.len(), 1);
-		fanout.pop(4..5, &new);
+		fanout.pop(6..7, &new);
 		assert!(fanout.feed.lock().unwrap().history.is_empty());
-		fanout.push(5, entry(5, 14_000), &new);
-		assert_eq!(fanout.feed.lock().unwrap().history.back().unwrap().media_sequence, 7);
+		fanout.push(7, entry(7, 14_000), &new);
+		assert_eq!(fanout.feed.lock().unwrap().history.back().unwrap().segment, 7);
 	}
 }
