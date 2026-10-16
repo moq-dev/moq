@@ -53,4 +53,4 @@ Public API: none. Wire: none.
 ## Related
 
 - [Live TS clock validation](/quest/m1/ts-live-clock.md) - the grader's PCR-rate verdict on `--live`, a different layer
-- [TS decoded content](/quest/m1/test-flakes-2/ts-video-content.md) - the other TS CI flake, on content loss
+- [#5713](https://github.com/moq-dev/moq/pull/5713) - the other TS CI flake, on content loss: an export starts on a whole group

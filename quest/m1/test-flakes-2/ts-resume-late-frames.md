@@ -24,9 +24,10 @@ passed with no fixture change.
   Fixture: the test feeds the capture tail faster or later than a real
   publisher would, so pace it on the media clock or a mocked clock.
 - No retries, wider timeouts, or a looser new-content assertion.
-- Compare with [TS decoded content](/quest/m1/test-flakes-2/ts-video-content.md):
-  its first hypothesis (a zero `max_delay` live subscription) may cause both.
+- Compare with [#5713](https://github.com/moq-dev/moq/pull/5713): a zero
+  `max_delay` live subscription cut the TS export's start group, and the
+  export now counts `dropped`, `trimmed` and `gaps` separately.
 
 ## Related
 
-- [TS decoded content](/quest/m1/test-flakes-2/ts-video-content.md) - the CI TS compliance flake, possibly the same cause
+- [#5713](https://github.com/moq-dev/moq/pull/5713) - the CI TS compliance flake, possibly the same cause
