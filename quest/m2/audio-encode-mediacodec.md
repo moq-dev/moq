@@ -26,7 +26,4 @@ behind the `mediacodec` feature and the encode seam.
 ## Required
 
 - [MediaCodec decode](/quest/m2/audio-decode-mediacodec.md) - the round-trip regression decodes through it
-
-## Required
-
 - [AudioToolbox encode](/quest/m2/audio-encode-audiotoolbox.md) - owns the shared flush and zero-or-more packet encoder contract
