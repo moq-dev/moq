@@ -8,9 +8,8 @@ their cause. They still prove that a signal exits `auth serve` cleanly.
 
 ## Plan
 
-Seen 2026-10-13 on #5458 and #5481 at load averages near 47 on 24 cores,
-beside [export failure exit](/quest/m1/test-flakes-2/export-failure-exit.md):
-each timed out and passed alone. Each test spawns a real `moq auth serve` and
+Seen 2026-10-13 on #5458 and #5481 at load averages near 47 on 24 cores.
+Each test timed out and passed alone. Each test spawns a real `moq auth serve` and
 bounds two waits with a 10 s `TIMEOUT`: the "auth server listening" log line,
 which only gates setup, and the exit after the signal, which is the property.
 

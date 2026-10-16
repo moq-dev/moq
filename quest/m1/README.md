@@ -168,7 +168,6 @@ above them.
 
 - [C++ and OBS package proof](/quest/m1/cpp-package-check.md) - the installed artifacts pass before their first release
 - [C++ FFI reuse](/quest/m1/cpp-ffi-reuse.md) - C++ packages link the shared default-feature FFI build once it is proven compatible
-- [Drafts type-check ignores ancestor tsconfigs](/quest/m1/drafts-ignore-config.md) - the drafts check passes when this repository is nested under another project's tsconfig
 
 ## Related
 
