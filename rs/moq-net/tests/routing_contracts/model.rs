@@ -43,10 +43,10 @@ pub type Rev = u64;
 /// An origin's route seqno.
 pub type Seqno = u64;
 
-/// The largest QUIC varint, which carries both a seqno and a revision. An
+/// The largest lite-07 varint, which carries both a seqno and a revision. An
 /// origin never advertises it: reaching it rotates the identity instead, so
 /// every advertised seqno leaves room for the successor a request asks for.
-pub const VARINT_MAX: u64 = (1 << 62) - 1;
+pub const VARINT_MAX: u64 = u64::MAX;
 
 /// How link costs accumulate.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -495,9 +495,10 @@ struct State {
 	interest: u32,
 	/// Each origin's claims as this node knows them; authoritative for its own.
 	views: BTreeMap<Id, View>,
-	/// After the interest widened, the region each view is still current in:
-	/// the rest is hidden until a batch answering the new interest arrives.
-	current: BTreeMap<Id, &'static str>,
+	/// After the interest widened, the regions each view is known current in:
+	/// the old interest, plus what each batch answering the new one certified.
+	/// The rest is hidden until certified.
+	current: BTreeMap<Id, Vec<&'static str>>,
 	/// The last view each neighbor sent, per identity.
 	heard: BTreeMap<(Node, Id), View>,
 	sent_views: BTreeMap<(Node, Id), View>,
@@ -768,7 +769,7 @@ impl Net {
 		let state = &mut self.nodes[node];
 		let id = state.proven.expect("not an origin");
 		let seqno = state.origins.get_mut(&id).unwrap();
-		if *seqno + 1 >= VARINT_MAX {
+		if *seqno + 1 == VARINT_MAX {
 			return self.rotate(node);
 		}
 		*seqno += 1;
@@ -826,7 +827,7 @@ impl Net {
 		let id = self.nodes[node].proven.expect("not an origin");
 		let view = self.nodes[node].views.get_mut(&id).unwrap();
 		let rev = view.floors[""] + 1;
-		if rev >= VARINT_MAX {
+		if rev == VARINT_MAX {
 			self.rotate(node);
 			return self.change(node, claim, attrs);
 		}
@@ -854,10 +855,12 @@ impl Net {
 		if !prefix.starts_with(state.watch) {
 			let old = state.watch;
 			for id in state.views.keys().filter(|id| !state.origins.contains_key(id)) {
-				state.current.entry(*id).or_insert(old);
+				state.current.entry(*id).or_insert_with(|| vec![old]);
 			}
 		}
-		state.current.retain(|_, current| !prefix.starts_with(*current));
+		state
+			.current
+			.retain(|_, regions| !regions.iter().any(|region| prefix.starts_with(region)));
 		state.watch = prefix;
 		state.interest += 1;
 		let peers: Vec<Node> = self.peers(node).collect();
@@ -1118,16 +1121,35 @@ impl Net {
 				let Some(id) = self.key(at, from, id) else {
 					return;
 				};
-				let view = match self.links[&(at, from)].grant {
-					Some(grant) if id & QUALIFIED != 0 => view.restrict(grant.scope),
-					_ => view,
+				let scope = match self.links[&(at, from)].grant {
+					Some(grant) if id & QUALIFIED != 0 => Some(grant.scope),
+					_ => None,
+				};
+				let view = match scope {
+					Some(scope) => view.restrict(scope),
+					None => view,
 				};
 				let state = &mut self.nodes[at];
 				if interest != state.interest {
 					// A batch from a stream the node has since replaced.
 					return;
 				}
-				state.current.remove(&id);
+				// The batch certifies the interest within the grant's scope.
+				let watch = state.watch;
+				let certified = match scope {
+					Some(scope) if scope.starts_with(watch) => Some(scope),
+					Some(scope) if !watch.starts_with(scope) => None,
+					_ => Some(watch),
+				};
+				if let Some(region) = certified
+					&& let Some(regions) = state.current.get_mut(&id)
+				{
+					if region == watch {
+						state.current.remove(&id);
+					} else {
+						regions.push(region);
+					}
+				}
 				if let Freshness::Floors { scoped } = self.cfg.freshness
 					&& !state.origins.contains_key(&id)
 				{
@@ -1152,7 +1174,7 @@ impl Net {
 		let state = &mut self.nodes[at];
 		if let Some(own) = state.origins.get_mut(&id) {
 			// Only the origin advances its seqno to answer.
-			if seqno >= VARINT_MAX {
+			if seqno == VARINT_MAX {
 				assert_eq!(state.proven, Some(id), "a forged identity ran out of seqnos");
 				self.rotate(at);
 			} else {
@@ -1566,9 +1588,10 @@ impl Net {
 				continue;
 			};
 			let available = self.route(node, id).is_some();
-			let current = state.current.get(&id).copied().unwrap_or(state.watch);
+			let current = state.current.get(&id);
 			for (&claim, &item) in &view.items {
-				if overlaps(claim, state.watch) && overlaps(claim, current) {
+				let certified = current.is_none_or(|regions| regions.iter().any(|region| overlaps(claim, region)));
+				if overlaps(claim, state.watch) && certified {
 					shown.insert((id, claim), Shown { item, available });
 				}
 			}

@@ -416,6 +416,54 @@ fn widening_behind_a_scoped_grant_shows_the_rest_of_the_scope() {
 	net.check().unwrap();
 }
 
+/// Two scoped grants qualify one origin under the same subject, so their
+/// batches merge into one view. After widening, a batch through the first
+/// grant certifies only its own scope: a claim in the second scope that ended
+/// while unwatched stays hidden until the second grant answers too.
+#[test]
+fn widening_behind_two_grants_waits_for_each_scope() {
+	let (origin, r1, r2, client) = (0, 1, 2, 3);
+	let mut net = Net::new(config(FLOORS, Requests::Off), 4);
+	net.leaf(origin);
+	net.leaf(client);
+	net.join(origin, r1, 1);
+	net.join(origin, r2, 1);
+	for (relay, scope) in [(r1, "live/a/"), (r2, "live/b/")] {
+		let grant = Grant {
+			subject: "local",
+			scope,
+		};
+		net.link(client, relay, Link::cost(1).grant(grant), Link::cost(1));
+	}
+	net.originate(origin, 7, 0);
+	net.announce(origin, "live/a/x/1", 0, None);
+	net.announce(origin, "live/b/z", 0, None);
+	assert!(net.run());
+	let id = qualified("local", 7);
+	assert_eq!(net.shows(client, id, "live/b/z"), Some(true));
+
+	net.hold(r1, client);
+	net.hold(r2, client);
+	net.watch(client, "live/a/x/");
+	net.unannounce(origin, "live/b/z");
+	assert!(net.run());
+	net.watch(client, "");
+	while net.deliver(r1, client) {}
+	assert_eq!(net.shows(client, id, "live/a/x/1"), Some(true));
+	assert_eq!(net.shows(client, id, "live/b/z"), None, "only the first scope answered");
+
+	net.release(r1, client);
+	net.release(r2, client);
+	assert!(net.run());
+	let life: Vec<Kind> = at(&net, client)
+		.iter()
+		.filter(|event| event.claim == "live/b/z")
+		.map(|event| event.kind)
+		.collect();
+	assert_eq!(life, [Kind::Start, Kind::Unwatched]);
+	net.check().unwrap();
+}
+
 /// An exact claim covers only its own path, so it is outside an interest
 /// below it, and only a wildcard ancestor is inside.
 #[test]

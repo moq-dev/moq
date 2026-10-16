@@ -293,7 +293,8 @@ loss never reports an END:
 
 - Each origin numbers the changes to its own claims with a revision that
   starts at zero for each routing identity, separate from the route seqno.
-  Both are varints. An origin never advertises the last value, 2^62-1: a
+  Both are varints. An origin never advertises the last value, 2^64-1 (the
+  largest lite-07 varint, as for the infinite metric): a
   seqno advance, claim change, or seqno request that would reach it rotates
   the identity instead, ending the old one everywhere and announcing the
   claims again under a fresh one, so nothing wraps and every advertised
@@ -333,7 +334,10 @@ loss never reports an END:
   snapshot still queued on the old stream does not count
   (`a_snapshot_queued_before_widening_keeps_the_frozen_rest_hidden`), and
   a batch cut to a scoped grant does
-  (`widening_behind_a_scoped_grant_shows_the_rest_of_the_scope`); and withdrawing one
+  (`widening_behind_a_scoped_grant_shows_the_rest_of_the_scope`). A batch
+  certifies the interest only within its session's grant scope, so a view
+  merged from several grants stays hidden in each scope until that grant
+  answers (`widening_behind_two_grants_waits_for_each_scope`); and withdrawing one
   origin's wildcard leaves another origin's copy
   (`wildcard_claims_end_per_origin_and_are_certified_below`).
 - Per identity, a node is usable (a feasible selected route: announcements
