@@ -56,7 +56,9 @@ round-trip test first.
   no `verbatim` record. A published exporter ignores such an entry and
   silently leaves the stream out of its TS; that is the accepted cost.
 - **Refusal.** A PES carrying a clock this does not rebase (ESCR, a
-  `pack_header_field`, TREF) or PES-level scrambling refuses its stream:
+  `pack_header_field`, TREF), PES-level scrambling, or a zero
+  `PES_packet_length` on a non-video stream_id (export refuses it too)
+  refuses its stream:
   no track is advertised, or an advertised one ends with an error and loses
   its catalog entry, with a warning and an importer health count.
 - **Scope.** This covers every stream the importer carries undecoded as

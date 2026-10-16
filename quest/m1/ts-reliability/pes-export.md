@@ -27,8 +27,8 @@ writes the member, so the round trip never meets a catalog export can't read.
   as the draft already forbids for `verbatim`.
 - **Mux.** Packetize the frame's bytes unchanged on the track's PID: no
   `PesHeader`, no AC-3 repacking. The timestamp is an arrival time, not
-  a decode deadline: the first byte goes out at the placement, never
-  earlier, so this needs its own path rather than `Track::push`'s
+  a decode deadline: the PES's first byte goes out at the placement,
+  never earlier, with its TS header just before it, so this needs its own path rather than `Track::push`'s
   decode-time deadline and `Schedule`'s early slots. A regression test
   asserts the first byte's output position. Where `verbatim_buffer` models
   the PID (DVB AC-3, teletext), admission reads the PTS from the header
