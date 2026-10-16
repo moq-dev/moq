@@ -15,7 +15,7 @@ use crate::transport::poll::SendStream as _;
 
 use crate::{
 	AsPath, DecodeError, Error, Timescale, Timestamp,
-	coding::{Encode as _, Encoder, Stream, Writer},
+	coding::{Decode as _, Encode as _, Encoder, Stream, Writer},
 	ietf::{self, Control, EndLocation, FetchHeader, FetchType, Filter, GroupOrder, Location, RequestId},
 	priority::{Priority, PriorityHandle, PriorityQueue},
 	track::{Order, Subscription},
@@ -56,6 +56,17 @@ fn track_properties(info: &track::Info, wanted: bool) -> ietf::Properties {
 		priority: Some(super::priority::to_wire(info.priority)),
 		group_order: Some(GroupOrder::Descending),
 	}
+}
+
+/// The rendezvous cap is zero, but asking to wait still makes a missing publisher a timeout.
+/// Once the broadcast resolves, a missing track is the publisher's answer and stays DOES_NOT_EXIST.
+fn rendezvous_error(error: Error, requested: bool, resolved: bool) -> Error {
+	let missing = match &error {
+		Error::Unroutable | Error::Stream(crate::StreamError::Unroutable) => true,
+		Error::NotFound | Error::Stream(crate::StreamError::NotFound) => !resolved,
+		_ => false,
+	};
+	if requested && missing { Error::Timeout } else { error }
 }
 
 enum FillStep {
@@ -360,6 +371,36 @@ impl<S: crate::transport::poll::Session> Target<S> {
 			None => Poll::Pending,
 		}
 	}
+
+	fn poll_event(
+		&mut self,
+		finished: &mut bool,
+		version: Version,
+		cx: &mut std::task::Context<'_>,
+	) -> Poll<NamespaceEvent> {
+		if matches!(
+			version,
+			Version::Draft14 | Version::Draft15 | Version::Draft16 | Version::Draft17
+		) {
+			return self.poll_closed(finished, version, cx).map(NamespaceEvent::Closed);
+		}
+		let Some(stream) = self.stream() else {
+			return Poll::Pending;
+		};
+		if !*finished {
+			match stream
+				.reader
+				.poll_decode_maybe::<super::request_stream::NamespaceUpdate>(cx)
+			{
+				Poll::Ready(Ok(Some(update))) => return Poll::Ready(NamespaceEvent::Request(update)),
+				Poll::Ready(Ok(None)) if !super::request_stream::fin_cancels(version) => *finished = true,
+				Poll::Ready(Ok(None)) => return Poll::Ready(NamespaceEvent::Closed(Ok(()))),
+				Poll::Ready(Err(err)) => return Poll::Ready(NamespaceEvent::Closed(Err(err))),
+				Poll::Pending => {}
+			}
+		}
+		stream.writer.poll_closed(cx).map(NamespaceEvent::Closed)
+	}
 }
 
 /// One announce loop's state: where its advertisements go, and what the peer holds.
@@ -376,6 +417,8 @@ struct Namespaces<S: crate::transport::poll::Session> {
 	permit: crate::auth::Permit,
 	/// The auth epoch last applied to `permit`.
 	epoch: u64,
+	/// Whether this discovery cursor includes hidden namespaces.
+	hidden: bool,
 }
 
 impl<S: crate::transport::poll::Session> Namespaces<S> {
@@ -387,6 +430,7 @@ impl<S: crate::transport::poll::Session> Namespaces<S> {
 			requests: HashMap::new(),
 			permit: Default::default(),
 			epoch: 0,
+			hidden: false,
 		}
 	}
 
@@ -436,6 +480,8 @@ impl Served {
 enum NamespaceEvent {
 	/// The session or stream ended, with the result to surface.
 	Closed(Result<(), Error>),
+	/// A requester changes the namespace prefix.
+	Request(super::request_stream::NamespaceUpdate),
 	/// An origin-level route (un)announce: whether it is active and whether it
 	/// restarts, `None` once the announce stream ends.
 	Update(Option<(crate::announce::Announce, bool, bool)>),
@@ -745,7 +791,7 @@ where
 				.maybe_boxed()
 			}
 			// SUBSCRIBE_TRACKS asks for every track under a prefix via PUBLISH, which we
-			// never send. The body is already framed off and draft-17+ replies carry no
+			// never send. Read its prefix to recognize reserved namespaces; replies carry no
 			// Request ID, so there is nothing to decode before refusing.
 			ietf::SUBSCRIBE_TRACKS_ID
 				if !matches!(
@@ -753,6 +799,16 @@ where
 					Version::Draft14 | Version::Draft15 | Version::Draft16 | Version::Draft17
 				) =>
 			{
+				RequestId::decode(&mut data, this.version)?;
+				let namespace = super::namespace::decode_namespace(&mut data)?;
+				if let Some(error) = super::namespace::refusal(&namespace, this.version) {
+					return Ok(async move {
+						if let Err(err) = super::request_stream::reject(stream, error).await {
+							tracing::debug!(%err, "reserved namespace refusal failed");
+						}
+					}
+					.maybe_boxed());
+				}
 				async move {
 					let reason = "SUBSCRIBE_TRACKS is not supported";
 					if let Err(err) = this.reject_namespace_request(stream, None, reason).await {
@@ -821,6 +877,9 @@ where
 		let join = (!Filter::is_draft20(self.version)).then(|| self.register_join(msg.request_id));
 		async move {
 			let _join = join;
+			if let Some(error) = super::namespace::refusal(&msg.track_namespace, self.version) {
+				return super::request_stream::reject(stream, error).await;
+			}
 			let request_id = msg.request_id;
 			let track_name = msg.track_name.clone();
 			let absolute = self.origin.absolute(&msg.track_namespace).to_owned();
@@ -858,9 +917,16 @@ where
 					.await;
 			}
 			if msg.range_filters {
-				return self
-					.reject_subscribe(stream, request_id, &Error::Unsupported, "range filters not supported")
-					.await;
+				return super::request_stream::reject(
+					stream,
+					ietf::RequestError {
+						request_id: None,
+						error_code: request::INVALID_FILTER,
+						reason_phrase: "Range Filters exceed MAX_FILTER_RANGES=0".into(),
+						retry_interval: 0,
+					},
+				)
+				.await;
 			}
 			// Held for the life of the subscription, and while the application verifies its
 			// token. A peer past its limits loses the session.
@@ -956,12 +1022,22 @@ where
 						// The reason is the origin's, not ours: a dynamic router refusing on
 						// authorization or a drain says so, and only an unroutable path means the
 						// broadcast is not here.
-						Err(err) => return Ok(Subscribed::Refused(err.to_string(), err)),
+						Err(err) => {
+							return Ok(Subscribed::Refused(
+								err.to_string(),
+								rendezvous_error(err, msg.rendezvous, false),
+							));
+						}
 					};
 
 					let track = match broadcast.track(&msg.track_name) {
 						Ok(track) => track,
-						Err(err) => return Ok(Subscribed::Refused(err.to_string(), err)),
+						Err(err) => {
+							return Ok(Subscribed::Refused(
+								err.to_string(),
+								rendezvous_error(err, msg.rendezvous, true),
+							));
+						}
 					};
 
 					let order = msg.group_order.to_order();
@@ -973,7 +1049,12 @@ where
 					// right below, before anything is served.
 					let (cache, mut track) = match track.subscribe(subscription.clone()).await {
 						Ok(subscribed) => (track, subscribed),
-						Err(err) => return Ok(Subscribed::Refused(err.to_string(), err)),
+						Err(err) => {
+							return Ok(Subscribed::Refused(
+								err.to_string(),
+								rendezvous_error(err, msg.rendezvous, true),
+							));
+						}
 					};
 
 					// A relay's copy that went idle cannot say where its live edge is until its
@@ -1217,6 +1298,8 @@ where
 		enum Turn {
 			// The track and any fill finished, or the stream failed.
 			Served(Result<(), Error>),
+			// Reading the requester's next update failed.
+			Malformed(Error),
 			// The peer cancelled, or the session ended.
 			Cancelled,
 			// A REQUEST_UPDATE, already decoded.
@@ -1257,12 +1340,12 @@ where
 							Poll::Ready(Ok(Some(FollowUp::Update(body)))) => {
 								return Poll::Ready(match Update::decode_legacy(&body, self.version) {
 									Ok(update) => Turn::Update(update),
-									Err(err) => Turn::Served(Err(err)),
+									Err(err) => Turn::Malformed(err),
 								});
 							}
 							// UNSUBSCRIBE, or the control stream going away.
 							Poll::Ready(Ok(Some(FollowUp::End) | None)) => return Poll::Ready(Turn::Cancelled),
-							Poll::Ready(Err(err)) => return Poll::Ready(Turn::Served(Err(err))),
+							Poll::Ready(Err(err)) => return Poll::Ready(Turn::Malformed(err)),
 							Poll::Pending => {}
 						}
 					} else {
@@ -1284,7 +1367,7 @@ where
 								*finished = true
 							}
 							Poll::Ready(Ok(None)) => return Poll::Ready(Turn::Cancelled),
-							Poll::Ready(Err(err)) => return Poll::Ready(Turn::Served(Err(err))),
+							Poll::Ready(Err(err)) => return Poll::Ready(Turn::Malformed(err)),
 							Poll::Pending => {}
 						}
 					}
@@ -1310,14 +1393,17 @@ where
 			let answer = self.version != Version::Draft14;
 
 			match turn {
-				// An update the draft answers by closing the session, such as one whose
-				// AUTHORIZATION TOKEN names an alias, closes it rather than only ending this
-				// subscription, as the same token on the request itself would.
-				Turn::Served(Err(err @ Error::Decode(crate::coding::DecodeError::Session(_)))) => {
-					self.session.clone().close(
-						super::error::to_session_code(&crate::SessionError::from(&err)),
-						&err.to_string(),
-					);
+				// A malformed update, such as one whose AUTHORIZATION TOKEN names an alias,
+				// closes the session rather than only ending this subscription, as the same
+				// token on the request itself would. A source track's decode failure is not
+				// this requester's fault, so it reaches Served and ends only this subscription.
+				Turn::Malformed(err) => {
+					if let Error::Decode(_) = err {
+						self.session.clone().close(
+							super::error::to_session_code(&crate::SessionError::from(&err)),
+							&err.to_string(),
+						);
+					}
 					return Some(Served::Track(Err(err)));
 				}
 				Turn::Served(res) => return Some(Served::Track(res)),
@@ -1879,18 +1965,27 @@ where
 				return Err(err);
 			}
 		};
+		let namespace = match &msg.fetch_type {
+			FetchType::Standalone { namespace, .. } | FetchType::Filtered { namespace, .. } => Some(namespace),
+			_ => None,
+		};
+		if let Some(error) = namespace.and_then(|namespace| super::namespace::refusal(namespace, self.version)) {
+			return super::request_stream::reject(stream, error).await;
+		}
 		let priority = super::priority::from_wire(msg.subscriber_priority);
 
 		// Serving a Range Filter unfiltered would deliver objects the subscriber excluded.
 		if msg.range_filters {
-			return self
-				.reject_fetch(
-					stream,
-					msg.request_id,
-					&Error::Unsupported,
-					"range filters not supported",
-				)
-				.await;
+			return super::request_stream::reject(
+				stream,
+				ietf::RequestError {
+					request_id: None,
+					error_code: request::INVALID_FILTER,
+					reason_phrase: "Range Filters exceed MAX_FILTER_RANGES=0".into(),
+					retry_interval: 0,
+				},
+			)
+			.await;
 		}
 
 		// FILL_TIMEOUT=0 asks for cache only, and any budget ends in Timed-Out gaps we
@@ -2385,6 +2480,9 @@ where
 		mut stream: Stream<S, Version>,
 		msg: ietf::TrackStatus<'_>,
 	) -> Result<(), Error> {
+		if let Some(error) = super::namespace::refusal(&msg.track_namespace, self.version) {
+			return super::request_stream::reject(stream, error).await;
+		}
 		let request_id = msg.request_id;
 
 		// Answer only for what our grant lets us publish (MoQ Auth): checked before the
@@ -3044,6 +3142,9 @@ where
 		mut stream: Stream<S, Version>,
 		msg: ietf::SubscribeNamespace<'_>,
 	) -> Result<(), Error> {
+		if let Some(error) = super::namespace::refusal(&msg.namespace, self.version) {
+			return super::request_stream::reject(stream, error).await;
+		}
 		let prefix = msg.namespace.to_owned();
 
 		tracing::debug!(prefix = %self.origin.absolute(&prefix), "subscribe_namespace stream");
@@ -3155,7 +3256,8 @@ where
 			_ => Target::Inline(stream),
 		};
 
-		let ns = Namespaces::new(peer, target);
+		let mut ns = Namespaces::new(peer, target);
+		ns.hidden = !declared.hidden || msg.hidden || self.origin.includes_hidden();
 		self.run_namespaces(announced, prefix, ns, initial).await
 	}
 
@@ -3200,7 +3302,7 @@ where
 	async fn run_namespaces(
 		&self,
 		mut announced: crate::announce::Consumer,
-		prefix: crate::PathOwned,
+		mut prefix: crate::PathOwned,
 		mut ns: Namespaces<S>,
 		initial: Vec<crate::announce::Announce>,
 	) -> Result<(), Error> {
@@ -3247,14 +3349,14 @@ where
 					if self.withdrawal.poll(waiter).is_ready() {
 						return Poll::Ready(NamespaceEvent::Update(None));
 					}
-					let mut cx = waiter.context();
-					if let Poll::Ready(res) = target.poll_closed(&mut finished, self.version, &mut cx) {
-						return Poll::Ready(NamespaceEvent::Closed(res));
-					}
 					// A grant change applies before the next update, so a namespace it no
 					// longer covers is withdrawn rather than re-sent.
 					if let Poll::Ready(permit) = self.auth.poll_permit(crate::auth::Direction::Publish, epoch, waiter) {
 						return Poll::Ready(NamespaceEvent::Regrant(permit));
+					}
+					let mut cx = waiter.context();
+					if let Poll::Ready(event) = target.poll_event(&mut finished, self.version, &mut cx) {
+						return Poll::Ready(event);
 					}
 					if let Poll::Ready(next) = announced.poll_next(waiter) {
 						return Poll::Ready(NamespaceEvent::Update(next.map(|event| match event {
@@ -3274,7 +3376,84 @@ where
 			};
 
 			match event {
-				NamespaceEvent::Closed(res) => break res,
+				NamespaceEvent::Closed(res) => {
+					if let Err(err @ Error::Decode(_)) = &res {
+						self.session.clone().close(
+							super::error::to_session_code(&crate::SessionError::from(err)),
+							&err.to_string(),
+						);
+					}
+					break res;
+				}
+				NamespaceEvent::Request(update) => {
+					if let Err(err) = self.control.accept(update.request_id) {
+						self.session.clone().close(
+							super::error::to_session_code(&crate::SessionError::from(&err)),
+							"invalid request ID",
+						);
+						break Err(err);
+					}
+					let refusal = update
+						.refused
+						.map(|error| ietf::RequestError {
+							request_id: None,
+							error_code: request::to_code(&error, request::Kind::SubscribeNamespace, self.version),
+							reason_phrase: "namespace update refused".into(),
+							retry_interval: 0,
+						})
+						.or_else(|| {
+							update
+								.prefix
+								.as_ref()
+								.and_then(|prefix| super::namespace::refusal(prefix, self.version))
+						});
+					if let Some(error) = refusal {
+						let stream = ns.target.stream().expect("update has a stream");
+						stream.writer.varint(ietf::RequestError::ID).await?;
+						stream.writer.encode(&error).await?;
+						// Dropping a finished writer resets it, which could discard the refusal.
+						stream.writer.finish()?;
+						break stream.writer.closed().await;
+					}
+					if let Some(next) = update.prefix.filter(|next| next != &prefix) {
+						// DONE still names the old prefix. After OK every suffix is relative
+						// to the new prefix, so replay the new cursor only after acknowledging.
+						let held: Vec<_> = ns
+							.watched
+							.iter()
+							.filter(|(_, watch)| watch.sent.wanted())
+							.map(|(suffix, _)| suffix.clone())
+							.collect();
+						for suffix in held {
+							self.withdraw_namespace(&mut ns.target, &mut ns.requests, suffix)
+								.await?;
+						}
+						ns.watched.clear();
+						prefix = next;
+						let scope = crate::Pattern::subtree(prefix.as_str())
+							.map(|p| p.rebase(prefix.as_str()))
+							.unwrap_or_default();
+						let origin = self
+							.origin
+							.scope(&prefix, &scope)
+							.unwrap_or_else(|_| self.origin.empty());
+						announced = origin
+							.excluding(self.exclude(&ns.peer))
+							.discovery(ns.hidden)
+							.announced();
+						retry_at = None;
+						retry_delay = RETRY_BASE;
+					}
+					let stream = ns.target.stream().expect("update has a stream");
+					stream.writer.varint(ietf::RequestOk::ID).await?;
+					stream
+						.writer
+						.encode(&ietf::RequestOk {
+							request_id: None,
+							active: None,
+						})
+						.await?;
+				}
 				NamespaceEvent::Retry => {
 					retry_at = None;
 					retry_delay = (retry_delay * 2).min(RETRY_MAX);
@@ -6088,6 +6267,202 @@ mod serve_tests {
 	}
 
 	#[moq_net_sim::test]
+	async fn subscription_track_property_filter_closes_the_session() {
+		for version in [Version::Draft19, Version::Draft21, Version::Draft22] {
+			let h = serve(version);
+			let mut session = ScriptedSession::new(vec![0x02, 0, 6, 2, 1, 0x29, 2, 0, 0]);
+			let mut stream = Stream::open(&mut session, version).await.unwrap();
+			let mut serving = TrackServe::new(
+				h.session.clone(),
+				h.track.subscribe(None),
+				RequestId(0),
+				version,
+				ServeRange::default(),
+				None,
+			);
+			let result = h
+				.publisher
+				.run_subscription(&mut stream, &mut serving, &mut false, async {}, None)
+				.await;
+			assert!(
+				matches!(result, Some(Served::Track(Err(Error::Decode(_))))),
+				"{version}: {result:?}"
+			);
+			assert_eq!(
+				h.log.closes().iter().map(|(code, _)| *code).collect::<Vec<_>>(),
+				[0x03],
+				"{version}"
+			);
+			assert!(session.log.writes.lock().unwrap().is_empty(), "no REQUEST_ERROR");
+		}
+	}
+
+	/// A source track failing to decode ends only the subscriptions it feeds, not the requester's session.
+	#[moq_net_sim::test]
+	async fn source_decode_failure_keeps_the_session() {
+		for version in [Version::Draft16, Version::Draft19, Version::Draft22] {
+			let h = serve(version);
+			let mut session = ScriptedSession::new(Vec::new());
+			let mut stream = Stream::open(&mut session, version).await.unwrap();
+			let mut serving = TrackServe::new(
+				h.session.clone(),
+				h.track.subscribe(None),
+				RequestId(0),
+				version,
+				ServeRange::default(),
+				None,
+			);
+			h.track.clone().abort(Error::Decode(DecodeError::InvalidValue)).unwrap();
+			let result = h
+				.publisher
+				.run_subscription(&mut stream, &mut serving, &mut false, async {}, None)
+				.await;
+			assert!(
+				matches!(result, Some(Served::Track(Err(Error::Decode(_))))),
+				"{version}: {result:?}"
+			);
+			assert!(h.log.closes().is_empty(), "{version}: the session closed");
+		}
+	}
+
+	#[moq_net_sim::test]
+	async fn namespace_updates_do_not_postpone_an_auth_withdrawal() {
+		for version in [Version::Draft18, Version::Draft21, Version::Draft22] {
+			let h = serve(version);
+			settle().await;
+			let mut session = ScriptedSession::new(Vec::new());
+			let stream = Stream::open(&mut session, version).await.unwrap();
+			let mut running = std::pin::pin!(h.publisher.clone().run_subscribe_namespace_stream(
+				stream,
+				ietf::SubscribeNamespace {
+					request_id: RequestId(0),
+					namespace: crate::Path::empty(),
+					hidden: false
+				}
+			));
+			assert!(futures::poll!(running.as_mut()).is_pending());
+			let mark = session.log.writes.lock().unwrap().len();
+			h.publisher.auth.authorize(&crate::auth::Grant::default());
+			// An otherwise valid no-op update is ready at the same time as revocation.
+			session.push(&[0x02, 0, 2, 2, 0]);
+			assert!(futures::poll!(running.as_mut()).is_pending());
+			let answer = session.log.writes.lock().unwrap().clone();
+			let mut wire = Decoder::new(&answer[mark..], version.into());
+			assert_eq!(
+				wire.varint().unwrap(),
+				ietf::NamespaceDone::ID,
+				"{version}: withdrawal precedes update OK"
+			);
+			assert_eq!(
+				ietf::NamespaceDone::decode(&mut wire, version).unwrap().suffix.as_str(),
+				"room"
+			);
+			assert_eq!(wire.varint().unwrap(), ietf::RequestOk::ID);
+			ietf::RequestOk::decode(&mut wire, version).unwrap();
+			assert!(wire.is_empty());
+		}
+	}
+
+	/// A refused namespace update waits for its REQUEST_ERROR to be acknowledged instead of
+	/// letting the writer's drop reset discard it.
+	#[moq_net_sim::test]
+	async fn refused_namespace_update_is_delivered_before_the_stream_ends() {
+		for version in [Version::Draft21, Version::Draft22] {
+			let h = serve(version);
+			settle().await;
+			let mut session = ScriptedSession::new(Vec::new()).with_unacked_fin();
+			let stream = Stream::open(&mut session, version).await.unwrap();
+			let msg = ietf::SubscribeNamespace {
+				request_id: RequestId(0),
+				namespace: crate::Path::new("room"),
+				hidden: false,
+			};
+			let mut running = std::pin::pin!(h.publisher.clone().run_subscribe_namespace_stream(stream, msg));
+			assert!(futures::poll!(running.as_mut()).is_pending());
+			// Request ID 2; TRACK_NAMESPACE_PREFIX is the reserved one-field tuple ".session".
+			let mut update = vec![0x02, 0, 13, 2, 1, 0x34, 1, 8];
+			update.extend_from_slice(b".session");
+			session.push(&update);
+			assert!(
+				futures::poll!(running.as_mut()).is_pending(),
+				"{version}: ended before the ack"
+			);
+			assert!(
+				session
+					.log
+					.trail()
+					.iter()
+					.any(|(_, sent)| matches!(sent, crate::lite::test_transport::Sent::Finish)),
+				"{version}: no FIN"
+			);
+			assert!(session.log.resets().is_empty(), "{version}: the refusal was reset");
+			assert!(h.log.closes().is_empty(), "{version}: the session closed");
+		}
+	}
+
+	#[moq_net_sim::test]
+	async fn namespace_updates_move_the_prefix_after_acknowledgement() {
+		for version in [Version::Draft18, Version::Draft21, Version::Draft22] {
+			let h = serve(version);
+			let _old = h
+				._origin
+				.announce("old/first", crate::origin::Route::default())
+				.unwrap();
+			let _new = h
+				._origin
+				.announce("new/second", crate::origin::Route::default())
+				.unwrap();
+			settle().await;
+			let mut session = ScriptedSession::new(Vec::new());
+			let stream = Stream::open(&mut session, version).await.unwrap();
+			let msg = ietf::SubscribeNamespace {
+				request_id: RequestId(0),
+				namespace: crate::Path::new("old"),
+				hidden: false,
+			};
+			let mut running = std::pin::pin!(h.publisher.clone().run_subscribe_namespace_stream(stream, msg));
+			assert!(futures::poll!(running.as_mut()).is_pending());
+			let first = session.log.writes.lock().unwrap().clone();
+			let mut wire = Decoder::new(&first, version.into());
+			assert_eq!(wire.varint().unwrap(), ietf::RequestOk::ID);
+			ietf::RequestOk::decode(&mut wire, version).unwrap();
+			assert_eq!(wire.varint().unwrap(), ietf::Namespace::ID);
+			assert_eq!(
+				ietf::Namespace::decode(&mut wire, version).unwrap().suffix.as_str(),
+				"first"
+			);
+			assert!(wire.is_empty());
+			// Request ID 2; TRACK_NAMESPACE_PREFIX is the one-field tuple "new".
+			let update = [0x02, 0, 8, 2, 1, 0x34, 1, 3, b'n', b'e', b'w'];
+			// Partial messages do not consume the update or change the current prefix.
+			session.push(&update[..6]);
+			assert!(futures::poll!(running.as_mut()).is_pending());
+			assert_eq!(*session.log.writes.lock().unwrap(), first);
+			session.push(&update[6..]);
+			assert!(futures::poll!(running.as_mut()).is_pending());
+			let answer = session.log.writes.lock().unwrap().clone();
+			let mut wire = Decoder::new(&answer[first.len()..], version.into());
+			assert_eq!(wire.varint().unwrap(), ietf::NamespaceDone::ID, "{version}");
+			assert_eq!(
+				ietf::NamespaceDone::decode(&mut wire, version).unwrap().suffix.as_str(),
+				"first"
+			);
+			assert_eq!(wire.varint().unwrap(), ietf::RequestOk::ID, "{version}");
+			ietf::RequestOk::decode(&mut wire, version).unwrap();
+			assert_eq!(wire.varint().unwrap(), ietf::Namespace::ID, "{version}");
+			assert_eq!(
+				ietf::Namespace::decode(&mut wire, version).unwrap().suffix.as_str(),
+				"second"
+			);
+			assert!(wire.is_empty());
+			// A fresh update ID is required even if the prefix does not change.
+			session.push(&update);
+			assert!(futures::poll!(running.as_mut()).is_ready());
+			assert_eq!(h.log.closes().iter().map(|(code, _)| *code).collect::<Vec<_>>(), [0x04]);
+		}
+	}
+
+	#[moq_net_sim::test]
 	async fn namespace_requester_fin_is_version_gated() {
 		for version in [Version::Draft17, Version::Draft18, Version::Draft19, Version::Draft22] {
 			let h = serve(version);
@@ -6122,6 +6497,7 @@ mod serve_tests {
 			fill,
 			properties_wanted: true,
 			forward: true,
+			rendezvous: false,
 			range_filters: false,
 			authorization_token: None,
 		}
@@ -6569,6 +6945,116 @@ mod serve_tests {
 		}
 	}
 
+	#[moq_net_sim::test]
+	async fn range_filters_over_the_default_limit_get_invalid_filter() {
+		for version in [Version::Draft19, Version::Draft20, Version::Draft21, Version::Draft22] {
+			let h = serve(version);
+			for fetch in [false, true] {
+				let stream = Stream::open(&mut h.session.clone(), version).await.unwrap();
+				let mark = h.log.writes.lock().unwrap().len();
+				if fetch {
+					h.publisher
+						.clone()
+						.run_fetch_stream(
+							stream,
+							ietf::Fetch {
+								request_id: RequestId(REQUEST_ID),
+								subscriber_priority: 128,
+								group_order: GroupOrder::Descending,
+								fetch_type: if Filter::is_draft20(version) {
+									FetchType::Filtered {
+										namespace: crate::Path::new("room"),
+										track: "video".into(),
+										filter: Filter::Unfiltered,
+									}
+								} else {
+									FetchType::Standalone {
+										namespace: crate::Path::new("room"),
+										track: "video".into(),
+										start: Location { group: 0, object: 0 },
+										end: Location { group: 0, object: 0 },
+									}
+								},
+								properties_wanted: true,
+								range_filters: true,
+								fill_timeout: false,
+							},
+						)
+						.await
+						.unwrap();
+				} else {
+					let mut msg = subscribe(Filter::NextObject, None);
+					msg.range_filters = true;
+					h.publisher.clone().run_subscribe_stream(stream, msg).await.unwrap();
+				}
+				assert_eq!(
+					refusal_code(&h.log.writes.lock().unwrap()[mark..], version),
+					Some(0x36),
+					"{version}: fetch={fetch}"
+				);
+				assert!(h.log.closes().is_empty());
+			}
+		}
+	}
+
+	#[moq_net_sim::test]
+	async fn rendezvous_wait_is_capped_at_zero_but_answers_timeout() {
+		for version in [Version::Draft18, Version::Draft21, Version::Draft22] {
+			// A wait applies only to a missing publisher; a missing track on a live one does not exist.
+			for (namespace, track, publisher) in [("missing", "video", false), ("room", "audio", true)] {
+				for wait in [None, Some(0), Some(7)] {
+					let mut body = Vec::new();
+					let mut w = Encoder::new(&mut body, version.into());
+					RequestId(REQUEST_ID).encode(&mut w, version).unwrap();
+					super::super::namespace::encode_namespace(&mut w, &crate::Path::new(namespace)).unwrap();
+					w.string(track).unwrap();
+					w.varint(u64::from(wait.is_some())).unwrap();
+					if let Some(wait) = wait {
+						w.varint(0x04).unwrap();
+						w.varint(wait).unwrap();
+					}
+					assert_eq!(
+						refusal(version, ietf::Subscribe::ID, body).await,
+						if !publisher && wait.is_some_and(|millis| millis > 0) {
+							0x02
+						} else {
+							0x10
+						},
+						"{version}: {namespace}/{track} {wait:?}"
+					);
+				}
+			}
+		}
+	}
+
+	#[moq_net_sim::test]
+	async fn reserved_namespace_requests_never_reach_the_application() {
+		for version in [Version::Draft21, Version::Draft22] {
+			for path in [".", "./child", ".session", ".session/extension"] {
+				let h = serve(version);
+				let claim = h._origin.dynamic("", crate::origin::Route::default()).unwrap();
+				settle().await;
+				let stream = Stream::open(&mut h.session.clone(), version).await.unwrap();
+				let mark = h.log.writes.lock().unwrap().len();
+				let body = track_status(path, true, version);
+				let mut serving = std::pin::pin!(
+					h.publisher
+						.clone()
+						.handle_stream(ietf::TrackStatus::ID, ietf::Body(body.into()), stream)
+						.unwrap()
+				);
+				let done = futures::poll!(serving.as_mut());
+				assert!(
+					claim.requested_broadcast().now_or_never().is_none(),
+					"{version}: {path} reached the application"
+				);
+				assert!(done.is_ready(), "{version}: {path} was left waiting");
+				assert_eq!(refusal_code(&h.log.writes.lock().unwrap()[mark..], version), Some(0x10));
+				assert!(h.log.closes().is_empty());
+			}
+		}
+	}
+
 	/// A SUBSCRIBE past the session's cap closes the session with TOO_MANY_REQUESTS.
 	#[moq_net_sim::test]
 	async fn subscriptions_past_the_cap_close_the_session() {
@@ -6671,7 +7157,7 @@ mod serve_tests {
 			for (label, id, params) in cases {
 				assert_eq!(
 					refusal(version, id, [head, params].concat()).await,
-					NOT_SUPPORTED,
+					if id == ietf::Subscribe::ID { 0x36 } else { NOT_SUPPORTED },
 					"{version}: {label}"
 				);
 			}
@@ -12463,6 +12949,7 @@ mod tests {
 					fill: None,
 					properties_wanted: true,
 					forward: true,
+					rendezvous: false,
 					range_filters: false,
 					authorization_token: None,
 				},
@@ -12816,6 +13303,7 @@ mod range_tests {
 			fill: None,
 			properties_wanted: true,
 			forward: true,
+			rendezvous: false,
 			range_filters: false,
 			authorization_token: None,
 		}
