@@ -701,7 +701,7 @@ fn churn(rng: &mut XorShift, freshness: Freshness) -> Net {
 				net.watch(client, ["", "live/a/", "live/b"][rng.next(3) as usize]);
 			}
 			7 if rng.chance(50) => {
-				// Collection is allowed once a node holds no route to an identity.
+				// Collection of routes and announcements is allowed once a node holds no route to an identity.
 				let node = rng.next(RELAYS as u64 + 3) as usize;
 				let id = ids[rng.next(2) as usize];
 				if !net.holds(node, id) && (RELAYS..RELAYS + 2).all(|origin| node != origin) {
@@ -743,9 +743,8 @@ fn churn(rng: &mut XorShift, freshness: Freshness) -> Net {
 	net
 }
 
-/// Collection drops a feasibility distance with no Babel GC timer, which is
-/// safe only because a node collects once no neighbor's entry remains, and an
-/// ordered session cannot deliver a stale advertisement after its retraction.
+/// Collection keeps the feasibility distance, so an echo of a node's own
+/// advertisement still queued on some session is refused after it collects.
 fn loop_free(net: &Net) {
 	for id in (100..110).chain(200..210) {
 		for node in 0..RELAYS + 3 {

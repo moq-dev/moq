@@ -799,11 +799,12 @@ impl Net {
 		}
 	}
 
-	/// Forget everything about `id` at `node`, as source garbage collection does.
+	/// Forget `id`'s routes and announcements at `node`. The feasibility
+	/// distance stays: an echo of `node`'s own advertisement can still be
+	/// queued on any session, and no local state proves it drained.
 	pub fn collect(&mut self, node: Node, id: Id) {
 		let state = &mut self.nodes[node];
 		state.rx.remove(&id);
-		state.fd.remove(&id);
 		state.filed.retain(|(_, key), _| *key != id);
 		state.views.remove(&id);
 		state.heard.retain(|(_, key), _| *key != id);

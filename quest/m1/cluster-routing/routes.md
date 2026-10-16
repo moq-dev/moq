@@ -111,8 +111,8 @@ The handoff contract below, decided 2026-10-16, settles claim freshness:
   `reconnect_without_restart_needs_a_seqno_advance`). A random identity alone
   does not keep a dead incarnation away. What bounds it is ordered sessions,
   state scoped to the session that delivered it, never advertising an
-  unreachable route, and keeping a feasibility distance while any route to
-  that identity remains: a collected incarnation then reappears only from a
+  unreachable route, and keeping the feasibility distance through
+  collection: a collected incarnation then reappears only from a
   message already in flight on a live session, which delivers the retraction
   next (`collected_incarnation_returns_only_while_its_retraction_is_in_flight`).
   `cluster.id` stops naming a routing identity.
@@ -318,8 +318,11 @@ loss never reports an END:
   a dead origin or a total partition goes offline everywhere with no timer
   (`holds_retire_once_nothing_can_recover`). No promise is made of learning a
   withdrawal during a partition.
-- A node may collect an identity's views, floors, and feasibility distance
-  once it holds no route entry for it; correctness does not depend on when.
+- A node may collect an identity's views and floors once it holds no route
+  entry for it; correctness does not depend on when. It keeps the
+  feasibility distance: an echo of its own advertisement can still wait on
+  any session, and dropping the distance lets that echo form a loop
+  (`collection_keeps_the_feasibility_distance_against_a_queued_echo`).
   After collection, or a process restart, a stale view returns only from a
   sender that has not yet received the withdrawal, and only until it does
   (`stale_replay_after_collection_lasts_only_until_the_withdrawal_behind_it`).
@@ -348,9 +351,9 @@ loss never reports an END:
 
   | Rule | Revivals | False ENDs | Re-announcements | Reader events | Claim KiB |
   | --- | --- | --- | --- | --- | --- |
-  | Next-hop authority | 374 | 445 | 377 | 8984 | 830 |
+  | Next-hop authority | 373 | 444 | 376 | 8982 | 830 |
   | Snapshot barrier | 224 | 164 | 249 | 9241 | 801 |
-  | Merged floors | 0 | 0 | 36 | 9213 | 779 |
+  | Merged floors | 0 | 0 | 36 | 9211 | 779 |
 
   Merged floors' re-announcements follow an offline period or a collection,
   never a known withdrawal. Byte counts are estimates in virtual time.
@@ -370,12 +373,17 @@ Decided with the maintainer 2026-10-16, from the handoff proof:
    when a held route recovers; let-go reported as END, as today; and
    availability with let-go kept as END, which hides whether the origin
    ended or the network lost it.
-4. Collection: ✅ collect once no neighbor's route entry remains, held
-   entries included. Babel's source GC timer guards against a late stale
-   advertisement, which an ordered session cannot deliver after its
-   retraction. `sweep_handoff` checks selected routes stay loop-free at every
-   step; collecting while a neighbor's entry remains loops at once.
-   Rejected: Babel's source GC timer.
+4. Collection: ✅ collect routes and announcements once no neighbor's route
+   entry remains, held entries included. `sweep_handoff` checks selected
+   routes stay loop-free at every step; collecting while a neighbor's entry
+   remains loops at once. Rejected: Babel's source GC timer.
+   Revised 2026-10-16 after review: the feasibility distance is not
+   collected. An empty route table does not prove that an echo of the node's
+   own advertisement has drained from every session, and accepting that echo
+   loops (`collection_keeps_the_feasibility_distance_against_a_queued_echo`).
+   Open: the distance, a seqno and metric per identity the node advertised,
+   then grows with identity churn. Bounding it safely needs a drain proof on
+   the wire or a timer.
 5. Seqno requests: ✅ one pending request per origin at every hop, resent on
    a next-hop change, with no timer and no hop count. Rejected: the
    bounded-retry sketch, which strands a quiet origin's node.

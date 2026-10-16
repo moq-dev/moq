@@ -132,6 +132,41 @@ fn collected_incarnation_returns_only_while_its_retraction_is_in_flight() {
 	}
 }
 
+/// No route entry is not proof that no advertisement derived from this node's
+/// own is still in flight. b's echo from c waits on c's session while b loses
+/// its only entry, so dropping b's feasibility distance there lets the echo
+/// through and b routes via c while c still routes via b.
+#[test]
+fn collection_keeps_the_feasibility_distance_against_a_queued_echo() {
+	let (origin, b, c) = (0, 1, 2);
+	let mut net = Net::new(Config::default(), 3);
+	net.join(origin, b, 1);
+	net.join(b, c, 1);
+	net.hold(c, b);
+	net.originate(origin, 7, 0);
+	assert!(net.run());
+	assert_eq!(net.route(c, 7).and_then(|route| route.next), Some(b));
+	assert!(net.queued(c, b) > 0, "c's echo waits");
+
+	net.hold(b, c);
+	net.disconnect(origin, b);
+	assert!(!net.holds(b, 7));
+	net.collect(b, 7);
+	assert!(net.deliver(c, b), "the echo of b's own advertisement");
+	assert!(net.route(b, 7).is_none(), "b refuses its own echo");
+	assert!(net.starved(b, 7));
+
+	net.release(b, c);
+	net.release(c, b);
+	assert!(net.run());
+	for node in [b, c] {
+		assert!(
+			net.route(node, 7).is_none(),
+			"node {node} routes to an unreachable origin"
+		);
+	}
+}
+
 // Metric: strictly positive link costs, checked, with no hop count.
 
 /// An origin two links from node 2, then an unrelated session at node 2 that
