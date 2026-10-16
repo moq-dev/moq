@@ -74,7 +74,6 @@ cache limits remain separate; bitrate pacing composes with this memory cap.
   datagrams join their subscription's send group instead of preempting every stream
 - [Relay peers get wider limits](/quest/m1/quic/peer-limits.md) - MAX_STREAMS
   and MAX_DATA are raised after SETUP identifies a cluster peer
-- [Delete NewReno](/quest/m1/quic/new-reno.md) - the unused public controller goes
 
 ## Related
 
