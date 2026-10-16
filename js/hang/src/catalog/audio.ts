@@ -10,11 +10,7 @@ const TrackSchema = z.object({
 	name: z.string(),
 });
 
-/**
- * Schema for a single audio rendition's decoder config.
- * Mirrors WebCodecs AudioDecoderConfig (https://w3c.github.io/webcodecs/#audio-decoder-config).
- */
-export const AudioConfigSchema = z.object({
+const AudioConfigFields = z.object({
 	// Optional reference to another broadcast that publishes this track, expressed
 	// relative to the broadcast that served this catalog (e.g. "./source").
 	// If unset, the track lives in the same broadcast as the catalog.
@@ -82,7 +78,21 @@ export const AudioConfigSchema = z.object({
 			z.transform((value) => (value === 0 ? undefined : value)),
 		),
 	),
+
+	// "ambisonic" is AmbiX; the order comes from numberOfChannels.
+	layout: z.optional(z.union([z.literal("ambisonic"), z.string()])),
 });
+
+/**
+ * Schema for a single audio rendition's decoder config.
+ * Mirrors WebCodecs AudioDecoderConfig (https://w3c.github.io/webcodecs/#audio-decoder-config).
+ */
+export const AudioConfigSchema = AudioConfigFields.check(
+	z.refine(
+		(c) => c.layout !== "ambisonic" || (c.numberOfChannels >= 4 && Number.isInteger(Math.sqrt(c.numberOfChannels))),
+		{ message: "ambisonic needs a perfect-square channel count >= 4" },
+	),
+);
 
 /** Schema for the catalog audio section: a map of track name to rendition config. */
 export const AudioSchema = z.union([
