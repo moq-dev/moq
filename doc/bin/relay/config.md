@@ -89,17 +89,21 @@ certificate, route hop, or cluster-looking URL alone does not select peer caps.
 [session]
 announces = 1000                     # Simultaneous broadcasts or namespaces.
 subscriptions = 1000                # Simultaneously held subscriptions.
+fetches = 10000                      # Independent simultaneous FETCH requests.
 
 [peer]
 announces = 100000
 subscriptions = 10000
+fetches = 10000
 ```
 
 These are the defaults. For example, `--peer-subscriptions=50000` raises the
-subscription cap on cluster links. Size peer caps for the combined traffic
-they carry, and use session peak counters to check headroom. Exceeding a cap
-closes the session with `TOO_MANY_REQUESTS`; reconnecting with the same load
-will exceed it again. Zero admits no entries of that kind, not unlimited
+subscription cap on cluster links. `--session-fetches` and `--peer-fetches`
+set the independent FETCH caps; concurrent callers of the same group each
+hold a slot. Size peer caps for the combined traffic they carry, and use
+session peak counters to check announcement and subscription headroom.
+Exceeding a cap closes the session with `TOO_MANY_REQUESTS`; reconnecting with
+the same load will exceed it again. Zero admits no entries of that kind, not unlimited
 entries. On moq-transport drafts 14 to 16 these caps also size the request
 window, so very small values can prevent other requests from progressing.
 

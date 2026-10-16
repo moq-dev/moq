@@ -60,5 +60,9 @@ name = "export"
 harness = false
 
 [[bench]]
+name = "jitter"
+harness = false
+
+[[bench]]
 name = "containers"
 harness = false

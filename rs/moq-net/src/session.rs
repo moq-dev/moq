@@ -705,8 +705,7 @@ impl Drop for Withdrawing {
 /// Caps on what one peer can make a session hold at once.
 ///
 /// A peer that goes past a cap loses the session, closed with `TOO_MANY_REQUESTS`. The
-/// stats sessions rows report each root's peaks, so an operator sees how close sessions
-/// come before one is closed.
+/// stats sessions rows report announcement and subscription peaks.
 ///
 /// On moq-transport drafts 14 to 16 the caps also size the request window, which counts
 /// every request (FETCH, TRACK_STATUS and SUBSCRIBE_UPDATE included), so very low caps
@@ -721,6 +720,8 @@ pub struct Limits {
 	/// Subscriptions the peer may hold on our broadcasts. On moq-lite 05 and later an open
 	/// TRACK stream holds one too, sharing it with a SUBSCRIBE for the same track.
 	pub subscriptions: usize,
+	/// FETCH requests the peer may hold before group coalescing, defaulting to 10,000.
+	pub fetches: usize,
 }
 
 impl Default for Limits {
@@ -729,6 +730,7 @@ impl Default for Limits {
 		Self {
 			announces: 100_000,
 			subscriptions: 10_000,
+			fetches: 10_000,
 		}
 	}
 }
@@ -739,7 +741,10 @@ impl Limits {
 	/// Twice what the caps admit, so a peer within them is never blocked by request IDs
 	/// still waiting to be granted back.
 	pub(crate) fn requests(&self) -> u64 {
-		let caps = self.announces.saturating_add(self.subscriptions) as u64;
+		let caps = self
+			.announces
+			.saturating_add(self.subscriptions)
+			.saturating_add(self.fetches) as u64;
 		caps.saturating_mul(2)
 	}
 }
