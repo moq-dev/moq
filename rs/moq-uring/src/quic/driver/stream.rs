@@ -70,6 +70,22 @@ impl SendStream {
 		n
 	}
 
+	/// Set the stream's priority, which orders it against the other streams
+	/// of its send group, or of the ungrouped streams. Higher goes first.
+	pub fn set_priority(&mut self, order: i64) {
+		let _ = self.shared.conn.borrow_mut().send_stream(self.id).set_priority(order);
+	}
+
+	/// Move the stream into a send group, or with `None` back to the
+	/// ungrouped streams, which go before every group.
+	///
+	/// # Panics
+	/// When `group` belongs to another connection.
+	pub fn set_group(&mut self, group: Option<&super::SendGroup>) {
+		let group = group.map(|group| group.on(&self.shared));
+		let _ = self.shared.conn.borrow_mut().send_stream(self.id).set_group(group);
+	}
+
 	/// [`reset`](web_transport_trait::poll::SendStream::reset) with a
 	/// full-width code, for the WebTransport HTTP/3 error mapping.
 	pub(crate) fn reset_code(&mut self, code: u64) {
@@ -121,7 +137,7 @@ impl web_transport_trait::poll::SendStream for SendStream {
 	fn set_priority(&mut self, order: i32) {
 		// The trait (like W3C sendOrder) sends HIGHER values first, and so
 		// does moq-quic.
-		let _ = self.shared.conn.borrow_mut().send_stream(self.id).set_priority(order);
+		SendStream::set_priority(self, order.into());
 	}
 
 	fn finish(&mut self) -> Result<(), Self::Error> {

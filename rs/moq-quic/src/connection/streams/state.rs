@@ -9,8 +9,8 @@ use rustc_hash::FxHashMap;
 use tracing::{debug, trace};
 
 use super::{
-    PendingStreamsQueue, Recv, Retransmits, Send, SendState, ShouldTransmit, StreamEvent,
-    StreamHalf, ThinRetransmits,
+    Recv, Retransmits, Schedule, Send, SendState, ShouldTransmit, StreamEvent, StreamHalf,
+    ThinRetransmits,
 };
 use crate::{
     Dir, MAX_STREAM_COUNT, Side, StreamId, TransportError, VarInt,
@@ -100,8 +100,8 @@ pub struct StreamsState {
     /// This differs from `self.send.len()` in that it does not include streams that the peer is
     /// permitted to open but which have not yet been opened.
     pub(super) send_streams: usize,
-    /// Streams with outgoing data queued, sorted by priority
-    pub(super) pending: PendingStreamsQueue,
+    /// Streams with outgoing data queued, in the order to send them
+    pub(super) pending: Schedule<StreamId>,
 
     events: VecDeque<StreamEvent>,
     /// Streams blocked on connection-level flow control or stream window space
@@ -171,7 +171,7 @@ impl StreamsState {
             opened: [false, false],
             next_reported_remote: [0, 0],
             send_streams: 0,
-            pending: PendingStreamsQueue::new(),
+            pending: Schedule::new(),
             events: VecDeque::new(),
             connection_blocked: Vec::new(),
             max_data: 0,
@@ -225,7 +225,9 @@ impl StreamsState {
                 // We don't bother calling `stream_freed` here because we explicitly reset affected
                 // counters below.
                 let id = StreamId::new(self.side, dir, i);
-                self.send.remove(&id).unwrap();
+                if let Some(mut stream) = self.send.remove(&id).unwrap() {
+                    self.pending.leave(&mut stream.slot);
+                }
                 if let Dir::Bi = dir {
                     self.recv.remove(&id).unwrap();
                 }
@@ -239,7 +241,6 @@ impl StreamsState {
             }
         }
 
-        self.pending.clear();
         self.send_streams = 0;
         self.data_sent = 0;
         self.buffered_data = 0;
@@ -380,7 +381,9 @@ impl StreamsState {
             hash_map::Entry::Vacant(_) => {}
             hash_map::Entry::Occupied(e) => {
                 if let Some(SendState::ResetSent) = e.get().as_ref().map(|s| s.state) {
-                    e.remove_entry();
+                    if let (_, Some(mut stream)) = e.remove_entry() {
+                        self.pending.leave(&mut stream.slot);
+                    }
                     self.stream_freed(id, StreamHalf::Send);
                 }
             }
@@ -389,13 +392,7 @@ impl StreamsState {
 
     /// Whether any stream data is queued, regardless of control frames
     pub(crate) fn can_send_stream_data(&self) -> bool {
-        // Reset streams may linger in the pending stream list, but will never produce stream frames
-        self.pending.iter().any(|stream| {
-            self.send
-                .get(&stream.id)
-                .and_then(|s| s.as_ref())
-                .is_some_and(|s| !s.is_reset())
-        })
+        !self.pending.is_empty()
     }
 
     /// Whether MAX_STREAM_DATA frames could be sent for stream `id`
@@ -620,25 +617,17 @@ impl StreamsState {
                 break;
             }
 
-            // Pop the stream of the highest priority that currently has pending data
-            // If the stream still has some pending data left after writing, it will be reinserted, otherwise not
-            let Some(stream) = self.pending.pop() else {
+            // Pop the next stream to send from. Reset streams leave the schedule, so every
+            // stream in it has data or a FIN to send.
+            let Some(id) = self.pending.pop() else {
                 break;
             };
-
-            let id = stream.id;
-
-            let Some(stream) = self.send.get_mut(&id).and_then(|s| s.as_mut()) else {
-                // Stream was reset with pending data and the reset was acknowledged
-                continue;
-            };
-
-            // Reset streams aren't removed from the pending list and still exist while the peer
-            // hasn't acknowledged the reset, but should not generate STREAM frames, so we need to
-            // check for them explicitly.
-            if stream.is_reset() {
-                continue;
-            }
+            let stream = self
+                .send
+                .get_mut(&id)
+                .and_then(|s| s.as_mut())
+                .expect("scheduled stream is open");
+            let start = buf.len();
 
             // Now that we know the `StreamId`, we can better account for how many bytes
             // are required to encode it.
@@ -648,18 +637,6 @@ impl StreamsState {
                 && matches!(stream.state, SendState::DataSent { .. });
             if fin {
                 stream.fin_pending = false;
-            }
-
-            if stream.is_pending() {
-                // If the stream still has pending data, reinsert it, possibly with an updated priority value
-                // Fairness with other streams is achieved by implementing round-robin scheduling,
-                // so that the other streams will have a chance to write data
-                // before we touch this stream again.
-                if fair {
-                    self.pending.push_pending(id, stream.priority);
-                } else {
-                    self.pending.reinsert_pending(id, stream.priority);
-                }
             }
 
             let meta = frame::StreamMeta { id, offsets, fin };
@@ -675,6 +652,13 @@ impl StreamsState {
                 offsets.start += data.len() as u64;
                 buf.put_slice(data);
             }
+
+            // Requeue a stream with data left, possibly at an updated priority. With fairness,
+            // it goes behind its equal-priority peers so they get a turn first. The frame's
+            // bytes count against its group's share either way.
+            let requeue = stream.is_pending().then_some(stream.priority);
+            self.pending
+                .sent(id, &mut stream.slot, buf.len() - start, requeue, fair);
             stream_frames.push(meta);
         }
 
@@ -708,7 +692,9 @@ impl StreamsState {
             return;
         }
 
-        entry.remove_entry();
+        if let (_, Some(mut stream)) = entry.remove_entry() {
+            self.pending.leave(&mut stream.slot);
+        }
         self.stream_freed(id, StreamHalf::Send);
         self.events.push_back(StreamEvent::Finished { id });
     }
@@ -722,7 +708,8 @@ impl StreamsState {
             return;
         }
         if !stream.is_pending() {
-            self.pending.push_pending(frame.id, stream.priority);
+            self.pending
+                .push(frame.id, &mut stream.slot, stream.priority);
         }
         stream.fin_pending |= frame.fin;
         stream.pending.retransmit(frame.offsets);
@@ -741,7 +728,7 @@ impl StreamsState {
                     continue;
                 }
                 if !stream.is_pending() {
-                    self.pending.push_pending(id, stream.priority);
+                    self.pending.push(id, &mut stream.slot, stream.priority);
                 }
                 stream.pending.retransmit_all_for_0rtt();
             }
