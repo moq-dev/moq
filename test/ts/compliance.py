@@ -1393,8 +1393,9 @@ def system_timelines(
     for program, changes in events.items():
         pmt = pcr = None
         epochs: list[tuple[int, int | None, int | None]] = []
-        added = first_complete is not None and first_complete < min(i for i, kind, _, _ in changes if kind == 0)
+        absent = first_complete is not None and first_complete < min(i for i, kind, _, _ in changes if kind == 0)
         for index, kind, pid, value in sorted(changes):
+            absent |= kind == 2
             if kind == 1 and pid != pmt:
                 continue
             new = (value, pcr) if kind == 0 else (pmt, value) if kind == 1 else (None, None)
@@ -1403,7 +1404,7 @@ def system_timelines(
             pmt, pcr = new
             if pcr is None and (pmt is not None or not epochs or epochs[-1][1] is None):
                 continue
-            start = index + 1 if epochs or added else 0
+            start = index + 1 if epochs or absent else 0
             if epochs and epochs[-1][0] == start:
                 epochs.pop()
             epochs.append((start, pmt, pcr))

@@ -65,6 +65,9 @@ and tables-only streams on a PCR PID at 100 Mb/s:
     program addition    four PAT copies spaced for TBsys at 10 Mb/s,  must pass (the added program
                         then a rise to 100 Mb/s and a version adding  takes nothing before the PAT)
                         a second program
+    program restored    the same, the opening PAT listing the second  must pass (the restored program
+                        program and a version dropping it before the  takes nothing before the PAT)
+                        burst, with no PMT for it
     unclocked tables    a discontinuity with one PCR, then copies     outside a clocked time base
 
 and an MPEG audio stream whose frames end partway through a packet, each decoded
@@ -300,14 +303,17 @@ def synthetic_system(path: str, layout: str) -> None:
     if layout == "program removal":
         # Seen first as the second of two sections, which lists both programs.
         pat = section(0x00, 1, one + two, number=1, last=1)
-    # The PAT's next version, which drops the second program, or adds it.
+    elif layout == "program restored":
+        pat = section(0x00, 1, one + two)
+    # The PAT's next versions: one dropping the second program, one adding it.
     dropped = section(0x00, 1, one, version=1)
-    added = section(0x00, 1, one + two, version=1)
+    added = section(0x00, 1, one + two, version=2)
     pmt = section(0x02, 1, (0xE000 | old).to_bytes(2, "big") + bytes([0xF0, 0x00]))
     # The PMT's next version, which moves the PCR.
     moved = section(0x02, 1, (0xE000 | new).to_bytes(2, "big") + bytes([0xF0, 0x00]), version=1)
     other = section(0x02, 2, (0xE000 | second).to_bytes(2, "big") + bytes([0xF0, 0x00]))
     moving = ("PCR PID move", "PCR switch in burst", "PCR move, new base", "PCR move, jump")
+    adding = ("program addition", "program restored")
     burst = [6_650 + n * 107 for n in range(9)]
     pats: list[int] = []
     others: list[int] = []
@@ -346,12 +352,14 @@ def synthetic_system(path: str, layout: str) -> None:
         # dropped program's clock, run on, would put them 165 us apart.
         fall, after = 6_650, 10_000_000
         copies, pats, others = [], [fall - 100] + [fall + 11 * n for n in range(1, 5)], [3]
-    elif layout == "program addition":
+    elif layout in adding:
         # Four PAT copies every 11 positions (1.65 ms) at 10 Mb/s, then the rate rises to 100
         # Mb/s and the PAT's next version adds the second program: its clock, run back, would
-        # put the copies 165 us apart.
+        # put the copies 165 us apart. Restored, the opening PAT lists the second program and
+        # a version dropping it follows before any PMT for it.
         fall, after, before = 6_650, 100_000_000, 10_000_000
         copies, pats = [], [fall - 50 + 11 * n for n in range(4)] + [fall + 100, fall + 400]
+        pats += [100] if layout == "program restored" else []
         others = [fall + 101, fall + 300]
     else:  # "unclocked tables": a signalled discontinuity, one PCR, then three copies
         fall, after = 6_650, 100_000_000
@@ -366,7 +374,10 @@ def synthetic_system(path: str, layout: str) -> None:
             out.append(packet(0, 0, b"\x00" + pat, pusi=True))
         elif index in pats:
             pat_cc = (pat_cc + 1) & 0x0F
-            table = dropped if layout == "program removal" else added if index > fall else pat
+            if layout == "program removal" or layout == "program restored" and index < fall:
+                table = dropped
+            else:
+                table = added if index > fall else pat
             out.append(packet(0, pat_cc, b"\x00" + table, pusi=True))
         elif index in others:
             out.append(packet(MOVED_PID, other_cc, b"\x00" + other, pusi=True))
@@ -383,7 +394,7 @@ def synthetic_system(path: str, layout: str) -> None:
         elif (index % 16 == 0 or index == fall) and not (layout == "unclocked tables" and index > fall):
             out.append(packet(pcr_pid, 0, adaptation=clock(0x10, ticks)))
         elif index % 16 == 8 and (
-            layout == "program removal" and index < fall - 100 or layout == "program addition" and index > fall + 101
+            layout == "program removal" and index < fall - 100 or layout in adding and index > fall + 101
         ):
             out.append(packet(second, 0, adaptation=clock(0x10, ticks)))
         else:
@@ -515,6 +526,7 @@ CASES = [
     ("PCR move, new base", system("PCR move, new base"), ("system-buffers", "pass")),
     ("program removal", system("program removal"), ("system-buffers", "pass")),
     ("program addition", system("program addition"), ("system-buffers", "pass")),
+    ("program restored", system("program restored"), ("system-buffers", "pass")),
     ("PCR move, jump", system("PCR move, jump"), ("system-buffers", {"PCR PID switch without a common time base"})),
     ("unclocked tables", system("unclocked tables"), ("system-buffers", {"outside a clocked time base"})),
     ("straddling audio", audio(4, STRADDLE_S), "pass"),
