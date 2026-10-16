@@ -1,0 +1,46 @@
+# BoltFFI's build of the slice; `run.sh` drives it. Generated output stays under target/.
+[package]
+name = "moq_ffi_gen"
+crate = "moq_ffi_gen"
+
+[cargo]
+global_args = ["--features=boltffi"]
+
+[targets.python]
+enabled = true
+output = "../../target/ffi-gen/boltffi/python"
+
+[targets.android]
+enabled = true
+output = "../../target/ffi-gen/boltffi/android"
+
+[targets.android.kotlin]
+package = "dev.moq.gen"
+output = "../../target/ffi-gen/boltffi/kotlin"
+
+[targets.apple]
+enabled = true
+output = "../../target/ffi-gen/boltffi/apple"
+
+[targets.apple.swift]
+output = "../../target/ffi-gen/boltffi/swift"
+
+[targets.wasm]
+enabled = true
+output = "../../target/ffi-gen/boltffi/wasm"
+# Only `debug` or `release`: moq-wasm's size-tuned `wasm-release` is not selectable.
+profile = "release"
+# No `client`: the browser dials through web-transport-wasm, outside the slice.
+cargo_args = ["--no-default-features"]
+
+# moq-wasm ships without wasm-opt, and the dev shell has none.
+[targets.wasm.optimize]
+enabled = false
+
+[targets.wasm.typescript]
+output = "../../target/ffi-gen/boltffi/typescript"
+
+[targets.wasm.npm]
+output = "../../target/ffi-gen/boltffi/npm"
+package_name = "moq-ffi-gen"
+targets = ["web"]
