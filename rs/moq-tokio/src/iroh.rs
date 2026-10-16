@@ -9,7 +9,7 @@ use std::{net, path::PathBuf, str::FromStr, sync::Arc};
 use crate::quic::CongestionControl;
 use url::Url;
 use web_transport_iroh::iroh::{self, SecretKey};
-// NOTE: web-transport-iroh should re-export proto like web-transport-moq does.
+// NOTE: web-transport-iroh should re-export proto like `crate::quic::web` does.
 use web_transport_proto::{ConnectRequest, ConnectResponse};
 
 pub use iroh::Endpoint;
@@ -112,7 +112,7 @@ pub enum Error {
 	RecvRequest(String),
 
 	/// GSO is always on for iroh, so `--quic-gso=false` cannot be honored.
-	#[error("the iroh backend cannot disable GSO; drop --quic-gso=false or use the noq backend")]
+	#[error("the iroh backend cannot disable GSO; drop --quic-gso=false or use the quic backend")]
 	GsoUnsupported,
 }
 
@@ -531,7 +531,7 @@ mod tests {
 
 	/// Build a controller from each family's factory and downcast it to the
 	/// concrete implementation it must map to. iroh runs on noq, so this is the
-	/// same pairing as the noq backend.
+	/// same pairing as the quic backend.
 	#[test]
 	fn congestion_factory_maps_each_family() {
 		let now = std::time::Instant::now();

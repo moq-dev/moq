@@ -2004,6 +2004,37 @@ fn initial_retransmit() {
     );
 }
 
+/// Each side tells its endpoint once that the connection stopped being active, before it drains,
+/// so a shutdown waiting on every connection can stop at the first of these
+#[test]
+fn draining_is_reported_once_before_drained() {
+    let _guard = subscribe();
+    let mut pair = Pair::default();
+    let (client_ch, server_ch) = pair.connect();
+    let now = pair.time;
+    pair.client_conn_mut(client_ch)
+        .close(now, VarInt(0), Bytes::new());
+    pair.drive();
+
+    let expected = [Lifecycle::Draining, Lifecycle::Drained];
+    let client: Vec<_> = pair
+        .client
+        .lifecycle
+        .iter()
+        .filter(|(ch, _)| *ch == client_ch)
+        .map(|(_, l)| *l)
+        .collect();
+    let server: Vec<_> = pair
+        .server
+        .lifecycle
+        .iter()
+        .filter(|(ch, _)| *ch == server_ch)
+        .map(|(_, l)| *l)
+        .collect();
+    assert_eq!(client, expected);
+    assert_eq!(server, expected);
+}
+
 #[test]
 fn instant_close_1() {
     let _guard = subscribe();
