@@ -1804,6 +1804,23 @@ test("Frame: END_OF_GROUP is accepted whether or not the header marks the end", 
 	expect(empty.endOfTrack).toBe(false);
 });
 
+test("Frame refuses draft-14 END_OF_TRACK properties", async () => {
+	const flags: GroupFlags = {
+		hasExtensions: true,
+		hasSubgroup: false,
+		hasSubgroupObject: false,
+		hasEnd: false,
+		hasPriority: true,
+		firstObject: true,
+	};
+	// Object ID delta 0, one unknown integer property, zero payload length, END_OF_TRACK.
+	const wire = new Uint8Array([0, 2, 0x20, 7, 0, 4]);
+	const reader = new Reader(undefined, wire, Version.DRAFT_14);
+	await expect(reader.decode((c) => Frame.decode(c, flags, undefined))).rejects.toThrow(
+		"END_OF_TRACK properties are unsupported",
+	);
+});
+
 test("Frame decodes objects split at every byte", async () => {
 	const flags: GroupFlags = {
 		hasExtensions: true,

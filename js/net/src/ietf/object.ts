@@ -356,11 +356,13 @@ export class Frame {
 		const delta = c.u53();
 
 		let timestamp: Timestamp | undefined;
+		let hasProperties = false;
 		if (flags.hasExtensions) {
 			const extensionsLength = c.u53();
 			if (extensionsLength > MAX_OBJECT_EXTENSIONS) {
 				throw new StreamError(StreamCode.MalformedTrack, { message: "object extensions exceed 64 KiB" });
 			}
+			hasProperties = extensionsLength !== 0;
 			// A track that declared no timescale is untimed, so its objects stay untimed even
 			// if one carries a Timestamp: there are no units to read it in.
 			if (timescale !== undefined) {
@@ -382,6 +384,7 @@ export class Frame {
 
 		// Defined on every implemented draft, whether or not the header marks the group's end.
 		if (status === END_OF_TRACK) {
+			if (hasProperties) throw new Error("END_OF_TRACK properties are unsupported");
 			const frame = new Frame({ endOfTrack: true });
 			frame.idDelta = delta;
 			return frame;

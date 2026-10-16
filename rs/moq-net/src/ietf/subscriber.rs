@@ -3660,6 +3660,7 @@ struct FirstObject {
 	/// The Object ID, which the first object's delta is.
 	id: u64,
 	end_of_track: bool,
+	has_properties: bool,
 }
 
 /// [`FirstObject`] for a stream whose objects carry extensions, or don't.
@@ -3669,13 +3670,20 @@ struct PeekFirst<const EXTENSIONS: bool>(FirstObject);
 impl<const EXTENSIONS: bool> Decode<Version> for PeekFirst<EXTENSIONS> {
 	fn decode(buf: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
 		let id = buf.varint()?;
-		if EXTENSIONS {
+		let has_properties = if EXTENSIONS {
 			let ObjectExtensionsLength(size) = ObjectExtensionsLength::decode(buf, version)?;
 			buf.slice(size)?;
-		}
+			size != 0
+		} else {
+			false
+		};
 		let size = buf.varint()?;
 		let end_of_track = size == 0 && buf.varint()? == END_OF_TRACK;
-		Ok(Self(FirstObject { id, end_of_track }))
+		Ok(Self(FirstObject {
+			id,
+			end_of_track,
+			has_properties,
+		}))
 	}
 }
 
@@ -3726,6 +3734,9 @@ where
 			}
 		};
 		if let Some(first) = first.filter(|first| first.end_of_track) {
+			if first.has_properties {
+				return Err(Error::Unsupported);
+			}
 			return Ok(Opened::EndOfTrack(first.id));
 		}
 
@@ -4230,7 +4241,10 @@ where
 					}
 					return Ok(Fetched::EndOfGroup);
 				}
-				END_OF_TRACK => return Ok(Fetched::EndOfTrack),
+				END_OF_TRACK => {
+					super::object::check_end_of_track(&decoded.properties)?;
+					return Ok(Fetched::EndOfTrack);
+				}
 				_ => return Err(Error::Unsupported),
 			}
 		}
@@ -5061,6 +5075,7 @@ impl GroupIngest {
 					} else if status == END_OF_TRACK {
 						// Defined on every implemented draft, whether or not the header marks
 						// the group's end.
+						super::object::check_end_of_track(&self.properties)?;
 						self.phase =
 							IngestPhase::Finished(Ended::Track(self.prior_object.expect("status follows object ID")));
 					} else {
@@ -11152,6 +11167,13 @@ mod stitch_tests {
 				);
 			}
 		}
+
+		let script = object_stream(Version::Draft14, true, &[(0, &[0x20, 7], Some(END_OF_TRACK))]);
+		let mut h = Harness::with_timescale(Fill::Done, vec![script], None);
+		h.subscriber.version = Version::Draft14;
+		let mut stream = h.stream().await.with_version(Version::Draft14);
+		let result = h.subscriber.clone().recv_group(&mut stream).await;
+		assert!(matches!(result, Err(Error::Unsupported)), "{result:?}");
 
 		let script = object_stream(
 			Version::Draft14,
