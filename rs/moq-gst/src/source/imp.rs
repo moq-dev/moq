@@ -1184,8 +1184,15 @@ impl Pump {
 		let mut sent_segment = false;
 		loop {
 			tokio::select! {
-				// This rendition is being torn down (its run ended, or a catalog update replaced it).
-				_ = cancel.changed() => return None,
+				// This rendition is being torn down (its run ended, or a catalog update replaced it). An
+				// end that arrived alongside still finishes the track, or the replacement waiting for
+				// this pad would replay it.
+				_ = cancel.changed() => {
+					if ended(&mut track) {
+						finished.lock().unwrap().insert(((kind, name.clone()), media));
+					}
+					return None;
+				}
 				frame = track.read() => match frame {
 					Ok(Some(moq_mux::container::Read::Gap { .. } | moq_mux::container::Read::End { .. })) => {}
 					Ok(Some(moq_mux::container::Read::Frame { frame, .. })) => {
@@ -1237,6 +1244,14 @@ impl Pump {
 			}
 		}
 	}
+}
+
+/// Whether the track's end is the next thing to read, without waiting for it. Anything else that
+/// is ready is read and dropped.
+fn ended(track: &mut moq_mux::container::Consumer<moq_mux::catalog::hang::Container>) -> bool {
+	let mut read = std::pin::pin!(track.read());
+	let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+	matches!(read.as_mut().poll(&mut cx), std::task::Poll::Ready(Ok(None)))
 }
 
 /// Start a new stream on the pad: a fresh stream-start and the rendition's caps. The segment
@@ -1357,9 +1372,32 @@ fn audio_caps(config: &hang::catalog::AudioConfig) -> Result<gst::Caps> {
 
 #[cfg(test)]
 mod tests {
-	use super::{PumpState, Timeline, plan_reconcile};
+	use super::{PumpState, Timeline, ended, plan_reconcile};
 	use moq_net::Timestamp;
 	use std::collections::HashMap;
+
+	/// A pump cancelled as its track ends records the end only when nothing is left to read.
+	#[test]
+	fn ended_sees_only_an_end_with_nothing_before_it() {
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let track = broadcast.create_track("video", hang::container::track_info(0)).unwrap();
+		let legacy = || moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Video);
+		let mut producer = moq_mux::container::Producer::new(track, legacy());
+		let mut consumer = moq_mux::container::Consumer::new(producer.consume(), legacy());
+		assert!(!ended(&mut consumer), "an open track has not ended");
+
+		producer
+			.write(moq_mux::container::Frame {
+				timestamp: Timestamp::ZERO,
+				payload: bytes::Bytes::from_static(&[0]),
+				keyframe: true,
+				duration: None,
+			})
+			.unwrap();
+		producer.finish().unwrap();
+		assert!(!ended(&mut consumer), "a frame was still unread");
+		assert!(ended(&mut consumer));
+	}
 
 	#[test]
 	fn video_caps_preserve_nal_framing() {
