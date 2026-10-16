@@ -21,8 +21,10 @@ carries a PTS (asynchronous KLV) therefore sits at 0 forever, below
 round-trip test first.
 
 - **Placement.** The frame timestamp is the program clock at the PES's first
-  byte, interpolated between the PCRs on either side by packet position
-  (ISO 13818-1 2.4.2.2), shifted onto the catalog clock by the timebase
+  byte, interpolated between the PCRs on either side by byte position
+  (ISO 13818-1 2.4.2.2): the PES start code's input offset against each
+  PCR's reference byte, not packet boundaries, reusing the byte-offset
+  clock in `passthrough.rs`, shifted onto the catalog clock by the timebase
   offset that shifts the PTS. A PES waits for the next PCR, within the
   existing `Retained` bound; it never spans a PCR discontinuity. The value
   depends only on the input bytes, so same-epoch importers agree. A program
