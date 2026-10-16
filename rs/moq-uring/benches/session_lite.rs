@@ -10,7 +10,7 @@
 use criterion::{criterion_group, criterion_main};
 
 #[cfg(all(target_os = "linux", feature = "quic"))]
-#[path = "../tests/support.rs"]
+#[path = "../tests/integration/support.rs"]
 mod support;
 
 #[cfg(all(target_os = "linux", feature = "quic"))]
