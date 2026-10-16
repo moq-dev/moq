@@ -29,6 +29,7 @@ members = [
     "rs/moq-nvenc",
     "rs/moq-pattern",
     "rs/moq-quic",
+    "rs/moq-quic/fuzz",
     "rs/moq-relay",
     "rs/moq-room",
     "rs/moq-rtc",
