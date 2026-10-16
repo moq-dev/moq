@@ -33,7 +33,13 @@ function isEpoch(text: string): boolean {
  * `broadcast`, or the archive's `replayEpoch`. A lowercase hyphenated UUIDv7, the same text MoQ
  * routes carry; anything else refuses the catalog.
  */
-export const EpochSchema: z.ZodMiniType<Epoch.Valid, string> = z.pipe(
+export const EpochSchema: z.ZodMiniType<ReferenceEpoch, string> = z.pipe(
 	z.string().check(z.refine(isEpoch, "expected a lowercase hyphenated UUIDv7")),
-	z.transform((text) => text as Epoch.Valid),
+	z.transform((text) => text as ReferenceEpoch),
 );
+
+/**
+ * A validated reference epoch: the same brand as `Epoch.Valid` from `@moq/net`, spelled out here
+ * so the catalog schemas' inferred types stay nameable from this package.
+ */
+export type ReferenceEpoch = string & { readonly _brand: "epoch" };

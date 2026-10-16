@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import * as z from "@zod/mini";
 import { ARCHIVE_VERSION, ArchiveSchema } from "./archive.ts";
 import { u53 } from "./integers.ts";
-import type { RelativeBroadcast } from "./path.ts";
+import type { ReferenceEpoch, RelativeBroadcast } from "./path.ts";
 import { checkRenditions, DuplicateRendition, RootSchema } from "./root.ts";
 import { track } from "./track.ts";
 
@@ -47,7 +47,7 @@ test("rendition broadcast reference is parsed and normalized", () => {
 
 // Mirrors Rust's `reference_epochs_roundtrip_in_every_section`.
 test("every reference-bearing section carries an optional epoch", () => {
-	const EPOCH = "01890a5d-ac96-774b-bcce-b302099a8057";
+	const EPOCH = "01890a5d-ac96-774b-bcce-b302099a8057" as ReferenceEpoch;
 	const catalog = (epoch: string) => ({
 		video: {
 			renditions: {
