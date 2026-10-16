@@ -94,6 +94,9 @@ export class Sync {
 
 	#epoch = 0;
 
+	// The furthest playhead a skip has jumped to on this timeline. A frame below it was passed over.
+	#floor: number | undefined;
+
 	// Releases parked waits, which may otherwise sleep forever on a reference that never returns.
 	#closed = new Signal(false);
 
@@ -196,7 +199,16 @@ export class Sync {
 		if (sleep <= cap) return sleep < 0; // within budget: let the buffer grow instead of skipping ahead
 
 		// Over the cap: re-anchor down so the resulting lookahead is exactly the cap.
-		this.#out.reference.set(ref + cap - delay);
+		const reference = ref + cap - delay;
+		this.#out.reference.set(reference);
+
+		// The playhead now sits at `timestamp - cap`, plus however long this frame waited between
+		// ingress and here. "instant" has no cap, so every newer frame would pass over whatever is
+		// still decoding; it presents frames as they exist instead.
+		if (this.in.delay.peek() !== "instant") {
+			const floor = Nano.toMilli(Nano(now())) - reference - delay;
+			if (this.#floor === undefined || floor > this.#floor) this.#floor = floor;
+		}
 		return sleep < 0;
 	}
 
@@ -205,6 +217,7 @@ export class Sync {
 	// plays from its own first frame instead of inheriting the previous reference.
 	reset(): void {
 		this.#epoch++;
+		this.#floor = undefined;
 		this.#out.reference.set(undefined);
 		this.#late.clear();
 	}
@@ -216,6 +229,14 @@ export class Sync {
 	 */
 	get epoch(): number {
 		return this.#epoch;
+	}
+
+	/**
+	 * Whether a playhead skip on this timeline passed over `timestamp`, so its frame must not render.
+	 * @internal
+	 */
+	skipped(timestamp: Milli): boolean {
+		return this.#floor !== undefined && timestamp < this.#floor;
 	}
 
 	// The PTS in milliseconds that should be rendering right now, derived from the reference +
