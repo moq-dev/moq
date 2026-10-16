@@ -21,7 +21,9 @@ See the [epic](/quest/m2/unbounded-groups/README.md) for the decisions.
   including one a reader is on. A reader keeps its current segment alive
   through its own reference, as prefetched frames are today. That memory
   is bounded by readers times one segment, not by the cache. Only the
-  writer's open segment stays resident.
+  writer's open segment stays resident. A refilled segment reaches its
+  waiting reader before it can be evicted, as Front eviction does for
+  frames.
 - Route failover mid-frame (`frame::Consumer`'s `Recover`) requests only
   the missing suffix by byte, instead of refetching the frame from its
   start. Cover it with a regression: a route fails partway through a frame

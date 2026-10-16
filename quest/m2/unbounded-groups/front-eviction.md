@@ -26,6 +26,10 @@ See the [epic](/quest/m2/unbounded-groups/README.md) for the decisions.
   with the tail writer. Coalesce concurrent readers on one hole into a
   single request, as `PendingFetch` does. Fold today's `Slot.head` tail copy
   into this.
+- A refill must not evict what it was fetched for before the waiting reader
+  takes it: hand its first demanded frame to that reader, or backpressure
+  the refill on the reader's cursor. Test a `track::Dynamic` handler that
+  writes more than the pool synchronously, so the reader still progresses.
 - Refill goes through [Model ranges](/quest/m1/subscribe-ranges/model.md)'
   range requests. Over moq-transport, a hole that covers whole objects
   refills; one inside an object is `Evicted`.
