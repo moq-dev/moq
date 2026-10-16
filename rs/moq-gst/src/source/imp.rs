@@ -395,15 +395,13 @@ struct Shape {
 /// win. A pump is torn down two different ways depending on how far it got: before it owns a pad,
 /// stopping it means it must never create one; after, it owns a pad and has to drop it. One
 /// compare-exchange settles which of the two happened, so a pad can't slip out between a
-/// teardown's check and the pump's creation. A live pump whose track ends cleanly marks it
-/// finished, so the run never subscribes to that track again.
+/// teardown's check and the pump's creation.
 struct PumpState(AtomicU8);
 
 impl PumpState {
 	const SUBSCRIBING: u8 = 0;
 	const LIVE: u8 = 1;
 	const CANCELLED: u8 = 2;
-	const FINISHED: u8 = 3;
 
 	fn new() -> Self {
 		Self(AtomicU8::new(Self::SUBSCRIBING))
@@ -423,15 +421,6 @@ impl PumpState {
 			.compare_exchange(Self::SUBSCRIBING, Self::CANCELLED, Ordering::AcqRel, Ordering::Acquire)
 			.is_ok()
 	}
-
-	/// Record that the live pump's track ended on its own.
-	fn finish(&self) {
-		self.0.store(Self::FINISHED, Ordering::Release);
-	}
-
-	fn finished(&self) -> bool {
-		self.0.load(Ordering::Acquire) == Self::FINISHED
-	}
 }
 
 /// A rendition by kind and moq track name: what a pad is kept by.
@@ -439,15 +428,24 @@ type Rendition = (TrackKind, String);
 
 /// The media a rendition plays: its resolved broadcast and track name, whatever the catalog calls
 /// it or however it spells the reference.
-type Track = (Option<moq_net::PathOwned>, String);
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct Track {
+	broadcast: Option<moq_net::PathOwned>,
+	name: String,
+}
+
+/// A pump that ended without being cancelled.
+struct Ended {
+	rendition: Rendition,
+	/// The pump's track, if it ended cleanly rather than failing.
+	finished: Option<Track>,
+}
 
 /// A rendition a run is serving, keyed in the run by moq track name.
 struct ActiveTrack {
 	kind: TrackKind,
 	/// Identity we diff against on each catalog update; a change hands the pad to a new pump.
 	shape: Shape,
-	/// The media this pump reads, remembered once it finishes.
-	track: Track,
 	/// Tells the pump to hand its pad back and exit (set when the run ends or reconcile
 	/// replaces the rendition).
 	cancel: watch::Sender<bool>,
@@ -529,7 +527,7 @@ impl Pads {
 
 	/// Take the rendition's pad out of the session, returning the task that ends it with EOS once
 	/// its pump lets go.
-	fn retire(&self, rendition: &Rendition) -> Option<impl Future<Output = Option<Rendition>> + Send + 'static> {
+	fn retire(&self, rendition: &Rendition) -> Option<impl Future<Output = Option<Ended>> + Send + 'static> {
 		let slot = self.0.lock().unwrap().remove(rendition)?;
 		Some(async move {
 			let _owned = slot.owner.clone().lock_owned().await;
@@ -757,15 +755,16 @@ async fn follow_catalog(
 		finished: HashSet::new(),
 	};
 	let mut active: HashMap<String, ActiveTrack> = HashMap::new();
-	let mut pumps: tokio::task::JoinSet<Option<Rendition>> = tokio::task::JoinSet::new();
+	let mut pumps: tokio::task::JoinSet<Option<Ended>> = tokio::task::JoinSet::new();
 	// The renditions the latest catalog lists.
 	let mut listed: HashSet<Rendition> = HashSet::new();
 	let mut catalog_closed = false;
 	let mut result = Ok(());
 
 	loop {
-		// Once the catalog is closed and the last pump drains, the run is done.
-		prune(&mut active, &mut playback.finished);
+		// Prune metadata for pumps that have ended (the JoinSet has already reaped the
+		// tasks). Once the catalog is closed and the last pump drains, the run is done.
+		active.retain(|_, track| !track.task.is_finished());
 		if catalog_closed && pumps.is_empty() {
 			break;
 		}
@@ -774,17 +773,11 @@ async fn follow_catalog(
 			biased;
 			// Ended by a restart, or the session ending.
 			_ = cancel.changed() => break,
-			// A pump finished; loop back so the `prune` above drops its entry and the
+			// A pump finished; loop back so the `retain` above prunes its entry and the
 			// break condition sees the drained set.
 			joined = pumps.join_next(), if !pumps.is_empty() => {
-				// A rendition the catalog retired ends with EOS once its track does. One still
-				// listed keeps its pad, since the track, the catalog, and the announcements arrive
-				// on different streams in either order.
-				if let Some(Ok(Some(rendition))) = joined
-					&& !listed.contains(&rendition)
-					&& let Some(retire) = pads.retire(&rendition)
-				{
-					pumps.spawn_on(STREAMING.scope(element.clone(), retire), RUNTIME.handle());
+				if let Some(joined) = joined {
+					settle(joined, &listed, &mut playback, &mut pumps, &element);
 				}
 			}
 			// The guard stops us polling a closed catalog track (which would spin the loop
@@ -792,8 +785,11 @@ async fn follow_catalog(
 			next = catalog_consumer.next(), if !catalog_closed => {
 				match next {
 					Ok(Some(catalog)) => {
-						// A pump can finish after the join above was polled.
-						prune(&mut active, &mut playback.finished);
+						// A pump may have ended since the join above was polled. Settle it first, or its
+						// finished track would look like one with no pump and start again.
+						while let Some(joined) = pumps.try_join_next() {
+							settle(joined, &listed, &mut playback, &mut pumps, &element);
+						}
 						listed = reconcile(&catalog, &mut active, &mut pumps, &source, &playback, &element, shutdown);
 					}
 					// Catalog track closed. Don't cancel the pumps: let each reach its natural end,
@@ -833,18 +829,23 @@ async fn follow_catalog(
 	result
 }
 
-/// Drop the entries of pumps that have ended (the JoinSet reaps the tasks), remembering the
-/// tracks that ended on their own.
-fn prune(active: &mut HashMap<String, ActiveTrack>, finished: &mut HashSet<Track>) {
-	active.retain(|_, pump| {
-		if !pump.task.is_finished() {
-			return true;
-		}
-		if pump.state.finished() {
-			finished.insert(pump.track.clone());
-		}
-		false
-	});
+/// Settle a pump that ended: remember its track if it finished, and end the pad of a rendition the
+/// catalog retired. One still listed keeps its pad, since the track, the catalog, and the
+/// announcements arrive on different streams in either order.
+fn settle(
+	joined: Result<Option<Ended>, tokio::task::JoinError>,
+	listed: &HashSet<Rendition>,
+	playback: &mut Playback,
+	pumps: &mut tokio::task::JoinSet<Option<Ended>>,
+	element: &glib::WeakRef<super::MoqSrc>,
+) {
+	let Ok(Some(ended)) = joined else { return };
+	playback.finished.extend(ended.finished);
+	if !listed.contains(&ended.rendition)
+		&& let Some(retire) = playback.pads.retire(&ended.rendition)
+	{
+		pumps.spawn_on(STREAMING.scope(element.clone(), retire), RUNTIME.handle());
+	}
 }
 
 /// Bring the run's pumps in line with `catalog`: spawn pumps for newly announced renditions,
@@ -859,7 +860,7 @@ fn prune(active: &mut HashMap<String, ActiveTrack>, finished: &mut HashSet<Track
 fn reconcile(
 	catalog: &moq_mux::catalog::hang::Catalog,
 	active: &mut HashMap<String, ActiveTrack>,
-	pumps: &mut tokio::task::JoinSet<Option<Rendition>>,
+	pumps: &mut tokio::task::JoinSet<Option<Ended>>,
 	source: &moq_mux::Source,
 	playback: &Playback,
 	element: &glib::WeakRef<super::MoqSrc>,
@@ -967,10 +968,10 @@ fn reconcile(
 	// renditions that didn't change. A parse failure (malformed init) skips just this rendition.
 	for name in plan.add {
 		let d = &desired[&name];
-		let track = (
-			source.resolve_reference(d.shape.broadcast.as_ref()),
-			d.shape.track.clone(),
-		);
+		let track = Track {
+			broadcast: source.resolve_reference(d.shape.broadcast.as_ref()),
+			name: d.shape.track.clone(),
+		};
 		if playback.finished.contains(&track) {
 			continue;
 		}
@@ -1009,7 +1010,7 @@ fn reconcile(
 					name: name.clone(),
 					caps: d.shape.caps.clone(),
 					binding,
-					track: d.shape.track.clone(),
+					track,
 					container,
 					pads: pads.clone(),
 					timeline: playback.timeline.clone(),
@@ -1027,7 +1028,6 @@ fn reconcile(
 			ActiveTrack {
 				kind: d.kind,
 				shape: d.shape.clone(),
-				track,
 				cancel: cancel_tx,
 				task,
 				state,
@@ -1099,7 +1099,8 @@ struct Pump {
 	name: String,
 	caps: gst::Caps,
 	binding: moq_mux::Binding,
-	track: String,
+	/// The media to subscribe to, reported back once it finishes.
+	track: Track,
 	container: moq_mux::catalog::hang::Container,
 	pads: Pads,
 	timeline: Arc<Timeline>,
@@ -1113,16 +1114,16 @@ struct Pump {
 impl Pump {
 	/// Subscribe to the track, then stream its frames to the rendition's pad, owning it until the
 	/// track ends, errors, or `cancel` fires. The pad goes back to the session without an EOS
-	/// either way. Returns the rendition if its track ended rather than being cancelled, so the
-	/// run can end the pad of one the catalog retired.
-	async fn run(self) -> Option<Rendition> {
+	/// either way. Reports how it ended unless it was cancelled, so the run can end the pad of one
+	/// the catalog retired and never resubscribe to a finished track.
+	async fn run(self) -> Option<Ended> {
 		let Pump {
 			element,
 			kind,
 			name,
 			caps,
 			binding,
-			track,
+			track: media,
 			container,
 			pads,
 			timeline,
@@ -1139,13 +1140,13 @@ impl Pump {
 			_ = cancel.changed() => return None,
 			subscriber = async {
 				let broadcast = binding.broadcast().await?;
-				let track = broadcast.track(&track)?;
+				let track = broadcast.track(&media.name)?;
 				Ok::<_, moq_mux::Error>(track.subscribe(moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(1))).await?)
 			} => match subscriber {
 				Ok(subscriber) => subscriber,
 				Err(err) => {
 					gst::warning!(CAT, "track {name} failed to subscribe: {err:?}");
-					return Some((kind, name));
+					return Some(Ended { rendition: (kind, name), finished: None });
 				}
 			}
 		};
@@ -1202,7 +1203,7 @@ impl Pump {
 								if let Some(obj) = element.upgrade() {
 									gst::element_error!(obj, gst::StreamError::Format, ("track {name} has an invalid timestamp"), ["{err:#}"]);
 								}
-								return Some((kind, name));
+								return Some(Ended { rendition: (kind, name), finished: None });
 							}
 						};
 						let segment = (!sent_segment).then(|| {
@@ -1226,18 +1227,15 @@ impl Pump {
 								if let Some(obj) = element.upgrade() {
 									gst::element_error!(obj, gst::StreamError::Format, ("track {name} was not negotiated"), ["caps {caps}"]);
 								}
-								return Some((kind, name));
+								return Some(Ended { rendition: (kind, name), finished: None });
 							}
-							Err(_) => return Some((kind, name)),
+							Err(_) => return Some(Ended { rendition: (kind, name), finished: None }),
 						}
 					}
-					Ok(None) => {
-						state.finish();
-						return Some((kind, name));
-					}
+					Ok(None) => return Some(Ended { rendition: (kind, name), finished: Some(media) }),
 					Err(err) => {
 						gst::warning!(CAT, "track {name} failed: {err:?}");
-						return Some((kind, name));
+						return Some(Ended { rendition: (kind, name), finished: None });
 					}
 				}
 			}
@@ -2301,6 +2299,33 @@ mod session_tests {
 			.unwrap();
 		catalog.modify().unwrap().video.renditions = BTreeMap::from([("video".to_string(), video_rendition())]);
 
+		// Count what reaches the video pad once it is added. A pump adds a new pad from the signal,
+		// before it pushes anything, so every buffer and every later stream is seen.
+		let buffers = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+		let restarts = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+		let (counted, restarted) = (buffers.clone(), restarts.clone());
+		let (added, mut adds) = tokio::sync::mpsc::unbounded_channel();
+		element.connect_pad_added(move |_, pad| {
+			if pad.name().starts_with("video_") {
+				let (counted, restarted) = (counted.clone(), restarted.clone());
+				pad.add_probe(
+					gst::PadProbeType::BUFFER | gst::PadProbeType::EVENT_DOWNSTREAM,
+					move |_, info| match &info.data {
+						Some(gst::PadProbeData::Buffer(_)) => {
+							counted.fetch_add(1, Ordering::Relaxed);
+							gst::PadProbeReturn::Drop
+						}
+						Some(gst::PadProbeData::Event(event)) if event.type_() == gst::EventType::StreamStart => {
+							restarted.fetch_add(1, Ordering::Relaxed);
+							gst::PadProbeReturn::Ok
+						}
+						_ => gst::PadProbeReturn::Ok,
+					},
+				);
+			}
+			added.send(pad.name().to_string()).unwrap();
+		});
+
 		let pads = Pads::default();
 		let (_shutdown, shutdown) = watch::channel(false);
 		let (_cancel, mut cancelled) = watch::channel(false);
@@ -2310,26 +2335,8 @@ mod session_tests {
 			let source = moq_mux::Source::new(origin().consume(), broadcast.consume());
 			super::RUNTIME.spawn(async move { follow_catalog(source, &pads, weak, &shutdown, &mut cancelled).await })
 		};
-
-		// Count what reaches the pad after its first stream began.
-		let pad = await_pad(&element, "video_");
-		let buffers = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
-		let restarts = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
-		let (counted, restarted) = (buffers.clone(), restarts.clone());
-		pad.add_probe(
-			gst::PadProbeType::BUFFER | gst::PadProbeType::EVENT_DOWNSTREAM,
-			move |_, info| match &info.data {
-				Some(gst::PadProbeData::Buffer(_)) => {
-					counted.fetch_add(1, Ordering::Relaxed);
-					gst::PadProbeReturn::Drop
-				}
-				Some(gst::PadProbeData::Event(event)) if event.type_() == gst::EventType::StreamStart => {
-					restarted.fetch_add(1, Ordering::Relaxed);
-					gst::PadProbeReturn::Ok
-				}
-				_ => gst::PadProbeReturn::Ok,
-			},
-		);
+		let pad = super::RUNTIME.block_on(adds.recv()).unwrap();
+		assert!(pad.starts_with("video_"), "{pad} was added first");
 
 		let mut producer = moq_mux::container::Producer::new(
 			video,
@@ -2347,29 +2354,22 @@ mod session_tests {
 		}
 		producer.finish().unwrap();
 
-		// The pump lets go of its pad once it has read the end of the track.
-		let video_rendition = (TrackKind::Video, "video".to_string());
-		let released = || pads.0.lock().unwrap()[&video_rendition].owner.try_lock().is_ok();
-		for _ in 0..100 {
-			if released() {
-				break;
-			}
-			std::thread::sleep(Duration::from_millis(50));
-		}
-		assert!(released(), "the pump never read the end of its track");
+		// The pump owns its pad until it has pushed the whole track and read its end.
+		let owner = pads.0.lock().unwrap()[&(TrackKind::Video, "video".to_string())]
+			.owner
+			.clone();
+		drop(super::RUNTIME.block_on(owner.lock_owned()));
+		assert_eq!(buffers.load(Ordering::Relaxed), FRAMES, "the track never played");
 
 		// The update still lists the finished rendition. Its audio pad proves the session acted on it.
 		catalog.modify().unwrap().audio.renditions = BTreeMap::from([("audio".to_string(), audio_rendition())]);
-		await_pad(&element, "audio_");
+		let pad = super::RUNTIME.block_on(adds.recv()).unwrap();
+		assert!(pad.starts_with("audio_"), "{pad} was added by the update");
 
 		// The run ends only once every pump drains, a replaying one included.
 		audio.finish().unwrap();
 		catalog.finish().unwrap();
-		super::RUNTIME
-			.block_on(async { tokio::time::timeout(Duration::from_secs(10), session).await })
-			.expect("the run outlived its broadcast")
-			.unwrap()
-			.unwrap();
+		super::RUNTIME.block_on(session).unwrap().unwrap();
 
 		assert_eq!(restarts.load(Ordering::Relaxed), 0, "the finished track started again");
 		assert_eq!(buffers.load(Ordering::Relaxed), FRAMES, "the finished track replayed");
@@ -2626,7 +2626,10 @@ mod session_tests {
 			name: "video".into(),
 			caps: gst::Caps::new_empty_simple("video/x-h264"),
 			binding: moq_mux::Binding::new(publisher.broadcast.consume()),
-			track: "video".into(),
+			track: super::Track {
+				broadcast: None,
+				name: "video".into(),
+			},
 			container: moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Video),
 			pads: Pads::default(),
 			timeline: std::sync::Arc::default(),
