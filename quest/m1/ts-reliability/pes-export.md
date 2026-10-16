@@ -33,8 +33,12 @@ writes the member, so the round trip never meets a catalog export can't read.
   does today, without rewriting the PES.
 - **Tune-in.** The rule that drops non-video frames before `video_start`
   compares a `pesPacket` frame's placement with the tune-in keyframe's
-  departure, not its PTS. Placement runs ahead of PTS by the decoder delay,
-  so comparing against the PTS drops data muxed beside the keyframe.
+  departure in this export's schedule, not its PTS. Placement is the
+  frame's due time in that same schedule, so the rule keeps exactly what
+  can go out after the keyframe; comparing against the PTS drops data
+  muxed beside it. The source's keyframe placement is not carried, so a
+  source decoder lead that differs from `--delay` shifts private data
+  against video by the difference, as any remux with a new delay does.
 - **Refusal.** A frame that is not exactly one well-formed PES packet
   (start code, a `PES_packet_length` matching the frame, a complete
   optional header where the stream_id has one) fails the track, like a

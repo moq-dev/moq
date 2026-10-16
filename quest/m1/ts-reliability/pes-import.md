@@ -32,13 +32,17 @@ round-trip test first.
   input, or a PCR discontinuity before the next PCR) has no PCR on the far
   side. Place it by extrapolating from that timebase's last two PCRs, which
   is still deterministic, rather than hold or drop it. With fewer than two
-  PCRs it is dropped and counted in importer health. Test both ends.
+  PCRs it is dropped and counted in importer health. A PES before the
+  first PCR the importer sees is dropped and counted the same way, like
+  anything before acquisition: back-extrapolating would let importers
+  started apart disagree. A new timebase starts with its first PCR, so
+  this happens only at startup. Test each case.
 - **Bytes.** The frame is the PES packet as received, start code through
   payload. PTS and DTS are rewritten in place onto the catalog clock modulo
   2^33, exactly as the media PTS moves. Every other field stays byte-exact,
   including flags, `data_alignment_indicator`, ES rate, trick mode, copy
-  info, the PES CRC (it covers the previous packet's data, which is
-  unchanged), extension data, stuffing, and the special stream-ID forms
+  info, the PES CRC (it covers the previous packet's data bytes, not its
+  header, so rebasing leaves it valid; assert that with a CRC fixture), extension data, stuffing, and the special stream-ID forms
   that have no optional header. Each PES keeps its own stream_id.
 - **Catalog.** The entry records `pid`, `descriptors` and the `pesPacket`
   member that [export](/quest/m1/ts-reliability/pes-export.md) reads, and
