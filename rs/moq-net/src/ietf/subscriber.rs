@@ -2842,8 +2842,9 @@ where
 			new_groups.subscribed(value, largest_group(&track, largest));
 		}
 		let dynamic_groups = track.info().dynamic_groups && super::subscribe::has_new_group_request(self.version);
-		// The aggregate request last read, so only a change is considered.
+		// The aggregate request last read, and the Largest Group it was last weighed at.
 		let mut asked = None;
+		let mut weighed = None;
 		// REQUEST_UPDATEs sent and not yet answered. Drafts 14-16 answer on the control
 		// stream by the update's own Request ID, which reaches no subscription, so only
 		// later drafts count them.
@@ -2878,7 +2879,7 @@ where
 					// whose head never arrives cannot hold every later group back.
 					if let Some(largest) = resuming
 						&& (poll_headed(&fill, waiter).is_ready()
-							|| largest.is_some_and(|largest| track.poll_past(largest.group, waiter).is_ready()))
+							|| largest.is_some_and(|largest| track.poll_past(Some(largest.group), waiter).is_ready()))
 					{
 						track.set_live(largest);
 						resuming = None;
@@ -2897,12 +2898,27 @@ where
 					// One REQUEST_UPDATE in flight at a time, which any MAX_REQUEST_UPDATES
 					// allows. Requests arriving meanwhile coalesce into the aggregate, read
 					// once its answer lands. Polled after the answers are read for that reason.
-					if dynamic_groups
-						&& unanswered.load(Ordering::Relaxed) == 0
-						&& let Poll::Ready(Ok(Some(request))) = track.poll_new_group(&mut asked, waiter)
-						&& new_groups.forward(request.value, largest_group(&track, largest))
-					{
-						return Poll::Ready(End::NewGroup(request.value));
+					if dynamic_groups && unanswered.load(Ordering::Relaxed) == 0 {
+						let mut changed = false;
+						while let Poll::Ready(Ok(_)) = track.poll_new_group(&mut asked, waiter) {
+							changed = true;
+						}
+						// A new group expires what was sent, so a request it does not answer
+						// is weighed again; one it answers is about to be cleared.
+						while let Some(request) = asked {
+							let now = largest_group(&track, largest);
+							let unmet = now.is_none_or(|now| request.first > now);
+							if changed || (unmet && now > weighed) {
+								changed = false;
+								weighed = now;
+								if new_groups.forward(request.value, now) {
+									return Poll::Ready(End::NewGroup(request.value));
+								}
+							}
+							if !unmet || track.poll_past(now, waiter).is_pending() {
+								break;
+							}
+						}
 					}
 					Poll::Pending
 				})
@@ -14442,6 +14458,49 @@ mod new_group_tests {
 		relay.land(6);
 		let _c = subscribe(&relay.track, Some(0));
 		assert_eq!(update(&mut stream).await, Some(0));
+		relay.serving.abort();
+	}
+
+	/// A held request a new group does not answer goes upstream again: the group expired
+	/// the one sent, and the subscriber still waits.
+	#[moq_net_sim::test]
+	async fn a_request_past_a_new_group_is_sent_again() {
+		let (mut relay, _first) = relay(None).await;
+		let (mut stream, _) = relay.accept().await;
+		accept(&mut stream, true, 5).await;
+
+		let _a = subscribe(&relay.track, Some(9));
+		assert_eq!(update(&mut stream).await, Some(9));
+		answer(&mut stream).await;
+		quiet(&mut stream).await;
+
+		relay.land(6);
+		assert_eq!(update(&mut stream).await, Some(9));
+		answer(&mut stream).await;
+
+		// A group answering it ends the request.
+		relay.land(9);
+		quiet(&mut stream).await;
+		relay.serving.abort();
+	}
+
+	/// A 0 held at Largest Group 5 is answered by group 6, so that group asks nothing more,
+	/// even before the subscriber reads it and lets go of the request.
+	#[moq_net_sim::test]
+	async fn the_group_answering_a_zero_asks_nothing_more() {
+		let (mut relay, _first) = relay(None).await;
+		let (mut stream, _) = relay.accept().await;
+		accept(&mut stream, true, 5).await;
+
+		let _a = relay.track.subscribe(track::Subscription {
+			new_group: Some(crate::model::NewGroup::new(0, Some(5))),
+			..Default::default()
+		});
+		assert_eq!(update(&mut stream).await, Some(0));
+		answer(&mut stream).await;
+
+		relay.land(6);
+		quiet(&mut stream).await;
 		relay.serving.abort();
 	}
 

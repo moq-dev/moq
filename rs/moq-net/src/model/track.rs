@@ -2328,13 +2328,16 @@ impl Producer {
 		self.state.read().max_sequence
 	}
 
-	/// Ready once the track holds a group past `sequence`, or is closed.
+	/// Ready once the track holds a group past `sequence` (any group for `None`), or is
+	/// closed.
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
-	pub(crate) fn poll_past(&self, sequence: u64, waiter: &kio::Waiter) -> Poll<()> {
-		let past = self.state.poll_ref(waiter, |state| match state.max_sequence {
-			Some(latest) if latest > sequence => Poll::Ready(()),
-			_ => Poll::Pending,
-		});
+	pub(crate) fn poll_past(&self, sequence: Option<u64>, waiter: &kio::Waiter) -> Poll<()> {
+		let past = self
+			.state
+			.poll_ref(waiter, |state| match state.max_sequence > sequence {
+				true => Poll::Ready(()),
+				false => Poll::Pending,
+			});
 		past.map(|_| ())
 	}
 
