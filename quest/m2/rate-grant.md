@@ -36,4 +36,3 @@ rates, on the next unpublished lite version after lite-07 only.
 ## Required
 
 - [In-band auth](/quest/m1/auth/README.md) - the AUTH grant this extends
-- [Bitrate claim](/doc/bin/relay/auth.md#claims) - the shape it reuses

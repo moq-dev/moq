@@ -36,10 +36,6 @@ Tests: a client writing flat out is held to the cap plus the bounded
 buffers; delivery to a capped subscriber never exceeds it; a cap change on a
 live session applies.
 
-## Required
-
-- [Bitrate claim](/doc/bin/relay/auth.md#claims) - the cap this enforces
-
 ## Related
 
 - [TCP acceptor](/quest/m2/one-port/tcp-demux.md) - boxes the accepted stream, so it must keep the socket handle these buffer sizes need
