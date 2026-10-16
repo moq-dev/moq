@@ -263,9 +263,9 @@ mod test {
 
 	fn soliciting(reference: &str) -> Catalog {
 		let (mut catalog, _) = catalog_payload("here");
-		let mut echo = hang::catalog::Echo::default();
-		echo.path = moq_net::path::Relative::new(reference).into_owned();
-		catalog.echo = Some(echo);
+		catalog.echo = Some(hang::catalog::Echo::new(
+			moq_net::path::Relative::new(reference).into_owned(),
+		));
 		catalog
 	}
 
