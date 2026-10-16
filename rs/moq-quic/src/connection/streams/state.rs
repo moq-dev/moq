@@ -1199,7 +1199,9 @@ mod tests {
             "reset must release the abandoned allocation"
         );
         assert_eq!(
-            send.reset_frame(id, 0u32.into(), false).unwrap().final_offset,
+            send.reset_frame(id, 0u32.into(), false)
+                .unwrap()
+                .final_offset,
             VarInt(24),
             "RESET_STREAM must retain its final offset"
         );

@@ -437,7 +437,11 @@ impl Checkpoint {
     ///
     /// # Panics
     /// - when used on a connection other than the one it came from, if that is detected
-    pub fn reset(self, conn: &mut crate::Connection, error_code: VarInt) -> Result<(), ClosedStream> {
+    pub fn reset(
+        self,
+        conn: &mut crate::Connection,
+        error_code: VarInt,
+    ) -> Result<(), ClosedStream> {
         conn.send_stream(self.id).reset_to(error_code, self.offset)
     }
 }

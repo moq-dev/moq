@@ -44,10 +44,10 @@ pub use bloom_token_log::BloomTokenLog;
 
 mod connection;
 pub use crate::connection::{
-    Checkpoint, Chunk, Chunks, ClosedStream, Connection, ConnectionError,
-    ConnectionStats, Datagrams, Event, FinishError, FrameStats, PathStats, ReadError,
-    ReadableError, RecvStream, RttEstimator, SendDatagramError, SendStream, ShouldTransmit,
-    StreamEvent, Streams, UdpStats, WriteError, Written,
+    Checkpoint, Chunk, Chunks, ClosedStream, Connection, ConnectionError, ConnectionStats,
+    Datagrams, Event, FinishError, FrameStats, PathStats, ReadError, ReadableError, RecvStream,
+    RttEstimator, SendDatagramError, SendStream, ShouldTransmit, StreamEvent, Streams, UdpStats,
+    WriteError, Written,
 };
 #[cfg(feature = "qlog")]
 pub use connection::qlog::QlogStream;

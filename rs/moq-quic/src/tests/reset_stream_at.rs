@@ -45,7 +45,11 @@ fn write(pair: &mut Pair, ch: ConnectionHandle, s: StreamId) -> Checkpoint {
 }
 
 /// Reset a client stream, still delivering what was written before `checkpoint`
-fn reset(pair: &mut Pair, ch: ConnectionHandle, checkpoint: Checkpoint) -> Result<(), ClosedStream> {
+fn reset(
+    pair: &mut Pair,
+    ch: ConnectionHandle,
+    checkpoint: Checkpoint,
+) -> Result<(), ClosedStream> {
     checkpoint.reset(pair.client_conn_mut(ch), ERROR)
 }
 
@@ -452,10 +456,7 @@ fn unsupported_returns_flow_control() {
         (MSG[..RELIABLE].to_vec(), Err(ReadError::Reset(ERROR)))
     );
     pair.drive();
-    assert_eq!(
-        pair.client_send(client_ch, next).write(MSG),
-        Ok(MSG.len())
-    );
+    assert_eq!(pair.client_send(client_ch, next).write(MSG), Ok(MSG.len()));
 }
 
 /// A zero Reliable Size is a plain RESET_STREAM, which needs no negotiation.
