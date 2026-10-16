@@ -1,13 +1,15 @@
-# [M] TS import carries private PES whole at its source placement
+# [L] TS import carries private PES whole at its source placement
 
 ## Goal
 
-`moq import ts` publishes every PES-framed verbatim stream (private data
-such as KLV, teletext, DVB subtitles, DVB AC-3, unknown types) as
-`pesPacket` frames: the whole PES packet with its clock fields moved onto the
-catalog clock, timestamped with its source placement. A PES without a PTS
-keeps none, and no frame is stamped 0 or at the track's own edge. Streams
-the profile cannot carry are refused and reported, never silently altered.
+`moq import ts` publishes every PES stream it does not decode (private data
+such as KLV, teletext, DVB subtitles, DVB AC-3, unknown types) as a
+`pesPacket` track: each frame the whole PES packet with its clock fields
+moved onto the catalog clock, timestamped with its source placement. A PES
+without a PTS keeps none, and no frame is stamped 0 or at the track's own
+edge. Streams the profile cannot carry are refused and reported, never
+silently altered. The legacy `pes` framing is gone from import, export and
+the draft.
 
 ## Plan
 
@@ -19,12 +21,12 @@ carries a PTS (asynchronous KLV) therefore sits at 0 forever, below
 round-trip test first.
 
 - **Placement.** The frame timestamp is the program clock at the PES's first
-  byte, interpolated between the PCRs around it by packet position
+  byte, interpolated between the PCRs on either side by packet position
   (ISO 13818-1 2.4.2.2), shifted onto the catalog clock by the timebase
   offset that shifts the PTS. A PES waits for the next PCR, within the
   existing `Retained` bound; it never spans a PCR discontinuity. The value
   depends only on the input bytes, so same-epoch importers agree. A program
-  with no PCR PID cannot place its PES, so its verbatim PES streams are
+  with no PCR PID cannot place its PES, so its private PES streams are
   refused.
 - **Bytes.** The frame is the PES packet as received, start code through
   payload. PTS and DTS are rewritten in place onto the catalog clock modulo
@@ -32,17 +34,31 @@ round-trip test first.
   including flags, `data_alignment_indicator`, ES rate, trick mode, copy
   info, the PES CRC (it covers the previous packet's data, which is
   unchanged), extension data, stuffing, and the special stream-ID forms
-  that have no optional header. Each PES keeps its own stream_id, so the
-  catalog stops recording `streamId` for this framing.
+  that have no optional header. Each PES keeps its own stream_id.
+- **Catalog.** The entry records `pid`, `descriptors` and the `pesPacket`
+  member that [export](/quest/m1/ts-reliability/pes-export.md) reads, and
+  no `verbatim` record. A published exporter ignores such an entry and
+  silently leaves the stream out of its TS; that is the accepted cost.
 - **Refusal.** A PES carrying a clock this does not rebase (ESCR, a
   `pack_header_field`, TREF) or PES-level scrambling refuses its stream:
   no track is advertised, or an advertised one ends with an error and loses
-  its catalog entry, with a warning and an importer health count. Rebase
-  ESCR instead if a real source needs it, with a fixture.
-- **Scope.** This covers every stream the importer carries verbatim as PES,
-  whatever its stream type, because nothing is inferred: a media stream
-  that splits an access unit across PES, leaving later ones without a PTS,
-  round-trips the same way. Decoded codecs keep their own timing.
+  its catalog entry, with a warning and an importer health count.
+- **Scope.** This covers every stream the importer carries undecoded as
+  PES, whatever its stream type, because nothing is inferred: a media
+  stream that splits an access unit across PES, leaving later ones without
+  a PTS, round-trips the same way. Decoded codecs keep their own timing.
+- **Delete `pes`.** In the same change, so main never writes a catalog its
+  exporter refuses: drop `Framing::Pes` and `Verbatim::stream_id`, export's
+  `write_pes` path for verbatim tracks, and the DVB AC-3 repack
+  (`queue_ac3`, `ac3_frames`, `ac3_carry`, `carries_ac3`). A catalog naming
+  `framing: "pes"`, or a `verbatim` record with no `framing` (which meant
+  `pes` in -00), is refused: never reinterpret it as a section. Published
+  importers and existing recordings with private PES then fail to export,
+  loudly. Migrate the hand-built `pes` catalogs in tests, including
+  `rs/moq-cli/src/publish.rs`. The repack exists so each AC-3 sync frame
+  reaches its T-STD buffer by its own decode time; sending the whole PES at
+  its source placement must keep that, so the multi-frame AC-3 fixture
+  below also passes the strict T-STD check.
 
 Tests: generated fixtures (extend `test/ts/fragment_pes.py` or add a
 generator) for asynchronous KLV (stream_type 0x06, `KLVA` registration, no
@@ -50,12 +66,14 @@ PTS) and synchronous KLV (stream_type 0x15, metadata_stream 0xFC, PTS),
 importer to track to exporter, asserting byte equality of each PES outside
 its rebased PTS and DTS. Cover PTS 0 versus no PTS, distinct PTS and DTS,
 data before the first video and between media, optional fields, special
-stream IDs, and each refusal. Add the `just test ts --klv` arm with FFmpeg
-and TSDuck grading, run on PRs that touch `rs/moq-mux/src/container/ts`.
+stream IDs, DVB AC-3 with several sync frames per PES, each refusal, and
+the refused `pes` catalog. Add a `just test ts --klv` arm with FFmpeg and
+TSDuck grading, run on PRs that touch `rs/moq-mux/src/container/ts`.
 
-Update `drafts/draft-lcurley-moq-mpegts.md` (the importer now writes
-`pesPacket` and states what it refuses) and the TS lines of
-`doc/bin/cli.md` and `doc/lib/rs/moq-mux.md`.
+Update `drafts/draft-lcurley-moq-mpegts.md` (the importer writes
+`pesPacket` and states what it refuses; `framing` is `"section"` only and
+required, `streamId` removed, changelog -01 noting the break with -00) and
+the TS lines of `doc/bin/cli.md` and `doc/lib/rs/moq-mux.md`.
 
 ## Required
 

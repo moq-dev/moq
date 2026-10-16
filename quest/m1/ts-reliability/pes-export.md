@@ -1,12 +1,12 @@
-# [M] TS export emits whole verbatim PES packets at their placement
+# [M] TS export emits whole PES packets at their placement
 
 ## Goal
 
-`moq export ts` reads the `pesPacket` verbatim framing and writes each frame
-as the PES packet it holds, byte for byte, sent at the frame's timestamp as
-its placement time. A PES without a PTS goes out without one; nothing in its
-header is synthesized. Private data placed alongside or after the tune-in
-keyframe survives the tune-in rule.
+`moq export ts` reads tracks the catalog marks `pesPacket` and writes each
+frame as the PES packet it holds, byte for byte, sent at the frame's
+timestamp as its placement time. A PES without a PTS goes out without one;
+nothing in its header is synthesized. Private data placed alongside or after
+the tune-in keyframe survives the tune-in rule.
 
 ## Plan
 
@@ -15,44 +15,45 @@ a `pesPacket` frame is one complete PES packet, start code through payload,
 whose PTS, DTS and every other header field are already on the catalog clock.
 Its frame timestamp is the source placement time: the program clock at the
 PES's first byte, on the media timeline. This lands before the importer
-writes the framing, so the round trip never meets a catalog export can't read.
+writes the member, so the round trip never meets a catalog export can't read.
 
-- **Catalog.** Add `Framing::PesPacket` (`"pesPacket"`) to
-  `rs/moq-mux/src/container/ts/catalog.rs`. `streamId` does not apply: the
-  stream_id travels in each frame. A catalog naming it alongside
-  `pesPacket` is refused.
+- **Catalog.** Add an optional `pesPacket` member to the `mpegts.tracks`
+  entry in `rs/moq-mux/src/container/ts/catalog.rs`, beside `verbatim`,
+  holding the PMT `streamType` (for example `catalog::PesPacket`). It is a
+  member rather than a `framing` value so old exporters ignore the entry
+  instead of refusing the catalog. The stream_id travels in each frame, so
+  it has no `streamId`. An entry with both `verbatim` and `pesPacket` is
+  refused.
 - **Mux.** Packetize the frame's bytes unchanged on the track's PID: no
-  `PesHeader`, no AC-3 repacking (`ac3_frames`
-  and the `samples` packing stay only for the legacy `pes` framing). The
-  unit is due at its timestamp, the way an unbuffered PID already is. Where
-  `verbatim_buffer` models the PID (DVB AC-3, teletext), admission reads the
-  PTS from the header bytes.
+  `PesHeader`, no AC-3 repacking. The unit is due at its timestamp, the way
+  an unbuffered PID already is. Where `verbatim_buffer` models the PID (DVB
+  AC-3, teletext), admission reads the PTS from the header bytes.
 - **Tune-in.** The rule that drops non-video frames before `video_start`
-  compares a verbatim frame's placement with the tune-in keyframe's
+  compares a `pesPacket` frame's placement with the tune-in keyframe's
   departure, not its PTS. Placement runs ahead of PTS by the decoder delay,
   so comparing against the PTS drops data muxed beside the keyframe.
 - **Refusal.** A frame that is not exactly one well-formed PES packet
-  (start code, a nonzero `PES_packet_length` matching the frame, a complete
-  optional header) fails the track, like a malformed section frame does.
-- **Legacy `pes`.** Keep reading it as today, so published importers still
-  export. Its special stream IDs (0xBC, 0xBE, 0xBF, 0xF0-0xF2, 0xF8, 0xFF)
-  carry no optional header, yet `write_pes` counts one in
-  `PES_packet_length`: refuse them at catalog load instead of writing a
-  wrong length.
+  (start code, a `PES_packet_length` of zero or matching the frame, a
+  complete optional header where the stream_id has one) fails the track,
+  like a malformed section frame does.
+
+Leave the legacy `pes` framing as it is here; the
+[importer quest](/quest/m1/ts-reliability/pes-import.md) deletes it once
+nothing writes it.
 
 Tests, in `export_test.rs` from hand-built catalogs and frames, wired into
 the existing `cargo test` CI: PTS 0 versus no PTS, distinct PTS and DTS,
 optional fields (ES rate, trick mode, copy info, CRC, extension, stuffing),
 `data_alignment_indicator` clear, private_stream_2 and padding stream IDs,
 private data before, beside and after the tune-in keyframe, and between
-media. Assert the output PES bytes equal the frame. Extend
-`just test ts` with a `--klv` arm that FFmpeg and TSDuck grade once the
-[importer](/quest/m1/ts-reliability/pes-import.md) writes the framing, or
-leave that arm to it.
+media, and an entry naming both members. Assert the output PES bytes equal
+the frame.
 
-Update `drafts/draft-lcurley-moq-mpegts.md` ({{verbatim}}, changelog -02)
-with the framing and its timestamp meaning, and the TS rows of
-`doc/lib/rs/moq-mux.md`. No JS change: nothing in `js/` reads the section.
+Update `drafts/draft-lcurley-moq-mpegts.md` (the `Track` type, the "MUST
+ignore an entry" rule, {{verbatim}}, {{rebuild}}, changelog -01) with the
+member, its timestamp meaning, and the fact that a consumer that predates
+it drops the track, plus the TS rows of `doc/lib/rs/moq-mux.md`. No JS
+change: nothing in `js/` interprets the section.
 
 ## Related
 
