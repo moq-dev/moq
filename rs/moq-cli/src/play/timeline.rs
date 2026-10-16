@@ -335,7 +335,13 @@ impl Role {
 impl Drop for Role {
 	fn drop(&mut self) {
 		if let Ok(mut presentation) = self.presentation.lock() {
-			presentation.roles[self.role as usize] = Segment::default();
+			// A declared end stays: the sink handed back still plays the tail up to it,
+			// and once it is past, nothing waits on it.
+			let segment = &mut presentation.roles[self.role as usize];
+			*segment = Segment {
+				end: segment.end.take(),
+				..Default::default()
+			};
 		}
 		self.changed.notify_waiters();
 	}
@@ -497,6 +503,26 @@ mod tests {
 			video.map(ms(40)).unwrap().as_millis() - audio.map(ms(0)).unwrap().as_millis(),
 			40
 		);
+	}
+
+	#[tokio::test]
+	async fn a_closed_role_still_holds_its_declared_end() {
+		tokio::time::pause();
+		let now = tokio::time::Instant::now();
+		let presentation = std::sync::Arc::new(std::sync::Mutex::new(Presentation::new(DELAY)));
+		presentation
+			.lock()
+			.unwrap()
+			.audio(Duration::from_secs(10), DELAY, now.into_std());
+		let audio = Role::new(presentation.clone(), Default::default(), Kind::Audio);
+		let video = Role::new(presentation.clone(), Default::default(), Kind::Video);
+		audio.end(ms(10_200)).unwrap();
+		// The track closed, but its returned sink still plays the tail up to the end.
+		drop(audio);
+		video.end(ms(10_000)).unwrap();
+		video.plan(ms(0), None);
+		let resume = tokio::time::timeout(DELAY + Duration::from_millis(150), video.resume(ms(0), None)).await;
+		assert!(resume.is_err(), "video resumed before the audio tail played");
 	}
 
 	#[tokio::test]
