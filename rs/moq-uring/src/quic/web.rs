@@ -442,7 +442,7 @@ impl Session {
 	/// Open a send group at `priority`, for streams to join with
 	/// [`SendStream::set_group`]. The HTTP/3 streams stay outside every
 	/// group, so they go first.
-	pub fn send_group(&self, priority: i32) -> super::SendGroup {
+	pub fn send_group(&self, priority: i64) -> super::SendGroup {
 		self.conn.send_group(priority)
 	}
 

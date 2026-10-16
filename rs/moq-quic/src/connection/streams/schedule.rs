@@ -87,7 +87,7 @@ impl<K: Copy> Queue<K> {
 #[derive(Debug)]
 struct Group<K> {
     domain: usize,
-    priority: i32,
+    priority: i64,
     queue: Queue<K>,
     /// Bytes this group may still send in its current turn; negative after an overdraw.
     deficit: i64,
@@ -108,7 +108,7 @@ struct Group<K> {
 struct Domain {
     /// The round robin of groups at each priority. Only the highest level with a backlogged
     /// group is served.
-    levels: BTreeMap<i32, VecDeque<usize>>,
+    levels: BTreeMap<i64, VecDeque<usize>>,
     deficit: i64,
     /// Whether an entry for this domain sits in the domain round robin, as for groups.
     ringed: bool,
@@ -194,7 +194,7 @@ impl<K: Copy> Schedule<K> {
     }
 
     /// Create a send group in `domain`, or the default domain.
-    pub(super) fn open_group(&mut self, priority: i32, domain: Option<usize>) -> usize {
+    pub(super) fn open_group(&mut self, priority: i64, domain: Option<usize>) -> usize {
         let domain = domain.unwrap_or(DEFAULT_DOMAIN);
         let state = &mut self.domains[domain];
         assert!(!state.closed, "group opened in a closed domain");
@@ -217,12 +217,12 @@ impl<K: Copy> Schedule<K> {
         self.free_group(group);
     }
 
-    pub(super) fn group_priority(&self, group: usize) -> i32 {
+    pub(super) fn group_priority(&self, group: usize) -> i64 {
         self.groups[group].priority
     }
 
     /// Move a group to another priority level, keeping its credit.
-    pub(super) fn set_group_priority(&mut self, group: usize, priority: i32) {
+    pub(super) fn set_group_priority(&mut self, group: usize, priority: i64) {
         let state = &mut self.groups[group];
         if state.priority == priority {
             return;
@@ -497,7 +497,7 @@ impl<K: Copy> Schedule<K> {
         }
     }
 
-    fn unring_group(domain: &mut Domain, group: usize, priority: i32) {
+    fn unring_group(domain: &mut Domain, group: usize, priority: i64) {
         let level = domain
             .levels
             .get_mut(&priority)
@@ -574,7 +574,7 @@ mod tests {
     #[test]
     fn ungrouped_streams_go_first() {
         let mut sim = Sim::new();
-        let group = sim.schedule.open_group(i32::MAX, None);
+        let group = sim.schedule.open_group(i64::MAX, None);
         let grouped = sim.stream(Some(group), i64::MAX, 100);
         let ungrouped = sim.stream(None, i64::MIN, 100);
         assert_eq!(sim.step(1000), Some(ungrouped));

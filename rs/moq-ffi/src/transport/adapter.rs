@@ -77,7 +77,7 @@ impl<S: backend::Session<SendStream: 'static, RecvStream: 'static> + Clone + 'st
 			.map_err(Error)
 			.map(|res| res.map(|(send, recv)| (SendStream(send), RecvStream(recv))))
 	}
-	fn send_group(&mut self, _: i32) -> Option<poll::Ungrouped> {
+	fn send_group(&mut self, _: i64) -> Option<poll::Ungrouped> {
 		None
 	}
 	fn poll_send_datagram(&mut self, cx: &mut Context<'_>, payload: &[u8]) -> Poll<Result<(), Self::Error>> {

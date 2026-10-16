@@ -55,7 +55,7 @@ impl<S: wt::Stats> moq::Stats for Stats<S> {
 /// without groups implements it empty.
 pub trait Grouped: backend::Session<SendStream: GroupedSend> {
 	/// Open a send group at `priority`, or `None` when the backend has none.
-	fn send_group(&mut self, priority: i32) -> Option<<Self::SendStream as GroupedSend>::Group> {
+	fn send_group(&mut self, priority: i64) -> Option<<Self::SendStream as GroupedSend>::Group> {
 		let _ = priority;
 		None
 	}
@@ -110,7 +110,7 @@ impl<S: Grouped<SendStream: 'static, RecvStream: 'static> + Clone + 'static> pol
 			.map_err(Error)
 			.map(|res| res.map(|(send, recv)| (SendStream(send), RecvStream(recv))))
 	}
-	fn send_group(&mut self, priority: i32) -> Option<<S::SendStream as GroupedSend>::Group> {
+	fn send_group(&mut self, priority: i64) -> Option<<S::SendStream as GroupedSend>::Group> {
 		Grouped::send_group(&mut self.0, priority)
 	}
 	fn poll_send_datagram(&mut self, cx: &mut Context<'_>, payload: &[u8]) -> Poll<Result<(), Self::Error>> {

@@ -162,7 +162,7 @@ pub mod poll {
 		/// priority get an equal share of bytes however many streams each has queued. Streams
 		/// outside every group go before all of them. The group is released once its last
 		/// handle is dropped and its streams finish.
-		fn send_group(&mut self, priority: i32) -> Option<<Self::SendStream as SendStream>::Group>;
+		fn send_group(&mut self, priority: i64) -> Option<<Self::SendStream as SendStream>::Group>;
 
 		/// Poll to send a datagram over the network.
 		///
@@ -333,7 +333,7 @@ pub mod poll {
 	/// Clones share the group.
 	pub trait SendGroup: Clone + 'static {
 		/// Change the group's priority: higher preempts lower.
-		fn set_priority(&mut self, priority: i32);
+		fn set_priority(&mut self, priority: i64);
 	}
 
 	/// The send group of a transport that has none, which cannot be constructed.
@@ -341,7 +341,7 @@ pub mod poll {
 	pub enum Ungrouped {}
 
 	impl SendGroup for Ungrouped {
-		fn set_priority(&mut self, _: i32) {
+		fn set_priority(&mut self, _: i64) {
 			match *self {}
 		}
 	}

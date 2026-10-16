@@ -374,7 +374,7 @@ impl Session {
 	///
 	/// See [`crate::quic::driver::SendGroup`]. The HTTP/3 streams stay outside every group,
 	/// so they go first.
-	pub fn send_group(&self, priority: i32) -> crate::quic::driver::SendGroup {
+	pub fn send_group(&self, priority: i64) -> crate::quic::driver::SendGroup {
 		self.conn.send_group(priority)
 	}
 

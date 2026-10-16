@@ -620,7 +620,7 @@ mod tests {
 			Poll::Pending
 		}
 
-		fn send_group(&mut self, _: i32) -> Option<crate::transport::poll::Ungrouped> {
+		fn send_group(&mut self, _: i64) -> Option<crate::transport::poll::Ungrouped> {
 			None
 		}
 
@@ -1015,7 +1015,7 @@ mod tests {
 			})
 		}
 
-		fn send_group(&mut self, _: i32) -> Option<crate::transport::poll::Ungrouped> {
+		fn send_group(&mut self, _: i64) -> Option<crate::transport::poll::Ungrouped> {
 			None
 		}
 

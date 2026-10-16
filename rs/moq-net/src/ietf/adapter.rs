@@ -1172,7 +1172,7 @@ impl<S: crate::transport::poll::Session> crate::transport::poll::Session for Con
 			.map(|r| r.map(AdapterRecv::Real).map_err(|_| crate::Error::Closed))
 	}
 
-	fn send_group(&mut self, priority: i32) -> Option<<Self::SendStream as crate::transport::poll::SendStream>::Group> {
+	fn send_group(&mut self, priority: i64) -> Option<<Self::SendStream as crate::transport::poll::SendStream>::Group> {
 		self.inner.send_group(priority)
 	}
 

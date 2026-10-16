@@ -67,7 +67,7 @@ impl Sender {
         }
     }
 
-    fn group(&mut self, priority: i32) -> SendGroup {
+    fn group(&mut self, priority: i64) -> SendGroup {
         self.groups().open(priority, None)
     }
 
@@ -345,7 +345,7 @@ fn retransmits_are_not_starved_by_equal_groups() {
 #[test]
 fn ungrouped_streams_preempt_groups() {
     let mut sender = Sender::new();
-    let group = sender.group(i32::MAX);
+    let group = sender.group(i64::MAX);
     let grouped = sender.open(Some(&group), i64::MAX, 10_000);
     let control = sender.open(None, i64::MIN, 10_000);
 
