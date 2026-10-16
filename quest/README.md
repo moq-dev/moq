@@ -8,7 +8,7 @@ grouped into milestones ordered by priority.
 ## Plan
 
 m0 holds urgent fixes and release-line maintenance. m1 is the finite next
-breaking release: clustering stability first, the QUIC library switch, and
+breaking release: clustering stability first, the in-tree QUIC stack, and
 planned public API and format breaks with their correctness and validation.
 m2 holds independently shippable capabilities and optimizations, plus the
 publication and adoption steps that follow m1. m3 holds external conditions

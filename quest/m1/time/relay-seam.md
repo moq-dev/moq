@@ -16,8 +16,9 @@ the web-transport adapter and are not replaced by a poll transport.
 
 Find the smallest remaining relay connection seam and keep its public API
 narrow. Move auth, cluster-origin, and stats integration tests onto the sim
-where they do not require real I/O. The switch settles the server types this
-seam abstracts over. Simulated UDP belongs to QUIC on the sim.
+where they do not require real I/O. It abstracts over moq-tokio's server
+types as the switch to `moq-quic` (#5664) left them. Simulated UDP belongs to
+QUIC on the sim.
 
 Public API: the remaining relay seam. Wire: none.
 
