@@ -704,9 +704,11 @@ The catalog's root `archive` field names every timeline, and any durable recordi
 
 ~~~
 type ArchiveSchema = {
-  "timelines": Map<TrackName, TrackName>,
+  "timelines": Map<TrackName, {
+    "track": TrackName,
+    "duration": number,
+  }>,
   "timescale": number | undefined,
-  "durationMax": number | undefined,
   "replay": string | undefined,
   "store": string | undefined,
   "version": number | undefined,
@@ -715,20 +717,21 @@ type ArchiveSchema = {
 
 A consumer that cannot decode the `archive` entry MUST ignore that entry without rejecting the catalog.
 
-The `timelines` field maps each indexed track to the MoQ track carrying its records.
+The `timelines` field maps each indexed track to the MoQ track carrying its records and that timeline's fixed nominal record `duration`.
+The duration is in `timescale` units and is zero for sparse timelines without a segment cadence.
 Any track may be indexed, including the catalog track itself and data tracks ({{data}}).
 Naming a timeline after its track with a `.timeline.z` suffix is RECOMMENDED; a consumer MUST use the advertised names rather than assuming them.
-A live publisher without a store advertises `archive` with the timeline fields (`timelines`, `timescale`, `durationMax`) alone.
+A live publisher without a store advertises `archive` with the timeline fields (`timelines`, `timescale`) alone.
 Every span a timeline advertises is FETCHable; with a store it is also durable.
 There is no generation: a client that must tell recordings apart compares `replay` and `store`.
 
-The `timescale` field is the units per second for the records' `pts` and `duration` values, and for `durationMax`.
+The `timescale` field is the units per second for the records' `pts` and `duration` values and timeline declarations.
 If absent, it defaults to 1000 (milliseconds).
 A zero `timescale` is invalid and MUST be refused.
 
-The `durationMax` field, if present, is the declared upper bound on a record's `duration`, in `timescale` units.
-A publisher MUST NOT emit a record whose `duration` exceeds it; splitting a group between frames ({{timeline-cutting}}) makes the bound achievable for any content, and a record whose frames are farther apart than the bound ends at the bound, leaving the rest of the gap uncovered.
-The value MUST NOT change for the life of the broadcast.
+Each declared timeline duration is a nominal target, not a bound: a publisher MAY overrun it to end at a group boundary.
+The value MUST NOT change for the life of that timeline track.
+A publisher that does not know the target MUST omit that timeline until its first record closes, then declare that record's duration.
 
 Wall-clock mapping is the catalog root `clock` ({{clock}}), not this section: a consumer derives the wall-clock time of any record as `clock.wall + pts` after converting `pts` into the clock's timescale.
 
@@ -817,10 +820,11 @@ The newest record is therefore the live edge of its track.
 The RECOMMENDED policy is one rule for every track:
 
 - A record ends at the first group boundary at least a minimum duration past its own start, so short groups (audio) pack into one record and long ones (video) get one each.
-- A group still open a maximum duration past the record's start is split between frames, so a group that never closes (an append-log such as a `moq-json` stream) is indexed as it grows; `durationMax` advertises this maximum.
+- A group still open several declared durations past the record's start is split between frames, so a group that never closes (an append-log such as a `moq-json` stream) is indexed as it grows.
 - A skipped group sequence ends the record at its newest known content, not where the next group starts, so a pause is not counted as content.
 
-A minimum of 2 seconds and a maximum of 10 seconds are RECOMMENDED.
+A minimum of 4 seconds is RECOMMENDED.
+Before an unhinted track declares, a safety ceiling of 10 seconds is RECOMMENDED.
 Sparse data that publishes on its own schedule, such as a catalog, SHOULD use a minimum of zero: each group is then its own record, ended as soon as the group finishes, so its newest group is indexed without waiting for another that may never come.
 
 A publisher MAY add boundaries of its own, such as following a source's segmentation or cutting audio where video starts a group, so a derived segment needs fewer records.
@@ -1127,6 +1131,7 @@ This document has no IANA actions.
 ## moq-hang-04
 {:numbered="false"}
 
+- Each archive timeline declares its own fixed nominal record duration; removed the broadcast-wide duration bound.
 - Derived HLS and DASH exports hand disabled references to enabled renditions at the first record numbered past the advertised ones, keeping the record `sequence` as the HLS media sequence and starting a DASH period.
 
 - Fixed a track's identity for its name ({{identity}}): codec, description, container, display aspect, sample rate, and channel count never change, while every other field, including size, bitrate, and framerate, updates in place. A change of identity takes a new track name, which a rendition may name with `track` while keeping its ID, or a new Epoch.
@@ -1146,7 +1151,7 @@ This document has no IANA actions.
 - Replaced the broadcast's one aligned timeline with one timeline per track: the catalog `archive` entry's `track` became a `timelines` map from each indexed track, the catalog included, to its timeline track.
 - Required consumers to ignore an undecodable `archive` entry without rejecting the catalog.
 - Replaced the segment record with a per-track record: `sequence`, `pts`, `duration`, and a `start`/`end` range of group and frame positions, dropping cross-track pacing and completeness.
-- One cutting rule for every track: a record ends at the first group boundary past a minimum (2 seconds RECOMMENDED, zero for sparse data such as a catalog) and splits a group between frames at a maximum (10 seconds RECOMMENDED), so a group that never closes is indexed as it grows and `durationMax` bounds every record.
+- One cutting rule for every track: a record ends at the first group boundary past a minimum (2 seconds RECOMMENDED, zero for sparse data such as a catalog) and splits a group between frames at a maximum (10 seconds RECOMMENDED), so a group that never closes is indexed as it grows.
 - Recording format version 2: each track stores record N at `segments/N`, beside its timeline's `segments/N`, with a `Frame Start` field in the segment object. Tracks commit and expire independently, and a DVR keeps each track's newest record.
 - Described deriving HLS and DASH at the edge from a reference rendition's records.
 - An edge keeps its derived-format video reference rendition while that rendition stays in the catalog; an audio reference yields once video has a timeline.

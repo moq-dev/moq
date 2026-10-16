@@ -21,7 +21,7 @@ the format so a timestamp is optional, rather than keep refusing.
   may exist, and the line's in-place exception
   ([archive](/quest/m1/archive/README.md), Compatibility) ends once a release
   ships recordings.
-- The timeline is a time index (`pts`, `duration`, `durationMax`), which an
+- The timeline is a time index (`pts`, `duration`), which an
   untimed track can't fill. Decide its shape before coding: likely one record
   per group with no `pts` or `duration`, as a sparse track already cuts.
 - Consumers that need media time refuse an untimed track loudly:
