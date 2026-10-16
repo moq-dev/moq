@@ -112,7 +112,8 @@ impl Send {
         self.state = ResetSent {
             final_size,
             reliable_size,
-            held: (!send).then_some(error_code),
+            error_code,
+            held: !send,
             reset_acked: false,
         };
         send.then_some(error_code)
@@ -120,31 +121,41 @@ impl Send {
 
     /// The error code of a held RESET_STREAM, once all the data it holds for has been acknowledged
     pub(super) fn take_held_reset(&mut self) -> Option<VarInt> {
-        let SendState::ResetSent { held, .. } = &mut self.state else {
+        let SendState::ResetSent {
+            error_code, held, ..
+        } = &mut self.state
+        else {
             return None;
         };
-        match self.pending.is_fully_acked() {
-            true => held.take(),
-            false => None,
+        if !*held || !self.pending.is_fully_acked() {
+            return None;
         }
+        *held = false;
+        Some(*error_code)
     }
 
-    /// Abandon the data a held RESET_STREAM waits on, returning its error code to send now
+    /// Abandon the data a reset still delivers, returning the error code of the zero-sized reset
+    /// to send now
     ///
-    /// For a peer that sent STOP_SENDING, which will not read it.
-    pub(super) fn release_held_reset(&mut self) -> Option<VarInt> {
+    /// For a peer that sent STOP_SENDING, which will not read it. This releases a held
+    /// RESET_STREAM, and replaces a RESET_STREAM_AT whose data is still unacknowledged.
+    pub(super) fn abandon_reliable(&mut self) -> Option<VarInt> {
         let SendState::ResetSent {
-            held,
             reliable_size,
+            error_code,
+            held,
             ..
         } = &mut self.state
         else {
             return None;
         };
-        let error_code = held.take()?;
+        if self.pending.is_fully_acked() {
+            return None;
+        }
         *reliable_size = 0;
+        *held = false;
         self.pending.truncate(0);
-        Some(error_code)
+        Some(*error_code)
     }
 
     /// The frame announcing this stream's reset, if it was reset
@@ -387,7 +398,8 @@ pub(super) enum SendState {
     ResetSent {
         final_size: u64,
         reliable_size: u64,
-        held: Option<VarInt>,
+        error_code: VarInt,
+        held: bool,
         reset_acked: bool,
     },
 }

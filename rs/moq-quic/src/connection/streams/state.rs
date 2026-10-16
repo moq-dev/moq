@@ -362,8 +362,8 @@ impl StreamsState {
 
     /// Process incoming `STOP_SENDING` frame
     ///
-    /// Returns the error code of a held reset to send now, since the peer will not read the data
-    /// it waited on.
+    /// Returns the error code of a zero-sized reset to send now, since the peer will not read the
+    /// data a reset still delivers.
     #[allow(unreachable_pub)] // fuzzing only
     pub fn received_stop_sending(&mut self, id: StreamId, error_code: VarInt) -> Option<VarInt> {
         self.insert_remote(id);
@@ -379,7 +379,7 @@ impl StreamsState {
                 .push_back(StreamEvent::Stopped { id, error_code });
         }
         let buffered = stream.pending.buffered();
-        let reset = stream.release_held_reset();
+        let reset = stream.abandon_reliable();
         self.buffered_data -= buffered - stream.pending.buffered();
         reset
     }
@@ -2845,37 +2845,43 @@ mod tests {
         assert_eq!(server.send_streams, 0);
     }
 
-    /// A peer that asks us to stop sending will not read the prefix a held reset waits on.
+    /// A peer that asks us to stop sending will not read the prefix a reset still delivers, so
+    /// a held RESET_STREAM goes at once and a RESET_STREAM_AT is replaced by a zero-sized reset.
     #[test]
-    fn stop_sending_releases_held_reset() {
-        let mut server = server_with_reset_stream_at(false);
-        let (mut pending, state) = (Retransmits::default(), ConnState::Established);
-        let id = Streams {
-            state: &mut server,
-            conn_state: &state,
-        }
-        .open(Dir::Uni)
-        .unwrap();
-        let mut stream = SendStream {
-            id,
-            state: &mut server,
-            pending: &mut pending,
-            conn_state: &state,
-        };
-        stream.write(b"hello world").unwrap();
-        stream.reset_to(7u32.into(), 4).unwrap();
-        assert!(pending.reset_stream.is_empty());
+    fn stop_sending_abandons_reliable_prefix() {
+        for reset_stream_at in [false, true] {
+            let mut server = server_with_reset_stream_at(reset_stream_at);
+            let (mut pending, state) = (Retransmits::default(), ConnState::Established);
+            let id = Streams {
+                state: &mut server,
+                conn_state: &state,
+            }
+            .open(Dir::Uni)
+            .unwrap();
+            let mut stream = SendStream {
+                id,
+                state: &mut server,
+                pending: &mut pending,
+                conn_state: &state,
+            };
+            stream.write(b"hello world").unwrap();
+            stream.reset_to(7u32.into(), 4).unwrap();
+            assert_eq!(pending.reset_stream.is_empty(), !reset_stream_at);
 
-        assert_eq!(
-            server.received_stop_sending(id, 9u32.into()),
-            Some(7u32.into())
-        );
-        assert_eq!(server.buffered_data, 0);
-        assert!(!server.can_send_stream_data());
-        let send = server.send[&id].as_ref().unwrap();
-        assert!(send.pending.is_fully_acked());
-        // Released once, so a repeated STOP_SENDING sends nothing more
-        assert_eq!(server.received_stop_sending(id, 9u32.into()), None);
+            assert_eq!(
+                server.received_stop_sending(id, 9u32.into()),
+                Some(7u32.into())
+            );
+            assert_eq!(server.buffered_data, 0);
+            assert!(!server.can_send_stream_data());
+            let send = server.send[&id].as_ref().unwrap();
+            assert!(send.pending.is_fully_acked());
+            let frame = send.reset_frame(id, 7u32.into(), reset_stream_at).unwrap();
+            assert_eq!(frame.reliable_size, None);
+            assert_eq!(frame.final_offset, VarInt(11));
+            // Abandoned once, so a repeated STOP_SENDING sends nothing more
+            assert_eq!(server.received_stop_sending(id, 9u32.into()), None);
+        }
     }
 
     #[test]

@@ -93,6 +93,55 @@ fn lose_client_packets(pair: &mut Pair) {
     pair.client.outbound.clear();
 }
 
+/// A peer that stops reading gets a zero-sized reset, and the prefix it will not read is never
+/// retransmitted.
+fn stop_sending_abandons_prefix(reset_stream_at: bool) {
+    let _guard = subscribe();
+    let mut pair = pair(reset_stream_at);
+    let (client_ch, server_ch) = pair.connect();
+
+    // The server learns of the stream from its first byte
+    let s = pair.client_streams(client_ch).open(Dir::Uni).unwrap();
+    pair.client_send(client_ch, s).write(&MSG[..1]).unwrap();
+    pair.drive();
+    assert_eq!(accept(&mut pair, server_ch), s);
+
+    // The rest of the prefix is lost, and so is any reset sent for it
+    pair.client_send(client_ch, s)
+        .write(&MSG[1..RELIABLE])
+        .unwrap();
+    let checkpoint = pair.client_send(client_ch, s).checkpoint();
+    pair.client_send(client_ch, s)
+        .write(&MSG[RELIABLE..])
+        .unwrap();
+    lose_client_packets(&mut pair);
+    reset(&mut pair, client_ch, checkpoint).unwrap();
+    pair.client.drive(pair.time, pair.server.addr);
+    pair.client.outbound.clear();
+    let resets = resets_sent(&mut pair, client_ch);
+
+    pair.server_recv(server_ch, s).stop(VarInt(7)).unwrap();
+    let streams = pair.client_conn_mut(client_ch).stats().frame_tx.stream;
+    pair.drive();
+
+    assert_eq!(
+        pair.client_conn_mut(client_ch).stats().frame_tx.stream,
+        streams
+    );
+    assert!(resets_sent(&mut pair, client_ch) > resets);
+    assert_eq!(pair.client_streams(client_ch).send_streams(), 0);
+}
+
+#[test]
+fn stop_sending_abandons_prefix_supported() {
+    stop_sending_abandons_prefix(true);
+}
+
+#[test]
+fn stop_sending_abandons_prefix_unsupported() {
+    stop_sending_abandons_prefix(false);
+}
+
 #[test]
 fn delivers_prefix_before_error() {
     let _guard = subscribe();
