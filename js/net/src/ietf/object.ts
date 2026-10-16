@@ -283,6 +283,14 @@ export class ObjectIdGap extends Error {
 	}
 }
 
+/** A draft-14 END_OF_TRACK carried properties, which a track-level end has nowhere to keep. */
+export class EndOfTrackProperties extends Error {
+	constructor() {
+		super("END_OF_TRACK properties are unsupported");
+		this.name = "EndOfTrackProperties";
+	}
+}
+
 /** A moq-transport object inside a group stream. */
 export class Frame {
 	/** The object payload, or `undefined` for an end of group or end of track marker. */
@@ -384,7 +392,7 @@ export class Frame {
 
 		// Defined on every implemented draft, whether or not the header marks the group's end.
 		if (status === END_OF_TRACK) {
-			if (hasProperties) throw new Error("END_OF_TRACK properties are unsupported");
+			if (hasProperties) throw new EndOfTrackProperties();
 			const frame = new Frame({ endOfTrack: true });
 			frame.idDelta = delta;
 			return frame;

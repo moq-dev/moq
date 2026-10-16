@@ -40,15 +40,6 @@ pub(super) fn check_status(version: Version, properties: &Properties) -> Result<
 	}
 }
 
-/// END_OF_TRACK is track-level, so there is nowhere to preserve object properties.
-#[cfg(feature = "async")]
-pub(super) fn check_end_of_track(properties: &Properties) -> Result<(), Error> {
-	match properties.is_empty() {
-		true => Ok(()),
-		false => Err(Error::Unsupported),
-	}
-}
-
 pub(super) struct Decoded {
 	pub properties: Properties,
 	pub timestamp: Option<Timestamp>,

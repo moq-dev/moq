@@ -3473,13 +3473,14 @@ where
 		let (producer, start) = match opened {
 			Opened::Group(producer, start) => (producer, start),
 			// A standalone terminal carries a Location, not a payload group.
-			Opened::EndOfTrack(object) => {
+			Opened::EndOfTrack { object, properties } => {
 				return end_track(
 					&mut track,
 					track::Position {
 						group: group.group_id,
 						frame: object,
 					},
+					properties,
 				);
 			}
 		};
@@ -3550,7 +3551,7 @@ where
 				let _ = producer.finish();
 			}
 			// No object past this group's last one exists, so the track ends after it.
-			Ok(Ended::Track(object)) => {
+			Ok(Ended::Track { object, properties }) => {
 				let _ = producer.finish();
 				return end_track(
 					&mut track,
@@ -3558,6 +3559,7 @@ where
 						group: group.group_id,
 						frame: object,
 					},
+					properties,
 				);
 			}
 		}
@@ -3627,8 +3629,14 @@ where
 /// learn the end before the live edge reaches it. A boundary at or below a group already
 /// received is the publisher breaking its own end, which no later group can repair. A
 /// marker that lands after the subscription already ended (its grace expired) changes
-/// nothing.
-fn end_track(track: &mut track::Producer, end: track::Position) -> Result<(), Error> {
+/// nothing. Draft-14 lets the marker carry properties, but the end is track-level with
+/// nowhere to keep them, so the track is refused rather than lose them.
+fn end_track(track: &mut track::Producer, end: track::Position, properties: bool) -> Result<(), Error> {
+	if properties {
+		tracing::warn!(?end, "END_OF_TRACK properties are unsupported");
+		let _ = track.clone().abort(Error::Unsupported);
+		return Err(Error::Unsupported);
+	}
 	// Lower groups may still be on the wire, behind the one that carried the end.
 	if let Err(err) = track.finish_at_pending(end) {
 		tracing::warn!(%err, ?end, "invalid END_OF_TRACK");
@@ -3642,8 +3650,9 @@ fn end_track(track: &mut track::Producer, end: track::Position) -> Result<(), Er
 enum Opened {
 	/// The group producer the stream writes into, and the Object ID it starts at.
 	Group(group::Producer, u64),
-	/// A standalone terminal marker, which creates no payload group.
-	EndOfTrack(u64),
+	/// A standalone terminal marker, which creates no payload group, and whether it
+	/// carried properties.
+	EndOfTrack { object: u64, properties: bool },
 }
 
 /// How a subgroup stream ended cleanly.
@@ -3651,8 +3660,9 @@ enum Opened {
 enum Ended {
 	/// The stream finished, or carried an explicit end of group.
 	Group,
-	/// It carried an END_OF_TRACK after the group's last object.
-	Track(u64),
+	/// It carried an END_OF_TRACK after the group's last object, and whether that
+	/// marker carried properties.
+	Track { object: u64, properties: bool },
 }
 
 /// Object status: no object at or past this location in the group exists (draft-14, 15).
@@ -3741,10 +3751,10 @@ where
 			}
 		};
 		if let Some(first) = first.filter(|first| first.end_of_track) {
-			if first.has_properties {
-				return Err(Error::Unsupported);
-			}
-			return Ok(Opened::EndOfTrack(first.id));
+			return Ok(Opened::EndOfTrack {
+				object: first.id,
+				properties: first.has_properties,
+			});
 		}
 
 		// Without a fill or resume, a relay preserves the subgroup's first Object ID
@@ -4248,10 +4258,9 @@ where
 					}
 					return Ok(Fetched::EndOfGroup);
 				}
-				END_OF_TRACK => {
-					super::object::check_end_of_track(&decoded.properties)?;
-					return Ok(Fetched::EndOfTrack);
-				}
+				// END_OF_TRACK is track-level, so there is nowhere to keep its properties.
+				END_OF_TRACK if !decoded.properties.is_empty() => return Err(Error::Unsupported),
+				END_OF_TRACK => return Ok(Fetched::EndOfTrack),
 				_ => return Err(Error::Unsupported),
 			}
 		}
@@ -5082,9 +5091,10 @@ impl GroupIngest {
 					} else if status == END_OF_TRACK {
 						// Defined on every implemented draft, whether or not the header marks
 						// the group's end.
-						super::object::check_end_of_track(&self.properties)?;
-						self.phase =
-							IngestPhase::Finished(Ended::Track(self.prior_object.expect("status follows object ID")));
+						self.phase = IngestPhase::Finished(Ended::Track {
+							object: self.prior_object.expect("status follows object ID"),
+							properties: !self.properties.is_empty(),
+						});
 					} else {
 						return Poll::Ready(Err(Error::Unsupported));
 					}
@@ -11187,6 +11197,10 @@ mod stitch_tests {
 			let mut stream = h.stream().await.with_version(Version::Draft14);
 			let result = h.subscriber.clone().recv_group(&mut stream).await;
 			assert!(matches!(result, Err(Error::Unsupported)), "{objects:?}: {result:?}");
+			assert!(
+				matches!(futures::FutureExt::now_or_never(h.track.closed()), Some(Error::Unsupported)),
+				"{objects:?}: the subscription must end with the refusal"
+			);
 		}
 
 		let script = object_stream(

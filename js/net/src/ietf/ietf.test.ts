@@ -7,7 +7,7 @@ import * as Varint from "../varint.ts";
 import { Fetch } from "./fetch.ts";
 import * as GoAway from "./goaway.ts";
 import * as Namespace from "./namespace.ts";
-import { FetchFrame, type FetchPosition, Frame, Group, type GroupFlags } from "./object.ts";
+import { EndOfTrackProperties, FetchFrame, type FetchPosition, Frame, Group, type GroupFlags } from "./object.ts";
 import { Parameters, SetupOptions } from "./parameters.ts";
 import { Publish, PublishDone } from "./publish.ts";
 import * as Announce from "./publish_namespace.ts";
@@ -1817,7 +1817,7 @@ test("Frame refuses draft-14 END_OF_TRACK properties", async () => {
 	const wire = new Uint8Array([0, 2, 0x20, 7, 0, 4]);
 	const reader = new Reader(undefined, wire, Version.DRAFT_14);
 	await expect(reader.decode((c) => Frame.decode(c, flags, undefined))).rejects.toThrow(
-		"END_OF_TRACK properties are unsupported",
+		EndOfTrackProperties,
 	);
 });
 
