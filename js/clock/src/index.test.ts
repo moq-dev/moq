@@ -189,10 +189,12 @@ test("an interval cancels pending ticks, refuses concurrent ticks and stays clos
 });
 
 test("the host clock counts from the performance time origin", () => {
-	const before = performance.now();
+	// biome-ignore lint/style/noRestrictedGlobals: compares the host backend with its source.
+	const host = performance;
+	const before = host.now();
 	const at = Nano.toMilli(Instant.durationSince(now(), Instant.zero));
 	expect(at).toBeGreaterThanOrEqual(before);
-	expect(at).toBeLessThanOrEqual(performance.now());
+	expect(at).toBeLessThanOrEqual(host.now());
 });
 
 test("an unreferenced sleep still completes on the host", async () => {

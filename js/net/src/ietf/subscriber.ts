@@ -1,3 +1,4 @@
+import { Milli, Nano } from "@moq/clock";
 import { type Dispose, type GetPromise, type Getter, race, Signal } from "@moq/signals";
 import * as announce from "../announced.ts";
 import type { Grant } from "../auth.ts";
@@ -22,7 +23,7 @@ import { finalSequence, hiddenBelow, hooks, scopeCaptures, scopeHead, scopeOverl
 import * as Path from "../path.ts";
 import { type Cursor, Reader, type Stream } from "../stream.ts";
 import { Tail } from "../tail.ts";
-import { Milli, type Timescale, type Timestamp } from "../time.ts";
+import type { Timescale, Timestamp } from "../time.ts";
 import type * as track from "../track.ts";
 import { untilAborted } from "../util/abort.ts";
 import { LIMITS, type Limits, SlotMap, Slots } from "../util/limits.ts";
@@ -695,7 +696,7 @@ export class Subscriber {
 			// Returning demand keeps the same setup and its original deadline.
 			const accepted = withTimeout(
 				setup,
-				SUBSCRIBE_OK_TIMEOUT_MS,
+				Nano.fromMilli(Milli(SUBSCRIBE_OK_TIMEOUT_MS)),
 				`subscribe timed out after ${SUBSCRIBE_OK_TIMEOUT_MS}ms waiting for SUBSCRIBE_OK (browser stream limit reached?)`,
 			);
 			for (;;) {
