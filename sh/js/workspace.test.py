@@ -190,11 +190,16 @@ class SelectionTest(unittest.TestCase):
     def test_biome_covers_unowned_js_files_in_fallback(self):
         def biome(paths):
             return next(c for c in self.calls(paths) if c[:3] == ["bun", "biome", "check"])
-        self.assertEqual(biome(["js/tsconfig.json"]), ["bun", "biome", "check", "js", "test"])
+        self.assertEqual(biome(["js/tsconfig.json"]), ["bun", "biome", "check", "js", "test", "doc", "demo"])
+        self.assertEqual(biome(["doc/index.md"]), ["bun", "biome", "check", "doc", "js/common"])
+        self.assertEqual(biome(["demo/nested/src/index.ts"]),
+                         ["bun", "biome", "check", "demo/nested", "js/common"])
+        self.assertEqual(biome(["demo/pub/src/index.ts"]),
+                         ["bun", "biome", "check", "js", "test", "doc", "demo"])
         self.assertEqual(biome(["js/core/src/index.ts"]),
-                         ["bun", "biome", "check", "js/core", "js/view", "js/common"])
+                         ["bun", "biome", "check", "js/core", "js/view", "doc", "js/common"])
         self.assertEqual(biome(["js/wasm/src/index.ts"]),
-                         ["bun", "biome", "check", "js/wasm", "test/browser", "js/common"])
+                         ["bun", "biome", "check", "js/wasm", "test/browser", "demo/nested", "js/common"])
 
     def test_build_never_generates_wasm(self):
         self.assertNotIn(["just", "js", "wasm"], self.calls(None, "build"))
