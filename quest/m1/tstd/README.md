@@ -1,4 +1,4 @@
-# T-STD compliant TS export
+# [L] T-STD compliant TS export
 
 ## Goal
 
@@ -41,14 +41,9 @@ content-loss coverage through the TS reliability line. Run TSDuck, FFmpeg
 software decode, and the custom model as automated assertions with known-bad
 controls. A model pass is not independent proof of decoded content.
 
-The current model does not cover every codec/layout or the PSI system buffer.
-Name those exclusions and assumptions in the profile report; the PSI quest
-owns its system-buffer proof, and the existing controls quest owns the missing
-MB/AAC controls. Do not relabel the current subset a full standards check.
-
-## Required
-
-- [PSI pacing](/quest/m1/tstd/psi-runs.md) - padded output paces the PAT and PMT so TBsys and Bsys never overflow
+The current model does not cover every codec/layout. Name those exclusions and
+assumptions in the profile report. Do not relabel the current subset a full
+standards check.
 
 ## Related
 
