@@ -660,6 +660,16 @@ impl Timelines {
 		section
 	}
 
+	/// Close every open record now, publishing any declaration it fixes.
+	pub(crate) fn flush(&self) {
+		let registry = self.registry.lock().unwrap();
+		for (_, live) in registry.tracks.values() {
+			let mut live = live.lock().unwrap();
+			live.segmenter.flush();
+			live.publish();
+		}
+	}
+
 	/// Flush every open record and finish every timeline track. Later enrollments fail.
 	pub fn finish(&self) {
 		let mut registry = self.registry.lock().unwrap();

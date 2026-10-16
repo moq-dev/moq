@@ -975,6 +975,9 @@ impl<E: CatalogExt> Producer<E> {
 	///
 	/// An estimate rise still held by the once-a-second limit is not published: media has ended.
 	pub fn finish(&mut self) -> crate::Result<()> {
+		// A track that ends before its first record closes declares its timeline now, while the
+		// catalog can still advertise it.
+		self.timeline.flush();
 		{
 			let mut state = take(&self.current);
 			if let Some(err) = &state.closed {
@@ -1855,6 +1858,22 @@ mod test {
 
 		let archive = catalog.snapshot().archive.expect("the estimate publishes the timeline");
 		assert_eq!(archive.timelines["video0"].duration, Some(4_000));
+	}
+
+	#[test]
+	fn a_track_shorter_than_one_record_is_advertised_on_finish() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let mut catalog = Producer::new(&mut broadcast, Config::default()).unwrap();
+		let mut recorder = catalog.enroll("audio0", None).unwrap();
+		recorder.frame(
+			hang::timeline::Position::group(0),
+			moq_net::Timestamp::from_millis(0).unwrap(),
+			true,
+		);
+
+		catalog.finish().unwrap();
+		let archive = catalog.snapshot().archive.expect("the catalog timeline is advertised");
+		assert_eq!(archive.timelines["audio0"].duration, Some(4_000));
 	}
 
 	#[test]
