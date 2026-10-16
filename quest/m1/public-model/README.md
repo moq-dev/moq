@@ -77,7 +77,10 @@ Inventory on `main` at b4eab0db1:
   (`hop.ts` values, `announced.ts` `Producer`, `consume.ts`, `tail.ts`,
   `priority.ts`). Model-internal hooks (sequence namespaces, timestamps,
   arrival, eviction, announcer stamping) stay private. Each session-reached
-  item is assigned in a child.
+  item is assigned in a child, except `wire.ts` `Established` (`consume`,
+  `goaway`). It is connection plumbing outside the model, a session handle
+  the connection layer uses, and stays private like the other excluded
+  plumbing.
 
 Work owned by this README, after the children land:
 

@@ -22,7 +22,9 @@ owns it or why it stays private.
 Enforce the marks in CI, or they drift. Narrowing makes the compiler
 reject unmarked reach, but a contributor can still restore `pub(crate)`
 without a comment. Add a check to the lint that `just check` and CI already
-run: every `pub(crate)` under `rs/moq-net/src/model/` must carry a marker
+run: every restricted visibility under `rs/moq-net/src/model/` broader than
+`pub(in crate::model)` or `pub(super)` (any `pub(crate)` or `pub(in crate)`
+spelling) must carry a marker
 comment from a fixed vocabulary (for example `// private: passthrough`,
 `tuning`, `capability gap`, `test`, or `// pending: <quest path>`). A
 `pending` mark must name a quest that still exists. Existence is enough
