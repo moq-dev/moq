@@ -133,6 +133,13 @@ A presence track's entries are cumulative from when it was first held: a
 session that ends stays counted, and so does every one after it, while
 anyone holds the track. A track held again starts over.
 
+Wire bytes start at zero on every hold, including the first. Other presence
+fields seed from the root's current live-session counters; they do not recover
+closed roots from before the hold. Node totals keep the full group epoch's
+history. Each recreated track starts a fresh snapshot group using the
+broadcast's shared, increasing group sequence, so relay caches can distinguish
+it from an earlier hold. Plain and compressed tracks share that allocator.
+
 ## Entries
 
 ### Traffic
@@ -171,7 +178,7 @@ should prefer the canonical name and fall back to the legacy one.
 ### Sessions
 
 ```json
-{ "acme": { "requests": 3, "sessions_started": 12, "sessions_ended": 10, "sessions": 12, "sessions_closed": 10, "announces_peak": 40, "subscriptions_peak": 900 } }
+{ "acme": { "requests": 3, "sessions_started": 12, "sessions_ended": 10, "sessions": 12, "sessions_closed": 10, "announces_peak": 40, "subscriptions_peak": 900, "wire_tx": 2048, "wire_rx": 1024 } }
 ```
 
 `sessions_started` and `sessions_ended` count connects and disconnects, whether
@@ -180,6 +187,20 @@ under the root on each tier for `presence.json`, and under every root in the
 group on the tier for `totals.json`. `sessions` and `sessions_closed` are their
 legacy spellings. A session moved to a new tier ends on the old one and starts
 on the new.
+
+`wire_tx` and `wire_rx` count transport bytes sent and received, separately
+from `Traffic.bytes`, which counts media payload. QUIC and WebTransport count
+UDP bytes, including retransmissions and transport overhead. A stats tick
+reads each available owned source directly, without activating the session's
+periodic sampler. Tier changes flush the old tier first; closing a source
+records its final nonnegative delta. Embedders register a cumulative `(tx, rx)`
+closure with `stats::Handle::wire` or `stats::Session::wire` and hold its guard.
+Dropping the guard records the final reading and unregisters the source.
+
+Unsupported transports, including browsers and the current WebSocket/qmux
+adapter, contribute zero. WebSocket wire accounting requires the separate
+qmux counter source; unavailable counters are never estimated from payload.
+Readers default missing wire fields to zero for older relays.
 
 `requests` counts admitted request/response exchanges under the token's root and
 tier, including HTTP `/fetch` and `/announced`. They never start or end a session.

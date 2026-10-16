@@ -43,7 +43,7 @@ pub(crate) struct Listing {
 }
 
 /// The parts of a [`Rendition`] a [`Listing`] uses, without its config type.
-trait Owned: Send + Sync {
+trait Owned: moq_net::transport::MaybeSend + moq_net::transport::MaybeSync {
 	fn name(&self) -> &str;
 	fn clock(&self) -> crate::Clock;
 	fn estimate(&mut self, estimate: super::Estimate) -> crate::Result<()>;

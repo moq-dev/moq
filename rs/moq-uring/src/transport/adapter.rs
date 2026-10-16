@@ -46,11 +46,17 @@ impl<S: wt::Stats> moq::Stats for Stats<S> {
 }
 /// A WebTransport session adapted to moq-net.
 #[derive(Clone)]
-pub struct Session<S>(S, moq::Binding);
+pub struct Session<S>(S, moq::Binding, Option<moq::Wire>);
 impl<S> Session<S> {
 	/// Wrap a backend poll session.
 	pub fn new(session: S, binding: moq::Binding) -> Self {
-		Self(session, binding)
+		Self(session, binding, None)
+	}
+
+	/// Attach an owned wire-counter source that remains readable off the worker thread.
+	pub fn with_wire(mut self, wire: moq::Wire) -> Self {
+		self.2 = Some(wire);
+		self
 	}
 }
 impl<S: backend::Session<SendStream: 'static, RecvStream: 'static> + Clone + 'static> poll::Session for Session<S> {
@@ -100,6 +106,9 @@ impl<S: backend::Session<SendStream: 'static, RecvStream: 'static> + Clone + 'st
 	}
 	fn stats(&self) -> impl moq::Stats {
 		Stats(backend::Session::stats(&self.0))
+	}
+	fn wire(&self) -> Option<moq::Wire> {
+		self.2.clone()
 	}
 }
 /// An outgoing WebTransport stream adapted to moq-net.
@@ -266,6 +275,23 @@ mod tests {
 			moq_net::Error::from_transport(error),
 			moq_net::Error::Session(moq_net::SessionError::Unauthorized)
 		));
+	}
+
+	#[test]
+	fn wire_source_outlives_the_thread_local_transport() {
+		let backend = Rc::new(Cell::new(0));
+		let counters = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(7));
+		let source = counters.clone();
+		let session = Session::new(Backend(backend.clone()), moq::Binding::Uri).with_wire(moq::Wire::new(move || {
+			(source.load(std::sync::atomic::Ordering::Relaxed), 0)
+		}));
+		let wire = poll::Session::wire(&session).unwrap();
+		drop(session);
+		assert_eq!(Rc::strong_count(&backend), 1);
+		counters.store(11, std::sync::atomic::Ordering::Relaxed);
+		std::thread::spawn(move || assert_eq!(wire.read(), (11, 0)))
+			.join()
+			.unwrap();
 	}
 
 	#[test]

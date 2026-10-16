@@ -47,6 +47,31 @@ pub enum Binding {
 	InBand,
 }
 
+#[cfg(not(target_family = "wasm"))]
+type WireReader = dyn Fn() -> (u64, u64) + Send + Sync;
+#[cfg(target_family = "wasm")]
+type WireReader = dyn Fn() -> (u64, u64);
+
+/// Owned cumulative transport byte counters, readable without polling the session driver.
+///
+/// A reader must own only its counter data, never keep the transport alive. After closure,
+/// its final values remain readable. Native readers are thread-safe; WASM readers may be
+/// thread-local. Unsupported transports return no reader.
+#[derive(Clone)]
+pub struct Wire(std::sync::Arc<WireReader>);
+
+impl Wire {
+	/// Read cumulative sent and received bytes from an owned, non-blocking source.
+	pub fn new(source: impl Fn() -> (u64, u64) + MaybeSend + MaybeSync + 'static) -> Self {
+		Self(std::sync::Arc::new(source))
+	}
+
+	/// Return cumulative sent and received bytes without requesting a stats sample.
+	pub fn read(&self) -> (u64, u64) {
+		(self.0)()
+	}
+}
+
 /// Connection-level statistics.
 ///
 /// Methods return `Option`: `None` means the implementation doesn't track
@@ -206,6 +231,11 @@ pub mod poll {
 		/// Return [`super::StatsUnavailable`] if the transport does not track them. Required
 		/// rather than defaulted for the same reason as [`protocol`](Self::protocol).
 		fn stats(&self) -> impl Stats;
+
+		/// Return owned direct wire counters, or `None` when unavailable.
+		fn wire(&self) -> Option<super::Wire> {
+			None
+		}
 
 		/// Accept the next unidirectional stream opened by the peer.
 		fn accept_uni(&mut self) -> AcceptUni<'_, Self> {

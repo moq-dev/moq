@@ -3,6 +3,10 @@
 use std::cell::RefCell;
 use std::net::SocketAddr;
 use std::rc::{Rc, Weak};
+use std::sync::{
+	Arc,
+	atomic::{AtomicU64, Ordering},
+};
 use std::task::{Context, Poll};
 use std::time::Instant;
 
@@ -29,6 +33,8 @@ const TRAIN_SEGMENTS: usize = 63;
 /// waiter without ever holding both.
 pub(crate) struct Inner {
 	pub(crate) conn: RefCell<moq_quic::Connection>,
+	/// Updated by packet ingress and egress, so readers never wake the worker to sample.
+	pub(crate) wire: Arc<[AtomicU64; 2]>,
 	pub(crate) state: RefCell<State>,
 	/// The worker driving this connection, which anything layered on it
 	/// (the WebTransport handshake, say) runs on too.
@@ -354,6 +360,12 @@ impl Connection {
 	pub fn stats(&self) -> moq_quic::ConnectionStats {
 		self.shared.conn.borrow().stats()
 	}
+
+	/// Return wire counters readable from any thread without retaining the worker connection.
+	pub fn wire(&self) -> moq_net::transport::Wire {
+		let wire = self.shared.wire.clone();
+		moq_net::transport::Wire::new(move || (wire[0].load(Ordering::Relaxed), wire[1].load(Ordering::Relaxed)))
+	}
 }
 
 impl Clone for Connection {
@@ -382,7 +394,9 @@ pub(crate) fn launch(
 	key: ConnectionHandle,
 	conn: moq_quic::Connection,
 ) -> (Shared, impl Future<Output = ()> + use<>) {
+	let stats = conn.stats();
 	let shared = Rc::new(Inner {
+		wire: Arc::new([AtomicU64::new(stats.udp_tx.bytes), AtomicU64::new(stats.udp_rx.bytes)]),
 		conn: RefCell::new(conn),
 		state: RefCell::new(State::new()),
 		owner: owner.clone(),
@@ -875,6 +889,7 @@ impl Driver {
 			let Some(transmit) = conn.poll_transmit(moq_clock::Instant::now(), segments, &mut self.scratch) else {
 				return Poll::Pending;
 			};
+			self.shared.wire[0].store(conn.stats().udp_tx.bytes, Ordering::Relaxed);
 			// Once closed, moq-quic transmits nothing but the CONNECTION_CLOSE.
 			(transmit, conn.is_closed())
 		};

@@ -84,6 +84,26 @@ impl<S: wt::Session<SendStream: 'static, RecvStream: 'static>> poll::Session for
 	fn stats(&self) -> impl moq::Stats {
 		Stats(backend::Session::stats(self))
 	}
+	fn wire(&self) -> Option<moq::Wire> {
+		use std::sync::atomic::{AtomicU64, Ordering};
+		use wt::Stats as _;
+		let stats = self.session.stats();
+		if stats.bytes_sent().is_none() && stats.bytes_received().is_none() {
+			return None;
+		}
+		let tx = AtomicU64::new(stats.bytes_sent().unwrap_or_default());
+		let rx = AtomicU64::new(stats.bytes_received().unwrap_or_default());
+		let session = std::sync::Arc::downgrade(&self.session);
+		Some(moq::Wire::new(move || {
+			// A stats reader must not extend the transport's lifetime after its driver drops.
+			if let Some(session) = session.upgrade() {
+				let stats = session.stats();
+				tx.fetch_max(stats.bytes_sent().unwrap_or_default(), Ordering::Relaxed);
+				rx.fetch_max(stats.bytes_received().unwrap_or_default(), Ordering::Relaxed);
+			}
+			(tx.load(Ordering::Relaxed), rx.load(Ordering::Relaxed))
+		}))
+	}
 }
 impl<S: wt::SendStream + 'static> poll::SendStream for super::SendStream<S> {
 	type Error = Error<S::Error>;

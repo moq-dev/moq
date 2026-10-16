@@ -110,9 +110,9 @@ impl From<&Stats> for Estimate {
 /// [`abort`](Self::abort) closes it explicitly with an error. The handle and the
 /// driver are severed in both directions: the driver holds no `Session` clone,
 /// so running it never keeps the session alive, and the `Session`
-/// holds no transport, so the handle is `Send + Sync` whatever transport the
-/// driver uses. Everything transport-shaped (the close, the close reason,
-/// the stats sample) is relayed through the driver.
+/// holds no transport, so the native handle is `Send + Sync` whatever transport
+/// the driver uses. Close requests, close reasons, and stats samples go through
+/// the driver; optional owned wire counters are readable directly.
 #[derive(Clone)]
 pub struct Session {
 	/// Handle side to driver: `Some` once [`abort`](Self::abort) or
@@ -122,6 +122,7 @@ pub struct Session {
 	/// Driver to handle side: how the transport ended.
 	closed: kio::Consumer<Option<Ended>>,
 	stats: kio::Shared<StatsState>,
+	wire: Option<crate::transport::Wire>,
 	version: Version,
 	// Weak, so the sampler runs only while a caller holds a consumer.
 	send_bandwidth: Option<bandwidth::Weak>,
@@ -168,6 +169,11 @@ impl Session {
 		};
 		stats.estimated_recv_rate = self.recv_bandwidth.as_ref().and_then(bandwidth::Consumer::peek);
 		stats
+	}
+
+	/// Return owned direct wire counters without requesting the 100 ms stats sampler.
+	pub fn wire(&self) -> Option<crate::transport::Wire> {
+		self.wire.clone()
 	}
 
 	/// Close the transport with an explicit error, instead of waiting for the last
@@ -288,6 +294,7 @@ impl Session {
 
 /// The handles a protocol driver shares with its [`Session`].
 pub(super) struct Handles {
+	pub stats: crate::stats::Session,
 	pub goaway: goaway::Handle,
 	pub auth: auth::Handle,
 	/// Where the driver publishes [`Estimate`] changes, for a protocol that reports
@@ -307,7 +314,14 @@ impl Session {
 	where
 		S: crate::transport::poll::Session,
 	{
-		let Handles { goaway, auth, estimate } = handles;
+		let Handles {
+			goaway,
+			auth,
+			estimate,
+			stats: context,
+		} = handles;
+		let wire = session.wire();
+		let wire_guard = wire.clone().map(|source| context.register_wire(source));
 		let sample = snapshot(&session);
 		if let Some(estimate) = &estimate
 			&& let Ok(mut current) = estimate.write()
@@ -340,6 +354,8 @@ impl Session {
 			close: Some(close.consume()),
 			closed,
 			stats: stats.clone(),
+			wire_source: wire.clone(),
+			wire_guard,
 			send_bandwidth: send_producer,
 			estimate,
 			sampled: None,
@@ -351,6 +367,7 @@ impl Session {
 			close,
 			closed: closed_consumer,
 			stats,
+			wire,
 			version,
 			send_bandwidth,
 			recv_bandwidth,
@@ -400,6 +417,18 @@ pub(crate) struct Supervisor<S> {
 	sampled: Option<crate::time::Instant>,
 	mode: SamplerMode,
 	drain: Drain,
+	wire_source: Option<crate::transport::Wire>,
+	wire_guard: Option<crate::stats::Wire>,
+}
+
+impl<S> Drop for Supervisor<S> {
+	fn drop(&mut self) {
+		// Refresh while the driver still owns its transport; an exported source keeps no connection alive.
+		if let Some(source) = &self.wire_source {
+			source.read();
+		}
+		self.wire_guard.take();
+	}
 }
 
 /// A [`Session::close`] waiting for the protocol to deliver what it queued.
@@ -435,6 +464,10 @@ impl<S: crate::transport::poll::Session> Supervisor<S> {
 			// this cell, so leave it holding the session's final counters
 			// rather than whichever sample the last demand happened to catch.
 			self.stats.lock().sample = snapshot(&self.session);
+			if let Some(source) = &self.wire_source {
+				source.read();
+			}
+			self.wire_guard.take();
 			let drain = match std::mem::replace(&mut self.drain, Drain::Idle) {
 				Drain::Done(res) => Some(res),
 				_ => None,
@@ -655,6 +688,7 @@ fn snapshot<S: crate::transport::poll::Session>(session: &S) -> Stats {
 // The point of the sever: the handle's auto-traits no longer depend on which
 // transport the runtime drives, so every consumer (moq-ffi needs Send + Sync)
 // works over every transport, pinned `!Send` ones included.
+#[cfg(not(target_family = "wasm"))]
 const _: () = {
 	const fn assert_send_sync<T: Send + Sync>() {}
 	assert_send_sync::<Session>();

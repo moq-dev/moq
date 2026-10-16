@@ -699,10 +699,11 @@ async fn serve_connection(
 		Some(_) => moq_net::transport::Binding::Uri,
 		None => moq_net::transport::Binding::InBand,
 	};
+	let wire = transport.wire();
 	let request = deadline
 		.bound(server.accept_request_lite(
 			std::time::Instant::now(),
-			moq_uring::transport::Session::new(transport, binding),
+			moq_uring::transport::Session::new(transport, binding).with_wire(wire),
 		))
 		.await
 		.context("moq handshake failed")?;

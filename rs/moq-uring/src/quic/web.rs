@@ -439,6 +439,11 @@ pub struct Session {
 }
 
 impl Session {
+	/// Return wire counters readable from any thread without retaining this session.
+	pub fn wire(&self) -> moq_net::transport::Wire {
+		self.conn.wire()
+	}
+
 	/// Wrap a raw-QUIC connection in a session, with no
 	/// WebTransport layering: streams and datagrams pass through untouched.
 	pub fn raw(conn: Connection) -> Self {

@@ -2,11 +2,12 @@
 
 ## Goal
 
-`Presence` gains cumulative `wire_tx` and `wire_rx`, under the same reset
-contract as its other cumulative fields: counted since the stats group's
-epoch began (a group returning from idle starts a new epoch at zero), and
-reset with a reclaimed and re-held presence track, so the aggregator never
-re-adds bytes an earlier epoch already reported. On every stats tick the
+`Presence` gains cumulative `wire_tx` and `wire_rx`. Node totals count since
+the stats group's epoch began (a group returning from idle starts a new epoch
+at zero). Per-root wire counters start at zero on every presence hold,
+including the first, with no retained per-root history while unheld. Each
+re-held segment must use a fresh broadcast epoch, track identity, or group
+sequence so relay caches cannot replay an earlier segment. On every stats tick the
 relay adds the delta of each live session's transport bytes since its last
 reading. A closing session adds its final reading. An embedder registers a connection's wire source against a
 (tier, root) on its stats handle, and the same tick reads it.
@@ -14,8 +15,11 @@ reading. A closing session adds its final reading. An embedder registers a conne
 ## Plan
 
 - **Sources:**
-  - **QUIC and WebTransport:** `bytes_sent` / `bytes_received` from
-    `moq_net::session::Stats`. `moq-quic` maps them to `udp_tx` / `udp_rx`.
+  - **QUIC and WebTransport:** an optional owned direct counter source across
+    transport/session adapters. Native sources are `Send + Sync` (conditional
+    bounds on WASM), readable independently of the session handle's lifetime.
+    `moq-quic` maps them to `udp_tx` / `udp_rx`. Unsupported/browser transports
+    expose no source; no sampler, timer, or poll-request fallback.
   - **WebSocket:** the qmux counters from
     [qmux byte counters](/quest/m2/wire-stats/qmux.md). Until those land, a
     WebSocket session reports 0: an undercount, never a guess.
@@ -40,8 +44,8 @@ reading. A closing session adds its final reading. An embedder registers a conne
   reset check (`Mergeable::regressed` in `rs/moq-stats/src/aggregate.rs`)
   carry them, so a node whose wire totals drop is a reset.
 - **Docs:** `doc/concept/stats.md` defines both fields, says
-  `Traffic.bytes` is payload, and says WebSocket wire bytes need a host
-  whose `TCP_INFO` reports them (Linux 4.19+), counting 0 elsewhere.
+  `Traffic.bytes` is payload, and says unavailable WebSocket wire counters
+  contribute zero until the qmux source is adopted.
 - **Tests (on controlled time):**
   - a session's wire bytes land under its root and tier;
   - a tier change splits them;
@@ -49,3 +53,5 @@ reading. A closing session adds its final reading. An embedder registers a conne
   - a stats group that idles out and returns starts its new epoch at zero;
   - the aggregator treats a wire-only drop as a reset;
   - a dropped embedder guard adds its last reading.
+  - a re-held presence track refreshes idle relay caches before exposing its
+    zero snapshot, for both plain and compressed siblings and multiple hops.
