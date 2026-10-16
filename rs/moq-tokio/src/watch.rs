@@ -100,6 +100,8 @@ pub(crate) fn callback(
 /// another line, a self-sustaining storm.
 struct Filter {
 	paths: Vec<PathBuf>,
+	/// Each path with its directory canonicalized, as `locate` spells an event's path.
+	located: Vec<PathBuf>,
 	/// Where each path currently resolves through its symlinks, `None` while it
 	/// doesn't resolve at all.
 	resolved: Vec<Option<PathBuf>>,
@@ -108,8 +110,13 @@ struct Filter {
 impl Filter {
 	fn new(paths: &[PathBuf]) -> Self {
 		let paths = paths.to_vec();
+		let located = paths.iter().filter_map(|p| locate(p)).collect();
 		let resolved = resolve(&paths);
-		Self { paths, resolved }
+		Self {
+			paths,
+			located,
+			resolved,
+		}
 	}
 
 	fn matches(&mut self, event: &notify::Event) -> bool {
@@ -122,13 +129,15 @@ impl Filter {
 			return false;
 		}
 
-		// Compared by file name alone: the watch is non-recursive, and backends
-		// spell the directory differently (FSEvents reports canonical paths).
-		let named = event
-			.paths
-			.iter()
-			.filter_map(|p| p.file_name())
-			.any(|name| self.paths.iter().any(|p| p.file_name() == Some(name)));
+		// Compared with the directory canonicalized, since backends spell it
+		// differently (FSEvents reports canonical paths). The file name check first
+		// skips that syscall for the unrelated churn that dominates these directories.
+		let named = event.paths.iter().any(|p| {
+			let name = p.file_name();
+			name.is_some()
+				&& self.located.iter().any(|f| f.file_name() == name)
+				&& locate(p).is_some_and(|p| self.located.contains(&p))
+		});
 
 		// A Kubernetes secret mount links `cert.pem` to `..data/cert.pem` and rotates
 		// by swapping the `..data` symlink, so no event ever names the file. Catch
@@ -140,6 +149,12 @@ impl Filter {
 
 		named || moved
 	}
+}
+
+fn locate(path: &Path) -> Option<PathBuf> {
+	let name = path.file_name()?;
+	let dir = path.parent().filter(|dir| !dir.as_os_str().is_empty());
+	Some(std::fs::canonicalize(dir.unwrap_or(Path::new("."))).ok()?.join(name))
 }
 
 fn resolve(paths: &[PathBuf]) -> Vec<Option<PathBuf>> {
@@ -251,6 +266,23 @@ mod tests {
 		assert!(filter.matches(&rescan));
 	}
 
+	// With the certificate and key in different directories, a file in one that
+	// shares the other's name is still unrelated.
+	#[test]
+	fn same_name_in_another_watched_directory_does_not_trigger_reload() {
+		use notify::EventKind;
+		use notify::event::{AccessKind, AccessMode};
+
+		let certs = tempfile::TempDir::new().unwrap();
+		let keys = tempfile::TempDir::new().unwrap();
+		let mut filter = Filter::new(&[certs.path().join("cert.pem"), keys.path().join("key.pem")]);
+
+		let closed = EventKind::Access(AccessKind::Close(AccessMode::Write));
+		assert!(!filter.matches(&event(closed, keys.path().join("cert.pem"))));
+		assert!(filter.matches(&event(closed, certs.path().join("cert.pem"))));
+		assert!(filter.matches(&event(closed, keys.path().join("key.pem"))));
+	}
+
 	// Drives a real inotify watch through a Kubernetes secret rotation while a log
 	// churns in the same directory. Each step blocks until its own events arrive, so
 	// the filter judges every event against the disk as it was at that step.
@@ -259,7 +291,6 @@ mod tests {
 	fn kubernetes_rotation_reloads_and_log_writes_do_not() {
 		use std::os::unix::fs::symlink;
 		use std::sync::mpsc;
-		use std::time::Duration;
 
 		// Lay out the mount like the kubelet: `tls.crt -> ..data/tls.crt` and
 		// `..data -> ..<timestamp>`.
@@ -292,11 +323,9 @@ mod tests {
 		let mut step = |done: &dyn Fn(&notify::Event) -> bool| -> Vec<bool> {
 			let mut verdicts = Vec::new();
 			loop {
-				// Only a hang guard: the awaited event is already on its way.
-				let event = rx
-					.recv_timeout(Duration::from_secs(10))
-					.expect("missing event")
-					.unwrap();
+				// The awaited event is already on its way; a lost one hangs until the
+				// test runner's timeout.
+				let event = rx.recv().expect("watcher dropped").unwrap();
 				verdicts.push(filter.matches(&event));
 				if done(&event) {
 					return verdicts;
