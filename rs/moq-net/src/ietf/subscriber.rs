@@ -6808,7 +6808,7 @@ mod tests {
 			.unwrap();
 
 		let mut announced = consumer.announced();
-		let route = announced.assert_next_active("room/host");
+		let route = announced.expect_next_active("room/host").await;
 		let hops: Vec<_> = route.hops.iter().copied().collect();
 		assert_eq!(hops, vec![crate::Hop::UNKNOWN]);
 		assert!(route.is_anonymous());
@@ -6843,8 +6843,8 @@ mod tests {
 		let _source = origin
 			.announce("room/host", crate::origin::Route::default().with_hops(upstream.clone()))
 			.unwrap();
-		announced.assert_next_active("room/host");
-		let _advertised = publishing.assert_next_active("room/host");
+		announced.expect_next_active("room/host").await;
+		let _advertised = publishing.expect_next_active("room/host").await;
 
 		// The peer reflects it back over the subscribe direction, which carries no
 		// hop chain of its own.
@@ -6910,12 +6910,14 @@ mod tests {
 		};
 
 		let first = connect();
-		announced.assert_next_active("room/host");
+		moq_clock::sim::yield_now().await;
+		announced.expect_next_active("room/host").await;
 
 		// The peer reconnects before the old session is retired: an identical route
 		// from the fresh session wins at once, as another source.
 		let _second = connect();
-		announced.assert_next_restarted("room/host");
+		moq_clock::sim::yield_now().await;
+		announced.expect_next_restarted("room/host").await;
 		announced.assert_next_wait();
 
 		// Neither route is offered back to the peer they both came from.
@@ -6923,6 +6925,7 @@ mod tests {
 
 		// The stale session finally retracting leaves the fresh route standing.
 		drop(first);
+		moq_clock::sim::yield_now().await;
 		announced.assert_next_wait();
 		assert!(routed_now(&consumer, "room/host").is_some());
 	}

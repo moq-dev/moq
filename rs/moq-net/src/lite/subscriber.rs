@@ -3718,7 +3718,7 @@ mod tests {
 
 		// The route is announced synchronously: hop 0 on the wire, assigned id local.
 		let mut cursor = consumer.announced();
-		let route = cursor.assert_next_active("room/host");
+		let route = cursor.expect_next_active("room/host").await;
 		let hops: Vec<_> = route.hops.iter().copied().collect();
 		assert_eq!(hops, vec![crate::Hop::UNKNOWN]);
 		assert!(route.is_anonymous());
@@ -3764,7 +3764,7 @@ mod tests {
 		);
 
 		let mut cursor = consumer.announced();
-		let route = cursor.assert_next_active("room/host");
+		let route = cursor.expect_next_active("room/host").await;
 		let hops: Vec<_> = route.hops.iter().copied().collect();
 		assert_eq!(hops, vec![crate::Hop::UNKNOWN, crate::Hop::UNKNOWN]);
 		assert!(route.is_anonymous());
@@ -3791,7 +3791,8 @@ mod tests {
 			.unwrap();
 
 		let mut cursor = consumer.announced();
-		let route = cursor.assert_next_active("room/host");
+		moq_clock::sim::yield_now().await;
+		let route = cursor.expect_next_active("room/host").await;
 		let hops: Vec<_> = route.hops.iter().copied().collect();
 		assert_eq!(hops, vec![crate::Hop::UNKNOWN]);
 
@@ -3806,7 +3807,8 @@ mod tests {
 				&mut announced,
 			)
 			.unwrap();
-		let route = cursor.assert_next_active("room/host");
+		moq_clock::sim::yield_now().await;
+		let route = cursor.expect_next_active("room/host").await;
 		let hops: Vec<_> = route.hops.iter().copied().collect();
 		assert_eq!(hops, vec![crate::Hop::UNKNOWN]);
 	}
@@ -3850,7 +3852,8 @@ mod tests {
 			.unwrap();
 
 		let mut cursor = consumer.announced();
-		cursor.assert_next_active("room/host");
+		moq_clock::sim::yield_now().await;
+		cursor.expect_next_active("room/host").await;
 
 		subscriber
 			.update_announce(
@@ -3863,7 +3866,8 @@ mod tests {
 			)
 			.unwrap();
 
-		let route = cursor.assert_next_active("room/host");
+		moq_clock::sim::yield_now().await;
+		let route = cursor.expect_next_active("room/host").await;
 		assert_eq!(route.cost, crate::origin::Cost::new(5).charged(0));
 	}
 
@@ -3888,7 +3892,7 @@ mod tests {
 			)
 			.unwrap();
 		let mut cursor = consumer.announced();
-		cursor.assert_next_active("room/host");
+		cursor.expect_next_active("room/host").await;
 
 		auth.authorize(&crate::auth::Grant {
 			publish: Default::default(),
@@ -3907,7 +3911,7 @@ mod tests {
 			)
 			.unwrap();
 		assert!(!attached, "a restart outside the limit was attached");
-		cursor.assert_next_ended("room/host");
+		cursor.expect_next_ended("room/host").await;
 	}
 
 	/// An announce stream that dies without an explicit `ended` retracts the route
@@ -3949,12 +3953,12 @@ mod tests {
 			)
 			.unwrap();
 		let mut cursor = consumer.announced();
-		cursor.assert_next_active("room/host");
+		cursor.expect_next_active("room/host").await;
 
 		// The stream ends without retracting anything: the map dies with it and the
 		// route retracts.
 		drop(announced);
-		cursor.assert_next_ended("room/host");
+		cursor.expect_next_ended("room/host").await;
 
 		// An explicit retraction retracts it the same way.
 		let hops = crate::Hops::try_from(vec![crate::Hop::new(7).unwrap()]).unwrap();
@@ -3970,10 +3974,10 @@ mod tests {
 				&mut announced,
 			)
 			.unwrap();
-		cursor.assert_next_active("room/host");
+		cursor.expect_next_active("room/host").await;
 		assert!(announced.contains(&path.clone()), "the announce was not recorded");
 		announced.withdraw(&path);
-		cursor.assert_next_ended("room/host");
+		cursor.expect_next_ended("room/host").await;
 	}
 
 	/// An unknown announce type between two starts is skipped without ending the
@@ -4023,8 +4027,8 @@ mod tests {
 		let mut run = std::pin::pin!(kio::wait(|waiter| prefix.poll(waiter)));
 		assert!(futures::poll!(run.as_mut()).is_pending());
 
-		cursor.assert_next_active("a");
-		cursor.assert_next_active("b");
+		cursor.expect_next_active("a").await;
+		cursor.expect_next_active("b").await;
 	}
 
 	/// An announce past the session's cap fails the session with TOO_MANY_REQUESTS, and

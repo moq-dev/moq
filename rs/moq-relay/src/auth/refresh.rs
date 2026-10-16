@@ -114,9 +114,9 @@ impl Credential {
 			} else {
 				self.grant.subscribe.clone()
 			},
-			expires: self
-				.expires
-				.map(|expires| moq_net::time::now() + expires.saturating_duration_since(tokio::time::Instant::now())),
+			expires: self.expires.and_then(|expires| {
+				moq_net::time::now().checked_add(expires.saturating_duration_since(tokio::time::Instant::now()))
+			}),
 		}
 	}
 }

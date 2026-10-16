@@ -27,7 +27,7 @@ pub async fn run<D: Driver>(driver: D) -> Error {
 }
 
 /// A deadline queue attached to the deterministic test clock.
-#[cfg(test)]
+#[cfg(all(test, feature = "async"))]
 pub(crate) fn sim() -> Deadlines {
 	let deadlines = Deadlines::new(moq_clock::now());
 	moq_clock::sim::attach(&deadlines);

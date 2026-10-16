@@ -3,20 +3,23 @@
 //! `web_async::time`. The only module, with the simulator, that reads a host clock.
 #![allow(clippy::disallowed_methods)]
 
+#[cfg(feature = "runtime")]
+use std::{future::Future, pin::Pin};
 use std::{
-	future::Future,
-	pin::Pin,
 	sync::OnceLock,
 	task::{Context, Poll},
 };
 
+#[cfg(feature = "runtime")]
 use web_async::time as host;
 
 use crate::{Instant, Wall};
 
 /// Where every unpaused clock counts from, so instants read on any thread, in any
 /// runtime or none, stay comparable.
+#[cfg(feature = "runtime")]
 static ORIGIN: OnceLock<host::Instant> = OnceLock::new();
+#[cfg(feature = "runtime")]
 static ANCHOR: OnceLock<(Instant, Wall)> = OnceLock::new();
 
 /// The origin this context counts from, and a reading of its clock.
@@ -25,6 +28,7 @@ static ANCHOR: OnceLock<(Instant, Wall)> = OnceLock::new();
 /// never reads below it. A paused tokio runtime's clock starts at the runtime's
 /// build, which can precede the origin; that runtime counts from its own first
 /// reading instead (see [`paused`]).
+#[cfg(feature = "runtime")]
 fn read() -> (host::Instant, host::Instant) {
 	#[cfg(any(not(target_arch = "wasm32"), target_os = "wasi"))]
 	let origin = *ORIGIN.get_or_init(|| host::Instant::from_std(std::time::Instant::now()));
@@ -38,11 +42,13 @@ fn read() -> (host::Instant, host::Instant) {
 	(origin, reading)
 }
 
+#[cfg(feature = "runtime")]
 pub(crate) fn now() -> Instant {
 	let (origin, reading) = read();
 	Instant::from_origin(reading.duration_since(origin))
 }
 
+#[cfg(feature = "runtime")]
 pub(crate) fn wall() -> Wall {
 	let since = host::SystemTime::now()
 		.duration_since(host::UNIX_EPOCH)
@@ -50,16 +56,19 @@ pub(crate) fn wall() -> Wall {
 	Wall::UNIX_EPOCH + since
 }
 
+#[cfg(feature = "runtime")]
 pub(crate) fn anchor() -> (Instant, Wall) {
 	*ANCHOR.get_or_init(|| (now(), wall()))
 }
 
 /// A host timer for `at`, on the origin it was created with.
+#[cfg(feature = "runtime")]
 pub(crate) struct Timer {
 	origin: host::Instant,
 	sleep: Pin<Box<host::Sleep>>,
 }
 
+#[cfg(feature = "runtime")]
 impl Timer {
 	pub(crate) fn new(at: Instant) -> Self {
 		let (origin, _) = read();
@@ -83,7 +92,56 @@ impl Timer {
 	}
 }
 
-#[cfg(any(not(target_arch = "wasm32"), target_os = "wasi"))]
+#[cfg(not(feature = "runtime"))]
+static STD_ORIGIN: OnceLock<(std::time::Instant, Wall)> = OnceLock::new();
+
+#[cfg(not(feature = "runtime"))]
+fn std_origin() -> (std::time::Instant, Wall) {
+	*STD_ORIGIN.get_or_init(|| (std::time::Instant::now(), system_wall()))
+}
+
+#[cfg(not(feature = "runtime"))]
+fn system_wall() -> Wall {
+	let since = std::time::SystemTime::now()
+		.duration_since(std::time::UNIX_EPOCH)
+		.expect("the host wall clock reads before 1970");
+	Wall::UNIX_EPOCH + since
+}
+
+#[cfg(not(feature = "runtime"))]
+pub(crate) fn now() -> Instant {
+	Instant::from_origin(std_origin().0.elapsed())
+}
+
+#[cfg(not(feature = "runtime"))]
+pub(crate) fn wall() -> Wall {
+	system_wall()
+}
+
+#[cfg(not(feature = "runtime"))]
+pub(crate) fn anchor() -> (Instant, Wall) {
+	(Instant::ZERO, std_origin().1)
+}
+
+#[cfg(not(feature = "runtime"))]
+pub(crate) struct Timer;
+
+#[cfg(not(feature = "runtime"))]
+impl Timer {
+	pub(crate) fn new(_: Instant) -> Self {
+		panic!("moq-clock runtime support is disabled")
+	}
+
+	pub(crate) fn reset(&mut self, _: Instant) {
+		panic!("moq-clock runtime support is disabled")
+	}
+
+	pub(crate) fn poll(&mut self, _: &mut Context<'_>) -> Poll<()> {
+		panic!("moq-clock runtime support is disabled")
+	}
+}
+
+#[cfg(all(feature = "runtime", any(not(target_arch = "wasm32"), target_os = "wasi")))]
 mod paused {
 	use std::{
 		collections::HashMap,
@@ -123,7 +181,7 @@ mod paused {
 	}
 }
 
-#[cfg(all(test, any(not(target_arch = "wasm32"), target_os = "wasi")))]
+#[cfg(all(test, feature = "runtime", any(not(target_arch = "wasm32"), target_os = "wasi")))]
 mod tests {
 	use std::time::Duration;
 
@@ -177,7 +235,7 @@ mod tests {
 	}
 }
 
-#[cfg(all(test, target_arch = "wasm32", not(target_os = "wasi")))]
+#[cfg(all(test, feature = "runtime", target_arch = "wasm32", not(target_os = "wasi")))]
 mod browser_tests {
 	use std::{future::pending, time::Duration};
 

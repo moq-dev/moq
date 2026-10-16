@@ -32,5 +32,4 @@ Public API: the in-memory session and the relay seam. Wire: none.
 
 ## Required
 
-- [moq-net on moq-clock](/quest/m1/time/net.md) - the sim and instant the relay tests run on
 - [Switch](/quest/m1/quic/fork/switch.md) - moq-tokio's server types settle first

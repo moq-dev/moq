@@ -14,7 +14,14 @@ categories = ["multimedia", "network-programming", "web-programming"]
 
 [features]
 default = ["noq", "aws-lc-rs", "websocket", "tcp", "uds"]
-noq = ["_transport", "_certs", "dep:web-transport-moq", "dep:reqwest", "watch", "dep:dns-lookup"]
+noq = [
+    "_transport",
+    "_certs",
+    "dep:web-transport-moq",
+    "dep:reqwest",
+    "watch",
+    "dep:dns-lookup",
+]
 # Server-side certificate handling: chains loaded from disk, self-signed generation,
 # in-memory identities, and per-SNI selection. Not one to enable on its own, since
 # nothing turns it into a listener: every QUIC backend needs it for its own TLS, and
@@ -33,8 +40,18 @@ qlog = ["web-transport-moq?/qlog"]
 # are off on the dependency), so a backend without aws-lc-rs/ring has no initial cipher.
 # A provider is also all it takes to sign and serve certificates, so each turns on
 # `_certs` even where there is no QUIC backend to serve them for.
-aws-lc-rs = ["_certs", "rustls/aws-lc-rs", "rcgen/aws_lc_rs", "web-transport-moq?/aws-lc-rs"]
-iroh = ["_transport", "dep:web-transport-iroh", "dep:web-transport-proto", "dep:noq-proto"]
+aws-lc-rs = [
+    "_certs",
+    "rustls/aws-lc-rs",
+    "rcgen/aws_lc_rs",
+    "web-transport-moq?/aws-lc-rs",
+]
+iroh = [
+    "_transport",
+    "dep:web-transport-iroh",
+    "dep:web-transport-proto",
+    "dep:noq-proto",
+]
 # LAN peer discovery over mDNS (the `mdns` module).
 mdns = ["dep:mdns-sd", "dep:hmac", "dep:sha2", "dep:subtle"]
 jemalloc = ["dep:tikv-jemallocator", "dep:tikv-jemalloc-ctl"]

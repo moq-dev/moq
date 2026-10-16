@@ -44,7 +44,6 @@ tracing-log = ["tracing/log"]
 rustls-log = ["rustls?/logging"]
 # Enable qlog support
 qlog = ["dep:qlog"]
-
 # Internal (PRIVATE!) features used to aid testing.
 # Don't rely on these whatsoever. They may disappear at any time.
 

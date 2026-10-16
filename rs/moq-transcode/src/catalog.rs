@@ -964,6 +964,8 @@ mod tests {
 
 		// A minute in, the source's mapping is far from the one a fresh clock would advertise.
 		let ago = Duration::from_secs(60);
+		let _ = moq_net::time::now();
+		tokio::time::advance(ago).await;
 		let clock = moq_mux::Clock::at(moq_net::time::now() - ago, SystemTime::now() - ago).unwrap();
 		let mut input = moq_net::broadcast::Info::default().produce();
 		let source =

@@ -18,7 +18,7 @@ ignored = ["getrandom"]
 [features]
 default = ["async"]
 # Runtime-backed helpers and Lite/IETF sessions; explicit-time model drivers stay available.
-async = ["dep:futures"]
+async = ["dep:futures", "moq-clock/runtime"]
 
 # Exposes the wire codecs to the `fuzz/` harness and the announce, codec, varint, and frame benches,
 # and session views of an origin to the viewers bench, through the hidden `fuzz` module. Off by
@@ -30,7 +30,7 @@ arrayvec = "0.7"
 bytes = { workspace = true }
 futures = { workspace = true, optional = true }
 kio = { workspace = true }
-moq-clock = { workspace = true }
+moq-clock = { version = "0.11.0", path = "../moq-clock", default-features = false }
 moq-pattern = { workspace = true, features = ["serde"] }
 num_enum = { workspace = true }
 rand = { workspace = true }

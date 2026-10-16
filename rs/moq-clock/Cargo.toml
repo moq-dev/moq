@@ -21,19 +21,21 @@ features = ["sim"]
 ignored = ["moq-clock"]
 
 [features]
+default = ["runtime"]
 # The deterministic single-threaded executor and `#[moq_clock::test]`. Meant for
 # dev-dependencies, so production builds never compile it.
 sim = ["dep:futures", "dep:moq-clock-macros"]
+runtime = ["dep:tokio", "dep:web-async"]
 
 [dependencies]
 futures = { workspace = true, optional = true }
 kio = { workspace = true }
 moq-clock-macros = { workspace = true, optional = true }
-web-async = { workspace = true }
+web-async = { workspace = true, optional = true }
 
 # The runtime handle, to keep a paused runtime's clock on its own origin.
 [target.'cfg(any(not(target_arch = "wasm32"), target_os = "wasi"))'.dependencies]
-tokio = { workspace = true, features = ["rt", "time"] }
+tokio = { workspace = true, features = ["rt", "time"], optional = true }
 
 [dev-dependencies]
 # Enable the simulator so its tests run in the merge gate.

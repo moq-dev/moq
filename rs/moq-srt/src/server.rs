@@ -768,7 +768,7 @@ mod tests {
 		// Drive pace + clamp exactly like `serve_subscribe`, with controlled `now`s so
 		// the second frame re-anchors (its media outruns wall-clock) and the third is a
 		// reorder whose media trails the new anchor.
-		let start = moq_net::time::now();
+		let start = Instant::ZERO + Duration::from_secs(1);
 		let mut pacer = moq_mux::Pacer::default();
 		let mut floor = None;
 
@@ -792,7 +792,7 @@ mod tests {
 	/// step as a rewind would drag the whole stream onto the reorder's instant.
 	#[test]
 	fn a_reorder_is_not_a_rewind() {
-		let start = moq_net::time::now();
+		let start = Instant::ZERO + Duration::from_secs(1);
 		let mut egress = Egress::default();
 
 		let first = egress.push(&frame(1_400_000, &[1; SRT_PAYLOAD]), 0, start);
