@@ -141,8 +141,9 @@ pub(crate) struct Row {
 	/// The reference record's sequence: its `EXT-X-MEDIA-SEQUENCE` and, with the reference's tag,
 	/// its URI (`seg/{tag}.{segment}.m4s`), shared across renditions.
 	pub segment: u64,
-	/// The DASH period start, retained even after the first row of the period is evicted.
-	pub period: Duration,
+	/// The DASH period start, the reference timestamp where its handoff landed; retained
+	/// even after the first row of the period is evicted.
+	pub period: moq_net::Timestamp,
 	/// The rendition the boundaries come from.
 	pub reference: Reference,
 	/// The reference record's frames, which the reference rendition serves as is.
@@ -572,7 +573,7 @@ mod tests {
 		Row {
 			index: segment,
 			segment,
-			period: Duration::ZERO,
+			period: moq_net::Timestamp::ZERO,
 			reference: Arc::new((Kind::Video, "video".to_string(), "video".to_string())),
 			frames: hang::timeline::Position::group(group)..hang::timeline::Position::group(group + 1),
 			keyframe: true,
@@ -796,7 +797,7 @@ mod tests {
 		live.push(old, window);
 		let switched = Row {
 			reference: Arc::new((Kind::Video, "other".into(), "other".into())),
-			period: Duration::from_secs(12),
+			period: moq_net::Timestamp::from_secs(12).unwrap(),
 			..row(6, 6, 12_000, 2_000)
 		};
 		live.push(switched, window);

@@ -53,8 +53,8 @@ pub(crate) struct Representation {
 	/// Whether this rendition's window has ended (the broadcast finished). Not rendered;
 	/// [`Manifest`] callers use it to pick static vs dynamic.
 	pub ended: bool,
-	/// The content timestamp where this reference period started.
-	pub period: Duration,
+	/// The reference timestamp where this period started, kept exact for its offset.
+	pub period: moq_net::Timestamp,
 	/// The init segment's content hash (`init.{init}.mp4`).
 	pub init: String,
 	/// The [`tag`](super::segments::tag) of the reference numbering the segments.
@@ -195,8 +195,9 @@ fn render_representation(out: &mut String, rep: &Representation, query: Option<&
 	let offset = if rep.period.is_zero() {
 		String::new()
 	} else {
-		let offset = rep.period.as_nanos() * u128::from(rep.timescale.max(1)) / 1_000_000_000;
-		format!(" presentationTimeOffset=\"{offset}\"")
+		// Scaled like each `S@t`, so the first segment lands exactly on the period start.
+		let timescale = moq_net::Timescale::new(u64::from(rep.timescale.max(1))).expect("nonzero timescale");
+		format!(" presentationTimeOffset=\"{}\"", rep.period.as_scale(timescale))
 	};
 	let _ = writeln!(
 		out,
@@ -310,11 +311,12 @@ pub(crate) fn render_manifest(manifest: &Manifest, query: Option<&str>) -> Strin
 
 	let periods: BTreeSet<_> = representations().map(|rep| rep.period).collect();
 	for period in periods {
+		let start = Duration::from(period);
 		let _ = writeln!(
 			out,
 			"  <Period id=\"{}\" start=\"{}\">",
-			period.as_nanos(),
-			xs_duration(period)
+			start.as_nanos(),
+			xs_duration(start)
 		);
 		render_adaptation_sets(
 			&mut out,
@@ -352,7 +354,7 @@ mod tests {
 			timescale: 1000,
 			segments,
 			ended,
-			period: Duration::ZERO,
+			period: moq_net::Timestamp::ZERO,
 			init: "0123abcd".into(),
 			tag: "ab12cd34".into(),
 			generation: None,
@@ -363,7 +365,7 @@ mod tests {
 	fn handoff_periods_preserve_absolute_time_and_source_templates() {
 		let old = video(vec![(4_000, 2_000)], false);
 		let mut next = video(vec![(6_000, 2_000)], false);
-		next.period = Duration::from_secs(6);
+		next.period = moq_net::Timestamp::from_secs(6).unwrap();
 		next.tag = "next".into();
 		let manifest = Manifest {
 			availability_start: Some(SystemTime::UNIX_EPOCH),
@@ -382,6 +384,26 @@ mod tests {
 		assert_eq!(xs_duration(Duration::from_nanos(6_000_000_001)), "PT6.000000001S");
 	}
 
+	// A 90 kHz tick is not a whole number of nanoseconds, so the offset must come from the
+	// timestamp itself rather than a nanosecond round trip.
+	#[test]
+	fn a_period_offset_keeps_the_exact_tick() {
+		let scale = moq_net::Timescale::new(90_000).unwrap();
+		let mut next = video(vec![(1, 90_000)], false);
+		next.timescale = 90_000;
+		next.period = moq_net::Timestamp::new(1, scale).unwrap();
+		let manifest = Manifest {
+			availability_start: Some(SystemTime::UNIX_EPOCH),
+			publish: SystemTime::UNIX_EPOCH,
+			window: None,
+			finished: false,
+			video: vec![next],
+			audio: Vec::new(),
+		};
+		let rendered = render_manifest(&manifest, None);
+		assert!(rendered.contains("presentationTimeOffset=\"1\""), "{rendered}");
+	}
+
 	fn audio(segments: Vec<(u64, u64)>, ended: bool) -> Representation {
 		Representation {
 			name: "audio0".into(),
@@ -396,7 +418,7 @@ mod tests {
 			timescale: 1000,
 			segments,
 			ended,
-			period: Duration::ZERO,
+			period: moq_net::Timestamp::ZERO,
 			init: "4567cdef".into(),
 			tag: "ab12cd34".into(),
 			generation: None,

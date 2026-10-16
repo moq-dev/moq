@@ -434,7 +434,11 @@ async fn watch_catalog(
 		}
 	}
 
-	// The source is done (or errored): let recording cursors finish.
+	// The source is done (or errored): let recording cursors finish. With every rendition
+	// disabled, no reference watcher is left to end the windows.
+	if reference.is_none() {
+		renditions.fanout().finish(None);
+	}
 	renditions.close();
 }
 
@@ -514,7 +518,7 @@ async fn watch_timeline(
 	// (`EXT-X-ENDLIST`), since a window left live would freeze players with no signal.
 	let result = watch(&broadcast, &section, &reference, &renditions, history).await;
 	// A superseded watcher cannot finish the newly selected reference's windows.
-	if renditions.finish(&reference) {
+	if renditions.finish(Some(&reference)) {
 		if let Err(err) = result {
 			tracing::error!(track = %reference.2, %err, "timeline failed; ending every playlist");
 		}
@@ -1731,6 +1735,46 @@ mod tests {
 		let snapshot = video1.snapshot();
 		assert_eq!(numbers(&snapshot), [3]);
 		assert!(!snapshot.finished, "the selected reference goes on");
+	}
+
+	// With every rendition disabled no reference watcher is left, so the source ending must
+	// still end every playlist and recording cursor.
+	#[tokio::test(start_paused = true)]
+	async fn a_source_ending_with_every_rendition_disabled_ends_the_playlists() {
+		let (origin, broadcast, mut catalog) = durable_pair().await;
+		let (_video0_track, mut video0) = timeline_track(&broadcast, "video0");
+		let (_video1_track, mut video1) = timeline_track(&broadcast, "video1");
+		for sequence in 0..4 {
+			video0.push(&gop(sequence)).unwrap();
+			video1.push(&gop(sequence)).unwrap();
+		}
+		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default());
+		broadcaster.advertised().await;
+		let rendition = broadcaster.rendition(Kind::Video, "video0").unwrap();
+		let tag = segments::tag(&(Kind::Video, "video0".into(), "video0".into()));
+		listed_under(&rendition, &tag, 3).await;
+		catalog
+			.mutate(|catalog| {
+				for config in catalog.video.renditions.values_mut() {
+					config.enabled = false;
+				}
+			})
+			.unwrap();
+		settle().await;
+		catalog.finish().unwrap();
+		tokio::time::timeout(Duration::from_secs(5), async {
+			while !rendition.snapshot().finished {
+				tokio::time::sleep(Duration::from_millis(10)).await;
+			}
+		})
+		.await
+		.expect("the playlist ends with the source");
+		let mut cursor = rendition.segments();
+		tokio::time::timeout(Duration::from_secs(5), async {
+			while cursor.next().await.unwrap().is_some() {}
+		})
+		.await
+		.expect("the recording cursor ends");
 	}
 
 	/// Wait until `rendition` lists segment `segment` (or later) under the reference `tag`.

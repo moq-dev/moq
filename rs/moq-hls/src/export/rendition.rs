@@ -733,7 +733,7 @@ impl Rendition {
 		let timescale = self.timescale();
 		let complete = self.resolved(&window.segments).count() == window.segments.len();
 		let ended = (window.ended && complete) || window.segments.last().is_some_and(|row| self.is_failed(row));
-		let mut periods = std::collections::BTreeMap::<Duration, (String, Vec<(u64, u64)>)>::new();
+		let mut periods = std::collections::BTreeMap::<moq_net::Timestamp, (String, Vec<(u64, u64)>)>::new();
 		for (row, content) in self.resolved(&window.segments) {
 			if content == Content::Gap {
 				continue;

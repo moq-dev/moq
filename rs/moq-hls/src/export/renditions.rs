@@ -261,8 +261,12 @@ impl Fanout {
 		if feed.anchor.is_none() {
 			feed.anchor = Some(SystemTime::now().checked_sub(end).unwrap_or(SystemTime::UNIX_EPOCH));
 		}
-		let period = feed.last.as_ref().map_or(Duration::ZERO, |last| {
-			if last.reference == *reference { last.period } else { pts }
+		let period = feed.last.as_ref().map_or(moq_net::Timestamp::ZERO, |last| {
+			if last.reference == *reference {
+				last.period
+			} else {
+				entry.pts
+			}
 		});
 		let discontinuity = feed.discontinuities.stamp(pts, end);
 		let row = segments::Row {
@@ -376,10 +380,15 @@ impl Fanout {
 		});
 	}
 
-	/// End the selected watcher, ignoring a superseded watcher's completion.
-	pub fn finish(&self, reference: &Reference) -> bool {
+	/// End every window for the selected watcher, ignoring a superseded watcher's completion.
+	/// `None` ends them when the source ended with no reference selected, so no watcher will.
+	pub fn finish(&self, reference: Option<&Reference>) -> bool {
 		let mut feed = self.feed.lock().unwrap();
-		if !feed.accepts(reference) {
+		let selected = match reference {
+			Some(reference) => feed.accepts(reference),
+			None => feed.selection.as_ref().is_none_or(Option::is_none),
+		};
+		if !selected {
 			return false;
 		}
 		feed.ended = true;
@@ -650,7 +659,7 @@ mod tests {
 		let feed = fanout.feed.lock().unwrap();
 		feed.history
 			.iter()
-			.map(|row| (row.segment, row.discontinuity, row.period))
+			.map(|row| (row.segment, row.discontinuity, Duration::from(row.period)))
 			.collect()
 	}
 
@@ -704,7 +713,7 @@ mod tests {
 		fanout.push(0, entry(0, 0), &old);
 		let replacement = Arc::new(old.as_ref().clone());
 		fanout.select(Some(replacement.clone()));
-		assert!(!fanout.finish(&old));
+		assert!(!fanout.finish(Some(&old)));
 		fanout.skip(Some(&old));
 		fanout.push(1, entry(1, 2_000), &old);
 		fanout.push(1, entry(1, 2_000), &replacement);
@@ -721,7 +730,7 @@ mod tests {
 		fanout.push(5, entry(5, 10_000), &old);
 		fanout.select(Some(new.clone()));
 		fanout.push(6, entry(6, 12_000), &old);
-		assert!(!fanout.finish(&old));
+		assert!(!fanout.finish(Some(&old)));
 		fanout.skip(Some(&old));
 		fanout.skip(Some(&new));
 		fanout.push(0, entry(0, 0), &new);
