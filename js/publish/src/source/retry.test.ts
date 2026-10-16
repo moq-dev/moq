@@ -11,9 +11,15 @@ import type { Media } from "./types";
 class FakeTrack extends EventTarget {
 	readyState: MediaStreamTrackState = "live";
 	stopped = false;
+	settings: MediaTrackSettings;
+
+	constructor(settings: MediaTrackSettings = { deviceId: "default" }) {
+		super();
+		this.settings = settings;
+	}
 
 	getSettings(): MediaTrackSettings {
-		return { deviceId: "default" };
+		return this.settings;
 	}
 
 	stop(): void {
@@ -31,6 +37,7 @@ class FakeTrack extends EventTarget {
 class FakeMediaDevices extends EventTarget {
 	tracks: FakeTrack[] = [];
 	errors: Error[] = [];
+	settings: MediaTrackSettings = { deviceId: "default" };
 
 	// getUserMedia rejects, the way it does once the last device is gone.
 	missing = false;
@@ -57,7 +64,7 @@ class FakeMediaDevices extends EventTarget {
 		if (this.denied) throw new DOMException("Permission denied", "NotAllowedError");
 		if (this.missing) throw new Error("NotFoundError");
 
-		const track = new FakeTrack();
+		const track = new FakeTrack(this.settings);
 		if (this.bornDead) track.readyState = "ended";
 		this.tracks.push(track);
 
@@ -124,6 +131,24 @@ function install<T extends EventTarget>(media: T): T & Disposable {
 			else Reflect.deleteProperty(globalThis, "self");
 		},
 	});
+}
+
+function installOrientation(type: OrientationType): { orientation: ScreenOrientation } & Disposable {
+	const original = Object.getOwnPropertyDescriptor(globalThis, "screen");
+	const orientation = new EventTarget() as ScreenOrientation;
+	Object.defineProperties(orientation, {
+		type: { configurable: true, writable: true, value: type },
+		angle: { configurable: true, writable: true, value: 0 },
+	});
+	Object.defineProperty(globalThis, "screen", { configurable: true, value: { orientation } });
+
+	return {
+		orientation,
+		[Symbol.dispose]() {
+			if (original) Object.defineProperty(globalThis, "screen", original);
+			else Reflect.deleteProperty(globalThis, "screen");
+		},
+	};
 }
 
 const flush = () => new Promise<void>((resolve) => queueMicrotask(resolve));
@@ -445,6 +470,39 @@ test("a camera re-opens when its track dies", async () => {
 
 	expect(published(camera.out.source.peek())).toBe(media.latest());
 
+	camera.close();
+});
+
+test("a landscape camera follows the phone's portrait orientation", async () => {
+	using media = install(new FakeMediaDevices());
+	media.settings = { deviceId: "default", width: 640, height: 480 };
+	using display = installOrientation("portrait-primary");
+
+	const camera = new Camera({ enabled: true });
+	await settle();
+	expect(camera.out.rotation.peek()).toBe(90);
+
+	Object.defineProperty(display.orientation, "type", { configurable: true, value: "portrait-secondary" });
+	display.orientation.dispatchEvent(new Event("change"));
+	await settle();
+	expect(camera.out.rotation.peek()).toBe(270);
+
+	Object.defineProperty(display.orientation, "type", { configurable: true, value: "landscape-primary" });
+	display.orientation.dispatchEvent(new Event("change"));
+	await settle();
+	expect(camera.out.rotation.peek()).toBe(0);
+
+	camera.close();
+});
+
+test("a camera whose pixels already follow portrait needs no rotation", async () => {
+	using media = install(new FakeMediaDevices());
+	media.settings = { deviceId: "default", width: 480, height: 640 };
+	using _display = installOrientation("portrait-primary");
+
+	const camera = new Camera({ enabled: true });
+	await settle();
+	expect(camera.out.rotation.peek()).toBe(0);
 	camera.close();
 });
 

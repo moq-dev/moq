@@ -21,6 +21,8 @@ export interface CameraProps extends Inputs<CameraInput> {
 type CameraOutput = {
 	// The live camera track, or undefined while disabled or denied.
 	source: Signal<Media | undefined>;
+	// Clockwise rotation needed to display the camera upright.
+	rotation: Signal<number>;
 	/** A terminal capture failure, cleared when a new capture attempt begins. */
 	error: Signal<Error | undefined>;
 };
@@ -49,6 +51,7 @@ export class Camera {
 
 	readonly #out: CameraOutput = {
 		source: new Signal<Media | undefined>(undefined),
+		rotation: new Signal(0),
 		error: new Signal<Error | undefined>(undefined),
 	};
 	readonly out = readonlys(this.#out);
@@ -149,6 +152,13 @@ export class Camera {
 
 			this.#retry.succeeded(effect, source);
 			effect.set(this.#out.source, { video: source });
+
+			const updateRotation = () => this.#out.rotation.set(cameraRotation(source));
+			const orientation = globalThis.screen?.orientation;
+			if (orientation) effect.event(orientation, "change", updateRotation);
+			effect.event(globalThis, "orientationchange", updateRotation);
+			updateRotation();
+			effect.cleanup(() => this.#out.rotation.set(0));
 		});
 	}
 
@@ -157,4 +167,25 @@ export class Camera {
 		this.#signals.close();
 		this.device.close();
 	}
+}
+
+// Camera constraints use landscape-primary dimensions. Only add metadata when the screen is
+// portrait but the live track remains landscape; a browser that already rotates the pixels reports
+// portrait settings and needs no catalog rotation.
+function cameraRotation(track: Video.StreamTrack): number {
+	const { width, height } = track.getSettings();
+	if (!width || !height || width <= height) return 0;
+
+	const type = globalThis.screen?.orientation?.type;
+	if (type === "portrait-primary") return 90;
+	if (type === "portrait-secondary") return 270;
+	if (type) return 0;
+
+	// Safari historically exposed only Window.orientation. Its portrait values are 0 and 180.
+	const angle = Reflect.get(globalThis, "orientation");
+	if (typeof angle !== "number") return 0;
+	const normalized = ((angle % 360) + 360) % 360;
+	if (normalized === 0) return 90;
+	if (normalized === 180) return 270;
+	return 0;
 }

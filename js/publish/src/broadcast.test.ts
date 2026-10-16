@@ -54,7 +54,13 @@ test("sibling broadcasts on one page advertise the same capture clock", async ()
 });
 
 test("folds video and audio renditions into the catalog by full track name", async () => {
-	const broadcast = new Broadcast({ enabled: true, display: { width: 1920, height: 1080 }, flip: true });
+	const rotation = new Signal(90);
+	const broadcast = new Broadcast({
+		enabled: true,
+		display: { width: 1920, height: 1080 },
+		flip: true,
+		rotation,
+	});
 
 	broadcast.video("video/hd").config.set(videoConfig);
 	broadcast.audio("audio/data").config.set(audioConfig);
@@ -65,7 +71,12 @@ test("folds video and audio renditions into the catalog by full track name", asy
 	expect(Number(catalog?.video?.display?.width)).toBe(1920);
 	expect(Number(catalog?.video?.display?.height)).toBe(1080);
 	expect(catalog?.video?.flip).toBe(true);
+	expect(catalog?.video?.rotation).toBe(90);
 	expect(catalog?.audio?.renditions["audio/data"]?.codec).toBe("opus");
+
+	rotation.set(270);
+	await settle();
+	expect((await readCatalog(broadcast))?.video?.rotation).toBe(270);
 
 	broadcast.close();
 });

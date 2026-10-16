@@ -139,6 +139,8 @@ export default class MoqPublish extends HTMLElement {
 
 	// Whether to flip the video horizontally on playback. No attribute yet.
 	#flip = new Signal(false);
+	// Clockwise rotation needed to present the live camera upright.
+	#rotation = new Signal(0);
 
 	// The preview element, either a <video> (raw source via srcObject) or a <canvas> (rendered frames).
 	#preview = new Signal<HTMLVideoElement | HTMLCanvasElement | undefined>(undefined);
@@ -203,6 +205,7 @@ export default class MoqPublish extends HTMLElement {
 			name: this.#name,
 			display: this.#capture.out.display,
 			flip: this.#flip,
+			rotation: this.#rotation,
 		});
 		this.signals.cleanup(() => this.broadcast.close());
 
@@ -249,6 +252,7 @@ export default class MoqPublish extends HTMLElement {
 					frames: this.#capture.out.frames,
 					display: this.#capture.out.display,
 					flip: this.#flip,
+					rotation: this.#rotation,
 					encoder: this.video,
 					mode: this.controls.preview,
 					enabled: this.#videoEnabled,
@@ -346,6 +350,7 @@ export default class MoqPublish extends HTMLElement {
 			video: this.#videoSource,
 			audio: this.#audioSource,
 		});
+		effect.set(this.#rotation, 0, 0);
 
 		if (!source) return;
 
@@ -358,6 +363,7 @@ export default class MoqPublish extends HTMLElement {
 			effect.run((nested) => {
 				nested.set(this.#videoSource, nested.get(video.out.source)?.video);
 				nested.set(this.#audioSource, nested.get(audio.out.source)?.audio);
+				nested.set(this.#rotation, nested.get(video.out.rotation), 0);
 			});
 
 			effect.cleanup(() => {

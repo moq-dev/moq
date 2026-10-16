@@ -34,6 +34,9 @@ export type BroadcastInput = {
 	// Whether the video should be flipped horizontally on playback. Catalog video-section metadata.
 	flip: Getter<boolean>;
 
+	// Clockwise video rotation in degrees. Catalog video-section metadata.
+	rotation: Getter<number>;
+
 	/**
 	 * How long relays keep a non-latest group of this broadcast's media tracks fetchable, in
 	 * milliseconds. Declared on every media track we accept; see {@link Container.trackInfo},
@@ -119,6 +122,7 @@ export class Broadcast {
 			name: getter(props?.name ?? Moq.Path.empty()),
 			display: getter(props?.display),
 			flip: getter(props?.flip ?? false),
+			rotation: getter(props?.rotation ?? 0),
 			maxAge: getter(props?.maxAge),
 		};
 
@@ -232,6 +236,7 @@ export class Broadcast {
 
 		const display = effect.get(this.in.display);
 		const flip = effect.get(this.in.flip);
+		const rotation = effect.get(this.in.rotation);
 
 		this.catalog.mutate((catalog) => {
 			if (Object.keys(video).length > 0) {
@@ -241,6 +246,7 @@ export class Broadcast {
 					section.display = { width: Catalog.u53(display.width), height: Catalog.u53(display.height) };
 				}
 				if (flip) section.flip = true;
+				if (rotation) section.rotation = rotation;
 				catalog.video = section;
 			} else {
 				delete catalog.video;
