@@ -24,6 +24,7 @@
 import com.android.build.api.dsl.LibraryExtension
 import com.vanniktech.maven.publish.JavadocJar
 import com.vanniktech.maven.publish.KotlinMultiplatform
+import org.gradle.api.publish.maven.tasks.GenerateMavenPom
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
 // Plugin versions are pinned in the root build.gradle.kts (Kotlin, publish) and
@@ -153,19 +154,6 @@ mavenPublishing {
     coordinates("dev.moq", "moq", version.toString())
 
     pom {
-        // The target POMs (moq-jvm, moq-android) name the substituted project's
-        // version, which is never published. Restore the range Gradle metadata keeps.
-        withXml {
-            val dependencies = asElement().getElementsByTagName("dependency")
-            for (index in 0 until dependencies.length) {
-                val dependency = dependencies.item(index) as org.w3c.dom.Element
-                val group = dependency.getElementsByTagName("groupId").item(0).textContent
-                val artifact = dependency.getElementsByTagName("artifactId").item(0).textContent
-                if (group == "dev.moq" && (artifact == "moq-ffi" || artifact.startsWith("moq-ffi-"))) {
-                    dependency.getElementsByTagName("version").item(0).textContent = MOQ_FFI_RANGE
-                }
-            }
-        }
         name.set("moq")
         description.set("Ergonomic Kotlin bindings for Media over QUIC")
         url.set("https://github.com/moq-dev/moq")
@@ -187,5 +175,17 @@ mavenPublishing {
             connection.set("scm:git:https://github.com/moq-dev/moq.git")
             developerConnection.set("scm:git:ssh://git@github.com/moq-dev/moq.git")
         }
+    }
+}
+
+// The target POMs (moq-jvm, moq-android) name the substituted project's
+// version, which is never published. Kotlin rewrites those dependencies in its
+// own withXml, whose order against ours varies, so restore the range after the
+// POM is written.
+tasks.withType<GenerateMavenPom>().configureEach {
+    val range = MOQ_FFI_RANGE
+    val ffi = Regex("(<groupId>dev\\.moq</groupId>\\s*<artifactId>moq-ffi[^<]*</artifactId>\\s*<version>)[^<]*(</version>)")
+    doLast {
+        destination.writeText(ffi.replace(destination.readText()) { it.groupValues[1] + range + it.groupValues[2] })
     }
 }
