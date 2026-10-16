@@ -160,9 +160,10 @@ impl Programs {
 		Ok(())
 	}
 
-	/// Abort every program's tracks with `err`, as [`Import::abort`] does. Consumes the importer.
+	/// Abort every program's catalog and media tracks with `err`. Consumes the importer.
 	pub fn abort(self, err: moq_net::Error) {
 		for program in self.programs {
+			program.catalog.abort(err.clone());
 			program.import.abort(err.clone());
 		}
 	}
@@ -222,6 +223,26 @@ mod test {
 	use crate::container::ts::import::test::{
 		corrupt, fifty_programs, pat_section, psi_packets, two_programs, two_section_pat,
 	};
+
+	#[tokio::test(start_paused = true)]
+	async fn internal_program_abort_preserves_the_catalog_error() {
+		let origin = crate::source::produce_origin();
+		let mut programs = Programs::new(origin, "event.hang", catalog::Config::default());
+		programs.decode(&two_programs()).unwrap();
+		let mut consumers: Vec<_> = programs.programs.iter().map(|p| p.catalog.consume().unwrap()).collect();
+		programs.abort(moq_net::Error::Transport("decode failed".into()));
+		for consumer in &mut consumers {
+			let err = loop {
+				match consumer.next().await {
+					Ok(Some(_)) => {}
+					other => break other.unwrap_err(),
+				}
+			};
+			assert!(
+				matches!(err, crate::Error::Json(moq_json::Error::Net(moq_net::Error::Transport(ref reason))) if reason == "decode failed")
+			);
+		}
+	}
 
 	#[test]
 	fn program_broadcasts_keep_the_catalog_suffix_last() {
