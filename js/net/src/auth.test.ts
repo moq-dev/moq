@@ -1,4 +1,5 @@
 import { describe, expect, spyOn, test } from "bun:test";
+import { Milli, Nano } from "@moq/clock";
 import type { Getter } from "@moq/signals";
 import { type Grant, type Issued, Unsupported } from "./auth.ts";
 import { accept as acceptSession, connect as connectSession, type Established } from "./connection/index.ts";
@@ -246,7 +247,13 @@ describe.each([Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_17, Ietf.ALPN.DRAFT_22])("%s", 
 
 			issued.close();
 			// A regression leaves `closed` pending, so bound the wait rather than hang the runner.
-			expect(await withTimeout(Promise.resolve(issued.closed), 1000, "the grant stream never closed")).toBeNull();
+			expect(
+				await withTimeout(
+					Promise.resolve(issued.closed),
+					Nano.fromMilli(Milli(1000)),
+					"the grant stream never closed",
+				),
+			).toBeNull();
 		} finally {
 			client.abort();
 			server.abort();
@@ -497,9 +504,10 @@ describe.each([Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_17, Ietf.ALPN.DRAFT_22])("AUTH 
 			await waitFor(pair.client.auth.grant, (g) => g !== undefined);
 			await waitFor(pair.server.auth.grant, (g) => g !== undefined);
 			await streams[0]?.writer.u53(0);
-			expect((await withTimeout(pair.transport.closed, 100, "second AUTH did not close")).closeCode).toBe(
-				SessionCode.ProtocolViolation,
-			);
+			expect(
+				(await withTimeout(pair.transport.closed, Nano.fromMilli(Milli(100)), "second AUTH did not close"))
+					.closeCode,
+			).toBe(SessionCode.ProtocolViolation);
 		} finally {
 			spy.mockRestore();
 			pair?.client.abort();
@@ -523,9 +531,10 @@ describe.each([Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_17, Ietf.ALPN.DRAFT_22])("AUTH 
 		});
 		const added = pair.client.auth.add("bad").catch(() => undefined);
 		try {
-			expect((await withTimeout(pair.transport.closed, 100, "malformed AUTH did not close")).closeCode).toBe(
-				SessionCode.ProtocolViolation,
-			);
+			expect(
+				(await withTimeout(pair.transport.closed, Nano.fromMilli(Milli(100)), "malformed AUTH did not close"))
+					.closeCode,
+			).toBe(SessionCode.ProtocolViolation);
 		} finally {
 			spy.mockRestore();
 			pair.client.abort();
@@ -579,9 +588,15 @@ describe.each([Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_17, Ietf.ALPN.DRAFT_22])("AUTH 
 					if (lite) await LiteMessage.encode(stream.writer, body, { id });
 					else await IetfMessage.encode(stream.writer, body, id);
 				}
-				expect((await withTimeout(pair.transport.closed, 100, "malformed AUTH did not close")).closeCode).toBe(
-					SessionCode.ProtocolViolation,
-				);
+				expect(
+					(
+						await withTimeout(
+							pair.transport.closed,
+							Nano.fromMilli(Milli(100)),
+							"malformed AUTH did not close",
+						)
+					).closeCode,
+				).toBe(SessionCode.ProtocolViolation);
 			} finally {
 				spy.mockRestore();
 				pair?.client.abort();
@@ -611,7 +626,13 @@ describe.each([Ietf.ALPN.DRAFT_17, Ietf.ALPN.DRAFT_22])("AUTH request IDs %s", (
 				const added = (client ? pair.client : pair.server).auth.add("bad ID").catch(() => undefined);
 				try {
 					expect(
-						(await withTimeout(pair.transport.closed, 100, "invalid AUTH ID left session open")).closeCode,
+						(
+							await withTimeout(
+								pair.transport.closed,
+								Nano.fromMilli(Milli(100)),
+								"invalid AUTH ID left session open",
+							)
+						).closeCode,
 					).toBe(SessionCode.InvalidRequestId);
 				} finally {
 					spy.mockRestore();
@@ -641,7 +662,13 @@ for (const [protocol, version] of [
 				trackName: "video",
 			}).encode(writer, version);
 			expect(
-				(await withTimeout(pair.transport.closed, 100, "cross-request reuse left session open")).closeCode,
+				(
+					await withTimeout(
+						pair.transport.closed,
+						Nano.fromMilli(Milli(100)),
+						"cross-request reuse left session open",
+					)
+				).closeCode,
 			).toBe(SessionCode.InvalidRequestId);
 		} finally {
 			pair.client.abort();

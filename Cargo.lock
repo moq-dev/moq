@@ -4648,6 +4648,7 @@ dependencies = [
  "futures",
  "getrandom 0.4.3",
  "kio 0.6.2",
+ "libc",
  "loom",
  "moq-net-sim",
  "moq-pattern",
