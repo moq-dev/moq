@@ -289,7 +289,9 @@ loss never reports an END:
 - A receiver keeps each session's last view, to apply the next batch, and
   merges every session's view into its own claim by claim: whichever view
   covers the claim with the newer floor decides. A floor certifies only the
-  claims overlapping its prefix, including wildcards above it, and a node
+  claims overlapping its prefix: those inside it and wildcards above it, not
+  an exact claim above it
+  (`only_a_wildcard_claim_overlaps_an_interest_below_it`). A node
   keeps one floor per prefix it has watched, dropping any that a wider,
   newer floor covers. An older complete snapshot is therefore ignored, where
   next-hop authority and a barrier both revive the withdrawal
@@ -301,7 +303,10 @@ loss never reports an END:
   refuses that snapshot or revives under it
   (`widening_interest_needs_floors_scoped_to_what_they_cover`); narrowing
   keeps the rest frozen at its floor for a rejoin
-  (`cancelling_interest_keeps_freshness_for_a_rejoin`); and withdrawing one
+  (`cancelling_interest_keeps_freshness_for_a_rejoin`), and widening hides
+  that frozen rest until a floor covering the widened interest arrives,
+  rather than showing a claim that ended unwatched
+  (`widening_hides_what_was_frozen_until_a_covering_floor_arrives`); and withdrawing one
   origin's wildcard leaves another origin's copy
   (`wildcard_claims_end_per_origin_and_are_certified_below`).
 - Per identity, a node is usable (a feasible selected route: announcements
@@ -352,13 +357,13 @@ loss never reports an END:
   | Rule | Revivals | False ENDs | Re-announcements | Reader events | Claim KiB |
   | --- | --- | --- | --- | --- | --- |
   | Next-hop authority | 373 | 444 | 376 | 8982 | 830 |
-  | Snapshot barrier | 224 | 164 | 249 | 9241 | 801 |
-  | Merged floors | 0 | 0 | 36 | 9211 | 779 |
+  | Snapshot barrier | 224 | 163 | 249 | 9235 | 801 |
+  | Merged floors | 0 | 0 | 35 | 9203 | 779 |
 
   Merged floors' re-announcements follow an offline period or a collection,
   never a known withdrawal. Byte counts are estimates in virtual time.
 
-Decided with the maintainer 2026-10-16, from the handoff proof:
+Decisions from the handoff proof, 1 to 5 settled with the maintainer 2026-10-16:
 
 1. Floor encoding: ✅ ANNOUNCE_FLOOR (Route ID, revision) closes each batch,
    and ANNOUNCEs carry no revision. Rejected: a revision on every ANNOUNCE,
@@ -381,12 +386,24 @@ Decided with the maintainer 2026-10-16, from the handoff proof:
    collected. An empty route table does not prove that an echo of the node's
    own advertisement has drained from every session, and accepting that echo
    loops (`collection_keeps_the_feasibility_distance_against_a_queued_echo`).
-   Open: the distance, a seqno and metric per identity the node advertised,
-   then grows with identity churn. Bounding it safely needs a drain proof on
-   the wire or a timer.
+   Its growth is decision 6.
 5. Seqno requests: ✅ one pending request per origin at every hop, resent on
    a next-hop change, with no timer and no hop count. Rejected: the
    bounded-retry sketch, which strands a quiet origin's node.
+6. Feasibility-distance retention: blocking, for the maintainer. Kept
+   through collection, the distance is a seqno and metric per identity the
+   node ever advertised, so it grows with identity churn (a fresh identity
+   per process or tab start) until the process restarts.
+   - (a) Accept it: about 16 bytes per dead identity, with no wire change.
+   - (b) A drain proof: a diffusing ack on ROUTE_END, sent only once every
+     route derived from the sender's advertisement has acked in turn, after
+     which the distance is dropped. A wire change, and a per-neighbor ack
+     alone is not enough, since an echo can return through other sessions.
+   - (c) A timer, as Babel's source GC does. It assumes stale echoes are gone
+     by then rather than proving it, which runs against the rule against
+     timeouts standing in for correctness.
+   - Recommendation: (a), then measure retained bytes per relay under
+     realistic churn before considering (b).
 
 Why not a hold-down: #4644 retracted at once and re-announced a replacement
 after 1 s, which ended a downstream front whose only path ran through the

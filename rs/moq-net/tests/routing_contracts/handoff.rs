@@ -310,6 +310,59 @@ fn cancelling_interest_keeps_freshness_for_a_rejoin() {
 	net.check().unwrap();
 }
 
+/// A client narrows its interest, and a claim outside it ends unseen. On
+/// widening, what it kept there is frozen at a floor it no longer refreshed,
+/// so it shows nothing in the widened region until a floor covering it
+/// arrives, rather than a stale Start the next snapshot ends.
+#[test]
+fn widening_hides_what_was_frozen_until_a_covering_floor_arrives() {
+	let (origin, r1, r2, client) = (0, 1, 2, 3);
+	let mut net = lagging(FLOORS, "");
+	net.announce(origin, "live/a/x", 0, None);
+	net.announce(origin, "live/b/y", 0, None);
+	assert!(net.run());
+	net.watch(client, "live/b/");
+	assert!(net.run());
+	net.unannounce(origin, "live/a/x");
+	assert!(net.run());
+
+	net.hold(r1, client);
+	net.hold(r2, client);
+	net.watch(client, "");
+	assert_eq!(net.shows(client, 7, "live/a/x"), None, "frozen while unwatched");
+	assert_eq!(net.shows(client, 7, "live/b/y"), Some(true), "still current");
+
+	net.release(r1, client);
+	net.release(r2, client);
+	assert!(net.run());
+	let life: Vec<Kind> = at(&net, client)
+		.iter()
+		.filter(|event| event.claim == "live/a/x")
+		.map(|event| event.kind)
+		.collect();
+	assert_eq!(life, [Kind::Start, Kind::Unwatched]);
+	net.check().unwrap();
+}
+
+/// An exact claim covers only its own path, so it is outside an interest
+/// below it, and only a wildcard ancestor is inside.
+#[test]
+fn only_a_wildcard_claim_overlaps_an_interest_below_it() {
+	assert!(!overlaps("live/a", "live/a/x"));
+	assert!(overlaps("live/a/", "live/a/x"));
+	assert!(overlaps("live/a/x", "live/a/"));
+	assert!(overlaps("live/a", "live/a"));
+
+	let (origin, client) = (0, 3);
+	let mut net = lagging(FLOORS, "live/a/x");
+	net.announce(origin, "live/a", 0, None);
+	net.announce(origin, "live/a/", 0, None);
+	assert!(net.run());
+	assert_eq!(net.shows(client, 7, "live/a"), None);
+	assert_eq!(net.shows(client, 7, "live/a/"), Some(true));
+	net.check().unwrap();
+}
+
 /// Two origins hold the same wildcard capability for one epoch, and a client
 /// watches a region below it. Withdrawing one origin's wildcard ends only that
 /// origin's claim. The client's floor for `live/a/` certifies the wildcard above

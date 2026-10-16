@@ -293,10 +293,15 @@ pub struct View {
 	items: BTreeMap<&'static str, Item>,
 }
 
-/// Whether a claim on one prefix and an interest in another can concern the
-/// same path: a wildcard above the interest, or anything inside it.
-pub fn overlaps(a: &str, b: &str) -> bool {
-	a.starts_with(b) || b.starts_with(a)
+/// Whether a claim on `prefix` covers `path`: itself, or below it for a wildcard.
+fn covers(prefix: &str, path: &str) -> bool {
+	path == prefix || (prefix.ends_with('/') && path.starts_with(prefix))
+}
+
+/// Whether `claim` can concern a path under `interest`: anything inside it, or
+/// a wildcard above it.
+pub fn overlaps(claim: &str, interest: &str) -> bool {
+	claim.starts_with(interest) || covers(claim, interest)
 }
 
 impl View {
@@ -304,7 +309,8 @@ impl View {
 	fn restrict(&self, prefix: &'static str) -> View {
 		let mut floors = BTreeMap::new();
 		for (&region, &floor) in &self.floors {
-			if overlaps(region, prefix) {
+			// Two interest regions meet when either contains the other.
+			if region.starts_with(prefix) || prefix.starts_with(region) {
 				let region = if region.len() > prefix.len() { region } else { prefix };
 				let entry = floors.entry(region).or_insert(floor);
 				*entry = (*entry).max(floor);
@@ -470,6 +476,10 @@ struct State {
 	watch: &'static str,
 	/// Each origin's claims as this node knows them; authoritative for its own.
 	views: BTreeMap<Id, View>,
+	/// After the interest widened, the region each view is still current in:
+	/// the rest stayed frozen while unwatched, so it is hidden until a floor
+	/// covering the whole interest arrives.
+	current: BTreeMap<Id, &'static str>,
 	/// The last view each neighbor sent, per identity.
 	heard: BTreeMap<(Node, Id), View>,
 	sent_views: BTreeMap<(Node, Id), View>,
@@ -490,7 +500,7 @@ pub struct Claim {
 
 impl Claim {
 	fn covers(&self, path: &str) -> bool {
-		path == self.prefix || (self.prefix.ends_with('/') && path.starts_with(self.prefix))
+		covers(self.prefix, path)
 	}
 }
 
@@ -781,7 +791,15 @@ impl Net {
 
 	/// The prefix `node` asks its neighbors for announcements under.
 	pub fn watch(&mut self, node: Node, prefix: &'static str) {
-		self.nodes[node].watch = prefix;
+		let state = &mut self.nodes[node];
+		if !prefix.starts_with(state.watch) {
+			let old = state.watch;
+			for id in state.views.keys().filter(|id| !state.origins.contains_key(id)) {
+				state.current.entry(*id).or_insert(old);
+			}
+		}
+		state.current.retain(|_, current| !prefix.starts_with(*current));
+		state.watch = prefix;
 		let peers: Vec<Node> = self.peers(node).collect();
 		for peer in peers {
 			self.advertise(peer);
@@ -807,6 +825,7 @@ impl Net {
 		state.rx.remove(&id);
 		state.filed.retain(|(_, key), _| *key != id);
 		state.views.remove(&id);
+		state.current.remove(&id);
 		state.heard.retain(|(_, key), _| *key != id);
 		state.pending.remove(&id);
 		state.gave_up.remove(&id);
@@ -972,6 +991,9 @@ impl Net {
 					_ => view,
 				};
 				let state = &mut self.nodes[at];
+				if view.floors.keys().any(|region| state.watch.starts_with(region)) {
+					state.current.remove(&id);
+				}
 				if let Freshness::Floors { scoped } = self.cfg.freshness
 					&& !state.origins.contains_key(&id)
 				{
@@ -1369,8 +1391,9 @@ impl Net {
 				continue;
 			};
 			let available = self.route(node, id).is_some();
+			let current = state.current.get(&id).copied().unwrap_or(state.watch);
 			for (&claim, &item) in &view.items {
-				if overlaps(claim, state.watch) {
+				if overlaps(claim, state.watch) && overlaps(claim, current) {
 					shown.insert((id, claim), Shown { item, available });
 				}
 			}
