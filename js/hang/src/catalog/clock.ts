@@ -37,6 +37,7 @@ export type Clock = z.infer<typeof ClockSchema>;
  * Throws on a zero timescale, a non-integer or unsafe value, or a result outside the JSON-safe
  * integer range.
  */
+// biome-ignore lint/style/noRestrictedGlobals: converts a timestamp, not a clock read.
 export function wallClockTime(clock: Clock, pts: number, ptsTimescale: number): Date {
 	if (!Number.isSafeInteger(clock.wall)) throw new RangeError(`invalid wall clock: ${clock.wall}`);
 	if (!Number.isSafeInteger(clock.timescale) || clock.timescale <= 0 || clock.timescale > 4_294_967_295)
@@ -55,5 +56,6 @@ export function wallClockTime(clock: Clock, pts: number, ptsTimescale: number): 
 	if (num > BigInt(Number.MAX_SAFE_INTEGER) * ptsScale)
 		throw new RangeError(`invalid wall clock: ${num / ptsScale} past ${Number.MAX_SAFE_INTEGER}`);
 
+	// biome-ignore lint/style/noRestrictedGlobals: converts a timestamp, not a clock read.
 	return new Date(MOQ_EPOCH_UNIX_MILLIS + Number((num * 1000n) / den));
 }

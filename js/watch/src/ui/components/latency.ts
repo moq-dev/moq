@@ -1,4 +1,4 @@
-import * as Moq from "@moq/net";
+import { Milli } from "@moq/clock";
 import type { Effect } from "@moq/signals";
 import * as DOM from "@moq/signals/dom";
 import type MoqWatch from "../../element";
@@ -25,7 +25,7 @@ export function latencyTab(parent: Effect, watch: MoqWatch): HTMLElement {
 	const buttons = PRESETS.map((preset) => {
 		const chip = DOM.create("button", { className: "chip", type: "button" }, preset.label);
 		parent.event(chip, "click", () => {
-			watch.delay = preset.value === "auto" ? "auto" : Moq.Time.Milli(preset.value);
+			watch.delay = preset.value === "auto" ? "auto" : Milli(preset.value);
 		});
 		chips.appendChild(chip);
 		return { preset, chip };

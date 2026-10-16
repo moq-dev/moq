@@ -376,7 +376,7 @@ mod tests {
 			listen.tcp.tls = Some(true);
 			listen.tls.generate = vec!["localhost".into()];
 			// Client-certificate policy is refused without a QUIC listener to read it.
-			if !cfg!(feature = "noq") {
+			if !cfg!(feature = "quic") {
 				continue;
 			}
 			listen.bind = Some("127.0.0.1:0".parse().unwrap());

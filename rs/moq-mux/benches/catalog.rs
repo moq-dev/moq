@@ -64,7 +64,7 @@ impl Fanout {
 					.await
 					.unwrap()
 			} else {
-				moq_mux::catalog::Consumer::Hang(catalog.consume().unwrap())
+				moq_mux::catalog::Consumer::from(catalog.consume().unwrap())
 			};
 			readers.push(reader);
 		}

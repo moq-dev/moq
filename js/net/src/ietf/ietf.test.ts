@@ -7,7 +7,7 @@ import * as Varint from "../varint.ts";
 import { Fetch } from "./fetch.ts";
 import * as GoAway from "./goaway.ts";
 import * as Namespace from "./namespace.ts";
-import { FetchFrame, type FetchPosition, Frame, Group, type GroupFlags } from "./object.ts";
+import { EndOfTrackProperties, FetchFrame, type FetchPosition, Frame, Group, type GroupFlags } from "./object.ts";
 import { Parameters, SetupOptions } from "./parameters.ts";
 import { Publish, PublishDone } from "./publish.ts";
 import * as Announce from "./publish_namespace.ts";
@@ -1804,6 +1804,27 @@ test("Frame: END_OF_GROUP is accepted whether or not the header marks the end", 
 	expect(empty.endOfTrack).toBe(false);
 });
 
+test("Frame refuses draft-14 END_OF_TRACK properties", async () => {
+	const flags: GroupFlags = {
+		hasExtensions: true,
+		hasSubgroup: false,
+		hasSubgroupObject: false,
+		hasEnd: false,
+		hasPriority: true,
+		firstObject: true,
+	};
+	// Object ID delta 0, one unknown integer property, zero payload length, END_OF_TRACK.
+	const wire = new Uint8Array([0, 2, 0x20, 7, 0, 4]);
+	const reader = new Reader(undefined, wire, Version.DRAFT_14);
+	await expect(reader.decode((c) => Frame.decode(c, flags, undefined))).rejects.toThrow(EndOfTrackProperties);
+
+	// From draft 15, no status object may carry properties at all.
+	for (const status of [3, 4]) {
+		const later = new Reader(undefined, new Uint8Array([0, 2, 0x20, 7, 0, status]), Version.DRAFT_15);
+		await expect(later.decode((c) => Frame.decode(c, flags, undefined))).rejects.toThrow(ProtocolViolation);
+	}
+});
+
 test("Frame decodes objects split at every byte", async () => {
 	const flags: GroupFlags = {
 		hasExtensions: true,
@@ -1857,9 +1878,7 @@ test("Frame rejects a property that runs past its block", async () => {
 	);
 });
 
-// Draft-19 reassigns property 0x06 from the draft-ietf-moq-loc-03 Timestamp to
-// SUBGROUP_DELIVERY_TIMEOUT, which must not be read as a time.
-test("Frame reads property 0x06 as a Timestamp only before draft-19", async () => {
+test("Frame reads only the current LOC Timestamp ID on every draft", async () => {
 	const flags: GroupFlags = {
 		hasExtensions: true,
 		hasSubgroup: false,
@@ -1868,13 +1887,22 @@ test("Frame reads property 0x06 as a Timestamp only before draft-19", async () =
 		hasPriority: true,
 		firstObject: true,
 	};
-	for (const [version, expected] of [
-		[Version.DRAFT_18, 42],
-		[Version.DRAFT_19, undefined],
+	for (const version of [
+		Version.DRAFT_14,
+		Version.DRAFT_15,
+		Version.DRAFT_16,
+		Version.DRAFT_17,
+		Version.DRAFT_18,
+		Version.DRAFT_19,
+		Version.DRAFT_20,
+		Version.DRAFT_21,
+		Version.DRAFT_22,
 	] as const) {
-		const reader = new Reader(undefined, new Uint8Array([0, 2, 0x06, 42, 1, 0xaa]), version);
-		const frame = await reader.decode((c) => Frame.decode(c, flags, Timescale.MILLI));
-		expect(frame.timestamp?.value).toBe(expected);
+		for (const id of [0x06, 0x10]) {
+			const reader = new Reader(undefined, new Uint8Array([0, 2, id, 42, 1, 0xaa]), version);
+			const frame = await reader.decode((c) => Frame.decode(c, flags, Timescale.MILLI));
+			expect(frame.timestamp?.value).toBe(id === 0x10 ? 42 : undefined);
+		}
 	}
 });
 

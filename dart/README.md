@@ -20,14 +20,14 @@ WebAssembly. Browser applications should use the TypeScript packages.
 ## Generator
 
 Bindings use [`kixelated/uniffi-dart`](https://github.com/kixelated/uniffi-dart)
-tag `v0.3.1-kixelated.5+v0.32.0`, which carries the UniFFI 0.32 and
-library-mode CLI changes. The Nix development shell supplies that exact
+tag `v0.3.1-kixelated.6+v0.32.0`, which carries the UniFFI 0.32,
+library-mode CLI, and disposed-argument changes. The Nix development shell supplies that exact
 revision plus `nix/uniffi-dart-record-error.patch`. Without Nix, install it
 with:
 
 ```bash
 cargo install --git https://github.com/kixelated/uniffi-dart \
-  --tag 'v0.3.1-kixelated.5+v0.32.0' --features binary uniffi-dart
+  --tag 'v0.3.1-kixelated.6+v0.32.0' --features binary uniffi-dart
 ```
 
 ## Releases

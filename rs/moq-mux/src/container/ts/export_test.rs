@@ -16,6 +16,7 @@ use mpeg2ts::pes::{PesPacketReader, ReadPesPacket};
 use mpeg2ts::ts::{ReadTsPacket, TsPacketReader, TsPayload};
 
 use crate::catalog::hang::Container as HangContainer;
+use crate::container::Container as _;
 use crate::container::ts::export::PCR_INTERVAL;
 use crate::container::ts::{Export, catalog as tscat, stats};
 use crate::container::{Frame, Kind, Producer};
@@ -979,6 +980,147 @@ async fn export_bframe_video_authors_dts() {
 	}
 }
 
+#[tokio::test(start_paused = true)]
+async fn export_trims_leading_pictures_after_each_delivery_break() {
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let mut catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+	let track = broadcast
+		.create_track("video", hang::container::track_info(hang::catalog::PRIORITY.video))
+		.unwrap();
+	catalog.modify().unwrap().video.renditions.insert(
+		"video".into(),
+		VideoConfig::new(H264 {
+			profile: 0x42,
+			constraints: 0xc0,
+			level: 0x1f,
+			inline: true,
+		}),
+	);
+	let format = HangContainer::Legacy(Kind::Video);
+	for (sequence, stamps) in [
+		(10, vec![100, 80, 90, 110]),
+		(11, vec![200, 180, 190, 210]),
+		(13, vec![400, 380, 390, 410]),
+	] {
+		let mut group = track.create_group(moq_net::group::Info { sequence }).unwrap();
+		let frames: Vec<_> = stamps
+			.into_iter()
+			.enumerate()
+			.map(|(index, ms)| Frame {
+				timestamp: Timestamp::from_millis(ms).unwrap(),
+				duration: None,
+				keyframe: index == 0,
+				payload: if index == 0 {
+					annexb(&[SPS, PPS, &[0x65, 0xab, 0xcd]])
+				} else {
+					annexb(&[&[0x41, 0xab, 0xcd]])
+				},
+			})
+			.collect();
+		format.write(&mut group, &frames).unwrap();
+		group.finish().unwrap();
+	}
+	track.finish().unwrap();
+	let mut export = open_export(crate::source::announced(&consumer).await)
+		.await
+		.unwrap()
+		.with_delay(RECORDING_MAX_AGE)
+		.with_replay();
+	let bytes: Vec<u8> = drain_frames(&mut export)
+		.await
+		.iter()
+		.flat_map(|frame| frame.payload.iter().copied())
+		.collect();
+	let (video, _) = collect_pes_pts(&bytes);
+	let expected: Vec<_> = [100, 110, 200, 180, 190, 210, 400, 410]
+		.into_iter()
+		.map(|ms| ms * 90)
+		.collect();
+	assert_eq!(
+		video, expected,
+		"continuous leading pictures survive; only join and later-hole orphans are trimmed"
+	);
+	let stats = export.stats();
+	assert_eq!(
+		(stats.dropped, stats.trimmed),
+		(2, 2),
+		"the join's orphans precede the output; the hole's are lost in it"
+	);
+}
+
+/// A frame dropped for missing its deadline takes the leading pictures of the keyframe the
+/// track resumes at with it, though nothing was lost upstream.
+#[tokio::test(start_paused = true)]
+async fn export_trims_leading_pictures_after_a_late_drop() {
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let mut catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+	let track = broadcast
+		.create_track("video", hang::container::track_info(hang::catalog::PRIORITY.video))
+		.unwrap();
+	catalog.modify().unwrap().video.renditions.insert(
+		"video".into(),
+		VideoConfig::new(H264 {
+			profile: 0x42,
+			constraints: 0xc0,
+			level: 0x1f,
+			inline: true,
+		}),
+	);
+	let mut video = Producer::new(track, HangContainer::Legacy(Kind::Video));
+	let mut export = open_export(crate::source::announced(&consumer).await)
+		.await
+		.unwrap()
+		.with_delay(Duration::from_millis(500));
+	let start = tokio::time::Instant::now();
+	let mut out = Vec::new();
+	// (arrival, PTS) in milliseconds, in decode order. The second group acquires the clock.
+	// Its 160 ms picture stalls past its deadline, before the next group exists for the
+	// source to skip to. That group arrives on time with its 1920 and 1960 ms leading pictures.
+	for (at, pts, keyframe) in [
+		(0, 0, true),
+		(40, 40, false),
+		(80, 80, true),
+		(120, 120, false),
+		(1000, 160, false),
+		(2000, 2000, true),
+		(2000, 1920, false),
+		(2000, 1960, false),
+		(2040, 2040, false),
+		(2080, 2080, true),
+		(2080, 2060, false),
+		(2120, 2120, false),
+	] {
+		tokio::time::sleep_until(start + Duration::from_millis(at)).await;
+		// Finding the source empty dates the next frame's arrival.
+		out.extend(poll_frames(&mut export));
+		video
+			.write(Frame {
+				timestamp: Timestamp::from_millis(pts).unwrap(),
+				duration: None,
+				keyframe,
+				payload: if keyframe {
+					annexb(&[SPS, PPS, &[0x65, 0xab, 0xcd]])
+				} else {
+					annexb(&[&[0x41, 0xab, 0xcd]])
+				},
+			})
+			.unwrap();
+		out.extend(poll_frames(&mut export));
+	}
+	video.finish().unwrap();
+	out.extend(drain_frames(&mut export).await);
+	let bytes: Vec<u8> = out.iter().flat_map(|frame| frame.payload.iter().copied()).collect();
+	let (pts, _) = collect_pes_pts(&bytes);
+	let expected: Vec<_> = [0, 40, 80, 120, 2000, 2040, 2080, 2060, 2120]
+		.into_iter()
+		.map(|ms| ms * 90)
+		.collect();
+	assert_eq!(pts, expected, "only the resumed keyframe's leading pictures go");
+	assert_eq!(export.dropped(), 3, "the late picture and the two it orphaned");
+}
+
 /// `(PTS, DTS)` of every video PES start, in transport (decode) order. Read raw, so a capture
 /// that starts before its PMT still counts.
 fn video_pes_timing(ts: &[u8]) -> Vec<(u64, u64)> {
@@ -1464,7 +1606,9 @@ async fn export_skips_an_unconfirmed_ac3_sync_word_at_a_join() {
 }
 
 /// A declared marker breaks the timeline even where the timestamps run on, so a frame left
-/// unfinished before it is dropped rather than completed with the first bytes after it.
+/// unfinished before it is dropped rather than completed with the first bytes after it. A
+/// data track declares the break by skipping a sequence after its group ended, so nothing it
+/// held before the break is trimmed.
 #[tokio::test(start_paused = true)]
 async fn export_drops_an_ac3_frame_cut_by_a_marker() {
 	let stream: Vec<u8> = (0..4).flat_map(ac3_frame).collect();
@@ -5472,6 +5616,158 @@ async fn tune_in_does_not_wait_on_dropped_audio() {
 	assert!(!out.is_empty(), "the tune-in waited on audio it had dropped");
 }
 
+/// A join whose first group the publisher cuts short, as a zero-budget live-edge subscribe
+/// is cut when the next group lands before the raised budget reaches it (moq-dev/moq#5565),
+/// starts at the next group: nothing of the cut-off start goes out, the next keyframe leads
+/// the audio, and the rest is intact.
+#[tokio::test(start_paused = true)]
+async fn a_start_group_cut_short_starts_at_the_next() {
+	use crate::container::Container as _;
+
+	let delay = Duration::from_secs(1);
+	let mut rig = Interleave::new().await;
+	let mut export = rig.export(delay).await;
+	let track = rig.video.track().clone();
+	let wire = HangContainer::Legacy(crate::container::Kind::Video);
+	let picture = |tick: u64| {
+		let keyframe = tick.is_multiple_of(GOP);
+		let slice = vec![if keyframe { 0x65u8 } else { 0x41 }; 400];
+		Frame {
+			timestamp: Timestamp::from_micros(tick * VIDEO_US).unwrap(),
+			duration: None,
+			payload: length_prefixed(&[&slice]),
+			keyframe,
+		}
+	};
+	let mut out = Vec::new();
+
+	// The first group delivers five pictures before the next group lands and the publisher
+	// resets it.
+	let mut cut = track.create_group(moq_net::group::Info { sequence: 0 }).unwrap();
+	for tick in 0..5 {
+		rig.at(tick * VIDEO_US).await;
+		wire.write(&mut cut, &[picture(tick)]).unwrap();
+		out.extend(poll_frames(&mut export));
+		rig.audio_until(tick * VIDEO_US, &mut export, &mut out);
+	}
+	let mut group = track.create_group(moq_net::group::Info { sequence: 1 }).unwrap();
+	wire.write(&mut group, &[picture(GOP)]).unwrap();
+	cut.abort(moq_net::Error::Old).unwrap();
+	for tick in 5..GOP {
+		rig.at(tick * VIDEO_US).await;
+		out.extend(poll_frames(&mut export));
+		rig.audio_until(tick * VIDEO_US, &mut export, &mut out);
+	}
+	for tick in GOP + 1..4 * GOP {
+		rig.at(tick * VIDEO_US).await;
+		if tick.is_multiple_of(GOP) {
+			group.finish().unwrap();
+			group = track
+				.create_group(moq_net::group::Info { sequence: tick / GOP })
+				.unwrap();
+		}
+		wire.write(&mut group, &[picture(tick)]).unwrap();
+		out.extend(poll_frames(&mut export));
+		rig.audio_until(tick * VIDEO_US, &mut export, &mut out);
+	}
+	group.finish().unwrap();
+	rig.finish();
+	out.extend(drain_frames(&mut export).await);
+
+	let ts: Vec<u8> = out.iter().flat_map(|f| f.payload.iter().copied()).collect();
+	let (video, audio) = collect_pes_pts(&ts);
+	let pts = |tick: u64| tick * VIDEO_US * 90 / 1_000;
+	assert_eq!(
+		video,
+		(GOP..4 * GOP).map(pts).collect::<Vec<_>>(),
+		"the export starts at the next group, whole"
+	);
+	assert!(
+		audio.iter().all(|&p| p >= pts(GOP)),
+		"no audio leads the keyframe the export starts at: {audio:?}"
+	);
+	let stats = export.stats();
+	assert_eq!(stats.dropped, 0, "nothing that went out lost a frame");
+	assert_eq!(stats.gaps, 1, "the cut is counted");
+	assert!(stats.trimmed >= 5, "the cut-off start is counted: {}", stats.trimmed);
+}
+
+/// Audio released while the video's start moves to its next group is dropped ahead of the
+/// keyframe, and its track has still sent nothing: audio that then misses its deadline is
+/// trimmed with it, not counted as lost from the output.
+#[tokio::test(start_paused = true)]
+async fn audio_dropped_ahead_of_a_moved_start_is_not_started() {
+	use crate::container::Container as _;
+
+	let delay = Duration::from_millis(200);
+	let mut rig = Interleave::new().await;
+	let mut export = rig.export(delay).await;
+	let track = rig.video.track().clone();
+	let wire = HangContainer::Legacy(crate::container::Kind::Video);
+	let picture = |tick: u64| {
+		let keyframe = tick.is_multiple_of(GOP);
+		let slice = vec![if keyframe { 0x65u8 } else { 0x41 }; 400];
+		Frame {
+			timestamp: Timestamp::from_micros(tick * VIDEO_US).unwrap(),
+			duration: None,
+			payload: length_prefixed(&[&slice]),
+			keyframe,
+		}
+	};
+	let mut out = Vec::new();
+
+	// The first group delivers three pictures, then the next group lands, sent ahead, and the
+	// publisher resets the first.
+	let mut cut = track.create_group(moq_net::group::Info { sequence: 0 }).unwrap();
+	for tick in 0..3 {
+		rig.at(tick * VIDEO_US).await;
+		wire.write(&mut cut, &[picture(tick)]).unwrap();
+		out.extend(poll_frames(&mut export));
+		rig.audio_until(tick * VIDEO_US, &mut export, &mut out);
+	}
+	let mut group = track.create_group(moq_net::group::Info { sequence: 1 }).unwrap();
+	wire.write(&mut group, &[picture(GOP)]).unwrap();
+	cut.abort(moq_net::Error::Old).unwrap();
+	// The audio flows long enough for some of it to go out and be dropped ahead of the
+	// keyframe, then stalls past its deadline.
+	for tick in 3..10 {
+		rig.at(tick * VIDEO_US).await;
+		out.extend(poll_frames(&mut export));
+		if tick < 5 {
+			rig.audio_until(tick * VIDEO_US, &mut export, &mut out);
+		}
+	}
+	for tick in 10..3 * GOP {
+		rig.at(tick * VIDEO_US).await;
+		if tick > GOP {
+			if tick.is_multiple_of(GOP) {
+				group.finish().unwrap();
+				group = track
+					.create_group(moq_net::group::Info { sequence: tick / GOP })
+					.unwrap();
+			}
+			wire.write(&mut group, &[picture(tick)]).unwrap();
+		}
+		out.extend(poll_frames(&mut export));
+		rig.audio_until(tick * VIDEO_US, &mut export, &mut out);
+	}
+	group.finish().unwrap();
+	rig.finish();
+	out.extend(drain_frames(&mut export).await);
+
+	let ts: Vec<u8> = out.iter().flat_map(|f| f.payload.iter().copied()).collect();
+	let (video, audio) = collect_pes_pts(&ts);
+	let pts = |tick: u64| tick * VIDEO_US * 90 / 1_000;
+	assert_eq!(video.first(), Some(&pts(GOP)), "the export starts at the next group");
+	assert!(
+		audio.iter().all(|&p| p >= pts(GOP)),
+		"no audio leads the keyframe: {audio:?}"
+	);
+	let stats = export.stats();
+	assert_eq!(stats.dropped, 0, "nothing was lost from the output");
+	assert!(stats.trimmed > 0);
+}
+
 /// A section lost before the cycle wraps commits an observed subset; the next
 /// cycle must *converge* to the full set rather than flip-flop between subsets.
 /// The repetition fast-path skips sections already active, so without the
@@ -8252,14 +8548,14 @@ async fn a_large_pmt_is_split_across_packets() {
 }
 
 /// A PMT spanning three packets at 20 Mb/s goes out at TBsys's rate: the PAT and PMT share its
-/// 512 bytes, which drain at Rxsys (ISO 13818-1 2.4.2.3).
+/// 512 bytes, which drain at Rxsys into Bsys's 1,536 (ISO 13818-1 2.4.2.3).
 #[tokio::test(start_paused = true)]
 async fn a_large_pmt_keeps_within_the_system_buffer() {
 	assert_eq!(large_pmt(48, Some(20_000_000)).await, 3);
 }
 
 /// Export `streams` language-tagged AAC streams, check the PMT reassembles across its packets
-/// and keeps within TBsys at `mux_rate`, and return how many packets it spans.
+/// and keeps within TBsys and Bsys at `mux_rate`, and return how many packets it spans.
 async fn large_pmt(streams: u16, mux_rate: Option<u64>) -> usize {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let mut catalog = crate::catalog::Producer::new(
@@ -8312,17 +8608,25 @@ async fn large_pmt(streams: u16, mux_rate: Option<u64>) -> usize {
 	let packets = ts.as_chunks::<188>().0;
 	let pid = |packet: &[u8; 188]| (u16::from(packet[1] & 0x1f) << 8) | u16::from(packet[2]);
 	if let Some(mux_rate) = mux_rate {
-		// TBsys: 188 B in per table packet, drained at Rxsys over each packet's time.
-		let drain = 1_000_000.0 / mux_rate as f64 * 188.0;
-		let (mut tb, mut peak) = (0.0f64, 0.0f64);
-		for packet in packets {
-			tb = (tb - drain).max(0.0);
-			if [0, 0x1000].contains(&pid(packet)) {
-				tb += 188.0;
-				peak = peak.max(tb);
-			}
+		// A table packet's bytes leave TBsys at Rxsys once those ahead have, never before they
+		// arrive, into Bsys, which drains at Rsys (ISO 13818-1 2.4.2.3).
+		let wire = 1504.0 / mux_rate as f64;
+		let rsys = (mux_rate as f64 / 500.0).max(80_000.0);
+		let (mut leave, mut empty, mut tbsys, mut bsys) = (f64::MIN, f64::MIN, 0.0f64, 0.0f64);
+		for (k, _) in packets
+			.iter()
+			.enumerate()
+			.filter(|(_, packet)| [0, 0x1000].contains(&pid(packet)))
+		{
+			let start = k as f64 * wire;
+			let free = leave.max(start);
+			leave = (start + wire).max(free + 1504.0 / 1_000_000.0);
+			tbsys = tbsys.max((leave - start - wire) * 125_000.0);
+			empty = empty.max(free) + 1504.0 / rsys;
+			bsys = bsys.max((empty - leave) * rsys / 8.0);
 		}
-		assert!(peak <= 512.0, "TBsys peak {peak:.0} B");
+		assert!(tbsys <= 512.001, "TBsys peak {tbsys:.0} B");
+		assert!(bsys <= 1536.001, "Bsys peak {bsys:.0} B");
 	}
 	let mut section = Vec::new();
 	let mut counters = Vec::new();

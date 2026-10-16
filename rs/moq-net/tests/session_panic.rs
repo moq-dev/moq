@@ -42,7 +42,9 @@ async fn publish(version: Version, relay: &origin::Producer, hop: u64, name: &st
 	let broadcast = origin.create_broadcast(name).unwrap();
 	broadcast.announce(Default::default()).unwrap();
 
-	let (client_transport, server_transport) = create_mock_session_pair(Some(version.alpn()));
+	let mut mock = moq_net::transport::memory::Config::default();
+	mock.protocol = Some(version.alpn().to_string());
+	let (client_transport, server_transport) = create_mock_session_pair(mock);
 	let client = Client::new()
 		.with_versions(version.into())
 		.with_publisher(origin.consume());

@@ -1,4 +1,4 @@
-//! Integration tests for noq QUIC and the iroh transport.
+//! Integration tests for QUIC and the iroh transport.
 
 use std::time::Duration;
 
@@ -10,7 +10,7 @@ fn timed() -> moq_net::track::Info {
 const TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Inputs for [`connect_test`].
-#[cfg(feature = "noq")]
+#[cfg(feature = "quic")]
 struct ConnectTest<'a> {
 	/// URL scheme to dial (`moqt` for raw QUIC, `https` for WebTransport).
 	scheme: &'a str,
@@ -39,7 +39,7 @@ struct ConnectTest<'a> {
 ///
 /// Dials `localhost`, so the client sends an SNI. Use [`no_sni_test`] to cover
 /// the SNI-less path.
-#[cfg(feature = "noq")]
+#[cfg(feature = "quic")]
 async fn backend_test(scheme: &str) {
 	connect_test(ConnectTest {
 		scheme,
@@ -60,7 +60,7 @@ async fn backend_test(scheme: &str) {
 /// Raw QUIC (`moqt`/`moql`) has no request URI, so the whole request target has to
 /// ride the SETUP; WebTransport carries it in the CONNECT URL instead. Either way the
 /// server reports the same route and query through [`moq_tokio::server::Request`].
-#[cfg(feature = "noq")]
+#[cfg(feature = "quic")]
 async fn path_test(scheme: &str) {
 	connect_test(ConnectTest {
 		scheme,
@@ -80,7 +80,7 @@ async fn path_test(scheme: &str) {
 /// in the server name). Raw QUIC has no in-band request URL, so this exercises
 /// the accept path with an empty server name, which must still establish rather
 /// than reject. Binds the loopback IP directly to avoid dual-stack flakiness.
-#[cfg(feature = "noq")]
+#[cfg(feature = "quic")]
 async fn no_sni_test(scheme: &str) {
 	connect_test(ConnectTest {
 		scheme,
@@ -98,7 +98,7 @@ async fn no_sni_test(scheme: &str) {
 
 /// Publish a broadcast on the server bound to `bind`, subscribe on a client that
 /// dials `authority`, and verify the data arrives over the requested scheme.
-#[cfg(feature = "noq")]
+#[cfg(feature = "quic")]
 async fn connect_test(config: ConnectTest<'_>) {
 	let ConnectTest {
 		scheme,
@@ -225,7 +225,7 @@ async fn connect_test(config: ConnectTest<'_>) {
 /// Write a self-signed PEM cert + key for `name` to `dir`, prefixed by `stem`.
 ///
 /// Returns the two paths, in the order the `cert` and `key` lists want them.
-#[cfg(feature = "noq")]
+#[cfg(feature = "quic")]
 fn write_self_signed(dir: &std::path::Path, stem: &str, name: &str) -> (std::path::PathBuf, std::path::PathBuf) {
 	use std::io::Write;
 
@@ -253,7 +253,7 @@ fn write_self_signed(dir: &std::path::Path, stem: &str, name: &str) -> (std::pat
 /// when the server picked the certificate the SNI asked for. Without SNI
 /// selection every client would get the first configured certificate, so the
 /// `alt.localhost` pin below would never match.
-#[cfg(feature = "noq")]
+#[cfg(feature = "quic")]
 async fn sni_test() {
 	let dir = tempfile::tempdir().expect("tempdir");
 	let (first_cert, first_key) = write_self_signed(dir.path(), "first", "localhost");
@@ -310,7 +310,7 @@ async fn sni_test() {
 }
 
 /// A generated certificate joins the file-backed ones rather than replacing them.
-#[cfg(feature = "noq")]
+#[cfg(feature = "quic")]
 async fn cert_sources_test() {
 	let dir = tempfile::tempdir().expect("tempdir");
 	let (cert, key) = write_self_signed(dir.path(), "server", "localhost");
@@ -335,7 +335,7 @@ async fn cert_sources_test() {
 
 /// Rotate the certificate files under a running listener and assert the served
 /// set follows, without the listener being rebuilt.
-#[cfg(feature = "noq")]
+#[cfg(feature = "quic")]
 async fn reload_test() {
 	let dir = tempfile::tempdir().expect("tempdir");
 	let (cert, key) = write_self_signed(dir.path(), "server", "localhost");
@@ -383,7 +383,7 @@ async fn reload_test() {
 /// Generate a CA, a server cert + key, and a client cert + key (all PEM, the
 /// leaf certs signed by the CA) written to a tempdir. Returns the dir plus the
 /// five paths so the caller can wire them into the TLS configs.
-#[cfg(feature = "noq")]
+#[cfg(feature = "quic")]
 fn generate_mtls_certs() -> (tempfile::TempDir, MtlsPaths) {
 	use rcgen::{
 		BasicConstraints, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair, KeyUsagePurpose,
@@ -436,7 +436,7 @@ fn generate_mtls_certs() -> (tempfile::TempDir, MtlsPaths) {
 }
 
 /// Filesystem paths to the PEM material produced by [`generate_mtls_certs`].
-#[cfg(feature = "noq")]
+#[cfg(feature = "quic")]
 struct MtlsPaths {
 	ca: std::path::PathBuf,
 	server_cert: std::path::PathBuf,
@@ -447,7 +447,7 @@ struct MtlsPaths {
 
 /// Connect with a client certificate signed by a CA the server trusts, and
 /// assert the server observes the validated peer certificate via mTLS.
-#[cfg(feature = "noq")]
+#[cfg(feature = "quic")]
 async fn mtls_test(scheme: &str, reject: bool) {
 	let (_dir, paths) = generate_mtls_certs();
 
@@ -736,14 +736,14 @@ async fn iroh_connect_test(version: Option<&str>) {
 		.expect("server task failed");
 }
 
-// ── Noq backend ─────────────────────────────────────────────────────
+// ── QUIC backend ────────────────────────────────────────────────────
 
 /// A client that closes before its runtime stops tells the server at once, instead of
 /// leaving it to the idle timeout, which is what a process exiting on a signal does.
-#[cfg(feature = "noq")]
+#[cfg(feature = "quic")]
 #[tracing_test::traced_test]
 #[tokio::test]
-async fn noq_client_close_reaches_server() {
+async fn quic_client_close_reaches_server() {
 	// An idle timeout inside TIMEOUT would hide a lost close.
 	let mut quic = moq_tokio::quic::Config::default();
 	quic.idle_timeout = Some(TIMEOUT * 3);
@@ -802,10 +802,10 @@ async fn noq_client_close_reaches_server() {
 
 /// A client that finishes its track and closes before its runtime stops still delivers
 /// the queued group and the track's finish, instead of the close discarding them.
-#[cfg(feature = "noq")]
+#[cfg(feature = "quic")]
 #[tracing_test::traced_test]
 #[tokio::test]
-async fn noq_client_close_drains_finished_track() {
+async fn quic_client_close_drains_finished_track() {
 	// Small, since the debug build logging every packet is slow and the drain has
 	// one second. Queued right before the close, it is still unacknowledged then.
 	let payload: Vec<u8> = (0..1024).map(|i| i as u8).collect();
@@ -916,10 +916,10 @@ async fn noq_client_close_drains_finished_track() {
 
 /// A GOAWAY leaves the old session serving its subscriptions after the replacement
 /// connects, and a close then drains that predecessor too rather than dropping it.
-#[cfg(feature = "noq")]
+#[cfg(feature = "quic")]
 #[tracing_test::traced_test]
 #[tokio::test]
-async fn noq_client_close_drains_migrated_predecessor() {
+async fn quic_client_close_drains_migrated_predecessor() {
 	// Several congestion windows, so it is still in flight when the close starts.
 	let payload: Vec<u8> = (0..64 * 1024).map(|i| i as u8).collect();
 
@@ -1064,10 +1064,10 @@ async fn noq_client_close_drains_migrated_predecessor() {
 
 /// A close cuts a predecessor that cannot drain off at its handover deadline,
 /// rather than holding it for the full one second close window.
-#[cfg(feature = "noq")]
+#[cfg(feature = "quic")]
 #[tracing_test::traced_test]
 #[tokio::test]
-async fn noq_client_close_keeps_predecessor_handover() {
+async fn quic_client_close_keeps_predecessor_handover() {
 	let quic = moq_tokio::quic::Config::default();
 	let mut server_config = moq_tokio::listen::Config::default();
 	server_config.bind = Some("127.0.0.1:0".parse().unwrap());
@@ -1173,73 +1173,73 @@ async fn noq_client_close_keeps_predecessor_handover() {
 	);
 }
 
-#[cfg(feature = "noq")]
+#[cfg(feature = "quic")]
 #[tracing_test::traced_test]
 #[tokio::test]
-async fn noq_raw_quic() {
+async fn quic_raw_quic() {
 	backend_test("moqt").await;
 }
 
-#[cfg(feature = "noq")]
+#[cfg(feature = "quic")]
 #[tracing_test::traced_test]
 #[tokio::test]
-async fn noq_raw_quic_no_sni() {
+async fn quic_raw_quic_no_sni() {
 	no_sni_test("moqt").await;
 }
 
-#[cfg(feature = "noq")]
+#[cfg(feature = "quic")]
 #[tracing_test::traced_test]
 #[tokio::test]
-async fn noq_raw_quic_path() {
+async fn quic_raw_quic_path() {
 	path_test("moqt").await;
 }
 
-#[cfg(feature = "noq")]
+#[cfg(feature = "quic")]
 #[tracing_test::traced_test]
 #[tokio::test]
-async fn noq_raw_quic_moql_path() {
+async fn quic_raw_quic_moql_path() {
 	path_test("moql").await;
 }
 
-#[cfg(feature = "noq")]
+#[cfg(feature = "quic")]
 #[tracing_test::traced_test]
 #[tokio::test]
-async fn noq_webtransport_path() {
+async fn quic_webtransport_path() {
 	path_test("https").await;
 }
 
-#[cfg(feature = "noq")]
+#[cfg(feature = "quic")]
 #[tracing_test::traced_test]
 #[tokio::test]
-async fn noq_webtransport() {
+async fn quic_webtransport() {
 	backend_test("https").await;
 }
 
-#[cfg(feature = "noq")]
+#[cfg(feature = "quic")]
 #[tracing_test::traced_test]
 #[tokio::test]
-async fn noq_mtls() {
+async fn quic_mtls() {
 	mtls_test("https", false).await;
 }
 
-#[cfg(feature = "noq")]
+#[cfg(feature = "quic")]
 #[tracing_test::traced_test]
 #[tokio::test]
-async fn noq_sni_certificate() {
+async fn quic_sni_certificate() {
 	sni_test().await;
 }
 
-#[cfg(feature = "noq")]
+#[cfg(feature = "quic")]
 #[tracing_test::traced_test]
 #[tokio::test]
-async fn noq_cert_sources() {
+async fn quic_cert_sources() {
 	cert_sources_test().await;
 }
 
-#[cfg(feature = "noq")]
+#[cfg(feature = "quic")]
 #[tracing_test::traced_test]
 #[tokio::test]
-async fn noq_cert_reload() {
+async fn quic_cert_reload() {
 	reload_test().await;
 }
 
@@ -1249,8 +1249,8 @@ async fn noq_cert_reload() {
 /// files it left behind.
 ///
 /// Both ends write into one directory, so this covers the client and server paths
-/// at once. Noq writes one file per connection.
-#[cfg(all(feature = "qlog", feature = "noq"))]
+/// at once. Each endpoint writes one file.
+#[cfg(all(feature = "qlog", feature = "quic"))]
 async fn qlog_test(scheme: &str) -> Vec<std::path::PathBuf> {
 	let dir = tempfile::tempdir().expect("failed to create tempdir");
 
@@ -1276,7 +1276,7 @@ async fn qlog_test(scheme: &str) -> Vec<std::path::PathBuf> {
 		.collect();
 
 	for trace in &traces {
-		// Noq writes JSON-SEQ (RFC 7464): each record is a 0x1e separator then
+		// qlog streams JSON-SEQ (RFC 7464): each record is a 0x1e separator then
 		// JSON, the first being the qlog header. Checking the bytes rather than just the
 		// length catches a writer that was buffered and never flushed.
 		let raw = std::fs::read(trace).expect("failed to read trace");
@@ -1303,9 +1303,9 @@ async fn qlog_test(scheme: &str) -> Vec<std::path::PathBuf> {
 	traces
 }
 
-#[cfg(all(feature = "qlog", feature = "noq"))]
+#[cfg(all(feature = "qlog", feature = "quic"))]
 #[tokio::test]
-async fn noq_qlog() {
+async fn quic_qlog() {
 	let traces = qlog_test("moqt").await;
 	assert!(!traces.is_empty(), "expected at least one trace");
 }
@@ -1334,7 +1334,7 @@ async fn connect_once(
 /// The size is the point: a frame that fits inside one window would pass whether or
 /// not the setting ever reached the backend.
 ///
-#[cfg(feature = "noq")]
+#[cfg(feature = "quic")]
 async fn window_test(scheme: &str) {
 	let mut quic = moq_tokio::quic::Config::default();
 	quic.receive_window = Some(64 * 1024);
@@ -1357,9 +1357,9 @@ async fn window_test(scheme: &str) {
 	.await;
 }
 
-#[cfg(feature = "noq")]
+#[cfg(feature = "quic")]
 #[tokio::test]
-async fn noq_windows() {
+async fn quic_windows() {
 	window_test("moqt").await;
 }
 

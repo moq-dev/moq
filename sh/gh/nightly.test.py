@@ -40,13 +40,17 @@ class NightlyTest(unittest.TestCase):
         result, calls = self.run_group("rust")
         self.assertEqual(result.returncode, 0, result.stderr)
         release = [call for call in calls if call.startswith("cargo bench")]
-        self.assertEqual(len(release), 3)  # moq-net fuzz, kio, then the shared build.
+        self.assertEqual(len(release), 4)  # moq-net, its CPU clock, kio, then the shared build.
+        self.assertTrue(any("--bench session -- session_delivery_group_cost_cpu --test" in call for call in release))
         shared = [call for call in release if "-p moq-relay" in call]
         self.assertEqual(len(shared), 1)
         self.assertIn("--no-fail-fast", shared[0])
         self.assertIn("--bench http_idle", shared[0])
         self.assertIn("--bench chunk_interleaving", shared[0])
         self.assertIn("--bench worker_turns", shared[0])
+        self.assertIn("-p moq-pattern", shared[0])
+        self.assertIn("--bench matching", shared[0])
+        self.assertIn("--bench containers", shared[0])
         self.assertIn("just rs bench-gst-catalog -- --quick", calls)
         self.assertTrue(calls[-1].startswith("just rs test -p moq-cli"))
 

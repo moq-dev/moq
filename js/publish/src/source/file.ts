@@ -1,5 +1,5 @@
+import { now as clockNow, sleepUntil as clockSleepUntil, Instant, Micro, Nano, Second } from "@moq/clock";
 import * as Util from "@moq/hang/util";
-import { Time } from "@moq/net";
 import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
 import type { InputAudioTrack, InputVideoTrack, VideoSample } from "mediabunny";
 import { Timeline } from "./timeline";
@@ -106,8 +106,8 @@ export class File {
 
 		const frames = new ReadableStream<VideoFrame>({
 			async pull(controller) {
-				const offset = Time.Micro.fromSecond((index / IMAGE_FRAME_RATE) as Time.Second);
-				const timestamp = (zero + offset) as Time.Micro;
+				const offset = Micro.fromSecond((index / IMAGE_FRAME_RATE) as Second);
+				const timestamp = (zero + offset) as Micro;
 				index++;
 
 				await sleepUntil(timestamp, signal);
@@ -266,7 +266,7 @@ function pace<S extends Sample, T>(
 				}
 
 				const sample = next.value;
-				const timestamp = timeline.at(sample.microsecondTimestamp as Time.Micro, loop);
+				const timestamp = timeline.at(sample.microsecondTimestamp as Micro, loop);
 
 				// A sample that's already late goes out immediately, letting a stalled reader catch up.
 				await sleepUntil(timestamp, signal);
@@ -278,7 +278,7 @@ function pace<S extends Sample, T>(
 
 				// Restamp onto our wall clock, the same epoch live capture uses, so a publish that
 				// mixes sources keeps one timeline.
-				sample.setTimestamp(Time.Second.fromMicro(timestamp));
+				sample.setTimestamp(Second.fromMicro(timestamp));
 				controller.enqueue(convert(sample));
 				sample.close();
 				return;
@@ -317,27 +317,15 @@ async function decodable(track: InputVideoTrack | InputAudioTrack | null, file: 
 	return false;
 }
 
-// Our wall clock in microseconds, the epoch capture stamps frames against (see video/processor.ts).
-function now(): Time.Micro {
-	return Time.Micro.fromMilli(performance.now() as Time.Milli);
+// The installed clock in microseconds, the epoch capture stamps frames against (see video/processor.ts).
+function now(): Micro {
+	return Nano.toMicro(Nano(clockNow()));
 }
 
-// Wait until the given wall clock time, or until the effect tears down.
+// Wait until the given clock time, or until the effect tears down.
 //
-// A raw timeout rather than effect.timer because this runs once per sample: effect.timer registers a
+// A plain sleep rather than effect.timer because this runs once per sample: effect.timer registers a
 // cleanup that only releases on teardown, which would pile up for as long as the file publishes.
-function sleepUntil(timestamp: Time.Micro, signal: AbortSignal): Promise<void> {
-	const delay = Time.Milli.fromMicro((timestamp - now()) as Time.Micro);
-	if (delay <= 0 || signal.aborted) return Promise.resolve();
-
-	return new Promise((resolve) => {
-		const done = () => {
-			clearTimeout(timeout);
-			signal.removeEventListener("abort", done);
-			resolve();
-		};
-
-		const timeout = setTimeout(done, delay);
-		signal.addEventListener("abort", done, { once: true });
-	});
+function sleepUntil(timestamp: Micro, signal: AbortSignal): Promise<void> {
+	return clockSleepUntil(Instant(Micro.toNano(timestamp)), { signal }).catch(() => {});
 }

@@ -1,4 +1,4 @@
-import { Time } from "@moq/net";
+import { Micro, Milli, type Second } from "@moq/clock";
 import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
 import * as Video from "@moq/video";
 import type { Fanout } from "./fanout";
@@ -23,6 +23,8 @@ export type RendererInput = {
 	display: Getter<{ width: number; height: number } | undefined>;
 	// Whether to mirror the video horizontally.
 	flip: Getter<boolean>;
+	// Clockwise rotation needed to display the video upright.
+	rotation: Getter<number>;
 	// The encoder to re-encode through in `encoded` mode. Falls back to the raw frame when unset.
 	encoder: Getter<Encoder.Encoder | undefined>;
 	// What to render. Defaults to `source`.
@@ -63,6 +65,7 @@ export class Renderer {
 			frames: getter(props?.frames),
 			display: getter(props?.display),
 			flip: getter(props?.flip ?? false),
+			rotation: getter(props?.rotation ?? 0),
 			encoder: getter(props?.encoder),
 			mode: getter(props?.mode ?? "source"),
 			enabled: getter(props?.enabled ?? true),
@@ -86,10 +89,15 @@ export class Renderer {
 			// until the first frame arrives.
 			display: this.#signals.computed((effect) => {
 				const current = effect.get(frame);
-				if (current) return { width: current.displayWidth, height: current.displayHeight };
-				return effect.get(this.in.display);
+				const display = current
+					? { width: current.displayWidth, height: current.displayHeight }
+					: effect.get(this.in.display);
+				return display ? Video.rotateVideoDimensions(display, effect.get(this.in.rotation)) : undefined;
 			}),
-			presentation: this.#signals.computed((effect) => ({ flip: effect.get(this.in.flip) })),
+			presentation: this.#signals.computed((effect) => ({
+				flip: effect.get(this.in.flip),
+				rotation: effect.get(this.in.rotation),
+			})),
 			backend: this.in.backend,
 		});
 		this.#signals.cleanup(() => video.close());
@@ -245,7 +253,7 @@ export class Transcode {
 		decoder.configure({ codec: config.codec, optimizeForLatency: true });
 
 		// Re-key on the same cadence as the real encoder so the decoder can start and recover.
-		let lastKeyframe: Time.Micro | undefined;
+		let lastKeyframe: Micro | undefined;
 
 		effect.run((inner) => {
 			const fanout = inner.get(this.in.source);
@@ -269,11 +277,11 @@ export class Transcode {
 
 						// Mirror Encoder.serve: default to a 2s GOP unless the rendition overrides it.
 						const settings = this.in.settings.peek();
-						const interval = settings?.keyframeInterval ?? Time.Milli.fromSecond(2 as Time.Second);
+						const interval = settings?.keyframeInterval ?? Milli.fromSecond(2 as Second);
 
-						const timestamp = frame.timestamp as Time.Micro;
+						const timestamp = frame.timestamp as Micro;
 						const keyFrame =
-							lastKeyframe === undefined || lastKeyframe + Time.Micro.fromMilli(interval) <= timestamp;
+							lastKeyframe === undefined || lastKeyframe + Micro.fromMilli(interval) <= timestamp;
 						if (keyFrame) lastKeyframe = timestamp;
 
 						encoder.encode(frame, { keyFrame });

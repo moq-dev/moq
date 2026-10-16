@@ -26,7 +26,7 @@ export interface Grant {
 	publish: Path.Patterns;
 	/** The broadcasts this side may subscribe to from the peer. */
 	subscribe: Path.Patterns;
-	/** When the grant lapses, in `Date.now()` milliseconds, or undefined for never. */
+	/** When the grant lapses, as `@moq/clock` wall time in Unix milliseconds, or undefined for never. */
 	expires?: number;
 }
 
