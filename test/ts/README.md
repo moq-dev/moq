@@ -33,7 +33,7 @@ just test ts --strict           # also fail on broadcast-shape warnings
 just test ts --with-eit         # add a synthetic EPG first, report which SI survived
 just test ts --live             # grade PCR release timing off the live pipe
 just test ts --pair             # two exporters of one broadcast, grade table anchoring
-just test ts --open-gop         # open-GOP clip; its leading pictures must survive
+just test ts --open-gop         # open-GOP clip; orphan leading pictures are trimmed
 just test ts --hrd              # 1080p video filling a broadcast-sized 9 Mbit CPB
 just test ts --headroom         # the same with four audio PIDs, muxed above the video's Rx
 just test ts --leak             # 1080p video with no HRD, filling its level's 24 Mb/s leak
@@ -457,12 +457,18 @@ Controls run in PR CI; the real pair runs nightly and on manual TS validation.
 
 ## Open GOP (`open-gop.py`)
 
+`just test harness` also runs the actual JS container and player against generated
+open-GOP access units with Chromium's software WebCodecs decoder forced. It
+checks a join, continuous GOPs, and a later delivery hole; disabling the trim
+reproduces `EncodingError` instead of silently accepting orphan references.
+
 Broadcast contribution encoders commonly send open GOP: after the first IDR, each
 keyframe is a non-IDR I picture flagged by a recovery-point SEI, and the B pictures
 that follow it in decode order but are presented before it (its leading pictures)
 reference the previous GOP. Only a viewer that already holds that GOP can decode
-them. Dropping them is right at a tune-in, which the transport cannot see, so the
-round-trip has to hand every one of them on, in decode order.
+them. The consumer trims the recovery group's orphan leading pictures at a join
+or after a delivery gap. Continuous groups keep every picture in decode order.
+A declared end is a fresh encoder boundary, not a delivery gap.
 
 `--open-gop` swaps the generated clip for an x264 `open-gop=1` encode whose 24-frame
 GOP and fixed B placement put three leading pictures behind every recovery point,
@@ -481,8 +487,8 @@ rebase.
 | Check | Severity | What it verifies |
 |---|---|---|
 | `fixture` | hard | the source has at least two non-IDR recovery points with leading pictures |
-| `decode-order` | hard | the capture is one contiguous run of the source's access units from a random-access point, with DTS strictly increasing |
-| `leading-pictures` | hard | every leading picture in that run is there and keeps the presentation offset the source gave it |
+| `decode-order` | hard | each delivered segment starts at a random-access point, omits only its orphan leading pictures, and keeps DTS strictly increasing |
+| `leading-pictures` | hard | every continuous leading picture is kept with its source presentation offset; recovery-group orphans are absent |
 | `random-access-indicator` | shape | the exporter flags exactly the random-access access units |
 | `recovery-point-sei` | shape | each recovery point keeps its SEI |
 | `dts-before-pts` | shape | no access unit is stamped to decode after it presents |
