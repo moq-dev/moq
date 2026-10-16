@@ -285,6 +285,21 @@ async fn static_peer_dials_from_the_configured_bind() {
 	conn.close(driver::VarInt::from_u32(0), b"done");
 }
 
+/// The tokio worker shards accept through the same request path, so a peer
+/// widens there too.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn tokio_worker_peer_session_widens_quic_limits() {
+	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	let dir = tempfile::tempdir().expect("tempdir");
+	let mut config = config(dir.path());
+	config.runtime.workers = Some(1);
+	config.runtime.pin = false;
+	let relay = Relay::load(config).await.expect("load relay");
+	let port = relay.addr().expect("workers bound an address").port();
+	peer_widens_and_viewer_does_not(relay, port).await;
+}
+
 #[cfg(all(target_os = "linux", feature = "_uring"))]
 #[tokio::test]
 async fn uring_peer_session_widens_quic_limits() {
