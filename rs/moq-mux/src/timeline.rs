@@ -26,6 +26,11 @@
 //! - [`Segmenter::cut`] adds an application boundary, such as a video keyframe cutting audio so a
 //!   derived segment needs fewer objects. The first cut takes over from minimum-duration pacing.
 //!
+//! An untimed track, whose frames carry no timestamps, has no duration to pace by: each group is
+//! its own record, ended when the group finishes or the next one starts, and its records carry no
+//! `pts` or `duration`. Nothing splits an untimed group, so one that never closes is indexed only
+//! when the segmenter flushes.
+//!
 //! ## Wiring
 //!
 //! [`catalog::Producer`](crate::catalog::Producer) owns the broadcast's [`Timelines`] and advertises
@@ -119,7 +124,8 @@ fn wire(pts: Timestamp) -> u64 {
 /// The record being built.
 struct Open {
 	start: Position,
-	pts: Timestamp,
+	/// `None` on an untimed track.
+	pts: Option<Timestamp>,
 	keyframe: bool,
 }
 
@@ -144,6 +150,8 @@ pub struct Segmenter {
 	cuts: VecDeque<Timestamp>,
 	/// A cut arrived, so the application owns the group boundaries from here on.
 	manual: bool,
+	/// Whether the track's frames carry timestamps, fixed by its first report.
+	timed: Option<bool>,
 	ready: VecDeque<Record>,
 	closed: bool,
 }
@@ -160,6 +168,7 @@ impl Segmenter {
 			frontier: None,
 			cuts: VecDeque::new(),
 			manual: false,
+			timed: None,
 			ready: VecDeque::new(),
 			closed: false,
 		}
@@ -176,11 +185,19 @@ impl Segmenter {
 		self.sequence
 	}
 
-	/// Report the frame at `position`, presented at `pts`.
+	/// Report the frame at `position`, presented at `pts`, or `None` on an untimed track.
 	///
 	/// Fails with [`TimelinePosition`](crate::Error::TimelinePosition) when `position` is at or
 	/// before the previous report: records never overlap, so that frame could never be indexed.
-	pub fn frame(&mut self, position: Position, pts: Timestamp, keyframe: bool) -> crate::Result<()> {
+	/// Fails with [`TimelineTiming`](crate::Error::TimelineTiming) when the track's first report
+	/// was timed and this one is not, or the reverse.
+	pub fn frame(
+		&mut self,
+		position: Position,
+		pts: impl Into<Option<Timestamp>>,
+		keyframe: bool,
+	) -> crate::Result<()> {
+		let pts = pts.into();
 		if self.closed {
 			return Ok(());
 		}
@@ -189,24 +206,19 @@ impl Segmenter {
 		{
 			return Err(crate::Error::TimelinePosition { position, last });
 		}
+		if *self.timed.get_or_insert(pts.is_some()) != pts.is_some() {
+			return Err(crate::Error::TimelineTiming(position));
+		}
+		if pts.is_none() {
+			// Cuts are content times, which an untimed track never reaches.
+			self.cuts.clear();
+		}
 
 		if let (Some(start), Some(last)) = (self.open.as_ref().map(|open| open.pts), self.last) {
-			let elapsed = pts.as_micros().saturating_sub(start.as_micros());
-			let end = if position.group != last.group {
-				let contiguous = position.group == last.group + 1 && position.frame == 0;
-				if !contiguous {
-					// A skipped sequence or a group joined mid-way always closes, so a record's groups are
-					// contiguous and the reader never has to guess what lies between. The skipped time is
-					// not content, so the record ends at its newest report rather than at this frame.
-					let frontier = self.frontier.expect("an open record has a frontier");
-					Some((Position::group(last.group + 1), frontier))
-				} else if elapsed >= self.config.duration_max.as_micros() || self.boundary(start, pts, elapsed) {
-					Some((Position::group(last.group + 1), pts))
-				} else {
-					None
-				}
-			} else {
-				(elapsed >= self.config.duration_max.as_micros()).then_some((position, pts))
+			let end = match (start, pts) {
+				(Some(start), Some(pts)) => self.timed_end(start, pts, position, last),
+				// An untimed record holds one group, ended where the next one starts.
+				_ => (position.group != last.group).then_some((Position::group(last.group + 1), None)),
 			};
 			if let Some((end, pts)) = end {
 				self.emit(end, pts);
@@ -223,8 +235,35 @@ impl Segmenter {
 		}
 		self.last = Some(position);
 		self.finished = false;
-		self.advance(pts);
+		if let Some(pts) = pts {
+			self.advance(pts);
+		}
 		Ok(())
+	}
+
+	/// Where a timed record that started at `start` ends, if a frame at `position` and `pts` ends it.
+	fn timed_end(
+		&mut self,
+		start: Timestamp,
+		pts: Timestamp,
+		position: Position,
+		last: Position,
+	) -> Option<(Position, Option<Timestamp>)> {
+		let elapsed = pts.as_micros().saturating_sub(start.as_micros());
+		if position.group == last.group {
+			return (elapsed >= self.config.duration_max.as_micros()).then_some((position, Some(pts)));
+		}
+		let contiguous = position.group == last.group + 1 && position.frame == 0;
+		if !contiguous {
+			// A skipped sequence or a group joined mid-way always closes, so a record's groups are
+			// contiguous and the reader never has to guess what lies between. The skipped time is
+			// not content, so the record ends at its newest report rather than at this frame.
+			return Some((Position::group(last.group + 1), self.frontier));
+		}
+		if elapsed >= self.config.duration_max.as_micros() || self.boundary(start, pts, elapsed) {
+			return Some((Position::group(last.group + 1), Some(pts)));
+		}
+		None
 	}
 
 	/// Whether a group starting at `pts` ends the record that started at `start`.
@@ -247,16 +286,16 @@ impl Segmenter {
 
 	/// Report that group `group` can gain no more frames.
 	///
-	/// With a zero [`Config::duration_min`] this closes the record, so a sparse track's newest
-	/// group is indexed without waiting for the next one.
+	/// With a zero [`Config::duration_min`], or on an untimed track, this closes the record, so the
+	/// newest group is indexed without waiting for the next one.
 	pub fn finish_group(&mut self, group: u64) {
 		if self.closed || self.last.is_none_or(|last| last.group != group) {
 			return;
 		}
 		self.finished = true;
-		if self.config.duration_min.is_zero() && self.open.is_some() {
-			let pts = self.frontier.expect("an open record has a frontier");
-			self.emit(Position::group(group + 1), pts);
+		let each = self.config.duration_min.is_zero() || self.timed == Some(false);
+		if each && self.open.is_some() {
+			self.emit(Position::group(group + 1), self.frontier);
 		}
 	}
 
@@ -284,9 +323,9 @@ impl Segmenter {
 	/// The first cut takes over from [`Config::duration_min`] pacing for good, since pacing would
 	/// otherwise close a record just before the caller declares where it really ends. A cut at or
 	/// before an earlier one is ignored, so several producers declaring the same boundaries (the
-	/// renditions of one import) cost nothing.
+	/// renditions of one import) cost nothing. An untimed track ignores cuts.
 	pub fn cut(&mut self, pts: Timestamp) {
-		if self.closed {
+		if self.closed || self.timed == Some(false) {
 			return;
 		}
 		self.manual = true;
@@ -300,7 +339,7 @@ impl Segmenter {
 	/// The record ends after the newest group when that group finished, otherwise after the newest
 	/// reported frame. Later reports start a new record.
 	pub fn flush(&mut self) {
-		let (Some(last), Some(frontier)) = (self.last, self.frontier) else {
+		let Some(last) = self.last else {
 			return;
 		};
 		if self.open.is_none() {
@@ -310,7 +349,7 @@ impl Segmenter {
 			true => Position::group(last.group + 1),
 			false => Position::new(last.group, last.frame + 1),
 		};
-		self.emit(end, frontier);
+		self.emit(end, self.frontier);
 	}
 
 	/// Flush, then ignore every later report.
@@ -319,16 +358,23 @@ impl Segmenter {
 		self.closed = true;
 	}
 
-	/// Close the open record at `end`, its content running to `pts`.
-	fn emit(&mut self, end: Position, pts: Timestamp) {
+	/// Close the open record at `end`, its content running to `pts`, which is `None` only when
+	/// the track is untimed.
+	fn emit(&mut self, end: Position, pts: Option<Timestamp>) {
 		let Some(open) = self.open.take() else {
 			return;
 		};
-		let start = wire(open.pts);
-		// Frames farther apart than the maximum leave nothing to split at, so the record stops at the
-		// advertised bound and the rest of the gap is uncovered.
-		let duration = wire(pts).saturating_sub(start).min(units(self.config.duration_max));
-		let mut record = Record::new(self.sequence, start, duration, open.start, end);
+		let mut record = match open.pts {
+			Some(start) => {
+				let start = wire(start);
+				let pts = pts.expect("a timed record has a frontier");
+				// Frames farther apart than the maximum leave nothing to split at, so the record stops at
+				// the advertised bound and the rest of the gap is uncovered.
+				let duration = wire(pts).saturating_sub(start).min(units(self.config.duration_max));
+				Record::new(self.sequence, start, duration, open.start, end)
+			}
+			None => Record::untimed(self.sequence, open.start, end),
+		};
 		record.keyframe = open.keyframe;
 		self.sequence += 1;
 		self.ready.push_back(record);
@@ -661,13 +707,17 @@ impl<E: RecordExt> Entry<E> {
 	/// Decode a record into an entry, converting its timing out of the wire timescale.
 	///
 	/// A pts the timescale can't represent is an error rather than a substituted value: silently
-	/// moving a timestamp would misdirect seeking and live-edge logic.
+	/// moving a timestamp would misdirect seeking and live-edge logic. An untimed record, or one
+	/// missing half its timing, fails with [`TimelineUntimed`](crate::Error::TimelineUntimed).
 	pub fn decode(record: Record<E>, timescale: Timescale) -> crate::Result<Entry<E>> {
+		let (Some(pts), Some(duration)) = (record.pts, record.duration) else {
+			return Err(crate::Error::TimelineUntimed(record.sequence));
+		};
 		let scale = timescale.as_u64() as u128;
-		let nanos = (record.duration as u128) * 1_000_000_000 / scale;
+		let nanos = (duration as u128) * 1_000_000_000 / scale;
 		Ok(Self {
 			sequence: record.sequence,
-			pts: Timestamp::new(record.pts, timescale)?,
+			pts: Timestamp::new(pts, timescale)?,
 			duration: Duration::from_nanos(nanos as u64),
 			start: record.start,
 			end: record.end,
@@ -781,7 +831,7 @@ mod test {
 
 	/// A record's `(pts, duration, start, end)` in wire units, for compact comparisons.
 	fn span(record: &Record) -> (u64, u64, Position, Position) {
-		(record.pts, record.duration, record.start, record.end)
+		(record.pts.unwrap(), record.duration.unwrap(), record.start, record.end)
 	}
 
 	fn drain(segmenter: &mut Segmenter) -> Vec<(u64, u64, Position, Position)> {
@@ -1015,6 +1065,75 @@ mod test {
 		let mut video = Segmenter::new(Config::default()).with_sequence(7);
 		groups(&mut video, 10..12, 2_000);
 		assert_eq!(video.next().unwrap().sequence, 7);
+	}
+
+	#[test]
+	fn an_untimed_track_records_each_group_without_timing() {
+		// The minimum and maximum measure time, which an untimed track has none of.
+		let mut data = Segmenter::new(Config::default().with_duration_max(Duration::from_secs(1)));
+		data.frame(Position::new(0, 0), None, true).unwrap();
+		data.frame(Position::new(0, 1), None, false).unwrap();
+		assert!(data.next().is_none(), "nothing splits an untimed group");
+		data.finish_group(0);
+		// A group that starts before the previous one finished ends it, as does a skipped sequence.
+		data.frame(at(1), None, true).unwrap();
+		data.frame(at(3), None, true).unwrap();
+		data.frame(Position::new(3, 1), None, false).unwrap();
+		data.close();
+
+		let records: Vec<Record> = std::iter::from_fn(|| data.next()).collect();
+		assert_eq!(
+			records,
+			vec![
+				Record::untimed(0, at(0), at(1)),
+				Record::untimed(1, at(1), at(2)),
+				Record::untimed(2, at(3), Position::new(3, 2)),
+			]
+		);
+	}
+
+	#[test]
+	fn an_untimed_track_keeps_no_cuts() {
+		let mut data = Segmenter::new(Config::default());
+		data.cut(ms(0));
+		data.frame(at(0), None, true).unwrap();
+		assert!(data.cuts.is_empty(), "a cut before the first report is dropped");
+		for i in 1..100 {
+			data.cut(ms(i * 1_000));
+		}
+		assert!(data.cuts.is_empty());
+	}
+
+	#[test]
+	fn a_track_is_all_timed_or_all_untimed() {
+		let mut timed = Segmenter::new(Config::default());
+		timed.frame(at(0), ms(0), true).unwrap();
+		assert!(matches!(
+			timed.frame(at(1), None, true),
+			Err(crate::Error::TimelineTiming(position)) if position == at(1)
+		));
+
+		let mut untimed = Segmenter::new(Config::default());
+		untimed.frame(at(0), None, true).unwrap();
+		assert!(matches!(
+			untimed.frame(at(1), ms(0), true),
+			Err(crate::Error::TimelineTiming(_))
+		));
+	}
+
+	#[test]
+	fn an_untimed_record_has_no_entry() {
+		let record = Record::<()>::untimed(3, at(0), at(1));
+		assert!(matches!(
+			Entry::decode(record, Timescale::MILLI),
+			Err(crate::Error::TimelineUntimed(3))
+		));
+		let mut half = Record::<()>::new(4, 0, 1_000, at(0), at(1));
+		half.duration = None;
+		assert!(matches!(
+			Entry::decode(half, Timescale::MILLI),
+			Err(crate::Error::TimelineUntimed(4))
+		));
 	}
 
 	/// Drain a finished timeline track.

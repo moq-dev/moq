@@ -21,9 +21,7 @@ Decided with the maintainer on 2026-10-13:
   candidates through the module [webrtc](/quest/m1/p2p/webrtc.md) lifts out
   of `moq-rtc`, with host candidates, `.local` resolution, and the STUN
   Binding client; don't copy it.
-- QUIC is `moq-quic`, fed datagrams from the nominated pair, so this waits
-  on [the switch](/quest/m1/quic/fork/switch.md) instead of building on
-  `moq-noq` and porting it.
+- QUIC is `moq-quic`, fed datagrams from the nominated pair.
 - Authentication: each side generates a self-signed certificate and sends
   its SHA-256 fingerprint in its offer or answer, as DTLS fingerprints ride
   in SDP. Both sides pin it with the existing `tls.fingerprint` check. MoQ
@@ -61,7 +59,6 @@ covers LAN and NAT pairs between two `moq-cli --p2p` nodes.
 
 ## Required
 
-- [Switch MoQ onto moq-quic](/quest/m1/quic/fork/switch.md) - `moq-quic` replaces `moq-noq` in moq-tokio
 - [UDP demux](/quest/m1/p2p/udp-demux.md) - the classifier that splits STUN from QUIC
 - [Native data channel transport](/quest/m1/p2p/webrtc.md) - the shared ICE gathering module
 - [Signaling and policy](/quest/m1/p2p/signal.md) - the offer schema and roster this extends

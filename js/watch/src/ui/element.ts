@@ -5,6 +5,7 @@
  *
  * @module
  */
+import { Milli, Nano } from "@moq/clock";
 import { Effect, Signal } from "@moq/signals";
 import * as DOM from "@moq/signals/dom";
 import type MoqWatch from "../element";
@@ -20,7 +21,7 @@ import type { Tab, UiState } from "./state";
 import styles from "./styles/index.css?inline";
 
 // How long the chrome lingers after the pointer stops moving (while playing).
-const HIDE_MS = 2800;
+const HIDE = Nano.fromMilli(Milli(2800));
 
 // Whether `el` is the element the browser has actually put fullscreen. Unlike
 // `document.fullscreenElement`, this is not retargeted to the shadow host. `matches` throws on a
@@ -200,7 +201,7 @@ export default class MoqWatchUi extends HTMLElement {
 			e.get(activity);
 			state.chrome.set(true);
 			if (isPinned) return;
-			e.timer(() => state.chrome.set(false), HIDE_MS);
+			e.timer(() => state.chrome.set(false), HIDE);
 		});
 
 		effect.event(this, "pointerleave", () => {

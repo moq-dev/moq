@@ -24,7 +24,7 @@ use rustls::pki_types::PrivatePkcs8KeyDer;
 
 /// Errors loading or generating TLS certificates and keys.
 ///
-/// Shared by the client TLS config and noq server.
+/// Shared by the client TLS config and QUIC server.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
@@ -791,7 +791,7 @@ pub(crate) enum Verification {
 	Fingerprints(Vec<[u8; 32]>),
 
 	/// Standard CA verification. When `system` is set the platform/default trust
-	/// store is trusted too; noq uses the OS platform verifier.
+	/// store is trusted too; the QUIC backend uses the OS platform verifier.
 	/// `custom` are extra PEM roots trusted in addition.
 	Roots { custom: CustomRoots, system: bool },
 }
@@ -955,7 +955,7 @@ impl Connect {
 	/// plaintext fetch, and there is nothing to bootstrap when verification is
 	/// disabled. With CA roots (the default), `http://` is the deliberate
 	/// per-connection way to pin a self-signed relay, so it is allowed.
-	#[cfg(feature = "noq")]
+	#[cfg(feature = "quic")]
 	pub(crate) fn allows_http_bootstrap(&self) -> bool {
 		self.fingerprint.is_empty() && !self.insecure.unwrap_or_default()
 	}
@@ -1634,7 +1634,7 @@ impl PeerIdentity {
 	/// Wrap the type-erased identity from the QUIC connection.
 	/// Returns `None` if the peer presented no certificate or the identity is
 	/// not a certificate chain.
-	#[cfg(feature = "noq")]
+	#[cfg(feature = "quic")]
 	pub(crate) fn from_any(identity: Option<Box<dyn std::any::Any>>) -> Option<Self> {
 		let chain = identity?.downcast::<Vec<CertificateDer<'static>>>().ok()?;
 		Some(Self { chain: *chain })
@@ -2092,7 +2092,7 @@ impl rustls::client::danger::ServerCertVerifier for FingerprintVerifier {
 }
 
 #[cfg(test)]
-#[cfg(all(feature = "noq", feature = "aws-lc-rs"))]
+#[cfg(all(feature = "quic", feature = "aws-lc-rs"))]
 mod tests {
 	#[tokio::test]
 	async fn resolved_config_keeps_reload_owner_alive() {
@@ -2266,7 +2266,7 @@ mod tests {
 		params.self_signed(&key).unwrap().into()
 	}
 
-	#[cfg(feature = "noq")]
+	#[cfg(feature = "quic")]
 	#[test]
 	fn peer_identity_expiry_reads_not_after() {
 		// notAfter at a whole second so the round-trip is exact.
@@ -2277,7 +2277,7 @@ mod tests {
 		params.not_after = not_after;
 		let cert: CertificateDer<'static> = params.self_signed(&key).unwrap().into();
 
-		// noq hand back the chain as a boxed Vec<CertificateDer>.
+		// The QUIC backend hands back the chain as a boxed Vec<CertificateDer>.
 		let identity: Box<dyn std::any::Any> = Box::new(vec![cert]);
 		let parsed = PeerIdentity::from_any(Some(identity)).expect("chain parsed");
 		let expiry = parsed.expiry().expect("expiry parsed");
@@ -2287,7 +2287,7 @@ mod tests {
 		);
 	}
 
-	#[cfg(feature = "noq")]
+	#[cfg(feature = "quic")]
 	#[test]
 	fn peer_identity_none_without_chain() {
 		assert!(PeerIdentity::from_any(None).is_none());
@@ -2390,7 +2390,7 @@ mod tests {
 	/// keeps its task, an OS directory watch, and the certificate keys alive for the
 	/// rest of the process. The `Arc` is the observable half: while the task lives it
 	/// holds one, so a `Weak` that still upgrades is a watcher that never stopped.
-	#[cfg(all(feature = "watch", feature = "noq"))]
+	#[cfg(all(feature = "watch", feature = "quic"))]
 	#[tokio::test]
 	async fn dropping_the_reload_guard_stops_the_watcher() {
 		let key = rcgen::KeyPair::generate().unwrap();
@@ -2525,7 +2525,7 @@ mod tests {
 
 	/// A resumed handshake skips certificate verification, so a listener with a
 	/// live peer set must disable resumption for removals to take effect.
-	#[cfg(all(feature = "watch", feature = "noq"))]
+	#[cfg(all(feature = "watch", feature = "quic"))]
 	#[test]
 	fn removed_peers_cannot_resume() {
 		let server_identity = Identity::generate(["localhost"]).unwrap();
@@ -2559,7 +2559,7 @@ mod tests {
 	}
 
 	/// A plain-TLS embedder receives a working config from the shared identity.
-	#[cfg(feature = "noq")]
+	#[cfg(feature = "quic")]
 	#[tokio::test]
 	async fn served_config_handshakes() {
 		let server = Listen {
@@ -2685,7 +2685,7 @@ mod tests {
 		(file, path)
 	}
 
-	#[cfg(all(feature = "watch", feature = "noq"))]
+	#[cfg(all(feature = "watch", feature = "quic"))]
 	fn signed_certificates() -> (
 		String,
 		CertificateDer<'static>,
@@ -2722,7 +2722,7 @@ mod tests {
 		)
 	}
 
-	#[cfg(all(feature = "watch", feature = "noq"))]
+	#[cfg(all(feature = "watch", feature = "quic"))]
 	fn handshake_kinds(
 		client: Arc<rustls::ClientConfig>,
 		server: Arc<rustls::ServerConfig>,
@@ -2754,7 +2754,7 @@ mod tests {
 		panic!("TLS handshake did not settle");
 	}
 
-	#[cfg(all(feature = "watch", feature = "noq"))]
+	#[cfg(all(feature = "watch", feature = "quic"))]
 	#[test]
 	fn reloadable_roots_disable_session_resumption() {
 		use std::io::Write;
@@ -2805,14 +2805,14 @@ mod tests {
 		);
 	}
 
-	#[cfg(all(feature = "watch", feature = "noq"))]
+	#[cfg(all(feature = "watch", feature = "quic"))]
 	#[test]
 	fn reloadable_client_roots_disable_server_resumption() {
 		let (ca_a, server_cert, server_key, client_cert, client_key) = signed_certificates();
 		let (ca_b, _, _, _, _) = signed_certificates();
-		// A dedicated directory, not `/tmp`: the watcher registers the parent, so
-		// unrelated churn there fires a reload that can read `ca_a` and store it
-		// after this test's own `reload()` installed `ca_b`.
+		// A dedicated directory, not `/tmp`: the watcher matches by file name within
+		// the parent, so another test's `root.pem` there fires a reload that can read
+		// `ca_a` and store it after this test's own `reload()` installed `ca_b`.
 		let dir = tempfile::TempDir::new().unwrap();
 		let root_path = dir.path().join("root.pem");
 		std::fs::write(&root_path, ca_a).unwrap();
@@ -2884,7 +2884,7 @@ mod tests {
 		assert!(handshake_kinds(reloadable_client, reloadable).is_err());
 	}
 
-	#[cfg(all(feature = "watch", feature = "noq"))]
+	#[cfg(all(feature = "watch", feature = "quic"))]
 	#[test]
 	fn custom_roots_reload_for_new_client_and_server_handshakes() {
 		let (ca_a, server_a, _, client_a, _) = signed_certificates();
@@ -3296,7 +3296,7 @@ mod legacy_tests {
 	/// The accept side, where a dropped `--server-tls-root` takes the mTLS client
 	/// CAs with it and leaves the listener accepting unauthenticated peers.
 	/// moq-cli's `export hls` flattens this type directly, so it is a live path.
-	#[cfg(feature = "noq")]
+	#[cfg(feature = "quic")]
 	#[test]
 	fn the_server_builders_refuse_a_released_spelling() {
 		let tls = parse(&["--server-tls-root", "/tmp/ca.pem"]).listen;

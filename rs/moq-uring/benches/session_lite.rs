@@ -1,7 +1,7 @@
 //! The PR-4 ablation matrix at session level: a full moq-lite session pair on
 //! one worker, publisher to subscriber over loopback QUIC, toggling receive
 //! batching, GRO, and GSO exactly like the raw echo. Each iteration delivers
-//! one group of 32 x 32 KiB frames (1 MiB, matching `echo_noq`'s unit), so
+//! one group of 32 x 32 KiB frames (1 MiB, matching `echo_quic`'s unit), so
 //! the two matrices are directly comparable: the difference is the moq-net
 //! machine and container framing on top of the same wire path.
 //!
@@ -9,11 +9,11 @@
 
 use criterion::{criterion_group, criterion_main};
 
-#[cfg(all(target_os = "linux", feature = "noq"))]
+#[cfg(all(target_os = "linux", feature = "quic"))]
 #[path = "../tests/support.rs"]
 mod support;
 
-#[cfg(all(target_os = "linux", feature = "noq"))]
+#[cfg(all(target_os = "linux", feature = "quic"))]
 mod linux {
 	use std::net::UdpSocket;
 	use std::time::Instant;
@@ -235,10 +235,10 @@ mod linux {
 	}
 }
 
-#[cfg(all(target_os = "linux", feature = "noq"))]
+#[cfg(all(target_os = "linux", feature = "quic"))]
 use linux::benchmark;
 
-#[cfg(not(all(target_os = "linux", feature = "noq")))]
+#[cfg(not(all(target_os = "linux", feature = "quic")))]
 fn benchmark(_: &mut criterion::Criterion) {}
 
 criterion_group!(benches, benchmark);

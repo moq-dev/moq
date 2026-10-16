@@ -41,7 +41,7 @@ them from m1.
 RFC 7983 already partitions the first byte: STUN is 0 to 3, DTLS 20 to 63,
 RTP and RTCP 128 to 191. QUIC fills the gaps: a long header is 192 to 255 and
 a short header 64 to 127, as long as the fixed bit is set, so the QUIC
-config disables QUIC-bit greasing (RFC 9287) explicitly; noq turns it on by
+config disables QUIC-bit greasing (RFC 9287) explicitly; `moq-quic` turns it on by
 default and nothing here disables it today. SRT does not fit:
 its data packets start with a 0 bit and its control packets with a 1, so both
 overlap. SRT is demuxed by flow instead. A 4-tuple ICE has succeeded on is pinned
@@ -60,7 +60,7 @@ unknown tuple is not SRT; it is dropped or given to the WebRTC mux.
 One OS socket, or one shard of a reuseport group, is read by the demux and
 fanned into virtual sockets, one per stack, each with the `AsyncUdpSocket`
 shape. Sends go straight to the shared socket, so every stack answers from
-the same address and port. noq accepts the virtual socket through
+the same address and port. moq-tokio's `quic::driver` accepts the virtual socket through
 `new_with_abstract_socket`. `moq-rtc`'s `Mux` already demuxes STUN by ufrag
 internally and takes a fed socket in
 [WebRTC on the shared socket](/quest/m2/one-port/rtc-feed.md). SRT skips `srt-tokio`,
