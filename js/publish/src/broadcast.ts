@@ -3,6 +3,7 @@ import * as Container from "@moq/hang/container";
 import * as Json from "@moq/json";
 import * as Moq from "@moq/net";
 import { Effect, type Getter, getter, type Inputs, type Readonlys, Signal } from "@moq/signals";
+import { rotateVideoDimensions } from "@moq/video";
 import { CatalogProducer } from "./catalog";
 import { errors } from "./internal";
 import { Baseline } from "./jitter";
@@ -27,8 +28,9 @@ export type BroadcastInput = {
 	// The broadcast name.
 	name: Getter<Moq.Path.Valid>;
 
-	// Catalog video-section display size, shared by all video renditions. Usually wired from a
-	// Video.Capture's `display` output. Omitted from the catalog when undefined.
+	// The captured picture size, shared by all video renditions. Usually wired from a
+	// Video.Capture's `display` output. The catalog display swaps it for a quarter-turn `rotation`,
+	// since it is the size to render at. Omitted from the catalog when undefined.
 	display: Getter<{ width: number; height: number } | undefined>;
 
 	// Whether the video should be flipped horizontally on playback. Catalog video-section metadata.
@@ -243,7 +245,8 @@ export class Broadcast {
 				const section: Catalog.Video = { renditions: video };
 				// display is optional in the schema, so it gates only itself, not the whole section.
 				if (display) {
-					section.display = { width: Catalog.u53(display.width), height: Catalog.u53(display.height) };
+					const { width, height } = rotateVideoDimensions(display, rotation);
+					section.display = { width: Catalog.u53(width), height: Catalog.u53(height) };
 				}
 				if (flip) section.flip = true;
 				if (rotation) section.rotation = rotation;
