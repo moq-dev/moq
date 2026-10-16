@@ -310,6 +310,9 @@ async function guardedPlayback(kind: "legacy" | "cmaf", reads: Read[], hold: rea
 		get resets() {
 			return resets;
 		},
+		release() {
+			for (const emit of pending.splice(0)) emit();
+		},
 		// A restarted publisher takes the name: another instance of the same broadcast.
 		republish() {
 			closeAll();
@@ -442,6 +445,69 @@ function marker(group: number, end: number): Read {
 }
 
 for (const kind of ["legacy", "cmaf"] as const) {
+	// Another track skips the shared playhead to `skipTo` while a 1s picture is still inside
+	// WebCodecs (`queued`) or parked in Sync.wait, with a 100ms delay and no buffer. Reports what
+	// was showing before the skip and whether the picture presented once its deadline came due.
+	async function skipDuring(stage: "queued" | "parked", skipTo: number) {
+		const clock = manualAt(5000);
+		const reads: Read[] = [];
+		const picture = 1_000_000;
+		const playback = await guardedPlayback(kind, reads, stage === "queued" ? [picture] : []);
+		try {
+			playback.enabled.set(false);
+			playback.delay.set(Milli(100));
+			await microtasks();
+			reads.push(sample(1, picture));
+			playback.enabled.set(true);
+			await microtasks();
+			expect(playback.outputs).toEqual(stage === "queued" ? [] : [picture]);
+			const before = playback.decoder.out.frame.peek();
+
+			playback.sync.received(Milli(skipTo), "audio", Milli(5000));
+			playback.release();
+			await microtasks();
+			const due = playback.decoder.out.frame.peek();
+			await clock.advance(100);
+			const after = playback.decoder.out.frame.peek();
+			return { before, after, presented: after !== due };
+		} finally {
+			playback.close();
+			await microtasks();
+			clock.restore();
+		}
+	}
+
+	for (const stage of ["queued", "parked"] as const) {
+		it(`${kind} drops a ${stage} picture another track skips the playhead past`, async () => {
+			const skip = await skipDuring(stage, 10_000);
+			expect(skip.presented).toBe(false);
+			expect(skip.after).toBe(skip.before);
+		});
+
+		// A startup burst: audio 50ms newer re-anchors the playhead to 950ms, still behind the picture.
+		it(`${kind} presents a ${stage} picture still ahead of the playhead a skip moved to`, async () => {
+			const skip = await skipDuring(stage, 1050);
+			expect(skip.presented).toBe(true);
+		});
+	}
+
+	it(`${kind} instant presents a queued picture after a newer frame arrives`, async () => {
+		const queued = 1_000_000;
+		const playback = await guardedPlayback(kind, [sample(1, queued)], [queued]);
+		try {
+			expect(playback.outputs).toEqual([]);
+
+			// "instant" has no cap, so every newer frame skips the playhead without passing over anything.
+			playback.sync.received(Milli(10_000), "video", Nano.toMilli(Nano(now())));
+			playback.release();
+			await microtasks();
+
+			expect(playback.decoder.out.timestamp.peek()).toBe(Milli(1000));
+		} finally {
+			playback.close();
+		}
+	});
+
 	it(`${kind} skips older groups before decode, even across a stale marker`, async () => {
 		const playback = await guardedPlayback(kind, [
 			sample(10, 1000),
@@ -700,3 +766,37 @@ it("a reset drops a parked video frame even when the next anchor restores the re
 		clock.restore();
 	}
 });
+
+for (const kind of ["legacy", "cmaf"] as const) {
+	it(`${kind} trims orphan leading pictures on join and later gap, preserving continuous groups`, async () => {
+		const reads: Read[] = [
+			sample(10, 1000),
+			sample(10, 800, false),
+			sample(10, 900, false),
+			sample(10, 1100, false),
+			sample(11, 2000),
+			sample(11, 1800, false),
+			sample(11, 1900, false),
+			sample(11, 2100, false),
+			gap,
+			sample(13, 4000),
+			sample(13, 3800, false),
+			sample(13, 3900, false),
+			sample(13, 4100, false),
+			{ kind: "end", group: 14, end: Micro(4200) },
+			sample(15, 5000),
+			sample(15, 4800, false),
+			sample(15, 4900, false),
+			sample(15, 5100, false),
+		];
+		const playback = await guardedPlayback(kind, reads);
+		try {
+			await microtasks();
+			expect(playback.submitted).toEqual([
+				1000, 1100, 2000, 1800, 1900, 2100, 4000, 4100, 5000, 4800, 4900, 5100,
+			]);
+		} finally {
+			playback.close();
+		}
+	});
+}
