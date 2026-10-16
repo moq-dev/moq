@@ -329,7 +329,10 @@ moq --cluster-lan --cluster-lan-secret /etc/moq/cluster.key import capture
 MoQ process and `moq-relay` on the LAN, with no other configuration. Without
 `--cluster-lan-secret`, anyone who can reach the listener joins, so leave it
 unset only on networks you trust. `--cluster-connect` is a MoQ side on its own,
-so it needs no `--connect`.
+so it needs no `--connect`. Cluster dials share `--connect-bind` with
+`--connect`, and each binds it, so a fixed `--connect-bind` port with both
+`--connect` and `--cluster-connect` (or `--cluster-connect-api`) is refused at
+startup: use port 0, or drop `--connect`.
 
 ## Auth
 
