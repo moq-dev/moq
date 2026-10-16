@@ -357,7 +357,12 @@ impl Role {
 		loop {
 			let now = tokio::time::Instant::now().into_std();
 			let end = {
-				let presentation = self.presentation.lock().unwrap();
+				let mut presentation = self.presentation.lock().unwrap();
+				// The peer already resumed this transition after draining every end
+				// before it; one it declared since must not hold this role back.
+				if let Some(mapping) = presentation.transition(transition).and_then(|pending| pending.mapping) {
+					return Ok(mapping);
+				}
 				presentation
 					.ends
 					.iter()
@@ -710,6 +715,35 @@ mod tests {
 			presentation.lock().unwrap().due(video.map(ms(40)).unwrap()),
 			Some(resumed.into_std())
 		);
+	}
+
+	#[tokio::test]
+	async fn a_resumed_transition_ignores_the_peers_later_end() {
+		tokio::time::pause();
+		let now = tokio::time::Instant::now();
+		let presentation = std::sync::Arc::new(std::sync::Mutex::new(Presentation::new(DELAY)));
+		presentation
+			.lock()
+			.unwrap()
+			.audio(Duration::from_secs(10), DELAY, now.into_std());
+		let audio = Role::new(presentation.clone(), Default::default(), Kind::Audio);
+		let video = Role::new(presentation.clone(), Default::default(), Kind::Video);
+		let transition = audio.declare();
+		video.declare();
+		audio.end(ms(10_020)).unwrap();
+		video.end(ms(10_020)).unwrap();
+		video.plan(transition, ms(40), None);
+		tokio::time::advance(DELAY + Duration::from_millis(20)).await;
+		let mapping = video.resume(transition, ms(40), None).await.unwrap();
+		video.apply(transition, mapping);
+		// The resumed video plays, then its encoder stops again far ahead.
+		tokio::time::advance(DELAY * 2).await;
+		video.declare();
+		video.end(ms(60_000)).unwrap();
+		audio.plan(transition, ms(0), Some(DELAY));
+		let resumed =
+			tokio::time::timeout(Duration::from_millis(1), audio.resume(transition, ms(0), Some(DELAY))).await;
+		assert!(resumed.is_ok(), "audio waited for video's next end");
 	}
 
 	#[tokio::test]

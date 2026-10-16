@@ -332,9 +332,14 @@ impl<O: Output> Video<O> {
 						continue;
 					}
 					Step::Flush => {
-						generation = None;
+						let flushed = generation.take();
 						held.clear();
-						decoder.flush().await?
+						let frames = decoder.flush().await?;
+						// A gap during the await already discarded these pictures' generation.
+						if flushed != Some(buffers.lock().unwrap().front().unwrap().generation) {
+							continue;
+						}
+						frames
 					}
 				};
 				// A codec returns display order, so a picture held before the newest
