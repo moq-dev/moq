@@ -19,6 +19,23 @@ Run every Criterion target plus the local relay workloads:
 nix develop --command just bench
 ```
 
+Measure small-group session cost over independent publisher and viewer counts,
+for SUBSCRIBE and FETCH:
+
+```bash
+nix develop --command cargo bench --locked -p moq-net --bench session -- session_delivery_group_cost
+nix develop --command env SESSION_CPU=1 cargo bench --locked -p moq-net --bench session -- session_delivery_group_cost_cpu
+```
+
+The CPU mode requires Unix and measures the benchmark's current thread, including
+its protocol drivers and the flow-control fixture but excluding scheduler
+preemption. Both modes exclude setup and cache-clock advancement. Constrained
+cases hold data after the first transport write and release it only after a
+write actually blocks; Lite FETCH uses a bidi response, while IETF FETCH and
+SUBSCRIBE use uni data streams. No sleep supplies backpressure. Every case
+checks complete payload delivery. Compare paired runs with identical settings
+and disclose host load; CPU timing still depends on hardware contention.
+
 Measure 50 fps audio at per-packet, 100 and 200 ms grouping, plus 400 fps
 (2.5 ms packets) at per-packet and the 20 ms default. Frames are 200 bytes:
 

@@ -1,4 +1,5 @@
 import { expect, spyOn, test } from "bun:test";
+import { Micro, Milli } from "@moq/clock";
 import * as Catalog from "@moq/hang/catalog";
 import { Legacy } from "@moq/hang/container";
 import { Group, Error as NetError, Origin, Path, Time } from "@moq/net";
@@ -21,7 +22,7 @@ test("arrival capture stamps a later group before a stalled earlier group", asyn
 		const waiting = read(early.consume());
 		late.writeFrame({
 			timestamp: Time.Timestamp.fromMicros(20_000),
-			payload: Legacy.encodeFrame(new Uint8Array([1]), Time.Micro(20_000)),
+			payload: Legacy.encodeFrame(new Uint8Array([1]), Micro(20_000)),
 		});
 		late.close();
 		await read(late.consume());
@@ -29,7 +30,7 @@ test("arrival capture stamps a later group before a stalled earlier group", asyn
 		now = 50;
 		early.writeFrame({
 			timestamp: Time.Timestamp.fromMicros(0),
-			payload: Legacy.encodeFrame(new Uint8Array([1]), Time.Micro(0)),
+			payload: Legacy.encodeFrame(new Uint8Array([1]), Micro(0)),
 		});
 		early.close();
 		await waiting;
@@ -48,7 +49,7 @@ test("arrival capture excludes duration markers", async () => {
 	const group = new Group.Producer(7);
 	group.writeFrame({
 		timestamp: Time.Timestamp.fromMicros(100_000),
-		payload: Legacy.encodeFrame(new Uint8Array(), Time.Micro(100_000)),
+		payload: Legacy.encodeFrame(new Uint8Array(), Micro(100_000)),
 	});
 	group.close();
 	const captured: Arrival[] = [];
@@ -77,8 +78,8 @@ test("the observer shares playback demand and closes without ending playback", a
 			numberOfChannels: 1,
 			container: { kind: "legacy" },
 		} as Catalog.AudioConfig),
-		delay: new Signal<Delay>(Time.Milli(250)),
-		maxDelay: new Signal(Time.Milli(250)),
+		delay: new Signal<Delay>(Milli(250)),
+		maxDelay: new Signal(Milli(250)),
 	});
 	try {
 		while (!track.subscription.peek()) await track.subscription.changed();
@@ -86,7 +87,7 @@ test("the observer shares playback demand and closes without ending playback", a
 		const player = published
 			.consume()
 			.track("audio")
-			.subscribe({ priority: Catalog.PRIORITY.audio, maxDelay: Time.Milli(250) });
+			.subscribe({ priority: Catalog.PRIORITY.audio, maxDelay: Milli(250) });
 		await capture.close();
 		expect(player.closed.peek()).toBeUndefined();
 		player.close();
@@ -117,7 +118,7 @@ test("at auto the observer asks for the decoder's 2 s budget, not the target", a
 			container: { kind: "legacy" },
 		} as Catalog.AudioConfig),
 		delay: new Signal<Delay>("auto"),
-		maxDelay: new Signal(Time.Milli(250)),
+		maxDelay: new Signal(Milli(250)),
 	});
 	try {
 		while (!track.subscription.peek()) await track.subscription.changed();
@@ -145,15 +146,15 @@ async function captureGroupEnd(end: (group: Group.Producer) => void): Promise<st
 			numberOfChannels: 1,
 			container: { kind: "legacy" },
 		} as Catalog.AudioConfig),
-		delay: new Signal<Delay>(Time.Milli(250)),
-		maxDelay: new Signal(Time.Milli(250)),
+		delay: new Signal<Delay>(Milli(250)),
+		maxDelay: new Signal(Milli(250)),
 	});
 	try {
 		while (!track.subscription.peek()) await track.subscription.changed();
 		const group = track.appendGroup();
 		group.writeFrame({
 			timestamp: Time.Timestamp.fromMicros(0),
-			payload: Legacy.encodeFrame(new Uint8Array([1]), Time.Micro(0)),
+			payload: Legacy.encodeFrame(new Uint8Array([1]), Micro(0)),
 		});
 		while (capture.drain().length === 0) await new Promise((resolve) => setTimeout(resolve, 0));
 		end(group);

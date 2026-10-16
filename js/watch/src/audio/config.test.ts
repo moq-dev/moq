@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
+import { Micro, Milli } from "@moq/clock";
 import * as Catalog from "@moq/hang/catalog";
-import { Time } from "@moq/net";
 import { Effect, Signal } from "@moq/signals";
 import { decoderConfig, frameDuration, packetDuration, playbackIdentity } from "./config";
 
@@ -63,8 +63,8 @@ test("routing and decoder inputs change the playback identity", () => {
 test("AAC and MP3 frame durations follow their codec frame sizes", () => {
 	expect(frameDuration(config({ codec: "mp4a.40.2", sampleRate: 48000 }))).toBeCloseTo(21.333, 3);
 	expect(frameDuration(config({ codec: "mp4a.40.5", sampleRate: 48000 }))).toBeCloseTo(42.667, 3);
-	expect(frameDuration(config({ codec: "mp3", sampleRate: 48000 }))).toBe(Time.Milli(24));
-	expect(frameDuration(config({ codec: "mp3", sampleRate: 24000 }))).toBe(Time.Milli(24));
+	expect(frameDuration(config({ codec: "mp3", sampleRate: 48000 }))).toBe(Milli(24));
+	expect(frameDuration(config({ codec: "mp3", sampleRate: 24000 }))).toBe(Milli(24));
 });
 
 test("Opus and unknown codecs have no constant frame duration", () => {
@@ -76,11 +76,11 @@ test("Opus and unknown codecs have no constant frame duration", () => {
 test("an implicit CMAF duration falls through to the Opus TOC", () => {
 	// TOC 0x78: config 15 (hybrid fullband, 20 ms), one frame.
 	const frame = {
-		timestamp: Time.Micro(0),
+		timestamp: Micro(0),
 		keyframe: true,
 		payload: new Uint8Array([0x78, 0]),
-		duration: Time.Micro(0),
+		duration: Micro(0),
 	};
-	expect(packetDuration("opus", frame)).toBe(Time.Milli(20));
+	expect(packetDuration("opus", frame)).toBe(Milli(20));
 	expect(packetDuration("mp4a.40.2", frame)).toBeUndefined();
 });

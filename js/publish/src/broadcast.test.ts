@@ -1,7 +1,8 @@
 import { expect, test } from "bun:test";
+import { Manual, Milli, Nano } from "@moq/clock";
 import * as Catalog from "@moq/hang/catalog";
 import * as Json from "@moq/json";
-import { Origin, Path, Time, Track } from "@moq/net";
+import { Origin, Path, Track } from "@moq/net";
 import { Effect, Signal } from "@moq/signals";
 import { Broadcast } from "./broadcast.ts";
 
@@ -343,7 +344,7 @@ test("replacing a closed rendition track keeps the broadcast and publishes a fre
 });
 
 test("changing maxAge publishes a new network broadcast", async () => {
-	const maxAge = new Signal<Time.Milli | undefined>(Time.Milli(1000));
+	const maxAge = new Signal<Milli | undefined>(Milli(1000));
 	const broadcast = new Broadcast({
 		enabled: true,
 		origin: new Origin.Producer(),
@@ -355,20 +356,19 @@ test("changing maxAge publishes a new network broadcast", async () => {
 	const before = broadcast.net.peek();
 
 	// A track's retention is fixed at creation, so the tracks move to a fresh broadcast.
-	maxAge.set(Time.Milli(2000));
+	maxAge.set(Milli(2000));
 	await settle();
 	const after = broadcast.net.peek();
 	expect(after).toBeDefined();
 	expect(after).not.toBe(before);
-	expect((await after?.track("video").info())?.maxAge).toBe(Time.Milli(2000));
+	expect((await after?.track("video").info())?.maxAge).toBe(Milli(2000));
 
 	broadcast.close();
 });
 
 test("keeps the current catalog snapshot for a reconnecting viewer", async () => {
-	const real = performance.now.bind(performance);
-	let now = real();
-	performance.now = () => now;
+	const clock = new Manual();
+	const restore = clock.install();
 
 	try {
 		const broadcast = new Broadcast({
@@ -388,14 +388,14 @@ test("keeps the current catalog snapshot for a reconnecting viewer", async () =>
 
 		// A reconnect past the idle cache window must still receive the live track's newest
 		// snapshot instead of waiting forever for an edit that may never come.
-		now += 60_000;
+		await clock.advanceAsync(Nano.fromMilli(Milli(60_000)));
 		const second = net.track(Broadcast.CATALOG_TRACK).subscribe();
 		expect((await new Json.Snapshot.Consumer<Catalog.Root>({ track: second }).latest())?.value.video).toBeDefined();
 		second.close();
 
 		broadcast.close();
 	} finally {
-		performance.now = real;
+		restore();
 	}
 });
 
