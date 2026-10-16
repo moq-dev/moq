@@ -74,7 +74,6 @@ above them.
 - [Moxygen minimal interop](/quest/m1/smoke-moxygen.md) - announce-subscribe passes and the smoke lane stops hiding its failure
 - [Public relay diagnosis](/quest/m1/smoke-relays.md) - optional failed cells get attributed causes and focused first-party follow-ups
 - [FETCH max-delay](/quest/m1/fetch-max-delay.md) - historical readers obey publisher max-age and an optional tighter reader budget, including while holding a group
-- [Draft-20 FETCH edge-case backport](/quest/m1/fetch-edge-cases.md) - backport the final-object and response-group fixes to a later 0.17 patch after main lands
 - [Subscribe-close backport](/quest/m1/subscribe-close-backport.md) - the same fix and the `race` loser fix on `release`, so closing a subscription during setup leaves no unhandled rejection in a later 0.17 patch
 - [Lite SETUP backport](/quest/m1/lite-setup-backport.md) - `release` closes a moq-lite session on a repeated SETUP parameter or a second Setup Stream, in a later 0.14.x patch (#5521)
 - [Claim answer epochs](/quest/m1/claim-answer-epochs.md) - a claim answers each output by publishing it at its exact path under its own epoch, so a restarted output never reaches a returning reader as the old one's cache
