@@ -106,6 +106,8 @@ pub enum moq_protocol_kind {
 	MOQ_PROTOCOL_KIND_UNKNOWN = 24,
 	/// The session exceeded its announcement or subscription cap.
 	MOQ_PROTOCOL_KIND_TOO_MANY_REQUESTS = 25,
+	/// The authorization token expired and can be refreshed.
+	MOQ_PROTOCOL_KIND_EXPIRED = 26,
 }
 
 /// A protocol failure a peer sent: scope, verbatim wire code, and recognized kind.
@@ -348,6 +350,7 @@ fn protocol_of_net(err: &moq_net::Error) -> Option<moq_protocol_error> {
 		moq_net::Error::Session(err) => Some(from_session(err)),
 		moq_net::Error::Stream(err) => Some(from_stream(err)),
 		moq_net::Error::App(app) => Some(from_stream(&moq_net::StreamError::App(*app))),
+		moq_net::Error::Expired => Some(from_session(&moq_net::SessionError::Expired)),
 		_ => None,
 	}
 }
@@ -374,6 +377,7 @@ fn session_kind(err: &moq_net::SessionError) -> moq_protocol_kind {
 		moq_net::SessionError::Cancel => MOQ_PROTOCOL_KIND_CANCEL,
 		moq_net::SessionError::Internal => MOQ_PROTOCOL_KIND_INTERNAL,
 		moq_net::SessionError::Unauthorized => MOQ_PROTOCOL_KIND_UNAUTHORIZED,
+		moq_net::SessionError::Expired => MOQ_PROTOCOL_KIND_EXPIRED,
 		moq_net::SessionError::ProtocolViolation => MOQ_PROTOCOL_KIND_PROTOCOL_VIOLATION,
 		moq_net::SessionError::KeyValueFormatting => MOQ_PROTOCOL_KIND_KEY_VALUE_FORMATTING,
 		moq_net::SessionError::GoawayTimeout => MOQ_PROTOCOL_KIND_GOAWAY_TIMEOUT,

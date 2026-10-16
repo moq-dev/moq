@@ -102,7 +102,7 @@ pub fn to_stream_code(err: &StreamError, version: Version) -> u32 {
 /// A code the draft does not assign stays [`StreamError::Unknown`], which surfaces as
 /// [`Error::Stream`](crate::Error::Stream): an error, but never one given a meaning it did
 /// not carry. That includes the codes this crate has no local counterpart for
-/// (UNKNOWN_OBJECT_STATUS, EXPIRED_AUTH_TOKEN, EXCESSIVE_LOAD) and every value a later
+/// (UNKNOWN_OBJECT_STATUS, EXCESSIVE_LOAD) and every value a later
 /// draft may add.
 pub fn from_stream_code(code: u32, version: Version) -> StreamError {
 	match code {
@@ -224,6 +224,7 @@ pub(crate) mod request {
 
 	/// The same condition from draft-15 on, where 0x10 became DOES_NOT_EXIST.
 	const MALFORMED_AUTH_TOKEN: u64 = 0x4;
+	const EXPIRED_AUTH_TOKEN: u64 = 0x5;
 
 	/// The value for "the thing you asked for is not here", or `None` where the draft and
 	/// request assign none.
@@ -295,6 +296,11 @@ pub(crate) mod request {
 		}
 	}
 
+	/// The value for an expired token. Draft-14 did not share this registry assignment.
+	fn expired_auth_token(version: Version) -> Option<u64> {
+		(version != Version::Draft14).then_some(EXPIRED_AUTH_TOKEN)
+	}
+
 	/// The value for a draining session, or `None` before draft-17 registered one.
 	fn going_away(version: Version) -> Option<u64> {
 		match version {
@@ -315,6 +321,7 @@ pub(crate) mod request {
 			Error::Unauthorized
 			| Error::Session(SessionError::Unauthorized)
 			| Error::Stream(StreamError::Unauthorized) => return UNAUTHORIZED,
+			Error::Expired | Error::Session(SessionError::Expired) => expired_auth_token(version),
 			Error::Timeout | Error::Stream(StreamError::DeliveryTimeout) | Error::Session(SessionError::Timeout) => {
 				return TIMEOUT;
 			}
@@ -364,6 +371,7 @@ pub(crate) mod request {
 			UNAUTHORIZED => Error::Unauthorized,
 			TIMEOUT => Error::Timeout,
 			NOT_SUPPORTED => Error::Unsupported,
+			code if Some(code) == expired_auth_token(version) => Error::Expired,
 			code if Some(code) == does_not_exist(kind, version) => Error::NotFound,
 			code if Some(code) == invalid_range(kind, version) => Error::InvalidRange,
 			code if Some(code) == invalid_joining_request_id(kind, version) => Error::InvalidJoiningRequestId,
@@ -402,9 +410,10 @@ pub(crate) mod request {
 		/// Every error a rejection distinguishes, plus one it does not, so the checks below cover
 		/// the whole registry rather than the variants someone remembered. A new arm in
 		/// [`to_code`] belongs here.
-		const EVERY_ERROR: [Error; 13] = [
+		const EVERY_ERROR: [Error; 14] = [
 			Error::Duplicate,
 			Error::Unauthorized,
+			Error::Expired,
 			Error::Timeout,
 			Error::Unsupported,
 			Error::Session(SessionError::Unsupported),

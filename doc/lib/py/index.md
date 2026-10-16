@@ -126,6 +126,7 @@ kind `ProtocolKind.TOO_MANY_REQUESTS`. Reduce
 the simultaneous announcements or subscriptions, or ask the relay operator
 to adjust the [session limits](/bin/relay/config#session-and-peer), before
 reconnecting with the same workload.
+An expired credential reports `ProtocolKind.EXPIRED`; refresh the token before retrying.
 
 ## Reference
 

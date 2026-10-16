@@ -87,6 +87,8 @@ export type RequestCondition =
 	| "internal"
 	/** The peer's credentials do not cover the request. */
 	| "unauthorized"
+	/** The token expired and can be refreshed. */
+	| "expired"
 	/** The request outlived an implementation-specific deadline. */
 	| "timeout"
 	/** This endpoint does not implement the request at all. */
@@ -109,6 +111,7 @@ const INTERNAL_ERROR = 0x0;
 const UNAUTHORIZED = 0x1;
 const TIMEOUT = 0x2;
 const NOT_SUPPORTED = 0x3;
+const EXPIRED_AUTH_TOKEN = 0x5;
 
 /** A draining session. Draft-17 and later. */
 const GOING_AWAY = 0x6;
@@ -192,6 +195,8 @@ export function toRequestCode(condition: RequestCondition, kind: RequestKind, ve
 			return INTERNAL_ERROR;
 		case "unauthorized":
 			return UNAUTHORIZED;
+		case "expired":
+			return version === Version.DRAFT_14 ? INTERNAL_ERROR : EXPIRED_AUTH_TOKEN;
 		case "timeout":
 			return TIMEOUT;
 		case "not_supported":
@@ -239,6 +244,7 @@ export function fromRequestCode(code: number, kind: RequestKind, version: IetfVe
 	if (code === doesNotExist(kind, version)) return "does_not_exist";
 	if (code === invalidRange(kind, version)) return "invalid_range";
 	if (code === invalidJoiningRequestId(kind, version)) return "invalid_joining_request_id";
+	if (version !== Version.DRAFT_14 && code === EXPIRED_AUTH_TOKEN) return "expired";
 	if (code === uninterested(kind, version)) return "uninterested";
 	if (code === malformedTrack(kind, version)) return "malformed_track";
 	if (code === goingAway(version)) return "going_away";
