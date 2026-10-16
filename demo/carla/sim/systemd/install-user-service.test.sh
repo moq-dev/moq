@@ -43,7 +43,7 @@ CARLA_SYSTEMD_USER_DIR="$tmp/units" \
 # The printed settings are what an operator copies: a scoped token for the
 # hosted relay, the locally built image, and the tokenless local relay.
 grep -Fxq '  MOQ_URL=https://cdn.moq.dev/demo?jwt=<token>' "$tmp/install.out"
-grep -Fxq '  CARLA_IMAGE=localhost/moq-carla:<tag printed by just carla build>' "$tmp/install.out"
+grep -Fxq '  CARLA_IMAGE=localhost/moq-carla:<tag printed by the moq-dev/carla build>' "$tmp/install.out"
 grep -Fq 'scoped to publish carla/** and subscribe' "$tmp/install.out"
 grep -Fq 'viewer/carla/**. For local development, MOQ_URL=http://localhost:4443 needs' "$tmp/install.out"
 test "$(stat -c %a "$tmp/units")" = 700

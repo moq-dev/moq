@@ -11,21 +11,24 @@ subscribes, and the truck echoes what it accepted on `status`.
 ├── web/      # the player: map, video, keyboard and steering-wheel input (@moq/demo-carla)
 ├── sim/      # the worker: one Python process driving every truck in CARLA
 │   ├── moq_carla_sim/  # safety gate, CARLA world, MoQ publish and control
-│   ├── plugin/         # the Unreal module that feeds the GPU bridge
-│   ├── patches/        # the CARLA build with the bridge (`just carla build`)
 │   └── systemd/        # rootless user units for an always-on workstation
 ├── bridge/   # Rust: the GPU video bridge the simulator loads (moq-carla-bridge)
 └── justfile  # `just carla <recipe>`
 ```
 
+The simulator itself is a CARLA source build with the bridge's Unreal module,
+in [moq-dev/carla](https://github.com/moq-dev/carla).
+
 ## Running locally
 
 Needs a Linux host with an NVIDIA GPU and podman; the repo's dev shell
 (`nix develop`, or direnv) provides everything else. Build the simulator image
-and the worker's virtualenv once, then leave the simulator running:
+with [moq-dev/carla](https://github.com/moq-dev/carla) and the worker's
+virtualenv once, then leave the simulator running:
 
 ```bash
-just carla build                      # prints the image tag
+git clone https://github.com/moq-dev/carla ../carla
+../carla/build.sh .                   # from this checkout's root; prints the image tag
 just carla venv
 CARLA_IMAGE=<tag> just carla server   # separate terminal
 just carla                            # relay + every truck + web player
@@ -151,7 +154,8 @@ Bake a town's roads for the player's map against a running simulator with
 ## The GPU video bridge
 
 Camera pixels never leave the GPU. `bridge/` is a library the simulator loads:
-the CARLA plugin (`sim/plugin/MoqBridge`) copies each camera's render target
+the CARLA plugin ([moq-dev/carla](https://github.com/moq-dev/carla)'s
+`plugin/MoqBridge`) copies each camera's render target
 into an exportable Vulkan image on Unreal's own queue, and the bridge hands it
 to the `moq-video` encoder on the same device, which converts, scales, and
 encodes it there. Compressed frames cross a Unix socket to the worker
@@ -167,7 +171,9 @@ worker exits for systemd to restart.
   `cargo run -p moq-carla-bridge --example standin -- <socket> truck1/front`
   feeds a worker by hand. The plugin itself compiles only in the CARLA build.
 
-The C ABI the plugin calls is `bridge/include/carla_bridge.h`.
+The C ABI the plugin calls is `bridge/include/carla_bridge.h`. moq-dev/carla
+holds an identical copy that the plugin compiles against: change both
+together, since its image build refuses a mismatch.
 
 ## Keeping it running
 
@@ -176,13 +182,12 @@ units. The installer records this checkout's path; rerun it after moving the
 checkout.
 
 ```bash
-just carla build
 just carla venv
 just carla service-install
 
 # The units read this. MOQ_URL carries a token allowed to publish `carla/**`
 # and subscribe `viewer/carla/**`; keeping it here keeps it off the command
-# line. CARLA_IMAGE is the tag `just carla build` printed, since the worker
+# line. CARLA_IMAGE is the tag the moq-dev/carla build printed, since the worker
 # refuses a stock simulator.
 cat >~/.config/moq/carla.env <<'EOF'
 MOQ_URL=https://cdn.moq.dev/demo?jwt=...

@@ -22,6 +22,12 @@
  * that cannot go on, whether for such an error or its own (a failed copy or
  * submission), reports it with carla_bridge_source_fail, which the worker
  * sees as the stream failing, then closes the source.
+ *
+ * This file has two identical copies: moq's
+ * demo/carla/bridge/include/carla_bridge.h, which the bridge library
+ * implements, and https://github.com/moq-dev/carla's include/carla_bridge.h,
+ * which the plugin compiles against. Change both together; the simulator
+ * image build refuses a mismatch.
  */
 
 #ifndef CARLA_BRIDGE_H

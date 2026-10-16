@@ -8,9 +8,10 @@
 # client and can be restarted independently.
 set -euo pipefail
 
-# Stock upstream by default. The worker needs the patched build (patches/: the
-# GPU video bridge and the RPC work guard), a local image from `just carla
-# build`, so it is selected by pinning CARLA_IMAGE rather than shipped here; put
+# Stock upstream by default. The worker needs the patched build (the GPU video
+# bridge and the RPC work guard), a local image built by
+# https://github.com/moq-dev/carla, so it is selected by pinning CARLA_IMAGE
+# rather than shipped here; put
 # that pin in ~/.config/moq/carla.env, which carla-sim.service reads. The
 # resolved image is logged below, so a pin that went missing is visible. The
 # worker refuses a stock simulator by name.

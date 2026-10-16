@@ -49,10 +49,6 @@ server:
 cdi:
     sim/cdi.sh
 
-# Build the simulator image (GPU video bridge, RPC idle wait) from source; see sim/patches/README.md.
-build:
-    sim/patches/build.sh
-
 # Disable rendering on a simulator no worker owns, so an idle simulator stays idle.
 park *ARGS:
     @sim/python.sh -m moq_carla_sim.park {{ ARGS }}
@@ -98,7 +94,6 @@ check:
     sim/python.test.sh
     sim/server.test.sh
     sim/systemd/install-user-service.test.sh
-    sim/patches/sources.test.sh
     bridge/gpu.test.sh
 
 # Auto-fix the worker's lint and formatting.

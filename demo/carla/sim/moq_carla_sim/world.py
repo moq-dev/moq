@@ -67,7 +67,7 @@ CONVOY_SPACING = 12.0
 SD_HEIGHT = 240
 
 # The camera attribute naming the bridge stream a camera renders for. Only the
-# patched simulator build has it (demo/carla/sim/patches).
+# patched simulator build has it (https://github.com/moq-dev/carla).
 BRIDGE_ATTRIBUTE = "moq_bridge_stream"
 
 # How often the clock reports its tick durations, matching the video pump's
@@ -838,7 +838,7 @@ class World:
         if not library.find("sensor.camera.rgb").has_attribute(BRIDGE_ATTRIBUTE):
             raise RuntimeError(
                 f"the simulator's cameras have no {BRIDGE_ATTRIBUTE} attribute: the simulator "
-                "lacks the GPU video bridge. Build it with `just carla build` and pin CARLA_IMAGE."
+                "lacks the GPU video bridge. Build it with https://github.com/moq-dev/carla and pin CARLA_IMAGE."
             )
         truck_bp = library.find(TRUCK_BLUEPRINT)
         # Traffic Manager deletes stuck non-hero vehicles. Every truck must

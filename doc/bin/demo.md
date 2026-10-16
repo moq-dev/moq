@@ -53,10 +53,11 @@ shape covers teleoperation: swap the emulator for a robot.
 
 Teleoperation over MoQ: simulated trucks drive themselves through one
 [CARLA](https://carla.org) world until you take one over from the browser.
-The simulator needs a Linux host with an NVIDIA GPU; the player runs anywhere.
+The simulator needs a Linux host with an NVIDIA GPU and an image built by
+[moq-dev/carla](https://github.com/moq-dev/carla); the player runs anywhere.
 
 ```bash
-just carla build && just carla venv   # once: the simulator image and worker
+just carla venv                       # once: the worker
 CARLA_IMAGE=<tag> just carla server   # leave the simulator running
 just carla                            # relay + trucks + player
 ```
