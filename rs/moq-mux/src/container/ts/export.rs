@@ -187,6 +187,12 @@ where
 	/// up before it ever configures video. `None` until the tables are built, and for
 	/// programs with no video track (nothing to align to).
 	video_start: Option<Timestamp>,
+	/// Whether a video frame has gone out since [`Self::video_start`] was set. Until one has,
+	/// what the other tracks release is dropped: a video track whose start group was cut
+	/// before it went out starts at its next keyframe instead ([`jitter::Buffer`]).
+	video_out: bool,
+	/// Frames dropped ahead of the first video keyframe, or of their codec config.
+	trimmed: u64,
 	/// Each elementary stream's access units and silence on the PCR returned ([`Self::stats`]).
 	liveness: super::import::Liveness,
 }
@@ -272,6 +278,8 @@ struct Input<'a> {
 	waiting_for_header: bool,
 	video_start: Option<Timestamp>,
 	jitter: &'a mut jitter::Buffer<u16, Queued>,
+	/// Counts the frames dropped ahead of the tune-in point or their codec config.
+	trimmed: &'a mut u64,
 }
 
 impl Track {
@@ -335,6 +343,7 @@ impl Track {
 			match self.source.poll_read(waiter)? {
 				Poll::Ready(Some(frame)) => {
 					if input.waiting_for_header && !self.source.header_ready() {
+						*input.trimmed += 1;
 						continue;
 					}
 					let pending = Pending {
@@ -349,6 +358,7 @@ impl Track {
 						&& !is_video && pending.restart == self.restart
 						&& pending.frame.timestamp < start
 					{
+						*input.trimmed += 1;
 						continue;
 					}
 					if input.waiting_for_header {
@@ -1046,6 +1056,8 @@ where
 			queue: VecDeque::new(),
 			liveness: Default::default(),
 			video_start: None,
+			video_out: false,
+			trimmed: 0,
 			mux_rate: None,
 			mux_rate_override: None,
 		}
@@ -1200,6 +1212,7 @@ where
 						&& track.pending.as_ref().is_some_and(|p| p.frame.timestamp < start)
 					{
 						track.pending = None;
+						self.trimmed += 1;
 					}
 				}
 			}
@@ -1252,22 +1265,26 @@ where
 				ready.generation >= self.generation,
 				"the jitter buffer released an older generation after a newer one"
 			);
-			let name = self
+			let (name, is_video) = self
 				.tracks
 				.iter()
 				.find(|(_, t)| t.pid == ready.track)
-				.map(|(name, _)| name.clone())
+				.map(|(name, t)| (name.clone(), matches!(t.kind, Kind::Video(_))))
 				.context("frame for an unknown PID")?;
-			self.last_timestamp = Some(ready.item.frame.timestamp);
-			let decode = ready.item.decode.as_nanos();
-			self.lay_before(ready.item.key.as_nanos())?;
-			self.mux(&name, ready.item)?;
-			if self.delay.is_zero() {
-				// Without a clock to lay slots on, a frame settles every slot before its own: a
-				// later frame decodes no earlier, so it can be due no earlier than this, less the
-				// longest drain of any track.
-				let drain = self.max_drain();
-				self.lay(Some(schedule::slot(decode.saturating_sub(drain.as_nanos()))))?;
+			if self.leads_video(is_video, ready.item.frame.timestamp) {
+				self.trimmed += 1;
+			} else {
+				self.last_timestamp = Some(ready.item.frame.timestamp);
+				let decode = ready.item.decode.as_nanos();
+				self.lay_before(ready.item.key.as_nanos())?;
+				self.mux(&name, ready.item)?;
+				if self.delay.is_zero() {
+					// Without a clock to lay slots on, a frame settles every slot before its own: a
+					// later frame decodes no earlier, so it can be due no earlier than this, less the
+					// longest drain of any track.
+					let drain = self.max_drain();
+					self.lay(Some(schedule::slot(decode.saturating_sub(drain.as_nanos()))))?;
+				}
 			}
 			if self.queue.is_empty() {
 				// Releasing a due frame opens room in its source. Read it before parking:
@@ -1281,6 +1298,7 @@ where
 						waiting_for_header: false,
 						video_start: self.video_start,
 						jitter: &mut self.jitter,
+						trimmed: &mut self.trimmed,
 					},
 				)?;
 				if !finished && track.finished {
@@ -1395,6 +1413,7 @@ where
 			waiting_for_header: self.psi.is_none(),
 			video_start: self.video_start,
 			jitter: &mut self.jitter,
+			trimmed: &mut self.trimmed,
 		};
 		for (name, track) in &mut self.tracks {
 			track.fill(name, waiter, &mut input)?;
@@ -1666,6 +1685,15 @@ where
 	pub fn stats(&self) -> super::stats::Export {
 		let mut stats = super::stats::Export {
 			dropped: self.jitter.dropped(),
+			trimmed: self.jitter.trimmed() + self.trimmed,
+			gaps: self
+				.tracks
+				.values()
+				.map(|track| {
+					let skips = track.base.1 + track.source.skips();
+					skips - (track.base.0 + track.source.markers())
+				})
+				.sum(),
 			drift: self.jitter.drift().map(|drift| drift * 1e6),
 			out_of_tolerance: self.jitter.out_of_tolerance(),
 			..Default::default()
@@ -1799,6 +1827,36 @@ where
 			self.stale.insert(name.clone());
 		}
 		Ok(())
+	}
+
+	/// Whether a frame released at `timestamp` presents ahead of the video keyframe the stream
+	/// begins on ([`Self::video_start`]), and so is dropped. A video track whose start group
+	/// was cut before it went out starts at its next keyframe instead ([`jitter::Buffer`]), so
+	/// until video goes out the start is the earliest frame a video track holds. Video goes out
+	/// further ahead of its decode time than the other tracks, so what they release before it
+	/// presents ahead of it too.
+	fn leads_video(&mut self, is_video: bool, timestamp: Timestamp) -> bool {
+		let Some(start) = self.video_start else {
+			return false;
+		};
+		if is_video {
+			if !self.video_out {
+				self.video_out = true;
+				self.video_start = Some(start.max(timestamp));
+			}
+			return false;
+		}
+		if self.video_out {
+			return timestamp < start;
+		}
+		let next = self
+			.tracks
+			.values()
+			.filter(|track| matches!(track.kind, Kind::Video(_)))
+			.filter_map(|track| self.jitter.peek(&track.pid))
+			.map(|queued| queued.frame.timestamp)
+			.min();
+		timestamp < next.map_or(start, |next| next.max(start))
 	}
 
 	/// Discard what has not gone out and restart the program clock. Every rendition

@@ -399,7 +399,14 @@ impl ExportSource {
 						}
 						frame
 					}
-					Some(Item::Read(Read::Gap { .. })) => {
+					Some(Item::Read(Read::Gap { timestamp, duration })) => {
+						// The export never receives this media, so say what it loses and where.
+						tracing::warn!(
+							track = consumer.name(),
+							at = ?std::time::Duration::from(timestamp),
+							lost = ?std::time::Duration::from(duration),
+							"media skipped upstream; resuming at the next group"
+						);
 						self.finish_ends();
 						self.skips += 1;
 						return Poll::Ready(Ok(Some(Event::GroupEnd)));
