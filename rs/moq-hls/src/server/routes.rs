@@ -271,13 +271,7 @@ async fn media(server: &Server, broadcast: &str, kind: Kind, rendition: &str, qu
 		Ok(parsed) => parsed,
 		Err(()) => return bad_request(),
 	};
-	let playlist = async {
-		match range {
-			Some(range) => rendition.playlist_range(range, child_query.as_deref()).await,
-			None => rendition.playlist(child_query.as_deref()).await,
-		}
-	};
-	match tokio::time::timeout(READY_TIMEOUT, playlist).await {
+	match tokio::time::timeout(READY_TIMEOUT, rendition.playlist(range, child_query.as_deref())).await {
 		Ok(Ok(Some(playlist))) => m3u8(playlist),
 		Ok(Ok(None)) | Err(_) => not_found(),
 		Ok(Err(crate::Error::RangeNotDurable | crate::Error::RangeUnavailable(_))) => range_not_satisfiable(),
@@ -286,22 +280,24 @@ async fn media(server: &Server, broadcast: &str, kind: Kind, rendition: &str, qu
 }
 
 /// Parse `start` and `end` as decimal media-time seconds, returning the remaining query for
-/// child resources. Both are required together and may occur only once.
+/// child resources. Both are required together and may occur only once. Other parameters pass
+/// through byte for byte, so a signed token is never re-encoded.
 fn playlist_range(query: Option<&str>) -> Result<(Option<crate::export::Range>, Option<String>), ()> {
 	let Some(query) = query else {
 		return Ok((None, None));
 	};
 	let mut start = None;
 	let mut end = None;
-	let mut child = url::form_urlencoded::Serializer::new(String::new());
-	for (key, value) in url::form_urlencoded::parse(query.as_bytes()) {
+	let mut child = Vec::new();
+	for pair in query.split('&') {
+		let Some((key, value)) = url::form_urlencoded::parse(pair.as_bytes()).next() else {
+			continue;
+		};
 		match key.as_ref() {
 			"start" if start.is_none() => start = Some(media_time(&value)?),
 			"end" if end.is_none() => end = Some(media_time(&value)?),
 			"start" | "end" => return Err(()),
-			_ => {
-				child.append_pair(&key, &value);
-			}
+			_ => child.push(pair),
 		}
 	}
 	let range = match (start, end) {
@@ -309,7 +305,7 @@ fn playlist_range(query: Option<&str>) -> Result<(Option<crate::export::Range>, 
 		(Some(start), Some(end)) => Some(crate::export::Range::new(start, end).map_err(|_| ())?),
 		_ => return Err(()),
 	};
-	let child = child.finish();
+	let child = child.join("&");
 	Ok((range, (!child.is_empty()).then_some(child)))
 }
 
@@ -435,13 +431,16 @@ mod tests {
 
 	#[test]
 	fn parses_playlist_ranges_and_preserves_other_query_parameters() {
-		let (range, query) = playlist_range(Some("jwt=a%2Eb&start=1.25&end=4")).unwrap();
+		let (range, query) = playlist_range(Some("jwt=a%2Eb&start=1.25&sig=x~y*&end=4")).unwrap();
 		assert_eq!(
 			range,
 			Some(crate::export::Range::new(Duration::from_millis(1250), Duration::from_secs(4)).unwrap())
 		);
-		assert_eq!(query.as_deref(), Some("jwt=a.b"));
-		assert_eq!(playlist_range(Some("jwt=x")).unwrap(), (None, Some("jwt=x".into())));
+		assert_eq!(query.as_deref(), Some("jwt=a%2Eb&sig=x~y*"));
+		assert_eq!(
+			playlist_range(Some("jwt=x&flag")).unwrap(),
+			(None, Some("jwt=x&flag".into()))
+		);
 
 		for invalid in [
 			"start=1",

@@ -580,7 +580,7 @@ impl Rendition {
 	///
 	/// The requested start is widened to the preceding independently decodable segment. The
 	/// playlist grows while `range.end` is ahead of the live edge and becomes VOD once covered.
-	pub fn range_playlist(&self, range: super::Range, query: Option<&str>) -> Result<Option<String>> {
+	pub(crate) fn range_playlist(&self, range: super::Range, query: Option<&str>) -> Result<Option<String>> {
 		if !super::durable(&self.section) {
 			return Err(crate::Error::RangeNotDurable);
 		}
@@ -603,23 +603,24 @@ impl Rendition {
 	///
 	/// Waits without bound for the first segment; bounding it is the caller's policy. `query`
 	/// propagates exactly as in [`media_playlist`](Self::media_playlist).
-	pub async fn playlist(&self, query: Option<&str>) -> Result<Option<String>> {
+	///
+	/// A `range` lists only the segments covering that media time, and needs a durable timeline
+	/// exported with [`Config::history`](super::Config::history). Its start widens to the
+	/// preceding sync point, and the playlist ends with `EXT-X-ENDLIST` once media covers its
+	/// end. A range the timeline cannot fully serve fails with
+	/// [`RangeNotDurable`](crate::Error::RangeNotDurable) or
+	/// [`RangeUnavailable`](crate::Error::RangeUnavailable) rather than listing a partial clip.
+	pub async fn playlist(&self, range: Option<super::Range>, query: Option<&str>) -> Result<Option<String>> {
 		self.playable().await;
 		// An inline-codec init needs a keyframe group fetched first. init() caches, so the
 		// player's follow-up GET of the init is free.
 		if self.init().await?.is_none() {
 			return Ok(None);
 		}
-		Ok(self.media_playlist(query))
-	}
-
-	/// Wait until media is playable, build its init, and render [`range_playlist`](Self::range_playlist).
-	pub async fn playlist_range(&self, range: super::Range, query: Option<&str>) -> Result<Option<String>> {
-		self.playable().await;
-		if self.init().await?.is_none() {
-			return Ok(None);
+		match range {
+			Some(range) => self.range_playlist(range, query),
+			None => Ok(self.media_playlist(query)),
 		}
-		self.range_playlist(range, query)
 	}
 
 	/// Snapshot the media playlist from the current timeline window.

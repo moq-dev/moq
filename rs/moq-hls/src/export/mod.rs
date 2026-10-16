@@ -2495,7 +2495,7 @@ mod tests {
 			.next()
 			.expect("a video rendition");
 		let rendition = broadcaster.rendition(Kind::Video, &video).expect("video discovered");
-		let playlist = tokio::time::timeout(Duration::from_secs(5), rendition.playlist(None))
+		let playlist = tokio::time::timeout(Duration::from_secs(5), rendition.playlist(None, None))
 			.await
 			.expect("a listed segment")
 			.unwrap()

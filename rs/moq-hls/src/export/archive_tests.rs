@@ -340,7 +340,7 @@ impl Replay {
 
 	async fn playlist(&self, kind: Kind, name: &str) -> String {
 		let rendition = self.rendition(kind, name);
-		tokio::time::timeout(Duration::from_secs(5), rendition.playlist(None))
+		tokio::time::timeout(Duration::from_secs(5), rendition.playlist(None, None))
 			.await
 			.expect("playlist renders")
 			.unwrap()
