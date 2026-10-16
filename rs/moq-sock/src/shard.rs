@@ -12,37 +12,34 @@
 //!
 //! # The group
 //!
-//! [`Group`] is the whole entry point. It takes the port, fixes the member
-//! count, and hands out one [`Member`] per slot in index order. Binding yields
-//! an opaque [`Claim`], so no socket can be served while the group is partial.
-//! [`Group::complete`] accepts every claim, attaches the steering filter, and
-//! returns a [`Bound`] group that hands out sockets while retaining every
-//! underlying member for its own lifetime.
+//! [`bind`] is the whole entry point. It takes the port, binds every member in
+//! index order, attaches the steering filter, and returns a [`Bound`] group
+//! that hands out one serving [`Socket`] per member while retaining every
+//! underlying socket for its own lifetime.
 //!
 //! ```no_run
 //! # fn example(addr: std::net::SocketAddr) -> Result<(), Box<dyn std::error::Error>> {
-//! let mut group = moq_sock::shard::Group::acquire(addr, 4)?;
-//! let mut claims = Vec::new();
-//! while let Some(member) = group.member() {
-//!     claims.push(member.bind()?);
-//! }
-//! let mut group = group.complete(claims)?;
+//! let mut group = moq_sock::shard::bind(addr, 4)?;
 //! let mut members = Vec::new();
 //! while let Some(member) = group.member()? {
 //!     members.push((member.shard(), member.into_inner()));
 //! }
-//! // Serve each socket, issuing connection IDs with `cid(shard)`.
+//! // Serve each socket with an endpoint whose connection IDs name its shard.
 //! # Ok(())
 //! # }
 //! ```
 //!
 //! # The encoding
 //!
-//! [`cid`] makes the first byte of every connection ID this member issues
-//! congruent to its index modulo the group size. It also marks the ID with a
-//! bit pattern that no valid SRT data header can carry. The kernel
-//! selects `socks[A % count]` for a returned accumulator `A`, so feeding it that
-//! byte lands on the owner.
+//! The filter reads the first byte of a packet's destination connection ID and
+//! reduces it modulo the group size. The endpoint serving a member has to issue
+//! 8-byte connection IDs whose first byte is congruent to the member's
+//! [`Shard::index`] modulo [`Shard::count`], and whose fourth byte has both
+//! bits of `0x18` set, a pattern no valid SRT data header carries, so a short
+//! header from another protocol on the port keeps the 4-tuple hash.
+//! `moq_quic::RandomConnectionIdGenerator::set_shard` issues exactly those.
+//! The kernel selects `socks[A % count]` for a returned accumulator `A`, so
+//! feeding it that byte lands on the owner.
 //!
 //! A client's first packets carry a connection ID the *client* invented, which
 //! encodes nothing. Those hash to an arbitrary member, and that is fine: whoever
@@ -57,24 +54,23 @@
 //! (the kernel pulls the header off first) and uses the return value as the
 //! index. That rule fits in classic BPF, with no `CAP_BPF`, no
 //! BPF toolchain in the build, and no map to keep alive across restarts. The
-//! cost is that the kernel selects by *position*, so the group has to be built
-//! once, in order, and never resized, which is what [`Group`] is for.
+//! cost is that the kernel selects by *position*, so the group has to be bound
+//! once, in order, and never resized, which is why [`bind`] does all of it.
 
 use std::io;
 use std::net::{SocketAddr, UdpSocket};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 /// One member's slot in a group of sockets sharing a port via `SO_REUSEPORT`.
 ///
 /// Every member binds the same address and the kernel spreads inbound datagrams
 /// across the group, so N servers on N threads can serve one port without a
 /// shared socket between them. The kernel identifies a member by its *position*
-/// in the group, which is why only [`Group::member`] mints one: a shard is
-/// meaningful only inside a group that was bound once, in index order, and is
-/// never resized.
+/// in the group, which is why only [`bind`] mints one: a shard is meaningful
+/// only inside a group that was bound once, in index order, and is never
+/// resized.
 ///
-/// Carry it wherever the member issues connection IDs, which [`cid`] marks
-/// with its index.
+/// Carry it wherever the member issues connection IDs, which have to name it
+/// (see [the encoding](self#the-encoding)).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Shard {
 	index: u16,
@@ -82,17 +78,6 @@ pub struct Shard {
 }
 
 impl Shard {
-	/// Slot `index` of a group of `count` sockets, or `None` if that slot cannot
-	/// exist: a `count` of zero or past [`MAX_SHARDS`], or an `index` at or past
-	/// the end.
-	///
-	/// The upper bound is what makes every shard safe to steer: [`cid`]
-	/// spends `256 / count` values of a byte, so a larger group would leave it
-	/// none to spend.
-	fn new(index: u16, count: u16) -> Option<Self> {
-		(count <= MAX_SHARDS && index < count).then_some(Self { index, count })
-	}
-
 	/// This member's position in the group, from zero.
 	pub fn index(self) -> u16 {
 		self.index
@@ -133,200 +118,79 @@ pub enum Error {
 	/// No port could be resolved for an ephemeral request.
 	#[error("failed to resolve an ephemeral port")]
 	Resolve(#[source] io::Error),
+
+	/// A member could not bind, including [`io::ErrorKind::Unsupported`]
+	/// anywhere but Linux and [`io::ErrorKind::AddrInUse`] when the address is
+	/// already held.
+	#[error("failed to bind reuseport member {index}")]
+	Bind {
+		/// The member that failed.
+		index: u16,
+		/// What the bind returned.
+		#[source]
+		source: io::Error,
+	},
+
+	/// The steering filter could not be attached.
+	#[error("failed to steer the reuseport group")]
+	Steer(#[source] io::Error),
 }
 
-/// A `SO_REUSEPORT` group being formed.
+/// Bind a steered group of `count` sockets sharing `addr`.
 ///
-/// Everything a steered group has to get right lives here rather than in its
+/// Everything a steered group has to get right happens here rather than in its
 /// caller, because none of it is visible in a socket afterwards:
 ///
 /// - The port is locked before the first member binds and stays locked until the
-///   group and every member it handed out are gone, so a second same-UID group
-///   cannot interleave into this one. Hold the group for as long as its sockets
-///   are served.
+///   returned group and every socket it handed out are gone, so a second
+///   same-UID group cannot interleave into this one. Hold the group for as long
+///   as its sockets are served.
 /// - The member count is checked once, against what the steering filter can
 ///   address, and never changes.
-/// - [`member`](Self::member) hands out slots in index order, and a [`Member`]
-///   is the only thing that can bind into the group. The kernel numbers the
-///   group by bind order, so a member that binds out of turn is refused rather
-///   than silently taking a sibling's slot.
-/// - [`complete`](Self::complete) accepts only every claim from this group and
-///   attaches the filter before returning a [`Bound`] group. A claim exposes no
-///   socket, so a partial group cannot serve.
-/// - [`Bound`] retains every underlying socket. A serving handle may be dropped
-///   without removing its member and renumbering the survivors.
+/// - Members bind in index order, which is the order the kernel numbers them
+///   by, and the filter is attached before any socket is released.
 ///
-/// Members may be bound wherever their sockets are served, a worker's own thread
-/// included, as long as each one binds before the next takes its turn.
-#[derive(Debug)]
-pub struct Group {
-	count: u16,
-
-	/// The next slot to hand out. Not the same as the next slot to *bind*: a
-	/// member may be bound on a thread of its own, which is what [`State`]
-	/// tracks.
-	next: u16,
-
-	state: Arc<State>,
-}
-
-impl Group {
-	/// Take the port and fix the group at `count` members.
-	///
-	/// A `count` of zero is a group of one: a lone member is a valid group, and
-	/// the callers that size a group from a worker count would otherwise each
-	/// clamp it themselves.
-	///
-	/// An ephemeral port (`0`) is resolved here, with a plain bind that is
-	/// dropped again, and the group then takes that port like a named one.
-	/// Never a reuseport bind of port `0`: Linux counts a port held only by
-	/// same-UID reuseport sockets as free for one, so the kernel could hand
-	/// back a port another group holds and this one would silently join it. A
-	/// plain bind conflicts with every holder. Another socket taking the port
-	/// before the first member binds fails that bind with
-	/// [`io::ErrorKind::AddrInUse`].
-	pub fn acquire(addr: SocketAddr, count: u16) -> Result<Self, Error> {
-		let count = count.max(1);
-		if count > MAX_SHARDS {
-			return Err(Error::Count { count, max: MAX_SHARDS });
-		}
-
-		let addr = match addr.port() {
-			0 => crate::bind::udp(crate::bind::Udp::new(addr))
-				.and_then(|socket| socket.local_addr())
-				.map_err(Error::Resolve)?,
-			_ => addr,
-		};
-
-		let port = addr.port();
-		let lock = Lock::acquire(port).map_err(|_| Error::Overlap { port })?;
-
-		Ok(Self {
-			count,
-			next: 0,
-			state: Arc::new(State::new(addr, lock)),
-		})
-	}
-
-	/// How many sockets share the port.
-	pub fn count(&self) -> u16 {
-		self.count
-	}
-
-	/// The address the group holds, with an ephemeral port already resolved.
-	pub fn addr(&self) -> SocketAddr {
-		self.state.addr
-	}
-
-	/// The next slot to bind, or `None` once every slot has been handed out.
-	///
-	/// Bind each member before taking the next: they join the group in the order
-	/// they bind, and that order is the only thing the kernel knows them by.
-	pub fn member(&mut self) -> Option<Member> {
-		let shard = Shard::new(self.next, self.count)?;
-		self.next += 1;
-		Some(Member {
-			shard,
-			state: self.state.clone(),
-		})
-	}
-
-	/// Complete the group and make its sockets available for serving.
-	///
-	/// Every member must have bound successfully, and the claims must belong to
-	/// this group in slot order. Failure closes the partial group as a whole.
-	pub fn complete(self, claims: Vec<Claim>) -> io::Result<Bound> {
-		if claims.len() != usize::from(self.count) {
-			return Err(io::Error::new(
-				io::ErrorKind::InvalidInput,
-				format!(
-					"reuseport group needs {} bound members; {} were provided",
-					self.count,
-					claims.len()
-				),
-			));
-		}
-
-		for (index, claim) in claims.iter().enumerate() {
-			if !Arc::ptr_eq(&self.state, &claim.state) || usize::from(claim.shard.index()) != index {
-				return Err(io::Error::new(
-					io::ErrorKind::InvalidInput,
-					"reuseport claims must belong to this group in slot order",
-				));
-			}
-		}
-
-		let sockets: Vec<_> = claims.into_iter().map(|claim| (claim.shard, claim.socket)).collect();
-		let (_, last) = sockets.last().expect("a group always has at least one member");
-		attach(last, self.count)?;
-
-		Ok(Bound {
-			sockets,
-			next: 0,
-			state: self.state,
-		})
-	}
-}
-
-/// One member's claim on a slot in a [`Group`], which binding spends.
+/// A `count` of zero is a group of one: a lone member is a valid group.
 ///
-/// Send it wherever the socket is served, a worker's own thread included. It
-/// carries the group's address and its share of the group's port lock, so a
-/// member still waiting to bind cannot be raced by a second group even if its
-/// group is dropped first.
-#[derive(Debug)]
-pub struct Member {
-	shard: Shard,
-	state: Arc<State>,
-}
-
-impl Member {
-	/// This member's slot, which its connection IDs have to encode
-	/// ([`cid`]).
-	pub fn shard(&self) -> Shard {
-		self.shard
+/// An ephemeral port (`0`) is resolved first, with a plain bind that is
+/// dropped again, and the group then takes that port like a named one.
+/// Never a reuseport bind of port `0`: Linux counts a port held only by
+/// same-UID reuseport sockets as free for one, so the kernel could hand
+/// back a port another group holds and this one would silently join it. A
+/// plain bind conflicts with every holder. Another socket taking the port
+/// before the first member binds fails that bind with
+/// [`io::ErrorKind::AddrInUse`].
+pub fn bind(addr: SocketAddr, count: u16) -> Result<Bound, Error> {
+	let count = count.max(1);
+	if count > MAX_SHARDS {
+		return Err(Error::Count { count, max: MAX_SHARDS });
 	}
 
-	/// Bind this member into the group and return its opaque claim.
-	///
-	/// Fails when a sibling has not bound yet: the kernel numbers a reuseport
-	/// group by bind order, so a member joining out of turn would take another's
-	/// slot and steer its traffic, with no error to show for it.
-	///
-	/// The claim exposes no socket. Pass every claim to [`Group::complete`],
-	/// which attaches the filter before releasing serving handles.
-	pub fn bind(self) -> io::Result<Claim> {
-		let mut bound = self.state.bound();
-		if *bound != self.shard.index() {
-			return Err(io::Error::other(format!(
-				"reuseport member {} cannot bind while {} of {} are in: the kernel numbers a group by bind order",
-				self.shard.index(),
-				*bound,
-				self.shard.count(),
-			)));
-		}
+	let addr = match addr.port() {
+		0 => crate::bind::udp(crate::bind::Udp::new(addr))
+			.and_then(|socket| socket.local_addr())
+			.map_err(Error::Resolve)?,
+		_ => addr,
+	};
 
-		let socket = bind(self.state.addr, self.shard)?;
-		*bound += 1;
-		drop(bound);
+	let port = addr.port();
+	let lock = Lock::acquire(port).map_err(|_| Error::Overlap { port })?;
 
-		Ok(Claim {
-			shard: self.shard,
-			socket,
-			state: self.state,
-		})
+	let mut sockets = Vec::with_capacity(usize::from(count));
+	for index in 0..count {
+		let socket = member(addr, index).map_err(|source| Error::Bind { index, source })?;
+		sockets.push((Shard { index, count }, socket));
 	}
-}
 
-/// One successfully bound member of a forming [`Group`].
-///
-/// Opaque so a socket cannot be served before every member has joined and the
-/// steering filter is attached. Pass all claims to [`Group::complete`].
-#[derive(Debug)]
-pub struct Claim {
-	shard: Shard,
-	socket: UdpSocket,
-	state: Arc<State>,
+	let (_, last) = sockets.last().expect("a group always has at least one member");
+	attach(last, count).map_err(Error::Steer)?;
+
+	Ok(Bound {
+		sockets,
+		next: 0,
+		addr,
+		_lock: lock,
+	})
 }
 
 /// A complete steered group that retains every member socket.
@@ -334,14 +198,16 @@ pub struct Claim {
 /// [`member`](Self::member) returns duplicate handles to the retained sockets.
 /// Dropping one handle stops serving that slot without removing it from the
 /// kernel group or renumbering any survivor. Dropping this group closes every
-/// retained member together.
+/// retained member together and releases the port.
 #[derive(Debug)]
 pub struct Bound {
 	sockets: Vec<(Shard, UdpSocket)>,
 	next: usize,
+	addr: SocketAddr,
 
-	/// Holds the port lock for exactly as long as the complete socket group.
-	state: Arc<State>,
+	/// Held for exactly as long as the complete socket group, and released by
+	/// the kernel with the process. `None` on a host with no lock directory.
+	_lock: Option<Lock>,
 }
 
 impl Bound {
@@ -350,9 +216,9 @@ impl Bound {
 		self.sockets.len().try_into().expect("group count fits u16")
 	}
 
-	/// The address every member holds.
+	/// The address every member holds, with an ephemeral port already resolved.
 	pub fn addr(&self) -> SocketAddr {
-		self.state.addr
+		self.addr
 	}
 
 	/// The next socket to serve, or `None` once every member was handed out.
@@ -388,50 +254,11 @@ impl Socket {
 	}
 }
 
-/// What the members of a forming group share: the address and port lock it
-/// holds, and how far the group has been bound.
+/// Bind member `index` of the group at `addr`.
 ///
-/// Shared rather than owned by the [`Group`] because a member is bound wherever
-/// its socket is served, which is usually not where the group lives. The lock
-/// rides along for the same reason: a member outstanding after its group is
-/// dropped can still bind, so the port has to stay held until the last of them
-/// is gone.
-#[derive(Debug)]
-struct State {
-	addr: SocketAddr,
-
-	/// How many members have bound, which is also the only index allowed to bind
-	/// next.
-	bound: Mutex<u16>,
-
-	/// Held until the group and its members are all dropped, and released by the
-	/// kernel with the process. `None` on a host with no lock directory.
-	_lock: Option<Lock>,
-}
-
-impl State {
-	fn new(addr: SocketAddr, lock: Option<Lock>) -> Self {
-		Self {
-			addr,
-			bound: Mutex::new(0),
-			_lock: lock,
-		}
-	}
-
-	/// The bound count, whatever a panicking member left behind: a failed bind
-	/// is reported by the count it did not advance, so there is no torn state a
-	/// poisoned lock would be protecting.
-	fn bound(&self) -> MutexGuard<'_, u16> {
-		self.bound.lock().unwrap_or_else(PoisonError::into_inner)
-	}
-}
-
-/// Bind one member's socket into the group at `addr`.
-///
-/// Private because the order is the whole invariant: reachable only through a
-/// [`Member`], which a [`Group`] hands out in index order and only while it
-/// holds the port.
-fn bind(addr: SocketAddr, shard: Shard) -> io::Result<UdpSocket> {
+/// Private because the order is the whole invariant: only [`bind`] calls this,
+/// once per index in order, while it holds the port.
+fn member(addr: SocketAddr, index: u16) -> io::Result<UdpSocket> {
 	// The first member probes with a plain bind before the group forms.
 	// `SO_REUSEPORT` groups by address and UID, so a member would otherwise
 	// *join* any group a same-UID process already has on the address, as two
@@ -445,9 +272,8 @@ fn bind(addr: SocketAddr, shard: Shard) -> io::Result<UdpSocket> {
 	// *constructing* concurrently could each probe while the other holds
 	// nothing yet, which is what [`Lock`] excludes; the probe's job is the
 	// holder the lock cannot see, one that predates it or never took it, or
-	// one that took an ephemeral group's port after [`Group::acquire`]
-	// resolved it.
-	if shard.index() == 0 {
+	// one that took an ephemeral group's port after [`bind`] resolved it.
+	if index == 0 {
 		drop(crate::bind::udp(crate::bind::Udp::new(addr))?);
 	}
 
@@ -649,36 +475,8 @@ fn prepare(dir: std::path::PathBuf) -> Option<std::path::PathBuf> {
 /// The largest group the steering filter can address.
 ///
 /// It selects with one byte of the connection ID, so a member past 255 could
-/// never be named: [`cid`] would have no stride to spend and the filter's
-/// `byte % count` could never return that index.
+/// never be named: the filter's `byte % count` could never return that index.
 pub const MAX_SHARDS: u16 = 256;
-
-/// The length of a connection ID that the steering filter recognizes.
-pub const CID_LEN: usize = 8;
-
-/// A connection ID that routes to `shard` without matching a valid SRT data header.
-///
-/// `count` values of the byte are reserved per member, so this keeps
-/// `256 / count` of its randomness: 32 values across 8 members. Two marker bits
-/// are fixed in the fourth byte and every other bit stays random. Connection IDs
-/// are not secrets, but they are unlinkable only while they look random, which
-/// is why the encoding spends only what routing and classification need.
-pub fn cid(shard: Shard) -> [u8; CID_LEN] {
-	use rand::RngExt;
-
-	let mut cid: [u8; CID_LEN] = rand::random();
-	let count = u32::from(shard.count());
-	// The number of whole strides of `count` that fit in a byte. At least one,
-	// because a group is never larger than `MAX_SHARDS`.
-	let strides = 256 / count;
-	let stride = rand::rng().random_range(0..strides);
-
-	cid[0] = (stride * count + u32::from(shard.index())) as u8;
-	// On an SRT data packet this byte overlays the PP/O/KK/R flags. KK=0b11
-	// is reserved, so the pattern cannot persist on a valid SRT flow.
-	cid[3] |= 0x18;
-	cid
-}
 
 /// Attach the steering filter to a socket in a reuseport group of `count`.
 ///
@@ -798,154 +596,69 @@ fn program(count: u16) -> [libc::sock_filter; 18] {
 mod tests {
 	use super::*;
 
-	/// A slot has to exist in the group it names, and the group has to be one
-	/// the steering filter can address: `cid` divides by the count, so
-	/// an oversized group would panic on a zero-width stride.
-	#[test]
-	fn shard_slots_are_bounded() {
-		assert_eq!(Shard::new(0, 1).map(|shard| shard.count()), Some(1));
-		assert_eq!(Shard::new(3, 4).map(|shard| shard.index()), Some(3));
-		assert!(Shard::new(4, 4).is_none());
-		assert!(Shard::new(0, 0).is_none());
-		assert!(Shard::new(0, MAX_SHARDS).is_some());
-		assert!(Shard::new(0, MAX_SHARDS + 1).is_none());
-	}
+	/// The length of the connection IDs a sharded endpoint issues.
+	const CID_LEN: usize = 8;
 
-	/// The group is the only source of slots, and it hands out exactly the ones
-	/// it was sized for, in order.
-	#[test]
-	fn a_group_hands_out_every_slot_in_order() {
-		const COUNT: u16 = 4;
-
-		let mut group = Group::acquire("127.0.0.1:0".parse().unwrap(), COUNT).unwrap();
-		assert_eq!(group.count(), COUNT);
-
-		for index in 0..COUNT {
-			let member = group.member().expect("a slot per member");
-			assert_eq!(member.shard().index(), index);
-			assert_eq!(member.shard().count(), COUNT);
-		}
-		assert!(group.member().is_none(), "the group cannot be resized");
-	}
-
-	/// A group of zero is a group of one: every caller sizes a group from a
-	/// worker count, and a lone member is a valid group.
-	#[test]
-	fn an_empty_group_holds_one_member() {
-		let mut group = Group::acquire("127.0.0.1:0".parse().unwrap(), 0).unwrap();
-		assert_eq!(group.count(), 1);
-		assert_eq!(group.member().map(|member| member.shard().count()), Some(1));
+	/// A connection ID shaped like a sharded endpoint's (see [the
+	/// encoding](super#the-encoding)): the first byte randomized within the
+	/// member's stride, so nothing but the reduction can be steering, and the
+	/// non-SRT marker set.
+	fn cid(shard: Shard) -> [u8; CID_LEN] {
+		use rand::RngExt;
+		let mut id: [u8; CID_LEN] = rand::random();
+		let count = u32::from(shard.count());
+		let stride = rand::rng().random_range(0..256 / count);
+		id[0] = (stride * count + u32::from(shard.index())) as u8;
+		id[3] |= 0x18;
+		id
 	}
 
 	/// The steering filter names a member with one byte, so a group past 256 has
-	/// members it could never reach. Refused where the group is sized, rather
-	/// than when the first connection ID has no stride left to spend.
+	/// members it could never reach. Refused before anything binds.
 	#[test]
 	fn an_unaddressable_group_is_refused() {
 		let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-		assert!(Group::acquire(addr, MAX_SHARDS).is_ok());
 		assert!(matches!(
-			Group::acquire(addr, MAX_SHARDS + 1),
+			bind(addr, MAX_SHARDS + 1),
 			Err(Error::Count { count: 257, max: 256 })
 		));
 	}
 
-	/// The encoding's only real requirement: whatever byte a member issues has to
-	/// reduce back to that member.
+	/// Elsewhere the kernel cannot steer, so a group is refused at its first
+	/// member rather than served by a socket that silently balances nothing.
 	#[test]
-	fn a_prefix_reduces_to_its_own_shard() {
-		// `MAX_SHARDS` is the interesting end: one stride per member, so the prefix
-		// is the index itself and there is no randomness left to spend.
-		for count in [1u16, 2, 3, 4, 7, 8, 16, 64, 255, MAX_SHARDS] {
-			for index in 0..count {
-				let shard = Shard::new(index, count).unwrap();
-				// Sampled, since the prefix is randomized within the member's stride.
-				for _ in 0..64 {
-					let id = cid(shard);
-					let prefix = id[0];
-					assert_eq!(
-						u16::from(prefix) % count,
-						index,
-						"prefix {prefix} of shard {index}/{count} steers elsewhere"
-					);
-					assert_eq!(id[3] & 0x18, 0x18, "CID lacks the non-SRT marker");
-				}
-			}
-		}
+	#[cfg(not(target_os = "linux"))]
+	fn a_group_is_refused_off_linux() {
+		let err = bind("127.0.0.1:0".parse().unwrap(), 2).expect_err("steered a group off Linux");
+		assert!(matches!(err, Error::Bind { index: 0, ref source } if source.kind() == io::ErrorKind::Unsupported));
 	}
 
-	/// Every member of a group has to be reachable, or the ones that aren't sit
-	/// idle while their share of the traffic goes to a sibling.
-	#[test]
-	fn prefixes_cover_every_shard() {
-		const COUNT: u16 = 8;
-		let mut seen = std::collections::HashSet::new();
-		for index in 0..COUNT {
-			let shard = Shard::new(index, COUNT).unwrap();
-			for _ in 0..256 {
-				seen.insert(u16::from(cid(shard)[0]) % COUNT);
-			}
-		}
-		assert_eq!(seen.len(), usize::from(COUNT));
-	}
-
-	/// An ephemeral request gives the first member a port of the kernel's
-	/// choosing, and the group is only balanced over a port every member holds.
+	/// The group hands out exactly the slots it was sized for, in order, every
+	/// one on the port the first member resolved.
 	#[test]
 	#[cfg(target_os = "linux")]
-	fn a_group_shares_one_ephemeral_port() {
+	fn a_group_hands_out_every_slot_on_one_port() {
 		const COUNT: u16 = 3;
 
-		let mut group = Group::acquire("127.0.0.1:0".parse().unwrap(), COUNT).unwrap();
-		let claims: Vec<Claim> = (0..COUNT)
-			.map(|_| group.member().expect("a slot per member").bind().expect("bind member"))
-			.collect();
-		let mut group = group.complete(claims).expect("complete group");
-		let sockets: Vec<UdpSocket> = (0..COUNT)
-			.map(|_| group.member().unwrap().expect("a socket per member").into_inner())
-			.collect();
-
+		let mut group = bind("127.0.0.1:0".parse().unwrap(), COUNT).unwrap();
+		assert_eq!(group.count(), COUNT);
 		let addr = group.addr();
 		assert_ne!(addr.port(), 0, "the group holds the port its first member bound");
-		for socket in &sockets {
-			assert_eq!(
-				socket.local_addr().unwrap(),
-				addr,
-				"every member holds the group's port"
-			);
+
+		for index in 0..COUNT {
+			let member = group.member().unwrap().expect("a socket per member");
+			assert_eq!(member.shard(), Shard { index, count: COUNT });
+			assert_eq!(member.into_inner().local_addr().unwrap(), addr);
 		}
+		assert!(group.member().unwrap().is_none(), "the group cannot be resized");
 	}
 
-	/// The kernel numbers a group by bind order, so a member that binds out of
-	/// turn would take a sibling's slot and steer its traffic. Refused instead,
-	/// which is the one part of the ordering rule a caller can still get wrong
-	/// once its members are bound on threads of their own.
+	/// A group of zero is a group of one: a lone member is a valid group.
 	#[test]
 	#[cfg(target_os = "linux")]
-	fn binding_out_of_order_is_refused() {
-		let mut group = Group::acquire("127.0.0.1:0".parse().unwrap(), 2).unwrap();
-		let first = group.member().expect("first slot");
-		let second = group.member().expect("second slot");
-
-		second.bind().expect_err("the second member cannot bind first");
-
-		// Refused, not deferred: nothing joined the group, so the slot the
-		// kernel would have handed the second member is still the first's.
-		first.bind().expect("bind the first member");
-		assert_ne!(group.addr().port(), 0);
-	}
-
-	/// A forming group exposes claims, not sockets, and refuses completion until
-	/// every declared member is bound.
-	#[test]
-	#[cfg(target_os = "linux")]
-	fn a_partial_group_cannot_serve() {
-		let mut group = Group::acquire("127.0.0.1:0".parse().unwrap(), 2).unwrap();
-		let claim = group.member().unwrap().bind().expect("bind first member");
-
-		group
-			.complete(vec![claim])
-			.expect_err("a partial group must not complete");
+	fn an_empty_group_holds_one_member() {
+		let group = bind("127.0.0.1:0".parse().unwrap(), 0).unwrap();
+		assert_eq!(group.count(), 1);
 	}
 
 	/// The whole point, end to end against a real kernel: a packet carrying a
@@ -959,12 +672,7 @@ mod tests {
 	fn a_connection_id_reaches_its_own_member() {
 		const COUNT: u16 = 4;
 
-		let mut group = Group::acquire("127.0.0.1:0".parse().unwrap(), COUNT).unwrap();
-		let mut claims = Vec::new();
-		while let Some(member) = group.member() {
-			claims.push(member.bind().expect("bind group member"));
-		}
-		let mut group = group.complete(claims).expect("complete group");
+		let mut group = bind("127.0.0.1:0".parse().unwrap(), COUNT).unwrap();
 		let mut sockets = Vec::new();
 		let mut shards = Vec::new();
 		while let Some(member) = group.member().expect("clone retained socket") {
@@ -1021,12 +729,7 @@ mod tests {
 	#[cfg(target_os = "linux")]
 	fn non_quic_flows_stay_on_one_member() {
 		const COUNT: u16 = 4;
-		let mut group = Group::acquire("127.0.0.1:0".parse().unwrap(), COUNT).unwrap();
-		let mut claims = Vec::new();
-		while let Some(member) = group.member() {
-			claims.push(member.bind().expect("bind group member"));
-		}
-		let mut group = group.complete(claims).expect("complete group");
+		let mut group = bind("127.0.0.1:0".parse().unwrap(), COUNT).unwrap();
 		let mut sockets = Vec::new();
 		while let Some(member) = group.member().expect("clone retained socket") {
 			let socket = member.into_inner();
@@ -1082,12 +785,7 @@ mod tests {
 	#[test]
 	#[cfg(target_os = "linux")]
 	fn dropping_a_serving_handle_does_not_resize_the_group() {
-		let mut group = Group::acquire("127.0.0.1:0".parse().unwrap(), 2).unwrap();
-		let mut claims = Vec::new();
-		while let Some(member) = group.member() {
-			claims.push(member.bind().expect("bind group member"));
-		}
-		let mut group = group.complete(claims).expect("complete group");
+		let mut group = bind("127.0.0.1:0".parse().unwrap(), 2).unwrap();
 		let first = group.member().unwrap().expect("first serving socket");
 		let second = group.member().unwrap().expect("second serving socket");
 		let shard = second.shard();
@@ -1107,88 +805,47 @@ mod tests {
 		assert_eq!(socket.recv_from(&mut buf).unwrap().0, packet.len());
 	}
 
-	/// A second group on a named port must lose it while the first is alive: two
-	/// groups constructing at once would each pass the bind probe before either
-	/// held the port, then interleave into one group whose filter steers each
-	/// process's traffic to the other's sockets.
+	/// A second group on a held port must lose it while the first is alive, for
+	/// a named port and a resolved ephemeral one alike: two groups constructing
+	/// at once would each pass the bind probe before either held the port, then
+	/// interleave into one group whose filter steers each process's traffic to
+	/// the other's sockets.
 	#[test]
 	#[cfg(target_os = "linux")]
 	fn a_second_group_cannot_take_the_port() {
 		// A port the kernel just handed out and nothing holds any more, which is
 		// as close to a reserved port as a test gets.
-		let addr = {
+		let named = {
 			let probe = crate::bind::udp(crate::bind::Udp::new("127.0.0.1:0".parse().unwrap())).unwrap();
 			probe.local_addr().unwrap()
 		};
 
-		let mut first = Group::acquire(addr, 1).unwrap();
-		let claim = first.member().unwrap().bind().expect("bind the first group");
-		let first = first.complete(vec![claim]).expect("complete the first group");
+		for addr in [named, "127.0.0.1:0".parse().unwrap()] {
+			let first = bind(addr, 1).expect("bind the first group");
+			let addr = first.addr();
 
-		assert!(
-			matches!(Group::acquire(addr, 1), Err(Error::Overlap { .. })),
-			"a second group took a held port"
-		);
+			assert!(
+				matches!(bind(addr, 1), Err(Error::Overlap { .. })),
+				"a second group took a held port"
+			);
 
-		// The lock dies with the group, so the port is takeable again.
-		drop(first);
-		Group::acquire(addr, 1).expect("the released port must be takeable again");
+			// The lock dies with the group, so the port is takeable again.
+			drop(first);
+			bind(addr, 1).expect("the released port must be takeable again");
+		}
 	}
 
-	/// An ephemeral request is resolved to a concrete port and locked before any
-	/// member binds. A reuseport bind of port `0` could land on a port another
-	/// same-UID group holds, and join it.
+	/// A same-UID reuseport socket already on the address, one the lock cannot
+	/// see, must fail the first member's bind rather than be joined by it.
 	#[test]
 	#[cfg(target_os = "linux")]
-	fn an_ephemeral_group_takes_its_port_up_front() {
-		let group = Group::acquire("127.0.0.1:0".parse().unwrap(), 1).unwrap();
-		let addr = group.addr();
-		assert_ne!(addr.port(), 0, "the port is resolved before any member binds");
+	fn a_held_address_is_refused_not_joined() {
+		let intruder =
+			crate::bind::udp(crate::bind::Udp::new("127.0.0.1:0".parse().unwrap()).with_reuse_port(true)).unwrap();
+		let addr = intruder.local_addr().unwrap();
 
-		assert!(
-			matches!(Group::acquire(addr, 1), Err(Error::Overlap { .. })),
-			"a second group took an ephemeral group's port"
-		);
-	}
-
-	/// A same-UID reuseport socket that takes an ephemeral group's port between
-	/// its resolution and the first member's bind must fail that bind, not be
-	/// joined by it.
-	#[test]
-	#[cfg(target_os = "linux")]
-	fn an_ephemeral_port_taken_before_binding_is_refused() {
-		let mut group = Group::acquire("127.0.0.1:0".parse().unwrap(), 1).unwrap();
-		let _intruder = crate::bind::udp(crate::bind::Udp::new(group.addr()).with_reuse_port(true)).unwrap();
-
-		let err = group.member().unwrap().bind().expect_err("joined the intruder's group");
-		assert_eq!(err.kind(), io::ErrorKind::AddrInUse);
-	}
-
-	/// A member outlives the group that handed it out and can still bind, so the
-	/// exclusion has to outlive the group too. Releasing the port at the group's
-	/// drop would let a second group probe and interleave into this one while its
-	/// first member had yet to join.
-	#[test]
-	#[cfg(target_os = "linux")]
-	fn an_outstanding_member_keeps_the_port() {
-		let addr = {
-			let probe = crate::bind::udp(crate::bind::Udp::new("127.0.0.1:0".parse().unwrap())).unwrap();
-			probe.local_addr().unwrap()
-		};
-
-		let mut group = Group::acquire(addr, 1).unwrap();
-		let member = group.member().expect("the only slot");
-		drop(group);
-
-		assert!(
-			matches!(Group::acquire(addr, 1), Err(Error::Overlap { .. })),
-			"a second group took a port an unbound member still holds"
-		);
-
-		let claim = member.bind().expect("bind the outstanding member");
-
-		drop(claim);
-		Group::acquire(addr, 1).expect("the released port must be takeable again");
+		let err = bind(addr, 1).expect_err("joined the intruder's group");
+		assert!(matches!(err, Error::Bind { index: 0, ref source } if source.kind() == io::ErrorKind::AddrInUse));
 	}
 
 	/// The jumps are offsets from the *following* instruction, so an off-by-one

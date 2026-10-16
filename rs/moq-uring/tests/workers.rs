@@ -19,7 +19,6 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::Poll;
 
-use moq_sock::shard::Group;
 use moq_uring::{Config, Error, Worker, quic, udp};
 
 fn worker() -> Option<Worker> {
@@ -79,12 +78,7 @@ fn a_steered_group_serves_a_shared_port() {
 	// kernel steers by, and binding before any thread spawns is what
 	// guarantees it. The group is held for as long as the sockets are served,
 	// since it is what holds the port.
-	let mut group = Group::acquire("127.0.0.1:0".parse().expect("addr"), WORKERS).expect("group");
-	let mut claims = Vec::new();
-	while let Some(member) = group.member() {
-		claims.push(member.bind().expect("bind group member"));
-	}
-	let mut group = group.complete(claims).expect("complete group");
+	let mut group = moq_sock::shard::bind("127.0.0.1:0".parse().expect("addr"), WORKERS).expect("group");
 	let mut members = Vec::new();
 	while let Some(member) = group.member().expect("clone retained socket") {
 		members.push(member);

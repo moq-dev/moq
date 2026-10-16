@@ -5024,7 +5024,6 @@ dependencies = [
  "moq-sock",
  "moq-tokio",
  "nix",
- "rand 0.10.3",
  "rcgen",
  "rustc-hash 2.1.3",
  "rustls",

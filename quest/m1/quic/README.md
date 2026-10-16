@@ -63,8 +63,9 @@ cache limits remain separate; bitrate pacing composes with this memory cap.
 ## Required
 
 - [Bound message assembly](/quest/m1/quic/receive-memory.md) - complete headers and frames return credit, and receiver priority cancellation restores progress
-- [Reliable stream reset](/quest/m1/quic/reliable-reset.md) - `RESET_STREAM_AT`,
-  so a reset WebTransport stream still delivers its header
+- [A reset group keeps its header](/quest/m1/quic/group-reset.md) - a lite
+  publisher resets a group with `RESET_STREAM_AT`, so its subscriber drops the
+  tail grace
 - [Hierarchical stream scheduling](/quest/m1/quic/scheduler.md) - strict
   subscription priority, fair buckets, and newest-first group order replace
   the lossy scalar; retransmits follow the same order
@@ -72,8 +73,6 @@ cache limits remain separate; bitrate pacing composes with this memory cap.
   datagrams join their subscription's send group instead of preempting every stream
 - [Relay peers get wider limits](/quest/m1/quic/peer-limits.md) - MAX_STREAMS
   and MAX_DATA are raised after SETUP identifies a cluster peer
-- [Shard the endpoint](/quest/m1/quic/shard.md) - the library shards a
-  server endpoint across cores by default, replacing the `--workers` group
 
 ## Related
 
