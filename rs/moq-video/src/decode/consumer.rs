@@ -123,9 +123,9 @@ impl Consumer {
 		// sequence there asks the publisher to rewind the track for everyone
 		// reading it. What a player wants is to skip what it already has.
 		if options.start == Start::Latest
-			&& let Some(live_edge) = track.latest()
+			&& let Some(live_edge) = subscriber.largest().await
 		{
-			subscriber.set_groups(live_edge..);
+			subscriber.set_groups(live_edge.group..);
 		}
 		let track = subscriber;
 		// The catalog says how the track is framed, and it is not always the legacy

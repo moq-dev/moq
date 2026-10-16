@@ -57,8 +57,8 @@ export class Consumer {
 	async #read(skip: boolean): Promise<Timed<Uint8Array> | undefined> {
 		for (;;) {
 			if (skip) {
-				const latest = this.#track.latest();
-				if (latest !== undefined) this.#track.setGroups({ start: { included: latest } });
+				const latest = await this.#track.largest();
+				if (latest !== undefined) this.#track.setGroups({ start: { included: latest.group } });
 			}
 
 			let next: Awaited<ReturnType<Moq.Track.Ordered["readFrame"]>>;

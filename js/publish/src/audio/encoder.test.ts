@@ -763,7 +763,7 @@ test("audio failure stays local through demand changes and capture format re-arm
 		if (!siblingTrack) throw new Error("expected demanded sibling track");
 		expect(siblingTrack.appendGroup().sequence).toBe(0);
 		await push(0, 1);
-		expect(subscriber.latest()).toBe(0);
+		expect((await subscriber.largest())?.group).toBe(0);
 		catalogSubscriber = net.track(Broadcast.CATALOG_TRACK).subscribe();
 		const catalog = new Json.Snapshot.Consumer<Catalog.Root>({ track: catalogSubscriber });
 		expect((await catalog.latest())?.value.audio?.renditions.audio?.enabled).not.toBe(false);
@@ -806,7 +806,7 @@ test("audio failure stays local through demand changes and capture format re-arm
 		recovered = net.track(config.track).subscribe();
 		await settle();
 		await push(3, 2);
-		expect(recovered.latest()).toBe(0);
+		expect((await recovered.largest())?.group).toBe(0);
 		expect(encoder.out.active.peek()).toBe(true);
 		expect(recovered.closed.peek()).toBeUndefined();
 		expect(broadcast.net.peek()).toBe(net);

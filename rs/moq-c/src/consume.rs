@@ -677,7 +677,11 @@ impl Consume {
 
 	fn apply_raw_subscription(track: &mut moq_net::track::Ordered, subscription: Option<moq_net::track::Subscription>) {
 		let subscription = subscription.unwrap_or_default();
-		let start = subscription.start.map(|start| start.group).or_else(|| track.latest());
+		let largest = match track.poll_largest(&kio::Waiter::noop()) {
+			std::task::Poll::Ready(Some(position)) => Some(position.group),
+			_ => None,
+		};
+		let start = subscription.start.map(|start| start.group).or(largest);
 		track.set_groups((
 			start.map_or(Bound::Unbounded, Bound::Included),
 			subscription

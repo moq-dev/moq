@@ -276,6 +276,10 @@ pub(crate) struct TrackState {
 	// datagrams, so it can run ahead of any cached group.
 	max_sequence: Option<u64>,
 
+	// The greatest real frame the publisher or serving route has reported. Unlike
+	// the cache, this survives eviction and may be known before its group arrives.
+	pub(super) largest: Option<Position>,
+
 	// The name's sequence namespace within the broadcast, which can run past this track's
 	// `max_sequence` when an earlier producer of the name wrote further.
 	sequence: Sequence,
@@ -1638,6 +1642,11 @@ impl TrackState {
 	/// read as the live edge, though the route already holds a newer one.
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	fn set_live(&mut self, largest: Option<Position>) {
+		if let Some(largest) = largest
+			&& self.largest.is_none_or(|current| largest > current)
+		{
+			self.largest = Some(largest);
+		}
 		if self.feed != Feed::Idle {
 			return;
 		}
@@ -1799,6 +1808,46 @@ fn commit_abort(mut state: kio::Mut<'_, TrackState>, err: Error) {
 	state.close();
 }
 
+fn largest_result(state: &TrackState, seen: Option<Position>) -> Poll<Option<Position>> {
+	match state.largest {
+		Some(largest) if seen.is_none_or(|seen| largest > seen) => Poll::Ready(Some(largest)),
+		_ if state.closed => Poll::Ready(None),
+		_ => Poll::Pending,
+	}
+}
+
+fn poll_largest_producer(
+	state: &kio::Producer<TrackState>,
+	seen: &mut Option<Position>,
+	waiter: &kio::Waiter,
+) -> Poll<Option<Position>> {
+	let result = match state.poll_ref(waiter, |state| largest_result(state, *seen)) {
+		Poll::Ready(Ok(result)) => Poll::Ready(result),
+		Poll::Ready(Err(state)) => Poll::Ready(state.largest.filter(|largest| seen.is_none_or(|seen| *largest > seen))),
+		Poll::Pending => Poll::Pending,
+	};
+	if let Poll::Ready(Some(largest)) = result {
+		*seen = Some(largest);
+	}
+	result
+}
+
+fn poll_largest_consumer(
+	state: &kio::Consumer<TrackState>,
+	seen: &mut Option<Position>,
+	waiter: &kio::Waiter,
+) -> Poll<Option<Position>> {
+	let result = match state.poll(waiter, |state| largest_result(state, *seen)) {
+		Poll::Ready(Ok(result)) => Poll::Ready(result),
+		Poll::Ready(Err(state)) => Poll::Ready(state.largest.filter(|largest| seen.is_none_or(|seen| *largest > seen))),
+		Poll::Pending => Poll::Pending,
+	};
+	if let Poll::Ready(Some(largest)) = result {
+		*seen = Some(largest);
+	}
+	result
+}
+
 /// A producer for a track, used to create new groups.
 #[derive(Clone)]
 pub struct Producer {
@@ -1815,6 +1864,8 @@ pub struct Producer {
 	// one subscription on tag and closed when the last producer clone drops. Empty
 	// (no-op) for an untagged broadcast.
 	stats: stats::Scope,
+	// Last position this handle yielded through `largest`.
+	largest: Option<Position>,
 }
 
 impl Producer {
@@ -1851,6 +1902,7 @@ impl Producer {
 			prev_subscription: None,
 			alive,
 			stats: stats::Scope::default(),
+			largest: None,
 		}
 	}
 
@@ -2314,9 +2366,21 @@ impl Producer {
 		self.state.read().is_closed()
 	}
 
-	/// Return the latest sequence number successfully appended to the track.
-	pub fn latest(&self) -> Option<u64> {
+	#[cfg(test)]
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	pub(crate) fn latest_sequence(&self) -> Option<u64> {
 		self.state.read().max_sequence
+	}
+
+	/// Poll for a newer largest frame on the track.
+	pub fn poll_largest(&mut self, waiter: &kio::Waiter) -> Poll<Option<Position>> {
+		poll_largest_producer(&self.state, &mut self.largest, waiter)
+	}
+
+	/// Wait for a newer largest frame on the track.
+	#[cfg(feature = "async")]
+	pub async fn largest(&mut self) -> Option<Position> {
+		kio::wait(|waiter| self.poll_largest(waiter)).await
 	}
 
 	/// Ready once the track holds a group past `sequence`, or is closed.
@@ -2396,6 +2460,7 @@ impl Producer {
 			// A producer-side (in-process) subscribe is not egress: stay untagged.
 			stats: stats::Scope::default(),
 			_stats_sub: stats::Subscription::default(),
+			largest: None,
 		}
 	}
 
@@ -3069,6 +3134,8 @@ pub struct Consumer {
 	// Egress stats scope, set by a tagged [`broadcast::Consumer`] via
 	// [`Self::with_stats`]. Empty (no-op) for an untagged track.
 	stats: stats::Scope,
+	// Last position this handle yielded through `largest`.
+	largest: Option<Position>,
 }
 
 impl Consumer {
@@ -3079,6 +3146,7 @@ impl Consumer {
 			broadcast,
 			state,
 			stats: stats::Scope::default(),
+			largest: None,
 		}
 	}
 
@@ -3380,10 +3448,23 @@ impl Consumer {
 		})
 	}
 
-	/// Return the latest group sequence in the track, or `None` before any group.
-	pub fn latest(&self) -> Option<u64> {
+	/// Poll for a newer largest frame on the track.
+	pub fn poll_largest(&mut self, waiter: &kio::Waiter) -> Poll<Option<Position>> {
+		let state = self
+			.serving()
+			.map_or_else(|| self.state.clone(), |serving| serving.state);
+		poll_largest_consumer(&state, &mut self.largest, waiter)
+	}
+
+	/// Wait for a newer largest frame on the track.
+	#[cfg(feature = "async")]
+	pub async fn largest(&mut self) -> Option<Position> {
+		kio::wait(|waiter| self.poll_largest(waiter)).await
+	}
+
+	pub(crate) fn latest_sequence(&self) -> Option<u64> {
 		if let Some(serving) = self.serving() {
-			return serving.latest();
+			return serving.latest_sequence();
 		}
 		self.state.read().max_sequence
 	}
@@ -3471,6 +3552,7 @@ impl Subscribing {
 			delivered: Delivered::default(),
 			stats: self.stats.clone(),
 			_stats_sub: self.stats.subscribe(),
+			largest: None,
 		}))
 	}
 
@@ -3819,6 +3901,8 @@ pub struct Subscriber {
 	// The subscription guard: bumps `subscriptions` (and the egress viewer refcount)
 	// while held, closing them on drop. Empty (no-op) for an untagged track.
 	_stats_sub: stats::Subscription,
+	// Last position this handle yielded through `largest`.
+	largest: Option<Position>,
 }
 
 /// Unread groups a logical reader can still take from a replaced copy.
@@ -4736,8 +4820,22 @@ impl Subscriber {
 		Ok(())
 	}
 
-	/// Return the latest sequence number in the track.
-	pub fn latest(&self) -> Option<u64> {
+	/// Poll for a newer largest frame on the track.
+	pub fn poll_largest(&mut self, waiter: &kio::Waiter) -> Poll<Option<Position>> {
+		match &mut self.inner {
+			Inner::Plain(cursor) => poll_largest_consumer(&cursor.state, &mut self.largest, waiter),
+			Inner::Resume(resume, _) => resume.poll_largest(&mut self.largest, waiter),
+		}
+	}
+
+	/// Wait for a newer largest frame on the track.
+	#[cfg(feature = "async")]
+	pub async fn largest(&mut self) -> Option<Position> {
+		kio::wait(|waiter| self.poll_largest(waiter)).await
+	}
+
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	pub(crate) fn latest_sequence(&self) -> Option<u64> {
 		match &self.inner {
 			Inner::Plain(cursor) => cursor.state.read().max_sequence,
 			Inner::Resume(resume, _) => resume.latest(),
@@ -4874,9 +4972,15 @@ impl Ordered {
 		kio::wait(|waiter| self.poll_finished(waiter)).await
 	}
 
-	/// The latest sequence number in the track.
-	pub fn latest(&self) -> Option<u64> {
-		self.inner.latest()
+	/// Poll for a newer largest frame on the track.
+	pub fn poll_largest(&mut self, waiter: &kio::Waiter) -> Poll<Option<Position>> {
+		self.inner.poll_largest(waiter)
+	}
+
+	/// Wait for a newer largest frame on the track.
+	#[cfg(feature = "async")]
+	pub async fn largest(&mut self) -> Option<Position> {
+		kio::wait(|waiter| self.poll_largest(waiter)).await
 	}
 
 	/// Whether `other` reads the same underlying track state.
@@ -5052,6 +5156,7 @@ impl Request {
 			prev_subscription: None,
 			alive: self.alive,
 			stats: self.stats,
+			largest: None,
 		}
 	}
 
@@ -5210,7 +5315,46 @@ mod test {
 		assert_eq!(producer.append_datagram(ts, &b"a"[..]).unwrap(), 1);
 		assert_eq!(producer.append_group().unwrap().sequence, 2);
 		assert_eq!(producer.append_datagram(ts, &b"b"[..]).unwrap(), 3);
-		assert_eq!(producer.latest(), Some(3));
+		assert_eq!(producer.latest_sequence(), Some(3));
+	}
+
+	#[cfg(feature = "async")]
+	#[moq_net_sim::test]
+	async fn largest_streams_real_frames_and_coalesces() {
+		let mut producer = track_producer("test", Info::default());
+		let mut subscriber = producer.subscribe(replay());
+
+		assert!(producer.largest().now_or_never().is_none());
+		let mut group = producer.append_group().unwrap();
+		assert!(
+			subscriber.largest().now_or_never().is_none(),
+			"an empty group has no location"
+		);
+
+		group.write_frame(None, &b"a"[..]).unwrap();
+		assert_eq!(producer.largest().await, Some(Position { group: 0, frame: 0 }));
+		assert_eq!(subscriber.largest().await, Some(Position { group: 0, frame: 0 }));
+
+		group.write_frame(None, &b"b"[..]).unwrap();
+		group.write_frame(None, &b"c"[..]).unwrap();
+		assert_eq!(subscriber.largest().await, Some(Position { group: 0, frame: 2 }));
+
+		group.finish().unwrap();
+		producer.finish().unwrap();
+		drop(group);
+		drop(producer);
+		assert_eq!(subscriber.largest().await, None);
+	}
+
+	#[cfg(feature = "async")]
+	#[moq_net_sim::test]
+	async fn largest_starts_with_the_routes_report() {
+		let mut producer = track_producer("test", Info::default());
+		let mut subscriber = producer.subscribe(replay());
+		producer.set_idle();
+		producer.set_live(Some(Position { group: 7, frame: 3 }));
+
+		assert_eq!(subscriber.largest().await, Some(Position { group: 7, frame: 3 }));
 	}
 
 	#[test]
@@ -6159,7 +6303,7 @@ mod test {
 	}
 
 	#[test]
-	fn fresh_expiry_scan_does_not_wake_track_consumers() {
+	fn frame_progress_wakes_track_consumers() {
 		use std::sync::atomic::{AtomicBool, Ordering};
 
 		let producer = track_producer_expiring("test", cache::DEFAULT_EXPIRY);
@@ -6175,8 +6319,8 @@ mod test {
 
 		live.write_frame(Timestamp::ZERO, b"x".as_slice()).unwrap();
 		assert!(
-			!woken.load(Ordering::SeqCst),
-			"a no-op expiry scan must not wake track consumers"
+			woken.load(Ordering::SeqCst),
+			"frame progress wakes largest-position waiters"
 		);
 	}
 
@@ -9636,7 +9780,11 @@ mod test {
 			producer.write_frame(Timestamp::ZERO, frame),
 			Err(Error::FrameTooLarge)
 		));
-		assert_eq!(producer.latest(), None, "the rejected frame did not publish a group");
+		assert_eq!(
+			producer.latest_sequence(),
+			None,
+			"the rejected frame did not publish a group"
+		);
 	}
 
 	#[test]

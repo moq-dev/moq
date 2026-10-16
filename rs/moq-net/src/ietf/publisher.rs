@@ -3590,7 +3590,7 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 		match range.start {
 			Some(start) => track.start_at(start.group),
 			None => {
-				if let Some(latest) = track.latest() {
+				if let Some(latest) = track.latest_sequence() {
 					track.start_at(latest);
 				}
 			}
@@ -13070,7 +13070,7 @@ struct LiveEdge {
 
 /// Snapshot the live edge of a track.
 fn live_edge(track: &track::Consumer) -> LiveEdge {
-	let Some(latest) = track.latest() else {
+	let Some(latest) = track.latest_sequence() else {
 		return LiveEdge::default();
 	};
 

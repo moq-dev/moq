@@ -50,6 +50,9 @@ pub use encoder::{Config, Encoder, Pending};
 pub use producer::Producer;
 
 #[cfg(test)]
+use futures::FutureExt;
+
+#[cfg(test)]
 mod test {
 	use std::task::Poll;
 
@@ -211,14 +214,17 @@ mod test {
 
 	#[test]
 	fn all_records_ride_one_group() {
-		let (mut producer, track) = producer(compressed());
+		let (mut producer, mut track) = producer(compressed());
 		for n in 0..50 {
 			producer.append(&json!({ "n": n })).unwrap();
 		}
 		producer.finish().unwrap();
 
 		// Never rolled: a single group holds the whole log.
-		assert_eq!(track.latest(), Some(0));
+		assert_eq!(
+			track.largest().now_or_never().flatten().map(|position| position.group),
+			Some(0)
+		);
 		assert_eq!(drain(consume(track, true)).len(), 50);
 	}
 
@@ -286,7 +292,15 @@ mod test {
 				.is_err()
 		);
 
-		assert_eq!(subscriber.latest(), None, "a rejected record opened a group");
+		assert_eq!(
+			subscriber
+				.largest()
+				.now_or_never()
+				.flatten()
+				.map(|position| position.group),
+			None,
+			"a rejected record opened a group"
+		);
 
 		let waiter = kio::Waiter::noop();
 		assert!(

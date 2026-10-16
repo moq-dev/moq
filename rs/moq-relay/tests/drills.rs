@@ -486,20 +486,15 @@ async fn cancel_under_backpressure_releases_the_reader(lane: Lane) {
 	// far behind is shed rather than waited for), so an unread backlog is what
 	// backpressure looks like from here.
 	let backlog = tokio::time::timeout(TIMEOUT, async {
-		loop {
-			match reader.track.latest() {
-				Some(latest) if latest >= first + STALL_GROUPS as u64 => return latest - first,
-				_ => tokio::time::sleep(Duration::from_millis(10)).await,
-			}
-		}
+		reader.track.largest().await.map(|position| position.group - first)
 	})
 	.await
 	.unwrap_or_else(|_| {
 		panic!(
-			"the stalled reader is only {:?} groups behind: nothing was queued, so there is no backlog to cancel under",
-			reader.track.latest().map(|latest| latest - first)
+			"the stalled reader did not report a live edge: nothing was queued, so there is no backlog to cancel under"
 		)
-	});
+	})
+	.expect("the stalled reader ended before reporting a live edge");
 	println!("fault activated: cancelling with {backlog} unread groups queued");
 
 	// Nothing has been released yet, so the release below cannot be reporting a

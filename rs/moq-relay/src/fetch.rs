@@ -15,8 +15,8 @@ pub async fn fetch_group(
 	}
 
 	let mut subscriber = track.subscribe(None).await?;
-	match subscriber.latest() {
-		Some(sequence) => track.fetch_group(sequence, None).await,
-		None => subscriber.recv_group().await?.ok_or(moq_net::Error::NotFound),
+	match subscriber.largest().await {
+		Some(position) => track.fetch_group(position.group, None).await,
+		None => Err(moq_net::Error::NotFound),
 	}
 }

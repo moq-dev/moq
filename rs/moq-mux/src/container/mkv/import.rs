@@ -621,7 +621,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	pub fn seek(&mut self, sequence: u64) -> Result<()> {
 		for track in self.tracks.values_mut() {
 			let sequence = match &track.track {
-				Media::Text(text) => sequence.max(text.track().latest().map_or(0, |latest| latest + 1)),
+				Media::Text(text) => sequence.max(text.next_sequence()),
 				_ => sequence,
 			};
 			track.track.seek(sequence)?;

@@ -140,10 +140,7 @@ impl Subscriber {
 	}
 
 	/// Read window changes from an existing subscription.
-	pub fn new(mut track: track::Subscriber) -> Self {
-		if let Some(latest) = track.latest() {
-			track.set_groups(latest..);
-		}
+	pub fn new(track: track::Subscriber) -> Self {
 		Self {
 			consumer: moq_json::window::Consumer::new(track, Default::default()),
 		}

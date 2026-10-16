@@ -57,6 +57,7 @@ pub struct Producer<C: Container, R = ()> {
 	/// Sequence to use for the next group opened by [`Self::write`].
 	/// Set by [`Self::seek`] and consumed on the next group creation.
 	pending_sequence: Option<u64>,
+	next_sequence: u64,
 
 	/// Reports each written frame and finished group into this rendition's timeline, when the
 	/// producer was built with one.
@@ -152,6 +153,7 @@ impl<C: Container> Producer<C> {
 			buffer: Vec::new(),
 			buffer_duration: std::time::Duration::ZERO,
 			pending_sequence: None,
+			next_sequence: 0,
 			recorder: None,
 			end: None,
 			live_edge: None,
@@ -188,6 +190,7 @@ where
 			buffer: Vec::new(),
 			buffer_duration: std::time::Duration::ZERO,
 			pending_sequence: None,
+			next_sequence: 0,
 			recorder: None,
 			end: None,
 			live_edge: None,
@@ -337,6 +340,11 @@ where
 		self.group.is_none()
 	}
 
+	/// The sequence that would be allocated for the next appended group.
+	pub fn next_sequence(&self) -> u64 {
+		self.next_sequence
+	}
+
 	/// Buffer up to `duration` of frames into each container frame.
 	///
 	/// When non-zero, frames are buffered and flushed together once the buffered duration exceeds
@@ -444,6 +452,7 @@ where
 				Some(sequence) => self.inner.create_group(moq_net::group::Info { sequence })?,
 				None => self.inner.append_group()?,
 			};
+			self.next_sequence = group.sequence + 1;
 
 			self.floor = self.start;
 			self.start = Some(frame.timestamp);
@@ -639,7 +648,7 @@ where
 			// Empty is payload on a data track, so skip this sequence with no object.
 			let skipped = match self.pending_sequence.take() {
 				Some(sequence) => sequence,
-				None => self.inner.latest().map_or(0, |s| s + 1),
+				None => self.next_sequence,
 			};
 			self.pending_sequence = Some(skipped + 1);
 			return Ok(());
@@ -648,6 +657,7 @@ where
 			Some(sequence) => self.inner.create_group(moq_net::group::Info { sequence })?,
 			None => self.inner.append_group()?,
 		};
+		self.next_sequence = group.sequence + 1;
 		let timestamp = self.live_edge.unwrap_or(moq_net::Timestamp::ZERO);
 		if let Some(recorder) = self.recorder.as_mut() {
 			recorder.frame(hang::timeline::Position::group(group.sequence), timestamp, false);
@@ -1096,13 +1106,13 @@ mod tests {
 		let mut producer = Producer::new(track, Container::Legacy(crate::container::Kind::Audio));
 
 		producer.write(frame(0, true)).unwrap();
-		let stale = producer.track().latest();
+		let stale = producer.next_sequence() - 1;
 
 		producer.discontinuity().unwrap();
-		let edge = producer.track().latest();
+		let edge = producer.next_sequence() - 1;
 
 		assert_ne!(edge, stale, "the marker group is the live edge now");
-		assert_eq!(edge, stale.map(|s| s + 1));
+		assert_eq!(edge, stale + 1);
 	}
 
 	/// The marker sits at the duration marker a cut wrote, not at the last frame below it,

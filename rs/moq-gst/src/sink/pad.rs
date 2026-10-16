@@ -34,7 +34,7 @@ enum PadState {
 enum Sink {
 	Media(Box<Media>),
 	Text(Box<Text>),
-	Opaque(moq_net::track::Producer),
+	Opaque(Box<moq_net::track::Producer>),
 }
 
 /// Keep finished rendition owners until a whole run's catalog has closed.
@@ -385,7 +385,7 @@ impl Pad {
 			let info = moq_net::track::Info::default()
 				.with_timescale(moq_net::Timescale::MICRO)
 				.with_max_age(std::time::Duration::from_secs(5));
-			self.track = Some(Sink::Opaque(request.accept(info)));
+			self.track = Some(Sink::Opaque(Box::new(request.accept(info))));
 			self.caps = Some(caps.clone());
 			return Ok(name);
 		}
@@ -1947,14 +1947,17 @@ mod tests {
 
 		let snapshot = catalog.snapshot();
 		let track = snapshot.video.renditions.keys().next().expect("a video rendition");
-		let subscriber = broadcast
+		let mut subscriber = broadcast
 			.consume()
 			.track(track)
 			.expect("the rendition track is published")
 			.subscribe(None)
 			.await
 			.expect("subscribe to the rendition track");
-		assert!(subscriber.latest().is_some(), "the IDR AU emitted a frame to the track");
+		assert!(
+			subscriber.largest().await.is_some(),
+			"the IDR AU emitted a frame to the track"
+		);
 	}
 
 	// A regressing PTS within an Active timeline still emits: frames arrive in decode order and B-frames

@@ -417,6 +417,8 @@ class TrackState {
 	update: Signal<Subscription | undefined>;
 	/** Resolved once the producer commits the immutable properties. */
 	info = new Signal<Info | undefined>(undefined);
+	/** Greatest real frame reported by the publisher, including a wire answer. */
+	largest = new Signal<Location | undefined>(undefined);
 
 	constructor(subscription?: Subscription) {
 		this.update = new Signal(subscription === undefined ? undefined : subscriptionDefaults(subscription));
@@ -447,6 +449,25 @@ async function resolveInfo(state: TrackState): Promise<Info> {
 		if (closed !== undefined) throw new Error("track closed before info was known");
 
 		await Signal.race(state.info, state.closed);
+	}
+}
+
+async function nextLargest(
+	state: TrackState,
+	seen: Location | undefined,
+	commit: (largest: Location) => void,
+): Promise<Location | undefined> {
+	for (;;) {
+		const largest = state.largest.peek();
+		if (
+			largest &&
+			(!seen || largest.group > seen.group || (largest.group === seen.group && largest.frame > seen.frame))
+		) {
+			commit(largest);
+			return largest;
+		}
+		if (state.closed.peek() !== undefined) return undefined;
+		await Signal.race(state.largest, state.closed);
 	}
 }
 
@@ -577,6 +598,7 @@ export class Producer {
 	// Whether any subscriber is currently attached, watched through {@link demand}.
 	#used = new Signal<boolean>(false);
 	#demand: Demand;
+	#largestSeen?: Location;
 
 	constructor(name: string) {
 		this.name = name;
@@ -596,7 +618,8 @@ export class Producer {
 			sequence.holders++;
 		};
 		hooks.bindSequence = bindProducerSequence;
-		hooks.cachedLargest = (producer) => producer.#largest();
+		hooks.cachedLargest = (producer) => producer.#cachedLargest();
+		hooks.reportedLargest = (producer, largest) => producer.#advanceLargest(largest);
 	}
 
 	/**
@@ -684,6 +707,7 @@ export class Producer {
 		sink.producer = this;
 		const info = this.#state.info.peek();
 		if (info) sink.info.set(info);
+		sink.largest.set(this.#state.largest.peek());
 
 		const closed = this.#state.closed.peek();
 		if (closed === undefined) {
@@ -808,7 +832,7 @@ export class Producer {
 
 	// The newest frame in the cache, as {@link Subscriber.largest} reads it from a sink:
 	// unknown once the newest group is evicted, since what is left cannot say where the edge is.
-	#largest(): Location | undefined {
+	#cachedLargest(): Location | undefined {
 		const latest = this.#state.latest;
 		if (latest === undefined || !this.#cached.has(latest)) return undefined;
 
@@ -820,6 +844,24 @@ export class Producer {
 			}
 		}
 		return largest;
+	}
+
+	#advanceLargest(largest: Location | undefined): void {
+		if (!largest) return;
+		const current = this.#state.largest.peek();
+		if (
+			current &&
+			(current.group > largest.group || (current.group === largest.group && current.frame >= largest.frame))
+		) {
+			return;
+		}
+		this.#state.largest.set(largest);
+		for (const sink of this.#sinks) sink.largest.set(largest);
+	}
+
+	/** Wait for the current or next newer largest frame, ending with the track. */
+	async largest(): Promise<Location | undefined> {
+		return nextLargest(this.#state, this.#largestSeen, (largest) => (this.#largestSeen = largest));
 	}
 
 	// Evict cached groups idle for longer than the cache window. Idle means nothing
@@ -896,6 +938,13 @@ export class Producer {
 		this.#advance(group.sequence);
 		this.#state.latest = Math.max(this.#state.latest ?? 0, group.sequence);
 		for (const sink of this.#sinks) this.#mirror(entry, sink);
+		const advance = () => {
+			const count = group.consume().frameCount;
+			if (count > 0) this.#advanceLargest({ group: group.sequence, frame: count - 1 });
+		};
+		advance();
+		const stop = hooks.groupProgress(group, advance);
+		void group.closed.then(stop);
 		// Give held mirrors the new live edge before pruning their timeline entry,
 		// so their latency guard can preserve a terminal expiry verdict.
 		this.#prune();
@@ -1167,6 +1216,7 @@ export class Subscriber {
 	readonly name: string;
 
 	#state: TrackState;
+	#largestSeen?: Location;
 	#nextSequence = 0;
 	#cursor = new Signal<{ start: number; end?: number }>({ start: 0 });
 	#enforceLatency = true;
@@ -1334,6 +1384,8 @@ export class Subscriber {
 	static {
 		makeSubscriber = (name, state) => new Subscriber(name, state);
 		hooks.tryRecvGroup = (subscriber) => subscriber.#tryRecvGroup();
+		hooks.latestSequence = (subscriber) => subscriber.#state.latest;
+		hooks.largestSnapshot = (subscriber) => subscriber.#state.largest.peek();
 		hooks.groupChanged = (subscriber, fn) => subscriber.#groupChanged(fn);
 		hooks.exemptFetch = (subscriber) => {
 			subscriber.#enforceLatency = false;
@@ -1379,16 +1431,11 @@ export class Subscriber {
 		return this.#state.update;
 	}
 
-	/** Return the latest group sequence observed on this track, if any. */
-	latest(): number | undefined {
-		return this.#state.latest;
-	}
-
 	/**
 	 * The track's exclusive end: the one {@link Producer.finishAt} declared, which can be
 	 * ahead of the live edge, or the head of the sequence after the highest produced once the
 	 * producer closes cleanly (`{ group: 0, frame: 0 }` for a track that produced none).
-	 * Groups and datagrams share the sequence namespace, so it can sit past `latest() + 1`.
+	 * Groups and datagrams share the sequence namespace, so it can sit past the last group.
 	 * Undefined until declared, and after an abort that declared none. Mirrors the Rust `end`.
 	 */
 	end(): Location | undefined {
@@ -1415,27 +1462,9 @@ export class Subscriber {
 		}
 	}
 
-	/**
-	 * The newest frame this track has produced, or `undefined` while it has none.
-	 *
-	 * Read from the groups buffered for this subscriber, so nothing is consumed. A newest
-	 * group that has no frames yet falls back to the newest older group that does. It
-	 * reads as `undefined` once the newest group has been evicted or received: what is
-	 * left can no longer say where the edge is.
-	 */
-	largest(): Location | undefined {
-		const latest = this.#state.latest;
-		if (latest === undefined) return undefined;
-
-		const groups = this.#state.groups.peek();
-		const newest = groups[groups.length - 1];
-		if (!newest || newest.sequence !== latest) return undefined;
-
-		for (let i = groups.length - 1; i >= 0; i--) {
-			const count = groups[i].frameCount;
-			if (count > 0) return { group: groups[i].sequence, frame: count - 1 };
-		}
-		return undefined;
+	/** Wait for the current or next newer largest frame, ending with the track. */
+	async largest(): Promise<Location | undefined> {
+		return nextLargest(this.#state, this.#largestSeen, (largest) => (this.#largestSeen = largest));
 	}
 
 	/**
@@ -1845,9 +1874,9 @@ export class Ordered {
 		return this.#subscriber.subscription;
 	}
 
-	/** The latest group sequence observed on this track, if any. */
-	latest(): number | undefined {
-		return this.#subscriber.latest();
+	/** Wait for the current or next newer largest frame, ending with the track. */
+	largest(): Promise<Location | undefined> {
+		return this.#subscriber.largest();
 	}
 
 	/** The track's exclusive end; see {@link Subscriber.end}. */

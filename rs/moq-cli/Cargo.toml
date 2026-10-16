@@ -103,6 +103,7 @@ base64 = { workspace = true }
 bytes = { workspace = true }
 hang = { workspace = true }
 humantime = { workspace = true }
+kio = { workspace = true }
 moq-archive = { workspace = true }
 moq-audio = { workspace = true, optional = true, features = ["aac"] }
 moq-auth = { workspace = true, features = ["serve"] }

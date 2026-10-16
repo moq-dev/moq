@@ -644,6 +644,19 @@ pub(crate) struct Track {
 }
 
 impl Track {
+	/// Advance the track's publisher-reported frame edge.
+	pub(crate) fn advance_largest(&self, group: u64, frame: u64) {
+		let Some(state) = self.state.upgrade() else {
+			return;
+		};
+		if let Ok(mut state) = state.write() {
+			let position = super::track::Position { group, frame };
+			if state.largest.is_none_or(|current| position > current) {
+				state.largest = Some(position);
+			}
+		}
+	}
+
 	/// Open an account against `pool` for the track behind `state`.
 	pub(crate) fn new(pool: Pool, state: kio::Weak<TrackState>) -> Arc<Self> {
 		let track = Arc::new(Self {

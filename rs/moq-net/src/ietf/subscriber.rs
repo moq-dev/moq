@@ -11662,7 +11662,7 @@ mod stitch_tests {
 			let mut consumer = h.track.subscribe(None);
 			let mut stream = h.stream().await.with_version(version);
 			h.subscriber.clone().recv_group(&mut stream).await.unwrap();
-			assert_eq!(h.track.latest(), Some(SEQUENCE));
+			assert_eq!(h.track.latest_sequence(), Some(SEQUENCE));
 			assert_eq!(read_group(&mut consumer).await, (SEQUENCE, vec![(None, vec![42])]));
 			let mut stream = h.stream().await.with_version(version);
 			h.subscriber.clone().recv_group(&mut stream).await.unwrap();
@@ -11942,7 +11942,11 @@ mod stitch_tests {
 		let mut stream = h.stream().await;
 		h.subscriber.clone().recv_group(&mut stream).await.unwrap();
 		assert_eq!(h.track.end(), Some(track::Position { group: 5, frame: 5 }));
-		assert_eq!(h.track.latest(), None, "a terminal marker creates no payload group");
+		assert_eq!(
+			h.track.latest_sequence(),
+			None,
+			"a terminal marker creates no payload group"
+		);
 	}
 
 	/// A group at or past the end an END_OF_TRACK declared contradicts that end, which no
@@ -11975,7 +11979,7 @@ mod stitch_tests {
 
 		h.subscriber.clone().recv_group(&mut stream).await.unwrap();
 		assert_eq!(h.track.end(), Some(track::Position::group(SEQUENCE)));
-		assert_eq!(h.track.latest(), None, "no group was created");
+		assert_eq!(h.track.latest_sequence(), None, "no group was created");
 	}
 
 	/// The group ended exactly where we joined it, so the subscription's stream carries no

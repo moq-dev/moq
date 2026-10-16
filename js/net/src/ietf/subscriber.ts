@@ -957,6 +957,18 @@ export class Subscriber {
 			priority: fromWire(ok.properties.priority ?? 128),
 			maxAge: maxCacheDuration === undefined ? undefined : Milli(Number(maxCacheDuration)),
 		});
+		if (ok.largest) {
+			if (
+				ok.largest.groupId > BigInt(Number.MAX_SAFE_INTEGER) ||
+				ok.largest.objectId > BigInt(Number.MAX_SAFE_INTEGER)
+			) {
+				throw new RangeError("largest location exceeds safe integers");
+			}
+			hooks.reportedLargest(subscription.track, {
+				group: Number(ok.largest.groupId),
+				frame: Number(ok.largest.objectId),
+			});
+		}
 
 		try {
 			this.#aliases.set(ok.trackAlias, subscription, { broadcast, name: request.name });

@@ -171,9 +171,9 @@ impl Consumer {
 		// across subscribers and can ask the publisher to rewind for everyone.
 		if options.start == Start::Latest
 			&& warmup.is_zero()
-			&& let Some(live_edge) = track.latest()
+			&& let Some(live_edge) = subscriber.largest().await
 		{
-			subscriber.set_groups(live_edge..);
+			subscriber.set_groups(live_edge.group..);
 		}
 		let track = subscriber;
 		let retention = track.info().max_age;

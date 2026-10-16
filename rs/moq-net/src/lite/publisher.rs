@@ -1932,7 +1932,7 @@ impl<S: crate::transport::poll::Session> Request<S> for SubscribeServe<S> {
 		// best-effort datagrams from this single cursor, so a group-only or datagram-only
 		// track opens exactly one subscription (no duplicate demand).
 		let track = broadcast.track(&msg.track)?;
-		let latest = track.latest();
+		let latest = track.latest_sequence();
 		let subscribing = track.subscribe(subscription).into_inner();
 		Ok(Self::Confirm {
 			msg: Box::new(msg),
@@ -2271,20 +2271,20 @@ mod test {
 		);
 
 		let mut legacy = served(Version::Lite01);
-		position_cursor(&mut legacy, Version::Lite01, None, producer.latest());
+		position_cursor(&mut legacy, Version::Lite01, None, producer.latest_sequence());
 		assert_eq!(drain(&mut legacy), vec![2]);
 
 		// Lite03-05 declare a budget, but their drafts define it as a staleness tolerance
 		// and an absent start as the latest group, so they are pinned all the same.
 		let mut tolerant =
 			producer.subscribe(track::Subscription::default().with_max_delay(std::time::Duration::from_secs(5)));
-		position_cursor(&mut tolerant, Version::Lite05, None, producer.latest());
+		position_cursor(&mut tolerant, Version::Lite05, None, producer.latest_sequence());
 		assert_eq!(drain(&mut tolerant), vec![2]);
 
 		// On lite-06 the declared budget is what resolves the start, so it stands.
 		let mut declared =
 			producer.subscribe(track::Subscription::default().with_max_delay(std::time::Duration::from_secs(5)));
-		position_cursor(&mut declared, Version::Lite06, None, producer.latest());
+		position_cursor(&mut declared, Version::Lite06, None, producer.latest_sequence());
 		assert_eq!(drain(&mut declared), vec![0, 1, 2]);
 	}
 
@@ -3373,7 +3373,7 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 			// `position_cursor` pins an unfloored SUBSCRIBE to the latest group, so an
 			// update that drops a named floor re-pins there too. On an empty track the
 			// next group is the latest, whatever its sequence.
-			self.track.start_at(self.track.latest().unwrap_or(0));
+			self.track.start_at(self.track.latest_sequence().unwrap_or(0));
 		}
 		self.track
 			.end_at(upd.end_group.map_or(Bound::Unbounded, Bound::Included));

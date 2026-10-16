@@ -401,8 +401,28 @@ impl Subscriber {
 	}
 
 	/// The newest sequence any copy has.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub(crate) fn latest(&self) -> Option<u64> {
 		self.reader().latest()
+	}
+
+	/// Poll for a newer largest frame on the currently serving copy.
+	pub(crate) fn poll_largest(&mut self, seen: &mut Option<Position>, waiter: &kio::Waiter) -> Poll<Option<Position>> {
+		let mut reader = self.reader();
+		let sub = ready!(reader.poll_serving(waiter));
+		let Some(sub) = sub else {
+			return Poll::Ready(None);
+		};
+		loop {
+			match ready!(sub.poll_largest(waiter)) {
+				Some(largest) if seen.is_none_or(|seen| largest > seen) => {
+					*seen = Some(largest);
+					return Poll::Ready(Some(largest));
+				}
+				Some(_) => continue,
+				None => return Poll::Ready(None),
+			}
+		}
 	}
 
 	/// The groups the copies' drift budget skipped since the last call, counted against
@@ -484,7 +504,7 @@ impl Reader {
 		// The replaced copies finish the groups they had when replaced, and nothing newer.
 		for copy in &mut self.copies {
 			if copy.until.is_none() {
-				copy.until = Some(self.newest.max(copy.track.latest()));
+				copy.until = Some(self.newest.max(copy.track.latest_sequence()));
 				copy.update(&self.mirrored);
 			}
 		}
@@ -816,8 +836,9 @@ impl Reader {
 		}
 	}
 
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	fn latest(&self) -> Option<u64> {
-		self.copies.iter().filter_map(|copy| copy.track.latest()).max()
+		self.copies.iter().filter_map(|copy| copy.track.latest_sequence()).max()
 	}
 }
 

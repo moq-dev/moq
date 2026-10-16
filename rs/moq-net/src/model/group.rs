@@ -761,6 +761,7 @@ impl Producer {
 		// With the group lock released (lock order is track then group), settle
 		// eviction debt if enough has been written since the track last paid.
 		self.cache.settle(now);
+		self.cache.advance_largest(self.info.sequence, (next_index - 1) as u64);
 		// An untimed frame presents nothing, so it can expire no read.
 		if let Some(timestamp) = timestamp {
 			self.cache.wakes().presented(timestamp);
@@ -826,6 +827,9 @@ impl Producer {
 		drop(state);
 
 		self.cache.settle(now);
+		if count > 0 {
+			self.cache.advance_largest(self.info.sequence, (next_index - 1) as u64);
+		}
 		if let Some(latest) = latest {
 			self.cache.wakes().presented(latest);
 		}
@@ -985,6 +989,8 @@ impl Producer {
 		// With the group lock released (lock order is track then group), settle
 		// eviction debt and age idle content out, reusing the tick above.
 		self.cache.settle(now);
+		self.cache
+			.advance_largest(self.info.sequence, (self.frame_count() - 1) as u64);
 		Ok(())
 	}
 

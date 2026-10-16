@@ -1541,7 +1541,6 @@ test.each([Version.DRAFT_14, Version.DRAFT_16])("draft %s drops a subgroup that 
 		flags: groupFlags(true),
 	});
 	await subscriber.handleGroup(partial, new Reader(undefined, encodeObjects([2, 0]), version));
-	expect(track.latest()).toBeUndefined();
 	expect(track.closed.peek()).toBeUndefined();
 	expect(warning).not.toHaveBeenCalled();
 

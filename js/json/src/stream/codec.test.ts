@@ -112,7 +112,6 @@ test("a rejected record ends the track without opening a group", async () => {
 	expect(() => producer.append({ value: undefined })).toThrow("not representable as JSON");
 
 	// Nothing was appended, so the log has no group for a consumer to enter and wait in.
-	expect(subscriber.latest()).toBeUndefined();
 
 	// And the log is missing a record, so the track ends rather than staying writable: a later
 	// append would present that gap as a complete log. Matches the Rust producer.

@@ -19,7 +19,7 @@ import {
 } from "../error.ts";
 import * as netGroup from "../group.ts";
 import { Cost, type Hop, MAX_HOPS, type Route, routesEqual, UNKNOWN_HOP } from "../hop.ts";
-import { groupBounds, hiddenBelow, scopeCaptures, scopeHead, scopeOverlaps } from "../internal.ts";
+import { groupBounds, hiddenBelow, hooks, scopeCaptures, scopeHead, scopeOverlaps } from "../internal.ts";
 import * as Path from "../path.ts";
 import { sendOrder } from "../priority.ts";
 import { type OpenOptions, type Reader, Stream } from "../stream.ts";
@@ -1161,6 +1161,7 @@ export class Subscriber {
 
 			if ("start" in resp) {
 				entry.start = resp.start.group;
+				hooks.reportedLargest(entry.track, resp.start.largest);
 				// The groups the SUBSCRIBE asked for below it are not waited for, whatever the
 				// demand asks later. One that still arrives is delivered.
 				if (entry.requested !== undefined) entry.tail.account(entry.requested, entry.start);

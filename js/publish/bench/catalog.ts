@@ -47,13 +47,13 @@ async function measure(tracks: number, viewers: number) {
 	});
 	// Initial configuration is outside the estimate traffic being measured.
 	for (const viewer of subscribers) await viewer.catalog.latest();
-	let latest = subscribers[0].subscriber.latest();
+	let largest = subscribers[0].subscriber.largest();
 	let publishes = 0;
 	let updates = 0;
 	const receive = async () => {
-		const next = subscribers[0].subscriber.latest();
-		if (next === latest) return;
-		latest = next;
+		const next = await Promise.race([largest, Promise.resolve(undefined)]);
+		if (!next) return;
+		largest = subscribers[0].subscriber.largest();
 		publishes++;
 		for (const viewer of subscribers) {
 			const root = (await viewer.catalog.latest())?.value;

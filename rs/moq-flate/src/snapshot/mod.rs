@@ -12,6 +12,8 @@
 //! there is no window to share across a single-frame group.
 
 use crate::Compression;
+#[cfg(test)]
+use futures::FutureExt;
 
 pub mod consumer;
 pub mod producer;
@@ -182,13 +184,16 @@ mod test {
 
 	#[test]
 	fn one_group_per_update() {
-		let (mut producer, track) = producer(false);
+		let (mut producer, mut track) = producer(false);
 		producer.update(&b"first"[..]).unwrap();
 		producer.update(&b"second"[..]).unwrap();
 		producer.finish().unwrap();
 
 		// Two updates => two groups. A consumer that joins after both only sees the latest.
-		assert_eq!(track.latest(), Some(1));
+		assert_eq!(
+			track.largest().now_or_never().flatten().map(|position| position.group),
+			Some(1)
+		);
 		assert_eq!(drain(consume(track, false)), vec![Bytes::from_static(b"second")]);
 	}
 

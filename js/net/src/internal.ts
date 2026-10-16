@@ -189,6 +189,14 @@ export const hooks: {
 	bindSequence: (producer: Producer, sequence: TrackSequence) => void;
 	/** The newest frame a producer's cache holds, read without subscribing; assigned by `track.ts`. */
 	cachedLargest: (producer: Producer) => Location | undefined;
+	/** Seed a received track from the publisher's reported edge; assigned by `track.ts`. */
+	reportedLargest: (producer: Producer, largest: Location | undefined) => void;
+	/** Snapshot the latest group sequence for wire positioning; assigned by `track.ts`. */
+	latestSequence: (subscriber: Subscriber) => number | undefined;
+	/** Snapshot the reported largest frame for wire responses; assigned by `track.ts`. */
+	largestSnapshot: (subscriber: Subscriber) => Location | undefined;
+	/** Observe a group's frame count; assigned by `group.ts`. */
+	groupProgress: (group: GroupProducer, fn: () => void) => Dispose;
 	/**
 	 * Take the next group the subscriber's cursor allows, without waiting; assigned by `track.ts`.
 	 *
@@ -262,6 +270,18 @@ export const hooks: {
 	},
 	cachedLargest: () => {
 		throw new Error("track.ts not loaded");
+	},
+	reportedLargest: () => {
+		throw new Error("track.ts not loaded");
+	},
+	latestSequence: () => {
+		throw new Error("track.ts not loaded");
+	},
+	largestSnapshot: () => {
+		throw new Error("track.ts not loaded");
+	},
+	groupProgress: () => {
+		throw new Error("group.ts not loaded");
 	},
 	tryRecvGroup: () => {
 		throw new Error("track.ts not loaded");

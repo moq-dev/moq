@@ -282,15 +282,8 @@ impl<T> Inner<T> {
 			return Err(err.clone());
 		}
 
-		// The same test `append_group` applies: a boundary declared ahead of the live edge still
-		// admits the groups below it.
 		let track = &self.track.inner;
-		let next = track.latest().map_or(0, |latest| latest.saturating_add(1));
-		if track.is_closed()
-			|| track
-				.end()
-				.is_some_and(|end| moq_net::track::Position::group(next) >= end)
-		{
+		if track.is_closed() || track.end().is_some() {
 			return Err(moq_net::Error::Closed.into());
 		}
 		Ok(())
