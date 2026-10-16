@@ -135,7 +135,13 @@ interface Note {
 }
 
 /** Split a draft into its metadata block and the abstract/note/middle/back sections. */
-function split(source: string): { meta: Metadata; abstract: string[]; notes: Note[]; middle: string[]; back: string[] } {
+function split(source: string): {
+	meta: Metadata;
+	abstract: string[];
+	notes: Note[];
+	middle: string[];
+	back: string[];
+} {
 	const lines = source.split("\n");
 
 	// The metadata block opens with `---` and closes at the first `--- <section>`.
@@ -162,7 +168,8 @@ function split(source: string): { meta: Metadata; abstract: string[]; notes: Not
 	// kramdown-rfc only allows notes between the abstract and the middle, and
 	// they end at the next marker.
 	const notes = noteStarts.map(({ title, line }, n) => {
-		if (line < abstract || line > middle) throw new Error(`--- note_ section must sit between --- abstract and --- middle`);
+		if (line < abstract || line > middle)
+			throw new Error(`--- note_ section must sit between --- abstract and --- middle`);
 		return { title, lines: lines.slice(line + 1, noteStarts[n + 1]?.line ?? middle) };
 	});
 

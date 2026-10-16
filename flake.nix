@@ -251,6 +251,8 @@
           jq
           # Runs the moq.sh installer tests under a strict POSIX shell.
           dash
+          # Proves the temporary bench relay owns its TCP and UDP sockets.
+          lsof
         ];
 
         # Linters / formatters used by `just check` and `just fix`, which
