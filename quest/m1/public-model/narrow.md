@@ -38,9 +38,13 @@ pairs with the narrowed visibility, so it does not need the compile probe.
 Each child's PR then deletes its `pending` marks as items go public, and the
 check fails if one is left behind.
 
-JS needs the same guard, since nothing compiles reach there and
-`stripInternal` hides it from custom transports. Mark the declarations the
-same way, with the same vocabulary: every export of `js/net/src/internal.ts`
+JS needs the same guard, since nothing compiles reach there. Custom
+transports cannot see this surface for two different reasons:
+`internal.ts` and `wire.ts` are not exported from `src/index.ts`, and
+`stripInternal` drops `@internal` members of exported classes from the
+declarations. Neither needs a new `@internal` tag. The classification
+marker is a separate comment from the shared vocabulary above, not the
+`@internal` tag. Add it to: every export of `js/net/src/internal.ts`
 and `wire.ts` (each `hooks` entry and view member included), and every
 `@internal` member in the model modules. Then add an import-edge grep to the
 same lint. It fails when a non-test file under `src/{ietf,lite,connection}/`
