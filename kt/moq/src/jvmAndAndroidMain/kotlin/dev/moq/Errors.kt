@@ -13,15 +13,15 @@ val MoqException.isShutdown: Boolean
     get() = this is MoqException.Cancelled || this is MoqException.Closed
 
 /**
- * True for HTTP 401/403 and a protocol Unauthorized session close. Unlike a
+ * True for HTTP 401/403, an expired token, and a protocol Unauthorized or Expired session close. Unlike a
  * transport failure, retrying without new credentials won't help, so callers
  * should surface these rather than reconnect.
  */
 val MoqException.isAuth: Boolean
     get() {
-        if (this is MoqException.Unauthorized || this is MoqException.Forbidden) return true
+        if (this is MoqException.Unauthorized || this is MoqException.Forbidden || this is MoqException.Expired) return true
         val protocol = protocolError ?: return false
-        return protocol.kind == MoqProtocolKind.UNAUTHORIZED
+        return protocol.kind == MoqProtocolKind.UNAUTHORIZED || protocol.kind == MoqProtocolKind.EXPIRED
     }
 
 /**
