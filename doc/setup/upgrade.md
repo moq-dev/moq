@@ -19,6 +19,11 @@ error lists and rerun.
 
 These land with the next breaking release, not the 2026-09-23 train.
 
+- **moq-mux's catalog consumer is opaque.** Construct `catalog::Consumer` with
+  `Consumer::new(broadcast, format).await` or convert an existing
+  `catalog::hang::Consumer` with `.into()`, then read it through `catalog::Stream`.
+  Its `Hang`, `Msf`, and `Closed` variants and `catalog::msf::Consumer::track`
+  are private.
 - **JS catalog ranking names its media kind.** Replace `Catalog.ranked(renditions)`
   with `Catalog.Video.ranked(renditions)`. `Catalog.Audio.ranked(renditions)`
   orders audio by enabled state, bitrate, sample rate, channel count, and name.

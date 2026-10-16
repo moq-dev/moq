@@ -13,8 +13,7 @@ runtimes (`moq-tokio` and `moq-uring`).
   group with every claim attaches a classic-BPF filter before any socket is
   released for serving. The completed group retains every member socket, so
   dropping one serving handle cannot renumber the survivors. A `Shard` names
-  the slot a member ended up in, and `cid_prefix` is the byte its issued ids
-  lead with.
+  the slot a member ended up in, and `cid` makes an issued id that names it.
 - **`cpu`**: pinning worker threads to cores.
 - **`udp`**: sending and receiving with GSO, GRO, and ECN, a hard fork of
   [quinn-udp](https://github.com/quinn-rs/quinn). All credit for it goes to

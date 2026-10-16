@@ -26,17 +26,17 @@ sans-io `srt-protocol` directly instead of waiting on a socket abstraction in
 srt-tokio.
 
 Decided 2026-10-05, from moq.pro's audit: `moq-rtc` taking a fed socket
-([rtc-feed](/quest/m2/one-port/rtc-feed.md)) and the steering filter
-([shard steering](/quest/m2/p2p/shard-steering.md)) join this line, and
+([rtc-feed](/quest/m2/one-port/rtc-feed.md)) joins this line, and
 [the io_uring demux](/quest/m2/uring-demux.md) is planned beside it, all in
 m2 rather than m3, since moq.pro's edge cutover and its uring rollout wait on
 them.
 
-Decided 2026-10-15: [UDP demux](/quest/m2/p2p/udp-demux.md) and
-[shard steering](/quest/m2/p2p/shard-steering.md) remain under P2P, now deferred to m2,
+Decided 2026-10-15: [UDP demux](/quest/m2/p2p/udp-demux.md) remains
+under P2P, now deferred to m2,
 because [native pairs](/quest/m2/p2p/native-quic.md) run QUIC and ICE's
 STUN on one socket through the same demux. The rest of this line builds on
-those shared prerequisites in m2.
+that shared prerequisite in m2. QUIC shard steering landed in #5638;
+reuse its filter rather than recreating that completed work.
 
 ### Classifying a datagram
 
@@ -99,6 +99,5 @@ pre-accepted streams can stand behind.
 ## Related
 
 - [UDP demux](/quest/m2/p2p/udp-demux.md) - one socket carries QUIC, with a WebRTC hook for embedders; owned by deferred native P2P in m2
-- [Steer only QUIC by connection ID](/quest/m2/p2p/shard-steering.md) - QUIC-bit greasing goes off and the reuseport filter leaves RTP, SRT, and STUN flows on one shard each
 - [One port on the io_uring workers](/quest/m2/uring-demux.md) - the io_uring workers host the UDP demux
 - [Stream sessions](/quest/m3/uring-tcp/README.md) - the io_uring workers that would host the TCP acceptor later
