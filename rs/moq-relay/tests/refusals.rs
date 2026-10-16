@@ -186,9 +186,19 @@ async fn lan_refusals_are_counted() {
 /// An auth server that cannot be reached is `unavailable`, apart from a refusal.
 #[tokio::test]
 async fn unavailable_auth_server_is_counted() {
-	let closed = std::net::TcpListener::bind("127.0.0.1:0").expect("reserve a port");
-	let auth_url = format!("http://{}/", closed.local_addr().expect("reserved address"));
-	drop(closed);
+	// Binding without listening keeps the port reserved while refusing connections.
+	let closed = tokio::net::TcpSocket::new_v4().expect("auth socket");
+	closed.bind("127.0.0.1:0".parse().unwrap()).expect("reserve auth port");
+	let address = closed.local_addr().expect("reserved address");
+	assert!(std::net::TcpListener::bind(address).is_err(), "auth port must stay reserved");
+	assert_eq!(
+		tokio::net::TcpStream::connect(address)
+			.await
+			.expect_err("auth socket must refuse connections")
+			.kind(),
+		std::io::ErrorKind::ConnectionRefused,
+	);
+	let auth_url = format!("http://{address}/");
 
 	let dir = tempfile::tempdir().expect("tempdir");
 	let mut config = config(dir.path(), false);
