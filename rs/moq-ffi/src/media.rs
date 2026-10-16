@@ -628,6 +628,18 @@ pub struct MoqMediaCatalogProducer {
 	broadcast: Weak<MoqBroadcastProducer>,
 }
 
+impl MoqMediaCatalogProducer {
+	#[cfg(all(any(feature = "audio", feature = "video"), not(target_arch = "wasm32")))]
+	pub(crate) fn broadcast(&self) -> Result<Arc<MoqBroadcastProducer>, MoqError> {
+		self.broadcast.upgrade().ok_or(MoqError::Closed)
+	}
+
+	#[cfg(all(any(feature = "audio", feature = "video"), not(target_arch = "wasm32")))]
+	pub(crate) fn belongs_to(&self, broadcast: &MoqBroadcastProducer) -> bool {
+		std::ptr::eq(self.broadcast.as_ptr(), broadcast)
+	}
+}
+
 #[uniffi::export]
 impl MoqMediaCatalogProducer {
 	/// Construct a weak catalog handle for this broadcast.

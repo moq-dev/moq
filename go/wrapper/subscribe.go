@@ -63,38 +63,6 @@ func (b *BroadcastConsumer) Resolve(ctx context.Context, reference *string) (*Br
 	return &BroadcastConsumer{inner: inner}, nil
 }
 
-// DecodeAudio subscribes to a raw-audio track; samples come back in the
-// format declared by output. catalogAudio comes from the catalog.
-func (b *BroadcastConsumer) DecodeAudio(
-	ctx context.Context,
-	name string,
-	catalogAudio ffi.MoqAudio,
-	output AudioDecoderOutput,
-) (*AudioConsumer, error) {
-	inner, err := b.inner.DecodeAudio(ctx, name, catalogAudio, output)
-	if err != nil {
-		return nil, err
-	}
-	return &AudioConsumer{inner: inner}, nil
-}
-
-// DecodeVideo subscribes to a video track and decodes it inside the bindings.
-// catalogVideo comes from the catalog. output.Format picks the packed CPU layout
-// every frame arrives in, defaulting to I420 when nil; each frame repeats it.
-// output.Resize is best effort, so read each frame's own dimensions.
-func (b *BroadcastConsumer) DecodeVideo(
-	ctx context.Context,
-	name string,
-	catalogVideo ffi.MoqVideo,
-	output VideoDecoderOutput,
-) (*VideoConsumer, error) {
-	inner, err := b.inner.DecodeVideo(ctx, name, catalogVideo, output)
-	if err != nil {
-		return nil, err
-	}
-	return &VideoConsumer{inner: inner}, nil
-}
-
 // GroupConsumer is a stream of raw frames within a single group.
 type GroupConsumer struct {
 	inner *ffi.MoqGroupConsumer
@@ -220,60 +188,9 @@ func (t *TrackConsumer) Cancel() {
 	t.inner.Cancel()
 }
 
-// AudioConsumer is a stream of decoded audio frames.
-type AudioConsumer struct {
-	inner *ffi.MoqAudioConsumer
-}
-
-// Next returns the next audio frame, or (nil, nil) when the track ends.
-func (a *AudioConsumer) Next(ctx context.Context) (*AudioFrame, error) {
-	return bridge.Call(ctx, a.inner.Cancel, a.inner.Next)
-}
-
-// All ranges over audio frames until the track ends or the loop breaks.
-func (a *AudioConsumer) All(ctx context.Context) iter.Seq2[*AudioFrame, error] {
-	return bridge.Seq(ctx, a.Next)
-}
-
-// Cancel stops the stream.
-func (a *AudioConsumer) Cancel() {
-	a.inner.Cancel()
-}
-
-// VideoConsumer is a stream of decoded video frames.
-type VideoConsumer struct {
-	inner *ffi.MoqVideoConsumer
-}
-
-// Next returns the next decoded frame, or (nil, nil) when the track ends.
-// Close each frame when done with it.
-func (v *VideoConsumer) Next(ctx context.Context) (*VideoDecodedFrame, error) {
-	res, err := bridge.CallHandle(ctx, v.inner.Cancel, func(ctx context.Context) (*ffi.MoqVideoDecodedFrame, error) {
-		res, err := v.inner.Next(ctx)
-		if err != nil || res == nil {
-			return nil, err
-		}
-		return *res, nil
-	})
-	if err != nil || res == nil {
-		return nil, err
-	}
-	return &VideoDecodedFrame{inner: res}, nil
-}
-
-// All ranges over decoded frames until the track ends or the loop breaks.
-func (v *VideoConsumer) All(ctx context.Context) iter.Seq2[*VideoDecodedFrame, error] {
-	return bridge.Seq(ctx, v.Next)
-}
-
-// Cancel stops the stream.
-func (v *VideoConsumer) Cancel() {
-	v.inner.Cancel()
-}
-
 // VideoDecodedFrame is one decoded video frame. It owns the decoder's surface
 // until Close, which returns it to the decoder: holding many frames stalls
-// decoding. It stays valid after its VideoConsumer is cancelled.
+// decoding. It stays valid after its video.Decoder is cancelled.
 type VideoDecodedFrame struct {
 	inner *ffi.MoqVideoDecodedFrame
 }

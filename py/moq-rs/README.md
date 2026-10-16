@@ -160,8 +160,8 @@ client = moq.Client(
 
 - **`BroadcastProducer()`**. Create a broadcast to publish tracks into.
   - `.dynamic() → BroadcastDynamic`
-  - `.encode_video(input, output, *, bandwidth=None) → VideoProducer`. Encode raw `VideoFrame`s inside the binding; `.write(frame)` each one.
-  - `.encode_audio(name, input, output, *, bandwidth=None) → AudioProducer`. Encode raw PCM `AudioFrame`s; the codec is `output.codec`, e.g. `AudioCodec.opus()` or `AudioCodec.aac()`, with `output.frame_duration_us` setting the Opus frame length (0 takes the codec's own frame, which AAC needs).
+  - `moq.video.producer(broadcast, catalog, input, output, bandwidth=None) → moq.video.Producer`. Encode raw video frames inside the binding.
+  - `moq.audio.producer(broadcast, catalog, input, output, bandwidth=None) → moq.audio.Producer`. Encode raw PCM frames. A zero frame duration uses the codec's own frame.
   - `.close()` ends the broadcast for good; a second call is a no-op.
 - **`BroadcastDynamic`**. Async source of tracks requested by subscribers.
   - `await .requested_track() → TrackRequest`. Call `.accept()` on it for a `TrackProducer`, or `.abort(code)` to reject.

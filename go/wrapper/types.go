@@ -60,7 +60,7 @@ type (
 	VideoSurfacePixelBuffer = ffi.MoqVideoSurfacePixelBuffer
 	// VideoCodec identifies a published video track's codec: H.264 or H.265.
 	VideoCodec = ffi.MoqVideoCodec
-	// VideoPixelFormat is a CPU pixel layout (I420 or RGBA): written to a VideoProducer, or read from a VideoDecodedFrame.
+	// VideoPixelFormat is a CPU pixel layout (I420 or RGBA): written to video.Producer, or read from a VideoDecodedFrame.
 	VideoPixelFormat = ffi.MoqVideoPixelFormat
 	// VideoEncoderInput declares the pixel layout, resolution, and framerate of frames written to a video producer.
 	VideoEncoderInput = ffi.MoqVideoEncoderInput

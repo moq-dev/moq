@@ -69,7 +69,9 @@ Moq.connect("https://relay.example.com").use { moq ->
     audio.writeFrame(Frame(payload = packet, timestampUs = 20_000u))
     audio.cut() // audio has no keyframes, so this is what gives it groups
 
-    val video = broadcast.encodeVideo(
+    val video = dev.moq.video.producer(
+        broadcast,
+        CatalogProducer(broadcast),
         VideoEncoderInput(format = VideoPixelFormat.RGBA, width = 1280u, height = 720u, framerate = 30u),
         VideoEncoderOutput(codec = VideoCodec.H264, track = "camera", bitrate = null, gop = null, kind = autoEncoder),
     )

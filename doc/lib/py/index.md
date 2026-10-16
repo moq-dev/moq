@@ -73,7 +73,10 @@ async def main():
         audio.cut()   # audio has no keyframes, so this is what gives it groups
 
         # Or raw pixels, encoded inside the binding (VideoToolbox, Media Foundation, NVENC, openh264)
-        video = broadcast.encode_video(
+        catalog_producer = moq.media.CatalogProducer(broadcast)
+        video = moq.video.producer(
+            broadcast,
+            catalog_producer,
             moq.VideoEncoderInput(format=moq.VideoPixelFormat.RGBA, width=1280, height=720, framerate=30),
             moq.VideoEncoderOutput(
                 codec=moq.VideoCodec.H264,
@@ -81,7 +84,7 @@ async def main():
                 kind=moq.VideoEncoderKind.AUTO(),  # pyright: ignore[reportArgumentType]
             ),
         )
-        video.write(moq.VideoFrame(timestamp_us=pts, data=rgba))
+        video.write(moq.video.Frame(timestamp=catalog_producer.now(), data=rgba))
 
         # Raw bytes and JSON
         events = broadcast.publish_track("events")

@@ -3,13 +3,13 @@ import MoqFFI
 /// Read side of a video track decoded inside the bindings. Iterating yields
 /// frames that own their decoded picture; call `pixels(format:)` for tightly
 /// packed CPU pixels. Release frames promptly: held frames hold decoder buffers.
-public final class VideoConsumer: AsyncSequence, Sendable {
+public final class VideoDecoder: AsyncSequence, Sendable {
     /// The decoded video frame emitted by this sequence.
     public typealias Element = VideoDecodedFrame
 
-    let ffi: MoqVideoConsumer
+    let ffi: MoqVideoDecoder
 
-    init(_ ffi: MoqVideoConsumer) {
+    init(_ ffi: MoqVideoDecoder) {
         self.ffi = ffi
     }
 
@@ -41,24 +41,9 @@ public final class VideoProducer: Sendable {
         self.ffi = ffi
     }
 
-    /// The video track's name.
-    public var name: String {
-        get throws { try ffi.name() }
-    }
-
     /// A watch-only handle to whether the video track has subscribers.
     public func demand() throws -> TrackDemand {
         TrackDemand(try ffi.demand())
-    }
-
-    /// Suspend until the video track has at least one active consumer. Prefer `demand()`.
-    public func used() async throws {
-        try await ffi.used()
-    }
-
-    /// Suspend until the video track has no active consumers. Prefer `demand()`.
-    public func unused() async throws {
-        try await ffi.unused()
     }
 
     /// Encode and publish one raw frame.
@@ -98,5 +83,58 @@ public final class VideoProducer: Sendable {
     /// Flush any frames the codec is holding and finalize the track.
     public func finish() throws {
         try ffi.finish()
+    }
+}
+
+/// Native video encoding, publication, and decoding.
+public enum Video {
+    public typealias Producer = VideoProducer
+    public typealias EncoderInput = VideoEncoderInput
+    public typealias EncoderOutput = VideoEncoderOutput
+    public typealias DecoderOutput = VideoDecoderOutput
+    public typealias Frame = VideoFrame
+    public typealias Decoder = VideoDecoder
+
+    public static func producer(
+        broadcast: BroadcastProducer,
+        catalog: Media.CatalogProducer,
+        input: EncoderInput,
+        output: EncoderOutput,
+        bandwidth: Bandwidth? = nil
+    ) throws -> Producer {
+        VideoProducer(try MoqVideoProducer(
+            broadcast: broadcast.ffi,
+            catalog: catalog.ffi,
+            input: input,
+            output: output,
+            bandwidth: bandwidth?.ffi
+        ))
+    }
+
+    public static func decoder(
+        broadcast: BroadcastConsumer,
+        name: String,
+        rendition: Media.Video,
+        output: DecoderOutput = DecoderOutput()
+    ) async throws -> Decoder {
+        VideoDecoder(try await moqVideoDecode(
+            broadcast: broadcast.ffi,
+            name: name,
+            catalogVideo: rendition,
+            output: output
+        ))
+    }
+
+    public final class Encoder: Sendable {
+        let ffi: MoqVideoEncoder
+
+        public init(input: EncoderInput, output: EncoderOutput) throws {
+            ffi = try MoqVideoEncoder(input: input, output: output)
+        }
+        public func encode(_ frame: Frame) throws -> [MoqVideoPacket] { try ffi.encode(frame: frame) }
+        public func cut() throws { try ffi.cut() }
+        public func setBitrate(_ bitrate: UInt64) throws { try ffi.setBitrate(bitrate: bitrate) }
+        public func flush() throws -> [MoqVideoPacket] { try ffi.flush() }
+        public func finish() throws -> [MoqVideoPacket] { try ffi.finish() }
     }
 }

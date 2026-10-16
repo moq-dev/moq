@@ -430,20 +430,23 @@ final class SmokeTests: XCTestCase {
         let broadcast = try BroadcastProducer()
         let input = AudioEncoderInput(format: .f32, sampleRate: 48_000, channels: 1)
 
-        let fine = try broadcast.encodeAudio(
-            name: "fine",
+        let catalog = try Media.CatalogProducer(broadcast: broadcast)
+        let fine = try Audio.producer(
+            broadcast: broadcast,
+            catalog: catalog,
             input: input,
-            output: AudioEncoderOutput(codec: AudioCodec.opus(), frameDurationUs: 2_500)
+            output: AudioEncoderOutput(codec: AudioCodec.opus(), track: "fine", frameDurationUs: 2_500)
         )
         // 2.5 ms of silence at 48 kHz mono f32: exactly one encoded frame.
         try fine.write(AudioFrame(timestampUs: 0, data: Data(count: 120 * 4)))
         try fine.finish()
 
         XCTAssertThrowsError(
-            try broadcast.encodeAudio(
-                name: "coarse",
+            try Audio.producer(
+                broadcast: broadcast,
+                catalog: catalog,
                 input: input,
-                output: AudioEncoderOutput(codec: AudioCodec.opus(), frameDurationUs: 2_000)
+                output: AudioEncoderOutput(codec: AudioCodec.opus(), track: "coarse", frameDurationUs: 2_000)
             )
         ) { error in
             if let audio = error as? MoqError, case .Audio = audio { return }
@@ -458,7 +461,9 @@ final class SmokeTests: XCTestCase {
     func testDecodeVideoFrame() async throws {
         let origin = OriginProducer()
         let broadcast = try origin.createBroadcast(path: "video-decode-frame")
-        let video = try broadcast.encodeVideo(
+        let video = try Video.producer(
+            broadcast: broadcast,
+            catalog: Media.CatalogProducer(broadcast: broadcast),
             input: VideoEncoderInput(format: .rgba, width: 320, height: 240, framerate: 30),
             // Software so the encode is deterministic everywhere.
             output: VideoEncoderOutput(codec: .h264, track: "camera", kind: .software)
@@ -479,7 +484,7 @@ final class SmokeTests: XCTestCase {
         let catalog = try XCTUnwrap(nextCatalog)
         let rendition = try XCTUnwrap(catalog.video["camera"])
 
-        let decoder = try await consumer.decodeVideo(name: "camera", catalogVideo: rendition)
+        let decoder = try await Video.decoder(broadcast: consumer, name: "camera", rendition: rendition)
 
         // Keep the encoder fed so the decoder sees frames after it joined.
         for i in 10..<40 {
@@ -512,11 +517,11 @@ final class SmokeTests: XCTestCase {
             var output: AudioEncoderOutput!
             do {
                 let codec = AudioCodec.opus()
-                output = AudioEncoderOutput(codec: codec)
+                output = AudioEncoderOutput(codec: codec, track: "mic")
             }
-            let producer = try broadcast.encodeAudio(name: "mic", input: input, output: output)
+            let producer = try Audio.producer(broadcast: broadcast, catalog: Media.CatalogProducer(broadcast: broadcast), input: input, output: output)
             try producer.write(silence)
-            XCTAssertEqual(try producer.name, "mic")
+            XCTAssertEqual(try producer.demand().name, "mic")
             try producer.finish()
             try broadcast.close()
         }
@@ -527,8 +532,8 @@ final class SmokeTests: XCTestCase {
             let producer: AudioProducer
             do {
                 let codec = AudioCodec.opus()
-                let output = AudioEncoderOutput(codec: codec)
-                producer = try broadcast.encodeAudio(name: "mic", input: input, output: output)
+                let output = AudioEncoderOutput(codec: codec, track: "mic")
+                producer = try Audio.producer(broadcast: broadcast, catalog: Media.CatalogProducer(broadcast: broadcast), input: input, output: output)
             }
             try producer.write(silence)
             try producer.finish()

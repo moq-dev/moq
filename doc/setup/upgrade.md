@@ -19,6 +19,15 @@ error lists and rerun.
 
 These land with the next breaking release, not the 2026-09-23 train.
 
+- **Native codecs have `audio` and `video` namespaces.** Construct a
+  broadcast-bound `audio.Producer` or `video.Producer` from its broadcast and
+  `media.CatalogProducer`; construct codec-only `Encoder` types without either.
+  Use the namespace `decoder` instead of `BroadcastConsumer.decode_audio` or
+  `decode_video`. Producers expose subscriber state only through `demand()`.
+  Audio output now carries the optional track name and defaults frame duration
+  to zero, which selects the codec's own frame. Video GOP configuration is a
+  `Keyframe { interval }` variant rather than a bare integer. Python and Go
+  expose the duration fields as `timedelta` and `time.Duration`.
 - **moq-mux's catalog consumer is opaque.** Construct `catalog::Consumer` with
   `Consumer::new(broadcast, format).await` or convert an existing
   `catalog::hang::Consumer` with `.into()`, then read it through `catalog::Stream`.

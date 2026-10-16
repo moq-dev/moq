@@ -70,7 +70,9 @@ let audio = try Media.TrackProducer.audio(broadcast: broadcast, initData: Media.
 try audio.writeFrame(packet, timestampUs: 20_000)
 try audio.cut() // audio has no keyframes, so this is what gives it groups
 
-let video = try broadcast.encodeVideo(
+let video = try Video.producer(
+    broadcast: broadcast,
+    catalog: Media.CatalogProducer(broadcast: broadcast),
     input: VideoEncoderInput(format: .rgba, width: 1280, height: 720, framerate: 30),
     output: VideoEncoderOutput(codec: .h264, track: "camera", kind: .auto)
 )

@@ -522,6 +522,7 @@ async fn raw_audio_activity() {
 				channels: 1,
 			},
 			MoqAudioEncoderOutput {
+				track: None,
 				codec: MoqAudioCodec::opus(),
 				sample_rate: None,
 				channels: None,
@@ -531,7 +532,7 @@ async fn raw_audio_activity() {
 			None,
 		)
 		.unwrap();
-	assert_eq!(audio.name().unwrap(), "microphone");
+	assert_eq!(audio.demand().unwrap().name(), "microphone");
 
 	let catalog = tokio::time::timeout(TIMEOUT, catalog_consumer.next())
 		.await
@@ -549,7 +550,7 @@ async fn raw_audio_activity() {
 	)
 	.await
 	.unwrap();
-	tokio::time::timeout(TIMEOUT, audio.used())
+	tokio::time::timeout(TIMEOUT, audio.demand().unwrap().used())
 		.await
 		.expect("timed out waiting for raw audio to become used")
 		.unwrap();
@@ -567,7 +568,7 @@ async fn raw_audio_activity() {
 	assert_eq!(first.timestamp_us, FIRST_TIMESTAMP_US);
 
 	drop(subscription);
-	tokio::time::timeout(TIMEOUT, audio.unused())
+	tokio::time::timeout(TIMEOUT, audio.demand().unwrap().unused())
 		.await
 		.expect("timed out waiting for raw audio to become unused")
 		.unwrap();
@@ -582,7 +583,7 @@ async fn raw_audio_activity() {
 	)
 	.await
 	.unwrap();
-	tokio::time::timeout(TIMEOUT, audio.used())
+	tokio::time::timeout(TIMEOUT, audio.demand().unwrap().used())
 		.await
 		.expect("timed out waiting for raw audio to become used again")
 		.unwrap();
@@ -625,6 +626,7 @@ async fn raw_audio_frame_durations() {
 		channels: 1,
 	};
 	let output = |frame_duration_us| MoqAudioEncoderOutput {
+		track: None,
 		codec: MoqAudioCodec::opus(),
 		sample_rate: None,
 		channels: None,
@@ -667,6 +669,7 @@ async fn raw_audio_codec_default_frame() {
 		channels: 2,
 	};
 	let output = |codec| MoqAudioEncoderOutput {
+		track: None,
 		codec,
 		sample_rate: None,
 		channels: None,
@@ -2716,15 +2719,15 @@ async fn video_raw_publish_consume() {
 			None,
 		)
 		.unwrap();
-	assert_eq!(video.name().unwrap(), "camera");
+	assert_eq!(video.demand().unwrap().name(), "camera");
 	let local_consumer = broadcast.consume().unwrap();
 	let demand_consumer = local_consumer.subscribe_track("camera".into(), None).await.unwrap();
-	tokio::time::timeout(TIMEOUT, video.used())
+	tokio::time::timeout(TIMEOUT, video.demand().unwrap().used())
 		.await
 		.expect("timed out waiting for video demand")
 		.unwrap();
 	drop(demand_consumer);
-	tokio::time::timeout(TIMEOUT, video.unused())
+	tokio::time::timeout(TIMEOUT, video.demand().unwrap().unused())
 		.await
 		.expect("timed out waiting for video demand to clear")
 		.unwrap();
@@ -2885,7 +2888,7 @@ async fn video_decode_frame_ownership() {
 			.unwrap();
 	}
 
-	let next = async |decoder: &MoqVideoConsumer| {
+	let next = async |decoder: &MoqVideoDecoder| {
 		tokio::time::timeout(TIMEOUT, decoder.next())
 			.await
 			.expect("timed out")

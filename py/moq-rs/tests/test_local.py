@@ -1252,7 +1252,7 @@ def test_optional_binding_records_use_none_defaults():
     assert encoder.sample_rate is None
     assert encoder.channels is None
     assert encoder.bitrate is None
-    assert encoder.frame_duration_us == 20_000
+    assert encoder.frame_duration_us == 0
 
     # Microseconds, so Opus' 2.5 ms frame is expressible at all.
     fine = moq.AudioEncoderOutput(codec=moq.AudioCodec.opus(), frame_duration_us=2_500)
@@ -1269,9 +1269,10 @@ def test_encode_audio_with_opus_object():
     for codec_first in (True, False):
         broadcast = moq.BroadcastProducer()
         codec = moq.AudioCodec.opus()
-        output = moq.AudioEncoderOutput(codec=codec)
-        producer = broadcast.encode_audio(
-            "mic",
+        output = moq.audio.EncoderOutput(codec=codec, track="mic")
+        producer = moq.audio.producer(
+            broadcast,
+            moq.media.CatalogProducer(broadcast),
             moq.AudioEncoderInput(format=moq.AudioSampleFormat.F32, sample_rate=48_000, channels=1),
             output,
         )
@@ -1282,8 +1283,8 @@ def test_encode_audio_with_opus_object():
             del output
             del codec
         # One 20 ms Opus frame of silence at 48 kHz mono.
-        producer.write(moq.AudioFrame(timestamp_us=0, data=bytes(960 * 4)))
-        assert producer.name == "mic"
+        producer.write(moq.audio.Frame(timestamp=timedelta(0), data=bytes(960 * 4)))
+        assert producer.demand().name == "mic"
         producer.finish()
         broadcast.close()
 
@@ -1292,7 +1293,9 @@ async def test_decode_video_frame():
     """A decoded frame owns its picture and converts to either layout, even after its consumer is cancelled."""
     origin = moq.OriginProducer()
     broadcast = create_announced(origin, "video-decode-frame")
-    video = broadcast.encode_video(
+    video = moq.video.producer(
+        broadcast,
+        moq.media.CatalogProducer(broadcast),
         moq.VideoEncoderInput(format=moq.VideoPixelFormat.RGBA, width=320, height=240, framerate=30),
         # Software so the encode is deterministic everywhere. uniffi nests each
         # variant inside the enum without declaring it a subclass, so the cast is
@@ -1308,7 +1311,7 @@ async def test_decode_video_frame():
     rgba = bytes([0x80]) * (320 * 240 * 4)
     video.cut()
     for i in range(10):
-        video.write(moq.VideoFrame(timestamp_us=i * 33_333, data=rgba))
+        video.write(moq.video.Frame(timestamp=timedelta(microseconds=i * 33_333), data=rgba))
 
     consumer = origin.consume()
     broadcast_consumer = await asyncio.wait_for(consumer.request_broadcast("video-decode-frame"), timeout=5.0)
@@ -1316,11 +1319,11 @@ async def test_decode_video_frame():
     track_name = next(iter(catalog.video))
     rendition = catalog.video[track_name]
 
-    decoder = await broadcast_consumer.decode_video(track_name, rendition)
+    decoder = await moq.video.decoder(broadcast_consumer, track_name, rendition)
 
     # Keep the encoder fed so the decoder sees frames after it joined.
     for i in range(10, 40):
-        video.write(moq.VideoFrame(timestamp_us=i * 33_333, data=rgba))
+        video.write(moq.video.Frame(timestamp=timedelta(microseconds=i * 33_333), data=rgba))
 
     frame = await asyncio.wait_for(anext(decoder), timeout=5.0)
     decoder.cancel()

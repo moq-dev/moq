@@ -39,7 +39,7 @@ public typealias VideoEncoderInput = MoqFFI.MoqVideoEncoderInput
 /// keyframe interval, and backend preference.
 public typealias VideoEncoderOutput = MoqFFI.MoqVideoEncoderOutput
 /// A CPU pixel layout (I420 or RGBA): fed to a `VideoProducer`, or delivered
-/// by `decodeVideo`.
+/// by `Video.decoder`.
 public typealias VideoPixelFormat = MoqFFI.MoqVideoPixelFormat
 /// A video codec identifier (H.264 or H.265).
 public typealias VideoCodec = MoqFFI.MoqVideoCodec

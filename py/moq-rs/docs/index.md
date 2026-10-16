@@ -61,8 +61,6 @@ asyncio.run(main())
    GroupProducer
    GroupRequest
    GroupDemand
-   AudioProducer
-   VideoProducer
 ```
 
 ## Subscribing
@@ -77,7 +75,36 @@ asyncio.run(main())
    BroadcastConsumer
    TrackConsumer
    GroupConsumer
-   AudioConsumer
+```
+
+## Native codecs
+
+```{eval-rst}
+.. currentmodule:: moq.audio
+
+.. autosummary::
+   :toctree: api
+   :nosignatures:
+
+   Producer
+   Encoder
+   Decoder
+   producer
+   decoder
+```
+
+```{eval-rst}
+.. currentmodule:: moq.video
+
+.. autosummary::
+   :toctree: api
+   :nosignatures:
+
+   Producer
+   Encoder
+   Decoder
+   producer
+   decoder
 ```
 
 ## Media

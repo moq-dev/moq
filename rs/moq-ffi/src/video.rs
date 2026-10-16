@@ -105,20 +105,34 @@ pub struct MoqVideoEncoderInput {
 #[derive(uniffi::Record)]
 pub struct MoqVideoEncoderOutput {
 	pub codec: MoqVideoCodec,
-	/// Track name. `None` derives a unique name from the codec.
+	/// Track name for a broadcast-bound producer. `None` derives one from the codec.
 	#[uniffi(default = None)]
 	pub track: Option<String>,
 	/// Target bitrate in bits per second. `None` derives one from the resolution
 	/// and framerate.
 	#[uniffi(default = None)]
 	pub bitrate: Option<u64>,
-	/// Keyframe interval in frames: a subscriber joining mid-stream waits at most
-	/// this many frames before it can decode. `None` uses ~2 seconds.
+	/// How encoded pictures are divided into independently decodable groups.
 	#[uniffi(default = None)]
-	pub gop: Option<u32>,
+	pub gop: Option<MoqVideoGop>,
 	/// Encoder implementation preference. Pass
 	/// [`MoqVideoEncoderKind::Auto`] unless you need a specific backend.
 	pub kind: MoqVideoEncoderKind,
+}
+
+/// How the encoded stream is divided into independently decodable groups.
+#[derive(Clone, Copy, uniffi::Enum)]
+pub enum MoqVideoGop {
+	/// Start a group with a keyframe every `interval` frames.
+	Keyframe { interval: u32 },
+}
+
+impl From<MoqVideoGop> for moq_video::encode::Gop {
+	fn from(gop: MoqVideoGop) -> Self {
+		match gop {
+			MoqVideoGop::Keyframe { interval } => Self::Keyframe { interval },
+		}
+	}
 }
 
 /// One raw video frame: pixels plus a presentation timestamp.
@@ -132,6 +146,118 @@ pub struct MoqVideoFrame {
 	pub timestamp_us: u64,
 	/// The pixels, in the configured layout.
 	pub data: Vec<u8>,
+}
+
+/// One access unit emitted by a codec-only video encoder.
+#[derive(uniffi::Record)]
+pub struct MoqVideoPacket {
+	/// Presentation timestamp in microseconds.
+	pub timestamp_us: u64,
+	/// Encoded access-unit payload.
+	pub data: Vec<u8>,
+	/// Whether the access unit starts from a keyframe.
+	pub keyframe: bool,
+}
+
+fn video_packets(packets: Vec<moq_video::encode::Encoded>) -> Vec<MoqVideoPacket> {
+	packets
+		.into_iter()
+		.map(|packet| MoqVideoPacket {
+			timestamp_us: packet.timestamp.as_micros() as u64,
+			data: packet.payload.to_vec(),
+			keyframe: packet.keyframe,
+		})
+		.collect()
+}
+
+fn video_encoder_config(
+	input: &MoqVideoEncoderInput,
+	output: &MoqVideoEncoderOutput,
+) -> Result<moq_video::encode::Config, MoqError> {
+	let framerate = moq_video::Rate::new(input.framerate, 1)
+		.map_err(|_| MoqError::from(moq_video::Error::InvalidFramerate(input.framerate)))?;
+	let mut config = moq_video::encode::Config::new(input.width, input.height, framerate);
+	config.codec = output.codec.into();
+	config.kind = output.kind.clone().into();
+	config.bitrate = output.bitrate.map(moq_net::bandwidth::Rate::from_bps);
+	if let Some(gop) = output.gop {
+		config.gop = gop.into();
+	}
+	Ok(config)
+}
+
+/// A codec-only video encoder, independent of any broadcast.
+#[derive(uniffi::Object)]
+pub struct MoqVideoEncoder {
+	inner: std::sync::Mutex<Option<moq_video::encode::Sink>>,
+	format: MoqVideoPixelFormat,
+	size: moq_video::Size,
+}
+
+#[uniffi::export]
+impl MoqVideoEncoder {
+	/// Create a codec-only encoder from input and output settings.
+	#[uniffi::constructor]
+	pub fn new(input: MoqVideoEncoderInput, output: MoqVideoEncoderOutput) -> Result<Arc<Self>, MoqError> {
+		let config = video_encoder_config(&input, &output)?;
+		let encoder = block_on(moq_video::encode::Sink::open(&config))?;
+		Ok(Arc::new(Self {
+			inner: std::sync::Mutex::new(Some(encoder)),
+			format: input.format,
+			size: config.size(),
+		}))
+	}
+
+	/// Encode one raw picture and return any access units now available.
+	pub fn encode(&self, frame: MoqVideoFrame) -> Result<Vec<MoqVideoPacket>, MoqError> {
+		let surface = match self.format {
+			MoqVideoPixelFormat::I420 => moq_video::Surface::I420(moq_video::I420::new(self.size, frame.data)?),
+			MoqVideoPixelFormat::Rgba => moq_video::Surface::rgba(&frame.data, self.size)?,
+		};
+		let frame = moq_video::Frame::new(surface, moq_net::Timestamp::from_micros(frame.timestamp_us)?);
+		let mut guard = self.inner.lock().map_err(|_| panic_error())?;
+		Ok(video_packets(block_on(
+			guard.as_mut().ok_or(MoqError::Closed)?.encode(frame),
+		)?))
+	}
+
+	/// Force the next encoded picture to start a new group.
+	pub fn cut(&self) -> Result<(), MoqError> {
+		let mut guard = self.inner.lock().map_err(|_| panic_error())?;
+		block_on(guard.as_mut().ok_or(MoqError::Closed)?.cut())?;
+		Ok(())
+	}
+
+	/// Retune the live encoder in bits per second.
+	pub fn set_bitrate(&self, bitrate: u64) -> Result<(), MoqError> {
+		let mut guard = self.inner.lock().map_err(|_| panic_error())?;
+		block_on(
+			guard
+				.as_mut()
+				.ok_or(MoqError::Closed)?
+				.set_bitrate(moq_net::bandwidth::Rate::from_bps(bitrate)),
+		)?;
+		Ok(())
+	}
+
+	/// Drain buffered access units while keeping the encoder open.
+	pub fn flush(&self) -> Result<Vec<MoqVideoPacket>, MoqError> {
+		let mut guard = self.inner.lock().map_err(|_| panic_error())?;
+		Ok(video_packets(block_on(
+			guard.as_mut().ok_or(MoqError::Closed)?.flush(),
+		)?))
+	}
+
+	/// Drain and close the encoder.
+	pub fn finish(&self) -> Result<Vec<MoqVideoPacket>, MoqError> {
+		let encoder = self
+			.inner
+			.lock()
+			.map_err(|_| panic_error())?
+			.take()
+			.ok_or(MoqError::Closed)?;
+		Ok(video_packets(block_on(encoder.finish())?))
+	}
 }
 
 /// End a video track, given the result of draining its encoder into it.
@@ -251,7 +377,7 @@ impl VideoProducer {
 
 /// Producer for a raw-video track.
 ///
-/// Built via [`MoqBroadcastProducer::encode_video`]. Each
+/// Constructed from a broadcast and its media catalog. Each
 /// [`write`](Self::write) accepts a [`MoqVideoFrame`] whose `data` is in the
 /// pixel format declared by the [`MoqVideoEncoderInput`] passed at publish time.
 #[derive(uniffi::Object)]
@@ -286,33 +412,24 @@ impl MoqVideoProducer {
 	}
 }
 
+#[cfg(test)]
+impl MoqBroadcastProducer {
+	pub(crate) fn encode_video(
+		self: &Arc<Self>,
+		input: MoqVideoEncoderInput,
+		output: MoqVideoEncoderOutput,
+		bandwidth: Option<Arc<MoqBandwidth>>,
+	) -> Result<Arc<MoqVideoProducer>, MoqError> {
+		let catalog = crate::media::MoqMediaCatalogProducer::new(self.clone())?;
+		MoqVideoProducer::new(self, &catalog, input, output, bandwidth)
+	}
+}
+
 #[uniffi::export]
 impl MoqVideoProducer {
-	/// Return the name of this video track.
-	pub fn name(&self) -> Result<String, MoqError> {
-		let _guard = crate::ffi::enter();
-		Ok(self.track_demand()?.name().to_string())
-	}
-
 	/// A watch-only handle to whether this video track has subscribers.
 	pub fn demand(&self) -> Result<Arc<MoqTrackDemand>, MoqError> {
 		Ok(MoqTrackDemand::new(self.track_demand()?))
-	}
-
-	/// Wait until this video track has at least one active consumer.
-	///
-	/// Prefer [`demand`](Self::demand), a handle that can wait without borrowing this producer.
-	pub async fn used(&self) -> Result<(), MoqError> {
-		let demand = self.track_demand()?;
-		crate::ffi::detached(async move { demand.used().await }).await
-	}
-
-	/// Wait until this video track has no active consumers.
-	///
-	/// Prefer [`demand`](Self::demand), a handle that can wait without borrowing this producer.
-	pub async fn unused(&self) -> Result<(), MoqError> {
-		let demand = self.track_demand()?;
-		crate::ffi::detached(async move { demand.unused().await }).await
 	}
 
 	/// Encode and publish one raw frame.
@@ -426,7 +543,7 @@ impl MoqVideoProducer {
 }
 
 #[uniffi::export]
-impl MoqBroadcastProducer {
+impl MoqVideoProducer {
 	/// Open a video track on this broadcast, encoding the raw frames written to
 	/// it.
 	///
@@ -440,14 +557,21 @@ impl MoqBroadcastProducer {
 	/// session's allocator and follow the grant with the same policy the Rust
 	/// capture encoder uses. [`set_bitrate`](MoqVideoProducer::set_bitrate) is
 	/// the manual ceiling: it retunes the encoder and moves the reservation.
-	#[uniffi::method(default(bandwidth = None))]
-	pub fn encode_video(
-		&self,
+	#[uniffi::constructor]
+	pub fn new(
+		broadcast: &MoqBroadcastProducer,
+		catalog: &crate::media::MoqMediaCatalogProducer,
 		input: MoqVideoEncoderInput,
 		output: MoqVideoEncoderOutput,
 		bandwidth: Option<Arc<MoqBandwidth>>,
 	) -> Result<Arc<MoqVideoProducer>, MoqError> {
 		let _guard = crate::ffi::runtime().enter();
+		catalog.broadcast()?;
+		if !catalog.belongs_to(broadcast) {
+			return Err(MoqError::Media {
+				reason: "catalog belongs to another broadcast".into(),
+			});
+		}
 
 		let framerate = moq_video::Rate::new(input.framerate, 1)
 			.map_err(|_| MoqError::from(moq_video::Error::InvalidFramerate(input.framerate)))?;
@@ -455,8 +579,8 @@ impl MoqBroadcastProducer {
 		config.codec = output.codec.into();
 		config.kind = output.kind.into();
 		config.bitrate = output.bitrate.map(moq_net::bandwidth::Rate::from_bps);
-		if let Some(interval) = output.gop {
-			config.gop = moq_video::encode::Gop::Keyframe { interval };
+		if let Some(gop) = output.gop {
+			config.gop = gop.into();
 		}
 
 		// Both before the track exists: a config this machine can't encode should fail
@@ -465,7 +589,7 @@ impl MoqBroadcastProducer {
 		let rendition = block_on(config.probe())?;
 		let encoder = block_on(moq_video::encode::Sink::open(&config))?;
 		let ceiling = video_ceiling(&config, &rendition);
-		let producer = self.with_state(|state| match output.track {
+		let producer = broadcast.with_state(|state| match output.track {
 			Some(name) => {
 				let track = state
 					.broadcast
@@ -641,7 +765,7 @@ pub struct MoqVideoDecoderOutput {
 	/// [`MoqVideoDecodedFrame::pixels`] never meets a surface it cannot read.
 	///
 	/// Only a platform with a [`MoqVideoSurface`] variant accepts it (macOS and iOS
-	/// today); [`decode_video`](MoqBroadcastConsumer::decode_video) fails with
+	/// today); [`moq_video_decode`] fails with
 	/// [`MoqError::Unsupported`] elsewhere.
 	#[uniffi(default = false)]
 	pub surface: bool,
@@ -665,7 +789,7 @@ pub enum MoqVideoSurface {
 /// Dropping (or destroying) the frame releases that surface to the decoder's
 /// pool, so hold only the frames you are still using: a consumer that keeps
 /// many stalls decoding once the pool runs dry. The frame outlives its
-/// [`MoqVideoConsumer`], including after [`cancel`](MoqVideoConsumer::cancel),
+/// [`MoqVideoDecoder`], including after [`cancel`](MoqVideoDecoder::cancel),
 /// and may be used and released from any thread.
 #[derive(uniffi::Object)]
 pub struct MoqVideoDecodedFrame {
@@ -737,12 +861,12 @@ impl VideoConsumerInner {
 
 /// Consumer for a video track decoded inside the bindings.
 #[derive(uniffi::Object)]
-pub struct MoqVideoConsumer {
+pub struct MoqVideoDecoder {
 	task: crate::ffi::Task<VideoConsumerInner>,
 }
 
 #[uniffi::export]
-impl MoqVideoConsumer {
+impl MoqVideoDecoder {
 	/// The next decoded frame, or `None` once the track ends.
 	pub async fn next(&self) -> Result<Option<Arc<MoqVideoDecodedFrame>>, MoqError> {
 		self.task.run(|mut state| async move { state.next().await }).await
@@ -754,6 +878,18 @@ impl MoqVideoConsumer {
 	/// Frames already returned stay valid until they are released.
 	pub fn cancel(&self) {
 		self.task.cancel();
+	}
+}
+
+#[cfg(test)]
+impl MoqBroadcastConsumer {
+	pub(crate) async fn decode_video(
+		&self,
+		name: String,
+		catalog_video: crate::media::MoqVideo,
+		output: MoqVideoDecoderOutput,
+	) -> Result<Arc<MoqVideoDecoder>, MoqError> {
+		moq_video_decode(self, name, catalog_video, output).await
 	}
 }
 
@@ -806,8 +942,7 @@ fn decoder_output(surface: bool, has_surface: bool) -> Result<moq_video::Output,
 	}
 }
 
-#[uniffi::export]
-impl MoqBroadcastConsumer {
+impl MoqVideoDecoder {
 	/// Subscribe to a video track and decode it inside the bindings.
 	///
 	/// `catalog_video` comes from the catalog (see
@@ -818,19 +953,19 @@ impl MoqBroadcastConsumer {
 	///
 	/// A rendition whose [`broadcast`](crate::media::MoqVideo::broadcast) names another broadcast
 	/// is subscribed there, so `name` is always read from the broadcast the catalog points at.
-	pub async fn decode_video(
-		&self,
+	async fn create(
+		broadcast: &MoqBroadcastConsumer,
 		name: String,
 		catalog_video: crate::media::MoqVideo,
 		output: MoqVideoDecoderOutput,
-	) -> Result<Arc<MoqVideoConsumer>, MoqError> {
+	) -> Result<Arc<MoqVideoDecoder>, MoqError> {
 		// Reject the codec and output before resolving: resolving reaches the origin, which can
 		// invoke a dynamic handler and open an upstream subscription we would immediately drop.
 		let reference = catalog_video.broadcast.clone();
 		let cfg = video_config(catalog_video)?;
 		let mut options = moq_video::decode::Options::default();
 		options.decoder.output = decoder_output(output.surface, HAS_SURFACE)?;
-		let broadcast = self.resolve_inner(reference.as_deref()).await?;
+		let resolved = broadcast.resolve_inner(reference.as_deref()).await?;
 
 		options.decoder.scale_hint = output.resize.map(|size| moq_video::Size::new(size.width, size.height));
 		options.max_delay = output
@@ -838,15 +973,26 @@ impl MoqBroadcastConsumer {
 			.map(std::time::Duration::from_micros)
 			.unwrap_or_default();
 
-		let consumer = self
+		let consumer = broadcast
 			.driver
-			.watch(async { Ok(moq_video::decode::Consumer::new(&broadcast, &cfg, name, options).await?) })
+			.watch(async { Ok(moq_video::decode::Consumer::new(&resolved, &cfg, name, options).await?) })
 			.await?;
 
-		Ok(Arc::new(MoqVideoConsumer {
-			task: crate::ffi::Task::new(VideoConsumerInner { consumer }).supervised(self.driver.clone()),
+		Ok(Arc::new(MoqVideoDecoder {
+			task: crate::ffi::Task::new(VideoConsumerInner { consumer }).supervised(broadcast.driver.clone()),
 		}))
 	}
+}
+
+/// Subscribe to and decode one catalog video rendition.
+#[uniffi::export]
+pub async fn moq_video_decode(
+	broadcast: &MoqBroadcastConsumer,
+	name: String,
+	catalog_video: crate::media::MoqVideo,
+	output: MoqVideoDecoderOutput,
+) -> Result<Arc<MoqVideoDecoder>, MoqError> {
+	MoqVideoDecoder::create(broadcast, name, catalog_video, output).await
 }
 
 #[cfg(test)]
