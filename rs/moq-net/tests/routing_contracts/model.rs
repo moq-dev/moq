@@ -466,6 +466,8 @@ pub struct Retained {
 	pub pending: usize,
 	/// Feasibility distances for identities a node does not serve.
 	pub distances: usize,
+	/// Regions certified since an interest widened, still awaiting the rest.
+	pub certified: usize,
 }
 
 #[derive(Default)]
@@ -604,6 +606,9 @@ pub struct Net {
 	nodes: Vec<State>,
 	links: BTreeMap<(Node, Node), Link>,
 	up: BTreeSet<(Node, Node)>,
+	/// `(node, peer)`: the identity `node` proved on its session to `peer`. A
+	/// session proves one key, once.
+	proved: BTreeMap<(Node, Node), Id>,
 	/// `(at, peer)`: `peer` sent `at` a GOAWAY on their current session.
 	draining: BTreeSet<(Node, Node)>,
 	queues: BTreeMap<(Node, Node), VecDeque<Msg>>,
@@ -631,6 +636,7 @@ impl Net {
 				.collect(),
 			links: BTreeMap::new(),
 			up: BTreeSet::new(),
+			proved: BTreeMap::new(),
 			draining: BTreeSet::new(),
 			queues: BTreeMap::new(),
 			acks: BTreeMap::new(),
@@ -673,6 +679,11 @@ impl Net {
 	pub fn connect(&mut self, a: Node, b: Node) {
 		assert!(self.links.contains_key(&(a, b)), "unknown link {a}-{b}");
 		self.up.insert(Self::pair(a, b));
+		for (x, y) in [(a, b), (b, a)] {
+			if let Some(id) = self.nodes[x].proven {
+				self.proved.insert((x, y), id);
+			}
+		}
 		self.advertise(a);
 		self.advertise(b);
 	}
@@ -687,6 +698,7 @@ impl Net {
 		for (x, y) in [(a, b), (b, a)] {
 			self.queues.remove(&(x, y));
 			self.acks.remove(&(x, y));
+			self.proved.remove(&(x, y));
 			self.held.remove(&(x, y));
 			self.draining.remove(&(y, x));
 			let state = &mut self.nodes[y];
@@ -745,6 +757,11 @@ impl Net {
 	/// `node` starts originating `id` at seqno `seqno`, proving it on every session.
 	pub fn originate(&mut self, node: Node, id: Id, seqno: Seqno) {
 		assert_eq!(id & QUALIFIED, 0, "a key-derived identity is never qualified");
+		let peers: Vec<Node> = self.peers(node).collect();
+		for peer in peers {
+			let proved = *self.proved.entry((node, peer)).or_insert(id);
+			assert_eq!(proved, id, "node {node}'s session to {peer} already proved another key");
+		}
 		let state = &mut self.nodes[node];
 		state.proven = Some(id);
 		state.origins.insert(id, seqno);
@@ -778,8 +795,14 @@ impl Net {
 
 	/// The origin at `node` retires its identity for a fresh one and announces
 	/// its claims again there: what it does instead of advancing a seqno or a
-	/// revision to [`VARINT_MAX`]. Every node lets the old identity go.
+	/// revision to [`VARINT_MAX`]. A session proves one key once, so every
+	/// session closes and reopens to prove the new one, and every node lets the
+	/// old identity go.
 	fn rotate(&mut self, node: Node) {
+		let peers: Vec<Node> = self.peers(node).collect();
+		for &peer in &peers {
+			self.disconnect(node, peer);
+		}
 		let state = &mut self.nodes[node];
 		let old = state.proven.expect("not an origin");
 		state.origins.remove(&old);
@@ -787,6 +810,9 @@ impl Net {
 		self.originate(node, fnv("rotate", &[old]) & !QUALIFIED, 0);
 		for (claim, item) in claims {
 			self.change(node, claim, Some((item.seed, item.epoch)));
+		}
+		for peer in peers {
+			self.connect(node, peer);
 		}
 	}
 
@@ -1066,7 +1092,7 @@ impl Net {
 	/// The key `at` files `id` under when `from` names it, or `None` when refused.
 	fn key(&self, at: Node, from: Node, id: Id) -> Option<Id> {
 		match self.links[&(at, from)].grant {
-			Some(grant) if self.nodes[from].proven != Some(id) => {
+			Some(grant) if self.proved.get(&(from, at)) != Some(&id) => {
 				if id & QUALIFIED != 0 && !self.cfg.requalify {
 					return None;
 				}
@@ -1146,7 +1172,8 @@ impl Net {
 				{
 					if region == watch {
 						state.current.remove(&id);
-					} else {
+					} else if !regions.iter().any(|known| region.starts_with(known)) {
+						regions.retain(|known| !known.starts_with(region));
 						regions.push(region);
 					}
 				}
@@ -1678,15 +1705,19 @@ impl Net {
 
 	/// Every claim each node knows must be the origin's state at the revision it
 	/// knows that claim at: no view holds a mix of stale and fresh knowledge.
-	pub fn check(&self) -> Result<(), String> {
+	/// Qualified views are checked against their origin. Returns the views checked.
+	pub fn check(&self) -> Result<BTreeSet<(Node, Id)>, String> {
+		let mut checked = BTreeSet::new();
 		for (node, state) in self.nodes.iter().enumerate() {
-			for (&id, view) in &state.views {
-				if state.origins.contains_key(&id) {
+			for (&key, view) in &state.views {
+				if state.origins.contains_key(&key) {
 					continue;
 				}
-				let Some(history) = self.history.get(&id) else {
+				let Some(id) = self.source(key) else {
 					continue;
 				};
+				let history = &self.history[&id];
+				checked.insert((node, key));
 				let claims: BTreeSet<&str> = history.iter().map(|change| change.claim).collect();
 				for claim in claims {
 					let Some(rev) = view.as_of(claim, true) else {
@@ -1698,14 +1729,43 @@ impl Net {
 					let known = view.items.get(claim).copied();
 					if known != self.truth(id, claim, rev) {
 						return Err(format!(
-							"node {node} holds {id}'s {claim} as {known:?} at revision {rev}, where the origin had {:?}",
+							"node {node} holds {key}'s {claim} as {known:?} at revision {rev}, where the origin had {:?}",
 							self.truth(id, claim, rev)
 						));
 					}
 				}
 			}
 		}
-		Ok(())
+		Ok(checked)
+	}
+
+	/// The origin identity whose claims `key` carries: itself, or what a grant's
+	/// subject qualified, unwound through any requalification.
+	fn source(&self, key: Id) -> Option<Id> {
+		if self.history.contains_key(&key) {
+			return Some(key);
+		}
+		if key & QUALIFIED == 0 {
+			return None;
+		}
+		let subjects: BTreeSet<&str> = self
+			.links
+			.values()
+			.filter_map(|link| link.grant)
+			.map(|grant| grant.subject)
+			.collect();
+		let known: BTreeSet<Id> = self
+			.nodes
+			.iter()
+			.flat_map(|state| state.views.keys().chain(state.rx.keys()))
+			.copied()
+			.chain(self.history.keys().copied())
+			.collect();
+		known
+			.into_iter()
+			.filter(|&inner| inner != key)
+			.find(|&inner| subjects.iter().any(|subject| qualified(subject, inner) == key))
+			.and_then(|inner| self.source(inner))
 	}
 
 	/// Announcement and route state kept across every node.
@@ -1721,6 +1781,7 @@ impl Net {
 			out.heard += state.heard.values().map(|view| view.items.len()).sum::<usize>();
 			out.pending += state.pending.len();
 			out.distances += state.fd.keys().filter(|id| !state.origins.contains_key(id)).count();
+			out.certified += state.current.values().map(Vec::len).sum::<usize>();
 		}
 		out
 	}

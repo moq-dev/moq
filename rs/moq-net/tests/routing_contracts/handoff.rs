@@ -388,7 +388,9 @@ fn a_snapshot_queued_before_widening_keeps_the_frozen_rest_hidden() {
 
 /// A client behind a scoped grant widens its interest. Every batch it gets is
 /// cut to the grant's scope, so no floor ever covers the widened interest;
-/// the batch answering it is still what shows the newly covered claims.
+/// the batch answering it is still what shows the newly covered claims. The
+/// certified region is kept once however many batches repeat it, and the
+/// freshness oracle checks the qualified view against the origin's history.
 #[test]
 fn widening_behind_a_scoped_grant_shows_the_rest_of_the_scope() {
 	let (origin, relay, client) = (0, 1, 2);
@@ -413,7 +415,17 @@ fn widening_behind_a_scoped_grant_shows_the_rest_of_the_scope() {
 	net.watch(client, "");
 	assert!(net.run());
 	assert_eq!(net.shows(client, id, "live/a/y"), Some(true));
-	net.check().unwrap();
+	let certified = net.retained().certified;
+	for _ in 0..8 {
+		net.announce(origin, "live/a/z", 0, None);
+		net.unannounce(origin, "live/a/z");
+		assert!(net.run());
+	}
+	assert_eq!(net.retained().certified, certified, "claim churn adds no state");
+	assert!(
+		net.check().unwrap().contains(&(client, id)),
+		"the qualified view is checked"
+	);
 }
 
 /// Two scoped grants qualify one origin under the same subject, so their
@@ -653,7 +665,9 @@ fn holds_retire_once_nothing_can_recover() {
 /// Seqnos and revisions are varints. An origin never advertises the last
 /// value: a bump, a claim change, or a request that would reach it rotates the
 /// identity instead, so every node lets the old one go and sees the claims
-/// again under the new one. Nothing wraps.
+/// again under the new one. Nothing wraps. A session proves one key once, so
+/// rotating closes and reopens every session the origin had up; proving a
+/// second key on a live session fails.
 #[test]
 fn exhausted_counters_rotate_the_identity() {
 	let (origin, a, b, c, client) = (0, 1, 2, 3, 4);

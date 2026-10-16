@@ -298,7 +298,8 @@ loss never reports an END:
   seqno advance, claim change, or seqno request that would reach it rotates
   the identity instead, ending the old one everywhere and announcing the
   claims again under a fresh one, so nothing wraps and every advertised
-  seqno leaves room for the successor a request names
+  seqno leaves room for the successor a request names. A session proves one
+  key once, so rotating closes and reopens every session the origin has up
   (`exhausted_counters_rotate_the_identity`).
   A session sends an origin's announcements in batches, each closed by a
   floor: the revision as of which the stream's announcements for that route,
