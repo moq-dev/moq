@@ -179,7 +179,13 @@ async function sample(config: Sample, round: number) {
 	const publisher = await publisherContext.newPage();
 	const consumer = await consumerContext.newPage();
 	const errors: string[] = [];
-	for (const page of [publisher, consumer]) page.on("pageerror", (error) => errors.push(error.message));
+	for (const page of [publisher, consumer]) {
+		page.on("pageerror", (error) => errors.push(error.message));
+		// A panic in a spawned WASM task only reaches the console, never a pageerror or rejection.
+		page.on("console", (message) => {
+			if (message.text().includes("panicked at")) errors.push(`panic: ${message.text()}`);
+		});
+	}
 	if (config.transport === "websocket")
 		await consumer.addInitScript(() => {
 			Object.defineProperty(globalThis, "WebTransport", { value: undefined });
