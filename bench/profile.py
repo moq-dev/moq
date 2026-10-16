@@ -82,8 +82,8 @@ def reduce(names, records, before, after):
     intervals = waits(records, end)
     workers, idle, folded = {}, [], Counter()
     for tid, name in names.items():
-        switches = [(at, event.startswith('PERF_RECORD_SWITCH IN')) for owner, at, event, _ in records
-                    if owner == tid and event.startswith('PERF_RECORD_SWITCH ')]
+        own = [(at, event) for owner, at, event, _ in records if owner == tid]
+        switches = [(at, event.startswith('PERF_RECORD_SWITCH IN')) for at, event in own if event != EVENT]
         if not switches:
             # Schedstat spans perf startup too, so an advance cannot prove CPU in this window.
             if after[tid] == before[tid]:
@@ -94,16 +94,22 @@ def reduce(names, records, before, after):
         if not mine:
             raise ValueError(f'worker {name} ({tid}) has switch records but no sampled switch-out')
         # The first switch-out means the worker was running at the window start.
-        running, last, cpu = not switches[0][1], start, 0
-        for at, entering in switches:
+        running, last, sampled, cpu = not switches[0][1], start, None, 0
+        for at, event in own:
+            if event == EVENT:
+                # waits() starts the off-CPU interval at the sample, which precedes the sideband OUT.
+                if running:
+                    sampled = at
+                continue
+            entering = event.startswith('PERF_RECORD_SWITCH IN')
             if entering == running:
                 # An identical observation contributes no new interval. Distinct timestamps still refuse.
                 if at == last:
                     continue
                 raise ValueError(f'worker {name} ({tid}) has nonalternating switch records')
             if running:
-                cpu += at - last
-            running, last = entering, at
+                cpu += (at if sampled is None else sampled) - last
+            running, last, sampled = entering, at, None
         if running:
             cpu += end - last
         if not any(re.search(r'\bmoq_|\bkio::', frame) for _, stack in mine for frame in stack):

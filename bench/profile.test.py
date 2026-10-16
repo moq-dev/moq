@@ -60,7 +60,8 @@ class Reduce(unittest.TestCase):
         result, _ = profile.reduce({'1': 'moq-quic-0'}, self.records(), {'1': 0}, {'1': 999})
         self.assertEqual(result['version'], 3)
         self.assertEqual(result['window_ns'], 30)
-        self.assertEqual(result['workers']['1']['cpu_ns'], 11)
+        # CPU ends at the sampled switch-out, where the wait begins, so the two tile the window.
+        self.assertEqual(result['workers']['1']['cpu_ns'], 10)
         self.assertEqual(result['workers']['1']['other_off_cpu_ns'], 20)
         # A worker with recorded switches never uses schedstat, even if it did not advance.
         unchanged, _ = profile.reduce({'1': 'moq-quic-0'}, self.records(), {'1': 7}, {'1': 7})
@@ -72,7 +73,7 @@ class Reduce(unittest.TestCase):
             ('1', 16, 'PERF_RECORD_SWITCH OUT preempt', []),
             ('1', 30, 'PERF_RECORD_SWITCH IN', [])]
         result, _ = profile.reduce({'1': 'moq-quic-0'}, records, {'1': 0}, {'1': 500})
-        self.assertEqual(result['workers']['1']['cpu_ns'], 16)  # [10,16] + [30,40]
+        self.assertEqual(result['workers']['1']['cpu_ns'], 15)  # [10,15] + [30,40]
         self.assertEqual(result['workers']['1']['other_off_cpu_ns'], 15)
 
     def test_worker_running_only_before_first_sample(self):
@@ -82,7 +83,7 @@ class Reduce(unittest.TestCase):
                    ('1', 21, 'PERF_RECORD_SWITCH OUT', []),
                    ('2', 50, 'PERF_RECORD_SWITCH IN', [])]
         result, _ = profile.reduce({'1': 'moq-quic-0'}, records, {'1': 0}, {'1': 1000})
-        self.assertEqual(result['workers']['1']['cpu_ns'], 11)
+        self.assertEqual(result['workers']['1']['cpu_ns'], 10)
         self.assertEqual(result['workers']['1']['other_off_cpu_ns'], 30)
 
     def test_recorded_waits_by_class_over_cpu(self):
