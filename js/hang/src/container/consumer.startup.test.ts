@@ -1,4 +1,5 @@
 import { expect, jest, onTestFinished, spyOn, test } from "bun:test";
+import { Micro, Milli } from "@moq/clock";
 import { Group, Error as NetError, StreamCode, Time, Track } from "@moq/net";
 import { Consumer, type Read } from "./consumer.ts";
 import { encodeFrame, Format } from "./legacy.ts";
@@ -9,9 +10,9 @@ const flush = () => new Promise<void>((resolve) => setImmediate(resolve));
 function setup(maxDelay = 100) {
 	jest.useFakeTimers();
 	const track = new Track.Producer("video");
-	const consumer = new Consumer(track.subscribe({ maxDelay: Time.Milli(30_000) }), {
+	const consumer = new Consumer(track.subscribe({ maxDelay: Milli(30_000) }), {
 		format: new Format("video"),
-		maxDelay: Time.Milli(maxDelay),
+		maxDelay: Milli(maxDelay),
 	});
 	const results: Read[] = [];
 	const warn = spyOn(console, "warn").mockImplementation(() => {});
@@ -50,7 +51,7 @@ function frames(results: Read[]) {
 
 function write(group: Group.Producer, timestamp: number, marker = false) {
 	group.writeFrame({
-		payload: encodeFrame(marker ? new Uint8Array() : new Uint8Array([1]), Time.Micro(timestamp)),
+		payload: encodeFrame(marker ? new Uint8Array() : new Uint8Array([1]), Micro(timestamp)),
 		timestamp: Time.Timestamp.now(),
 	});
 }

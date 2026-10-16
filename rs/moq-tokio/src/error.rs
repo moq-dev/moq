@@ -206,10 +206,10 @@ pub enum Error {
 	#[error(transparent)]
 	Tls(Arc<crate::tls::Error>),
 
-	/// The noq backend failed.
-	#[cfg(feature = "noq")]
+	/// The QUIC backend failed.
+	#[cfg(feature = "quic")]
 	#[error(transparent)]
-	Noq(Arc<crate::noq::Error>),
+	Quic(Arc<crate::quic::Error>),
 
 	/// The Iroh backend failed.
 	#[cfg(feature = "iroh")]
@@ -252,8 +252,8 @@ impl Error {
 			| Self::WindowRange(_)
 			| Self::QlogUnsupported
 			| Self::Connect(_) => true,
-			#[cfg(feature = "noq")]
-			Self::Noq(err) => err.is_terminal(),
+			#[cfg(feature = "quic")]
+			Self::Quic(err) => err.is_terminal(),
 			#[cfg(feature = "websocket")]
 			Self::WebSocket(err) => err.is_terminal(),
 			#[cfg(feature = "tcp")]
@@ -285,8 +285,8 @@ impl Error {
 			Self::MoqNet(
 				moq_net::Error::Unauthorized | moq_net::Error::Session(moq_net::SessionError::Unauthorized),
 			) => Some(crate::ConnectError::Unauthorized),
-			#[cfg(feature = "noq")]
-			Self::Noq(err) => err.connect_error(),
+			#[cfg(feature = "quic")]
+			Self::Quic(err) => err.connect_error(),
 			#[cfg(feature = "websocket")]
 			Self::TransportRace { quic, websocket } => quic.connect_error().or_else(|| websocket.connect_error()),
 			#[cfg(feature = "websocket")]
@@ -318,8 +318,8 @@ impl Error {
 				_ => None,
 			},
 
-			#[cfg(feature = "noq")]
-			Self::Noq(err) => err.status(),
+			#[cfg(feature = "quic")]
+			Self::Quic(err) => err.status(),
 			#[cfg(feature = "websocket")]
 			Self::WebSocket(err) => err.status(),
 			_ => None,
@@ -348,14 +348,14 @@ impl From<crate::tls::Error> for Error {
 	}
 }
 
-#[cfg(feature = "noq")]
-impl From<crate::noq::Error> for Error {
-	fn from(err: crate::noq::Error) -> Self {
+#[cfg(feature = "quic")]
+impl From<crate::quic::Error> for Error {
+	fn from(err: crate::quic::Error) -> Self {
 		if let Some(err) = err.connect_error() {
 			return Self::Connect(err);
 		}
 
-		Self::Noq(Arc::new(err))
+		Self::Quic(Arc::new(err))
 	}
 }
 

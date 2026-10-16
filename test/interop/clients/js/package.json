@@ -7,6 +7,7 @@
 		"test": "bun test --only-failures"
 	},
 	"dependencies": {
+		"@moq/clock": "workspace:*",
 		"@moq/hang": "workspace:*",
 		"@moq/net": "workspace:*",
 		"@moq/publish": "workspace:*",
