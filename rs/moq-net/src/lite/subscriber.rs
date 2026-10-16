@@ -5645,12 +5645,14 @@ impl<S: crate::transport::poll::Session> ServeLoop<S> {
 								// parks, since a cap can be raised). Those streams can still
 								// be in flight, so wait for the tail before finishing.
 								let subscription = self.serving.subscription();
-								let requested_end = subscription.as_ref().and_then(|sub| sub.end()).map(|end| match end
-									.frame
-								{
-									0 => end.group,
-									_ => end.group.saturating_add(1),
-								});
+								let requested_end =
+									subscription
+										.as_ref()
+										.and_then(|sub| sub.end())
+										.map(|end| match end.frame {
+											0 => end.group,
+											_ => end.group.saturating_add(1),
+										});
 								// The effective max delay is the stopgap grace: the wrong clock
 								// (it bounds presentation-time drift), but it is how long the
 								// subscriber was willing to wait for a late group anyway.

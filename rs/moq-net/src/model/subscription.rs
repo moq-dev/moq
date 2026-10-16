@@ -208,7 +208,9 @@ pub(super) fn union(ranges: impl IntoIterator<Item = Range>) -> Vec<Range> {
 		})
 		.max();
 	ranges.retain(|range| match range.start {
-		Anchor::Absolute(start) => open_absolute.is_none_or(|open| start < open || (start == open && range.end.is_none())),
+		Anchor::Absolute(start) => {
+			open_absolute.is_none_or(|open| start < open || (start == open && range.end.is_none()))
+		}
 		Anchor::Relative(back) => open_relative.is_none_or(|open| back > open || (back == open && range.end.is_none())),
 	});
 	ranges.sort_unstable();
@@ -356,10 +358,7 @@ impl Subscription {
 				},
 			})
 			.collect();
-		Self {
-			ranges,
-			..self.clone()
-		}
+		Self { ranges, ..self.clone() }
 	}
 
 	/// The lowest group this subscription's ranges start at, resolving relative starts
@@ -553,10 +552,7 @@ mod tests {
 	}
 
 	fn range(start: Anchor, end: impl Into<Option<Anchor>>) -> Range {
-		Range {
-			start,
-			end: end.into(),
-		}
+		Range { start, end: end.into() }
 	}
 
 	fn ranges(subscriptions: &[Subscription]) -> Vec<Range> {
@@ -687,7 +683,10 @@ mod tests {
 			"a gap stays a gap"
 		);
 		assert_eq!(
-			ranges(&[sub(&[Range::groups(2..5), Range::groups(9..)]), sub(&[Range::groups(4..)])]),
+			ranges(&[
+				sub(&[Range::groups(2..5), Range::groups(9..)]),
+				sub(&[Range::groups(4..)])
+			]),
 			vec![Range::groups(2..)]
 		);
 		assert_eq!(
@@ -731,7 +730,10 @@ mod tests {
 				sub(range(absolute(5, 9), absolute(5, 10))),
 				sub(range(absolute(5, 2), absolute(5, 3)))
 			]),
-			vec![range(absolute(5, 2), absolute(5, 3)), range(absolute(5, 9), absolute(5, 10))]
+			vec![
+				range(absolute(5, 2), absolute(5, 3)),
+				range(absolute(5, 9), absolute(5, 10))
+			]
 		);
 		assert_eq!(
 			ranges(&[
@@ -750,7 +752,11 @@ mod tests {
 		assert_eq!(combine(&[a.clone(), b.clone()]), combine(&[b.clone(), a.clone()]));
 
 		let combined = combine(&[a.clone(), b]);
-		assert_eq!(combine(&[combined.clone().unwrap(), a]), combined, "a subset adds nothing");
+		assert_eq!(
+			combine(&[combined.clone().unwrap(), a]),
+			combined,
+			"a subset adds nothing"
+		);
 	}
 
 	#[test]

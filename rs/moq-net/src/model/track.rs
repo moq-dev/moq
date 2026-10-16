@@ -4022,7 +4022,11 @@ impl Cursor {
 			// arrive, however many have arrived since.
 			let latest = {
 				let state = self.state.read();
-				state.arrival.front().map(|(sequence, _)| *sequence).or(state.max_sequence)
+				state
+					.arrival
+					.front()
+					.map(|(sequence, _)| *sequence)
+					.or(state.max_sequence)
 			};
 			if let Some(floor) = self.subscription.read().floor(latest) {
 				self.min_sequence = self.min_sequence.max(floor);

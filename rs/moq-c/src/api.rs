@@ -635,10 +635,12 @@ pub enum moq_order {
 
 fn parse_anchor(anchor: &moq_anchor) -> Result<moq_net::track::Anchor, Error> {
 	Ok(match anchor.kind {
-		v if v == moq_anchor_kind::MOQ_ANCHOR_ABSOLUTE as u32 => moq_net::track::Anchor::Absolute(moq_net::track::Position {
-			group: anchor.group,
-			frame: anchor.frame,
-		}),
+		v if v == moq_anchor_kind::MOQ_ANCHOR_ABSOLUTE as u32 => {
+			moq_net::track::Anchor::Absolute(moq_net::track::Position {
+				group: anchor.group,
+				frame: anchor.frame,
+			})
+		}
 		v if v == moq_anchor_kind::MOQ_ANCHOR_RELATIVE as u32 => moq_net::track::Anchor::Relative(anchor.group),
 		_ => return Err(Error::InvalidCode),
 	})
@@ -646,7 +648,9 @@ fn parse_anchor(anchor: &moq_anchor) -> Result<moq_net::track::Anchor, Error> {
 
 /// # Safety
 /// - `subscription->ranges` must be NULL or point to `subscription->ranges_len` ranges.
-pub(crate) unsafe fn parse_subscription(subscription: &moq_subscription) -> Result<moq_net::track::Subscription, Error> {
+pub(crate) unsafe fn parse_subscription(
+	subscription: &moq_subscription,
+) -> Result<moq_net::track::Subscription, Error> {
 	let order = match subscription.order {
 		v if v == moq_order::MOQ_ORDER_DESCENDING as u32 => moq_net::track::Order::Descending,
 		v if v == moq_order::MOQ_ORDER_ASCENDING as u32 => moq_net::track::Order::Ascending,

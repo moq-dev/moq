@@ -1764,7 +1764,10 @@ fn raw_track_subscription_options_and_update() {
 	assert_eq!(moq_consume_track_frame_free(frame_id), 0);
 
 	let widened = [moq_range {
-		end: moq_anchor { group: 3, ..ranges[0].end },
+		end: moq_anchor {
+			group: 3,
+			..ranges[0].end
+		},
 		..ranges[0]
 	}];
 	let update = moq_subscription {

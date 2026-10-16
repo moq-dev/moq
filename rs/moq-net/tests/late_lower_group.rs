@@ -120,7 +120,9 @@ async fn session(version: &str, relay: bool, start: Option<Position>) -> Vec<(u6
 		.expect("resolve timeout")
 		.expect("broadcast resolves");
 
-	let subscription = Subscription::default().with_max_delay(BUDGET).with_ranges([floored(start)]);
+	let subscription = Subscription::default()
+		.with_max_delay(BUDGET)
+		.with_ranges([floored(start)]);
 	let reader = moq_net_sim::spawn(async move {
 		let mut sub = remote
 			.track("late")
@@ -162,7 +164,9 @@ async fn in_process(start: Option<Position>) -> Vec<(u64, usize)> {
 				.with_max_age(FOREVER),
 		)
 		.unwrap();
-	let subscription = Subscription::default().with_max_delay(BUDGET).with_ranges([floored(start)]);
+	let subscription = Subscription::default()
+		.with_max_delay(BUDGET)
+		.with_ranges([floored(start)]);
 	let mut sub = track.subscribe(subscription);
 	let reader = moq_net_sim::spawn(async move { read_all(&mut sub).await });
 	moq_net_sim::sleep(Duration::from_millis(10)).await;
