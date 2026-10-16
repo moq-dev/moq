@@ -40,7 +40,7 @@ enum Sink {
 /// Keep finished rendition owners until a whole run's catalog has closed.
 #[must_use]
 pub(super) struct Closed {
-	track: Option<Sink>,
+	tracks: Vec<Sink>,
 }
 
 /// An audio or video pad, published through a codec importer.
@@ -250,8 +250,11 @@ pub enum PushOutcome {
 pub struct Pad {
 	/// The requested pad gates the first catalog even before CAPS can name its rendition.
 	reserved: Option<moq_mux::catalog::Reserved>,
+	catalog: Option<moq_mux::catalog::Producer>,
 	wall: Option<std::sync::Arc<super::wall::Wall>>,
 	track: Option<Sink>,
+	/// Finished identities remain described in replayed catalogs until the run ends.
+	retired: Vec<Sink>,
 	caps: Option<gst::Caps>,
 	/// Set once a producer build rejects this pad's caps or bitstream; further buffers are dropped and
 	/// the track stays finalized. Isolated to the pad, so the session and other pads keep going. The
@@ -271,8 +274,10 @@ impl Pad {
 	pub fn new() -> Self {
 		Self {
 			reserved: None,
+			catalog: None,
 			wall: None,
 			track: None,
+			retired: Vec::new(),
 			caps: None,
 			failed: false,
 			state: PadState::NoSegment,
@@ -307,7 +312,10 @@ impl Pad {
 				}
 			};
 			if !resolved {
-				self.finalize()?;
+				let retired = std::mem::take(&mut self.retired);
+				let result = self.finalize();
+				self.retired = retired;
+				result?;
 			}
 		}
 		Ok(())
@@ -327,7 +335,7 @@ impl Pad {
 		self.failed
 	}
 
-	/// (Re)build the producer when the pad's caps change, under `track` when the pad was given a name.
+	/// Keep a compatible producer, or publish changed decoder identity under a fresh name.
 	/// A build failure invalidates only this pad; the caller keeps the session and other pads alive.
 	/// Identical caps re-sent as a sticky event keep the live producer.
 	pub(super) fn observe_caps(
@@ -339,6 +347,38 @@ impl Pad {
 		if self.failed || (self.track.is_some() && self.caps.as_deref() == Some(options.caps)) {
 			return CapsOutcome::Unchanged;
 		}
+		self.catalog = Some(catalog.clone());
+		let same_identity = self
+			.caps
+			.as_ref()
+			.is_some_and(|caps| same_caps_identity(caps, options.caps));
+		if self.track.is_some() && same_identity {
+			if let Some(Sink::Text(text)) = &mut self.track {
+				let result = text.producer.modify().and_then(|mut config| {
+					config.lang = options
+						.caps
+						.structure(0)
+						.expect("one caps structure")
+						.get::<String>("language-code")
+						.ok();
+					config.commit()
+				});
+				if let Err(err) = result {
+					self.fail();
+					return CapsOutcome::Failed(format!("{err:#}"));
+				}
+			}
+			self.caps = Some(options.caps.clone());
+			return CapsOutcome::Unchanged;
+		}
+		let name = options
+			.requested
+			.filter(|_| self.caps.is_some() && !same_identity)
+			.map(|name| broadcast.unique_name(&format!(".{name}")));
+		let options = ProducerOptions {
+			requested: name.as_deref().or(options.requested),
+			..options
+		};
 		let reserved = self.reserved.take().unwrap_or_else(|| catalog.reserve());
 		match self.build(broadcast, reserved, options) {
 			Ok(name) => CapsOutcome::Active(name),
@@ -369,8 +409,10 @@ impl Pad {
 			"encoder is only supported on audio and video pads, not {}",
 			structure.name()
 		);
-		// Renegotiation: finalize the previous producer before replacing it (closed once, not abandoned).
-		self.finalize()?;
+		// Keep the finished identity's owner: archived groups still need its catalog description.
+		let (closed, result) = self.finish();
+		self.retired = closed.tracks;
+		result?;
 		// Opaque data has no codec importer and no catalog entry, so it never reaches the codec match.
 		if structure.name() == "application/octet-stream" {
 			// A generated name would leave the track unfindable: nothing advertises it.
@@ -840,19 +882,78 @@ impl Pad {
 	/// Finish once, retaining rendition owners so closing a run cannot publish their removal.
 	pub(super) fn finish(&mut self) -> (Closed, Result<bool>) {
 		self.reserved.take();
-		let mut closed = Closed {
-			track: self.track.take(),
+		let mut track = self.track.take();
+		// Unresolved importers still hold a reservation that gates the first catalog.
+		// They have no historical description to retain and must release that gate.
+		let retain = match (&track, &self.catalog) {
+			(Some(Sink::Media(media)), Some(catalog)) => {
+				let mut catalog = catalog.clone();
+				match catalog.modify() {
+					Ok(current) if media.audio => current.audio.renditions.contains_key(&media.track.name()),
+					Ok(current) => current.video.renditions.contains_key(&media.track.name()),
+					Err(_) => false, // The catalog is already terminal.
+				}
+			}
+			_ => true,
 		};
-		let Some(track) = closed.track.as_mut() else {
-			return (closed, Ok(false));
-		};
-		let result = match track {
-			Sink::Media(media) => media.track.finish().map_err(anyhow::Error::from),
-			Sink::Text(text) => text.producer.finish().map_err(anyhow::Error::from),
-			Sink::Opaque(producer) => producer.clone().finish().map_err(anyhow::Error::from),
+		let result = match track.as_mut() {
+			Some(Sink::Media(media)) => media.track.finish().map_err(anyhow::Error::from),
+			Some(Sink::Text(text)) => text.producer.finish().map_err(anyhow::Error::from),
+			Some(Sink::Opaque(producer)) => producer.clone().finish().map_err(anyhow::Error::from),
+			None => {
+				return (
+					Closed {
+						tracks: std::mem::take(&mut self.retired),
+					},
+					Ok(false),
+				);
+			}
 		};
 		self.failed |= result.is_err();
-		(closed, result.map(|()| true))
+		let mut tracks = std::mem::take(&mut self.retired);
+		if retain {
+			tracks.extend(track);
+		}
+		(Closed { tracks }, result.map(|()| true))
+	}
+}
+
+/// Compare the decoder configuration this pad builds, ignoring unrelated caps hints.
+fn same_caps_identity(previous: &gst::CapsRef, next: &gst::CapsRef) -> bool {
+	if previous.size() != 1 || next.size() != 1 {
+		return false;
+	}
+	let previous = previous.structure(0).expect("one caps structure");
+	let next = next.structure(0).expect("one caps structure");
+	if previous.name() != next.name() {
+		return false;
+	}
+	match previous.name().as_str() {
+		// Video configuration is in the encoded sequence headers. Its importer handles
+		// identity changes there; caps geometry, colour and rate fields are hints.
+		"video/x-h264" | "video/x-h265" | "video/x-av1" | "video/x-vp8" | "video/x-vp9" => true,
+		"audio/x-opus" => match (opus_catalog(previous), opus_catalog(next)) {
+			(Ok(previous), Ok(next)) => previous == next,
+			_ => false,
+		},
+		"audio/mpeg" => {
+			let mp3 = |caps: &gst::StructureRef| caps.get::<i32>("layer").ok() == Some(3);
+			if mp3(previous) != mp3(next) {
+				return false;
+			}
+			if mp3(previous) {
+				return ["rate", "channels"].into_iter().all(
+					|field| matches!((previous.get::<i32>(field), next.get::<i32>(field)), (Ok(a), Ok(b)) if a > 0 && a == b),
+				);
+			}
+			let description = |caps: &gst::StructureRef| {
+				let data = caps.get::<gst::Buffer>("codec_data").ok()?;
+				Some(data.map_readable().ok()?.as_slice().to_vec())
+			};
+			matches!((description(previous), description(next)), (Some(a), Some(b)) if a == b)
+		}
+		"text/x-raw" | "application/octet-stream" => true,
+		_ => previous == next,
 	}
 }
 
@@ -1233,10 +1334,9 @@ mod tests {
 		assert!(first.finalize().unwrap(), "the first producer is still live");
 	}
 
-	// Renegotiation re-reserves the same explicit name. `build` finalizes the old producer first and the
-	// broadcast reclaims closed entries on insert, so the pad does not collide with itself.
+	// A size hint does not change decoder identity or restart the existing track.
 	#[test]
-	fn renegotiation_keeps_the_explicit_name() {
+	fn a_size_hint_keeps_the_live_producer() {
 		gst::init().unwrap();
 		let (broadcast, catalog) = producers();
 		let mut pad = Pad::new();
@@ -1248,13 +1348,50 @@ mod tests {
 			.field("stream-format", "byte-stream")
 			.field("alignment", "au")
 			.field("width", 1280i32)
+			.field("height", 720i32)
+			.field("framerate", gst::Fraction::new(24, 1))
+			.field("colorimetry", "bt709")
 			.build();
 		assert_eq!(
 			pad.observe_caps(&broadcast, &catalog, producer_options(&renegotiated, Some("camera")),),
-			CapsOutcome::Active("camera".to_string()),
-			"the same name is reserved again, not rejected as a duplicate"
+			CapsOutcome::Unchanged,
+			"a size hint must not restart the track"
 		);
 		assert!(!pad.is_failed());
+	}
+
+	#[test]
+	fn changed_audio_identity_mints_a_fresh_explicit_name() {
+		gst::init().unwrap();
+		let (broadcast, catalog) = producers();
+		let mut pad = Pad::new();
+		assert_eq!(
+			pad.observe_caps(
+				&broadcast,
+				&catalog,
+				producer_options(&opus_caps(1, None, None), Some("audio"))
+			),
+			CapsOutcome::Active("audio".into())
+		);
+		let first = catalog.snapshot().audio.renditions["audio"].clone();
+		let CapsOutcome::Active(next) = pad.observe_caps(
+			&broadcast,
+			&catalog,
+			producer_options(&opus_caps(2, None, None), Some("audio")),
+		) else {
+			panic!("new audio identity must publish");
+		};
+		assert_ne!(next, "audio");
+		let after = catalog.snapshot();
+		assert_eq!(after.audio.renditions["audio"], first);
+		assert_eq!(after.audio.renditions[&next].channel_count, 2);
+		let (closed, result) = pad.finish();
+		assert!(result.unwrap());
+		drop(pad);
+		assert_eq!(catalog.snapshot().audio.renditions, after.audio.renditions);
+		let mut final_catalog = catalog.clone();
+		final_catalog.finish().unwrap();
+		drop(closed);
 	}
 
 	// AAC carries its config in caps; without codec_data the producer cannot be built.
@@ -2103,6 +2240,32 @@ mod tests {
 		pad.flush();
 		assert!(!pad.is_failed());
 		assert!(!pad.finalize().unwrap(), "no producer to finalize");
+	}
+
+	#[test]
+	fn subtitle_language_updates_in_place() {
+		gst::init().unwrap();
+		let (broadcast, catalog) = producers();
+		let mut pad = Pad::new();
+		let caps = gst::Caps::builder("text/x-raw")
+			.field("format", "utf8")
+			.field("language-code", "en")
+			.build();
+		assert_eq!(
+			pad.observe_caps(&broadcast, &catalog, producer_options(&caps, Some("subtitles"))),
+			CapsOutcome::Active("subtitles".into())
+		);
+		let next = gst::Caps::builder("text/x-raw")
+			.field("format", "utf8")
+			.field("language-code", "fr")
+			.build();
+		assert_eq!(
+			pad.observe_caps(&broadcast, &catalog, producer_options(&next, Some("subtitles"))),
+			CapsOutcome::Unchanged
+		);
+		let after = catalog.snapshot();
+		assert_eq!(after.text.renditions.len(), 1);
+		assert_eq!(after.text.renditions["subtitles"].lang.as_deref(), Some("fr"));
 	}
 
 	fn text_caps() -> gst::Caps {
