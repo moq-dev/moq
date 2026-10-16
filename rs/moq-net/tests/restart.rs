@@ -576,3 +576,117 @@ async fn a_more_specific_source_cannot_fill_a_held_covering_track() {
 		assert_eq!(read(&mut subscription).await, "old:1");
 	}
 }
+
+/// A worker claiming `pool` through the public API: each request is prepared under a
+/// fresh epoch and published at its exact path, and `outputs[path]` holds the latest.
+struct Pool {
+	_claim: Rc<origin::Dynamic>,
+	outputs: Rc<RefCell<std::collections::HashMap<String, (broadcast::Producer, track::Producer)>>>,
+	answered: Rc<RefCell<usize>>,
+}
+
+impl Pool {
+	fn new(origin: &origin::Producer) -> Self {
+		let claim = Rc::new(origin.dynamic("pool").unwrap());
+		let outputs = Rc::new(RefCell::new(std::collections::HashMap::new()));
+		let answered = Rc::new(RefCell::new(0));
+		let (handler, served, count) = (claim.clone(), outputs.clone(), answered.clone());
+		drop(moq_net_sim::spawn(async move {
+			while let Ok(request) = handler.requested_broadcast().await {
+				let path = request.path().to_string();
+				let prepared = request.prepare(Epoch::mint()).unwrap();
+				let track = prepared.broadcast().create_track("video", timed()).unwrap();
+				let output = prepared.publish().unwrap();
+				served.borrow_mut().insert(path, (output, track));
+				*count.borrow_mut() += 1;
+			}
+		}));
+		Self {
+			_claim: claim,
+			outputs,
+			answered,
+		}
+	}
+
+	fn write(&self, path: &str, tag: &str) {
+		write(&self.outputs.borrow()[path].1, tag);
+	}
+
+	/// End the output at `path`, as a worker does when it restarts that job.
+	fn close(&self, path: &str) {
+		self.outputs.borrow()[path].0.close();
+	}
+}
+
+/// Wake the worker for `path` through the claim, then subscribe through the exact route
+/// it published. A relay resolves a path under the claim optimistically, and the first
+/// subscription through it is reset once the exact route arrives: the cold-start reset
+/// accepted until announce takeover lands.
+async fn claimed(origin: &origin::Producer, path: &str) -> (broadcast::Consumer, track::Subscriber) {
+	let cold = origin.consume().request_broadcast(path, None).await.unwrap();
+	drop(cold.track("video").unwrap().subscribe(None).await);
+	settle().await;
+	subscribe(origin, path).await
+}
+
+/// `W -> R -> E`, where worker `W` claims `pool` and restarts the output at `pool/p`
+/// within the cache window. A returning reader at the edge gets the new output from its
+/// first group, never a group cached from the old one, while `pool/q` keeps its reader.
+async fn claim_restart(version: &str) {
+	let version: Version = version.parse().unwrap();
+	let worker = produce_origin(1);
+	let relay = produce_origin(2);
+	let edge = produce_origin(3);
+	let _upstream = link(version, &worker, &relay).await;
+	let _downstream = link(version, &relay, &edge).await;
+	let pool = Pool::new(&worker);
+	settle().await;
+
+	let (_sibling, mut sibling) = claimed(&edge, "pool/q").await;
+	pool.write("pool/q", "q:0");
+	assert_eq!(read(&mut sibling).await, "q:0", "{version}");
+
+	let (old, mut first) = claimed(&edge, "pool/p").await;
+	for group in 0..3 {
+		pool.write("pool/p", &format!("old:{group}"));
+		assert_eq!(read(&mut first).await, format!("old:{group}"), "{version}");
+	}
+	drop(first);
+	pool.close("pool/p");
+	settle().await;
+
+	let (fresh, mut returning) = claimed(&edge, "pool/p").await;
+	assert!(!fresh.is_clone(&old), "{version}: joined the old output");
+	if version == "moq-lite-07-wip".parse().unwrap() {
+		assert!(fresh.info().epoch.is_some(), "{version}: resolved through the claim");
+		assert_ne!(fresh.info().epoch, old.info().epoch, "{version}: reused the old epoch");
+	}
+	assert_eq!(*pool.answered.borrow(), 3, "{version}: the worker was not asked again");
+	pool.write("pool/p", "new:0");
+	assert_eq!(read(&mut returning).await, "new:0", "{version}");
+
+	pool.write("pool/q", "q:1");
+	assert_eq!(read(&mut sibling).await, "q:1", "{version}: the sibling lost its reader");
+}
+
+macro_rules! claim_restart_tests {
+	($($name:ident: $version:literal,)*) => {
+		$(
+			#[moq_net_sim::test]
+			async fn $name() {
+				moq_net_sim::timeout(TEST_TIMEOUT, claim_restart($version))
+					.await
+					.expect("timed out");
+			}
+		)*
+	};
+}
+
+claim_restart_tests! {
+	claim_restart_lite05: "moq-lite-05",
+	claim_restart_lite06: "moq-lite-06",
+	claim_restart_lite07: "moq-lite-07-wip",
+	claim_restart_ietf14: "moq-transport-14",
+	claim_restart_ietf16: "moq-transport-16",
+	claim_restart_ietf22: "moq-transport-22",
+}
