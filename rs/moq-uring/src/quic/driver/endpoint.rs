@@ -91,6 +91,7 @@ impl Endpoint {
 			return Err(Error::Io(Shared::gone_error().to_string()));
 		};
 		let local = socket.local_addr().map_err(|err| Error::Io(err.to_string()))?;
+		socket.route_unreachable();
 		let server = match &config.server {
 			Some(server) => {
 				let mut server = super::server_config(server)?;

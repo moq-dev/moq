@@ -345,7 +345,8 @@ struct Rx {
 	/// Destinations a send found no route to, each with its errno, for the
 	/// demux task to hand to the connections dialing them. Here rather than
 	/// on the send side because the demux task is what parks on `waiters`.
-	unreachable: Vec<(SocketAddr, i32)>,
+	/// `None` until a consumer asks for them, so a raw socket queues nothing.
+	unreachable: Option<Vec<(SocketAddr, i32)>>,
 }
 
 /// Send-side state.
@@ -480,11 +481,18 @@ impl SockShared {
 	}
 
 	/// A send to `to` found no route. Unlike other send failures this says
-	/// nothing about the socket, so only the connections dialing `to` hear it.
+	/// nothing about the socket, so with a consumer only the connections
+	/// dialing `to` hear it. Without one there is no destination to route it
+	/// to, so it fails sends like any other error.
 	fn unreachable(&self, to: SocketAddr, code: i32) {
 		let mut rx = self.rx.borrow_mut();
-		if !rx.unreachable.iter().any(|(addr, _)| *addr == to) {
-			rx.unreachable.push((to, code));
+		let Some(reports) = rx.unreachable.as_mut() else {
+			drop(rx);
+			self.fail_tx(code);
+			return;
+		};
+		if !reports.iter().any(|(addr, _)| *addr == to) {
+			reports.push((to, code));
 		}
 		rx.waiters.wake();
 	}
@@ -639,7 +647,7 @@ impl Socket {
 				armed: None,
 				starved: false,
 				error: None,
-				unreachable: Vec::new(),
+				unreachable: None,
 			}),
 			tx: RefCell::new(tx),
 		});
@@ -696,13 +704,21 @@ impl Socket {
 		Poll::Pending
 	}
 
+	/// Report sends that find no route through
+	/// [`take_unreachable`](Self::take_unreachable) instead of failing every
+	/// later send, for a consumer that routes them to the right connection.
+	#[cfg_attr(not(feature = "quic"), allow(dead_code))]
+	pub(crate) fn route_unreachable(&self) {
+		self.shared.rx.borrow_mut().unreachable.get_or_insert_default();
+	}
+
 	/// A destination a send found no route to, and why, once per report.
 	///
 	/// Reported through the receive waiters, so whoever parks in
 	/// [`poll_recv`](Self::poll_recv) is woken to collect it.
 	#[cfg_attr(not(feature = "quic"), allow(dead_code))]
 	pub(crate) fn take_unreachable(&self) -> Option<(SocketAddr, io::Error)> {
-		let (to, code) = self.shared.rx.borrow_mut().unreachable.pop()?;
+		let (to, code) = self.shared.rx.borrow_mut().unreachable.as_mut()?.pop()?;
 		Some((to, io::Error::from_raw_os_error(code)))
 	}
 
@@ -1613,7 +1629,7 @@ mod tests {
 			armed: None,
 			starved: false,
 			error: None,
-			unreachable: Vec::new(),
+			unreachable: None,
 		}
 	}
 
@@ -1650,5 +1666,56 @@ mod tests {
 			assert_eq!(rx.ring.as_ref().expect("ring").tail, expected);
 		}
 		assert!(!grow_rx(&mut rx, &config), "grew past the ceiling");
+	}
+
+	/// With nothing routing unreachable reports, a send that finds no route
+	/// fails later sends like any other error instead of queueing a report
+	/// nobody will collect. Linux refuses a v4-mapped destination on an
+	/// IPv6-only socket with `ENETUNREACH`.
+	#[test]
+	fn a_raw_socket_sees_an_unreachable_send_fail() {
+		use nix::sys::socket::{AddressFamily, SockFlag, SockType, SockaddrIn6, bind, setsockopt, socket, sockopt};
+
+		let mut worker = match crate::Worker::new(crate::Config::default()) {
+			Ok(worker) => worker,
+			Err(Error::Unsupported(reason)) if std::env::var_os("MOQ_STRICT").is_none() => {
+				eprintln!("skipping io_uring socket test: {reason}");
+				return;
+			}
+			Err(err) => panic!("worker setup failed: {err}"),
+		};
+		let handle = worker.handle();
+		let fd = socket(AddressFamily::Inet6, SockType::Datagram, SockFlag::empty(), None).expect("socket");
+		setsockopt(&fd, sockopt::Ipv6V6Only, &true).expect("IPV6_V6ONLY");
+		let local: SocketAddrV6 = "[::1]:0".parse().expect("addr");
+		bind(fd.as_raw_fd(), &SockaddrIn6::from(local)).expect("bind");
+		let sock = handle.udp(UdpSocket::from(fd), Config::default()).expect("socket");
+
+		let err = worker
+			.block_on(async {
+				let mut tx = sock.acquire().await.expect("send buffer");
+				tx[..4].copy_from_slice(b"lost");
+				tx.send(Transmit {
+					to: SocketAddr::new(Ipv4Addr::LOCALHOST.to_ipv6_mapped().into(), 1),
+					len: 4,
+					segment: 4,
+					ecn: None,
+				})
+				.expect("staged");
+				// The failure lands with the send's completion, a worker turn later.
+				for _ in 0..1000 {
+					match sock.acquire().await {
+						Ok(tx) => drop(tx),
+						Err(err) => return err,
+					}
+					crate::Timer::after(&handle, std::time::Duration::from_millis(1))
+						.wait()
+						.await;
+				}
+				panic!("the unreachable send never failed the socket");
+			})
+			.expect("worker");
+		assert_eq!(err.kind(), io::ErrorKind::NetworkUnreachable, "{err}");
+		assert!(sock.shared.rx.borrow().unreachable.is_none(), "nothing queued");
 	}
 }
