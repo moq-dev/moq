@@ -135,7 +135,11 @@ impl Preferences {
 	/// Drop a NEW_GROUP_REQUEST that `sequence` answers.
 	pub(super) fn answer_new_group(&self, sequence: u64) {
 		// Checked before taking the write, which wakes this channel's readers.
-		if !self.read().new_group.is_some_and(|new_group| sequence >= new_group.first) {
+		if !self
+			.read()
+			.new_group
+			.is_some_and(|new_group| sequence >= new_group.first)
+		{
 			return;
 		}
 		let _ = self.update_with(|value| Subscription {
@@ -255,8 +259,16 @@ mod tests {
 					expected = Some(next);
 				}
 			}
-			assert_eq!(producer.subscription(), super::super::public(expected.clone()), "operation {step}");
-			assert_eq!(producer.new_group(), super::super::new_group(expected), "operation {step}");
+			assert_eq!(
+				producer.subscription(),
+				super::super::public(expected.clone()),
+				"operation {step}"
+			);
+			assert_eq!(
+				producer.new_group(),
+				super::super::new_group(expected),
+				"operation {step}"
+			);
 		}
 		drop(slots);
 		assert_eq!(producer.subscription(), None);
