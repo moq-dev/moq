@@ -152,35 +152,41 @@ async fn tokio_peer_session_widens_quic_limits() {
 	peer_widens_and_viewer_does_not(relay, port).await;
 }
 
-/// A peer receive window QUIC cannot advertise is refused at load, as `[quic]`'s
-/// is, rather than saturating on accept and failing only once the relay dials.
-#[tokio::test]
-async fn oversized_peer_window_is_refused_at_load() {
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+/// Load a relay with `set` applied, returning why it was refused.
+async fn refused_at_load(set: impl FnOnce(&mut Config)) -> String {
 	let dir = tempfile::tempdir().expect("tempdir");
 	let mut config = config(dir.path());
-	config.peer.quic.receive_window = std::num::NonZeroU64::new(1 << 62).unwrap();
-	let err = match Relay::load(config).await {
-		Ok(_) => panic!("an oversized peer receive window must be refused"),
-		Err(err) => err,
-	};
-	assert!(
-		format!("{err:#}").contains("peer.quic.receive_window"),
-		"refused for the wrong reason: {err:#}"
-	);
+	set(&mut config);
+	match Relay::load(config).await {
+		Ok(_) => panic!("an unadvertisable QUIC limit must be refused"),
+		Err(err) => format!("{err:#}"),
+	}
 }
 
-/// Every cluster dial is a peer link, so a dial template carrying the plain
-/// `[quic]` settings still advertises the peer limits from the handshake on.
+/// A limit QUIC cannot advertise is refused at load, in `[peer.quic]` and
+/// `[quic]` alike, rather than wedging the peer or the handshake later.
 #[tokio::test]
-async fn cluster_dials_widen_a_plain_client() {
+async fn unadvertisable_quic_limits_are_refused_at_load() {
 	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	let err = refused_at_load(|config| {
+		config.peer.quic.receive_window = std::num::NonZeroU64::new(1 << 62).unwrap();
+	})
+	.await;
+	assert!(err.contains("[peer.quic]") && err.contains("receive_window"), "{err}");
 
-	let mut connect = moq_tokio::connect::Config::default();
-	connect.tls.insecure = Some(true);
+	let err = refused_at_load(|config| {
+		config.peer.quic.max_streams = std::num::NonZeroU64::new((1 << 60) + 1).unwrap();
+	})
+	.await;
+	assert!(err.contains("[peer.quic]") && err.contains("max_streams"), "{err}");
 
-	// A bare QUIC server: the dialer's stream limit is a transport parameter, so
-	// the handshake alone shows it.
+	let err = refused_at_load(|config| config.quic.max_streams = Some((1 << 60) + 1)).await;
+	assert!(err.contains("[quic]") && err.contains("max_streams"), "{err}");
+}
+
+/// A bare QUIC server speaking the dial template's ALPNs: the dialer's stream
+/// limit is a transport parameter, so the handshake alone shows it.
+fn bare_server(connect: &moq_tokio::connect::Config) -> driver::Endpoint {
 	let key = rcgen::KeyPair::generate().expect("keypair");
 	let cert = rcgen::CertificateParams::new(vec!["localhost".to_string()])
 		.expect("cert params")
@@ -200,16 +206,20 @@ async fn cluster_dials_widen_a_plain_client() {
 		.map(|alpn| alpn.as_bytes().to_vec())
 		.collect();
 	let crypto = driver::crypto::rustls::QuicServerConfig::try_from(tls).expect("quic crypto");
-	let server = driver::Endpoint::server(
+	driver::Endpoint::server(
 		driver::ServerConfig::with_crypto(std::sync::Arc::new(crypto)),
 		"127.0.0.1:0".parse().unwrap(),
 	)
-	.expect("server endpoint");
+	.expect("server endpoint")
+}
+
+/// Start a cluster whose one static peer is `server`, and accept its dial.
+async fn static_dial(
+	server: &driver::Endpoint,
+	connect: moq_tokio::connect::Config,
+	quic: moq_tokio::quic::Config,
+) -> (driver::Connection, tokio::task::JoinHandle<anyhow::Result<()>>) {
 	let port = server.local_addr().expect("server addr").port();
-
-	let mut quic = moq_tokio::quic::Config::default();
-	quic.max_streams = Some(VIEWER_STREAMS);
-
 	let mut options = moq_relay::cluster::Options::new(Default::default());
 	options.config.connect = vec![moq_relay::cluster::Peer::new(format!("moql://127.0.0.1:{port}/"))];
 	options.peer.quic.max_streams = std::num::NonZeroU64::new(4 * PROBE as u64).unwrap();
@@ -217,13 +227,27 @@ async fn cluster_dials_widen_a_plain_client() {
 		.expect("cluster init")
 		.with_connect(connect, quic);
 	let running = tokio::spawn(cluster.start().await.expect("cluster start").run());
-
 	let conn = tokio::time::timeout(TIMEOUT, server.accept())
 		.await
 		.expect("dial timeout")
 		.expect("incoming")
 		.await
 		.expect("handshake");
+	(conn, running)
+}
+
+/// Every cluster dial is a peer link, so a dial template carrying the plain
+/// `[quic]` settings still advertises the peer limits from the handshake on.
+#[tokio::test]
+async fn cluster_dials_widen_a_plain_client() {
+	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	let mut connect = moq_tokio::connect::Config::default();
+	connect.tls.insecure = Some(true);
+	let server = bare_server(&connect);
+	let mut quic = moq_tokio::quic::Config::default();
+	quic.max_streams = Some(VIEWER_STREAMS);
+	let (conn, running) = static_dial(&server, connect, quic).await;
+
 	let mut streams = Vec::new();
 	while streams.len() < PROBE {
 		match conn.open_uni().now_or_never() {
@@ -232,6 +256,29 @@ async fn cluster_dials_widen_a_plain_client() {
 		}
 	}
 	assert_eq!(streams.len(), PROBE, "the dial advertises the peer stream limit");
+
+	running.abort();
+	let _ = running.await;
+	conn.close(driver::VarInt::from_u32(0), b"done");
+}
+
+/// A static peer dials from the `[connect]` bind port, so a deployment that
+/// admits cluster traffic by source port keeps working.
+#[tokio::test]
+async fn static_peer_dials_from_the_configured_bind() {
+	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	let mut connect = moq_tokio::connect::Config::default();
+	connect.tls.insecure = Some(true);
+	// Borrow a free port from the OS, then hand it to the dial template.
+	let bind = std::net::UdpSocket::bind("127.0.0.1:0")
+		.expect("probe socket")
+		.local_addr()
+		.expect("probe addr");
+	connect.bind = Some(bind);
+	let server = bare_server(&connect);
+	let (conn, running) = static_dial(&server, connect, Default::default()).await;
+
+	assert_eq!(conn.remote_address(), bind, "the dial keeps the configured bind");
 
 	running.abort();
 	let _ = running.await;

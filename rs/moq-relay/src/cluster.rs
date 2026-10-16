@@ -930,6 +930,10 @@ pub struct Cluster {
 	quic: Option<moq_tokio::quic::Config>,
 	#[cfg(feature = "iroh")]
 	iroh: Option<moq_tokio::iroh::Endpoint>,
+	/// The client static and API peers share, on the template's bind address, so
+	/// a fixed `[connect]` bind port stays the cluster's egress port. Built by
+	/// [`Self::start`].
+	dial: Option<moq_tokio::Client>,
 	/// Bound listen port and optional generated-certificate fingerprint.
 	advertise: Option<LanAdvertise>,
 	/// Set by [`Self::start`] when LAN discovery is on, so inbound
@@ -1066,6 +1070,7 @@ impl Cluster {
 			config,
 			connect: None,
 			quic: None,
+			dial: None,
 			#[cfg(feature = "iroh")]
 			iroh: None,
 			advertise: None,
@@ -1175,8 +1180,9 @@ impl Cluster {
 		})
 	}
 
-	/// Attach the dial template every peer dial is built from, each on its own
-	/// ephemeral socket with the [`Options::peer`] QUIC limits.
+	/// Attach the dial template every peer dial is built from, with the
+	/// [`Options::peer`] QUIC limits. Static and API peers share one socket on its
+	/// bind address; each LAN dial takes an ephemeral port.
 	///
 	/// Required when any peer is configured; [`start`](Self::start) returns an
 	/// error otherwise.
@@ -1369,7 +1375,7 @@ impl Cluster {
 	///
 	/// Bails when peers are configured to dial but no usable dial template was
 	/// attached via [`with_connect`](Self::with_connect).
-	pub async fn start(self) -> anyhow::Result<Started> {
+	pub async fn start(mut self) -> anyhow::Result<Started> {
 		let node = self.config.node.clone();
 		let lan = self.lan();
 		#[cfg(feature = "cluster-lan")]
@@ -1406,10 +1412,14 @@ impl Cluster {
 			});
 		}
 
-		// Build one dial client up front, so a bad template fails startup rather
-		// than every dial.
-		self.peer_client(false, None)
+		// Built up front, so a bad template fails startup rather than every dial.
+		// Static and API peers share this client; LAN dials each build their own,
+		// so a LAN-only node builds one only to check the template.
+		let statics = !self.config.connect.is_empty() || self.config.connect_api.is_some();
+		let client = self
+			.peer_client(!statics, None)
 			.context("cluster peers configured but the dial template is unusable")?;
+		self.dial = statics.then_some(client);
 
 		// Build here so malformed API roots fail startup, before background work.
 		let http = if self.config.connect_api.as_deref().is_some_and(connect_api_is_http) {
@@ -1792,7 +1802,13 @@ impl Cluster {
 		let redacted = moq_tokio::RedactedUrl::new(first);
 		tracing::info!(url = %redacted, "dialing cluster peer");
 
-		let client = self.peer_client(target.lan, target.fingerprint.as_deref())?;
+		let client = match target.lan {
+			true => self.peer_client(true, target.fingerprint.as_deref())?,
+			false => self
+				.dial
+				.clone()
+				.context("internal: cluster peer dial before Cluster::start")?,
+		};
 
 		// Cluster dials use their configured stats tier. Cluster peers carry no auth
 		// root, so presence is keyed under the empty root within the cluster tier.
@@ -1837,20 +1853,20 @@ impl Cluster {
 		}
 	}
 
-	/// A client for one peer dial, from the dial template: its own ephemeral
-	/// socket and the [`Options::peer`] QUIC limits, since every dial is a peer.
-	/// A LAN dial also keeps only request-path versions and pins the advertised
-	/// fingerprint on a clean TLS config, so the relay's CA roots cannot combine
-	/// with it.
+	/// A peer client from the dial template, with the [`Options::peer`] QUIC
+	/// limits, since every dial is a peer. A LAN client is built per dial, so it
+	/// takes an ephemeral port beside the shared static client, keeps only
+	/// request-path versions, and pins the advertised fingerprint on a clean TLS
+	/// config, so the relay's CA roots cannot combine with it.
 	fn peer_client(&self, lan: bool, fingerprint: Option<&str>) -> anyhow::Result<moq_tokio::Client> {
 		let mut connect = self
 			.connect
 			.clone()
 			.context("cluster dial without a dial template (call Cluster::with_connect)")?;
-		let mut bind = connect.resolve().bind;
-		bind.set_port(0);
-		connect.bind = Some(bind);
 		if lan {
+			let mut bind = connect.resolve().bind;
+			bind.set_port(0);
+			connect.bind = Some(bind);
 			connect.backoff.timeout = Some(std::time::Duration::ZERO);
 			connect.once = Some(false);
 			connect.version = connect

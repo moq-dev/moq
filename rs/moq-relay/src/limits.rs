@@ -1,5 +1,6 @@
 //! Request caps and QUIC limits selected after the relay authorizes a session.
 
+use anyhow::Context;
 use serde::{Deserialize, Serialize};
 
 /// Request caps for ordinary client sessions.
@@ -145,18 +146,16 @@ impl Default for Quic {
 }
 
 impl Quic {
-	/// Refuses a receive window QUIC cannot advertise, as `[quic]` does, so the
-	/// accept and dial paths never disagree about it.
+	/// Refuses limits QUIC cannot advertise, as `[quic]` does, so the accept and
+	/// dial paths never disagree about them.
 	pub(crate) fn resolve(&self) -> anyhow::Result<moq_tokio::quic::Limits> {
-		anyhow::ensure!(
-			self.receive_window.get() < 1 << 62,
-			"peer.quic.receive_window must fit a QUIC varint (below 2^62)"
-		);
-		Ok(moq_tokio::quic::Limits {
+		let limits = moq_tokio::quic::Limits {
 			max_streams: self.max_streams,
 			receive_window: self.receive_window,
 			send_window: self.send_window,
-		})
+		};
+		limits.validate().context("invalid [peer.quic]")?;
+		Ok(limits)
 	}
 }
 

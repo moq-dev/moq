@@ -1,3 +1,4 @@
+use anyhow::Context;
 use serde::{Deserialize, Serialize};
 
 use crate::{auth, cache, cluster, internal, stats, web};
@@ -361,6 +362,10 @@ impl Config {
 	pub(crate) fn resolve(&mut self) -> anyhow::Result<()> {
 		let deprecated = self.deprecated();
 		anyhow::ensure!(deprecated.is_empty(), "{deprecated}");
+		// Here rather than at an endpoint, since io_uring workers and lazily built
+		// dial clients would otherwise check `[quic]` late or never. `[peer.quic]`
+		// is checked by `Cluster::new`, which embedders call directly.
+		self.quic.validate().context("invalid [quic]")?;
 
 		self.quic
 			.max_streams

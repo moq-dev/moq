@@ -128,9 +128,9 @@ pub(crate) const DEFAULT_KEEP_ALIVE: Duration = Duration::from_secs(3);
 /// The flow-control limits a QUIC connection can be widened to, such as by a
 /// relay once it knows the peer is another relay.
 ///
-/// Like `[quic]`, a stream count past what QUIC can express saturates to its
-/// maximum, while a receive window past a QUIC varint is refused. Each is non-zero
-/// because zero streams or a zero window credits nothing and wedges the connection.
+/// Each is non-zero because zero streams or a zero window credits nothing and
+/// wedges the connection. [`Limits::validate`] refuses the values QUIC cannot
+/// advertise, as [`Config`] does, and every setter taking one checks it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Limits {
 	/// Max concurrent streams the peer may open, per direction.
@@ -139,6 +139,17 @@ pub struct Limits {
 	pub receive_window: std::num::NonZeroU64,
 	/// Cap on unacknowledged outgoing data, in bytes.
 	pub send_window: std::num::NonZeroU64,
+}
+
+impl Limits {
+	/// Refuse a stream count past 2^60 or a receive window past a QUIC varint.
+	pub fn validate(&self) -> crate::Result<()> {
+		validate_streams(Some(self.max_streams.get()))?;
+		match self.receive_window.get() {
+			window if window > MAX_VARINT => Err(crate::Error::WindowRange("receive_window")),
+			_ => Ok(()),
+		}
+	}
 }
 
 /// The `--quic-*` transport section, applied to dialed and accepted connections alike.
@@ -547,9 +558,10 @@ impl Config {
 		self.legacy.deprecated()
 	}
 
-	/// Reject knobs this build can't honor. Called when the endpoint is built.
+	/// Reject knobs this build can't honor, including limits QUIC cannot
+	/// advertise. Called when the endpoint is built.
 	#[cfg(feature = "_transport")]
-	pub(crate) fn validate(&self) -> crate::Result<()> {
+	pub fn validate(&self) -> crate::Result<()> {
 		// Erroring beats silently ignoring the flag: the operator asked for traces and
 		// would otherwise go looking for files that were never going to appear.
 		match self.qlog.as_ref() {
@@ -557,6 +569,7 @@ impl Config {
 			_ => Ok(()),
 		}?;
 		validate_idle_timeout(Some(self.resolve().idle_timeout))?;
+		validate_streams(self.max_streams)?;
 		validate_windows(self)
 	}
 
@@ -614,8 +627,19 @@ fn validate_idle_timeout(idle_timeout: Option<Duration>) -> crate::Result<()> {
 
 /// The largest value a QUIC varint can carry, which bounds every flow-control
 /// limit that goes on the wire as a transport parameter.
-#[cfg(feature = "_transport")]
 const MAX_VARINT: u64 = (1 << 62) - 1;
+
+/// The largest stream limit QUIC can advertise: a stream ID is a varint whose
+/// low two bits are its type, so RFC 9000 caps the count at 2^60.
+const MAX_STREAMS: u64 = 1 << 60;
+
+/// Reject a stream limit a peer would refuse with FRAME_ENCODING_ERROR.
+fn validate_streams(max_streams: Option<u64>) -> crate::Result<()> {
+	match max_streams {
+		Some(streams) if streams > MAX_STREAMS => Err(crate::Error::StreamsRange),
+		_ => Ok(()),
+	}
+}
 
 /// Reject a flow-control window no connection can honor.
 ///
@@ -994,6 +1018,38 @@ mod tests {
 			..Default::default()
 		};
 		assert!(at_limit.validate().is_ok());
+	}
+
+	/// A MAX_STREAMS past 2^60 is a frame encoding error at the peer, so `[quic]`
+	/// and the runtime limits both refuse it.
+	#[cfg(feature = "_transport")]
+	#[test]
+	fn stream_limits_must_fit_a_stream_id() {
+		let over = Config {
+			max_streams: Some(MAX_STREAMS + 1),
+			..Default::default()
+		};
+		assert!(matches!(over.validate(), Err(crate::Error::StreamsRange)));
+		let at_limit = Config {
+			max_streams: Some(MAX_STREAMS),
+			..Default::default()
+		};
+		assert!(at_limit.validate().is_ok());
+
+		let limit = |max_streams: u64, receive_window: u64| Limits {
+			max_streams: std::num::NonZeroU64::new(max_streams).unwrap(),
+			receive_window: std::num::NonZeroU64::new(receive_window).unwrap(),
+			send_window: std::num::NonZeroU64::MAX,
+		};
+		assert!(limit(MAX_STREAMS, MAX_VARINT).validate().is_ok());
+		assert!(matches!(
+			limit(MAX_STREAMS + 1, MAX_VARINT).validate(),
+			Err(crate::Error::StreamsRange)
+		));
+		assert!(matches!(
+			limit(MAX_STREAMS, MAX_VARINT + 1).validate(),
+			Err(crate::Error::WindowRange("receive_window"))
+		));
 	}
 
 	#[test]
