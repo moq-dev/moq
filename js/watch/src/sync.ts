@@ -94,6 +94,9 @@ export class Sync {
 
 	#epoch = 0;
 
+	// The furthest playhead a skip has jumped to on this timeline. A frame below it was passed over.
+	#floor: number | undefined;
+
 	// Releases parked waits, which may otherwise sleep forever on a reference that never returns.
 	#closed = new Signal(false);
 
@@ -195,9 +198,13 @@ export class Sync {
 		const cap = this.#out.maxDelay.peek();
 		if (sleep <= cap) return sleep < 0; // within budget: let the buffer grow instead of skipping ahead
 
-		// Over the cap: re-anchor down so the resulting lookahead is exactly the cap. Anything
-		// submitted against the old playhead belongs to the skipped timeline.
-		this.#epoch++;
+		// Over the cap: re-anchor down so the resulting lookahead is exactly the cap, which puts the
+		// playhead at `timestamp - cap`. "instant" has no cap, so every newer frame would pass over
+		// whatever is still decoding; it presents frames as they exist instead.
+		if (this.in.delay.peek() !== "instant") {
+			const floor = timestamp - cap;
+			if (this.#floor === undefined || floor > this.#floor) this.#floor = floor;
+		}
 		this.#out.reference.set(ref + cap - delay);
 		return sleep < 0;
 	}
@@ -207,17 +214,26 @@ export class Sync {
 	// plays from its own first frame instead of inheriting the previous reference.
 	reset(): void {
 		this.#epoch++;
+		this.#floor = undefined;
 		this.#out.reference.set(undefined);
 		this.#late.clear();
 	}
 
 	/**
-	 * Bumped by every `reset()` and playhead skip. A frame submitted across a bump belongs to the
-	 * previous timeline, even when the next frame restores the same reference value.
+	 * Bumped by every `reset()`. A frame that waited across a bump belongs to the previous
+	 * timeline, even when the next frame restores the same reference value.
 	 * @internal
 	 */
 	get epoch(): number {
 		return this.#epoch;
+	}
+
+	/**
+	 * Whether a playhead skip on this timeline passed over `timestamp`, so its frame must not render.
+	 * @internal
+	 */
+	skipped(timestamp: Milli): boolean {
+		return this.#floor !== undefined && timestamp < this.#floor;
 	}
 
 	// The PTS in milliseconds that should be rendering right now, derived from the reference +

@@ -445,21 +445,64 @@ function marker(group: number, end: number): Read {
 }
 
 for (const kind of ["legacy", "cmaf"] as const) {
-	it(`${kind} drops a picture queued before another track skips the clock ahead`, async () => {
+	// Another track skips the shared playhead to `skipTo` while a 1s picture is still inside
+	// WebCodecs (`queued`) or parked in Sync.wait, with a 100ms delay and no buffer. Reports what
+	// was showing before the skip and whether the picture presented once its deadline came due.
+	async function skipDuring(stage: "queued" | "parked", skipTo: number) {
+		const clock = manualAt(5000);
+		const reads: Read[] = [];
+		const picture = 1_000_000;
+		const playback = await guardedPlayback(kind, reads, stage === "queued" ? [picture] : []);
+		try {
+			playback.enabled.set(false);
+			playback.delay.set(Milli(100));
+			await microtasks();
+			reads.push(sample(1, picture));
+			playback.enabled.set(true);
+			await microtasks();
+			expect(playback.outputs).toEqual(stage === "queued" ? [] : [picture]);
+			const before = playback.decoder.out.frame.peek();
+
+			playback.sync.received(Milli(skipTo), "audio", Milli(5000));
+			playback.release();
+			await microtasks();
+			const due = playback.decoder.out.frame.peek();
+			await clock.advance(100);
+			const after = playback.decoder.out.frame.peek();
+			return { before, after, presented: after !== due };
+		} finally {
+			playback.close();
+			await microtasks();
+			clock.restore();
+		}
+	}
+
+	for (const stage of ["queued", "parked"] as const) {
+		it(`${kind} drops a ${stage} picture another track skips the playhead past`, async () => {
+			const skip = await skipDuring(stage, 10_000);
+			expect(skip.presented).toBe(false);
+			expect(skip.after).toBe(skip.before);
+		});
+
+		// A startup burst: audio 50ms newer re-anchors the playhead to 950ms, still behind the picture.
+		it(`${kind} presents a ${stage} picture still ahead of the playhead a skip moved to`, async () => {
+			const skip = await skipDuring(stage, 1050);
+			expect(skip.presented).toBe(true);
+		});
+	}
+
+	it(`${kind} instant presents a queued picture after a newer frame arrives`, async () => {
 		const queued = 1_000_000;
 		const playback = await guardedPlayback(kind, [sample(1, queued)], [queued]);
 		try {
-			expect(playback.submitted).toEqual([queued]);
 			expect(playback.outputs).toEqual([]);
 
-			// Audio reaches a much newer timestamp while the old video picture is still inside
-			// WebCodecs. That moves the shared playhead beyond the queued picture.
-			playback.sync.received(Milli(10_000), "audio", Nano.toMilli(Nano(now())));
+			// "instant" has no cap, so every newer frame skips the playhead without passing over anything.
+			playback.sync.received(Milli(10_000), "video", Nano.toMilli(Nano(now())));
 			playback.release();
 			await microtasks();
 
-			expect(playback.outputs).toEqual([queued]);
-			expect(playback.decoder.out.frame.peek()).toBeUndefined();
+			expect(playback.decoder.out.timestamp.peek()).toBe(Milli(1000));
 		} finally {
 			playback.close();
 		}

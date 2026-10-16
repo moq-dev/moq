@@ -211,14 +211,50 @@ describe("wait", () => {
 });
 
 describe("recorded ingress", () => {
-	it("bumps the epoch when a frame skips the shared playhead ahead", async () => {
+	it("a skip passes over only frames behind the playhead it jumped to", async () => {
 		const sync = new Sync({ delay: Milli(100) });
 		await flush();
-		sync.received(Milli(0), "video", Milli(1000));
-		const epoch = sync.epoch;
+		sync.received(Milli(1000), "video", Milli(5000));
+		expect(sync.skipped(Milli(0))).toBe(false);
 
-		sync.received(Milli(2000), "audio", Milli(1000));
-		expect(sync.epoch).toBe(epoch + 1);
+		// A startup burst with no buffer: audio 50ms newer skips the playhead to 950ms.
+		sync.received(Milli(1050), "audio", Milli(5000));
+		expect(sync.skipped(Milli(1000))).toBe(false);
+		expect(sync.skipped(Milli(949))).toBe(true);
+
+		// A large skip passes over the earlier frame.
+		sync.received(Milli(10_000), "audio", Milli(5000));
+		expect(sync.skipped(Milli(1000))).toBe(true);
+		expect(sync.skipped(Milli(9900))).toBe(false);
+		sync.close();
+	});
+
+	it("a skip never lowers the floor and a reset clears it", async () => {
+		const delay = new Signal<Delay>(Milli(100));
+		const sync = new Sync({ delay });
+		await flush();
+		sync.received(Milli(0), "video", Milli(5000));
+		sync.received(Milli(10_000), "audio", Milli(5000));
+		expect(sync.skipped(Milli(9000))).toBe(true);
+
+		// A larger cap re-anchors to a lower playhead, but cannot revive what was passed over.
+		delay.set(Milli(5000));
+		await flush();
+		sync.received(Milli(11_000), "audio", Milli(5000));
+		expect(sync.skipped(Milli(9000))).toBe(true);
+
+		// A new timeline may start its timestamps over.
+		sync.reset();
+		expect(sync.skipped(Milli(9000))).toBe(false);
+		sync.close();
+	});
+
+	it("instant skips pass over nothing", async () => {
+		const sync = new Sync({ delay: "instant" });
+		await flush();
+		sync.received(Milli(0), "video", Milli(5000));
+		sync.received(Milli(10_000), "video", Milli(5000));
+		expect(sync.skipped(Milli(0))).toBe(false);
 		sync.close();
 	});
 
