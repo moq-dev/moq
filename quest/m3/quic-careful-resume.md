@@ -18,7 +18,7 @@ RTT with its age, jumps the congestion window toward that estimate once the
 new path's RTT matches the recorded one, and drops back to ordinary slow
 start on the first loss or a mismatched RTT.
 
-- Implement in the fork as a `Controller` wrapper: any controller can be
+- Implement in `moq-quic` as a `Controller` wrapper: any controller can be
   resumed. BBR3 seeds its bandwidth model and pacing rate directly; Cubic
   seeds `ssthresh`.
 - The store is a bounded, in-process map keyed by remote address plus SNI,
@@ -31,10 +31,6 @@ start on the first loss or a mismatched RTT.
 Measure time to the encoder's target rate after a reconnect on the impaired
 path profile, plus loss and latency during the jump. Ship it on by default
 only when the jump never makes the first second worse than slow start.
-
-## Required
-
-- [Hard fork](/quest/m1/quic/fork/README.md) - the change lands in `moq-quic`, not the frozen fork
 
 ## Related
 

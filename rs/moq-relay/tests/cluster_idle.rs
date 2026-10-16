@@ -2,7 +2,7 @@
 //!
 //! A crashed or partitioned peer sends no close, so the idle timeout is the whole
 //! outage window for subscribes routed through it.
-#![cfg(feature = "noq")]
+#![cfg(feature = "quic")]
 
 use std::time::{Duration, Instant};
 

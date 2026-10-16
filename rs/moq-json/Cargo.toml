@@ -43,3 +43,8 @@ harness = false
 [[bench]]
 name = "window"
 harness = false
+
+# Run the documented example's inline test in the normal nextest gate.
+[[example]]
+name = "teleop"
+test = true

@@ -28,7 +28,7 @@ export * as Group from "./group.ts";
 export * as Origin from "./origin.ts";
 /** Broadcast path utilities with delimiter-aware prefix matching. Path patterns are re-exported from `@moq/pattern`. */
 export * as Path from "./path.ts";
-/** Branded time types (nanoseconds, microseconds, milliseconds, seconds) with conversions. */
+/** Presentation timestamps and their timescales; duration units live in `@moq/clock`. */
 export * as Time from "./time.ts";
 export type { Timed } from "./timed.ts";
 /** Track role handles. */

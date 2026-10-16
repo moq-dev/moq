@@ -1,6 +1,6 @@
+import { Milli } from "@moq/clock";
 import type { Drain } from "../connection/goaway.ts";
 import { Reader, type Writer } from "../stream.ts";
-import * as Time from "../time.ts";
 import * as Message from "./message.ts";
 import { type IetfVersion, Version } from "./version.ts";
 
@@ -52,7 +52,7 @@ export class GoAway {
 	drain(): Drain {
 		return {
 			uri: this.newSessionUri,
-			timeout: this.timeout > 0n ? Time.Milli(Number(this.timeout)) : undefined,
+			timeout: this.timeout > 0n ? Milli(Number(this.timeout)) : undefined,
 		};
 	}
 

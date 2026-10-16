@@ -6,6 +6,10 @@ microbenchmarks stay beside their crates under `rs/*/benches`, while the
 
 `run.sh` owns builds, comparison rounds, and reporting. `relay.sh` owns the
 temporary relay lifecycle and load execution shared by each comparison mode.
+A temporary relay is ready only once its PID owns both the TCP listener and UDP
+socket on its assigned port. `lsof`, included in the Nix shell, verifies
+ownership. A collision uses the existing startup attempts; exhausted attempts
+fail with the relay log before any load starts.
 
 ## Commands
 
@@ -14,6 +18,23 @@ Run every Criterion target plus the local relay workloads:
 ```bash
 nix develop --command just bench
 ```
+
+Measure small-group session cost over independent publisher and viewer counts,
+for SUBSCRIBE and FETCH:
+
+```bash
+nix develop --command cargo bench --locked -p moq-net --bench session -- session_delivery_group_cost
+nix develop --command env SESSION_CPU=1 cargo bench --locked -p moq-net --bench session -- session_delivery_group_cost_cpu
+```
+
+The CPU mode requires Unix and measures the benchmark's current thread, including
+its protocol drivers and the flow-control fixture but excluding scheduler
+preemption. Both modes exclude setup and cache-clock advancement. Constrained
+cases hold data after the first transport write and release it only after a
+write actually blocks; Lite FETCH uses a bidi response, while IETF FETCH and
+SUBSCRIBE use uni data streams. No sleep supplies backpressure. Every case
+checks complete payload delivery. Compare paired runs with identical settings
+and disclose host load; CPU timing still depends on hardware contention.
 
 Measure 50 fps audio at per-packet, 100 and 200 ms grouping, plus 400 fps
 (2.5 ms packets) at per-packet and the 20 ms default. Frames are 200 bytes:
@@ -159,3 +180,14 @@ ratio is what moq-ffi's handles and runtime cost. Ratios hold only within one
 machine. The nightly runs it, prints the table in the job summary, and keeps the
 results as the `bench-ffi` artifact. Each language also has its own recipe
 (`just go bench`, `just py bench`, `just kt bench`).
+
+## Pattern and container coverage
+
+Rust Criterion coverage includes `moq-pattern`'s
+`matching` (pattern count and path depth, last match and miss) and `moq-mux`'s
+`containers` (CMAF and Annex-B import/export). Container cases vary frame count
+and payload size; CMAF also varies track count. Separate frame and byte rates
+use the same fixtures, with byte rates counting the encoded stream size.
+Fixture generation, publisher setup and destruction stay outside timing.
+The existing shared Rust benchmark nightly invocation runs both targets; their `--test` mode
+exercises every case without making timing claims.
