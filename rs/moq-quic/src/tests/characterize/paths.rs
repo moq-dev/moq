@@ -321,7 +321,7 @@ fn path_validation_failure_reverts() {
     let (mut pair, client_ch, server_ch) = connected();
     pair.drive();
     let old = pair.client.addr;
-    let new = SocketAddr::new(old.ip(), CLIENT_PORTS.lock().unwrap().next().unwrap());
+    let new = SocketAddr::new(old.ip(), old.port() + 1);
 
     // One client packet arrives from the new address, as if forwarded by an attacker
     pair.client_conn_mut(client_ch).ping();
@@ -356,19 +356,17 @@ fn path_validation_failure_reverts() {
 fn rtt_after_rebinding(ip: IpAddr) -> (Duration, Duration) {
     let _guard = subscribe();
     let mut pair = pair_with(|_| {});
-    pair.latency = Duration::from_millis(50);
-    pair.client.addr = SocketAddr::new(ip, CLIENT_PORTS.lock().unwrap().next().unwrap());
+    pair.client.addr = SocketAddr::new(ip, pair.client.addr.port());
     pair.server.addr = SocketAddr::new(ip, pair.server.addr.port());
     let (client_ch, server_ch) = pair.connect_with(client_with(|_| {}));
     pair.drive();
     let before = pair.server_conn_mut(server_ch).rtt();
 
-    pair.client.addr = SocketAddr::new(ip, CLIENT_PORTS.lock().unwrap().next().unwrap());
+    let new = SocketAddr::new(ip, pair.client.addr.port() + 1);
+    pair.client.addr = new;
     pair.client_conn_mut(client_ch).ping();
     pair.drive_client();
-    let now = pair.time + pair.latency;
-    pair.time = now;
-    let new = pair.client.addr;
+    let now = pair.time;
     pair.server.drive(now, new);
     assert_eq!(pair.server_conn_mut(server_ch).remote_address(), new);
     (before, pair.server_conn_mut(server_ch).rtt())
