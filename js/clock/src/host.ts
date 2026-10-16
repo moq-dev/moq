@@ -5,6 +5,7 @@ import type { Backend } from "./backend.ts";
 export const host: Backend = {
 	now: () => performance.now() * 1_000_000,
 	wall: () => Date.now(),
+	origin: () => performance.timeOrigin,
 	arm(at, ready, ref) {
 		let timer: ReturnType<typeof setTimeout> | undefined;
 		let active = true;

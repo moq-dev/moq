@@ -45,6 +45,10 @@ zero and 2025-01-01 UTC. `advance()` moves both readings; `stepWall()` changes
 only wall time. `advanceAsync()` also drains due timers and the microtasks
 they schedule, so assertions observe their effects.
 
+`origin()` reads the wall time at instant zero, which maps an instant onto
+wall time without the jitter of subtracting two live reads. On the host it is
+the realm's performance time origin; on a `Manual` it follows `stepWall()`.
+
 Installation is scoped to the current JS realm. Restore it in `finally` and
 keep tests sharing that realm serial. Timers remain bound to the clock on
 which they were created, even after restoration. Host timers used by a test
