@@ -6,10 +6,12 @@ export interface Limits {
 	announces: number;
 	/** Subscriptions the peer may hold on our broadcasts, a TRACK stream sharing one with its SUBSCRIBE. */
 	subscriptions: number;
+	/** FETCH requests the peer may hold, counted before requests for one group coalesce. */
+	fetches: number;
 }
 
 /** moq-net's default limits. @internal */
-export const LIMITS: Readonly<Limits> = Object.freeze({ announces: 100_000, subscriptions: 10_000 });
+export const LIMITS: Readonly<Limits> = Object.freeze({ announces: 100_000, subscriptions: 10_000, fetches: 10_000 });
 
 /** A session's count of live peer requests, which closes the session past its cap. @internal */
 export class Slots {

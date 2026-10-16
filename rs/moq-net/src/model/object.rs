@@ -34,9 +34,8 @@ pub(crate) struct Properties {
 	pub timescale: Option<Timescale>,
 	/// The immutable block holds a Timestamp, which keeps its ingress units.
 	pub sealed_time: bool,
-	/// The ingress draft predates 19, so 0x06 is a Timestamp rather than
-	/// SUBGROUP_DELIVERY_TIMEOUT.
-	pub legacy_time: bool,
+	/// Property 0x06 means SUBGROUP_DELIVERY_TIMEOUT on the ingress draft.
+	pub delivery_timeout: bool,
 }
 
 impl Properties {

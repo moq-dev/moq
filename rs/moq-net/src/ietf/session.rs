@@ -231,6 +231,7 @@ where
 				publisher.withdrawal = withdrawing.clone();
 				publisher.owed = serving.clone();
 				publisher.subscriptions = subscriptions;
+				publisher.fetches = crate::session::Slots::new(limits.fetches);
 
 				let mut subscriber = Subscriber::new(
 					runtime.clone(),
@@ -434,6 +435,7 @@ where
 				publisher.withdrawal = withdrawing.clone();
 				publisher.owed = serving.clone();
 				publisher.subscriptions = subscriptions;
+				publisher.fetches = crate::session::Slots::new(limits.fetches);
 
 				let mut subscriber = Subscriber::new(
 					runtime.clone(),
@@ -2531,6 +2533,7 @@ mod tests {
 			fill: None,
 			properties_wanted: true,
 			forward: true,
+			rendezvous: false,
 			range_filters: false,
 			authorization_token: None,
 		}
@@ -2949,6 +2952,7 @@ mod tests {
 			fill: None,
 			properties_wanted: true,
 			forward: true,
+			rendezvous: false,
 			range_filters: false,
 			authorization_token: None,
 		};
