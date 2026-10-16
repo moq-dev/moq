@@ -34,7 +34,14 @@ import * as Cluster from "./cluster.ts";
 import { ObjectDatagram } from "./datagram.ts";
 import { requestReason, toRequestCode } from "./error.ts";
 import * as Namespace from "./namespace.ts";
-import { decodeObjectTime, Frame, type Group as GroupMessage, hasFirstObjectBit, ObjectIdGap } from "./object.ts";
+import {
+	decodeObjectTime,
+	EndOfTrackProperties,
+	Frame,
+	type Group as GroupMessage,
+	hasFirstObjectBit,
+	ObjectIdGap,
+} from "./object.ts";
 import { fromWire, toWire } from "./priority.ts";
 import { type Publish, PublishDone, PublishError, publishDoneClean } from "./publish.ts";
 import {
@@ -1340,7 +1347,14 @@ export class Subscriber {
 				return;
 			}
 			if (e instanceof ObjectIdGap) console.warn(`unsupported object gap: ${reason(e)}`);
-			if (e instanceof ProtocolViolation || (e instanceof StreamError && e.code === StreamCode.MalformedTrack)) {
+			if (e instanceof EndOfTrackProperties) {
+				// The group before the marker is complete; only the track's end can't be carried.
+				producer?.close();
+				track.close(e);
+			} else if (
+				e instanceof ProtocolViolation ||
+				(e instanceof StreamError && e.code === StreamCode.MalformedTrack)
+			) {
 				// The publisher broke the track's end or its content, which no later group can repair.
 				producer?.close(e);
 				track.close(e);

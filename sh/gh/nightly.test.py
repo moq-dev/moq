@@ -47,6 +47,9 @@ class NightlyTest(unittest.TestCase):
         self.assertIn("--bench http_idle", shared[0])
         self.assertIn("--bench chunk_interleaving", shared[0])
         self.assertIn("--bench worker_turns", shared[0])
+        self.assertIn("-p moq-pattern", shared[0])
+        self.assertIn("--bench matching", shared[0])
+        self.assertIn("--bench containers", shared[0])
         self.assertIn("just rs bench-gst-catalog -- --quick", calls)
         self.assertTrue(calls[-1].startswith("just rs test -p moq-cli"))
 

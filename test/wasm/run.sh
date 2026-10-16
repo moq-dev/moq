@@ -34,11 +34,17 @@ PORT="${WASM_PORT:-}"
 
 # Cargo profile for the relay. Debug compiles faster, which is what a test
 # fixture wants; the workload is three connections and a few hundred KiB.
+BASELINE=
 PROFILE="${WASM_PROFILE:-debug}"
 RELAY="${RELAY_BIN:-}"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
+        --baseline)
+            BASELINE=true
+            export MOQ_TEST_KEEP=1
+            shift
+            ;;
         --timeout)
             if [[ $# -lt 2 || -z "${2:-}" || "$2" == -* ]]; then
                 echo "error: --timeout requires a value" >&2
@@ -115,8 +121,16 @@ bunx tsc --noEmit
 
 echo "bundling the harness page..."
 rm -rf dist
-bun build src/main.ts --outdir dist --target browser >/dev/null
-cp index.html dist/index.html
+driver=driver.ts
+if [[ -n $BASELINE ]]; then
+    bun test baseline/fixture.test.ts
+    bun build baseline/publisher.ts baseline/consumer.ts --outdir dist --target browser >/dev/null
+    bun build ../../js/net/src/index.ts --outfile dist/net.js --target browser --minify >/dev/null
+    driver=baseline/driver.ts
+else
+    bun build src/main.ts --outdir dist --target browser >/dev/null
+    cp index.html dist/index.html
+fi
 
 # ── relays ──────────────────────────────────────────────────────────────────
 # One reservation per flavour rather than a span from a fixed base: a span means
@@ -164,7 +178,7 @@ printf '[%s]\n' "$(
 # in `wait`, where a trap can run: bash defers a trap until a foreground child
 # returns, which would leave Chromium behind for as long as the driver hangs.
 status=0
-harness_spawn driver - bun driver.ts --relays "$HARNESS_RUN/relays.json" --timeout "$TIMEOUT"
+harness_spawn driver - bun "$driver" --relays "$HARNESS_RUN/relays.json" --timeout "$TIMEOUT"
 harness_wait "$HARNESS_PID" || status=$?
 
 if [[ $status -ne 0 ]]; then

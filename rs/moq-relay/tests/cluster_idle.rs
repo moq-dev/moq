@@ -2,7 +2,7 @@
 //!
 //! A crashed or partitioned peer sends no close, so the idle timeout is the whole
 //! outage window for subscribes routed through it.
-#![cfg(feature = "noq")]
+#![cfg(feature = "quic")]
 
 use std::time::{Duration, Instant};
 
@@ -62,7 +62,7 @@ async fn spawn_peer() -> (u16, tokio::runtime::Runtime) {
 		while let Some(request) = listener.accept().await {
 			let origin = origin.clone();
 			tokio::spawn(async move {
-				if let Ok(session) = request.with_publisher(&origin).ok().await {
+				if let Ok((session, _driver)) = request.with_publisher(&origin).ok().await {
 					let _ = session.closed().await;
 				}
 			});
