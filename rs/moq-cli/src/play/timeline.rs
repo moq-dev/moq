@@ -55,9 +55,11 @@ struct Pending {
 	mapping: Option<Mapping>,
 }
 
-struct Boundary {
-	starts: Option<Instant>,
-	end: Duration,
+enum Boundary {
+	/// A playing role's end on the shared timeline, which moves with the anchor.
+	Mapped { starts: Option<Instant>, end: Duration },
+	/// When a retired role's tail finishes playing, whatever the anchor does after.
+	Drained(Instant),
 }
 
 #[derive(Clone, Copy)]
@@ -199,7 +201,7 @@ pub(super) struct Role {
 	changed: std::sync::Arc<tokio::sync::Notify>,
 	role: Kind,
 	mapping: std::sync::Mutex<Mapping>,
-	/// Whether a sink handed back for draining still plays up to the declared end.
+	/// Whether the declared end was frozen for a tail that outlives the role.
 	retired: bool,
 }
 
@@ -245,9 +247,16 @@ impl Role {
 		}
 	}
 
-	/// Stop, keeping the declared end: the sink handed back still plays the tail
-	/// up to it. Dropping instead discards the tail with the end.
-	pub(super) fn retire(mut self) {
+	/// Stop while a tail still plays until `drained`, holding a declared end until
+	/// then. Dropping instead discards the tail with the end.
+	///
+	/// The end is frozen on the wall clock: a later rendition re-pins the anchor,
+	/// which would carry a media timestamp onto an unrelated timeline.
+	pub(super) fn retire(mut self, drained: Option<Instant>) {
+		let mut presentation = self.presentation.lock().unwrap();
+		let end = &mut presentation.ends[self.role as usize];
+		*end = end.take().and(drained.map(Boundary::Drained));
+		drop(presentation);
 		self.retired = true;
 	}
 
@@ -303,7 +312,7 @@ impl Role {
 	/// Mark where this role's current segment ends on the shared clock.
 	pub(super) fn end(&self, source: Timestamp) -> anyhow::Result<()> {
 		let mapping = *self.mapping.lock().unwrap();
-		self.presentation.lock().unwrap().ends[self.role as usize] = Some(Boundary {
+		self.presentation.lock().unwrap().ends[self.role as usize] = Some(Boundary::Mapped {
 			starts: mapping.starts,
 			end: timestamp(mapping.map(source)?),
 		});
@@ -376,8 +385,13 @@ impl Role {
 					.ends
 					.iter()
 					.flatten()
-					.filter(|boundary| boundary.starts.is_none_or(|start| start <= now))
-					.filter_map(|boundary| presentation.due(media(boundary.end)))
+					.filter_map(|boundary| match boundary {
+						Boundary::Mapped { starts, end } => starts
+							.is_none_or(|start| start <= now)
+							.then(|| presentation.due(media(*end)))
+							.flatten(),
+						Boundary::Drained(at) => Some(*at),
+					})
 					.max()
 			};
 			if let Some(end) = end.filter(|end| *end > now) {
@@ -426,7 +440,7 @@ impl Drop for Role {
 	fn drop(&mut self) {
 		let own = self.role as usize;
 		if let Ok(mut presentation) = self.presentation.lock() {
-			// A retired end stays until it is past; nothing waits on it after that.
+			// A retired end stays until it drains; nothing waits on it after that.
 			if !self.retired {
 				presentation.ends[own] = None;
 			}
@@ -797,7 +811,7 @@ mod tests {
 		audio.declare();
 		audio.end(ms(10_200)).unwrap();
 		// The track closed, but its returned sink still plays the tail up to the end.
-		audio.retire();
+		audio.retire(Some((now + Duration::from_millis(300)).into_std()));
 		let transition = video.declare();
 		video.end(ms(10_000)).unwrap();
 		video.plan(transition, ms(0), None);
@@ -807,6 +821,31 @@ mod tests {
 		)
 		.await;
 		assert!(resume.is_err(), "video resumed before the audio tail played");
+	}
+
+	#[tokio::test]
+	async fn a_retired_end_ignores_a_later_re_pin() {
+		tokio::time::pause();
+		let now = tokio::time::Instant::now();
+		let presentation = std::sync::Arc::new(std::sync::Mutex::new(Presentation::new(DELAY)));
+		presentation
+			.lock()
+			.unwrap()
+			.audio(Duration::from_secs(10), DELAY, now.into_std());
+		let audio = Role::new(presentation.clone(), Default::default(), Kind::Audio);
+		let video = Role::new(presentation.clone(), Default::default(), Kind::Video);
+		audio.declare();
+		audio.end(ms(10_200)).unwrap();
+		audio.retire(Some((now + Duration::from_millis(300)).into_std()));
+		// A replacement rendition starts over at zero and re-pins the anchor.
+		let mut pinned = presentation.lock().unwrap();
+		pinned.restarted();
+		pinned.audio(Duration::from_millis(50), DELAY, now.into_std());
+		drop(pinned);
+		let transition = video.declare();
+		video.plan(transition, ms(0), None);
+		let resume = tokio::time::timeout(Duration::from_millis(400), video.resume(transition, ms(0), None)).await;
+		assert!(resume.is_ok(), "video waited past the drained tail");
 	}
 
 	#[tokio::test]

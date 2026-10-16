@@ -204,7 +204,7 @@ impl<O: Output> Video<O> {
 			let mut held = BTreeSet::new();
 			// Decoded pictures waiting for room in the window's queue.
 			let mut pending = VecDeque::new();
-			loop {
+			let drained = loop {
 				let (current, oldest, ended) = {
 					let buffers = buffers.lock().unwrap();
 					let buffer = buffers.front().unwrap();
@@ -255,9 +255,10 @@ impl<O: Output> Video<O> {
 					} else if generation.is_some() {
 						Step::Flush
 					} else {
-						// A new encoder waits for every old picture to be presented.
+						// A new encoder waits for every old picture to be presented. A closed
+						// track hands its last due time to whatever resumes after it.
 						if closed.load(std::sync::atomic::Ordering::Relaxed) && buffers.lock().unwrap().len() == 1 {
-							break;
+							break queue.back().and_then(|frame| presentation.due(frame.timestamp));
 						} else if !queue.is_empty() {
 							Step::Wait(
 								queue
@@ -320,7 +321,7 @@ impl<O: Output> Video<O> {
 						};
 						let Some((start, transition, before)) = next else {
 							if closed.load(std::sync::atomic::Ordering::Relaxed) {
-								break;
+								break None;
 							}
 							self.changed.notified().await;
 							continue;
@@ -374,10 +375,11 @@ impl<O: Output> Video<O> {
 						.into_iter()
 						.filter(|frame| floor.is_none_or(|floor| frame.timestamp.as_micros() >= floor.as_micros())),
 				);
-			}
-			Ok::<_, anyhow::Error>(())
+			};
+			Ok::<_, anyhow::Error>(drained)
 		};
-		tokio::try_join!(receive, decode)?;
+		let (_, drained) = tokio::try_join!(receive, decode)?;
+		role.retire(drained);
 		Ok(())
 	}
 }
@@ -738,6 +740,50 @@ mod tests {
 		assert_eq!(shown, [0, 33, 66], "the end discarded the pictures before it");
 		producer.finish().unwrap();
 		task.await.unwrap().unwrap();
+	}
+
+	#[tokio::test]
+	async fn a_closed_track_holds_its_end_until_its_last_picture_is_due() {
+		tokio::time::pause();
+		let delay = Duration::from_millis(200);
+		let media = media(delay);
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let source = broadcast
+			.create_track("video", hang::container::track_info(hang::catalog::PRIORITY.video))
+			.unwrap();
+		let subscriber = source
+			.consume()
+			.subscribe(moq_net::track::Subscription::default().with_max_delay(delay))
+			.await
+			.unwrap();
+		let format = || moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Video);
+		let mut producer = moq_mux::container::Producer::new(source, format());
+		for ms in [0, 33, 66] {
+			producer.write(frame(ms, ms == 0)).unwrap();
+		}
+		// The publisher declares an end, then the track closes.
+		producer.discontinuity().unwrap();
+		producer.finish().unwrap();
+		let track = moq_mux::container::Consumer::new(subscriber, format());
+		// The window never presents, so the decoded pictures stay queued.
+		let task = tokio::spawn(playback(&media, delay).run(track, Buffered::new(0)));
+		while !task.is_finished() {
+			tokio::time::advance(Duration::from_millis(1)).await;
+			tokio::task::yield_now().await;
+		}
+		task.await.unwrap().unwrap();
+		assert_eq!(media.video.lock().unwrap().len(), 3, "the pictures were presented");
+		let last = media
+			.presentation
+			.lock()
+			.unwrap()
+			.due(moq_net::Timestamp::from_millis(66).unwrap())
+			.unwrap();
+		assert!(Instant::now().into_std() < last, "the track closed after its tail was due");
+		let audio = Role::new(media.presentation.clone(), media.drained.clone(), super::super::playback::Kind::Audio);
+		let transition = audio.declare();
+		audio.resume(transition, moq_net::Timestamp::ZERO, None).await.unwrap();
+		assert!(Instant::now().into_std() >= last, "audio resumed over the video tail");
 	}
 
 	#[tokio::test]

@@ -679,7 +679,7 @@ async fn play_audio<O: Output>(
 		Ok::<_, anyhow::Error>(sink)
 	};
 	let (_, sink) = tokio::try_join!(receive, play)?;
-	role.retire();
+	role.retire(Instant::now().into_std().checked_add(sink.buffered()));
 	Ok(sink)
 }
 
