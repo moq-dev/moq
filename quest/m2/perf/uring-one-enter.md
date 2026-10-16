@@ -37,7 +37,7 @@ regression and do not mask the question with sleeps, retries, or timeout
 changes.
 
 The retained paired run uses the existing workload lifecycle. A first run
-stopped on the already-planned [relay-port race](/quest/m2/perf/bench-relay-port.md);
+stopped on the relay-port race (fixed by #5636);
 the completed diagnostic used preflighted unique ports below the host's
 client ephemeral range, with no runtime retry. The benchmark CLI is unchanged.
 
