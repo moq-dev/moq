@@ -402,7 +402,11 @@ impl Peer {
 	) -> Result<Self, Error> {
 		let stun = resolve_stun(&config.stun).await;
 		let inbound = moq_ice::reader(socket.clone());
-		let agent = moq_ice::Agent::new(rtc, socket, locals, inbound)?.with_stun(&stun);
+		let mut agent = moq_ice::Agent::new(rtc, socket, locals, inbound)?.with_stun(&stun);
+		if let Role::Offerer { .. } = role {
+			// The answer applies through `rtc_mut`, which starts the deadline.
+			agent = agent.awaiting_answer();
+		}
 
 		let (commands, rx) = mpsc::unbounded_channel();
 		let (candidates_tx, candidates) = mpsc::unbounded_channel();

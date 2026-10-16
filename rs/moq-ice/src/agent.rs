@@ -102,7 +102,8 @@ pub struct Agent {
 	timeout: Instant,
 	/// Datagrams the socket refused for lack of buffer space, sent first next time.
 	outbox: VecDeque<(Vec<u8>, SocketAddr)>,
-	started: Instant,
+	/// When the [`ESTABLISH_TIMEOUT`] started, or `None` while an offer awaits its answer.
+	started: Option<Instant>,
 	connected: bool,
 }
 
@@ -132,7 +133,7 @@ impl Agent {
 			failed: None,
 			timeout: now,
 			outbox: VecDeque::new(),
-			started: now,
+			started: Some(now),
 			connected: false,
 		};
 		// Signaling already changed the connection.
@@ -171,9 +172,22 @@ impl Agent {
 		&self.rtc
 	}
 
+	/// Hold off the deadline for ICE to connect until the first [`Agent::rtc_mut`],
+	/// for an offer whose answer has yet to arrive: signaling time is the caller's.
+	pub fn awaiting_answer(mut self) -> Self {
+		self.started = None;
+		self
+	}
+
 	/// Change the connection through a guard that drains what the change produced
 	/// when dropped: transmits are sent, and events wait for [`Agent::next`].
 	pub fn rtc_mut(&mut self) -> RtcMut<'_> {
+		self.started.get_or_insert_with(Instant::now);
+		self.change()
+	}
+
+	/// [`Agent::rtc_mut`] for the agent's own changes, which never start the deadline.
+	fn change(&mut self) -> RtcMut<'_> {
 		RtcMut(self)
 	}
 
@@ -212,14 +226,16 @@ impl Agent {
 			if !self.rtc.is_alive() {
 				return Err(Error::Closed);
 			}
-			if !self.connected && self.started.elapsed() >= ESTABLISH_TIMEOUT {
+			let establish = self
+				.started
+				.filter(|_| !self.connected)
+				.map(|at| at + ESTABLISH_TIMEOUT);
+			if establish.is_some_and(|at| at <= Instant::now()) {
 				return Err(Error::Timeout);
 			}
 
-			let mut deadline = self.stun.iter().map(|q| q.deadline).fold(self.timeout, Instant::min);
-			if !self.connected {
-				deadline = deadline.min(self.started + ESTABLISH_TIMEOUT);
-			}
+			let deadline = self.stun.iter().map(|q| q.deadline).chain(establish);
+			let deadline = deadline.fold(self.timeout, Instant::min);
 
 			let now = Instant::now();
 			if deadline > now {
@@ -237,7 +253,7 @@ impl Agent {
 			}
 
 			let now = Instant::now();
-			let result = self.rtc_mut().handle_input(Input::Timeout(now));
+			let result = self.change().handle_input(Input::Timeout(now));
 			if let Err(err) = result {
 				self.fail(Error::rtc(err));
 			}
@@ -282,7 +298,14 @@ impl Agent {
 		let dst = to_family(dst, self.socket_v6);
 		match self.socket.try_send_to(data, dst) {
 			Ok(len) => self.inbound.wire.sent(len),
-			Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => self.outbox.push_back((data.to_vec(), dst)),
+			// Changes can keep coming while the socket stays full, so the backlog is
+			// bounded like the inbound queue; ICE, SCTP, and RTP recover the loss.
+			Err(err) if err.kind() == std::io::ErrorKind::WouldBlock && self.outbox.len() < crate::INBOX => {
+				self.outbox.push_back((data.to_vec(), dst))
+			}
+			Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+				tracing::debug!(%dst, len = data.len(), "dropped a datagram: the socket is full")
+			}
 			Err(err) => tracing::warn!(%err, %dst, "send failed"),
 		}
 	}
@@ -299,7 +322,7 @@ impl Agent {
 			tracing::debug!(%src, len = data.len(), "dropped unrecognized datagram");
 			return;
 		};
-		let result = self.rtc_mut().handle_input(Input::Receive(Instant::now(), receive));
+		let result = self.change().handle_input(Input::Receive(Instant::now(), receive));
 		if let Err(err) = result {
 			self.fail(Error::rtc(err));
 		}
@@ -332,7 +355,7 @@ impl Agent {
 		match Candidate::server_reflexive(mapped, query.base, "udp") {
 			// None: redundant with a candidate the agent already has, as when there is no NAT.
 			Ok(candidate) => {
-				let added = self.rtc_mut().add_local_candidate(candidate).cloned();
+				let added = self.change().add_local_candidate(candidate).cloned();
 				if let Some(candidate) = added {
 					self.events.push_back(Event::Candidate(candidate));
 				}
@@ -453,6 +476,38 @@ mod tests {
 		assert_eq!(data.len(), 11);
 		drop(agent);
 		assert_eq!(wire.stats(), crate::Stats { tx: 73, rx: 11 });
+	}
+
+	/// An agent on a fresh socket, which tokio reports unwritable until the runtime
+	/// polls it, so every send waits in the outbox until the test yields.
+	fn unpolled() -> Agent {
+		let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+		socket.set_nonblocking(true).unwrap();
+		let socket = Arc::new(UdpSocket::from_std(socket).unwrap());
+		let local = socket.local_addr().unwrap();
+		let inbound = crate::reader(socket.clone());
+		Agent::new(Rtc::builder().build(Instant::now()), socket, vec![local], inbound).unwrap()
+	}
+
+	#[tokio::test]
+	async fn outbox_is_bounded() {
+		let mut agent = unpolled();
+		let dst = agent.locals[0];
+		for _ in 0..crate::INBOX + 10 {
+			agent.send(&[1; 100], dst);
+		}
+		assert_eq!(agent.outbox.len(), crate::INBOX);
+	}
+
+	#[tokio::test]
+	async fn awaiting_answer_holds_the_deadline() {
+		let mut agent = unpolled().awaiting_answer();
+		assert_eq!(agent.started, None);
+		// The agent's own changes, such as timeouts and STUN, leave it held.
+		drop(agent.change());
+		assert_eq!(agent.started, None);
+		drop(agent.rtc_mut());
+		assert!(agent.started.is_some());
 	}
 
 	#[test]
