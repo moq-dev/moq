@@ -258,13 +258,18 @@ impl<O: Output> Video<O> {
 						// bumps the revision while holding it.
 						let next = {
 							let mut buffers = buffers.lock().unwrap();
-							if buffers.len() > 1 {
-								advancing.store(true, std::sync::atomic::Ordering::Relaxed);
-								buffers.pop_front();
-								let start = buffers.front().unwrap().oldest().expect("a resumed group has a frame");
-								Some((start, revision.load(std::sync::atomic::Ordering::Relaxed)))
-							} else {
-								None
+							// Eviction can empty a replacement until its next keyframe; one a
+							// later replacement already follows never gets another.
+							while buffers.len() > 2 && buffers[1].oldest().is_none() {
+								buffers.remove(1);
+							}
+							match buffers.get(1).and_then(|next| next.oldest()) {
+								Some(start) => {
+									advancing.store(true, std::sync::atomic::Ordering::Relaxed);
+									buffers.pop_front();
+									Some((start, revision.load(std::sync::atomic::Ordering::Relaxed)))
+								}
+								None => None,
 							}
 						};
 						let Some((start, before)) = next else {
