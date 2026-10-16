@@ -71,13 +71,11 @@ fn list(data: &Bytes, version: Version, immutable: bool) -> Result<List, Error> 
 		previous = id;
 		let value = if id % 2 == 0 {
 			let value = decoder.varint()?;
-			if id == 0x10 {
-				result.time = Some(value);
-			}
 			if id == 0x3e && result.gap.replace(value).is_some() {
 				return Err(Error::MalformedTrack);
 			}
 			if id == 0x10 {
+				result.time = Some(value);
 				if result.properties.timestamp.replace(value).is_some() {
 					return Err(Error::MalformedTrack);
 				}
