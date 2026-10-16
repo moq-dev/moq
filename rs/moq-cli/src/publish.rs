@@ -1545,29 +1545,34 @@ pub(crate) mod tests {
 	}
 
 	/// Input that ends before declaring any track fails, rather than announcing a broadcast
-	/// with nothing in it.
+	/// with nothing in it. Stream metadata alone (a PMT, an FLV header, an AUD) declares none.
 	#[tokio::test(start_paused = true)]
 	async fn an_import_with_no_track_fails_unannounced() {
-		let origin = moq_tokio::origin::spawn();
-		let mut announced = origin.consume().announced();
-		let broadcast = origin.create_broadcast("demo").unwrap();
-		let publish = Publish::new(
-			broadcast.clone(),
-			&PublishFormat::Ts { program: None },
-			Default::default(),
-		)
-		.unwrap();
-		#[allow(irrefutable_let_patterns)]
-		let Source::Stream { decoder, catalog } = publish.source else {
-			panic!("expected a stream source");
-		};
-		let pending = Pending::new(broadcast, Default::default()).unwrap();
-		let err = decode(decoder, catalog, &[][..], Duration::ZERO, Some(pending))
-			.await
-			.unwrap_err();
-		assert!(err.to_string().contains("declared"), "{err:#}");
-		let event = tokio::time::timeout(Duration::from_secs(1), announced.next()).await;
-		assert!(event.is_err(), "announced an empty broadcast: {event:?}");
+		let tables = two_programs()[..3 * 188].to_vec();
+		let flv_header = b"FLV\x01\x05\x00\x00\x00\x09\x00\x00\x00\x00".to_vec();
+		let aud = vec![0, 0, 0, 1, 9, 0xf0];
+		for (format, input) in [
+			(PublishFormat::Ts { program: None }, Vec::new()),
+			(PublishFormat::Ts { program: Some(1) }, tables),
+			(PublishFormat::Flv, flv_header),
+			(PublishFormat::Avc3, aud),
+		] {
+			let origin = moq_tokio::origin::spawn();
+			let mut announced = origin.consume().announced();
+			let broadcast = origin.create_broadcast("demo").unwrap();
+			let publish = Publish::new(broadcast.clone(), &format, Default::default()).unwrap();
+			#[allow(irrefutable_let_patterns)]
+			let Source::Stream { decoder, catalog } = publish.source else {
+				panic!("expected a stream source");
+			};
+			let pending = Pending::new(broadcast, Default::default()).unwrap();
+			let err = decode(decoder, catalog, &input[..], Duration::ZERO, Some(pending))
+				.await
+				.unwrap_err();
+			assert!(err.to_string().contains("declared"), "{err:#}");
+			let event = tokio::time::timeout(Duration::from_secs(1), announced.next()).await;
+			assert!(event.is_err(), "announced an empty broadcast: {event:?}");
+		}
 	}
 
 	/// A PAT listing two programs, then one MP2 PES of each: program 1 on PID `0x61` at 1 s
