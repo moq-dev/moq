@@ -22,9 +22,7 @@ Decided with the maintainer on 2026-10-13:
   and the STUN Binding client in `webrtc::ice`; don't copy them. The first
   two are private to the data channel transport today, so move them into
   `webrtc::ice` rather than export them where they sit.
-- QUIC is `moq-quic`, fed datagrams from the nominated pair, so this waits
-  on [the switch](/quest/m1/quic/fork/switch.md) instead of building on
-  `moq-noq` and porting it.
+- QUIC is `moq-quic`, fed datagrams from the nominated pair.
 - Authentication: each side generates a self-signed certificate and sends
   its SHA-256 fingerprint in its offer or answer, as DTLS fingerprints ride
   in SDP. Both sides pin it with the existing `tls.fingerprint` check. MoQ
@@ -62,6 +60,5 @@ covers LAN and NAT pairs between two `moq-cli --p2p` nodes.
 
 ## Required
 
-- [Switch MoQ onto moq-quic](/quest/m1/quic/fork/switch.md) - `moq-quic` replaces `moq-noq` in moq-tokio
 - [UDP demux](/quest/m1/p2p/udp-demux.md) - the classifier that splits STUN from QUIC
 - [Signaling and policy](/quest/m1/p2p/signal.md) - the offer schema and roster this extends
