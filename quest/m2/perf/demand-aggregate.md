@@ -15,9 +15,10 @@ readers, so `js/net/src/track.ts` keeps its fold.
 ## Plan
 
 - Shared state, no message passing (decided 2026-10-06). `Subscriptions`
-  becomes per-field counted ordered maps for `priority`, `max_delay`, `start`,
-  and `end`, with a count for the `None` arm (no floor, unbounded) that absorbs
-  `start` and `end`. Subscribe, update, and drop mutate it directly under the
+  becomes per-field counted ordered maps for `priority` and `max_delay`, a
+  count of descending subscribers for `order`, and a counted multiset of
+  `ranges` whose union is taken on read (`track_subscription_ranges` measures
+  that union). Subscribe, update, and drop mutate it directly under the
   lock: remove the subscriber's old contribution, add the new one. Each
   subscriber keeps its own last value for that. The per-subscriber
   `kio::Consumer<Subscription>` channels, the waiter re-arming, and the
@@ -41,4 +42,3 @@ Public API: none expected. Wire: none.
 ## Related
 
 - [Front deadlines](/quest/m2/front-deadline-index.md) - the per-track half of a front's cost; this is the per-reader half
-- [Subscribe ranges](/quest/m1/subscribe-ranges/model.md) - changes what the aggregate holds; whichever lands second adapts
