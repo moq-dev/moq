@@ -838,10 +838,11 @@ mod tests {
 		audio.end(ms(10_200)).unwrap();
 		audio.retire(Some((now + Duration::from_millis(300)).into_std()));
 		// A replacement rendition starts over at zero and re-pins the anchor.
-		let mut pinned = presentation.lock().unwrap();
-		pinned.restarted();
-		pinned.audio(Duration::from_millis(50), DELAY, now.into_std());
-		drop(pinned);
+		{
+			let mut presentation = presentation.lock().unwrap();
+			presentation.restarted();
+			presentation.audio(Duration::from_millis(50), DELAY, now.into_std());
+		}
 		let transition = video.declare();
 		video.plan(transition, ms(0), None);
 		let resume = tokio::time::timeout(Duration::from_millis(400), video.resume(transition, ms(0), None)).await;

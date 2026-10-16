@@ -779,8 +779,15 @@ mod tests {
 			.unwrap()
 			.due(moq_net::Timestamp::from_millis(66).unwrap())
 			.unwrap();
-		assert!(Instant::now().into_std() < last, "the track closed after its tail was due");
-		let audio = Role::new(media.presentation.clone(), media.drained.clone(), super::super::playback::Kind::Audio);
+		assert!(
+			Instant::now().into_std() < last,
+			"the track closed after its tail was due"
+		);
+		let audio = Role::new(
+			media.presentation.clone(),
+			media.drained.clone(),
+			super::super::playback::Kind::Audio,
+		);
 		let transition = audio.declare();
 		audio.resume(transition, moq_net::Timestamp::ZERO, None).await.unwrap();
 		assert!(Instant::now().into_std() >= last, "audio resumed over the video tail");
