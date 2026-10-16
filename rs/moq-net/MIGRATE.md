@@ -3,3 +3,263 @@
 How to update your code for each breaking change, newest first.
 
 ## Unreleased
+
+### Superseded groups age by wall clock too (#5548)
+
+A superseded group is stale once its successor arrived a full `max_delay` ago, as well as by media time.
+Untimed tracks are no longer exempt: with the default zero `max_delay`, an untimed subscriber starts at the latest group and skips each superseded one.
+Give it a budget to replay or tolerate reordering.
+
+```rust
+let sub = track::Subscription::default().with_max_delay(Duration::from_secs(1));
+```
+
+### `cache::Pool::gc` takes a waiter
+
+Call it again when the waiter wakes, since a parked read can arm an earlier deadline than the one returned.
+
+```rust
+// Before
+let next = pool.gc(now);
+// After
+let next = pool.gc(now, &waiter);
+```
+
+### A replacement track owns its start sequence (#5068)
+
+`append_group` and `append_datagram` on a track that replaces an earlier producer of the same name return `Error::Duplicate` instead of continuing past the earlier producer's sequence.
+Pick the start sequence yourself with `create_group`, or publish a new broadcast.
+
+### Announcements are `Start`, `Update`, `End`, and `Restart` events
+
+`announce::Consumer` yields `announce::Event`, carrying an `announce::Announce { prefix, captures, route }`.
+`announce::Update` and `announce::Kind` are gone.
+`Restart` means another publisher instance now serves the prefix: request the path again.
+A newer epoch no longer ends open subscriptions with `Unroutable`; they stay on the old instance until dropped or its route goes.
+
+```rust
+// Before
+while let Some(update) = announced.next().await {
+	if !update.kind.is_active() {
+		continue;
+	}
+	let broadcast = origin.request_broadcast(&update.prefix).await?;
+}
+// After
+while let Some(event) = announced.next().await {
+	match event {
+		announce::Event::Start(a) | announce::Event::Restart(a) => {
+			let broadcast = origin.request_broadcast(&a.prefix, a.route.epoch).await?;
+		}
+		announce::Event::Update(_) => {}
+		announce::Event::End(_) => {}
+	}
+}
+```
+
+### Routes carry the publisher epoch (#4942)
+
+An epoch is a property of the route, not the path.
+`Path::join_epoch` and `Path::split_epoch` are gone; set it with `Route::with_epoch` and read `Route::epoch`.
+Nothing mints an epoch by default, and a route without one does not resume across routes.
+
+```rust
+// Before
+let path = path.join_epoch(epoch);
+origin.publish(path, route);
+// After
+origin.publish(path, route.with_epoch(epoch));
+```
+
+### `request_broadcast` takes an epoch
+
+Pass `None` to accept any publisher instance, or an `Epoch` to refuse every other one.
+A dynamic route updated to another epoch refuses the requests its handler still holds with `Unroutable`.
+
+```rust
+// Before
+let broadcast = origin.request_broadcast(path).await?;
+// After
+let broadcast = origin.request_broadcast(path, None).await?;
+```
+
+### Demand is read through `demand()`
+
+`track::Producer`'s `is_used`, `used`, `unused`, and `poll_unused`, and `group::Producer`'s `used` and `unused`, moved to `demand()`.
+`track::Request`, `track::Dynamic`, and `group::Request` poll it through `demand().poll_unused`, which returns `Poll<Result<()>>`: treat `Err` (the request closed) as unused too.
+A `group::Request` is withdrawn once its last `fetch_group` caller leaves, so a handler that sees it unused just drops it; a later fetch queues a fresh request, and serving the abandoned one returns `Error::Duplicate`.
+
+```rust
+// Before
+track.unused().await;
+// After
+track.demand().unused().await?;
+```
+
+### moq-net owns its transport traits
+
+`moq_net::web_transport_trait` is gone.
+`transport::poll::{Session, SendStream, RecvStream}` carry their own `poll_*` methods, `transport::Error`, and `transport::Stats`, and `Error::from_transport` takes a `transport::Error`.
+A custom transport implements these traits and reports `binding()`: `transport::Binding::Uri` when its handshake carries the request URI, or `InBand` when SETUP carries it.
+
+```rust
+impl moq_net::transport::poll::Session for MySession {
+	fn binding(&self) -> moq_net::transport::Binding {
+		moq_net::transport::Binding::Uri
+	}
+	// poll_accept_bi, poll_open_uni, ...
+}
+```
+
+### Data publishes keep optional timestamps
+
+`Timed<P>` drops its clock type parameter and its `at` is an `Option<Timestamp>`.
+Publish `at: None` only on an untimed track; pass a timestamp on a timed one.
+
+```rust
+// Before
+Timed::<Value, Clock>::new(value, at)
+// After
+Timed { value, at: Some(at) }
+```
+
+### A track is timed or untimed
+
+`track::Info.timescale` is `Option<Timescale>`, `None` for an untimed track, and an undeclared timescale no longer defaults to milliseconds.
+`Frame.timestamp`, `frame::Info.timestamp`, and `Datagram.timestamp` are `Option<Timestamp>`, and `group::{Producer, Consumer}::timescale()` return `Option<Timescale>`.
+A write whose timedness does not match its track fails with `TimestampMismatch`.
+Tracks from moq-lite before 05 and moq-transport without `TIMESCALE` arrive untimed instead of stamped with their arrival time.
+
+```rust
+// Before
+let track = broadcast.create_track("video", None)?; // milliseconds
+// After
+let info = track::Info::default().with_timescale(Timescale::MILLI);
+let track = broadcast.create_track("video", info)?;
+```
+
+### Subscriber staleness is `max_delay`
+
+How far a group may fall behind the live edge before a subscriber skips it is no longer named `max_age`, which stays the publisher's retention on `track::Info`.
+
+```rust
+// Before
+let sub = track::Subscription::default().with_max_age(delay);
+// After
+let sub = track::Subscription::default().with_max_delay(delay);
+```
+
+### Publisher retention is optional (#4242)
+
+`track::Info::max_age` is `Option<Duration>`, `None` meaning no publisher limit.
+`track::DEFAULT_MAX_AGE` and `origin::Config::default_max_age` are gone.
+
+```rust
+// Before
+let info = track::Info::default().with_max_age(track::DEFAULT_MAX_AGE);
+// After
+let info = track::Info::default().with_max_age(Duration::from_secs(30));
+```
+
+### Route cost is one value (#4661)
+
+`Cost` is opaque: construct it with `Cost::new` and read it with `value()`.
+The `warm` and `cold` fields are gone.
+
+```rust
+// Before
+let cost = Cost { warm: 10, cold: 10 };
+// After
+let cost = Cost::new(10);
+```
+
+### Datagrams are unfetchable and bounded by the group range (#4982)
+
+A FETCH that reaches a datagram fails with `Error::NotFetchable` (received as `Error::Stream(StreamError::NotFetchable)`).
+Datagrams outside a subscriber's group range are skipped.
+Treat both like `NotFound` if you match on errors.
+
+### Sessions cap peer requests (#4820)
+
+A peer past the session's announce, subscription, or fetch bound loses the session with `TooManyRequests`.
+Raise the defaults for a large relay mesh.
+
+```rust
+let client = Client::new().with_limits(session::Limits { subscriptions: 100_000, ..Default::default() });
+```
+
+### A path is one broadcast (#4741)
+
+Broadcast identity is the path, whatever the publisher or first hop.
+A publisher that restarts its group numbering must publish under a new broadcast name.
+
+### Broadcast `finish` and `abort` are removed (#4152)
+
+Close a broadcast with `close()`; its end carries no cause.
+`broadcast::Consumer::is_finished` is gone, and `closed()` on `Consumer` and `Dynamic` returns `()`.
+
+```rust
+// Before
+producer.finish();
+let err = consumer.closed().await;
+// After
+producer.close();
+consumer.closed().await;
+```
+
+### No `VarInt`
+
+Varints are plain `u64`s.
+
+```rust
+// Before
+let v = VarInt::decode_quic(buf)?.into_inner();
+VarInt::try_from(v)?.encode_quic(buf);
+// After
+let v = moq_net::varint::decode_quic(buf)?;
+moq_net::varint::encode_quic(v, buf)?; // fails past varint::MAX_QUIC
+```
+
+## 0.2 -> 0.3
+
+### Origins (#3400, #3804)
+
+`create_broadcast(path, route)` is `origin.publish(path, route)`, or `create_broadcast(path)` then `broadcast.announce(route)`.
+`with_root` plus `scope(prefixes)` is one `scope(root, &patterns)` returning `Result`.
+`origin::Info` is `origin::Config`.
+
+```rust
+// Before
+let broadcast = origin.create_broadcast(path, route);
+let scoped = origin.with_root(root).scope(&prefixes);
+// After
+let broadcast = origin.publish(path, route)?;
+let scoped = origin.scope(root, &patterns)?;
+```
+
+### Announcements are prefix routes (#3225, #3770)
+
+`announce::Update` is `{ prefix, route, kind, captures }`.
+Skip inactive updates and resolve the broadcast through the origin.
+Serve a subtree on demand with `origin.dynamic(prefix, route)`.
+
+```rust
+if !update.kind.is_active() {
+	continue;
+}
+let broadcast = consumer.request_broadcast(&update.prefix).await?;
+```
+
+### Track renames (#3666)
+
+| Before | After |
+| --- | --- |
+| `with_latency_max` / `latency_max` | `with_max_age` / `max_age` |
+| `write_datagram(Datagram)` | `insert_datagram(sequence, timestamp, payload)` |
+| `track::SubscriberControl` | `track::Control` |
+| `track::GroupRequest` | `group::Request` |
+| `ConnectionStats` | `session::Stats`, with `estimated_send_rate` / `estimated_recv_rate` |
+
+### Oversized groups abort (#3585)
+
+A group past its size limit aborts with `GroupTooLarge` instead of shedding its head.
