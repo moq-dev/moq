@@ -127,6 +127,14 @@ class Reduce(unittest.TestCase):
             profile.reduce({'1': 'moq-quic-0', '2': 'moq-quic-1'}, records,
                            {'1': 0, '2': 0}, {'1': 1, '2': 1})
 
+    def test_duplicate_same_switch_is_idempotent(self):
+        records = self.records()
+        expected, _ = profile.reduce({'1': 'moq-quic-0'}, records, {'1': 0}, {'1': 1})
+        # A real capture repeats one OUT with exactly the same TID and timestamp.
+        duplicate = records + [row for row in records if row[2].startswith('PERF_RECORD_SWITCH ')]
+        result, _ = profile.reduce({'1': 'moq-quic-0'}, duplicate, {'1': 0}, {'1': 1})
+        self.assertEqual(result, expected)
+
     def test_invalid_switch_stream_refused(self):
         records = self.records() + [('1', 15, 'PERF_RECORD_SWITCH IN', [])]
         with self.assertRaisesRegex(ValueError, 'nonalternating'):

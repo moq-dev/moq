@@ -97,6 +97,9 @@ def reduce(names, records, before, after):
         running, last, cpu = not switches[0][1], start, 0
         for at, entering in switches:
             if entering == running:
+                # An identical observation contributes no new interval. Distinct timestamps still refuse.
+                if at == last:
+                    continue
                 raise ValueError(f'worker {name} ({tid}) has nonalternating switch records')
             if running:
                 cpu += at - last
