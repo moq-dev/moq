@@ -80,6 +80,10 @@ jobs:
           - name: BBB rendition alignment
             recipe: pub check-bbb
             uncached: true
+          - name: Browser backend baseline
+            recipe: test wasm-baseline
+            artifact: wasm-backend-baseline
+            artifact-path: target/test
           - name: Audit
             recipe: rs audit
             uncached: true

@@ -127,3 +127,46 @@ this harness exists for. There is nothing left to assert about negotiation, so
 Firefox joins the matrix when Gecko implements the subprotocol, not before.
 `@moq/net` sidesteps this in the browser by routing Firefox below 153 to
 WebSocket; `@moq/wasm` has no such fallback.
+
+## Backend baseline
+
+```bash
+just test wasm-baseline
+```
+
+Runs the existing async consumer correctness cases first, then retains raw
+handwritten JS and Rust WASM consumer samples against the same real relays.
+Publisher and subscriber pages are separate. Publisher count and subscribers
+per publisher vary independently; payload sizes cover small audio-shaped
+frames through 128 KiB. Alternating and consecutive A/A runs expose variability.
+Every payload byte and group sequence is checked. The JS fallback runs with
+WebTransport disabled in its consumer page; WASM's missing fallback is an
+explicit gap, not a simulated result.
+
+`backend.json` in the retained harness run includes complete backend entrypoint
+assets and their gzip sizes, tool/source/browser/hardware provenance, raw
+module and first-frame times, consumer renderer CPU, and heap/WASM capacities.
+The neutral harness is listed separately. CPU uses CDP `threadTicks` and includes
+connection setup, protocol processing, binding copies and byte validation.
+Network waiting is reported as elapsed time, not CPU. Current bindings cannot
+attribute protocol and boundary CPU separately or count copies and GC; the
+report states those limits. Fresh contexts and no-store responses mean uncached
+page imports, with browser process and OS caches still warm.
+
+No timing threshold fails a shared runner. Bad bytes, negotiation, incomplete
+samples or an unavailable claimed CPU clock fail. Retain raw rounds and compare
+their range before drawing a performance conclusion. Nightly uploads the run
+for 45 days. This is a consume-path baseline, not approval to adopt WASM for the
+complete JS API.
+
+The independent integer fixtures retain decimal strings through `u64::MAX`.
+Leading-ones and QUIC encodings round-trip legal values exactly and refuse each
+format's overflow. Real group tests replay the safe 31-bit, 32-bit and near-53-bit
+boundaries from the original async cases in
+[#5337](https://github.com/moq-dev/moq/issues/5337), plus forced WASM memory
+growth. That contribution pins original async consumer source
+`bd2840874627d70fd5d33dddacec9ea5d77a7004`; its publisher prototype/Charon and
+WASM-to-JS measurements are separate, unverified results here. Full network
+sequences above 2^53 need a native publisher and a JS model that can represent
+them before adoption. WASM frame timestamps and complete publish/backpressure
+API parity remain explicit gaps too.
