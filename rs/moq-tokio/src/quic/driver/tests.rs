@@ -1968,9 +1968,8 @@ async fn unreachable_sends_are_loss_once_established() {
     .unwrap();
     let mut roots = RootCertStore::empty();
     roots.add(factory.cert.cert.der().clone()).unwrap();
-    client.set_default_client_config(
-        ClientConfig::with_root_certificates(Arc::new(roots)).unwrap(),
-    );
+    client
+        .set_default_client_config(ClientConfig::with_root_certificates(Arc::new(roots)).unwrap());
 
     let (client_conn, server_conn) = join!(
         async {

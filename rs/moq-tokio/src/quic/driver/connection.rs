@@ -275,7 +275,8 @@ impl Future for ConnectionDriver {
                 if !conn.inner.is_closed() {
                     // Closed, so dropping the last handle cannot overwrite the cause.
                     conn.inner.close(Instant::now(), 0u32.into(), Bytes::new());
-                    let cause = TransportError::new(TransportErrorCode::NO_VIABLE_PATH, e.to_string());
+                    let cause =
+                        TransportError::new(TransportErrorCode::NO_VIABLE_PATH, e.to_string());
                     conn.terminate(cause.into(), &self.conn.shared);
                 }
                 return Poll::Ready(Ok(()));
