@@ -1278,7 +1278,7 @@ impl NewGroups {
 		let (producer, subscribers, asked) = &mut self.tracks[track];
 		subscribers[subscriber]
 			.update(track::Subscription {
-				new_group: Some(crate::model::NewGroup::new(value, None)),
+				new_group: crate::model::NewGroup::new(value, None),
 				..Default::default()
 			})
 			.unwrap();

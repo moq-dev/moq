@@ -1048,7 +1048,7 @@ where
 					let mut subscription = serving_subscription(msg.subscriber_priority).with_order(order);
 					// Set before subscribing, so a relay that has no upstream subscription yet
 					// carries it on the SUBSCRIBE it opens, as the draft requires.
-					subscription.new_group = msg.new_group.map(|value| NewGroup::new(value, None));
+					subscription.new_group = msg.new_group.and_then(|value| NewGroup::new(value, None));
 
 					// Subscribe before resolving the filter: on a routed broadcast the live edge only
 					// becomes readable once the subscription's demand attaches a route, so the edge
@@ -1083,7 +1083,7 @@ where
 						None => track::Position::after_group(end.group),
 					});
 					// The live edge is only known once subscribed.
-					subscription.new_group = msg.new_group.map(|value| NewGroup::new(value, edge.latest));
+					subscription.new_group = msg.new_group.and_then(|value| NewGroup::new(value, edge.latest));
 					let _ = track.update(subscription);
 					// A Timestamp goes out wherever the draft can declare its units and the track
 					// has them. A subscriber that opted out of this SUBSCRIBE_OK's properties learns
@@ -3665,10 +3665,13 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 	}
 
 	/// Hold the subscriber's NEW_GROUP_REQUEST until a group answers it; the upstream
-	/// session decides whether it goes further.
+	/// session decides whether it goes further. One a held group answers asks nothing.
 	fn request_new_group(&mut self, value: u64) -> Result<(), Error> {
+		let Some(request) = NewGroup::new(value, self.track.latest()) else {
+			return Ok(());
+		};
 		let mut subscription = self.track.subscription();
-		subscription.new_group = Some(NewGroup::new(value, self.track.latest()));
+		subscription.new_group = Some(request);
 		self.track.update(subscription)
 	}
 
@@ -6213,7 +6216,7 @@ mod serve_tests {
 						.run_subscription(&mut stream, &mut serving, &mut finished, async {}, None)
 				);
 			assert!(futures::poll!(run.as_mut()).is_pending(), "{version}: update ended it");
-			assert_eq!(h.track.new_group(), Some(NewGroup { value: 9, first: 9 }), "{version}");
+			assert_eq!(h.track.new_group(), Some(NewGroup { value: 9, first: 0 }), "{version}");
 			// Draft 16 names the update it answers; later drafts answer on its own stream.
 			let written = session.log.writes.lock().unwrap().clone();
 			assert_eq!(written[0], ietf::RequestOk::ID as u8, "{version}: {written:?}");

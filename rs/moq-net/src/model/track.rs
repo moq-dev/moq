@@ -8185,7 +8185,7 @@ mod test {
 		}
 	}
 
-	/// A NEW_GROUP_REQUEST aggregates as the highest one held, stays out of the public
+	/// A NEW_GROUP_REQUEST aggregates as the one answered latest, stays out of the public
 	/// subscription, and leaves a subscriber once it is handed a group at or past it.
 	#[test]
 	fn new_group_requests_aggregate_out_of_sight() {
@@ -8194,12 +8194,13 @@ mod test {
 			..Info::timed()
 		};
 		let mut producer = track_producer("test", info);
-		let wants = |value| Subscription {
-			new_group: Some(NewGroup::new(value, None)),
+		let wants = |value, latest| Subscription {
+			new_group: NewGroup::new(value, Some(latest)),
 			..Default::default()
 		};
-		let mut a = producer.subscribe(wants(5));
-		let _b = producer.subscribe(wants(3));
+		// Answered by group 5 and group 3.
+		let mut a = producer.subscribe(wants(5, 4));
+		let _b = producer.subscribe(wants(0, 2));
 
 		let mut prev = None;
 		let mut poll = |producer: &Producer| {
@@ -8227,7 +8228,7 @@ mod test {
 			.unwrap()
 			.unwrap()
 			.unwrap();
-		assert_eq!(poll(&producer), Some(Some(3)), "the other request remains");
+		assert_eq!(poll(&producer), Some(Some(0)), "the other request remains");
 		assert!(
 			producer.poll_subscription_changed(&waiter).is_pending(),
 			"the public view never saw a request"

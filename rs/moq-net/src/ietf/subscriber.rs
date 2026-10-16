@@ -14232,7 +14232,7 @@ mod new_group_tests {
 	/// A downstream subscriber holding `new_group`, as the downstream session sets it.
 	fn subscribe(track: &track::Consumer, new_group: Option<u64>) -> kio::Pending<track::Subscribing> {
 		track.subscribe(track::Subscription {
-			new_group: new_group.map(|value| crate::model::NewGroup::new(value, None)),
+			new_group: new_group.and_then(|value| crate::model::NewGroup::new(value, None)),
 			..Default::default()
 		})
 	}
@@ -14484,22 +14484,37 @@ mod new_group_tests {
 		relay.serving.abort();
 	}
 
-	/// A request goes upstream on receipt only: groups that arrive without answering it
-	/// end its outstanding period but never send it again.
+	/// A request goes upstream once and the next group answers it, even one naming a group
+	/// far past it: new groups never send it again, so no value can make the publisher
+	/// start group after group.
 	#[moq_net_sim::test]
-	async fn new_groups_do_not_resend_a_held_request() {
-		let (mut relay, _first) = relay(None).await;
-		let (mut stream, _) = relay.accept().await;
-		accept(&mut stream, true, 5).await;
+	async fn new_groups_never_resend_a_request() {
+		for value in [0, 9, 1 << 40] {
+			let (mut relay, _first) = relay(None).await;
+			let (mut stream, _) = relay.accept().await;
+			accept(&mut stream, true, 5).await;
 
-		let _a = subscribe(&relay.track, Some(9));
-		assert_eq!(update(&mut stream).await, Some(9));
-		answer(&mut stream).await;
-		for sequence in 6..=8 {
-			relay.land(sequence);
-			quiet(&mut stream).await;
+			let a = relay.track.subscribe(track::Subscription {
+				new_group: crate::model::NewGroup::new(value, Some(5)),
+				..Default::default()
+			});
+			assert_eq!(update(&mut stream).await, Some(value));
+			answer(&mut stream).await;
+
+			for sequence in 6..9 {
+				relay.land(sequence);
+				quiet(&mut stream).await;
+			}
+
+			// Group 6 answered it, so the subscriber holds nothing once it reads past it.
+			let mut a = a.await.unwrap();
+			while a.recv_group().await.unwrap().is_some_and(|group| group.sequence < 8) {}
+			let state = relay.probe.state.lock();
+			let copy = state.subscribes.values().next().unwrap().producer.clone().unwrap();
+			drop(state);
+			assert_eq!(copy.new_group(), None, "{value}");
+			relay.serving.abort();
 		}
-		relay.serving.abort();
 	}
 
 	/// A publisher that did not advertise DYNAMIC_GROUPS still sees a SUBSCRIBE's request,

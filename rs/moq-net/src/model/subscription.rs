@@ -111,13 +111,12 @@ pub struct Subscription {
 /// A NEW_GROUP_REQUEST as one hop holds it.
 ///
 /// Subscribers' requests combine as the greatest: the one answered later, whose answer
-/// answers both. A value names its own answer, so a value at or past a 0's answer goes
-/// upstream in its place, and a 0 is kept only over values this hop already has. On a
-/// tie, the value says more upstream than a 0 does.
+/// answers both. Between requests answered alike, the higher value says the most upstream,
+/// and any value says more than a 0.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct NewGroup {
-	/// The first group sequence that answers it here. A 0 is answered by the group after
-	/// the newest this hop held when it arrived, not by the one it is about to join.
+	/// The first group sequence that answers it here: the one after the newest this hop
+	/// held when it arrived, not the one the subscriber is about to join.
 	pub first: u64,
 	/// The value as received, which is what goes upstream: the subscriber's largest known
 	/// group plus one, or 0 when it knows none.
@@ -125,14 +124,20 @@ pub(crate) struct NewGroup {
 }
 
 impl NewGroup {
-	/// A request for `value`, arriving while this hop's newest group is `latest`.
+	/// A request for `value`, arriving while this hop's newest group is `latest`, or `None`
+	/// when a group the hop holds already answers it.
+	///
+	/// Any newer group answers it here, even one below a value past the newest held. The
+	/// subscriber learned of its groups from the publisher, which so answers with a group at
+	/// or past the value; holding out for that exact group would only ask again, and a
+	/// value naming a group that never existed would ask on every group.
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
-	pub fn new(value: u64, latest: Option<u64>) -> Self {
-		let first = match (value, latest) {
-			(0, Some(latest)) => latest.saturating_add(1),
-			_ => value,
-		};
-		Self { first, value }
+	pub fn new(value: u64, latest: Option<u64>) -> Option<Self> {
+		if value != 0 && latest.is_some_and(|latest| value <= latest) {
+			return None;
+		}
+		let first = latest.map_or(0, |latest| latest.saturating_add(1));
+		Some(Self { first, value })
 	}
 }
 
@@ -583,27 +588,27 @@ mod tests {
 		assert_eq!(combined.end, Some(Position::group(21)));
 	}
 
-	/// A 0 asks the publisher for a new group whatever it holds, so it covers any value,
-	/// and the merged request is answered only once every subscriber's would be.
+	/// Any group newer than the hop held answers a request, a value it already holds asks
+	/// nothing, and merged requests are answered once every subscriber's would be.
 	#[test]
 	fn new_group_requests_merge() {
-		let zero = NewGroup::new(0, Some(5));
+		let zero = NewGroup::new(0, Some(5)).unwrap();
 		assert_eq!(zero, NewGroup { value: 0, first: 6 });
-		let nine = NewGroup::new(9, Some(5));
-		// A value past the 0's answer goes up instead, and its answer answers both.
+		// A value past the next group is still answered by it, so it can never ask again.
+		let nine = NewGroup::new(9, Some(5)).unwrap();
+		assert_eq!(nine, NewGroup { value: 9, first: 6 });
+		assert_eq!(NewGroup::new(4, None), Some(NewGroup { value: 4, first: 0 }));
+		// A value the hop already holds is answered.
+		assert_eq!(NewGroup::new(5, Some(5)), None);
+		// Answered alike, the value goes up in place of the 0, and the higher value wins.
 		assert_eq!(zero.max(nine), nine);
 		assert_eq!(nine.max(zero), nine);
-		// A value naming the 0's own answer is the same request, said precisely.
-		let six = NewGroup::new(6, Some(5));
-		assert_eq!(zero.max(six), six);
-		assert_eq!(six.max(zero), six);
-		// A value this hop already had is stale, so the 0 still asks.
-		let three = NewGroup::new(3, Some(5));
-		assert_eq!(zero.max(three), zero);
-		assert_eq!(three.max(zero), zero);
-		// Two 0s are answered by the later of their answers.
-		assert_eq!(zero.max(NewGroup::new(0, Some(7))), NewGroup { value: 0, first: 8 });
-		// Otherwise the higher value.
-		assert_eq!(NewGroup::new(7, Some(5)).max(nine), nine);
+		let six = NewGroup::new(6, Some(5)).unwrap();
+		assert_eq!(six.max(nine), nine);
+		assert_eq!(nine.max(six), nine);
+		// Otherwise the one answered later.
+		let later = NewGroup::new(0, Some(7)).unwrap();
+		assert_eq!(nine.max(later), later);
+		assert_eq!(later.max(nine), later);
 	}
 }

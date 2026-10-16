@@ -239,7 +239,8 @@ mod tests {
 				},
 				new_group: rng
 					.random_bool(0.5)
-					.then(|| NewGroup::new(rng.random_range(0..8), Some(rng.random_range(0..8)))),
+					.then(|| NewGroup::new(rng.random_range(0..8), Some(rng.random_range(0..8))))
+					.flatten(),
 			};
 			match (&mut slots[index], rng.random_range(0..3)) {
 				(slot @ None, _) => *slot = Some((producer.subscribe(next.clone()), next)),
