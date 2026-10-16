@@ -423,6 +423,8 @@ pub struct Token {
 	pub publish: moq_auth::Access,
 	/// The tier this session's stats record under.
 	pub tier: Tier,
+	/// The path this session's stats record under.
+	pub label: PathOwned,
 	/// Whether the session is a cluster peer, so its routes entered elsewhere.
 	pub peer: bool,
 	/// Whether the peer is upstream, so it is never offered another upstream's routes.
@@ -437,6 +439,7 @@ impl Token {
 	/// they say.
 	pub fn new(path: &str, grant: &Grant) -> Self {
 		let root = grant.root.as_deref().unwrap_or(path);
+		let label = grant.label.as_deref().unwrap_or(root);
 		Self {
 			path: path.to_string(),
 			root: Path::new(root).to_owned(),
@@ -448,6 +451,7 @@ impl Token {
 			subscribe: grant.subscribe.clone(),
 			publish: grant.publish.clone(),
 			tier: crate::configured_tier(grant.tier.clone()),
+			label: Path::new(label).to_owned(),
 			peer: grant.peer,
 			upstream: grant.upstream,
 		}
@@ -622,10 +626,11 @@ impl Lease {
 								None => {}
 							}
 						}
-						if fresh.tier != self.token.tier {
-							tracing::info!(from = %self.token.tier, to = %fresh.tier, "tier changed");
-							self.stats.set_tier(fresh.tier.clone());
+						if fresh.tier != self.token.tier || fresh.label != self.token.label {
+							tracing::info!(tier = %fresh.tier, label = %fresh.label, "stats label changed");
+							self.stats.retag(fresh.tier.clone(), &fresh.label);
 							self.token.tier = fresh.tier;
+							self.token.label = fresh.label;
 						}
 						self.expires = grant.deadline();
 					},
@@ -1320,15 +1325,18 @@ mod tests {
 		let mut grant = Grant::new(patterns(&["alice/**"]), patterns(&["**"]));
 		grant.root = Some("pid/room".into());
 		grant.tier = Some("gold".into());
+		grant.label = Some("project/key/123".into());
 		let token = Token::new("/vanity/room", &grant);
 		assert_eq!(token.root, Path::new("pid/room").to_owned());
 		assert_eq!(token.publish, patterns(&["alice/**"]));
 		assert_eq!(token.subscribe, patterns(&["**"]));
 		assert_eq!(token.tier, Tier::new("gold"));
+		assert_eq!(token.label, Path::new("project/key/123").to_owned());
 
 		let patterns = patterns(&["*/chat", "alice", ""]);
 		let token = Token::new("/", &Grant::new(patterns.clone(), Patterns::new()));
 		assert_eq!(token.publish, patterns);
+		assert_eq!(token.label, token.root, "an absent label defaults to the auth root");
 	}
 
 	#[test]

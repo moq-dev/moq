@@ -944,7 +944,7 @@ async fn admit_http(
 		state.cluster.refusals.record(crate::refusals::Refusal::Forbidden);
 		return Err(StatusCode::UNAUTHORIZED.into());
 	};
-	let stats = state.cluster.stats.tier(token.tier.clone()).request(&token.root);
+	let stats = state.cluster.stats.tier(token.tier.clone()).request(&token.label);
 	let origin = origin.consume().with_stats(stats.clone());
 	Ok((lease.with_stats(stats), origin))
 }

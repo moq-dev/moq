@@ -376,10 +376,11 @@ impl Refresh {
 					}
 				}
 				Event::Changed(id, Change::Grant(grant)) if self.valid(&grant) => {
+					let fresh = self.admitted.recheck(&grant);
 					let credential = self.credentials.get_mut(&id).expect("observed credential");
 					credential.expires = grant.deadline();
 					if credential.initial {
-						self.stats.set_tier(crate::configured_tier(grant.tier.clone()));
+						self.stats.retag(fresh.tier, &fresh.label);
 					}
 					credential.grant = grant;
 					if let Some(issued) = &credential.issued {

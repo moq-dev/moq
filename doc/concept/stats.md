@@ -89,8 +89,8 @@ comes in two encodings:
 | `totals.json` | tier | [Totals](#totals) for the whole group |
 | `[<tier>/]publisher.json` | broadcast path | [Traffic](#traffic) this node sent (egress) |
 | `[<tier>/]subscriber.json` | broadcast path | [Traffic](#traffic) this node received (ingress) |
-| `[<tier>/]sessions.json` | auth root | [Sessions](#sessions) connected now |
-| `[<root>/]presence.json` | tier | [Sessions](#sessions) under one auth root |
+| `[<tier>/]sessions.json` | stats label | [Sessions](#sessions) connected now |
+| `[<label>/]presence.json` | tier | [Sessions](#sessions) under one stats label |
 
 The default tier's per-tier tracks are unprefixed. A named tier prefixes each
 name with its label and a slash: tier `region/sjc` publishes
@@ -103,9 +103,9 @@ them earlier: any name of the shape
 `[<tier>/]{publisher,subscriber,sessions}.json[.z]` is accepted and held open
 with `{}` until the tier records.
 
-A presence track exists only while subscribed. Ask for `<root>/presence.json`
-for any auth root in the group (`presence.json` for the empty root). The relay
-answers with the root's current sessions and counts from there, holding a root
+A presence track exists only while subscribed. Ask for `<label>/presence.json`
+for any stats label in the group (`presence.json` for the empty label). The relay
+answers with the label's current sessions and counts from there, holding a label
 with no sessions open at `{}`, and stops producing it once the last subscriber
 leaves. A root outside the group, or any other name, is refused.
 
@@ -195,15 +195,19 @@ should prefer the canonical name and fall back to the legacy one.
 ### Sessions
 
 ```json
-{ "acme": { "requests": 3, "sessions_started": 12, "sessions_ended": 10, "sessions": 12, "sessions_closed": 10, "announces_peak": 40, "subscriptions_peak": 900 } }
+{ "acme/key/123": { "requests": 3, "sessions_started": 12, "sessions_ended": 10, "sent_bytes": 1048576, "received_bytes": 524288, "sessions": 12, "sessions_closed": 10, "announces_peak": 40, "subscriptions_peak": 900 } }
 ```
 
 `sessions_started` and `sessions_ended` count connects and disconnects, whether
-or not any data flows: under an auth root on the tier for `sessions.json`,
-under the root on each tier for `presence.json`, and under every root in the
+or not any data flows: under a stats label on the tier for `sessions.json`,
+under the label on each tier for `presence.json`, and under every label in the
 group on the tier for `totals.json`. `sessions` and `sessions_closed` are their
 legacy spellings. A session moved to a new tier ends on the old one and starts
-on the new.
+on the new. `sent_bytes` and `received_bytes` count payload for the session,
+including HTTP requests. A changed label moves later presence and bytes; bytes
+before the change remain under the old label. If the grant omits `label`, its
+authorization root is used. Older readers ignore these fields and newer readers
+default missing fields to zero.
 
 `requests` counts admitted request/response exchanges under the token's root and
 tier, including HTTP `/fetch` and `/announced`. They never start or end a session.

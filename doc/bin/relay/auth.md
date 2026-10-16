@@ -28,7 +28,7 @@ token, the declared role, and the verified client certificate. Nothing is
 parsed on the server's behalf: the `jwt` query parameter is a convention of
 `moq auth serve`, not of the relay. The grant answers with `publish` and
 `subscribe` pattern unions and optionally a `root` alias, read-only `mounts`,
-`expires`, a `revalidate` cadence, a stats `tier`, and `peer` / `upstream` to
+`expires`, a `revalidate` cadence, a stats `tier` and `label`, and `peer` / `upstream` to
 mark another relay and an [upstream link](/bin/relay/cluster#upstream-links).
 The fields are documented on `moq_auth::Request` and `moq_auth::Grant`
 ([Rust](/lib/rs/moq-auth), [TypeScript](/lib/js/auth)).
@@ -52,8 +52,8 @@ flowing. A wider grant brings those paths back within the admitted root and
 SETUP role. A one-shot HTTP `/fetch` ends on a narrower grant instead. A
 changed `root`, `mounts`, `peer`, or `upstream`, or a 401 or 403, ends that
 credential's grant, which closes the session unless an
-[in-band](#in-band-renewal) credential still holds it. A changed `tier` keeps
-the session and moves its stats from then on. Any other failure retries with backoff and the session lives
+[in-band](#in-band-renewal) credential still holds it. A changed `tier` or
+`label` keeps the session and moves its later stats. Any other failure retries with backoff and the session lives
 until `expires`, so an outage always has the bound the server chose. A grant
 with `revalidate` must set `expires` for that reason. A session that
 reaches `expires` closes as `Expired` rather than `Unauthorized`, which also

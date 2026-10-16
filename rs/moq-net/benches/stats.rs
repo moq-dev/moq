@@ -6,7 +6,7 @@
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use futures::FutureExt;
-use moq_net::{announce, broadcast, origin, stats};
+use moq_net::{announce, broadcast, fuzz, origin, stats};
 
 /// `(broadcasts, tiers)` shapes; every broadcast records under every tier.
 const SHAPES: [(usize, usize); 4] = [(100, 1), (1_000, 1), (100, 10), (1_000, 10)];
@@ -87,5 +87,36 @@ fn request(c: &mut Criterion) {
 	group.finish();
 }
 
-criterion_group!(benches, report, request);
+fn write(c: &mut Criterion) {
+	let registry = stats::Registry::new(stats::Config::new());
+	let tier = stats::Tier::default();
+	let path = fuzz::path_meter(&registry, &tier, "room/live");
+	let session = fuzz::session_meter(&registry, tier, "root", "room/live");
+	c.bench_function("stats/write/path-bytes", |b| b.iter(|| path.bytes(1)));
+	c.bench_function("stats/write/session-bytes", |b| b.iter(|| session.bytes(1)));
+}
+
+fn session_report(c: &mut Criterion) {
+	let mut group = c.benchmark_group("stats/session-report");
+	for labels in [1, 100, 1_000] {
+		for sessions in [1, 10] {
+			let registry = stats::Registry::new(stats::Config::new());
+			let handle = registry.tier(stats::Tier::default());
+			let contexts: Vec<_> = (0..labels)
+				.flat_map(|label| {
+					let handle = handle.clone();
+					(0..sessions).map(move |_| handle.session(format!("project/key/{label}")))
+				})
+				.collect();
+			let mut report = stats::Report::default();
+			group.bench_function(BenchmarkId::from_parameter(format!("{labels}x{sessions}")), |b| {
+				b.iter(|| registry.report(&mut report));
+			});
+			std::hint::black_box(contexts);
+		}
+	}
+	group.finish();
+}
+
+criterion_group!(benches, report, request, write, session_report);
 criterion_main!(benches);
