@@ -78,8 +78,10 @@ mixing artifacts from different runs or rebuilding today's bindings.
 
 Both paths build `moq-ffi` with default `audio` and `video` features,
 `--locked`, and the release profile: fat LTO, one codegen unit, and debuginfo
-stripped for `moq-ffi`. The run installed Rust 1.99.0 (`b940084d7`) for every
-job. C++ invokes `cargo build --locked --package moq-ffi --release` through
+stripped for `moq-ffi`. The toolchain action installed stable Rust 1.99.0,
+but the repository's `rust-toolchain.toml` selects Rust 1.98.1 (`48a229cea`)
+for the actual Cargo builds on both paths. C++ invokes
+`cargo build --locked --package moq-ffi --release` through
 CMake; the shared candidate adds `--target <triple>` through
 `rs/moq-ffi/build.sh`. C++ is always a native host build. Only the shared ARM
 Linux candidate crosses from an x86 Linux host.
