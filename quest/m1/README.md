@@ -30,8 +30,8 @@ Decided with the maintainer on 2026-10-13:
   successive stages, not prerequisites of the cut that makes them possible.
   Their owner is [release execution](/quest/m2/release/README.md).
 
-The route handoff and watch-worker planning quests settle their existing
-implementation choices before code is written. The binding namespace spike
+The watch-worker planning quest settles its existing implementation choices
+before code is written. The binding namespace spike
 must produce a go/no-go before generated package names freeze. Existing
 upgrade and identity guides carry migrations; feature docs change inline.
 Keep generic proofs in this repository; deployments and their operational

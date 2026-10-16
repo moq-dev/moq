@@ -4,9 +4,11 @@
 //! against [`model`], under the rule that fails and the rule that holds. The
 //! model is a reference for the contract, not the relay: when lite-07's route
 //! layer lands, these topologies become its acceptance tests. Failover fixtures
-//! advance the origin's seqno by hand where the seqno request would. It sits in
+//! here advance the origin's seqno by hand where the seqno request would;
+//! [`handoff`] runs the request exchange and the announcement layer. It sits in
 //! `tests/` rather than inline because it tests no moq-net module.
 
+mod handoff;
 mod model;
 
 use model::{Aggregate, Config, Export, Forward, Grant, Link, Metric, Net, Outcome, Rule, TieBreak, qualified};

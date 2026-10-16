@@ -18,8 +18,8 @@ Keep the 2026-10-01 two-layer direction, reconciled with the maintainer's
 contract below. The routing contract's fixtures live in
 `rs/moq-net/tests/routing_contracts/` and run against a small reference model;
 port each topology to the implementation as acceptance, then delete the model.
-The sketch stays conditional on Next-hop handoff, which settles claim
-freshness before coding:
+The handoff contract below settles claim freshness; its proposals marked open
+await the maintainer before the wire is written:
 
 - Wire sketch, flexible in detail. ROUTE_START carries the node id, a seqno,
   the metric, and the down-only bit (below), and implicitly takes the next
@@ -42,12 +42,14 @@ freshness before coding:
   of broadcasts; another origin may still serve the same epoch. An announce
   never changes its Route ID: another origin
   serving the same path is another ANNOUNCE. An ANNOUNCE naming an unknown
-  Route ID is a protocol violation. ROUTE_END removes this stream's
-  reachability, not proof that the
-  origin withdrew its claims. Preserve known presence through uncertain
-  handoff with forwarding availability represented separately and bounded
-  state, following the handoff proof's reference/retirement contract.
-  ROUTE_REQUEST (node id, seqno, hop count) travels
+  Route ID is a protocol violation. A ROUTE_UPDATE with an infinite metric
+  means held: the sender has no usable route but still holds the origin's
+  announcements while it recovers. ROUTE_END means the sender let go of the
+  origin on this stream; neither is proof that the origin withdrew its
+  claims (see the handoff contract). Each batch of ANNOUNCEs for a route
+  closes with a floor, the origin revision as of which the stream's set for
+  that route is complete.
+  ROUTE_REQUEST (node id, seqno) travels
   the other way on the same stream, toward the neighbour that sent the route.
   The hop list leaves lite-07, and with it the
   `Hop Base`/`Hop Keep` compression.
@@ -56,15 +58,16 @@ freshness before coding:
   ROUTE_START  node=0x7a3f seqno=41 metric=12   -> route 0
   ANNOUNCE_START prefix=transcode/ route=0 cost=10    -> announce 0
   ANNOUNCE_START prefix=transcode/foobar route=0 cost=1 -> announce 1
+  ANNOUNCE_FLOOR route=0 revision=7             # complete as of revision 7
   ROUTE_UPDATE route=0 seqno=42 metric=15
   ANNOUNCE_END announce=1                       # this origin withdraws a claim
-  ROUTE_END    route=0                          # this stream loses reachability
+  ANNOUNCE_FLOOR route=0 revision=8
+  ROUTE_UPDATE route=0 seqno=42 metric=inf      # held: unusable, still recovering
+  ROUTE_END    route=0                          # let go: forget it on this stream
   ```
 - Scope route state to interested origins, not the CDN's whole node table.
   Send a route before any announcement referencing it. The handoff contract
-  defines unavailable routes and reference retirement, including partial
-  interest, so collection neither invents a publisher END nor permits stale
-  claims to revive after rejoin.
+  defines held routes, letting go, and collection.
 - The announce cost is the origin's per-prefix seed (`transcode/**` at 10 and
   `transcode/foobar` at 1 from one node, decided 2026-10-01) and nobody
   changes it in transit; a path's cost through a route is that seed plus the
@@ -175,14 +178,22 @@ freshness before coding:
   the hop count is at least two, it forwards the request with the hop count
   decremented, never to the requesting neighbour (RFC 8966 s3.8.1.2): through
   a feasible route's next hop if one avoids the requester, else through an
-  infeasible route's, else it drops the request. A node keeps one request
-  per origin and seqno pending, suppressing duplicates, and resends its own
-  a small number of times; the pending entry expires when answered, when the
-  route is gone, or when the retries run out, and only a later infeasible
-  update starts a new one. Feasibility is never
-  reset to accept a longer route after a retraction or a session replay.
-  The handoff proof must revise this pending/retrigger sketch if a quiet
-  origin could otherwise remain starved after the final retry.
+  infeasible route's, else it drops the request. Every node holding a
+  request, its own or forwarded, keeps one per origin pending, suppressing
+  duplicates, until it selects a route at least that new or has no usable
+  route left, and sends it again whenever the neighbour it would send it to
+  changes. No retry timer and no hop count: a looping copy meets its own
+  pending entry and stops. Proposed by the handoff proof, open: the earlier
+  sketch (a few timed resends, then wait for the next infeasible update)
+  leaves a node starved for good behind a quiet origin when every attempt is
+  dropped by a forwarder whose retraction is still in flight, and the
+  previous hop then moves to an equal-metric route that changes nothing it
+  advertises (`a_quiet_origin_stays_starved_after_bounded_retries`).
+  Recovery is eventual without timers: a drop happens only at a node with no
+  usable route, whose retraction then changes the previous hop's next hop
+  and resends the request, and once the topology is quiet the selected next
+  hops, loop-free under feasibility, carry it to the origin. Feasibility is
+  never reset to accept a longer route after a retraction or a session replay.
 - Feasibility makes a detour longer than the lost route wait for that request
   to reach the origin, where today's path vector fails over at once. Redundant
   cores are feasible successors and switch immediately
@@ -194,12 +205,10 @@ freshness before coding:
   Decided 2026-10-13: accept this recovery pause; instant failover is not a
   requirement. Measure transport failure detection, additional sequence-refresh
   recovery, and total interruption separately. The fixtures' manual origin
-  bump proves feasibility recovery, not the request exchange or its latency.
-- Claim authority and freshness follow the handoff proof, independently of
-  the requested path's forwarding choice. Next-hop authority alone failed
-  the simulator below. A complete old snapshot cannot overwrite a known
-  withdrawal. Do not preclude claim revisions or freshness floors before
-  that proof. Store only state justified by its bounded replay/coverage model.
+  bump proves feasibility recovery; the handoff fixtures also run the request
+  exchange, though not its latency.
+- Claim freshness follows the handoff contract below, independently of the
+  requested path's forwarding choice.
 - Only the first hop selects the origin. It keeps `route_order`'s shape over
   the origin nodes announcing the path: longest prefix, newest epoch, the
   link's priority (`origin::Producer::with_preference`), seed plus route
@@ -267,6 +276,105 @@ freshness before coding:
 - Mixed versions: a lite-06 peer keeps today's path vector, translated at the
   relay that speaks both, for the rollout window only.
 
+Handoff contract, proven 2026-10-15 by the fixtures in `handoff.rs` against
+next-hop authority and a snapshot barrier alone. A next-hop change adopts the
+newest knowledge any session has, never an older complete snapshot, and route
+loss never reports an END:
+
+- Each origin numbers the changes to its own claims with a revision that
+  starts at zero for each routing identity, separate from the route seqno.
+  A session sends an origin's announcements in batches, each closed by a
+  floor: the revision as of which the stream's announcements for that route,
+  within the stream's interest prefix, are complete. A relay watches the
+  root, so one floor per stream always covers its view.
+- A receiver keeps each session's last view, to apply the next batch, and
+  merges every session's view into its own claim by claim: whichever view
+  covers the claim with the newer floor decides. A floor certifies only the
+  claims overlapping its prefix, including wildcards above it, and a node
+  keeps one floor per prefix it has watched, dropping any that a wider,
+  newer floor covers. An older complete snapshot is therefore ignored, where
+  next-hop authority and a barrier both revive the withdrawal
+  (`an_older_complete_snapshot_revives_a_known_withdrawal`); a new next hop
+  whose ROUTE precedes its announcements changes nothing the reader sees
+  (`next_hop_authority_reports_false_absence_while_announcements_trail`);
+  widening keeps a narrower, newer floor yet still accepts an older, wider
+  snapshot for what it newly covers, where one floor per origin either
+  refuses that snapshot or revives under it
+  (`widening_interest_needs_floors_scoped_to_what_they_cover`); narrowing
+  keeps the rest frozen at its floor for a rejoin
+  (`cancelling_interest_keeps_freshness_for_a_rejoin`); and withdrawing one
+  origin's wildcard leaves another origin's copy
+  (`wildcard_claims_end_per_origin_and_are_certified_below`).
+- Per identity, a node is usable (a feasible selected route: announcements
+  shown available), held, or let go. It is held while starved, or while a
+  neighbor's held route has a last finite advertisement feasible here; it
+  keeps showing the announcements as unavailable and sends ROUTE_UPDATE with
+  an infinite metric. Holds therefore follow strictly decreasing metrics
+  down to a starved node and cannot prop each other up. Otherwise the node
+  lets go: ROUTE_END to every neighbor it advertised to, and its reader sees
+  the announcements go offline, distinct from an END the origin sent. The
+  detour window keeps presence at the starved relay and behind it
+  (`a_starved_relay_keeps_presence_unavailable_until_its_request_recovers_it`);
+  a dead origin or a total partition goes offline everywhere with no timer
+  (`holds_retire_once_nothing_can_recover`). No promise is made of learning a
+  withdrawal during a partition.
+- A node may collect an identity's views, floors, and feasibility distance
+  once it holds no route entry for it; correctness does not depend on when.
+  After collection, or a process restart, a stale view returns only from a
+  sender that has not yet received the withdrawal, and only until it does
+  (`stale_replay_after_collection_lasts_only_until_the_withdrawal_behind_it`).
+  Retained state is each session's last view, one merged view per held
+  identity with a floor per watched prefix, and one pending request per
+  origin; withdrawal history leaves nothing. One claim change costs one batch
+  per session carrying the route and one event per watching node
+  (`announcement_cost_follows_sessions_and_live_claims`). Without split
+  horizon a relay echoes an origin's claims back to it.
+- A fresh identity per restart also starts a fresh revision space; reusing
+  an identity would need its revision persisted along with its seqno
+  (`origin_restart_takes_a_fresh_identity_for_its_claims`).
+- Presence and availability are separate. A forwarded subscription follows
+  only a usable route, so a held route ends it as unreachability does while
+  the reader's announcement stays, unavailable. When the selected route
+  moves between usable next hops, keep the same-epoch subscription on the old
+  one until the new one delivers; epochless changes remain Restart. The model
+  does not cover the data path; the route-change acceptance tests do.
+- `sweep_handoff` churns 150 random meshes per rule: two origins and a
+  client, claims changing, sessions dropping and returning, messages held
+  and delivered out of step, interest changing, origins restarting with
+  fresh identities, and route-less identities collected. Merged floors keep
+  every view equal to some revision of the origin's truth after every step,
+  and once churn stops every node shows each live origin's current claims and
+  holds nothing for a dead one. Over the same scenarios:
+
+  | Rule | Revivals | False ENDs | Re-announcements | Reader events | Claim KiB |
+  | --- | --- | --- | --- | --- | --- |
+  | Next-hop authority | 374 | 445 | 377 | 8984 | 830 |
+  | Snapshot barrier | 224 | 164 | 249 | 9241 | 801 |
+  | Merged floors | 0 | 0 | 36 | 9213 | 779 |
+
+  Merged floors' re-announcements follow an offline period or a collection,
+  never a known withdrawal. Byte counts are estimates in virtual time.
+
+Proposed by the handoff proof, open for the maintainer:
+
+1. Floor encoding. (a) Recommended: ANNOUNCE_FLOOR (Route ID, revision)
+   closes each batch, and ANNOUNCEs carry no revision. (b) A revision on every
+   ANNOUNCE: a receiver still needs each session's last view to apply a
+   batch from a sender whose own view jumped, so it adds bytes and removes no
+   state. (c) The floor on ROUTE_UPDATE, which ties claim churn to route
+   processing.
+2. Held encoding. (a) Recommended: an infinite metric means held and
+   ROUTE_END means let go, with no new field. (b) An explicit held bit.
+3. Reader API. (a) Recommended: an announcement carries availability, and
+   letting go is reported as offline, distinct from the origin's END. (b) No
+   availability signal: presence alone, with requests waiting. (c) Let-go
+   reported as END, as today.
+4. Collection. (a) Recommended: collect once no route entry remains, since
+   correctness does not depend on the delay. (b) Babel's source GC timer.
+5. Seqno requests. (a) Recommended: hop-by-hop pending with resend on
+   next-hop change, no timer, no hop count. (b) The bounded-retry sketch,
+   which strands a quiet origin's node.
+
 Why not a hold-down: #4644 retracted at once and re-announced a replacement
 after 1 s, which ended a downstream front whose only path ran through the
 relay, dropping subscribers for about a second while the relay kept serving;
@@ -309,10 +417,6 @@ Open, for the implementer to settle and record:
 - The earlier simulator persisted seqnos across restart. Re-run with the
   settled fresh routing incarnation and the stale-state rules above; do not
   carry the old assumption into acceptance.
-- The window where an origin's ANNOUNCE_END and a next-hop change cross in
-  flight, and what makes a replacement next hop's announce set current. Kept
-  open: [Next-hop handoff](/quest/m1/cluster-routing/handoff.md) settles it
-  with deterministic acceptance tests before the wire is written.
 - How much of today's route trie, fronts, and `route_order` survives intact.
 
 The #4349 counterexamples are the `residual_*` tests in
@@ -330,7 +434,8 @@ it as a Restart, so a lite-06 client sees `Start, End, Start` while the
 broadcast stays live. Pin today's sequence beside the `residual_*` tests;
 the epochless Restart rule above decides what it becomes.
 
-Tests, time mocked: #4644's live-graph withdrawal and failover tests
+Tests, time mocked: the handoff fixtures and sweep in `handoff.rs`;
+#4644's live-graph withdrawal and failover tests
 (`quest/m0/path-hunting` branch) as acceptance, run on the wip version; a
 link flap with many broadcasts behind one origin costs one ROUTE change per
 link; a ring of three where a stale neighbour cannot revive an ended
@@ -378,7 +483,6 @@ release.
 ## Required
 
 - [Identity proof](/quest/m1/cluster-routing/identity.md) - proven own identities and subject-qualified forwarded ones
-- [Next-hop handoff](/quest/m1/cluster-routing/handoff.md) - complete and fresh claims with bounded state
 
 ## Closes
 
