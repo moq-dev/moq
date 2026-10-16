@@ -17,7 +17,8 @@ Decided in the 2026-10-16 plan with the maintainer:
 - **Baseline is `origin/main` at b30289127**, before the open rewrites
   (#5711 scheduler, #5690 reliable reset, #5735 receive memory, #5688
   shard, #5674 peer limits) merge. The net lands first so each rewrite can
-  compare against it: benchmarks via `just bench <baseline>`, tests by
+  compare against it: benchmarks via `just bench` against the commit that
+  lands them (Criterion only compares cases present at the base), tests by
   rebasing, where every behavior change shows up as a failing test to
   accept or fix.
 - **Ranked first in the QUIC epic, but blocks nothing.** Every m1 QUIC

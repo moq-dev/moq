@@ -2,15 +2,21 @@
 
 ## Goal
 
-`rs/moq-quic/benches/` holds Criterion benchmarks that `just bench <base>`
-compares between the baseline (b30289127) and any later commit, so each
-QUIC rewrite reports its CPU and allocation cost against the code it
-replaced. They run in the nightly Criterion smoke with the other crates.
+`rs/moq-quic/benches/` holds Criterion benchmarks that each QUIC rewrite
+compares against the code it replaced. They run in the nightly Criterion
+smoke with the other crates.
 
 ## Plan
 
 Decided 2026-10-16. Land this first in the epic, so the open rewrites can
-run it against the baseline.
+compare against it.
+
+`just bench <base>` only compares cases that exist at `<base>`, so the base
+is the commit that lands this suite, not b30289127. Landed before a
+rewrite, that commit is still pre-rewrite: the rewrite rebases and runs
+`just bench <suite commit>`. For a rewrite that merges first, compare its
+parent with this suite cherry-picked onto it against its merge commit with
+the same suite, and record those numbers in this PR.
 
 - Drive a sans-IO `Pair` (or a bench-local equivalent built from the public
   API) with no-op packet protection, ported from quinn `perf`'s
