@@ -95,7 +95,7 @@ ranked just below deterministic TS legs, which it requires.
 - [Per-stream deadlines](/quest/m2/quic-deadline.md) - hopeless retransmits
   become resets, and a tail loss probe fires early while there is still time
 - [qmux on the QUIC stream state machine](/quest/m2/quic-qmux.md) - qmux is a
-  first-class crate in the fork over the shared stream state machine
+  first-class crate over `moq-quic`'s shared stream state machine
 - [Align BBR loss handling with draft-06](/quest/m2/quic-bbr-loss-parity.md) - losses use their own sample and the draft-05 links go, keeping the spurious-loss undo that already re-enters ProbeUp through Refill
 - [Measure ECN on the backbone](/quest/m2/quic-ecn-measure.md) - a written
   verdict on marking versus dropping, and whether Linode and OVH keep marks

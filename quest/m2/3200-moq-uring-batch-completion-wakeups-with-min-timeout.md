@@ -36,7 +36,7 @@ The kernel returns when `N` CQEs arrive, when `t` expires after partial progress
 Benchmark chat, 1:1 video, and fanout workloads with `N = 1/4/8/16` and `t = 0/5/10/20 us`. Record CQEs per wake, enters per second, CPU per message, p50, p99, and p999 latency. Pick no production default until the latency budget and CPU win are both demonstrated.
 
 Decided in the 2026-09-30 audit: moved to m2. It trades latency for CPU,
-the win is unmeasured on noq, and io_uring ships in no package.
+the win is unmeasured on `moq-quic`, and io_uring ships in no package.
 
 ## Required
 

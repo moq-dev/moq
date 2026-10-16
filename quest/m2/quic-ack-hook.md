@@ -13,10 +13,10 @@ Decided in the 2026-10-05 audit: re-planned on moq-net's own transport
 traits. moq-net has no `web-transport-trait` dependency, so it could not
 call a hook that exists only upstream. The method lives on
 `rs/moq-net/src/transport.rs`'s `poll::SendStream`, implemented by the
-moq-tokio and moq-uring adapters (the in-tree web-transport-moq after
-[the fork](/quest/m1/quic/fork/README.md)); no `web-transport-trait` release
-is needed. Rejected: keeping the method upstream. This quest supersedes the
-design in moq-dev/web-transport#368, whose snapshot-counter shape loses the
+moq-tokio and moq-uring adapters (moq-tokio's through `quic::web`); no
+`web-transport-trait` release is needed. Rejected: keeping the method
+upstream. This quest supersedes the design in moq-dev/web-transport#368,
+whose snapshot-counter shape loses the
 wakeups a latency sample needs.
 
 Add one method to `SendStream`, in the trait's poll style:
