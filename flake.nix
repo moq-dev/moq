@@ -564,8 +564,11 @@
             ++ dartDeps
             ++ devTools
             ++ [ quest-cli ]
-            # perf records relay worker off-CPU stacks for `just bench-lock`.
-            ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.perf ];
+            # perf records lock waits; ss proves the temporary relay owns its sockets.
+            ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
+              pkgs.perf
+              pkgs.iproute2
+            ];
 
           # jemalloc's configure uses -O0 test builds, which conflict with
           # Nix's _FORTIFY_SOURCE hardening (requires -O).
