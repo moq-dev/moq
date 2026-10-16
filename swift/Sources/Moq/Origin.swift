@@ -116,7 +116,7 @@ public final class OriginConsumer: Sendable {
         AnnounceConsumer(try ffi.announced(config: MoqAnnounceConfig(prefix: prefix, filter: filter, hidden: hidden)))
     }
 
-    /// Wait for a route covering an exact path, then resolve the broadcast there.
+    /// Follow an exact path, resolving each publisher instance that serves it.
     public func announcedBroadcast(path: String) throws -> AnnouncedBroadcast {
         AnnouncedBroadcast(try ffi.announcedBroadcast(path: path))
     }
@@ -171,8 +171,12 @@ public final class AnnouncedBroadcast: Sendable {
         self.ffi = ffi
     }
 
-    /// Suspend until a route covers the path, then resolve the broadcast there.
-    /// Throws `Closed` if cancelled or the origin closes first.
+    /// Suspend until the next publisher instance serves the path, then resolve it.
+    /// The first call resolves the instance serving the path once one is announced.
+    /// Each later call waits for another to take over (a restarted publisher, or a
+    /// replacement session) or for the broadcast to return after it went offline.
+    /// Drop what was read from the previous instance then: its tracks end when its
+    /// session does. Throws `Closed` if cancelled or the origin closes first.
     public func available() async throws -> BroadcastConsumer {
         BroadcastConsumer(try await ffi.available())
     }

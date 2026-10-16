@@ -202,21 +202,42 @@ impl Announced {
 	}
 }
 
-/// Waits for a route covering one exact path, then resolves it.
+/// Follows one exact path, resolving each publisher instance that serves it.
 struct AnnouncedBroadcast {
 	origin: moq_net::origin::Consumer,
 	path: moq_net::PathOwned,
+	follow: moq_net::announce::Follow,
+	/// An instance serves the path that was not handed out yet.
+	unseen: bool,
 	driver: Background,
 }
 
 impl AnnouncedBroadcast {
 	async fn available(&mut self) -> Result<Arc<MoqBroadcastConsumer>, MoqError> {
-		// `routed_broadcast` rides out the churn between something covering the path
-		// and the path actually resolving (failover, an advertise-only announce
-		// racing its handler).
 		let broadcast = self
 			.driver
-			.watch(async { Ok(self.origin.routed_broadcast(&self.path).await?) })
+			.watch(async {
+				// Apply every change on hand before resolving, so a burst of them hands out
+				// only the instance serving the path now.
+				loop {
+					let event = match self.follow.poll_next(&kio::Waiter::noop()) {
+						std::task::Poll::Ready(event) => event,
+						std::task::Poll::Pending if self.unseen => break,
+						std::task::Poll::Pending => self.follow.next().await,
+					};
+					match event.ok_or(MoqError::Closed)? {
+						moq_net::announce::Event::Start(_) | moq_net::announce::Event::Restart(_) => self.unseen = true,
+						moq_net::announce::Event::End(_) => self.unseen = false,
+						// The same instance over another route, which its subscriptions ride out.
+						moq_net::announce::Event::Update(_) => {}
+					}
+				}
+				self.unseen = false;
+				// `routed_broadcast` rides out the churn between something covering the path
+				// and the path actually resolving (failover, an advertise-only announce
+				// racing its handler).
+				Ok(self.origin.routed_broadcast(&self.path).await?)
+			})
 			.await?;
 		Ok(Arc::new(MoqBroadcastConsumer::routed(
 			broadcast,
@@ -287,7 +308,7 @@ impl From<moq_net::announce::Event> for MoqAnnounceEvent {
 	}
 }
 
-/// Waits for a specific broadcast to be announced.
+/// Follows a specific broadcast across the publisher instances that serve it.
 #[derive(uniffi::Object)]
 pub struct MoqAnnouncedBroadcast {
 	task: Task<AnnouncedBroadcast>,
@@ -448,7 +469,7 @@ impl MoqOriginConsumer {
 		}))
 	}
 
-	/// Resolve the broadcast at `path`, waiting until something can serve it.
+	/// Follow the broadcast at `path`, resolving each publisher instance that serves it.
 	///
 	/// This is how you resolve a path right after connecting: announcements arrive over the
 	/// session after it opens, so `request_broadcast` on its own races them. A
@@ -459,19 +480,20 @@ impl MoqOriginConsumer {
 		self.driver.check()?;
 		let path = moq_net::Path::new(&path).to_owned();
 
-		// Probe the permission eagerly so an unreachable path fails here, rather than
-		// surfacing later as a `Closed` the caller can't tell from the origin ending.
-		self.inner
-			.scope(&path, &moq_net::Patterns::from(moq_net::Pattern::all()))?;
+		// Following checks the permission eagerly, so an unreachable path fails here rather
+		// than surfacing later as a `Closed` the caller can't tell from the origin ending.
+		let follow = self.inner.follow(&path)?;
 
 		Ok(Arc::new(MoqAnnouncedBroadcast {
 			task: Task::new(AnnouncedBroadcast {
-				// The wait runs on the *unrooted* cursor. `announced_broadcast` narrows with
-				// `scope`, which leaves the root alone, so the broadcast is handed out named by
-				// its full path. Rooting the cursor at `path` would name it "" instead, making
-				// it its own root, and a catalog's `../sibling` reference would read as escaping.
+				// The wait runs on the *unrooted* cursor, so the broadcast is handed out named
+				// by its full path. Rooting the cursor at `path` would name it "" instead,
+				// making it its own root, and a catalog's `../sibling` reference would read as
+				// escaping.
 				origin: self.inner.clone(),
 				path,
+				follow,
+				unseen: false,
 				driver: self.driver.clone(),
 			}),
 		}))
@@ -603,9 +625,14 @@ impl MoqAnnounceConsumer {
 
 #[uniffi::export]
 impl MoqAnnouncedBroadcast {
-	/// Wait until the broadcast is announced. Returns `Closed` if cancelled or the origin is closed.
+	/// Wait for the next publisher instance serving the broadcast. Returns `Closed` if cancelled
+	/// or the origin is closed.
 	///
-	/// Its end arrives as a [`MoqAnnounceEvent::End`] on the origin's announcements.
+	/// The first call resolves the instance serving the path, once one is announced. Each later
+	/// call waits for another to take over, as a restarted publisher or a replacement session
+	/// does, or for the broadcast to return after it went offline. Drop everything read from the
+	/// previous instance then and read the new one: the old one's tracks end when its session
+	/// does, and look finished.
 	pub async fn available(&self) -> Result<Arc<MoqBroadcastConsumer>, MoqError> {
 		self.task.run(|mut state| async move { state.available().await }).await
 	}

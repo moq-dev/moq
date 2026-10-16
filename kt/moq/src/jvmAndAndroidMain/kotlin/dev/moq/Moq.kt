@@ -33,10 +33,11 @@ class Moq internal constructor(
         session.consume().announced(config)
 
     /**
-     * Await a route covering exactly [path], then resolve the broadcast there.
+     * Follow exactly [path], resolving each publisher instance that serves it.
      *
      * Unlike [requestBroadcast] this waits indefinitely for a future
-     * announcement. Cancel the returned handle to stop waiting.
+     * announcement, and each later `available()` waits for the next instance,
+     * such as a restarted publisher. Cancel the returned handle to stop waiting.
      */
     fun announcedBroadcast(path: String): AnnouncedBroadcast = session.consume().announcedBroadcast(path)
 
