@@ -245,13 +245,17 @@ impl Client {
 
 	/// Dial QUIC and WebTransport with these flow-control limits instead of the
 	/// configured ones, sharing this client's socket; other transports keep theirs.
-	pub fn with_quic_limits(mut self, limits: crate::quic::Limits) -> Self {
+	pub fn with_quic_limits(self, limits: crate::quic::Limits) -> Self {
 		#[cfg(feature = "quic")]
+		return Self {
+			quic: self.quic.map(|quic| quic.with_limits(limits)),
+			..self
+		};
+		#[cfg(not(feature = "quic"))]
 		{
-			self.quic = self.quic.map(|quic| quic.with_limits(limits));
+			let _ = limits;
+			self
 		}
-		let _ = limits;
-		self
 	}
 
 	/// Override whether this client redials after a session drop.
