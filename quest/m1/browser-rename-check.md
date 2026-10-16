@@ -46,6 +46,15 @@ or a connection to the isolated Opus scheduling finding. Keep this quest until
 smooth playback is established with the complete applicable oracle; no timing,
 tone or skew threshold has been relaxed.
 
+2026-10-16: the post-rename tone failure (CI: 71/81) was the replacement
+track's jitter estimate restarting from its cold-start prior. The shared delay
+dropped at promotion and climbed back, so the audio ring skipped and then
+parked. A replacement consumer now continues its predecessor's estimate. Five
+focused runs on a loaded machine (load 47 on 24 cores): three passed every
+window; one failed coded-size growth tone (60/81) while the delay rose with
+real video lateness on the same `video/1`; one failed on a subscribe update
+racing the old track's finish (`stream aborted by the remote server`).
+
 ## Related
 
 - [Rust identity enforcement](/quest/m1/catalog-identity-rs.md) - the same contract for the Rust publishers
