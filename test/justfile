@@ -150,7 +150,8 @@ ts-eit *args:
     ./ts/eit-roundtrip.sh "$@"
 
 # The T-STD model's controls: a broadcast capture must pass, and the same capture
-# delivered too slowly, too early, or in a burst must fail. Needs only TSDuck.
+# delivered too slowly, too early, or in a burst must fail. Needs TSDuck, plus
+# ffmpeg/ffprobe (libx264) for the generated references.
 ts-tstd:
     bash ./ts/tstd-controls.sh
 
