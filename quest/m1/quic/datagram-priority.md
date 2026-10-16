@@ -95,7 +95,7 @@ synchronous `send_datagram` taking a send-group handle and a group
 sequence.
 Every implementation follows: moq-tokio (`transport.rs`,
 `transport/owned.rs`), moq-uring (`transport/adapter.rs`,
-`quic/noq/connection.rs`, `quic/web.rs`), moq-ffi and moq-wasm
+`quic/driver/connection.rs`, `quic/web.rs`), moq-ffi and moq-wasm
 (`transport/adapter.rs`), moq-net's `ietf/adapter.rs`, and the test mocks.
 moq-uring's `quic/web.rs` serves WebTransport over the worker's own QUIC
 connection, so it honors the handle and order like raw QUIC. moq-wasm sits

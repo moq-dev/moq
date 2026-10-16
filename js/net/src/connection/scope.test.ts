@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { Milli, Nano } from "@moq/clock";
 import { announcedView } from "../announced.test-util";
 import * as Ietf from "../ietf/index.ts";
 import * as Lite from "../lite/index.ts";
@@ -33,7 +34,11 @@ for (const protocol of [Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_19]) {
 		try {
 			const received: string[] = [];
 			for (let index = 0; index < 3; index++) {
-				const update = await withTimeout(announced.next(), 1000, "scoped announcement did not arrive");
+				const update = await withTimeout(
+					announced.next(),
+					Nano.fromMilli(Milli(1000)),
+					"scoped announcement did not arrive",
+				);
 				if (update?.kind !== "start") throw new Error(`expected an announcement, got ${update?.kind}`);
 				received.push(update.prefix);
 			}

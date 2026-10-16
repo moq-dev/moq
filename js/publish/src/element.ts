@@ -139,6 +139,8 @@ export default class MoqPublish extends HTMLElement {
 
 	// Whether to flip the video horizontally on playback. No attribute yet.
 	#flip = new Signal(false);
+	// The camera's screen orientation, which the capture turns into a rotation for landscape frames.
+	#orientation = new Signal(0);
 
 	// The preview element, either a <video> (raw source via srcObject) or a <canvas> (rendered frames).
 	#preview = new Signal<HTMLVideoElement | HTMLCanvasElement | undefined>(undefined);
@@ -186,7 +188,7 @@ export default class MoqPublish extends HTMLElement {
 			this.#eitherEnabled.set(!muted || !invisible);
 		});
 
-		this.#capture = new Video.Capture({ source: this.#videoSource });
+		this.#capture = new Video.Capture({ source: this.#videoSource, orientation: this.#orientation });
 		this.signals.cleanup(() => this.#capture.close());
 
 		// Reached as `audio.capture` rather than a field of its own, so audio and video read alike.
@@ -203,6 +205,7 @@ export default class MoqPublish extends HTMLElement {
 			name: this.#name,
 			display: this.#capture.out.display,
 			flip: this.#flip,
+			rotation: this.#capture.out.rotation,
 		});
 		this.signals.cleanup(() => this.broadcast.close());
 
@@ -249,6 +252,7 @@ export default class MoqPublish extends HTMLElement {
 					frames: this.#capture.out.frames,
 					display: this.#capture.out.display,
 					flip: this.#flip,
+					rotation: this.#capture.out.rotation,
 					encoder: this.video,
 					mode: this.controls.preview,
 					enabled: this.#videoEnabled,
@@ -346,6 +350,7 @@ export default class MoqPublish extends HTMLElement {
 			video: this.#videoSource,
 			audio: this.#audioSource,
 		});
+		effect.set(this.#orientation, 0, 0);
 
 		if (!source) return;
 
@@ -358,6 +363,7 @@ export default class MoqPublish extends HTMLElement {
 			effect.run((nested) => {
 				nested.set(this.#videoSource, nested.get(video.out.source)?.video);
 				nested.set(this.#audioSource, nested.get(audio.out.source)?.audio);
+				nested.set(this.#orientation, nested.get(video.out.orientation), 0);
 			});
 
 			effect.cleanup(() => {

@@ -1,7 +1,8 @@
 import { expect, test } from "bun:test";
+import { Milli } from "@moq/clock";
 import * as Path from "../path.ts";
 import { Reader, Writer } from "../stream.ts";
-import { Milli, Timescale } from "../time.ts";
+import { Timescale } from "../time.ts";
 import { infoDefaults } from "../track.ts";
 import { Track, TrackInfo } from "./track.ts";
 import { Version } from "./version.ts";

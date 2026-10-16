@@ -175,7 +175,7 @@ pub struct Export {
 	/// One row per elementary stream PID the exporter writes, ordered by PID.
 	pub streams: BTreeMap<u16, Stream>,
 	/// Frames dropped for arriving after their deadline, and the frames a video track then
-	/// dropped waiting for its next keyframe.
+	/// dropped waiting for its next keyframe or leading the keyframe it resumed at.
 	pub dropped: u64,
 	/// How fast the source's clock runs against ours, in parts per million (positive runs
 	/// fast), as last measured. `None` until there is a measurement.
