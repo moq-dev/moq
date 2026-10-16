@@ -154,7 +154,7 @@ impl<S: backend::RecvStream + 'static> poll::RecvStream for RecvStream<S> {
 }
 
 fn close_kind(error: &(dyn std::error::Error + 'static)) -> moq::CloseKind {
-	#[cfg(all(target_os = "linux", feature = "noq"))]
+	#[cfg(all(target_os = "linux", feature = "quic"))]
 	if let Some(error) = error.downcast_ref::<crate::quic::Error>() {
 		return match error {
 			crate::quic::Error::TimedOut => moq::CloseKind::IdleTimeout,
@@ -327,7 +327,7 @@ mod tests {
 	}
 }
 
-#[cfg(all(test, target_os = "linux", feature = "noq"))]
+#[cfg(all(test, target_os = "linux", feature = "quic"))]
 mod outcome_tests {
 	use super::*;
 

@@ -18,6 +18,7 @@ pub enum Refusal {
 	/// The LAN membership proof was missing or invalid.
 	Lan,
 }
+
 impl Refusal {
 	/// Every currently defined kind, in display order.
 	pub const ALL: &'static [Self] = &[
@@ -55,6 +56,7 @@ pub struct Refusals {
 	/// The LAN membership proof was missing or invalid.
 	pub lan: u64,
 }
+
 impl Refusals {
 	/// The cumulative count for this kind.
 	pub fn count(&self, kind: Refusal) -> u64 {
@@ -83,6 +85,7 @@ impl Refusals {
 			|| self.lan < previous.lan
 	}
 }
+
 #[derive(Debug, Default)]
 pub(super) struct RefusalCounters {
 	refused: AtomicU64,
@@ -91,6 +94,7 @@ pub(super) struct RefusalCounters {
 	forbidden: AtomicU64,
 	lan: AtomicU64,
 }
+
 impl RefusalCounters {
 	pub(super) fn counter(&self, kind: Refusal) -> &AtomicU64 {
 		match kind {
@@ -125,6 +129,7 @@ pub enum Failure {
 	/// The session credential expired.
 	Expired,
 }
+
 impl Failure {
 	/// Every currently defined kind, in display order.
 	pub const ALL: &'static [Self] = &[Self::IdleTimeout, Self::Transport, Self::Application, Self::Expired];
@@ -153,6 +158,7 @@ pub struct Failures {
 	/// The session credential expired.
 	pub expired: u64,
 }
+
 impl Failures {
 	/// The cumulative count for this kind.
 	pub fn count(&self, kind: Failure) -> u64 {
@@ -178,6 +184,7 @@ impl Failures {
 			|| self.expired < previous.expired
 	}
 }
+
 #[derive(Debug, Default)]
 pub(super) struct FailureCounters {
 	idle_timeout: AtomicU64,
@@ -185,6 +192,7 @@ pub(super) struct FailureCounters {
 	application: AtomicU64,
 	expired: AtomicU64,
 }
+
 impl FailureCounters {
 	pub(super) fn counter(&self, kind: Failure) -> &AtomicU64 {
 		match kind {

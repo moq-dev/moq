@@ -133,9 +133,9 @@ impl<S: wt::RecvStream + 'static> poll::RecvStream for super::RecvStream<S> {
 }
 
 fn close_kind(error: &(dyn std::error::Error + 'static)) -> moq::CloseKind {
-	#[cfg(feature = "noq")]
-	if let Some(error) = error.downcast_ref::<web_transport_moq::SessionError>() {
-		use web_transport_moq::{SessionError, noq::ConnectionError};
+	#[cfg(feature = "quic")]
+	if let Some(error) = error.downcast_ref::<crate::quic::web::SessionError>() {
+		use crate::quic::{driver::ConnectionError, web::SessionError};
 		return match error {
 			SessionError::ConnectionError(ConnectionError::TimedOut) => moq::CloseKind::IdleTimeout,
 			SessionError::ConnectionError(ConnectionError::LocallyClosed) => moq::CloseKind::Closed,
@@ -154,11 +154,11 @@ fn close_kind(error: &(dyn std::error::Error + 'static)) -> moq::CloseKind {
 	error.source().map(close_kind).unwrap_or_default()
 }
 
-#[cfg(all(test, feature = "noq"))]
+#[cfg(all(test, feature = "quic"))]
 mod outcome_tests {
 	use super::*;
+	use crate::quic::{driver::ConnectionError, web::SessionError};
 	use moq_net::transport::Error as _;
-	use web_transport_moq::{SessionError, noq::ConnectionError};
 
 	#[test]
 	fn typed_idle_and_local_closes_survive_session_and_stream_wrappers() {
@@ -167,7 +167,7 @@ mod outcome_tests {
 			moq_net::Error::from_transport(idle),
 			moq_net::Error::IdleTimeout
 		));
-		let idle = Error(web_transport_moq::ReadError::SessionError(
+		let idle = Error(crate::quic::web::ReadError::SessionError(
 			SessionError::ConnectionError(ConnectionError::TimedOut),
 		));
 		assert_eq!(idle.close_kind(), moq::CloseKind::IdleTimeout);

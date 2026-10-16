@@ -2228,9 +2228,6 @@ mod tests {
 		drop(broadcast);
 	}
 
-	/// `?cost=` is read and stripped (it rides SETUP, not the URL), other
-	/// query params survive, and a garbage value is an error rather than a
-	/// silent default.
 	#[test]
 	fn remote_logical_outcome_ignores_retries_and_counts_one_terminal_close() {
 		use moq_net::stats::{Failure, Registry};
@@ -2278,6 +2275,9 @@ mod tests {
 		assert_eq!(presence.sessions_failed.application, 0);
 	}
 
+	/// `?cost=` is read and stripped (it rides SETUP, not the URL), other
+	/// query params survive, and a garbage value is an error rather than a
+	/// silent default.
 	#[test]
 	fn cost_param_is_consumed() {
 		let mut url = Url::parse("https://peer.example/?jwt=abc&cost=0").unwrap();

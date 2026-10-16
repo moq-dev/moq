@@ -532,14 +532,14 @@ impl Lease {
 
 	pub(crate) fn close_session(self, error: &moq_net::Error, bytes: Bytes) {
 		let stats = self.stats.clone();
-		let reason = if crate::connection::failure(error).is_none() {
-			"closed".to_string()
-		} else {
-			error.to_string()
+		let failure = crate::connection::failure(error);
+		let reason = match failure {
+			Some(_) => error.to_string(),
+			None => "closed".to_string(),
 		};
-		let reason = self.close(reason, bytes);
-		if reason != lease::Reason::Expired
-			&& let Some(kind) = crate::connection::failure(error)
+		// An expired lease already recorded its own failure kind.
+		if self.close(reason, bytes) != lease::Reason::Expired
+			&& let Some(kind) = failure
 		{
 			stats.fail(kind);
 		}

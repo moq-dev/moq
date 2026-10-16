@@ -55,7 +55,6 @@ Decided 2026-10-08:
 Public API: moq-auth's refusal error and the HTTP refusal body. Wire: the
 auth HTTP contract only, not MoQ.
 
-
 ## Related
 
 - [Expired token error](/quest/m1/auth/expired-error.md) - the MoQ wire
