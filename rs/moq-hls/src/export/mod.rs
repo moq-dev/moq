@@ -3908,6 +3908,22 @@ mod tests {
 		test.drain("video0").await;
 	}
 
+	// A range over a recording that ended without media is refused rather than reported missing.
+	#[tokio::test(start_paused = true)]
+	async fn a_range_over_an_empty_ended_recording_is_refused() {
+		let test = Timelines::new();
+		let (track, video0) = test.publish("video0");
+		let (_track, _video1) = test.publish("video1");
+		cut(track, video0);
+		assert!(test.finished("video1").await.segments.is_empty());
+
+		let range = Range::new(Duration::ZERO, Duration::from_secs(2)).unwrap();
+		assert!(matches!(
+			test.rendition("video1").snapshot_range(range, None),
+			Err(crate::Error::RangeUnavailable(_))
+		));
+	}
+
 	// A rendition running far ahead of a stalled reference keeps the records its listed segments
 	// resolve to, so a listed segment never turns into a gap.
 	#[tokio::test(start_paused = true)]

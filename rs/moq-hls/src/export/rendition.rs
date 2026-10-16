@@ -656,7 +656,10 @@ impl Rendition {
 		self.media.sync(&self.live);
 		let mut window = self.live.window();
 		let Some(first) = window.segments.first() else {
-			return Ok(self.snapshot_as(generation));
+			if window.ended {
+				return Err(crate::Error::RangeUnavailable("the recording is empty".into()));
+			}
+			return Ok(self.snapshot_from_window(window, false, generation));
 		};
 		if range.start < Duration::from(first.pts) {
 			return Err(crate::Error::RangeUnavailable("start is before retained media".into()));
