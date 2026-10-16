@@ -341,7 +341,7 @@ impl Connection {
 	/// Change the connection's flow-control limits; a raise reaches the peer
 	/// on the next packet.
 	pub fn set_limits(&self, limits: crate::quic::Limits) {
-		let streams = VarInt::from_u64(limits.max_streams).unwrap_or(VarInt::MAX);
+		let streams = VarInt::from_u64(limits.max_streams.get()).unwrap_or(VarInt::MAX);
 		let mut conn = self.shared.conn.borrow_mut();
 		conn.set_max_concurrent_streams(Dir::Bi, streams);
 		conn.set_max_concurrent_streams(Dir::Uni, streams);

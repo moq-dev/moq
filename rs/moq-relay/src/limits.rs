@@ -112,7 +112,7 @@ pub struct Quic {
 		default = "100000",
 		setting = "peer.quic.max_streams"
 	)]
-	pub max_streams: u64,
+	pub max_streams: std::num::NonZeroU64,
 	/// Connection-wide QUIC receive window, in bytes.
 	#[usage(
 		long = "peer-quic-receive-window",
@@ -137,7 +137,7 @@ impl Default for Quic {
 		// one viewer rather than a link carrying a whole cluster's traffic.
 		let window = std::num::NonZeroU64::new(10 * moq_tokio::quic::DEFAULT_RECEIVE_WINDOW).expect("non-zero");
 		Self {
-			max_streams: 10 * moq_tokio::quic::DEFAULT_MAX_STREAMS,
+			max_streams: std::num::NonZeroU64::new(10 * moq_tokio::quic::DEFAULT_MAX_STREAMS).expect("non-zero"),
 			receive_window: window,
 			send_window: window,
 		}

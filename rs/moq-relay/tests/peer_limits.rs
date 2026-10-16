@@ -35,7 +35,7 @@ fn config(dir: &std::path::Path) -> Config {
 	config.listen.tls.cert = vec![cert];
 	config.listen.tls.key = vec![key];
 	config.quic.max_streams = Some(VIEWER_STREAMS);
-	config.peer.quic.max_streams = 4 * PROBE as u64;
+	config.peer.quic.max_streams = std::num::NonZeroU64::new(4 * PROBE as u64).unwrap();
 	config
 }
 
@@ -183,7 +183,7 @@ async fn cluster_dials_widen_a_plain_client() {
 
 	let mut options = moq_relay::cluster::Options::new(Default::default());
 	options.config.connect = vec![moq_relay::cluster::Peer::new(format!("moql://127.0.0.1:{port}/"))];
-	options.peer.quic.max_streams = 4 * PROBE as u64;
+	options.peer.quic.max_streams = std::num::NonZeroU64::new(4 * PROBE as u64).unwrap();
 	let cluster = moq_relay::cluster::Cluster::new(options)
 		.expect("cluster init")
 		.with_client(client);

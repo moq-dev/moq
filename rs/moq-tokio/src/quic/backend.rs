@@ -347,7 +347,7 @@ impl Client {
 	/// Dial with `limits` in place of the configured stream limit and windows.
 	pub fn with_limits(mut self, limits: crate::quic::Limits) -> Self {
 		let mut transport = (*self.transport).clone();
-		let streams = driver::VarInt::from_u64(limits.max_streams).unwrap_or(driver::VarInt::MAX);
+		let streams = driver::VarInt::from_u64(limits.max_streams.get()).unwrap_or(driver::VarInt::MAX);
 		transport.max_concurrent_bidi_streams(streams);
 		transport.max_concurrent_uni_streams(streams);
 		transport.receive_window(driver::VarInt::from_u64(limits.receive_window.get()).unwrap_or(driver::VarInt::MAX));

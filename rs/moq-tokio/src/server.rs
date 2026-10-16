@@ -1721,7 +1721,7 @@ impl Request {
 		#[cfg(feature = "quic")]
 		if let Some(conn) = &self.quic {
 			use crate::quic::driver::VarInt;
-			let streams = VarInt::from_u64(limits.max_streams).unwrap_or(VarInt::MAX);
+			let streams = VarInt::from_u64(limits.max_streams.get()).unwrap_or(VarInt::MAX);
 			conn.set_max_concurrent_bi_streams(streams);
 			conn.set_max_concurrent_uni_streams(streams);
 			conn.set_receive_window(VarInt::from_u64(limits.receive_window.get()).unwrap_or(VarInt::MAX));

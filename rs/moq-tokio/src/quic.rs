@@ -128,12 +128,12 @@ pub(crate) const DEFAULT_KEEP_ALIVE: Duration = Duration::from_secs(3);
 /// The flow-control limits a QUIC connection can be widened to, such as by a
 /// relay once it knows the peer is another relay.
 ///
-/// Values past what QUIC can express saturate to its maximum. The windows are
-/// non-zero because a zero window credits nothing and wedges the connection.
+/// Values past what QUIC can express saturate to its maximum. Each is non-zero
+/// because zero streams or a zero window credits nothing and wedges the connection.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Limits {
 	/// Max concurrent streams the peer may open, per direction.
-	pub max_streams: u64,
+	pub max_streams: std::num::NonZeroU64,
 	/// Connection-wide receive window, in bytes.
 	pub receive_window: std::num::NonZeroU64,
 	/// Cap on unacknowledged outgoing data, in bytes.
