@@ -17,6 +17,7 @@
  */
 import * as net from "node:net";
 import { parseArgs } from "node:util";
+import { Milli } from "@moq/clock";
 import * as Moq from "@moq/net";
 
 const { values } = parseArgs({
@@ -46,13 +47,13 @@ const GROUPS_PER_RELAY = 10;
 const GROUP_INTERVAL_MS = 100;
 // How long the viewer's old session may keep serving after the GOAWAY. Well inside the relay's
 // 20s drain window, so the relay's exit log can prove the viewer left on its own.
-const HANDOVER = Moq.Time.Milli(2000);
+const HANDOVER = Milli(2000);
 // The viewer's latency budget, as a player sets one (the interop subscribers use the same).
 // Following the route means resubscribing on B, and B has to subscribe upstream afresh once A
 // drops its pull; the budget is what lets that resubscribe reach back to a group that was in
 // flight across the swap instead of starting at the next one. With none, a group boundary
 // landing inside the swap drops that group.
-const MAX_DELAY = Moq.Time.Milli(1000);
+const MAX_DELAY = Milli(1000);
 
 const path = Moq.Path.from("drain");
 const trackName = "seq";

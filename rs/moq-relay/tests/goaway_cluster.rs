@@ -33,7 +33,7 @@ async fn within<T>(step: &str, fut: impl std::future::Future<Output = T>) -> T {
 /// Run an integration-test future on a dedicated thread with a large stack.
 ///
 /// Under `--all-features`, `moq-tokio` compiles every transport
-/// (noq, iroh, websocket, and qmux) into its `Session`/`Client` types.
+/// (QUIC, iroh, websocket, and qmux) into its `Session`/`Client` types.
 /// These multi-relay tests hold several such values live across await points,
 /// so the single test future's state machine is large, and in an unoptimized
 /// build it overflows libtest's default 2 MiB per-test thread stack (a SIGABRT
@@ -259,7 +259,7 @@ async fn spawn_upstream(
 		while let Some(request) = server.accept().await {
 			// Serve the shared origin bidirectionally, like a relay peer would.
 			let scratch = moq_tokio::origin::spawn();
-			let session = match request.with_publisher(&origin).with_subscriber(scratch).ok().await {
+			let (session, _driver) = match request.with_publisher(&origin).with_subscriber(scratch).ok().await {
 				Ok(session) => session,
 				Err(err) => {
 					tracing::warn!(%err, "upstream accept failed");
