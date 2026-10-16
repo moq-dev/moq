@@ -118,8 +118,9 @@ pub enum Requests {
 	/// update arrives. Forwarders keep no state.
 	Retries(u32),
 	/// Every node holding a request, its own or forwarded, keeps it until a route
-	/// at least that new is selected or no route is left, and sends it again
-	/// whenever the neighbor it would send it to changes. No timers.
+	/// at least that new is selected or no route is left, sends it to its next
+	/// hop even when that is a requester, and sends it again whenever that
+	/// neighbor changes. No timers.
 	HopByHop,
 }
 
@@ -235,8 +236,9 @@ enum Msg {
 	/// ROUTE_START or ROUTE_UPDATE, or `None` for ROUTE_END.
 	Route { id: Id, reach: Option<Reach> },
 	/// A batch of ANNOUNCEs closed by its floor: the sender's complete view of
-	/// this identity's claims within the receiver's interest.
-	Claims { id: Id, view: View },
+	/// this identity's claims within the receiver's interest. `interest` names
+	/// the interest it answers, as the request a stream belongs to does.
+	Claims { id: Id, view: View, interest: u32 },
 	/// ROUTE_REQUEST, toward the neighbor whose route the sender would use.
 	Request { id: Id, seqno: u32 },
 }
@@ -480,11 +482,13 @@ struct State {
 	gave_up: BTreeSet<Id>,
 	/// The prefix this node asks its neighbors for announcements under.
 	watch: &'static str,
+	/// Counts this node's interest changes.
+	interest: u32,
 	/// Each origin's claims as this node knows them; authoritative for its own.
 	views: BTreeMap<Id, View>,
 	/// After the interest widened, the region each view is still current in:
 	/// the rest stayed frozen while unwatched, so it is hidden until a floor
-	/// covering the whole interest arrives.
+	/// covering the whole interest arrives in answer to that interest.
 	current: BTreeMap<Id, &'static str>,
 	/// The last view each neighbor sent, per identity.
 	heard: BTreeMap<(Node, Id), View>,
@@ -706,6 +710,7 @@ impl Net {
 		self.nodes[node] = State {
 			transit: old.transit,
 			watch: old.watch,
+			interest: old.interest,
 			forgot: old.forgot + 1,
 			..State::default()
 		};
@@ -813,6 +818,7 @@ impl Net {
 		}
 		state.current.retain(|_, current| !prefix.starts_with(*current));
 		state.watch = prefix;
+		state.interest += 1;
 		let peers: Vec<Node> = self.peers(node).collect();
 		for peer in peers {
 			self.advertise(peer);
@@ -843,6 +849,30 @@ impl Net {
 		state.gave_up.remove(&id);
 		state.forgot += 1;
 		self.advertise(node);
+	}
+
+	/// Whether every neighbor has processed `node`'s retraction of `id`: none
+	/// holds an entry from it and no route message from it is in flight. The
+	/// echoed ROUTE_ENDs tell `node` this; a restart gets it by
+	/// closing every session.
+	pub fn retracted(&self, node: Node, id: Id) -> bool {
+		self.peers(node).all(|peer| {
+			let queued = self.queues.get(&(node, peer)).is_some_and(|queue| {
+				queue
+					.iter()
+					.any(|msg| matches!(msg, Msg::Route { id: sent, .. } if *sent == id))
+			});
+			let held = self
+				.key(peer, node, id)
+				.and_then(|key| self.nodes[peer].rx.get(&key))
+				.is_some_and(|routes| routes.contains_key(&node));
+			!queued && !held
+		})
+	}
+
+	/// Drop `node`'s feasibility distance for `id`.
+	pub fn forget(&mut self, node: Node, id: Id) {
+		self.nodes[node].fd.remove(&id);
 	}
 
 	pub fn claim(&mut self, id: Id, prefix: &'static str, seed: Metric, epoch: Option<u32>) -> usize {
@@ -1042,7 +1072,7 @@ impl Net {
 					state.rx.remove(&id);
 				}
 			}
-			Msg::Claims { id, view } => {
+			Msg::Claims { id, view, interest } => {
 				let Some(id) = self.key(at, from, id) else {
 					return;
 				};
@@ -1051,7 +1081,7 @@ impl Net {
 					_ => view,
 				};
 				let state = &mut self.nodes[at];
-				if view.floors.keys().any(|region| state.watch.starts_with(region)) {
+				if interest == state.interest && view.floors.keys().any(|region| state.watch.starts_with(region)) {
 					state.current.remove(&id);
 				}
 				if let Freshness::Floors { scoped } = self.cfg.freshness
@@ -1366,10 +1396,11 @@ impl Net {
 				self.stats.claim_msgs += 1;
 				self.stats.claim_items += items;
 				self.stats.claim_bytes += bytes;
-				self.queues
-					.entry((node, peer))
-					.or_default()
-					.push_back(Msg::Claims { id, view });
+				self.queues.entry((node, peer)).or_default().push_back(Msg::Claims {
+					id,
+					view,
+					interest: self.nodes[peer].interest,
+				});
 			}
 		}
 		// Drop a feasibility distance once nothing here routes or advertises the
@@ -1439,7 +1470,15 @@ impl Net {
 				continue;
 			};
 			let answered = self.route(node, id).is_some_and(|route| route.seqno >= pending.seqno);
-			let target = self.target(node, id, &pending.from);
+			// Hop by hop, a request follows the next hop even back through a
+			// requester: next hops form no loop, one pending request per hop stops
+			// a bounce, and no requester ever cancels, so excluding one can strand
+			// a request while every route still runs through it.
+			let except = match self.cfg.requests {
+				Requests::HopByHop => BTreeSet::new(),
+				_ => pending.from.clone(),
+			};
+			let target = self.target(node, id, &except);
 			if answered || target.is_none() || (pending.from.is_empty() && !starved) {
 				self.nodes[node].pending.remove(&id);
 				continue;

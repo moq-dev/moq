@@ -182,9 +182,13 @@ The handoff contract below, decided 2026-10-16, settles claim freshness:
   ROUTE_REQUEST for that origin, with its feasibility seqno plus one, to the
   neighbour it would use. A node holding a route at least that new answers
   with it, and only the origin advances its seqno to answer. Otherwise it
-  forwards the request, never to the requesting neighbour (RFC 8966
-  s3.8.1.2): through a feasible route's next hop if one avoids the requester,
-  else through an infeasible route's, else it drops the request. Every node
+  forwards the request to the neighbour it would use for its own: a
+  feasible route's next hop, else an infeasible route's, even when that
+  neighbour asked it. This departs from RFC 8966 s3.8.1.2, which avoids the
+  requester: nothing cancels a request, so a requester that stopped waiting
+  stays excluded, and a hop whose only route runs through it strands the
+  request (`sweep_requests_reach_a_quiet_origin`). Next hops form no loop,
+  and one pending request per hop stops a bounce. Every node
   holding a request, its own or forwarded, keeps one per origin pending,
   suppressing duplicates, until it selects a route at least that new or has
   no usable route left, and sends it again whenever the neighbour it would
@@ -311,9 +315,11 @@ loss never reports an END:
   (`widening_interest_needs_floors_scoped_to_what_they_cover`); narrowing
   keeps the rest frozen at its floor for a rejoin
   (`cancelling_interest_keeps_freshness_for_a_rejoin`), and widening hides
-  that frozen rest until a floor covering the widened interest arrives,
-  rather than showing a claim that ended unwatched
-  (`widening_hides_what_was_frozen_until_a_covering_floor_arrives`); and withdrawing one
+  that frozen rest until a floor covering the widened interest arrives on
+  the stream answering it, rather than showing a claim that ended unwatched
+  (`widening_hides_what_was_frozen_until_a_covering_floor_arrives`); a root
+  snapshot still queued from the old interest does not count
+  (`a_snapshot_queued_before_widening_keeps_the_frozen_rest_hidden`); and withdrawing one
   origin's wildcard leaves another origin's copy
   (`wildcard_claims_end_per_origin_and_are_certified_below`).
 - Per identity, a node is usable (a feasible selected route: announcements
@@ -370,9 +376,9 @@ loss never reports an END:
 
   | Rule | Revivals | False ENDs | Re-announcements | Reader events | Claim KiB |
   | --- | --- | --- | --- | --- | --- |
-  | Next-hop authority | 383 | 445 | 391 | 9014 | 833 |
-  | Snapshot barrier | 238 | 173 | 265 | 9292 | 804 |
-  | Merged floors | 0 | 0 | 35 | 9199 | 779 |
+  | Next-hop authority | 387 | 448 | 395 | 9022 | 833 |
+  | Snapshot barrier | 237 | 172 | 264 | 9286 | 804 |
+  | Merged floors | 0 | 0 | 35 | 9186 | 779 |
 
   Merged floors' re-announcements follow an offline period or a collection,
   never a known withdrawal. Byte counts are estimates in virtual time.
@@ -400,10 +406,13 @@ Decided with the maintainer 2026-10-16, from the handoff proof:
    the node's own advertisement has drained from every session, and
    accepting that echo loops
    (`collection_keeps_the_feasibility_distance_against_a_queued_echo`), so
-   the feasibility distance waits for decision 6.
+   decision 6 drains the feasibility distance instead.
 5. Seqno requests: ✅ one pending request per origin at every hop, resent on
    a next-hop change, with no timer and no hop count. Rejected: the
    bounded-retry sketch, which strands a quiet origin's node.
+   Revised 2026-10-16 after review: a hop forwards to its next hop even when
+   that neighbour asked it, since excluding requesters strands requests
+   (`sweep_requests_reach_a_quiet_origin`).
 6. Feasibility-distance retention: ✅ drain it. A receiver echoes every
    ROUTE_END back on the same stream once applied, and a node drops the
    distance once it routes and advertises the identity nowhere and every
@@ -413,13 +422,17 @@ Decided with the maintainer 2026-10-16, from the handoff proof:
    distance would leak for every identity sent to a client. A per-neighbour
    echo is enough, with no diffusing computation: once none holds the
    advertisement, no node selects through this one, and every other node
-   keeps its own distance. `sweep_handoff` interleaves echoes freely with
-   routes, stays loop-free at every step, and leaves no distance for a dead
-   identity; dropping the distance before the echoes return fails the queued
-   echo fixture. Rejected: keeping the distance forever, which grows with
-   publisher churn times uptime on every relay that saw an identity, about
-   16 bytes each, until a restart; and Babel's source GC timer, which
-   assumes stale echoes are gone by then rather than proving it.
+   keeps its own distance. A restart is the same drain, since its sessions
+   close with the process
+   (`restart_drops_the_feasibility_distance_with_every_session`).
+   `sweep_handoff` interleaves echoes freely with routes, stays loop-free at
+   every step, and leaves no distance for a dead identity; dropping the
+   distance before the echoes return fails the queued echo fixture, and
+   dropping it at no entry loops where the echoed condition never does
+   (`sweep_forgetting_distances`). Rejected: keeping the distance forever,
+   which grows with publisher churn times uptime on every relay that saw an
+   identity, about 16 bytes each, until a restart; and Babel's source GC
+   timer, which assumes stale echoes are gone by then rather than proving it.
 
 Why not a hold-down: #4644 retracted at once and re-announced a replacement
 after 1 s, which ended a downstream front whose only path ran through the
@@ -490,8 +503,9 @@ an island reached through the CDN after a partition; an unknown Route ID
 refused; a five-node ring whose preferred origin link fails recovers its
 longer backup through a seqno request, duplicates suppressed, while that
 backup never loses its session; a ring where a node's own preferred route
-points back at the requester forwards the request around it instead, and an
-unanswerable request stops after its retries. Failover is measured
+points back at the requester forwards the request to it, which carries it
+on along its own route, and an unanswerable request stops once no usable
+route is left. Failover is measured
 on broadcast liveness while the next hop changes, including a new next hop
 whose ROUTE arrives before its ANNOUNCE set, and reports per-path
 retractions and re-announcements beside the ROUTE budget; eventual route
