@@ -53,8 +53,8 @@ interface Reported {
  * watches (`announced(scope)` and `request(path, { announced: true })`) that no open request
  * already covers, and closes {@link LINGER} after nothing at or beneath its prefix is watched.
  * A narrower watch rides an open broader request, and a narrower request already open stays
- * open until the broader one covering it goes, so neither takes the other's routes over:
- * nothing tells when a fresh request has caught up. A route both report is inserted once and
+ * open until the broader one covering it goes, so neither takes the other's routes over
+ * before it has caught up, which not every version can tell. A route both report is inserted once and
  * driven by its first reporter; if it changes hands anyway (a request failing), it restarts
  * unless one epoch proves both requests saw one instance.
  *
