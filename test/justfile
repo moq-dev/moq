@@ -117,11 +117,6 @@ audio-quality-record *args:
 drill-sensitivity *args:
     ./drill/sensitivity.sh "$@"
 
-# Select or run the PR's affected sensitivity mutations against its base.
-[positional-arguments]
-drill-pr mode base="":
-    python3 ./drill/pr.py "$@"
-
 # Round-trips a PCR-paced TS through a relay and checks the subscriber's `export
 # ts` output with FFmpeg, TSDuck and a custom analyzer (the T-STD buffer model, PCR
 # spacing and byte schedule). Flags: `--analyze-only file.ts`
@@ -185,7 +180,7 @@ video:
 
 # Optional publisher retention across Rust/JS sessions through a Rust relay.
 max-age:
-    cargo nextest run --locked -p moq-tokio --test max_age --run-ignored all
+    cargo nextest run --locked -p moq-tokio --test integration -E 'test(/^max_age::/)' --run-ignored all
 
 # Cross-language subscription termination over in-memory transports.
 bare-fin:
