@@ -208,12 +208,13 @@ impl Properties {
 	}
 }
 
-/// Record a DYNAMIC_GROUPS value, refusing anything but 0 or 1, and a second occurrence.
+/// Record a DYNAMIC_GROUPS value, refusing a second occurrence. Anything but 0 or 1 is a
+/// PROTOCOL_VIOLATION that closes the session (draft-22 section 10.6).
 fn set_dynamic_groups(dynamic_groups: &mut Option<bool>, value: u64) -> Result<(), DecodeError> {
 	let value = match value {
 		0 => false,
 		1 => true,
-		_ => return Err(DecodeError::InvalidValue),
+		_ => return Err(DecodeError::Session(crate::SessionError::ProtocolViolation)),
 	};
 	match dynamic_groups.replace(value) {
 		Some(_) => Err(DecodeError::InvalidValue),
@@ -428,7 +429,10 @@ mod tests {
 		assert!(decode_draft22(&[0x30, 0x01]).unwrap().dynamic_groups);
 		assert!(!decode_draft22(&[0x30, 0x00]).unwrap().dynamic_groups);
 		assert!(!decode_draft22(&[]).unwrap().dynamic_groups);
-		assert!(matches!(decode_draft22(&[0x30, 0x02]), Err(DecodeError::InvalidValue)));
+		assert!(matches!(
+			decode_draft22(&[0x30, 0x02]),
+			Err(DecodeError::Session(crate::SessionError::ProtocolViolation))
+		));
 	}
 
 	/// A processor searches Immutable Properties too, with the same validation.
@@ -438,7 +442,7 @@ mod tests {
 		assert!(decode_draft22(&[0x0b, 0x02, 0x30, 0x01]).unwrap().dynamic_groups);
 		assert!(matches!(
 			decode_draft22(&[0x0b, 0x02, 0x30, 0x02]),
-			Err(DecodeError::InvalidValue)
+			Err(DecodeError::Session(crate::SessionError::ProtocolViolation))
 		));
 		// Immutable Properties nested inside Immutable Properties is malformed.
 		assert!(decode_draft22(&[0x0b, 0x02, 0x0b, 0x00]).is_err());
