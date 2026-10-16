@@ -1,8 +1,8 @@
+import { Micro, Milli } from "@moq/clock";
 import * as Catalog from "@moq/hang/catalog";
 import * as Container from "@moq/hang/container";
 import * as Util from "@moq/hang/util";
 import type * as Moq from "@moq/net";
-import { Time } from "@moq/net";
 import {
 	type Computed,
 	Effect,
@@ -17,7 +17,6 @@ import { Producer as ArrivalProducer, type Arrivals, gap } from "../arrivals";
 import { hostedAssets } from "../assets";
 import { base64ToBytes } from "../base64";
 import { type Failure, failureMoved, nextMedia, subscribeMedia } from "../media";
-
 import type { Sync } from "../sync";
 import { type AudioBuffer, createAudioBuffer } from "./buffer";
 import { type DecoderConfig, frameDuration, type PlaybackIdentity, packetDuration, playbackIdentity } from "./config";
@@ -54,7 +53,7 @@ type DecoderOutput = {
 	stats: Signal<Stats | undefined>;
 
 	// Current playback timestamp from worklet
-	timestamp: Signal<Time.Milli | undefined>;
+	timestamp: Signal<Milli | undefined>;
 
 	// Whether the audio buffer is stalled (waiting to fill)
 	stalled: Signal<boolean>;
@@ -97,7 +96,7 @@ export class Decoder {
 		root: new Signal<AudioNode | undefined>(undefined),
 		sampleRate: new Signal<number | undefined>(undefined),
 		stats: new Signal<Stats | undefined>(undefined),
-		timestamp: new Signal<Time.Milli | undefined>(undefined),
+		timestamp: new Signal<Milli | undefined>(undefined),
 		stalled: new Signal<boolean>(true),
 		underruns: new Signal<number>(0),
 		buffered: new Signal<Container.BufferedRanges>([]),
@@ -121,14 +120,14 @@ export class Decoder {
 	#terminal = new Terminal();
 
 	// The container consumer's arrival estimate, unset while nothing is subscribed.
-	#measured = new Signal<Time.Milli | undefined>(undefined);
+	#measured = new Signal<Milli | undefined>(undefined);
 
 	// The subscription's max delay: the shared budget, raised to the estimator's ceiling in "auto".
-	#subscribeMaxDelay = new Signal<Time.Milli>(Time.Milli.zero);
-	#maxDelay = new Signal<Time.Milli>(Time.Milli.zero);
+	#subscribeMaxDelay = new Signal<Milli>(Milli.zero);
+	#maxDelay = new Signal<Milli>(Milli.zero);
 
 	// The codec's frame duration: the catalog constant, refined by each frame's own duration.
-	#frame = new Signal<Time.Milli | undefined>(undefined);
+	#frame = new Signal<Milli | undefined>(undefined);
 
 	// Which subscription the ring's buffered samples came from. See #runDecoder.
 	#handover = new Handover();
@@ -161,7 +160,7 @@ export class Decoder {
 				measured,
 				advertised: effect.get(this.source.out.jitter),
 				frame: effect.get(this.#frame),
-				delay: delay !== undefined ? Time.Milli(delay) : undefined,
+				delay: delay !== undefined ? Milli(delay) : undefined,
 			});
 		});
 		this.#signals.cleanup(this.sync.register(playout));
@@ -187,9 +186,9 @@ export class Decoder {
 	#runSubscribeMaxDelay(effect: Effect): void {
 		const maxDelay = effect.get(this.sync.out.maxDelay);
 		const auto = effect.get(this.sync.in.delay) === "auto";
-		const warmup = Time.Milli(effect.get(this.source.out.config)?.warmup ?? 0);
-		this.#maxDelay.set(Time.Milli.add(maxDelay, warmup));
-		this.#subscribeMaxDelay.set(Time.Milli.add(auto ? Time.Milli.max(maxDelay, AUTO_MAX_DELAY) : maxDelay, warmup));
+		const warmup = Milli(effect.get(this.source.out.config)?.warmup ?? 0);
+		this.#maxDelay.set(Milli(maxDelay + warmup));
+		this.#subscribeMaxDelay.set(Milli((auto ? Math.max(maxDelay, AUTO_MAX_DELAY) : maxDelay) + warmup));
 	}
 
 	#runShape(effect: Effect): void {
@@ -268,7 +267,7 @@ export class Decoder {
 
 			// Mirror ring state (timestamp/stalled) onto our public signals.
 			effect.run((inner) => {
-				const ts = Time.Milli.fromMicro(inner.get(ring.timestamp));
+				const ts = Milli.fromMicro(inner.get(ring.timestamp));
 				this.#out.timestamp.set(ts);
 				this.#trimDecodeBuffered(ts);
 			});
@@ -412,7 +411,7 @@ export class Decoder {
 	): void {
 		const preSkip =
 			config.codec === "opus" && config.description ? Util.Opus.preSkip(Util.Hex.toBytes(config.description)) : 0;
-		this.#terminal.clear(preSkip, Time.Micro.fromMilli(Time.Milli(config.warmup ?? 0)));
+		this.#terminal.clear(preSkip, Micro.fromMilli(Milli(config.warmup ?? 0)));
 		const format =
 			config.container.kind === "loc" ? new Container.Loc.Format("audio") : new Container.Legacy.Format(config);
 		// Create consumer with slightly less latency than the render worklet to avoid underflowing.
@@ -474,7 +473,7 @@ export class Decoder {
 				const { frame } = next;
 
 				// Classify ingress before decoder backpressure changes the delivery clock.
-				const timestamp = Time.Milli.fromMicro(frame.timestamp as Time.Micro);
+				const timestamp = Milli.fromMicro(frame.timestamp as Micro);
 				const late = this.sync.received(timestamp, "audio", frame.arrival);
 				this.#arrivals.write({ kind: "frame", timestamp, arrival: frame.arrival, late });
 
@@ -490,7 +489,7 @@ export class Decoder {
 
 				// Backpressure: in buffered mode this holds the encoded frame until the playhead nears
 				// it, keeping the lookahead above the floor as Opus instead of decoded PCM. No-op live.
-				await ring.wait(frame.timestamp as Time.Micro, effect.abort);
+				await ring.wait(frame.timestamp as Micro, effect.abort);
 				if (effect.abort.aborted) break;
 
 				const chunk = new EncodedAudioChunk({
@@ -519,7 +518,7 @@ export class Decoder {
 		const init = Container.Cmaf.decodeInitSegment(initSegment);
 		const opusDescription = config.description ? Util.Hex.toBytes(config.description) : init.description;
 		const preSkip = config.codec === "opus" && opusDescription ? Util.Opus.preSkip(opusDescription) : 0;
-		this.#terminal.clear(preSkip, Time.Micro.fromMilli(Time.Milli(config.warmup ?? 0)));
+		this.#terminal.clear(preSkip, Micro.fromMilli(Milli(config.warmup ?? 0)));
 		// Opus in CMAF uses raw packets (not OGG-wrapped), so description must be omitted.
 		// The dOps box from the init segment is not a valid OGG Identification Header.
 		const description =
@@ -581,7 +580,7 @@ export class Decoder {
 				if (next.kind !== "frame") continue;
 				const { frame } = next;
 
-				const timestamp = Time.Milli.fromMicro(frame.timestamp);
+				const timestamp = Milli.fromMicro(frame.timestamp);
 				const late = this.sync.received(timestamp, "audio", frame.arrival);
 				this.#arrivals.write({ kind: "frame", timestamp, arrival: frame.arrival, late });
 
@@ -626,7 +625,7 @@ export class Decoder {
 
 	#emit(sample: AudioData) {
 		const { timestamp, frameOffset, frames } = this.#terminal.span(sample);
-		const timestampMilli = Time.Milli.fromMicro(timestamp);
+		const timestampMilli = Milli.fromMicro(timestamp);
 		if (frames === 0) {
 			sample.close();
 			return;
@@ -649,9 +648,9 @@ export class Decoder {
 		}
 
 		// Calculate end time from sample duration
-		const durationMicro = ((frames / sample.sampleRate) * 1_000_000) as Time.Micro;
-		const durationMilli = Time.Milli.fromMicro(durationMicro);
-		const end = Time.Milli.add(timestampMilli, durationMilli);
+		const durationMicro = ((frames / sample.sampleRate) * 1_000_000) as Micro;
+		const durationMilli = Milli.fromMicro(durationMicro);
+		const end = Milli(timestampMilli + durationMilli);
 
 		// A new subscription has taken over the timeline: drop the previous one's write-ahead tail
 		// rather than letting it play out after this frame. See #runDecoder.
@@ -680,15 +679,15 @@ export class Decoder {
 		sample.close();
 	}
 
-	#addDecodeBuffered(start: Time.Milli, end: Time.Milli): void {
+	#addDecodeBuffered(start: Milli, end: Milli): void {
 		if (start > end) return;
 
 		this.#decodeBuffered.mutate((current) => {
 			for (const range of current) {
 				// Extend range if new sample overlaps or is adjacent (1ms tolerance for float precision)
 				if (start <= range.end + 1 && end >= range.start) {
-					range.start = Time.Milli.min(range.start, start);
-					range.end = Time.Milli.max(range.end, end);
+					range.start = Milli(Math.min(range.start, start));
+					range.end = Milli(Math.max(range.end, end));
 					return;
 				}
 			}
@@ -699,7 +698,7 @@ export class Decoder {
 	}
 
 	// Drop reported decode ranges at or after `timestamp`, mirroring a ring truncation.
-	#truncateDecodeBuffered(timestamp: Time.Milli): void {
+	#truncateDecodeBuffered(timestamp: Milli): void {
 		this.#decodeBuffered.mutate((current) => {
 			while (current.length > 0 && current[current.length - 1].start >= timestamp) current.pop();
 			const last = current[current.length - 1];
@@ -707,11 +706,11 @@ export class Decoder {
 		});
 	}
 
-	#trimDecodeBuffered(timestamp: Time.Milli): void {
+	#trimDecodeBuffered(timestamp: Milli): void {
 		this.#decodeBuffered.mutate((current) => {
 			while (current.length > 0) {
 				if (current[0].end >= timestamp) {
-					current[0].start = Time.Milli.max(current[0].start, timestamp);
+					current[0].start = Milli(Math.max(current[0].start, timestamp));
 					break;
 				}
 				current.shift();

@@ -338,11 +338,11 @@ test("a maxDelay or maxAge that is not a duration is refused, not rounded into o
 
 	// The wire carries an unsigned varint, so rounding these would encode a budget the
 	// caller never asked for: -0.5 would ceil to zero and silently take the live edge.
-	expect(() => producer.subscribe({ maxDelay: Milli(-0.5) })).toThrow(RangeError);
-	expect(() => producer.subscribe({ maxDelay: Milli(-100) })).toThrow(RangeError);
-	expect(() => producer.subscribe({ maxDelay: Milli(Number.NaN) })).toThrow(RangeError);
-	expect(() => producer.subscribe({ maxDelay: Milli(Number.POSITIVE_INFINITY) })).toThrow(RangeError);
-	expect(() => producer.accept({ maxAge: Milli(-0.5) })).toThrow(RangeError);
+	expect(() => producer.subscribe({ maxDelay: -0.5 as Milli })).toThrow(RangeError);
+	expect(() => producer.subscribe({ maxDelay: -100 as Milli })).toThrow(RangeError);
+	expect(() => producer.subscribe({ maxDelay: Number.NaN as Milli })).toThrow(RangeError);
+	expect(() => producer.subscribe({ maxDelay: Number.POSITIVE_INFINITY as Milli })).toThrow(RangeError);
+	expect(() => producer.accept({ maxAge: -0.5 as Milli })).toThrow(RangeError);
 	expect(() => producer.accept({ maxAge: Milli(Number.MAX_SAFE_INTEGER + 1) })).toThrow(RangeError);
 	expect(() => producer.subscribe({ maxDelay: Milli(Number.MAX_SAFE_INTEGER + 1) })).toThrow(RangeError);
 });
