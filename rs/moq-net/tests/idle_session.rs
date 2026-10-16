@@ -102,3 +102,24 @@ async fn busy_viewer_sees_the_estimate_move() {
 		);
 	}
 }
+
+/// A transport estimate demanded locally still costs one poll per sampling deadline.
+#[moq_net_sim::test]
+async fn ietf_stats_refresh_costs_one_driver_poll() {
+	for version in ["moq-transport-16", "moq-transport-22"] {
+		let polls = Arc::new(AtomicUsize::new(0));
+		let mut options = MockConnectOptions::new(version.parse::<Version>().unwrap());
+		options.stats = STATS;
+		options.server_polls = Some(polls.clone());
+		let pair = connect_mock(options).await;
+		let _bandwidth = pair.server.send_bandwidth().expect("transport estimate");
+		moq_net_sim::sleep(Duration::from_secs(1)).await;
+		let start = polls.load(Ordering::Relaxed);
+		let reads = pair.server_transport.stats_reads();
+		moq_net_sim::sleep(Duration::from_secs(10)).await;
+		let polls = polls.load(Ordering::Relaxed) - start;
+		let reads = pair.server_transport.stats_reads() - reads;
+		assert_eq!(reads, 100, "{version}: one sample per 100 ms");
+		assert_eq!(polls, reads, "{version}: one poll per refresh");
+	}
+}

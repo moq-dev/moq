@@ -179,10 +179,10 @@ def run(action, plan):
             command("bunx", "tsc", "--noEmit", "--project", name)
         finally:
             Path(name).unlink()
-    # The fallback covers files outside every workspace, like js/tsconfig.json.
-    command("bun", "biome", "check", *(["js"] if plan["all"] else
+    # The fallback covers files outside every workspace, like js/tsconfig.json and test/lib.
+    command("bun", "biome", "check", *(["js", "test"] if plan["all"] else
                                        [p["directory"] for p in packages.values()
-                                        if p["directory"].startswith("js/")] + ["js/common"]))
+                                        if p["directory"].startswith(("js/", "test/"))] + ["js/common"]))
     scripts("build")
     for name in ("@moq/watch", "@moq/publish"):
         if name in packages:

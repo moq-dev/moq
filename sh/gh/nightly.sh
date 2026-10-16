@@ -31,12 +31,15 @@ case "${1:-}" in
         run just rs test -p moq-archive -p moq-mux --no-fail-fast \
             -E 'test(benchmark_timeline_fetch_fanout) | test(benchmark_damage_pid_fanout)' \
             --run-ignored only --success-output immediate
+        # Codecs are irrelevant to timebase reservation, so skip building them.
+        run just rs test -p moq-ffi --no-default-features -E 'test(benchmark_timebase_reservation_fanout)' \
+            --run-ignored only --success-output immediate
         # moq-gst's catalog bench shares a target name with moq-mux's, so it runs on its own.
         run just rs bench-gst-catalog -- --quick
         run just rs test -p moq-cli -E 'test(benchmark_stream_import)' --run-ignored only --success-output immediate
         ;;
     js)
-        for benchmark in broadcasts request-ids requests forward reader frames varint lite-varint track interests; do
+        for benchmark in broadcasts request-ids requests forward reader frames varint lite-varint track interests priority; do
             run just js bench "$benchmark"
         done
         run just js catalog-bench

@@ -598,10 +598,11 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 						.with_pre_skip(dops.pre_skip);
 				head.output_gain = dops.output_gain;
 
-				// The catalog describes the decoder's output: Opus always decodes at 48 kHz, whatever
-				// the sample entry or the informational input rate claims.
-				let mut config = AudioConfig::new(AudioCodec::Opus, 48_000, head.channel_count);
-				config.description = Some(head.encode()?);
+				// The shared conversion sets the decoder's 48 kHz output rate and Opus warmup,
+				// whatever the sample entry or the informational input rate claims.
+				let description = head.encode()?;
+				let mut config: AudioConfig = head.into();
+				config.description = Some(description);
 				config.container = container;
 				config
 			}

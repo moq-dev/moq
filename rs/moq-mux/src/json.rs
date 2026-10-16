@@ -20,7 +20,7 @@
 //! #     broadcast: &mut moq_net::broadcast::Producer,
 //! #     catalog: &moq_mux::catalog::Producer,
 //! # ) -> moq_mux::Result<()> {
-//! let info = moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI);
+//! let info = moq_net::track::Info::default();
 //! let track = broadcast.create_track("chat", info)?;
 //! let config = moq_mux::json::Config::default().with_compression(true);
 //! let mut chat = catalog.json_stream::<Message>(track, config)?;
@@ -31,6 +31,8 @@
 //!
 //! The catalog entry is written when the producer is created and removed when it drops, so a track
 //! is never advertised without a publisher behind it.
+//!
+//! A bare value stays untimed; only a timed track accepts an explicit capture time.
 //!
 //! A value timed on the broadcast [`Clock`](crate::Clock) is written at that timestamp as given,
 //! and the entry advertises how late values reach the transport as its `jitter` and `delay`, the
@@ -229,7 +231,8 @@ impl<T: Serialize, E: CatalogExt> Snapshot<T, E> {
 	where
 		T: 'a,
 	{
-		let (value, captured) = self.listing.stamp(value.into());
+		let value = value.into();
+		let captured = value.at;
 		match self.inner.update(value)? {
 			Some(size) => self.listing.record(size, captured),
 			None => Ok(()),
@@ -304,22 +307,21 @@ impl<T: Serialize, E: CatalogExt> Stream<T, E> {
 	///
 	/// A record that cannot be written ends the track (see [`moq_json::stream::Producer::append`])
 	/// and retires the catalog entry with it. A record refused with
-	/// [`moq_net::Error::GroupTooLarge`] leaves both intact, since nothing was written. A catalog
-	/// error publishing the measured bitrate is returned after the record was written, so the track
+	/// [`moq_net::Error::GroupTooLarge`] or [`moq_net::Error::TimestampMismatch`] leaves both intact,
+	/// since nothing was written. A catalog error publishing the measured bitrate is returned after the record was written, so the track
 	/// stays open and a retry would duplicate it.
 	pub fn append<'a>(&mut self, value: impl Into<Timed<&'a T>>) -> crate::Result<()>
 	where
 		T: 'a,
 	{
-		let (value, captured) = match &mut self.listing {
-			Some(listing) => listing.stamp(value.into()),
-			// A failed write already ended the log, which refuses this record whatever its time.
-			None => (Timed::from(value.into().value), None),
-		};
+		let value = value.into();
+		let captured = value.at;
 		let size = match self.inner.append(value) {
 			Ok(size) => size,
 			// Refused before anything was written, so the log and its entry carry on.
-			Err(err @ moq_json::Error::Net(moq_net::Error::GroupTooLarge)) => return Err(err.into()),
+			Err(err @ moq_json::Error::Net(moq_net::Error::GroupTooLarge | moq_net::Error::TimestampMismatch)) => {
+				return Err(err.into());
+			}
 			Err(err) => {
 				// The inner producer has already ended the track. Dropping the listing retires the
 				// catalog entry: waiting for the handle to drop would keep advertising a track that
@@ -463,6 +465,10 @@ mod test {
 
 	/// Create the moq-net track a data producer publishes on, as a caller does for a media track.
 	fn track(broadcast: &mut moq_net::broadcast::Producer, name: &str) -> moq_net::track::Producer {
+		broadcast.create_track(name, moq_net::track::Info::default()).unwrap()
+	}
+
+	fn timed_track(broadcast: &mut moq_net::broadcast::Producer, name: &str) -> moq_net::track::Producer {
 		broadcast.create_track(name, timed()).unwrap()
 	}
 
@@ -530,15 +536,15 @@ mod test {
 	}
 
 	/// A track registered before an importer's first frame fixes the clock, so an importer starting
-	/// an hour in shifts onto it: the track keeps stamping on the clock it started with.
+	/// an hour in shifts onto it: the publisher keeps stamping on the clock it started with.
 	#[test]
 	fn an_importer_joins_the_data_tracks_clock() {
 		let (mut broadcast, catalog) = catalog();
 		let mut status = catalog
-			.json_snapshot::<Value>(track(&mut broadcast, "status"), Config::default())
+			.json_snapshot::<Value>(timed_track(&mut broadcast, "status"), Config::default())
 			.unwrap();
 		let mut chat = catalog
-			.json_stream::<Value>(track(&mut broadcast, "chat"), Config::default())
+			.json_stream::<Value>(timed_track(&mut broadcast, "chat"), Config::default())
 			.unwrap();
 		let mut subscribers = [status.consume(), chat.consume()];
 
@@ -551,7 +557,9 @@ mod test {
 			.unwrap();
 		assert_eq!(catalog.snapshot().clock, published, "the clock never moves");
 		assert!(before <= first, "the importer lands at now: {before:?} {first:?}");
-		status.update(&json!({ "live": true })).unwrap();
+		status
+			.update(Timed::from(&json!({ "live": true })).at(catalog.clock().now()))
+			.unwrap();
 		chat.append(Timed::from(&json!({ "n": 1 })).at(catalog.clock().now()))
 			.unwrap();
 		let after = catalog.clock().now();
@@ -594,9 +602,9 @@ mod test {
 		full.finish().unwrap();
 		delta.finish().unwrap();
 
-		// The default subscription budget keeps only the latest group. Ratio 0 rolled a new
-		// group for the second value, so that group holds one frame. A positive ratio appends
-		// the second value to the same group.
+		// The default subscription budget keeps only the latest group, aging untimed groups by
+		// wall clock. Ratio 0 rolled a new group for the second value, so that group holds one
+		// frame. A positive ratio appends the second value to the same group.
 		assert_eq!(ready_groups(&mut full_track), vec![1]);
 		assert_eq!(ready_groups(&mut delta_track), vec![2]);
 	}
@@ -720,7 +728,7 @@ mod test {
 	fn an_unchanged_snapshot_measures_nothing() {
 		let (mut broadcast, catalog) = catalog();
 		let mut status = catalog
-			.json_snapshot::<Value>(track(&mut broadcast, "status"), Config::default())
+			.json_snapshot::<Value>(timed_track(&mut broadcast, "status"), Config::default())
 			.unwrap();
 		let now = catalog.clock().now();
 		let value = serde_json::json!({ "armed": true });

@@ -304,7 +304,9 @@ impl Replay {
 		let mut json = moq_json::snapshot::Config::default();
 		json.delta_ratio = 0;
 		let mut catalog = moq_json::snapshot::Producer::new(track, json);
-		catalog.update(&self::catalog(archive)).unwrap();
+		catalog
+			.update(moq_net::Timed::from(&self::catalog(archive)).at(moq_net::Timestamp::now()))
+			.unwrap();
 
 		let serving = reader::Config::new(recording.timelines()).with_cache(cache);
 		let reader = moq_archive::Reader::open(recording.store.clone(), &broadcast, serving)
@@ -658,7 +660,9 @@ async fn history_after_expiry(finished: bool) {
 		.create_track(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info())
 		.unwrap();
 	let mut catalog = moq_json::snapshot::Producer::new(track, moq_json::snapshot::Config::default());
-	catalog.update(&self::catalog(durable())).unwrap();
+	catalog
+		.update(moq_net::Timed::from(&self::catalog(durable())).at(moq_net::Timestamp::now()))
+		.unwrap();
 	let reader = moq_archive::Reader::open(
 		recording.store.clone(),
 		&broadcast,

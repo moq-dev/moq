@@ -16,7 +16,7 @@ from the dispatcher's static JS pattern, which would otherwise never run the rea
 
 An input outside every current workspace selects all packages, including shared
 inputs such as `js/common/`, `js/justfile`, `test/tsconfig.json`, `drafts/`, Rust's
-shared JSON vectors, the root manifest and lockfile, and Biome then checks all of `js/`.
+shared JSON vectors, the root manifest and lockfile, and Biome then checks all of `js/` and `test/`.
 Unrelated paths are filtered by the dispatcher first.
 `just js check`, `just js test` and `just js build` explicitly select all packages.
 

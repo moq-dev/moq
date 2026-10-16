@@ -92,7 +92,8 @@ impl Publisher {
 			return Ok(());
 		}
 		self.prune()?;
-		self.producer.push(&text.to_owned())?;
+		self.producer
+			.push(moq_net::Timed::from(&text.to_owned()).at(moq_net::Timestamp::now()))?;
 		self.expires.push_back(Instant::now() + HISTORY);
 		Ok(())
 	}
@@ -103,7 +104,8 @@ impl Publisher {
 		if count == 0 {
 			return Ok(());
 		}
-		self.producer.pop(count as u64)?;
+		self.producer
+			.pop(moq_net::Timed::from(count as u64).at(moq_net::Timestamp::now()))?;
 		self.expires.drain(..count);
 		Ok(())
 	}

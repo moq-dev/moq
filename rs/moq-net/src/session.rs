@@ -416,7 +416,11 @@ enum SamplerMode {
 	/// Nobody wants stats; sampling is paused.
 	Idle,
 	/// Someone does; sample when the deadline elapses.
-	Polling { deadline: crate::time::Deadline },
+	// Keep the deadline under a task bit: advancing this driver's clock then
+	// queues the sample without waking the already-running driver again.
+	Polling {
+		deadline: Box<kio::Tasks<crate::time::Deadline>>,
+	},
 }
 
 impl<S: crate::transport::poll::Session> Supervisor<S> {
@@ -546,9 +550,17 @@ impl<S: crate::transport::poll::Session> Supervisor<S> {
 		stats.sample = sample;
 		stats.demanded = false;
 		drop(stats);
-		self.mode = SamplerMode::Polling {
-			deadline: crate::time::Deadline::after(&self.runtime, Self::POLL_INTERVAL),
-		};
+		let next = crate::time::Deadline::after(&self.runtime, Self::POLL_INTERVAL);
+		match &mut self.mode {
+			SamplerMode::Polling { deadline } => deadline.push(next),
+			SamplerMode::Idle => {
+				let mut deadline = kio::Tasks::new();
+				deadline.push(next);
+				self.mode = SamplerMode::Polling {
+					deadline: Box::new(deadline),
+				};
+			}
+		}
 	}
 
 	fn poll_sampler(&mut self, waiter: &kio::Waiter) {

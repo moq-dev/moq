@@ -132,6 +132,9 @@ struct Auth {
 		parse = "list_by_comma"
 	)]
 	public_publish: Option<Vec<String>>,
+
+	#[usage(env = "MOQ_AUTH_VERIFICATIONS", cli("--auth-verifications"))]
+	verifications: Option<usize>,
 }
 
 #[derive(usage::Config)]

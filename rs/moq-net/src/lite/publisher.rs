@@ -1223,103 +1223,48 @@ impl AnnounceRun {
 		Ok(())
 	}
 
-	/// Buffer the version-specific initial burst: ANNOUNCE_INIT (Lite01/02) or
-	/// ANNOUNCE_OK plus the initial actives (lite-05+).
+	/// Buffer ANNOUNCE_INIT (Lite01/02) or ANNOUNCE_OK and its initial actives (Lite05+).
 	fn init<S: crate::transport::poll::Session>(
 		&mut self,
 		stream: &mut Stream<S, Version>,
 		origin: &origin::Consumer,
 		announced: &mut announce::Consumer,
 	) -> Result<(), Error> {
+		if !matches!(self.version, Version::Lite01 | Version::Lite02) && !self.version.has_announce_ok() {
+			return Ok(());
+		}
+		let initial: Vec<_> = super::replay::initial(std::iter::from_fn(|| announced.try_next()))
+			.into_iter()
+			.filter_map(|update| {
+				let suffix = update.prefix;
+				if !self.permitted(&suffix) {
+					return None;
+				}
+				let absolute = origin.absolute(&suffix);
+				let (hops, cost) = self.outgoing(&update.route, &absolute)?;
+				tracing::debug!(route = %absolute, "announce");
+				Some((suffix, hops, cost, update.route.epoch))
+			})
+			.collect();
 		match self.version {
 			Version::Lite01 | Version::Lite02 => {
-				let mut init: Vec<(crate::PathOwned, Hops, crate::origin::Cost)> = Vec::new();
-
-				// Send ANNOUNCE_INIT as the first message with all currently active routes.
-				// We use `try_next()` to synchronously get the initial updates.
-				while let Some(event) = announced.try_next() {
-					let (update, active) = match event {
-						announce::Event::Start(update)
-						| announce::Event::Update(update)
-						| announce::Event::Restart(update) => (update, true),
-						announce::Event::End(update) => (update, false),
-					};
-					let absolute = origin.absolute(&update.prefix);
-					let suffix = update.prefix;
-
-					if active {
-						init.retain(|(s, ..)| s != &suffix);
-						if !self.permitted(&suffix) {
-							continue;
-						}
-						let Some((hops, cost)) = self.outgoing(&update.route, &absolute) else {
-							continue;
-						};
-						tracing::debug!(route = %absolute, "announce");
-						init.push((suffix, hops, cost));
-					} else {
-						// A potential race: a just-announced route already retracted.
-						tracing::debug!(route = %absolute, "unannounce");
-						init.retain(|(s, ..)| s != &suffix);
-					}
-				}
-
-				let suffixes = init.iter().map(|(suffix, ..)| suffix.clone()).collect();
+				let suffixes = initial.iter().map(|(suffix, ..)| suffix.clone()).collect();
 				stream.writer.buffer(&lite::AnnounceInit { suffixes })?;
-				// The peer holds these now, so a later retraction or a narrower grant ends them.
-				for (suffix, hops, cost) in init {
+				// The peer holds these now, so a later retraction or narrower grant ends them.
+				for (suffix, hops, cost, _) in initial {
 					self.live.insert(suffix, Advertised { id: None, hops, cost });
 				}
 			}
-			_ if self.version.has_announce_ok() => {
-				// Drain the current active set synchronously (like the Lite01/02 path),
-				// stashing suffix+hops so we can both COUNT them for AnnounceOk and re-send
-				// them afterward. The receiver stamps our origin onto each hop chain, so we
-				// forward the stored chain as-is (no self push here).
-				let mut initial: Vec<(crate::PathOwned, Hops, crate::origin::Cost, Option<crate::Epoch>)> = Vec::new();
-				while let Some(event) = announced.try_next() {
-					let (update, active) = match event {
-						announce::Event::Start(update)
-						| announce::Event::Update(update)
-						| announce::Event::Restart(update) => (update, true),
-						announce::Event::End(update) => (update, false),
-					};
-					let absolute = origin.absolute(&update.prefix);
-					let suffix = update.prefix;
-
-					if active {
-						initial.retain(|(s, ..)| s != &suffix);
-						if !self.permitted(&suffix) {
-							continue;
-						}
-						let Some((hops, cost)) = self.outgoing(&update.route, &absolute) else {
-							continue;
-						};
-						tracing::debug!(route = %absolute, "announce");
-						initial.push((suffix, hops, cost, update.route.epoch));
-					} else {
-						// A potential race: a just-announced route already retracted.
-						tracing::debug!(route = %absolute, "unannounce");
-						initial.retain(|(s, ..)| s != &suffix);
-					}
-				}
-
-				// Report our origin id (stamped onto hops by the receiver, not us)
-				// and the count of initial announces that follow immediately.
-				let ok = lite::AnnounceOk {
+			_ => {
+				stream.writer.buffer(&lite::AnnounceOk {
 					origin: self.self_origin,
 					active: initial.len() as u64,
-				};
-				stream.writer.buffer(&ok)?;
+				})?;
 				for (suffix, hops, cost, epoch) in initial {
 					self.start(stream, suffix, hops, cost, epoch)?;
 				}
 			}
-			_ => {
-				// Lite03/Lite04: no announce init, no AnnounceOk.
-			}
 		}
-
 		Ok(())
 	}
 
@@ -2496,6 +2441,33 @@ mod announce_test {
 	type TestPublisher = Publisher<SinkSession>;
 
 	const VERSION: Version = Version::Lite06;
+
+	#[test]
+	fn initial_replay_keeps_the_last_event_and_its_order() {
+		let update = |prefix: &'static str, cost| announce::Announce {
+			prefix: crate::PathOwned::from(prefix),
+			captures: None,
+			route: origin::Route::default().with_cost(cost),
+		};
+		let events = [
+			announce::Event::Start(update("a", 1)),
+			announce::Event::Start(update("b", 2)),
+			announce::Event::Update(update("a", 3)),
+			announce::Event::Start(update("c", 4)),
+			announce::Event::End(update("b", 2)),
+			announce::Event::Restart(update("c", 5)),
+			announce::Event::End(update("c", 5)),
+			announce::Event::Start(update("b", 6)),
+		];
+		let initial: Vec<_> = super::super::replay::initial(events)
+			.into_iter()
+			.map(|update| (update.prefix, update.route.cost))
+			.collect();
+		assert_eq!(
+			initial,
+			vec![("a".into(), origin::Cost::new(3)), ("b".into(), origin::Cost::new(6))]
+		);
+	}
 
 	/// The hops stamped on every harness route.
 	fn pub_hops() -> Hops {
