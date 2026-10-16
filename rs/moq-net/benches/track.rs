@@ -472,11 +472,8 @@ fn bench_subscriber_churn(c: &mut Criterion) {
 				BenchmarkId::new(format!("steady_{steady}"), churn),
 				&churn,
 				|b, &churn| {
-					b.iter_batched_ref(
-						|| Churn::new(steady, 0),
-						|setup| setup.run(churn),
-						BatchSize::SmallInput,
-					);
+					let mut setup = Churn::new(steady, 0);
+					b.iter(|| setup.run(churn));
 				},
 			);
 		}
@@ -490,7 +487,8 @@ fn bench_subscriber_churn_after_peak(c: &mut Criterion) {
 	group.throughput(Throughput::Elements(CHURN as u64));
 	for peak in PEAK {
 		group.bench_with_input(BenchmarkId::from_parameter(peak), &peak, |b, &peak| {
-			b.iter_batched_ref(|| Churn::new(1, peak), |setup| setup.run(CHURN), BatchSize::SmallInput);
+			let mut setup = Churn::new(1, peak);
+			b.iter(|| setup.run(CHURN));
 		});
 	}
 	group.finish();
