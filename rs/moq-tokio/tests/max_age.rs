@@ -30,7 +30,8 @@ async fn relay(version: moq_net::Version, javascript: Option<bool>) -> anyhow::R
 					.await?,
 			);
 		}
-		for session in sessions {
+		for (session, driver) in sessions {
+			driver.await??;
 			let _ = session.closed().await;
 		}
 		Ok::<_, anyhow::Error>(())

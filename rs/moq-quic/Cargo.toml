@@ -81,8 +81,12 @@ web-time = "1"
 assert_matches = "1.1"
 hex-literal = "1"
 rcgen = "0.14"
+stats_alloc = "0.1.10"
 tracing-subscriber = { version = "0.3.0", default-features = false, features = ["env-filter", "fmt", "ansi", "time", "local-time"] }
 wasm-bindgen-test = "0.3.45"
+
+[target.'cfg(not(target_family = "wasm"))'.dev-dependencies]
+cpu-time = "1.0.0"
 
 # quinn's workspace lints, kept so upstream code stays clean against them.
 [lints.rust]
