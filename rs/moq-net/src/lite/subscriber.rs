@@ -137,9 +137,9 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 		}
 	}
 
-	/// The recorded session end, or [`Error::Dropped`] when nothing recorded one.
+	/// The recorded session end, or cancellation when the dispatcher was dropped.
 	fn end_reason(&self) -> Error {
-		self.ended.lock().clone().unwrap_or(Error::Dropped)
+		self.ended.lock().clone().unwrap_or(Error::Cancel)
 	}
 
 	/// What pulling content across this session's link costs, added to the route cost
@@ -5517,8 +5517,8 @@ impl<S: crate::transport::poll::Session> ServeLoop<S> {
 						return Poll::Ready(ServeEnd::Idle);
 					}
 					let mut cx = std::task::Context::from_waker(waiter.waker());
-					if self.closed.poll_closed(&mut cx).is_ready() {
-						return Poll::Ready(ServeEnd::GiveBack(Error::Dropped));
+					if let Poll::Ready(err) = self.closed.poll_closed(&mut cx) {
+						return Poll::Ready(ServeEnd::GiveBack(crate::lite::error::from_transport(err)));
 					}
 					return Poll::Pending;
 				}
@@ -5559,8 +5559,8 @@ impl<S: crate::transport::poll::Session> ServeLoop<S> {
 							}
 							continue;
 						}
-						// Our own producer is alive (we hold it); treat as terminal anyway.
-						Poll::Ready(Err(_)) => return Poll::Ready(ServeEnd::GiveBack(Error::Dropped)),
+						// A live clone can abort the producer with a specific cause.
+						Poll::Ready(Err(err)) => return Poll::Ready(ServeEnd::GiveBack(err)),
 						Poll::Pending => {}
 					}
 					match self.serving.poll_subscription_changed(waiter) {
@@ -5580,7 +5580,7 @@ impl<S: crate::transport::poll::Session> ServeLoop<S> {
 							}
 							continue;
 						}
-						Poll::Ready(Err(_)) => return Poll::Ready(ServeEnd::GiveBack(Error::Dropped)),
+						Poll::Ready(Err(err)) => return Poll::Ready(ServeEnd::GiveBack(err)),
 						Poll::Pending => {}
 					}
 

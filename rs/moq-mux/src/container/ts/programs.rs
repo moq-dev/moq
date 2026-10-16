@@ -160,9 +160,10 @@ impl Programs {
 		Ok(())
 	}
 
-	/// Abort every program's tracks with `err`, as [`Import::abort`] does. Consumes the importer.
+	/// Abort every program's catalog and media tracks with `err`. Consumes the importer.
 	pub fn abort(self, err: moq_net::Error) {
 		for program in self.programs {
+			program.catalog.abort(err.clone());
 			program.import.abort(err.clone());
 		}
 	}

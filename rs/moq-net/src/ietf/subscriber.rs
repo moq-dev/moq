@@ -68,7 +68,11 @@ struct AliasTable {
 type TrackAliases = kio::Producer<AliasTable>;
 
 fn insert_track_alias(aliases: &TrackAliases, alias: u64, request_id: RequestId) -> Result<(), Error> {
-	let mut aliases = aliases.write().map_err(|_| Error::Dropped)?;
+	let mut aliases = aliases.write().map_err(|_| {
+		// The table is never explicitly closed, and this call holds a producer.
+		debug_assert!(false, "alias table closed while binding a live subscription");
+		Error::Cancel
+	})?;
 	let table = &mut *aliases;
 
 	match table.map.entry(alias) {
@@ -682,7 +686,7 @@ async fn resolve_track_alias(
 			None => Poll::Pending,
 		});
 		if let Poll::Ready(result) = resolved {
-			return Poll::Ready(result.unwrap_or(Err(Error::Dropped)));
+			return Poll::Ready(result.unwrap_or(Err(Error::Cancel)));
 		}
 		if timeout.poll(waiter).is_ready() {
 			return Poll::Ready(Err(Error::NotFound));
@@ -3826,8 +3830,11 @@ where
 
 			match settled {
 				Poll::Ready(Ok(_)) => Poll::Ready(Ok(())),
-				// The subscription went away underneath us.
-				Poll::Ready(Err(_)) => Poll::Ready(Err(Error::Dropped)),
+				// Fill is never explicitly closed, and this task holds a producer.
+				Poll::Ready(Err(_)) => {
+					debug_assert!(false, "fill closed while a receive task owns it");
+					Poll::Ready(Err(Error::Cancel))
+				}
 				Poll::Pending => Poll::Pending,
 			}
 		})
@@ -3836,7 +3843,12 @@ where
 		// stream is the only thing saying the group is still being read.
 		reading.resume();
 		settled?;
-		fill.write().map_err(|_| Error::Dropped)?.claim(sequence, start)
+		fill.write()
+			.map_err(|_| {
+				debug_assert!(false, "fill closed while claiming its head");
+				Error::Cancel
+			})?
+			.claim(sequence, start)
 	}
 }
 
@@ -3961,8 +3973,11 @@ where
 					// did. Either way its objects would duplicate a group already in flight.
 					_ => Err(Error::Unsupported),
 				}),
-				// The subscription went away underneath us.
-				Poll::Ready(Err(_)) => Poll::Ready(Err(Error::Dropped)),
+				// Fill is never explicitly closed, and this task holds a producer.
+				Poll::Ready(Err(_)) => {
+					debug_assert!(false, "fill closed while a receive task owns it");
+					Poll::Ready(Err(Error::Cancel))
+				}
 				Poll::Pending => Poll::Pending,
 			}
 		})
@@ -4012,11 +4027,12 @@ where
 		// reach a producer this task still owns. So the handoff is where that is settled.
 		match fill.write() {
 			Ok(mut state) => state.install(head),
-			// The subscription is gone entirely, so nothing is left to hand it to.
+			// Fill is never explicitly closed, and this task holds a producer.
 			Err(_) => {
+				debug_assert!(false, "fill closed while installing its head");
 				let mut head = head;
 				head.cancel();
-				return Err(Error::Dropped);
+				return Err(Error::Cancel);
 			}
 		}
 
@@ -4594,7 +4610,7 @@ where
 						}
 					})
 				}
-				Poll::Ready(Err(_)) => Poll::Ready(Err(Error::Dropped)),
+				Poll::Ready(Err(_)) => Poll::Ready(Err(Error::Cancel)),
 				Poll::Pending => Poll::Pending,
 			}
 		})

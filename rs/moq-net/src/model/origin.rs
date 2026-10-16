@@ -2463,7 +2463,7 @@ impl DriverState {
 		// was cancelled above and will never resolve them.
 		for producer in fronts {
 			if let Ok(mut request) = producer.write() {
-				request.resolved.get_or_insert(Err(Error::Dropped));
+				request.resolved.get_or_insert(Err(Error::Closed));
 			}
 		}
 		// Reject every pending route request, including those already handed to a
@@ -2474,7 +2474,7 @@ impl DriverState {
 			server.closed = true;
 			for producer in server.requests.drain_all() {
 				if let Ok(mut request) = producer.write() {
-					request.resolved.get_or_insert(Err(Error::Dropped));
+					request.resolved.get_or_insert(Err(Error::Closed));
 				}
 			}
 		}
@@ -3022,7 +3022,7 @@ async fn serve_front(task: FrontTask) -> Vec<InFlight> {
 						// current level, so a reader gone before the next poll would
 						// otherwise leave the track unread with no linger armed.
 						if let Some(io) = tracks.get_mut(&name)
-							&& !io.weak.abort_unused(Error::Dropped)
+							&& !io.weak.abort_unused(Error::Cancel)
 						{
 							if !io.used {
 								io.used = true;
@@ -3184,7 +3184,11 @@ async fn serve_front(task: FrontTask) -> Vec<InFlight> {
 					{
 						let result = match copy.poll_complete(&kio::Waiter::noop()) {
 							Poll::Ready(result) => result,
-							Poll::Pending => Err(Error::Dropped),
+							Poll::Pending => {
+								// A channel cannot reopen after poll_closed reported its end.
+								debug_assert!(false, "closed copy did not report completion");
+								Err(Error::Cancel)
+							}
 						};
 						let delivered = copy.latest().is_some();
 						return Some(Step::Ended(name.clone(), *source, result, delivered));
@@ -4685,11 +4689,6 @@ impl kio::Task for Routing {
 				(_, Some(request)) => match ready!(request.poll_ok(waiter)) {
 					Ok(broadcast) => return Poll::Ready(Ok(broadcast)),
 					Err(Error::Unroutable) => self.request = None,
-					// Teardown parks a pending request with `Dropped`; the contract is
-					// `Closed` once the origin is gone.
-					Err(Error::Dropped) if self.consumer.shared.lock().closed => {
-						return Poll::Ready(Err(Error::Closed));
-					}
 					Err(err) => return Poll::Ready(Err(err)),
 				},
 				(Some((watch, seen)), None) => {
@@ -8814,8 +8813,7 @@ mod tests {
 		resolving.await.expect("resolves");
 	}
 
-	/// Teardown rejects a parked request with `Dropped`, but a destroyed origin
-	/// is `Closed` to `routed_broadcast`'s callers.
+	/// Teardown rejects the parked request with the origin's own terminal cause.
 	#[moq_net_sim::test]
 	#[cfg(feature = "async")]
 	async fn routed_broadcast_reports_teardown_as_closed() {

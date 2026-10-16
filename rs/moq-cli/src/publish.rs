@@ -231,6 +231,14 @@ enum PublishCatalog {
 }
 
 impl PublishCatalog {
+	fn abort(self, err: moq_net::Error) {
+		match self {
+			Self::Media(catalog) => catalog.abort(err),
+			Self::Ts(catalog) => catalog.abort(err),
+			Self::TsPrograms => {}
+		}
+	}
+
 	/// End the catalog tracks cleanly, keeping the renditions they last listed.
 	fn finish(&mut self) -> anyhow::Result<()> {
 		match self {
@@ -622,7 +630,9 @@ async fn decode(
 			Ok(())
 		}
 		Err(err) => {
-			decoder.abort(moq_net::Error::Transport(err.to_string()));
+			let reason = moq_net::Error::Transport(err.to_string());
+			catalog.abort(reason.clone());
+			decoder.abort(reason);
 			Err(err)
 		}
 	}
