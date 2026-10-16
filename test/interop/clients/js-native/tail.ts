@@ -1,6 +1,7 @@
 /** Finite raw-track interop: publish until the harness acknowledges, or read through clean EOF. @module */
 import { strict as assert } from "node:assert";
 import { createInterface } from "node:readline";
+import { Milli } from "@moq/clock";
 import * as Moq from "@moq/net";
 import { install } from "@moq/web-transport";
 
@@ -58,7 +59,7 @@ try {
 			}
 			const track = broadcast
 				.track("tail")
-				.subscribe({ maxDelay: Moq.Time.Milli(drop ? 60_000 : 5000), groups: { start: { included: 0 } } });
+				.subscribe({ maxDelay: Milli(drop ? 60_000 : 5000), groups: { start: { included: 0 } } });
 			const seen: number[] = [];
 			try {
 				for (;;) {

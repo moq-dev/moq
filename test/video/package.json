@@ -6,6 +6,7 @@
 		"check": "tsc --noEmit"
 	},
 	"dependencies": {
+		"@moq/clock": "workspace:*",
 		"@moq/publish": "workspace:*",
 		"@moq/signals": "workspace:*",
 		"@moq/video": "workspace:*",

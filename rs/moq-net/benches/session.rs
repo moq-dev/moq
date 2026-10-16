@@ -11,6 +11,11 @@
 //! route table they occupy, not a publisher writing into its own cache.
 //!
 //! `SESSION_ALLOCS=1` prints allocations per viewer-group instead of timing.
+//! `SESSION_CPU=1` measures thread CPU time on Unix instead of elapsed time, excluding
+//! preemption while retaining all protocol work on this current-thread runtime. CPU-timed
+//! groups have a `_cpu` suffix. Cache-clock advancement remains outside both clocks.
+//! `session_delivery_group_cost` sweeps publishers and viewers independently for SUBSCRIBE
+//! and FETCH; its constrained cases release held streams only after a real blocked write.
 //! `SESSION_EXPIRY_ONLY=1` uses the standalone 30s-expiry pool and reports groups
 //! written plus charged cache bytes every 10s during long profiling runs. Each round
 //! advances the cache clock by a second, so the expiry window spans 30 rounds.
@@ -97,6 +102,10 @@ struct Shape {
 	/// Whole groups each watched broadcast writes per round, so a serve loop finds a
 	/// backlog ready: the group rate a round stands in for.
 	burst: usize,
+	/// Bytes queued before a mock stream applies backpressure.
+	window: usize,
+	/// Read each group via a fresh FETCH rather than a live subscription.
+	fetch: bool,
 }
 
 impl Shape {
@@ -111,6 +120,8 @@ impl Shape {
 		frame: 64,
 		paced: false,
 		burst: 1,
+		window: 1024 * 1024,
+		fetch: false,
 	};
 
 	/// What each viewer subscribes with: a burst is a backlog, which the default
@@ -135,7 +146,7 @@ impl Shape {
 
 	fn id(&self, version: &str) -> String {
 		format!(
-			"{version}/relays={}/publishers={}/broadcasts={}/viewers={}/watch={}/frame={}{}{}",
+			"{version}/relays={}/publishers={}/broadcasts={}/viewers={}/watch={}/frame={}{}{}{}{}",
 			self.relays,
 			self.publishers,
 			self.broadcasts,
@@ -152,6 +163,12 @@ impl Shape {
 			} else {
 				String::new()
 			},
+			if self.window < 1024 * 1024 {
+				format!("/window={}", self.window)
+			} else {
+				String::new()
+			},
+			if self.fetch { "/fetch" } else { "" },
 		)
 	}
 }
@@ -199,6 +216,47 @@ fn runtime() -> tokio::runtime::Runtime {
 		.unwrap()
 }
 
+/// One round's clock; the CPU variant excludes scheduling delays from other processes.
+enum MeasurementClock {
+	Wall(Instant),
+	#[cfg(unix)]
+	Cpu(Duration),
+}
+
+impl MeasurementClock {
+	fn start(cpu: bool) -> Self {
+		if cpu {
+			#[cfg(unix)]
+			return Self::Cpu(Self::cpu());
+			#[cfg(not(unix))]
+			panic!("SESSION_CPU requires Unix thread CPU clocks");
+		}
+		Self::Wall(Instant::now())
+	}
+
+	fn elapsed(self) -> Duration {
+		match self {
+			Self::Wall(start) => start.elapsed(),
+			#[cfg(unix)]
+			Self::Cpu(start) => Self::cpu()
+				.checked_sub(start)
+				.expect("thread CPU clock moved backwards"),
+		}
+	}
+
+	#[cfg(unix)]
+	fn cpu() -> Duration {
+		let mut time = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+		// SAFETY: `time` is a valid, initialized output pointer for this supported clock.
+		let result = unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut time) };
+		assert_eq!(result, 0, "thread CPU clock: {}", std::io::Error::last_os_error());
+		Duration::new(
+			u64::try_from(time.tv_sec).unwrap(),
+			u32::try_from(time.tv_nsec).unwrap(),
+		)
+	}
+}
+
 fn write_group(track: &track::Producer, payload: &Bytes, frames: usize) {
 	let mut group = track.append_group().unwrap();
 	for _ in 0..frames {
@@ -226,6 +284,7 @@ fn path(broadcast: usize) -> String {
 /// keeps a session or broadcast alive.
 struct Cluster {
 	version: Version,
+	window: usize,
 	relays: Vec<origin::Producer>,
 	/// One track per broadcast, indexed like [`path`].
 	tracks: Vec<track::Producer>,
@@ -241,6 +300,7 @@ impl Cluster {
 	async fn new(version: &str, shape: Shape) -> Self {
 		let mut this = Self {
 			version: version.parse().unwrap(),
+			window: shape.window,
 			relays: Vec::new(),
 			tracks: Vec::new(),
 			_broadcasts: Vec::new(),
@@ -263,6 +323,7 @@ impl Cluster {
 				let client = this.relays[client].clone().peer();
 				let server = this.relays[server].clone().peer();
 				let mut options = MockConnectOptions::new(this.version);
+				options.transport.stream_buffer = this.window;
 				options.client_publish = Some(client.consume().with_hidden(true));
 				options.client_subscribe = Some(client);
 				options.server_publish = Some(server.consume().with_hidden(true));
@@ -283,6 +344,7 @@ impl Cluster {
 			}
 
 			let mut options = MockConnectOptions::new(this.version);
+			options.transport.stream_buffer = this.window;
 			options.client_publish = Some(origin.consume());
 			options.server_subscribe = Some(this.relays[publisher % shape.relays].clone());
 			this._pairs.push(connect_mock(options).await);
@@ -310,6 +372,7 @@ impl Cluster {
 	async fn join(&mut self, relay: usize) -> Viewer {
 		let (origin, pool) = self.origin(CLIENT_CACHE);
 		let mut options = MockConnectOptions::new(self.version);
+		options.transport.stream_buffer = self.window;
 		// Hidden included, as the dash's `.stats/` scope sees its subtree.
 		options.server_publish = Some(self.relays[relay].consume().with_hidden(true));
 		options.client_subscribe = Some(origin.clone());
@@ -317,6 +380,8 @@ impl Cluster {
 
 		Viewer {
 			subscribers: Vec::new(),
+			fetches: Vec::new(),
+			blocked: 0,
 			_pair: pair,
 			origin,
 			pool,
@@ -326,6 +391,8 @@ impl Cluster {
 
 struct Viewer {
 	subscribers: Vec<track::Subscriber>,
+	fetches: Vec<(usize, track::Consumer)>,
+	blocked: usize,
 	_pair: MockPair,
 	origin: origin::Producer,
 	pool: cache::Pool,
@@ -365,6 +432,7 @@ struct Room {
 	/// The group each viewer's subscriber is reading, when paced, flattened in viewer order.
 	reading: Vec<Option<group::Consumer>>,
 	cache_now: moq_net::time::Instant,
+	cpu: bool,
 }
 
 impl Room {
@@ -374,6 +442,10 @@ impl Room {
 			"a viewer can't watch more broadcasts than exist"
 		);
 		assert!(!shape.paced || shape.burst == 1, "a paced round writes one frame");
+		assert!(
+			!shape.fetch || (!shape.paced && shape.burst == 1),
+			"fetch rounds read one finished group"
+		);
 		let mut cluster = Cluster::new(version, shape).await;
 
 		// Viewer v watches a contiguous window starting at v * watch, so viewers
@@ -391,7 +463,12 @@ impl Room {
 			// publisher it watches whenever there is more than one.
 			let mut viewer = cluster.join((viewer + 1) % shape.relays).await;
 			for broadcast in broadcasts {
-				viewer.watch(&path(broadcast), &[TRACK], shape.subscription()).await;
+				if shape.fetch {
+					let source = viewer.origin.consume().routed_broadcast(path(broadcast)).await.unwrap();
+					viewer.fetches.push((broadcast, source.track(TRACK).unwrap()));
+				} else {
+					viewer.watch(&path(broadcast), &[TRACK], shape.subscription()).await;
+				}
 			}
 			viewers.push(viewer);
 		}
@@ -412,6 +489,7 @@ impl Room {
 			writing: Vec::new(),
 			reading: Vec::new(),
 			cache_now: moq_net::time::Instant::now(),
+			cpu: std::env::var_os("SESSION_CPU").is_some(),
 		};
 		room.writing.resize_with(room.watched.len(), || None);
 		room.reading.resize_with(shape.viewers * shape.watch, || None);
@@ -422,6 +500,11 @@ impl Room {
 		for pool in room.pools() {
 			pool.resize(None);
 		}
+		let blocked_before: usize = room
+			.viewers
+			.iter()
+			.map(|viewer| viewer._pair.server_transport.blocked_writes())
+			.sum();
 		// Warm every path so the timed rounds skip first-group setup.
 		for _ in 0..FRAMES / shape.frames() {
 			room.tick();
@@ -437,6 +520,17 @@ impl Room {
 		for _ in 0..4 {
 			room.tick();
 			room.round().await;
+		}
+		if shape.window < shape.frame * FRAMES {
+			let blocked: usize = room
+				.viewers
+				.iter()
+				.map(|viewer| viewer._pair.server_transport.blocked_writes())
+				.sum();
+			assert!(
+				blocked > blocked_before,
+				"the constrained fixture must exercise flow control"
+			);
 		}
 		room
 	}
@@ -460,6 +554,16 @@ impl Room {
 		if self.shape.paced {
 			return self.paced_round().await;
 		}
+		let constrained = self.shape.window < self.shape.frame * FRAMES;
+		if constrained {
+			for viewer in &mut self.viewers {
+				viewer.blocked = viewer._pair.server_transport.blocked_writes();
+				viewer._pair.server_transport.split_unis();
+				if self.cluster.version.is_lite() {
+					viewer._pair.server_transport.split_responses();
+				}
+			}
+		}
 		for &broadcast in &self.watched {
 			for _ in 0..self.shape.burst {
 				write_group(&self.cluster.tracks[broadcast], &self.payload, FRAMES);
@@ -469,9 +573,30 @@ impl Room {
 		// Round-robin, so no subscription's backlog waits on another's being read.
 		for _ in 0..self.shape.burst {
 			for viewer in &mut self.viewers {
-				for subscriber in &mut viewer.subscribers {
-					bytes += read_group(subscriber).await;
-				}
+				let transport = &viewer._pair.server_transport;
+				let read = async {
+					let mut bytes = 0;
+					for (broadcast, track) in &viewer.fetches {
+						let sequence = self.cluster.tracks[*broadcast].latest().unwrap();
+						let mut group = track.fetch_group(sequence, None).await.unwrap();
+						while let Some(frame) = group.read_frame().await.unwrap() {
+							bytes += frame.payload.len();
+						}
+					}
+					for subscriber in &mut viewer.subscribers {
+						bytes += read_group(subscriber).await;
+					}
+					bytes
+				};
+				bytes += if constrained {
+					let release = async {
+						transport.blocked_after(viewer.blocked).await;
+						transport.release_split();
+					};
+					futures::join!(read, release).0
+				} else {
+					read.await
+				};
 			}
 		}
 		assert_eq!(bytes, self.shape.expected());
@@ -521,7 +646,7 @@ impl Room {
 		let mut next_report = Duration::from_secs(10);
 		for _ in 0..iters {
 			self.tick();
-			let start = Instant::now();
+			let start = MeasurementClock::start(self.cpu);
 			self.round().await;
 			elapsed += start.elapsed();
 			if report && began.elapsed() >= next_report {
@@ -541,7 +666,12 @@ impl Room {
 fn delivery(c: &mut Criterion, name: &str, shapes: impl IntoIterator<Item = Shape>) {
 	let rt = runtime();
 	let shapes: Vec<_> = shapes.into_iter().collect();
-	let mut group = c.benchmark_group(format!("session_delivery_{name}"));
+	let cpu = if std::env::var_os("SESSION_CPU").is_some() {
+		"_cpu"
+	} else {
+		""
+	};
+	let mut group = c.benchmark_group(format!("session_delivery_{name}{cpu}"));
 	for version in VERSIONS {
 		for shape in &shapes {
 			// Built on first call: Criterion only calls a routine its filter
@@ -555,6 +685,27 @@ fn delivery(c: &mut Criterion, name: &str, shapes: impl IntoIterator<Item = Shap
 		}
 	}
 	group.finish();
+}
+
+/// Small-group cost over independent publisher/viewer axes, with both egress request paths.
+fn group_cost(c: &mut Criterion) {
+	if std::env::var_os("SESSION_ALLOCS").is_some() || std::env::var_os("SESSION_EXPIRY_ONLY").is_some() {
+		return;
+	}
+	let shapes = [1, 16].into_iter().flat_map(|publishers| {
+		[1, 16, 64].into_iter().flat_map(move |viewers| {
+			[64, 1024 * 1024].into_iter().flat_map(move |window| {
+				[false, true].map(move |fetch| Shape {
+					publishers,
+					viewers,
+					window,
+					fetch,
+					..Shape::BASE
+				})
+			})
+		})
+	});
+	delivery(c, "group_cost", shapes);
 }
 
 fn join(c: &mut Criterion, name: &str, shapes: impl IntoIterator<Item = Shape>) {
@@ -1119,5 +1270,5 @@ fn session(c: &mut Criterion) {
 	);
 }
 
-criterion_group!(benches, session, withdrawal, idle);
+criterion_group!(benches, session, group_cost, withdrawal, idle);
 criterion_main!(benches);

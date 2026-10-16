@@ -68,7 +68,11 @@ struct AliasTable {
 type TrackAliases = kio::Producer<AliasTable>;
 
 fn insert_track_alias(aliases: &TrackAliases, alias: u64, request_id: RequestId) -> Result<(), Error> {
-	let mut aliases = aliases.write().map_err(|_| Error::Dropped)?;
+	let mut aliases = aliases.write().map_err(|_| {
+		// The table is never explicitly closed, and this call holds a producer.
+		debug_assert!(false, "alias table closed while binding a live subscription");
+		Error::Cancel
+	})?;
 	let table = &mut *aliases;
 
 	match table.map.entry(alias) {
@@ -722,7 +726,7 @@ async fn resolve_track_alias(
 			None => Poll::Pending,
 		});
 		if let Poll::Ready(result) = resolved {
-			return Poll::Ready(result.unwrap_or(Err(Error::Dropped)));
+			return Poll::Ready(result.unwrap_or(Err(Error::Cancel)));
 		}
 		if timeout.poll(waiter).is_ready() {
 			return Poll::Ready(Err(Error::NotFound));
@@ -3928,8 +3932,11 @@ where
 
 			match settled {
 				Poll::Ready(Ok(_)) => Poll::Ready(Ok(())),
-				// The subscription went away underneath us.
-				Poll::Ready(Err(_)) => Poll::Ready(Err(Error::Dropped)),
+				// Fill is never explicitly closed, and this task holds a producer.
+				Poll::Ready(Err(_)) => {
+					debug_assert!(false, "fill closed while a receive task owns it");
+					Poll::Ready(Err(Error::Cancel))
+				}
 				Poll::Pending => Poll::Pending,
 			}
 		})
@@ -3938,7 +3945,12 @@ where
 		// stream is the only thing saying the group is still being read.
 		reading.resume();
 		settled?;
-		fill.write().map_err(|_| Error::Dropped)?.claim(sequence, start)
+		fill.write()
+			.map_err(|_| {
+				debug_assert!(false, "fill closed while claiming its head");
+				Error::Cancel
+			})?
+			.claim(sequence, start)
 	}
 }
 
@@ -4063,8 +4075,11 @@ where
 					// did. Either way its objects would duplicate a group already in flight.
 					_ => Err(Error::Unsupported),
 				}),
-				// The subscription went away underneath us.
-				Poll::Ready(Err(_)) => Poll::Ready(Err(Error::Dropped)),
+				// Fill is never explicitly closed, and this task holds a producer.
+				Poll::Ready(Err(_)) => {
+					debug_assert!(false, "fill closed while a receive task owns it");
+					Poll::Ready(Err(Error::Cancel))
+				}
 				Poll::Pending => Poll::Pending,
 			}
 		})
@@ -4114,11 +4129,12 @@ where
 		// reach a producer this task still owns. So the handoff is where that is settled.
 		match fill.write() {
 			Ok(mut state) => state.install(head),
-			// The subscription is gone entirely, so nothing is left to hand it to.
+			// Fill is never explicitly closed, and this task holds a producer.
 			Err(_) => {
+				debug_assert!(false, "fill closed while installing its head");
 				let mut head = head;
 				head.cancel();
-				return Err(Error::Dropped);
+				return Err(Error::Cancel);
 			}
 		}
 
@@ -4698,7 +4714,7 @@ where
 						}
 					})
 				}
-				Poll::Ready(Err(_)) => Poll::Ready(Err(Error::Dropped)),
+				Poll::Ready(Err(_)) => Poll::Ready(Err(Error::Cancel)),
 				Poll::Pending => Poll::Pending,
 			}
 		})
@@ -5215,6 +5231,17 @@ mod tests {
 	use futures::poll;
 
 	use super::*;
+
+	#[moq_net_sim::test]
+	async fn internal_alias_resolution_ends_with_its_session() {
+		let aliases = TrackAliases::default();
+		let consumer = aliases.consume();
+		drop(aliases);
+		assert!(matches!(
+			resolve_track_alias(&crate::time::Clock::sim(), consumer, 7).await,
+			Err(Error::Cancel)
+		));
+	}
 
 	async fn check_publish_fin(responses: Vec<u8>, clean: bool) {
 		use crate::lite::test_transport::ScriptedSession;
@@ -12922,6 +12949,18 @@ mod stitch_tests {
 			buf.extend_from_slice(payload);
 		}
 		buf.to_vec()
+	}
+
+	#[moq_net_sim::test]
+	async fn internal_group_fetch_setup_cancellation_is_cancel() {
+		let mut run = GroupFetchRun::new(VERSION, Vec::new()).await;
+		let slot = kio::Producer::new(GroupFetch::Pending);
+		let entry = GroupFetchEntry::new(&run.subscriber.state, RequestId(23), slot.clone());
+		let mut receiving = run.subscriber.clone();
+		let mut receive = std::pin::pin!(receiving.recv_group_fetch(&mut run.stream, slot));
+		assert!(futures::poll!(&mut receive).is_pending());
+		drop(entry);
+		assert!(matches!(receive.await, Err(Error::Cancel)));
 	}
 
 	/// A subscriber reading one scripted group fetch stream, already past its header.

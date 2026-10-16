@@ -90,6 +90,13 @@ These land with the next breaking release, not the 2026-09-23 train.
   `Connection` and `Established.discovery` are removed, and passing the option
   throws a `TypeError`: drop it. A relay that refuses an announce request
   downgrades that session to blind requests on its own.
+- **JS time units and timers come from `@moq/clock`.** `Time.Nano`, `Time.Micro`,
+  `Time.Milli`, and `Time.Second` are gone from `@moq/net`: import `Nano`,
+  `Micro`, `Milli`, and `Second` from `@moq/clock`, which throws on negative or
+  non-finite values. `effect.timer`, `effect.timeout`, and `effect.interval`
+  take a `Nano` (`Nano.fromMilli(Milli(250))`), not milliseconds, and run on the
+  installed clock. `sleep` and `sleepUntil` take `{ signal }` instead of a bare
+  signal. `@moq/room`'s `HISTORY` is a `Nano`.
 - **"Epoch" means only the publisher epoch.** The reconnect counter is
   `connects()`: `moq_tokio::Connection::epoch()` and moq-ffi's
   `MoqSession::epoch()` are `connects()`, which is Python's `connects()`, Go's

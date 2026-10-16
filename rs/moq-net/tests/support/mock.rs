@@ -47,6 +47,7 @@ struct Line {
 #[derive(Default)]
 struct Conn {
 	finishes: AtomicUsize,
+	blocked_writes: kio::Shared<usize>,
 	hold_fins: AtomicBool,
 	/// Acknowledge every FIN as soon as it is sent, before the peer reads it.
 	ack_fins: AtomicBool,
@@ -81,6 +82,8 @@ struct Link {
 	ready_bi: kio::Queue<Bi>,
 	/// While set, the uni streams opened hold back everything after their first write.
 	split: Mutex<Option<Arc<kio::Shared<bool>>>>,
+	/// A responder can gate the return direction of newly opened bidi streams too.
+	split_responses: Mutex<Option<Arc<kio::Shared<bool>>>>,
 	/// The acceptor's transport, so a release can sort streams it has not accepted yet.
 	acceptor: Mutex<memory::Session>,
 }
@@ -95,6 +98,7 @@ impl Link {
 			ready_uni: kio::Queue::new(),
 			ready_bi: kio::Queue::new(),
 			split: Default::default(),
+			split_responses: Default::default(),
 			acceptor: Mutex::new(acceptor),
 		}
 	}
@@ -191,6 +195,9 @@ impl MockSendStream {
 		first: Option<u8>,
 		written: Poll<Result<usize, memory::Error>>,
 	) -> Poll<Result<usize, memory::Error>> {
+		if written.is_pending() {
+			*self.conn.blocked_writes.lock() += 1;
+		}
 		if let Poll::Ready(Ok(size)) = written
 			&& size > 0
 		{
@@ -550,7 +557,10 @@ impl poll::Session for MockSession {
 			held,
 			..Default::default()
 		});
-		let back = Arc::new(Line::default());
+		let back = Arc::new(Line {
+			split: self.side.inc.split_responses.lock().unwrap().clone(),
+			..Default::default()
+		});
 		lines.push_back([forward.clone(), back.clone()]);
 		drop(lines);
 
@@ -625,6 +635,25 @@ impl poll::Session for MockSession {
 // Only some test binaries steer delivery.
 #[allow(dead_code)]
 impl MockSession {
+	/// Writes that parked on the in-memory stream's byte window.
+	pub fn blocked_writes(&self) -> usize {
+		*self.side.conn.blocked_writes.read()
+	}
+
+	/// Wait until a write parks after the supplied count, without polling or sleeping.
+	pub async fn blocked_after(&self, before: usize) {
+		kio::wait(|waiter| {
+			self.side.conn.blocked_writes.poll(waiter, |count| {
+				if **count > before {
+					Poll::Ready(())
+				} else {
+					Poll::Pending
+				}
+			})
+		})
+		.await;
+	}
+
 	/// Streams whose FIN was sent before the connection closed.
 	pub fn finished_streams(&self) -> usize {
 		self.side.conn.finishes.load(Ordering::Relaxed)
@@ -740,13 +769,23 @@ impl MockSession {
 		*self.side.out.split.lock().unwrap() = Some(Arc::default());
 	}
 
-	/// Deliver what [`Self::split_unis`] held, and stop splitting.
-	pub fn release_split(&self) {
-		if let Some(split) = self.side.out.split.lock().unwrap().take() {
-			*split.lock() = true;
-		}
+	/// Deliver the first write of new bidi responses, holding the rest until `release_split`.
+	pub fn split_responses(&self) {
+		*self.side.out.split_responses.lock().unwrap() = Some(Arc::default());
 	}
 
+	/// Deliver what `split_unis` or `split_responses` held, and stop splitting.
+	pub fn release_split(&self) {
+		for gate in [
+			self.side.out.split.lock().unwrap().take(),
+			self.side.out.split_responses.lock().unwrap().take(),
+		]
+		.into_iter()
+		.flatten()
+		{
+			*gate.lock() = true;
+		}
+	}
 	/// Lose every datagram this side sends from now on.
 	pub fn lose_datagrams(&self) {
 		self.side.lossy.store(true, Ordering::Relaxed);
@@ -785,12 +824,10 @@ impl MockSession {
 /// Create a pair of connected mock sessions.
 ///
 /// Streams opened on `client` appear in `server.accept_*()` and vice versa.
-/// Both sides report the given `protocol` from
+/// Both sides report `config.protocol` from
 /// [`moq_net::transport::poll::Session::protocol`], matching ALPN negotiation
 /// behavior.
-pub fn create_mock_session_pair(protocol: Option<&'static str>) -> (MockSession, MockSession) {
-	let mut config = memory::Config::default();
-	config.protocol = protocol.map(str::to_string);
+pub fn create_mock_session_pair(config: memory::Config) -> (MockSession, MockSession) {
 	let (client, server) = memory::pair(config);
 
 	let conn = Arc::new(Conn::default());
