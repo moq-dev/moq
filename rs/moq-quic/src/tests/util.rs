@@ -397,6 +397,14 @@ pub(super) struct TestEndpoint {
     pub(super) capture_inbound_packets: bool,
     pub(super) handle_incoming: Box<dyn FnMut(&Incoming) -> IncomingConnectionBehavior>,
     pub(super) waiting_incoming: Vec<Incoming>,
+    /// Every draining and drained endpoint event, in the order connections raised them
+    pub(super) lifecycle: Vec<(ConnectionHandle, Lifecycle)>,
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub(super) enum Lifecycle {
+    Draining,
+    Drained,
 }
 
 #[derive(Debug, Copy, Clone)]
@@ -441,6 +449,7 @@ impl TestEndpoint {
             capture_inbound_packets: false,
             handle_incoming: Box::new(|_| IncomingConnectionBehavior::Accept),
             waiting_incoming: Vec::new(),
+            lifecycle: Vec::new(),
         }
     }
 
@@ -536,6 +545,12 @@ impl TestEndpoint {
             }
 
             for (ch, event) in endpoint_events {
+                if event.is_draining() {
+                    self.lifecycle.push((ch, Lifecycle::Draining));
+                }
+                if event.is_drained() {
+                    self.lifecycle.push((ch, Lifecycle::Drained));
+                }
                 if let Some(event) = self.handle_event(ch, event)
                     && let Some(conn) = self.connections.get_mut(&ch)
                 {

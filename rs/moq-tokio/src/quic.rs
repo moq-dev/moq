@@ -14,6 +14,29 @@ use std::time::Duration;
 
 use crate::cli::Duration as CliDuration;
 
+#[cfg(feature = "quic")]
+mod backend;
+#[cfg(feature = "quic")]
+pub use backend::Error;
+#[cfg(feature = "quic")]
+pub(crate) use backend::{Client, Options, Server, accept};
+
+// The async QUIC layer driving `moq-quic` on tokio, forked from quinn (see its module docs).
+// Public only so the workspace's tests can dial a bare endpoint; not a stable API.
+// cargo fmt formats submodules with the crate root's config, so `just rs fix`
+// formats this one separately with its own (quinn's).
+#[cfg(feature = "quic")]
+#[doc(hidden)]
+#[rustfmt::skip]
+pub mod driver;
+
+/// WebTransport over [`driver`], formerly the `web-transport-moq` crate.
+///
+/// Public only so the workspace's tests can dial a bare session; not a stable API.
+#[cfg(feature = "quic")]
+#[doc(hidden)]
+pub mod web;
+
 /// The routable server ID a QUIC-LB load balancer encodes into connection IDs.
 ///
 /// Parsed from, and serialized as, a hex string. Its length must match the load
@@ -55,7 +78,7 @@ pub struct LoadBalancer {
 
 /// The congestion control family for a QUIC connection.
 ///
-/// Noq uses CUBIC for loss-based control and BBRv3 for delay-based control.
+/// CUBIC is used for loss-based control and BBRv3 for delay-based control.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, usage::ValueEnum, serde::Serialize, serde::Deserialize)]
 #[usage(ignore_case)]
 #[serde(rename_all = "kebab-case")]
@@ -87,7 +110,7 @@ pub const DEFAULT_MAX_STREAMS: u64 = 10_000;
 /// Bounds how much unread data one peer can make us buffer across all of its streams,
 /// which the backends otherwise leave unlimited. Sized so a relay-to-relay session, which
 /// shares one connection, can still sustain several Gbps at intercontinental RTTs.
-#[cfg(any(feature = "noq", feature = "iroh"))]
+#[cfg(any(feature = "quic", feature = "iroh"))]
 pub(crate) const DEFAULT_RECEIVE_WINDOW: u64 = 64 << 20;
 
 /// Default idle timeout before an inactive connection is dropped.
@@ -250,7 +273,7 @@ pub struct Config {
 
 	/// Write qlog traces into this directory, which must already exist.
 	///
-	/// Noq writes one file per connection.
+	/// Each endpoint writes one file, shared by its connections.
 	///
 	/// Requires the `qlog` feature; setting it errors at init otherwise.
 	#[serde(default, skip_serializing_if = "Option::is_none")]
@@ -648,7 +671,7 @@ impl Resolved {
 	/// Delay-based unless the operator says otherwise: BBR keeps queues short and the
 	/// send rate steady enough for a live encoder to track, which is what this stack
 	/// carries.
-	#[cfg_attr(not(any(feature = "noq", feature = "iroh")), allow(dead_code))]
+	#[cfg_attr(not(any(feature = "quic", feature = "iroh")), allow(dead_code))]
 	pub(crate) fn congestion(&self) -> CongestionControl {
 		self.congestion_control.unwrap_or(CongestionControl::Delay)
 	}
@@ -657,7 +680,7 @@ impl Resolved {
 	///
 	/// Only meaningful once [`Config::validate`] has passed; a build without the
 	/// `qlog` feature never gets here with a directory set.
-	#[cfg_attr(not(feature = "noq"), allow(dead_code))]
+	#[cfg_attr(not(feature = "quic"), allow(dead_code))]
 	pub(crate) fn qlog_dir(&self) -> Option<&std::path::Path> {
 		self.qlog.as_deref()
 	}

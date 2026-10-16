@@ -35,8 +35,3 @@ no `Controller` or wire change.
 Decided in the 2026-09-30 audit: moved to m2. The seven correctness fixes
 already shipped, and this remaining gap has no observed impact on MoQ
 traffic yet.
-
-
-## Related
-
-- [Switch](/quest/m1/quic/fork/switch.md) - MoQ runs on `moq-quic`; not a blocker, since this is a local `rs/moq-quic` fix

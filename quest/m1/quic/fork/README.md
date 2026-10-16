@@ -1,4 +1,4 @@
-# Hard-fork quinn into the monorepo as moq-quic
+# [XS] Hard-fork quinn into the monorepo as moq-quic
 
 ## Goal
 
@@ -55,12 +55,8 @@ them:
 This README's own work: delete moq-dev/noq's `moq-sync.yml` and mark its
 README frozen. Advisory triage is documented in `rs/moq-quic/README.md`.
 Every carried change in moq-dev/noq's `CHANGELOG-MOQ.md`
-is either ported by a child quest or recorded as not applicable in the
-[switch](/quest/m1/quic/fork/switch.md) PR.
-
-## Required
-
-- [Switch](/quest/m1/quic/fork/switch.md) - quinn's async layer and `web-transport-moq` join moq-tokio, both runtimes run on `moq-quic`, `moq-noq*` is gone, and relay memory matches `moq-noq`
+is either ported by a child quest or recorded as not applicable in
+[#5664](https://github.com/moq-dev/moq/pull/5664).
 
 ## Related
 
