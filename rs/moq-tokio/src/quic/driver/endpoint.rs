@@ -59,8 +59,8 @@ impl Endpoint {
     /// the address `[::]:0` is a reasonable default to maximize the ability to connect to other
     /// address. For example:
     ///
-    /// ```
-    /// quinn::Endpoint::client((std::net::Ipv6Addr::UNSPECIFIED, 0).into());
+    /// ```no_run
+    /// moq_tokio::quic::driver::Endpoint::client((std::net::Ipv6Addr::UNSPECIFIED, 0).into());
     /// ```
     ///
     /// Some environments may not allow creation of dual-stack sockets, in which case an IPv6

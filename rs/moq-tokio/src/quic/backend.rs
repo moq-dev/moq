@@ -627,8 +627,12 @@ impl driver::AsyncUdpSocket for Socket {
 		// Only the endpoint driver receives, so the one readiness waker is enough.
 		loop {
 			ready!(io.poll_recv_ready(cx))?;
-			if let Ok(res) = io.try_io(tokio::io::Interest::READABLE, || self.state.recv(io.into(), bufs, meta)) {
-				return Poll::Ready(Ok(res));
+			match io.try_io(tokio::io::Interest::READABLE, || self.state.recv(io.into(), bufs, meta)) {
+				Ok(res) => return Poll::Ready(Ok(res)),
+				// `try_io` clears readiness only for `WouldBlock`; retrying any other error
+				// would spin, since `poll_recv_ready` completes at once and the recv fails again.
+				Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {}
+				Err(err) => return Poll::Ready(Err(err)),
 			}
 		}
 	}
