@@ -60,5 +60,5 @@ unsupported.
 
 - [poll_acked on moq-net's send stream](/quest/m2/quic-ack-hook.md) - the
   hook this samples through
-- [Egress lag histogram](/quest/m1/qos/lag-histogram.md) - the
+- [Egress lag histogram](/quest/m2/qos/lag-histogram.md) - the
   group-granularity sampler and starvation histogram this refines

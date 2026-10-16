@@ -2,8 +2,9 @@
 
 ## Goal
 
-MoQ carries a robot's video down and its control up on one session, as a
-library capability rather than a demo convention.
+Document how existing MoQ media and data primitives carry video down and
+control up on one session, with a runnable non-media example. New robot
+primitives and operator arbitration remain in m3 until a consumer needs them.
 
 Generic in the library: the primitive is what any teleoperated machine needs,
 and integrations are adapters on top of it. ArduPilot is the first open

@@ -22,7 +22,7 @@ Decided with the maintainer on 2026-10-13:
   and keeps the future until `rust_future_free`
   (mozilla/uniffi-rs#2771), and `ffi::Task::run` depends on that today. So
   Shape A includes the core change that drops the future on cancel,
-  prototyped on a UniFFI branch if [the fork](/quest/m1/uniffi-fork.md)
+  prototyped on a UniFFI branch if [the fork](/quest/m2/uniffi-fork.md)
   does not exist yet, and measures with and without it. Measure what
   remains of `Task` (cancel, shutdown).
 - **Shape B, foreign poll**: export a sync `poll_x(waker)` whose waker is a

@@ -22,7 +22,7 @@ Capture sets the catalog `rotation` from the sensor and display orientation,
 so a phone held in portrait plays upright; the browser half of that is
 [#933](/quest/m1/933-video-rotation-metadata-not-propagated-from-mobile-camera.md).
 
-Promoted from m2 on 2026-10-09 by maintainer priority.
+Deferred to m2; mobile capture does not gate the next breaking cut.
 
 ## Related
 

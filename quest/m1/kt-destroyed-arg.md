@@ -14,8 +14,11 @@ valid closed-publication behavior is unchanged.
 Found while landing [#5559](https://github.com/moq-dev/moq/pull/5559).
 
 - ✅ Decided 2026-10-15 (maintainer): fix it in the Kotlin template of the
-  generator fork moq pins today and bump that pin; do not hand-patch the
-  generated bindings. The [hard fork](/quest/m1/uniffi-fork.md) carries the
+  generator moq uses and update its dependency; do not hand-patch the
+  generated bindings. Kotlin currently uses workspace UniFFI 0.32 through
+  `rs/uniffi-bindgen`, not the proposed all-generator fork. Apply a focused
+  upstream/template fix without waiting for that experiment. The
+  [hard fork](/quest/m2/uniffi-fork.md) carries the
   fix when it moves the generators.
 - Reproduce first, at a constructor that takes another moq object (for
   example a handle built from a broadcast), with the argument destroyed
@@ -34,4 +37,4 @@ Wire: none.
 
 ## Related
 
-- [Hard-fork the binding generator](/quest/m1/uniffi-fork.md) - inherits the template fix
+- [Hard-fork the binding generator](/quest/m2/uniffi-fork.md) - inherits the template fix

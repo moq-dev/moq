@@ -82,7 +82,7 @@ precondition.
   content at hand derives from the epoch and the content instead (maintainer,
   superseding #5412's adoption from the live catalog). In TS passthrough that
   is the M2ts section's `random_access` and recorded `mux_rate`, owned by
-  [raw TS cuts](/quest/m1/ts-passthrough-epoch-cuts.md); audit the other
+  [raw TS cuts](/quest/m2/ts-passthrough-epoch-cuts.md); audit the other
   importers for more.
 - A restart under the same epoch re-derives the same coordinate, including
   after a total outage, so the epoch keeps naming one timeline and resuming
@@ -122,5 +122,5 @@ breaking grant for publish-only tokens is dropped). Wire: none.
 
 ## Related
 
-- [Same-epoch importers](/quest/m1/hop-aligned-import.md) - group sequences and the end-to-end pair on this coordinate
+- [Same-epoch importers](/quest/m2/hop-aligned-import.md) - group sequences and the end-to-end pair on this coordinate
 - [Broadcast epochs](/quest/m0/broadcast-epoch/README.md) - same-epoch routes resume each other's subscriptions

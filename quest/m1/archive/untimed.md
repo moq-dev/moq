@@ -16,11 +16,10 @@ Decided 2026-10-14 by the maintainer, from
 the format so a timestamp is optional, rather than keep refusing.
 
 - Timedness is a track property, so `.info` carries it: an absent `timescale`
-  means the track's frames store no timestamps. Settle whether that is a new
-  format version: `moq-archive` is on `release`, so recordings in version 2
-  may exist, and the line's in-place exception
-  ([archive](/quest/m1/archive/README.md), Compatibility) ends once a release
-  ships recordings.
+  means the track's frames store no timestamps. Main currently carries v2,
+  while the release branch carries v1. Check publication state before coding
+  and select the next format version if v2 has shipped; preserve explicit
+  version handling as [archive](/quest/m1/archive/README.md) requires.
 - The timeline is a time index (`pts`, `duration`, `durationMax`), which an
   untimed track can't fill. Decide its shape before coding: likely one record
   per group with no `pts` or `duration`, as a sparse track already cuts.

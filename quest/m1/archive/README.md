@@ -19,12 +19,12 @@ landed on main; the line may still reshape both.
 
 ### Compatibility
 
-Decided (2026-09-28): the line may break the hang `archive` catalog entry and
-the recording format in place on `main`, without a version bump
-(for example the track-timeline rework in #4280). No archives exist
-yet, so nothing recorded or published depends on either shape. This is an
-exception for this line only; once a release ships
-recordings, later format changes go through the entry's format version.
+The release branch and `moq-archive-v0.0.14` carry format v1; main carries
+v2. Published recordings therefore exist as a compatibility obligation, even
+without evidence of deployed archives. Preserve version recognition and
+explicit refusal of unsupported versions. Before reshaping v2, check whether
+it has published; a published format changes through a new version. The old
+blanket permission to break recordings in place no longer applies.
 
 ### Landed
 

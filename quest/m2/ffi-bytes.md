@@ -19,7 +19,7 @@ Decided with the maintainer on 2026-10-13:
   each (`uniffi_core` `ffi_converter_impls.rs`), in both directions. That
   path covers arguments, record fields (`MoqFrame.payload`, video and audio
   frames), and returns (`read_frame`, `recv_datagram`). Make it one
-  `memcpy` in [moq-dev/uniffi](/quest/m1/uniffi-fork.md). The serialized
+  `memcpy` in [moq-dev/uniffi](/quest/m2/uniffi-fork.md). The serialized
   format is unchanged, so no generator or binding API changes. Two copies
   remain for records and returns (the wrapper's container to `RustBuffer`,
   then `RustBuffer` to `Vec<u8>`); removing the second needs the ownership
@@ -42,5 +42,5 @@ type. Wire: none.
 
 ## Required
 
-- [Swift, Dart, and C++ benchmarks](/quest/m1/ffi-bench-wrappers.md) - the other three wrappers' numbers
-- [Hard fork](/quest/m1/uniffi-fork.md) - the repository the core patch lands in
+- [Swift, Dart, and C++ benchmarks](/quest/m2/ffi-bench-wrappers.md) - the other three wrappers' numbers
+- [Hard fork](/quest/m2/uniffi-fork.md) - the repository the core patch lands in

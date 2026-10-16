@@ -11,7 +11,7 @@ instead of falling back to the main thread.
 
 ## Plan
 
-[Plan: watch worker](/quest/m1/plan-watch-worker.md) picks between an
+[Plan: watch worker](/quest/m2/plan-watch-worker.md) picks between an
 invisible page-wide worker with on-demand signal handles and
 application-spawned workers, and rewrites this quest with the result. Until
 then, the settled constraints in that quest apply here too.
@@ -30,7 +30,7 @@ Gate on the plan's jank harness and N-player sweep, both nightly.
 
 ## Required
 
-- [Plan: watch worker](/quest/m1/plan-watch-worker.md) - picks the worker model and rewrites this quest
+- [Plan: watch worker](/quest/m2/plan-watch-worker.md) - picks the worker model and rewrites this quest
 - [A/V clock](/quest/m1/av-clock.md) - reshapes `Sync` and the worklet playhead, so the move to the worker happens once
 
 ## Related

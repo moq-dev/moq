@@ -20,11 +20,12 @@ SSRC bytes and scatter across shards, SRT data is steered by a sequence
 byte, and STUN and DTLS, whose byte 1 or 6 barely varies, pile onto one shard.
 
 Decided 2026-10-05: its own quest, required by the
-[UDP demux](/quest/m1/p2p/udp-demux.md) because the demux's flow table is
+[UDP demux](/quest/m2/p2p/udp-demux.md) because the demux's flow table is
 per shard. Folding it into [the io_uring demux](/quest/m2/uring-demux.md) was
 rejected: moq-tokio's group has the same exposure.
 
-Decided 2026-10-13: moved to m1 with the UDP demux, for native P2P.
+Decided 2026-10-15: deferred with P2P and its UDP demux to m2.
+QUIC endpoint sharding itself remains in m1.
 
 Decided 2026-10-05: classify on more than the first byte and stay [S].
 Rejected: re-sizing the quest to [M] for flow state, and a userspace hand-off

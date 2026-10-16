@@ -39,5 +39,5 @@ candidate is offered and selected. Browser interop is the harness's job.
 
 ## Related
 
-- [moq-cli joins](/quest/m1/p2p/cli.md) - the first consumer
-- [Native pairs over ICE and QUIC](/quest/m1/p2p/native-quic.md) - reuses the ICE gathering module this lifts out of `moq-rtc`
+- [moq-cli joins](/quest/m2/p2p/cli.md) - the first consumer
+- [Native pairs over ICE and QUIC](/quest/m2/p2p/native-quic.md) - reuses the ICE gathering module this lifts out of `moq-rtc`

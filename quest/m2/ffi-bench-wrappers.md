@@ -10,7 +10,7 @@ so every wrapper's FFI cost is tracked and shows on the trend site.
 
 Decided with the maintainer on 2026-10-15: every wrapper is covered because
 each generator lowers bytes differently, and a generator regression only
-shows in its own language. [Payload bytes](/quest/m1/ffi-bytes.md) needs
+shows in its own language. [Payload bytes](/quest/m2/ffi-bytes.md) needs
 all six to prove its fix.
 
 - Swift has no Linux toolchain in the dev shell; run it in the macOS job in

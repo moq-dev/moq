@@ -2,7 +2,7 @@
 
 ## Goal
 
-Publish the breaking relay QoS lag and dropped-counter API in this release.
+Publish the relay QoS lag and dropped-counter API after the next release.
 The histogram lands on totals and prefix tracks beside the existing maps.
 Publisher timeliness, client media health, and dashboard presentation remain
 separate additive work in m2.
@@ -34,8 +34,9 @@ and publisher timeliness lives downstream. This line only reports the
 counters.
 
 Decided (2026-10-06 audit): [stats prefix
-tracks](/quest/m1/stats-prefix-tracks.md) lands first, since it is
-a prerequisite of the breaking lag API in m1; the lag histogram lands on the stats totals and
+tracks](/quest/m2/stats-prefix-tracks.md) lands first, since it is
+a prerequisite of the lag API; both are deferred to m2 by the maintainer
+on 2026-10-15; the lag histogram lands on the stats totals and
 prefix tracks rather than the per-path `publisher.json` and
 `subscriber.json` map rows, which stay unchanged for existing readers
 (2026-10-12).
@@ -43,7 +44,7 @@ Rejected: the histogram first, which would make prefix tracks carry the lag
 histogram and dropped counters across.
 
 Decided (2026-10-08): the egress histogram is its own quest,
-[viewer lag histogram](/quest/m1/qos/lag-histogram.md), since every other
+[viewer lag histogram](/quest/m2/qos/lag-histogram.md), since every other
 child reads it. The line's PR, #4133, closed without landing (2026-10-09);
 its code is kept on `wip/4133-lag-histogram`.
 
@@ -54,13 +55,13 @@ on `main`.
 
 ## Required
 
-- [Viewer lag histogram](/quest/m1/qos/lag-histogram.md) - the egress `lag`
+- [Viewer lag histogram](/quest/m2/qos/lag-histogram.md) - the egress `lag`
   histogram and `dropped` counters land on the stats totals and prefix
   tracks
 
 ## Related
 
-- [Stats prefix tracks](/quest/m1/stats-prefix-tracks.md) -
+- [Stats prefix tracks](/quest/m2/stats-prefix-tracks.md) -
   lands first beside the map rows; this line's histograms land on the
   totals and prefix tracks
 - [Media stats](/quest/m2/stats/README.md) - publishers and viewers report
