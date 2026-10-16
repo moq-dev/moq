@@ -33,6 +33,7 @@ import { DuplicateTrackAlias, RetiredTrackAlias, TrackAliases } from "./aliases.
 import * as Cluster from "./cluster.ts";
 import { ObjectDatagram } from "./datagram.ts";
 import { requestReason, toRequestCode } from "./error.ts";
+import * as Namespace from "./namespace.ts";
 import { decodeObjectTime, Frame, type Group as GroupMessage, hasFirstObjectBit, ObjectIdGap } from "./object.ts";
 import { fromWire, toWire } from "./priority.ts";
 import { type Publish, PublishDone, PublishError, publishDoneClean } from "./publish.ts";
@@ -45,7 +46,7 @@ import {
 	PublishNamespaceUpdate,
 } from "./publish_namespace.ts";
 import { RequestError, RequestOk } from "./request.ts";
-import { finCancels } from "./request_stream.ts";
+import { finCancels, refuseReserved } from "./request_stream.ts";
 import { joinFilter, Subscribe, SubscribeError, SubscribeOk, Unsubscribe } from "./subscribe.ts";
 import {
 	PublishBlocked,
@@ -981,6 +982,10 @@ export class Subscriber {
 	 * @internal
 	 */
 	async runPublishNamespace(msg: PublishNamespace, stream: Stream) {
+		if (Namespace.reserved(msg.trackNamespace, this.#session.version)) {
+			await refuseReserved(stream, this.#session.version);
+			return;
+		}
 		const version = this.#session.version;
 		const path = msg.trackNamespace;
 
@@ -1176,6 +1181,10 @@ export class Subscriber {
 	 * @internal
 	 */
 	async runPublish(msg: Publish, stream: Stream) {
+		if (Namespace.reserved(msg.trackNamespace, this.#session.version)) {
+			await refuseReserved(stream, this.#session.version);
+			return;
+		}
 		const version = this.#session.version;
 
 		// We decline the method itself rather than this particular track, which would be
