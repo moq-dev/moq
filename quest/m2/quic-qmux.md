@@ -44,8 +44,8 @@ receive-offset accessor, frame-iterator access, and limited datagram helper
 visibility. Review each exposure as a reusable internal boundary rather than
 making the whole QUIC connection public.
 
-`RESET_STREAM_AT` is a QUIC extension, not a qmux-specific frame. Once the
-reliable-reset quest lands, make qmux drive that shared send and receive state
+`RESET_STREAM_AT` is a QUIC extension, not a qmux-specific frame, and
+`moq-quic` now implements it (#5690). Make qmux drive that shared send and receive state
 instead of retaining the prototype's local parsing and transitions. Because
 qmux runs over a reliable ordered transport, serialization acknowledges the
 committed prefix immediately, but the receiver must still delay the reset
@@ -78,8 +78,6 @@ the fork plan the same day kept it there.
 
 ## Required
 
-- [Reliable stream reset](/quest/m1/quic/reliable-reset.md) - qmux reuses the
-  extension's stream state rather than implementing reset locally
 - [Hierarchical stream scheduling](/quest/m1/quic/scheduler.md) - qmux must
   expose the same scheduling contract as native QUIC
 
