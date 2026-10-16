@@ -88,11 +88,14 @@ pub(crate) enum Push {
 /// The clock follows the source's: a source clock running slower than ours would make
 /// every frame late in the end, and a faster one would hold more and more. So the clock
 /// measures the source's rate and runs its decode timeline at it, holding the freshest
-/// frames of the track sent latest a delay. Each [`STEER`] of our time gives a floor, the
-/// most slack a frame of that track arrived with (the least across tracks of each one's
-/// most, a track not heard placed by its lead), which queueing and retransmission only ever
-/// lower; the upper envelope of the floors over [`RATE_WINDOW`] gives the rate (its slope)
-/// and the slack now, so a spell of queueing shorter than half the window moves neither.
+/// frames of the track sent latest a delay. Each [`STEER`] of our time gives each track it
+/// hears its most slack, which queueing and retransmission only ever lower, and a floor,
+/// the least of those (a track not heard placed by its lead). Over [`RATE_WINDOW`] the
+/// rate is the slope of one track's upper envelope, the track whose slack keeps closest to
+/// it: a TS mux sends its video ahead by however full the encoder's buffer is, so the
+/// video's slack wanders by hundreds of ms where the audio's keeps within a few. The slack
+/// now is the floors' upper envelope at that slope, so the track sent latest keeps the
+/// delay, and a spell of queueing shorter than half the window moves neither.
 /// The backlog a network stall releases is read at once, so it gives one floor, its
 /// freshest frame's: stepped on decode time it would give one per step of the media it
 /// held, and early on, before the window fills, those would read as a source far slower
@@ -224,8 +227,11 @@ struct Steer<K> {
 	/// This step's floor.
 	floor: Option<Floor<K>>,
 	/// Each step's floor, as its decode time and phase in seconds, over the last
-	/// [`RATE_WINDOW`]. Its slope is how much faster the source's clock runs than ours.
+	/// [`RATE_WINDOW`].
 	phase: VecDeque<(f64, f64)>,
+	/// Each track's own phase at each step that heard it, over the same window. The slope of
+	/// the steadiest's envelope is how much faster the source's clock runs than ours.
+	tracks: BTreeMap<K, VecDeque<(f64, f64)>>,
 	/// How far the drift has moved the deadlines, in seconds.
 	steered: f64,
 	/// The source's clock rate off ours, as last measured: positive runs fast.
@@ -241,10 +247,38 @@ impl<K> Default for Steer<K> {
 		Self {
 			floor: None,
 			phase: VecDeque::new(),
+			tracks: BTreeMap::new(),
 			steered: 0.0,
 			source: None,
 			startup: None,
 		}
+	}
+}
+
+impl<K: Ord> Steer<K> {
+	/// The source's rate and the floor's phase now. The rate is the slope of the envelope of
+	/// whichever track in `heard`, of those heard in at least half the floors, lies closest
+	/// under its own at the median, so a spell of queueing on it shorter than half the window
+	/// does not hand the rate to another; the phase is the floors' envelope at that slope.
+	fn measure<'a>(&self, heard: impl Iterator<Item = &'a K>, now: f64) -> Option<(f64, f64)>
+	where
+		K: 'a,
+	{
+		let steadiest = heard
+			.filter_map(|key| self.tracks.get(key))
+			.filter(|series| 2 * series.len() >= self.phase.len())
+			.filter_map(|series| {
+				let (slope, at) = envelope(series, now)?;
+				Some((depth(series, slope, at, now), slope))
+			})
+			.min_by(|a, b| a.0.total_cmp(&b.0))
+			.map(|(_, slope)| slope);
+		let rate = match steadiest {
+			Some(rate) => rate,
+			None => envelope(&self.phase, now)?.0,
+		};
+		let at = self.phase.iter().map(|&(x, y)| y + rate * (now - x)).reduce(f64::max)?;
+		Some((rate, at))
 	}
 }
 
@@ -299,6 +333,11 @@ impl<K: Ord + Clone, T> Buffer<K, T> {
 		}
 	}
 
+	/// How long past its decode time each frame is held.
+	pub fn delay(&self) -> Duration {
+		self.delay
+	}
+
 	/// The tracks an acquisition waits to hear from, two delays at most, before it anchors: any
 	/// of them may be the one sent latest against its decode time.
 	pub fn expect(&mut self, keys: impl IntoIterator<Item = K>) {
@@ -311,6 +350,11 @@ impl<K: Ord + Clone, T> Buffer<K, T> {
 	pub fn replay(mut self) -> Self {
 		self.replay = true;
 		self
+	}
+
+	/// Whether each clock anchors on its first frame ([`Self::replay`]).
+	pub fn replaying(&self) -> bool {
+		self.replay
 	}
 
 	/// Queue a frame, or drop it if it cannot make its deadline. Fails once the source's clock
@@ -594,12 +638,23 @@ impl<K: Ord + Clone, T> Buffer<K, T> {
 			}
 		}
 		self.steer.steered += elapsed * clock.drift;
-		let phases = &mut self.steer.phase;
-		phases.push_back((at, phase));
-		while phases.front().is_some_and(|&(at, _)| now - at > RATE_WINDOW) {
-			phases.pop_front();
+		let window = |series: &mut VecDeque<(f64, f64)>| {
+			while series.front().is_some_and(|&(at, _)| now - at > RATE_WINDOW) {
+				series.pop_front();
+			}
+		};
+		self.steer.phase.push_back((at, phase));
+		window(&mut self.steer.phase);
+		for (key, &(track, decode)) in &floor.tracks {
+			self.steer
+				.tracks
+				.entry(key.clone())
+				.or_default()
+				.push_back((decode, track));
 		}
-		let Some((rate, at)) = envelope(phases, now) else {
+		self.steer.tracks.values_mut().for_each(window);
+		self.steer.tracks.retain(|_, series| !series.is_empty());
+		let Some((rate, at)) = self.steer.measure(floor.tracks.keys(), now) else {
 			self.clock = Some(Clock {
 				anchor,
 				base: arrival.decode,
@@ -848,6 +903,13 @@ fn envelope(points: &VecDeque<(f64, f64)>, now: f64) -> Option<(f64, f64)> {
 		.find(|((x1, _), (x2, _))| *x1 <= mean && mean <= *x2 && x2 > x1)?;
 	let slope = (y2 - y1) / (x2 - x1);
 	Some((slope, y1 + slope * (now - x1)))
+}
+
+/// How far below the line of `slope` that is at `at` at `now` the median of `points` lies.
+fn depth(points: &VecDeque<(f64, f64)>, slope: f64, at: f64, now: f64) -> f64 {
+	let mut below: Vec<f64> = points.iter().map(|&(x, y)| at - slope * (now - x) - y).collect();
+	below.sort_by(f64::total_cmp);
+	below[below.len() / 2]
 }
 
 #[cfg(test)]
@@ -1413,6 +1475,11 @@ mod tests {
 		dropped: u64,
 		/// What the last push did.
 		last: Option<Push>,
+		/// The source's rate the buffer measured at the end, and how often it was out of tolerance.
+		drift: Option<f64>,
+		out_of_tolerance: u64,
+		/// The rate measured after each push, by decode time in seconds.
+		rates: Vec<(f64, f64)>,
 	}
 
 	/// Feed `secs` of 10 fps frames of tracks 1 and 2 through a 500 ms buffer from a source
@@ -1439,6 +1506,9 @@ mod tests {
 			err: None,
 			dropped: 0,
 			last: None,
+			drift: None,
+			out_of_tolerance: 0,
+			rates: Vec::new(),
 		};
 		for (sent, track, decode) in frames {
 			let arrived = start + Duration::from_secs_f64(sent);
@@ -1459,9 +1529,14 @@ mod tests {
 					break;
 				}
 			}
+			if let Some(rate) = buffer.drift() {
+				fed.rates.push((decode.as_secs_f64(), rate));
+			}
 			due(&mut buffer);
 		}
 		fed.dropped = buffer.dropped();
+		fed.drift = buffer.drift();
+		fed.out_of_tolerance = buffer.out_of_tolerance();
 		fed
 	}
 
@@ -1552,6 +1627,49 @@ mod tests {
 			.await;
 			assert!(fed.err.is_none(), "{queued} s queued: {:?}", fed.err);
 			assert_eq!(fed.dropped, 0, "{queued} s queued");
+		}
+	}
+
+	/// The track sent latest, sent ahead by a lead that wanders as a TS mux's video does with
+	/// how full the encoder's buffer is, here by 200 ms over 20 minutes, does not move the rate:
+	/// it is measured on the track sent as it decodes, whose slack keeps to its envelope, so a
+	/// source within the limit is never out of tolerance and the estimate settles at its rate.
+	#[tokio::test(start_paused = true)]
+	async fn a_wandering_track_sent_latest_does_not_move_the_rate() {
+		for ppm in [-20.0, 0.0, 20.0] {
+			let fed = feed(ppm, 3_600.0, |track, sent| match track {
+				1 => Some(sent + 0.2 - 0.1 * (sent * std::f64::consts::TAU / 1_200.0).cos()),
+				_ => Some(sent),
+			})
+			.await;
+			assert!(fed.err.is_none(), "{ppm} ppm: {:?}", fed.err);
+			assert_eq!(fed.dropped, 0, "{ppm} ppm");
+			assert_eq!(fed.out_of_tolerance, 0, "{ppm} ppm");
+			let drift = fed.drift.expect("a measurement") * 1e6;
+			assert!((drift + ppm).abs() < 0.5, "{ppm} ppm: measured {drift} ppm");
+		}
+	}
+
+	/// A spell of queueing on the steady track, four minutes of 200 ms more, does not hand the
+	/// rate to the wandering one: a track's swing is the median of how far its slack lies under
+	/// its envelope, which a spell shorter than half the window does not move.
+	#[tokio::test(start_paused = true)]
+	async fn a_spell_on_the_steady_track_keeps_the_rate_on_it() {
+		let spell = 1_500.0..1_740.0;
+		for ppm in [-20.0, 0.0, 20.0] {
+			let fed = feed(ppm, 2_400.0, |track, sent| match track {
+				1 => Some(sent + 0.2 - 0.1 * (sent * std::f64::consts::TAU / 900.0).cos()),
+				_ => Some(sent + if spell.contains(&sent) { 0.2 } else { 0.0 }),
+			})
+			.await;
+			assert!(fed.err.is_none(), "{ppm} ppm: {:?}", fed.err);
+			let worst = fed
+				.rates
+				.iter()
+				.filter(|(at, _)| *at > RATE_WINDOW + 60.0)
+				.map(|(_, rate)| (rate * 1e6 + ppm).abs())
+				.fold(0.0, f64::max);
+			assert!(worst < 0.5, "{ppm} ppm: measured up to {worst} ppm off");
 		}
 	}
 

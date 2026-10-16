@@ -103,7 +103,7 @@ tokio::task_local! {
 struct SessionController {
 	shutdown: watch::Sender<bool>,
 	join: tokio::task::JoinHandle<()>,
-	/// The one-shot connection, held so [`stop`](Self::stop) can end it and wait for it to close.
+	/// The reconnecting connection, held so [`stop`](Self::stop) can end it and wait for it to close.
 	connection: moq_tokio::Connection,
 	/// The client behind `connection`, closed by [`stop`](Self::stop) so the close reaches the
 	/// relay before `gst-launch` exits rather than leaving it to time the connection out.
@@ -202,22 +202,19 @@ impl SessionController {
 	}
 }
 
-/// Start the one-shot dial, returning it with its client and the origin its announcements land in.
+/// Start the reconnecting dial and the origin its announcements land in.
 fn connect(
 	settings: &ResolvedSettings,
 ) -> Result<(moq_tokio::Client, moq_tokio::Connection, moq_net::origin::Consumer)> {
 	let mut config = moq_tokio::connect::Config::default();
 	config.tls.insecure = Some(settings.tls_disable_verify);
+	config.backoff.timeout = Some(std::time::Duration::ZERO);
 
 	// The origin and the connection loop are both spawned tasks.
 	let _rt = RUNTIME.enter();
 	let origin = moq_tokio::origin::spawn();
 	let consumer = origin.consume();
-	// One-shot: a drop ends the session with an error rather than redialing.
-	let client = config
-		.init(Default::default())?
-		.with_subscriber(origin)
-		.with_reconnect(false);
+	let client = config.init(Default::default())?.with_subscriber(origin);
 	let connection = client.connect(settings.url.clone());
 	Ok((client, connection, consumer))
 }
@@ -564,7 +561,7 @@ async fn run_session(
 		_ = shutdown.changed() => return Ok(()),
 	}
 
-	// The dial is one-shot, so once it closes nothing can announce the path again.
+	// A temporary disconnect keeps the origin alive; only a terminal failure closes the loop.
 	let lost = async {
 		match connection.closed().await {
 			Ok(()) => anyhow::anyhow!("connection closed"),
@@ -682,7 +679,20 @@ fn play(
 /// holds the pads for the next start. A refusal is not: no restart answers a path that names
 /// nothing or a token that doesn't grant it, so it fails the session, as a malformed catalog does.
 fn source_lost(err: &moq_net::Error) -> bool {
-	!matches!(err, moq_net::Error::NotFound | moq_net::Error::Unauthorized)
+	if matches!(err, moq_net::Error::NotFound | moq_net::Error::Unauthorized) {
+		return false;
+	}
+	let code = match err {
+		moq_net::Error::Stream(moq_net::StreamError::Session(code)) => code.clone(),
+		_ => moq_net::SessionError::from(err),
+	};
+	!matches!(
+		code,
+		moq_net::SessionError::Unauthorized
+			| moq_net::SessionError::ProtocolViolation
+			| moq_net::SessionError::KeyValueFormatting
+			| moq_net::SessionError::InvalidRequestId
+	)
 }
 
 /// [`source_lost`] for a catalog read, where anything but a transport failure is malformed.
@@ -1481,6 +1491,25 @@ mod session_tests {
 			let source = moq_mux::Source::new(origin.consume(), broadcast);
 			follow_catalog(source, &Pads::default(), element, &stopping, &mut shutdown).await
 		})
+	}
+
+	#[test]
+	fn malformed_input_is_not_a_lost_source() {
+		for err in [
+			moq_net::Error::ProtocolViolation,
+			moq_net::Error::WrongSize,
+			moq_net::Error::Session(moq_net::SessionError::ProtocolViolation),
+			moq_net::Error::Session(moq_net::SessionError::KeyValueFormatting),
+		] {
+			assert!(!super::source_lost(&err), "{err:?}");
+		}
+		for err in [
+			moq_net::Error::Closed,
+			moq_net::Error::SessionClosed,
+			moq_net::Error::Cancel,
+		] {
+			assert!(super::source_lost(&err), "{err:?}");
+		}
 	}
 
 	fn video_rendition() -> VideoConfig {
@@ -2905,23 +2934,38 @@ mod session_tests {
 		origin: moq_net::origin::Producer,
 		url: url::Url,
 		task: tokio::task::JoinHandle<()>,
+		close: tokio::sync::mpsc::UnboundedSender<moq_net::Error>,
 	}
 
 	impl Relay {
 		fn new() -> Self {
+			Self::bind("127.0.0.1:0".parse().unwrap(), false)
+		}
+
+		fn bind(addr: std::net::SocketAddr, refuse: bool) -> Self {
 			super::RUNTIME.block_on(async {
 				let origin = moq_tokio::origin::spawn();
 				let mut config = moq_tokio::listen::Config::default();
-				config.tcp.bind = Some("127.0.0.1:0".parse().unwrap());
+				config.tcp.bind = Some(addr);
 				let mut server = config.init(Default::default()).unwrap().listen().await.unwrap();
 				let port = server.tcp_local_addr().unwrap().port();
 				let serving = origin.clone();
+				let (close, mut closing) = tokio::sync::mpsc::unbounded_channel::<moq_net::Error>();
 				let task = tokio::spawn(async move {
-					let mut sessions = Vec::new();
-					while let Some(request) = server.accept().await {
-						let request = request.with_publisher(&serving).with_subscriber(serving.clone());
-						if let Ok(session) = request.ok().await {
-							sessions.push(session);
+					let mut sessions: Vec<moq_net::Session> = Vec::new();
+					loop {
+						tokio::select! {
+							Some(err) = closing.recv() => {
+								for session in &sessions { session.abort(err.clone()); }
+							}
+							request = server.accept() => {
+								let Some(request) = request else { break };
+								if refuse {
+									request.reject(moq_tokio::server::Reject::Forbidden).await.unwrap();
+								} else if let Ok(session) = request.with_publisher(&serving).with_subscriber(serving.clone()).ok().await {
+									sessions.push(session);
+								}
+							}
 						}
 					}
 				});
@@ -2929,8 +2973,14 @@ mod session_tests {
 					origin,
 					url: format!("tcp://127.0.0.1:{port}/").parse().unwrap(),
 					task,
+					close,
 				}
 			})
+		}
+
+		fn stop(mut self) {
+			self.task.abort();
+			let _ = super::RUNTIME.block_on(&mut self.task);
 		}
 	}
 
@@ -3014,6 +3064,114 @@ mod session_tests {
 		pipeline.set_state(gst::State::Null).unwrap();
 		assert!(error.is_none(), "{error:?}");
 		assert_eq!(video, 1, "the switch took another pad");
+	}
+
+	/// Both elements keep their sessions alive across an outage beyond the default retry budget.
+	#[test]
+	fn relay_loss_reconnects_after_the_default_budget() {
+		let _pad_ids = pad_ids();
+		let relay = Relay::new();
+		let url = relay.url.clone();
+		let addr = format!("127.0.0.1:{}", url.port().unwrap()).parse().unwrap();
+		let (pipeline, output) = pipeline(&url);
+		let sink = glib::Object::builder::<crate::sink::MoqSink>()
+			.property("url", url.as_str())
+			.property("broadcast", "room")
+			.build();
+		let video = sink.request_pad_simple("sink_%u").unwrap();
+		video.set_property("track", "video");
+		sink.set_state(gst::State::Paused).unwrap();
+		assert!(video.send_event(gst::event::StreamStart::new("video")));
+		assert!(
+			video.send_event(gst::event::Caps::new(
+				&gst::Caps::builder("video/x-h264")
+					.field("stream-format", "byte-stream")
+					.field("alignment", "au")
+					.build()
+			))
+		);
+		assert!(video.send_event(gst::event::Segment::new(&gst::FormattedSegment::<gst::ClockTime>::new())));
+		let start = std::time::Instant::now();
+		let frame = || {
+			let mut frame = gst::Buffer::from_slice(crate::sink::h264_keyframe_au());
+			frame
+				.get_mut()
+				.unwrap()
+				.set_pts(gst::ClockTime::from_nseconds(start.elapsed().as_nanos() as u64));
+			assert_eq!(video.chain(frame), Ok(gst::FlowSuccess::Ok));
+		};
+		let pull = |wait: Duration| {
+			output.emit_by_name::<Option<gst::Sample>>("try-pull-sample", &[&(wait.as_nanos() as u64)])
+		};
+		let play = || {
+			for _ in 0..200 {
+				frame();
+				if pull(Duration::from_millis(50)).is_some() {
+					return;
+				}
+			}
+			panic!("moqsink frames never reached moqsrc");
+		};
+		play();
+		let held = pipeline.by_name("src").unwrap().src_pads();
+		relay.stop();
+		// Real sockets use the real clock: this exercises the deployed 10s retry budget.
+		std::thread::sleep(Duration::from_secs(11));
+		while pull(Duration::ZERO).is_some() {}
+		let replacement = Relay::bind(addr, false);
+		play();
+		assert_eq!(
+			pipeline.by_name("src").unwrap().src_pads(),
+			held,
+			"reconnect replaced the linked pad"
+		);
+		sink.set_state(gst::State::Null).unwrap();
+		assert_played_cleanly(pipeline);
+		replacement.stop();
+	}
+
+	#[test]
+	fn a_refused_redial_posts_a_bus_error_after_playback() {
+		let _pad_ids = pad_ids();
+		let relay = Relay::new();
+		let addr = format!("127.0.0.1:{}", relay.url.port().unwrap()).parse().unwrap();
+		let mut publisher = Publisher::new(&relay.origin, epoch(), video_rendition());
+		let (pipeline, sink) = pipeline(&relay.url);
+		rendered(&sink, &mut publisher, 1);
+		relay.stop();
+		let refusing = Relay::bind(addr, true);
+		let error = pipeline
+			.bus()
+			.unwrap()
+			.timed_pop_filtered(gst::ClockTime::from_seconds(10), &[gst::MessageType::Error]);
+		pipeline.set_state(gst::State::Null).unwrap();
+		refusing.stop();
+		let error = error.expect("refused redial did not fail the pipeline");
+		let gst::MessageView::Error(error) = error.view() else {
+			unreachable!()
+		};
+		assert!(error.debug().unwrap().contains("unauthorized"), "{error:?}");
+	}
+
+	#[test]
+	fn a_protocol_violation_posts_a_bus_error_after_playback() {
+		let _pad_ids = pad_ids();
+		let relay = Relay::new();
+		let mut publisher = Publisher::new(&relay.origin, epoch(), video_rendition());
+		let (pipeline, sink) = pipeline(&relay.url);
+		rendered(&sink, &mut publisher, 1);
+		relay.close.send(moq_net::Error::ProtocolViolation).unwrap();
+		let error = pipeline
+			.bus()
+			.unwrap()
+			.timed_pop_filtered(gst::ClockTime::from_seconds(10), &[gst::MessageType::Error]);
+		pipeline.set_state(gst::State::Null).unwrap();
+		relay.stop();
+		let error = error.expect("protocol violation did not fail the pipeline");
+		let gst::MessageView::Error(error) = error.view() else {
+			unreachable!()
+		};
+		assert!(error.debug().unwrap().contains("protocol violation"), "{error:?}");
 	}
 
 	/// End to end through a relay: a publisher restarted under a new epoch, the old one still up.

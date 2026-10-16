@@ -419,6 +419,11 @@ A broadcast demultiplexed from a DVB transport stream: video and audio described
 # Appendix B: Changelog
 {:numbered="false"}
 
+## draft-lcurley-moq-mpegts-01
+{:numbered="false"}
+
+- Added the `m2ts` section, a transport stream carried whole, with its mapping onto MSFTS; the comparison uses MSFTS's `mpeg2ts` names.
+
 ## draft-lcurley-moq-mpegts-00
 {:numbered="false"}
 
@@ -427,7 +432,6 @@ A broadcast demultiplexed from a DVB transport stream: video and audio described
 - A consumer refuses a catalog with an unrecognized `framing` or an invalid `si` map key.
 - Added `muxRate`, the source's constant multiplex rate.
 - A consumer may read the pre-`table_id` inline `sections` form; writing stays track-only.
-- Added the `m2ts` section, a transport stream carried whole, with its mapping onto MSFTS; the comparison uses MSFTS's `mpeg2ts` names.
 
 
 # Acknowledgments

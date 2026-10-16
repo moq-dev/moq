@@ -119,6 +119,18 @@ impl Decode<Version> for Framed {
 	}
 }
 
+/// Refuse a modern request with its complete REQUEST_ERROR, then finish the response.
+pub(super) async fn reject<S: crate::transport::poll::Session>(
+	mut stream: Stream<S, Version>,
+	error: super::RequestError<'_>,
+) -> Result<(), Error> {
+	stream.writer.varint(super::RequestError::ID).await?;
+	stream.writer.encode(&error).await?;
+	// A peer dropping the response after reading the refusal is a normal end.
+	let _ = stream.writer.close().await;
+	Ok(())
+}
+
 /// A framed subscription update, preserving omitted preferences.
 #[derive(Debug)]
 pub(super) struct Update {
@@ -197,16 +209,17 @@ impl Update {
 		if !data.is_empty() {
 			return Err(DecodeError::InvalidValue);
 		}
+		// TRACK_PROPERTY_FILTER belongs only to SUBSCRIBE_TRACKS and its updates.
+		if !track_filter.is_empty() {
+			return Err(DecodeError::InvalidValue);
+		}
 		let unsupported = forward == Some(false)
 			|| filter.is_some()
 			|| fill.is_some()
-			|| object_timeout.is_some()
-			|| subgroup_timeout.is_some()
 			|| !subgroup_filter.is_empty()
 			|| !object_filter.is_empty()
 			|| !priority_filter.is_empty()
 			|| !property_filter.is_empty()
-			|| !track_filter.is_empty()
 			|| new_group.is_some();
 		let (refused, authorization_token) = Self::refused(token, unsupported);
 		Ok(Self {
@@ -243,9 +256,77 @@ impl Decode<Version> for Update {
 	}
 }
 
+/// The namespace-only parameters of a modern REQUEST_UPDATE.
+#[derive(Debug)]
+pub(super) struct NamespaceUpdate {
+	pub(super) request_id: super::RequestId,
+	pub(super) prefix: Option<crate::PathOwned>,
+	pub(super) refused: Option<Error>,
+}
+
+#[derive(Debug)]
+struct NamespacePrefix(crate::PathOwned);
+
+impl super::parameters::Param for NamespacePrefix {
+	fn param_encode(&self, w: &mut crate::coding::Encoder<'_>, _: Version) -> Result<(), crate::coding::EncodeError> {
+		super::namespace::encode_namespace(w, &self.0)
+	}
+	fn param_decode(r: &mut Decoder<'_>, _: Version) -> Result<Self, DecodeError> {
+		Ok(Self(super::namespace::decode_namespace(r)?))
+	}
+}
+
+impl Decode<Version> for NamespaceUpdate {
+	fn decode(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
+		if r.varint()? != super::SubscribeUpdate::ID {
+			return Err(DecodeError::InvalidValue);
+		}
+		let size = r.u16()? as usize;
+		let mut data = r.sub(size)?;
+		let mut decode = || {
+			let request_id = super::RequestId::decode(&mut data, version)?;
+			decode_params!(&mut data, version,
+				0x03 => token: Vec<super::token::RequestToken>,
+				0x34 => prefix: Option<NamespacePrefix>,
+			);
+			if !data.is_empty() {
+				return Err(DecodeError::InvalidValue);
+			}
+			Ok(Self {
+				request_id,
+				prefix: prefix.map(|p| p.0),
+				refused: super::token::single(token).err().map(Into::into),
+			})
+		};
+		decode().map_err(DecodeError::complete)
+	}
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[test]
+	fn delivery_timeouts_on_subscription_updates_are_accepted() {
+		for version in [Version::Draft18, Version::Draft21, Version::Draft22] {
+			// Request ID 2; OBJECT_DELIVERY_TIMEOUT=7, SUBGROUP_DELIVERY_TIMEOUT=9.
+			let mut buf = bytes::Bytes::from_static(&[2, 2, 0x02, 7, 0x04, 9]);
+			let update = crate::coding::decode_buf(&mut buf, version, Update::decode_body).unwrap();
+			assert!(update.refused.is_none(), "{version}: {:?}", update.refused);
+		}
+	}
+
+	#[test]
+	fn track_property_filter_on_subscription_update_is_a_protocol_violation() {
+		for version in [Version::Draft19, Version::Draft21, Version::Draft22] {
+			let mut buf = bytes::Bytes::from_static(&[2, 1, 0x29, 2, 0, 0]);
+			let error = crate::coding::decode_buf(&mut buf, version, Update::decode_body).unwrap_err();
+			assert_eq!(
+				super::super::error::to_session_code(&crate::SessionError::from(&Error::from(error))),
+				0x03
+			);
+		}
+	}
 
 	/// TRACK_NAMESPACE_PREFIX (0x34) updates a SUBSCRIBE_NAMESPACE or SUBSCRIBE_TRACKS only,
 	/// so on a subscription's REQUEST_UPDATE it closes the session instead of being acked.

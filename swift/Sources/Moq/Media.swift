@@ -59,11 +59,11 @@ public enum Media {
         /// The container format.
         public var format: ContainerFormat
         /// The leading container bytes.
-        public var data: [UInt8]
+        public var data: Data
         /// A shared source timebase, or nil for an independent offset.
         public var timebase: Timebase?
         /// Configure a container's leading bytes and source timeline.
-        public init(format: ContainerFormat, data: [UInt8], timebase: Timebase? = nil) {
+        public init(format: ContainerFormat, data: Data, timebase: Timebase? = nil) {
             self.format = format
             self.data = data
             self.timebase = timebase

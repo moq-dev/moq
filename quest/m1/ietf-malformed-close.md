@@ -127,4 +127,3 @@ behaviour moves closer to the drafts.
 ## Related
 
 - [#5107](https://github.com/moq-dev/moq/pull/5107) - landed request-token decode and AUTH_TOKEN_CACHE_OVERFLOW
-- [moq-transport request codes](/quest/m2/ietf-request-codes.md) - the request-level half of the same validator report
