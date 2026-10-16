@@ -2,14 +2,12 @@
 //! tooling can read.
 //!
 //! The point of the test is the two halves the relay depends on: the sink
-//! actually produces a file for the connection (per connection on noq and
-//! per connection on noq, and
-//! every record in it is JSON, so a reader is not handed a truncated or
+//! actually produces a file for each end of the connection, and every record in it is JSON, so a reader is not handed a truncated or
 //! interleaved trace.
 //!
 //! Unsupported local kernels skip loudly; MOQ_STRICT makes CI refuse them.
 
-#![cfg(all(target_os = "linux", feature = "qlog", feature = "noq"))]
+#![cfg(all(target_os = "linux", feature = "qlog", feature = "quic"))]
 
 #[path = "support.rs"]
 mod support;

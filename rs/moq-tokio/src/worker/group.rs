@@ -94,7 +94,7 @@ impl Workers {
 		// hands out one member per slot in the order the kernel numbers them by.
 		let mut forming = moq_sock::shard::Group::acquire(requested, config.count).map_err(|err| match err {
 			moq_sock::shard::Error::Count { count, max } => Error::WorkerCount { count, max },
-			moq_sock::shard::Error::Resolve(err) => crate::noq::Error::BindSocket(err).into(),
+			moq_sock::shard::Error::Resolve(err) => crate::quic::Error::BindSocket(err).into(),
 			// The port lock is the only other way to lose the address, and it is
 			// held by exactly one thing: another group of this UID.
 			_ => Error::WorkerOverlap { addr: requested },
@@ -102,16 +102,16 @@ impl Workers {
 		let count = forming.count();
 		let mut claims = Vec::with_capacity(count as usize);
 		while let Some(member) = forming.member() {
-			claims.push(member.bind().map_err(crate::noq::Error::BindSocket)?);
+			claims.push(member.bind().map_err(crate::quic::Error::BindSocket)?);
 		}
-		let mut group = forming.complete(claims).map_err(crate::noq::Error::BindSocket)?;
+		let mut group = forming.complete(claims).map_err(crate::quic::Error::BindSocket)?;
 
 		let shared = Arc::new(Shared::default());
 
 		let mut workers = Vec::with_capacity(count as usize);
 		let mut certificates = None;
 
-		while let Some(member) = group.member().map_err(crate::noq::Error::BindSocket)? {
+		while let Some(member) = group.member().map_err(crate::quic::Error::BindSocket)? {
 			let index = member.shard().index();
 			// `max(1)` because an empty core list means pinning is off, not that
 			// there are no workers.
