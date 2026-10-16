@@ -4764,6 +4764,7 @@ dependencies = [
 name = "moq-pattern"
 version = "0.1.2"
 dependencies = [
+ "criterion",
  "moq-pattern",
  "serde",
  "serde_json",
