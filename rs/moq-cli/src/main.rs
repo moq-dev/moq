@@ -428,7 +428,6 @@ impl Directions {
 async fn spawn_moq(
 	moq: &MoqSide,
 	net: &Net,
-	client: moq_tokio::Client,
 	cluster: moq_relay::cluster::Cluster,
 	directions: Directions,
 	tasks: &mut JoinSet<anyhow::Result<()>>,
@@ -445,8 +444,12 @@ async fn spawn_moq(
 	};
 	let origin = cluster.origin.clone();
 
+	// Built only to dial `--connect`: the cluster binds its own client from the
+	// same `[connect]` config, so a second one would contend for a fixed bind port.
+	let mut dialer = None;
 	if let Some(url) = moq.client.url.clone() {
-		let mut client = client;
+		let mut client = net.client(moq.client.clone())?;
+		dialer = Some(client.clone());
 		if directions.publish {
 			client = client.with_publisher(origin.consume());
 		}
@@ -475,6 +478,7 @@ async fn spawn_moq(
 	Ok(Attached {
 		bandwidth,
 		origin,
+		client: dialer,
 		connection,
 		shutdown,
 	})
@@ -484,6 +488,8 @@ async fn spawn_moq(
 struct Attached {
 	bandwidth: moq_net::bandwidth::Allocator,
 	origin: moq_net::origin::Producer,
+	/// The client that dialed `--connect`, to close its endpoint on exit.
+	client: Option<moq_tokio::Client>,
 	/// The relay connection, when `--connect` dialed one.
 	connection: Option<moq_tokio::Connection>,
 	shutdown: Option<Shutdown>,
@@ -517,8 +523,7 @@ async fn run_play(moq: MoqSide, args: play::Args, net: Net) -> anyhow::Result<()
 		consume: true,
 		..Default::default()
 	};
-	let client = net.client(moq.client.clone())?;
-	let Attached { origin, .. } = spawn_moq(&moq, &net, client, cluster, directions, &mut tasks).await?;
+	let Attached { origin, .. } = spawn_moq(&moq, &net, cluster, directions, &mut tasks).await?;
 
 	play::run(origin.consume(), name, args, tasks).await
 }
@@ -541,15 +546,17 @@ async fn run_stages(moq: MoqSide, stages: Vec<Command>, net: Net) -> anyhow::Res
 
 	// The stage combinations were refused up front by `Invocation::validate`, before
 	// anything bound a port or dialed out.
-	let client = net.client(moq.client.clone())?;
+	let mut client = None;
 	let mut connection = None;
 	let result = async {
 		let Attached {
 			bandwidth,
 			origin,
+			client: dialer,
 			connection: attached,
 			shutdown,
-		} = spawn_moq(&moq, &net, client.clone(), cluster, Directions::of(&stages), &mut tasks).await?;
+		} = spawn_moq(&moq, &net, cluster, Directions::of(&stages), &mut tasks).await?;
+		client = dialer;
 		connection = attached;
 
 		// stdin and stdout are one resource each, so two stages can't share them.
@@ -601,7 +608,9 @@ async fn run_stages(moq: MoqSide, stages: Vec<Command>, net: Net) -> anyhow::Res
 	{
 		tracing::warn!(%err, "closed before delivering everything");
 	}
-	client.close().await;
+	if let Some(client) = client {
+		client.close().await;
+	}
 	result
 }
 
@@ -1213,6 +1222,51 @@ mod tests {
 			.start()
 			.await
 			.expect("http API with TLS");
+	}
+
+	/// Without `--connect`, only the cluster binds `--connect-bind`, so a fixed
+	/// port with a WAN cluster peer starts instead of colliding with itself.
+	#[tokio::test]
+	async fn a_fixed_connect_bind_with_a_cluster_peer_starts() {
+		let _ = moq_tokio::crypto::install_default();
+		// Borrow a free port from the OS, then hand it to `--connect-bind`.
+		let bind = std::net::UdpSocket::bind("127.0.0.1:0")
+			.expect("probe socket")
+			.local_addr()
+			.expect("probe addr")
+			.to_string();
+		let invocation = Invocation::try_parse_from([
+			"moq",
+			"--connect-bind",
+			&bind,
+			"--cluster-connect",
+			"moql://127.0.0.1:9/",
+			"import",
+			"ts",
+		])
+		.expect("parse");
+		invocation.moq.validate().expect("validate");
+		let cluster = invocation.moq.cluster().expect("cluster");
+		let net = Net {
+			quic: invocation.moq.quic.clone(),
+			#[cfg(feature = "iroh")]
+			iroh: None,
+		};
+		let mut tasks = JoinSet::new();
+		let attached = spawn_moq(
+			&invocation.moq,
+			&net,
+			cluster,
+			Directions {
+				publish: true,
+				consume: false,
+			},
+			&mut tasks,
+		)
+		.await
+		.expect("a fixed bind with a cluster peer starts");
+		assert!(attached.client.is_none(), "no --connect, so no client of its own");
+		tasks.abort_all();
 	}
 
 	#[test]
