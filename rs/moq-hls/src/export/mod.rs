@@ -52,6 +52,25 @@ use segments::Reference;
 type TimelineWatchers =
 	Arc<Mutex<std::collections::BTreeMap<segments::ReferenceKey, (Reference, tokio::task::JoinHandle<()>)>>>;
 
+/// A half-open media-time range for an HLS playlist.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Range {
+	/// The first requested media time.
+	pub start: Duration,
+	/// The first media time outside the request.
+	pub end: Duration,
+}
+
+impl Range {
+	/// Build a non-empty media-time range.
+	pub fn new(start: Duration, end: Duration) -> crate::Result<Self> {
+		if start >= end {
+			return Err(crate::Error::RangeUnavailable("start must be before end".into()));
+		}
+		Ok(Self { start, end })
+	}
+}
+
 /// Backoff bounds for the initial catalog subscription.
 ///
 /// The usual failure is a publisher that has announced its broadcast but not yet written its
