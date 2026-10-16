@@ -183,7 +183,7 @@ class ConnectionStats:
     packets_sent: int | None
     packets_received: int | None
     packets_lost: int | None
-    version: str | None
+    version: str | None = None
     """The negotiated protocol version, spelled like ``Client(versions=...)``."""
 
     @staticmethod
