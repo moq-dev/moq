@@ -39,6 +39,7 @@
       "name": "@moq/demo-carla",
       "version": "0.1.0",
       "dependencies": {
+        "@moq/clock": "workspace:^",
         "@moq/json": "workspace:^",
         "@moq/net": "workspace:^",
         "@moq/watch": "workspace:^",

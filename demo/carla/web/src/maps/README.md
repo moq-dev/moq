@@ -45,6 +45,14 @@ The manifest's `image` is a relative basename and `bbox` is
 records `name`, image `width`/`height`, `groundZ`, the camera transform and FOV,
 and the simulator `frame`. The PNG and manifest are a pair: ship them together.
 WebP is also supported using `<Town>.aerial.webp` and the matching manifest.
+Every visitor downloads the image, and the map fits the view to the roads
+without zooming further, so ship at most 2560x1440 WebP (Town10HD\_Opt is about
+350 KB) and update the manifest's size and checksum to match:
+
+```bash
+ffmpeg -i <Town>.aerial.png -vf scale=2560:1440 -c:v libwebp -quality 70 <Town>.aerial.webp
+```
+
 Run `just fix` afterwards so the manifests match the repository's formatting.
 
 This is a perspective screenshot calibrated on the `--ground-z` plane, not an

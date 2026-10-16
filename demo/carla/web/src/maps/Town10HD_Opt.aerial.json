@@ -2,11 +2,11 @@
 	"version": 1,
 	"map": "Carla/Maps/Town10HD_Opt",
 	"image": "Town10HD_Opt.aerial.webp",
-	"image_sha256": "8bf3fad9861d24b47cf5916148d3a4e324e8b1c43a5c500fe534cea0690e278b",
+	"image_sha256": "a131ed672676660a9146a638ea4b40acbbc09f234d4c9d147dc83fbab5b1ec96",
 	"units": "metres",
 	"image_size": {
-		"width": 3840,
-		"height": 2160
+		"width": 2560,
+		"height": 1440
 	},
 	"camera": {
 		"location": {

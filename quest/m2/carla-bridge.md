@@ -54,7 +54,7 @@ probe opens the camera's own backend with a CPU picture.
 
 ## Required
 
-- [Vulkan Video encode](/quest/m1/vulkan-encode.md) - the AMD encoder this exercises
+- [Vulkan Video encode on AMD](/quest/m2/vulkan-encode.md) - the AMD encoder this exercises
 
 ## Related
 

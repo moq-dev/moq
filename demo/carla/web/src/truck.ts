@@ -8,6 +8,7 @@
  *
  * @module
  */
+import { Milli, Nano } from "@moq/clock";
 import * as Json from "@moq/json";
 import * as Moq from "@moq/net";
 import * as Watch from "@moq/watch";
@@ -57,7 +58,7 @@ export class SafetyCommandBroadcast {
 	}
 }
 
-const CONTROL_HEARTBEAT_MS = 250;
+const CONTROL_HEARTBEAT = Nano.fromMilli(Milli(250));
 const MAX_PENDING_ACKS = 64;
 
 /**
@@ -115,7 +116,7 @@ export class Truck {
 		this.#signals.run(this.#runActive.bind(this));
 		this.#signals.run(this.#runControlLease.bind(this));
 		this.#signals.run(this.#runRespawn.bind(this));
-		this.#signals.interval(() => this.#heartbeat(), CONTROL_HEARTBEAT_MS);
+		this.#signals.interval(() => this.#heartbeat(), CONTROL_HEARTBEAT);
 
 		// Video pipeline.
 		this.broadcast = new Watch.Broadcast({
