@@ -54,6 +54,8 @@ using AudioConsumer = MoqAudioConsumer;
 using AudioEncoder = MoqAudioEncoder;
 using AudioProducer = MoqAudioProducer;
 using Bandwidth = MoqBandwidth;
+/// An owned bandwidth estimate; release it to stop receive PROBE demand.
+using BandwidthConsumer = MoqBandwidthConsumer;
 using BroadcastConsumer = MoqBroadcastConsumer;
 using BroadcastDynamic = MoqBroadcastDynamic;
 using BroadcastProducer = MoqBroadcastProducer;

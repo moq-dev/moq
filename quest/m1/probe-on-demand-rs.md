@@ -26,6 +26,11 @@ Decided (2026-10-12, quest-plan):
   a consumer: it consumes the inner session's estimate only while its own
   consumer is used.
 
+Decided (2026-10-16): bindings return an owned generic bandwidth consumer
+(`Bandwidth.Consumer` / `MoqBandwidthConsumer`) with `peek()` and `changed()`.
+Holding this consumer is demand; releasing the last one stops PROBE. The
+session handle itself is never demand.
+
 Test: a session nobody holds a consumer for opens no PROBE stream, and one that
 holds then drops a consumer opens and then resets it. Reuse the mock transport
 stats and the harness in `rs/moq-net/tests/integration/idle_session.rs`.

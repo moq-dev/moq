@@ -91,7 +91,10 @@ impl Status {
 }
 
 /// Convert only transport metrics actually supplied by the active backend into the public property.
-fn connection_stats_structure(stats: moq_net::session::Stats) -> gst::Structure {
+fn connection_stats_structure(
+	stats: moq_net::session::Stats,
+	recv_rate: Option<moq_net::bandwidth::Rate>,
+) -> gst::Structure {
 	let mut structure = gst::Structure::new_empty("moq-connection-stats");
 	if let Some(rtt) = stats.rtt {
 		structure.set("rtt-us", u64::try_from(rtt.as_micros()).unwrap_or(u64::MAX));
@@ -103,7 +106,7 @@ fn connection_stats_structure(stats: moq_net::session::Stats) -> gst::Structure 
 		),
 		(
 			"estimated-recv-rate-bps",
-			stats.estimated_recv_rate.map(moq_net::bandwidth::Rate::as_bps),
+			recv_rate.map(moq_net::bandwidth::Rate::as_bps),
 		),
 		("bytes-sent", stats.bytes_sent),
 		("bytes-received", stats.bytes_received),
@@ -358,7 +361,9 @@ impl Session {
 
 	/// Snapshot the current connection statistics, or None while disconnected.
 	pub fn connection_stats(&self) -> Option<gst::Structure> {
-		self.connection_stats.stats().map(connection_stats_structure)
+		self.connection_stats
+			.stats()
+			.map(|stats| connection_stats_structure(stats, self.recv_bandwidth.peek()))
 	}
 
 	/// Cumulative connects and disconnects recorded by the reconnect loop.
@@ -523,7 +528,7 @@ mod tests {
 		stats.rtt = Some(std::time::Duration::ZERO);
 		stats.bytes_sent = Some(0);
 		stats.packets_lost = Some(7);
-		let structure = connection_stats_structure(stats);
+		let structure = connection_stats_structure(stats, None);
 		assert_eq!(structure.get::<u64>("rtt-us"), Ok(0));
 		assert_eq!(structure.get::<u64>("bytes-sent"), Ok(0));
 		assert_eq!(structure.get::<u64>("packets-lost"), Ok(7));
