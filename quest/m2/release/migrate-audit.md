@@ -5,7 +5,8 @@
 Every PR into `release` runs a check that diffs each published package's
 public API against its last release tag. A backport fails on any break; on
 the breaking cut PR the diff is reported for the auditor, who confirms every
-break has its `MIGRATE.md` entry before the cut merges.
+break, including those in surfaces the diff cannot see, has its `MIGRATE.md`
+entry before the cut merges.
 
 ## Plan
 
@@ -25,7 +26,14 @@ Decided 2026-10-16 (maintainer interview):
   UniFFI interface diff for the bindings. Prefer maintained tools over
   hand-rolled diffing. Wire it into the workflow that runs on PRs into
   `release`, and add the audit step to CONTRIBUTING.md's Releases section.
-- For this cut, fill every gap the report shows in the matching `MIGRATE.md`.
+- Coverage: the report covers Rust crates, `@moq/*` declarations, and the
+  generated FFI interfaces. A break only in a hand-written binding wrapper
+  (`py/moq-rs`, `kt/moq`, `dart/moq`, `go/wrapper`, `swift`, `cpp/moq`,
+  `cpp/obs`) or a binary's flags, env vars, or config keys escapes it, so the
+  cut's audit also reads the diff of those paths by hand. Per-language wrapper
+  checks are out of scope until a missed break shows they are needed.
+- For this cut, fill every gap the report and the manual pass show in the
+  matching `MIGRATE.md`.
 - Required by the cut, after m1's breaking work has landed.
 
 ## Required

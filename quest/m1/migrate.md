@@ -49,8 +49,13 @@ Decided 2026-10-16 (maintainer interview):
   moq-video/moq-audio, and @moq/hang/@moq/publish/@moq/watch.
 - Ranked first in m1 so breaking work landing after it carries its entry.
 
-Update `doc/AGENTS.md` if it describes upgrade.md as the migration home, and
-any rule that points breaking PRs at upgrade.md.
+Repoint every active quest that sends breaking entries to upgrade.md, so
+they land in package files instead: `quest/m1/ffi-shape/README.md`,
+`quest/m1/ffi-shape/stream-producer-name.md`,
+`quest/m1/json-window-timestamps.md`, `quest/m2/release/c-retire.md`, and the
+release epic's note that the upgrade guide describes public API
+(`quest/m2/release/README.md`). Grep `quest/` for `upgrade.md` again when
+landing, since other quests may add references meanwhile.
 
 ## Related
 
