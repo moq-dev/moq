@@ -228,6 +228,11 @@ export class Decoder {
 		this.#instance = { path: active.path, closed: active.closed };
 		if (republished) this.sync.reset();
 
+		// Only a rendition read from the same path continues the outgoing arrival estimate: another
+		// path's arrivals have nothing to do with what this one learned.
+		const outgoing = this.#active.peek();
+		const predecessor = outgoing?.broadcast.path === active.path ? outgoing.consumer : undefined;
+
 		// Start a new pending effect.
 		let pending: DecoderTrack | undefined = new DecoderTrack({
 			sync: this.sync,
@@ -238,7 +243,7 @@ export class Decoder {
 			identity: key,
 			stats: this.#out.stats,
 			catalog: broadcast.out.catalog,
-			predecessor: this.#active.peek()?.consumer,
+			predecessor,
 		});
 		this.#selected = pending;
 		effect.run((inner) => {
@@ -400,8 +405,8 @@ interface DecoderTrackProps {
 	// The broadcast catalog this subscription started from. Updates on that broadcast still apply;
 	// a later source does not.
 	catalog: Getter<Catalog.Root | undefined>;
-	// The consumer of the rendition on screen when this one was selected, whose arrival estimate it
-	// continues.
+	// The consumer of the rendition on screen when this one was selected from the same path, whose
+	// arrival estimate it continues.
 	predecessor?: Container.Consumer;
 
 	stats: Signal<Stats | undefined>;

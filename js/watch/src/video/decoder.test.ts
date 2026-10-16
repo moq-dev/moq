@@ -340,11 +340,18 @@ async function guardedPlayback(kind: "legacy" | "cmaf", reads: Read[], hold: rea
 			producer = new Moq.Broadcast.Producer();
 			active.set(producer.consume());
 		},
-		// Only the media the rendition reads restarts, under the same catalog.
-		republishMedia() {
+		// Only the media the rendition reads restarts, under the same catalog, or moves to `path`. A
+		// live playback gets its video track back, published before the decoder asks for it.
+		republishMedia(path?: string): Moq.Track.Producer | undefined {
 			media.peek().close();
-			mediaProducer = new Moq.Broadcast.Producer();
+			mediaProducer = path
+				? new Moq.Origin.Producer().createBroadcast(Moq.Path.from(path))
+				: new Moq.Broadcast.Producer();
+			const track = live
+				? mediaProducer.createTrack("video", { timescale: Moq.Time.Timescale.MILLI })
+				: undefined;
 			media.set(mediaProducer.consume());
+			return track;
 		},
 		close() {
 			decoder.close();
@@ -822,6 +829,39 @@ function legacyFrame(media: Micro): Moq.Group.Frame {
 	return { payload, timestamp: Moq.Time.Timestamp.fromMicros(media) };
 }
 
+// A live video track on a manual clock: one frame per group every 33ms, flushed in runs of `burst`,
+// so each run's first frame lands that much late. A replacement track continues the same timeline.
+function liveVideo(clock: ReturnType<typeof manualAt>, track: Moq.Track.Producer, burst: number) {
+	const FRAME = 33;
+	let frame = 0;
+	let sequence = 0;
+	let held: number[] = [];
+	return {
+		burst,
+		replace(next: Moq.Track.Producer) {
+			track = next;
+			sequence = 0;
+		},
+		// Advances the clock by `step` to `t`, publishing every frame due by then.
+		async advance(t: number, step: number) {
+			await clock.advance(step);
+			for (; frame * FRAME <= t; frame++) {
+				held.push(frame * FRAME);
+				if (held.length < this.burst) continue;
+				for (const media of held) {
+					const group = new Moq.Group.Producer(sequence++);
+					group.writeFrame(legacyFrame(Micro.fromMilli(Milli(media))));
+					group.close();
+					track.writeGroup(group);
+				}
+				held = [];
+			}
+			await new Promise((resolve) => setImmediate(resolve));
+			await microtasks();
+		},
+	};
+}
+
 // A codec change renames the video track, and the replacement's consumer starts reading the same
 // path. Restarting its arrival estimate from the cold-start prior dropped the shared "auto" delay
 // at promotion and climbed back as the new track relearned the lateness, so the audio ring
@@ -841,13 +881,8 @@ it("a renamed video track keeps the delay, so audio neither skips nor goes silen
 		ring.resize(Milli.fromSecond((ringSamples(RATE, delay) / RATE) as Second));
 	});
 
-	// One frame per group every 33ms, flushed in runs of 12: each run's first frame lands ~360ms late.
-	const FRAME = 33;
-	const BURST = 12;
-	let track = playback.track as Moq.Track.Producer;
-	let sequence = 0;
-	let held: number[] = [];
-	let frame = 0;
+	// Flushed in runs of 12, so each run's first frame lands ~360ms late.
+	const video = liveVideo(clock, playback.track as Moq.Track.Producer, 12);
 
 	let inserted = 0;
 	let played = 0;
@@ -856,21 +891,7 @@ it("a renamed video track keeps the delay, so audio neither skips nor goes silen
 
 	const run = async (from: number, until: number) => {
 		for (let t = from + STEP; t <= until; t += STEP) {
-			await clock.advance(STEP);
-			for (; frame * FRAME <= t; frame++) {
-				held.push(frame * FRAME);
-				if (held.length < BURST) continue;
-				for (const media of held) {
-					const group = new Moq.Group.Producer(sequence++);
-					group.writeFrame(legacyFrame(Micro.fromMilli(Milli(media))));
-					group.close();
-					track.writeGroup(group);
-				}
-				held = [];
-			}
-			await new Promise((resolve) => setImmediate(resolve));
-			await microtasks();
-
+			await video.advance(t, STEP);
 			ring.write(Micro.fromMilli(Milli(t - STEP)), [new Float32Array(samples).fill(0.5)]);
 			inserted += samples;
 			const count = ring.read(output);
@@ -891,10 +912,9 @@ it("a renamed video track keeps the delay, so audio neither skips nor goes silen
 		const before = { inserted, played, buffered: ring.length };
 		silent = 0;
 
-		track.close();
+		(playback.track as Moq.Track.Producer).close();
 		playback.switchRendition("video/1");
-		track = playback.producer.createTrack("video/1", { timescale: Moq.Time.Timescale.MILLI });
-		sequence = 0;
+		video.replace(playback.producer.createTrack("video/1", { timescale: Moq.Time.Timescale.MILLI }));
 		await run(20_000, 26_000);
 
 		// The replacement read the new track and showed it.
@@ -904,6 +924,38 @@ it("a renamed video track keeps the delay, so audio neither skips nor goes silen
 		expect(playback.sync.out.delay.peek()).toBeGreaterThanOrEqual(delay);
 	} finally {
 		follow.close();
+		playback.close();
+		await microtasks();
+		clock.restore();
+	}
+});
+
+// Another path's arrivals say nothing about this one's, so a rendition read from elsewhere, such as
+// through a `broadcast` override, learns its own estimate instead of inheriting the outgoing one.
+it("a video track read from another path does not inherit the outgoing delay", async () => {
+	const clock = manualAt(0);
+	const playback = await guardedPlayback("legacy", [], [], true);
+	const video = liveVideo(clock, playback.track as Moq.Track.Producer, 12);
+	const run = async (from: number, until: number) => {
+		for (let t = from + 20; t <= until; t += 20) await video.advance(t, 20);
+	};
+
+	try {
+		playback.delay.set("auto");
+		await microtasks();
+
+		await run(0, 20_000);
+		const warm = playback.sync.out.delay.peek();
+		expect(warm).toBeGreaterThan(Milli(300));
+
+		// The same media from another path, where every frame lands on time.
+		video.replace(playback.republishMedia("elsewhere") as Moq.Track.Producer);
+		video.burst = 1;
+		await run(20_000, 22_000);
+
+		expect(playback.decoder.out.timestamp.peek()).toBeGreaterThan(Milli(21_000));
+		expect(playback.sync.out.delay.peek()).toBeLessThan(warm);
+	} finally {
 		playback.close();
 		await microtasks();
 		clock.restore();
