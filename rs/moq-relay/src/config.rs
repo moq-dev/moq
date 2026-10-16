@@ -1570,7 +1570,7 @@ uid = [1001]
 			"cannot be combined",
 		);
 
-		#[cfg(feature = "noq")]
+		#[cfg(feature = "quic")]
 		{
 			let path = dir.join("typed.toml");
 			std::fs::write(&path, "[listen]\nload_balancer = { id = \"ab\", nonce = 8 }\n").unwrap();
