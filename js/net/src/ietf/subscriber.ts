@@ -1304,6 +1304,12 @@ export class Subscriber {
 				}
 
 				if (frame.endOfTrack) {
+					// The compact form names the subgroup by its first Object ID, so a marker
+					// opening the stream at a nonzero one ends subgroup N, not the track.
+					if (!producer && group.flags.hasSubgroupObject && frame.idDelta !== 0) {
+						stream.stop(new Error("subgroups are not supported"));
+						return;
+					}
 					// No object at or past this location exists: after the group's last object
 					// the track ends with it, and at object 0 it ends before it.
 					if (producer && frame.idDelta !== 0) throw new ObjectIdGap(frame.idDelta);
