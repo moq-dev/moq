@@ -1351,8 +1351,9 @@ def system_timelines(
 
     A receiver learns a program's PMT PID from the PAT, and its PCR PID from a PMT on that
     PID, each from the packet after the section that declares it. The first pair a program
-    declares holds from the start of the capture. A complete PAT version without the program
-    ends it, an epoch with neither PID, until a PAT and PMT declare it again."""
+    declares holds from the start of the capture, unless a complete PAT before it left the
+    program out. A complete PAT version without a program a section has listed ends it, an
+    epoch with neither PID, until a PAT and PMT declare it again."""
     by_pid = packets_on(data, packet_size, {0})
     # (index, kind, PMT PID, value): a PAT naming the PMT PID (0), a PMT naming the PCR PID
     # (1), or a complete PAT version without the program (2).
@@ -1360,6 +1361,7 @@ def system_timelines(
     listed: set[int] = set()
     version: int | None = None
     parts: dict[int, set[int]] = {}
+    first_complete: int | None = None
     for index, section in sections(by_pid.get(0, [])):
         if section[0] != 0x00 or not section[5] & 0x01:
             continue
@@ -1373,11 +1375,13 @@ def system_timelines(
         if (section[5] >> 1) & 0x1F != version:
             version, parts = (section[5] >> 1) & 0x1F, {}
         parts[section[6]] = programs
+        listed |= programs
         if all(n in parts for n in range(section[7] + 1)):
             current = set().union(*(parts[n] for n in range(section[7] + 1)))
             for program in listed - current:
                 events[program].append((index, 2, 0, 0))
             listed = current
+            first_complete = index if first_complete is None else first_complete
     pmt_pids = {pid for changes in events.values() for _, _, pid, _ in changes}
     by_pid |= packets_on(data, packet_size, {1, 2, 3} | pmt_pids)
     for pid in pmt_pids:
@@ -1389,6 +1393,7 @@ def system_timelines(
     for program, changes in events.items():
         pmt = pcr = None
         epochs: list[tuple[int, int | None, int | None]] = []
+        added = first_complete is not None and first_complete < min(i for i, kind, _, _ in changes if kind == 0)
         for index, kind, pid, value in sorted(changes):
             if kind == 1 and pid != pmt:
                 continue
@@ -1398,7 +1403,7 @@ def system_timelines(
             pmt, pcr = new
             if pcr is None and (pmt is not None or not epochs or epochs[-1][1] is None):
                 continue
-            start = index + 1 if epochs else 0
+            start = index + 1 if epochs or added else 0
             if epochs and epochs[-1][0] == start:
                 epochs.pop()
             epochs.append((start, pmt, pcr))
@@ -1420,7 +1425,8 @@ def program_system_packets(
         for index, packet in packets:
             first = not is_duplicate(last, packet)
             last = packet
-            pmt = epochs[max(bisect.bisect_right(starts, index) - 1, 0)][1]
+            n = bisect.bisect_right(starts, index) - 1
+            pmt = epochs[n][1] if n >= 0 else None
             if pmt is not None and (pid <= 3 or pmt == pid):
                 out.append((index, first))
     out.sort()
@@ -1519,7 +1525,10 @@ def check_system_buffers(ts_path: str, packet_size: int, scan: Scan) -> Check:
     TBsys empties at least once a second. Both buffers keep their bytes across a change of
     PMT PID, PCR PID or transport rate; a signalled discontinuity starts them afresh, as in
     `check_tstd`, and a program a complete PAT drops takes nothing until it is declared again,
-    afresh. A program declaring no PCR (PCR_PID 0x1FFF, 2.4.4.9) has no clock to model;
+    afresh. Across a PCR PID change the last PCR on the old PID and the first on the new are
+    the program's successive PCRs: unless the change signals a discontinuity, they must
+    increase and lie within 0.1 s (2.7.2), or the check fails and the buffers start afresh.
+    A program declaring no PCR (PCR_PID 0x1FFF, 2.4.4.9) has no clock to model;
     a system packet on any other PCR PID's stretch with fewer than two PCRs fails, since it
     was not checked.
     """
@@ -1537,26 +1546,39 @@ def check_system_buffers(ts_path: str, packet_size: int, scan: Scan) -> Check:
         modelled = 0
         # The runs one set of buffers lives through, each clock known before any packet is
         # taken: a packet still reaching Bsys as the clock changes drains at the next rate.
-        chains: list[list[tuple[int, list[tuple[int, bool]], PcrClock]]] = []
+        # Across a PCR PID change the last PCR on the old PID and the first on the new are the
+        # program's successive PCRs, which time the bytes between them (2.4.2.2).
+        chains: list[list[tuple[int, list[tuple[int, bool]], PcrClock, list[tuple[int, int]]]]] = []
         chain = None
         for lo, hi, pcr_pid, fresh in clock_runs(scan, epochs):
             run = packets[bisect.bisect_left(indices, lo) : bisect.bisect_left(indices, hi)]
-            clock = PcrClock([s for s in scan.pcr_by_pid.get(pcr_pid, []) if lo <= s[0] < hi])
+            samples = [s for s in scan.pcr_by_pid.get(pcr_pid, []) if lo <= s[0] < hi]
+            clock = PcrClock(samples)
             if pcr_pid == 0x1FFF or not clock.ok():
                 if pcr_pid != 0x1FFF and run:
                     name = "outside a clocked time base"
                     grade.violations[name] = grade.violations.get(name, 0) + len(run)
                 chain = None
                 continue
+            if chain is not None and not fresh:
+                before, held = chain[-1][3][-1], chain[-1][3]
+                if 0 < (samples[0][1] - before[1]) % PCR_WRAP <= PCR_HZ // 10:
+                    chain[-1] = (*chain[-1][:2], PcrClock([*held, samples[0]]), held)
+                    samples = [before, *samples]
+                    clock = PcrClock(samples)
+                else:
+                    name = "PCR PID switch without a common time base"
+                    grade.violations[name] = grade.violations.get(name, 0) + 1
+                    fresh = True
             if fresh or chain is None:
                 chain = []
                 chains.append(chain)
-            chain.append((lo, run, clock))
+            chain.append((lo, run, clock, samples))
         for chain in chains:
             buffers = SystemBuffers()
-            for lo, _, clock in chain:
+            for lo, _, clock, _ in chain:
                 buffers.run_on(clock, clock.time_at(lo))
-            for _, run, clock in chain:
+            for _, run, clock, _ in chain:
                 for index, first in run:
                     modelled += 1
                     buffers.take(clock.time_at(index), clock.time_at(index + 1), first, grade)

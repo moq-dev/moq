@@ -165,7 +165,10 @@ bytes enter Bsys as they leave TBsys, and a duplicate (2.4.3.3, the same bytes
 but for a refreshed PCR or OPCR) enters TBsys but not Bsys. Each program is
 followed through the PAT and its PMTs, as a receiver would: its packets on the PMT
 PID then in force count, timed on the PCR PID then in force, and both buffers keep
-their bytes when either PID moves, until a complete PAT drops the program. Rsys drains Bsys at the transport rate each pair
+their bytes when either PID moves, until a complete PAT drops the program. Across a
+PCR PID move the last PCR on the old PID and the first on the new are the program's
+successive PCRs, so unless the move signals a discontinuity they must increase and lie
+within 0.1 s (2.7.2). Rsys drains Bsys at the transport rate each pair
 of PCRs gives, so a rate change takes effect where it happens. A system packet on a
 stretch of the PCR PID with fewer than two PCRs fails, since nothing checked it;
 a program declaring no PCR (0x1FFF) has no clock to model. The
