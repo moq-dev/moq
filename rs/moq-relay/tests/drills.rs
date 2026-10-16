@@ -714,23 +714,20 @@ async fn interrupted_publisher_republishes_new_content(lane: Lane) {
 	let (_, payload) = read_group(&mut reader, "before the interrupt").await;
 	assert_eq!(payload, b"original", "delivery is broken before the drill even starts");
 
-	// The interrupt: the session goes first, so the relay loses the publisher
-	// with no finish and no unannounce, which is what a crashed publisher looks
-	// like. Dropping the broadcast while the session was still up would send a
-	// clean unannounce instead and never reach the crash path. The rest goes
-	// after, including the subscriber's handles, so nothing local keeps the dead
-	// broadcast alive for the assertions below.
+	// Dropping the connection cancels its task asynchronously. Keep the broadcast
+	// alive until the relay withdraws it, so a clean unannounce cannot race the
+	// session loss and satisfy the assertion without testing crash recovery.
 	drop(first_session);
 	drop(reader);
-	drop(track);
-	drop(broadcast);
-	drop(first);
 
 	// Terminal result: the name stops being announced. Nothing told the relay
 	// the broadcast ended, so this is the proof that losing the publisher's
 	// session withdraws what it announced rather than parking subscribers on it.
 	expect_announce(&mut announced, "live", false, "the interrupted publisher").await;
 	println!("fault activated: the interrupted publisher's broadcast was withdrawn");
+	drop(track);
+	drop(broadcast);
+	drop(first);
 
 	// Restore: the same name, a new publisher, different content.
 	let second = moq_tokio::origin::spawn();

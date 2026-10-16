@@ -2,7 +2,7 @@
 
 ## Goal
 
-Swift, Dart, and C++ run the [binding benchmark](/quest/m1/ffi-bench.md)
+Swift, Dart, and C++ run the [binding benchmark](/bench/README.md)
 nightly with the same shape, metrics, and output as Python, Kotlin, and Go,
 so every wrapper's FFI cost is tracked and shows on the trend site.
 
@@ -16,11 +16,7 @@ all six to prove its fix.
 - Swift has no Linux toolchain in the dev shell; run it in the macOS job in
   `platform.yml`. Its numbers come from a different runner, so report its
   ratio against a Rust baseline measured in that same job.
-- Follow whatever the harness quest settled on for shape and output; extend
-  it rather than fork it.
+- Follow the shape and output in `bench/README.md` (`bench/ffi.sh` runs
+  each runner, `bench/ffi.py` combines them); extend it rather than fork it.
 
 Public API: none. Wire: none.
-
-## Required
-
-- [Binding benchmark harness](/quest/m1/ffi-bench.md) - the shape, baselines, and output these join

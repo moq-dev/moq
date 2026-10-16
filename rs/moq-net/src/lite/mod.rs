@@ -23,6 +23,8 @@ mod probe;
 #[cfg(feature = "async")]
 mod publisher;
 #[cfg(feature = "async")]
+mod replay;
+#[cfg(feature = "async")]
 mod session;
 mod setup;
 mod stream;

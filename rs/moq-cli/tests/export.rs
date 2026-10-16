@@ -4,6 +4,7 @@
 #![cfg(unix)]
 
 use std::io::Cursor;
+use std::os::fd::AsRawFd;
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -11,7 +12,7 @@ use std::time::{Duration, Instant};
 use hang::moq_net;
 use moq_mux::container::ts;
 use mpeg2ts::ts::{ReadTsPacket, TsPacketReader, TsPayload};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin};
 use tokio::task::JoinHandle;
 
@@ -28,6 +29,8 @@ struct Export {
 	output: Output,
 	stdout: JoinHandle<std::io::Result<()>>,
 	stderr: JoinHandle<String>,
+	settled: Option<tokio::sync::oneshot::Receiver<()>>,
+	fence: tokio::sync::mpsc::UnboundedSender<tokio::sync::oneshot::Sender<usize>>,
 }
 
 impl Export {
@@ -146,40 +149,78 @@ fn export_as(relay: &Relay, global: &[&str], format: Format, flags: &[&str]) -> 
 	let mut child = moq(relay, global)
 		.args(["export", format.name])
 		.args(flags)
+		.env("RUST_LOG", "warn,moq_mux::container::ts::follower=info")
 		.stdout(Stdio::piped())
 		.stderr(Stdio::piped())
 		.spawn()
 		.expect("spawn export");
-	let (output, stdout) = collect(child.stdout.take().expect("stdout"));
-	let mut stderr = child.stderr.take().expect("stderr");
+	let (output, stdout, fence) = collect(child.stdout.take().expect("stdout"));
+	let mut stderr = BufReader::new(child.stderr.take().expect("stderr"));
+	let (settle, settled) = tokio::sync::oneshot::channel();
 	let stderr = tokio::spawn(async move {
-		let mut errors = Vec::new();
-		stderr.read_to_end(&mut errors).await.expect("read export stderr");
-		String::from_utf8_lossy(&errors).into_owned()
+		let mut errors = String::new();
+		let mut settle = Some(settle);
+		loop {
+			let mut line = String::new();
+			if stderr.read_line(&mut line).await.expect("read export stderr") == 0 {
+				return errors;
+			}
+			errors.push_str(&line);
+			if line.contains("waiting for it to return")
+				&& let Some(settle) = settle.take()
+			{
+				let _ = settle.send(());
+			}
+		}
 	});
 	Export {
 		child,
 		output,
 		stdout,
 		stderr,
+		settled: Some(settled),
+		fence,
 	}
 }
 
 /// Collect everything `pipe` yields, retaining its completion before final assertions.
-fn collect(mut pipe: impl tokio::io::AsyncRead + Unpin + Send + 'static) -> (Output, JoinHandle<std::io::Result<()>>) {
+fn collect(
+	mut pipe: tokio::process::ChildStdout,
+) -> (
+	Output,
+	JoinHandle<std::io::Result<()>>,
+	tokio::sync::mpsc::UnboundedSender<tokio::sync::oneshot::Sender<usize>>,
+) {
 	let output = Output::default();
 	let sink = output.clone();
+	let (fence, mut requested) = tokio::sync::mpsc::unbounded_channel::<tokio::sync::oneshot::Sender<usize>>();
 	let task = tokio::spawn(async move {
 		let mut buf = vec![0; 64 * 1024];
 		loop {
-			let n = pipe.read(&mut buf).await?;
-			if n == 0 {
-				return Ok(());
+			tokio::select! {
+				n = pipe.read(&mut buf) => {
+					let n = n?;
+					if n == 0 { return Ok(()); }
+					sink.lock().unwrap().extend_from_slice(&buf[..n]);
+				}
+				Some(fence) = requested.recv() => {
+					// The follower entered linger only after each old stdout write and flush.
+					// This task owns the reader, so no read can race the queued-byte count.
+					let mut pending: libc::c_int = 0;
+					// SAFETY: the pipe is live and pending points to a writable c_int.
+					if unsafe { libc::ioctl(pipe.as_raw_fd(), libc::FIONREAD, &mut pending) } < 0 {
+						return Err(std::io::Error::last_os_error());
+					}
+					let mut tail = vec![0; pending as usize];
+					pipe.read_exact(&mut tail).await?;
+					let mut output = sink.lock().unwrap();
+					output.extend_from_slice(&tail);
+					let _ = fence.send(output.len());
+				}
 			}
-			sink.lock().unwrap().extend_from_slice(&buf[..n]);
 		}
 	});
-	(output, task)
+	(output, task, fence)
 }
 
 /// Start `moq import ts` and feed it the clip at about real time, handing stdin back
@@ -220,11 +261,10 @@ async fn interrupt(mut child: Child, stdin: ChildStdin) {
 		.status()
 		.expect("kill");
 	assert!(status.success());
-	// The interrupted process exits once its stdin read returns; closing stdin any
-	// sooner could land first and finish the broadcast instead.
-	tokio::time::sleep(Duration::from_millis(500)).await;
+	// Keep stdin open until signal-driven shutdown exits. EOF would instead finish
+	// the broadcast cleanly and hide the interrupted-publication property.
+	assert!(wait(&mut child).await.success());
 	drop(stdin);
-	wait(&mut child).await;
 }
 
 async fn wait(child: &mut Child) -> std::process::ExitStatus {
@@ -351,8 +391,18 @@ async fn interrupted(export: &mut Export, publisher: (Child, JoinHandle<ChildStd
 	let stdin = feeding.await.unwrap();
 	export.output_past(0).await;
 	interrupt(publisher, stdin).await;
-	tokio::time::sleep(Duration::from_secs(1)).await;
-	export.output.lock().unwrap().len().next_multiple_of(188)
+	tokio::time::timeout(TIMEOUT, export.settled.take().expect("one interruption per export"))
+		.await
+		.expect("export never drained into linger")
+		.expect("export stopped before entering linger");
+	let (fence, drained) = tokio::sync::oneshot::channel();
+	export.fence.send(fence).expect("stdout reader is still running");
+	let len = tokio::time::timeout(TIMEOUT, drained)
+		.await
+		.expect("stdout reader never drained its queued tail")
+		.expect("stdout reader ended before its tail fence");
+	assert_eq!(len % 188, 0, "the drained output ends on a complete TS packet");
+	len
 }
 
 /// A restarted publisher is another instance, so the export does not splice it in: it exits 1

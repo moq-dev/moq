@@ -79,7 +79,11 @@ take a broadcast, a `Named` or `Requested` target, and an `AudioInit` / `VideoIn
 A `Named` target chooses a track name or lets the importer derive one; a `Requested`
 target takes over a subscriber's pending request. A duplicate name fails.
 `VideoInit.Hint` seeds fields the bitstream cannot supply. `NewContainerProducer` /
-`NewContainerStreamProducer` demux whole chunks or a byte stream into their own tracks.
+`NewContainerStreamProducer` demux whole chunks or a byte stream into their own tracks,
+using `ContainerInit` or `ContainerStreamInit`. Share `NewTimebase(broadcast)` in these
+records for containers on one source timeline; omitting it gives each an independent
+offset. Timebases belong to one broadcast and do not keep it open. Call `Close` to
+release the timebase handle on the calling goroutine.
 `NewCatalogProducer` holds its broadcast weakly and owns catalog properties and sections.
 `NewCatalogConsumer`, `NewTrackConsumer`, and `FetchGroup` read
 catalog snapshots, live media, and one fetched media group. `NewGroupConsumer`

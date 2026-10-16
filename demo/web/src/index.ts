@@ -381,7 +381,9 @@ ui.run((effect) => {
 
 	// Report the transport negotiated by the live connection.
 	const transport = effect.get(connection.transport);
-	$("network-transport").textContent = transport ? (transport === "websocket" ? "WebSocket" : "WebTransport") : "";
+	$("network-transport").textContent = transport
+		? { websocket: "WebSocket", webtransport: "WebTransport", webrtc: "WebRTC" }[transport]
+		: "";
 
 	const video = effect.get(watch.video.out.stats);
 	const audio = effect.get(watch.audio.out.stats);

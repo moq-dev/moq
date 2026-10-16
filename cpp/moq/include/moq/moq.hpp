@@ -70,6 +70,8 @@ using JsonStreamConsumer = MoqJsonStreamConsumer;
 using JsonStreamProducer = MoqJsonStreamProducer;
 using MediaCatalogConsumer = MoqMediaCatalogConsumer;
 using MediaCatalogProducer = MoqMediaCatalogProducer;
+/// Shares one source timestamp offset without keeping its broadcast open.
+using MediaTimebase = MoqMediaTimebase;
 using MediaTrackConsumer = MoqMediaTrackConsumer;
 using MediaGroupConsumer = MoqMediaGroupConsumer;
 using MediaContainerProducer = MoqMediaContainerProducer;
@@ -104,6 +106,8 @@ using ClientConfig = MoqClientConfig;
 using ClientTls = MoqClientTls;
 using ConnectionStats = MoqConnectionStats;
 using ContainerInit = MoqContainerInit;
+/// A byte-stream container format and an optional shared source timebase.
+using ContainerStreamInit = MoqContainerStreamInit;
 using Datagram = MoqDatagram;
 using Dimensions = MoqDimensions;
 using FetchGroupOptions = MoqFetchGroupOptions;

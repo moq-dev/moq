@@ -238,6 +238,22 @@ impl Config {
 				"--fanout owns the publish/subscribe shape; omit --broadcasts and --subscribe"
 			);
 		}
+		if config.publishes() && config.expects_delivery() {
+			anyhow::ensure!(
+				config.fps.min.min(config.fps.max) > 0,
+				"subscribing to generated media requires --fps greater than 0"
+			);
+			if config.fanout.is_none() {
+				let connections = config.connections.min.min(config.connections.max).max(1);
+				let broadcasts = config.broadcasts();
+				let available = (connections - 1).saturating_mul(broadcasts.min.min(broadcasts.max));
+				let subscribe = config.subscribe();
+				anyhow::ensure!(
+					subscribe.min.max(subscribe.max) <= available,
+					"--subscribe exceeds the {available} peer broadcasts guaranteed by --connections and --broadcasts"
+				);
+			}
+		}
 		Ok(config)
 	}
 
@@ -361,6 +377,40 @@ struct Settings {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[test]
+	fn readiness_refuses_unreachable_or_idle_generated_media() {
+		for args in [
+			vec!["--connections", "2:4", "--broadcasts", "1:3", "--subscribe", "2"],
+			vec!["--connections", "4:2", "--broadcasts", "3:1", "--subscribe", "2"],
+			vec!["--connections", "2", "--subscribe", "1", "--fps", "0:30"],
+			vec!["--connections", "2", "--fanout", "test", "--fps", "30:0"],
+		] {
+			let result = Config::parse_and_merge(std::iter::once("moq-bench").chain(args.clone()));
+			let error = result.unwrap_err().to_string();
+			assert!(
+				error.contains(if args.contains(&"--fps") {
+					"--fps"
+				} else {
+					"--subscribe"
+				}),
+				"{args:?}: {error}"
+			);
+		}
+		let config = Config::parse_and_merge([
+			"moq-bench",
+			"--connections",
+			"1",
+			"--broadcasts",
+			"0",
+			"--subscribe",
+			"9",
+			"--fps",
+			"0",
+		])
+		.unwrap();
+		assert_eq!(config.subscribe(), Range::new(9, 9));
+	}
 
 	#[test]
 	fn cli_overrides_toml() {

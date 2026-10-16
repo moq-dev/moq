@@ -21,7 +21,8 @@ UniFFI:
   with the quests that name UniFFI internals:
   [Payload bytes](/quest/m1/ffi-bytes.md),
   [Poll-native async](/quest/m1/ffi-poll.md),
-  [Zero-copy byte returns](/quest/m2/ffi-bytes-return.md), and
+  [Zero-copy byte returns](/quest/m2/ffi-bytes-return.md),
+  [Kotlin calls](/quest/m1/kt-ffi-calls.md), and
   [Namespaced external types](/quest/m2/uniffi-namespaces.md).
 
 - **Why**: every UniFFI minor release breaks external generators (0.31
@@ -72,4 +73,5 @@ Public API: none at the move; moq-ffi's dependency names change. Wire: none.
 ## Related
 
 - [Payload bytes](/quest/m1/ffi-bytes.md) - the first patch the fork carries
+- [Kotlin calls](/quest/m1/kt-ffi-calls.md) - a Kotlin generator patch the fork carries
 - [Namespaced external types](/quest/m2/uniffi-namespaces.md) - fixes mozilla/uniffi-rs#3026 in the fork

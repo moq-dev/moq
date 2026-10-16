@@ -1,6 +1,7 @@
 //! Timed text reconstructed from container sample metadata.
 
 use moq_net::Timestamp;
+use std::ops::Range;
 
 pub(super) struct Cue<'a> {
 	pub start: Timestamp,
@@ -96,8 +97,11 @@ pub(super) fn has_timestamp(body: &str) -> bool {
 		.any(|tag| tag.starts_with(|c: char| c.is_ascii_digit()))
 }
 
-/// Matroska stores inline WebVTT timestamps relative to the Block timestamp.
-pub(super) fn rebase(body: &str, start: Timestamp, end: Timestamp) -> Result<String, &'static str> {
+/// Rebase inline timestamps from their source origin onto the cue's presentation time.
+pub(super) fn rebase(body: &str, cue: Range<Timestamp>, origin: Timestamp) -> Result<String, &'static str> {
+	let start = cue.start;
+	let end = cue.end;
+	let origin = origin.convert(start.scale()).map_err(|_| "inline timestamp overflow")?;
 	let mut output = String::new();
 	let mut remaining = body;
 	let mut previous = start;
@@ -107,42 +111,13 @@ pub(super) fn rebase(body: &str, start: Timestamp, end: Timestamp) -> Result<Str
 		if remaining.as_bytes().first().is_some_and(u8::is_ascii_digit) {
 			let close = remaining.find('>').ok_or("unterminated inline timestamp")?;
 			let value = &remaining[..close];
-			let mut parts: Vec<&str> = value.split(':').collect();
-			if !(2..=3).contains(&parts.len()) {
-				return Err("invalid inline timestamp");
-			}
-			let seconds = parts.pop().unwrap();
-			let (seconds, millis) = seconds.split_once('.').ok_or("invalid inline timestamp")?;
-			let number = |value: &str| -> Result<u64, &'static str> {
-				if value.len() < 2 || !value.bytes().all(|value| value.is_ascii_digit()) {
-					return Err("invalid inline timestamp");
-				}
-				value.parse().map_err(|_| "inline timestamp overflow")
-			};
-			if millis.len() != 3 || seconds.len() != 2 {
-				return Err("invalid inline timestamp");
-			}
-			let seconds = number(seconds)?;
-			let minutes = parts.pop().unwrap();
-			if minutes.len() != 2 {
-				return Err("invalid inline timestamp");
-			}
-			let minutes = number(minutes)?;
-			let hours = parts.pop().map(number).transpose()?.unwrap_or(0);
-			if seconds >= 60 || minutes >= 60 {
-				return Err("invalid inline timestamp");
-			}
-			let millis = hours
-				.checked_mul(3600)
-				.and_then(|value| value.checked_add(minutes * 60 + seconds))
-				.and_then(|value| value.checked_mul(1000))
-				.and_then(|value| value.checked_add(number(millis).ok()?))
-				.ok_or("inline timestamp overflow")?;
-			let relative = Timestamp::from_micros(millis.checked_mul(1000).ok_or("inline timestamp overflow")?)
-				.map_err(|_| "inline timestamp overflow")?;
+			let relative = timestamp(value)?;
 			let relative = relative
 				.convert(start.scale())
 				.map_err(|_| "inline timestamp overflow")?;
+			let relative = relative
+				.checked_sub(origin)
+				.map_err(|_| "inline timestamp before cue origin")?;
 			let absolute = start.checked_add(relative).map_err(|_| "inline timestamp overflow")?;
 			if absolute <= previous || absolute >= end {
 				return Err("inline timestamp outside cue");
@@ -154,6 +129,53 @@ pub(super) fn rebase(body: &str, start: Timestamp, end: Timestamp) -> Result<Str
 	}
 	output.push_str(remaining);
 	Ok(output)
+}
+
+/// Parse a WebVTT timestamp.
+pub(super) fn timestamp(value: &str) -> Result<Timestamp, &'static str> {
+	let mut parts: Vec<&str> = value.split(':').collect();
+	if !(2..=3).contains(&parts.len()) {
+		return Err("invalid inline timestamp");
+	}
+	let seconds = parts.pop().unwrap();
+	let (seconds, millis) = seconds.split_once('.').ok_or("invalid inline timestamp")?;
+	let number = |value: &str| -> Result<u64, &'static str> {
+		if value.len() < 2 || !value.bytes().all(|value| value.is_ascii_digit()) {
+			return Err("invalid inline timestamp");
+		}
+		value.parse().map_err(|_| "inline timestamp overflow")
+	};
+	if millis.len() != 3 || seconds.len() != 2 {
+		return Err("invalid inline timestamp");
+	}
+	let seconds = number(seconds)?;
+	let minutes = parts.pop().unwrap();
+	if minutes.len() != 2 {
+		return Err("invalid inline timestamp");
+	}
+	let minutes = number(minutes)?;
+	let hours = parts.pop().map(number).transpose()?.unwrap_or(0);
+	if seconds >= 60 || minutes >= 60 {
+		return Err("invalid inline timestamp");
+	}
+	let millis = hours
+		.checked_mul(3600)
+		.and_then(|value| value.checked_add(minutes * 60 + seconds))
+		.and_then(|value| value.checked_mul(1000))
+		.and_then(|value| value.checked_add(number(millis).ok()?))
+		.ok_or("inline timestamp overflow")?;
+	Timestamp::from_micros(millis.checked_mul(1000).ok_or("inline timestamp overflow")?)
+		.map_err(|_| "inline timestamp overflow")
+}
+
+/// Append a validated WebVTT comment block.
+pub(super) fn comments(output: &mut String, value: &str) -> Result<(), &'static str> {
+	if !value.starts_with("NOTE") || value.contains("-->") || value.contains('\0') {
+		return Err("invalid cue comments");
+	}
+	output.push_str(value.trim_end_matches('\n'));
+	output.push_str("\n\n");
+	Ok(())
 }
 
 #[cfg(test)]
@@ -172,10 +194,10 @@ mod tests {
 			"<00:60.000>",
 			"<00:00.50>",
 		] {
-			assert!(rebase(body, start, end).is_err(), "{body}");
+			assert!(rebase(body, start..end, Timestamp::ZERO).is_err(), "{body}");
 		}
 		assert_eq!(
-			rebase("<b>text</b><00:00.500>next", start, end).unwrap(),
+			rebase("<b>text</b><00:00.500>next", start..end, Timestamp::ZERO).unwrap(),
 			"<b>text</b><00:00:00.750>next"
 		);
 	}

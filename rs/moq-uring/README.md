@@ -2,8 +2,8 @@
 
 Experimental Linux io\_uring support for the native MoQ stack: a
 thread-per-core `Worker` that owns a `SINGLE_ISSUER | DEFER_TASKRUN |
-COOP_TASKRUN` ring, a userspace timer heap, a local (`!Send`) task set, and
-the UDP sockets bound through it.
+COOP_TASKRUN | TASKRUN_FLAG` ring, a userspace timer heap, a local (`!Send`)
+task set, and the UDP sockets bound through it.
 
 - **Receive**: one persistent multishot `recvmsg` per socket, fed from a
   registered provided-buffer ring of worst-case-sized buffers (one per
@@ -45,9 +45,14 @@ the UDP sockets bound through it.
   thread through `metrics::Metrics::snapshot`. Buffer-pool health (`ENOBUFS`,
   provided-buffer exhaustion, TX-pool stalls), batch effectiveness (datagrams
   per receive and per send), ring traffic (submissions, completions,
-  `io_uring_enter` calls), and scheduling (parks, remote futex wakes, timer
-  churn). Pass a `metrics::Metrics` to `Config::metrics` to hold a copy on the
-  thread that spawned the worker, or read the worker's own with
+  `io_uring_enter` calls), and scheduling (turns, parks, remote futex wakes,
+  timer churn). A turn that parks carries its staged SQEs in that enter;
+  notified turns enter only for staged SQEs, deferred completion work, or CQ
+  overflow. `sq_full_enters` counts queue-pressure enters. `sqes` and `cqes`
+  are fixed histograms of submissions accepted and completions made visible
+  by each enter, including zero, with boundaries at 0, 1, powers of two
+  through 256, and infinity. Pass a `metrics::Metrics` to `Config::metrics` to
+  hold a copy on the thread that spawned the worker, or read the worker's own with
   `Handle::metrics`. `moq-relay` publishes them at `/metrics` on its internal
   listener.
 - **Identity**: the socket names its worker. `Handle::udp` adopts a lone
@@ -106,7 +111,9 @@ includes GitHub-hosted CI runners.
 first spike (recv batching x GRO x GSO, epoll vs io\_uring); see git history
 for their methodology. `echo_noq` is the ablation matrix over the real
 worker: the same noq echo with receive batching, GRO, and GSO toggled one
-at a time.
+at a time. `worker_turns` sweeps socket counts and datagrams per burst
+independently to measure drive-loop batching without QUIC. Its smoke cases
+run in the Rust nightly benchmark group.
 
 ```bash
 just rs bench-udp --sample-size 20 --measurement-time 2 --warm-up-time 1
