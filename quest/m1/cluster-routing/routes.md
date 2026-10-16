@@ -327,7 +327,8 @@ loss never reports an END:
   entry for it; correctness does not depend on when. It keeps the
   feasibility distance: an echo of its own advertisement can still wait on
   any session, and dropping the distance lets that echo form a loop
-  (`collection_keeps_the_feasibility_distance_against_a_queued_echo`).
+  (`collection_keeps_the_feasibility_distance_against_a_queued_echo`). When
+  it may drop the distance is decision 6.
   After collection, or a process restart, a stale view returns only from a
   sender that has not yet received the withdrawal, and only until it does
   (`stale_replay_after_collection_lasts_only_until_the_withdrawal_behind_it`).
@@ -393,17 +394,26 @@ Decisions from the handoff proof, 1 to 5 settled with the maintainer 2026-10-16:
 6. Feasibility-distance retention: blocking, for the maintainer. Kept
    through collection, the distance is a seqno and metric per identity the
    node ever advertised, so it grows with identity churn (a fresh identity
-   per process or tab start) until the process restarts.
+   per process or tab start) until the process restarts. A restart already
+   drops it safely: the sessions close with the process, so no neighbor
+   still holds an advertisement the new process never made, and a stale echo
+   through a third node's surviving session meets that node's own distance
+   (`restart_drops_the_feasibility_distance_with_every_session`). The same
+   per-neighbor condition is enough without a restart: dropping the distance
+   once every neighbor has processed the ROUTE_END never loops, where
+   dropping it once no entry is left does
+   (`sweep_forgetting_distances`: 0 loops over 1438 drops, against 28).
    - (a) Accept it: about 16 bytes per dead identity, with no wire change.
-   - (b) A drain proof: a diffusing ack on ROUTE_END, sent only once every
-     route derived from the sender's advertisement has acked in turn, after
-     which the distance is dropped. A wire change, and a per-neighbor ack
-     alone is not enough, since an echo can return through other sessions.
+   - (b) Acknowledge ROUTE_END per neighbor, and drop the distance once every
+     neighbor it went to has acknowledged. One message per ROUTE_END per
+     neighbor on the wire, and no diffusing computation: only each edge
+     matters, since every node farther away keeps its own distance.
    - (c) A timer, as Babel's source GC does. It assumes stale echoes are gone
      by then rather than proving it, which runs against the rule against
      timeouts standing in for correctness.
-   - Recommendation: (a), then measure retained bytes per relay under
-     realistic churn before considering (b).
+   - Recommendation: (b). It bounds retained state to identities with a
+     retraction in flight for one small wire addition; (a) stays the
+     fallback if lite-07's wire is frozen first.
 
 Why not a hold-down: #4644 retracted at once and re-announced a replacement
 after 1 s, which ended a downstream front whose only path ran through the

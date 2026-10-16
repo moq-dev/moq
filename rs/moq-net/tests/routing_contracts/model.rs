@@ -833,6 +833,30 @@ impl Net {
 		self.advertise(node);
 	}
 
+	/// Whether every neighbor has processed `node`'s retraction of `id`: none
+	/// holds an entry from it and no route message from it is in flight. An
+	/// acknowledged ROUTE_END would tell `node` this; a restart gets it by
+	/// closing every session.
+	pub fn retracted(&self, node: Node, id: Id) -> bool {
+		self.peers(node).all(|peer| {
+			let queued = self.queues.get(&(node, peer)).is_some_and(|queue| {
+				queue
+					.iter()
+					.any(|msg| matches!(msg, Msg::Route { id: sent, .. } if *sent == id))
+			});
+			let held = self
+				.key(peer, node, id)
+				.and_then(|key| self.nodes[peer].rx.get(&key))
+				.is_some_and(|routes| routes.contains_key(&node));
+			!queued && !held
+		})
+	}
+
+	/// Drop `node`'s feasibility distance for `id`.
+	pub fn forget(&mut self, node: Node, id: Id) {
+		self.nodes[node].fd.remove(&id);
+	}
+
 	pub fn claim(&mut self, id: Id, prefix: &'static str, seed: Metric, epoch: Option<u32>) -> usize {
 		self.claims.push(Claim {
 			id,

@@ -167,6 +167,166 @@ fn collection_keeps_the_feasibility_distance_against_a_queued_echo() {
 	}
 }
 
+/// Every node's next-hop chain toward `id` ends without revisiting a node.
+fn assert_loop_free(net: &Net, nodes: usize, id: u64) {
+	for node in 0..nodes {
+		let mut at = node;
+		for hop in 0.. {
+			let Some(next) = net.route(at, id).and_then(|route| route.next) else {
+				break;
+			};
+			assert!(hop < nodes, "{id} loops from node {node}");
+			at = next;
+		}
+	}
+}
+
+/// A restarted relay loses every feasibility distance, yet stays loop-free:
+/// its sessions close with the process, and each neighbor drops what it
+/// learned on them, so no neighbor still holds an advertisement the new
+/// process never made. A stale echo still reaches it through a third node's
+/// session that outlived it, and is safe, because every node on that echo's
+/// path kept its own distance.
+#[test]
+fn restart_drops_the_feasibility_distance_with_every_session() {
+	let (origin, b, c, d) = (0, 1, 2, 3);
+	let mut net = Net::new(Config::default(), 4);
+	net.join(origin, b, 1);
+	net.join(b, c, 1);
+	net.join(c, d, 1);
+	net.join(d, b, 10);
+	net.originate(origin, 7, 0);
+	assert!(net.run());
+	assert_eq!(net.route(d, 7).and_then(|route| route.next), Some(c));
+
+	// The update c sends d after losing b waits on a session that outlives b.
+	net.hold(c, d);
+	net.kill(b);
+	assert!(net.run());
+	assert_loop_free(&net, 4, 7);
+	assert!(net.route(c, 7).is_none());
+	assert_eq!(net.route(d, 7).and_then(|route| route.next), Some(c), "stale");
+
+	net.connect(b, d);
+	assert!(net.run());
+	assert_eq!(
+		net.route(b, 7).and_then(|route| route.next),
+		Some(d),
+		"the echo of the old advertisement reaches the new process"
+	);
+	assert_loop_free(&net, 4, 7);
+	net.connect(b, c);
+	assert!(net.run());
+	assert!(net.route(c, 7).is_none(), "the distance at c refuses the longer copy");
+	assert_loop_free(&net, 4, 7);
+
+	net.release(c, d);
+	assert!(net.run());
+	assert_loop_free(&net, 4, 7);
+	net.connect(origin, b);
+	assert!(net.run());
+	assert_loop_free(&net, 4, 7);
+	for node in [b, c, d] {
+		assert!(net.route(node, 7).is_some(), "node {node} recovers");
+	}
+}
+
+/// Random meshes churn links, hold and deliver messages out of step, and
+/// collect route-less identities, then drop the feasibility distance. Dropped
+/// once no route entry is left, it loops; dropped once every neighbor has
+/// processed the retraction, as an acknowledged ROUTE_END or a restart
+/// proves, it never does. Only the edge to each neighbor matters, since every
+/// node farther away keeps its own distance.
+#[test]
+fn sweep_forgetting_distances() {
+	let mut loops = [0; 2];
+	let mut forgotten = [0; 2];
+	for (acked, (loops, forgotten)) in [false, true].into_iter().zip(loops.iter_mut().zip(&mut forgotten)) {
+		let mut rng = XorShift(0x5eed_f0d5);
+		for _ in 0..300 {
+			let nodes = RELAYS + 2;
+			let mut net = Net::new(Config::default(), nodes);
+			let mut links = Vec::new();
+			for a in 0..RELAYS {
+				for b in a + 1..RELAYS {
+					if b == a + 1 || rng.chance(40) {
+						net.join(a, b, 1 + rng.next(3));
+						links.push((a, b));
+					}
+				}
+			}
+			let ids = [RELAYS as u64, RELAYS as u64 + 1];
+			for origin in RELAYS..nodes {
+				let relay = rng.next(RELAYS as u64) as usize;
+				net.join(origin, relay, 1);
+				links.push((relay, origin));
+				net.originate(origin, origin as u64, 0);
+			}
+			assert!(net.run());
+
+			for _ in 0..60 {
+				match rng.next(8) {
+					0 => {
+						let (a, b) = links[rng.next(links.len() as u64) as usize];
+						if net.connected(a, b) {
+							net.disconnect(a, b);
+						} else {
+							net.connect(a, b);
+						}
+					}
+					1 | 2 => {
+						let (a, b) = links[rng.next(links.len() as u64) as usize];
+						let (from, to) = if rng.chance(50) { (a, b) } else { (b, a) };
+						if rng.chance(60) {
+							net.hold(from, to);
+						} else {
+							net.release(from, to);
+						}
+					}
+					3 => {
+						let busy = net.busy();
+						if !busy.is_empty() {
+							let (from, to) = busy[rng.next(busy.len() as u64) as usize];
+							net.deliver(from, to);
+						}
+					}
+					4 => net.bump(RELAYS + rng.next(2) as usize),
+					_ => {
+						let node = rng.next(RELAYS as u64) as usize;
+						let id = ids[rng.next(2) as usize];
+						if !net.holds(node, id) {
+							net.collect(node, id);
+							if !acked || net.retracted(node, id) {
+								net.forget(node, id);
+								*forgotten += 1;
+							}
+						}
+					}
+				}
+				net.settle(1);
+				for &id in &ids {
+					for node in 0..nodes {
+						let mut at = node;
+						let mut hops = 0;
+						while let Some(next) = net.route(at, id).and_then(|route| route.next) {
+							hops += 1;
+							if hops > nodes {
+								*loops += 1;
+								break;
+							}
+							at = next;
+						}
+					}
+				}
+			}
+		}
+	}
+	println!("distances dropped {forgotten:?}, loops {loops:?}: at no entry, then once retracted");
+	assert!(loops[0] > 0, "the sweep must reach the unsafe drop");
+	assert!(forgotten[1] > 0);
+	assert_eq!(loops[1], 0);
+}
+
 // Metric: strictly positive link costs, checked, with no hop count.
 
 /// An origin two links from node 2, then an unrelated session at node 2 that
