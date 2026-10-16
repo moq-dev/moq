@@ -1629,6 +1629,44 @@ async fn export_packs_ac3_frames_up_to_their_buffer() {
 	);
 }
 
+/// One six-block 48 kHz E-AC-3 sync frame, with an optional dependent substream.
+fn eac3_frame(dependent: bool) -> Vec<u8> {
+	let mut frame = vec![0x0b, 0x77, if dependent { 0x40 } else { 0 }, 0xff, 0x3f, 0x80];
+	frame.resize(512, 0xaa);
+	frame
+}
+
+#[tokio::test(start_paused = true)]
+async fn export_splits_dvb_eac3_access_units() {
+	let frame = eac3_frame(false);
+	let pes = exported_dolby_pes(vec![Ac3Write::Pes(0, frame.repeat(3))], 0x7a).await;
+	assert_eq!(pes.len(), 3);
+	for (i, (pts, payload)) in pes.iter().enumerate() {
+		assert_eq!(*pts, pes[0].0 + i as u64 * 2_880);
+		assert_eq!(*payload, frame);
+	}
+}
+
+#[tokio::test(start_paused = true)]
+async fn export_keeps_dvb_eac3_dependent_substreams_on_one_interval() {
+	let unit = [eac3_frame(false), eac3_frame(true)].concat();
+	let pes = exported_dolby_pes(vec![Ac3Write::Pes(0, unit.repeat(3))], 0x7a).await;
+	assert_eq!(pes.len(), 3);
+	for (i, (pts, payload)) in pes.iter().enumerate() {
+		assert_eq!(*pts, pes[0].0 + i as u64 * 2_880, "one 32 ms interval per access unit");
+		assert_eq!(*payload, unit);
+	}
+}
+
+#[tokio::test(start_paused = true)]
+async fn export_drops_dvb_eac3_partial_frames() {
+	let frame = eac3_frame(false);
+	let payload = [frame.clone(), frame[..60].to_vec()].concat();
+	let pes = exported_dolby_pes(vec![Ac3Write::Pes(0, payload)], 0x7a).await;
+	assert_eq!(pes.len(), 1);
+	assert_eq!(pes[0].1, frame);
+}
+
 /// A 32 kb/s 48 kHz 2/0 AC-3 sync frame: 128 bytes, 1,536 samples (32 ms).
 fn ac3_sync() -> Vec<u8> {
 	let mut sync = vec![0x0b, 0x77, 0x00, 0x00, 0x00, 0x40, 0x40];
@@ -1664,6 +1702,10 @@ enum Ac3Write {
 /// Export `input` on an AC-3 passthrough PID beside bbb's media, and return the PTS and
 /// payload of every PES on that PID.
 async fn exported_ac3_pes(input: Vec<Ac3Write>) -> Vec<(u64, Vec<u8>)> {
+	exported_dolby_pes(input, 0x6a).await
+}
+
+async fn exported_dolby_pes(input: Vec<Ac3Write>, descriptor: u8) -> Vec<(u64, Vec<u8>)> {
 	const AC3_PID: u16 = 0x104;
 	let data = include_bytes!("test_data/bbb.ts");
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
@@ -1683,7 +1725,7 @@ async fn exported_ac3_pes(input: Vec<Ac3Write>) -> Vec<(u64, Vec<u8>)> {
 		let mut track = tscat::Track::new(AC3_PID);
 		track.verbatim = Some(tscat::Verbatim::new(0x06, tscat::Framing::Pes));
 		track.descriptors = vec![tscat::Descriptor {
-			tag: 0x6a,
+			tag: descriptor,
 			data: Bytes::from_static(&[0x00]),
 		}];
 		catalog

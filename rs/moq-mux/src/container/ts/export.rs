@@ -317,8 +317,8 @@ impl Track {
 			self.restart = pending.restart;
 			self.clock = DecodeClock::default();
 		}
-		if self.carries_ac3() {
-			return self.queue_ac3(name, pending, jitter);
+		if self.carries_ac3() || self.carries_eac3() {
+			return self.queue_dolby(name, pending, jitter);
 		}
 		let Kind::Video(stream_type) = self.kind else {
 			return self.push(name, pending, None, None, jitter);
@@ -392,11 +392,11 @@ impl Track {
 		Ok(())
 	}
 
-	/// Queue each AC-3 sync frame of a passed-through PES on its own, due at its own decode
+	/// Queue each Dolby access unit of a passed-through PES on its own, due at its own decode
 	/// time: a receiver's buffer holds and decodes each on its own, and the whole PES would
 	/// overflow it. A frame the last PES began decodes ahead of this PES, so the jitter buffer
 	/// has to order it on its own time, not the PES's.
-	fn queue_ac3(
+	fn queue_dolby(
 		&mut self,
 		name: &str,
 		pending: Pending,
@@ -409,7 +409,12 @@ impl Track {
 			arrived,
 			read,
 		} = pending;
-		let Some(frames) = ac3_frames(&mut self.ac3_carry, skip, frame.timestamp, &frame.payload) else {
+		let frames = if self.carries_eac3() {
+			Some(eac3_units(frame.timestamp, &frame.payload)?)
+		} else {
+			ac3_frames(&mut self.ac3_carry, skip, frame.timestamp, &frame.payload)
+		};
+		let Some(frames) = frames else {
 			let pending = Pending {
 				frame,
 				restart,
@@ -453,6 +458,21 @@ impl Track {
 			.descriptors
 			.iter()
 			.any(|descriptor| descriptor.tag == AC3_DESCRIPTOR)
+	}
+
+	/// DVB E-AC-3 remains private data, with its descriptor identifying the decoder buffer.
+	fn carries_eac3(&self) -> bool {
+		matches!(
+			self.kind,
+			Kind::Verbatim {
+				stream_type: 0x06,
+				framing: catalog::Framing::Pes,
+				..
+			}
+		) && self
+			.descriptors
+			.iter()
+			.any(|descriptor| descriptor.tag == EAC3_DESCRIPTOR)
 	}
 
 	/// The samples an audio frame of `payload` lasts and their rate, if it may share a PES with
@@ -2948,11 +2968,14 @@ fn audio_buffer(config: &AudioConfig, kind: &Kind) -> Buffer {
 /// The DVB AC-3 descriptor's tag (ETSI EN 300 468 6.2.1), marking AC-3 as private data.
 const AC3_DESCRIPTOR: u8 = 0x6a;
 
+/// The DVB Enhanced AC-3 descriptor's tag (ETSI EN 300 468 Annex D).
+const EAC3_DESCRIPTOR: u8 = 0x7a;
+
 /// The DVB teletext descriptor's tag (ETSI EN 300 468 6.2.43).
 const TELETEXT_DESCRIPTOR: u8 = 0x56;
 
-/// A verbatim stream's buffers, for the kinds its descriptors identify: AC-3 as DVB private
-/// data (ATSC A/52 Annex A 5.4), and teletext, whose 480-byte transport buffer drains at
+/// A verbatim stream's buffers, for the kinds its descriptors identify: Dolby audio as DVB
+/// private data (ETSI TS 101 154 4.1.6.11), and teletext, whose 480-byte transport buffer drains at
 /// 6.75 Mb/s (ETSI EN 300 472 5). Any other stream has none the schedule knows.
 fn verbatim_buffer(kind: &Kind, descriptors: &[catalog::Descriptor]) -> Option<Buffer> {
 	let Kind::Verbatim {
@@ -2964,7 +2987,8 @@ fn verbatim_buffer(kind: &Kind, descriptors: &[catalog::Descriptor]) -> Option<B
 		return None;
 	};
 	descriptors.iter().find_map(|descriptor| match descriptor.tag {
-		AC3_DESCRIPTOR => Some(Buffer {
+		// ETSI TS 101 154 V2.9.1 4.1.6.11 recommends 5,696 bytes for both DVB codecs.
+		AC3_DESCRIPTOR | EAC3_DESCRIPTOR => Some(Buffer {
 			rate: 2_000_000,
 			leak: None,
 			size: Some(5_696),
@@ -2980,6 +3004,47 @@ fn verbatim_buffer(kind: &Kind, descriptors: &[catalog::Descriptor]) -> Option<B
 		}),
 		_ => None,
 	})
+}
+
+/// Split DVB E-AC-3 at independent substream 0, keeping every associated substream on
+/// that presentation interval (ETSI TS 102 366 E.2.8). A truncated sync frame is dropped.
+fn eac3_units(start: Timestamp, payload: &Bytes) -> anyhow::Result<Vec<(Timestamp, Bytes)>> {
+	let mut units = Vec::new();
+	let (mut offset, mut begin) = (0, None);
+	let mut at = start;
+	let mut period = None;
+	while offset < payload.len() {
+		let rest = &payload[offset..];
+		if rest.len() < 6 {
+			break;
+		}
+		let header = crate::codec::eac3::sync_header(rest)?;
+		if rest.len() < header.len {
+			break;
+		}
+		let primary = rest[2] >> 6 != 1 && (rest[2] >> 3) & 7 == 0;
+		if primary {
+			if let Some(begin) = begin {
+				units.push((at, payload.slice(begin..offset)));
+				at = at.checked_add(period.unwrap())?;
+			}
+			begin = Some(offset);
+			period = Some(Timestamp::from_micros(
+				header.samples * 1_000_000 / u64::from(header.sample_rate),
+			)?);
+		} else if begin.is_some() {
+			let child = Timestamp::from_micros(header.samples * 1_000_000 / u64::from(header.sample_rate))?;
+			anyhow::ensure!(
+				Some(child) == period,
+				"E-AC-3 substreams have different presentation intervals"
+			);
+		}
+		offset += header.len;
+	}
+	if let Some(begin) = begin {
+		units.push((at, payload.slice(begin..offset)));
+	}
+	Ok(units)
 }
 
 /// An AC-3 sync frame a passed-through PES left unfinished.

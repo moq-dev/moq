@@ -424,6 +424,8 @@ AC3_ATSC_BS = 2592
 EAC3_ATSC_BS = 12896
 # ATSC A/52 Annex A 5.4: AC-3 carried as DVB private data.
 AC3_DVB_BS = 5696
+# ETSI TS 101 154 V2.9.1 4.1.6.11 gives Enhanced AC-3 the same DVB buffer.
+EAC3_DVB_BS = 5696
 
 MPEG_AUDIO_KBPS = {
     (1, 1): (0, 32, 64, 96, 128, 160, 192, 224, 256, 288, 320, 352, 384, 416, 448),
@@ -792,7 +794,7 @@ def stream_kind(stream: Stream) -> str | None:
     if kind == 0x06 and f"registration:{int.from_bytes(b'Opus', 'big')}" in tags:
         return "opus"
     if kind == 0x06 and tags & {"DVB_enhanced_AC3_descriptor", "enhanced_AC3_descriptor"}:
-        raise Refused("E-AC-3 as DVB private data takes its buffer from ETSI TS 101 154, not modelled")
+        return "eac3-dvb"
     if kind in (0x01, 0x02, 0x10, 0x11, 0x1C, 0x20, 0x21, 0x42, 0xD1, 0xEA):
         raise Refused(f"stream_type 0x{kind:02X} is audio/video this model has no parameters for")
     return None
@@ -830,6 +832,7 @@ def stream_params(kind: str, stream: Stream) -> tuple[Params, object]:
         "ac3-atsc": ("AC-3 (ATSC)", AC3_ATSC_BS, ac3_frame),
         "eac3-atsc": ("E-AC-3 (ATSC)", EAC3_ATSC_BS, ac3_frame),
         "ac3-dvb": ("AC-3 (DVB)", AC3_DVB_BS, ac3_frame),
+        "eac3-dvb": ("E-AC-3 (DVB)", EAC3_DVB_BS, ac3_frame),
     }[kind]
     return Params(label=label, rx=AUDIO_RX, b=bs), parse
 
