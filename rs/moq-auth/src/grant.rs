@@ -230,4 +230,14 @@ mod tests {
 		let deadline = grant.deadline();
 		assert!(deadline.is_none_or(|at| at > start + Duration::from_secs(1 << 40)));
 	}
+	#[test]
+	fn capped_role_roundtrips() {
+		let wire = serde_json::json!({
+			"publish": { "path": "alice/**", "rate": 8_000_000 }
+		});
+		let grant: Grant = serde_json::from_value(wire).unwrap();
+		let encoded = serde_json::to_value(grant).unwrap();
+		assert_eq!(encoded["publish"]["rate"], 8_000_000);
+		assert!(encoded.get("put").is_none());
+	}
 }

@@ -120,3 +120,8 @@ test("a grant round trips and is validated", () => {
 	expect(() => GrantSchema.parse({ publish: ["**"], expires: 4102444800.5 })).toThrow();
 	expect(() => GrantSchema.parse({ publish: ["a/**/b/**"] })).toThrow();
 });
+
+test("an auth endpoint grant accepts a capped role", () => {
+	const grant = GrantSchema.parse({ publish: { path: "alice/**", rate: 8_000_000 } });
+	expect(grant).toHaveProperty("publish.rate", 8_000_000);
+});

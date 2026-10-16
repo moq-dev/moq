@@ -118,3 +118,10 @@ test("authorize - wildcards rebase as a set", () => {
 	const permissions = authorize(claims("", ["**/chat"], []), "chat");
 	expect(permissions.subscribe.toJSON()).toEqual(["", "**/chat"]);
 });
+
+test("a capped role retains its cap instead of encoding legacy put", () => {
+	const claims = ClaimsSchema.parse({ publish: { path: "alice/**", rate: 8_000_000 } });
+	const encoded = encodeGrants(claims);
+	expect(encoded).toHaveProperty("publish.rate", 8_000_000);
+	expect(encoded).not.toHaveProperty("put");
+});

@@ -668,4 +668,14 @@ mod tests {
 		assert_eq!(permissions.subscribe.len(), 2);
 		assert_eq!(permissions.subscribe, patterns(&["", "**/chat"]));
 	}
+	#[test]
+	fn capped_role_roundtrips() {
+		let wire = serde_json::json!({
+			"publish": { "path": "alice/**", "rate": 8_000_000 }
+		});
+		let grant: Claims = serde_json::from_value(wire).unwrap();
+		let encoded = serde_json::to_value(grant).unwrap();
+		assert_eq!(encoded["publish"]["rate"], 8_000_000);
+		assert!(encoded.get("put").is_none());
+	}
 }
