@@ -269,12 +269,14 @@ gpu:
     sh/rs/gpu.sh
 
 # The media tasks run against a recorder rather than a device (see
-# `rs/moq-cli/src/play/fake.rs`), so this needs no speaker or display.
+# `rs/moq-cli/src/play/fake.rs`), so this needs no speaker or display. Only the
+# binary's own tests: the integration tests spawn verbs `play` leaves alone,
+# and the default pass already runs them.
 
 # Test moq-cli's `play` feature, which default features leave out.
 [positional-arguments]
 play *args:
-    just rs test -p moq-cli --features play "$@"
+    CARGO_BUILD_WARNINGS=deny RUSTC_WORKSPACE_WRAPPER={{ quote(require("clippy-driver")) }} bash sh/rs/nextest.sh cargo nextest run --locked -p moq-cli --features play --bins "$@"
 
 # Compile and run the `/// ```` examples, which nextest skips.
 [positional-arguments]

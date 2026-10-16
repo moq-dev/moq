@@ -130,6 +130,8 @@ frame_types! {
     CONNECTION_CLOSE = 0x1c,
     APPLICATION_CLOSE = 0x1d,
     HANDSHAKE_DONE = 0x1e,
+    // https://datatracker.ietf.org/doc/html/draft-ietf-quic-reliable-stream-reset#section-4
+    RESET_STREAM_AT = 0x24,
     // ACK Frequency
     ACK_FREQUENCY = 0xaf,
     IMMEDIATE_ACK = 0x1f,
@@ -171,7 +173,7 @@ impl Frame {
         use Frame::*;
         match self {
             Padding => FrameType::PADDING,
-            ResetStream(_) => FrameType::RESET_STREAM,
+            ResetStream(x) => x.ty(),
             Close(self::Close::Connection(_)) => FrameType::CONNECTION_CLOSE,
             Close(self::Close::Application(_)) => FrameType::APPLICATION_CLOSE,
             MaxData(_) => FrameType::MAX_DATA,
@@ -581,6 +583,13 @@ impl Iter {
                 id: self.bytes.get()?,
                 error_code: self.bytes.get()?,
                 final_offset: self.bytes.get()?,
+                reliable_size: None,
+            }),
+            FrameType::RESET_STREAM_AT => Frame::ResetStream(ResetStream {
+                id: self.bytes.get()?,
+                error_code: self.bytes.get()?,
+                final_offset: self.bytes.get()?,
+                reliable_size: Some(self.bytes.get()?),
             }),
             FrameType::CONNECTION_CLOSE => Frame::Close(Close::Connection(ConnectionClose {
                 error_code: self.bytes.get()?,
@@ -832,18 +841,30 @@ pub struct ResetStream {
     pub(crate) id: StreamId,
     pub(crate) error_code: VarInt,
     pub(crate) final_offset: VarInt,
+    /// The prefix the sender still delivers, set for RESET_STREAM_AT and absent for RESET_STREAM
+    pub(crate) reliable_size: Option<VarInt>,
 }
 
 impl FrameStruct for ResetStream {
-    const SIZE_BOUND: usize = 1 + 8 + 8 + 8;
+    const SIZE_BOUND: usize = 1 + 8 + 8 + 8 + 8;
 }
 
 impl ResetStream {
+    fn ty(&self) -> FrameType {
+        match self.reliable_size {
+            Some(_) => FrameType::RESET_STREAM_AT,
+            None => FrameType::RESET_STREAM,
+        }
+    }
+
     pub(crate) fn encode<W: BufMut>(&self, out: &mut W) {
-        out.write(FrameType::RESET_STREAM); // 1 byte
+        out.write(self.ty()); // 1 byte
         out.write(self.id); // <= 8 bytes
         out.write(self.error_code); // <= 8 bytes
         out.write(self.final_offset); // <= 8 bytes
+        if let Some(reliable_size) = self.reliable_size {
+            out.write(reliable_size); // <= 8 bytes
+        }
     }
 }
 
@@ -994,6 +1015,28 @@ mod test {
         match &frames[0] {
             Frame::AckFrequency(decoded) => assert_eq!(decoded, &original),
             x => panic!("incorrect frame {x:?}"),
+        }
+    }
+
+    #[test]
+    fn reset_stream_at_coding() {
+        for reliable_size in [None, Some(VarInt(0)), Some(VarInt(3))] {
+            let mut buf = Vec::new();
+            ResetStream {
+                id: StreamId(2),
+                error_code: VarInt(7),
+                final_offset: VarInt(9),
+                reliable_size,
+            }
+            .encode(&mut buf);
+            assert!(buf.len() <= ResetStream::SIZE_BOUND);
+            let frames = frames(buf);
+            assert_eq!(frames.len(), 1);
+            assert_matches!(
+                &frames[0],
+                Frame::ResetStream(ResetStream { id: StreamId(2), error_code: VarInt(7), final_offset: VarInt(9), reliable_size: r })
+                    if *r == reliable_size
+            );
         }
     }
 

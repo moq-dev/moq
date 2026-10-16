@@ -69,6 +69,21 @@ Runtime comparison requires Linux because io\_uring and relay process metrics
 come from Linux interfaces. The default worker count is the number of online
 logical CPUs.
 
+Sweep the relay's QUIC shard count against the connection count, for the
+room (`video`: every connection publishes and subscribes) and `fanout` (one
+publisher, the rest subscribers) workloads:
+
+```bash
+nix develop --command just bench-shard
+nix develop --command just bench-shard "0 1 8 24" "64 512"
+```
+
+Zero shards is the shared runtime with one Tokio thread per logical CPU; any
+other count is that many unpinned Tokio workers. The table reports CPU per
+connection, so a steering, dispatch, or per-shard cost that grows with either
+axis reads as a slope. Linux only, since nothing else steers a reuseport
+group. It runs nightly.
+
 Attribute relay worker lock waits to the stacks that blocked, as a share of
 each worker's CPU:
 

@@ -255,7 +255,7 @@ impl Session {
 		} else {
 			let (send, recv) = self.conn.accept_bi().await.map_err(|e| self.map_error(e))?;
 			Ok((
-				SendStream::new(send, self.close.clone()),
+				SendStream::new(send, self.close.clone(), None),
 				RecvStream::new(recv, self.close.clone()),
 			))
 		}
@@ -276,7 +276,8 @@ impl Session {
 
 		// Reset the stream priority back to the default of 0.
 		send.set_priority(0).ok();
-		Ok(SendStream::new(send, self.close.clone()))
+		let header = send.checkpoint();
+		Ok(SendStream::new(send, self.close.clone(), Some(header)))
 	}
 
 	/// Open a new bidirectional stream. See [`crate::quic::driver::Connection::open_bi`].
@@ -294,8 +295,9 @@ impl Session {
 
 		// Reset the stream priority back to the default of 0.
 		send.set_priority(0).ok();
+		let header = send.checkpoint();
 		Ok((
-			SendStream::new(send, self.close.clone()),
+			SendStream::new(send, self.close.clone(), Some(header)),
 			RecvStream::new(recv, self.close.clone()),
 		))
 	}
@@ -887,7 +889,8 @@ impl SessionAccept {
 
 			if let Some((send, recv)) = res {
 				// Wrap the streams in our own types for correct error codes.
-				let send = SendStream::new(send, self.close.clone());
+				// The peer opened it, so this half carries no header.
+				let send = SendStream::new(send, self.close.clone(), None);
 				let recv = RecvStream::new(recv, self.close.clone());
 				return Poll::Ready(Ok((send, recv)));
 			}
@@ -1292,6 +1295,35 @@ mod tests {
 		let (send, recv) = server.accept_bi().await.unwrap();
 		let err = SessionAccept::decode_bi(send, recv, SESSION).await.err().unwrap();
 		assert_reset(err);
+	}
+
+	/// A stream reset before any payload still delivers its header, so the peer attributes the
+	/// reset to the session instead of dropping a stream it cannot place.
+	#[tokio::test]
+	async fn reset_delivers_header() {
+		let (client_conn, server_conn, _endpoints) = pair().await;
+		let (client, server) = tokio::join!(
+			Session::connect(client_conn, url::Url::parse("https://localhost/").unwrap()),
+			async { crate::quic::web::Request::accept(server_conn).await.unwrap().ok().await },
+		);
+		let (client, server) = (client.unwrap(), server.unwrap());
+
+		client.open_uni().await.unwrap().reset(7).unwrap();
+		let (mut send, _recv) = client.open_bi().await.unwrap();
+		send.reset(8).unwrap();
+
+		let read = async {
+			let mut uni = server.accept_uni().await.unwrap();
+			let (_send, mut bi) = server.accept_bi().await.unwrap();
+			(
+				uni.read_chunk(usize::MAX).await.unwrap_err(),
+				bi.read_chunk(usize::MAX).await.unwrap_err(),
+			)
+		};
+		// Without the header the server never surfaces the streams, so bound the wait.
+		let (uni, bi) = tokio::time::timeout(Duration::from_secs(10), read).await.unwrap();
+		assert!(matches!(uni, crate::quic::web::ReadError::Reset(7)), "{uni:?}");
+		assert!(matches!(bi, crate::quic::web::ReadError::Reset(8)), "{bi:?}");
 	}
 
 	/// A stream that names another session is still reported as `UnknownSession`.
