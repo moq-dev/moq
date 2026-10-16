@@ -2228,10 +2228,10 @@ mod request_token_tests {
 		assert_ne!(second_expires, first_expires);
 	}
 
-	/// With no accepted renewal, the deadline ends the request UNAUTHORIZED, and the
+	/// With no accepted renewal, the deadline ends the request as Expired, and the
 	/// session is not closed by it.
 	#[moq_net_sim::test]
-	async fn the_deadline_ends_the_request_unauthorized_without_renewal() {
+	async fn the_deadline_expires_the_request_without_renewal() {
 		let runtime = crate::time::Clock::sim();
 		let handle = Handle::new(true);
 		let mut requests = handle.requests().unwrap();
