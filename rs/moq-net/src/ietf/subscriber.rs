@@ -3480,11 +3480,6 @@ where
 	pub async fn recv_group(&mut self, stream: &mut Reader<S::RecvStream, Version>) -> Result<(), Error> {
 		let group: ietf::GroupHeader = stream.decode().await?;
 
-		if group.sub_group_id != 0 {
-			tracing::warn!(sub_group_id = %group.sub_group_id, "subgroup ID is not supported, dropping stream");
-			return Err(Error::Unsupported);
-		}
-
 		// SUBSCRIBE_OK or PUBLISH can be reordered behind this stream. Hold only the
 		// subgroup header while waiting so the data stream cannot consume flow control.
 		let aliases = self.state.lock().aliases.consume();
@@ -3551,8 +3546,11 @@ where
 			Err(err) => return Err(err),
 			Ok(opened) => opened,
 		};
-		let (producer, start) = match opened {
-			Opened::Group(producer, start) => (producer, start),
+		let (producer, start, parent) = match opened {
+			Opened::Group(producer, start) => (producer, start, None),
+			// Another subgroup is its own group beside the public one, and starts wherever it
+			// starts: a fill or resume only ever covers subgroup 0.
+			Opened::Subgroup { parent, subgroup } => (subgroup, 0, Some(parent)),
 			// A standalone terminal carries a Location, not a payload group.
 			Opened::EndOfTrack { object, properties } => {
 				return end_track(
@@ -3566,10 +3564,11 @@ where
 			}
 		};
 
-		if passthrough || producer.wire().is_none() {
+		if parent.is_none() && (passthrough || producer.wire().is_none()) {
 			let first_id = start.max(producer.frame_count() as u64);
 			producer.set_wire(group::Wire {
 				sparse: false,
+				priority: group.flags.has_priority.then_some(group.publisher_priority),
 				first_object: group.flags.first_object && first_id == start,
 				first_id,
 				extensions: group.flags.has_extensions,
@@ -3579,25 +3578,51 @@ where
 			})?;
 		}
 
+		// Declared first so it drops last, once the subgroup below has ended either way.
+		let _settle = parent.map(SettleZero);
 		// Guarded: this handler can be dropped at any await below, and a group producer
 		// that dies without a terminal leaves its consumer waiting on nothing.
 		let producer = crate::recv::Group::new(producer);
+		let res = self
+			.ingest_group(stream, &group, &track, &producer, timescale, resume.map(|_| start))
+			.await;
+		self.end_group(res, &group, &mut track, producer)
+	}
 
-		let res = {
-			let mut ingest = GroupIngest::new(self, &group, timescale, resume.map(|_| start));
-			let mut writing = producer.clone();
-			kio::wait(|waiter| {
-				if let Poll::Ready(err) = track.poll_closed(waiter) {
-					return Poll::Ready(Err(err));
-				}
-				if let Poll::Ready(err) = producer.poll_closed(waiter) {
-					return Poll::Ready(Err(err));
-				}
-				ingest.poll(stream, &mut writing, waiter)
-			})
-			.await
-		};
+	/// Read a subgroup stream's objects into `producer`, until the stream, the group, or
+	/// the track ends.
+	async fn ingest_group(
+		&self,
+		stream: &mut Reader<S::RecvStream, Version>,
+		group: &ietf::GroupHeader,
+		track: &track::Producer,
+		producer: &crate::recv::Group,
+		timescale: Option<Timescale>,
+		start: Option<u64>,
+	) -> Result<Ended, Error> {
+		let mut ingest = GroupIngest::new(self, group, timescale, start);
+		let mut writing = (**producer).clone();
+		kio::wait(|waiter| {
+			if let Poll::Ready(err) = track.poll_closed(waiter) {
+				return Poll::Ready(Err(err));
+			}
+			if let Poll::Ready(err) = producer.poll_closed(waiter) {
+				return Poll::Ready(Err(err));
+			}
+			ingest.poll(stream, &mut writing, waiter)
+		})
+		.await
+	}
 
+	/// Finish or abort a subgroup stream's group as its ingest ended, ending the track too
+	/// when the stream said so or proved it malformed.
+	fn end_group(
+		&self,
+		res: Result<Ended, Error>,
+		group: &ietf::GroupHeader,
+		track: &mut track::Producer,
+		producer: crate::recv::Group,
+	) -> Result<(), Error> {
 		match res {
 			Err(err @ (Error::Cancel | Error::Stream(crate::StreamError::Cancel))) => {
 				let _ = producer.abort(err);
@@ -3620,7 +3645,7 @@ where
 			Err(Error::MalformedTrack) => {
 				tracing::warn!(group = %producer.sequence, "malformed track");
 				let _ = producer.abort(Error::MalformedTrack);
-				let _ = track.abort(Error::MalformedTrack);
+				let _ = track.clone().abort(Error::MalformedTrack);
 				return Err(Error::MalformedTrack);
 			}
 			// The peer reset the stream, the transport failed, or the track went away.
@@ -3635,7 +3660,7 @@ where
 			Ok(Ended::Track { object, properties }) => {
 				let _ = producer.finish();
 				return end_track(
-					&mut track,
+					track,
 					track::Position {
 						group: group.group_id,
 						frame: object,
@@ -3731,9 +3756,24 @@ fn end_track(track: &mut track::Producer, end: track::Position, properties: bool
 enum Opened {
 	/// The group producer the stream writes into, and the Object ID it starts at.
 	Group(group::Producer, u64),
+	/// A subgroup other than 0, written beside its group's public frames.
+	Subgroup {
+		parent: group::Producer,
+		subgroup: group::Producer,
+	},
 	/// A standalone terminal marker, which creates no payload group, and whether it
 	/// carried properties.
 	EndOfTrack { object: u64, properties: bool },
+}
+
+/// Once a subgroup beside a group's public frames ends, finish them empty if every other
+/// subgroup ended without subgroup 0 arriving, which is how plain readers see such a group.
+struct SettleZero(group::Producer);
+
+impl Drop for SettleZero {
+	fn drop(&mut self) {
+		self.0.settle_zero();
+	}
 }
 
 /// How a subgroup stream ended cleanly.
@@ -3807,7 +3847,12 @@ where
 		let sequence = header.group_id;
 		// Stats (groups/frames/bytes) are counted in the model as the group is written,
 		// through the tagged `track::Producer`.
-		let create = |track: &mut track::Producer| track.create_group(group::Info { sequence });
+		let info = group::Info { sequence };
+		// A subgroup 0 the group already finished without has no public frames to join.
+		let create = |track: &mut track::Producer| match track.create_relay_group(info, 0)? {
+			group::Relayed::Public(group) => Ok(group),
+			group::Relayed::Beside(_) => Err(Error::Duplicate),
+		};
 
 		let peeked = match header.flags.has_extensions {
 			true => stream
@@ -3823,9 +3868,13 @@ where
 			Ok(first) => first,
 			// The header arrived, so the stream counts toward the track's end. Abort the
 			// group it named rather than let the track end clean without it. A fill that
-			// already holds the group reports it through its own producer.
+			// already holds the group reports it through its own producer. Another
+			// subgroup failing is only its own loss.
 			Err(err) => {
-				if let Ok(group) = create(track) {
+				if !header.flags.has_subgroup_object
+					&& header.sub_group_id == 0
+					&& let Ok(group) = create(track)
+				{
 					let _ = group.abort(err.clone());
 				}
 				return Err(err);
@@ -3838,10 +3887,41 @@ where
 			});
 		}
 
-		// Without a fill or resume, a relay preserves the subgroup's first Object ID
-		// and FIRST_OBJECT claim independently. Plain readers see only frame ordinals.
+		// The header names its subgroup, or says it is the first Object ID. A stream with no
+		// object names none, so it can only end subgroup 0.
+		let subgroup = match header.flags.has_subgroup_object {
+			true => first.map_or(0, |first| first.id),
+			false => header.sub_group_id,
+		};
+		let fill_outstanding = fill.read().outstanding();
+		// A fill or resume only ever covers subgroup 0's public frames.
+		if subgroup != 0 || (!fill_outstanding && resume.is_none()) {
+			let parent = match track.create_relay_group(info, subgroup)? {
+				// Without a fill or resume, a relay preserves the subgroup's first Object ID
+				// and FIRST_OBJECT claim independently. Plain readers see only frame ordinals.
+				group::Relayed::Public(group) => {
+					return Ok(Opened::Group(group, first.map_or(0, |first| first.id)));
+				}
+				group::Relayed::Beside(parent) => parent,
+			};
+			let subgroup = parent.subgroup(
+				subgroup,
+				group::Wire {
+					// Its frames are numbered from 0 while its objects need not be.
+					sparse: true,
+					priority: header.flags.has_priority.then_some(header.publisher_priority),
+					first_object: header.flags.first_object,
+					first_id: first.map_or(0, |first| first.id),
+					extensions: header.flags.has_extensions,
+					has_end: header.flags.has_end,
+					fetchable: false,
+					last: None,
+				},
+			)?;
+			return Ok(Opened::Subgroup { parent, subgroup });
+		}
 
-		if !fill.read().outstanding() {
+		if !fill_outstanding {
 			// The group a resumed subscription picks up partway through starts where it
 			// asked, and a stream with no objects is the end of a group complete there.
 			// A publisher sending more of it (a pre-draft-20 join asks for all of it) has
@@ -4711,6 +4791,7 @@ where
 			extensions: true,
 			has_end: true,
 			fetchable: true,
+			priority: None,
 			last: None,
 		})?;
 
@@ -4969,7 +5050,10 @@ fn open_fill_group(
 	head: &mut Option<(u64, u64, crate::recv::Group)>,
 	sequence: u64,
 ) -> Result<(), Error> {
-	let producer = track.create_group(group::Info { sequence })?;
+	// A fill only ever heads subgroup 0's public frames.
+	let group::Relayed::Public(producer) = track.create_relay_group(group::Info { sequence }, 0)? else {
+		return Err(Error::Duplicate);
+	};
 	producer.set_wire(group::Wire {
 		sparse: false,
 		first_object: true,
@@ -4977,6 +5061,7 @@ fn open_fill_group(
 		extensions: true,
 		has_end: true,
 		fetchable: true,
+		priority: None,
 		last: None,
 	})?;
 	*head = Some((sequence, 0, crate::recv::Group::new(producer)));

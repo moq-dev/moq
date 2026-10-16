@@ -462,6 +462,8 @@ impl Slot {
 	/// Abort every copy this slot holds.
 	fn abort(&self, err: Error) {
 		for group in self.copies() {
+			// The cache drops the group whole, every subgroup with it.
+			group.abort_subgroups(&err);
 			let _ = group.clone().abort(err.clone());
 		}
 	}
@@ -1887,7 +1889,43 @@ impl Producer {
 
 	/// Create a new group with the given sequence number.
 	pub fn create_group(&self, group: group::Info) -> Result<group::Producer> {
-		self.insert(group, false)
+		self.insert(group, false, None)
+	}
+
+	/// Create or join a group a moq-transport session relays, for a stream carrying
+	/// `subgroup`.
+	///
+	/// A subgroup 0 stream writes the public frames, claiming a group another subgroup
+	/// opened first, and is [`Error::Duplicate`] beside a group that has one. Any other
+	/// subgroup, or a subgroup 0 the group already finished without, is kept beside them:
+	/// it joins the group here, or opens it to wait for subgroup 0.
+	#[cfg(feature = "async")]
+	pub(crate) fn create_relay_group(&self, group: group::Info, subgroup: u64) -> Result<group::Relayed> {
+		{
+			let state = self.modify()?;
+			let live = state
+				.lookup
+				.get(&group.sequence)
+				.map(|slot| &slot.group)
+				.filter(|live| !live.is_aborted());
+			if let Some(live) = live {
+				if subgroup != 0 {
+					return Ok(group::Relayed::Beside(live.clone()));
+				}
+				match live.claim_zero() {
+					Ok(true) => return Ok(group::Relayed::Public(live.clone())),
+					Ok(false) => return Ok(group::Relayed::Beside(live.clone())),
+					// It has its subgroup 0: a duplicate, unless it is a copy to replace.
+					Err(Error::Duplicate) => {}
+					Err(err) => return Err(err),
+				}
+			}
+		}
+		let created = self.insert(group, false, Some(subgroup != 0))?;
+		match subgroup {
+			0 => Ok(group::Relayed::Public(created)),
+			_ => Ok(group::Relayed::Beside(created)),
+		}
 	}
 
 	/// Create a group a session is receiving from a route, withheld from readers until
@@ -1899,7 +1937,7 @@ impl Producer {
 	/// that older group first.
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub(crate) fn receive_group(&self, group: group::Info) -> Result<group::Producer> {
-		self.insert(group, true)
+		self.insert(group, true, None)
 	}
 
 	/// Show a [`Self::receive_group`] group to readers: its first frame landed, or its
@@ -1911,7 +1949,9 @@ impl Producer {
 		}
 	}
 
-	fn insert(&self, group: group::Info, pending: bool) -> Result<group::Producer> {
+	/// `subgroups` lets the group carry subgroups other than 0 before readers see it,
+	/// waiting for subgroup 0 when `Some(true)`.
+	fn insert(&self, group: group::Info, pending: bool, subgroups: Option<bool>) -> Result<group::Producer> {
 		let mut state = self.modify()?;
 		if let Some(fin) = state.final_sequence()
 			&& group.sequence >= fin
@@ -1924,6 +1964,9 @@ impl Producer {
 		state.claim_sequence(group.sequence, 0)?;
 
 		let group = group::Producer::new(group, track, state.cache.clone()).with_meter(self.stats.meter());
+		if let Some(pending) = subgroups {
+			group.carry_subgroups(pending)?;
+		}
 		state.cap(&group)?;
 		state.commit_group(&group, pending);
 

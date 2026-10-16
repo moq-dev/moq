@@ -2610,16 +2610,6 @@ mod tests {
 		.0
 	}
 
-	/// A non-zero subgroup is refused on its own stream, never by closing the session.
-	#[moq_net_sim::test]
-	async fn a_non_zero_subgroup_is_stopped_without_closing_the_session() {
-		let (log, result) = dispatch_uni(Version::Draft19, subgroup_header(Version::Draft19, 7, 1).await, None).await;
-
-		assert_eq!(log.stops(), vec![crate::ietf::error::INTERNAL_ERROR]);
-		assert!(result.is_none(), "one refused subgroup ended the session: {result:?}");
-		assert_eq!(log.closes(), vec![], "one refused subgroup may not close the session");
-	}
-
 	/// A stream type encoded for `version`, followed by a few bytes of body.
 	fn uni_stream(version: Version, kind: u64) -> Vec<u8> {
 		let mut buf = Vec::new();

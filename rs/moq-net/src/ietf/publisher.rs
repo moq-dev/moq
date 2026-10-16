@@ -155,7 +155,7 @@ async fn read_fetch(
 	let info = track.query().await?;
 	let cached = track.peek_group(sequence);
 	let wire = cached.as_ref().and_then(|group| group.wire());
-	if wire.as_ref().is_some_and(|wire| !wire.fetchable) {
+	if cached.as_ref().is_some_and(|group| !group.fetchable()) {
 		return Err(Error::Unsupported);
 	}
 	// Relayed Object IDs need not match frame ordinals, so a relayed group is read from
@@ -176,7 +176,7 @@ async fn read_fetch(
 	let mut budget = kio::coop::Budget::new(32);
 	loop {
 		kio::wait(|waiter| budget.poll_yield(waiter)).await;
-		if group.wire().is_some_and(|wire| !wire.fetchable) {
+		if !group.fetchable() {
 			return Err(Error::Unsupported);
 		}
 		let ordinal = group.index();
@@ -208,7 +208,7 @@ async fn read_fetch(
 		.end_object()
 		.filter(|end| complete && end.id >= skip && until.is_none_or(|until| end.id < until));
 
-	if group.wire().is_some_and(|wire| !wire.fetchable) {
+	if !group.fetchable() {
 		return Err(Error::Unsupported);
 	}
 	Ok(FetchedGroup {
@@ -1704,7 +1704,7 @@ where
 		let mut prior = None;
 
 		let mut buf = arrayvec::ArrayVec::<frame::Object, 8>::new();
-		if group.wire().is_some_and(|wire| !wire.fetchable) {
+		if !group.fetchable() {
 			return Err(Error::Unsupported);
 		}
 		// A long cached group is written a slice per poll, so the session's other tasks still run.
@@ -2092,6 +2092,7 @@ where
 					request_id: msg.request_id,
 					priority: kio::Producer::new(priority).consume(),
 					order: Order::Descending,
+					publisher: 0,
 				};
 				(track, start, end, false, ranking, gate)
 			}
@@ -3560,6 +3561,10 @@ struct TrackServe<S: crate::transport::poll::Session> {
 	range: ServeRange,
 	timescale: Option<Timescale>,
 	children: kio::Tasks<GroupServe<S>>,
+	/// Relayed groups watched for subgroups other than 0, each served on its own stream.
+	subgroups: kio::Tasks<SubgroupWatch<S>>,
+	/// Set once the track drains: the watches stop looking for new subgroups.
+	sealed: kio::Producer<bool>,
 	/// The subscriber priority, which every group stream follows while it is open.
 	priority: kio::Producer<u8>,
 	/// Where the group streams are ranked: the session's queue once [`Self::ranked`].
@@ -3607,6 +3612,7 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 			request_id,
 			priority: priority.consume(),
 			order: track.subscription().order,
+			publisher: super::priority::to_wire(track.info().priority),
 		};
 
 		Self {
@@ -3618,6 +3624,8 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 			range,
 			timescale,
 			children: kio::Tasks::new(),
+			subgroups: kio::Tasks::new(),
+			sealed: kio::Producer::new(false),
 			priority,
 			ranking,
 			draining: false,
@@ -3656,6 +3664,24 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 	/// stream, as a cancelled subscription's would; a drained track has none left.
 	fn close_groups(&mut self) {
 		self.children = kio::Tasks::new();
+		self.subgroups = kio::Tasks::new();
+	}
+
+	/// Every group and subgroup stream finished.
+	fn poll_streams(&mut self, waiter: &kio::Waiter) -> Poll<()> {
+		let groups = self.children.poll(waiter);
+		let subgroups = self.subgroups.poll(waiter);
+		match groups.is_ready() && subgroups.is_ready() {
+			true => Poll::Ready(()),
+			false => Poll::Pending,
+		}
+	}
+
+	/// Stop looking for new subgroups, serving the ones already found.
+	fn seal(&mut self) {
+		if let Ok(mut sealed) = self.sealed.write() {
+			*sealed = true;
+		}
 	}
 
 	/// Where the track ends, when the subscription ran to that end rather than stopping at
@@ -3712,10 +3738,10 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 			let _ = self.terminal.end.set(end);
 		}
 		if self.draining {
-			return self.children.poll(waiter).map(Ok);
+			return self.poll_streams(waiter).map(Ok);
 		}
 
-		let _ = self.children.poll(waiter);
+		let _ = self.poll_streams(waiter);
 		loop {
 			// Still serves the datagrams and the groups already started below.
 			if self.budget.poll_yield(waiter).is_pending() {
@@ -3740,57 +3766,60 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 						continue;
 					}
 
-					let wire = group.wire();
-					let msg = ietf::GroupHeader {
+					let header = Header {
 						track_alias: self.request_id.0,
-						group_id: sequence,
-						sub_group_id: 0,
-						// The publisher's own ranking of its tracks, which is what a relay
-						// prefers when it can't pick between its subscribers' priorities. The
-						// model ranks higher-first and this wire field lower-first.
-						publisher_priority: super::priority::to_wire(self.track.info().priority),
-						// Carry per-object timestamps as extension headers (the Timestamp
-						// Object Property) only when TIMESCALE was declared for this version.
-						// Drafts 14-16 cannot, so the flag stays clear.
-						flags: ietf::GroupFlags {
-							has_extensions: self.timescale.is_some()
-								|| wire.as_ref().is_some_and(|wire| wire.extensions),
-							first_object: wire
-								.as_ref()
-								.map_or(slice.skip == 0, |wire| wire.first_object && slice.skip <= wire.first_id),
-							// A stream capped by the range stops before the group may end, so its
-							// FIN cannot claim END_OF_GROUP.
-							has_end: slice.until.is_none() && wire.as_ref().is_none_or(|wire| wire.has_end),
-							..Default::default()
-						},
-					};
-
-					let rank = self.ranking.rank(Location {
 						group: sequence,
-						object: slice.skip,
-					});
-					self.children.push(
-						GroupServe::new(
-							self.session.clone(),
-							msg,
-							rank,
-							group,
-							self.timescale,
-							self.version,
-							slice,
-						)
-						.counted(self.opened.clone())
-						.terminal(self.terminal.clone()),
+						publisher: self.ranking.publisher,
+						timescale: self.timescale,
+						version: self.version,
+						slice,
+					};
+					let msg = header.build(0, group.wire().as_ref());
+					let rank = self.ranking.rank_at(
+						Location {
+							group: sequence,
+							object: slice.skip,
+						},
+						msg.publisher_priority,
 					);
+					// A relayed group can carry other subgroups, and only settles its own header
+					// once its subgroup 0 stream arrives.
+					let relayed = group.subgroups().map(|subgroups| {
+						self.subgroups.push(SubgroupWatch {
+							session: self.session.clone(),
+							subgroups,
+							sealed: self.sealed.consume(),
+							finding: true,
+							serves: kio::Tasks::new(),
+							ranking: self.ranking.clone(),
+							header,
+							opened: self.opened.clone(),
+						});
+						self.ranking.clone()
+					});
+					let mut serve = GroupServe::new(
+						self.session.clone(),
+						msg,
+						rank,
+						group,
+						self.timescale,
+						self.version,
+						slice,
+					)
+					.counted(self.opened.clone())
+					.terminal(self.terminal.clone());
+					serve.awaiting = relayed;
+					self.children.push(serve);
 				}
 				Poll::Ready(Ok(None)) => {
 					// Datagrams written before the track finished still go out.
 					self.poll_datagrams(waiter)?;
 					self.draining = true;
+					self.seal();
 					if let Poll::Ready(Ok(end)) = self.track.poll_finished(waiter) {
 						self.end = Some(end);
 					}
-					return self.children.poll(waiter).map(Ok);
+					return self.poll_streams(waiter).map(Ok);
 				}
 				Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
 				Poll::Pending => break,
@@ -3799,7 +3828,7 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 		// Groups first, so a burst of datagrams cannot starve them.
 		self.poll_datagrams(waiter)?;
 		// Newly created group machines start now rather than on the next wake.
-		let _ = self.children.poll(waiter);
+		let _ = self.poll_streams(waiter);
 		Poll::Pending
 	}
 
@@ -3922,16 +3951,24 @@ struct Ranking {
 	priority: kio::Consumer<u8>,
 	/// The request's GROUP_ORDER, fixed for its life: no update carries it.
 	order: Order,
+	/// The publisher priority of a stream that carries none of its own: the track's.
+	publisher: u8,
 }
 
 impl Ranking {
 	/// A stream carrying a group from `start` on, ranked among the request's others.
 	fn rank(&self, start: Location) -> Rank {
+		self.rank_at(start, self.publisher)
+	}
+
+	/// [`Self::rank`] for a stream whose header carries `publisher` priority.
+	fn rank_at(&self, start: Location, publisher: u8) -> Rank {
 		let applied = *self.priority.read();
 		Rank {
 			handle: self.queue.insert(
 				Priority::new(applied, self.request_id.0, start.group)
 					.with_order(self.order)
+					.with_publisher(publisher)
 					.with_start(start.object),
 			),
 			priority: self.priority.clone(),
@@ -4063,6 +4100,130 @@ impl Rank {
 	}
 }
 
+/// What every subgroup stream of one group shares when its header is built.
+#[derive(Clone, Copy)]
+struct Header {
+	track_alias: u64,
+	group: u64,
+	/// The track's publisher priority, for a stream whose relayed header omitted its own.
+	publisher: u8,
+	/// Carry per-object timestamps as extension headers (the Timestamp Object Property)
+	/// only when TIMESCALE was declared for this version.
+	timescale: Option<Timescale>,
+	version: Version,
+	slice: GroupSlice,
+}
+
+impl Header {
+	/// The header of `subgroup`'s stream: its relayed header state when it has some, in
+	/// the most compact subgroup ID form, else the track's defaults.
+	fn build(&self, subgroup: u64, wire: Option<&group::Wire>) -> ietf::GroupHeader {
+		let slice = self.slice;
+		let priority = wire.and_then(|wire| wire.priority);
+		// The subgroup ID costs nothing when it is the first Object ID the stream carries.
+		let named = subgroup != 0 && wire.is_some_and(|wire| wire.first_id == subgroup && slice.skip <= subgroup);
+		ietf::GroupHeader {
+			track_alias: self.track_alias,
+			group_id: self.group,
+			sub_group_id: if named { 0 } else { subgroup },
+			// The publisher's own ranking of its tracks, which is what a relay prefers when
+			// it can't pick between its subscribers' priorities.
+			publisher_priority: priority.unwrap_or(self.publisher),
+			flags: ietf::GroupFlags {
+				has_extensions: self.timescale.is_some() || wire.is_some_and(|wire| wire.extensions),
+				has_subgroup: subgroup != 0 && !named,
+				has_subgroup_object: named,
+				first_object: wire.map_or(slice.skip == 0, |wire| wire.first_object && slice.skip <= wire.first_id),
+				// A stream capped by the range stops before the group may end, so its FIN
+				// cannot claim END_OF_GROUP.
+				has_end: slice.until.is_none() && wire.is_none_or(|wire| wire.has_end),
+				// A relayed header that omitted its priority inherits the track's again, except
+				// on draft-14, which has no such header.
+				has_priority: priority.is_some() || wire.is_none() || self.version == Version::Draft14,
+			},
+		}
+	}
+}
+
+/// Serves a relayed group's subgroups other than 0 as they arrive, each on its own stream
+/// ranked by its own publisher priority.
+///
+/// Watches until no producer is left to add one or the track drains, then finishes once
+/// its streams have.
+struct SubgroupWatch<S: crate::transport::poll::Session> {
+	session: S,
+	subgroups: group::SubgroupReader,
+	sealed: kio::Consumer<bool>,
+	/// Still looking for subgroups.
+	finding: bool,
+	serves: kio::Tasks<GroupServe<S>>,
+	ranking: Ranking,
+	header: Header,
+	opened: Arc<AtomicU64>,
+}
+
+impl<S: crate::transport::poll::Session> kio::Task for SubgroupWatch<S> {
+	type Output = ();
+
+	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
+		while self.finding {
+			match self.subgroups.poll_next(waiter) {
+				Poll::Ready(Some((id, group))) => self.serve(id, group),
+				Poll::Ready(None) => self.finding = false,
+				// The track drained, so a subgroup still to come is not served.
+				Poll::Pending => {
+					if self.sealed.poll(waiter, |sealed| match **sealed {
+						true => Poll::Ready(()),
+						false => Poll::Pending,
+					})
+					.is_ready()
+					{
+						self.finding = false;
+					}
+					break;
+				}
+			}
+		}
+		match self.serves.poll(waiter).is_ready() && !self.finding {
+			true => Poll::Ready(()),
+			false => Poll::Pending,
+		}
+	}
+}
+
+impl<S: crate::transport::poll::Session> SubgroupWatch<S> {
+	fn serve(&mut self, id: u64, group: group::Consumer) {
+		let slice = self.header.slice;
+		// Nothing the subscription asked for: it starts past every object.
+		if slice.skip > 0 && group.ends_before(slice.skip) {
+			return;
+		}
+		let wire = group.wire();
+		let msg = self.header.build(id, wire.as_ref());
+		let start = wire.as_ref().map_or(slice.skip, |wire| wire.first_id.max(slice.skip));
+		let rank = self.ranking.rank_at(
+			Location {
+				group: self.header.group,
+				object: start,
+			},
+			msg.publisher_priority,
+		);
+		tracing::debug!(group = self.header.group, subgroup = id, "serving subgroup");
+		self.serves.push(
+			GroupServe::new(
+				self.session.clone(),
+				msg,
+				rank,
+				group,
+				self.header.timescale,
+				self.header.version,
+				slice,
+			)
+			.counted(self.opened.clone()),
+		);
+	}
+}
+
 /// Serves one group on its own unidirectional stream in the moq-transport
 /// subgroup format.
 struct GroupServe<S: crate::transport::poll::Session> {
@@ -4071,6 +4232,9 @@ struct GroupServe<S: crate::transport::poll::Session> {
 	opened: Arc<AtomicU64>,
 	msg: ietf::GroupHeader,
 	rank: Rank,
+	/// A relayed group's subgroup 0 opens no stream until its header arrives, if it ever
+	/// does: then its header and rank are rebuilt from it.
+	awaiting: Option<Ranking>,
 	group: group::Consumer,
 	timescale: Option<Timescale>,
 	version: Version,
@@ -4128,15 +4292,16 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 		version: Version,
 		slice: GroupSlice,
 	) -> Self {
-		if group.wire().is_none() {
-			group.skip_to(slice.skip);
-			group.end_at(slice.until.map_or(Bound::Unbounded, Bound::Excluded));
+		// Relayed Object IDs need not match frame ordinals, so those are sliced by ID.
+		if !group.is_relayed() {
+			slice.apply(&mut group);
 		}
 		Self {
 			session,
 			opened: Default::default(),
 			msg,
 			rank,
+			awaiting: None,
 			group,
 			timescale,
 			version,
@@ -4174,6 +4339,39 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 					if self.group.poll_expired(waiter) {
 						self.state = GroupState::Done;
 						return Poll::Ready(Err(Error::Old));
+					}
+					if let Some(ranking) = self.awaiting.take() {
+						let wire = match self.group.poll_header(waiter) {
+							Poll::Ready(Some(wire)) => wire,
+							// Another subgroup opened the group, and none of its own came.
+							Poll::Ready(None) => {
+								self.state = GroupState::Done;
+								return Poll::Ready(Ok(()));
+							}
+							Poll::Pending => {
+								self.awaiting = Some(ranking);
+								return Poll::Pending;
+							}
+						};
+						if wire.is_none() {
+							self.slice.apply(&mut self.group);
+						}
+						let header = Header {
+							track_alias: self.msg.track_alias,
+							group: self.msg.group_id,
+							publisher: ranking.publisher,
+							timescale: self.timescale,
+							version: self.version,
+							slice: self.slice,
+						};
+						self.msg = header.build(0, wire.as_ref());
+						self.rank = ranking.rank_at(
+							Location {
+								group: self.msg.group_id,
+								object: self.slice.skip,
+							},
+							self.msg.publisher_priority,
+						);
 					}
 					let stream = match ready!(self.session.poll_open_uni(&mut cx)) {
 						Ok(stream) => stream,
@@ -7413,6 +7611,7 @@ mod serve_tests {
 			request_id: RequestId(REQUEST_ID),
 			priority: priority.consume(),
 			order: Order::Descending,
+			publisher: 0,
 		};
 		let [higher, _older, _later, _lower] = rival_streams(&queue, ranking.request_id);
 		// Newest first: the subscription's group 5 goes ahead of the fill, and group 3 after.
@@ -7467,6 +7666,7 @@ mod serve_tests {
 			request_id: RequestId(REQUEST_ID),
 			priority: kio::Producer::new(PRIORITY).consume(),
 			order: Order::Descending,
+			publisher: 0,
 		};
 		// The live stream, from object 1 on, queued first so the slab id alone would favor it.
 		let mut live = ranking.rank(Location { group: 4, object: 1 });
@@ -7531,9 +7731,11 @@ mod serve_tests {
 			// Keyed by the FETCH's own id, it would land after both of the subscription's.
 			let queue = h.publisher.priority.clone();
 			let subscription = RequestId(REQUEST_ID);
+			// The subscription's group streams carry the track's publisher priority.
+			let publisher = super::super::priority::to_wire(h.track.info().priority);
 			let _streams = [
-				queue.insert(Priority::new(PRIORITY, subscription.0, LATEST + 1)),
-				queue.insert(Priority::new(PRIORITY, subscription.0, LATEST - 1)),
+				queue.insert(Priority::new(PRIORITY, subscription.0, LATEST + 1).with_publisher(publisher)),
+				queue.insert(Priority::new(PRIORITY, subscription.0, LATEST - 1).with_publisher(publisher)),
 			];
 			let _rivals = rival_streams(&queue, subscription);
 
@@ -13158,6 +13360,14 @@ struct GroupSlice {
 	skip: u64,
 	/// One past the last object to write, when the filter ends inside this group.
 	until: Option<u64>,
+}
+
+impl GroupSlice {
+	/// Bound a plain group's reader to the slice, whose frame ordinals are its Object IDs.
+	fn apply(&self, group: &mut group::Consumer) {
+		group.skip_to(self.skip);
+		group.end_at(self.until.map_or(Bound::Unbounded, Bound::Excluded));
+	}
 }
 
 /// Resolve a SUBSCRIBE's Location Filter into the range to serve.
