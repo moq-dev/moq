@@ -137,6 +137,42 @@ test("a reader attaching to a still source starts with the current picture, stam
 	expect(open()).toEqual([]);
 });
 
+test("a reader attaching after another never starts below what that one read", async () => {
+	using input = frameSource();
+	// The capture clock runs 200ms ahead of performance.now(), as it does when the first frame,
+	// which anchors the capture clock, arrived late.
+	const clock = spyOn(performance, "now").mockReturnValue(1_000);
+	const capture = new Capture({ source: input.source });
+	const first = new Effect();
+	const second = new Effect();
+
+	try {
+		await flush();
+		const fanout = capture.out.frames.peek();
+		if (!fanout) throw new Error("no fanout");
+
+		const before = fanout.subscribe(first).getReader();
+		input.push(1_200_000);
+		const read = (await before.read()).value as unknown as Frame;
+		expect(read.timestamp).toBe(1_200_000);
+		read.close();
+		first.close();
+
+		// A demand gap shorter than the clocks' offset.
+		clock.mockReturnValue(1_050);
+		const after = fanout.subscribe(second).getReader();
+		const resumed = (await after.read()).value as unknown as Frame;
+		expect(resumed.timestamp).toBe(1_250_000);
+		resumed.close();
+	} finally {
+		second.close();
+		capture.close();
+		clock.mockRestore();
+	}
+
+	expect(open()).toEqual([]);
+});
+
 test("the held frame is closed when replaced, when an unread copy is dropped, and on close", async () => {
 	using input = frameSource();
 	const capture = new Capture({ source: input.source });

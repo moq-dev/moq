@@ -97,11 +97,12 @@ class Frames extends Fanout<VideoFrame> {
 	readonly #unread = new Set<VideoFrame>();
 
 	constructor(source: ReadableStream<VideoFrame>) {
-		const held: Held = { closed: false };
+		const held: Held = { closed: false, at: 0 };
 		const hold = new TransformStream<VideoFrame, VideoFrame>({
 			transform: (frame, controller) => {
 				held.frame?.close();
 				held.frame = held.closed ? undefined : frame.clone();
+				held.at = performance.now();
 				controller.enqueue(frame);
 			},
 		});
@@ -123,7 +124,11 @@ class Frames extends Fanout<VideoFrame> {
 
 		// Re-stamped to now. The held frame may be minutes old, and publishing it at its capture time
 		// would deliver it that late, a delay the jitter estimate keeps for the life of the stream.
-		const at = Time.Micro.fromMilli(performance.now() as Time.Milli);
+		// Now is on the capture clock: the held stamp plus how long it was held. Capture stamps can run
+		// ahead of performance.now() (the first frame's arrival anchors them), so a stamp read off it
+		// could fall below frames an earlier reader published, rewinding a track resumed after a gap.
+		const elapsed = Time.Micro.fromMilli((performance.now() - this.#held.at) as Time.Milli);
+		const at = Math.round(held.timestamp + elapsed) as Time.Micro;
 		let first: VideoFrame | undefined = new VideoFrame(held, { timestamp: at });
 		this.#unread.add(first);
 		const release = () => {
@@ -181,4 +186,5 @@ class Frames extends Fanout<VideoFrame> {
 	}
 }
 
-type Held = { frame?: VideoFrame; closed: boolean };
+// The newest frame, when it came through (performance.now()), and whether the fanout closed.
+type Held = { frame?: VideoFrame; at: number; closed: boolean };
