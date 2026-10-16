@@ -2,7 +2,7 @@ import { describe, expect, it } from "bun:test";
 import { readdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { Time } from "@moq/net";
+import type { Milli } from "@moq/clock";
 import { Jitter } from "./jitter";
 
 // The conformance corpus beside doc/concept/audio-jitter.md, read directly so this is graded
@@ -52,7 +52,7 @@ describe("audio jitter conformance", () => {
 			const expected = new Map(c.target);
 			let current: number | undefined;
 			for (let i = 0; i < c.arrival.length; i++) {
-				jitter.observe(c.arrival[i] as Time.Milli, c.media[i] as Time.Milli);
+				jitter.observe(c.arrival[i] as Milli, c.media[i] as Milli);
 				const value = target(jitter, c);
 				const listed = expected.get(i);
 				if (listed !== undefined) {
@@ -69,18 +69,18 @@ describe("audio jitter conformance", () => {
 
 describe("Jitter", () => {
 	it("starts at the prior's 95th percentile", () => {
-		expect(new Jitter().measured).toBe(100 as Time.Milli);
+		expect(new Jitter().measured).toBe(100 as Milli);
 	});
 
 	it("is not moved by a stale frame ahead of the live edge", () => {
 		// The #3517 regression: one frame from a stale group, then the live edge 14.5s of media later,
 		// then evenly paced audio with no real jitter. The jump must not read as a delay or a frame.
 		const jitter = new Jitter();
-		jitter.observe(0 as Time.Milli, 0 as Time.Milli);
+		jitter.observe(0 as Milli, 0 as Milli);
 		for (let i = 0; i < 500; i++) {
-			jitter.observe((10 + i * 20) as Time.Milli, (14_500 + i * 20) as Time.Milli);
+			jitter.observe((10 + i * 20) as Milli, (14_500 + i * 20) as Milli);
 		}
-		expect(jitter.measured).toBe(20 as Time.Milli);
+		expect(jitter.measured).toBe(20 as Milli);
 	});
 
 	it("does not follow the absolute delay", () => {
@@ -88,8 +88,8 @@ describe("Jitter", () => {
 		const near = new Jitter();
 		const far = new Jitter();
 		for (let i = 0; i < 500; i++) {
-			near.observe((10 + i * 20) as Time.Milli, (i * 20) as Time.Milli);
-			far.observe((2000 + i * 20) as Time.Milli, (i * 20) as Time.Milli);
+			near.observe((10 + i * 20) as Milli, (i * 20) as Milli);
+			far.observe((2000 + i * 20) as Milli, (i * 20) as Milli);
 		}
 		expect(far.measured).toBe(near.measured);
 	});

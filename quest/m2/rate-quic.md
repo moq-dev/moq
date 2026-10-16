@@ -63,8 +63,8 @@ backpressure the peer cannot ignore, rather than metering and closing.
   `moq_uring::quic::web::Session::set_limits`, each taking its backend's
   `quic::Limits`) with the two rates, and reach it from the live session
   so revalidation can change it after SETUP.
-- Lands in `moq-quic`, so it waits for the [fork](/quest/m1/quic/fork/README.md).
-  The relay drops its refusal for QUIC sessions in the same PR.
+- Lands in `moq-quic`. The relay drops its refusal for QUIC sessions in
+  the same PR.
 
 Tests, on a simulated clock: a peer sending flat out is held to the cap
 within the burst; a peer that ignores credit is closed with a flow-control
@@ -85,6 +85,5 @@ that a one-second rate window can also be the complete assembly allowance.
 
 ## Required
 
-- [Hard fork](/quest/m1/quic/fork/README.md) - the credit and pacer changes land in `moq-quic`
 - [Bound message assembly](/quest/m1/quic/receive-memory.md) - separate retained memory from paced outstanding credit
 - [Bitrate claim](/quest/m2/rate-claim.md) - the cap this enforces

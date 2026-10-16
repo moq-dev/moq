@@ -1,5 +1,6 @@
 /** Measure publisher fairness with memory-resident groups and an immediately writable transport. */
 
+import { Milli } from "@moq/clock";
 import { randomHop } from "../src/hop.ts";
 import { NativeSession } from "../src/ietf/adapter.ts";
 import { Publisher as IetfPublisher } from "../src/ietf/publisher.ts";
@@ -12,7 +13,7 @@ import { createMockTransportPair } from "../src/mock.ts";
 import { Producer as Origin } from "../src/origin.ts";
 import * as Path from "../src/path.ts";
 import { Stream } from "../src/stream.ts";
-import { Milli, Timescale, Timestamp } from "../src/time.ts";
+import { Timescale, Timestamp } from "../src/time.ts";
 
 async function measure(protocol: string, groups: number, viewers: number) {
 	const origin = new Origin();

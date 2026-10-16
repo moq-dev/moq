@@ -15,7 +15,7 @@ group backlog.
 
 ## Plan
 
-Add a generic send-group primitive to noq-proto. A group owns its
+Add a generic send-group primitive to `moq-quic`. A group owns its
 strict priority and fair-share scheduler state; each stream owns only its
 order within that group. Prefer an owned group handle whose drop removes its
 scheduler state and whose priority can be updated without walking every open
@@ -58,7 +58,7 @@ the tier and the weighting.
 
 The delivered API is hierarchical send groups. Do not require a separately
 published scalar-widening API or drop fairness as an intermediate release.
-Prototype the byte-accounted scheduler in the fork. An existing Quinn prototype can
+Prototype the byte-accounted scheduler in `moq-quic`. An existing Quinn prototype can
 supply a workload baseline, but a recency field alone does not prove byte
 fairness: differently sized writes must spend the group's byte credit, and
 requeueing or adding streams must not reset that credit.
@@ -100,10 +100,6 @@ fixtures through its record writer after adopting the scheduler; native
 scheduler completion must not wait for that dependent integration. Preserve
 working behavior on backends not yet migrated, and remove queue code only
 where the new implementation makes it redundant.
-
-## Required
-
-- [Hard fork](/quest/m1/quic/fork/README.md) - lands in `moq-quic`, not the frozen fork
 
 ## Closes
 
