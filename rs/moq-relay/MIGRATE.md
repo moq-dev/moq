@@ -1,5 +1,134 @@
 # Migrating moq-relay
 
 How to update your code, invocation, and config for each breaking change, newest first.
+Rolling a cluster across a release also follows the [upgrade guide](https://moq.dev/setup/upgrade).
 
 ## Unreleased
+
+### Workers default to unpinned (#5688)
+
+`runtime.pin` defaults to off, so two worker groups on one host no longer crowd onto the first cores.
+Set it to keep the old placement.
+
+```toml
+[runtime]
+pin = true
+```
+
+### iroh is opt-in (#5223)
+
+The default build has no iroh listener and no `--iroh-*` flags or `[iroh]` table.
+Build with `--features iroh` to keep it.
+
+### The `noq` cargo feature is `quic`
+
+Rename it wherever you enable it; the QUIC stack is MoQ's own `moq-quic`.
+A qlog directory gets one file per endpoint instead of one per connection.
+
+### A QUIC load-balancer nonce needs its server id (#5114)
+
+`listen.lb_nonce` (`--listen-quic-lb-nonce`, `MOQ_LISTEN_QUIC_LB_NONCE`) without `lb_id` stops startup.
+Setting `lb_id` or `lb_nonce` together with `load_balancer` also stops; `lb_id` used to win.
+Set one of them.
+
+### Settings no listener reads stop startup (#5006)
+
+A stream-only relay (TCP or Unix, no `--listen`) refuses the QUIC-only `--listen-preferred-v4` / `-v6`, `--listen-quic-lb-id`, and pinned `tls.peers`.
+It also refuses `--listen-tls-cert`, `-key`, or `-generate` unless `--listen-tcp-tls` serves it, and `listen.tls.root`, since only QUIC verifies a client CA.
+`--listen-unix-allow-*` needs `--listen-unix-bind`, and `web.https.cert`, `key`, and `root` need `web.https.listen`.
+Each used to be ignored: drop it, or add the listener it configures.
+
+### `--cluster-mesh` and `--cluster-linger` are unknown flags (#4818)
+
+They, TOML `mesh` and `linger`, and `MOQ_CLUSTER_MESH` / `MOQ_CLUSTER_LINGER` are no longer read.
+List every peer with `--cluster-connect` or `--cluster-connect-api`.
+In Rust, `cluster::Config` has no `mesh` or `linger` field.
+
+### `--cluster-id` no longer falls back to `--hop` (#4969)
+
+A node that pinned its id with `--hop` passes `--cluster-id`.
+A route that names no publisher keeps its 0 instead of gaining a random hop.
+
+### Embedding: auth takes the client-CA answer (#4912)
+
+`auth::Config::validate` and `init` take `client_ca: bool`, whether any listener verifies client certificates, and `validate_client_ca` is gone.
+
+```rust
+// Before
+config.auth.validate()?;
+config.auth.validate_client_ca()?;
+// After
+config.auth.validate(client_ca)?;
+```
+
+### Embedding: io_uring workers bind from the server config (#5312)
+
+`uring::Workers::bind` takes a `moq_tokio::server::Config`, so generated and rotating certificates work in both worker modes.
+
+## 0.16 -> 0.17
+
+### Gossip discovery is removed (#4601)
+
+A relay dials only the peers it lists or finds on the LAN, never a URL learned from an announcement, and no longer announces `.internal/origins`.
+`--cluster-mesh` and TOML `mesh` are refused by name: list every peer with `--cluster-connect` or `--cluster-connect-api`.
+The `/nodes` endpoint lists only peers this relay dialed.
+
+## 0.15 -> 0.16
+
+### 0.14 auth behavior is restored (#4319)
+
+- Removed 0.14 auth settings (`[auth]` `key`, `key_dir`, `auth_api`, `domains`, `mtls_tier`, `[auth.tls]`, their flags and `MOQ_AUTH_*` variables) stop the relay with the replacement named.
+- Public and mTLS patterns are rooted at `/`, as in 0.14: `anon/**` admits a client dialed at `/anon`.
+- A token's `iss`, `sub`, and `jti` are ignored and `nbf` is enforced; any other claim, `aud` and `cluster` included, refuses the token.
+- A relay on `--auth-public` refuses a session presenting a token, including a peer's `cluster.token`, and refuses to start with a client CA.
+
+## 0.14 -> 0.15
+
+### Flags split by direction
+
+The flags split into `--listen-*` (accepting), `--connect-*` (dialing), and a shared `--quic-*` section.
+Environment variables follow the flag (`MOQ_SERVER_BIND` is `MOQ_LISTEN`), and a renamed one is refused with its replacement named.
+
+| Before | After |
+| --- | --- |
+| `--server-bind` | `--listen` |
+| `--server-*`, `--tls-cert`, `--tls-key`, `--tls-generate` | `--listen-*`, `--listen-tls-cert`, `--listen-tls-key`, `--listen-tls-generate` |
+| `--client-connect` | `--connect` |
+| `--client-*` | `--connect-*` |
+| `--client-failover-delay` | `--connect-race` |
+| `--client-reconnect=false` | `--connect-once` |
+| `--tls-disable-verify`, `--client-tls-disable-verify` | `--connect-tls-insecure` |
+| `--server-quic-*`, `--client-quic-*` | `--quic-*`, applied to both directions |
+| TOML `[server]`, `[client]` | `[listen]`, `[connect]` |
+| TOML `[server.quic]`, `[client.quic]` | `[quic]` |
+| TOML `listen`, `connect`, `failover_delay`, `reconnect`, `disable_verify` | `bind`, `url`, `race`, `once` (inverted), `insecure` |
+| `--cluster-linger` | removed; a broadcast closes when its last publisher is lost |
+| `--cluster-connect host:port` | a full URL, `https://host/?jwt=TOKEN` |
+
+### Auth is one contract (#3688)
+
+The relay asks an auth server per session (`--auth-url`) or applies a static grant (`--auth-public`); exactly one is required.
+`--auth-key`, `--auth-key-dir`, `--auth-api`, `--auth-api-mode`, `--auth-public-api`, `--auth-domain`, `--auth-mtls-tier`, and `--auth-tls-*` are gone: run `moq auth serve --key-dir ...` beside the relay and point `--auth-url` at it.
+The flag-by-flag mapping is in [Migrating from the relay flags](https://moq.dev/bin/relay/auth#migrating-from-the-relay-flags).
+A verified client certificate admits nothing on its own; the auth server grants it.
+
+```bash
+# Before
+moq-relay --auth-key-dir keys/ --auth-public anon
+# After
+moq auth serve --key-dir keys/ --public-publish 'anon/**' --public-subscribe 'anon/**' &
+moq-relay --auth-url http://127.0.0.1:4440
+```
+
+### Grants are patterns
+
+`anon` is exactly the broadcast `anon`; write `anon/**` for the subtree.
+This applies to `--auth-public`, TOML `public`, and `[auth.public]`, which is now `public_subscribe` / `public_publish`.
+A public or mTLS pattern with no wildcard refuses to start, naming the subtree to write.
+JWT `publish` and `subscribe` claims are patterns too, so a token granting `alice` covers only `alice`.
+
+### Embedding
+
+`Relay` fields are private (#3638): clone the handles you need, mount routes, then call `Relay::run`.
+`Cluster::with_cache` moved to `cluster::Options`.
+The `quinn` and `quiche` features and the backend setting are gone (#3811).
