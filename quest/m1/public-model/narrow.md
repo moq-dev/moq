@@ -38,4 +38,15 @@ pairs with the narrowed visibility, so it does not need the compile probe.
 Each child's PR then deletes its `pending` marks as items go public, and the
 check fails if one is left behind.
 
+JS needs the same guard, since nothing compiles reach there and
+`stripInternal` hides it from custom transports. Mark the declarations the
+same way, with the same vocabulary: every export of `js/net/src/internal.ts`
+and `wire.ts` (each `hooks` entry and view member included), and every
+`@internal` member in the model modules. Then add an import-edge grep to the
+same lint. It fails when a non-test file under `src/{ietf,lite,connection}/`
+imports a name from `internal.ts`, `wire.ts`, or a module the index does not
+export, or reads a `hooks.<name>` or view member, whose declaration has no
+marker. Recommended over a custom Biome (GritQL) or ESLint rule: it is
+one script beside the Rust grep and needs no type information.
+
 No public API or wire change.
