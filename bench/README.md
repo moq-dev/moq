@@ -159,3 +159,14 @@ ratio is what moq-ffi's handles and runtime cost. Ratios hold only within one
 machine. The nightly runs it, prints the table in the job summary, and keeps the
 results as the `bench-ffi` artifact. Each language also has its own recipe
 (`just go bench`, `just py bench`, `just kt bench`).
+
+## Pattern and container coverage
+
+Rust Criterion coverage includes `moq-pattern`'s
+`matching` (pattern count and path depth, last match and miss) and `moq-mux`'s
+`containers` (CMAF and Annex-B import/export). Container cases vary frame count
+and payload size; CMAF also varies track count. Separate frame and byte rates
+use the same fixtures, with byte rates counting the encoded stream size.
+Fixture generation, publisher setup and destruction stay outside timing.
+The existing shared Rust benchmark nightly invocation runs both targets; their `--test` mode
+exercises every case without making timing claims.

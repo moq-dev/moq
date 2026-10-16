@@ -598,6 +598,46 @@ struct Advertised {
 	route: crate::origin::Route,
 }
 
+/// A joining request may be abandoned before it takes an ID. Once allocated, its
+/// header must still reach the peer so drafts 14/15 never see a missing ID.
+struct JoiningTask {
+	work: Option<MaybeSendBox<'static, ()>>,
+	state: kio::Shared<JoiningState>,
+	tasks: Tasks,
+}
+
+#[derive(Default)]
+struct JoiningState {
+	committed: bool,
+	cancelled: bool,
+}
+
+impl JoiningTask {
+	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
+		let Some(work) = self.work.as_mut() else {
+			return Poll::Ready(());
+		};
+		ready!(waiter.poll_future(work.as_mut()));
+		self.work = None;
+		Poll::Ready(())
+	}
+}
+
+impl Drop for JoiningTask {
+	fn drop(&mut self) {
+		let committed = {
+			let mut state = self.state.lock();
+			state.cancelled = true;
+			state.committed
+		};
+		if committed && let Some(work) = self.work.take() {
+			// The session owns the remaining send, including after the subscription
+			// ends. It closes the request immediately after delivering its header.
+			self.tasks.push(work);
+		}
+	}
+}
+
 #[derive(Clone)]
 pub(super) struct Subscriber<S: crate::transport::poll::Session> {
 	// Scoped to a minted source on the clone that serves its requests.
@@ -2728,7 +2768,7 @@ where
 			true => track.start_at(largest.map_or(0, |largest| largest.group)),
 			false => track.start_at(start.map(|start| start.group)),
 		};
-		let mut fetching: Option<MaybeSendBox<'static, ()>> = None;
+		let mut fetching: Option<JoiningTask> = None;
 		{
 			let mut state = self.state.lock();
 			if let Some(held) = state.subscribes.get_mut(&request_id) {
@@ -2763,7 +2803,7 @@ where
 		if let Some(joining) = joining
 			&& largest.is_some()
 		{
-			fetching = self.start_joining_fetch(request_id, &track, joining).await;
+			fetching = self.start_joining_fetch(request_id, &track, joining);
 		}
 
 		// One event ends the subscription: the last subscriber leaving, or the
@@ -2786,14 +2826,14 @@ where
 			let mut done = std::pin::pin!(Self::read_publish_done(&mut stream.reader, self.version));
 			loop {
 				let end = kio::wait(|waiter| {
-					if !fetch_done
-						&& let Some(fut) = fetching.as_mut()
-						&& waiter.poll_future(fut.as_mut()).is_ready()
-					{
-						fetch_done = true;
-					}
 					if gate.poll_denied(waiter).is_ready() {
 						return Poll::Ready(End::Revoked);
+					}
+					if !fetch_done
+						&& let Some(fut) = fetching.as_mut()
+						&& fut.poll(waiter).is_ready()
+					{
+						fetch_done = true;
 					}
 					// An error is the track closing, which the arms below report.
 					if let Poll::Ready(Ok(request)) = dynamic.poll_requested_group(waiter) {
@@ -2862,7 +2902,7 @@ where
 									kio::wait(|waiter| {
 										if !fetch_done
 											&& let Some(fut) = fetching.as_mut()
-											&& waiter.poll_future(fut.as_mut()).is_ready()
+											&& fut.poll(waiter).is_ready()
 										{
 											fetch_done = true;
 										}
@@ -2891,6 +2931,9 @@ where
 				}
 			}
 		};
+
+		// Release an unallocated join now, or let the session finish its committed header.
+		drop(fetching);
 
 		// Clean up
 		let aborted = self.remove_subscribe(request_id).is_none();
@@ -3093,103 +3136,141 @@ where
 	/// The subscribe's request id names the FETCH. A refusal or a failed send settles the
 	/// fill so the live subscription continues from the edge; the data, when there is any,
 	/// arrives on its own fetch stream and [`Self::recv_fill`] stitches it.
-	async fn start_joining_fetch(
+	fn start_joining_fetch(
 		&self,
 		subscribe_id: RequestId,
 		track: &track::Producer,
 		joining: JoiningFetch,
-	) -> Option<MaybeSendBox<'static, ()>> {
+	) -> Option<JoiningTask> {
 		let (fill, largest) = {
 			let state = self.state.lock();
 			let held = state.subscribes.get(&subscribe_id)?;
 			(held.fill.clone(), held.largest)
 		};
-		// Where the subscription starts if the join falls back to live.
 		let live = Live {
 			track: track.clone(),
 			start: largest.map(|largest| largest.group),
 		};
-
-		let fetch_id = match self.control.next_request_id(&self.runtime).await {
-			Ok(id) => id,
-			Err(_) => {
-				settle_join_live(&fill, live);
-				return None;
-			}
-		};
-
-		{
-			let mut state = self.state.lock();
-			let track = state.subscribes.get_mut(&subscribe_id)?;
-			track.fetch_id = Some(fetch_id);
-			state.fetches.insert(fetch_id, subscribe_id);
-		}
-
-		let mut stream = match Stream::open(&mut self.session.clone(), self.version).await {
-			Ok(s) => s,
-			Err(err) => {
-				tracing::debug!(%err, "failed to open joining FETCH stream");
-				settle_join_live(&fill, live);
-				return None;
-			}
-		};
-
-		let fetch_type = match joining {
-			JoiningFetch::Relative { group_offset } => FetchType::RelativeJoining {
-				subscriber_request_id: subscribe_id,
-				group_offset,
-			},
-			JoiningFetch::Absolute { group_id } => FetchType::AbsoluteJoining {
-				subscriber_request_id: subscribe_id,
-				group_id,
-			},
-		};
-
-		if let Err(err) = async {
-			stream.writer.varint(ietf::Fetch::ID).await?;
-			stream
-				.writer
-				.encode(&ietf::Fetch {
-					request_id: fetch_id,
-					subscriber_priority: super::priority::to_wire(
-						track.subscription().map(|s| s.priority).unwrap_or(0),
-					),
-					group_order: GroupOrder::Ascending,
-					fetch_type,
-					range_filters: false,
-					fill_timeout: false,
-					properties_wanted: true,
-				})
-				.await?;
-			Ok::<(), Error>(())
-		}
-		.await
-		{
-			tracing::debug!(%err, "failed to write joining FETCH");
-			settle_join_live(&fill, live);
-			return None;
-		}
-
+		let state = kio::Shared::<JoiningState>::default();
+		let progress = state.clone();
 		let mut this = self.clone();
-		Some(
-			async move {
-				this.finish_joining_fetch(stream, fill, live).await;
+		let work = async move {
+			// No ID is spent while opening a stream, so dropping a blocked open
+			// cannot leave a gap in the peer's sequential request IDs.
+			let mut stream = match Stream::open(&mut this.session.clone(), this.version).await {
+				Ok(stream) => stream,
+				Err(err) => {
+					tracing::debug!(%err, "failed to open joining FETCH stream");
+					settle_join_live(&fill, live);
+					return;
+				}
+			};
+			let fetch_id = match this.control.next_request_id(&this.runtime).await {
+				Ok(id) => id,
+				Err(_) => {
+					settle_join_live(&fill, live);
+					return;
+				}
+			};
+			// On the shared control streams of drafts 14-16, later IDs must
+			// not overtake this header even if its subscription cancels mid-write.
+			let sending = matches!(this.version, Version::Draft14 | Version::Draft15 | Version::Draft16)
+				.then(|| this.control.sending());
+			progress.lock().committed = true;
+			{
+				let mut state = this.state.lock();
+				if let Some(track) = state.subscribes.get_mut(&subscribe_id) {
+					track.fetch_id = Some(fetch_id);
+					state.fetches.insert(fetch_id, subscribe_id);
+				}
 			}
-			.maybe_boxed(),
-		)
+			let fetch_type = match joining {
+				JoiningFetch::Relative { group_offset } => FetchType::RelativeJoining {
+					subscriber_request_id: subscribe_id,
+					group_offset,
+				},
+				JoiningFetch::Absolute { group_id } => FetchType::AbsoluteJoining {
+					subscriber_request_id: subscribe_id,
+					group_id,
+				},
+			};
+			if let Err(err) = async {
+				stream.writer.varint(ietf::Fetch::ID).await?;
+				stream
+					.writer
+					.encode(&ietf::Fetch {
+						request_id: fetch_id,
+						subscriber_priority: super::priority::to_wire(
+							live.track.subscription().map(|s| s.priority).unwrap_or(0),
+						),
+						group_order: GroupOrder::Ascending,
+						fetch_type,
+						range_filters: false,
+						fill_timeout: false,
+						properties_wanted: true,
+					})
+					.await?;
+				Ok::<(), Error>(())
+			}
+			.await
+			{
+				tracing::debug!(%err, "failed to write joining FETCH");
+				if matches!(this.version, Version::Draft14 | Version::Draft15) {
+					// A sequential-ID peer cannot accept any later request when this
+					// header failed before it learned the allocated ID.
+					this.session.close(
+						super::error::to_session_code(&SessionError::Internal),
+						"failed to send joining FETCH",
+					);
+				}
+				settle_join_live(&fill, live);
+				return;
+			}
+			drop(sending);
+			this.finish_joining_fetch(stream, fill, live, progress).await;
+		}
+		.maybe_boxed();
+		Some(JoiningTask {
+			work: Some(work),
+			state,
+			tasks: self.tasks.clone(),
+		})
 	}
 
-	async fn finish_joining_fetch(&mut self, mut stream: Stream<S, Version>, fill: kio::Producer<Fill>, live: Live) {
-		if !matches!(self.read_fetch_response(&mut stream).await, Ok(true)) {
+	async fn finish_joining_fetch(
+		&mut self,
+		mut stream: Stream<S, Version>,
+		fill: kio::Producer<Fill>,
+		live: Live,
+		progress: kio::Shared<JoiningState>,
+	) {
+		let cancelled = |waiter: &kio::Waiter| {
+			progress
+				.poll(waiter, |state| {
+					state.cancelled.then_some(()).map_or(Poll::Pending, Poll::Ready)
+				})
+				.map(drop)
+		};
+		let accepted = {
+			let mut response = std::pin::pin!(self.read_fetch_response(&mut stream));
+			kio::wait(|waiter| {
+				if cancelled(waiter).is_ready() {
+					return Poll::Ready(false);
+				}
+				waiter
+					.poll_future(response.as_mut())
+					.map(|response| matches!(response, Ok(true)))
+			})
+			.await
+		};
+		if accepted {
+			// The request stays open while the subscription still needs its fill.
+			kio::wait(cancelled).await;
+		} else {
 			settle_join_live(&fill, live);
-			let _ = stream.writer.close().await;
-			return;
 		}
-		// Hold the request open until this task is dropped with the subscription.
-		// Closing our send side first is what a draft-14-16 adapter treats as
-		// cancelling the FETCH, and the objects then never leave the publisher.
-		let _stream = stream;
-		std::future::pending::<()>().await;
+		stream.reader.abort(&Error::Cancel);
+		let _ = stream.writer.close().await;
 	}
 
 	/// `true` when the publisher answered FETCH_OK. A FETCH_ERROR / REQUEST_ERROR is a
@@ -12883,6 +12964,7 @@ mod joining_fetch_tests {
 		transport::poll::Session as _,
 		util::{TaskSet, Tasks},
 	};
+	use futures::FutureExt;
 
 	const JOINING_DRAFTS: [Version; 6] = [
 		Version::Draft14,
@@ -13006,13 +13088,22 @@ mod joining_fetch_tests {
 
 	impl JoinRun {
 		async fn start(version: Version, start: Option<track::Position>, ok: Vec<u8>, fetch: Vec<u8>) -> Self {
-			let session = ScriptedSession::per_stream(vec![ok, fetch]);
+			Self::start_with_control(version, start, [ok, fetch], Control::new(None, false)).await
+		}
+
+		async fn start_with_control(
+			version: Version,
+			start: Option<track::Position>,
+			scripts: [Vec<u8>; 2],
+			control: Control,
+		) -> Self {
+			let session = ScriptedSession::per_stream(Vec::from(scripts));
 			let (tasks, _task_set) = crate::util::TaskSet::new();
 			let subscriber = Subscriber::new(
 				crate::time::Clock::sim(),
 				session.clone(),
 				crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
-				Control::new(None, false),
+				control,
 				None,
 				peer::PeerSetup::default(),
 				crate::Hop::new(1).unwrap(),
@@ -13064,6 +13155,169 @@ mod joining_fetch_tests {
 	impl Drop for JoinRun {
 		fn drop(&mut self) {
 			self.serving.abort();
+		}
+	}
+
+	/// A peer withholding joining-FETCH credit cannot keep an unauthorized track alive.
+	#[moq_net_sim::test]
+	async fn revocation_does_not_wait_for_joining_fetch_credit() {
+		let version = Version::Draft14;
+		let mut run = JoinRun::start_with_control(
+			version,
+			None,
+			[
+				subscribe_ok(version, Some(ietf::Location { group: 4, object: 1 })),
+				fetch_ok(version),
+			],
+			Control::new(Some(RequestId(3)), false),
+		)
+		.await;
+		assert!(run.fill_outstanding(), "accepted subscription awaits its joining FETCH");
+		assert!(
+			!decode_messages(&run.session.log, version)
+				.iter()
+				.any(|(id, _)| *id == ietf::Fetch::ID)
+		);
+		run.subscriber.auth.authorize(&crate::auth::Grant::default());
+		settle().await;
+		let mut received = (&mut run._hold.2)
+			.now_or_never()
+			.expect("SUBSCRIBE_OK accepted the track")
+			.unwrap();
+		assert!(matches!(
+			received.finished().now_or_never(),
+			Some(Err(Error::Unauthorized))
+		));
+	}
+
+	fn pending_join<S: crate::transport::poll::Boxable>(
+		session: S,
+		version: Version,
+	) -> (Subscriber<S>, track::Producer, TaskSet) {
+		let (tasks, task_set) = TaskSet::new();
+		let subscriber = Subscriber::new(
+			crate::time::Clock::sim(),
+			session,
+			crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+			Control::new(None, false),
+			None,
+			peer::PeerSetup::default(),
+			crate::Hop::new(1).unwrap(),
+			None,
+			version,
+			tasks,
+			Default::default(),
+		);
+		let track = track::Producer::new(
+			std::sync::Arc::new(crate::broadcast::Info::default()),
+			"video",
+			track::Info::timed(),
+		);
+		subscriber.state.lock().subscribes.insert(
+			RequestId(99),
+			TrackState {
+				largest: Some(ietf::Location { group: 4, object: 1 }),
+				..TrackState::new(
+					track.clone(),
+					Path::new("broadcast").to_owned(),
+					kio::Producer::new(Fill::Requested),
+					None,
+				)
+			},
+		);
+		(subscriber, track, task_set)
+	}
+
+	/// Abandoning a blocked open leaves the next sequential ID available to unrelated work.
+	#[moq_net_sim::test]
+	async fn cancelling_a_joining_fetch_open_spends_no_id() {
+		for version in JOINING_DRAFTS {
+			let gate = kio::Producer::new(false);
+			let session = ScriptedSession::gated_open(Vec::new(), gate.consume());
+			let log = session.log.clone();
+			let (subscriber, track, mut tasks) = pending_join(session, version);
+			let mut joining = subscriber
+				.start_joining_fetch(RequestId(99), &track, JoiningFetch::Relative { group_offset: 0 })
+				.unwrap();
+			assert!(joining.poll(&kio::Waiter::noop()).is_pending());
+			drop(joining);
+			*gate.write().ok().expect("gate is open") = true;
+			let _ = tasks.poll(&kio::Waiter::noop());
+			assert_eq!(
+				subscriber.control.next_request_id(&subscriber.runtime).await.unwrap(),
+				RequestId(1)
+			);
+			assert_eq!(log.bi_opens(), 0, "{version}: the abandoned open is gone");
+		}
+	}
+
+	/// A cancelled partial legacy header still precedes the next unrelated request ID.
+	#[moq_net_sim::test]
+	async fn cancelling_a_partial_joining_fetch_preserves_request_id_order() {
+		for version in [Version::Draft14, Version::Draft15, Version::Draft16] {
+			let gate = kio::Producer::new(false);
+			let session = crate::lite::test_transport::SinkSession::gated_bi_prefix(2, gate.consume());
+			let log = session.log.clone();
+			let (subscriber, track, mut tasks) = pending_join(session, version);
+			let mut joining = subscriber
+				.start_joining_fetch(RequestId(99), &track, JoiningFetch::Relative { group_offset: 0 })
+				.unwrap();
+			assert!(joining.poll(&kio::Waiter::noop()).is_pending());
+			assert_eq!(log.writes.lock().unwrap().len(), 2, "partial header");
+			let mut unrelated = std::pin::pin!(subscriber.control.next_request_id(&subscriber.runtime));
+			assert!(kio::Waiter::noop().poll_future(unrelated.as_mut()).is_pending());
+			drop(joining);
+			let _ = tasks.poll(&kio::Waiter::noop());
+			assert!(kio::Waiter::noop().poll_future(unrelated.as_mut()).is_pending());
+			*gate.write().ok().expect("gate is open") = true;
+			let next = kio::wait(|waiter| {
+				let _ = tasks.poll(waiter);
+				waiter.poll_future(unrelated.as_mut())
+			})
+			.await
+			.unwrap();
+			assert_eq!(next, RequestId(3), "{version}: no ID was skipped or reused");
+			let messages = decode_messages(&log, version);
+			assert_eq!(messages.len(), 1);
+			assert_eq!(messages[0].0, ietf::Fetch::ID);
+			let mut body = messages[0].1.clone();
+			let fetch = crate::coding::decode_buf(&mut body, version, ietf::Fetch::decode_msg).unwrap();
+			assert_eq!(fetch.request_id, RequestId(1));
+			assert!(log.resets().is_empty(), "header and FIN must survive cancellation");
+			assert!(
+				log.trail()
+					.iter()
+					.any(|(_, sent)| matches!(sent, crate::lite::test_transport::Sent::Finish))
+			);
+		}
+	}
+
+	/// A peer that never acknowledges cancellation cannot retain request-ID allocation.
+	#[moq_net_sim::test]
+	async fn joining_fetch_cleanup_does_not_hold_the_next_request_id() {
+		for version in [Version::Draft14, Version::Draft15, Version::Draft16] {
+			let session = ScriptedSession::per_stream(Vec::new()).with_unacked_fin();
+			let log = session.log.clone();
+			let (subscriber, track, mut tasks) = pending_join(session, version);
+			let mut joining = subscriber
+				.start_joining_fetch(RequestId(99), &track, JoiningFetch::Relative { group_offset: 0 })
+				.unwrap();
+			assert!(joining.poll(&kio::Waiter::noop()).is_pending());
+			drop(joining);
+			assert!(
+				tasks.poll(&kio::Waiter::noop()).is_pending(),
+				"FIN remains unacknowledged"
+			);
+			assert_eq!(
+				subscriber.control.next_request_id(&subscriber.runtime).await.unwrap(),
+				RequestId(3)
+			);
+			assert!(
+				log.trail()
+					.iter()
+					.any(|(_, sent)| matches!(sent, crate::lite::test_transport::Sent::Finish))
+			);
+			assert!(log.resets().is_empty());
 		}
 	}
 

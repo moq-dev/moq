@@ -16,7 +16,10 @@ DTS untouched, so the only thing that changes is when the bytes arrive:
 The video TB drains at 1.2x the bit rate the SPS's NAL HRD declares (1.935 Mb/s),
 so any delivery well above real time overflows it. MB holds the level's whole CPB
 less the declared one, ~3.6 MB, more than this 4 s capture carries, so no restamp
-of it can overflow MB.
+of it can overflow MB. An 8 s generated Baseline@2.0 clip without NAL HRD
+uses the smaller level-default MB instead: as encoded it passes, and at 4x
+it overflows MB (as well as TB). A second generated AVC/AAC reference uses
+a 0.1 s mux delay and 2 Mb/s transport rate so AAC passes both TB and B.
 
 A capture cannot be edited into the packet layouts the model has to get right, so
 the rest are built here: a 10 Mb/s single-video stream carrying the Kyrion SPS,
@@ -207,13 +210,44 @@ def synthetic_audio(path: str, frames: int, decode_s: float) -> None:
         handle.write(b"".join(out))
 
 
-def restamp(scale: float):
-    """A builder that restamps the Kyrion capture's PCRs at `scale` times its own rate."""
+def encoded(audio: bool):
+    """A builder for an 8 s level-default AVC reference, optionally with stereo AAC."""
 
     def build(path: str) -> str:
-        rate = compliance.run_tsanalyze(FIXTURE)["ts"]["bitrate"]
+        command = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+                   "-f", "lavfi", "-i", "testsrc2=size=320x240:rate=25"]
+        if audio:
+            command += ["-f", "lavfi", "-i", "sine=frequency=1000:sample_rate=48000"]
+        command += ["-map", "0:v"] + (["-map", "1:a"] if audio else [])
+        command += ["-t", "8", "-c:v", "libx264", "-threads", "2",
+                    "-preset", "ultrafast", "-tune", "zerolatency",
+                    "-profile:v", "baseline", "-level:v", "2.0", "-b:v", "1M",
+                    "-x264-params", "keyint=25:min-keyint=25:scenecut=0:aud=1:repeat-headers=1:nal-hrd=none"]
+        if audio:
+            command += ["-c:a", "aac", "-b:a", "128k", "-ac", "2"]
+        # The 0.1 s lead avoids underflow without filling AAC's 3584-byte B;
+        # the 2 Mb/s mux rate also keeps audio packet bursts within its TB drain.
+        command += ["-f", "mpegts", "-muxrate", "2000000", "-pcr_period", "20",
+                    "-pes_payload_size", "0", "-muxdelay", "0.1", "-muxpreload", "0.1", path]
+        subprocess.run(command, check=True)
+        probe = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "stream=codec_name",
+                                "-of", "json", path], capture_output=True, text=True, check=True)
+        codecs = [stream["codec_name"] for stream in json.loads(probe.stdout)["streams"]]
+        if codecs != (["h264", "aac"] if audio else ["h264"]):
+            raise RuntimeError(f"generated reference has unexpected codecs: {codecs}")
+        return path
+
+    return build
+
+
+def restamp(scale: float, source=lambda _path: FIXTURE):
+    """A builder that restamps a source's PCRs at `scale` times its own rate."""
+
+    def build(path: str) -> str:
+        original = source(path + ".source.ts")
+        rate = compliance.run_tsanalyze(original)["ts"]["bitrate"]
         subprocess.run(
-            ["tsp", "-I", "file", FIXTURE, "-P", "pcradjust", "--bitrate", f"{rate * scale:.0f}"]
+            ["tsp", "-I", "file", original, "-P", "pcradjust", "--bitrate", f"{rate * scale:.0f}"]
             + ["--ignore-pts", "--ignore-dts", "-O", "file", path],
             check=True,
         )
@@ -261,6 +295,9 @@ CASES = [
     ("0.7x", restamp(0.7), {"EB underflow", "B underflow"}),
     ("4x", restamp(4.0), {"TB overflow", "B overflow", "held over 1 s"}),
     ("15x", restamp(15.0), {"TB overflow", "B overflow", "held over 1 s"}),
+    ("level defaults", encoded(False), "pass"),
+    ("MB burst", restamp(4.0, encoded(False)), {"MB overflow"}),
+    ("AAC reference", encoded(True), "pass"),
     ("synthetic", built("synthetic"), "pass"),
     ("two AUs, one PES", built("two AUs, one PES"), "several access units"),
     ("adaptation burst", built("adaptation burst"), {"TB overflow"}),
