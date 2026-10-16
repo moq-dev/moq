@@ -38,4 +38,6 @@ under a fresh [epoch](/concept/moq-lite#publisher-epochs), so a publisher that
 reconnects while its stale session lingers replaces it at once.
 
 Built on [str0m](https://crates.io/crates/str0m); the library is
-[`moq-rtc`](https://docs.rs/moq-rtc).
+[`moq-rtc`](https://docs.rs/moq-rtc). Embedders can sample each peer's
+[wire source](https://docs.rs/moq-rtc/latest/moq_rtc/wire/index.html) for UDP
+payload bytes, including media, control traffic, and retransmissions.
