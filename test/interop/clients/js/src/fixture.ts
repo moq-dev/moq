@@ -114,6 +114,12 @@ export class Fixture {
 		this.#video = video;
 		this.#signals.cleanup(() => video.close());
 
+		// Mark the codec change only once the probe has published it. Marking on request would paint the
+		// new generation into pictures the old codec still encodes onto the old track.
+		this.#signals.run((effect) => {
+			if (this.#generation === 0 && effect.get(video.out.catalog)?.codec.startsWith("vp8")) this.#generation = 1;
+		});
+
 		// Handed the source at page load, before any gesture, like a pre-granted microphone. Readiness
 		// then requires an audio catalog after the click, which covers the capture resuming its own
 		// suspended graph.
@@ -227,9 +233,8 @@ export class Fixture {
 		this.#videoEnabled.set(enabled);
 	}
 
-	/** Switch codecs on the existing rendition and mark subsequent source pictures. */
+	/** Switch codecs on the existing rendition, marking pictures once the catalog advertises VP8. */
 	changeVideoCodec(): void {
-		this.#generation = 1;
 		this.#video.config.update((config) => ({ ...config, codec: "vp8" }));
 	}
 
