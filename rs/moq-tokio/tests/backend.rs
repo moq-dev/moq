@@ -168,7 +168,7 @@ async fn connect_test(config: ConnectTest<'_>) {
 		if let Some(expect_authority) = expect_authority {
 			assert_eq!(request.authority(), expect_authority.as_deref());
 		}
-		let session = request.with_publisher(&pub_origin).ok().await?;
+		let (session, _driver) = request.with_publisher(&pub_origin).ok().await?;
 
 		let _broadcast = broadcast;
 		let _track = track;
@@ -489,7 +489,7 @@ async fn mtls_test(scheme: &str, reject: bool) {
 			request.reject(moq_tokio::server::Reject::Forbidden).await?;
 			return Ok::<_, anyhow::Error>(has_cert);
 		}
-		let session = request.with_publisher(pub_origin.consume()).ok().await?;
+		let (session, _driver) = request.with_publisher(pub_origin.consume()).ok().await?;
 		let _ = session.closed().await;
 		Ok::<_, anyhow::Error>(has_cert)
 	});
@@ -682,7 +682,7 @@ async fn iroh_connect_test(version: Option<&str>) {
 		if let Some(version) = version.first() {
 			assert_eq!(request.alpn(), Some(version.alpn()));
 		}
-		let session = request.with_publisher(&pub_origin).ok().await?;
+		let (session, _driver) = request.with_publisher(&pub_origin).ok().await?;
 
 		let _broadcast = broadcast;
 		let _track = track;
@@ -787,7 +787,7 @@ async fn noq_client_close_reaches_server() {
 		.await
 		.expect("accept timed out")
 		.expect("no incoming connection");
-	let session = request.ok().await.expect("server handshake failed");
+	let (session, _driver) = request.ok().await.expect("server handshake failed");
 	accepted.send(()).expect("client waiting for the accepted session");
 	tokio::task::spawn_blocking(move || client.join())
 		.await
@@ -868,7 +868,7 @@ async fn noq_client_close_drains_finished_track() {
 	let origin = moq_tokio::origin::spawn();
 	let consumer = origin.consume();
 	let mut announcements = consumer.announced();
-	let _session = request
+	let (_session, _driver) = request
 		.with_subscriber(origin)
 		.ok()
 		.await
@@ -989,7 +989,7 @@ async fn noq_client_close_drains_migrated_predecessor() {
 	let origin = moq_tokio::origin::spawn();
 	let consumer = origin.consume();
 	let mut announcements = consumer.announced();
-	let first = request
+	let (first, _driver) = request
 		.with_subscriber(origin)
 		.ok()
 		.await
@@ -1126,7 +1126,7 @@ async fn noq_client_close_keeps_predecessor_handover() {
 	let origin = moq_tokio::origin::spawn();
 	let consumer = origin.consume();
 	let mut announcements = consumer.announced();
-	let first = request
+	let (first, _driver) = request
 		.with_subscriber(origin)
 		.ok()
 		.await

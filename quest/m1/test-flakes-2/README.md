@@ -42,10 +42,7 @@ Public API: none. Wire: none.
 - [Auth refresh mocks time](/quest/m1/test-flakes-2/auth-refresh-mock-time.md) - moq-relay's auth refresh and fixed-lease tests measure a grant's life on one mocked clock
 - [uring teardown close](/quest/m1/test-flakes-2/uring-teardown-close.md) - moq-uring's published-close teardown test holds under load, fixed at its cause
 - [Auth serve signals](/quest/m1/test-flakes-2/auth-serve-signals.md) - moq-cli's auth serve signal tests hold under load
-- [Export exit tests](/quest/m1/test-flakes-2/export-failure-exit.md) - moq-cli's failed-export and interrupted-publisher exit tests hold under load
 - [js -> go rewind](/quest/m1/test-flakes-2/js-go-rewind.md) - the `js -> go` interop cell never reads a frame below the previous group's start, fixed on the side that produced it
-- [WASM IETF read](/quest/m1/test-flakes-2/wasm-ietf-read.md) - the WASM suite's IETF read case reads whole groups on a loaded runner, fixed at the burst or the assertion as the evidence says
-- [BBR marking seed](/quest/m1/test-flakes-2/bbr-marking-seed.md) - the BBR marking test seeds its probe schedule, replays a failing seed, and its rare drop is fixed at the cause
 
 ## Related
 

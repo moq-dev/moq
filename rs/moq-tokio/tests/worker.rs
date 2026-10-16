@@ -741,7 +741,7 @@ async fn rotated_identity_reaches_every_worker() {
 				let send = send.clone();
 				let certificates = certificates.clone();
 				tokio::spawn(async move {
-					let session = request.ok().await.unwrap();
+					let (session, _driver) = request.ok().await.unwrap();
 					send.send((index, certificates.fingerprints())).unwrap();
 					let _ = session.closed().await;
 				});
