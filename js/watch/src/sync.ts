@@ -198,14 +198,17 @@ export class Sync {
 		const cap = this.#out.maxDelay.peek();
 		if (sleep <= cap) return sleep < 0; // within budget: let the buffer grow instead of skipping ahead
 
-		// Over the cap: re-anchor down so the resulting lookahead is exactly the cap, which puts the
-		// playhead at `timestamp - cap`. "instant" has no cap, so every newer frame would pass over
-		// whatever is still decoding; it presents frames as they exist instead.
+		// Over the cap: re-anchor down so the resulting lookahead is exactly the cap.
+		const reference = ref + cap - delay;
+		this.#out.reference.set(reference);
+
+		// The playhead now sits at `timestamp - cap`, plus however long this frame waited between
+		// ingress and here. "instant" has no cap, so every newer frame would pass over whatever is
+		// still decoding; it presents frames as they exist instead.
 		if (this.in.delay.peek() !== "instant") {
-			const floor = timestamp - cap;
+			const floor = Nano.toMilli(Nano(now())) - reference - delay;
 			if (this.#floor === undefined || floor > this.#floor) this.#floor = floor;
 		}
-		this.#out.reference.set(ref + cap - delay);
 		return sleep < 0;
 	}
 

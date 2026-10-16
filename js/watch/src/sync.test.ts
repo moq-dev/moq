@@ -211,6 +211,35 @@ describe("wait", () => {
 });
 
 describe("recorded ingress", () => {
+	it("anchors and classifies using arrival rather than delayed delivery", async () => {
+		const clock = new Manual();
+		clock.advance(Nano.fromMilli(Milli(10_000)));
+		const restore = clock.install();
+		const sync = new Sync({ delay: Milli(100) });
+		try {
+			for (let i = 0; i < 20; i++) await Promise.resolve();
+			expect(sync.received(Milli(0), "audio", Milli(1000))).toBe(false);
+			expect(sync.out.reference.peek()).toBe(1000);
+			expect(sync.received(Milli(20), "audio", Milli(1020))).toBe(false);
+			expect(sync.received(Milli(40), "audio", Milli(1200))).toBe(true);
+		} finally {
+			restore();
+			sync.close();
+		}
+	});
+});
+
+describe("skip floor", () => {
+	// Arrivals are on the local clock, pinned here so a skip's playhead does not depend on wall time.
+	let clock: Manual;
+	let restore: () => void;
+	beforeEach(() => {
+		clock = new Manual();
+		clock.advance(Nano.fromMilli(Milli(5000)));
+		restore = clock.install();
+	});
+	afterEach(() => restore());
+
 	it("a skip passes over only frames behind the playhead it jumped to", async () => {
 		const sync = new Sync({ delay: Milli(100) });
 		await flush();
@@ -249,6 +278,19 @@ describe("recorded ingress", () => {
 		sync.close();
 	});
 
+	it("a skip counts how long the skipping frame waited after ingress", async () => {
+		const sync = new Sync({ delay: Milli(100) });
+		await flush();
+		sync.received(Milli(0), "video", Milli(5000));
+
+		// Reordering held this audio for 200ms, so the new reference puts the playhead at 10.1s now.
+		clock.advance(Nano.fromMilli(Milli(200)));
+		sync.received(Milli(10_000), "audio", Milli(5000));
+		expect(sync.skipped(Milli(10_050))).toBe(true);
+		expect(sync.skipped(Milli(10_100))).toBe(false);
+		sync.close();
+	});
+
 	it("instant skips pass over nothing", async () => {
 		const sync = new Sync({ delay: "instant" });
 		await flush();
@@ -256,22 +298,5 @@ describe("recorded ingress", () => {
 		sync.received(Milli(10_000), "video", Milli(5000));
 		expect(sync.skipped(Milli(0))).toBe(false);
 		sync.close();
-	});
-
-	it("anchors and classifies using arrival rather than delayed delivery", async () => {
-		const clock = new Manual();
-		clock.advance(Nano.fromMilli(Milli(10_000)));
-		const restore = clock.install();
-		const sync = new Sync({ delay: Milli(100) });
-		try {
-			for (let i = 0; i < 20; i++) await Promise.resolve();
-			expect(sync.received(Milli(0), "audio", Milli(1000))).toBe(false);
-			expect(sync.out.reference.peek()).toBe(1000);
-			expect(sync.received(Milli(20), "audio", Milli(1020))).toBe(false);
-			expect(sync.received(Milli(40), "audio", Milli(1200))).toBe(true);
-		} finally {
-			restore();
-			sync.close();
-		}
 	});
 });
