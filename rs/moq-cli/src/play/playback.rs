@@ -13,18 +13,19 @@ pub(super) enum Kind {
 	Audio,
 }
 
-/// The track a rendition plays from: its broadcast and its name there.
+/// The track a rendition plays from: its resolved broadcast path and its name there.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(super) struct Track {
-	broadcast: Option<hang::moq_net::path::RelativeOwned>,
+	/// Resolved rather than as written, since several references name one broadcast.
+	broadcast: Option<hang::moq_net::PathOwned>,
 	name: String,
 }
 
 impl Track {
-	/// The track the rendition `id`, configured by `config`, plays from.
-	pub(super) fn of(config: &impl Reference, id: &str) -> Self {
+	/// The track the rendition `id`, configured by `config` in `source`'s catalog, plays from.
+	pub(super) fn of(source: &moq_mux::Source, config: &impl Reference, id: &str) -> Self {
 		Self {
-			broadcast: config.broadcast().cloned(),
+			broadcast: source.resolve_reference(config.broadcast()),
 			name: config.track(id).to_string(),
 		}
 	}

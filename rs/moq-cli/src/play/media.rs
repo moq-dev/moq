@@ -221,7 +221,7 @@ impl<O: Output> Media<O> {
 			if playback.wants(Kind::Video) {
 				playback.read(Kind::Video);
 				for (name, config) in snapshot.video.enabled() {
-					let reference = Track::of(config, name);
+					let reference = Track::of(&source, config, name);
 					// A finished track has only its newest group left, which already played.
 					if playback.finished(&reference) {
 						continue;
@@ -272,13 +272,8 @@ impl<O: Output> Media<O> {
 							let (stop, stopped) = tokio::sync::oneshot::channel();
 							video_demand = Some((name.clone(), stop));
 							tasks.spawn(async move {
-								(
-									Kind::Video,
-									tokio::select! {
-									result = video.run(track, decoder) => result.map(|()| (true, None)),
-									_ = stopped => Ok((false, None)),
-									},
-								)
+								let result = until_stopped(video.run(track, decoder), stopped).await;
+								(Kind::Video, result.map(|(finished, _)| (finished, None)))
 							});
 							playback.started(Kind::Video, reference);
 							break;
@@ -294,7 +289,7 @@ impl<O: Output> Media<O> {
 			if playback.wants(Kind::Audio) {
 				playback.read(Kind::Audio);
 				for (name, config) in snapshot.audio.enabled() {
-					let reference = Track::of(config, name);
+					let reference = Track::of(&source, config, name);
 					// A finished track has only its newest group left, which already played.
 					if playback.finished(&reference) {
 						continue;
@@ -334,13 +329,7 @@ impl<O: Output> Media<O> {
 							let (stop, stopped) = tokio::sync::oneshot::channel();
 							audio_demand = Some((name.clone(), stop));
 							tasks.spawn(async move {
-								(
-									Kind::Audio,
-									tokio::select! {
-									result = play_audio(consumer, audio) => result.map(|sink| (true, Some(sink))),
-									_ = stopped => Ok((false, None)),
-									},
-								)
+								(Kind::Audio, until_stopped(play_audio(consumer, audio), stopped).await)
 							});
 							playback.started(Kind::Audio, reference);
 							break;
@@ -361,6 +350,19 @@ impl<O: Output> Media<O> {
 				);
 			}
 		}
+	}
+}
+
+/// Drive `play` until it ends or `stopped` fires, reporting whether it ended on its
+/// own. Decided by whichever branch won, not by who holds the stop handle: a
+/// rendition can be disabled after its track ended but before the end is joined.
+async fn until_stopped<T>(
+	play: impl Future<Output = anyhow::Result<T>>,
+	stopped: tokio::sync::oneshot::Receiver<()>,
+) -> anyhow::Result<(bool, Option<T>)> {
+	tokio::select! {
+		result = play => result.map(|left| (true, Some(left))),
+		_ = stopped => Ok((false, None)),
 	}
 }
 
@@ -881,6 +883,34 @@ mod tests {
 			PACKET_DURATION * 10,
 			"the finished track replayed"
 		);
+	}
+
+	/// A catalog can disable a rendition after its track ended but before the
+	/// player joins that end. The stop then lands on nothing, and the end still
+	/// counts as finished, so re-enabling the rendition does not replay it.
+	#[tokio::test]
+	async fn a_stop_after_the_track_ended_still_reports_it_finished() {
+		let (stop, stopped) = tokio::sync::oneshot::channel();
+		let task = tokio::spawn(until_stopped(async { anyhow::Ok(()) }, stopped));
+		while !task.is_finished() {
+			tokio::task::yield_now().await;
+		}
+		assert!(stop.send(()).is_err(), "the stop raced a running task");
+		let (finished, _) = task.await.unwrap().unwrap();
+		assert!(finished, "a track that ended was reported as stopped");
+	}
+
+	/// Equivalent `broadcast` references name one track, so a snapshot that only
+	/// respells the reference does not make a finished track look new.
+	#[tokio::test]
+	async fn equivalent_references_name_one_track() {
+		let origin = moq_tokio::origin::spawn();
+		let (broadcast, _catalog, _audio) = publish(&origin, Default::default());
+		let source = moq_mux::Source::new(origin.consume(), broadcast.consume());
+		let mut config = AudioConfig::new(AudioCodec::Pcm, SAMPLE_RATE, 1);
+		let absent = Track::of(&source, &config, "audio");
+		config.broadcast = Some(moq_net::path::RelativeOwned::new(""));
+		assert_eq!(Track::of(&source, &config, "audio"), absent);
 	}
 
 	/// A covering route of the same epoch that arrives as the exact route goes, both
