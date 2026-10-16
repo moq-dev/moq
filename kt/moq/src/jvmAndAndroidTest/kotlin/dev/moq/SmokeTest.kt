@@ -51,6 +51,15 @@ private fun opusHead(): ByteArray =
 
 class SmokeTest {
     @Test
+    fun `destroyed object arguments are refused before native calls`() {
+        val broadcast = BroadcastProducer()
+        broadcast.destroy()
+
+        val error = assertFailsWith<IllegalStateException> { CatalogProducer(broadcast) }
+        assertTrue(error.message.orEmpty().contains("already been destroyed"))
+    }
+
+    @Test
     fun `container timebase belongs to one broadcast`() {
         BroadcastProducer().use { owner ->
             BroadcastProducer().use { other ->
