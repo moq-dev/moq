@@ -28,6 +28,13 @@ These land with the next breaking release, not the 2026-09-23 train.
   with `Catalog.Video.ranked(renditions)`. `Catalog.Audio.ranked(renditions)`
   orders audio by enabled state, bitrate, sample rate, channel count, and name.
   Both helpers put disabled renditions last.
+- **The `noq` cargo feature is `quic`.** Rename it wherever you enable it on
+  moq-tokio, moq-uring, moq-relay, moq-cli, or the other crates that forward
+  it. The QUIC stack is now MoQ's own `moq-quic` rather than the `moq-noq`
+  crates. In Rust, `moq_tokio::noq::Error` is `moq_tokio::quic::Error`, and
+  `moq_tokio::Error::Noq` is `moq_tokio::Error::Quic`. A qlog directory gets one
+  file per endpoint instead of one per connection; on io\_uring workers, one per
+  endpoint and one per dial.
 - **moq-tokio config durations are optional.** Wrap durations in `Some(...)` for
   connect `race`, `resolution_delay`, and `timeout`; listen `timeout`; QUIC
   `idle_timeout` and `keep_alive`; backoff `initial`, `max`, and `timeout`;
@@ -83,6 +90,13 @@ These land with the next breaking release, not the 2026-09-23 train.
   `Connection` and `Established.discovery` are removed, and passing the option
   throws a `TypeError`: drop it. A relay that refuses an announce request
   downgrades that session to blind requests on its own.
+- **JS time units and timers come from `@moq/clock`.** `Time.Nano`, `Time.Micro`,
+  `Time.Milli`, and `Time.Second` are gone from `@moq/net`: import `Nano`,
+  `Micro`, `Milli`, and `Second` from `@moq/clock`, which throws on negative or
+  non-finite values. `effect.timer`, `effect.timeout`, and `effect.interval`
+  take a `Nano` (`Nano.fromMilli(Milli(250))`), not milliseconds, and run on the
+  installed clock. `sleep` and `sleepUntil` take `{ signal }` instead of a bare
+  signal. `@moq/room`'s `HISTORY` is a `Nano`.
 - **"Epoch" means only the publisher epoch.** The reconnect counter is
   `connects()`: `moq_tokio::Connection::epoch()` and moq-ffi's
   `MoqSession::epoch()` are `connects()`, which is Python's `connects()`, Go's

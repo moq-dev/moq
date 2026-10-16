@@ -22,8 +22,11 @@ text; this quest owns the following behavior it left out.
 - Exporters: a late first announcement starts the rendition and End ends
   it. Restart behavior belongs to
   [restart followers](/quest/m1/restart-followers.md).
-- A reference with an `epoch` follows only its own instance: a Restart onto
-  another epoch ends that rendition, matching `relativeBroadcast` in
+- A replacement is a Restart for an announcement follower, never a seamless
+  same-epoch resume. A proven Takeover preserves the same instance.
+- A reference with an `epoch` follows only its own instance: following never
+  substitutes a different epoch, so a Restart onto another one ends that
+  rendition, matching `relativeBroadcast` in
   `@moq/watch` (`follows a replaced sibling only for a reference that names
   no epoch`).
 - `@moq/watch` returns nothing for a rendition whose followed broadcast proves

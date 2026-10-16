@@ -37,10 +37,6 @@ own threading model.
 
 Update `doc/bin/relay/` for the flag change.
 
-## Required
-
-- [Hard fork](/quest/m1/quic/fork/README.md) - the stack has to be in-tree before the library can own sharding
-
 ## Related
 
-- [UDP demux](/quest/m1/p2p/udp-demux.md) - demuxes each shard's socket; keep the demux over whatever the library hands out
+- [UDP demux](/quest/m2/p2p/udp-demux.md) - demuxes each shard's socket; keep the demux over whatever the library hands out

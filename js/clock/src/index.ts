@@ -15,3 +15,8 @@ export { Instant, Micro, Milli, Nano, Second, Wall } from "./types.ts";
 export function wall(): Wall {
 	return Wall(backend().wall());
 }
+
+/** Read the installed clock's wall time at instant zero, in Unix milliseconds. */
+export function origin(): Wall {
+	return Wall(backend().origin());
+}

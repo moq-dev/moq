@@ -46,8 +46,8 @@ check-test *args:
 lint *args:
     python3 sh/rs/stats-docs.py
     cargo fmt --all --check
-    # quinn-udp keeps quinn's formatting; cargo fmt skips it (see moq-sock's lib.rs).
-    rustfmt --edition 2024 --check rs/moq-sock/src/udp/mod.rs
+    # quinn-udp and quinn keep quinn's formatting; cargo fmt skips them (see moq-sock's lib.rs, moq-tokio's quic.rs).
+    rustfmt --edition 2024 --check rs/moq-sock/src/udp/mod.rs rs/moq-tokio/src/quic/driver/mod.rs
     RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps "$@"
     cargo shear
     cargo sort --workspace --check --no-format
@@ -57,7 +57,7 @@ lint *args:
 fix *args:
     cargo clippy --locked --fix --allow-staged --allow-dirty --all-targets "$@"
     cargo fmt --all
-    rustfmt --edition 2024 rs/moq-sock/src/udp/mod.rs
+    rustfmt --edition 2024 rs/moq-sock/src/udp/mod.rs rs/moq-tokio/src/quic/driver/mod.rs
     cargo shear --fix
     cargo sort --workspace --no-format
 
@@ -294,6 +294,10 @@ loom *args:
     RUSTFLAGS="--cfg loom" cargo test --locked --release -p kio --lib loom:: "$@"
     RUSTFLAGS="--cfg loom" cargo test --locked --release -p moq-net --test loom "$@"
 
+# Prove downstream futures are Send at the default recursion limit on nightly.
+send-depth:
+    bash sh/rs/send-depth.sh
+
 # Needs nightly and cargo-fuzz; CI replays the corpus on stable through
 # moq-net's own tests instead. See rs/moq-net/fuzz/README.md.
 
@@ -312,11 +316,11 @@ bench-udp *args:
     cargo bench -p moq-uring --bench udp_tokio -- "$@"
     cargo bench -p moq-uring --bench udp_uring -- "$@"
 
-# Measure a noq echo through the io_uring worker, ablating receive
+# Measure a QUIC echo through the io_uring worker, ablating receive
 # batching, GRO, and GSO one at a time. Linux 6.12+ (skips loudly otherwise).
 [positional-arguments]
 bench-echo *args:
-    cargo bench -p moq-uring --bench echo_noq -- "$@"
+    cargo bench -p moq-uring --bench echo_quic -- "$@"
 
 # Measure a full moq-lite session (publisher to subscriber) through the
 # io_uring worker, same ablations and per-iteration unit as bench-echo.

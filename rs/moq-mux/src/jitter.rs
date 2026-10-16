@@ -26,6 +26,9 @@ pub(crate) struct Arrival<T> {
 	pub skip: u64,
 	/// Whether the frame decodes without the track's earlier frames.
 	pub sync: bool,
+	/// Whether it presents before the track's last sync frame, so it also references frames
+	/// before that one: an open GOP's leading picture.
+	pub leading: bool,
 	pub item: T,
 }
 
@@ -44,7 +47,7 @@ pub(crate) enum Push {
 	Queued,
 	/// It missed its deadline and was dropped; the track resumes at its next sync frame.
 	Late,
-	/// It was dropped because the track is waiting for a sync frame.
+	/// It was dropped because the track is waiting for a sync frame, or leads the one it resumed at.
 	Waiting,
 }
 
@@ -94,8 +97,9 @@ pub(crate) enum Push {
 /// rate is the slope of one track's upper envelope, the track whose slack keeps closest to
 /// it: a TS mux sends its video ahead by however full the encoder's buffer is, so the
 /// video's slack wanders by hundreds of ms where the audio's keeps within a few. The slack
-/// now is the floors' upper envelope at that slope, so the track sent latest keeps the
-/// delay, and a spell of queueing shorter than half the window moves neither.
+/// now is the floors' upper envelope at that slope, kept within the floors seen, so the
+/// track sent latest keeps the delay, and a spell of queueing shorter than half the window
+/// moves neither.
 /// The backlog a network stall releases is read at once, so it gives one floor, its
 /// freshest frame's: stepped on decode time it would give one per step of the media it
 /// held, and early on, before the window fills, those would read as a source far slower
@@ -103,7 +107,9 @@ pub(crate) enum Push {
 /// 13818-1 2.4.2.1 allows one: within [`MAX_DRIFT`] of ours, changing by at most
 /// [`MAX_SLEW`]. A source past that is counted, and once it has cost half the delay
 /// [`Buffer::push`] fails. What anchoring on frames that reached us late or early left is
-/// not charged to it, while the clock pulls it shut.
+/// not charged to it, while the clock pulls it shut. So a move in latency smaller than half
+/// the delay never fails; early on, one past it that the floors so far trace as a line reads
+/// as the rate, as a source that far off would.
 ///
 /// A zero delay holds nothing and drops nothing: each frame goes out as soon as it is
 /// read, ordered only among the frames read together.
@@ -302,6 +308,8 @@ struct Track<T> {
 	generation: u64,
 	/// Frames are dropped until the next sync frame, and why.
 	waiting: Option<Wait>,
+	/// Why the track resumed at its last sync frame, whose leading frames are dropped too.
+	resumed: Option<Wait>,
 }
 
 /// Why a track waits for a sync frame.
@@ -525,6 +533,7 @@ impl<K: Ord + Clone, T> Buffer<K, T> {
 			skip: arrival.skip,
 			generation,
 			waiting: None,
+			resumed: None,
 		});
 		track.restart = arrival.restart;
 		track.skip = arrival.skip;
@@ -535,7 +544,11 @@ impl<K: Ord + Clone, T> Buffer<K, T> {
 				Push::Waiting
 			}
 			_ if track.waiting.is_some() && !arrival.sync => Push::Waiting,
+			_ if track.resumed.is_some() && arrival.leading => Push::Waiting,
 			Some(deadline) if arrival.arrived <= deadline || self.delay.is_zero() => {
+				if arrival.sync {
+					track.resumed = track.waiting;
+				}
 				track.waiting = None;
 				track
 					.queue
@@ -549,7 +562,7 @@ impl<K: Ord + Clone, T> Buffer<K, T> {
 				Push::Late
 			}
 		};
-		if push != Push::Queued && track.waiting == Some(Wait::Late) {
+		if push != Push::Queued && track.waiting.or(track.resumed) == Some(Wait::Late) {
 			self.dropped += 1;
 		}
 		push
@@ -664,7 +677,17 @@ impl<K: Ord + Clone, T> Buffer<K, T> {
 		};
 		// The phase rises as the source's clock runs fast, so frames arrive ever earlier.
 		let slow = -rate;
-		let gap = at + self.steer.steered;
+		// Within the floors seen: past them the envelope is a guess at the rate, not slack any
+		// frame had. Once a move in latency stops, the edge it moved along runs on past the
+		// floors that hold after it, and would charge the rate for slack no frame lost or gained.
+		let (low, high) = self
+			.steer
+			.phase
+			.iter()
+			.fold((f64::INFINITY, f64::NEG_INFINITY), |(low, high), &(_, y)| {
+				(low.min(y), high.max(y))
+			});
+		let gap = at.clamp(low, high) + self.steer.steered;
 		self.steer.source = Some(rate);
 		// The clock pulls the startup gap shut, so it shrinks with the gap and never reopens.
 		let startup = self.steer.startup.get_or_insert(gap);
@@ -849,7 +872,8 @@ impl<K: Ord + Clone, T> Buffer<K, T> {
 		self.acquire.is_none() && self.tracks.values().all(|track| track.queue.is_empty())
 	}
 
-	/// How many frames were dropped, late or waiting for a sync frame after one was.
+	/// How many frames were dropped, late or lost with one: waiting for a sync frame after it,
+	/// or leading the sync frame the track resumed at.
 	pub fn dropped(&self) -> u64 {
 		self.dropped
 	}
@@ -930,6 +954,7 @@ mod tests {
 			restart: 0,
 			skip: 0,
 			sync: true,
+			leading: false,
 			item,
 		}
 	}
@@ -1041,6 +1066,49 @@ mod tests {
 
 		tokio::time::advance(Duration::from_secs(1)).await;
 		assert_eq!(due(&mut buffer), ["v0", "a0", "a180", "v240"]);
+	}
+
+	/// The sync frame a track resumes at after a drop loses its leading frames too, since
+	/// they reference the dropped ones. The next sync frame's leading frames are kept.
+	#[tokio::test(start_paused = true)]
+	async fn a_resumed_sync_frame_drops_its_leading_frames() {
+		let start = Instant::now();
+		let mut buffer = Buffer::new(DELAY).replay();
+		let video = |arrived, decode, sync, leading, item| Arrival {
+			sync,
+			leading,
+			..arrival(arrived, decode, item)
+		};
+		buffer.push(1, video(start, 0, true, false, "v0")).unwrap();
+		let late = start + Duration::from_millis(200);
+		assert_eq!(
+			buffer.push(1, video(late, 40, false, false, "v40")).unwrap(),
+			Push::Late
+		);
+		assert_eq!(
+			buffer.push(1, video(late, 200, true, false, "v200")).unwrap(),
+			Push::Queued
+		);
+		assert_eq!(
+			buffer.push(1, video(late, 240, false, true, "v240")).unwrap(),
+			Push::Waiting
+		);
+		assert_eq!(
+			buffer.push(1, video(late, 280, false, false, "v280")).unwrap(),
+			Push::Queued
+		);
+		assert_eq!(
+			buffer.push(1, video(late, 320, true, false, "v320")).unwrap(),
+			Push::Queued
+		);
+		assert_eq!(
+			buffer.push(1, video(late, 360, false, true, "v360")).unwrap(),
+			Push::Queued
+		);
+		assert_eq!(buffer.dropped(), 2, "the leading frame was lost with the late one");
+
+		tokio::time::advance(Duration::from_secs(1)).await;
+		assert_eq!(due(&mut buffer), ["v0", "v200", "v280", "v320", "v360"]);
 	}
 
 	/// A restart before anything went out keeps the clock, so the tracks stay on one.
@@ -1364,6 +1432,7 @@ mod tests {
 				restart: 0,
 				skip: 0,
 				sync: true,
+				leading: false,
 				item: "v",
 			};
 			let held = buffer
@@ -1482,15 +1551,33 @@ mod tests {
 		rates: Vec<(f64, f64)>,
 	}
 
-	/// Feed `secs` of 10 fps frames of tracks 1 and 2 through a 500 ms buffer from a source
-	/// whose clock runs `ppm` slower than ours, the frame of `track` sent at `sent` seconds of
-	/// our clock reaching us at `arrive(track, sent)`, or with the frame of its track before it
-	/// if that is later, or never if `None`, in the order they reach us, until a push fails.
-	async fn feed(ppm: f64, secs: f64, arrive: impl Fn(u16, f64) -> Option<f64>) -> Fed {
+	/// The buffer [`feed`] runs a source through: its delay and the tracks it carries.
+	struct Shape {
+		delay: Duration,
+		tracks: &'static [u16],
+	}
+
+	/// Two tracks through a 500 ms buffer.
+	const PAIR: Shape = Shape {
+		delay: Duration::from_millis(500),
+		tracks: &[1, 2],
+	};
+
+	/// `just test ts --full`'s export: a video and two audio tracks through a 900 ms buffer.
+	const FULL: Shape = Shape {
+		delay: Duration::from_millis(900),
+		tracks: &[1, 2, 3],
+	};
+
+	/// Feed `secs` of 10 fps frames of `shape`'s tracks through its buffer from a source whose
+	/// clock runs `ppm` slower than ours, the frame of `track` sent at `sent` seconds of our
+	/// clock reaching us at `arrive(track, sent)`, or with the frame of its track before it if
+	/// that is later, or never if `None`, in the order they reach us, until a push fails.
+	async fn feed(shape: &Shape, ppm: f64, secs: f64, arrive: impl Fn(u16, f64) -> Option<f64>) -> Fed {
 		let start = Instant::now();
-		let mut buffer = Buffer::new(Duration::from_millis(500));
+		let mut buffer = Buffer::new(shape.delay);
 		let mut frames = Vec::new();
-		for track in [1, 2] {
+		for &track in shape.tracks {
 			let mut last = 0.0f64;
 			for k in 0..(secs * 10.0) as u64 {
 				let decode = Duration::from_millis(k * 100);
@@ -1520,6 +1607,7 @@ mod tests {
 				restart: 0,
 				skip: 0,
 				sync: true,
+				leading: false,
 				item: "v",
 			};
 			match buffer.push(track, frame) {
@@ -1544,11 +1632,54 @@ mod tests {
 	/// seconds, naming its rate, rather than drop nearly every frame for hours.
 	#[tokio::test(start_paused = true)]
 	async fn a_source_far_off_real_time_fails_within_seconds() {
-		let fed = feed(220_000.0, 3_600.0, |track, sent| (track == 1).then_some(sent)).await;
+		let fed = feed(&PAIR, 220_000.0, 3_600.0, |track, sent| (track == 1).then_some(sent)).await;
 		let (at, err) = fed.err.expect("no error");
 		assert!(at < 10.0, "failed {at} s in");
 		let err = err.to_string();
 		assert!(err.contains("-220000.0 ppm"), "the error names the wrong rate: {err}");
+	}
+
+	/// A source on our clock whose latency moves by under half the delay while the export
+	/// starts, queueing that builds or a backlog that drains over 5 to 20 s from the first
+	/// frame on or once the first rates are measured, and then holds, never fails or drops a
+	/// frame through `shape`'s buffer. Its first track (the video) is sent `lead(sent)` ahead
+	/// and the rest as they decode.
+	async fn start_up_latency_never_fails(shape: &Shape, lead: fn(f64) -> f64) {
+		for draining in [false, true] {
+			for depth in [0.3, 0.4] {
+				for ramp in [5.0, 10.0, 20.0] {
+					for from in [0.0, 3.0, 6.0] {
+						let fed = feed(shape, 0.0, from + ramp + 120.0, |track, sent| {
+							let built = depth * ((sent - from) / ramp).clamp(0.0, 1.0);
+							let latency = if draining { depth - built } else { built };
+							let lead = if track == 1 { lead(sent) } else { 0.0 };
+							Some(sent + latency - lead)
+						})
+						.await;
+						let case = match draining {
+							true => format!("{depth} s draining over {ramp} s from {from} s"),
+							false => format!("{depth} s building over {ramp} s from {from} s"),
+						};
+						assert!(fed.err.is_none(), "{case}: {:?}", fed.err);
+						assert_eq!(fed.dropped, 0, "{case}");
+					}
+				}
+			}
+		}
+	}
+
+	/// Read at now, the envelope edge a move in latency ran along goes on past the floors that
+	/// hold after it, and would charge the rate for slack no frame lost or gained.
+	#[tokio::test(start_paused = true)]
+	async fn start_up_latency_never_fails_one_track() {
+		start_up_latency_never_fails(&Shape { tracks: &[1], ..FULL }, |_| 0.0).await;
+	}
+
+	/// The same on `just test ts --full`'s shape: video sent up to 0.65 s ahead, wandering
+	/// with how full the encoder's buffer is, beside two audio tracks sent as they decode.
+	#[tokio::test(start_paused = true)]
+	async fn start_up_latency_never_fails_a_full_multiplex() {
+		start_up_latency_never_fails(&FULL, |sent| 0.5 + 0.15 * (sent * std::f64::consts::TAU / 7.0).sin()).await;
 	}
 
 	/// A stall shorter than half [`RATE_WINDOW`] drops what it made late and recovers, even
@@ -1558,7 +1689,7 @@ mod tests {
 		for at in [5.0, 9.0, 1_200.0] {
 			for length in [3.0, 10.0, 60.0, 290.0] {
 				let stall = at..at + length;
-				let fed = feed(0.0, at + length + 30.0, |track, sent| {
+				let fed = feed(&PAIR, 0.0, at + length + 30.0, |track, sent| {
 					(track == 1).then_some(if stall.contains(&sent) { stall.end } else { sent })
 				})
 				.await;
@@ -1577,7 +1708,7 @@ mod tests {
 		for ppm in [-20.0, 0.0, 20.0] {
 			for late in [0.3, 0.45] {
 				for phase in 0..5u64 {
-					let fed = feed(ppm, 600.0, |track, sent| {
+					let fed = feed(&PAIR, ppm, 600.0, |track, sent| {
 						let jitter = ((sent / 2.0) as u64 * 3 + phase) % 5;
 						let late = if sent < 1.0 { late } else { 0.0 };
 						(track == 1).then_some(sent + late + jitter as f64 * 0.002)
@@ -1599,7 +1730,7 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn closing_a_late_start_is_not_charged_to_the_rate() {
 		let rise = 14_000.0..14_600.0;
-		let fed = feed(0.0, 16_000.0, |track, sent| {
+		let fed = feed(&PAIR, 0.0, 16_000.0, |track, sent| {
 			let late = match sent {
 				_ if sent < 1.0 => 0.45,
 				_ if rise.contains(&sent) => 0.04,
@@ -1619,7 +1750,7 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn the_track_sent_latest_stopping_keeps_the_clock() {
 		for queued in [0.0, 0.4] {
-			let fed = feed(0.0, 300.0, |track, sent| match track {
+			let fed = feed(&PAIR, 0.0, 300.0, |track, sent| match track {
 				1 => Some(sent),
 				_ if sent < 56.0 => Some(sent + 0.7),
 				_ => (sent < 60.0).then_some(sent + 0.7 + queued),
@@ -1637,7 +1768,7 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn a_wandering_track_sent_latest_does_not_move_the_rate() {
 		for ppm in [-20.0, 0.0, 20.0] {
-			let fed = feed(ppm, 3_600.0, |track, sent| match track {
+			let fed = feed(&PAIR, ppm, 3_600.0, |track, sent| match track {
 				1 => Some(sent + 0.2 - 0.1 * (sent * std::f64::consts::TAU / 1_200.0).cos()),
 				_ => Some(sent),
 			})
@@ -1657,7 +1788,7 @@ mod tests {
 	async fn a_spell_on_the_steady_track_keeps_the_rate_on_it() {
 		let spell = 1_500.0..1_740.0;
 		for ppm in [-20.0, 0.0, 20.0] {
-			let fed = feed(ppm, 2_400.0, |track, sent| match track {
+			let fed = feed(&PAIR, ppm, 2_400.0, |track, sent| match track {
 				1 => Some(sent + 0.2 - 0.1 * (sent * std::f64::consts::TAU / 900.0).cos()),
 				_ => Some(sent + if spell.contains(&sent) { 0.2 } else { 0.0 }),
 			})

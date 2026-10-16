@@ -19,9 +19,11 @@ egress moved to msfts#37 (closed). Two differences remain:
   `mpegts` section; supported SI already uses tracks. Map these mechanisms
   separately to MSFTS's table tracks instead of saying all tables live in
   the catalog.
-- **ES units.** MSFTS es-units carry the whole PES packet; here they carry the
-  payload plus `stream_id`. Decide whether the PES header fields we drop
-  matter to a subscriber, and converge or document the mapping.
+- **ES units.** MSFTS `es-packets` (draft-gregoire-moq-msfts-02) carry the
+  TS packets of one PID. Here decoded media carries access units, and
+  undecoded PES carries the whole PES packet at its source placement
+  ([whole-PES import](/quest/m1/ts-reliability/pes-import.md)). Document the
+  mapping between them.
 
 Decided in the 2026-10-11 audit: keep the semantic lane and raw fallback
 distinct. Whole SPTS maps to `unmodified-program`, whole MPTS to
@@ -30,8 +32,7 @@ distinct. Whole SPTS maps to `unmodified-program`, whole MPTS to
 The fallback will not split PIDs or add source-position reconstruction
 metadata. Use [the current draft](https://datatracker.ietf.org/doc/html/draft-gregoire-moq-msfts)
 to document both semantic and scheduling differences; shared terminology
-does not establish wire interoperability. Coordinate PES decisions with
-[private PES timing and headers](/quest/m1/plan-ts-pes-untimed.md).
+does not establish wire interoperability.
 
 Update `drafts/draft-lcurley-moq-mpegts.md` and `doc/concept` with whatever
 lands. [#4577](https://github.com/moq-dev/moq/pull/4577) (per-ES access

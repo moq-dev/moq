@@ -207,6 +207,15 @@ pub enum Error {
 	#[error("no timeline for track {0}")]
 	TimelineMissing(String),
 
+	/// A timeline frame report is timed differently from the track's earlier ones: a track is all
+	/// timed or all untimed.
+	#[error("timeline report at {0:?} does not match the track's timing")]
+	TimelineTiming(hang::timeline::Position),
+
+	/// A timeline record has no `pts` or `duration` to decode, as on an untimed track.
+	#[error("timeline record {0} is untimed")]
+	TimelineUntimed(u64),
+
 	/// Error from a muxer/demuxer that reports via `anyhow` (currently MPEG-TS).
 	/// Boxed in an `Arc` so the enum stays `Clone` (`anyhow::Error` is not).
 	#[error("{0}")]

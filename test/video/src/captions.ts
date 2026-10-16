@@ -1,6 +1,7 @@
+import { Micro, Milli } from "@moq/clock";
 import type * as Catalog from "@moq/hang/catalog";
 import { Legacy } from "@moq/hang/container";
-import { Origin, Path, Time } from "@moq/net";
+import { Origin, Path } from "@moq/net";
 import { Signal } from "@moq/signals";
 import { Broadcast } from "../../../js/watch/src/broadcast";
 import { Sync } from "../../../js/watch/src/sync";
@@ -20,15 +21,15 @@ export function captions() {
 		textCatalog.renditions[name] = { format: "utf8", role: "subtitle", container: { kind: "legacy" } };
 		const track = producer.createTrack(name);
 		const group = track.appendGroup();
-		group.writeFrame({ payload: Legacy.encodeFrame(new TextEncoder().encode(text), Time.Micro(1_000_000)) });
+		group.writeFrame({ payload: Legacy.encodeFrame(new TextEncoder().encode(text), Micro(1_000_000)) });
 		group.close();
 	}
 	producer.announce();
 	const broadcast = new Broadcast({ origin, name: Path.from("captions"), catalogFormat: "manual", catalog });
 	const target = new Signal<string | undefined>(undefined);
 	const source = new Source({ broadcast, target });
-	const sync = new Sync({ delay: Time.Milli.zero });
-	sync.received(Time.Milli(1000));
+	const sync = new Sync({ delay: Milli.zero });
+	sync.received(Milli(1000));
 	const container = document.createElement("div");
 	container.id = "captions";
 	container.style.cssText = "position:relative;width:640px;height:360px";

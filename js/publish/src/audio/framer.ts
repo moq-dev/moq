@@ -1,12 +1,12 @@
-import { Time } from "@moq/net";
+import { Micro, type Second } from "@moq/clock";
 import type { AudioFrame } from "./capture";
 
-type FrameSize = { samples: number } | { duration: Time.Micro };
+type FrameSize = { samples: number } | { duration: Micro };
 
 // How far an input timestamp may sit from where the running timeline expects it before it counts as
 // a new segment rather than rounding noise. Capture quanta and container packets are both exact to
 // well under this, so anything past it is a real gap.
-const DISCONTINUITY = Time.Micro(1_000);
+const DISCONTINUITY = Micro(1_000);
 
 /** Collects capture quanta into codec-aligned audio frames. */
 export class Framer {
@@ -14,7 +14,7 @@ export class Framer {
 	readonly #channels: number;
 	readonly #size: FrameSize;
 
-	#origin: Time.Micro | undefined;
+	#origin: Micro | undefined;
 	#frameIndex = 0;
 	#sampleIndex = 0;
 	#inputSamples = 0;
@@ -81,22 +81,22 @@ export class Framer {
 	}
 
 	/** Where the next frame will start. Throws until the first input sets the origin. */
-	get next(): Time.Micro {
+	get next(): Micro {
 		return this.#timestamp();
 	}
 
 	// Whether this chunk starts somewhere other than where the previous one left off.
-	#discontinuous(timestamp: Time.Micro): boolean {
+	#discontinuous(timestamp: Micro): boolean {
 		if (this.#origin === undefined) return false;
 
-		const elapsed = Time.Micro.fromSecond((this.#inputSamples / this.#sampleRate) as Time.Second);
+		const elapsed = Micro.fromSecond((this.#inputSamples / this.#sampleRate) as Second);
 		return Math.abs(timestamp - this.#origin - elapsed) > DISCONTINUITY;
 	}
 
 	// Start a new segment at `timestamp`, dropping the partial frame the previous one left behind.
 	// Those samples sit on the old timeline, so padding them out with new ones would encode a splice
 	// that never happened. It costs less than one frame of audio at the seam.
-	#reset(timestamp: Time.Micro): void {
+	#reset(timestamp: Micro): void {
 		this.#origin = timestamp;
 		this.#frameIndex = 0;
 		this.#sampleIndex = 0;
@@ -119,13 +119,13 @@ export class Framer {
 		return end - this.#sampleIndex;
 	}
 
-	#timestamp(): Time.Micro {
+	#timestamp(): Micro {
 		if (this.#origin === undefined) throw new Error("missing timestamp origin");
 
 		const offset =
 			"duration" in this.#size
 				? this.#frameIndex * this.#size.duration
-				: Time.Micro.fromSecond((this.#sampleIndex / this.#sampleRate) as Time.Second);
-		return (this.#origin + offset) as Time.Micro;
+				: Micro.fromSecond((this.#sampleIndex / this.#sampleRate) as Second);
+		return (this.#origin + offset) as Micro;
 	}
 }

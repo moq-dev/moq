@@ -20,28 +20,30 @@ a blocker for this line.
 ## Plan
 
 Deferred to m2 in the 2026-09-30 audit: the consumer is moq.pro's edge, and
-STUN's only consumer is P2P, now in m1. SRT is not blocked upstream:
+STUN's only consumer is P2P, deferred to m2. SRT is not blocked upstream:
 [SRT demux](/quest/m2/one-port/srt-demux.md) decided on 2026-09-30 to drive
 sans-io `srt-protocol` directly instead of waiting on a socket abstraction in
 srt-tokio.
 
 Decided 2026-10-05, from moq.pro's audit: `moq-rtc` taking a fed socket
-([rtc-feed](/quest/m2/one-port/rtc-feed.md)) and the shard steering filter join this line, and
+([rtc-feed](/quest/m2/one-port/rtc-feed.md)) joins this line, and
 [the io_uring demux](/quest/m2/uring-demux.md) is planned beside it, all in
 m2 rather than m3, since moq.pro's edge cutover and its uring rollout wait on
 them.
 
-Decided 2026-10-13: [UDP demux](/quest/m1/p2p/udp-demux.md) and shard steering moved to m1 under P2P,
-because [native pairs](/quest/m1/p2p/native-quic.md) run QUIC and ICE's
+Decided 2026-10-15: [UDP demux](/quest/m2/p2p/udp-demux.md) remains
+under P2P, now deferred to m2,
+because [native pairs](/quest/m2/p2p/native-quic.md) run QUIC and ICE's
 STUN on one socket through the same demux. The rest of this line builds on
-them from m1.
+that shared prerequisite in m2. QUIC shard steering landed in #5638;
+reuse its filter rather than recreating that completed work.
 
 ### Classifying a datagram
 
 RFC 7983 already partitions the first byte: STUN is 0 to 3, DTLS 20 to 63,
 RTP and RTCP 128 to 191. QUIC fills the gaps: a long header is 192 to 255 and
 a short header 64 to 127, as long as the fixed bit is set, so the QUIC
-config disables QUIC-bit greasing (RFC 9287) explicitly; noq turns it on by
+config disables QUIC-bit greasing (RFC 9287) explicitly; `moq-quic` turns it on by
 default and nothing here disables it today. SRT does not fit:
 its data packets start with a 0 bit and its control packets with a 1, so both
 overlap. SRT is demuxed by flow instead. A 4-tuple ICE has succeeded on is pinned
@@ -60,7 +62,7 @@ unknown tuple is not SRT; it is dropped or given to the WebRTC mux.
 One OS socket, or one shard of a reuseport group, is read by the demux and
 fanned into virtual sockets, one per stack, each with the `AsyncUdpSocket`
 shape. Sends go straight to the shared socket, so every stack answers from
-the same address and port. noq accepts the virtual socket through
+the same address and port. moq-tokio's `quic::driver` accepts the virtual socket through
 `new_with_abstract_socket`. `moq-rtc`'s `Mux` already demuxes STUN by ufrag
 internally and takes a fed socket in
 [WebRTC on the shared socket](/quest/m2/one-port/rtc-feed.md). SRT skips `srt-tokio`,
@@ -70,7 +72,7 @@ decided.
 
 ### STUN
 
-Decided 2026-10-08: the public STUN responder is left to P2P (m1), its
+Decided 2026-10-08: the public STUN responder is left to P2P (m2), its
 only consumer. Here, a Binding request carrying USERNAME is an ICE check
 and goes to WebRTC; any other is dropped and counted. Decided 2026-10-13:
 the responder binds its own port ([relay STUN](/doc/bin/relay/config.md#stun)),
@@ -96,6 +98,6 @@ pre-accepted streams can stand behind.
 
 ## Related
 
-- [UDP demux](/quest/m1/p2p/udp-demux.md) - one socket carries QUIC, with a WebRTC hook for embedders; moved to m1 for native P2P
+- [UDP demux](/quest/m2/p2p/udp-demux.md) - one socket carries QUIC, with a WebRTC hook for embedders; owned by deferred native P2P in m2
 - [One port on the io_uring workers](/quest/m2/uring-demux.md) - the io_uring workers host the UDP demux
 - [Stream sessions](/quest/m3/uring-tcp/README.md) - the io_uring workers that would host the TCP acceptor later
