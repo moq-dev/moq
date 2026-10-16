@@ -52,6 +52,13 @@ and tables-only streams on a PCR PID at 100 Mb/s:
                         more                                          Rsys until the fall)
     PCR PID move        the PMT moves the PCR to a 10 Mb/s PID, then  must pass (each PID's clock only
                         four copies spaced for TBsys at 10 Mb/s       while it is the PCR PID)
+    PCR switch in burst ten copies, the tenth moving the PCR to a     Bsys overflow (the tenth drains
+                        PID at 25 Mb/s, then one more                 at the new Rsys from the switch)
+    PCR move, new base  the PMT moves the PCR to a PID whose first    must pass (the new time base
+                        PCR signals a discontinuity, then copies      starts the buffers afresh)
+    program removal     the PAT drops a second program, its PCRs      must pass (the dropped program
+                        stop, the rate falls to 10 Mb/s, then four    takes nothing after the PAT)
+                        PAT copies spaced for TBsys
     unclocked tables    a discontinuity with one PCR, then copies     outside a clocked time base
 
 and an MPEG audio stream whose frames end partway through a packet, each decoded
@@ -280,12 +287,19 @@ def synthetic_system(path: str, layout: str) -> None:
     """A PAT and PMT, then PMT copies among PCRs and nulls at 100 Mb/s, where Rsys is 200 kb/s,
     until the transport rate falls at `fall`, bent into `layout`. A copy every 107 positions
     (1.6 ms) meets TBsys just as it passes the last one on."""
-    old, new = 0x102, 0x103
-    pat = section(0x00, 1, (1).to_bytes(2, "big") + (0xE000 | PMT_PID).to_bytes(2, "big"))
+    old, new, second = 0x102, 0x103, 0x104
+    one = (1).to_bytes(2, "big") + (0xE000 | PMT_PID).to_bytes(2, "big")
+    two = (2).to_bytes(2, "big") + (0xE000 | MOVED_PID).to_bytes(2, "big")
+    pat = section(0x00, 1, one + two if layout == "program removal" else one)
+    # The PAT's next version, which drops the second program.
+    dropped = section(0x00, 1, one, version=1)
     pmt = section(0x02, 1, (0xE000 | old).to_bytes(2, "big") + bytes([0xF0, 0x00]))
     # The PMT's next version, which moves the PCR.
     moved = section(0x02, 1, (0xE000 | new).to_bytes(2, "big") + bytes([0xF0, 0x00]), version=1)
+    other = section(0x02, 2, (0xE000 | second).to_bytes(2, "big") + bytes([0xF0, 0x00]))
+    moving = ("PCR PID move", "PCR switch in burst", "PCR move, new base")
     burst = [6_650 + n * 107 for n in range(9)]
+    pats: list[int] = []
     if layout == "rate-fall burst":
         # Bsys holds 1.3 KB as the rate falls to 25 Mb/s, where Rsys is 80 kb/s, and three
         # more copies overflow it: its 54 ms to drain at the old Rsys would pass them, had
@@ -302,25 +316,52 @@ def synthetic_system(path: str, layout: str) -> None:
         # 11 positions (1.65 ms): the old PID's clock, run on, would put them 165 us apart.
         fall, after = 6_650, 10_000_000
         copies = [fall - 1] + [fall + 11 * n for n in range(1, 5)]
+    elif layout == "PCR switch in burst":
+        # Ten copies, the tenth moving the PCR to a PID that carries it on at 25 Mb/s, and one
+        # more: Bsys drains at 80 kb/s from the switch, the tenth copy still reaching it, so
+        # the eleventh takes it to 1,551 B.
+        fall, after = burst[0] + 964, 25_000_000
+        copies = [burst[0] + n * 107 for n in range(10)] + [burst[0] + 1_196]
+    elif layout == "PCR move, new base":
+        # The PMT moves the PCR to a PID whose first PCR signals a time base 0.5 s behind the
+        # old one, then copies spaced for TBsys.
+        fall, after = 6_650, 100_000_000
+        copies = [fall - 1] + [fall + 107 * n for n in range(1, 5)]
+    elif layout == "program removal":
+        # The PAT drops the second program, whose PCRs stop with it, then the rate falls to 10
+        # Mb/s and four PAT copies follow every 11 positions (1.65 ms): the dropped program's
+        # clock, run on, would put them 165 us apart.
+        fall, after = 6_650, 10_000_000
+        copies, pats = [], [fall - 100] + [fall + 11 * n for n in range(1, 5)]
     else:  # "unclocked tables": a signalled discontinuity, one PCR, then three copies
         fall, after = 6_650, 100_000_000
         copies = [fall + 20 + n * 107 for n in range(3)]
     out: list[bytes] = []
-    at, cc = 0.0, 0
+    at, cc, pat_cc = 0.0, 0, 0
     for index in range(fall + 1_700):
-        pcr_pid = new if layout == "PCR PID move" and index >= fall else old
-        ticks = round((1.0 + at) * compliance.PCR_HZ)
+        pcr_pid = new if layout in moving and index >= fall else old
+        behind = 0.5 if layout == "PCR move, new base" and index >= fall else 0.0
+        ticks = round((1.0 + at - behind) * compliance.PCR_HZ)
         if index == 1:
             out.append(packet(0, 0, b"\x00" + pat, pusi=True))
+        elif index in pats:
+            pat_cc = (pat_cc + 1) & 0x0F
+            out.append(packet(0, pat_cc, b"\x00" + dropped, pusi=True))
+        elif index == 3 and layout == "program removal":
+            out.append(packet(MOVED_PID, 0, b"\x00" + other, pusi=True))
         elif index == 2 or index in copies:
-            table = moved if layout == "PCR PID move" and index >= fall - 1 else pmt
+            table = moved if layout in moving and index >= fall - 1 else pmt
             out.append(packet(PMT_PID, cc, b"\x00" + table, pusi=True))
             cc = (cc + 1) & 0x0F
         elif layout == "unclocked tables" and index == fall:
             # The discontinuity indicator (0x80) with the new time base's only PCR.
             out.append(packet(old, 0, adaptation=clock(0x90, ticks + 10 * compliance.PCR_HZ)))
+        elif behind and index == fall:
+            out.append(packet(new, 0, adaptation=clock(0x90, ticks)))
         elif (index % 16 == 0 or index == fall) and not (layout == "unclocked tables" and index > fall):
             out.append(packet(pcr_pid, 0, adaptation=clock(0x10, ticks)))
+        elif layout == "program removal" and index % 16 == 8 and index < fall - 100:
+            out.append(packet(second, 0, adaptation=clock(0x10, ticks)))
         else:
             out.append(packet(0x1FFF, 0, b"\xff" * 184))
         at += 188 * 8 / (100_000_000 if index < fall else after)
@@ -446,6 +487,9 @@ CASES = [
     ("rate-fall burst", system("rate-fall burst"), ("system-buffers", {"Bsys overflow"})),
     ("rate fall", system("rate fall"), ("system-buffers", "pass")),
     ("PCR PID move", system("PCR PID move"), ("system-buffers", "pass")),
+    ("PCR switch in burst", system("PCR switch in burst"), ("system-buffers", {"Bsys overflow"})),
+    ("PCR move, new base", system("PCR move, new base"), ("system-buffers", "pass")),
+    ("program removal", system("program removal"), ("system-buffers", "pass")),
     ("unclocked tables", system("unclocked tables"), ("system-buffers", {"outside a clocked time base"})),
     ("straddling audio", audio(4, STRADDLE_S), "pass"),
     ("mid-packet overflow", audio(7, MID_PACKET_S), {"B overflow"}),
