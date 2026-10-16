@@ -194,7 +194,9 @@ export class Sync {
 		const cap = this.#out.maxDelay.peek();
 		if (sleep <= cap) return sleep < 0; // within budget: let the buffer grow instead of skipping ahead
 
-		// Over the cap: re-anchor down so the resulting lookahead is exactly the cap.
+		// Over the cap: re-anchor down so the resulting lookahead is exactly the cap. Anything
+		// submitted against the old playhead belongs to the skipped timeline.
+		this.#epoch++;
 		this.#out.reference.set(Time.Milli.add(ref, Time.Milli.sub(cap, delay)));
 		return sleep < 0;
 	}
@@ -209,8 +211,8 @@ export class Sync {
 	}
 
 	/**
-	 * Bumped by every `reset()`. A frame that waited across a bump belongs to the previous
-	 * timeline, even when the next frame restores the same reference value.
+	 * Bumped by every `reset()` and playhead skip. A frame submitted across a bump belongs to the
+	 * previous timeline, even when the next frame restores the same reference value.
 	 * @internal
 	 */
 	get epoch(): number {

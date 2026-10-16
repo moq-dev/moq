@@ -201,6 +201,17 @@ describe("wait", () => {
 });
 
 describe("recorded ingress", () => {
+	it("bumps the epoch when a frame skips the shared playhead ahead", async () => {
+		const sync = new Sync({ delay: Time.Milli(100) });
+		await flush();
+		sync.received(Time.Milli(0), "video", Time.Milli(1000));
+		const epoch = sync.epoch;
+
+		sync.received(Time.Milli(2000), "audio", Time.Milli(1000));
+		expect(sync.epoch).toBe(epoch + 1);
+		sync.close();
+	});
+
 	it("anchors and classifies using arrival rather than delayed delivery", async () => {
 		const sync = new Sync({ delay: Time.Milli(100) });
 		const original = performance.now;

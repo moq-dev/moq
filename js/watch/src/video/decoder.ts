@@ -434,6 +434,10 @@ class DecoderTrack {
 	// The playhead moved and the next decoded frame decides whether the decoder resets.
 	#resetPending = false;
 
+	// The shared-clock epoch each chunk was submitted in. WebCodecs may hold a decoded picture until
+	// after another track skips the clock ahead, so sampling the epoch only in output() is too late.
+	#epochs = new Map<number, number[]>();
+
 	#signals = new Effect();
 
 	constructor(props: DecoderTrackProps) {
@@ -464,7 +468,7 @@ class DecoderTrack {
 					// The clock epoch this frame was decoded in. A reset while we wait below (this
 					// track's playhead moving, or a shared reset such as audio's at an utterance
 					// boundary) means the frame belongs to the previous timeline and must be dropped.
-					const epoch = this.sync.epoch;
+					const epoch = this.#takeEpoch(frame.timestamp);
 
 					const timestamp = Time.Milli.fromMicro(frame.timestamp as Time.Micro);
 					if (timestamp < (this.timestamp.peek() ?? 0)) {
@@ -477,6 +481,7 @@ class DecoderTrack {
 					// received(), so it predates the current timeline. Drop it: painting it would
 					// set `timestamp` from the old timeline and late-reject what follows.
 					if (this.sync.out.reference.peek() === undefined) return;
+					if (epoch !== this.sync.epoch) return;
 
 					if (this.frame.peek() === undefined) {
 						// Render something while we wait for the sync to catch up.
@@ -603,7 +608,7 @@ class DecoderTrack {
 
 				latest = next.group;
 				this.#resetAtKeyframe(decoder, frame.keyframe);
-				decoder.decode(chunk);
+				this.#decode(decoder, chunk);
 			}
 		});
 	}
@@ -679,7 +684,8 @@ class DecoderTrack {
 				if (decoder.state === "closed") break;
 				latest = next.group;
 				this.#resetAtKeyframe(decoder, frame.keyframe);
-				decoder.decode(
+				this.#decode(
+					decoder,
 					new EncodedVideoChunk({
 						type: frame.keyframe ? "key" : "delta",
 						data: frame.payload,
@@ -713,7 +719,22 @@ class DecoderTrack {
 		// A closed decoder throws on reset.
 		if (!keyframe || decoder.state === "closed") return;
 		decoder.reset();
+		this.#epochs.clear();
 		this.#configure(decoder);
+	}
+
+	#decode(decoder: VideoDecoder, chunk: EncodedVideoChunk): void {
+		const epochs = this.#epochs.get(chunk.timestamp);
+		if (epochs) epochs.push(this.sync.epoch);
+		else this.#epochs.set(chunk.timestamp, [this.sync.epoch]);
+		decoder.decode(chunk);
+	}
+
+	#takeEpoch(timestamp: number): number {
+		const epochs = this.#epochs.get(timestamp);
+		const epoch = epochs?.shift();
+		if (epochs?.length === 0) this.#epochs.delete(timestamp);
+		return epoch ?? this.sync.epoch;
 	}
 
 	#configure(decoder: VideoDecoder): void {

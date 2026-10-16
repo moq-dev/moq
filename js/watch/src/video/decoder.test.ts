@@ -297,6 +297,9 @@ async function guardedPlayback(kind: "legacy" | "cmaf", reads: Read[], hold: rea
 		get resets() {
 			return resets;
 		},
+		release() {
+			for (const emit of pending.splice(0)) emit();
+		},
 		// A restarted publisher takes the name: another instance of the same broadcast.
 		republish() {
 			closeAll();
@@ -429,6 +432,26 @@ function marker(group: number, end: number): Read {
 }
 
 for (const kind of ["legacy", "cmaf"] as const) {
+	it(`${kind} drops a picture queued before another track skips the clock ahead`, async () => {
+		const queued = 1_000_000;
+		const playback = await guardedPlayback(kind, [sample(1, queued)], [queued]);
+		try {
+			expect(playback.submitted).toEqual([queued]);
+			expect(playback.outputs).toEqual([]);
+
+			// Audio reaches a much newer timestamp while the old video picture is still inside
+			// WebCodecs. That moves the shared playhead beyond the queued picture.
+			playback.sync.received(Time.Milli(10_000), "audio", Time.Milli.now());
+			playback.release();
+			await microtasks();
+
+			expect(playback.outputs).toEqual([queued]);
+			expect(playback.decoder.out.frame.peek()).toBeUndefined();
+		} finally {
+			playback.close();
+		}
+	});
+
 	it(`${kind} skips older groups before decode, even across a stale marker`, async () => {
 		const playback = await guardedPlayback(kind, [
 			sample(10, 1000),
