@@ -29,8 +29,8 @@ passed on implementation commit `cbbcf9b2c92aa88c5550d9175adcc317f8137f4a`.
 Linux x86, Linux ARM, macOS ARM and Windows MSVC passed installed C++17 and
 C++23 consumers, including both coroutine probes. Unix also passed pkg-config
 and doc samples. All four jobs then verified/extracted their checked archives
-and produced C++ packages. Later documentation-only commits record and
-reconcile that proof without changing the tested implementation.
+and produced C++ packages. Later commits change only documentation and the
+tag-only release-creation notes, which that dry-run does not exercise.
 
 The [FFI build evidence](/.github/ffi.md#c-comparison) separates historical
 archive/metadata comparisons from this current executable consumer proof.
