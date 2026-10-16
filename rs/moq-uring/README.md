@@ -71,35 +71,35 @@ the tokio stack.
 
 ## Backends
 
-The `quic` module uses the sans-IO [moq-noq-proto](https://github.com/moq-dev/noq)
-stack with rustls. The `noq` feature is enabled by default and remains optional
-so the worker, timers, and UDP socket can be built without QUIC.
+The `quic` module uses the sans-IO [moq-quic](../moq-quic) stack with rustls.
+The `quic` feature is enabled by default and remains optional so the worker,
+timers, and UDP socket can be built without QUIC.
 
 | Feature | Stack | TLS |
 |---|---|---|
-| `noq` (default) | [moq-noq-proto](https://github.com/moq-dev/noq) | rustls |
+| `quic` (default) | [moq-quic](../moq-quic) | rustls |
 
 Building without default features leaves the `quic` module out entirely.
 
 ```bash
-cargo test -p moq-uring --features noq
+just rs uring
 ```
 
 `moq-relay` enables it with `--features io-uring`.
 
-The `qlog` feature turns on noq's capture support. It writes one file per
-connection.
+The `qlog` feature turns on moq-quic's capture support. It writes one file per
+endpoint on the accept side and per dial on the connect side.
 
 ## Validation
 
-`tests/echo.rs` runs an echo against a tokio noq peer over the worker:
-handshake, half a megabyte each way, and timers driven by noq's timeout.
+`tests/echo.rs` runs an echo against a tokio QUIC peer over the worker:
+handshake, half a megabyte each way, and timers driven by moq-quic's timeout.
 `tests/session.rs` runs full moq-lite sessions through
 `quic::Endpoint` (including two clients demuxed on one server socket), and
 `tests/endpoint.rs` covers the endpoint mechanics (dial+accept on one socket,
 version negotiation, the dial-only refusal), `tests/workers.rs` runs a
 steered two-worker reuseport group serving one port across threads, and
-`tests/web.rs` is WebTransport interop against `web-transport-moq`: stream and
+`tests/web.rs` is WebTransport interop against moq-tokio's: stream and
 datagram echo through the H3 framing,
 close codes through the capsule, and a full moq-lite session over
 WebTransport. All of them skip (loudly) below the kernel floor, which
@@ -109,8 +109,8 @@ includes GitHub-hosted CI runners.
 
 `udp_tokio` and `udp_uring` are the disposable syscall-level matrices from the
 first spike (recv batching x GRO x GSO, epoll vs io\_uring); see git history
-for their methodology. `echo_noq` is the ablation matrix over the real
-worker: the same noq echo with receive batching, GRO, and GSO toggled one
+for their methodology. `echo_quic` is the ablation matrix over the real
+worker: the same QUIC echo with receive batching, GRO, and GSO toggled one
 at a time. `worker_turns` sweeps socket counts and datagrams per burst
 independently to measure drive-loop batching without QUIC. Its smoke cases
 run in the Rust nightly benchmark group.

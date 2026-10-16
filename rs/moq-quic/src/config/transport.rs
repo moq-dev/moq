@@ -1,16 +1,16 @@
 use std::{fmt, sync::Arc};
 #[cfg(feature = "qlog")]
-use std::{io, sync::Mutex, time::Instant};
+use std::{io, sync::Mutex};
 
 #[cfg(feature = "qlog")]
 use qlog::streamer::QlogStreamer;
 
-#[cfg(feature = "qlog")]
-use crate::QlogStream;
 use crate::{
     Duration, INITIAL_MTU, MAX_UDP_PAYLOAD, VarInt, VarIntBoundsExceeded, congestion,
     connection::qlog::QlogSink,
 };
+#[cfg(feature = "qlog")]
+use crate::{Instant, QlogStream};
 
 /// Parameters governing the core QUIC state machine
 ///
@@ -634,10 +634,12 @@ impl QlogConfig {
             vec![],
         );
 
+        // The streamer's own epoch only times the events it stamps itself, which this
+        // crate never asks it to; `QlogStream` stamps them on MoQ's clock instead.
         let mut streamer = QlogStreamer::new(
             self.title,
             self.description,
-            self.start_time,
+            std::time::Instant::now(),
             trace,
             qlog::events::EventImportance::Core,
             // `Instant` should have sub-microsecond precision on most platforms
@@ -646,7 +648,10 @@ impl QlogConfig {
         );
 
         match streamer.start_log() {
-            Ok(()) => Some(QlogStream(Arc::new(Mutex::new(streamer)))),
+            Ok(()) => Some(QlogStream {
+                streamer: Arc::new(Mutex::new(streamer)),
+                start: self.start_time,
+            }),
             Err(e) => {
                 warn!("could not initialize endpoint qlog streamer: {e}");
                 None

@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, jest, mock, spyOn } from "bun:test";
+import { Micro, Milli, Nano, now } from "@moq/clock";
 import * as Catalog from "@moq/hang/catalog";
 import * as Container from "@moq/hang/container";
 import * as Moq from "@moq/net";
-import { Time } from "@moq/net";
 import { Signal } from "@moq/signals";
 import type { Broadcast } from "../broadcast";
 import { type Delay, Sync } from "../sync";
@@ -76,8 +76,8 @@ function frame(): Extract<Read, { kind: "frame" }> {
 		kind: "frame",
 		group: 0,
 		frame: {
-			arrival: Time.Milli.now(),
-			timestamp: Time.Micro(frameTimestamp),
+			arrival: Nano.toMilli(Nano(now())),
+			timestamp: Micro(frameTimestamp),
 			payload: new Uint8Array([1]),
 			keyframe: true,
 		},
@@ -227,7 +227,7 @@ async function play(initial: Delay, buffered = false, cmaf = false) {
 
 	const delay = new Signal<Delay>(initial);
 	const source = new Source({ broadcast, supported: async () => true });
-	const sync = new Sync({ delay, buffer: Time.Milli(buffered ? 1000 : 0) });
+	const sync = new Sync({ delay, buffer: Milli(buffered ? 1000 : 0) });
 	// The decoder's own switch, which a mute or pause turns off.
 	const decoding = new Signal(true);
 	const decoder = new Decoder({ source, sync, enabled: decoding });
@@ -297,21 +297,21 @@ async function play(initial: Delay, buffered = false, cmaf = false) {
 }
 
 it("decodes an audio packet inside a group after a gap", async () => {
-	const playback = await play(Time.Milli(100));
+	const playback = await play(Milli(100));
 	try {
 		await playback.play();
 		// Opened late, so it observes only the gap and frame below.
 		const arrivals = playback.arrivals();
-		playback.push({ kind: "gap", timestamp: Time.Micro(20_000), duration: Time.Micro(40_000) });
+		playback.push({ kind: "gap", timestamp: Micro(20_000), duration: Micro(40_000) });
 		const next = frame();
 		next.frame.keyframe = false;
 		playback.push(next);
 		await microtasks();
 		expect(playback.inserted()).toContain(next.frame.timestamp);
-		expect(await arrivals.next()).toEqual({ kind: "gap", timestamp: Time.Milli(20), duration: Time.Milli(40) });
+		expect(await arrivals.next()).toEqual({ kind: "gap", timestamp: Milli(20), duration: Milli(40) });
 		expect(await arrivals.next()).toMatchObject({
 			kind: "frame",
-			timestamp: Time.Milli.fromMicro(next.frame.timestamp),
+			timestamp: Milli.fromMicro(next.frame.timestamp),
 			arrival: next.frame.arrival,
 		});
 		arrivals.close();
@@ -324,7 +324,7 @@ it("decodes an audio packet inside a group after a gap", async () => {
 
 describe("Decoder across a broadcast disable", () => {
 	it("releases the graph when its broadcast is disabled and rebuilds on return", async () => {
-		const playback = await play(Time.Milli(100));
+		const playback = await play(Milli(100));
 		try {
 			await playback.play();
 			const [context] = contexts;
@@ -346,7 +346,7 @@ describe("Decoder across a broadcast disable", () => {
 });
 
 describe("Decoder across a delay change", () => {
-	for (const initial of [Time.Milli(100), "auto"] as const) {
+	for (const initial of [Milli(100), "auto"] as const) {
 		it(`keeps the subscription and ring when ${initial} becomes a number`, async () => {
 			const playback = await play(initial);
 			try {
@@ -354,7 +354,7 @@ describe("Decoder across a delay change", () => {
 				expect(playback.subscriptions()).toBe(1);
 				expect(playback.codecs()).toBe(1);
 
-				playback.delay.set(Time.Milli(120));
+				playback.delay.set(Milli(120));
 				await microtasks();
 				await playback.play();
 
@@ -369,7 +369,7 @@ describe("Decoder across a delay change", () => {
 	}
 
 	it("rebuilds on a switch to and from instant", async () => {
-		const playback = await play(Time.Milli(100));
+		const playback = await play(Milli(100));
 		try {
 			await playback.play();
 
@@ -377,7 +377,7 @@ describe("Decoder across a delay change", () => {
 			await microtasks();
 			expect(playback.resets()).toBe(1);
 
-			playback.delay.set(Time.Milli(100));
+			playback.delay.set(Milli(100));
 			await microtasks();
 			await playback.play();
 
@@ -408,7 +408,7 @@ describe("Decoder across a rendition's absence", () => {
 	it("plays the tail, suspends once drained, and resumes on return", async () => {
 		// The ring's stall state is polled on an interval.
 		jest.useFakeTimers();
-		const playback = await play(Time.Milli(100));
+		const playback = await play(Milli(100));
 		try {
 			await playback.play(12);
 			const [ring] = playback.rings();
@@ -451,7 +451,7 @@ describe("Decoder across a rendition's absence", () => {
 	});
 
 	it("deselects a disabled rendition and keeps one graph across disable and enable", async () => {
-		const playback = await play(Time.Milli(100));
+		const playback = await play(Milli(100));
 		try {
 			await playback.play(12);
 			expect(playback.track()).toBe("audio");
@@ -475,7 +475,7 @@ describe("Decoder across a rendition's absence", () => {
 	});
 
 	it("plays a different broadcast whose timeline starts behind the playhead", async () => {
-		const playback = await play(Time.Milli(100));
+		const playback = await play(Milli(100));
 		try {
 			await playback.play(12);
 			const [ring] = playback.rings();
@@ -502,7 +502,7 @@ describe("Decoder across a rendition's absence", () => {
 	});
 
 	it("keeps the graph when only the container changes", async () => {
-		const playback = await play(Time.Milli(100));
+		const playback = await play(Milli(100));
 		try {
 			await playback.play();
 			playback.restore({ container: { kind: "loc" } });
@@ -517,7 +517,7 @@ describe("Decoder across a rendition's absence", () => {
 	});
 
 	it("rebuilds the graph on a new channel count", async () => {
-		const playback = await play(Time.Milli(100));
+		const playback = await play(Milli(100));
 		try {
 			await playback.play();
 			playback.restore({ numberOfChannels: 1 });
@@ -531,7 +531,7 @@ describe("Decoder across a rendition's absence", () => {
 	});
 
 	it("keeps the graph for a rendition at the rate the decoder already outputs", async () => {
-		const playback = await play(Time.Milli(100));
+		const playback = await play(Milli(100));
 		try {
 			// Advertised at 24 kHz but decoded at 48 kHz (Opus on Chrome), so the graph settles at 48 kHz.
 			playback.restore({ sampleRate: 24_000 });
@@ -554,7 +554,7 @@ describe("Decoder across a rendition's absence", () => {
 			load = resolve;
 		});
 
-		const playback = await play(Time.Milli(100));
+		const playback = await play(Milli(100));
 		try {
 			const timestamps = await playback.play(6);
 			expect(playback.inserted()).toEqual([]);
@@ -572,7 +572,7 @@ describe("Decoder across a rendition's absence", () => {
 
 for (const cmaf of [false, true]) {
 	it(`settles a buffered ${cmaf ? "CMAF" : "legacy"} rendition change with a stationary playhead`, async () => {
-		const playback = await play(Time.Milli(100), true, cmaf);
+		const playback = await play(Milli(100), true, cmaf);
 		try {
 			const timestamps = await playback.play(20);
 			const before = playback.codecs();
@@ -598,7 +598,7 @@ for (const cmaf of [false, true]) {
 describe("fatal decoder errors", () => {
 	it("releases audio subscriptions and retains the failure until the source changes", async () => {
 		const close = spyOn(Moq.Track.Subscriber.prototype, "close");
-		const playback = await play(Time.Milli(100));
+		const playback = await play(Milli(100));
 		try {
 			await playback.play();
 			const before = close.mock.calls.length;
@@ -628,7 +628,7 @@ describe("fatal decoder errors", () => {
 	});
 
 	it("clears the failure when a source without audio is selected while muted", async () => {
-		const playback = await play(Time.Milli(100));
+		const playback = await play(Milli(100));
 		try {
 			await playback.play();
 			const failure = new DOMException("invalid encoded audio", "EncodingError");
@@ -646,7 +646,7 @@ describe("fatal decoder errors", () => {
 	});
 
 	it("keeps the failure while the same rendition is muted by its publisher", async () => {
-		const playback = await play(Time.Milli(100));
+		const playback = await play(Milli(100));
 		try {
 			await playback.play();
 			const failure = new DOMException("invalid encoded audio", "EncodingError");
