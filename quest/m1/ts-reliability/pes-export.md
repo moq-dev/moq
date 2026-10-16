@@ -22,8 +22,9 @@ writes the member, so the round trip never meets a catalog export can't read.
   holding the PMT `streamType` (for example `catalog::PesPacket`). It is a
   member rather than a `framing` value so old exporters ignore the entry
   instead of refusing the catalog. The stream_id travels in each frame, so
-  it has no `streamId`. An entry with both `verbatim` and `pesPacket` is
-  refused.
+  it has no `streamId`. An entry with both `verbatim` and `pesPacket`, or
+  a `pesPacket` entry whose track is also a media rendition, is refused,
+  as the draft already forbids for `verbatim`.
 - **Mux.** Packetize the frame's bytes unchanged on the track's PID: no
   `PesHeader`, no AC-3 repacking. The timestamp is an arrival time, not
   a decode deadline: the first byte goes out at the placement, never
@@ -57,7 +58,7 @@ the existing `cargo test` CI: PTS 0 versus no PTS, distinct PTS and DTS,
 optional fields (ES rate, trick mode, copy info, CRC, extension, stuffing),
 `data_alignment_indicator` clear, private_stream_2 and padding stream IDs,
 private data before, beside and after the tune-in keyframe, and between
-media, and an entry naming both members. Assert the output PES bytes equal
+media, an entry naming both members, and one that is also a rendition. Assert the output PES bytes equal
 the frame.
 
 Update `drafts/draft-lcurley-moq-mpegts.md` (the `Track` type, the "MUST
