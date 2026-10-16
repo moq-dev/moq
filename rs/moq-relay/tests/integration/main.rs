@@ -13,6 +13,7 @@ mod embed;
 mod goaway_cluster;
 mod hidden_cluster;
 mod lan_mesh;
+mod peer_limits;
 mod public_rules;
 mod refusals;
 mod released_cli;
