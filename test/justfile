@@ -26,7 +26,7 @@ harness:
     cd .. && bun test test/interop/compat/resolve.test.ts
     cd .. && bun install --frozen-lockfile
     cd interop/clients/js && bunx playwright install chromium
-    cd interop/clients/js && bun test ./harness.browser.ts ./capture-channel-count.browser.ts ./src/contract.test.ts ./src/resume.test.ts
+    cd interop/clients/js && bun test ./harness.browser.ts ./capture-channel-count.browser.ts ./open-gop.browser.ts ./src/contract.test.ts ./src/resume.test.ts
 
 # Cross-language media interop test, built from this checkout. Stands up a
 # relay and runs the publisher x subscriber matrix. Default: rust only (fast
@@ -128,7 +128,7 @@ drill-pr mode base="":
 # (skip the round-trip), `--strict` (fail on shape warnings), `--source file.ts`
 # (use a real capture), `--live` (grade PCR release timing and byte position off
 # the pipe instead, which a capture cannot carry; nightly runs this arm),
-# `--open-gop` (an open-GOP clip whose leading pictures must survive), `--hrd`
+# `--open-gop` (an open-GOP clip whose orphan leading pictures are trimmed), `--hrd`
 # (1080p video filling a broadcast-sized CPB), `--delay 2s` (the exporter's). See
 # ts/README.md.
 
@@ -137,6 +137,7 @@ drill-pr mode base="":
 ts *args:
     python3 ./ts/fragment_pes.test.py
     python3 ./ts/pcr-timing.test.py
+    python3 ./ts/open-gop.test.py
     ./ts/run.sh "$@"
 
 # Table-placement grader: acquisition, interleave, phase, drift and missing-table controls.

@@ -26,6 +26,7 @@ import {
 	supportCacheKey,
 } from "./config";
 import { caughtUp, renditionJitter, switchJitter } from "./playhead";
+import { Recovery } from "./recovery";
 import type { Source } from "./source";
 
 // The amount of time to wait before considering the video to be buffering.
@@ -476,6 +477,8 @@ class DecoderTrack {
 					// received(), so it predates the current timeline. Drop it: painting it would
 					// set `timestamp` from the old timeline and late-reject what follows.
 					if (this.sync.out.reference.peek() === undefined) return;
+					// WebCodecs can hold a picture until after another track skipped the playhead past it.
+					if (this.sync.skipped(timestamp)) return;
 
 					if (this.frame.peek() === undefined) {
 						// Render something while we wait for the sync to catch up.
@@ -487,7 +490,7 @@ class DecoderTrack {
 					const signal = effect.abort;
 					await this.sync.wait(timestamp, signal);
 					if (signal.aborted) return;
-					if (epoch !== this.sync.epoch) return;
+					if (epoch !== this.sync.epoch || this.sync.skipped(timestamp)) return;
 
 					if (timestamp < (this.timestamp.peek() ?? 0)) {
 						// Late frame, don't render it.
@@ -552,6 +555,7 @@ class DecoderTrack {
 
 		let previous: Micro | undefined;
 		let latest: number | undefined;
+		const recovery = new Recovery();
 
 		effect.spawn(async () => {
 			for (;;) {
@@ -561,7 +565,10 @@ class DecoderTrack {
 				// A gap or a declared end breaks the timeline: re-anchor before decoding further, and
 				// never bridge the buffer across it.
 				if (next.kind !== "frame") {
-					if (next.kind === "gap") this.arrivals?.write(gap(next));
+					if (next.kind === "gap") {
+						recovery.gap();
+						this.arrivals?.write(gap(next));
+					}
 					if (latest !== undefined) this.#onBreak();
 					previous = undefined;
 					continue;
@@ -572,11 +579,12 @@ class DecoderTrack {
 				// sequences only grow within a subscription, so a break (which a stale marker can
 				// raise) never resets this guard. Rejected payloads still count as received bytes.
 				const stale = latest !== undefined && next.group < latest;
+				const accepted = !stale && recovery.accept(frame);
 				this.stats.update((current) => ({
-					frameCount: (current?.frameCount ?? 0) + (stale ? 0 : 1),
+					frameCount: (current?.frameCount ?? 0) + (accepted ? 1 : 0),
 					bytesReceived: (current?.bytesReceived ?? 0) + frame.payload.byteLength,
 				}));
-				if (stale) continue;
+				if (!accepted) continue;
 
 				// Classify ingress before decoder backpressure changes the delivery clock.
 				const timestamp = Milli.fromMicro(frame.timestamp as Micro);
@@ -637,6 +645,7 @@ class DecoderTrack {
 
 		let previous: Micro | undefined;
 		let latest: number | undefined;
+		const recovery = new Recovery();
 
 		effect.spawn(async () => {
 			for (;;) {
@@ -645,7 +654,10 @@ class DecoderTrack {
 
 				// A gap or a declared end breaks the timeline (see #runLegacy).
 				if (next.kind !== "frame") {
-					if (next.kind === "gap") this.arrivals?.write(gap(next));
+					if (next.kind === "gap") {
+						recovery.gap();
+						this.arrivals?.write(gap(next));
+					}
 					if (latest !== undefined) this.#onBreak();
 					previous = undefined;
 					continue;
@@ -656,11 +668,12 @@ class DecoderTrack {
 				// sequences only grow within a subscription, so a break (which a stale marker can
 				// raise) never resets this guard. Rejected payloads still count as received bytes.
 				const stale = latest !== undefined && next.group < latest;
+				const accepted = !stale && recovery.accept(frame);
 				this.stats.update((current) => ({
-					frameCount: (current?.frameCount ?? 0) + (stale ? 0 : 1),
+					frameCount: (current?.frameCount ?? 0) + (accepted ? 1 : 0),
 					bytesReceived: (current?.bytesReceived ?? 0) + frame.payload.byteLength,
 				}));
-				if (stale) continue;
+				if (!accepted) continue;
 
 				// Classify ingress before decoder backpressure changes the delivery clock.
 				const timestamp = Milli.fromMicro(frame.timestamp);
