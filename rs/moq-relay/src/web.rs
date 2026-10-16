@@ -984,11 +984,16 @@ async fn admit_http(
 	request.server_name = request_host(uri, headers);
 	request.remote = Some(remote.0);
 	request.tls = mtls.and_then(|Extension(MtlsPeer(identity))| auth::peer(&identity));
-	let lease = state
-		.auth
-		.admit(request)
-		.await
-		.inspect_err(|err| state.cluster.refusals.record_auth(err))?;
+	// The listener's timeout bounds admission as it bounds the request headers. An
+	// HTTP read has no handshake deadline to inherit, so the bound starts here.
+	let admit = state.auth.admit(request);
+	let lease = match state.timeout {
+		Some(timeout) => moq_clock::timeout(timeout, admit)
+			.await
+			.unwrap_or_else(|_| Err(auth::Error::Unavailable("the admission timed out".into()))),
+		None => admit.await,
+	}
+	.inspect_err(|err| state.cluster.refusals.record_auth(err))?;
 	let token = lease.token();
 	let Some(origin) = state.cluster.subscriber(token) else {
 		state.cluster.refusals.record(crate::refusals::Refusal::Forbidden);
@@ -1933,6 +1938,48 @@ mod tests {
 			.expect("slow headers held the connection open")
 			.ok();
 		assert!(start.elapsed() >= timeout, "closed before the timeout");
+
+		serving.abort();
+	}
+
+	/// An HTTP read's admission is bounded by the listener's timeout, like its request
+	/// headers: a decision that never comes answers 502 once the timeout passes. Real
+	/// sockets, so this runs on the wall clock and bounds the answer from below.
+	#[tokio::test]
+	async fn an_unanswered_http_admission_is_refused_at_the_timeout() {
+		use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+		let timeout = std::time::Duration::from_millis(200);
+		let mut config = Config::default();
+		config.http.listen = Some("127.0.0.1:0".parse().unwrap());
+		// Held and never answered: the decider that never decides.
+		let (auth, _admissions) = crate::auth::Auth::embedded("test");
+		let cluster = cluster::Cluster::new(crate::cluster::Options::default()).unwrap();
+		let dir = TempDir::new().unwrap();
+		let (_, cert, _) = make_certs(&dir);
+		let certificates = moq_tokio::tls::Certificates::from_pem(&std::fs::read(&cert).unwrap()).unwrap();
+		let web = Web::new(auth, cluster, certificates, config)
+			.with_timeout(Some(timeout))
+			.bind()
+			.unwrap();
+		let http = web.addrs().http.expect("the HTTP listener is configured");
+		let routes = web.routes();
+		let serving = tokio::spawn(web.serve(routes));
+
+		let mut tcp = tokio::net::TcpStream::connect(http).await.unwrap();
+		let start = std::time::Instant::now();
+		tcp.write_all(b"GET /announced HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+			.await
+			.unwrap();
+
+		let mut response = Vec::new();
+		tokio::time::timeout(std::time::Duration::from_secs(10), tcp.read_to_end(&mut response))
+			.await
+			.expect("the unanswered admission held the request open")
+			.ok();
+		let response = String::from_utf8_lossy(&response);
+		assert!(response.starts_with("HTTP/1.1 502 "), "{response}");
+		assert!(start.elapsed() >= timeout, "refused before the timeout");
 
 		serving.abort();
 	}
