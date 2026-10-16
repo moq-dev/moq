@@ -111,7 +111,6 @@ const INTERNAL_ERROR = 0x0;
 const UNAUTHORIZED = 0x1;
 const TIMEOUT = 0x2;
 const NOT_SUPPORTED = 0x3;
-const EXPIRED_AUTH_TOKEN = 0x5;
 
 /** A draining session. Draft-17 and later. */
 const GOING_AWAY = 0x6;
@@ -173,6 +172,16 @@ function malformedAuthToken(kind: RequestKind, version: IetfVersion): number | u
 	return kind === "publish" ? undefined : MALFORMED_AUTH_TOKEN_14;
 }
 
+/** Draft-15 moved EXPIRED_AUTH_TOKEN off 0x12, which became MALFORMED_TRACK. */
+const EXPIRED_AUTH_TOKEN_14 = 0x12;
+const EXPIRED_AUTH_TOKEN = 0x5;
+
+/** The value for an expired token, or undefined where none is assigned: draft-14 PUBLISH_ERROR. */
+function expiredAuthToken(kind: RequestKind, version: IetfVersion): number | undefined {
+	if (version !== Version.DRAFT_14) return EXPIRED_AUTH_TOKEN;
+	return kind === "publish" ? undefined : EXPIRED_AUTH_TOKEN_14;
+}
+
 /** The value for a draining session, or undefined before draft-17 registered one. */
 function goingAway(version: IetfVersion): number | undefined {
 	return version >= Version.DRAFT_17 ? GOING_AWAY : undefined;
@@ -196,7 +205,7 @@ export function toRequestCode(condition: RequestCondition, kind: RequestKind, ve
 		case "unauthorized":
 			return UNAUTHORIZED;
 		case "expired":
-			return version === Version.DRAFT_14 ? INTERNAL_ERROR : EXPIRED_AUTH_TOKEN;
+			return expiredAuthToken(kind, version) ?? INTERNAL_ERROR;
 		case "timeout":
 			return TIMEOUT;
 		case "not_supported":
@@ -244,7 +253,7 @@ export function fromRequestCode(code: number, kind: RequestKind, version: IetfVe
 	if (code === doesNotExist(kind, version)) return "does_not_exist";
 	if (code === invalidRange(kind, version)) return "invalid_range";
 	if (code === invalidJoiningRequestId(kind, version)) return "invalid_joining_request_id";
-	if (version !== Version.DRAFT_14 && code === EXPIRED_AUTH_TOKEN) return "expired";
+	if (code === expiredAuthToken(kind, version)) return "expired";
 	if (code === uninterested(kind, version)) return "uninterested";
 	if (code === malformedTrack(kind, version)) return "malformed_track";
 	if (code === goingAway(version)) return "going_away";

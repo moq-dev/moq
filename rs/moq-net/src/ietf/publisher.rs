@@ -426,6 +426,11 @@ impl Served {
 			Self::Track(Err(Error::Unauthorized | Error::Session(crate::SessionError::Unauthorized))) => {
 				(ietf::PublishDoneStatus::Unauthorized, "not granted")
 			}
+			// PUBLISH_DONE registers no token expiry, and its EXPIRED means the subscription's
+			// own lifetime ran out, so an expired token is reported as no longer granted.
+			Self::Track(Err(Error::Expired | Error::Session(crate::SessionError::Expired))) => {
+				(ietf::PublishDoneStatus::Unauthorized, "token expired")
+			}
 			Self::Track(Err(_)) => (ietf::PublishDoneStatus::InternalError, "internal error"),
 			Self::UpdateFailed(_) => (ietf::PublishDoneStatus::UpdateFailed, "update failed"),
 		}
@@ -10145,7 +10150,7 @@ mod serve_tests {
 		assert_eq!(popped.load(Ordering::Relaxed), 2, "the acceptor never saw the renewal");
 
 		// The acceptor is stuck. Past the old 60s expiry the deadline must still fire and end
-		// the request UNAUTHORIZED, rather than the pending renewal stalling serving.
+		// the request EXPIRED, rather than the pending renewal stalling serving.
 		moq_net_sim::advance(Duration::from_secs(120)).await;
 		let mut ended = None;
 		for _ in 0..50 {
@@ -10157,7 +10162,7 @@ mod serve_tests {
 			settle().await;
 		}
 		let res = ended.expect("serving must end at the old deadline, not stall on the slow renewal");
-		assert!(matches!(res, Err(Error::Unauthorized)), "{res:?}");
+		assert!(matches!(res, Err(Error::Expired)), "{res:?}");
 	}
 
 	/// Publisher / SUBSCRIBE side: on a session without the AUTH extension the union is

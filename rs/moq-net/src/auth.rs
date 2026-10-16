@@ -1369,7 +1369,7 @@ impl RequestGrant {
 	}
 
 	/// Resolve with the refusal that ends the request: the deadline lapsing
-	/// ([`Error::Unauthorized`]), the acceptor revoking or dropping the grant (its code and
+	/// ([`Error::Expired`]), the acceptor revoking or dropping the grant (its code and
 	/// reason), or an acceptor-side update that no longer covers the request
 	/// ([`Error::Unauthorized`]). A covering update, such as a lowered expiry, is folded in and
 	/// polling continues. Never resolves while the grant still stands.
@@ -1377,7 +1377,7 @@ impl RequestGrant {
 		let mut held = self.held();
 		loop {
 			if held.deadline.poll(waiter).is_ready() {
-				return Poll::Ready(Refusal::new(Error::Unauthorized, "request token expired"));
+				return Poll::Ready(Refusal::new(Error::Expired, "request token expired"));
 			}
 			match held.verdict.poll_reply(waiter) {
 				Poll::Ready(Reply::Grant(grant)) => {
@@ -2250,7 +2250,7 @@ mod request_token_tests {
 		.unwrap();
 
 		let err = kio::wait(|waiter| request_grant.poll_ended(waiter)).await.error;
-		assert!(matches!(err, Error::Unauthorized), "{err:?}");
+		assert!(matches!(err, Error::Expired), "{err:?}");
 		assert_eq!(handle.grant().peek(), None, "the session grant is untouched");
 	}
 
@@ -2299,7 +2299,7 @@ mod request_token_tests {
 		// when that lapses.
 		assert_eq!(request_grant.grant().expires, first_expires);
 		let err = kio::wait(|waiter| request_grant.poll_ended(waiter)).await.error;
-		assert!(matches!(err, Error::Unauthorized), "{err:?}");
+		assert!(matches!(err, Error::Expired), "{err:?}");
 	}
 
 	/// An acceptor-side update that no longer covers the request ends it, even when the
