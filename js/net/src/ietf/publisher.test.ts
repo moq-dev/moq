@@ -435,32 +435,44 @@ test("Range Filters over MAX_FILTER_RANGES zero get INVALID_FILTER", async () =>
 
 test("RENDEZVOUS_TIMEOUT has a zero cap with TIMEOUT for a requested wait", async () => {
 	for (const version of [Version.DRAFT_18, Version.DRAFT_21, Version.DRAFT_22]) {
-		for (const millis of [undefined, 0, 7]) {
-			const pair = createMockTransportPair(ALPNS[version]);
-			const { pub, origin } = publisher(pair.server, { session: new NativeSession(pair.server, version, true) });
-			const request = requestStream(version);
-			const fields = [
-				7,
-				1,
-				7,
-				...new TextEncoder().encode("missing"),
-				5,
-				...new TextEncoder().encode("video"),
-				...(millis === undefined ? [0] : [1, 0x04, millis]),
-			];
-			const msg = await Subscribe.decode(
-				new Reader(undefined, Uint8Array.from([0, fields.length, ...fields]), version),
-				version,
-			);
-			try {
-				await pub.runSubscribe(msg, request.stream);
-				await request.stream.writer.closed;
-				const wire = request.wire();
-				expect(await wire.u53()).toBe(RequestError.id);
-				expect((await RequestError.decode(wire, version)).errorCode).toBe(millis ? 0x02 : 0x10);
-			} finally {
-				origin.close();
-				request.cancel();
+		// A wait applies only to a missing publisher; a missing track on a live one does not exist.
+		for (const [namespace, trackName, live] of [
+			["missing", "video", false],
+			["room", "audio", true],
+		] as const) {
+			for (const millis of [undefined, 0, 7]) {
+				const pair = createMockTransportPair(ALPNS[version]);
+				const { pub, origin } = publisher(pair.server, {
+					session: new NativeSession(pair.server, version, true),
+				});
+				const broadcast = live ? publish(origin, Path.from(namespace)) : undefined;
+				const track = broadcast?.createTrack("video", { timescale: Timescale.MILLI });
+				const request = requestStream(version);
+				const fields = [
+					7,
+					1,
+					namespace.length,
+					...new TextEncoder().encode(namespace),
+					trackName.length,
+					...new TextEncoder().encode(trackName),
+					...(millis === undefined ? [0] : [1, 0x04, millis]),
+				];
+				const msg = await Subscribe.decode(
+					new Reader(undefined, Uint8Array.from([0, fields.length, ...fields]), version),
+					version,
+				);
+				try {
+					await pub.runSubscribe(msg, request.stream);
+					await request.stream.writer.closed;
+					const wire = request.wire();
+					expect(await wire.u53()).toBe(RequestError.id);
+					expect((await RequestError.decode(wire, version)).errorCode).toBe(millis && !live ? 0x02 : 0x10);
+				} finally {
+					track?.close();
+					broadcast?.close();
+					origin.close();
+					request.cancel();
+				}
 			}
 		}
 	}

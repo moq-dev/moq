@@ -448,11 +448,13 @@ export class Publisher {
 					(failed.code !== StreamCode.NotFound && failed.code !== StreamCode.Unroutable)
 				)
 					throw err;
+				// The broadcast resolved, so only a vanished route still means a missing publisher;
+				// a missing track is the publisher's answer.
 				await this.#refuse(
 					stream,
 					msg.requestId,
 					SubscribeError.id,
-					this.#failed(err, "subscribe", msg.rendezvous),
+					this.#failed(err, "subscribe", msg.rendezvous && failed.code === StreamCode.Unroutable),
 				);
 				return;
 			}

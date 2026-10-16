@@ -59,18 +59,14 @@ fn track_properties(info: &track::Info, wanted: bool) -> ietf::Properties {
 }
 
 /// The rendezvous cap is zero, but asking to wait still makes a missing publisher a timeout.
-fn rendezvous_error(error: Error, requested: bool) -> Error {
-	if requested
-		&& matches!(
-			error,
-			Error::NotFound
-				| Error::Unroutable
-				| Error::Stream(crate::StreamError::NotFound | crate::StreamError::Unroutable)
-		) {
-		Error::Timeout
-	} else {
-		error
-	}
+/// Once the broadcast resolves, a missing track is the publisher's answer and stays DOES_NOT_EXIST.
+fn rendezvous_error(error: Error, requested: bool, resolved: bool) -> Error {
+	let missing = match &error {
+		Error::Unroutable | Error::Stream(crate::StreamError::Unroutable) => true,
+		Error::NotFound | Error::Stream(crate::StreamError::NotFound) => !resolved,
+		_ => false,
+	};
+	if requested && missing { Error::Timeout } else { error }
 }
 
 enum FillStep {
@@ -1024,12 +1020,22 @@ where
 						// The reason is the origin's, not ours: a dynamic router refusing on
 						// authorization or a drain says so, and only an unroutable path means the
 						// broadcast is not here.
-						Err(err) => return Ok(Subscribed::Refused(err.to_string(), err)),
+						Err(err) => {
+							return Ok(Subscribed::Refused(
+								err.to_string(),
+								rendezvous_error(err, msg.rendezvous, false),
+							));
+						}
 					};
 
 					let track = match broadcast.track(&msg.track_name) {
 						Ok(track) => track,
-						Err(err) => return Ok(Subscribed::Refused(err.to_string(), err)),
+						Err(err) => {
+							return Ok(Subscribed::Refused(
+								err.to_string(),
+								rendezvous_error(err, msg.rendezvous, true),
+							));
+						}
 					};
 
 					let order = msg.group_order.to_order();
@@ -1041,7 +1047,12 @@ where
 					// right below, before anything is served.
 					let (cache, mut track) = match track.subscribe(subscription.clone()).await {
 						Ok(subscribed) => (track, subscribed),
-						Err(err) => return Ok(Subscribed::Refused(err.to_string(), err)),
+						Err(err) => {
+							return Ok(Subscribed::Refused(
+								err.to_string(),
+								rendezvous_error(err, msg.rendezvous, true),
+							));
+						}
 					};
 
 					// A relay's copy that went idle cannot say where its live edge is until its
@@ -1218,7 +1229,6 @@ where
 			let (served, streams) = match subscribed {
 				Ok(Ok(Subscribed::Served(served, streams))) => (served, streams),
 				Ok(Ok(Subscribed::Refused(reason, err))) => {
-					let err = rendezvous_error(err, msg.rendezvous);
 					return self.reject_subscribe(stream, request_id, &err, &reason).await;
 				}
 				Ok(Err(err)) => return Err(err),
@@ -6907,26 +6917,29 @@ mod serve_tests {
 	#[moq_net_sim::test]
 	async fn rendezvous_wait_is_capped_at_zero_but_answers_timeout() {
 		for version in [Version::Draft18, Version::Draft21, Version::Draft22] {
-			for wait in [None, Some(0), Some(7)] {
-				let mut body = Vec::new();
-				let mut w = Encoder::new(&mut body, version.into());
-				RequestId(REQUEST_ID).encode(&mut w, version).unwrap();
-				super::super::namespace::encode_namespace(&mut w, &crate::Path::new("missing")).unwrap();
-				w.string("video").unwrap();
-				w.varint(u64::from(wait.is_some())).unwrap();
-				if let Some(wait) = wait {
-					w.varint(0x04).unwrap();
-					w.varint(wait).unwrap();
+			// A wait applies only to a missing publisher; a missing track on a live one does not exist.
+			for (namespace, track, publisher) in [("missing", "video", false), ("room", "audio", true)] {
+				for wait in [None, Some(0), Some(7)] {
+					let mut body = Vec::new();
+					let mut w = Encoder::new(&mut body, version.into());
+					RequestId(REQUEST_ID).encode(&mut w, version).unwrap();
+					super::super::namespace::encode_namespace(&mut w, &crate::Path::new(namespace)).unwrap();
+					w.string(track).unwrap();
+					w.varint(u64::from(wait.is_some())).unwrap();
+					if let Some(wait) = wait {
+						w.varint(0x04).unwrap();
+						w.varint(wait).unwrap();
+					}
+					assert_eq!(
+						refusal(version, ietf::Subscribe::ID, body).await,
+						if !publisher && wait.is_some_and(|millis| millis > 0) {
+							0x02
+						} else {
+							0x10
+						},
+						"{version}: {namespace}/{track} {wait:?}"
+					);
 				}
-				assert_eq!(
-					refusal(version, ietf::Subscribe::ID, body).await,
-					if wait.is_some_and(|millis| millis > 0) {
-						0x02
-					} else {
-						0x10
-					},
-					"{version}: {wait:?}"
-				);
 			}
 		}
 	}
