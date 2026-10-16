@@ -199,3 +199,9 @@ p2p:
     cd .. && bun install --frozen-lockfile
     cd p2p && bunx playwright install chromium
     cd p2p && bun test ./transport.browser.ts
+
+# Retain complete backend assets, parity, and raw alternating browser samples.
+[positional-arguments]
+wasm-baseline *args:
+    MOQ_TEST_RUNS="${MOQ_TEST_RUNS:-../target/test/wasm-backend}" ./wasm/run.sh "$@"
+    MOQ_TEST_RUNS="${MOQ_TEST_RUNS:-../target/test/wasm-backend}" ./wasm/run.sh --baseline "$@"

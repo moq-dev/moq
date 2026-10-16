@@ -4,7 +4,7 @@
 //!
 //! Unsupported local kernels skip loudly; MOQ_STRICT makes CI refuse them.
 
-#![cfg(all(target_os = "linux", feature = "noq"))]
+#![cfg(all(target_os = "linux", feature = "quic"))]
 
 #[path = "support.rs"]
 mod support;
@@ -200,7 +200,7 @@ fn unsupported_version_is_negotiated_only_by_servers() {
 
 			// Junk first: it must not be fatal, and whatever answer it draws
 			// must be smaller than it was, so the socket is never an
-			// amplifier. Noq answers a packet naming no connection with a
+			// amplifier. moq-quic answers a packet naming no connection with a
 			// stateless reset, which is what tells a
 			// peer holding stale state to give up.
 			let junk = [0u8; 64];
@@ -276,7 +276,7 @@ fn unsupported_version_is_negotiated_only_by_servers() {
 	assert!(
 		versions
 			.iter()
-			.any(|version| moq_noq_proto::DEFAULT_SUPPORTED_VERSIONS.contains(version)),
+			.any(|version| moq_quic::DEFAULT_SUPPORTED_VERSIONS.contains(version)),
 		"the supported version is offered: {versions:?}"
 	);
 	drop((endpoint, dial_only));
@@ -382,7 +382,7 @@ fn an_unanswered_dial_times_out() {
 	let client_sock = handle
 		.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
 		.expect("client socket");
-	// The dial ends at noq's handshake idle timeout (10s), not the idle timeout.
+	// The dial ends at moq-quic's handshake idle timeout (10s), not the idle timeout.
 	let dial = dial_config(hole.local_addr().expect("addr"));
 
 	let result = worker
@@ -419,7 +419,7 @@ fn the_backlog_bounds_pending_handshakes() {
 	let client_sock = handle
 		.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
 		.expect("client socket");
-	// The server never answers, so the dial ends at noq's handshake idle
+	// The server never answers, so the dial ends at moq-quic's handshake idle
 	// timeout (10s).
 	let dial = dial_config(server);
 
