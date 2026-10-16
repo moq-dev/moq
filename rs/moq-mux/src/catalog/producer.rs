@@ -929,7 +929,13 @@ impl<E: CatalogExt> Producer<E> {
 	///
 	/// An estimate rise still held by the once-a-second limit is not published: media has ended.
 	pub fn finish(&mut self) -> crate::Result<()> {
-		take(&self.current).closed = Some(moq_net::Error::Closed.into());
+		{
+			let mut state = take(&self.current);
+			if let Some(err) = &state.closed {
+				return Err(err.clone());
+			}
+			state.closed = Some(moq_net::Error::Closed.into());
+		}
 		self.outputs.hang.finish()?;
 		self.outputs.hangz.finish()?;
 		self.outputs.msf_track.finish()?;
@@ -1339,6 +1345,7 @@ mod test {
 		for reader in &mut readers {
 			assert!(matches!(reader.recv_group().await, Err(moq_net::Error::Unauthorized)));
 		}
+		assert!(copy.finish().is_err());
 		assert!(matches!(
 			copy.modify().err(),
 			Some(crate::Error::Moq(moq_net::Error::Unauthorized))
