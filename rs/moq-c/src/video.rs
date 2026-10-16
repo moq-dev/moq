@@ -1087,7 +1087,9 @@ mod tests {
 			ceiling: None,
 		};
 
-		let result = tokio::task::spawn_blocking(move || video.publish_finish()).await.unwrap();
+		let result = tokio::task::spawn_blocking(move || video.publish_finish())
+			.await
+			.unwrap();
 		assert!(matches!(result, Err(Error::Panic)), "{result:?}");
 		assert!(matches!(track.recv_group().await, Ok(None)), "expected a clean end");
 	}
