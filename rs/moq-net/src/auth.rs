@@ -1311,13 +1311,13 @@ impl RequestVerdict {
 
 	/// After the first grant, poll for the acceptor's next action on this token: a
 	/// replacement grant (an update, such as a lowered expiry), a refusal (revoke), or the
-	/// enforced grant being dropped. `Pending` while the grant still stands.
-	fn poll_reply(&self, waiter: &kio::Waiter) -> Poll<Reply> {
+	/// enforced grant being dropped (`None`). `Pending` while the grant still stands.
+	fn poll_reply(&self, waiter: &kio::Waiter) -> Poll<Option<Reply>> {
 		let Some(issue) = &self.issue else {
-			return Poll::Ready(Reply::Refuse {
+			return Poll::Ready(Some(Reply::Refuse {
 				code: SessionError::Unauthorized,
 				reason: "no verifier".to_string(),
-			});
+			}));
 		};
 		let mut guard = ready_or!(
 			issue.poll(waiter, |issue| match issue.outbox.is_empty() && !issue.done {
@@ -1325,15 +1325,7 @@ impl RequestVerdict {
 				false => Poll::Ready(()),
 			})
 		);
-		Poll::Ready(match guard.outbox.pop_front() {
-			Some(reply) => reply,
-			// Done with nothing more to read: the acceptor dropped the enforced grant, ending
-			// the request.
-			None => Reply::Refuse {
-				code: SessionError::Unauthorized,
-				reason: "grant dropped".to_string(),
-			},
-		})
+		Poll::Ready(guard.outbox.pop_front())
 	}
 }
 
@@ -1374,6 +1366,8 @@ struct Held {
 	kind: RequestKind,
 	/// The request's slot, shared with a renewal's verification.
 	hold: Option<Hold>,
+	/// The token of the renewal being verified, until the serve loop applies its verdict.
+	renewing: Option<kio::Shared<Issue>>,
 	clock: crate::time::Clock,
 }
 
@@ -1403,6 +1397,7 @@ impl RequestGrant {
 			path,
 			kind,
 			hold,
+			renewing: None,
 			clock: clock.clone(),
 		}))))
 	}
@@ -1424,8 +1419,10 @@ impl RequestGrant {
 
 	/// Start verifying a renewal's token, holding the request's slot while it runs.
 	pub(crate) fn verify_renewal(&self, handle: &Handle, token: crate::setup::Token) -> RequestVerdict {
-		let held = self.held();
-		handle.verify_request(token, held.hold.clone())
+		let mut held = self.held();
+		let verdict = handle.verify_request(token, held.hold.clone());
+		held.renewing = verdict.issue.clone();
+		verdict
 	}
 
 	/// Apply a renewal's verdict, or return the refusal that ends the request.
@@ -1439,8 +1436,9 @@ impl RequestGrant {
 		verdict: RequestVerdict,
 		res: std::result::Result<Grant, Refusal>,
 	) -> std::result::Result<(), Refusal> {
-		let grant = res?;
 		let mut held = self.held();
+		held.renewing = None;
+		let grant = res?;
 		if !live(&held.clock, held.kind, held.path.as_str(), &grant) {
 			return Err(Refusal::new(Error::Unauthorized, "renewal not granted"));
 		}
@@ -1462,7 +1460,17 @@ impl RequestGrant {
 				return Poll::Ready(Refusal::new(Error::Unauthorized, "request token expired"));
 			}
 			match held.verdict.poll_reply(waiter) {
-				Poll::Ready(Reply::Grant(grant)) => {
+				// The acceptor dropped the grant after accepting its renewal, which the serve loop
+				// has yet to apply: the renewal takes over rather than the request ending between
+				// the two.
+				Poll::Ready(None) if held.renewing.as_ref().is_some_and(granted) => return Poll::Pending,
+				Poll::Ready(None) => {
+					return Poll::Ready(Refusal::new(
+						Error::Session(SessionError::Unauthorized),
+						"grant dropped",
+					));
+				}
+				Poll::Ready(Some(Reply::Grant(grant))) => {
 					if !held.kind.covers(&grant, held.path.as_str()) {
 						return Poll::Ready(Refusal::new(Error::Unauthorized, "request token no longer granted"));
 					}
@@ -1472,7 +1480,7 @@ impl RequestGrant {
 					// be waiting.
 					continue;
 				}
-				Poll::Ready(Reply::Refuse { code, reason }) => {
+				Poll::Ready(Some(Reply::Refuse { code, reason })) => {
 					return Poll::Ready(Refusal::new(Error::Session(code), &reason));
 				}
 				Poll::Pending => return Poll::Pending,
@@ -1522,6 +1530,13 @@ pub(crate) async fn until<F: std::future::Future>(
 #[cfg_attr(not(feature = "async"), allow(dead_code))]
 fn live(clock: &crate::time::Clock, kind: RequestKind, path: &str, grant: &Grant) -> bool {
 	kind.covers(grant, path) && grant.expires.is_none_or(|expires| expires > clock.now())
+}
+
+/// Whether the acceptor granted the token behind `issue` and still holds the grant.
+#[cfg_attr(not(feature = "async"), allow(dead_code))]
+fn granted(issue: &kio::Shared<Issue>) -> bool {
+	let issue = issue.read();
+	!issue.done && issue.outbox.iter().any(|reply| matches!(reply, Reply::Grant(_)))
 }
 
 /// A grant issued to one of the peer's tokens, which the session enforces. Dropping it

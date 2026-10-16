@@ -109,7 +109,9 @@ fn admission(c: &mut Criterion) {
 /// A client publishing `origin` to its own server, whose session and token requests follow.
 async fn publisher(origin: &origin::Producer) -> (Session, Session, auth::Requests) {
 	let version: Version = "moq-transport-22".parse().unwrap();
-	let (client, server) = create_mock_session_pair(Some(version.alpn()));
+	let mut mock = moq_net::transport::memory::Config::default();
+	mock.protocol = Some(version.alpn().to_string());
+	let (client, server) = create_mock_session_pair(mock);
 	// Tokens ride requests alone, and the client announces with PUBLISH_NAMESPACE.
 	let mut client_extensions = moq_net::setup::Extensions::default();
 	client_extensions.auth = false;
@@ -189,13 +191,12 @@ fn renewal(c: &mut Criterion) {
 							issued
 						})
 					};
-					// A round's grants outlive the next round, whose updates go out only once
-					// the server applied this one's: dropping a grant sooner can end its
-					// request before the renewal that replaces it lands.
-					let mut held = [swap(&auths[0]), Vec::new()];
+					// Each round's grants replace the last round's, which drop once their
+					// renewals are accepted.
+					let mut _held = swap(&auths[0]);
 					let mut next = 1;
 					b.iter(|| {
-						held[next] = swap(&auths[next]);
+						_held = swap(&auths[next]);
 						next ^= 1;
 					});
 				},

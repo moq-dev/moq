@@ -192,6 +192,45 @@ async fn moqt_22_a_cancelled_renewal_keeps_the_session() {
 	.expect("timed out");
 }
 
+/// An acceptor that accepts a renewal and drops the grant it replaces in one step keeps the
+/// announcement: the old grant ending is not the request ending once its replacement is in.
+/// The replacement then holds it, so an update that stops covering it ends it.
+#[moq_net_sim::test]
+async fn moqt_22_dropping_the_old_grant_with_its_renewal_keeps_the_announce() {
+	within(async {
+		let (mut pair, client_origin, server_origin) = connect_route_auth(MOQT_22).await;
+		let mut requests = pair.requests.take().unwrap();
+		let first = pair.client.auth().add("first").await.expect("kept for requests");
+		let broadcast = client_origin.create_broadcast("room/x").unwrap();
+		broadcast.announce(origin::Route::default().with_auth(first)).unwrap();
+		let first = requests
+			.next()
+			.await
+			.expect("the announce's token")
+			.accept(Grant::all());
+		wait_announced(&server_origin.consume(), "room/x", true).await;
+
+		let second = pair.client.auth().add("second").await.expect("kept for requests");
+		broadcast.announce(origin::Route::default().with_auth(second)).unwrap();
+		let renewal = requests.next().await.expect("the renewal's token");
+		assert_eq!(renewal.token().as_ref(), b"second");
+		let second = renewal.accept(Grant::all());
+		drop(first);
+
+		moq_net_sim::sleep(Duration::from_secs(1)).await;
+		assert!(
+			futures::FutureExt::now_or_never(second.closed()).is_none(),
+			"the request ended with the grant its renewal replaced"
+		);
+
+		second.update(Grant::default());
+		second.closed().await;
+		assert_eq!(pair.client_transport.close_reason(), None);
+	})
+	.await
+	.expect("timed out");
+}
+
 /// A pair where the client declines MoQ Auth, so every token the server sees rode a
 /// request, and the server declines MoQ Solicit, so the client announces with
 /// PUBLISH_NAMESPACE rather than answering a SUBSCRIBE_NAMESPACE.
