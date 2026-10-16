@@ -1,4 +1,5 @@
 import { expect, spyOn, test } from "bun:test";
+import { Milli } from "@moq/clock";
 import { Effect, Signal } from "@moq/signals";
 import type { Producer as BroadcastProducer } from "../broadcast.ts";
 import { SessionCode, SessionError, StreamCode, toTransport } from "../error.ts";
@@ -7,7 +8,6 @@ import * as Lite from "../lite/index.ts";
 import { createMockTransportPair } from "../mock.ts";
 import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
-import * as Time from "../time.ts";
 import { wireOf } from "../wire.ts";
 import { type AcceptProps, accept as acceptSession } from "./index.ts";
 import { Reload, type ReloadProps } from "./reload.ts";
@@ -150,7 +150,7 @@ test("a peer that severs immediately keeps escalating the backoff", async () => 
 		enabled: true,
 		url,
 		websocket: { enabled: false },
-		delay: { initial: Time.Milli(1000), multiplier: 2, max: Time.Milli(1000), timeout: Time.Milli(1) },
+		delay: { initial: Milli(1000), multiplier: 2, max: Milli(1000), timeout: Milli(1) },
 	});
 	try {
 		await waitUntil(() => reload.error.peek() !== undefined);
@@ -191,7 +191,7 @@ test("an explicitly undefined delay field falls back to its default", async () =
 		enabled: true,
 		url,
 		websocket: { enabled: false },
-		delay: { initial: undefined, multiplier: undefined, max: undefined, timeout: Time.Milli(0) },
+		delay: { initial: undefined, multiplier: undefined, max: undefined, timeout: Milli(0) },
 	});
 	try {
 		await waitUntil(() => dials > 0);
@@ -237,7 +237,7 @@ test("an announced request follows the reconnect on the same handle", async () =
 		enabled: true,
 		url,
 		websocket: { enabled: false },
-		delay: { initial: Time.Milli(10), multiplier: 1, max: Time.Milli(10) },
+		delay: { initial: Milli(10), multiplier: 1, max: Milli(10) },
 		consume: clientOrigin,
 	});
 	const watched = clientOrigin.request(Path.from("late"), { announced: true });
@@ -277,7 +277,7 @@ test("a reload that gives up keeps requests pending until it is disposed", async
 		enabled: true,
 		url,
 		websocket: { enabled: false },
-		delay: { initial: Time.Milli(1), multiplier: 2, max: Time.Milli(1), timeout: Time.Milli(0) },
+		delay: { initial: Milli(1), multiplier: 2, max: Milli(1), timeout: Milli(0) },
 		consume: origin,
 	});
 
@@ -328,7 +328,7 @@ test("a page hide after give-up does not retry the refused URL", async () => {
 		enabled: true,
 		url,
 		websocket: { enabled: false },
-		delay: { initial: Time.Milli(1), multiplier: 1, max: Time.Milli(1), timeout: Time.Milli(0) },
+		delay: { initial: Milli(1), multiplier: 1, max: Milli(1), timeout: Milli(0) },
 	});
 
 	try {
@@ -374,7 +374,7 @@ test("a session rejected as unauthorized surfaces the code and stops retrying", 
 		enabled: true,
 		url,
 		websocket: { enabled: false },
-		delay: { initial: Time.Milli(1), multiplier: 2, max: Time.Milli(1), timeout: Time.Milli(0) },
+		delay: { initial: Milli(1), multiplier: 2, max: Milli(1), timeout: Milli(0) },
 	});
 	const watch = new Effect();
 	watch.run((effect) => {
@@ -434,7 +434,7 @@ test("an unauthorized session close during setup stops retrying", async () => {
 		url,
 		websocket: { enabled: false },
 		// Unlimited retries prove that `closed` settles only because the rejection is terminal.
-		delay: { initial: Time.Milli(1), multiplier: 1, max: Time.Milli(1), timeout: Time.Milli(0) },
+		delay: { initial: Milli(1), multiplier: 1, max: Milli(1), timeout: Milli(0) },
 	});
 
 	try {
@@ -484,7 +484,7 @@ test("a setup stream reset is not mistaken for an unauthorized session", async (
 		websocket: { enabled: false },
 		// Unlimited retries, so a second attempt can only happen because the first failure
 		// was treated as retryable rather than terminal.
-		delay: { initial: Time.Milli(1), multiplier: 1, max: Time.Milli(1), timeout: Time.Milli(0) },
+		delay: { initial: Milli(1), multiplier: 1, max: Milli(1), timeout: Milli(0) },
 	});
 
 	try {
@@ -525,7 +525,7 @@ test("origins span reconnects: local re-announces, remote re-populates", async (
 		enabled: true,
 		url,
 		websocket: { enabled: false },
-		delay: { initial: Time.Milli(10), multiplier: 1, max: Time.Milli(10) },
+		delay: { initial: Milli(10), multiplier: 1, max: Milli(10) },
 		publish: publishOrigin.consume(),
 		consume: subscribeOrigin,
 	});

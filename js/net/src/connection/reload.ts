@@ -1,10 +1,10 @@
+import { Instant, Milli, Nano, now, sleep } from "@moq/clock";
 import { Effect, type GetPromise, type Getter, Once, Signal } from "@moq/signals";
 import * as Announce from "../announced.ts";
 import { Allocator } from "../bandwidth.ts";
 import { error, SessionCode, SessionError } from "../error.ts";
 import type { Consumer as OriginConsumer, Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
-import * as Time from "../time.ts";
 import { Follow } from "../util/observed.ts";
 import { wireOf } from "../wire.ts";
 import { type ConnectProps, connect, type WebSocketProps, type WebTransportProps } from "./connect.ts";
@@ -22,20 +22,20 @@ import type { Probe, Stats } from "./stats.ts";
  */
 export type ReloadDelay = {
 	/** The delay before reconnecting (default: 1000ms). */
-	initial?: Time.Milli;
+	initial?: Milli;
 
 	/** The multiplier for the delay (default: 2). */
 	multiplier?: number;
 
 	/** The maximum delay (default: 5000ms). */
-	max?: Time.Milli;
+	max?: Milli;
 
 	/**
 	 * Maximum total time to spend retrying the current URL before giving up
 	 * (default: 0, unlimited). Resets after each successful connection, a URL change, or a
 	 * disable/re-enable.
 	 */
-	timeout?: Time.Milli;
+	timeout?: Milli;
 };
 
 /**
@@ -77,14 +77,14 @@ export type ReloadProps = Omit<ConnectProps, "url" | "signal" | "transport"> & {
  * dispose the loop, and a new URL or a disable/re-enable starts another sequence.
  */
 const DEFAULT_DELAY: Required<ReloadDelay> = {
-	initial: Time.Milli(1000),
+	initial: Milli(1000),
 	multiplier: 2,
-	max: Time.Milli(5000),
-	timeout: Time.Milli(0),
+	max: Milli(5000),
+	timeout: Milli(0),
 };
 
 /** How often the send-rate estimate is sampled from the live transport. */
-const BANDWIDTH_POLL = 100;
+const BANDWIDTH_POLL = Nano.fromMilli(Milli(100));
 
 /** Current state of a reconnecting connection. */
 export type ReloadStatus = "connecting" | "connected" | "disconnected";
@@ -204,8 +204,8 @@ export class Reload {
 
 	// The current wait between attempts, doubling per failure, and when the retry window expires.
 	// Both are undefined between sequences, so a later edit to `delay` applies to the next one.
-	#delay: DOMHighResTimeStamp | undefined;
-	#deadline: DOMHighResTimeStamp | undefined;
+	#delay: Milli | undefined;
+	#deadline: number | undefined;
 
 	// The URL the current retry sequence is for. Cleared when disabled, URL-less, or given
 	// up, so the next attempt starts a fresh backoff window.
@@ -358,7 +358,7 @@ export class Reload {
 		effect.spawn(async () => {
 			// Set once the session is live, so #retry can tell a healthy session that
 			// later dropped from a connect failure or a peer that flaps immediately.
-			let connected: DOMHighResTimeStamp | undefined;
+			let connected: Instant | undefined;
 
 			try {
 				// Loops only to migrate: a GOAWAY off a healthy session dials its replacement
@@ -392,7 +392,7 @@ export class Reload {
 					// The replacement serves now; a predecessor keeps draining its groups in flight.
 					this.established.set(connection);
 					this.status.set("connected");
-					connected = performance.now();
+					connected = now();
 
 					// A cancelled effect resolves undefined, so the sentinel tells the session
 					// closing (null for clean, an Error otherwise) apart from this run being
@@ -415,7 +415,7 @@ export class Reload {
 					// A session that outlived the initial delay was healthy, so its handover is not a
 					// failure. One redirected almost at once still migrates, but through the backoff,
 					// so two peers bouncing us between them escalate to the capped delay.
-					if (performance.now() - connected < this.#initial()) {
+					if (Instant.durationSince(now(), connected) < Nano.fromMilli(this.#initial())) {
 						this.#retry(effect, connected, new Error("peer redirected immediately"));
 						return;
 					}
@@ -478,7 +478,7 @@ export class Reload {
 		return true;
 	}
 
-	#initial(): Time.Milli {
+	#initial(): Milli {
 		return this.delay?.initial ?? DEFAULT_DELAY.initial;
 	}
 
@@ -487,7 +487,7 @@ export class Reload {
 	 * has expired. `connected` is when the dead session was established, if it ever was, and
 	 * `cause` the error that killed it, if it died with one.
 	 */
-	#retry(effect: Effect, connected: DOMHighResTimeStamp | undefined, cause?: unknown): void {
+	#retry(effect: Effect, connected: Instant | undefined, cause?: unknown): void {
 		// Resolved per sequence rather than at construction, so an edit to `delay` (including
 		// one that drops a field back to its default) applies to the next retry. Field by
 		// field rather than by spread: a caller building `{ initial: maybeInitial }` from an
@@ -507,7 +507,7 @@ export class Reload {
 		// start a fresh retry window: a one-off drop should reconnect promptly. Anything
 		// shorter is a peer that accepts and immediately severs, which has to keep
 		// escalating or we hammer it forever at the initial delay.
-		if (connected !== undefined && performance.now() - connected >= initial) {
+		if (connected !== undefined && Instant.durationSince(now(), connected) >= Nano.fromMilli(initial)) {
 			this.#delay = undefined;
 			this.#deadline = undefined;
 		}
@@ -527,11 +527,11 @@ export class Reload {
 			return;
 		}
 
-		const now = performance.now();
+		const at = now();
 		this.#delay ??= initial;
-		this.#deadline ??= timeout > 0 ? now + timeout : Number.POSITIVE_INFINITY;
+		this.#deadline ??= timeout > 0 ? Instant.add(at, Nano.fromMilli(timeout)) : Number.POSITIVE_INFINITY;
 
-		if (now >= this.#deadline) {
+		if (at >= this.#deadline) {
 			console.warn("reconnect timed out");
 			// A graceful close has no error, so report the timeout itself.
 			this.#giveUp(cause === undefined ? new Error("reconnect timed out") : error(cause));
@@ -540,11 +540,11 @@ export class Reload {
 
 		// Equal jitter, so a fleet of tabs knocked offline together doesn't reconnect on the same
 		// tick, and never past the deadline the retry window promised.
-		const wait = Math.min(this.#delay * (0.5 + Math.random() / 2), this.#deadline - now);
-		this.#delay = Math.min(this.#delay * multiplier, max);
+		const wait = Math.min(Nano.fromMilli(this.#delay) * (0.5 + Math.random() / 2), this.#deadline - at);
+		this.#delay = Milli(Math.min(this.#delay * multiplier, max));
 
 		const tick = this.#tick.peek() + 1;
-		effect.timer(() => this.#tick.update((prev) => Math.max(prev, tick)), wait);
+		effect.timer(() => this.#tick.update((prev) => Math.max(prev, tick)), Nano(wait));
 	}
 
 	#giveUp(cause: Error): void {
@@ -638,17 +638,21 @@ export class Reload {
  */
 class Draining {
 	#connection: Established;
-	#timer: ReturnType<typeof setTimeout>;
+	#timer = new AbortController();
 	#onRetire: () => void;
 	#retired = false;
 
-	constructor(connection: Established, handover: Time.Milli, onRetire: () => void) {
+	constructor(connection: Established, handover: Milli, onRetire: () => void) {
 		this.#connection = connection;
 		this.#onRetire = onRetire;
-		this.#timer = setTimeout(() => {
-			console.warn("old session did not drain in time; closing");
-			this.retire();
-		}, handover);
+		void sleep(Nano.fromMilli(handover), { signal: this.#timer.signal }).then(
+			() => {
+				if (this.#retired) return;
+				console.warn("old session did not drain in time; closing");
+				this.retire();
+			},
+			() => {},
+		);
 		void connection.closed.then(() => this.retire());
 	}
 
@@ -656,7 +660,7 @@ class Draining {
 	retire(): void {
 		if (this.#retired) return;
 		this.#retired = true;
-		clearTimeout(this.#timer);
+		this.#timer.abort();
 		this.#connection.abort();
 		this.#onRetire();
 	}

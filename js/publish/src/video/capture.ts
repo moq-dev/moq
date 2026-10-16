@@ -1,4 +1,4 @@
-import { Time } from "@moq/net";
+import { Instant, Nano, now } from "@moq/clock";
 import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
 import { Fanout } from "../fanout";
 import { TrackProcessor } from "./processor";
@@ -97,12 +97,12 @@ class Frames extends Fanout<VideoFrame> {
 	readonly #unread = new Set<VideoFrame>();
 
 	constructor(source: ReadableStream<VideoFrame>) {
-		const held: Held = { closed: false, at: 0 };
+		const held: Held = { closed: false, at: Instant(0) };
 		const hold = new TransformStream<VideoFrame, VideoFrame>({
 			transform: (frame, controller) => {
 				held.frame?.close();
 				held.frame = held.closed ? undefined : frame.clone();
-				held.at = performance.now();
+				held.at = now();
 				controller.enqueue(frame);
 			},
 		});
@@ -124,14 +124,12 @@ class Frames extends Fanout<VideoFrame> {
 
 		// Re-stamped to now. The held frame may be minutes old, and publishing it at its capture time
 		// would deliver it that late, a delay the jitter estimate keeps for the life of the stream.
-		// Capture stamps can run ahead of performance.now() (the first frame's arrival anchors them), so
-		// now alone could fall below frames an earlier reader published, rewinding a track resumed after
-		// a gap. Never stamp below the held stamp plus how long it was held.
-		const now = performance.now();
-		const elapsed = Time.Micro.fromMilli((now - this.#held.at) as Time.Milli);
-		const at = Math.round(
-			Math.max(held.timestamp + elapsed, Time.Micro.fromMilli(now as Time.Milli)),
-		) as Time.Micro;
+		// Capture stamps can run ahead of the clock (the first frame's arrival anchors them), so now
+		// alone could fall below frames an earlier reader published, rewinding a track resumed after a
+		// gap. Never stamp below the held stamp plus how long it was held.
+		const clock = now();
+		const elapsed = Nano.toMicro(Instant.durationSince(clock, this.#held.at));
+		const at = Math.round(Math.max(held.timestamp + elapsed, Nano.toMicro(Nano(clock))));
 		let first: VideoFrame | undefined = new VideoFrame(held, { timestamp: at });
 		this.#unread.add(first);
 		const release = () => {
@@ -189,5 +187,5 @@ class Frames extends Fanout<VideoFrame> {
 	}
 }
 
-// The newest frame, when it came through (performance.now()), and whether the fanout closed.
-type Held = { frame?: VideoFrame; at: number; closed: boolean };
+// The newest frame, when it came through, and whether the fanout closed.
+type Held = { frame?: VideoFrame; at: Instant; closed: boolean };
