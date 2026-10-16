@@ -587,6 +587,155 @@ async fn read_more(recv: &mut quic::RecvStream, out: &mut Vec<u8>) {
 	out.extend_from_slice(&buf[..n]);
 }
 
+/// A stream reset before any payload still delivers its WebTransport header,
+/// so the peer attributes the reset to the session rather than dropping a
+/// stream it cannot place: uring to tokio, and back.
+#[test]
+fn a_reset_stream_keeps_its_header() {
+	let Some(mut worker) = worker() else { return };
+	let handle = worker.handle();
+	let certs = support::certs().expect("certificates");
+	let endpoint = h3_endpoint(&handle, &certs);
+	let addr = endpoint.local_addr();
+
+	let client = tokio_client(format!("https://{addr}/"), |session| {
+		Box::pin(async move {
+			let mut recv = session.accept_uni().await.expect("accept_uni");
+			let err = recv.read_chunk(usize::MAX).await.expect_err("the server reset it");
+			assert!(matches!(err, moq_tokio::quic::web::ReadError::Reset(7)), "got {err:?}");
+
+			session.open_uni().await.expect("open_uni").reset(8).expect("reset");
+			session.closed().await;
+		})
+	});
+
+	worker
+		.block_on(async move {
+			let conn = endpoint.accept().await.expect("accept");
+			let request = quic::web::Request::accept(conn).await.expect("handshake");
+			let mut session = request
+				.respond(quic::web::Response::default().with_protocol(PROTO))
+				.await
+				.expect("respond");
+
+			// Reset before any payload.
+			let mut send = std::future::poll_fn(|cx| session.poll_open_uni(cx))
+				.await
+				.expect("open_uni");
+			send.reset(7);
+
+			let mut recv = within(
+				&handle,
+				"the client's reset stream",
+				std::future::poll_fn(|cx| session.poll_accept_uni(cx)),
+			)
+			.await
+			.expect("accept_uni");
+			let mut buf = [0u8; 16];
+			let err = std::future::poll_fn(|cx| recv.poll_read(cx, &mut buf))
+				.await
+				.expect_err("the client reset it");
+			assert!(matches!(err, quic::Error::Reset(8)), "got {err:?}");
+
+			session.close(CLOSE_CODE, CLOSE_REASON);
+			std::future::poll_fn(|cx| session.poll_closed(cx)).await;
+		})
+		.expect("worker");
+
+	client.join().expect("client thread");
+}
+
+/// A stream opened with no connection credit left still delivers its header
+/// when reset, rather than a plain reset of a stream the peer cannot place.
+#[test]
+fn a_reset_stream_keeps_its_header_without_credit() {
+	use std::task::Poll;
+
+	let Some(mut worker) = worker() else { return };
+	let handle = worker.handle();
+	let certs = support::certs().expect("certificates");
+	let endpoint = h3_endpoint(&handle, &certs);
+	let addr = endpoint.local_addr();
+	let cert = std::fs::read(&certs.cert).expect("certificate");
+
+	let client = std::thread::spawn(move || {
+		let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+		let rt = tokio::runtime::Builder::new_current_thread()
+			.enable_all()
+			.build()
+			.expect("tokio runtime");
+		rt.block_on(async move {
+			use moq_tokio::quic::driver;
+			use rustls::pki_types::{CertificateDer, pem::PemObject as _};
+
+			let mut roots = rustls::RootCertStore::empty();
+			roots
+				.add(CertificateDer::from_pem_slice(&cert).expect("pem"))
+				.expect("root");
+			let mut crypto = rustls::ClientConfig::builder()
+				.with_root_certificates(roots)
+				.with_no_client_auth();
+			crypto.alpn_protocols = vec![b"h3".to_vec()];
+			let mut config = driver::ClientConfig::new(std::sync::Arc::new(
+				driver::crypto::rustls::QuicClientConfig::try_from(crypto).expect("quic crypto"),
+			));
+			// Little enough connection credit for the server to run out of
+			let mut transport = driver::TransportConfig::default();
+			transport.receive_window(driver::VarInt::from_u32(16 * 1024));
+			config.transport_config(std::sync::Arc::new(transport));
+			let endpoint = driver::Endpoint::client("127.0.0.1:0".parse().unwrap()).expect("endpoint");
+			let client = moq_tokio::quic::web::Client::new(endpoint, config);
+
+			let request =
+				moq_tokio::quic::web::proto::ConnectRequest::new(url::Url::parse(&format!("https://{addr}/")).unwrap())
+					.with_protocol(PROTO);
+			let session = client.connect(request).await.expect("connect");
+
+			// Reading the filler returns the credit the reset stream waits on.
+			let mut filler = session.accept_uni().await.expect("accept_uni");
+			read_all(&mut filler).await;
+
+			let accept = tokio::time::timeout(std::time::Duration::from_secs(5), session.accept_uni());
+			let mut recv = accept.await.expect("the reset stream arrives").expect("accept_uni");
+			let err = recv.read_chunk(usize::MAX).await.expect_err("the server reset it");
+			assert!(matches!(err, moq_tokio::quic::web::ReadError::Reset(7)), "got {err:?}");
+			// Only now, so the close cannot overtake the reset stream.
+			session.close(CLOSE_CODE, CLOSE_REASON.as_bytes());
+			session.closed().await;
+		});
+	});
+
+	worker
+		.block_on(async move {
+			let conn = endpoint.accept().await.expect("accept");
+			let request = quic::web::Request::accept(conn).await.expect("handshake");
+			let mut session = request
+				.respond(quic::web::Response::default().with_protocol(PROTO))
+				.await
+				.expect("respond");
+
+			// Spend all of the connection credit on a filler stream.
+			let mut filler = std::future::poll_fn(|cx| session.poll_open_uni(cx))
+				.await
+				.expect("open_uni");
+			let chunk = [0u8; 1024];
+			while let Poll::Ready(n) = std::future::poll_fn(|cx| Poll::Ready(filler.poll_write(cx, &chunk))).await {
+				n.expect("write");
+			}
+			filler.finish().expect("finish");
+
+			let mut send = std::future::poll_fn(|cx| session.poll_open_uni(cx))
+				.await
+				.expect("open_uni");
+			send.reset(7);
+
+			std::future::poll_fn(|cx| session.poll_closed(cx)).await;
+		})
+		.expect("worker");
+
+	client.join().expect("client thread");
+}
+
 /// Closing a session and dropping it on the spot still delivers the close
 /// capsule, with the HTTP/3 critical streams open underneath it.
 ///
