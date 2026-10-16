@@ -50,6 +50,7 @@ moq-tokio's `quic::web` module is `web-transport-moq` from moq-dev/noq at [`e27c
 Changes on top of the upstream commit, besides the renames:
 
 - **BBR3**, from [quinn#2481](https://github.com/quinn-rs/quinn/pull/2481) at [`55f74c0d`](https://github.com/quinn-rs/quinn/pull/2481/commits/55f74c0dd0738b5ad7d7676c0b2869a547783f83) (open upstream), rebased onto the fork point with authorship kept. It replaces quinn's BBR and is the default controller. It carries the BBR correctness fixes moq-dev/noq shipped in `moq-noq` 1.3.1, and with them the `Controller` changes BBR needs: packets named by number and `SpaceId`, `on_packet_sent`, `on_packet_lost`, `on_cwnd_limited`, `on_app_limited`, `on_ack_frequency_update`, and a `pacing_rate` and `send_quantum` the pacer obeys. `ControllerMetrics` rates are bytes per second.
+- **BBR3 packet retirement**: per-space packet lookup and round-indexed expiry retire completed snapshots incrementally, preserving the extra ACK batch of metadata for late loss callbacks. The bounded indexes handle sparse packet numbers without walking the live flight. Upstream submission is deferred while quinn#2481 remains open: this fork also carries the packet-space and loss callback adaptations, so a port needs to target that implementation after its shape settles.
 - **Classic ECN for BBR3**, ported from [moq-dev/noq#12](https://github.com/moq-dev/noq/pull/12): CE exits Startup, stops a bandwidth probe, or lowers the short-term model, once per recovery episode, instead of counting as a loss.
 - **Pacer rounding**: a wait shorter than a nanosecond rounds up instead of re-arming the pacing timer at the current instant.
 - **Malformed control input**: `RETIRE_CONNECTION_ID` for a sequence that was never issued (`issued` is a count, so `sequence >= issued`) and a repeated `grease_quic_bit` or `min_ack_delay` transport parameter close the connection. RFC 9000 section 7.4 only says SHOULD for a duplicate parameter; this fork refuses it, as it does every other known parameter.
@@ -73,4 +74,4 @@ Recheck the BBR3 changes when cherry-picking quinn#2481 updates, or if it merges
 
 `cargo audit` cannot match the renamed crate, so security fixes are tracked by hand.
 Watch quinn-rs/quinn's [security advisories](https://github.com/quinn-rs/quinn/security/advisories) and releases (including the `0.11.x` branch, which sometimes gets a fix `main` does not need).
-For each quinn-proto or quinn-udp advisory, check whether the vulnerable code exists in this fork, and if it does, port the fix together with its regression test.
+For each quinn, quinn-proto, or quinn-udp advisory, check whether the vulnerable code exists in this fork, and if it does, port the fix together with its regression test.

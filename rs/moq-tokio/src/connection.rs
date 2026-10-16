@@ -2285,7 +2285,7 @@ mod tests {
 		tokio::spawn(async move {
 			while let Some(request) = server.accept().await {
 				let transport = request.transport();
-				if let Ok(session) = request.ok().await {
+				if let Ok((session, _driver)) = request.ok().await {
 					let _ = accepted.send((transport, session));
 				}
 			}
@@ -2359,7 +2359,7 @@ mod tests {
 		let (accepted, sessions) = tokio::sync::mpsc::unbounded_channel();
 		let task = tokio::spawn(async move {
 			while let Some(request) = server.accept().await {
-				if let Ok(session) = request.with_publisher(&origin).ok().await {
+				if let Ok((session, _driver)) = request.with_publisher(&origin).ok().await {
 					let _ = accepted.send(session);
 				}
 			}

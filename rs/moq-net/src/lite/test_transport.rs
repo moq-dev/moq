@@ -130,6 +130,7 @@ impl Log {
 }
 
 pub struct SinkSend {
+	prefix: usize,
 	pub log: Log,
 	/// This stream's id in [`Log::trail`].
 	id: usize,
@@ -172,6 +173,7 @@ impl poll::SendGroup for SinkGroup {
 impl SinkSend {
 	pub fn new(log: Log) -> Self {
 		Self {
+			prefix: 0,
 			id: log.streams.fetch_add(1, Ordering::Relaxed),
 			log,
 			gate: None,
@@ -185,6 +187,7 @@ impl SinkSend {
 	/// A send stream whose writes park until `gate` flips to true.
 	pub fn gated(log: Log, gate: kio::Consumer<bool>) -> Self {
 		Self {
+			prefix: 0,
 			id: log.streams.fetch_add(1, Ordering::Relaxed),
 			log,
 			gate: Some(gate),
@@ -201,7 +204,9 @@ impl poll::SendStream for SinkSend {
 	type Group = SinkGroup;
 
 	fn poll_write(&mut self, cx: &mut Context<'_>, buf: &[u8]) -> Poll<Result<usize, Self::Error>> {
-		if let Some(gate) = &self.gate {
+		if self.prefix == 0
+			&& let Some(gate) = &self.gate
+		{
 			// A closed gate parks forever, which surfaces as a hung test rather than a
 			// write that silently skipped the gate.
 			let waiter = self.park.hold(cx);
@@ -210,6 +215,13 @@ impl poll::SendStream for SinkSend {
 				Poll::Ready(Err(_)) | Poll::Pending => return Poll::Pending,
 			}
 		}
+		let buf = if self.prefix > 0 {
+			let take = buf.len().min(self.prefix);
+			self.prefix -= take;
+			&buf[..take]
+		} else {
+			buf
+		};
 		self.log.writes.lock().unwrap().extend_from_slice(buf);
 		self.log.record(self.id, Sent::Write(buf.to_vec()));
 		Poll::Ready(Ok(buf.len()))
@@ -435,6 +447,7 @@ impl poll::Session for DeadStreamSession {
 /// Send streams record their bytes while peer reads park forever.
 #[derive(Clone, Default)]
 pub struct SinkSession {
+	bi_prefix: usize,
 	pub log: Log,
 	/// Set by [`Self::gated_bi`]. `None` parks `open_bi` itself forever, which is all
 	/// a test driving only uni streams needs.
@@ -510,6 +523,14 @@ impl SinkSession {
 		}
 	}
 
+	/// Write this prefix on each bidi stream before holding its remaining bytes.
+	pub fn gated_bi_prefix(prefix: usize, gate: kio::Consumer<bool>) -> Self {
+		Self {
+			bi_prefix: prefix,
+			..Self::gated_bi(gate)
+		}
+	}
+
 	/// Accept bidi streams from the peer, holding every write until `gate` flips to true.
 	///
 	/// The accepted half of a control stream carries the answers (track info,
@@ -566,7 +587,8 @@ impl poll::Session for SinkSession {
 		};
 		self.log.bi_opens.fetch_add(1, Ordering::Relaxed);
 
-		let send = SinkSend::gated(self.log.clone(), gate);
+		let mut send = SinkSend::gated(self.log.clone(), gate);
+		send.prefix = self.bi_prefix;
 		Poll::Ready(Ok((send, PendingRecv)))
 	}
 

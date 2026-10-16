@@ -154,7 +154,7 @@ impl Session {
 		recv: crate::quic::driver::RecvStream,
 		close: Arc<CloseReason>,
 	) {
-		let close_info = Self::read_capsules(recv).await;
+		let close_info = Self::read_capsules(&conn, recv).await;
 		let code = close_info.as_ref().map_or(0, |(c, _)| *c);
 
 		let http3_code: crate::quic::driver::VarInt = web_transport_proto::error_to_http3(code).try_into().unwrap();
@@ -182,7 +182,10 @@ impl Session {
 	// Keep reading capsules from the CONNECT recv stream until it's closed.
 	// Returns Some((code, reason)) if a CloseWebTransportSession capsule was received,
 	// or None if the stream closed without a capsule.
-	async fn read_capsules(recv: crate::quic::driver::RecvStream) -> Option<(u32, String)> {
+	async fn read_capsules(
+		conn: &crate::quic::driver::Connection,
+		recv: crate::quic::driver::RecvStream,
+	) -> Option<(u32, String)> {
 		let mut reader = web_transport_proto::Http3CapsuleReader::new(recv);
 		loop {
 			match reader.read().await {
@@ -194,8 +197,13 @@ impl Session {
 					tracing::warn!(%typ, size = payload.len(), "unknown capsule");
 				}
 				Ok(None) => return None,
+				// The capsule reader reports a lost stream as `UnexpectedEnd`, so ask the
+				// connection: a read cut short by its close is the ordinary teardown.
 				Err(e) => {
-					tracing::warn!(?e, "failed to read capsule");
+					match conn.close_reason() {
+						Some(reason) => tracing::debug!(?e, %reason, "CONNECT stream ended with the connection"),
+						None => tracing::warn!(?e, "failed to read capsule"),
+					}
 					return None;
 				}
 			}
@@ -1228,6 +1236,41 @@ mod tests {
 				)) if code.into_inner() == 7
 			),
 			"{err:?}"
+		);
+	}
+
+	/// A CONNECT stream cut off by the connection's close is ordinary teardown, not a warning.
+	#[tokio::test]
+	#[tracing_test::traced_test]
+	async fn capsule_read_ends_quietly_with_connection() {
+		let (client, server, _endpoints) = pair().await;
+
+		// A zero-length reserved frame, so the server sees the stream without a capsule.
+		let (mut send, _recv) = client.open_bi().await.unwrap();
+		send.write_all(&[0x21, 0x00]).await.unwrap();
+		let (_send, recv) = server.accept_bi().await.unwrap();
+
+		client.close(0u32.into(), b"done");
+		assert!(Session::read_capsules(&server, recv).await.is_none());
+		assert!(!logs_contain("failed to read capsule"), "an ordinary close warned");
+	}
+
+	/// A CONNECT stream that ends mid-frame on a live connection still warns.
+	#[tokio::test]
+	#[tracing_test::traced_test]
+	async fn capsule_read_truncated_warns() {
+		let (client, server, _endpoints) = pair().await;
+
+		// A DATA frame that promises 5 bytes and carries 1.
+		let (mut send, _recv) = client.open_bi().await.unwrap();
+		send.write_all(&[0x00, 0x05, 0x01]).await.unwrap();
+		send.finish().unwrap();
+		let (_send, recv) = server.accept_bi().await.unwrap();
+
+		assert!(Session::read_capsules(&server, recv).await.is_none());
+		assert!(
+			logs_contain("failed to read capsule"),
+			"a truncated capsule stream was not reported"
 		);
 	}
 

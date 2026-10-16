@@ -787,6 +787,7 @@ mod tests {
 	use super::*;
 
 	/// A millisecond track: the frames written here carry timestamps.
+	#[cfg(all(feature = "websocket", feature = "quic"))]
 	fn timed() -> moq_net::track::Info {
 		moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
 	}
@@ -825,7 +826,7 @@ mod tests {
 			let request = server.accept().await.unwrap();
 			assert_eq!(request.path(), "/room");
 			assert_eq!(request.query(), Some("jwt=secret"));
-			let session = request.with_publisher(&server_origin).ok().await.unwrap();
+			let (session, _driver) = request.with_publisher(&server_origin).ok().await.unwrap();
 			(server, session)
 		});
 		let mut config = crate::connect::Config::default();
@@ -1519,7 +1520,7 @@ mod tests {
 				crate::Transport::WebTransport,
 				"expected the QUIC listener",
 			);
-			let session = request.with_publisher(&pub_origin).ok().await?;
+			let (session, _driver) = request.with_publisher(&pub_origin).ok().await?;
 			assert_eq!(session.version(), expected_version, "server negotiated stale version");
 			let _broadcast = broadcast;
 			let _track = track;

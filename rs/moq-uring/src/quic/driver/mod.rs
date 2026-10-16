@@ -104,6 +104,8 @@ fn provider() -> Arc<rustls::crypto::CryptoProvider> {
 /// largest datagram we tell peers we can receive.
 pub(crate) fn endpoint_config(shard: Option<moq_sock::shard::Shard>) -> Result<Arc<moq_quic::EndpointConfig>, Error> {
 	let mut config = moq_quic::EndpointConfig::default();
+	// The steering filter recognizes short headers by their fixed bit.
+	config.grease_quic_bit(shard.is_none());
 	config.cid_generator(Arc::new(move || Box::new(Cids { shard })));
 	config
 		.max_udp_payload_size(SEGMENT as u16)

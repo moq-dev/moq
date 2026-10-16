@@ -292,7 +292,7 @@ impl Endpoint {
     /// [`Connection::close()`]: crate::quic::driver::Connection::close
     pub fn close(&self, error_code: VarInt, reason: &[u8]) {
         let reason = Bytes::copy_from_slice(reason);
-        let mut endpoint = self.inner.state.lock().unwrap();
+        let endpoint = &mut *self.inner.state.lock().unwrap();
         endpoint.recv_state.connections.close = Some((error_code, reason.clone()));
         for sender in endpoint.recv_state.connections.senders.values() {
             // Ignoring errors from dropped connections
@@ -301,7 +301,19 @@ impl Endpoint {
                 reason: reason.clone(),
             });
         }
+        // Refuse queued attempts now, the same as ones arriving after the close, so the peer
+        // hears back before a caller of `wait_all_draining` releases the socket.
+        let mut response_buffer = Vec::new();
+        for incoming in endpoint.recv_state.incoming.drain(..) {
+            endpoint.stats.refused_handshakes += 1;
+            response_buffer.clear();
+            let transmit = endpoint.inner.refuse(incoming, &mut response_buffer);
+            respond(transmit, &response_buffer, &mut endpoint.sender);
+        }
         self.inner.shared.incoming.notify_waiters();
+        if endpoint.all_draining() {
+            self.inner.shared.all_draining.notify_waiters();
+        }
     }
 
     /// Wait for all connections on the endpoint to be cleanly shut down
@@ -331,24 +343,42 @@ impl Endpoint {
     /// Wait until no connection on the endpoint is still active
     ///
     /// A connection stops being active once its peer's close arrives, or once its closing
-    /// period ends if the peer never answers. Unlike [`wait_idle()`], this does not sit out
-    /// the closing period for a peer that already has the close, nor wait for the
+    /// period ends if the peer never answers. An attempt queued for [`accept()`] or partway
+    /// through [`Incoming::accept`] still counts as active. Unlike [`wait_idle()`], this does
+    /// not sit out the closing period for a peer that already has the close, nor wait for the
     /// [`Connection`](crate::quic::driver::Connection) handles to drop.
     ///
     /// Does not proactively close existing connections or cause incoming connections to be
     /// rejected. Consider calling [`close()`] if that is desired.
     ///
+    /// [`accept()`]: Endpoint::accept
     /// [`close()`]: Endpoint::close
     /// [`wait_idle()`]: Endpoint::wait_idle
     pub async fn wait_all_draining(&self) {
         loop {
             {
                 let endpoint = &mut *self.inner.state.lock().unwrap();
-                if endpoint.recv_state.connections.all_draining() {
+                if endpoint.all_draining() {
                     break;
                 }
                 // Construct future while lock is held to avoid race
                 self.inner.shared.all_draining.notified()
+            }
+            .await;
+        }
+    }
+
+    /// Wait until a connection attempt is queued for [`accept()`](Endpoint::accept)
+    #[cfg(test)]
+    pub(crate) async fn wait_queued(&self) {
+        loop {
+            {
+                let endpoint = self.inner.state.lock().unwrap();
+                if !endpoint.recv_state.incoming.is_empty() {
+                    break;
+                }
+                // Construct future while lock is held to avoid race
+                self.inner.shared.incoming.notified()
             }
             .await;
         }
@@ -419,13 +449,18 @@ impl Future for EndpointDriver {
 
 impl Drop for EndpointDriver {
     fn drop(&mut self) {
-        let mut endpoint = self.0.state.lock().unwrap();
+        let endpoint = &mut *self.0.state.lock().unwrap();
         endpoint.driver_lost = true;
         self.0.shared.incoming.notify_waiters();
         // Drop all outgoing channels, signaling the termination of the endpoint to the associated
         // connections.
         endpoint.recv_state.connections.senders.clear();
         endpoint.recv_state.connections.draining.clear();
+        // `accept` yields nothing once the driver is lost, so queued attempts would hold off
+        // `wait_all_draining` forever.
+        for incoming in endpoint.recv_state.incoming.drain(..) {
+            endpoint.inner.ignore(incoming);
+        }
         self.0.shared.all_draining.notify_waiters();
         // Clearing the senders is what makes the endpoint idle, but a waiter already parked on
         // `idle` only re-reads that after being notified, and with the driver gone nothing else
@@ -499,6 +534,10 @@ impl EndpointInner {
         // being processed to wake idle waiters.
         if state.is_idle() {
             self.shared.idle.notify_waiters();
+        }
+        // The pending accept held off `wait_all_draining`, and a failed one sends no event.
+        if state.all_draining() {
+            self.shared.all_draining.notify_waiters();
         }
         result
     }
@@ -609,9 +648,7 @@ impl State {
                     shared.idle.notify_waiters();
                 }
             }
-            if (event.is_draining() || event.is_drained())
-                && self.recv_state.connections.all_draining()
-            {
+            if (event.is_draining() || event.is_drained()) && self.all_draining() {
                 shared.all_draining.notify_waiters();
             }
             let Some(event) = self.inner.handle_event(ch, event) else {
@@ -632,6 +669,13 @@ impl State {
 
     fn is_idle(&self) -> bool {
         self.recv_state.connections.is_empty() && self.pending_accepts == 0
+    }
+
+    /// Whether no connection is still active, nor any attempt left that could become one
+    fn all_draining(&self) -> bool {
+        self.recv_state.connections.all_draining()
+            && self.pending_accepts == 0
+            && self.recv_state.incoming.is_empty()
     }
 }
 
@@ -777,6 +821,11 @@ impl Future for Accept<'_> {
             return Poll::Ready(None);
         }
         if let Some(incoming) = endpoint.recv_state.incoming.pop_front() {
+            // A handed-out attempt no longer holds off `wait_all_draining`, and refusing,
+            // ignoring, or dropping it sends no event that would wake the waiter later.
+            if endpoint.all_draining() {
+                this.endpoint.inner.shared.all_draining.notify_waiters();
+            }
             // Release the mutex lock on endpoint so cloning it doesn't deadlock
             drop(endpoint);
             let incoming = Incoming::new(incoming, this.endpoint.inner.clone());

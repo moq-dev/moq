@@ -3,6 +3,7 @@ use futures::try_join;
 use thiserror::Error;
 
 #[derive(Error, Debug, Clone)]
+#[non_exhaustive]
 pub enum SettingsError {
 	#[error("quic stream was closed early")]
 	UnexpectedEnd,
