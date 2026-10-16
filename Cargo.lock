@@ -4686,72 +4686,6 @@ name = "moq-net-sim-macros"
 version = "0.0.0"
 
 [[package]]
-name = "moq-noq"
-version = "2.0.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "20d9d1334f556a15e60f6d406020fc3a40409335ae8a2ad472f6bf074a01acfa"
-dependencies = [
- "bytes",
- "cfg_aliases",
- "derive_more 2.1.1",
- "moq-noq-proto",
- "moq-noq-udp",
- "pin-project-lite",
- "rustc-hash 2.1.3",
- "rustls",
- "socket2 0.6.5",
- "thiserror 2.0.21",
- "tokio",
- "tokio-stream",
- "tracing",
- "web-time",
-]
-
-[[package]]
-name = "moq-noq-proto"
-version = "2.0.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "50ac444c6c1ed18d45536cd939be7f0fd664996e79c0519119b13d6ae9d3d5e2"
-dependencies = [
- "aes-gcm",
- "aws-lc-rs",
- "bytes",
- "derive_more 2.1.1",
- "enum-assoc",
- "fastbloom",
- "getrandom 0.4.3",
- "identity-hash",
- "lru-slab",
- "n0-qlog",
- "rand 0.10.3",
- "rand_pcg",
- "ring",
- "rustc-hash 2.1.3",
- "rustls",
- "rustls-pki-types",
- "rustls-platform-verifier",
- "slab",
- "sorted-index-buffer",
- "thiserror 2.0.21",
- "tinyvec",
- "tracing",
- "web-time",
-]
-
-[[package]]
-name = "moq-noq-udp"
-version = "2.0.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8e978cded333ca8a6d50b96a7a4388ccc8d98db51d89df7dbee598e9b849ee79"
-dependencies = [
- "cfg_aliases",
- "libc",
- "socket2 0.6.5",
- "tracing",
- "windows-sys 0.61.2",
-]
-
-[[package]]
 name = "moq-nvenc"
 version = "0.1.2"
 dependencies = [
@@ -4783,6 +4717,7 @@ dependencies = [
  "getrandom 0.4.3",
  "hex-literal",
  "lru-slab",
+ "moq-clock",
  "qlog",
  "rand 0.10.3",
  "rand_pcg",
@@ -4848,7 +4783,6 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "usage-rs",
- "web-transport-moq",
  "web-transport-trait",
 ]
 
@@ -5005,19 +4939,26 @@ dependencies = [
  "futures",
  "hex",
  "hmac 0.13.0",
+ "http",
  "humantime",
  "jni 0.22.4",
+ "kio 0.6.2",
  "libc",
  "mdns-sd",
+ "moq-clock",
  "moq-net",
+ "moq-quic",
  "moq-sock",
  "noq-proto",
  "notify",
+ "pin-project-lite",
  "qmux",
  "rand 0.10.3",
  "rcgen",
  "reqwest",
+ "rustc-hash 2.1.3",
  "rustls",
+ "rustls-native-certs",
  "rustls-platform-verifier",
  "rustls-webpki",
  "serde",
@@ -5040,7 +4981,6 @@ dependencies = [
  "url",
  "usage-rs",
  "web-transport-iroh",
- "web-transport-moq",
  "web-transport-proto",
  "web-transport-trait",
  "webpki-roots",
@@ -5077,8 +5017,9 @@ dependencies = [
  "io-uring",
  "kio 0.6.2",
  "libc",
+ "moq-clock",
  "moq-net",
- "moq-noq-proto",
+ "moq-quic",
  "moq-sock",
  "moq-tokio",
  "nix",
@@ -5094,7 +5035,6 @@ dependencies = [
  "tokio",
  "tracing",
  "url",
- "web-transport-moq",
  "web-transport-proto",
  "web-transport-trait",
 ]
@@ -5303,19 +5243,6 @@ dependencies = [
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-time",
-]
-
-[[package]]
-name = "n0-qlog"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bb1c2fc610d1facce51b0bf5d8245b309c91996a933defdf7742c92ac78a58cb"
-dependencies = [
- "humantime",
- "serde",
- "serde_json",
- "serde_with",
- "strum",
 ]
 
 [[package]]
@@ -10363,27 +10290,6 @@ dependencies = [
  "kio 0.5.9",
  "n0-error",
  "n0-future",
- "tokio",
- "tracing",
- "url",
- "web-transport-proto",
- "web-transport-trait",
-]
-
-[[package]]
-name = "web-transport-moq"
-version = "2.0.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5dc946e718371f88a79d849c352b6bdd95e0a36139e9b76818c1a101b45ed97a"
-dependencies = [
- "bytes",
- "futures",
- "http",
- "kio 0.5.9",
- "moq-noq",
- "rustls",
- "rustls-native-certs",
- "thiserror 2.0.21",
  "tokio",
  "tracing",
  "url",

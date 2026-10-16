@@ -6,7 +6,7 @@
 
 use crate::connection::Goaway;
 use crate::{Addrs, Backoff, Connection, Error};
-#[cfg(all(feature = "websocket", feature = "noq"))]
+#[cfg(all(feature = "websocket", feature = "quic"))]
 use std::future::Future;
 use url::Url;
 
@@ -47,7 +47,7 @@ pub struct Client {
 	/// raw TCP/UDS qmux and WebSocket). Resolved once in [`Client::new`] so the ALPN list
 	/// can't diverge between transports.
 	#[cfg(any(
-		feature = "noq",
+		feature = "quic",
 		feature = "iroh",
 		feature = "websocket",
 		feature = "tcp",
@@ -81,10 +81,10 @@ pub struct Client {
 	#[cfg(feature = "websocket")]
 	tls_host_name: Option<String>,
 	/// Only the TLS-based dials read this; the plaintext qmux transports have none.
-	#[cfg(any(feature = "noq", feature = "websocket"))]
+	#[cfg(any(feature = "quic", feature = "websocket"))]
 	tls: rustls::ClientConfig,
-	#[cfg(feature = "noq")]
-	noq: Option<crate::noq::NoqClient>,
+	#[cfg(feature = "quic")]
+	quic: Option<crate::quic::Client>,
 	#[cfg(feature = "iroh")]
 	iroh: Option<crate::iroh::Endpoint>,
 	#[cfg(feature = "iroh")]
@@ -98,7 +98,7 @@ impl Client {
 	#[cfg(not(feature = "_transport"))]
 	pub fn new(_config: Config) -> crate::Result<Self> {
 		Err(Error::NoBackend(
-			"no backend compiled; enable noq, iroh, websocket, tcp, or uds feature",
+			"no backend compiled; enable quic, iroh, websocket, tcp, or uds feature",
 		))
 	}
 
@@ -121,11 +121,11 @@ impl Client {
 
 		// Only the rustls-backed transports use this. Iroh and the plaintext
 		// qmux transports must not require a rustls crypto provider.
-		#[cfg(any(feature = "noq", feature = "websocket"))]
+		#[cfg(any(feature = "quic", feature = "websocket"))]
 		let tls = config.tls.build()?;
 
-		#[cfg(feature = "noq")]
-		let noq = Some(crate::noq::NoqClient::new(&config, &quic)?);
+		#[cfg(feature = "quic")]
+		let quic = Some(crate::quic::Client::new(&config, &quic)?);
 
 		let versions = config.versions();
 		// Read before the struct literal below moves fields out of `config`.
@@ -145,7 +145,7 @@ impl Client {
 				.with_versions(versions.clone())
 				.with_extensions(config.extensions),
 			#[cfg(any(
-				feature = "noq",
+				feature = "quic",
 				feature = "iroh",
 				feature = "websocket",
 				feature = "tcp",
@@ -168,10 +168,10 @@ impl Client {
 			websocket: config.websocket,
 			#[cfg(feature = "websocket")]
 			tls_host_name,
-			#[cfg(any(feature = "noq", feature = "websocket"))]
+			#[cfg(any(feature = "quic", feature = "websocket"))]
 			tls,
-			#[cfg(feature = "noq")]
-			noq,
+			#[cfg(feature = "quic")]
+			quic,
 			#[cfg(feature = "iroh")]
 			iroh: None,
 			#[cfg(feature = "iroh")]
@@ -278,13 +278,13 @@ impl Client {
 	/// This closes at once, discarding stream data the peer has not acknowledged yet.
 	/// Call [`Connection::close`] on each connection first to deliver it.
 	///
-	/// Only the noq endpoint is closed. WebSocket, TCP, and UDS sessions end when their
+	/// Only the QUIC endpoint is closed. WebSocket, TCP, and UDS sessions end when their
 	/// [`Connection`] is dropped (the kernel closes the socket on exit), and an iroh
 	/// endpoint passed to `with_iroh` is closed by its owner.
 	pub async fn close(self) {
-		#[cfg(feature = "noq")]
-		if let Some(noq) = self.noq {
-			noq.close().await;
+		#[cfg(feature = "quic")]
+		if let Some(quic) = self.quic {
+			quic.close().await;
 		}
 	}
 
@@ -315,7 +315,7 @@ impl Client {
 	///
 	/// Errors if no transport feature is compiled in.
 	#[cfg(not(any(
-		feature = "noq",
+		feature = "quic",
 		feature = "iroh",
 		feature = "websocket",
 		feature = "tcp",
@@ -323,7 +323,7 @@ impl Client {
 	)))]
 	pub(crate) async fn dial(&self, _addr: crate::connect::Addr) -> crate::Result<Dialed> {
 		Err(Error::NoBackend(
-			"no backend compiled; enable noq, iroh, websocket, tcp, or uds feature",
+			"no backend compiled; enable quic, iroh, websocket, tcp, or uds feature",
 		))
 	}
 
@@ -334,7 +334,7 @@ impl Client {
 	/// protocol driver is spawned on the current tokio runtime; the session
 	/// closes once the last returned handle drops.
 	#[cfg(any(
-		feature = "noq",
+		feature = "quic",
 		feature = "iroh",
 		feature = "websocket",
 		feature = "tcp",
@@ -362,7 +362,7 @@ impl Client {
 
 	/// The moq client builder, advertising `path` in the SETUP when there is one.
 	#[cfg(any(
-		feature = "noq",
+		feature = "quic",
 		feature = "iroh",
 		feature = "websocket",
 		feature = "tcp",
@@ -376,7 +376,7 @@ impl Client {
 	}
 
 	#[cfg(any(
-		feature = "noq",
+		feature = "quic",
 		feature = "iroh",
 		feature = "websocket",
 		feature = "tcp",
@@ -472,15 +472,15 @@ impl Client {
 			return Ok(Dialed::new(session, crate::Transport::Iroh));
 		}
 
-		#[cfg(feature = "noq")]
-		if let Some(noq) = self.noq.as_ref() {
+		#[cfg(feature = "quic")]
+		if let Some(quic) = self.quic.as_ref() {
 			let quic_addr = addr.clone();
 			let binding = match quic_transport(&url) {
 				crate::Transport::Quic => moq_net::transport::Binding::InBand,
 				_ => moq_net::transport::Binding::Uri,
 			};
 			let quic_handle = async {
-				noq.connect(&self.tls, quic_addr, &self.versions)
+				quic.connect(&self.tls, quic_addr, &self.versions)
 					.await
 					.map(|session| crate::transport::Session::new(session, binding))
 					.map_err(Error::from)
@@ -530,7 +530,7 @@ impl Client {
 	///
 	/// Only compiled when there is a QUIC dial to race: a WebSocket-only build connects
 	/// over the fallback directly.
-	#[cfg(all(feature = "websocket", feature = "noq"))]
+	#[cfg(all(feature = "websocket", feature = "quic"))]
 	async fn race_moq_connect<Q, S>(
 		&self,
 		moq: &moq_net::Client,
@@ -574,7 +574,7 @@ impl Client {
 /// `None` when the result is empty, which means the same as omitting the parameter: the
 /// server's default path. A peer on published lite-05 rejects an empty value outright.
 #[cfg(any(
-	feature = "noq",
+	feature = "quic",
 	feature = "iroh",
 	feature = "websocket",
 	feature = "tcp",
@@ -600,7 +600,7 @@ fn request_target(url: &Url) -> Option<String> {
 /// picked by ALPN negotiation rather than by the scheme; that dial reads the negotiated
 /// [`crate::iroh::Binding`] and calls [`request_target`] itself.
 #[cfg(any(
-	feature = "noq",
+	feature = "quic",
 	feature = "iroh",
 	feature = "websocket",
 	feature = "tcp",
@@ -623,9 +623,9 @@ fn setup_path(url: &Url) -> Option<String> {
 	}
 }
 
-/// What a noq dial to `url` runs on: WebTransport for `https://` (and the `http://`
+/// What a QUIC dial to `url` runs on: WebTransport for `https://` (and the `http://`
 /// bootstrap), raw QUIC for `moqt://` and `moql://`.
-#[cfg(feature = "noq")]
+#[cfg(feature = "quic")]
 fn quic_transport(url: &Url) -> crate::Transport {
 	match url.scheme() {
 		"moqt" | "moql" => crate::Transport::Quic,
@@ -643,7 +643,7 @@ pub(crate) struct Dialed {
 impl Dialed {
 	#[cfg_attr(
 		not(any(
-			feature = "noq",
+			feature = "quic",
 			feature = "iroh",
 			feature = "websocket",
 			feature = "tcp",
@@ -662,7 +662,7 @@ impl Dialed {
 /// from the host and port so URL userinfo never goes on the wire. `None` for every other
 /// scheme, and when the URL has no host, since an empty authority is meaningless.
 #[cfg(any(
-	feature = "noq",
+	feature = "quic",
 	feature = "iroh",
 	feature = "websocket",
 	feature = "tcp",
@@ -681,7 +681,7 @@ fn setup_authority(url: &Url) -> Option<String> {
 }
 
 /// The arm that won a [`race_transport_connect`]; the other was dropped, cancelling it.
-#[cfg(all(feature = "websocket", feature = "noq"))]
+#[cfg(all(feature = "websocket", feature = "quic"))]
 enum TransportRace<Q, W> {
 	Quic(Q),
 	WebSocket(W),
@@ -689,7 +689,7 @@ enum TransportRace<Q, W> {
 
 /// Race the QUIC dial to `url` against the WebSocket fallback, returning whichever
 /// transport comes up first.
-#[cfg(all(feature = "websocket", feature = "noq"))]
+#[cfg(all(feature = "websocket", feature = "quic"))]
 async fn race_transport_connect<Q, W, QT, WT>(url: &Url, quic: Q, websocket: W) -> crate::Result<TransportRace<QT, WT>>
 where
 	Q: Future<Output = crate::Result<QT>>,
@@ -751,7 +751,7 @@ where
 /// Auth is terminal only when both arms refused. A WebTransport-only endpoint
 /// answers the fallback with 403 while QUIC is still in flight, and reconnect
 /// treats is_auth() as terminal, so a mixed pair reports the retryable error.
-#[cfg(all(feature = "websocket", feature = "noq"))]
+#[cfg(all(feature = "websocket", feature = "quic"))]
 fn race_error(quic: Error, websocket: Error) -> Error {
 	match (quic.is_auth(), websocket.is_auth()) {
 		(false, false) => Error::TransportRace {
@@ -764,7 +764,7 @@ fn race_error(quic: Error, websocket: Error) -> Error {
 }
 
 #[cfg(any(
-	feature = "noq",
+	feature = "quic",
 	feature = "iroh",
 	feature = "websocket",
 	feature = "tcp",
@@ -787,29 +787,30 @@ mod tests {
 	use super::*;
 
 	/// A millisecond track: the frames written here carry timestamps.
+	#[cfg(all(feature = "websocket", feature = "quic"))]
 	fn timed() -> moq_net::track::Info {
 		moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
 	}
 
-	#[cfg(feature = "noq")]
+	#[cfg(feature = "quic")]
 	#[tokio::test]
 	async fn fixed_target_preserves_request_and_refuses_redirect() {
 		check_fixed_redirect(false, true).await;
 	}
 
-	#[cfg(feature = "noq")]
+	#[cfg(feature = "quic")]
 	#[tokio::test]
 	async fn one_shot_fixed_target_refuses_redirect() {
 		check_fixed_redirect(true, true).await;
 	}
 
-	#[cfg(feature = "noq")]
+	#[cfg(feature = "quic")]
 	#[tokio::test]
 	async fn unused_fixed_fallback_does_not_restrict_connected_target() {
 		check_fixed_redirect(true, false).await;
 	}
 
-	#[cfg(feature = "noq")]
+	#[cfg(feature = "quic")]
 	async fn check_fixed_redirect(once: bool, pinned: bool) {
 		let mut listen = crate::listen::Config {
 			bind: Some("127.0.0.1:0".parse().unwrap()),
@@ -886,7 +887,7 @@ mod tests {
 	}
 
 	#[cfg(any(
-		feature = "noq",
+		feature = "quic",
 		feature = "iroh",
 		feature = "websocket",
 		feature = "tcp",
@@ -937,7 +938,7 @@ mod tests {
 	}
 
 	#[cfg(any(
-		feature = "noq",
+		feature = "quic",
 		feature = "iroh",
 		feature = "websocket",
 		feature = "tcp",
@@ -976,7 +977,7 @@ mod tests {
 	/// The iroh dial derives its target here rather than through [`setup_path`], since
 	/// only the negotiated binding says whether to send one.
 	#[cfg(any(
-		feature = "noq",
+		feature = "quic",
 		feature = "iroh",
 		feature = "websocket",
 		feature = "tcp",
@@ -1351,7 +1352,7 @@ mod tests {
 		assert_eq!(config.versions().alpns().len(), moq_net::ALPNS.len());
 	}
 
-	#[cfg(all(feature = "websocket", feature = "noq"))]
+	#[cfg(all(feature = "websocket", feature = "quic"))]
 	#[tokio::test]
 	async fn race_transport_connect_keeps_websocket_after_quic_auth_error() {
 		let quic = async { Err::<usize, _>(crate::ConnectError::Unauthorized.into()) };
@@ -1367,7 +1368,7 @@ mod tests {
 		assert!(matches!(value, super::TransportRace::WebSocket(1)));
 	}
 
-	#[cfg(all(feature = "websocket", feature = "noq"))]
+	#[cfg(all(feature = "websocket", feature = "quic"))]
 	#[tokio::test]
 	async fn race_transport_connect_keeps_quic_after_websocket_forbidden() {
 		let quic = async {
@@ -1389,7 +1390,7 @@ mod tests {
 	/// Inline rather than in `tests/` so each arm dials its own ephemeral port: the
 	/// public connect sends the fallback to the QUIC port, which nothing reserves over
 	/// TCP as well.
-	#[cfg(all(feature = "websocket", feature = "noq"))]
+	#[cfg(all(feature = "websocket", feature = "quic"))]
 	#[tokio::test]
 	async fn websocket_forbidden_does_not_end_a_quic_connect() {
 		use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -1431,14 +1432,14 @@ mod tests {
 
 		// The same race `connect_inner` runs, except the fallback dials its own port,
 		// as plain ws:// so the listener above can answer without TLS.
-		let noq = client.noq.clone().unwrap();
+		let quic = client.quic.clone().unwrap();
 		let (tls, versions) = (client.tls.clone(), client.versions.clone());
 		let quic_addr: crate::connect::Addr = Url::parse(&format!("https://localhost:{quic_port}")).unwrap().into();
 		let ws_addr: crate::connect::Addr = Url::parse(&format!("http://localhost:{ws_port}")).unwrap().into();
 		// Hold QUIC until the fallback has been refused, so the 403 is always exercised.
 		let quic = Box::pin(async move {
 			forbid.await.unwrap().expect("fallback listener failed");
-			noq.connect(&tls, quic_addr, &versions)
+			quic.connect(&tls, quic_addr, &versions)
 				.await
 				.map(|session| crate::transport::Session::new(session, moq_net::transport::Binding::Uri))
 				.map_err(Error::from)
@@ -1460,7 +1461,7 @@ mod tests {
 	/// QUIC wins while the fallback handshake is held until QUIC connects.
 	/// Each transport owns its ephemeral port; this exercises the same race as
 	/// connect_inner without depending on which real handshake runs faster.
-	#[cfg(all(feature = "websocket", feature = "noq"))]
+	#[cfg(all(feature = "websocket", feature = "quic"))]
 	#[tracing_test::traced_test]
 	#[tokio::test]
 	async fn broadcast_race_quic_wins() {
@@ -1530,8 +1531,8 @@ mod tests {
 		let client = client.with_subscriber(sub_origin);
 		let dialer = client.clone();
 		let quic = Box::pin(async move {
-			let noq = dialer.noq.as_ref().expect("QUIC backend");
-			let session = noq.connect(&dialer.tls, quic_addr, &dialer.versions).await?;
+			let quic = dialer.quic.as_ref().expect("QUIC backend");
+			let session = quic.connect(&dialer.tls, quic_addr, &dialer.versions).await?;
 			connected.send(()).expect("fallback listener alive");
 			Ok::<_, crate::Error>(crate::transport::Session::new(
 				session,
@@ -1577,7 +1578,7 @@ mod tests {
 			.expect("server task failed");
 	}
 
-	#[cfg(all(feature = "websocket", feature = "noq"))]
+	#[cfg(all(feature = "websocket", feature = "quic"))]
 	#[tokio::test]
 	async fn race_transport_connect_reports_auth_when_both_refuse() {
 		let quic = async { Err::<usize, _>(crate::ConnectError::Unauthorized.into()) };
@@ -1589,7 +1590,7 @@ mod tests {
 		assert!(err.is_auth(), "unexpected error: {err}");
 	}
 
-	#[cfg(all(feature = "websocket", feature = "noq"))]
+	#[cfg(all(feature = "websocket", feature = "quic"))]
 	#[tokio::test]
 	async fn race_transport_connect_reports_quic_error_when_websocket_forbidden() {
 		let quic = async {
@@ -1605,7 +1606,7 @@ mod tests {
 		assert!(!err.is_auth(), "mixed auth/non-auth must stay retryable: {err}");
 	}
 
-	#[cfg(all(feature = "websocket", feature = "noq"))]
+	#[cfg(all(feature = "websocket", feature = "quic"))]
 	#[tokio::test]
 	async fn race_transport_connect_keeps_websocket_after_quic_non_auth_error() {
 		let quic = async { Err::<usize, _>(Error::ConnectFailed) };
@@ -1619,14 +1620,14 @@ mod tests {
 
 	/// The URL a race unit test dials. Each test runs in its own process under nextest,
 	/// so the process-wide [`crate::websocket::won`] memo starts empty.
-	#[cfg(all(feature = "websocket", feature = "noq"))]
+	#[cfg(all(feature = "websocket", feature = "quic"))]
 	fn race_url() -> Url {
 		Url::parse("https://race.invalid/").unwrap()
 	}
 
 	/// QUIC winning a race clears WebSocket's earlier win, so the next dial gives QUIC
 	/// its head start again.
-	#[cfg(all(feature = "websocket", feature = "noq"))]
+	#[cfg(all(feature = "websocket", feature = "quic"))]
 	#[tokio::test(start_paused = true)]
 	async fn quic_winning_restores_its_head_start() {
 		crate::websocket::remember(&race_url());
@@ -1644,7 +1645,7 @@ mod tests {
 	}
 
 	/// A race arm that never finishes, and reports through `dropped` once it is dropped.
-	#[cfg(all(feature = "websocket", feature = "noq"))]
+	#[cfg(all(feature = "websocket", feature = "quic"))]
 	fn loser<T>() -> (
 		impl Future<Output = T>,
 		tokio::sync::oneshot::Receiver<std::convert::Infallible>,
@@ -1659,7 +1660,7 @@ mod tests {
 
 	/// WebSocket winning cancels the QUIC dial before the race returns, so no QUIC
 	/// session can come up behind the one WebSocket serves.
-	#[cfg(all(feature = "websocket", feature = "noq"))]
+	#[cfg(all(feature = "websocket", feature = "quic"))]
 	#[tokio::test(start_paused = true)]
 	async fn websocket_winning_cancels_the_quic_dial() {
 		let (quic, mut dropped) = loser::<crate::Result<&str>>();
@@ -1677,7 +1678,7 @@ mod tests {
 	}
 
 	/// QUIC winning cancels the WebSocket dial before the race returns.
-	#[cfg(all(feature = "websocket", feature = "noq"))]
+	#[cfg(all(feature = "websocket", feature = "quic"))]
 	#[tokio::test(start_paused = true)]
 	async fn quic_winning_cancels_the_websocket_dial() {
 		let quic = async { Ok("quic") };
@@ -1694,7 +1695,7 @@ mod tests {
 		);
 	}
 
-	#[cfg(all(feature = "websocket", feature = "noq"))]
+	#[cfg(all(feature = "websocket", feature = "quic"))]
 	#[tokio::test]
 	async fn race_transport_connect_returns_when_quic_transport_connects() {
 		let quic = async { Ok("quic") };
@@ -1721,7 +1722,7 @@ mod tests {
 
 	/// Iroh carries no rustls state, so constructing its client must not require an
 	/// application-installed crypto provider.
-	#[cfg(all(feature = "iroh", not(any(feature = "noq", feature = "websocket"))))]
+	#[cfg(all(feature = "iroh", not(any(feature = "quic", feature = "websocket"))))]
 	#[test]
 	fn iroh_only_client_does_not_require_a_tls_provider() {
 		crate::connect::Config::default().init().expect("iroh-only client");
