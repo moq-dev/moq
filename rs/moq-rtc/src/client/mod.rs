@@ -67,13 +67,17 @@ impl Client {
 
 	/// `client subscribe`: pull a remote WHEP feed and publish it as
 	/// `broadcast` on the local origin. Returns once the session is
-	/// running in the background.
-	pub async fn subscribe(&self, url: Url, broadcast: moq_net::broadcast::Producer) -> crate::Result<()> {
+	/// running in the background, returning its cumulative UDP payload source.
+	pub async fn subscribe(
+		&self,
+		url: Url,
+		broadcast: moq_net::broadcast::Producer,
+	) -> crate::Result<crate::wire::Source> {
 		whep::dial(self, url, broadcast).await
 	}
 
 	/// `client publish`: pull the broadcast at `path` from `origin` and push it to a
-	/// remote WHIP endpoint. Gated on the per-codec re-packetizer.
+	/// remote WHIP endpoint, returning its cumulative UDP payload source.
 	///
 	/// Taking the origin plus path (rather than a resolved [`moq_net::broadcast::Consumer`])
 	/// lets the egress resolve a rendition whose catalog `broadcast` field references a
@@ -83,7 +87,7 @@ impl Client {
 		url: Url,
 		origin: moq_net::origin::Consumer,
 		path: impl moq_net::AsPath,
-	) -> crate::Result<()> {
+	) -> crate::Result<crate::wire::Source> {
 		whip::dial(self, url, origin, path).await
 	}
 }
