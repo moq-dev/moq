@@ -314,7 +314,13 @@ publish the same clock and timestamps wherever each started, without reading
 anything from the other; group numbering is not aligned yet. PTS zero is the
 epoch's time, and for `ts` one 33-bit wrap before it. The wall mapping is
 therefore off by the source clock's reading at the epoch's time: for a TS
-program clock, anywhere within 13.25 hours. A host whose clock reads before the
+program clock, anywhere within 13.25 hours. Each process picks a TS timestamp's
+wrap from its own clock, so near either end of that range, processes whose host
+clocks or delivery differ by more than the distance left can put one timestamp
+in adjacent wraps, 26.5 hours apart, and one later reads its media as a rewind.
+FLV's millisecond timestamps are not unwrapped, so redundant `flv` imports stop
+matching at its 49.7-day wrap: the incumbent rewinds and exits, and one started
+after it publishes timestamps near zero. A host whose clock reads before the
 epoch's time cannot place an `fmp4`, `flv`, or `hls` import on it, and exits 1.
 Only `import fmp4`, `flv`, `hls`, and `ts` (one program, or `--passthrough`)
 accept it. The RTMP, SRT, and WHIP ingests and

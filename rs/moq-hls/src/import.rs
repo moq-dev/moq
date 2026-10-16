@@ -1628,7 +1628,7 @@ mod tests {
 	/// Imports of one playlist given timebases placed by one epoch keep its timestamps on the
 	/// epoch's clock, so one started later publishes the same timestamps on the same root clock.
 	/// Each anchoring its own timebase would shift by its own arrival instead.
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn imports_placed_by_one_epoch_publish_the_same_timestamps() {
 		let (init, fragments) = fmp4_parts(2);
 		let mut resource = init.clone();
@@ -1653,7 +1653,9 @@ mod tests {
 			(catalog, timebase)
 		};
 		let mut imported = Vec::new();
+		let mut started = Vec::new();
 		for _ in 0..2 {
+			started.push(std::time::SystemTime::now());
 			let mut broadcast = moq_net::broadcast::Info::new().produce();
 			let consumer = broadcast.consume();
 			let (catalog, timebase) = placed(&mut broadcast);
@@ -1662,8 +1664,9 @@ mod tests {
 			let mut import = Import::new(broadcast, catalog.clone(), cfg).unwrap();
 			import.init().await.unwrap();
 			imported.push((catalog.snapshot().clock, published(&consumer, &catalog).await));
-			tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 		}
+		// An arrival-anchored clock maps the wall at its catalog's creation, so this alone tells the two apart.
+		assert!(started[1] > started[0], "the later import starts later on the wall");
 
 		let reference = placed(&mut moq_net::broadcast::Info::new().produce()).0;
 		assert_eq!(
