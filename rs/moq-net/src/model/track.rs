@@ -20,7 +20,7 @@ use super::delivered::Delivered;
 use super::{Datagram, Requests};
 
 use super::Cap;
-pub use super::subscription::{Order, Position, Subscription};
+pub use super::subscription::{Anchor, Order, Position, Range, Subscription};
 
 use std::{
 	collections::{BTreeMap, VecDeque},
@@ -2776,18 +2776,6 @@ fn snapshot_subscription(subs: &kio::Shared<Subscriptions>, bound: Option<Durati
 	clamp_combined(combined, bound)
 }
 
-/// The read cursor's floor: the group the subscription named, or 0 (no floor).
-///
-/// A floor is the only thing a start contributes; [`Subscription::max_delay`] is what asks
-/// for data. Delivery walks everything at or above the floor and skips what the budget
-/// convicts, so a zero budget (the default) delivers only the live edge, a larger one
-/// reaches back over what it can still use, and a floor above the live edge simply waits
-/// there (a resumed subscription naming where it left off). One bound decides both what
-/// is sent and what is expired, so the two cannot disagree.
-fn floor_of(subscription: &Subscription) -> u64 {
-	subscription.start.map(|start| start.group).unwrap_or(0)
-}
-
 /// Clamp a drift budget to the publisher's retention window: nobody can wait for a late
 /// group longer than the publisher keeps it around.
 ///
@@ -3939,6 +3927,9 @@ struct Cursor {
 	datagram_index: usize,
 	/// Minimum sequence to return from any `recv` method. Set by `start_at`.
 	min_sequence: u64,
+	/// Whether the subscription's floor still waits on the track's first group: a range
+	/// counting back from the latest group cannot resolve before one exists.
+	floor_pending: bool,
 	/// One past the highest sequence returned by `next_group`, or `None` once it returned
 	/// `u64::MAX` and no group can follow.
 	/// Used only by that method to skip late arrivals; does not affect `recv_group`.
@@ -3976,12 +3967,13 @@ struct Cursor {
 
 impl Cursor {
 	fn new(state: kio::Consumer<TrackState>, subscription: kio::Producer<Subscription>) -> Self {
-		// The budget picks where to start, timed or not: delivery skips the cached groups
-		// it already judges stale, on whichever clock convicts them.
-		let (min_sequence, datagram_index) = {
+		// The ranges floor the cursor, and the budget picks where above it to start, timed
+		// or not: delivery skips the cached groups it already judges stale, on whichever
+		// clock convicts them.
+		let (floor, datagram_index) = {
 			let preferences = subscription.read();
 			let state = state.read();
-			let min_sequence = floor_of(&preferences);
+			let floor = preferences.floor(state.max_sequence);
 			// Arrival order need not be timestamp order. Only skip the initial stale prefix;
 			// subsequent delivery stays in arrival order, including late datagrams.
 			let newest = state.datagrams.iter().filter_map(|datagram| datagram.timestamp).max();
@@ -3997,12 +3989,13 @@ impl Cursor {
 					})
 					.expect("the newest datagram is within max delay")
 			});
-			(min_sequence, state.datagram_offset + start)
+			(floor, state.datagram_offset + start)
 		};
 		Self {
 			state,
 			subscription,
-			min_sequence,
+			min_sequence: floor.unwrap_or(0),
+			floor_pending: floor.is_none(),
 			index: 0,
 			datagram_index,
 			next_sequence: Some(0),
@@ -4023,6 +4016,19 @@ impl Cursor {
 		{
 			*current = self.end_sequence;
 		}
+	}
+
+	/// Raise the floor to where the subscription's ranges start, once a group exists to
+	/// count a relative start back from. Returns whether the floor is settled.
+	fn resolve_floor(&mut self) -> bool {
+		if self.floor_pending {
+			let latest = self.state.read().max_sequence;
+			if let Some(floor) = self.subscription.read().floor(latest) {
+				self.min_sequence = self.min_sequence.max(floor);
+				self.floor_pending = false;
+			}
+		}
+		!self.floor_pending
 	}
 
 	// A helper to automatically apply Dropped if the state is closed without an error.
@@ -4143,6 +4149,7 @@ impl Cursor {
 	}
 
 	fn poll_recv_group(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<group::Consumer>>> {
+		self.resolve_floor();
 		if let Some(aborts) = &self.aborts {
 			// A sequence may name both a live group and its fetched head. Only the
 			// consumer we parked decides whether this notification invalidates it.
@@ -4199,6 +4206,12 @@ impl Cursor {
 					consumer.cache_refresh();
 					self.index = found_index + 1;
 
+					// The first group to arrive resolves a relative floor, which may land
+					// above it.
+					if self.floor_pending && self.resolve_floor() && consumer.sequence < self.min_sequence {
+						continue;
+					}
+
 					// Park a group beyond the cap instead of dropping it, and keep scanning
 					// so an in-range group that arrived behind it still flows.
 					if !super::subscription::before_end(consumer.sequence, self.end_sequence) {
@@ -4234,9 +4247,10 @@ impl Cursor {
 				return Poll::Ready(Ok(None));
 			};
 			self.datagram_index = found_index + 1;
+			self.resolve_floor();
 
 			let sequence = datagram.sequence;
-			let mid_group = self.subscription.read().start.is_some_and(|start| {
+			let mid_group = self.subscription.read().start().is_some_and(|start| {
 				start.group == sequence
 					&& start.frame > datagram.wire.as_ref().and_then(|wire| wire.object_id).unwrap_or(0)
 			});
@@ -4255,6 +4269,7 @@ impl Cursor {
 		let Some(next) = self.next_sequence else {
 			return Poll::Ready(Ok(None));
 		};
+		self.resolve_floor();
 		let mut floor = next.max(self.min_sequence);
 		let end = self.end_sequence;
 		// One scan for the whole poll, so walking a backlog off stays linear in its size.
@@ -4269,6 +4284,12 @@ impl Cursor {
 				return Poll::Ready(Ok(None));
 			};
 			let group = producer.consume();
+
+			// The first group to arrive resolves a relative floor, which may land above it.
+			if self.floor_pending && self.resolve_floor() && group.sequence < self.min_sequence {
+				floor = floor.max(self.min_sequence);
+				continue;
+			}
 
 			// Skip a group the budget has given up on and keep scanning, so one poll
 			// walks a whole backlog off rather than handing it out group by group.
@@ -4611,6 +4632,7 @@ impl Subscriber {
 			Inner::Resume(resume, _) => return resume.poll_start(waiter),
 		};
 		let start = ready!(Consumer::poll_state_start(&cursor.state, waiter));
+		cursor.resolve_floor();
 		Poll::Ready(start.map(|start| start.max(cursor.min_sequence)))
 	}
 
@@ -8205,7 +8227,7 @@ mod test {
 			"the widest subscriber changing must wake the aggregate watcher",
 		);
 		match producer.poll_subscription_changed(&waiter) {
-			Poll::Ready(Ok(Some(sub))) => assert_eq!(sub.end, Position::after_group(5)),
+			Poll::Ready(Ok(Some(sub))) => assert_eq!(sub.end(), Position::after_group(5)),
 			other => panic!("expected the narrowed aggregate, got {other:?}"),
 		}
 	}

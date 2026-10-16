@@ -1067,14 +1067,16 @@ where
 					// cover the group with no gap and no overlap.
 					let edge = live_edge(&cache);
 					let range = subscribe_range(&msg, edge, self.version);
-					subscription.start = range.start.map(|start| track::Position {
-						group: start.group,
-						frame: start.object,
-					});
-					subscription.end = range.end.and_then(|end| match end.object {
-						Some(object) => track::Position::after(end.group, object),
-						None => track::Position::after_group(end.group),
-					});
+					subscription.set_bounds(
+						range.start.map(|start| track::Position {
+							group: start.group,
+							frame: start.object,
+						}),
+						range.end.and_then(|end| match end.object {
+							Some(object) => track::Position::after(end.group, object),
+							None => track::Position::after_group(end.group),
+						}),
+					);
 					let _ = track.update(subscription);
 					// A Timestamp goes out wherever the draft can declare its units and the track
 					// has them. A subscriber that opted out of this SUBSCRIBE_OK's properties learns
