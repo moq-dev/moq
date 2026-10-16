@@ -61,7 +61,7 @@ config.auth.validate_client_ca()?;
 config.auth.validate(client_ca)?;
 ```
 
-### Embedding: io_uring workers bind from the server config (#5312)
+### Embedding: io\_uring workers bind from the server config (#5312)
 
 `uring::Workers::bind` takes a `moq_tokio::server::Config`, so generated and rotating certificates work in both worker modes.
 
