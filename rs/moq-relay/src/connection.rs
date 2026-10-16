@@ -145,7 +145,7 @@ impl Connection {
 		}
 		let lease = lease.preparing(request.auth(), request.role())?;
 		// Bounded too: a peer that stalls the SETUP reply must not outlive the relay.
-		let session = self
+		let (session, driver) = self
 			.shutdown
 			.until_deadline(request.ok())
 			.await
@@ -153,7 +153,9 @@ impl Connection {
 
 		tracing::info!(version = %session.version(), %transport, "negotiated");
 
-		supervise(session, lease, self.shutdown.clone(), registration).await
+		let result = supervise(session, lease, self.shutdown.clone(), registration).await;
+		driver.await??;
+		result
 	}
 
 	/// Admit this connection. Any failure is returned as a [`StatusError`] so

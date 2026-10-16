@@ -208,14 +208,21 @@ impl Client {
 		let connection = self
 			.client
 			.clone()
-			.with_publisher(&publish)
-			.with_subscriber(subscribe.clone())
+			.with_publisher(&publish.inner)
+			.with_subscriber(subscribe.inner.clone())
 			.connect(url);
 
 		// Wait for the first session so auth errors surface here; later drops are the
 		// connection's to ride out. `MoqClient::cancel` unblocks a dial stuck retrying.
 		// `established` hands the connection back, which is what keeps it reconnecting.
-		let connection = connection.established().await.map_err(map_connect_error)?;
+		let connection = publish
+			.driver
+			.watch(
+				subscribe
+					.driver
+					.watch(async { connection.established().await.map_err(map_connect_error) }),
+			)
+			.await?;
 
 		Ok(Arc::new(MoqSession::connected(connection, publish, subscribe)))
 	}
@@ -225,6 +232,9 @@ impl Client {
 fn map_connect_error(err: moq_tokio::Error) -> MoqError {
 	match err {
 		moq_tokio::Error::MoqNet(err) => err.into(),
+		moq_tokio::Error::Panic => MoqError::Task {
+			reason: "background task panicked".into(),
+		},
 		err => match err.connect_error() {
 			Some(moq_tokio::ConnectError::Unauthorized) => MoqError::Unauthorized,
 			Some(moq_tokio::ConnectError::Forbidden) => MoqError::Forbidden,
@@ -248,8 +258,11 @@ fn map_connect_error(err: moq_tokio::Error) -> MoqError {
 /// connect error would make every status watcher treat an expected teardown as a
 /// broken connection.
 #[cfg(not(target_arch = "wasm32"))]
-fn map_closed_error(err: moq_tokio::Error) -> MoqError {
+pub(crate) fn map_closed_error(err: moq_tokio::Error) -> MoqError {
 	match err {
+		moq_tokio::Error::Panic => MoqError::Task {
+			reason: "background task panicked".into(),
+		},
 		moq_tokio::Error::Stopped => MoqError::Closed,
 		// A peer's session/stream code stays structured. HTTP 401/403 are a
 		// connect-time rejection, not a protocol code, and land below.
@@ -487,8 +500,8 @@ impl Client {
 		// transport and ends that task.
 		let (session, driver) = moq_net::Client::new()
 			.with_versions(self.versions.clone())
-			.with_publisher(&publish)
-			.with_subscriber(subscribe.clone())
+			.with_publisher(&publish.inner)
+			.with_subscriber(subscribe.inner.clone())
 			.connect(web_async::time::Instant::now(), transport)
 			.await?;
 
@@ -662,7 +675,37 @@ impl From<moq_tokio::Status> for MoqConnectionStatus {
 enum Inner {
 	#[cfg(not(target_arch = "wasm32"))]
 	Connection(moq_tokio::Connection),
-	Session(moq_net::Session),
+	Session(Accepted),
+}
+
+#[derive(Clone)]
+struct Accepted {
+	session: moq_net::Session,
+	driver: crate::ffi::Background,
+}
+
+impl std::ops::Deref for Accepted {
+	type Target = moq_net::Session;
+	fn deref(&self) -> &Self::Target {
+		&self.session
+	}
+}
+
+impl Accepted {
+	async fn closed<T>(&self) -> Result<T, MoqError> {
+		self.driver.check()?;
+		#[cfg(not(target_arch = "wasm32"))]
+		self.driver.finished().await?;
+		Err(self.session.closed().await.into())
+	}
+
+	async fn close(self) -> Result<(), MoqError> {
+		self.driver.check()?;
+		let result = self.session.close().await;
+		#[cfg(not(target_arch = "wasm32"))]
+		self.driver.finished().await?;
+		result.map_err(Into::into)
+	}
 }
 
 #[derive(uniffi::Object)]
@@ -685,8 +728,8 @@ impl MoqSession {
 	#[cfg(not(target_arch = "wasm32"))]
 	pub(crate) fn connected(
 		connection: moq_tokio::Connection,
-		publish: moq_net::origin::Producer,
-		subscribe: moq_net::origin::Producer,
+		publish: crate::origin::Origin,
+		subscribe: crate::origin::Origin,
 	) -> Self {
 		Self::build(Inner::Connection(connection), publish, subscribe)
 	}
@@ -694,10 +737,21 @@ impl MoqSession {
 	/// Wrap a server-accepted session (see `MoqServer::accept`).
 	pub(crate) fn accepted(
 		session: moq_net::Session,
-		publish: moq_net::origin::Producer,
-		subscribe: moq_net::origin::Producer,
+		publish: crate::origin::Origin,
+		subscribe: crate::origin::Origin,
+		#[cfg(not(target_arch = "wasm32"))] driver: tokio::task::JoinHandle<moq_tokio::Result<()>>,
 	) -> Self {
-		Self::build(Inner::Session(session), publish, subscribe)
+		#[cfg(not(target_arch = "wasm32"))]
+		let driver = crate::ffi::Background::new(async move {
+			match driver.await {
+				Ok(result) => result,
+				Err(error) if error.is_cancelled() => Err(moq_net::Error::Cancel.into()),
+				Err(_) => Err(moq_tokio::Error::Panic),
+			}
+		});
+		#[cfg(target_arch = "wasm32")]
+		let driver = crate::ffi::Background::default();
+		Self::build(Inner::Session(Accepted { session, driver }), publish, subscribe)
 	}
 
 	fn mint_allocator(inner: &Inner) -> moq_net::bandwidth::Allocator {
@@ -713,12 +767,12 @@ impl MoqSession {
 		}
 	}
 
-	fn build(inner: Inner, publish: moq_net::origin::Producer, subscribe: moq_net::origin::Producer) -> Self {
+	fn build(inner: Inner, publish: crate::origin::Origin, subscribe: crate::origin::Origin) -> Self {
 		// Eagerly wrap the wired origin sides so each publish()/consume()
 		// call hands back the same Arc. `publish` is published into; `subscribe`
 		// is where the remote's broadcasts land (read via its consumer view).
 		let publisher = Arc::new(MoqOriginProducer::from_inner(publish));
-		let consumer = Arc::new(MoqOriginConsumer::from_inner(subscribe.consume()));
+		let consumer = Arc::new(MoqOriginConsumer::from_inner(subscribe));
 		let bandwidth = Arc::new(MoqBandwidth::new(Self::mint_allocator(&inner)));
 		Self {
 			inner: inner.clone(),
@@ -728,6 +782,14 @@ impl MoqSession {
 			consumer,
 			bandwidth,
 		}
+	}
+
+	async fn watch<T>(&self, future: impl std::future::Future<Output = Result<T, MoqError>>) -> Result<T, MoqError> {
+		self.publisher
+			.inner()
+			.driver
+			.watch(self.consumer.driver.watch(future))
+			.await
 	}
 
 	/// Abort the live transport (if any) with `err` and stop any reconnect loop.
@@ -763,15 +825,14 @@ impl MoqSession {
 	/// session resolves with the session's close reason.
 	pub async fn closed(&self) -> Result<(), MoqError> {
 		// We have a task to run all of the closed calls juuuuust so they use the same tokio runtime.
-		self.closed
-			.run(|inner| async move {
-				match &*inner {
-					#[cfg(not(target_arch = "wasm32"))]
-					Inner::Connection(connection) => connection.closed().await.map_err(map_closed_error),
-					Inner::Session(session) => Err(session.closed().await.into()),
-				}
-			})
-			.await
+		self.watch(self.closed.run(|inner| async move {
+			match &*inner {
+				#[cfg(not(target_arch = "wasm32"))]
+				Inner::Connection(connection) => connection.closed().await.map_err(map_closed_error),
+				Inner::Session(session) => session.closed().await,
+			}
+		}))
+		.await
 	}
 
 	/// Wait for the connection status to differ from the one this handle last reported.
@@ -787,15 +848,14 @@ impl MoqSession {
 	/// before you ask again is coalesced away, so the outages it hides are the ones
 	/// that already healed. Don't count outages with it.
 	pub async fn status(&self) -> Result<MoqConnectionStatus, MoqError> {
-		self.status
-			.run(|mut inner| async move {
-				match &mut *inner {
-					#[cfg(not(target_arch = "wasm32"))]
-					Inner::Connection(connection) => Ok(connection.status().await.map_err(map_closed_error)?.into()),
-					Inner::Session(session) => Err(session.closed().await.into()),
-				}
-			})
-			.await
+		self.watch(self.status.run(|mut inner| async move {
+			match &mut *inner {
+				#[cfg(not(target_arch = "wasm32"))]
+				Inner::Connection(connection) => Ok(connection.status().await.map_err(map_closed_error)?.into()),
+				Inner::Session(session) => session.closed().await,
+			}
+		}))
+		.await
 	}
 
 	/// How many times this session has connected: 1 for the connect it was built from, one more
@@ -829,14 +889,17 @@ impl MoqSession {
 	/// IETF also waits for transport ACKs.
 	pub async fn shutdown(&self) -> Result<(), MoqError> {
 		let inner = self.inner.clone();
-		crate::ffi::detached(async move {
+		let result = crate::ffi::detached(async move {
 			match inner {
 				#[cfg(not(target_arch = "wasm32"))]
 				Inner::Connection(connection) => connection.close().await.map_err(map_closed_error),
-				Inner::Session(session) => session.close().await.map_err(MoqError::from),
+				Inner::Session(session) => session.close().await,
 			}
 		})
-		.await
+		.await;
+		self.publisher.inner().driver.check()?;
+		self.consumer.driver.check()?;
+		result
 	}
 
 	/// The publish-side origin: where local broadcasts get advertised

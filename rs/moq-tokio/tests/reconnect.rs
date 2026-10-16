@@ -78,7 +78,7 @@ async fn a_handshake_slower_than_the_retry_window_still_lands() {
 	let _server = tokio::spawn(async move {
 		let origin = moq_tokio::origin::spawn();
 		while let Some(request) = server.accept().await {
-			if let Ok(session) = request.with_publisher(&origin).ok().await {
+			if let Ok((session, _driver)) = request.with_publisher(&origin).ok().await {
 				let _ = accepted.send(session);
 			}
 		}
@@ -187,7 +187,7 @@ async fn spawn_server() -> (
 		while let Some(request) = server.accept().await {
 			let origin = moq_tokio::origin::spawn();
 			match request.with_publisher(&origin).ok().await {
-				Ok(session) => {
+				Ok((session, _driver)) => {
 					let _ = accepted.send(session);
 				}
 				Err(err) => tracing::warn!(%err, "accept failed"),
@@ -401,7 +401,7 @@ async fn rides_out_a_drain(backoff: moq_tokio::Backoff, drained: usize) {
 		// Held, as a draining server does: each one closes when the client leaves it.
 		let mut held = Vec::new();
 		while let Some(request) = server.accept().await {
-			let Ok(session) = request.with_publisher(&origin).ok().await else {
+			let Ok((session, _driver)) = request.with_publisher(&origin).ok().await else {
 				continue;
 			};
 			if held.len() < drained {

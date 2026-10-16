@@ -358,6 +358,7 @@ impl Drop for SendStream {
 
 /// Errors that arise from writing to a stream
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum WriteError {
     /// The peer is no longer accepting data on this stream
     ///
@@ -409,6 +410,7 @@ impl From<WriteError> for io::Error {
 
 /// Errors that arise while monitoring for a send stream stop from the peer
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum StoppedError {
     /// The connection was lost
     #[error("connection lost")]

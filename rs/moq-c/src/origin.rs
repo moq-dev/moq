@@ -23,7 +23,7 @@ struct TaskEntry {
 #[derive(Default)]
 pub struct Origin {
 	/// Active origin producers for publishing and consuming broadcasts.
-	active: NonZeroSlab<moq_net::origin::Producer>,
+	active: NonZeroSlab<Producer>,
 
 	/// Delivered announce events, freed by the caller.
 	announced: NonZeroSlab<AnnouncedRecord>,
@@ -39,6 +39,41 @@ pub struct Origin {
 
 	/// Broadcast requests delivered to a dynamic handler, freed after accept/reject.
 	broadcast_request: NonZeroSlab<Option<moq_net::origin::Request>>,
+}
+
+#[derive(Clone)]
+pub(crate) struct Producer {
+	pub producer: moq_net::origin::Producer,
+	pub driver: crate::ffi::Background,
+}
+
+impl std::ops::Deref for Producer {
+	type Target = moq_net::origin::Producer;
+	fn deref(&self) -> &Self::Target {
+		&self.producer
+	}
+}
+
+#[derive(Clone)]
+pub(crate) struct Consumer {
+	pub inner: moq_net::origin::Consumer,
+	pub driver: crate::ffi::Background,
+}
+
+impl std::ops::Deref for Consumer {
+	type Target = moq_net::origin::Consumer;
+	fn deref(&self) -> &Self::Target {
+		&self.inner
+	}
+}
+
+impl Producer {
+	fn consume_owned(&self) -> Consumer {
+		Consumer {
+			inner: self.producer.consume(),
+			driver: self.driver.clone(),
+		}
+	}
 }
 
 /// One announce event and the C string views borrowed from it.
@@ -97,11 +132,17 @@ impl Origin {
 	pub fn create(&mut self) -> Result<Id, Error> {
 		// Every FFI entry point runs inside `RUNTIME.enter()`, so the driver
 		// lands on the dedicated moq-c runtime.
-		self.active.insert(moq_tokio::origin::spawn())
+		let (producer, driver) = moq_net::origin::Producer::new(Default::default());
+		self.active.insert(Producer {
+			producer,
+			driver: crate::ffi::Background::driver(driver),
+		})
 	}
 
-	pub fn get(&self, id: Id) -> Result<&moq_net::origin::Producer, Error> {
-		self.active.get(id).ok_or(Error::OriginNotFound)
+	pub fn get(&self, id: Id) -> Result<&Producer, Error> {
+		let origin = self.active.get(id).ok_or(Error::OriginNotFound)?;
+		origin.driver.check()?;
+		Ok(origin)
 	}
 
 	pub fn announced(
@@ -111,8 +152,11 @@ impl Origin {
 		hidden: bool,
 		on_announce: OnStatus,
 	) -> Result<Id, Error> {
-		let origin = self.active.get_mut(origin).ok_or(Error::OriginNotFound)?;
+		let origin = self.active.get(origin).ok_or(Error::OriginNotFound)?;
+		origin.driver.check()?;
+		let driver = origin.driver.clone();
 		let consumer = origin
+			.producer
 			.consume()
 			.scope("", &moq_net::Patterns::from(scope))?
 			.with_hidden(hidden)
@@ -126,7 +170,7 @@ impl Origin {
 		let id = self.announced_task.insert(Some(entry))?;
 
 		tokio::spawn(async move {
-			let res = Self::run_announced(on_announce, consumer, channel.1).await;
+			let res = crate::ffi::run(driver.watch(Self::run_announced(on_announce, consumer, channel.1))).await;
 
 			// Deliver one final terminal callback (code <= 0), then drop the entry.
 			// Pull it out from under the lock so the callback never runs while held.
@@ -204,8 +248,10 @@ impl Origin {
 	/// or cancellation it fires a single terminal code (`0` on close, negative on error). Returns a
 	/// task handle for cancellation via [`Self::consume_announced_close`].
 	pub fn consume_announced(&mut self, origin: Id, path: String, on_broadcast: OnStatus) -> Result<Id, Error> {
-		let origin = self.active.get_mut(origin).ok_or(Error::OriginNotFound)?;
-		let consumer = origin.consume();
+		let origin = self.active.get(origin).ok_or(Error::OriginNotFound)?;
+		origin.driver.check()?;
+		let driver = origin.driver.clone();
+		let consumer = origin.consume_owned();
 		let channel = oneshot::channel();
 
 		let entry = TaskEntry {
@@ -215,7 +261,9 @@ impl Origin {
 		let id = self.consume_task.insert(Some(entry))?;
 
 		tokio::spawn(async move {
-			let res = Self::run_consume_announced(on_broadcast, consumer, path, channel.1).await;
+			let res =
+				crate::ffi::run(driver.watch(Self::run_consume_announced(on_broadcast, consumer, path, channel.1)))
+					.await;
 
 			// Deliver one final terminal callback (code <= 0), then drop the entry.
 			// Pull it out from under the lock so the callback never runs while held.
@@ -230,7 +278,7 @@ impl Origin {
 
 	async fn run_consume_announced(
 		callback: OnStatus,
-		consumer: moq_net::origin::Consumer,
+		consumer: Consumer,
 		path: String,
 		mut close: oneshot::Receiver<()>,
 	) -> Result<(), Error> {
@@ -265,8 +313,10 @@ impl Origin {
 	/// handle (> 0) once served, then a terminal `0`; or a single terminal code (`0` on close,
 	/// negative on error) if it can't be served. Returns a task handle for cancellation.
 	pub fn request(&mut self, origin: Id, path: String, on_broadcast: OnStatus) -> Result<Id, Error> {
-		let origin = self.active.get_mut(origin).ok_or(Error::OriginNotFound)?;
-		let consumer = origin.consume();
+		let origin = self.active.get(origin).ok_or(Error::OriginNotFound)?;
+		origin.driver.check()?;
+		let driver = origin.driver.clone();
+		let consumer = origin.consume_owned();
 		let channel = oneshot::channel();
 
 		let entry = TaskEntry {
@@ -276,7 +326,7 @@ impl Origin {
 		let id = self.consume_task.insert(Some(entry))?;
 
 		tokio::spawn(async move {
-			let res = Self::run_request(on_broadcast, consumer, path, channel.1).await;
+			let res = crate::ffi::run(driver.watch(Self::run_request(on_broadcast, consumer, path, channel.1))).await;
 
 			// Deliver one final terminal callback (code <= 0), then drop the entry.
 			// Pull it out from under the lock so the callback never runs while held.
@@ -291,7 +341,7 @@ impl Origin {
 
 	async fn run_request(
 		callback: OnStatus,
-		consumer: moq_net::origin::Consumer,
+		consumer: Consumer,
 		path: String,
 		mut close: oneshot::Receiver<()>,
 	) -> Result<(), Error> {
@@ -330,9 +380,11 @@ impl Origin {
 		&self,
 		origin: Id,
 		path: P,
-	) -> Result<moq_net::broadcast::Producer, Error> {
-		let origin = self.active.get(origin).ok_or(Error::OriginNotFound)?;
-		Ok(origin.create_broadcast(path)?)
+	) -> Result<(moq_net::broadcast::Producer, crate::ffi::Background), Error> {
+		let origin = self.get(origin)?;
+		let result = origin.producer.create_broadcast(path);
+		origin.driver.check()?;
+		Ok((result?, origin.driver.clone()))
 	}
 
 	/// Advertise `prefix` and serve requests beneath it, delivering each as a
@@ -345,7 +397,11 @@ impl Origin {
 		on_request: OnStatus,
 	) -> Result<Id, Error> {
 		let origin = self.active.get(origin).ok_or(Error::OriginNotFound)?;
-		let inner = origin.dynamic(prefix, route)?;
+		origin.driver.check()?;
+		let driver = origin.driver.clone();
+		let result = origin.producer.dynamic(prefix, route);
+		origin.driver.check()?;
+		let inner = result?;
 		let channel = oneshot::channel();
 		let id = self.dynamic.insert(Some(DynamicEntry {
 			inner: Some(inner),
@@ -354,7 +410,7 @@ impl Origin {
 		}))?;
 
 		tokio::spawn(async move {
-			let res = Self::run_dynamic(id, channel.1).await;
+			let res = crate::ffi::run(driver.watch(Self::run_dynamic(id, channel.1))).await;
 			let entry = State::lock().origin.dynamic.remove(id).flatten();
 			if let Some(entry) = entry {
 				entry.callback.call(res);
@@ -439,5 +495,42 @@ impl Origin {
 	pub fn close(&mut self, origin: Id) -> Result<(), Error> {
 		self.active.remove(origin).ok_or(Error::OriginNotFound)?;
 		Ok(())
+	}
+}
+
+#[cfg(test)]
+mod supervision_tests {
+	use super::*;
+
+	#[tokio::test]
+	async fn a_broadcast_keeps_the_origin_failure_after_its_origin_handle_is_released() {
+		let (producer, completion, trigger) = crate::ffi::panicking_origin();
+		let mut origins = Origin::default();
+		let origin = origins
+			.active
+			.insert(Producer {
+				producer,
+				driver: completion.clone(),
+			})
+			.unwrap();
+		let mut publish = crate::publish::Publish::default();
+		let broadcast = publish
+			.create(origins.create_broadcast(origin, "retained").unwrap())
+			.unwrap();
+		origins.close(origin).unwrap();
+		*trigger
+			.write()
+			.unwrap_or_else(|_| unreachable!("test keeps its panic trigger open")) = true;
+		assert!(matches!(completion.finished().await, Err(Error::Panic)));
+		drop(completion);
+		assert!(matches!(
+			publish.announce(broadcast, Default::default()),
+			Err(Error::Panic)
+		));
+		let healthy = origins.create().unwrap();
+		let broadcast = publish
+			.create(origins.create_broadcast(healthy, "healthy").unwrap())
+			.unwrap();
+		publish.announce(broadcast, Default::default()).unwrap();
 	}
 }
