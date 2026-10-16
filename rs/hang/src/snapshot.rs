@@ -53,12 +53,6 @@ pub(crate) struct Wall;
 fn epoch() -> std::time::SystemTime {
 	std::time::UNIX_EPOCH + Duration::from_millis(crate::catalog::MOQ_EPOCH_UNIX_MILLIS)
 }
-pub(crate) fn wall_default() -> std::time::SystemTime {
-	epoch()
-}
-pub(crate) fn wall_zero(value: &std::time::SystemTime) -> bool {
-	*value == epoch()
-}
 impl SerializeAs<std::time::SystemTime> for Wall {
 	fn serialize_as<S: serde::Serializer>(value: &std::time::SystemTime, serializer: S) -> Result<S::Ok, S::Error> {
 		let duration = value.duration_since(epoch()).map_err(serde::ser::Error::custom)?;
@@ -106,14 +100,12 @@ mod tests {
 			serde_json::to_value(echo::Snapshot::<()>::default()).unwrap(),
 			serde_json::json!({})
 		);
-		let track: stats::Track = serde_json::from_str(r#"{"future":17}"#).unwrap();
-		assert_eq!(track, stats::Track::default());
-		assert_eq!(serde_json::to_value(track).unwrap(), serde_json::json!({}));
+		let rendition: stats::Rendition = serde_json::from_str(r#"{"future":17}"#).unwrap();
+		assert_eq!(rendition, stats::Rendition::default());
+		assert_eq!(serde_json::to_value(rendition).unwrap(), serde_json::json!({}));
 		let catalog = Catalog::<()>::from_str("{}").unwrap();
 		assert!(catalog.stats.is_none() && catalog.echo.is_none());
 		assert_eq!(catalog.to_json().unwrap(), "{}");
-		assert!(Catalog::<()>::from_str(r#"{"stats":{}}"#).is_err());
-		assert!(Catalog::<()>::from_str(r#"{"echo":{}}"#).is_err());
 	}
 
 	#[test]
@@ -159,21 +151,27 @@ mod tests {
 		let cases: Vec<serde_json::Value> =
 			serde_json::from_str(include_str!("../fixtures/snapshot-invalid.json")).unwrap();
 		for case in cases {
-			assert!(serde_json::from_value::<stats::Track>(case.clone()).is_err(), "{case}");
+			assert!(
+				serde_json::from_value::<stats::Rendition>(case.clone()).is_err(),
+				"{case}"
+			);
 		}
 		for input in [
 			r#"{"stalled":-1}"#,
 			r#"{"latency":0.5}"#,
-			r#"{"arrival":{"timestamp":9007199254740992}}"#,
-			r#"{"arrival":{"wall":-1}}"#,
+			r#"{"arrival":{"timestamp":9007199254740992,"wall":0}}"#,
+			r#"{"arrival":{"timestamp":0,"wall":-1}}"#,
+			r#"{"arrival":{}}"#,
+			r#"{"arrival":{"timestamp":0}}"#,
+			r#"{"arrival":{"wall":0}}"#,
 		] {
-			assert!(serde_json::from_str::<echo::Track>(input).is_err(), "{input}");
+			assert!(serde_json::from_str::<echo::Rendition>(input).is_err(), "{input}");
 		}
-		let track = stats::Track {
+		let rendition = stats::Rendition {
 			frames: crate::catalog::MAX_SAFE_INTEGER + 1,
 			..Default::default()
 		};
-		assert!(serde_json::to_value(track).is_err());
+		assert!(serde_json::to_value(rendition).is_err());
 	}
 
 	#[test]
@@ -190,7 +188,7 @@ mod tests {
 		let arrival = report.renditions["hd"].arrival.as_ref().unwrap();
 		assert_eq!(arrival.timestamp, moq_net::Timestamp::from_millis(30_000).unwrap());
 		assert_eq!(
-			arrival.wall.duration_since(wall_default()).unwrap(),
+			arrival.wall.duration_since(epoch()).unwrap(),
 			Duration::from_millis(175_184_640_000)
 		);
 		assert_eq!(report.renditions["hd"].stalled, Duration::from_millis(120));

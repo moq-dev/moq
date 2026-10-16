@@ -12,16 +12,16 @@ import { TransportSchema } from "./stats";
 
 /** The newest received media timestamp paired with its arrival wall time. */
 export const ArrivalSchema = z.object({
-	// Media timestamp in milliseconds; omitted means zero.
-	timestamp: z.optional(u53Schema),
-	// Arrival milliseconds since the MoQ epoch; omitted means that epoch.
-	wall: z.optional(u53Schema),
+	// Media timestamp in milliseconds.
+	timestamp: u53Schema,
+	// Arrival milliseconds since the MoQ epoch.
+	wall: u53Schema,
 });
 /** The newest received media timestamp and its wall-clock arrival. */
 export type Arrival = z.infer<typeof ArrivalSchema>;
 
 /** Cumulative counters and latest playout measurements for one rendition. */
-export const TrackSchema = z.object({
+export const RenditionSchema = z.object({
 	// Cumulative media frames received.
 	frames: z.optional(u53Schema),
 	// Cumulative media payload bytes received.
@@ -49,13 +49,13 @@ export const TrackSchema = z.object({
 	latency: measurementSchema,
 });
 /** One rendition's delivery counters and latest playout measurements. */
-export type Track = z.infer<typeof TrackSchema>;
+export type Rendition = z.infer<typeof RenditionSchema>;
 /** One cumulative viewer report, keyed by the catalog's rendition IDs. */
 export const SnapshotSchema = z.looseObject({
 	// Connection measurements; unavailable fields remain absent.
 	transport: z.optional(TransportSchema),
 	// Empty entries retain a rendition ID whose counters are all zero.
-	renditions: z.optional(z.record(z.string(), TrackSchema)),
+	renditions: z.optional(z.record(z.string(), RenditionSchema)),
 });
 /** One viewer report, with application or container sections flattened beside it. */
 export type Snapshot = z.infer<typeof SnapshotSchema>;

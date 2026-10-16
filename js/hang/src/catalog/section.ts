@@ -32,3 +32,27 @@ export function section<T extends z.ZodMiniType>(schema: T, map: string) {
 		]),
 	);
 }
+
+/**
+ * Like {@link section}, for a section identified by one string field (`stats.track`, `echo.path`)
+ * rather than a map. Mirrors the Rust `deserialize_named`.
+ *
+ * @param schema - the section's own schema, applied when the field is a string.
+ * @param key - the section's required string field.
+ */
+export function named<T extends z.ZodMiniType>(schema: T, key: string) {
+	return z.optional(
+		z.union([
+			schema,
+			z.pipe(
+				z.custom<unknown>(
+					(value) =>
+						typeof value !== "object" ||
+						value === null ||
+						typeof (value as Record<string, unknown>)[key] !== "string",
+				),
+				z.transform(() => undefined),
+			),
+		]),
+	);
+}

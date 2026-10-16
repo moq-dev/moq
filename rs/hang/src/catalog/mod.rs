@@ -99,3 +99,32 @@ where
 
 	serde_json::from_value(value).map_err(serde::de::Error::custom)
 }
+
+/// Decode an optional section identified by one string field (`stats.track`, `echo.path`).
+///
+/// A value without that string field is someone else's key and decodes as absent, for the same
+/// reason as [`deserialize_section`]; a value with it is ours and must decode.
+fn deserialize_named<'de, D, T>(deserializer: D, key: &str) -> Result<Option<T>, D::Error>
+where
+	D: serde::Deserializer<'de>,
+	T: serde::de::DeserializeOwned,
+{
+	use serde::Deserialize;
+	let value = serde_json::Value::deserialize(deserializer)?;
+
+	if !value.get(key).is_some_and(serde_json::Value::is_string) {
+		return Ok(None);
+	}
+
+	serde_json::from_value(value)
+		.map(Some)
+		.map_err(serde::de::Error::custom)
+}
+
+pub(crate) fn deserialize_stats<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Option<Stats>, D::Error> {
+	deserialize_named(deserializer, "track")
+}
+
+pub(crate) fn deserialize_echo<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Option<Echo>, D::Error> {
+	deserialize_named(deserializer, "path")
+}

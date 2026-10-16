@@ -22,7 +22,7 @@ export const TransportSchema = z.object({
 /** Transport measurements, absent when unavailable; a measured zero remains zero. */
 export type Transport = z.infer<typeof TransportSchema>;
 /** Cumulative counters and target bitrate for one locally published rendition. */
-export const TrackSchema = z.object({
+export const RenditionSchema = z.object({
 	// Cumulative media frames sent.
 	frames: z.optional(u53Schema),
 	// Cumulative media payload bytes sent.
@@ -35,13 +35,13 @@ export const TrackSchema = z.object({
 	bitrate: measurementSchema,
 });
 /** One locally published rendition's counters and optional target bitrate. */
-export type Track = z.infer<typeof TrackSchema>;
+export type Rendition = z.infer<typeof RenditionSchema>;
 /** One cumulative publisher report, keyed by the catalog's rendition IDs. */
 export const SnapshotSchema = z.looseObject({
 	// Connection measurements; unavailable fields remain absent.
 	transport: z.optional(TransportSchema),
 	// Empty entries retain a rendition ID whose counters are all zero.
-	renditions: z.optional(z.record(z.string(), TrackSchema)),
+	renditions: z.optional(z.record(z.string(), RenditionSchema)),
 });
 /** One publisher report, with application or container sections flattened beside it. */
 export type Snapshot = z.infer<typeof SnapshotSchema>;

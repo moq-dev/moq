@@ -11,7 +11,7 @@ import { TRACK } from "./format";
 import { JsonSchema } from "./json";
 import type { RelativeBroadcast } from "./path";
 import { PRIORITY } from "./priority";
-import { section } from "./section";
+import { named, section } from "./section";
 import { StatsSchema } from "./stats";
 import { TextSchema } from "./text";
 import { VideoSchema } from "./video";
@@ -38,18 +38,10 @@ export const RootSchema = z.looseObject({
 	// The broadcast's one continuous clock, if the publisher exposes one. Independent of
 	// `archive`: a live-only publisher exposes its mapping without creating a segment index.
 	clock: z.optional(ClockSchema),
-	stats: z.optional(
-		z.pipe(
-			z.nullable(StatsSchema),
-			z.transform((value) => value ?? undefined),
-		),
-	),
-	echo: z.optional(
-		z.pipe(
-			z.nullable(EchoSchema),
-			z.transform((value) => value ?? undefined),
-		),
-	),
+	// Decoded leniently like `text` below: a value without a string `track` or `path` is someone
+	// else's and decodes as absent. See `named`.
+	stats: named(StatsSchema, "track"),
+	echo: named(EchoSchema, "path"),
 	// `text`, `json`, and `binary` are generic enough keys that an application could have been
 	// carrying its own before these sections were reserved, so a value that isn't a section decodes
 	// as absent rather than failing the whole catalog. A value that IS a section but carries a

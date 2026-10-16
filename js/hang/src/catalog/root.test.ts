@@ -264,6 +264,17 @@ test("shared stats and echo discovery round trips without changing old catalogs"
 	).json();
 	expect(RootSchema.parse(fixture)).toEqual(fixture);
 	expect(RootSchema.parse({})).toEqual({});
-	expect(() => RootSchema.parse({ stats: {} })).toThrow();
-	expect(() => RootSchema.parse({ echo: {} })).toThrow();
+});
+
+test("a foreign stats or echo value decodes as absent instead of failing the catalog", () => {
+	for (const foreign of [{}, 5, "on", { track: 5 }, { path: ["a"] }, null]) {
+		for (const key of ["stats", "echo"]) {
+			const parsed = RootSchema.parse({ video: { renditions: {} }, [key]: foreign });
+			expect(parsed.stats).toBeUndefined();
+			expect(parsed.echo).toBeUndefined();
+		}
+	}
+	const parsed = RootSchema.parse({ stats: { track: "stats.json" }, echo: { path: "viewers" } });
+	expect(parsed.stats).toEqual({ track: "stats.json" });
+	expect(parsed.echo?.path).toBe("viewers" as RelativeBroadcast);
 });

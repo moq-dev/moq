@@ -14,7 +14,7 @@ pub struct Snapshot<E = ()> {
 	pub transport: Transport,
 	/// Per-rendition counters, including entries with all counters reset to zero.
 	#[serde(skip_serializing_if = "BTreeMap::is_empty")]
-	pub renditions: BTreeMap<String, Track>,
+	pub renditions: BTreeMap<String, Rendition>,
 	/// Application-defined root sections flattened beside the media report.
 	#[serde(flatten)]
 	pub ext: E,
@@ -25,7 +25,7 @@ pub struct Snapshot<E = ()> {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
 #[serde(default, rename_all = "camelCase")]
 #[non_exhaustive]
-pub struct Track {
+pub struct Rendition {
 	/// Cumulative media frames received.
 	#[serde_as(as = "Number")]
 	#[serde(skip_serializing_if = "is_zero")]
@@ -70,24 +70,20 @@ pub struct Track {
 /// The newest received media timestamp paired with its arrival wall time.
 #[serde_with::serde_as]
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
-#[serde(default, rename_all = "camelCase")]
 #[non_exhaustive]
 pub struct Arrival {
 	/// The media timestamp, encoded in milliseconds.
 	#[serde_as(as = "Millis")]
-	#[serde(skip_serializing_if = "timestamp_zero")]
 	pub timestamp: moq_net::Timestamp,
 	/// The arrival wall time, encoded in milliseconds since the MoQ epoch.
 	#[serde_as(as = "crate::snapshot::Wall")]
-	#[serde(skip_serializing_if = "crate::snapshot::wall_zero")]
 	pub wall: std::time::SystemTime,
 }
-impl Default for Arrival {
-	fn default() -> Self {
-		Self {
-			timestamp: moq_net::Timestamp::ZERO,
-			wall: crate::snapshot::wall_default(),
-		}
+
+impl Arrival {
+	/// Pair a received media timestamp with the wall time it arrived.
+	pub fn new(timestamp: moq_net::Timestamp, wall: std::time::SystemTime) -> Self {
+		Self { timestamp, wall }
 	}
 }
 
@@ -98,8 +94,4 @@ pub const TRACK: &str = "feedback.json";
 /// Whether a broadcast path identifies viewer feedback rather than playable media.
 pub fn is_echo(path: &moq_net::Path) -> bool {
 	path.as_str().ends_with(SUFFIX)
-}
-
-fn timestamp_zero(timestamp: &moq_net::Timestamp) -> bool {
-	timestamp.is_zero()
 }

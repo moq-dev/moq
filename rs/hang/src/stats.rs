@@ -13,7 +13,7 @@ pub struct Snapshot<E = ()> {
 	pub transport: Transport,
 	/// Per-rendition counters, including entries with all counters reset to zero.
 	#[serde(skip_serializing_if = "BTreeMap::is_empty")]
-	pub renditions: BTreeMap<String, Track>,
+	pub renditions: BTreeMap<String, Rendition>,
 	/// Application-defined root sections flattened beside the media report.
 	#[serde(flatten)]
 	pub ext: E,
@@ -24,7 +24,7 @@ pub struct Snapshot<E = ()> {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
 #[serde(default, rename_all = "camelCase")]
 #[non_exhaustive]
-pub struct Track {
+pub struct Rendition {
 	/// Cumulative frames sent.
 	#[serde_as(as = "Number")]
 	#[serde(skip_serializing_if = "is_zero")]

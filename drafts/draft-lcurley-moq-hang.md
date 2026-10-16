@@ -619,6 +619,8 @@ A reader recognizes feedback by the `.echo` suffix on the broadcast's final path
 The application controls names and publish/subscribe authorization; a report is not authenticated beyond those rights.
 Without `echo`, no feedback is solicited.
 
+An application may already carry its own `stats` or `echo` root key, so a reader MUST treat a `stats` value without a string `track`, or an `echo` value without a string `path`, as absent rather than refuse the catalog.
+
 Both tracks carry JSON snapshots, optionally with the `.z` sibling encoding of JSON snapshots.
 The uncompressed track carries a complete snapshot in a group's single UTF-8 JSON frame.
 The compressed sibling starts each group with a full snapshot and continues with RFC 7396 merge patches in the DEFLATE stream defined in {{compression}}.
@@ -628,22 +630,22 @@ A reader takes the newest complete snapshot and treats the reporting broadcast's
 ~~~
 type PublisherSnapshot = {
   transport?: Transport,
-  renditions?: { [renditionId: string]: PublisherTrack },
+  renditions?: { [renditionId: string]: PublisherRendition },
   // ... any container or application sections ...
 }
 type ViewerSnapshot = {
   transport?: Transport,
-  renditions?: { [renditionId: string]: ViewerTrack },
+  renditions?: { [renditionId: string]: ViewerRendition },
   // ... any container or application sections ...
 }
-type PublisherTrack = {
+type PublisherRendition = {
   frames?: number, bytes?: number, keyframes?: number, skipped?: number,
   bitrate?: number,
 }
-type ViewerTrack = {
+type ViewerRendition = {
   frames?: number, bytes?: number, decoded?: number, late?: number,
   errors?: number, stalls?: number, stalled?: number, underruns?: number,
-  arrival?: { timestamp?: number, wall?: number }, latency?: number,
+  arrival?: { timestamp: number, wall: number }, latency?: number,
 }
 type Transport = {
   rtt?: number, rate?: number, lostBytes?: number, lostPackets?: number, age?: number,
@@ -655,7 +657,7 @@ Unknown fields MUST be ignored; application and container sections MAY be flatte
 Absent rendition counters mean zero, and zero counters MAY be omitted; JavaScript preserves omission instead of synthesizing fields.
 Unavailable gauges and transport measurements MUST remain absent, and a known zero MUST remain explicit.
 A reader treats JSON `null` in an optional `stats` or `echo` catalog section, gauge, transport measurement, or `arrival` as absent; publishers omit unavailable fields.
-An absent `arrival.timestamp` means zero and an absent `arrival.wall` means the MoQ epoch.
+An `arrival` MUST carry both `timestamp` and `wall`; a reader MUST refuse one missing either.
 Rendition IDs are the unique keys from the soliciting catalog, independent of media kind and wire track name.
 A viewer reports referenced renditions under the IDs in the catalog it read, even when their media comes from another broadcast.
 An empty rendition entry is valid and represents zero cumulative counters; its ID MUST NOT be removed merely because its counters are zero.

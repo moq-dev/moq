@@ -47,12 +47,12 @@ test("optional null measurements mean unavailable rather than measured zero", ()
 			),
 		),
 	).toEqual({ transport: {}, renditions: { hd: {} } });
-	expect(JSON.parse(JSON.stringify(Echo.TrackSchema.parse({ latency: null, arrival: null })))).toEqual({});
+	expect(JSON.parse(JSON.stringify(Echo.RenditionSchema.parse({ latency: null, arrival: null })))).toEqual({});
 });
 
 test("unknown track fields are ignored and flattened snapshot extensions survive", () => {
-	expect(Stats.TrackSchema.parse({ future: 42 })).toEqual({});
-	expect(Echo.TrackSchema.parse({ future: 42 })).toEqual({});
+	expect(Stats.RenditionSchema.parse({ future: 42 })).toEqual({});
+	expect(Echo.RenditionSchema.parse({ future: 42 })).toEqual({});
 	const input = { mpegts: { packets: 42 } };
 	expect(Stats.SnapshotSchema.parse(input)).toEqual(input);
 	expect(Echo.SnapshotSchema.parse(input)).toEqual(input);
@@ -64,16 +64,19 @@ test("shared invalid counters refuse instead of rounding", async () => {
 	const cases = (await Bun.file(
 		new URL("../../../rs/hang/fixtures/snapshot-invalid.json", import.meta.url),
 	).json()) as unknown[];
-	for (const value of cases) expect(() => Stats.TrackSchema.parse(value)).toThrow();
+	for (const value of cases) expect(() => Stats.RenditionSchema.parse(value)).toThrow();
 	for (const value of [
 		{ stalled: -1 },
 		{ latency: 0.5 },
-		{ arrival: { timestamp: Number.MAX_SAFE_INTEGER + 1 } },
-		{ arrival: { wall: -1 } },
+		{ arrival: { timestamp: Number.MAX_SAFE_INTEGER + 1, wall: 0 } },
+		{ arrival: { timestamp: 0, wall: -1 } },
+		{ arrival: {} },
+		{ arrival: { timestamp: 0 } },
+		{ arrival: { wall: 0 } },
 		{ frames: null },
 		{ frames: Number.NaN },
 	])
-		expect(() => Echo.TrackSchema.parse(value)).toThrow();
+		expect(() => Echo.RenditionSchema.parse(value)).toThrow();
 	for (const value of [{ rtt: -1 }, { rate: 0.5 }, { lostBytes: Number.MAX_SAFE_INTEGER + 1 }])
 		expect(() => Stats.TransportSchema.parse(value)).toThrow();
 });
