@@ -4,8 +4,8 @@ use std::collections::{BTreeSet, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use moq_clock::Instant;
 use moq_mux::container::{Frame, Read};
-use tokio::time::Instant;
 
 use super::buffer::Buffer;
 use super::output::Output;
@@ -22,7 +22,7 @@ const DECODE_AHEAD: Duration = Duration::from_millis(100);
 /// What the decode loop does next.
 enum Step {
 	/// Sleep until the instant, or until the buffer or the window changes.
-	Wait(Option<std::time::Instant>),
+	Wait(Option<Instant>),
 	Decode,
 	/// The track ended: drain what the codec still holds.
 	Flush,
@@ -35,7 +35,7 @@ enum Step {
 /// is skipped anyway once the next falls due. Making room then keeps a
 /// stalled window from stalling decode without dropping a picture a live one
 /// would show.
-fn vacancy(queue: &VecDeque<moq_video::Frame>, presentation: &Presentation) -> Option<std::time::Instant> {
+fn vacancy(queue: &VecDeque<moq_video::Frame>, presentation: &Presentation) -> Option<Instant> {
 	if queue.len() < MAX_FRAMES {
 		return None;
 	}
@@ -90,7 +90,7 @@ impl<O: Output> Video<O> {
 							.presentation
 							.lock()
 							.unwrap()
-							.video(frame.timestamp, Instant::now().into_std())
+							.video(frame.timestamp, moq_clock::now())
 						{
 							self.output.send(Event::Wake);
 						}
@@ -151,7 +151,7 @@ impl<O: Output> Video<O> {
 				let step = {
 					let mut queue = self.frames.lock().unwrap();
 					let presentation = self.presentation.lock().unwrap();
-					let now = Instant::now().into_std();
+					let now = moq_clock::now();
 					let mut placed = false;
 					while !pending.is_empty() && vacancy(&queue, &presentation).is_none_or(|at| at <= now) {
 						if queue.len() >= MAX_FRAMES {
@@ -191,7 +191,7 @@ impl<O: Output> Video<O> {
 				let frames = match step {
 					Step::Wait(Some(at)) => {
 						tokio::select! {
-							_ = tokio::time::sleep_until(at.into()) => {},
+							_ = moq_clock::sleep_until(at) => {},
 							_ = self.changed.notified() => {},
 						}
 						continue;
@@ -355,11 +355,7 @@ mod tests {
 		let start = Instant::now();
 		let last = moq_net::Timestamp::from_millis(1_980).unwrap();
 		if speaker {
-			media
-				.presentation
-				.lock()
-				.unwrap()
-				.audio(Duration::ZERO, delay, start.into_std());
+			media.presentation.lock().unwrap().audio(Duration::ZERO, delay, start);
 		}
 		let decoder = Buffered::default();
 		let decoded = decoder.decoded.clone();
@@ -373,7 +369,7 @@ mod tests {
 		} else {
 			Duration::ZERO
 		};
-		assert_eq!(media.presentation.lock().unwrap().due(last), Some(last_due.into_std()));
+		assert_eq!(media.presentation.lock().unwrap().due(last), Some(last_due));
 		assert!(media.video.lock().unwrap().len() <= MAX_FRAMES);
 		if speaker {
 			assert!(
@@ -482,7 +478,7 @@ mod tests {
 				.lock()
 				.unwrap()
 				.due(moq_net::Timestamp::from_millis(500).unwrap()),
-			Some((restarted + delay).into_std())
+			Some(restarted + delay)
 		);
 		assert!(media.output.present(&media).is_none());
 		tokio::time::advance(delay + Duration::from_millis(1)).await;
@@ -553,9 +549,9 @@ mod tests {
 		let last = moq_net::Timestamp::from_millis(order.iter().max().unwrap() * 33).unwrap();
 		let end = media.presentation.lock().unwrap().due(last).unwrap();
 		let mut shown = Vec::new();
-		while Instant::now().into_std() <= end + Duration::from_millis(10) {
+		while moq_clock::now() <= end + Duration::from_millis(10) {
 			if let Some(timestamp) = media.output.present(&media) {
-				shown.push((timestamp, Instant::now().into_std()));
+				shown.push((timestamp, moq_clock::now()));
 			}
 			tokio::time::advance(Duration::from_millis(1)).await;
 			tokio::task::yield_now().await;

@@ -4408,6 +4408,7 @@ dependencies = [
  "moq-archive",
  "moq-audio",
  "moq-auth",
+ "moq-clock",
  "moq-hls",
  "moq-json",
  "moq-msf",

@@ -9,9 +9,6 @@ use anyhow::Context;
 use hang::moq_net;
 use moq_mux::catalog::{self, Stream};
 use moq_net::announce::Event as AnnounceEvent;
-// tokio's clock, which is the wall clock unless a test pauses it to drive the
-// playout clock itself.
-use tokio::time::Instant;
 
 use super::args::Args;
 use super::output::{Output, Sink, Speaker};
@@ -510,7 +507,7 @@ async fn play_audio<O: Output>(
 		let moved = presentation
 			.lock()
 			.unwrap()
-			.audio(timing.end, sink.buffered(), Instant::now().into_std());
+			.audio(timing.end, sink.buffered(), moq_clock::now());
 		if moved {
 			changed.notify_one();
 			output.send(Event::Wake);
@@ -653,12 +650,12 @@ mod tests {
 		// millisecond, which relative sleeps would accumulate into a publisher
 		// falling behind the speaker.
 		let mut old = rendition(&broadcast, &catalog, "old");
-		let start = Instant::now();
+		let start = moq_clock::now();
 		let mut index = 0;
 		while index < 50 {
 			old.write(packet(index, OLD)).unwrap();
 			index += 1;
-			tokio::time::sleep_until(start + PACKET_DURATION * index as u32).await;
+			moq_clock::sleep_until(start + PACKET_DURATION * index as u32).await;
 		}
 
 		// The replacement joins the catalog, then the old track finishes.
@@ -669,7 +666,7 @@ mod tests {
 		drop(old);
 
 		while index < 100 {
-			tokio::time::sleep_until(start + PACKET_DURATION * index as u32).await;
+			moq_clock::sleep_until(start + PACKET_DURATION * index as u32).await;
 			new.write(packet(index, NEW)).unwrap();
 			index += 1;
 		}
@@ -1034,7 +1031,7 @@ mod tests {
 		let track = moq_mux::container::Consumer::new(subscriber, Container::try_from(&catalog).unwrap());
 		let recorder = Recorder::default();
 		let media = media(&origin, delay, recorder.clone());
-		let now = Instant::now();
+		let now = moq_clock::now();
 		let last = moq_net::Timestamp::from_millis(60 * 33).unwrap();
 		let task = tokio::spawn(
 			Video {
@@ -1049,7 +1046,7 @@ mod tests {
 		loop {
 			tokio::task::yield_now().await;
 			if media.video.lock().unwrap().len() == 30
-				|| media.presentation.lock().unwrap().due(last) == Some((now + delay).into_std())
+				|| media.presentation.lock().unwrap().due(last) == Some(now + delay)
 			{
 				break;
 			}
@@ -1057,11 +1054,7 @@ mod tests {
 		let due = media.presentation.lock().unwrap().due(last);
 		task.abort();
 		let _ = task.await;
-		assert_eq!(
-			due,
-			Some((now + delay).into_std()),
-			"the decoder did not observe the live edge"
-		);
+		assert_eq!(due, Some(now + delay), "the decoder did not observe the live edge");
 		assert!(recorder.present(&media).is_none(), "nothing is due before its delay");
 	}
 }
