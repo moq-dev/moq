@@ -783,8 +783,11 @@ async fn serve_connection(
 			.spawn(async move {
 				// Abandoned at the drain deadline: worker teardown only detaches this task.
 				let admitted = shutdown
-					.admit(cluster.admit_session(&auth, auth_request.clone()))
-					.await?;
+					.admit(async {
+						Ok::<_, crate::auth::Error>(cluster.admit_session(&auth, auth_request.clone()).await)
+					})
+					.await
+					.inspect_err(|err| cluster.refusals.record(err.into()))??;
 				Ok::<_, crate::auth::Error>((admitted, sessions.register(auth_request)))
 			})
 			.await
@@ -795,7 +798,6 @@ async fn serve_connection(
 				admitted
 			}
 			Err(err) => {
-				serve.cluster.refusals.record((&err).into());
 				// The status is what separates "your credential is bad" from "the
 				// auth server is down". Collapsing both into Unauthorized tells a
 				// client to stop reconnecting through an outage it could have

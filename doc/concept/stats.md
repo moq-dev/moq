@@ -181,6 +181,22 @@ group on the tier for `totals.json`. `sessions` and `sessions_closed` are their
 legacy spellings. A session moved to a new tier ends on the old one and starts
 on the new.
 
+`sessions_refused` counts refusals by `refused`, `unavailable`, `request`,
+`forbidden`, and `lan`. Relay admission refusals have no resolved grant, so they
+belong to the empty root on the default tier. An embedder that refuses a session
+outside relay admission can record it on its stats handle under the root and tier
+it resolved. Refused sessions never increase the live session count.
+
+`sessions_failed` counts abnormal ends by `idle_timeout`, `transport`,
+`application`, and `expired`. A clean peer close, local close, drain, or shutdown
+is not a failure. These are subsets of the sessions that end, leaving the live
+count unchanged. A reconnecting cluster dial retains one logical session across
+physical reconnects, so intermediate retry statuses add no failure; its typed
+terminal session error counts once when that logical session ends. Initial
+setup errors and configuration failures do not become admitted-session failures.
+Both objects default to zero when reading an older publisher;
+their counters survive pruning and follow the node epoch and reset rules.
+
 `requests` counts admitted request/response exchanges under the token's root and
 tier, including HTTP `/fetch` and `/announced`. They never start or end a session.
 A fetch's delivered group bytes count against the broadcast path on that tier;

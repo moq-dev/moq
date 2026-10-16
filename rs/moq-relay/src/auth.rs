@@ -530,6 +530,21 @@ impl Lease {
 		self
 	}
 
+	pub(crate) fn close_session(self, error: &moq_net::Error, bytes: Bytes) {
+		let stats = self.stats.clone();
+		let reason = if crate::connection::failure(error).is_none() {
+			"closed".to_string()
+		} else {
+			error.to_string()
+		};
+		let reason = self.close(reason, bytes);
+		if reason != lease::Reason::Expired
+			&& let Some(kind) = crate::connection::failure(error)
+		{
+			stats.fail(kind);
+		}
+	}
+
 	/// Attach the session's stats context, so a re-checked tier retags it live.
 	pub fn with_stats(mut self, stats: moq_net::stats::Session) -> Self {
 		self.stats = stats;
@@ -640,7 +655,11 @@ impl Lease {
 		{
 			reason = ended;
 		}
-		self.consumer.close(reason, bytes)
+		let reason = self.consumer.close(reason, bytes);
+		if reason == lease::Reason::Expired {
+			self.stats.fail(moq_net::stats::Failure::Expired);
+		}
+		reason
 	}
 }
 
@@ -1310,5 +1329,25 @@ mod tests {
 		assert_eq!(token.recheck(&aliased).root, token.root);
 		// A grant without the alias is relative to what was dialed, not to the old root.
 		assert_eq!(token.recheck(&everything()).root, Path::new("vanity/room").to_owned());
+	}
+}
+
+#[cfg(test)]
+mod outcome_tests {
+	use super::*;
+
+	#[test]
+	fn typed_expiry_wins_a_racing_transport_close_without_string_classification() {
+		let registry = moq_net::stats::Registry::new(Default::default());
+		let stats = registry.tier(Tier::default()).session("tenant");
+		let (producer, consumer) = lease::Producer::new(Grant::default());
+		let lease = Lease::new("/tenant", consumer).with_stats(stats.clone());
+		producer.revoke(lease::Reason::Expired);
+		lease.close_session(&moq_net::Error::Transport("closed".into()), Bytes::default());
+		drop(stats);
+		let presence = registry.snapshot().sessions()[0].1;
+		assert_eq!(presence.sessions_failed.expired, 1);
+		assert_eq!(presence.sessions_failed.transport, 0);
+		assert_eq!(presence.sessions_ended, 1);
 	}
 }

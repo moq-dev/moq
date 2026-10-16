@@ -216,6 +216,7 @@ fn route_failed(err: &Error) -> bool {
 	matches!(
 		err,
 		Error::Transport(_)
+			| Error::IdleTimeout
 			| Error::Session(_)
 			| Error::SessionClosed
 			| Error::GoingAway

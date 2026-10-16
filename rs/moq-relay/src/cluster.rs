@@ -1075,11 +1075,15 @@ impl Cluster {
 
 	/// Admit a gateway session and scope both origin directions from its grant.
 	pub async fn admit(&self, auth: &auth::Auth, request: moq_auth::Request) -> Result<Admitted, auth::Error> {
-		if !matches!(request.event, moq_auth::Event::Connect) {
-			return Err(auth::Error::Request("admission requires a connect event".into()));
+		let result = async {
+			if !matches!(request.event, moq_auth::Event::Connect) {
+				return Err(auth::Error::Request("admission requires a connect event".into()));
+			}
+			let lease = auth.admit(request.clone()).await?;
+			self.scope(lease, &request)
 		}
-		let lease = auth.admit(request.clone()).await?;
-		self.scope(lease, &request)
+		.await;
+		result.inspect_err(|err| self.refusals.record(err.into()))
 	}
 
 	/// Network sessions enforce changing grants in AUTH, within a fixed root and SETUP role.
@@ -1088,8 +1092,12 @@ impl Cluster {
 		auth: &auth::Auth,
 		request: moq_auth::Request,
 	) -> Result<Admitted, auth::Error> {
-		let lease = auth.admit(request.clone()).await?;
-		self.scope_session(lease, &request)
+		let result = async {
+			let lease = auth.admit(request.clone()).await?;
+			self.scope_session(lease, &request)
+		}
+		.await;
+		result.inspect_err(|err| self.refusals.record(err.into()))
 	}
 
 	pub(crate) fn scope_session(
@@ -1225,6 +1233,7 @@ impl Cluster {
 	/// its own handle: publishing lasts exactly as long as the cluster does.
 	pub fn with_stats(mut self, stats: moq_stats::Producer) -> Self {
 		self.stats = stats.registry().clone();
+		self.refusals = crate::refusals::Refusals::new(&self.stats);
 		self._stats_publisher = Some(stats);
 		self
 	}
@@ -1802,10 +1811,11 @@ impl Cluster {
 			true => self.origin.clone().upstream(),
 			false => self.origin.clone().peer(),
 		};
+		let stats = self.stats.tier(self.cluster_tier()).session("");
 		let mut client = client
 			.with_publisher(origin.consume().with_hidden(true))
 			.with_subscriber(origin)
-			.with_stats(self.stats.tier(self.cluster_tier()).session(""))
+			.with_stats(stats.clone())
 			.with_limits(self.peer_limits);
 		if let Some(cost) = target.cost {
 			client = client.with_cost(cost);
@@ -1824,8 +1834,9 @@ impl Cluster {
 		// old session finally closed instead of migrating to the replacement.
 		let mut reconnect = client.with_reconnect(true).connect(addrs.clone());
 		let mut connection = None;
+		let mut established = false;
 		loop {
-			match reconnect.status().await? {
+			match remote_status(&stats, &mut established, reconnect.status().await)? {
 				moq_tokio::Status::Connected if connection.is_none() => {
 					connection = Some(self.nodes.connect_outbound(id, redacted.to_string()));
 				}
@@ -2040,6 +2051,24 @@ pub(crate) fn canonicalize_peer_key(peer: &str) -> String {
 	}
 }
 
+/// A reconnecting peer keeps one logical presence until its loop actually ends.
+fn remote_status(
+	stats: &moq_net::stats::Session,
+	established: &mut bool,
+	status: moq_tokio::Result<moq_tokio::Status>,
+) -> moq_tokio::Result<moq_tokio::Status> {
+	match &status {
+		Ok(moq_tokio::Status::Connected) => *established = true,
+		Err(moq_tokio::Error::MoqNet(error)) if *established => {
+			if let Some(kind) = crate::connection::failure(error) {
+				stats.fail(kind);
+			}
+		}
+		_ => {}
+	}
+	status
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -2196,6 +2225,53 @@ mod tests {
 	/// `?cost=` is read and stripped (it rides SETUP, not the URL), other
 	/// query params survive, and a garbage value is an error rather than a
 	/// silent default.
+	#[test]
+	fn remote_logical_outcome_ignores_retries_and_counts_one_terminal_close() {
+		use moq_net::stats::{Failure, Registry};
+		let registry = Registry::new(Default::default());
+		let stats = registry.tier(Tier::default()).session("");
+		let mut established = false;
+		let _ = remote_status(
+			&stats,
+			&mut established,
+			Err(moq_tokio::Error::MoqNet(moq_net::Error::ProtocolViolation)),
+		);
+		for status in [
+			moq_tokio::Status::Connected,
+			moq_tokio::Status::Disconnected,
+			moq_tokio::Status::Connected,
+			moq_tokio::Status::Migrating,
+		] {
+			remote_status(&stats, &mut established, Ok(status)).unwrap();
+		}
+		let _ = remote_status(&stats, &mut established, Err(moq_tokio::Error::ConnectFailed));
+		assert_eq!(
+			registry.snapshot().sessions()[0]
+				.1
+				.sessions_failed
+				.count(Failure::Transport),
+			0
+		);
+		let _ = remote_status(
+			&stats,
+			&mut established,
+			Err(moq_tokio::Error::MoqNet(moq_net::Error::IdleTimeout)),
+		);
+		let _ = remote_status(
+			&stats,
+			&mut established,
+			Err(moq_tokio::Error::MoqNet(moq_net::Error::Session(
+				moq_net::SessionError::App(42),
+			))),
+		);
+		drop(stats);
+		let presence = registry.snapshot().sessions()[0].1;
+		assert_eq!(presence.sessions_started, 1);
+		assert_eq!(presence.sessions_ended, 1);
+		assert_eq!(presence.sessions_failed.idle_timeout, 1);
+		assert_eq!(presence.sessions_failed.application, 0);
+	}
+
 	#[test]
 	fn cost_param_is_consumed() {
 		let mut url = Url::parse("https://peer.example/?jwt=abc&cost=0").unwrap();

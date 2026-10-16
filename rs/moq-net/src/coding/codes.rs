@@ -39,7 +39,7 @@ pub trait StreamCodes {
 			return self.decode_stream_code(code).into();
 		}
 
-		Error::Transport(err.to_string())
+		Error::from_transport(err)
 	}
 }
 

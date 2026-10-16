@@ -520,6 +520,9 @@ pub enum Error {
 	/// Session and stream unknowns are [`Self::Session`] / [`Self::Stream`], not this.
 	#[error("remote error: code={0}")]
 	Remote(u32),
+	/// The underlying connection reached its transport idle deadline.
+	#[error("transport idle timeout")]
+	IdleTimeout,
 }
 
 impl Error {
@@ -556,7 +559,11 @@ impl Error {
 			return StreamError::from_code(code).into();
 		}
 
-		Self::Transport(err.to_string())
+		match err.close_kind() {
+			crate::transport::CloseKind::IdleTimeout => Self::IdleTimeout,
+			crate::transport::CloseKind::Closed => Self::Closed,
+			_ => Self::Transport(err.to_string()),
+		}
 	}
 }
 
@@ -668,6 +675,13 @@ impl From<&Error> for StreamError {
 }
 
 impl crate::transport::Error for Error {
+	fn close_kind(&self) -> crate::transport::CloseKind {
+		match self {
+			Self::IdleTimeout => crate::transport::CloseKind::IdleTimeout,
+			Self::Closed => crate::transport::CloseKind::Closed,
+			_ => crate::transport::CloseKind::Transport,
+		}
+	}
 	fn session_error(&self) -> Option<(u32, String)> {
 		None
 	}

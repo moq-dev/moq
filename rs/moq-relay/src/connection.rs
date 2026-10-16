@@ -9,7 +9,7 @@ use moq_tokio::server::Request;
 /// the right code instead of sprinkling close/return at each failure site.
 struct StatusError {
 	status: http::StatusCode,
-	refusal: Refusal,
+	refusal: Option<Refusal>,
 	source: anyhow::Error,
 }
 
@@ -17,7 +17,7 @@ impl From<auth::Error> for StatusError {
 	fn from(err: auth::Error) -> Self {
 		Self {
 			status: (&err).into(),
-			refusal: (&err).into(),
+			refusal: Some((&err).into()),
 			source: err.into(),
 		}
 	}
@@ -103,7 +103,9 @@ impl Connection {
 		let (admitted, registration) = match admitted {
 			Ok(admitted) => admitted,
 			Err(err) => {
-				self.cluster.refusals.record(err.refusal);
+				if let Some(refusal) = err.refusal {
+					self.cluster.refusals.record(refusal);
+				}
 				let reject = match err.status {
 					http::StatusCode::UNAUTHORIZED => moq_tokio::server::Reject::Unauthorized,
 					http::StatusCode::FORBIDDEN => moq_tokio::server::Reject::Forbidden,
@@ -168,7 +170,16 @@ impl Connection {
 		if self.request.peer_identity().is_some() {
 			tracing::debug!("client certificate verified; reported to the auth server");
 		}
-		let admitted = self.cluster.admit_session(&self.auth, request.clone()).await?;
+		let admitted = self
+			.cluster
+			.admit_session(&self.auth, request.clone())
+			.await
+			.map_err(|err| {
+				// Cluster admission owns this refusal; only local/drain refusals remain here.
+				let mut error = StatusError::from(err);
+				error.refusal = None;
+				error
+			})?;
 		let registration = self.sessions.as_ref().map(|sessions| sessions.register(request));
 		Ok((admitted, registration))
 	}
@@ -178,7 +189,7 @@ impl Connection {
 		let Some(presented) = cluster::Cluster::lan_credential(self.request.path()) else {
 			return Err(StatusError {
 				status: http::StatusCode::FORBIDDEN,
-				refusal: Refusal::Lan,
+				refusal: Some(Refusal::Lan),
 				source: anyhow::anyhow!("LAN peer did not present a membership proof"),
 			});
 		};
@@ -191,12 +202,12 @@ impl Connection {
 			}
 			Some(false) => Err(StatusError {
 				status: http::StatusCode::FORBIDDEN,
-				refusal: Refusal::Lan,
+				refusal: Some(Refusal::Lan),
 				source: anyhow::anyhow!("LAN peer did not present this listener's membership proof"),
 			}),
 			None => Err(StatusError {
 				status: http::StatusCode::FORBIDDEN,
-				refusal: Refusal::Lan,
+				refusal: Some(Refusal::Lan),
 				source: anyhow::anyhow!("/.cluster request refused: LAN discovery is not enabled"),
 			}),
 		}
@@ -237,11 +248,7 @@ pub async fn supervise(
 		};
 		tokio::select! {
 			err = session.closed() => {
-				let reason = match &err {
-					moq_net::Error::Cancel => "closed".to_string(),
-					other => other.to_string(),
-				};
-				lease.close(reason, session_bytes(&session));
+				lease.close_session(&err, session_bytes(&session));
 				return Err(err.into());
 			}
 			why = lease.ended() => {
@@ -271,5 +278,50 @@ pub(crate) fn session_bytes(session: &moq_net::Session) -> moq_auth::Bytes {
 	moq_auth::Bytes {
 		sent: stats.bytes_sent.unwrap_or_default(),
 		received: stats.bytes_received.unwrap_or_default(),
+	}
+}
+
+/// Close classification comes only from typed protocol and transport causes.
+pub(crate) fn failure(error: &moq_net::Error) -> Option<moq_net::stats::Failure> {
+	use moq_net::stats::Failure;
+	use moq_net::{Error, SessionError};
+	match error {
+		Error::Cancel
+		| Error::Closed
+		| Error::GoingAway
+		| Error::SessionClosed
+		| Error::Session(SessionError::Cancel) => None,
+		Error::IdleTimeout => Some(Failure::IdleTimeout),
+		Error::Transport(_) => Some(Failure::Transport),
+		_ => Some(Failure::Application),
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use moq_net::{Error, SessionError, stats::Failure};
+
+	#[test]
+	fn clean_closes_are_not_failures_and_typed_causes_keep_their_kind() {
+		for error in [
+			Error::Cancel,
+			Error::Closed,
+			Error::GoingAway,
+			Error::SessionClosed,
+			Error::Session(SessionError::Cancel),
+		] {
+			assert_eq!(failure(&error), None);
+		}
+		assert_eq!(failure(&Error::IdleTimeout), Some(Failure::IdleTimeout));
+		assert_eq!(
+			failure(&Error::Transport("idle timeout".into())),
+			Some(Failure::Transport),
+			"messages never choose the kind"
+		);
+		assert_eq!(
+			failure(&Error::Session(SessionError::App(42))),
+			Some(Failure::Application)
+		);
 	}
 }

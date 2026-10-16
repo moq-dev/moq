@@ -272,6 +272,12 @@ per-session limits, past which one is closed with `TOO_MANY_REQUESTS`.
 [Stats](/concept/stats) describes the paths, tracks, and encodings; read them
 with the [`moq-stats`](https://docs.rs/moq-stats) crate.
 
+Session outcome counters in the stats feed distinguish admission refusals from
+abnormal closes; see [session stats](/concept/stats#sessions). `/metrics` exposes
+`moq_relay_sessions_refused_total` by reason and
+`moq_relay_sessions_failed_total` by tier and kind. Refusals remain counted when
+stats publishing is disabled.
+
 ## \[iroh]
 
 Iroh requires building the relay from source with `cargo build --release -p moq-relay --features iroh`. Published binaries, Docker images, and the Nix package leave it out.
