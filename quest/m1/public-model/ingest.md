@@ -18,13 +18,24 @@ recommendations below are the planning quest's, and the ones marked
 Rust items (`rs/moq-net/src/model/`), as they stood at b4eab0db1:
 
 - **Withheld groups** (`track::Producer::receive_group`, `reveal_group`,
-  `group::Producer::is_started`; lite subscriber). **Decision**:
-  - ✅ Remove the need. `create_group` withholds every group from readers
-    until its first frame lands or it ends, the rule a received group needs,
-    so a joiner at the live edge is never handed an older group first. An
-    app writes its first frame as it creates a group, so it sees no change
-    beyond an empty open group staying invisible.
-  - A public `receive_group` and `reveal_group` pair.
+  `group::Producer::is_started`; lite subscriber). **Decision**, reopened
+  for the maintainer 2026-10-16 after review:
+  - ~~Remove the need: `create_group` withholds every group until its first
+    frame or end.~~ Settled earlier, then reopened. It deadlocks a publisher
+    that creates a group and waits on `group::Producer::demand()` before
+    encoding (the documented "publish only while someone is watching"
+    pattern, also exposed by moq-ffi). Group demand counts readers of the
+    group, and no reader can reach a withheld group, so the first frame never
+    comes.
+  - Recommended: `create_group` stays visible at once, so its demand
+    works before the first frame. A public `track::Producer::receive_group`
+    returns a group that reveals itself on its first frame or its end. There
+    is no separate `reveal_group` call to forget, and `is_started` stays
+    private. Only a session writing a peer's groups uses it.
+  - A public `receive_group` and `reveal_group` pair, as today.
+  - Withhold every group, but count a track subscriber that would receive
+    it as pre-frame group demand. This keeps one call but couples group
+    demand to track cursors.
 - **Owned frame writer** (`group::Producer::create_frame_owned`,
   `frame::ProducerOwned`; both subscribers, `coding/reader.rs`). A
   poll-driven wire driver cannot hold the borrowing `frame::Producer<'a>`
