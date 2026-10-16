@@ -129,4 +129,4 @@ End+Start. The child quests own their focused regressions.
 
 - [JS consume identity](https://github.com/moq-dev/moq/pull/5254) - requests carry the serving prefix's epoch and new winners cannot reuse an old cached broadcast
 
-- [Stats prefix tracks](/quest/m2/stats-prefix-tracks.md) - remains in the breaking release with QoS, independently of epoch correctness
+- [Stats prefix tracks](/quest/m2/stats-prefix-tracks.md) - deferred with QoS to m2; neither gates epoch correctness or the next cut

@@ -37,12 +37,12 @@ ranked just below deterministic TS legs, which it requires.
 - [Kotlin calls](/quest/m2/kt-ffi-calls.md) - Kotlin calls into moq-ffi cost about what Python's and Go's do, sync and async, once the fork's Kotlin generator drops JNA's per-call overhead
 - [Poll-native async spike](/quest/m2/ffi-poll.md) - measure kio poll-native exports and foreign poll against `ffi::Task`, then pick the shape
 - [Rendition preference](/quest/m2/rendition-preference.md) - automatic selection by `<moq-watch>`, `Video::ranked`, and WHEP keeps the highest `preference` that decodes, so a compatibility transcode is only picked when nothing preferred decodes
+- [Stats prefix tracks](/quest/m2/stats-prefix-tracks.md) - additive tracks required by the breaking lag API; existing maps remain supported
 - [QoS](/quest/m2/qos/README.md) - broadcast health: relay starvation and timeliness histograms
 - [Plan: watch worker](/quest/m2/plan-watch-worker.md) - prototype an invisible page worker against app-spawned workers, and land the jank harness that decides
 - [Watch worker](/quest/m2/watch-worker.md) - watch playback runs in a worker onto an OffscreenCanvas, so main-thread jank never stalls video or audio
 - [Vulkan Video encode on AMD](/quest/m2/vulkan-encode.md) - H.264 and H.265 from an external Vulkan image on RADV, hand-rolled on ash, proven on an RX 9070
 - [VA-API encodes an external Vulkan image](/quest/m2/vaapi-vulkan-import.md) - an explicit-sync DMA-BUF reaches Intel's encoder, proven on Arrow Lake
-- [Stats prefix tracks](/quest/m2/stats-prefix-tracks.md) - additive tracks required by the breaking lag API; existing maps remain supported
 - [C++ FFI reuse](/quest/m2/cpp-ffi-reuse.md) - C++ packages link the shared default-feature FFI build once it is proven compatible
 
 - [Time test sweep](/quest/m2/time-test-sweep.md) - unrelated test conversion and the workspace lint ratchet

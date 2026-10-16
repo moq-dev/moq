@@ -20,7 +20,7 @@ a blocker for this line.
 ## Plan
 
 Deferred to m2 in the 2026-09-30 audit: the consumer is moq.pro's edge, and
-STUN's only consumer is P2P, now in m1. SRT is not blocked upstream:
+STUN's only consumer is P2P, deferred to m2. SRT is not blocked upstream:
 [SRT demux](/quest/m2/one-port/srt-demux.md) decided on 2026-09-30 to drive
 sans-io `srt-protocol` directly instead of waiting on a socket abstraction in
 srt-tokio.
@@ -32,11 +32,11 @@ Decided 2026-10-05, from moq.pro's audit: `moq-rtc` taking a fed socket
 m2 rather than m3, since moq.pro's edge cutover and its uring rollout wait on
 them.
 
-Decided 2026-10-13: [UDP demux](/quest/m2/p2p/udp-demux.md) and
-[shard steering](/quest/m2/p2p/shard-steering.md) moved to m1 under P2P,
+Decided 2026-10-15: [UDP demux](/quest/m2/p2p/udp-demux.md) and
+[shard steering](/quest/m2/p2p/shard-steering.md) remain under P2P, now deferred to m2,
 because [native pairs](/quest/m2/p2p/native-quic.md) run QUIC and ICE's
 STUN on one socket through the same demux. The rest of this line builds on
-them from m1.
+those shared prerequisites in m2.
 
 ### Classifying a datagram
 
@@ -72,7 +72,7 @@ decided.
 
 ### STUN
 
-Decided 2026-10-08: the public STUN responder is left to P2P (m1), its
+Decided 2026-10-08: the public STUN responder is left to P2P (m2), its
 only consumer. Here, a Binding request carrying USERNAME is an ICE check
 and goes to WebRTC; any other is dropped and counted. Decided 2026-10-13:
 the responder binds its own port ([relay STUN](/doc/bin/relay/config.md#stun)),
@@ -98,7 +98,7 @@ pre-accepted streams can stand behind.
 
 ## Related
 
-- [UDP demux](/quest/m2/p2p/udp-demux.md) - one socket carries QUIC, with a WebRTC hook for embedders; moved to m1 for native P2P
+- [UDP demux](/quest/m2/p2p/udp-demux.md) - one socket carries QUIC, with a WebRTC hook for embedders; owned by deferred native P2P in m2
 - [Steer only QUIC by connection ID](/quest/m2/p2p/shard-steering.md) - QUIC-bit greasing goes off and the reuseport filter leaves RTP, SRT, and STUN flows on one shard each
 - [One port on the io_uring workers](/quest/m2/uring-demux.md) - the io_uring workers host the UDP demux
 - [Stream sessions](/quest/m3/uring-tcp/README.md) - the io_uring workers that would host the TCP acceptor later
