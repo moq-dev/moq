@@ -1,5 +1,6 @@
 //! Media time: the playout clock, and the audio track's own timeline.
 
+use anyhow::Context;
 use std::time::{Duration, Instant};
 
 use super::playback::Kind;
@@ -29,9 +30,27 @@ pub(super) struct Presentation {
 	/// audio frame pins the anchor outright instead of pacing against media it
 	/// will never play.
 	restart: bool,
-	/// Segment reached by each active playback role.
-	roles: [Option<u64>; 2],
-	segment: u64,
+	/// Endpoints declared by each role, on the shared playback timeline.
+	roles: [Segment; 2],
+	reference: Option<Timestamp>,
+}
+
+#[derive(Default)]
+struct Segment {
+	end: Option<Boundary>,
+	plans: std::collections::VecDeque<Plan>,
+	active: Option<Mapping>,
+}
+
+struct Boundary {
+	starts: Option<Instant>,
+	end: Duration,
+}
+
+struct Plan {
+	source: Duration,
+	delay: Duration,
+	mapping: Option<Mapping>,
 }
 
 impl Presentation {
@@ -41,32 +60,21 @@ impl Presentation {
 			delay,
 			speaker: false,
 			restart: false,
-			roles: [None; 2],
-			segment: 0,
+			roles: Default::default(),
+			reference: None,
 		}
 	}
 
-	pub(super) fn started(&mut self, role: Kind) {
-		self.roles[role as usize] = Some(0);
-	}
-
-	pub(super) fn finished(&mut self, role: Kind) {
-		self.roles[role as usize] = None;
-	}
-
-	/// Rebase once every active role has played out the previous segment.
-	pub(super) fn resume(&mut self, role: Kind, segment: u64) -> bool {
-		self.roles[role as usize] = Some(segment);
-		if self.roles.iter().flatten().any(|ready| *ready < segment) {
-			return false;
-		}
-		if self.segment < segment {
-			self.segment = segment;
-			self.pacer = moq_mux::Pacer::default().with_delay(self.delay);
-			self.speaker = false;
-			self.restart = false;
-		}
-		true
+	/// The media position the shared clock will reach at `at`.
+	fn position(&self, at: Instant) -> Option<Duration> {
+		let reference = self.reference?;
+		let due = self.due(reference)?;
+		let reference = timestamp(reference);
+		Some(if at >= due {
+			reference.saturating_add(at.duration_since(due))
+		} else {
+			reference.saturating_sub(due.duration_since(at))
+		})
 	}
 
 	/// Fold an arriving video frame into the anchor, unless the speaker owns it,
@@ -79,6 +87,7 @@ impl Presentation {
 			return false;
 		}
 
+		self.reference = Some(timestamp);
 		let before = self.pacer.due(timestamp);
 		before != Some(self.pacer.pace(timestamp, now))
 	}
@@ -104,6 +113,7 @@ impl Presentation {
 	/// recompute the deadline it is already asleep on.
 	pub(super) fn audio(&mut self, end: Duration, buffered: Duration, now: Instant) -> bool {
 		let timestamp = media(end);
+		self.reference = Some(timestamp);
 		let edge = now
 			.checked_add(buffered)
 			.and_then(|at| at.checked_sub(self.delay))
@@ -152,12 +162,35 @@ impl Presentation {
 	}
 }
 
-/// Releases a role when its track ends or the task is cancelled.
+/// Maps each encoder segment onto the shared playback clock.
 pub(super) struct Role {
 	presentation: std::sync::Arc<std::sync::Mutex<Presentation>>,
 	changed: std::sync::Arc<tokio::sync::Notify>,
 	role: Kind,
-	segment: u64,
+	mapping: std::sync::Mutex<Mapping>,
+}
+
+#[derive(Clone, Copy, Default)]
+pub(super) struct Mapping {
+	source: Duration,
+	target: Duration,
+	starts: Option<Instant>,
+}
+
+impl Mapping {
+	fn map(self, source: Timestamp) -> anyhow::Result<Timestamp> {
+		let source = Duration::from(source);
+		let target = if source >= self.source {
+			self.target
+				.checked_add(source - self.source)
+				.context("playback timeline overflow")?
+		} else {
+			self.target
+				.checked_sub(self.source - source)
+				.context("picture precedes the playback timeline")?
+		};
+		Ok(Timestamp::from_micros(u64::try_from(target.as_micros())?)?)
+	}
 }
 
 impl Role {
@@ -166,29 +199,120 @@ impl Role {
 		changed: std::sync::Arc<tokio::sync::Notify>,
 		role: Kind,
 	) -> Self {
-		presentation.lock().unwrap().started(role);
 		Self {
 			presentation,
 			changed,
 			role,
-			segment: 0,
+			mapping: Default::default(),
 		}
 	}
 
-	pub(super) async fn resume(&mut self) {
-		self.segment += 1;
-		self.presentation.lock().unwrap().resume(self.role, self.segment);
+	pub(super) fn map(&self, source: Timestamp) -> anyhow::Result<Timestamp> {
+		self.mapping.lock().unwrap().map(source)
+	}
+
+	pub(super) fn end(&self, source: Timestamp) -> anyhow::Result<()> {
+		let mapping = *self.mapping.lock().unwrap();
+		self.presentation.lock().unwrap().roles[self.role as usize].end = Some(Boundary {
+			starts: mapping.starts,
+			end: timestamp(mapping.map(source)?),
+		});
 		self.changed.notify_waiters();
+		Ok(())
+	}
+
+	pub(super) fn plan(&self, source: Timestamp, delay: Option<Duration>) {
+		let mut presentation = self.presentation.lock().unwrap();
+		let delay = delay.unwrap_or(presentation.delay);
+		presentation.roles[self.role as usize].plans.push_back(Plan {
+			source: Duration::from(source),
+			delay,
+			mapping: None,
+		});
+		self.changed.notify_waiters();
+	}
+
+	pub(super) fn gap(&self) {
+		let mut presentation = self.presentation.lock().unwrap();
+		presentation.roles[self.role as usize].end = None;
+		presentation.roles[self.role as usize].plans.clear();
+		presentation.roles[self.role as usize].active = None;
+		self.changed.notify_waiters();
+	}
+
+	pub(super) fn apply(&self, mapping: Mapping) {
+		*self.mapping.lock().unwrap() = mapping;
+		let mut presentation = self.presentation.lock().unwrap();
+		presentation.roles[self.role as usize].active = Some(mapping);
+		presentation.roles[self.role as usize].plans.pop_front();
+		self.changed.notify_waiters();
+	}
+
+	/// Drain declared old media, then align the new encoder to the running clock.
+	pub(super) async fn resume(&self, source: Timestamp, delay: Option<Duration>) -> anyhow::Result<Mapping> {
 		loop {
-			let changed = self.changed.notified();
-			// Register before inspecting shared state so a peer cannot finish between them.
-			tokio::pin!(changed);
-			changed.as_mut().enable();
-			if self.presentation.lock().unwrap().resume(self.role, self.segment) {
-				self.changed.notify_waiters();
-				return;
+			let now = tokio::time::Instant::now().into_std();
+			let end = {
+				let presentation = self.presentation.lock().unwrap();
+				presentation
+					.roles
+					.iter()
+					.filter_map(|role| role.end.as_ref())
+					.filter(|boundary| boundary.starts.is_none_or(|start| start <= now))
+					.filter_map(|boundary| presentation.due(media(boundary.end)))
+					.max()
+			};
+			if let Some(end) = end.filter(|end| *end > now) {
+				tokio::select! {
+					_ = tokio::time::sleep_until(end.into()) => {},
+					_ = self.changed.notified() => {},
+				}
+				continue;
 			}
-			changed.await;
+			let mut presentation = self.presentation.lock().unwrap();
+			let own = self.role as usize;
+			let peer = 1 - own;
+			if let Some(mapping) = presentation.roles[own].plans.front().and_then(|plan| plan.mapping) {
+				return Ok(mapping);
+			}
+			// Both roles already have replacement media. The speaker's first sample
+			// defines their common origin even when its adaptive delay differs from video's.
+			if presentation.roles[own]
+				.plans
+				.front()
+				.is_some_and(|plan| plan.mapping.is_none())
+				&& presentation.roles[peer]
+					.plans
+					.front()
+					.is_some_and(|plan| plan.mapping.is_none())
+			{
+				let audio = presentation.roles[Kind::Audio as usize].plans.front().unwrap();
+				let starts = now
+					.checked_add(audio.delay)
+					.context("playback delay exceeds the system clock")?;
+				let mapping = Mapping {
+					source: audio.source,
+					target: presentation.position(starts).unwrap_or(audio.source),
+					starts: Some(starts),
+				};
+				presentation.roles[own].plans.front_mut().unwrap().mapping = Some(mapping);
+				presentation.roles[peer].plans.front_mut().unwrap().mapping = Some(mapping);
+				return Ok(mapping);
+			}
+			if let Some(mapping) = presentation.roles[peer]
+				.active
+				.filter(|mapping| mapping.starts.is_some_and(|starts| starts > now))
+			{
+				return Ok(mapping);
+			}
+			let starts = now
+				.checked_add(delay.unwrap_or(presentation.delay))
+				.context("playback delay exceeds the system clock")?;
+			return Ok(Mapping {
+				source: Duration::from(source),
+				target: presentation.position(starts).unwrap_or_else(|| timestamp(source)),
+				starts: Some(starts),
+			});
 		}
 	}
 }
@@ -196,7 +320,9 @@ impl Role {
 impl Drop for Role {
 	fn drop(&mut self) {
 		if let Ok(mut presentation) = self.presentation.lock() {
-			presentation.finished(self.role);
+			presentation.roles[self.role as usize].end = None;
+			presentation.roles[self.role as usize].plans.clear();
+			presentation.roles[self.role as usize].active = None;
 		}
 		self.changed.notify_waiters();
 	}
@@ -317,30 +443,48 @@ mod tests {
 		Timestamp::from_millis(millis).unwrap()
 	}
 
-	#[test]
-	fn a_segment_rebases_only_after_both_playback_roles_drain() {
-		let start = Instant::now();
-		let mut presentation = Presentation::new(DELAY);
-		presentation.started(Kind::Video);
-		presentation.started(Kind::Audio);
-		presentation.audio(Duration::from_secs(10), DELAY, start);
-		let old = presentation.due(ms(10_000));
-		assert!(!presentation.resume(Kind::Video, 1));
-		assert_eq!(presentation.due(ms(10_000)), old);
-		assert!(presentation.resume(Kind::Audio, 1));
-		assert_eq!(presentation.due(ms(10_000)), None);
-		presentation.audio(Duration::from_secs(1), DELAY, start);
-		assert!(presentation.resume(Kind::Video, 1));
+	#[tokio::test]
+	async fn one_ended_role_maps_to_the_continuous_peers_clock() {
+		tokio::time::pause();
+		let start = tokio::time::Instant::now();
+		let presentation = std::sync::Arc::new(std::sync::Mutex::new(Presentation::new(DELAY)));
+		let audio = Role::new(presentation.clone(), Default::default(), Kind::Audio);
+		let video = Role::new(presentation.clone(), Default::default(), Kind::Video);
+		presentation.lock().unwrap().video(ms(10_000), start.into_std());
+		audio.end(ms(10_020)).unwrap();
+		tokio::time::advance(DELAY + Duration::from_millis(20)).await;
+		let unchanged = presentation.lock().unwrap().due(ms(10_500));
+		audio.apply(audio.resume(ms(0), Some(DELAY)).await.unwrap());
+		assert_eq!(audio.map(ms(0)).unwrap().as_millis(), 10_120);
+		assert_eq!(video.map(ms(10_500)).unwrap().as_millis(), 10_500);
+		assert_eq!(presentation.lock().unwrap().due(ms(10_500)), unchanged);
+	}
+
+	#[tokio::test]
+	async fn paired_plans_keep_media_offsets_and_follow_the_speakers_delay() {
+		tokio::time::pause();
+		let now = tokio::time::Instant::now();
+		let presentation = std::sync::Arc::new(std::sync::Mutex::new(Presentation::new(DELAY)));
+		presentation
+			.lock()
+			.unwrap()
+			.audio(Duration::from_secs(10), DELAY, now.into_std());
+		let audio = Role::new(presentation.clone(), Default::default(), Kind::Audio);
+		let video = Role::new(presentation.clone(), Default::default(), Kind::Video);
+		audio.end(ms(10_020)).unwrap();
+		video.end(ms(10_020)).unwrap();
+		audio.plan(ms(0), Some(Duration::from_millis(80)));
+		video.plan(ms(40), None);
+		tokio::time::advance(DELAY + Duration::from_millis(20)).await;
+		video.apply(video.resume(ms(40), None).await.unwrap());
+		audio.apply(audio.resume(ms(0), Some(Duration::from_millis(80))).await.unwrap());
 		assert_eq!(
-			presentation.due(ms(1_000)),
-			Some(start + DELAY),
-			"one rebase per segment"
+			video.map(ms(40)).unwrap().as_millis() - audio.map(ms(0)).unwrap().as_millis(),
+			40
 		);
-		assert!(!presentation.resume(Kind::Audio, 2));
-		presentation.finished(Kind::Video);
-		assert!(
-			presentation.resume(Kind::Audio, 2),
-			"a closed track cannot hold its peer forever"
+		assert_eq!(
+			presentation.lock().unwrap().due(audio.map(ms(0)).unwrap()),
+			Some((now + Duration::from_millis(200)).into_std())
 		);
 	}
 

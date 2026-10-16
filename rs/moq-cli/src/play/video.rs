@@ -73,8 +73,10 @@ impl Decoder for moq_video::decode::Sink {
 impl<O: Output> Video<O> {
 	pub async fn run(self, mut track: Track, mut decoder: impl Decoder) -> anyhow::Result<()> {
 		let closed = std::sync::atomic::AtomicBool::new(false);
+		let advancing = std::sync::atomic::AtomicBool::new(false);
+		let revision = std::sync::atomic::AtomicU64::new(0);
 		let buffers = Mutex::new(VecDeque::from([Buffer::default()]));
-		let mut role = Role::new(
+		let role = Role::new(
 			self.presentation.clone(),
 			self.changed.clone(),
 			super::playback::Kind::Video,
@@ -87,11 +89,12 @@ impl<O: Output> Video<O> {
 			loop {
 				let read = track.read().await?;
 				let mut buffers = buffers.lock().unwrap();
-				let active = buffers.len() == 1;
+				let active = buffers.len() == 1 && !advancing.load(std::sync::atomic::Ordering::Relaxed);
 				let before = buffers.front().unwrap().generation;
 				let ended = match read {
 					Some(Read::Frame { group, frame }) => {
 						if end.take_if(|end| *end != group).is_some() {
+							role.plan(frame.timestamp, None);
 							buffers.push_back(Buffer::default());
 						}
 						if active
@@ -99,7 +102,7 @@ impl<O: Output> Video<O> {
 							.presentation
 							.lock()
 							.unwrap()
-							.video(frame.timestamp, Instant::now().into_std())
+							.video(role.map(frame.timestamp)?, Instant::now().into_std())
 						{
 							self.output.send(Event::Wake);
 						}
@@ -109,6 +112,8 @@ impl<O: Output> Video<O> {
 					// Applied in delivery order, so the restart lands before the frame after it.
 					Some(Read::Gap { .. }) => {
 						end = None;
+						revision.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+						role.gap();
 						buffers.clear();
 						buffers.push_back(Buffer::default());
 						buffers.front_mut().unwrap().clear();
@@ -116,9 +121,13 @@ impl<O: Output> Video<O> {
 						self.presentation.lock().unwrap().video_restarted();
 						false
 					}
-					Some(Read::End { group, .. }) => {
+					Some(Read::End { group, end: endpoint }) => {
 						end = Some(group);
 						buffers.back_mut().unwrap().ended = true;
+						buffers.back_mut().unwrap().end = Some(endpoint);
+						if active {
+							role.end(endpoint)?;
+						}
 						false
 					}
 					None => {
@@ -187,6 +196,7 @@ impl<O: Output> Video<O> {
 						// Every access unit up to the earliest picture still owed must be
 						// decoded before that picture is due, however deep the stream
 						// reorders or the codec holds pictures back.
+						let oldest = role.map(oldest)?;
 						let owed = held.first().map_or(oldest, |held| oldest.min(*held));
 						let at = presentation
 							.due(owed)
@@ -229,13 +239,14 @@ impl<O: Output> Video<O> {
 						continue;
 					}
 					Step::Decode => {
-						let frame = buffers
+						let mut frame = buffers
 							.lock()
 							.unwrap()
 							.front_mut()
 							.unwrap()
 							.pop()
 							.expect("no await since inspecting the buffer");
+						frame.timestamp = role.map(frame.timestamp)?;
 						generation = Some(current);
 						held.insert(frame.timestamp);
 						// Never race a codec call: cancelling Sink::decode poisons it. The
@@ -246,6 +257,7 @@ impl<O: Output> Video<O> {
 						let next = {
 							let mut buffers = buffers.lock().unwrap();
 							if buffers.len() > 1 {
+								advancing.store(true, std::sync::atomic::Ordering::Relaxed);
 								buffers.pop_front();
 								true
 							} else {
@@ -259,11 +271,28 @@ impl<O: Output> Video<O> {
 							self.changed.notified().await;
 							continue;
 						}
-						role.resume().await;
+						let start = buffers
+							.lock()
+							.unwrap()
+							.front()
+							.unwrap()
+							.oldest()
+							.expect("a resumed group has a frame");
+						let before = revision.load(std::sync::atomic::Ordering::Relaxed);
+						let mapping = role.resume(start, None).await?;
+						if revision.load(std::sync::atomic::Ordering::Relaxed) != before {
+							advancing.store(false, std::sync::atomic::Ordering::Relaxed);
+							continue;
+						}
+						role.apply(mapping);
 						let buffers = buffers.lock().unwrap();
+						if let Some(end) = buffers.front().unwrap().end {
+							role.end(end)?;
+						}
+						advancing.store(false, std::sync::atomic::Ordering::Relaxed);
 						let mut presentation = self.presentation.lock().unwrap();
 						for frame in &buffers.front().unwrap().frames {
-							presentation.video(frame.timestamp, Instant::now().into_std());
+							presentation.video(role.map(frame.timestamp)?, Instant::now().into_std());
 						}
 						self.output.send(Event::Wake);
 						continue;
@@ -281,7 +310,14 @@ impl<O: Output> Video<O> {
 				}
 				// A codec may return pictures it held across the keyframe that
 				// resumed a skipped timeline. Those pictures no longer have a slot.
-				let floor = buffers.lock().unwrap().front().unwrap().floor;
+				let floor = buffers
+					.lock()
+					.unwrap()
+					.front()
+					.unwrap()
+					.floor
+					.map(|floor| role.map(floor))
+					.transpose()?;
 				pending.extend(
 					frames
 						.into_iter()
@@ -636,7 +672,11 @@ mod tests {
 			tokio::time::advance(Duration::from_millis(1)).await;
 		}
 		task.await.unwrap().unwrap();
-		assert_eq!(shown, [0, 33, 66, 0, 33, 66]);
+		assert_eq!(&shown[..3], [0, 33, 66]);
+		assert_eq!(shown.len(), 6);
+		assert!(shown[3] > shown[2], "the resumed segment follows every old picture");
+		assert_eq!(shown[4] - shown[3], 33);
+		assert_eq!(shown[5] - shown[4], 33);
 		assert_eq!(
 			*flushed.lock().unwrap(),
 			2,

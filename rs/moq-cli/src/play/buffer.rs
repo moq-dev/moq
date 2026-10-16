@@ -17,6 +17,8 @@ pub(super) struct Buffer {
 	pub floor: Option<moq_net::Timestamp>,
 	waiting_keyframe: bool,
 	pub ended: bool,
+	/// Exclusive endpoint declared for this encoder segment.
+	pub end: Option<moq_net::Timestamp>,
 }
 
 impl Buffer {

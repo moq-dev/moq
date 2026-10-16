@@ -1026,6 +1026,69 @@ mod tests {
 		}
 	}
 
+	#[tokio::test]
+	async fn decoded_segments_keep_resampler_tails_before_fresh_encoder_frames() {
+		tokio::time::pause();
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let track = broadcast
+			.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
+			.unwrap();
+		let mut producer = moq_mux::container::Producer::new(
+			track,
+			moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Audio),
+		);
+		let catalog = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Pcm, 44_100, 1);
+		let mut consumer = Consumer::new(
+			&broadcast.consume(),
+			&catalog,
+			"audio",
+			Options {
+				output: Output {
+					sample_rate: Some(48_000),
+					..Output::default()
+				},
+				max_delay: Duration::from_secs(1),
+				..Options::new()
+			},
+		)
+		.await
+		.unwrap();
+		for (micros, sample) in [(0, 0.25f32), (30_000, 0.5)] {
+			producer
+				.write(moq_mux::container::Frame {
+					timestamp: Timestamp::from_micros(micros).unwrap(),
+					duration: Some(Timestamp::from_scale(1024, 44_100).unwrap()),
+					keyframe: true,
+					payload: (0..1024).flat_map(|_| sample.to_le_bytes()).collect::<Vec<_>>().into(),
+				})
+				.unwrap();
+			if micros == 0 {
+				producer.discontinuity().unwrap();
+			}
+		}
+		producer.finish().unwrap();
+		let mut ended = None;
+		let mut tail = false;
+		let mut resumed = false;
+		while let Some(event) = consumer.read().await.unwrap() {
+			match event {
+				Read::End { segment, .. } if ended.is_none() => ended = Some(segment),
+				Read::Frame { segment, .. } if ended == Some(segment) => {
+					assert!(!resumed);
+					tail = true;
+				}
+				Read::Frame { segment, .. } if ended.is_some_and(|old| old != segment) => resumed = true,
+				Read::Gap { .. } => panic!("a declared encoder boundary is not loss"),
+				_ => {}
+			}
+		}
+		assert!(
+			tail,
+			"the old resampler tail must follow its End without looking like a new encoder"
+		);
+		assert!(resumed, "a later group opens a fresh decoded segment");
+	}
+
 	/// A packet whose sample count isn't a multiple of the resampler's chunk leaves
 	/// samples buffered, and the next output starts with those. Stamping that
 	/// output with the packet that completed the chunk puts it up to a chunk late,
