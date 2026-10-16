@@ -30,13 +30,5 @@ Recommended unattended follow-up for the approved overnight batch:
   applicable CLI shutdown integrations; record tested SHA, release base,
   and results in a separate PR targeting `release`.
 
-The existing failed-export load quest is related but not proven to share
-this cause. Its cleanup closes stdin first, so this fix alone does not
-complete that quest.
-
 Public API: no signatures or CLI flags change; a stopped process no longer
 waits for an unrelated stdin writer to close. Wire: none.
-
-## Related
-
-- [Failed-export exit under load](/quest/m1/test-flakes-2/export-failure-exit.md) - independently identify the process and bound that fail under load
