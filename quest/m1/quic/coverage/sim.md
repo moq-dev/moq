@@ -28,7 +28,3 @@ Decided 2026-10-16:
   that asserts Cubic-specific timing pins Cubic explicitly. A test that
   fails under BBR3 for a real bug stays on BBR3, `#[ignore]`d with a
   follow-up quest, rather than being hidden on Cubic.
-
-## Related
-
-- [Characterization tests](/quest/m1/quic/coverage/characterize.md) - targeted tests on today's harness, which can land before this
