@@ -196,7 +196,7 @@ impl Config {
 	pub fn public_grant(&self) -> Option<Grant> {
 		let publish: Patterns = self.public.iter().chain(&self.public_publish).cloned().collect();
 		let subscribe: Patterns = self.public.iter().chain(&self.public_subscribe).cloned().collect();
-		(!publish.is_empty() || !subscribe.is_empty()).then(|| Grant::new(publish, subscribe))
+		(!publish.is_empty() || !subscribe.is_empty()).then(|| Grant::new(publish.into(), subscribe.into()))
 	}
 
 	/// The 0.14 settings in use, each paired with what replaced it. A relay refuses
@@ -418,9 +418,9 @@ pub struct Token {
 	/// resolves at the absolute path it maps to.
 	pub mounts: Vec<(PathOwned, PathOwned)>,
 	/// The patterns the holder may subscribe to, relative to `root`.
-	pub subscribe: Patterns,
+	pub subscribe: moq_auth::Access,
 	/// The patterns the holder may publish to, relative to `root`.
-	pub publish: Patterns,
+	pub publish: moq_auth::Access,
 	/// The tier this session's stats record under.
 	pub tier: Tier,
 	/// Whether the session is a cluster peer, so its routes entered elsewhere.
@@ -451,6 +451,10 @@ impl Token {
 			peer: grant.peer,
 			upstream: grant.upstream,
 		}
+	}
+
+	pub(crate) fn uncapped(&self) -> Result<(), Error> {
+		check_rates(&self.publish, &self.subscribe)
 	}
 
 	/// Rebuild the token from a re-checked grant, relative to the same dialed path,
@@ -580,6 +584,9 @@ impl Lease {
 				changed = self.consumer.changed() => match changed {
 					Ok(grant) => {
 						let fresh = self.token.recheck(&grant);
+						if let Err(err) = fresh.uncapped() {
+							return err.to_string().into();
+						}
 						if fresh.root != self.token.root {
 							return lease::Reason::Narrowed;
 						}
@@ -598,13 +605,13 @@ impl Lease {
 							match &self.session {
 								Some(session) => {
 									tracing::info!(
-										publish = %join(&fresh.publish),
-										subscribe = %join(&fresh.subscribe),
+										publish = %join(&fresh.publish.path),
+										subscribe = %join(&fresh.subscribe.path),
 										"grant changed; re-authorizing the session",
 									);
 									session.authorize(&moq_net::auth::Grant {
-										publish: fresh.publish.clone(),
-										subscribe: fresh.subscribe.clone(),
+										publish: fresh.publish.path.clone(),
+										subscribe: fresh.subscribe.path.clone(),
 										expires: None,
 									});
 									self.token.publish = fresh.publish;
@@ -792,6 +799,7 @@ impl Auth {
 	pub async fn admit(&self, request: Request) -> Result<Lease, Error> {
 		let consumer = self.decide(request.clone()).await?;
 		let mut lease = Lease::new(&request.path, consumer);
+		lease.token.uncapped()?;
 		lease.source = Some(Source {
 			auth: self.clone(),
 			request,
@@ -841,8 +849,18 @@ fn answered_with(
 	answered: Result<Result<lease::Consumer, Error>, oneshot::error::RecvError>,
 ) -> Result<lease::Consumer, Error> {
 	let consumer = answered.map_err(|_| Error::Unavailable("the admission went unanswered".into()))??;
-	consumer.grant().validate()?;
+	let grant = consumer.grant();
+	grant.validate()?;
+	check_rates(&grant.publish, &grant.subscribe)?;
 	Ok(consumer)
+}
+
+/// Refuse caps before reducing a grant to the paths its origin can enforce.
+fn check_rates(publish: &moq_auth::Access, subscribe: &moq_auth::Access) -> Result<(), Error> {
+	if publish.rate.is_some() || subscribe.rate.is_some() {
+		return Err(Error::Forbidden("this transport cannot enforce bitrate caps".into()));
+	}
+	Ok(())
 }
 
 /// The sessions an embedded [`Auth`] is waiting to admit, in arrival order.
@@ -975,6 +993,57 @@ mod tests {
 			public: public.iter().map(|p| p.parse().unwrap()).collect(),
 			..Default::default()
 		}
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn capped_grants_are_refused_on_every_transport() {
+		use moq_auth::Transport::*;
+		for transport in [
+			Quic,
+			Iroh,
+			WebSocket,
+			Tcp,
+			Unix,
+			Http,
+			Rtmp,
+			Srt,
+			WebRtc,
+			WebTransport,
+			Unknown,
+		] {
+			for publish in [false, true] {
+				let (auth, mut admissions) = Auth::embedded("test");
+				let request = auth.request(transport, "/room");
+				let (result, ()) = tokio::join!(auth.admit(request), async {
+					let mut grant = Grant::new(moq_net::Pattern::all().into(), moq_net::Pattern::all().into());
+					let access = if publish {
+						&mut grant.publish
+					} else {
+						&mut grant.subscribe
+					};
+					access.rate = Some(moq_auth::Rate::from_bps(8000).unwrap());
+					admissions.next().await.unwrap().grant(lease::Consumer::fixed(grant));
+				});
+				let Err(Error::Forbidden(message)) = result else {
+					panic!("{transport} admitted a cap")
+				};
+				assert!(
+					message.contains("cannot enforce bitrate caps"),
+					"{transport}: {message}"
+				);
+			}
+		}
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn a_cap_added_at_revalidation_ends_the_lease() {
+		let grant = Grant::new(moq_net::Pattern::all().into(), moq_net::Pattern::all().into());
+		let (producer, consumer) = lease::Producer::new(grant.clone());
+		let mut lease = Lease::new("/room", consumer);
+		let mut capped = grant;
+		capped.subscribe.rate = Some(moq_auth::Rate::from_bps(8000).unwrap());
+		producer.update(capped);
+		assert!(lease.ended().await.to_string().contains("cannot enforce bitrate caps"));
 	}
 
 	#[test]

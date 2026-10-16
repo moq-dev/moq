@@ -107,12 +107,12 @@ impl Credential {
 			publish: if role == Some(Role::Subscriber) {
 				Default::default()
 			} else {
-				self.grant.publish.clone()
+				self.grant.publish.path.clone()
 			},
 			subscribe: if role == Some(Role::Publisher) {
 				Default::default()
 			} else {
-				self.grant.subscribe.clone()
+				self.grant.subscribe.path.clone()
 			},
 			expires: self.expires.map(tokio::time::Instant::into_std),
 		}
@@ -127,6 +127,10 @@ impl Refresh {
 	) -> Result<Self, moq_net::Error> {
 		let requests = handle.requests()?;
 		let mut initial = Credential::new(lease.consumer.clone());
+		// Admission and protocol setup can observe different live grant versions.
+		if super::check_rates(&initial.grant.publish, &initial.grant.subscribe).is_err() {
+			return Err(moq_net::Error::Unauthorized);
+		}
 		initial.initial = true;
 		let this = Self {
 			handle,
@@ -150,7 +154,8 @@ impl Refresh {
 
 	fn valid(&self, grant: &Grant) -> bool {
 		let fresh = self.admitted.recheck(grant);
-		fresh.root == self.admitted.root
+		super::check_rates(&grant.publish, &grant.subscribe).is_ok()
+			&& fresh.root == self.admitted.root
 			&& fresh.mounts == self.admitted.mounts
 			&& fresh.peer == self.admitted.peer
 			&& fresh.upstream == self.admitted.upstream
@@ -523,6 +528,49 @@ mod tests {
 			admission.grant(lease::Consumer::fixed(initial));
 		});
 		(lease.unwrap(), admissions)
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn a_cap_added_before_protocol_setup_is_refused() {
+		let (admitted, _) = admission(grant("a/**", 3000)).await;
+		let (client, supervising) = sessions(admitted).await;
+		let (producer, consumer) = lease::Producer::new(grant("a/**", 3000));
+		let mut lease = super::super::Lease::new("/room", consumer);
+		let mut capped = grant("a/**", 3000);
+		capped.publish.rate = Some(moq_auth::Rate::from_bps(8000).unwrap());
+		producer.update(capped);
+		assert!(matches!(Refresh::new(&mut lease, client.auth(), None), Err(moq_net::Error::Unauthorized)));
+		client.abort(moq_net::Error::Cancel);
+		supervising.abort();
+		let _ = supervising.await;
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn a_capped_attachment_is_refused_without_losing_the_existing_grant() {
+		let (lease, mut admissions) = admission(grant("a/**", 3000)).await;
+		let (client, supervising) = sessions(lease).await;
+		let auth = client.auth();
+		let (result, ()) = tokio::join!(auth.add("capped"), async {
+			let mut capped = grant("a/**", 3000);
+			capped.publish.rate = Some(moq_auth::Rate::from_bps(8000).unwrap());
+			admissions.next().await.unwrap().grant(lease::Consumer::fixed(capped));
+		});
+		assert!(result.is_err(), "the cap was discarded");
+		assert!(
+			!supervising.is_finished(),
+			"a refused attachment ended the initial grant"
+		);
+		let (result, ()) = tokio::join!(auth.add("uncapped"), async {
+			admissions
+				.next()
+				.await
+				.unwrap()
+				.grant(lease::Consumer::fixed(grant("a/**", 3000)));
+		});
+		result.unwrap();
+		client.abort(moq_net::Error::Cancel);
+		supervising.abort();
+		let _ = supervising.await;
 	}
 
 	#[tokio::test(start_paused = true)]

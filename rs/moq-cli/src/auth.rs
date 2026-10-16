@@ -96,8 +96,8 @@ impl Args {
 
 				let payload = moq_auth::Claims::default()
 					.with_root(root)
-					.with_publish(publish)
-					.with_subscribe(subscribe)
+					.with_publish(publish.into_iter().collect())
+					.with_subscribe(subscribe.into_iter().collect())
 					.with_expires(expires.map(Into::into))
 					.with_issued(issued.map(Into::into));
 
@@ -855,7 +855,7 @@ mod tests {
 			.sign(
 				&moq_auth::Claims::default()
 					.with_root("demo")
-					.with_publish(["alice/**".parse().unwrap()]),
+					.with_publish(["alice/**".parse().unwrap()].into_iter().collect()),
 			)
 			.unwrap();
 		let path = dir.path().join("alice.jwt");

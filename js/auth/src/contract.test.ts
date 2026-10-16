@@ -110,7 +110,7 @@ test("a grant round trips and is validated", () => {
 		revalidate: 60,
 		tier: "websocket",
 	});
-	expect(grant.publish).toEqual(["alice/**"]);
+	expect(grant.publish?.toJSON()).toEqual(["alice/**"]);
 
 	expect(() => GrantSchema.parse({})).toThrow(/name something/);
 	expect(() => GrantSchema.parse({ publish: ["**"], revalidate: 60 })).toThrow(/must expire/);

@@ -514,7 +514,7 @@ mod tests {
 	/// The wire carries whole seconds, so a cadence under one second would serialize
 	/// as zero and be refused; these tests run on a one-second cadence.
 	fn grant(expires_in: Option<Duration>, revalidate: Option<Duration>) -> Grant {
-		let mut grant = Grant::new(patterns(&["**"]), Patterns::new());
+		let mut grant = Grant::new(patterns(&["**"]).into(), Patterns::new().into());
 		grant.expires = expires_in.map(|d| SystemTime::now() + d);
 		grant.revalidate = revalidate;
 		grant
@@ -529,7 +529,7 @@ mod tests {
 		.await;
 
 		let consumer = client(&server).connect(request()).await.unwrap();
-		assert_eq!(consumer.grant().publish, patterns(&["**"]));
+		assert_eq!(consumer.grant().publish, patterns(&["**"]).into());
 		assert_eq!(log.events(), [Event::Connect]);
 
 		consumer.close("disconnected", Bytes { sent: 7, received: 11 });
@@ -871,7 +871,7 @@ mod tests {
 	#[tokio::test]
 	async fn an_expired_grant_is_refused() {
 		tokio::time::pause();
-		let mut grant = Grant::new(patterns(&["**"]), Patterns::new());
+		let mut grant = Grant::new(patterns(&["**"]).into(), Patterns::new().into());
 		grant.expires = Some(SystemTime::now() - Duration::from_secs(1));
 		let script = Script::new(Log::default(), move |_| Some(Ok(grant.clone())));
 		assert!(matches!(script.connect().await, Err(Error::GrantExpired)));
@@ -936,7 +936,7 @@ mod tests {
 		assert!(log.revalidates() >= 1, "the outage was answered before expires");
 		assert_eq!(
 			consumer.grant().publish,
-			patterns(&["**"]),
+			patterns(&["**"]).into(),
 			"the grant stands through the outage"
 		);
 		let reason = tokio::time::timeout_at(latest + tolerance, consumer.closed())

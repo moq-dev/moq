@@ -205,11 +205,11 @@ impl Serving {
 		let token = lease.token();
 		let publish = directions
 			.publish
-			.then(|| origin.scope(&token.root, &token.subscribe).ok())
+			.then(|| origin.scope(&token.root, &token.subscribe.path).ok())
 			.flatten();
 		let subscribe = directions
 			.consume
-			.then(|| origin.scope(&token.root, &token.publish).ok())
+			.then(|| origin.scope(&token.root, &token.publish.path).ok())
 			.flatten();
 		if publish.is_none() && subscribe.is_none() {
 			request.reject(moq_tokio::server::Reject::Forbidden).await.ok();

@@ -1,4 +1,4 @@
-use moq_pattern::Patterns;
+use crate::Access;
 use serde::{Deserialize, Serialize};
 use serde_with::{DurationSeconds, TimestampSeconds, serde_as};
 use std::collections::BTreeMap;
@@ -17,12 +17,12 @@ use std::time::{Duration, SystemTime};
 #[non_exhaustive]
 pub struct Grant {
 	/// Patterns the session may publish, relative to the root.
-	#[serde(skip_serializing_if = "Patterns::is_empty")]
-	pub publish: Patterns,
+	#[serde(skip_serializing_if = "Access::is_default")]
+	pub publish: Access,
 
 	/// Patterns the session may subscribe to, relative to the root.
-	#[serde(skip_serializing_if = "Patterns::is_empty")]
-	pub subscribe: Patterns,
+	#[serde(skip_serializing_if = "Access::is_default")]
+	pub subscribe: Access,
 
 	/// The path the patterns are relative to, replacing the dialed one. This is how a
 	/// server aliases a slug to a canonical id. Absent means the dialed path.
@@ -59,7 +59,7 @@ pub struct Grant {
 
 impl Grant {
 	/// A grant of these patterns and nothing else.
-	pub fn new(publish: Patterns, subscribe: Patterns) -> Self {
+	pub fn new(publish: Access, subscribe: Access) -> Self {
 		Self {
 			publish,
 			subscribe,
@@ -102,7 +102,7 @@ impl Grant {
 mod tests {
 	use super::*;
 
-	fn patterns(texts: &[&str]) -> Patterns {
+	fn patterns(texts: &[&str]) -> Access {
 		texts.iter().map(|text| text.parse().unwrap()).collect()
 	}
 
@@ -151,7 +151,7 @@ mod tests {
 
 	#[test]
 	fn mounts_round_trip_as_an_object() {
-		let mut grant = Grant::new(Patterns::new(), patterns(&["**"]));
+		let mut grant = Grant::new(Access::default(), patterns(&["**"]));
 		grant.mounts.insert(".svc".into(), ".svc/pid".into());
 		let json = serde_json::to_string(&grant).unwrap();
 		assert_eq!(json, r#"{"subscribe":["**"],"mounts":{".svc":".svc/pid"}}"#);
@@ -160,7 +160,7 @@ mod tests {
 
 	#[test]
 	fn empty_fields_are_omitted_and_defaulted() {
-		let grant = Grant::new(patterns(&["**"]), Patterns::new());
+		let grant = Grant::new(patterns(&["**"]), Access::default());
 		assert_eq!(serde_json::to_string(&grant).unwrap(), r#"{"publish":["**"]}"#);
 		assert_eq!(serde_json::from_str::<Grant>(r#"{"publish":["**"]}"#).unwrap(), grant);
 	}
@@ -169,7 +169,7 @@ mod tests {
 	fn validate_refuses_nothing_unbounded_and_expired() {
 		assert!(matches!(Grant::default().validate(), Err(crate::Error::UselessGrant)));
 
-		let mut grant = Grant::new(patterns(&["**"]), Patterns::new());
+		let mut grant = Grant::new(patterns(&["**"]), Access::default());
 		grant.validate().unwrap();
 
 		grant.revalidate = Some(Duration::from_secs(1));
@@ -191,7 +191,7 @@ mod tests {
 
 	#[test]
 	fn validate_refuses_an_upstream_that_is_not_a_peer() {
-		let mut grant = Grant::new(patterns(&["**"]), Patterns::new());
+		let mut grant = Grant::new(patterns(&["**"]), Access::default());
 		grant.upstream = true;
 		assert!(matches!(grant.validate(), Err(crate::Error::UpstreamWithoutPeer)));
 		grant.peer = true;
@@ -202,7 +202,7 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn deadline_is_the_exact_expiry() {
 		let start = tokio::time::Instant::now();
-		let mut grant = Grant::new(patterns(&["**"]), Patterns::new());
+		let mut grant = Grant::new(patterns(&["**"]), Access::default());
 		assert_eq!(grant.deadline(), None);
 
 		grant.expires = Some(SystemTime::now() + Duration::from_secs(10));
