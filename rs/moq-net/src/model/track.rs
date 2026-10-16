@@ -3777,10 +3777,9 @@ impl kio::Task for Fetching {
 ///
 /// - [`Self::set_groups`] limits **this subscriber's reads**, filtering exactly what
 ///   this handle returns without changing the publisher's demand.
-/// - [`Subscription::start`] / [`Subscription::end`], set via [`Self::update`],
-///   are a **request to the publisher**. They're aggregated across every live subscriber
-///   (earliest start, widest end), so they say what the publisher should send, not what
-///   this subscriber sees.
+/// - [`Subscription::ranges`], set via [`Self::update`], are a **request to the
+///   publisher**. They're aggregated across every live subscriber (their union), so they
+///   say what the publisher should send, not what this subscriber sees.
 ///
 /// They stay separate because their scopes differ: a subscriber can't filter by the
 /// aggregate, since another subscriber can widen it, and the publisher can't honor a
@@ -3789,7 +3788,8 @@ impl kio::Task for Fetching {
 /// for. Set both to skip them *and* avoid the transfer.
 ///
 /// The one place they meet is where the cursor comes from. A new subscriber's cursor is
-/// floored at the group its own subscription named (or 0), and its
+/// floored at the lowest group its own ranges start at, a relative start counted back from
+/// the latest group (or the first to arrive, before any exists), and its
 /// [`Subscription::max_delay`] decides what above the floor is worth delivering. Every later
 /// move is the caller's.
 pub struct Subscriber {
@@ -3949,7 +3949,7 @@ struct Cursor {
 	/// [`Self::end_sequence`], shared with the groups this cursor hands out so their
 	/// expiry measures drift against the same servable window after a cap moves.
 	///
-	/// Deliberately not [`Subscription::end`]. That is a *request to the publisher*,
+	/// Deliberately not where [`Subscription::ranges`] end. That is a *request to the publisher*,
 	/// folded in with every other subscriber's, and it does not filter this handle (see
 	/// [`Subscriber`]): another unbounded subscriber widens the aggregate and the groups
 	/// arrive here anyway. Capping the drift edge with it would pin the live edge at the
@@ -4427,7 +4427,7 @@ impl Subscriber {
 	/// skipped rather than handed over, so a single poll walks off a whole backlog. The
 	/// default is [`Duration::ZERO`], which takes the live
 	/// edge and writes the rest off; raise it to read history. [`Self::set_groups`] and
-	/// [`Subscription::start`] are filters, not exemptions: backfill needs a budget that
+	/// [`Subscription::ranges`] are filters, not exemptions: backfill needs a budget that
 	/// covers it. [`Consumer::fetch_group`] is the way to ask for one old group outright.
 	/// The budget remains attached to a returned group: if it stalls while newer data
 	/// advances, its pending frame read ends with [`Error::Old`].
@@ -4682,7 +4682,7 @@ impl Subscriber {
 	/// `2..=5` includes groups 2 through 5; `2..5` excludes group 5. An omitted
 	/// start preserves the current floor, and an omitted end removes the cap.
 	/// Groups above the end remain buffered and can be read after raising the cap.
-	/// This changes only local delivery; use [`Subscription::with_groups`] and
+	/// This changes only local delivery; use [`Subscription::ranges`] and
 	/// [`Self::update`] to change the requested groups.
 	pub fn set_groups(&mut self, groups: impl RangeBounds<u64>) {
 		let (start, end) = super::subscription::sequence_bounds(groups);
@@ -4694,7 +4694,7 @@ impl Subscriber {
 	///
 	/// A local filter, not a request: it doesn't tell the publisher anything, so the
 	/// skipped groups are still delivered and simply not returned. To ask the publisher
-	/// to start there instead, set [`Subscription::start`] via [`Self::update`].
+	/// to start there instead, set [`Subscription::ranges`] via [`Self::update`].
 	/// See [Local cursor vs wire preference](Self#local-cursor-vs-wire-preference).
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub(crate) fn start_at(&mut self, sequence: u64) {
@@ -4719,9 +4719,9 @@ impl Subscriber {
 	///
 	/// The range says whether its sequence is delivered: `..=5` serves through group 5,
 	/// `..5` stops before it. `..0` is the empty range: no group is delivered.
-	/// [`Position::group_end`] translates a [`Subscription::end`].
+	/// [`Position::group_end`] translates a range's absolute end.
 	///
-	/// A local filter, not a request; [`Subscription::end`] is the wire-level
+	/// A local filter, not a request; [`Subscription::ranges`] are the wire-level
 	/// counterpart. See [Local cursor vs wire preference](Self#local-cursor-vs-wire-preference).
 	///
 	/// Groups beyond the cap are held rather than skipped past, so a later call to
@@ -8088,7 +8088,7 @@ mod test {
 			append_at(&mut producer, second * 1000);
 		}
 
-		// `Subscription::end` is a request to the publisher, folded in with every other
+		// A range's end is a request to the publisher, folded in with every other
 		// subscriber's, and it does not filter this handle: the groups above it arrive
 		// anyway. Capping the live edge with it would pin the edge below them, leaving
 		// everything past it with nothing newer to be late against.

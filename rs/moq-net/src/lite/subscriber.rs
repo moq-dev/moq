@@ -2889,7 +2889,7 @@ mod tests {
 
 	/// The model's exclusive end maps back to the wire's inclusive pair.
 	///
-	/// The two disagree deliberately (see [`Subscription::end`]), so this pins the seam:
+	/// The two disagree deliberately (see [`Position::after_group`]), so this pins the seam:
 	/// an end at the head of a group means the group below it, served whole, while one
 	/// mid-group caps the frame below it. Off by one here would silently drop or
 	/// duplicate a frame at every relay hop.

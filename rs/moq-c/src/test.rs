@@ -1411,10 +1411,9 @@ fn publish_track_invalid_broadcast() {
 	let subscription = moq_subscription {
 		priority: 1,
 		max_delay_us: 0,
-		group_start: 0,
-		group_start_present: false,
-		group_end: 0,
-		group_end_present: false,
+		ranges: std::ptr::null(),
+		ranges_len: 0,
+		order: 0,
 	};
 	assert!(unsafe { moq_consume_track_update(9999, &subscription) } < 0);
 }
@@ -1518,10 +1517,9 @@ fn raw_track_publish_consume() {
 	let subscription = moq_subscription {
 		priority: 0,
 		max_delay_us: 1_000_000,
-		group_start: 0,
-		group_start_present: false,
-		group_end: 0,
-		group_end_present: false,
+		ranges: std::ptr::null(),
+		ranges_len: 0,
+		order: 0,
 	};
 	let consumer = id(unsafe {
 		moq_consume_track(
@@ -1720,13 +1718,25 @@ fn raw_track_subscription_options_and_update() {
 	let consume = request_broadcast(origin, path);
 
 	let frame_cb = Callback::new();
+	let ranges = [moq_range {
+		start: moq_anchor {
+			kind: moq_anchor_kind::MOQ_ANCHOR_ABSOLUTE as u32,
+			group: 1,
+			frame: 0,
+		},
+		end: moq_anchor {
+			kind: moq_anchor_kind::MOQ_ANCHOR_ABSOLUTE as u32,
+			group: 2,
+			frame: 0,
+		},
+		end_present: true,
+	}];
 	let subscription = moq_subscription {
 		priority: 5,
 		max_delay_us: 25_000,
-		group_start: 1,
-		group_start_present: true,
-		group_end: 2,
-		group_end_present: true,
+		ranges: ranges.as_ptr(),
+		ranges_len: ranges.len(),
+		order: 0,
 	};
 	let consumer = id(unsafe {
 		moq_consume_track(
@@ -1753,8 +1763,12 @@ fn raw_track_subscription_options_and_update() {
 	assert_eq!(frame.timestamp_us, 20_000);
 	assert_eq!(moq_consume_track_frame_free(frame_id), 0);
 
+	let widened = [moq_range {
+		end: moq_anchor { group: 3, ..ranges[0].end },
+		..ranges[0]
+	}];
 	let update = moq_subscription {
-		group_end: 3,
+		ranges: widened.as_ptr(),
 		..subscription
 	};
 	assert_eq!(unsafe { moq_consume_track_update(consumer, &update) }, 0);
@@ -4930,10 +4944,9 @@ fn read_raw_frames(consume: u32, name: &[u8], count: usize) -> Vec<Vec<u8>> {
 	let subscription = moq_subscription {
 		priority: 0,
 		max_delay_us: 1_000_000,
-		group_start: 0,
-		group_start_present: false,
-		group_end: 0,
-		group_end_present: false,
+		ranges: std::ptr::null(),
+		ranges_len: 0,
+		order: 0,
 	};
 	let track = id(unsafe {
 		moq_consume_track(

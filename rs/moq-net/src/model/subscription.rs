@@ -435,8 +435,8 @@ impl Position {
 	/// The position just past `frame` of `group`: the exclusive end that includes it.
 	///
 	/// `None` when there is no such position, i.e. the very last frame of the very last
-	/// group. That is past everything, which [`Subscription::end`] spells `None` too, so
-	/// the two meanings line up and `with_end` can take this directly.
+	/// group. That is past everything, which an open [`Range::end`] spells `None` too, so
+	/// the two meanings line up.
 	pub fn after(group: u64, frame: u64) -> Option<Self> {
 		match frame.checked_add(1) {
 			Some(frame) => Some(Self { group, frame }),
