@@ -1,0 +1,105 @@
+#wheel-cal {
+	position: fixed;
+	inset: 0;
+	z-index: 10;
+	background: rgba(0, 0, 0, 0.75);
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	padding: 1.25rem;
+}
+#wheel-cal[hidden] {
+	display: none;
+}
+.cal-box {
+	background: var(--panel);
+	border: 1px solid var(--accent);
+	border-radius: 8px;
+	padding: 1.1rem;
+	width: min(30rem, 100%);
+	display: flex;
+	flex-direction: column;
+	gap: 0.7rem;
+}
+.cal-box h2 {
+	font-size: 0.9rem;
+	color: var(--accent);
+	letter-spacing: 0.04em;
+}
+.cal-device {
+	font-size: 0.72rem;
+}
+.cal-progress {
+	font-size: 0.66rem;
+	color: var(--muted);
+	text-transform: uppercase;
+	letter-spacing: 0.06em;
+}
+.cal-prompt {
+	font-size: 0.8rem;
+	line-height: 1.5;
+}
+.cal-live {
+	font-size: 0.66rem;
+	color: var(--muted);
+	background: #000;
+	border-radius: 4px;
+	padding: 0.4rem 0.5rem;
+	overflow-x: auto;
+	white-space: nowrap;
+}
+.cal-warn {
+	font-size: 0.7rem;
+	color: var(--danger);
+}
+.cal-actions {
+	display: flex;
+	gap: 0.5rem;
+}
+.cal-actions button {
+	font:
+		0.7rem ui-monospace,
+		monospace;
+	color: var(--text);
+	background: #000;
+	border: 1px solid var(--line);
+	border-radius: 4px;
+	padding: 0.3rem 0.7rem;
+	cursor: pointer;
+}
+.cal-actions button:hover {
+	border-color: var(--muted);
+}
+.cal-actions .cal-capture {
+	border-color: var(--accent);
+	color: var(--accent);
+}
+.cal-actions .cal-cancel {
+	margin-left: auto;
+}
+.cal-safety {
+	display: flex;
+	align-items: center;
+	gap: 0.6rem;
+	border-top: 1px solid var(--line);
+	padding-top: 0.7rem;
+	font-size: 0.66rem;
+	color: var(--muted);
+	line-height: 1.4;
+}
+.cal-safety .estop-btn {
+	font:
+		600 0.68rem ui-monospace,
+		monospace;
+	letter-spacing: 0.06em;
+	color: #fff;
+	background: var(--danger);
+	border: 1px solid var(--danger);
+	border-radius: 4px;
+	padding: 0.25rem 0.6rem;
+	cursor: pointer;
+	flex: none;
+}
+.cal-safety .estop-btn:hover {
+	background: #c53437;
+}

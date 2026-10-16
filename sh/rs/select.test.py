@@ -25,7 +25,7 @@ class SelectTest(unittest.TestCase):
                        SELECT_CALLS=str(calls), BASH_ENV=os.devnull)
             subprocess.run(["bash", "sh/rs/select.sh", action, str(changed)],
                            cwd=ROOT, env=env, check=True, capture_output=True, text=True)
-            return calls.read_text().splitlines()
+            return calls.read_text().splitlines() if calls.exists() else []
 
     def test_nextest_launcher_selects_workspace(self):
         for action in ("check", "check-test", "lint", "test"):
@@ -57,6 +57,13 @@ class SelectTest(unittest.TestCase):
             with self.subTest(action=action, owner="net"):
                 self.assertEqual(self.selected("sh/rs/net-features.sh", action=action),
                                  ["rs net-features"])
+
+    def test_demo_crate_follows_its_dependencies(self):
+        for path in ("demo/carla/bridge/src/lib.rs", "rs/moq-video/src/lib.rs"):
+            with self.subTest(path=path):
+                calls = self.selected(path, action="test")
+                self.assertTrue(any("/demo/carla/bridge#moq-carla-bridge" in call for call in calls), calls)
+        self.assertEqual(self.selected("demo/carla/web/src/main.ts"), [])
 
     def test_shared_build_input_gets_all_permutations(self):
         calls = self.selected("Cargo.lock")

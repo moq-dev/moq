@@ -1,0 +1,31 @@
+[Unit]
+Description=CARLA MoQ worker
+Documentation=file://@CARLA_REPO@/demo/carla/README.md
+Wants=carla-sim.service
+After=carla-sim.service
+
+[Service]
+Type=simple
+Environment=CARLA_REPO=@CARLA_REPO@
+# MOQ_URL lives here, so a JWT in it stays off the command line.
+EnvironmentFile=%E/moq/carla.env
+# After= only orders the container's *start*; the simulator answers RPC seconds
+# to a minute later. Without this gate the worker spends a 30s client timeout
+# and a restart backoff on every cold boot. It also covers the one-time 8.6 GB
+# image pull, up to the start timeout; Restart=on-failure retries if that
+# expires anyway.
+ExecStartPre=@NIX_BIN@ develop --accept-flake-config ${CARLA_REPO} --command just --justfile ${CARLA_REPO}/justfile carla wait-port 127.0.0.1 2000 600
+ExecStart=@NIX_BIN@ develop --accept-flake-config ${CARLA_REPO} --command just --justfile ${CARLA_REPO}/justfile carla worker
+# just reports a recipe killed by SIGTERM as exit 143 rather than dying of
+# the signal, which systemd would otherwise log as a failed stop.
+SuccessExitStatus=143
+Restart=on-failure
+RestartSec=10s
+RestartSteps=4
+RestartMaxDelaySec=2min
+# The gate above runs inside the start timeout, which defaults to 90s.
+TimeoutStartSec=6min
+TimeoutStopSec=30s
+
+[Install]
+WantedBy=default.target
