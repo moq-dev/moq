@@ -1,4 +1,4 @@
-//! Echo a tokio noq peer through the io_uring worker while ablating UDP features.
+//! Echo a tokio QUIC peer through the io_uring worker while ablating UDP features.
 
 use criterion::{criterion_group, criterion_main};
 
@@ -50,7 +50,7 @@ mod linux {
 		let server = quic::server::Config::new(
 			quic::Identity::open(&certs.cert, &certs.key)
 				.expect("identity")
-				.server(&[web_transport_moq::ALPN], quic::server::ClientAuth::None)
+				.server(&[moq_tokio::quic::web::ALPN], quic::server::ClientAuth::None)
 				.expect("tls"),
 		);
 		let socket = handle
@@ -72,11 +72,11 @@ mod linux {
 				.build()
 				.expect("runtime");
 			runtime.block_on(async move {
-				let client = web_transport_moq::ClientBuilder::new()
+				let client = moq_tokio::quic::web::ClientBuilder::new()
 					.dangerous()
 					.with_no_certificate_verification()
 					.expect("client");
-				let request = web_transport_moq::proto::ConnectRequest::new(
+				let request = moq_tokio::quic::web::proto::ConnectRequest::new(
 					url::Url::parse(&format!("https://{addr}/echo")).expect("url"),
 				);
 				let session = client.connect(request).await.expect("connect");
@@ -154,7 +154,7 @@ mod linux {
 			("all-off", none),
 		];
 
-		let mut group = c.benchmark_group("echo_noq");
+		let mut group = c.benchmark_group("echo_quic");
 		group.throughput(Throughput::Bytes(PAYLOAD as u64));
 
 		for (name, udp_config) in ablations {

@@ -47,10 +47,6 @@ with its consumer. Wire: existing QUIC flow-control and cancellation frames;
 no new MoQ message or negotiation. Browser and iroh receivers do not gain a
 capability their transports cannot provide.
 
-## Required
-
-- [Switch MoQ onto moq-quic](/quest/m1/quic/fork/switch.md) - both native adapters use the in-tree transport
-
 ## Related
 
 - [Bound message assembly](/quest/m1/quic/receive-memory.md) - retains connection credit until a complete message is handed off

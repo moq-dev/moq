@@ -36,7 +36,6 @@ Wire: none.
 ## Required
 
 - [moq-net on moq-clock](/quest/m1/time/net.md) - the driver's instant becomes moq-clock's
-- [Switch](/quest/m1/quic/fork/switch.md) - the QUIC driver this edits moves onto `moq-quic`
 
 ## Closes
 
