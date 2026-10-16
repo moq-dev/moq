@@ -129,21 +129,25 @@ impl Filter {
 			return false;
 		}
 
+		let resolved = resolve(&self.paths);
+
+		// An event names a watched file by its own path or, for a symlink, by the
+		// target it resolves to (an in-place write reports the target's name).
 		// Compared with the directory canonicalized, since backends spell it
 		// differently (FSEvents reports canonical paths). The file name check first
 		// skips that syscall for the unrelated churn that dominates these directories.
+		let watched = || self.located.iter().chain(resolved.iter().flatten());
 		let named = event.paths.iter().any(|p| {
 			let name = p.file_name();
 			name.is_some()
-				&& self.located.iter().any(|f| f.file_name() == name)
-				&& locate(p).is_some_and(|p| self.located.contains(&p))
+				&& watched().any(|f| f.file_name() == name)
+				&& locate(p).is_some_and(|p| watched().any(|f| *f == p))
 		});
 
 		// A Kubernetes secret mount links `cert.pem` to `..data/cert.pem` and rotates
 		// by swapping the `..data` symlink, so no event ever names the file. Catch
 		// that by where the paths resolve, refreshed on every event so a rotation
 		// that was named doesn't fire again on the next unrelated one.
-		let resolved = resolve(&self.paths);
 		let moved = resolved != self.resolved;
 		self.resolved = resolved;
 
@@ -281,6 +285,24 @@ mod tests {
 		assert!(!filter.matches(&event(closed, keys.path().join("cert.pem"))));
 		assert!(filter.matches(&event(closed, certs.path().join("cert.pem"))));
 		assert!(filter.matches(&event(closed, keys.path().join("key.pem"))));
+	}
+
+	// A configured symlink whose target is rewritten in place reports the target's
+	// name, and nothing resolves anywhere new.
+	#[cfg(unix)]
+	#[test]
+	fn write_to_symlink_target_triggers_reload() {
+		use notify::EventKind;
+		use notify::event::{AccessKind, AccessMode};
+
+		let dir = tempfile::TempDir::new().unwrap();
+		std::fs::write(dir.path().join("actual.pem"), "v1").unwrap();
+		std::os::unix::fs::symlink("actual.pem", dir.path().join("cert.pem")).unwrap();
+		let mut filter = Filter::new(&[dir.path().join("cert.pem")]);
+
+		let closed = EventKind::Access(AccessKind::Close(AccessMode::Write));
+		assert!(filter.matches(&event(closed, dir.path().join("actual.pem"))));
+		assert!(!filter.matches(&event(closed, dir.path().join("relay.log"))));
 	}
 
 	// Drives a real inotify watch through a Kubernetes secret rotation while a log
