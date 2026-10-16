@@ -151,7 +151,7 @@ impl<O: Output> Media<O> {
 			if playback.pending().is_none() {
 				tokio::select! {
 					result = tasks.join_next(), if !tasks.is_empty() => {
-						let ended = joined(result.expect("guarded by is_empty"))?.map(|(kind, sink)| {
+						let ended = joined(result.expect("guarded by is_empty"))?.map(|(kind, (finished, sink))| {
 							if kind == Kind::Audio {
 								// The tail still sounds, so the speaker keeps the anchor, but a
 								// replacement is a track boundary whose timestamps need not
@@ -165,16 +165,11 @@ impl<O: Output> Media<O> {
 							if let Some(sink) = sink {
 								tails.spawn(drain(sink));
 							}
-							kind
+							(kind, finished)
 						});
-						// A disabled rendition's demand was taken to stop it; one still held
-						// means the track ended on its own.
-						let finished = match ended {
-							Some(Kind::Video) => video_demand.take().is_some(),
-							Some(Kind::Audio) => audio_demand.take().is_some(),
-							None => false,
-						};
-						playback.ended(ended, finished);
+						if let Some((kind, finished)) = ended {
+							playback.ended(kind, finished);
+						}
 					}
 					_ = tails.join_next(), if !tails.is_empty() => {}
 					// Followed for as long as it lasts, not just until something is
@@ -280,8 +275,8 @@ impl<O: Output> Media<O> {
 								(
 									Kind::Video,
 									tokio::select! {
-									result = video.run(track, decoder) => result.map(|()| None),
-									_ = stopped => Ok(None),
+									result = video.run(track, decoder) => result.map(|()| (true, None)),
+									_ = stopped => Ok((false, None)),
 									},
 								)
 							});
@@ -342,8 +337,8 @@ impl<O: Output> Media<O> {
 								(
 									Kind::Audio,
 									tokio::select! {
-									result = play_audio(consumer, audio) => result.map(Some),
-									_ = stopped => Ok(None),
+									result = play_audio(consumer, audio) => result.map(|sink| (true, Some(sink))),
+									_ = stopped => Ok((false, None)),
 									},
 								)
 							});

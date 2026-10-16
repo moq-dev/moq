@@ -111,10 +111,7 @@ impl Playback {
 
 	/// Record a task ending, re-arming selection for that half. `finished` is
 	/// whether its track ended on its own, rather than being stopped.
-	pub(super) fn ended(&mut self, kind: Option<Kind>, finished: bool) {
-		let Some(kind) = kind else {
-			return;
-		};
+	pub(super) fn ended(&mut self, kind: Kind, finished: bool) {
 		let half = self.half_mut(kind);
 		half.playing = false;
 		if let Some(track) = half.track.take()
@@ -196,11 +193,11 @@ mod tests {
 	fn only_an_ended_track_is_finished() {
 		let mut playback = Playback::default();
 		playback.started(Kind::Video, track("video"));
-		playback.ended(Some(Kind::Video), false);
+		playback.ended(Kind::Video, false);
 		assert!(!playback.finished(&track("video")));
 
 		playback.started(Kind::Video, track("video"));
-		playback.ended(Some(Kind::Video), true);
+		playback.ended(Kind::Video, true);
 		assert!(playback.finished(&track("video")));
 		assert!(!playback.finished(&track("audio")));
 	}
@@ -224,7 +221,7 @@ mod tests {
 		playback.received(Default::default());
 		assert!(playback.pending().is_none(), "nothing to start while both halves play");
 
-		playback.ended(Some(Kind::Video), true);
+		playback.ended(Kind::Video, true);
 		assert!(!playback.done(), "playback ended on a retired rendition");
 		assert!(playback.audio.playing, "audio ended with the video rendition");
 		assert!(playback.pending().is_some(), "the retirement snapshot was dropped");
@@ -251,7 +248,7 @@ mod tests {
 		playback.started(Kind::Video, track("video"));
 		playback.read(Kind::Audio);
 
-		playback.ended(Some(Kind::Video), true);
+		playback.ended(Kind::Video, true);
 		assert!(playback.pending().is_none(), "the player would resubscribe in a loop");
 
 		playback.received(Default::default());
@@ -269,7 +266,7 @@ mod tests {
 		playback.catalog_ended = true;
 		assert!(!playback.done(), "playback ended while video was still playing");
 
-		playback.ended(Some(Kind::Video), true);
+		playback.ended(Kind::Video, true);
 		assert!(playback.done());
 	}
 
@@ -289,7 +286,7 @@ mod tests {
 		// retired track does.
 		playback.received(Default::default());
 		playback.catalog_ended = true;
-		playback.ended(Some(Kind::Video), true);
+		playback.ended(Kind::Video, true);
 
 		assert!(playback.pending().is_some(), "the final snapshot was never offered");
 		assert!(!playback.done(), "playback ended with a replacement still unread");
