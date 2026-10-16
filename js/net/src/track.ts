@@ -16,6 +16,7 @@ import {
 	insertRun,
 	type Recv,
 	type Run,
+	removeRun,
 	runGaps,
 	type TrackRequestOptions,
 	type TrackSequence,
@@ -621,6 +622,16 @@ export class Producer {
 		}
 	}
 
+	// A publisher may re-create a group it cut; the sequence is no longer given up.
+	#undrop(sequence: number): void {
+		for (const state of [this.#state, ...this.#sinks]) {
+			const drops = state.drops.peek();
+			if (runGaps(drops, sequence, sequence + 1).length === 0) {
+				state.drops.set(removeRun(drops, sequence, sequence + 1));
+			}
+		}
+	}
+
 	/**
 	 * Resolve this track's immutable publisher properties, committed at accept time.
 	 * Rejects if the track is closed before the properties are known.
@@ -917,9 +928,13 @@ export class Producer {
 	// Retain a source group and fan it out to every live sink.
 	#publish(group: GroupProducer): void {
 		const entry: CachedGroup = { group, mirrors: new Map<TrackState, GroupConsumer>(), arrived: now() };
+		this.#undrop(group.sequence);
 		group.closed.then((closed) => {
-			if (closed instanceof Error && !(closed instanceof TooFarBehind))
-				this.#drop(group.sequence, group.sequence + 1);
+			if (!(closed instanceof Error) || closed instanceof TooFarBehind) return;
+			// A re-created group already replaced this one.
+			const current = this.#cached.get(group.sequence);
+			if (current && current.group !== group) return;
+			this.#drop(group.sequence, group.sequence + 1);
 		});
 		this.#cache.push(entry);
 		this.#cached.set(group.sequence, entry);
@@ -1209,7 +1224,7 @@ export class Subscriber {
 	// the track's drops last folded in, and every sequence already reported. Drops are
 	// persistent track state, so they are tracked here rather than removed for everyone.
 	#pending: Run[] = [];
-	#dropsSeen?: readonly Run[];
+	#dropsSeen?: { drops: readonly Run[]; start: number; end?: number };
 	#reported: Run[] = [];
 	// The group the frame-level helpers are currently draining, acquired through the
 	// sequence cursor so frame reads and {@link Ordered.nextGroup} share one floor.
@@ -1607,9 +1622,11 @@ export class Subscriber {
 		}
 		if (dispositions) {
 			// Rescanned only after it changed, so an idle poll costs nothing per drop held.
+			// Out-of-window runs were skipped, so a moved window rescans too.
 			const drops = this.#state.drops.peek();
-			if (drops !== this.#dropsSeen) {
-				this.#dropsSeen = drops;
+			const seen = this.#dropsSeen;
+			if (!seen || seen.drops !== drops || seen.start !== start || seen.end !== end) {
+				this.#dropsSeen = { drops, start, end };
 				for (const run of drops) insertRun(this.#pending, run.start, run.end);
 			}
 			for (let run = this.#pending.shift(); run; run = this.#pending.shift()) {

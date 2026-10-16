@@ -109,6 +109,16 @@ export function insertRun(runs: Run[], start: number, end: number): void {
 	runs.splice(first, last - first, merged);
 }
 
+/** The sorted, disjoint `runs` with `[start, end)` taken out. */
+export function removeRun(runs: readonly Run[], start: number, end: number): Run[] {
+	return runs.flatMap((run) =>
+		[
+			{ start: run.start, end: Math.min(run.end, start) },
+			{ start: Math.max(run.start, end), end: run.end },
+		].filter((part) => part.start < part.end),
+	);
+}
+
 /** The parts of `[start, end)` that sorted, disjoint `runs` do not cover, in order. */
 export function runGaps(runs: readonly Run[], start: number, end: number): Run[] {
 	const gaps: Run[] = [];

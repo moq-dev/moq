@@ -4717,6 +4717,66 @@ mod serve_group_test {
 		);
 	}
 
+	/// An upstream drop below the floor is forwarded once an update lowers the floor to it,
+	/// not only at the end.
+	#[moq_net_sim::test]
+	async fn a_lowered_start_forwards_a_drop_held_below_it() {
+		let version = Version::Lite06;
+		let mut track = track::Producer::new(
+			Arc::new(broadcast::Info::default()),
+			"test",
+			crate::track::Info::timed(),
+		);
+		let subscription = track::Subscription::default()
+			.with_start(track::Position::group(5))
+			.with_max_delay(Duration::from_secs(60));
+		let subscriber = track.subscribe(subscription);
+		let (mut run, mut writer, log) = lite_run(version, SinkSession::new(Log::default()), subscriber);
+		write_group(&mut track, 5, 5);
+		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+		assert_eq!(run.start, Some(5));
+
+		track.drop_groups(2..3);
+		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+		assert_eq!(drops(&mut writer, &log, version).await, []);
+
+		run.update(lite::SubscribeUpdate {
+			order: crate::track::Order::Descending,
+			priority: 0,
+			max_delay: Duration::from_secs(60),
+			start_group: Some(0),
+			end_group: None,
+			start_frame: 0,
+			end_frame: None,
+		});
+		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+		assert_eq!(drops(&mut writer, &log, version).await, [(2, 2)]);
+	}
+
+	/// A group the publisher cuts and then re-creates is served, not dropped.
+	#[moq_net_sim::test]
+	async fn a_recreated_cut_is_not_dropped() {
+		let version = Version::Lite06;
+		let mut track = track::Producer::new(
+			Arc::new(broadcast::Info::default()),
+			"test",
+			crate::track::Info::timed(),
+		);
+		let subscriber = track.subscribe(None);
+		let (mut run, mut writer, log) = lite_run(version, SinkSession::new(Log::default()), subscriber);
+		write_group(&mut track, 0, 0);
+		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+
+		// Recorded as a drop on the track, as a relay does for an upstream SUBSCRIBE_DROP,
+		// before this run looks.
+		track.drop_groups(1..2);
+		write_group(&mut track, 1, 1);
+		track.finish_at(track::Position::group(2)).unwrap();
+		drop(track);
+		kio::wait(|waiter| run.poll(&mut writer, waiter)).await.unwrap();
+		assert_eq!(drops(&mut writer, &log, version).await, []);
+	}
+
 	/// A SUBSCRIBE_UPDATE that lowers the start below SUBSCRIBE_START asks for those groups
 	/// too, so the drops at the end count from there.
 	#[moq_net_sim::test]

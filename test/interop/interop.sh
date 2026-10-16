@@ -963,6 +963,11 @@ run_drop_pair() {
     local pub="$1" sub="$2" version="$3" pid subscriber_pid
     local name="drop-${version}-${pub}-${sub}"
     local fifo="$HARNESS_RUN/tail-ack" broadcast="$name-$$-$RANDOM"
+    if is_broken "$pub" || is_broken "$sub"; then
+        echo "  FAIL  drop $version $pub -> $sub (client unavailable)"
+        overall=1
+        return
+    fi
     mkfifo "$fifo"
     exec 9<>"$fifo"
     harness_spawn "$name-pub" "$HARNESS_RUN/$name-pub.log" run_tail_publisher "$fifo" "$pub" publish "$broadcast" "$(token_url --publish "$broadcast")" "$version" drop
@@ -1207,10 +1212,12 @@ if [[ "$NEGATIVE" -eq 0 && "$MEDIA" -eq 0 && "$IN_TREE" -eq 1 ]]; then
             run_tail_pair "$runtime" rust
         fi
     done
-    for version in moq-lite-05 moq-lite-06; do
-        run_drop_pair rust js-native-node "$version"
-        run_drop_pair js-native-node rust "$version"
-    done
+    if needs js-native-node; then
+        for version in moq-lite-05 moq-lite-06; do
+            run_drop_pair rust js-native-node "$version"
+            run_drop_pair js-native-node rust "$version"
+        done
+    fi
 fi
 
 if [[ "$overall" -eq 0 ]]; then

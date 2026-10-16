@@ -530,6 +530,18 @@ impl TrackState {
 		self.drops_revision += 1;
 	}
 
+	/// Remove an aborted slot, keeping a cut as a drop: reclaiming it must not erase a
+	/// disposition a relay still has to forward.
+	fn reclaim_aborted(&mut self, sequence: u64) {
+		if let Some(slot) = self.lookup.remove(&sequence)
+			&& slot.visible
+			&& slot.group.is_cut()
+			&& let Some(end) = sequence.checked_add(1)
+		{
+			self.drop_groups(sequence..end);
+		}
+	}
+
 	/// Whether the cached group at `sequence` is one readers saw and the publisher cut.
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	fn is_cut(&self, sequence: u64) -> bool {
@@ -1095,13 +1107,7 @@ impl TrackState {
 				// Already aborted: the frames are gone, reclaim the slot so a
 				// later fetch can serve the sequence again.
 				if slot.is_aborted() {
-					let slot = self.lookup.remove(&sequence).unwrap();
-					if slot.visible
-						&& slot.group.is_cut()
-						&& let Some(end) = sequence.checked_add(1)
-					{
-						self.drop_groups(sequence..end);
-					}
+					self.reclaim_aborted(sequence);
 					continue;
 				}
 				if self.protects(sequence) || !slot.is_expired(&scan) {
@@ -1286,6 +1292,14 @@ impl TrackState {
 		}
 
 		self.advance(sequence);
+		// A publisher may re-create a group it cut; the sequence is no longer given up.
+		if visible
+			&& self.drops.contains(&sequence)
+			&& let Some(end) = sequence.checked_add(1)
+		{
+			self.drops.remove(sequence..end);
+			self.drops_revision += 1;
+		}
 		self.lookup.insert(
 			sequence,
 			Slot {
@@ -1451,7 +1465,7 @@ impl TrackState {
 			}
 			if slot.is_aborted() {
 				// Aborted upstream: the frames are already gone, reclaim the slot.
-				self.lookup.remove(&sequence);
+				self.reclaim_aborted(sequence);
 				continue;
 			}
 			if self.protects(sequence) {
@@ -3935,9 +3949,9 @@ struct DropCursor {
 	cuts: super::aborts::Watch,
 	/// Sequences given up and not reported yet: stale skips, cuts, and upstream drops.
 	pending: RangeSet<u64>,
-	/// The [`TrackState::drops_revision`] last folded into `pending`.
+	/// The [`TrackState::drops_revision`] and window last folded into `pending`.
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
-	revision: Option<u64>,
+	scanned: Option<(u64, Range<u64>)>,
 	/// Every sequence this cursor already reported.
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	reported: RangeSet<u64>,
@@ -3946,21 +3960,11 @@ struct DropCursor {
 #[cfg_attr(not(feature = "async"), allow(dead_code))]
 impl DropCursor {
 	fn new(state: &TrackState) -> Self {
-		// Watch before scanning, so a cut landing between the two is still seen.
-		let cuts = state.cache.watch_cuts();
-		let mut pending = RangeSet::new();
-		for (&sequence, slot) in &state.lookup {
-			if slot.visible
-				&& slot.group.is_cut()
-				&& let Some(end) = sequence.checked_add(1)
-			{
-				pending.insert(sequence..end);
-			}
-		}
+		// Watch before the first scan, so a cut landing between the two is still seen.
 		Self {
-			cuts,
-			pending,
-			revision: None,
+			cuts: state.cache.watch_cuts(),
+			pending: RangeSet::new(),
+			scanned: None,
 			reported: RangeSet::new(),
 		}
 	}
@@ -3975,11 +3979,22 @@ impl DropCursor {
 				self.pending.insert(sequence..end);
 			}
 		}
-		if self.revision != Some(state.drops_revision) {
-			self.revision = Some(state.drops_revision);
+		// Rescan only after the drops change or the window moves; out-of-window runs were
+		// skipped and may be owed now.
+		let scan = (state.drops_revision, within.clone());
+		if self.scanned.as_ref() != Some(&scan) {
+			self.scanned = Some(scan);
 			for dropped in state.drops.overlapping(within) {
 				self.pending
 					.insert(dropped.start.max(within.start)..dropped.end.min(within.end));
+			}
+			for (&sequence, slot) in state.lookup.range(within.clone()) {
+				if slot.visible
+					&& slot.group.is_cut()
+					&& let Some(end) = sequence.checked_add(1)
+				{
+					self.pending.insert(sequence..end);
+				}
 			}
 		}
 		while let Some(range) = self.pending.iter().next().cloned() {

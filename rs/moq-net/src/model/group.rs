@@ -538,7 +538,7 @@ struct Alive {
 	// straddle the abort: see `Producer::live_first_frame`.
 	aborted: AtomicBool,
 	// Whether the abort was the publisher giving the group up rather than cache policy
-	// (`Old`, `Timeout`). Stored before `aborted`, under the same rules.
+	// (`Old`, `Timeout`, `Evicted`). Stored before `aborted`, under the same rules.
 	cut: AtomicBool,
 	// The cache stamp `GroupState::charge` maintains, held here as well so the
 	// eviction and expiry walks can weigh a candidate without taking the group lock
@@ -1065,7 +1065,7 @@ impl Producer {
 	}
 
 	fn commit_abort(&self, mut guard: kio::Mut<'_, GroupState>, err: Error) {
-		let cut = !matches!(err, Error::Old | Error::Timeout);
+		let cut = !matches!(err, Error::Old | Error::Timeout | Error::Evicted);
 		guard.abort = Some(err);
 		self.alive.cut.store(cut, Ordering::Release);
 		self.alive.aborted.store(true, Ordering::Release);
