@@ -50,7 +50,7 @@ AUTH_KEYS, checks `exp`, matches node id against the roster, and requires
 granted paths. A missing, expired, HMAC-signed, or unproven grant, or one
 whose `cnf` is not the session's proven key, is not a grant.
 
-[Signaling and policy](/quest/m1/p2p/signal.md) presents the grant in band
+[Signaling and policy](/quest/m2/p2p/signal.md) presents the grant in band
 on each direct session. P2P is its only consumer, so it lives on this line
 rather than the auth line (decided in the 2026-09-30 audit).
 

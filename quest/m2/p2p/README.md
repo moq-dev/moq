@@ -33,10 +33,17 @@ under "One channel, qmux, ordered".
 
 ## Plan
 
-Promoted to m1 in the 2026-10-13 clustering interview: CDN-connected clients
-using application-selected shorter or preferred P2P paths are a required
-consumer. P2P remains an independently shippable milestone after the shared
-routing contracts; no second routing implementation.
+Deferred to m2 by the maintainer on 2026-10-15, with signaling, transports,
+policy, and validation together. CDN-connected clients using selected peer
+paths remain the consumer. Reuse the shared routing contracts; no second
+routing implementation. Any incompatible wire additions after lite-07
+finalizes use a later wip/version.
+
+This epic owns practical P2P setup guidance extending the routing concept:
+keep the CDN session while selecting peers, explain no browser transit, and
+show application-selected ICE servers including an opt-in relay STUN endpoint
+(`stun:relay.example.com:3478`). Link `/bin/relay/config#stun` and the
+JS/native P2P reference. Do not imply that direct always beats CDN.
 
 ### The relay is the rendezvous and the fallback
 
@@ -65,7 +72,7 @@ off by default, and used only when the application lists it.
 ### Policy is the application's
 
 `Peers` takes the shared origin, a reconnect-safe relay auth handle for
-[peer grants](/quest/m1/p2p/peer-grant.md), plus:
+[peer grants](/quest/m2/p2p/peer-grant.md), plus:
 
 - `enabled`: an explicit on/off signal, off by default;
 - `prefix`: the reserved prefix, `.p2p/` under the session root by default;
@@ -99,7 +106,7 @@ SCTP retransmits it. Decided 2026-10-08: the channel is always ordered, and
 unordered qmux was dropped. Receiver reassembly would exist only in the Rust
 qmux, so it could cover native pairs alone, and a native pair runs QUIC,
 whose streams are independent. The
-[harness](/quest/m1/p2p/harness.md) reports the stall so the cost stays
+[harness](/quest/m2/p2p/harness.md) reports the stall so the cost stays
 visible.
 
 Channel-per-stream is not planned. moq opens a stream per group, so it churns
@@ -118,7 +125,7 @@ Decided 2026-10-13: priority then total cost selects among authorized routes;
 a direct connection does not always win. A watching tab never re-serves what
 it receives. Offloading a room of watchers is a local relay's job
 (`moq-cli --p2p` is the small one), which keeps warm and cold costs and cache-aware routing out of the
-protocol. [Peer route policy](/quest/m1/p2p/cost-scopes.md) sets the cost
+protocol. [Peer route policy](/quest/m2/p2p/cost-scopes.md) sets the cost
 knobs and defaults.
 
 Target the public `@moq/net` interface regardless of whether its
@@ -139,15 +146,15 @@ Backend choice does not change the policy that watching tabs never re-serve.
 
 ## Required
 
-- [Peer grants](/quest/m1/p2p/peer-grant.md) - the relay issues a node-bound, asymmetrically signed grant a browser can verify; HS256 keys issue none
-- [Signaling and policy](/quest/m1/p2p/signal.md) - opted-in peers find each other under the prefix, the application picks who to dial, and the roster-size gate decides whether STUN is used
-- [Native data channel transport](/quest/m1/p2p/webrtc.md) - `moq-tokio` holds a moq-net session with a browser over str0m with a full ICE agent
-- [UDP demux](/quest/m1/p2p/udp-demux.md) - one classifier splits QUIC from STUN and WebRTC on the relay's socket and on a native pair's
-- [Native pairs over ICE and QUIC](/quest/m1/p2p/native-quic.md) - two native peers connect through ICE, then `moq-quic` over the nominated path with fingerprints pinned from the offer
-- [moq-cli joins](/quest/m1/p2p/cli.md) - `--p2p` publishes a roster entry, dials native peers over ICE and QUIC, and serves browsers as a transit hop
-- [Peer route policy](/quest/m1/p2p/cost-scopes.md) - application priorities and total cost choose eligible routes, with epoch-aware handover
-- [Watch opts in](/quest/m1/p2p/watch.md) - one attribute turns it on in the demo and the watcher migrates to the best eligible route
-- [Harness](/quest/m1/p2p/harness.md) - the Playwright harness and the numbers behind every mapping decision
+- [Peer grants](/quest/m2/p2p/peer-grant.md) - the relay issues a node-bound, asymmetrically signed grant a browser can verify; HS256 keys issue none
+- [Signaling and policy](/quest/m2/p2p/signal.md) - opted-in peers find each other under the prefix, the application picks who to dial, and the roster-size gate decides whether STUN is used
+- [Native data channel transport](/quest/m2/p2p/webrtc.md) - `moq-tokio` holds a moq-net session with a browser over str0m with a full ICE agent
+- [UDP demux](/quest/m2/p2p/udp-demux.md) - one classifier splits QUIC from STUN and WebRTC on the relay's socket and on a native pair's
+- [Native pairs over ICE and QUIC](/quest/m2/p2p/native-quic.md) - two native peers connect through ICE, then `moq-quic` over the nominated path with fingerprints pinned from the offer
+- [moq-cli joins](/quest/m2/p2p/cli.md) - `--p2p` publishes a roster entry, dials native peers over ICE and QUIC, and serves browsers as a transit hop
+- [Peer route policy](/quest/m2/p2p/cost-scopes.md) - application priorities and total cost choose eligible routes, with epoch-aware handover
+- [Watch opts in](/quest/m2/p2p/watch.md) - one attribute turns it on in the demo and the watcher migrates to the best eligible route
+- [Harness](/quest/m2/p2p/harness.md) - the Playwright harness and the numbers behind every mapping decision
 
 ## Related
 

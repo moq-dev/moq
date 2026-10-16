@@ -22,15 +22,15 @@ Decided with the maintainer on 2026-10-15:
   - The async continuation is a plain JNA `Callback` with no
     `CallbackThreadInitializer`, so each wakeup from a Rust worker attaches
     that thread to the JVM and detaches it again.
-- **Fix in [the fork](/quest/m1/uniffi-fork.md)'s Kotlin generator**, not by
+- **Fix in [the fork](/quest/m2/uniffi-fork.md)'s Kotlin generator**, not by
   patching generated code. Both costs are one quest: same root, same
   generator, same proof. Prefer a shape that keeps the wrapper's API
   unchanged.
-- If [the BoltFFI spike](/quest/m1/boltffi.md) picks BoltFFI, re-plan this
+- If [the BoltFFI spike](/quest/m2/boltffi.md) picks BoltFFI, re-plan this
   against its Kotlin backend, or delete it if that backend already avoids JNA.
 
 Public API: none expected. Wire: none.
 
 ## Required
 
-- [Hard fork](/quest/m1/uniffi-fork.md) - the generator this patches
+- [Hard fork](/quest/m2/uniffi-fork.md) - the generator this patches

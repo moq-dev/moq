@@ -94,7 +94,7 @@ and payloads.
 
 ## Related
 
-- [Viewer lag histogram](/quest/m1/qos/lag-histogram.md) - lands on the totals
+- [Viewer lag histogram](/quest/m2/qos/lag-histogram.md) - lands on the totals
   and these prefix tracks
 - [Publisher timeliness at relay ingest](/quest/m2/qos-publisher-timeliness.md) - the drift
   histogram lands on the same tracks

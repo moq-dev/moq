@@ -14,7 +14,7 @@ load, because they read one mocked clock instead of the host's wall clock:
 
 ## Plan
 
-All three failed under load on 2026-10-13 (seen on #5148, #5462, and
+These tests failed under load on 2026-10-13 (seen on #5148, #5462, and
 #5446) and passed alone. One run reported the session outliving its grant
 at 28.5 s against the outage test's 29 s floor. AGENTS.md requires unit
 tests to mock time.
@@ -40,7 +40,9 @@ deterministic, rather than widen a bound.
   and bracketing the bounds the way `an_outage_keeps_the_session_until_expires`
   does cannot stop that. That test also unwraps a wall expiry that may
   already be past, so it moves onto the mocked clock here too. Hence the
-  crate is Required, rather than a paused-Tokio fallback.
+  existing moq-clock crate is used directly, rather than a paused-Tokio
+  fallback. This quest owns the targeted moq-auth grant clock conversion;
+  it does not wait for the whole workspace sweep or future relay seam.
 - `a_fixed_lease_still_expires` moves off real sockets onto
   `memory_sessions()` and `moq_relay::supervise` under the same clock. If no
   other real-socket test proves the tcp and ws paths hand their lease to

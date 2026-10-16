@@ -39,4 +39,4 @@ Update `doc/bin/relay/` for the flag change.
 
 ## Related
 
-- [UDP demux](/quest/m1/p2p/udp-demux.md) - demuxes each shard's socket; keep the demux over whatever the library hands out
+- [UDP demux](/quest/m2/p2p/udp-demux.md) - demuxes each shard's socket; keep the demux over whatever the library hands out
