@@ -6,7 +6,6 @@ from datetime import timedelta
 from typing import TYPE_CHECKING
 
 from moq_ffi import (
-    MoqAudioProducer,
     MoqBroadcastDynamic,
     MoqBroadcastProducer,
     MoqGroupDemand,
@@ -16,21 +15,17 @@ from moq_ffi import (
     MoqTrackDynamic,
     MoqTrackProducer,
     MoqTrackRequest,
-    MoqVideoProducer,
 )
 
 from ._records import _subscription, _track_info
 from .types import (
-    AudioFrame,
     Frame,
     Route,
     Subscription,
     TrackInfo,
-    VideoFrame,
 )
 
 if TYPE_CHECKING:
-    from .session import Reservation
     from .subscribe import BroadcastConsumer, GroupConsumer, TrackConsumer
 
 
@@ -283,101 +278,6 @@ class TrackDynamic:
     def cancel(self) -> None:
         """Cancel current and future group request waits."""
         self._inner.cancel()
-
-
-class AudioProducer:
-    """Publish raw PCM through :func:`moq.audio.producer`.
-
-    PCM layout
-    (format / sample rate / channels / bitrate / frame duration) is
-    fixed at construction; each :meth:`write` call passes only bytes
-    and a presentation timestamp.
-    """
-
-    def __init__(self, inner: MoqAudioProducer) -> None:
-        self._inner = inner
-
-    def demand(self) -> TrackDemand:
-        """A watch-only handle to whether this audio track has subscribers."""
-        return TrackDemand(self._inner.demand())
-
-    def reanchor(self) -> None:
-        """Re-anchor the timeline to the next frame after an idle gap."""
-        self._inner.reanchor()
-
-    def write(self, frame: AudioFrame) -> None:
-        """Push one frame of PCM in the configured input format."""
-        self._inner.write(frame)
-
-    def reservation(self) -> Reservation | None:
-        """This encoder's bandwidth reservation, if published against a session allocator."""
-        inner = self._inner.reservation()
-        if inner is None:
-            return None
-        from .session import Reservation as ReservationType
-
-        return ReservationType(inner)
-
-    def finish(self) -> None:
-        """Flush any pending samples and finalize the track."""
-        self._inner.finish()
-
-
-class VideoProducer:
-    """Publish raw pictures and let a native encoder compress them on the way out.
-
-    Built via :func:`moq.video.producer`. Pixel format,
-    resolution, and framerate are fixed at construction; each
-    :meth:`write` call passes only pixels and a presentation timestamp.
-    """
-
-    def __init__(self, inner: MoqVideoProducer) -> None:
-        self._inner = inner
-
-    def demand(self) -> TrackDemand:
-        """A watch-only handle to whether this video track has subscribers."""
-        return TrackDemand(self._inner.demand())
-
-    def write(self, frame: VideoFrame) -> None:
-        """Encode and publish one frame in the configured input format.
-
-        A hardware encoder pipelines, so a call that puts nothing on the wire
-        is normal rather than an error.
-        """
-        self._inner.write(frame)
-
-    def cut(self) -> None:
-        """Start a new group at the next written frame.
-
-        Optional: the encoder keyframes every ``gop`` frames on its own, and
-        each of those cuts a group, so a subscriber can always join without
-        this. Reach for it only to place the boundaries yourself. Raises if
-        the selected encoder cannot force a keyframe; nothing is queued then
-        and groups keep their interval.
-        """
-        self._inner.cut()
-
-    def set_bitrate(self, bitrate: int) -> None:
-        """Retune the live encoder, in bits per second.
-
-        Cheap enough to drive from a congestion controller: no keyframe is
-        forced. Raises if this backend cannot retune while running. That is
-        not fatal: the encoder keeps its current rate.
-        """
-        self._inner.set_bitrate(bitrate)
-
-    def reservation(self) -> Reservation | None:
-        """This encoder's bandwidth reservation, if published against a session allocator."""
-        inner = self._inner.reservation()
-        if inner is None:
-            return None
-        from .session import Reservation as ReservationType
-
-        return ReservationType(inner)
-
-    def finish(self) -> None:
-        """Flush any frames the codec is holding and finalize the track."""
-        self._inner.finish()
 
 
 class BroadcastDynamic:

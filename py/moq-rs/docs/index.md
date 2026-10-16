@@ -210,7 +210,6 @@ Rust side ([`moq-ffi`](https://crates.io/crates/moq-ffi)).
    media.Video
    media.VideoHint
    media.VideoProperties
-   VideoFrame
    VideoCodec
    VideoPixelFormat
    VideoEncoderInput
@@ -218,12 +217,9 @@ Rust side ([`moq-ffi`](https://crates.io/crates/moq-ffi)).
    VideoEncoderKind
    media.Dimensions
    media.Audio
-   AudioFrame
    AudioCodec
    media.AudioFormat
-   AudioDecoderOutput
    AudioEncoderInput
-   AudioEncoderOutput
    Subscription
    TrackInfo
    FetchGroupOptions

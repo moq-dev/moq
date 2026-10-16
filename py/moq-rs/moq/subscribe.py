@@ -5,23 +5,19 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 
 from moq_ffi import (
-    MoqAudioDecoder,
     MoqBroadcastConsumer,
     MoqFrame,
     MoqGroupConsumer,
     MoqTrackConsumer,
-    MoqVideoDecoder,
 )
 
 from ._records import _subscription
 from .types import (
-    AudioFrame,
     Datagram,
     FetchGroupOptions,
     Frame,
     Subscription,
     TrackInfo,
-    VideoDecodedFrame,
 )
 
 
@@ -158,70 +154,6 @@ class TrackConsumer:
 
     def cancel(self) -> None:
         """Cancel the subscription and stop delivering groups."""
-        self._inner.cancel()
-
-
-class AudioDecoder:
-    """Async iterator of decoded audio frames.
-
-    Built via :func:`moq.audio.decoder`. The PCM layout
-    is fixed by the :class:`AudioDecoderOutput` passed at subscribe
-    time; each frame's ``data`` is raw bytes in that format.
-    """
-
-    def __init__(self, inner: MoqAudioDecoder) -> None:
-        self._inner = inner
-
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, *exc) -> None:
-        self.cancel()
-
-    def __aiter__(self):
-        return self
-
-    async def __anext__(self) -> AudioFrame:
-        frame = await self._inner.next()
-        if frame is None:
-            raise StopAsyncIteration
-        return frame
-
-    def cancel(self) -> None:
-        """Cancel the subscription and stop delivering audio frames."""
-        self._inner.cancel()
-
-
-class VideoDecoder:
-    """Async iterator of decoded video frames.
-
-    Built via :func:`moq.video.decoder`. Each frame owns its
-    decoded picture until it is garbage collected; ``frame.pixels(format)``
-    converts it to tightly packed CPU pixels. Each carries its own
-    ``width()`` and ``height()``: ``output.resize`` is best effort, so read
-    the frame rather than assuming it took.
-    """
-
-    def __init__(self, inner: MoqVideoDecoder) -> None:
-        self._inner = inner
-
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, *exc) -> None:
-        self.cancel()
-
-    def __aiter__(self):
-        return self
-
-    async def __anext__(self) -> VideoDecodedFrame:
-        frame = await self._inner.next()
-        if frame is None:
-            raise StopAsyncIteration
-        return frame
-
-    def cancel(self) -> None:
-        """Cancel the subscription and stop delivering video frames."""
         self._inner.cancel()
 
 

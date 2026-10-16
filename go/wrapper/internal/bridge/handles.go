@@ -27,6 +27,8 @@ var (
 	Reservation func(*ffi.MoqReservation) any
 	// CatalogProducer returns the handle behind a *media.CatalogProducer.
 	CatalogProducer func(any) *ffi.MoqMediaCatalogProducer
+	// VideoDecodedFrame wraps a decoded frame as a *moq.VideoDecodedFrame.
+	VideoDecodedFrame func(*ffi.MoqVideoDecodedFrame) any
 )
 
 // BroadcastConsumer returns the handle behind a *moq.BroadcastConsumer.

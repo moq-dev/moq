@@ -1248,20 +1248,16 @@ def test_optional_binding_records_use_none_defaults():
     assert hint.framerate is None
     assert hint.optimize_for_latency is None
 
-    encoder = moq.AudioEncoderOutput(codec=moq.AudioCodec.opus())
+    encoder = moq.audio.EncoderOutput(codec=moq.AudioCodec.opus())
     assert encoder.sample_rate is None
     assert encoder.channels is None
     assert encoder.bitrate is None
-    assert encoder.frame_duration_us == 0
+    assert encoder.frame_duration == timedelta(0)
 
-    # Microseconds, so Opus' 2.5 ms frame is expressible at all.
-    fine = moq.AudioEncoderOutput(codec=moq.AudioCodec.opus(), frame_duration_us=2_500)
-    assert fine.frame_duration_us == 2_500
-
-    decoder = moq.AudioDecoderOutput(format=moq.AudioSampleFormat.F32)
+    decoder = moq.audio.DecoderOutput(format=moq.AudioSampleFormat.F32)
     assert decoder.sample_rate is None
     assert decoder.channels is None
-    assert decoder.max_delay_us is None
+    assert decoder.max_delay is None
 
 
 def test_encode_audio_with_opus_object():

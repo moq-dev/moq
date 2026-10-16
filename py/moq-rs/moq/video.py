@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import timedelta
 
 from moq_ffi import (
+    MoqVideoDecoder,
     MoqVideoDecoderOutput,
     MoqVideoEncoder,
     MoqVideoFrame,
@@ -19,7 +20,7 @@ from .media import CatalogProducer, Dimensions, Video
 from .publish import BroadcastProducer, TrackDemand
 from .session import Bandwidth, Reservation
 from .subscribe import BroadcastConsumer
-from .subscribe import VideoDecoder as Decoder
+from .types import VideoDecodedFrame
 from .types import VideoEncoderInput as EncoderInput
 from .types import VideoEncoderOutput as EncoderOutput
 from .types import VideoGop as Gop
@@ -27,6 +28,8 @@ from .types import VideoGop as Gop
 
 @dataclass(frozen=True)
 class Frame:
+    """One raw picture in the configured input layout, with its presentation timestamp."""
+
     timestamp: timedelta
     data: bytes
 
@@ -36,6 +39,8 @@ class Frame:
 
 @dataclass(frozen=True)
 class Packet:
+    """One encoded access unit from an :class:`Encoder`."""
+
     timestamp: timedelta
     data: bytes
     keyframe: bool
@@ -47,6 +52,8 @@ class Packet:
 
 @dataclass(frozen=True)
 class DecoderOutput:
+    """What a :class:`Decoder` delivers: an optional resize, a max delay, and the decoder's surface (macOS only)."""
+
     resize: Dimensions | None = None
     max_delay: timedelta | None = None
     surface: bool = False
@@ -60,27 +67,81 @@ class DecoderOutput:
 
 
 class Producer:
+    """Publish raw pictures, encoded on the way out. Built via :func:`producer`.
+
+    Pixel format, resolution, and framerate are fixed at construction; each
+    :meth:`write` passes only pixels and a presentation timestamp.
+    """
+
     def __init__(self, inner: MoqVideoProducer) -> None:
         self._inner = inner
 
     def demand(self) -> TrackDemand:
+        """A watch-only handle to whether this video track has subscribers."""
         return TrackDemand(self._inner.demand())
 
     def write(self, frame: Frame) -> None:
+        """Encode and publish one picture in the configured input format.
+
+        A hardware encoder pipelines, so a call that puts nothing on the wire
+        is normal rather than an error.
+        """
         self._inner.write(frame._ffi())
 
     def cut(self) -> None:
+        """Start a new group at the next written frame.
+
+        Optional: the encoder starts groups on its own per ``output.gop``. Raises
+        if the selected encoder cannot force a keyframe; groups keep their interval.
+        """
         self._inner.cut()
 
     def set_bitrate(self, bitrate: int) -> None:
+        """Retune the live encoder, in bits per second, without forcing a keyframe.
+
+        Raises if this backend cannot retune while running; the encoder keeps its rate.
+        """
         self._inner.set_bitrate(bitrate)
 
     def reservation(self) -> Reservation | None:
+        """This encoder's bandwidth reservation, if published against a session allocator."""
         value = self._inner.reservation()
         return None if value is None else Reservation(value)
 
     def finish(self) -> None:
+        """Flush any frames the codec is holding and finalize the track."""
         self._inner.finish()
+
+
+class Decoder:
+    """Async iterator of decoded frames. Built via :func:`decoder`.
+
+    Each frame owns its decoded picture until it is garbage collected;
+    ``frame.pixels(format)`` converts it to tightly packed CPU pixels.
+    ``output.resize`` is best effort, so read each frame's ``width()`` and ``height()``.
+    """
+
+    def __init__(self, inner: MoqVideoDecoder) -> None:
+        self._inner = inner
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc) -> None:
+        self.cancel()
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self) -> VideoDecodedFrame:
+        frame = await self._inner.next()
+        if frame is None:
+            raise StopAsyncIteration
+        return frame
+
+    def cancel(self) -> None:
+        """Cancel the subscription and stop delivering video frames."""
+        self._inner.cancel()
 
 
 def producer(

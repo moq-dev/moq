@@ -12,12 +12,22 @@ import (
 	"moq.dev/moq/media"
 )
 
+// Codec selects the audio codec; build one with moq.OpusAudioCodec or moq.AacAudioCodec.
 type Codec = *ffi.MoqAudioCodec
+
+// SampleFormat is a raw PCM sample layout.
 type SampleFormat = ffi.MoqAudioSampleFormat
+
+// EncoderInput declares the PCM layout written to a Producer.
 type EncoderInput = ffi.MoqAudioEncoderInput
+
+// Packet is one encoded payload from an Encoder.
 type Packet = ffi.MoqAudioPacket
+
+// EncoderFinish holds the packets Encoder.Finish drains and the padded samples to discard.
 type EncoderFinish = ffi.MoqAudioEncoderFinish
 
+// EncoderOutput configures the codec side: codec, track name, rate, channels, bitrate, and frame duration (0 takes the codec's own frame).
 type EncoderOutput struct {
 	Codec         Codec
 	Track         *string
@@ -32,6 +42,7 @@ func (o EncoderOutput) ffi() (ffi.MoqAudioEncoderOutput, error) {
 	return ffi.MoqAudioEncoderOutput{Codec: o.Codec, Track: o.Track, SampleRate: o.SampleRate, Channels: o.Channels, Bitrate: o.Bitrate, FrameDurationUs: uint32(frame)}, err
 }
 
+// DecoderOutput configures the PCM a Decoder delivers and how stale a group may get before it is skipped.
 type DecoderOutput struct {
 	Format     SampleFormat
 	SampleRate *uint32
@@ -44,6 +55,7 @@ func (o DecoderOutput) ffi() (ffi.MoqAudioDecoderOutput, error) {
 	return ffi.MoqAudioDecoderOutput{Format: o.Format, SampleRate: o.SampleRate, Channels: o.Channels, MaxDelayUs: delay}, err
 }
 
+// Frame is interleaved PCM with its presentation timestamp.
 type Frame struct {
 	Timestamp time.Duration
 	Data      []byte
@@ -53,12 +65,15 @@ func (f Frame) ffi() (ffi.MoqAudioFrame, error) {
 	us, err := bridge.Duration(f.Timestamp, "audio timestamp")
 	return ffi.MoqAudioFrame{TimestampUs: us, Data: f.Data}, err
 }
+
 func frame(raw ffi.MoqAudioFrame) Frame {
 	return Frame{Timestamp: time.Duration(raw.TimestampUs) * time.Microsecond, Data: raw.Data}
 }
 
+// Producer encodes PCM and publishes it as a track in a broadcast's catalog.
 type Producer struct{ inner *ffi.MoqAudioProducer }
 
+// NewProducer opens an audio track on broadcast, registering its rendition in catalog; bandwidth may be nil.
 func NewProducer(broadcast *moq.BroadcastProducer, catalog *media.CatalogProducer, input EncoderInput, output EncoderOutput, bandwidth *moq.Bandwidth) (*Producer, error) {
 	out, err := output.ffi()
 	if err != nil {
@@ -75,6 +90,8 @@ func NewProducer(broadcast *moq.BroadcastProducer, catalog *media.CatalogProduce
 	}
 	return &Producer{inner}, nil
 }
+
+// Demand returns a watch-only handle to whether the track has subscribers.
 func (p *Producer) Demand() (*moq.TrackDemand, error) {
 	inner, err := p.inner.Demand()
 	if err != nil {
@@ -82,7 +99,11 @@ func (p *Producer) Demand() (*moq.TrackDemand, error) {
 	}
 	return bridge.TrackDemand(inner).(*moq.TrackDemand), nil
 }
+
+// Reanchor re-anchors the timeline to the next frame after an idle gap.
 func (p *Producer) Reanchor() error { return p.inner.Reanchor() }
+
+// Write encodes and publishes one PCM frame in the configured input layout.
 func (p *Producer) Write(value Frame) error {
 	raw, err := value.ffi()
 	if err != nil {
@@ -90,6 +111,8 @@ func (p *Producer) Write(value Frame) error {
 	}
 	return p.inner.Write(raw)
 }
+
+// Reservation returns this track's bandwidth reservation, or nil without one.
 func (p *Producer) Reservation() *moq.Reservation {
 	raw := p.inner.Reservation()
 	if raw == nil || *raw == nil {
@@ -97,10 +120,14 @@ func (p *Producer) Reservation() *moq.Reservation {
 	}
 	return bridge.Reservation(*raw).(*moq.Reservation)
 }
+
+// Finish flushes pending samples and ends the track.
 func (p *Producer) Finish() error { return p.inner.Finish() }
 
+// Encoder encodes PCM without publishing it.
 type Encoder struct{ inner *ffi.MoqAudioEncoder }
 
+// NewEncoder opens a codec-only encoder; output.Track is ignored.
 func NewEncoder(output EncoderOutput) (*Encoder, error) {
 	raw, err := output.ffi()
 	if err != nil {
@@ -112,12 +139,20 @@ func NewEncoder(output EncoderOutput) (*Encoder, error) {
 	}
 	return &Encoder{inner}, nil
 }
-func (e *Encoder) FrameSize() (uint64, error)                  { return e.inner.FrameSize() }
-func (e *Encoder) Encode(pcm []float32) (Packet, error)        { return e.inner.Encode(pcm) }
+
+// FrameSize is the samples per channel each Encode call takes.
+func (e *Encoder) FrameSize() (uint64, error) { return e.inner.FrameSize() }
+
+// Encode encodes one codec-sized interleaved f32 frame.
+func (e *Encoder) Encode(pcm []float32) (Packet, error) { return e.inner.Encode(pcm) }
+
+// Finish pads an optional partial frame, drains the codec, and closes the encoder.
 func (e *Encoder) Finish(pcm []float32) (EncoderFinish, error) { return e.inner.Finish(pcm) }
 
+// Decoder subscribes to an audio rendition and yields decoded PCM.
 type Decoder struct{ inner *ffi.MoqAudioDecoder }
 
+// NewDecoder subscribes to the named catalog rendition, following its broadcast reference.
 func NewDecoder(ctx context.Context, broadcast *moq.BroadcastConsumer, name string, rendition media.Audio, output DecoderOutput) (*Decoder, error) {
 	out, err := output.ffi()
 	if err != nil {
@@ -129,6 +164,8 @@ func NewDecoder(ctx context.Context, broadcast *moq.BroadcastConsumer, name stri
 	}
 	return &Decoder{inner}, nil
 }
+
+// Next returns the next decoded frame, or (nil, nil) when the track ends.
 func (d *Decoder) Next(ctx context.Context) (*Frame, error) {
 	raw, err := bridge.Call(ctx, d.inner.Cancel, d.inner.Next)
 	if err != nil || raw == nil {
@@ -137,5 +174,9 @@ func (d *Decoder) Next(ctx context.Context) (*Frame, error) {
 	value := frame(*raw)
 	return &value, nil
 }
+
+// All ranges over decoded frames until the track ends or the loop breaks.
 func (d *Decoder) All(ctx context.Context) iter.Seq2[*Frame, error] { return bridge.Seq(ctx, d.Next) }
-func (d *Decoder) Cancel()                                          { d.inner.Cancel() }
+
+// Cancel stops the stream.
+func (d *Decoder) Cancel() { d.inner.Cancel() }

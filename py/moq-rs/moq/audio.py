@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import timedelta
 
 from moq_ffi import (
+    MoqAudioDecoder,
     MoqAudioDecoderOutput,
     MoqAudioEncoder,
     MoqAudioEncoderFinish,
@@ -43,6 +44,8 @@ class Frame:
 
 @dataclass(frozen=True)
 class EncoderOutput:
+    """Codec-side settings. A zero ``frame_duration`` takes the codec's own frame."""
+
     codec: Codec
     track: str | None = None
     sample_rate: int | None = None
@@ -63,6 +66,8 @@ class EncoderOutput:
 
 @dataclass(frozen=True)
 class DecoderOutput:
+    """The PCM layout a :class:`Decoder` delivers and how stale a group may get."""
+
     format: SampleFormat
     sample_rate: int | None = None
     channels: int | None = None
@@ -78,29 +83,52 @@ class DecoderOutput:
 
 
 class Producer:
+    """Publish raw PCM, encoded on the way out. Built via :func:`producer`.
+
+    The PCM layout, codec, bitrate, and frame duration are fixed at
+    construction; each :meth:`write` passes only samples and a timestamp.
+    """
+
     def __init__(self, inner: MoqAudioProducer) -> None:
         self._inner = inner
 
     def demand(self) -> TrackDemand:
+        """A watch-only handle to whether this audio track has subscribers."""
         return TrackDemand(self._inner.demand())
 
     def reanchor(self) -> None:
+        """Re-anchor the timeline to the next frame after an idle gap."""
         self._inner.reanchor()
 
     def write(self, frame: Frame) -> None:
+        """Push one frame of PCM in the configured input format."""
         self._inner.write(frame._ffi())
 
     def reservation(self) -> Reservation | None:
+        """This encoder's bandwidth reservation, if published against a session allocator."""
         value = self._inner.reservation()
         return None if value is None else Reservation(value)
 
     def finish(self) -> None:
+        """Flush any pending samples and finalize the track."""
         self._inner.finish()
 
 
 class Decoder:
-    def __init__(self, inner) -> None:
+    """Async iterator of decoded PCM frames. Built via :func:`decoder`.
+
+    The layout is fixed by the :class:`DecoderOutput` passed at subscribe time;
+    each frame's ``data`` is raw bytes in that format.
+    """
+
+    def __init__(self, inner: MoqAudioDecoder) -> None:
         self._inner = inner
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc) -> None:
+        self.cancel()
 
     def __aiter__(self):
         return self
@@ -112,6 +140,7 @@ class Decoder:
         return Frame._from_ffi(value)
 
     def cancel(self) -> None:
+        """Cancel the subscription and stop delivering audio frames."""
         self._inner.cancel()
 
 

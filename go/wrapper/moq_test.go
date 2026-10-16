@@ -360,17 +360,15 @@ func testDecodeVideoFrame(t *testing.T, surface bool) {
 	if frame == nil {
 		t.Fatal("expected a frame")
 	}
-	defer frame.Destroy()
+	defer frame.Close()
 	decoder.Cancel()
 
 	if !surface {
 		if got := frame.Surface(); got != nil {
 			t.Fatalf("CPU decode surface = %#v, want nil", got)
 		}
-	} else if value := frame.Surface(); value == nil {
-		t.Fatal("surface = nil, want a non-null VideoSurfacePixelBuffer")
-	} else if pb, ok := (*value).(moq.VideoSurfacePixelBuffer); !ok || pb.Pointer == 0 {
-		t.Fatalf("surface = %#v, want a non-null VideoSurfacePixelBuffer", *value)
+	} else if pb, ok := frame.Surface().(moq.VideoSurfacePixelBuffer); !ok || pb.Pointer == 0 {
+		t.Fatalf("surface = %#v, want a non-null VideoSurfacePixelBuffer", frame.Surface())
 	}
 
 	i420, err := frame.Pixels(moq.VideoPixelFormatI420)

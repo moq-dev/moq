@@ -23,4 +23,5 @@ func init() {
 	bridge.TrackDemand = func(inner *ffi.MoqTrackDemand) any { return &TrackDemand{inner: inner} }
 	bridge.Bandwidth = func(v any) *ffi.MoqBandwidth { return v.(*Bandwidth).inner }
 	bridge.Reservation = func(inner *ffi.MoqReservation) any { return &Reservation{inner: inner} }
+	bridge.VideoDecodedFrame = func(inner *ffi.MoqVideoDecodedFrame) any { return &VideoDecodedFrame{inner: inner} }
 }
