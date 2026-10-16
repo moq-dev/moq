@@ -81,35 +81,40 @@ impl Properties {
 	/// so the caller must not append anything after it.
 	///
 	/// Properties are serialized in ascending order by type, delta-encoded.
+	///
+	/// Draft 16 gets only DYNAMIC_GROUPS, which it defines and which a subscriber needs
+	/// before it may send NEW_GROUP_REQUEST in an update.
 	pub fn encode(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
-		if !Self::sends_timescale(version) {
+		if matches!(version, Version::Draft14 | Version::Draft15) {
 			return Ok(());
 		}
 
 		let mut prev_type = 0;
 
-		if let Some(age) = self.max_cache_duration {
-			w.varint(4u64)?;
-			w.varint(u64::try_from(age.as_millis()).map_err(|_| EncodeError::BoundsExceeded)?)?;
-			prev_type = 4;
-		}
+		if Self::sends_timescale(version) {
+			if let Some(age) = self.max_cache_duration {
+				w.varint(4u64)?;
+				w.varint(u64::try_from(age.as_millis()).map_err(|_| EncodeError::BoundsExceeded)?)?;
+				prev_type = 4;
+			}
 
-		if let Some(timescale) = self.timescale {
-			w.varint(TIMESCALE - prev_type)?;
-			w.varint(u64::from(timescale))?;
-			prev_type = TIMESCALE;
-		}
+			if let Some(timescale) = self.timescale {
+				w.varint(TIMESCALE - prev_type)?;
+				w.varint(u64::from(timescale))?;
+				prev_type = TIMESCALE;
+			}
 
-		if let Some(priority) = self.priority {
-			w.varint(DEFAULT_PUBLISHER_PRIORITY - prev_type)?;
-			w.varint(u64::from(priority))?;
-			prev_type = DEFAULT_PUBLISHER_PRIORITY;
-		}
+			if let Some(priority) = self.priority {
+				w.varint(DEFAULT_PUBLISHER_PRIORITY - prev_type)?;
+				w.varint(u64::from(priority))?;
+				prev_type = DEFAULT_PUBLISHER_PRIORITY;
+			}
 
-		if let Some(group_order) = self.group_order {
-			w.varint(DEFAULT_PUBLISHER_GROUP_ORDER - prev_type)?;
-			w.varint(u64::from(u8::from(group_order)))?;
-			prev_type = DEFAULT_PUBLISHER_GROUP_ORDER;
+			if let Some(group_order) = self.group_order {
+				w.varint(DEFAULT_PUBLISHER_GROUP_ORDER - prev_type)?;
+				w.varint(u64::from(u8::from(group_order)))?;
+				prev_type = DEFAULT_PUBLISHER_GROUP_ORDER;
+			}
 		}
 
 		// Omitted means 0, so only support is worth bytes.
@@ -452,6 +457,22 @@ mod tests {
 		.encode(&mut Encoder::new(&mut buf, Version::Draft22.into()), Version::Draft22)
 		.unwrap();
 		assert_eq!(buf, [0x30, 0x01]);
+
+		// Draft 16 defines DYNAMIC_GROUPS but not TIMESCALE, and drafts 14 and 15 have no block.
+		let both = Properties {
+			dynamic_groups: true,
+			timescale: Some(Timescale::MILLI),
+			..Default::default()
+		};
+		for (version, expected) in [
+			(Version::Draft14, &[][..]),
+			(Version::Draft15, &[][..]),
+			(Version::Draft16, &[0x30, 0x01][..]),
+		] {
+			let mut buf = Vec::new();
+			both.encode(&mut Encoder::new(&mut buf, version.into()), version).unwrap();
+			assert_eq!(buf, expected, "{version}");
+		}
 
 		let mut buf = Vec::new();
 		Properties::default()

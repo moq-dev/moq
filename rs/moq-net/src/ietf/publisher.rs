@@ -6160,8 +6160,12 @@ mod serve_tests {
 	/// latest, and SUBSCRIBE_OK advertises DYNAMIC_GROUPS only for a track that supports it.
 	#[moq_net_sim::test]
 	async fn a_subscribe_new_group_request_reaches_the_track() {
-		let version = Version::Draft22;
-		for dynamic_groups in [true, false] {
+		for (version, dynamic_groups) in [
+			(Version::Draft16, true),
+			(Version::Draft16, false),
+			(Version::Draft22, true),
+			(Version::Draft22, false),
+		] {
 			let h = serve_track(
 				version,
 				crate::track::Info {
@@ -6180,7 +6184,11 @@ mod serve_tests {
 				h.track.new_group() == Some(5)
 			})
 			.await;
-			assert_eq!(subscribe_ok(&h.log, version).properties.dynamic_groups, dynamic_groups);
+			assert_eq!(
+				subscribe_ok(&h.log, version).properties.dynamic_groups,
+				dynamic_groups,
+				"{version}"
+			);
 		}
 	}
 
