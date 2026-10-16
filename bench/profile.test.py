@@ -130,7 +130,7 @@ class Reduce(unittest.TestCase):
     def test_duplicate_same_switch_is_idempotent(self):
         records = self.records()
         expected, _ = profile.reduce({'1': 'moq-quic-0'}, records, {'1': 0}, {'1': 1})
-        # A real capture repeats one OUT with exactly the same TID and timestamp.
+        # Repeating either state at the same instant adds no interval.
         duplicate = records + [row for row in records if row[2].startswith('PERF_RECORD_SWITCH ')]
         result, _ = profile.reduce({'1': 'moq-quic-0'}, duplicate, {'1': 0}, {'1': 1})
         self.assertEqual(result, expected)
