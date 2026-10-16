@@ -7,6 +7,9 @@
 //! track's next one. A timeline therefore only advertises durable objects, and no track waits for
 //! another.
 //!
+//! An untimed track, such as any track over moq-transport without TIMESCALE, is recorded untimed:
+//! each group is its own record with no `pts` or `duration`, and its objects store no timestamps.
+//!
 //! A writer started on a prefix that already holds a recording resumes it: see [`Writer::new`].
 //!
 //! ```no_run
@@ -345,9 +348,11 @@ impl<S: ObjectStore> Control<S> {
 	/// Enroll the track `name`, its records cut by `config`.
 	///
 	/// Media keeps the default minimum; sparse data such as a catalog uses zero, so each group is
-	/// stored as soon as it finishes. Subscribes to the track and creates its `.info` and its
+	/// stored as soon as it finishes. An untimed track ignores `config`: each group is its own
+	/// record, stored once it finishes. Subscribes to the track and creates its `.info` and its
 	/// timeline's before accepting any group. Fails when the name was already enrolled, names a
-	/// timeline, or `.info` conflicts.
+	/// timeline, or `.info` conflicts, and with [`Error::Untimed`] when a DVR enrolls an untimed
+	/// track, whose retention it cannot measure.
 	pub async fn track(&self, name: &str, config: timeline::Config) -> Result<()> {
 		if name.ends_with(hang::timeline::SUFFIX) || !self.shared.enrolled.lock().unwrap().insert(name.to_string()) {
 			return Err(Error::Enrolled(name.to_string()));
@@ -391,12 +396,12 @@ impl<S: ObjectStore> Control<S> {
 			.subscribe(replay.clone())
 			.await
 			.map_err(source_error)?;
-		let timescale = subscriber
-			.info()
-			.timescale
-			.ok_or_else(|| Error::Untimed(name.to_string()))?;
-		let info =
-			Info::new(subscriber.info().priority, timescale.as_u64())?.with_epoch(shared.source.info().epoch.clone());
+		let timescale = subscriber.info().timescale;
+		if timescale.is_none() && shared.retention.is_some() {
+			return Err(Error::Untimed(name.to_string()));
+		}
+		let info = Info::new(subscriber.info().priority, timescale.map(Timescale::as_u64))?
+			.with_epoch(shared.source.info().epoch.clone());
 		shared.store.put_info(name, &info).await?;
 
 		let timeline = hang::timeline::default_name(name);
@@ -413,11 +418,10 @@ impl<S: ObjectStore> Control<S> {
 			.await
 			.map_err(timeline_error_net)?
 			.ordered();
-		let timeline_scale = groups
-			.info()
-			.timescale
-			.ok_or_else(|| Error::Untimed(timeline.to_string()))?;
-		let info = Info::new(groups.info().priority, timeline_scale.as_u64())?;
+		// The stored timeline is timed exactly when its track is: an untimed track's records have no
+		// content time to stamp their timeline frames with.
+		let timeline_scale = timescale.and(groups.info().timescale);
+		let info = Info::new(groups.info().priority, timeline_scale.map(Timescale::as_u64))?;
 		shared.store.put_info(&timeline, &info).await?;
 
 		let resume = shared.recovered.lock().unwrap().remove(name);
@@ -499,7 +503,8 @@ struct Incoming {
 /// One enrolled track: its source reads, its segmenter, and its committer.
 struct Track<S> {
 	name: String,
-	timescale: Timescale,
+	/// `None` when the track is untimed.
+	timescale: Option<Timescale>,
 	segmenter: Segmenter,
 	/// A resumed track's committed end; earlier content is already stored.
 	floor: Option<Position>,
@@ -538,20 +543,29 @@ impl<S: ObjectStore> Track<S> {
 			let sequence = *entry.key();
 			let incoming = entry.get_mut();
 			for (index, frame) in incoming.pending.drain(..) {
-				if index == 0 {
+				if index == 0
+					&& let Some(timestamp) = frame.timestamp
+				{
 					if let Some(reported) = self.reported
-						&& frame.timestamp < reported
+						&& timestamp < reported
 					{
 						return Err(malformed(
 							&self.name,
 							sequence,
-							format!("timestamp {} precedes {reported}", frame.timestamp),
+							format!("timestamp {timestamp} precedes {reported}"),
 						));
 					}
-					self.reported = Some(frame.timestamp);
+					self.reported = Some(timestamp);
 				}
-				// Frame timestamps were validated while reading, so this conversion succeeds.
-				let pts = Timestamp::new(frame.timestamp, self.timescale).map_err(|_| Error::Id(frame.timestamp))?;
+				// Frame timestamps were validated against the track while reading, so this conversion
+				// succeeds, and an untimed track reports no timestamps.
+				let pts = frame
+					.timestamp
+					.zip(self.timescale)
+					.map(|(timestamp, timescale)| {
+						Timestamp::new(timestamp, timescale).map_err(|_| Error::Id(timestamp))
+					})
+					.transpose()?;
 				let position = Position::new(sequence, index);
 				self.segmenter
 					.frame(position, pts, index == 0)
@@ -734,14 +748,18 @@ fn handle<S: ObjectStore>(
 				Ok(Some(frame)) => {
 					let index = incoming.next;
 					incoming.next += 1;
-					// The track is timed, so every frame on it is.
-					let timestamp = frame
-						.timestamp
-						.ok_or_else(|| malformed(&name, sequence, Error::Untimed(name.clone())))?
-						.convert(track.timescale)
-						.map_err(|_| malformed(&name, sequence, Error::Overflow))?
-						.value();
-					crate::path::check_id(timestamp).map_err(|err| malformed(&name, sequence, err))?;
+					// A track is all timed or all untimed.
+					let timestamp = match (track.timescale, frame.timestamp) {
+						(Some(timescale), Some(timestamp)) => {
+							let timestamp = timestamp
+								.convert(timescale)
+								.map_err(|_| malformed(&name, sequence, Error::Overflow))?
+								.value();
+							Some(crate::path::check_id(timestamp).map_err(|err| malformed(&name, sequence, err))?)
+						}
+						(None, None) => None,
+						_ => return Err(malformed(&name, sequence, Error::Timing)),
+					};
 					// A resumed track already stored the head of the group it stopped inside.
 					if track.floor.is_none_or(|floor| Position::new(sequence, index) >= floor) {
 						let frame = Frame {
@@ -823,7 +841,10 @@ impl<S: ObjectStore> Committer<S> {
 		}
 
 		self.output.push(&record).map_err(timeline_error)?;
-		let pts = Timestamp::new(record.pts, TIMESCALE).map_err(|_| Error::Id(record.pts))?;
+		let pts = record
+			.pts
+			.map(|pts| Timestamp::new(pts, TIMESCALE).map_err(|_| Error::Id(pts)))
+			.transpose()?;
 		self.window.push_back(record.clone());
 
 		let expired = self.expire();
@@ -877,9 +898,16 @@ impl<S: ObjectStore> Committer<S> {
 		let target = (retention.as_micros() * TIMESCALE.as_u64() as u128).div_ceil(1_000_000);
 		let mut expired = Vec::new();
 		while self.window.len() > 1 {
+			// A DVR refuses untimed tracks, so every record here is timed.
 			let newest = self.window.back().expect("non-empty");
-			let end = newest.pts as u128 + newest.duration as u128;
-			if end.saturating_sub(self.window[1].pts as u128) < target {
+			let end = newest
+				.pts
+				.zip(newest.duration)
+				.map(|(pts, duration)| pts as u128 + duration as u128);
+			let covered = end
+				.zip(self.window[1].pts)
+				.map(|(end, pts)| end.saturating_sub(pts as u128));
+			if covered.is_none_or(|covered| covered < target) {
 				break;
 			}
 			expired.push(self.window.pop_front().expect("non-empty"));
@@ -887,17 +915,25 @@ impl<S: ObjectStore> Committer<S> {
 		expired
 	}
 
-	/// Collect the timeline groups completed since the last record, stamped at `pts`.
+	/// Collect the timeline groups completed since the last record, stamped at `pts`, or unstamped
+	/// for an untimed track.
 	///
 	/// The live timeline track stamps frames with the wall clock; storing the record's content time
 	/// instead keeps a recording's bytes a function of its content alone.
-	fn read_timeline(&mut self, pts: Timestamp) -> Result<Object> {
+	fn read_timeline(&mut self, pts: Option<Timestamp>) -> Result<Object> {
 		let waiter = kio::Waiter::noop();
-		let timescale = self
-			.groups
-			.info()
-			.timescale
-			.ok_or_else(|| Error::Timeline("untimed timeline track".to_string()))?;
+		let timestamp = match pts {
+			Some(pts) => {
+				let timescale = self
+					.groups
+					.info()
+					.timescale
+					.ok_or_else(|| Error::Timeline("untimed timeline track".to_string()))?;
+				let timestamp = pts.convert(timescale).map_err(|_| Error::Overflow)?.value();
+				Some(crate::path::check_id(timestamp)?)
+			}
+			None => None,
+		};
 		let mut groups = Vec::new();
 		while let Poll::Ready(result) = self.groups.poll_next_group(&waiter) {
 			let Some(mut group) = result.map_err(timeline_error_net)? else {
@@ -906,13 +942,10 @@ impl<S: ObjectStore> Committer<S> {
 			let mut frames = Vec::new();
 			loop {
 				match group.poll_read_frame(&waiter) {
-					Poll::Ready(Ok(Some(frame))) => {
-						let timestamp = pts.convert(timescale).map_err(|_| Error::Overflow)?.value();
-						frames.push(Frame {
-							timestamp: crate::path::check_id(timestamp)?,
-							payload: frame.payload,
-						});
-					}
+					Poll::Ready(Ok(Some(frame))) => frames.push(Frame {
+						timestamp,
+						payload: frame.payload,
+					}),
 					Poll::Ready(Ok(None)) => break,
 					Poll::Ready(Err(err)) => return Err(timeline_error_net(err)),
 					// Flushing closed every group, so an open one is a bug.
@@ -987,12 +1020,29 @@ fn malformed(track: &str, sequence: u64, err: impl std::fmt::Display) -> Error {
 	Error::Source(format!("track {track} group {sequence}: {err}"))
 }
 
-/// The content time the newest committed record reached, in `timescale`.
-fn recorded_end(resume: &Resume, timescale: Timescale) -> Result<Option<u64>> {
-	let Some(record) = resume.checkpoint.records.last() else {
+/// The content time the newest committed record reached, in `timescale`, or `None` when nothing
+/// was recorded or the track is untimed.
+///
+/// Fails when any retained record's timing disagrees with its track's, so a resume never extends a
+/// mixed timeline.
+fn recorded_end(resume: &Resume, timescale: Option<Timescale>) -> Result<Option<u64>> {
+	let records = &resume.checkpoint.records;
+	if let Some(record) = records
+		.iter()
+		.find(|record| record.pts.is_some() != timescale.is_some() || record.duration.is_some() != timescale.is_some())
+	{
+		return Err(Error::Timeline(format!(
+			"record {} timing does not match its track",
+			record.sequence
+		)));
+	}
+	let (Some(record), Some(timescale)) = (records.last(), timescale) else {
 		return Ok(None);
 	};
-	let millis = record.pts.checked_add(record.duration).ok_or(Error::Overflow)?;
+	let (Some(pts), Some(duration)) = (record.pts, record.duration) else {
+		unreachable!("checked above");
+	};
+	let millis = pts.checked_add(duration).ok_or(Error::Overflow)?;
 	let end = Timestamp::new(millis, TIMESCALE).map_err(|_| Error::Id(millis))?;
 	Ok(Some(end.convert(timescale).map_err(|_| Error::Overflow)?.value()))
 }
@@ -1082,7 +1132,10 @@ mod tests {
 		let mut decoder = moq_json::window::Decoder::<Record>::new(config);
 		let mut records = BTreeMap::new();
 		for segment in segments {
-			let object = store.get_segments(&timeline, segment).await.unwrap();
+			let object = store
+				.get_segments(&timeline, segment, timed(store, &timeline).await)
+				.await
+				.unwrap();
 			for stored in object.groups {
 				let mut group = decoder.group();
 				for frame in stored.frames {
@@ -1119,10 +1172,16 @@ mod tests {
 		records.iter().map(|record| record.sequence).collect()
 	}
 
+	/// Whether `track`'s stored `.info` declares a timescale.
+	async fn timed<S: ObjectStore>(store: &Store<S>, track: &str) -> bool {
+		store.get_info(track).await.unwrap().timescale.is_some()
+	}
+
 	/// Every record resolves to one stored object holding exactly its frames.
 	async fn check_objects<S: ObjectStore>(store: &Store<S>, track: &str, records: &[Record]) {
+		let timed = timed(store, track).await;
 		for record in records {
-			let object = store.get_segments(track, record.sequence).await.unwrap();
+			let object = store.get_segments(track, record.sequence, timed).await.unwrap();
 			object.check_span(record.start, record.end).unwrap();
 		}
 	}
@@ -1182,26 +1241,139 @@ mod tests {
 		check_objects(&store, "catalog.json", &catalog).await;
 		assert!(window(&store, "ignored").await.is_empty());
 
-		let object = store.get_segments("video", 2).await.unwrap();
-		assert_eq!(object.groups[0].frames[1].timestamp, 2500);
+		let object = store.get_segments("video", 2, true).await.unwrap();
+		assert_eq!(object.groups[0].frames[1].timestamp, Some(2500));
 		assert_eq!(object.groups[0].frames[1].payload, "2@2500");
-		assert_eq!(store.get_info("video").await.unwrap(), Info::new(127, 1000).unwrap());
+		assert_eq!(
+			store.get_info("video").await.unwrap(),
+			Info::new(127, Some(1000)).unwrap()
+		);
 		store.get_info(&timeline("video")).await.unwrap();
 		assert!(store.get_info("ignored").await.is_err());
 	}
 
-	/// A recording needs a timestamp on every frame, so an untimed track is refused.
+	/// An untimed track that keeps an hour of history, so enrollment sees every group.
+	fn untimed(broadcast: &broadcast::Producer, name: &str) -> track::Producer {
+		let info = track::Info::default()
+			.with_timescale(None)
+			.with_max_age(Duration::from_secs(3600));
+		broadcast.create_track(name, info).unwrap()
+	}
+
+	/// Write one complete untimed group of `frames` frames.
+	fn untimed_group(track: &track::Producer, sequence: u64, frames: u64) {
+		let mut group = track.create_group(group::Info { sequence }).unwrap();
+		for index in 0..frames {
+			group.write_frame(None, format!("{sequence}/{index}")).unwrap();
+		}
+		group.finish().unwrap();
+	}
+
+	/// An untimed track records each group as its own record, with no timing anywhere.
 	#[tokio::test]
-	async fn an_untimed_track_is_refused() {
+	async fn an_untimed_track_is_recorded_untimed() {
 		let source = broadcast::Info::new().produce();
-		let _data = source
-			.create_track("data", track::Info::default().with_timescale(None))
-			.unwrap();
+		let data = untimed(&source, "data");
 
 		let store = Store::new(InMemory::new(), "rec");
 		let writer = Writer::new(store.clone(), source.consume(), Config::default())
 			.await
 			.unwrap();
+		// The minimum measures time, so it cannot pack untimed groups.
+		writer.control().track("data", media()).await.unwrap();
+
+		untimed_group(&data, 0, 2);
+		untimed_group(&data, 1, 1);
+		untimed_group(&data, 3, 3);
+		data.finish().unwrap();
+		source.close();
+		writer.run().await.unwrap();
+
+		let records = window(&store, "data").await;
+		assert_eq!(
+			records,
+			vec![
+				Record::untimed(0, Position::group(0), Position::group(1)),
+				Record::untimed(1, Position::group(1), Position::group(2)),
+				Record::untimed(2, Position::group(3), Position::group(4)),
+			]
+		);
+		check_objects(&store, "data", &records).await;
+		let object = store.get_segments("data", 2, false).await.unwrap();
+		assert!(object.groups[0].frames.iter().all(|frame| frame.timestamp.is_none()));
+		assert_eq!(object.groups[0].frames[2].payload, "3/2");
+
+		assert_eq!(store.get_info("data").await.unwrap(), Info::new(127, None).unwrap());
+		let timeline = timeline("data");
+		assert_eq!(store.get_info(&timeline).await.unwrap().timescale, None);
+		let stored = store.get_segments(&timeline, 0, false).await.unwrap();
+		assert!(stored.groups[0].frames.iter().all(|frame| frame.timestamp.is_none()));
+	}
+
+	/// A restarted writer resumes an untimed track after its newest record.
+	#[tokio::test]
+	async fn an_untimed_track_resumes() {
+		let store = Store::new(InMemory::new(), "rec");
+		for groups in [0..2, 0..4] {
+			let source = broadcast::Info::new().produce();
+			let data = untimed(&source, "data");
+			let writer = Writer::new(store.clone(), source.consume(), Config::default())
+				.await
+				.unwrap();
+			writer.control().track("data", sparse()).await.unwrap();
+			// The source's cache replays groups the recording already holds.
+			for sequence in groups {
+				untimed_group(&data, sequence, 1);
+			}
+			data.finish().unwrap();
+			source.close();
+			writer.run().await.unwrap();
+		}
+
+		let records = window(&store, "data").await;
+		assert_eq!(sequences(&records), (0..4).collect::<Vec<_>>());
+		assert_eq!(groups(&records), (0..4).map(|s| (s, s)).collect::<Vec<_>>());
+		check_objects(&store, "data", &records).await;
+	}
+
+	/// A resume refuses a retained record whose timing disagrees with its track's, at any age.
+	#[test]
+	fn a_resume_refuses_mixed_timing() {
+		let resume = |records: Vec<Record>| Resume {
+			checkpoint: moq_json::window::Checkpoint {
+				range: 0..records.len() as u64,
+				records,
+			},
+			sequence: 0,
+			checkpoints: VecDeque::new(),
+		};
+		let timed = Record::new(1, 1_000, 1_000, Position::group(1), Position::group(2));
+		let untimed = Record::untimed(0, Position::group(0), Position::group(1));
+
+		let mixed = resume(vec![untimed.clone(), timed.clone()]);
+		assert!(matches!(
+			recorded_end(&mixed, Some(Timescale::MILLI)),
+			Err(Error::Timeline(_))
+		));
+		assert!(matches!(recorded_end(&mixed, None), Err(Error::Timeline(_))));
+
+		assert_eq!(recorded_end(&resume(vec![untimed]), None).unwrap(), None);
+		assert_eq!(
+			recorded_end(&resume(vec![timed]), Some(Timescale::MILLI)).unwrap(),
+			Some(2_000)
+		);
+	}
+
+	/// A DVR measures retention in content time, which an untimed track has none of.
+	#[tokio::test]
+	async fn a_dvr_refuses_an_untimed_track() {
+		let source = broadcast::Info::new().produce();
+		let _data = untimed(&source, "data");
+
+		let store = Store::new(InMemory::new(), "rec");
+		let retention = Retention::new(Duration::from_secs(30), Duration::ZERO);
+		let config = Config::default().with_retention(retention);
+		let writer = Writer::new(store.clone(), source.consume(), config).await.unwrap();
 		assert_eq!(
 			writer.control().track("data", sparse()).await,
 			Err(Error::Untimed("data".into()))
@@ -1275,7 +1447,7 @@ mod tests {
 			]
 		);
 		check_objects(&store, "log", &records).await;
-		assert_eq!(store.get_segments("log", 1).await.unwrap().frame_start, 3);
+		assert_eq!(store.get_segments("log", 1, true).await.unwrap().frame_start, 3);
 
 		open.finish().unwrap();
 		log.finish().unwrap();
@@ -1416,9 +1588,9 @@ mod tests {
 		let records = window(&store, "video").await;
 		assert_eq!(groups(&records), vec![(0, 0), (1, 1), (2, 2)]);
 		check_objects(&store, "video", &records).await;
-		let object = store.get_segments("video", 0).await.unwrap();
+		let object = store.get_segments("video", 0, true).await.unwrap();
 		let frames: Vec<_> = object.groups[0].frames.iter().map(|f| f.timestamp).collect();
-		assert_eq!(frames, vec![0, 500]);
+		assert_eq!(frames, vec![Some(0), Some(500)]);
 	}
 
 	#[tokio::test]
@@ -1621,7 +1793,10 @@ mod tests {
 		let _video = track(&source, "video");
 
 		let store = Store::new(InMemory::new(), "rec");
-		store.put_info("video", &Info::new(7, 1000).unwrap()).await.unwrap();
+		store
+			.put_info("video", &Info::new(7, Some(1000)).unwrap())
+			.await
+			.unwrap();
 		let writer = Writer::new(store, source.consume(), Config::default()).await.unwrap();
 		let control = writer.control();
 		assert_eq!(
@@ -1680,7 +1855,7 @@ mod tests {
 		Object::new(vec![Group {
 			sequence,
 			frames: vec![Frame {
-				timestamp: sequence * 1000,
+				timestamp: Some(sequence * 1000),
 				payload: "orphan".into(),
 			}],
 		}])
@@ -1701,7 +1876,7 @@ mod tests {
 		// The resumed timeline groups continue the stored numbering.
 		let mut numbers = Vec::new();
 		for segment in 0..6 {
-			let object = store.get_segments(&timeline("video"), segment).await.unwrap();
+			let object = store.get_segments(&timeline("video"), segment, true).await.unwrap();
 			numbers.extend(object.groups.iter().map(|group| group.sequence));
 		}
 		assert!(numbers.windows(2).all(|pair| pair[0] < pair[1]), "{numbers:?}");
@@ -1984,7 +2159,7 @@ mod tests {
 		assert!(matches!(result, Err(Error::Store(_))));
 
 		// A gap in the timeline keys leaves the retained window unrecoverable.
-		let newest = store.get_segments(&timeline("video"), 5).await.unwrap();
+		let newest = store.get_segments(&timeline("video"), 5, true).await.unwrap();
 		store.put_segments(&timeline("video"), 3, &newest).await.unwrap();
 		let result = Writer::new(store.clone(), source.consume(), config).await;
 		assert!(matches!(result, Err(Error::Timeline(_))));
@@ -2094,7 +2269,7 @@ mod tests {
 
 		// `segments/5` still decodes, but it restates an earlier window, so resuming would write the
 		// next record on top of it.
-		let older = store.get_segments(&timeline("video"), 0).await.unwrap();
+		let older = store.get_segments(&timeline("video"), 0, true).await.unwrap();
 		store
 			.delete(&Key::segments(timeline("video"), 5).unwrap())
 			.await

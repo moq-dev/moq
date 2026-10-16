@@ -134,7 +134,8 @@ portable layout and codecs:
 A recorded track's `segments/<n>` holds record `n` of its timeline; its
 timeline, named with a `.timeline.z` suffix, stores the window groups committed
 with record `n` under its own `segments/<n>`. `.info` is versioned JSON with
-the immutable priority and timescale. A segment object is a versioned binary
+the immutable priority and timescale, absent for an untimed track, whose
+frames store no timestamps and whose records carry no `pts` or `duration`. A segment object is a versioned binary
 envelope: a frame start, a group/frame table with timestamps and payload
 offsets, then the original payloads. One GET populates an LRU with the adjacent
 groups, while audio-only or low-rendition playback never downloads unrelated
@@ -167,7 +168,6 @@ owned by that prerequisite, not duplicated in archive storage.
 - [Replay catalog](/quest/m1/archive/replay-catalog.md) - `moq_archive::Reader` republishes the recorded catalog live with `store` set, so stock `moq export hls` serves the whole replay of `moq import archive`
 - [Idle flush](/quest/m1/archive/flush.md) - idle tracks are recorded within a bounded wall-clock delay, and `flush()` forces a track's pending record out
 - [History from the retained floor](/quest/m1/archive/history-floor.md) - history mode lists a retained (DVR) recording from its oldest retained segment instead of refusing it
-- [Untimed tracks](/quest/m1/archive/untimed.md) - untimed tracks are recorded and replayed untimed instead of refused, through an optional timestamp in the format
 
 ## Related
 

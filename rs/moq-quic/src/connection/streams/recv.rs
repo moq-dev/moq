@@ -6,6 +6,7 @@ use tracing::debug;
 
 use super::state::get_or_insert_recv;
 use super::{ClosedStream, Retransmits, ShouldTransmit, StreamId, StreamsState};
+use crate::connection::ConnectionTag;
 use crate::connection::assembler::{Assembler, Chunk, IllegalOrderedRead};
 use crate::connection::streams::state::StreamRecv;
 use crate::{TransportError, VarInt, frame};
@@ -336,10 +337,25 @@ impl<'a> Chunks<'a> {
         }
     }
 
+    /// Keep the connection flow control credit for the bytes read so far.
+    ///
+    /// Stream credit still advances on [`Self::finalize()`], but the connection credit for these
+    /// bytes is withheld from the peer until the returned [`Credit`] is passed to
+    /// [`Connection::release()`][crate::Connection::release].
+    pub fn hold(&mut self) -> Credit {
+        let bytes = mem::take(&mut self.read);
+        self.streams.held += bytes;
+        Credit {
+            bytes,
+            tag: self.streams.tag,
+        }
+    }
+
     /// Mark the read data as consumed from the stream.
     ///
     /// The number of read bytes will be released from the congestion window,
     /// allowing the remote peer to send more data if it was previously blocked.
+    /// Bytes taken by [`Self::hold()`] keep their connection credit.
     ///
     /// If [`ShouldTransmit::should_transmit()`] returns `true`,
     /// a packet needs to be sent to the peer informing them that the stream is unblocked.
@@ -385,6 +401,69 @@ impl<'a> Chunks<'a> {
 impl Drop for Chunks<'_> {
     fn drop(&mut self) {
         let _ = self.finalize_inner();
+    }
+}
+
+/// Connection flow control credit for bytes read with [`Chunks::hold()`].
+///
+/// The peer cannot reuse this credit until it is passed to
+/// [`Connection::release()`][crate::Connection::release] on the connection it came from, so
+/// dropping it leaks receive window. A default `Credit` is empty and belongs to no connection
+/// until it merges one that does.
+#[must_use = "dropping Credit leaks connection flow control credit"]
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Credit {
+    bytes: u64,
+    pub(super) tag: ConnectionTag,
+}
+
+impl Credit {
+    /// The number of bytes this credit covers.
+    pub fn len(&self) -> u64 {
+        self.bytes
+    }
+
+    /// Whether this credit covers no bytes.
+    pub fn is_empty(&self) -> bool {
+        self.bytes == 0
+    }
+
+    /// Split off the credit for the first `bytes`, keeping the rest.
+    ///
+    /// # Panics
+    /// If `bytes` exceeds [`Self::len()`].
+    pub fn split(&mut self, bytes: u64) -> Self {
+        assert!(
+            bytes <= self.bytes,
+            "split {bytes} of {} held bytes",
+            self.bytes
+        );
+        self.bytes -= bytes;
+        Self {
+            bytes,
+            tag: self.tag,
+        }
+    }
+
+    /// Take over the bytes covered by `other`.
+    ///
+    /// # Panics
+    /// If `other` came from another connection.
+    pub fn merge(&mut self, other: Self) {
+        if other.tag != self.tag {
+            assert!(
+                self.tag == ConnectionTag::NONE || other.tag == ConnectionTag::NONE,
+                "merged credit from another connection"
+            );
+            if self.tag == ConnectionTag::NONE {
+                self.tag = other.tag;
+            }
+        }
+        self.bytes += other.bytes;
+    }
+
+    pub(super) fn into_bytes(self) -> u64 {
+        self.bytes
     }
 }
 
