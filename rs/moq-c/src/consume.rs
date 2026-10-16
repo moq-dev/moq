@@ -1010,8 +1010,10 @@ impl Consume {
 				},
 			};
 
-			// Hold the lock only to buffer the value; release it before the callback.
-			let value_id = State::lock().consume.json_value.insert(JsonValue::new(value)?)?;
+			// Serialize before locking, hold the lock only to buffer the value, and release it
+			// before the callback.
+			let value = JsonValue::new(value)?;
+			let value_id = State::lock().consume.json_value.insert(value)?;
 			callback.call(Ok(value_id));
 		}
 	}
@@ -1077,7 +1079,8 @@ impl Consume {
 				},
 			};
 
-			let value_id = State::lock().consume.json_value.insert(JsonValue::new(value)?)?;
+			let value = JsonValue::new(value)?;
+			let value_id = State::lock().consume.json_value.insert(value)?;
 			callback.call(Ok(value_id));
 		}
 	}
