@@ -489,7 +489,7 @@ impl Client {
 			.with_versions(self.versions.clone())
 			.with_publisher(&publish)
 			.with_subscriber(subscribe.clone())
-			.connect(web_async::time::Instant::now(), transport)
+			.connect(moq_clock::now(), transport)
 			.await?;
 
 		crate::ffi::spawn(async move {

@@ -248,7 +248,7 @@ fn lite_session_over_webtransport() {
 			let (moq, session_driver) = moq_net::Client::new()
 				.with_subscriber(sub_origin.clone())
 				.connect_lite(
-					std::time::Instant::now(),
+					moq_net::time::now(),
 					moq_tokio::transport::Session::new(session, moq_net::transport::Binding::Uri),
 				)
 				.await
@@ -299,7 +299,7 @@ fn lite_session_over_webtransport() {
 			let (session, driver) = moq_net::Server::new()
 				.with_publisher(&serve_origin)
 				.accept_lite(
-					std::time::Instant::now(),
+					moq_net::time::now(),
 					moq_uring::transport::Session::new(session, moq_net::transport::Binding::Uri),
 				)
 				.await

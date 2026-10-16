@@ -49,6 +49,7 @@ struct Runtime {
 
 struct Time {
 	clock: Manual,
+	anchor: Option<(Instant, Wall)>,
 	/// Orders timers armed for the same instant by when they were armed.
 	next: u64,
 	timers: BTreeMap<(Instant, u64), Waker>,
@@ -131,6 +132,18 @@ pub(crate) fn wall() -> Option<Wall> {
 	current().map(|runtime| runtime.time.borrow().clock.wall())
 }
 
+pub(crate) fn anchor() -> Option<(Instant, Wall)> {
+	current().map(|runtime| {
+		let mut time = runtime.time.borrow_mut();
+		if let Some(anchor) = time.anchor {
+			return anchor;
+		}
+		let anchor = (time.clock.now(), time.clock.wall());
+		time.anchor = Some(anchor);
+		anchor
+	})
+}
+
 /// Whether the calling thread is inside [`run`].
 pub fn is_running() -> bool {
 	CURRENT.with(|current| current.borrow().is_some())
@@ -169,6 +182,7 @@ pub fn run<F: IntoFuture>(future: F) -> F::Output {
 		spawned: RefCell::new(Vec::new()),
 		time: RefCell::new(Time {
 			clock: Manual::new(),
+			anchor: None,
 			next: 0,
 			timers: BTreeMap::new(),
 		}),

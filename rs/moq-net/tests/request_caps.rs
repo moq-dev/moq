@@ -74,7 +74,7 @@ fn limits(announces: usize, subscriptions: usize) -> Limits {
 
 /// Many more requests than the window admits at once, opened and closed in turn, all
 /// succeed: each one that closes is granted back.
-#[moq_net_sim::test]
+#[moq_clock::test]
 async fn closed_requests_are_granted_back() {
 	const ROUNDS: usize = 64;
 
@@ -82,14 +82,14 @@ async fn closed_requests_are_granted_back() {
 		// A window of 8 requests, far fewer than the rounds below. The cap leaves room
 		// for an UNSUBSCRIBE still in flight when the next SUBSCRIBE lands.
 		let setup = setup(version, limits(0, 4), ROUNDS).await;
-		let broadcast = moq_net_sim::timeout(TIMEOUT, setup.client.consume().routed_broadcast("bcast"))
+		let broadcast = moq_clock::timeout(TIMEOUT, setup.client.consume().routed_broadcast("bcast"))
 			.await
 			.expect("announce timeout")
 			.unwrap();
 
 		for round in 0..ROUNDS {
 			let track = broadcast.track(&format!("t{round}")).unwrap();
-			let subscriber = moq_net_sim::timeout(TIMEOUT, track.subscribe(None))
+			let subscriber = moq_clock::timeout(TIMEOUT, track.subscribe(None))
 				.await
 				.unwrap_or_else(|_| panic!("{version}: round {round} stalled"))
 				.unwrap_or_else(|err| panic!("{version}: round {round} refused: {err}"));
@@ -98,7 +98,7 @@ async fn closed_requests_are_granted_back() {
 
 			// Wait for the server to see it end, so the next round is a fresh request.
 			let published = &setup.tracks[round];
-			moq_net_sim::timeout(TIMEOUT, published.demand().unused())
+			moq_clock::timeout(TIMEOUT, published.demand().unused())
 				.await
 				.unwrap_or_else(|_| panic!("{version}: round {round} never ended"))
 				.unwrap();
@@ -107,23 +107,23 @@ async fn closed_requests_are_granted_back() {
 }
 
 /// A subscription past the cap closes the session with TOO_MANY_REQUESTS.
-#[moq_net_sim::test]
+#[moq_clock::test]
 async fn a_subscription_past_the_cap_closes_the_session() {
 	for version in VERSIONS {
 		let setup = setup(version, limits(1, 1), 2).await;
-		let broadcast = moq_net_sim::timeout(TIMEOUT, setup.client.consume().routed_broadcast("bcast"))
+		let broadcast = moq_clock::timeout(TIMEOUT, setup.client.consume().routed_broadcast("bcast"))
 			.await
 			.expect("announce timeout")
 			.unwrap();
 
-		let _held = moq_net_sim::timeout(TIMEOUT, broadcast.track("t0").unwrap().subscribe(None))
+		let _held = moq_clock::timeout(TIMEOUT, broadcast.track("t0").unwrap().subscribe(None))
 			.await
 			.expect("subscribe timeout")
 			.unwrap_or_else(|err| panic!("{version}: the first subscription was refused: {err}"));
 
 		// moq-lite hands the subscriber over once TRACK_INFO answers, so the close
 		// arrives on the first read instead.
-		let refused = moq_net_sim::timeout(TIMEOUT, async {
+		let refused = moq_clock::timeout(TIMEOUT, async {
 			let mut subscriber = broadcast.track("t1").unwrap().subscribe(None).await?;
 			subscriber.recv_group().await.map(|_| ())
 		})
@@ -131,7 +131,7 @@ async fn a_subscription_past_the_cap_closes_the_session() {
 		.expect("subscribe timeout");
 		assert!(refused.is_err(), "{version}: a second subscription was admitted");
 
-		let err = moq_net_sim::timeout(TIMEOUT, setup._pair.client.closed())
+		let err = moq_clock::timeout(TIMEOUT, setup._pair.client.closed())
 			.await
 			.unwrap_or_else(|_| panic!("{version}: the session stayed open"));
 		assert!(
@@ -142,7 +142,7 @@ async fn a_subscription_past_the_cap_closes_the_session() {
 }
 
 /// A broadcast announced past the cap closes the session with TOO_MANY_REQUESTS.
-#[moq_net_sim::test]
+#[moq_clock::test]
 async fn an_announce_past_the_cap_closes_the_session() {
 	for version in VERSIONS {
 		let version: Version = version.parse().unwrap();
@@ -159,7 +159,7 @@ async fn an_announce_past_the_cap_closes_the_session() {
 		options.server_limits = Some(limits(1, 1));
 		let pair = connect_mock(options).await;
 
-		let err = moq_net_sim::timeout(TIMEOUT, pair.client.closed())
+		let err = moq_clock::timeout(TIMEOUT, pair.client.closed())
 			.await
 			.unwrap_or_else(|_| panic!("{version}: the session stayed open"));
 		assert!(

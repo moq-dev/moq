@@ -226,7 +226,7 @@ impl Control {
 	///
 	/// `runtime` arms the give-up timer, so the wait cannot outlive the caller's
 	/// clock.
-	pub async fn next_request_id(&self, runtime: &crate::time::Clock) -> Result<RequestId, Error> {
+	pub async fn next_request_id(&self, runtime: &crate::time::Deadlines) -> Result<RequestId, Error> {
 		let mut timeout = crate::time::Deadline::after(runtime, std::time::Duration::from_secs(10));
 
 		kio::wait(|waiter| {

@@ -24,8 +24,6 @@ members = [
     "rs/moq-native",
     "rs/moq-net",
     "rs/moq-net/fuzz",
-    "rs/moq-net/sim",
-    "rs/moq-net/sim/macros",
     "rs/moq-nvenc",
     "rs/moq-pattern",
     "rs/moq-quic",
@@ -150,6 +148,7 @@ moq-archive = { version = "0.0.11", path = "rs/moq-archive" }
 moq-audio = { version = "0.1.10", path = "rs/moq-audio", default-features = false }
 moq-auth = { version = "0.2.1", path = "rs/moq-auth" }
 moq-clock-macros = { version = "0.1.0", path = "rs/moq-clock/macros" }
+moq-clock = { version = "0.11.0", path = "rs/moq-clock" }
 moq-flate = { version = "0.2.0", path = "rs/moq-flate" }
 moq-hls = { version = "0.5.11", path = "rs/moq-hls", default-features = false }
 moq-json = { version = "0.5.8", path = "rs/moq-json" }

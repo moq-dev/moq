@@ -11,11 +11,11 @@ use std::collections::{BTreeMap, HashMap};
 use std::task::Poll;
 use std::time::Duration;
 
+use moq_clock::Instant;
 use moq_net::kio::{self, Pending, Waiter};
 use moq_net::stats::{Presence, Role, Tier, Traffic};
 use moq_net::track::Subscribing;
 use moq_net::{AsPath, Epoch, PathOwned, origin};
-use web_async::time::Instant;
 
 use crate::{
 	PresenceFrame, Result, SessionsFrame, Totals, TotalsFrame, TrafficFrame, parse_node_path, presence_track,
@@ -624,7 +624,7 @@ impl<V: Mergeable> Merged<V> {
 		// then fold every departed node whose grace elapsed. A fold leaves the
 		// merged view unchanged, and only an announce adds a node, which polls
 		// here, so no timer is needed to keep the map bounded.
-		let now = Instant::now();
+		let now = moq_clock::now();
 		let config = &self.config;
 		let name = self.name.as_str();
 		let origin = &self.origin;
@@ -708,7 +708,7 @@ impl<V: Mergeable> Merged<V> {
 					let node = entry.get_mut();
 					// A return after the grace starts over, even when this announce
 					// is the first poll since the grace elapsed.
-					node.fold_expired(&mut self.retired, self.grace, Instant::now());
+					node.fold_expired(&mut self.retired, self.grace, moq_clock::now());
 					node.departed = None;
 					if matches!(node.reader, Reader::Ended) {
 						node.reader = resolve(&self.origin, &node.path, node.epoch.clone());
@@ -736,7 +736,7 @@ impl<V: Mergeable> Merged<V> {
 			// grace re-arms it.
 			match self.nodes.get_mut(&key) {
 				Some(node) => {
-					node.departed = Some(Instant::now());
+					node.departed = Some(moq_clock::now());
 					node.depart()
 				}
 				None => false,
@@ -1271,7 +1271,7 @@ mod tests {
 	fn replacement_while_reader_retries(drop_epoch: bool) {
 		use std::sync::Barrier;
 
-		let now = std::time::Instant::now();
+		let now = moq_clock::now();
 		// The clock never advances here, so nothing may wait out the update hold.
 		let mut config = origin::Config::default();
 		config.update_hold = std::time::Duration::ZERO;

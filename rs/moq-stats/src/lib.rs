@@ -1,3 +1,5 @@
+#![cfg_attr(test, allow(clippy::disallowed_methods))]
+
 //! Publish and consume MoQ traffic stats.
 //!
 //! `moq-net` collects session and request traffic counters in a

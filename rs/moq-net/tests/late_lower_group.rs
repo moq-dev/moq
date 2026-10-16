@@ -45,7 +45,7 @@ fn write_group(track: &moq_net::track::Producer, sequence: u64) {
 async fn read_all(sub: &mut moq_net::track::Subscriber) -> Vec<(u64, usize)> {
 	let mut got = Vec::new();
 	loop {
-		let next = moq_net_sim::timeout(TIMEOUT, sub.recv_group())
+		let next = moq_clock::timeout(TIMEOUT, sub.recv_group())
 			.await
 			.expect("recv_group timed out");
 		let Some(mut group) = next.expect("recv_group") else {
@@ -53,7 +53,7 @@ async fn read_all(sub: &mut moq_net::track::Subscriber) -> Vec<(u64, usize)> {
 		};
 		let mut frames = 0;
 		loop {
-			let frame = moq_net_sim::timeout(TIMEOUT, group.read_frame())
+			let frame = moq_clock::timeout(TIMEOUT, group.read_frame())
 				.await
 				.expect("read_frame timed out")
 				.expect("read_frame");
@@ -103,17 +103,17 @@ async fn session(version: &str, relay: bool, start: Option<Position>) -> Vec<(u6
 	let pair = connect_mock(options).await;
 
 	let consumer = subscriber.consume();
-	moq_net_sim::timeout(TIMEOUT, consumer.routed("bcast"))
+	moq_clock::timeout(TIMEOUT, consumer.routed("bcast"))
 		.await
 		.expect("announce timeout")
 		.expect("routed");
-	let remote = moq_net_sim::timeout(TIMEOUT, consumer.request_broadcast("bcast", None))
+	let remote = moq_clock::timeout(TIMEOUT, consumer.request_broadcast("bcast", None))
 		.await
 		.expect("resolve timeout")
 		.expect("broadcast resolves");
 
 	let subscription = Subscription::default().with_max_delay(BUDGET).with_start(start);
-	let reader = moq_net_sim::spawn(async move {
+	let reader = moq_clock::sim::spawn(async move {
 		let mut sub = remote
 			.track("late")
 			.unwrap()
@@ -123,19 +123,19 @@ async fn session(version: &str, relay: bool, start: Option<Position>) -> Vec<(u6
 		read_all(&mut sub).await
 	});
 
-	moq_net_sim::timeout(TIMEOUT, track.demand().used())
+	moq_clock::timeout(TIMEOUT, track.demand().used())
 		.await
 		.expect("no subscriber appeared")
 		.unwrap();
 	// Idle time lets the subscription settle, and again lets SUBSCRIBE_START land,
 	// before the lower group is created.
-	moq_net_sim::sleep(Duration::from_millis(10)).await;
+	moq_clock::sleep(Duration::from_millis(10)).await;
 	write_group(&track, 1);
-	moq_net_sim::sleep(Duration::from_millis(10)).await;
+	moq_clock::sleep(Duration::from_millis(10)).await;
 	write_group(&track, 0);
 	track.finish().unwrap();
 
-	let got = moq_net_sim::timeout(TIMEOUT * 3, reader)
+	let got = moq_clock::timeout(TIMEOUT * 3, reader)
 		.await
 		.expect("reader hung")
 		.expect("reader panicked");
@@ -156,13 +156,13 @@ async fn in_process(start: Option<Position>) -> Vec<(u64, usize)> {
 		.unwrap();
 	let subscription = Subscription::default().with_max_delay(BUDGET).with_start(start);
 	let mut sub = track.subscribe(subscription);
-	let reader = moq_net_sim::spawn(async move { read_all(&mut sub).await });
-	moq_net_sim::sleep(Duration::from_millis(10)).await;
+	let reader = moq_clock::sim::spawn(async move { read_all(&mut sub).await });
+	moq_clock::sleep(Duration::from_millis(10)).await;
 	write_group(&track, 1);
-	moq_net_sim::sleep(Duration::from_millis(10)).await;
+	moq_clock::sleep(Duration::from_millis(10)).await;
 	write_group(&track, 0);
 	track.finish().unwrap();
-	let got = moq_net_sim::timeout(TIMEOUT * 3, reader)
+	let got = moq_clock::timeout(TIMEOUT * 3, reader)
 		.await
 		.expect("reader hung")
 		.expect("reader panicked");
@@ -170,7 +170,7 @@ async fn in_process(start: Option<Position>) -> Vec<(u64, usize)> {
 	got
 }
 
-#[moq_net_sim::test]
+#[moq_clock::test]
 async fn an_explicit_floor_receives_a_group_created_below_the_first_served_group() {
 	let want = vec![(1, 4), (0, 4)];
 	let mut failures = Vec::new();
@@ -194,7 +194,7 @@ async fn an_explicit_floor_receives_a_group_created_below_the_first_served_group
 /// Pre-06, an omitted floor joins at the first served group. Group 0, created after
 /// group 1 was served, is below that join. Lite-06 cannot spell this separately from
 /// a floor of group 0; that case is the explicit-floor test.
-#[moq_net_sim::test]
+#[moq_clock::test]
 async fn an_unfloored_lite05_join_drops_a_group_created_below_the_first_served_group() {
 	let want = vec![(1, 4)];
 	let mut failures = Vec::new();

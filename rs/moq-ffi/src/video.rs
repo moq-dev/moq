@@ -12,7 +12,6 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Instant;
 
 use tokio::sync::oneshot;
 
@@ -544,7 +543,7 @@ async fn follow_reservation(
 			max = next;
 			control = Control::new(Policy::new(max));
 		}
-		let Some(bitrate) = control.update(estimate, Instant::now()) else {
+		let Some(bitrate) = control.update(estimate, moq_clock::now()) else {
 			continue;
 		};
 

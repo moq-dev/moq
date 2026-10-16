@@ -5016,13 +5016,13 @@ async fn video_encoder_follows_a_shrinking_grant() {
 		.unwrap();
 	assert_eq!(reservation.grant(), Some(1_000_000));
 
-	let deadline = std::time::Instant::now() + TIMEOUT;
+	let deadline = moq_clock::Instant::now() + TIMEOUT;
 	loop {
 		if video.applied_bitrate() == 1_000_000 {
 			break;
 		}
 		assert!(
-			std::time::Instant::now() < deadline,
+			moq_clock::Instant::now() < deadline,
 			"encoder did not follow the shrinking grant, last applied {}",
 			video.applied_bitrate()
 		);
@@ -5798,7 +5798,7 @@ async fn shutdown_times_out_on_an_unfinished_track() {
 			.unwrap();
 		shutdown_ready(&track, &reader).await;
 		let receiving = tokio::spawn(async move { reader.read_frame().await });
-		let start = std::time::Instant::now();
+		let start = moq_clock::Instant::now();
 		let err = tokio::time::timeout(TIMEOUT, publisher.shutdown())
 			.await
 			.expect("shutdown")

@@ -72,16 +72,16 @@ async fn round(version: &str, relay: bool, newest_first: bool) -> Vec<(u64, usiz
 	let pair = connect_mock(options).await;
 
 	let consumer = subscriber.consume();
-	moq_net_sim::timeout(TIMEOUT, consumer.routed("bcast"))
+	moq_clock::timeout(TIMEOUT, consumer.routed("bcast"))
 		.await
 		.expect("announce timeout")
 		.expect("routed");
-	let remote = moq_net_sim::timeout(TIMEOUT, consumer.request_broadcast("bcast", None))
+	let remote = moq_clock::timeout(TIMEOUT, consumer.request_broadcast("bcast", None))
 		.await
 		.expect("resolve timeout")
 		.expect("broadcast resolves");
 
-	let reader = moq_net_sim::spawn(async move {
+	let reader = moq_clock::sim::spawn(async move {
 		let subscription = Subscription::default()
 			.with_max_delay(FOREVER)
 			.with_start(Position::group(0));
@@ -95,14 +95,14 @@ async fn round(version: &str, relay: bool, newest_first: bool) -> Vec<(u64, usiz
 		// Group 6 never ends, so read until every frame arrived or nothing more does.
 		let mut got = Vec::new();
 		while got.iter().map(|(_, frames)| frames).sum::<usize>() < 5 {
-			let Ok(next) = moq_net_sim::timeout(TIMEOUT, sub.recv_group()).await else {
+			let Ok(next) = moq_clock::timeout(TIMEOUT, sub.recv_group()).await else {
 				break;
 			};
 			let Some(mut group) = next.expect("recv_group") else {
 				break;
 			};
 			let mut frames = 0;
-			while let Ok(frame) = moq_net_sim::timeout(TIMEOUT, group.read_frame()).await {
+			while let Ok(frame) = moq_clock::timeout(TIMEOUT, group.read_frame()).await {
 				match frame.expect("read_frame") {
 					Some(_) => frames += 1,
 					None => break,
@@ -114,13 +114,13 @@ async fn round(version: &str, relay: bool, newest_first: bool) -> Vec<(u64, usiz
 		got
 	});
 
-	moq_net_sim::timeout(TIMEOUT, track.demand().used())
+	moq_clock::timeout(TIMEOUT, track.demand().used())
 		.await
 		.expect("no subscriber appeared")
 		.unwrap();
 	// Simulated time advances only once every task is idle, so this settles the
 	// subscription before the groups exist.
-	moq_net_sim::sleep(Duration::from_millis(10)).await;
+	moq_clock::sleep(Duration::from_millis(10)).await;
 
 	// The hop the publisher's group streams cross first: into the relay, when there is one.
 	let first_hop = upstream
@@ -142,11 +142,11 @@ async fn round(version: &str, relay: bool, newest_first: bool) -> Vec<(u64, usiz
 
 	if newest_first {
 		// Paused time advances only once every task is idle: both streams are open.
-		moq_net_sim::sleep(Duration::from_millis(10)).await;
+		moq_clock::sleep(Duration::from_millis(10)).await;
 		first_hop.release_unis_reversed();
 	}
 
-	let got = moq_net_sim::timeout(TIMEOUT * 3, reader)
+	let got = moq_clock::timeout(TIMEOUT * 3, reader)
 		.await
 		.expect("reader hung")
 		.expect("reader panicked");
@@ -163,7 +163,7 @@ async fn round(version: &str, relay: bool, newest_first: bool) -> Vec<(u64, usiz
 	got
 }
 
-#[moq_net_sim::test]
+#[moq_clock::test]
 async fn a_fresh_subscriber_receives_the_finished_older_group() {
 	let mut failures = Vec::new();
 	for version in VERSIONS {
@@ -199,7 +199,7 @@ async fn read_history(sub: &mut moq_net::track::Subscriber) {
 	assert_eq!(sequences, [5, 6]);
 }
 
-#[moq_net_sim::test]
+#[moq_clock::test]
 async fn a_late_subscriber_receives_the_relays_cached_history() {
 	// Older drafts canonicalize group 0 to the live edge instead of replay.
 	let version: Version = "moq-lite-07-wip".parse().unwrap();
@@ -229,7 +229,7 @@ async fn a_late_subscriber_receives_the_relays_cached_history() {
 		.with_max_delay(FOREVER)
 		.with_start(Position::group(0));
 	let first_subscription = subscription.clone();
-	let first_reader = moq_net_sim::spawn(async move {
+	let first_reader = moq_clock::sim::spawn(async move {
 		let mut sub = remote
 			.track("history")
 			.unwrap()
@@ -251,9 +251,9 @@ async fn a_late_subscriber_receives_the_relays_cached_history() {
 		live.write_frame(Timestamp::now(), &b"live"[..]).unwrap();
 	}
 	// Both streams open before paused time advances; 10ms stays below linger.
-	moq_net_sim::sleep(Duration::from_millis(10)).await;
+	moq_clock::sleep(Duration::from_millis(10)).await;
 	upstream.server_transport.release_unis_reversed();
-	let first_sub = moq_net_sim::timeout(TIMEOUT, first_reader)
+	let first_sub = moq_clock::timeout(TIMEOUT, first_reader)
 		.await
 		.expect("first subscriber history")
 		.unwrap();
@@ -266,7 +266,7 @@ async fn a_late_subscriber_receives_the_relays_cached_history() {
 	consumer.routed("bcast").await.unwrap();
 	let remote = consumer.request_broadcast("bcast", None).await.unwrap();
 	let mut late_sub = remote.track("history").unwrap().subscribe(subscription).await.unwrap();
-	moq_net_sim::timeout(TIMEOUT, read_history(&mut late_sub))
+	moq_clock::timeout(TIMEOUT, read_history(&mut late_sub))
 		.await
 		.unwrap_or_else(|_| panic!("{version}: late subscriber history"));
 	drop((first_sub, late_sub, first_pair, late_pair, upstream, live));

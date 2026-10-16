@@ -44,10 +44,10 @@ async fn connect(
 
 /// Subscribe to the test track through `origin` in `order`, then read every backlog group
 /// in the order it arrives.
-fn read_arrivals(origin: moq_net::origin::Producer, order: Order) -> moq_net_sim::JoinHandle<Vec<u64>> {
-	moq_net_sim::spawn(async move {
+fn read_arrivals(origin: moq_net::origin::Producer, order: Order) -> moq_clock::sim::JoinHandle<Vec<u64>> {
+	moq_clock::sim::spawn(async move {
 		let consumer = origin.consume();
-		moq_net_sim::timeout(TIMEOUT, consumer.routed("bcast"))
+		moq_clock::timeout(TIMEOUT, consumer.routed("bcast"))
 			.await
 			.expect("announce timeout")
 			.expect("routed");
@@ -68,7 +68,7 @@ fn read_arrivals(origin: moq_net::origin::Producer, order: Order) -> moq_net_sim
 
 		let mut arrivals = Vec::new();
 		while arrivals.len() < BACKLOG.len() {
-			let group = moq_net_sim::timeout(TIMEOUT, sub.recv_group())
+			let group = moq_clock::timeout(TIMEOUT, sub.recv_group())
 				.await
 				.expect("group timeout")
 				.expect("recv_group")
@@ -137,15 +137,15 @@ async fn round(version: &str, relay: bool, order: Order) -> Vec<u64> {
 	support::harness::subscribed(&track).await;
 	// Simulated time advances only once every task is idle, so this settles the
 	// subscription on every hop before the groups exist.
-	moq_net_sim::sleep(Duration::from_millis(10)).await;
+	moq_clock::sleep(Duration::from_millis(10)).await;
 
 	pair.server_transport.hold_unis();
 	let backlog = write_backlog(&track);
 	// Every group stream is open and ranked before any reaches the subscriber.
-	moq_net_sim::sleep(Duration::from_millis(10)).await;
+	moq_clock::sleep(Duration::from_millis(10)).await;
 	pair.server_transport.release_unis_by_priority();
 
-	let got = moq_net_sim::timeout(TIMEOUT * 3, reader)
+	let got = moq_clock::timeout(TIMEOUT * 3, reader)
 		.await
 		.expect("reader hung")
 		.expect("reader panicked");
@@ -153,7 +153,7 @@ async fn round(version: &str, relay: bool, order: Order) -> Vec<u64> {
 	got
 }
 
-#[moq_net_sim::test]
+#[moq_clock::test]
 async fn a_backlog_is_served_in_the_subscription_order() {
 	let mut failures = Vec::new();
 	for version in [
@@ -184,7 +184,7 @@ async fn a_backlog_is_served_in_the_subscription_order() {
 /// One relay request serves an ascending and a descending subscriber: upstream asks for
 /// descending so the live subscriber stays fresh, and each downstream session still sends
 /// its own subscriber's backlog in that subscriber's order.
-#[moq_net_sim::test]
+#[moq_clock::test]
 async fn merged_subscribers_keep_their_own_order() {
 	for version in ["moq-lite-07-wip", "moq-transport-17"] {
 		let version: Version = version.parse().unwrap();
@@ -206,7 +206,7 @@ async fn merged_subscribers_keep_their_own_order() {
 
 		let ascending = read_arrivals(ascending_origin.clone(), Order::Ascending);
 		support::harness::subscribed(&track).await;
-		moq_net_sim::sleep(Duration::from_millis(10)).await;
+		moq_clock::sleep(Duration::from_millis(10)).await;
 		assert_eq!(
 			upstream_order(),
 			Some(Order::Ascending),
@@ -214,7 +214,7 @@ async fn merged_subscribers_keep_their_own_order() {
 		);
 
 		let descending = read_arrivals(descending_origin.clone(), Order::Descending);
-		moq_net_sim::sleep(Duration::from_millis(10)).await;
+		moq_clock::sleep(Duration::from_millis(10)).await;
 		// lite-07 moves the upstream request with a SUBSCRIBE_UPDATE. This moq-transport
 		// subscriber never updates a request, priority included, so its first order stands.
 		let merged = match version.is_lite() {
@@ -226,12 +226,12 @@ async fn merged_subscribers_keep_their_own_order() {
 		descending_pair.server_transport.hold_unis();
 		ascending_pair.server_transport.hold_unis();
 		let backlog = write_backlog(&track);
-		moq_net_sim::sleep(Duration::from_millis(10)).await;
+		moq_clock::sleep(Duration::from_millis(10)).await;
 		descending_pair.server_transport.release_unis_by_priority();
 		ascending_pair.server_transport.release_unis_by_priority();
 
 		for (reader, order) in [(descending, Order::Descending), (ascending, Order::Ascending)] {
-			let got = moq_net_sim::timeout(TIMEOUT * 3, reader)
+			let got = moq_clock::timeout(TIMEOUT * 3, reader)
 				.await
 				.expect("reader hung")
 				.expect("reader panicked");

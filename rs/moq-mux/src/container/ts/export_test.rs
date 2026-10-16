@@ -5016,7 +5016,7 @@ where
 		// Run the paused clock only as far as the next frame due, so a test that writes
 		// more afterwards is still on time for it.
 		if let Some(deadline) = export.next_due() {
-			tokio::time::sleep_until(deadline).await;
+			moq_clock::sleep_until(deadline).await;
 			continue;
 		}
 		match tokio::time::timeout(Duration::from_millis(10), export.next()).await {
@@ -7123,6 +7123,8 @@ fn assert_decodes_after_the_clock(frames: &[Frame]) {
 /// the same bytes as one that sees each tick whole.
 #[tokio::test(start_paused = true)]
 async fn declared_reorder_sizes_the_decode_clock_from_the_first_frame() {
+	// Leave room for replay send-ahead before the logical clock's zero origin.
+	tokio::time::advance(Duration::from_secs(1)).await;
 	let mut rig = Reordered::new(
 		crate::codec::h264::fixtures::SPS_IPB,
 		crate::codec::h264::fixtures::PPS,

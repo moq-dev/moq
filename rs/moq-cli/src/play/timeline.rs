@@ -1,6 +1,7 @@
 //! Media time: the playout clock, and the audio track's own timeline.
 
-use std::time::{Duration, Instant};
+use hang::moq_net::time::Instant;
+use std::time::Duration;
 
 use hang::moq_net::Timestamp;
 
@@ -242,7 +243,7 @@ mod tests {
 	/// edge without giving up the configured delay.
 	#[test]
 	fn a_late_first_frame_catches_up_to_live() {
-		let start = Instant::now();
+		let start = hang::moq_net::time::now();
 		let mut presentation = Presentation::new(DELAY);
 
 		// Produced 500ms ago, though nothing here knows that yet. The window is
@@ -267,7 +268,7 @@ mod tests {
 	/// video burst must not move the anchor out from under it.
 	#[test]
 	fn the_speaker_owns_the_anchor_while_it_plays() {
-		let start = Instant::now();
+		let start = hang::moq_net::time::now();
 		let mut presentation = Presentation::new(DELAY);
 
 		presentation.audio(Duration::from_secs(1), DELAY, start);
@@ -293,7 +294,7 @@ mod tests {
 	/// behind the sound.
 	#[test]
 	fn the_speaker_anchors_at_the_live_edge() {
-		let start = Instant::now();
+		let start = hang::moq_net::time::now();
 		let mut presentation = Presentation::new(DELAY);
 
 		// The last sample written is a full delay from sounding, which is exactly
@@ -313,7 +314,7 @@ mod tests {
 	/// the sink would play now while the picture stayed on video's timeline.
 	#[test]
 	fn the_speaker_re_anchors_when_it_takes_over() {
-		let start = Instant::now();
+		let start = hang::moq_net::time::now();
 		let mut presentation = Presentation::new(DELAY);
 		presentation.video(ms(4_000), start);
 
@@ -333,7 +334,7 @@ mod tests {
 	/// would schedule video against samples the speaker never plays.
 	#[test]
 	fn a_restarted_speaker_re_anchors() {
-		let start = Instant::now();
+		let start = hang::moq_net::time::now();
 		let mut presentation = Presentation::new(DELAY);
 		presentation.audio(Duration::from_secs(10), DELAY, start);
 
@@ -350,7 +351,7 @@ mod tests {
 	/// restart left over would re-pin the frame after it onto that frame's jitter.
 	#[test]
 	fn a_stopped_speaker_drops_a_pending_restart() {
-		let start = Instant::now();
+		let start = hang::moq_net::time::now();
 		let mut presentation = Presentation::new(DELAY);
 		presentation.audio(Duration::from_secs(10), DELAY, start);
 		presentation.restarted();
@@ -371,7 +372,7 @@ mod tests {
 	/// speaker moved has to say so or the queue presents late by that much.
 	#[test]
 	fn a_moved_anchor_is_reported() {
-		let start = Instant::now();
+		let start = hang::moq_net::time::now();
 		let mut presentation = Presentation::new(DELAY);
 		assert!(
 			presentation.audio(Duration::from_secs(1), DELAY, start),

@@ -17,7 +17,7 @@ use super::{
 /// Everything one moq-transport session needs to start.
 pub struct Config<S: crate::transport::poll::Session> {
 	/// The runtime that arms the session's timers.
-	pub runtime: crate::time::Clock,
+	pub runtime: crate::time::Deadlines,
 
 	pub session: S,
 
@@ -748,7 +748,7 @@ fn peer_from_params(params: &ietf::Parameters, version: Version) -> Result<peer:
 /// names the other extensions we offer.
 #[allow(clippy::too_many_arguments)]
 async fn run_setup<S: crate::transport::poll::Session>(
-	runtime: crate::time::Clock,
+	runtime: crate::time::Deadlines,
 	mut session: S,
 	version: Version,
 	path: Option<String>,
@@ -1436,7 +1436,7 @@ mod tests {
 	use super::*;
 	use crate::model::ProduceTest;
 
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn auth_ids_share_the_modern_request_history() {
 		for version in [
 			Version::Draft17,
@@ -1490,7 +1490,7 @@ mod tests {
 						crate::lite::test_transport::ScriptedSession::new(Vec::new()).with_incoming_bidis(incoming);
 					let log = session.log.clone();
 					let (driver, _) = start(Config {
-						runtime: crate::time::Clock::sim(),
+						runtime: crate::time::sim(),
 						session,
 						setup: None,
 						request_id_max: None,
@@ -1513,7 +1513,7 @@ mod tests {
 						extensions: Default::default(),
 					})
 					.unwrap();
-					let err = moq_net_sim::timeout(std::time::Duration::from_secs(10), driver)
+					let err = moq_clock::timeout(std::time::Duration::from_secs(10), driver)
 						.await
 						.expect("invalid AUTH ID left the session open")
 						.expect_err("invalid request ID must be fatal");
@@ -1527,7 +1527,7 @@ mod tests {
 		}
 	}
 
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn malformed_auth_replies_close_the_session() {
 		for version in [Version::Draft17, Version::Draft22] {
 			for (id, body) in [
@@ -1545,7 +1545,7 @@ mod tests {
 				let session = crate::lite::test_transport::ScriptedSession::per_stream(vec![script]);
 				let log = session.log.clone();
 				let (driver, _) = start(Config {
-					runtime: crate::time::Clock::sim(),
+					runtime: crate::time::sim(),
 					session,
 					setup: None,
 					request_id_max: None,
@@ -1568,7 +1568,7 @@ mod tests {
 					extensions: Default::default(),
 				})
 				.unwrap();
-				let err = moq_net_sim::timeout(std::time::Duration::from_secs(10), driver)
+				let err = moq_clock::timeout(std::time::Duration::from_secs(10), driver)
 					.await
 					.expect("the session outlived a malformed AUTH reply")
 					.expect_err("malformed AUTH is fatal");
@@ -1578,7 +1578,7 @@ mod tests {
 		}
 	}
 
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn malformed_presenter_auth_closes_the_session() {
 		for version in [Version::Draft17, Version::Draft22] {
 			for body in [vec![0, 2], vec![0, 0, 0]] {
@@ -1591,7 +1591,7 @@ mod tests {
 					crate::lite::test_transport::ScriptedSession::new(Vec::new()).with_incoming_bidis(vec![script]);
 				let log = session.log.clone();
 				let (driver, _) = start(Config {
-					runtime: crate::time::Clock::sim(),
+					runtime: crate::time::sim(),
 					session,
 					setup: None,
 					request_id_max: None,
@@ -1614,7 +1614,7 @@ mod tests {
 					extensions: Default::default(),
 				})
 				.unwrap();
-				let err = moq_net_sim::timeout(std::time::Duration::from_secs(10), driver)
+				let err = moq_clock::timeout(std::time::Duration::from_secs(10), driver)
 					.await
 					.expect("malformed presenter AUTH was ignored")
 					.expect_err("malformed AUTH is fatal");
@@ -1673,7 +1673,7 @@ mod tests {
 	/// Driven through `start` rather than `run_subscribe_namespace` directly: the
 	/// stream surfaces the error either way, so only this loop's handling of it decides
 	/// between a close and a warning, and a test below the loop would pass regardless.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn a_namespace_without_a_hop_path_closes_the_session() {
 		const VERSION: Version = Version::Draft19;
 
@@ -1685,7 +1685,7 @@ mod tests {
 		let log = session.log.clone();
 
 		let (driver, _goaway) = start(Config {
-			runtime: crate::time::Clock::sim(),
+			runtime: crate::time::sim(),
 			session,
 			setup: None,
 			request_id_max: None,
@@ -1714,7 +1714,7 @@ mod tests {
 		})
 		.expect("start the session");
 
-		let err = moq_net_sim::timeout(std::time::Duration::from_secs(10), driver)
+		let err = moq_clock::timeout(std::time::Duration::from_secs(10), driver)
 			.await
 			.expect("the session ended rather than carrying on")
 			.expect_err("a malformed NAMESPACE fails the session");
@@ -1732,7 +1732,7 @@ mod tests {
 	/// `start` so the per-prefix fan-out is exercised, not just one stream in
 	/// isolation: a loop that opened a single stream would still satisfy a test that
 	/// called `run_subscribe_namespace` itself.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn every_permitted_prefix_gets_its_own_subscribe_namespace() {
 		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 		let scope: crate::Patterns = ["cam", "mic"]
@@ -1748,7 +1748,7 @@ mod tests {
 		let log = session.log.clone();
 
 		let (driver, _goaway) = start(Config {
-			runtime: crate::time::Clock::sim(),
+			runtime: crate::time::sim(),
 			session,
 			setup: None,
 			request_id_max: None,
@@ -1769,14 +1769,14 @@ mod tests {
 			extensions: Default::default(),
 		})
 		.expect("start the session");
-		let _driver = moq_net_sim::spawn(driver);
+		let _driver = moq_clock::sim::spawn(driver);
 
 		// Both requests are written before either peer response, which never comes.
 		for _ in 0..100 {
 			if occurrences(&log, b"cam") > 0 && occurrences(&log, b"mic") > 0 {
 				break;
 			}
-			moq_net_sim::sleep(std::time::Duration::from_millis(5)).await;
+			moq_clock::sleep(std::time::Duration::from_millis(5)).await;
 		}
 
 		assert_eq!(occurrences(&log, b"cam"), 1, "one SUBSCRIBE_NAMESPACE for cam");
@@ -1821,7 +1821,7 @@ mod tests {
 			.expect("open the control stream");
 
 		let (driver, _goaway) = start(Config {
-			runtime: crate::time::Clock::sim(),
+			runtime: crate::time::sim(),
 			session,
 			setup: Some(setup),
 			request_id_max: None,
@@ -1844,14 +1844,14 @@ mod tests {
 			extensions: Default::default(),
 		})
 		.expect("start the session");
-		let driver = moq_net_sim::spawn(driver);
+		let driver = moq_clock::sim::spawn(driver);
 
 		let needle = subscribe_namespace_legacy(version, prefix.unwrap_or("")).await;
 		for _ in 0..ANNOUNCE_TURNS {
 			if occurrences(&log, &needle) > 0 {
 				break;
 			}
-			moq_net_sim::sleep(std::time::Duration::from_millis(1)).await;
+			moq_clock::sleep(std::time::Duration::from_millis(1)).await;
 		}
 
 		assert!(!driver.is_finished(), "{version:?} ended the session");
@@ -1863,7 +1863,7 @@ mod tests {
 	/// that declared no MoQ Solicit) is not asked for it, and a real prefix still goes
 	/// out. A peer that declared Solicit is ours: it only tells when asked, so it still
 	/// gets the empty prefix. Draft-16 made the empty prefix legal, so it stays.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn an_empty_namespace_is_not_asked_of_a_foreign_peer_before_draft_16() {
 		for version in [Version::Draft14, Version::Draft15] {
 			assert_eq!(
@@ -1909,7 +1909,7 @@ mod tests {
 		let log = session.log.clone();
 
 		let (driver, _goaway) = start(Config {
-			runtime: crate::time::Clock::sim(),
+			runtime: crate::time::sim(),
 			session,
 			setup: None,
 			request_id_max: None,
@@ -1929,14 +1929,14 @@ mod tests {
 			extensions: Default::default(),
 		})
 		.expect("start the session");
-		let _driver = moq_net_sim::spawn(driver);
+		let _driver = moq_clock::sim::spawn(driver);
 
 		// Drive until the announce lands, rather than betting on one fixed window.
 		for _ in 0..ANNOUNCE_TURNS {
 			if occurrences(&log, b"solo-cam") > 0 {
 				break;
 			}
-			moq_net_sim::sleep(std::time::Duration::from_millis(1)).await;
+			moq_clock::sleep(std::time::Duration::from_millis(1)).await;
 		}
 
 		occurrences(&log, b"solo-cam")
@@ -1944,7 +1944,7 @@ mod tests {
 
 	/// The peer's SETUP decides whether an advertisement may go out unasked, so nothing
 	/// can be sent before it arrives.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn no_announce_before_the_peer_setup() {
 		assert_eq!(
 			announce_occurrences(None).await,
@@ -1955,7 +1955,7 @@ mod tests {
 
 	/// A peer that requires solicitation hears nothing until it asks, which is the
 	/// behavior the IETF draft describes for a relay.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn a_peer_requiring_solicitation_is_not_told_unasked() {
 		let declared = peer::Peer {
 			solicit: Some(true),
@@ -1972,7 +1972,7 @@ mod tests {
 	/// A peer that declared nothing is told without being asked. Every relay that never
 	/// sends SUBSCRIBE_NAMESPACE depends on this, and the session is what wires the
 	/// unsolicited loop up at all.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn a_peer_declaring_nothing_is_told_unasked() {
 		assert_eq!(
 			announce_occurrences(Some(peer::Peer::default())).await,
@@ -1999,7 +1999,7 @@ mod tests {
 		_cam: crate::AnnounceProducer,
 		_gate: kio::Producer<bool>,
 		_goaway: crate::goaway::Handle,
-		_driver: moq_net_sim::JoinHandle<Result<(), Error>>,
+		_driver: moq_clock::sim::JoinHandle<Result<(), Error>>,
 	}
 
 	fn auth_session(auth: bool) -> AuthSession {
@@ -2012,7 +2012,7 @@ mod tests {
 
 		let handle = crate::auth::Handle::new(true);
 		let (driver, goaway) = start(Config {
-			runtime: crate::time::Clock::sim(),
+			runtime: crate::time::sim(),
 			session,
 			setup: None,
 			request_id_max: None,
@@ -2042,18 +2042,18 @@ mod tests {
 			_cam: cam,
 			_gate: gate,
 			_goaway: goaway,
-			_driver: moq_net_sim::spawn(driver),
+			_driver: moq_clock::sim::spawn(driver),
 		}
 	}
 
 	/// A peer that never offered MoQ Auth sees no Auth request, the session keeps
 	/// working, and every token fails as unsupported rather than hanging.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn a_peer_without_auth_sees_no_auth_request() {
 		let session = auth_session(false);
 		let (handle, log) = (&session.handle, &session.log);
 
-		let err = moq_net_sim::timeout(std::time::Duration::from_secs(1), handle.add("token"))
+		let err = moq_clock::timeout(std::time::Duration::from_secs(1), handle.add("token"))
 			.await
 			.expect("unsupported promptly")
 			.err()
@@ -2065,7 +2065,7 @@ mod tests {
 			if occurrences(log, b"solo-cam") > 0 {
 				break;
 			}
-			moq_net_sim::sleep(std::time::Duration::from_millis(1)).await;
+			moq_clock::sleep(std::time::Duration::from_millis(1)).await;
 		}
 		assert_eq!(occurrences(log, b"solo-cam"), 1, "the session stopped advertising");
 		assert_eq!(
@@ -2076,7 +2076,7 @@ mod tests {
 	}
 
 	/// A peer that offered it gets the connection's own credential right away.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn a_negotiating_peer_gets_the_setup_token() {
 		let session = auth_session(true);
 		let log = &session.log;
@@ -2084,7 +2084,7 @@ mod tests {
 			if occurrences(log, &auth_type()) > 0 {
 				break;
 			}
-			moq_net_sim::sleep(std::time::Duration::from_millis(1)).await;
+			moq_clock::sleep(std::time::Duration::from_millis(1)).await;
 		}
 		assert_eq!(occurrences(log, &auth_type()), 1, "one AUTH for the setup token");
 	}
@@ -2096,7 +2096,7 @@ mod tests {
 		let session = crate::lite::test_transport::ScriptedSession::new(Vec::new());
 		let log = session.log.clone();
 		let (driver, _goaway) = start(Config {
-			runtime: crate::time::Clock::sim(),
+			runtime: crate::time::sim(),
 			session,
 			setup: None,
 			request_id_max: None,
@@ -2118,7 +2118,7 @@ mod tests {
 		.expect("start the session");
 
 		// The driver parks once SETUP is out.
-		moq_net_sim::timeout(std::time::Duration::from_secs(10), driver)
+		moq_clock::timeout(std::time::Duration::from_secs(10), driver)
 			.await
 			.expect_err("the session ended instead of parking after SETUP");
 
@@ -2132,7 +2132,7 @@ mod tests {
 	}
 
 	/// Each extension reaches our SETUP only while this side offers it.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn a_declined_extension_stays_out_of_setup() {
 		let all = crate::setup::Extensions::default();
 		let mut no_auth = all;
@@ -2154,7 +2154,7 @@ mod tests {
 
 	/// A server's handle supports AUTH only when the client offered it too, so a server
 	/// answering a client that did not offer it leaves the option out, whatever it offers.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn a_server_offers_auth_only_to_a_client_that_did() {
 		let all = crate::setup::Extensions::default();
 		assert_eq!(
@@ -2192,7 +2192,7 @@ mod tests {
 			.with_incoming_bidis(vec![auth_request(VERSION).await]);
 		let log = session.log.clone();
 		let (driver, _goaway) = start(Config {
-			runtime: crate::time::Clock::sim(),
+			runtime: crate::time::sim(),
 			session,
 			setup: None,
 			request_id_max: None,
@@ -2217,7 +2217,7 @@ mod tests {
 		})
 		.expect("start the session");
 
-		let res = moq_net_sim::timeout(std::time::Duration::from_secs(10), driver)
+		let res = moq_clock::timeout(std::time::Duration::from_secs(10), driver)
 			.await
 			.ok();
 		(res, log.closes())
@@ -2225,7 +2225,7 @@ mod tests {
 
 	/// The Auth draft negotiates the extension only when both sides offer it, so an Auth
 	/// request reaching a side that declined it is a protocol violation, not a token to grant.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn an_auth_request_to_a_side_that_declined_it_is_refused() {
 		let (res, closes) = serve_auth_request(true).await;
 		assert!(res.is_none(), "both offered: the request is served, {res:?}");
@@ -2281,7 +2281,7 @@ mod tests {
 		let log = session.log.clone();
 
 		let (driver, _goaway) = start(Config {
-			runtime: crate::time::Clock::sim(),
+			runtime: crate::time::sim(),
 			session,
 			setup: None,
 			request_id_max: None,
@@ -2304,7 +2304,7 @@ mod tests {
 		})
 		.expect("start the session");
 
-		moq_net_sim::timeout(std::time::Duration::from_secs(10), driver)
+		moq_clock::timeout(std::time::Duration::from_secs(10), driver)
 			.await
 			.expect_err("the session ended over one dead stream");
 
@@ -2312,7 +2312,7 @@ mod tests {
 	}
 
 	/// A draft-17+ client advertises its AUTHORITY in the SETUP it writes on its uni stream.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn setup_carries_the_authority() {
 		const AUTHORITY: &[u8] = b"relay.example.com:4443";
 
@@ -2324,7 +2324,7 @@ mod tests {
 			let log = session.log.clone();
 
 			let (driver, _goaway) = start(Config {
-				runtime: crate::time::Clock::sim(),
+				runtime: crate::time::sim(),
 				session,
 				setup: None,
 				request_id_max: None,
@@ -2345,7 +2345,7 @@ mod tests {
 			})
 			.expect("start the session");
 
-			moq_net_sim::timeout(std::time::Duration::from_secs(10), driver)
+			moq_clock::timeout(std::time::Duration::from_secs(10), driver)
 				.await
 				.expect_err("the session ended instead of parking after SETUP");
 
@@ -2357,12 +2357,12 @@ mod tests {
 		}
 	}
 
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn a_uni_stream_dead_before_its_type_does_not_end_the_session() {
 		a_dead_incoming_stream_is_not_fatal(crate::lite::test_transport::DeadStreamSession::unis(1)).await;
 	}
 
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn a_bidi_stream_dead_before_its_header_does_not_end_the_session() {
 		a_dead_incoming_stream_is_not_fatal(crate::lite::test_transport::DeadStreamSession::bis(1)).await;
 	}
@@ -2370,12 +2370,12 @@ mod tests {
 	/// moxygen resets a subgroup stream it opened but never wrote with its own CANCELLED
 	/// (0x1). Over raw QUIC our transport reads that code through the WebTransport space
 	/// and cannot map it, which used to end the session.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn a_uni_stream_reset_with_an_unmapped_code_does_not_end_the_session() {
 		a_dead_incoming_stream_is_not_fatal(crate::lite::test_transport::DeadStreamSession::unis(1).unmapped()).await;
 	}
 
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn a_bidi_stream_reset_with_an_unmapped_code_does_not_end_the_session() {
 		a_dead_incoming_stream_is_not_fatal(crate::lite::test_transport::DeadStreamSession::bis(1).unmapped()).await;
 	}
@@ -2432,7 +2432,7 @@ mod tests {
 		let (tasks, _task_set) = TaskSet::new();
 		let peer_setup = peer::PeerSetup::default();
 		let subscriber = Subscriber::new(
-			crate::time::Clock::sim(),
+			crate::time::sim(),
 			session.clone(),
 			origin,
 			Control::new(None, true),
@@ -2474,14 +2474,14 @@ mod tests {
 			if !log.stops().is_empty() {
 				break;
 			}
-			moq_net_sim::sleep(std::time::Duration::from_millis(1)).await;
+			moq_clock::sleep(std::time::Duration::from_millis(1)).await;
 		}
 
 		(log, None)
 	}
 
 	/// A late group must reach the dispatch loop and stop with CANCELLED.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn a_group_for_a_retired_alias_is_stopped_with_cancelled() {
 		let (log, result) =
 			dispatch_uni(Version::Draft19, subgroup_header(Version::Draft19, 7, 0).await, Some(7)).await;
@@ -2501,7 +2501,7 @@ mod tests {
 	/// accepted can be one whose bytes the peer has not sent yet, held back by connection
 	/// flow control that the later streams' unread data is using up. Waiting on its type
 	/// before reading them deadlocks the connection.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn a_silent_stream_does_not_hold_up_the_next() {
 		let header = subgroup_header(Version::Draft19, 7, 0).await;
 		let session =
@@ -2517,7 +2517,7 @@ mod tests {
 	}
 
 	/// A stalled bidi header must not block a SUBSCRIBE on the next stream.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn a_silent_bidi_does_not_hold_up_the_next() {
 		const VERSION: Version = Version::Draft19;
 		let mut subscribe = Vec::new();
@@ -2549,7 +2549,7 @@ mod tests {
 				.with_incoming_bidis(vec![stalled, subscribe.clone()]);
 			let driver = bidi_driver(session, Some(origin.consume()));
 			let subscribed = Box::pin(async { while track.subscription_changed().await.unwrap().is_none() {} });
-			let result = moq_net_sim::timeout(
+			let result = moq_clock::timeout(
 				std::time::Duration::from_secs(10),
 				futures::future::select(driver, subscribed),
 			)
@@ -2563,7 +2563,7 @@ mod tests {
 	}
 
 	/// Child tasks must report malformed and unknown requests to the session driver.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn invalid_bidi_requests_still_end_the_session() {
 		for id in [ietf::Subscribe::ID, 0x3f] {
 			let mut header = Vec::new();
@@ -2572,7 +2572,7 @@ mod tests {
 			encoder.slice(&[0, 0]); // Complete, empty body: malformed for SUBSCRIBE.
 			let session =
 				crate::lite::test_transport::ScriptedSession::new(Vec::new()).with_incoming_bidis(vec![header]);
-			let err = moq_net_sim::timeout(std::time::Duration::from_secs(10), bidi_driver(session, None))
+			let err = moq_clock::timeout(std::time::Duration::from_secs(10), bidi_driver(session, None))
 				.await
 				.expect("invalid request did not end the session")
 				.expect_err("invalid request was accepted");
@@ -2587,7 +2587,7 @@ mod tests {
 	/// Start a draft-19 session with SETUP already settled, so bidi requests run immediately.
 	fn bidi_driver(session: crate::lite::test_transport::ScriptedSession, publish: Option<origin::Consumer>) -> Driver {
 		start(Config {
-			runtime: crate::time::Clock::sim(),
+			runtime: crate::time::sim(),
 			session,
 			setup: None,
 			request_id_max: None,
@@ -2611,7 +2611,7 @@ mod tests {
 	}
 
 	/// A non-zero subgroup is refused on its own stream, never by closing the session.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn a_non_zero_subgroup_is_stopped_without_closing_the_session() {
 		let (log, result) = dispatch_uni(Version::Draft19, subgroup_header(Version::Draft19, 7, 1).await, None).await;
 
@@ -2630,7 +2630,7 @@ mod tests {
 	}
 
 	/// Padding is read and dropped: no STOP_SENDING, and the session stays up.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn a_padding_stream_is_discarded() {
 		for version in [
 			Version::Draft18,
@@ -2654,7 +2654,7 @@ mod tests {
 	/// A server waiting on the client's SETUP holds the padding and group streams that beat
 	/// it, then classifies them once the session starts. The drafts say to buffer early
 	/// data; rejecting it reached the wire as INTERNAL_ERROR.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn uni_streams_before_setup_are_held_until_it_lands() {
 		const VERSION: Version = Version::Draft19;
 
@@ -2687,7 +2687,7 @@ mod tests {
 
 	/// An unknown or invalid stream type MUST close the session, so it stops nothing on its own:
 	/// the session close takes the stream with it.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn an_unknown_uni_type_closes_the_session() {
 		for (version, kind) in [
 			(Version::Draft19, 0),
@@ -2711,7 +2711,7 @@ mod tests {
 	}
 
 	/// The bidi dispatcher closes the session for an unknown full-width message type.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn an_unknown_bidi_type_closes_the_session() {
 		for version in [
 			Version::Draft17,
@@ -2730,7 +2730,7 @@ mod tests {
 					crate::lite::test_transport::ScriptedSession::new(Vec::new()).with_incoming_bidis(vec![payload]);
 				let log = session.log.clone();
 				let (driver, _goaway) = start(Config {
-					runtime: crate::time::Clock::sim(),
+					runtime: crate::time::sim(),
 					session,
 					setup: None,
 					request_id_max: None,
@@ -2751,7 +2751,7 @@ mod tests {
 				})
 				.unwrap();
 
-				let err = moq_net_sim::timeout(std::time::Duration::from_secs(10), driver)
+				let err = moq_clock::timeout(std::time::Duration::from_secs(10), driver)
 					.await
 					.expect("unknown bidi type must end the session")
 					.expect_err("unknown bidi type must fail the session");
@@ -2768,7 +2768,7 @@ mod tests {
 		}
 	}
 
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn an_invalid_group_order_closes_the_session() {
 		for version in [Version::Draft18, Version::Draft21, Version::Draft22] {
 			for (value, nested) in [
@@ -2798,7 +2798,7 @@ mod tests {
 					crate::lite::test_transport::ScriptedSession::new(Vec::new()).with_incoming_bidis(vec![payload]);
 				let log = session.log.clone();
 				let (driver, _goaway) = start(Config {
-					runtime: crate::time::Clock::sim(),
+					runtime: crate::time::sim(),
 					session,
 					setup: None,
 					request_id_max: None,
@@ -2818,7 +2818,7 @@ mod tests {
 					limits: Default::default(),
 				})
 				.unwrap();
-				let err = moq_net_sim::timeout(std::time::Duration::from_secs(10), driver)
+				let err = moq_clock::timeout(std::time::Duration::from_secs(10), driver)
 					.await
 					.expect("invalid GROUP_ORDER must close the session")
 					.expect_err("invalid GROUP_ORDER must fail");
@@ -2885,7 +2885,7 @@ mod tests {
 	///
 	/// Driven through `start` because only the full loop shows the consequence, the read
 	/// task propagating the classifier's error.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn a_repeated_publish_namespace_done_does_not_end_the_session() {
 		const VERSION: Version = Version::Draft14;
 
@@ -2900,7 +2900,7 @@ mod tests {
 			.expect("open the control stream");
 
 		let (driver, _goaway) = start(Config {
-			runtime: crate::time::Clock::sim(),
+			runtime: crate::time::sim(),
 			session,
 			setup: Some(setup),
 			request_id_max: None,
@@ -2920,14 +2920,14 @@ mod tests {
 			extensions: Default::default(),
 		})
 		.expect("start the session");
-		let driver = moq_net_sim::spawn(driver);
+		let driver = moq_clock::sim::spawn(driver);
 
 		let accepted = publish_namespace_ok(RequestId(1)).await;
 		for _ in 0..ANNOUNCE_TURNS {
 			if occurrences(&log, &accepted) > 0 && consumer.get_broadcast("room/host").is_none() {
 				break;
 			}
-			moq_net_sim::sleep(std::time::Duration::from_millis(1)).await;
+			moq_clock::sleep(std::time::Duration::from_millis(1)).await;
 		}
 
 		assert_eq!(occurrences(&log, &accepted), 1, "the advertisement was not accepted");
@@ -2983,7 +2983,7 @@ mod tests {
 	/// A request's AUTHORIZATION TOKEN decodes by the SETUP option's rules, so one this
 	/// endpoint cannot use closes the session with the draft's code. Draft-14 carries the
 	/// request on the control stream, a strict draft on its own stream.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn a_request_token_that_cannot_be_used_closes_the_session() {
 		for version in [Version::Draft14, Version::Draft22] {
 			for (token, expected, why) in [
@@ -3019,7 +3019,7 @@ mod tests {
 				};
 				let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 				let (driver, _goaway) = start(Config {
-					runtime: crate::time::Clock::sim(),
+					runtime: crate::time::sim(),
 					session,
 					setup,
 					request_id_max: None,
@@ -3040,7 +3040,7 @@ mod tests {
 				})
 				.unwrap();
 
-				let err = moq_net_sim::timeout(std::time::Duration::from_secs(10), driver)
+				let err = moq_clock::timeout(std::time::Duration::from_secs(10), driver)
 					.await
 					.unwrap_or_else(|_| panic!("{version:?} {why}: the session stayed up"))
 					.expect_err("the token must fail the session");

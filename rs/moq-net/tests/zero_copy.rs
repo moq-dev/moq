@@ -22,7 +22,7 @@ fn produce_origin(hop: u64) -> origin::Producer {
 	producer
 }
 
-#[moq_net_sim::test]
+#[moq_clock::test]
 async fn frames_cross_without_a_copy() {
 	for version in VERSIONS {
 		let version: Version = version.parse().unwrap();
@@ -59,11 +59,11 @@ async fn frames_cross_without_a_copy() {
 		broadcast.announce(Default::default()).unwrap();
 
 		let consumer = subscriber.consume();
-		moq_net_sim::timeout(TIMEOUT, consumer.routed("room"))
+		moq_clock::timeout(TIMEOUT, consumer.routed("room"))
 			.await
 			.expect("announce timeout")
 			.unwrap();
-		let remote = moq_net_sim::timeout(TIMEOUT, consumer.request_broadcast("room", None))
+		let remote = moq_clock::timeout(TIMEOUT, consumer.request_broadcast("room", None))
 			.await
 			.expect("resolve timeout")
 			.expect("broadcast resolves");
@@ -75,7 +75,7 @@ async fn frames_cross_without_a_copy() {
 		group.write_frame(Timestamp::ZERO, payload.clone()).unwrap();
 		group.finish().unwrap();
 
-		let mut group = moq_net_sim::timeout(TIMEOUT, sub.recv_group())
+		let mut group = moq_clock::timeout(TIMEOUT, sub.recv_group())
 			.await
 			.expect("group timeout")
 			.unwrap()

@@ -652,8 +652,9 @@ impl Handle {
 		let mut timer = self.timer();
 		kio::wait(|waiter| {
 			loop {
-				match driver.poll(Instant::now(), waiter) {
-					Ok(at) => timer.set(at),
+				let now = moq_net::time::now();
+				match driver.poll(now, waiter) {
+					Ok(at) => timer.set(at.map(|at| Instant::now() + at.saturating_duration_since(now))),
 					Err(err) => return Poll::Ready(err),
 				}
 				if timer.poll(waiter).is_pending() {

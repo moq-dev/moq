@@ -234,7 +234,7 @@ pub(super) fn peer_grant(
 /// the tokens as unsupported.
 #[cfg(feature = "async")]
 pub(super) async fn run_present<S>(
-	runtime: crate::time::Clock,
+	runtime: crate::time::Deadlines,
 	session: S,
 	control: Control,
 	handle: Handle,
@@ -300,7 +300,7 @@ where
 /// One token's Auth request.
 #[cfg(feature = "async")]
 struct Present<S: crate::transport::poll::Session> {
-	runtime: crate::time::Clock,
+	runtime: crate::time::Deadlines,
 	session: S,
 	control: Control,
 	handle: Handle,
@@ -423,7 +423,7 @@ async fn read_message<S: crate::transport::poll::Session>(
 /// otherwise the default grant for the connection's own credential.
 #[derive(Clone)]
 pub(super) struct Serve {
-	pub runtime: crate::time::Clock,
+	pub runtime: crate::time::Deadlines,
 	pub handle: Handle,
 	/// What the peer's connection credential earns by default.
 	pub peer_grant: Grant,
@@ -486,7 +486,7 @@ impl Serve {
 /// the default acceptor's grant into the outbox as it changes.
 #[cfg(feature = "async")]
 async fn serve_issue<S: crate::transport::poll::Session>(
-	runtime: &crate::time::Clock,
+	runtime: &crate::time::Deadlines,
 	issue: &kio::Shared<Issue>,
 	mut default: Option<&mut crate::auth::DefaultGrant>,
 	stream: &mut Stream<S, Version>,

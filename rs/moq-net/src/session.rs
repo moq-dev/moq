@@ -297,7 +297,7 @@ pub(super) struct Handles {
 
 impl Session {
 	pub(super) fn new<S>(
-		runtime: crate::time::Clock,
+		runtime: crate::time::Deadlines,
 		session: S,
 		version: Version,
 		recv_bandwidth: Option<bandwidth::Consumer>,
@@ -379,7 +379,7 @@ impl Session {
 pub(crate) struct Supervisor<S> {
 	version: Version,
 	local_close: Arc<std::sync::atomic::AtomicBool>,
-	runtime: crate::time::Clock,
+	runtime: crate::time::Deadlines,
 	session: S,
 	// A dedicated clone for the close watch, since each pending poll operation
 	// needs its own handle.

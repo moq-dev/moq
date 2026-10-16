@@ -76,9 +76,9 @@ async fn connect_datagram_track() -> Fixture {
 /// asserts what delivery actually guarantees rather than a fixed count: whatever
 /// arrives is intact and in order, and the last one written arrives, since nothing
 /// is pushed during the drain to evict it.
-#[moq_net_sim::test]
+#[moq_clock::test]
 async fn datagrams_reach_the_subscriber_in_order() {
-	moq_net_sim::timeout(TEST_TIMEOUT, async {
+	moq_clock::timeout(TEST_TIMEOUT, async {
 		let mut fixture = connect_datagram_track().await;
 		const COUNT: u64 = 32;
 
@@ -121,7 +121,7 @@ async fn datagrams_reach_the_subscriber_in_order() {
 
 /// MoQ Transport carries a datagram as an OBJECT_DATAGRAM at object 0, so it arrives as a
 /// datagram with its sequence, alongside the groups on streams.
-#[moq_net_sim::test]
+#[moq_clock::test]
 async fn ietf_delivers_datagrams() {
 	for version in [
 		"moq-transport-14",
@@ -129,7 +129,7 @@ async fn ietf_delivers_datagrams() {
 		"moq-transport-17",
 		"moq-transport-20",
 	] {
-		moq_net_sim::timeout(TEST_TIMEOUT, ietf_delivers_datagrams_on(version))
+		moq_clock::timeout(TEST_TIMEOUT, ietf_delivers_datagrams_on(version))
 			.await
 			.unwrap_or_else(|_| panic!("{version}: timed out"));
 	}
@@ -197,9 +197,9 @@ async fn ietf_delivers_datagrams_on(version: &str) {
 }
 
 /// Explicit insert keeps the origin sequence on the lite wire, including a gap.
-#[moq_net_sim::test]
+#[moq_clock::test]
 async fn inserted_sequences_survive_the_lite_wire() {
-	moq_net_sim::timeout(TEST_TIMEOUT, async {
+	moq_clock::timeout(TEST_TIMEOUT, async {
 		let mut fixture = connect_datagram_track().await;
 
 		fixture
@@ -241,7 +241,7 @@ async fn inserted_sequences_survive_the_lite_wire() {
 /// moq-lite-07, and with the NOT_FOUND an earlier version has for it. A relay carries the
 /// answer across in the downstream version's terms. The moq-transport side (DOES_NOT_EXIST)
 /// is covered by the IETF publisher's own tests.
-#[moq_net_sim::test]
+#[moq_clock::test]
 async fn a_fetched_datagram_is_refused_per_version() {
 	const NOT_FETCHABLE: &str = "not fetchable";
 	const NOT_FOUND: &str = "not found";
@@ -280,7 +280,7 @@ async fn a_fetched_datagram_is_refused_per_version() {
 		(&["moq-lite-07-wip", "moq-lite-07-wip"], NOT_FETCHABLE),
 		(&["moq-lite-07-wip", "moq-lite-06"], NOT_FOUND),
 	] {
-		let refused = moq_net_sim::timeout(TEST_TIMEOUT, fetch_a_datagram(versions))
+		let refused = moq_clock::timeout(TEST_TIMEOUT, fetch_a_datagram(versions))
 			.await
 			.unwrap_or_else(|_| panic!("{versions:?}: timed out"));
 		assert_eq!(refused, expected, "{versions:?}");

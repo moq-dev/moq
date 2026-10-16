@@ -114,7 +114,9 @@ impl Credential {
 			} else {
 				self.grant.subscribe.clone()
 			},
-			expires: self.expires.map(tokio::time::Instant::into_std),
+			expires: self
+				.expires
+				.map(|expires| moq_net::time::now() + expires.saturating_duration_since(tokio::time::Instant::now())),
 		}
 	}
 }
@@ -468,7 +470,7 @@ mod tests {
 			qmux::Session::accept(stream(server), config())
 		)
 		.unwrap();
-		let now = tokio::time::Instant::now().into_std();
+		let now = moq_net::time::now();
 		let client = async {
 			let origin = moq_tokio::origin::spawn();
 			let (session, driver) = moq_net::Client::new()

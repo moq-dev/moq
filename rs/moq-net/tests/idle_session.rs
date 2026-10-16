@@ -46,7 +46,7 @@ async fn viewer(
 
 	let mut probe = pair.client.recv_bandwidth().expect("lite carries PROBE");
 	assert_eq!(probe.changed().await.unwrap(), Some(Rate::from_bps(1_000_000)));
-	moq_net_sim::sleep(Duration::from_secs(1)).await;
+	moq_clock::sleep(Duration::from_secs(1)).await;
 	(pair, probe)
 }
 
@@ -56,7 +56,7 @@ fn origin() -> origin::Producer {
 	origin
 }
 
-#[moq_net_sim::test]
+#[moq_clock::test]
 async fn idle_viewer_does_not_wake_the_server() {
 	for version in VERSIONS {
 		let origin = origin();
@@ -66,7 +66,7 @@ async fn idle_viewer_does_not_wake_the_server() {
 		let reads = &pair.server_transport;
 		let (start_polls, start_reads) = (polls.load(Ordering::Relaxed), reads.stats_reads());
 		assert!(start_polls > 0, "the requested poll counter must observe the handshake");
-		moq_net_sim::sleep(IDLE).await;
+		moq_clock::sleep(IDLE).await;
 		let polls = polls.load(Ordering::Relaxed) - start_polls;
 		let reads = reads.stats_reads() - start_reads;
 
@@ -80,7 +80,7 @@ async fn idle_viewer_does_not_wake_the_server() {
 
 /// The flip side: a session the server is doing work for samples as it goes, so a
 /// moved estimate reaches the viewer with that work, not at the next max age.
-#[moq_net_sim::test]
+#[moq_clock::test]
 async fn busy_viewer_sees_the_estimate_move() {
 	for version in VERSIONS {
 		let origin = origin();
@@ -94,7 +94,7 @@ async fn busy_viewer_sees_the_estimate_move() {
 		let broadcast = origin.create_broadcast("live").unwrap();
 		broadcast.announce(Default::default()).unwrap();
 
-		let moved = moq_net_sim::timeout(Duration::from_millis(1), probe.changed()).await;
+		let moved = moq_clock::timeout(Duration::from_millis(1), probe.changed()).await;
 		assert_eq!(
 			moved.expect("reported with the work").unwrap(),
 			Some(Rate::from_bps(2_000_000)),
@@ -104,7 +104,7 @@ async fn busy_viewer_sees_the_estimate_move() {
 }
 
 /// A transport estimate demanded locally still costs one poll per sampling deadline.
-#[moq_net_sim::test]
+#[moq_clock::test]
 async fn ietf_stats_refresh_costs_one_driver_poll() {
 	for version in ["moq-transport-16", "moq-transport-22"] {
 		let polls = Arc::new(AtomicUsize::new(0));
@@ -113,10 +113,10 @@ async fn ietf_stats_refresh_costs_one_driver_poll() {
 		options.server_polls = Some(polls.clone());
 		let pair = connect_mock(options).await;
 		let _bandwidth = pair.server.send_bandwidth().expect("transport estimate");
-		moq_net_sim::sleep(Duration::from_secs(1)).await;
+		moq_clock::sleep(Duration::from_secs(1)).await;
 		let start = polls.load(Ordering::Relaxed);
 		let reads = pair.server_transport.stats_reads();
-		moq_net_sim::sleep(Duration::from_secs(10)).await;
+		moq_clock::sleep(Duration::from_secs(10)).await;
 		let polls = polls.load(Ordering::Relaxed) - start;
 		let reads = pair.server_transport.stats_reads() - reads;
 		assert_eq!(reads, 100, "{version}: one sample per 100 ms");

@@ -15,7 +15,7 @@
 use std::ffi::{c_char, c_void};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use tokio::sync::oneshot;
 
@@ -232,7 +232,7 @@ async fn follow_reservation(
 			max = next;
 			control = Control::new(Policy::new(max));
 		}
-		let Some(bitrate) = control.update(estimate, Instant::now()) else {
+		let Some(bitrate) = control.update(estimate, moq_net::time::now()) else {
 			continue;
 		};
 

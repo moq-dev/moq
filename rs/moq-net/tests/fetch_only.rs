@@ -30,11 +30,11 @@ fn produce_origin(hop: u64) -> moq_net::origin::Producer {
 
 async fn resolve(origin: &moq_net::origin::Producer) -> moq_net::broadcast::Consumer {
 	let consumer = origin.consume();
-	moq_net_sim::timeout(TIMEOUT, consumer.routed("bcast"))
+	moq_clock::timeout(TIMEOUT, consumer.routed("bcast"))
 		.await
 		.expect("announce timeout")
 		.expect("routed");
-	moq_net_sim::timeout(TIMEOUT, consumer.request_broadcast("bcast", None))
+	moq_clock::timeout(TIMEOUT, consumer.request_broadcast("bcast", None))
 		.await
 		.expect("resolve timeout")
 		.expect("broadcast resolves")
@@ -58,7 +58,7 @@ fn publish_finished(origin: &moq_net::origin::Producer) -> (moq_net::broadcast::
 
 	let subscribed = Arc::new(AtomicBool::new(false));
 	let flag = subscribed.clone();
-	drop(moq_net_sim::spawn(async move {
+	drop(moq_clock::sim::spawn(async move {
 		while let Ok(subscription) = track.subscription_changed().await {
 			if subscription.is_some() {
 				flag.store(true, Ordering::SeqCst);
@@ -69,13 +69,13 @@ fn publish_finished(origin: &moq_net::origin::Producer) -> (moq_net::broadcast::
 }
 
 async fn fetch(broadcast: &moq_net::broadcast::Consumer, sequence: u64) -> Result<Vec<Vec<u8>>, moq_net::Error> {
-	let mut group = moq_net_sim::timeout(TIMEOUT, async {
+	let mut group = moq_clock::timeout(TIMEOUT, async {
 		broadcast.track("video").unwrap().fetch_group(sequence, None).await
 	})
 	.await
 	.expect("fetch timed out")?;
 	let mut frames = Vec::new();
-	while let Some(frame) = moq_net_sim::timeout(TIMEOUT, group.read_frame())
+	while let Some(frame) = moq_clock::timeout(TIMEOUT, group.read_frame())
 		.await
 		.expect("read timed out")?
 	{
@@ -118,11 +118,11 @@ async fn direct(version: &str) {
 }
 
 /// A finished track is fetched without a SUBSCRIBE, which it would refuse.
-#[moq_net_sim::test]
+#[moq_clock::test]
 async fn a_fetch_learns_the_track_without_subscribing() {
 	let mut failures = Vec::new();
 	for version in VERSIONS {
-		if moq_net_sim::spawn(direct(version)).await.is_err() {
+		if moq_clock::sim::spawn(direct(version)).await.is_err() {
 			failures.push(*version);
 		}
 	}
@@ -164,10 +164,10 @@ async fn relayed(version: &str) {
 
 /// A subscriber arriving at a copy learned from TRACK_STATUS still gets timestamped
 /// frames: the copy is timed from TRACK_STATUS_OK, and the resumed SUBSCRIBE keeps it so.
-#[moq_net_sim::test]
+#[moq_clock::test]
 async fn a_subscribe_after_track_status_keeps_timestamps() {
 	for version in ["moq-transport-18", "moq-transport-19", "moq-transport-22"] {
-		moq_net_sim::timeout(TIMEOUT, async {
+		moq_clock::timeout(TIMEOUT, async {
 			let publisher = produce_origin(1);
 			let broadcast = publisher.create_broadcast("bcast").unwrap();
 			let track = broadcast.create_track("video", timed()).unwrap();
@@ -207,11 +207,11 @@ async fn a_subscribe_after_track_status_keeps_timestamps() {
 }
 
 /// A relay serves a downstream fetch with a fetch upstream, never a subscription.
-#[moq_net_sim::test]
+#[moq_clock::test]
 async fn a_relay_fetches_without_subscribing_upstream() {
 	let mut failures = Vec::new();
 	for version in VERSIONS {
-		if moq_net_sim::spawn(relayed(version)).await.is_err() {
+		if moq_clock::sim::spawn(relayed(version)).await.is_err() {
 			failures.push(*version);
 		}
 	}

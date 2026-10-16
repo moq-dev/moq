@@ -1257,7 +1257,7 @@ async fn memory_sessions() -> (moq_net::Session, moq_net::Session) {
 	)
 	.expect("qmux handshake");
 
-	let now = tokio::time::Instant::now().into_std();
+	let now = moq_net::time::now();
 	let client = async {
 		let (session, driver) = moq_net::Client::new()
 			.connect(

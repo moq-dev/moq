@@ -41,18 +41,18 @@ fn produce_origin(hop: u64) -> moq_net::origin::Producer {
 
 async fn resolve(origin: &moq_net::origin::Producer) -> moq_net::broadcast::Consumer {
 	let consumer = origin.consume();
-	moq_net_sim::timeout(TIMEOUT, consumer.routed("bcast"))
+	moq_clock::timeout(TIMEOUT, consumer.routed("bcast"))
 		.await
 		.expect("announce timeout")
 		.expect("routed");
-	moq_net_sim::timeout(TIMEOUT, consumer.request_broadcast("bcast", None))
+	moq_clock::timeout(TIMEOUT, consumer.request_broadcast("bcast", None))
 		.await
 		.expect("resolve timeout")
 		.expect("broadcast resolves")
 }
 
 async fn read(group: &mut moq_net::group::Consumer) -> Vec<u8> {
-	moq_net_sim::timeout(TIMEOUT, group.read_frame())
+	moq_clock::timeout(TIMEOUT, group.read_frame())
 		.await
 		.expect("no frame")
 		.expect("read_frame")
@@ -102,17 +102,17 @@ async fn round(version: &str) {
 		.subscribe(Subscription::default().with_start(start))
 		.await
 		.expect("peer subscribe");
-	let mut peer_group = moq_net_sim::timeout(TIMEOUT, peer_sub.recv_group())
+	let mut peer_group = moq_clock::timeout(TIMEOUT, peer_sub.recv_group())
 		.await
 		.expect("peer got no group")
 		.unwrap()
 		.unwrap();
 	// The peer reads its headless copy from frame 0: a fetch of the head through R.
-	let _ = moq_net_sim::timeout(Duration::from_millis(500), peer_group.read_frame()).await;
+	let _ = moq_clock::timeout(Duration::from_millis(500), peer_group.read_frame()).await;
 
 	// A fresh reader on R wants the latest group from its snapshot.
 	let mut sub = remote.track("catalog.json").unwrap().subscribe(None).await.unwrap();
-	let mut got = moq_net_sim::timeout(TIMEOUT, sub.recv_group())
+	let mut got = moq_clock::timeout(TIMEOUT, sub.recv_group())
 		.await
 		.unwrap_or_else(|_| panic!("{version}: no group"))
 		.unwrap()
@@ -123,7 +123,7 @@ async fn round(version: &str) {
 	assert_eq!(read(&mut got).await, b"delta2", "{version}");
 
 	// The publisher keeps writing into the group: the reader on R hears it.
-	moq_net_sim::sleep(Duration::from_secs(1)).await;
+	moq_clock::sleep(Duration::from_secs(1)).await;
 	group.write_frame(Timestamp::now(), &b"delta3"[..]).unwrap();
 	assert_eq!(
 		read(&mut got).await,
@@ -135,9 +135,9 @@ async fn round(version: &str) {
 	// subscriptions keep the live feed running. The live group still holds R's slot: a
 	// later reader gets the whole group again.
 	drop((got, peer_group));
-	moq_net_sim::sleep(Duration::from_secs(1)).await;
+	moq_clock::sleep(Duration::from_secs(1)).await;
 	let mut late_sub = remote.track("catalog.json").unwrap().subscribe(None).await.unwrap();
-	let mut late = moq_net_sim::timeout(TIMEOUT, late_sub.recv_group())
+	let mut late = moq_clock::timeout(TIMEOUT, late_sub.recv_group())
 		.await
 		.unwrap_or_else(|_| panic!("{version}: no group after the fetch was abandoned"))
 		.unwrap()
@@ -156,11 +156,11 @@ async fn round(version: &str) {
 	));
 }
 
-#[moq_net_sim::test]
+#[moq_clock::test]
 async fn a_fetched_head_keeps_the_live_group_visible() {
 	let mut failures = Vec::new();
 	for version in VERSIONS {
-		if moq_net_sim::spawn(round(version)).await.is_err() {
+		if moq_clock::sim::spawn(round(version)).await.is_err() {
 			failures.push(*version);
 		}
 	}

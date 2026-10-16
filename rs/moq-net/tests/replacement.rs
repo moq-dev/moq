@@ -40,7 +40,7 @@ async fn link(version: Version, from: &origin::Producer, to: &origin::Producer) 
 
 /// The next announce event, failing on a hang.
 async fn next_event(announced: &mut announce::Consumer) -> announce::Event {
-	moq_net_sim::timeout(Duration::from_secs(10), announced.next())
+	moq_clock::timeout(Duration::from_secs(10), announced.next())
 		.await
 		.expect("announce hung")
 		.expect("announce ended")
@@ -55,7 +55,7 @@ fn write(track: &track::Producer, tag: &str) {
 
 /// The next frame a subscription delivers, as text.
 async fn read(subscription: &mut track::Subscriber) -> String {
-	let mut group = moq_net_sim::timeout(Duration::from_secs(10), subscription.recv_group())
+	let mut group = moq_clock::timeout(Duration::from_secs(10), subscription.recv_group())
 		.await
 		.expect("subscription hung")
 		.unwrap()
@@ -65,7 +65,7 @@ async fn read(subscription: &mut track::Subscriber) -> String {
 }
 
 async fn subscribe(broadcast: &broadcast::Consumer, name: &str) -> Result<track::Subscriber, Error> {
-	moq_net_sim::timeout(Duration::from_secs(10), broadcast.track(name)?.subscribe(None))
+	moq_clock::timeout(Duration::from_secs(10), broadcast.track(name)?.subscribe(None))
 		.await
 		.expect("subscribe hung")
 }
@@ -103,7 +103,7 @@ async fn replace(version: &str, epoch: Option<Epoch>) {
 	// The replacement: the same peer re-announces everything over a second session,
 	// while the first one is still open.
 	let _second = link(version, &publisher, &viewer).await;
-	moq_net_sim::sleep(WITHIN_HOLD).await;
+	moq_clock::sleep(WITHIN_HOLD).await;
 
 	// A request through the old handle right after the replacement is still served.
 	let mut late = subscribe(&old, "audio")
@@ -115,7 +115,7 @@ async fn replace(version: &str, epoch: Option<Epoch>) {
 	if epoch.is_some() {
 		// The epoch continues across the replacement: nothing to restart, and the old
 		// handle keeps serving.
-		if let Ok(event) = moq_net_sim::timeout(PAST_HOLD, announced.next()).await {
+		if let Ok(event) = moq_clock::timeout(PAST_HOLD, announced.next()).await {
 			panic!("{version}: an epoch route restarted on replacement: {event:?}");
 		}
 		let mut later = subscribe(&old, "meta").await.unwrap();
@@ -126,7 +126,7 @@ async fn replace(version: &str, epoch: Option<Epoch>) {
 
 	// Without an epoch the replacement is a restart: once the hold releases it, the old
 	// handle refuses new requests, and the restart is already there to follow.
-	moq_net_sim::sleep(PAST_HOLD).await;
+	moq_clock::sleep(PAST_HOLD).await;
 	let Err(err) = subscribe(&old, "meta").await else {
 		panic!("{version}: a retired handle served a request");
 	};
@@ -149,24 +149,24 @@ fn epoch() -> Epoch {
 	"01900000-0000-7000-8000-000000000001".parse().unwrap()
 }
 
-#[moq_net_sim::test]
+#[moq_clock::test]
 async fn epochless_lite06() {
-	moq_net_sim::timeout(TEST_TIMEOUT, replace("moq-lite-06", None))
+	moq_clock::timeout(TEST_TIMEOUT, replace("moq-lite-06", None))
 		.await
 		.expect("timed out");
 }
 
-#[moq_net_sim::test]
+#[moq_clock::test]
 async fn epochless_lite07() {
-	moq_net_sim::timeout(TEST_TIMEOUT, replace("moq-lite-07-wip", None))
+	moq_clock::timeout(TEST_TIMEOUT, replace("moq-lite-07-wip", None))
 		.await
 		.expect("timed out");
 }
 
 /// Only lite-07 carries the epoch.
-#[moq_net_sim::test]
+#[moq_clock::test]
 async fn epoch_lite07() {
-	moq_net_sim::timeout(TEST_TIMEOUT, replace("moq-lite-07-wip", Some(epoch())))
+	moq_clock::timeout(TEST_TIMEOUT, replace("moq-lite-07-wip", Some(epoch())))
 		.await
 		.expect("timed out");
 }

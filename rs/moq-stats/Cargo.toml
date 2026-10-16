@@ -20,6 +20,7 @@ bench = ["moq-net/fuzz"]
 
 [dependencies]
 moq-json = { workspace = true }
+moq-clock = { workspace = true }
 moq-net = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

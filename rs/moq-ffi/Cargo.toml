@@ -35,6 +35,7 @@ hang = { workspace = true }
 # `kio::MaybeSend` is the `Send` bound that vanishes on wasm; see `ffi::Task`.
 kio = { workspace = true }
 moq-json = { workspace = true }
+moq-clock = { workspace = true }
 moq-mux = { workspace = true }
 moq-net = { workspace = true }
 serde_json = { workspace = true }

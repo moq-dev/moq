@@ -22,7 +22,7 @@ fn produce_origin(hop: u64) -> moq_net::origin::Producer {
 
 /// The relay accepts the wide sequence from lite-07, refuses that subscription to the
 /// lite-06 reader that cannot encode it, and keeps the session serving other tracks.
-#[moq_net_sim::test]
+#[moq_clock::test]
 async fn wide_sequence_fails_only_its_subscription() {
 	const WIDE: u64 = 1 << 62;
 
@@ -58,7 +58,7 @@ async fn wide_sequence_fails_only_its_subscription() {
 	consumer.routed("bench").await.unwrap();
 	let remote = consumer.request_broadcast("bench", None).await.unwrap();
 
-	let result = moq_net_sim::timeout(Duration::from_secs(5), async {
+	let result = moq_clock::timeout(Duration::from_secs(5), async {
 		let mut sub = remote.track("wide").unwrap().subscribe(None).await?;
 		sub.recv_group().await.map(|group| group.map(|group| group.sequence))
 	})
@@ -78,7 +78,7 @@ async fn wide_sequence_fails_only_its_subscription() {
 
 /// A subscription that starts inside the QUIC range and later receives a group of
 /// `1 << 62` fails only that subscription. The session and the other track continue.
-#[moq_net_sim::test]
+#[moq_clock::test]
 async fn a_later_wide_group_fails_only_that_subscription() {
 	const WIDE: u64 = 1 << 62;
 
@@ -116,7 +116,7 @@ async fn a_later_wide_group_fails_only_that_subscription() {
 	let mut group = wide.create_group(moq_net::group::Info { sequence: WIDE }).unwrap();
 	group.write_frame(Timestamp::ZERO, b"wide".as_ref()).unwrap();
 
-	let result = moq_net_sim::timeout(Duration::from_secs(5), sub.recv_group())
+	let result = moq_clock::timeout(Duration::from_secs(5), sub.recv_group())
 		.await
 		.expect("the wide group hung the subscription instead of failing it");
 	match result {

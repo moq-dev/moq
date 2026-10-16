@@ -77,7 +77,7 @@ fn runtime() -> tokio::runtime::Runtime {
 }
 
 fn now() -> moq_net::time::Instant {
-	tokio::time::Instant::now().into_std()
+	moq_clock::now()
 }
 
 /// One publisher and one subscriber session over an in-memory pair.

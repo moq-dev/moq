@@ -930,7 +930,7 @@ impl MoqMediaTrackProducer {
 		let timestamp = moq_net::Timestamp::from_micros(timestamp_us)?;
 		let mut guard = self.inner.lock().unwrap();
 		let media = guard.as_mut().ok_or(MoqError::Closed)?;
-		media.import.flush(timestamp, std::time::Instant::now())?;
+		media.import.flush(timestamp, moq_clock::Instant::now())?;
 		Ok(())
 	}
 
@@ -1689,7 +1689,7 @@ mod timebase_tests {
 				reserve();
 			}
 			for touched in [1, 16, 256] {
-				let start = std::time::Instant::now();
+				let start = moq_clock::Instant::now();
 				for _ in 0..1000 {
 					for _ in 0..touched {
 						reserve();

@@ -283,7 +283,7 @@ mod tests {
 		}
 	}
 
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn raw_payload_stop_uses_the_negotiated_registry() {
 		for (version, expected) in [
 			(

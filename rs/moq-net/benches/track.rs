@@ -46,7 +46,9 @@
 use std::hint::black_box;
 use std::sync::{Arc, Barrier};
 use std::task::Poll;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant as WallInstant};
+
+use moq_net::time::Instant;
 
 use bytes::Bytes;
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
@@ -427,7 +429,7 @@ fn parallel_write(pool: &cache::Pool, writers: usize, iterations: u64) -> Durati
 		// The first wait returns once every writer has built its producer, keeping setup out
 		// of the interval. The second releases them, so no write lands before the stamp.
 		barrier.wait();
-		let start = Instant::now();
+		let start = WallInstant::now();
 		barrier.wait();
 		for handle in handles {
 			handle.join().unwrap();
@@ -626,7 +628,7 @@ fn bench_parked_read(c: &mut Criterion) {
 				// Each append above woke the reads before it: park them again.
 				repoll(&mut reads);
 
-				let start = Instant::now();
+				let start = WallInstant::now();
 				for _ in 0..iterations {
 					let mut next = track.append_group().unwrap();
 					next.write_frame(Timestamp::from_micros(micros).unwrap(), Bytes::from_static(b"x"))
@@ -675,7 +677,7 @@ fn bench_sparse_read(c: &mut Criterion) {
 					for gap in 0..gaps {
 						hand_out(gap * 2);
 					}
-					let start = Instant::now();
+					let start = WallInstant::now();
 					for iteration in 0..iterations {
 						hand_out((gaps + iteration) * 2);
 						hand_out(iteration * 2 + 1);

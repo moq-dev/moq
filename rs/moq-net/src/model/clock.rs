@@ -6,14 +6,15 @@
 //! [`anchor`] that maps an instant onto a timestamp, so a port swaps this module
 //! for its platform's clock.
 
-use std::sync::LazyLock;
+use std::collections::HashMap;
+use std::sync::{LazyLock, Mutex};
 use std::time::Duration;
 
 use rand::RngExt;
 
 /// The current instant on the model's clock.
 pub(crate) fn now() -> crate::time::Instant {
-	crate::time::Instant::now()
+	moq_clock::now()
 }
 
 /// The instant a cache judges wall-clock staleness by, before the time its drivers
@@ -21,31 +22,8 @@ pub(crate) fn now() -> crate::time::Instant {
 ///
 /// The ambient runtime's clock where there is one, so a paused test runtime pauses
 /// staleness along with the drivers it supplies time to.
-#[cfg(not(any(test, loom)))]
 pub(crate) fn wall() -> crate::time::Instant {
-	#[cfg(all(feature = "async", not(target_family = "wasm")))]
-	let now = web_async::time::Instant::now().into_std();
-	#[cfg(not(all(feature = "async", not(target_family = "wasm"))))]
-	let now = now();
-	now
-}
-
-/// Loom permutes handoffs without advancing time, so scheduling cannot age groups.
-#[cfg(all(loom, not(test)))]
-pub(crate) fn wall() -> crate::time::Instant {
-	static FROZEN: LazyLock<crate::time::Instant> = LazyLock::new(now);
-	*FROZEN
-}
-
-/// Unit tests freeze the wall clock, so only time a test supplies moves it: the
-/// simulated clock inside `moq_net_sim`, or a pool stepped by hand outside it.
-#[cfg(test)]
-pub(crate) fn wall() -> crate::time::Instant {
-	static FROZEN: LazyLock<crate::time::Instant> = LazyLock::new(now);
-	match moq_net_sim::is_running() {
-		true => moq_net_sim::now(),
-		false => *FROZEN,
-	}
+	moq_clock::now()
 }
 
 /// Where [`Timestamp`](crate::Timestamp)s count from: an instant, and the
@@ -56,11 +34,15 @@ pub(crate) fn wall() -> crate::time::Instant {
 /// deters using it as a wall clock and catches implementations that assume
 /// unrelated broadcasts are synchronized.
 pub(crate) fn anchor() -> (crate::time::Instant, Duration) {
-	static ANCHOR: LazyLock<(crate::time::Instant, Duration)> = LazyLock::new(|| {
+	static ANCHORS: LazyLock<Mutex<HashMap<(crate::time::Instant, moq_clock::Wall), Duration>>> =
+		LazyLock::new(Default::default);
+	let (instant, wall) = moq_clock::anchor();
+	let mut anchors = ANCHORS.lock().unwrap();
+	let offset = *anchors.entry((instant, wall)).or_insert_with(|| {
 		let jitter = Duration::from_millis(rand::rng().random_range(1..69_420));
-		(now(), offset(jitter))
+		offset(wall, jitter)
 	});
-	*ANCHOR
+	(instant, offset)
 }
 
 /// Wall time since 2020-01-01T00:00:00Z, less the jitter.
@@ -68,15 +50,34 @@ pub(crate) fn anchor() -> (crate::time::Instant, Duration) {
 /// Counting from 50 years after the Unix epoch keeps the value ~1.5e12 ms smaller,
 /// trimming a byte or two off the first frame's varint. Saturates to zero on a wall
 /// clock set before 2020 (an unsynced clock), since only a non-negative start matters.
-#[cfg(any(not(target_arch = "wasm32"), target_os = "wasi"))]
-fn offset(jitter: Duration) -> Duration {
+fn offset(wall: moq_clock::Wall, jitter: Duration) -> Duration {
 	const EPOCH: Duration = Duration::from_secs(1_577_836_800);
-	let since = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH);
-	since.unwrap_or_default().saturating_sub(EPOCH).saturating_sub(jitter)
+	wall.saturating_duration_since(moq_clock::Wall::UNIX_EPOCH)
+		.saturating_sub(EPOCH)
+		.saturating_sub(jitter)
 }
 
-/// The browser build has no wall clock, so timestamps count up from the jitter.
-#[cfg(all(target_arch = "wasm32", not(target_os = "wasi")))]
-fn offset(jitter: Duration) -> Duration {
-	jitter
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn each_ambient_clock_owns_its_wall_anchor() {
+		let first = moq_clock::sim::run(async { anchor() });
+		let second = moq_clock::sim::run(async {
+			moq_clock::sim::step_wall(moq_clock::Manual::WALL_START + Duration::from_secs(86_400));
+			let before = anchor();
+			moq_clock::sim::step_wall(moq_clock::Manual::WALL_START - Duration::from_secs(86_400));
+			assert_eq!(
+				anchor(),
+				before,
+				"a wall correction does not retime an established anchor"
+			);
+			before
+		});
+		assert!(
+			second.1 > first.1 + Duration::from_secs(60),
+			"the later wall belongs to a new clock"
+		);
+	}
 }

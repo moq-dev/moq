@@ -17,6 +17,7 @@ use crate::{Instant, Wall};
 /// Where every unpaused clock counts from, so instants read on any thread, in any
 /// runtime or none, stay comparable.
 static ORIGIN: OnceLock<host::Instant> = OnceLock::new();
+static ANCHOR: OnceLock<(Instant, Wall)> = OnceLock::new();
 
 /// The origin this context counts from, and a reading of its clock.
 ///
@@ -47,6 +48,10 @@ pub(crate) fn wall() -> Wall {
 		.duration_since(host::UNIX_EPOCH)
 		.expect("the host wall clock reads before 1970");
 	Wall::UNIX_EPOCH + since
+}
+
+pub(crate) fn anchor() -> (Instant, Wall) {
+	*ANCHOR.get_or_init(|| (now(), wall()))
 }
 
 /// A host timer for `at`, on the origin it was created with.

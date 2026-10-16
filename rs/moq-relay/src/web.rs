@@ -2015,7 +2015,7 @@ mod tests {
 				.with_versions("moq-lite-06".parse::<moq_net::Version>().unwrap().into())
 				.with_publisher(origin.consume())
 				.connect(
-					tokio::time::Instant::now().into_std(),
+					moq_net::time::now(),
 					moq_tokio::transport::Session::new(transport, moq_net::transport::Binding::Uri),
 				)
 				.await

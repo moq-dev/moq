@@ -960,11 +960,11 @@ mod tests {
 	/// `modify()`, so the derivative's clock carries that mapping and its data is stamped on it.
 	#[tokio::test(start_paused = true)]
 	async fn a_derivative_stamps_on_its_source_clock() {
-		use std::time::{Duration, Instant, SystemTime};
+		use std::time::{Duration, SystemTime};
 
 		// A minute in, the source's mapping is far from the one a fresh clock would advertise.
 		let ago = Duration::from_secs(60);
-		let clock = moq_mux::Clock::at(Instant::now() - ago, SystemTime::now() - ago).unwrap();
+		let clock = moq_mux::Clock::at(moq_net::time::now() - ago, SystemTime::now() - ago).unwrap();
 		let mut input = moq_net::broadcast::Info::default().produce();
 		let source =
 			moq_mux::catalog::Producer::new(&mut input, moq_mux::catalog::Config::default().with_clock(clock)).unwrap();

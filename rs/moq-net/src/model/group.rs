@@ -3083,7 +3083,7 @@ mod test {
 	/// a write guard was mutably accessed, so `frame_notify` must mark the guard
 	/// modified; a guard dropped untouched wakes nobody and the reader would
 	/// stall until the frame completed.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	#[cfg(feature = "async")]
 	async fn chunk_write_wakes_parked_reader() {
 		let mut producer = Info { sequence: 0 }.produce();
@@ -3095,11 +3095,11 @@ mod test {
 			})
 			.unwrap();
 		let mut f = consumer.next_frame().await.unwrap().unwrap();
-		let handle = moq_net_sim::spawn(async move { f.read_chunk().await });
+		let handle = moq_clock::sim::spawn(async move { f.read_chunk().await });
 		// Let the reader park on the empty partial before the chunk lands.
-		moq_net_sim::sleep(std::time::Duration::from_millis(50)).await;
+		moq_clock::sleep(std::time::Duration::from_millis(50)).await;
 		frame.write(Bytes::from_static(b"foo")).unwrap();
-		let chunk = moq_net_sim::timeout(std::time::Duration::from_secs(2), handle)
+		let chunk = moq_clock::timeout(std::time::Duration::from_secs(2), handle)
 			.await
 			.expect("parked chunk reader was never woken by the chunk write")
 			.unwrap()

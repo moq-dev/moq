@@ -39,13 +39,13 @@ const MOQT_22: &str = "moq-transport-22";
 macro_rules! cases {
 	($($case:ident),* $(,)?) => {
 		mod lite_07 {
-			$(#[moq_net_sim::test] async fn $case() { super::$case(super::LITE_07).await })*
+			$(#[moq_clock::test] async fn $case() { super::$case(super::LITE_07).await })*
 		}
 		mod moqt_17 {
-			$(#[moq_net_sim::test] async fn $case() { super::$case(super::MOQT_17).await })*
+			$(#[moq_clock::test] async fn $case() { super::$case(super::MOQT_17).await })*
 		}
 		mod moqt_22 {
-			$(#[moq_net_sim::test] async fn $case() { super::$case(super::MOQT_22).await })*
+			$(#[moq_clock::test] async fn $case() { super::$case(super::MOQT_22).await })*
 		}
 	};
 }
@@ -75,10 +75,10 @@ cases!(
 macro_rules! prefix_cases {
 	($($case:ident),* $(,)?) => {
 		mod moqt_17_prefixes {
-			$(#[moq_net_sim::test] async fn $case() { super::$case(super::MOQT_17).await })*
+			$(#[moq_clock::test] async fn $case() { super::$case(super::MOQT_17).await })*
 		}
 		mod moqt_22_prefixes {
-			$(#[moq_net_sim::test] async fn $case() { super::$case(super::MOQT_22).await })*
+			$(#[moq_clock::test] async fn $case() { super::$case(super::MOQT_22).await })*
 		}
 	};
 }
@@ -89,17 +89,17 @@ prefix_cases!(
 	a_grant_too_large_for_one_message_is_unsupported,
 );
 
-#[moq_net_sim::test]
+#[moq_clock::test]
 async fn lite_07_carries_pattern_grants() {
 	pattern_grants_arrive_exactly(LITE_07).await
 }
 
-#[moq_net_sim::test]
+#[moq_clock::test]
 async fn lite_07_enforces_a_wildcard_grant() {
 	a_wildcard_grant_is_enforced(LITE_07).await
 }
 
-#[moq_net_sim::test]
+#[moq_clock::test]
 async fn lite_06_has_no_grant() {
 	older_versions_have_no_grant(LITE_06).await
 }
@@ -107,7 +107,7 @@ async fn lite_06_has_no_grant() {
 /// The control for the lite versions without AUTH: on the same barrier, lite-07 has
 /// opened an Auth Stream on each side, which is what makes its absence on them mean
 /// something.
-#[moq_net_sim::test]
+#[moq_clock::test]
 async fn lite_07_opens_an_auth_stream_per_side() {
 	within(async {
 		let (pair, _broadcast) = connect_announced(LITE_07).await;
@@ -123,12 +123,12 @@ async fn lite_07_opens_an_auth_stream_per_side() {
 	.expect("timed out");
 }
 
-#[moq_net_sim::test]
+#[moq_clock::test]
 async fn lite_05_has_no_grant() {
 	older_versions_have_no_grant("moq-lite-05").await
 }
 
-#[moq_net_sim::test]
+#[moq_clock::test]
 async fn moqt_16_has_no_grant() {
 	older_versions_have_no_grant("moq-transport-16").await
 }
@@ -216,7 +216,7 @@ struct Pair {
 	server_transport: MockSession,
 	requests: Option<auth::Requests>,
 	/// Aborting it drops the server's driver without letting it finish.
-	server_driver: moq_net_sim::JoinHandle<Error>,
+	server_driver: moq_clock::sim::JoinHandle<Error>,
 }
 
 async fn connect(opts: Options) -> Pair {
@@ -256,7 +256,7 @@ async fn connect(opts: Options) -> Pair {
 			.server_requests
 			.then(|| handshake.auth().requests().expect("requests available before ok()"));
 		let (session, mut driver) = handshake.ok().await.expect("server accept");
-		let driver = moq_net_sim::spawn(moq_net_sim::drive(move |now, waiter| {
+		let driver = moq_clock::sim::spawn(moq_clock::drive(move |now, waiter| {
 			moq_net::time::Driver::poll(&mut driver, now, waiter)
 		}));
 		(session, requests, driver)
@@ -280,7 +280,7 @@ fn serve(
 	answer: impl Fn(&[u8]) -> Option<Grant> + 'static,
 ) -> futures::channel::mpsc::UnboundedReceiver<(Vec<u8>, auth::Issued)> {
 	let (tx, rx) = futures::channel::mpsc::unbounded();
-	moq_net_sim::spawn(async move {
+	moq_clock::sim::spawn(async move {
 		let mut unanswered = Vec::new();
 		while let Some(request) = requests.next().await {
 			let token = request.token().to_vec();
@@ -295,8 +295,8 @@ fn serve(
 	rx
 }
 
-fn within<F: std::future::Future>(f: F) -> impl std::future::Future<Output = Result<F::Output, moq_net_sim::Elapsed>> {
-	moq_net_sim::timeout(TEST_TIMEOUT, f)
+fn within<F: std::future::Future>(f: F) -> impl std::future::Future<Output = Result<F::Output, moq_clock::Elapsed>> {
+	moq_clock::timeout(TEST_TIMEOUT, f)
 }
 
 /// Each side's default grant is what the other side's origin handles allow:
@@ -424,7 +424,7 @@ async fn an_unanswered_token_does_not_suspend_the_check(version: &'static str) {
 		});
 
 		let auth = pair.client.auth();
-		let pending = moq_net_sim::spawn(async move { auth.add("never answered").await.map(|_| ()) });
+		let pending = moq_clock::sim::spawn(async move { auth.add("never answered").await.map(|_| ()) });
 		assert_eq!(granted(&pair.client).await, grant(&["baz"], &[]));
 
 		let bad = publisher.create_broadcast("foo/bar").unwrap();
@@ -564,7 +564,7 @@ async fn a_refused_token_reports_the_code(version: &'static str) {
 		})
 		.await;
 		let mut requests = pair.requests.take().unwrap();
-		moq_net_sim::spawn(async move {
+		moq_clock::sim::spawn(async move {
 			while let Some(request) = requests.next().await {
 				match request.token().is_empty() {
 					true => {
@@ -599,7 +599,7 @@ async fn a_refused_setup_token_grants_nothing(version: &'static str) {
 		})
 		.await;
 		let mut requests = pair.requests.take().unwrap();
-		moq_net_sim::spawn(async move {
+		moq_clock::sim::spawn(async move {
 			while let Some(request) = requests.next().await {
 				request.reject(SessionError::Unauthorized, "bad credential");
 			}
@@ -626,9 +626,9 @@ async fn dropping_the_requests_refuses_queued_tokens(version: &'static str) {
 		let first = requests.next().await.expect("setup token");
 		drop(first.accept(Grant::default()));
 		let auth = pair.client.auth();
-		let pending = moq_net_sim::spawn(async move { auth.add("queued").await.map(drop) });
+		let pending = moq_clock::sim::spawn(async move { auth.add("queued").await.map(drop) });
 		// Give the second token time to reach the queue before dropping it.
-		moq_net_sim::sleep(Duration::from_millis(50)).await;
+		moq_clock::sleep(Duration::from_millis(50)).await;
 		drop(requests);
 
 		let err = pending.await.unwrap().expect_err("refused");
@@ -1097,7 +1097,7 @@ async fn nothing_outside_the_grant_reaches_the_peer(version: &'static str) {
 		// Hold the answer, so the peer's discovery request is in long before the grant.
 		let mut requests = pair.requests.take().unwrap();
 		let setup = requests.next().await.expect("setup token");
-		let leaked = moq_net_sim::timeout(
+		let leaked = moq_clock::timeout(
 			Duration::from_millis(100),
 			wait_announced(&relay.consume(), "foo/bar", true),
 		)
@@ -1119,19 +1119,19 @@ async fn nothing_outside_the_grant_reaches_the_peer(version: &'static str) {
 macro_rules! limit_cases {
 	($($case:ident),* $(,)?) => {
 		mod limit_lite_05 {
-			$(#[moq_net_sim::test] async fn $case() { super::$case("moq-lite-05").await })*
+			$(#[moq_clock::test] async fn $case() { super::$case("moq-lite-05").await })*
 		}
 		mod limit_lite_06 {
-			$(#[moq_net_sim::test] async fn $case() { super::$case(super::LITE_06).await })*
+			$(#[moq_clock::test] async fn $case() { super::$case(super::LITE_06).await })*
 		}
 		mod limit_lite_07 {
-			$(#[moq_net_sim::test] async fn $case() { super::$case(super::LITE_07).await })*
+			$(#[moq_clock::test] async fn $case() { super::$case(super::LITE_07).await })*
 		}
 		mod limit_moqt_16 {
-			$(#[moq_net_sim::test] async fn $case() { super::$case("moq-transport-16").await })*
+			$(#[moq_clock::test] async fn $case() { super::$case("moq-transport-16").await })*
 		}
 		mod limit_moqt_17 {
-			$(#[moq_net_sim::test] async fn $case() { super::$case(super::MOQT_17).await })*
+			$(#[moq_clock::test] async fn $case() { super::$case(super::MOQT_17).await })*
 		}
 	};
 }
@@ -1143,17 +1143,17 @@ limit_cases!(
 	a_widening_brings_back_what_the_peer_published,
 );
 
-#[moq_net_sim::test]
+#[moq_clock::test]
 async fn lite_05_narrowing_resets_a_fetch_in_flight() {
 	a_narrowing_resets_a_fetch_in_flight("moq-lite-05").await
 }
 
-#[moq_net_sim::test]
+#[moq_clock::test]
 async fn lite_06_narrowing_resets_a_fetch_in_flight() {
 	a_narrowing_resets_a_fetch_in_flight(LITE_06).await
 }
 
-#[moq_net_sim::test]
+#[moq_clock::test]
 async fn lite_07_narrowing_resets_a_fetch_in_flight() {
 	a_narrowing_resets_a_fetch_in_flight(LITE_07).await
 }

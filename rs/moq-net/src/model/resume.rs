@@ -1641,9 +1641,9 @@ mod test {
 	/// arrives, so only the deadline wake can release the reader: against a cold route, and
 	/// against one whose copy already caches groups past the held one, so a cursor that
 	/// skips ahead cannot hide the stall.
-	#[test]
+	#[moq_clock::test]
 	#[cfg(feature = "async")]
-	fn an_untimed_group_no_route_continues_is_given_up_by_wall_clock() {
+	async fn an_untimed_group_no_route_continues_is_given_up_by_wall_clock() {
 		let untimed = || {
 			track::Producer::new(
 				Arc::new(broadcast::Info::default()),
