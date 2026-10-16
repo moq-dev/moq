@@ -51,25 +51,6 @@ impl SendStream {
 		self.fin || self.reset
 	}
 
-	/// Queue as much of `buf` as moq-quic will take right now, without parking.
-	/// Best-effort, for the close path where nobody is left to poll.
-	pub(crate) fn try_write(&mut self, buf: &[u8]) -> usize {
-		if self.fin || self.reset {
-			return 0;
-		}
-		let n = self
-			.shared
-			.conn
-			.borrow_mut()
-			.send_stream(self.id)
-			.write(buf)
-			.unwrap_or(0);
-		if n > 0 {
-			self.shared.kick();
-		}
-		n
-	}
-
 	/// Mark the data written so far, for a later [`reset_code`](Self::reset_code) to deliver.
 	pub(crate) fn checkpoint(&self) -> Checkpoint {
 		self.shared.conn.borrow_mut().send_stream(self.id).checkpoint()

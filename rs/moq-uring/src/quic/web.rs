@@ -436,6 +436,10 @@ pub struct Session {
 	/// What [`protocol`](web_transport_trait::poll::Session::protocol)
 	/// reports: the selected subprotocol in web mode, the ALPN in raw mode.
 	protocol: Option<String>,
+	/// Streams opened but still writing their WebTransport header, handed out
+	/// only once it is all written, so a reset always delivers it.
+	opening_uni: Option<(SendStream, Bytes)>,
+	opening_bi: Option<(SendStream, RecvStream, Bytes)>,
 }
 
 impl Session {
@@ -447,6 +451,8 @@ impl Session {
 			conn,
 			web: None,
 			protocol,
+			opening_uni: None,
+			opening_bi: None,
 		}
 	}
 
@@ -512,6 +518,8 @@ impl Session {
 			conn,
 			web: Some(web),
 			protocol,
+			opening_uni: None,
+			opening_bi: None,
 		}
 	}
 
@@ -530,6 +538,8 @@ impl Clone for Session {
 			conn: self.conn.clone(),
 			web: self.web.clone(),
 			protocol: self.protocol.clone(),
+			opening_uni: None,
+			opening_bi: None,
 		}
 	}
 }
@@ -583,13 +593,7 @@ impl web_transport_trait::poll::Session for Session {
 		let Some(web) = self.web.clone() else {
 			let (send, recv) = ready!(web_transport_trait::poll::Session::poll_accept_bi(&mut self.conn, cx))?;
 			return Poll::Ready(Ok((
-				SendStream {
-					inner: send,
-					prefix: Bytes::new(),
-					header: None,
-					finishing: false,
-					web: false,
-				},
+				SendStream::new(send, false),
 				RecvStream {
 					inner: recv,
 					web: false,
@@ -599,16 +603,7 @@ impl web_transport_trait::poll::Session for Session {
 
 		loop {
 			if let Some((send, recv)) = web.state.borrow_mut().ready_bi.pop_front() {
-				return Poll::Ready(Ok((
-					SendStream {
-						inner: send,
-						prefix: Bytes::new(),
-						header: None,
-						finishing: false,
-						web: true,
-					},
-					RecvStream { inner: recv, web: true },
-				)));
+				return Poll::Ready(Ok((SendStream::new(send, true), RecvStream { inner: recv, web: true })));
 			}
 
 			loop {
@@ -626,38 +621,33 @@ impl web_transport_trait::poll::Session for Session {
 	}
 
 	fn poll_open_uni(&mut self, cx: &mut Context<'_>) -> Poll<Result<Self::SendStream, Self::Error>> {
-		let inner = ready!(web_transport_trait::poll::Session::poll_open_uni(&mut self.conn, cx))
-			.map_err(|err| self.map_err(err))?;
-		let prefix = self.web.as_ref().map(|web| web.header_uni.clone()).unwrap_or_default();
-		Poll::Ready(Ok(SendStream {
-			inner,
-			header: None,
-			prefix,
-			finishing: false,
-			web: self.web.is_some(),
-		}))
+		if self.opening_uni.is_none() {
+			let inner = ready!(web_transport_trait::poll::Session::poll_open_uni(&mut self.conn, cx))
+				.map_err(|err| self.map_err(err))?;
+			let header = self.web.as_ref().map(|web| web.header_uni.clone()).unwrap_or_default();
+			self.opening_uni = Some((SendStream::new(inner, self.web.is_some()), header));
+		}
+		let (send, header) = self.opening_uni.as_mut().expect("opening");
+		let result = ready!(send.poll_header(cx, header));
+		let (send, _) = self.opening_uni.take().expect("opening");
+		Poll::Ready(result.map(|()| send))
 	}
 
 	fn poll_open_bi(
 		&mut self,
 		cx: &mut Context<'_>,
 	) -> Poll<Result<(Self::SendStream, Self::RecvStream), Self::Error>> {
-		let (send, recv) = ready!(web_transport_trait::poll::Session::poll_open_bi(&mut self.conn, cx))
-			.map_err(|err| self.map_err(err))?;
-		let prefix = self.web.as_ref().map(|web| web.header_bi.clone()).unwrap_or_default();
-		Poll::Ready(Ok((
-			SendStream {
-				inner: send,
-				header: None,
-				prefix,
-				finishing: false,
-				web: self.web.is_some(),
-			},
-			RecvStream {
-				inner: recv,
-				web: self.web.is_some(),
-			},
-		)))
+		if self.opening_bi.is_none() {
+			let (send, recv) = ready!(web_transport_trait::poll::Session::poll_open_bi(&mut self.conn, cx))
+				.map_err(|err| self.map_err(err))?;
+			let web = self.web.is_some();
+			let header = self.web.as_ref().map(|web| web.header_bi.clone()).unwrap_or_default();
+			self.opening_bi = Some((SendStream::new(send, web), RecvStream { inner: recv, web }, header));
+		}
+		let (send, _, header) = self.opening_bi.as_mut().expect("opening");
+		let result = ready!(send.poll_header(cx, header));
+		let (send, recv, _) = self.opening_bi.take().expect("opening");
+		Poll::Ready(result.map(|()| (send, recv)))
 	}
 
 	fn poll_send_datagram(&mut self, cx: &mut Context<'_>, payload: &[u8]) -> Poll<Result<(), Self::Error>> {
@@ -805,27 +795,26 @@ impl web_transport_trait::poll::Session for Session {
 
 /// An outgoing stream, WebTransport-framed when its session is.
 ///
-/// [`finish`](web_transport_trait::poll::SendStream::finish) can leave the
-/// WebTransport header owed, when the connection has no flow-control credit
-/// for it. The FIN then goes out on a later
-/// [`poll_closed`](web_transport_trait::poll::SendStream::poll_closed), or on
-/// `Drop` if credit has returned by then. Dropping immediately after
-/// finishing, with no poll in between, leaves no moment for it to return and
-/// cancels the stream instead, so pair the two when a clean end matters.
+/// A web stream we opened is handed out with its header already written, so a
+/// reset still delivers the header and the peer can tell which session the
+/// reset belongs to.
 pub struct SendStream {
 	inner: super::SendStream,
-	/// Header bytes still owed to the wire before any payload.
-	prefix: Bytes,
-	/// Taken once the whole header is written, so a reset still delivers it.
+	/// The end of the WebTransport header on a stream we opened, for a reset
+	/// to deliver.
 	header: Option<moq_quic::Checkpoint>,
-	/// [`finish`](web_transport_trait::poll::SendStream::finish) ran with the
-	/// header still owed, so [`poll_closed`](web_transport_trait::poll::SendStream::poll_closed)
-	/// writes the rest and finishes then.
-	finishing: bool,
 	web: bool,
 }
 
 impl SendStream {
+	fn new(inner: super::SendStream, web: bool) -> Self {
+		Self {
+			inner,
+			header: None,
+			web,
+		}
+	}
+
 	fn map(&self, err: Error) -> Error {
 		match self.web {
 			true => unmap_err(err),
@@ -833,22 +822,28 @@ impl SendStream {
 		}
 	}
 
-	/// Account for `n` header bytes written, checkpointing once the last one is.
-	fn advance_prefix(&mut self, n: usize) {
-		self.prefix.advance(n);
-		if n > 0 && self.prefix.is_empty() {
-			self.header = Some(self.inner.checkpoint());
+	/// Write the WebTransport header of a stream we opened, checkpointing it
+	/// once it is all written.
+	fn poll_header(&mut self, cx: &mut Context<'_>, header: &mut Bytes) -> Poll<Result<(), Error>> {
+		if !self.web {
+			return Poll::Ready(Ok(()));
 		}
+		while !header.is_empty() {
+			let n = ready!(web_transport_trait::poll::SendStream::poll_write(
+				&mut self.inner,
+				cx,
+				header
+			))
+			.map_err(|err| self.map(err))?;
+			header.advance(n);
+		}
+		self.header = Some(self.inner.checkpoint());
+		Poll::Ready(Ok(()))
 	}
 
-	/// Reset a WebTransport stream, still delivering its header so the peer
-	/// can tell which session the reset belongs to.
+	/// Reset a WebTransport stream, still delivering the header of one we
+	/// opened.
 	fn reset_web(&mut self, code: u64) {
-		if !self.prefix.is_empty() {
-			let n = self.inner.try_write(&self.prefix);
-			self.advance_prefix(n);
-		}
-		// A header the connection had no room for goes out as a plain reset
 		self.inner.reset_code(code, self.header.take());
 	}
 }
@@ -857,21 +852,6 @@ impl web_transport_trait::poll::SendStream for SendStream {
 	type Error = Error;
 
 	fn poll_write(&mut self, cx: &mut Context<'_>, buf: &[u8]) -> Poll<Result<usize, Self::Error>> {
-		// The FIN is owed the moment the header lands, so there is no room
-		// left for a payload; the inner stream refuses a post-FIN write the
-		// same way.
-		if self.finishing {
-			return Poll::Ready(Err(Error::Quic("stream already finished".to_string())));
-		}
-		while !self.prefix.is_empty() {
-			let n = ready!(web_transport_trait::poll::SendStream::poll_write(
-				&mut self.inner,
-				cx,
-				&self.prefix
-			))
-			.map_err(|err| self.map(err))?;
-			self.advance_prefix(n);
-		}
 		match web_transport_trait::poll::SendStream::poll_write(&mut self.inner, cx, buf) {
 			Poll::Ready(Err(err)) => Poll::Ready(Err(self.map(err))),
 			other => other,
@@ -879,18 +859,6 @@ impl web_transport_trait::poll::SendStream for SendStream {
 	}
 
 	fn poll_write_buf<B: Buf>(&mut self, cx: &mut Context<'_>, buf: &mut B) -> Poll<Result<usize, Self::Error>> {
-		if self.finishing {
-			return Poll::Ready(Err(Error::Quic("stream already finished".to_string())));
-		}
-		while !self.prefix.is_empty() {
-			let n = ready!(web_transport_trait::poll::SendStream::poll_write(
-				&mut self.inner,
-				cx,
-				&self.prefix
-			))
-			.map_err(|err| self.map(err))?;
-			self.advance_prefix(n);
-		}
 		match web_transport_trait::poll::SendStream::poll_write_buf(&mut self.inner, cx, buf) {
 			Poll::Ready(Err(err)) => Poll::Ready(Err(self.map(err))),
 			other => other,
@@ -902,21 +870,6 @@ impl web_transport_trait::poll::SendStream for SendStream {
 	}
 
 	fn finish(&mut self) -> Result<(), Self::Error> {
-		// A stream finished before any write still owes its header, or the
-		// peer sees an unframed (and thus invalid) stream.
-		if !self.prefix.is_empty() {
-			let n = self.inner.try_write(&self.prefix);
-			self.advance_prefix(n);
-			if !self.prefix.is_empty() {
-				// Zero capacity here is ordinary flow control, which clears
-				// once the peer reads. Reporting it terminally would have the
-				// caller drop (and so reset) a stream that is finishing
-				// cleanly, so the FIN becomes this stream's debt: `poll_closed`
-				// writes the rest, and `Drop` pays what it can if nobody polls.
-				self.finishing = true;
-				return Ok(());
-			}
-		}
 		web_transport_trait::poll::SendStream::finish(&mut self.inner).map_err(|err| self.map(err))
 	}
 
@@ -928,23 +881,6 @@ impl web_transport_trait::poll::SendStream for SendStream {
 	}
 
 	fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-		// `finish` left the header owed, so finishing is still this call's job.
-		while self.finishing {
-			match ready!(web_transport_trait::poll::SendStream::poll_write(
-				&mut self.inner,
-				cx,
-				&self.prefix
-			)) {
-				Ok(n) => self.advance_prefix(n),
-				Err(err) => return Poll::Ready(Err(self.map(err))),
-			}
-			if self.prefix.is_empty() {
-				self.finishing = false;
-				if let Err(err) = web_transport_trait::poll::SendStream::finish(&mut self.inner) {
-					return Poll::Ready(Err(self.map(err)));
-				}
-			}
-		}
 		match web_transport_trait::poll::SendStream::poll_closed(&mut self.inner, cx) {
 			Poll::Ready(Err(err)) => Poll::Ready(Err(self.map(err))),
 			other => other,
@@ -954,17 +890,6 @@ impl web_transport_trait::poll::SendStream for SendStream {
 
 impl Drop for SendStream {
 	fn drop(&mut self) {
-		// `finish` returned `Ok` with the header still owed, so the FIN is
-		// this stream's debt rather than the caller's. Pay it if the credit
-		// has since arrived, instead of letting a stream the caller finished
-		// cleanly go out as a cancellation.
-		if self.finishing {
-			let n = self.inner.try_write(&self.prefix);
-			self.advance_prefix(n);
-			if self.prefix.is_empty() {
-				let _ = web_transport_trait::poll::SendStream::finish(&mut self.inner);
-			}
-		}
 		// The inner `Drop` resets with a raw 0, which reads to a browser as an
 		// HTTP/3 stream error rather than the WebTransport cancellation that
 		// dropping a stream means. moq cancels subscriptions by dropping, so
