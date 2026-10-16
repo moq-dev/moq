@@ -1,9 +1,10 @@
 import { expect, setSystemTime, spyOn, test } from "bun:test";
+import { Manual, Milli, Nano } from "@moq/clock";
 import { ProtocolViolation, TimestampMismatch, TooFarBehind } from "./error.ts";
 import { Producer as GroupProducer, MAX_GROUP_FRAMES } from "./group.ts";
 import { hooks } from "./internal.ts";
 import { textFrame } from "./mock.ts";
-import { Milli, Timescale, Timestamp } from "./time.ts";
+import { Timescale, Timestamp } from "./time.ts";
 import { infoDefaults, type Subscription, Producer as TrackProducer } from "./track.ts";
 
 const enc = new TextEncoder();
@@ -17,50 +18,17 @@ function settle(): Promise<void> {
 	return new Promise((resolve) => setTimeout(resolve, 0));
 }
 
-function mockMonotonicTime(initial: number) {
-	let now = initial;
-	const real = performance.now.bind(performance);
-	performance.now = () => now;
+// A manual clock reading `initial` milliseconds. `set` moves it to an absolute time and fires
+// what came due; `advance` also drains what those timers schedule.
+function manualTime(initial: number) {
+	const clock = new Manual();
+	const restore = clock.install();
+	const to = (ms: number) => Nano(Nano.fromMilli(Milli(ms)) - clock.now());
+	clock.advance(to(initial));
 	return {
-		set: (value: number) => {
-			now = value;
-		},
-		restore: () => {
-			performance.now = real;
-		},
-	};
-}
-
-function mockCacheTime(initial: number) {
-	const clock = mockMonotonicTime(initial);
-	let now = initial;
-	const realSet = globalThis.setTimeout;
-	const realClear = globalThis.clearTimeout;
-	const armed = new Map<object, { at: number; fire: () => void }>();
-	// @ts-expect-error a stub, not a full setTimeout
-	globalThis.setTimeout = (fire: () => void, delay: number) => {
-		const handle = { unref: () => {} };
-		armed.set(handle, { at: now + delay, fire });
-		return handle;
-	};
-	// @ts-expect-error a stub, not a full clearTimeout
-	globalThis.clearTimeout = (handle: object) => armed.delete(handle);
-	return {
-		deadline: () => Math.min(...[...armed.values()].map((timer) => timer.at)),
-		advance: (value: number) => {
-			now = value;
-			clock.set(value);
-			for (const [handle, timer] of [...armed]) {
-				if (timer.at > now) continue;
-				armed.delete(handle);
-				timer.fire();
-			}
-		},
-		restore: () => {
-			globalThis.setTimeout = realSet;
-			globalThis.clearTimeout = realClear;
-			clock.restore();
-		},
+		set: (ms: number) => clock.advance(to(ms)),
+		advance: (ms: number) => clock.advanceAsync(to(ms)),
+		restore,
 	};
 }
 
@@ -370,11 +338,11 @@ test("a maxDelay or maxAge that is not a duration is refused, not rounded into o
 
 	// The wire carries an unsigned varint, so rounding these would encode a budget the
 	// caller never asked for: -0.5 would ceil to zero and silently take the live edge.
-	expect(() => producer.subscribe({ maxDelay: Milli(-0.5) })).toThrow(RangeError);
-	expect(() => producer.subscribe({ maxDelay: Milli(-100) })).toThrow(RangeError);
-	expect(() => producer.subscribe({ maxDelay: Milli(Number.NaN) })).toThrow(RangeError);
-	expect(() => producer.subscribe({ maxDelay: Milli(Number.POSITIVE_INFINITY) })).toThrow(RangeError);
-	expect(() => producer.accept({ maxAge: Milli(-0.5) })).toThrow(RangeError);
+	expect(() => producer.subscribe({ maxDelay: -0.5 as Milli })).toThrow(RangeError);
+	expect(() => producer.subscribe({ maxDelay: -100 as Milli })).toThrow(RangeError);
+	expect(() => producer.subscribe({ maxDelay: Number.NaN as Milli })).toThrow(RangeError);
+	expect(() => producer.subscribe({ maxDelay: Number.POSITIVE_INFINITY as Milli })).toThrow(RangeError);
+	expect(() => producer.accept({ maxAge: -0.5 as Milli })).toThrow(RangeError);
 	expect(() => producer.accept({ maxAge: Milli(Number.MAX_SAFE_INTEGER + 1) })).toThrow(RangeError);
 	expect(() => producer.subscribe({ maxDelay: Milli(Number.MAX_SAFE_INTEGER + 1) })).toThrow(RangeError);
 });
@@ -670,7 +638,7 @@ test("ordered frame reads skip a late lower-sequence group", async () => {
 });
 
 test("zero latency takes the latest group when ages are equal", async () => {
-	const clock = mockMonotonicTime(10_000);
+	const clock = manualTime(10_000);
 	try {
 		const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI, maxAge: Milli(5000) });
 		const track = producer.subscribe();
@@ -789,7 +757,7 @@ test("the budget is clamped to the publisher's window", async () => {
 // The stalled group needs no timestamp of its own: its reach is where its stamped
 // successor begins, which the zero budget already puts out of range.
 test("a stamped successor expires a group stalled before its first frame", async () => {
-	const clock = mockMonotonicTime(10_000);
+	const clock = manualTime(10_000);
 	try {
 		const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI, maxAge: Milli(5000) });
 		const track = producer.subscribe();
@@ -888,7 +856,7 @@ test("a budget is measured from the reader's position", async () => {
 });
 
 test("a handed-out group still expires while its first frame is stalled", async () => {
-	const clock = mockMonotonicTime(10_000);
+	const clock = manualTime(10_000);
 	try {
 		const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI, maxAge: Milli(5000) });
 		const track = producer.subscribe();
@@ -1032,7 +1000,7 @@ test("a drained group finishes cleanly after the live edge advances", async () =
 // maxAge measures how long ago each group's successor arrived as well as media time, so a
 // publisher that stops writing cannot pin its superseded groups.
 test("a stalled track keeps only its newest group", () => {
-	const clock = mockMonotonicTime(10_000);
+	const clock = manualTime(10_000);
 	const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI, maxAge: Milli(1000) });
 	try {
 		for (const millis of [0, 10, 20]) {
@@ -1052,7 +1020,7 @@ test("a stalled track keeps only its newest group", () => {
 // A peer whose timestamps stop advancing never ages a group out on media time. The wall
 // clock still does.
 test("frozen timestamps still age out by wall clock", () => {
-	const clock = mockMonotonicTime(10_000);
+	const clock = manualTime(10_000);
 	const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI });
 	const frame = () => producer.writeFrame({ payload: enc.encode("x"), timestamp: Timestamp.fromMillis(0) });
 	try {
@@ -1077,7 +1045,7 @@ test("frozen timestamps still age out by wall clock", () => {
 // Arrival is per track: a group joining a second track later doesn't restart the first
 // track's clock.
 test("a group shared by two tracks ages each from its own arrival", () => {
-	const clock = mockMonotonicTime(10_000);
+	const clock = manualTime(10_000);
 	const first = new TrackProducer("first").accept({});
 	const second = new TrackProducer("second").accept({});
 	try {
@@ -1101,7 +1069,7 @@ test("a group shared by two tracks ages each from its own arrival", () => {
 // Groups that arrive at once are judged by media time, which convicts them before the wall
 // clock can.
 test("a startup burst ages out by media time", () => {
-	const clock = mockMonotonicTime(10_000);
+	const clock = manualTime(10_000);
 	const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI });
 	try {
 		for (let second = 0; second < 5; second++) {
@@ -1120,7 +1088,7 @@ test("a startup burst ages out by media time", () => {
 // written after its successor arrives, so no write could wake it.
 test("a parked read wakes at its wall deadline", async () => {
 	for (const timescale of [undefined, Timescale.MILLI]) {
-		const clock = mockCacheTime(10_000);
+		const clock = manualTime(10_000);
 		const producer = new TrackProducer("test").accept({ timescale });
 		try {
 			const track = producer.subscribe({ maxDelay: Milli(1000) });
@@ -1139,10 +1107,9 @@ test("a parked read wakes at its wall deadline", async () => {
 			});
 			await Promise.resolve();
 
-			clock.advance(10_900);
-			await Promise.resolve();
+			await clock.advance(10_900);
 			expect(woken).toBe(false);
-			clock.advance(11_000);
+			await clock.advance(11_000);
 			expect(await read).toBeUndefined();
 		} finally {
 			producer.close();
@@ -1156,7 +1123,7 @@ test("a parked read wakes at its wall deadline", async () => {
 // flooding a run of them cannot pin the group before the run either.
 test("a run of empty groups ages out by wall clock", () => {
 	const RUN = 1000;
-	const clock = mockMonotonicTime(10_000);
+	const clock = manualTime(10_000);
 	const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI });
 	try {
 		const track = producer.subscribe({ maxDelay: Milli(1000) });
@@ -1177,8 +1144,8 @@ test("a run of empty groups ages out by wall clock", () => {
 	}
 });
 
-test("a live track retains its newest closed group through idle expiry", () => {
-	const clock = mockCacheTime(10_000);
+test("a live track retains its newest closed group through idle expiry", async () => {
+	const clock = manualTime(10_000);
 	const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI, maxAge: Milli(100) });
 	try {
 		// A late older group must not replace the protected newest snapshot.
@@ -1188,7 +1155,7 @@ test("a live track retains its newest closed group through idle expiry", () => {
 			group.close();
 			producer.writeGroup(group);
 		}
-		clock.advance(10_000 + CACHE_WINDOW_MS + 200);
+		await clock.advance(10_000 + CACHE_WINDOW_MS + 200);
 		const replay = producer.subscribe({ maxDelay: Milli(100) });
 		expect(replay.tryRecvGroup()?.sequence).toBe(2);
 		expect(replay.tryRecvGroup()).toBeUndefined();
@@ -1204,7 +1171,7 @@ test("a live track retains its newest closed group through idle expiry", () => {
 // budget is timestamp-only and says nothing here (the empty successor has no timestamp
 // to bound the held group with).
 test("retention eviction surfaces as a gap for a handed-out group", async () => {
-	const clock = mockMonotonicTime(10_000);
+	const clock = manualTime(10_000);
 	try {
 		const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI, maxAge: Milli(100) });
 		const track = producer.subscribe({ maxDelay: Milli(100) });
@@ -1227,7 +1194,7 @@ test("retention eviction surfaces as a gap for a handed-out group", async () => 
 });
 
 test("idle expiry reclaims an ended track's held mirror", async () => {
-	const clock = mockMonotonicTime(10_000);
+	const clock = manualTime(10_000);
 	try {
 		const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI, maxAge: Milli(100) });
 		const track = producer.subscribe({ maxDelay: Milli(100) });
@@ -1251,7 +1218,7 @@ test("idle expiry reclaims an ended track's held mirror", async () => {
 });
 
 test("retention reclaims a group the publisher abandoned open", async () => {
-	const clock = mockMonotonicTime(10_000);
+	const clock = manualTime(10_000);
 	try {
 		const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI, maxAge: Milli(100) });
 		const track = producer.subscribe({ maxDelay: Milli(100) });
@@ -1276,7 +1243,7 @@ test("retention reclaims a group the publisher abandoned open", async () => {
 });
 
 test("an idle live edge ages out once a newer group arrives", async () => {
-	const clock = mockMonotonicTime(10_000);
+	const clock = manualTime(10_000);
 	try {
 		const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI, maxAge: Milli(100) });
 		const track = producer.subscribe({ maxDelay: Milli(100) });
@@ -1306,7 +1273,7 @@ test("an idle live edge ages out once a newer group arrives", async () => {
 });
 
 test("an abandoned open group ages out with no further write", async () => {
-	const clock = mockCacheTime(10_000);
+	const clock = manualTime(10_000);
 	const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI });
 	try {
 		// A budget past the cache window, so the eviction rather than the budget ends it.
@@ -1318,23 +1285,29 @@ test("an abandoned open group ages out with no further write", async () => {
 		const group = await track.recvGroup();
 		if (!group) throw new Error("missing group");
 		expect(await group.readString()).toBe("first");
-		const read = group.readFrame();
-		clock.advance(10_000 + CACHE_WINDOW_MS + 1);
-		await expect(read).rejects.toBeInstanceOf(TooFarBehind);
+		const read = group.readFrame().catch((err: unknown) => err);
+		await clock.advance(10_000 + CACHE_WINDOW_MS + 1);
+		expect(await read).toBeInstanceOf(TooFarBehind);
 	} finally {
 		producer.close();
 		clock.restore();
 	}
 });
 
-test("publisher maxAge does not change the idle cache deadline", () => {
+test("publisher maxAge does not change the idle cache deadline", async () => {
 	for (const maxAge of [Milli(30), Milli(2 ** 31 + 10_000)]) {
-		const clock = mockCacheTime(10_000);
+		const clock = manualTime(10_000);
 		const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI, maxAge });
 		try {
-			producer.writeFrame(textFrame("cached"));
+			const idle = producer.appendGroup();
+			idle.writeFrame(textFrame("cached"));
 			producer.appendGroup();
-			expect(clock.deadline()).toBe(10_000 + CACHE_WINDOW_MS / 8);
+			// Eviction ends the idle open group a cache window after its last write, give or take
+			// the one slice a scan can lag.
+			await clock.advance(10_000 + CACHE_WINDOW_MS - 1);
+			expect(idle.closed.peek()).toBeUndefined();
+			await clock.advance(10_000 + CACHE_WINDOW_MS + CACHE_WINDOW_MS / 8);
+			expect(idle.closed.peek()).toBeInstanceOf(TooFarBehind);
 		} finally {
 			producer.close();
 			clock.restore();
@@ -1343,7 +1316,7 @@ test("publisher maxAge does not change the idle cache deadline", () => {
 });
 
 test("retention pruning preserves clean EOF for a drained mirror", async () => {
-	const clock = mockMonotonicTime(10_000);
+	const clock = manualTime(10_000);
 	try {
 		const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI, maxAge: Milli(100) });
 		const track = producer.subscribe({ maxDelay: Milli(100) });
@@ -1368,7 +1341,7 @@ test("retention pruning preserves clean EOF for a drained mirror", async () => {
 });
 
 test("system clock changes do not affect the latency budget", async () => {
-	const clock = mockMonotonicTime(10_000);
+	const clock = manualTime(10_000);
 	setSystemTime(new Date(10_000));
 	try {
 		const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI, maxAge: Milli(100) });
@@ -2044,7 +2017,7 @@ test("publisher max age is absent unless explicitly declared", () => {
 // Rust applies the pool's idle expiry with `max_age: None` too: omitting the publisher
 // limit only removes the media-time clamp, never the wall-clock bound on memory.
 test("an omitted publisher limit still ages idle groups out", async () => {
-	const clock = mockMonotonicTime(10_000);
+	const clock = manualTime(10_000);
 	const producer = new TrackProducer("unlimited").accept({ timescale: Timescale.MILLI });
 	try {
 		const source = producer.appendGroup();
@@ -2069,7 +2042,7 @@ test("an omitted publisher limit still ages idle groups out", async () => {
 });
 
 test("a live track does not pin an aborted newest group", () => {
-	const clock = mockMonotonicTime(10_000);
+	const clock = manualTime(10_000);
 	const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI });
 	try {
 		const good = producer.appendGroup();
@@ -2090,7 +2063,7 @@ test("a live track does not pin an aborted newest group", () => {
 });
 
 test("closing a track keeps an idle newest group for subscribers to drain", async () => {
-	const clock = mockMonotonicTime(10_000);
+	const clock = manualTime(10_000);
 	try {
 		const producer = new TrackProducer("catalog").accept({ timescale: Timescale.MILLI });
 		const subscriber = producer.subscribe({ maxDelay: Milli(100_000) });
@@ -2115,7 +2088,7 @@ test("closing a track keeps an idle newest group for subscribers to drain", asyn
 });
 
 test("a late subscriber to a closed unlimited track is released once the cache ages out", async () => {
-	const clock = mockMonotonicTime(10_000);
+	const clock = manualTime(10_000);
 	try {
 		const producer = new TrackProducer("unlimited").accept({ timescale: Timescale.MILLI });
 		const source = producer.appendGroup();
@@ -2203,9 +2176,9 @@ test("an abort after the declared end reached by a datagram ends clean", () => {
 	expect(producer.closed.peek()).toBeNull();
 });
 
-test("an ended track's buffered groups age out for a stale subscriber", () => {
+test("an ended track's buffered groups age out for a stale subscriber", async () => {
 	for (const abort of [undefined, new Error("boom")]) {
-		const clock = mockCacheTime(10_000);
+		const clock = manualTime(10_000);
 		const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI, maxAge: Milli(30) });
 		try {
 			const stale = producer.subscribe({ maxDelay: Milli(30) });
@@ -2215,7 +2188,7 @@ test("an ended track's buffered groups age out for a stale subscriber", () => {
 			producer.close(abort);
 
 			// Nothing writes after close, so only the scheduled cache cleanup runs.
-			clock.advance(10_000 + CACHE_WINDOW_MS + 100);
+			await clock.advance(10_000 + CACHE_WINDOW_MS + 100);
 			if (abort) expect(() => stale.tryRecvGroup()).toThrow(abort);
 			else expect(stale.tryRecvGroup()).toBeUndefined();
 		} finally {
@@ -2327,7 +2300,7 @@ test("a datagram whose timedness disagrees with its track is refused", async () 
 // group it doesn't find stale, the way a timed one does: a group is stale once its
 // successor arrived a full budget ago.
 test("an untimed subscriber starts at the oldest fresh group", () => {
-	const clock = mockMonotonicTime(10_000);
+	const clock = manualTime(10_000);
 	const producer = new TrackProducer("test").accept({});
 	try {
 		// Group N's successor arrives N + 1 seconds in.
@@ -2399,8 +2372,8 @@ test("an explicit start floors an untimed track", () => {
 	expect(drain(live)).toEqual([4]);
 });
 
-test("a mid-group end survives eviction and a filtered late reader", () => {
-	const clock = mockCacheTime(10_000);
+test("a mid-group end survives eviction and a filtered late reader", async () => {
+	const clock = manualTime(10_000);
 	const producer = new TrackProducer("video").accept({});
 	try {
 		producer.finishAt({ group: 5, frame: 5 });
@@ -2409,7 +2382,7 @@ test("a mid-group end survives eviction and a filtered late reader", () => {
 		for (let i = 0; i < 5; i++) group.writeFrame({ payload: new Uint8Array([i]) });
 		group.close();
 		producer.close();
-		clock.advance(10_000 + CACHE_WINDOW_MS + 1);
+		await clock.advance(10_000 + CACHE_WINDOW_MS + 1);
 		const reader = producer.subscribe().withGroups({ end: { excluded: 5 } });
 		expect(reader.largest()).toBeUndefined();
 		expect(reader.end()).toEqual({ group: 5, frame: 5 });

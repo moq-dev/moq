@@ -1,3 +1,4 @@
+import { Milli } from "@moq/clock";
 import type * as Moq from "@moq/net";
 import type * as Wasm from "@moq/wasm";
 import { type Sample, verify } from "./fixture.ts";
@@ -33,7 +34,7 @@ async function run(config: Sample) {
 				const connection = await net.Connection.connect({
 					url: new URL(config.url),
 					consume: origin,
-					websocket: { enabled: config.transport === "websocket", delay: net.Time.Milli(0) },
+					websocket: { enabled: config.transport === "websocket", delay: Milli(0) },
 				});
 				if (connection.version !== config.version || connection.transport !== config.transport)
 					throw new Error(`wrong negotiation: ${connection.version}/${connection.transport}`);

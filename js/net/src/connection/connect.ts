@@ -1,10 +1,10 @@
+import { Milli, Nano, sleep } from "@moq/clock";
 import Session, { type Version as QmuxVersion } from "@moq/qmux";
 import { error, fromClose, sessionCause } from "../error.ts";
 import * as Ietf from "../ietf/index.ts";
 import * as Lite from "../lite/index.ts";
 import type { Consumer as OriginConsumer, Producer as OriginProducer } from "../origin.ts";
 import { Stream } from "../stream.ts";
-import * as Time from "../time.ts";
 import * as Hex from "../util/hex.ts";
 import { redact } from "../util/log.ts";
 import { isWebTransportSupported } from "./browser.ts";
@@ -14,11 +14,11 @@ import { DISCOVERY_REMOVED, forwardAnnounced } from "./forward.ts";
 import { exchangeSetup } from "./handshake.ts";
 
 // Default head start for WebTransport before attempting the WebSocket fallback.
-const DEFAULT_WEBSOCKET_DELAY_MS = Time.Milli(500);
+const DEFAULT_WEBSOCKET_DELAY_MS = Milli(500);
 
 // RESET_STREAM and CONNECTION_CLOSE are separate transport notifications. Give the latter
 // time to surface its authoritative code without letting a reset-only peer stall SETUP forever.
-const SETUP_CLOSE_GRACE_MS = 100;
+const SETUP_CLOSE_GRACE = Nano.fromMilli(Milli(100));
 
 /** Tuning for the WebSocket fallback used when WebTransport is unavailable or loses the connect race. */
 export interface WebSocketProps {
@@ -32,7 +32,7 @@ export interface WebSocketProps {
 	 * The delay in milliseconds before attempting the WebSocket fallback (default: 500).
 	 * If WebSocket won the previous race for a given URL, this is 0.
 	 */
-	delay?: Time.Milli;
+	delay?: Milli;
 }
 
 /**
@@ -244,10 +244,7 @@ async function connectTransport(url: URL, session: WebTransport, wiring: Session
 		// peer's close code. Wait briefly without closing locally, since a local clean close
 		// could overwrite that code. A reset-only peer is cleaned up after the grace period.
 		const pending = Symbol("session close pending");
-		const final = await Promise.race([
-			closed,
-			new Promise<typeof pending>((resolve) => setTimeout(() => resolve(pending), SETUP_CLOSE_GRACE_MS)),
-		]);
+		const final = await Promise.race([closed, sleep(SETUP_CLOSE_GRACE).then(() => pending)]);
 		if (final !== pending) {
 			if (final) throw final;
 			throw cause;
@@ -524,7 +521,7 @@ async function connectWebTransport(
 
 // TODO accept arguments to control the port/path used.
 async function connectWebSocket(url: URL, delay: number, cancel: Promise<void>): Promise<Session | undefined> {
-	const timer = new Promise<void>((resolve) => setTimeout(resolve, delay));
+	const timer = sleep(Nano.fromMilli(Milli(delay)));
 
 	const active = await Promise.race([cancel, timer.then(() => true)]);
 	if (!active) return undefined;

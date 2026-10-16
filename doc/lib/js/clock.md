@@ -29,7 +29,9 @@ try {
 }
 ```
 
-`Instant` counts nanoseconds from its clock's first read. `Nano`, `Micro`,
+`Instant` counts nanoseconds from its clock's origin: the realm's performance
+time origin on the host, so DOM timestamps convert by unit, or zero for a
+`Manual` clock. `Nano`, `Micro`,
 `Milli`, and `Second` brand duration units; convert a duration to nanoseconds
 before passing it to a timer. Number nanoseconds are exact for roughly 104
 days, then gradually lose sub-microsecond precision. Compare instants only
@@ -43,6 +45,10 @@ zero and 2025-01-01 UTC. `advance()` moves both readings; `stepWall()` changes
 only wall time. `advanceAsync()` also drains due timers and the microtasks
 they schedule, so assertions observe their effects.
 
+`origin()` reads the wall time at instant zero, which maps an instant onto
+wall time without the jitter of subtracting two live reads. On the host it is
+the realm's performance time origin; on a `Manual` it follows `stepWall()`.
+
 Installation is scoped to the current JS realm. Restore it in `finally` and
 keep tests sharing that realm serial. Timers remain bound to the clock on
 which they were created, even after restoration. Host timers used by a test
@@ -52,9 +58,10 @@ An interval's first `tick()` is ready at once. Its default `Burst` policy
 returns every missed scheduled tick; `Delay` resumes a full period from now,
 and `Skip` resumes at the next original deadline. Keep one pending tick per
 handle and call `close()` to cancel it when finished. Sleep accepts an abort
-signal; timeout cancels its own timer when the operation settles, but does
+`signal`, and `ref: false` lets a Node or Bun process exit while only that
+sleep is pending. Timeout cancels its own timer when the operation settles, but does
 not cancel the operation. An already-ready operation wins a zero timeout.
 
-The package lands additively. `@moq/net` currently retains its own time units.
-See the [source API](https://github.com/moq-dev/moq/tree/main/js/clock/src)
+Every `@moq/*` package reads time and arms timers through this package, so
+installing a `Manual` clock also drives their timeouts and retention. See the [source API](https://github.com/moq-dev/moq/tree/main/js/clock/src)
 for the exported functions and conversions.

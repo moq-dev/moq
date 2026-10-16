@@ -505,8 +505,8 @@ impl Publish {
 		// Neither handle exposes the current state, only the level-triggered waits, and exactly
 		// one of them is ready at any instant: racing them is the read. Close is ignored until
 		// that seed is delivered, so a watcher closed before its first poll still reports USED
-		// or UNUSED before the terminal. A dropped track is its end, not a failure; the watcher
-		// does not keep it alive and reports the close as clean.
+		// or UNUSED before the terminal. An application dropping its producer ends the watcher; it
+		// does not keep the track alive and reports the close as clean.
 		let mut used = tokio::select! {
 			res = demand.used() => match res {
 				Ok(()) => true,
@@ -637,7 +637,7 @@ impl Publish {
 				}) => res,
 			};
 
-			// A finished broadcast or track is the end of the requests, not a failure.
+			// A finished broadcast or track, or its application dropping the producer, ends requests.
 			let request = match res {
 				Ok(request) => request,
 				Err(moq_net::Error::Closed | moq_net::Error::Dropped) => return Ok(()),
