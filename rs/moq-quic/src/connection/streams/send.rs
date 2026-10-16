@@ -1,7 +1,7 @@
 use bytes::Bytes;
 use thiserror::Error;
 
-use crate::{VarInt, connection::send_buffer::SendBuffer, frame};
+use crate::{StreamId, VarInt, connection::send_buffer::SendBuffer, frame};
 
 #[derive(Debug)]
 pub(super) struct Send {
@@ -37,7 +37,7 @@ impl Send {
 
     /// Whether the stream has been reset
     pub(super) fn is_reset(&self) -> bool {
-        matches!(self.state, SendState::ResetSent)
+        matches!(self.state, SendState::ResetSent { .. })
     }
 
     pub(super) fn finish(&mut self) -> Result<(), FinishError> {
@@ -89,13 +89,51 @@ impl Send {
     }
 
     /// Update stream state due to a reset sent by the local application
-    pub(super) fn reset(&mut self) {
+    ///
+    /// Data below `reliable_size` is still delivered; everything after it is abandoned.
+    pub(super) fn reset(&mut self, reliable_size: u64) {
         use SendState::*;
         if let DataSent { .. } | Ready = self.state {
-            self.state = ResetSent;
-            self.pending.discard();
+            debug_assert!(reliable_size <= self.pending.offset());
+            self.state = ResetSent {
+                final_size: self.pending.offset(),
+                reliable_size,
+                reset_acked: false,
+            };
+            self.pending.truncate(reliable_size);
             self.fin_pending = false;
         }
+    }
+
+    /// The frame announcing this stream's reset, if it was reset
+    pub(super) fn reset_frame(&self, id: StreamId, error_code: VarInt) -> Option<frame::ResetStream> {
+        let SendState::ResetSent {
+            final_size,
+            reliable_size,
+            ..
+        } = self.state
+        else {
+            return None;
+        };
+        Some(frame::ResetStream {
+            id,
+            error_code,
+            final_offset: VarInt::try_from(final_size).expect("impossibly large offset"),
+            // A zero Reliable Size is a plain RESET_STREAM, which any peer accepts
+            reliable_size: (reliable_size > 0)
+                .then(|| VarInt::try_from(reliable_size).expect("impossibly large offset")),
+        })
+    }
+
+    /// Handle acknowledgement of the reset frame
+    ///
+    /// Returns whether the reset and all data below its Reliable Size have been acknowledged
+    pub(super) fn reset_acked(&mut self) -> bool {
+        let SendState::ResetSent { reset_acked, .. } = &mut self.state else {
+            return false;
+        };
+        *reset_acked = true;
+        self.pending.is_fully_acked()
     }
 
     /// Handle STOP_SENDING
@@ -111,7 +149,8 @@ impl Send {
         }
     }
 
-    /// Returns whether the stream has been finished and all data has been acknowledged by the peer
+    /// Returns whether the stream has been finished or reset, and all data it still owes the peer
+    /// has been acknowledged
     pub(super) fn ack(&mut self, frame: frame::StreamMeta) -> bool {
         self.pending.ack(frame.offsets);
         match &mut self.state {
@@ -119,7 +158,10 @@ impl Send {
                 *finish_acked |= frame.fin;
                 *finish_acked && self.pending.is_fully_acked()
             }
-            _ => false,
+            SendState::ResetSent { reset_acked, .. } => {
+                *reset_acked && self.pending.is_fully_acked()
+            }
+            SendState::Ready => false,
         }
     }
 
@@ -289,8 +331,26 @@ pub(super) enum SendState {
     Ready,
     /// Stream was finished; now sending retransmits only
     DataSent { finish_acked: bool },
-    /// Sent RESET
-    ResetSent,
+    /// Sent RESET_STREAM, or RESET_STREAM_AT while data below `reliable_size` is still delivered
+    ResetSent {
+        final_size: u64,
+        reliable_size: u64,
+        reset_acked: bool,
+    },
+}
+
+/// Reasons why a reset with a Reliable Size might fail
+#[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
+pub enum ResetAtError {
+    /// The stream has not been opened or was already reset or fully acknowledged
+    #[error("closed stream")]
+    ClosedStream,
+    /// The peer did not advertise support for RESET_STREAM_AT
+    #[error("peer does not support RESET_STREAM_AT")]
+    Unsupported,
+    /// The Reliable Size covers bytes that were never written to the stream
+    #[error("reliable size exceeds the bytes written")]
+    Unwritten,
 }
 
 /// Reasons why attempting to finish a stream might fail

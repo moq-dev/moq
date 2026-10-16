@@ -84,8 +84,8 @@ pub use streams::StreamsState;
 #[cfg(not(fuzzing))]
 use streams::StreamsState;
 pub use streams::{
-    Chunks, ClosedStream, FinishError, ReadError, ReadableError, RecvStream, SendStream,
-    ShouldTransmit, StreamEvent, Streams, WriteError, Written,
+    Chunks, ClosedStream, FinishError, ReadError, ReadableError, RecvStream, ResetAtError,
+    SendStream, ShouldTransmit, StreamEvent, Streams, WriteError, Written,
 };
 
 mod timer;
@@ -3075,6 +3075,13 @@ impl Connection {
                     self.streams.received_max_streams(dir, count)?;
                 }
                 Frame::ResetStream(frame) => {
+                    if frame.reliable_size.is_some() && !self.config.reset_stream_at {
+                        // We never advertised it, so it is an unknown frame type
+                        let mut err =
+                            TransportError::FRAME_ENCODING_ERROR("unsupported RESET_STREAM_AT");
+                        err.frame = Some(frame::FrameType::RESET_STREAM_AT);
+                        return Err(err);
+                    }
                     if self.streams.received_reset(frame)?.should_transmit() {
                         self.spaces[SpaceId::Data].pending.max_data = true;
                     }

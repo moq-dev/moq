@@ -42,6 +42,7 @@ use crate::{
 mod util;
 use util::*;
 
+mod reset_stream_at;
 mod token;
 
 #[cfg(all(target_family = "wasm", target_os = "unknown"))]

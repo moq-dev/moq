@@ -17,7 +17,7 @@ pub use recv::{Chunks, ReadError, ReadableError};
 mod send;
 pub(crate) use send::{ByteSlice, BytesArray};
 use send::{BytesSource, Send, SendState};
-pub use send::{FinishError, WriteError, Written};
+pub use send::{FinishError, ResetAtError, WriteError, Written};
 
 mod state;
 #[allow(unreachable_pub)] // fuzzing only
@@ -324,24 +324,58 @@ impl<'a> SendStream<'a> {
     /// # Panics
     /// - when applied to a receive stream
     pub fn reset(&mut self, error_code: VarInt) -> Result<(), ClosedStream> {
+        match self.reset_at(error_code, 0) {
+            Ok(()) => Ok(()),
+            Err(ResetAtError::ClosedStream) => Err(ClosedStream { _private: () }),
+            Err(ResetAtError::Unsupported | ResetAtError::Unwritten) => {
+                unreachable!("a zero Reliable Size is always valid")
+            }
+        }
+    }
+
+    /// Abandon transmitting data on a stream, except for its first `reliable_size` bytes
+    ///
+    /// Sends RESET_STREAM_AT: the peer receives the prefix before the error. A zero
+    /// `reliable_size` is the same as [`reset`](Self::reset). The prefix is dropped if the peer
+    /// already asked us to stop sending.
+    ///
+    /// Fails without changing the stream if the peer does not accept RESET_STREAM_AT, or if
+    /// `reliable_size` covers bytes that were never written.
+    ///
+    /// # Panics
+    /// - when applied to a receive stream
+    pub fn reset_at(&mut self, error_code: VarInt, reliable_size: u64) -> Result<(), ResetAtError> {
         let max_send_data = self.state.max_send_data(self.id);
+        let supported = self.state.peer_reset_stream_at;
         let stream = self
             .state
             .send
             .get_mut(&self.id)
-            .ok_or(ClosedStream { _private: () })?
+            .ok_or(ResetAtError::ClosedStream)?
             .get_or_insert_with(|| Send::new(max_send_data));
 
-        if matches!(stream.state, SendState::ResetSent) {
+        if stream.is_reset() {
             // Redundant reset call
-            return Err(ClosedStream { _private: () });
+            return Err(ResetAtError::ClosedStream);
         }
+        if reliable_size > stream.offset() {
+            return Err(ResetAtError::Unwritten);
+        }
+        if reliable_size > 0 && !supported {
+            return Err(ResetAtError::Unsupported);
+        }
+        // The peer that sent STOP_SENDING will not read the prefix
+        let reliable_size = match stream.stop_reason {
+            Some(_) => 0,
+            None => reliable_size,
+        };
 
         // Restore the portion of the send window consumed by the data that we aren't about to
         // send. We leave flow control alone because the peer's responsible for issuing additional
         // credit based on the final offset communicated in the RESET_STREAM frame we send.
-        self.state.buffered_data -= stream.pending.buffered();
-        stream.reset();
+        let buffered = stream.pending.buffered();
+        stream.reset(reliable_size);
+        self.state.buffered_data -= buffered - stream.pending.buffered();
         self.pending.reset_stream.push((self.id, error_code));
 
         // Don't reopen an already-closed stream we haven't forgotten yet
