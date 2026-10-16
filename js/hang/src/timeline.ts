@@ -10,9 +10,9 @@
  * @module
  */
 
+import type { Micro } from "@moq/clock";
 import * as Json from "@moq/json";
 import type * as Moq from "@moq/net";
-import type { Time } from "@moq/net";
 import * as z from "@zod/mini";
 import type * as Catalog from "./catalog";
 import { u53Schema } from "./catalog";
@@ -55,7 +55,7 @@ const RecordSchema = z.looseObject({
 export const SUFFIX = ".timeline.z";
 
 /** A record with timestamps converted to microseconds. */
-export type Entry = Omit<Record, "pts" | "duration"> & { pts: Time.Micro; duration: Time.Micro };
+export type Entry = Omit<Record, "pts" | "duration"> & { pts: Micro; duration: Micro };
 
 /** One change to the visible timeline window. */
 export type Event = { push: { index: number; entry: Entry } } | { pop: Json.Window.Span } | { skip: Json.Window.Span };
@@ -97,10 +97,10 @@ export class Consumer implements AsyncIterable<Event> {
 		return event;
 	}
 
-	#micros(units: number): Time.Micro {
+	#micros(units: number): Micro {
 		const value = (BigInt(units) * 1_000_000n) / BigInt(this.#timescale);
 		if (value > BigInt(Number.MAX_SAFE_INTEGER)) throw new Error("timeline timestamp overflow");
-		return Number(value) as Time.Micro;
+		return Number(value) as Micro;
 	}
 
 	/** Iterate timeline events until the track ends. */

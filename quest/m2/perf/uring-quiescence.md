@@ -8,8 +8,8 @@ the same drive-loop turn, so one enter carries the reply. Today
 lands in the next turn by design (rs/kio/src/task.rs:246-257, test
 `a_mid_pass_wake_lands_in_the_next_pass`), so a datagram costs three turns:
 dispatch sets the demux bit, the demux drains packets and kicks each
-connection driver (rs/moq-uring/src/quic/noq/endpoint.rs:208-220,
-:285-290), and the drivers stage `SendMsg` a turn later. Every hop is a turn
+connection driver (`Endpoint::demux` in
+rs/moq-uring/src/quic/driver/endpoint.rs), and the drivers stage `SendMsg` a turn later. Every hop is a turn
 and up to an enter. The other io_uring runtimes drain their local queue to
 exhaustion, or to a quantum, before touching the ring.
 
@@ -30,14 +30,14 @@ must not starve the socket.
   stale first pass a park-returning turn runs today (worker.rs:180 polls on
   readiness the previous turn already consumed).
 - The egress driver stages one GSO train of `TRAIN_SEGMENTS = 63` segments
-  per turn and then wakes itself (`Driver::flush`,
-  rs/moq-uring/src/quic/noq/connection.rs:743-751), so a deep backlog pays a
+  per turn and then wakes itself (`Driver::flush` in
+  rs/moq-uring/src/quic/driver/connection.rs), so a deep backlog pays a
   whole turn per train and would consume every pass. That cadence is a
   hardcoded fairness choice across connections sharing a socket. Make it a
   trains-per-turn budget on `flush` and sweep 1, 2, and 4 together with the
   pass budget, under the fanout and single-heavy-connection shapes, so trains
   per turn and passes per turn are measured together. A no-win keeps 1 train.
-  The #3120 numbers are the deleted quiche driver's; re-profile on noq.
+  The #3120 numbers are the deleted quiche driver's; re-profile on `moq-quic`.
   Decided in the 2026-09-30 audit: the egress requeue quest merged here, since
   both budgets need the same sweep.
 - Add `passes` per turn to the metrics beside `turns`.
@@ -49,6 +49,5 @@ meaning with a budget of 1 and gains a sibling proving the budget bound.
 
 ## Required
 
-- [Hard fork](/quest/m1/quic/fork/README.md) - the noq driver this edits moves onto `moq-quic` (decided in the 2026-10-05 audit)
 - [One enter per turn](/quest/m2/perf/uring-one-enter.md) - the metrics and
   the submit placement this sweep is measured with

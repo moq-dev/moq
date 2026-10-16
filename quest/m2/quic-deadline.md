@@ -14,7 +14,7 @@ change is needed.
 
 ## Plan
 
-Implement in the fork.
+Implement in `moq-quic`.
 
 - Add `set_deadline(Instant)` on `SendStream`. A stream without one behaves
   exactly as today.
@@ -48,10 +48,6 @@ reordering, and probe overhead versus the default PTO. A proactive probe that
 raises loss or latency under any profile stays off by default.
 
 Decided in the 2026-09-30 audit: moved to m2. No m1 quest consumes it.
-
-## Required
-
-- [Hard fork](/quest/m1/quic/fork/README.md) - the change lands in `moq-quic`, not the frozen fork
 
 ## Related
 
