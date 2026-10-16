@@ -28,6 +28,11 @@ round-trip test first.
   depends only on the input bytes, so same-epoch importers agree. A program
   with no PCR PID cannot place its PES, so its private PES streams are
   refused.
+- **Trailing PES.** A PES that starts after its timebase's last PCR (end of
+  input, or a PCR discontinuity before the next PCR) has no PCR on the far
+  side. Place it by extrapolating from that timebase's last two PCRs, which
+  is still deterministic, rather than hold or drop it. With fewer than two
+  PCRs it is dropped and counted in importer health. Test both ends.
 - **Bytes.** The frame is the PES packet as received, start code through
   payload. PTS and DTS are rewritten in place onto the catalog clock modulo
   2^33, exactly as the media PTS moves. Every other field stays byte-exact,
@@ -50,15 +55,17 @@ round-trip test first.
 - **Delete `pes`.** In the same change, so main never writes a catalog its
   exporter refuses: drop `Framing::Pes` and `Verbatim::stream_id`, export's
   `write_pes` path for verbatim tracks, and the DVB AC-3 repack
-  (`queue_ac3`, `ac3_frames`, `ac3_carry`, `carries_ac3`). A catalog naming
+  (`queue_ac3` and the per-frame PES it writes). A catalog naming
   `framing: "pes"`, or a `verbatim` record with no `framing` (which meant
   `pes` in -00), is refused: never reinterpret it as a section. Published
   importers and existing recordings with private PES then fail to export,
   loudly. Migrate the hand-built `pes` catalogs in tests, including
-  `rs/moq-cli/src/publish.rs`. The repack exists so each AC-3 sync frame
-  reaches its T-STD buffer by its own decode time; sending the whole PES at
-  its source placement must keep that, so the multi-frame AC-3 fixture
-  below also passes the strict T-STD check.
+  `rs/moq-cli/src/publish.rs`. The repack rewrites a multi-frame AC-3 PES
+  as one PES per sync frame; only that output rewrite goes. The PES PTS
+  covers only its first sync frame, so the export's AC-3 buffer model still
+  walks the sync frames in the unchanged bytes to remove each at its own
+  decode time, and the multi-frame AC-3 fixture below passes the strict
+  T-STD check.
 
 Tests: generated fixtures (extend `test/ts/fragment_pes.py` or add a
 generator) for asynchronous KLV (stream_type 0x06, `KLVA` registration, no

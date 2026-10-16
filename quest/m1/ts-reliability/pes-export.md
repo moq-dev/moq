@@ -27,15 +27,19 @@ writes the member, so the round trip never meets a catalog export can't read.
 - **Mux.** Packetize the frame's bytes unchanged on the track's PID: no
   `PesHeader`, no AC-3 repacking. The unit is due at its timestamp, the way
   an unbuffered PID already is. Where `verbatim_buffer` models the PID (DVB
-  AC-3, teletext), admission reads the PTS from the header bytes.
+  AC-3, teletext), admission reads the PTS from the header bytes. That PTS
+  covers only the first AC-3 sync frame, so the model walks the sync frames
+  in the bytes and removes each at its own decode time, as `ac3_frames`
+  does today, without rewriting the PES.
 - **Tune-in.** The rule that drops non-video frames before `video_start`
   compares a `pesPacket` frame's placement with the tune-in keyframe's
   departure, not its PTS. Placement runs ahead of PTS by the decoder delay,
   so comparing against the PTS drops data muxed beside the keyframe.
 - **Refusal.** A frame that is not exactly one well-formed PES packet
-  (start code, a `PES_packet_length` of zero or matching the frame, a
-  complete optional header where the stream_id has one) fails the track,
-  like a malformed section frame does.
+  (start code, a `PES_packet_length` matching the frame, a complete
+  optional header where the stream_id has one) fails the track, like a
+  malformed section frame does. A length of zero is allowed only for a
+  video stream_id (0xE0-0xEF), as H.222.0 permits.
 
 Leave the legacy `pes` framing as it is here; the
 [importer quest](/quest/m1/ts-reliability/pes-import.md) deletes it once
