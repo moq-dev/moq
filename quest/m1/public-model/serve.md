@@ -12,7 +12,7 @@ writing has expired. The built-in lite and IETF publishers use the same calls.
 Rules, carve-outs, and the inventory method are in the
 [epic](/quest/m1/public-model/README.md). Rerun the inventory first; the
 recommendations below are the planning quest's, and the ones marked
-**decision** are the maintainer's (see the PR that added this quest).
+**decision** were settled by the maintainer on 2026-10-16 (#5717).
 
 Rust items (`rs/moq-net/src/model/`), as they stood at b4eab0db1:
 
@@ -23,12 +23,21 @@ Rust items (`rs/moq-net/src/model/`), as they stood at b4eab0db1:
   `poll_largest` answers "the largest position once the cache is live".
   Check that it waits out an idle copy the way `poll_live` does.
 - **Cursor** (`track::Subscriber::start_at`, `raise_start_to`, `end_at`,
-  `subscription::Cap`; both publishers). **Decision**, recommended: remove
-  the need. The public `set_groups` assigns its floor in either direction
-  instead of only raising it, since each reader already hands a sequence out
-  once (#5446), so a SUBSCRIBE_UPDATE that widens the start re-offers only
-  unread groups. `start_at`, `raise_start_to`, `end_at`, and `Cap` then go.
-  The alternative is a second public `replace_groups`.
+  `subscription::Cap`; both publishers). **Decision**:
+  - ✅ One public method assigns the floor and the cap in either direction,
+    renamed from `set_groups` to `set_bounds` (JS `setBounds`) on
+    `track::Subscriber` and `track::Ordered`, since it sets the reader's
+    bounds. Each reader already hands a sequence out once (#5446), so a
+    SUBSCRIBE_UPDATE that widens the start re-offers only unread groups.
+    `start_at`, `raise_start_to`, `end_at`, and `Cap` go. Precondition:
+    lowering the floor re-offers unread cached groups in every mode. Today
+    only the resume cursor does; the arrival-order (Plain) cursor walks a
+    monotonic arrival index, so it must rescan below its old floor for
+    groups it never handed out. Rewrite the doc ("without rewinding read
+    progress") to say what lowering does. Open for the implementer to bring
+    back: whether `group::Consumer::set_frames` and
+    `Subscription::with_groups` follow the rename.
+  - A second public `replace_groups`.
 - `group::Consumer::start_at`, `end_at` (both publishers): remove the need;
   the public `set_frames` and `skip_to` cover them.
 - `subscription::Position::final_sequence` (lite publisher): public, the
@@ -56,14 +65,19 @@ Rust items (`rs/moq-net/src/model/`), as they stood at b4eab0db1:
 JS items (`js/net/src/`):
 
 - `hooks.replaceGroups` (lite publisher): mirror the cursor decision, so
-  `Track.Subscriber.setGroups` assigns the floor and the hook goes.
+  `Track.Subscriber.setBounds` assigns the floor and the hook goes.
 - `hooks.tryRecvGroup` with its `Recv` union, and `hooks.groupChanged`
-  (lite publisher). **Decision**, recommended: public. The public
-  `Subscriber.tryRecvGroup()` returns `undefined` for both a held boundary
-  and a drained end, so a synchronous publisher cannot tell them apart or
-  park. Return the `Recv` union from the public method and expose the
-  change wake (a signal or a promise, matching the package's style). Rust's
-  poll API already has both.
+  (lite publisher). The public `Subscriber.tryRecvGroup()` returns
+  `undefined` for both a held boundary and a drained end, so a synchronous
+  publisher cannot tell them apart or park. **Decision**:
+  - ✅ Public. Return the `Recv` union from the public method and expose
+    the change wake (a signal or a promise, matching the package's style).
+    The union deliberately has no Rust type: Rust's lite publisher builds
+    its private `Recv` from the public `poll_recv_group` (Pending versus
+    `Ready(None)`) and `poll_finished`, which a third party composes the
+    same way.
+  - Mirror Rust exactly: a distinct drained result and a synchronous end
+    check instead of the union, plus the wake.
 - `hooks.guardGroup`, `hooks.readGroupFrame` with `ReadGroupFrame` (both
   publishers): mirror the Rust group expiry as one public call. Reading a
   frame the publisher `complete()`s holds the group's `closed` until it is
@@ -85,7 +99,8 @@ JS items (`js/net/src/`):
 - `priority.ts` `sendOrder`, `Priority`: stay private. They rank streams on
   a `stream.ts` writer, which is wire plumbing in both languages.
 
-Tests: each public call gets a mock-time test in its language, and the
+Tests: lowering the floor re-offers an unread cached group in both cursor
+modes. Each public call gets a mock-time test in its language, and the
 built-in publishers move onto the public calls, so their existing suites
 cover the behavior.
 

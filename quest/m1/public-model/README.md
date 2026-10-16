@@ -13,8 +13,7 @@ of the model (`ietf/`, `lite/`, connection plumbing, wire codecs).
 ## Plan
 
 Planned 2026-10-16 from the inventory below; the per-item decisions live in
-the children's Plans, and the maintainer's calls are listed in the PR that
-added this epic.
+the children's Plans, and the maintainer settled the open ones in #5717.
 
 Rules every child follows:
 
@@ -32,6 +31,9 @@ Rules every child follows:
     A relay built on the public model drops them, as plain moq-lite does.
   - "tunes the built-in sessions": constants and wake or allocation batching
     that change cost, never behavior a third party can observe.
+  - "capability gap": a built-in behavior a third party can observe but
+    not reproduce yet, kept private by a recorded decision that names what
+    would close it (the idle copy in [ingest](/quest/m1/public-model/ingest.md)).
 - Items replaced by another quest's new API wait for that quest instead of
   growing a public shape it deletes: fetch and per-group requests
   ([Model ranges](/quest/m1/subscribe-ranges/model.md)), largest and
@@ -79,11 +81,10 @@ Inventory on `main` at b4eab0db1:
 
 Work owned by this README, after the children land:
 
-- Narrow every model-internal Rust item to `pub(in crate::model)` (or
-  `pub(super)`), so a `pub(crate)` left in `model/` is always a marked
-  passthrough, tuning, or test-only item. A new model item a session
-  reaches then fails to compile until someone makes it public or marks it,
-  instead of silently growing the private surface.
+- Rerun the inventory and confirm every `pub(crate)` left in `model/` is a
+  marked passthrough, tuning, capability-gap, or test-only item, so the
+  "pending" marks from [Narrow the model](/quest/m1/public-model/narrow.md)
+  are all gone.
 - Prove the result with a toy transport that uses only the public API: an
   integration test under `rs/moq-net/tests/` (outside the crate, so the
   compiler enforces it) and a JS test importing only the package entrypoint.
@@ -92,6 +93,7 @@ Work owned by this README, after the children land:
 
 ## Required
 
+- [Narrow the model](/quest/m1/public-model/narrow.md) - a new model item a session reaches fails to compile until it is made public or marked, while the other children are in flight
 - [Public ingest](/quest/m1/public-model/ingest.md) - a custom subscriber writes received groups, frames, starts, and ends into a track through public calls
 - [Public serving](/quest/m1/public-model/serve.md) - a custom publisher reads a track's start, cursor, and group expiry for its wire through public calls
 - [Public routes and answering](/quest/m1/public-model/answer.md) - a custom relay ingests routes, answers broadcast and track requests on demand, and advertises without echoing a peer's routes back

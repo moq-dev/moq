@@ -13,26 +13,36 @@ ending. The built-in lite and IETF subscribers use the same calls.
 Rules, carve-outs, and the inventory method are in the
 [epic](/quest/m1/public-model/README.md). Rerun the inventory first; the
 recommendations below are the planning quest's, and the ones marked
-**decision** are the maintainer's (see the PR that added this quest).
+**decision** were settled by the maintainer on 2026-10-16 (#5717).
 
 Rust items (`rs/moq-net/src/model/`), as they stood at b4eab0db1:
 
 - **Withheld groups** (`track::Producer::receive_group`, `reveal_group`,
-  `group::Producer::is_started`; lite subscriber). **Decision**, recommended:
-  remove the need. `create_group` withholds every group from readers until
-  its first frame lands or it ends, the rule a received group needs, so a
-  joiner at the live edge is never handed an older group first. An app
-  writes its first frame as it creates a group, so it sees no change. The
-  alternative is a public `receive_group` and `reveal_group` pair.
+  `group::Producer::is_started`; lite subscriber). **Decision**:
+  - ✅ Remove the need. `create_group` withholds every group from readers
+    until its first frame lands or it ends, the rule a received group needs,
+    so a joiner at the live edge is never handed an older group first. An
+    app writes its first frame as it creates a group, so it sees no change
+    beyond an empty open group staying invisible.
+  - A public `receive_group` and `reveal_group` pair.
 - **Owned frame writer** (`group::Producer::create_frame_owned`,
-  `frame::ProducerOwned`; both subscribers, `coding/reader.rs`).
-  **Decision**, recommended: replace the borrowing `frame::Producer<'a>`
-  with one owned `frame::Producer`, and have the group refuse a second open
-  frame with an error instead of the caller's promise. A poll-driven wire
-  driver cannot hold the borrow across polls. The alternative is a second,
-  public owned type, which AGENTS.md's no-twins rule argues against.
-- `frame::ProducerOwned::write` without a wake, and `notify`: stay private,
-  "tunes the built-in sessions" (batches wakes per poll turn).
+  `frame::ProducerOwned`; both subscribers, `coding/reader.rs`). A
+  poll-driven wire driver cannot hold the borrowing `frame::Producer<'a>`
+  across polls. **Decision**:
+  - One owned `frame::Producer` that borrows nothing, relying on the
+    runtime `Error::FrameOpen` refusal `open_frame` already has.
+  - A second, public owned type (AGENTS.md's no-twins rule argues against
+    it).
+  - ✅ The frame writer consumes the `group::Producer` and hands it back
+    when the frame finishes, so one open frame per group stays a
+    compile-time guarantee and the writer holds no borrow. Group calls
+    needed while a frame is open (abort, expiry) go through the frame
+    writer. The borrowing `create_frame` and `ProducerOwned` both go, and
+    the stale "caller's promise" doc on `create_frame_owned` goes with
+    them.
+- The frame writer's write without a wake (today
+  `frame::ProducerOwned::write`) and `notify`: stay private, "tunes the
+  built-in sessions" (batches wakes per poll turn).
 - **Allocation budget** (`frame::Budget`; both subscribers): remove the
   need. A peer-declared frame size is untrusted for every wire, so the model
   bounds up-front allocation itself (from the origin's cache pool, or a
@@ -40,12 +50,15 @@ Rust items (`rs/moq-net/src/model/`), as they stood at b4eab0db1:
 - `group::Producer::info` (IETF subscriber): public, mirroring
   `track::Producer::info`.
 - **Received end** (`track::Producer::finish_at_pending`, `set_tail_pending`;
-  both subscribers). **Decision**, recommended: public after
-  [Tail arrivals](/quest/m1/tail-arrivals.md) settles the semantics, as one
-  call that declares an end received from the wire and returns a handle the
-  session settles (or drops) when its tail is in. The paired bool cannot then
-  be left set. Without it, a custom subscriber over unordered streams ends
-  readers at a hole.
+  both subscribers). Without it, a custom subscriber over unordered streams
+  ends readers at a hole. **Decision**:
+  - Public after [Tail arrivals](/quest/m1/tail-arrivals.md), as one call
+    that returns a handle the session settles when its tail is in.
+  - Keep it private.
+  - ✅ Public after Tail arrivals, with the shape left to that quest. Once
+    the model records arrivals per track bounded by the subscription's
+    grace, it may own the grace timer itself, so a plain `finish_at` on a
+    received track could be enough and no settle handle is needed.
 - **Session end** (`track::Producer::close`, `abort_session`; both
   subscribers): public. Fold `abort_session` into the public `abort` (abort
   open groups too) unless the implementer finds a reader-visible difference,
@@ -59,10 +72,16 @@ Rust items (`rs/moq-net/src/model/`), as they stood at b4eab0db1:
   the public `start_at` resolving it.
 - **Idle copy** (`track::Producer::set_idle`, `set_live`, `is_live`,
   `idle_newest`, `track::IDLE_LINGER`; lite subscriber, `set_idle` also
-  IETF). **Decision**, recommended: stay private, "tunes the built-in
-  sessions". They keep a lingering copy's cache from serving stale groups
-  between subscriptions; a custom subscriber that ends its track when its
-  upstream subscription ends loses only the linger.
+  IETF). They keep a lingering copy's cache from serving stale groups
+  between subscriptions. **Decision**:
+  - ✅ Stay private, marked as a known capability gap rather than tuning:
+    the staleness they prevent is observable, so "tunes the built-in
+    sessions" does not fit. A custom subscriber that ends its track when
+    its upstream subscription ends is correct, but cannot keep a lingering
+    copy. When designing the resolved start below, check whether idle folds
+    into it (re-subscribing a lingering copy is a request whose start the
+    peer resolves later); if it does, the gap closes there.
+  - Public as an idle handle whose `live(largest)` resumes readers.
 - Fetch ingest (`group::Request` fields `state` and `result`,
   `track::TrackState` with `TrackState::abort`, `track::FetchOutcome`,
   `group::Request::finish_track_at`, `track::Consumer::poll_landed`): remove

@@ -13,7 +13,7 @@ a peer without echoing the peer's own routes back.
 Rules, carve-outs, and the inventory method are in the
 [epic](/quest/m1/public-model/README.md). Rerun the inventory first; the
 recommendations below are the planning quest's, and the ones marked
-**decision** are the maintainer's (see the PR that added this quest).
+**decision** were settled by the maintainer on 2026-10-16 (#5717).
 
 Rust items (`rs/moq-net/src/model/`), as they stood at b4eab0db1:
 
@@ -22,12 +22,13 @@ Rust items (`rs/moq-net/src/model/`), as they stood at b4eab0db1:
 - `origin::Cost::charged` (both subscribers, IETF cluster): public.
   `Cost::UNKNOWN` goes; it equals `Cost::default()`.
 - **Announcing identity** (`origin::Route::via`, `Route::source`,
-  `Route::with_via`; both subscribers, server). **Decision**, recommended:
-  replace. The identity moves onto the origin handle a session announces
-  through (beside the public `Producer::peer`), so every route it ingests
-  carries it and a `Route` can never forward it. `Route.source` stays a
-  private field the handle sets. The alternative is a public
-  `Route::with_via`, which a caller could forward by mistake.
+  `Route::with_via`; both subscribers, server). **Decision**:
+  - ✅ Replace. The identity moves onto the origin handle a session
+    announces through, as `origin::Producer::via(hop)` beside the public
+    `Producer::peer` (the name `via` stays), so every route it ingests
+    carries it and a `Route` can never forward it. `Route.via` and
+    `Route.source` stay private fields the handle sets.
+  - A public `Route::with_via`, which a caller could forward by mistake.
 - `origin::Consumer::excluding` (both publishers, client): public;
   split-horizon toward a peer, the counterpart of the identity above.
 - `origin::Producer::create_source` (both subscribers): public under a role
@@ -37,20 +38,22 @@ Rust items (`rs/moq-net/src/model/`), as they stood at b4eab0db1:
 - `broadcast::SourceGuard` (both subscribers): not model. Move it to the
   sessions; a third party drops or closes its own source.
 - **Request validity** (`broadcast::RequestValidity`, `origin::Selection`;
-  both subscribers). **Decision**, recommended: remove the need. The source
-  minted for a `Dynamic` request ends itself with `Unroutable` once its
-  route is replaced or its selection period retires, so no session can serve
-  a stale instance by forgetting a check. The alternative is a public
-  validity handle every answerer must poll.
+  both subscribers). **Decision**:
+  - ✅ Remove the need. The source minted for a `Dynamic` request ends
+    itself with `Unroutable` once its route is replaced or its selection
+    period retires, so no session can serve a stale instance by forgetting
+    a check. The answering session sees it through its writes failing.
+  - A public validity handle every answerer must poll.
 - **Unused races** (`broadcast::Producer::poll_unheld`, `close_unheld`,
   `group::Producer::poll_unused`, `abort_unused`,
-  `track::Request::reject_unused`; both subscribers). **Decision**,
-  recommended: public, as one family matching the public
-  `track::Producer::abort_unused(self, err) -> Result<(), Self>`: each
-  answerer has `demand()` for the wait and an atomic `*_unused` that refuses
-  when a reader returned in the gap. Rename `close_unheld` and
-  `poll_unheld` to the `unused` vocabulary if their semantics match
-  `broadcast::Demand`, or document the difference.
+  `track::Request::reject_unused`; both subscribers). **Decision**:
+  - ✅ Public, as one family matching the public
+    `track::Producer::abort_unused(self, err) -> Result<(), Self>`: each
+    answerer has `demand()` for the wait and an atomic `*_unused` that
+    refuses when a reader returned in the gap. Rename `close_unheld` and
+    `poll_unheld` to the `unused` vocabulary where their semantics match
+    `broadcast::Demand`, or document the difference.
+  - Keep them private.
 - `origin::Dynamic::withdrawn` (lite subscriber): public, as the explicit
   peer withdrawal that differs from a session simply dropping its handle.
 - `origin::interest_prefixes` (both subscribers): remove the need through
@@ -85,10 +88,15 @@ JS items (`js/net/src/`):
   (`Broadcast.fromSession`).
 - `wire.ts` `OriginProducer.requests`, `changed`, `blind`, `answer`,
   `routes`, `origin.ts` `RequestSlot`, `internal.ts` `coveringPrefixes`
-  (the blind-answer loop in `connection/forward.ts`). **Decision**,
-  recommended: replace with the Rust shape. A session answers through the
-  public `Origin.Dynamic` requests and mints a source per request, as Rust
-  sessions do, so the slot loop and its view go.
+  (the blind-answer loop in `connection/forward.ts`). **Decision**:
+  - ✅ Replace with the Rust shape. A session answers through the public
+    `Origin.Dynamic` requests and mints a source per request, as Rust
+    sessions do, so the slot loop and its view go. Caveat: JS "blind" mode
+    (answering requests after a peer refuses or resets announce requests)
+    has no counterpart in the Rust sessions. The public shape must answer
+    blind requests too, or Lazy discovery must remove blind mode first;
+    decide which before deleting the loop.
+  - Make the `wire.ts` views public.
 - `wire.ts` `OriginProducer.expect` (`connection/reload.ts`, keeps requests
   pending while a reconnect is in flight): public if Rust has the same need
   across a reconnect, else private to the connection.
@@ -106,12 +114,12 @@ JS items (`js/net/src/`):
   the public announce event carries what `sameInstance` and a scoped
   route's claim need; if it does not, that is track metadata and goes public.
 - `wire.ts` `Broadcast.requested` (with its `served` flag) and
-  `overrideBroadcastWire` (both subscribers). **Decision**, recommended:
-  public, mirroring Rust's `broadcast::Producer::dynamic()`: a broadcast
-  producer hands out track requests on demand, and a track's info and
-  fetches are answered through its `Track.Request` and `Track.Dynamic`
-  (ranges once Model ranges lands). A subclass of `Broadcast.Consumer`
-  cannot do either today.
+  `overrideBroadcastWire` (both subscribers). Part of the JS answering
+  decision above: ✅ public, mirroring Rust's
+  `broadcast::Producer::dynamic()`: a broadcast producer hands out track
+  requests on demand, and a track's info and fetches are answered through
+  its `Track.Request` and `Track.Dynamic` (ranges once Model ranges lands).
+  A subclass of `Broadcast.Consumer` cannot do either today.
 - `wire.ts` `OriginConsumer.broadcasts`: registered and never read; delete.
 - `hop.ts` `HopSchema`, `randomHop`, `UNKNOWN_HOP`, `MAX_HOPS`,
   `Cost.zero`, `Route.default`, `Route.normalize`, `routesEqual`: public
