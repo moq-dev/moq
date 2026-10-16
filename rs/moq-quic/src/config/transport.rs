@@ -50,6 +50,8 @@ pub struct TransportConfig {
     pub(crate) allow_spin: bool,
     pub(crate) datagram_receive_buffer_size: Option<usize>,
     pub(crate) datagram_send_buffer_size: usize,
+    /// Advertise and accept RESET_STREAM_AT; only tests turn it off
+    pub(crate) reset_stream_at: bool,
     #[cfg(test)]
     pub(crate) deterministic_packet_numbers: bool,
 
@@ -332,6 +334,13 @@ impl TransportConfig {
         self
     }
 
+    /// Whether to advertise support for receiving RESET_STREAM_AT
+    #[cfg(test)]
+    pub(crate) fn reset_stream_at(&mut self, enabled: bool) -> &mut Self {
+        self.reset_stream_at = enabled;
+        self
+    }
+
     /// Whether to force every packet number to be used
     ///
     /// By default, packet numbers are occasionally skipped to ensure peers aren't ACKing packets
@@ -419,6 +428,7 @@ impl Default for TransportConfig {
             allow_spin: true,
             datagram_receive_buffer_size: Some(STREAM_RWND as usize),
             datagram_send_buffer_size: 1024 * 1024,
+            reset_stream_at: true,
             #[cfg(test)]
             deterministic_packet_numbers: false,
 
@@ -457,6 +467,7 @@ impl fmt::Debug for TransportConfig {
             allow_spin,
             datagram_receive_buffer_size,
             datagram_send_buffer_size,
+            reset_stream_at,
             #[cfg(test)]
                 deterministic_packet_numbers: _,
             congestion_controller_factory: _,
@@ -494,6 +505,7 @@ impl fmt::Debug for TransportConfig {
             .field("allow_spin", allow_spin)
             .field("datagram_receive_buffer_size", datagram_receive_buffer_size)
             .field("datagram_send_buffer_size", datagram_send_buffer_size)
+            .field("reset_stream_at", reset_stream_at)
             // congestion_controller_factory not debug
             .field("enable_segmentation_offload", enable_segmentation_offload);
         if cfg!(feature = "qlog") {

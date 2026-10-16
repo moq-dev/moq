@@ -231,6 +231,19 @@ refresh each reason before committing.
 The matrix asks "did bytes arrive and did a pixel light up". That passes on a
 frozen picture, on silence, and on audio a second out of step, so
 `just test media` measures the media itself, browser to browser.
+Use `just test media --media-engines chromium,firefox,webkit` to run each pinned
+Playwright player against a Chromium publisher. The harness installs the requested
+engines and runs the same lifecycle cases, content tolerances, and five negative
+controls per engine. A missing runtime or required API fails that engine by name.
+Firefox and WebKit players explicitly use WebSocket; Chromium keeps normal
+transport selection. This does not measure Firefox's QUIC path.
+
+The capability report names the engine version and separately lists missing
+publisher and player APIs. Firefox 155 in Playwright 1.63 exposes WebTransport and
+WebCodecs but lacks `MediaStreamTrackProcessor`, so it can play this fixture but
+cannot publish it. Capabilities are measured on every run rather than assumed
+from an engine name. Playwright WebKit is not Safari; Safari device/transport
+bugs and real Firefox transport negotiation still require manual evidence.
 
 The publisher is a fixture, not a fake camera: a canvas painting a frame counter
 as black/white blocks, and a tone stepping through a fixed frequency table. Both
@@ -242,7 +255,7 @@ samples, not that a machine played them.
 
 Each run covers, against a real local relay:
 
-- **capabilities** - probes every platform API the player needs, and fails
+- **capabilities** - probes native APIs separately for the publisher and player, and fails
   naming what is missing rather than skipping a case.
 - **cold start** - the publisher reports when it is announced and encoding, then
   a fresh page joins. No reload, unlike the matrix driver: a subscriber that
@@ -250,9 +263,12 @@ Each run covers, against a real local relay:
 - **user gesture** - Chromium is launched with
   `--autoplay-policy=document-user-activation-required`, which applies to
   top-level Web Audio contexts. The fixture and player graphs must be suspended
-  before either page is clicked, then both must carry audio afterwards. Harness
-  state probes use CDP with `userGesture: false`: Playwright's usual page reads
-  themselves grant activation and would invalidate this assertion.
+  before either page is clicked, then both must carry audio afterwards. Firefox
+  is launched with its Web Audio autoplay block enabled. Playwright's usual page
+  reads grant activation and would invalidate this assertion, so the player logs
+  each sample to the console and the harness never evaluates in a player page
+  before its click. The Chromium fixture is read over CDP with
+  `userGesture: false`, and capability probes run in a separate page.
 - **capture permission** - the camera case uses a fake device for deterministic
   input, while Playwright denies and then grants permissions. Both source errors
   must be visible; neither a full nor a microphone-only denial may announce a
