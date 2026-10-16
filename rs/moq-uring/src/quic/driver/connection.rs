@@ -337,6 +337,11 @@ impl Connection {
 	pub fn handshake(&self) -> &crate::quic::handshake::Info {
 		&self.handshake
 	}
+
+	/// Returns connection statistics.
+	pub fn stats(&self) -> moq_quic::ConnectionStats {
+		self.shared.conn.borrow().stats()
+	}
 }
 
 impl Clone for Connection {

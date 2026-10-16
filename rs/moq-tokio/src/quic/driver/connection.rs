@@ -1015,7 +1015,7 @@ impl RemoteAddressWatcher {
 }
 
 #[derive(Debug)]
-pub(crate) struct ConnectionRef(Arc<ConnectionInner>);
+pub(crate) struct ConnectionRef(pub(crate) Arc<ConnectionInner>);
 
 impl ConnectionRef {
     fn stable_id(&self) -> usize {

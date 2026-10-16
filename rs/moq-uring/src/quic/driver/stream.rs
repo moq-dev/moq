@@ -223,6 +223,9 @@ pub struct RecvStream {
 	stopped: bool,
 	/// Bytes `poll_closed` read ahead, handed to `poll_read` before moq-quic's.
 	backlog: BytesMut,
+	/// The connection credit for `backlog`, kept until the application reads
+	/// it, as if it were still in moq-quic's reassembly buffer.
+	backlog_credit: moq_quic::Credit,
 }
 
 impl RecvStream {
@@ -234,6 +237,63 @@ impl RecvStream {
 			finished: false,
 			stopped: false,
 			backlog: BytesMut::new(),
+			backlog_credit: moq_quic::Credit::default(),
+		}
+	}
+
+	/// Read into `dst`, keeping the connection flow control credit for exactly
+	/// the bytes read, or `None` once the peer has finished the stream.
+	///
+	/// Stream credit still advances, so a stream window smaller than an
+	/// application message keeps the message flowing, while the connection
+	/// window these bytes occupy stays spent until the credit is dropped.
+	pub fn poll_read_held(&mut self, cx: &mut Context<'_>, dst: &mut [u8]) -> Poll<Result<Option<Credit>, Error>> {
+		let mut held = moq_quic::Credit::default();
+		self.poll_read_into(cx, dst, Some(&mut held)).map_ok(|read| {
+			read.map(|_| Credit {
+				shared: self.shared.clone(),
+				inner: held,
+			})
+		})
+	}
+
+	/// [`poll_read`](web_transport_trait::poll::RecvStream::poll_read), with
+	/// the credit for the bytes read moved into `held` instead of returned to
+	/// the peer.
+	fn poll_read_into(
+		&mut self,
+		cx: &mut Context<'_>,
+		dst: &mut [u8],
+		held: Option<&mut moq_quic::Credit>,
+	) -> Poll<Result<Option<usize>, Error>> {
+		let waiter = self.park.hold(cx);
+		if dst.is_empty() {
+			return Poll::Ready(Ok(Some(0)));
+		}
+		if !self.backlog.is_empty() {
+			return Poll::Ready(Ok(Some(self.drain(dst, held))));
+		}
+		if self.finished {
+			return Poll::Ready(Ok(None));
+		}
+		match Self::read(&self.shared, self.id, dst.len(), held) {
+			Read::Chunk(bytes) => {
+				// moq-quic hands out at most `dst.len()`.
+				dst[..bytes.len()].copy_from_slice(&bytes);
+				Poll::Ready(Ok(Some(bytes.len())))
+			}
+			Read::Finished => {
+				self.finished = true;
+				Poll::Ready(Ok(None))
+			}
+			Read::Blocked => {
+				if let Some(err) = self.shared.closed() {
+					return Poll::Ready(Err(err));
+				}
+				self.shared.park_readable(self.id, waiter);
+				Poll::Pending
+			}
+			Read::Reset(code) => Poll::Ready(Err(Error::Reset(code))),
 		}
 	}
 
@@ -246,6 +306,7 @@ impl RecvStream {
 	/// [`stop`](web_transport_trait::poll::RecvStream::stop) with a
 	/// full-width code, for the WebTransport HTTP/3 error mapping.
 	pub(crate) fn stop_code(&mut self, code: u64) {
+		release(&self.shared, std::mem::take(&mut self.backlog_credit));
 		self.backlog.clear();
 		if self.stopped || self.finished {
 			return;
@@ -264,11 +325,12 @@ impl RecvStream {
 	/// Take up to `max` bytes out of moq-quic's reassembly buffer.
 	///
 	/// Reading is what returns the peer's flow control credit, so a read that
-	/// owes it a frame kicks the driver.
+	/// owes it a frame kicks the driver. The connection credit for the bytes
+	/// read moves into `held` instead, when given.
 	///
 	/// Takes the shared state rather than `&mut self` so a caller can hold a
 	/// waiter from `self.park` across the read.
-	fn read(shared: &Shared, id: StreamId, max: usize) -> Read {
+	fn read(shared: &Shared, id: StreamId, max: usize, held: Option<&mut moq_quic::Credit>) -> Read {
 		let mut conn = shared.conn.borrow_mut();
 		let mut recv = conn.recv_stream(id);
 		let mut chunks = match recv.read(true) {
@@ -282,6 +344,9 @@ impl RecvStream {
 			Err(moq_quic::ReadError::Blocked) => Read::Blocked,
 			Err(moq_quic::ReadError::Reset(code)) => Read::Reset(code.into_inner()),
 		};
+		if let Some(held) = held {
+			held.merge(chunks.hold());
+		}
 		let transmit = chunks.finalize().should_transmit();
 		drop(conn);
 		if transmit {
@@ -290,14 +355,20 @@ impl RecvStream {
 		read
 	}
 
-	/// Move up to `dst.len()` read-ahead bytes out of the backlog.
+	/// Move up to `dst.len()` read-ahead bytes out of the backlog, with their
+	/// credit moved into `held` or else returned to the peer.
 	///
 	/// Wakes a `poll_closed` parked at the read-ahead cap: the room it was
 	/// waiting for is what this just made.
-	fn drain(&mut self, dst: &mut [u8]) -> usize {
+	fn drain(&mut self, dst: &mut [u8], held: Option<&mut moq_quic::Credit>) -> usize {
 		let n = dst.len().min(self.backlog.len());
 		dst[..n].copy_from_slice(&self.backlog[..n]);
 		self.backlog.advance(n);
+		let credit = self.backlog_credit.split(n as u64);
+		match held {
+			Some(held) => held.merge(credit),
+			None => release(&self.shared, credit),
+		}
 		if n > 0 {
 			self.shared.wake_readable(self.id);
 		}
@@ -309,35 +380,7 @@ impl web_transport_trait::poll::RecvStream for RecvStream {
 	type Error = Error;
 
 	fn poll_read(&mut self, cx: &mut Context<'_>, dst: &mut [u8]) -> Poll<Result<Option<usize>, Self::Error>> {
-		let waiter = self.park.hold(cx);
-		if dst.is_empty() {
-			return Poll::Ready(Ok(Some(0)));
-		}
-		if !self.backlog.is_empty() {
-			return Poll::Ready(Ok(Some(self.drain(dst))));
-		}
-		if self.finished {
-			return Poll::Ready(Ok(None));
-		}
-		match Self::read(&self.shared, self.id, dst.len()) {
-			Read::Chunk(bytes) => {
-				let n = bytes.len().min(dst.len());
-				dst[..n].copy_from_slice(&bytes[..n]);
-				Poll::Ready(Ok(Some(n)))
-			}
-			Read::Finished => {
-				self.finished = true;
-				Poll::Ready(Ok(None))
-			}
-			Read::Blocked => {
-				if let Some(err) = self.shared.closed() {
-					return Poll::Ready(Err(err));
-				}
-				self.shared.park_readable(self.id, waiter);
-				Poll::Pending
-			}
-			Read::Reset(code) => Poll::Ready(Err(Error::Reset(code))),
-		}
+		self.poll_read_into(cx, dst, None)
 	}
 
 	fn stop(&mut self, code: u32) {
@@ -367,7 +410,7 @@ impl web_transport_trait::poll::RecvStream for RecvStream {
 				self.shared.park_readable(self.id, waiter);
 				return Poll::Pending;
 			}
-			match Self::read(&self.shared, self.id, READ_CHUNK) {
+			match Self::read(&self.shared, self.id, READ_CHUNK, Some(&mut self.backlog_credit)) {
 				Read::Chunk(bytes) => self.backlog.extend_from_slice(&bytes),
 				Read::Finished => {
 					self.finished = true;
@@ -388,6 +431,7 @@ impl web_transport_trait::poll::RecvStream for RecvStream {
 
 impl Drop for RecvStream {
 	fn drop(&mut self) {
+		release(&self.shared, std::mem::take(&mut self.backlog_credit));
 		self.shared.forget_recv(self.id);
 		if !self.finished && !self.stopped {
 			let _ = self
@@ -404,5 +448,72 @@ impl Drop for RecvStream {
 impl std::fmt::Debug for RecvStream {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
 		f.debug_struct("RecvStream").field("id", &self.id).finish()
+	}
+}
+
+/// Return `credit` to the peer, kicking the driver if the peer should hear.
+fn release(shared: &Shared, credit: moq_quic::Credit) {
+	if credit.is_empty() {
+		return;
+	}
+	if shared.conn.borrow_mut().release(credit).should_transmit() {
+		shared.kick();
+	}
+}
+
+/// Connection flow control credit for bytes read with
+/// [`RecvStream::poll_read_held`].
+///
+/// The peer cannot reuse the connection window these bytes occupy until this
+/// is dropped, which returns it even after the stream or connection is gone.
+pub struct Credit {
+	shared: Shared,
+	inner: moq_quic::Credit,
+}
+
+impl Credit {
+	/// The number of bytes this credit covers.
+	pub fn len(&self) -> u64 {
+		self.inner.len()
+	}
+
+	/// Whether this credit covers no bytes.
+	pub fn is_empty(&self) -> bool {
+		self.inner.is_empty()
+	}
+
+	/// Split off the credit for the first `bytes`, keeping the rest.
+	///
+	/// # Panics
+	/// If `bytes` exceeds [`Self::len()`].
+	pub fn split(&mut self, bytes: u64) -> Self {
+		Self {
+			shared: self.shared.clone(),
+			inner: self.inner.split(bytes),
+		}
+	}
+
+	/// Take over the bytes covered by `other`.
+	///
+	/// # Panics
+	/// If `other` came from another connection.
+	pub fn merge(&mut self, mut other: Self) {
+		assert!(
+			std::rc::Rc::ptr_eq(&self.shared, &other.shared),
+			"merged credit from another connection"
+		);
+		self.inner.merge(std::mem::take(&mut other.inner));
+	}
+}
+
+impl Drop for Credit {
+	fn drop(&mut self) {
+		release(&self.shared, std::mem::take(&mut self.inner));
+	}
+}
+
+impl std::fmt::Debug for Credit {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.debug_struct("Credit").field("len", &self.len()).finish()
 	}
 }
