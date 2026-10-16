@@ -265,6 +265,7 @@ impl Timeline {
 
 	/// Index one timeline object's groups, then republish each on the timeline track.
 	fn replay<T>(&mut self, shared: &Shared<T>, segment: u64, object: &Object) -> Result<()> {
+		let timed = self.timescale.is_some();
 		for stored in &object.groups {
 			let mut group = self.decoder.group();
 			let decoded = stored.frames.iter().try_for_each(|frame| group.decode(&frame.payload));
@@ -274,6 +275,15 @@ impl Timeline {
 			let mut index = shared.index.lock().unwrap();
 			while let Some(event) = group.next_event() {
 				match event {
+					window::Event::Push { value, .. }
+						if value.pts.is_some() != timed || value.duration.is_some() != timed =>
+					{
+						tracing::warn!(
+							track = self.track,
+							sequence = value.sequence,
+							"ignoring a record whose timing contradicts its timeline"
+						);
+					}
 					window::Event::Push { index: at, value } if at == value.sequence => index.push(&self.track, &value),
 					window::Event::Push { index: at, value } => {
 						tracing::warn!(

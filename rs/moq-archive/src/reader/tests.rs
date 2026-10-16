@@ -762,6 +762,28 @@ async fn an_untimed_recording_replays_untimed() {
 	);
 }
 
+/// A record whose timing contradicts its timeline is not indexed, though its object is stored.
+#[tokio::test]
+async fn a_record_contradicting_its_timeline_is_not_indexed() {
+	let mut archive = Archive::new().await;
+	archive.add("video", 0..1, 1).await;
+	let stored = archive.record("video", Position::group(1), Position::group(2), 1).await;
+	let untimed = Record::untimed(stored.sequence, stored.start, stored.end);
+	let mut groups = archive.edit("video", &untimed, 0).await;
+	// The timeline envelope stays timed, as its `.info` declares.
+	for frame in groups.iter_mut().flat_map(|group| &mut group.frames) {
+		frame.timestamp = Some(100);
+	}
+	archive.timeline("video", untimed.sequence, groups).await;
+
+	let (broadcast, _reader) = open(&archive).await;
+	assert_eq!(
+		fetch(&broadcast, "video", 0, 0).await.unwrap(),
+		expected("video", 0, 0..1)
+	);
+	not_found(fetch(&broadcast, "video", 1, 0).await);
+}
+
 #[tokio::test]
 async fn open_requires_every_timeline_info() {
 	let store = Store::new(Mock::memory(), "rec");
