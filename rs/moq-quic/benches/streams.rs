@@ -11,7 +11,7 @@ use moq_quic::Dir;
 #[allow(dead_code)]
 mod common;
 
-use common::{Pair, Setup, payload};
+use common::{Pair, Setup, ThreadCpu, payload};
 
 /// Opens `streams` streams across `priorities` levels, writes `writes` writes of `size` bytes to
 /// each, and drives until the server has read them all.
@@ -34,7 +34,7 @@ fn send(pair: &mut Pair, streams: usize, priorities: usize, writes: usize, size:
 }
 
 /// Stream count against priority levels, with a few packets per stream so they interleave.
-fn bench_priority(c: &mut Criterion) {
+fn bench_priority(c: &mut Criterion<ThreadCpu>) {
     const BYTES: usize = 4096;
     let mut group = c.benchmark_group("send_priority");
     for streams in [1, 16, 256, 1024] {
@@ -60,7 +60,7 @@ fn bench_priority(c: &mut Criterion) {
 }
 
 /// Bytes per write against stream count, writing a fixed 64 KiB to each stream.
-fn bench_write_size(c: &mut Criterion) {
+fn bench_write_size(c: &mut Criterion<ThreadCpu>) {
     const BYTES: usize = 64 << 10;
     let mut group = c.benchmark_group("send_write_size");
     for streams in [1, 64] {
@@ -79,5 +79,9 @@ fn bench_write_size(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_priority, bench_write_size);
+criterion_group! {
+    name = benches;
+    config = common::config();
+    targets = bench_priority, bench_write_size
+}
 criterion_main!(benches);

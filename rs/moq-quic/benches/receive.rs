@@ -8,7 +8,7 @@ use moq_quic::{Dir, VarInt};
 #[allow(dead_code)]
 mod common;
 
-use common::{Pair, Setup, Sink, payload};
+use common::{Pair, Setup, Sink, ThreadCpu, payload};
 
 /// Stream data per packet, so a stream of `n` packets spans about `n` datagrams.
 const PACKET: usize = 1100;
@@ -17,7 +17,7 @@ const PACKET: usize = 1100;
 /// hole in many partial streams at once until each retransmission arrives.
 ///
 /// Only the server's side of the exchange is timed.
-fn bench_loss(c: &mut Criterion) {
+fn bench_loss(c: &mut Criterion<ThreadCpu>) {
     let mut group = c.benchmark_group("receive_loss");
     for streams in [1, 16, 256] {
         for packets in [2, 16] {
@@ -59,7 +59,7 @@ fn bench_loss(c: &mut Criterion) {
 
 /// Sender resets: streams carry `bytes` each, of which one burst leaves before every stream is
 /// reset, and the exchange runs until the server has seen every reset.
-fn bench_reset(c: &mut Criterion) {
+fn bench_reset(c: &mut Criterion<ThreadCpu>) {
     let mut group = c.benchmark_group("receive_reset");
     for streams in [16, 256, 1024] {
         for bytes in [0, 16384] {
@@ -97,7 +97,7 @@ fn bench_reset(c: &mut Criterion) {
 
 /// Receiver stops: the server sends STOP_SENDING for every stream as it opens, and the exchange
 /// runs until the client has reset and forgotten them all.
-fn bench_stop(c: &mut Criterion) {
+fn bench_stop(c: &mut Criterion<ThreadCpu>) {
     let mut group = c.benchmark_group("receive_stop");
     for streams in [16, 256, 1024] {
         for bytes in [1100, 16384] {
@@ -132,5 +132,9 @@ fn bench_stop(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_loss, bench_reset, bench_stop);
+criterion_group! {
+    name = benches;
+    config = common::config();
+    targets = bench_loss, bench_reset, bench_stop
+}
 criterion_main!(benches);

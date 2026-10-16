@@ -12,14 +12,14 @@ use moq_quic::DatagramEvent;
 #[allow(dead_code)]
 mod common;
 
-use common::{Pair, Setup};
+use common::{Pair, Setup, ThreadCpu};
 
 /// Datagrams dispatched per iteration, drawn across every CID the server issued.
 const BATCH: usize = 1024;
 
 /// Connections against CIDs per connection. A client with zero-length CIDs advertises an
 /// `active_connection_id_limit` of 2, otherwise 5, and the server issues that many.
-fn bench_route(c: &mut Criterion) {
+fn bench_route(c: &mut Criterion<ThreadCpu>) {
     let mut group = c.benchmark_group("endpoint_route");
     group.throughput(Throughput::Elements(BATCH as u64));
     for connections in [16, 256, 4096] {
@@ -84,5 +84,9 @@ fn route(connections: usize, cids: usize) -> (Pair, Vec<BytesMut>) {
     (pair, datagrams)
 }
 
-criterion_group!(benches, bench_route);
+criterion_group! {
+    name = benches;
+    config = common::config();
+    targets = bench_route
+}
 criterion_main!(benches);

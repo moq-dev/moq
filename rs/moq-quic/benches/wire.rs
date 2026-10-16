@@ -4,7 +4,9 @@
 //! DATAGRAM frames carry the payload because they are never retransmitted: whatever an
 //! iteration leaves unacknowledged is simply lost, and the next iteration starts clean.
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+use cpu_time::ThreadTime;
 
 use bytes::BytesMut;
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
@@ -13,7 +15,8 @@ use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_m
 mod common;
 
 use common::{
-    Forge, Pair, ServerPackets, Setup, ack_frame, datagram_frame, deliver, flush, payload, tick,
+    Forge, Pair, ServerPackets, Setup, ThreadCpu, ack_frame, datagram_frame, deliver, flush,
+    payload, tick,
 };
 
 /// Frame bytes that fit one 1452-byte datagram after the header and tag, with room to spare
@@ -84,7 +87,7 @@ fn ack(forge: &mut Forge, pns: &[u64], ranges: usize) -> BytesMut {
 
 /// Packet encode: the server packs queued DATAGRAM frames, frames per packet against packets.
 /// Only `poll_transmit` is timed; a forged ACK then clears the flight.
-fn bench_encode(c: &mut Criterion) {
+fn bench_encode(c: &mut Criterion<ThreadCpu>) {
     let mut group = c.benchmark_group("wire_encode");
     for frames in [1, 16] {
         for packets in [64, 1024] {
@@ -98,7 +101,7 @@ fn bench_encode(c: &mut Criterion) {
                         let mut busy = Duration::ZERO;
                         for _ in 0..iters {
                             let empty = queue(pair, packets, frames);
-                            let start = Instant::now();
+                            let start = ThreadTime::now();
                             let datagrams = flush(pair, empty);
                             busy += start.elapsed();
 
@@ -117,7 +120,7 @@ fn bench_encode(c: &mut Criterion) {
 
 /// Packet and frame decode: the server ingests forged packets of DATAGRAM frames, frames per
 /// packet against packets. Only the ingest is timed.
-fn bench_decode(c: &mut Criterion) {
+fn bench_decode(c: &mut Criterion<ThreadCpu>) {
     let mut group = c.benchmark_group("wire_decode");
     for frames in [1, 16] {
         for packets in [64, 1024] {
@@ -137,7 +140,7 @@ fn bench_decode(c: &mut Criterion) {
                         for _ in 0..iters {
                             let forged: Vec<_> =
                                 (0..packets).map(|_| forge.packet(&body)).collect();
-                            let start = Instant::now();
+                            let start = ThreadTime::now();
                             for packet in forged {
                                 deliver(pair, packet);
                             }
@@ -166,7 +169,7 @@ fn bench_decode(c: &mut Criterion) {
 
 /// ACK processing: one forged ACK covers a flight of server packets in a number of ranges,
 /// in-flight packets against ranges. Only the ACK's ingest is timed.
-fn bench_ack(c: &mut Criterion) {
+fn bench_ack(c: &mut Criterion<ThreadCpu>) {
     let mut group = c.benchmark_group("wire_ack");
     for packets in [256, 2048] {
         for ranges in [1, 16, 128] {
@@ -182,7 +185,7 @@ fn bench_ack(c: &mut Criterion) {
                             let empty = queue(pair, packets, 1);
                             let sent = numbers(parser, &flush(pair, empty));
                             let ack = ack(forge, &sent, ranges);
-                            let start = Instant::now();
+                            let start = ThreadTime::now();
                             deliver(pair, ack);
                             busy += start.elapsed();
                             tick(pair);
@@ -196,5 +199,9 @@ fn bench_ack(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_encode, bench_decode, bench_ack);
+criterion_group! {
+    name = benches;
+    config = common::config();
+    targets = bench_encode, bench_decode, bench_ack
+}
 criterion_main!(benches);

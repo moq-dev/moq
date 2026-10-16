@@ -3,7 +3,8 @@
 //!
 //! Packets are not protected and the congestion window is unlimited, so a benchmark measures
 //! protocol CPU rather than AES or a controller's model. Time is virtual: it only advances to
-//! the next timer once no datagram is in flight.
+//! the next timer once no datagram is in flight. Cases are timed in thread CPU time, so a busy
+//! host descheduling the benchmark does not inflate them.
 
 use std::{
     any::Any,
@@ -14,6 +15,11 @@ use std::{
 };
 
 use bytes::{BufMut, Bytes, BytesMut};
+use cpu_time::ThreadTime;
+use criterion::{
+    Criterion,
+    measurement::{Measurement, ValueFormatter, WallTime},
+};
 use moq_clock::Instant;
 use moq_quic::{
     ClientConfig, ConnectError, Connection, ConnectionHandle, ConnectionId, ConnectionIdGenerator,
@@ -118,7 +124,7 @@ impl Peer {
 
     /// Handles every queued datagram, fires due timers, runs the application, and transmits.
     fn process(&mut self, now: Instant) {
-        let start = std::time::Instant::now();
+        let start = ThreadTime::now();
         let mut buf = std::mem::take(&mut self.buf);
 
         for (remote, data) in std::mem::take(&mut self.inbound) {
@@ -259,13 +265,17 @@ impl Pair {
     pub(crate) fn new(setup: Setup) -> Self {
         let server_cids = Arc::new(Mutex::new(Vec::new()));
         let log = server_cids.clone();
+        // Fixed seeds make packet number skips and key update timing the same on every run, and
+        // on both sides of a comparison.
         let mut server_endpoint = EndpointConfig::default();
-        server_endpoint.cid_generator(Arc::new(move || {
-            Box::new(Recording {
-                inner: RandomConnectionIdGenerator::new(8),
-                log: log.clone(),
-            })
-        }));
+        server_endpoint
+            .rng_seed(Some([0xff; 32]))
+            .cid_generator(Arc::new(move || {
+                Box::new(Recording {
+                    inner: RandomConnectionIdGenerator::new(8),
+                    log: log.clone(),
+                })
+            }));
         let server = Endpoint::new(Arc::new(server_endpoint), Some(server_config()), false);
         let server = Peer::new(server, SocketAddr::new(Ipv6Addr::LOCALHOST.into(), 4433));
 
@@ -283,7 +293,9 @@ impl Pair {
         for index in 0..setup.clients {
             let mut config = EndpointConfig::default();
             let cid_len = setup.client_cid_len;
-            config.cid_generator(Arc::new(move || {
+            let mut seed = [0; 32];
+            seed[..8].copy_from_slice(&(index as u64).to_le_bytes());
+            config.rng_seed(Some(seed)).cid_generator(Arc::new(move || {
                 Box::new(RandomConnectionIdGenerator::new(cid_len))
             }));
             let mut endpoint = Endpoint::new(Arc::new(config), None, false);
@@ -845,6 +857,48 @@ impl PacketKey for NoPacket {
 
     fn integrity_limit(&self) -> u64 {
         u64::MAX
+    }
+}
+
+/// The Criterion config every target runs with: thread CPU time, not elapsed time.
+///
+/// The suite is single-threaded, so this thread's CPU time is the protocol's, and a loaded host
+/// preempting the benchmark does not count toward it.
+pub(crate) fn config() -> Criterion<ThreadCpu> {
+    Criterion::default().with_measurement(ThreadCpu)
+}
+
+/// Measures this thread's CPU time.
+pub(crate) struct ThreadCpu;
+
+impl Measurement for ThreadCpu {
+    type Intermediate = ThreadTime;
+    type Value = Duration;
+
+    fn start(&self) -> ThreadTime {
+        ThreadTime::now()
+    }
+
+    fn end(&self, start: ThreadTime) -> Duration {
+        start.elapsed()
+    }
+
+    fn add(&self, a: &Duration, b: &Duration) -> Duration {
+        *a + *b
+    }
+
+    fn zero(&self) -> Duration {
+        Duration::ZERO
+    }
+
+    fn to_f64(&self, value: &Duration) -> f64 {
+        value.as_nanos() as f64
+    }
+
+    fn formatter(&self) -> &dyn ValueFormatter {
+        // Durations, so they format the way elapsed time does.
+        static WALL: WallTime = WallTime;
+        WALL.formatter()
     }
 }
 
