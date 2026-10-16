@@ -25,6 +25,9 @@ typedef Request = MoqRequest;
 /// The network transport carrying an incoming session.
 typedef Transport = MoqTransport;
 
+/// The congestion control family for a QUIC connection.
+typedef CongestionControl = MoqCongestionControl;
+
 /// The publish side of an origin: create broadcasts so subscribers can discover them.
 typedef OriginProducer = MoqOriginProducer;
 

@@ -79,10 +79,11 @@ void AddProperties(obs_properties_t *props);
 
 // Fill a client's config from these settings before the client is built.
 //
-// moq-ffi validates the record when it builds the client: a value it rejects, such as a
+// Returns why a setting can't be expressed in the config, or an empty string. Everything
+// else is validated by moq-ffi when it builds the client: a value it rejects, such as a
 // bind address that doesn't parse, fails `moq::Client::init` with a `Config` error naming
-// it, and the caller should refuse to start rather than dial with a setting the user asked
-// for silently dropped.
-void Configure(obs_data_t *settings, moq::ClientConfig &config);
+// it. Either way the caller should refuse to start rather than dial with a setting the
+// user asked for silently dropped.
+std::string Configure(obs_data_t *settings, moq::ClientConfig &config);
 
 } // namespace MoQSettings

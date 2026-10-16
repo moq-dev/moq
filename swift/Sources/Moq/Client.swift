@@ -9,9 +9,13 @@ public final class Client: Sendable {
     /// - Parameters:
     ///   - bind: The local UDP address to bind; `nil` binds an ephemeral dual-stack port.
     ///   - versions: Protocol versions to offer, most preferred first (`"moq-lite-03"`);
-    ///     empty offers every supported version.
-    ///   - tls: Certificate trust (`insecure`, `roots`, `fingerprints`, ...) and the mTLS identity.
-    ///   - quic: QUIC tuning, such as the peer's inbound stream cap.
+    ///     empty offers every supported version, which `versions()` lists.
+    ///   - timeoutUs: How long one connect may take, dial and handshake together; 0 waits forever.
+    ///   - raceUs: Happy Eyeballs: how long before the next resolved address is also dialed.
+    ///   - resolutionDelayUs: Happy Eyeballs: how long IPv4 waits for the full DNS answer.
+    ///   - tls: Certificate trust (`insecure`, `roots`, `fingerprints`, ...), the SNI override,
+    ///     and the mTLS identity.
+    ///   - quic: QUIC tuning, such as the peer's inbound stream cap and the idle timeout.
     ///   - websocket: The WebSocket fallback raced against QUIC for `http(s)` URLs.
     ///   - once: Dial once instead of redialing with backoff whenever the transport drops.
     ///   - backoff: Retry pacing for the automatic reconnect.
@@ -23,6 +27,9 @@ public final class Client: Sendable {
     public init(
         bind: String? = nil,
         versions: [String] = [],
+        timeoutUs: UInt64? = nil,
+        raceUs: UInt64? = nil,
+        resolutionDelayUs: UInt64? = nil,
         tls: ClientTls = ClientTls(),
         quic: QuicConfig = QuicConfig(),
         websocket: WebSocketConfig = WebSocketConfig(),
@@ -34,6 +41,9 @@ public final class Client: Sendable {
         ffi = try MoqClient(config: MoqClientConfig(
             bind: bind,
             versions: versions,
+            timeoutUs: timeoutUs,
+            raceUs: raceUs,
+            resolutionDelayUs: resolutionDelayUs,
             tls: tls,
             quic: quic,
             websocket: websocket,
@@ -53,6 +63,17 @@ public final class Client: Sendable {
     public func cancel() {
         ffi.cancel()
     }
+}
+
+/// The protocol versions offered by default, most preferred first, spelled the way
+/// `Client(versions:)` takes them.
+public func versions() -> [String] {
+    moqVersions()
+}
+
+/// Whether this build can write qlog traces for `QuicConfig.qlog`.
+public func qlogSupported() -> Bool {
+    moqQlogSupported()
 }
 
 /// An established MoQ session.

@@ -21,6 +21,8 @@ typealias ServerConfig = uniffi.moq.MoqServerConfig
 typealias ServerTls = uniffi.moq.MoqServerTls
 /** QUIC transport tuning, such as the peer's inbound stream cap. */
 typealias QuicConfig = uniffi.moq.MoqQuicConfig
+/** The congestion control family for a QUIC connection. */
+typealias CongestionControl = uniffi.moq.MoqCongestionControl
 /** The WebSocket fallback raced against QUIC: whether it runs and QUIC's head start. */
 typealias WebSocketConfig = uniffi.moq.MoqWebSocketConfig
 /** A live pub/sub session with a relay, exposing publish and consume origins. */

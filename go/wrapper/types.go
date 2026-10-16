@@ -25,6 +25,8 @@ type (
 	AudioFrame = ffi.MoqAudioFrame
 	// ConnectionStatus is a connection lifecycle transition reported by Session.Status.
 	ConnectionStatus = ffi.MoqConnectionStatus
+	// CongestionControl is the congestion control family for a QUIC connection.
+	CongestionControl = ffi.MoqCongestionControl
 	// ErrorScope is whether a protocol code is from the session or stream registry.
 	ErrorScope = ffi.MoqErrorScope
 	// FetchGroupOptions configures a single FetchGroup call, including its optional freshness budget.
@@ -142,6 +144,25 @@ const (
 	// ConnectionStatusMigrating means the peer sent a GOAWAY; the replacement is being dialed while the old session keeps serving.
 	ConnectionStatusMigrating = ffi.MoqConnectionStatusMigrating
 )
+
+// CongestionControl values.
+const (
+	// CongestionControlLoss is loss-based (CUBIC): it chases throughput, so the send rate sawtooths.
+	CongestionControlLoss = ffi.MoqCongestionControlLoss
+	// CongestionControlDelay is delay-based (BBR): it keeps queues short and the send rate steady.
+	CongestionControlDelay = ffi.MoqCongestionControlDelay
+)
+
+// Versions lists the protocol versions offered by default, most preferred
+// first, spelled the way WithVersions takes them.
+func Versions() []string {
+	return ffi.MoqVersions()
+}
+
+// QlogSupported reports whether this build can write qlog traces for WithQUICQlog.
+func QlogSupported() bool {
+	return ffi.MoqQlogSupported()
+}
 
 // LogLevel configures the native tracing log level (e.g. "info", "debug").
 func LogLevel(level string) error {
