@@ -72,7 +72,21 @@ pub(crate) fn anchor() -> (Instant, Wall) {
 	if let Some(anchor) = paused::anchor() {
 		return anchor;
 	}
-	*ANCHOR.get_or_init(|| (now(), wall()))
+	*ANCHOR.get_or_init(|| (real_now(), wall()))
+}
+
+/// [`now`] from the host's real clock, so an advanced paused runtime sharing the
+/// origin cannot skew the anchor every unpaused caller maps through.
+#[cfg(all(feature = "runtime", any(not(target_arch = "wasm32"), target_os = "wasi")))]
+fn real_now() -> Instant {
+	let origin = ORIGIN.get_or_init(|| host::Instant::from_std(std::time::Instant::now()));
+	Instant::from_origin(LEAD + std::time::Instant::now().saturating_duration_since(origin.into_std()))
+}
+
+/// The browser has one clock and no paused runtimes.
+#[cfg(all(target_arch = "wasm32", not(target_os = "wasi")))]
+fn real_now() -> Instant {
+	now()
 }
 
 /// A host timer for `at`, on the origin it was created with.
@@ -279,6 +293,26 @@ mod tests {
 			let (instant, _) = crate::anchor();
 			assert_eq!(instant, crate::now());
 		});
+	}
+
+	/// A paused runtime sharing the origin cannot skew the anchor of unpaused
+	/// callers by advancing its clock before the anchor is first taken.
+	#[test]
+	fn a_later_paused_runtime_does_not_skew_the_anchor() {
+		let _ = crate::now();
+		// Built after the origin, so it counts from the shared origin.
+		let runtime = tokio::runtime::Builder::new_current_thread()
+			.enable_time()
+			.start_paused(true)
+			.build()
+			.unwrap();
+		runtime.block_on(async {
+			let _ = crate::now();
+			tokio::time::advance(Duration::from_secs(3_600)).await;
+			let _ = crate::anchor();
+		});
+		let (instant, _) = crate::anchor();
+		assert!(instant <= crate::now(), "{instant:?} > {:?}", crate::now());
 	}
 
 	/// A fresh clock names moments before the process started, as std's does, so

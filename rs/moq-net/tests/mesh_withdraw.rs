@@ -22,7 +22,7 @@ fn produce_origin(hop: u64) -> origin::Producer {
 
 /// An origin holding route updates for `hold`. Its cache never expires idle
 /// groups: nothing here carries media, and the expiry sweep would keep a timer
-/// armed forever, so [`moq_clock::sim::yield_now`] could never see the mesh settle.
+/// armed forever, so [`moq_clock::sim::idle`] could never see the mesh settle.
 fn produce(hop: u64, hold: Duration) -> origin::Producer {
 	let mut config = origin::Config::new(Hop::new(hop).unwrap());
 	config.pool = cache::Pool::unbounded();
@@ -41,14 +41,8 @@ enum Kind {
 	End,
 }
 
-/// Let every bounded link, hold, and quarantine deadline in these meshes elapse.
-async fn settle() {
-	// Awaiting one far deadline lets the simulator visit intervening deadlines in order,
-	// preserving link latency and update-hold semantics while advancing no wall time.
-	moq_clock::sleep(Duration::from_secs(60)).await;
-}
-
-/// Every update per prefix the watcher has seen. Await [`settle`] first.
+/// Every update per prefix the watcher has seen. Await [`moq_clock::sim::idle`]
+/// first, so every link, hold and quarantine in the mesh has settled.
 fn drain(watched: &mut mpsc::UnboundedReceiver<(String, Kind)>) -> HashMap<String, Vec<Kind>> {
 	let mut updates = HashMap::<String, Vec<Kind>>::new();
 	while let Ok((prefix, kind)) = watched.try_recv() {
@@ -114,7 +108,7 @@ impl Mesh {
 				broadcast
 			})
 			.collect();
-		settle().await;
+		moq_clock::sim::idle().await;
 		let updates = drain(&mut self.watched);
 		assert_eq!(updates.len(), count);
 		for (prefix, kinds) in updates {
@@ -151,7 +145,7 @@ async fn full_mesh_withdraw_retracts_once(version: &str) {
 	let mut mesh = Mesh::new(version, 8, &full_mesh(8)).await;
 	let broadcasts = mesh.publish(100, 0).await;
 	drop(broadcasts);
-	settle().await;
+	moq_clock::sim::idle().await;
 	let updates = drain(&mut mesh.watched);
 	assert_eq!(updates.len(), 100);
 	for (prefix, kinds) in updates {
@@ -170,7 +164,7 @@ async fn partial_mesh_withdraw_then_republish() {
 	let mut mesh = Mesh::new("moq-lite-06", 12, &ring_with_chords(12)).await;
 	let broadcasts = mesh.publish(100, 0).await;
 	drop(broadcasts);
-	settle().await;
+	moq_clock::sim::idle().await;
 	let updates = drain(&mut mesh.watched);
 	assert_eq!(updates.len(), 100);
 	for (prefix, kinds) in updates {
@@ -232,7 +226,7 @@ async fn partial_mesh_withdraw_retracts_once() {
 	for publisher in [5, 13, 22, 26, 32] {
 		let broadcast = nodes[publisher].create_broadcast(format!("room/{publisher}")).unwrap();
 		broadcast.announce(Default::default()).unwrap();
-		settle().await;
+		moq_clock::sim::idle().await;
 		for (relay, watched) in watched.iter_mut().enumerate() {
 			let updates = drain(watched);
 			assert!(
@@ -242,7 +236,7 @@ async fn partial_mesh_withdraw_retracts_once() {
 		}
 
 		drop(broadcast);
-		settle().await;
+		moq_clock::sim::idle().await;
 		let mut hunted = Vec::new();
 		for (relay, watched) in watched.iter_mut().enumerate() {
 			let updates = drain(watched);
@@ -286,13 +280,13 @@ async fn retracted_relay_ignores_a_stale_path() {
 
 	let broadcast = nodes[7].create_broadcast("room/7").unwrap();
 	broadcast.announce(Default::default()).unwrap();
-	settle().await;
+	moq_clock::sim::idle().await;
 	for watched in watched.iter_mut() {
 		drain(watched);
 	}
 
 	drop(broadcast);
-	settle().await;
+	moq_clock::sim::idle().await;
 	let mut revived = Vec::new();
 	for (relay, watched) in watched.iter_mut().enumerate() {
 		let kinds = drain(watched).remove("room/7").unwrap();
@@ -349,7 +343,7 @@ impl Cluster {
 			relays: relays.iter().map(|relay| watch(relay.consume().announced())).collect(),
 		};
 		// Let every session's announce interest land before anything is published.
-		settle().await;
+		moq_clock::sim::idle().await;
 		assert!(drain(&mut cluster.client).is_empty());
 		cluster
 	}
@@ -359,7 +353,7 @@ impl Cluster {
 	async fn publish(&mut self, path: &str) -> (broadcast::Producer, Vec<Kind>) {
 		let broadcast = self.publisher.create_broadcast(path).unwrap();
 		broadcast.announce(Default::default()).unwrap();
-		settle().await;
+		moq_clock::sim::idle().await;
 		let client = drain(&mut self.client).remove(path).unwrap();
 		assert_ne!(client.last(), Some(&Kind::End), "client: {client:?}");
 		for (relay, watched) in self.relays.iter_mut().enumerate() {
@@ -372,7 +366,7 @@ impl Cluster {
 	/// Close `broadcast` cleanly: what the watching client, then each relay, saw.
 	async fn close(&mut self, path: &str, broadcast: broadcast::Producer) -> (Vec<Kind>, Vec<Vec<Kind>>) {
 		drop(broadcast);
-		settle().await;
+		moq_clock::sim::idle().await;
 		let client = drain(&mut self.client).remove(path).unwrap();
 		let mut relays = Vec::new();
 		for watched in self.relays.iter_mut() {
