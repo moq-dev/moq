@@ -621,7 +621,9 @@ impl Timelines {
 			let sequence = live.segmenter.sequence();
 			let declared = live.segmenter.declared;
 			live.segmenter = Segmenter::new(config).with_sequence(sequence);
-			live.segmenter.declared = declared;
+			if declared.is_some() {
+				live.segmenter.declared = declared;
+			}
 			drop(live);
 			return Ok(Recorder { live: existing.clone() });
 		}
@@ -1309,6 +1311,17 @@ mod test {
 		assert_eq!(video[1].end, at(3), "the terminal flush ends after the finished group");
 		let catalog = read(&broadcast, &section, "catalog.json").await;
 		assert_eq!(catalog.len(), 1, "the catalog does not wait for the video");
+	}
+
+	#[test]
+	fn an_empty_enrollment_does_not_mask_a_later_hint() {
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let timelines = Timelines::new(&broadcast);
+		drop(timelines.track("video", Config::default()).unwrap());
+		let _video = timelines
+			.track("video", Config::default().with_duration_hint(Duration::from_secs(6)))
+			.unwrap();
+		assert_eq!(timelines.section().timelines["video"].duration, Some(6_000));
 	}
 
 	#[test]
