@@ -1,7 +1,7 @@
 //! JSON publishing over [`moq-net`](moq_net) tracks, in three modes:
 //!
-//! - [`snapshot`]: **lossy**. One JSON value updated over time; a consumer only gets the most
-//!   recent value. Intermediate updates are collapsed and older groups are dropped.
+//! - [`snapshot`]: **lossy**. One JSON value updated over time; `next` yields states inside the
+//!   drift budget, while `latest` skips to the newest state. Superseded groups may be lost.
 //! - [`stream`]: **lossless**. An ordered append-log of self-contained records; every record is
 //!   preserved and delivered in order, nothing is ever superseded.
 //! - [`window`]: **bounded**. An ordered run of records appended to the back and dropped from the

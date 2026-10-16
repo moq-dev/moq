@@ -62,7 +62,7 @@ impl<E: CatalogExt> Consumer<E> {
 	/// that from the operator while the missing rendition surfaces much later as a track that
 	/// never fills.
 	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Catalog<E>>>> {
-		let catalog = ready!(self.inner.poll_next(waiter))?;
+		let catalog = ready!(self.inner.poll_latest(waiter))?.map(|value| value.value);
 		if let Some(catalog) = catalog.as_ref() {
 			catalog.check_renditions()?;
 			check_resolvable(&self.base, catalog)?;

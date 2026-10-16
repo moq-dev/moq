@@ -17,6 +17,8 @@ import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.onCompletion
 import kotlinx.serialization.serializer
+import kotlin.time.Duration
+import kotlin.time.Duration.Companion.microseconds
 
 /** Publishes lossy latest-value JSON snapshots on a track it takes over. */
 typealias SnapshotProducer = uniffi.moq.MoqJsonSnapshotProducer
@@ -30,6 +32,19 @@ typealias StreamConsumer = uniffi.moq.MoqJsonStreamConsumer
 typealias SnapshotConfig = uniffi.moq.MoqJsonSnapshotConfig
 /** Configures a lossless JSON stream track. */
 typealias StreamConfig = uniffi.moq.MoqJsonStreamConfig
+/** A JSON string and the timestamp of the frame that carried it. */
+typealias Value = uniffi.moq.MoqJsonValue
+
+/** The frame's timestamp on the broadcast clock, or null when untimed. */
+val Value.timestamp: Duration?
+    get() = timestampUs?.toLong()?.microseconds
+
+/** A decoded JSON value and its frame timestamp on the broadcast clock, or null when untimed. */
+data class Timed<T>(val value: T, val timestamp: Duration?)
+
+/** Decode [Value.value] as [T], keeping the timestamp. */
+inline fun <reified T> Value.decode(): Timed<T> =
+    Timed(MoqJson.decodeFromString(serializer<T>(), value), timestamp)
 
 /**
  * Publish [value] as a JSON snapshot, superseding the last. A no-op when unchanged.
@@ -48,10 +63,12 @@ inline fun <reified T> StreamProducer.append(value: T, timestampUs: ULong? = nul
 }
 
 /**
- * Stream of JSON values (as strings) from a snapshot track, yielding the latest reconstructed
- * value. A consumer that has fallen behind collapses the backlog to the latest.
+ * Stream of each JSON state from a snapshot track, in order.
+ *
+ * Groups older than the subscription's `maxDelayUs` are skipped, so a playhead reader sets that
+ * budget to its distance behind live. Call [SnapshotConsumer.latest] to skip to the newest state.
  */
-fun SnapshotConsumer.values(): Flow<String> = flow {
+fun SnapshotConsumer.values(): Flow<Value> = flow {
     while (true) {
         currentCoroutineContext().ensureActive()
         emit(next() ?: break)
@@ -60,8 +77,8 @@ fun SnapshotConsumer.values(): Flow<String> = flow {
     if (cause is CancellationException) cancel()
 }
 
-/** Stream of JSON records (as strings) from a stream track, in order. */
-fun StreamConsumer.values(): Flow<String> = flow {
+/** Stream of JSON records from a stream track, in order. */
+fun StreamConsumer.values(): Flow<Value> = flow {
     while (true) {
         currentCoroutineContext().ensureActive()
         emit(next() ?: break)
@@ -71,18 +88,17 @@ fun StreamConsumer.values(): Flow<String> = flow {
 }
 
 /**
- * Stream of decoded snapshot values, yielding the latest reconstructed value.
+ * Stream of decoded snapshot states, in order.
  *
- * A consumer that has fallen behind collapses the backlog to the latest. Use
- * [SnapshotConsumer.values] for the undecoded JSON strings.
+ * Use [SnapshotConsumer.values] for the undecoded JSON strings.
  */
-inline fun <reified T> SnapshotConsumer.valuesAs(): Flow<T> =
-    values().map { MoqJson.decodeFromString(serializer<T>(), it) }
+inline fun <reified T> SnapshotConsumer.valuesAs(): Flow<Timed<T>> =
+    values().map { it.decode<T>() }
 
 /**
  * Stream of decoded stream records, in order.
  *
  * Use [StreamConsumer.values] for the undecoded JSON strings.
  */
-inline fun <reified T> StreamConsumer.valuesAs(): Flow<T> =
-    values().map { MoqJson.decodeFromString(serializer<T>(), it) }
+inline fun <reified T> StreamConsumer.valuesAs(): Flow<Timed<T>> =
+    values().map { it.decode<T>() }

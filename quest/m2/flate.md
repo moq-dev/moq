@@ -28,7 +28,8 @@ What remains:
 - moq-ffi has no consume side for flate tracks. Add consumers mirroring the
   `json` ones so each wrapper can read what it writes.
 - Add consumers to each wrapper's `flate` namespace, following `json` and
-  the timestamp-preserving `next()` / `latest()` contract.
+  the timestamp-preserving `next()` / `latest()` contract: return a payload
+  plus `timestamp_us` record shaped like `MoqJsonValue` (#5677).
 - Document in `doc/lib/{py,swift,kt,go,dart}` beside the JSON entry.
 - Tests: a round trip in each wrapper that has tests, and one cross-language
   check that a wrapper-published group decodes with `@moq/flate`. Run
@@ -37,7 +38,3 @@ What remains:
 Public API: additive on top of #4519. Wire, catalog, and relay: none.
 Compression stays invisible to `moq-net`; a compressed track is announced,
 routed, and cached like any other.
-
-## Required
-
-- [Data consumer timestamps](/quest/m1/data-consumer-timestamps.md) - establishes the consumer contract these new bindings use

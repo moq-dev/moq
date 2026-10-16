@@ -143,6 +143,25 @@ These land with the next breaking release, not the 2026-09-23 train.
   now carries `moq_net::Error`, so it is no longer `PartialEq`. moq-mux's
   `Error::Binary` is `Error::Flate`. In TypeScript, import `Snapshot` and
   `Stream` from `@moq/flate`.
+- **Rust data consumers return `Timed<T>`.** `moq_json` and `moq_flate` snapshot
+  and stream `next`/`poll_next`, and the moq-mux JSON/binary wrappers, now return
+  `.value` plus optional `.at`, preserving the frame's exact timestamp and scale.
+  An untimed frame keeps `None`; a timestamp of zero remains present. Snapshot
+  `next` yields each state inside the subscription's drift budget. Use `latest`
+  (or `poll_latest`) for the previous collapse-to-newest behavior, and set
+  `max_delay` when following a playhead behind live. The mux wrappers refuse
+  `latest` on a stream rather than discard lossless records. Track framing is
+  unchanged.
+- **JSON consumers in every binding return the frame timestamp.** moq-ffi's
+  `MoqJsonSnapshotConsumer` and `MoqJsonStreamConsumer` `next()` return a
+  `MoqJsonValue` (`value` plus `timestamp_us`, null when untimed) instead of a
+  string, and the snapshot consumer adds `latest()`. Its `next()` now yields each
+  state in order; call `latest()` for the old collapse-to-newest read. Python
+  and Go consumers yield `json.Timed` (`value`, `timestamp` as a duration), Swift
+  yields `Json.Timed` (`value`, `timestampUs`), Kotlin's `values()` emits `Value`
+  and `valuesAs<T>()` emits `Timed<T>`, and Dart and C++ return `Value` /
+  `JsonValue`. C's `moq_json_value` gains `timestamp_us` and `timestamp_present`,
+  and a snapshot callback now fires for each state rather than only the newest.
 - **moq-ffi data tracks wrap a track.** The broadcast's
   `publish_binary_*`, `publish_json_*`, and `subscribe_json_*` are gone.
   Create the track with `publish_track` or `subscribe_track`, then construct
