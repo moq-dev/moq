@@ -8,9 +8,6 @@
 //! `moq-boy`, which pauses its emulator on `track::Producer::used()` /
 //! `unused()`.
 
-#[cfg(feature = "capture")]
-use std::time::Instant;
-
 use moq_mux::catalog::hang::CatalogExt;
 #[cfg(feature = "capture")]
 use moq_mux::rate;
@@ -561,7 +558,7 @@ async fn apply_estimate(
 		return;
 	};
 
-	let Some(bitrate) = control.update(estimate, Instant::now()) else {
+	let Some(bitrate) = control.update(estimate, moq_net::time::now()) else {
 		return;
 	};
 
@@ -1087,10 +1084,15 @@ mod tests {
 		impl Fixture {
 			/// Start the capture loop on a broadcast whose clock began `behind` ago, at `wall`.
 			async fn start(behind: Duration, wall: SystemTime) -> Self {
+				// The capture stream counts on the host clock and the broadcast on moq-clock; the
+				// loop correlates the two, so each epoch is the same moment on its own clock.
 				let epoch = Instant::now()
 					.checked_sub(behind)
 					.expect("a monotonic clock that far back");
-				let clock = moq_mux::Clock::at(epoch, wall).unwrap();
+				let start = moq_net::time::now()
+					.checked_sub(behind)
+					.expect("a monotonic clock that far back");
+				let clock = moq_mux::Clock::at(start, wall).unwrap();
 				let mut broadcast = moq_net::broadcast::Info::new().produce();
 				let consumer = broadcast.consume();
 				let config = moq_mux::catalog::Config::default()
