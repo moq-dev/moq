@@ -45,7 +45,7 @@ The relay's `/metrics` endpoint already carries the ring-level counters
 row per io_uring worker.
 
 Decided in the 2026-09-30 audit: io_uring is off by default and ships in no
-package, and none of the uring micro-opts is measured on noq. The unmeasured
+package, and none of the uring micro-opts is measured on `moq-quic`. The unmeasured
 ones moved out (3200 to m2; 3129 with the open contract, 3201, 3202, and 3204
 to m3), and NAPI busy polling (3203), registered wait arguments (3205), and
 the priority `set_track` wakes were dropped. Egress requeue folded into Run to
@@ -78,7 +78,7 @@ optimization.
 - [Run to quiescence](/quest/m2/perf/uring-quiescence.md) - a received packet's reply is staged in the same turn, under a pass and train budget that keeps the fairness rule
 - [Demand aggregate](/quest/m2/perf/demand-aggregate.md) - a track subscribe, leave, or preference update no longer walks every reader of the track
 - [Ingest batch](/quest/m2/perf/ingest-batch.md) - relay ingest pays one lock, wake, and clock read per burst of whole frames instead of per frame
-- [Remove moq-uring copies](/quest/m2/perf/uring-copies.md) - egress, stream send and receive, and datagram receive stop copying where the QUIC core already allows it, after the fork
+- [Remove moq-uring copies](/quest/m2/perf/uring-copies.md) - egress, stream send and receive, and datagram receive stop copying where the QUIC core already allows it, with before/after measurements on `moq-quic`
 
 ## Related
 

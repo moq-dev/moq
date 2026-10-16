@@ -25,7 +25,7 @@ its own.
 
 - moq-net's transport trait gains `set_limits(Limits)` on the session,
   `Limits` carrying the three values, implemented by the moq-tokio and
-  moq-uring adapters over `moq-quic` after the fork switch; every other
+  moq-uring adapters over `moq-quic`; every other
   backend, the browser included, reports it unsupported.
 - The peer table gains the same three values (the stream limit and the two
   windows),

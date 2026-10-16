@@ -9,7 +9,7 @@ supports zero-copy, with a measured before/after.
 
 Found in the 2026-09-30 fork planning; none needs a QUIC API change:
 
-- Egress: `quic/noq/connection.rs` copies each GSO train from `scratch` into
+- Egress: `quic/driver/connection.rs` copies each GSO train from `scratch` into
   the TX buffer. Hand the TX pool's `Vec` to `poll_transmit` directly; it
   encrypts in place and only reserves when capacity is short.
 - Stream send: moq-net's `write_chunk(Bytes)` falls back to the trait's

@@ -15,7 +15,7 @@ group backlog.
 
 ## Plan
 
-Add a generic send-group primitive to noq-proto. A group owns its
+Add a generic send-group primitive to `moq-quic`. A group owns its
 strict priority and fair-share scheduler state; each stream owns only its
 order within that group. Prefer an owned group handle whose drop removes its
 scheduler state and whose priority can be updated without walking every open

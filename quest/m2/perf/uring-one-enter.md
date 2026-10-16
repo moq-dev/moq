@@ -42,7 +42,7 @@ the completed diagnostic used preflighted unique ports below the host's
 client ephemeral range, with no runtime retry. The benchmark CLI is unchanged.
 
 The completed work changes only the Worker loop, Shared::push, observations,
-and their consumers, leaving `rs/moq-uring/src/quic/noq` alone.
+and their consumers, leaving the QUIC driver alone.
 
 ## Related
 
