@@ -1,7 +1,7 @@
 //! Random workloads over a seeded, impaired network, asserting what must hold on any path
 //!
-//! `MOQ_QUIC_SEED` and `MOQ_QUIC_CASES` pick the workloads; a failure prints the shrunken case,
-//! whose `seed` replays its network.
+//! `MOQ_QUIC_SEED` and `MOQ_QUIC_CASES` pick the workloads, and `just rs quic-sim` sweeps a fresh
+//! seed. A failure prints the shrunken case, whose `seed` replays the run exactly.
 
 use proptest::prelude::*;
 use proptest::test_runner::{Config, RngSeed, TestCaseError, TestCaseResult, TestRunner};

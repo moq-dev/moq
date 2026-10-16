@@ -48,7 +48,8 @@ pub(super) struct Pair {
     /// Number of spin bit flips
     pub(super) spins: u64,
     last_spin: bool,
-    /// Draws every [`Link`] impairment, so the seed that built the pair replays them
+    /// Draws every [`Link`] impairment from the test thread's seed, as the endpoints draw their
+    /// keys and connection IDs, so `entropy::reseed` before building a pair replays all of them
     rng: StdRng,
     /// The next port [`Self::next_port`] hands out
     port: u16,
@@ -57,7 +58,7 @@ pub(super) struct Pair {
 impl Pair {
     pub(super) fn default_with_deterministic_pns() -> Self {
         let mut cfg = server_config();
-        let mut transport = cubic_transport();
+        let mut transport = TransportConfig::default();
         transport.deterministic_packet_numbers(true);
         cfg.transport = Arc::new(transport);
         Self::new(Default::default(), cfg)
@@ -68,15 +69,6 @@ impl Pair {
         let client = Endpoint::new(endpoint_config, None, true);
 
         Self::new_from_endpoint(client, server)
-    }
-
-    /// A default pair whose every random choice, from keys and connection IDs to the impairments
-    /// of its links, replays from `seed`
-    ///
-    /// Without it, a test replays from its thread's fixed starting seed.
-    pub(super) fn seeded(seed: u64) -> Self {
-        entropy::reseed(seed);
-        Self::default()
     }
 
     pub(super) fn new_from_endpoint(client: Endpoint, server: Endpoint) -> Self {
@@ -819,7 +811,7 @@ impl Write for SharedBuffer {
 
 pub(super) fn server_config() -> ServerConfig {
     let mut config = ServerConfig::with_crypto(Arc::new(server_crypto()));
-    config.transport = Arc::new(cubic_transport());
+    config.transport = Arc::new(TransportConfig::default());
     if !cfg!(feature = "bloom") {
         config
             .validation_token
@@ -834,7 +826,7 @@ pub(super) fn server_config_with_cert(
     key: PrivateKeyDer<'static>,
 ) -> ServerConfig {
     let mut config = ServerConfig::with_crypto(Arc::new(server_crypto_with_cert(cert, key)));
-    config.transport = Arc::new(cubic_transport());
+    config.transport = Arc::new(TransportConfig::default());
     config
         .validation_token
         .sent(2)
@@ -878,23 +870,22 @@ fn server_crypto_inner(
 
 pub(super) fn client_config() -> ClientConfig {
     let mut cfg = ClientConfig::new(Arc::new(client_crypto()));
-    cfg.transport = Arc::new(cubic_transport());
+    cfg.transport = Arc::new(TransportConfig::default());
     cfg
 }
 
 pub(super) fn client_config_with_deterministic_pns() -> ClientConfig {
     let mut cfg = ClientConfig::new(Arc::new(client_crypto()));
-    let mut transport = cubic_transport();
+    let mut transport = TransportConfig::default();
     transport.deterministic_packet_numbers(true);
     cfg.transport = Arc::new(transport);
     cfg
 }
 
-/// The transport the connection tests run: Cubic, as upstream quinn's do, instead of BBR3
+/// Cubic instead of the production BBR3, for a test that scripts Cubic's packet schedule
 ///
-/// The tests script lockstep packet schedules at zero RTT. The window-derived pacer stops pacing
-/// there, while BBR3 paces from its own rate and releases a burst nanoseconds later, depending on
-/// how much of its budget the randomly sized handshake spent. Tests of BBR3 opt in.
+/// At zero RTT the window-derived pacer stops pacing, so a lockstep script sees whole windows
+/// leave at once, while BBR3 paces from its own rate and releases a burst nanoseconds later.
 pub(super) fn cubic_transport() -> TransportConfig {
     let mut transport = TransportConfig::default();
     transport.congestion_controller_factory(Arc::new(congestion::CubicConfig::default()));
