@@ -140,8 +140,8 @@ async fn tokio_peer_session_widens_quic_limits() {
 	peer_widens_and_viewer_does_not(relay, port).await;
 }
 
-/// Every cluster dial is a peer link, so a client built from the plain `[quic]`
-/// settings still advertises the peer limits from the handshake on.
+/// Every cluster dial is a peer link, so a dial template carrying the plain
+/// `[quic]` settings still advertises the peer limits from the handshake on.
 #[tokio::test]
 async fn cluster_dials_widen_a_plain_client() {
 	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
@@ -179,14 +179,13 @@ async fn cluster_dials_widen_a_plain_client() {
 
 	let mut quic = moq_tokio::quic::Config::default();
 	quic.max_streams = Some(VIEWER_STREAMS);
-	let client = connect.init(quic).expect("client init");
 
 	let mut options = moq_relay::cluster::Options::new(Default::default());
 	options.config.connect = vec![moq_relay::cluster::Peer::new(format!("moql://127.0.0.1:{port}/"))];
 	options.peer.quic.max_streams = std::num::NonZeroU64::new(4 * PROBE as u64).unwrap();
 	let cluster = moq_relay::cluster::Cluster::new(options)
 		.expect("cluster init")
-		.with_client(client);
+		.with_connect(connect, quic);
 	let running = tokio::spawn(cluster.start().await.expect("cluster start").run());
 
 	let conn = tokio::time::timeout(TIMEOUT, server.accept())

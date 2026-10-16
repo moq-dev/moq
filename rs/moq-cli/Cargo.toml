@@ -28,7 +28,7 @@ doc = false
 [features]
 default = ["cluster-lan", "quic", "websocket", "nvidia", "s3", "gcs", "azure"]
 # Experimental transport with a heavy dependency tree, enabled only on request.
-iroh = ["moq-tokio/iroh"]
+iroh = ["moq-relay/iroh", "moq-tokio/iroh"]
 # LAN discovery and meshing (`--cluster-lan`).
 cluster-lan = ["moq-relay/cluster-lan"]
 jemalloc = ["moq-tokio/jemalloc"]

@@ -344,18 +344,6 @@ impl Client {
 		})
 	}
 
-	/// Dial with `limits` in place of the configured stream limit and windows.
-	pub fn with_limits(mut self, limits: crate::quic::Limits) -> Self {
-		let mut transport = (*self.transport).clone();
-		let streams = driver::VarInt::from_u64(limits.max_streams.get()).unwrap_or(driver::VarInt::MAX);
-		transport.max_concurrent_bidi_streams(streams);
-		transport.max_concurrent_uni_streams(streams);
-		transport.receive_window(driver::VarInt::from_u64(limits.receive_window.get()).unwrap_or(driver::VarInt::MAX));
-		transport.send_window(limits.send_window.get());
-		self.transport = Arc::new(transport);
-		self
-	}
-
 	/// Close every connection, then wait until each has sent its close to the peer.
 	pub async fn close(self) {
 		self.quic.close(driver::VarInt::from_u32(0), b"client shutdown");

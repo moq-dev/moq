@@ -24,7 +24,6 @@ use crate::{Instant, QlogStream};
 /// for higher bandwidths and latencies increases worst-case memory consumption, but does not impair
 /// performance at lower bandwidths and latencies. The default configuration is tuned for a 100Mbps
 /// link with a 100ms round trip time.
-#[derive(Clone)]
 pub struct TransportConfig {
     pub(crate) max_concurrent_bidi_streams: VarInt,
     pub(crate) max_concurrent_uni_streams: VarInt,

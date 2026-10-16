@@ -811,7 +811,7 @@ struct LanAuth {
 /// Construction settings for a [`Cluster`]: identity, discovery, and the origin cache.
 ///
 /// The origin is built once from these, so cache settings cannot detach a handle
-/// taken after construction. Independent services ([`Cluster::with_client`],
+/// taken after construction. Independent services ([`Cluster::with_connect`],
 /// [`Cluster::with_stats`]) attach afterwards without rebuilding it.
 #[derive(Default)]
 #[non_exhaustive]
@@ -915,21 +915,21 @@ struct Work {
 /// origin. Loop prevention and route preference come from the hop list carried
 /// on each announced route (see [`moq_net::origin::Route`]).
 ///
-/// Construct with [`Cluster::new`], then attach a QUIC client and (optionally)
+/// Construct with [`Cluster::new`], then attach a dial template and (optionally)
 /// a [`stats::Registry`](moq_net::stats::Registry) with the `with_*` builder
 /// methods. Those builders do not rebuild the origin. A cluster without a
-/// client can serve local sessions but cannot dial remote peers.
+/// dial template can serve local sessions but cannot dial remote peers.
 #[derive(Clone)]
 pub struct Cluster {
 	session_limits: moq_net::session::Limits,
 	peer_limits: moq_net::session::Limits,
 	peer_quic: moq_tokio::quic::Limits,
 	config: Config,
-	client: Option<moq_tokio::Client>,
-	/// Dial template for LAN peers that pin a fingerprint; static and API
-	/// dials keep [`Self::client`].
+	/// Dial template every peer dial is built from; see [`Self::peer_client`].
 	connect: Option<moq_tokio::connect::Config>,
 	quic: Option<moq_tokio::quic::Config>,
+	#[cfg(feature = "iroh")]
+	iroh: Option<moq_tokio::iroh::Endpoint>,
 	/// Bound listen port and optional generated-certificate fingerprint.
 	advertise: Option<LanAdvertise>,
 	/// Set by [`Self::start`] when LAN discovery is on, so inbound
@@ -1011,7 +1011,7 @@ impl Cluster {
 	/// Creates a cluster with one origin, using [`Options`] for identity
 	/// and cache.
 	///
-	/// Use [`with_client`](Self::with_client) to enable dialing remote peers
+	/// Use [`with_connect`](Self::with_connect) to enable dialing remote peers
 	/// (required when `config.connect` is non-empty), and
 	/// [`with_stats`](Self::with_stats) to enable metrics publishing. Those
 	/// builders do not rebuild the origin.
@@ -1063,9 +1063,10 @@ impl Cluster {
 			peer_limits: peer.resolve(),
 			peer_quic: peer.quic.resolve(),
 			config,
-			client: None,
 			connect: None,
 			quic: None,
+			#[cfg(feature = "iroh")]
+			iroh: None,
 			advertise: None,
 			#[cfg(feature = "cluster-lan")]
 			lan_auth: Arc::new(std::sync::OnceLock::new()),
@@ -1173,24 +1174,21 @@ impl Cluster {
 		})
 	}
 
-	/// Attach a QUIC client used to dial cluster peers. Its dials get the
-	/// [`Options::peer`] QUIC limits, since every one of them is a peer.
+	/// Attach the dial template every peer dial is built from, each on its own
+	/// ephemeral socket with the [`Options::peer`] QUIC limits.
 	///
-	/// Required when `config.connect` is non-empty; [`start`](Self::start) returns
-	/// an error otherwise.
-	pub fn with_client(mut self, client: moq_tokio::Client) -> Self {
-		self.client = Some(client.with_quic_limits(self.peer_quic));
-		self
-	}
-
-	/// Attach the dial template used to build a per-peer client for LAN mesh
-	/// dials (fingerprint pinning, request-path versions, ephemeral bind).
-	///
-	/// Required when `--cluster-lan` is on; [`start`](Self::start) returns an
+	/// Required when any peer is configured; [`start`](Self::start) returns an
 	/// error otherwise.
 	pub fn with_connect(mut self, connect: moq_tokio::connect::Config, quic: moq_tokio::quic::Config) -> Self {
 		self.connect = Some(connect);
 		self.quic = Some(quic);
+		self
+	}
+
+	/// Dial `iroh://` peers through this endpoint.
+	#[cfg(feature = "iroh")]
+	pub fn with_iroh(mut self, iroh: moq_tokio::iroh::Endpoint) -> Self {
+		self.iroh = Some(iroh);
 		self
 	}
 
@@ -1206,9 +1204,9 @@ impl Cluster {
 
 	/// Attach the client TLS config used for `--cluster-connect-api` peer-list
 	/// fetches. Only its client identity is shared; the API has separate server
-	/// trust and verifies the hostname in its URL. Required for an HTTP(S) API; pass the same config
-	/// used to build the QUIC [`with_client`](Self::with_client) so the endpoint
-	/// sees this relay's cluster certificate.
+	/// trust and verifies the hostname in its URL. Required for an HTTP(S) API; pass the TLS config of
+	/// the [`with_connect`](Self::with_connect) template so the endpoint sees this
+	/// relay's cluster certificate.
 	pub fn with_client_tls(mut self, tls: rustls::ClientConfig) -> Self {
 		self.client_tls = Some(Arc::new(tls));
 		self
@@ -1368,8 +1366,8 @@ impl Cluster {
 	/// would release systemd's dependent units on a relay that is about to exit.
 	/// Call this before signalling readiness, and hand the result to `run`.
 	///
-	/// Bails when peers are configured to dial but no client was attached via
-	/// [`with_client`](Self::with_client).
+	/// Bails when peers are configured to dial but no usable dial template was
+	/// attached via [`with_connect`](Self::with_connect).
 	pub async fn start(self) -> anyhow::Result<Started> {
 		let node = self.config.node.clone();
 		let lan = self.lan();
@@ -1407,10 +1405,10 @@ impl Cluster {
 			});
 		}
 
-		anyhow::ensure!(
-			self.client.is_some(),
-			"cluster peers configured but no QUIC client attached (call Cluster::with_client)"
-		);
+		// Build one dial client up front, so a bad template fails startup rather
+		// than every dial.
+		self.peer_client(false, None)
+			.context("cluster peers configured but the dial template is unusable")?;
 
 		// Build here so malformed API roots fail startup, before background work.
 		let http = if self.config.connect_api.as_deref().is_some_and(connect_api_is_http) {
@@ -1793,13 +1791,7 @@ impl Cluster {
 		let redacted = moq_tokio::RedactedUrl::new(first);
 		tracing::info!(url = %redacted, "dialing cluster peer");
 
-		let client = if target.lan {
-			self.lan_client(target.fingerprint.as_deref())?
-		} else {
-			self.client
-				.clone()
-				.context("internal: cluster peer dial without an attached QUIC client")?
-		};
+		let client = self.peer_client(target.lan, target.fingerprint.as_deref())?;
 
 		// Cluster dials use their configured stats tier. Cluster peers carry no auth
 		// root, so presence is keyed under the empty root within the cluster tier.
@@ -1844,31 +1836,44 @@ impl Cluster {
 		}
 	}
 
-	/// A client for one LAN dial: request-path versions, ephemeral bind, and
-	/// the advertised fingerprint pinned on a clean TLS config so the relay's
-	/// CA roots cannot combine with it.
-	fn lan_client(&self, fingerprint: Option<&str>) -> anyhow::Result<moq_tokio::Client> {
+	/// A client for one peer dial, from the dial template: its own ephemeral
+	/// socket and the [`Options::peer`] QUIC limits, since every dial is a peer.
+	/// A LAN dial also keeps only request-path versions and pins the advertised
+	/// fingerprint on a clean TLS config, so the relay's CA roots cannot combine
+	/// with it.
+	fn peer_client(&self, lan: bool, fingerprint: Option<&str>) -> anyhow::Result<moq_tokio::Client> {
 		let mut connect = self
 			.connect
 			.clone()
-			.context("internal: LAN dial without Cluster::with_connect")?;
-		connect.backoff.timeout = Some(std::time::Duration::ZERO);
-		connect.once = Some(false);
+			.context("cluster dial without a dial template (call Cluster::with_connect)")?;
 		let mut bind = connect.resolve().bind;
 		bind.set_port(0);
 		connect.bind = Some(bind);
-		connect.version = connect
-			.versions()
-			.iter()
-			.filter(|version| Self::carries_request_path(version))
-			.copied()
-			.collect();
+		if lan {
+			connect.backoff.timeout = Some(std::time::Duration::ZERO);
+			connect.once = Some(false);
+			connect.version = connect
+				.versions()
+				.iter()
+				.filter(|version| Self::carries_request_path(version))
+				.copied()
+				.collect();
+		}
 		if let Some(fingerprint) = fingerprint {
 			connect.tls = moq_tokio::tls::Connect::default();
 			connect.tls.fingerprint = vec![fingerprint.to_string()];
 		}
-		let quic = self.quic.clone().unwrap_or_default();
-		Ok(connect.init(quic)?.with_quic_limits(self.peer_quic))
+		let mut quic = self.quic.clone().unwrap_or_default();
+		quic.max_streams = Some(self.peer_quic.max_streams.get());
+		quic.receive_window = Some(self.peer_quic.receive_window.get());
+		quic.send_window = Some(self.peer_quic.send_window.get());
+		let client = connect.init(quic)?;
+		#[cfg(feature = "iroh")]
+		let client = match &self.iroh {
+			Some(iroh) => client.with_iroh(iroh.clone()),
+			None => client,
+		};
+		Ok(client)
 	}
 
 	/// Start a reconnecting LAN session from discovered details. Tests wire this
@@ -1877,7 +1882,7 @@ impl Cluster {
 	fn dial_lan_target(&self, target: &DialTarget) -> anyhow::Result<moq_tokio::Connection> {
 		let addrs = moq_tokio::Addrs::collect(target.addrs()).context("peer advertised no reachable address")?;
 		let mut client = self
-			.lan_client(target.fingerprint.as_deref())?
+			.peer_client(true, target.fingerprint.as_deref())?
 			.with_origin(self.origin.clone().peer());
 		if let Some(cost) = target.cost {
 			client = client.with_cost(cost);

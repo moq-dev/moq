@@ -436,9 +436,13 @@ async fn spawn_moq(
 	let mut bandwidth = moq_net::bandwidth::Allocator::unlimited();
 	let mut connection = None;
 	let cluster = cluster
-		.with_client(client.clone())
 		.with_client_tls(moq.client.tls.build()?)
 		.with_connect(moq.client.clone(), moq.quic.clone());
+	#[cfg(feature = "iroh")]
+	let cluster = match net.iroh.clone() {
+		Some(iroh) => cluster.with_iroh(iroh),
+		None => cluster,
+	};
 	let origin = cluster.origin.clone();
 
 	if let Some(url) = moq.client.url.clone() {
@@ -1191,17 +1195,10 @@ mod tests {
 		])
 		.expect("parse");
 		assert!(invocation.moq.validate().is_ok());
-		let net = Net {
-			quic: invocation.moq.quic.clone(),
-			#[cfg(feature = "iroh")]
-			iroh: None,
-		};
-		let client = net.client(invocation.moq.client.clone()).expect("client");
 		let cluster = invocation
 			.moq
 			.cluster()
 			.expect("cluster")
-			.with_client(client)
 			.with_connect(invocation.moq.client.clone(), invocation.moq.quic.clone());
 		let err = cluster
 			.clone()
