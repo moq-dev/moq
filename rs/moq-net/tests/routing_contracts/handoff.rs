@@ -585,7 +585,8 @@ fn announcement_cost_follows_sessions_and_live_claims() {
 /// Random meshes with two origins and a client under random churn: claims
 /// change, sessions drop and return, messages are held and replayed out of
 /// step, the client changes interest, and an origin restarts with a fresh
-/// identity. Under merged floors, every view is always some revision of the
+/// identity. Under every rule, selected routes never loop, even right after a
+/// collection. Under merged floors, every view is always some revision of the
 /// origin's truth, nothing revives and nothing ends falsely, and once churn
 /// stops every node shows every live origin's current claims and holds
 /// nothing for a dead one. A node that collected an origin with no route left,
@@ -728,6 +729,7 @@ fn churn(rng: &mut XorShift, freshness: Freshness) -> Net {
 		if freshness == FLOORS {
 			net.check().unwrap();
 		}
+		loop_free(&net);
 	}
 
 	for &(a, b) in &links {
@@ -739,6 +741,24 @@ fn churn(rng: &mut XorShift, freshness: Freshness) -> Net {
 	}
 	assert!(net.run());
 	net
+}
+
+/// Collection drops a feasibility distance with no Babel GC timer, which is
+/// safe only because a node collects once no neighbor's entry remains, and an
+/// ordered session cannot deliver a stale advertisement after its retraction.
+fn loop_free(net: &Net) {
+	for id in (100..110).chain(200..210) {
+		for node in 0..RELAYS + 3 {
+			let mut at = node;
+			for hop in 0.. {
+				let Some(next) = net.route(at, id).and_then(|selected| selected.next) else {
+					break;
+				};
+				assert!(hop <= RELAYS + 3, "{id} loops from node {node}");
+				at = next;
+			}
+		}
+	}
 }
 
 /// After churn stops with every session up, each node shows exactly the live
