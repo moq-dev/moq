@@ -177,8 +177,8 @@ pub struct SubscribeArgs {
 	/// The format to write to stdout.
 	pub format: SubscribeFormat,
 
-	/// How far playback may drift from the live edge before skipping groups. TS also
-	/// holds every frame this long after its decode time (`--delay`).
+	/// How far playback may drift from the live edge before skipping groups. TS also runs
+	/// this far behind the source (`--delay`).
 	pub max_delay: Duration,
 
 	/// How long to wait for the broadcast to come back after it ends (TS only).

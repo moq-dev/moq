@@ -369,6 +369,11 @@ package-gst *args:
 gst-smoke *args:
     rs/moq-gst/smoke.sh "$@"
 
+# Held feed FETCH readiness across independent request and track counts.
+[positional-arguments]
+bench-feed-fetch *args:
+    bash sh/rs/nextest.sh cargo nextest run --locked --release -p moq-net --lib --run-ignored only -E 'test(benchmark_feed_fetch_wakes)' --success-output immediate "$@"
+
 # Device-free mixer cost, swept over sink count and frames per callback.
 bench-playback:
     bash sh/rs/nextest.sh cargo nextest run --locked --release -p moq-audio --features playback --run-ignored only -E 'test(benchmark_mixer_callbacks)' --success-output immediate

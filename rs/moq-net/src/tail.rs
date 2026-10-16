@@ -50,6 +50,14 @@ pub(crate) struct Tail {
 	streams: u64,
 	// Streams whose header arrived and that are still being read.
 	active: u64,
+	/// Fetches waiting on an accounted group, rather than every ledger write.
+	waiting: kio::Lock<Waiting>,
+}
+
+#[derive(Debug, Default)]
+struct Waiting {
+	groups: std::collections::BTreeMap<u64, kio::WaiterList>,
+	sweep: usize,
 }
 
 impl Default for Tail {
@@ -59,6 +67,7 @@ impl Default for Tail {
 			grace: GRACE,
 			streams: 0,
 			active: 0,
+			waiting: Default::default(),
 		}
 	}
 }
@@ -83,6 +92,7 @@ impl Tail {
 			return;
 		}
 
+		self.wake_groups(groups.clone());
 		// Every run the insert overlaps or touches merges with it into one.
 		let first = self.runs.partition_point(|run| run.groups.end < groups.start);
 		let last = self.runs.partition_point(|run| run.groups.start <= groups.end);
@@ -123,6 +133,11 @@ impl Tail {
 	/// Fold every gap older than the grace into the runs around it.
 	pub fn expire(&mut self, now: Instant) {
 		let grace = self.grace;
+		for (gap, at) in self.folds() {
+			if at <= now {
+				self.wake_groups(gap);
+			}
+		}
 		self.runs.dedup_by(|run, below| {
 			let expired = now.duration_since(run.since) >= grace;
 			if expired {
@@ -138,8 +153,8 @@ impl Tail {
 		groups.is_empty()
 			|| self
 				.runs
-				.iter()
-				.any(|run| run.groups.start <= groups.start && groups.end <= run.groups.end)
+				.get(self.runs.partition_point(|run| run.groups.end <= groups.start))
+				.is_some_and(|run| run.groups.start <= groups.start && groups.end <= run.groups.end)
 	}
 
 	/// When the ledger gives up on a missing `group`: once the grace has passed since a later
@@ -153,6 +168,40 @@ impl Tail {
 			true => None,
 			false => above.since.checked_add(self.grace),
 		}
+	}
+
+	/// Register only for this group's accounting, including an explicit drop.
+	pub fn watch_group(&self, group: u64, waiter: &kio::Waiter) {
+		let mut waiting = self.waiting.lock();
+		if waiting.groups.len() >= waiting.sweep {
+			waiting.groups.retain(|_, list| !list.is_empty());
+			waiting.sweep = (waiting.groups.len() * 2).max(16);
+		}
+		waiting.groups.entry(group).or_default().register(waiter);
+	}
+
+	fn wake_groups(&self, groups: Range<u64>) {
+		let mut woken = Vec::new();
+		{
+			let mut waiting = self.waiting.lock();
+			while let Some(at) = waiting.groups.range(groups.clone()).next().map(|(at, _)| *at) {
+				woken.extend(waiting.groups.remove(&at));
+			}
+		}
+		woken.iter_mut().for_each(kio::WaiterList::wake);
+	}
+
+	/// Gaps whose age bounds a held fetch, including the gap before the first arrival.
+	pub fn folds(&self) -> impl Iterator<Item = (Range<u64>, Instant)> + '_ {
+		let mut below = 0;
+		self.runs.iter().filter_map(move |run| {
+			let gap = below..run.groups.start;
+			below = run.groups.end;
+			if gap.is_empty() {
+				return None;
+			}
+			Some((gap, run.since.checked_add(self.grace)?))
+		})
 	}
 
 	/// The runs of `groups` not accounted for, in order.
