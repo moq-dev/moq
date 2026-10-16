@@ -84,6 +84,7 @@ have fixes on `main`: macOS tests (#5335), drill-sensitivity (#5338), loom
 - [qmux release backport](/quest/m0/qmux-credit-backport.md) - adopt the 0.5 fix independently of the next breaking cut
 
 - [Lite SETUP backport](/quest/m0/lite-setup-backport.md) - `release` closes a moq-lite session on a repeated SETUP parameter or a second Setup Stream, in a later 0.14.x patch (#5521)
+- [A discarded Retry no longer blocks the genuine one](/quest/m0/retry-after-invalid-retry.md) - one injected or corrupted Retry no longer kills a handshake, on `main` and then `release`
 - [Kotlin wrapper POM release](/quest/m0/kt-ffi-pom.md) - `dev.moq:moq` 0.5.2 ships from `release`, its POMs naming moq-ffi at `[0.4.3,0.5)`
 
 - [CI cost and latency](/quest/m0/ci/README.md) - PRs stop queueing behind hosted runner caps: macOS and Windows move to the merge queue, caches move to R2, and setup is skipped when no work is selected

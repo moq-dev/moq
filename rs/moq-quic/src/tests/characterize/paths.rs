@@ -269,7 +269,7 @@ fn second_retry_is_discarded() {
 /// A discarded Retry still counts as an authenticated packet, so the client then discards the
 /// server's genuine Retry of its retransmitted Initial too, and never connects
 #[test]
-#[ignore = "bug: /quest/m1/quic/retry-after-invalid-retry.md"]
+#[ignore = "bug: /quest/m0/retry-after-invalid-retry.md"]
 fn retry_after_invalid_retry() {
     let _guard = subscribe();
     for mangle in [bad_tag as Mangle, same_cid] {
