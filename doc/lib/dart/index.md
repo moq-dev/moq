@@ -5,10 +5,6 @@ description: Futures and streams for Flutter via the moq package
 
 # Dart and Flutter
 
-`FetchGroupOptions.maxDelayUs` optionally tightens a one-group fetch's
-freshness window. Leave it null to apply publisher retention alone; zero is an
-explicit live-edge budget.
-
 [![pub.dev](https://img.shields.io/pub/v/moq)](https://pub.dev/packages/moq)
 
 The [`moq`](https://pub.dev/packages/moq) package on pub.dev wraps the

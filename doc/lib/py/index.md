@@ -5,10 +5,6 @@ description: Async pub/sub for Python via the moq-rs package
 
 # Python
 
-`FetchGroupOptions.max_delay_us` optionally tightens a one-group fetch's
-freshness window. Leave it as `None` to apply publisher retention alone; zero
-is an explicit live-edge budget.
-
 [![PyPI](https://img.shields.io/pypi/v/moq-rs)](https://pypi.org/project/moq-rs/)
 
 `moq-rs` on PyPI (the `moq` name was taken), imported as `moq`. It wraps the

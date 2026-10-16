@@ -41,9 +41,9 @@ impl Message for Fetch<'_> {
 		let epoch = super::epoch::decode_epoch(r, version)?;
 		let track = Cow::Owned(r.string()?);
 		let priority = r.u8()?;
-		let max_delay = match version {
-			Version::Lite07 => r.varint_opt()?.map(std::time::Duration::from_millis),
-			_ => None,
+		let max_delay = match version.has_fetch_max_delay() {
+			true => r.varint_opt()?.map(std::time::Duration::from_millis),
+			false => None,
 		};
 		let group = r.varint()?;
 
@@ -80,15 +80,15 @@ impl Message for Fetch<'_> {
 		super::epoch::encode_epoch(w, version, self.epoch.as_ref())?;
 		w.string(&self.track)?;
 		w.u8(self.priority);
-		match version {
-			Version::Lite07 => w.varint_opt(
+		match version.has_fetch_max_delay() {
+			true => w.varint_opt(
 				self.max_delay
 					.map(|delay| u64::try_from(delay.as_nanos().div_ceil(1_000_000)))
 					.transpose()
 					.map_err(|_| EncodeError::BoundsExceeded)?,
 			)?,
-			_ if self.max_delay.is_some() => return Err(EncodeError::Version),
-			_ => {}
+			false if self.max_delay.is_some() => return Err(EncodeError::Version),
+			false => {}
 		}
 		w.varint(self.group)?;
 

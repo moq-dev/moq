@@ -1180,9 +1180,9 @@ export class Subscriber {
 	#state: TrackState;
 	#nextSequence = 0;
 	#cursor = new Signal<{ start: number; end?: number }>({ start: 0 });
-	// FETCH omission is unbounded, unlike SUBSCRIBE's zero default. Undefined means
-	// this is an ordinary subscription; null means an omitted FETCH budget.
-	#fetchMaxDelay?: Milli | null;
+	// A FETCH's own budget in place of the subscription's; unlike SUBSCRIBE's zero
+	// default, an omitted one is unbounded, leaving publisher retention alone.
+	#fetchBudget?: number;
 	// Which cursor owns this subscription. Both cursors draw from one buffer, so the
 	// first group read commits the track to arrival order and {@link ordered} commits
 	// it to sequence order; whichever wins is the only one allowed from here on.
@@ -1218,10 +1218,7 @@ export class Subscriber {
 			break;
 		}
 
-		const requested =
-			this.#fetchMaxDelay === undefined
-				? (this.#state.update.peek()?.maxDelay ?? 0)
-				: (this.#fetchMaxDelay ?? Number.POSITIVE_INFINITY);
+		const requested = this.#fetchBudget ?? this.#state.update.peek()?.maxDelay ?? 0;
 		const retained = this.#state.info.peek()?.maxAge;
 		return {
 			budget: retained === undefined ? requested : Math.min(requested, retained),
@@ -1351,7 +1348,7 @@ export class Subscriber {
 		hooks.tryRecvGroup = (subscriber) => subscriber.#tryRecvGroup();
 		hooks.groupChanged = (subscriber, fn) => subscriber.#groupChanged(fn);
 		hooks.fetchBudget = (subscriber, maxDelay) => {
-			subscriber.#fetchMaxDelay = maxDelay ?? null;
+			subscriber.#fetchBudget = maxDelay ?? Number.POSITIVE_INFINITY;
 		};
 		hooks.replaceGroups = (subscriber, groups) => subscriber.#replaceGroups(groups);
 		// The sequence cursor lives here (it shares the buffer and the drift anchor with

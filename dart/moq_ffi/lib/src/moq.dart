@@ -15,7 +15,7 @@ export "uniffi_runtime.dart";
 class MoqFetchGroupOptions {
   final int priority;
   final int? maxDelayUs;
-  MoqFetchGroupOptions({this.priority = 0, this.maxDelayUs});
+  MoqFetchGroupOptions({this.priority = 0, this.maxDelayUs = null});
 }
 
 class FfiConverterMoqFetchGroupOptions {

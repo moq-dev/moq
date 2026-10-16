@@ -1,10 +1,10 @@
+import type { Milli } from "@moq/clock";
 import type * as Epoch from "../epoch.ts";
 import * as Path from "../path.ts";
 import type { Reader, Writer } from "../stream.ts";
-import type { Milli } from "../time.ts";
 import { decodeEpoch, encodeEpoch } from "./epoch.ts";
 import * as Message from "./message.ts";
-import { hasFrameBounds, Version } from "./version.ts";
+import { hasFetchMaxDelay, hasFrameBounds, Version } from "./version.ts";
 
 function guardFetch(version: Version) {
 	switch (version) {
@@ -69,7 +69,7 @@ export class Fetch {
 		await encodeEpoch(w, version, this.epoch);
 		await w.string(this.track);
 		await w.u8(this.priority);
-		if (version === Version.DRAFT_07) await w.u53(this.maxDelay === undefined ? 0 : this.maxDelay + 1);
+		if (hasFetchMaxDelay(version)) await w.u53(this.maxDelay === undefined ? 0 : this.maxDelay + 1);
 		else if (this.maxDelay !== undefined) throw new Error("fetch maxDelay not supported for this version");
 		await w.u53(this.group);
 
@@ -87,7 +87,7 @@ export class Fetch {
 		const epoch = await decodeEpoch(r, version);
 		const track = await r.string();
 		const priority = await r.u8();
-		const encodedMaxDelay = version === Version.DRAFT_07 ? await r.u53() : 0;
+		const encodedMaxDelay = hasFetchMaxDelay(version) ? await r.u53() : 0;
 		const maxDelay = encodedMaxDelay > 0 ? ((encodedMaxDelay - 1) as Milli) : undefined;
 		const group = await r.u53();
 

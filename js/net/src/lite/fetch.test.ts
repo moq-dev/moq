@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
+import { Milli } from "@moq/clock";
 import * as Path from "../path.ts";
 import { Reader, Writer } from "../stream.ts";
-import { Milli } from "../time.ts";
 import { Fetch } from "./fetch.ts";
 import { Version } from "./version.ts";
 

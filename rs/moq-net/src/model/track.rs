@@ -3140,12 +3140,13 @@ impl Consumer {
 		}
 	}
 
-	/// Poll for group `sequence` falling a full `budget` behind this track's live edge,
-	/// as a reader would judge it, whether the track holds it or not; see
-	/// `TrackState::drifted`. Parks in this track's expiry index, so only a change that can
-	/// make the group stale, or land it here, wakes it. Pending for good once the track closes.
+	/// Poll for group `sequence` falling a full `budget`, clamped to this track's retention,
+	/// behind its live edge, as a reader would judge it, whether the track holds it or not;
+	/// see `TrackState::drifted`. Parks in this track's expiry index, so only a change that
+	/// can make the group stale, or land it here, wakes it. Pending for good once the track closes.
 	pub(crate) fn poll_stale(&self, sequence: u64, budget: Duration, waiter: &kio::Waiter) -> Poll<()> {
 		let state = self.state.read();
+		let budget = clamp_max_delay(budget, state.max_age_bound());
 		state.cache.wakes().watch_held(sequence, waiter);
 		match state.poll_drifted(sequence, None, budget, waiter) {
 			true => Poll::Ready(()),
@@ -3449,7 +3450,8 @@ impl group::Request {
 		self.priority
 	}
 
-	/// The widest age budget among callers sharing this upstream fetch.
+	/// The widest age budget among callers sharing this upstream fetch, for a handler that forwards it.
+	/// Each caller still enforces its own, so a handler serving locally can ignore it.
 	pub fn max_delay(&self) -> Option<Duration> {
 		self.max_delay
 	}
@@ -3620,12 +3622,10 @@ impl kio::Task for Fetching {
 		if self.resume.is_none()
 			&& let Some(routes) = self.state.read().routes.clone()
 		{
-			let options = group::Fetch::default()
-				.with_priority(self.priority)
-				.with_frame_start(self.frame_start);
-			let options = match self.max_delay {
-				Some(max_delay) => options.with_max_delay(max_delay),
-				None => options,
+			let options = group::Fetch {
+				priority: self.priority,
+				max_delay: self.max_delay,
+				frame_start: self.frame_start,
 			};
 			self.resume = Some(Box::new(routes.fetch_group(self.sequence, options)));
 		}
@@ -3640,9 +3640,9 @@ impl kio::Task for Fetching {
 			self.frame_start,
 			self.result.as_ref(),
 		);
-		let budget = clamp_max_delay(self.max_delay.unwrap_or(Duration::MAX), state.read().max_age_bound());
 		{
 			let state = state.read();
+			let budget = clamp_max_delay(self.max_delay.unwrap_or(Duration::MAX), state.max_age_bound());
 			state.cache.wakes().watch_landing(sequence, waiter);
 			if state.poll_drifted(sequence, None, budget, waiter) {
 				return Poll::Ready(Err(Error::Old));

@@ -5,10 +5,6 @@ description: Coroutines and Flow for Android and the JVM via dev.moq:moq
 
 # Kotlin
 
-`FetchGroupOptions.maxDelayUs` optionally tightens a one-group fetch's
-freshness window. Leave it null to apply publisher retention alone; zero is an
-explicit live-edge budget.
-
 [![Maven Central](https://img.shields.io/maven-central/v/dev.moq/moq)](https://central.sonatype.com/artifact/dev.moq/moq)
 
 `dev.moq:moq` on Maven Central: a Kotlin Multiplatform wrapper with a

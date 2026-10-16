@@ -5,14 +5,14 @@
  *
  * @module
  */
-import type { Instant } from "@moq/clock";
+import type { Instant, Milli } from "@moq/clock";
 import type { Dispose, Getter } from "@moq/signals";
 import type { Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
 import type * as Epoch from "./epoch.ts";
 import type { Frame, Consumer as GroupConsumer, Producer as GroupProducer } from "./group.ts";
 import { isAnonymous, type Route } from "./hop.ts";
 import * as Path from "./path.ts";
-import type { Milli, Timestamp } from "./time.ts";
+import type { Timestamp } from "./time.ts";
 import type { Groups, Location, Producer, Request, Subscriber } from "./track.ts";
 import type { Advertised, Advertisements } from "./wire.ts";
 

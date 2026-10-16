@@ -88,8 +88,6 @@ release the timebase handle on the calling goroutine.
 `NewCatalogConsumer`, `NewTrackConsumer`, and `FetchGroup` read
 catalog snapshots, live media, and one fetched media group. `NewGroupConsumer`
 decodes a raw group, such as one from `moq.TrackConsumer.RecvGroup` for arrival-order reads.
-`FetchGroupOptions.MaxDelayUs` is an optional freshness budget; nil uses the
-publisher's retention limit alone.
 Frames and `Flush` use `time.Duration`; `Demand()` owns track names and subscriber waits.
 
 `BroadcastProducer.Dynamic()` accepts subscriber-requested tracks. Call

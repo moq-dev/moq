@@ -60,6 +60,7 @@ import {
 	hasAnnounceId,
 	hasAnnounceOk,
 	hasDatagrams,
+	hasFetchMaxDelay,
 	hasOrder,
 	hasProbeRtt,
 	hasStreamCount,
@@ -1024,7 +1025,7 @@ export class Subscriber {
 		sequence: number,
 		priority: number,
 		group: netGroup.Producer,
-		maxDelay?: Time.Milli,
+		maxDelay?: Milli,
 	): Promise<void> {
 		const refused = unauthorized(broadcast);
 		// Arm before checking so revocation during setup or response cannot be missed.
@@ -1071,7 +1072,7 @@ export class Subscriber {
 		sequence: number,
 		priority: number,
 		group: netGroup.Producer,
-		maxDelay?: Time.Milli,
+		maxDelay?: Milli,
 	): Promise<{ stream: Stream; info: TrackInfo }> {
 		const { epoch, valid } = consumed;
 		const cancel = new AbortController();
@@ -1093,7 +1094,7 @@ export class Subscriber {
 					epoch,
 					track,
 					priority,
-					maxDelay: this.version === Version.DRAFT_07 ? maxDelay : undefined,
+					maxDelay: hasFetchMaxDelay(this.version) ? maxDelay : undefined,
 					group: sequence,
 				}).encode(stream.writer, this.version);
 				// A byte or an empty-group FIN accepts the fetch; a reset rejects it.
