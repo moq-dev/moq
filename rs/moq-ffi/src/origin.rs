@@ -725,7 +725,9 @@ mod supervision_tests {
 		let consumer = origin.consume().request_broadcast("routed".into()).await.unwrap();
 		let subscriber = consumer.subscribe_track("data".into(), None).await.unwrap();
 		let group = subscriber.recv_group().await.unwrap().unwrap();
-		let catalog = crate::media::MoqMediaCatalogConsumer::subscribe(&consumer).await.unwrap();
+		let catalog = crate::media::MoqMediaCatalogConsumer::subscribe(&consumer)
+			.await
+			.unwrap();
 		drop(consumer);
 		drop(origin);
 		*trigger

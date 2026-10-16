@@ -1147,10 +1147,7 @@ mod supervision_tests {
 			.write()
 			.unwrap_or_else(|_| unreachable!("test keeps its panic trigger open")) = true;
 		assert!(matches!(driver.finished().await, Err(Error::Panic)));
-		let result = rendition
-			.driver
-			.watch(std::future::pending::<Result<(), Error>>())
-			.await;
+		let result = rendition.driver.check();
 		assert!(matches!(result, Err(Error::Panic)), "{result:?}");
 	}
 }
