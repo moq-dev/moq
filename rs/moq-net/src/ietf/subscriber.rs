@@ -11198,7 +11198,10 @@ mod stitch_tests {
 			let result = h.subscriber.clone().recv_group(&mut stream).await;
 			assert!(matches!(result, Err(Error::Unsupported)), "{objects:?}: {result:?}");
 			assert!(
-				matches!(futures::FutureExt::now_or_never(h.track.closed()), Some(Error::Unsupported)),
+				matches!(
+					futures::FutureExt::now_or_never(h.track.closed()),
+					Some(Error::Unsupported)
+				),
 				"{objects:?}: the subscription must end with the refusal"
 			);
 		}

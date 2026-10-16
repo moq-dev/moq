@@ -1816,9 +1816,7 @@ test("Frame refuses draft-14 END_OF_TRACK properties", async () => {
 	// Object ID delta 0, one unknown integer property, zero payload length, END_OF_TRACK.
 	const wire = new Uint8Array([0, 2, 0x20, 7, 0, 4]);
 	const reader = new Reader(undefined, wire, Version.DRAFT_14);
-	await expect(reader.decode((c) => Frame.decode(c, flags, undefined))).rejects.toThrow(
-		EndOfTrackProperties,
-	);
+	await expect(reader.decode((c) => Frame.decode(c, flags, undefined))).rejects.toThrow(EndOfTrackProperties);
 });
 
 test("Frame decodes objects split at every byte", async () => {
