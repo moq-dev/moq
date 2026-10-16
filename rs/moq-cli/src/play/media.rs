@@ -455,8 +455,11 @@ async fn play_audio<O: Output>(
 	// all logs once rather than once per packet.
 	let mut dropping = false;
 
+	// A decoder segment only changes at a declared end or a gap, and a gap
+	// resets this, so any change of segment is a resume. A short segment can
+	// declare its end before its first PCM, so the end alone cannot mark it.
 	let receive = async {
-		let mut end = None;
+		let mut planned = None;
 		loop {
 			let event = match consumer.read().await {
 				Err(err) if !matches!(err, moq_audio::Error::Decode(_)) => return Err(err.into()),
@@ -465,13 +468,12 @@ async fn play_audio<O: Output>(
 			let ended = matches!(event, Ok(None));
 			let delay = consumer.delay();
 			match &event {
-				Ok(Some(moq_audio::decode::Read::End { segment, .. })) => end = Some(*segment),
-				Ok(Some(moq_audio::decode::Read::Gap { .. })) => end = None,
-				Ok(Some(moq_audio::decode::Read::Frame { segment, frame }))
-					if end.is_some_and(|end| end != *segment) =>
-				{
-					role.plan(frame.timestamp, Some(lead(delay, frame)));
-					end = None;
+				Ok(Some(moq_audio::decode::Read::Gap { .. })) => planned = None,
+				Ok(Some(moq_audio::decode::Read::Frame { segment, frame })) => {
+					let resumed = planned.replace(*segment).is_some_and(|planned| planned != *segment);
+					if resumed {
+						role.plan(frame.timestamp, Some(lead(delay, frame)));
+					}
 				}
 				_ => {}
 			}
@@ -483,7 +485,10 @@ async fn play_audio<O: Output>(
 		}
 	};
 	let play = async {
-		let mut end_segment = None;
+		// The segment the role's mapping serves, and an end declared for a later
+		// one, which can only be mapped once that segment resumes.
+		let mut mapped = None;
+		let mut deferred = None;
 		let mut sequential = false;
 		loop {
 			let (event, delay) = loop {
@@ -494,7 +499,7 @@ async fn play_audio<O: Output>(
 			};
 			let frame = match event {
 				Ok(Some(moq_audio::decode::Read::Frame { segment, frame })) => {
-					if end_segment.take_if(|end| *end != segment).is_some() {
+					if mapped.replace(segment).is_some_and(|mapped| mapped != segment) {
 						// A declared boundary preserves the old sink, unlike an undeclared hole.
 						drain(sink).await;
 						let first = lead(delay, &frame);
@@ -507,6 +512,11 @@ async fn play_audio<O: Output>(
 						if let Some(at) = at {
 							tokio::time::sleep_until(at.into()).await;
 						}
+						if let Some((ended, end)) = deferred.take()
+							&& ended == segment
+						{
+							role.end(end)?;
+						}
 						sequential = true;
 						timeline = AudioTimeline::default();
 						sink = speaker.sink(input.clone())?;
@@ -515,12 +525,16 @@ async fn play_audio<O: Output>(
 					frame
 				}
 				Ok(Some(moq_audio::decode::Read::End { segment, end })) => {
-					end_segment = Some(segment);
-					role.end(end)?;
+					if mapped.is_none_or(|mapped| mapped == segment) {
+						role.end(end)?;
+					} else {
+						deferred = Some((segment, end));
+					}
 					continue;
 				}
 				Ok(Some(moq_audio::decode::Read::Gap { .. })) => {
-					end_segment = None;
+					mapped = None;
+					deferred = None;
 					role.gap();
 					sequential = false;
 					continue;
