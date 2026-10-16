@@ -4519,6 +4519,11 @@ impl Subscriber {
 	/// upstream subscription (a reconnect, or another route) as a request for a group
 	/// that already came.
 	fn answer_new_group(&self, sequence: u64) {
+		// Only a DYNAMIC_GROUPS track forwards a request, so every other track (moq-lite's
+		// included) skips the lock on each group handed out.
+		if !self.info.dynamic_groups {
+			return;
+		}
 		let channel = match &self.inner {
 			Inner::Plain(cursor) => &cursor.subscription,
 			Inner::Resume(resume, _) => resume.subscription(),
@@ -8297,7 +8302,11 @@ mod test {
 	/// subscription, and leaves a subscriber once it is handed a group at or past it.
 	#[test]
 	fn new_group_requests_aggregate_out_of_sight() {
-		let mut producer = track_producer("test", Info::timed());
+		let info = Info {
+			dynamic_groups: true,
+			..Info::timed()
+		};
+		let mut producer = track_producer("test", info);
 		let wants = |new_group| Subscription {
 			new_group: Some(new_group),
 			..Default::default()
