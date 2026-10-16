@@ -34,10 +34,10 @@ check-changed list:
 workers:
     ../sh/js/workers.sh
 
-# Auto-fix lint and formatting issues, including the test harnesses.
+# Auto-fix lint and formatting issues in workspaces, harnesses, docs and demos.
 fix:
     bun install
-    bun biome check --write . ../test
+    bun biome check --write . ../test ../doc ../demo
 
 # Run all unit tests.
 test:
