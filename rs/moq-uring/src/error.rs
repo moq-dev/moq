@@ -11,6 +11,10 @@ pub enum Error {
 	/// An io_uring or socket operation failed.
 	#[error("io error: {0}")]
 	Io(#[from] std::io::Error),
+
+	/// A QUIC flow-control window does not fit a QUIC varint; names which one.
+	#[error("quic {0} must fit a QUIC varint")]
+	WindowRange(&'static str),
 }
 
 impl Error {

@@ -164,8 +164,9 @@ impl Default for Transport {
 /// The flow-control limits an established connection can change, such as a
 /// relay widening them once it knows the peer is another relay.
 ///
-/// Values past what QUIC can express saturate to its maximum. Each is non-zero
-/// because zero streams or a zero window credits nothing and wedges the connection.
+/// A stream count past what QUIC can express saturates to its maximum, while a
+/// receive window past a QUIC varint is refused. Each is non-zero because zero
+/// streams or a zero window credits nothing and wedges the connection.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Limits {
 	/// Max concurrent streams the peer may open, per direction.

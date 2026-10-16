@@ -1022,6 +1022,7 @@ impl Cluster {
 	///
 	/// Errors if `config.id` is set but invalid: it must be non-zero and below
 	/// 2^62 (the wire varint limit). An unset id picks a fresh random origin.
+	/// Errors too if the `peer.quic` receive window does not fit a QUIC varint.
 	pub fn new(options: Options) -> anyhow::Result<Self> {
 		let Options {
 			config,
@@ -1061,7 +1062,7 @@ impl Cluster {
 		Ok(Cluster {
 			session_limits: session.resolve(),
 			peer_limits: peer.resolve(),
-			peer_quic: peer.quic.resolve(),
+			peer_quic: peer.quic.resolve()?,
 			config,
 			connect: None,
 			quic: None,

@@ -145,12 +145,18 @@ impl Default for Quic {
 }
 
 impl Quic {
-	pub(crate) fn resolve(&self) -> moq_tokio::quic::Limits {
-		moq_tokio::quic::Limits {
+	/// Refuses a receive window QUIC cannot advertise, as `[quic]` does, so the
+	/// accept and dial paths never disagree about it.
+	pub(crate) fn resolve(&self) -> anyhow::Result<moq_tokio::quic::Limits> {
+		anyhow::ensure!(
+			self.receive_window.get() < 1 << 62,
+			"peer.quic.receive_window must fit a QUIC varint (below 2^62)"
+		);
+		Ok(moq_tokio::quic::Limits {
 			max_streams: self.max_streams,
 			receive_window: self.receive_window,
 			send_window: self.send_window,
-		}
+		})
 	}
 }
 

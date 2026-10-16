@@ -152,6 +152,24 @@ async fn tokio_peer_session_widens_quic_limits() {
 	peer_widens_and_viewer_does_not(relay, port).await;
 }
 
+/// A peer receive window QUIC cannot advertise is refused at load, as `[quic]`'s
+/// is, rather than saturating on accept and failing only once the relay dials.
+#[tokio::test]
+async fn oversized_peer_window_is_refused_at_load() {
+	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	let dir = tempfile::tempdir().expect("tempdir");
+	let mut config = config(dir.path());
+	config.peer.quic.receive_window = std::num::NonZeroU64::new(1 << 62).unwrap();
+	let err = match Relay::load(config).await {
+		Ok(_) => panic!("an oversized peer receive window must be refused"),
+		Err(err) => err,
+	};
+	assert!(
+		format!("{err:#}").contains("peer.quic.receive_window"),
+		"refused for the wrong reason: {err:#}"
+	);
+}
+
 /// Every cluster dial is a peer link, so a dial template carrying the plain
 /// `[quic]` settings still advertises the peer limits from the handshake on.
 #[tokio::test]

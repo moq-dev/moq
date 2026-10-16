@@ -352,15 +352,20 @@ impl Connection {
 
 	/// Change the connection's flow-control limits; a raise reaches the peer
 	/// on the next packet.
-	pub fn set_limits(&self, limits: crate::quic::Limits) {
+	///
+	/// Errors, changing nothing, on a receive window past a QUIC varint.
+	pub fn set_limits(&self, limits: crate::quic::Limits) -> Result<(), crate::Error> {
+		let window =
+			VarInt::from_u64(limits.receive_window.get()).map_err(|_| crate::Error::WindowRange("receive_window"))?;
 		let streams = VarInt::from_u64(limits.max_streams.get()).unwrap_or(VarInt::MAX);
 		let mut conn = self.shared.conn.borrow_mut();
 		conn.set_max_concurrent_streams(Dir::Bi, streams);
 		conn.set_max_concurrent_streams(Dir::Uni, streams);
-		conn.set_receive_window(VarInt::from_u64(limits.receive_window.get()).unwrap_or(VarInt::MAX));
+		conn.set_receive_window(window);
 		conn.set_send_window(limits.send_window.get());
 		drop(conn);
 		self.shared.kick();
+		Ok(())
 	}
 
 	/// Returns connection statistics.

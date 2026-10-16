@@ -1716,14 +1716,17 @@ impl Request {
 	/// once the peer is known to be another relay.
 	///
 	/// Errors on a transport that is not QUIC (qmux streams, iroh), which keeps
-	/// the limits its own config set.
+	/// the limits its own config set, and on a receive window past a QUIC varint,
+	/// leaving the limits unchanged.
 	pub fn set_quic_limits(&self, limits: crate::quic::Limits) -> crate::Result<()> {
 		#[cfg(feature = "quic")]
 		if let Some(conn) = &self.quic {
 			use crate::quic::driver::VarInt;
+			let window =
+				VarInt::from_u64(limits.receive_window.get()).map_err(|_| Error::WindowRange("receive_window"))?;
 			// Windows first: each setter can flush on its own, and the stream credit is
 			// what a peer waits on, so it must not overtake the window.
-			conn.set_receive_window(VarInt::from_u64(limits.receive_window.get()).unwrap_or(VarInt::MAX));
+			conn.set_receive_window(window);
 			conn.set_send_window(limits.send_window.get());
 			let streams = VarInt::from_u64(limits.max_streams.get()).unwrap_or(VarInt::MAX);
 			conn.set_max_concurrent_bi_streams(streams);

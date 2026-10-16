@@ -826,7 +826,7 @@ async fn serve_connection(
 			max_streams: limits.max_streams,
 			receive_window: limits.receive_window,
 			send_window: limits.send_window,
-		});
+		})?;
 	}
 	let mut request = request.with_stats(stats).with_limits(serve.cluster.limits(&lease));
 	if let Some(subscriber) = subscriber {
