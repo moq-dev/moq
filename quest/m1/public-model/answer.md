@@ -103,12 +103,31 @@ JS items (`js/net/src/`):
   (the blind-answer loop in `connection/forward.ts`). **Decision**:
   - ✅ Replace with the Rust shape. A session answers through the public
     `Origin.Dynamic` requests and mints a source per request, as Rust
-    sessions do, so the slot loop and its view go. Caveat: JS "blind" mode
-    (answering requests after a peer refuses or resets announce requests)
-    has no counterpart in the Rust sessions. The public shape must answer
-    blind requests too, or Lazy discovery must remove blind mode first;
-    decide which before deleting the loop.
+    sessions do, so the slot loop and its view go.
   - Make the `wire.ts` views public.
+- **Blind answers** (the same loop, settled in review of #5717). Every JS
+  session answers each request no route covers by subscribing on its peer:
+  always, and as the only path after a peer refuses or resets discovery.
+  [Lazy discovery](/quest/m1/lazy-discovery/README.md) keeps a plain
+  `request(path)` blind, and its Rust child adds the same downgrade, so
+  blind answering stays and needs a public shape before the loop goes.
+  **Decision**:
+  - Recommended: a fallback answerer, `origin::Producer::fallback()` in Rust
+    and `Origin.Producer.fallback()` in JS (name open). It returns the same
+    `Dynamic` request stream, scoped to the handle's allowed paths. It
+    receives only requests that no announced or served route covers, and
+    every request the table later routes is withdrawn from it. It is never
+    advertised, since it claims nothing. The first fallback to answer a
+    request wins, and dropping the handle withdraws its answers, so a
+    standby session answers next. This is what `serveRequests` in
+    `connection/forward.ts` does today.
+  - A `dynamic(prefix, route)` flagged blind and ranked below every
+    announced route. This reuses one call but puts an unadvertised,
+    claim-free entry in the route table, where selection and split-horizon
+    must special-case it.
+  Land the Rust side with or after Rust lazy discovery (Required below),
+  which brings blind answers to Rust. Delete the JS loop only once the
+  fallback answers the same requests, including after a downgrade.
 - `wire.ts` `OriginProducer.expect` (`connection/reload.ts`, keeps requests
   pending while a reconnect is in flight): public if Rust has the same need
   across a reconnect, else private to the connection.

@@ -25,7 +25,9 @@ without a comment. Add a check to the lint that `just check` and CI already
 run: every `pub(crate)` under `rs/moq-net/src/model/` must carry a marker
 comment from a fixed vocabulary (for example `// private: passthrough`,
 `tuning`, `capability gap`, `test`, or `// pending: <quest path>`). A
-`pending` mark must name a quest that still exists. The check is a grep. It
+`pending` mark must name a quest that still exists. Existence is enough
+because a finished quest is deleted in the PR that completes it (`quest
+guide`: "Finished quests are deleted"). The check is a grep. It
 pairs with the narrowed visibility, so it does not need the compile probe.
 Each child's PR then deletes its `pending` marks as items go public, and the
 check fails if one is left behind.
