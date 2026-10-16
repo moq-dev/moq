@@ -49,7 +49,8 @@ list(TRANSFORM _generated_files PREPEND "${_generated}/" OUTPUT_VARIABLE _genera
 set(_render "${CMAKE_CURRENT_BINARY_DIR}/render")
 list(TRANSFORM _generated_files PREPEND "${_render}/" OUTPUT_VARIABLE _render_paths)
 add_custom_target(moq_ffi ALL
-    COMMAND cargo build --locked --package moq-ffi ${_cargo_flags}
+    # The OpenH264 software fallback is opt-in in Rust; the C++ package ships it.
+    COMMAND cargo build --locked --package moq-ffi --features openh264 ${_cargo_flags}
     COMMAND ${CMAKE_COMMAND} -E rm -rf "${_render}"
     COMMAND "${UNIFFI_BINDGEN_CPP}" --library "${_metadata}"
         --config "${CMAKE_CURRENT_SOURCE_DIR}/uniffi.toml" --out-dir "${_render}"

@@ -14,6 +14,10 @@ rust-version.workspace = true
 [features]
 default = ["quic", "websocket"]
 jemalloc = ["moq-tokio/jemalloc"]
+# The software H.264 encoder. moq-boy needs it at runtime (a 160x144 frame is
+# below every hardware encoder's minimum), but it is vendored C++, so it stays
+# off for development builds; the nix package turns it on.
+openh264 = ["moq-video/openh264"]
 quic = ["moq-tokio/quic"]
 websocket = ["moq-tokio/websocket"]
 
@@ -27,8 +31,9 @@ moq-json = { workspace = true }
 moq-mux = { workspace = true }
 moq-net = { workspace = true }
 moq-tokio = { workspace = true, default-features = false, features = ["aws-lc-rs"] }
-# Select software H.264 plus the Linux NVIDIA and VAAPI codecs explicitly.
-moq-video = { workspace = true, features = ["nvidia", "openh264", "vaapi"] }
+# Select the Linux NVIDIA and VAAPI codecs explicitly; software H.264 is the
+# `openh264` feature.
+moq-video = { workspace = true, features = ["nvidia", "vaapi"] }
 serde = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 tracing = { workspace = true }

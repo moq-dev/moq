@@ -113,7 +113,9 @@ can_run_on_host() {
 # Build the library for a single target
 build_target() {
     local target="$1"
-    local cargo_args=(build --locked --release --package moq-ffi)
+    # Releases carry the OpenH264 software fallback, the only encoder on API-24
+    # Android and the Apple simulators; a no-op under --no-default-features.
+    local cargo_args=(build --locked --release --package moq-ffi --features openh264)
     if [[ "$NO_DEFAULT_FEATURES" == true ]]; then
         cargo_args+=(--no-default-features)
     fi
