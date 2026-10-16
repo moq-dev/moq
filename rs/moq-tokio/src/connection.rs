@@ -1221,6 +1221,7 @@ impl Connection {
 	}
 
 	/// Present tokens that survive session replacement and observe the live grant union.
+	/// A route names a session's own `moq_net::auth::Auth` instead, re-added after a reconnect.
 	pub fn auth(&self) -> auth::Handle {
 		auth::Handle {
 			connection: self.state.clone(),

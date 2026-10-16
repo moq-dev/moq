@@ -5,10 +5,11 @@
  * sides negotiate MoQ Auth, presents the credential its connection already carried (the
  * URL, or nothing) right after setup, and learns the {@link Grant} it earned. Older
  * versions, and peers that do not negotiate it, carry no AUTH exchange: the grant stays
- * undefined. There {@link Auth.add} rejects with {@link Unsupported} on moq-lite, and on
+ * undefined. There {@link Handle.add} rejects with {@link Unsupported} on moq-lite, and on
  * moq-transport keeps the token, with no grant, for the announcements whose route names it.
- * {@link Auth.grant} is the union of every token this side presented, and {@link Auth.add}
- * presents another without reconnecting. Mirrors the Rust `moq_net::auth`.
+ * {@link Handle.grant} is the union of every token this side presented, and {@link Handle.add}
+ * presents another without reconnecting, returning its {@link Auth}. Mirrors the Rust
+ * `moq_net::auth`.
  *
  * @module
  */
@@ -47,8 +48,8 @@ export class Unsupported extends Error {
 	}
 }
 
-/** A token this side presented. {@link Token.close} withdraws it. */
-export interface Token {
+/** A token this side presented, which a route can name. {@link Auth.close} withdraws it. */
+export interface Auth {
 	/** This token's own grant: undefined until the peer answers, and again once it ends. */
 	readonly grant: Getter<Grant | undefined>;
 	/** Settles when the token ends: the peer's revocation, or its withdrawal. */
@@ -95,7 +96,7 @@ export interface Requests {
 }
 
 /** A session's tokens and grants. See the module docs. */
-export interface Auth {
+export interface Handle {
 	/** The union of every grant this side holds: undefined until the peer first answers. */
 	readonly grant: Getter<Grant | undefined>;
 
@@ -105,7 +106,7 @@ export interface Auth {
 	 * peer's refusal as an `Error.Session`. On moq-transport without AUTH it resolves at
 	 * once with no grant: only a request whose route names it carries it.
 	 */
-	add(token: string | Uint8Array): Promise<Token>;
+	add(token: string | Uint8Array): Promise<Auth>;
 
 	/**
 	 * Answer every token the peer presents, instead of the default: granting what this side
@@ -120,11 +121,11 @@ export interface Auth {
 	requests(): Requests;
 }
 
-/** The {@link Auth} of a session without AUTH: no grant, and no tokens. */
-export class None implements Auth {
+/** The {@link Handle} of a session without AUTH: no grant, and no tokens. */
+export class None implements Handle {
 	readonly grant: Getter<Grant | undefined> = new Signal<Grant | undefined>(undefined);
 
-	add(_token: string | Uint8Array): Promise<Token> {
+	add(_token: string | Uint8Array): Promise<Auth> {
 		return Promise.reject(new Unsupported());
 	}
 

@@ -62,7 +62,7 @@ export class Connection implements Established {
 	readonly probe: Getter<Probe> = new Signal<Probe>({});
 
 	/** Our tokens and grants, when the peer negotiated MoQ Auth; see {@link Established.auth}. */
-	get auth(): Auth.Auth {
+	get auth(): Auth.Handle {
 		return this.#auth;
 	}
 

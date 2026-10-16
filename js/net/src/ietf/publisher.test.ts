@@ -1,7 +1,7 @@
 import { expect, jest, spyOn, test } from "bun:test";
 import { Milli } from "@moq/clock";
 import { Signal } from "@moq/signals";
-import type { Grant, Token } from "../auth.ts";
+import type { Auth, Grant } from "../auth.ts";
 import { Producer as BroadcastProducer } from "../broadcast.ts";
 import * as Epoch from "../epoch.ts";
 import { error, ProtocolViolation, StreamCode } from "../error.ts";
@@ -1495,10 +1495,10 @@ function republish(origin: OriginProducer, old: BroadcastProducer) {
 
 /** The tokens one session issued, each carried as its own bytes. */
 class Tokens {
-	#issued = new Map<Token, Uint8Array>();
+	#issued = new Map<Auth, Uint8Array>();
 
-	issue(value: string): Token {
-		const token: Token = {
+	issue(value: string): Auth {
+		const token: Auth = {
 			grant: new Signal<Grant | undefined>(undefined),
 			closed: new Promise(() => {}),
 			close() {},
@@ -1507,7 +1507,7 @@ class Tokens {
 		return token;
 	}
 
-	carried(token: Token | undefined): Uint8Array | undefined {
+	carried(token: Auth | undefined): Uint8Array | undefined {
 		return token && this.#issued.get(token);
 	}
 }

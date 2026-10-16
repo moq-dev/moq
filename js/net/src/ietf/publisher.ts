@@ -1,6 +1,6 @@
 import { Instant, Milli, Nano, now, sleep } from "@moq/clock";
 import { type Dispose, type Getter, race, Signal } from "@moq/signals";
-import type { Grant, Token } from "../auth.ts";
+import type { Auth, Grant } from "../auth.ts";
 import { enforceGrant } from "../auth_session.ts";
 import type * as broadcast from "../broadcast.ts";
 import { Withdrawal } from "../connection/withdrawal.ts";
@@ -110,7 +110,7 @@ interface Reprice {
 	from?: Cluster.Advert;
 	to?: Cluster.Advert;
 	/** The token the request should carry instead, when it changed. */
-	token?: Token;
+	token?: Auth;
 }
 
 /** Whether two hop paths list the same hops in the same order. */
@@ -148,7 +148,7 @@ type Refused = "never" | number;
 type Answer = "held" | "dropped" | Refused;
 
 /** The open PUBLISH_NAMESPACE request per advertised path. */
-type Requests = Map<Path.Valid, { path: Path.Valid; requestId: bigint; stream: Stream; auth?: Token }>;
+type Requests = Map<Path.Valid, { path: Path.Valid; requestId: bigint; stream: Stream; auth?: Auth }>;
 
 /** What one announce loop knows about the peer, keyed the way that loop names namespaces. */
 interface Namespaces {
@@ -164,7 +164,7 @@ interface Namespaces {
 
 /** The bytes a request carries for a token this session issued. */
 interface Carrier {
-	carried(token: Token | undefined): Uint8Array | undefined;
+	carried(token: Auth | undefined): Uint8Array | undefined;
 }
 
 /** Where one announce loop sends its advertisements. */
@@ -179,10 +179,10 @@ interface Target {
 	withdraw(key: Path.Valid): Promise<void>;
 
 	/** The token the peer holds a namespace under, or undefined when its advertisement carries none. */
-	held(key: Path.Valid): Token | undefined;
+	held(key: Path.Valid): Auth | undefined;
 
 	/** The token an advertisement naming `auth` carries: only a request can carry one. */
-	carry(auth: Token | undefined): Token | undefined;
+	carry(auth: Auth | undefined): Auth | undefined;
 }
 
 /** What {@link Publisher.runGroup} needs to serve one group. */
@@ -1550,7 +1550,7 @@ export class Publisher {
 	}
 
 	/** `auth` when a request of this session can carry it. */
-	#carry(auth: Token | undefined): Token | undefined {
+	#carry(auth: Auth | undefined): Auth | undefined {
 		return this.#auth?.carried(auth) === undefined ? undefined : auth;
 	}
 

@@ -1,13 +1,13 @@
 import { wall } from "@moq/clock";
 import { type Dispose, type Getter, Once, Signal } from "@moq/signals";
 import {
-	type Auth as AuthApi,
+	type Auth,
 	type Grant,
 	grantsEqual,
+	type Handle,
 	type Issued,
 	type Request,
 	type Requests,
-	type Token,
 	Unsupported,
 } from "./auth.ts";
 import { closeReason, error, ProtocolViolation, SessionCode, SessionError, StreamCode, StreamError } from "./error.ts";
@@ -64,7 +64,7 @@ function cancel(): StreamError {
 }
 
 /** One token this side presented. */
-class Presented implements Token {
+class Presented implements Auth {
 	readonly grant = new Signal<Grant | undefined>(undefined);
 	readonly closed: Promise<Error | null>;
 	readonly answered: Promise<void>;
@@ -275,7 +275,7 @@ export interface AuthSessionProps {
  *
  * @internal
  */
-export class AuthSession implements AuthApi {
+export class AuthSession implements Handle {
 	/** The peer sent a malformed AUTH message; the owning connection closes the session. */
 	readonly violated = new Once<ProtocolViolation>();
 	#wire?: AuthWire;
@@ -316,7 +316,7 @@ export class AuthSession implements AuthApi {
 		return this.#wire !== undefined;
 	}
 
-	async add(token: string | Uint8Array): Promise<Token> {
+	async add(token: string | Uint8Array): Promise<Auth> {
 		if (this.#closed || (!this.#wire && !this.#requests)) throw new Unsupported();
 		const bytes = typeof token === "string" ? new TextEncoder().encode(token) : token;
 		if (!this.#wire) {
@@ -335,7 +335,7 @@ export class AuthSession implements AuthApi {
 	 * The bytes a request carries for `token`: undefined for none, for one another session
 	 * issued, or for one that ended.
 	 */
-	carried(token: Token | undefined): Uint8Array | undefined {
+	carried(token: Auth | undefined): Uint8Array | undefined {
 		if (!this.#requests || !(token instanceof Presented) || !this.#issued.has(token) || token.ended)
 			return undefined;
 		return token.token;

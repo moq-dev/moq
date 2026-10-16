@@ -41,6 +41,17 @@ because it has a consumer now. The decisions are recorded in the
   one session, which would make the app re-add and re-announce after every
   reconnect. moq-tokio's `connection::Auth` and `connection::Token` are
   renamed so the names match across layers.
+- ✅ Revisited 2026-10-16 (maintainer, #5695): the connection-level handle is
+  a session-independent issuer in moq-net, which needs its own refactor, so
+  it moves to [Auth outlives its session](/quest/m1/auth/issuer.md). Until
+  then an `Auth` is bound to one session's handle, and a route on a
+  reconnecting connection is re-added and re-announced after a reconnect.
+- ✅ Decided 2026-10-16 (maintainer, #5695): the JS names mirror Rust's in
+  this PR: JS `Auth` becomes `Handle` and `Token` becomes `Auth`.
+- ✅ Decided 2026-10-16 (maintainer, #5695): an acceptor that accepts a
+  renewal and drops the grant it replaces in one step keeps the request. The
+  receiver hands over to the accepted renewal rather than ending between the
+  two.
 - ✅ Decided 2026-10-16 (maintainer, #5695): `Route::auth` only. A
   `Subscription` is aggregated across subscribers before it reaches the
   wire, so `Subscription::auth` and its aggregation rule are a follow-up.
