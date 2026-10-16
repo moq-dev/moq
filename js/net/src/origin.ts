@@ -421,11 +421,11 @@ class ServeState {
 		finishRequest(request, unroutable());
 	}
 
-	accept(request: Request, front: broadcast.Consumer): boolean {
+	accept(request: Request, front: broadcast.Consumer): void {
 		const path = Path.join(this.root, request.path);
 		if (this.closed.peek() !== undefined || this.pending.get(path) !== request) {
 			front.close();
-			return false;
+			return;
 		}
 		this.pending.delete(path);
 		const existing = this.served.get(path);
@@ -433,7 +433,7 @@ class ServeState {
 			front.close();
 			this.onChange(path);
 			this.settled.update((n) => n + 1);
-			return false;
+			return;
 		}
 		this.served.set(path, front);
 		void front.closed.then(() => {
@@ -443,7 +443,6 @@ class ServeState {
 		});
 		this.onChange(path);
 		this.settled.update((n) => n + 1);
-		return true;
 	}
 
 	has(request: Request): boolean {
@@ -1275,15 +1274,15 @@ export class Producer implements Table {
 	 * no announced local broadcast wins is handed to the handle as a {@link Request}.
 	 */
 	dynamic(prefix: Path.Valid): Dynamic {
-		return this.#insertRoute(prefix, Route.default, true);
+		return this.#insertRoute(prefix, Route.default, true, true);
 	}
 
-	/** Insert a claim with route metadata for protocol tests and session forwarding. @internal */
+	/** Insert an originated claim with route metadata that answers through `accept`, for tests and benches. @internal */
 	dynamicRoute(
 		prefix: Path.Valid,
 		route: Route | { epoch?: Route["epoch"]; hops?: Route["hops"]; cost?: Route["cost"] } = Route.default,
 	): Dynamic {
-		return this.#insertRoute(prefix, Route.normalize(route), false);
+		return this.#insertRoute(prefix, Route.normalize(route), true, false);
 	}
 
 	/**
@@ -1296,10 +1295,10 @@ export class Producer implements Table {
 		prefix: Path.Valid,
 		route: Route | { epoch?: Route["epoch"]; hops?: Route["hops"]; cost?: Route["cost"] } = Route.default,
 	): Dynamic {
-		return this.#insertRoute(prefix, Route.normalize(route), false);
+		return this.#insertRoute(prefix, Route.normalize(route), false, false);
 	}
 
-	#insertRoute(prefix: Path.Valid, route: Route, originated: boolean): Dynamic {
+	#insertRoute(prefix: Path.Valid, route: Route, originated: boolean, publishes: boolean): Dynamic {
 		prefix = this.#scope.prefix(prefix);
 		const server = new ServeState(this.#scope.root, originated);
 		server.onChange = (path) => this.#state.refresh(path);
@@ -1326,7 +1325,7 @@ export class Producer implements Table {
 		});
 		if (closed) {
 			server.close();
-			return makeDynamic(prefix, entry, this.#state, () => {}, originated ? this : undefined);
+			return makeDynamic(prefix, entry, this.#state, () => {}, publishes ? this : undefined);
 		}
 		this.#state.rebuildOriginated();
 		this.#state.refreshPrefix(prefix);
@@ -1345,7 +1344,7 @@ export class Producer implements Table {
 			this.#state.refreshPrefix(prefix);
 		};
 
-		return makeDynamic(prefix, entry, this.#state, retract, originated ? this : undefined);
+		return makeDynamic(prefix, entry, this.#state, retract, publishes ? this : undefined);
 	}
 
 	/**
@@ -2314,12 +2313,16 @@ export class Request {
 	/** @internal Publish a prepared answer after its tracks have been filled. */
 	publishPrepared(answer: broadcast.Producer, epoch: Epoch.Valid): broadcast.Producer {
 		if (!this.#server.has(this)) throw new Error("request is closed");
+		// The exact route usually settles the request on its own, resolving its waiters
+		// through the new epoch; answer it directly if it is still pending.
 		answer.announce({ epoch });
-		if (!this.#server.accept(this, answer.consume())) {
-			answer.unannounce();
-			throw new Error("request is closed");
-		}
+		if (this.#server.has(this)) this.#server.accept(this, answer.consume());
 		return answer;
+	}
+
+	/** @internal Refuse the request a prepared answer abandoned. */
+	rejectPrepared(err: Error): void {
+		this.#server.reject(this, err);
 	}
 
 	/**
@@ -2378,5 +2381,13 @@ export class Prepared {
 		if (this.#done) throw new Error("prepared answer is closed");
 		this.#done = true;
 		return this.#request.publishPrepared(this.broadcast, this.#epoch);
+	}
+
+	/** Abandon the answer unpublished, closing its broadcast and resolving every waiting requester with `err`. */
+	reject(err: Error): void {
+		if (this.#done) return;
+		this.#done = true;
+		this.broadcast.close();
+		this.#request.rejectPrepared(err);
 	}
 }

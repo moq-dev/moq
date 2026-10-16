@@ -1919,9 +1919,11 @@ impl Producer {
 	/// The advertisement is visible to [`Consumer::announced`] and forwarded by
 	/// sessions for as long as the returned [`Dynamic`] (and every clone) lives.
 	/// A consumer resolving a path under it through this route is handed to the
-	/// handler as a [`Request`] to materialize on demand. This is how a service
-	/// answers a whole subtree without publishing each path, and how sessions
-	/// land the routes a peer announces to them; a publisher that
+	/// handler as a [`Request`] to materialize on demand: [`Request::prepare`]
+	/// under a new epoch, fill, then [`Prepared::publish`] the exact path. Each
+	/// answer is its own publisher instance, so restarting one output never
+	/// splices into a copy of the last. This is how a service answers a whole
+	/// subtree without publishing each path ahead of time; a publisher that
 	/// knows its broadcasts advertises each one's exact path with
 	/// [`broadcast::Producer::announce`] instead, so subscribers can enumerate
 	/// them.
@@ -4274,7 +4276,7 @@ impl Resolution {
 /// subtree it never publishes ahead of time.
 ///
 /// Drop it to retract the route and reject the requests still waiting to be
-/// served; [`update`](Self::update) re-prices it in place.
+/// served.
 ///
 /// It keeps the origin's [`Driver`] running, like a published broadcast: a
 /// handler can drop every [`Producer`] and keep serving.
@@ -4391,12 +4393,6 @@ impl Dynamic {
 	#[doc(hidden)]
 	pub fn update_route(&self, route: Route) -> Result<(), Error> {
 		self.announcement.update(route)
-	}
-
-	/// Update peer route metadata.
-	#[doc(hidden)]
-	pub fn update(&self, route: Route) -> Result<(), Error> {
-		self.update_route(route)
 	}
 
 	/// Poll for the next requested path under this route, without blocking.
@@ -4528,9 +4524,9 @@ impl ServeState {
 /// A pending request for a broadcast to be served on demand.
 ///
 /// Yielded by [`Dynamic::poll_requested_broadcast`]. The requester is awaiting inside
-/// [`Consumer::request_broadcast`]; [`accept`](Self::accept) resolves it with a live
-/// broadcast (which the handler keeps producing into) and [`reject`](Self::reject) resolves
-/// it with an error. Dropping the request without either rejects it.
+/// [`Consumer::request_broadcast`]; [`prepare`](Self::prepare) then [`Prepared::publish`]
+/// resolves it with a new exact-path broadcast, and [`reject`](Self::reject) resolves it
+/// with an error. Dropping the request without either rejects it.
 pub struct Request {
 	// Absolute path that was requested.
 	path: PathOwned,
@@ -4566,8 +4562,16 @@ impl Request {
 	}
 
 	/// Resolve a session-forwarded claim with its peer's already-routed broadcast.
+	///
+	/// # Panics
+	///
+	/// On a request from [`Producer::dynamic`], which answers only through [`Self::prepare`].
 	#[doc(hidden)]
 	pub fn accept(self, broadcast: impl Consume<broadcast::Consumer>) {
+		assert!(
+			self.publisher.is_none(),
+			"an application claim answers through prepare and publish"
+		);
 		let broadcast = broadcast.consume();
 		let _ = ServeState::resolve(&self.home, &self.path, &self.producer, Ok(broadcast));
 		// `self.producer` drops here, closing the channel; the value is still observable.
@@ -6630,7 +6634,7 @@ mod tests {
 		let route = producer.dynamic_route("room", Route::default().with_cost(3)).unwrap();
 		announced.assert_next_active("room");
 
-		route.update(Route::default().with_cost(5)).unwrap();
+		route.update_route(Route::default().with_cost(5)).unwrap();
 		match announced.next().now_or_never().expect("next blocked").expect("no next") {
 			AnnounceEvent::Update(update) => assert_eq!(update.route.cost, Cost::new(5)),
 			other => panic!("should be an update: got {other:?}"),
@@ -6798,7 +6802,7 @@ mod tests {
 		assert_eq!(announced.assert_next_restarted("room").cost, Cost::new(1));
 		quiet(&mut announced).await;
 
-		c.update(Route::default().with_hops(hops(&[12])).with_cost(3)).unwrap();
+		c.update_route(Route::default().with_hops(hops(&[12])).with_cost(3)).unwrap();
 		assert_eq!(announced.assert_next_restarted("room").cost, Cost::new(2));
 		quiet(&mut announced).await;
 	}
@@ -6816,7 +6820,7 @@ mod tests {
 		assert_eq!(announced.assert_next_active("room").cost, Cost::new(5));
 		let _sticky = hold(&consumer, "room/job", &a).await;
 
-		b.update(Route::default().with_hops(hops(&[11])).with_cost(3)).unwrap();
+		b.update_route(Route::default().with_hops(hops(&[11])).with_cost(3)).unwrap();
 		assert_eq!(announced.assert_next_restarted("room").cost, Cost::new(3));
 		quiet(&mut announced).await;
 	}
@@ -8114,7 +8118,7 @@ mod tests {
 		assert_eq!(excluded.assert_next_active("room/live").cost, Cost::new(5));
 		assert_eq!(video.assert_next_active("room/live").cost, Cost::new(5));
 
-		chat.update(Route::default().with_hops(hops(&[7])).with_cost(9))
+		chat.update_route(Route::default().with_hops(hops(&[7])).with_cost(9))
 			.unwrap();
 		assert_eq!(all.assert_next_active("room/live").cost, Cost::new(5));
 		assert_eq!(rooted.assert_next_active("").cost, Cost::new(5));
@@ -8143,9 +8147,9 @@ mod tests {
 			.announced();
 		assert_eq!(announced.assert_next_active("").cost, Cost::new(9));
 
-		broad.update(Route::default().with_cost(0)).unwrap();
+		broad.update_route(Route::default().with_cost(0)).unwrap();
 		announced.assert_next_wait();
-		narrow.update(Route::default().with_cost(8)).unwrap();
+		narrow.update_route(Route::default().with_cost(8)).unwrap();
 		assert_eq!(announced.assert_next_active("").cost, Cost::new(8));
 		drop(narrow);
 		assert_eq!(announced.assert_next_active("").cost, Cost::new(0));
@@ -8583,7 +8587,7 @@ mod tests {
 			announced.assert_next_wait();
 			let remaining = if restart {
 				// The older table entry has the newest advertisement after a restart.
-				first.update(route).unwrap();
+				first.update_route(route).unwrap();
 				second.withdrawn();
 				announced.assert_next_restarted("room");
 				first
@@ -8826,6 +8830,72 @@ mod tests {
 		assert!(matches!(pending.await, Err(Error::Unroutable)));
 	}
 
+	/// An answer prepared for a claim that went away is refused, never announced.
+	#[moq_net_sim::test]
+	#[cfg(feature = "async")]
+	async fn a_prepared_answer_for_an_abandoned_claim_is_never_announced() {
+		let producer = origin(1).produce();
+		let mut announced = producer.consume().announced();
+		let claim = producer.dynamic("room").unwrap();
+		announced.assert_next_active("room");
+		let _pending = producer.consume().request_broadcast("room/alice", None);
+		let prepared = queued(&claim).await.prepare(crate::Epoch::mint()).unwrap();
+
+		drop(claim);
+		announced.assert_next_ended("room");
+		assert!(matches!(prepared.publish(), Err(Error::Unroutable)));
+		announced.assert_next_wait();
+	}
+
+	/// An answer prepared before the claim changed instance is refused, never announced.
+	#[moq_net_sim::test]
+	#[cfg(feature = "async")]
+	async fn a_prepared_answer_for_a_released_request_is_never_announced() {
+		let producer = origin(1).produce();
+		let mut announced = producer.consume().announced();
+		let claim = producer.dynamic("room").unwrap();
+		announced.assert_next_active("room");
+		let _pending = producer.consume().request_broadcast("room/alice", None);
+		let prepared = queued(&claim).await.prepare(crate::Epoch::mint()).unwrap();
+
+		claim.update_route(Route::default().with_epoch(crate::Epoch::mint())).unwrap();
+		announced.assert_next_restarted("room");
+		assert!(matches!(prepared.publish(), Err(Error::Unroutable)));
+		announced.assert_next_wait();
+	}
+
+	/// A request pinned to an epoch resolves only through the answer published under it,
+	/// never by asking the claim, which has no epoch of its own.
+	#[moq_net_sim::test]
+	#[cfg(feature = "async")]
+	async fn a_pinned_request_resolves_only_through_the_published_epoch() {
+		let producer = origin(1).produce();
+		let consumer = producer.consume();
+		let claim = producer.dynamic("room").unwrap();
+		let epoch = crate::Epoch::mint();
+		let unknown = consumer.request_broadcast("room/alice", crate::Epoch::mint());
+		assert!(matches!(unknown.await, Err(Error::Unroutable)));
+
+		let pending = consumer.request_broadcast("room/alice", None);
+		let _published = queued(&claim).await.prepare(epoch.clone()).unwrap().publish().unwrap();
+		pending.await.expect("resolves");
+
+		let pinned = consumer.request_broadcast("room/alice", epoch.clone()).await;
+		assert_eq!(pinned.expect("resolves").info().epoch.as_ref(), Some(&epoch));
+		let stale = consumer.request_broadcast("room/alice", crate::Epoch::mint());
+		assert!(matches!(stale.await, Err(Error::Unroutable)));
+	}
+
+	#[moq_net_sim::test]
+	#[cfg(feature = "async")]
+	#[should_panic(expected = "prepare and publish")]
+	async fn an_application_claim_cannot_accept_an_arbitrary_broadcast() {
+		let producer = origin(1).produce();
+		let claim = producer.dynamic("room").unwrap();
+		let _pending = producer.consume().request_broadcast("room/alice", None);
+		queued(&claim).await.accept(&broadcast::Info::new().produce());
+	}
+
 	/// A refusal from the longest prefix is the answer: neither a costlier advertiser of
 	/// that prefix nor a catch-all is asked instead.
 	#[moq_net_sim::test]
@@ -8930,7 +9000,7 @@ mod tests {
 		assert!(server.poll_requested_broadcast(&kio::Waiter::noop()).is_pending());
 
 		// A re-price moves the table: the retry reaches the handler, which serves it.
-		server.update(Route::default().with_cost(2)).unwrap();
+		server.update_route(Route::default().with_cost(2)).unwrap();
 		assert!((&mut resolving).now_or_never().is_none());
 		let request = queued(&server).await;
 		let served = broadcast::Info::new().produce();
@@ -9759,7 +9829,7 @@ mod tests {
 		for first in [&[][..], &[0][..], &[10][..]] {
 			let (mut rig, server, _source) = ResumeRig::new(first).await;
 			let standby = rig.standby(&[10, 20]);
-			server.update(Route::default().with_hops(hops(&[11]))).unwrap();
+			server.update_route(Route::default().with_hops(hops(&[11]))).unwrap();
 
 			let mut group = rig.incumbent_track.append_group().unwrap();
 			group.write_frame(crate::Timestamp::ZERO, b"after".as_ref()).unwrap();
@@ -9963,7 +10033,7 @@ mod tests {
 		// A metadata-only reprice of the only route: nothing re-requests and the
 		// subscription keeps flowing from the same source.
 		incumbent
-			.update(Route::default().with_hops(hops(&[10])).with_cost(9))
+			.update_route(Route::default().with_hops(hops(&[10])).with_cost(9))
 			.unwrap();
 
 		let track = source.create_track("audio", crate::track::Info::timed()).unwrap();
@@ -9997,7 +10067,7 @@ mod tests {
 		// keeps serving. The front migrates to the standby without waiting for
 		// the death.
 		incumbent
-			.update(
+			.update_route(
 				Route::default()
 					.with_epoch(epoch())
 					.with_hops(hops(&[10]))
@@ -10899,7 +10969,7 @@ mod tests {
 		let selected = broad.request_validity(&Path::new("room/a")).unwrap();
 		let pending = selected.current();
 		assert!(!pending.is_closed());
-		broad.update(broad.route().with_cost(Cost::from(7))).unwrap();
+		broad.update_route(broad.route().with_cost(Cost::from(7))).unwrap();
 		assert!(!pending.is_closed());
 		// Another peer's winning route cannot change what a request on peer 2 names.
 		let other = producer

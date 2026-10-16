@@ -2730,7 +2730,7 @@ mod session_tests {
 
 		let mut new = Publisher::standalone(video_rendition());
 		*serving.lock().unwrap() = new.broadcast.consume();
-		pool.update(epoch()).unwrap();
+		pool.update_route(epoch()).unwrap();
 		assert_eq!(recorder.written(&mut new, 2), pad, "the restart moved to another pad");
 
 		stop(session);

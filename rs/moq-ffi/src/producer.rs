@@ -152,7 +152,7 @@ impl MoqBroadcastProducer {
 		})
 	}
 
-	#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+	#[cfg(test)]
 	pub(crate) fn consume_inner(&self) -> Result<moq_net::broadcast::Consumer, MoqError> {
 		self.with_state(|state| Ok(state.broadcast.consume()))
 	}

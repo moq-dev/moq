@@ -232,7 +232,7 @@ mod tests {
 		assert_eq!(followed(&mut follow).await, ("update", "pool/job".into()));
 
 		// The covering prefix no longer serves the path, so its changes are not seen.
-		pool.update(pool.route().with_cost(5)).unwrap();
+		pool.update_route(pool.route().with_cost(5)).unwrap();
 		quiet(&mut follow).await;
 
 		// Another instance at the path.
@@ -243,7 +243,7 @@ mod tests {
 		drop(exact);
 		assert_eq!(followed(&mut follow).await, ("restart", "pool".into()));
 
-		pool.update(pool.route().with_cost(9)).unwrap();
+		pool.update_route(pool.route().with_cost(9)).unwrap();
 		assert_eq!(followed(&mut follow).await, ("update", "pool".into()));
 
 		drop(pool);
