@@ -23,6 +23,14 @@ pub struct Session {
 		setting = "session.subscriptions"
 	)]
 	pub subscriptions: usize,
+	/// Maximum simultaneously held FETCH requests.
+	#[usage(
+		long = "session-fetches",
+		env = "MOQ_SESSION_FETCHES",
+		default = "10000",
+		setting = "session.fetches"
+	)]
+	pub fetches: usize,
 }
 
 impl Default for Session {
@@ -30,13 +38,14 @@ impl Default for Session {
 		Self {
 			announces: 1000,
 			subscriptions: 1000,
+			fetches: 10000,
 		}
 	}
 }
 
 impl Session {
 	pub(crate) fn resolve(&self) -> moq_net::session::Limits {
-		resolve(self.announces, self.subscriptions)
+		resolve(self.announces, self.subscriptions, self.fetches)
 	}
 }
 
@@ -61,6 +70,14 @@ pub struct Peer {
 		setting = "peer.subscriptions"
 	)]
 	pub subscriptions: usize,
+	/// Maximum simultaneously held FETCH requests.
+	#[usage(
+		long = "peer-fetches",
+		env = "MOQ_PEER_FETCHES",
+		default = "10000",
+		setting = "peer.fetches"
+	)]
+	pub fetches: usize,
 }
 
 impl Default for Peer {
@@ -68,19 +85,21 @@ impl Default for Peer {
 		Self {
 			announces: 100000,
 			subscriptions: 10000,
+			fetches: 10000,
 		}
 	}
 }
 
 impl Peer {
 	pub(crate) fn resolve(&self) -> moq_net::session::Limits {
-		resolve(self.announces, self.subscriptions)
+		resolve(self.announces, self.subscriptions, self.fetches)
 	}
 }
 
-fn resolve(announces: usize, subscriptions: usize) -> moq_net::session::Limits {
+fn resolve(announces: usize, subscriptions: usize, fetches: usize) -> moq_net::session::Limits {
 	let mut limits = moq_net::session::Limits::default();
 	limits.announces = announces;
 	limits.subscriptions = subscriptions;
+	limits.fetches = fetches;
 	limits
 }

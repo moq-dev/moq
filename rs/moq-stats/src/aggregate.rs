@@ -361,7 +361,8 @@ impl Mergeable for Presence {
 	}
 
 	fn regressed(&self, prev: &Self) -> bool {
-		self.sessions_started < prev.sessions_started
+		self.requests < prev.requests
+			|| self.sessions_started < prev.sessions_started
 			|| self.sessions_ended < prev.sessions_ended
 			|| self.announces_peak < prev.announces_peak
 			|| self.subscriptions_peak < prev.subscriptions_peak
@@ -1842,6 +1843,48 @@ mod tests {
 		let node = merged.nodes.values_mut().next().expect("node");
 		node.observe(BTreeMap::from([(String::new(), presence(1, 0))]));
 		assert_eq!(merged.merged()[""], presence(7, 6));
+	}
+
+	#[test]
+	fn request_totals_survive_departure_resume_and_request_only_reset() {
+		let (mut merged, key) = hand_merged::<Presence>();
+		let request = |requests| {
+			let mut presence = Presence::default();
+			presence.requests = requests;
+			presence
+		};
+		merged
+			.nodes
+			.get_mut(&key)
+			.unwrap()
+			.observe(BTreeMap::from([(String::new(), request(5))]));
+		merged.nodes.get_mut(&key).unwrap().depart();
+		assert_eq!(merged.merged()[""], request(5));
+		merged
+			.nodes
+			.get_mut(&key)
+			.unwrap()
+			.observe(BTreeMap::from([(String::new(), request(5))]));
+		assert_eq!(
+			merged.merged()[""],
+			request(5),
+			"resuming does not admit requests again"
+		);
+		merged
+			.nodes
+			.get_mut(&key)
+			.unwrap()
+			.observe(BTreeMap::from([(String::new(), request(6))]));
+		merged
+			.nodes
+			.get_mut(&key)
+			.unwrap()
+			.observe(BTreeMap::from([(String::new(), request(2))]));
+		assert_eq!(
+			merged.merged()[""],
+			request(8),
+			"request-only regression begins another segment"
+		);
 	}
 
 	#[test]

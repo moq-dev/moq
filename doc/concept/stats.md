@@ -124,7 +124,7 @@ its counters, even while idle: the last viewer can leave while the publisher
 still holds the path, and a returning viewer resumes the same counters. So a
 key missing from a frame had no counters, and one that returns starts from
 zero; the totals keep what it counted. A sessions entry appears while a
-session is connected and on the tick its last one disconnects. While a group
+session or HTTP request holds its context and on the tick its last one ends. While a group
 lingers empty, these tracks hold `{}`.
 
 ### Presence
@@ -171,7 +171,7 @@ should prefer the canonical name and fall back to the legacy one.
 ### Sessions
 
 ```json
-{ "acme": { "sessions_started": 12, "sessions_ended": 10, "sessions": 12, "sessions_closed": 10, "announces_peak": 40, "subscriptions_peak": 900 } }
+{ "acme": { "requests": 3, "sessions_started": 12, "sessions_ended": 10, "sessions": 12, "sessions_closed": 10, "announces_peak": 40, "subscriptions_peak": 900 } }
 ```
 
 `sessions_started` and `sessions_ended` count connects and disconnects, whether
@@ -180,6 +180,14 @@ under the root on each tier for `presence.json`, and under every root in the
 group on the tier for `totals.json`. `sessions` and `sessions_closed` are their
 legacy spellings. A session moved to a new tier ends on the old one and starts
 on the new.
+
+`requests` counts admitted request/response exchanges under the token's root and
+tier, including HTTP `/fetch` and `/announced`. They never start or end a session.
+A fetch's delivered group bytes count against the broadcast path on that tier;
+`/announced` delivers no media bytes. The auth decider can give HTTP its own tier
+using `Transport::Http`. An older reader ignores `requests`; a newer reader
+reads it as zero when absent. A request moved to another tier stays counted where
+it was admitted; later traffic follows the new tier.
 
 `announces_peak` and `subscriptions_peak` are the most broadcasts announced to
 the relay, and subscriptions held on it, by any one session. Compare them with

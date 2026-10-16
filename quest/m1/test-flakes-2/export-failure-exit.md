@@ -59,7 +59,3 @@ case in 4.787 s. Those passes do not identify or resolve the historical cause.
 Reproduce and record the failed bound and process before changing that arm.
 
 Public API: none. Wire: none.
-
-## Related
-
-- [CLI stdin release](/quest/m1/cli-stdin-release.md) - the release backport of that fix

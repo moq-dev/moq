@@ -24,7 +24,7 @@
 #   ./run.sh --leak                # 1080p video with no HRD, filling its level's 24 Mb/s leak
 #   ./run.sh --full                # the same with two audio PIDs, filling its multiplex with no nulls
 #   ./run.sh --fragment-pes        # split generated clear PES headers across packets
-#   ./run.sh --delay 1s            # pass the exporter's --delay
+#   ./run.sh --delay 2s            # pass the exporter's --delay
 
 # `--live` swaps the analyzer, not the rig. compliance.py grades a captured file
 # on the stream's own PCR clock, which is the right basis for the IRD model it

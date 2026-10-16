@@ -45,4 +45,3 @@ Public API: none. Wire: none.
 ## Related
 
 - [Runtime trait](/quest/m2/runtime-trait.md) - replaces web-async; moq-ffi's tokio runtime may move behind it
-- [Kotlin JVM exit](/quest/m2/kt-jvm-exit.md) - a shutdown race the async shape affects
