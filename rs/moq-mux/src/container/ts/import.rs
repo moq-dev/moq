@@ -8059,7 +8059,7 @@ pub(super) mod test {
 			let mut updates = catalog.consume().unwrap();
 			let mut import = super::Import::new(broadcast, catalog.reserve());
 			import
-				.decode(&synth_pmt(&[(StreamType::Mpeg2Video, PCR_PID)], false))
+				.decode(&synth_pmt(&[(StreamType::Mpeg2PacketizedData, PCR_PID)], false))
 				.unwrap();
 			import.decode(&pes_packet(PCR_PID, 90_000)).unwrap();
 			let waiter = kio::Waiter::noop();
@@ -8103,7 +8103,7 @@ pub(super) mod test {
 		let mut updates = catalog.consume().unwrap();
 		let mut import = super::Import::new(broadcast, catalog.reserve());
 		import
-			.decode(&synth_pmt(&[(StreamType::Mpeg2Video, PCR_PID)], false))
+			.decode(&synth_pmt(&[(StreamType::Mpeg2PacketizedData, PCR_PID)], false))
 			.unwrap();
 		let waiter = kio::Waiter::noop();
 		for frame in 0..100 {
@@ -8120,7 +8120,7 @@ pub(super) mod test {
 	/// A source whose clock keeps resetting before a window completes still releases its
 	/// catalog once enough media time has passed in total.
 	#[test]
-	fn a_ts_resetting_its_clock_releases_its_catalog_after_four_seconds_of_media() {
+	fn a_ts_resetting_its_clock_does_not_release_without_a_configured_track() {
 		use crate::catalog::hang::Catalog;
 		use crate::container::ts::catalog::Ext;
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
@@ -8141,13 +8141,11 @@ pub(super) mod test {
 				import.decode(&pes_packet(PCR_PID, 90_000 + frame * 3_600)).unwrap();
 			}
 			import.decode(&flag_discontinuity(pcr_packet(PCR_PID, 0))).unwrap();
-			let released = updates.poll_next(&waiter).is_ready();
-			assert_eq!(released, epoch >= 4, "released after epoch {epoch}");
-			if released {
-				return;
-			}
+			assert!(
+				updates.poll_next(&waiter).is_pending(),
+				"metadata-only catalog released after epoch {epoch}"
+			);
 		}
-		unreachable!();
 	}
 
 	/// A clock break after a measured window but before the first catalog publishes voids the
@@ -8165,7 +8163,7 @@ pub(super) mod test {
 		let mut updates = catalog.consume().unwrap();
 		let mut import = super::Import::new(broadcast, catalog.reserve());
 		import
-			.decode(&synth_pmt(&[(StreamType::Mpeg2Video, PCR_PID)], false))
+			.decode(&synth_pmt(&[(StreamType::Mpeg2PacketizedData, PCR_PID)], false))
 			.unwrap();
 		let window = |import: &mut super::Import<Ext>, stuffing: usize| {
 			for i in 0..=50 {
@@ -8208,7 +8206,7 @@ pub(super) mod test {
 		let mut updates = catalog.consume().unwrap();
 		let mut import = super::Import::new(broadcast, catalog.reserve());
 		import
-			.decode(&synth_pmt(&[(StreamType::Mpeg2Video, PCR_PID)], false))
+			.decode(&synth_pmt(&[(StreamType::Mpeg2PacketizedData, PCR_PID)], false))
 			.unwrap();
 		let waiter = kio::Waiter::noop();
 		// Starts two seconds before the rollover.
@@ -8241,7 +8239,7 @@ pub(super) mod test {
 		let mut updates = catalog.consume().unwrap();
 		let mut import = super::Import::new(broadcast, catalog.reserve());
 		import
-			.decode(&synth_pmt(&[(StreamType::Mpeg2Video, PCR_PID)], false))
+			.decode(&synth_pmt(&[(StreamType::Mpeg2PacketizedData, PCR_PID)], false))
 			.unwrap();
 		import.decode(&pes_packet(PCR_PID, 90_000)).unwrap();
 		import.decode(&pcr_packet(PCR_PID, 0)).unwrap();

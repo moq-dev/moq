@@ -299,8 +299,8 @@ pub struct Publish {
 
 /// A broadcast's announcement, held until its catalog first goes out.
 ///
-/// The catalog withholds its first snapshot until the input has declared every track (for TS,
-/// the first PMT). A relay queries a broadcast's tracks the moment it is announced, so a standby
+/// The catalog withholds its first snapshot until the input names at least one servable track. A
+/// relay queries a broadcast's tracks the moment it is announced, so a standby
 /// announced any sooner refuses the tracks its epoch's live partner is serving, and the relay
 /// keeps those refusals.
 struct Pending {
@@ -403,7 +403,7 @@ impl Publish {
 	/// named after `name` (`event.hang` becomes `event/1.hang`, `event/2.hang`, ...).
 	///
 	/// The programs aren't known until the PAT arrives, so each broadcast is created then and
-	/// announced once its PMT has declared its tracks, and [`announce`](Self::announce) has
+	/// announced once its catalog has named a servable track, and [`announce`](Self::announce) has
 	/// nothing to do.
 	pub fn ts_programs(origin: moq_net::origin::Producer, name: String, config: moq_mux::catalog::Config) -> Self {
 		Self {

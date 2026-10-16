@@ -121,6 +121,21 @@ struct Reservations {
 	published: bool,
 }
 
+/// Whether the catalog names anything this broadcast can serve.
+///
+/// Root metadata and application extensions can describe a stream before its media config is
+/// known. They must not make an empty broadcast discoverable. Extensions report their own
+/// independently servable tracks through [`CatalogExt::has_track`].
+fn has_track<E: CatalogExt>(catalog: &Catalog<E>) -> bool {
+	!catalog.video.renditions.is_empty()
+		|| !catalog.audio.renditions.is_empty()
+		|| !catalog.text.renditions.is_empty()
+		|| !catalog.json.tracks.is_empty()
+		|| !catalog.binary.tracks.is_empty()
+		|| catalog.m2ts.is_some()
+		|| catalog.ext.has_track()
+}
+
 /// The built-in catalog's own timeline, enrolled with the first media track.
 #[derive(Default)]
 struct CatalogTimeline {
@@ -695,7 +710,7 @@ impl<E: CatalogExt> Producer<E> {
 	}
 
 	/// Drop a [`Reserved`](super::Reserved) handle, flushing the initial snapshot if that was the
-	/// last thing gating it.
+	/// last thing gating it and the catalog names a track.
 	pub(super) fn release_reserver(&mut self) {
 		{
 			let mut state = take(&self.current);
@@ -710,13 +725,17 @@ impl<E: CatalogExt> Producer<E> {
 		// Snapshot under the lock and emit outside it, since emitting writes to the catalog tracks.
 		let catalog = {
 			let mut state = take(&self.current);
+			// At this point no unresolved rendition can remain: each one holds a reservation. An
+			// owned name therefore covers application-defined rendition sections that cannot be
+			// inspected through the base catalog fields.
+			let names_track = has_track(&state.catalog) || !state.owned.is_empty();
 			let r = &mut state.reservations;
 			if r.published || r.reservers != 0 {
 				return;
 			}
 			// Nothing was staged (e.g. every stream was ignored): stay unpublished so a later change
 			// still triggers the first emit, rather than publishing an empty catalog now.
-			if !r.pending {
+			if !r.pending || !names_track {
 				return;
 			}
 			r.pending = false;
@@ -2195,6 +2214,61 @@ mod test {
 		};
 		assert!(snapshot.audio.renditions.contains_key("audio0"));
 		assert!(!snapshot.video.renditions.contains_key("video0"));
+	}
+
+	#[test]
+	fn metadata_alone_does_not_publish_the_initial_catalog() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let config = Config::default().with_catalog(Catalog::<Extra>::default());
+		let mut catalog = Producer::new(&mut broadcast, config).unwrap();
+		let mut consumer: Consumer<Extra> = Consumer::new(catalog.outputs.hang.consume());
+		let waiter = kio::Waiter::noop();
+		let reserved = catalog.reserve();
+
+		catalog
+			.modify()
+			.unwrap()
+			.set_section("mpegts", serde_json::json!({ "programs": [1] }))
+			.unwrap();
+		assert!(
+			matches!(consumer.poll_next(&waiter), Poll::Pending),
+			"extension metadata must not publish an empty broadcast"
+		);
+		drop(reserved);
+		assert!(
+			matches!(consumer.poll_next(&waiter), Poll::Pending),
+			"releasing the importer must not publish metadata without a track"
+		);
+
+		catalog
+			.modify()
+			.unwrap()
+			.audio
+			.renditions
+			.insert("audio0".to_string(), AudioConfig::new(AudioCodec::Opus, 48_000, 2));
+		let snapshot = match consumer.poll_next(&waiter) {
+			Poll::Ready(Ok(Some(c))) => c,
+			other => panic!("expected a catalog naming the track, got {other:?}"),
+		};
+		assert!(snapshot.audio.renditions.contains_key("audio0"));
+		assert!(snapshot.ext.get("mpegts").is_some());
+	}
+
+	#[test]
+	fn m2ts_counts_as_a_servable_track() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let mut catalog = Producer::new(&mut broadcast, Config::default()).unwrap();
+		let mut consumer: Consumer = Consumer::new(catalog.outputs.hang.consume());
+		let waiter = kio::Waiter::noop();
+
+		catalog
+			.mutate(|catalog| catalog.m2ts = Some(hang::catalog::M2ts::new("input.m2ts")))
+			.unwrap();
+		let snapshot = match consumer.poll_next(&waiter) {
+			Poll::Ready(Ok(Some(c))) => c,
+			other => panic!("expected the passthrough catalog, got {other:?}"),
+		};
+		assert_eq!(snapshot.m2ts.unwrap().track, "input.m2ts");
 	}
 
 	// Dropping a reservation without fulfilling it (a stream that never produced a config) still opens

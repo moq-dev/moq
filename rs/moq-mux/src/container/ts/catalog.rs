@@ -388,7 +388,17 @@ pub struct Ext {
 	pub mpegts: Mpegts,
 }
 
-impl CatalogExt for Ext {}
+impl CatalogExt for Ext {
+	fn has_track(&self) -> bool {
+		self.mpegts.tracks.values().any(|track| track.verbatim.is_some())
+			|| self
+				.mpegts
+				.si
+				.values()
+				.flat_map(BTreeMap::values)
+				.any(|entry| !entry.track.is_empty())
+	}
+}
 
 /// An extension that can carry an `mpegts` catalog section.
 ///
