@@ -43,7 +43,7 @@ Rust items (`rs/moq-net/src/model/`), as they stood at b4eab0db1:
       reports the last frame that exists. This touches
       [Live largest location](/quest/m1/largest.md); align with it there.
     - Regression guard: `rejoin_waits_for_the_answers_first_frame`
-      (`rs/moq-net/tests/rejoin.rs`, fails when the judgments count a
+      (`rs/moq-net/tests/integration/rejoin.rs`, fails when the judgments count a
       frameless group) and
       `revealing_a_presented_group_wakes_a_read_it_expires` stay;
       `a_withheld_group_holds_the_end` and
