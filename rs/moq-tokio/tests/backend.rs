@@ -757,6 +757,8 @@ async fn noq_client_close_reaches_server() {
 		.parse()
 		.unwrap();
 
+	let (accepted, established) = tokio::sync::oneshot::channel();
+
 	// The client gets a runtime of its own, gone as soon as the client returns: nothing
 	// drives its endpoint afterwards, exactly as when a process exits.
 	let client = std::thread::spawn(move || {
@@ -773,6 +775,9 @@ async fn noq_client_close_reaches_server() {
 				.expect("failed to init client")
 				.with_subscriber(moq_tokio::origin::spawn());
 			let (client, connection) = connect_once(client, url).await.expect("client connect failed");
+			// The client handshake can finish before the server hands its session to
+			// the test. Close only once the test owns the peer we intend to observe.
+			established.await.expect("server accepted the session");
 			drop(connection);
 			client.close().await;
 		});
@@ -783,6 +788,7 @@ async fn noq_client_close_reaches_server() {
 		.expect("accept timed out")
 		.expect("no incoming connection");
 	let session = request.ok().await.expect("server handshake failed");
+	accepted.send(()).expect("client waiting for the accepted session");
 	tokio::task::spawn_blocking(move || client.join())
 		.await
 		.unwrap()

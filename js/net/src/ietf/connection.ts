@@ -19,6 +19,7 @@ import { type RequestKind, toRequestCode } from "./error.ts";
 import { Fetch, FetchError, FetchHeader } from "./fetch.ts";
 import { GoAway } from "./goaway.ts";
 import * as Message from "./message.ts";
+import * as Namespace from "./namespace.ts";
 import { Group } from "./object.ts";
 import { Publish, PublishError } from "./publish.ts";
 import { PublishNamespace, PublishNamespaceError } from "./publish_namespace.ts";
@@ -401,13 +402,14 @@ export class Connection implements Established {
 				if (this.#session.version < Version.DRAFT_18) {
 					throw new ProtocolViolation("SUBSCRIBE_TRACKS before draft-18");
 				}
-				const requestId = await Message.decode(stream.reader, async (reader) => {
-					const id = await reader.u62();
+				const request = await Message.decode(stream.reader, async (reader) => {
+					const requestId = await reader.u62();
+					const namespace = await Namespace.decode(reader);
 					await reader.readAll();
-					return id;
+					return { requestId, namespace };
 				});
-				this.#session.spendRequest(requestId);
-				await this.#publisher.runSubscribeTracks(stream);
+				this.#session.spendRequest(request.requestId);
+				await this.#publisher.runSubscribeTracks(stream, request.namespace);
 				break;
 			}
 			case BigInt(TrackStatusRequest.id): {

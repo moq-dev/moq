@@ -93,6 +93,7 @@ export type RequestCondition =
 	| "not_supported"
 	/** The broadcast or track the peer asked for is not here. */
 	| "invalid_range"
+	| "invalid_filter"
 	| "invalid_joining_request_id"
 	| "does_not_exist"
 	/** The content the peer offered is not wanted here, so it should stop offering it. */
@@ -188,6 +189,8 @@ function goingAway(version: IetfVersion): number | undefined {
  */
 export function toRequestCode(condition: RequestCondition, kind: RequestKind, version: IetfVersion): number {
 	switch (condition) {
+		case "invalid_filter":
+			return version >= Version.DRAFT_19 ? 0x36 : INTERNAL_ERROR;
 		case "internal":
 			return INTERNAL_ERROR;
 		case "unauthorized":
@@ -236,6 +239,7 @@ export function fromRequestCode(code: number, kind: RequestKind, version: IetfVe
 			return "not_supported";
 	}
 
+	if (code === 0x36 && version >= Version.DRAFT_19) return "invalid_filter";
 	if (code === doesNotExist(kind, version)) return "does_not_exist";
 	if (code === invalidRange(kind, version)) return "invalid_range";
 	if (code === invalidJoiningRequestId(kind, version)) return "invalid_joining_request_id";
