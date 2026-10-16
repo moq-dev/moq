@@ -1,6 +1,7 @@
+import { Milli } from "@moq/clock";
 import type * as Catalog from "@moq/hang/catalog";
 import type * as Moq from "@moq/net";
-import { Path, Time } from "@moq/net";
+import { Path } from "@moq/net";
 import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
 import * as Audio from "./audio";
 import { Broadcast, type CatalogFormat } from "./broadcast";
@@ -41,7 +42,7 @@ export type PlayerInput = {
 	/** Playback distance from the live edge. */
 	delay: Getter<Delay>;
 	/** Future-dated media held beyond the live edge. */
-	buffer: Getter<Time.Milli>;
+	buffer: Getter<Milli>;
 	/** Desired video rendition or quality limits. */
 	target: Getter<Video.Target | undefined>;
 	/** Selected caption track, or undefined for off. */
@@ -96,7 +97,7 @@ export class Player {
 			visible: getter(props.visible ?? "20%"),
 			backend: getter<Video.Backend>(props.backend ?? "auto"),
 			delay: getter(props.delay ?? "auto"),
-			buffer: getter(props.buffer ?? Time.Milli.zero),
+			buffer: getter(props.buffer ?? Milli.zero),
 			target: getter<Video.Target | undefined>(props.target),
 			captions: getter<string | undefined>(props.captions),
 		});

@@ -14,9 +14,8 @@ The in-tree `moq-quic` `Connection` (`rs/moq-quic/src/connection/mod.rs`)
 already exposes runtime `set_max_concurrent_streams`, `set_receive_window`,
 and `set_send_window`; a raise queues `MAX_STREAMS` and `MAX_DATA` on the next
 packet, and a shrink is a debt paid as the peer consumes credit. The existing
-setters provide this seam; the transport integration waits for
-[the fork switch](/quest/m1/quic/fork/README.md), so moq-tokio and moq-uring
-run on `moq-quic` instead of `moq-noq`.
+setters provide this seam in `moq-quic`, which moq-tokio and moq-uring both
+run on.
 
 Decided 2026-10-08: the relay's peer config surface already exists. A
 session is a cluster peer when its admitted grant is marked `peer`, and the
@@ -26,7 +25,7 @@ its own.
 
 - moq-net's transport trait gains `set_limits(Limits)` on the session,
   `Limits` carrying the three values, implemented by the moq-tokio and
-  moq-uring adapters over `moq-quic` after the fork switch; every other
+  moq-uring adapters over `moq-quic`; every other
   backend, the browser included, reports it unsupported.
 - The peer table gains the same three values (the stream limit and the two
   windows),
@@ -45,8 +44,3 @@ unbounded assembly pool.
 Tests: a cluster session sees the raised `MAX_STREAMS` after SETUP and a
 viewer session does not; the io_uring path applies the same values; a
 `peer` table below the defaults is refused at resolve time.
-
-## Required
-
-- [Hard fork](/quest/m1/quic/fork/README.md) - moq-tokio and moq-uring run on `moq-quic`, whose setters this calls
-

@@ -45,5 +45,8 @@
 		"solid-js": {
 			"optional": true
 		}
+	},
+	"dependencies": {
+		"@moq/clock": "workspace:^"
 	}
 }

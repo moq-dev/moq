@@ -21,8 +21,7 @@ send stream offsets in any order.
 
 Decided 2026-10-02: the line moved from m2 to m3. It is a speculative
 optimization with no consumer asking for it, so it parks until one does and
-is deleted if it goes stale. The QUIC primitives land in `moq-quic`, the
-[hard fork](/quest/m1/quic/fork/README.md)'s stack.
+is deleted if it goes stale. The QUIC primitives land in `moq-quic`.
 
 Decided 2026-10-08: the four build quests were deleted. They churned with
 every frame-model and transport change while waiting on a verdict nobody had
