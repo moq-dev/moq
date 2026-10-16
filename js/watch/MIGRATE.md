@@ -3,3 +3,55 @@
 How to update your code for each breaking change, newest first.
 
 ## Unreleased
+
+### `"auto"` delay is measured (#4162)
+
+`"auto"` is sized from how late frames arrive instead of derived from RTT.
+A numeric `delay` is taken literally instead of having the rendition's own delay added on top.
+`Sync.out.jitter` always equals `Sync.out.delay`, and `"auto"` with no decoder registered resolves to 0 instead of 100 ms.
+
+### Staleness is `maxDelay`
+
+`Sync.out.maxAge` is `Sync.out.maxDelay`.
+
+```ts
+// Before
+const budget = sync.out.maxAge.peek();
+// After
+const budget = sync.out.maxDelay.peek();
+```
+
+### Disabled renditions are never selected (#4915)
+
+A rendition the catalog marks `enabled: false` is skipped, even when named.
+With no video rendition selectable, the picture clears to black.
+
+### `announced` off stays on one publisher
+
+With `announced` off, the player no longer moves to a later publisher at the same path.
+Turn `announced` on to follow restarts.
+
+## 0.5 -> 0.6
+
+### Delay attributes need a unit (#3396, #3817)
+
+`latency`, `latency-min`, `latency-max`, and `jitter` are `delay` and `buffer`, each with a unit.
+`reload` is `announced`.
+
+```html
+<!-- Before -->
+<moq-watch url="..." name="demo" latency="100" reload></moq-watch>
+<!-- After -->
+<moq-watch url="..." name="demo" delay="100ms" buffer="30s" announced></moq-watch>
+```
+
+### `Watch.Broadcast` is `Watch.Player`
+
+The player takes the connection's origin.
+
+```ts
+// Before
+new Watch.Broadcast({ connection, name });
+// After
+new Watch.Player({ origin: connection.origin, name });
+```
