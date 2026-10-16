@@ -10,6 +10,9 @@
 //! The reader never infers that a recording ended: it keeps following until the caller, who may
 //! know finality out of band, calls [`Reader::finish`].
 //!
+//! A track whose `.info` declares no timescale replays untimed, along with its timeline: its frames
+//! carry no timestamps, and nothing stands in for one.
+//!
 //! ```no_run
 //! # async fn example(store: moq_archive::Store<moq_archive::object_store::memory::InMemory>) -> moq_archive::Result<()> {
 //! use moq_archive::reader::{Config, Reader};
@@ -82,6 +85,8 @@ struct Timeline {
 	/// The track it indexes.
 	track: String,
 	producer: track::Producer,
+	/// `None` when the timeline, like the track it indexes, is untimed.
+	timescale: Option<Timescale>,
 	decoder: window::Decoder<Record>,
 	/// The last timeline segment replayed.
 	cursor: Option<u64>,
@@ -89,13 +94,13 @@ struct Timeline {
 
 struct TimelineRequests {
 	name: String,
-	timescale: Timescale,
+	timescale: Option<Timescale>,
 	dynamic: track::Dynamic,
 }
 
 struct TimelineRequest {
 	name: String,
-	timescale: Timescale,
+	timescale: Option<Timescale>,
 	request: group::Request,
 }
 
@@ -161,7 +166,7 @@ impl<T: ObjectStore> Reader<T> {
 			return Err(moq_net::Error::Duplicate.into());
 		}
 		let info = track_info(&self.shared.store.get_info(&timeline).await?)?;
-		let timescale = info.timescale.expect("track_info declares a timescale");
+		let timescale = info.timescale;
 		let producer = self.broadcast.create_track(timeline.clone(), info)?;
 		self.shared
 			.requests
@@ -175,6 +180,7 @@ impl<T: ObjectStore> Reader<T> {
 		self.timelines.push(Timeline {
 			track,
 			producer,
+			timescale,
 			decoder: window::Decoder::new(window::ConsumerConfig::default().with_compression(true)),
 			cursor: None,
 		});
@@ -239,7 +245,11 @@ impl Timeline {
 		segments.dedup();
 
 		for segment in segments {
-			match shared.store.get_segments(&name, segment).await {
+			match shared
+				.store
+				.get_segments(&name, segment, self.timescale.is_some())
+				.await
+			{
 				Ok(object) => self.replay(shared, segment, &object)?,
 				Err(Error::Store(err)) => return Err(Error::Store(err)),
 				Err(err) => {
@@ -255,6 +265,7 @@ impl Timeline {
 
 	/// Index one timeline object's groups, then republish each on the timeline track.
 	fn replay<T>(&mut self, shared: &Shared<T>, segment: u64, object: &Object) -> Result<()> {
+		let timed = self.timescale.is_some();
 		for stored in &object.groups {
 			let mut group = self.decoder.group();
 			let decoded = stored.frames.iter().try_for_each(|frame| group.decode(&frame.payload));
@@ -264,6 +275,15 @@ impl Timeline {
 			let mut index = shared.index.lock().unwrap();
 			while let Some(event) = group.next_event() {
 				match event {
+					window::Event::Push { value, .. }
+						if value.pts.is_some() != timed || value.duration.is_some() != timed =>
+					{
+						tracing::warn!(
+							track = self.track,
+							sequence = value.sequence,
+							"ignoring a record whose timing contradicts its timeline"
+						);
+					}
 					window::Event::Push { index: at, value } if at == value.sequence => index.push(&self.track, &value),
 					window::Event::Push { index: at, value } => {
 						tracing::warn!(
@@ -304,9 +324,8 @@ impl Timeline {
 				Err(moq_net::Error::Duplicate) => continue,
 				Err(err) => return Err(err.into()),
 			};
-			let timescale = producer.timescale().expect("`track_info` declares a timescale");
 			for frame in &stored.frames {
-				producer.write_frame(timestamp(frame.timestamp, timescale)?, frame.payload.clone())?;
+				producer.write_frame(timestamp(frame.timestamp, self.timescale)?, frame.payload.clone())?;
 			}
 			producer.finish()?;
 		}
@@ -391,7 +410,11 @@ async fn serve_timeline_group<T: ObjectStore>(shared: Arc<Shared<T>>, request: T
 	let object = shared
 		.cache
 		.get_or_insert_async(&key, async {
-			shared.store.get_segments(&name, segment).await.map(Arc::new)
+			shared
+				.store
+				.get_segments(&name, segment, timescale.is_some())
+				.await
+				.map(Arc::new)
 		})
 		.await;
 	let object = match object {
@@ -453,7 +476,7 @@ async fn serve_track<T: ObjectStore>(shared: Arc<Shared<T>>, request: track::Req
 		},
 	};
 
-	let timescale = info.timescale.expect("`track_info` declares a timescale");
+	let timescale = info.timescale;
 	let dynamic = request.dynamic();
 	let demand = dynamic.demand();
 	let _producer = request.accept(info);
@@ -485,7 +508,7 @@ async fn serve_track<T: ObjectStore>(shared: Arc<Shared<T>>, request: track::Req
 async fn serve_group<T: ObjectStore>(
 	shared: Arc<Shared<T>>,
 	track: String,
-	timescale: Timescale,
+	timescale: Option<Timescale>,
 	request: group::Request,
 ) {
 	let sequence = request.sequence();
@@ -503,7 +526,8 @@ async fn serve_group<T: ObjectStore>(
 	}
 	// Validate the first object before accepting, so an unreadable group is a plain miss. Keep it,
 	// so a cache too small to hold it costs no second GET.
-	let mut first = match object(&shared, &track, &spans[0]).await {
+	let timed = timescale.is_some();
+	let mut first = match object(&shared, &track, timed, &spans[0]).await {
 		Ok(object) => Some((spans[0].sequence, object)),
 		Err(err) => {
 			tracing::warn!(track, sequence, %err, "archived group is unavailable");
@@ -526,7 +550,7 @@ async fn serve_group<T: ObjectStore>(
 			}
 			let loaded = match first.take_if(|(loaded, _)| *loaded == span.sequence) {
 				Some((_, object)) => Ok(object),
-				None => object(&shared, &track, span).await,
+				None => object(&shared, &track, timed, span).await,
 			};
 			let object = match loaded {
 				Ok(object) if span.start <= Position::new(sequence, next) => object,
@@ -588,12 +612,12 @@ async fn serve_group<T: ObjectStore>(
 }
 
 /// A span's object, from the cache or one GET validated against the span.
-async fn object<T: ObjectStore>(shared: &Shared<T>, track: &str, span: &Span) -> Result<Arc<Object>> {
+async fn object<T: ObjectStore>(shared: &Shared<T>, track: &str, timed: bool, span: &Span) -> Result<Arc<Object>> {
 	let key = Key::segments(track.to_string(), span.sequence)?;
 	shared
 		.cache
 		.get_or_insert_async(&key, async {
-			let object = shared.store.get_segments(track, span.sequence).await?;
+			let object = shared.store.get_segments(track, span.sequence, timed).await?;
 			object.check_span(span.start, span.end)?;
 			Ok(Arc::new(object))
 		})
@@ -601,14 +625,20 @@ async fn object<T: ObjectStore>(shared: &Shared<T>, track: &str, span: &Span) ->
 }
 
 fn track_info(info: &crate::Info) -> Result<track::Info> {
-	let timescale = Timescale::new(info.timescale).map_err(|_| Error::Timescale(info.timescale))?;
-	Ok(track::Info::default()
-		.with_timescale(timescale)
-		.with_priority(info.priority))
+	let mut track = track::Info::default().with_priority(info.priority);
+	if let Some(timescale) = info.timescale {
+		track = track.with_timescale(Timescale::new(timescale).map_err(|_| Error::Timescale(timescale))?);
+	}
+	Ok(track)
 }
 
-fn timestamp(value: u64, timescale: Timescale) -> Result<Timestamp> {
-	Timestamp::new(value, timescale).map_err(|_| Error::Id(value))
+/// A stored timestamp on its track, which must be timed exactly when the frame is.
+fn timestamp(value: Option<u64>, timescale: Option<Timescale>) -> Result<Option<Timestamp>> {
+	match (value, timescale) {
+		(Some(value), Some(timescale)) => Ok(Some(Timestamp::new(value, timescale).map_err(|_| Error::Id(value))?)),
+		(None, None) => Ok(None),
+		_ => Err(Error::Timing),
+	}
 }
 
 /// Adapt a boxed future into a [`kio::Tasks`] task.

@@ -240,7 +240,7 @@ impl SendStream {
     /// - when `group` belongs to another connection
     pub fn set_group(&self, group: Option<&SendGroup>) -> Result<(), ClosedStream> {
         let mut conn = self.conn.state.lock("SendStream::set_group");
-        let group = group.map(|group| group.on(&self.conn));
+        let group = group.map(SendGroup::id);
         conn.inner.send_stream(self.stream).set_group(group)
     }
 

@@ -47,16 +47,8 @@ impl SendGroup {
         conn.inner.send_groups().priority(self.id())
     }
 
-    /// The group as the connection knows it, if it belongs to `conn`.
-    pub(crate) fn on(&self, conn: &ConnectionInner) -> &moq_quic::SendGroup {
-        assert!(
-            std::ptr::eq(&*self.0.conn, conn),
-            "send group used on another connection"
-        );
-        self.id()
-    }
-
-    fn id(&self) -> &moq_quic::SendGroup {
+    /// The group as the connection knows it, which refuses it on any other connection.
+    pub(crate) fn id(&self) -> &moq_quic::SendGroup {
         self.0.group.as_ref().expect("only taken on drop")
     }
 }

@@ -45,16 +45,8 @@ impl SendGroup {
 		self.0.shared.conn.borrow_mut().send_groups().priority(self.id())
 	}
 
-	/// The group as the connection knows it, if it belongs to `shared`.
-	pub(crate) fn on(&self, shared: &Shared) -> &moq_quic::SendGroup {
-		assert!(
-			Rc::ptr_eq(&self.0.shared, shared),
-			"send group used on another connection"
-		);
-		self.id()
-	}
-
-	fn id(&self) -> &moq_quic::SendGroup {
+	/// The group as the connection knows it, which refuses it on any other connection.
+	pub(crate) fn id(&self) -> &moq_quic::SendGroup {
 		self.0.group.as_ref().expect("only taken on drop")
 	}
 }

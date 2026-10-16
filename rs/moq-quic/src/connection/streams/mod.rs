@@ -5,7 +5,11 @@ use thiserror::Error;
 use tracing::trace;
 
 use super::spaces::{Retransmits, ThinRetransmits};
-use crate::{Dir, StreamId, VarInt, connection::streams::state::get_or_insert_recv, frame};
+use crate::{
+    Dir, StreamId, VarInt,
+    connection::{ConnectionTag, streams::state::get_or_insert_recv},
+    frame,
+};
 
 mod recv;
 use recv::Recv;
@@ -13,7 +17,7 @@ use recv::Recv;
 #[cfg(test)]
 mod saturated;
 mod schedule;
-pub use recv::{Chunks, ReadError, ReadableError};
+pub use recv::{Chunks, Credit, ReadError, ReadableError};
 use schedule::Schedule;
 
 mod send;
@@ -406,12 +410,10 @@ impl<'a> SendStream<'a> {
             .ok_or(ClosedStream { _private: () })?
             .get_or_insert_with(|| Send::new(max_send_data));
 
-        self.state.pending.join(
-            self.id,
-            &mut stream.slot,
-            group.map(|g| g.0),
-            stream.priority,
-        );
+        let group = group.map(|g| g.index(self.state.tag));
+        self.state
+            .pending
+            .join(self.id, &mut stream.slot, group, stream.priority);
         Ok(())
     }
 }
@@ -432,32 +434,57 @@ impl SendGroups<'_> {
     /// # Panics
     /// - when `domain` was opened on another connection
     pub fn open(&mut self, priority: i32, domain: Option<&SendDomain>) -> SendGroup {
-        SendGroup(self.state.pending.open_group(priority, domain.map(|d| d.0)))
+        let tag = self.state.tag;
+        let domain = domain.map(|d| d.index(tag));
+        SendGroup {
+            index: self.state.pending.open_group(priority, domain),
+            tag,
+        }
     }
 
     /// Release a send group; its streams keep their place until they finish
+    ///
+    /// # Panics
+    /// - when `group` was opened on another connection
     pub fn close(&mut self, group: SendGroup) {
-        self.state.pending.close_group(group.0);
+        let index = group.index(self.state.tag);
+        self.state.pending.close_group(index);
     }
 
     /// Change a group's priority, moving any data it has queued along with it
+    ///
+    /// # Panics
+    /// - when `group` was opened on another connection
     pub fn set_priority(&mut self, group: &SendGroup, priority: i32) {
-        self.state.pending.set_group_priority(group.0, priority);
+        let index = group.index(self.state.tag);
+        self.state.pending.set_group_priority(index, priority);
     }
 
     /// The group's priority
+    ///
+    /// # Panics
+    /// - when `group` was opened on another connection
     pub fn priority(&self, group: &SendGroup) -> i32 {
-        self.state.pending.group_priority(group.0)
+        self.state
+            .pending
+            .group_priority(group.index(self.state.tag))
     }
 
     /// Open a domain, which gets an equal share of bytes with every other domain
     pub fn open_domain(&mut self) -> SendDomain {
-        SendDomain(self.state.pending.open_domain())
+        SendDomain {
+            index: self.state.pending.open_domain(),
+            tag: self.state.tag,
+        }
     }
 
     /// Release a domain; its groups keep their share until they are released
+    ///
+    /// # Panics
+    /// - when `domain` was opened on another connection
     pub fn close_domain(&mut self, domain: SendDomain) {
-        self.state.pending.close_domain(domain.0);
+        let index = domain.index(self.state.tag);
+        self.state.pending.close_domain(index);
     }
 }
 
@@ -466,14 +493,34 @@ impl SendGroups<'_> {
 /// Release it with [`SendGroups::close`] on the connection that opened it.
 #[derive(Debug, PartialEq, Eq)]
 #[must_use = "a send group lives until it is closed"]
-pub struct SendGroup(usize);
+pub struct SendGroup {
+    index: usize,
+    tag: ConnectionTag,
+}
+
+impl SendGroup {
+    fn index(&self, tag: ConnectionTag) -> usize {
+        assert_eq!(self.tag, tag, "send group used on another connection");
+        self.index
+    }
+}
 
 /// A domain of send groups, from [`SendGroups::open_domain`]
 ///
 /// Release it with [`SendGroups::close_domain`] on the connection that opened it.
 #[derive(Debug, PartialEq, Eq)]
 #[must_use = "a domain lives until it is closed"]
-pub struct SendDomain(usize);
+pub struct SendDomain {
+    index: usize,
+    tag: ConnectionTag,
+}
+
+impl SendDomain {
+    fn index(&self, tag: ConnectionTag) -> usize {
+        assert_eq!(self.tag, tag, "send domain used on another connection");
+        self.index
+    }
+}
 
 /// Application events about streams
 #[derive(Debug, PartialEq, Eq)]
