@@ -10,6 +10,10 @@ prior, as `doc/concept/audio-jitter.md` ("Across renditions") requires.
 
 ## Plan
 
+Starts once #5635 lands. That PR adds `ConsumerProps.predecessor` to
+`@moq/hang` and the video hand-off this quest mirrors; this quest adds no API of
+its own.
+
 Today the audio decoder's `#runLegacyDecoder` and `#runCmafDecoder` clear
 `#measured` on teardown, before the replacement subscription opens, and the
 new `Container.Consumer` starts from the prior. At a rename, the audio target
