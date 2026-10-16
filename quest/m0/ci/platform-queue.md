@@ -35,4 +35,4 @@ the implementation PR.
 
 ## Related
 
-- [mbx on R2](/quest/m0/ci/mbx-r2.md) - gives platform jobs a Rust cache
+- [Verify the R2 Rust cache](/quest/m0/ci/mbx-r2-verify.md) - confirms the platform jobs hit their Rust cache
