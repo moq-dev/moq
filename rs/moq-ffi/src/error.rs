@@ -67,6 +67,8 @@ pub enum MoqProtocolKind {
 	Unknown,
 	/// The session exceeded its announcement or subscription cap.
 	TooManyRequests,
+	/// The authorization token expired and can be refreshed. Session 0x18.
+	Expired,
 }
 
 /// A protocol failure a peer sent (or this side will send): scope, verbatim code, kind,
@@ -118,6 +120,7 @@ fn session_kind(err: &moq_net::SessionError) -> MoqProtocolKind {
 		moq_net::SessionError::Cancel => MoqProtocolKind::Cancel,
 		moq_net::SessionError::Internal => MoqProtocolKind::Internal,
 		moq_net::SessionError::Unauthorized => MoqProtocolKind::Unauthorized,
+		moq_net::SessionError::Expired => MoqProtocolKind::Expired,
 		moq_net::SessionError::ProtocolViolation => MoqProtocolKind::ProtocolViolation,
 		moq_net::SessionError::KeyValueFormatting => MoqProtocolKind::KeyValueFormatting,
 		moq_net::SessionError::GoawayTimeout => MoqProtocolKind::GoawayTimeout,
@@ -243,6 +246,10 @@ pub enum MoqError {
 	#[error("forbidden")]
 	Forbidden,
 
+	/// The authorization token expired; refresh it before retrying.
+	#[error("authorization token expired")]
+	Expired,
+
 	/// The requested track or group is not available.
 	#[error("not found")]
 	NotFound,
@@ -299,6 +306,7 @@ impl From<moq_net::Error> for MoqError {
 			moq_net::Error::Closed | moq_net::Error::GoingAway | moq_net::Error::SessionClosed => Self::Closed,
 			moq_net::Error::Cancel => Self::Cancelled,
 			moq_net::Error::Unauthorized => Self::Unauthorized,
+			moq_net::Error::Expired => Self::Expired,
 			moq_net::Error::Unsupported | moq_net::Error::Version => Self::Unsupported,
 			moq_net::Error::Session(err) => Self::Protocol {
 				details: MoqProtocolError::from_session(&err),
@@ -475,6 +483,22 @@ mod tests {
 				assert_eq!(protocol.scope, MoqErrorScope::Session);
 				assert_eq!(protocol.code, 0x2);
 				assert_eq!(protocol.kind, MoqProtocolKind::Unauthorized);
+			}
+			other => panic!("expected Protocol, got {other}"),
+		}
+	}
+
+	/// A refused request carries no session code, so it must not claim the session expired.
+	#[test]
+	fn expired_request_is_not_a_session_close() {
+		assert!(matches!(MoqError::from(moq_net::Error::Expired), MoqError::Expired));
+
+		let err = MoqError::from(moq_net::Error::from(moq_net::SessionError::Expired));
+		match err {
+			MoqError::Protocol { details } => {
+				assert_eq!(details.scope, MoqErrorScope::Session);
+				assert_eq!(details.code, 0x18);
+				assert_eq!(details.kind, MoqProtocolKind::Expired);
 			}
 			other => panic!("expected Protocol, got {other}"),
 		}

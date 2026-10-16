@@ -17,8 +17,9 @@ Decided 2026-10-13 (see the [epic](/quest/m1/ietf-extension/README.md)).
   finalize rename alone.
 - Add a documented `pub ietf: bool` field on `setup::Extensions`, default
   `false`. moq-relay sets it. Both sides must offer it.
-- lite-07 only, while it is the wip version. Frozen versions get no framing
-  branches.
+- Target the current wip version. If lite-07 has finalized before this
+  lands, use the next wip/version. Published versions get no incompatible
+  framing changes.
 - When negotiated, the fields are always present, with no flag bits:
   - The Group message gains the explicit FIRST_OBJECT state. The first
     object ID alone cannot recover the FIRST_OBJECT bit. Subgroups other

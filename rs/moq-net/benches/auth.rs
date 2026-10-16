@@ -3,7 +3,7 @@
 //! Measures the pending queue and complete grant/withdrawal lifecycle. Run the same
 //! matrix before and after queue changes so a per-session scan appears on its own axis.
 
-#[path = "../tests/support/mod.rs"]
+#[path = "../tests/integration/support/mod.rs"]
 mod support;
 
 use bytes::Bytes;
@@ -21,7 +21,9 @@ struct Pair {
 }
 
 async fn pair(version: Version) -> Pair {
-	let (client, server) = create_mock_session_pair(Some(version.alpn()));
+	let mut mock = moq_net::transport::memory::Config::default();
+	mock.protocol = Some(version.alpn().to_string());
+	let (client, server) = create_mock_session_pair(mock);
 	let client = async {
 		let (session, driver) = moq_net::Client::new()
 			.with_versions(version.into())

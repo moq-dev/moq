@@ -26,6 +26,7 @@ production stability proven merely because upstream artifacts published.
 
 ## Required
 
+- [API-diff check](/quest/m2/release/migrate-audit.md) - PRs into release diff the public API; backports refuse breaks, the cut confirms MIGRATE.md coverage
 - [Cut and publish](/quest/m2/release/cut.md) - independently executable after m1; release-triggered publication
 - [Published catalog readers](/quest/m2/release/catalog-readers.md) - released Go and JS clients accept the current Rust publisher's live catalog in smoke; an earlier release-line patch may satisfy it
 - [Published assets](/quest/m2/release/assets-release.md) - npm carries hostable worklets
@@ -34,6 +35,7 @@ production stability proven merely because upstream artifacts published.
 - [Dart publication](/quest/m2/release/dart-publish.md) - the wrapper and native artifacts install from the registry
 - [Final libmoq stub](/quest/m2/release/libmoq-final-release.md) - publish the migration notice before removing its source
 - [Retire libmoq](/quest/m2/release/libmoq-retire.md) - cleanup only after that publication
+- [Final hand-written C notice](/quest/m2/release/c-final-release.md) - publish the migration notice before source retirement
 - [Retire hand-written C](/quest/m2/release/c-retire.md) - complete the final old-package notice and source retirement
 - [Hosted worklet adoption](/quest/m2/release/dogfood-assets.md) - downstream consumers exercise the published assets
 - [moq.sh deployment](/quest/m2/release/moq-sh-deploy.md) - verify its release-triggered publication

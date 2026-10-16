@@ -89,7 +89,7 @@ reasons, so later sessions don't reopen them:
   instant at its boundary.
 
 This milestone verifies the exported clock contract and production consumers
-needed by the QUIC switch and clustering regressions. Unrelated test/private
+needed by the in-tree QUIC stack and clustering regressions. Unrelated test/private
 cleanup and the global lint ratchet belong to
 [the follow-up sweep](/quest/m2/time-test-sweep.md).
 

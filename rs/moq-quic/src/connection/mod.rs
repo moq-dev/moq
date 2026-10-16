@@ -76,7 +76,22 @@ use spaces::Retransmits;
 use spaces::{PacketNumberFilter, PacketSpace, SendableFrames, SentPacket, ThinRetransmits};
 
 mod stats;
-pub use stats::{ConnectionStats, FrameStats, PathStats, UdpStats};
+
+/// Identifies one connection, so state handed out by it cannot be returned to another.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ConnectionTag(u64);
+
+impl ConnectionTag {
+    /// No connection, for state that has not come from one yet.
+    pub(crate) const NONE: Self = Self(0);
+
+    /// A tag no other connection in this process has.
+    pub(crate) fn next() -> Self {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        Self(NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
+    }
+}
+pub use stats::{ConnectionStats, CreditStats, FrameStats, PathStats, UdpStats};
 
 mod streams;
 #[cfg(fuzzing)]
@@ -84,8 +99,8 @@ pub use streams::StreamsState;
 #[cfg(not(fuzzing))]
 use streams::StreamsState;
 pub use streams::{
-    Chunks, ClosedStream, FinishError, ReadError, ReadableError, RecvStream, SendStream,
-    ShouldTransmit, StreamEvent, Streams, WriteError, Written,
+    Checkpoint, Chunks, ClosedStream, Credit, FinishError, ReadError, ReadableError, RecvStream,
+    SendStream, ShouldTransmit, StreamEvent, Streams, WriteError, Written,
 };
 
 mod timer;
@@ -1358,8 +1373,22 @@ impl Connection {
         stats.path.cwnd = self.path.congestion.window();
         stats.path.bandwidth_estimate = self.path.congestion.metrics().bandwidth_estimate;
         stats.path.current_mtu = self.path.mtud.current_mtu();
+        stats.credit = self.streams.credit_stats();
 
         stats
+    }
+
+    /// Return connection flow control credit taken by [`Chunks::hold()`] to the peer.
+    ///
+    /// If [`ShouldTransmit::should_transmit()`] returns `true`, call
+    /// [`Self::poll_transmit()`] soon so the peer learns of the larger window.
+    ///
+    /// # Panics
+    /// If `credit` came from another connection.
+    pub fn release(&mut self, credit: Credit) -> ShouldTransmit {
+        let transmit = self.streams.release(credit);
+        self.spaces[SpaceId::Data].pending.max_data |= transmit.should_transmit();
+        transmit
     }
 
     /// Ping the remote endpoint
@@ -1752,13 +1781,20 @@ impl Connection {
 
         // Update state for confirmed delivery of frames
         if let Some(retransmits) = info.retransmits.get() {
-            for (id, _) in retransmits.reset_stream.iter() {
-                self.streams.reset_acked(*id);
+            for &(id, reliable_size) in retransmits.reset_stream.iter() {
+                self.streams.reset_acked(id, reliable_size);
             }
         }
 
         for frame in info.stream_frames {
-            self.streams.received_ack_of(frame);
+            let id = frame.id;
+            // A reset held for a peer without RESET_STREAM_AT goes out once it holds the data
+            if let Some(reliable_size) = self.streams.received_ack_of(frame) {
+                self.spaces[SpaceId::Data]
+                    .pending
+                    .reset_stream
+                    .push((id, reliable_size));
+            }
         }
     }
 
@@ -3075,6 +3111,13 @@ impl Connection {
                     self.streams.received_max_streams(dir, count)?;
                 }
                 Frame::ResetStream(frame) => {
+                    if frame.reliable_size.is_some() && !self.config.reset_stream_at {
+                        // We never advertised it, so it is an unknown frame type
+                        let mut err =
+                            TransportError::FRAME_ENCODING_ERROR("unsupported RESET_STREAM_AT");
+                        err.frame = Some(frame::FrameType::RESET_STREAM_AT);
+                        return Err(err);
+                    }
                     if self.streams.received_reset(frame)?.should_transmit() {
                         self.spaces[SpaceId::Data].pending.max_data = true;
                     }
@@ -3118,7 +3161,13 @@ impl Connection {
                             "STOP_SENDING on unopened stream",
                         ));
                     }
-                    self.streams.received_stop_sending(id, error_code);
+                    if let Some(reliable_size) = self.streams.received_stop_sending(id, error_code)
+                    {
+                        self.spaces[SpaceId::Data]
+                            .pending
+                            .reset_stream
+                            .push((id, reliable_size));
+                    }
                 }
                 Frame::RetireConnectionId { sequence } => {
                     let allow_more_cids = self

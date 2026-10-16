@@ -18,9 +18,10 @@ the encode seam as the platform candidate on macOS and iOS.
   `kAudioConverterPrimeInfo` gives the delay the timestamps fold in.
 - Bitrate through `kAudioConverterEncodeBitRate`, updated live where the
   converter allows.
-- The seam assumes one packet per frame. If the converter holds output back,
-  the backend needs a `flush` and a zero-or-more return, which changes
-  `Encoder::encode`.
+- This quest owns changing `Encoder::encode` from one packet per frame to
+  a zero-or-more packet return with a flush operation. MediaCodec requires
+  this shared contract even if AudioToolbox itself emits immediately. Prove
+  delayed and multiple outputs and flushing in the shared encoder tests.
 - Gate the seam's "AAC refused without a platform encoder" test to hosts
   without one.
 - Regression: a stereo and a 5.1 encode round-trip through the AudioToolbox

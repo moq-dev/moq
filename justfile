@@ -60,6 +60,11 @@ bench-audio:
 bench-runtime $ROUNDS="3" $WORKERS="":
     MOQ_BENCH_RUNTIME_ROUNDS="$ROUNDS" MOQ_BENCH_RUNTIME_WORKERS="$WORKERS" bench/run.sh --runtime
 
+# Sweep the relay's QUIC shard count against room and fanout connection counts;
+# 0 shards is the shared runtime. Example: `just bench-shard "0 1 8" "64 512"`.
+bench-shard $SHARDS="0 1 4 16" $CONNECTIONS="16 64 256":
+    MOQ_BENCH_SHARD_COUNTS="$SHARDS" MOQ_BENCH_SHARD_CONNECTIONS="$CONNECTIONS" bench/run.sh --shard
+
 # Attribute relay worker std mutex waits by stack, for each worker count.
 bench-lock $WORKLOAD="fanout" $WORKERS="1 4 16":
     MOQ_BENCH_LOCK_WORKLOAD="$WORKLOAD" MOQ_BENCH_LOCK_WORKERS="$WORKERS" bench/run.sh --lock
