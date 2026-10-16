@@ -31,13 +31,20 @@ revised in the #5734 review.
 - **Producers.** When `Demand::wanted` passes the largest group, the
   producer re-emits the current value as a snapshot (or the current window)
   in a new group immediately, rather than waiting for the next update.
-- **Driver (Rust).** The producers are synchronous and moq-json has no
-  runtime, so the caller drives refresh: `Producer::refresh(&self).await`
-  (plus `poll_refresh` for sync owners) waits until `wanted` passes the
-  largest group, then re-emits. Callers loop or select on it beside their
-  updates. JS producers drive it internally. Decided in the #5734 review,
-  over a driver handle returned by the constructor and over checking only
-  on update, which never refreshes an idle value.
+- **Driver.** The producers are synchronous and moq-json has no runtime,
+  so the Rust caller drives refresh: `Producer::refresh(&self).await` (plus
+  `poll_refresh` for sync owners) waits until `wanted` passes the largest
+  group, then re-emits. Callers loop or select on it beside their updates.
+  JS producers drive it internally. Decided in the #5734 review, over a
+  driver handle returned by the constructor and over checking only on
+  update, which never refreshes an idle value.
+- **Driver (moq-ffi).** Each bound json producer drives refresh
+  internally, as JS does: its constructor starts a task with
+  `crate::ffi::spawn` that waits on the track's demand, re-emits the value
+  under the producer's lock, and stops on finish or drop. Bindings gain no
+  refresh API. Decided in the #5734 review over exposing an async
+  `refresh()` in moq-ffi and every wrapper (about 150 lines), which every
+  binding caller would have to loop on, and a missed loop fails silently.
 - **Timestamp.** Producers and encoders retain the timestamp of the last
   committed update, and a refresh restates the value at it. That is the
   state's own time and never rewinds, because it equals the previous
@@ -62,7 +69,8 @@ revised in the #5734 review.
 - **Bindings.** Replace `delta_ratio` with `deltas` in moq-ffi
   (`rs/moq-ffi/src/json.rs`), moq-c, the py, swift, go, kt, and dart wrappers, and
   `doc/lib/*`. The ratio reaches them through `MoqTrackInfo::refresh` from
-  [core](/quest/m1/refresh/core.md). Update the moq-json and `@moq/json`
+  [core](/quest/m1/refresh/core.md), and the moq-ffi driver above refreshes
+  their producers with no wrapper change. Update the moq-json and `@moq/json`
   READMEs and the Unreleased section of `doc/setup/upgrade.md`.
 - moq-flate is unchanged. Its snapshot mode already opens a group per
   update, and its stream mode keeps one group by design.
@@ -72,11 +80,13 @@ group, and a joiner above it gets a fresh snapshot group. With no joiner the
 group grows to the caps. `refresh: None` never rolls early, `deltas: false`
 writes one snapshot group per update, and `Encoder::snapshot()` restates the
 retained value. A refresh on a timed track reuses the last committed
-timestamp. Run in Rust and JS.
+timestamp. Run in Rust and JS. A moq-ffi test shows an idle bound
+snapshot producer re-emitting its value when a joiner crosses the ratio.
 
 Public API: breaking (`delta_ratio` and `op_ratio` replaced by `deltas` and
 `ops` in Rust, JS, and every binding that exposes them; `Encoder::snapshot()`
-and Rust `Producer::refresh` / `poll_refresh` added). Wire: none.
+and Rust `Producer::refresh` / `poll_refresh` added; bindings gain no refresh
+method because moq-ffi drives it internally). Wire: none.
 
 ## Required
 
