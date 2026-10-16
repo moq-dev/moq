@@ -67,6 +67,51 @@ the session and memory counts move.
 
 Public API: a device capacity and health snapshot in moq-video. Wire: none.
 
+### Source audit (2026-10-16)
+
+There is no single Linux interface that supplies the promised device-wide
+snapshot across NVIDIA, AMD, and Intel:
+
+- Vulkan
+  [`VK_EXT_memory_budget`](https://registry.khronos.org/vulkan/specs/latest/man/html/VK_EXT_memory_budget.html)
+  reports the current process's estimated heap usage and allocation budget,
+  not device-wide used and total memory. It cannot back the admission fields.
+- DRM
+  [`drm-memory-*`](https://docs.kernel.org/gpu/drm-usage-stats.html) and engine
+  counters in fdinfo are scoped to one DRM client. They are useful for
+  attributing this process, but cannot provide device-wide sessions, memory,
+  utilization, or health.
+- AMDGPU exposes device-wide
+  [`mem_info_vram_total` and `mem_info_vram_used`](https://docs.kernel.org/gpu/amdgpu/driver-misc.html),
+  but those sysfs files are driver-specific and do not supply codec sessions
+  or a portable reset state.
+- NVIDIA's
+  [NVML device queries](https://docs.nvidia.com/deploy/nvml-api/latest/api/group__nvmlDeviceQueries.html)
+  supply device memory, encoder sessions and utilization, decoder utilization,
+  model, and lost/reset-required errors. That is the only evaluated source
+  that covers most of the snapshot, and it is vendor-specific.
+
+The implementation therefore needs vendor adapters behind one public schema;
+"vendor-neutral" describes the caller API, not its data source. Keep every
+field optional and attach a scope (`Process` or `Device`) so partial adapters
+cannot accidentally present process-local data as admission capacity.
+
+Before implementation, decide the public shape and the first honest support
+floor:
+
+1. **Recommended:** `gpu::snapshot(&frame::vulkan::Device)` returns one
+   additive `gpu::Snapshot` with scoped optional measurements. Land NVIDIA's
+   device-wide adapter and the in-process encoder/decoder counts first; add
+   AMD and Intel adapters when their hardware quests can prove equivalent
+   fields. Unsupported fields remain absent.
+2. Require the whole promised field set on all three vendors before exposing
+   the API. This keeps a stronger contract, but blocks the quest on hardware
+   access and on driver interfaces that do not currently expose equivalent
+   device-wide codec-session data.
+3. Expose a provider trait for callers to supply vendor data. This avoids an
+   in-tree NVML adapter, but leaks backend selection and lifecycle into every
+   admission caller.
+
 ## Related
 
 - [VA-API encodes an external Vulkan image](/quest/m1/vaapi-vulkan-import.md) - picks a render node by the same `dev_t`
