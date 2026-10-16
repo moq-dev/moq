@@ -2962,7 +2962,7 @@ mod session_tests {
 								let Some(request) = request else { break };
 								if refuse {
 									request.reject(moq_tokio::server::Reject::Forbidden).await.unwrap();
-								} else if let Ok(session) = request.with_publisher(&serving).with_subscriber(serving.clone()).ok().await {
+								} else if let Ok((session, _driver)) = request.with_publisher(&serving).with_subscriber(serving.clone()).ok().await {
 									sessions.push(session);
 								}
 							}

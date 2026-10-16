@@ -35,6 +35,7 @@ import { type RequestKind, requestReason, toRequestCode } from "./error.ts";
 import { type Fetch, FetchError, FetchHeader } from "./fetch.ts";
 import * as Filter from "./filter.ts";
 import * as Message from "./message.ts";
+import * as Namespace from "./namespace.ts";
 import { FetchFrame, Frame, Group as GroupMessage } from "./object.ts";
 import { Parameters } from "./parameters.ts";
 import { fromWire, toWire } from "./priority.ts";
@@ -47,7 +48,7 @@ import {
 	PublishNamespaceUpdate,
 } from "./publish_namespace.ts";
 import { RequestError, RequestOk } from "./request.ts";
-import { cancelled, finCancels } from "./request_stream.ts";
+import { cancelled, finCancels, namespaceUpdate, refuseReserved } from "./request_stream.ts";
 import { GroupOrder, type Subscribe, SubscribeError, SubscribeOk, SubscribeUpdate } from "./subscribe.ts";
 import {
 	type SubscribeNamespace,
@@ -354,6 +355,10 @@ export class Publisher {
 	 * @internal
 	 */
 	async runSubscribe(msg: Subscribe, stream: Stream) {
+		if (Namespace.reserved(msg.trackNamespace, this.#session.version)) {
+			await refuseReserved(stream, this.#session.version);
+			return;
+		}
 		// Only a subscription we would serve holds a slot, as in Rust: a refused one ends at
 		// once. A peer past the cap loses the session.
 		const charged = msg.forward && !msg.rangeFilters && !this.#denied(msg.trackNamespace);
@@ -388,7 +393,14 @@ export class Publisher {
 				: undefined;
 
 		if (unsupported) {
-			refusal = { errorCode: toRequestCode("not_supported", "subscribe", version), reasonPhrase: unsupported };
+			refusal = {
+				errorCode: toRequestCode(
+					msg.rangeFilters && msg.forward ? "invalid_filter" : "not_supported",
+					"subscribe",
+					version,
+				),
+				reasonPhrase: unsupported,
+			};
 		} else if (this.#denied(name)) {
 			// Serve only what our grant lets us publish. Checked before resolving, so a denied
 			// request never reaches the origin.
@@ -402,7 +414,7 @@ export class Publisher {
 					stream.abort(cancel);
 					return;
 				}
-				refusal = this.#failed(err, "subscribe");
+				refusal = this.#failed(err, "subscribe", msg.rendezvous);
 			}
 		}
 
@@ -428,7 +440,26 @@ export class Publisher {
 		let ranking: Priority | undefined;
 
 		try {
-			const info = await untilAborted(track.info(), left.signal);
+			let info: Awaited<ReturnType<TrackSubscriber["info"]>>;
+			try {
+				info = await untilAborted(track.info(), left.signal);
+			} catch (err) {
+				const failed = error(err);
+				if (
+					!(failed instanceof StreamError) ||
+					(failed.code !== StreamCode.NotFound && failed.code !== StreamCode.Unroutable)
+				)
+					throw err;
+				// The broadcast resolved, so only a vanished route still means a missing publisher;
+				// a missing track is the publisher's answer.
+				await this.#refuse(
+					stream,
+					msg.requestId,
+					SubscribeError.id,
+					this.#failed(err, "subscribe", msg.rendezvous && failed.code === StreamCode.Unroutable),
+				);
+				return;
+			}
 			// A Timestamp goes out only when this SUBSCRIBE_OK actually carries TIMESCALE.
 			// Drafts 14-16 never write that property, so their objects stay unstamped.
 			const timescale =
@@ -570,12 +601,17 @@ export class Publisher {
 						if (err instanceof MalformedAuthToken) throw await refuse("malformed_auth_token", err.message);
 						throw err;
 					}
+					if (params.trackPropertyFilter)
+						throw new ProtocolViolation(
+							"TRACK_PROPERTY_FILTER is only allowed on SUBSCRIBE_TRACKS updates",
+						);
 					const unsupported =
 						params.forward === false ||
 						params.bytes.size > 0 ||
 						params.rangeFilters ||
-						params.trackPropertyFilter ||
-						[...params.vars.keys()].some((key) => key !== 0x10n && key !== 0x20n);
+						[...params.vars.keys()].some(
+							(key) => key !== 0x02n && key !== 0x06n && key !== 0x10n && key !== 0x20n,
+						);
 					if (unsupported) throw await refuse("not_supported", "REQUEST_UPDATE parameters not supported");
 					// update() replaces every option, so carry the rest over as Rust does.
 					if (params.subscriberPriority !== undefined)
@@ -1102,9 +1138,13 @@ export class Publisher {
 	}
 
 	async #runSubscribeNamespace(msg: SubscribeNamespace, stream: Stream) {
+		if (Namespace.reserved(msg.namespace, this.#session.version)) {
+			await refuseReserved(stream, this.#session.version);
+			return;
+		}
 		if (this.#withdrawal.closing.peek()) return;
 		const version = this.#session.version;
-		const prefix = msg.namespace;
+		let prefix = msg.namespace;
 		const legacy = version === Version.DRAFT_14 || version === Version.DRAFT_15;
 
 		// Draft-14/15: the open PUBLISH_NAMESPACE request per advertised suffix.
@@ -1117,6 +1157,12 @@ export class Publisher {
 		};
 
 		const ending = cancelled(stream, version);
+		const readUpdate = () =>
+			namespaceUpdate(stream.reader, version).then(
+				(update) => ({ update }),
+				(err) => ({ error: error(err) }),
+			);
+		let updating = version >= Version.DRAFT_18 ? readUpdate() : undefined;
 		try {
 			// Send OK response
 			if (version === Version.DRAFT_14) {
@@ -1201,10 +1247,48 @@ export class Publisher {
 
 				// Wait for the next change, or for the peer to unsubscribe.
 				const next = await (retry
-					? race([changed, this.#withdrawal.closing, ending, retryAfter(retry).then(() => advertised)])
-					: race([changed, this.#withdrawal.closing, ending]));
+					? race([
+							changed,
+							this.#withdrawal.closing,
+							ending,
+							...(updating !== undefined ? [updating] : []),
+							retryAfter(retry).then(() => advertised),
+						])
+					: race([changed, this.#withdrawal.closing, ending, ...(updating !== undefined ? [updating] : [])]));
 				dispose();
 				if (!next || next === true) break;
+				if (typeof next === "object" && "error" in next) throw next.error;
+				if (typeof next === "object" && "update" in next) {
+					const update = next.update;
+					updating = undefined;
+					if (!update) continue;
+					this.#session.spendRequest(update.requestId);
+					if (update.refused || (update.prefix !== undefined && Namespace.reserved(update.prefix, version))) {
+						await stream.writer.u53(RequestError.id);
+						await new RequestError({
+							requestId: undefined,
+							errorCode: toRequestCode(
+								update.refused ?? "does_not_exist",
+								"subscribe_namespace",
+								version,
+							),
+							reasonPhrase: "namespace update refused",
+						}).encode(stream.writer, version);
+						break;
+					}
+					if (update.prefix !== undefined && update.prefix !== prefix) {
+						for (const suffix of ns.active.keys()) await target.withdraw(suffix);
+						ns.active.clear();
+						ns.offered.clear();
+						ns.refused.clear();
+						prefix = update.prefix;
+						// A new cursor starts its backoff fresh, as in Rust.
+						retry = 0;
+					}
+					await stream.writer.u53(RequestOk.id);
+					await new RequestOk({ requestId: undefined }).encode(stream.writer, version);
+					updating = readUpdate();
+				}
 			}
 
 			// Withdraw before the ask stream FINs, as Rust does: a peer that reads that
@@ -1216,10 +1300,14 @@ export class Publisher {
 			const e = error(err);
 			console.debug(`subscribe_namespace stream error: ${reason(e)}`);
 			stream.abort(e);
-			if (this.#withdrawal.closing.peek()) throw e;
+			if (e instanceof ProtocolViolation || this.#withdrawal.closing.peek()) throw e;
 		} finally {
 			// This subscription's advertisements die with it.
 			await withdrawAll();
+			if (updating !== undefined) {
+				stream.reader.stop(new Error("namespace subscription ended"));
+				await updating;
+			}
 		}
 	}
 
@@ -1617,6 +1705,10 @@ export class Publisher {
 	 * @internal
 	 */
 	async runTrackStatusRequest(msg: TrackStatusRequest, stream: Stream) {
+		if (Namespace.reserved(msg.trackNamespace, this.#session.version)) {
+			await refuseReserved(stream, this.#session.version);
+			return;
+		}
 		const version = this.#session.version;
 		const name = msg.trackNamespace;
 		const denied: Refusal = {
@@ -1710,7 +1802,11 @@ export class Publisher {
 	 *
 	 * @internal
 	 */
-	async runSubscribeTracks(stream: Stream) {
+	async runSubscribeTracks(stream: Stream, namespace?: Path.Valid) {
+		if (namespace !== undefined && Namespace.reserved(namespace, this.#session.version)) {
+			await refuseReserved(stream, this.#session.version);
+			return;
+		}
 		const version = this.#session.version;
 		await stream.writer.u53(RequestError.id);
 		await new RequestError({
@@ -1728,6 +1824,17 @@ export class Publisher {
 	async runFetch(msg: Fetch, stream: Stream) {
 		this.#fetches.acquire();
 		try {
+			if (msg.trackNamespace !== undefined && Namespace.reserved(msg.trackNamespace, this.#session.version)) {
+				await refuseReserved(stream, this.#session.version);
+				return;
+			}
+			if (msg.rangeFilters) {
+				await this.#refuse(stream, msg.requestId, FetchError.id, {
+					errorCode: toRequestCode("invalid_filter", "fetch", this.#session.version),
+					reasonPhrase: "Range Filters exceed MAX_FILTER_RANGES=0",
+				});
+				return;
+			}
 			await this.#refuseUnsupported(stream, msg.requestId, "fetch", FetchError.id, "FETCH is not supported");
 		} finally {
 			this.#fetches.release();
@@ -1767,11 +1874,13 @@ export class Publisher {
 	}
 
 	/** What a request that failed to resolve is refused with. */
-	#failed(err: unknown, kind: RequestKind): Refusal {
+	#failed(err: unknown, kind: RequestKind, wait = false): Refusal {
 		const e = error(err);
 		const condition =
 			e instanceof StreamError && (e.code === StreamCode.NotFound || e.code === StreamCode.Unroutable)
-				? "does_not_exist"
+				? wait
+					? "timeout"
+					: "does_not_exist"
 				: "internal";
 		return { errorCode: toRequestCode(condition, kind, this.#session.version), reasonPhrase: reason(e) };
 	}

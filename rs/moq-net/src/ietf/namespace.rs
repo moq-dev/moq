@@ -85,9 +85,61 @@ pub fn decode_namespace(r: &mut Decoder<'_>) -> Result<Path<'static>, DecodeErro
 	Ok(from_tuple(&parts))
 }
 
+/// Session namespaces belong to the transport, and none of our extensions defines one.
+pub(super) fn refusal(namespace: &Path, version: super::Version) -> Option<super::RequestError<'static>> {
+	if matches!(
+		version,
+		super::Version::Draft14
+			| super::Version::Draft15
+			| super::Version::Draft16
+			| super::Version::Draft17
+			| super::Version::Draft18
+			| super::Version::Draft19
+			| super::Version::Draft20
+	) {
+		return None;
+	}
+	// Reserved literals contain no escapes. Comparing the first escaped field keeps
+	// a slash within a field and an empty first field from becoming a reserved name.
+	if !matches!(namespace.as_str().split('/').next(), Some("." | ".session")) {
+		return None;
+	}
+	Some(super::RequestError {
+		request_id: None,
+		error_code: super::error::request::to_code(
+			&crate::Error::NotFound,
+			super::error::request::Kind::Subscribe,
+			version,
+		),
+		reason_phrase: "reserved namespace does not exist".into(),
+		retry_interval: 0,
+	})
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[test]
+	fn reserved_namespaces_keep_exact_tuple_fields_and_draft_boundaries() {
+		for (fields, reserved) in [
+			(vec!["."], true),
+			(vec![".", "child"], true),
+			(vec![".session"], true),
+			(vec![".session", "extension"], true),
+			(vec![".session/extension"], false),
+			(vec!["", ".session"], false),
+			(vec![".application"], false),
+			(vec![".sessionish"], false),
+		] {
+			let parts: Vec<_> = fields.iter().map(|field| (*field).to_owned()).collect();
+			let path = from_tuple(&parts);
+			for version in [super::super::Version::Draft21, super::super::Version::Draft22] {
+				assert_eq!(refusal(&path, version).is_some(), reserved, "{version}: {fields:?}");
+			}
+			assert!(refusal(&path, super::super::Version::Draft20).is_none());
+		}
+	}
 	use crate::coding::Form;
 
 	const FORM: Form = Form::LeadingOnes { seven: false };

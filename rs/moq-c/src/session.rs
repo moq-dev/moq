@@ -33,6 +33,7 @@ enum Link {
 
 struct Accepted {
 	session: moq_net::Session,
+	driver: ffi::Background,
 	/// Shared by every `moq_session_bandwidth` handle, like [`Link::Dialed`]'s.
 	bandwidth: moq_net::bandwidth::Allocator,
 }
@@ -41,8 +42,8 @@ struct Accepted {
 pub(crate) struct Connect {
 	pub config: crate::client::Config,
 	pub url: Url,
-	pub publish: Option<moq_net::origin::Producer>,
-	pub consume: Option<moq_net::origin::Producer>,
+	pub publish: Option<crate::origin::Producer>,
+	pub consume: Option<crate::origin::Producer>,
 	pub callback: ffi::OnStatus,
 }
 
@@ -56,10 +57,10 @@ impl Connect {
 			.init(self.config.quic.clone())
 			.map_err(|err| Error::InvalidConfig(err.to_string()))?;
 		if let Some(publish) = &self.publish {
-			client = client.with_publisher(publish);
+			client = client.with_publisher(&publish.producer);
 		}
 		if let Some(consume) = &self.consume {
-			client = client.with_subscriber(consume.clone());
+			client = client.with_subscriber(consume.producer.clone());
 		}
 
 		Ok(PreparedConnect {
@@ -76,8 +77,8 @@ impl Connect {
 pub(crate) struct PreparedConnect {
 	client: moq_tokio::Client,
 	url: Url,
-	publish: Option<moq_net::origin::Producer>,
-	consume: Option<moq_net::origin::Producer>,
+	publish: Option<crate::origin::Producer>,
+	consume: Option<crate::origin::Producer>,
 	callback: ffi::OnStatus,
 }
 
@@ -116,22 +117,29 @@ impl Session {
 		tokio::spawn(async move {
 			// Keep the origin producers alive for the lifetime of the reconnect loop:
 			// the session reads from the publish consumer and writes into the subscribe producer.
+			let publish_driver = publish.as_ref().map(|origin| origin.driver.clone()).unwrap_or_default();
+			let consume_driver = consume.as_ref().map(|origin| origin.driver.clone()).unwrap_or_default();
 			let _publish = publish;
 			let _consume = consume;
 
 			// A panic ends only this session, reported through the terminal callback.
-			let res = moq_tokio::panic::isolate(async move {
+			let res = ffi::run(publish_driver.watch(consume_driver.watch(async move {
 				tokio::select! {
 					// close() requested: drain what the session queued, then close it.
 					_ = closed.1 => reconnect.clone().close().await.map_err(map_connect_error),
 					res = Self::report(callback, reconnect.clone()) => res,
 				}
-			})
-			.await
-			.unwrap_or(Err(Error::Panic));
+			})))
+			.await;
 			// The terminal callback waits for the close to reach the peer, so a caller that exits
 			// on it doesn't leave the peer to time the connection out.
-			client.close().await;
+			let res = crate::ffi::run(async {
+				client.close().await;
+				publish_driver.check()?;
+				consume_driver.check()?;
+				res
+			})
+			.await;
 
 			// Deliver one final terminal callback (0 = closed, < 0 = error), then
 			// drop the entry. Pull it out from under the lock so the callback never
@@ -149,16 +157,16 @@ impl Session {
 	pub fn accept(
 		&mut self,
 		request: moq_tokio::server::Request,
-		publish: Option<moq_net::origin::Producer>,
-		consume: Option<moq_net::origin::Producer>,
+		publish: Option<crate::origin::Producer>,
+		consume: Option<crate::origin::Producer>,
 		callback: ffi::OnStatus,
 	) -> Result<Id, Error> {
 		let mut request = request;
 		if let Some(publish) = &publish {
-			request = request.with_publisher(publish);
+			request = request.with_publisher(&publish.producer);
 		}
 		if let Some(consume) = &consume {
-			request = request.with_subscriber(consume.clone());
+			request = request.with_subscriber(consume.producer.clone());
 		}
 
 		let closed = oneshot::channel();
@@ -171,25 +179,33 @@ impl Session {
 
 		tokio::spawn(async move {
 			// Keep the origin producers alive for the lifetime of the session.
+			let publish_driver = publish.as_ref().map(|origin| origin.driver.clone()).unwrap_or_default();
+			let consume_driver = consume.as_ref().map(|origin| origin.driver.clone()).unwrap_or_default();
 			let _publish = publish;
 			let _consume = consume;
 
 			// A panic ends only this session, reported through the terminal callback.
-			let res = moq_tokio::panic::isolate(async move {
+			let mut res = ffi::run(publish_driver.watch(consume_driver.watch(async move {
 				tokio::select! {
 					_ = closed.1 => Ok(()),
 					res = Self::serve(id, callback, request) => res,
 				}
-			})
-			.await
-			.unwrap_or(Err(Error::Panic));
+			})))
+			.await;
 
 			let entry = State::lock().session.task.remove(id).flatten();
 			if let Some(entry) = entry {
 				// Close the transport now rather than whenever the last clone drops.
-				if let Link::Accepted(Some(accepted)) = &entry.link {
-					accepted.session.abort(moq_net::Error::Cancel);
+				if let Link::Accepted(Some(accepted)) = &entry.link
+					&& let Err(error) = ffi::run(async {
+						accepted.session.abort(moq_net::Error::Cancel);
+						accepted.driver.finished().await
+					})
+					.await
+				{
+					res = Err(error);
 				}
+				let res = publish_driver.check().and_then(|()| consume_driver.check()).and(res);
 				entry.callback.call(res);
 			}
 		});
@@ -199,7 +215,14 @@ impl Session {
 
 	/// Establish an accepted session, publish it to the entry, and wait for it to close.
 	async fn serve(id: Id, callback: ffi::OnStatus, request: moq_tokio::server::Request) -> Result<(), Error> {
-		let session = request.ok().await.map_err(map_connect_error)?;
+		let (session, driver) = request.ok().await.map_err(map_connect_error)?;
+		let driver = ffi::Background::new(async move {
+			match driver.await {
+				Ok(result) => result.map_err(map_connect_error),
+				Err(error) if error.is_panic() => Err(Error::Panic),
+				Err(_) => Err(moq_net::Error::Cancel.into()),
+			}
+		});
 		let bandwidth = session
 			.send_bandwidth()
 			.map(moq_net::bandwidth::Allocator::new)
@@ -208,12 +231,14 @@ impl Session {
 		if let Some(entry) = State::lock().session.task.get_mut(id).and_then(|entry| entry.as_mut()) {
 			entry.link = Link::Accepted(Some(Accepted {
 				session: session.clone(),
+				driver: driver.clone(),
 				bandwidth,
 			}));
 		}
 
 		// A server-accepted session is a single transport, so it only ever connects once.
 		callback.call(1);
+		driver.finished().await?;
 		Err(session.closed().await.into())
 	}
 
