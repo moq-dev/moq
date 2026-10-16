@@ -40,11 +40,55 @@ and distinguish a MoQ group boundary from a decoder acquisition point. RAI,
 periodic cuts, and an intact object alone do not ensure available PAT/PMT,
 codec configuration, clock context, or references for every MPTS program.
 
-The README owns the guide and the final two-mode integration proof. Reuse the
-children's fixtures and CI recipes, including their known-bad controls. Publish
+The README owns the guide and integration proof for the modes present in
+m1: semantic remux and raw import/carriage. The deferred raw export quest
+extends the guide and proves its output when it lands; it does not block
+this proof. Reuse the children's fixtures and CI recipes, including their
+known-bad controls. Publish
 a coverage table linking each supported profile and loss guarantee to its
 test; unsupported or unmeasured cells stay explicit. Keep CLI instructions
 and the MPEG-TS draft consistent in each feature change.
+
+Decided 2026-10-16 by the maintainer, for private PES timing and headers
+(#5718):
+
+- **Carriage.** A PES without a PTS is not untimed. The multiplex places
+  every byte on the program clock; only its presentation time is absent.
+  So a private PES track stays timed on the legacy container, which keeps
+  the timestamp in its payload and so survives transports without
+  net-level timestamps (IETF drafts 14-16, lite-05/06's send-time stamps),
+  and never becomes an untimed track. Each frame's timestamp is the PES's
+  source placement: the program clock at its first byte, interpolated
+  between the PCRs on either side (ISO 13818-1 2.4.2.2) and moved onto the
+  catalog clock like the media. Its payload is the whole PES packet: PTS
+  and DTS rebased, every other header byte kept, so PTS presence, special
+  stream-ID forms and optional fields round-trip without per-stream-type
+  timing rules. A PES that carries a PTS also gets placement, not its PTS,
+  as its frame timestamp; the PTS lives in the bytes.
+- **Signalling.** A new `pesPacket` member of the `mpegts.tracks` entry,
+  beside `verbatim` rather than a new `framing` value. Old consumers ignore
+  an entry with neither `verbatim` nor a described track, so a published
+  exporter silently drops these tracks (teletext, DVB subtitles, DVB AC-3,
+  KLV, unknown private types) from the rebuilt TS and its PMT, with no
+  error, instead of refusing the whole catalog. Chosen over the loud
+  refusal so old exporters keep the media and sections.
+- **Legacy `pes`.** The `pes` framing is removed, not kept for a release:
+  export refuses a catalog that names it, and the AC-3 repack goes with
+  it. So a current exporter refuses broadcasts from published importers
+  and recordings that carry private PES, and draft -01 breaks -00 there.
+  The deletion lands with the importer switch, so main never writes a
+  catalog its exporter refuses.
+- **Clock fields.** Only PTS and DTS are rebased. ESCR, `pack_header_field`,
+  TREF and PES-level scrambling refuse their stream with a warning and an
+  importer health count. TS-packet-layer details (continuity, adaptation
+  fields, packet boundaries) stay with the raw fallback.
+
+Rejected: an untimed track with a container that takes time from the net
+frame, which loses timing on those transports and in archive replay and
+needs timedness fixed before the first PES; a per-track "no PTS" flag,
+which keeps the synthesized header and misleads old exporters; and
+extrapolating placement from earlier PCRs without waiting, which is wrong
+on variable-rate multiplexes.
 
 The planning children settle catalog and clock contracts before production
 changes. Their output adds independently completable implementation quests to
@@ -56,13 +100,18 @@ remain with their current quests.
 ## Required
 
 - [Plan: semantic fidelity](/quest/m1/ts-reliability/fidelity.md) - explicit profiles and PMT lifecycle contracts produce implementation quests
-- [Plan: PES timing and headers](/quest/m1/plan-ts-pes-untimed.md) - private PES semantics have a settled carriage and placement contract
+- [Raw stream types](/quest/m1/ts-reliability/stream-type.md) - unknown stream types survive export instead of failing the PMT
+- [Whole-PES export](/quest/m1/ts-reliability/pes-export.md) - export writes `pesPacket` tracks byte for byte at their placement
+- [Whole-PES import](/quest/m1/ts-reliability/pes-import.md) - private PES travels whole at its source placement, a missing PTS stays missing, and the `pes` framing is deleted
+- [Section placement](/quest/m1/ts-reliability/section-placement.md) - sections share the PCR placement clock instead of the video PTS
 - [Loss and recovery tests](/quest/m1/ts-reliability/recovery.md) - actual MoQ omissions exercise reacquisition and unaffected tracks
+- [Data-track breaks](/quest/m1/ts-reliability/data-break.md) - a data track's declared break reads as a break, not as media lost upstream
+- [Audio behind the keyframe](/quest/m1/ts-reliability/audio-lead.md) - an export whose video start group is dropped still begins on a keyframe
 - [T-STD TS export](/quest/m1/tstd/README.md) - the semantic mux schedules the content it admits within its supported buffer models
 
 ## Related
 
-- [Epoch anchor](/quest/m1/epoch-anchor.md) - shared identity across importers requires one source coordinate per epoch, derived from the epoch
+- [Epoch anchor](/quest/m2/epoch-anchor.md) - shared identity across importers requires one source coordinate per epoch, derived from the epoch
 - [TS over RTP legs](/quest/m2/ts-rtp-egress.md) - TS identity alone is not ST 2022-7, which also needs matching RTP headers
 - [TS health counters](/quest/m2/ts-health-stats.md) - ingress and egress evidence need distinct monitoring points
 - [MSFTS mapping](/quest/m3/msfts-convergence.md) - document the exact equivalence and differences between the carriage modes

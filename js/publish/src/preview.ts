@@ -23,6 +23,8 @@ export type RendererInput = {
 	display: Getter<{ width: number; height: number } | undefined>;
 	// Whether to mirror the video horizontally.
 	flip: Getter<boolean>;
+	// Clockwise rotation needed to display the video upright.
+	rotation: Getter<number>;
 	// The encoder to re-encode through in `encoded` mode. Falls back to the raw frame when unset.
 	encoder: Getter<Encoder.Encoder | undefined>;
 	// What to render. Defaults to `source`.
@@ -63,6 +65,7 @@ export class Renderer {
 			frames: getter(props?.frames),
 			display: getter(props?.display),
 			flip: getter(props?.flip ?? false),
+			rotation: getter(props?.rotation ?? 0),
 			encoder: getter(props?.encoder),
 			mode: getter(props?.mode ?? "source"),
 			enabled: getter(props?.enabled ?? true),
@@ -86,10 +89,15 @@ export class Renderer {
 			// until the first frame arrives.
 			display: this.#signals.computed((effect) => {
 				const current = effect.get(frame);
-				if (current) return { width: current.displayWidth, height: current.displayHeight };
-				return effect.get(this.in.display);
+				const display = current
+					? { width: current.displayWidth, height: current.displayHeight }
+					: effect.get(this.in.display);
+				return display ? Video.rotateVideoDimensions(display, effect.get(this.in.rotation)) : undefined;
 			}),
-			presentation: this.#signals.computed((effect) => ({ flip: effect.get(this.in.flip) })),
+			presentation: this.#signals.computed((effect) => ({
+				flip: effect.get(this.in.flip),
+				rotation: effect.get(this.in.rotation),
+			})),
 			backend: this.in.backend,
 		});
 		this.#signals.cleanup(() => video.close());

@@ -174,9 +174,21 @@ impl Class {
 pub struct Export {
 	/// One row per elementary stream PID the exporter writes, ordered by PID.
 	pub streams: BTreeMap<u16, Stream>,
-	/// Frames dropped for arriving after their deadline, and the frames a video track then
-	/// dropped waiting for its next keyframe.
+	/// Frames dropped after their stream's first went out: for arriving after their deadline,
+	/// for falling due before a new timeline's clock was acquired, and the frames a video track
+	/// then dropped waiting for its next keyframe or leading the keyframe it resumed at, late
+	/// or after a hole upstream once the output held frames ahead of the hole.
 	pub dropped: u64,
+	/// Frames dropped before their stream's first went out, so the output starts on a whole
+	/// group led by the video keyframe: what a joiner is handed older than the delay, a start
+	/// group cut short upstream, the first keyframe's leading pictures, and what precedes the
+	/// first keyframe or the codec config.
+	/// Nothing is missing from the output for these.
+	pub trimmed: u64,
+	/// Times a source skipped media it will never deliver: a group lost or expired upstream,
+	/// or a resubscription. A data track's declared break is a skipped sequence, so it counts
+	/// here too, though nothing of it is lost. Each is logged with the span it skipped.
+	pub gaps: u64,
 	/// How fast the source's clock runs against ours, in parts per million (positive runs
 	/// fast), as last measured. `None` until there is a measurement.
 	pub drift: Option<f64>,

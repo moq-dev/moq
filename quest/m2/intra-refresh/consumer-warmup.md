@@ -59,5 +59,4 @@ The fix is history rather than a withhold rule:
 
 ## Related
 
-- [Open-GOP leading pictures](/quest/m1/open-gop-leading-pictures.md) - trims frames stamped before the keyframe, the other tune-in case
 - [Native dual decoder](/quest/m2/intra-refresh/native-dual-decoder.md) - the player path, which shows stripes instead

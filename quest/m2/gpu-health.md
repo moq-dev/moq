@@ -18,14 +18,14 @@ Those are the caller's.
 
 Decided 2026-10-05 in moq.pro's quest audit: vendor-neutral now, not
 NVIDIA-scoped. Reason: the external GPU surface (#4975),
-[Vulkan encode](/quest/m1/vulkan-encode.md), and
-[VA-API import](/quest/m1/vaapi-vulkan-import.md) make AMD and Intel encode
+[Vulkan encode](/quest/m2/vulkan-encode.md), and
+[VA-API import](/quest/m2/vaapi-vulkan-import.md) make AMD and Intel encode
 first-class, so an NVML-shaped API would be rewritten once they land.
 moq.pro's transcode admission and its benchmarks assume NVML today; they
 adopt this instead.
 
 Decided 2026-10-05: one device identity wherever a render node exists, the
-render node's `dev_t`, shared with [VA-API import](/quest/m1/vaapi-vulkan-import.md).
+render node's `dev_t`, shared with [VA-API import](/quest/m2/vaapi-vulkan-import.md).
 NVIDIA's device UUID maps to its node through `VK_EXT_physical_device_drm`.
 The external GPU surface (#4975) carries that identity as
 `frame::vulkan::Device { device_uuid, driver_uuid, render_node: Option<u64> }`.
@@ -55,10 +55,9 @@ Guidance, to be settled while building:
   errors (`VK_ERROR_DEVICE_LOST`, CUDA and VA-API equivalents) and from the
   driver's reset counters where exposed.
 - A snapshot call, not a callback; cheap enough to poll about once a second.
-- The snapshot is additive, but it keys by the surface's identity, and the
-  surface change is breaking, so it reaches `release` with
-  [the multi-vendor release](/quest/m2/gpu-release.md), not by an earlier
-  backport.
+- The snapshot is additive and keys by the surface's identity. Publish it
+  after the vendor implementations it reports are validated. It does not gate
+  [the multi-vendor release](/quest/m2/gpu-release.md) or the next cut.
 
 Test: a unit test of each source's parsing against recorded fixtures, and
 ignored hardware tests in `just rs gpu`'s per-vendor branches (the recipe
@@ -69,5 +68,5 @@ Public API: a device capacity and health snapshot in moq-video. Wire: none.
 
 ## Related
 
-- [VA-API encodes an external Vulkan image](/quest/m1/vaapi-vulkan-import.md) - picks a render node by the same `dev_t`
-- [Vulkan Video encode on AMD](/quest/m1/vulkan-encode.md) - the AMD backend whose sessions this counts
+- [VA-API encodes an external Vulkan image](/quest/m2/vaapi-vulkan-import.md) - picks a render node by the same `dev_t`
+- [Vulkan Video encode on AMD](/quest/m2/vulkan-encode.md) - the AMD backend whose sessions this counts

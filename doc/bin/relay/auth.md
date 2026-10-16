@@ -55,7 +55,9 @@ credential's grant, which closes the session unless an
 [in-band](#in-band-renewal) credential still holds it. A changed `tier` keeps
 the session and moves its stats from then on. Any other failure retries with backoff and the session lives
 until `expires`, so an outage always has the bound the server chose. A grant
-with `revalidate` must set `expires` for that reason.
+with `revalidate` must set `expires` for that reason. A session that
+reaches `expires` closes as `Expired` rather than `Unauthorized`, which also
+stops the reconnect loop: refresh the token, then reconnect with the new URL.
 
 **End.** Every close reports `end` with the reason, the duration, and the
 bytes sent and received.
