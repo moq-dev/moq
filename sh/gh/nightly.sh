@@ -7,11 +7,39 @@ if [[ $# != 1 ]]; then
     echo "$usage" >&2
     exit 2
 fi
+case "$1" in
+    rust | js) ;;
+    *)
+        echo "$usage" >&2
+        exit 2
+        ;;
+esac
+
+root=$(git rev-parse --show-toplevel)
+out=${MOQ_BENCH_RESULTS:-$root/target/bench/nightly/$1}
+mkdir -p "$out"
+export MOQ_BENCH_RUNS="$out/criterion-runs.txt"
+: >"$MOQ_BENCH_RUNS"
+rm -f "$out/report.json"
 
 failed=()
 run() {
     echo "nightly: $*"
     if ! "$@"; then failed+=("$*"); fi
+}
+
+criterion() {
+    local label=$1
+    shift
+    run env MOQ_BENCH_LABEL="$label" MOQ_BENCH_ARTIFACTS="$out/runs" just gh criterion "$@"
+}
+
+javascript() {
+    local label=$1
+    shift
+    mkdir -p "$out/raw"
+    echo "nightly: $*"
+    if ! "$@" | tee "$out/raw/$label.csv"; then failed+=("$*"); fi
 }
 
 case "${1:-}" in
@@ -25,18 +53,18 @@ case "${1:-}" in
         run just rs bench-feed-fetch
         run just rs test -p moq-relay -E 'test(benchmark_stun_sources)' --run-ignored only --success-output immediate
         # Fuzz exposes moq-net's codec benches; it is not a feature of the other crates.
-        run cargo bench --locked --no-fail-fast -p moq-net --features fuzz --bench '*' -- --test
+        criterion net --no-fail-fast -p moq-net --features fuzz --bench '*'
         # Exercise the optional thread-CPU clock as well as the normal elapsed-time smoke.
-        run env SESSION_CPU=1 cargo bench --locked -p moq-net --bench session -- session_delivery_group_cost_cpu --test
-        # Each kio routine once, including the contended bench's worker threads.
-        run cargo bench --locked --no-fail-fast -p kio --bench '*' -- --test
+        SESSION_CPU=1 criterion net-cpu -p moq-net --bench session -- session_delivery_group_cost_cpu
+        # Measure each kio routine, including the contended bench's worker threads.
+        criterion kio --no-fail-fast -p kio --bench '*'
         # One invocation unifies this release build instead of rebuilding shared crates
         # independently for each target. Keep the explicit targets: '*' would add coverage.
-        run cargo bench --locked --no-fail-fast -p moq-relay -p moq-stats -p moq-mux -p moq-rtmp -p moq-uring -p moq-pattern \
+        criterion shared --no-fail-fast -p moq-relay -p moq-stats -p moq-mux -p moq-rtmp -p moq-uring -p moq-pattern \
             --features moq-stats/bench \
             --bench http_idle --bench auth --bench producer_tick --bench decode --bench aggregate \
             --bench catalog --bench ts_schedule --bench export --bench containers --bench matching \
-            --bench chunk_interleaving --bench worker_turns -- --test
+            --bench chunk_interleaving --bench worker_turns
         run just rs test -p moq-archive -p moq-mux -p moq-hls --no-fail-fast \
             -E 'test(benchmark_timeline_fetch_fanout) | test(benchmark_damage_pid_fanout) | test(benchmark_pes_staging) | test(benchmark_reference_handoff_fanout)' \
             --run-ignored only --success-output immediate
@@ -44,17 +72,17 @@ case "${1:-}" in
         run just rs test -p moq-ffi --no-default-features -E 'test(benchmark_timebase_reservation_fanout)' \
             --run-ignored only --success-output immediate
         # moq-gst's catalog bench shares a target name with moq-mux's, so it runs on its own.
-        run just rs bench-gst-catalog -- --quick
+        criterion gst -p moq-gst --bench catalog
         run just rs test -p moq-cli -E 'test(benchmark_stream_import)' --run-ignored only --success-output immediate
         ;;
     js)
         for benchmark in broadcasts request-ids requests forward reader frames varint lite-varint track interests priority; do
-            run just js bench "$benchmark"
+            javascript "$benchmark" just js bench "$benchmark"
         done
-        run just js catalog-bench
-        run just js arrivals-bench
-        run just js p2p-bench
-        run just js signals-bench
+        javascript catalog just js catalog-bench
+        javascript arrivals just js arrivals-bench
+        javascript p2p just js p2p-bench
+        javascript signals just js signals-bench
         ;;
     *)
         echo "$usage" >&2
@@ -66,3 +94,5 @@ if ((${#failed[@]})); then
     printf 'nightly: failed: %s\n' "${failed[@]}" >&2
     exit 1
 fi
+
+just gh benchmark-report "$1" "$out" "$out/report.json"

@@ -13,6 +13,9 @@ import * as Path from "../src/path.ts";
 import { Reader, Stream } from "../src/stream.ts";
 import * as Varint from "../src/varint.ts";
 
+// Keep protocol diagnostics out of the measured CSV on stdout.
+console.debug = console.error;
+
 const frameSizes = [16, 100, 1000];
 const chunkSizes = [1200, 16 * 1024, 64 * 1024];
 const framesPerGroup = 50;
