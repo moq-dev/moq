@@ -400,12 +400,13 @@ impl ExportSource {
 						frame
 					}
 					Some(Item::Read(Read::Gap { timestamp, duration })) => {
-						// The export never receives this media, so say what it loses and where.
+						// Say what the export never receives and where. A data track declares a
+						// break by skipping a sequence, which reads the same though nothing is lost.
 						tracing::warn!(
 							track = consumer.name(),
 							at = ?std::time::Duration::from(timestamp),
-							lost = ?std::time::Duration::from(duration),
-							"media skipped upstream; resuming at the next group"
+							skipped = ?std::time::Duration::from(duration),
+							"media skipped upstream, or a data track's declared break; resuming at the next group"
 						);
 						self.finish_ends();
 						self.skips += 1;
