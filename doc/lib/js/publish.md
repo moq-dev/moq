@@ -57,12 +57,12 @@ simulcast, drop the element and register several encoders on a
 `Publish.Broadcast`, as below.
 
 Audio groups carry at least 20 ms by default, packing shorter codec frames
-together. `el.audio.groupDuration` changes that minimum; `Time.Milli(0)` puts
+together. `el.audio.groupDuration` changes that minimum; `Milli(0)` puts
 every frame in its own group. A longer minimum lets a relay keep fewer
 streams, at the cost of coarser loss: a viewer that falls behind skips a whole
 group. Frames still forward as they are encoded.
 
-Timestamps are `performance.now()` in microseconds, so every source shares one
+Timestamps are `@moq/clock`'s `now()` in microseconds, so every source shares one
 timeline. The catalog's `clock` maps it to wall time. Stamp your own tracks
 (e.g. text cues) on the same timeline to stay in sync.
 
@@ -77,6 +77,7 @@ the same content, so a track re-created on the same `net` throws on an append
 that would reuse its sequences:
 
 ```ts
+import { Milli } from "@moq/clock";
 import * as Json from "@moq/json";
 import * as Moq from "@moq/net";
 
@@ -88,7 +89,7 @@ signals.run((effect) => {
     // value is stamped with when it was written, so the track declares a timescale.
     const track = net.createTrack("meta.json", {
         timescale: Moq.Time.Timescale.MILLI,
-        maxAge: Moq.Time.Milli(86_400_000),
+        maxAge: Milli(86_400_000),
     });
     effect.cleanup(() => track.close());
 
