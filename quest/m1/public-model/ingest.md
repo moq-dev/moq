@@ -127,8 +127,8 @@ Rust items (`rs/moq-net/src/model/`), as they stood at b4eab0db1:
   `track::Request` (for example a pre-accept `request_start(floor)`), with
   the public `start_at` resolving it.
 - **Idle copy** (`track::Producer::set_idle`, `set_live`, `is_live`,
-  `idle_newest`, `track::IDLE_LINGER`; lite subscriber, `set_idle` also
-  IETF). They keep a lingering copy's cache from serving stale groups
+  `idle_newest`, `track::IDLE_LINGER`, `poll_past`; lite subscriber,
+  `set_idle`, `set_live`, and `poll_past` also IETF). They keep a lingering copy's cache from serving stale groups
   between subscriptions. **Decision**:
   - ✅ Stay private, marked as a known capability gap rather than tuning:
     the staleness they prevent is observable, so "tunes the built-in
@@ -138,6 +138,12 @@ Rust items (`rs/moq-net/src/model/`), as they stood at b4eab0db1:
     into it (re-subscribing a lingering copy is a request whose start the
     peer resolves later); if it does, the gap closes there.
   - Public as an idle handle whose `live(largest)` resumes readers.
+  - `track::Producer::poll_past` (IETF resume: a group past the answer's
+    Largest marks the copy live) belongs to this item and shares its fate:
+    private while the idle copy is, public only with it. Fix it either way:
+    it reads `max_sequence`, which a frameless group header advances, so it
+    must wait for a later group that has started (a frame landed or it
+    ended), the gating rule above.
 - Fetch ingest (`group::Request` fields `state` and `result`,
   `track::TrackState`, `track::FetchOutcome`, `finish_track_at`,
   `poll_landed`): moved to [the deferred quest](/quest/m1/public-model/deferred.md),
