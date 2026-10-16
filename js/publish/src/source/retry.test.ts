@@ -11,15 +11,9 @@ import type { Media } from "./types";
 class FakeTrack extends EventTarget {
 	readyState: MediaStreamTrackState = "live";
 	stopped = false;
-	settings: MediaTrackSettings;
-
-	constructor(settings: MediaTrackSettings = { deviceId: "default" }) {
-		super();
-		this.settings = settings;
-	}
 
 	getSettings(): MediaTrackSettings {
-		return this.settings;
+		return { deviceId: "default" };
 	}
 
 	stop(): void {
@@ -37,7 +31,6 @@ class FakeTrack extends EventTarget {
 class FakeMediaDevices extends EventTarget {
 	tracks: FakeTrack[] = [];
 	errors: Error[] = [];
-	settings: MediaTrackSettings = { deviceId: "default" };
 
 	// getUserMedia rejects, the way it does once the last device is gone.
 	missing = false;
@@ -64,7 +57,7 @@ class FakeMediaDevices extends EventTarget {
 		if (this.denied) throw new DOMException("Permission denied", "NotAllowedError");
 		if (this.missing) throw new Error("NotFoundError");
 
-		const track = new FakeTrack(this.settings);
+		const track = new FakeTrack();
 		if (this.bornDead) track.readyState = "ended";
 		this.tracks.push(track);
 
@@ -136,10 +129,7 @@ function install<T extends EventTarget>(media: T): T & Disposable {
 function installOrientation(type: OrientationType): { orientation: ScreenOrientation } & Disposable {
 	const original = Object.getOwnPropertyDescriptor(globalThis, "screen");
 	const orientation = new EventTarget() as ScreenOrientation;
-	Object.defineProperties(orientation, {
-		type: { configurable: true, writable: true, value: type },
-		angle: { configurable: true, writable: true, value: 0 },
-	});
+	Object.defineProperty(orientation, "type", { configurable: true, value: type });
 	Object.defineProperty(globalThis, "screen", { configurable: true, value: { orientation } });
 
 	return {
@@ -473,36 +463,35 @@ test("a camera re-opens when its track dies", async () => {
 	camera.close();
 });
 
-test("a landscape camera follows the phone's portrait orientation", async () => {
-	using media = install(new FakeMediaDevices());
-	media.settings = { deviceId: "default", width: 640, height: 480 };
+test("a camera reports the turn a portrait screen needs", async () => {
+	using _media = install(new FakeMediaDevices());
 	using display = installOrientation("portrait-primary");
+	const turn = (type: OrientationType) => {
+		Object.defineProperty(display.orientation, "type", { configurable: true, value: type });
+		display.orientation.dispatchEvent(new Event("change"));
+	};
 
-	const camera = new Camera({ enabled: true });
+	const enabled = new Signal(true);
+	const camera = new Camera({ enabled });
 	await settle();
-	expect(camera.out.rotation.peek()).toBe(90);
+	expect(camera.out.orientation.peek()).toBe(90);
 
-	Object.defineProperty(display.orientation, "type", { configurable: true, value: "portrait-secondary" });
-	display.orientation.dispatchEvent(new Event("change"));
+	turn("portrait-secondary");
 	await settle();
-	expect(camera.out.rotation.peek()).toBe(270);
+	expect(camera.out.orientation.peek()).toBe(270);
 
-	Object.defineProperty(display.orientation, "type", { configurable: true, value: "landscape-primary" });
-	display.orientation.dispatchEvent(new Event("change"));
+	turn("landscape-primary");
 	await settle();
-	expect(camera.out.rotation.peek()).toBe(0);
+	expect(camera.out.orientation.peek()).toBe(0);
 
-	camera.close();
-});
-
-test("a camera whose pixels already follow portrait needs no rotation", async () => {
-	using media = install(new FakeMediaDevices());
-	media.settings = { deviceId: "default", width: 480, height: 640 };
-	using _display = installOrientation("portrait-primary");
-
-	const camera = new Camera({ enabled: true });
+	turn("portrait-primary");
 	await settle();
-	expect(camera.out.rotation.peek()).toBe(0);
+	expect(camera.out.orientation.peek()).toBe(90);
+
+	enabled.set(false);
+	await settle();
+	expect(camera.out.orientation.peek()).toBe(0);
+
 	camera.close();
 });
 

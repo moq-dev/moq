@@ -21,8 +21,9 @@ export interface CameraProps extends Inputs<CameraInput> {
 type CameraOutput = {
 	// The live camera track, or undefined while disabled or denied.
 	source: Signal<Media | undefined>;
-	// Clockwise rotation needed to display the camera upright.
-	rotation: Signal<number>;
+	// Clockwise turn a landscape picture needs to appear upright on this screen: 90 or 270 while the
+	// screen is portrait, otherwise 0. Feed it to a Video.Capture, which checks the live frames.
+	orientation: Signal<number>;
 	/** A terminal capture failure, cleared when a new capture attempt begins. */
 	error: Signal<Error | undefined>;
 };
@@ -51,7 +52,7 @@ export class Camera {
 
 	readonly #out: CameraOutput = {
 		source: new Signal<Media | undefined>(undefined),
-		rotation: new Signal(0),
+		orientation: new Signal(0),
 		error: new Signal<Error | undefined>(undefined),
 	};
 	readonly out = readonlys(this.#out);
@@ -67,6 +68,17 @@ export class Camera {
 		this.constraints = Signal.from(props?.constraints);
 
 		this.#signals.run(this.#run.bind(this));
+		this.#signals.run(this.#runOrientation.bind(this));
+	}
+
+	#runOrientation(effect: Effect): void {
+		if (!effect.get(this.in.enabled)) return;
+
+		const update = () => this.#out.orientation.set(screenOrientation());
+		const orientation = globalThis.screen?.orientation;
+		if (orientation) effect.event(orientation, "change", update);
+		effect.event(globalThis, "orientationchange", update);
+		effect.set(this.#out.orientation, screenOrientation(), 0);
 	}
 
 	#run(effect: Effect): void {
@@ -152,13 +164,6 @@ export class Camera {
 
 			this.#retry.succeeded(effect, source);
 			effect.set(this.#out.source, { video: source });
-
-			const updateRotation = () => this.#out.rotation.set(cameraRotation(source));
-			const orientation = globalThis.screen?.orientation;
-			if (orientation) effect.event(orientation, "change", updateRotation);
-			effect.event(globalThis, "orientationchange", updateRotation);
-			updateRotation();
-			effect.cleanup(() => this.#out.rotation.set(0));
 		});
 	}
 
@@ -169,13 +174,8 @@ export class Camera {
 	}
 }
 
-// Camera constraints use landscape-primary dimensions. Only add metadata when the screen is
-// portrait but the live track remains landscape; a browser that already rotates the pixels reports
-// portrait settings and needs no catalog rotation.
-function cameraRotation(track: Video.StreamTrack): number {
-	const { width, height } = track.getSettings();
-	if (!width || !height || width <= height) return 0;
-
+// Camera sensors deliver landscape pictures, so a portrait screen needs a quarter turn.
+function screenOrientation(): number {
 	const type = globalThis.screen?.orientation?.type;
 	if (type === "portrait-primary") return 90;
 	if (type === "portrait-secondary") return 270;

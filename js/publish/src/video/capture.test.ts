@@ -12,12 +12,16 @@ class Frame {
 	// Every frame built, so a test can assert none is left open.
 	static all: Frame[] = [];
 
-	codedWidth = 1920;
-	codedHeight = 1080;
+	codedWidth: number;
+	codedHeight: number;
+	rotation?: number;
 	timestamp: number;
 	closed = false;
 
 	constructor(source?: Frame, init?: { timestamp: number }) {
+		this.codedWidth = source?.codedWidth ?? 1920;
+		this.codedHeight = source?.codedHeight ?? 1080;
+		this.rotation = source?.rotation;
 		this.timestamp = init?.timestamp ?? source?.timestamp ?? 0;
 		Frame.all.push(this);
 	}
@@ -71,6 +75,77 @@ test("capture resamples live scale when frame dimensions stay unchanged", async 
 		if (videoFrame) Object.defineProperty(globalThis, "VideoFrame", videoFrame);
 		else Reflect.deleteProperty(globalThis, "VideoFrame");
 	}
+});
+
+// Let signal effects settle without waiting on the wall clock.
+async function settle(times = 20): Promise<void> {
+	for (let i = 0; i < times; i++) await new Promise<void>((resolve) => queueMicrotask(resolve));
+}
+
+function sized(width: number, height: number, rotation?: number): VideoFrame {
+	return Object.assign(new Frame(), { codedWidth: width, codedHeight: height, rotation }) as unknown as VideoFrame;
+}
+
+test("rotation follows the live frames, not the track's settings", async () => {
+	const processor = Object.getOwnPropertyDescriptor(globalThis, "MediaStreamTrackProcessor");
+	const videoFrame = Object.getOwnPropertyDescriptor(globalThis, "VideoFrame");
+	let controller!: ReadableStreamDefaultController<VideoFrame>;
+	const readable = new ReadableStream<VideoFrame>({
+		start: (value) => {
+			controller = value;
+		},
+	});
+	Object.defineProperty(globalThis, "MediaStreamTrackProcessor", {
+		configurable: true,
+		value: class {
+			readonly readable = readable;
+		},
+	});
+	Object.defineProperty(globalThis, "VideoFrame", { configurable: true, value: Frame });
+
+	// Safari reports the requested landscape size until the first frame, then delivers portrait.
+	const track = { getSettings: () => ({ width: 1280, height: 720 }) } as unknown as StreamTrack;
+	const orientation = new Signal(90);
+	const capture = new Capture({ source: track, orientation });
+	try {
+		let display = capture.out.display.changed();
+		controller.enqueue(sized(720, 1280));
+		expect(await display).toMatchObject({ width: 720, height: 1280 });
+		await settle();
+		expect(capture.out.rotation.peek()).toBe(0);
+
+		// A sideways landscape picture on a portrait screen takes the screen's turn.
+		let rotation = capture.out.rotation.changed();
+		controller.enqueue(sized(1280, 720));
+		expect(await rotation).toBe(90);
+
+		rotation = capture.out.rotation.changed();
+		orientation.set(270);
+		expect(await rotation).toBe(270);
+
+		rotation = capture.out.rotation.changed();
+		orientation.set(0);
+		expect(await rotation).toBe(0);
+
+		// A frame that declares its own rotation wins over the screen.
+		rotation = capture.out.rotation.changed();
+		controller.enqueue(sized(1280, 720, 90));
+		expect(await rotation).toBe(90);
+
+		// Back to an upright portrait picture.
+		display = capture.out.display.changed();
+		controller.enqueue(sized(720, 1280));
+		await display;
+		await settle();
+		expect(capture.out.rotation.peek()).toBe(0);
+	} finally {
+		capture.close();
+		if (processor) Object.defineProperty(globalThis, "MediaStreamTrackProcessor", processor);
+		else Reflect.deleteProperty(globalThis, "MediaStreamTrackProcessor");
+		if (videoFrame) Object.defineProperty(globalThis, "VideoFrame", videoFrame);
+		else Reflect.deleteProperty(globalThis, "VideoFrame");
+	}
+	expect(capture.out.rotation.peek()).toBe(0);
 });
 
 // Installs Frame as the global VideoFrame and returns a FrameSource fed by hand.

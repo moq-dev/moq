@@ -4,9 +4,13 @@ import { Fanout } from "../fanout";
 import { TrackProcessor } from "./processor";
 import { normalizeSource, type Source } from "./types";
 
-// The raw capture source to pump frames from.
+// Signals the capture reads.
 export type CaptureInput = {
+	// The raw capture source to pump frames from.
 	source: Getter<Source | undefined>;
+	// Clockwise turn a landscape frame needs to appear upright, usually a Camera's `orientation`.
+	// Ignored for portrait frames and for frames that carry their own rotation. Defaults to 0.
+	orientation: Getter<number>;
 };
 
 type CaptureOutput = {
@@ -16,6 +20,8 @@ type CaptureOutput = {
 	frames: Signal<Fanout<VideoFrame> | undefined>;
 	// The captured dimensions and source scale, sampled together for each frame.
 	display: Signal<{ width: number; height: number; scale?: number } | undefined>;
+	// Clockwise rotation needed to show the live frames upright.
+	rotation: Signal<number>;
 };
 
 /**
@@ -32,17 +38,23 @@ export class Capture {
 	readonly #out: CaptureOutput = {
 		frames: new Signal<Fanout<VideoFrame> | undefined>(undefined),
 		display: new Signal<{ width: number; height: number; scale?: number } | undefined>(undefined),
+		rotation: new Signal(0),
 	};
 	readonly out = readonlys(this.#out);
+
+	// The rotation the newest frame declares itself, via VideoFrame.rotation where supported.
+	#tagged = new Signal(0);
 
 	#signals = new Effect();
 
 	constructor(props?: Inputs<CaptureInput>) {
 		this.in = {
 			source: getter(props?.source),
+			orientation: getter(props?.orientation ?? 0),
 		};
 
 		this.#signals.run(this.#run.bind(this));
+		this.#signals.run(this.#runRotation.bind(this));
 	}
 
 	#run(effect: Effect) {
@@ -60,7 +72,20 @@ export class Capture {
 		effect.set(this.#out.frames, fanout, undefined);
 		effect.cleanup(() => {
 			this.#out.display.set(undefined);
+			this.#tagged.set(0);
 		});
+	}
+
+	// Derived from the live frames rather than the track settings: Safari reports the requested size
+	// until the first frame arrives, then the delivered size without an event.
+	#runRotation(effect: Effect) {
+		const display = effect.get(this.#out.display);
+		if (!display) return;
+
+		const tagged = effect.get(this.#tagged);
+		const landscape = display.width > display.height;
+		const rotation = tagged || (landscape ? effect.get(this.in.orientation) : 0);
+		effect.set(this.#out.rotation, rotation, 0);
 	}
 
 	// Sample live source metadata even when the coded dimensions stay unchanged.
@@ -70,6 +95,7 @@ export class Capture {
 				try {
 					const scale = "frames" in source ? undefined : normalizeSource(source).scale;
 					this.#out.display.set({ width: frame.codedWidth, height: frame.codedHeight, scale });
+					this.#tagged.set((frame as VideoFrame & { rotation?: number }).rotation ?? 0);
 					controller.enqueue(frame);
 				} catch (error) {
 					frame.close();

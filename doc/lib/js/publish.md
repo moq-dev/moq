@@ -117,16 +117,19 @@ import * as Publish from "@moq/publish";
 // the broadcasts, so they survive a reconnect.
 const connection = new Moq.Connection({ url: new URL("https://relay.example.com/anon") });
 
+const camera = new Publish.Source.Camera({ enabled: true });
+const microphone = new Publish.Source.Microphone({ enabled: true });
+const video = new Publish.Signals.Computed((effect) => effect.get(camera.out.source)?.video);
+// The orientation turns a phone's landscape frames upright while it is held in portrait.
+const capture = new Publish.Video.Capture({ source: video, orientation: camera.out.orientation });
+
 const broadcast = new Publish.Broadcast({
     origin: connection.origin,
     enabled: true,
     name: Publish.Net.Path.from("alice.hang"),
+    display: capture.out.display,
+    rotation: capture.out.rotation,
 });
-
-const camera = new Publish.Source.Camera({ enabled: true });
-const microphone = new Publish.Source.Microphone({ enabled: true });
-const video = new Publish.Signals.Computed((effect) => effect.get(camera.out.source)?.video);
-const capture = new Publish.Video.Capture({ source: video });
 
 // Each encoder registers a rendition on the broadcast (`broadcast.video(name)`) and
 // encodes only while someone is subscribed.
