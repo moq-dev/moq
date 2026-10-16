@@ -212,6 +212,8 @@ percent-encoding = "2"
 pollster = "1.0"
 qmux = { version = "0.6.3", default-features = false }
 rand = "0.10.1"
+# default-features off so each consumer picks its crypto provider.
+rcgen = { version = "0.14", default-features = false }
 # default-features off so each consumer picks its own TLS backend and body
 # features; nothing here wants the default native-tls stack.
 reqwest = { version = "0.13", default-features = false }

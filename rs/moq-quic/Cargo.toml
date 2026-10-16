@@ -65,7 +65,7 @@ moq-clock = { workspace = true }
 qlog = { version = "0.18", optional = true }
 rand = { workspace = true }
 rand_pcg = "0.10"
-rcgen = { version = "0.14", optional = true }
+rcgen = { workspace = true, optional = true, features = ["ring"] }
 ring = { version = "0.17", optional = true }
 rustc-hash = { workspace = true }
 rustls = { version = "0.23.5", default-features = false, features = ["std"], optional = true }
@@ -88,7 +88,7 @@ web-time = "1"
 arbitrary = { version = "1.5", features = ["derive"] }
 assert_matches = "1.1"
 hex-literal = "1"
-rcgen = "0.14"
+rcgen = { workspace = true, features = ["pem", "ring"] }
 stats_alloc = "0.1.10"
 tracing-subscriber = { version = "0.3.0", default-features = false, features = ["env-filter", "fmt", "ansi", "time", "local-time"] }
 wasm-bindgen-test = "0.3.45"

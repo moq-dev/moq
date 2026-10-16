@@ -98,7 +98,8 @@ pub fn streamid(data: &[u8]) -> bool {
     let (Ok(side), Ok(dir), Ok(index)) = (
         u.arbitrary::<bool>(),
         u.arbitrary::<bool>(),
-        u.arbitrary::<u64>(),
+        // A stream id is a 62-bit varint whose low two bits carry side and direction.
+        u.int_in_range(0..=(1u64 << 60) - 1),
     ) else {
         return false;
     };
@@ -108,6 +109,7 @@ pub fn streamid(data: &[u8]) -> bool {
     let id = StreamId::new(side, dir, index);
     assert_eq!(id.initiator(), side);
     assert_eq!(id.dir(), dir);
+    assert_eq!(id.index(), index);
     true
 }
 

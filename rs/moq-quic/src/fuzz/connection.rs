@@ -6,7 +6,7 @@
 //! when an op says so.
 
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     net::{Ipv6Addr, SocketAddr},
     sync::{Arc, LazyLock},
 };
@@ -200,8 +200,10 @@ struct Peer {
     read: HashMap<StreamId, u64>,
     checkpoints: Vec<crate::Checkpoint>,
     held: Vec<Credit>,
-    datagrams_sent: u64,
-    datagrams_received: u64,
+    /// The length of each datagram this side sent, indexed by the sequence number it carries.
+    datagrams_sent: Vec<usize>,
+    /// The sequence numbers of the datagrams this side received.
+    datagrams_received: HashSet<u64>,
 }
 
 impl Peer {
@@ -223,8 +225,8 @@ impl Peer {
             read: HashMap::new(),
             checkpoints: Vec::new(),
             held: Vec::new(),
-            datagrams_sent: 0,
-            datagrams_received: 0,
+            datagrams_sent: Vec::new(),
+            datagrams_received: HashSet::new(),
         }
     }
 
@@ -412,18 +414,16 @@ impl Pair {
                 Event::Connected => peer.connected = true,
                 Event::DatagramReceived => {
                     while let Some(datagram) = conn.datagrams().recv() {
-                        check_datagram(&datagram);
-                        peer.datagrams_received += 1;
+                        let seq = check_datagram(&datagram, &other.datagrams_sent);
+                        assert!(
+                            peer.datagrams_received.insert(seq),
+                            "datagram {seq} delivered twice"
+                        );
                     }
                 }
                 _ => {}
             }
         }
-        // Every datagram is distinct on the wire, so one delivered twice is a bug.
-        assert!(
-            peer.datagrams_received <= other.datagrams_sent,
-            "received more datagrams than were sent"
-        );
     }
 
     /// Advance to the earliest armed timer, if any, and let both sides react.
@@ -556,14 +556,18 @@ impl Pair {
             }
             Op::Datagram { who, len, drop } => {
                 let peer = self.peer(who);
+                let seq = peer.datagrams_sent.len() as u64;
                 let Some(conn) = peer.conn() else {
                     return;
                 };
-                let data = (0..len)
-                    .map(|i| datagram_byte(len.into(), i.into()))
+                let data: Bytes = seq
+                    .to_le_bytes()
+                    .into_iter()
+                    .chain((0..len).map(|i| datagram_byte(seq, i.into())))
                     .collect();
+                let size = data.len();
                 if conn.datagrams().send(data, drop).is_ok() {
-                    peer.datagrams_sent += 1;
+                    peer.datagrams_sent.push(size);
                 }
             }
             Op::Ping { who } => {
@@ -749,16 +753,26 @@ fn stream_byte(writer: Side, id: StreamId, offset: u64) -> u8 {
     mixed as u8
 }
 
-/// The byte at index `i` of a datagram of `len`, so content depends on nothing but its size.
-fn datagram_byte(len: u64, i: u64) -> u8 {
-    (i ^ (i >> 8) ^ len.wrapping_mul(0x3b)) as u8
+/// The payload byte at index `i` of the datagram with sequence number `seq`.
+fn datagram_byte(seq: u64, i: u64) -> u8 {
+    (i ^ (i >> 8) ^ seq.wrapping_mul(0x3b)) as u8
 }
 
-fn check_datagram(datagram: &Bytes) {
-    let len = datagram.len() as u64;
-    for (i, &byte) in datagram.iter().enumerate() {
-        assert_eq!(byte, datagram_byte(len, i as u64), "corrupt datagram");
+/// Check a datagram against the sender's record and return the sequence number it carries.
+fn check_datagram(datagram: &Bytes, sent: &[usize]) -> u64 {
+    let (seq, payload) = datagram
+        .split_first_chunk::<8>()
+        .expect("datagram shorter than its sequence number");
+    let seq = u64::from_le_bytes(*seq);
+    let len = usize::try_from(seq)
+        .ok()
+        .and_then(|seq| sent.get(seq))
+        .unwrap_or_else(|| panic!("datagram {seq} was never sent"));
+    assert_eq!(datagram.len(), *len, "datagram {seq} changed length");
+    for (i, &byte) in payload.iter().enumerate() {
+        assert_eq!(byte, datagram_byte(seq, i as u64), "corrupt datagram {seq}");
     }
+    seq
 }
 
 /// Handshake, apply every op the input decodes to, then drain and check.

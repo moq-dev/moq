@@ -45,16 +45,16 @@ symbol stripping. Prefix direct calls with
 
 - A decoded packet header and its coalesced remainder account for every input byte.
 - Transport parameters that decode re-encode to bytes that decode to the same values.
-- A stream ID keeps the initiator and direction it was built from.
+- A stream ID keeps the initiator, direction, and index it was built from.
 - ACK ranges walk downward without overlapping.
 - `connection` handshakes a client and server over TLS, then applies opens, accepts,
   writes, finishes, resets (plain and from a checkpoint), stops, reads that hold or
   release credit, runtime limit and window changes, datagrams, key updates, and time
   jumps, while dropping, duplicating, reordering, corrupting, and injecting datagrams.
   Every stream read is in order, never past what was written, byte-for-byte what was
-  written, and finishes only at the length the writer finished at. Every datagram is
-  one that was sent, and none arrives twice. The network drains at the end, so whatever
-  is still in flight is checked too.
+  written, and finishes only at the length the writer finished at. Every datagram
+  carries a sequence number and arrives intact, at most once. The network drains at
+  the end, so whatever is still in flight is checked too.
 
 A parse that fails is not a finding, and neither is a connection the ops close.
 
