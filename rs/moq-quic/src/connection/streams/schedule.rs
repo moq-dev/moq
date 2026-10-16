@@ -434,7 +434,10 @@ impl<K: Copy, D> Schedule<K, D> {
         budget: usize,
     ) -> bool {
         if let Some(group) = group {
-            assert!(!self.groups[group].closed, "datagram sent on a closed group");
+            assert!(
+                !self.groups[group].closed,
+                "datagram sent on a closed group"
+            );
         }
 
         self.recency -= 1;
@@ -492,7 +495,11 @@ impl<K: Copy, D> Schedule<K, D> {
     /// A group this empties restarts its turn when restored, gaining up to a quantum of credit,
     /// so this is for the rare packet clamped below the path MTU, not every full one.
     pub(super) fn defer_datagram(&mut self, group: Option<usize>) {
-        let (key, item) = self.queue(group).items.pop_last().expect("a datagram heads");
+        let (key, item) = self
+            .queue(group)
+            .items
+            .pop_last()
+            .expect("a datagram heads");
         self.deferred.push((group, key, item));
         // Its group stays allocated: the datagram is still indexed for eviction.
         self.deactivate(group);
@@ -1034,7 +1041,7 @@ mod tests {
         // Full: the next evicts the low group's oldest, then its newest.
         let (high_new, queued) = sim.datagram(Some(high), 0, 100, 400);
         assert!(queued);
-        assert_eq!(sim.datagram(Some(high), 0, 100, 400).1, true);
+        assert!(sim.datagram(Some(high), 0, 100, 400).1);
         assert_eq!(sim.drain(), [ungrouped, high_old, high_new, high_new + 1]);
         let _ = (low_old, low_new);
     }
@@ -1045,7 +1052,7 @@ mod tests {
         let high = sim.schedule.open_group(1, None);
         let low = sim.schedule.open_group(0, None);
         let kept = sim.datagram(Some(high), 0, 100, 100).0;
-        assert_eq!(sim.datagram(Some(low), 0, 100, 100).1, false);
+        assert!(!sim.datagram(Some(low), 0, 100, 100).1);
         assert_eq!(sim.schedule.datagram_bytes(), 100);
         assert!(sim.schedule.is_clean());
         assert_eq!(sim.drain(), [kept]);

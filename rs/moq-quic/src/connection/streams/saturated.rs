@@ -125,7 +125,9 @@ impl Sender {
         let mut data = BytesMut::with_capacity(bytes);
         data.put_u64(tag);
         data.resize(bytes, 0);
-        let datagram = frame::Datagram { data: data.freeze() };
+        let datagram = frame::Datagram {
+            data: data.freeze(),
+        };
         assert!(
             self.state
                 .queue_datagram(datagram, group, order, usize::MAX)
@@ -531,8 +533,16 @@ fn low_priority_datagrams_wait_behind_streams() {
         .iter()
         .position(|sent| matches!(sent, Sent::Datagram(_)))
         .unwrap();
-    assert!(order[..first].iter().all(|&sent| sent == Sent::Stream(stream)));
-    assert!(order[first..].iter().all(|sent| matches!(sent, Sent::Datagram(_))));
+    assert!(
+        order[..first]
+            .iter()
+            .all(|&sent| sent == Sent::Stream(stream))
+    );
+    assert!(
+        order[first..]
+            .iter()
+            .all(|sent| matches!(sent, Sent::Datagram(_)))
+    );
     assert_eq!(sender.bytes(&[stream]), 20_000);
     assert_eq!(order[first..].len(), tags.len());
 }
@@ -552,7 +562,11 @@ fn high_priority_datagrams_preempt_streams() {
     // Newest first, as the group orders them.
     let expected: Vec<_> = tags.iter().rev().map(|&tag| Sent::Datagram(tag)).collect();
     assert_eq!(order[..tags.len()], expected[..]);
-    assert!(order[tags.len()..].iter().all(|&sent| sent == Sent::Stream(stream)));
+    assert!(
+        order[tags.len()..]
+            .iter()
+            .all(|&sent| sent == Sent::Stream(stream))
+    );
 }
 
 /// Inside one group a datagram merges into the group order: it waits behind a stream

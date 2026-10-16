@@ -456,7 +456,9 @@ impl Session {
 		let mut framed = BytesMut::with_capacity(web.header_datagram.len() + payload.len());
 		framed.extend_from_slice(&web.header_datagram);
 		framed.extend_from_slice(&payload);
-		self.conn.send_datagram(framed.freeze(), group, order).map_err(unmap_err)
+		self.conn
+			.send_datagram(framed.freeze(), group, order)
+			.map_err(unmap_err)
 	}
 
 	/// Wrap a raw-QUIC connection in a session, with no

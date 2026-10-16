@@ -600,7 +600,12 @@ impl poll::Session for MockSession {
 		None
 	}
 
-	fn send_datagram(&mut self, payload: Bytes, group: Option<&poll::Ungrouped>, order: i64) -> Result<(), Self::Error> {
+	fn send_datagram(
+		&mut self,
+		payload: Bytes,
+		group: Option<&poll::Ungrouped>,
+		order: i64,
+	) -> Result<(), Self::Error> {
 		if self.side.lossy.load(Ordering::Relaxed) {
 			return Ok(());
 		}

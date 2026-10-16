@@ -541,7 +541,11 @@ impl Connection {
             return Err(SendDatagramError::ConnectionLost(x.clone()));
         }
         use moq_quic::SendDatagramError::*;
-        match conn.inner.datagrams().send(data, group.map(SendGroup::id), order) {
+        match conn
+            .inner
+            .datagrams()
+            .send(data, group.map(SendGroup::id), order)
+        {
             Ok(()) => {
                 conn.wake();
                 Ok(())
