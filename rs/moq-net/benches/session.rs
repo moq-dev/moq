@@ -464,12 +464,7 @@ impl Room {
 			let mut viewer = cluster.join((viewer + 1) % shape.relays).await;
 			for broadcast in broadcasts {
 				if shape.fetch {
-					let source = viewer
-						.origin
-						.consume()
-						.routed_broadcast(&path(broadcast))
-						.await
-						.unwrap();
+					let source = viewer.origin.consume().routed_broadcast(path(broadcast)).await.unwrap();
 					viewer.fetches.push((broadcast, source.track(TRACK).unwrap()));
 				} else {
 					viewer.watch(&path(broadcast), &[TRACK], shape.subscription()).await;
