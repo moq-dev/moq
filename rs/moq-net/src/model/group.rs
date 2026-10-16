@@ -1787,9 +1787,9 @@ impl Consumer {
 		self.cursor.expiry_pending()
 	}
 
-	/// Whether this cursor failed because its subscription max delay budget expired.
-	#[cfg(test)]
-	#[cfg(feature = "async")]
+	/// Whether a max delay budget gave up on this group, including a clean end of a drained
+	/// one: a server must not answer that end as if the group were whole.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub(crate) fn latency_expired(&self) -> bool {
 		self.expired
 	}

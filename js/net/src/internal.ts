@@ -229,6 +229,8 @@ export const hooks: {
 		group: GroupConsumer,
 		expiry: { expired: () => boolean; changed: readonly Getter<unknown>[] },
 	) => void;
+	/** Whether a drift budget gave up on a drained group, which reads as a clean end. */
+	groupExpired: (group: GroupConsumer) => boolean;
 	/** Start a group operation unless the handed-out group has expired, and stop it if the group expires mid-flight. */
 	guardGroup: <T>(group: GroupConsumer, operation: () => Promise<T>) => Promise<T>;
 	/** Read a frame the wire publisher completes (or skips) once written. */
@@ -291,6 +293,9 @@ export const hooks: {
 		throw new Error("group.ts not loaded");
 	},
 	expireGroup: () => {
+		throw new Error("group.ts not loaded");
+	},
+	groupExpired: () => {
 		throw new Error("group.ts not loaded");
 	},
 	guardGroup: () => {
