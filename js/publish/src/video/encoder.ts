@@ -1,7 +1,7 @@
+import { Micro, Milli, type Second } from "@moq/clock";
 import * as Catalog from "@moq/hang/catalog";
 import * as Container from "@moq/hang/container";
 import type * as Moq from "@moq/net";
-import { Time } from "@moq/net";
 import {
 	type Computed,
 	Effect,
@@ -49,7 +49,7 @@ export interface Config {
 	maxScale?: number;
 
 	// The interval at which to insert keyframes. (default: 2000 milliseconds)
-	keyframeInterval?: Time.Milli;
+	keyframeInterval?: Milli;
 
 	// If not provided, the encoder will use the best bitrate for the given width, height, and framerate.
 	maxBitrate?: number;
@@ -369,8 +369,8 @@ export class Encoder {
 
 		const producer = new Container.Legacy.Producer(track, new Container.Legacy.Format("video"));
 
-		let lastKeyframe: Time.Micro | undefined;
-		let lastEncoded: Time.Micro | undefined;
+		let lastKeyframe: Micro | undefined;
+		let lastEncoded: Micro | undefined;
 		let tearingDown = false;
 
 		effect.spawn(async () => {
@@ -378,7 +378,7 @@ export class Encoder {
 				output: (frame: EncodedVideoChunk) => {
 					const key = frame.type === "key";
 					if (key) {
-						lastKeyframe = frame.timestamp as Time.Micro;
+						lastKeyframe = frame.timestamp as Micro;
 					}
 
 					this.#out.stats.update((stats) => ({
@@ -387,7 +387,7 @@ export class Encoder {
 						keyframes: key ? stats.keyframes + 1 : stats.keyframes,
 					}));
 
-					producer.encode(frame, frame.timestamp as Time.Micro, key);
+					producer.encode(frame, frame.timestamp as Micro, key);
 					if (this.#estimator.flush(frame.timestamp, baseline)) {
 						this.#estimate.set({ ...this.#estimator.estimate });
 					}
@@ -450,12 +450,12 @@ export class Encoder {
 							// a frame we meant to keep.
 							const targetFrameRate = config?.frameRate;
 							if (targetFrameRate && lastEncoded !== undefined) {
-								const minGap = Time.Micro.fromSecond((1 / targetFrameRate) as Time.Second);
+								const minGap = Micro.fromSecond((1 / targetFrameRate) as Second);
 								if (frame.timestamp - lastEncoded < minGap - minGap / 2) continue;
 							}
-							lastEncoded = frame.timestamp as Time.Micro;
+							lastEncoded = frame.timestamp as Micro;
 
-							const interval = config?.keyframeInterval ?? Time.Milli.fromSecond(2 as Time.Second);
+							const interval = config?.keyframeInterval ?? Milli.fromSecond(2 as Second);
 
 							// Force a keyframe if this is the first frame (no group yet), the GOP elapsed, or
 							// the caller asked for one and the last is old enough.
@@ -463,10 +463,10 @@ export class Encoder {
 							const keyFrame =
 								resized ||
 								since === undefined ||
-								since >= Time.Micro.fromMilli(interval) ||
-								(this.#cut && since >= Time.Micro.fromMilli(MIN_CUT_INTERVAL));
+								since >= Micro.fromMilli(interval) ||
+								(this.#cut && since >= Micro.fromMilli(MIN_CUT_INTERVAL));
 							if (keyFrame) {
-								lastKeyframe = frame.timestamp as Time.Micro;
+								lastKeyframe = frame.timestamp as Micro;
 								resized = false;
 								// Any keyframe serves an outstanding request.
 								this.#cut = false;
@@ -498,7 +498,7 @@ export class Encoder {
 					track.closed.peek() === undefined
 				) {
 					// One frame interval after the last picture, in whole microseconds like any VideoFrame.
-					const interval = Time.Micro.fromSecond((1 / (config.framerate ?? 30)) as Time.Second);
+					const interval = Micro.fromSecond((1 / (config.framerate ?? 30)) as Second);
 					const frame = black(config, Math.round(lastEncoded + interval));
 					try {
 						encoder.encode(frame, { keyFrame: true });
@@ -818,7 +818,7 @@ export class Encoder {
 
 // The closest two requested keyframes may land. A keyframe costs several times a predicted frame,
 // and this stays well under the default two-second GOP so a request still beats the cadence.
-const MIN_CUT_INTERVAL = 500 as Time.Milli;
+const MIN_CUT_INTERVAL = 500 as Milli;
 
 // The source's nominal frame rate: what the capture device settled on, or what a frame stream
 // declared. Undefined when nothing reports one.

@@ -9,7 +9,7 @@
 //!
 //! Unsupported local kernels skip loudly; MOQ_STRICT makes CI refuse them.
 
-#![cfg(all(target_os = "linux", feature = "noq"))]
+#![cfg(all(target_os = "linux", feature = "quic"))]
 
 #[path = "support.rs"]
 mod support;

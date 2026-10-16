@@ -1,6 +1,7 @@
+import { Milli } from "@moq/clock";
 import * as Catalog from "@moq/hang/catalog";
 import * as Container from "@moq/hang/container";
-import { Error as NetError, Time } from "@moq/net";
+import { Error as NetError } from "@moq/net";
 import { Effect, type Getter, getter, type Inputs, type Readonlys } from "@moq/signals";
 import type { VTTCue, VTTRegion } from "media-captions";
 import { subscribeMedia } from "../media";
@@ -8,14 +9,14 @@ import type { Sync } from "../sync";
 import type { Source } from "./source";
 
 // Drop cues whose end is more than this far behind the playhead, to bound memory on a long stream.
-const PRUNE_BEHIND = Time.Milli(30_000);
+const PRUNE_BEHIND = Milli(30_000);
 
 // How long a `utf8` roll-up cue lingers when no later cue supersedes it.
-const UTF8_LINGER = Time.Milli(30_000);
+const UTF8_LINGER = Milli(30_000);
 
 // How far a VTT payload's own timing may sit from its frame timestamp before we call it a bug.
 // Generous: this is catching a wrong clock, not measuring drift.
-const SKEW_TOLERANCE = Time.Milli(1_000);
+const SKEW_TOLERANCE = Milli(1_000);
 
 /**
  * The cue state for one selected track, accumulated as groups arrive.

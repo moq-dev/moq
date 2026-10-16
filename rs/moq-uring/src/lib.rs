@@ -21,7 +21,7 @@
 //! member of a steered reuseport group ([`udp::Bound`]) issues connection ids
 //! that steer back to it. [`Handle::run`] supplies time and schedules driver
 //! wakeups; callers run the returned drivers with [`Handle::spawn`]. The stack
-//! underneath is enabled by the `noq` feature; a build without it leaves the
+//! underneath is enabled by the `quic` feature; a build without it leaves the
 //! module out.
 //!
 //! [`metrics::Metrics`] is how the worker's own health leaves its thread:
@@ -39,7 +39,7 @@
 mod error;
 pub mod metrics;
 mod park;
-#[cfg(feature = "noq")]
+#[cfg(feature = "quic")]
 pub mod quic;
 mod shared;
 mod timer;

@@ -17,6 +17,7 @@
  */
 
 import "./highlight";
+import { Milli, Nano, now } from "@moq/clock";
 import * as Json from "@moq/json";
 import "@moq/watch/element"; // defines <moq-watch>
 import "@moq/watch/ui"; // defines <moq-watch-ui>
@@ -498,55 +499,58 @@ viz.run((effect) => {
 
 // Sample the active tile's byte/frame counters and push per-second rates.
 let prevWatch: MoqWatch | undefined;
-let prev = { frames: 0, videoBytes: 0, audioBytes: 0, when: performance.now() };
-viz.interval(() => {
-	const watch = activeWatch.peek();
-	const now = performance.now();
+let prev = { frames: 0, videoBytes: 0, audioBytes: 0, when: Nano.toMilli(Nano(now())) };
+viz.interval(
+	() => {
+		const watch = activeWatch.peek();
+		const at = Nano.toMilli(Nano(now()));
 
-	// Reset baselines when switching tiles (or when idle) so the first sample
-	// isn't a huge spike from the counter difference.
-	if (watch !== prevWatch || !watch) {
-		prevWatch = watch;
-		const video = watch?.video.out.stats.peek();
-		const audio = watch?.audio.out.stats.peek();
-		prev = {
-			frames: video?.frameCount ?? 0,
-			videoBytes: video?.bytesReceived ?? 0,
-			audioBytes: audio?.bytesReceived ?? 0,
-			when: now,
-		};
-		for (const g of allGraphs) g.push(undefined);
-		return;
-	}
+		// Reset baselines when switching tiles (or when idle) so the first sample
+		// isn't a huge spike from the counter difference.
+		if (watch !== prevWatch || !watch) {
+			prevWatch = watch;
+			const video = watch?.video.out.stats.peek();
+			const audio = watch?.audio.out.stats.peek();
+			prev = {
+				frames: video?.frameCount ?? 0,
+				videoBytes: video?.bytesReceived ?? 0,
+				audioBytes: audio?.bytesReceived ?? 0,
+				when: at,
+			};
+			for (const g of allGraphs) g.push(undefined);
+			return;
+		}
 
-	const v = watch.video.out.stats.peek();
-	const a = watch.audio.out.stats.peek();
-	const videoBytes = v?.bytesReceived ?? 0;
-	const audioBytes = a?.bytesReceived ?? 0;
-	const frames = v?.frameCount ?? 0;
-	const elapsed = now - prev.when;
+		const v = watch.video.out.stats.peek();
+		const a = watch.audio.out.stats.peek();
+		const videoBytes = v?.bytesReceived ?? 0;
+		const audioBytes = a?.bytesReceived ?? 0;
+		const frames = v?.frameCount ?? 0;
+		const elapsed = at - prev.when;
 
-	const perSec = (delta: number) => (delta >= 0 ? (delta * 1000) / elapsed : undefined);
-	let videoBitrate: number | undefined;
-	let audioBitrate: number | undefined;
-	let throughput: number | undefined;
-	let fps: number | undefined;
-	if (elapsed > 0) {
-		videoBitrate = perSec((videoBytes - prev.videoBytes) * 8);
-		audioBitrate = perSec((audioBytes - prev.audioBytes) * 8);
-		throughput = perSec((videoBytes - prev.videoBytes + audioBytes - prev.audioBytes) * 8);
-		fps = perSec(frames - prev.frames);
-	}
-	videoBitrateGraph.push(videoBitrate);
-	audioBitrateGraph.push(audioBitrate);
-	fpsGraph.push(fps);
-	throughputGraph.push(throughput);
+		const perSec = (delta: number) => (delta >= 0 ? (delta * 1000) / elapsed : undefined);
+		let videoBitrate: number | undefined;
+		let audioBitrate: number | undefined;
+		let throughput: number | undefined;
+		let fps: number | undefined;
+		if (elapsed > 0) {
+			videoBitrate = perSec((videoBytes - prev.videoBytes) * 8);
+			audioBitrate = perSec((audioBytes - prev.audioBytes) * 8);
+			throughput = perSec((videoBytes - prev.videoBytes + audioBytes - prev.audioBytes) * 8);
+			fps = perSec(frames - prev.frames);
+		}
+		videoBitrateGraph.push(videoBitrate);
+		audioBitrateGraph.push(audioBitrate);
+		fpsGraph.push(fps);
+		throughputGraph.push(throughput);
 
-	const rtt = watch.connection.probe.peek()?.rtt as unknown as number | undefined;
-	rttGraph.push(rtt && rtt > 0 ? rtt : undefined);
+		const rtt = watch.connection.probe.peek()?.rtt as unknown as number | undefined;
+		rttGraph.push(rtt && rtt > 0 ? rtt : undefined);
 
-	prev = { frames, videoBytes, audioBytes, when: now };
-}, 250);
+		prev = { frames, videoBytes, audioBytes, when: at };
+	},
+	Nano.fromMilli(Milli(250)),
+);
 
 // Rebuild the buffer visualization whenever the active tile changes; it binds to
 // one element and runs its own animation loop until its child effect closes.
