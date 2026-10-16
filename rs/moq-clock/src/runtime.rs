@@ -18,6 +18,13 @@ use web_async::time as host;
 
 use crate::{Instant, Wall};
 
+/// How far past [`Instant::ZERO`] a runtime clock reads at its origin.
+///
+/// Like std's since-boot `Instant`, so `now() - d` names a moment before the
+/// process started instead of underflowing during its first seconds. 2^32 s
+/// (~136 years) outlasts any lookback, and leaves ~448 years of range ahead.
+const LEAD: std::time::Duration = std::time::Duration::from_secs(1 << 32);
+
 /// Where every unpaused clock counts from, so instants read on any thread, in any
 /// runtime or none, stay comparable.
 #[cfg(any(feature = "runtime", all(target_arch = "wasm32", not(target_os = "wasi"))))]
@@ -48,7 +55,7 @@ fn read() -> (host::Instant, host::Instant) {
 #[cfg(any(feature = "runtime", all(target_arch = "wasm32", not(target_os = "wasi"))))]
 pub(crate) fn now() -> Instant {
 	let (origin, reading) = read();
-	Instant::from_origin(reading.duration_since(origin))
+	Instant::from_origin(LEAD + reading.duration_since(origin))
 }
 
 #[cfg(any(feature = "runtime", all(target_arch = "wasm32", not(target_os = "wasi"))))]
@@ -81,12 +88,14 @@ impl Timer {
 		let (origin, _) = read();
 		Self {
 			origin,
-			sleep: Box::pin(host::sleep_until(origin + at.since_origin())),
+			sleep: Box::pin(host::sleep_until(origin + at.since_origin().saturating_sub(LEAD))),
 		}
 	}
 
 	pub(crate) fn reset(&mut self, at: Instant) {
-		self.sleep.as_mut().reset(self.origin + at.since_origin());
+		self.sleep
+			.as_mut()
+			.reset(self.origin + at.since_origin().saturating_sub(LEAD));
 	}
 
 	pub(crate) fn poll(&mut self, cx: &mut Context<'_>) -> Poll<()> {
@@ -117,7 +126,7 @@ fn system_wall() -> Wall {
 
 #[cfg(not(any(feature = "runtime", all(target_arch = "wasm32", not(target_os = "wasi")))))]
 pub(crate) fn now() -> Instant {
-	Instant::from_origin(std_origin().0.elapsed())
+	Instant::from_origin(LEAD + std_origin().0.elapsed())
 }
 
 #[cfg(not(any(feature = "runtime", all(target_arch = "wasm32", not(target_os = "wasi")))))]
@@ -127,7 +136,7 @@ pub(crate) fn wall() -> Wall {
 
 #[cfg(not(any(feature = "runtime", all(target_arch = "wasm32", not(target_os = "wasi")))))]
 pub(crate) fn anchor() -> (Instant, Wall) {
-	(Instant::ZERO, std_origin().1)
+	(Instant::from_origin(LEAD), std_origin().1)
 }
 
 #[cfg(not(feature = "runtime"))]
@@ -270,6 +279,22 @@ mod tests {
 			let (instant, _) = crate::anchor();
 			assert_eq!(instant, crate::now());
 		});
+	}
+
+	/// A fresh clock names moments before the process started, as std's does, so
+	/// looking back from startup never underflows.
+	#[test]
+	fn startup_reads_can_look_back() {
+		let runtime = tokio::runtime::Builder::new_current_thread()
+			.enable_time()
+			.start_paused(true)
+			.build()
+			.unwrap();
+		runtime.block_on(async {
+			let now = crate::now();
+			assert!(now.checked_sub(Duration::from_secs(3_600)).is_some(), "{now:?}");
+		});
+		assert!(crate::now().checked_sub(Duration::from_secs(3_600)).is_some());
 	}
 
 	/// Every worker of a multi-thread runtime, and a thread outside any runtime,
