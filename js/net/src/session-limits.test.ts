@@ -19,6 +19,7 @@ import { createMockTransportPair } from "./mock.ts";
 import { Producer as OriginProducer } from "./origin.ts";
 import * as Path from "./path.ts";
 import { Stream, Writer } from "./stream.ts";
+import { Timescale } from "./time.ts";
 import type { Limits } from "./util/limits.ts";
 import { wireOf } from "./wire.ts";
 
@@ -26,8 +27,9 @@ import { wireOf } from "./wire.ts";
 const limits: Limits = { announces: 8, subscriptions: 4, fetches: 4 };
 
 // A publisher serving one announced broadcast whose tracks are never accepted, so every
-// subscription stays live, waiting on the track, without timers or media.
-function pendingPublisher(protocol: "lite" | "ietf") {
+// subscription stays live, waiting on the track, without timers or media. With `track`, the
+// "video" track exists but never produces a group, so a FETCH waits on the group instead.
+function pendingPublisher(protocol: "lite" | "ietf", options: { track?: boolean } = {}) {
 	const pair = createMockTransportPair();
 	const closing = spyOn(pair.server, "close");
 	const quiet = [
@@ -38,6 +40,7 @@ function pendingPublisher(protocol: "lite" | "ietf") {
 	const path = Path.from("test");
 	const broadcast = origin.createBroadcast(path);
 	broadcast.announce();
+	if (options.track) broadcast.createTrack("video", { timescale: Timescale.MILLI });
 	// Serve tracks on demand, then never answer the request.
 	void wireOf(broadcast).requested();
 	const version = protocol === "lite" ? LiteVersion.DRAFT_06 : IetfVersion.DRAFT_22;
@@ -257,11 +260,16 @@ test.each(["lite", "ietf"] as const)("%s caps each FETCH before shared lookup", 
 	}
 });
 
-test("lite returns FETCH slots when an unanswered requester leaves", async () => {
-	const session = pendingPublisher("lite");
+test.each([
+	["an unanswered", false],
+	["a missing group's", true],
+] as const)("lite returns FETCH slots when %s requester leaves", async (_, track) => {
+	const session = pendingPublisher("lite", { track });
 	try {
 		for (let round = 0; round < 3; round++) {
 			const cancels = Array.from({ length: limits.fetches }, (_, id) => session.fetch(id));
+			// Let each lookup settle into its wait first: the track's answer, or a group that never comes.
+			await new Promise((resolve) => setTimeout(resolve, 0));
 			for (const cancel of cancels) cancel();
 			await Promise.all(session.pending);
 			expect(session.closing).not.toHaveBeenCalled();

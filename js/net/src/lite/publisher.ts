@@ -896,16 +896,19 @@ export class Publisher {
 		}
 
 		// A normal request FIN is not a cancellation: FETCH has no more request bytes.
+		const left = new AbortController();
+		void stream.reader.closed.catch(() => left.abort());
+		void stream.writer.closed.catch(() => left.abort());
+		// The lookups hold the broadcast and track only until the track info answers.
 		const hold = new AbortController();
-		void stream.reader.closed.catch(() => hold.abort());
-		void stream.writer.closed.catch(() => hold.abort());
+		const holding = AbortSignal.any([left.signal, hold.signal]);
 		try {
 			let front: broadcast.Consumer | undefined;
 			try {
 				front =
 					this.#publish &&
 					(wireOf(this.#publish).local(msg.broadcast, msg.epoch) ??
-						(await wireOf(this.#publish).demand(msg.broadcast, msg.epoch, hold.signal)));
+						(await wireOf(this.#publish).demand(msg.broadcast, msg.epoch, holding)));
 			} catch (err: unknown) {
 				stream.writer.reset(error(err));
 				return;
@@ -930,11 +933,15 @@ export class Publisher {
 				// come off the same front, so the metadata and the frames are one generation.
 				let info: TrackInfoMessage;
 				try {
-					info = await this.#resolveTrackInfo(front, msg.track, hold.signal, true);
+					info = await this.#resolveTrackInfo(front, msg.track, holding, true);
 				} finally {
 					hold.abort();
 				}
-				group = await wireOf(front).fetchGroup(msg.track, msg.group, { priority: msg.priority });
+				// A group that has not arrived yet holds this FETCH's slot until the requester leaves.
+				group = await wireOf(front).fetchGroup(msg.track, msg.group, {
+					priority: msg.priority,
+					signal: left.signal,
+				});
 				serving(group);
 				// Revoked while the group resolved: the watch already reset the stream.
 				if (watch.revoked()) {
