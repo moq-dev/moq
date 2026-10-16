@@ -115,8 +115,11 @@ JS items (`js/net/src/`):
   - Recommended: a fallback answerer, `origin::Producer::fallback()` in Rust
     and `Origin.Producer.fallback()` in JS (name open). It returns the same
     `Dynamic` request stream, scoped to the handle's allowed paths. It
-    receives only requests that no announced or served route covers, and
-    every request the table later routes is withdrawn from it. It is never
+    receives only requests that no announced or served route covers. Once
+    the table routes a path, the new route takes only unresolved and new
+    requests for it. A request the fallback already resolved ends with an
+    error, since a blind answer has no epoch to prove the route serves the
+    same instance (never stitch). It is never
     advertised, since it claims nothing. The first fallback to answer a
     request wins. Dropping the handle ends the requests it resolved with an
     error and never moves them to another fallback, which may be another
