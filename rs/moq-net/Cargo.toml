@@ -67,6 +67,10 @@ getrandom = { workspace = true }
 # Keep this in lockstep with rs/moq-wasm's pinned wasm-bindgen CLI schema.
 wasm-bindgen-test = "=0.3.77"
 
+# Optional per-thread CPU timing in the session benchmark.
+[target.'cfg(unix)'.dev-dependencies]
+libc = { workspace = true }
+
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)'] }
 
