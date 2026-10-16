@@ -164,12 +164,9 @@ impl ServerState {
 		listen.tls.key = config.tls.key.into_iter().map(PathBuf::from).collect();
 		listen.tls.generate = config.tls.generate;
 
-		let mut quic = moq_tokio::quic::Config::default();
-		quic.max_streams = config.quic.max_streams;
-
 		Ok(Self {
 			config: listen,
-			quic,
+			quic: config.quic.into(),
 			publish: config.publish,
 			consume: config.consume,
 			requests: None,
