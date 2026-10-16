@@ -39,6 +39,13 @@ These land with the next breaking release, not the 2026-09-23 train.
 - **`cache::Pool::gc` takes a waiter.** In Rust, `gc(now)` is
   `gc(now, waiter)`, like `Driver::poll`: call it again when the waiter wakes,
   since a parked read can arm an earlier deadline than the one returned.
+- **Native background panics.** UniFFI reports `MoqError::Task` with a panic
+  reason, and C reports `MOQ_ERROR_PANIC`. Other objects keep running. Browser
+  WebAssembly still aborts on panic with the current toolchain.
+- **Accepted sessions return their driver task.** `moq_tokio::server::Request::ok()`
+  now returns `(session, driver)`. Await the supervised driver before classifying
+  the session close, so a driver panic reports `moq_tokio::Error::Panic` rather
+  than the cancellation its teardown leaves on a channel.
 - **A QUIC load-balancer nonce needs its server id.** `listen.lb_nonce`,
   `--listen-quic-lb-nonce`, and `MOQ_LISTEN_QUIC_LB_NONCE` without `lb_id` stop
   startup. Setting `lb_id` (or `lb_nonce`) and `load_balancer` together also

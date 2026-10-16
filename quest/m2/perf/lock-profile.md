@@ -56,11 +56,13 @@ three crates plus five Prometheus families):
 - Measure from outside the process, aggregated by thread name and user
   stack. No instrumentation in `kio`, no new public API, no metrics.
 - perf samples each worker switch-out with its stack, and `--switch-events`
-  adds the switch-in, so each off-CPU interval has an exact duration;
-  `/proc` schedstat supplies CPU (decided by the maintainer 2026-10-12,
-  replacing bpftrace and an eu-stack sampler; its ptrace stops likely
-  inflated waits, reading 0.15 wait/CPU on fanout-heavy at 4 workers where
-  exact intervals read 0.0013). It samples the `context-switches` software
+  adds the switch-in, so each off-CPU interval has an exact duration
+  (decided by the maintainer 2026-10-12, replacing bpftrace and an eu-stack
+  sampler; its ptrace stops likely inflated waits, reading 0.15 wait/CPU on
+  fanout-heavy at 4 workers where exact intervals read 0.0013). CPU comes
+  from the same switch records, clipped to the recorded window; `/proc`
+  schedstat only tells an idle worker from an ambiguous one with no switch
+  records. It samples the `context-switches` software
   event with a period of 1, not the `sched:sched_switch` tracepoint, since
   it records the same switch-outs without tracefs access (decided
   2026-10-12). It needs `kernel.perf_event_paranoid=-1`: kernel-context
