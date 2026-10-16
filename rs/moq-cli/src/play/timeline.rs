@@ -38,6 +38,10 @@ pub(super) struct Presentation {
 #[derive(Default)]
 struct Segment {
 	end: Option<Boundary>,
+	/// Whether a declared end is still waiting for its replacement.
+	pending: bool,
+	/// The peer's replacement mapping, applied while this role was pending.
+	paired: Option<Mapping>,
 	plans: std::collections::VecDeque<Plan>,
 	active: Option<Mapping>,
 }
@@ -213,10 +217,14 @@ impl Role {
 
 	pub(super) fn end(&self, source: Timestamp) -> anyhow::Result<()> {
 		let mapping = *self.mapping.lock().unwrap();
-		self.presentation.lock().unwrap().roles[self.role as usize].end = Some(Boundary {
+		let mut presentation = self.presentation.lock().unwrap();
+		let segment = &mut presentation.roles[self.role as usize];
+		segment.end = Some(Boundary {
 			starts: mapping.starts,
 			end: timestamp(mapping.map(source)?),
 		});
+		segment.pending = true;
+		drop(presentation);
 		self.changed.notify_waiters();
 		Ok(())
 	}
@@ -233,18 +241,24 @@ impl Role {
 	}
 
 	pub(super) fn gap(&self) {
-		let mut presentation = self.presentation.lock().unwrap();
-		presentation.roles[self.role as usize].end = None;
-		presentation.roles[self.role as usize].plans.clear();
-		presentation.roles[self.role as usize].active = None;
+		self.presentation.lock().unwrap().roles[self.role as usize] = Segment::default();
 		self.changed.notify_waiters();
 	}
 
 	pub(super) fn apply(&self, mapping: Mapping) {
 		*self.mapping.lock().unwrap() = mapping;
 		let mut presentation = self.presentation.lock().unwrap();
-		presentation.roles[self.role as usize].active = Some(mapping);
-		presentation.roles[self.role as usize].plans.pop_front();
+		let own = &mut presentation.roles[self.role as usize];
+		own.active = Some(mapping);
+		own.plans.pop_front();
+		own.pending = false;
+		own.paired = None;
+		// A peer that ended too resumes on this mapping, however late its media lands.
+		let peer = &mut presentation.roles[1 - self.role as usize];
+		if peer.pending {
+			peer.paired = Some(mapping);
+		}
+		drop(presentation);
 		self.changed.notify_waiters();
 	}
 
@@ -299,10 +313,11 @@ impl Role {
 				presentation.roles[peer].plans.front_mut().unwrap().mapping = Some(mapping);
 				return Ok(mapping);
 			}
-			if let Some(mapping) = presentation.roles[peer]
-				.active
-				.filter(|mapping| mapping.starts.is_some_and(|starts| starts > now))
-			{
+			if let Some(mapping) = presentation.roles[own].paired.or_else(|| {
+				presentation.roles[peer]
+					.active
+					.filter(|mapping| mapping.starts.is_some_and(|starts| starts > now))
+			}) {
 				return Ok(mapping);
 			}
 			let starts = now
@@ -320,9 +335,7 @@ impl Role {
 impl Drop for Role {
 	fn drop(&mut self) {
 		if let Ok(mut presentation) = self.presentation.lock() {
-			presentation.roles[self.role as usize].end = None;
-			presentation.roles[self.role as usize].plans.clear();
-			presentation.roles[self.role as usize].active = None;
+			presentation.roles[self.role as usize] = Segment::default();
 		}
 		self.changed.notify_waiters();
 	}
@@ -458,6 +471,32 @@ mod tests {
 		assert_eq!(audio.map(ms(0)).unwrap().as_millis(), 10_120);
 		assert_eq!(video.map(ms(10_500)).unwrap().as_millis(), 10_500);
 		assert_eq!(presentation.lock().unwrap().due(ms(10_500)), unchanged);
+	}
+
+	#[tokio::test]
+	async fn a_late_paired_replacement_keeps_its_media_offset() {
+		tokio::time::pause();
+		let now = tokio::time::Instant::now();
+		let presentation = std::sync::Arc::new(std::sync::Mutex::new(Presentation::new(DELAY)));
+		presentation
+			.lock()
+			.unwrap()
+			.audio(Duration::from_secs(10), DELAY, now.into_std());
+		let audio = Role::new(presentation.clone(), Default::default(), Kind::Audio);
+		let video = Role::new(presentation.clone(), Default::default(), Kind::Video);
+		audio.end(ms(10_020)).unwrap();
+		video.end(ms(10_020)).unwrap();
+		audio.plan(ms(0), Some(DELAY));
+		tokio::time::advance(DELAY + Duration::from_millis(20)).await;
+		audio.apply(audio.resume(ms(0), Some(DELAY)).await.unwrap());
+		// The video replacement lands after the resumed audio has started playing.
+		tokio::time::advance(DELAY * 2).await;
+		video.plan(ms(40), None);
+		video.apply(video.resume(ms(40), None).await.unwrap());
+		assert_eq!(
+			video.map(ms(40)).unwrap().as_millis() - audio.map(ms(0)).unwrap().as_millis(),
+			40
+		);
 	}
 
 	#[tokio::test]
