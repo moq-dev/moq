@@ -170,7 +170,7 @@ struct Worker {
 impl Worker {
 	fn new(hop: u64) -> Self {
 		let origin = produce_origin(hop);
-		let claim = Rc::new(origin.dynamic("pool", origin::Route::default()).unwrap());
+		let claim = Rc::new(origin.dynamic_route("pool", origin::Route::default()).unwrap());
 		let outputs = Rc::new(RefCell::new(Vec::new()));
 		let (handler, served) = (claim.clone(), outputs.clone());
 		drop(moq_net_sim::spawn(async move {
@@ -253,7 +253,7 @@ impl Claim {
 	fn new(origin: &origin::Producer, epoch: Option<Epoch>) -> Self {
 		let mut route = origin::Route::default();
 		route.epoch = epoch;
-		let dynamic = Rc::new(origin.dynamic("live", route).unwrap());
+		let dynamic = Rc::new(origin.dynamic_route("live", route).unwrap());
 		let outputs = Rc::new(RefCell::new(Vec::new()));
 		let (handler, served) = (dynamic.clone(), outputs.clone());
 		drop(moq_net_sim::spawn(async move {
@@ -280,7 +280,7 @@ impl Claim {
 	fn update_epoch(&self, epoch: Option<Epoch>) {
 		let mut route = self.dynamic.route();
 		route.epoch = epoch;
-		self.dynamic.update(route).unwrap();
+		self.dynamic.update_route(route).unwrap();
 	}
 }
 
@@ -308,7 +308,7 @@ async fn dynamic_epoch(version: &str, from: Option<Epoch>, to: Option<Epoch>) {
 	assert_eq!(read(&mut sticky).await, "old:0", "{version}");
 
 	// A re-price at the same epoch is an update at most: every handle survives.
-	claim.dynamic.update(claim.dynamic.route().with_cost(5)).unwrap();
+	claim.dynamic.update_route(claim.dynamic.route().with_cost(5)).unwrap();
 	while let Ok(event) = moq_net_sim::timeout(Duration::from_secs(1), announced.next()).await {
 		assert!(
 			matches!(event, Some(announce::Event::Update(_))),
@@ -383,9 +383,12 @@ async fn dynamic_epoch_second_route_keeps_winning() {
 	let (a, _) = epochs();
 	let origin = produce_origin(1);
 	let first = Claim::new(&origin, Some(a.clone()));
-	first.dynamic.update(first.dynamic.route().with_cost(1)).unwrap();
+	first.dynamic.update_route(first.dynamic.route().with_cost(1)).unwrap();
 	let second = Claim::new(&origin, Some(a.clone()));
-	second.dynamic.update(second.dynamic.route().with_cost(5)).unwrap();
+	second
+		.dynamic
+		.update_route(second.dynamic.route().with_cost(5))
+		.unwrap();
 	let mut announced = origin.consume().announced();
 	match next_event(&mut announced).await {
 		announce::Event::Start(announce) => assert_eq!(announce.route.epoch.as_ref(), Some(&a)),

@@ -39,6 +39,9 @@ pub struct Origin {
 
 	/// Broadcast requests delivered to a dynamic handler, freed after accept/reject.
 	broadcast_request: NonZeroSlab<Option<moq_net::origin::Request>>,
+
+	/// Claim answers being filled before their exact route is announced.
+	prepared: NonZeroSlab<Option<moq_net::origin::Prepared>>,
 }
 
 /// One announce event and the C string views borrowed from it.
@@ -337,15 +340,9 @@ impl Origin {
 
 	/// Advertise `prefix` and serve requests beneath it, delivering each as a
 	/// broadcast-request handle via `on_request`.
-	pub fn dynamic(
-		&mut self,
-		origin: Id,
-		prefix: &str,
-		route: moq_net::origin::Route,
-		on_request: OnStatus,
-	) -> Result<Id, Error> {
+	pub fn dynamic(&mut self, origin: Id, prefix: &str, on_request: OnStatus) -> Result<Id, Error> {
 		let origin = self.active.get(origin).ok_or(Error::OriginNotFound)?;
-		let inner = origin.dynamic(prefix, route)?;
+		let inner = origin.dynamic(prefix)?;
 		let channel = oneshot::channel();
 		let id = self.dynamic.insert(Some(DynamicEntry {
 			inner: Some(inner),
@@ -396,16 +393,6 @@ impl Origin {
 		}
 	}
 
-	pub fn dynamic_update(&self, dynamic: Id, route: moq_net::origin::Route) -> Result<(), Error> {
-		let dynamic = self
-			.dynamic
-			.get(dynamic)
-			.and_then(|entry| entry.as_ref())
-			.and_then(|entry| entry.inner.as_ref())
-			.ok_or(Error::NotFound)?;
-		Ok(dynamic.update(route)?)
-	}
-
 	pub fn dynamic_close(&mut self, dynamic: Id) -> Result<(), Error> {
 		let entry = self
 			.dynamic
@@ -434,6 +421,14 @@ impl Origin {
 
 	pub fn broadcast_request_take(&mut self, request: Id) -> Result<moq_net::origin::Request, Error> {
 		self.broadcast_request.remove(request).flatten().ok_or(Error::NotFound)
+	}
+
+	pub fn prepared_insert(&mut self, prepared: moq_net::origin::Prepared) -> Result<Id, Error> {
+		self.prepared.insert(Some(prepared))
+	}
+
+	pub fn prepared_take(&mut self, prepared: Id) -> Result<moq_net::origin::Prepared, Error> {
+		self.prepared.remove(prepared).flatten().ok_or(Error::NotFound)
 	}
 
 	pub fn close(&mut self, origin: Id) -> Result<(), Error> {

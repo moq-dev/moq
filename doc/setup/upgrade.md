@@ -542,7 +542,8 @@ Other changes to a deployment:
 - **Announcements are prefix routes** (#3225, #3770). `announce::Update` is
   `{ prefix, route, kind, captures }`: skip `!update.kind.is_active()` and
   resolve the broadcast with `consumer.request_broadcast(&update.prefix, update.route.epoch)`.
-  Serve a subtree on demand with `origin.dynamic(prefix, route)`.
+  Serve a subtree on demand with `origin.dynamic(prefix)`. Answer each request by
+  preparing a new epoch, filling its broadcast, then publishing it.
 - **Tracks.** `with_latency_max` / `latency_max` is `with_max_age` / `max_age`.
   `write_datagram(Datagram)` is `insert_datagram(sequence, timestamp, payload)`
   (#3666); `append_datagram` is unchanged. `track::SubscriberControl` is

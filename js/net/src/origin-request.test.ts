@@ -140,7 +140,7 @@ test("announced requests follow the serving prefix, ignoring descendants and re-
 	const origin = new Producer();
 	const source = new BroadcastProducer();
 	const keeper = source.consume();
-	const prefix = origin.dynamic(Path.from("pool"));
+	const prefix = origin.dynamicRoute(Path.from("pool"));
 	const serving = (async () => {
 		for await (const request of prefix.requested()) request.accept(source.consume());
 	})();
@@ -176,7 +176,7 @@ test("announced requests follow the serving prefix, ignoring descendants and re-
 test("an announced request ignores a covering route whose scope excludes its path", async () => {
 	const origin = new Producer();
 	const scoped = origin.scope(Path.empty(), new Path.Patterns([Path.Pattern.parse("room/*/chat")]));
-	const prefix = scoped.dynamic(Path.from("room/alice"));
+	const prefix = scoped.dynamicRoute(Path.from("room/alice"));
 	const exact = origin.createBroadcast(Path.from("room/alice"));
 	exact.announce({ cost: 5n });
 	const request = origin.request(Path.from("room/alice"), { announced: true });
@@ -193,7 +193,7 @@ test("an announced request follows an epochless route replaced by an identical o
 	const origin = new Producer();
 	const path = Path.from("room");
 	const serve = (source: BroadcastProducer) => {
-		const route = origin.dynamic(path);
+		const route = origin.dynamicRoute(path);
 		void (async () => {
 			for await (const request of route.requested()) request.accept(source.consume());
 		})();
@@ -224,7 +224,7 @@ test("an origin closing settles an announced request a served route resolved", a
 	const origin = new Producer();
 	const path = Path.from("room");
 	const source = new BroadcastProducer();
-	const route = origin.dynamic(path);
+	const route = origin.dynamicRoute(path);
 	void (async () => {
 		for await (const request of route.requested()) request.accept(source.consume());
 	})();
@@ -243,7 +243,7 @@ test("an origin closing settles an announced request a served route resolved", a
 test("an announced request keeps a refusal that lands with a re-price", async () => {
 	const origin = new Producer();
 	const path = Path.from("room");
-	const route = origin.dynamic(path);
+	const route = origin.dynamicRoute(path);
 	const requested = route.requested();
 	const request = origin.request(path, { announced: true });
 	const pending = (await requested.next()).value;
@@ -274,7 +274,7 @@ for (const received of [false, true]) {
 		const events: string[] = [];
 		const stop = wireOf(origin).interests((prefix, wanted) => events.push(`${prefix} ${wanted}`));
 		const source = new BroadcastProducer();
-		const route = received ? wireOf(origin).receive(path, Route.default) : origin.dynamic(path);
+		const route = received ? wireOf(origin).receive(path, Route.default) : origin.dynamicRoute(path);
 		void (async () => {
 			for await (const request of route.requested()) request.accept(source.consume());
 		})();

@@ -144,6 +144,13 @@ pub struct MoqBroadcastRequest {
 	inner: std::sync::Mutex<Option<moq_net::origin::Request>>,
 }
 
+#[derive(uniffi::Object)]
+/// A claim answer being filled before its exact route is announced.
+pub struct MoqBroadcastPrepared {
+	inner: std::sync::Mutex<Option<moq_net::origin::Prepared>>,
+	broadcast: Arc<MoqBroadcastProducer>,
+}
+
 struct Announced {
 	inner: moq_net::announce::Consumer,
 }
@@ -348,10 +355,9 @@ impl MoqOriginProducer {
 	/// the returned handle while the route should stay advertised and missing
 	/// broadcasts should be served. Create, attach this for tracks served on
 	/// demand, populate, then announce.
-	pub fn dynamic(&self, prefix: String, route: MoqRoute) -> Result<Arc<MoqOriginDynamic>, MoqError> {
+	pub fn dynamic(&self, prefix: String) -> Result<Arc<MoqOriginDynamic>, MoqError> {
 		let _guard = crate::ffi::enter();
-		let route: moq_net::origin::Route = route.try_into()?;
-		let dynamic = self.inner.dynamic(prefix, route)?;
+		let dynamic = self.inner.dynamic(prefix)?;
 		let slot = Arc::new(std::sync::Mutex::new(Some(dynamic)));
 		Ok(Arc::new(MoqOriginDynamic {
 			slot: slot.clone(),
@@ -456,16 +462,6 @@ impl MoqOriginDynamic {
 			.await
 	}
 
-	/// Replace the route in place: its epoch, hops, and a static cost. The prefix cannot
-	/// change; call `dynamic` again instead.
-	pub fn update(&self, route: MoqRoute) -> Result<(), MoqError> {
-		let _guard = crate::ffi::enter();
-		let route: moq_net::origin::Route = route.try_into()?;
-		let slot = self.slot.lock().unwrap();
-		let dynamic = slot.as_ref().ok_or(MoqError::Closed)?;
-		Ok(dynamic.update(route)?)
-	}
-
 	/// Stop serving and retract the route. Terminal: this handler is released
 	/// here, not when the handle is, so pending requests are rejected before
 	/// this returns.
@@ -502,13 +498,16 @@ impl MoqBroadcastRequest {
 		Ok(request.path().to_string())
 	}
 
-	/// Accept the request with an unannounced broadcast.
-	pub fn accept(&self, broadcast: &MoqBroadcastProducer) -> Result<(), MoqError> {
+	/// Start answering as a new publisher instance, hidden until published.
+	pub fn prepare(&self, epoch: String) -> Result<Arc<MoqBroadcastPrepared>, MoqError> {
 		let _guard = crate::ffi::enter();
-		let consumer = broadcast.consume_inner()?;
 		let request = self.take()?;
-		request.accept(&consumer);
-		Ok(())
+		let prepared = request.prepare(epoch.parse()?)?;
+		let broadcast = Arc::new(MoqBroadcastProducer::from_inner(prepared.broadcast().clone())?);
+		Ok(Arc::new(MoqBroadcastPrepared {
+			inner: std::sync::Mutex::new(Some(prepared)),
+			broadcast,
+		}))
 	}
 
 	/// Reject the request with an application error code.
@@ -517,6 +516,22 @@ impl MoqBroadcastRequest {
 		let request = self.take()?;
 		request.reject(moq_net::Error::App(error_code));
 		Ok(())
+	}
+}
+
+#[uniffi::export]
+impl MoqBroadcastPrepared {
+	/// The unannounced broadcast to fill before publishing.
+	pub fn broadcast(&self) -> Arc<MoqBroadcastProducer> {
+		self.broadcast.clone()
+	}
+
+	/// Announce the filled broadcast and resolve every waiting requester.
+	pub fn publish(&self) -> Result<Arc<MoqBroadcastProducer>, MoqError> {
+		let _guard = crate::ffi::enter();
+		let prepared = self.inner.lock().unwrap().take().ok_or(MoqError::Closed)?;
+		prepared.publish()?;
+		Ok(self.broadcast.clone())
 	}
 }
 
