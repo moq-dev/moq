@@ -25,7 +25,7 @@ being useful if the original was lost does not make redundancy free. Keep
 all bytes in congestion accounting and count unique media delivery once.
 Wire-capacity evidence must remain distinct from application goodput.
 
-Implement only the measured winning mechanism in the fork's recovery and
+Implement only the measured winning mechanism in `moq-quic`'s recovery and
 pacing layer. For redundant probes, evaluate the existing IMMEDIATE_ACK
 extension so ACK delay does not obscure a short sample. Enable probing only
 while an active application requests headroom, within explicit byte/time

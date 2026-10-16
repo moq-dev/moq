@@ -58,7 +58,7 @@ the tier and the weighting.
 
 The delivered API is hierarchical send groups. Do not require a separately
 published scalar-widening API or drop fairness as an intermediate release.
-Prototype the byte-accounted scheduler in the fork. An existing Quinn prototype can
+Prototype the byte-accounted scheduler in `moq-quic`. An existing Quinn prototype can
 supply a workload baseline, but a recency field alone does not prove byte
 fairness: differently sized writes must spend the group's byte credit, and
 requeueing or adding streams must not reset that credit.

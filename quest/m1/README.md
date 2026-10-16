@@ -14,9 +14,8 @@ Decided with the maintainer on 2026-10-13:
   through a stale route; a working backup recovers; matching-epoch handover
   preserves eligible content; a new epoch produces an explicit Restart.
   Catalogs, long-lived readers, and late joiners must obey the same contract.
-- Prioritize the QUIC library switch beside routing. Its clock prerequisite
-  lands first. Keep its correctness, interoperability, memory, and performance
-  evidence; a passing simulator alone does not validate a real transport.
+- Prioritize the in-tree QUIC stack (`moq-quic`) beside routing. Keep its
+  correctness, interoperability, memory, and performance evidence; a passing simulator alone does not validate a real transport.
 - Finish planned breaking APIs in this release, including public clocks,
   signed priority, binding shape, watch worker, and the QoS lag API. Keep
   prerequisites of those changes here even when a prerequisite is additive.

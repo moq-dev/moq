@@ -13,7 +13,7 @@ production number that sizes the cut-through opportunity.
 Decided 2026-09-30: one monotonic byte counter, no hold-time histogram, on the
 ingress (`Role::Subscriber`) rows next to
 [publisher timeliness](/quest/m2/qos-publisher-timeliness.md)'s fields.
-Independent of the bench; it can start once `moq-quic` lands.
+Independent of the bench.
 
 - `moq-quic` counts per receive stream. The assembler stamps each chunk buffered past
   the contiguous frontier with its arrival time; when the frontier passes it,

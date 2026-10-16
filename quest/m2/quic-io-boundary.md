@@ -11,8 +11,8 @@ those buffers with the ring is
 ## Plan
 
 Decided in the 2026-09-30 plan: commit to the redesign, but start only after
-a noq or `moq-quic` profile shows where ingress and egress spend their time.
-No current profile is from noq, and every other copy is removed without an
+a `moq-quic` profile shows where ingress and egress spend their time.
+No current profile is from `moq-quic`, and every other copy is removed without an
 API change by [Remove moq-uring copies](/quest/m2/perf/uring-copies.md).
 
 Candidates, to be ranked by the profile:

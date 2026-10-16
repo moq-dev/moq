@@ -14,7 +14,7 @@ change is needed.
 
 ## Plan
 
-Implement in the fork.
+Implement in `moq-quic`.
 
 - Add `set_deadline(Instant)` on `SendStream`. A stream without one behaves
   exactly as today.

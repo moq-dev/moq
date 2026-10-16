@@ -2,8 +2,8 @@
 
 ## Goal
 
-moq-tokio's QUIC endpoint (quinn's async layer, which the hard fork imports
-into moq-tokio; `moq-quic` is the sans-IO core and owns no socket) can close
+moq-tokio's QUIC endpoint (quinn's async layer, imported
+into moq-tokio as `quic::driver`; `moq-quic` is the sans-IO core and owns no socket) can close
 its UDP socket, and report when it has, without
 waiting for every connection handle to drop. moq-tokio then deletes the
 closable socket wrapper that #4087 added to make `Listener::close` release the
