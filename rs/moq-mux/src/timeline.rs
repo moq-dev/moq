@@ -209,6 +209,10 @@ impl Segmenter {
 		if *self.timed.get_or_insert(pts.is_some()) != pts.is_some() {
 			return Err(crate::Error::TimelineTiming(position));
 		}
+		if pts.is_none() {
+			// Cuts are content times, which an untimed track never reaches.
+			self.cuts.clear();
+		}
 
 		if let (Some(start), Some(last)) = (self.open.as_ref().map(|open| open.pts), self.last) {
 			let end = match (start, pts) {
@@ -319,9 +323,9 @@ impl Segmenter {
 	/// The first cut takes over from [`Config::duration_min`] pacing for good, since pacing would
 	/// otherwise close a record just before the caller declares where it really ends. A cut at or
 	/// before an earlier one is ignored, so several producers declaring the same boundaries (the
-	/// renditions of one import) cost nothing.
+	/// renditions of one import) cost nothing. An untimed track ignores cuts.
 	pub fn cut(&mut self, pts: Timestamp) {
-		if self.closed {
+		if self.closed || self.timed == Some(false) {
 			return;
 		}
 		self.manual = true;
@@ -1086,6 +1090,18 @@ mod test {
 				Record::untimed(2, at(3), Position::new(3, 2)),
 			]
 		);
+	}
+
+	#[test]
+	fn an_untimed_track_keeps_no_cuts() {
+		let mut data = Segmenter::new(Config::default());
+		data.cut(ms(0));
+		data.frame(at(0), None, true).unwrap();
+		assert!(data.cuts.is_empty(), "a cut before the first report is dropped");
+		for i in 1..100 {
+			data.cut(ms(i * 1_000));
+		}
+		assert!(data.cuts.is_empty());
 	}
 
 	#[test]
