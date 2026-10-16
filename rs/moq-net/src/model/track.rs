@@ -133,6 +133,7 @@ pub struct Info {
 	///
 	/// Relay-only: a local publisher has no way to answer the request, and moq-lite does
 	/// not carry the capability, so both leave it unset.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub(crate) dynamic_groups: bool,
 }
 
@@ -8317,11 +8318,11 @@ mod test {
 		assert!(producer.poll_subscription_changed(&waiter).is_ready());
 
 		producer.create_group(group::Info { sequence: 4 }).unwrap();
-		a.recv_group().now_or_never().unwrap().unwrap().unwrap();
+		kio::wait(|waiter| a.poll_recv_group(waiter)).now_or_never().unwrap().unwrap().unwrap();
 		assert_eq!(poll(&producer), None, "group 4 answers neither");
 
 		producer.create_group(group::Info { sequence: 5 }).unwrap();
-		a.recv_group().now_or_never().unwrap().unwrap().unwrap();
+		kio::wait(|waiter| a.poll_recv_group(waiter)).now_or_never().unwrap().unwrap().unwrap();
 		assert_eq!(poll(&producer), Some(Some(3)), "the other request remains");
 		assert!(
 			producer.poll_subscription_changed(&waiter).is_pending(),
