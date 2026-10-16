@@ -354,12 +354,38 @@ fn bench_relay_frames(c: &mut Criterion) {
 	let _ = c;
 }
 
+/// Sweep moq-transport subgroups per group against the subscribers reading them. Ingest
+/// is timed alone, so a per-subgroup scan of the ones already open shows up as a slope.
+fn bench_relay_subgroups(c: &mut Criterion) {
+	#[cfg(feature = "fuzz")]
+	{
+		let mut g = c.benchmark_group("group_relay_subgroups");
+		for subgroups in [1u64, 64, 4_096] {
+			g.throughput(Throughput::Elements(subgroups));
+			g.bench_function(BenchmarkId::new("ingest", subgroups), |b| {
+				b.iter(|| moq_net::fuzz::RelaySubgroups::new(subgroups));
+			});
+			let context = moq_net::fuzz::RelaySubgroups::new(subgroups);
+			for subscribers in [1, 64] {
+				g.throughput(Throughput::Elements(subgroups * subscribers as u64));
+				g.bench_function(BenchmarkId::new("fanout", format!("{subgroups}/{subscribers}")), |b| {
+					b.iter(|| black_box(context.read(subscribers)));
+				});
+			}
+		}
+		g.finish();
+	}
+	#[cfg(not(feature = "fuzz"))]
+	let _ = c;
+}
+
 criterion_group!(
 	benches,
 	bench_write,
 	bench_read,
 	bench_roundtrip,
 	bench_track_recv,
-	bench_relay_frames
+	bench_relay_frames,
+	bench_relay_subgroups
 );
 criterion_main!(benches);

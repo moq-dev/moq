@@ -83,7 +83,6 @@ Work owned by this README, after the children land:
 
 ## Required
 
-- [Subgroups](/quest/m1/ietf-extension/subgroups.md) - a group holds several subgroups, each forwarded on its own stream with its ID and exact publisher priority; plain readers see subgroup 0
 - [Dynamic groups](/quest/m1/ietf-extension/dynamic-groups.md) - NEW_GROUP_REQUEST reaches the original publisher, coalesced across downstream subscribers
 - [Track properties](/quest/m1/ietf-extension/track-properties.md) - unknown track properties are forwarded unchanged in SUBSCRIBE_OK, FETCH_OK, and TRACK_STATUS_OK
 - [Relay hops](/quest/m1/ietf-extension/lite.md) - the `ietf` SETUP extension carries every crate-private field across a lite-07 hop between relays

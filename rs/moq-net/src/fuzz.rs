@@ -58,6 +58,68 @@ pub fn object_group(frames: usize, properties: bool) -> (broadcast::Producer, tr
 	(broadcast, track, group)
 }
 
+/// A relayed group of moq-transport subgroups, for model benchmarks.
+pub struct RelaySubgroups {
+	_track: track::Producer,
+	group: group::Producer,
+}
+
+impl RelaySubgroups {
+	/// Open `subgroups` subgroups of one object each the way IETF ingress does, then end
+	/// them in order. Subgroup 0 never comes, so every end settles the group.
+	pub fn new(subgroups: u64) -> Self {
+		let track = track::Producer::new(
+			std::sync::Arc::new(broadcast::Info::default()),
+			"subgroups",
+			track::Info::default(),
+		);
+		let mut opened = Vec::new();
+		let mut parent = None;
+		for id in 1..=subgroups {
+			let group::Relayed::Beside(group) = track.create_relay_group(group::Info { sequence: 0 }, id).unwrap()
+			else {
+				unreachable!("a nonzero subgroup is kept beside the public frames");
+			};
+			let wire = group::Wire {
+				sparse: true,
+				priority: None,
+				first_object: true,
+				first_id: id,
+				extensions: false,
+				has_end: true,
+				fetchable: false,
+				last: None,
+			};
+			let mut subgroup = group.subgroup(id, wire).unwrap();
+			subgroup.write_frame(None, Bytes::from_static(&[0; 64])).unwrap();
+			opened.push(subgroup);
+			parent = Some(group);
+		}
+		let group = parent.expect("at least one subgroup");
+		for subgroup in opened {
+			subgroup.finish().unwrap();
+			group.settle_zero();
+		}
+		Self { _track: track, group }
+	}
+
+	/// Find and drain every subgroup once per reader, the way each subscription's egress
+	/// does, returning the frames read.
+	pub fn read(&self, readers: usize) -> usize {
+		use futures::FutureExt;
+		let mut frames = 0;
+		for _ in 0..readers {
+			let mut subgroups = self.group.consume().subgroups().unwrap();
+			while let std::task::Poll::Ready(Some((_, mut subgroup))) = subgroups.poll_next(&kio::Waiter::noop()) {
+				while subgroup.read_frame().now_or_never().unwrap().unwrap().is_some() {
+					frames += 1;
+				}
+			}
+		}
+		frames
+	}
+}
+
 /// Every target, keyed by the name of its `fuzz_targets/<name>.rs` shim.
 pub const TARGETS: &[(&str, Target)] = &[
 	("lite", lite_wire),

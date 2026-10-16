@@ -11680,4 +11680,94 @@ mod test {
 		}
 		assert_eq!(subscriber.delivered_runs(), 1000);
 	}
+
+	/// The header state of a relayed subgroup starting at `first_id`.
+	#[cfg(feature = "async")]
+	fn subgroup_wire(first_id: u64) -> group::Wire {
+		group::Wire {
+			sparse: true,
+			priority: None,
+			first_object: true,
+			first_id,
+			extensions: false,
+			has_end: true,
+			fetchable: false,
+			last: None,
+		}
+	}
+
+	/// A group another subgroup opened still gives its public frames to subgroup 0.
+	#[test]
+	#[cfg(feature = "async")]
+	fn subgroup_zero_claims_a_group_another_subgroup_opened() {
+		let producer = track_producer("test", Info::default());
+		let mut subscriber = producer.subscribe(replay());
+		let info = group::Info { sequence: 0 };
+		let Ok(group::Relayed::Beside(parent)) = producer.create_relay_group(info, 1) else {
+			panic!("subgroup 1 is kept beside the public frames");
+		};
+		let nested = parent.subgroup(1, subgroup_wire(1)).unwrap();
+		assert!(matches!(parent.subgroup(1, subgroup_wire(1)), Err(Error::Duplicate)));
+		assert!(matches!(parent.subgroup(0, subgroup_wire(0)), Err(Error::Duplicate)));
+		nested.finish().unwrap();
+
+		let Ok(group::Relayed::Public(mut zero)) = producer.create_relay_group(info, 0) else {
+			panic!("subgroup 0 claims the public frames");
+		};
+		zero.write_frame(None, bytes::Bytes::from_static(b"zero")).unwrap();
+		zero.finish().unwrap();
+		parent.settle_zero();
+
+		let mut group = subscriber.recv_group().now_or_never().unwrap().unwrap().unwrap();
+		let frame = group.read_frame().now_or_never().unwrap().unwrap().unwrap();
+		assert_eq!(frame.payload, "zero");
+		assert!(group.read_frame().now_or_never().unwrap().unwrap().is_none());
+	}
+
+	/// Once every other subgroup ends without subgroup 0, the group finishes empty for
+	/// plain readers, and a late subgroup 0 is kept beside it.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_group_without_subgroup_zero_finishes_empty() {
+		let producer = track_producer("test", Info::default());
+		let info = group::Info { sequence: 0 };
+		let Ok(group::Relayed::Beside(parent)) = producer.create_relay_group(info, 1) else {
+			panic!("subgroup 1 is kept beside the public frames");
+		};
+		let nested = parent.subgroup(1, subgroup_wire(1)).unwrap();
+		parent.settle_zero();
+		assert!(!parent.is_finished(), "subgroup 1 is still open");
+		nested.finish().unwrap();
+		parent.settle_zero();
+		assert!(parent.is_finished());
+
+		let Ok(group::Relayed::Beside(again)) = producer.create_relay_group(info, 0) else {
+			panic!("a late subgroup 0 is kept beside the public frames");
+		};
+		again.subgroup(0, subgroup_wire(0)).unwrap();
+		let mut subgroups = parent.consume().subgroups().expect("the group carries subgroups");
+		let found: Vec<u64> = std::iter::from_fn(|| match subgroups.poll_next(&kio::Waiter::noop()) {
+			Poll::Ready(Some((id, _))) => Some(id),
+			_ => None,
+		})
+		.collect();
+		assert_eq!(found, [1, 0]);
+	}
+
+	/// Every subgroup draws on the group's one size limit, but only the one that
+	/// overflows it is refused.
+	#[test]
+	#[cfg(feature = "async")]
+	fn subgroups_share_the_group_size_limit() {
+		let producer = track_producer("test", Info::default());
+		let Ok(group::Relayed::Public(mut parent)) = producer.create_relay_group(group::Info { sequence: 0 }, 0) else {
+			panic!("subgroup 0 is the public frames");
+		};
+		let half = bytes::Bytes::from(vec![0u8; (group::MAX_CACHE_BYTES / 2) as usize]);
+		parent.write_frame(None, half.clone()).unwrap();
+		let mut nested = parent.subgroup(1, subgroup_wire(1)).unwrap();
+		assert!(matches!(nested.write_frame(None, half), Err(Error::GroupTooLarge)));
+		assert!(!parent.is_aborted());
+		parent.write_frame(None, bytes::Bytes::from_static(b"x")).unwrap();
+	}
 }

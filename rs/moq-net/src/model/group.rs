@@ -201,6 +201,9 @@ struct Relay {
 	subgroups: Option<kio::Producer<Subgroups>>,
 	// Whether subgroup 0, the public frames, arrived, is still expected, or never came.
 	zero: Zero,
+	// How many leading `subgroups` are known to have ended, while subgroup 0 is pending.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	settled: usize,
 	// The size limit every subgroup of the group shares, once it has more than one.
 	family: Option<Arc<Family>>,
 	// What this subgroup last reserved from `family`.
@@ -218,6 +221,7 @@ enum Zero {
 	/// Another subgroup opened the group first, and subgroup 0 may still come.
 	Pending,
 	/// Every other subgroup ended without it, so the group finished empty.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	Absent,
 }
 
@@ -229,6 +233,9 @@ enum Zero {
 #[derive(Default)]
 pub(crate) struct Subgroups {
 	list: Vec<(u64, Box<dyn Subgroup>)>,
+	// The IDs in `list`, so refusing a duplicate does not scan it.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	ids: std::collections::HashSet<u64>,
 }
 
 /// How a moq-transport subgroup stream joins its group.
@@ -253,10 +260,12 @@ pub(crate) struct SubgroupReader {
 impl SubgroupReader {
 	/// The next subgroup's ID and reader, or `None` once no producer is left to add one.
 	pub(crate) fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Option<(u64, Consumer)>> {
-		let next = self.subgroups.poll(waiter, |subgroups| match subgroups.list.get(self.seen) {
-			Some((id, group)) => Poll::Ready((*id, group.producer().consume())),
-			None => Poll::Pending,
-		});
+		let next = self
+			.subgroups
+			.poll(waiter, |subgroups| match subgroups.list.get(self.seen) {
+				Some((id, group)) => Poll::Ready((*id, group.producer().consume())),
+				None => Poll::Pending,
+			});
 		match next {
 			Poll::Ready(Ok((id, mut group))) => {
 				self.seen += 1;
@@ -689,7 +698,12 @@ struct Alive {
 impl Drop for Alive {
 	fn drop(&mut self) {
 		// No producer is left to add a subgroup, so readers watching for one can stop.
-		let subgroups = self.state.read().relay.as_ref().and_then(|relay| relay.subgroups.clone());
+		let subgroups = self
+			.state
+			.read()
+			.relay
+			.as_ref()
+			.and_then(|relay| relay.subgroups.clone());
 		if let Some(subgroups) = subgroups {
 			let _ = subgroups.close();
 		}
@@ -844,9 +858,13 @@ impl Producer {
 				}
 			}
 		};
-		let subgroups = state.relay().subgroups.get_or_insert_with(kio::Producer::default).clone();
+		let subgroups = state
+			.relay()
+			.subgroups
+			.get_or_insert_with(kio::Producer::default)
+			.clone();
 		let mut subgroups = subgroups.write().map_err(|_| Error::Dropped)?;
-		if subgroups.list.iter().any(|(open, _)| *open == id) {
+		if subgroups.ids.contains(&id) {
 			return Err(Error::Duplicate);
 		}
 
@@ -873,6 +891,7 @@ impl Producer {
 			relay.reserved = reserved;
 			relay.nested = true;
 		}
+		subgroups.ids.insert(id);
 		subgroups.list.push((id, Box::new(nested.clone())));
 		Ok(nested)
 	}
@@ -887,20 +906,19 @@ impl Producer {
 		if !state.zero_pending() {
 			return;
 		}
-		let open = state
-			.relay
-			.as_ref()
-			.and_then(|relay| relay.subgroups.as_ref())
-			.is_some_and(|subgroups| {
-				subgroups.read().list.iter().any(|(_, subgroup)| {
-					let subgroup = subgroup.producer().state.read();
-					subgroup.fin.is_none() && subgroup.abort.is_none()
-				})
-			});
-		if open {
-			return;
+		let relay = state.relay();
+		if let Some(subgroups) = &relay.subgroups {
+			let subgroups = subgroups.read();
+			// A subgroup never reopens, so each settle resumes where the last one stopped.
+			while let Some((_, subgroup)) = subgroups.list.get(relay.settled) {
+				let subgroup = subgroup.producer().state.read();
+				if subgroup.fin.is_none() && subgroup.abort.is_none() {
+					return;
+				}
+				relay.settled += 1;
+			}
 		}
-		state.relay().zero = Zero::Absent;
+		relay.zero = Zero::Absent;
 		state.fin = Some(state.next_index);
 	}
 
@@ -1361,11 +1379,21 @@ impl Producer {
 
 	/// Abort every subgroup other than 0 with `err`, for the cache dropping the whole group.
 	pub(crate) fn abort_subgroups(&self, err: &Error) {
-		let subgroups = self.state.read().relay.as_ref().and_then(|relay| relay.subgroups.clone());
+		let subgroups = self
+			.state
+			.read()
+			.relay
+			.as_ref()
+			.and_then(|relay| relay.subgroups.clone());
 		let Some(subgroups) = subgroups else {
 			return;
 		};
-		let list: Vec<Self> = subgroups.read().list.iter().map(|(_, group)| group.producer().clone()).collect();
+		let list: Vec<Self> = subgroups
+			.read()
+			.list
+			.iter()
+			.map(|(_, group)| group.producer().clone())
+			.collect();
 		for group in list {
 			let _ = group.abort(err.clone());
 		}

@@ -4172,11 +4172,13 @@ impl<S: crate::transport::poll::Session> kio::Task for SubgroupWatch<S> {
 				Poll::Ready(None) => self.finding = false,
 				// The track drained, so a subgroup still to come is not served.
 				Poll::Pending => {
-					if self.sealed.poll(waiter, |sealed| match **sealed {
-						true => Poll::Ready(()),
-						false => Poll::Pending,
-					})
-					.is_ready()
+					if self
+						.sealed
+						.poll(waiter, |sealed| match **sealed {
+							true => Poll::Ready(()),
+							false => Poll::Pending,
+						})
+						.is_ready()
 					{
 						self.finding = false;
 					}
