@@ -6,6 +6,7 @@
  */
 import { RefusedRedirect } from "../error.ts";
 import * as Time from "../time.ts";
+import type { Transport } from "./transport.ts";
 
 /** A peer's GOAWAY as a session received it. */
 export interface Drain {
@@ -60,7 +61,7 @@ export function handover(cap: Time.Milli, timeout?: Time.Milli): Time.Milli {
  *
  * @internal
  */
-export function dialed(primary: URL, transport: "webtransport" | "websocket", websocket?: URL): URL {
+export function dialed(primary: URL, transport: Transport, websocket?: URL): URL {
 	return transport === "websocket" && websocket ? websocket : primary;
 }
 
@@ -70,7 +71,7 @@ export function dialed(primary: URL, transport: "webtransport" | "websocket", we
  *
  * @internal
  */
-export function pinnedTransport(transport: "webtransport" | "websocket", configured: boolean): boolean {
+export function pinnedTransport(transport: Transport, configured: boolean): boolean {
 	return configured && transport === "webtransport";
 }
 

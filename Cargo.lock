@@ -2133,7 +2133,7 @@ dependencies = [
  "ed25519",
  "rand_core 0.10.1",
  "serde",
- "sha2",
+ "sha2 0.11.0",
  "signature 3.0.0",
  "subtle",
  "zeroize",
@@ -4112,6 +4112,16 @@ checksum = "47e1ffaa40ddd1f3ed91f717a33c8c0ee23fff369e3aa8772b9605cc1d22f4c3"
 
 [[package]]
 name = "md-5"
+version = "0.10.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d89e7ee0cfbedfc4da3340218492196241d89eefb6dab27de5df917a6d2e78cf"
+dependencies = [
+ "cfg-if",
+ "digest 0.10.7",
+]
+
+[[package]]
+name = "md-5"
 version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "69b6441f590336821bb897fb28fc622898ccceb1d6cea3fde5ea86b090c4de98"
@@ -4534,7 +4544,7 @@ dependencies = [
  "percent-encoding",
  "rand 0.10.3",
  "reqwest",
- "sha2",
+ "sha2 0.11.0",
  "thiserror 2.0.21",
  "tokio",
  "tower",
@@ -4813,6 +4823,7 @@ dependencies = [
  "serde_json",
  "serde_with",
  "socket2 0.6.5",
+ "stun-types",
  "sysinfo",
  "tempfile",
  "thiserror 2.0.21",
@@ -4879,7 +4890,7 @@ dependencies = [
  "moq-tokio",
  "rand 0.10.3",
  "rustls",
- "sha2",
+ "sha2 0.11.0",
  "socket2 0.6.5",
  "thiserror 2.0.21",
  "tokio",
@@ -4998,7 +5009,7 @@ dependencies = [
  "rustls-webpki",
  "serde",
  "serde_with",
- "sha2",
+ "sha2 0.11.0",
  "socket2 0.6.5",
  "subtle",
  "tempfile",
@@ -6409,7 +6420,7 @@ dependencies = [
  "humantime",
  "hyper",
  "itertools 0.15.0",
- "md-5",
+ "md-5 0.11.0",
  "nix",
  "parking_lot",
  "percent-encoding",
@@ -6547,7 +6558,7 @@ dependencies = [
  "elliptic-curve",
  "primefield",
  "primeorder",
- "sha2",
+ "sha2 0.11.0",
 ]
 
 [[package]]
@@ -6561,7 +6572,7 @@ dependencies = [
  "fiat-crypto",
  "primefield",
  "primeorder",
- "sha2",
+ "sha2 0.11.0",
 ]
 
 [[package]]
@@ -8205,6 +8216,17 @@ checksum = "bbfa15b3dddfee50a0fff136974b3e1bde555604ba463834a7eb7deb6417705d"
 
 [[package]]
 name = "sha2"
+version = "0.10.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a7507d819769d01a365ab707794a4084392c824f54a7a6a7862f8c3d0892b283"
+dependencies = [
+ "cfg-if",
+ "cpufeatures 0.2.17",
+ "digest 0.10.7",
+]
+
+[[package]]
+name = "sha2"
 version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "446ba717509524cb3f22f17ecc096f10f4822d76ab5c0b9822c5f9c284e825f4"
@@ -8683,6 +8705,25 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "stun-types"
+version = "2.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b7ec5f6730f68951e45aa8c9f42912fcb87932c690c10963c2133751e42c6552"
+dependencies = [
+ "byteorder",
+ "crc",
+ "hmac 0.12.1",
+ "md-5 0.10.6",
+ "rand 0.9.5",
+ "sha1 0.10.7",
+ "sha2 0.10.9",
+ "smallvec",
+ "subtle",
+ "thiserror 2.0.21",
+ "tracing",
 ]
 
 [[package]]

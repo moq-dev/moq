@@ -35,6 +35,28 @@ ceilings in `test/audio-quality/budgets.json` from re-measured nightly runs.
 
 Public API: none expected. Wire: none.
 
+The 2026-10-15 ARM comparison still reproduces the defect with Opus warmup
+#5569 included. [The untraced controls](https://github.com/moq-dev/moq/actions/runs/38807783281)
+run `isolated,plain` and then `plain,isolated`, each in a fresh harness run.
+Isolated-first reaches a 560 ms target with two underrun episodes; the other
+three rows hold 60 ms with no episodes. Configuration is identical within
+each pair, including 80 ms codec warmup. Row order remains a confound.
+
+The failing row's arrival gaps coincide with 227–320 ms main-thread long
+tasks. A [GC profile](https://github.com/moq-dev/moq/actions/runs/38809803022)
+reproduces the pauses with no recorded GC work overlapping the longest tasks.
+A [sampled CPU profile](https://github.com/moq-dev/moq/actions/runs/38811094714)
+has 100–315 ms sampling gaps across the pauses, with boundary samples in
+`Stream.Reader` awaiting native `ReadableStreamDefaultReader.read()`. This
+locates the browser read/scheduling boundary but does not establish its cause.
+Recorded arrival replay produces the same target with either ring.
+
+Use `--capture` to preserve arrivals and native long tasks; `--trace` also
+saves GC events and a sampled CPU profile. Tracing can perturb playback, so
+compare separate untraced controls and never calibrate budgets from traced
+rows. The original fix and budget-tightening goals remain open; the diagnostic
+change does not alter the estimator, ring, or ceilings.
+
 ## Related
 
 - [Watch](/quest/m1/audio-jitter-target/watch.md) - the manual browser proof that follows this fix

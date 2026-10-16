@@ -17,7 +17,10 @@ run() {
 case "${1:-}" in
     rust)
         run just rs bench-latency
+        run just rs test -p moq-bench --release --run-ignored only \
+            -E 'test(benchmark_readiness_establishment)' --success-output immediate
         run just rs bench-playback
+        run just rs test -p moq-relay -E 'test(benchmark_stun_sources)' --run-ignored only --success-output immediate
         # Fuzz exposes moq-net's codec benches; it is not a feature of the other crates.
         run cargo bench --locked --no-fail-fast -p moq-net --features fuzz --bench '*' -- --test
         # Each kio routine once, including the contended bench's worker threads.
@@ -44,6 +47,7 @@ case "${1:-}" in
         done
         run just js catalog-bench
         run just js arrivals-bench
+        run just js p2p-bench
         run just js signals-bench
         ;;
     *)

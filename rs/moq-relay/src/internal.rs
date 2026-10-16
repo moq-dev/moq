@@ -91,6 +91,7 @@ pub struct Internal {
 	health: moq_tokio::accept::Health,
 	listeners: Vec<moq_tokio::accept::Health>,
 	uring: Vec<UringWorker>,
+	stun: Option<crate::stun::Counters>,
 	shutdown: Option<crate::shutdown::Observer>,
 	listener: Option<net::TcpListener>,
 	addr: Option<net::SocketAddr>,
@@ -104,6 +105,7 @@ struct InternalState {
 	sessions: crate::session::Registry,
 	listeners: Vec<moq_tokio::accept::Health>,
 	uring: Vec<UringWorker>,
+	stun: Option<crate::stun::Counters>,
 	shutdown: Option<crate::shutdown::Observer>,
 }
 
@@ -131,10 +133,16 @@ impl Internal {
 			health,
 			listeners,
 			uring: Vec::new(),
+			stun: None,
 			shutdown: None,
 			listener: None,
 			addr: None,
 		}
+	}
+
+	pub(crate) fn with_stun(mut self, counters: Option<crate::stun::Counters>) -> Self {
+		self.stun = counters;
+		self
 	}
 
 	pub(crate) fn with_timeout(mut self, timeout: Option<std::time::Duration>) -> Self {
@@ -251,6 +259,7 @@ impl Internal {
 				sessions: self.sessions.clone(),
 				listeners: self.listeners.clone(),
 				uring: self.uring.clone(),
+				stun: self.stun.clone(),
 				shutdown: self.shutdown.clone(),
 			})
 	}
@@ -325,6 +334,9 @@ async fn serve_health() -> Response {
 /// counts (`open - closed`).
 async fn serve_metrics(State(state): State<InternalState>) -> Response {
 	let mut body = render_metrics(&state.stats.snapshot(), &state.listeners, &state.uring);
+	if let Some(stun) = &state.stun {
+		stun.render(&mut body);
+	}
 	if let Some(shutdown) = &state.shutdown {
 		render_drain(&mut body, shutdown.tally());
 	}
@@ -730,6 +742,28 @@ fn render_uring(_out: &mut String, _workers: &[UringWorker]) {}
 mod tests {
 	use super::*;
 
+	#[tokio::test]
+	async fn stun_metrics_are_present_only_for_a_configured_listener() {
+		for stun in [None, Some(crate::stun::Counters::default())] {
+			let configured = stun.is_some();
+			let state = InternalState {
+				stats: moq_net::stats::Registry::disabled(),
+				nodes: None,
+				refusals: None,
+				sessions: crate::session::Registry::new(),
+				listeners: Vec::new(),
+				uring: Vec::new(),
+				stun,
+				shutdown: None,
+			};
+			let response = serve_metrics(State(state)).await;
+			let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+			let body = std::str::from_utf8(&body).unwrap();
+			assert_eq!(body.contains("moq_relay_stun_replies_total"), configured);
+			assert_eq!(body.contains("moq_relay_stun_dropped_total"), configured);
+		}
+	}
+
 	/// A millisecond track: the frames written here carry timestamps.
 	fn timed() -> moq_net::track::Info {
 		moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
@@ -974,6 +1008,7 @@ mod tests {
 			sessions: crate::session::Registry::new(),
 			listeners: Vec::new(),
 			uring: Vec::new(),
+			stun: None,
 			shutdown: None,
 		};
 
@@ -992,6 +1027,7 @@ mod tests {
 			sessions: crate::session::Registry::new(),
 			listeners: Vec::new(),
 			uring: Vec::new(),
+			stun: None,
 			shutdown: None,
 		};
 
