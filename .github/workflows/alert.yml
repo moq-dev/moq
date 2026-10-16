@@ -26,7 +26,6 @@ on:
     workflows:
       - apt-repo
       - Cache
-      - Cachix
       - Check
       - Docker
       - Interop
@@ -49,6 +48,7 @@ on:
       - Release JS
       - Release Kotlin FFI
       - Release Kotlin lib
+      - Release Nix
       - Release Py
       - Release Py FFI
       - Release RS

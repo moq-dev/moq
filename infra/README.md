@@ -8,12 +8,14 @@ infrastructure.
 | `infra/apt` | `apt.moq.dev`   | `apt-moq-dev`   | Debian/Ubuntu package repository        |
 | `infra/rpm` | `rpm.moq.dev`   | `rpm-moq-dev`   | Fedora/RHEL package repository          |
 | `infra/moq-sh` | `moq.sh`     |                 | The `moq` installer script              |
+| `infra/nix` | `nix.moq.dev`   | `nix-moq-dev`, `nix-ci-moq-dev` | Nix binary cache        |
 
 Each worker is a standalone bun package with a `wrangler.jsonc` and a
 small TypeScript handler. The apt and rpm workers proxy GETs out of the R2
 bucket with appropriate `Content-Type` and `Cache-Control` headers for the
-file kind. The moq.sh worker serves `install.sh` from its bundle at every path,
-with the newest `moq-cli` release filled in as the default version.
+file kind, and the nix worker does the same across its two buckets. The
+moq.sh worker serves `install.sh` from its bundle at every path, with the
+newest `moq-cli` release filled in as the default version.
 
 ## Deploying a worker
 
@@ -23,6 +25,7 @@ From the repo root:
 just infra apt deploy
 just infra rpm deploy
 just infra moq-sh deploy
+just infra nix deploy
 ```
 
 Each recipe runs `bun install` and `bun wrangler deploy`. The
@@ -131,3 +134,104 @@ Or trigger the GitHub Actions workflow manually:
 gh workflow run apt-repo.yml -f tag=moq-relay-v1.2.3
 gh workflow run rpm-repo.yml -f tag=moq-relay-v1.2.3
 ```
+
+## Bootstrapping the Nix cache
+
+`nix.moq.dev` serves two buckets as one binary cache. `nix-moq-dev` holds
+released packages, pushed by `release-nix.yml` on a release tag, and never
+expires. `nix-ci-moq-dev` holds the dev shells `cache.yml` pushes from `main`,
+and its lifecycle rule (`infra/nix/lifecycle.json`) deletes each object 30
+days after upload; the next warm re-uploads what it still needs. `flake.nix`
+sets `fallback = true` because that expiry can remove a path before one that
+depends on it.
+
+Nix only trusts paths signed by the key in `flake.nix`, so the signing key is
+the trust boundary, not the bucket keys. It lives in two GitHub Environments:
+`cache-write`, which only `main` can deploy to, and `nix-release`, which only
+the five release tag patterns can. Readers need no secret.
+
+All of this runs once, by a maintainer, in this order:
+
+1. **Restrict the release tags.** Anyone with write access can push a tag
+   today, and `nix-release` admits any commit carrying one. Limit creating,
+   moving, and deleting them to moq-bot, the GitHub App release-plz tags
+   with, plus the role the `release` branch ruleset already lets bypass:
+
+   ```bash
+   gh api -X POST repos/moq-dev/moq/rulesets --input - <<'EOF'
+   {
+     "name": "release tags",
+     "target": "tag",
+     "enforcement": "active",
+     "conditions": {"ref_name": {"exclude": [], "include": [
+       "refs/tags/moq-relay-v*", "refs/tags/moq-cli-v*", "refs/tags/moq-boy-v*",
+       "refs/tags/moq-c-v*", "refs/tags/moq-gst-v*"
+     ]}},
+     "rules": [{"type": "creation"}, {"type": "update"}, {"type": "deletion"}],
+     "bypass_actors": [
+       {"actor_type": "Integration", "actor_id": 1039466, "bypass_mode": "always"},
+       {"actor_type": "RepositoryRole", "actor_id": 2, "bypass_mode": "always"}
+     ]
+   }
+   EOF
+   ```
+
+2. **Create the buckets and deploy the Worker** under your `wrangler login`:
+
+   ```bash
+   just infra nix create   # both buckets, plus the CI lifecycle rule
+   just infra nix deploy   # nix.moq.dev
+   ```
+
+   After editing the rules, `just infra nix lifecycle` applies them.
+
+3. **Create the two Environments.** Name `main` rather than using a
+   protected-branches policy, which would admit `release` too. Skip
+   `cache-write` if the Rust build cache bootstrap already made it.
+
+   ```bash
+   gh api -X PUT repos/moq-dev/moq/environments/cache-write --input - <<'EOF'
+   {"deployment_branch_policy": {"protected_branches": false, "custom_branch_policies": true}}
+   EOF
+   gh api -X POST repos/moq-dev/moq/environments/cache-write/deployment-branch-policies \
+     -f name=main -f type=branch
+
+   gh api -X PUT repos/moq-dev/moq/environments/nix-release --input - <<'EOF'
+   {"deployment_branch_policy": {"protected_branches": false, "custom_branch_policies": true}}
+   EOF
+   for tag in 'moq-relay-v*' 'moq-cli-v*' 'moq-boy-v*' 'moq-c-v*' 'moq-gst-v*'; do
+     gh api -X POST repos/moq-dev/moq/environments/nix-release/deployment-branch-policies \
+       -f name="$tag" -f type=tag
+   done
+   ```
+
+4. **Create two R2 API tokens** in the dashboard (R2 -> Manage API tokens ->
+   Create Account API token), each **Object Read & Write** on one bucket only.
+   Wrangler cannot create R2 tokens. Store each in its Environment:
+
+   ```bash
+   # Scoped to nix-ci-moq-dev
+   gh secret set NIX_R2_ACCESS_KEY_ID --env cache-write --repo moq-dev/moq
+   gh secret set NIX_R2_SECRET_ACCESS_KEY --env cache-write --repo moq-dev/moq
+
+   # Scoped to nix-moq-dev
+   gh secret set NIX_R2_ACCESS_KEY_ID --env nix-release --repo moq-dev/moq
+   gh secret set NIX_R2_SECRET_ACCESS_KEY --env nix-release --repo moq-dev/moq
+   ```
+
+5. **Generate the signing key.** This stores it as `NIX_SIGNING_KEY` in both
+   Environments without writing it to disk, and prints the public key:
+
+   ```bash
+   just infra nix keygen
+   ```
+
+   Put the printed `nix.moq.dev-1:...` key in `flake.nix`'s `nixConfig`.
+
+A job missing its secrets fails rather than skip the push. A job naming an
+Environment that does not exist yet creates it with no deployment policy, so
+if either workflow ran before step 3, check the policy before adding secrets.
+
+To rotate the key, run `keygen` again and add the new public key next to the
+old one in `flake.nix`. Drop the old key once nothing signed with it matters:
+30 days for CI paths, but never for released ones unless they are re-signed.
