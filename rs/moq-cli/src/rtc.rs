@@ -108,7 +108,8 @@ pub async fn connect_import(target: ImportTarget, url: Url, epoch: moq_net::Epoc
 	config.max_age = target.max_age;
 	config.bandwidth = target.bandwidth;
 	let client = moq_rtc::Client::new(config);
-	Ok(client.subscribe(url, producer).await?)
+	client.subscribe(url, producer).await?;
+	Ok(())
 }
 
 /// WHIP client: push a broadcast from the Origin to a remote (export).
@@ -124,7 +125,8 @@ pub async fn connect_export(origin: moq_net::origin::Consumer, url: Url, name: S
 	notify_ready();
 
 	let client = moq_rtc::Client::new(moq_rtc::client::Config::default());
-	Ok(client.publish(url, origin, &name).await?)
+	client.publish(url, origin, &name).await?;
+	Ok(())
 }
 
 fn server_config(listen: &Listen) -> moq_rtc::server::Config {

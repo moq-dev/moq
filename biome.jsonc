@@ -61,6 +61,10 @@
 			}
 		}
 	},
+	"html": {
+		// Vue template reads count as uses of script variables.
+		"experimentalFullSupportEnabled": true
+	},
 	"css": {
 		"parser": {
 			"cssModules": false,
