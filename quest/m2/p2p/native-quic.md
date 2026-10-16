@@ -19,9 +19,9 @@ Decided with the maintainer on 2026-10-13:
 - ICE is str0m's standalone sans-IO agent, the `is` crate (0.11, already in
   the lockfile through str0m; str0m re-exports it as `str0m::ice`). Gather
   candidates with `moq_tokio::webrtc`'s host gathering, `.local` resolution,
-  and the STUN Binding client in `webrtc::ice`; don't copy them. The first
-  two are private to the data channel transport today, so move them into
-  `webrtc::ice` rather than export them where they sit.
+  and the STUN Binding client in `moq-ice`; don't copy them. The first two
+  are private to the data channel transport today, so move them into
+  `moq-ice` rather than export them from `moq-tokio`.
 - QUIC is `moq-quic`, fed datagrams from the nominated pair.
 - Authentication: each side generates a self-signed certificate and sends
   its SHA-256 fingerprint in its offer or answer, as DTLS fingerprints ride

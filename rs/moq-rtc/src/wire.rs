@@ -1,16 +1,14 @@
 //! Cumulative UDP payload bytes for one WebRTC peer.
 
-use moq_tokio::webrtc::ice;
-
 /// A peer's cumulative datagram bytes, excluding IP and UDP headers.
-pub use ice::Stats;
+pub use moq_ice::Stats;
 
 /// A read-only source whose counters survive the WebRTC session ending.
 #[derive(Clone, Debug)]
-pub struct Source(ice::Wire);
+pub struct Source(moq_ice::Wire);
 
 impl Source {
-	pub(crate) fn new(wire: ice::Wire) -> Self {
+	pub(crate) fn new(wire: moq_ice::Wire) -> Self {
 		Self(wire)
 	}
 

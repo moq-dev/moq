@@ -1,27 +1,7 @@
-//! The ICE side of a str0m peer connection: one UDP socket, its candidates, and
-//! the loop that drives an [`Rtc`] over it.
-//!
-//! str0m is sans-IO, so [`Agent::next`] alternates between [`Rtc::handle_input`]
-//! (datagrams and timeouts) and [`Rtc::poll_output`] (transmits, events, the next
-//! timeout), and runs a STUN Binding client on the same socket so the agent can
-//! offer server-reflexive candidates. Shared by this crate's data channel
-//! transport and `moq-rtc`'s WHIP/WHEP gateway, which only differ in what they do
-//! with the events.
-//!
-//! str0m requires every mutation of an [`Rtc`] to be followed by draining
-//! `poll_output` to a timeout before the next one. The agent owns that cycle: it
-//! hands out only a shared [`Agent::rtc`], and [`Agent::mutate`] drains after the
-//! caller's change, queueing the events for [`Agent::next`].
-//!
-//! A dual-stack socket (`[::]`) reports an IPv4 peer as an IPv4-mapped IPv6
-//! address and refuses a send to a real `V4` destination. Neither form leaks past
-//! this module: inbound sources are unmapped by [`canonical`], since ICE pairs
-//! candidates by address family, and outbound destinations are mapped back.
-
 use std::collections::VecDeque;
 use std::net::{IpAddr, SocketAddr};
+use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use str0m::net::{Protocol, Receive};
@@ -30,63 +10,8 @@ use stun_types::attribute::XorMappedAddress;
 use stun_types::message::{BINDING, Message, MessageClass, MessageWriteVec, TransactionId};
 use stun_types::prelude::*;
 use tokio::net::UdpSocket;
-use tokio::sync::mpsc;
 
-/// One inbound UDP datagram and the address it came from.
-pub type Packet = (Vec<u8>, SocketAddr);
-
-/// The datagrams routed to one [`Agent`], and the counters they are tallied in.
-pub struct Inbound {
-	/// Ends once every sender is dropped, which ends the agent.
-	pub packets: mpsc::Receiver<Packet>,
-	/// Counts `rx` where datagrams are routed, so a full queue's drops count too;
-	/// the agent counts `tx`.
-	pub wire: Wire,
-}
-
-/// Cumulative UDP payload bytes exchanged with one peer, excluding IP and UDP
-/// headers. Clones share counters, which outlive the agent.
-#[derive(Clone, Debug, Default)]
-pub struct Wire(Arc<Counters>);
-
-#[derive(Debug, Default)]
-struct Counters {
-	tx: AtomicU64,
-	rx: AtomicU64,
-}
-
-/// A snapshot of a [`Wire`]'s counters.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct Stats {
-	/// Bytes the socket accepted, including ICE, DTLS, and retransmissions.
-	pub tx: u64,
-	/// Bytes routed to the peer, including those its full queue dropped.
-	pub rx: u64,
-}
-
-impl Wire {
-	/// Read both counters without consuming them.
-	pub fn stats(&self) -> Stats {
-		Stats {
-			tx: self.0.tx.load(Ordering::Relaxed),
-			rx: self.0.rx.load(Ordering::Relaxed),
-		}
-	}
-
-	/// Count a datagram routed to this peer.
-	pub fn received(&self, bytes: usize) {
-		self.0.rx.fetch_add(bytes as u64, Ordering::Relaxed);
-	}
-
-	fn sent(&self, bytes: usize) {
-		self.0.tx.fetch_add(bytes as u64, Ordering::Relaxed);
-	}
-}
-
-/// Bound on a session's inbound datagram queue, sized like a socket buffer: past
-/// it, datagrams are dropped rather than buffered, since ICE and SCTP tolerate loss
-/// and a stalled session must not grow memory without limit.
-pub const INBOX: usize = 256;
+use crate::{Inbound, Wire};
 
 /// Backstop deadline for reaching a connected ICE state, covering the one case
 /// str0m's agent deliberately never times out: a peer that provides no remote
@@ -246,12 +171,10 @@ impl Agent {
 		&self.rtc
 	}
 
-	/// Change the connection, then drain what the change produced: transmits are
-	/// sent, and events wait for [`Agent::next`].
-	pub fn mutate<T>(&mut self, change: impl FnOnce(&mut Rtc) -> T) -> T {
-		let result = change(&mut self.rtc);
-		self.drain();
-		result
+	/// Change the connection through a guard that drains what the change produced
+	/// when dropped: transmits are sent, and events wait for [`Agent::next`].
+	pub fn rtc_mut(&mut self) -> RtcMut<'_> {
+		RtcMut(self)
 	}
 
 	/// The counters of the bytes exchanged with the peer.
@@ -314,8 +237,10 @@ impl Agent {
 			}
 
 			let now = Instant::now();
-			self.mutate(|rtc| rtc.handle_input(Input::Timeout(now)))
-				.unwrap_or_else(|err| self.fail(Error::rtc(err)));
+			let result = self.rtc_mut().handle_input(Input::Timeout(now));
+			if let Err(err) = result {
+				self.fail(Error::rtc(err));
+			}
 			self.retransmit(now);
 		}
 	}
@@ -374,8 +299,10 @@ impl Agent {
 			tracing::debug!(%src, len = data.len(), "dropped unrecognized datagram");
 			return;
 		};
-		self.mutate(|rtc| rtc.handle_input(Input::Receive(Instant::now(), receive)))
-			.unwrap_or_else(|err| self.fail(Error::rtc(err)));
+		let result = self.rtc_mut().handle_input(Input::Receive(Instant::now(), receive));
+		if let Err(err) = result {
+			self.fail(Error::rtc(err));
+		}
 	}
 
 	/// Consume a reply to one of our STUN queries, returning false for anything else.
@@ -405,7 +332,8 @@ impl Agent {
 		match Candidate::server_reflexive(mapped, query.base, "udp") {
 			// None: redundant with a candidate the agent already has, as when there is no NAT.
 			Ok(candidate) => {
-				if let Some(candidate) = self.mutate(|rtc| rtc.add_local_candidate(candidate).cloned()) {
+				let added = self.rtc_mut().add_local_candidate(candidate).cloned();
+				if let Some(candidate) = added {
 					self.events.push_back(Event::Candidate(candidate));
 				}
 			}
@@ -441,6 +369,29 @@ impl Agent {
 	}
 }
 
+/// Mutable access to an [`Agent`]'s connection, which drains it when dropped.
+pub struct RtcMut<'a>(&'a mut Agent);
+
+impl Deref for RtcMut<'_> {
+	type Target = Rtc;
+
+	fn deref(&self) -> &Rtc {
+		&self.0.rtc
+	}
+}
+
+impl DerefMut for RtcMut<'_> {
+	fn deref_mut(&mut self) -> &mut Rtc {
+		&mut self.0.rtc
+	}
+}
+
+impl Drop for RtcMut<'_> {
+	fn drop(&mut self) {
+		self.0.drain();
+	}
+}
+
 /// Unmap an IPv4-mapped address to the `V4` it really is; others pass through.
 pub fn canonical(addr: SocketAddr) -> SocketAddr {
 	SocketAddr::new(addr.ip().to_canonical(), addr.port())
@@ -466,36 +417,6 @@ fn pick_local(locals: &[SocketAddr], src: SocketAddr) -> SocketAddr {
 		.unwrap_or(locals[0])
 }
 
-/// Pump every datagram from a socket the caller owns 1:1 into a queue for
-/// [`Agent::new`], until the queue's receiver is dropped.
-pub fn reader(socket: Arc<UdpSocket>) -> Inbound {
-	let (tx, rx) = mpsc::channel(INBOX);
-	let wire = Wire::default();
-	let counted = wire.clone();
-	tokio::spawn(async move {
-		let mut buf = vec![0u8; 65_535];
-		loop {
-			tokio::select! {
-				res = socket.recv_from(&mut buf) => match res {
-					Ok((len, src)) => {
-						counted.received(len);
-						// Bounded like a socket buffer: drop on full.
-						if let Err(mpsc::error::TrySendError::Closed(_)) = tx.try_send((buf[..len].to_vec(), canonical(src))) {
-							break;
-						}
-					}
-					Err(err) => {
-						tracing::warn!(%err, "webrtc socket recv failed");
-						break;
-					}
-				},
-				_ = tx.closed() => break,
-			}
-		}
-	});
-	Inbound { packets: rx, wire }
-}
-
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -516,7 +437,7 @@ mod tests {
 		let socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
 		let peer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
 		let local = socket.local_addr().unwrap();
-		let inbound = reader(socket.clone());
+		let inbound = crate::reader(socket.clone());
 		let wire = inbound.wire.clone();
 		let mut agent = Agent::new(Rtc::builder().build(Instant::now()), socket, vec![local], inbound).unwrap();
 
@@ -525,13 +446,13 @@ mod tests {
 		agent.send(&[42; 73], peer.local_addr().unwrap());
 		// UDP refuses an oversized datagram, which is never counted as sent.
 		agent.send(&vec![0; 65_536], peer.local_addr().unwrap());
-		assert_eq!(wire.stats(), Stats { tx: 73, rx: 0 });
+		assert_eq!(wire.stats(), crate::Stats { tx: 73, rx: 0 });
 
 		peer.send_to(&[7; 11], local).await.unwrap();
 		let (data, _) = agent.inbound.packets.recv().await.unwrap();
 		assert_eq!(data.len(), 11);
 		drop(agent);
-		assert_eq!(wire.stats(), Stats { tx: 73, rx: 11 });
+		assert_eq!(wire.stats(), crate::Stats { tx: 73, rx: 11 });
 	}
 
 	#[test]

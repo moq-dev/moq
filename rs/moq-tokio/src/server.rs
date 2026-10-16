@@ -882,16 +882,14 @@ impl Listener {
 	/// [`crate::webrtc::Answerer`], leaving admission to the returned [`Request`].
 	///
 	/// Waits for ICE and the channel to come up, bounded by the handshake timeout.
-	/// The channel's protocol must be a MoQ ALPN this server speaks.
+	/// The channel's protocol must be a MoQ ALPN this server speaks. Returns
+	/// [`Error::Stopped`] once the listener is closing.
 	#[cfg(feature = "webrtc")]
 	pub async fn accept_webrtc(&self, peer: &crate::webrtc::Answerer) -> crate::Result<Request> {
 		use crate::webrtc::Error as WebRtcError;
 
 		let server = &self.server;
-		let active = server
-			.activity
-			.enter()
-			.ok_or(Error::NoBackend("the listener is closing"))?;
+		let active = server.activity.enter().ok_or(Error::Stopped)?;
 		let deadline = server
 			.timeout
 			.and_then(|timeout| tokio::time::Instant::now().checked_add(timeout));
@@ -901,7 +899,7 @@ impl Listener {
 			if !server.versions.alpns().contains(&opened.protocol.as_str()) {
 				return Err(WebRtcError::Protocol(opened.protocol));
 			}
-			let config = opened.config();
+			let config = opened.config;
 			let protocol = opened.protocol;
 			let session = qmux::Session::accept(opened.channel, config).await?;
 			Ok((session, protocol))

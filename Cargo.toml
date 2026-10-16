@@ -17,6 +17,7 @@ members = [
     "rs/moq-flate",
     "rs/moq-gst",
     "rs/moq-hls",
+    "rs/moq-ice",
     "rs/moq-json",
     "rs/moq-loc",
     "rs/moq-msf",
@@ -62,6 +63,7 @@ default-members = [
     # "rs/moq-gst",   # requires GStreamer
     "rs/moq-flate",
     "rs/moq-hls",
+    "rs/moq-ice",
     "rs/moq-json",
     "rs/moq-loc",
     "rs/moq-msf",
@@ -155,6 +157,7 @@ moq-clock = { version = "0.11.0", path = "rs/moq-clock" }
 moq-clock-macros = { version = "0.1.0", path = "rs/moq-clock/macros" }
 moq-flate = { version = "0.2.0", path = "rs/moq-flate" }
 moq-hls = { version = "0.5.11", path = "rs/moq-hls", default-features = false }
+moq-ice = { version = "0.1.0", path = "rs/moq-ice" }
 moq-json = { version = "0.5.8", path = "rs/moq-json" }
 moq-loc = { version = "0.2.19", path = "rs/moq-loc" }
 moq-msf = { version = "0.5.1", path = "rs/moq-msf" }

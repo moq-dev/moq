@@ -1,6 +1,6 @@
 //! str0m session driver shared by every HTTP role / media direction.
 //!
-//! [`moq_tokio::webrtc::ice::Agent`] drives the sans-IO [`str0m::Rtc`] over UDP;
+//! [`moq_tokio::webrtc::moq_ice::Agent`] drives the sans-IO [`str0m::Rtc`] over UDP;
 //! [`Session::run`] feeds it egress writes and handles the media events it surfaces.
 //!
 //! The session itself doesn't care whether the [`Rtc`] was populated by
@@ -13,7 +13,6 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use moq_tokio::webrtc::ice;
 use str0m::{Candidate, Event, Rtc};
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
@@ -81,7 +80,7 @@ impl MediaFlow {
 /// `inbound` rather than being read off the socket directly, so several
 /// sessions can share one socket behind the `crate::server::mux`.
 pub struct Session {
-	agent: ice::Agent,
+	agent: moq_ice::Agent,
 	role: MediaRole,
 	opened_media: HashSet<str0m::media::Mid>,
 	/// Egress write requests. `Some` only for [`MediaRole::Egress`]
@@ -98,17 +97,17 @@ pub struct Session {
 
 impl Session {
 	/// Convenience for the ingest case (WHIP server, WHEP client). `locals` are the
-	/// advertised ICE candidates, not the socket bind (see [`ice::Agent::new`]).
-	/// `inbound` comes from the server mux, or [`ice::reader`] for a 1:1 client socket.
+	/// advertised ICE candidates, not the socket bind (see [`moq_ice::Agent::new`]).
+	/// `inbound` comes from the server mux, or [`moq_ice::reader`] for a 1:1 client socket.
 	pub fn ingest(
 		rtc: Rtc,
 		socket: Arc<UdpSocket>,
 		locals: Vec<SocketAddr>,
-		inbound: ice::Inbound,
+		inbound: moq_ice::Inbound,
 		sink: Box<dyn MediaSink>,
 	) -> Result<Self> {
 		Ok(Self {
-			agent: ice::Agent::new(rtc, socket, locals, inbound)?,
+			agent: moq_ice::Agent::new(rtc, socket, locals, inbound)?,
 			role: MediaRole::Ingest(sink),
 			opened_media: HashSet::new(),
 			writes_rx: None,
@@ -118,18 +117,18 @@ impl Session {
 	}
 
 	/// Convenience for the egress case (WHEP server, WHIP client). `locals` are the
-	/// advertised ICE candidates, not the socket bind (see [`ice::Agent::new`]).
-	/// `inbound` comes from the server mux, or [`ice::reader`] for a 1:1 client socket.
+	/// advertised ICE candidates, not the socket bind (see [`moq_ice::Agent::new`]).
+	/// `inbound` comes from the server mux, or [`moq_ice::reader`] for a 1:1 client socket.
 	pub fn egress(
 		rtc: Rtc,
 		socket: Arc<UdpSocket>,
 		locals: Vec<SocketAddr>,
-		inbound: ice::Inbound,
+		inbound: moq_ice::Inbound,
 		mut source: EgressSource,
 	) -> Result<Self> {
 		let writes_rx = source.take_writes();
 		Ok(Self {
-			agent: ice::Agent::new(rtc, socket, locals, inbound)?,
+			agent: moq_ice::Agent::new(rtc, socket, locals, inbound)?,
 			role: MediaRole::Egress(Box::new(source)),
 			opened_media: HashSet::new(),
 			writes_rx: Some(writes_rx),
@@ -174,15 +173,15 @@ impl Session {
 					}
 				} => {
 					let wallclock = self.egress_clock.wallclock(req.time, Instant::now());
-					self.agent.mutate(|rtc| crate::egress::dispatch(rtc, req, wallclock));
+					crate::egress::dispatch(&mut self.agent.rtc_mut(), req, wallclock);
 				}
 
 				event = self.agent.next() => match event {
-					Ok(ice::Event::Rtc(event)) => self.handle_event(event)?,
+					Ok(moq_ice::Event::Rtc(event)) => self.handle_event(event)?,
 					// No STUN servers are configured, so there is nothing to trickle.
 					Ok(_) => {}
-					Err(ice::Error::Closed) => return Err(Error::SessionClosed),
-					Err(ice::Error::Timeout) => return Err(Error::IceTimeout),
+					Err(moq_ice::Error::Closed) => return Err(Error::SessionClosed),
+					Err(moq_ice::Error::Timeout) => return Err(Error::IceTimeout),
 					Err(err) => return Err(Error::rtc(err)),
 				},
 			}
@@ -516,7 +515,7 @@ pub fn rtc_with_codecs(codecs: &[str0m::format::Codec]) -> Rtc {
 }
 
 /// Bind an ephemeral UDP socket for a single client session and return it
-/// (to share with its [`ice::reader`]) plus the ICE candidates
+/// (to share with its [`moq_ice::reader`]) plus the ICE candidates
 /// to advertise.
 ///
 /// The client paths are 1:1 (one socket per dialed session, no demux); the

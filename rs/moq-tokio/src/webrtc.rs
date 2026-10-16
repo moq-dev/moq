@@ -31,7 +31,6 @@ use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, oneshot};
 
 mod channel;
-pub mod ice;
 
 /// The data channel label, as `@moq/p2p` creates it.
 const LABEL: &str = "moq";
@@ -49,10 +48,11 @@ const DEFAULT_MAX_MESSAGE_SIZE: u64 = 64 * 1024;
 /// Bytes the channel may hold unsent before qmux's writer waits, as `@moq/p2p` allows.
 const SEND_WINDOW: usize = RECORD_SIZE as usize * 4;
 
-/// Records read off the channel that qmux has yet to take, matching the send
-/// window. A full queue stops the driver reading the socket, so a slow reader
-/// pushes back on the peer through SCTP's congestion control, as TCP would.
-const READ_QUEUE: usize = SEND_WINDOW / RECORD_SIZE as usize;
+/// Unread bytes the channel tolerates past qmux's advertised `max_data`, for the
+/// frame headers and control frames that flow control does not count. A peer that
+/// honors flow control with reasonably full records stays under it; one that
+/// ignores it has the channel closed instead of growing memory without limit.
+const READ_SLACK: u64 = 16 * RECORD_SIZE;
 
 /// How long to wait for a `.local` name to resolve: mdns-sd's first query plus its
 /// retransmissions at one and two seconds (RFC 6762 section 5.2).
@@ -69,9 +69,17 @@ pub enum Error {
 	#[error(transparent)]
 	Io(#[from] std::io::Error),
 
-	/// The peer connection ended.
-	#[error(transparent)]
-	Ice(#[from] ice::Error),
+	/// The peer disconnected, or the connection was closed.
+	#[error("peer connection closed")]
+	Closed,
+
+	/// ICE never connected before the establishment deadline.
+	#[error("ICE did not connect before the establishment deadline")]
+	Timeout,
+
+	/// The WebRTC stack failed (DTLS, SCTP, or ICE state).
+	#[error("rtc error: {0}")]
+	Rtc(String),
 
 	/// A session description failed to parse or apply.
 	#[error("invalid session description: {0}")]
@@ -115,6 +123,18 @@ pub enum Error {
 }
 
 crate::error::from_message!(qmux::Error => Qmux);
+
+impl Error {
+	/// Adopt the agent's error. Not a `From` impl, which would put moq-ice in this crate's API.
+	fn ice(err: moq_ice::Error) -> Self {
+		match err {
+			moq_ice::Error::Closed => Self::Closed,
+			moq_ice::Error::Timeout => Self::Timeout,
+			moq_ice::Error::Rtc(err) => Self::Rtc(err),
+			err => Self::Rtc(err.to_string()),
+		}
+	}
+}
 
 /// How an [`Offerer`] or [`Answerer`] gathers its local candidates.
 #[derive(Clone, Debug, Default)]
@@ -280,7 +300,7 @@ impl Offerer {
 
 		let (tx, rx) = oneshot::channel();
 		self.peer.send(Command::Answer(parsed, max_message, tx))?;
-		rx.await.map_err(|_| ice::Error::Closed)??;
+		rx.await.map_err(|_| Error::Closed)??;
 		self.peer.resolve(mdns);
 		Ok(())
 	}
@@ -381,8 +401,8 @@ impl Peer {
 		max_message: Option<u64>,
 	) -> Result<Self, Error> {
 		let stun = resolve_stun(&config.stun).await;
-		let inbound = ice::reader(socket.clone());
-		let agent = ice::Agent::new(rtc, socket, locals, inbound)?.with_stun(&stun);
+		let inbound = moq_ice::reader(socket.clone());
+		let agent = moq_ice::Agent::new(rtc, socket, locals, inbound)?.with_stun(&stun);
 
 		let (commands, rx) = mpsc::unbounded_channel();
 		let (candidates_tx, candidates) = mpsc::unbounded_channel();
@@ -415,14 +435,14 @@ impl Peer {
 	async fn channel(&self) -> Result<Opened, Error> {
 		let (tx, rx) = oneshot::channel();
 		self.send(Command::Channel(tx))?;
-		let mut opened = rx.await.map_err(|_| ice::Error::Closed)??;
+		let mut opened = rx.await.map_err(|_| Error::Closed)??;
 		// The session keeps the driver alive once this handle is gone.
 		opened.channel.writer._driver = Some(self.commands.clone());
 		Ok(opened)
 	}
 
 	fn send(&self, command: Command) -> Result<(), Error> {
-		self.commands.send(command).map_err(|_| ice::Error::Closed.into())
+		self.commands.send(command).map_err(|_| Error::Closed)
 	}
 
 	/// Add the `.local` candidates a description carried once mDNS resolves them.
@@ -446,21 +466,20 @@ pub(crate) struct Opened {
 	pub channel: channel::Channel,
 	/// The MoQ ALPN the channel carries.
 	pub protocol: String,
-	/// The record size to advertise: 16 KiB, capped by the peer's SCTP message limit.
-	pub max_record_size: u64,
+	/// The qmux session settings for this channel.
+	pub config: qmux::Config,
 }
 
-impl Opened {
-	/// The qmux session settings for this channel.
-	pub fn config(&self) -> qmux::Config {
-		let mut config = crate::qmux_config();
-		config.version = qmux::Version::QMux01;
-		config.protocol = qmux::Protocol::Negotiated(self.protocol.clone());
-		config.max_record_size = self.max_record_size;
-		// The binding has no datagrams.
-		config.max_datagram_frame_size = 0;
-		config
-	}
+/// The qmux session settings for a channel carrying `protocol`, advertising
+/// `max_record_size`: 16 KiB, capped by the peer's SCTP message limit.
+fn session_config(protocol: &str, max_record_size: u64) -> qmux::Config {
+	let mut config = crate::qmux_config();
+	config.version = qmux::Version::QMux01;
+	config.protocol = qmux::Protocol::Negotiated(protocol.to_string());
+	config.max_record_size = max_record_size;
+	// The binding has no datagrams.
+	config.max_datagram_frame_size = 0;
+	config
 }
 
 pub(crate) enum Command {
@@ -482,17 +501,17 @@ enum Role {
 struct Open {
 	id: ChannelId,
 	protocol: String,
-	reads: mpsc::Sender<Result<Bytes, qmux::Error>>,
+	reads: channel::Inbox,
 	/// `None` once the session's writer closed.
 	writes: Option<mpsc::Receiver<Bytes>>,
-	max_record_size: u64,
+	config: qmux::Config,
 	/// The session's halves, until a session takes them.
 	halves: Option<channel::Channel>,
 }
 
 /// Owns the connection and runs it on its own task.
 struct Driver {
-	agent: ice::Agent,
+	agent: moq_ice::Agent,
 	commands: mpsc::UnboundedReceiver<Command>,
 	/// Dropped once gathering finishes, ending [`Offerer::candidate`] and [`Answerer::candidate`].
 	candidates: Option<mpsc::UnboundedSender<Candidate>>,
@@ -510,11 +529,6 @@ impl Driver {
 	async fn run(mut self) {
 		let err = loop {
 			let writable = self.writable();
-			// Only a full read queue is kept, to wait for the session to take a record.
-			let full = match &self.channel {
-				Some(Ok(open)) if open.reads.capacity() == 0 && !open.reads.is_closed() => Some(open.reads.clone()),
-				_ => None,
-			};
 			let writes = match &mut self.channel {
 				Some(Ok(Open {
 					writes: Some(writes), ..
@@ -523,12 +537,11 @@ impl Driver {
 			};
 
 			tokio::select! {
-				// Each event carries at most one record, so the read queue never overflows.
-				event = self.agent.next(), if full.is_none() => match event {
+				event = self.agent.next() => match event {
 					Ok(event) => if let Err(err) = self.event(event) {
 						break err;
 					},
-					Err(err) => break err.into(),
+					Err(err) => break Error::ice(err),
 				},
 				command = self.commands.recv() => match command {
 					Some(command) => self.command(command),
@@ -540,13 +553,11 @@ impl Driver {
 						break err;
 					}
 				}
-				// Closed or not, the queue has room once this returns.
-				_ = async { full.as_ref().unwrap().reserve().await.ok(); }, if full.is_some() => {}
 			}
 		};
 
 		match &err {
-			Error::Ice(ice::Error::Closed) => tracing::debug!("peer connection closed"),
+			Error::Closed => tracing::debug!("peer connection closed"),
 			err => tracing::debug!(%err, "peer connection failed"),
 		}
 		if let Some(waiter) = self.waiter.take() {
@@ -563,10 +574,10 @@ impl Driver {
 			return false;
 		};
 		let id = *id;
-		self.agent.mutate(|rtc| {
-			rtc.channel(id)
-				.is_some_and(|mut channel| channel.buffered_amount() < SEND_WINDOW)
-		})
+		self.agent
+			.rtc_mut()
+			.channel(id)
+			.is_some_and(|mut channel| channel.buffered_amount() < SEND_WINDOW)
 	}
 
 	/// Hand a record from the session to SCTP, or close the channel when the session's writer closed.
@@ -577,19 +588,18 @@ impl Driver {
 		let id = open.id;
 		let Some(data) = data else {
 			open.writes = None;
-			self.agent.mutate(|rtc| rtc.direct_api().close_data_channel(id));
+			self.agent.rtc_mut().direct_api().close_data_channel(id);
 			return Ok(());
 		};
-		let written = self.agent.mutate(|rtc| {
-			let mut channel = rtc.channel(id).ok_or(ice::Error::Closed)?;
-			channel
-				.write(true, &data)
-				.map_err(|err| ice::Error::Rtc(err.to_string()))
-		})?;
+		let written = {
+			let mut rtc = self.agent.rtc_mut();
+			let mut channel = rtc.channel(id).ok_or(Error::Closed)?;
+			channel.write(true, &data).map_err(|err| Error::Rtc(err.to_string()))?
+		};
 		// The send window keeps the buffer well below str0m's, so a refusal is a bug, not backpressure.
 		match written {
 			true => Ok(()),
-			false => Err(ice::Error::Rtc("SCTP refused a record within the send window".into()).into()),
+			false => Err(Error::Rtc("SCTP refused a record within the send window".into())),
 		}
 	}
 
@@ -602,16 +612,17 @@ impl Driver {
 					Role::Answerer => None,
 				};
 				let result = match pending {
-					Some(pending) => self
-						.agent
-						.mutate(|rtc| rtc.sdp_api().accept_answer(pending, answer))
-						.map(|()| self.max_message = Some(max_message))
-						.map_err(|err| Error::Sdp(err.to_string())),
+					Some(pending) => {
+						let accepted = self.agent.rtc_mut().sdp_api().accept_answer(pending, answer);
+						accepted
+							.map(|()| self.max_message = Some(max_message))
+							.map_err(|err| Error::Sdp(err.to_string()))
+					}
 					None => Err(Error::Sdp("the answer was already applied".into())),
 				};
 				let _ = reply.send(result);
 			}
-			Command::Candidate(candidate) => self.agent.mutate(|rtc| rtc.add_remote_candidate(candidate)),
+			Command::Candidate(candidate) => self.agent.rtc_mut().add_remote_candidate(candidate),
 			Command::Channel(reply) => {
 				if self.taken {
 					let _ = reply.send(Err(Error::Taken));
@@ -624,19 +635,20 @@ impl Driver {
 		}
 	}
 
-	fn event(&mut self, event: ice::Event) -> Result<(), Error> {
+	fn event(&mut self, event: moq_ice::Event) -> Result<(), Error> {
 		let event = match event {
-			ice::Event::Candidate(candidate) => {
+			moq_ice::Event::Candidate(candidate) => {
 				if let Some(candidates) = &self.candidates {
 					let _ = candidates.send(Candidate(candidate.to_sdp_string()));
 				}
 				return Ok(());
 			}
-			ice::Event::Gathered => {
+			moq_ice::Event::Gathered => {
 				self.candidates = None;
 				return Ok(());
 			}
-			ice::Event::Rtc(event) => event,
+			moq_ice::Event::Rtc(event) => event,
+			_ => return Ok(()),
 		};
 
 		match event {
@@ -650,14 +662,16 @@ impl Driver {
 				}
 				let record = if !data.binary {
 					Err(qmux::Error::ProtocolViolation)
-				} else if data.data.len() as u64 > open.max_record_size {
+				} else if data.data.len() as u64 > open.config.max_record_size {
 					Err(qmux::Error::FrameTooLarge)
 				} else {
 					Ok(Bytes::from(data.data))
 				};
-				// Room was checked before this event was taken; a closed reader drops it.
-				if let Err(mpsc::error::TrySendError::Full(_)) = open.reads.try_send(record) {
-					unreachable!("the driver takes no event while the read queue is full");
+				if !open.reads.push(record) {
+					tracing::debug!("closing the data channel: the peer ignored qmux flow control");
+					let id = open.id;
+					self.agent.rtc_mut().direct_api().close_data_channel(id);
+					self.channel = Some(Err(Error::Closed));
 				}
 			}
 			str0m::Event::ChannelClose(id) => {
@@ -665,7 +679,7 @@ impl Driver {
 					&& open.id == id
 				{
 					// The session's reader sees the end of its records.
-					self.channel = Some(Err(ice::Error::Closed.into()));
+					self.channel = Some(Err(Error::Closed));
 				}
 			}
 			_ => {}
@@ -678,21 +692,22 @@ impl Driver {
 		let expected = match &self.role {
 			Role::Offerer { channel, .. } => *channel == id,
 			// The remote peer may open other channels first; only the `moq` one is the session's.
-			Role::Answerer => self.agent.mutate(|rtc| {
-				rtc.channel(id)
-					.and_then(|channel| channel.config().map(|config| config.label == LABEL))
-					.unwrap_or(false)
-			}),
+			Role::Answerer => self
+				.agent
+				.rtc_mut()
+				.channel(id)
+				.and_then(|channel| channel.config().map(|config| config.label == LABEL))
+				.unwrap_or(false),
 		};
 		if !expected || self.channel.is_some() {
 			tracing::debug!(?id, "closing an unexpected data channel");
-			self.agent.mutate(|rtc| rtc.direct_api().close_data_channel(id));
+			self.agent.rtc_mut().direct_api().close_data_channel(id);
 			return;
 		}
 
 		let opened = self.adopt(id);
 		if opened.is_err() {
-			self.agent.mutate(|rtc| rtc.direct_api().close_data_channel(id));
+			self.agent.rtc_mut().direct_api().close_data_channel(id);
 		}
 		self.channel = Some(opened);
 		self.deliver();
@@ -705,32 +720,34 @@ impl Driver {
 			return Err(Error::MessageSize(max_message));
 		}
 
-		let protocol = self.agent.mutate(|rtc| {
-			let mut channel = rtc.channel(id).ok_or(ice::Error::Closed)?;
+		let protocol = {
+			let mut rtc = self.agent.rtc_mut();
+			let mut channel = rtc.channel(id).ok_or(Error::Closed)?;
 			let config = channel.config().ok_or(Error::Unreliable)?;
 			if !config.ordered || config.reliability != Reliability::Reliable {
 				return Err(Error::Unreliable);
 			}
 			let protocol = config.protocol.clone();
 			channel.set_buffered_amount_low_threshold(SEND_WINDOW / 2);
-			Ok(protocol)
-		})?;
+			protocol
+		};
 
-		let (reads, rx) = mpsc::channel(READ_QUEUE);
+		let config = session_config(&protocol, max_record_size);
+		let (reads, reader) = channel::queue(config.max_data + READ_SLACK);
 		let (tx, writes) = mpsc::channel(1);
 		Ok(Open {
 			id,
 			protocol,
 			reads,
 			writes: Some(writes),
-			max_record_size,
+			config,
 			halves: Some(channel::Channel {
 				writer: channel::Writer {
 					tx: Some(tx),
 					max: usize::try_from(max_message).unwrap_or(usize::MAX),
 					_driver: None,
 				},
-				reader: channel::Reader { rx },
+				reader,
 			}),
 		})
 	}
@@ -747,12 +764,12 @@ impl Driver {
 			Ok(open) => Ok(Opened {
 				channel: open.halves.take().expect("only the first session takes the halves"),
 				protocol: open.protocol.clone(),
-				max_record_size: open.max_record_size,
+				config: open.config.clone(),
 			}),
 			Err(err) => Err(match err {
 				Error::Unreliable => Error::Unreliable,
 				Error::MessageSize(size) => Error::MessageSize(*size),
-				_ => ice::Error::Closed.into(),
+				_ => Error::Closed,
 			}),
 		};
 		let _ = waiter.send(result);

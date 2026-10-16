@@ -83,8 +83,8 @@ async fn session_over_loopback() {
 	transfer(&offerer, &answerer, b"hello").await;
 }
 
-/// A frame many records long fills the SCTP send window and the read queue, so
-/// both sides have to wait for the other and resume.
+/// A frame many records long fills the SCTP send window, so the writer has to
+/// wait for the peer's acknowledgements and resume.
 #[tokio::test]
 async fn large_frame_over_loopback() {
 	let config = Config::default();
@@ -94,6 +94,71 @@ async fn large_frame_over_loopback() {
 
 	let payload: Vec<u8> = (0..1024 * 1024).map(|i| i as u8).collect();
 	transfer(&offerer, &answerer, &payload).await;
+}
+
+/// Open the data channel between two loopback peers, without a MoQ session over it.
+async fn channels() -> (Offerer, Answerer, Opened, Opened) {
+	let config = Config::default();
+	let (offerer, offer) = Offerer::with_hosts(&config, protocol(), vec![LOOPBACK]).await.unwrap();
+	let (answerer, answer) = Answerer::with_hosts(&config, &offer, vec![LOOPBACK]).await.unwrap();
+	offerer.accept(&answer).await.unwrap();
+	let (sent, received) = tokio::time::timeout(TIMEOUT, async { tokio::join!(offerer.channel(), answerer.channel()) })
+		.await
+		.expect("the channel did not open");
+	(offerer, answerer, sent.unwrap(), received.unwrap())
+}
+
+/// A full record, numbered so its order can be checked.
+fn record(index: usize) -> Bytes {
+	Bytes::from(vec![index as u8; RECORD_SIZE as usize])
+}
+
+/// A session that is not reading must not stop the peer connection: the agent
+/// keeps acknowledging, so the remote writer gets well past the send window.
+#[tokio::test]
+async fn unread_records_do_not_stall_the_writer() {
+	use qmux::transport::{Reader as _, Writer as _};
+
+	let (_offerer, _answerer, sent, received) = channels().await;
+	let (mut writer, mut reader) = (sent.channel.writer, received.channel.reader);
+	let count = 8 * SEND_WINDOW / RECORD_SIZE as usize;
+	tokio::time::timeout(TIMEOUT, async {
+		for index in 0..count {
+			writer.send(record(index)).await.unwrap();
+		}
+	})
+	.await
+	.expect("the writer stalled while the reader was idle");
+
+	for index in 0..count {
+		assert_eq!(reader.recv().await.unwrap(), record(index));
+	}
+}
+
+/// A peer that sends past qmux's receive window while the session is not reading
+/// has the channel closed, after the records within the budget.
+#[tokio::test]
+async fn ignoring_flow_control_closes_the_channel() {
+	use qmux::transport::{Reader as _, Writer as _};
+
+	let (_offerer, _answerer, sent, received) = channels().await;
+	let budget = received.config.max_data + READ_SLACK;
+	let within = (budget / RECORD_SIZE) as usize;
+	let (mut writer, mut reader) = (sent.channel.writer, received.channel.reader);
+	tokio::time::timeout(TIMEOUT, async {
+		for index in 0..within + 8 {
+			if writer.send(record(index)).await.is_err() {
+				break;
+			}
+		}
+	})
+	.await
+	.expect("the writer stalled");
+
+	for index in 0..within {
+		assert_eq!(reader.recv().await.unwrap(), record(index));
+	}
+	assert!(matches!(reader.recv().await, Err(qmux::Error::FlowControlError)));
 }
 
 /// Answer STUN Binding requests with the source address, as a public server would.

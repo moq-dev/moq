@@ -4563,6 +4563,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "moq-ice"
+version = "0.1.0"
+dependencies = [
+ "str0m",
+ "stun-types",
+ "thiserror 2.0.21",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "moq-json"
 version = "0.5.8"
 dependencies = [
@@ -4809,6 +4820,7 @@ dependencies = [
  "axum",
  "bytes",
  "hang",
+ "moq-ice",
  "moq-mux",
  "moq-net",
  "moq-tokio",
@@ -4948,6 +4960,7 @@ dependencies = [
  "libc",
  "mdns-sd",
  "moq-clock",
+ "moq-ice",
  "moq-net",
  "moq-quic",
  "moq-sock",

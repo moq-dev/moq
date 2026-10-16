@@ -312,7 +312,7 @@ impl Client {
 
 		let attempt = async {
 			let opened = peer.channel().await?;
-			let config = opened.config();
+			let config = opened.config;
 			let session = qmux::Session::connect(opened.channel, config)
 				.await
 				.map_err(crate::webrtc::Error::from)?;

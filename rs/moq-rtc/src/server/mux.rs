@@ -23,7 +23,7 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 
-use moq_tokio::webrtc::ice::{self, Inbound, Packet};
+use moq_ice::{Inbound, Packet};
 use str0m::ice::{IceCreds, StunMessage};
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
@@ -45,7 +45,7 @@ struct Registry {
 struct Entry {
 	ufrag: String,
 	sender: mpsc::Sender<Packet>,
-	wire: ice::Wire,
+	wire: moq_ice::Wire,
 }
 
 /// The shared media socket plus its demux routing table.
@@ -125,8 +125,8 @@ impl Mux {
 	/// [`Registration`] guard the session task must hold for its lifetime.
 	pub(crate) fn register(&self) -> (IceCreds, Inbound, Registration) {
 		let creds = IceCreds::new();
-		let (tx, rx) = mpsc::channel(ice::INBOX);
-		let wire = ice::Wire::default();
+		let (tx, rx) = mpsc::channel(moq_ice::INBOX);
+		let wire = moq_ice::Wire::default();
 		let entry = Arc::new(Entry {
 			ufrag: creds.ufrag.clone(),
 			sender: tx,
@@ -171,8 +171,8 @@ async fn demux(socket: Arc<UdpSocket>, registry: Arc<Mutex<Registry>>) {
 			}
 		};
 		// A dual-stack bind reports IPv4 peers as `::ffff:a.b.c.d`; unmap before
-		// this address becomes a registry key or reaches ICE (see `ice::canonical`).
-		let src = ice::canonical(src);
+		// this address becomes a registry key or reaches ICE (see `moq_ice::canonical`).
+		let src = moq_ice::canonical(src);
 		let data = &buf[..len];
 
 		// Cached peers need one routing lock; only a new address parses STUN.
@@ -255,7 +255,7 @@ mod tests {
 		let address_b = "127.0.0.1:10002".parse().unwrap();
 		let mut registry = mux.registry.lock().unwrap();
 		assert!(registry.route(100, address_a, Some("unknown")).is_none());
-		for _ in 0..ice::INBOX {
+		for _ in 0..moq_ice::INBOX {
 			let entry = registry.route(11, address_a, Some(&a.ufrag)).unwrap();
 			entry.sender.try_send((vec![0; 11], address_a)).unwrap();
 		}
@@ -268,12 +268,12 @@ mod tests {
 		drop(registry);
 		assert_eq!(
 			source_a.stats(),
-			ice::Stats {
+			moq_ice::Stats {
 				tx: 0,
-				rx: 11 * ice::INBOX as u64 + 23
+				rx: 11 * moq_ice::INBOX as u64 + 23
 			}
 		);
-		assert_eq!(source_b.stats(), ice::Stats { tx: 0, rx: 37 });
+		assert_eq!(source_b.stats(), moq_ice::Stats { tx: 0, rx: 37 });
 
 		// Unregister even while an inbox is still held: cached addresses cannot
 		// keep attributing traffic after the peer ends.
@@ -300,7 +300,7 @@ mod tests {
 				let mut addresses = Vec::new();
 				for peer in 0..peers {
 					let (sender, receiver) = mpsc::channel(1);
-					let wire = ice::Wire::default();
+					let wire = moq_ice::Wire::default();
 					let address = SocketAddr::from(([127, 0, 0, 1], peer as u16 + 1));
 					let entry = Arc::new(Entry {
 						ufrag: peer.to_string(),
