@@ -81,6 +81,7 @@ is published; older versions are unchanged.
 - [FETCH max-delay](/quest/m1/fetch-max-delay.md) - historical requests have a reader budget, carried by FETCH while present and by ranges after its removal
 - [Subscribe ranges](/quest/m1/subscribe-ranges/README.md) - SUBSCRIBE carries ranges and an order and lite FETCH is gone, in Rust and JS
 - [Announcement takeover](/quest/m1/announce-takeover.md) - ANNOUNCE_TAKEOVER preserves a proven instance under a new independent route
+- [Refresh on the lite wire](/quest/m1/refresh/lite.md) - TRACK_INFO carries the refresh ratio and SUBSCRIBE_UPDATE the wanted group
 
 ## Related
 
