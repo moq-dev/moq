@@ -1,4 +1,5 @@
 import { expect, mock, spyOn, test } from "bun:test";
+import { Manual, Milli, Nano } from "@moq/clock";
 import * as Moq from "@moq/net";
 import { Effect, Signal } from "@moq/signals";
 import { Baseline } from "../jitter";
@@ -132,6 +133,120 @@ test("a reader attaching to a still source starts with the current picture, stam
 		effect.close();
 		capture.close();
 		clock.mockRestore();
+	}
+
+	expect(open()).toEqual([]);
+});
+
+test("a reader attaching after another never starts below what that one read", async () => {
+	using input = frameSource();
+	// The capture clock runs 200ms ahead of performance.now(), as it does when the first frame,
+	// which anchors the capture clock, arrived late.
+	const clock = spyOn(performance, "now").mockReturnValue(1_000);
+	const capture = new Capture({ source: input.source });
+	const first = new Effect();
+	const second = new Effect();
+
+	try {
+		const fanout = capture.out.frames.peek() ?? (await capture.out.frames.changed());
+		if (!fanout) throw new Error("no fanout");
+
+		const before = fanout.subscribe(first).getReader();
+		input.push(1_200_000);
+		const read = (await before.read()).value as unknown as Frame;
+		expect(read.timestamp).toBe(1_200_000);
+		read.close();
+		first.close();
+
+		// A demand gap shorter than the clocks' offset.
+		clock.mockReturnValue(1_050);
+		const after = fanout.subscribe(second).getReader();
+		const resumed = (await after.read()).value as unknown as Frame;
+		expect(resumed.timestamp).toBe(1_250_000);
+		resumed.close();
+	} finally {
+		second.close();
+		capture.close();
+		clock.mockRestore();
+	}
+
+	expect(open()).toEqual([]);
+});
+
+test("a reader attaching to a frame held late still starts at now", async () => {
+	using input = frameSource();
+	// The frame reached the fanout 200ms after its stamp, as on a busy main thread.
+	const clock = spyOn(performance, "now").mockReturnValue(1_200);
+	const capture = new Capture({ source: input.source });
+	const first = new Effect();
+	const second = new Effect();
+
+	try {
+		const fanout = capture.out.frames.peek() ?? (await capture.out.frames.changed());
+		if (!fanout) throw new Error("no fanout");
+
+		const before = fanout.subscribe(first).getReader();
+		input.push(1_000_000);
+		(await before.read()).value?.close();
+		first.close();
+
+		clock.mockReturnValue(1_250);
+		const after = fanout.subscribe(second).getReader();
+		const resumed = (await after.read()).value as unknown as Frame;
+		expect(resumed.timestamp).toBe(1_250_000);
+		resumed.close();
+	} finally {
+		second.close();
+		capture.close();
+		clock.mockRestore();
+	}
+
+	expect(open()).toEqual([]);
+});
+
+test("a replay never starts below an earlier replay", async () => {
+	using input = frameSource();
+	const clock = new Manual();
+	const restore = clock.install();
+	const advance = (ms: number) => clock.advance(Nano.fromMilli(Milli(ms)));
+	const capture = new Capture({ source: input.source });
+	const watch = new Effect();
+	const first = new Effect();
+	const second = new Effect();
+
+	try {
+		const fanout = capture.out.frames.peek() ?? (await capture.out.frames.changed());
+		if (!fanout) throw new Error("no fanout");
+		// Reads every live frame, so awaiting it proves the fanout held that frame.
+		const live = fanout.subscribe(watch).getReader();
+
+		// Capture stamps 200ms ahead of the clock.
+		advance(1_000);
+		input.push(1_200_000);
+		(await live.read()).value?.close();
+
+		advance(50);
+		const before = fanout.subscribe(first).getReader();
+		const replayed = (await before.read()).value as unknown as Frame;
+		expect(replayed.timestamp).toBe(1_250_000);
+		replayed.close();
+		first.close();
+
+		// The next frame reaches the fanout late, so it holds a stamp below that replay.
+		advance(50);
+		input.push(1_210_000);
+		(await live.read()).value?.close();
+
+		advance(1);
+		const after = fanout.subscribe(second).getReader();
+		const resumed = (await after.read()).value as unknown as Frame;
+		expect(resumed.timestamp).toBe(1_250_000);
+		resumed.close();
+	} finally {
+		watch.close();
+		second.close();
+		capture.close();
+		restore();
 	}
 
 	expect(open()).toEqual([]);
