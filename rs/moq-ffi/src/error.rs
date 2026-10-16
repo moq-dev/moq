@@ -246,6 +246,10 @@ pub enum MoqError {
 	#[error("forbidden")]
 	Forbidden,
 
+	/// The authorization token expired; refresh it before retrying.
+	#[error("authorization token expired")]
+	Expired,
+
 	/// The requested track or group is not available.
 	#[error("not found")]
 	NotFound,
@@ -302,9 +306,7 @@ impl From<moq_net::Error> for MoqError {
 			moq_net::Error::Closed | moq_net::Error::GoingAway | moq_net::Error::SessionClosed => Self::Closed,
 			moq_net::Error::Cancel => Self::Cancelled,
 			moq_net::Error::Unauthorized => Self::Unauthorized,
-			moq_net::Error::Expired => Self::Protocol {
-				details: MoqProtocolError::from_session(&moq_net::SessionError::Expired),
-			},
+			moq_net::Error::Expired => Self::Expired,
 			moq_net::Error::Unsupported | moq_net::Error::Version => Self::Unsupported,
 			moq_net::Error::Session(err) => Self::Protocol {
 				details: MoqProtocolError::from_session(&err),
@@ -486,9 +488,12 @@ mod tests {
 		}
 	}
 
+	/// A refused request carries no session code, so it must not claim the session expired.
 	#[test]
-	fn expired_keeps_its_actionable_kind() {
-		let err = MoqError::from(moq_net::Error::Expired);
+	fn expired_request_is_not_a_session_close() {
+		assert!(matches!(MoqError::from(moq_net::Error::Expired), MoqError::Expired));
+
+		let err = MoqError::from(moq_net::Error::from(moq_net::SessionError::Expired));
 		match err {
 			MoqError::Protocol { details } => {
 				assert_eq!(details.scope, MoqErrorScope::Session);

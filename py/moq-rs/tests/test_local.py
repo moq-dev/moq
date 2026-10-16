@@ -135,6 +135,7 @@ def test_protocol_error_helper_covers_known_app_and_unknown():
         assert protocol.code == code
         assert protocol.kind == kind
         assert moq.is_auth(err) is auth
+    assert moq.is_auth(moq.Error.Expired())
     assert moq.protocol_error(RuntimeError("nope")) is None
 
 

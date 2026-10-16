@@ -41,6 +41,7 @@ pub const MOQ_ERROR_JSON: i32 = -37;
 pub const MOQ_ERROR_JSON_TRACK: i32 = -38;
 pub const MOQ_ERROR_INVALID_CONFIG: i32 = -40;
 pub const MOQ_ERROR_UNRESOLVABLE_BROADCAST: i32 = -41;
+pub const MOQ_ERROR_EXPIRED: i32 = -42;
 
 /// Whether a protocol code is from the session or stream registry.
 #[repr(C)]
@@ -350,7 +351,6 @@ fn protocol_of_net(err: &moq_net::Error) -> Option<moq_protocol_error> {
 		moq_net::Error::Session(err) => Some(from_session(err)),
 		moq_net::Error::Stream(err) => Some(from_stream(err)),
 		moq_net::Error::App(app) => Some(from_stream(&moq_net::StreamError::App(*app))),
-		moq_net::Error::Expired => Some(from_session(&moq_net::SessionError::Expired)),
 		_ => None,
 	}
 }
@@ -422,6 +422,8 @@ impl ffi::ReturnCode for Error {
 
 	fn code(&self) -> i32 {
 		match self {
+			// A refused request's expiry has no session or stream code, so it gets its own status.
+			Error::Moq(moq_net::Error::Expired) => MOQ_ERROR_EXPIRED,
 			Error::Moq(_) => MOQ_ERROR_MOQ,
 			Error::Url(_) => MOQ_ERROR_URL,
 			Error::Utf8(_) => MOQ_ERROR_UTF8,
