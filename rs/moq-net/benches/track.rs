@@ -75,8 +75,6 @@ const STEADY: [usize; 4] = [1, 100, 1000, 10_000];
 /// Viewers that join and leave, one at a time, during one measured run.
 const CHURN: [usize; 3] = [1, 8, 64];
 
-/// Viewers that join at once and stay, during one measured run.
-
 /// Viewers that joined and left before the churn, leaving the list room for that many.
 const PEAK: [usize; 3] = [0, 1024, 16384];
 
