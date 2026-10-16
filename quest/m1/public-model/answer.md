@@ -118,8 +118,10 @@ JS items (`js/net/src/`):
     receives only requests that no announced or served route covers, and
     every request the table later routes is withdrawn from it. It is never
     advertised, since it claims nothing. The first fallback to answer a
-    request wins, and dropping the handle withdraws its answers, so a
-    standby session answers next. This is what `serveRequests` in
+    request wins. Dropping the handle ends the requests it resolved with an
+    error and never moves them to another fallback, which may be another
+    publisher instance (never stitch). A standby answers only requests
+    still unresolved, and new ones. This is what `serveRequests` in
     `connection/forward.ts` does today.
   - A `dynamic(prefix, route)` flagged blind and ranked below every
     announced route. This reuses one call but puts an unadvertised,

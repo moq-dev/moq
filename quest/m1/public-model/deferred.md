@@ -50,3 +50,5 @@ built-in sessions moved onto the public calls.
 - [JS track handover](/quest/m1/js-group-handover.md) - owns the JS fan-out copy behind `Group.Producer.mirror`
 - [JS pending tail](/quest/m1/js-pending-tail.md) - the JS received-end hold behind `hooks.endTrack`
 - [Public ingest](/quest/m1/public-model/ingest.md) - settles the received-end shape JS mirrors
+- [JS ranges](/quest/m1/subscribe-ranges/js.md) - the JS `Track.Request`/`Track.Dynamic` range requests that answer track info and fetches
+- [Public routes and answering](/quest/m1/public-model/answer.md) - the public `Broadcast.requested` handout this completes
