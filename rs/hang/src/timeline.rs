@@ -92,6 +92,7 @@ impl Position {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(
 	rename_all = "camelCase",
+	try_from = "Parsed<E>",
 	bound(serialize = "E: serde::Serialize", deserialize = "E: serde::de::DeserializeOwned")
 )]
 pub struct Record<E: RecordExt = ()> {
@@ -128,6 +129,45 @@ pub struct Record<E: RecordExt = ()> {
 
 fn default_keyframe() -> bool {
 	true
+}
+
+/// A [`Record`] as parsed, before checking that it carries both or neither of `pts` and `duration`.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", bound(deserialize = "E: serde::de::DeserializeOwned"))]
+struct Parsed<E> {
+	sequence: u64,
+	#[serde(default)]
+	pts: Option<u64>,
+	#[serde(default)]
+	duration: Option<u64>,
+	start: Position,
+	end: Position,
+	#[serde(default = "default_keyframe")]
+	keyframe: bool,
+	#[serde(flatten)]
+	ext: E,
+}
+
+impl<E: RecordExt> TryFrom<Parsed<E>> for Record<E> {
+	type Error = String;
+
+	fn try_from(parsed: Parsed<E>) -> std::result::Result<Self, String> {
+		if parsed.pts.is_some() != parsed.duration.is_some() {
+			return Err(format!(
+				"record {} needs both pts and duration, or neither",
+				parsed.sequence
+			));
+		}
+		Ok(Self {
+			sequence: parsed.sequence,
+			pts: parsed.pts,
+			duration: parsed.duration,
+			start: parsed.start,
+			end: parsed.end,
+			keyframe: parsed.keyframe,
+			ext: parsed.ext,
+		})
+	}
 }
 
 impl<E: RecordExt> Record<E> {
@@ -217,6 +257,16 @@ mod test {
 			r#"{"sequence":4,"start":{"group":9},"end":{"group":10}}"#
 		);
 		assert_eq!(Record::<()>::from_slice(&json).unwrap(), record);
+	}
+
+	#[test]
+	fn a_record_with_half_its_timing_is_refused() {
+		for json in [
+			r#"{"sequence":0,"pts":0,"start":{"group":0},"end":{"group":1}}"#,
+			r#"{"sequence":0,"duration":1,"start":{"group":0},"end":{"group":1}}"#,
+		] {
+			assert!(Record::<()>::from_slice(json.as_bytes()).is_err(), "{json}");
+		}
 	}
 
 	#[test]
