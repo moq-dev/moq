@@ -293,6 +293,12 @@ loss never reports an END:
 
 - Each origin numbers the changes to its own claims with a revision that
   starts at zero for each routing identity, separate from the route seqno.
+  Both are varints. An origin never advertises the last value, 2^62-1: a
+  seqno advance, claim change, or seqno request that would reach it rotates
+  the identity instead, ending the old one everywhere and announcing the
+  claims again under a fresh one, so nothing wraps and every advertised
+  seqno leaves room for the successor a request names
+  (`exhausted_counters_rotate_the_identity`).
   A session sends an origin's announcements in batches, each closed by a
   floor: the revision as of which the stream's announcements for that route,
   within the stream's interest prefix, are complete. A relay watches the
@@ -303,7 +309,7 @@ loss never reports an END:
   claims overlapping its prefix: those inside it and wildcards above it, not
   an exact claim above it
   (`only_a_wildcard_claim_overlaps_an_interest_below_it`). A node
-  keeps one floor per prefix it has watched, dropping any that a wider,
+  keeps floors only within its current interest, dropping any that a wider,
   newer floor covers. An older complete snapshot is therefore ignored, where
   next-hop authority and a barrier both revive the withdrawal
   (`an_older_complete_snapshot_revives_a_known_withdrawal`); a new next hop
@@ -312,14 +318,22 @@ loss never reports an END:
   widening keeps a narrower, newer floor yet still accepts an older, wider
   snapshot for what it newly covers, where one floor per origin either
   refuses that snapshot or revives under it
-  (`widening_interest_needs_floors_scoped_to_what_they_cover`); narrowing
-  keeps the rest frozen at its floor for a rejoin
-  (`cancelling_interest_keeps_freshness_for_a_rejoin`), and widening hides
-  that frozen rest until a floor covering the widened interest arrives on
-  the stream answering it, rather than showing a claim that ended unwatched
+  (`widening_interest_needs_floors_scoped_to_what_they_cover`). An interest
+  change opens a new stream: batches still in flight on the old one are
+  discarded, and each neighbour starts the new one with a complete
+  snapshot. The first batch answering the new interest retires whatever
+  lies outside it, so state follows the current interest, not every prefix
+  ever watched; a rejoin then replays a lagging relay's view, as after a
+  collection, only until the newer snapshot behind it lands
+  (`cancelling_interest_retires_its_region`). That batch re-certifies any
+  wildcard above the interest, so retiring never ends a claim still
+  watched. Until it arrives, a widened node hides what it has not retired
+  yet, rather than showing a claim that ended unwatched
   (`widening_hides_what_was_frozen_until_a_covering_floor_arrives`); a root
-  snapshot still queued from the old interest does not count
-  (`a_snapshot_queued_before_widening_keeps_the_frozen_rest_hidden`); and withdrawing one
+  snapshot still queued on the old stream does not count
+  (`a_snapshot_queued_before_widening_keeps_the_frozen_rest_hidden`), and
+  a batch cut to a scoped grant does
+  (`widening_behind_a_scoped_grant_shows_the_rest_of_the_scope`); and withdrawing one
   origin's wildcard leaves another origin's copy
   (`wildcard_claims_end_per_origin_and_are_certified_below`).
 - Per identity, a node is usable (a feasible selected route: announcements
@@ -351,9 +365,10 @@ loss never reports an END:
   sender that has not yet received the withdrawal, and only until it does
   (`stale_replay_after_collection_lasts_only_until_the_withdrawal_behind_it`).
   Retained state is each session's last view, one merged view per held
-  identity with a floor per watched prefix, one pending request per origin,
-  and a feasibility distance only while an identity is routed, advertised,
-  or draining; withdrawal history leaves nothing. One claim change costs one
+  identity with floors only within the current interest, one pending
+  request per origin, and a feasibility distance only while an identity is
+  routed, advertised, or draining; neither withdrawal history nor interest
+  history leaves anything. One claim change costs one
   batch per session carrying the route and one event per watching node
   (`announcement_cost_follows_sessions_and_live_claims`). Without split
   horizon a relay echoes an origin's claims back to it.
@@ -376,9 +391,9 @@ loss never reports an END:
 
   | Rule | Revivals | False ENDs | Re-announcements | Reader events | Claim KiB |
   | --- | --- | --- | --- | --- | --- |
-  | Next-hop authority | 387 | 448 | 395 | 9022 | 833 |
-  | Snapshot barrier | 237 | 172 | 264 | 9286 | 804 |
-  | Merged floors | 0 | 0 | 35 | 9186 | 779 |
+  | Next-hop authority | 386 | 424 | 393 | 8853 | 840 |
+  | Snapshot barrier | 231 | 175 | 260 | 9086 | 814 |
+  | Merged floors | 0 | 0 | 30 | 9020 | 789 |
 
   Merged floors' re-announcements follow an offline period or a collection,
   never a known withdrawal. Byte counts are estimates in virtual time.

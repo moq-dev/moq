@@ -11,7 +11,7 @@
 use std::collections::BTreeSet;
 
 use super::XorShift;
-use super::model::{Config, Event, Freshness, Id, Kind, Link, Net, Requests, overlaps};
+use super::model::{Config, Event, Freshness, Grant, Id, Kind, Link, Net, Requests, VARINT_MAX, overlaps, qualified};
 
 const NEXT_HOP: Freshness = Freshness::NextHop;
 const BARRIER: Freshness = Freshness::Barrier;
@@ -273,12 +273,13 @@ fn widening_interest_needs_floors_scoped_to_what_they_cover() {
 	}
 }
 
-/// A client narrows its interest and later widens it again. While narrowed it
-/// keeps what it knew outside the new interest, frozen at its floor, so a
-/// lagging relay's snapshot on rejoin cannot revive a withdrawal the client saw
-/// before it narrowed.
+/// A client narrows its interest and later widens it again. Narrowing retires
+/// what it knew outside the new interest, so its state follows the current
+/// interest rather than every prefix it ever watched. On rejoin a lagging
+/// relay's snapshot replays a withdrawal the client saw before it narrowed,
+/// as after a collection, and only until the newer snapshot behind it lands.
 #[test]
-fn cancelling_interest_keeps_freshness_for_a_rejoin() {
+fn cancelling_interest_retires_its_region() {
 	let (origin, r1, r2, client) = (0, 1, 2, 3);
 	let mut net = lagging(FLOORS, "");
 	net.announce(origin, "live/a/x", 0, None);
@@ -290,23 +291,28 @@ fn cancelling_interest_keeps_freshness_for_a_rejoin() {
 
 	net.watch(client, "live/b/");
 	assert!(net.run());
+	assert_eq!(net.floors(client, 7), 1, "only the watched region");
 	net.hold(r1, client);
 	net.watch(client, "");
 	assert!(net.run());
 	assert_eq!(
 		net.shows(client, 7, "live/a/x"),
-		None,
-		"the lagging relay's snapshot is older"
+		Some(true),
+		"the lagging relay replays"
 	);
 	net.release(r1, client);
+	assert!(net.run());
+	assert_eq!(net.shows(client, 7, "live/a/x"), None);
 	net.release(origin, r2);
 	assert!(net.run());
-	assert_eq!(revivals(&net.events), 0);
-	assert_eq!(
-		net.floors(client, 7),
-		1,
-		"the newer root floor absorbs the narrower one"
-	);
+	let life: Vec<Kind> = at(&net, client)
+		.iter()
+		.filter(|event| event.claim == "live/a/x")
+		.map(|event| event.kind)
+		.collect();
+	assert_eq!(life, [Kind::Start, Kind::End, Kind::Start, Kind::End]);
+	assert_eq!(revivals(&net.events), 0, "a retired region, like a collection");
+	assert_eq!(net.floors(client, 7), 1);
 	net.check().unwrap();
 }
 
@@ -377,6 +383,36 @@ fn a_snapshot_queued_before_widening_keeps_the_frozen_rest_hidden() {
 		.map(|event| event.kind)
 		.collect();
 	assert_eq!(life, [Kind::Start, Kind::Unwatched]);
+	net.check().unwrap();
+}
+
+/// A client behind a scoped grant widens its interest. Every batch it gets is
+/// cut to the grant's scope, so no floor ever covers the widened interest;
+/// the batch answering it is still what shows the newly covered claims.
+#[test]
+fn widening_behind_a_scoped_grant_shows_the_rest_of_the_scope() {
+	let (origin, relay, client) = (0, 1, 2);
+	let mut net = Net::new(config(FLOORS, Requests::Off), 3);
+	net.leaf(origin);
+	net.leaf(client);
+	net.join(origin, relay, 1);
+	let grant = Grant {
+		subject: "local",
+		scope: "live/a/",
+	};
+	net.link(client, relay, Link::cost(1).grant(grant), Link::cost(1));
+	net.watch(client, "live/a/x/");
+	net.originate(origin, 7, 0);
+	net.announce(origin, "live/a/x/1", 0, None);
+	net.announce(origin, "live/a/y", 0, None);
+	assert!(net.run());
+	let id = qualified("local", 7);
+	assert_eq!(net.shows(client, id, "live/a/x/1"), Some(true));
+	assert_eq!(net.shows(client, id, "live/a/y"), None);
+
+	net.watch(client, "");
+	assert!(net.run());
+	assert_eq!(net.shows(client, id, "live/a/y"), Some(true));
 	net.check().unwrap();
 }
 
@@ -566,6 +602,64 @@ fn holds_retire_once_nothing_can_recover() {
 	}
 }
 
+/// Seqnos and revisions are varints. An origin never advertises the last
+/// value: a bump, a claim change, or a request that would reach it rotates the
+/// identity instead, so every node lets the old one go and sees the claims
+/// again under the new one. Nothing wraps.
+#[test]
+fn exhausted_counters_rotate_the_identity() {
+	let (origin, a, b, c, client) = (0, 1, 2, 3, 4);
+	let rotated = |net: &Net| {
+		let fresh = net.proven(origin);
+		assert_ne!(fresh, 7, "a fresh identity");
+		assert_eq!(net.shows(client, 7, "live/x"), None);
+		assert_eq!(net.shows(client, fresh, "live/x"), Some(true));
+		assert!(net.route(a, 7).is_none());
+		net.check().unwrap();
+	};
+	let build = |seqno| {
+		let mut net = Net::new(config(FLOORS, Requests::HopByHop), 5);
+		net.leaf(origin);
+		net.leaf(client);
+		net.join(origin, a, 1);
+		net.join(a, b, 1);
+		net.join(b, c, 1);
+		net.join(origin, c, 1);
+		net.join(client, a, 1);
+		net.disconnect(origin, c);
+		net.originate(origin, 7, seqno);
+		net.announce(origin, "live/x", 0, None);
+		assert!(net.run());
+		net
+	};
+
+	let mut net = build(VARINT_MAX - 2);
+	net.bump(origin);
+	assert!(net.run());
+	assert_eq!(net.proven(origin), 7);
+	net.bump(origin);
+	assert!(net.run());
+	rotated(&net);
+
+	let mut net = build(0);
+	net.age(origin, VARINT_MAX - 2);
+	net.announce(origin, "live/y", 0, None);
+	assert!(net.run());
+	assert_eq!(net.proven(origin), 7);
+	net.unannounce(origin, "live/y");
+	assert!(net.run());
+	rotated(&net);
+
+	// The origin moves to a farther attachment, and the starved node asks for
+	// the last seqno.
+	let mut net = build(VARINT_MAX - 1);
+	net.disconnect(origin, a);
+	net.connect(origin, c);
+	assert!(net.run());
+	rotated(&net);
+	assert!(net.route(a, net.proven(origin)).is_some());
+}
+
 /// The seqno request sketch: a starved node resends its request a few times
 /// and then gives up until an infeasible update arrives. Node b forwards along
 /// its route through x, whose own route just failed but whose retraction to b
@@ -715,19 +809,25 @@ fn sweep_requests_reach_a_quiet_origin() {
 }
 
 /// One change to a claim costs one batch per session carrying its origin's
-/// route and one event per node watching it; retained state follows sessions
-/// and live claims, and withdrawal history leaves nothing behind.
+/// route and one event per node watching it; retained state follows sessions,
+/// live claims, and current interest, and neither withdrawal history nor
+/// interest history leaves anything behind.
 #[test]
 fn announcement_cost_follows_sessions_and_live_claims() {
 	const PREFIXES: [&str; 4] = ["live/a", "live/b", "live/c", "live/d"];
 	let build = |relays: usize, claims: usize| {
-		let mut net = Net::new(Config::default(), relays + 1);
+		let mut net = Net::new(Config::default(), relays + 2);
 		for relay in 0..relays {
 			net.join(relay, (relay + 1) % relays, 1);
 		}
 		let origin = relays;
 		net.leaf(origin);
 		net.join(origin, 0, 1);
+		// A client watching a region with no claims yet.
+		let client = relays + 1;
+		net.leaf(client);
+		net.join(client, relays / 2, 1);
+		net.watch(client, "none/");
 		net.originate(origin, 7, 0);
 		for prefix in &PREFIXES[..claims] {
 			net.announce(origin, prefix, 0, None);
@@ -743,13 +843,14 @@ fn announcement_cost_follows_sessions_and_live_claims() {
 		let sessions = 2 * relays + 2;
 		let retained = net.retained();
 		assert_eq!(retained.items, relays * claims);
-		assert_eq!(retained.floors, relays);
+		assert_eq!(retained.floors, relays + 1);
 		assert_eq!(retained.heard, sessions * claims);
 
 		let (stats, events) = (net.stats, net.events.len());
 		net.unannounce(origin, PREFIXES[0]);
 		assert!(net.run());
-		assert_eq!(net.stats.claim_msgs - stats.claim_msgs, sessions);
+		// The client's session carries only the advanced floor.
+		assert_eq!(net.stats.claim_msgs - stats.claim_msgs, sessions + 1);
 		assert_eq!(net.stats.claim_items - stats.claim_items, sessions);
 		assert_eq!(net.events.len() - events, relays + 1, "once per node");
 
@@ -761,6 +862,23 @@ fn announcement_cost_follows_sessions_and_live_claims() {
 		let after = net.retained();
 		assert_eq!(after.items, relays * (claims - 1));
 		assert_eq!(after.floors, retained.floors, "no tombstones");
+		net.check().unwrap();
+
+		// The client cycles through disjoint regions, one with a live claim.
+		let client = relays + 1;
+		for cycles in [1, 16] {
+			for room in 0..cycles {
+				let region: &'static str = Box::leak(format!("room/{room}/").into_boxed_str());
+				net.watch(client, region);
+				assert!(net.run());
+				net.watch(client, PREFIXES[1]);
+				assert!(net.run());
+				assert_eq!(net.shows(client, 7, PREFIXES[1]), Some(true));
+			}
+			net.watch(client, "none/");
+			assert!(net.run());
+			assert_eq!(net.retained(), after, "interest history after {cycles} cycles");
+		}
 		net.check().unwrap();
 	}
 }

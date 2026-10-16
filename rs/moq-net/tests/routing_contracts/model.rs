@@ -38,7 +38,15 @@ pub type Metric = u64;
 
 /// An origin's claim revision: it advances on every change to the origin's own
 /// claims, starting from zero with each routing identity.
-pub type Rev = u32;
+pub type Rev = u64;
+
+/// An origin's route seqno.
+pub type Seqno = u64;
+
+/// The largest QUIC varint, which carries both a seqno and a revision. An
+/// origin never advertises it: reaching it rotates the identity instead, so
+/// every advertised seqno leaves room for the successor a request asks for.
+pub const VARINT_MAX: u64 = (1 << 62) - 1;
 
 /// How link costs accumulate.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -215,7 +223,7 @@ pub struct Grant {
 /// What a node advertises for one identity.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Advert {
-	seqno: u32,
+	seqno: Seqno,
 	metric: Metric,
 	down_only: bool,
 }
@@ -240,7 +248,7 @@ enum Msg {
 	/// the interest it answers, as the request a stream belongs to does.
 	Claims { id: Id, view: View, interest: u32 },
 	/// ROUTE_REQUEST, toward the neighbor whose route the sender would use.
-	Request { id: Id, seqno: u32 },
+	Request { id: Id, seqno: Seqno },
 }
 
 /// A route a node holds from one neighbor.
@@ -256,7 +264,7 @@ struct Entry {
 pub struct Selected {
 	/// The neighbor it goes through, or `None` when this node is the identity.
 	pub next: Option<Node>,
-	pub seqno: u32,
+	pub seqno: Seqno,
 	/// This node's metric.
 	pub metric: Metric,
 	/// The metric the next hop advertised.
@@ -268,7 +276,7 @@ pub struct Selected {
 /// A seqno request a node keeps.
 #[derive(Clone, Debug)]
 struct Pending {
-	seqno: u32,
+	seqno: Seqno,
 	/// Neighbors it forwards the request for; empty when only its own.
 	from: BTreeSet<Node>,
 	/// The neighbor it last sent the request to.
@@ -318,10 +326,11 @@ impl View {
 				*entry = (*entry).max(floor);
 			}
 		}
+		// An item stays only while a kept floor still certifies it.
 		let items = self
 			.items
 			.iter()
-			.filter(|(claim, _)| overlaps(claim, prefix))
+			.filter(|(claim, _)| floors.keys().any(|region| overlaps(claim, region)))
 			.map(|(claim, item)| (*claim, *item))
 			.collect();
 		View { floors, items }
@@ -465,13 +474,13 @@ struct State {
 	proven: Option<Id>,
 	/// Identities this node serves itself, with their seqnos: its proven one,
 	/// plus any it forges.
-	origins: BTreeMap<Id, u32>,
+	origins: BTreeMap<Id, Seqno>,
 	/// Whether this node advertises identities it does not serve.
 	transit: bool,
 	rx: BTreeMap<Id, BTreeMap<Node, Entry>>,
 	/// For a key this node qualified, the identity the neighbor named.
 	filed: BTreeMap<(Node, Id), Id>,
-	fd: BTreeMap<Id, (u32, Metric)>,
+	fd: BTreeMap<Id, (Seqno, Metric)>,
 	sent: BTreeMap<(Node, Id), Reach>,
 	/// ROUTE_ENDs sent to each neighbor that it has not echoed back yet. Until
 	/// they all return, a neighbor may still hold this node's advertisement,
@@ -487,14 +496,13 @@ struct State {
 	/// Each origin's claims as this node knows them; authoritative for its own.
 	views: BTreeMap<Id, View>,
 	/// After the interest widened, the region each view is still current in:
-	/// the rest stayed frozen while unwatched, so it is hidden until a floor
-	/// covering the whole interest arrives in answer to that interest.
+	/// the rest is hidden until a batch answering the new interest arrives.
 	current: BTreeMap<Id, &'static str>,
 	/// The last view each neighbor sent, per identity.
 	heard: BTreeMap<(Node, Id), View>,
 	sent_views: BTreeMap<(Node, Id), View>,
 	shown: BTreeMap<(Id, &'static str), Shown>,
-	/// How many times this node restarted or collected an origin.
+	/// How many times this node restarted, collected an origin, or retired a region.
 	forgot: u32,
 }
 
@@ -734,7 +742,7 @@ impl Net {
 	}
 
 	/// `node` starts originating `id` at seqno `seqno`, proving it on every session.
-	pub fn originate(&mut self, node: Node, id: Id, seqno: u32) {
+	pub fn originate(&mut self, node: Node, id: Id, seqno: Seqno) {
 		assert_eq!(id & QUALIFIED, 0, "a key-derived identity is never qualified");
 		let state = &mut self.nodes[node];
 		state.proven = Some(id);
@@ -750,7 +758,7 @@ impl Net {
 	}
 
 	/// `node` advertises `id` as if forwarding it, without proving it.
-	pub fn forge(&mut self, node: Node, id: Id, seqno: u32) {
+	pub fn forge(&mut self, node: Node, id: Id, seqno: Seqno) {
 		self.nodes[node].origins.insert(id, seqno);
 		self.advertise(node);
 	}
@@ -759,8 +767,33 @@ impl Net {
 	pub fn bump(&mut self, node: Node) {
 		let state = &mut self.nodes[node];
 		let id = state.proven.expect("not an origin");
-		*state.origins.get_mut(&id).unwrap() += 1;
+		let seqno = state.origins.get_mut(&id).unwrap();
+		if *seqno + 1 >= VARINT_MAX {
+			return self.rotate(node);
+		}
+		*seqno += 1;
 		self.advertise(node);
+	}
+
+	/// The origin at `node` retires its identity for a fresh one and announces
+	/// its claims again there: what it does instead of advancing a seqno or a
+	/// revision to [`VARINT_MAX`]. Every node lets the old identity go.
+	fn rotate(&mut self, node: Node) {
+		let state = &mut self.nodes[node];
+		let old = state.proven.expect("not an origin");
+		state.origins.remove(&old);
+		let claims = state.views.remove(&old).map(|view| view.items).unwrap_or_default();
+		self.originate(node, fnv("rotate", &[old]) & !QUALIFIED, 0);
+		for (claim, item) in claims {
+			self.change(node, claim, Some((item.seed, item.epoch)));
+		}
+	}
+
+	/// Jump the origin's revision to `rev`, as a long-lived origin's claim
+	/// changes reach it.
+	pub fn age(&mut self, node: Node, rev: Rev) {
+		let id = self.proven(node);
+		self.nodes[node].views.get_mut(&id).unwrap().floors.insert("", rev);
 	}
 
 	/// The identity `node` proves.
@@ -774,7 +807,7 @@ impl Net {
 	}
 
 	/// The origin's current seqno.
-	pub fn seqno(&self, node: Node) -> u32 {
+	pub fn seqno(&self, node: Node) -> Seqno {
 		let state = &self.nodes[node];
 		state.origins[&state.proven.expect("not an origin")]
 	}
@@ -793,6 +826,10 @@ impl Net {
 		let id = self.nodes[node].proven.expect("not an origin");
 		let view = self.nodes[node].views.get_mut(&id).unwrap();
 		let rev = view.floors[""] + 1;
+		if rev >= VARINT_MAX {
+			self.rotate(node);
+			return self.change(node, claim, attrs);
+		}
 		view.floors.insert("", rev);
 		let item = attrs.map(|(seed, epoch)| Item {
 			seed,
@@ -808,6 +845,10 @@ impl Net {
 	}
 
 	/// The prefix `node` asks its neighbors for announcements under.
+	///
+	/// A new interest is a new stream: the old stream's batches still in flight
+	/// are discarded, and each neighbor starts the new stream with a complete
+	/// snapshot, which retires what the node knew outside the new interest.
 	pub fn watch(&mut self, node: Node, prefix: &'static str) {
 		let state = &mut self.nodes[node];
 		if !prefix.starts_with(state.watch) {
@@ -821,6 +862,7 @@ impl Net {
 		state.interest += 1;
 		let peers: Vec<Node> = self.peers(node).collect();
 		for peer in peers {
+			self.nodes[peer].sent_views.retain(|(to, _), _| *to != node);
 			self.advertise(peer);
 		}
 		self.advertise(node);
@@ -1081,13 +1123,23 @@ impl Net {
 					_ => view,
 				};
 				let state = &mut self.nodes[at];
-				if interest == state.interest && view.floors.keys().any(|region| state.watch.starts_with(region)) {
-					state.current.remove(&id);
+				if interest != state.interest {
+					// A batch from a stream the node has since replaced.
+					return;
 				}
+				state.current.remove(&id);
 				if let Freshness::Floors { scoped } = self.cfg.freshness
 					&& !state.origins.contains_key(&id)
 				{
-					state.views.entry(id).or_default().merge(&view, scoped);
+					let merged = state.views.entry(id).or_default();
+					merged.merge(&view, scoped);
+					// The batch certifies the whole interest, wildcards above it
+					// included, so what lies outside can go.
+					let kept = merged.restrict(state.watch);
+					if kept != *merged {
+						*merged = kept;
+						state.forgot += 1;
+					}
 				}
 				state.heard.insert((from, id), view);
 			}
@@ -1096,11 +1148,16 @@ impl Net {
 		self.advertise(at);
 	}
 
-	fn request_received(&mut self, at: Node, from: Node, id: Id, seqno: u32) {
+	fn request_received(&mut self, at: Node, from: Node, id: Id, seqno: Seqno) {
 		let state = &mut self.nodes[at];
 		if let Some(own) = state.origins.get_mut(&id) {
 			// Only the origin advances its seqno to answer.
-			*own = (*own).max(seqno);
+			if seqno >= VARINT_MAX {
+				assert_eq!(state.proven, Some(id), "a forged identity ran out of seqnos");
+				self.rotate(at);
+			} else {
+				*own = (*own).max(seqno);
+			}
 			return;
 		}
 		if self.route(at, id).is_some_and(|route| route.seqno >= seqno) {
@@ -1130,7 +1187,7 @@ impl Net {
 		}
 	}
 
-	fn send_request(&mut self, node: Node, to: Node, id: Id, seqno: u32) {
+	fn send_request(&mut self, node: Node, to: Node, id: Id, seqno: Seqno) {
 		self.stats.requests += 1;
 		let id = self.name(node, to, id);
 		self.queues
@@ -1331,9 +1388,12 @@ impl Net {
 				let view = view.clone();
 				self.nodes[node].views.insert(id, view);
 			}
-			if !self.nodes[node].transit && !self.nodes[node].origins.contains_key(&id) {
+			// A leaf advertises only what it serves, and ends what it stopped serving.
+			let serves = self.nodes[node].transit || self.nodes[node].origins.contains_key(&id);
+			if !serves && !self.nodes[node].sent.keys().any(|(_, sent)| *sent == id) {
 				continue;
 			}
+			let selected = selected.filter(|_| serves);
 			// The feasibility distance tracks finite updates actually sent (RFC 8966 s3.7.3).
 			if let Some(selected) = selected
 				&& peers
@@ -1342,7 +1402,7 @@ impl Net {
 			{
 				self.record(node, id, selected);
 			}
-			let live = self.live(node, id);
+			let live = serves && self.live(node, id);
 			let view = self.adopted(node, id).cloned().unwrap_or_default();
 			for &peer in &peers {
 				let upstream = self.links[&(node, peer)].upstream;
