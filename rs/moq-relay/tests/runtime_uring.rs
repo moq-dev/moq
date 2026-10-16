@@ -872,3 +872,56 @@ async fn stall_after_hello(server: SocketAddr) -> SocketAddr {
 	});
 	addr
 }
+
+#[path = "support/logs.rs"]
+mod logs;
+
+/// The harness keeps only the connection target, including its span on worker and shared tasks.
+#[tokio::test]
+async fn uring_sessions_log_their_close_under_a_connection_span() {
+	use tracing_subscriber::layer::SubscriberExt;
+	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	if !supported() {
+		return;
+	}
+	let logs = logs::Logs::default();
+	let subscriber = tracing_subscriber::fmt()
+		.with_ansi(false)
+		.with_writer(logs.clone())
+		.finish()
+		.with(tracing_subscriber::filter::Targets::new().with_target("moq_relay::connection", tracing::Level::INFO));
+	// Worker threads need the same dispatcher as the shared runtime.
+	tracing::subscriber::set_global_default(subscriber).expect("test owns the global subscriber");
+	let dir = tempfile::tempdir().unwrap();
+	let (cert, key) = certificate(dir.path());
+	let relay = Relay::load(uring_config(&cert, &key))
+		.await
+		.unwrap()
+		.with_signals(false);
+	let port = relay.addr().unwrap().port();
+	let trigger = relay.shutdown_trigger().clone();
+	let running = tokio::spawn(relay.run());
+	for scheme in ["moql", "https"] {
+		let url = format!("{scheme}://127.0.0.1:{port}/logs").parse().unwrap();
+		let connection = connect(client(), url).await;
+		tokio::time::timeout(TIMEOUT, logs.wait_for("negotiated"))
+			.await
+			.expect("negotiated log missing");
+		let _ = connection.close().await;
+	}
+	trigger.start();
+	tokio::time::timeout(TIMEOUT, running).await.unwrap().unwrap().unwrap();
+	let text = logs.text();
+	let negotiated: Vec<_> = text.lines().filter(|line| line.contains("negotiated")).collect();
+	let closed: Vec<_> = text.lines().filter(|line| line.contains("connection closed")).collect();
+	assert_eq!(negotiated.len(), 2, "{text}");
+	assert_eq!(closed.len(), 2, "{text}");
+	for id in 0..2 {
+		for lines in [&negotiated, &closed] {
+			assert!(
+				lines.iter().any(|line| line.contains(&format!("conn{{id={id} "))),
+				"missing conn {id}: {text}"
+			);
+		}
+	}
+}

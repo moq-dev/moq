@@ -21,8 +21,9 @@ use std::task::Poll;
 
 use anyhow::Context as _;
 use futures::FutureExt as _;
+use tracing::Instrument;
 
-use crate::{auth, cluster, refusals::Refusal, shutdown};
+use crate::{auth, cluster, connection::Lifecycle, shutdown};
 
 /// A stop signal a worker parks on, wakeable from the shared runtime.
 #[derive(Default)]
@@ -569,12 +570,15 @@ fn serve_worker(spawn: Spawn) -> bool {
 					let id = serve.cluster.next_connection_id();
 					let conn_handle = accept_handle.clone();
 					let serve = serve.clone();
-					let connection = async move {
-						if let Err(err) = serve_connection(conn_handle, conn, id, serve).await {
-							tracing::warn!(id, %err, "connection closed");
-						}
-					};
-					accept_handle.spawn(moq_tokio::panic::isolate(connection).map(drop));
+					let lifecycle =
+						Lifecycle::new(serve.cluster.clone(), serve.auth.clone(), id, Some(conn.remote_addr()))
+							.with_shutdown(serve.shutdown.clone())
+							.with_sessions(serve.sessions.clone());
+					accept_handle.spawn(async move {
+						lifecycle
+							.run(serve_connection(conn_handle, conn, serve, &lifecycle))
+							.await;
+					});
 				}
 				Err(err) => {
 					let _ = accept_failures
@@ -636,8 +640,8 @@ impl Deadline {
 async fn serve_connection(
 	handle: moq_uring::Handle,
 	conn: moq_uring::quic::Connection,
-	id: u64,
 	serve: Serve,
+	lifecycle: &Lifecycle,
 ) -> anyhow::Result<()> {
 	use web_transport_trait::poll::Session as _;
 
@@ -740,75 +744,20 @@ async fn serve_connection(
 	auth_request.alpn = alpn.clone();
 	auth_request.role = request.role().and_then(crate::auth::role);
 	auth_request.tls = identity.as_ref().and_then(crate::auth::peer);
-	let mut registration = None;
-	let admitted = if cluster::Cluster::is_lan_path(&path) {
-		let lease = match cluster::Cluster::lan_credential(&path) {
-			Some(presented) => match serve.cluster.verify_lan_credential(presented) {
-				Some(true) => serve.auth.admit_fixed("/", serve.cluster.lan_peer_grant()),
-				Some(false) => {
-					serve.cluster.refusals.record(Refusal::Lan);
-					request.close(moq_net::Error::Unauthorized);
-					anyhow::bail!("LAN peer did not present this listener's membership proof");
+	let admission = lifecycle.clone();
+	let (admitted, registration) = match lifecycle
+		.shared(&serve.tokio, async move { admission.admit(auth_request).await })
+		.await?
+	{
+		Ok(admitted) => admitted,
+		Err(err) => {
+			request.close(match err.status {
+				axum::http::StatusCode::UNAUTHORIZED | axum::http::StatusCode::FORBIDDEN => {
+					moq_net::Error::Unauthorized
 				}
-				None => {
-					serve.cluster.refusals.record(Refusal::Lan);
-					request.close(moq_net::Error::Unauthorized);
-					anyhow::bail!("/.cluster request refused: LAN discovery is not enabled");
-				}
-			},
-			None => {
-				serve.cluster.refusals.record(Refusal::Lan);
-				request.close(moq_net::Error::Unauthorized);
-				anyhow::bail!("LAN peer did not present a membership proof");
-			}
-		};
-		match serve.cluster.scope(lease, &auth_request) {
-			Ok(admitted) => admitted,
-			Err(err) => {
-				serve.cluster.refusals.record((&err).into());
-				request.close(moq_net::Error::Unauthorized);
-				return Err(err.into());
-			}
-		}
-	} else {
-		if identity.is_some() {
-			tracing::debug!(id, "client certificate verified; reported to the auth server");
-		}
-		let auth = serve.auth.clone();
-		let cluster = serve.cluster.clone();
-		let sessions = serve.sessions.clone();
-		let shutdown = serve.shutdown.clone();
-		match serve
-			.tokio
-			.spawn(async move {
-				// Abandoned at the drain deadline: worker teardown only detaches this task.
-				let admitted = shutdown
-					.admit(cluster.admit_session(&auth, auth_request.clone()))
-					.await?;
-				Ok::<_, crate::auth::Error>((admitted, sessions.register(auth_request)))
-			})
-			.await
-			.context("auth task failed")?
-		{
-			Ok((admitted, registered)) => {
-				registration = Some(registered);
-				admitted
-			}
-			Err(err) => {
-				serve.cluster.refusals.record((&err).into());
-				// The status is what separates "your credential is bad" from "the
-				// auth server is down". Collapsing both into Unauthorized tells a
-				// client to stop reconnecting through an outage it could have
-				// waited out.
-				let status = axum::http::StatusCode::from(&err);
-				request.close(match status {
-					axum::http::StatusCode::UNAUTHORIZED | axum::http::StatusCode::FORBIDDEN => {
-						moq_net::Error::Unauthorized
-					}
-					other => moq_net::Error::App(other.as_u16()),
-				});
-				return Err(anyhow::Error::new(err).context("authentication failed"));
-			}
+				other => moq_net::Error::App(other.as_u16()),
+			});
+			return Err(err.source);
 		}
 	};
 
@@ -835,24 +784,16 @@ async fn serve_connection(
 			err => tracing::debug!(%err, "session driver ended"),
 		}
 	};
-	handle.spawn(moq_tokio::panic::isolate(driver).map(drop));
+	handle.spawn(moq_tokio::panic::isolate(driver).in_current_span().map(drop));
 
-	tracing::info!(id, version = %session.version(), %transport, "negotiated");
-
-	// The session handle is Send + Sync however its transport is driven, so
-	// its lifecycle (credential expiry, GOAWAY drain) lives with the timers
-	// and the shutdown broadcast on the shared runtime.
-	let shutdown = serve.shutdown.clone();
-	serve.tokio.spawn(moq_tokio::panic::isolate(async move {
-		match crate::connection::supervise(session, lease, shutdown, registration).await {
-			// A lease or shutdown ending the session closes it too: logged, so every
-			// accepted connection pairs with its end.
-			Ok(()) => tracing::info!(id, "connection closed"),
-			Err(err) => tracing::warn!(id, %err, "connection closed"),
-		}
-	}));
-
-	Ok(())
+	// The driver stays on this worker; admission and supervision share the same
+	// lifecycle owner on the runtime that owns auth's HTTP client and timers.
+	let supervisor = lifecycle.clone();
+	lifecycle
+		.shared(&serve.tokio, async move {
+			supervisor.supervise(session, lease, registration, transport).await
+		})
+		.await?
 }
 
 #[cfg(test)]
