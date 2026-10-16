@@ -103,6 +103,9 @@ on the browser's WebTransport, which cannot rank a datagram against
 a stream, so it ignores the handle and order and keeps its current
 best-effort send. Wire: none.
 
+Docs: the Priority row in `doc/concept/moq-lite.md` says datagrams are not
+part of the equal-priority byte split yet; drop that once they are.
+
 ## Related
 
 - [Scope track priority](/quest/m1/track-priority-scope.md) - owns what a

@@ -17,7 +17,7 @@ every connect; it remains for GOAWAY drains and publisher replacement.
 The origin side is done: a handle resolved through a peer keeps serving new
 requests while the peer's epochless replacement is held, and refuses them
 with `Unroutable` only once the `Restart` is deliverable (`Release` in `rs/moq-net/src/model/origin.rs`,
-`rs/moq-net/tests/replacement.rs`). So a consumer that never follows `Restart`
+`rs/moq-net/tests/integration/replacement.rs`). So a consumer that never follows `Restart`
 works through the hold (300 ms by default), and its open subscriptions stay
 sticky on the old session until it closes, where they end cleanly. A
 consumer that opens a request after the hold, or reads past the old
@@ -45,7 +45,7 @@ Audit and fix:
 - The interop clients under `test/interop/clients`, where they resolve a
   broadcast themselves.
 
-Regression: extend `rs/moq-net/tests/replacement.rs` (or the consumer's own
+Regression: extend `rs/moq-net/tests/integration/replacement.rs` (or the consumer's own
 tests) so each follower reads past the old session's close after an
 epochless replacement. Then run `just test interop --all`.
 
