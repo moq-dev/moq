@@ -2932,7 +2932,7 @@ fn consume_announced_local() {
 	// Start waiting before the broadcast exists: the announcement arrives afterwards.
 	let cb = Callback::new();
 	let path = b"live";
-	let _task = id(unsafe {
+	let task = id(unsafe {
 		moq_origin_announced_broadcast(
 			origin,
 			path.as_ptr() as *const c_char,
@@ -2947,9 +2947,10 @@ fn consume_announced_local() {
 	let format = moq_audio_format::MOQ_AUDIO_FORMAT_OPUS;
 	let media = id(publish_audio(broadcast, format, &init, None));
 
-	// First the broadcast handle, then a terminal 0 once the wait finishes.
+	// The broadcast handle; the wait carries on for the next instance until cancelled.
 	let consume = id(cb.recv());
-	assert_eq!(cb.recv_terminal(), 0, "wait delivers terminal 0 after the handle");
+	assert_eq!(moq_origin_announced_broadcast_cancel(task), 0);
+	assert_eq!(cb.recv_terminal(), 0, "cancel delivers terminal 0");
 
 	// The delivered handle behaves like one from moq_origin_request.
 	let catalog_cb = Callback::new();
@@ -3110,6 +3111,45 @@ fn consume_announced_close_cancels() {
 		"double-close should fail"
 	);
 
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
+/// Publish `path` on `origin` under a fresh epoch, as each run of a publisher does. The C ABI
+/// announces without one, so this reaches past it.
+fn publish_run(origin: u32, path: &str) -> moq_net::broadcast::Producer {
+	let _runtime = crate::ffi::RUNTIME.enter();
+	let route = moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint());
+	let origin = crate::Id::try_from(origin).unwrap();
+	State::lock().origin.get(origin).unwrap().publish(path, route).unwrap()
+}
+
+/// Another publisher instance taking the path delivers a fresh handle on the same wait.
+#[test]
+fn consume_announced_follows_a_restart() {
+	let origin = id(moq_origin_create());
+	let cb = Callback::new();
+	let path = b"live";
+	let task = id(unsafe {
+		moq_origin_announced_broadcast(
+			origin,
+			path.as_ptr() as *const c_char,
+			path.len(),
+			Some(channel_callback),
+			cb.ptr,
+		)
+	});
+
+	let first_run = publish_run(origin, "live");
+	let first = id(cb.recv());
+	let second_run = publish_run(origin, "live");
+	let second = id(cb.recv());
+	assert_ne!(first, second, "the restart delivered the old handle");
+
+	assert_eq!(moq_consume_close(first), 0);
+	assert_eq!(moq_consume_close(second), 0);
+	assert_eq!(moq_origin_announced_broadcast_cancel(task), 0);
+	assert_eq!(cb.recv_terminal(), 0, "cancel delivers terminal 0");
+	drop((first_run, second_run));
 	assert_eq!(moq_origin_close(origin), 0);
 }
 

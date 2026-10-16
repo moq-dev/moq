@@ -242,11 +242,11 @@ impl Origin {
 		Ok(())
 	}
 
-	/// Wait until the broadcast at `path` is announced, then deliver its handle via the callback.
+	/// Follow the broadcast at `path`, delivering each publisher instance's handle via the callback.
 	///
-	/// The callback fires the broadcast handle (> 0) once announced, then a terminal `0`. On error
-	/// or cancellation it fires a single terminal code (`0` on close, negative on error). Returns a
-	/// task handle for cancellation via [`Self::consume_announced_close`].
+	/// The callback fires a broadcast handle (> 0) for each instance serving the path, until a
+	/// single terminal code (`0` on close, negative on error). Returns a task handle for
+	/// cancellation via [`Self::consume_announced_close`].
 	pub fn consume_announced(&mut self, origin: Id, path: String, on_broadcast: OnStatus) -> Result<Id, Error> {
 		let origin = self.active.get(origin).ok_or(Error::OriginNotFound)?;
 		origin.driver.check()?;
@@ -282,27 +282,61 @@ impl Origin {
 		path: String,
 		mut close: oneshot::Receiver<()>,
 	) -> Result<(), Error> {
-		// `routed_broadcast` rides out the churn between something covering the path
-		// and the path actually resolving (failover, an advertise-only announce
-		// racing its handler). `biased` so a pending close always wins.
-		let broadcast = tokio::select! {
-			biased;
-			_ = &mut close => return Ok(()),
-			resolved = consumer.routed_broadcast(path.as_str()) => match resolved {
-				Ok(broadcast) => broadcast,
-				// An unreachable path and a closed origin both mean no broadcast
-				// can ever arrive here.
-				Err(moq_net::Error::Unauthorized | moq_net::Error::Closed) => {
-					return Err(Error::BroadcastNotFound);
-				}
-				Err(err) => return Err(err.into()),
-			},
+		// An unreachable path and a closed origin both mean no broadcast can ever arrive here.
+		let mut follow = match consumer.follow(path.as_str()) {
+			Ok(follow) => follow,
+			Err(moq_net::Error::Unauthorized) => return Err(Error::BroadcastNotFound),
+			Err(err) => return Err(err.into()),
 		};
+		let mut delivered = false;
 
-		// Hold the lock only to buffer the broadcast; release it before the callback.
-		let broadcast_id = State::lock().consume.start(broadcast, Some(consumer))?;
-		callback.call(broadcast_id);
-		Ok(())
+		// Deliver each publisher instance serving the path: the first, then each one that takes
+		// over or returns. `biased` so a pending close always wins.
+		loop {
+			// Apply every change on hand before resolving, so a burst of them delivers only the
+			// instance serving the path now.
+			let mut unseen = false;
+			loop {
+				let event = match follow.poll_next(&kio::Waiter::noop()) {
+					std::task::Poll::Ready(event) => event,
+					std::task::Poll::Pending if unseen => break,
+					std::task::Poll::Pending => tokio::select! {
+						biased;
+						_ = &mut close => return Ok(()),
+						event = follow.next() => event,
+					},
+				};
+				match event {
+					None if delivered => return Ok(()),
+					None => return Err(Error::BroadcastNotFound),
+					Some(moq_net::announce::Event::Start(_) | moq_net::announce::Event::Restart(_)) => unseen = true,
+					Some(moq_net::announce::Event::End(_)) => unseen = false,
+					// The same instance over another route, which its subscriptions ride out.
+					Some(moq_net::announce::Event::Update(_)) => {}
+				}
+			}
+
+			// `routed_broadcast` rides out the churn between something covering the path
+			// and the path actually resolving (failover, an advertise-only announce
+			// racing its handler).
+			let broadcast = tokio::select! {
+				biased;
+				_ = &mut close => return Ok(()),
+				resolved = consumer.routed_broadcast(path.as_str()) => match resolved {
+					Ok(broadcast) => broadcast,
+					Err(moq_net::Error::Closed) if delivered => return Ok(()),
+					Err(moq_net::Error::Unauthorized | moq_net::Error::Closed) => {
+						return Err(Error::BroadcastNotFound);
+					}
+					Err(err) => return Err(err.into()),
+				},
+			};
+
+			// Hold the lock only to buffer the broadcast; release it before the callback.
+			let broadcast_id = State::lock().consume.start(broadcast, Some(consumer.clone()))?;
+			callback.call(broadcast_id);
+			delivered = true;
+		}
 	}
 
 	/// Request the broadcast at `path`, delivering its handle once it can be served.

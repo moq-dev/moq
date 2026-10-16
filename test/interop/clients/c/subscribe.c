@@ -74,8 +74,9 @@ static void on_frame(void *ud, int32_t frame) {
     moq_consume_frame_free((uint32_t)frame);
 }
 
-// Delivers the broadcast handle once it's announced, then once more with a
-// terminal code (<= 0). Store the first positive handle and wake main.
+// Delivers a broadcast handle for each publisher instance serving the path, then
+// a terminal code (<= 0). Store the first positive handle and wake main; one frame
+// is all this client reads, so a later instance's handle is freed unread.
 static void on_broadcast(void *ud, int32_t broadcast) {
     ctx_t *c = (ctx_t *)ud;
     if (broadcast <= 0) { // 0 = ended, negative = error
@@ -83,11 +84,13 @@ static void on_broadcast(void *ud, int32_t broadcast) {
         return;
     }
     pthread_mutex_lock(&c->mu);
-    if (c->broadcast <= 0) {
+    int first = c->broadcast <= 0;
+    if (first) {
         c->broadcast = broadcast;
         pthread_cond_broadcast(&c->cv);
     }
     pthread_mutex_unlock(&c->mu);
+    if (!first) moq_consume_close((uint32_t)broadcast);
 }
 
 static void on_catalog(void *ud, int32_t catalog) {
