@@ -368,6 +368,11 @@ These land with the next breaking release, not the 2026-09-23 train.
   (`source.catalog(format)`) and narrow it with `catalog::Stream::select`
   before constructing the export. `moq export flv` still applies the same
   rendition flags.
+- **A timed track refuses a group that rewinds.** A group whose first frame
+  starts before a lower-sequence group's, or after a higher one's, fails the
+  write with `TimestampMismatch`, and a received one closes the track. A
+  publisher whose timeline restarts, such as an HLS `EXT-X-DISCONTINUITY` that
+  resets decode times, publishes a new broadcast instead.
 - **A track is timed or untimed, and nothing fills in a timestamp on
   receive.** An untimed track (no timescale) arrives untimed, except over
   moq-lite 05 and later, which can't encode absence yet and carry a send time

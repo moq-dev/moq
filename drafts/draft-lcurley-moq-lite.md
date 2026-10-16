@@ -174,6 +174,7 @@ A Group Stream normally starts at frame 0, but MAY start later when the publishe
 
 Each frame of a timed Track carries a presentation timestamp expressed in the Track's `Timescale` (see [TRACK_INFO](#track-info)), used by the moq-lite layer for [expiration](#expiration) decisions.
 A Track without a `Timescale` is untimed: its frames and datagrams carry no timestamp.
+A timed Group's frame 0 timestamp MUST NOT be earlier than that of any lower-sequence Group; a receiver closes the Track with TIMESTAMP_MISMATCH when one is.
 lite-05 and lite-06 cannot encode an untimed Track, so a publisher on those versions declares a `Timescale` of 1000 for it and stamps every frame and datagram with its send time in milliseconds.
 
 ## Positions {#positions}
@@ -351,7 +352,7 @@ Sent when resetting a stream (RESET_STREAM), or when refusing to receive one (ST
 | ------- | ------------- | ----------- |
 |  0x38  | FRAME_TOO_LARGE | A frame declared a payload larger than the receiver accepts. |
 | ------- | ------------- | ----------- |
-|  0x39  | TIMESTAMP_MISMATCH | A frame's timestamp does not match its track's timescale. |
+|  0x39  | TIMESTAMP_MISMATCH | A frame's timestamp does not fit its track: it disagrees with the track's timescale, or starts a group earlier than the group before it. |
 | ------- | ------------- | ----------- |
 |  0x3A  | NOT_FETCHABLE | The FETCH named a group delivered only as a datagram, which is never cached (see [Datagrams](#datagrams)). It has no moq-transport value; a bridge refuses the FETCH with DOES_NOT_EXIST. |
 | ------- | ------------- | ----------- |
@@ -1571,6 +1572,7 @@ The `Message Length` describes the payload size on the wire.
 
 ## moq-lite-07
 
+- A timed Group's frame 0 timestamp must not be earlier than a lower-sequence Group's; TIMESTAMP_MISMATCH covers a violation.
 - Added the reliable ordered RTCDataChannel binding, with one Qmux Record per binary message and no datagrams.
 
 - Added `Group Order` to SUBSCRIBE and SUBSCRIBE_UPDATE: descending (0x0, the previous fixed order) or ascending (0x1). A relay requests descending upstream unless every subscription it serves is ascending.

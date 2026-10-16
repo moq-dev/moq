@@ -3627,12 +3627,13 @@ where
 				// Return the refusal to the dispatcher so it sends STOP_SENDING.
 				return Err(err);
 			}
-			// The track is malformed, not just this group, so no later group is trusted.
-			Err(Error::MalformedTrack) => {
-				tracing::warn!(group = %producer.sequence, "malformed track");
-				let _ = producer.abort(Error::MalformedTrack);
-				let _ = track.abort(Error::MalformedTrack);
-				return Err(Error::MalformedTrack);
+			// The track is malformed, not just this group, so no later group is trusted. A
+			// timestamp that doesn't fit the track (one that rewinds, say) is the same.
+			Err(err @ (Error::MalformedTrack | Error::TimestampMismatch)) => {
+				tracing::warn!(%err, group = %producer.sequence, "malformed track");
+				let _ = producer.abort(err.clone());
+				let _ = track.abort(err.clone());
+				return Err(err);
 			}
 			// The peer reset the stream, the transport failed, or the track went away.
 			Err(err) => {
@@ -4132,8 +4133,8 @@ where
 					*state = Fill::Done;
 				}
 				// As for a subgroup object: the track is malformed, not just this fill.
-				if matches!(err, Error::MalformedTrack) {
-					let _ = track.abort(Error::MalformedTrack);
+				if matches!(err, Error::MalformedTrack | Error::TimestampMismatch) {
+					let _ = track.abort(err.clone());
 				}
 				return Err(err);
 			}
@@ -12403,6 +12404,29 @@ mod stitch_tests {
 		let (sequence, frames) = read_group(&mut consumer).await;
 		assert_eq!(sequence, SEQUENCE + 1);
 		assert_eq!(frames[0].1, b"next");
+		assert!(h.session.log.closes().is_empty());
+	}
+
+	/// A group whose first object rewinds past the group before it condemns the track,
+	/// not just its stream, and the session stays up.
+	#[moq_net_sim::test]
+	async fn a_rewound_group_aborts_the_track() {
+		use futures::FutureExt;
+
+		let mut h = Harness::new(Fill::Done, vec![draft18_subgroup(SEQUENCE, true, 0, &[b"rewound"])]);
+		h.subscriber.version = Version::Draft18;
+		// Starts past the incoming group's first object, at `timestamp(0)`.
+		let mut before = h.track.create_group((SEQUENCE - 1).into()).unwrap();
+		before.write_frame(timestamp(4000), b"before".as_slice()).unwrap();
+		before.finish().unwrap();
+
+		let mut stream = read_draft18(&h.session).await;
+		let res = h.subscriber.clone().recv_group(&mut stream).await;
+		assert!(matches!(res, Err(Error::TimestampMismatch)), "{res:?}");
+		assert!(matches!(
+			h.track.closed().now_or_never(),
+			Some(Error::TimestampMismatch)
+		));
 		assert!(h.session.log.closes().is_empty());
 	}
 

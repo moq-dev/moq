@@ -4,7 +4,16 @@ import { Signal } from "@moq/signals";
 import type { Grant } from "../auth.ts";
 import type { Probe as ProbeStats } from "../connection/stats.ts";
 import * as Epoch from "../epoch.ts";
-import { error, fromTransport, ProtocolViolation, reason, SessionCode, StreamCode, StreamError } from "../error.ts";
+import {
+	error,
+	fromTransport,
+	ProtocolViolation,
+	reason,
+	SessionCode,
+	StreamCode,
+	StreamError,
+	TimestampMismatch,
+} from "../error.ts";
 import { HopSchema, isAnonymous, MAX_HOPS, Route, UNKNOWN_HOP } from "../hop.ts";
 import * as Path from "../path.ts";
 import { Reader, Writer } from "../stream.ts";
@@ -929,13 +938,17 @@ function fakeSession(park: number[] = [], stall: number[] = []) {
 	return { quic, streams, opened, closes };
 }
 
-async function answerTrackInfo(stream: FakeStream, version: Version = Version.DRAFT_05): Promise<void> {
+async function answerTrackInfo(
+	stream: FakeStream,
+	version: Version = Version.DRAFT_05,
+	timescale?: number,
+): Promise<void> {
 	const chunks: Uint8Array[] = [];
 	const writer = new Writer(
 		new WritableStream<Uint8Array>({ write: (chunk) => void chunks.push(new Uint8Array(chunk)) }),
 		version,
 	);
-	await new TrackInfo({}).encode(writer, version);
+	await new TrackInfo({ timescale }).encode(writer, version);
 	for (const chunk of chunks) stream.inbound.enqueue(chunk);
 	stream.inbound.close();
 }
@@ -1672,6 +1685,50 @@ test("a local unsubscribe owes no SUBSCRIBE_END", async () => {
 	} finally {
 		responses.mockRestore();
 		ordered.close();
+		track.close();
+		broadcast.close();
+		subscriber.close();
+	}
+});
+
+// A lite-07 group stream carrying one frame at `timestamp` (zigzag delta from 0) in the track's scale.
+async function groupStream(timestamp: number): Promise<Reader> {
+	const chunks: Uint8Array[] = [];
+	const writer = new Writer(
+		new WritableStream<Uint8Array>({ write: (chunk) => void chunks.push(new Uint8Array(chunk)) }),
+		Version.DRAFT_07,
+	);
+	await writer.u62(BigInt(timestamp) * 2n);
+	await writer.u53(1);
+	await writer.write(new Uint8Array([0]));
+	return new Reader(
+		new ReadableStream({
+			start: (controller) => {
+				for (const chunk of chunks) controller.enqueue(chunk);
+				controller.close();
+			},
+		}),
+		undefined,
+		Version.DRAFT_07,
+	);
+}
+
+test("a rewound group closes the track", async () => {
+	const { quic, streams, opened } = fakeSession();
+	const subscriber = new Subscriber(quic, Version.DRAFT_07, HopSchema.parse(1n));
+	const broadcast = subscriber.consume(Path.from("room"));
+	const track = broadcast.track("video").subscribe();
+	try {
+		await opened(0);
+		await answerTrackInfo(streams[0], Version.DRAFT_07, 1000);
+		await (await opened(1)).reading;
+		await subscriber.runGroup(new Group({ subscribe: 0n, sequence: 4 }), await groupStream(1000));
+		expect(track.closed.peek()).toBeUndefined();
+
+		// A higher sequence starting earlier can never be repaired by a later group.
+		await subscriber.runGroup(new Group({ subscribe: 0n, sequence: 5 }), await groupStream(500));
+		expect(await track.closed).toBeInstanceOf(TimestampMismatch);
+	} finally {
 		track.close();
 		broadcast.close();
 		subscriber.close();

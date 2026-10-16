@@ -983,6 +983,11 @@ impl<S: crate::transport::poll::Session> GroupRecv<S> {
 						Err(err) => {
 							tracing::debug!(%err, group = %group.sequence, "group error");
 							let _ = group.abort(err.clone());
+							// A timestamp that doesn't fit the track (one that rewinds, say)
+							// condemns the track, not just this group.
+							if matches!(err, Error::TimestampMismatch) {
+								let _ = track.clone().abort(err.clone());
+							}
 							Err(err)
 						}
 					};
@@ -2218,6 +2223,65 @@ mod tests {
 				}
 			}
 		}
+	}
+
+	/// A received group whose first frame rewinds past the group before it condemns the
+	/// track, not just its stream, and the session stays up.
+	#[moq_net_sim::test]
+	async fn a_rewound_group_aborts_the_track() {
+		use crate::transport::poll::Session as _;
+
+		let version = Version::Lite07;
+		let mut script = Vec::new();
+		let mut encoder = crate::coding::Encoder::new(&mut script, version.into());
+		lite::Group {
+			subscribe: 7,
+			sequence: 5,
+			frame_start: 0,
+		}
+		.encode(&mut encoder, version)
+		.unwrap();
+		// Frame 0 at 500ms: the first delta is absolute.
+		encoder.varint(crate::coding::varint::zigzag(500)).unwrap();
+		encoder.bytes(b"rewound").unwrap();
+		let mut session = crate::lite::test_transport::ScriptedSession::eof(script);
+		let subscriber = Subscriber::new(SubscriberConfig {
+			runtime: crate::time::Clock::sim(),
+			session: session.clone(),
+			origin: origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+			recv_bandwidth: None,
+			version,
+			peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Binding::InBand),
+			peer_hop: None,
+			cost: None,
+			going_away: Default::default(),
+			auth: crate::auth::Handle::new(false),
+		});
+
+		let track = track::Producer::new(
+			std::sync::Arc::new(crate::broadcast::Info::default()),
+			"video",
+			crate::track::Info::timed(),
+		);
+		let mut before = track.create_group(4u64.into()).unwrap();
+		before
+			.write_frame(Timestamp::from_millis(1000).unwrap(), &b"before"[..])
+			.unwrap();
+		before.finish().unwrap();
+		subscriber.subscribes.lock().insert(
+			7,
+			TrackEntry {
+				producer: track.clone(),
+				timescale: Some(Timescale::MILLI),
+				tail: Default::default(),
+			},
+		);
+
+		let (_, recv) = session.open_bi().await.unwrap();
+		let mut group = GroupRecv::new(subscriber, Reader::new(recv, version));
+		let res = kio::wait(|waiter| group.poll_serve(waiter)).await;
+		assert!(matches!(res, Err(Error::TimestampMismatch)), "{res:?}");
+		assert!(matches!(track.closed().now_or_never(), Some(Error::TimestampMismatch)));
 	}
 
 	/// An idle copy that resubscribes gets its newest cached group again. That stream only

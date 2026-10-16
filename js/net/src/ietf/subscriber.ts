@@ -15,6 +15,7 @@ import {
 	StreamCode,
 	Stream as StreamError,
 	sessionCause,
+	TimestampMismatch,
 	unauthorized,
 } from "../error.ts";
 import * as netGroup from "../group.ts";
@@ -1354,9 +1355,11 @@ export class Subscriber {
 				track.close(e);
 			} else if (
 				e instanceof ProtocolViolation ||
+				e instanceof TimestampMismatch ||
 				(e instanceof StreamError && e.code === StreamCode.MalformedTrack)
 			) {
-				// The publisher broke the track's end or its content, which no later group can repair.
+				// The publisher broke the track's end or its content (a rewound timestamp, say),
+				// which no later group can repair.
 				producer?.close(e);
 				track.close(e);
 			} else {

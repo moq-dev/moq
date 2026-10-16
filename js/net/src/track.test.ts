@@ -619,18 +619,18 @@ test("ordered frame reads skip a late lower-sequence group", async () => {
 	const track = producer.subscribe({ maxDelay: Milli(5000) }).ordered();
 
 	const five = new GroupProducer(5);
-	five.writeFrame(textFrame("five"));
+	five.writeFrame(textFrame("five", Timestamp.fromMillis(5)));
 	five.close();
 	producer.writeGroup(five);
 	expect(await track.readString()).toBe("five");
 
 	const three = new GroupProducer(3);
-	three.writeFrame(textFrame("three"));
+	three.writeFrame(textFrame("three", Timestamp.fromMillis(3)));
 	three.close();
 	producer.writeGroup(three);
 
 	const six = new GroupProducer(6);
-	six.writeFrame(textFrame("six"));
+	six.writeFrame(textFrame("six", Timestamp.fromMillis(6)));
 	six.close();
 	producer.writeGroup(six);
 
@@ -668,9 +668,9 @@ test("latency budget admits groups within its presentation-time window", async (
 test("a late lower group within the budget is delivered", async () => {
 	const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI, maxAge: Milli(30_000) });
 	for (const [sequence, timestamp] of [
-		[5, 0],
-		[6, 1000],
-		[7, 2000],
+		[5, 1000],
+		[6, 2000],
+		[7, 3000],
 	]) {
 		const group = new GroupProducer(sequence);
 		producer.writeGroup(group);
@@ -2442,4 +2442,96 @@ test.each([true, false])("a mid-group end caps later writes (declared first: %s)
 	group.close(new Error("replaced"));
 	expect(() => producer.writeGroup(overfull)).toThrow(ProtocolViolation);
 	producer.close();
+});
+
+// A closed group `sequence` written into `producer` whose one frame starts at `ms`, aborted
+// as ingest does when that frame is refused.
+function stampGroup(producer: TrackProducer, sequence: number, ms: number): GroupProducer {
+	const group = new GroupProducer(sequence);
+	producer.writeGroup(group);
+	try {
+		group.writeFrame({ payload: enc.encode(`${ms}`), timestamp: Timestamp.fromMillis(ms) });
+	} catch (err) {
+		group.close(err as Error);
+		throw err;
+	}
+	group.close();
+	return group;
+}
+
+test("an appended rewind is refused and an equal start is not", () => {
+	const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI });
+	producer.writeFrame({ payload: enc.encode("a"), timestamp: Timestamp.fromMillis(1000) });
+	producer.writeFrame({ payload: enc.encode("b"), timestamp: Timestamp.fromMillis(1000) });
+	expect(() => producer.writeFrame({ payload: enc.encode("c"), timestamp: Timestamp.fromMillis(999) })).toThrow(
+		TimestampMismatch,
+	);
+	producer.writeFrame({ payload: enc.encode("d"), timestamp: Timestamp.fromMillis(1001) });
+});
+
+test("a rewind is refused whichever group lands first", () => {
+	const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI });
+	stampGroup(producer, 5, 1000);
+	expect(() => stampGroup(producer, 3, 2000)).toThrow(TimestampMismatch);
+	stampGroup(producer, 3, 500);
+	expect(() => stampGroup(producer, 4, 400)).toThrow(TimestampMismatch);
+	expect(() => stampGroup(producer, 4, 1100)).toThrow(TimestampMismatch);
+	stampGroup(producer, 4, 700);
+});
+
+test("a group stamped before it is written is checked on write", () => {
+	const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI });
+	stampGroup(producer, 1, 6000);
+	const group = new GroupProducer(2);
+	group.writeFrame({ payload: enc.encode("early"), timestamp: Timestamp.fromMillis(5000) });
+	expect(() => producer.writeGroup(group)).toThrow(TimestampMismatch);
+});
+
+test("an evicted group still bounds, and a late group below it is unverified", async () => {
+	const clock = manualTime(10_000);
+	try {
+		const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI, maxAge: Milli(60_000) });
+		for (const [sequence, ms] of [
+			[0, 1000],
+			[1, 2000],
+			[2, 3000],
+		]) {
+			stampGroup(producer, sequence, ms);
+		}
+
+		// Idle past the cache window, so the next write evicts every group but the new edge.
+		clock.set(10_000 + CACHE_WINDOW_MS + 200);
+		const edge = producer.appendGroup();
+		expect(() => edge.writeFrame({ payload: enc.encode("rewind"), timestamp: Timestamp.fromMillis(2500) })).toThrow(
+			TimestampMismatch,
+		);
+		edge.writeFrame({ payload: enc.encode("edge"), timestamp: Timestamp.fromMillis(3000) });
+
+		// At or below the watermark the lower neighbor may be gone, so the watermark only caps
+		// the group and it is accepted without being trusted to time anything.
+		const track = producer.subscribe({ maxDelay: Milli(60_000) });
+		expect(() => stampGroup(producer, 1, 4000)).toThrow(TimestampMismatch);
+		stampGroup(producer, 1, 500);
+		producer.close();
+
+		const timestamps = new Map<number, Timestamp | undefined>();
+		for (let group = await track.recvGroup(); group; group = await track.recvGroup()) {
+			timestamps.set(group.sequence, hooks.groupTimestamp(group));
+		}
+		expect(timestamps.get(3)?.value).toBe(3000);
+		expect(timestamps.has(1)).toBe(true);
+		expect(timestamps.get(1)).toBeUndefined();
+	} finally {
+		clock.restore();
+	}
+});
+
+test("an untimed track takes groups in any order", () => {
+	const producer = new TrackProducer("test").accept({});
+	for (const sequence of [5, 3, 4]) {
+		const group = new GroupProducer(sequence);
+		producer.writeGroup(group);
+		group.writeFrame({ payload: enc.encode(`${sequence}`) });
+		group.close();
+	}
 });

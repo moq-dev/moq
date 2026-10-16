@@ -221,6 +221,16 @@ export const hooks: {
 	 * Throws `ProtocolViolation` if a frame at or past the cap already exists.
 	 */
 	limitGroup: (group: GroupProducer, frames: number) => void;
+	/**
+	 * Check a group's first frame against a track it joined before the frame lands. `admit`
+	 * throws `TimestampMismatch` on a rewind, or returns the commit to run once every track
+	 * the group joined accepted it.
+	 */
+	admitGroupStart: (group: GroupProducer, admit: (start: Timestamp) => () => void) => void;
+	/** Return a group producer's first timestamp, if it already holds a frame. */
+	groupStart: (group: GroupProducer) => Timestamp | undefined;
+	/** Keep a mirror of a group accepted unverified below its track's eviction watermark out of media-time expiry. */
+	unverifyGroup: (group: GroupConsumer) => void;
 	/** Return a group's first timestamp, retained even after its first frame is read. */
 	groupTimestamp: (group: GroupConsumer) => Timestamp | undefined;
 	groupLatest: (group: GroupConsumer) => Timestamp | undefined;
@@ -280,6 +290,15 @@ export const hooks: {
 		throw new Error("group.ts not loaded");
 	},
 	limitGroup: () => {
+		throw new Error("group.ts not loaded");
+	},
+	admitGroupStart: () => {
+		throw new Error("group.ts not loaded");
+	},
+	groupStart: () => {
+		throw new Error("group.ts not loaded");
+	},
+	unverifyGroup: () => {
 		throw new Error("group.ts not loaded");
 	},
 	arriveGroup: () => {

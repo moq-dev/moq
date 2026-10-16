@@ -667,6 +667,11 @@ impl Track {
 		&self.pool
 	}
 
+	/// The track holding this account's groups, while it is still open.
+	pub(crate) fn track(&self) -> Option<kio::Producer<TrackState>> {
+		self.state.upgrade()
+	}
+
 	/// The track's reads parked on their drift budget.
 	pub(crate) fn wakes(&self) -> &expiry::Wakes {
 		&self.wakes

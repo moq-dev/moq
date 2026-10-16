@@ -365,7 +365,7 @@ export class Consumer {
 }
 
 // The index of the first timeline group at or after `sequence`.
-function timelineIndex(timeline: GroupConsumer[], sequence: number): number {
+function timelineIndex(timeline: readonly { sequence: number }[], sequence: number): number {
 	let lo = 0;
 	let hi = timeline.length;
 	while (lo < hi) {
@@ -455,7 +455,23 @@ async function resolveInfo(state: TrackState): Promise<Info> {
 // A source group retained in the producer cache, with the mirror handed to each sink
 // so eviction can drop them together.
 // `arrived` is when the group joined this track, which its mirrors age a predecessor from.
-type CachedGroup = { group: GroupProducer; mirrors: Map<TrackState, GroupConsumer>; arrived: Instant };
+// `bound` is its first frame's timestamp once checked to fit between its neighbors', which
+// bounds theirs; `unverified` marks one accepted below the eviction watermark instead.
+type CachedGroup = {
+	group: GroupProducer;
+	mirrors: Map<TrackState, GroupConsumer>;
+	arrived: Instant;
+	bound?: Timestamp;
+	unverified?: boolean;
+};
+
+// A group's checked start, kept by sequence.
+type Start = { sequence: number; start: Timestamp };
+
+// Whether `a` presents before `b`, whatever their scales.
+function earlier(a: Timestamp, b: Timestamp): boolean {
+	return a.value * b.scale < b.value * a.scale;
+}
 
 let bindProducerSequence: (producer: Producer, sequence: TrackSequence) => void;
 
@@ -562,6 +578,13 @@ export class Producer {
 	#cache: CachedGroup[] = [];
 	// The same entries by sequence, so a write finds a duplicate without a scan.
 	#cached = new Map<number, CachedGroup>();
+	// The cached groups' checked starts, sorted by sequence, so a first frame finds its
+	// neighbors' with a search.
+	#bounds: Start[] = [];
+	// The highest-sequence checked start evicted. Eviction is not a sequence prefix, so a
+	// group above it is checked against it as well as its cached neighbors; one at or below
+	// it may have lost its lower bound. One entry, so nothing grows with the cache.
+	#evicted?: Start;
 	// When the cache was last scanned. See #prune.
 	#pruned = Number.NEGATIVE_INFINITY;
 	// When the track closed, which restarts the former newest group's idle window. See #prune.
@@ -754,6 +777,7 @@ export class Producer {
 	#mirror(entry: CachedGroup, sink: TrackState): void {
 		const dst = entry.group.mirror();
 		hooks.arriveGroup(dst, entry.arrived);
+		if (entry.unverified) hooks.unverifyGroup(dst);
 		entry.mirrors.set(sink, dst);
 		timelineInsert(sink.timeline, dst);
 		void dst.readable().then(() => sink.timelineChanged.update((revision) => revision + 1));
@@ -796,6 +820,55 @@ export class Producer {
 	#uncache(entry: CachedGroup): void {
 		this.#cache.splice(this.#cache.indexOf(entry), 1);
 		this.#cached.delete(entry.group.sequence);
+		this.#unbound(entry);
+	}
+
+	// The starts a first frame of group `sequence` must fall between: the nearest checked
+	// starts cached on either side, since groups land out of sequence order, and the eviction
+	// watermark. Throws {@link TimestampMismatch} on a rewind; an equal start is allowed. Returns
+	// whether the group is late, at or below the watermark, where its floor may be gone, so
+	// the watermark caps it instead and it is accepted unverified.
+	#admit(sequence: number, start: Timestamp): boolean {
+		const bounds = this.#bounds;
+		const index = timelineIndex(bounds, sequence);
+		let floor = bounds[index - 1]?.start;
+		let ceiling = bounds[bounds[index]?.sequence === sequence ? index + 1 : index]?.start;
+		const evicted = this.#evicted;
+		const late = evicted !== undefined && sequence <= evicted.sequence;
+		if (evicted && late) {
+			if (ceiling === undefined || earlier(evicted.start, ceiling)) ceiling = evicted.start;
+		} else if (evicted) {
+			if (floor === undefined || earlier(floor, evicted.start)) floor = evicted.start;
+		}
+		if ((floor && earlier(start, floor)) || (ceiling && earlier(ceiling, start))) throw new TimestampMismatch();
+		return late;
+	}
+
+	// Record a cached group's checked start: a bound for its neighbors, or unverified.
+	#record(entry: CachedGroup, start: Timestamp, late: boolean): void {
+		if (late) {
+			entry.unverified = true;
+			for (const mirror of entry.mirrors.values()) hooks.unverifyGroup(mirror);
+			return;
+		}
+		entry.bound = start;
+		const sequence = entry.group.sequence;
+		const last = this.#bounds.at(-1);
+		if (!last || last.sequence < sequence) this.#bounds.push({ sequence, start });
+		else this.#bounds.splice(timelineIndex(this.#bounds, sequence), 0, { sequence, start });
+	}
+
+	// Drop a group's checked start as it leaves the cache, raising the watermark to it when
+	// it was evicted.
+	#unbound(entry: CachedGroup, evicted = false): void {
+		const start = entry.bound;
+		if (start === undefined) return;
+		const sequence = entry.group.sequence;
+		const index = timelineIndex(this.#bounds, sequence);
+		if (this.#bounds[index]?.sequence === sequence) this.#bounds.splice(index, 1);
+		if (evicted && (this.#evicted === undefined || sequence > this.#evicted.sequence)) {
+			this.#evicted = { sequence, start };
+		}
 	}
 
 	// The newest group remains replayable while the track is live, even after the group
@@ -859,6 +932,7 @@ export class Producer {
 				if (oldest === undefined || activity < oldest) oldest = activity;
 			} else {
 				this.#cached.delete(entry.group.sequence);
+				this.#unbound(entry, true);
 				this.#evict(entry);
 			}
 		}
@@ -893,9 +967,20 @@ export class Producer {
 		this.#pruneTimerAt = at;
 	}
 
-	// Retain a source group and fan it out to every live sink.
-	#publish(group: GroupProducer): void {
+	// Retain a source group and fan it out to every live sink. A group that already holds
+	// frame 0 passes its checked `start` and whether it is `late`; any other checks frame 0
+	// against this track when it lands.
+	#publish(group: GroupProducer, start?: Timestamp, late = false): void {
 		const entry: CachedGroup = { group, mirrors: new Map<TrackState, GroupConsumer>(), arrived: now() };
+		const sequence = group.sequence;
+		if (start) {
+			this.#record(entry, start, late);
+		} else {
+			hooks.admitGroupStart(group, (start) => {
+				const late = this.#admit(sequence, start);
+				return () => this.#record(entry, start, late);
+			});
+		}
 		this.#cache.push(entry);
 		this.#cached.set(group.sequence, entry);
 		this.#advance(group.sequence);
@@ -962,6 +1047,7 @@ export class Producer {
 	 *
 	 * Its frames must match the track's {@link Info.timescale}: a timestamp on every frame of
 	 * a timed track and none on an untimed one, or the write throws {@link TimestampMismatch}.
+	 * So does a first frame that starts before the group below it or after the one above it.
 	 */
 	appendGroup(): GroupProducer {
 		const group = new GroupProducer(this.#nextSequence());
@@ -980,12 +1066,16 @@ export class Producer {
 	 * sequence again. Best effort (mirrors Rust): nothing remembers a sequence whose cache
 	 * entry is already gone, so a long-evicted sequence is accepted as new. Throws
 	 * {@link TimestampMismatch} if the group already holds a frame whose timedness
-	 * disagrees with the track's {@link Info.timescale}.
+	 * disagrees with the track's {@link Info.timescale}, or whose first frame starts before
+	 * the group below it or after the one above it.
 	 */
 	writeGroup(group: GroupProducer) {
 		this.#writable(group.sequence);
 		this.#bind(group);
 		this.#cap(group);
+		// A group written before it joined is checked here, before it is cached or fanned out.
+		const start = hooks.groupStart(group);
+		const late = start !== undefined && this.#admit(group.sequence, start);
 
 		const existing = this.#cached.get(group.sequence);
 		if (existing) {
@@ -996,7 +1086,7 @@ export class Producer {
 			this.#uncache(existing);
 		}
 
-		this.#publish(group);
+		this.#publish(group, start, late);
 	}
 
 	// Fan a datagram out to every live subscriber, dropping the oldest once the ring is full.
@@ -1228,11 +1318,9 @@ export class Subscriber {
 	//
 	// Its first timestamp is the furthest presentation time `sequence` could still reach.
 	// An upper bound, deliberately: a frame's duration is not on the wire, so a group's own
-	// last timestamp says where it starts presenting, not where it ends. Only the
-	// *immediate* successor counts: timestamps need not rise with sequence (a rewind
-	// reorders them), so a later stamped group proves nothing about where an unstamped
-	// successor will begin, and shrinking the bound is the unsafe direction. An unstamped
-	// successor leaves the reach unbounded until it presents a frame.
+	// last timestamp says where it starts presenting, not where it ends. The bound is the
+	// *immediate* successor's start, so an unstamped successor leaves the reach unbounded
+	// until it presents a frame.
 	#successor(sequence: number, end?: number): GroupConsumer | undefined {
 		const timeline = this.#state.timeline;
 		for (let i = timelineIndex(timeline, sequence + 1); i < timeline.length; i++) {

@@ -175,6 +175,9 @@ pub(crate) struct GroupState {
 	// rather than read off `frames` so an abort doesn't erase it.
 	timeline: Timeline,
 
+	// How the track judged the start against its neighbors' when frame 0 landed.
+	origin: Origin,
+
 	// Once finalized, the total number of frames the group will ever contain. Recorded
 	// at finish so the count outlives an abort that clears the cache.
 	pub(crate) fin: Option<usize>,
@@ -227,6 +230,22 @@ enum Timeline {
 	/// frame's: the group's presentation end so far, which a reader that has taken
 	/// every frame sits at and a drift budget measures it against.
 	Timed { start: Timestamp, latest: Timestamp },
+}
+
+/// How a timed group's start was checked against its neighbors' (see
+/// [`track::Neighbors`]), which decides whether it bounds theirs.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum Origin {
+	/// Not checked: untimed, started past frame 0, or written with no open track. A start
+	/// read off a later frame is not where the group began, so it bounds nothing.
+	#[default]
+	Unchecked,
+	/// Frame 0 fit between its neighbors, so its start bounds theirs.
+	Bound,
+	/// Frame 0 landed at or below the track's eviction watermark, where its lower bound
+	/// may be gone. Accepted so backfill keeps working, but it neither bounds a neighbor
+	/// nor drives media-time expiry.
+	Unverified,
 }
 
 impl GroupState {
@@ -355,6 +374,17 @@ impl GroupState {
 			return Poll::Ready(Err(Error::Lagged));
 		}
 		self.poll_terminal(index)
+	}
+
+	/// Check frame 0's `timestamp` against the track's `neighbors`, returning how to record
+	/// it. Anything but a timed frame 0 checked under an open track is unchecked, as is an
+	/// IETF stream that does not begin at the group's first object.
+	fn check_start(&self, neighbors: Option<&track::Neighbors>, timestamp: Option<Timestamp>) -> Result<Origin> {
+		let original = self.next_index == 0 && self.wire().is_none_or(|wire| wire.first_object);
+		match (neighbors, timestamp) {
+			(Some(neighbors), Some(start)) if original => neighbors.admit(start),
+			_ => Ok(self.origin),
+		}
 	}
 
 	/// Record a frame's place in presentation time: the first frame starts the group,
@@ -537,6 +567,9 @@ struct Alive {
 	// out of `GroupState` has to read both under one guard, or the two halves can
 	// straddle the abort: see `Producer::live_first_frame`.
 	aborted: AtomicBool,
+	// Set once the first frame is written, so later writes skip the track lock the first
+	// one's rewind check takes. A stale false only takes that lock once more.
+	started: AtomicBool,
 	// The cache stamp `GroupState::charge` maintains, held here as well so the
 	// eviction and expiry walks can weigh a candidate without taking the group lock
 	// they already hold the track lock over.
@@ -657,6 +690,7 @@ impl Producer {
 			info,
 			state: state.clone(),
 			aborted: AtomicBool::new(false),
+			started: AtomicBool::new(false),
 			access,
 		});
 		Self {
@@ -685,6 +719,18 @@ impl Producer {
 	/// The parent track's timescale, or `None` when it declared no timeline.
 	pub fn timescale(&self) -> Option<Timescale> {
 		self.track.timescale
+	}
+
+	/// The track to check this group's start against, while frame 0 may still be unwritten.
+	///
+	/// The caller holds its lock until the frame is recorded, so the check and the stamp are
+	/// one step against every other group's (locks are ordered track then group). Only a
+	/// timed group not yet started pays for it, once.
+	fn first_frame_track(&self) -> Option<kio::Producer<track::TrackState>> {
+		if self.track.timescale.is_none() || self.alive.started.load(Ordering::Relaxed) {
+			return None;
+		}
+		self.cache.track()
 	}
 
 	/// Start the group at frame `index` rather than 0, so the first frame written lands
@@ -732,6 +778,9 @@ impl Producer {
 			return Err(Error::FrameTooLarge);
 		}
 
+		let track = self.first_frame_track();
+		let track = track.as_ref().map(|track| track.read());
+		let neighbors = track.as_ref().map(|track| track.neighbors(self.info.sequence));
 		let mut state = modify(&self.state)?;
 		if state.fin.is_some() {
 			return Err(Error::Closed);
@@ -744,6 +793,7 @@ impl Producer {
 			.checked_add(1)
 			.ok_or(Error::BoundsExceeded(crate::coding::BoundsExceeded))?;
 		state.admit(next_index)?;
+		let origin = state.check_start(neighbors.as_ref(), timestamp)?;
 		debug_assert!(state.partial.is_none(), "a frame is already open");
 		let size = payload.len() as u64;
 		if state.would_overflow(1, size) {
@@ -755,8 +805,11 @@ impl Producer {
 		state.frames.push_back(Frame { timestamp, payload });
 		state.next_index = next_index;
 		state.committed = state.next_index;
+		state.origin = origin;
 		state.stamp(timestamp);
+		self.alive.started.store(true, Ordering::Relaxed);
 		drop(state);
+		drop(track);
 
 		// With the group lock released (lock order is track then group), settle
 		// eviction debt if enough has been written since the track last paid.
@@ -792,6 +845,9 @@ impl Producer {
 
 		let count = frames.len();
 		let bytes: u64 = frames.filled().iter().map(|frame| frame.payload.len() as u64).sum();
+		let track = self.first_frame_track();
+		let track = track.as_ref().map(|track| track.read());
+		let neighbors = track.as_ref().map(|track| track.neighbors(self.info.sequence));
 		let mut state = modify(&self.state)?;
 		if state.fin.is_some() {
 			return Err(Error::Closed);
@@ -804,6 +860,14 @@ impl Producer {
 			.checked_add(count)
 			.ok_or(Error::BoundsExceeded(crate::coding::BoundsExceeded))?;
 		state.admit(next_index)?;
+		let first = frames.filled().first().map(|frame| frame.timestamp);
+		let origin = match first {
+			Some(timestamp) => state.check_start(
+				neighbors.as_ref(),
+				on_track(timestamp, self.track.timescale).expect("timestamp scale checked above"),
+			)?,
+			None => state.origin,
+		};
 		if state.would_overflow(count, bytes) {
 			return Err(self.abort_too_large(state));
 		}
@@ -823,7 +887,12 @@ impl Producer {
 		}
 		state.next_index = next_index;
 		state.committed = next_index;
+		state.origin = origin;
+		if count > 0 {
+			self.alive.started.store(true, Ordering::Relaxed);
+		}
 		drop(state);
+		drop(track);
 
 		self.cache.settle(now);
 		if let Some(latest) = latest {
@@ -886,6 +955,9 @@ impl Producer {
 			return Err(Error::FrameTooLarge);
 		}
 
+		let track = self.first_frame_track();
+		let track = track.as_ref().map(|track| track.read());
+		let neighbors = track.as_ref().map(|track| track.neighbors(self.info.sequence));
 		let mut state = modify(&self.state)?;
 		if state.fin.is_some() {
 			return Err(Error::Closed);
@@ -898,6 +970,7 @@ impl Producer {
 			.checked_add(1)
 			.ok_or(Error::BoundsExceeded(crate::coding::BoundsExceeded))?;
 		state.admit(next_index)?;
+		let origin = state.check_start(neighbors.as_ref(), timestamp)?;
 		// Only one frame is ever in flight, so the declared size is the most the cache
 		// can grow by before the next check.
 		let metadata_bytes = header.fields.as_ref().map_or(0, |fields| fields.heap());
@@ -927,8 +1000,11 @@ impl Producer {
 		state.next_index = next_index;
 		// Opening the frame is enough: the header carries the timestamp, so the group's
 		// place in time is known before a single payload byte streams in.
+		state.origin = origin;
 		state.stamp(timestamp);
+		self.alive.started.store(true, Ordering::Relaxed);
 		drop(state);
+		drop(track);
 
 		// With the group lock released (lock order is track then group), settle
 		// eviction debt if enough has been written since the track last paid.
@@ -1148,10 +1224,24 @@ impl Producer {
 	/// place in the media timeline rather than when it happened to be delivered. That
 	/// is what lets the track tell a burst of old content apart from live content (see
 	/// [`track::Subscriber`]).
+	///
+	/// `None` for a group accepted unverified below the track's eviction watermark too:
+	/// nothing proves where it starts, so it drives no media-time expiry.
 	pub(crate) fn timestamp(&self) -> Option<Timestamp> {
-		match self.state.read().timeline {
-			Timeline::Timed { start, .. } => Some(start),
-			Timeline::Empty | Timeline::Untimed => None,
+		let state = self.state.read();
+		match state.timeline {
+			Timeline::Timed { start, .. } if state.origin != Origin::Unverified => Some(start),
+			_ => None,
+		}
+	}
+
+	/// The start this group lends its neighbors' rewind check: its first frame's timestamp,
+	/// once frame 0 was checked to fit between theirs.
+	pub(crate) fn bound(&self) -> Option<Timestamp> {
+		let state = self.state.read();
+		match state.timeline {
+			Timeline::Timed { start, .. } if state.origin == Origin::Bound => Some(start),
+			_ => None,
 		}
 	}
 
@@ -1164,9 +1254,10 @@ impl Producer {
 	/// fallen behind is there nothing left worth delivering. Grows as the group does, so
 	/// a group still receiving frames stays fresh and a stalled one ages in place.
 	pub(crate) fn latest(&self) -> Option<Timestamp> {
-		match self.state.read().timeline {
-			Timeline::Timed { latest, .. } => Some(latest),
-			Timeline::Empty | Timeline::Untimed => None,
+		let state = self.state.read();
+		match state.timeline {
+			Timeline::Timed { latest, .. } if state.origin != Origin::Unverified => Some(latest),
+			_ => None,
 		}
 	}
 

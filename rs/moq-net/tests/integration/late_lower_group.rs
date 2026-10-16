@@ -34,10 +34,13 @@ fn produce_origin(hop: u64) -> moq_net::origin::Producer {
 	producer
 }
 
+/// Four frames starting at `sequence` seconds, so a group created late still starts
+/// below the one after it.
 fn write_group(track: &moq_net::track::Producer, sequence: u64) {
 	let mut group = track.create_group(moq_net::group::Info { sequence }).unwrap();
-	for _ in 0..4 {
-		group.write_frame(Timestamp::now(), &b"x"[..]).unwrap();
+	for frame in 0..4 {
+		let timestamp = Timestamp::from_millis(sequence * 1000 + frame).unwrap();
+		group.write_frame(timestamp, &b"x"[..]).unwrap();
 	}
 	group.finish().unwrap();
 }

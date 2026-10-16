@@ -16,6 +16,7 @@ import {
 	StreamCode,
 	StreamError,
 	sessionCause,
+	TimestampMismatch,
 	unauthorized,
 } from "../error.ts";
 import * as netGroup from "../group.ts";
@@ -1355,6 +1356,9 @@ export class Subscriber {
 		} catch (err: unknown) {
 			const e = await sessionCause(this.#quic, err);
 			producer.close(e);
+			// A timestamp that doesn't fit the track (one that rewinds, say) condemns the
+			// track, not just this group.
+			if (e instanceof TimestampMismatch) track.close(e);
 			stream.stop(e);
 		} finally {
 			read();
