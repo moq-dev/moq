@@ -174,8 +174,9 @@ const std::vector<Field> &Fields()
 				 "URL, so a relay can be reached by IP."));
 
 		// Reconnect.
-		f.push_back(Number(BACKOFF_INITIAL, "Reconnect delay (ms)", Millis(d.backoff.initial_us, BACKOFF_INITIAL),
-				   1, 60000, 100, "Delay before the first reconnect attempt; it grows from here."));
+		f.push_back(Number(BACKOFF_INITIAL, "Reconnect delay (ms)",
+				   Millis(d.backoff.initial_us, BACKOFF_INITIAL), 1, 60000, 100,
+				   "Delay before the first reconnect attempt; it grows from here."));
 		f.push_back(Number(BACKOFF_MAX, "Reconnect delay cap (ms)", Millis(d.backoff.max_us, BACKOFF_MAX), 1,
 				   600000, 1000, "Ceiling on the growing reconnect delay."));
 		f.push_back(Number(BACKOFF_TIMEOUT, "Give up after (ms)", Millis(d.backoff.timeout_us, BACKOFF_TIMEOUT),
@@ -192,10 +193,12 @@ const std::vector<Field> &Fields()
 		f.push_back(Number(QUIC_MAX_STREAMS, "Max concurrent streams",
 				   static_cast<long long>(d.quic.max_streams.value_or(0)), 1, 65536, 1,
 				   "MoQ opens a stream per group, so a busy publisher wants this high."));
-		f.push_back(Number(QUIC_IDLE_TIMEOUT, "Idle timeout (ms)", Millis(d.quic.idle_timeout_us, QUIC_IDLE_TIMEOUT),
-				   0, 600000, 1000, "How long an idle connection survives before it is dropped."));
-		f.push_back(Number(QUIC_KEEP_ALIVE, "Keep-alive interval (ms)", Millis(d.quic.keep_alive_us, QUIC_KEEP_ALIVE),
-				   0, 60000, 100, "0 disables the keep-alive pings."));
+		f.push_back(Number(QUIC_IDLE_TIMEOUT, "Idle timeout (ms)",
+				   Millis(d.quic.idle_timeout_us, QUIC_IDLE_TIMEOUT), 0, 600000, 1000,
+				   "How long an idle connection survives before it is dropped."));
+		f.push_back(Number(QUIC_KEEP_ALIVE, "Keep-alive interval (ms)",
+				   Millis(d.quic.keep_alive_us, QUIC_KEEP_ALIVE), 0, 60000, 100,
+				   "0 disables the keep-alive pings."));
 		f.push_back(Choose(QUIC_GSO, "UDP segmentation offload", AutoOnOff(), false,
 				   "Batches sends into one syscall. Turn it off if large sends vanish; some "
 				   "NICs and middleboxes mangle segmented packets."));

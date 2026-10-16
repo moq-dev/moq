@@ -26,8 +26,8 @@ struct obs_data {
 
 namespace {
 
-template <typename T> T Lookup(const std::map<std::string, T> &set, const std::map<std::string, T> &defaults,
-			       const char *key, T fallback)
+template<typename T>
+T Lookup(const std::map<std::string, T> &set, const std::map<std::string, T> &defaults, const char *key, T fallback)
 {
 	if (auto it = set.find(key); it != set.end())
 		return it->second;
@@ -148,7 +148,8 @@ int main()
 		CHECK(settings.default_ints["connect_timeout_ms"] == (long long)(*library.timeout_us / 1000));
 		CHECK(settings.default_ints["failover_delay_ms"] == (long long)(*library.race_us / 1000));
 		CHECK(settings.default_ints["quic_max_streams"] == (long long)*library.quic.max_streams);
-		CHECK(settings.default_ints["quic_idle_timeout_ms"] == (long long)(*library.quic.idle_timeout_us / 1000));
+		CHECK(settings.default_ints["quic_idle_timeout_ms"] ==
+		      (long long)(*library.quic.idle_timeout_us / 1000));
 		CHECK(settings.default_ints["quic_keep_alive_ms"] == (long long)(*library.quic.keep_alive_us / 1000));
 		CHECK(settings.default_ints["backoff_timeout_ms"] == (long long)(*library.backoff.timeout_us / 1000));
 		CHECK(settings.default_bools["websocket_enabled"] == *library.websocket.enabled);
