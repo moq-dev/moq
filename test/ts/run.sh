@@ -18,7 +18,7 @@
 #   ./run.sh --with-eit            # add a synthetic EPG first, report which SI survived
 #   ./run.sh --live                # grade PCR release timing off the live pipe
 #   ./run.sh --pair                # two exporters of one broadcast, grade table anchoring
-#   ./run.sh --open-gop            # open-GOP clip; its leading pictures must survive
+#   ./run.sh --open-gop            # open-GOP clip; orphan leading pictures are trimmed
 #   ./run.sh --hrd                 # 1080p video filling a broadcast-sized 9 Mbit CPB
 #   ./run.sh --headroom            # the same with four audio PIDs, muxed above the video's Rx
 #   ./run.sh --leak                # 1080p video with no HRD, filling its level's 24 Mb/s leak

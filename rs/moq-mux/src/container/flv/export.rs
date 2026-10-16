@@ -363,6 +363,7 @@ impl<S: Stream> Export<S> {
 							restart: track.source.markers(),
 							skip: track.source.skips(),
 							sync: kind == 1 || frame.keyframe,
+							leading: false,
 							item: frame,
 						}
 					};
@@ -380,6 +381,7 @@ impl<S: Stream> Export<S> {
 						restart,
 						skip,
 						sync,
+						leading,
 						item,
 						..
 					} = arrival;
@@ -392,6 +394,7 @@ impl<S: Stream> Export<S> {
 							restart,
 							skip,
 							sync,
+							leading,
 							item: (item, timestamp),
 						},
 					)? == crate::jitter::Push::Late

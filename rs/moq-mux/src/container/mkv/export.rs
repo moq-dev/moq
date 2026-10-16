@@ -382,6 +382,7 @@ impl<S: Stream> Export<S> {
 						restart: track.source.markers(),
 						skip: track.source.skips(),
 						sync: track.kind == TrackKind::Audio || frame.keyframe,
+						leading: false,
 						item: frame,
 					}
 				};
