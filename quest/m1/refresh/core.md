@@ -25,8 +25,8 @@ Decided 2026-10-16 (see the [epic](/quest/m1/refresh/README.md)).
   undefined>` replace `demand.used` and `unused()`. Migrate js/publish,
   js/json, js/flate, and the other callers.
 - **moq-ffi and bindings.** moq-ffi's `Demand` (`rs/moq-ffi/src/demand.rs`)
-  follows, as do moq-c, the py, swift, kt, go, and dart wrappers, and
-  `doc/lib/*`. `MoqTrackInfo` gains `refresh`, beside `max_age_us`.
+  follows, as do moq-c, the py, swift, kt, go, and dart wrappers, `cpp/moq`,
+  `cpp/obs/src`, `doc/lib/*`, and `doc/bin/obs.md`. `MoqTrackInfo` gains `refresh`, beside `max_age_us`.
   Because json producers read the ratio from the track, a binding could not
   otherwise publish a refreshing json track (revised in the #5734 review).
 - **Semantics.**
