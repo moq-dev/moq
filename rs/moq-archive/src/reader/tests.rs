@@ -48,7 +48,10 @@ impl Archive {
 
 	async fn encoder(&mut self, track: &str) -> &mut Encoder {
 		if !self.encoders.contains_key(track) {
-			self.store.put_info(track, &Info::new(1, Some(1000)).unwrap()).await.unwrap();
+			self.store
+				.put_info(track, &Info::new(1, Some(1000)).unwrap())
+				.await
+				.unwrap();
 			self.store
 				.put_info(&timeline(track), &Info::new(0, Some(1000)).unwrap())
 				.await

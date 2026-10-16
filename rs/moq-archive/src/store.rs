@@ -458,7 +458,10 @@ mod tests {
 	#[tokio::test]
 	async fn info_property_mismatch_is_a_hard_error() {
 		let store = memory();
-		store.put_info("video", &Info::new(0, Some(1_000)).unwrap()).await.unwrap();
+		store
+			.put_info("video", &Info::new(0, Some(1_000)).unwrap())
+			.await
+			.unwrap();
 		assert!(matches!(
 			store.put_info("video", &Info::new(1, Some(1_000)).unwrap()).await,
 			Err(Error::Priority {
@@ -473,7 +476,10 @@ mod tests {
 				intended: Some(2000)
 			})
 		));
-		assert_eq!(store.get_info("video").await.unwrap(), Info::new(0, Some(1_000)).unwrap());
+		assert_eq!(
+			store.get_info("video").await.unwrap(),
+			Info::new(0, Some(1_000)).unwrap()
+		);
 	}
 
 	#[tokio::test]
@@ -560,7 +566,10 @@ mod tests {
 	#[tokio::test]
 	async fn percent_encoded_track_listing() {
 		let store = memory();
-		store.put_info("catalog.json", &Info::new(0, Some(1)).unwrap()).await.unwrap();
+		store
+			.put_info("catalog.json", &Info::new(0, Some(1)).unwrap())
+			.await
+			.unwrap();
 		let locations = names(&store, &Query::new()).await;
 		assert!(locations.contains(&format!("{}/.info", encode_track("catalog.json").unwrap())));
 	}
@@ -570,7 +579,10 @@ mod tests {
 		let store = memory();
 		store.put_info("video", &Info::new(0, Some(1)).unwrap()).await.unwrap();
 		store.put_segments("video", 1, &one_group(1, b"a")).await.unwrap();
-		store.put_info("video-alt", &Info::new(0, Some(1)).unwrap()).await.unwrap();
+		store
+			.put_info("video-alt", &Info::new(0, Some(1)).unwrap())
+			.await
+			.unwrap();
 
 		let query = Query::track("video").unwrap();
 		let paths = names(&store, &query).await;
@@ -809,7 +821,10 @@ mod tests {
 	#[tokio::test]
 	async fn empty_prefix_lists_the_whole_store() {
 		let store = Store::new(Mock::memory(), "");
-		store.put_info("catalog.json", &Info::new(0, Some(1)).unwrap()).await.unwrap();
+		store
+			.put_info("catalog.json", &Info::new(0, Some(1)).unwrap())
+			.await
+			.unwrap();
 		store.put_segments("video", 4, &one_group(4, b"a")).await.unwrap();
 		assert_eq!(store.paginated_prefix(None), None);
 

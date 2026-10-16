@@ -156,6 +156,9 @@ mod tests {
 			Info::decode(br#"{"version":2,"priority":0,"timescale":1,"extra":true}"#),
 			Err(Error::Json(_))
 		));
-		assert!(matches!(Info::decode(br#"{"version":2,"timescale":1}"#), Err(Error::Json(_))));
+		assert!(matches!(
+			Info::decode(br#"{"version":2,"timescale":1}"#),
+			Err(Error::Json(_))
+		));
 	}
 }

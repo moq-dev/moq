@@ -129,7 +129,10 @@ impl Recording {
 		let mut encoders = HashMap::new();
 		for track in tracks {
 			// Legacy media is stamped in microseconds.
-			store.put_info(track, &Info::new(1, Some(1_000_000)).unwrap()).await.unwrap();
+			store
+				.put_info(track, &Info::new(1, Some(1_000_000)).unwrap())
+				.await
+				.unwrap();
 			store
 				.put_info(&timeline(track), &Info::new(0, Some(1000)).unwrap())
 				.await

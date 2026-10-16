@@ -191,7 +191,12 @@ impl Segmenter {
 	/// before the previous report: records never overlap, so that frame could never be indexed.
 	/// Fails with [`TimelineTiming`](crate::Error::TimelineTiming) when the track's first report
 	/// was timed and this one is not, or the reverse.
-	pub fn frame(&mut self, position: Position, pts: impl Into<Option<Timestamp>>, keyframe: bool) -> crate::Result<()> {
+	pub fn frame(
+		&mut self,
+		position: Position,
+		pts: impl Into<Option<Timestamp>>,
+		keyframe: bool,
+	) -> crate::Result<()> {
 		let pts = pts.into();
 		if self.closed {
 			return Ok(());

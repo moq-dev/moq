@@ -230,7 +230,11 @@ async fn recordings_are_byte_identical_on_every_backend() {
 			let object = crate::Object::decode(bytes.clone(), true).unwrap();
 			assert_eq!(object.frame_start, 0, "no source group outlived the maximum");
 			for group in object.groups {
-				let frames = group.frames.into_iter().map(|f| (f.timestamp.unwrap(), f.payload)).collect();
+				let frames = group
+					.frames
+					.into_iter()
+					.map(|f| (f.timestamp.unwrap(), f.payload))
+					.collect();
 				stored.insert((track.clone(), group.sequence), frames);
 			}
 		}
@@ -350,7 +354,9 @@ async fn an_offline_reader_follows_dvr_expiry() {
 	}
 	committed(8).await;
 	// Records 7 and 8 hold the 2s window, and the newest timeline object restates both.
-	while store.get_segments("video", 6, true).await.is_ok() || store.get_segments(&timeline("video"), 7, true).await.is_ok() {
+	while store.get_segments("video", 6, true).await.is_ok()
+		|| store.get_segments(&timeline("video"), 7, true).await.is_ok()
+	{
 		tokio::time::sleep(Duration::from_millis(5)).await;
 	}
 

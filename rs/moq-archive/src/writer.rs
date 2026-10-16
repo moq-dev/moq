@@ -562,7 +562,9 @@ impl<S: ObjectStore> Track<S> {
 				let pts = frame
 					.timestamp
 					.zip(self.timescale)
-					.map(|(timestamp, timescale)| Timestamp::new(timestamp, timescale).map_err(|_| Error::Id(timestamp)))
+					.map(|(timestamp, timescale)| {
+						Timestamp::new(timestamp, timescale).map_err(|_| Error::Id(timestamp))
+					})
 					.transpose()?;
 				let position = Position::new(sequence, index);
 				self.segmenter
@@ -898,8 +900,13 @@ impl<S: ObjectStore> Committer<S> {
 		while self.window.len() > 1 {
 			// A DVR refuses untimed tracks, so every record here is timed.
 			let newest = self.window.back().expect("non-empty");
-			let end = newest.pts.zip(newest.duration).map(|(pts, duration)| pts as u128 + duration as u128);
-			let covered = end.zip(self.window[1].pts).map(|(end, pts)| end.saturating_sub(pts as u128));
+			let end = newest
+				.pts
+				.zip(newest.duration)
+				.map(|(pts, duration)| pts as u128 + duration as u128);
+			let covered = end
+				.zip(self.window[1].pts)
+				.map(|(end, pts)| end.saturating_sub(pts as u128));
 			if covered.is_none_or(|covered| covered < target) {
 				break;
 			}
@@ -1020,7 +1027,10 @@ fn recorded_end(resume: &Resume, timescale: Option<Timescale>) -> Result<Option<
 		return Ok(None);
 	};
 	let (Some(pts), Some(duration)) = (record.pts, record.duration) else {
-		return Err(Error::Timeline(format!("record {} is untimed on a timed track", record.sequence)));
+		return Err(Error::Timeline(format!(
+			"record {} is untimed on a timed track",
+			record.sequence
+		)));
 	};
 	let millis = pts.checked_add(duration).ok_or(Error::Overflow)?;
 	let end = Timestamp::new(millis, TIMESCALE).map_err(|_| Error::Id(millis))?;
@@ -1224,7 +1234,10 @@ mod tests {
 		let object = store.get_segments("video", 2, true).await.unwrap();
 		assert_eq!(object.groups[0].frames[1].timestamp, Some(2500));
 		assert_eq!(object.groups[0].frames[1].payload, "2@2500");
-		assert_eq!(store.get_info("video").await.unwrap(), Info::new(127, Some(1000)).unwrap());
+		assert_eq!(
+			store.get_info("video").await.unwrap(),
+			Info::new(127, Some(1000)).unwrap()
+		);
 		store.get_info(&timeline("video")).await.unwrap();
 		assert!(store.get_info("ignored").await.is_err());
 	}
@@ -1742,7 +1755,10 @@ mod tests {
 		let _video = track(&source, "video");
 
 		let store = Store::new(InMemory::new(), "rec");
-		store.put_info("video", &Info::new(7, Some(1000)).unwrap()).await.unwrap();
+		store
+			.put_info("video", &Info::new(7, Some(1000)).unwrap())
+			.await
+			.unwrap();
 		let writer = Writer::new(store, source.consume(), Config::default()).await.unwrap();
 		let control = writer.control();
 		assert_eq!(

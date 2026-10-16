@@ -245,7 +245,11 @@ impl Timeline {
 		segments.dedup();
 
 		for segment in segments {
-			match shared.store.get_segments(&name, segment, self.timescale.is_some()).await {
+			match shared
+				.store
+				.get_segments(&name, segment, self.timescale.is_some())
+				.await
+			{
 				Ok(object) => self.replay(shared, segment, &object)?,
 				Err(Error::Store(err)) => return Err(Error::Store(err)),
 				Err(err) => {
