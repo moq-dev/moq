@@ -15,8 +15,9 @@ The harness defaults to BBR3, the production controller, instead of Cubic.
 
 Decided 2026-10-16:
 
-- **Determinism**: one seed flows into the CID generator, the reset key, and
-  token randomness, which today use `rand::rng()` and OS entropy. TLS key
+- **Determinism**: one seed flows into the CID generator, the reset key,
+  token randomness, and BBR3's `probe_rng_seed` (which picks the ProbeBW
+  wait and Reno-round bound), which today use `rand::rng()` and OS entropy. TLS key
   shares may stay nondeterministic if no observable behavior depends on
   them; otherwise use a deterministic test crypto provider. Ports stop
   depending on test order.
