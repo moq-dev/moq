@@ -800,14 +800,21 @@ impl<E: CatalogExt> Producer<E> {
 		track: &str,
 		duration_hint: Option<std::time::Duration>,
 	) -> crate::Result<crate::timeline::Recorder> {
-		let mut recorder = self
-			.timeline
-			.track(track, self.cutting.clone().with_duration_hint(duration_hint))?;
+		let mut cutting = self.cutting.clone();
+		if duration_hint.is_some() {
+			cutting = cutting.with_duration_hint(duration_hint);
+		}
+		let mut recorder = self.timeline.track(track, cutting)?;
 		{
 			let mut catalog = self.outputs.catalog_timeline.lock().unwrap();
 			if catalog.recorder.is_none() {
-				// Sparse data: a catalog may not change again, so each group is its own record.
-				let cutting = self.cutting.clone().with_duration_min(std::time::Duration::ZERO);
+				// Sparse data: a catalog may not change again, so each group is its own record, and a
+				// media hint says nothing about its cadence.
+				let cutting = self
+					.cutting
+					.clone()
+					.with_duration_min(std::time::Duration::ZERO)
+					.with_duration_hint(None);
 				catalog.recorder = Some(self.timeline.track(hang::Catalog::DEFAULT_NAME, cutting)?);
 			}
 		}
@@ -1874,6 +1881,23 @@ mod test {
 		catalog.finish().unwrap();
 		let archive = catalog.snapshot().archive.expect("the catalog timeline is advertised");
 		assert_eq!(archive.timelines["audio0"].duration, Some(4_000));
+	}
+
+	#[test]
+	fn a_configured_hint_applies_to_media_but_not_the_catalog() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let config = Config::default()
+			.with_timeline(crate::timeline::Config::default().with_duration_hint(std::time::Duration::from_secs(6)));
+		let mut catalog = Producer::new(&mut broadcast, config).unwrap();
+		let _video = catalog.enroll("video0", None).unwrap();
+		let _audio = catalog
+			.enroll("audio0", Some(std::time::Duration::from_secs(5)))
+			.unwrap();
+
+		let archive = catalog.snapshot().archive.expect("the timelines are advertised");
+		assert_eq!(archive.timelines["video0"].duration, Some(6_000));
+		assert_eq!(archive.timelines["audio0"].duration, Some(5_000));
+		assert_eq!(archive.timelines[hang::Catalog::DEFAULT_NAME].duration, Some(0));
 	}
 
 	#[test]
