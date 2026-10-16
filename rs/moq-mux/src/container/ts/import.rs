@@ -180,6 +180,9 @@ impl<E: catalog::Catalog> Import<E> {
 		// may carry the section by value, and a snapshot clones under the mutex (no publish).
 		let mut snapshot = catalog.snapshot();
 		let supports_mpegts = snapshot.ext.mpegts_mut().is_some();
+		if supports_mpegts {
+			catalog.count_ext_tracks(|ext: &mut E| ext.mpegts_mut().is_some_and(|mpegts| mpegts.has_track()));
+		}
 		let si = super::si::Capture::new(broadcast.clone(), catalog.clone());
 		let mux_rate_reservation = supports_mpegts.then(|| reserved.clone());
 		Self {
@@ -3944,6 +3947,62 @@ pub(super) mod test {
 			1,
 			"expected one scte35 rendition"
 		);
+	}
+
+	// An application extension composing the `mpegts` section counts its verbatim tracks as
+	// servable without implementing anything beyond `ts::Catalog`, so an input whose only track
+	// is a cue announces.
+	#[tokio::test(start_paused = true)]
+	async fn a_composed_extension_publishes_a_cue_only_catalog() {
+		use crate::catalog::hang::{Catalog, CatalogExt};
+		use crate::container::ts::catalog::{Catalog as TsCatalog, Mpegts};
+
+		#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Default, PartialEq)]
+		struct Composed {
+			#[serde(default, skip_serializing_if = "Mpegts::is_empty")]
+			mpegts: Mpegts,
+			#[serde(default, skip_serializing_if = "Option::is_none")]
+			app: Option<u32>,
+		}
+		impl CatalogExt for Composed {}
+		impl TsCatalog for Composed {
+			fn mpegts_mut(&mut self) -> Option<&mut Mpegts> {
+				Some(&mut self.mpegts)
+			}
+		}
+
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = crate::catalog::Producer::new(
+			&mut broadcast,
+			crate::catalog::Config::default().with_catalog(Catalog::<Composed>::default()),
+		)
+		.unwrap();
+		let mut updates = catalog.consume().unwrap();
+		let mut import = super::Import::new(broadcast, catalog.reserve());
+
+		let mut bytes = bytes::BytesMut::new();
+		bytes.extend_from_slice(&synth_pmt(
+			&[
+				(StreamType::Mpeg2Video, PCR_PID),
+				(StreamType::Dts8ChannelLosslessAudio, 0x21),
+			],
+			true,
+		));
+		bytes.extend_from_slice(&packet(true, 0, 0, &CUE));
+		bytes.extend_from_slice(&pes_packet(PCR_PID, 90_000));
+		import.decode(&bytes).unwrap();
+		import.finish().unwrap();
+
+		let first = tokio::time::timeout(Duration::from_secs(10), updates.next())
+			.await
+			.expect("the cue track publishes the initial catalog")
+			.unwrap()
+			.unwrap();
+		assert!(
+			first.video.renditions.is_empty() && first.audio.renditions.is_empty(),
+			"only the extension lists a track"
+		);
+		assert_eq!(first.ext.mpegts.tracks.len(), 1, "the cue track is listed");
 	}
 
 	// The base catalog (`Catalog<()>`) can't carry cues, so a detected CUEI PID routes to

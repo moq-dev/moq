@@ -27,12 +27,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// The same extension rides the MSF catalog track, so this requires [`moq_msf::CatalogExt`];
 /// that trait is blanket-implemented, so one `impl CatalogExt` is still all a caller writes.
-pub trait CatalogExt: moq_msf::CatalogExt {
-	/// Whether this extension names a track that can already be served.
-	fn has_track(&self) -> bool {
-		false
-	}
-}
+pub trait CatalogExt: moq_msf::CatalogExt {}
 
 impl CatalogExt for () {}
 

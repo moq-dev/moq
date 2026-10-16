@@ -23,6 +23,10 @@ struct State<E: CatalogExt> {
 	/// name long before it has an entry.
 	owned: BTreeMap<(std::any::TypeId, String), bool>,
 
+	/// Reports whether the extension lists a track of its own, registered by an importer that
+	/// records tracks there (see [`Producer::count_ext_tracks`]).
+	ext_tracks: Option<fn(&mut E) -> bool>,
+
 	/// Gates the initial catalog publish until all reservations resolve (see
 	/// [`reserve`](Producer::reserve)).
 	reservations: Reservations,
@@ -52,17 +56,17 @@ impl<E: CatalogExt> State<E> {
 	///
 	/// Root metadata and application sections can describe a stream before its media config is
 	/// known, and must not make an empty broadcast discoverable. A listed rendition covers
-	/// application-defined sections the base fields can't see; extensions report their own
-	/// independently servable tracks through [`CatalogExt::has_track`].
-	fn lists_track(&self) -> bool {
-		let catalog = &self.catalog;
+	/// application-defined sections the base fields can't see, and an importer that lists tracks in
+	/// the extension reports them through [`ext_tracks`](Self::ext_tracks).
+	fn lists_track(&mut self) -> bool {
+		let catalog = &mut self.catalog;
 		!catalog.video.renditions.is_empty()
 			|| !catalog.audio.renditions.is_empty()
 			|| !catalog.text.renditions.is_empty()
 			|| !catalog.json.tracks.is_empty()
 			|| !catalog.binary.tracks.is_empty()
 			|| catalog.m2ts.is_some()
-			|| catalog.ext.has_track()
+			|| self.ext_tracks.is_some_and(|lists| lists(&mut catalog.ext))
 			|| self.owned.values().any(|&listed| listed)
 	}
 }
@@ -445,6 +449,7 @@ impl<E: CatalogExt> Producer<E> {
 			current: Arc::new(Mutex::new(State {
 				catalog,
 				owned: BTreeMap::new(),
+				ext_tracks: None,
 				reservations: Reservations::default(),
 				closed: None,
 				clock,
@@ -693,6 +698,12 @@ impl<E: CatalogExt> Producer<E> {
 	{
 		let rendition = self.rendition(track.name())?;
 		self.media(track, container, rendition, config.into())
+	}
+
+	/// Count the tracks `lists` finds in the extension toward the initial publish's
+	/// [track requirement](State::lists_track), for an importer that records tracks there.
+	pub(crate) fn count_ext_tracks(&self, lists: fn(&mut E) -> bool) {
+		take(&self.current).ext_tracks = Some(lists);
 	}
 
 	/// Whether a live producer or published config already claims `name` in `R`'s section.

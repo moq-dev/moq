@@ -148,6 +148,16 @@ impl Mpegts {
 			&& self.si.is_empty()
 			&& self.mux_rate.is_none()
 	}
+
+	/// Whether the section lists a track it carries itself: a verbatim stream or an SI table.
+	pub(crate) fn has_track(&self) -> bool {
+		self.tracks.values().any(|track| track.verbatim.is_some())
+			|| self
+				.si
+				.values()
+				.flat_map(BTreeMap::values)
+				.any(|entry| !entry.track.is_empty())
+	}
 }
 
 /// Program identity, from the PAT.
@@ -388,17 +398,7 @@ pub struct Ext {
 	pub mpegts: Mpegts,
 }
 
-impl CatalogExt for Ext {
-	fn has_track(&self) -> bool {
-		self.mpegts.tracks.values().any(|track| track.verbatim.is_some())
-			|| self
-				.mpegts
-				.si
-				.values()
-				.flat_map(BTreeMap::values)
-				.any(|entry| !entry.track.is_empty())
-	}
-}
+impl CatalogExt for Ext {}
 
 /// An extension that can carry an `mpegts` catalog section.
 ///
