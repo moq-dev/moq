@@ -601,6 +601,12 @@ async fn decode(
 	// they have to surface as they accumulate rather than at exit.
 	let mut log = ts::stats::Log::default();
 	let mut sampled = tokio::time::Instant::now();
+	let sections = stats.as_ref().map(crate::report::Stats::sections);
+	let report = |snapshot: &ts::stats::Snapshot| {
+		if let Some(sections) = &sections {
+			sections.set(|report| report.mpegts = Some(snapshot.clone()));
+		}
+	};
 
 	// Run the read/decode loop so an error surfaces here rather than
 	// dropping the decoder (and its tracks) with a bare Error::Dropped.
@@ -621,6 +627,7 @@ async fn decode(
 			if sampled.elapsed() >= ts::stats::Log::INTERVAL {
 				sampled = tokio::time::Instant::now();
 				if let Some(stats) = decoder.stats() {
+					report(&stats);
 					log.sample(stats);
 				}
 			}
@@ -647,6 +654,7 @@ async fn decode(
 	// The drain at end of input can publish a frame nothing vouched for, so the
 	// final snapshot is only complete after `finish`.
 	if let Some(stats) = decoder.stats() {
+		report(&stats);
 		log.finish(&stats);
 	}
 	match outcome {

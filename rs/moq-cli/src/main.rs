@@ -894,6 +894,7 @@ async fn run_stdout(
 		return subscribe.run().await;
 	};
 	let mut echo = report::Echo::new(origin, subscribe.source().clone(), catalog, echo, connection);
+	let subscribe = subscribe.with_sections(echo.sections());
 	let result = tokio::select! {
 		result = subscribe.run() => result,
 		never = echo.run() => match never {},

@@ -42,7 +42,7 @@ Guidance, to be settled while building:
   starts over rather than going negative.
 - Container sections such as `mpegts` are excluded from the verdict; their
   counters are read by their own consumers
-  ([TS health counters](/quest/m2/ts-health-stats.md)).
+  ([MPEG-TS sections](/doc/concept/stats.md#mpeg-ts-sections)).
 - Thresholds are a documented default the caller can override, not policy
   baked into the types. Start from a few measured cases rather than guesses.
 - A verdict carries its evidence: which inputs drove it and who observed them.
@@ -65,4 +65,3 @@ Public API: new health types in `hang` and `@moq/hang`. Wire: none.
 
 - [QoS](/quest/m2/qos/README.md) - the relay's delivery counters, which a combined downstream verdict also reads
 - [Broadcast epochs](/quest/m0/broadcast-epoch/README.md) - a new epoch is one way a counter reset shows
-- [TS health counters](/quest/m2/ts-health-stats.md) - container counters kept out of the verdict
