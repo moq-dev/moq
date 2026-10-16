@@ -69,5 +69,5 @@ The historical samples locate candidates; they are not controlled benchmarks.
 - [macOS zero-RTT test](/quest/m0/ci/platform-macos-zero-rtt.md) - the moq-tokio 0-RTT driver test passes on macOS in the merge queue
 - [Require platform gates](/quest/m0/ci/platform-queue.md) - activate the consolidated platform checks in the main and release rulesets after the workflow lands
 - [mbx on R2](/quest/m0/ci/mbx-r2.md) - Rust builds on every OS read an R2 cache that only `main` writes, escaping the 10 GB Actions cache
-- [Nix cache](/quest/m0/ci/nix-cache.md) - `nix.moq.dev` on R2 replaces Cachix for CI and releases
+- [Verify the Nix cache](/quest/m0/ci/nix-cache-verify.md) - condition: the maintainer bootstrap; then confirm CI and releases use `nix.moq.dev` and retire Cachix
 - [Nightly after FFI reuse](/quest/m0/ci/nightly-ffi-reuse.md) - condition: the first scheduled Nightly and `moq-ffi-v*` tag after #5549 and #5527; measure them and verify the shared build

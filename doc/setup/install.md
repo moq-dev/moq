@@ -67,8 +67,9 @@ docker run -i moqdev/moq --help
 Static binaries for Linux (x86\_64, aarch64), macOS (Apple Silicon), and Windows
 (x64) are attached to every
 [GitHub release](https://github.com/moq-dev/moq/releases). The Nix cache at
-`kixelated.cachix.org` only holds tagged releases, so the `release` branch
-builds from source.
+`nix.moq.dev` only holds tagged releases, so the `release` branch builds from
+source. Nix asks before trusting it; `--accept-flake-config` says yes for one
+command.
 
 ## Debian and Ubuntu
 
