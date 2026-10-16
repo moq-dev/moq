@@ -1,15 +1,15 @@
-import { Time } from "@moq/net";
+import { Milli, Second } from "@moq/clock";
 
 /** The terms of the audio playout target, all in milliseconds. */
 export interface Target {
 	/** The arrival estimate from the container consumer. */
-	measured: Time.Milli;
+	measured: Milli;
 	/** The flush span the rendition advertises, if any. */
-	advertised?: Time.Milli;
+	advertised?: Milli;
 	/** The codec's frame duration, if known. */
-	frame?: Time.Milli;
+	frame?: Milli;
 	/** The catalog `delay`: how far this rendition trails the broadcast's earliest one, if any. */
-	delay?: Time.Milli;
+	delay?: Milli;
 }
 
 /**
@@ -21,10 +21,9 @@ export interface Target {
  * taken against the track's own fastest frame and cancels any offset between tracks. See
  * doc/concept/audio-jitter.md.
  */
-export function target(props: Target): Time.Milli {
-	const floored = Time.Milli.max(props.measured, props.advertised ?? Time.Milli.zero);
-	const own = Time.Milli.add(floored, props.frame ?? Time.Milli.zero);
-	return Time.Milli.add(own, props.delay ?? Time.Milli.zero);
+export function target(props: Target): Milli {
+	const floored = Math.max(props.measured, props.advertised ?? Milli.zero);
+	return Milli(floored + (props.frame ?? Milli.zero) + (props.delay ?? Milli.zero));
 }
 
 /**
@@ -32,7 +31,7 @@ export function target(props: Target): Time.Milli {
  *
  * The measured term saturates at 100 buckets of 20 ms, so a frame later than this adds nothing.
  */
-export const AUTO_MAX_DELAY = 2000 as Time.Milli;
+export const AUTO_MAX_DELAY = 2000 as Milli;
 
 // An AudioWorkletProcessor renders in fixed 128-sample quanta, so a ring shallower than one can
 // never be read from.
@@ -46,6 +45,6 @@ const RENDER_QUANTUM = 128;
  * audio never recovers. Audio keeps its own floor rather than deriving its depth verbatim from a
  * buffer whose meaning is "video holds nothing".
  */
-export function ringSamples(rate: number, delay: Time.Milli): number {
-	return Math.max(RENDER_QUANTUM, Math.ceil(rate * Time.Second.fromMilli(delay)));
+export function ringSamples(rate: number, delay: Milli): number {
+	return Math.max(RENDER_QUANTUM, Math.ceil(rate * Second.fromMilli(delay)));
 }

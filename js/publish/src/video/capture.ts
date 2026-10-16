@@ -1,4 +1,4 @@
-import { Time } from "@moq/net";
+import { Nano, now } from "@moq/clock";
 import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
 import { Fanout } from "../fanout";
 import { TrackProcessor } from "./processor";
@@ -123,7 +123,7 @@ class Frames extends Fanout<VideoFrame> {
 
 		// Re-stamped to now. The held frame may be minutes old, and publishing it at its capture time
 		// would deliver it that late, a delay the jitter estimate keeps for the life of the stream.
-		const at = Time.Micro.fromMilli(performance.now() as Time.Milli);
+		const at = Nano.toMicro(Nano(now()));
 		let first: VideoFrame | undefined = new VideoFrame(held, { timestamp: at });
 		this.#unread.add(first);
 		const release = () => {
