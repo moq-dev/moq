@@ -254,6 +254,11 @@ datagram: unreliable, unordered, under about 1200 bytes, and never
 retransmitted. It suits real-time audio and sensor data. There is no stream
 fallback, so a datagram that doesn't fit isn't delivered that way.
 
+A datagram shares its subscription's priority and group order with streams,
+so a low-priority datagram waits behind higher-priority groups instead of
+jumping the queue. Sent from Rust over QUIC or WebTransport (iroh excepted),
+a full send buffer drops the lowest-priority subscription's oldest datagram.
+
 Nothing caches a datagram. A subscription gets the ones inside its group
 range, and a new one may get the few still in the publisher's short send
 buffer, but `FETCH` never returns one. A publisher that knows the sequence was
