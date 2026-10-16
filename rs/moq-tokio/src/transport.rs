@@ -96,8 +96,9 @@ type OpBox<T> = futures::future::BoxFuture<'static, T>;
 ///   Send-side watches are interruptible, so an idle watch can observe peer
 ///   cancellation while later writes reclaim the stream.
 pub struct Session<S: web_transport_trait::Session> {
+	session: S,
 	// Shared only by transport adapters; a wire reader keeps a Weak to this handle.
-	session: std::sync::Arc<S>,
+	wire: std::sync::Arc<S>,
 	binding: moq_net::transport::Binding,
 	accept_uni: OpSlot<Result<S::RecvStream, S::Error>>,
 	accept_bi: OpSlot<BiResult<S>>,
@@ -135,12 +136,14 @@ fn poll_op<T>(slot: &mut OpSlot<T>, cx: &mut Context<'_>, start: impl FnOnce() -
 impl<S: web_transport_trait::Session> Session<S> {
 	/// Wrap an async-interface transport session.
 	pub fn new(session: S, binding: moq_net::transport::Binding) -> Self {
-		Self::wrap(std::sync::Arc::new(session), binding)
+		let wire = std::sync::Arc::new(session.clone());
+		Self::wrap(session, binding, wire)
 	}
 
-	fn wrap(session: std::sync::Arc<S>, binding: moq_net::transport::Binding) -> Self {
+	fn wrap(session: S, binding: moq_net::transport::Binding, wire: std::sync::Arc<S>) -> Self {
 		Self {
 			session,
+			wire,
 			binding,
 			accept_uni: OpSlot::default(),
 			accept_bi: OpSlot::default(),
@@ -156,7 +159,7 @@ impl<S: web_transport_trait::Session> Session<S> {
 // owns its own progress under the poll contract.
 impl<S: web_transport_trait::Session> Clone for Session<S> {
 	fn clone(&self) -> Self {
-		Self::wrap(self.session.clone(), self.binding)
+		Self::wrap(self.session.clone(), self.binding, self.wire.clone())
 	}
 }
 

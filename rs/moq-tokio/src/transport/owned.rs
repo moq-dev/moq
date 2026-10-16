@@ -93,7 +93,7 @@ impl<S: wt::Session<SendStream: 'static, RecvStream: 'static>> poll::Session for
 		}
 		let tx = AtomicU64::new(stats.bytes_sent().unwrap_or_default());
 		let rx = AtomicU64::new(stats.bytes_received().unwrap_or_default());
-		let session = std::sync::Arc::downgrade(&self.session);
+		let session = std::sync::Arc::downgrade(&self.wire);
 		Some(moq::Wire::new(move || {
 			// A stats reader must not extend the transport's lifetime after its driver drops.
 			if let Some(session) = session.upgrade() {
