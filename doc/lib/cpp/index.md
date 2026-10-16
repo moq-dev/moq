@@ -98,11 +98,21 @@ auto broadcast = ok(announced->available().get());
 auto catalogs = ok(moq::MediaCatalogConsumer::subscribe(broadcast).get());
 if (auto catalog = ok(catalogs->next().get())) {   // std::nullopt once the catalog ends
     for (const auto &[name, video] : catalog->video) {
-        auto media = ok(moq::MediaContainerConsumer::subscribe(broadcast, {name, video.container}).get());
+        // The track is the rendition's `track` when set, otherwise its catalog key.
+        auto track = video.track.value_or(name);
+        auto media = ok(moq::MediaTrackConsumer::subscribe(broadcast, {track, video.container}).get());
         auto frame = ok(media->next().get());   // std::nullopt once the track ends
     }
 }
 ```
+
+`MediaTrackConsumer` reads in decode order. For arrival-order reads, decode each group
+from `TrackConsumer::recv_group` with `moq::MediaGroupConsumer::init(group, container)`;
+frames carry container media time as they land.
+Share `moq::MediaTimebase::init(broadcast)` through container init records when several
+imports use one source timeline. `MediaContainerStreamProducer::init` takes
+`ContainerStreamInit`; omitting its timebase keeps an independent offset. A timebase
+belongs to its broadcast and does not keep it open.
 
 ```cpp
 // Publish encoded frames, or raw pixels with the codec inside the binding.
@@ -115,7 +125,9 @@ ok(audio->write_frame({packet, 20'000}));
 moq::VideoEncoderOutput output{moq::VideoCodec::kH264, "camera", std::nullopt, std::nullopt, moq::VideoEncoderKind::kAuto{}};
 auto video = ok(broadcast->encode_video({moq::VideoPixelFormat::kRgba, 1280, 720, 30}, output, nullptr));
 ok(video->write({0, rgba}));
-ok(broadcast->announce({}));
+moq::Route route;
+route.epoch = moq::mint_epoch(); // a fresh epoch per run
+ok(broadcast->announce(route));
 ok(broadcast->close());    // keep the producer alive while publishing, then close explicitly
 ```
 
@@ -148,11 +160,20 @@ auto continuation = std::move(reading).then(moq::inline_executor, [](moq::expect
 auto frame = co_await media->next();
 ```
 
+## Runtime
+
+Native I/O and background tasks run on a Tokio worker pool. Futures are still
+polled on the [executor](#executor), while `get()` and `wait_for()` block the
+calling thread; independent native wake callbacks can run concurrently. The
+executor passed to `then()` dispatches only the continuation. Call
+`moq::shutdown()` from a host thread before unloading the module; it joins
+native workers and then the executor. Never call shutdown from a continuation.
+
 ## Executor
 
-Futures are polled, and continuations run, on one process-wide executor
-thread unless you install your own with `moq::set_executor(executor,
-shutdown)` before the first async call. An `Executor` takes a `moq::Task` and
+Futures are polled on one process-wide executor thread unless you install your
+own with `moq::set_executor(executor, shutdown)` before the first async call.
+An `Executor` takes a `moq::Task` and
 returns true once it has accepted it; `shutdown` stops accepting and returns
 once no task can still run. A host with its own threads (a game engine)
 installs one that hops onto them. The executor passed to `then()` is separate:
@@ -164,9 +185,22 @@ Never block the executor. A continuation or resumed coroutine that calls
 which deadlocks. `moq::inline_executor` runs a continuation right where the
 future completed, which is the executor thread.
 
+## Disabled renditions
+
+Audio and video convenience decoders reject a catalog configuration with `enabled: false`. Select an enabled rendition from the latest catalog before opening a decoder.
+
+## Track demand
+
+Obtain a dynamic track request’s `demand()` before accepting it to watch subscribers through the handoff to its producer. The watch does not keep the track alive and ends when the track closes or the request is rejected.
+
 ## Shutdown
 
-`moq::shutdown()` stops the `moq-ffi` runtime thread, then the executor.
+`session->shutdown().get()` drains for up to one second and reports any error.
+Application delivery requires explicitly selecting `moq-lite-07-wip` on both
+peers; older Lite versions (including default lite-06) and IETF wait only for
+transport ACKs. Finish or abort live tracks first.
+
+`moq::shutdown()` stops the `moq-ffi` runtime workers, then the executor.
 Pending calls resolve `Cancelled`, and every object stays safe to drop. Call
 it once before a plugin or engine module unloads, from a thread that is not
 running a continuation, so no thread is left calling into unmapped code. A
@@ -174,13 +208,21 @@ process that exits normally can skip it.
 
 ## Errors
 
+Error cases carrying a diagnostic expose it as `reason`; protocol failures expose `details`.
 `moq::Error` holds a `std::variant` of cases (`moq::Error::kCancelled`,
 `kUnauthorized`, `kProtocol`, ...); test one with
 `std::holds_alternative<moq::Error::kUnauthorized>(error.get_variant())`. Auth
 rejections are their own cases, so you don't retry them. `error.to_string()`
 gives the message Rust's `Display` does, for logs; branch on the case, not the
-text. A Rust panic or a misused future (`get()` twice) aborts with a message on
-stderr instead of throwing.
+text. A Rust panic inside a call, or a misused future (`get()` twice), aborts
+with a message on stderr instead of throwing. A panic in a session's background
+work closes only that session.
+
+A session closed for exceeding the relay's request caps reports the protocol
+kind `ProtocolKind::kTooManyRequests`. Reduce
+the simultaneous announcements or subscriptions, or ask the relay operator
+to adjust the [session limits](/bin/relay/config#session-and-peer), before
+reconnecting with the same workload.
 
 Check a result before reading it. With exceptions off below C++23, reading the
 value of an error is undefined, through `*result` and `value()` alike, since

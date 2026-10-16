@@ -5,6 +5,7 @@
 
 #include <moq/ffi/moq.hpp>
 
+#include <chrono>
 #include <functional>
 #include <string>
 #include <utility>
@@ -69,8 +70,10 @@ using JsonStreamConsumer = MoqJsonStreamConsumer;
 using JsonStreamProducer = MoqJsonStreamProducer;
 using MediaCatalogConsumer = MoqMediaCatalogConsumer;
 using MediaCatalogProducer = MoqMediaCatalogProducer;
-using MediaContainerConsumer = MoqMediaContainerConsumer;
-using MediaContainerGroupConsumer = MoqMediaContainerGroupConsumer;
+/// Shares one source timestamp offset without keeping its broadcast open.
+using MediaTimebase = MoqMediaTimebase;
+using MediaTrackConsumer = MoqMediaTrackConsumer;
+using MediaGroupConsumer = MoqMediaGroupConsumer;
 using MediaContainerProducer = MoqMediaContainerProducer;
 using MediaContainerStreamProducer = MoqMediaContainerStreamProducer;
 using MediaTrackProducer = MoqMediaTrackProducer;
@@ -103,6 +106,8 @@ using ClientConfig = MoqClientConfig;
 using ClientTls = MoqClientTls;
 using ConnectionStats = MoqConnectionStats;
 using ContainerInit = MoqContainerInit;
+/// A byte-stream container format and an optional shared source timebase.
+using ContainerStreamInit = MoqContainerStreamInit;
 using Datagram = MoqDatagram;
 using Dimensions = MoqDimensions;
 using FetchGroupOptions = MoqFetchGroupOptions;
@@ -110,8 +115,8 @@ using FlateConfig = MoqFlateConfig;
 using Frame = MoqFrame;
 using JsonSnapshotConfig = MoqJsonSnapshotConfig;
 using JsonStreamConfig = MoqJsonStreamConfig;
-using MediaContainerConfig = MoqMediaContainerConfig;
-using MediaContainerGroupConfig = MoqMediaContainerGroupConfig;
+using MediaTrackConfig = MoqMediaTrackConfig;
+using MediaGroupConfig = MoqMediaGroupConfig;
 using MediaFrame = MoqMediaFrame;
 using OriginConfig = MoqOriginConfig;
 using ProtocolError = MoqProtocolError;
@@ -180,7 +185,7 @@ inline void set_executor(Executor executor, std::function<void()> shutdown) noex
     ::uniffi::set_async_dispatcher(std::move(executor), std::move(shutdown));
 }
 
-// Stops the moq-ffi runtime thread, then the executor, before the process or module goes away.
+// Stops the moq-ffi runtime workers, then the executor, before the process or module goes away.
 // Pending calls resolve Cancelled. Call it once from a thread that is not running a continuation.
 inline void shutdown() noexcept {
     moq_ffi_shutdown();
@@ -190,6 +195,24 @@ inline void shutdown() noexcept {
 // Sets the log level: "error", "warn", "info", "debug", "trace", or "". Errors if called twice.
 inline expected<void> log_level(const std::string &level) {
     return moq_log_level(level);
+}
+
+// Mints a fresh publisher epoch, ordered newest last. Announce one per run in Route::epoch,
+// so viewers see a restart as a new broadcast instead of a stalled one.
+inline std::string mint_epoch() {
+    return moq_mint_epoch();
+}
+
+// The wall-clock time an epoch encodes, to the millisecond. Errors unless it is a UUIDv7.
+// Millisecond ticks hold every 48-bit UUIDv7 time, where system_clock's nanoseconds overflow in 2262.
+inline expected<std::chrono::time_point<std::chrono::system_clock, std::chrono::milliseconds>>
+epoch_time(const std::string &epoch) {
+    auto ms = moq_epoch_time_ms(epoch);
+    if (!ms) {
+        return unexpected(std::move(ms).error());
+    }
+    return std::chrono::time_point<std::chrono::system_clock, std::chrono::milliseconds>(
+        std::chrono::milliseconds(static_cast<std::chrono::milliseconds::rep>(*ms)));
 }
 
 #ifdef MOQ_COROUTINES

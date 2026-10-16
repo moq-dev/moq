@@ -15,17 +15,18 @@ set working-directory := '.'
 
 # List the cross-language suites.
 default:
-    @just --justfile {{ justfile() }} --list test
+    @just --justfile {{ quote(justfile()) }} --list test
 
 # Port isolation across private temp roots and keyboard activation under a canvas.
 # The browser check is not `*.test.ts`: plain `bun test` runs lack Playwright Chromium,
 # which this recipe installs, as the interop and wasm harnesses do.
 harness:
     ./lib/harness.test.sh
+    ./interop/relay-log.test.sh
     cd .. && bun test test/interop/compat/resolve.test.ts
     cd .. && bun install --frozen-lockfile
     cd interop/clients/js && bunx playwright install chromium
-    cd interop/clients/js && bun test ./harness.browser.ts ./src/contract.test.ts
+    cd interop/clients/js && bun test ./harness.browser.ts ./capture-channel-count.browser.ts ./src/contract.test.ts ./src/resume.test.ts
 
 # Cross-language media interop test, built from this checkout. Stands up a
 # relay and runs the publisher x subscriber matrix. Default: rust only (fast
@@ -33,19 +34,26 @@ harness:
 # browser + C++ publish; everyone subscribes (incl. native node/bun JS, the
 # moq-c C client, and the GStreamer moqsrc plugin). Other flags pass through, e.g.
 # `just test interop --publishers rust,python --subscribers rust,c`.
-# Finite track tails run too; `--tail` selects just Rust/Node/Bun tail checks.
+# Finite track tails run too; `--tail` selects just the CLI FETCH close and Rust/Node/Bun tail checks.
 # Both runs first check js/net's varints against moq-net's encoder at every size boundary,
 # and on lite-06/07 messages (the filter also matches `lite_varint_interop`), then
-# moq-transport OBJECT_DATAGRAMs both ways on every draft.
+# moq-transport OBJECT_DATAGRAMs both ways and the JS answer to TRACK_STATUS on every
+# draft, and Lite AUTH_ERROR NOT_SUPPORTED after a grant in both directions.
 [positional-arguments]
 interop *args:
-    just rs test -p moq-net --lib varint_interop ietf_datagram_interop --run-ignored all
+    just rs test -p moq-net --lib varint_interop ietf_datagram_interop ietf_track_status_interop auth_unsupported_interop --run-ignored all
     ./interop/interop.sh "$@"
 
 # Nightly main vs newest installable registry releases: tokens, moq-lite session
 # versions, decoded catalogs/containers, and group FETCH. See interop/README.md.
-wire-compat:
-    ./interop/compat.sh
+# --remeasure also runs the planned breaks and rewrites them, as each release does.
+[positional-arguments]
+wire-compat *args:
+    ./interop/compat.sh "$@"
+
+# Paint a short-side transcode rung from a coded portrait through moq-watch.
+portrait:
+    ./portrait/run.sh
 
 # Negative control: no publisher, every subscriber must time out (proves the
 
@@ -74,6 +82,10 @@ media *args:
 [positional-arguments]
 drill *args:
     just rs test -p moq-relay --test drills "$@"
+
+# Play through a private Linux null device using the shipped headless binary.
+native-play:
+    ./native-play/run.sh
 
 # Plays a tone in headless Chromium through moq-shaper and grades what the listener
 # heard (underruns, skip-aheads, silence, the resolved delay) against
@@ -106,7 +118,7 @@ drill-sensitivity *args:
     ./drill/sensitivity.sh "$@"
 
 # Round-trips a PCR-paced TS through a relay and checks the subscriber's `export
-# ts` output with TSDuck plus a custom analyzer (the T-STD buffer model, PCR
+# ts` output with FFmpeg, TSDuck and a custom analyzer (the T-STD buffer model, PCR
 # spacing and byte schedule). Flags: `--analyze-only file.ts`
 # (skip the round-trip), `--strict` (fail on shape warnings), `--source file.ts`
 # (use a real capture), `--live` (grade PCR release timing and byte position off
@@ -118,7 +130,12 @@ drill-sensitivity *args:
 # Check the subscriber's MPEG-TS output for IRD compliance.
 [positional-arguments]
 ts *args:
+    python3 ./ts/pcr-timing.test.py
     ./ts/run.sh "$@"
+
+# Table-placement grader: acquisition, interleave, phase, drift and missing-table controls.
+ts-pair-controls:
+    python3 ./ts/table-anchor.test.py
 
 # Round-trip the EIT fixtures: the sparse schedule must survive and
 # pending-version sections must be dropped at import.
@@ -129,7 +146,11 @@ ts-eit *args:
 # The T-STD model's controls: a broadcast capture must pass, and the same capture
 # delivered too slowly, too early, or in a burst must fail. Needs only TSDuck.
 ts-tstd:
-    ./ts/tstd-controls.py
+    bash ./ts/tstd-controls.sh
+
+# Prove FFmpeg decode/content and TSDuck structure/PCR assertions reject damaged TS.
+ts-controls:
+    bash ./ts/controls.sh
 
 # A JS viewer watching a live track through a relay that drains (SIGTERM, after
 # a stand-in for DNS stops pointing at it) migrates to a second relay behind the
@@ -161,3 +182,7 @@ max-age:
 # Cross-language subscription termination over in-memory transports.
 bare-fin:
     just rs test -p moq-net --lib bare_fin_interop --run-ignored all
+
+# Explore JSON snapshot codec sequences with a fresh replayable seed.
+json-properties:
+    bash json-properties.sh

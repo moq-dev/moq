@@ -23,11 +23,17 @@ export type Role = z.infer<typeof RoleSchema>;
 // is exposed inline via `initData`, regardless of how it was carried on the wire.
 const trackShape = {
 	name: z.string(),
+	/** The track's absolute namespace; absent inherits the catalog's namespace. */
+	namespace: z.optional(z.string()),
 	packaging: PackagingSchema,
 	// draft-00 marks isLive required but omits it on mediatimeline/eventtimeline
 	// tracks, so accept its absence rather than reject the whole catalog.
 	isLive: z.optional(z.boolean()),
 	role: z.optional(RoleSchema),
+	/** A human-readable label for the track. */
+	label: z.optional(z.string()),
+	/** The BCP-47 language tag of the track. */
+	lang: z.optional(z.string()),
 	codec: z.optional(z.string()),
 	width: z.optional(z.number()),
 	height: z.optional(z.number()),

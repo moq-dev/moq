@@ -17,6 +17,11 @@ use moq_relay::{
 	cluster::{self, Peer},
 };
 
+/// A millisecond track: the frames written here carry timestamps.
+fn timed() -> moq_net::track::Info {
+	moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+}
+
 const TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Bound `fut` by [`TIMEOUT`], naming the step that hung.
@@ -116,7 +121,7 @@ async fn node(id: u64, connect: Vec<Peer>) -> Node {
 		while let Some(request) = listener.accept().await {
 			let connection = Connection::new(request, serving.clone(), auth.clone());
 			sessions.spawn(async move {
-				let _ = connection.run().await;
+				connection.run().await;
 			});
 		}
 	});
@@ -148,7 +153,7 @@ impl Drop for Publisher {
 
 fn publish(origin: &origin::Producer, path: &str) -> Publisher {
 	let broadcast = origin.publish(path, Default::default()).expect("publish");
-	let track = broadcast.create_track("video", None).expect("create track");
+	let track = broadcast.create_track("video", timed()).expect("create track");
 	let writer = tokio::spawn(async move {
 		loop {
 			let Ok(mut group) = track.append_group() else { break };

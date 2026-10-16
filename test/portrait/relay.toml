@@ -1,0 +1,16 @@
+# Private loopback relay for the portrait transcode harness.
+[log]
+level = "info"
+
+[listen]
+bind = "127.0.0.1:4443"
+tls.generate = ["localhost", "127.0.0.1"]
+# The CLI peers negotiate lite-07 so their epochs carry an initial request across a
+# replacement session; lite-06 refuses it as a new instance. Chromium offers lite-06.
+version = ["moq-lite-07-wip", "moq-lite-06"]
+
+[web.http]
+listen = "127.0.0.1:4443"
+
+[auth]
+public = "**"

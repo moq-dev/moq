@@ -30,8 +30,8 @@ import { VideoSchema } from "./video";
 export const RootSchema = z.looseObject({
 	video: z.optional(VideoSchema),
 	audio: z.optional(AudioSchema),
-	// The broadcast's segment index and any durable archive, if the publisher offers one.
-	archive: z.optional(ArchiveSchema),
+	// An incompatible archive disables seeking/recording, not the rest of the catalog.
+	archive: z.catch(z.optional(ArchiveSchema), undefined),
 	// The broadcast's one continuous clock, if the publisher exposes one. Independent of
 	// `archive`: a live-only publisher exposes its mapping without creating a segment index.
 	clock: z.optional(ClockSchema),
@@ -62,13 +62,27 @@ export class TooManyRenditions extends Error {
 	}
 }
 
-/** Refuse an update with too many media renditions. */
+/** A catalog update used one rendition ID for both a video and an audio rendition. */
+export class DuplicateRendition extends Error {
+	readonly id: string;
+
+	constructor(id: string) {
+		super(`catalog rendition ID is both video and audio: ${id}`);
+		this.name = "DuplicateRendition";
+		this.id = id;
+	}
+}
+
+/** Refuse an update with too many media renditions, or with an ID naming both a video and an audio rendition. */
 export function checkRenditions(root: Root): Root {
 	const count =
 		Object.keys(root.video?.renditions ?? {}).length +
 		Object.keys(root.audio?.renditions ?? {}).length +
 		Object.keys(root.text?.renditions ?? {}).length;
 	if (count > MAX_RENDITIONS) throw new TooManyRenditions(count);
+	const audio = root.audio?.renditions ?? {};
+	const duplicate = Object.keys(root.video?.renditions ?? {}).find((id) => Object.hasOwn(audio, id));
+	if (duplicate !== undefined) throw new DuplicateRendition(duplicate);
 	return root;
 }
 

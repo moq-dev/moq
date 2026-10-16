@@ -38,7 +38,13 @@ and anchors the catalog clock on the first frame, so it names the wall time the
 push arrived. A group starting before the previous group's start, such as an
 encoder restarting its timestamps mid-push, ends that push with an error.
 
-A player that advertises enhanced-RTMP multitrack receives every rendition.
+Egress uses `--max-delay` (default 500 ms) for both the FLV release delay and
+the stalled-group budget. Frames go out in decode order; a late video frame
+is dropped and video resumes at the next keyframe. Zero releases available
+frames immediately without deadline drops.
+
+Disabled renditions (catalog `enabled: false`) are skipped. A player that
+advertises enhanced-RTMP multitrack receives every enabled rendition.
 Any other player receives one video rendition, the largest picture (then
 highest bitrate) in a codec it advertised, and one audio rendition, the highest
 bitrate (then sample rate, then channels) in a codec it advertised. A push

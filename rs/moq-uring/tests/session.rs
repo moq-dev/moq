@@ -21,7 +21,7 @@ use moq_uring::{Config, Error, Worker, quic, udp};
 fn worker() -> Option<Worker> {
 	match Worker::new(Config::default()) {
 		Ok(worker) => Some(worker),
-		Err(Error::Unsupported(reason)) => {
+		Err(Error::Unsupported(reason)) if std::env::var_os("MOQ_STRICT").is_none() => {
 			eprintln!("skipping io_uring session test: {reason}");
 			None
 		}
@@ -31,6 +31,11 @@ fn worker() -> Option<Worker> {
 
 const ALPN: &str = "moq-lite-05";
 const PAYLOAD: &[u8] = b"hello over io_uring";
+
+/// A millisecond track: the frames written here carry timestamps.
+fn timed() -> moq_net::track::Info {
+	moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+}
 
 #[test]
 fn lite_session_over_the_worker() {
@@ -54,7 +59,7 @@ fn lite_session_over_the_worker() {
 	// finished group.
 	let broadcast = pub_origin.create_broadcast("test").expect("create broadcast");
 	broadcast.announce(Default::default()).expect("create broadcast");
-	let track = broadcast.create_track("data", None).expect("create track");
+	let track = broadcast.create_track("data", timed()).expect("create track");
 	let mut group = track.append_group().expect("append group");
 	group
 		.write_frame(moq_net::Timestamp::ZERO, PAYLOAD)
@@ -62,8 +67,12 @@ fn lite_session_over_the_worker() {
 	group.finish().expect("finish group");
 
 	let certs = support::certs().expect("certificates");
-	let mut server_config = quic::server::Config::new(quic::Identity::open(&certs.cert, &certs.key).expect("identity"));
-	server_config.alpn = vec![ALPN.to_string()];
+	let server_config = quic::server::Config::new(
+		quic::Identity::open(&certs.cert, &certs.key)
+			.expect("identity")
+			.server(&[ALPN], quic::server::ClientAuth::None)
+			.expect("tls"),
+	);
 
 	let server_sock = handle
 		.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
@@ -87,7 +96,7 @@ fn lite_session_over_the_worker() {
 			.with_publisher(&pub_origin)
 			.accept_lite(
 				std::time::Instant::now(),
-				moq_uring::transport::Session::new(quic::web::Session::raw(conn)),
+				moq_uring::transport::Session::new(quic::web::Session::raw(conn), moq_net::transport::Binding::InBand),
 			)
 			.await
 			.expect("accept_lite");
@@ -110,7 +119,10 @@ fn lite_session_over_the_worker() {
 				.with_subscriber(sub.clone())
 				.connect_lite(
 					std::time::Instant::now(),
-					moq_uring::transport::Session::new(quic::web::Session::raw(conn)),
+					moq_uring::transport::Session::new(
+						quic::web::Session::raw(conn),
+						moq_net::transport::Binding::InBand,
+					),
 				)
 				.await
 				.expect("connect_lite");
@@ -183,7 +195,7 @@ fn two_lite_sessions_share_the_server_socket() {
 
 	let broadcast = pub_origin.create_broadcast("test").expect("create broadcast");
 	broadcast.announce(Default::default()).expect("create broadcast");
-	let track = broadcast.create_track("data", None).expect("create track");
+	let track = broadcast.create_track("data", timed()).expect("create track");
 	let mut group = track.append_group().expect("append group");
 	group
 		.write_frame(moq_net::Timestamp::ZERO, PAYLOAD)
@@ -191,8 +203,12 @@ fn two_lite_sessions_share_the_server_socket() {
 	group.finish().expect("finish group");
 
 	let certs = support::certs().expect("certificates");
-	let mut server_config = quic::server::Config::new(quic::Identity::open(&certs.cert, &certs.key).expect("identity"));
-	server_config.alpn = vec![ALPN.to_string()];
+	let server_config = quic::server::Config::new(
+		quic::Identity::open(&certs.cert, &certs.key)
+			.expect("identity")
+			.server(&[ALPN], quic::server::ClientAuth::None)
+			.expect("tls"),
+	);
 
 	let server_sock = handle
 		.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
@@ -215,7 +231,10 @@ fn two_lite_sessions_share_the_server_socket() {
 					.with_publisher(&pub_origin)
 					.accept_lite(
 						std::time::Instant::now(),
-						moq_uring::transport::Session::new(quic::web::Session::raw(conn)),
+						moq_uring::transport::Session::new(
+							quic::web::Session::raw(conn),
+							moq_net::transport::Binding::InBand,
+						),
 					)
 					.await
 					.expect("accept_lite");
@@ -241,7 +260,10 @@ fn two_lite_sessions_share_the_server_socket() {
 					.with_subscriber(sub.clone())
 					.connect_lite(
 						std::time::Instant::now(),
-						moq_uring::transport::Session::new(quic::web::Session::raw(conn)),
+						moq_uring::transport::Session::new(
+							quic::web::Session::raw(conn),
+							moq_net::transport::Binding::InBand,
+						),
 					)
 					.await
 					.expect("connect_lite");
@@ -293,8 +315,12 @@ fn configured_roots_verify_the_server() {
 	let handle = worker.handle();
 	let certs = support::certs().expect("certificates");
 
-	let mut server_config = quic::server::Config::new(quic::Identity::open(&certs.cert, &certs.key).expect("identity"));
-	server_config.alpn = vec![ALPN.to_string()];
+	let server_config = quic::server::Config::new(
+		quic::Identity::open(&certs.cert, &certs.key)
+			.expect("identity")
+			.server(&[ALPN], quic::server::ClientAuth::None)
+			.expect("tls"),
+	);
 
 	let server_sock = handle
 		.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
@@ -346,11 +372,14 @@ fn required_client_auth_refuses_an_anonymous_client() {
 	let handle = worker.handle();
 	let certs = support::certs().expect("certificates");
 
-	let mut server_config = quic::server::Config::new(quic::Identity::open(&certs.cert, &certs.key).expect("identity"));
-	server_config.alpn = vec![ALPN.to_string()];
 	// Any root will do: the client presents nothing, so it fails before the
 	// chain is ever checked.
-	server_config.client_auth = quic::server::ClientAuth::Required(vec![certs.cert.clone()]);
+	let server_config = quic::server::Config::new(
+		quic::Identity::open(&certs.cert, &certs.key)
+			.expect("identity")
+			.server(&[ALPN], quic::server::ClientAuth::Required(vec![certs.cert.clone()]))
+			.expect("tls"),
+	);
 
 	let server_sock = handle
 		.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
@@ -410,9 +439,12 @@ fn a_root_bundle_is_loaded_whole() {
 	let handle = worker.handle();
 	let bundle = support::bundle().expect("bundle");
 
-	let mut server_config =
-		quic::server::Config::new(quic::Identity::open(&bundle.cert, &bundle.key).expect("identity"));
-	server_config.alpn = vec![ALPN.to_string()];
+	let server_config = quic::server::Config::new(
+		quic::Identity::open(&bundle.cert, &bundle.key)
+			.expect("identity")
+			.server(&[ALPN], quic::server::ClientAuth::None)
+			.expect("tls"),
+	);
 
 	let server_sock = handle
 		.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())

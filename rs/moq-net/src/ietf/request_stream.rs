@@ -38,6 +38,35 @@ pub(super) fn poll_cancel<S: crate::transport::poll::Session>(
 	Poll::Pending
 }
 
+/// Watch for the requester ending a request it has not been answered on yet, without consuming
+/// what it sent meanwhile: a waiting message (an update, say) ends the watch on the reader and
+/// is read once the request is answered. A withdrawal queued behind an update is therefore seen
+/// only then; until the verifier answers, the requester holds nothing but its own slot.
+pub(super) fn poll_withdrawn<S: crate::transport::poll::Session>(
+	stream: &mut Stream<S, Version>,
+	version: Version,
+	cx: &mut Context<'_>,
+) -> Poll<()> {
+	// Drafts 14-16 deliver the terminal message (UNSUBSCRIBE, PUBLISH_NAMESPACE_DONE) ahead of
+	// the FIN, so a waiting message that is not an update already withdraws the request. Their
+	// virtual writers are closed while the control request lives, so only the reader counts.
+	if matches!(version, Version::Draft14 | Version::Draft15 | Version::Draft16) {
+		return match stream.reader.poll_varint_peek(cx) {
+			Poll::Ready(Ok(id)) if id == super::SubscribeUpdate::ID => Poll::Pending,
+			Poll::Ready(_) => Poll::Ready(()),
+			Poll::Pending => Poll::Pending,
+		};
+	}
+	if stream.writer.poll_closed(cx).is_ready() {
+		return Poll::Ready(());
+	}
+	match stream.reader.poll_has_more(cx) {
+		Poll::Ready(Ok(false)) if fin_cancels(version) => Poll::Ready(()),
+		Poll::Ready(Err(_)) => Poll::Ready(()),
+		_ => Poll::Pending,
+	}
+}
+
 /// Poll a draft 14-16 virtual request stream until the requester ends the request.
 ///
 /// An update modifies the request rather than ending it, so it is skipped. Any other
@@ -78,13 +107,30 @@ impl Decode<Version> for FollowUp {
 	}
 }
 
+/// One whole `[type][length][body]` message off a request stream, decoded at once so a read
+/// dropped part-way consumes nothing.
+#[derive(Debug)]
+pub(super) struct Framed(pub(super) u64, pub(super) super::Body);
+
+impl Decode<Version> for Framed {
+	fn decode(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
+		let id = r.varint()?;
+		Ok(Self(id, super::Body::decode(r, version)?))
+	}
+}
+
 /// A framed subscription update, preserving omitted preferences.
 #[derive(Debug)]
 pub(super) struct Update {
 	/// The first Request ID: the update's own on drafts 14-16, which their answer names.
 	pub(super) request_id: super::RequestId,
 	pub(super) priority: Option<u8>,
-	pub(super) unsupported: bool,
+	/// Why the update is refused, which fails the subscription: [`Error::Unsupported`], a
+	/// [`DecodeError::MalformedAuthToken`] for tokens that repeat, or a
+	/// [`DecodeError::MultipleAuthTokens`] for more than one token.
+	pub(super) refused: Option<Error>,
+	/// The AUTHORIZATION TOKEN renewing the request's credential.
+	pub(super) authorization_token: Option<super::token::RequestToken>,
 }
 
 impl Update {
@@ -112,14 +158,16 @@ impl Update {
 				let _end_group = data.varint()?;
 				let priority = data.u8()?;
 				let forward = data.bool()?;
-				Parameters::skip(data)?;
+				let tokens = Parameters::skip_request(data)?;
 				if !data.is_empty() {
 					return Err(DecodeError::InvalidValue);
 				}
+				let (refused, authorization_token) = Self::refused(tokens, !forward);
 				return Ok(Self {
 					request_id,
 					priority: Some(priority),
-					unsupported: !forward,
+					refused,
+					authorization_token,
 				});
 			}
 			// The request it updates, which the adapter already routed by.
@@ -133,7 +181,7 @@ impl Update {
 		}
 		decode_params!(data, version,
 			0x02 => object_timeout: Option<u64>,
-			0x03 => token: Vec<Opaque>,
+			0x03 => token: Vec<super::token::RequestToken>,
 			0x06 => subgroup_timeout: Option<u64> where !matches!(version, Version::Draft14 | Version::Draft15 | Version::Draft16 | Version::Draft17),
 			0x10 => forward: Option<bool>,
 			0x20 => priority: Option<u8>,
@@ -149,22 +197,37 @@ impl Update {
 		if !data.is_empty() {
 			return Err(DecodeError::InvalidValue);
 		}
+		let unsupported = forward == Some(false)
+			|| filter.is_some()
+			|| fill.is_some()
+			|| object_timeout.is_some()
+			|| subgroup_timeout.is_some()
+			|| !subgroup_filter.is_empty()
+			|| !object_filter.is_empty()
+			|| !priority_filter.is_empty()
+			|| !property_filter.is_empty()
+			|| !track_filter.is_empty()
+			|| new_group.is_some();
+		let (refused, authorization_token) = Self::refused(token, unsupported);
 		Ok(Self {
 			request_id,
 			priority,
-			unsupported: forward == Some(false)
-				|| filter.is_some()
-				|| fill.is_some()
-				|| object_timeout.is_some()
-				|| subgroup_timeout.is_some()
-				|| !token.is_empty()
-				|| !subgroup_filter.is_empty()
-				|| !object_filter.is_empty()
-				|| !priority_filter.is_empty()
-				|| !property_filter.is_empty()
-				|| !track_filter.is_empty()
-				|| new_group.is_some(),
+			refused,
+			authorization_token,
 		})
+	}
+
+	/// Why an update is refused, if it is, and the token it carries. A token refusal comes
+	/// first: section 8.9 rejects an update whose tokens repeat, which says more than that we
+	/// do not support it.
+	fn refused(
+		tokens: Vec<super::token::RequestToken>,
+		unsupported: bool,
+	) -> (Option<Error>, Option<super::token::RequestToken>) {
+		match super::token::single(tokens) {
+			Err(err) => (Some(err.into()), None),
+			Ok(token) => (unsupported.then_some(Error::Unsupported), token),
+		}
 	}
 }
 
@@ -196,6 +259,6 @@ mod tests {
 		let mut buf = bytes::Bytes::from_static(&[0x02, 0x01, 0x20, 0x05]);
 		let update = crate::coding::decode_buf(&mut buf, Version::Draft18, Update::decode_body).unwrap();
 		assert_eq!(update.priority, Some(5));
-		assert!(!update.unsupported);
+		assert!(update.refused.is_none());
 	}
 }

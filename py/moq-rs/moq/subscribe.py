@@ -34,7 +34,7 @@ def _frame(frame: MoqFrame | None) -> Frame | None:
 
 
 class GroupConsumer:
-    """Async iterator of timestamped frames within a single group."""
+    """Async iterator of raw frames within a single group."""
 
     def __init__(self, inner: MoqGroupConsumer) -> None:
         self._inner = inner
@@ -60,7 +60,7 @@ class GroupConsumer:
         return Frame._from_ffi(frame)
 
     async def read_frame(self) -> Frame | None:
-        """Read the next timestamped frame. Returns `None` when the group ends."""
+        """Read the next raw frame. Returns `None` when the group ends."""
         return _frame(await self._inner.read_frame())
 
     def cancel(self) -> None:
@@ -74,7 +74,7 @@ class TrackConsumer:
     Iterating yields groups via :meth:`next_group`. Use :meth:`recv_group` (or
     :meth:`groups_as_arrived`) for arrival order instead.
 
-    Each group is itself an async iterator of timestamped frames. Same pattern as
+    Each group is itself an async iterator of raw frames. Same pattern as
     moq-boy's status/command tracks (one frame per group), but multi-frame
     groups are also supported.
     """
@@ -134,7 +134,7 @@ class TrackConsumer:
         return GroupConsumer(group)
 
     async def read_frame(self) -> Frame | None:
-        """Read the first timestamped frame of the next group.
+        """Read the first raw frame of the next group.
 
         Convenience for tracks using one-frame-per-group (like moq-boy's
         status/command tracks). Completed empty groups are skipped. Returns
@@ -266,10 +266,11 @@ class BroadcastConsumer:
         ``reference`` is ``catalog.video[name].broadcast`` /
         ``catalog.audio[name].broadcast``: ``None`` or empty names this broadcast,
         anything else names a sibling relative to it (e.g. ``./source``). Call it on
-        a rendition that carries one before :meth:`~moq.media.ContainerConsumer.subscribe`,
-        :meth:`subscribe_track`, :meth:`fetch_group`, or :meth:`~moq.media.ContainerGroupConsumer.fetch`,
-        which take a track name rather than a rendition; :meth:`decode_audio` and
-        :meth:`decode_video` resolve it themselves.
+        a rendition that carries one before :meth:`~moq.media.TrackConsumer.subscribe`,
+        :meth:`subscribe_track`, :meth:`fetch_group`, or :meth:`~moq.media.GroupConsumer.fetch`,
+        which take a track name rather than a rendition: the rendition's ``track``, or its
+        catalog key when unset. :meth:`decode_audio` and :meth:`decode_video` resolve both
+        themselves.
 
         Raises if this broadcast came from a local producer rather than an origin,
         since a standalone broadcast has no sibling to name.

@@ -11,7 +11,7 @@ function decodeJson(raw: Uint8Array): Record<string, unknown> {
 
 test("decodes a draft-00 catalog with a numeric version", () => {
 	// Example 1 from draft-ietf-moq-msf-00, trimmed. Numeric version plus unmodeled
-	// fields (namespace, targetLatency, generatedAt) which must be ignored.
+	// fields (targetLatency, generatedAt) which must be ignored.
 	const catalog = decode(
 		encodeJson({
 			version: 1,
@@ -249,4 +249,29 @@ test("round-trips a __proto__ extension member as data", () => {
 	const wire = decodeJson(encode(catalog));
 	expect(Object.keys(wire)).toContain("__proto__");
 	expect(wire.ok).toBe(2);
+});
+
+test("caption role, label, language and codec survive the wire", () => {
+	const track = {
+		name: "captions.en",
+		packaging: "loc",
+		isLive: true,
+		role: "caption",
+		codec: "ttml",
+		lang: "en",
+		label: "English SDH",
+	};
+	expect(decode(encode({ tracks: [track] })).tracks).toEqual([track]);
+});
+
+test("preserves a track namespace through MSF decoding and encoding", () => {
+	for (const version of [1, "draft-01"]) {
+		const wire = encodeJson({
+			version,
+			tracks: [{ name: "video", namespace: "room/left", packaging: "loc", role: "video", codec: "vp8" }],
+		});
+		expect(decodeJson(encode(decode(wire))).tracks).toEqual([
+			{ name: "video", namespace: "room/left", packaging: "loc", role: "video", codec: "vp8", isLive: false },
+		]);
+	}
 });

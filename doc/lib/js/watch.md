@@ -43,6 +43,12 @@ Every attribute is also a reactive property. The
 The overlay adds play/pause, volume, fullscreen, a quality selector, a
 buffering indicator, and a stats panel.
 
+`el.error` (also `el.player.error`) reports a fatal audio or video decode error.
+The failing track closes its subscription and stops decoding. Select another
+source or rendition to clear the failure; the player does not resubscribe to
+broken media automatically. Individual decoder errors are available at
+`el.audio.out.error` and `el.video.out.error`.
+
 `el.broadcast.out.status` is `offline`, `loading`, `live`, or `error`. On
 `error` the origin refused the broadcast, `el.broadcast.out.error` says why,
 and the player does not ask again until it is pointed elsewhere or re-enabled.
@@ -112,10 +118,10 @@ const dispose = el.signals.run((effect) => {
 ```
 
 Call `dispose()` on unmount. The effect re-runs when the catalog or the
-active broadcast changes, so a reconnect resubscribes on its own: the broadcast
-requests the path again whenever it is announced (a start or a restart), and
-switches only when that resolves another broadcast. A request ending is never
-the trigger, so following a restart needs a relay with discovery.
+active broadcast changes, so a reconnect resubscribes on its own: the
+broadcast's announced request moves to each start or restart, and switches only
+when that resolves another broadcast. A request ending is never the trigger, so
+following a restart needs a relay with discovery.
 
 ## Without the element
 
@@ -141,6 +147,30 @@ const player = new Watch.Player({
 Pass a signal from [`@moq/signals`](/lib/js/signals) for any control you want
 to change later, such as `muted` or `delay`. `Player` is the pipeline inside
 `<moq-watch>`; its parts are exported for custom composition.
+
+To chart when each frame arrived against when it plays, open an `arrivals()`
+handle on a decoder. It yields every frame received while it is open, stamped
+when the frame came off the transport, and a gap wherever media after an earlier
+frame will never arrive (a latency skip, a hole):
+
+```ts
+const arrivals = player.audio.arrivals();
+for await (const entry of arrivals) {
+    if (entry.kind === "gap") {
+        // Break the plotted line; nothing arrived from `timestamp` for `duration`.
+        continue;
+    }
+    const { timestamp, arrival, late } = entry;
+    // `late`: arrived after its playback deadline.
+}
+```
+
+A gap's span is an upper bound: without per-frame durations it starts at the
+last frame's timestamp, and it covers any pause the publisher declared.
+
+Unread frames queue on the handle, so keep reading and keep your own window.
+Leaving the loop or calling `arrivals.close()` stops observing and releases
+them; nothing is retained without an open handle. Video reports the rendition on screen.
 
 ## Buffered playback
 

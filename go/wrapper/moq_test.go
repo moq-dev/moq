@@ -85,7 +85,7 @@ func TestDynamicBroadcastRequest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	track, err := served.PublishTrack("status", nil)
+	track, err := served.PublishTrack("status", timedInfo())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -401,7 +401,7 @@ func TestFetchGroupAndServeDynamicMiss(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	track, err := broadcast.PublishTrack("events", nil)
+	track, err := broadcast.PublishTrack("events", timedInfo())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -544,7 +544,7 @@ func TestLocalPublishConsumeAudio(t *testing.T) {
 		t.Fatalf("audio = %+v, want opus/48000/2", audio)
 	}
 
-	mediaConsumer, err := moqmedia.NewContainerConsumer(ctx, bc, moqmedia.ContainerConfig{Name: trackName, Container: audio.Container, Subscription: nil})
+	mediaConsumer, err := moqmedia.NewTrackConsumer(ctx, bc, moqmedia.TrackConfig{Name: trackName, Container: audio.Container, Subscription: nil})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -565,6 +565,32 @@ func TestLocalPublishConsumeAudio(t *testing.T) {
 	if string(frame.Payload) != string(payload) || uint64(frame.Timestamp.Microseconds()) != 1_000_000 {
 		t.Fatalf("frame = %+v, want payload=%q ts=1000000", frame, payload)
 	}
+
+	// The same group, received raw in arrival order and decoded with the container.
+	track, err := bc.SubscribeTrack(ctx, trackName, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer track.Cancel()
+	group, err := track.RecvGroup(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if group == nil {
+		t.Fatal("expected a group")
+	}
+	decoded, err := moqmedia.NewGroupConsumer(group, audio.Container)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer decoded.Cancel()
+	frame, err = decoded.Next(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if frame == nil || string(frame.Payload) != string(payload) || uint64(frame.Timestamp.Microseconds()) != 1_000_000 {
+		t.Fatalf("decoded frame = %+v, want payload=%q ts=1000000", frame, payload)
+	}
 }
 
 func TestTrackPublishConsume(t *testing.T) {
@@ -575,7 +601,7 @@ func TestTrackPublishConsume(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	track, err := broadcast.PublishTrack("data", nil)
+	track, err := broadcast.PublishTrack("data", timedInfo())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -635,7 +661,7 @@ func TestReadFrameSkipsEmptyThenPopulatedGroups(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	track, err := broadcast.PublishTrack("status", nil)
+	track, err := broadcast.PublishTrack("status", timedInfo())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -745,7 +771,7 @@ func TestDynamicTrackRequest(t *testing.T) {
 		t.Fatalf("request name = %q, want events", name)
 	}
 
-	track, err := request.Accept(nil)
+	track, err := request.Accept(timedInfo())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -800,12 +826,12 @@ func TestDynamicTrackRequestCanPublishAudio(t *testing.T) {
 	}
 
 	type subscribeResult struct {
-		media *moqmedia.ContainerConsumer
+		media *moqmedia.TrackConsumer
 		err   error
 	}
 	subscribe := make(chan subscribeResult, 1)
 	go func() {
-		media, err := moqmedia.NewContainerConsumer(ctx, consumer, moqmedia.ContainerConfig{Name: "requested-audio", Container: moqmedia.LegacyContainer(), Subscription: nil})
+		media, err := moqmedia.NewTrackConsumer(ctx, consumer, moqmedia.TrackConfig{Name: "requested-audio", Container: moqmedia.LegacyContainer(), Subscription: nil})
 		subscribe <- subscribeResult{media: media, err: err}
 	}()
 
@@ -837,7 +863,7 @@ func TestDynamicTrackRequestCanPublishAudio(t *testing.T) {
 		t.Fatalf("request name after accept error = %v, want ErrClosed", err)
 	}
 
-	var mediaConsumer *moqmedia.ContainerConsumer
+	var mediaConsumer *moqmedia.TrackConsumer
 	select {
 	case res := <-subscribe:
 		if res.err != nil {
@@ -1084,7 +1110,7 @@ func TestUsedCancelKeepsTheTrack(t *testing.T) {
 	}
 	defer broadcast.Close()
 
-	track, err := broadcast.PublishTrack("status", nil)
+	track, err := broadcast.PublishTrack("status", timedInfo())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1315,6 +1341,47 @@ func TestAnnouncedExactFilterCapturesEmpty(t *testing.T) {
 	}
 }
 
+// A route carries the publisher's epoch, and a new one restarts announce consumers.
+func TestAnnouncedEpochRestarts(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+
+	origin := newOrigin(t)
+	announced, err := origin.Consume().Announced(moq.AnnounceOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer announced.Cancel()
+
+	broadcast, err := origin.CreateBroadcast("epoch")
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := moq.MintEpoch()
+	if at, err := moq.EpochTime("018bcfe5-6800-7000-8000-000000000000"); err != nil || !at.Equal(time.UnixMilli(1_700_000_000_000)) {
+		t.Fatalf("EpochTime = %v, %v; want 2023-11-14T22:13:20Z", at, err)
+	}
+	if err := broadcast.Announce(moq.Route{Epoch: &first}); err != nil {
+		t.Fatal(err)
+	}
+	if start := nextAnnounced(t, ctx, announced); start.Route.Epoch == nil || *start.Route.Epoch != first {
+		t.Fatalf("start epoch = %v, want %s", start.Route.Epoch, first)
+	}
+
+	second := moq.MintEpoch()
+	if err := broadcast.Announce(moq.Route{Epoch: &second}); err != nil {
+		t.Fatal(err)
+	}
+	restart, ok := nextRoute(t, ctx, announced).(moq.AnnounceEventRestart)
+	if !ok || restart.Announce.Route.Epoch == nil || *restart.Announce.Route.Epoch != second {
+		t.Fatalf("restart = %+v, want epoch %s", restart, second)
+	}
+
+	if _, err := moq.EpochTime("not-an-epoch"); !errors.Is(err, moq.ErrInvalidEpoch) {
+		t.Fatalf("EpochTime(bad) = %v, want ErrInvalidEpoch", err)
+	}
+}
+
 // nextRoute returns the next announce event.
 func nextRoute(t *testing.T, ctx context.Context, announced *moq.AnnounceConsumer) moq.AnnounceEvent {
 	t.Helper()
@@ -1383,3 +1450,9 @@ func TestDynamicServesARequestUnderAPrefix(t *testing.T) {
 func us(v uint64) *uint64 { return &v }
 
 func ts(d time.Duration) *time.Duration { return &d }
+
+// timedInfo declares the microsecond timeline used by timed raw fixtures.
+func timedInfo() *moq.TrackInfo {
+	scale := uint64(1_000_000)
+	return &moq.TrackInfo{Priority: 127, Timescale: &scale}
+}

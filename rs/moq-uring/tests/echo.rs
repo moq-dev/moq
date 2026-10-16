@@ -15,7 +15,7 @@ const PAYLOAD: usize = 512 * 1024;
 fn worker() -> Option<Worker> {
 	match Worker::new(Config::default()) {
 		Ok(worker) => Some(worker),
-		Err(Error::Unsupported(reason)) => {
+		Err(Error::Unsupported(reason)) if std::env::var_os("MOQ_STRICT").is_none() => {
 			eprintln!("skipping io_uring echo test: {reason}");
 			None
 		}
@@ -53,8 +53,12 @@ fn echo_noq_peer() {
 	let handle = worker.handle();
 	let certs = support::certs().expect("certificates");
 
-	let mut server = quic::server::Config::new(quic::Identity::open(&certs.cert, &certs.key).expect("identity"));
-	server.alpn = vec![web_transport_moq::ALPN.to_string()];
+	let server = quic::server::Config::new(
+		quic::Identity::open(&certs.cert, &certs.key)
+			.expect("identity")
+			.server(&[web_transport_moq::ALPN], quic::server::ClientAuth::None)
+			.expect("tls"),
+	);
 	let socket = handle
 		.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
 		.expect("socket");

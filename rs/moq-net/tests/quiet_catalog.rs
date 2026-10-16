@@ -1,3 +1,5 @@
+#![cfg(feature = "async")]
+
 //! A catalog publishes one finished group and then stays quiet. Media hides a
 //! subscription that starts past a group, because the next group arrives; a
 //! catalog does not produce one, so a reader that never received the snapshot
@@ -9,6 +11,11 @@ use std::{future::Future, time::Duration};
 
 use moq_net::{Error, Hop, Timestamp, Version, broadcast, origin, track};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
+
+/// A millisecond track: the frames written here carry timestamps.
+fn timed() -> moq_net::track::Info {
+	moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+}
 
 const TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -42,7 +49,7 @@ async fn settle() {
 /// Announce `live/catalog.json` holding one finished snapshot group.
 fn publish(origin: &origin::Producer) -> (broadcast::Producer, track::Producer) {
 	let broadcast = origin.create_broadcast("live").unwrap();
-	let track = broadcast.create_track("catalog.json", None).unwrap();
+	let track = broadcast.create_track("catalog.json", timed()).unwrap();
 	broadcast.announce(Default::default()).unwrap();
 	let mut group = track.append_group().unwrap();
 	group.write_frame(Timestamp::ZERO, b"snapshot").unwrap();

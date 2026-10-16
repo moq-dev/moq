@@ -3,7 +3,8 @@ import * as Lite from "../lite/index.ts";
 import type { Consumer as OriginConsumer, Producer as OriginProducer } from "../origin.ts";
 import { Stream } from "../stream.ts";
 import type { Established } from "./established.ts";
-import { forwardAnnounced } from "./forward.ts";
+import * as Extensions from "./extensions.ts";
+import { DISCOVERY_REMOVED, forwardAnnounced } from "./forward.ts";
 import { exchangeSetup } from "./handshake.ts";
 
 /** Options for {@link accept}. */
@@ -17,12 +18,6 @@ export interface AcceptProps {
 	version?: number;
 
 	/**
-	 * Whether this server supports broadcast discovery; see {@link Established.discovery}.
-	 * Defaults to true.
-	 */
-	discovery?: boolean;
-
-	/**
 	 * The origin whose broadcasts the session announces and serves to the peer. Omit to
 	 * publish nothing. Borrowed, not owned: closing the session leaves its broadcasts alone.
 	 */
@@ -33,14 +28,18 @@ export interface AcceptProps {
 	 * nothing. The entries retract when the session dies; see the `consume` connect option.
 	 */
 	consume?: OriginProducer;
+
+	/** The moq-transport extensions to offer, each on unless set to `false`. */
+	extensions?: Extensions.Extensions;
 }
 
 /** The per-session wiring shared by every negotiated protocol path. */
 type SessionProps = {
-	discovery: boolean;
 	publish?: OriginConsumer;
 	/** Whether this side dialed; only the dialing side aborts on a publication its grant does not cover. */
 	client: boolean;
+	/** The moq-transport extensions this side offers. */
+	extensions: Extensions.Offered;
 };
 
 /**
@@ -52,6 +51,7 @@ type SessionProps = {
  * @returns A promise that resolves to a Connection instance
  */
 export async function accept({ transport, url, ...props }: AcceptProps): Promise<Established> {
+	if ("discovery" in props) throw new TypeError(DISCOVERY_REMOVED);
 	const connection = await acceptInner(transport, url, props);
 	if (props.consume) forwardAnnounced(connection, props.consume);
 	return connection;
@@ -67,9 +67,9 @@ async function acceptInner(
 	const protocol = (transport as { protocol?: string }).protocol;
 
 	const wiring: SessionProps = {
-		discovery: props.discovery ?? true,
 		publish: props.publish,
 		client: false,
+		extensions: Extensions.offered(props.extensions),
 	};
 
 	if (protocol === Ietf.ALPN.DRAFT_22) {
@@ -118,7 +118,12 @@ async function acceptAlpn(
 	version: Ietf.IetfVersion,
 	wiring: SessionProps,
 ): Promise<Established> {
-	const { control, early, solicit, hidden, cluster, auth } = await exchangeSetup(transport, version, "moq-lite-js");
+	const { control, early, solicit, hidden, cluster, auth } = await exchangeSetup(
+		transport,
+		version,
+		"moq-lite-js",
+		wiring.extensions,
+	);
 
 	return new Ietf.Connection({
 		...wiring,
@@ -164,7 +169,7 @@ async function acceptSetup(
 	const params = new Ietf.SetupOptions();
 	params.setVarint(Ietf.SetupOption.MaxRequestId, Ietf.initialMaxRequestId(true));
 	params.setBytes(Ietf.SetupOption.Implementation, encoder.encode("moq-lite-js"));
-	Ietf.solicitIntoSetup(params);
+	Extensions.intoSetup(params, wiring.extensions, version);
 	Ietf.hiddenIntoSetup(params);
 
 	const server = new Ietf.ServerSetup({ version, parameters: params });
@@ -224,7 +229,7 @@ async function acceptNegotiated(
 	const params = new Ietf.SetupOptions();
 	params.setVarint(Ietf.SetupOption.MaxRequestId, Ietf.initialMaxRequestId(true));
 	params.setBytes(Ietf.SetupOption.Implementation, encoder.encode("moq-lite-js"));
-	Ietf.solicitIntoSetup(params);
+	Extensions.intoSetup(params, wiring.extensions, setupVersion);
 	Ietf.hiddenIntoSetup(params);
 
 	const server = new Ietf.ServerSetup({ version: selectedVersion, parameters: params });

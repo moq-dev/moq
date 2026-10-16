@@ -1,3 +1,5 @@
+#![cfg(feature = "async")]
+
 //! A SUBSCRIBE_TRACKS is refused on its own stream, and the session keeps delivering.
 //!
 //! Deterministic: paused time and a single-threaded runtime over the mock transport.
@@ -12,6 +14,11 @@ use moq_net::transport::poll::{RecvStream as _, SendStream as _, Session as _};
 use moq_net::{Hop, Timestamp, Version};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
+/// A millisecond track: the frames written here carry timestamps.
+fn timed() -> moq_net::track::Info {
+	moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+}
+
 const TIMEOUT: Duration = Duration::from_secs(10);
 
 /// SUBSCRIBE_TRACKS for prefix `room`, with no parameters. Every value fits a one-byte
@@ -20,7 +27,7 @@ const TIMEOUT: Duration = Duration::from_secs(10);
 const SUBSCRIBE_TRACKS: &[u8] = &[
 	0x51, // SUBSCRIBE_TRACKS
 	0x00, 0x08, // Length
-	0x01, // Request ID
+	0x3f, // Fresh server-parity Request ID, after the existing subscription.
 	0x01, 0x04, b'r', b'o', b'o', b'm', // Track Namespace Prefix
 	0x00, // Number of Parameters
 ];
@@ -43,7 +50,7 @@ struct Setup {
 async fn setup(version: Version) -> Setup {
 	let publisher = produce_origin(1);
 	let broadcast = publisher.create_broadcast("room").unwrap();
-	let track = broadcast.create_track("video", None).unwrap();
+	let track = broadcast.create_track("video", timed()).unwrap();
 	broadcast.announce(Default::default()).unwrap();
 
 	let subscriber = produce_origin(2);

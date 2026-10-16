@@ -1,9 +1,11 @@
+#![cfg(feature = "async")]
+
 //! An untimed track reaches every subscriber untimed, through a relay too, on every wire
 //! that can say so, and a timed track keeps its timestamps.
 //!
-//! No receiver fills in arrival time. Until lite-07 encodes absence, a lite-05+ encoder
-//! writes its send time instead, so those hops are the one place an untimed track gains a
-//! timeline.
+//! No receiver fills in arrival time. Lite-05 and lite-06 cannot encode absence, so their
+//! encoder writes its send time instead, and those hops are the one place an untimed track
+//! gains a timeline.
 
 mod support;
 
@@ -13,6 +15,11 @@ use bytes::Bytes;
 use moq_net::{Hop, Timescale, Timestamp, Version, origin, track};
 use support::harness::peer;
 
+/// A millisecond track: the frames written here carry timestamps.
+fn timed() -> moq_net::track::Info {
+	moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+}
+
 const TIMEOUT: Duration = Duration::from_secs(10);
 
 /// What a subscriber reads for a timed and an untimed track.
@@ -20,7 +27,7 @@ const TIMEOUT: Duration = Duration::from_secs(10);
 enum Arrives {
 	/// Both keep what the publisher wrote.
 	Faithful,
-	/// The untimed track carries the encoder's send times (lite-05+ before lite-07).
+	/// The untimed track carries the encoder's send times (lite-05 and lite-06).
 	SendTime,
 	/// The wire declares no timescale, so even the timed track arrives untimed.
 	Untimed,
@@ -29,7 +36,7 @@ enum Arrives {
 fn expected(version: &str) -> Arrives {
 	match version {
 		"moq-lite-03" | "moq-lite-04" => Arrives::Untimed,
-		"moq-lite-05" | "moq-lite-06" | "moq-lite-07-wip" => Arrives::SendTime,
+		"moq-lite-05" | "moq-lite-06" => Arrives::SendTime,
 		// Drafts 14 to 16 can't carry TIMESCALE.
 		"moq-transport-14" | "moq-transport-16" => Arrives::Untimed,
 		_ => Arrives::Faithful,
@@ -121,7 +128,7 @@ async fn frame_through(hops: &[&str], info: track::Info) -> (Option<Timestamp>, 
 #[moq_net_sim::test]
 async fn frames_arrive_as_published() {
 	for version in VERSIONS {
-		let (timed, timed_info) = frame_through(&[version], track::Info::default()).await;
+		let (timed, timed_info) = frame_through(&[version], timed()).await;
 		let (untimed, untimed_info) = frame_through(&[version], untimed()).await;
 		match expected(version) {
 			Arrives::Faithful => {
@@ -146,15 +153,20 @@ async fn frames_arrive_as_published() {
 /// does not gain one downstream.
 #[moq_net_sim::test]
 async fn a_relay_forwards_an_untimed_track_untimed() {
-	let (frame, info) = frame_through(&["moq-transport-17", "moq-transport-20"], untimed()).await;
-	assert_eq!(frame, None, "the relay did not stamp it");
-	assert_eq!(info.timescale, None, "the relay must not claim a timeline");
+	for hops in [
+		&["moq-transport-17", "moq-transport-20"][..],
+		&["moq-lite-07-wip", "moq-lite-07-wip"][..],
+	] {
+		let (frame, info) = frame_through(hops, untimed()).await;
+		assert_eq!(frame, None, "{hops:?}: the relay did not stamp it");
+		assert_eq!(info.timescale, None, "{hops:?}: the relay must not claim a timeline");
+	}
 
 	for hops in [
 		&["moq-lite-03", "moq-transport-17"][..],
 		&["moq-transport-16", "moq-transport-20"][..],
 	] {
-		let (frame, info) = frame_through(hops, track::Info::default()).await;
+		let (frame, info) = frame_through(hops, timed()).await;
 		assert_eq!(frame, None, "{hops:?}: the first hop has no timestamps to forward");
 		assert_eq!(info.timescale, None, "{hops:?}: the relay must not claim a timeline");
 	}
@@ -164,7 +176,7 @@ async fn a_relay_forwards_an_untimed_track_untimed() {
 /// moq-transport: only an unfloored subscriber jumps to the latest group.
 ///
 /// The subscription asks for history the way a resume does, with a budget covering it:
-/// lite-05+ carries send times, so downstream the groups are timed and a zero budget would
+/// lite-05 and lite-06 carry send times, so downstream the groups are timed and a zero budget would
 /// skip the older ones there, as it would on any timed track. moq-transport before draft
 /// 20 can only join a past group through a joining FETCH, which our publisher refuses for
 /// groups before the live one, so draft 20 stands in for it.
@@ -201,8 +213,8 @@ async fn an_explicit_start_holds_on_an_untimed_track() {
 	}
 }
 
-/// An untimed track's datagram arrives untimed on moq-transport, and with a send time on
-/// lite.
+/// An untimed track's datagram arrives untimed, except with a send time on lite-05 and
+/// lite-06.
 #[moq_net_sim::test]
 async fn datagrams_arrive_as_published() {
 	for version in ["moq-lite-05", "moq-lite-07-wip", "moq-transport-16", "moq-transport-20"] {
@@ -223,15 +235,15 @@ async fn datagrams_arrive_as_published() {
 			.expect("datagram timeout")
 			.unwrap()
 			.expect("a datagram");
-		let lite = version.starts_with("moq-lite");
-		assert_eq!(datagram.timestamp.is_some(), lite, "{version}");
+		let stamps = version == "moq-lite-05";
+		assert_eq!(datagram.timestamp.is_some(), stamps, "{version}");
 	}
 }
 
 /// A standalone FETCH of an untimed track answers with untimed objects.
 #[moq_net_sim::test]
 async fn a_fetched_untimed_frame_arrives_untimed() {
-	for version in ["moq-lite-06", "moq-transport-19"] {
+	for version in ["moq-lite-06", "moq-lite-07-wip", "moq-transport-19"] {
 		let chain = Chain::new(&[version]).await;
 		let broadcast = chain.nodes[0].create_broadcast("room").unwrap();
 		let mut dynamic = broadcast.dynamic();
@@ -250,13 +262,13 @@ async fn a_fetched_untimed_frame_arrives_untimed() {
 			futures::future::Either::Left((request, _)) => request.expect("the fetch reaches the publisher"),
 			futures::future::Either::Right(_) => panic!("nothing answered the fetch"),
 		};
-		let mut group = request.accept(None).unwrap();
+		let mut group = request.accept(timed()).unwrap();
 		group.write_frame(None, Bytes::from_static(b"segment")).unwrap();
 		group.finish().unwrap();
 
 		let mut fetched = waiting.await.unwrap();
 		let frame = fetched.read_frame().await.unwrap().unwrap();
-		let lite = version.starts_with("moq-lite");
-		assert_eq!(frame.timestamp.is_some(), lite, "{version}");
+		let stamps = version == "moq-lite-06";
+		assert_eq!(frame.timestamp.is_some(), stamps, "{version}");
 	}
 }

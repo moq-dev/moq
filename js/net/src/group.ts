@@ -4,7 +4,7 @@
  * @module
  */
 import { type Dispose, type GetPromise, type Getter, Once, Signal } from "@moq/signals";
-import { FrameTooLarge, GroupTooLarge, TimestampMismatch, TooFarBehind } from "./error.ts";
+import { FrameTooLarge, GroupTooLarge, ProtocolViolation, TimestampMismatch, TooFarBehind } from "./error.ts";
 import { hooks, type ReadGroupFrame } from "./internal.ts";
 import type { Timestamp } from "./time.ts";
 
@@ -68,6 +68,10 @@ class GroupState {
 	timestamp?: Timestamp;
 	// The newest frame's timestamp: where a reader that has taken every frame sits.
 	latest?: Timestamp;
+	// When the group joined the track this mirror belongs to, at this hop, in
+	// `performance.now()` milliseconds: the wall clock a superseded predecessor ages from.
+	// Per track, since one group can join several.
+	arrived = 0;
 
 	constructor(sequence: number) {
 		this.sequence = sequence;
@@ -147,6 +151,10 @@ export class Producer {
 	#used = new Signal<boolean>(false);
 	#demand: Demand;
 
+	// Exclusive cap on the frame count, set when the track ends inside this group: a write
+	// past the track's end is refused rather than served as content that does not exist.
+	#limit?: number;
+
 	// When the group was created or last written. Retention ages a group from this,
 	// not from its creation, so a group still being filled is never reclaimed.
 	#activity = performance.now();
@@ -165,6 +173,14 @@ export class Producer {
 			if (state.timed !== undefined) throw new TimestampMismatch();
 			for (const frame of state.frames.peek()) checkTimed(timed, frame);
 			state.timed = timed;
+		};
+		hooks.limitGroup = (group, frames) => {
+			// A closed group takes no more frames, but one already past the cap still
+			// contradicts the end.
+			if (group.#state.total.peek() > frames) {
+				throw new ProtocolViolation(`group ${group.sequence} already holds a frame past the track's end`);
+			}
+			group.#limit = frames;
 		};
 	}
 
@@ -246,6 +262,9 @@ export class Producer {
 		// it up front with `Error::FrameTooLarge`; do the same rather than silently dropping it.
 		if (frame.payload.byteLength > MAX_GROUP_CACHE_BYTES) throw new FrameTooLarge();
 		checkTimed(this.#state.timed, frame);
+		if (this.#limit !== undefined && this.#state.total.peek() >= this.#limit) {
+			throw new Error(`frame ${this.#state.total.peek()} is past the track's end`);
+		}
 		if (
 			this.#state.total.peek() >= MAX_GROUP_FRAMES ||
 			this.#state.cacheBytes + frame.payload.byteLength > MAX_GROUP_CACHE_BYTES
@@ -413,6 +432,10 @@ export class Consumer {
 		makeConsumer = (state) => new Consumer(state);
 		hooks.groupTimestamp = (group) => group.#state.timestamp;
 		hooks.groupLatest = (group) => group.#state.latest;
+		hooks.groupArrived = (group) => group.#state.arrived;
+		hooks.arriveGroup = (group, at) => {
+			group.#state.arrived = at;
+		};
 		hooks.expireGroup = (group, expiry) => {
 			group.#expiry = expiry;
 		};

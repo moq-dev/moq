@@ -24,6 +24,40 @@ use crate::{
 /// [`seeds`] is checked against.
 pub type Target = fn(&[u8]) -> bool;
 
+/// Build a cached group with optional private object fields for model benchmarks.
+pub fn object_group(frames: usize, properties: bool) -> (broadcast::Producer, track::Producer, group::Producer) {
+	let broadcast = broadcast::Producer::new(broadcast::Info::default());
+	let track = broadcast.create_track("objects", None).unwrap();
+	let mut group = track.append_group().unwrap();
+	let payload = Bytes::from_static(&[0; 64]);
+	for id in 0..frames {
+		let fields = properties.then(|| {
+			std::sync::Arc::new(crate::model::object::Fields {
+				id: id as u64,
+				properties: crate::model::object::Properties {
+					values: vec![crate::model::object::Property {
+						id: 0x80,
+						value: crate::model::object::Value::Int(96_000),
+					}],
+					..Default::default()
+				},
+			})
+		});
+		let header = frame::Header {
+			info: frame::Info {
+				size: payload.len() as u64,
+				timestamp: None,
+			},
+			fields,
+		};
+		let mut frame = group.create_frame_owned(header, &frame::Budget::default()).unwrap();
+		frame.write(payload.clone()).unwrap();
+		frame.finish().unwrap();
+	}
+	group.finish().unwrap();
+	(broadcast, track, group)
+}
+
 /// Every target, keyed by the name of its `fuzz_targets/<name>.rs` shim.
 pub const TARGETS: &[(&str, Target)] = &[
 	("lite", lite_wire),
@@ -106,18 +140,22 @@ where
 
 /// [`roundtrip`] for a datagram body, which runs to the end of its buffer.
 fn datagram(data: &[u8], version: lite::Version) -> bool {
-	let Ok(decoded) = lite::Datagram::decode(Bytes::copy_from_slice(data), version) else {
-		return false;
-	};
+	// The body doesn't say whether it carries a timestamp, so try both readings.
+	let mut any = false;
+	for timed in [true, false] {
+		let Ok(decoded) = lite::Datagram::decode(Bytes::copy_from_slice(data), version, |_| timed) else {
+			continue;
+		};
+		any = true;
 
-	let Ok(first) = decoded.encode_bytes(version) else {
-		return true;
-	};
+		let Ok(first) = decoded.encode_bytes(version) else {
+			continue;
+		};
 
-	let echo = lite::Datagram::decode(first, version).expect("could not decode our own encoding");
-	assert_eq!(echo, decoded, "datagram did not survive a round trip");
-
-	true
+		let echo = lite::Datagram::decode(first, version, |_| timed).expect("could not decode our own encoding");
+		assert_eq!(echo, decoded, "datagram did not survive a round trip");
+	}
+	any
 }
 
 /// Decode one moq-lite wire object from arbitrary bytes.
@@ -339,6 +377,7 @@ impl LiteSample {
 			.encode(w, version)
 			.unwrap(),
 			Self::Subscribe => lite::Subscribe {
+				order: crate::track::Order::Descending,
 				epoch: None,
 				id: 3,
 				broadcast: Path::new("room/alice"),
@@ -355,7 +394,7 @@ impl LiteSample {
 			Self::Datagram => lite::Datagram {
 				subscribe: 3,
 				sequence: 1_234,
-				timestamp: 1_234_567_890,
+				timestamp: Some(1_234_567_890),
 				payload: bytes::Bytes::new(),
 			}
 			.encode(w, version)
@@ -388,7 +427,7 @@ impl LiteSample {
 			}
 			Self::Group => lite::Group::decode(r, version).map(|_| 1).unwrap(),
 			Self::Subscribe => lite::Subscribe::decode(r, version).map(|_| 1).unwrap(),
-			Self::Datagram => lite::Datagram::decode(bytes::Bytes::copy_from_slice(data), version)
+			Self::Datagram => lite::Datagram::decode(bytes::Bytes::copy_from_slice(data), version, |_| true)
 				.map(|_| 1)
 				.unwrap(),
 			Self::Setup => lite::Setup::decode(r, version).map(|_| 1).unwrap(),
@@ -523,6 +562,7 @@ impl Default for Messages {
 
 		Self {
 			lite_subscribe: lite::Subscribe {
+				order: crate::track::Order::Descending,
 				epoch: None,
 				id: 7,
 				broadcast: Path::new("room/alice"),
@@ -535,6 +575,7 @@ impl Default for Messages {
 				end_frame: None,
 			},
 			lite_update: lite::SubscribeUpdate {
+				order: crate::track::Order::Descending,
 				priority: 4,
 				max_delay: Duration::from_millis(500),
 				start_group: Some(1_000),
@@ -549,7 +590,7 @@ impl Default for Messages {
 			lite_info: lite::TrackInfo {
 				priority: 1,
 				max_age: Some(Duration::from_secs(10)),
-				timescale: crate::Timescale::MICRO,
+				timescale: Some(crate::Timescale::MICRO),
 			},
 			lite_group: lite::Group {
 				subscribe: 7,
@@ -567,6 +608,7 @@ impl Default for Messages {
 				properties_wanted: false,
 				forward: true,
 				range_filters: false,
+				authorization_token: None,
 			},
 			// Draft-17+ carries the request id in the control message framing instead.
 			ietf_ok: ietf::SubscribeOk {
@@ -1053,7 +1095,12 @@ impl FrameRecv {
 		let mut info = broadcast::Info::new();
 		info.pool = cache::Pool::unbounded();
 		let broadcast = info.produce();
-		let track = broadcast.create_track("frames", None).unwrap();
+		let track = broadcast
+			.create_track(
+				"frames",
+				crate::track::Info::default().with_timescale(crate::Timescale::MILLI),
+			)
+			.unwrap();
 		let budget = budget.map(frame::Budget::new).unwrap_or_default();
 		let payload = bytes::Bytes::from(vec![0u8; size]);
 
@@ -1168,6 +1215,34 @@ impl std::error::Error for NoError {}
 impl crate::transport::Error for NoError {
 	fn session_error(&self) -> Option<(u32, String)> {
 		None
+	}
+}
+
+/// Admit modern request IDs for the history benchmark, returning the accepted count.
+pub fn request_history(ids: &[u64]) -> usize {
+	ietf::request_history(ids)
+}
+
+/// Admit a draft-16 window for the request-ID benchmark, returning the accepted count.
+pub fn request_ids(window: u64, ids: &[u64]) -> usize {
+	ietf::request_ids(window, ids)
+}
+
+/// A source-selection watch for the private request-lifetime benchmark.
+pub struct RequestValidity(crate::model::broadcast::RequestValidity);
+
+impl RequestValidity {
+	/// Watch which instance this route's peer selects for a path.
+	pub fn new(route: &crate::origin::Dynamic, path: &crate::Path) -> Self {
+		Self(crate::model::broadcast::RequestValidity::for_source(route, path))
+	}
+
+	/// Capture the lifetime of one pending request.
+	pub fn start(&self) -> kio::Consumer<()> {
+		match self.0.start() {
+			crate::model::broadcast::RequestValidity::Period(route, _) => route,
+			_ => unreachable!("a source watch always captures a route lease"),
+		}
 	}
 }
 

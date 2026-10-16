@@ -5,12 +5,9 @@
 //! fuzzers, or recording one codec to disk. There is no container framing
 //! (timestamps are dropped).
 //!
-//! Two source shapes are accepted:
-//! - **avc3** (catalog `description` empty): payload is already Annex-B with
-//!   SPS/PPS inline. Pass through unchanged.
-//! - **avc1** (catalog `description` is the avcC): length-prefixed NALUs.
-//!   Length prefixes are replaced with `00 00 00 01` start codes; SPS/PPS
-//!   extracted from the avcC are injected ahead of every keyframe.
+//! A source without a decoder description is already Annex-B and passes through unchanged.
+//! With an avcC description, length prefixes become start codes and any out-of-band
+//! parameter sets precede keyframes. avc3 samples may carry all parameter sets inline.
 
 use std::task::{Poll, ready};
 
@@ -28,6 +25,10 @@ pub struct Export<S: Stream> {
 	catalog: Option<S>,
 	max_delay: std::time::Duration,
 	track: Option<H264Track>,
+	/// The latest presentation time written. A switch to another rendition resumes at its first
+	/// keyframe past it: a new subscription starts at the rendition's latest group, which for
+	/// one re-enabled is the stale group it stopped on.
+	playhead: Option<std::time::Duration>,
 }
 
 struct H264Track {
@@ -38,13 +39,14 @@ struct H264Track {
 	/// silently reusing a stale `convert`.
 	config: VideoConfig,
 	source: ExportSource,
-	/// `Some` for an avc1 source: SPS/PPS prefix prebuilt from the avcC, and
-	/// the avcC length-prefix size. `None` for an avc3 source: Annex-B passes
-	/// through without conversion.
-	convert: Option<Avc1Convert>,
+	/// A decoder description supplies length-prefix size and any out-of-band parameter sets.
+	/// Without one, the payload is already Annex-B.
+	convert: Option<Convert>,
+	/// Frames are dropped until a keyframe past the playhead.
+	joining: bool,
 }
 
-struct Avc1Convert {
+struct Convert {
 	length_size: usize,
 	keyframe_prefix: Bytes,
 }
@@ -62,6 +64,7 @@ impl<S: Stream> Export<S> {
 			catalog: Some(catalog),
 			max_delay: std::time::Duration::ZERO,
 			track: None,
+			playhead: None,
 		}
 	}
 
@@ -101,6 +104,14 @@ impl<S: Stream> Export<S> {
 
 			match ready!(track.source.poll_read(waiter))? {
 				Some(frame) => {
+					let timestamp = std::time::Duration::from(frame.timestamp);
+					if track.joining {
+						if !frame.keyframe || self.playhead.is_some_and(|playhead| timestamp <= playhead) {
+							continue;
+						}
+						track.joining = false;
+					}
+					self.playhead = self.playhead.max(Some(timestamp));
 					let bytes = match &track.convert {
 						None => frame.payload,
 						Some(convert) => {
@@ -123,7 +134,7 @@ impl<S: Stream> Export<S> {
 
 	fn update_catalog(&mut self, catalog: &Catalog) -> crate::Result<()> {
 		let mut catalog = catalog.clone();
-		self.source.retain_valid_media(&mut catalog);
+		self.source.retain_selectable(&mut catalog);
 
 		let picked = catalog
 			.video
@@ -160,7 +171,9 @@ impl<S: Stream> Export<S> {
 			None => None,
 			Some(avcc) => {
 				let params = super::Avcc::parse(avcc)?;
-				if params.sps.is_empty() || params.pps.is_empty() {
+				if matches!(&config.codec, hang::catalog::VideoCodec::H264(codec) if !codec.inline)
+					&& (params.sps.is_empty() || params.pps.is_empty())
+				{
 					return Err(super::Error::MissingParamSets {
 						name: name.clone(),
 						sps: params.sps.len(),
@@ -169,7 +182,7 @@ impl<S: Stream> Export<S> {
 					.into());
 				}
 				let prefix = annexb::build_prefix(params.sps.iter().chain(params.pps.iter()));
-				Some(Avc1Convert {
+				Some(Convert {
 					length_size: params.length_size,
 					keyframe_prefix: prefix,
 				})
@@ -181,6 +194,7 @@ impl<S: Stream> Export<S> {
 			config: config.clone(),
 			source,
 			convert,
+			joining: true,
 		});
 
 		Ok(())
@@ -293,7 +307,7 @@ mod tests {
 		let consumer = broadcast.consume();
 		// The whole track is written before the exporter runs, so it needs a budget
 		// wide enough to read it: the default skips everything but the live edge.
-		let mut export = Export::new(crate::source::announced(&consumer), Once(Some(catalog)))
+		let mut export = Export::new(crate::source::announced(&consumer).await, Once(Some(catalog)))
 			.with_max_delay(std::time::Duration::from_secs(30));
 
 		let frame0 = export.next().await.unwrap().expect("first frame");
@@ -323,5 +337,95 @@ mod tests {
 			&[0, 0, 0, 1, 0x61, 0xe0, 0x12, 0x34],
 			"frame 1 P-slice must follow the prefix in Annex-B form"
 		);
+	}
+	/// The next chunk, required to be ready without another frame arriving.
+	async fn next<S: Stream>(export: &mut Export<S>) -> Bytes {
+		tokio::time::timeout(std::time::Duration::from_millis(1), export.next())
+			.await
+			.expect("a frame is ready")
+			.unwrap()
+			.expect("the export continues")
+	}
+
+	/// A disabled rendition hands the stream to its enabled sibling. Re-enabled, it takes the
+	/// stream back at its first keyframe past what was written, skipping the stale group a new
+	/// subscription starts on.
+	#[tokio::test(start_paused = true)]
+	async fn follows_the_catalog_across_a_disable() {
+		use crate::container::test_util::{Live, raw_frame};
+
+		let mut live = Live::avc3();
+		let primary = live.track.name().to_string();
+		let config = live.catalog.snapshot().video.renditions[&primary].clone();
+		let mut sibling = live.add_track(".sibling", |catalog, name| {
+			catalog.modify().unwrap().video.renditions.insert(name, config);
+		});
+		assert!(primary.as_str() < sibling.name(), "the primary is first by name");
+		let set_enabled = |live: &mut Live, enabled: bool| {
+			live.catalog
+				.modify()
+				.unwrap()
+				.video
+				.renditions
+				.get_mut(&primary)
+				.unwrap()
+				.enabled = enabled;
+		};
+		let mut export = Export::new(live.source().await, live.catalog_stream().await);
+
+		live.track.write(raw_frame(0, b"primary-0", true)).unwrap();
+		sibling.write(raw_frame(0, b"sibling-0", true)).unwrap();
+		assert_eq!(next(&mut export).await.as_ref(), b"primary-0");
+
+		set_enabled(&mut live, false);
+		sibling.write(raw_frame(100_000, b"sibling-1", true)).unwrap();
+		assert_eq!(next(&mut export).await.as_ref(), b"sibling-1");
+
+		set_enabled(&mut live, true);
+		assert!(
+			tokio::time::timeout(std::time::Duration::from_millis(1), export.next())
+				.await
+				.is_err(),
+			"the stale group the primary stopped on is not replayed"
+		);
+		live.track.write(raw_frame(200_000, b"primary-2", true)).unwrap();
+		assert_eq!(next(&mut export).await.as_ref(), b"primary-2");
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn in_band_export_accepts_empty_parameter_sets() {
+		for in_band in [false, true] {
+			let mut catalog = avc1_catalog("video", Bytes::from_static(&[1, 0x42, 0, 0x1f, 0xff, 0xe0, 0]));
+			let config = catalog.video.renditions.get_mut("video").unwrap();
+			let hang::catalog::VideoCodec::H264(codec) = &mut config.codec else {
+				unreachable!()
+			};
+			codec.inline = in_band;
+			let broadcast = moq_net::broadcast::Info::new().produce();
+			let track = broadcast
+				.create_track("video", hang::container::track_info(hang::catalog::PRIORITY.video))
+				.unwrap();
+			let mut group = track.create_group(moq_net::group::Info { sequence: 0 }).unwrap();
+			let nals: &[&[u8]] = &[&[0x67, 0x42, 0, 0x1f], &[0x68, 0xce], &[0x65, 0x88]];
+			write_length_prefixed(&mut group, 0, nals);
+			group.finish().unwrap();
+			track.finish().unwrap();
+			let consumer = broadcast.consume();
+			let mut exporter = Export::new(crate::source::announced(&consumer).await, Once(Some(catalog)));
+			let result = exporter.next().await;
+			if in_band {
+				let expected: Vec<_> = nals
+					.iter()
+					.flat_map(|nal| [0, 0, 0, 1].into_iter().chain(nal.iter().copied()))
+					.collect();
+				assert_eq!(result.unwrap().unwrap().as_ref(), expected.as_slice());
+				assert!(exporter.next().await.unwrap().is_none());
+			} else {
+				assert!(matches!(
+					result,
+					Err(crate::Error::H264(super::super::Error::MissingParamSets { .. }))
+				));
+			}
+		}
 	}
 }

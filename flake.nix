@@ -27,11 +27,9 @@
     # The quest CLI, which also serves the quest guide and skills the stubs in
     # .claude/skills call. Bump the rev to upgrade them.
     quest = {
-      url = "github:kixelated/quest/5ff9229d277a4580296795a82f427f5ec30072c7";
+      url = "github:kixelated/quest/b7027a3ded4b0a36505f40eb7ed788c1023e7a49";
       inputs.nixpkgs.follows = "nixpkgs";
       inputs.flake-utils.follows = "flake-utils";
-      inputs.crane.follows = "crane";
-      inputs.rust-overlay.follows = "rust-overlay";
     };
   };
 
@@ -135,6 +133,7 @@
             cargo-edit
             cargo-semver-checks
             cargo-deny
+            cargo-bloat
             # Per-crate feature matrices (`just rs features`), where workspace
             # unification would otherwise hide a broken single-crate build.
             cargo-hack
@@ -157,6 +156,8 @@
             # PulseAudio rather than the `pipewire` PCM below. Loaded at runtime
             # only, via `alsaPlugins`.
             pkgs.alsa-plugins
+            # A private clocked null device for native playback tests.
+            (pkgs.lib.getBin pkgs.pulseaudio)
             # moq-video's `pipewire` screen-capture feature: the pipewire crate
             # links libpipewire-0.3 via pkg-config and generates bindings at build
             # time (bindgenHook above provides libclang). Linux-only; macOS uses
@@ -283,7 +284,7 @@
         # understands metadata emitted by that uniffi, so it moves with the `uniffi`
         # dependency in rs/moq-ffi/Cargo.toml. Five other places name the same
         # generator version and must be bumped together: the repo and revision
-        # in release-go-ffi.yml, and the `cargo install` line in
+        # in release-ffi.yml, and the `cargo install` line in
         # rs/moq-ffi/build.sh, go/ffi/README.md, sh/go/check.sh, and
         # sh/go/stage.sh.
         #
@@ -562,7 +563,9 @@
             ++ cppDeps
             ++ dartDeps
             ++ devTools
-            ++ [ quest-cli ];
+            ++ [ quest-cli ]
+            # perf records relay worker off-CPU stacks for `just bench-lock`.
+            ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.perf ];
 
           # jemalloc's configure uses -O0 test builds, which conflict with
           # Nix's _FORTIFY_SOURCE hardening (requires -O).

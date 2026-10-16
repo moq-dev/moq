@@ -36,6 +36,7 @@ struct Accepting {
 /// State shared by the handles, the demux task, and the per-connection
 /// teardown tasks.
 pub(crate) struct Inner {
+	activity: moq_net::server::Activity,
 	/// The socket's worker, where every task of this endpoint runs.
 	owner: Owner,
 	socket: Rc<udp::Socket>,
@@ -53,6 +54,7 @@ pub(crate) struct Inner {
 	/// bounded by [`Config::backlog`].
 	pending: Cell<usize>,
 	backlog: usize,
+	handshake: crate::quic::handshake::Config,
 	/// Live [`Endpoint`] handles; at zero the endpoint winds down (no new
 	/// accepts or dials, existing connections served until they end).
 	handles: Cell<usize>,
@@ -102,6 +104,7 @@ impl Endpoint {
 		let endpoint = moq_noq_proto::Endpoint::new(super::endpoint_config(socket.shard())?, server, false);
 
 		let inner = Rc::new(Inner {
+			activity: config.activity,
 			owner,
 			socket: Rc::new(socket),
 			local,
@@ -110,6 +113,7 @@ impl Endpoint {
 			conns: RefCell::new(FxHashMap::default()),
 			pending: Cell::new(0),
 			backlog: config.backlog,
+			handshake: config.handshake,
 			handles: Cell::new(1),
 			closed: RefCell::new(None),
 			task_waiters: RefCell::new(kio::WaiterList::new()),
@@ -166,7 +170,7 @@ impl Endpoint {
 		let shared = self.inner.launch(key, conn);
 		// Flush the Initial flight; the demux task takes it from here.
 		shared.kick();
-		connection::establish(shared).await
+		connection::establish(shared, None).await
 	}
 }
 
@@ -326,8 +330,18 @@ impl Inner {
 			return None;
 		}
 
+		// Closed for drain: refuse so the peer redials elsewhere instead of
+		// retransmitting into a server that is leaving.
+		let Some(active) = self.activity.enter() else {
+			buf.clear();
+			let transmit = self.endpoint.borrow_mut().refuse(incoming, buf);
+			self.respond(&transmit, buf);
+			return None;
+		};
 		buf.clear();
-		let accepted = self.endpoint.borrow_mut().accept(incoming, Instant::now(), buf, None);
+		let now = Instant::now();
+		let deadline = self.handshake.timeout.and_then(|timeout| now.checked_add(timeout));
+		let accepted = self.endpoint.borrow_mut().accept(incoming, now, buf, None);
 		let (key, conn) = match accepted {
 			Ok(accepted) => accepted,
 			Err(err) => {
@@ -340,12 +354,13 @@ impl Inner {
 		};
 
 		let shared = self.launch(key, conn);
+		shared.state.borrow_mut().active = Some(active);
 
 		// Hand the connection over once (if) its handshake completes.
 		self.pending.set(self.pending.get() + 1);
 		let inner = self.clone();
 		self.owner.spawn(async move {
-			let outcome = connection::establish(shared).await;
+			let outcome = connection::establish(shared, deadline).await;
 			inner.pending.set(inner.pending.get() - 1);
 			let mut conn = match outcome {
 				Ok(conn) => conn,

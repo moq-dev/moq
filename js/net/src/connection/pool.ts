@@ -9,6 +9,7 @@ import type { Handle } from "../bandwidth.ts";
 import * as Origin from "../origin.ts";
 import * as Path from "../path.ts";
 import * as Time from "../time.ts";
+import { Follow } from "../util/observed.ts";
 import { type AcceptProps as AcceptPropsType, accept } from "./accept.ts";
 import { isWebTransportSupported } from "./browser.ts";
 import {
@@ -20,6 +21,8 @@ import {
 	type WebTransportProps as WebTransportPropsType,
 } from "./connect.ts";
 import type { Established as EstablishedType } from "./established.ts";
+import type { Extensions as ExtensionsType } from "./extensions.ts";
+import { DISCOVERY_REMOVED } from "./forward.ts";
 import type { GoawayProps, Redirect as RedirectType } from "./goaway.ts";
 import { Reload, type ReloadDelay, type ReloadStatus } from "./reload.ts";
 import type { Probe as ProbeType, Stats as StatsType } from "./stats.ts";
@@ -57,9 +60,6 @@ export interface ConnectionProps {
 
 	/** WebSocket fallback options applied to each connection attempt (not reactive). */
 	websocket?: WebSocketPropsType;
-
-	/** Whether the relay supports broadcast discovery. */
-	discovery?: boolean;
 
 	/** The origin whose broadcasts are served, spanning reconnects. Implies a private loop. */
 	publish?: Origin.Consumer;
@@ -105,7 +105,7 @@ export interface ConnectionProps {
  * session finishes its groups, and the handle and its origin carry across. A redirect the
  * {@link ConnectionProps.goaway} policy refuses stops the loop like an auth rejection does.
  *
- * Options the pool cannot honor (transport options, discovery, delay, goaway, a pinned
+ * Options the pool cannot honor (transport options, delay, goaway, a pinned
  * certificate, caller-owned origins) use a private loop. An explicit `share: true`
  * refuses them. A supplied transport cannot reconnect at all; pass it to {@link Connection.connect}
  * instead.
@@ -150,7 +150,7 @@ export class Connection {
 	 */
 	readonly transport: Getter<TransportType | undefined>;
 
-	/** The current connection's PROBE estimates, or undefined while disconnected. */
+	/** Receive estimates while observed, or undefined while disconnected; peek does not request them. */
 	readonly probe: Getter<ProbeType | undefined>;
 
 	/**
@@ -185,7 +185,7 @@ export class Connection {
 	#closed = new Once<Error | null>();
 	readonly #status = new Signal<ReloadStatus>("disconnected");
 	readonly #established = new Signal<EstablishedType | undefined>(undefined);
-	readonly #probe = new Signal<ProbeType | undefined>(undefined);
+	readonly #probe = new Signal<Getter<ProbeType | undefined> | undefined>(undefined);
 	readonly #origin = new Signal<Origin.Producer | undefined>(undefined);
 	readonly #bandwidth = new Signal<Handle | undefined>(undefined);
 	readonly #error = new Signal<Error | undefined>(undefined);
@@ -207,7 +207,7 @@ export class Connection {
 		this.enabled = Signal.from(props?.enabled ?? true);
 		this.status = this.#status;
 		this.error = this.#error;
-		this.probe = this.#probe;
+		this.probe = new Follow(this.#probe);
 		this.origin = this.#origin;
 		this.bandwidth = this.#bandwidth;
 		this.transport = this.#signals.computed((effect) => effect.get(this.#established)?.transport);
@@ -237,7 +237,7 @@ export class Connection {
 			// Proxy the shared loop's outputs, so this handle reads like its own connection.
 			effect.run((nested) => nested.set(this.#status, nested.get(lease.connection.status), "disconnected"));
 			effect.run((nested) => nested.set(this.#established, nested.get(lease.connection.established), undefined));
-			effect.run((nested) => nested.set(this.#probe, nested.get(lease.connection.probe), undefined));
+			effect.run((nested) => nested.set(this.#probe, lease.connection.probe, undefined));
 			effect.run((nested) => nested.set(this.#error, nested.get(lease.connection.error), undefined));
 		});
 	}
@@ -254,10 +254,7 @@ export class Connection {
 			consume: origin,
 			webtransport: props.webtransport,
 			websocket: props.websocket,
-			discovery: props.discovery,
-			// A handle nobody watches wants unlimited retries; an auth rejection still
-			// stops this URL, and a new one starts another sequence.
-			delay: { timeout: Time.Milli(0), ...props.delay },
+			delay: props.delay,
 			goaway: props.goaway,
 		});
 		this.#signals.cleanup(() => loop.close());
@@ -269,7 +266,7 @@ export class Connection {
 		});
 		this.#signals.run((effect) => effect.set(this.#status, effect.get(loop.status), "disconnected"));
 		this.#signals.run((effect) => effect.set(this.#established, effect.get(loop.established), undefined));
-		this.#signals.run((effect) => effect.set(this.#probe, effect.get(loop.probe), undefined));
+		this.#signals.run((effect) => effect.set(this.#probe, loop.probe, undefined));
 		this.#signals.run((effect) => effect.set(this.#error, effect.get(loop.error), undefined));
 	}
 
@@ -372,6 +369,8 @@ export namespace Connection {
 	export type CertificateHash = CertificateHashType;
 	/** An established one-shot session. */
 	export type Established = EstablishedType;
+	/** The moq-transport extensions a one-shot session offers. */
+	export type Extensions = ExtensionsType;
 }
 
 /** Throw if `props` cannot be honored, rather than silently dropping them. */
@@ -379,6 +378,7 @@ function refuse(props?: ConnectionProps): void {
 	if (!props) return;
 
 	const extra = props as ConnectionProps & { transport?: unknown; signal?: unknown };
+	if ("discovery" in props) throw new TypeError(DISCOVERY_REMOVED);
 	if (extra.transport) {
 		throw new Error("a supplied transport cannot reconnect; call Connection.connect() instead");
 	}
@@ -400,9 +400,6 @@ function refuse(props?: ConnectionProps): void {
 	if (props.websocket !== undefined) {
 		throw new Error("websocket options cannot be shared; pass share: false");
 	}
-	if (props.discovery !== undefined) {
-		throw new Error("discovery cannot be shared; pass share: false");
-	}
 	if (props.delay !== undefined) {
 		throw new Error("delay cannot be shared; pass share: false");
 	}
@@ -416,7 +413,6 @@ function requiresPrivate(props: ConnectionProps): boolean {
 	return (
 		props.webtransport !== undefined ||
 		props.websocket !== undefined ||
-		props.discovery !== undefined ||
 		props.delay !== undefined ||
 		props.goaway !== undefined ||
 		props.publish !== undefined ||
@@ -448,10 +444,6 @@ function acquire(key: string, linger?: Time.Milli): Entry & { release: () => voi
 			enabled: true,
 			publish: origin.consume(),
 			consume: origin,
-			// Nobody observes a shared loop's `closed`, so giving up would strand every handle
-			// on this URL offline until the page reloads. Retry for as long as the entry lives
-			// instead; an auth rejection still stops this URL, and evicts below.
-			delay: { timeout: Time.Milli(0) },
 		});
 
 		const created: Entry = { key, origin, connection, refs: 0, linger: linger ?? LINGER_MS };

@@ -59,20 +59,25 @@ class Session:
         are the ones that already healed. Do not count outages with it."""
         return await self._inner.status()
 
-    def epoch(self) -> int:
-        """The connection epoch: 1 for the connect that built this session, one more
+    def connects(self) -> int:
+        """How many times this session has connected: 1 for the connect that built it, one more
         on each reconnect. A server-accepted session stays at 1.
 
         Pair it with :meth:`status` to log each reconnect by number; a
-        ``CONNECTED`` status whose epoch grew is a reconnect."""
-        return self._inner.epoch()
+        ``CONNECTED`` status whose count grew is a reconnect."""
+        return self._inner.connects()
 
     def cancel(self, code: int) -> None:
         """Close the session with the given error code."""
         self._inner.cancel(code)
 
     async def shutdown(self) -> None:
-        """Drain finished tracks within one second, raising if delivery times out."""
+        """Drain within one second, raising on failure.
+
+        Explicit ``moq-lite-07-wip`` waits for the peer to receive finished tails;
+        older Lite versions, including the default lite-06, wait only for transport
+        ACKs. IETF also waits for transport ACKs.
+        """
         await self._inner.shutdown()
 
     def publish(self) -> OriginProducer:

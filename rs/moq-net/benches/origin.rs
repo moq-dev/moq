@@ -19,6 +19,8 @@
 //!
 //! A route swap on one front is swept over its tracks and the copies each track
 //! still holds from earlier routes, and a front retiring over the fronts around it.
+//! Readers draining a swapped track are swept over their count, the groups every
+//! route delivered, and the routes each reader still holds a copy of.
 //!
 //! Run with `cargo bench -p moq-net --bench origin`.
 
@@ -32,6 +34,11 @@ use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, 
 use futures::FutureExt;
 use moq_net::{Epoch, Hop, Hops, Pattern, Patterns, Timestamp, announce, auth, broadcast, kio, origin, track};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
+
+/// A millisecond track: the frames written here carry timestamps.
+fn timed() -> track::Info {
+	track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+}
 
 /// `(publishers, subscribers)` shapes for the fan-out benchmarks.
 const SHAPES: [(usize, usize); 3] = [(100, 10), (1_000, 100), (1_000, 1_000)];
@@ -93,6 +100,47 @@ fn bench_announce(c: &mut Criterion) {
 					cursor.next().now_or_never().flatten().expect("retract delivered");
 				}
 			});
+		});
+	}
+	group.finish();
+}
+
+/// A peer carrying `publishers` broadcasts withdraws them all before the
+/// driver's clock moves again, then `subscribers` cursors drain the retractions.
+/// Each retraction quarantines its prefix until a fresh clock reading, so a cost
+/// per earlier retraction shows up as a slope over publishers.
+fn bench_withdraw(c: &mut Criterion) {
+	let mut group = c.benchmark_group("origin/withdraw");
+	for (publishers, subscribers) in [(100, 1), (1_000, 1), (10_000, 1), (1_000, 10)] {
+		let id = BenchmarkId::from_parameter(format!("{publishers}p_{subscribers}s"));
+		group.bench_function(id, |b| {
+			b.iter_batched(
+				|| {
+					let (producer, mut driver) = origin::Producer::new(origin::Config::default());
+					// Retractions read the driver's last clock reading, which stays put below.
+					driver
+						.poll(moq_net::time::Instant::now(), &kio::Waiter::noop())
+						.unwrap();
+					let routes: Vec<_> = (0..publishers)
+						.map(|i| producer.dynamic(format!("room/{i}"), peer_route(9, 1)).unwrap())
+						.collect();
+					let mut cursors: Vec<_> = (0..subscribers).map(|_| producer.consume().announced()).collect();
+					for cursor in &mut cursors {
+						while cursor.next().now_or_never().flatten().is_some() {}
+					}
+					(producer, driver, routes, cursors)
+				},
+				|(producer, driver, routes, mut cursors)| {
+					drop(routes);
+					for cursor in &mut cursors {
+						for _ in 0..publishers {
+							cursor.next().now_or_never().flatten().expect("retract delivered");
+						}
+					}
+					(producer, driver, cursors)
+				},
+				BatchSize::LargeInput,
+			);
 		});
 	}
 	group.finish();
@@ -281,9 +329,10 @@ fn bench_reprice_duplicate(c: &mut Criterion) {
 					for cost in [incumbent_cost - 1, incumbent_cost + 1] {
 						route.update(peer_route(challenger, cost)).unwrap();
 						for cursor in &mut cursors {
+							// The winner switches between epochless routes, which is another instance.
 							let event = cursor.next().now_or_never().flatten().expect("winner changed");
-							let moq_net::announce::Event::Update(update) = event else {
-								panic!("expected an update: got {event:?}");
+							let moq_net::announce::Event::Restart(update) = event else {
+								panic!("expected a restart: got {event:?}");
 							};
 							assert_eq!(update.route.cost, moq_net::origin::Cost::new(cost.min(incumbent_cost)));
 						}
@@ -608,8 +657,10 @@ fn bench_pool_cursors(c: &mut Criterion) {
 
 /// Publisher handoff at one path: a subscriber is reading from one local
 /// source when a second announces at the same path and takes over (newest
-/// wins). Measured from the standby's attach to the subscriber receiving its
-/// first group, with `publishers` unrelated broadcasts in the table.
+/// wins). An open subscription stays on the old instance, so the subscriber
+/// re-requests the broadcast. Measured from the standby's attach to the
+/// re-request receiving its first group, with `publishers` unrelated
+/// broadcasts in the table.
 fn bench_handoff(c: &mut Criterion) {
 	let mut group = c.benchmark_group("origin/handoff");
 	group.measurement_time(Duration::from_secs(5));
@@ -632,7 +683,7 @@ fn bench_handoff(c: &mut Criterion) {
 					let mut total = Duration::ZERO;
 					for _ in 0..iterations {
 						let incumbent = producer.publish("room/live", origin::Route::default()).unwrap();
-						let track = incumbent.create_track("video", None).unwrap();
+						let track = incumbent.create_track("video", timed()).unwrap();
 						let mut first = track.append_group().unwrap();
 						first.write_frame(Timestamp::ZERO, b"one".as_ref()).unwrap();
 						first.finish().unwrap();
@@ -643,20 +694,26 @@ fn bench_handoff(c: &mut Criterion) {
 
 						let started = std::time::Instant::now();
 						let standby = producer.create_broadcast("room/live").unwrap();
-						let track = standby.create_track("video", None).unwrap();
+						let track = standby.create_track("video", timed()).unwrap();
 						let mut second = track.create_group(moq_net::group::Info { sequence: 1 }).unwrap();
 						second.write_frame(Timestamp::ZERO, b"two".as_ref()).unwrap();
 						second.finish().unwrap();
 						// Announcing is what makes the standby a route the front can take.
 						standby.announce(origin::Route::default()).unwrap();
-						subscription.recv_group().await.unwrap().expect("standby group");
+						let replaced = consumer.request_broadcast("room/live", None).await.unwrap();
+						let mut replacement = replaced.track("video").unwrap().subscribe(None).await.unwrap();
+						let group = replacement.recv_group().await.unwrap().expect("standby group");
 						total += started.elapsed();
+						// Rejoining the incumbent would replay its cached group 0 instead.
+						assert_eq!(group.sequence, 1, "standby group");
 
 						drop(subscription);
+						drop(replacement);
 						incumbent.close();
 						standby.close();
-						// Wait for the front to close so the next iteration starts a fresh one.
+						// Wait for the fronts to close so the next iteration starts fresh ones.
 						resolved.closed().await;
+						replaced.closed().await;
 					}
 					total
 				})
@@ -701,7 +758,7 @@ async fn watching(routes: usize, subscribers: usize) -> Watching {
 	let mut tracks = Vec::new();
 	for index in 0..routes {
 		let broadcast = relay.publish(watched_path(index), origin::Route::default()).unwrap();
-		tracks.push(broadcast.create_track("video", None).unwrap());
+		tracks.push(broadcast.create_track("video", timed()).unwrap());
 		broadcasts.push(broadcast);
 	}
 
@@ -835,7 +892,7 @@ fn bench_relay(c: &mut Criterion) {
 			runtime.spawn(moq_net::time::run(driver));
 			let broadcast = producer.publish("room/live", origin::Route::default()).unwrap();
 			let sources: Vec<_> = (0..tracks)
-				.map(|i| broadcast.create_track(format!("{i}"), None).unwrap())
+				.map(|i| broadcast.create_track(format!("{i}"), timed()).unwrap())
 				.collect();
 			let mut subscriptions = runtime.block_on(async {
 				let resolved = producer.consume().request_broadcast("room/live", None).await.unwrap();
@@ -945,7 +1002,7 @@ impl Generation {
 		let broadcast = producer.create_broadcast(COPY_PATH).unwrap();
 		let mut held = Vec::with_capacity(tracks);
 		for i in 0..tracks {
-			let track = broadcast.create_track(format!("{i}"), None).unwrap();
+			let track = broadcast.create_track(format!("{i}"), timed()).unwrap();
 			let mut written = track.append_group().unwrap();
 			written.write_frame(Timestamp::ZERO, b"f".as_ref()).unwrap();
 			written.finish().unwrap();
@@ -1070,9 +1127,136 @@ fn bench_copy_walk(c: &mut Criterion) {
 	group.finish();
 }
 
+/// `(readers, retained, routes)` for [`bench_resume_overlap`]: readers of one track,
+/// the groups every route holds, and the routes it swapped through.
+const RESUME_OVERLAP: [(usize, usize, usize); 12] = [
+	(1, 1, 2),
+	(1, 64, 2),
+	(1, 1024, 2),
+	(8, 1, 2),
+	(8, 64, 2),
+	(8, 1024, 2),
+	(32, 64, 2),
+	(256, 64, 2),
+	(32, 1024, 2),
+	(1, 64, 8),
+	(1, 64, 32),
+	(32, 64, 8),
+];
+
+/// A track that swapped through its routes while its readers' local cap held every
+/// group back, so each reader keeps a copy per route and every copy holds the same
+/// groups, each replacement in reverse arrival order.
+struct ResumeOverlap {
+	_producer: origin::Producer,
+	_generations: Vec<(broadcast::Producer, track::Producer)>,
+	readers: Vec<track::Subscriber>,
+}
+
+async fn resume_overlap(readers: usize, retained: usize, routes: usize) -> ResumeOverlap {
+	let (producer, driver) = origin::Producer::new(origin::Config::default());
+	tokio::spawn(moq_net::time::run(driver));
+	let epoch = Epoch::mint();
+	let generation = |order: &mut dyn Iterator<Item = usize>| {
+		let broadcast = producer.create_broadcast(COPY_PATH).unwrap();
+		let track = broadcast.create_track("0", timed()).unwrap();
+		for sequence in order {
+			let mut group = track
+				.create_group(moq_net::group::Info {
+					sequence: sequence as u64,
+				})
+				.unwrap();
+			group.write_frame(Timestamp::ZERO, b"f".as_ref()).unwrap();
+			group.finish().unwrap();
+		}
+		broadcast
+			.announce(origin::Route::default().with_epoch(epoch.clone()))
+			.unwrap();
+		(broadcast, track)
+	};
+	let mut generations = vec![generation(&mut (0..retained))];
+	let resolved = tokio::time::timeout(COPY_WAIT, producer.consume().request_broadcast(COPY_PATH, None))
+		.await
+		.expect("front did not resolve")
+		.expect("front refused");
+	let track = resolved.track("0").unwrap();
+	// A budget covering every group, so none is written off as late.
+	let subscription = track::Subscription::default().with_max_delay(Duration::from_secs(3600));
+	let mut subscribers = Vec::with_capacity(readers);
+	for _ in 0..readers {
+		let mut subscriber = tokio::time::timeout(COPY_WAIT, track.subscribe(subscription.clone()))
+			.await
+			.expect("track did not splice")
+			.expect("subscribe failed");
+		// Held back until the drain, so every route's copy is kept for its unread groups.
+		subscriber.set_groups(..0);
+		subscribers.push(subscriber);
+	}
+	let waiter = kio::Waiter::noop();
+	for _ in 1..routes {
+		generations.push(generation(&mut (0..retained).rev()));
+		let (_, latest) = generations.last().unwrap();
+		tokio::time::timeout(COPY_WAIT, latest.demand().used())
+			.await
+			.expect("route swap did not splice")
+			.expect("replacement track closed");
+		// Each reader follows the swap, subscribing to the new copy.
+		for subscriber in &mut subscribers {
+			assert!(
+				subscriber.poll_recv_group(&waiter).is_pending(),
+				"the cap holds every group"
+			);
+		}
+	}
+	for subscriber in &mut subscribers {
+		subscriber.set_groups(..);
+	}
+	ResumeOverlap {
+		_producer: producer,
+		_generations: generations,
+		readers: subscribers,
+	}
+}
+
+/// Readers draining a track whose routes all delivered every group: each group is
+/// handed out once, and every other copy's duplicate is skipped against what the reader
+/// handed out. The slopes over retained groups and routes are that skipping's cost.
+fn bench_resume_overlap(c: &mut Criterion) {
+	let mut group = c.benchmark_group("origin/resume_overlap");
+	group.sample_size(10);
+	for (readers, retained, routes) in RESUME_OVERLAP {
+		group.throughput(Throughput::Elements((readers * retained) as u64));
+		group.bench_function(
+			BenchmarkId::from_parameter(format!("{readers}r_{retained}g_{routes}c")),
+			|b| {
+				let runtime = tokio::runtime::Builder::new_current_thread()
+					.enable_all()
+					.build()
+					.unwrap();
+				let waiter = kio::Waiter::noop();
+				b.iter_batched_ref(
+					|| runtime.block_on(resume_overlap(readers, retained, routes)),
+					|rig| {
+						for reader in &mut rig.readers {
+							let mut delivered = 0;
+							while let Poll::Ready(Ok(Some(_))) = reader.poll_recv_group(&waiter) {
+								delivered += 1;
+							}
+							assert_eq!(delivered, retained, "every group once");
+						}
+					},
+					BatchSize::PerIteration,
+				);
+			},
+		);
+	}
+	group.finish();
+}
+
 criterion_group!(
 	benches,
 	bench_announce,
+	bench_withdraw,
 	bench_announce_mounted,
 	bench_announce_fleet,
 	bench_announce_duplicate,
@@ -1089,6 +1273,7 @@ criterion_group!(
 	bench_narrow,
 	bench_relay,
 	bench_parked,
-	bench_copy_walk
+	bench_copy_walk,
+	bench_resume_overlap
 );
 criterion_main!(benches);

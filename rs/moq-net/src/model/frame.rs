@@ -8,7 +8,7 @@
 use std::ops::Range;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Mutex, OnceLock, PoisonError};
 use std::task::{Poll, ready};
 
 use arrayvec::ArrayVec;
@@ -31,8 +31,8 @@ pub struct Info {
 	/// [`group::Producer::create_frame`] converts it into the parent track's
 	/// timescale, so the scale you build it with doesn't have to match the track.
 	/// No receiver fills one in, so an untimed track stays untimed across hops, except
-	/// over moq-lite 05 and later, which can't mark a track untimed yet and carries the
-	/// encoder's send time instead.
+	/// over moq-lite 05 and 06, which can't mark a track untimed and carry the encoder's
+	/// send time instead.
 	pub timestamp: Option<Timestamp>,
 }
 
@@ -48,7 +48,35 @@ pub struct Frame {
 	pub payload: Bytes,
 }
 
-/// A reusable batch of frames, filled by [`group::Consumer::read_frames`] and drained
+/// A frame with the relay metadata its group keeps beside it, read only by wire egress.
+#[cfg(feature = "async")]
+#[derive(Clone, Debug)]
+pub(crate) struct Object {
+	pub frame: Frame,
+	pub fields: Option<Arc<super::object::Fields>>,
+}
+
+#[cfg(feature = "async")]
+impl std::ops::Deref for Object {
+	type Target = Frame;
+	fn deref(&self) -> &Self::Target {
+		&self.frame
+	}
+}
+
+/// A streamed frame's private header, alongside the unchanged public header.
+pub(crate) struct Header {
+	pub info: Info,
+	pub fields: Option<Arc<super::object::Fields>>,
+}
+
+impl From<Info> for Header {
+	fn from(info: Info) -> Self {
+		Self { info, fields: None }
+	}
+}
+
+/// A reusable batch of frames, filled by [`group::Consumer::poll_read_frames`] and drained
 /// by [`group::Producer::write_frames`].
 ///
 /// A fixed-capacity inline buffer: `N` frames of stack storage, never a heap
@@ -139,17 +167,21 @@ impl<const N: usize> Buffer<N> {
 /// size fits what remains is allocated up front; past that, its buffer grows with the
 /// bytes received. Each frame returns its share once it completes or aborts.
 #[derive(Clone)]
+#[cfg_attr(not(feature = "async"), allow(dead_code))]
 pub(crate) struct Budget(Arc<AtomicUsize>);
 
 impl Budget {
 	/// Enough for a handful of large keyframes in flight at once.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	const DEFAULT: usize = 16 * 1024 * 1024;
 
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub(crate) fn new(bytes: usize) -> Self {
 		Self(Arc::new(AtomicUsize::new(bytes)))
 	}
 
 	/// Take `size` bytes of the budget, or `None` if that is more than remains.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub(crate) fn reserve(&self, size: usize) -> Option<Reservation> {
 		self.0
 			.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |left| left.checked_sub(size))
@@ -168,6 +200,7 @@ impl Default for Budget {
 }
 
 /// A frame's share of a [`Budget`], returned on drop.
+#[cfg_attr(not(feature = "async"), allow(dead_code))]
 pub(crate) struct Reservation {
 	budget: Budget,
 	size: usize,
@@ -271,6 +304,7 @@ impl FrameBuf {
 	}
 
 	/// A buffer for a frame of `size` bytes that allocates only as bytes arrive.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub(crate) fn growing(size: usize) -> Self {
 		Self::with_growth(size, true)
 	}
@@ -334,7 +368,7 @@ impl FrameBuf {
 			FrameStorage::Shared(_) => return,
 			FrameStorage::Fixed(segment) => unsafe { segment.write(prev, src) },
 			FrameStorage::Growing(current) => {
-				let mut current = current.lock().expect("mutex poisoned");
+				let mut current = current.lock().unwrap_or_else(PoisonError::into_inner);
 				let needed = prev + src.len();
 				if current.capacity < needed {
 					// Doubling keeps the copies linear in the frame size, and the cap makes
@@ -370,7 +404,7 @@ impl FrameBuf {
 		let segment = match self.0.storage.get() {
 			Some(FrameStorage::Shared(bytes)) => return bytes.slice(start..end),
 			Some(FrameStorage::Fixed(segment)) => segment.clone(),
-			Some(FrameStorage::Growing(current)) => current.lock().expect("mutex poisoned").clone(),
+			Some(FrameStorage::Growing(current)) => current.lock().unwrap_or_else(PoisonError::into_inner).clone(),
 			// Nothing written, so the range is empty.
 			None => return Bytes::new(),
 		};
@@ -384,7 +418,7 @@ impl FrameBuf {
 		match self.0.storage.get() {
 			Some(FrameStorage::Shared(bytes)) => bytes.len(),
 			Some(FrameStorage::Fixed(segment)) => segment.capacity,
-			Some(FrameStorage::Growing(current)) => current.lock().expect("mutex poisoned").capacity,
+			Some(FrameStorage::Growing(current)) => current.lock().unwrap_or_else(PoisonError::into_inner).capacity,
 			None => 0,
 		}
 	}
@@ -548,6 +582,7 @@ impl<'a> Producer<'a> {
 /// frame on the group until this one is finished or aborted.
 ///
 /// Holds the frame's share of the session's [`Budget`], if it got one, until then.
+#[cfg_attr(not(feature = "async"), allow(dead_code))]
 pub(crate) struct ProducerOwned {
 	raw: Raw<group::Producer>,
 	_reserved: Option<Reservation>,
@@ -562,6 +597,7 @@ impl std::ops::Deref for ProducerOwned {
 }
 
 impl ProducerOwned {
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub(crate) fn new(group: group::Producer, buf: FrameBuf, info: Info, reserved: Option<Reservation>) -> Self {
 		Self {
 			raw: Raw {
@@ -576,12 +612,14 @@ impl ProducerOwned {
 	}
 
 	/// Attach the parent group's ingress meter, so written chunks bump `bytes`.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub(crate) fn with_meter(mut self, meter: stats::Meter) -> Self {
 		self.raw.stats = meter;
 		self
 	}
 
 	/// Bytes still needed to complete the frame.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub fn remaining(&self) -> usize {
 		self.raw.remaining()
 	}
@@ -594,21 +632,25 @@ impl ProducerOwned {
 	/// to publish bytes nobody can observe yet.
 	///
 	/// `coding::Reader::poll_read_frame` owns the pairing and is the only caller.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub(crate) fn write<B: IntoBytes>(&mut self, chunk: B) -> Result<()> {
 		self.raw.write(chunk)
 	}
 
 	/// Publish what has been written so far, waking consumers parked on the group.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub(crate) fn notify(&self) {
 		self.raw.group.frame_notify();
 	}
 
 	/// Commit the frame, verifying that all bytes were written.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub fn finish(mut self) -> Result<()> {
 		self.raw.finish()
 	}
 
 	/// Abort the frame (and its group) with the given error.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub fn abort(mut self, err: Error) -> Result<()> {
 		self.raw.abort(err)
 	}
@@ -670,6 +712,8 @@ pub struct Consumer {
 	// The group's channel, used to park while a partial frame fills.
 	state: kio::Consumer<GroupState>,
 	info: Info,
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	pub(crate) fields: Option<Arc<super::object::Fields>>,
 	source: Source,
 	// Byte offset consumed so far.
 	read_idx: usize,
@@ -693,10 +737,12 @@ impl std::ops::Deref for Consumer {
 }
 
 impl Consumer {
-	pub(crate) fn new(state: kio::Consumer<GroupState>, info: Info, source: Source) -> Self {
+	pub(crate) fn new(state: kio::Consumer<GroupState>, header: impl Into<Header>, source: Source) -> Self {
+		let header = header.into();
 		Self {
 			state,
-			info,
+			info: header.info,
+			fields: header.fields,
 			source,
 			read_idx: 0,
 			stats: stats::Meter::default(),
@@ -737,6 +783,9 @@ impl Consumer {
 			if !recover.wants(failed.as_ref(), waiter) {
 				return res;
 			}
+			if self.state.read().sparse() {
+				return Poll::Ready(Err(Error::Unsupported));
+			}
 			let mut replacement = match recover.poll(*index, failed.as_ref(), waiter) {
 				Poll::Ready(Ok(group)) => group,
 				Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
@@ -758,6 +807,11 @@ impl Consumer {
 					};
 				}
 			};
+			// This copy was dense through its frame, so the replacement's must be the same
+			// Object ID: a copy that begins past a gap holds different content there.
+			if frame.fields.as_ref().is_some_and(|fields| fields.id != *index) {
+				return Poll::Ready(Err(Error::Unsupported));
+			}
 			// Same name, same content: a different size is the routes disagreeing.
 			if frame.info.size != self.info.size {
 				return Poll::Ready(Err(Error::ProtocolViolation));
@@ -877,6 +931,7 @@ impl Consumer {
 	}
 
 	/// Return the next chunk of bytes since the last read.
+	#[cfg(feature = "async")]
 	pub async fn read_chunk(&mut self) -> Result<Option<Bytes>> {
 		kio::wait(|waiter| self.poll_read_chunk(waiter)).await
 	}
@@ -926,6 +981,7 @@ impl Consumer {
 	}
 
 	/// Return all remaining bytes, blocking until the frame is finished.
+	#[cfg(feature = "async")]
 	pub async fn read_all(&mut self) -> Result<Bytes> {
 		kio::wait(|waiter| self.poll_read_all(waiter)).await
 	}

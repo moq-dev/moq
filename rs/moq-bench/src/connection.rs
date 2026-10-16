@@ -131,7 +131,10 @@ pub async fn run(ctx: Connection) {
 				continue;
 			}
 		};
-		let track = match broadcast.create_track(TRACK, None) {
+		let track = match broadcast.create_track(
+			TRACK,
+			moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI),
+		) {
 			Ok(track) => track,
 			Err(err) => {
 				tracing::error!(connection, %err, "failed to create track");
@@ -506,7 +509,11 @@ async fn read_group(group: &mut group::Consumer, learned_shape: &mut bool, stats
 /// A group that explicitly fails is known lost immediately, even when it is the
 /// first or live-frontier group. Each observation feeds the shared [`Stats`]
 /// incrementally so the reporter sees losses live and many subscriptions sum
-/// correctly: `groups_expected - groups_present` is the total skipped or failed.
+/// correctly: `groups_expected - groups_present` is the gaps still outstanding.
+///
+/// `groups_lost` only grows: one observation either fills a counted gap or adds
+/// new ones, never both, so summing the gap's increases counts each skipped or
+/// failed group once, and a late arrival cannot cancel a later loss.
 struct GapTracker<'a> {
 	stats: &'a Stats,
 	min: u64,
@@ -572,12 +579,17 @@ impl<'a> GapTracker<'a> {
 		// known lost. Completed groups below the frontier are present.
 		let expected = self.cap.map_or(0, |cap| cap - self.min + 1) + u64::from(!self.frontier_complete);
 		let present = self.complete - u64::from(self.frontier_complete);
+		let grown = (expected - present).saturating_sub(self.expected - self.present);
+		// Grow the denominator first and release the counters bounded by it, so a
+		// snapshot that acquires them before reading `groups_expected` never sees
+		// more lost or present groups than expected.
 		self.stats
 			.groups_expected
 			.fetch_add(expected - self.expected, Ordering::Relaxed);
+		self.stats.groups_lost.fetch_add(grown, Ordering::Release);
 		self.stats
 			.groups_present
-			.fetch_add(present - self.present, Ordering::Relaxed);
+			.fetch_add(present - self.present, Ordering::Release);
 		self.expected = expected;
 		self.present = present;
 	}
@@ -603,6 +615,11 @@ impl Drop for Gauge<'_> {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	/// A millisecond track: the frames written here carry timestamps.
+	fn timed() -> moq_net::track::Info {
+		moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+	}
 
 	async fn wait_for(counter: &AtomicU64, value: u64) {
 		while counter.load(Ordering::Relaxed) < value {
@@ -632,7 +649,7 @@ mod tests {
 
 		let stats = Arc::new(Stats::default());
 		let broadcast = broadcast::Info::new().produce();
-		let track = broadcast.create_track(TRACK, None).unwrap();
+		let track = broadcast.create_track(TRACK, timed()).unwrap();
 		let consumer = broadcast.consume();
 
 		// 10fps (100ms/frame), 8-byte frames, 2 payload frames per group.
@@ -676,7 +693,7 @@ mod tests {
 
 		let stats = Arc::new(Stats::default());
 		let broadcast = broadcast::Info::new().produce();
-		let track = broadcast.create_track(TRACK, None).unwrap();
+		let track = broadcast.create_track(TRACK, timed()).unwrap();
 		let consumer = broadcast.consume();
 
 		let task = tokio::spawn(produce(0, "bench/test".into(), rolled(10, 4, 0), track, stats.clone()));
@@ -707,7 +724,7 @@ mod tests {
 
 		let stats = Arc::new(Stats::default());
 		let broadcast = broadcast::Info::new().produce();
-		let track = broadcast.create_track(TRACK, None).unwrap();
+		let track = broadcast.create_track(TRACK, timed()).unwrap();
 		let consumer = broadcast.consume();
 
 		// 10fps, 300-byte messages, lone-keyframe groups (the chat shape).
@@ -740,7 +757,7 @@ mod tests {
 
 		let stats = Arc::new(Stats::default());
 		let broadcast = broadcast::Info::new().produce();
-		let track = broadcast.create_track(TRACK, None).unwrap();
+		let track = broadcast.create_track(TRACK, timed()).unwrap();
 		let consumer = broadcast.consume();
 
 		// 50 bytes is well under the serialized header (roughly 170 bytes).
@@ -785,7 +802,7 @@ mod tests {
 		// One legitimate peer under the bench namespace with a single finished group.
 		let peer = origin.create_broadcast("bench/current/0/0").unwrap();
 		peer.announce(Default::default()).unwrap();
-		let track = peer.create_track(TRACK, None).unwrap();
+		let track = peer.create_track(TRACK, timed()).unwrap();
 		let mut group = track.append_group().unwrap();
 		group
 			.write_frame(moq_net::Timestamp::now(), Bytes::from_static(b"{}"))
@@ -817,7 +834,7 @@ mod tests {
 
 		let broadcast = origin.create_broadcast("bench/run/chat").unwrap();
 		broadcast.announce(Default::default()).unwrap();
-		let track = broadcast.create_track(TRACK, None).unwrap();
+		let track = broadcast.create_track(TRACK, timed()).unwrap();
 		tokio::task::yield_now().await;
 		let mut group = track.append_group().unwrap();
 		let header = serde_json::json!({
@@ -854,7 +871,7 @@ mod tests {
 
 		let stats = Arc::new(Stats::default());
 		let broadcast = broadcast::Info::new().produce();
-		let mut track = broadcast.create_track(TRACK, None).unwrap();
+		let mut track = broadcast.create_track(TRACK, timed()).unwrap();
 		let consumer = broadcast.consume();
 
 		// Group 0 lands intact.
@@ -912,7 +929,7 @@ mod tests {
 
 		let stats = Arc::new(Stats::default());
 		let broadcast = broadcast::Info::new().produce();
-		let mut track = broadcast.create_track(TRACK, None).unwrap();
+		let mut track = broadcast.create_track(TRACK, timed()).unwrap();
 		let consumer = broadcast.consume();
 
 		let task = {
@@ -974,10 +991,11 @@ mod tests {
 	}
 
 	fn lost(stats: &Stats) -> u64 {
-		stats
-			.groups_expected
-			.load(Ordering::Relaxed)
-			.saturating_sub(stats.groups_present.load(Ordering::Relaxed))
+		stats.groups_lost.load(Ordering::Relaxed)
+	}
+
+	fn outstanding(stats: &Stats) -> u64 {
+		stats.groups_expected.load(Ordering::Relaxed) - stats.groups_present.load(Ordering::Relaxed)
 	}
 
 	/// A hole below the frontier (group 2 never arrives, but 3 and 4 do) is one skip.
@@ -990,6 +1008,29 @@ mod tests {
 		}
 		assert_eq!(stats.groups_recv.load(Ordering::Relaxed), 4);
 		assert_eq!(lost(&stats), 1);
+	}
+
+	/// A group that lands after the frontier settled past it closes the gap but
+	/// stays lost, so recovering an old gap cannot hide a new loss.
+	#[test]
+	fn gap_tracker_late_arrival_stays_lost() {
+		let stats = Stats::default();
+		let mut gaps = GapTracker::new(&stats);
+
+		for seq in [0, 1, 3, 4] {
+			gaps.complete(seq);
+		}
+		assert_eq!((lost(&stats), outstanding(&stats)), (1, 1));
+
+		gaps.complete(2);
+		assert_eq!(stats.groups_recv.load(Ordering::Relaxed), 5);
+		assert_eq!((lost(&stats), outstanding(&stats)), (1, 0), "the late group stays lost");
+
+		// 6 is skipped; 8 settles 7, confirming it.
+		for seq in [5, 7, 8] {
+			gaps.complete(seq);
+		}
+		assert_eq!((lost(&stats), outstanding(&stats)), (2, 1));
 	}
 
 	/// Out-of-order arrivals that fill the whole span count as zero loss.

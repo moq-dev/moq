@@ -1,20 +1,20 @@
-import { expect, mock, spyOn, test } from "bun:test";
+import { expect, jest, mock, spyOn, test } from "bun:test";
 import { Signal } from "@moq/signals";
 import type { Grant } from "../auth.ts";
 import { Producer as BroadcastProducer } from "../broadcast.ts";
-import { StreamCode, toStreamCode } from "../error.ts";
+import { SessionCode, StreamCode, toStreamCode } from "../error.ts";
 import { Producer as GroupProducer } from "../group.ts";
 import { randomHop } from "../hop.ts";
 import { hooks } from "../internal.ts";
 import { createMockTransportPair, textFrame } from "../mock.ts";
 import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
+import { sendOrder } from "../priority.ts";
 import { Reader, Stream, Writer } from "../stream.ts";
 import { Milli, Timescale, Timestamp } from "../time.ts";
 import { type AnnounceBroadcast, AnnounceRequest, decodeAnnounceBroadcast } from "./announce.ts";
 import { Fetch } from "./fetch.ts";
 import { Group as GroupMessage } from "./group.ts";
-import { sendOrder } from "./priority.ts";
 import { Probe as ProbeMessage } from "./probe.ts";
 import { Publisher } from "./publisher.ts";
 import { decodeSubscribeResponse, Subscribe, type SubscribeEnd, SubscribeUpdate } from "./subscribe.ts";
@@ -740,6 +740,38 @@ test("lite draft-05: an explicit floor still serves a group below the first one"
 	}
 });
 
+// Pre-06 an absent Group Start is the latest group. An update that drops a named floor
+// re-pins there, so a group created below it afterwards is not served.
+test("lite draft-05: an update dropping the floor re-pins to the latest group", async () => {
+	const sub = await servedSubscription({ startGroup: 0 });
+	try {
+		sub.serve(2);
+		expect(await sub.servedSequence()).toBe(2);
+
+		await replayUpdate({ priority: 0 }).encode(sub.client.writer, Version.DRAFT_05);
+		await flush();
+		sub.serve(0);
+		sub.serve(3);
+		expect(await sub.servedSequence()).toBe(3);
+	} finally {
+		await sub.close();
+	}
+});
+
+// On an empty track the re-pin has no latest group to name, so the first group the
+// track produces is served, even below the dropped floor.
+test("lite draft-05: an update dropping the floor on an empty track serves the next group", async () => {
+	const sub = await servedSubscription({ startGroup: 5 });
+	try {
+		await replayUpdate({ priority: 0 }).encode(sub.client.writer, Version.DRAFT_05);
+		await flush();
+		sub.serve(0);
+		expect(await sub.servedSequence()).toBe(0);
+	} finally {
+		await sub.close();
+	}
+});
+
 // Lite-06 encodes a floor of group 0 as 0, including a subscribe that omitted Group Start.
 // That is a floor, so a later group 0 is still served.
 test("lite draft-06: an omitted group start still serves a group below the first one", async () => {
@@ -773,7 +805,8 @@ test("lite draft-05: a group popped before a cap update is still served", async 
 		sub.release();
 		expect(await sub.servedSequence()).toBe(1);
 		while (ranges.mock.calls.length === 0) await flush();
-		expect(lastGroups(ranges)).toEqual({ start: undefined, end: { included: 0 } });
+		// Dropping the named floor re-pins to the latest group, as an unfloored SUBSCRIBE does.
+		expect(lastGroups(ranges)).toEqual({ start: { included: 1 }, end: { included: 0 } });
 	} finally {
 		ranges.mockRestore();
 		sub.release();
@@ -1016,6 +1049,7 @@ test("lite draft-06: scheduling updates apply while SUBSCRIBE_START is blocked",
 		expect(sub.track.subscription.peek()).toEqual({
 			priority: 9,
 			maxDelay: TEST_MAX_DELAY_MS,
+			order: "descending",
 			groups: { start: undefined, end: { excluded: 6 } },
 		});
 		expect(ranges).not.toHaveBeenCalled();
@@ -1149,7 +1183,7 @@ test("lite draft-07: subscribe end waits for groups below a declared finish", as
 		first.writeFrame(textFrame("hello"));
 		first.close();
 		track.writeGroup(first);
-		track.finishAt(2);
+		track.finishAt({ group: 2, frame: 0 });
 
 		const start = await decodeSubscribeResponse(client.reader, Version.DRAFT_07);
 		expect("start" in start).toBe(true);
@@ -2055,3 +2089,84 @@ test.each([0, 1])("lite draft-07 reports the cached largest position when starti
 		await running;
 	}
 });
+
+async function settleControls(): Promise<void> {
+	await new Promise<void>((resolve) => {
+		const channel = new MessageChannel();
+		channel.port1.onmessage = () => {
+			channel.port1.close();
+			channel.port2.close();
+			resolve();
+		};
+		channel.port2.postMessage(null);
+	});
+}
+
+for (const version of [Version.DRAFT_03, Version.DRAFT_04, Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07]) {
+	test(`Report consumes PROBE targets and observes their FIN (${version})`, async () => {
+		jest.useFakeTimers();
+		const pair = createMockTransportPair(ALPN_05, { stats: { estimatedSendRate: 1_000_000, smoothedRtt: 12 } });
+		const publisher = new Publisher(pair.server, version, randomHop());
+		const client = await Stream.open(pair.client, { version });
+		const server = await Stream.accept(pair.server, version);
+		if (!server) throw new Error("publisher did not accept PROBE");
+		const reset = spyOn(server.writer, "reset");
+		const close = spyOn(server.writer, "close");
+		const serving = publisher.runProbe(server);
+		try {
+			await new ProbeMessage({ bitrate: 4_000_000, rtt: 20 }).encode(client.writer, version);
+			await settleControls();
+			jest.advanceTimersByTime(100);
+			await settleControls();
+			expect((await ProbeMessage.decode(client.reader, version)).bitrate).toBe(1_000_000);
+			expect(reset).not.toHaveBeenCalled();
+			client.writer.close();
+			await settleControls();
+			expect(close).toHaveBeenCalled();
+		} finally {
+			client.close();
+			server.close();
+			pair.client.close();
+			publisher.close();
+			await serving;
+			reset.mockRestore();
+			close.mockRestore();
+			jest.useRealTimers();
+		}
+	});
+}
+
+for (const version of [Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07]) {
+	test(`malformed SUBSCRIBE_UPDATE closes the session after request setup (${version})`, async () => {
+		const pair = createMockTransportPair(ALPN_05);
+		const origin = new OriginProducer();
+		const broadcast = publish(origin, Path.from("test"));
+		const track = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+		const publisher = new Publisher(pair.server, version, randomHop(), origin.consume());
+		const client = await Stream.open(pair.client, { version });
+		const server = await Stream.accept(pair.server, version);
+		if (!server) throw new Error("publisher did not accept SUBSCRIBE");
+		const close = spyOn(pair.server, "close");
+		const serving = publisher.runSubscribe(
+			new Subscribe({ id: 0n, broadcast: Path.from("test"), track: "video", priority: 0 }),
+			server,
+		);
+		try {
+			await settleControls();
+			// The complete zero-length update cannot hold its required fields.
+			await client.writer.write(new Uint8Array([0]));
+			await settleControls();
+			expect(close.mock.calls.some(([info]) => info?.closeCode === SessionCode.ProtocolViolation)).toBe(true);
+		} finally {
+			client.close();
+			server.close();
+			publisher.close();
+			track.close();
+			broadcast.close();
+			origin.close();
+			pair.client.close();
+			await serving;
+			close.mockRestore();
+		}
+	});
+}

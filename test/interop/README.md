@@ -23,7 +23,7 @@ The normal run also checks a finite raw track through the relay. Its publisher
 announces end 4 before writing four 256 KiB groups; the reader verifies every byte,
 exactly groups 0 through 3, and a clean end at 4. Rust-to-Rust always runs. Selecting
 native JS adds both Rust-to-JS and JS-to-Rust under that runtime, so `--all` covers
-Node and Bun. `--tail` runs just these five lanes. The wire-compat lanes, which swap in released relays and clients, skip them.
+Node and Bun. The current CLI also FETCHes group 0, verifies every byte, and closes under the relay idle-out check. `--tail` runs this FETCH round and the five finite-tail lanes. The wire-compat lanes, which swap in released relays and clients, skip them.
 
 The finite clients keep their session alive until the harness acknowledges the
 reader's complete clean end over stdin, so a lane tests delivery rather than
@@ -42,7 +42,9 @@ released relays and clients, skip it.
 
 Whenever the browser subscriber is in the run, the matrix ends with a close-code
 case: Chromium dials the relay with a token its public rules refuse, and
-`WebTransport.closed` must carry the relay's code and reason. Chromium treats a
+`WebTransport.closed` must carry the relay's code and reason. A WebSocket-only
+`Connection` must publish the same Unauthorized session error and stop its
+unlimited reconnect loop. Chromium treats a
 server's HTTP/3 control stream ending as fatal, so a server that ends it under
 the close capsule loses both; no Rust peer is that strict.
 
@@ -141,7 +143,7 @@ just test interop --all
 # Pick your own axes:
 just test interop --publishers rust,python --subscribers rust,c,js-native-bun
 
-# Finite track tails only: Rust-to-Rust and Rust/Node/Bun in both directions.
+# CLI FETCH close and finite track tails only: Rust-to-Rust and Rust/Node/Bun in both directions.
 just test interop --tail
 
 # Subscription termination: Rust/JS response bytes over in-memory transports.
@@ -186,14 +188,22 @@ offers only the cell's version, and JavaScript checks the negotiated version.
 The relay is anonymous here, since released binaries may predate AUTH; the
 default matrix covers tokens and grants.
 Current Rust media publishers feed released Rust and JS readers, then released
-publishers feed current readers, through both relay sources. Rust exports must
-decode to a video frame through ffmpeg. The existing JS subscriber
-reconstructs the catalog and decodes the container.
+publishers feed current readers, through both relay sources. Each reader is its
+own lane, `media-rust` and `media-js-native-node`. Rust exports must
+decode to a video frame through ffmpeg. The JS reader is
+`compat/client.ts`, not the interop subscriber, whose API follows the
+checkout. One copy runs against each package set, using only API both have,
+and it reconstructs the catalog and decodes the container.
+Before cross-version sessions, current and released media controls each run
+with their own relay, publisher, and Rust/JS readers on moq-lite-06. These
+controls always run, including when a planned break skips cross-version lanes,
+so a broken reader cannot make compatibility failures ambiguous.
 
 Each `moq-net` library states whether a draft has FETCH (lite-05 onward
 today). A draft without it in both is logged and its FETCH lanes skipped; one
-the release supports and the checkout dropped fails. Both Rust versions FETCH the group the
-publisher's own JS subscriber observed and compare every frame's exact
+the release supports and the checkout dropped fails, unless a planned break covers
+the `fetch-capability` cell for that version. Both Rust versions FETCH the group the
+publisher's own compat client observed and compare every frame's exact
 payload. JS publishers write one group after that subscriber's demand, and the
 opposite-source Rust CLI FETCHes it by the same observed ID.
 
@@ -202,12 +212,19 @@ skipped, then lists each failing cell before it fails.
 Checkout-only versions are logged and omitted. Removing a released version
 fails before sessions start. A maintainer-approved break belongs in
 `compat/planned-breaks.json` with its reason and the exact affected release
-versions. Keyed by a protocol name it drops that version; with `cells` it
-skips only the named lanes, optionally narrowed to versions, a relay source,
-or a publisher source. Every skipped cell is logged with the break's name.
-Entries become errors once an affected release changes or no longer offers a
-listed version, forcing removal or a fresh review. Future WIP drafts receive
-no automatic exception.
+versions. Keyed by a protocol name it skips every cell of that version, and
+excuses the checkout removing it; with `cells` it skips only the named lanes,
+optionally narrowed to versions, a relay source, or a publisher source. Every
+skipped cell is logged with the break's name. Entries become errors once an
+affected release changes or no longer offers a listed version, forcing a
+re-measure. Future WIP drafts receive no automatic exception.
+
+`just test wire-compat --remeasure` is that re-measure, run after each release
+publishes (see `CONTRIBUTING.md`). It runs the cells planned breaks cover
+without letting them fail the run, then rewrites `compat/planned-breaks.json`:
+a break with a failing cell is re-pinned to the releases just measured, and one
+with none is deleted. It prints each break's failing cells. Review the diff and
+refresh each reason before committing.
 
 ## Media QA
 
@@ -337,6 +354,10 @@ hands moq-net's QUIC and leading-ones encodings of each varint size boundary
 `number` conversion, and returns js/net's own encodings, which Rust requires to
 match byte for byte and decode back to the same value.
 
+`lite_auth_unsupported_interop` sends an AUTH\_OK followed by AUTH\_ERROR
+NOT\_SUPPORTED across Rust and JS in both directions, checking that the later
+refusal retains its meaning and both bindings emit the same bytes.
+
 `lite_varint_interop` runs next to it and does the same through moq-lite's
 version dispatch: `lite-varint.ts` decodes Rust's lite-06 (QUIC) and lite-07
 (leading-ones) varints, a SETUP carrying a 62-bit Hop ID, a datagram, and a
@@ -348,3 +369,8 @@ and JS refuses them on lite-06.
 drafts 14 through 22: `ietf-datagram.ts` decodes Rust's datagrams and their
 Timestamps and re-encodes them byte for byte, and Rust decodes the datagram the
 JS publisher sends.
+
+`ietf_track_status_interop` sends Rust's `TRACK_STATUS` to the JS publisher on
+drafts 14 through 22 through `track-status.ts`, and Rust decodes each
+`TRACK_STATUS_OK` and the refusal for a missing broadcast the way its
+subscriber reads them.

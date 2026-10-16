@@ -16,10 +16,13 @@ mod follow;
 // tested without a runtime.
 mod front;
 
+mod aborts;
 mod bytes;
 pub(crate) mod clock;
-mod datagram;
+pub(crate) mod datagram;
+mod delivered;
 mod expiry;
+pub(crate) mod object;
 mod requests;
 mod resume;
 mod subscription;
@@ -44,7 +47,8 @@ pub use timed::Timed;
 /// Publishing broadcasts, announcing routes, and consuming both through an origin.
 pub mod origin {
 	pub use super::origin_impl::{
-		Config, Consumer, Cost, DEFAULT_UPDATE_HOLD, Driver, Dynamic, Producer, Request, Requesting, Route, Source,
+		Config, Consumer, Cost, DEFAULT_UPDATE_HOLD, Driver, Dynamic, Preference, Producer, Request, Requesting, Route,
+		Routing, Source,
 	};
 }
 
@@ -59,11 +63,12 @@ pub mod announce {
 pub use origin_impl::{Consume, Hop, Hops, InvalidHop};
 
 // The announce-interest prefixes a scope needs on a prefix-shaped wire.
+#[cfg(feature = "async")]
 pub(crate) use origin_impl::interest_prefixes;
 
 // The advertise-only route guard, for tests shaping the route table.
-#[cfg(test)]
+#[cfg(all(test, feature = "async"))]
 pub(crate) use origin_impl::AnnounceProducer;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "async"))]
 pub(crate) use origin_impl::ProduceTest;

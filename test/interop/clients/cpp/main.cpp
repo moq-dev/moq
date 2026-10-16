@@ -196,7 +196,7 @@ int subscribe(const std::string &url, const std::string &path, double timeout) {
     moq::Subscription subscription;
     subscription.max_delay_us = MAX_DELAY_US;
     auto media = until(
-        moq::MediaContainerConsumer::subscribe(consumer, {name, video.container, subscription}), deadline,
+        moq::MediaTrackConsumer::subscribe(consumer, {name, video.container, subscription}), deadline,
         "container consumer"
     );
 

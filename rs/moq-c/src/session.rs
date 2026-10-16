@@ -119,11 +119,16 @@ impl Session {
 			let _publish = publish;
 			let _consume = consume;
 
-			let res = tokio::select! {
-				// close() requested: drain what the session queued, then close it.
-				_ = closed.1 => reconnect.clone().close().await.map_err(map_connect_error),
-				res = Self::report(callback, reconnect.clone()) => res,
-			};
+			// A panic ends only this session, reported through the terminal callback.
+			let res = moq_tokio::panic::isolate(async move {
+				tokio::select! {
+					// close() requested: drain what the session queued, then close it.
+					_ = closed.1 => reconnect.clone().close().await.map_err(map_connect_error),
+					res = Self::report(callback, reconnect.clone()) => res,
+				}
+			})
+			.await
+			.unwrap_or(Err(Error::Panic));
 			// The terminal callback waits for the close to reach the peer, so a caller that exits
 			// on it doesn't leave the peer to time the connection out.
 			client.close().await;
@@ -169,10 +174,15 @@ impl Session {
 			let _publish = publish;
 			let _consume = consume;
 
-			let res = tokio::select! {
-				_ = closed.1 => Ok(()),
-				res = Self::serve(id, callback, request) => res,
-			};
+			// A panic ends only this session, reported through the terminal callback.
+			let res = moq_tokio::panic::isolate(async move {
+				tokio::select! {
+					_ = closed.1 => Ok(()),
+					res = Self::serve(id, callback, request) => res,
+				}
+			})
+			.await
+			.unwrap_or(Err(Error::Panic));
 
 			let entry = State::lock().session.task.remove(id).flatten();
 			if let Some(entry) = entry {
@@ -202,7 +212,7 @@ impl Session {
 			}));
 		}
 
-		// A server-accepted session is a single transport, so it only ever reaches epoch 1.
+		// A server-accepted session is a single transport, so it only ever connects once.
 		callback.call(1);
 		Err(session.closed().await.into())
 	}
@@ -251,7 +261,7 @@ impl Session {
 		}
 	}
 
-	/// Forward connection epochs to the status callback until the reconnect loop stops.
+	/// Forward connect counts to the status callback until the reconnect loop stops.
 	///
 	/// Returns the terminal error via `?`. Disconnects aren't reported: status 0 is reserved for a
 	/// clean close (delivered as the terminal callback once the task ends).
@@ -260,11 +270,11 @@ impl Session {
 		loop {
 			if let moq_tokio::Status::Connected = reconnect.status().await.map_err(map_connect_error)? {
 				connects += 1;
-				// Positive status carries the connection epoch, so callers can tell a
+				// Positive status carries the connect count, so callers can tell a
 				// reconnect (>1) from the first connect (1). No lock is held, so the C
 				// callback is free to re-enter moq-c.
 				let code = i32::try_from(connects)
-					.context("connection epoch exceeded i32::MAX")
+					.context("connect count exceeded i32::MAX")
 					.map_err(|err| Error::Connect(Arc::new(err)))?;
 				callback.call(code);
 			}
@@ -289,6 +299,7 @@ fn map_connect_error(err: moq_tokio::Error) -> Error {
 		// Local auth stays the dedicated C status. A scoped protocol close is `Error::Moq`
 		// so `moq_error_protocol` can recover the registry and code.
 		moq_tokio::Error::MoqNet(moq_net::Error::Unauthorized) => Error::Unauthorized,
+		moq_tokio::Error::Panic => Error::Panic,
 		moq_tokio::Error::MoqNet(err) => err.into(),
 		err => match err.connect_error() {
 			Some(moq_tokio::ConnectError::Unauthorized) => Error::Unauthorized,

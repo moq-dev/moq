@@ -63,12 +63,8 @@ field if needed; published formats are unchanged. Update API, concept,
 CLI and matching draft documentation inline, including the changed FETCH
 exemption and the distinction between age and upstream wait budgets.
 
-## Required
-
-- [One max_age meaning](/quest/m1/cache-max-age.md) - one expiry rule and deadline wake mechanism
-
 ## Related
 
 - [IETF fill timeout](/quest/m1/ietf-fill-timeout.md) - upstream waiting bounded through the existing FETCH parameter
 - [Subscribe ranges](/quest/m1/subscribe-ranges/README.md) - historical ranges retain this optional budget and publisher clamp
-- [Retired requests](/quest/m0/broadcast-epoch/retired-requests.md) - identity stays pinned independently of age
+- [Retired requests](https://github.com/moq-dev/moq/pull/5294) - identity stays pinned independently of age

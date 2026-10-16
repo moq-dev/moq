@@ -46,6 +46,10 @@ dev:
 bench $BASE="":
     bench/run.sh "$BASE"
 
+# Benchmark the Rust, Go, Python, and Kotlin bindings against two Rust baselines.
+bench-ffi:
+    bench/ffi.sh
+
 # Measure audio group sizes across relay publisher/subscriber and fanout shapes.
 bench-audio:
     bench/run.sh --audio
@@ -56,6 +60,10 @@ bench-audio:
 bench-runtime $ROUNDS="3" $WORKERS="":
     MOQ_BENCH_RUNTIME_ROUNDS="$ROUNDS" MOQ_BENCH_RUNTIME_WORKERS="$WORKERS" bench/run.sh --runtime
 
+# Attribute relay worker std mutex waits by stack, for each worker count.
+bench-lock $WORKLOAD="fanout" $WORKERS="1 4 16":
+    MOQ_BENCH_LOCK_WORKLOAD="$WORKLOAD" MOQ_BENCH_LOCK_WORKERS="$WORKERS" bench/run.sh --lock
+
 # Install repo-wide tooling. Per-language deps install on first check.
 install:
     bun install
@@ -63,7 +71,8 @@ install:
 
 # Lints, compiles, and tests only the packages the branch changed plus
 # everything depending on them; `check --all` is the unscoped suite. BASE
-# defaults to the branch's upstream. Rust compiles once: its test build doubles
+# defaults to the PR base, then a main/release upstream, then origin/main.
+# Rust compiles once: its test build doubles
 # as the clippy gate (see `rs check-test`).
 
 # Lint, compile, and test what the branch changed since BASE, plus its dependents.
@@ -76,6 +85,10 @@ check $BASE="":
 # Run half of `check` for CI: JOB `check` lints and compiles, `test` runs the tests.
 ci $JOB $BASE="":
     sh/dispatch.sh "ci-$JOB" "$BASE"
+
+# Report what a CI job (`check`, `test`, `platform`) selects, before installing the dev shell or build caches.
+ci-select $JOB $BASE="":
+    sh/dispatch.sh "ci-$JOB" "$BASE" --query
 
 # Auto-fix lint and formatting for what the branch changed since BASE.
 fix $BASE="":

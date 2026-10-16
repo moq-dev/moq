@@ -1,3 +1,5 @@
+#![cfg(feature = "async")]
+
 //! A track whose declared end has settled holds every group it promised: the end was
 //! reached and each group below it finished. An abort that lands afterwards, such as
 //! the session dying, ends the track cleanly but must not throw those groups away: a
@@ -6,6 +8,11 @@
 mod support;
 
 use moq_net::{Error, Hop, Timestamp};
+
+/// A millisecond track: the frames written here carry timestamps.
+fn timed() -> moq_net::track::Info {
+	moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+}
 
 fn produce_origin(hop: u64) -> moq_net::origin::Producer {
 	let (producer, driver) = moq_net::origin::Producer::new(moq_net::origin::Config::new(Hop::new(hop).unwrap()));
@@ -21,7 +28,7 @@ const GROUPS: u64 = 2;
 async fn round(abort: bool, ordered: bool) -> (Vec<u64>, Option<Error>) {
 	let origin = produce_origin(1);
 	let broadcast = origin.create_broadcast("bcast").unwrap();
-	let mut track = broadcast.create_track("video", None).unwrap();
+	let mut track = broadcast.create_track("video", timed()).unwrap();
 	// From the first group with a replay window: a late reader is owed the whole track,
 	// not the live edge.
 	let subscription = moq_net::track::Subscription::default()
@@ -34,7 +41,7 @@ async fn round(abort: bool, ordered: bool) -> (Vec<u64>, Option<Error>) {
 		group.write_frame(Timestamp::ZERO, b"frame".as_slice()).unwrap();
 		group.finish().unwrap();
 	}
-	track.finish_at(GROUPS).unwrap();
+	track.finish_at(moq_net::track::Position::group(GROUPS)).unwrap();
 	// Every group below the end is finished: the end has settled and the track is
 	// complete. Nothing has been read yet.
 	if abort {

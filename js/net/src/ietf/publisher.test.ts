@@ -1,28 +1,31 @@
-import { expect, jest, mock, spyOn, test } from "bun:test";
+import { expect, jest, spyOn, test } from "bun:test";
 import { Signal } from "@moq/signals";
-import type { Producer as BroadcastProducer } from "../broadcast.ts";
+import type { Grant } from "../auth.ts";
+import { Producer as BroadcastProducer } from "../broadcast.ts";
 import * as Epoch from "../epoch.ts";
-import { error } from "../error.ts";
+import { error, StreamCode } from "../error.ts";
 import { Producer as GroupProducer, MAX_GROUP_FRAMES } from "../group.ts";
 import { type Hop, HopSchema } from "../hop.ts";
 import { createMockTransportPair } from "../mock.ts";
 import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
-import { Reader, Stream } from "../stream.ts";
+import { Reader, Stream, Writer } from "../stream.ts";
 import { Milli, Timescale, Timestamp } from "../time.ts";
 import type { Producer as TrackProducer } from "../track.ts";
 import { wireOf } from "../wire.ts";
 import { ControlStreamAdapter, NativeSession, type Session } from "./adapter.ts";
 import type * as Cluster from "./cluster.ts";
+import { toRequestCode } from "./error.ts";
 import { Fetch, FetchHeader } from "./fetch.ts";
 import { Frame, Group as GroupMessage } from "./object.ts";
+import { toWire } from "./priority.ts";
 import { PublishDone } from "./publish.ts";
 import { PublishNamespace, PublishNamespaceUpdate } from "./publish_namespace.ts";
 import { Publisher } from "./publisher.ts";
 import { RequestError, RequestOk } from "./request.ts";
-import { Subscribe, SubscribeOk, SubscribeUpdate, Unsubscribe } from "./subscribe.ts";
+import { GroupOrder, Subscribe, SubscribeError, SubscribeOk, SubscribeUpdate, Unsubscribe } from "./subscribe.ts";
 import { SubscribeNamespace, SubscribeNamespaceEntry, SubscribeNamespaceEntryDone } from "./subscribe_namespace.ts";
-import { TrackStatusRequest } from "./track.ts";
+import { TRACK_STATUS_ERROR_14, TrackStatusOk, TrackStatusRequest } from "./track.ts";
 import { ALPN, type IetfVersion, Version } from "./version.ts";
 
 function publish(origin: OriginProducer, path: Path.Valid) {
@@ -115,7 +118,13 @@ function publisher(
 		requiresSolicitation = false,
 		session,
 		cluster,
-	}: { requiresSolicitation?: boolean; session?: Session; cluster?: Cluster.Hops } = {},
+		grant,
+	}: {
+		requiresSolicitation?: boolean;
+		session?: Session;
+		cluster?: Cluster.Hops;
+		grant?: Signal<Grant | undefined>;
+	} = {},
 ): { pub: Publisher; origin: OriginProducer } {
 	const origin = new OriginProducer();
 	const inner = session ?? new NativeSession(transport, VERSION, true);
@@ -126,51 +135,223 @@ function publisher(
 			publish: origin.consume(),
 			requiresSolicitation,
 			cluster,
+			grant,
 		}),
 		origin,
 	};
 }
 
-test("TRACK_STATUS gets exact NOT_SUPPORTED refusal bytes on every draft", async () => {
-	const phrase = new TextEncoder().encode("TRACK_STATUS is not supported");
-	for (const version of [
-		Version.DRAFT_14,
-		Version.DRAFT_15,
-		Version.DRAFT_16,
-		Version.DRAFT_17,
-		Version.DRAFT_18,
-		Version.DRAFT_19,
-		Version.DRAFT_20,
-		Version.DRAFT_21,
-		Version.DRAFT_22,
-	] as const) {
-		const pair = createMockTransportPair(ALPN.DRAFT_19);
+const IETF_VERSIONS = [
+	Version.DRAFT_14,
+	Version.DRAFT_15,
+	Version.DRAFT_16,
+	Version.DRAFT_17,
+	Version.DRAFT_18,
+	Version.DRAFT_19,
+	Version.DRAFT_20,
+	Version.DRAFT_21,
+	Version.DRAFT_22,
+] as const;
+
+/** A request stream recording what the publisher writes, with the requester's side under test control. */
+function requestStream(version: IetfVersion) {
+	let input!: ReadableStreamDefaultController<Uint8Array>;
+	const written: number[] = [];
+	const stream = new Stream({
+		readable: new ReadableStream<Uint8Array>({
+			start(c) {
+				input = c;
+			},
+		}),
+		writable: new WritableStream<Uint8Array>({
+			write: (chunk) => {
+				written.push(...chunk);
+			},
+		}),
+		version,
+	});
+	return {
+		stream,
+		written,
+		wire: () => new Reader(undefined, Uint8Array.from(written), version),
+		cancel: () => input.error(new Error("request cancelled")),
+	};
+}
+
+function trackStatus(namespace: string, propertiesWanted = true) {
+	return new TrackStatusRequest({
+		requestId: 7n,
+		trackNamespace: Path.from(namespace),
+		trackName: "video",
+		propertiesWanted,
+	});
+}
+
+/** The error code of the refusal on `wire`. */
+async function refusalCode(wire: Reader, version: IetfVersion): Promise<number> {
+	if (version === Version.DRAFT_14) {
+		expect(await wire.u53()).toBe(TRACK_STATUS_ERROR_14);
+		return (await SubscribeError.decode(wire, version)).errorCode;
+	}
+	expect(await wire.u53()).toBe(RequestError.id);
+	return (await RequestError.decode(wire, version)).errorCode;
+}
+
+// TRACK_STATUS gets what a SUBSCRIBE_OK would carry, as far as each draft's answer has room,
+// without subscribing to the track. INCLUDE_PROPERTIES=0 empties the properties.
+test("TRACK_STATUS is answered on every draft without subscribing", async () => {
+	for (const version of IETF_VERSIONS) {
+		for (const wanted of [true, false]) {
+			const pair = createMockTransportPair(ALPNS[version]);
+			const session = new NativeSession(pair.server, version, true);
+			const { pub, origin } = publisher(pair.server, { session });
+			const broadcast = publish(origin, Path.from("room"));
+			const track = broadcast.createTrack("video", {
+				timescale: Timescale.MILLI,
+				maxAge: Milli(5000),
+				priority: 2,
+			});
+			const group = new GroupProducer(4);
+			group.writeFrame({ payload: new Uint8Array([1]), timestamp: Timestamp.fromMillis(0) });
+			group.writeFrame({ payload: new Uint8Array([2]), timestamp: Timestamp.fromMillis(1) });
+			track.writeGroup(group);
+			const subscribed = spyOn(track, "subscribe");
+
+			const { stream, wire } = requestStream(version);
+			// Only draft-20 can carry the opt-out.
+			await pub.runTrackStatusRequest(trackStatus("room", wanted || version < Version.DRAFT_20), stream);
+			expect(subscribed).not.toHaveBeenCalled();
+
+			const r = wire();
+			expect(await r.u53()).toBe(TrackStatusOk.id(version));
+			const ok = await TrackStatusOk.decode(r, version);
+			expect(await r.done()).toBe(true);
+
+			const legacy = version === Version.DRAFT_14 || version === Version.DRAFT_15 || version === Version.DRAFT_16;
+			expect(ok.requestId).toBe(legacy ? 7n : undefined);
+			expect(ok.largest).toEqual({ groupId: 4n, objectId: 1n });
+			const expected =
+				version === Version.DRAFT_14 || version === Version.DRAFT_15
+					? { groupOrder: GroupOrder.Descending }
+					: version < Version.DRAFT_18 || (!wanted && version >= Version.DRAFT_20)
+						? {}
+						: {
+								timescale: Timescale.MILLI,
+								priority: toWire(2),
+								groupOrder: GroupOrder.Descending,
+								maxCacheDuration: 5000n,
+							};
+			expect(ok.properties).toEqual(expected);
+			origin.close();
+		}
+	}
+});
+
+// A track that has published nothing answers without LARGEST_OBJECT.
+test("TRACK_STATUS for an empty track names no largest", async () => {
+	const version = Version.DRAFT_22;
+	const pair = createMockTransportPair(ALPNS[version]);
+	const session = new NativeSession(pair.server, version, true);
+	const { pub, origin } = publisher(pair.server, { session });
+	publish(origin, Path.from("room")).createTrack("video");
+
+	const { stream, wire } = requestStream(version);
+	await pub.runTrackStatusRequest(trackStatus("room"), stream);
+	const r = wire();
+	expect(await r.u53()).toBe(TrackStatusOk.id(version));
+	expect((await TrackStatusOk.decode(r, version)).largest).toBeUndefined();
+	origin.close();
+});
+
+// Refused before anything resolves when the grant excludes the broadcast, and refused when
+// the grant narrows while the broadcast resolves.
+test("TRACK_STATUS outside the grant is refused on every draft", async () => {
+	const nothing = (): Grant => ({ publish: new Path.Patterns([]), subscribe: new Path.Patterns([]) });
+	for (const version of IETF_VERSIONS) {
+		const unauthorized = toRequestCode("unauthorized", "track_status", version);
+		const pair = createMockTransportPair(ALPNS[version]);
+		const session = new NativeSession(pair.server, version, true);
+		const grant = new Signal<Grant | undefined>(nothing());
+		const { pub, origin } = publisher(pair.server, { session, grant });
+		const requests = origin.dynamic(Path.from("room")).requested();
+
+		const outside = requestStream(version);
+		await pub.runTrackStatusRequest(trackStatus("room"), outside.stream);
+		expect(await refusalCode(outside.wire(), version)).toBe(unauthorized);
+
+		// Granted, so it reaches the handler, which has not answered when the grant narrows.
+		grant.set(undefined);
+		const narrowed = requestStream(version);
+		const task = pub.runTrackStatusRequest(trackStatus("room"), narrowed.stream);
+		expect((await requests.next()).value?.path).toBe(Path.from("room"));
+		grant.set(nothing());
+		await task;
+		expect(await refusalCode(narrowed.wire(), version)).toBe(unauthorized);
+
+		await requests.return?.();
+		origin.close();
+	}
+});
+
+test("TRACK_STATUS for a missing broadcast or track is refused DOES_NOT_EXIST", async () => {
+	for (const version of IETF_VERSIONS) {
+		const missing = toRequestCode("does_not_exist", "track_status", version);
+		const pair = createMockTransportPair(ALPNS[version]);
 		const session = new NativeSession(pair.server, version, true);
 		const { pub, origin } = publisher(pair.server, { session });
-		const written: Uint8Array[] = [];
-		const stream = new Stream({
-			readable: new ReadableStream<Uint8Array>(),
-			writable: new WritableStream<Uint8Array>({
-				write: (chunk) => {
-					written.push(new Uint8Array(chunk));
-				},
-			}),
-			version,
-		});
-		await pub.runTrackStatusRequest(
-			new TrackStatusRequest({ requestId: 7n, trackNamespace: Path.from("test"), trackName: "video" }),
-			stream,
-		);
-		await stream.writer.closed;
-		const body = [
-			...(version <= Version.DRAFT_16 ? [7] : []),
-			3,
-			...(version >= Version.DRAFT_16 ? [0] : []),
-			phrase.length,
-			...phrase,
-		];
-		const expected = [version === Version.DRAFT_14 ? 0x0f : 0x05, 0, body.length, ...body];
-		expect(written.flatMap((chunk) => Array.from(chunk))).toEqual(expected);
+
+		const absent = requestStream(version);
+		await pub.runTrackStatusRequest(trackStatus("absent"), absent.stream);
+		expect(await refusalCode(absent.wire(), version)).toBe(missing);
+
+		// A produced broadcast serves only the tracks it created.
+		publish(origin, Path.from("room"));
+		const untracked = requestStream(version);
+		await pub.runTrackStatusRequest(trackStatus("room"), untracked.stream);
+		expect(await refusalCode(untracked.wire(), version)).toBe(missing);
+		origin.close();
+	}
+});
+
+// The requester leaving is owed nothing, and gives back the origin demand or the track
+// lookup it held, whichever was still resolving.
+test("a cancelled TRACK_STATUS releases its demand on every draft", async () => {
+	for (const version of IETF_VERSIONS) {
+		const pair = createMockTransportPair(ALPNS[version]);
+		const session = new NativeSession(pair.server, version, true);
+		const { pub, origin } = publisher(pair.server, { session });
+		const requests = origin.dynamic(Path.from("room")).requested();
+
+		// The broadcast is still resolving: its handler never answers.
+		const early = requestStream(version);
+		const resolving = pub.runTrackStatusRequest(trackStatus("room/early"), early.stream);
+		const pending = (await requests.next()).value;
+		expect(pending?.path).toBe(Path.from("room/early"));
+		early.cancel();
+		await resolving;
+		expect(early.written).toEqual([]);
+		// Withdrawn, so a late answer is closed rather than served.
+		const answer = new BroadcastProducer().consume();
+		pending?.accept(answer);
+		expect(answer.closed.peek()).toBeNull();
+
+		// The broadcast resolves, but its track is never answered.
+		const late = requestStream(version);
+		const looking = pub.runTrackStatusRequest(trackStatus("room/late"), late.stream);
+		const request = (await requests.next()).value;
+		if (!request) throw new Error("no request for room/late");
+		const served = new BroadcastProducer();
+		const trackRequest = wireOf(served).requested();
+		request.accept(served);
+		expect((await trackRequest)?.name).toBe("video");
+		expect(served.demand().used.peek()).toBe(true);
+		late.cancel();
+		await looking;
+		expect(late.written).toEqual([]);
+		await served.demand().unused();
+
+		await requests.return?.();
+		served.close();
 		origin.close();
 	}
 });
@@ -217,6 +398,49 @@ test("FETCH and a non-forwarding SUBSCRIBE get NOT_SUPPORTED", async () => {
 		);
 		expect(paused[0]).toBe(0x05);
 		expect(paused[version <= Version.DRAFT_16 ? 4 : 3]).toBe(0x3);
+	}
+});
+
+/** A request's USE_VALUE token decodes but grants nothing yet, so a SUBSCRIBE outside the grant is still refused. */
+test("a request token does not widen the grant", async () => {
+	for (const version of [Version.DRAFT_14, Version.DRAFT_22] as const) {
+		const pair = createMockTransportPair(ALPNS[version]);
+		const session = new NativeSession(pair.server, version, true);
+		const nothing = new Signal<Grant | undefined>({
+			publish: new Path.Patterns([]),
+			subscribe: new Path.Patterns([]),
+		});
+		const { pub, origin } = publisher(pair.server, { session, grant: nothing });
+		publish(origin, Path.from("room"));
+
+		const ascii = (text: string) => [...new TextEncoder().encode(text)];
+		// Draft-14 carries priority, group order, forward, and a Largest Object filter inline.
+		const fields = version === Version.DRAFT_14 ? [0x80, 0x02, 0x01, 0x02] : [];
+		const token = [0x03, 0x00, 0xaa]; // USE_VALUE, type 0
+		const body = [0, 1, 4, ...ascii("room"), 5, ...ascii("video"), ...fields, 1, 0x03, token.length, ...token];
+		const msg = await Subscribe.decode(
+			new Reader(undefined, new Uint8Array([0, body.length, ...body]), version),
+			version,
+		);
+
+		const written: Uint8Array[] = [];
+		const stream = new Stream({
+			readable: new ReadableStream<Uint8Array>(),
+			writable: new WritableStream<Uint8Array>({
+				write: (chunk) => {
+					written.push(new Uint8Array(chunk));
+				},
+			}),
+			version,
+		});
+		await pub.runSubscribe(msg, stream);
+		await stream.writer.closed;
+		origin.close();
+
+		// SUBSCRIBE_ERROR on draft-14, REQUEST_ERROR after; the code follows the Length and any Request ID.
+		const wire = written.flatMap((chunk) => Array.from(chunk));
+		expect(wire[0]).toBe(0x05);
+		expect(wire[version === Version.DRAFT_14 ? 4 : 3]).toBe(toRequestCode("unauthorized", "subscribe", version));
 	}
 });
 
@@ -384,89 +608,6 @@ test("a group that goes stale while its stream opens writes nothing", async () =
 	}
 });
 
-test.each(["acknowledged", "rejected"] as const)(
-	"a replacement waits until its predecessor's FIN is %s",
-	async (result) => {
-		const pair = createMockTransportPair(ALPN.DRAFT_19);
-		const open = pair.server.createBidirectionalStream.bind(pair.server);
-		const closing = Promise.withResolvers<void>();
-		const acknowledged = Promise.withResolvers<void>();
-		let opened = 0;
-		pair.server.createBidirectionalStream = async (options) => {
-			const stream = await open(options);
-			if (++opened !== 1) return stream;
-			const writer = stream.writable.getWriter();
-			return {
-				readable: stream.readable,
-				writable: new WritableStream<Uint8Array>({
-					write: (chunk) => writer.write(chunk),
-					async close() {
-						await writer.close();
-						closing.resolve();
-						await acknowledged.promise;
-					},
-					abort: (reason) => writer.abort(reason),
-				}),
-			} as WebTransportBidirectionalStream;
-		};
-		const { pub, origin } = publisher(pair.server);
-		let first: BroadcastProducer | undefined;
-		let second: BroadcastProducer | undefined;
-		const changed = Signal.prototype.changed;
-		const disposed = mock(() => {});
-		let registration: ReturnType<typeof spyOn<typeof Signal.prototype, "changed">> | undefined;
-		const loop = pub.runPublishNamespaces();
-		try {
-			first = publish(origin, Path.from("replacement"));
-			const old = await nextStream(pair.client);
-			if (!old) throw new Error("missing initial advertisement");
-			expect(await readPublishNamespace(old)).toBe(Path.from("replacement"));
-			await acceptPublishNamespace(old);
-			registration = spyOn(Signal.prototype, "changed").mockImplementation(function (
-				this: Signal<unknown>,
-				fn?: (value: unknown) => void,
-			) {
-				const original = changed.bind(this);
-				if (!fn) return original();
-				const dispose = original(fn);
-				return () => {
-					dispose();
-					disposed();
-				};
-			} as typeof changed);
-			first.close();
-			second = publish(origin, Path.from("replacement"));
-			await closing.promise;
-			const early = await nextStream(pair.client);
-			early?.abort(new Error("replacement arrived before acknowledgment"));
-			expect(early).toBeUndefined();
-			expect(opened).toBe(1);
-			if (result === "rejected") {
-				expect(disposed).not.toHaveBeenCalled();
-				acknowledged.reject(new Error("FIN acknowledgment failed"));
-				await loop;
-				expect(opened).toBe(1);
-				expect(disposed).toHaveBeenCalled();
-				return;
-			}
-			acknowledged.resolve();
-			const replacement = await nextStream(pair.client);
-			if (!replacement) throw new Error("missing replacement after acknowledgment");
-			expect(await readPublishNamespace(replacement)).toBe(Path.from("replacement"));
-			await acceptPublishNamespace(replacement);
-		} finally {
-			registration?.mockRestore();
-			acknowledged.resolve();
-			first?.close();
-			second?.close();
-			origin.close();
-			await loop;
-			pair.client.close();
-			pair.server.close();
-		}
-	},
-);
-
 /**
  * Every advertisement waits a round trip for the peer's reply. A broadcast published in
  * that window has to survive it: the loop is not watching the signal while it waits, so
@@ -550,6 +691,7 @@ test("a failed stream open does not kill the announce loop", async () => {
 		version: inner.version,
 		acceptBi: () => inner.acceptBi(),
 		nextRequestId: () => inner.nextRequestId(),
+		spendRequest: (id) => inner.spendRequest(id),
 		close: () => inner.close(),
 		openBi: () => {
 			if (failures-- > 0) throw new Error("no stream credit");
@@ -595,6 +737,7 @@ test("a namespace refused once is retried without anything else changing", async
 		version: inner.version,
 		acceptBi: () => inner.acceptBi(),
 		nextRequestId: () => inner.nextRequestId(),
+		spendRequest: (id) => inner.spendRequest(id),
 		close: () => inner.close(),
 		openBi: () => {
 			if (failures-- > 0) throw new Error("no stream credit");
@@ -631,6 +774,7 @@ test("a solicited legacy advertisement refused once is retried", async () => {
 		version: inner.version,
 		acceptBi: () => inner.acceptBi(),
 		nextRequestId: () => inner.nextRequestId(),
+		spendRequest: (id) => inner.spendRequest(id),
 		close: () => inner.close(),
 		openBi: () => {
 			if (failures-- > 0) throw new Error("no stream credit");
@@ -1252,8 +1396,8 @@ test("a republish withdraws the PUBLISH_NAMESPACE and advertises again", async (
 
 		republish(origin, broadcast);
 
-		// Draft-17+ withdraws with the FIN alone, and the replacement waits for it.
-		expect(await old.reader.done()).toBe(true);
+		// Draft-17+ withdraws by cancelling the request, never a FIN.
+		expect(await old.reader.done().catch(error)).toMatchObject({ code: StreamCode.Cancel });
 		const next = await take(streams);
 		expect(await acceptClustered(next)).toMatchObject({ cost: 4n });
 	} finally {
@@ -1313,8 +1457,8 @@ test.each([
 		await readUpdate(stream);
 		await declinePublishNamespace(stream, retryInterval);
 
-		// Our side finishes too, which completes the withdrawal.
-		expect(await stream.reader.done()).toBe(true);
+		// Our side cancels too, which completes the withdrawal.
+		expect(await stream.reader.done().catch(error)).toMatchObject({ code: StreamCode.Cancel });
 
 		// Well past our own backoff, but inside the interval the peer asked for.
 		await advance(9_000);
@@ -1336,9 +1480,9 @@ test.each([
 });
 
 /**
- * A peer that refuses an update and then closes its side can make our withdrawal's wait
- * on the FIN reject. The request is gone either way, so the loop keeps the refusal and
- * re-offers the namespace instead of ending.
+ * A peer that refuses an update and then closes its side races our own withdrawal. The
+ * request is gone either way, so the loop keeps the refusal and re-offers the namespace
+ * instead of ending.
  */
 test("a refused update whose peer closes the request keeps the loop running", async () => {
 	const { pub, origin, streams, close } = clustered();
@@ -1615,7 +1759,7 @@ function fixture(version: IetfVersion = V20): {
 	close: () => void;
 } {
 	const pair = createMockTransportPair(ALPNS[version]);
-	const session = new NativeSession(pair.server, version, true);
+	const session = new NativeSession(pair.server, version, false);
 	const { pub, origin } = publisher(pair.server, { session });
 	const broadcast = publish(origin, Path.from("test"));
 	const uni = pair.client.incomingUnidirectionalStreams.getReader() as ReadableStreamDefaultReader<
@@ -1709,6 +1853,7 @@ async function readGroup(stream: ReadableStream<Uint8Array>): Promise<ServedGrou
 async function readEndOfTrack(stream: ReadableStream<Uint8Array>): Promise<number> {
 	const reader = new Reader(stream, undefined, V20);
 	const header = await GroupMessage.decode(reader, V20);
+	expect(header.flags.hasEnd).toBe(false);
 	const frame = await reader.decode((c) => Frame.decode(c, header.flags, undefined));
 	expect(frame.endOfTrack).toBe(true);
 	expect(await reader.done()).toBe(true);
@@ -2118,6 +2263,34 @@ test("draft-20: an opt-out peer gets no track properties", async () => {
 });
 
 /**
+ * Through draft-15 SUBSCRIBE_OK restates the order the subscription is served in; later
+ * drafts announce the publisher's default, newest first.
+ */
+test.each([
+	[Version.DRAFT_14, GroupOrder.Ascending],
+	[Version.DRAFT_15, GroupOrder.Ascending],
+	[Version.DRAFT_17, GroupOrder.Descending],
+] as const)("%s: SUBSCRIBE_OK announces the served order", async (version, announced) => {
+	const fx = fixture(version);
+	fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
+
+	const { client, ok } = await runSubscribe(
+		fx,
+		new Subscribe({
+			requestId: 7n,
+			trackNamespace: Path.from("test"),
+			trackName: "video",
+			subscriberPriority: 0,
+			groupOrder: "ascending",
+		}),
+	);
+	expect(ok.properties.groupOrder).toBe(announced);
+
+	fx.close();
+	client.close();
+});
+
+/**
  * Drafts 14-16 cannot send TIMESCALE, so a subscribed group carries no Timestamp even though
  * the track has units. Draft-17 declares the units and stamps the object.
  */
@@ -2153,6 +2326,130 @@ test("drafts 14-16 send no Timestamp without TIMESCALE", async () => {
 		}
 		expect(await reader.read(await reader.u53())).toEqual(new TextEncoder().encode("0.0"));
 
+		fx.close();
+		client.close();
+	}
+});
+
+test.each([false, true])("draft-20: exact terminal 5/5 survives group FIN=%s", async (finished) => {
+	const fx = fixture();
+	const track = fx.broadcast.createTrack("video");
+	const { client } = await runSubscribe(
+		fx,
+		new Subscribe({
+			requestId: 7n,
+			trackNamespace: Path.from("test"),
+			trackName: "video",
+			subscriberPriority: 0,
+			filter: { kind: "absolute", startGroup: 0n, startObject: 0n },
+		}),
+	);
+	try {
+		const group = new GroupProducer(5);
+		track.writeGroup(group);
+		for (let i = 0; i < 5; i++) group.writeFrame({ payload: new Uint8Array([i]) });
+		const uni = await fx.uni.read();
+		if (!uni.value) throw new Error("missing group stream");
+		const reader = new Reader(uni.value, undefined, V20);
+		const header = await GroupMessage.decode(reader, V20);
+		expect(header.groupId).toBe(5);
+		for (let i = 0; i < 5; i++) {
+			const frame = await reader.decode((c) => Frame.decode(c, header.flags, undefined));
+			expect(frame.payload).toEqual(new Uint8Array([i]));
+		}
+		if (finished) {
+			group.close();
+			expect(await reader.done()).toBe(true);
+		}
+		track.finishAt({ group: 5, frame: 5 });
+		group.close();
+		track.close();
+		if (finished) {
+			const marker = await fx.uni.read();
+			if (!marker.value) throw new Error("missing terminal stream");
+			const end = new Reader(marker.value, undefined, V20);
+			const endHeader = await GroupMessage.decode(end, V20);
+			expect(endHeader.groupId).toBe(5);
+			expect(endHeader.flags.hasEnd).toBe(false);
+			expect(endHeader.flags.firstObject).toBe(false);
+			const frame = await end.decode((c) => Frame.decode(c, endHeader.flags, undefined));
+			expect(frame.endOfTrack).toBe(true);
+			expect(frame.idDelta).toBe(5);
+			expect(await end.done()).toBe(true);
+		} else {
+			const frame = await reader.decode((c) => Frame.decode(c, header.flags, undefined));
+			expect(frame.endOfTrack).toBe(true);
+			expect(frame.idDelta).toBe(0);
+			expect(await reader.done()).toBe(true);
+		}
+		expect(await client.reader.u53()).toBe(PublishDone.id);
+		expect((await PublishDone.decode(client.reader, V20)).streamCount).toBe(finished ? 2n : 1n);
+	} finally {
+		fx.close();
+		client.close();
+	}
+});
+
+/** An inline END_OF_TRACK on a stream reset after its FIN may never arrive, so it is resent. */
+test("draft-20: an inline terminal reset after its FIN falls back to a standalone marker", async () => {
+	const opened: Writer[] = [];
+	const tryOpen = Writer.tryOpen.bind(Writer);
+	const spy = spyOn(Writer, "tryOpen").mockImplementation(async (...args) => {
+		const writer = await tryOpen(...args);
+		if (writer) opened.push(writer);
+		return writer;
+	});
+	const fx = fixture();
+	const track = fx.broadcast.createTrack("video");
+	const { client } = await runSubscribe(
+		fx,
+		new Subscribe({
+			requestId: 7n,
+			trackNamespace: Path.from("test"),
+			trackName: "video",
+			subscriberPriority: 0,
+			filter: { kind: "absolute", startGroup: 0n, startObject: 0n },
+		}),
+	);
+	try {
+		const group = new GroupProducer(5);
+		track.writeGroup(group);
+		for (let i = 0; i < 5; i++) group.writeFrame({ payload: new Uint8Array([i]) });
+		const uni = await fx.uni.read();
+		if (!uni.value) throw new Error("missing group stream");
+		const reader = new Reader(uni.value, undefined, V20);
+		const header = await GroupMessage.decode(reader, V20);
+		for (let i = 0; i < 5; i++) await reader.decode((c) => Frame.decode(c, header.flags, undefined));
+
+		// The group stream's close fails from here on, like a reset after its FIN.
+		const closed = Object.getOwnPropertyDescriptor(Writer.prototype, "closed")?.get;
+		if (!closed) throw new Error("Writer.closed is not a getter");
+		let reset = false;
+		Object.defineProperty(opened[0], "closed", {
+			get(this: Writer) {
+				return reset ? Promise.reject(new Error("reset after FIN")) : closed.call(this);
+			},
+		});
+		reset = true;
+
+		track.finishAt({ group: 5, frame: 5 });
+		group.close();
+		track.close();
+
+		const inline = await reader.decode((c) => Frame.decode(c, header.flags, undefined));
+		expect(inline.endOfTrack).toBe(true);
+		const marker = await fx.uni.read();
+		if (!marker.value) throw new Error("missing standalone terminal stream");
+		const end = new Reader(marker.value, undefined, V20);
+		const endHeader = await GroupMessage.decode(end, V20);
+		expect(endHeader.groupId).toBe(5);
+		const frame = await end.decode((c) => Frame.decode(c, endHeader.flags, undefined));
+		expect(frame.endOfTrack).toBe(true);
+		expect(frame.idDelta).toBe(5);
+		expect(await client.reader.u53()).toBe(PublishDone.id);
+		expect((await PublishDone.decode(client.reader, V20)).streamCount).toBe(2n);
+	} finally {
+		spy.mockRestore();
 		fx.close();
 		client.close();
 	}
@@ -2242,7 +2539,20 @@ test("draft-20: the subscriber leaving ends a fill still reading its group", asy
 
 		// The fill is parked on a group that is never going to close on its own, so this only
 		// settles once the subscriber leaving cancels it.
-		const reading = readFill(fill);
+		const [data, observed] = fill.tee();
+		const reading = readFill(data);
+		// Opening the stream precedes fetching the group. Observe an actual object so the
+		// cancellation tests a fill reading its open group, even when header writes yield.
+		const reader = new Reader(observed, undefined, V20);
+		expect(await reader.u53()).toBe(FetchHeader.type);
+		await FetchHeader.decode(reader, V20);
+		const flags = await reader.u53();
+		if (flags & 0x08) await reader.u53();
+		if (flags & 0x04) await reader.u53();
+		if (flags & 0x10) await reader.u8();
+		if (flags & 0x20) await reader.read(await reader.u53());
+		expect(new TextDecoder().decode(await reader.read(await reader.u53()))).toBe("0.0");
+		reader.stop(new Error("observation complete"));
 		client.close();
 
 		// A reset discards what the peer has not acknowledged, so the objects already written

@@ -504,23 +504,31 @@ test("TrackStatusRequest: round trip", async () => {
 	expect(decoded.trackName).toBe("main");
 });
 
-test("TrackStatus v14: round trip", async () => {
-	const msg = new Track.TrackStatus({
-		trackNamespace: Path.from("test"),
-		trackName: "status",
-		statusCode: 200,
-		lastGroupId: 42n,
-		lastObjectId: 100n,
-	});
+// TRACK_STATUS_OK carries what SUBSCRIBE_OK would, as far as each draft's answer has room.
+test("TrackStatusOk: round trip on every draft", async () => {
+	const properties = { timescale: Timescale.MILLI, priority: 7, groupOrder: 0x02, maxCacheDuration: 1000n };
+	for (const version of Object.values(Version).filter((v): v is IetfVersion => v !== Version.DRAFT_07)) {
+		const legacy = version === Version.DRAFT_14 || version === Version.DRAFT_15 || version === Version.DRAFT_16;
+		const msg = new Track.TrackStatusOk({
+			requestId: legacy ? 3n : undefined,
+			largest: { groupId: 4n, objectId: 1n },
+			properties,
+		});
+		const encoded = await encodeVersioned(msg, version);
+		const decoded = await decodeVersioned(encoded, Track.TrackStatusOk.decode, version);
 
-	const encoded = await encodeVersioned(msg, Version.DRAFT_14);
-	const decoded = await decodeVersioned(encoded, Track.TrackStatus.decode, Version.DRAFT_14);
-
-	expect(decoded.trackNamespace).toBe("test" as Path.Valid);
-	expect(decoded.trackName).toBe("status");
-	expect(decoded.statusCode).toBe(200);
-	expect(decoded.lastGroupId).toBe(42n);
-	expect(decoded.lastObjectId).toBe(100n);
+		expect(decoded.requestId).toBe(legacy ? 3n : undefined);
+		expect(decoded.largest).toEqual({ groupId: 4n, objectId: 1n });
+		// GROUP_ORDER is a field on draft-14 and a parameter on draft-15; REQUEST_OK has no
+		// properties block until draft-18.
+		const expected =
+			version === Version.DRAFT_14 || version === Version.DRAFT_15
+				? { groupOrder: 0x02 }
+				: version >= Version.DRAFT_18
+					? properties
+					: {};
+		expect(decoded.properties).toEqual(expected);
+	}
 });
 
 // Validation tests
@@ -1763,6 +1771,39 @@ test("Frame object time: draft-16 starts delta property types", async () => {
 	expect(decoded.timestamp?.scale).toBe(Timescale.MILLI);
 });
 
+// The End-of-Group header bit and an END_OF_GROUP (0x03) status are independent, so a
+// publisher may send both. Either way the group ends on a payload-less frame.
+test("Frame: END_OF_GROUP is accepted whether or not the header marks the end", async () => {
+	const makeFlags = (hasEnd: boolean): GroupFlags => ({
+		hasExtensions: false,
+		hasSubgroup: false,
+		hasSubgroupObject: false,
+		hasEnd,
+		hasPriority: true,
+		firstObject: true,
+	});
+
+	// idDelta 0, zero-length payload, then the END_OF_GROUP status.
+	const wire = new Uint8Array([0x00, 0x00, 0x03]);
+
+	for (const hasEnd of [false, true]) {
+		const decoded = await new Reader(undefined, wire, Version.DRAFT_20).decode((c) =>
+			Frame.decode(c, makeFlags(hasEnd), Timescale.MILLI),
+		);
+
+		// No payload is the group-end signal the subscriber breaks its read loop on.
+		expect(decoded.payload).toBeUndefined();
+		expect(decoded.endOfTrack).toBe(false);
+	}
+
+	// Status 0 on a marked stream is still an empty frame, not a group end.
+	const empty = await new Reader(undefined, new Uint8Array([0x00, 0x00, 0x00]), Version.DRAFT_20).decode((c) =>
+		Frame.decode(c, makeFlags(true), Timescale.MILLI),
+	);
+	expect(empty.payload).toEqual(new Uint8Array(0));
+	expect(empty.endOfTrack).toBe(false);
+});
+
 test("Frame decodes objects split at every byte", async () => {
 	const flags: GroupFlags = {
 		hasExtensions: true,
@@ -1814,6 +1855,27 @@ test("Frame rejects a property that runs past its block", async () => {
 	await expect(reader.decode((c) => Frame.decode(c, flags, Timescale.MILLI))).rejects.toThrow(
 		"message is shorter than its fields",
 	);
+});
+
+// Draft-19 reassigns property 0x06 from the draft-ietf-moq-loc-03 Timestamp to
+// SUBGROUP_DELIVERY_TIMEOUT, which must not be read as a time.
+test("Frame reads property 0x06 as a Timestamp only before draft-19", async () => {
+	const flags: GroupFlags = {
+		hasExtensions: true,
+		hasSubgroup: false,
+		hasSubgroupObject: false,
+		hasEnd: true,
+		hasPriority: true,
+		firstObject: true,
+	};
+	for (const [version, expected] of [
+		[Version.DRAFT_18, 42],
+		[Version.DRAFT_19, undefined],
+	] as const) {
+		const reader = new Reader(undefined, new Uint8Array([0, 2, 0x06, 42, 1, 0xaa]), version);
+		const frame = await reader.decode((c) => Frame.decode(c, flags, Timescale.MILLI));
+		expect(frame.timestamp?.value).toBe(expected);
+	}
 });
 
 // A fetch stream's first object is the only one carrying absolute ids, so a wrong flag byte
@@ -2025,6 +2087,7 @@ test("TrackStatusRequest: carries SUBSCRIBE fields", async () => {
 	for (const [version, rest] of cases) {
 		const msg = await decodeVersioned(framed([...TRACK_HEAD, ...rest]), Track.TrackStatusRequest.decode, version);
 		expect(msg.trackName).toBe("video");
+		expect(msg.propertiesWanted).toBe(version !== Version.DRAFT_20);
 	}
 });
 
@@ -2119,3 +2182,103 @@ for (const version of [Version.DRAFT_14, Version.DRAFT_15, Version.DRAFT_16]) {
 		expect(params.groupOrder).toBe(0);
 	});
 }
+
+// Caller-selected SUBSCRIBE group order, on both wire shapes: draft-14's inline u8 and
+// the draft-15+ message parameter.
+test.each([
+	["v14", Version.DRAFT_14],
+	["v20", Version.DRAFT_20],
+] as const)("Subscribe %s: group order defaults to descending", async (_name, version) => {
+	const msg = new Subscribe.Subscribe({
+		requestId: 1n,
+		trackNamespace: Path.from("test"),
+		trackName: "video",
+		subscriberPriority: 128,
+	});
+	expect(msg.groupOrder).toBe("descending");
+
+	const encoded = await encodeVersioned(msg, version);
+	const decoded = await decodeVersioned(encoded, Subscribe.Subscribe.decode, version);
+	expect(decoded.groupOrder).toBe("descending");
+});
+
+test.each([
+	["v14", Version.DRAFT_14],
+	["v20", Version.DRAFT_20],
+] as const)("Subscribe %s: a caller can request ascending group order", async (_name, version) => {
+	const msg = new Subscribe.Subscribe({
+		requestId: 1n,
+		trackNamespace: Path.from("test"),
+		trackName: "video",
+		subscriberPriority: 128,
+		groupOrder: "ascending",
+	});
+
+	const encoded = await encodeVersioned(msg, version);
+
+	// Differential, not a byte search: `toContain(1)` would pass on requestId 1n
+	// alone. Encode the same message as descending and require that exactly one
+	// byte moved, from 0x02 to 0x01.
+	const descending = await encodeVersioned(
+		new Subscribe.Subscribe({
+			requestId: 1n,
+			trackNamespace: Path.from("test"),
+			trackName: "video",
+			subscriberPriority: 128,
+			groupOrder: "descending",
+		}),
+		version,
+	);
+	expect(encoded.length).toBe(descending.length);
+	const differing = [...encoded].flatMap((byte, i) => (byte === descending[i] ? [] : [i]));
+	expect(differing).toHaveLength(1);
+	expect(encoded[differing[0]]).toBe(Subscribe.GroupOrder.Ascending);
+	expect(descending[differing[0]]).toBe(Subscribe.GroupOrder.Descending);
+
+	const decoded = await decodeVersioned(encoded, Subscribe.Subscribe.decode, version);
+	expect(decoded.groupOrder).toBe("ascending");
+});
+
+// Draft-14 carries GROUP_ORDER as an inline u8 rather than a message parameter, so 0 ("no
+// preference") is reachable there from a peer. It decodes as descending rather than surfacing
+// as a third value the model has to handle, and anything past 2 is refused.
+test("Subscribe v14: an inline group order of 0 decodes as descending", async () => {
+	const msg = new Subscribe.Subscribe({
+		requestId: 1n,
+		trackNamespace: Path.from("test"),
+		trackName: "video",
+		subscriberPriority: 128,
+	});
+	const encoded = await encodeVersioned(msg, Version.DRAFT_14);
+
+	// Rewrite the encoded inline order byte, which no encoder of ours emits as 0 or 3.
+	const orderAt = encoded.lastIndexOf(Subscribe.GroupOrder.Descending);
+	const zeroed = new Uint8Array(encoded);
+	zeroed[orderAt] = Subscribe.GroupOrder.Default;
+	const decoded = await decodeVersioned(zeroed, Subscribe.Subscribe.decode, Version.DRAFT_14);
+	expect(decoded.groupOrder).toBe("descending");
+
+	const invalid = new Uint8Array(encoded);
+	invalid[orderAt] = 3;
+	await expect(decodeVersioned(invalid, Subscribe.Subscribe.decode, Version.DRAFT_14)).rejects.toThrow(/group order/);
+});
+
+// Draft-15 still lets a GROUP_ORDER parameter of 0 through, and it means the same.
+test("Subscribe v15: a group order parameter of 0 decodes as descending", async () => {
+	const msg = new Subscribe.Subscribe({
+		requestId: 1n,
+		trackNamespace: Path.from("test"),
+		trackName: "video",
+		subscriberPriority: 128,
+		groupOrder: "ascending",
+	});
+	const encoded = await encodeVersioned(msg, Version.DRAFT_15);
+
+	// The parameter's value is the byte after its id, 0x22.
+	const orderAt = encoded.findIndex((byte, i) => byte === 0x22 && encoded[i + 1] === Subscribe.GroupOrder.Ascending);
+	expect(orderAt).toBeGreaterThan(-1);
+	const zeroed = new Uint8Array(encoded);
+	zeroed[orderAt + 1] = Subscribe.GroupOrder.Default;
+	const decoded = await decodeVersioned(zeroed, Subscribe.Subscribe.decode, Version.DRAFT_15);
+	expect(decoded.groupOrder).toBe("descending");
+});

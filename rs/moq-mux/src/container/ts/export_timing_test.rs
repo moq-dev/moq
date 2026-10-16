@@ -83,7 +83,7 @@ struct Live {
 }
 
 impl Live {
-	fn new(scale: f64, audio_lag: i64) -> Self {
+	async fn new(scale: f64, audio_lag: i64) -> Self {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let consumer = broadcast.consume();
 		let mut catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
@@ -128,7 +128,7 @@ impl Live {
 		let audio = Producer::new(track, HangContainer::Legacy(crate::container::Kind::Audio));
 
 		Self {
-			source: crate::source::announced(&consumer),
+			source: crate::source::announced(&consumer).await,
 			_broadcast: broadcast,
 			catalog,
 			video,
@@ -183,7 +183,7 @@ impl Live {
 
 	/// A receiver joining now.
 	async fn join(&self, every: Duration) -> Leg {
-		let export = Export::new(self.source.clone())
+		let export = super::export_test::open_export(self.source.clone())
 			.await
 			.unwrap()
 			.with_delay(DELAY)
@@ -295,7 +295,7 @@ impl Live {
 
 /// One receiver: an exporter and what it rendered, with the instant each slot went out.
 struct Leg {
-	export: Export,
+	export: Export<crate::catalog::Consumer>,
 	/// How often it reads its subscription. Zero reads after every frame the source sends; a
 	/// coarser cadence stands for a receiver behind a burstier network or scheduler.
 	every: Duration,
@@ -508,7 +508,7 @@ const CLOCK_SLACK: f64 = 2.0 * SLOT_MS;
 /// Join mid-group with `lag`, render 7.2 s with the video ticks `stall` accepts stalled, and
 /// return the leg's units.
 async fn join(lag: i64, stall: impl Fn(u64) -> bool) -> Vec<Unit> {
-	let mut live = Live::new(1.0, lag);
+	let mut live = Live::new(1.0, lag).await;
 	live.run(JOIN, &mut [], |_| false).await;
 	let mut leg = live.join(Duration::ZERO).await;
 	live.run(24 * GOP, &mut [&mut leg], stall).await;
@@ -573,7 +573,7 @@ async fn a_track_sent_later_than_the_delay_loses_nothing() {
 	let mut lost = Vec::new();
 	for lag in [LONG_LAG, -LONG_LAG] {
 		for join in [3 * GOP, JOIN] {
-			let mut live = Live::new(1.0, lag);
+			let mut live = Live::new(1.0, lag).await;
 			live.run(join, &mut [], |_| false).await;
 			let mut leg = live.join(Duration::ZERO).await;
 			live.run(join + 20 * GOP, &mut [&mut leg], |_| false).await;
@@ -611,7 +611,7 @@ async fn frames_held_through_a_silence_drop_as_late() {
 	// The frames presented within the jitter of the last one read before the silence.
 	let held = jitter.as_micros() as u64 / VIDEO_US + 1;
 	for lag in [0, LAGS[0], LAGS[1]] {
-		let mut live = Live::new(1.0, lag);
+		let mut live = Live::new(1.0, lag).await;
 		live.declare_video_jitter(jitter);
 		let mut leg = live.join(Duration::ZERO).await;
 		live.run(8 * GOP + 5, &mut [&mut leg], |_| false).await;
@@ -647,7 +647,7 @@ async fn frames_held_through_a_silence_drop_as_late() {
 #[tokio::test(start_paused = true)]
 async fn video_held_for_most_of_the_delay_drops_nothing() {
 	for lag in [0, LAGS[0], LAGS[1]] {
-		let mut live = Live::new(1.0, lag);
+		let mut live = Live::new(1.0, lag).await;
 		live.declare_video_jitter(DELAY * 4 / 5);
 		let mut leg = live.join(Duration::ZERO).await;
 		live.run(20 * GOP, &mut [&mut leg], |_| false).await;
@@ -661,7 +661,7 @@ async fn video_held_for_most_of_the_delay_drops_nothing() {
 #[tokio::test(start_paused = true)]
 async fn the_video_held_at_the_end_goes_out() {
 	for lag in [0, LAGS[0], LAGS[1]] {
-		let mut live = Live::new(1.0, lag);
+		let mut live = Live::new(1.0, lag).await;
 		live.declare_video_jitter(Duration::from_millis(300));
 		let mut leg = live.join(Duration::ZERO).await;
 		let last = 8 * GOP + 5;
@@ -693,7 +693,7 @@ const DRIFT_TICKS: u64 = 300_000_000 / VIDEO_US;
 /// The spread of (slot sent − source's clock at the slot) after the first 10 s over `ticks`
 /// of media, the drops, and the export's stats at the end.
 async fn on_a_scaled_clock(scale: f64, ticks: u64) -> (Duration, u64, Stats) {
-	let mut live = Live::new(scale, 0);
+	let mut live = Live::new(scale, 0).await;
 	let mut leg = live.join(Duration::ZERO).await;
 	live.run(ticks, &mut [&mut leg], |_| false).await;
 
@@ -734,6 +734,23 @@ async fn a_source_past_the_limit_is_counted() {
 	let drift = stats.drift.expect("a measurement");
 	assert!((drift - 400.0).abs() < 1.0, "measured {drift} ppm");
 	assert!(stats.out_of_tolerance > 0, "not counted");
+}
+
+/// The same source fails the export once it has used half the delay, about ten minutes in,
+/// rather than drop nearly every frame from then on.
+#[tokio::test(start_paused = true)]
+#[should_panic(expected = "past the 30 ppm the output's may follow")]
+async fn a_source_past_the_limit_fails_once_half_the_delay_is_gone() {
+	on_a_scaled_clock(1.0004, 900_000_000 / VIDEO_US).await;
+}
+
+/// A source 22% slow, as an importer starved of CPU, fails the export within seconds.
+#[tokio::test(start_paused = true)]
+#[should_panic(expected = "the source's clock runs -220")]
+async fn a_source_far_off_real_time_fails_within_seconds() {
+	let mut live = Live::new(1.0 / 1.22, 0).await;
+	let mut leg = live.join(Duration::ZERO).await;
+	live.run(10_000_000 / VIDEO_US, &mut [&mut leg], |_| false).await;
 }
 
 // A 1+1 pair is two receivers of one broadcast whose outputs a seamless switch compares packet
@@ -781,7 +798,7 @@ async fn pair(scale: f64, lag: i64, ticks: u64, stall: impl Fn(u64) -> bool + Co
 }
 
 async fn pair_at(rate: u64, scale: f64, lag: i64, ticks: u64, stall: impl Fn(u64) -> bool + Copy) -> (Leg, Leg, u64) {
-	let mut live = Live::new(scale, lag);
+	let mut live = Live::new(scale, lag).await;
 	live.rate = rate;
 	let mut a = live.join(Duration::ZERO).await;
 	live.run(JOIN, &mut [&mut a], stall).await;
@@ -838,7 +855,7 @@ async fn two_legs_render_a_drifting_source_the_same_way() {
 #[tokio::test(start_paused = true)]
 async fn a_joiner_keeps_the_system_clock_in_tolerance() {
 	const WINDOW: u64 = 30_000_000;
-	let mut live = Live::new(1.0, 0);
+	let mut live = Live::new(1.0, 0).await;
 	live.run(JOIN, &mut [], |_| false).await;
 	let mut leg = live.join(Duration::ZERO).await;
 	live.run(JOIN + 300_000_000 / VIDEO_US, &mut [&mut leg], |_| false)
@@ -885,7 +902,7 @@ async fn a_joiner_keeps_the_system_clock_in_tolerance() {
 /// joined on was.
 #[tokio::test(start_paused = true)]
 async fn a_joiner_runs_at_the_delay_from_its_first_output() {
-	let mut live = Live::new(1.0, 0);
+	let mut live = Live::new(1.0, 0).await;
 	live.run(JOIN, &mut [], |_| false).await;
 	let mut leg = live.join(Duration::ZERO).await;
 	live.run(JOIN + 10_000_000 / VIDEO_US, &mut [&mut leg], |_| false).await;

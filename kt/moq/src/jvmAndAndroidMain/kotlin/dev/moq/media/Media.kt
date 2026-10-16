@@ -22,9 +22,9 @@ typealias ContainerProducer = uniffi.moq.MoqMediaContainerProducer
 /** The write side of a container fed a raw byte stream. */
 typealias ContainerStreamProducer = uniffi.moq.MoqMediaContainerStreamProducer
 /** The read side of a media track: yields frames with codec metadata in decode order. */
-typealias ContainerConsumer = uniffi.moq.MoqMediaContainerConsumer
+typealias TrackConsumer = uniffi.moq.MoqMediaTrackConsumer
 /** A finite fetched media group: yields container-decoded frames until the group ends. */
-typealias ContainerGroupConsumer = uniffi.moq.MoqMediaContainerGroupConsumer
+typealias GroupConsumer = uniffi.moq.MoqMediaGroupConsumer
 /** The read side of a broadcast's catalog: yields updates as the set of tracks changes. */
 typealias CatalogConsumer = uniffi.moq.MoqMediaCatalogConsumer
 /** A broadcast's catalog: its tracks and their properties, plus any application sections. */
@@ -47,7 +47,11 @@ typealias VideoProperties = uniffi.moq.MoqVideoProperties
 typealias AudioInit = uniffi.moq.MoqAudioInit
 /** A video codec, optional init bytes, a label, and catalog hints. */
 typealias VideoInit = uniffi.moq.MoqVideoInit
-/** A container format and its leading bytes. */
+/** A shared source timestamp offset that does not keep its broadcast open. */
+typealias Timebase = uniffi.moq.MoqMediaTimebase
+/** A byte-stream container format and an optional shared source timebase. */
+typealias ContainerStreamInit = uniffi.moq.MoqContainerStreamInit
+/** A container format, its leading bytes, and an optional shared source timebase. */
 typealias ContainerInit = uniffi.moq.MoqContainerInit
 /** The catalog description of an audio track: codec, sample rate, channels, whether it is enabled, and container. */
 typealias Audio = uniffi.moq.MoqAudio
@@ -63,9 +67,9 @@ typealias Named = uniffi.moq.MoqMediaTarget.Named
 /** A subscriber-requested track. */
 typealias Requested = uniffi.moq.MoqMediaTarget.Requested
 /** A track name, container, and live delivery options. */
-typealias ContainerConfig = uniffi.moq.MoqMediaContainerConfig
+typealias TrackConfig = uniffi.moq.MoqMediaTrackConfig
 /** A fetched group name, sequence, container, and delivery options. */
-typealias ContainerGroupConfig = uniffi.moq.MoqMediaContainerGroupConfig
+typealias GroupConfig = uniffi.moq.MoqMediaGroupConfig
 /** The packaging advertised for a media track. */
 typealias Container = uniffi.moq.MoqContainer
 
@@ -100,7 +104,7 @@ suspend fun catalog(broadcast: dev.moq.BroadcastConsumer): Catalog {
 }
 
 /** Stream of decoded media frames in decode order. */
-fun ContainerConsumer.frames(): Flow<MediaFrame> = flow {
+fun TrackConsumer.frames(): Flow<MediaFrame> = flow {
     while (true) {
         currentCoroutineContext().ensureActive()
         emit(next() ?: break)
@@ -109,8 +113,8 @@ fun ContainerConsumer.frames(): Flow<MediaFrame> = flow {
     if (cause is CancellationException) cancel()
 }
 
-/** Stream of decoded frames from one finite, fetched media group. */
-fun ContainerGroupConsumer.frames(): Flow<MediaFrame> = flow {
+/** Stream of decoded frames from one finite media group. */
+fun GroupConsumer.frames(): Flow<MediaFrame> = flow {
     while (true) {
         currentCoroutineContext().ensureActive()
         emit(next() ?: break)

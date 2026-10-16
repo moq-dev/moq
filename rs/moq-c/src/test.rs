@@ -1626,7 +1626,6 @@ fn raw_track_datagram_publish_consume() {
 		)
 	});
 
-	// Millisecond-aligned so the value survives the default (millisecond) timescale exactly.
 	let payload = b"hello datagram";
 	let mut sequence: u64 = u64::MAX;
 	assert_eq!(
@@ -3837,15 +3836,15 @@ fn video_raw_publish_rejects_invalid_config() {
 	assert!(unsafe { moq_encode_video(broadcast, &zero_framerate, &valid_output, 0) } < 0);
 
 	// Regression: dimensions arrive as a raw `u32` pair, and their product used to
-	// overflow the default-bitrate estimate inside the encoder. A panic here is an
-	// aborted host process, not an error return, since release builds are
-	// `panic = "abort"`. It has to come back as a negative code.
+	// overflow the default-bitrate estimate inside the encoder. It has to be refused
+	// as invalid, not reach the host as a caught panic.
 	let unrepresentable = moq_video_encoder_input {
 		width: u32::MAX - 1,
 		height: u32::MAX - 1,
 		..valid_input
 	};
-	assert!(unsafe { moq_encode_video(broadcast, &unrepresentable, &valid_output, 0) } < 0);
+	let refused = unsafe { moq_encode_video(broadcast, &unrepresentable, &valid_output, 0) };
+	assert!(refused < 0 && refused != MOQ_ERROR_PANIC, "{refused}");
 
 	// A size no encoder can take, but whose arithmetic is fine, is the backend's
 	// call rather than the boundary's: it must not be swept up by the check above.
@@ -4259,16 +4258,19 @@ fn defaults_report_what_a_zeroed_config_dials() {
 	assert!(config.has_backoff_initial);
 	assert_eq!(
 		config.backoff_initial_us,
-		expected.connect.backoff.initial.as_micros() as u64
+		expected.connect.backoff.initial.unwrap().as_micros() as u64
 	);
 	assert!(config.has_backoff_multiplier);
 	assert_eq!(config.backoff_multiplier, expected.connect.backoff.multiplier);
 	assert!(config.has_backoff_max);
-	assert_eq!(config.backoff_max_us, expected.connect.backoff.max.as_micros() as u64);
+	assert_eq!(
+		config.backoff_max_us,
+		expected.connect.backoff.max.unwrap().as_micros() as u64
+	);
 	assert!(config.has_backoff_timeout);
 	assert_eq!(
-		config.backoff_timeout_us,
-		expected.connect.backoff.timeout.as_micros() as u64
+		expected.connect.backoff.timeout,
+		Some(std::time::Duration::from_micros(config.backoff_timeout_us))
 	);
 
 	let websocket = expected.connect.websocket.resolve();
@@ -4314,13 +4316,13 @@ fn zero_with_a_flag_set_is_a_real_value() {
 	config.has_quic_keep_alive = true;
 
 	let explicit = parsed(&config);
-	assert_eq!(explicit.connect.backoff.timeout, std::time::Duration::ZERO);
-	assert_eq!(explicit.quic.keep_alive, std::time::Duration::ZERO);
+	assert_eq!(explicit.connect.backoff.timeout, Some(std::time::Duration::ZERO));
+	assert_eq!(explicit.quic.keep_alive, Some(std::time::Duration::ZERO));
 
 	// Without the flags the same zeroes mean nothing at all.
 	let defaults = parsed(&client_config());
-	assert_ne!(defaults.connect.backoff.timeout, std::time::Duration::ZERO);
-	assert_eq!(defaults.quic.keep_alive, std::time::Duration::from_secs(3));
+	assert_ne!(defaults.connect.backoff.timeout, Some(std::time::Duration::ZERO));
+	assert_eq!(defaults.quic.keep_alive, Some(std::time::Duration::from_secs(3)));
 }
 
 #[test]
@@ -4447,12 +4449,15 @@ fn config_quic_and_backoff_knobs_apply() {
 	let parsed = parsed(&config);
 	assert_eq!(
 		parsed.connect.backoff.initial,
-		std::time::Duration::from_micros(500_000)
+		Some(std::time::Duration::from_micros(500_000))
 	);
 	assert_eq!(parsed.connect.backoff.multiplier, 3);
-	assert_eq!(parsed.connect.backoff.max, std::time::Duration::from_micros(10_000_000));
+	assert_eq!(
+		parsed.connect.backoff.max,
+		Some(std::time::Duration::from_micros(10_000_000))
+	);
 	assert_eq!(parsed.quic.max_streams, Some(4096));
-	assert_eq!(parsed.quic.idle_timeout, std::time::Duration::from_millis(15_000));
+	assert_eq!(parsed.quic.idle_timeout, Some(std::time::Duration::from_millis(15_000)));
 	assert_eq!(parsed.quic.gso, Some(false));
 	assert_eq!(parsed.quic.mtu_discovery, Some(true));
 	assert_eq!(parsed.quic.qlog.as_deref(), Some(std::path::Path::new(dir)));
@@ -4818,7 +4823,7 @@ fn server_accepts_a_session() {
 		"accept consumes the request"
 	);
 
-	// Both sides report the first (and, for the server, only) epoch.
+	// Both sides report the first (and, for the server, only) connect.
 	assert_eq!(session_cb.recv(), 1);
 	assert_eq!(client_cb.recv(), 1);
 

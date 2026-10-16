@@ -1,11 +1,14 @@
 import { expect, mock, spyOn, test } from "bun:test";
+import * as Moq from "@moq/net";
 import { Effect, Signal } from "@moq/signals";
+import { Baseline } from "../jitter";
 
 // The capture pulls its processor in as a `?worklet` blob URL, which the bun test loader can't
 // resolve. Stub it so the module imports; the value is only ever passed to our fake addModule.
 mock.module("./capture-worklet.ts?worklet", () => ({ default: async () => "blob:fake-capture" }));
 
 const { Capture } = await import("./capture.ts");
+const { Encoder } = await import("./encoder.ts");
 
 const flush = () => new Promise<void>((resolve) => queueMicrotask(resolve));
 async function settle(times = 5): Promise<void> {
@@ -484,4 +487,132 @@ test("blocks when the worklet node can't be built, until its inputs change", asy
 	capture.close();
 	await settle();
 	error.mockRestore();
+});
+
+// An AudioEncoder that counts its instances, so a test can fail one and see whether another is built.
+function installFailableAudioEncoder() {
+	const instances: { fail(error: Error): void }[] = [];
+
+	class FailableAudioEncoder {
+		state: CodecState = "unconfigured";
+		#error: AudioEncoderInit["error"];
+		constructor(init: AudioEncoderInit) {
+			this.#error = init.error;
+			instances.push(this);
+		}
+		configure(): void {
+			this.state = "configured";
+		}
+		encode(): void {}
+		async flush(): Promise<void> {
+			// The throwaway description probe is not a live capture encoder.
+			instances.splice(instances.indexOf(this), 1);
+		}
+		close(): void {
+			this.state = "closed";
+		}
+		fail(error: Error): void {
+			this.state = "closed";
+			this.#error(error as DOMException);
+		}
+	}
+
+	class FakeAudioData {
+		close(): void {}
+	}
+
+	// The decoder only has to exist, or the encoder loads the Opus polyfill instead.
+	const globals: Record<string, unknown> = {
+		AudioEncoder: FailableAudioEncoder,
+		AudioDecoder: class {},
+		AudioData: FakeAudioData,
+	};
+	const originals = new Map<string, PropertyDescriptor | undefined>();
+	for (const [name, value] of Object.entries(globals)) {
+		originals.set(name, Object.getOwnPropertyDescriptor(globalThis, name));
+		Object.defineProperty(globalThis, name, { configurable: true, writable: true, value });
+	}
+
+	return {
+		instances,
+		[Symbol.dispose]() {
+			for (const [name, original] of originals) {
+				if (original) Object.defineProperty(globalThis, name, original);
+				else Reflect.deleteProperty(globalThis, name);
+			}
+		},
+	};
+}
+
+// `<moq-publish>` hands the capture and its encoder one `enabled`, so a mute drops the capture's
+// format. A failed encoder re-arms only for a different source, such as the new track a re-enabled
+// microphone opens, never for the same source coming back from a mute or an interrupted context.
+test("a failed encoder stays failed until the capture source changes", async () => {
+	using webaudio = installGatedWebAudio();
+	using codecs = installFailableAudioEncoder();
+	const error = spyOn(console, "error").mockImplementation(() => {});
+
+	webaudio.gesture();
+	const enabled = new Signal(true);
+	const source = new Signal(fakeSource());
+	const capture = new Capture({ enabled, source: source as never });
+	const track = new Moq.Track.Producer("audio").accept({ timescale: Moq.Time.Timescale.MILLI });
+	const rendition = {
+		config: new Signal(undefined),
+		track: new Signal<Moq.Track.Producer | undefined>(track),
+		close: () => {},
+	};
+	const encoder = new Encoder("audio", {
+		broadcast: { audio: () => rendition, baseline: new Baseline() } as never,
+		capture,
+		enabled,
+	});
+	// Renders a quantum on the newest graph, which is when the capture reports its format.
+	const render = async () => {
+		await settle();
+		webaudio.worklets.at(-1)?.render();
+		await settle();
+	};
+
+	try {
+		await render();
+		if (!encoder.out.catalog.peek()) await encoder.out.catalog.changed();
+		expect(codecs.instances).toHaveLength(1);
+		const failure = new Error("audio encoder failed");
+		codecs.instances[0].fail(failure);
+		await settle();
+		expect(encoder.out.error.peek()).toBe(failure);
+
+		// A mute keeps the failure visible, and the unmute hands back the same source and format.
+		enabled.set(false);
+		await settle();
+		expect(capture.out.format.peek()).toBeUndefined();
+		expect(encoder.out.error.peek()).toBe(failure);
+		enabled.set(true);
+		await render();
+		expect(capture.out.format.peek()).toBeDefined();
+		expect(encoder.out.error.peek()).toBe(failure);
+
+		// So does a context Safari interrupts and gives back.
+		webaudio.contexts.at(-1)?.transition("interrupted");
+		await settle();
+		expect(capture.out.format.peek()).toBeUndefined();
+		webaudio.contexts.at(-1)?.transition("running");
+		await render();
+		expect(capture.out.format.peek()).toBeDefined();
+		expect(encoder.out.error.peek()).toBe(failure);
+		expect(codecs.instances).toHaveLength(1);
+
+		// A new source retries once.
+		source.set(fakeSource());
+		await render();
+		expect(encoder.out.error.peek()).toBeUndefined();
+		expect(codecs.instances).toHaveLength(2);
+	} finally {
+		encoder.close();
+		capture.close();
+		track.close();
+		await settle();
+		error.mockRestore();
+	}
 });

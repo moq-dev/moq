@@ -32,9 +32,8 @@ about 22 s with skip-aheads on the way down.
 
 - Decide whether those re-stall refills are what the goal wants, using the
   replay rows as the measurement. Tighten the replay budgets with any fix.
-  Re-record the browser rows' `test/audio-quality/budgets.json` from the
-  nightly runner's first runs on `main` before tightening them, since they were
-  recorded locally (#4426) and nightly only runs `main`'s code.
+  Tighten the browser rows only from nightly runner measurements, re-measured
+  as `test/audio-quality/budgets.json`'s note describes.
 - The replay sizes every frame as the trace's median spacing, which a trace
   missing most of its frames defeats; record the codec's frame duration in the
   trace and replay that instead.
@@ -49,17 +48,18 @@ about 22 s with skip-aheads on the way down.
   88 to 275 ms/s drift the issue reported stand unconfirmed. If drift survives,
   the suspects are `writeFrame` opening a group per audio frame under
   WebTransport stream credit and the main-thread task queue delivering encoder
-  output. The first suspect is now owned by
-  [audio group duration](/quest/m1/audio-group-duration.md), which defaults
-  `groupDuration` to 20 ms. A/B the default against a group of 100 ms or so
-  in the same run; once that quest lands, the baseline is 20 ms groups, not a
-  group per frame.
+  output. Audio now defaults `groupDuration` to 20 ms. A/B that default
+  against a group of 100 ms or so in the same run.
 
 Decided 2026-10-08: moves to m1 with the rest of the line. The estimator
 defaults on and only this manual proof is left, so it no longer gates a
 release.
 
+## Required
+
+- [Opus isolated-ring target](/quest/m1/audio-jitter-target/opus-isolated-target.md) - the isolated ring holds the target at near-zero jitter
+
 ## Related
 
-- [Audio group duration](/quest/m1/audio-group-duration.md) - owns the group-per-frame suspect and changes this run's A/B baseline
 - [A/V clock](/quest/m1/av-clock.md) - reshapes `SyncInput` around the per-track target this line produces
+- [AAC bursty budgets](/quest/m1/audio-jitter-target/aac-bursty-budgets.md) - confirms the AAC reorder fix on the nightlies, no gate on this proof

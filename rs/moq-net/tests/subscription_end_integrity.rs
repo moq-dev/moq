@@ -1,3 +1,5 @@
+#![cfg(feature = "async")]
+
 //! A subscription ends cleanly only when every group in its range has been accounted
 //! for; a session closing with a group still in flight ends it with an error.
 //!
@@ -23,6 +25,11 @@ use std::time::Duration;
 
 use moq_net::{Hop, Timestamp, Version};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
+
+/// A millisecond track: the frames written here carry timestamps.
+fn timed() -> moq_net::track::Info {
+	moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+}
 
 const TIMEOUT: Duration = Duration::from_secs(10);
 const HEAD: [&[u8]; 2] = [b"head-a", b"head-b"];
@@ -50,7 +57,7 @@ fn expected() -> Vec<Vec<u8>> {
 async fn round(drop_session: bool) -> (Vec<Vec<u8>>, Option<moq_net::Error>) {
 	let publisher = produce_origin(1);
 	let broadcast = publisher.create_broadcast("bcast").unwrap();
-	let track = broadcast.create_track("video", None).unwrap();
+	let track = broadcast.create_track("video", timed()).unwrap();
 	broadcast.announce(Default::default()).unwrap();
 
 	let subscriber = produce_origin(2);
@@ -200,7 +207,7 @@ const DEATH: moq_net::SessionError = moq_net::SessionError::App(7);
 async fn killed(version: &str, local: bool) -> (Option<moq_net::Error>, Option<moq_net::Error>) {
 	let publisher = produce_origin(1);
 	let broadcast = publisher.create_broadcast("bcast").unwrap();
-	let track = broadcast.create_track("video", None).unwrap();
+	let track = broadcast.create_track("video", timed()).unwrap();
 	broadcast.announce(Default::default()).unwrap();
 
 	let subscriber = produce_origin(2);

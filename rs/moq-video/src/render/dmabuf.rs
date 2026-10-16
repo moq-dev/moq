@@ -299,29 +299,10 @@ unsafe fn adopt_plane(
 /// would produce, with pixels it chose itself.
 #[cfg(all(test, feature = "vaapi"))]
 pub(super) mod fixture {
-	use std::os::fd::OwnedFd;
 	use std::sync::Arc;
 
 	use super::*;
-
-	/// A DMA-BUF built from an already exported descriptor.
-	///
-	/// The export holds its own reference on the underlying allocation, so the
-	/// VA-API surface it came from is long gone by the time anything imports
-	/// this. Downloading is not implemented: the point of the fixture is the
-	/// zero-copy path, and a test comparing against the CPU one builds its
-	/// reference from the bytes it uploaded rather than reading them back.
-	struct Exported(OwnedFd);
-
-	impl crate::frame::DmaBufFrame for Exported {
-		fn export(&self) -> std::io::Result<OwnedFd> {
-			self.0.try_clone()
-		}
-
-		fn download_i420(&self) -> Result<crate::frame::I420, Error> {
-			Err(err("the DMA-BUF fixture does not implement downloading"))
-		}
-	}
+	use crate::DmaBufLayout;
 
 	/// The VA-API fourcc naming the same layout as a DRM format.
 	///
@@ -422,16 +403,11 @@ pub(super) mod fixture {
 			.collect();
 		let fd = object.fd.try_clone().expect("duplicate the exported descriptor");
 
-		DmaBuf::new(
-			format,
-			object.drm_format_modifier,
-			size.width,
-			size.height,
-			planes,
-			None,
-			Arc::new(Exported(fd)),
-		)
-		.expect("a well-formed DMA-BUF")
+		// The export holds its own reference on the allocation, so the VA-API
+		// surface it came from can go away before anything imports this.
+		let mut layout = DmaBufLayout::new(format, size, planes);
+		layout.modifier = object.drm_format_modifier;
+		DmaBuf::new(fd, layout, ()).expect("a well-formed DMA-BUF")
 	}
 
 	/// Copy tightly packed planes into a surface, honoring the image's own plane

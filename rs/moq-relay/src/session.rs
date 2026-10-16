@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::SystemTime;
 
 use axum::http::StatusCode;
@@ -76,7 +76,11 @@ impl Registration {
 
 impl Drop for Registration {
 	fn drop(&mut self) {
-		self.registry.inner.lock().unwrap().remove(&self.id);
+		self.registry
+			.inner
+			.lock()
+			.unwrap_or_else(PoisonError::into_inner)
+			.remove(&self.id);
 	}
 }
 
@@ -90,7 +94,7 @@ impl Registry {
 	pub fn register(&self, request: Request) -> Registration {
 		let handle = Handle::default();
 		let id = request.id.clone();
-		self.inner.lock().unwrap().insert(
+		self.inner.lock().unwrap_or_else(PoisonError::into_inner).insert(
 			id.clone(),
 			Entry {
 				request,
@@ -110,7 +114,7 @@ impl Registry {
 	pub fn list(&self, filter: &Filter) -> Vec<View> {
 		self.inner
 			.lock()
-			.unwrap()
+			.unwrap_or_else(PoisonError::into_inner)
 			.values()
 			.filter(|entry| filter.matches(&entry.request))
 			.map(|entry| View::from_session(&entry.request, entry.started))
@@ -121,7 +125,7 @@ impl Registry {
 	/// currently sit in the table.
 	pub fn revalidate(&self, filter: &Filter) -> Vec<String> {
 		let mut ids = Vec::new();
-		for (id, entry) in self.inner.lock().unwrap().iter() {
+		for (id, entry) in self.inner.lock().unwrap_or_else(PoisonError::into_inner).iter() {
 			if filter.matches(&entry.request) {
 				entry.handle.wake();
 				ids.push(id.clone());
@@ -357,7 +361,10 @@ fn tls_matches(want: &Option<String>, have: Option<&str>) -> bool {
 /// The wire spelling `moq-auth` serializes, so a new transport is filterable without a second list.
 fn parse_transport(value: &str) -> Option<Transport> {
 	use serde::{Deserialize, de::IntoDeserializer};
-	Transport::deserialize(IntoDeserializer::<serde::de::value::Error>::into_deserializer(value)).ok()
+	// Operator filters must reject typos even though incoming auth facts accept future names.
+	Transport::deserialize(IntoDeserializer::<serde::de::value::Error>::into_deserializer(value))
+		.ok()
+		.filter(|transport| transport.as_str() == value)
 }
 
 fn parse_role(value: &str) -> Option<Role> {
@@ -491,6 +498,8 @@ mod tests {
 			Transport::Rtmp,
 			Transport::Srt,
 			Transport::WebRtc,
+			Transport::WebTransport,
+			Transport::Unknown,
 		] {
 			let filter = Filter::from_query(Some(&format!("transport={transport}"))).unwrap();
 			assert_eq!(filter.transport, Some(transport));

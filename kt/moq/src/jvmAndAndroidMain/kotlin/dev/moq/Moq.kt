@@ -51,12 +51,12 @@ class Moq internal constructor(
     suspend fun requestBroadcast(path: String): BroadcastConsumer = session.consume().requestBroadcast(path)
 
     /**
-     * The connection epoch: 1 for the connect that built this session, one more on
+     * How many times this session has connected: 1 for the connect that built it, one more on
      * each reconnect. A server-accepted session stays at 1.
      *
      * Pair it with [Session.status] to log each reconnect by number.
      */
-    fun epoch(): ULong = session.epoch()
+    fun connects(): ULong = session.connects()
 
     /**
      * The session's bandwidth allocator.
@@ -67,7 +67,12 @@ class Moq internal constructor(
      */
     fun bandwidth(): Bandwidth = session.bandwidth()
 
-    /** Drain finished tracks within one second, throwing if delivery times out. */
+    /**
+     * Drain finished tracks within one second, throwing on failure.
+     * Explicit `moq-lite-07-wip` waits for the peer to receive finished tails; older
+     * Lite versions, including the default lite-06, wait only for transport ACKs.
+     * IETF also waits for transport ACKs.
+     */
     suspend fun shutdown() {
         try {
             session.shutdown()

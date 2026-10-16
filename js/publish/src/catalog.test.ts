@@ -32,6 +32,25 @@ test("catalog producer seeds subscribers and fans out edits", async () => {
 	effect.close();
 });
 
+test("catalog producer refuses an ID naming both a video and an audio rendition", () => {
+	const catalog = new CatalogProducer();
+	expect(() =>
+		catalog.mutate((c) => {
+			c.video = { renditions: { main: { codec: "avc1.64001f", container: { kind: "legacy" } } } };
+			c.audio = {
+				renditions: {
+					main: {
+						codec: "opus",
+						sampleRate: Catalog.u53(48000),
+						numberOfChannels: Catalog.u53(2),
+						container: { kind: "legacy" },
+					},
+				},
+			};
+		}),
+	).toThrow(Catalog.DuplicateRendition);
+});
+
 test("catalog producer publishes every update as a snapshot group", async () => {
 	const catalog = new CatalogProducer();
 	catalog.mutate((c) => {
@@ -92,6 +111,28 @@ test("catalog producer advertises the page clock from the first snapshot", async
 	expect(second.clock).toEqual(first.clock);
 
 	effect.close();
+});
+
+test("catalog producer omits the clock when the page's wall clock is unset", async () => {
+	// A device booted before it synced its clock: the page began in 1970.
+	Object.defineProperty(performance, "timeOrigin", { value: 86_400_000, configurable: true });
+	try {
+		const catalog = new CatalogProducer();
+		catalog.mutate((c) => {
+			c.video = { renditions: {} };
+		});
+
+		const effect = new Effect();
+		const track = new Track.Producer("catalog.json");
+		catalog.serve(track, effect);
+		const subscriber = track.subscribe().ordered();
+		const group = await subscriber.nextGroup();
+		expect(await group?.readJson()).toEqual({ video: { renditions: {} } });
+		effect.close();
+	} finally {
+		// Drops the override, uncovering the real getter.
+		Reflect.deleteProperty(performance, "timeOrigin");
+	}
 });
 
 test("a reconnecting subscriber is seeded with the full current catalog", async () => {
@@ -197,6 +238,28 @@ for (const field of ["jitter", "delay"] as const) {
 		});
 	}
 }
+
+// Same-named tracks in different broadcasts are different tracks.
+test("catalog keeps estimates apart for same-named tracks in different broadcasts", () => {
+	const catalog = new CatalogProducer();
+	const rendition = (broadcast: string, jitter: number) => ({
+		codec: "opus",
+		container: { kind: "legacy" as const },
+		sampleRate: Catalog.u53(48000),
+		numberOfChannels: Catalog.u53(2),
+		broadcast: broadcast as Catalog.RelativeBroadcast,
+		track: "audio",
+		jitter: Catalog.u53(jitter),
+	});
+	catalog.mutate((value) => {
+		value.audio = { renditions: { en: rendition("../en", 64), es: rendition("../es", 128) } };
+	});
+	expect(() =>
+		catalog.mutate((value) => {
+			delete value.audio?.renditions.es;
+		}),
+	).not.toThrow();
+});
 
 for (const section of ["json", "binary"] as const) {
 	test(`catalog refuses zero or decreasing ${section} jitter without retaining it`, () => {
@@ -392,4 +455,44 @@ describe("estimate publication window", () => {
 		advance(100);
 		expect((await consumer.latest())?.value.video?.renditions.v.jitter).toBe(Catalog.u53(3));
 	});
+});
+
+// Each ID's estimate is checked on its own, even when two IDs alias one track.
+test("catalog refuses a falling estimate on one alias of a track", () => {
+	const catalog = new CatalogProducer();
+	const alias = (jitter: number) => ({
+		codec: "opus",
+		container: { kind: "legacy" as const },
+		sampleRate: Catalog.u53(48000),
+		numberOfChannels: Catalog.u53(2),
+		track: "audio",
+		jitter: Catalog.u53(jitter),
+	});
+	catalog.mutate((value) => {
+		value.audio = { renditions: { en: alias(100), es: alias(100) } };
+	});
+	expect(() =>
+		catalog.mutate((value) => {
+			value.audio = { renditions: { en: alias(10), es: alias(100) } };
+		}),
+	).toThrow("jitter cannot decrease");
+});
+
+// A renamed rendition's new track starts its estimates over.
+test("catalog lets a renamed track start its estimates over", () => {
+	const catalog = new CatalogProducer();
+	const config = { codec: "vp8", container: { kind: "legacy" as const } };
+	catalog.mutate((value) => {
+		value.video = { renditions: { video: { ...config, jitter: Catalog.u53(100) } } };
+	});
+	catalog.mutate((value) => {
+		value.video = { renditions: { video: { ...config, codec: "vp9", track: "video/1", jitter: Catalog.u53(10) } } };
+	});
+	expect(() =>
+		catalog.mutate((value) => {
+			value.video = {
+				renditions: { video: { ...config, codec: "vp9", track: "video/1", jitter: Catalog.u53(5) } },
+			};
+		}),
+	).toThrow("jitter cannot decrease");
 });

@@ -1,3 +1,5 @@
+#![cfg(feature = "async")]
+
 //! Fetching a group from a moq-transport publisher never subscribes to its track.
 //!
 //! The subscriber learns the track from TRACK_STATUS instead, so a finished track is still
@@ -12,6 +14,11 @@ use std::time::Duration;
 
 use moq_net::{Hop, Timestamp, Version};
 use support::harness::{MockConnectOptions, connect_mock};
+
+/// A millisecond track: the frames written here carry timestamps.
+fn timed() -> moq_net::track::Info {
+	moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+}
 
 const TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -36,7 +43,7 @@ async fn resolve(origin: &moq_net::origin::Producer) -> moq_net::broadcast::Cons
 /// Publish a finished track of three groups, and flag any subscription it ever gets.
 fn publish_finished(origin: &moq_net::origin::Producer) -> (moq_net::broadcast::Producer, Arc<AtomicBool>) {
 	let broadcast = origin.create_broadcast("bcast").unwrap();
-	let mut track = broadcast.create_track("video", None).unwrap();
+	let mut track = broadcast.create_track("video", timed()).unwrap();
 	broadcast.announce(Default::default()).unwrap();
 	for sequence in 0..3u64 {
 		let mut group = track.append_group().unwrap();
@@ -163,7 +170,7 @@ async fn a_subscribe_after_track_status_keeps_timestamps() {
 		moq_net_sim::timeout(TIMEOUT, async {
 			let publisher = produce_origin(1);
 			let broadcast = publisher.create_broadcast("bcast").unwrap();
-			let track = broadcast.create_track("video", None).unwrap();
+			let track = broadcast.create_track("video", timed()).unwrap();
 			broadcast.announce(Default::default()).unwrap();
 
 			let client = produce_origin(2);

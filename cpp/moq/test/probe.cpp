@@ -99,18 +99,42 @@ Coroutine read_one(std::shared_ptr<moq::TrackConsumer> consumer, std::optional<m
 } // namespace
 
 int main() {
+    auto timebase_owner = ok(moq::BroadcastProducer::init(), "timebase owner");
+    auto timebase_other = ok(moq::BroadcastProducer::init(), "timebase other");
+    auto timebase = ok(moq::MediaTimebase::init(timebase_owner), "timebase");
+    auto foreign_chunks = moq::MediaContainerProducer::init(timebase_other, {moq::ContainerFormat::kFmp4, {}, timebase});
+    CHECK(!foreign_chunks);
+    CHECK(std::holds_alternative<moq::Error::kCodec>(foreign_chunks.error().get_variant()));
+    auto foreign_stream = moq::MediaContainerStreamProducer::init(timebase_other, {moq::ContainerFormat::kFmp4, timebase});
+    CHECK(!foreign_stream);
+    CHECK(std::holds_alternative<moq::Error::kCodec>(foreign_stream.error().get_variant()));
+    ok(timebase_owner->close(), "close timebase owner");
+    CHECK(!moq::MediaTimebase::init(timebase_owner));
+    ok(timebase_other->close(), "close timebase other");
+
     // A synchronous error is a returned value, not an exception.
     auto unbound = ok(moq::Server::init({}), "server init");
     auto fingerprints = unbound->cert_fingerprints();
     CHECK(!fingerprints);
     CHECK(std::holds_alternative<moq::Error::kBind>(fingerprints.error().get_variant()));
+    CHECK(std::get<moq::Error::kBind>(fingerprints.error().get_variant()).reason ==
+          "not listening; call listen() first");
     // It prints the message Rust's Display gives.
     CHECK(fingerprints.error().to_string() == "bind: not listening; call listen() first");
+
+    // An epoch's time keeps every 48-bit millisecond, past where system_clock's nanoseconds wrap.
+    CHECK(ok(moq::epoch_time("018bcfe5-6800-7000-8000-000000000000"), "epoch_time").time_since_epoch() ==
+          std::chrono::milliseconds(1700000000000));
+    CHECK(ok(moq::epoch_time("ffffffff-ffff-7000-8000-000000000000"), "epoch_time").time_since_epoch() ==
+          std::chrono::milliseconds(0xffffffffffff));
+    CHECK(!moq::epoch_time("not-an-epoch"));
 
     // Publisher: a server whose origin serves one broadcast with one track.
     auto origin = moq::OriginProducer::init({});
     auto broadcast = ok(origin->create_broadcast("probe"), "create_broadcast");
-    auto track = ok(broadcast->publish_track("data", std::nullopt), "publish_track");
+    moq::TrackInfo info;
+    info.timescale = 1000000;
+    auto track = ok(broadcast->publish_track("data", info), "publish_track");
     ok(broadcast->announce({}), "announce");
 
     moq::ServerConfig server_config;

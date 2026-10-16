@@ -13,9 +13,10 @@ import {
 	readonlys,
 	Signal,
 } from "@moq/signals";
+import { Producer as ArrivalProducer, type Arrivals, gap } from "../arrivals";
 import { hostedAssets } from "../assets";
 import { base64ToBytes } from "../base64";
-import { nextMedia, subscribeMedia } from "../media";
+import { type Failure, failureMoved, nextMedia, subscribeMedia } from "../media";
 
 import type { Sync } from "../sync";
 import { type AudioBuffer, createAudioBuffer } from "./buffer";
@@ -25,10 +26,7 @@ import { AUTO_MAX_DELAY, ringSamples, target } from "./latency";
 // A blob: URL, or a hosted file when assets() is set; see vite-plugin-worklet.
 import RenderWorklet from "./render-worklet.ts?worklet";
 import type { Source } from "./source";
-import { type DecodedSpan, Terminal } from "./terminal";
-import { Warmup } from "./warmup";
-
-const LEGACY_WARMUP_CALLBACKS = 3;
+import { Terminal } from "./terminal";
 
 export type DecoderInput = {
 	// Whether to download the audio track. Defaults to true.
@@ -44,6 +42,8 @@ export type DecoderProps = Inputs<DecoderInput> & {
 };
 
 type DecoderOutput = {
+	/** Fatal decode failure, cleared when another source is selected. */
+	error: Signal<Error | undefined>;
 	context: Signal<AudioContext | undefined>;
 
 	// The root of the audio graph, which can be used for custom visualizations.
@@ -92,6 +92,7 @@ export class Decoder {
 	readonly sync: Sync;
 
 	readonly #out: DecoderOutput = {
+		error: new Signal<Error | undefined>(undefined),
 		context: new Signal<AudioContext | undefined>(undefined),
 		root: new Signal<AudioNode | undefined>(undefined),
 		sampleRate: new Signal<number | undefined>(undefined),
@@ -116,7 +117,7 @@ export class Decoder {
 	// The rendition is absent and the ring has drained its tail, so the graph has nothing to play.
 	readonly #idle: Computed<boolean>;
 
-	// Ordered discontinuity and endpoint state from the container consumer.
+	// Ordered epoch and endpoint state from the container consumer.
 	#terminal = new Terminal();
 
 	// The container consumer's arrival estimate, unset while nothing is subscribed.
@@ -124,6 +125,7 @@ export class Decoder {
 
 	// The subscription's max delay: the shared budget, raised to the estimator's ceiling in "auto".
 	#subscribeMaxDelay = new Signal<Time.Milli>(Time.Milli.zero);
+	#maxDelay = new Signal<Time.Milli>(Time.Milli.zero);
 
 	// The codec's frame duration: the catalog constant, refined by each frame's own duration.
 	#frame = new Signal<Time.Milli | undefined>(undefined);
@@ -134,7 +136,11 @@ export class Decoder {
 	// The broadcast instance the ring's timeline belongs to. See #runDecoder.
 	#instance?: Moq.Broadcast.Consumer["closed"];
 
+	// Fans received frames out to open `arrivals()` handles; retains nothing without one.
+	#arrivals = new ArrivalProducer();
+
 	#signals = new Effect();
+	#failed?: Failure;
 
 	// The catalog fields that require a replacement subscription or decoder.
 	readonly #identity: Computed<PlaybackIdentity | undefined>;
@@ -181,7 +187,9 @@ export class Decoder {
 	#runSubscribeMaxDelay(effect: Effect): void {
 		const maxDelay = effect.get(this.sync.out.maxDelay);
 		const auto = effect.get(this.sync.in.delay) === "auto";
-		this.#subscribeMaxDelay.set(auto ? Time.Milli.max(maxDelay, AUTO_MAX_DELAY) : maxDelay);
+		const warmup = Time.Milli(effect.get(this.source.out.config)?.warmup ?? 0);
+		this.#maxDelay.set(Time.Milli.add(maxDelay, warmup));
+		this.#subscribeMaxDelay.set(Time.Milli.add(auto ? Time.Milli.max(maxDelay, AUTO_MAX_DELAY) : maxDelay, warmup));
 	}
 
 	#runShape(effect: Effect): void {
@@ -313,26 +321,52 @@ export class Decoder {
 	}
 
 	#runDecoder(effect: Effect): void {
-		const enabled = effect.get(this.in.enabled);
-		if (!enabled) return;
-		if (effect.get(this.sync.out.instant)) return;
-
+		const running = effect.get(this.in.enabled) && !effect.get(this.sync.out.instant);
 		const broadcast = effect.get(this.source.in.broadcast);
-		if (!broadcast) return;
-
 		const track = effect.get(this.source.out.track);
-		if (!track) return;
-
 		const identity = effect.get(this.#identity);
-		if (!identity) return;
+
+		// Honor a per-rendition `broadcast` override: subscribe on the resolved source
+		// broadcast instead of the catalog's own broadcast. A stopped decoder resolves it only to
+		// tell whether a failure's source is still selected.
+		const active =
+			broadcast && track && identity && (running || this.#failed)
+				? broadcast.relativeBroadcast(effect, identity.broadcast)
+				: undefined;
+		const key = identity && JSON.stringify(identity);
+
+		// A failure belongs to its source: selecting another clears it, even while muted or paused.
+		const failed = this.#failed;
+		const selected = broadcast && failed ? effect.get(broadcast.out.active)?.closed : undefined;
+		if (failed && failureMoved(failed, { broadcast: selected, media: active?.closed, track, identity: key })) {
+			this.#failed = undefined;
+			this.#out.error.set(undefined);
+		}
+
+		if (!running || !broadcast || !track || !identity) return;
 
 		const config = identity.decoder;
 		this.#frame.set(frameDuration(config));
 
-		// Honor a per-rendition `broadcast` override: subscribe on the resolved source
-		// broadcast instead of the catalog's own broadcast.
-		const active = broadcast.relativeBroadcast(effect, identity.broadcast);
-		if (!active) return;
+		if (!active || !key) return;
+
+		// This source already failed; wait for another.
+		if (this.#failed) return;
+		// Closing this effect releases both its container reader and track subscription.
+		const failure = new Signal<Error | undefined>(undefined);
+		let attempt: Effect | undefined;
+		effect.run((inner) => {
+			const error = inner.get(failure);
+			if (!error) return;
+			this.#failed = {
+				broadcast: broadcast.out.active.peek()?.closed,
+				media: active.closed,
+				track,
+				identity: key,
+			};
+			this.#out.error.set(error);
+			attempt?.close();
+		});
 
 		// Another broadcast (a new name, or a republish) brings its own timeline, which a ring and a
 		// clock anchored on the previous one would discard as already played. A return to the same
@@ -353,32 +387,39 @@ export class Decoder {
 		// of tail beyond them. Drop that once the replacement's first frame says where it starts.
 		this.#handover.opened();
 
-		const sub = subscribeMedia(effect, {
-			broadcast: active,
-			track,
-			priority: Catalog.PRIORITY.audio,
-			maxDelay: this.#subscribeMaxDelay,
-		});
-		if (!sub) return;
+		effect.run((run) => {
+			attempt = run;
+			const sub = subscribeMedia(run, {
+				broadcast: active,
+				track: Catalog.track(track, identity),
+				priority: Catalog.PRIORITY.audio,
+				maxDelay: this.#subscribeMaxDelay,
+			});
+			if (!sub) return;
 
-		if (config.container.kind === "cmaf") {
-			this.#runCmafDecoder(effect, sub, config);
-		} else {
-			this.#runLegacyDecoder(effect, sub, config);
-		}
+			if (config.container.kind === "cmaf") {
+				this.#runCmafDecoder(run, sub, { config, failure });
+			} else {
+				this.#runLegacyDecoder(run, sub, { config, failure });
+			}
+		});
 	}
 
-	#runLegacyDecoder(effect: Effect, sub: Moq.Track.Subscriber, config: DecoderConfig): void {
+	#runLegacyDecoder(
+		effect: Effect,
+		sub: Moq.Track.Subscriber,
+		{ config, failure }: { config: DecoderConfig; failure: Signal<Error | undefined> },
+	): void {
 		const preSkip =
 			config.codec === "opus" && config.description ? Util.Opus.preSkip(Util.Hex.toBytes(config.description)) : 0;
-		this.#terminal.clear(preSkip);
+		this.#terminal.clear(preSkip, Time.Micro.fromMilli(Time.Milli(config.warmup ?? 0)));
 		const format =
 			config.container.kind === "loc" ? new Container.Loc.Format("audio") : new Container.Legacy.Format(config);
 		// Create consumer with slightly less latency than the render worklet to avoid underflowing.
 		// TODO include JITTER_UNDERHEAD
 		const consumer = new Container.Consumer(sub, {
 			format,
-			maxDelay: this.sync.out.maxDelay,
+			maxDelay: this.#maxDelay,
 		});
 		effect.cleanup(() => consumer.close());
 
@@ -398,19 +439,9 @@ export class Decoder {
 			const loaded = await Util.Libav.polyfill();
 			if (!loaded) return; // cancelled
 
-			const warmup = new Warmup(LEGACY_WARMUP_CALLBACKS);
-
 			const decoder = new AudioDecoder({
-				output: (data) => {
-					const decoded = this.#terminal.span(data);
-					if (warmup.drop()) {
-						// Drop initial callbacks to prime the decoder.
-						data.close();
-						return;
-					}
-					this.#emit(data, decoded);
-				},
-				error: (error) => console.error("audio decoder error", error),
+				output: (data) => this.#emit(data),
+				error: (error) => failure.set(error),
 			});
 			effect.cleanup(() => {
 				if (decoder.state !== "closed") decoder.close();
@@ -434,20 +465,18 @@ export class Decoder {
 			for (;;) {
 				const next = await nextMedia(consumer);
 				if (!next) break;
-				if (this.#onNext(next)) {
+				if (this.#onRead(next)) {
 					decoder.reset();
 					decoder.configure(decoderConfig);
 				}
-				if (next.end !== undefined) {
-					continue;
-				}
-
+				if (next.kind === "gap") this.#arrivals.write(gap(next));
+				if (next.kind !== "frame") continue;
 				const { frame } = next;
-				if (!frame) continue;
 
-				// Mark that we received this frame right now.
+				// Classify ingress before decoder backpressure changes the delivery clock.
 				const timestamp = Time.Milli.fromMicro(frame.timestamp as Time.Micro);
-				this.sync.received(timestamp, "audio");
+				const late = this.sync.received(timestamp, "audio", frame.arrival);
+				this.#arrivals.write({ kind: "frame", timestamp, arrival: frame.arrival, late });
 
 				const duration = packetDuration(config.codec, frame);
 				if (duration !== undefined) this.#frame.set(duration);
@@ -461,10 +490,12 @@ export class Decoder {
 
 				// Backpressure: in buffered mode this holds the encoded frame until the playhead nears
 				// it, keeping the lookahead above the floor as Opus instead of decoded PCM. No-op live.
-				await ring.wait(frame.timestamp as Time.Micro);
+				await ring.wait(frame.timestamp as Time.Micro, effect.abort);
+				if (effect.abort.aborted) break;
 
 				const chunk = new EncodedAudioChunk({
-					type: frame.keyframe ? "key" : "delta",
+					// WebCodecs audio chunks are key even inside a MoQ group.
+					type: "key",
 					data: frame.payload,
 					timestamp: frame.timestamp,
 				});
@@ -477,14 +508,18 @@ export class Decoder {
 		});
 	}
 
-	#runCmafDecoder(effect: Effect, sub: Moq.Track.Subscriber, config: DecoderConfig): void {
+	#runCmafDecoder(
+		effect: Effect,
+		sub: Moq.Track.Subscriber,
+		{ config, failure }: { config: DecoderConfig; failure: Signal<Error | undefined> },
+	): void {
 		if (config.container.kind !== "cmaf") return; // just to help typescript
 
 		const initSegment = base64ToBytes(config.container.init);
 		const init = Container.Cmaf.decodeInitSegment(initSegment);
 		const opusDescription = config.description ? Util.Hex.toBytes(config.description) : init.description;
 		const preSkip = config.codec === "opus" && opusDescription ? Util.Opus.preSkip(opusDescription) : 0;
-		this.#terminal.clear(preSkip);
+		this.#terminal.clear(preSkip, Time.Micro.fromMilli(Time.Milli(config.warmup ?? 0)));
 		// Opus in CMAF uses raw packets (not OGG-wrapped), so description must be omitted.
 		// The dOps box from the init segment is not a valid OGG Identification Header.
 		const description =
@@ -496,7 +531,7 @@ export class Decoder {
 
 		const consumer = new Container.Consumer(sub, {
 			format: new Container.Cmaf.Format(init),
-			maxDelay: this.sync.out.maxDelay,
+			maxDelay: this.#maxDelay,
 		});
 		effect.cleanup(() => consumer.close());
 
@@ -518,7 +553,7 @@ export class Decoder {
 
 			const decoder = new AudioDecoder({
 				output: (data) => this.#emit(data),
-				error: (error) => console.error("audio decoder error", error),
+				error: (error) => failure.set(error),
 			});
 			effect.cleanup(() => {
 				if (decoder.state !== "closed") decoder.close();
@@ -538,16 +573,17 @@ export class Decoder {
 				if (!next) break;
 
 				// Reset and re-anchor before decoding the first frame of a new codec epoch.
-				if (this.#onNext(next)) {
+				if (this.#onRead(next)) {
 					decoder.reset();
 					decoder.configure(decoderConfig);
 				}
-
+				if (next.kind === "gap") this.#arrivals.write(gap(next));
+				if (next.kind !== "frame") continue;
 				const { frame } = next;
-				if (!frame) continue;
 
 				const timestamp = Time.Milli.fromMicro(frame.timestamp);
-				this.sync.received(timestamp, "audio");
+				const late = this.sync.received(timestamp, "audio", frame.arrival);
+				this.#arrivals.write({ kind: "frame", timestamp, arrival: frame.arrival, late });
 
 				const duration = packetDuration(config.codec, frame);
 				if (duration !== undefined) this.#frame.set(duration);
@@ -561,12 +597,14 @@ export class Decoder {
 
 				// Backpressure: in buffered mode this holds the encoded frame until the playhead nears
 				// it, keeping the lookahead above the floor as Opus instead of decoded PCM. No-op live.
-				await ring.wait(frame.timestamp);
+				await ring.wait(frame.timestamp, effect.abort);
+				if (effect.abort.aborted) break;
 
 				if (decoder.state === "closed") break;
 				decoder.decode(
 					new EncodedAudioChunk({
-						type: frame.keyframe ? "key" : "delta",
+						// WebCodecs audio chunks are key even inside a MoQ group.
+						type: "key",
 						data: frame.payload,
 						timestamp: frame.timestamp,
 					}),
@@ -586,8 +624,8 @@ export class Decoder {
 		}
 	}
 
-	#emit(sample: AudioData, decoded: DecodedSpan = this.#terminal.span(sample)) {
-		const { timestamp, frameOffset, frames } = decoded;
+	#emit(sample: AudioData) {
+		const { timestamp, frameOffset, frames } = this.#terminal.span(sample);
 		const timestampMilli = Time.Milli.fromMicro(timestamp);
 		if (frames === 0) {
 			sample.close();
@@ -687,21 +725,22 @@ export class Decoder {
 		this.#ring.peek()?.reset();
 	}
 
-	// Apply ordered container metadata before handling the result. An endpoint that also
-	// starts a new epoch must survive the reset so its following drain is trimmed.
-	#onNext(next: {
-		discontinuity: number;
-		group: number;
-		end?: Time.Micro;
-		frame?: { timestamp: Time.Micro };
-	}): boolean {
-		if (!this.#terminal.update(next)) return false;
+	// Apply an ordered container read before handling it, reporting whether a codec epoch ended:
+	// a gap, or a later group after a declared end.
+	#onRead(read: Container.Read): boolean {
+		if (!this.#terminal.update(read)) return false;
 		this.#ring.peek()?.reset();
 		this.sync.reset();
 		return true;
 	}
 
+	/** Observe every frame and gap received from now until the handle or this decoder closes. */
+	arrivals(): Arrivals {
+		return this.#arrivals.consume();
+	}
+
 	close() {
+		this.#arrivals.close();
 		this.#signals.close();
 	}
 

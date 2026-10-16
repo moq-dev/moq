@@ -150,6 +150,15 @@ func (r *TrackRequest) Name() (string, error) {
 	return r.inner.Name()
 }
 
+// Demand watches this track's subscribers, including after accepting it.
+func (r *TrackRequest) Demand() (*TrackDemand, error) {
+	inner, err := r.inner.Demand()
+	if err != nil {
+		return nil, err
+	}
+	return &TrackDemand{inner: inner}, nil
+}
+
 // Dynamic creates a fetch handler before accepting this requested track.
 func (r *TrackRequest) Dynamic() (*TrackDynamic, error) {
 	inner, err := r.inner.Dynamic()
@@ -400,9 +409,8 @@ func (r *GroupRequest) Abort(errorCode uint16) error {
 //
 // It is weak: holding it does not keep the request alive. The last caller to
 // leave withdraws the request, so once unused, demand never returns: drop the
-// request. Waits fail once the request is answered: ErrClosed if it was
-// dropped, otherwise the error the accept or reject left for the waiting
-// fetches.
+// request. Waits fail with ErrClosed after the request is accepted or dropped,
+// and keep the rejection reason after it is rejected.
 type GroupDemand struct {
 	inner *ffi.MoqGroupDemand
 }
@@ -456,9 +464,9 @@ func (a *AudioProducer) Unused(ctx context.Context) error {
 	return a.inner.Unused(ctx)
 }
 
-// ResetEpoch re-anchors the timeline to the next frame after an idle gap.
-func (a *AudioProducer) ResetEpoch() error {
-	return a.inner.ResetEpoch()
+// Reanchor re-anchors the timeline to the next frame after an idle gap.
+func (a *AudioProducer) Reanchor() error {
+	return a.inner.Reanchor()
 }
 
 // Write pushes one frame of PCM in the configured input format.

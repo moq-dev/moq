@@ -12,11 +12,11 @@ use crate::{Error, Ladder};
 pub(crate) struct Resolved {
 	/// The rendition/track name serving this incarnation, e.g. `video/360p`.
 	///
-	/// Later incarnations of the same configured height carry a revision suffix
+	/// Later incarnations of the same configured short side carry a revision suffix
 	/// (`video/360p.2`); see [`Names`].
 	pub name: String,
-	/// The configured height this rung serves, which the name is derived from.
-	pub height: u32,
+	/// The configured short side this rung serves, which the name is derived from.
+	pub short_side: u32,
 	/// The output resolution, derived from the source aspect ratio.
 	pub size: moq_video::Size,
 	pub bitrate: moq_net::bandwidth::Rate,
@@ -26,7 +26,7 @@ pub(crate) struct Resolved {
 impl Resolved {
 	/// Whether `other` resolves to exactly this picture, whatever it is named.
 	pub fn same_shape(&self, other: &Self) -> bool {
-		self.height == other.height
+		self.short_side == other.short_side
 			&& self.size == other.size
 			&& self.bitrate == other.bitrate
 			&& self.framerate == other.framerate
@@ -43,19 +43,19 @@ impl Resolved {
 /// used, rather than reusing the one it just finished.
 #[derive(Default)]
 pub(crate) struct Names {
-	/// The revision last issued per configured height. The first is the bare
+	/// The revision last issued per configured short side. The first is the bare
 	/// `video/360p`, so a suffix only ever appears on a rung that was resolved
 	/// again.
 	revisions: std::collections::HashMap<u32, u32>,
 }
 
 impl Names {
-	/// A name for a fresh incarnation of `height`.
-	pub fn mint(&mut self, height: u32) -> String {
-		let revision = self.revisions.entry(height).and_modify(|r| *r += 1).or_insert(1);
+	/// A name for a fresh incarnation of the short-side `size`.
+	pub fn mint(&mut self, size: u32) -> String {
+		let revision = self.revisions.entry(size).and_modify(|r| *r += 1).or_insert(1);
 		match *revision {
-			1 => format!("video/{height}p"),
-			revision => format!("video/{height}p.{revision}"),
+			1 => format!("video/{size}p"),
+			revision => format!("video/{size}p.{revision}"),
 		}
 	}
 }
@@ -288,30 +288,28 @@ pub(crate) fn resolve_rungs(ladder: &Ladder, source_name: &str, source: &VideoCo
 
 	let mut resolved: Vec<Resolved> = Vec::new();
 	for rung in ladder.rungs() {
-		let height = rung.height as u64;
-		if height > source_height {
-			// Never upscale.
+		let side = u64::from(rung.size);
+		let source_side = source_width.min(source_height);
+		if side > source_side {
 			continue;
 		}
-		// A same-height rung is only useful at a lower bitrate, and an unknown
-		// source bitrate can't prove that.
-		if height == source_height && source.bitrate.is_none() {
+		// At equal resolution, only a known lower bitrate makes a rung useful.
+		if side == source_side && source.bitrate.is_none() {
 			continue;
 		}
-		if source.bitrate.is_some_and(|bitrate| rung.bitrate.as_bps() >= bitrate) {
+		if source.bitrate.is_some_and(|rate| rung.bitrate.as_bps() >= rate) {
 			continue;
 		}
-		// Preserve the source aspect ratio, rounded to even for I420 chroma.
-		let width = ((source_width * height + source_height / 2) / source_height) & !1;
-		if width == 0 {
+		let scale = |dimension| ((dimension * side + source_side / 2) / source_side) & !1;
+		let width = scale(source_width);
+		let height = scale(source_height);
+		if width < 2 || height < 2 {
 			continue;
 		}
-
-		let height = height as u32;
 		resolved.push(Resolved {
-			name: format!("video/{height}p"),
-			height,
-			size: moq_video::Size::new(width as u32, height),
+			name: format!("video/{}p", rung.size),
+			short_side: rung.size,
+			size: moq_video::Size::new(width as u32, height as u32),
 			bitrate: rung.bitrate,
 			framerate,
 		});
@@ -440,7 +438,7 @@ mod tests {
 		let mut published = [Published {
 			rung: Resolved {
 				name: "video/360p".into(),
-				height: 360,
+				short_side: 360,
 				size: moq_video::Size::new(640, 360),
 				bitrate: moq_net::bandwidth::Rate::from_bps(600_000),
 				framerate: Some(moq_video::Rate::new(30, 1).unwrap()),
@@ -503,15 +501,18 @@ mod tests {
 			(source(1920, 1080, Some(6_000_000)), vec![240, 360, 480, 720]),
 		] {
 			let resolved = resolve_rungs(&ladder, "video", &picture).unwrap();
-			assert_eq!(resolved.iter().map(|rung| rung.height).collect::<Vec<_>>(), expected);
+			assert_eq!(
+				resolved.iter().map(|rung| rung.short_side).collect::<Vec<_>>(),
+				expected
+			);
 			assert!(resolved.windows(2).all(|pair| pair[0].bitrate < pair[1].bitrate));
 		}
 	}
 
 	#[test]
-	fn same_height_needs_lower_bitrate() {
+	fn same_short_side_needs_lower_bitrate() {
 		let rungs = Ladder::new([Rung::new(480, moq_net::bandwidth::Rate::from_bps(1_200_000))]).unwrap();
-		// Unknown source bitrate: a same-height rung can't prove it's below.
+		// Unknown source bitrate: a same-short-side rung can't prove it's below.
 		assert!(
 			resolve_rungs(&rungs, "video", &source(854, 480, None))
 				.unwrap()
@@ -536,14 +537,54 @@ mod tests {
 		assert_eq!(resolved.len(), 1);
 		assert_eq!(resolved[0].size, moq_video::Size::new(640, 360));
 
-		// Vertical video: aspect preserved, width rounded to even.
+		// Vertical video keeps the same pixel count and bitrate as a rotated landscape frame.
 		let resolved = resolve_rungs(
 			&Ladder::new([Rung::new(360, moq_net::bandwidth::Rate::from_bps(600_000))]).unwrap(),
 			"video",
 			&source(1080, 1920, Some(6_000_000)),
 		)
 		.unwrap();
-		assert_eq!(resolved[0].size, moq_video::Size::new(202, 360));
+		assert_eq!(resolved[0].size, moq_video::Size::new(360, 640));
+	}
+
+	#[test]
+	fn portrait_ladders_use_the_coded_short_side_and_keep_rotation() {
+		let ladder = Ladder::new([
+			Rung::new(360, moq_net::bandwidth::Rate::from_bps(600_000)),
+			Rung::new(720, moq_net::bandwidth::Rate::from_bps(2_500_000)),
+		])
+		.unwrap();
+		for (width, height, rotation, expected) in [
+			(1080, 1920, None, [(360, 640), (720, 1280)]),
+			(1920, 1080, Some(90.0), [(640, 360), (1280, 720)]),
+		] {
+			let input = source(width, height, Some(6_000_000));
+			let resolved = resolve_rungs(&ladder, "video", &input).unwrap();
+			let sizes: Vec<_> = resolved
+				.iter()
+				.map(|rung| (rung.size.width, rung.size.height))
+				.collect();
+			assert_eq!(sizes, expected);
+			let mut catalog = moq_mux::catalog::hang::Catalog::default();
+			catalog.video.rotation = rotation;
+			let published: Vec<_> = resolved
+				.into_iter()
+				.map(|rung| Published {
+					entry: source(rung.size.width, rung.size.height, Some(rung.bitrate.as_bps())),
+					rung,
+				})
+				.collect();
+			let mut output = moq_mux::catalog::hang::Catalog::default();
+			populate(&mut output, &catalog, &published, None).unwrap();
+			assert_eq!(output.video.rotation, rotation);
+			assert_eq!(output.video.renditions.len(), 2);
+		}
+		// A narrow portrait cannot admit a rung wider than its coded short side.
+		assert!(
+			resolve_rungs(&ladder, "video", &source(320, 1080, None))
+				.unwrap()
+				.is_empty()
+		);
 	}
 
 	/// A publisher that advertises its codec before opening its camera has no dimensions yet, and
@@ -630,7 +671,7 @@ mod tests {
 	async fn rung_entry_describes_the_rung() {
 		let rung = Resolved {
 			name: "video/360p".to_string(),
-			height: 360,
+			short_side: 360,
 			size: moq_video::Size::new(640, 360),
 			bitrate: moq_net::bandwidth::Rate::from_bps(600_000),
 			framerate: Some(moq_video::Rate::new(30, 1).unwrap()),
@@ -662,7 +703,7 @@ mod tests {
 	async fn an_unknown_rate_stays_unknown_after_probe() {
 		let rung = Resolved {
 			name: "video/360p".to_string(),
-			height: 360,
+			short_side: 360,
 			size: moq_video::Size::new(640, 360),
 			bitrate: moq_net::bandwidth::Rate::from_bps(600_000),
 			framerate: None,
@@ -913,5 +954,47 @@ mod tests {
 		populate(&mut out, &child, &[], None).unwrap();
 		assert_eq!(out.archive, Some(archive), "a derivative keeps the child's archive");
 		assert_eq!(out.clock, Some(clock), "a derivative keeps the child's clock");
+	}
+
+	/// A derivative runs on its source's mapping: `populate` writes the source's root clock through
+	/// `modify()`, so the derivative's clock carries that mapping and its data is stamped on it.
+	#[tokio::test(start_paused = true)]
+	async fn a_derivative_stamps_on_its_source_clock() {
+		use std::time::{Duration, Instant, SystemTime};
+
+		// A minute in, the source's mapping is far from the one a fresh clock would advertise.
+		let ago = Duration::from_secs(60);
+		let clock = moq_mux::Clock::at(Instant::now() - ago, SystemTime::now() - ago).unwrap();
+		let mut input = moq_net::broadcast::Info::default().produce();
+		let source =
+			moq_mux::catalog::Producer::new(&mut input, moq_mux::catalog::Config::default().with_clock(clock)).unwrap();
+
+		let mut output = moq_net::broadcast::Info::default().produce();
+		let mut derived = moq_mux::catalog::Producer::new(&mut output, moq_mux::catalog::Config::default()).unwrap();
+		let mut guard = derived.modify().unwrap();
+		populate(&mut guard, &source.snapshot(), &[], None).unwrap();
+		guard.commit().unwrap();
+		let adopted = derived.clock();
+		assert_eq!(adopted.wall(), clock.wall());
+
+		let info = moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI);
+		let mut status = derived
+			.json_snapshot::<u32>(
+				output.create_track("status", info).unwrap(),
+				moq_mux::json::Config::default(),
+			)
+			.unwrap();
+		let mut subscriber = status.consume();
+		tokio::time::advance(Duration::from_secs(3)).await;
+		status.update(moq_net::Timed::from(&1).at(adopted.now())).unwrap();
+
+		let waiter = kio::Waiter::noop();
+		let std::task::Poll::Ready(Ok(Some(mut group))) = subscriber.poll_recv_group(&waiter) else {
+			panic!("the update is published");
+		};
+		let std::task::Poll::Ready(Ok(Some(frame))) = group.poll_read_frame(&waiter) else {
+			panic!("the update is published");
+		};
+		assert_eq!(frame.timestamp.unwrap().as_millis(), adopted.now().as_millis());
 	}
 }

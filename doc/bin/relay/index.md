@@ -17,7 +17,7 @@ relay serves video, audio, and data alike.
 - **A group cache** with byte and age budgets, so late joiners and the HLS gateway can fetch recent history.
 - **HTTP endpoints** to list broadcasts, fetch groups, probe health, and scrape Prometheus metrics. See [HTTP](/bin/relay/http).
 - **Live stats** published as MoQ tracks per node and per tenant, split by billing tier.
-- **Plaintext TCP and Unix-socket listeners** for trusted local workers, and experimental [iroh](/concept/transport#iroh-peer-to-peer-experimental) peer-to-peer.
+- **Plaintext TCP and Unix-socket listeners** for trusted local workers, and experimental [iroh](/concept/transport#iroh-peer-to-peer-experimental) peer-to-peer in source builds with the `iroh` feature.
 - **Hot reload** of certificates and trust roots.
 
 ## Run
@@ -77,6 +77,9 @@ relay.with_web(web).run().await?;
   DNS before draining, call `with_signals(false)` and fire `shutdown_trigger()`
   yourself. The drain reaches only MoQ sessions, so stop any extra listener
   (RTMP, SRT, ...) on your own deadline.
+- To serve MoQ from your own `moq_tokio::server::Config`, set its `activity`
+  from `relay.shutdown().activity()` and pass `relay.shutdown().clone()` to
+  `Connection::with_shutdown`, so the drain waits for its handshakes too.
 - To decide admissions yourself, leave `[auth]` empty and answer
   `relay.admissions()`; see [Authentication](/bin/relay/auth#in-process).
 

@@ -7,8 +7,7 @@
 //! continuation included) on that worker; a wrong prefix stalls the
 //! handshake, so every dial being accepted is what proves the steering.
 //!
-//! Kernel-gated: skips loudly below the Linux 6.12 floor (GitHub-hosted CI),
-//! and runs everywhere else.
+//! Unsupported local kernels skip loudly; MOQ_STRICT makes CI refuse them.
 
 #![cfg(all(target_os = "linux", feature = "noq"))]
 
@@ -26,7 +25,7 @@ use moq_uring::{Config, Error, Worker, quic, udp};
 fn worker() -> Option<Worker> {
 	match Worker::new(Config::default()) {
 		Ok(worker) => Some(worker),
-		Err(Error::Unsupported(reason)) => {
+		Err(Error::Unsupported(reason)) if std::env::var_os("MOQ_STRICT").is_none() => {
 			eprintln!("skipping io_uring workers test: {reason}");
 			None
 		}
@@ -117,8 +116,12 @@ fn a_steered_group_serves_a_shared_port() {
 				// steers with, and there is no other way to hand one over.
 				let socket = handle.udp(member, udp::Config::default()).expect("socket");
 
-				let mut server = quic::server::Config::new(quic::Identity::open(cert, key).expect("identity"));
-				server.alpn = vec![ALPN.to_string()];
+				let server = quic::server::Config::new(
+					quic::Identity::open(cert, key)
+						.expect("identity")
+						.server(&[ALPN], quic::server::ClientAuth::None)
+						.expect("tls"),
+				);
 				let endpoint = quic::Endpoint::new(socket, quic::endpoint::Config::default().with_server(server))
 					.expect("endpoint");
 

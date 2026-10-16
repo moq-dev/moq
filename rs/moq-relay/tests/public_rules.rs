@@ -12,12 +12,17 @@ use std::time::Duration;
 use moq_relay::{auth, cluster, web};
 use moq_tokio::moq_net;
 
+/// A millisecond track: the frames written here carry timestamps.
+fn timed() -> moq_net::track::Info {
+	moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+}
+
 const TIMEOUT: Duration = Duration::from_secs(10);
 
 fn client() -> moq_tokio::Client {
 	let mut config = moq_tokio::connect::Config::default();
 	config.once = Some(true);
-	config.websocket.delay = Duration::ZERO;
+	config.websocket.delay = Some(Duration::ZERO);
 	config.bind = Some("127.0.0.1:0".parse().expect("parse bind"));
 	config.init(Default::default()).expect("client init")
 }
@@ -62,7 +67,7 @@ async fn publish(url: url::Url, name: &str) -> Box<dyn std::any::Any> {
 	let origin = moq_tokio::origin::spawn();
 	let broadcast = origin.create_broadcast(name).expect("create broadcast");
 	broadcast.announce(Default::default()).expect("announce");
-	let track = broadcast.create_track("video", None).expect("create track");
+	let track = broadcast.create_track("video", timed()).expect("create track");
 	let mut group = track.append_group().expect("append group");
 	group
 		.write_frame(moq_net::Timestamp::ZERO, b"hello".as_ref())

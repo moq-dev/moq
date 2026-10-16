@@ -1,9 +1,9 @@
 //! H.265 single-rendition Annex-B exporter.
 //!
-//! HEVC analogue of [`crate::codec::h264::Export`]. Accepts either a hev1
-//! (Annex-B, parameter sets inline) or hvc1 (length-prefixed + out-of-band
-//! hvcC) source and emits a raw Annex-B elementary stream. Timestamps are
-//! dropped.
+//! HEVC analogue of [`crate::codec::h264::Export`]. Sources without a description
+//! are already Annex-B. With an hvcC description, length prefixes become start codes
+//! and any out-of-band parameter sets precede keyframes. hev1 samples may carry all
+//! parameter sets inline. Timestamps are dropped.
 
 use std::task::{Poll, ready};
 
@@ -21,6 +21,10 @@ pub struct Export<S: Stream> {
 	catalog: Option<S>,
 	max_delay: std::time::Duration,
 	track: Option<H265Track>,
+	/// The latest presentation time written. A switch to another rendition resumes at its first
+	/// keyframe past it: a new subscription starts at the rendition's latest group, which for
+	/// one re-enabled is the stale group it stopped on.
+	playhead: Option<std::time::Duration>,
 }
 
 struct H265Track {
@@ -31,13 +35,14 @@ struct H265Track {
 	/// silently reusing a stale `convert`.
 	config: VideoConfig,
 	source: ExportSource,
-	/// `Some` for an hvc1 source: VPS/SPS/PPS prefix prebuilt from the hvcC,
-	/// and the hvcC length-prefix size. `None` for a hev1 source: Annex-B
-	/// passes through without conversion.
-	convert: Option<Hvc1Convert>,
+	/// A decoder description supplies length-prefix size and any out-of-band parameter sets.
+	/// Without one, the payload is already Annex-B.
+	convert: Option<Convert>,
+	/// Frames are dropped until a keyframe past the playhead.
+	joining: bool,
 }
 
-struct Hvc1Convert {
+struct Convert {
 	length_size: usize,
 	keyframe_prefix: Bytes,
 }
@@ -54,6 +59,7 @@ impl<S: Stream> Export<S> {
 			catalog: Some(catalog),
 			max_delay: std::time::Duration::ZERO,
 			track: None,
+			playhead: None,
 		}
 	}
 
@@ -93,6 +99,14 @@ impl<S: Stream> Export<S> {
 
 			match ready!(track.source.poll_read(waiter))? {
 				Some(frame) => {
+					let timestamp = std::time::Duration::from(frame.timestamp);
+					if track.joining {
+						if !frame.keyframe || self.playhead.is_some_and(|playhead| timestamp <= playhead) {
+							continue;
+						}
+						track.joining = false;
+					}
+					self.playhead = self.playhead.max(Some(timestamp));
 					let bytes = match &track.convert {
 						None => frame.payload,
 						Some(convert) => {
@@ -115,7 +129,7 @@ impl<S: Stream> Export<S> {
 
 	fn update_catalog(&mut self, catalog: &Catalog) -> crate::Result<()> {
 		let mut catalog = catalog.clone();
-		self.source.retain_valid_media(&mut catalog);
+		self.source.retain_selectable(&mut catalog);
 
 		let picked = catalog
 			.video
@@ -152,7 +166,9 @@ impl<S: Stream> Export<S> {
 			None => None,
 			Some(hvcc) => {
 				let params = super::Hvcc::parse(hvcc)?;
-				if params.vps.is_empty() || params.sps.is_empty() || params.pps.is_empty() {
+				if matches!(&config.codec, hang::catalog::VideoCodec::H265(codec) if !codec.in_band)
+					&& (params.vps.is_empty() || params.sps.is_empty() || params.pps.is_empty())
+				{
 					return Err(super::Error::MissingParamSets {
 						name: name.clone(),
 						vps: params.vps.len(),
@@ -162,7 +178,7 @@ impl<S: Stream> Export<S> {
 					.into());
 				}
 				let prefix = annexb::build_prefix(params.vps.iter().chain(params.sps.iter()).chain(params.pps.iter()));
-				Some(Hvc1Convert {
+				Some(Convert {
 					length_size: params.length_size,
 					keyframe_prefix: prefix,
 				})
@@ -174,6 +190,7 @@ impl<S: Stream> Export<S> {
 			config: config.clone(),
 			source,
 			convert,
+			joining: true,
 		});
 
 		Ok(())
@@ -279,7 +296,7 @@ mod tests {
 		let consumer = broadcast.consume();
 		// The whole track is written before the exporter runs, so it needs a budget
 		// wide enough to read it: the default skips everything but the live edge.
-		let mut export = Export::new(crate::source::announced(&consumer), Once(Some(catalog)))
+		let mut export = Export::new(crate::source::announced(&consumer).await, Once(Some(catalog)))
 			.with_max_delay(std::time::Duration::from_secs(30));
 
 		let frame0 = export.next().await.unwrap().expect("first frame");
@@ -302,5 +319,112 @@ mod tests {
 			"group-start frame must begin with VPS/SPS/PPS"
 		);
 		assert_eq!(&frame1[prefix.len()..], &[0, 0, 0, 1, 0x02, 0x01, 0xe0, 0x12]);
+	}
+	/// The next chunk, required to be ready without another frame arriving.
+	async fn next<S: Stream>(export: &mut Export<S>) -> Bytes {
+		tokio::time::timeout(std::time::Duration::from_millis(1), export.next())
+			.await
+			.expect("a frame is ready")
+			.unwrap()
+			.expect("the export continues")
+	}
+
+	/// A disabled rendition hands the stream to its enabled sibling. Re-enabled, it takes the
+	/// stream back at its first keyframe past what was written, skipping the stale group a new
+	/// subscription starts on.
+	#[tokio::test(start_paused = true)]
+	async fn follows_the_catalog_across_a_disable() {
+		use crate::container::test_util::{Live, raw_frame};
+
+		let mut config = VideoConfig::new(H265 {
+			in_band: true,
+			profile_space: 0,
+			profile_idc: 1,
+			profile_compatibility_flags: [0x60, 0, 0, 0],
+			tier_flag: false,
+			level_idc: 93,
+			constraint_flags: [0x90, 0, 0, 0, 0, 0],
+		});
+		config.coded_width = Some(320);
+		config.coded_height = Some(240);
+		config.container = hang::catalog::Container::Legacy;
+		let sibling_config = config.clone();
+		let mut live = Live::new(".hev1", |catalog, name| {
+			catalog.modify().unwrap().video.renditions.insert(name, config);
+		});
+		let primary = live.track.name().to_string();
+		let mut sibling = live.add_track(".sibling", |catalog, name| {
+			catalog.modify().unwrap().video.renditions.insert(name, sibling_config);
+		});
+		assert!(primary.as_str() < sibling.name(), "the primary is first by name");
+		let set_enabled = |live: &mut Live, enabled: bool| {
+			live.catalog
+				.modify()
+				.unwrap()
+				.video
+				.renditions
+				.get_mut(&primary)
+				.unwrap()
+				.enabled = enabled;
+		};
+		let mut export = Export::new(live.source().await, live.catalog_stream().await);
+
+		live.track.write(raw_frame(0, b"primary-0", true)).unwrap();
+		sibling.write(raw_frame(0, b"sibling-0", true)).unwrap();
+		assert_eq!(next(&mut export).await.as_ref(), b"primary-0");
+
+		set_enabled(&mut live, false);
+		sibling.write(raw_frame(100_000, b"sibling-1", true)).unwrap();
+		assert_eq!(next(&mut export).await.as_ref(), b"sibling-1");
+
+		set_enabled(&mut live, true);
+		assert!(
+			tokio::time::timeout(std::time::Duration::from_millis(1), export.next())
+				.await
+				.is_err(),
+			"the stale group the primary stopped on is not replayed"
+		);
+		live.track.write(raw_frame(200_000, b"primary-2", true)).unwrap();
+		assert_eq!(next(&mut export).await.as_ref(), b"primary-2");
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn in_band_export_accepts_empty_parameter_sets() {
+		for in_band in [false, true] {
+			let mut catalog = hvc1_catalog(
+				"video",
+				Bytes::from_static(&[1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0]),
+			);
+			let config = catalog.video.renditions.get_mut("video").unwrap();
+			let hang::catalog::VideoCodec::H265(codec) = &mut config.codec else {
+				unreachable!()
+			};
+			codec.in_band = in_band;
+			let broadcast = moq_net::broadcast::Info::new().produce();
+			let track = broadcast
+				.create_track("video", hang::container::track_info(hang::catalog::PRIORITY.video))
+				.unwrap();
+			let mut group = track.create_group(moq_net::group::Info { sequence: 0 }).unwrap();
+			let nals: &[&[u8]] = &[&[0x40, 1, 0x0c], &[0x42, 1, 1], &[0x44, 1, 0xc0], &[0x26, 1, 0x88]];
+			write_length_prefixed(&mut group, 0, nals);
+			group.finish().unwrap();
+			track.finish().unwrap();
+			let consumer = broadcast.consume();
+			let mut exporter = Export::new(crate::source::announced(&consumer).await, Once(Some(catalog)));
+			let result = exporter.next().await;
+			if in_band {
+				let expected: Vec<_> = nals
+					.iter()
+					.flat_map(|nal| [0, 0, 0, 1].into_iter().chain(nal.iter().copied()))
+					.collect();
+				assert_eq!(result.unwrap().unwrap().as_ref(), expected.as_slice());
+				assert!(exporter.next().await.unwrap().is_none());
+			} else {
+				assert!(matches!(
+					result,
+					Err(crate::Error::H265(super::super::Error::MissingParamSets { .. }))
+				));
+			}
+		}
 	}
 }

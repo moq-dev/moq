@@ -14,8 +14,8 @@ name: Release Kotlin lib
 #
 # A push is deferred while rs/moq-ffi
 # has changes since its release tag: the wrapper could call FFI API that no
-# published moq-ffi has. Release Kotlin FFI re-triggers this workflow once the
-# next moq-ffi release lands, which then publishes from that tag's commit.
+# published moq-ffi has. The FFI coordinator re-triggers this workflow after
+# its Kotlin publisher succeeds, then publishes from that tag's commit.
 
 on:
   push:
@@ -42,7 +42,7 @@ on:
   # dispatch on `release` publishes.
   workflow_dispatch:
   workflow_run:
-    workflows: ["Release Kotlin FFI"]
+    workflows: ["Release FFI", "Release Kotlin FFI"]
     types:
       - completed
 
@@ -50,17 +50,42 @@ permissions:
   contents: read
 
 jobs:
-  check-version:
-    name: Check version
+  ffi-release:
+    name: Check FFI publisher
     runs-on: ubuntu-latest
-    # workflow_run has the base repository's privileges, so accept only a
-    # successful upstream tag-push run from the expected release workflow.
+    # workflow_run is privileged. Preserve the owner, push and tag gates before
+    # reading the trusted upstream checkout or allowing wrapper publication.
     if: >-
       github.event_name != 'workflow_run' ||
       (github.repository_owner == 'moq-dev' &&
-       github.event.workflow_run.conclusion == 'success' &&
+       (github.event.workflow_run.name == 'Release FFI' || github.event.workflow_run.conclusion == 'success') &&
        github.event.workflow_run.event == 'push' &&
        startsWith(github.event.workflow_run.head_branch, 'moq-ffi-v'))
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      ready: ${{ steps.publisher.outputs.ready }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: ./.github/actions/just
+      - name: Check independent publisher
+        id: publisher
+        env:
+          GH_TOKEN: ${{ github.token }}
+          UPSTREAM_NAME: ${{ github.event.workflow_run.name }}
+          UPSTREAM_RUN_ID: ${{ github.event.workflow_run.id }}
+          UPSTREAM_RUN_STARTED_AT: ${{ github.event.workflow_run.run_started_at }}
+        run: just gh ffi completed kotlin
+
+  check-version:
+    name: Check version
+    needs: [ffi-release]
+    if: needs.ffi-release.outputs.ready == 'true'
+    runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.version.outputs.version }}
       should_publish: ${{ steps.decide.outputs.should_publish }}
@@ -97,7 +122,7 @@ jobs:
           fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
-      # workflow_run is chained after Release Kotlin FFI, so its tag is
+      # workflow_run verifies the Kotlin FFI publisher, so its tag is
       # published. PRs run it too, so the dry-run shows whether merging would
       # publish.
       - name: Check for unreleased FFI changes
@@ -184,7 +209,7 @@ jobs:
           # dropped from the SDK repository. Gradle fetches the rest itself.
           packages: platform-tools
 
-      - uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6.3.0
+      - uses: gradle/actions/setup-gradle@3f5f9adaf7d9fecd50b5935e54106014257a94e6 # v6.4.0
 
       # check-version runs outside the serialized group, so an earlier run
       # holding it may have published this version since. Check again.

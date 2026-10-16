@@ -19,6 +19,10 @@ mod import_test;
 #[derive(Debug, Clone, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
+	/// A subtitle cue cannot be represented with valid text and timing.
+	#[error("invalid subtitle: {0}")]
+	InvalidSubtitle(&'static str),
+
 	#[error("unsupported EBML DocType: {0}")]
 	UnsupportedDocType(String),
 
@@ -70,9 +74,6 @@ pub enum Error {
 
 	#[error("MKV track layout changed after header was emitted: track '{0}' added")]
 	HeaderAddedTrack(String),
-
-	#[error("MKV track layout changed after header was emitted: track '{0}' removed")]
-	HeaderRemovedTrack(String),
 
 	#[error("MKV export does not support CMAF {kind} track '{name}'")]
 	UnsupportedCmafTrack { kind: String, name: String },

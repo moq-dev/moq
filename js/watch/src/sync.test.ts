@@ -147,15 +147,73 @@ describe("wait", () => {
 		sync.close();
 	});
 
-	it("wakes a sleeping wait on reset", async () => {
+	it("holds a sleeping wait across a reset until the next frame re-anchors", async () => {
 		const sync = new Sync({ delay: 10_000 as Time.Milli });
 		await flush();
-		sync.received(Time.Milli.now());
+		const timestamp = Time.Milli.now();
+		sync.received(timestamp);
 
-		const waiting = sync.wait(Time.Milli.now());
+		let woke = false;
+		const waiting = sync.wait(timestamp).then(() => {
+			woke = true;
+		});
 		await flush();
 		sync.reset();
+		await flush();
+		expect(woke).toBe(false);
+
+		// The next frame anchors far enough ahead that this one is overdue.
+		sync.received(Time.Milli.add(timestamp, Time.Milli(20_000)));
+		await waiting;
+		expect(woke).toBe(true);
+		sync.close();
+	});
+
+	it("releases a wait parked across a reset when its signal aborts", async () => {
+		const sync = new Sync({ delay: 10_000 as Time.Milli });
+		await flush();
+		const timestamp = Time.Milli.now();
+		sync.received(timestamp);
+
+		const controller = new AbortController();
+		const waiting = sync.wait(timestamp, controller.signal);
+		await flush();
+		sync.reset();
+		await flush();
+		controller.abort();
 		await waiting;
 		sync.close();
+	});
+
+	it("releases a wait parked across a reset when closed", async () => {
+		const sync = new Sync({ delay: 10_000 as Time.Milli });
+		await flush();
+		const timestamp = Time.Milli.now();
+		sync.received(timestamp);
+
+		const waiting = sync.wait(timestamp);
+		await flush();
+		sync.reset();
+		await flush();
+		sync.close();
+		await waiting;
+	});
+});
+
+describe("recorded ingress", () => {
+	it("anchors and classifies using arrival rather than delayed delivery", async () => {
+		const sync = new Sync({ delay: Time.Milli(100) });
+		const original = performance.now;
+		performance.now = () => 10000;
+		try {
+			for (let i = 0; i < 20; i++) await Promise.resolve();
+			expect(sync.received(Time.Milli(0), "audio", Time.Milli(1000))).toBe(false);
+			expect(sync.out.reference.peek()).toBe(Time.Milli(1000));
+			expect(sync.received(Time.Milli(20), "audio", Time.Milli(1020))).toBe(false);
+			expect(sync.received(Time.Milli(40), "audio", Time.Milli(1200))).toBe(true);
+		} finally {
+			performance.now = original;
+			sync.close();
+		}
 	});
 });

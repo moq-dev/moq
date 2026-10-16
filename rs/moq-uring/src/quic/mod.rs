@@ -6,7 +6,8 @@
 //! GRO coalesces in), arms the worker's userspace timers from the
 //! connection's timeout, and wakes stream waiters. The returned
 //! [`Connection`] implements [`web_transport_trait::poll`], so
-//! wrapping it with `crate::transport::Session::new` lets
+//! wrapping it with `crate::transport::Session::new` and
+//! [`moq_net::transport::Binding::InBand`] lets
 //! `moq_net::Client::connect_lite` / `Server::accept_lite` run real moq-lite
 //! sessions on the worker; everything is `Rc`-shared and `!Send` by design.
 //!
@@ -21,6 +22,7 @@
 
 pub mod client;
 pub mod endpoint;
+pub mod handshake;
 #[cfg(feature = "qlog")]
 pub mod qlog;
 pub mod server;
@@ -65,6 +67,17 @@ impl Identity {
 			cert: cert.into(),
 			key: key.into(),
 		}
+	}
+
+	/// A TLS 1.3 server policy presenting this identity, speaking `alpn` in
+	/// preference order, and checking clients as `client_auth` says.
+	pub fn server(
+		&self,
+		alpn: &[impl AsRef<str>],
+		client_auth: server::ClientAuth,
+	) -> Result<std::sync::Arc<rustls::ServerConfig>, Error> {
+		let alpn = alpn.iter().map(|proto| proto.as_ref().as_bytes().to_vec()).collect();
+		noq::identity_server_config(self, alpn, &client_auth)
 	}
 
 	/// The PEM certificate chain being presented, for a caller that publishes

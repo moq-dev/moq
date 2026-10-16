@@ -4,6 +4,7 @@ import { sharedStreamCode } from "./ietf/error.ts";
 import type { IetfVersion } from "./ietf/version.ts";
 import { Version } from "./ietf/version.ts";
 import { Version as Lite, type Version as LiteVersion } from "./lite/version.ts";
+import { decodeError } from "./util/decode_error.ts";
 import { TimeoutError, withTimeout } from "./util/timeout.ts";
 import { POW32, toBigInt, toNumber, U64 } from "./util/u64.ts";
 import { decodeUtf8 } from "./util/utf8.ts";
@@ -19,6 +20,10 @@ import {
 	writeLeadingOnes,
 	writeQuic,
 } from "./util/varint.ts";
+import { Budget } from "./util/yield.ts";
+
+// Sharing the slice across writers bounds concurrent groups and subscriber fanout too.
+const writeBudget = new Budget();
 
 // Decode raw transport errors before mapping so they cannot bypass the negotiated
 // registry. Ordinary errors already send 0 and retain their local identity.
@@ -413,7 +418,7 @@ export class Reader {
 			this.#short = undefined;
 			return result;
 		} catch (err: unknown) {
-			if (!(err instanceof Short)) throw err;
+			if (!(err instanceof Short)) throw decodeError(err);
 			// Filling could never satisfy it, so retrying would spin.
 			if (err.need <= this.#buffer.byteLength) throw new Error("decode ran short of bytes it already had");
 			this.#short = { decode, err };
@@ -772,6 +777,8 @@ export class Writer {
 		await this.#writer.write(v).catch((err: unknown) => {
 			throw fromTransport(err, { version: asIetf(this.version) });
 		});
+		const pause = writeBudget.poll();
+		if (pause !== undefined) await pause;
 	}
 
 	async string(str: string) {

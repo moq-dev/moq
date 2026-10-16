@@ -37,8 +37,8 @@ pub struct ExportArgs {
 	#[usage(flatten)]
 	pub endpoint: Args,
 
-	/// How far a group may fall behind the live edge before it is skipped. RTMP is
-	/// unpaced, so this bounds buffering, not the wire rate.
+	/// FLV frame release delay and stalled-group budget. Late video resumes at
+	/// its next keyframe; zero releases available frames without deadline drops.
 	#[usage(long, default = "500ms")]
 	pub max_delay: crate::duration::Duration,
 

@@ -746,12 +746,9 @@ impl<S: Stream> Play<S> {
 		self.peer
 	}
 
-	/// Set how long the FLV muxer waits for a stalled group before skipping to a
-	/// newer one (the moq-level frame-drop latency). Defaults to
-	/// [`DEFAULT_MAX_DELAY`](crate::DEFAULT_MAX_DELAY). RTMP is unpaced (tags go out as
-	/// fast as the socket accepts them), so this bounds buffering, not the wire
-	/// rate. Pass [`Duration::ZERO`] to drop stale groups
-	/// aggressively.
+	/// Set the FLV release delay and stalled-group budget.
+	/// Defaults to [`DEFAULT_MAX_DELAY`](crate::DEFAULT_MAX_DELAY); zero releases
+	/// available frames immediately without deadline drops.
 	pub fn with_max_delay(mut self, latency: Duration) -> Self {
 		self.latency = latency;
 		self
@@ -828,17 +825,17 @@ impl<S: Stream> Play<S> {
 		};
 
 		// The capability check consumed its snapshot, so the export follows a fresh
-		// subscription narrowed to what the client can play. It resolves through the
-		// same source as the tracks, so a publisher that reconnected since the check
-		// doesn't split the catalog from its media.
-		let source = moq_mux::Source::new(origin.consume(), path.as_str());
+		// subscription narrowed to what the client can play. It reads the broadcast the
+		// check resolved, so a publisher that reconnected since then doesn't split the
+		// catalog from its media.
+		let source = moq_mux::Source::new(origin.clone(), broadcast);
 		let stream = source
 			.catalog::<()>(CatalogFormat::default())
 			.await
 			.map_err(|e| anyhow::anyhow!("init FLV export: {e}"))?
 			.select(select);
 		let mut export = FlvExport::new(source, stream)
-			.with_max_delay(self.latency)
+			.with_delay(self.latency)
 			.with_multitrack(self.capabilities.multitrack);
 
 		// Resolve the catalog and codec headers before Play.Start, too. Otherwise a
@@ -922,15 +919,19 @@ impl<S: Stream> Play<S> {
 
 /// Narrow a play to what the client can decode, or refuse it.
 ///
-/// A multitrack client receives every rendition, so it must play them all. A
-/// single-track client receives the best rendition of each kind it can play.
+/// A multitrack client receives every enabled rendition, so it must play them all. A
+/// single-track client receives the best enabled rendition of each kind it can play.
 fn play_selection(
 	catalog: &moq_mux::catalog::hang::Catalog,
 	capabilities: &ClientCapabilities,
 ) -> std::result::Result<select::Broadcast, String> {
 	let video_playable = |config: &VideoConfig| plays_video(capabilities, config.codec.kind());
 	let video_refused = if capabilities.multitrack {
-		catalog.video.renditions.values().find(|config| !video_playable(config))
+		catalog
+			.video
+			.enabled()
+			.map(|(_, config)| config)
+			.find(|config| !video_playable(config))
 	} else if catalog.video.renditions.values().any(video_playable) {
 		None
 	} else {
@@ -948,7 +949,11 @@ fn play_selection(
 
 	let audio_playable = |config: &hang::catalog::AudioConfig| plays_audio(capabilities, &config.codec);
 	let audio_refused = if capabilities.multitrack {
-		catalog.audio.renditions.values().find(|config| !audio_playable(config))
+		catalog
+			.audio
+			.enabled()
+			.map(|(_, config)| config)
+			.find(|config| !audio_playable(config))
 	} else if catalog.audio.renditions.values().any(audio_playable) {
 		None
 	} else {
@@ -1217,8 +1222,9 @@ async fn pump<S: Stream>(
 					}
 					ServerSessionEvent::PublishStreamFinished { .. } => finished = true,
 					// onMetaData and other script data: the FLV importer reads codec
-					// config from the sequence headers, so metadata isn't forwarded.
-					ServerSessionEvent::StreamMetadataChanged { .. } => {}
+					// config from the sequence headers, so script data isn't forwarded.
+					ServerSessionEvent::StreamMetadataChanged { .. }
+					| ServerSessionEvent::UnhandleableAmf0Data { .. } => publisher.metadata.record(),
 					other => tracing::trace!(%peer, ?other, "ignoring RTMP event"),
 				},
 				ServerSessionResult::UnhandleableMessageReceived(_) => {
@@ -1440,6 +1446,7 @@ async fn run_handshake<S: Stream>(stream: &mut S, peer: SocketAddr) -> anyhow::R
 /// the path.
 struct Publisher {
 	importer: FlvImport,
+	metadata: crate::metadata::Dropped,
 	// A clone of the importer's producer, so an end can close the broadcast
 	// (prompt unannounce) even though the importer owns it.
 	broadcast: moq_net::broadcast::Producer,
@@ -1463,6 +1470,7 @@ impl Publisher {
 
 		Ok(Self {
 			importer,
+			metadata: crate::metadata::Dropped::new(path),
 			broadcast: handle,
 			epoch,
 		})
@@ -1502,6 +1510,58 @@ impl Publisher {
 #[cfg(test)]
 mod tests {
 	use super::*;
+	#[tokio::test(start_paused = true)]
+	#[tracing_test::traced_test]
+	async fn publish_metadata_drops_warn_once() {
+		let (mut stream, _peer) = tokio::io::duplex(1024);
+		let (mut session, _) = ServerSession::new(ServerSessionConfig::new()).unwrap();
+		let origin = moq_tokio::origin::spawn();
+		let mut publisher = Publisher::new(&origin, "metadata", Default::default()).unwrap();
+		let mut work = VecDeque::from([ServerSessionResult::RaisedEvent(
+			ServerSessionEvent::StreamMetadataChanged {
+				app_name: "live".into(),
+				stream_key: "metadata".into(),
+				metadata: crate::rml::sessions::StreamMetadata::new(),
+			},
+		)]);
+		// A custom script message goes through the session's own parser.
+		work.extend(session.handle_input(&crate::metadata::cue_point_packet()).unwrap());
+		work.push_back(ServerSessionResult::RaisedEvent(
+			ServerSessionEvent::PublishStreamFinished {
+				app_name: "live".into(),
+				stream_key: "metadata".into(),
+			},
+		));
+		pump(
+			&mut stream,
+			&mut session,
+			&mut work,
+			&mut publisher,
+			"127.0.0.1:1935".parse().unwrap(),
+		)
+		.await
+		.unwrap();
+		assert_eq!(publisher.metadata.count, 2);
+		publisher.finish().unwrap();
+		drop(publisher);
+		logs_assert(|lines| {
+			let warnings = lines
+				.iter()
+				.filter(|line| line.contains("discarding RTMP stream metadata"))
+				.count();
+			let summary = lines.iter().any(|line| {
+				line.contains("RTMP metadata discard summary")
+					&& line.contains("path=metadata")
+					&& line.contains("count=2")
+			});
+			if warnings == 1 && summary {
+				Ok(())
+			} else {
+				Err(format!("warnings={warnings}, summary={summary}"))
+			}
+		});
+	}
+
 	use crate::rml::sessions::{
 		ClientSession, ClientSessionConfig, ClientSessionEvent, ClientSessionResult, PublishRequestType,
 	};
@@ -1950,26 +2010,43 @@ mod tests {
 		);
 		catalog.video.renditions.insert("c".to_string(), rendition(h264, 720));
 
-		let best = |capabilities: &ClientCapabilities| {
-			let select = play_selection(&catalog, capabilities).unwrap();
+		fn best(catalog: &moq_mux::catalog::hang::Catalog, capabilities: &ClientCapabilities) -> Option<String> {
+			let select = play_selection(catalog, capabilities).unwrap();
 			let mut catalog = catalog.clone();
 			select.retain(&mut catalog);
 			catalog.video.ranked().next().map(|(name, _)| name.clone())
-		};
+		}
 
 		let legacy = ClientCapabilities::default();
-		assert_eq!(best(&legacy).as_deref(), Some("c"));
+		assert_eq!(best(&catalog, &legacy).as_deref(), Some("c"));
 
 		let hevc = FourCcSupport {
 			any: false,
 			fourccs: vec![*b"hvc1"],
 		};
 		let enhanced = ClientCapabilities::new(0, hevc.clone(), FourCcSupport::default());
-		assert_eq!(best(&enhanced).as_deref(), Some("b"));
+		assert_eq!(best(&catalog, &enhanced).as_deref(), Some("b"));
 
 		// Multitrack carries every rendition, so one the client can't decode refuses the play.
-		let multitrack = ClientCapabilities::new(CAPS_EX_MULTITRACK, hevc, FourCcSupport::default());
+		let multitrack = ClientCapabilities::new(CAPS_EX_MULTITRACK, hevc.clone(), FourCcSupport::default());
 		assert!(play_selection(&catalog, &multitrack).is_err());
+
+		// A disabled rendition is never selected, so a single-track client gets the best enabled
+		// one, and a multitrack client that can't decode it still plays the rest.
+		catalog.video.renditions.get_mut("c").unwrap().enabled = false;
+		assert_eq!(best(&catalog, &legacy).as_deref(), Some("a"));
+		let avc = FourCcSupport {
+			any: false,
+			fourccs: vec![*b"avc1"],
+		};
+		let h264_only = ClientCapabilities::new(CAPS_EX_MULTITRACK, avc, FourCcSupport::default());
+		assert!(
+			play_selection(&catalog, &h264_only).is_err(),
+			"b is enabled and is H.265"
+		);
+		catalog.video.renditions.get_mut("b").unwrap().enabled = false;
+		assert!(play_selection(&catalog, &h264_only).is_ok());
+		assert_eq!(best(&catalog, &h264_only).as_deref(), Some("a"));
 	}
 
 	/// A single-track client gets the best audio rendition it can play, not the first by name.

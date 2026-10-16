@@ -27,8 +27,15 @@
 
 use std::time::Duration;
 
+use futures::FutureExt;
+
 use moq_relay::{Config, Relay};
 use moq_tokio::moq_net;
+
+/// A millisecond track: the frames written here carry timestamps.
+fn timed() -> moq_net::track::Info {
+	moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+}
 
 /// Ceiling for anything a drill waits on. Every wait is bounded, so a broken
 /// handoff fails as a timeout with a message instead of hanging the suite.
@@ -298,8 +305,8 @@ fn quic() -> moq_tokio::quic::Config {
 	// busy runner has to stall eight times over before a live session is mistaken
 	// for a dead one.
 	let mut quic = moq_tokio::quic::Config::default();
-	quic.idle_timeout = Duration::from_secs(2);
-	quic.keep_alive = Duration::from_millis(250);
+	quic.idle_timeout = Some(Duration::from_secs(2));
+	quic.keep_alive = Some(Duration::from_millis(250));
 	quic
 }
 
@@ -320,9 +327,9 @@ fn dial() -> moq_tokio::connect::Config {
 
 	// Fast enough to keep a relay bounce or a link flap inside the drill's
 	// budget, paced enough that the loop is still a backoff.
-	config.backoff.initial = Duration::from_millis(50);
-	config.backoff.max = Duration::from_millis(200);
-	config.backoff.timeout = Duration::from_secs(5);
+	config.backoff.initial = Some(Duration::from_millis(50));
+	config.backoff.max = Some(Duration::from_millis(200));
+	config.backoff.timeout = Some(Duration::from_secs(5));
 	config
 }
 
@@ -434,7 +441,7 @@ async fn cancel_under_backpressure_releases_the_reader(lane: Lane) {
 	let publisher = moq_tokio::origin::spawn();
 	let broadcast = publisher.create_broadcast("live").expect("create broadcast");
 	broadcast.announce(Default::default()).expect("announce broadcast");
-	let mut track = broadcast.create_track(TRACK, None).expect("create track");
+	let mut track = broadcast.create_track(TRACK, timed()).expect("create track");
 	let publish_session = tokio::time::timeout(
 		TIMEOUT,
 		client(&url)
@@ -565,7 +572,7 @@ async fn relay_killed_mid_group_aborts_then_resumes(lane: Lane) {
 	let publisher = moq_tokio::origin::spawn();
 	let broadcast = publisher.create_broadcast("live").expect("create broadcast");
 	broadcast.announce(Default::default()).expect("announce broadcast");
-	let mut track = broadcast.create_track(TRACK, None).expect("create track");
+	let mut track = broadcast.create_track(TRACK, timed()).expect("create track");
 	let mut publish_loop = client(&url).publish(publisher.consume()).expect("no connect url");
 
 	let subscriber = moq_tokio::origin::spawn();
@@ -688,7 +695,7 @@ async fn interrupted_publisher_republishes_new_content(lane: Lane) {
 	let first = moq_tokio::origin::spawn();
 	let broadcast = first.create_broadcast("live").expect("create broadcast");
 	broadcast.announce(Default::default()).expect("announce broadcast");
-	let mut track = broadcast.create_track(TRACK, None).expect("create track");
+	let mut track = broadcast.create_track(TRACK, timed()).expect("create track");
 	let first_session = tokio::time::timeout(
 		TIMEOUT,
 		client(&url)
@@ -707,29 +714,26 @@ async fn interrupted_publisher_republishes_new_content(lane: Lane) {
 	let (_, payload) = read_group(&mut reader, "before the interrupt").await;
 	assert_eq!(payload, b"original", "delivery is broken before the drill even starts");
 
-	// The interrupt: the session goes first, so the relay loses the publisher
-	// with no finish and no unannounce, which is what a crashed publisher looks
-	// like. Dropping the broadcast while the session was still up would send a
-	// clean unannounce instead and never reach the crash path. The rest goes
-	// after, including the subscriber's handles, so nothing local keeps the dead
-	// broadcast alive for the assertions below.
+	// Dropping the connection cancels its task asynchronously. Keep the broadcast
+	// alive until the relay withdraws it, so a clean unannounce cannot race the
+	// session loss and satisfy the assertion without testing crash recovery.
 	drop(first_session);
 	drop(reader);
-	drop(track);
-	drop(broadcast);
-	drop(first);
 
 	// Terminal result: the name stops being announced. Nothing told the relay
 	// the broadcast ended, so this is the proof that losing the publisher's
 	// session withdraws what it announced rather than parking subscribers on it.
 	expect_announce(&mut announced, "live", false, "the interrupted publisher").await;
 	println!("fault activated: the interrupted publisher's broadcast was withdrawn");
+	drop(track);
+	drop(broadcast);
+	drop(first);
 
 	// Restore: the same name, a new publisher, different content.
 	let second = moq_tokio::origin::spawn();
 	let broadcast = second.create_broadcast("live").expect("re-create broadcast");
 	broadcast.announce(Default::default()).expect("announce broadcast");
-	let mut track = broadcast.create_track(TRACK, None).expect("re-create track");
+	let mut track = broadcast.create_track(TRACK, timed()).expect("re-create track");
 	let second_session = tokio::time::timeout(
 		TIMEOUT,
 		client(&url)
@@ -790,10 +794,10 @@ const SETTLE: Duration = Duration::from_secs(10);
 
 /// The cross-relay drill's link: the drills' impairment behind a bottleneck a
 /// burst overruns, so its tail waits in the queue or is dropped from it. It is
-/// slower than [`credit`]'s receive window lets a sender go (about 1 KiB per
-/// round trip, some 160 kbit/s), or the window would bind first and the queue
-/// would never fill. The window keeps a burst's datagrams small, so the 50ms
-/// queue holds one or two of them before it drops the rest.
+/// slower than [`credit`]'s receive window lets a sender go. The first burst
+/// is collected at ingress after setup, so scheduling cannot drain the bucket
+/// between its datagrams; its surviving bytes exceed the burst and 50ms queue
+/// allowance before they are accounted at one instant.
 fn bursty() -> moq_shaper::Profile {
 	moq_shaper::Profile {
 		rate: Some(moq_shaper::Rate {
@@ -812,10 +816,22 @@ fn bursty() -> moq_shaper::Profile {
 fn credit(lane: Lane, mut quic: moq_tokio::quic::Config) -> moq_tokio::quic::Config {
 	if let Lane::Impaired = lane {
 		quic.max_streams = Some(16);
-		quic.receive_window = Some(4 * PAYLOAD as u64);
-		quic.stream_receive_window = Some(2 * PAYLOAD as u64);
+		// The one-shot ingress burst must fit inside transport credit before
+		// anything is released. Keep two bucket allowances, rounded to groups,
+		// while still forcing a full application burst to wait for more credit.
+		let receive_window = ingress_bytes();
+		assert!(receive_window < BURST_GROUPS * PAYLOAD as u64);
+		quic.receive_window = Some(receive_window);
+		quic.stream_receive_window = Some(receive_window);
 	}
 	quic
+}
+
+/// Enough bytes to cross the ingress bucket without needing an acknowledgment.
+fn ingress_bytes() -> u64 {
+	let rate = bursty().rate.expect("bursty rate");
+	let queued = (rate.bits_per_second as u128 * rate.queue.as_nanos() / 8 / 1_000_000_000) as u64;
+	(rate.burst + queued).next_multiple_of(PAYLOAD as u64) * 2
 }
 
 /// How a cross-relay group reached the subscriber, or why it never did.
@@ -853,9 +869,16 @@ async fn read_payload(mut group: moq_net::group::Consumer, sequence: u64) -> Res
 	}
 }
 
-/// The payload of group `sequence`: its number, padded to [`PAYLOAD`].
+/// The group number, padded so the first burst's newest group can fill ingress.
 fn payload(sequence: u64) -> Vec<u8> {
-	format!("{sequence:>PAYLOAD$}").into_bytes()
+	// A latest-only subscription can skip every earlier group in a burst.
+	// Its newest frame alone must cross the gate before it needs an ACK.
+	let width = if sequence == BURST_GROUPS - 1 {
+		ingress_bytes() as usize
+	} else {
+		PAYLOAD
+	};
+	format!("{sequence:>width$}").into_bytes()
 }
 
 /// Drill: bursts of one-frame groups cross a two-relay cluster.
@@ -955,7 +978,7 @@ async fn cross_cluster(lane: Lane, link: PeerLink) {
 	// idles out only after `relay_idle`, which the flap's waits allow for.
 	let mut config = relay_config();
 	config.quic = credit(lane, config.quic);
-	let relay_idle = config.quic.idle_timeout;
+	let relay_idle = config.quic.resolve().idle_timeout;
 	let origin = RelayHost::start(config).await;
 	let seed = seed(lane);
 	let peer = match (link, lane) {
@@ -973,7 +996,7 @@ async fn cross_cluster(lane: Lane, link: PeerLink) {
 	config.connect = dial();
 	// Retry forever: a give-up after a slow impaired handshake would look exactly
 	// like the never-redialed regression, and a stall still fails the drill.
-	config.connect.backoff.timeout = Duration::ZERO;
+	config.connect.backoff.timeout = Some(Duration::ZERO);
 	if link == PeerLink::Transport {
 		config.connect.version = vec!["moq-transport-19".parse().expect("parse version")];
 	}
@@ -986,7 +1009,7 @@ async fn cross_cluster(lane: Lane, link: PeerLink) {
 	let publisher = moq_tokio::origin::spawn();
 	let broadcast = publisher.create_broadcast("live").expect("create broadcast");
 	broadcast.announce(Default::default()).expect("announce broadcast");
-	let mut track = broadcast.create_track(TRACK, None).expect("create track");
+	let mut track = broadcast.create_track(TRACK, timed()).expect("create track");
 	let url = publish_path.url.clone();
 	let publish_session = tokio::time::timeout(
 		TIMEOUT,
@@ -1018,10 +1041,33 @@ async fn cross_cluster(lane: Lane, link: PeerLink) {
 
 	// Subscribed before the first burst, as an app watching a control channel is.
 	let mut reader = subscribe(&subscribed, "live").await;
+	// The subscriber's subscription can start before the origin's reaches the
+	// publisher, which takes extra round trips over a moq-transport peer. The
+	// ingress burst holds every publisher datagram, including the replies and
+	// credit the origin needs before it subscribes, so arming it any earlier
+	// starves the publisher's session until it idles out.
+	tokio::time::timeout(TIMEOUT, async {
+		while track.subscription().is_none() {
+			track.subscription_changed().await.expect("track aborted");
+		}
+	})
+	.await
+	.expect("the origin never subscribed to the publisher");
 
 	// What connecting and subscribing overflowed, so only the bursts are graded.
 	let paths = [&peer, &publish_path, &subscribe_path];
 	let setup_overflowed: u64 = paths.iter().map(|path| path.overflowed()).sum();
+	let ingress = match lane {
+		Lane::Impaired => Some(
+			publish_path
+				.shaper
+				.as_ref()
+				.expect("impaired path")
+				.burst(moq_shaper::ingress::Direction::Up)
+				.expect("arm an ingress burst"),
+		),
+		Lane::Loopback => None,
+	};
 
 	let total = BURSTS * BURST_GROUPS;
 	let mut written = Vec::new();
@@ -1206,6 +1252,13 @@ async fn cross_cluster(lane: Lane, link: PeerLink) {
 		.values()
 		.filter(|outcome| !matches!(outcome, Outcome::Live))
 		.count();
+	if let Some(ingress) = ingress {
+		ingress
+			.completed()
+			.now_or_never()
+			.expect("ingress burst never completed")
+			.expect("ingress burst cancelled");
+	}
 	let overflowed = paths.iter().map(|path| path.overflowed()).sum::<u64>() - setup_overflowed;
 	println!(
 		"fault activated: {gaps} of {total} groups missed the live subscription (reset: {resets:?}), {overflowed} datagrams overflowed a bottleneck during the bursts, slowest group {} after {:?}",

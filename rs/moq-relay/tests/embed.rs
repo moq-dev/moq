@@ -15,6 +15,11 @@ use std::time::Duration;
 use moq_relay::{Config, Relay};
 use moq_tokio::moq_net;
 
+/// A millisecond track: the frames written here carry timestamps.
+fn timed() -> moq_net::track::Info {
+	moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+}
+
 const TIMEOUT: Duration = Duration::from_secs(10);
 
 fn certificate(dir: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf) {
@@ -254,7 +259,7 @@ async fn embed_and_stop(mut config: Config) {
 
 	let broadcast = origin.create_broadcast("test").expect("create broadcast");
 	broadcast.announce(Default::default()).expect("announce");
-	let track = broadcast.create_track("video", None).expect("create track");
+	let track = broadcast.create_track("video", timed()).expect("create track");
 	let mut group = track.append_group().expect("append group");
 	group
 		.write_frame(moq_net::Timestamp::ZERO, b"hello".as_ref())
@@ -392,13 +397,13 @@ async fn worker_tokio_custom_route_and_quic() {
 }
 
 /// io_uring workers. Off the default feature set; `just rs uring` and nightly
-/// `--all-features` compile it. Skips on kernels below the 6.12 floor.
+/// `--all-features` compile it. Skips below the 6.12 floor unless MOQ_STRICT.
 #[cfg(all(target_os = "linux", feature = "_uring"))]
 #[tokio::test]
 async fn uring_custom_route_and_quic() {
 	match moq_uring::Worker::new(Default::default()) {
 		Ok(_) => {}
-		Err(moq_uring::Error::Unsupported(reason)) => {
+		Err(moq_uring::Error::Unsupported(reason)) if std::env::var_os("MOQ_STRICT").is_none() => {
 			eprintln!("skipping io_uring embed test: {reason}");
 			return;
 		}

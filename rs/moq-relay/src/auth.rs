@@ -3,6 +3,8 @@
 //! process answering [`Admissions`]. Nothing else admits anyone; a verified client
 //! certificate is reported to whoever decides as a fact.
 
+mod refresh;
+
 use std::sync::Arc;
 
 use axum::http;
@@ -22,7 +24,7 @@ const ADMIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 /// Where every session's grant comes from. Exactly one of `url` and the public
 /// patterns is set; [`validate`](Self::validate) refuses anything else.
 #[serde_as]
-#[derive(usage::Args, Clone, Debug, Serialize, Deserialize, Default)]
+#[derive(usage::Args, Clone, Debug, Serialize, Deserialize)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 #[serde(default)]
 #[non_exhaustive]
@@ -70,6 +72,17 @@ pub struct Config {
 	#[serde_as(as = "OneOrMany<_>")]
 	pub public_publish: Vec<Pattern>,
 
+	/// Maximum in-band tokens one session has the auth server verifying at once,
+	/// counting checks still running past the admission timeout. Later tokens wait
+	/// for a slot. Defaults to 128.
+	#[usage(
+		long = "auth-verifications",
+		env = "MOQ_AUTH_VERIFICATIONS",
+		default = "128",
+		setting = "auth.verifications"
+	)]
+	pub verifications: usize,
+
 	/// The 0.14 flags and env vars #3688 removed, kept parsing but hidden. Never
 	/// read as settings: [`deprecated`](Self::deprecated) names what replaced each.
 	#[usage(flatten)]
@@ -97,6 +110,28 @@ pub struct Config {
 	#[serde(skip_serializing)]
 	pub(crate) tls: Option<serde::de::IgnoredAny>,
 }
+
+impl Default for Config {
+	fn default() -> Self {
+		Self {
+			url: None,
+			public: Vec::new(),
+			public_subscribe: Vec::new(),
+			public_publish: Vec::new(),
+			verifications: VERIFICATIONS,
+			legacy: Legacy::default(),
+			key: None,
+			key_dir: None,
+			auth_api: None,
+			domains: None,
+			mtls_tier: None,
+			tls: None,
+		}
+	}
+}
+
+/// The default for [`Config::verifications`].
+const VERIFICATIONS: usize = 128;
 
 /// The `--auth-*` flags 0.14 had and #3688 removed, with their env vars: a relay
 /// deployed through the environment would otherwise ignore them without a word.
@@ -274,8 +309,12 @@ impl Config {
 			(None, Some(_)) if client_ca => anyhow::bail!(
 				"a client CA (--listen-tls-root, --web-https-root) verifies client certificates, which --auth-public ignores; remove it, or grant certificates with --auth-url to `moq auth serve --mtls-*`"
 			),
-			_ => Ok(()),
+			_ => {}
 		}
+		if self.verifications == 0 {
+			anyhow::bail!("--auth-verifications must be at least 1, or no in-band token is ever verified");
+		}
+		Ok(())
 	}
 
 	/// Build the [`Auth`] this configuration describes, after [`validate`](Self::validate)
@@ -302,6 +341,8 @@ impl Config {
 			(None, None) => unreachable!("validated above"),
 		};
 		let (auth, admissions) = Auth::embedded(node);
+		let mut auth = auth.with_verifications(self.verifications);
+		auth.in_band = matches!(decider, Decider::Server(_));
 		decider.spawn(admissions);
 		Ok(auth)
 	}
@@ -436,6 +477,8 @@ impl Token {
 /// a fixed grant. [`ended`](Self::ended) resolves when that word no longer covers
 /// the session; the holder then closes the session, and the lease with the reason.
 pub struct Lease {
+	refresh: Option<refresh::Refresh>,
+	source: Option<Source>,
 	consumer: lease::Consumer,
 	token: Token,
 	/// The live session a re-check re-authorizes in place, once attached.
@@ -449,18 +492,35 @@ pub struct Lease {
 	stats: moq_net::stats::Session,
 }
 
+struct Source {
+	auth: Auth,
+	request: Request,
+}
+
 impl Lease {
 	/// Hold `consumer` for a session that dialed `path`, reducing its grant to
 	/// what the origin scopes by.
 	pub fn new(path: &str, consumer: lease::Consumer) -> Self {
 		let grant = consumer.grant();
 		Self {
+			refresh: None,
+			source: None,
 			token: Token::new(path, &grant),
 			expires: grant.deadline(),
 			consumer,
 			session: None,
 			stats: Default::default(),
 		}
+	}
+
+	/// Take AUTH decisions before the protocol driver chooses its default acceptor.
+	pub(crate) fn preparing(
+		mut self,
+		handle: moq_net::auth::Handle,
+		role: Option<moq_net::Role>,
+	) -> Result<Self, moq_net::Error> {
+		self.refresh = Some(refresh::Refresh::new(&mut self, handle, role)?);
+		Ok(self)
 	}
 
 	/// Re-authorize `session` in place when a re-check changes what the grant allows,
@@ -484,7 +544,11 @@ impl Lease {
 
 	/// Ask the lease's producer to re-check now. A no-op on a fixed lease.
 	pub fn revalidate(&self) {
-		self.consumer.revalidate();
+		if let Some(refresh) = &self.refresh {
+			refresh.revalidate();
+		} else {
+			self.consumer.revalidate();
+		}
 	}
 
 	/// Wait for the lease to stop covering the session: the grant expired, was
@@ -498,7 +562,13 @@ impl Lease {
 	/// since the routes it already announced would be misreported as entering here or
 	/// from a peer, or offered to the wrong links. A changed tier keeps the session and
 	/// moves its [stats](Self::with_stats) to the new tier.
+	///
+	/// Once the relay answers the session's AUTH requests itself, each of
+	/// these ends only that credential's grant; the lease ends when no credential remains.
 	pub async fn ended(&mut self) -> lease::Reason {
+		if let Some(refresh) = &mut self.refresh {
+			return refresh.ended().await;
+		}
 		loop {
 			let expire = async {
 				match self.expires {
@@ -562,6 +632,14 @@ impl Lease {
 	/// moved, and learn what it ended with: that, or the decider's reason if it
 	/// revoked first. Dropping the consumer reports zero bytes.
 	pub fn close(self, reason: impl Into<lease::Reason>, bytes: Bytes) -> lease::Reason {
+		let mut reason = reason.into();
+		// A gateway has one credential, so its revocation caused the transfer to
+		// end. A refreshed session instead reports the result of its whole union.
+		if self.refresh.is_none()
+			&& let std::task::Poll::Ready(ended) = self.consumer.poll_closed(&moq_net::kio::Waiter::noop())
+		{
+			reason = ended;
+		}
 		self.consumer.close(reason, bytes)
 	}
 }
@@ -608,12 +686,17 @@ impl Decider {
 				match &self {
 					Self::Server(client) => {
 						let client = client.clone();
-						tokio::spawn(async move {
-							match client.connect(admission.request.clone()).await {
+						// A panic drops the admission, which answers it as unavailable.
+						tokio::spawn(moq_tokio::panic::isolate(async move {
+							let lease = match &admission.connection {
+								Some(connection) => client.attach(connection, admission.request.clone()).await,
+								None => client.connect(admission.request.clone()).await,
+							};
+							match lease {
 								Ok(lease) => admission.grant(lease),
 								Err(err) => admission.refuse(err.into()),
 							}
-						});
+						}));
 					}
 					// Nothing here can verify a token, so one is refused rather than ignored:
 					// its holder expects it to count, and the public grant is not what it says.
@@ -656,6 +739,10 @@ fn presents_token(request: &Request) -> bool {
 pub struct Auth {
 	admissions: mpsc::UnboundedSender<Admission>,
 	node: Arc<str>,
+	/// Whether the decider can verify a token presented in band; public rules cannot.
+	in_band: bool,
+	/// How many in-band tokens one session may have the decider verifying at once.
+	verifications: usize,
 }
 
 impl Auth {
@@ -667,8 +754,19 @@ impl Auth {
 		let auth = Self {
 			admissions: sender,
 			node: Arc::from(node.into()),
+			in_band: true,
+			verifications: VERIFICATIONS,
 		};
 		(auth, Admissions(receiver))
+	}
+
+	/// Verify at most `verifications` in-band tokens per session at once, as
+	/// `--auth-verifications` does for a configured `Auth`; later ones wait for a slot.
+	/// Panics on 0, which would leave every in-band token waiting forever.
+	pub fn with_verifications(mut self, verifications: usize) -> Self {
+		assert!(verifications > 0, "an Auth must verify at least one token at a time");
+		self.verifications = verifications;
+		self
 	}
 
 	/// An `Auth` that refuses every session a server or a public grant would have
@@ -692,19 +790,34 @@ impl Auth {
 
 	/// Admit a session: the lease it holds, carrying the scope the origin applies.
 	pub async fn admit(&self, request: Request) -> Result<Lease, Error> {
-		let path = request.path.clone();
+		let consumer = self.decide(request.clone()).await?;
+		let mut lease = Lease::new(&request.path, consumer);
+		lease.source = Some(Source {
+			auth: self.clone(),
+			request,
+		});
+		Ok(lease)
+	}
+
+	async fn decide(&self, request: Request) -> Result<lease::Consumer, Error> {
+		let answer = self.submit(request, None)?;
+		let answered = tokio::time::timeout(ADMIT_TIMEOUT, answer)
+			.await
+			.map_err(|_| timed_out())?;
+		answered_with(answered)
+	}
+
+	/// Queue one admission for the decider, returning its pending answer.
+	fn submit(&self, request: Request, connection: Option<lease::Consumer>) -> Result<Answer, Error> {
 		let (reply, answer) = oneshot::channel();
 		self.admissions
-			.send(Admission { request, reply })
+			.send(Admission {
+				request,
+				connection,
+				reply,
+			})
 			.map_err(|_| Error::Unavailable("nobody is answering admissions".into()))?;
-		let consumer = tokio::time::timeout(ADMIT_TIMEOUT, answer)
-			.await
-			.map_err(|_| Error::Unavailable("the admission timed out".into()))?
-			.map_err(|_| Error::Unavailable("the admission went unanswered".into()))??;
-		// Every decider is held to the same answer contract: a grant that admits
-		// nothing or asks for a re-check without a bound is a bug, not a refusal.
-		consumer.grant().validate()?;
-		Ok(Lease::new(&path, consumer))
+		Ok(answer)
 	}
 
 	/// Admit a session on a grant decided locally, bypassing the server: the LAN
@@ -714,11 +827,32 @@ impl Auth {
 	}
 }
 
+/// A decider's pending answer to one [`Admission`].
+type Answer = oneshot::Receiver<Result<lease::Consumer, Error>>;
+
+fn timed_out() -> Error {
+	Error::Unavailable("the admission timed out".into())
+}
+
+/// Check a decider's answer against the contract every decider is held to: a
+/// grant that admits nothing or asks for a re-check without a bound is a bug, not
+/// a refusal.
+fn answered_with(
+	answered: Result<Result<lease::Consumer, Error>, oneshot::error::RecvError>,
+) -> Result<lease::Consumer, Error> {
+	let consumer = answered.map_err(|_| Error::Unavailable("the admission went unanswered".into()))??;
+	consumer.grant().validate()?;
+	Ok(consumer)
+}
+
 /// The sessions an embedded [`Auth`] is waiting to admit, in arrival order.
 ///
 /// The transport has already accepted each one; it waits for its answer, so a
 /// slow decider holds connects the way a slow auth server would, and one that
-/// takes longer than a server may (ten seconds) is refused as unavailable.
+/// takes longer than a server may (ten seconds) is refused as unavailable. An
+/// [attached](Admission::attached) token holds one of its session's verification
+/// slots until the decider answers or drops it, even past that, and the session's
+/// later tokens wait for a slot before they reach the decider.
 /// Answer in place or hand each [`Admission`] to its own task; nothing here
 /// serializes them.
 pub struct Admissions(mpsc::UnboundedReceiver<Admission>);
@@ -736,10 +870,25 @@ impl Admissions {
 pub struct Admission {
 	/// The `connect` request the relay built: every fact the transport knows.
 	pub request: Request,
+	connection: Option<lease::Consumer>,
 	reply: oneshot::Sender<Result<lease::Consumer, Error>>,
 }
 
+#[cfg(test)]
 impl Admission {
+	/// Resolve once the relay stops waiting for this decision.
+	pub(crate) async fn abandoned(&mut self) {
+		self.reply.closed().await
+	}
+}
+
+impl Admission {
+	/// Whether this verifies another credential presented in band for the session
+	/// already admitted as `request.id`, rather than admitting a new session.
+	pub fn attached(&self) -> bool {
+		self.connection.is_some()
+	}
+
 	/// Admit the session on `lease`: [`lease::Consumer::fixed`] for a grant that
 	/// never changes, or the consumer of a [`lease::Producer`] the decider keeps to
 	/// re-check, update, revoke, and learn when the session ends.
@@ -758,8 +907,8 @@ impl Admission {
 /// transport knows, nothing parsed on the server's behalf.
 pub fn request_for(auth: &Auth, request: &moq_tokio::server::Request) -> Request {
 	let transport = match request.transport() {
-		// The auth contract names QUIC either way; WebTransport is QUIC underneath.
-		moq_tokio::Transport::Quic | moq_tokio::Transport::WebTransport => moq_auth::Transport::Quic,
+		moq_tokio::Transport::Quic => moq_auth::Transport::Quic,
+		moq_tokio::Transport::WebTransport => moq_auth::Transport::WebTransport,
 		moq_tokio::Transport::Iroh => moq_auth::Transport::Iroh,
 		moq_tokio::Transport::WebSocket => moq_auth::Transport::WebSocket,
 		moq_tokio::Transport::Tcp => moq_auth::Transport::Tcp,
@@ -843,6 +992,21 @@ mod tests {
 		let grant = split.public_grant().unwrap();
 		assert_eq!(grant.subscribe, patterns(&["anon/**"]));
 		assert!(grant.publish.is_empty());
+	}
+
+	/// The verification concurrency defaults to 128, reads from `[auth]`, and refuses 0,
+	/// which would leave every in-band token waiting forever.
+	#[test]
+	fn verifications_default_and_refuse_zero() {
+		let config = config(Some("http://127.0.0.1:4440/"), &[]);
+		assert_eq!(config.verifications, 128);
+		let parsed: Config = toml::from_str("url = \"http://127.0.0.1:4440/\"\nverifications = 4\n").unwrap();
+		assert_eq!(parsed.verifications, 4);
+		let zero = Config {
+			verifications: 0,
+			..config
+		};
+		assert!(zero.validate(false).is_err());
 	}
 
 	/// Public rules grant a certificate what they grant anyone, so a client CA

@@ -13,6 +13,54 @@ use crate::{
 	ietf, lite, setup, stats,
 };
 
+/// Tracks admitted connections until their handshake or session ends.
+#[derive(Clone, Debug)]
+pub struct Activity {
+	state: kio::Producer<()>,
+	// Admission goes through the weak handle: its open check shares the lock
+	// `close` commits under, so a connection is either counted or refused.
+	admit: kio::ProducerWeak<()>,
+}
+
+impl Default for Activity {
+	fn default() -> Self {
+		let state = kio::Producer::default();
+		let admit = state.weak();
+		Self { state, admit }
+	}
+}
+
+impl Activity {
+	/// Hold the server active until the returned guard is dropped, or `None` once closed.
+	pub fn enter(&self) -> Option<Active> {
+		Some(Active {
+			_guard: self.admit.try_consume()?,
+		})
+	}
+
+	/// Wait until every admitted connection has left, then refuse new ones.
+	pub async fn close(&self) {
+		loop {
+			if self.state.unused().await.is_err() {
+				return;
+			}
+			match self.state.write_unused() {
+				kio::Unused::Idle(state) => return state.close(),
+				// Admitted between the wake and the commit: wait for it too.
+				kio::Unused::Used => continue,
+				kio::Unused::Closed => return,
+			}
+		}
+	}
+}
+
+/// Keeps an admitted connection in the server's active set.
+#[derive(Debug)]
+#[must_use]
+pub struct Active {
+	_guard: kio::Consumer<()>,
+}
+
 /// A MoQ server session builder.
 #[derive(Default, Clone)]
 pub struct Server {
@@ -21,6 +69,7 @@ pub struct Server {
 	stats: stats::Session,
 	versions: Versions,
 	limits: crate::session::Limits,
+	extensions: setup::Extensions,
 }
 
 impl Server {
@@ -69,6 +118,12 @@ impl Server {
 	/// Defaults to every version this crate supports.
 	pub fn with_versions(mut self, versions: Versions) -> Self {
 		self.versions = versions;
+		self
+	}
+
+	/// Choose which moq-transport extensions to offer in SETUP. Defaults to all of them.
+	pub fn with_extensions(mut self, extensions: setup::Extensions) -> Self {
+		self.extensions = extensions;
 		self
 	}
 
@@ -141,7 +196,7 @@ impl Server {
 			crate::session::Handles {
 				goaway: start.goaway,
 				auth: start.auth,
-				setup: start.setup,
+				estimate: Some(start.estimate),
 			},
 		))
 	}
@@ -173,7 +228,7 @@ impl Server {
 		let mut refused = session.clone();
 		self.handshake_lite(now, session)
 			.await
-			.inspect_err(|err| close(&mut refused, err))
+			.inspect_err(|err| close(&mut refused, err, None))
 	}
 
 	async fn handshake_lite<S>(&self, now: Instant, mut session: S) -> Result<Handshake<S>, Error>
@@ -296,7 +351,7 @@ impl Server {
 		let mut refused = session.clone();
 		self.handshake(now, session)
 			.await
-			.inspect_err(|err| close(&mut refused, err))
+			.inspect_err(|err| close(&mut refused, err, None))
 	}
 
 	async fn handshake<S>(&self, now: Instant, mut session: S) -> Result<Handshake<S>, Error>
@@ -438,8 +493,9 @@ impl Server {
 			origin: peer_setup.declared.cluster.hop.filter(|h| *h != crate::Hop::UNKNOWN),
 			token: peer_setup.token.clone(),
 			assigned_hop: crate::Hop::random(),
-			// The client's SETUP already settled whether MoQ Auth is negotiated.
-			auth: crate::auth::Handle::new(peer_setup.declared.auth),
+			// The client's SETUP already settled whether it offered MoQ Auth, so it is
+			// negotiated exactly when we offer it too.
+			auth: crate::auth::Handle::new(peer_setup.declared.auth && self.extensions.auth),
 			inner: Some(RequestInner {
 				server: self.clone(),
 				runtime,
@@ -560,7 +616,7 @@ where
 
 			// The client's SETUP was read at the pause; hand the stream back
 			// for GOAWAY. A server never advertises a path, hence `None`.
-			let (protocol, goaway, setup) = ietf::start(ietf::Config {
+			let (protocol, goaway) = ietf::start(ietf::Config {
 				runtime: runtime.clone(),
 				limits: server.limits,
 				session: session.clone(),
@@ -579,6 +635,7 @@ where
 				peer_declared: Some(peer_setup.declared),
 				auth: auth.clone(),
 				early_unis: peer_setup.early,
+				extensions: server.extensions,
 			})?;
 			tracing::debug!(?version, "connected");
 			Ok(Session::new(
@@ -587,14 +644,18 @@ where
 				version.into(),
 				None,
 				crate::driver::Protocol::Ietf(protocol),
-				crate::session::Handles { goaway, auth, setup },
+				crate::session::Handles {
+					goaway,
+					auth,
+					estimate: None,
+				},
 			))
 		}
 		.maybe_boxed()
 	}
 
 	fn close(mut self: Box<Self>, err: Error) {
-		close(&mut self.session, &err);
+		close(&mut self.session, &err, Some(self.version.into()));
 	}
 }
 
@@ -644,7 +705,9 @@ where
 						ietf::initial_max_request_id(server.limits.requests(), true),
 					);
 					parameters.set_bytes(ietf::ParameterBytes::Implementation, b"moq-lite-rs".to_vec());
-					ietf::solicit::into_setup(&mut parameters, v);
+					if server.extensions.solicit {
+						ietf::solicit::into_setup(&mut parameters, v);
+					}
 					ietf::hidden::into_setup(&mut parameters, v);
 					ietf::active_count::into_setup(&mut parameters, v);
 					parameters.encode_bytes(v)?
@@ -658,7 +721,7 @@ where
 			};
 			stream.writer.encode(&server_setup).await?;
 
-			let (recv_bw, protocol, goaway, auth, setup) = match version {
+			let (recv_bw, protocol, goaway, auth, estimate) = match version {
 				Version::Lite(v) => {
 					let stream = stream.with_version(v);
 					// Pre-lite-05: no Setup Stream, so nothing to advertise or seed.
@@ -681,13 +744,13 @@ where
 						crate::driver::Protocol::Lite(Box::new(start.driver)),
 						start.goaway,
 						start.auth,
-						start.setup,
+						Some(start.estimate),
 					)
 				}
 				Version::Ietf(v) => {
 					let stream = stream.with_version(v);
 					// Draft 14-16: path came in the bidi SETUP, no uni SETUP to hand back.
-					let (protocol, goaway, setup) = ietf::start(ietf::Config {
+					let (protocol, goaway) = ietf::start(ietf::Config {
 						runtime: runtime.clone(),
 						limits: server.limits,
 						session: session.clone(),
@@ -705,8 +768,9 @@ where
 						peer_declared: Some(peer_declared),
 						auth: auth.clone(),
 						early_unis: Vec::new(),
+						extensions: server.extensions,
 					})?;
-					(None, crate::driver::Protocol::Ietf(protocol), goaway, auth, setup)
+					(None, crate::driver::Protocol::Ietf(protocol), goaway, auth, None)
 				}
 			};
 
@@ -716,14 +780,14 @@ where
 				version,
 				recv_bw,
 				protocol,
-				crate::session::Handles { goaway, auth, setup },
+				crate::session::Handles { goaway, auth, estimate },
 			))
 		}
 		.maybe_boxed()
 	}
 
 	fn close(mut self: Box<Self>, err: Error) {
-		close(&mut self.session, &err);
+		close(&mut self.session, &err, Some(self.version));
 	}
 }
 
@@ -818,6 +882,12 @@ where
 		self
 	}
 
+	/// Set request caps after authorizing the peer and before answering SETUP.
+	pub fn with_limits(mut self, limits: crate::session::Limits) -> Self {
+		self.inner_mut().server.limits = limits;
+		self
+	}
+
 	fn inner_mut(&mut self) -> &mut RequestInner<S> {
 		self.inner.as_mut().expect("request already responded")
 	}
@@ -856,18 +926,20 @@ where
 
 impl<S: crate::transport::poll::Session> RequestInner<S> {
 	fn close(self, err: Error) {
-		let mut session = match self.handshake {
-			PausedHandshake::LiteBare { session, .. } => session,
-			PausedHandshake::LiteSetup { session, .. } => session,
+		let (mut session, version) = match self.handshake {
+			PausedHandshake::LiteBare { session, version } => (session, version),
+			PausedHandshake::LiteSetup { session, version, .. } => (session, version),
 			PausedHandshake::Boxed(paused) => return paused.close(err),
 		};
-		close(&mut session, &err);
+		close(&mut session, &err, Some(version.into()));
 	}
 }
 
 /// Close `session` with `err`'s wire code.
-fn close<S: crate::transport::poll::Session>(session: &mut S, err: &Error) {
-	session.close(SessionError::from(err).to_code(), &err.to_string());
+fn close<S: crate::transport::poll::Session>(session: &mut S, err: &Error, version: Option<Version>) {
+	let error = SessionError::from(err);
+	let code = version.map_or_else(|| error.to_code(), |version| version.session_code(&error));
+	session.close(code, &err.to_string());
 }
 
 impl<S: crate::transport::poll::Session> Drop for Handshake<S> {
@@ -918,6 +990,7 @@ mod tests {
 	/// else is inert.
 	#[derive(Clone)]
 	struct FakeSession {
+		binding: crate::transport::Binding,
 		protocol: Option<&'static str>,
 		uni: Arc<Mutex<VecDeque<Vec<u8>>>>,
 		bi: Arc<Mutex<VecDeque<Vec<u8>>>>,
@@ -928,6 +1001,7 @@ mod tests {
 	impl FakeSession {
 		fn new(protocol: &'static str, uni: impl IntoIterator<Item = Vec<u8>>) -> Self {
 			Self {
+				binding: crate::transport::Binding::InBand,
 				protocol: Some(protocol),
 				uni: Arc::new(Mutex::new(uni.into_iter().collect())),
 				bi: Default::default(),
@@ -1006,6 +1080,9 @@ mod tests {
 		}
 		fn max_datagram_size(&self) -> usize {
 			1200
+		}
+		fn binding(&self) -> crate::transport::Binding {
+			self.binding
 		}
 		fn protocol(&self) -> Option<&str> {
 			self.protocol
@@ -1140,6 +1217,53 @@ mod tests {
 		params
 	}
 
+	/// An acceptor taken with `Request::auth().requests()` BEFORE `ok()` must govern the
+	/// session the driver then runs, through the REAL accept path (`accept_request` -> `ok`).
+	/// The session's own `auth()` (the handle the driver polls) routes a request token to that
+	/// pre-ok consumer instead of falling to the `Unsupported` default, and granting admits.
+	/// Both a no-AUTH-extension legacy session (draft-14, `Handle::new(false)`) and the modern
+	/// uni-SETUP path (draft-18); a QUIC server has no other point to install the verifier.
+	#[moq_net_sim::test]
+	async fn a_pre_ok_verifier_governs_the_session() {
+		let cases = [
+			(
+				FakeSession::new(ALPN_14, [])
+					.with_bi(legacy_setup(ietf::Version::Draft14, ietf::Parameters::default())),
+				ietf::Version::Draft14,
+			),
+			(
+				FakeSession::new(ALPN_18, [ietf_setup(ietf::Version::Draft18, Some("room/alice"))]),
+				ietf::Version::Draft18,
+			),
+		];
+
+		for (session, version) in cases {
+			let request = Server::new()
+				.accept_request(moq_net_sim::now(), session)
+				.await
+				.unwrap_or_else(|e| panic!("accept at {version:?}: {e}"));
+
+			// Install the verifier before ok(), as a QUIC server must.
+			let mut requests = request.auth().requests().expect("requests() pre-ok");
+			let (net_session, _driver) = request.ok().await.unwrap_or_else(|e| panic!("ok at {version:?}: {e}"));
+
+			// The session's own handle is the one the driver polls. Verifying a request token on
+			// it must reach the pre-ok consumer; if the handle were not shared it would fall to
+			// the Unsupported default and the consumer would never see this request.
+			let verdict = net_session.auth().verify_request(
+				crate::setup::Token {
+					kind: crate::setup::Token::OUT_OF_BAND,
+					value: b"jwt".to_vec(),
+				},
+				None,
+			);
+			let received = requests.next().await.expect("the pre-ok consumer receives the request");
+			assert_eq!(received.token().as_ref(), b"jwt", "{version:?}");
+			let _issued = received.accept(crate::auth::Grant::all());
+			assert!(verdict.grant().await.is_ok(), "granting admits at {version:?}");
+		}
+	}
+
 	#[moq_net_sim::test]
 	async fn accept_request_exposes_the_setup_token() {
 		let modern = FakeSession::new(
@@ -1254,6 +1378,37 @@ mod tests {
 		// client that wants the root doesn't have to special-case the parameter.
 		let session = FakeSession::new(ALPN_LITE_05, [lite05_setup(Some(""), None, None)]);
 		let request = Server::new().accept_request(moq_net_sim::now(), session).await.unwrap();
+		assert_eq!(request.path(), "");
+	}
+
+	#[moq_net_sim::test]
+	async fn uri_binding_rejects_setup_path_presence() {
+		for alpn in [ALPN_LITE_05, ALPN_LITE_06, ALPN_LITE_07_WIP] {
+			for path in ["", "/team/room"] {
+				let mut session = FakeSession::new(alpn, [lite05_setup(Some(path), None, None)]);
+				session.binding = crate::transport::Binding::Uri;
+				let observed = session.clone();
+				let result = Server::new()
+					.with_versions(alpn.parse::<Version>().unwrap().into())
+					.accept_request_lite(moq_net_sim::now(), session)
+					.await;
+				assert!(
+					matches!(result, Err(Error::ProtocolViolation)),
+					"{alpn}: URI binding accepted a SETUP path"
+				);
+				assert_eq!(observed.close_code(), Some(3));
+			}
+		}
+	}
+
+	#[moq_net_sim::test]
+	async fn uri_binding_accepts_setup_without_path() {
+		let mut session = FakeSession::new(ALPN_LITE_05, [lite05_setup(None, None, None)]);
+		session.binding = crate::transport::Binding::Uri;
+		let request = Server::new()
+			.accept_request_lite(moq_net_sim::now(), session)
+			.await
+			.unwrap();
 		assert_eq!(request.path(), "");
 	}
 

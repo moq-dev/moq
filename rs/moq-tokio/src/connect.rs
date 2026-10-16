@@ -361,6 +361,21 @@ impl ConnectError {
 mod tests {
 	use super::*;
 
+	/// The dial config offers every extension unless told otherwise, and leaves the
+	/// default out when serialized.
+	#[test]
+	fn extensions_default_on_and_parse_off() {
+		let config: Config = toml::from_str("[extensions]\nsolicit = false\n").expect("parse");
+		assert!(!config.extensions.solicit);
+		assert!(config.extensions.auth);
+		assert!(toml::to_string(&config).expect("serialize").contains("solicit = false"));
+		assert!(
+			!toml::to_string(&Config::default())
+				.expect("serialize")
+				.contains("extensions")
+		);
+	}
+
 	#[test]
 	fn auth_statuses_are_terminal() {
 		assert_eq!(ConnectError::from_status_u16(401), Some(ConnectError::Unauthorized));
@@ -379,7 +394,7 @@ failover_delay = "1s"
 		)
 		.expect("parse");
 		assert!(config.url.is_none());
-		assert_eq!(config.race, DEFAULT_RACE);
+		assert_eq!(config.resolve().race, DEFAULT_RACE);
 		let reported = config.deprecated().to_string();
 		assert!(reported.contains("connect -> url"), "{reported}");
 		assert!(reported.contains("failover_delay -> race"), "{reported}");
@@ -464,6 +479,11 @@ failover_delay = "1s"
 	}
 }
 
+/// Whether `extensions` offers every extension, the default a config leaves out.
+pub(crate) fn all_extensions(extensions: &moq_net::setup::Extensions) -> bool {
+	*extensions == moq_net::setup::Extensions::default()
+}
+
 /// The dial side of an endpoint: where to connect and how to get there.
 ///
 /// Derives [`usage::Args`], so flatten it into a binary's own parser with
@@ -511,16 +531,20 @@ pub struct Config {
 	///
 	/// This staggers the attempts within one [`crate::Client::connect`]; [`Self::timeout`]
 	/// bounds that call as a whole.
+	/// `None` uses the default; an explicit command-line flag or environment variable wins.
 	#[usage(skip)]
-	#[serde(with = "crate::cli::duration::serde_duration")]
-	pub race: std::time::Duration,
+	#[serde(
+		default,
+		with = "crate::cli::duration::serde_duration::option",
+		skip_serializing_if = "Option::is_none"
+	)]
+	pub race: Option<std::time::Duration>,
 
+	/// Delay before also dialing the next resolved address. Defaults to 250ms; 0s dials every address at once.
 	#[usage(
 		name = "connect-race",
 		long = "connect-race",
 		env = "MOQ_CONNECT_RACE",
-		default_value_t = crate::cli::Duration::fallback(DEFAULT_RACE),
-		default = "250ms",
 		setting = "connect.race"
 	)]
 	#[serde(default, rename = "__cli_race", skip_serializing_if = "Option::is_none")]
@@ -538,16 +562,20 @@ pub struct Config {
 	/// The full answer is authoritative, including which family to try first, so
 	/// this is how long the IPv4-only one waits for it before going ahead alone.
 	/// Defaults to 50ms; `0s` dials as soon as any address resolves.
+	/// `None` uses the default; an explicit command-line flag or environment variable wins.
 	#[usage(skip)]
-	#[serde(with = "crate::cli::duration::serde_duration")]
-	pub resolution_delay: std::time::Duration,
+	#[serde(
+		default,
+		with = "crate::cli::duration::serde_duration::option",
+		skip_serializing_if = "Option::is_none"
+	)]
+	pub resolution_delay: Option<std::time::Duration>,
 
+	/// Delay before dialing IPv4 while the full DNS answer is outstanding. Defaults to 50ms.
 	#[usage(
 		name = "connect-resolution-delay",
 		long = "connect-resolution-delay",
 		env = "MOQ_CONNECT_RESOLUTION_DELAY",
-		default_value_t = crate::cli::Duration::fallback(DEFAULT_RESOLUTION_DELAY),
-		default = "50ms",
 		setting = "connect.resolution_delay"
 	)]
 	#[serde(default, rename = "__cli_resolution_delay", skip_serializing_if = "Option::is_none")]
@@ -562,16 +590,20 @@ pub struct Config {
 	/// never speaks would hang the whole connect. [`crate::Connection`] only re-arms
 	/// its backoff between attempts, so an attempt that never returns stalls the
 	/// retry loop indefinitely.
+	/// `None` uses the default; an explicit command-line flag or environment variable wins.
 	#[usage(skip)]
-	#[serde(with = "crate::cli::duration::serde_duration")]
-	pub timeout: std::time::Duration,
+	#[serde(
+		default,
+		with = "crate::cli::duration::serde_duration::option",
+		skip_serializing_if = "Option::is_none"
+	)]
+	pub timeout: Option<std::time::Duration>,
 
+	/// Maximum time for one connect, covering the dial and the MoQ handshake. Defaults to 30s; 0s waits forever.
 	#[usage(
 		name = "connect-timeout",
 		long = "connect-timeout",
 		env = "MOQ_CONNECT_TIMEOUT",
-		default_value_t = crate::cli::Duration::fallback(DEFAULT_TIMEOUT),
-		default = "30s",
 		setting = "connect.timeout"
 	)]
 	#[serde(default, rename = "__cli_timeout", skip_serializing_if = "Option::is_none")]
@@ -608,6 +640,11 @@ pub struct Config {
 		)
 	)]
 	pub version: Vec<moq_net::Version>,
+
+	/// The moq-transport extensions to offer in SETUP, all by default.
+	#[serde(default, skip_serializing_if = "crate::connect::all_extensions")]
+	#[usage(skip)]
+	pub extensions: moq_net::setup::Extensions,
 
 	/// TLS trust and client-certificate settings (`--connect-tls-*`).
 	#[usage(flatten)]
@@ -679,14 +716,15 @@ impl Default for Config {
 			url: None,
 			connect: None,
 			bind: None,
-			race: DEFAULT_RACE,
+			race: Some(DEFAULT_RACE),
 			race_arg: None,
 			failover_delay: None,
-			resolution_delay: DEFAULT_RESOLUTION_DELAY,
+			resolution_delay: Some(DEFAULT_RESOLUTION_DELAY),
 			resolution_delay_arg: None,
-			timeout: DEFAULT_TIMEOUT,
+			timeout: Some(DEFAULT_TIMEOUT),
 			timeout_arg: None,
 			version: Vec::new(),
+			extensions: Default::default(),
 			tls: Default::default(),
 			once: None,
 			reconnect: None,
@@ -755,9 +793,17 @@ impl Config {
 	pub fn resolve(&self) -> Resolved {
 		Resolved {
 			bind: self.bind.unwrap_or_else(default_bind),
-			race: crate::cli::Duration::resolve(self.race_arg, self.race),
-			resolution_delay: crate::cli::Duration::resolve(self.resolution_delay_arg, self.resolution_delay),
-			timeout: crate::cli::Duration::resolve(self.timeout_arg, self.timeout),
+			race: self.race_arg.map(Into::into).or(self.race).unwrap_or(DEFAULT_RACE),
+			resolution_delay: self
+				.resolution_delay_arg
+				.map(Into::into)
+				.or(self.resolution_delay)
+				.unwrap_or(DEFAULT_RESOLUTION_DELAY),
+			timeout: self
+				.timeout_arg
+				.map(Into::into)
+				.or(self.timeout)
+				.unwrap_or(DEFAULT_TIMEOUT),
 		}
 	}
 }
@@ -801,4 +847,33 @@ mod addr_tests {
 		assert_eq!(target.addresses(), Some([peer].as_slice()));
 		assert_eq!(Addr::new(url).addresses(), None);
 	}
+}
+
+#[cfg(test)]
+mod duration_tests {
+	use super::*;
+	crate::cli::duration::test_config_duration!(
+		race_set_in_code_beats_parser_default,
+		Config,
+		race,
+		"--connect-race",
+		|c: &Config| c.resolve().race,
+		|d| d
+	);
+	crate::cli::duration::test_config_duration!(
+		resolution_delay_set_in_code_beats_parser_default,
+		Config,
+		resolution_delay,
+		"--connect-resolution-delay",
+		|c: &Config| c.resolve().resolution_delay,
+		|d| d
+	);
+	crate::cli::duration::test_config_duration!(
+		timeout_set_in_code_beats_parser_default,
+		Config,
+		timeout,
+		"--connect-timeout",
+		|c: &Config| c.resolve().timeout,
+		|d| d
+	);
 }

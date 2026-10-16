@@ -653,7 +653,9 @@ impl MoqVideoDecodedFrame {
 				.to_rgba(&moq_video::convert::Config::default())
 				.map(|rgba| rgba.into_data()),
 		}
-		.map_err(|err| MoqError::Codec(err.to_string()))
+		.map_err(|err| MoqError::Codec {
+			reason: err.to_string(),
+		})
 	}
 
 	/// A borrowed handle to the decoder's surface, or `None` when the frame is
@@ -710,6 +712,9 @@ impl MoqVideoConsumer {
 /// is rejected here; a recognized one the native backends can't open is rejected when the decoder
 /// opens, which is still before the first frame.
 fn video_config(catalog_video: crate::media::MoqVideo) -> Result<hang::catalog::VideoConfig, MoqError> {
+	if !catalog_video.enabled {
+		return Err(MoqError::NotFound);
+	}
 	let codec: hang::catalog::VideoCodec = catalog_video.codec.parse().map_err(|_| MoqError::Unsupported)?;
 	// Parsing is total: an unrecognized name becomes `Unknown` rather than failing. Reject it here
 	// so a typo in the catalog is an error at subscribe, not an opaque backend failure later.
@@ -719,6 +724,7 @@ fn video_config(catalog_video: crate::media::MoqVideo) -> Result<hang::catalog::
 
 	let mut config = hang::catalog::VideoConfig::new(codec);
 	config.label = catalog_video.label;
+	config.track = catalog_video.track;
 	config.description = catalog_video.description.map(Into::into);
 	if let Some(coded) = catalog_video.coded {
 		config.coded_width = Some(coded.width);
@@ -798,6 +804,7 @@ mod decode_tests {
 		MoqVideo {
 			label: None,
 			broadcast: None,
+			track: None,
 			codec: codec.to_string(),
 			description: None,
 			coded: Some(MoqDimensions {
@@ -810,6 +817,15 @@ mod decode_tests {
 			framerate: Some(30.0),
 			container: MoqContainer::Legacy,
 		}
+	}
+
+	#[test]
+	fn video_config_refuses_disabled_renditions() {
+		let mut config = catalog_video("avc1.64001f");
+		config.enabled = false;
+		assert!(matches!(video_config(config.clone()), Err(MoqError::NotFound)));
+		config.enabled = true;
+		assert!(video_config(config).is_ok());
 	}
 
 	#[test]

@@ -19,10 +19,24 @@ const PROP_TIMESTAMP = 0x10n;
 // so it is not accepted here.
 const PROP_TIMESTAMP_DRAFT03 = 0x06n;
 
+/** Whether 0x06 is the draft-03 Timestamp: draft-19 reassigns it to SUBGROUP_DELIVERY_TIMEOUT. */
+function hasDraft03Timestamp(version: IetfVersion | undefined): boolean {
+	switch (version) {
+		case Version.DRAFT_14:
+		case Version.DRAFT_15:
+		case Version.DRAFT_16:
+		case Version.DRAFT_17:
+		case Version.DRAFT_18:
+			return true;
+		default:
+			return false;
+	}
+}
+
 // draft-18 adds bit 0x40 (FIRST_OBJECT) to the subgroup header type per spec
 // 11.4.2. Set on emit unless a filter trimmed the group's head. On parse a
 // cleared bit is the peer's claim that the stream starts partway through;
-// object 0 is still the head, and any other first ID is dropped.
+// object 0 is still the payload head; a standalone terminal may name a later ID.
 const FIRST_OBJECT_BIT = 0x40;
 
 /** Whether the subgroup header carries FIRST_OBJECT: draft-18 and later, not drafts 14-17. */
@@ -110,6 +124,7 @@ export function decodeObjectTime(c: Cursor, timescale: Timescale): Timestamp | u
 	let timestamp: bigint | undefined;
 	let prevType = 0n;
 	let first = true;
+	const draft03 = hasDraft03Timestamp(asIetf(c.version));
 
 	while (c.remaining > 0) {
 		const step = c.u62();
@@ -119,7 +134,7 @@ export function decodeObjectTime(c: Cursor, timescale: Timescale): Timestamp | u
 
 		if (id % 2n === 0n) {
 			const value = c.u62();
-			if (id === PROP_TIMESTAMP || id === PROP_TIMESTAMP_DRAFT03) {
+			if (id === PROP_TIMESTAMP || (draft03 && id === PROP_TIMESTAMP_DRAFT03)) {
 				timestamp = value;
 			}
 		} else {
@@ -279,6 +294,8 @@ export class Frame {
 	 * does not exist either, so the track ends at that group; later in a group it ends after it.
 	 */
 	endOfTrack: boolean;
+	/** Absolute object ID for a standalone terminal; zero for sequential objects. */
+	idDelta = 0;
 
 	constructor({
 		payload,
@@ -337,9 +354,6 @@ export class Frame {
 		// a sequential group is a zero delta throughout, and any other value means the group
 		// either starts partway through or has a gap that would renumber the frames after it.
 		const delta = c.u53();
-		if (delta !== 0) {
-			throw new ObjectIdGap(delta);
-		}
 
 		let timestamp: Timestamp | undefined;
 		if (flags.hasExtensions) {
@@ -359,6 +373,7 @@ export class Frame {
 		const payloadLength = c.u53();
 
 		if (payloadLength > 0) {
+			if (delta !== 0) throw new ObjectIdGap(delta);
 			const payload = c.read(payloadLength);
 			return new Frame({ payload, timestamp });
 		}
@@ -366,18 +381,17 @@ export class Frame {
 		const status = c.u53();
 
 		// Defined on every implemented draft, whether or not the header marks the group's end.
-		if (status === END_OF_TRACK) return new Frame({ endOfTrack: true });
+		if (status === END_OF_TRACK) {
+			const frame = new Frame({ endOfTrack: true });
+			frame.idDelta = delta;
+			return frame;
+		}
+		if (delta !== 0) throw new ObjectIdGap(delta);
 		// Allowed even when the header marks the group's end: that bit only lets a FIN imply it,
 		// and imquic sends both.
 		if (status === GROUP_END) return new Frame();
 
-		if (flags.hasEnd) {
-			// Empty frame
-			if (status === 0) return new Frame({ payload: new Uint8Array(0), timestamp });
-		} else if (status === 0) {
-			// TODO status === 0 should be an empty frame, but moq-rs seems to be sending it incorrectly on group end.
-			return new Frame();
-		}
+		if (status === 0) return new Frame({ payload: new Uint8Array(0), timestamp });
 
 		throw new Error(`Unsupported object status: ${status}`);
 	}

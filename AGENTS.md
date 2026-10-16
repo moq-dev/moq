@@ -20,6 +20,7 @@ This file is split into nested `AGENTS.md` files based on the language/situation
 - Keep the PR focused. No unrelated refactors, formatting churn, or drive-by changes; split when in doubt.
 - Refactor aggressively for long-term maintainability, but re-evaluate the direction as you learn.
 - Propose a course change, even suggest abandoning a PR, rather than finish a half-solution.
+- Be adversarial: attack your own approach, reports, reviews, and other PRs as hard as anyone else's, and argue for the best approach over the first one that works.
 - When a decision is the maintainer's (API shape, naming, scope), ask with 2-3 options and a recommendation.
 - All tests need to be wired into CI, at least a nightly.
 - Never edit an `AGENTS.md`, `CONTRIBUTING.md`, or skill without being prompted, and read `PROMPTING.md` first.
@@ -44,7 +45,6 @@ This file is split into nested `AGENTS.md` files based on the language/situation
 - Suggest follow up sessions and quests when finished, interactively prompting the user.
 - Prefer the simple solution.
 - Say it once, in the fewest words that hold up.
-- Critically think, and decide if the complexity is worth it. Simple is better.
 - Prefer a quest over a GitHub issue for work needing durable scope.
 - Use interactive prompts when possible.
 - Try to do stuff asynchronously. ex. ask about follow-ups while tests run.
@@ -64,6 +64,7 @@ A bad shape costs a breaking change in every language, and the surface is huge.
 - A broadcast, track, or group name always means the same content. MoQ has no ETag-style invalidation, so a publisher that reuses a name for different content (such as restarting group numbers) is a bug; publish a new broadcast instead of working around it.
 - Avoid callback parameters. Return a handle, an event, or a Producer/Consumer split.
 - Avoid 4+ args; use a struct or object.
+- Prefer nesting related API, configuration, and structured output fields under their shared role.
 - Name by role, not today's implementation.
 - When a name or shape feels awkward, propose alternatives with a recommendation instead of shipping it.
 - Short names under a module namespace (`encode::Config`, not `EncoderConfig`). Mirror names across Rust, JS, and the bindings.

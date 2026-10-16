@@ -18,7 +18,6 @@ use std::time::{Duration, SystemTime};
 use moq_mux::catalog::hang::Catalog;
 use moq_mux::timeline::Entry;
 
-use super::Upstream;
 use super::rendition::{Kind, Rendition};
 use super::segments::{self, Discontinuities, Reference};
 
@@ -81,8 +80,15 @@ struct Feed {
 /// `close`.
 #[derive(Clone)]
 pub(crate) struct Producer {
-	state: kio::Producer<BTreeMap<Key, Arc<Rendition>>>,
+	state: kio::Producer<State>,
 	fanout: Fanout,
+}
+
+#[derive(Default)]
+struct State {
+	renditions: BTreeMap<Key, Arc<Rendition>>,
+	// Cache catalog quality order without making any_held_externally count it as a consumer.
+	audio: Vec<Weak<Rendition>>,
 }
 
 /// The timeline fan-out handle: everything the timeline watcher needs, and nothing more.
@@ -98,7 +104,7 @@ pub(crate) struct Fanout {
 impl Producer {
 	pub fn new(window: Duration) -> Self {
 		Self {
-			state: kio::Producer::new(BTreeMap::new()),
+			state: kio::Producer::new(State::default()),
 			fanout: Fanout {
 				feed: Arc::new(Mutex::new(Feed {
 					targets: Vec::new(),
@@ -141,25 +147,38 @@ impl Producer {
 
 	/// Look up a rendition by kind and name (serve path).
 	pub fn get(&self, kind: Kind, name: &str) -> Option<Arc<Rendition>> {
-		self.state.read().get(&(kind, name.to_string())).cloned()
+		self.state.read().renditions.get(&(kind, name.to_string())).cloned()
 	}
 
-	/// Snapshot the current renditions in `(kind, name)` order (for the master playlist).
+	/// Snapshot video by name and audio in catalog quality order (for the master playlist).
 	pub fn snapshot(&self) -> Vec<Arc<Rendition>> {
-		self.state.read().values().cloned().collect()
+		let current = self.state.read();
+		let mut snapshot: Vec<_> = current
+			.renditions
+			.values()
+			.filter(|rendition| rendition.kind == Kind::Video)
+			.cloned()
+			.collect();
+		snapshot.extend(
+			current
+				.audio
+				.iter()
+				.map(|rendition| rendition.upgrade().expect("ranked audio is held in the rendition map")),
+		);
+		snapshot
 	}
 
 	/// Whether the current catalog contains no servable renditions (serve path).
 	#[cfg_attr(not(feature = "server"), allow(dead_code))]
 	pub fn is_empty(&self) -> bool {
-		self.state.read().is_empty()
+		self.state.read().renditions.is_empty()
 	}
 
 	/// Whether anything outside the map (a recording cursor, a handed-out `Arc`) still holds a
 	/// rendition. `Broadcaster::drop` checks this to decide whether the timeline watcher must
 	/// outlive it (so those holders keep receiving records) or can be aborted.
 	pub fn any_held_externally(&self) -> bool {
-		self.state.read().values().any(|r| Arc::strong_count(r) > 1)
+		self.state.read().renditions.values().any(|r| Arc::strong_count(r) > 1)
 	}
 
 	/// Release every rendition the map is holding.
@@ -173,7 +192,8 @@ impl Producer {
 	/// progress drains to the real end of the broadcast instead of being truncated here.
 	pub fn clear(&self) {
 		if let Ok(mut current) = self.state.write() {
-			current.clear();
+			current.renditions.clear();
+			current.audio.clear();
 		}
 	}
 
@@ -338,6 +358,7 @@ impl Producer {
 		let _ = kio::wait(|waiter| {
 			self.state.poll_ref(waiter, |current| {
 				if current
+					.renditions
 					.values()
 					.any(|rendition| rendition.poll_playable(waiter).is_ready())
 				{
@@ -350,15 +371,16 @@ impl Producer {
 		.await;
 	}
 
-	/// Resolve once at least one rendition is [advertised](Rendition::is_advertised), so a master
-	/// playlist can list it.
+	/// Resolve once at least one enabled rendition is [advertised](Rendition::is_advertised), so a
+	/// master playlist can list it.
 	#[cfg_attr(not(feature = "server"), allow(dead_code))]
 	pub(crate) async fn advertised(&self) {
 		let _ = kio::wait(|waiter| {
 			self.state.poll_ref(waiter, |current| {
 				if current
+					.renditions
 					.values()
-					.any(|rendition| rendition.poll_advertised(waiter).is_ready())
+					.any(|rendition| rendition.is_enabled() && rendition.poll_advertised(waiter).is_ready())
 				{
 					Poll::Ready(())
 				} else {
@@ -375,7 +397,8 @@ impl Producer {
 	fn register(&self, rendition: &Arc<Rendition>) {
 		let mut feed = self.fanout.feed.lock().unwrap();
 		rendition.label(feed.generation.clone());
-		rendition.watch();
+		// An unwindowed feed is history mode: every rendition reads its timeline from the start.
+		rendition.watch(feed.window.is_none());
 		for (index, entry, reference, discontinuity) in &feed.history {
 			rendition.push(*index, entry, reference, *discontinuity, feed.window);
 		}
@@ -391,6 +414,11 @@ impl Producer {
 	/// Reconcile the rendition set with a complete catalog snapshot. Removed or reconfigured
 	/// renditions are closed (so cursors over them end) before replacements become visible.
 	///
+	/// A disabled rendition stays in the set, serving its window and media playlist, and is only
+	/// left out of the master playlist and the DASH manifest. Closing it would end its playlist
+	/// with `EXT-X-ENDLIST`, which reads as a finished broadcast, and a rendition that
+	/// re-enables keeps its media sequence and history.
+	///
 	/// "Reconfigured" means the media itself changed (see [`Rendition::matches_video`]). A
 	/// rendition whose entry only carries a revised estimate is kept as-is and just takes the
 	/// new advertised bitrate, since the publisher republishes the catalog every time its
@@ -400,11 +428,11 @@ impl Producer {
 	/// entry): without one there is nothing to render playlists from, so the whole catalog is
 	/// skipped with a warning.
 	///
-	/// `upstream` carries the broadcast the snapshot was read from, so each rendition serves media
+	/// `source` holds the broadcast the snapshot was read from, so each rendition serves media
 	/// from that same broadcast rather than whatever is at the path by the time it is asked. A
 	/// rendition whose `broadcast` reference escapes above the origin root names no broadcast at
 	/// all, so it is dropped with a warning rather than served.
-	pub fn sync(&self, upstream: &Upstream, catalog: &Catalog) {
+	pub fn sync(&self, source: &moq_mux::Source, catalog: &Catalog) {
 		let Some(archive) = catalog.archive.clone() else {
 			if !catalog.video.renditions.is_empty() || !catalog.audio.renditions.is_empty() {
 				tracing::warn!("catalog advertises no archive; its renditions can't be served as HLS");
@@ -422,6 +450,7 @@ impl Producer {
 		// over it drains and ends, instead of parking on a window that never finishes -- the
 		// cursor's own `Arc<Rendition>` would otherwise keep it alive.
 		let stale: Vec<Key> = current
+			.renditions
 			.iter()
 			.filter(|((kind, name), rendition)| match kind {
 				Kind::Video => !catalog
@@ -438,20 +467,21 @@ impl Producer {
 			.map(|(key, _)| key.clone())
 			.collect();
 		for key in stale {
-			if let Some(rendition) = current.remove(&key) {
+			if let Some(rendition) = current.renditions.remove(&key) {
 				rendition.close();
 			}
 		}
 
 		for (name, video) in &catalog.video.renditions {
 			let key = (Kind::Video, name.clone());
-			if let Some(rendition) = current.get(&key) {
+			if let Some(rendition) = current.renditions.get(&key) {
 				// Survived the stale pass, so it decodes the same: keep its window, its cached
-				// init segment and its media sequence, and just take the new bitrate and framerate.
-				rendition.refresh(video.bitrate, video.framerate);
+				// init segment and its media sequence, and just take the new bitrate, framerate,
+				// and `enabled` flag.
+				rendition.refresh(video.bitrate, video.framerate, video.enabled);
 				continue;
 			}
-			let rendition = match Rendition::video(name.clone(), video, upstream, section.clone(), clock) {
+			let rendition = match Rendition::video(name.clone(), video, source, section.clone(), clock) {
 				Ok(rendition) => Arc::new(rendition),
 				Err(err) => {
 					tracing::warn!(rendition = name, %err, "ignoring unservable video rendition");
@@ -459,15 +489,15 @@ impl Producer {
 				}
 			};
 			self.register(&rendition);
-			current.insert(key, rendition);
+			current.renditions.insert(key, rendition);
 		}
 		for (name, audio) in &catalog.audio.renditions {
 			let key = (Kind::Audio, name.clone());
-			if let Some(rendition) = current.get(&key) {
-				rendition.refresh(audio.bitrate, None);
+			if let Some(rendition) = current.renditions.get(&key) {
+				rendition.refresh(audio.bitrate, None, audio.enabled);
 				continue;
 			}
-			let rendition = match Rendition::audio(name.clone(), audio, upstream, section.clone(), clock) {
+			let rendition = match Rendition::audio(name.clone(), audio, source, section.clone(), clock) {
 				Ok(rendition) => Arc::new(rendition),
 				Err(err) => {
 					tracing::warn!(rendition = name, %err, "ignoring unservable audio rendition");
@@ -475,8 +505,16 @@ impl Producer {
 				}
 			};
 			self.register(&rendition);
-			current.insert(key, rendition);
+			current.renditions.insert(key, rendition);
 		}
+		// Rank once per catalog update, keeping playlist reads linear. Updating state also wakes
+		// the master's long-poll when metadata changes without replacing a rendition.
+		current.audio = catalog
+			.audio
+			.ranked()
+			.filter_map(|(name, _)| current.renditions.get(&(Kind::Audio, name.clone())))
+			.map(Arc::downgrade)
+			.collect();
 	}
 }
 
@@ -486,7 +524,7 @@ impl Producer {
 /// set it has reported, so it diffs against the producer independently of any other consumer:
 /// a fresh consumer replays every current rendition as [`Event::Added`].
 pub struct Consumer {
-	state: kio::Consumer<BTreeMap<Key, Arc<Rendition>>>,
+	state: kio::Consumer<State>,
 	/// The renditions this cursor has already reported, by identity, so a reconfigure (a
 	/// replaced `Arc`) is seen as a remove followed by an add.
 	seen: BTreeMap<Key, Arc<Rendition>>,
@@ -509,7 +547,10 @@ impl Consumer {
 	}
 
 	fn poll_next(&self, waiter: &kio::Waiter) -> Poll<Option<Event>> {
-		match self.state.poll(waiter, |current| next_event(current, &self.seen)) {
+		match self
+			.state
+			.poll(waiter, |current| next_event(&current.renditions, &self.seen))
+		{
 			Poll::Ready(Ok(event)) => Poll::Ready(Some(event)),
 			// Closed with no pending diff: no more changes.
 			Poll::Ready(Err(_)) => Poll::Ready(None),

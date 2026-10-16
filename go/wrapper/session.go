@@ -37,14 +37,14 @@ func (s *Session) Status(ctx context.Context) (ConnectionStatus, error) {
 	return bridge.Call(ctx, s.abort, s.inner.Status)
 }
 
-// Epoch is the connection epoch: 1 for the connect that built this session, one
+// Connects counts how many times this session has connected: 1 for the connect that built it, one
 // more on each reconnect. A server-accepted session stays at 1.
 //
 // Pair it with Status to log each reconnect by number: a ConnectionStatusConnected whose
-// Epoch grew is a reconnect. Like Status, it reports the current state, so a
+// count grew is a reconnect. Like Status, it reports the current state, so a
 // drop that reconnects between reads is coalesced away.
-func (s *Session) Epoch() uint64 {
-	return s.inner.Epoch()
+func (s *Session) Connects() uint64 {
+	return s.inner.Connects()
 }
 
 // Stats snapshots the current connection statistics.
@@ -104,7 +104,10 @@ func (s *Session) Consume() *OriginConsumer {
 	return &OriginConsumer{inner: s.inner.Consume()}
 }
 
-// Shutdown drains finished tracks within one second, returning any delivery error.
+// Shutdown drains finished tracks within one second, returning any drain error.
+// Explicit moq-lite-07-wip waits for the peer to receive finished tails; older Lite
+// versions, including the default lite-06, wait only for transport ACKs.
+// IETF also waits for transport ACKs.
 // Cancelling ctx aborts the session immediately.
 func (s *Session) Shutdown(ctx context.Context) error {
 	return bridge.CallErr(ctx, s.abort, s.inner.Shutdown)

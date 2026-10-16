@@ -25,6 +25,7 @@ import kotlin.test.assertNull
 import kotlin.test.assertTrue
 import kotlin.time.Duration.Companion.microseconds
 import kotlin.time.Duration.Companion.milliseconds
+import kotlin.time.Instant
 
 @Serializable
 private data class Status(val state: String)
@@ -49,6 +50,30 @@ private fun opusHead(): ByteArray =
     )
 
 class SmokeTest {
+    @Test
+    fun `container timebase belongs to one broadcast`() {
+        BroadcastProducer().use { owner ->
+            BroadcastProducer().use { other ->
+                Timebase(owner).use { timebase ->
+                    assertFailsWith<MoqException.Codec> {
+                        ContainerProducer(other, ContainerInit(ContainerFormat.FMP4, byteArrayOf(), timebase))
+                    }
+                    assertFailsWith<MoqException.Codec> {
+                        ContainerStreamProducer(other, ContainerStreamInit(ContainerFormat.FMP4, timebase))
+                    }
+                    owner.end()
+                    assertFailsWith<MoqException.Closed> { Timebase(owner) }
+                }
+            }
+        }
+    }
+
+    @Test
+    fun `diagnostic errors expose their named reason`() {
+        val error = MoqException.Transport(reason = "reset")
+        assertEquals("reset", error.reason)
+    }
+
     @Test
     fun `stream abort preserves protocol details`() = runTest {
         BroadcastProducer().use { broadcast ->
@@ -186,7 +211,7 @@ class SmokeTest {
     @Test
     fun `broadcast consumer fetches cached group`() = runTest {
         BroadcastProducer().use { broadcast ->
-            val track = broadcast.publishTrack("events", null)
+            val track = broadcast.publishTrack("events", TrackInfo(timescale = 1_000_000uL))
             val group = track.appendGroup()
             group.writeFrame(Frame(payload = "cached".encodeToByteArray(), timestampUs = 0uL))
             group.finish()
@@ -205,7 +230,7 @@ class SmokeTest {
     @Test
     fun `readFrame skips empty then populated groups`() = runTest {
         BroadcastProducer().use { broadcast ->
-            val track = broadcast.publishTrack("status", null)
+            val track = broadcast.publishTrack("status", TrackInfo(timescale = 1_000_000uL))
             val consumer = track.consume(null)
             track.appendGroup().finish()
             track.appendGroup().finish()
@@ -217,12 +242,54 @@ class SmokeTest {
     }
 
     @Test
+    fun `flate preserves optional timestamps`() = runTest {
+        for (timestamp in listOf(null, 123_456uL)) {
+            for (mode in listOf("snapshot", "stream")) {
+                BroadcastProducer().use { broadcast ->
+                    val info = if (timestamp == null) null else TrackInfo(timescale = 1_000_000uL)
+                    val track = broadcast.publishTrack("data", info)
+                    val consumer = track.consume(null)
+                    val payload = "payload".encodeToByteArray()
+                    if (mode == "snapshot") {
+                        val producer = dev.moq.flate.SnapshotProducer(broadcast, track, dev.moq.flate.Config())
+                        producer.update(payload, timestamp)
+                        producer.finish()
+                    } else {
+                        val producer = dev.moq.flate.StreamProducer(broadcast, track, dev.moq.flate.Config())
+                        producer.append(payload, timestamp)
+                        producer.finish()
+                    }
+                    val frame = consumer.readFrame()
+                    assertEquals("payload", frame?.payload?.decodeToString())
+                    assertEquals(timestamp, frame?.timestampUs)
+                }
+            }
+        }
+    }
+
+    @Test
+    fun `raw writes without timestamps stay untimed`() = runTest {
+        BroadcastProducer().use { broadcast ->
+            val track = broadcast.publishTrack("untimed", null)
+            val consumer = track.consume(null)
+            track.writeFrame(Frame(payload = "payload".encodeToByteArray()))
+            val frame = consumer.readFrame()
+            assertEquals("payload", frame?.payload?.decodeToString())
+            assertNull(frame?.timestampUs)
+            assertNull(consumer.info().timescale)
+            track.finish()
+        }
+    }
+
+    @Test
     fun `catalog handle closes with its broadcast`() {
         val broadcast = BroadcastProducer()
         val catalog = CatalogProducer(broadcast)
         catalog.setSection("app", "{\"value\":42}")
+        catalog.now()
         broadcast.close()
         assertFailsWith<MoqException.Closed> { catalog.removeSection("app") }
+        assertFailsWith<MoqException.Closed> { catalog.now() }
         catalog.close()
     }
 
@@ -238,7 +305,7 @@ class SmokeTest {
 
             // Fetch while the track is still published: finishing the media producer
             // unpublishes it, and the fetch would then miss with NotFound.
-            val fetched: ContainerGroupConsumer = ContainerGroupConsumer.fetch(consumer, ContainerGroupConfig(name = name, sequence = 0uL, container = audio.container, options = FetchGroupOptions(priority = 3u)))
+            val fetched = dev.moq.media.GroupConsumer.fetch(consumer, dev.moq.media.GroupConfig(name = name, sequence = 0uL, container = audio.container, options = FetchGroupOptions(priority = 3u)))
 
             // Close the group so the fetched stream terminates instead of waiting for more.
             media.finish()
@@ -387,6 +454,27 @@ class SmokeTest {
                 broadcast.announce(Route())
                 assertIs<AnnounceEventStart>(announced.nextRoute())
                 consumer.requestBroadcast("live")
+            }
+        }
+    }
+
+    @Test
+    fun `a new epoch restarts announce consumers`() = runTest {
+        OriginProducer(OriginConfig()).use { origin ->
+            val announced = origin.consume().announced(AnnounceConfig())
+            origin.createBroadcast("epoch").use { broadcast ->
+                val first = mintEpoch()
+                assertEquals(Instant.fromEpochMilliseconds(1_700_000_000_000), epochTime("018bcfe5-6800-7000-8000-000000000000"))
+                broadcast.announce(Route(epoch = first))
+                val start = assertIs<AnnounceEventStart>(announced.nextRoute())
+                assertEquals(first, start.announce.route.epoch)
+
+                val second = mintEpoch()
+                broadcast.announce(Route(epoch = second))
+                val restart = assertIs<AnnounceEventRestart>(announced.nextRoute())
+                assertEquals(second, restart.announce.route.epoch)
+
+                assertFailsWith<MoqException> { epochTime("not-an-epoch") }
             }
         }
     }

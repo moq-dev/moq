@@ -314,7 +314,7 @@ impl Message for Publish<'_> {
 				};
 				let forward = r.bool()?;
 				// parameters
-				Parameters::skip(r)?;
+				super::token::single(Parameters::skip_request(r)?)?;
 
 				Ok(Self {
 					request_id,
@@ -340,7 +340,7 @@ impl Message for Publish<'_> {
 				// OBJECT_DELIVERY_TIMEOUT is also legal in draft-15. The values are dropped.
 				decode_params!(r, version,
 					0x02 => _object_delivery_timeout: Option<u64> where version == Version::Draft15 || Filter::is_draft20(version),
-					0x03 => _authorization_token: Vec<super::Opaque>,
+					0x03 => authorization_token: Vec<super::token::RequestToken>,
 					0x06 => _subgroup_delivery_timeout: Option<u64> where Filter::is_draft20(version),
 					0x08 => _expires: Option<u64>,
 					0x09 => largest_location: Option<Location>,
@@ -349,8 +349,9 @@ impl Message for Publish<'_> {
 					0x21 => _filter: Option<Filter> where Filter::is_draft20(version),
 					0x22 => group_order: Option<GroupOrder> where version == Version::Draft15 || Filter::is_draft20(version),
 				);
-
 				let mut properties = Properties::decode(r, version)?;
+				// Last, so a malformed field closes the session before a token refusal.
+				super::token::single(authorization_token)?;
 				properties.group_order = properties.group_order.or(group_order);
 
 				let forward = forward.unwrap_or(true);
@@ -440,7 +441,7 @@ impl Message for PublishOk {
 				let filter = Filter::decode(r, version)?;
 
 				// no parameters
-				Parameters::skip(r)?;
+				Parameters::skip_response(r)?;
 
 				Ok(Self {
 					request_id,

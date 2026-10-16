@@ -3,8 +3,9 @@
 //! Used when QUIC is unreachable: UDP blocked by a firewall, a proxy in the way, a
 //! network that only passes TCP/443. The client races this against QUIC and gives QUIC
 //! a small head start ([`Config::delay`]), so WebSocket only wins when QUIC can't get
-//! through. A [`crate::Connection`] that lands on WebSocket keeps the QUIC dial going and
-//! moves onto it if it completes. Servers accept it on a separate TCP port via [`Listener`].
+//! through. A session that lands on WebSocket stays on it for its lifetime. Servers
+//! accept it on a separate TCP port via [`Listener`], or pass an HTTP server's
+//! upgraded socket to [`accept`] before admitting the returned request.
 
 use qmux::ws::tokio_tungstenite;
 use qmux::ws::tokio_tungstenite::tungstenite::{self, client::IntoClientRequest, http};
@@ -34,6 +35,10 @@ pub enum Error {
 	/// The URL had no host to dial.
 	#[error("missing hostname")]
 	MissingHostname,
+
+	/// The TLS server name could not be used.
+	#[error(transparent)]
+	Tls(#[from] crate::tls::Error),
 
 	/// The URL scheme can't carry WebSocket. Only `http`, `https`, `ws`, and `wss` work.
 	#[error("unsupported URL scheme for WebSocket: {0}")]
@@ -104,7 +109,67 @@ impl Error {
 
 type Result<T> = std::result::Result<T, Error>;
 
-// Track servers (hostname:port) where WebSocket won the race, so we won't give QUIC a headstart next time
+/// The MoQ handshake policy and connection facts for an upgraded WebSocket.
+#[non_exhaustive]
+pub struct Options {
+	pub(crate) url: Url,
+	pub(crate) server: moq_net::Server,
+	pub(crate) active: moq_net::server::Active,
+	/// The addresses and negotiated subprotocol captured before the upgrade.
+	pub link: crate::server::Link,
+	/// The verified TLS peer, when the HTTP server requested a certificate.
+	pub identity: Option<crate::tls::PeerIdentity>,
+	/// The socket measurements captured before the HTTP server erased its descriptor.
+	pub socket_stats: Option<qmux::SharedSocketStats>,
+	/// The SETUP deadline, including its reply; defaults to ten seconds.
+	pub timeout: Option<time::Duration>,
+}
+
+impl Options {
+	/// Carry an accepted connection's guard, URL, and MoQ policy through its upgrade.
+	pub fn new(url: Url, server: moq_net::Server, active: moq_net::server::Active) -> Self {
+		Self {
+			url,
+			server,
+			active,
+			link: Default::default(),
+			identity: None,
+			socket_stats: None,
+			timeout: Some(crate::listen::DEFAULT_TIMEOUT),
+		}
+	}
+}
+
+/// Read SETUP on an upgraded WebSocket, leaving admission to the returned request.
+pub async fn accept<T>(socket: T, options: Options) -> crate::Result<crate::server::Request>
+where
+	T: futures::Stream<Item = std::result::Result<tungstenite::Message, tungstenite::Error>>
+		+ futures::Sink<tungstenite::Message, Error = tungstenite::Error>
+		+ Send
+		+ Unpin
+		+ 'static,
+{
+	let deadline = options
+		.timeout
+		.and_then(|timeout| tokio::time::Instant::now().checked_add(timeout));
+	// A vanished peer sends no FIN. Ping and timeout bound the same stale-session
+	// lifetime that QUIC's idle timeout bounds on the native path.
+	let mut upgraded = qmux::ws::Upgraded::new(socket)
+		.with_keep_alive(qmux::ws::KeepAlive::default())
+		.with_session_config(crate::qmux_config());
+	if let Some(stats) = &options.socket_stats {
+		upgraded = upgraded.with_socket_stats(stats.clone());
+	}
+	if let Some(alpn) = &options.link.alpn {
+		upgraded = upgraded.with_alpn(alpn);
+	}
+	crate::server::accept_websocket(upgraded.accept(), options, deadline).await
+}
+
+/// Servers (host, port) where WebSocket won the race, so later dials skip QUIC's head start.
+///
+/// Both arms still race on those dials, and a QUIC win clears the entry through [`forget`],
+/// since UDP gets through after all.
 static WEBSOCKET_WON: LazyLock<Mutex<HashSet<(String, u16)>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
 
 /// The [`WEBSOCKET_WON`] key for a dial URL: the host and port the fallback dials.
@@ -119,12 +184,17 @@ fn won_key(url: &Url) -> Result<(String, u16)> {
 }
 
 /// Forget that WebSocket won for `url`, giving QUIC its head start again.
-///
-/// Called once a QUIC dial to `url` lands after all, which proves UDP gets through.
+#[cfg(feature = "noq")]
 pub(crate) fn forget(url: &Url) {
 	if let Ok(key) = won_key(url) {
 		WEBSOCKET_WON.lock().unwrap().remove(&key);
 	}
+}
+
+/// Record that WebSocket won for `url`, as a fallback dial that lands does.
+#[cfg(all(test, feature = "noq"))]
+pub(crate) fn remember(url: &Url) {
+	WEBSOCKET_WON.lock().unwrap().insert(won_key(url).unwrap());
 }
 
 /// Whether the next dial to `url` skips QUIC's head start.
@@ -156,16 +226,20 @@ pub struct Config {
 
 	/// Head start given to the QUIC dial before the WebSocket fallback joins the
 	/// race. Defaults to 200ms, and drops to zero for a server WebSocket already won.
+	/// `None` uses the default; an explicit command-line flag or environment variable wins.
 	#[usage(skip)]
-	#[serde(with = "crate::cli::duration::serde_duration")]
-	pub delay: time::Duration,
+	#[serde(
+		default,
+		with = "crate::cli::duration::serde_duration::option",
+		skip_serializing_if = "Option::is_none"
+	)]
+	pub delay: Option<time::Duration>,
 
+	/// Head start given to the QUIC dial before the WebSocket fallback joins the race. Defaults to 200ms.
 	#[usage(
 		name = "connect-websocket-delay",
 		long = "connect-websocket-delay",
 		env = "MOQ_CONNECT_WEBSOCKET_DELAY",
-		default_value_t = CliDuration::fallback(DEFAULT_DELAY),
-		default = "200ms",
 		setting = "connect.websocket.delay"
 	)]
 	#[serde(default, rename = "__cli_delay", skip_serializing_if = "Option::is_none")]
@@ -181,7 +255,7 @@ impl Default for Config {
 	fn default() -> Self {
 		Self {
 			enabled: None,
-			delay: DEFAULT_DELAY,
+			delay: Some(DEFAULT_DELAY),
 			delay_arg: None,
 			legacy: Default::default(),
 		}
@@ -245,7 +319,7 @@ impl Config {
 	pub fn resolve(&self) -> Resolved {
 		Resolved {
 			enabled: self.enabled.unwrap_or(true),
-			delay: CliDuration::resolve(self.delay_arg, self.delay),
+			delay: self.delay_arg.map(Into::into).or(self.delay).unwrap_or(DEFAULT_DELAY),
 		}
 	}
 }
@@ -305,20 +379,6 @@ pub(crate) async fn connect(
 		return Err(Error::Disabled);
 	}
 
-	let key = won_key(&url)?;
-	let (host, port) = key.clone();
-
-	// Apply a small penalty to WebSocket to improve odds for QUIC to connect first,
-	// unless we've already had to fall back to WebSockets for this server.
-	// TODO if let chain
-	match resolved.delay {
-		delay if !delay.is_zero() && !WEBSOCKET_WON.lock().unwrap().contains(&key) => {
-			tokio::time::sleep(delay).await;
-			tracing::debug!(peer = %crate::connect::Endpoint(&url), delay_ms = %delay.as_millis(), "QUIC not yet connected, attempting WebSocket fallback");
-		}
-		_ => {}
-	}
-
 	// Convert URL scheme: http:// -> ws://, https:// -> wss://
 	// Custom protocols (moqt://, moql://) use raw QUIC and don't support WebSocket.
 	let needs_tls = match url.scheme() {
@@ -334,6 +394,29 @@ pub(crate) async fn connect(
 		"wss" => true,
 		_ => return Err(Error::UnsupportedScheme(url.scheme().to_string())),
 	};
+
+	let key = won_key(&url)?;
+	let (host, port) = key.clone();
+
+	// A secure dial presents this name on every attempt; the override was checked when the client was built.
+	if needs_tls && tls_host_name.is_none() {
+		match url.host() {
+			// URL brackets delimit IPv6 literals, but aren't part of the TLS server name.
+			Some(url::Host::Ipv6(ip)) => crate::tls::server_name(&ip.to_string())?,
+			_ => crate::tls::server_name(&host)?,
+		}
+	}
+
+	// Apply a small penalty to WebSocket to improve odds for QUIC to connect first,
+	// unless we've already had to fall back to WebSockets for this server.
+	// TODO if let chain
+	match resolved.delay {
+		delay if !delay.is_zero() && !WEBSOCKET_WON.lock().unwrap().contains(&key) => {
+			tokio::time::sleep(delay).await;
+			tracing::debug!(peer = %crate::connect::Endpoint(&url), delay_ms = %delay.as_millis(), "QUIC not yet connected, attempting WebSocket fallback");
+		}
+		_ => {}
+	}
 
 	tracing::debug!(peer = %crate::connect::Endpoint(&url), "connecting via WebSocket");
 
@@ -374,6 +457,7 @@ pub(crate) async fn connect(
 				.with_protocols(alpns.iter().map(|&a| (a, qmux_versions_for(a))))
 				.with_connector(connector)
 				.with_keep_alive(qmux::ws::KeepAlive::default()) // 5s ping / 30s deadline; TCP backs off retransmits too far for QUIC's 10s
+				.with_session_config(crate::qmux_config())
 				.connect(url.as_str())
 				.await
 				.map_err(Error::connect)?
@@ -410,7 +494,7 @@ async fn connect_tls_override(
 		Ok(ip) => tls_url.set_ip_host(ip),
 		Err(_) => tls_url.set_host(Some(tls_host_name)).map_err(|_| ()),
 	}
-	.map_err(|_| Error::connect(qmux::Error::InvalidServerName))?;
+	.map_err(|_| Error::BuildRequest(format!("invalid TLS host name: {tls_host_name}")))?;
 	let mut request = tls_url
 		.as_str()
 		.into_client_request()
@@ -432,7 +516,9 @@ async fn connect_tls_override(
 		.headers()
 		.get(http::header::SEC_WEBSOCKET_PROTOCOL)
 		.and_then(|value| value.to_str().ok());
-	let upgraded = qmux::ws::Upgraded::new(websocket).with_keep_alive(qmux::ws::KeepAlive::default());
+	let upgraded = qmux::ws::Upgraded::new(websocket)
+		.with_keep_alive(qmux::ws::KeepAlive::default())
+		.with_session_config(crate::qmux_config());
 	Ok(match negotiated {
 		Some(protocol) => upgraded.with_alpn(protocol).connect(),
 		None => upgraded.connect(),
@@ -465,6 +551,25 @@ impl Error {
 				status: Some(status), ..
 			} => crate::ConnectError::from_status_u16(*status),
 			_ => None,
+		}
+	}
+
+	/// A fixed local error or settled rejection that another dial cannot repair.
+	pub(crate) fn is_terminal(&self) -> bool {
+		match self {
+			Self::Disabled
+			| Self::MissingHostname
+			| Self::UnsupportedScheme(_)
+			| Self::BuildRequest(_)
+			| Self::ProtocolHeader(_)
+			| Self::ConnectRejected(_) => true,
+			Self::Tls(err) => err.is_terminal(),
+			Self::Failover(failures) => {
+				!failures.is_empty() && failures.iter().all(|failure| failure.error.is_terminal())
+			}
+			_ => self
+				.status()
+				.is_some_and(|status| !crate::error::status_retryable(status)),
 		}
 	}
 
@@ -619,7 +724,9 @@ impl Listener {
 				.unwrap()
 				.take()
 				.expect("successful upgrade selected a protocol");
-			let upgraded = qmux::ws::Upgraded::new(websocket).with_keep_alive(qmux::ws::KeepAlive::default());
+			let upgraded = qmux::ws::Upgraded::new(websocket)
+				.with_keep_alive(qmux::ws::KeepAlive::default())
+				.with_session_config(crate::qmux_config());
 			let session = match &protocol {
 				Some(protocol) => upgraded.with_alpn(protocol).accept(),
 				None => upgraded.accept(),
@@ -922,4 +1029,17 @@ mod legacy_tests {
 		let config = parse(&[]);
 		assert_eq!(config.resolve().delay, DEFAULT_DELAY);
 	}
+}
+
+#[cfg(test)]
+mod duration_tests {
+	use super::*;
+	crate::cli::duration::test_config_duration!(
+		delay_set_in_code_beats_parser_default,
+		Config,
+		delay,
+		"--connect-websocket-delay",
+		|c: &Config| c.resolve().delay,
+		|d| d
+	);
 }

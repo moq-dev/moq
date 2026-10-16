@@ -67,16 +67,20 @@ class FakeData {
 	close() {}
 }
 
-type Read = NonNullable<Awaited<ReturnType<Container.Consumer["next"]>>>;
+type Read = Container.Read;
 
 let frameTimestamp = 0;
-function frame(): Read {
+function frame(): Extract<Read, { kind: "frame" }> {
 	frameTimestamp += 20_000;
 	return {
+		kind: "frame",
 		group: 0,
-		discontinuity: 0,
-		continuous: true,
-		frame: { timestamp: Time.Micro(frameTimestamp), payload: new Uint8Array([1]), keyframe: true },
+		frame: {
+			arrival: Time.Milli.now(),
+			timestamp: Time.Micro(frameTimestamp),
+			payload: new Uint8Array([1]),
+			keyframe: true,
+		},
 	};
 }
 
@@ -90,24 +94,34 @@ const globals = [
 ] as const;
 const originals = new Map<string, PropertyDescriptor | undefined>();
 let codecs = 0;
+let codecErrors: AudioDecoderInit["error"][] = [];
 
 beforeEach(() => {
 	frameTimestamp = 0;
 	codecs = 0;
+	codecErrors = [];
 	contexts = [];
 	moduleLoaded = Promise.resolve();
 	for (const name of globals) originals.set(name, Object.getOwnPropertyDescriptor(globalThis, name));
 
 	class Codec {
 		state = "configured";
+		needsKey = true;
 		readonly init: AudioDecoderInit;
 		constructor(init: AudioDecoderInit) {
 			this.init = init;
+			codecErrors.push(init.error);
 			codecs++;
 		}
-		configure() {}
-		reset() {}
-		decode(chunk: { timestamp: number }) {
+		configure() {
+			this.needsKey = true;
+		}
+		reset() {
+			this.needsKey = true;
+		}
+		decode(chunk: { timestamp: number; type: EncodedAudioChunkType }) {
+			if (this.needsKey && chunk.type !== "key") throw new DOMException("key chunk required", "DataError");
+			this.needsKey = false;
 			this.init.output(new FakeData(chunk.timestamp) as unknown as AudioData);
 		}
 		close() {
@@ -116,8 +130,10 @@ beforeEach(() => {
 	}
 	const chunk = class {
 		readonly timestamp: number;
+		readonly type: EncodedAudioChunkType;
 		constructor(init: EncodedAudioChunkInit) {
 			this.timestamp = init.timestamp;
+			this.type = init.type;
 		}
 	};
 
@@ -175,7 +191,7 @@ function feed() {
 	};
 }
 
-async function play(initial: Delay) {
+async function play(initial: Delay, buffered = false, cmaf = false) {
 	const push = feed();
 	const truncate = spyOn(SharedRingBuffer.prototype, "truncate");
 	const reset = spyOn(SharedRingBuffer.prototype, "reset");
@@ -184,24 +200,37 @@ async function play(initial: Delay) {
 	let producer = new Moq.Broadcast.Producer();
 	let consumer = producer.consume();
 	const relativeBroadcast = mock(() => consumer);
-	const audio = Catalog.AudioConfigSchema.parse({
+	let audio = Catalog.AudioConfigSchema.parse({
 		codec: "opus",
 		container: { kind: "legacy" },
 		sampleRate: 48_000,
 		numberOfChannels: 2,
 	});
+	if (cmaf) {
+		audio = Catalog.AudioConfigSchema.parse({
+			...audio,
+			container: {
+				kind: "cmaf",
+				init: Buffer.from(Container.Cmaf.createAudioInitSegment(audio)).toString("base64"),
+			},
+		});
+	}
 	const catalog = new Signal<Catalog.Root>({ audio: { renditions: { audio } } });
 	const enabled = new Signal(true);
+	// The catalog broadcast's instance, identified by its `closed` handle.
+	const active = new Signal({ closed: {} });
 	const broadcast = new Signal<Broadcast | undefined>({
 		in: { enabled },
-		out: { catalog },
+		out: { catalog, active },
 		relativeBroadcast,
 	} as unknown as Broadcast);
 
 	const delay = new Signal<Delay>(initial);
 	const source = new Source({ broadcast, supported: async () => true });
-	const sync = new Sync({ delay });
-	const decoder = new Decoder({ source, sync });
+	const sync = new Sync({ delay, buffer: Time.Milli(buffered ? 1000 : 0) });
+	// The decoder's own switch, which a mute or pause turns off.
+	const decoding = new Signal(true);
+	const decoder = new Decoder({ source, sync, enabled: decoding });
 	await microtasks();
 
 	// Enough frames to get past the legacy decoder's warm-up, so a handover would truncate.
@@ -209,7 +238,7 @@ async function play(initial: Delay) {
 		const timestamps: number[] = [];
 		for (let i = 0; i < count; i++) {
 			const read = frame();
-			timestamps.push(read.frame?.timestamp ?? 0);
+			timestamps.push(read.frame.timestamp);
 			push(read);
 			await microtasks();
 		}
@@ -218,11 +247,20 @@ async function play(initial: Delay) {
 
 	return {
 		delay,
+		push,
 		enabled,
+		decoding,
 		context: decoder.out.context,
+		arrivals: () => decoder.arrivals(),
+		error: decoder.out.error,
 		play,
 		// Remove the rendition from the catalog, then restore it.
 		remove: () => catalog.set({}),
+		// Point the player at another broadcast, one without audio.
+		leave: () => {
+			active.set({ closed: {} });
+			catalog.set({});
+		},
 		// Keep the rendition in the catalog with `enabled: false`, as a muted publisher does.
 		disable: () =>
 			catalog.set({
@@ -257,6 +295,32 @@ async function play(initial: Delay) {
 		},
 	};
 }
+
+it("decodes an audio packet inside a group after a gap", async () => {
+	const playback = await play(Time.Milli(100));
+	try {
+		await playback.play();
+		// Opened late, so it observes only the gap and frame below.
+		const arrivals = playback.arrivals();
+		playback.push({ kind: "gap", timestamp: Time.Micro(20_000), duration: Time.Micro(40_000) });
+		const next = frame();
+		next.frame.keyframe = false;
+		playback.push(next);
+		await microtasks();
+		expect(playback.inserted()).toContain(next.frame.timestamp);
+		expect(await arrivals.next()).toEqual({ kind: "gap", timestamp: Time.Milli(20), duration: Time.Milli(40) });
+		expect(await arrivals.next()).toMatchObject({
+			kind: "frame",
+			timestamp: Time.Milli.fromMicro(next.frame.timestamp),
+			arrival: next.frame.arrival,
+		});
+		arrivals.close();
+		expect(await arrivals.next()).toBeUndefined();
+	} finally {
+		playback.close();
+		await microtasks();
+	}
+});
 
 describe("Decoder across a broadcast disable", () => {
 	it("releases the graph when its broadcast is disabled and rebuilds on return", async () => {
@@ -375,13 +439,12 @@ describe("Decoder across a rendition's absence", () => {
 			const before = playback.inserted().length;
 			const timestamps = await playback.play(6);
 
-			// One graph throughout, and the return decodes into the same ring from its first frame past
-			// the legacy warm-up.
+			// One graph throughout; a rendition without warmup keeps its entire return.
 			expect(contexts).toHaveLength(1);
 			expect(context.calls.close).toBe(0);
 			expect(playback.subscriptions()).toBe(2);
 			expect(playback.rings()).toEqual([ring]);
-			expect(playback.inserted().slice(before)).toEqual(timestamps.slice(3));
+			expect(playback.inserted().slice(before)).toEqual(timestamps);
 		} finally {
 			playback.close();
 		}
@@ -499,8 +562,102 @@ describe("Decoder across a rendition's absence", () => {
 			load();
 			await microtasks();
 
-			// Everything past the legacy warm-up reaches the ring, none of it dropped for want of one.
-			expect(playback.inserted()).toEqual(timestamps.slice(3));
+			// Every frame reaches the ring once the worklet loads.
+			expect(playback.inserted()).toEqual(timestamps);
+		} finally {
+			playback.close();
+		}
+	});
+});
+
+for (const cmaf of [false, true]) {
+	it(`settles a buffered ${cmaf ? "CMAF" : "legacy"} rendition change with a stationary playhead`, async () => {
+		const playback = await play(Time.Milli(100), true, cmaf);
+		try {
+			const timestamps = await playback.play(20);
+			const before = playback.codecs();
+			expect(before).toBe(1);
+			// Nothing reads the ring, as with a muted AudioContext. Decode is held upstream.
+			// The first frame past the last decoded one is the one blocked on backpressure. Earlier gaps
+			// are the legacy decoder's dropped warm-up output.
+			const last = Math.max(...playback.inserted());
+			const held = timestamps.find((timestamp) => timestamp > last);
+			expect(held).toBeDefined();
+			playback.restore({ description: "4f707573486561640102000080bb0000000000" });
+			await microtasks();
+			expect(playback.codecs()).toBe(before + 1);
+			// Releasing the retired loop's wait must not decode the frame it held.
+			expect(playback.inserted()).not.toContain(held);
+		} finally {
+			playback.close();
+			await microtasks();
+		}
+	});
+}
+
+describe("fatal decoder errors", () => {
+	it("releases audio subscriptions and retains the failure until the source changes", async () => {
+		const close = spyOn(Moq.Track.Subscriber.prototype, "close");
+		const playback = await play(Time.Milli(100));
+		try {
+			await playback.play();
+			const before = close.mock.calls.length;
+			const failure = new DOMException("invalid encoded audio", "EncodingError");
+			codecErrors.at(-1)?.(failure);
+			await microtasks();
+			expect(playback.error.peek()).toBe(failure);
+			expect(close.mock.calls.length).toBeGreaterThan(before);
+			playback.decoding.set(false);
+			await microtasks();
+			playback.decoding.set(true);
+			await microtasks();
+			const attempts = playback.subscriptions();
+			expect(playback.error.peek()).toBe(failure);
+			expect(playback.codecs()).toBe(1);
+			playback.remove();
+			await microtasks();
+			playback.replace();
+			playback.restore();
+			await microtasks();
+			expect(playback.error.peek()).toBeUndefined();
+			expect(playback.subscriptions()).toBeGreaterThan(attempts);
+		} finally {
+			playback.close();
+			close.mockRestore();
+		}
+	});
+
+	it("clears the failure when a source without audio is selected while muted", async () => {
+		const playback = await play(Time.Milli(100));
+		try {
+			await playback.play();
+			const failure = new DOMException("invalid encoded audio", "EncodingError");
+			codecErrors.at(-1)?.(failure);
+			await microtasks();
+			playback.decoding.set(false);
+			await microtasks();
+			expect(playback.error.peek()).toBe(failure);
+			playback.leave();
+			await microtasks();
+			expect(playback.error.peek()).toBeUndefined();
+		} finally {
+			playback.close();
+		}
+	});
+
+	it("keeps the failure while the same rendition is muted by its publisher", async () => {
+		const playback = await play(Time.Milli(100));
+		try {
+			await playback.play();
+			const failure = new DOMException("invalid encoded audio", "EncodingError");
+			codecErrors.at(-1)?.(failure);
+			await microtasks();
+			playback.disable();
+			await microtasks();
+			playback.restore();
+			await microtasks();
+			expect(playback.error.peek()).toBe(failure);
+			expect(playback.codecs()).toBe(1);
 		} finally {
 			playback.close();
 		}

@@ -3,6 +3,7 @@
 use std::collections::VecDeque;
 
 use hang::catalog::VideoConfig;
+use moq_mux::container::Read;
 
 use super::decoder::Config;
 use super::sink::Sink;
@@ -85,8 +86,6 @@ pub struct Consumer {
 	pending: VecDeque<Frame>,
 	/// Whether the ended track's decoder has already been drained.
 	drained: bool,
-	/// Last container playhead generation observed.
-	discontinuity: u64,
 }
 
 impl Consumer {
@@ -101,7 +100,7 @@ impl Consumer {
 		let decoder = Sink::open(catalog, &options.decoder).await?;
 
 		let name = name.into();
-		let track = broadcast.track(&name)?;
+		let track = broadcast.track(hang::catalog::Reference::track(catalog, &name))?;
 		let mut subscriber = track
 			.subscribe(
 				moq_net::track::Subscription::default()
@@ -140,7 +139,6 @@ impl Consumer {
 			track,
 			pending: VecDeque::new(),
 			drained: false,
-			discontinuity: 0,
 		})
 	}
 
@@ -166,14 +164,13 @@ impl Consumer {
 				return Ok(None);
 			}
 
-			let mux_frame = self.track.read().await?;
-			let discontinuity = self.track.discontinuity();
-			if discontinuity != self.discontinuity {
-				// A playhead event re-applies startup delay and skip; the next group
-				// already starts on a keyframe with parameter sets, so the decoder is
-				// not flushed.
-				self.discontinuity = discontinuity;
-			}
+			let mux_frame = match self.track.read().await? {
+				Some(Read::Frame { frame, .. }) => Some(frame),
+				// The next group starts on a keyframe with parameter sets, so neither a
+				// gap nor a declared end flushes the decoder.
+				Some(Read::Gap { .. } | Read::End { .. }) => continue,
+				None => None,
+			};
 
 			let Some(mux_frame) = mux_frame else {
 				// The flag goes up only once the tail is in hand, so a read
@@ -248,17 +245,10 @@ mod tests {
 		}
 
 		let origin = produce_origin();
-		let requests = origin.dynamic("", Default::default()).unwrap();
-		let served = source_subscriber.clone();
-		tokio::spawn(async move {
-			while let Ok(request) = requests.requested_broadcast().await {
-				request.accept(served.clone());
-			}
-		});
 		let catalog = moq_mux::catalog::Consumer::<()>::new(&source_subscriber, moq_mux::catalog::CatalogFormat::Hang)
 			.await
 			.unwrap();
-		let source = moq_mux::Source::new(origin.consume(), "test");
+		let source = moq_mux::Source::new(origin.consume(), source_subscriber.clone());
 		// Both frames are encoded before the export runs, so the exporter needs a budget
 		// wide enough to read them: its REAL_TIME default keeps only the live edge, and
 		// the second `next()` would then block forever waiting for a group that was

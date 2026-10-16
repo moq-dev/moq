@@ -154,11 +154,29 @@ export type Sample = {
 	resources: Resources;
 };
 
+/** Whether a changed presented frame belongs to playback within the live bound. */
+export function reachesLive(observation: {
+	previous?: number;
+	source: number;
+	sample: Pick<Sample, "frameId" | "audioContext" | "audioStalled">;
+	bound: number;
+}): boolean {
+	const { previous, source, sample, bound } = observation;
+	return (
+		sample.audioContext === "running" &&
+		!sample.audioStalled &&
+		previous !== undefined &&
+		sample.frameId !== undefined &&
+		sample.frameId !== previous &&
+		source - sample.frameId <= bound
+	);
+}
+
 // ── the refused session ─────────────────────────────────────────────────────
 
-/** How a refused session ended, as `WebTransport.closed` reported it to the page. */
+/** How a refused session ended, from `WebTransport.closed` or `Connection.error`. */
 export type CloseState =
-	/** `closed` resolved: the close capsule arrived. */
+	/** The peer's session close code and description. */
 	| { closeCode: number; reason: string }
 	/** `closed` rejected, or the relay admitted the session: the close never said why. */
 	| { error: string };

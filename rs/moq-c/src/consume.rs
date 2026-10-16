@@ -62,7 +62,7 @@ async fn resolve(
 	};
 
 	let origin = origin.ok_or_else(|| Error::UnresolvableBroadcast(reference.as_str().to_string()))?;
-	let source = moq_mux::Source::new(origin, &broadcast.info().path);
+	let source = moq_mux::Source::new(origin, broadcast);
 	Ok(source.resolve(Some(&reference.borrow())).await?)
 }
 
@@ -421,7 +421,10 @@ impl Consume {
 			.iter()
 			.nth(index)
 			.ok_or(Error::NoIndex)?;
-		let name = name.clone();
+		if !config.enabled {
+			return Err(moq_net::Error::NotFound.into());
+		}
+		let name = hang::catalog::Reference::track(config, name).to_string();
 		// Consume with the container the catalog actually advertises (Legacy / Cmaf / Loc)
 		// instead of assuming Legacy, otherwise CMAF/fMP4 sources (e.g. ffmpeg moqenc,
 		// browser @moq/publish) are misread as raw frames.
@@ -482,7 +485,10 @@ impl Consume {
 			.iter()
 			.nth(index)
 			.ok_or(Error::NoIndex)?;
-		let name = name.clone();
+		if !config.enabled {
+			return Err(moq_net::Error::NotFound.into());
+		}
+		let name = hang::catalog::Reference::track(config, name).to_string();
 		let container = moq_mux::catalog::hang::Container::try_from(config)?;
 		let reference = config.broadcast.clone();
 		let broadcast = consume.broadcast.clone();
@@ -533,8 +539,10 @@ impl Consume {
 			let frame = tokio::select! {
 				biased;
 				_ = &mut close => return Ok(()),
-				frame = track.read() => match frame? {
-					Some(frame) => frame,
+				read = track.read() => match read? {
+					Some(moq_mux::container::Read::Frame { frame, .. }) => frame,
+					// The C ABI carries frames only.
+					Some(moq_mux::container::Read::Gap { .. } | moq_mux::container::Read::End { .. }) => continue,
 					None => return Ok(()),
 				},
 			};

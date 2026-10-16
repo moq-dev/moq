@@ -1,5 +1,5 @@
 import Session, { type Version as QmuxVersion } from "@moq/qmux";
-import { error, fromClose } from "../error.ts";
+import { error, fromClose, sessionCause } from "../error.ts";
 import * as Ietf from "../ietf/index.ts";
 import * as Lite from "../lite/index.ts";
 import type { Consumer as OriginConsumer, Producer as OriginProducer } from "../origin.ts";
@@ -9,7 +9,8 @@ import * as Hex from "../util/hex.ts";
 import { redact } from "../util/log.ts";
 import { isWebTransportSupported } from "./browser.ts";
 import type { Established } from "./established.ts";
-import { forwardAnnounced } from "./forward.ts";
+import * as Extensions from "./extensions.ts";
+import { DISCOVERY_REMOVED, forwardAnnounced } from "./forward.ts";
 import { exchangeSetup } from "./handshake.ts";
 
 // Default head start for WebTransport before attempting the WebSocket fallback.
@@ -83,12 +84,6 @@ export interface ConnectProps {
 	transport?: WebTransport;
 
 	/**
-	 * Whether the relay supports broadcast discovery; see {@link Established.discovery}.
-	 * Defaults to true.
-	 */
-	discovery?: boolean;
-
-	/**
 	 * The origin whose broadcasts the session announces and serves to the peer. Omit to
 	 * publish nothing.
 	 *
@@ -102,13 +97,18 @@ export interface ConnectProps {
 	 * The origin the session feeds with the peer's announced broadcasts. Omit to discover
 	 * nothing.
 	 *
-	 * Everything the peer announces appears in the origin's table for the session's
-	 * lifetime, consumable by path; the entries retract when the session dies. Pass the
-	 * producer behind {@link ConnectProps.publish} to route both directions through one
-	 * origin: a locally published path is then served back to local consumers directly, and
-	 * the session still never announces the peer's own broadcasts back to it.
+	 * What the peer announces under the prefixes the origin's readers watch
+	 * (`announced(scope)` or `request(path, { announced: true })`) appears in its table for
+	 * the session's lifetime, consumable by path; nothing is asked until something watches,
+	 * and the entries retract when the session dies. Pass the producer behind
+	 * {@link ConnectProps.publish} to route both directions through one origin: a locally
+	 * published path is then served back to local consumers directly, and the session still
+	 * never announces the peer's own broadcasts back to it.
 	 */
 	consume?: OriginProducer;
+
+	/** The moq-transport extensions to offer, each on unless set to `false`. */
+	extensions?: Extensions.Extensions;
 
 	/**
 	 * Aborts the connection attempt with the signal's reason. An already-aborted
@@ -120,10 +120,11 @@ export interface ConnectProps {
 
 /** The per-session wiring shared by every negotiated protocol path. */
 type SessionProps = {
-	discovery: boolean;
 	publish?: OriginConsumer;
 	/** Whether this side dialed; only the dialing side aborts on a publication its grant does not cover. */
 	client: boolean;
+	/** The moq-transport extensions this side offers. */
+	extensions: Extensions.Offered;
 };
 
 // Save if WebSocket won the last race, so we won't give QUIC a head start next time.
@@ -140,6 +141,7 @@ const NEVER_ABORTED = new AbortController().signal;
  * @returns A promise that resolves to an established session
  */
 export async function connect({ url, ...props }: ConnectProps): Promise<Established> {
+	if ("discovery" in props) throw new TypeError(DISCOVERY_REMOVED);
 	const signal = props.signal ?? NEVER_ABORTED;
 	signal.throwIfAborted();
 
@@ -167,9 +169,9 @@ export async function connect({ url, ...props }: ConnectProps): Promise<Establis
 
 async function connectInner(url: URL, props: Omit<ConnectProps, "url">, abort: Promise<void>): Promise<Established> {
 	const wiring: SessionProps = {
-		discovery: props.discovery ?? true,
 		publish: props.publish,
 		client: true,
+		extensions: Extensions.offered(props.extensions),
 	};
 
 	if (props.transport) {
@@ -235,6 +237,9 @@ async function connectTransport(url: URL, session: WebTransport, wiring: Session
 	try {
 		return await Promise.race([terminal, negotiate(url, session, wiring)]);
 	} catch (cause) {
+		// A session failure already guarantees a terminal close; its authoritative code
+		// must not be overwritten by the reset-only fallback while the browser delivers it.
+		cause = await sessionCause(session, cause);
 		// A session shutdown can reject its SETUP stream before `closed` publishes the
 		// peer's close code. Wait briefly without closing locally, since a local clean close
 		// could overwrite that code. A reset-only peer is cleaned up after the grace period.
@@ -307,7 +312,7 @@ async function negotiate(url: URL, session: WebTransport, wiring: SessionProps):
 	const params = new Ietf.SetupOptions();
 	params.setVarint(Ietf.SetupOption.MaxRequestId, Ietf.initialMaxRequestId(false));
 	params.setBytes(Ietf.SetupOption.Implementation, encoder.encode("moq-lite-js"));
-	Ietf.solicitIntoSetup(params);
+	Extensions.intoSetup(params, wiring.extensions, setupVersion);
 	Ietf.hiddenIntoSetup(params);
 
 	const client = new Ietf.ClientSetup({
@@ -364,7 +369,12 @@ async function handshakeAlpn(
 	version: Ietf.IetfVersion,
 	wiring: SessionProps,
 ): Promise<Established> {
-	const { control, early, solicit, hidden, cluster, auth } = await exchangeSetup(session, version, "moq-lite-js");
+	const { control, early, solicit, hidden, cluster, auth } = await exchangeSetup(
+		session,
+		version,
+		"moq-lite-js",
+		wiring.extensions,
+	);
 
 	return new Ietf.Connection({
 		...wiring,

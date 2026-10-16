@@ -31,6 +31,21 @@ A failing run keeps its run directory, including a Playwright trace of the
 failing page, and CI uploads it; a passing run deletes its own. See
 [the harness contract](../README.md).
 
+## Rust clock
+
+`moq-clock`'s browser backend also runs here, using `wasm-bindgen-test` and the
+same Playwright Chromium installation:
+
+```bash
+bun install --frozen-lockfile
+bunx playwright install chromium
+just rs wasm-test
+```
+
+The suite covers monotonic time, sleep deadlines, timeouts, an interval's immediate
+first tick, and a controlled `Date.now()` reading. `rust.ts` opens wasm-bindgen's
+harness page and propagates failures through Cargo and `just`.
+
 ## Shape
 
 `run.sh` builds, starts the relays, and hands their URLs to `driver.ts`, which
@@ -45,10 +60,10 @@ is also a cross-implementation interop check.
 The page loads `js/wasm/dist/moq.js` from a URL rather than an import the
 bundler can follow, so what runs is the generated output exactly as it ships:
 the glue, the `.wasm` it fetches, and the JS names `#[wasm_bindgen]` chose.
-`run.sh` also type-checks the harness against the generated `moq.d.ts`, which is
-the only thing in the repo that reads it. That is worth doing: wasm-bindgen
-resolves a type in a signature by its Rust identifier alone, so a binding can
-compile, run, and still publish typings that name the wrong class.
+`just check` and `run.sh` both type-check the harness against the generated
+`moq.d.ts`. That is worth doing: wasm-bindgen resolves a type in a signature
+by its Rust identifier alone, so a binding can compile, run, and still publish
+typings that name the wrong class.
 
 ### Relays
 

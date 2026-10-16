@@ -1,8 +1,10 @@
 import { Unsupported } from "../auth.ts";
 import type { AuthWire, WireGrant, WireReply } from "../auth_session.ts";
-import { type SessionCode, SessionError } from "../error.ts";
+import { ProtocolViolation, SessionCode, SessionError } from "../error.ts";
 import * as Path from "../path.ts";
 import { type Reader, Stream, type Writer } from "../stream.ts";
+import { decodeUtf8 } from "../util/utf8.ts";
+import { closeViolation } from "./error.ts";
 import * as Message from "./message.ts";
 import { StreamId } from "./stream.ts";
 import { hasAuth, type Version } from "./version.ts";
@@ -100,7 +102,13 @@ export class AuthOk {
 
 	static async decode(r: Reader, version: Version): Promise<AuthOk> {
 		guardAuth(version);
-		return Message.decode(r, AuthOk.#decode);
+		return Message.decode(r, async (body) => {
+			try {
+				return await AuthOk.#decode(body);
+			} catch (cause) {
+				throw new ProtocolViolation("malformed AUTH_OK", { cause });
+			}
+		});
 	}
 }
 
@@ -127,11 +135,17 @@ export class AuthError {
 
 	static async #decode(r: Reader): Promise<AuthError> {
 		const code = await r.u53();
-		const reason = await r.string();
-		if (new TextEncoder().encode(reason).byteLength > MAX_REASON) {
-			throw new Error("AUTH_ERROR reason exceeds 8,192 bytes");
+		if (code > 0xffffffff) throw new ProtocolViolation("AUTH_ERROR code exceeds 32 bits");
+		const size = await r.u62();
+		if (size > BigInt(MAX_REASON)) {
+			throw new ProtocolViolation("AUTH_ERROR reason exceeds 8,192 bytes");
 		}
-		return new AuthError(code, reason);
+		const bytes = await r.read(Number(size));
+		try {
+			return new AuthError(code, decodeUtf8(bytes));
+		} catch (cause) {
+			throw new ProtocolViolation("invalid UTF-8 AUTH_ERROR reason", { cause });
+		}
 	}
 
 	async encode(w: Writer, version: Version): Promise<void> {
@@ -181,12 +195,23 @@ export class LiteAuthWire implements AuthWire {
 	}
 
 	async read(stream: Stream): Promise<WireReply | undefined> {
-		const reply = await decodeAuthReplyMaybe(stream.reader, this.#version);
+		let reply: AuthReply | undefined;
+		try {
+			reply = await decodeAuthReplyMaybe(stream.reader, this.#version);
+		} catch (err) {
+			closeViolation(this.#quic, err);
+			throw err;
+		}
 		if (!reply) return undefined;
 		if (reply instanceof AuthOk) {
 			return { grant: { publish: reply.publish, subscribe: reply.subscribe, expires: reply.expires } };
 		}
-		return { refused: new SessionError(reply.code as SessionCode, { reason: reply.reason }) };
+		return {
+			refused:
+				reply.code === SessionCode.Unsupported
+					? new Unsupported(reply.reason)
+					: new SessionError(reply.code as SessionCode, { reason: reply.reason }),
+		};
 	}
 
 	/** The stream type is already consumed by the dispatcher. */
@@ -203,8 +228,9 @@ export class LiteAuthWire implements AuthWire {
 		await new AuthError(code, reason).encode(stream.writer, this.#version);
 	}
 
-	/** Resetting reads as unsupported to the presenter, the same as a peer that predates AUTH. */
+	/** Tell the presenter explicitly, including after an earlier grant. */
 	async unsupported(stream: Stream, reason: string): Promise<void> {
-		stream.writer.reset(new Unsupported(reason));
+		await new AuthError(SessionCode.Unsupported, reason).encode(stream.writer, this.#version);
+		await stream.writer.close();
 	}
 }

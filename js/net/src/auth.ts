@@ -13,7 +13,7 @@
  */
 
 import { type Getter, Signal } from "@moq/signals";
-import type { SessionCode } from "./error.ts";
+import { SessionCode } from "./error.ts";
 import type * as Path from "./path.ts";
 
 /**
@@ -38,6 +38,8 @@ export function grantsEqual(a: Grant | undefined, b: Grant | undefined): boolean
 
 /** The session or peer carries no AUTH exchange, or takes no tokens in band. */
 export class Unsupported extends Error {
+	/** The moq-lite session code for this condition. */
+	readonly code = SessionCode.Unsupported;
 	constructor(message = "auth unsupported") {
 		super(message);
 		this.name = "Unsupported";
@@ -58,6 +60,8 @@ export interface Token {
 export interface Request {
 	/** The token the peer presented. Empty means the credential its connection carried. */
 	readonly token: Uint8Array;
+	/** Settles when the peer withdraws this unanswered token or closes the session. */
+	readonly closed: PromiseLike<Error | null>;
 	/**
 	 * Grant the token until the returned {@link Issued} is revoked or closed.
 	 *
@@ -107,6 +111,9 @@ export interface Auth {
 	 *
 	 * Call it as soon as connect or accept resolves, in the same task: whoever answers is
 	 * decided once, right after. Throws once that has happened.
+	 *
+	 * The peer's stream credit bounds how many tokens wait unanswered, since each holds its
+	 * stream open until answered or withdrawn. A withdrawn token leaves the queue.
 	 */
 	requests(): Requests;
 }

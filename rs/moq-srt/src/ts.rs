@@ -55,13 +55,14 @@ enum Importer {
 		// (prompt unannounce) even though the importer owns it.
 		broadcast: moq_net::broadcast::Producer,
 	},
-	/// Each program's broadcast is created and announced once the first PAT names it.
+	/// Each program's broadcast is created once the first PAT names it, and announced once its PMT
+	/// declares its tracks.
 	All(Box<ts::Programs>),
 }
 
 impl Publisher {
 	/// Wire up the TS importer and catalog for `path` on `origin`, announcing the broadcast
-	/// now, or each program's once the PAT lists it for [`Program::All`].
+	/// now, or each program's once its PMT declares its tracks for [`Program::All`].
 	///
 	/// `config` is the catalog the importer publishes into: retention
 	/// (`with_max_age`) and the connection allocator passthrough tracks claim on
@@ -165,7 +166,7 @@ impl Publisher {
 pub(crate) struct Options {
 	/// The muxer's jitter-buffer delay ([`Subscriber::new`]).
 	pub latency: Duration,
-	/// How long to wait for the same publisher instance to come back once its broadcast ends.
+	/// How long a return or stitched replacement has to supply its first catalog.
 	pub linger: Duration,
 	/// Follow another instance replacing the broadcast, as a full program switch.
 	pub stitch: bool,
@@ -204,12 +205,12 @@ impl Subscriber {
 			return Ok(None);
 		}
 
-		// The export resolves the broadcast (and any referenced sibling broadcast, via the
-		// catalog `broadcast` field) through the origin, joining the one just announced.
-		let source = moq_mux::Source::new(origin.consume(), path);
-		let export = ts::Export::with_ts(source, moq_mux::catalog::CatalogFormat::Hang)
-			.await?
-			.with_delay(options.latency);
+		// Join the broadcast just announced. The export resolves any referenced sibling
+		// broadcast (the catalog `broadcast` field) through the same origin.
+		let broadcast = origin.request_broadcast(path, None).await?;
+		let source = moq_mux::Source::new(origin.clone(), broadcast);
+		let catalog = source.catalog::<ts::Ext>(moq_mux::catalog::CatalogFormat::Hang).await?;
+		let export = ts::Export::new(source, catalog).with_delay(options.latency);
 		let follower = ts::Follower::new(export)?
 			.with_linger(options.linger)
 			.with_stitch(options.stitch);
@@ -425,7 +426,7 @@ mod tests {
 	}
 
 	/// A two-program multiplex, each program carrying one private PES stream (carried
-	/// verbatim) and its first PES, which anchors the clock and so publishes the catalog:
+	/// verbatim) and its first PES plus a complete PCR measurement window:
 	/// program 1's on PID 0x101, program 2's on 0x201.
 	fn two_programs() -> Bytes {
 		let mut ts = psi_packet(0x0000, &pat(&[(1, 0x0100), (2, 0x0200)]));
@@ -433,6 +434,23 @@ mod tests {
 		ts.extend_from_slice(&psi_packet(0x0200, &pmt(2, 0x06, 0x0201)));
 		ts.extend_from_slice(&pes_packet(0x0101, 90_000));
 		ts.extend_from_slice(&pes_packet(0x0201, 90_000));
+		// Complete the startup rate window before expecting a live catalog.
+		for index in 0..=8u64 {
+			let base = index * 22_500;
+			for pid in [0x0101u16, 0x0201] {
+				let mut packet = vec![0x47, (pid >> 8) as u8, pid as u8, 0x20, 183, 0x10];
+				packet.extend_from_slice(&[
+					(base >> 25) as u8,
+					(base >> 17) as u8,
+					(base >> 9) as u8,
+					(base >> 1) as u8,
+					((base & 1) as u8) << 7 | 0x7e,
+					0,
+				]);
+				packet.resize(188, 0xff);
+				ts.extend_from_slice(&packet);
+			}
+		}
 		ts.into()
 	}
 
@@ -629,10 +647,9 @@ mod tests {
 
 		let track = broadcast.track(name.as_str()).unwrap().subscribe(None).await.unwrap();
 		let mut reader = moq_mux::container::Consumer::new(track, Container::Legacy(moq_mux::container::Kind::Data));
-		let cue = timeout(Duration::from_secs(5), reader.read())
+		let cue = timeout(Duration::from_secs(5), next_frame(&mut reader))
 			.await
 			.expect("cue read timed out")
-			.unwrap()
 			.expect("a published cue section");
 		let expected_cue = cue.payload;
 		assert_eq!(expected_cue[0], 0xFC, "a verbatim splice_info_section (table_id 0xFC)");
@@ -678,15 +695,24 @@ mod tests {
 			.expect("SRT egress preserves the SCTE-35 track");
 		let track = roundtrip_consumer.track(name).unwrap().subscribe(None).await.unwrap();
 		let mut reader = moq_mux::container::Consumer::new(track, Container::Legacy(moq_mux::container::Kind::Data));
-		let cue = timeout(Duration::from_secs(5), reader.read())
+		let cue = timeout(Duration::from_secs(5), next_frame(&mut reader))
 			.await
 			.expect("round-trip cue read timed out")
-			.unwrap()
 			.expect("SRT egress preserves a cue section");
 		assert_eq!(cue.payload[0], 0xFC, "the round-trip cue is a splice_info_section");
 		assert_eq!(
 			cue.payload, expected_cue,
 			"SRT egress preserves the complete cue section"
 		);
+	}
+
+	/// The next frame, passing over gaps and ends.
+	async fn next_frame(reader: &mut moq_mux::container::Consumer<Container>) -> Option<moq_mux::container::Frame> {
+		loop {
+			match reader.read().await.unwrap()? {
+				moq_mux::container::Read::Frame { frame, .. } => return Some(frame),
+				moq_mux::container::Read::Gap { .. } | moq_mux::container::Read::End { .. } => continue,
+			}
+		}
 	}
 }

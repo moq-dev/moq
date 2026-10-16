@@ -334,3 +334,44 @@ fn consumer_creation_cannot_cross_an_idle_guard() {
 		drop(minting.join().unwrap());
 	});
 }
+
+/// Ready once the gate opens.
+fn gated(gate: crate::Consumer<bool>) -> impl FnMut(&crate::Waiter) -> Poll<()> + Unpin {
+	move |waiter| match gate.poll(waiter, |open| if **open { Poll::Ready(()) } else { Poll::Pending }) {
+		Poll::Ready(_) => Poll::Ready(()),
+		Poll::Pending => Poll::Pending,
+	}
+}
+
+/// The owner's poll wakes one of its own tasks, holding that wake of itself until it returns,
+/// while another thread wakes the other task. Neither wake may be lost, whether the
+/// owner's poll takes its own wake in the same pass or returns first.
+#[test]
+fn a_held_wake_never_hides_a_remote_wake() {
+	for same_pass in [false, true] {
+		loom::model(move || {
+			let local = Producer::new(false);
+			let remote = Producer::new(false);
+			let mut tasks = crate::Tasks::new();
+			tasks.push(gated(local.consume()));
+			tasks.push(gated(remote.consume()));
+
+			let opener = thread::spawn(move || *remote.write().ok().expect("open") = true);
+
+			let mut first = true;
+			block_on(wait(move |waiter| {
+				waiter.batch(|| {
+					if std::mem::take(&mut first) {
+						let _ = tasks.poll(waiter);
+						*local.write().ok().expect("open") = true;
+						if !same_pass {
+							return Poll::Pending;
+						}
+					}
+					tasks.poll(waiter)
+				})
+			}));
+			opener.join().unwrap();
+		});
+	}
+}

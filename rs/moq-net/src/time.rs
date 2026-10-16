@@ -5,7 +5,7 @@
 use crate::Error;
 use std::{
 	collections::BTreeMap,
-	sync::{Arc, Mutex},
+	sync::{Arc, Mutex, PoisonError},
 	task::Poll,
 };
 
@@ -35,6 +35,7 @@ pub trait Driver {
 ///
 /// Tokio on native, `setTimeout` in the browser. Resolves with the driver's
 /// terminal error, [`Error::Closed`] for a clean finish.
+#[cfg(feature = "async")]
 pub async fn run<D: Driver>(mut driver: D) -> Error {
 	let mut timer: Option<std::pin::Pin<Box<web_async::time::Sleep>>> = None;
 	kio::wait(|waiter| {
@@ -73,7 +74,7 @@ pub(crate) async fn run_sim<D: Driver + Unpin>(mut driver: D) -> Error {
 /// A clock private to one driver, advanced only by the instants it is polled with.
 ///
 /// Clones share the clock. Everything the driver owns arms its [`Deadline`]s here,
-/// and [`Self::timeout`] reports the earliest so the driver can ask to be polled
+/// and [`Self::park`] reports the earliest so the driver can ask to be polled
 /// again by then.
 #[derive(Clone, Default)]
 pub(crate) struct Clock(Arc<Mutex<State>>);
@@ -92,6 +93,7 @@ impl Clock {
 	/// A clock the test executor advances with its simulated time. Outside the
 	/// executor, a synchronous test never waits on a deadline, so nothing advances it.
 	#[cfg(test)]
+	#[cfg(feature = "async")]
 	pub(crate) fn sim() -> Self {
 		if !moq_net_sim::is_running() {
 			return Self::new(Instant::now());
@@ -105,6 +107,7 @@ impl Clock {
 		clock
 	}
 
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub(crate) fn new(now: Instant) -> Self {
 		let clock = Self::default();
 		clock.advance(now);
@@ -112,11 +115,17 @@ impl Clock {
 	}
 
 	/// Move to `now`, waking every deadline at or before it.
+	///
+	/// The driver is polling from here until [`Self::park`], which reads every
+	/// deadline armed meanwhile, so it drops its registration rather than wake
+	/// itself. Taken rather than replaced: a new list's serial would cost the
+	/// driver's waiter its records of every other list it is parked on.
 	pub(crate) fn advance(&self, now: Instant) {
 		let due = {
-			let mut state = self.0.lock().unwrap();
+			let mut state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
 			assert!(state.now.is_none_or(|prev| now >= prev), "driver time moved backwards");
 			state.now = Some(now);
+			drop(state.driver.take());
 			let mut due = Vec::new();
 			while state.deadlines.first_key_value().is_some_and(|((at, _), _)| *at <= now) {
 				due.push(state.deadlines.pop_first().unwrap().1);
@@ -125,26 +134,31 @@ impl Clock {
 		};
 		for waiters in due {
 			// Take the registrations before waking: wake may immediately poll a deadline.
-			let mut ready = waiters.lock().unwrap().take();
+			let mut ready = waiters.lock().unwrap_or_else(PoisonError::into_inner).take();
 			ready.wake();
 		}
 	}
 
 	/// The latest supplied instant, or `None` before the first.
 	pub(crate) fn try_now(&self) -> Option<Instant> {
-		self.0.lock().unwrap().now
+		self.0.lock().unwrap_or_else(PoisonError::into_inner).now
 	}
 
-	/// Register the driver's poll to be woken by a new earliest deadline.
-	pub(crate) fn register_driver(&self, waiter: &kio::Waiter) {
-		waiter.register(&mut self.0.lock().unwrap().driver);
+	/// The earliest armed deadline, registering the driver's poll to be woken when an
+	/// earlier one is armed. Ends the poll [`Self::advance`] began: one lock, so a
+	/// deadline armed elsewhere is either reported here or wakes the driver.
+	pub(crate) fn park(&self, waiter: &kio::Waiter) -> Option<Instant> {
+		let mut state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+		waiter.register(&mut state.driver);
+		state.deadlines.first_key_value().map(|((at, _), _)| *at)
 	}
 
 	/// The earliest armed deadline still in the future.
+	#[cfg(test)]
 	pub(crate) fn timeout(&self) -> Option<Instant> {
 		self.0
 			.lock()
-			.unwrap()
+			.unwrap_or_else(PoisonError::into_inner)
 			.deadlines
 			.first_key_value()
 			.map(|((at, _), _)| *at)
@@ -152,7 +166,11 @@ impl Clock {
 
 	/// The latest instant supplied by the owning driver.
 	pub(crate) fn now(&self) -> Instant {
-		self.0.lock().unwrap().now.expect("driver has not been polled")
+		self.0
+			.lock()
+			.unwrap_or_else(PoisonError::into_inner)
+			.now
+			.expect("driver has not been polled")
 	}
 }
 
@@ -171,7 +189,7 @@ pub(crate) struct Deadline {
 impl Deadline {
 	/// A disarmed deadline, which never fires until [`set`](Self::set) arms it.
 	pub(crate) fn new(clock: &Clock) -> Self {
-		let mut state = clock.0.lock().unwrap();
+		let mut state = clock.0.lock().unwrap_or_else(PoisonError::into_inner);
 		let id = state.next;
 		state.next = state.next.checked_add(1).expect("deadline identifier overflow");
 		Self {
@@ -182,18 +200,12 @@ impl Deadline {
 		}
 	}
 
-	/// A deadline armed for `at`.
-	pub(crate) fn at(clock: &Clock, at: Instant) -> Self {
-		let mut deadline = Self::new(clock);
-		deadline.set(Some(at));
-		deadline
-	}
-
 	/// A deadline armed for `duration` past the clock's [`now`](Clock::now).
 	///
 	/// A duration the clock cannot represent (e.g. [`std::time::Duration::MAX`])
 	/// leaves the deadline disarmed, so it never fires rather than panicking on
 	/// the overflow.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub(crate) fn after(clock: &Clock, duration: std::time::Duration) -> Self {
 		let mut deadline = Self::new(clock);
 		deadline.set(clock.now().checked_add(duration));
@@ -208,7 +220,7 @@ impl Deadline {
 		if self.at == at {
 			return;
 		}
-		let mut state = self.clock.0.lock().unwrap();
+		let mut state = self.clock.0.lock().unwrap_or_else(PoisonError::into_inner);
 		if let Some(old) = self.at.take() {
 			state.deadlines.remove(&(old, self.id));
 		}
@@ -230,6 +242,7 @@ impl Deadline {
 	}
 
 	/// The instant this fires at, or `None` while disarmed.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub(crate) fn deadline(&self) -> Option<Instant> {
 		self.at
 	}
@@ -240,12 +253,20 @@ impl Deadline {
 		let Some(at) = self.at else { return Poll::Pending };
 		// Register under the clock lock, so an `advance` past `at` either happened
 		// first (and we see it) or wakes this registration.
-		let state = self.clock.0.lock().unwrap();
+		let state = self.clock.0.lock().unwrap_or_else(PoisonError::into_inner);
 		if state.now.is_some_and(|now| now >= at) {
 			return Poll::Ready(());
 		}
-		waiter.register(&mut self.waiters.lock().unwrap());
+		waiter.register(&mut self.waiters.lock().unwrap_or_else(PoisonError::into_inner));
 		Poll::Pending
+	}
+}
+
+impl kio::Task for Deadline {
+	type Output = ();
+
+	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
+		self.poll(waiter)
 	}
 }
 
@@ -271,7 +292,8 @@ mod tests {
 		let now = Instant::now();
 		let clock = Clock::new(now);
 		let at = now + Duration::from_secs(3);
-		let mut deadline = Deadline::at(&clock, at);
+		let mut deadline = Deadline::new(&clock);
+		deadline.set(Some(at));
 		assert_eq!(clock.timeout(), Some(at));
 		assert!(deadline.poll(&kio::Waiter::noop()).is_pending());
 		clock.advance(at);
@@ -324,6 +346,68 @@ mod tests {
 			"the deadline wake was lost"
 		);
 		assert!(deadline.poll(&waiter).is_ready());
+	}
+
+	/// A deadline that fires and re-arms inside the driver's poll is that poll's work:
+	/// neither its wake nor its re-arm asks for another. One armed from outside the
+	/// poll still wakes the driver.
+	#[test]
+	fn a_deadline_costs_the_driver_one_poll() {
+		struct Wakes(std::sync::atomic::AtomicUsize);
+		impl std::task::Wake for Wakes {
+			fn wake(self: Arc<Self>) {
+				self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+			}
+		}
+
+		const PERIOD: Duration = Duration::from_secs(1);
+		let start = Instant::now();
+		let clock = Clock::new(start);
+
+		// A driver child that re-arms its deadline every time it fires, like PROBE's refresh.
+		let mut tasks = kio::Tasks::new();
+		let mut tick = Deadline::after(&clock, PERIOD);
+		let ticking = clock.clone();
+		tasks.push(move |waiter: &kio::Waiter| {
+			while tick.poll(waiter).is_ready() {
+				tick.set(Some(ticking.now() + PERIOD));
+			}
+			Poll::Pending
+		});
+
+		// `Driver::poll`, minus the protocol.
+		let now = std::cell::Cell::new(start);
+		let timeout = std::cell::Cell::new(None);
+		let mut driver = std::pin::pin!(kio::wait(|waiter: &kio::Waiter| {
+			waiter.batch(|| {
+				clock.advance(now.get());
+				let _ = tasks.poll(waiter);
+				timeout.set(clock.park(waiter));
+			});
+			Poll::<()>::Pending
+		}));
+		let wakes = Arc::new(Wakes(std::sync::atomic::AtomicUsize::new(0)));
+		let waker = std::task::Waker::from(wakes.clone());
+		let mut cx = std::task::Context::from_waker(&waker);
+
+		assert!(driver.as_mut().poll(&mut cx).is_pending());
+		for ticks in 1..=3 {
+			now.set(start + PERIOD * ticks);
+			assert!(driver.as_mut().poll(&mut cx).is_pending());
+			assert_eq!(timeout.get(), Some(now.get() + PERIOD), "the deadline re-armed");
+			assert_eq!(
+				wakes.0.load(std::sync::atomic::Ordering::SeqCst),
+				0,
+				"tick {ticks} woke the driver it ran in"
+			);
+		}
+
+		let _sooner = Deadline::after(&clock, PERIOD / 2);
+		assert_eq!(
+			wakes.0.load(std::sync::atomic::Ordering::SeqCst),
+			1,
+			"an earlier deadline armed outside the poll must wake the driver"
+		);
 	}
 
 	#[test]

@@ -87,6 +87,9 @@ authorization and hidden names work exactly as without one.
   winning the path, is announced as a restart. Subscriptions already open stay
   on the old instance until dropped or its route goes, while new requests get
   the new one, so a player follows the restart by requesting the path again.
+  Held handles can still read their old cached content, but cannot open new
+  epochless requests once the restart is delivered. Request the path again for
+  new content.
   That is how a restarted encoder, whose group numbers start over, takes the
   name instead of stalling viewers on the old sequence. A relay drops its copy
   of the old instance, so a new subscriber never sees its cached groups.
@@ -99,8 +102,22 @@ path, since nothing says it serves the same bytes.
 
 `moq` and `moqsink` mint a fresh epoch per run, kept across reconnects, and the
 RTMP, SRT, and WHIP ingests mint one per connection. Replicas share one by
-passing the same `moq --epoch`, except under [encryption](/concept/hang#encryption). See [Clustering](/bin/relay/cluster) for how a
+passing the same [`moq --epoch`](/bin/cli#publisher-runs), which only the importers that derive their tracks from the input accept, except under [encryption](/concept/hang#encryption). See [Clustering](/bin/relay/cluster) for how a
 relay uses this.
+
+### Multiple CDNs
+
+An endpoint can hold sessions to several CDNs at once, each feeding one shared
+origin, and rank them: moq.pro as primary, another CDN as secondary. The rank is
+a per-link preference the endpoint sets (higher wins, 0 is neutral, negative demotes), never sent on the wire. It decides after
+the newest epoch and before cost, so metrics from different operators are never
+compared. A subscription uses the preferred link that has a route and moves to the
+next when that route goes; a publisher pushes the same broadcast to every CDN.
+
+The move resumes without a seam only between routes with the same epoch, which
+needs moq-lite 07 on both links. A CDN speaking moq-transport carries no epoch, so
+moving onto it, or back off it, is a restart and the player requests the path
+again.
 
 ### Hidden broadcasts
 
@@ -150,7 +167,13 @@ to a prefix. Right after setup both sides present the credential the connection
 already carried (the URL token, a client certificate, or nothing), so a
 publisher learns before anyone subscribes whether its broadcasts can reach the
 peer. More tokens can be added without reconnecting; the session's scope is the
-union of every open token's grant.
+union of every open token's grant. A token the peer has no verifier for, or
+whose grant is too large to send, fails with `Unsupported` and ends only that
+token; the session and its other grants stay up. A relay with an
+[auth server](/bin/relay/auth#in-band-renewal) verifies these tokens through it,
+so a fresh grant can keep the connection alive after its original credential
+expires; under public rules or a client certificate it refuses them as
+`Unsupported`.
 
 A subscription or fetch that loses access resets with the `UNAUTHORIZED` stream
 code and the session stays up. A client that publishes outside its grant closes
@@ -173,22 +196,32 @@ Each subscription carries the knobs that decide behavior under congestion:
 | Knob | Effect |
 | --- | --- |
 | **Priority** (0..255) | Higher-priority tracks get bandwidth first. Audio above video, base layer above enhancement. |
-| **Order** | Which group to send first when several are pending. Newest first for live, oldest first for catch-up. |
-| **Max delay** | How far a non-latest group may fall behind the live edge before it is skipped. Zero means "live edge only", and raising it is also what asks for history. |
+| **Order** | Which group to send first when several are pending. Newest first for live (the default), oldest first for catch-up. Needs moq-lite 07 or moq-transport; older moq-lite always sends newest first. |
+| **Max delay** | How long a non-latest group stays worth delivering before it is skipped. Zero means "live edge only", and raising it is also what asks for history. |
 
-Max delay is measured on the media timeline, not the wall clock, so a backlog
-delivered as a burst is still late while a congestion stall never expires
-anything on its own. Both ends apply it: the publisher skips a group rather
-than sending it, and the subscriber skips it again as it reads, since the
-publisher only ever sees the most tolerant budget across its subscribers.
+Order only decides what goes first, never what is skipped, so catching up oldest
+first needs a max delay that covers the backlog. When a relay serves subscribers of
+both orders from one upstream subscription, it asks upstream for newest first, and
+still sends each subscriber its groups in that subscriber's own order. Over
+moq-transport the upstream order is fixed by whichever subscriber arrived first.
+
+Max delay starts counting when a group's successor arrives, on two clocks, and
+whichever reaches it first skips the group: the wall clock since the successor
+arrived at this hop, and how far the successor's first timestamp trails the
+live edge. Media time catches a backlog delivered as a burst; the wall clock
+catches a publisher whose timestamps stall and an untimed track. The newest
+group has no successor, so it is never skipped. Both ends apply it: the
+publisher skips a group rather than sending it, and the subscriber skips it
+again as it reads, since the publisher only ever sees the most tolerant budget
+across its subscribers.
 
 A track is timed or untimed: it declares a timescale or none, and a frame that
-doesn't match is refused. No receiver fills in an arrival time. An untimed
-group never falls past max delay, so a new subscriber starts at its latest
-group unless it names a start. Tracks from moq-lite before 05, or from
+doesn't match is refused. No receiver fills in an arrival time, so an untimed
+track is judged by the wall clock alone. Tracks from moq-lite before 05, or from
 moq-transport without a `TIMESCALE` (every track on drafts 14-16), arrive
-untimed. No moq-lite version can declare an untimed track, so on 05 and later
-its frames go out stamped with their send time.
+untimed. moq-lite 05 and 06 cannot declare an untimed track, so there its
+frames go out stamped with their send time; the work-in-progress 07 carries it
+untimed.
 
 A relay cancels its upstream subscription once nobody subscribes, but keeps its
 copy of the track for 30 seconds after the last reader leaves, so a returning
@@ -198,9 +231,9 @@ nothing from it until the source answers again.
 The publisher may declare a retention window per track. Omission sets no limit;
 zero keeps only the live edge. Relays preserve that declaration, and may still
 evict sooner under their own cache ceiling. Media tracks explicitly use 30
-seconds so a segmented egress can still find its segments. Retention uses media
-timestamps and always keeps the newest group. IETF carries the same idea as
-`MAX_CACHE_DURATION`, measured in wall time, which is only an approximate match.
+seconds so a segmented egress can still find its segments. Retention ages a
+group by the same two clocks as max delay and always keeps the newest group.
+IETF carries the same idea as `MAX_CACHE_DURATION`, measured in wall time alone.
 
 Put together, a conference might use:
 

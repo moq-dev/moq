@@ -49,8 +49,8 @@ impl MoqTrackDemand {
 ///
 /// Weak: holding it does not keep the request alive. The last caller to leave withdraws the
 /// request, and a later fetch of the group queues a fresh one, so once unused, demand never
-/// returns: drop the request. Waits fail once the request is answered: with `Closed` if it was
-/// dropped, otherwise with the error the accept or reject left for the waiting fetches.
+/// returns: drop the request. Waits fail with `Closed` after the request is accepted or dropped,
+/// and keep the rejection reason after it is rejected.
 #[derive(uniffi::Object)]
 pub struct MoqGroupDemand {
 	inner: moq_net::group::Demand,

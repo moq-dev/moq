@@ -17,6 +17,7 @@ author:
     email: kixelated@gmail.com
 
 normative:
+  moqmsf: I-D.ietf-moq-msf
   moql: I-D.lcurley-moq-lite
   moqflate:
     title: "DEFLATE Compressed Tracks for MoQ"
@@ -163,13 +164,25 @@ A zero `timescale` is invalid, as is a `wall` outside the JSON-safe integer rang
 The mapping is fixed for the broadcast and independent of `archive`: a live-only publisher exposes its clock without creating a timeline.
 A discontinuity marker is a delivery event, not a new epoch, and a system-clock adjustment never retimes the mapping.
 
+## Track Identity {#identity}
+A track name always means the same content, so a catalog update never redefines an audio or video track.
+A track's identity is the fields a consumer cannot change without reinitializing its decoder or demuxer: `codec`, `description`, and `container`, plus `displayAspectWidth` and `displayAspectHeight` for video and `sampleRate` and `numberOfChannels` for audio.
+A publisher MUST NOT change them for a track once a catalog lists it.
+
+Every other rendition field is live state that MAY change in any update within its own rules (`jitter` and `delay` never fall), as MAY the video section's `display`, `rotation`, and `flip`.
+The picture size MAY change at any keyframe, which a `description` carrying parameter sets rules out, and `codec` names a profile and level that covers every picture the track carries.
+A publisher that changes an identity field MUST publish the media under a new track name, or as a new broadcast under a new Epoch {{moql}}.
+A rendition MAY keep its ID and name the new track with `track` ({{field-track}}), so a consumer follows the new name rather than reusing a decoder configured for the ID.
+A track name removed from the catalog MUST NOT return with a different identity.
+A consumer MAY configure a decoder once per track from the catalog.
+
 ## Video
 A video track contains the necessary information to decode a video stream.
 
 
 ~~~
 type VideoSchema = {
-  "renditions": Map<TrackName, VideoDecoderConfig>,
+  "renditions": Map<RenditionId, VideoDecoderConfig>,
   "display": {
     "width": number,
     "height": number,
@@ -179,7 +192,7 @@ type VideoSchema = {
 }
 ~~~
 
-The `renditions` field contains a map of track names to video decoder configurations.
+The `renditions` field contains a map of rendition IDs to video decoder configurations; each names its track as {{field-track}} describes.
 See the [WebCodecs specification](https://www.w3.org/TR/webcodecs/#video-decoder-config) for specifics and registered codecs.
 Any field carrying raw bytes, notably `description`, is a hex string ({{binary}}).
 
@@ -195,8 +208,9 @@ type VideoDecoderConfigExtensions = {
 }
 ~~~
 
-`displayAspectWidth` and `displayAspectHeight` give the display aspect ratio of the media, stretching or shrinking the coded pixels.
-A consumer that understands neither field MUST assume square pixels, a 1:1 ratio.
+`displayAspectWidth` and `displayAspectHeight` give the aspect ratio the whole decoded picture is displayed at, as in WebCodecs' `VideoDecoderConfig`.
+They are not the sample (pixel) aspect ratio: a publisher with square samples omits them, and one with non-square samples sends the picture's aspect, such as 16:9 for a 1440x1080 picture with 4:3 samples.
+A consumer that understands neither field MUST display the decoded picture at its own shape.
 Both MUST be present together; a consumer that sees only one MUST ignore it.
 
 For example:
@@ -240,11 +254,11 @@ An audio track contains the necessary information to decode an audio stream.
 
 ~~~
 type AudioSchema = {
-  "renditions": Map<TrackName, AudioDecoderConfig>,
+  "renditions": Map<RenditionId, AudioDecoderConfig>,
 }
 ~~~
 
-The `renditions` field contains a map of track names to audio decoder configurations.
+The `renditions` field contains a map of rendition IDs to audio decoder configurations; each names its track as {{field-track}} describes.
 See the [WebCodecs specification](https://www.w3.org/TR/webcodecs/#audio-decoder-config) for specifics and registered codecs.
 Any field carrying raw bytes, notably `description`, is a hex string ({{binary}}).
 The `sampleRate` and `numberOfChannels` fields describe the decoded output: for HE-AAC, the SBR rate rather than the core's, and two channels under parametric stereo.
@@ -296,7 +310,7 @@ Unlike audio and video there is no WebCodecs decoder for text, so a consumer par
 
 ~~~
 type TextSchema = {
-  "renditions": Map<TrackName, TextConfig>,
+  "renditions": Map<RenditionId, TextConfig>,
 }
 
 type TextConfig = {
@@ -307,7 +321,7 @@ type TextConfig = {
 }
 ~~~
 
-The `renditions` field maps track names to text configurations, typically one per language.
+The `renditions` field maps rendition IDs to text configurations, typically one per language; each names its track as {{field-track}} describes.
 
 The `format` field selects the cue serialization, and tells a consumer how to parse each frame's payload:
 
@@ -328,6 +342,10 @@ Unlike `format`, an unrecognized `role` never prevents rendering: it describes i
 
 The `lang` field is the BCP-47 {{!RFC5646}} language tag of the track, for example `en` or `es-419`.
 Two renditions sharing a `lang` are told apart by `label` ({{field-label}}), one of the common rendition fields ({{common}}).
+
+A gateway translating an MSF {{moqmsf}} caption or subtitle track MUST preserve its `codec` as `format`, and its `role`, `lang`, and `label` when present.
+It MUST preserve supported packaging and timing, and MUST refuse text packaging it cannot represent rather than silently delete the track.
+A missing text codec MUST NOT be replaced with a guessed format.
 
 Regardless of `format`, each frame's timestamp ({{container}}) is the authoritative cue start time on the media clock, so a relay and a consumer can order and schedule cues without parsing the payload.
 A text track has no delta frames: every frame is a self-contained cue, so a group MAY consist of multiple frames, following the same rule as a codec that lacks delta frames ({{container}}).
@@ -360,18 +378,18 @@ The catalog lists them in two sections, split by payload encoding:
 
 ~~~
 type JsonTracks = {
-  "tracks": Map<TrackName, JsonSchema>,
+  "tracks": Map<EntryId, JsonSchema>,
 }
 
 type BinaryTracks = {
-  "tracks": Map<TrackName, BinarySchema>,
+  "tracks": Map<EntryId, BinarySchema>,
 }
 ~~~
 
 A `json` track's frames are UTF-8 JSON values; a `binary` track's frames are opaque to everything but the application.
 The split is by what a generic consumer can do without knowing the application: parse, inspect, and re-serialize a JSON track, but only copy a binary one.
 
-Each map is keyed by track name, so an entry's key is the name to subscribe to.
+Each map is keyed by entry ID, which is also the track name unless the entry's `track` field ({{field-track}}) says otherwise.
 Unlike the media sections these are not rendition sets: entries are distinct tracks, not alternatives to choose between.
 A publisher MUST omit a section that holds no tracks.
 
@@ -384,6 +402,7 @@ type JsonSchema = {
   "compression": Compression | undefined,
   "schema": string | undefined,
   "broadcast": string | undefined,
+  "track": string | undefined,
   "bitrate": number | undefined,
   "jitter": number | undefined,
   "delay": number | undefined,
@@ -400,6 +419,7 @@ type BinarySchema = {
   "compression": Compression | undefined,
   "mime": string | undefined,
   "broadcast": string | undefined,
+  "track": string | undefined,
   "bitrate": number | undefined,
   "jitter": number | undefined,
   "delay": number | undefined,
@@ -455,8 +475,8 @@ A consumer MUST ignore a track whose `compression` it does not recognize, since 
 The `deflate` value is the group-scoped DEFLATE of {{compression}}.
 A `snapshot` group covers a single value (plus any deltas), so its window spans that group alone; a `stream` group's frames compress against the earlier ones in the log.
 
-### broadcast {#data-shared}
-The `broadcast` field carries the same meaning here as it does for a media rendition ({{field-broadcast}}).
+### broadcast and track {#data-shared}
+The `broadcast` and `track` fields carry the same meaning here as they do for a media rendition ({{field-broadcast}}, {{field-track}}).
 
 ### bitrate, jitter, and delay {#data-estimates}
 The optional `bitrate` field is the track's maximum bitrate in bits per second.
@@ -480,6 +500,7 @@ Audio, video, and text renditions share the following fields, extending the WebC
 ~~~
 type CommonExtensions = {
   "broadcast": string | undefined,
+  "track": string | undefined,
   "label": string | undefined,
   "container": Container,
   "jitter": number | undefined,
@@ -503,7 +524,20 @@ A consumer MUST reject a catalog containing one, rather than resolving the refer
 This lets a publisher author a catalog that points at tracks it does not republish.
 For example, a transcoder produces a catalog listing its own downstream renditions alongside the untouched source rendition, referencing the latter in the source broadcast rather than copying the bytes through.
 
-A consumer subscribes to such a rendition in the referenced broadcast, using the rendition's track name unchanged.
+A consumer subscribes to such a rendition in the referenced broadcast, using the rendition's track name ({{field-track}}).
+
+An MSF {{moqmsf}} gateway maps the resolved broadcast path to the track's absolute `namespace`, or derives a relative `broadcast` reference from that namespace when importing.
+An absent MSF `namespace` inherits the catalog's broadcast.
+Since each endpoint sees paths under its own connection root, a `namespace` equal to the catalog broadcast's path, or matching it on whole trailing segments, also names the catalog's broadcast; a gateway MUST NOT emit a different broadcast's `namespace` that matches so.
+A gateway MUST preserve the namespace and track-name pair or refuse the rendition; it MUST NOT substitute the catalog's broadcast for an unrepresentable reference.
+
+### track {#field-track}
+A rendition's key in its map is its ID, and by default also the name of its track.
+The `track` field overrides the name, so that the ID can stay unique when the name cannot: two renditions referencing same-named tracks in different broadcasts ({{field-broadcast}}) need different IDs.
+A consumer MUST subscribe to the `track` value when present and to the ID otherwise.
+
+A publisher SHOULD omit `track` unless the ID cannot be the track name, since a consumer that predates the field subscribes to the ID.
+A rendition ID MUST NOT name both a video and an audio rendition, and a consumer MUST reject a catalog in which one does.
 
 ### label {#field-label}
 The `label` field is a human-readable rendition name for a track picker.
@@ -535,6 +569,17 @@ For example:
 - An encoder that consistently flushes 200 milliseconds late contributes no `jitter`; only variation above its own minimum counts.
 - A fragment or packet batch contributes the media span between its earliest timestamp and flush point.
 - Reordered frames contribute the delay they were held before flushing, without treating a decode-order presentation timestamp gap as delay by itself.
+
+### warmup {#field-warmup}
+
+An audio or video rendition MAY declare `warmup`, an integer duration in milliseconds after a group start before its decoded output is presentable without decoding the previous group.
+A publisher MUST round a fractional-millisecond warmup up to the next whole millisecond.
+Absent or `0` means every group start is immediately presentable.
+After a non-continuous join, a consumer MUST decode from the group start and MUST NOT present frames stamped before the group's start plus `warmup`.
+It SHOULD join that much earlier to obtain the requested presentation time.
+
+For video, `warmup` can describe a refresh cycle during which decoding converges without an initial keyframe.
+For audio, it describes decoder pre-roll, for example 80 milliseconds for Opus, and does not change the group-start rule.
 
 ### delay {#field-delay}
 The maximum amount, in milliseconds, by which a rendition's minimum flush lateness ({{field-jitter}}) has trailed the smallest minimum among the broadcast's renditions that measure it.
@@ -571,9 +616,11 @@ type Container =
 The `kind` field selects the framing; a consumer MUST ignore a rendition whose `kind` it does not recognize.
 Every container shares the same group rules:
 
-Each moq-lite group MUST start with a keyframe, except a group that contains only a discontinuity marker.
+A video group MUST start at a random access point: a keyframe unless the rendition declares `warmup` ({{field-warmup}}), in which case it MAY start at a picture from which decoding converges within that duration.
+Other groups MUST start with a keyframe.
+A group containing only a discontinuity marker is exempt from these rules.
 If the codec does not support delta frames (e.g. audio), a group MAY consist of multiple keyframes.
-Otherwise, a group MUST consist of a single keyframe followed by zero or more delta frames.
+Otherwise, a group MUST consist of its random access picture followed by zero or more delta frames.
 
 A group with no decodable frames is a walk-now discontinuity: one empty codec payload and no media.
 A consumer MUST NOT submit the marker to a decoder.
@@ -665,6 +712,8 @@ type ArchiveSchema = {
   "version": number | undefined,
 }
 ~~~
+
+A consumer that cannot decode the `archive` entry MUST ignore that entry without rejecting the catalog.
 
 The `timelines` field maps each indexed track to the MoQ track carrying its records.
 Any track may be indexed, including the catalog track itself and data tracks ({{data}}).
@@ -1074,6 +1123,11 @@ This document has no IANA actions.
 ## moq-hang-04
 {:numbered="false"}
 
+- Fixed a track's identity for its name ({{identity}}): codec, description, container, display aspect, sample rate, and channel count never change, while every other field, including size, bitrate, and framerate, updates in place. A change of identity takes a new track name, which a rendition may name with `track` while keeping its ID, or a new Epoch.
+- Specified MSF text metadata preservation and refusal of unrepresentable text packaging during gateway conversion.
+- Specified conversion between relative broadcast references and MSF track namespaces without changing track identity, reading a namespace aligned with the catalog path's trailing segments as the catalog itself.
+
+- Added optional audio and video `warmup` durations, rounded up to whole milliseconds, and allowed video groups to start at convergent random access pictures.
 - Defined encoder `jitter` as flush lateness above the rendition's own recent minimum, replacing fixed frame-duration hints; container batches retain media-span estimates.
 - Timed CMAF samples from the frame timestamp, which is the fragment's earliest presentation time; `tfdt` is only relative within the fragment, and places the samples of an untimed frame. A timed CMAF track counts in its `mdhd` ticks.
 - Allowed a DVR to delete timeline objects no checkpoint recovery needs, oldest first.
@@ -1084,6 +1138,7 @@ This document has no IANA actions.
 - Added the optional `delay` field to `json` and `binary` track entries, measured only from payloads stamped with their capture time on the broadcast clock.
 - Replaced the video `stalled` field with an optional `enabled` field on audio and video renditions. A consumer MUST NOT select a disabled rendition and ignores `stalled`. A consumer that predates `enabled` keeps selecting a disabled rendition.
 - Replaced the broadcast's one aligned timeline with one timeline per track: the catalog `archive` entry's `track` became a `timelines` map from each indexed track, the catalog included, to its timeline track.
+- Required consumers to ignore an undecodable `archive` entry without rejecting the catalog.
 - Replaced the segment record with a per-track record: `sequence`, `pts`, `duration`, and a `start`/`end` range of group and frame positions, dropping cross-track pacing and completeness.
 - One cutting rule for every track: a record ends at the first group boundary past a minimum (2 seconds RECOMMENDED, zero for sparse data such as a catalog) and splits a group between frames at a maximum (10 seconds RECOMMENDED), so a group that never closes is indexed as it grows and `durationMax` bounds every record.
 - Recording format version 2: each track stores record N at `segments/N`, beside its timeline's `segments/N`, with a `Frame Start` field in the segment object. Tracks commit and expire independently, and a DVR keeps each track's newest record.
@@ -1091,6 +1146,8 @@ This document has no IANA actions.
 - An edge keeps its derived-format video reference rendition while that rendition stays in the catalog; an audio reference yields once video has a timeline.
 - Added an optional `epoch` to `.info`: the source route's Epoch, compared on resume so a restarted source fails enrollment.
 - Audio `sampleRate` and `numberOfChannels` describe the decoded output, so HE-AAC names its SBR rate and parametric stereo names two channels.
+- Added an optional `track` field to video, audio, text, `json`, and `binary` entries naming the track in its broadcast; the entry's key is its ID and names the track when `track` is absent. A consumer MUST reject a catalog using one ID for both a video and an audio rendition.
+- Defined video `displayAspectWidth` and `displayAspectHeight` as the whole picture's display aspect, not the sample aspect.
 
 ## moq-hang-03
 {:numbered="false"}

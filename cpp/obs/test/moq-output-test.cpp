@@ -303,8 +303,105 @@ std::optional<moq::Catalog> relayCatalog(const std::shared_ptr<moq::BroadcastCon
 }
 } // namespace
 
+// The production commit boundary lets a real stats call race retirement without
+// callbacks or branches in the output's hot path.
+struct MoQOutputStatsTest {
+	static std::optional<std::string> Epoch(MoQOutput &output)
+	{
+		std::shared_ptr<moq::OriginProducer> origin;
+		{
+			std::lock_guard<std::mutex> lock(output.media_mutex);
+			origin = output.origin;
+		}
+		auto announced = TestOk(origin->consume()->announced(moq::AnnounceConfig{}), "announced");
+		auto next = announced->next();
+		if (next.wait_for(std::chrono::seconds(10)) != std::future_status::ready)
+			return std::nullopt;
+		auto event = TestOk(next.get(), "announcement");
+		if (!event)
+			return std::nullopt;
+		const auto *start = std::get_if<moq::AnnounceEvent::kStart>(&event->get_variant());
+		return start ? start->announce.route.epoch : std::nullopt;
+	}
+
+	static std::shared_ptr<moq::Session> Session(MoQOutput &output)
+	{
+		std::lock_guard<std::mutex> lock(output.mutex);
+		return output.session;
+	}
+	static bool Commit(MoQOutput &output, const std::shared_ptr<moq::Session> &session,
+			   MoQOutput::ConnectionStats *accepted)
+	{
+		MoQOutput::ConnectionStats stale;
+		stale.dial = "retired";
+		stale.bytes_sent = 123;
+		return output.CommitConnectionStats(session, std::move(stale), accepted);
+	}
+	static void Disconnect(MoQOutput &output)
+	{
+		std::lock_guard<std::mutex> lock(output.mutex);
+		output.live = false;
+	}
+};
+
 int main()
 {
+	{
+		TestRelay relay;
+		reset(relay.Url());
+		MoQOutput output(nullptr, OUTPUT);
+		CHECK(output.Start());
+		const auto first = MoQOutputStatsTest::Epoch(output);
+		CHECK(first.has_value());
+		CHECK(first == output.GetEpoch());
+		CHECK(WaitFor([&] { return output.IsLiveSession() && relay.Accepted() == 1; }));
+		relay.DropSessions();
+		CHECK(WaitFor([&] { return output.GetReconnectCount() == 1 && output.IsLiveSession(); }));
+		CHECK(MoQOutputStatsTest::Epoch(output) == first);
+		CHECK(first == output.GetEpoch());
+		output.Stop();
+		CHECK(output.GetEpoch().empty());
+		CHECK(output.Start());
+		const auto second = MoQOutputStatsTest::Epoch(output);
+		CHECK(second.has_value());
+		CHECK(second != first);
+		CHECK(second == output.GetEpoch());
+		output.Stop();
+	}
+	printf("each start announces a fresh epoch, reconnect preserves it: ok\n");
+
+	for (int retirement = 0; retirement < 3; ++retirement) {
+		TestRelay relay;
+		reset(relay.Url());
+		MoQOutput output(nullptr, OUTPUT);
+		CHECK(output.Start());
+		CHECK(WaitFor([&] { return output.IsLiveSession(); }));
+		auto sampled = MoQOutputStatsTest::Session(output);
+		CHECK(sampled != nullptr);
+		if (!sampled)
+			continue;
+		// Use the generated bindings and real session before crossing the commit boundary.
+		const auto raw = sampled->stats();
+		(void)raw;
+		MoQOutput::ConnectionStats accepted;
+		accepted.dial = "accepted";
+		accepted.bytes_sent = 456;
+		if (retirement == 0) {
+			output.Stop();
+		} else if (retirement == 1) {
+			output.Stop();
+			CHECK(output.Start());
+			CHECK(WaitFor([&] { return output.IsLiveSession(); }));
+		} else {
+			MoQOutputStatsTest::Disconnect(output);
+		}
+		CHECK(!MoQOutputStatsTest::Commit(output, sampled, &accepted));
+		CHECK(accepted.dial == "accepted");
+		CHECK(accepted.bytes_sent == 456);
+		output.Stop();
+	}
+	printf("retired stats never replace the accepted sample: ok\n");
+
 	// Publishes over a real session: connects, reports itself live, carries
 	// stats, and lands video and audio renditions in the relay's catalog. Only CBR
 	// publishes the configured bitrate as a hint.
@@ -377,9 +474,9 @@ int main()
 		CHECK(catalog.has_value());
 		if (catalog) {
 			const auto &[name, rendition] = *catalog->video.begin();
-			auto media = TestOk(
-				moq::MediaContainerConsumer::subscribe(broadcast, {name, rendition.container}).get(),
-				"container consumer");
+			auto media =
+				TestOk(moq::MediaTrackConsumer::subscribe(broadcast, {name, rendition.container}).get(),
+				       "container consumer");
 			// Read a frame first, so the relay is subscribed before the last one is written.
 			auto next = media->next();
 			CHECK(next.wait_for(std::chrono::seconds(10)) == std::future_status::ready);

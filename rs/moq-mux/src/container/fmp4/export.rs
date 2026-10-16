@@ -42,15 +42,16 @@ const INIT_QUEUE: Duration = Duration::from_secs(30);
 /// fragment duration on top of that, for downstream consumers that throttle by
 /// fragment rate. Returns `None` when the broadcast ends.
 ///
-/// The init segment declares every rendition in the catalog once each can be described,
-/// and fragments cut while it waits are written right after it. Annex-B H.264 and H.265
-/// whose catalog codec string and dimensions determine the sample entry are described at
-/// the first catalog, as avc3 or hev1 with parameter sets in the samples. From then on
-/// the track set is fixed: a rendition that leaves and returns with the same sample entry
-/// is written under the track it was declared as. That comparison covers the catalog-derived
-/// record, so an Annex-B encoder that restarts with a new parameter set can return. A new
-/// rendition, a changed sample entry, or a return that replays media already written fails
-/// the export.
+/// The init segment declares every enabled rendition in the catalog once each can be
+/// described, and fragments cut while it waits are written right after it. Annex-B H.264
+/// and H.265 whose catalog codec string and dimensions determine the sample entry are
+/// described at the first catalog, as avc3 or hev1 with parameter sets in the samples. From
+/// then on the track set is fixed: a rendition that leaves the catalog, as a disabled one
+/// (`enabled: false`) does, is unsubscribed and idles. On its return it is resubscribed after
+/// the last group read, under the track it was declared as, when its sample entry is
+/// unchanged. That comparison covers the catalog-derived record, so an Annex-B encoder that
+/// restarts with a new parameter set can return. A new rendition, a changed sample entry, or
+/// a return that replays media already written fails the export.
 ///
 /// [`next_chunk`](Self::next_chunk) returns the same bytes as a [`Chunk`], which
 /// separates the init segment from a [`Fragment`] carrying whether it begins at a
@@ -229,6 +230,8 @@ struct Fmp4Track {
 
 	/// Whether the source has signalled end-of-track, or the rendition left the catalog.
 	finished: bool,
+	/// The group of the last frame read, where a resubscription resumes after.
+	group: Option<u64>,
 	/// The source group closed, so its buffered fragment can be emitted.
 	group_finished: bool,
 
@@ -264,6 +267,7 @@ impl Fmp4Track {
 			buffer: Vec::new(),
 			buffer_independent: false,
 			finished: false,
+			group: None,
 			group_finished: false,
 			written: None,
 			backlog: None,
@@ -553,6 +557,7 @@ impl<S: Stream> Export<S> {
 				while let Some(source) = track.source.as_mut() {
 					match source.poll_event(waiter)? {
 						Poll::Ready(Some(Event::Frame(frame))) => {
+							track.group = source.group();
 							// A keyframe may carry new parameter sets, so check it still matches.
 							if !track.described || frame.keyframe {
 								track.describe(name)?;
@@ -563,7 +568,7 @@ impl<S: Stream> Export<S> {
 							track.pending = Some(frame);
 							break;
 						}
-						Poll::Ready(Some(Event::FrameEnd(end))) => {
+						Poll::Ready(Some(Event::FrameEnd { end, .. })) => {
 							if track.is_video
 								&& let Some(last) = track.buffer.last_mut()
 								&& last.duration.is_none()
@@ -779,7 +784,7 @@ impl<S: Stream> Export<S> {
 			.audio
 			.renditions
 			.retain(|name, config| crate::catalog::hang::supported(name, &config.container));
-		self.source.retain_valid_media(&mut catalog);
+		self.source.retain_selectable(&mut catalog);
 
 		let video = catalog
 			.video
@@ -801,9 +806,14 @@ impl<S: Stream> Export<S> {
 			match self.tracks.get_mut(&name) {
 				Some(track) if track.source.is_some() => track.reconfigure(&name, config)?,
 				Some(track) => {
-					let Some(source) = config.subscribe(&self.source, &name, self.max_delay)? else {
+					let Some(mut source) = config.subscribe(&self.source, &name, self.max_delay)? else {
 						continue;
 					};
+					// The publisher still caches the group the rendition left on, which a
+					// fresh subscription would start at, so resume after the last group read.
+					if let Some(group) = track.group {
+						source = source.after(group);
+					}
 					track.rejoin(&name, config, source)?;
 				}
 				None => {

@@ -174,6 +174,9 @@ QString ExplainFailure(int code, const std::string &reason)
 		return QStringLiteral("Connect failed · the relay did not accept the session");
 	case MoQError::Kind::Offline:
 		return {};
+	case MoQError::Kind::TooManyRequests:
+		return QStringLiteral(
+			"Relay request limit reached · reduce tracks or ask the operator to raise the limit");
 	case MoQError::Kind::Other:
 		return QString::fromStdString(reason);
 	}
@@ -1111,6 +1114,11 @@ void MoQDock::StartStream()
 		return;
 	}
 
+	if (auto *moq = static_cast<MoQOutput *>(obs_obj_get_data(output))) {
+		const auto epoch = moq->GetEpoch();
+		if (!epoch.empty())
+			publishSummary += QStringLiteral("\nEpoch ") + QString::fromStdString(epoch);
+	}
 	pollTimer->start();
 
 	SetRunning(true);

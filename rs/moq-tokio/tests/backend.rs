@@ -2,6 +2,11 @@
 
 use std::time::Duration;
 
+/// A millisecond track: the frames written here carry timestamps.
+fn timed() -> moq_net::track::Info {
+	moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+}
+
 const TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Inputs for [`connect_test`].
@@ -113,7 +118,9 @@ async fn connect_test(config: ConnectTest<'_>) {
 	broadcast
 		.announce(Default::default())
 		.expect("failed to create broadcast");
-	let track = broadcast.create_track("video", None).expect("failed to create track");
+	let track = broadcast
+		.create_track("video", timed())
+		.expect("failed to create track");
 
 	let mut group = track.append_group().expect("failed to append group");
 	group
@@ -343,15 +350,6 @@ async fn reload_test() {
 		.expect("failed to init server");
 	let server = server.listen().await.expect("failed to listen");
 
-	// Every process the user runs shares one inotify instance limit, so a loaded host can refuse
-	// the listener its watcher. Judge by the listener's own watcher: a separate probe would race
-	// the rest of the host for the same limit.
-	#[cfg(feature = "watch")]
-	if tracing_test::internal::logs_with_scope_contain("moq_tokio", "hot reload disabled") {
-		eprintln!("skipping reload_test: host cannot start an inotify watcher");
-		return;
-	}
-
 	let certificates = server.certificates();
 	let before = certificates.fingerprints();
 	assert_eq!(before.len(), 1);
@@ -463,7 +461,7 @@ async fn mtls_test(scheme: &str, reject: bool) {
 	// One shared tuning, handed to both roles the way a binary would.
 	let mut quic = moq_tokio::quic::Config::default();
 	quic.gso = Some(false);
-	quic.keep_alive = Duration::from_secs(1);
+	quic.keep_alive = Some(Duration::from_secs(1));
 
 	let server = server_config.init(quic.clone()).expect("failed to init server");
 	let mut server = server.listen().await.expect("failed to listen");
@@ -605,7 +603,9 @@ async fn iroh_connect_test(version: Option<&str>) {
 	broadcast
 		.announce(Default::default())
 		.expect("failed to create broadcast");
-	let track = broadcast.create_track("video", None).expect("failed to create track");
+	let track = broadcast
+		.create_track("video", timed())
+		.expect("failed to create track");
 
 	let mut group = track.append_group().expect("failed to append group");
 	group
@@ -746,7 +746,7 @@ async fn iroh_connect_test(version: Option<&str>) {
 async fn noq_client_close_reaches_server() {
 	// An idle timeout inside TIMEOUT would hide a lost close.
 	let mut quic = moq_tokio::quic::Config::default();
-	quic.idle_timeout = TIMEOUT * 3;
+	quic.idle_timeout = Some(TIMEOUT * 3);
 
 	let mut server_config = moq_tokio::listen::Config::default();
 	server_config.bind = Some("127.0.0.1:0".parse().unwrap());
@@ -826,7 +826,9 @@ async fn noq_client_close_drains_finished_track() {
 			let origin = moq_tokio::origin::spawn();
 			let broadcast = origin.create_broadcast("test").expect("failed to create broadcast");
 			broadcast.announce(Default::default()).expect("failed to announce");
-			let mut track = broadcast.create_track("video", None).expect("failed to create track");
+			let mut track = broadcast
+				.create_track("video", timed())
+				.expect("failed to create track");
 
 			let mut config = moq_tokio::connect::Config::default();
 			config.tls.insecure = Some(true);
@@ -938,7 +940,9 @@ async fn noq_client_close_drains_migrated_predecessor() {
 			let origin = moq_tokio::origin::spawn();
 			let broadcast = origin.create_broadcast("test").expect("failed to create broadcast");
 			broadcast.announce(Default::default()).expect("failed to announce");
-			let mut track = broadcast.create_track("video", None).expect("failed to create track");
+			let mut track = broadcast
+				.create_track("video", timed())
+				.expect("failed to create track");
 
 			let mut config = moq_tokio::connect::Config::default();
 			config.tls.insecure = Some(true);
@@ -955,7 +959,7 @@ async fn noq_client_close_drains_migrated_predecessor() {
 			subscribed_tx.send(()).unwrap();
 
 			// Once the replacement is live, only the predecessor serves the subscription.
-			while connection.epoch() < 2 || !connection.connected() {
+			while connection.connects() < 2 || !connection.connected() {
 				connection.status().await.expect("connection stopped");
 			}
 			migrated_tx.send(()).unwrap();
@@ -1079,13 +1083,15 @@ async fn noq_client_close_keeps_predecessor_handover() {
 			let broadcast = origin.create_broadcast("test").expect("failed to create broadcast");
 			broadcast.announce(Default::default()).expect("failed to announce");
 			// Never finished, so the predecessor serving it cannot drain.
-			let mut track = broadcast.create_track("video", None).expect("failed to create track");
+			let mut track = broadcast
+				.create_track("video", timed())
+				.expect("failed to create track");
 
 			let mut config = moq_tokio::connect::Config::default();
 			config.tls.insecure = Some(true);
 			config.bind = Some("127.0.0.1:0".parse().unwrap());
 			// Well under the one second close window.
-			config.goaway.handover = Duration::from_millis(500);
+			config.goaway.handover = Some(Duration::from_millis(500));
 			let client = config
 				.init(quic)
 				.expect("failed to init client")

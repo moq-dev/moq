@@ -39,10 +39,10 @@ Rename the `noq` cargo features by role (`quic` is the recommendation);
 confirm the name with the maintainer in the PR. Update every doc and example
 that names noq, and run `just test interop --all`.
 
-Decided 2026-10-10: `moq-quic` takes `moq_time::Instant` at its boundary in
+Decided 2026-10-10: `moq-quic` takes `moq_clock::Instant` at its boundary in
 place of `std::time::Instant`, so the sim can drive real QUIC later
 ([QUIC on the sim](/quest/m2/quic-sim.md)) and the io_uring worker's per-turn
-sample passes straight through. `moq_time::Instant` mirrors std's methods, so
+sample passes straight through. `moq_clock::Instant` mirrors std's methods, so
 alias it in `moq-quic` and keep the swap an import change; that keeps
 upstream cherry-picks mechanical.
 
@@ -56,7 +56,3 @@ Re-run #3342's bulk and fanout relay memory workloads after the switch and
 report them in the PR. On `moq-noq` they measured 75 MiB (bulk) and 31 MiB
 (fanout), against 141 and 97 MiB without lazy slots; `moq-quic` should land
 near the former.
-
-## Required
-
-- [The moq-time crate](/quest/m1/time/crate.md) - the instant `moq-quic` takes

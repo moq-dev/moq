@@ -13,12 +13,13 @@ const MP3_MPEG1_MIN_SAMPLE_RATE = 32000;
 /** The catalog fields that determine the demuxer and WebCodecs decoder instance. */
 export type DecoderConfig = Pick<
 	Catalog.AudioConfig,
-	"codec" | "container" | "description" | "sampleRate" | "numberOfChannels"
+	"codec" | "container" | "description" | "sampleRate" | "numberOfChannels" | "warmup"
 >;
 
 /** The routing and decoder state whose changes require a replacement subscription. */
 export type PlaybackIdentity = {
 	broadcast: Catalog.AudioConfig["broadcast"];
+	track: Catalog.AudioConfig["track"];
 	decoder: DecoderConfig;
 };
 
@@ -30,6 +31,7 @@ export function decoderConfig(config: Catalog.AudioConfig): DecoderConfig {
 		description: config.description,
 		sampleRate: config.sampleRate,
 		numberOfChannels: config.numberOfChannels,
+		warmup: config.warmup,
 	};
 }
 
@@ -37,6 +39,7 @@ export function decoderConfig(config: Catalog.AudioConfig): DecoderConfig {
 export function playbackIdentity(config: Catalog.AudioConfig): PlaybackIdentity {
 	return {
 		broadcast: config.broadcast,
+		track: config.track,
 		decoder: decoderConfig(config),
 	};
 }

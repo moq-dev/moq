@@ -49,12 +49,16 @@ for a permission, device, or settings change instead of prompting again.
 The video encoder follows its share of the connection's send-rate estimate, so
 several publishers on one connection do not each target the whole uplink.
 Codec, resolution, framerate, and bitrate are tunable through
-`el.video.config`, and `el.video.cut()` asks for an extra keyframe. For
+`el.video.config`, and `el.video.cut()` asks for an extra keyframe. Size,
+bitrate, and framerate change in place, while a codec or audio format change
+keeps the rendition's catalog ID under a fresh `track` name that viewers
+follow through the catalog. For
 simulcast, drop the element and register several encoders on a
 `Publish.Broadcast`, as below.
 
-Each audio frame is its own group by default. `el.audio.groupDuration` (such as
-`Time.Milli(100)`) packs several frames per group, so a relay keeps fewer
+Audio groups carry at least 20 ms by default, packing shorter codec frames
+together. `el.audio.groupDuration` changes that minimum; `Time.Milli(0)` puts
+every frame in its own group. A longer minimum lets a relay keep fewer
 streams, at the cost of coarser loss: a viewer that falls behind skips a whole
 group. Frames still forward as they are encoded.
 
@@ -65,8 +69,12 @@ timeline. The catalog's `clock` maps it to wall time. Stamp your own tracks
 ## Custom tracks
 
 `broadcast.net` is the underlying `Moq.Broadcast.Producer`, so an application
-can serve its own tracks alongside the media. It is recreated on each
-reconnect, so acquire it from an effect and reseed the track each time:
+can serve its own tracks alongside the media. It is recreated when the origin, name,
+`enabled`, or `maxAge` changes, so acquire it from an effect and create each
+track once per `net`. Names under a rendition's ID, such as `video/1`, are
+reserved for that rendition's replacement tracks. A track name always means
+the same content, so a track re-created on the same `net` throws on an append
+that would reuse its sequences:
 
 ```ts
 import * as Json from "@moq/json";
@@ -133,7 +141,13 @@ signal). An enabled camera or microphone prompts for permission on
 construction, and a screen source must be built inside the user gesture that
 authorizes it. Audio waits for the page's first click or keypress, since
 browsers suspend Web Audio until then. Every input and output is a signal from
-[`@moq/signals`](/lib/js/signals).
+[`@moq/signals`](/lib/js/signals). A failed encoder exposes the cause through
+`out.error` and disables only its rendition; siblings and the broadcast keep
+running. It does not retry on demand or bandwidth changes, and enable cycles
+that keep the same capture do not retry. A new capture source (such as the
+track a camera or microphone reopens on unmute), changed encoder settings, or
+a replacement encoder recovers it. Recovery keeps the catalog ID and uses a
+fresh `track` name.
 
 ## Strict CSP
 

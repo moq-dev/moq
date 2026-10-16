@@ -1412,6 +1412,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "core_detect"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7f8f80099a98041a3d1622845c271458a2d73e688351bf3cb999266764b81d48"
+
+[[package]]
 name = "coreaudio-rs"
 version = "0.14.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2018,9 +2024,9 @@ dependencies = [
 
 [[package]]
 name = "dns-lookup"
-version = "4.0.1"
+version = "4.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6120e7e5dcd1c90098e349def389e2797377cdbe6b465ad8fdd115c0c99d5cf2"
+checksum = "263c0ccfc6b3b6a93e959edad4f985779e76c0b36dbb2e13e3d27c690974adf1"
 dependencies = [
  "cfg-if",
  "libc",
@@ -3897,18 +3903,18 @@ dependencies = [
 
 [[package]]
 name = "lazy_static"
-version = "1.5.0"
+version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
+checksum = "20870f649af7073d53e38067b2a84312175d56ea15217e1b15bc83506ec50afb"
 dependencies = [
  "spin 0.9.9",
 ]
 
 [[package]]
 name = "libc"
-version = "0.2.189"
+version = "0.2.190"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2"
+checksum = "ce5d3ddc6d3fa000eb1536d85e147bfe31aacaba692ed6a876f95cb7c855be78"
 
 [[package]]
 name = "libfuzzer-sys"
@@ -4378,6 +4384,7 @@ dependencies = [
  "bytes",
  "hang",
  "humantime",
+ "libc",
  "moq-archive",
  "moq-audio",
  "moq-auth",
@@ -4412,6 +4419,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "moq-clock"
+version = "0.11.0"
+dependencies = [
+ "futures",
+ "kio 0.6.2",
+ "moq-clock",
+ "moq-clock-macros",
+ "tokio",
+ "wasm-bindgen",
+ "wasm-bindgen-test",
+ "web-async",
+]
+
+[[package]]
+name = "moq-clock-macros"
+version = "0.1.0"
+
+[[package]]
 name = "moq-e2ee"
 version = "0.0.11"
 dependencies = [
@@ -4436,6 +4461,7 @@ dependencies = [
  "getrandom 0.4.3",
  "hang",
  "kio 0.6.2",
+ "libc",
  "moq-audio",
  "moq-json",
  "moq-mux",
@@ -4472,6 +4498,7 @@ version = "0.4.12"
 dependencies = [
  "anyhow",
  "bytes",
+ "criterion",
  "futures",
  "gst-plugin-version-helper",
  "gstreamer",
@@ -4525,6 +4552,7 @@ dependencies = [
  "kio 0.6.2",
  "moq-flate",
  "moq-net",
+ "proptest",
  "serde",
  "serde_json",
  "serde_path_to_error",
@@ -4639,9 +4667,9 @@ version = "0.0.0"
 
 [[package]]
 name = "moq-noq"
-version = "2.0.4"
+version = "2.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6bbf0af241543ba9abfbee6c436eeae5367efde3037c9c4982aec2567d74b92b"
+checksum = "20d9d1334f556a15e60f6d406020fc3a40409335ae8a2ad472f6bf074a01acfa"
 dependencies = [
  "bytes",
  "cfg_aliases",
@@ -4661,9 +4689,9 @@ dependencies = [
 
 [[package]]
 name = "moq-noq-proto"
-version = "2.0.4"
+version = "2.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "102495e6fc86b36d47e75947bd136f0e60d0d360cf15fc3b9712b60cb3c979a2"
+checksum = "50ac444c6c1ed18d45536cd939be7f0fd664996e79c0519119b13d6ae9d3d5e2"
 dependencies = [
  "aes-gcm",
  "aws-lc-rs",
@@ -4692,9 +4720,9 @@ dependencies = [
 
 [[package]]
 name = "moq-noq-udp"
-version = "2.0.4"
+version = "2.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "589717ed483c3b74a5fdb628139191b9a1e1b92877847a0ac9f3ff44df7bbd4e"
+checksum = "8e978cded333ca8a6d50b96a7a4388ccc8d98db51d89df7dbee598e9b849ee79"
 dependencies = [
  "cfg_aliases",
  "libc",
@@ -4760,7 +4788,9 @@ dependencies = [
  "axum-server",
  "bytes",
  "bytesize",
+ "criterion",
  "futures",
+ "http-body",
  "http-cache-reqwest",
  "humantime",
  "hyper-util",
@@ -4791,8 +4821,10 @@ dependencies = [
  "toml 1.1.6+spec-1.1.0",
  "tower-service",
  "tracing",
+ "tracing-subscriber",
  "url",
  "usage-rs",
+ "web-transport-moq",
  "web-transport-trait",
 ]
 
@@ -4853,6 +4885,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tracing",
+ "tracing-test",
 ]
 
 [[package]]
@@ -7025,6 +7058,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3d595e54a326bc53c1c197b32d295e14b169e3cfeaa8dc82b529f947fba6bcf5"
 
 [[package]]
+name = "proptest"
+version = "1.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b8530004ccb15eae51c7e40009fbe317f341f804db54dc033eec1c50be28cfa0"
+dependencies = [
+ "bitflags 2.13.2",
+ "chacha20",
+ "core_detect",
+ "num-traits",
+ "rand 0.10.3",
+ "rand_xorshift",
+ "regex-syntax",
+ "unarray",
+]
+
+[[package]]
 name = "pulseaudio"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7054,9 +7103,9 @@ dependencies = [
 
 [[package]]
 name = "qmux"
-version = "0.6.1"
+version = "0.6.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f6de80b363c2d1fc3c5b5c2b7c9e7c44b5f50480025d19ad51a9f304d2ca90d4"
+checksum = "542edbed299cac6d624d3964c423c2b2a94b19ffcde4eef5fde09b74c64799e4"
 dependencies = [
  "bytes",
  "futures",
@@ -7261,6 +7310,15 @@ name = "rand_pcg"
 version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "caa0f4137e1c0a72f4c651489402276c8e8e1cf081f3b0ba156d2cbeef09e86a"
+dependencies = [
+ "rand_core 0.10.1",
+]
+
+[[package]]
+name = "rand_xorshift"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "60aa6af80be32871323012e02e6e65f8a7cc7890931ae421d217ad8fe0df2ccf"
 dependencies = [
  "rand_core 0.10.1",
 ]
@@ -7534,9 +7592,9 @@ dependencies = [
 
 [[package]]
 name = "rubato"
-version = "5.0.0"
+version = "5.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a7cb1ffaf8738df50aab642a7f6465df81c6ba9e2818268053487165298114be"
+checksum = "cc1e951b9f5432ec1422f4dcfa5733fc501265902612edf5ef8bd8ecdd960930"
 dependencies = [
  "audioadapter",
  "audioadapter-buffers",
@@ -8540,9 +8598,9 @@ checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
 
 [[package]]
 name = "str0m"
-version = "0.24.0"
+version = "0.24.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "018e4267976f45bf568c146b559bbabd2e823a9dc8c10b5b86e83118b597b89c"
+checksum = "3e80c4a4ef148e4a9fd15b9525c7f376d97e86729f19880b591ad220f1288c0f"
 dependencies = [
  "arrayvec",
  "base64ct",
@@ -9021,9 +9079,9 @@ checksum = "fd3ca314f692efd6c868f8408f53fe444634a845f96c028b97d35f6a1f79f0ee"
 
 [[package]]
 name = "tokio"
-version = "1.53.1"
+version = "1.53.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "202caea871b69668250d242070849eb495be178ed697a3e98aebce5bc81a0bed"
+checksum = "e95f91fcc7a621e8b030f6aa23c71fe9838ae2fb4d8118b75602a328f5144044"
 dependencies = [
  "bytes",
  "libc",
@@ -9050,9 +9108,9 @@ dependencies = [
 
 [[package]]
 name = "tokio-rustls"
-version = "0.26.5"
+version = "0.26.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b0c85f2c3ef0b1cd58b36682f4b17aaa995f0e5db534d85692b4903abce21f67"
+checksum = "c9cc2678c2cdd569ef8215e2afd7954ada2ae20b4fdd2c5fe6139a3b02d105db"
 dependencies = [
  "rustls",
  "tokio",
@@ -9494,6 +9552,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "unarray"
+version = "0.1.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "eaea85b334db583fe3274d12b4cd1880032beab409c0d774be044d4480ab9a94"
+
+[[package]]
 name = "unicode-ident"
 version = "1.0.26"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -9761,9 +9825,9 @@ checksum = "06abde3611657adf66d383f00b093d7faecc7fa57071cce2578660c9f1010821"
 
 [[package]]
 name = "uuid"
-version = "1.26.1"
+version = "1.27.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2ef6dac1e96601b4fb3acccccff2139741fcb757cb9a36089bf5be91cfb285ce"
+checksum = "97277d36b9c3ace13e58fa6e753f8b0bbbf302a18dd193240d70f9e29681059a"
 dependencies = [
  "getrandom 0.4.3",
  "js-sys",
@@ -10137,9 +10201,9 @@ dependencies = [
 
 [[package]]
 name = "web-transport-moq"
-version = "2.0.4"
+version = "2.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "60d31032c966e67089b5369f9aecf925ef7d0f8a155530da7dc355bc930b097d"
+checksum = "5dc946e718371f88a79d849c352b6bdd95e0a36139e9b76818c1a101b45ed97a"
 dependencies = [
  "bytes",
  "futures",
@@ -10181,9 +10245,9 @@ dependencies = [
 
 [[package]]
 name = "web-transport-wasm"
-version = "0.7.0"
+version = "0.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3a9069c0103154db8be4ab08432c72b6605a75175871be692f67c3de2f3ba154"
+checksum = "a6bc4178c49b934e4adf5e651eb1506bf4b803835612f5acd2381875a89d1f9f"
 dependencies = [
  "bytes",
  "js-sys",

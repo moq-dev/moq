@@ -1,3 +1,5 @@
+#![cfg(feature = "async")]
+
 //! A relay that fetches the head of a group it is receiving mid-group keeps delivering
 //! that group to arrival-order subscribers, along with the frames written into it after.
 //!
@@ -13,6 +15,11 @@ use std::time::Duration;
 use moq_net::track::{Position, Subscription};
 use moq_net::{Hop, Timestamp, Version};
 use support::harness::{MockConnectOptions, connect_mock};
+
+/// A millisecond track: the frames written here carry timestamps.
+fn timed() -> moq_net::track::Info {
+	moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+}
 
 const TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -61,7 +68,7 @@ async fn round(version: &str) {
 	let version: Version = version.parse().unwrap();
 	let publisher = produce_origin(1);
 	let broadcast = publisher.create_broadcast("bcast").unwrap();
-	let track = broadcast.create_track("catalog.json", None).unwrap();
+	let track = broadcast.create_track("catalog.json", timed()).unwrap();
 	broadcast.announce(Default::default()).unwrap();
 
 	let mut group = track.append_group().unwrap();

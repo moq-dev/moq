@@ -97,6 +97,7 @@ type OpBox<T> = futures::future::BoxFuture<'static, T>;
 ///   cancellation while later writes reclaim the stream.
 pub struct Session<S: web_transport_trait::Session> {
 	session: S,
+	binding: moq_net::transport::Binding,
 	accept_uni: OpSlot<Result<S::RecvStream, S::Error>>,
 	accept_bi: OpSlot<BiResult<S>>,
 	open_uni: OpSlot<Result<S::SendStream, S::Error>>,
@@ -132,9 +133,10 @@ fn poll_op<T>(slot: &mut OpSlot<T>, cx: &mut Context<'_>, start: impl FnOnce() -
 
 impl<S: web_transport_trait::Session> Session<S> {
 	/// Wrap an async-interface transport session.
-	pub fn new(session: S) -> Self {
+	pub fn new(session: S, binding: moq_net::transport::Binding) -> Self {
 		Self {
 			session,
+			binding,
 			accept_uni: OpSlot::default(),
 			accept_bi: OpSlot::default(),
 			open_uni: OpSlot::default(),
@@ -149,7 +151,7 @@ impl<S: web_transport_trait::Session> Session<S> {
 // owns its own progress under the poll contract.
 impl<S: web_transport_trait::Session> Clone for Session<S> {
 	fn clone(&self) -> Self {
-		Self::new(self.session.clone())
+		Self::new(self.session.clone(), self.binding)
 	}
 }
 
@@ -1335,7 +1337,12 @@ mod tests {
 		assert_eq!(fake.writes.lock().unwrap().as_slice(), b"hello");
 		assert_eq!(fake.priorities.lock().unwrap().as_slice(), &[7]);
 		assert_eq!(fake.resets.lock().unwrap().as_slice(), &[0x33]);
-		let mut session = Session::new(FakeSession);
-		assert!(poll::Session::poll_accept_uni(&mut session, &mut cx).is_pending());
+		for binding in [moq_net::transport::Binding::Uri, moq_net::transport::Binding::InBand] {
+			let session = Session::new(FakeSession, binding);
+			let mut cloned = session.clone();
+			assert_eq!(poll::Session::binding(&session), binding);
+			assert_eq!(poll::Session::binding(&cloned), binding);
+			assert!(poll::Session::poll_accept_uni(&mut cloned, &mut cx).is_pending());
+		}
 	}
 }

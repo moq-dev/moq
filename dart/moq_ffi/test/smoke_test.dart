@@ -35,7 +35,10 @@ void main() {
 
   test('raw track round trips a frame', () async {
     final broadcast = MoqBroadcastProducer();
-    final track = broadcast.publishTrack(name: 'events', info: null);
+    final track = broadcast.publishTrack(
+      name: 'events',
+      info: MoqTrackInfo(timescale: 1000000),
+    );
     final consumer = track.consume(subscription: null);
     final nextGroup = consumer.nextGroup();
 

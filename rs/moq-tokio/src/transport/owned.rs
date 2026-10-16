@@ -69,6 +69,9 @@ impl<S: wt::Session<SendStream: 'static, RecvStream: 'static>> poll::Session for
 	fn max_datagram_size(&self) -> usize {
 		backend::Session::max_datagram_size(self)
 	}
+	fn binding(&self) -> moq::Binding {
+		self.binding
+	}
 	fn protocol(&self) -> Option<&str> {
 		backend::Session::protocol(self)
 	}

@@ -18,17 +18,18 @@ that 127 is the middle of a `u8`. The wire stays a byte.
 
 Where the model stands today, all in `rs/moq-net`:
 
-- One `PriorityQueue` per moq-lite session (`lite/publisher.rs`), a strict
-  global sort over every in-flight group on the connection: a subscription at
+- One `PriorityQueue` per session, shared by the moq-lite and moq-transport
+  publishers, a strict global sort over every in-flight group on the
+  connection: a subscription at
   priority 200 pre-empts one at 100 indefinitely, and only the top 255 groups
   get a distinct rank.
 - `Priority` already ranks a group by its track priority, then its subscription
-  id, then newest group first within that subscription (`lite/priority.rs`). JS
+  id, then group within that subscription in its order (`priority.rs`). JS
   packs track priority and the group's position within its own subscription
-  into one send order (`js/net/src/lite/priority.ts`), so two tracks at equal
+  into one send order (`js/net/src/priority.ts`), so two tracks at equal
   priority interleave rather than one draining first.
-- Group order within a track is fixed newest first today; a subscription-chosen
-  order arrives with [Subscribe ranges](/quest/m1/subscribe-ranges/README.md).
+- Group order within a track follows each subscription's `order` (#5385),
+  newest first by default.
 - A relay forwards the max of its downstream subscriber priorities upstream
   (`model/subscription.rs`, `lite/subscriber.rs`), never the publisher's track
   priority, so one viewer asking for 255 raises that track above every other
@@ -57,7 +58,8 @@ Direction to settle in the draft first, then the code:
   needed on the wire; the draft only has to say that a relay MAY scope
   priority to the broadcast.
 - On a relay-to-relay session with fairness on, ordering across broadcasts is
-  byte-fair (the scheduler's fair tier, one send group per broadcast), the
+  byte-fair (the scheduler's fair tier, one domain per broadcast and one send group
+  per subscription inside that domain), the
   publisher's track priority orders streams within a broadcast, and
   downstream subscriber priorities are not forwarded. Attribute FETCH streams
   to a domain the same way: cache-miss and history fetches carry Subscriber
@@ -65,10 +67,10 @@ Direction to settle in the draft first, then the code:
   bypasses tenant isolation; settle their carrier beside the subscription one,
   or narrow the goal to subscription delivery.
 - Rank by track priority, then subscription, then the subscription's own group
-  order (newest first until subscribe ranges adds a direction).
+  order (`Subscription::order`, newest first by default).
 - Decide whether the publisher's `track::Info::priority` breaks a tie
   between equal subscriber priorities in `Priority::cmp`
-  (`rs/moq-net/src/lite/priority.rs`). The
+  (`rs/moq-net/src/priority.rs`). The
   [ladder controller](/quest/m3/ladder/controller.md), now in m3, wants that
   tiebreak; this quest owns the answer and the code change, so the controller
   only consumes it (2026-10-06 audit). Either way, make the docs agree:
@@ -120,7 +122,7 @@ to 127 on IETF. Report both with the draft change.
 ## Required
 
 - [Hierarchical stream scheduling](/quest/m1/quic/scheduler.md) - the fair
-  tier the per-broadcast send groups ride on
+  tier the broadcast domains and subscription send groups ride on
 
 ## Related
 

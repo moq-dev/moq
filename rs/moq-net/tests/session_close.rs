@@ -1,3 +1,5 @@
+#![cfg(feature = "async")]
+
 //! `Session::close` delivers what the session queued before closing, within a deadline,
 //! while `abort` still closes at once.
 //!
@@ -9,6 +11,11 @@ use std::time::Duration;
 
 use moq_net::{Error, Hop, Timestamp, Version};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
+
+/// A millisecond track: the frames written here carry timestamps.
+fn timed() -> moq_net::track::Info {
+	moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+}
 
 const TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -32,7 +39,7 @@ struct Setup {
 async fn setup(version: &str) -> Setup {
 	let publisher = produce_origin(1);
 	let broadcast = publisher.create_broadcast("bcast").unwrap();
-	let track = broadcast.create_track("video", None).unwrap();
+	let track = broadcast.create_track("video", timed()).unwrap();
 	broadcast.announce(Default::default()).unwrap();
 
 	let subscriber = produce_origin(2);
@@ -80,6 +87,29 @@ async fn setup(version: &str) -> Setup {
 		track,
 		reader,
 		_broadcast: broadcast,
+	}
+}
+
+/// TRACK_INFO creates demand before any SUBSCRIBE, so demand alone cannot gate a drain test.
+#[moq_net_sim::test]
+async fn track_info_interest_precedes_a_subscription() {
+	for version in ["moq-lite-05", "moq-lite-06", "moq-lite-07-wip"] {
+		let publisher = produce_origin(1);
+		let broadcast = publisher.create_broadcast("bcast").unwrap();
+		let track = broadcast.create_track("video", timed()).unwrap();
+		broadcast.announce(Default::default()).unwrap();
+		let subscriber = produce_origin(2);
+		let mut options = MockConnectOptions::new(version.parse().unwrap());
+		options.server_publish = Some(publisher.consume());
+		options.client_subscribe = Some(subscriber.clone());
+		let _pair = connect_mock(options).await;
+		let consumer = subscriber.consume();
+		consumer.routed("bcast").await.unwrap();
+		let remote = consumer.request_broadcast("bcast", None).await.unwrap();
+		let copy = remote.track("video").unwrap();
+		copy.query().await.expect("TRACK_INFO");
+		track.demand().used().await.expect("TRACK_INFO holds demand");
+		assert!(track.subscription().is_none(), "{version}: no SUBSCRIBE was requested");
 	}
 }
 
@@ -287,5 +317,52 @@ async fn older_lite_close_keeps_ack_drain() {
 		group.finish().unwrap();
 		track.finish().unwrap();
 		pair.client.close().await.expect("released draft still drains on ACKs");
+	}
+}
+
+/// A locally unsupported feature uses only the negotiated session registry.
+#[moq_net_sim::test]
+async fn unsupported_abort_uses_the_negotiated_session_registry() {
+	for protocol in ["moq-lite-06", "moq-lite-07-wip", "moq-transport-17", "moq-transport-22"] {
+		let version: Version = protocol.parse().unwrap();
+		let pair = connect_mock(MockConnectOptions::new(version)).await;
+		pair.client.abort(Error::Unsupported);
+		let _ = pair.server.closed().await;
+		let (code, _) = pair.server_transport.close_reason().expect("transport closed");
+		assert_eq!(code, if version.is_lite() { 0x30 } else { 0x1 }, "{protocol}");
+	}
+}
+
+/// A Lite-only close code arriving on IETF stays unknown instead of gaining Lite semantics.
+#[moq_net_sim::test]
+async fn unsupported_close_is_decoded_by_the_negotiated_session_registry() {
+	for protocol in ["moq-lite-06", "moq-lite-07-wip", "moq-transport-17", "moq-transport-22"] {
+		let version: Version = protocol.parse().unwrap();
+		let mut pair = connect_mock(MockConnectOptions::new(version)).await;
+		moq_net::transport::poll::Session::close(&mut pair.server_transport, 0x30, "unsupported");
+		let error = pair.client.closed().await;
+		let expected = if version.is_lite() {
+			moq_net::SessionError::Unsupported
+		} else {
+			moq_net::SessionError::Unknown(0x30)
+		};
+		assert!(matches!(error, Error::Session(code) if code == expected), "{protocol}");
+	}
+}
+
+/// moq-lite's own session range (0x30-0x3f) is never sent as an unknown code on either
+/// wire, while a code outside it passes through.
+#[moq_net_sim::test]
+async fn an_unknown_lite_range_abort_is_unspecified_on_every_wire() {
+	for protocol in ["moq-lite-06", "moq-lite-07-wip", "moq-transport-17", "moq-transport-22"] {
+		for (unknown, expected) in [(0x31, 0x1), (0x20, 0x20)] {
+			let version: Version = protocol.parse().unwrap();
+			let pair = connect_mock(MockConnectOptions::new(version)).await;
+			pair.client
+				.abort(Error::Session(moq_net::SessionError::Unknown(unknown)));
+			let _ = pair.server.closed().await;
+			let (code, _) = pair.server_transport.close_reason().expect("transport closed");
+			assert_eq!(code, expected, "{protocol} {unknown:#x}");
+		}
 	}
 }

@@ -6,13 +6,34 @@ check:
     sh/gh/alert.sh check-coverage
     bun sh/gh/check-runs.ts
 
-# Tests of the release tooling itself; nightly, not on every pull request.
+# Tests of repository tooling; nightly, not on every pull request.
 test:
+    python3 sh/size/report.test.py
+    python3 sh/size/release.test.py
+    python3 sh/size/nightly.test.py
+    python3 bench/compare.test.py
+    python3 bench/summary.test.py
+    python3 bench/relay.test.py
+    python3 bench/profile.test.py
+    python3 bench/ffi.test.py
+    python3 sh/gh/gst-formula.test.py
+    python3 sh/changed.test.py
+    python3 sh/dispatch-query.test.py
+    python3 sh/dispatch-query.test.py --bench
+    bun test sh/gh/setup.test.ts
+    bun sh/gh/queue.test.ts
     python3 sh/gh/install-formula.test.py
     sh/gh/release.test.sh
+    python3 sh/gh/ffi.test.py
+    bun test sh/gh/ffi.test.ts
     python3 sh/rs/package-rename.test.py
+    python3 sh/rs/select.test.py
+    python3 sh/js/workspace.test.py
+    python3 sh/rs/test-lints.test.py
+    python3 sh/gh/nightly.test.py
     sh/go/publish-wrapper.test.sh
     bash .claude/hooks/direnv.test.sh
+    python3 sh/rs/uring.test.py
 
 # Release workflow helpers, e.g. `just gh release parse-version moq-cli`.
 [positional-arguments]
@@ -38,3 +59,30 @@ install-formula *args:
 [positional-arguments]
 trigger-repo-publish *args:
     sh/gh/trigger-repo-publish.sh "$@"
+
+# Measure a workflow run's release uploads, the minimal FFI build, and bundled first-load JS entries.
+size-collect output run="":
+    sh/size/collect.sh '{{ output }}' '{{ run }}'
+
+# Compare a size report with its retained nightly history.
+[positional-arguments]
+size-report *args:
+    python3 sh/size/report.py "$@"
+
+# Collect and compare nightly shipping sizes through the existing alert path.
+size-nightly output run:
+    sh/size/nightly.sh '{{ output }}' '{{ run }}'
+
+# Install the rendered GStreamer formula against the current macOS tarball.
+[positional-arguments]
+gst-formula *args:
+    python3 sh/gh/gst-formula.py "$@"
+
+# Run related Nightly benchmarks in one build environment, reporting every failure.
+nightly group:
+    sh/gh/nightly.sh {{ quote(group) }}
+
+# Select shared native artifacts or check an upstream FFI publisher.
+[positional-arguments]
+ffi *args:
+    python3 sh/gh/ffi.py "$@"

@@ -38,8 +38,8 @@ traffic yet.
 
 ## Required
 
-- [BBR ACK cleanup](/quest/m1/bbr-ack-cleanup.md) - edits the same `bbr3/mod.rs` packet bookkeeping and lands first; this keeps the metadata it preserves
+- [BBR ACK cleanup](/quest/m2/bbr-ack-cleanup.md) - edits the same `bbr3/mod.rs` packet bookkeeping and lands first; this keeps the metadata it preserves
 
 ## Related
 
-- [Switch](/quest/m1/quic/fork/switch.md) - MoQ runs on `moq-quic`; not a blocker, since this is a local `rs/moq-quic` fix (decided for the m1 BBR quests in fork/input-validation)
+- [Switch](/quest/m1/quic/fork/switch.md) - MoQ runs on `moq-quic`; not a blocker, since this is a local `rs/moq-quic` fix

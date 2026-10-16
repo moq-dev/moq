@@ -1,5 +1,16 @@
 import { expect, test } from "bun:test";
+import * as Catalog from "./index.ts";
 import { ranked, VideoConfigSchema, VideoSchema } from "./video.ts";
+
+test("ranked puts enabled video before a larger disabled picture", () => {
+	const renditions = {
+		disabled: { ...rendition({ codedWidth: 1920, codedHeight: 1080 }, 6_000_000), enabled: false },
+		implicit: rendition({ codedWidth: 640, codedHeight: 360 }, 1_000_000),
+		explicit: { ...rendition({ codedWidth: 1280, codedHeight: 720 }, 3_000_000), enabled: true },
+	};
+	expect(ranked(renditions).map(([name]) => name)).toEqual(["explicit", "implicit", "disabled"]);
+	expect(Catalog.Video.ranked(renditions)).toEqual(ranked(renditions));
+});
 
 function rendition(size?: { codedWidth: number; codedHeight: number }, bitrate?: number) {
 	return VideoConfigSchema.parse({
@@ -123,4 +134,17 @@ test("legacy video arrays derive display size from display aspect fields", () =>
 	).toEqual({ width: 16, height: 9 });
 	expect(Number(parsed.renditions.video?.displayAspectWidth)).toBe(16);
 	expect(Number(parsed.renditions.video?.displayAspectHeight)).toBe(9);
+});
+
+test("video warmup round trips as optional integer milliseconds", () => {
+	const base = { codec: "vp8", container: { kind: "legacy" } };
+	expect(VideoConfigSchema.parse(base).warmup).toBeUndefined();
+	for (const warmup of [0, 80, 1_000]) {
+		const config = VideoConfigSchema.parse({ ...base, warmup });
+		expect(Number(config.warmup)).toBe(warmup);
+		expect(VideoConfigSchema.parse(JSON.parse(JSON.stringify(config)))).toEqual(config);
+	}
+	for (const warmup of [-1, 0.5, Number.MAX_SAFE_INTEGER + 1]) {
+		expect(() => VideoConfigSchema.parse({ ...base, warmup })).toThrow();
+	}
 });

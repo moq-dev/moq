@@ -1,3 +1,5 @@
+#![cfg(feature = "async")]
+
 //! Regression: a publisher that finishes its track and then its broadcast, over one
 //! direct session with no relay, has the subscription reset with
 //! [`Error::Dropped`](moq_net::Error::Dropped) and the track's content lost.
@@ -19,6 +21,11 @@ use std::time::Duration;
 use moq_net::{Hop, Timestamp, Version};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
+/// A millisecond track: the frames written here carry timestamps.
+fn timed() -> moq_net::track::Info {
+	moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+}
+
 const TIMEOUT: Duration = Duration::from_secs(10);
 const PAYLOAD: &[u8] = b"frame";
 
@@ -33,7 +40,7 @@ fn produce_origin(hop: u64) -> moq_net::origin::Producer {
 async fn round(finish_broadcast: bool) -> (Vec<Vec<u8>>, Option<moq_net::Error>) {
 	let publisher = produce_origin(1);
 	let broadcast = publisher.create_broadcast("bcast").unwrap();
-	let track = broadcast.create_track("video", None).unwrap();
+	let track = broadcast.create_track("video", timed()).unwrap();
 	broadcast.announce(Default::default()).unwrap();
 
 	let subscriber = produce_origin(2);

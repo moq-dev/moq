@@ -31,7 +31,7 @@ impl From<auth::Error> for StatusError {
 pub struct Connection {
 	/// A numeric identifier for logging.
 	id: u64,
-	/// The raw QUIC/WebTransport request to accept or reject.
+	/// The transport request to accept or reject.
 	request: Request,
 	/// The cluster state used to resolve origins.
 	cluster: cluster::Cluster,
@@ -78,10 +78,29 @@ impl Connection {
 		self
 	}
 
-	/// Admits and serves this connection until it closes.
+	/// Admits and serves this connection until it closes, then logs the close. A panic
+	/// ends only this connection, as an error.
 	#[tracing::instrument("conn", skip_all, fields(id = self.id, remote = self.request.remote_addr().map(tracing::field::display), session = tracing::field::Empty))]
-	pub async fn run(self) -> anyhow::Result<()> {
-		let (admitted, registration) = match self.admit().await {
+	pub async fn run(self) {
+		let id = self.id;
+		// Boxed: debug builds copy the session's large future through each wrapper's
+		// stack frame, which overflows a test thread.
+		let result = moq_tokio::panic::isolate(Box::pin(self.serve()))
+			.await
+			.unwrap_or_else(|| Err(anyhow::anyhow!("connection panicked")));
+		// Logged here, under the same target as the span's other lines, so every
+		// transport's `conn{id=...}` pairs with its close under one log filter.
+		match result {
+			Ok(()) => tracing::info!(id, "connection closed"),
+			Err(err) => tracing::warn!(id, %err, "connection closed"),
+		}
+	}
+
+	async fn serve(self) -> anyhow::Result<()> {
+		// Abandoned at the drain deadline, so the deadline bounds this task and its
+		// socket like it bounds a session.
+		let admitted = self.shutdown.admit(self.admit()).await;
+		let (admitted, registration) = match admitted {
 			Ok(admitted) => admitted,
 			Err(err) => {
 				self.cluster.refusals.record(err.refusal);
@@ -110,14 +129,20 @@ impl Connection {
 		//
 		// moq-net defaults the unset side to a fresh no-op origin, which is fine for a
 		// publish-only or subscribe-only session.
-		let mut request = self.request.with_stats(stats);
+		let mut request = self.request.with_stats(stats).with_limits(self.cluster.limits(&lease));
 		if let Some(subscriber) = subscriber {
 			request = request.with_publisher(subscriber);
 		}
 		if let Some(publisher) = publisher {
 			request = request.with_subscriber(publisher);
 		}
-		let session = request.ok().await?;
+		let lease = lease.preparing(request.auth(), request.role())?;
+		// Bounded too: a peer that stalls the SETUP reply must not outlive the relay.
+		let session = self
+			.shutdown
+			.until_deadline(request.ok())
+			.await
+			.ok_or_else(|| anyhow::anyhow!("the SETUP reply was still pending at the drain deadline"))??;
 
 		tracing::info!(version = %session.version(), %transport, "negotiated");
 
@@ -143,7 +168,7 @@ impl Connection {
 		if self.request.peer_identity().is_some() {
 			tracing::debug!("client certificate verified; reported to the auth server");
 		}
-		let admitted = self.cluster.admit(&self.auth, request.clone()).await?;
+		let admitted = self.cluster.admit_session(&self.auth, request.clone()).await?;
 		let registration = self.sessions.as_ref().map(|sessions| sessions.register(request));
 		Ok((admitted, registration))
 	}

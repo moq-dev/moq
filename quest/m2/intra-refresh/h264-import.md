@@ -11,6 +11,11 @@ were immediately decodable.
 
 ## Plan
 
+The recovery-boundary planning prerequisite must settle the precision and
+publication ordering before implementing the duration proposal below. In
+particular, rounding down and raising a catalog value after a longer sweep
+are not yet proven safe for a viewer that already received those pictures.
+
 - `rs/moq-mux/src/codec/h264/split.rs`: `sei_has_recovery_point` returns the
   `recovery_frame_cnt` the `h264-parser` crate already exposes on
   `SeiPayload::RecoveryPoint`, and the split frame carries it. A count of zero
@@ -40,4 +45,4 @@ were immediately decodable.
 
 ## Required
 
-- [Catalog warmup](/quest/m1/catalog-warmup.md) - the field import writes
+- [Plan: recovery boundaries](/quest/m2/intra-refresh/plan-boundary.md) - resolve the rounded and later-mutated warmup contract before implementing it

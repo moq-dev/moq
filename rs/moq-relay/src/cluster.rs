@@ -2,7 +2,7 @@ use std::{
 	collections::HashMap,
 	path::PathBuf,
 	sync::{
-		Arc, Mutex,
+		Arc, Mutex, PoisonError,
 		atomic::{AtomicU64, Ordering},
 	},
 	time::Duration,
@@ -451,7 +451,10 @@ struct DialMap {
 impl DialMap {
 	/// True if `peer` is already being dialed.
 	fn contains(&self, peer: &str) -> bool {
-		self.inner.lock().expect("dial map poisoned").contains_key(peer)
+		self.inner
+			.lock()
+			.unwrap_or_else(PoisonError::into_inner)
+			.contains_key(peer)
 	}
 
 	/// Record an already-spawned dial under `source`. If the source is redundant,
@@ -471,7 +474,7 @@ impl DialMap {
 	where
 		F: FnMut(DialTarget) -> AbortHandle,
 	{
-		let mut map = self.inner.lock().expect("dial map poisoned");
+		let mut map = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
 		if let Some(entry) = map.get_mut(&target.key) {
 			let replace = entry.active == source && entry.sources.get(source) != Some(&target);
 			entry.sources.set(source, target.clone());
@@ -502,7 +505,7 @@ impl DialMap {
 	where
 		F: FnMut(DialTarget) -> AbortHandle,
 	{
-		let mut map = self.inner.lock().expect("dial map poisoned");
+		let mut map = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
 		let Some(entry) = map.get_mut(peer) else { return };
 		if entry.sources.get(source).is_none() {
 			return;
@@ -540,7 +543,7 @@ impl DialMap {
 		let removed: Vec<String> = self
 			.inner
 			.lock()
-			.expect("dial map poisoned")
+			.unwrap_or_else(PoisonError::into_inner)
 			.iter()
 			.filter(|(peer, entry)| entry.sources.api.is_some() && !desired.contains_key(*peer))
 			.map(|(peer, _)| peer.clone())
@@ -813,6 +816,10 @@ struct LanAuth {
 #[derive(Default)]
 #[non_exhaustive]
 pub struct Options {
+	/// Request caps for ordinary client sessions.
+	pub session: crate::limits::Session,
+	/// Request caps for authenticated peers and outbound cluster links.
+	pub peer: crate::limits::Peer,
 	/// Cluster identity, peers, and discovery.
 	pub config: Config,
 
@@ -852,23 +859,31 @@ impl Options {
 /// live, so dropping it without running retires that advertisement.
 pub struct Started {
 	cluster: Cluster,
-	/// `None` when nothing is configured, so [`run`](Self::run) returns immediately.
+	/// `None` when nothing is configured, so [`run`](Self::run) dials nothing.
 	work: Option<Work>,
 }
 
 impl Started {
-	/// True when nothing is configured, so [`run`](Self::run) returns immediately.
+	/// True when nothing is configured, so [`run`](Self::run) dials nothing.
 	pub fn standalone(&self) -> bool {
 		self.work.is_none()
 	}
 
-	/// Run the cluster until it stops.
+	/// Run the cluster until it stops, or until a task it cannot serve without (its
+	/// origin driver, cache governor, or certificate reload) panics.
 	///
-	/// Returns immediately when nothing is configured (standalone).
+	/// Standalone, this only waits for such a panic.
 	pub async fn run(self) -> anyhow::Result<()> {
-		match self.work {
-			Some(work) => self.cluster.run_work(work).await,
-			None => Ok(()),
+		let critical = self.cluster.critical.clone();
+		let work = async move {
+			match self.work {
+				Some(work) => self.cluster.run_work(work).await,
+				None => std::future::pending().await,
+			}
+		};
+		tokio::select! {
+			res = work => res,
+			err = critical.failed() => Err(err),
 		}
 	}
 }
@@ -906,6 +921,8 @@ struct Work {
 /// client can serve local sessions but cannot dial remote peers.
 #[derive(Clone)]
 pub struct Cluster {
+	session_limits: moq_net::session::Limits,
+	peer_limits: moq_net::session::Limits,
 	config: Config,
 	client: Option<moq_tokio::Client>,
 	/// Dial template for LAN peers that pin a fingerprint; static and API
@@ -933,6 +950,10 @@ pub struct Cluster {
 	/// peer-list fetches present the same cluster cert the QUIC dials do. `Arc` so
 	/// cloning a `Cluster` per connection stays cheap.
 	client_tls: Option<Arc<rustls::ClientConfig>>,
+
+	/// The origin driver, cache governor, and certificate reload: a panic in any
+	/// of them stops [`Relay::run`](crate::Relay::run).
+	pub(crate) critical: crate::critical::Critical,
 
 	/// All broadcasts, local and remote. Downstream sessions read from here
 	/// (filtered by their auth token) and remote dials both read and write here.
@@ -967,6 +988,15 @@ pub struct Admitted {
 }
 
 impl Cluster {
+	/// The request caps for an admitted session: only a `peer` grant gets the peer policy.
+	pub(crate) fn limits(&self, lease: &auth::Lease) -> moq_net::session::Limits {
+		if lease.token().peer {
+			self.peer_limits
+		} else {
+			self.session_limits
+		}
+	}
+
 	/// The origin ID used by this relay on the wire.
 	pub fn id(&self) -> u64 {
 		self.origin.hop().id()
@@ -987,7 +1017,12 @@ impl Cluster {
 	/// Errors if `config.id` is set but invalid: it must be non-zero and below
 	/// 2^62 (the wire varint limit). An unset id picks a fresh random origin.
 	pub fn new(options: Options) -> anyhow::Result<Self> {
-		let Options { config, cache } = options;
+		let Options {
+			config,
+			cache,
+			session,
+			peer,
+		} = options;
 		let id = match config.id {
 			Some(0) => anyhow::bail!("--cluster-id must be non-zero"),
 			Some(id) if id >= 1 << 62 => {
@@ -1002,15 +1037,24 @@ impl Cluster {
 		// matching the `--cluster-connect-api` validation, instead of silently
 		// keeping the first entry when dials spawn.
 		parse_peer_list(config.connect.clone(), None).context("invalid --cluster-connect peer list")?;
+		let critical = crate::critical::Critical::default();
 		let mut origin_config = origin::Config::new(id);
 		if let Some(cache) = cache {
 			origin_config.pool = cache.pool;
 			origin_config.cache_duration = cache.duration;
+			if let Some(governor) = cache.governor {
+				critical.spawn("cache governor", governor);
+			}
 		}
-		let origin = moq_tokio::origin::spawn_config(origin_config);
+		let (origin, driver) = origin::Producer::new(origin_config);
+		critical.spawn("origin driver", async move {
+			moq_net::time::run(driver).await;
+		});
 		let nodes = crate::nodes::Nodes::default();
 		tracing::info!(hop_id = %origin.hop(), configured = config.id.is_some(), "cluster initialized");
 		Ok(Cluster {
+			session_limits: session.resolve(),
+			peer_limits: peer.resolve(),
 			config,
 			client: None,
 			connect: None,
@@ -1022,6 +1066,7 @@ impl Cluster {
 			refusals: Default::default(),
 			connection_ids: Arc::default(),
 			client_tls: None,
+			critical,
 			origin,
 			stats: moq_net::stats::Registry::disabled(),
 			_stats_publisher: None,
@@ -1035,6 +1080,41 @@ impl Cluster {
 		}
 		let lease = auth.admit(request.clone()).await?;
 		self.scope(lease, &request)
+	}
+
+	/// Network sessions enforce changing grants in AUTH, within a fixed root and SETUP role.
+	pub(crate) async fn admit_session(
+		&self,
+		auth: &auth::Auth,
+		request: moq_auth::Request,
+	) -> Result<Admitted, auth::Error> {
+		let lease = auth.admit(request.clone()).await?;
+		self.scope_session(lease, &request)
+	}
+
+	pub(crate) fn scope_session(
+		&self,
+		lease: auth::Lease,
+		request: &moq_auth::Request,
+	) -> Result<Admitted, auth::Error> {
+		let mut admitted = self.scope(lease, request)?;
+		let mut bound = admitted.lease.token().clone();
+		bound.publish = moq_net::Pattern::all().into();
+		bound.subscribe = moq_net::Pattern::all().into();
+		if request.role != Some(moq_auth::Role::Subscriber) {
+			admitted.publisher = self
+				.publisher(&bound)
+				.map(|origin| origin.with_stats(admitted.stats.clone()));
+		}
+		if request.role != Some(moq_auth::Role::Publisher) {
+			admitted.subscriber = self.subscriber(&bound).map(|origin| {
+				origin
+					.consume()
+					.with_hidden(request.tls.is_some() || Self::is_lan_path(&request.path))
+					.with_stats(admitted.stats.clone())
+			});
+		}
+		Ok(admitted)
 	}
 
 	/// Resolve origin handles for a lease already admitted by a local relay rule.
@@ -1436,8 +1516,11 @@ impl Cluster {
 				// A supervised task ending at all is a failure, so its result decides
 				// the cluster's. A panic surfaces too rather than being swallowed.
 				Some(res) = supervised.join_next() => res.context("cluster task panicked")??,
-				// A dial task ending is ordinary: that peer went away.
-				Some(_) = tasks.join_next() => {}
+				// A dial task ending is ordinary: that peer went away. A panic is not:
+				// each dial attempt contains its own, so one here is in the loop itself.
+				Some(res) = tasks.join_next() => if let Err(err) = res && err.is_panic() {
+					return Err(err).context("cluster task panicked");
+				},
 				else => break,
 			}
 		}
@@ -1688,9 +1771,11 @@ impl Cluster {
 		// Each attempt is its own session, so it gets its own id. Matches the span an
 		// accepted connection runs under, so both directions log the same way.
 		let id = self.next_connection_id();
-		self.run_remote_session(id, addrs, target)
+		// A panic fails this attempt like any other error, so the peer is redialed.
+		moq_tokio::panic::isolate(self.run_remote_session(id, addrs, target))
 			.instrument(tracing::info_span!("conn", id))
 			.await
+			.context("cluster peer session panicked")?
 	}
 
 	async fn run_remote_session(&self, id: u64, addrs: &moq_tokio::Addrs, target: &DialTarget) -> anyhow::Result<()> {
@@ -1720,7 +1805,8 @@ impl Cluster {
 		let mut client = client
 			.with_publisher(origin.consume().with_hidden(true))
 			.with_subscriber(origin)
-			.with_stats(self.stats.tier(self.cluster_tier()).session(""));
+			.with_stats(self.stats.tier(self.cluster_tier()).session(""))
+			.with_limits(self.peer_limits);
 		if let Some(cost) = target.cost {
 			client = client.with_cost(cost);
 		}
@@ -1758,7 +1844,7 @@ impl Cluster {
 			.connect
 			.clone()
 			.context("internal: LAN dial without Cluster::with_connect")?;
-		connect.backoff.timeout = std::time::Duration::ZERO;
+		connect.backoff.timeout = Some(std::time::Duration::ZERO);
 		connect.once = Some(false);
 		let mut bind = connect.resolve().bind;
 		bind.set_port(0);
@@ -1958,6 +2044,31 @@ pub(crate) fn canonicalize_peer_key(peer: &str) -> String {
 mod tests {
 	use super::*;
 	use crate::Config as RelayConfig;
+
+	#[tokio::test]
+	async fn request_limits_follow_the_admitted_grant() {
+		let mut options = Options::default();
+		options.session.announces = 2;
+		options.session.subscriptions = 3;
+		options.peer.announces = 20;
+		options.peer.subscriptions = 30;
+		let cluster = Cluster::new(options).unwrap();
+		for (peer, upstream, expected) in [(false, false, (2, 3)), (true, false, (20, 30)), (true, true, (20, 30))] {
+			let mut grant = moq_auth::Grant::new(Default::default(), Default::default());
+			grant.peer = peer;
+			grant.upstream = upstream;
+			let (_producer, consumer) = moq_auth::lease::Producer::new(grant);
+			// A cluster-looking path alone never selects the peer policy.
+			let lease = auth::Lease::new("/.cluster/untrusted", consumer);
+			let limits = cluster.limits(&lease);
+			assert_eq!((limits.announces, limits.subscriptions), expected);
+		}
+	}
+
+	/// A millisecond track: the frames written here carry timestamps.
+	fn timed() -> moq_net::track::Info {
+		moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+	}
 
 	/// The next route and whether it is active.
 	async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<(moq_net::announce::Announce, bool)> {
@@ -2620,7 +2731,7 @@ mod tests {
 
 		let broadcast = origin.create_broadcast("cam").expect("create");
 		broadcast.announce(Default::default()).expect("announce");
-		let mut track = broadcast.create_track("data", None).expect("track");
+		let mut track = broadcast.create_track("data", timed()).expect("track");
 		track.write_frame(moq_net::Timestamp::ZERO, b"hello").expect("write");
 		assert!(pool.used() > 0, "writes charge the constructed cache pool");
 
@@ -3052,7 +3163,7 @@ mod tests {
 			while let Some(request) = listener.accept().await {
 				let conn = crate::Connection::new(request, accept.clone(), crate::auth::Auth::refuse("test"));
 				tokio::spawn(async move {
-					let _ = conn.run().await;
+					conn.run().await;
 				});
 			}
 		});

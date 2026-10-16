@@ -30,7 +30,8 @@ the UDP sockets bound through it.
   HTTP/3 CONNECT handshake (SETTINGS, subprotocol selection, capsule close)
   over the same adapter via `web-transport-proto`. `quic::web::Session` is
   a raw or web transport (`Session::raw`). Wrap it with
-  `transport::Session::new` before `connect_lite`/`accept_lite`, which return
+  `transport::Session::new(session, binding)`, using `moq_net::transport::Binding::Uri`
+  for WebTransport or `InBand` for raw QUIC, before `connect_lite`/`accept_lite`, which return
   the session and its driver; poll the driver or await it inside a
   `Handle::spawn` task to run it on the worker. Web mode maps stream and close codes through the
   HTTP/3 error space.
@@ -111,3 +112,18 @@ at a time.
 just rs bench-udp --sample-size 20 --measurement-time 2 --warm-up-time 1
 just rs bench-echo
 ```
+
+## Parallel test runs
+
+Locked memory is charged per user across processes, not per nextest run.
+Unit tests use 128 SQ entries and 512 CQ entries instead of the production
+256/2048 geometry. Integration tests still exercise production rings.
+The nextest group allows four ring tests per invocation.
+
+The Rust recipes that run nextest use `sh/rs/nextest.sh`: local Linux shells raise their
+soft locked-memory limit to the host's hard limit, while GitHub-hosted jobs
+raise both to 64 MiB before launching nextest. A NixOS self-hosted runner
+should set `serviceConfig.LimitMEMLOCK = "64M"` on its runner service.
+For many simultaneous local checks, configure the same user limit through
+PAM limits or the service that starts the development shell; a Nix shell
+cannot raise its inherited hard limit. Verify with `ulimit -Sl` and `ulimit -Hl`.

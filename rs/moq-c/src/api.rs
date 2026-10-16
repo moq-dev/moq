@@ -1110,14 +1110,16 @@ pub extern "C" fn moq_client_defaults() -> moq_client_config {
 		dst.websocket_delay_us = micros(websocket.delay);
 		dst.has_websocket_delay = true;
 
-		dst.backoff_initial_us = micros(config.connect.backoff.initial);
+		dst.backoff_initial_us = micros(config.connect.backoff.initial.unwrap());
 		dst.has_backoff_initial = true;
 		dst.backoff_multiplier = config.connect.backoff.multiplier;
 		dst.has_backoff_multiplier = true;
-		dst.backoff_max_us = micros(config.connect.backoff.max);
+		dst.backoff_max_us = micros(config.connect.backoff.max.unwrap());
 		dst.has_backoff_max = true;
-		dst.backoff_timeout_us = micros(config.connect.backoff.timeout);
-		dst.has_backoff_timeout = true;
+		if let Some(timeout) = config.connect.backoff.timeout {
+			dst.backoff_timeout_us = micros(timeout);
+			dst.has_backoff_timeout = true;
+		}
 
 		let quic = config.quic.resolve();
 		dst.quic_max_streams = quic.max_streams;
@@ -1201,7 +1203,7 @@ unsafe fn connect_session(
 /// since the origins outlive the underlying connection.
 ///
 /// `on_status` reports the session lifecycle through its status code:
-/// - `> 0` on every (re)connect, carrying the connection epoch (`1` = first connect,
+/// - `> 0` on every (re)connect, carrying the connect count (`1` = first connect,
 ///   `2` = first reconnect, and so on), so a reconnect is distinguishable from the
 ///   initial connect. May fire repeatedly. Transient disconnects are not reported.
 /// - `0` when the session is closed cleanly via [moq_session_close] (terminal).

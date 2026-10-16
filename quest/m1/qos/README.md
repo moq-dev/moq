@@ -2,12 +2,10 @@
 
 ## Goal
 
-Publishers, relays, and viewers report the telemetry that broadcast health and
-congestion views need: how far behind viewers are according to what the
-network has acknowledged, how timely publishers are against their own media
-clock, and what publishers and viewers report for themselves through
-[media stats](/quest/m1/stats/README.md), with congestion visible for viewers
-in aggregate.
+Publish the breaking relay QoS lag and dropped-counter API in this release.
+The histogram lands on totals and prefix tracks beside the existing maps.
+Publisher timeliness, client media health, and dashboard presentation remain
+separate additive work in m2.
 
 ## Plan
 
@@ -25,9 +23,9 @@ histograms, which stay monotonic and merge-patch friendly, and which any
 consumer can diff into a distribution. Clients report for themselves through
 hang stats and `.echo` feedback tracks, planned in their own line on `main`.
 
-The counters and channels land here. Client health and preflight are
-[client health](/quest/m1/stats/health.md) and
-[preflight](/quest/m1/stats/preflight.md) in the media stats line. The
+Only the lag counters land here. Client health and preflight are
+[client health](/quest/m2/stats/health.md) and
+[preflight](/quest/m2/stats/preflight.md) in the media stats line. The
 moq.pro (downstream) dashboard work, including the health badge and the
 connection-health drill-down, consumes both.
 
@@ -35,12 +33,13 @@ The per-broadcast verdict combining client reports, the relay's starvation,
 and publisher timeliness lives downstream. This line only reports the
 counters.
 
-Decided (2026-10-06 audit): [stats totals and prefix
-tracks](/quest/m0/broadcast-epoch/stats-split.md) lands first, since it is m0
-and gates the release; the lag histogram lands on stats-split's totals and
+Decided (2026-10-06 audit): [stats prefix
+tracks](/quest/m1/stats-prefix-tracks.md) lands first, since it is
+a prerequisite of the breaking lag API in m1; the lag histogram lands on the stats totals and
 prefix tracks rather than the per-path `publisher.json` and
-`subscriber.json` map rows, which stats-split retires.
-Rejected: the histogram first, which would make stats-split carry the lag
+`subscriber.json` map rows, which stay unchanged for existing readers
+(2026-10-12).
+Rejected: the histogram first, which would make prefix tracks carry the lag
 histogram and dropped counters across.
 
 Decided (2026-10-08): the egress histogram is its own quest,
@@ -56,20 +55,15 @@ on `main`.
 ## Required
 
 - [Viewer lag histogram](/quest/m1/qos/lag-histogram.md) - the egress `lag`
-  histogram and `dropped` counters land on stats-split's totals and prefix
+  histogram and `dropped` counters land on the stats totals and prefix
   tracks
-- [Lag dashboard](/quest/m1/qos/lag-dashboard.md) - the demo stats
-  dashboard shows viewer lag percentiles and dropped media
-- [Publisher timeliness](/quest/m1/qos/publisher-timeliness.md) - per
-  broadcast, how late media arrives at the relay against the track's own
-  clock, and whether timestamps stay monotonic
 
 ## Related
 
-- [Stats totals and prefix tracks](/quest/m0/broadcast-epoch/stats-split.md) -
-  lands first and replaces the map rows; this line's histograms move onto its
+- [Stats prefix tracks](/quest/m1/stats-prefix-tracks.md) -
+  lands first beside the map rows; this line's histograms land on the
   totals and prefix tracks
-- [Media stats](/quest/m1/stats/README.md) - publishers and viewers report
+- [Media stats](/quest/m2/stats/README.md) - publishers and viewers report
   their own media, transport, and playback health, the media half of a verdict
 - [Loss delay](/quest/m3/cut-through/loss-delay.md) - an ingress counter of
   bytes a loss held back by at least one RTT, on the same rows

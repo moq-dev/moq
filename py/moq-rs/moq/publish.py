@@ -55,7 +55,7 @@ class GroupProducer:
 
         return GroupConsumer(self._inner.consume())
 
-    def write_frame(self, payload: bytes, timestamp: timedelta = timedelta(0)) -> None:
+    def write_frame(self, payload: bytes, timestamp: timedelta | None = None) -> None:
         """Write a frame with its presentation timestamp."""
         self._inner.write_frame(Frame(payload, timestamp)._ffi())
 
@@ -126,11 +126,11 @@ class TrackProducer:
         """Create a group with an explicit sequence number."""
         return GroupProducer(self._inner.create_group(sequence))
 
-    def write_frame(self, payload: bytes, timestamp: timedelta = timedelta(0)) -> None:
+    def write_frame(self, payload: bytes, timestamp: timedelta | None = None) -> None:
         """Write a single-frame group with its presentation timestamp."""
         self._inner.write_frame(Frame(payload, timestamp)._ffi())
 
-    def append_datagram(self, payload: bytes, timestamp: timedelta = timedelta(0)) -> int:
+    def append_datagram(self, payload: bytes, timestamp: timedelta | None = None) -> int:
         """Send a best-effort datagram and return its sequence number.
 
         Payloads are capped at 1200 bytes. Datagram delivery requires a datagram-capable
@@ -186,6 +186,10 @@ class TrackRequest:
         """
         return TrackProducer(self._inner.accept(_track_info(info)))
 
+    def demand(self) -> TrackDemand:
+        """Watch this track's subscribers, including after accepting it."""
+        return TrackDemand(self._inner.demand())
+
     def dynamic(self) -> TrackDynamic:
         """Create a fetch handler before accepting this requested track."""
         return TrackDynamic(self._inner.dynamic())
@@ -200,9 +204,9 @@ class GroupDemand:
 
     Returned by ``GroupRequest.demand()``. Weak: holding it does not keep the
     request alive. The last caller to leave withdraws the request, so once
-    unused, demand never returns: drop the request. Waits raise once the
-    request is answered: ``moq.Error.Closed`` if it was dropped, otherwise the
-    error the accept or reject left for the waiting fetches.
+    unused, demand never returns: drop the request. Waits raise
+    ``moq.Error.Closed`` after the request is accepted or dropped, and keep
+    the rejection reason after it is rejected.
     """
 
     def __init__(self, inner: MoqGroupDemand) -> None:
@@ -314,9 +318,9 @@ class AudioProducer:
         """Wait until this audio track has no active subscribers. Prefer :meth:`demand`."""
         await self._inner.unused()
 
-    def reset_epoch(self) -> None:
+    def reanchor(self) -> None:
         """Re-anchor the timeline to the next frame after an idle gap."""
-        self._inner.reset_epoch()
+        self._inner.reanchor()
 
     def write(self, frame: AudioFrame) -> None:
         """Push one frame of PCM in the configured input format."""

@@ -30,7 +30,11 @@ lite-07, decided 2026-10-05. That removes lite-07's `Hop Base`/`Hop Keep`
 announce compression along with the hop list, and moq.pro's lite-07 rollout
 has to plan for a lite-07 without hop lists. Only
 [Routes and announces](/quest/m1/cluster-routing/routes.md) gates the cut,
-not the rest of the cluster-routing line (decided 2026-10-08).
+not the later federation/P2P integrations. Decided 2026-10-13: routes now
+owns the tier/partition correctness tests, so they run before the cut. Peer
+grants and metadata-only subscriptions do not gate it: neither is clustering
+stability. Both are additive and, per the freeze policy, target whichever lite
+wip is current when they land.
 
 Decided 2026-10-08: Restart and AUTH join Required, since both change the
 lite-07 wire. SUBSCRIBE_OK carrying live media time was dropped: no reader
@@ -60,27 +64,25 @@ The cut:
 Rust's lite-07 varints already carry the full 64 bits the draft specifies,
 so no codec work waits on the cut.
 
-Open, for the maintainer:
-
-- Whether released clients offer lite-07 first by default, or accept it while
-  still offering lite-06 first for one release. Recommended: servers accept
-  it by default and clients keep lite-06 first for one release, so a
-  deployment rolls out on its own schedule.
+Decided 2026-10-13: servers accept finalized lite-07 by default, and
+first-party Rust and JS clients prefer it with older-version fallback. Test
+the negotiated version against new and old servers and refusal of the wip
+identifier. This release adopts the new routing contract end to end.
 
 Public API: the lite-07 version constant and ALPN lose `-wip`. Wire: lite-07
 is published; older versions are unchanged.
 
 ## Required
 
-- [lite-07 Live flag](/quest/m1/lite-live.md) - SUBSCRIBE carries `Live` apart from its floor
 - [In-band auth](/quest/m1/auth/README.md) - lite-07 carries the Auth Stream and UNAUTHORIZED (0x3B)
+- [Identity proof](/quest/m1/cluster-routing/identity.md) - lite-07 carries the routing key and its per-session proof
 - [Routes and announces](/quest/m1/cluster-routing/routes.md) - lite-07 carries the route layer: ROUTE per origin node and path-less ANNOUNCE, with the hop list gone
 - [SUBSCRIBE_DROP](/quest/m1/subscribe-drop.md) - lite-07 restores SUBSCRIBE_DROP in place of `Stream Count`
 - [FETCH max-delay](/quest/m1/fetch-max-delay.md) - historical requests have a reader budget, carried by FETCH while present and by ranges after its removal
 - [Subscribe ranges](/quest/m1/subscribe-ranges/README.md) - SUBSCRIBE carries ranges and an order and lite FETCH is gone, in Rust and JS
-- [Untimed lite-07](/quest/m1/lite-untimed.md) - an untimed track crosses the wire untimed
-- [Claim-served epochs](/quest/m1/claim-epochs.md) - TRACK_INFO carries the epoch of the instance that answered
+- [Announcement takeover](/quest/m1/announce-takeover.md) - ANNOUNCE_TAKEOVER preserves a proven instance under a new independent route
 
 ## Related
 
+- [Relay hops](/quest/m1/ietf-extension/lite.md) - the `ietf` SETUP extension targets lite-07 wip and does not gate the cut
 - [The moq.pro mesh runs lite-07](/quest/m3/lite07-mesh.md) - the deployment condition that follows this

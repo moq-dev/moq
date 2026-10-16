@@ -7,6 +7,8 @@ on 2026-10-12 with draft-22 media working both ways: the draft-22
 LOCATION_FILTER form (#4847), a clear FIRST_OBJECT at object 0 accepted
 (#5027), and moq-noq 1.3.5. A draft-22 peer (imquic main 925e3d83) can
 subscribe with any of the six filters and publish through the relay.
+The next 0.17 patch also fixes #5407's unset-clock crash and #5413's lost
+quiet edge.
 
 ## Plan
 
@@ -27,9 +29,31 @@ Decided 2026-10-08:
 - Offer the reporter the `release` head for their rig once the children
   land, but don't gate the cut on their result.
 
-The backports have landed, including moq-noq 1.3.5 in #5170 (refreshed in the
-2026-10-10 audit). This README's remaining work: bump `@moq/net` on
-`release` (`/bump`), merge the release-plz PR it regenerates for the
-backports (0.17.3; 0.17.2 already shipped, and #4944 predates the
-backports), and send the reporter the branch.
+The backports shipped in moq-relay 0.17.3 (#5119) and `@moq/net` 0.4.3
+(refreshed 2026-10-12). Draft-22 interop on 2026-10-12 then found FETCH still
+refused on draft-20+ sessions; its backport landed on `release` in #5402.
+This README's remaining work: cut the next 0.17 patch, `@moq/publish`, and
+`@moq/hang` with it (`/bump`, then the release-plz PR), and tell the testers
+and the reporters of #5407 and #5413. `@moq/net` needs no publish: `release`
+builds byte-identical to the published 0.4.3. After it publishes, re-measure
+the planned wire-compat breaks (CONTRIBUTING.md).
 
+Decided 2026-10-15 (maintainer): the same patch also publishes `@moq/hang`
+as is, with its tolerant catalog parser (#5520). Against the published 0.5.2,
+the parsed `Root` type and input type are unchanged, and every catalog 0.5.2
+accepted parses the same (audit in #5590). The only change is the zod wrapper
+on `RootSchema.shape.archive`, which the maintainer accepted as a patch on
+2026-10-15 since zod schema internals are not public API. That release's
+re-measure is expected to delete the `catalog-archive` planned break.
+
+Decided 2026-10-13: the same patch also carries two crash and availability
+fixes reported against the release line, an unset host clock and a quiet
+track's latest group lost after rejoin.
+
+Decided 2026-10-13 (maintainer): the two draft-20 FETCH edge cases found on
+#5402 do not hold this cut; they land on `main` first and ship in a later 0.17
+patch.
+
+## Related
+
+- [Draft-20 FETCH edge cases](/quest/m1/fetch-edge-cases.md) - the main-first fixes that follow this cut in a later 0.17 patch

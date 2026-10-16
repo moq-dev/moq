@@ -16,10 +16,11 @@
 
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::task::Poll;
 
 use anyhow::Context as _;
+use futures::FutureExt as _;
 
 use crate::{auth, cluster, refusals::Refusal, shutdown};
 
@@ -36,7 +37,7 @@ impl Stop {
 			if self.stopped.load(Ordering::Acquire) {
 				return Poll::Ready(());
 			}
-			*self.waker.lock().unwrap() = Some(cx.waker().clone());
+			*self.waker.lock().unwrap_or_else(PoisonError::into_inner) = Some(cx.waker().clone());
 			if self.stopped.load(Ordering::Acquire) {
 				return Poll::Ready(());
 			}
@@ -47,7 +48,7 @@ impl Stop {
 
 	fn stop(&self) {
 		self.stopped.store(true, Ordering::Release);
-		if let Some(waker) = self.waker.lock().unwrap().take() {
+		if let Some(waker) = self.waker.lock().unwrap_or_else(PoisonError::into_inner).take() {
 			waker.wake();
 		}
 	}
@@ -70,6 +71,9 @@ struct Serve {
 	versions: moq_net::Versions,
 	/// The address every worker socket shares, reported as a session's `local`.
 	local: SocketAddr,
+	/// `listen.timeout`, which each worker's endpoint starts at a connection's
+	/// first packet.
+	timeout: Option<std::time::Duration>,
 }
 
 /// A bound group of io_uring QUIC workers sharing one port.
@@ -82,7 +86,7 @@ pub struct Workers {
 	members: Vec<moq_sock::shard::Socket>,
 	addr: SocketAddr,
 	server: moq_uring::quic::server::Config,
-	/// What the workers serve, fingerprinted once, for `/certificate.sha256`.
+	/// The same live resolver used by every worker and the fingerprint endpoint.
 	certificates: moq_tokio::tls::Certificates,
 	/// One counter set per worker, in shard order. Created here rather than on
 	/// the worker thread so `/metrics` can publish every worker's series from
@@ -94,6 +98,7 @@ pub struct Workers {
 	pin: bool,
 	alpns: Arc<Vec<String>>,
 	versions: moq_net::Versions,
+	timeout: Option<std::time::Duration>,
 
 	threads: Vec<(u16, std::thread::JoinHandle<()>)>,
 	stops: Vec<Arc<Stop>>,
@@ -110,19 +115,27 @@ pub struct Workers {
 impl Workers {
 	/// Bind one socket per worker on the address `listen` describes.
 	///
-	/// Like the tokio group, `listen`'s `tcp`/`unix` listeners are ignored
-	/// (serve those from an [`init_streams`](moq_tokio::listen::Config::init_streams)
-	/// server), and `tls.generate` is refused since every worker must serve
-	/// one identity. Unlike it, exactly one certificate/key pair is required,
-	/// and it is read here rather than on each worker thread.
-	pub fn bind(
-		listen: &moq_tokio::listen::Config,
-		quic: &moq_tokio::quic::Config,
-		config: moq_tokio::worker::Config,
-	) -> anyhow::Result<Self> {
-		if !listen.tls.generate.is_empty() {
-			anyhow::bail!("io_uring workers cannot use listen.tls.generate; provide a certificate file");
-		}
+	/// Shares one served identity with every member; stream listeners are served separately.
+	pub fn bind(server: moq_tokio::server::Config, config: moq_tokio::worker::Config) -> anyhow::Result<Self> {
+		let listen = &server.listen;
+		let quic = &server.quic;
+		let tls = match server.tls {
+			Some(tls) => {
+				// A second configured source must not be silently ignored.
+				anyhow::ensure!(
+					listen.tls.cert.is_empty()
+						&& listen.tls.key.is_empty()
+						&& listen.tls.generate.is_empty()
+						&& listen.tls.root.is_empty()
+						&& listen.tls.identity.is_none()
+						&& listen.tls.peers.is_none(),
+					"a shared TLS policy cannot be combined with listen.tls settings"
+				);
+				tls
+			}
+			None => listen.tls.load()?,
+		};
+		let certificates = tls.certificates();
 
 		// Everything below is a setting this listener cannot deliver. Refusing
 		// beats starting and quietly behaving differently from what the
@@ -134,26 +147,6 @@ impl Workers {
 				 QUIC-LB server id (listen.lb_id)"
 			);
 		}
-		let (cert, key) = match (listen.tls.cert.as_slice(), listen.tls.key.as_slice()) {
-			([cert], [key]) => (cert.clone(), key.clone()),
-			([], []) => anyhow::bail!("io_uring workers need a certificate (listen.tls.cert/key)"),
-			_ => anyhow::bail!("io_uring workers serve exactly one certificate, got several"),
-		};
-		// Read once, here, rather than per worker: every worker must present
-		// the same identity, and a certificate replaced on disk while the
-		// threads are starting would otherwise split the group between two.
-		let identity = moq_uring::quic::Identity::open(&cert, &key)
-			.with_context(|| format!("failed to load {} / {}", cert.display(), key.display()))?;
-		let certificates = moq_tokio::tls::Certificates::from_pem(identity.cert())
-			.with_context(|| format!("failed to fingerprint {}", cert.display()))?;
-
-		// A client certificate stands in for a JWT, exactly as on the tokio
-		// path; a client that presents none still gets the token flow.
-		let client_auth = match listen.tls.root.is_empty() {
-			true => moq_uring::quic::server::ClientAuth::None,
-			false => moq_uring::quic::server::ClientAuth::Optional(listen.tls.root.clone()),
-		};
-
 		// One resolution for the whole group, so a DNS answer that rotates
 		// between queries cannot hand members different addresses.
 		//
@@ -234,9 +227,12 @@ impl Workers {
 			);
 		}
 
-		let mut server = moq_uring::quic::server::Config::new(identity);
-		server.alpn = alpns.iter().cloned().chain(["h3".to_string()]).collect();
-		server.client_auth = client_auth;
+		let alpn = alpns
+			.iter()
+			.map(|alpn| alpn.as_bytes().to_vec())
+			.chain([b"h3".to_vec()])
+			.collect();
+		let mut server = moq_uring::quic::server::Config::new(tls.config(alpn)?);
 		let quic = quic.resolve();
 		server.transport = transport(&quic)?;
 
@@ -258,6 +254,7 @@ impl Workers {
 			pin: config.pin,
 			alpns: Arc::new(alpns),
 			versions,
+			timeout: listen.resolved_timeout(),
 			threads: Vec::new(),
 			stops: Vec::new(),
 			failures,
@@ -282,8 +279,7 @@ impl Workers {
 	/// The certificate every worker presents, for publishing its SHA-256
 	/// fingerprint.
 	///
-	/// Fixed for the group's lifetime: the identity is read once at
-	/// [`bind`](Self::bind) and nothing reloads it.
+	/// Tracks rotations: every worker resolves through the same live identity.
 	pub fn certificates(&self) -> moq_tokio::tls::Certificates {
 		self.certificates.clone()
 	}
@@ -310,6 +306,7 @@ impl Workers {
 			alpns: self.alpns.clone(),
 			versions: self.versions.clone(),
 			local: self.addr,
+			timeout: self.timeout,
 		};
 
 		let cores = match self.pin {
@@ -545,9 +542,11 @@ fn serve_worker(spawn: Spawn) -> bool {
 			.handle()
 			.udp(member, udp)
 			.context("failed to adopt the worker socket")?;
+		let mut endpoint_config = moq_uring::quic::endpoint::Config::default().with_server(server);
+		endpoint_config.activity = serve.shutdown.activity.clone();
+		endpoint_config.handshake.timeout = serve.timeout;
 		let endpoint =
-			moq_uring::quic::Endpoint::new(socket, moq_uring::quic::endpoint::Config::default().with_server(server))
-				.context("failed to build the QUIC endpoint")?;
+			moq_uring::quic::Endpoint::new(socket, endpoint_config).context("failed to build the QUIC endpoint")?;
 		Ok((worker, endpoint))
 	})();
 
@@ -570,11 +569,12 @@ fn serve_worker(spawn: Spawn) -> bool {
 					let id = serve.cluster.next_connection_id();
 					let conn_handle = accept_handle.clone();
 					let serve = serve.clone();
-					accept_handle.spawn(async move {
+					let connection = async move {
 						if let Err(err) = serve_connection(conn_handle, conn, id, serve).await {
 							tracing::warn!(id, %err, "connection closed");
 						}
-					});
+					};
+					accept_handle.spawn(moq_tokio::panic::isolate(connection).map(drop));
 				}
 				Err(err) => {
 					let _ = accept_failures
@@ -592,6 +592,45 @@ fn serve_worker(spawn: Spawn) -> bool {
 	true
 }
 
+/// What remains of a connection's handshake deadline, and how to tell the peer
+/// it passed.
+struct Deadline {
+	timer: moq_uring::Timer,
+	/// Closes with the timeout code once a session exists to carry it. Until
+	/// then a timed-out handshake is just dropped, and its guard closes in the
+	/// handshake's own error space, as HTTP/3 has no MoQ codes.
+	close: Option<moq_uring::quic::web::Session>,
+}
+
+impl Deadline {
+	fn new(handle: &moq_uring::Handle, conn: &moq_uring::quic::Connection) -> Self {
+		let mut timer = handle.timer();
+		timer.set(conn.handshake().deadline);
+		Self { timer, close: None }
+	}
+
+	async fn bound<T, E: Into<anyhow::Error>>(
+		&mut self,
+		handshake: impl Future<Output = Result<T, E>>,
+	) -> anyhow::Result<T> {
+		use web_transport_trait::poll::Session as _;
+		let timer = std::pin::pin!(self.timer.wait());
+		let handshake = std::pin::pin!(handshake);
+		match futures::future::select(timer, handshake).await {
+			futures::future::Either::Left(_) => {
+				// Close before dropping the pending handshake, whose cancellation guard
+				// would otherwise replace the timeout with an abandoned-handshake error.
+				let err = moq_net::Error::Timeout;
+				if let Some(close) = &mut self.close {
+					close.close(moq_net::SessionError::Timeout.to_code(), &err.to_string());
+				}
+				Err(err.into())
+			}
+			futures::future::Either::Right((result, _)) => result.map_err(Into::into),
+		}
+	}
+}
+
 /// Serve one accepted connection on its worker: handshake and session start
 /// here; authentication and supervision on the shared runtime.
 async fn serve_connection(
@@ -601,6 +640,10 @@ async fn serve_connection(
 	serve: Serve,
 ) -> anyhow::Result<()> {
 	use web_transport_trait::poll::Session as _;
+
+	// The endpoint started this deadline at the connection's first packet and
+	// enforced it through the QUIC handshake; it covers SETUP OK too.
+	let mut deadline = Deadline::new(&handle, &conn);
 
 	// Read the link facts now: the handshake below consumes the connection.
 	let remote = conn.remote_addr();
@@ -626,7 +669,8 @@ async fn serve_connection(
 	let mut alpn = conn.protocol().map(str::to_owned);
 	let (transport, url) = match conn.protocol() {
 		Some("h3") => {
-			let request = moq_uring::quic::web::Request::accept(conn)
+			let request = deadline
+				.bound(moq_uring::quic::web::Request::accept(conn))
 				.await
 				.context("WebTransport handshake failed")?;
 			let url = request.url().clone();
@@ -640,8 +684,8 @@ async fn serve_connection(
 				response = response.with_protocol(protocol);
 			}
 			alpn = protocol.clone();
-			let session = request
-				.respond(response)
+			let session = deadline
+				.bound(request.respond(response))
 				.await
 				.context("WebTransport response failed")?;
 			(session, Some(url))
@@ -649,9 +693,17 @@ async fn serve_connection(
 		_ => (moq_uring::quic::web::Session::raw(conn), None),
 	};
 
-	let request = moq_net::Server::new()
-		.with_versions(serve.versions.clone())
-		.accept_request_lite(std::time::Instant::now(), moq_uring::transport::Session::new(transport))
+	deadline.close = Some(transport.clone());
+	let server = moq_net::Server::new().with_versions(serve.versions.clone());
+	let binding = match url {
+		Some(_) => moq_net::transport::Binding::Uri,
+		None => moq_net::transport::Binding::InBand,
+	};
+	let request = deadline
+		.bound(server.accept_request_lite(
+			std::time::Instant::now(),
+			moq_uring::transport::Session::new(transport, binding),
+		))
 		.await
 		.context("moq handshake failed")?;
 
@@ -669,7 +721,12 @@ async fn serve_connection(
 		}
 	};
 	let path = if path.is_empty() { "/".to_string() } else { path };
-	let mut auth_request = serve.auth.request(moq_auth::Transport::Quic, path.clone());
+	// Only a WebTransport session carries a URL.
+	let transport = match url {
+		Some(_) => moq_auth::Transport::WebTransport,
+		None => moq_auth::Transport::Quic,
+	};
+	let mut auth_request = serve.auth.request(transport, path.clone());
 	auth_request.query = query;
 	auth_request.remote = Some(remote);
 	auth_request.local = Some(serve.local);
@@ -720,10 +777,14 @@ async fn serve_connection(
 		let auth = serve.auth.clone();
 		let cluster = serve.cluster.clone();
 		let sessions = serve.sessions.clone();
+		let shutdown = serve.shutdown.clone();
 		match serve
 			.tokio
 			.spawn(async move {
-				let admitted = cluster.admit(&auth, auth_request.clone()).await?;
+				// Abandoned at the drain deadline: worker teardown only detaches this task.
+				let admitted = shutdown
+					.admit(cluster.admit_session(&auth, auth_request.clone()))
+					.await?;
 				Ok::<_, crate::auth::Error>((admitted, sessions.register(auth_request)))
 			})
 			.await
@@ -758,41 +819,38 @@ async fn serve_connection(
 		stats,
 	} = admitted;
 
-	let mut request = request.with_stats(stats);
+	let mut request = request.with_stats(stats).with_limits(serve.cluster.limits(&lease));
 	if let Some(subscriber) = subscriber {
 		request = request.with_publisher(subscriber);
 	}
 	if let Some(publisher) = publisher {
 		request = request.with_subscriber(publisher);
 	}
-	let (session, driver) = request.ok().await?;
+	let lease = lease.preparing(request.auth(), request.role())?;
+	let (session, driver) = deadline.bound(request.ok()).await?;
 	let driver_handle = handle.clone();
-	handle.spawn(async move {
+	let driver = async move {
 		match driver_handle.run(driver).await {
 			moq_net::Error::Closed => {}
 			err => tracing::debug!(%err, "session driver ended"),
 		}
-	});
-
-	// Only a WebTransport session carries a URL.
-	let transport = match url {
-		Some(_) => moq_tokio::Transport::WebTransport,
-		None => moq_tokio::Transport::Quic,
 	};
+	handle.spawn(moq_tokio::panic::isolate(driver).map(drop));
+
 	tracing::info!(id, version = %session.version(), %transport, "negotiated");
 
 	// The session handle is Send + Sync however its transport is driven, so
 	// its lifecycle (credential expiry, GOAWAY drain) lives with the timers
 	// and the shutdown broadcast on the shared runtime.
 	let shutdown = serve.shutdown.clone();
-	serve.tokio.spawn(async move {
+	serve.tokio.spawn(moq_tokio::panic::isolate(async move {
 		match crate::connection::supervise(session, lease, shutdown, registration).await {
 			// A lease or shutdown ending the session closes it too: logged, so every
 			// accepted connection pairs with its end.
 			Ok(()) => tracing::info!(id, "connection closed"),
 			Err(err) => tracing::warn!(id, %err, "connection closed"),
 		}
-	});
+	}));
 
 	Ok(())
 }
@@ -828,5 +886,62 @@ mod tests {
 		assert_eq!(transport.receive_window, None);
 		assert_eq!(transport.stream_receive_window, None);
 		assert_eq!(transport.send_window, None);
+	}
+
+	/// An auth decision still pending at the drain deadline is abandoned then,
+	/// although worker teardown only detaches the task awaiting it.
+	#[tokio::test]
+	async fn pending_admission_is_abandoned_at_the_deadline() {
+		let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+		if let Err(moq_uring::Error::Unsupported(reason)) = moq_uring::Worker::new(Default::default())
+			&& std::env::var_os("MOQ_STRICT").is_none()
+		{
+			eprintln!("skipping io_uring relay test: {reason}");
+			return;
+		}
+
+		let dir = tempfile::tempdir().unwrap();
+		let key = rcgen::KeyPair::generate().unwrap();
+		let cert = rcgen::CertificateParams::new(vec!["localhost".to_string()])
+			.unwrap()
+			.self_signed(&key)
+			.unwrap();
+		let (cert_path, key_path) = (dir.path().join("cert.pem"), dir.path().join("key.pem"));
+		std::fs::write(&cert_path, cert.pem()).unwrap();
+		std::fs::write(&key_path, key.serialize_pem()).unwrap();
+
+		let window = std::time::Duration::from_secs(1);
+		let mut config = crate::Config::default();
+		config.listen.bind = Some("127.0.0.1:0".parse().unwrap());
+		config.listen.tls.cert = vec![cert_path];
+		config.listen.tls.key = vec![key_path];
+		config.runtime.workers = Some(1);
+		config.runtime.pin = false;
+		config.runtime.io_uring = true;
+		config.drain_timeout = window;
+		let mut relay = crate::Relay::load(config).await.unwrap().with_signals(false);
+		let port = relay.addr().unwrap().port();
+		let mut admissions = relay.admissions().unwrap();
+		let trigger = relay.shutdown_trigger().clone();
+		let running = tokio::spawn(relay.run());
+
+		let mut client = moq_tokio::connect::Config::default();
+		client.tls.insecure = Some(true);
+		client.once = Some(true);
+		client.bind = Some("127.0.0.1:0".parse().unwrap());
+		let url: url::Url = format!("moql://127.0.0.1:{port}/drain").parse().unwrap();
+		let client = client.init(Default::default()).unwrap();
+		let connecting = tokio::spawn(async move { client.with_reconnect(false).connect(url).established().await });
+		let mut admission = admissions.next().await.unwrap();
+
+		// Only timers decide what follows; the embedded admission's own timeout
+		// is well past the drain window.
+		tokio::time::pause();
+		trigger.start();
+		tokio::time::timeout(window + std::time::Duration::from_secs(1), admission.abandoned())
+			.await
+			.expect("the admission outlived the drain deadline");
+		running.await.unwrap().unwrap();
+		connecting.abort();
 	}
 }

@@ -21,6 +21,8 @@
 #   ./run.sh --open-gop            # open-GOP clip; its leading pictures must survive
 #   ./run.sh --hrd                 # 1080p video filling a broadcast-sized 9 Mbit CPB
 #   ./run.sh --headroom            # the same with four audio PIDs, muxed above the video's Rx
+#   ./run.sh --leak                # 1080p video with no HRD, filling its level's 24 Mb/s leak
+#   ./run.sh --full                # the same with two audio PIDs, filling its multiplex with no nulls
 #   ./run.sh --delay 1s            # pass the exporter's --delay
 
 # `--live` swaps the analyzer, not the rig. compliance.py grades a captured file
@@ -29,7 +31,7 @@
 # checks can see *when* the exporter handed the bytes over. pcr-timing.py reads
 # the subscriber's stdout a packet at a time and stamps each read, so it grades
 # release timing and byte position alongside the values. Nightly runs this arm
-# (.github/workflows/nightly.yml); it is not a per-PR gate, because it needs a
+# (.github/workflows/ts.yml); it is not a per-PR gate, because it needs a
 # real-time window to measure at all.
 #
 # `--pair` changes the rig rather than the analyzer: it subscribes twice to one
@@ -46,11 +48,17 @@ WORKSPACE=$(cd "$DIR/../.." && pwd)
 # Run directory, reserved ports, and process-group ownership. See test/README.md.
 # shellcheck source-path=SCRIPTDIR source=../lib/harness.sh
 source "$DIR/../lib/harness.sh"
+# shellcheck source-path=SCRIPTDIR source=process.sh
+source "$DIR/process.sh"
 
 # Captured before the parse below consumes it, so the rerun command carries the
 # source capture, mux rate, EIT fixture, and analyzer thresholds this run used,
 # whether they arrived as flags or as environment overrides.
 RERUN="$(harness_env TSC_DURATION TSC_BITRATE TSC_PORT TSC_PROFILE)just test ts$(harness_argv "$@")"
+
+# Seamless session replacement needs an explicit publisher epoch. Keep this
+# opt-in local to the validation rig; epochless replacement is tested as refusal.
+VERSION=moq-lite-07-wip
 
 SOURCE=""       # real capture to publish instead of a generated clip
 ANALYZE_ONLY="" # existing TS to analyze without a round-trip
@@ -67,6 +75,8 @@ PAIR=""     # subscribe twice and grade the two captures against each other
 OPEN_GOP="" # publish open GOP with leading pictures, and grade them through the round-trip
 HRD=""      # publish video that fills a broadcast-sized CPB, as a contribution encoder does
 HEADROOM="" # the same plus four audio PIDs, in a multiplex faster than the video's Rx
+LEAK=""     # publish video with no HRD at its level's leak, as a full-rate feed does
+FULL=""     # the same with audio, in a multiplex the source fills with no nulls
 EXPORT=()   # extra `export ts` flags (--delay)
 # How far into the run the second subscriber joins. A late join is the point: two
 # exporters started together can share a cadence by starting together, which is
@@ -75,8 +85,8 @@ PAIR_JOIN="${TSC_PAIR_JOIN:-5}"
 # Shortest overlap worth a verdict, in seconds. Below this the slower tables fall under
 # the analyzer's emission floor and go report-only, which reads as a pass.
 PAIR_MIN_OVERLAP="${TSC_PAIR_MIN_OVERLAP:-25}"
-DURATION_SET="" # so pair mode can raise the default without overriding an explicit --duration
-BITRATE_SET=""  # so headroom mode can raise the default without overriding an explicit --bitrate
+DURATION_SET="" # so pair and leak modes can raise the default without overriding an explicit --duration
+BITRATE_SET=""  # so headroom and leak modes can raise the default without overriding an explicit --bitrate
 PASSTHRU=()     # forwarded to compliance.py (thresholds, --report-json, ...)
 
 while [[ $# -gt 0 ]]; do
@@ -139,6 +149,14 @@ while [[ $# -gt 0 ]]; do
             HEADROOM=1
             shift
             ;;
+        --leak)
+            LEAK=1
+            shift
+            ;;
+        --full)
+            FULL=1
+            shift
+            ;;
         --delay)
             EXPORT=(--delay "$2")
             shift 2
@@ -180,6 +198,28 @@ if [[ -n "$HEADROOM" && -n "$HRD$OPEN_GOP$SOURCE$ANALYZE_ONLY" ]]; then
 fi
 # Room for the audio, with the video still taking up to 86 % of the multiplex.
 [[ -n "$HEADROOM" && -z "$BITRATE_SET" && -z "${TSC_BITRATE:-}" ]] && BITRATE=12500000
+if [[ -n "$LEAK" && -n "$HRD$HEADROOM$OPEN_GOP$SOURCE$ANALYZE_ONLY" ]]; then
+    echo "error: --leak generates its own clip and cannot be combined with --hrd, --headroom, --open-gop, --source, or --analyze-only" >&2
+    exit 1
+fi
+# Room for the video's packet headers, and long enough that an export admitting video a
+# few percent below the leak exhausts the delay's lead and misses a deadline.
+[[ -n "$LEAK" && -z "$BITRATE_SET" && -z "${TSC_BITRATE:-}" ]] && BITRATE=26000000
+[[ -n "$LEAK" && -z "$DURATION_SET" && -z "${TSC_DURATION:-}" ]] && DURATION=30
+if [[ -n "$FULL" && -n "$LEAK$HRD$HEADROOM$OPEN_GOP$SOURCE$ANALYZE_ONLY" ]]; then
+    echo "error: --full generates its own clip and cannot be combined with --leak, --hrd, --headroom, --open-gop, --source, or --analyze-only" >&2
+    exit 1
+fi
+# The clip's rate is whatever its packets fill, measured once it is generated.
+if [[ -n "$FULL" && -n "$BITRATE_SET${TSC_BITRATE:-}" ]]; then
+    echo "error: --full runs at the rate its clip fills and takes no --bitrate" >&2
+    exit 1
+fi
+[[ -n "$FULL" && -z "$DURATION_SET" && -z "${TSC_DURATION:-}" ]] && DURATION=30
+# Its video arrives up to about 0.65 s ahead of decoding with no room to catch up, so the
+# export needs a longer lead than the default delay gives, yet one a unit's window and
+# slot keep under the T-STD's 1 s.
+[[ -n "$FULL" && ${#EXPORT[@]} -eq 0 ]] && EXPORT=(--delay 900ms)
 if [[ -n "$OPEN_GOP" && -n "$ANALYZE_ONLY$LIVE$PAIR" ]]; then
     echo "error: --open-gop cannot be combined with --analyze-only, --live, or --pair" >&2
     exit 1
@@ -196,7 +236,7 @@ require_tools() {
     done
     # ffmpeg + cargo are only needed for the round-trip, not for --analyze-only.
     if [[ -z "$ANALYZE_ONLY" ]]; then
-        for t in cargo ffmpeg curl timeout; do have "$t" || missing+=("$t"); done
+        for t in cargo ffmpeg ffprobe curl timeout; do have "$t" || missing+=("$t"); done
     fi
     # The EIT fixture reads the service triplet out of the stream and may need to pad a
     # stuffing-free clip to make room for the table.
@@ -214,9 +254,10 @@ analyze() {
     # Single source of truth for the verdict: compliance.py runs the TSDuck
     # tools itself and prints the PASS/WARN/FAIL summary. A second argument is
     # the source TS, which enables the duration-fidelity check (round-trip only).
-    local ref=()
+    local ref=() report=()
+    [[ -n "${HARNESS_RUN:-}" ]] && report=(--report-json "$HARNESS_RUN/compliance.json")
     [[ -n "${2:-}" ]] && ref=(--reference "$2")
-    python3 "$DIR/compliance.py" --ts "$1" ${ref[@]+"${ref[@]}"} $STRICT ${PASSTHRU[@]+"${PASSTHRU[@]}"}
+    python3 "$DIR/compliance.py" --ts "$1" ${ref[@]+"${ref[@]}"} ${report[@]+"${report[@]}"} $STRICT ${PASSTHRU[@]+"${PASSTHRU[@]}"}
 }
 
 require_tools
@@ -235,6 +276,9 @@ fi
 # Only the round-trip stands anything up, so `--analyze-only` above needs no run
 # directory, no reserved port, and nothing to reap.
 harness_begin ts "$RERUN"
+ffmpeg -version >"$HARNESS_RUN/ffmpeg-version.txt"
+ffprobe -version >"$HARNESS_RUN/ffprobe-version.txt"
+tsp --version >"$HARNESS_RUN/tsduck-version.txt" 2>&1
 
 TARGET_BASE=$(cargo metadata --format-version 1 --manifest-path "$WORKSPACE/Cargo.toml" --no-deps |
     sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')
@@ -279,14 +323,14 @@ elif [[ -n "$HRD$HEADROOM" ]]; then
         # A broadcast feed's audio beside it: three MPEG-1 Layer II PIDs and an AC-3 one, in a
         # multiplex faster than the video's Rx (10.8 Mb/s). Only then can video packets arrive
         # faster than its transport buffer drains, so each slot has to interleave them with
-        # the audio and the nulls (moq-dev/moq#5142). At 192 kb/s an AC-3 frame stays within
-        # a third of the 2,592-byte buffer ffmpeg's ATSC carriage gives it.
+        # the audio and the nulls (moq-dev/moq#5142). At 640 kb/s the AC-3 frame nearly fills
+        # ATSC's 2,592-byte buffer, so the next frame needs its exact decode-time release.
         AUDIO=(-map 0:v)
         for k in 1 2 3 4; do
             INPUTS+=(-f lavfi -i "sine=frequency=$((330 * k)):sample_rate=48000")
             AUDIO+=(-map "$k:a")
         done
-        AUDIO+=(-ac 2 -c:a mp2 -b:a 192k -c:a:3 ac3)
+        AUDIO+=(-ac 2 -c:a mp2 -b:a 192k -c:a:3 ac3 -b:a:3 640k)
     fi
     ffmpeg -y -hide_banner -loglevel error \
         "${INPUTS[@]}" \
@@ -294,6 +338,50 @@ elif [[ -n "$HRD$HEADROOM" ]]; then
         -c:v libx264 -profile:v high -level 4.0 -preset veryfast -pix_fmt yuv420p \
         -x264-params "keyint=25:min-keyint=25:scenecut=0:nal-hrd=cbr" -b:v 9M -maxrate 9M -bufsize 9M \
         -f mpegts -muxrate "$BITRATE" -pcr_period 20 -pes_payload_size 0 "$SRC_TS"
+elif [[ -n "$LEAK" ]]; then
+    echo "### generating ~${DURATION}s 1080p clip with no HRD at its level's 24 Mb/s leak with ffmpeg"
+    # A full-rate feed's shape: with no HRD, level 4.0's leak from MB into EB (Rbx, 24 Mb/s)
+    # is the video's only limit, and a target above the VBV's 24 Mb/s ceiling holds the
+    # video at it, so the export has to admit the leak's whole rate (moq-dev/moq#5362).
+    ffmpeg -y -hide_banner -loglevel error \
+        -f lavfi -i "testsrc2=size=1920x1080:rate=25,noise=alls=24:allf=t" \
+        -t "$DURATION" -an \
+        -c:v libx264 -profile:v high -level 4.0 -preset veryfast -pix_fmt yuv420p \
+        -x264-params "keyint=25:min-keyint=25:scenecut=0" -b:v 30M -maxrate 24M -bufsize 24M \
+        -f mpegts -muxrate "$BITRATE" -pcr_period 20 -pes_payload_size 0 "$SRC_TS"
+elif [[ -n "$FULL" ]]; then
+    echo "### generating ~${DURATION}s 1080p clip at its level's leak with two audio PIDs, filling its multiplex with no nulls"
+    # A full-rate contribution feed's shape: the --leak video beside an MP2 and a DVB AC-3
+    # PID, with its PCR in the video's adaptation field and several audio frames a PES, and
+    # no null packets, so the export has no room to spend more packets than the source on
+    # clocks or audio framing (moq-dev/moq#5362). ffmpeg pads any multiplex rate it is
+    # given, so mux with room to spare, drop the nulls, and stamp the clock at the rate the
+    # rest fill. The PTS and DTS stay: moving them with each PCR would move B pictures
+    # against their group's keyframe, and the video goes out far enough ahead of its DTS
+    # for its packets to arrive a little earlier or later. Muxed at most 0.5 s ahead, it
+    # arrives up to about 0.65 s ahead once the nulls are gone.
+    PADDED_TS="$HARNESS_RUN/padded.ts"
+    PADDED_RATE=27000000
+    ffmpeg -y -hide_banner -loglevel error \
+        -f lavfi -i "testsrc2=size=1920x1080:rate=25,noise=alls=24:allf=t" \
+        -f lavfi -i "sine=frequency=440:sample_rate=48000" \
+        -f lavfi -i "sine=frequency=880:sample_rate=48000" \
+        -t "$DURATION" -map 0:v -map 1:a -map 2:a -ac 2 \
+        -c:v libx264 -profile:v high -level 4.0 -preset veryfast -pix_fmt yuv420p \
+        -x264-params "keyint=25:min-keyint=25:scenecut=0" -b:v 30M -maxrate 24M -bufsize 24M \
+        -c:a:0 mp2 -b:a:0 192k -c:a:1 ac3 -b:a:1 192k \
+        -f mpegts -mpegts_flags system_b -muxrate "$PADDED_RATE" -pcr_period 20 -max_delay 500000 "$PADDED_TS"
+    PACKETS=$(($(wc -c <"$PADDED_TS") / 188))
+    NULLS=$(tsp -I file "$PADDED_TS" -P count --pid 0x1FFF --total -O drop 2>&1 |
+        sed -n 's/.*counted \([0-9,]*\) packets.*/\1/p' | tr -d ,)
+    [[ -n "$NULLS" ]] || {
+        echo "error: could not count the generated clip's null packets" >&2
+        exit 1
+    }
+    BITRATE=$((PADDED_RATE * (PACKETS - NULLS) / PACKETS))
+    tsp -I file "$PADDED_TS" -P filter --negate --pid 0x1FFF \
+        -P pcradjust --bitrate "$BITRATE" --ignore-pts --ignore-dts -O file "$SRC_TS"
+    echo "  ${NULLS} null packets dropped of ${PACKETS}: ${BITRATE} b/s"
 else
     echo "### generating ~${DURATION}s broadcast-like ${OPEN_GOP:+open-GOP }clip with ffmpeg"
     # CBR with a 20 ms PCR, like a contribution feed. Not cosmetic: `regulate`
@@ -337,9 +425,10 @@ if harness_probe "$URL/certificate.sha256"; then
     exit 1
 fi
 
-echo "### starting relay on 127.0.0.1:${PORT}"
+echo "### starting relay on 127.0.0.1:${PORT} ($VERSION)"
+printf '%s\n' "$VERSION" >"$HARNESS_RUN/moq-version.txt"
 harness_spawn relay "$HARNESS_RUN/relay.log" "$RELAY" "$DIR/relay.toml" \
-    --listen "127.0.0.1:${PORT}" --web-http-listen "127.0.0.1:${PORT}"
+    --listen-version "$VERSION" --listen "127.0.0.1:${PORT}" --web-http-listen "127.0.0.1:${PORT}"
 if ! harness_ready "$URL/certificate.sha256" 30 "$HARNESS_PID"; then
     echo "error: relay never became ready" >&2
     sed 's/^/  relay: /' "$HARNESS_RUN/relay.log" >&2 || true
@@ -358,11 +447,9 @@ harness_endpoint relay "$URL"
 
 # SCHEDULE carries the rate pcr-timing.py's schedule check grades against, and gates
 # on it. The generated clip is muxed at $BITRATE, which is the rate the catalog records
-# and the exporter pads to, on a constant-rate schedule from the first null packet on:
-# every interval is the bytes the rate implies, to one packet. Left to estimate, the
-# grader divides total bytes by the PCR span, and the unpadded start drags that off the
-# true rate. A --source capture's rate is not known here, so for that the grader
-# estimates it, says so, and only reports.
+# and the exporter pads to, on a constant-rate schedule from the first PCR:
+# every interval is the bytes the rate implies, to one packet. A --source capture's
+# rate is not known here, so for that the grader estimates it, says so, and only reports.
 SCHEDULE=()
 [[ -z "$SOURCE" ]] && SCHEDULE=(--mux-rate "$BITRATE" --schedule-pct-min 99)
 
@@ -375,8 +462,8 @@ grade_live() {
     # status we are here to record.
     set +e
     timeout -k 3 $((DURATION + 20)) \
-        "$MOQ" --connect "$URL" --broadcast "$BROADCAST" export ts ${EXPORT[@]+"${EXPORT[@]}"} 2>"$HARNESS_RUN/sub.log" |
-        python3 "$DIR/pcr-timing.py" --live --seconds "$DURATION" --release-pct-max 1 $STRICT \
+        "$MOQ" --connect "$URL" --connect-version "$VERSION" --broadcast "$BROADCAST" export ts ${EXPORT[@]+"${EXPORT[@]}"} 2>"$HARNESS_RUN/sub.log" |
+        ts_drain python3 "$DIR/pcr-timing.py" --live --seconds "$DURATION" --release-pct-max 1 $STRICT \
             ${SCHEDULE[@]+"${SCHEDULE[@]}"} ${PASSTHRU[@]+"${PASSTHRU[@]}"} >"$HARNESS_RUN/timing.out" 2>&1
     printf '%s\n' "${PIPESTATUS[0]} ${PIPESTATUS[1]}" >"$HARNESS_RUN/timing.rc"
 }
@@ -384,7 +471,7 @@ grade_live() {
 # shellcheck disable=SC2329  # invoked indirectly via 'harness_spawn'
 capture() {
     timeout -k 3 $((DURATION + 20)) \
-        "$MOQ" --connect "$URL" --broadcast "$BROADCAST" export ts ${EXPORT[@]+"${EXPORT[@]}"} >"$SUB_TS" 2>"$HARNESS_RUN/sub.log"
+        "$MOQ" --connect "$URL" --connect-version "$VERSION" --broadcast "$BROADCAST" export ts ${EXPORT[@]+"${EXPORT[@]}"} >"$SUB_TS" 2>"$HARNESS_RUN/sub.log"
 }
 
 # shellcheck disable=SC2329  # invoked indirectly via 'harness_spawn'
@@ -395,7 +482,7 @@ capture_b() {
     # the media, because it has no shared history to derive them from.
     sleep "$PAIR_JOIN"
     timeout -k 3 $((DURATION + 20)) \
-        "$MOQ" --connect "$URL" --broadcast "$BROADCAST" export ts ${EXPORT[@]+"${EXPORT[@]}"} >"$SUB_B_TS" 2>"$HARNESS_RUN/sub-b.log"
+        "$MOQ" --connect "$URL" --connect-version "$VERSION" --broadcast "$BROADCAST" export ts ${EXPORT[@]+"${EXPORT[@]}"} >"$SUB_B_TS" 2>"$HARNESS_RUN/sub-b.log"
 }
 
 if [[ -n "$LIVE" ]]; then
@@ -421,31 +508,32 @@ sleep 1
 # at 5). It is the publisher's granularity, not the exporter's, so the harness has
 # to be well inside it or it grades tsp.
 # Bounded like the subscriber: if the relay stalls after readiness, `moq import
-# ts` could otherwise block `wait "$PUB_PID"` forever. tsp/moq stderr lands in
-# pub.log, which the empty-capture handler below dumps on failure.
+# ts` could otherwise block `wait "$PUB_PID"` forever. The bound adds the 30 s
+# default max-age a finished import stays up for after EOF. tsp/moq stderr lands
+# in pub.log, which the empty-capture handler below dumps on failure.
 echo "### publishing PCR-paced TS -> $BROADCAST"
 # shellcheck disable=SC2329  # invoked indirectly via 'harness_spawn'
 publish() {
-    # shellcheck disable=SC2016  # $1..$4 are the child bash -c positionals, not ours.
-    timeout -k 3 $((DURATION + 20)) bash -c '
+    # shellcheck disable=SC2016  # $1..$5 are the child bash -c positionals, not ours.
+    timeout -k 3 $((DURATION + 20 + 30)) bash -o pipefail -c '
         tsp -I file "$1" -P regulate --pcr-synchronous --wait-min 5 |
-            "$2" --connect "$3" --broadcast "$4" import ts
-    ' _ "$SRC_TS" "$MOQ" "$URL" "$BROADCAST"
+            "$2" --connect "$3" --connect-version "$5" --broadcast "$4" import ts
+    ' _ "$SRC_TS" "$MOQ" "$URL" "$BROADCAST" "$VERSION"
 }
 harness_spawn pub "$HARNESS_RUN/pub.log" publish
 PUB_PID="$HARNESS_PID"
 
-# Keep the publisher's exit status: `timeout` returns 124 when it had to kill a
-# stalled `moq import ts`, non-zero/non-124 means the import itself errored. Both
-# explain a truncated capture, so surface it alongside the logs on failure.
-harness_wait "$PUB_PID" && PUB_RC=0 || PUB_RC=$?
-
 # shellcheck disable=SC2329  # invoked from multiple failure paths below
 dump_logs() {
-    echo "  publisher exit status: $PUB_RC" >&2
+    cat "$HARNESS_RUN/process-status.log" >&2 || true
     sed 's/^/  pub: /' "$HARNESS_RUN/pub.log" >&2 || true
     sed 's/^/  sub: /' "$HARNESS_RUN/sub.log" >&2 || true
 }
+
+if ! ts_wait "$PUB_PID" publisher; then
+    dump_logs
+    exit 1
+fi
 
 # ── live: the grader owns the verdict ───────────────────────────────────────
 if [[ -n "$LIVE" ]]; then
@@ -458,16 +546,14 @@ if [[ -n "$LIVE" ]]; then
     read -r EXPORT_RC GRADE_RC <"$HARNESS_RUN/timing.rc"
     echo
     cat "$HARNESS_RUN/timing.out"
-    # 124 is `timeout` reaching the end of the window, which is how the exporter is
-    # meant to stop; SIGPIPE (141) is the grader closing the pipe on its own window.
-    # Anything else ended the stream under the grader, so say so: it graded a
-    # shorter window than it was asked for, and the report alone doesn't show that.
-    # Not fatal, because the grader's verdict on what it did see is still the
-    # verdict, and a short window can only make the sample smaller, not kinder.
-    if [[ "$EXPORT_RC" -ne 0 && "$EXPORT_RC" -ne 124 && "$EXPORT_RC" -ne 141 ]]; then
+    # The grader drains after its measurement window, so no broken pipe or
+    # timeout is an expected successful export.
+    printf 'exporter: %s\ngrader: %s\n' "$EXPORT_RC" "$GRADE_RC" >>"$HARNESS_RUN/process-status.log"
+    if [[ "$EXPORT_RC" -ne 0 ]]; then
         echo >&2
-        echo "warning: the exporter exited $EXPORT_RC before the window closed" >&2
-        sed 's/^/  sub: /' "$HARNESS_RUN/sub.log" >&2 || true
+        echo "error: the exporter exited $EXPORT_RC" >&2
+        dump_logs
+        exit 1
     fi
     if [[ "$GRADE_RC" -ne 0 ]]; then
         echo >&2
@@ -475,23 +561,15 @@ if [[ -n "$LIVE" ]]; then
         dump_logs
         exit "$GRADE_RC"
     fi
-    # The grader's verdict is not the whole run. It grades whatever reached it, and
-    # the sample floor only rejects a window that came up short: a publisher that
-    # dies late still leaves enough behind to pass every check. That is a broken
-    # round-trip reported as a good one, so the publisher's own status is a gate
-    # too. 124 is `timeout` killing a stalled `moq import ts`, which is a failure
-    # of the same kind rather than a clean end, so it is not excused here.
-    if [[ "$PUB_RC" -ne 0 ]]; then
-        echo >&2
-        echo "error: the publisher exited $PUB_RC; the graded stream is not a whole round-trip" >&2
-        dump_logs
-        exit 1
-    fi
     exit 0
 fi
 
-sleep 3
-harness_reap "$SUB_PID"
+# Let the exporter drain to EOF within its existing timeout. Killing it after a
+# sleep can both truncate a valid tail and conceal an earlier process failure.
+if ! ts_wait "$SUB_PID" exporter; then
+    dump_logs
+    exit 1
+fi
 
 if [[ ! -s "$SUB_TS" ]]; then
     echo "error: subscriber captured no data" >&2
@@ -501,7 +579,11 @@ fi
 
 # ── pair: the two captures are the measurement ──────────────────────────────
 if [[ -n "$PAIR" ]]; then
-    harness_reap "$SUB_B_PID"
+    if ! ts_wait "$SUB_B_PID" exporter-b; then
+        dump_logs
+        cat "$HARNESS_RUN/sub-b.log" >&2
+        exit 1
+    fi
     if [[ ! -s "$SUB_B_TS" ]]; then
         echo "error: the second subscriber captured no data" >&2
         sed 's/^/  sub-b: /' "$HARNESS_RUN/sub-b.log" >&2 || true
@@ -510,19 +592,12 @@ if [[ -n "$PAIR" ]]; then
     fi
     echo "### captured $(wc -c <"$SUB_TS" | tr -d ' ') + $(wc -c <"$SUB_B_TS" | tr -d ' ') bytes -> comparing table anchors"
     echo
-    if ! python3 "$DIR/table-anchor.py" "$SUB_TS" "$SUB_B_TS" $STRICT \
+    if ! python3 "$DIR/table-anchor.py" "$SUB_TS" "$SUB_B_TS" --source "$SRC_TS" \
+        --report-json "$HARNESS_RUN/table-anchor.json" $STRICT \
         ${PASSTHRU[@]+"${PASSTHRU[@]}"}; then
         echo >&2
         echo "error: table anchor analysis failed (see round-trip logs below)" >&2
         sed 's/^/  sub-b: /' "$HARNESS_RUN/sub-b.log" >&2 || true
-        dump_logs
-        exit 1
-    fi
-    # As in --live: a grader can only speak for what reached it, so a publisher that
-    # died mid-run must not be reported as a clean pair.
-    if [[ "$PUB_RC" -ne 0 ]]; then
-        echo >&2
-        echo "error: the publisher exited $PUB_RC; the graded pair is not a whole round-trip" >&2
         dump_logs
         exit 1
     fi
@@ -534,6 +609,15 @@ if [[ -n "$CAPTURE_OUT" ]]; then
 fi
 
 echo "### captured $(wc -c <"$SUB_TS" | tr -d ' ') bytes -> analyzing"
+
+# The initial decoded-content profile is the generated closed-GOP H.264/AAC
+# pair. Other arms retain their specific structural/model oracles until their
+# acquisition and decoder-priming contracts are covered by fixtures.
+if [[ -z "$SOURCE$OPEN_GOP$HRD$HEADROOM$LEAK$FULL" ]]; then
+    python3 "$DIR/decode.py" "$SRC_TS" "$SUB_TS" --output "$HARNESS_RUN/decode"
+else
+    echo "decoded-content comparison: not covered for this profile"
+fi
 
 # Which SI survived the round-trip. Informational: the exporter rebuilds SI from the
 # catalog, so a PID the import path does not route simply is not there, and that is a
@@ -564,6 +648,18 @@ if [[ -n "$OPEN_GOP" ]]; then
         exit 1
     fi
 fi
+
+# The delay's lead over the source's hides packets the export spends beyond the source's
+# until it runs out, so they are counted outright.
+if [[ -n "$FULL" ]]; then
+    echo
+    if ! python3 "$DIR/overhead.py" "$SRC_TS" "$SUB_TS"; then
+        echo >&2
+        echo "error: the export spends more packets than its source on clocks and audio" >&2
+        dump_logs
+        exit 1
+    fi
+fi
 echo
 # Pass the source so duration-fidelity can pin the exported stream's rate. A tiny
 # capture still parses, so the round-trip can fail here with a non-empty file;
@@ -580,7 +676,7 @@ fi
 # capture goes through pcr-timing.py as well. Its hard checks gate here as they do under
 # --live, and so does pcr-schedule when the rate is known (SCHEDULE).
 echo
-if ! python3 "$DIR/pcr-timing.py" "$SUB_TS" ${SCHEDULE[@]+"${SCHEDULE[@]}"} $STRICT; then
+if ! python3 "$DIR/pcr-timing.py" "$SUB_TS" --report-json "$HARNESS_RUN/pcr-timing.json" ${SCHEDULE[@]+"${SCHEDULE[@]}"} $STRICT; then
     echo >&2
     echo "error: PCR timing analysis failed (see round-trip logs below)" >&2
     dump_logs
@@ -589,17 +685,11 @@ fi
 
 # pcr-schedule allows each PCR a packet of slack, but an IRD or a TR 101 290 probe holds
 # every PCR to within 500 ns of its byte position at the mux rate (PCR_accuracy_error).
-# TSDuck's pcrverify measures exactly that. The first seconds are skipped: the export
-# starts unpadded until the importer has measured the source's rate and recorded it.
+# TSDuck's pcrverify measures exactly that, including the first PCR interval.
 if [[ ${#SCHEDULE[@]} -gt 0 ]]; then
     echo
     echo "### PCR accuracy (tsp -P pcrverify, +/-500 ns at ${BITRATE} b/s)"
-    SKIP=$((3 * BITRATE / 8 / 188))
-    tsp -I file "$SUB_TS" -P skip "$SKIP" -P pcrverify --bitrate "$BITRATE" --absolute --jitter-max 13 \
-        -O drop >"$HARNESS_RUN/pcrverify.log" 2>&1 || true
-    VERDICT=$(grep -E "PCR OK, " "$HARNESS_RUN/pcrverify.log" | tail -1)
-    echo "  ${VERDICT:-no verdict}"
-    if [[ ! "$VERDICT" =~ ([0-9,]+)\ PCR\ OK,\ 0\ with ]]; then
+    if ! python3 "$DIR/accuracy.py" "$SUB_TS" --bitrate "$BITRATE" --log "$HARNESS_RUN/pcrverify.log"; then
         echo >&2
         echo "error: PCRs stray from their byte position (see $HARNESS_RUN/pcrverify.log)" >&2
         dump_logs

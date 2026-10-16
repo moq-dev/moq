@@ -4,8 +4,7 @@
 //! traffic-class control messages the peer sees no mark, its ACKs carry no
 //! ECN counts, and noq disables ECN on the first one.
 //!
-//! Kernel-gated: skips loudly below the Linux 6.12 floor (GitHub-hosted CI),
-//! and runs everywhere else.
+//! Unsupported local kernels skip loudly; MOQ_STRICT makes CI refuse them.
 
 #![cfg(target_os = "linux")]
 
@@ -16,7 +15,7 @@ use moq_uring::{Config, Error, Worker, udp};
 fn worker() -> Option<Worker> {
 	match Worker::new(Config::default()) {
 		Ok(worker) => Some(worker),
-		Err(Error::Unsupported(reason)) => {
+		Err(Error::Unsupported(reason)) if std::env::var_os("MOQ_STRICT").is_none() => {
 			eprintln!("skipping io_uring ecn test: {reason}");
 			None
 		}

@@ -12,6 +12,11 @@ use std::time::Duration;
 use moq_relay::{Config, Connection, Relay, auth, cluster, web};
 use moq_tokio::moq_net;
 
+/// A millisecond track: the frames written here carry timestamps.
+fn timed() -> moq_net::track::Info {
+	moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+}
+
 const TIMEOUT: Duration = Duration::from_secs(10);
 
 /// The newest moq-lite ALPN both sides should converge on. Derived from
@@ -37,11 +42,16 @@ async fn build_web(ws: bool) -> web::Web {
 	let mut config = web::Config::default();
 	config.ws = ws;
 	config.http.listen = Some("127.0.0.1:0".parse().expect("parse listen"));
-	build_web_with(config).await
+	build_web_with(config, new_cluster()).await
 }
 
-/// [`build_web`] for a test that configures the listeners itself (e.g. HTTPS).
-async fn build_web_with(web_config: web::Config) -> web::Web {
+/// A standalone cluster with default options.
+fn new_cluster() -> cluster::Cluster {
+	cluster::Cluster::new(cluster::Options::default()).expect("cluster init")
+}
+
+/// [`build_web`] for a test that configures the listeners or the cluster itself (e.g. HTTPS).
+async fn build_web_with(web_config: web::Config, cluster: cluster::Cluster) -> web::Web {
 	// Crypto provider is process-global; reinstalls after the first one are
 	// no-ops, but the test binary may run before any other moq code does.
 	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
@@ -52,8 +62,6 @@ async fn build_web_with(web_config: web::Config) -> web::Web {
 	let auth = auth_config
 		.init("test", &moq_tokio::tls::Connect::default(), false)
 		.expect("auth init");
-
-	let cluster = cluster::Cluster::new(cluster::Options::default()).expect("cluster init");
 
 	// moq_tokio::Server is needed for `certificates`, even though we never
 	// expose HTTPS or QUIC in this test. Binding QUIC to `[::]:0` picks an
@@ -112,7 +120,7 @@ fn client_version(version: Option<moq_net::Version>) -> moq_tokio::Client {
 	// redial would re-register with the relay behind the assertions' back.
 	config.once = Some(true);
 	// Zero head start so the WebSocket path runs immediately.
-	config.websocket.delay = std::time::Duration::ZERO;
+	config.websocket.delay = Some(std::time::Duration::ZERO);
 	// Every relay in this file listens on IPv4 loopback, so bind the same family
 	// rather than egressing a QUIC dial from a dual-stack IPv6 socket.
 	config.bind = Some("127.0.0.1:0".parse().expect("parse bind"));
@@ -135,7 +143,7 @@ async fn relay_websocket_round_trip_uses_newest_version() {
 	let pub_origin = moq_tokio::origin::spawn();
 	let broadcast = pub_origin.create_broadcast("test").expect("create broadcast");
 	broadcast.announce(Default::default()).expect("create broadcast");
-	let track = broadcast.create_track("video", None).expect("create track");
+	let track = broadcast.create_track("video", timed()).expect("create track");
 	let mut group = track.append_group().expect("append group");
 	group
 		.write_frame(moq_net::Timestamp::ZERO, b"hello".as_ref())
@@ -206,6 +214,95 @@ async fn relay_websocket_round_trip_uses_newest_version() {
 	web_handle.abort();
 }
 
+/// Relay log output as text, waking every waiter on each write.
+#[derive(Clone, Default)]
+struct Logs {
+	text: std::sync::Arc<std::sync::Mutex<String>>,
+	written: std::sync::Arc<tokio::sync::Notify>,
+}
+
+impl Logs {
+	/// Wait until the output contains `needle`.
+	async fn wait_for(&self, needle: &str) {
+		loop {
+			// Created before the check, so a write in between still wakes it.
+			let written = self.written.notified();
+			if self.text.lock().unwrap().contains(needle) {
+				return;
+			}
+			written.await;
+		}
+	}
+}
+
+impl std::io::Write for Logs {
+	fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+		self.text.lock().unwrap().push_str(&String::from_utf8_lossy(data));
+		self.written.notify_waiters();
+		Ok(data.len())
+	}
+
+	fn flush(&mut self) -> std::io::Result<()> {
+		Ok(())
+	}
+}
+
+impl tracing_subscriber::fmt::MakeWriter<'_> for Logs {
+	type Writer = Self;
+
+	fn make_writer(&self) -> Self {
+		self.clone()
+	}
+}
+
+/// A WebSocket session takes its id from the cluster-wide counter and logs its close, like
+/// a QUIC one, so the interop harness can pair its `conn{id=N}` span with that close.
+#[tokio::test]
+async fn relay_websocket_logs_its_close_under_a_cluster_id() {
+	use tracing_subscriber::layer::SubscriberExt;
+
+	let logs = Logs::default();
+	// Only the connection target, as the interop harness keeps, so the span and its close
+	// must both log there.
+	let subscriber = tracing_subscriber::fmt()
+		.with_ansi(false)
+		.with_writer(logs.clone())
+		.finish()
+		.with(tracing_subscriber::filter::Targets::new().with_target("moq_relay::connection", tracing::Level::INFO));
+	// Thread-local, which covers the relay: the test's current-thread runtime runs its tasks.
+	let _logging = tracing::subscriber::set_default(subscriber);
+
+	let cluster = new_cluster();
+	// Take an id as a QUIC accept would, so a WebSocket counter of its own would reuse it.
+	let id = cluster.next_connection_id() + 1;
+	let mut config = web::Config::default();
+	config.ws = true;
+	config.http.listen = Some("127.0.0.1:0".parse().expect("parse listen"));
+	let web = build_web_with(config, cluster).await;
+	let port = web.addrs().http.expect("HTTP listener is configured").port();
+	let web_handle = tokio::spawn(async move { web.run().await.expect("relay web server") });
+
+	let url: url::Url = format!("ws://127.0.0.1:{port}/smoke").parse().expect("parse url");
+	let (client, connection) = tokio::time::timeout(
+		TIMEOUT,
+		connect_once(client().with_subscriber(moq_tokio::origin::spawn()), url),
+	)
+	.await
+	.expect("connect timeout")
+	.expect("connect failed");
+	tokio::time::timeout(TIMEOUT, logs.wait_for(&format!("conn{{id={id} ")))
+		.await
+		.expect("the WebSocket session was not numbered on the cluster counter");
+
+	let _ = connection.close().await;
+	drop(client);
+	tokio::time::timeout(TIMEOUT, logs.wait_for(&format!("connection closed id={id}")))
+		.await
+		.expect("the WebSocket session's close was not logged");
+
+	web_handle.abort();
+}
+
 /// Read announcements until `until` shows up, returning every active prefix seen.
 async fn announced_until(announcements: &mut moq_net::announce::Consumer, until: &str) -> Vec<String> {
 	let mut seen = Vec::new();
@@ -235,7 +332,7 @@ async fn hidden_broadcasts_need_a_lite07_opt_in() {
 	let pub_origin = moq_tokio::origin::spawn();
 	let hidden = pub_origin.create_broadcast(".x/y").expect("create hidden");
 	hidden.announce(Default::default()).expect("announce hidden");
-	let track = hidden.create_track("video", None).expect("create track");
+	let track = hidden.create_track("video", timed()).expect("create track");
 	track
 		.append_group()
 		.expect("append group")
@@ -393,7 +490,7 @@ async fn relay_https_terminates_tls() {
 	config.https.listen = Some("127.0.0.1:0".parse().expect("parse listen"));
 	config.https.cert = vec![cert_path];
 	config.https.key = vec![key_path];
-	let web = build_web_with(config).await;
+	let web = build_web_with(config, new_cluster()).await;
 	let port = web.addrs().https.expect("HTTPS listener is configured").port();
 
 	// Held past `serve`, which consumes the server: this is the whole point of
@@ -436,7 +533,7 @@ async fn relay_websocket_root_path_upgrades() {
 	let pub_origin = moq_tokio::origin::spawn();
 	let broadcast = pub_origin.create_broadcast("test").expect("create broadcast");
 	broadcast.announce(Default::default()).expect("create broadcast");
-	let track = broadcast.create_track("video", None).expect("create track");
+	let track = broadcast.create_track("video", timed()).expect("create track");
 	let mut group = track.append_group().expect("append group");
 	group
 		.write_frame(moq_net::Timestamp::ZERO, b"hello".as_ref())
@@ -508,7 +605,7 @@ async fn two_publish_only_clients_coexist() {
 	let pub_a = moq_tokio::origin::spawn();
 	let broadcast_a = pub_a.create_broadcast("alpha").expect("create broadcast a");
 	broadcast_a.announce(Default::default()).expect("create broadcast a");
-	let track_a = broadcast_a.create_track("video", None).expect("create track a");
+	let track_a = broadcast_a.create_track("video", timed()).expect("create track a");
 	track_a
 		.append_group()
 		.expect("append group a")
@@ -518,7 +615,7 @@ async fn two_publish_only_clients_coexist() {
 	let pub_b = moq_tokio::origin::spawn();
 	let broadcast_b = pub_b.create_broadcast("beta").expect("create broadcast b");
 	broadcast_b.announce(Default::default()).expect("create broadcast b");
-	let track_b = broadcast_b.create_track("video", None).expect("create track b");
+	let track_b = broadcast_b.create_track("video", timed()).expect("create track b");
 	track_b
 		.append_group()
 		.expect("append group b")
@@ -612,7 +709,7 @@ async fn spawn_accept_relay(
 				.with_shutdown(moq_relay::shutdown::Observer::disabled());
 			id += 1;
 			tokio::spawn(async move {
-				let _ = conn.run().await;
+				conn.run().await;
 			});
 		}
 	});
@@ -650,7 +747,7 @@ async fn internal_tcp_round_trip() {
 	let pub_origin = moq_tokio::origin::spawn();
 	let broadcast = pub_origin.create_broadcast("test").expect("create broadcast");
 	broadcast.announce(Default::default()).expect("create broadcast");
-	let track = broadcast.create_track("video", None).expect("create track");
+	let track = broadcast.create_track("video", timed()).expect("create track");
 	let mut group = track.append_group().expect("append group");
 	group
 		.write_frame(moq_net::Timestamp::ZERO, b"hello".as_ref())
@@ -753,7 +850,7 @@ async fn internal_unix_round_trip() {
 	let pub_origin = moq_tokio::origin::spawn();
 	let broadcast = pub_origin.create_broadcast("test").expect("create broadcast");
 	broadcast.announce(Default::default()).expect("create broadcast");
-	let track = broadcast.create_track("video", None).expect("create track");
+	let track = broadcast.create_track("video", timed()).expect("create track");
 	let mut group = track.append_group().expect("append group");
 	group
 		.write_frame(moq_net::Timestamp::ZERO, b"hello".as_ref())
@@ -845,7 +942,7 @@ async fn path_round_trip(version: moq_net::Version, pub_url: url::Url, sub_url: 
 	let pub_origin = moq_tokio::origin::spawn();
 	let bc = pub_origin.create_broadcast(broadcast).expect("create broadcast");
 	bc.announce(Default::default()).expect("create broadcast");
-	let track = bc.create_track("video", None).expect("create track");
+	let track = bc.create_track("video", timed()).expect("create track");
 	let mut group = track.append_group().expect("append group");
 	group
 		.write_frame(moq_net::Timestamp::ZERO, b"hello".as_ref())

@@ -42,9 +42,8 @@ connection (`wss://`) and keep whichever wins. A small multiplexer,
 [qmux](/draft/qmux-websocket), carries MoQ streams over the socket. It works
 everywhere but cannot escape TCP head-of-line blocking, so priority and resets
 only help once bytes leave the TCP queue. The fallback is automatic in every
-client; the relay enables it with `[web.https]`. A native Rust client that
-lands on WebSocket keeps dialing QUIC and moves the session over once QUIC
-succeeds.
+client; the relay enables it with `[web.https]`. A session that lands on
+WebSocket stays there until it ends; the next connect races again.
 
 ## Raw QUIC (native)
 
@@ -83,7 +82,8 @@ punching. Discovery still publishes the endpoint's addresses to n0's DNS
 whichever way it is configured. Browsers can't use iroh at all: WebTransport
 gives a page a connection, not an endpoint.
 
-The relay opts in with `[iroh] enabled = true` and a persisted `secret` so the
+Build the relay from source with `cargo build -p moq-relay --release --features iroh`,
+then opt in with `[iroh] enabled = true` and a persisted `secret` so the
 endpoint id survives restarts. See the [config reference](/bin/relay/config#iroh).
 
 ## Custom Rust transports

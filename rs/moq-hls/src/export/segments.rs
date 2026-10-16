@@ -52,7 +52,7 @@ struct State {
 /// Numbers the broadcast's content timeline: the sequence bumps wherever the timeline breaks.
 ///
 /// Held once by the timeline fanout rather than per rendition, so every rendition stamps a
-/// record with the same sequence even when one isn't listing rows (waiting to rebind) or
+/// record with the same sequence even when one isn't listing rows (its sibling ended) or
 /// cleared its own window.
 #[derive(Default)]
 pub(crate) struct Discontinuities {
@@ -102,17 +102,28 @@ pub(crate) fn evicts(window: Duration, len: usize, rest: Duration, keeps_start: 
 
 /// Whether a player can start at a `reference` record: audio starts anywhere, video only at a
 /// group start that is a sync point.
-pub(crate) fn starts(reference: &(Kind, String), keyframe: bool, start: &hang::timeline::Position) -> bool {
+pub(crate) fn starts(reference: &ReferenceKey, keyframe: bool, start: &hang::timeline::Position) -> bool {
 	reference.0 == Kind::Audio || (keyframe && start.frame == 0)
 }
 
-/// The rendition a broadcast's segment boundaries come from.
-pub(crate) type Reference = Arc<(Kind, String)>;
+/// A reference's kind, rendition ID, and the track its timeline indexes. The track is part of it
+/// because it can change under one ID, and the new track's records are another numbering.
+pub(crate) type ReferenceKey = (Kind, String, String);
 
-/// The URI tag naming `reference`'s segment numbering: a hash of its kind and name, so every edge
+/// The rendition a broadcast's segment boundaries come from.
+pub(crate) type Reference = Arc<ReferenceKey>;
+
+/// The URI tag naming `reference`'s segment numbering: a hash of its kind, ID and track, so every edge
 /// derives the same one and it never contains a URI separator.
-pub(crate) fn tag(reference: &(Kind, String)) -> String {
-	let digest = Sha256::digest(format!("{}/{}", reference.0.as_str(), reference.1));
+pub(crate) fn tag(reference: &ReferenceKey) -> String {
+	let (kind, id, track) = reference;
+	// A track named by its ID hashes as before, so edges on either side of an upgrade agree.
+	// An override uses a separator the ID form cannot produce after the kind, and length-prefixes
+	// the ID, so no pair of names can hash the bytes of another reference.
+	let digest = match id == track {
+		true => Sha256::digest(format!("{}/{id}", kind.as_str())),
+		false => Sha256::digest(format!("{}\0{}\0{id}{track}", kind.as_str(), id.len())),
+	};
 	// 32 bits: the tag only has to tell apart the references one broadcast ever switches between.
 	digest[..4].iter().map(|b| format!("{b:02x}")).collect()
 }
@@ -345,7 +356,7 @@ impl Producer {
 
 	/// The newest group of `reference` a row starts on a keyframe, used to bootstrap an init
 	/// segment for inline-parameter-set codecs.
-	pub fn latest_keyframe_group(&self, reference: &(Kind, String)) -> Option<u64> {
+	pub fn latest_keyframe_group(&self, reference: &ReferenceKey) -> Option<u64> {
 		let state = self.state.read();
 		state
 			.rows
@@ -400,6 +411,7 @@ impl Producer {
 			state: self.state.consume(),
 			rendition,
 			after: None,
+			feed: None,
 		}
 	}
 }
@@ -427,15 +439,35 @@ pub struct Segment {
 
 /// A cursor over one rendition's segments, in timeline order.
 ///
-/// Obtained from [`Rendition::segments`](super::Rendition::segments). Drives the same
-/// fetch-on-demand path the HTTP serve path uses, so it adds no standing traffic: each
-/// [`next`](Self::next) awaits the next segment, then FETCHes and transmuxes it.
+/// Obtained from [`Rendition::segments`](super::Rendition::segments). Each
+/// [`next`](Self::next) awaits the next segment, then FETCHes and transmuxes it through the
+/// path the HTTP serve path uses. The cursor also holds a live subscription to the media
+/// track, so each group reaches the cache as it is published and that FETCH is a hit. A
+/// cursor reads every group anyway, so this costs no extra traffic, and a source without
+/// FETCH (moq-lite before 05) can serve a group no other way.
 pub struct Consumer {
 	state: kio::Consumer<State>,
 	rendition: Arc<Rendition>,
 	/// Last fetched or skipped segment, with the reference numbering it; errors leave it unchanged
 	/// so callers can retry.
 	after: Option<(Reference, u64)>,
+	feed: Option<Feed>,
+}
+
+/// The live subscription a [`Consumer`] holds on its rendition's media track.
+struct Feed {
+	/// What it subscribed through: a re-issued sibling bind gets a fresh feed.
+	binding: Arc<moq_mux::Binding>,
+	state: FeedState,
+}
+
+enum FeedState {
+	/// Waiting for the binding to resolve the broadcast.
+	Binding,
+	Subscribing(moq_net::track::Subscribing),
+	Live(Box<moq_net::track::Subscriber>),
+	/// The track can't be subscribed; fetches fail on their own.
+	Failed,
 }
 
 impl Consumer {
@@ -476,7 +508,8 @@ impl Consumer {
 		}
 	}
 
-	fn poll_next(&self, waiter: &kio::Waiter) -> Poll<Option<Row>> {
+	fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Option<Row>> {
+		self.poll_feed(waiter);
 		let poll = self
 			.state
 			.poll(waiter, |state| match state.next_after(self.after.as_ref()) {
@@ -491,6 +524,40 @@ impl Consumer {
 			Poll::Pending => Poll::Pending,
 		}
 	}
+
+	/// Hold a live subscription on the media track the rendition is bound to now.
+	fn poll_feed(&mut self, waiter: &kio::Waiter) {
+		// Also ends the window on an ended sibling, which nothing else may wake this cursor for.
+		let binding = self.rendition.poll_media(waiter);
+		let feed = match &mut self.feed {
+			Some(feed) if Arc::ptr_eq(&feed.binding, &binding) => feed,
+			feed => feed.insert(Feed {
+				binding,
+				state: FeedState::Binding,
+			}),
+		};
+		loop {
+			feed.state = match &mut feed.state {
+				FeedState::Binding => match self.rendition.poll_subscribe(&feed.binding, waiter) {
+					Poll::Ready(Some(subscribing)) => FeedState::Subscribing(subscribing),
+					Poll::Ready(None) => FeedState::Failed,
+					Poll::Pending => return,
+				},
+				FeedState::Subscribing(subscribing) => match subscribing.poll_ok(waiter) {
+					Poll::Ready(Ok(subscriber)) => FeedState::Live(Box::new(subscriber)),
+					Poll::Ready(Err(_)) => FeedState::Failed,
+					Poll::Pending => return,
+				},
+				FeedState::Live(subscriber) => {
+					// Drop each group as it arrives: the cache keeps it for the fetch, and a
+					// subscription that resumed across routes only pulls while it is read.
+					while let Poll::Ready(Ok(Some(_))) = subscriber.poll_recv_group(waiter) {}
+					return;
+				}
+				FeedState::Failed => return,
+			};
+		}
+	}
 }
 
 #[cfg(test)]
@@ -502,7 +569,7 @@ mod tests {
 		Row {
 			index: segment,
 			segment,
-			reference: Arc::new((Kind::Video, "video".to_string())),
+			reference: Arc::new((Kind::Video, "video".to_string(), "video".to_string())),
 			frames: hang::timeline::Position::group(group)..hang::timeline::Position::group(group + 1),
 			keyframe: true,
 			duration: Duration::from_millis(duration_ms),
@@ -632,7 +699,7 @@ mod tests {
 			window,
 		);
 
-		let video = (Kind::Video, "video".to_string());
+		let video = (Kind::Video, "video".to_string(), "video".to_string());
 		let tag = tag(&video);
 		assert_eq!(
 			live.row(&tag, 0).unwrap().frames,
@@ -645,7 +712,10 @@ mod tests {
 			Some(0),
 			"row 1 does not start on a keyframe"
 		);
-		assert_eq!(live.latest_keyframe_group(&(Kind::Audio, "video".to_string())), None);
+		assert_eq!(
+			live.latest_keyframe_group(&(Kind::Audio, "video".to_string(), "video".to_string())),
+			None
+		);
 	}
 
 	#[test]
@@ -703,7 +773,7 @@ mod tests {
 
 		live.clear();
 		let switched = Row {
-			reference: Arc::new((Kind::Video, "other".to_string())),
+			reference: Arc::new((Kind::Video, "other".to_string(), "other".to_string())),
 			..row(0, 0, 0, 2_000)
 		};
 		live.push(switched, window);
@@ -713,5 +783,19 @@ mod tests {
 		};
 		assert_eq!(next.segment, 0);
 		assert_ne!(tag(&next.reference), tag(&old.reference), "its URLs carry another tag");
+	}
+
+	#[test]
+	fn tag_encodings_never_collide() {
+		let key = |id: &str, track: &str| (Kind::Video, id.to_string(), track.to_string());
+		// The ID form and an override cannot share bytes, whatever the names contain.
+		assert_ne!(tag(&key("a\0b", "a\0b")), tag(&key("a", "b")));
+		// Nor can two overrides that split the same bytes differently.
+		assert_ne!(tag(&key("ab", "c")), tag(&key("a", "bc")));
+		// A track named by its ID keeps the tag it had before overrides existed.
+		assert_eq!(tag(&key("video", "video")), {
+			let digest = Sha256::digest("video/video");
+			digest[..4].iter().map(|b| format!("{b:02x}")).collect::<String>()
+		});
 	}
 }

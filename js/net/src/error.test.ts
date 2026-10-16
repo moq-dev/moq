@@ -93,6 +93,11 @@ test("the error type names the registry the code came from", () => {
 	expect(Number(stream.code)).toBe(Number(session?.code));
 });
 
+test("invalid request IDs keep their session registry code", () => {
+	expect(Number(SessionCode.InvalidRequestId)).toBe(0x4);
+	expect(fromClose({ closeCode: 0x4 })?.code).toBe(SessionCode.InvalidRequestId);
+});
+
 test("the code types reject the other registry", () => {
 	new StreamError(StreamCode.DeliveryTimeout);
 	new SessionError(SessionCode.Unauthorized);
@@ -209,15 +214,24 @@ test("the code tables match the spec", () => {
 	expect(Number(SessionCode.Cancel)).toBe(0x0);
 	expect(Number(SessionCode.Unauthorized)).toBe(0x2);
 	expect(Number(SessionCode.GoawayTimeout)).toBe(0x10);
+	expect(Number(SessionCode.AuthTokenCacheOverflow)).toBe(0x13);
 	expect(Number(SessionCode.Version)).toBe(0x15);
+	expect(Number(SessionCode.UnknownAuthTokenAlias)).toBe(0x17);
+	expect(Number(SessionCode.TooManyRequestUpdates)).toBe(0x1b);
 	expect(Number(StreamCode.Cancel)).toBe(0x1);
 	expect(Number(StreamCode.SessionClosed)).toBe(0x3);
 	expect(Number(StreamCode.TooFarBehind)).toBe(0x5);
 
-	// The session table carries only what the draft assigns.
+	// Session codes retain moq-transport assignments below 32; Lite owns 48-63.
 	for (const code of Object.values(SessionCode)) {
-		expect(code).toBeLessThan(32);
+		if (code === SessionCode.Unsupported) {
+			expect(code).toBeGreaterThanOrEqual(48);
+			expect(code).toBeLessThan(64);
+		} else {
+			expect(code).toBeLessThan(32);
+		}
 	}
+	expect(Number(SessionCode.Unsupported)).toBe(0x30);
 
 	// The stream table adds moq-lite's own 48-63 assignments. 32-47 is reserved and
 	// carries nothing, so no code sits there.

@@ -15,6 +15,11 @@ use moq_relay::{
 };
 use url::Url;
 
+/// A millisecond track: the frames written here carry timestamps.
+fn timed() -> moq_net::track::Info {
+	moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
+}
+
 const TEST_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Bound `fut` by [`TEST_TIMEOUT`], panicking with `step` so a hang names the
@@ -137,14 +142,14 @@ async fn cluster_continues_a_group_split_by_goaway_inner() {
 	let upstream_origin = moq_tokio::origin::spawn();
 	let broadcast = upstream_origin.create_broadcast("cam").expect("create broadcast");
 	broadcast.announce(Default::default()).expect("announce");
-	let track = broadcast.create_track("video", None).expect("create track");
+	let track = broadcast.create_track("video", timed()).expect("create track");
 
 	let (port_a, mut accepted_a, _handle_a) = spawn_upstream(upstream_origin.clone()).await;
 	let (port_b, mut accepted_b, _handle_b) = spawn_upstream(upstream_origin.clone()).await;
 
 	let mut client_config = moq_tokio::connect::Config::default();
 	client_config.tls.insecure = Some(true);
-	client_config.goaway.handover = Duration::from_secs(2);
+	client_config.goaway.handover = Some(Duration::from_secs(2));
 	let client = client_config.init(Default::default()).expect("client init");
 
 	let mut cluster_config = cluster::Config::default();
@@ -280,7 +285,7 @@ async fn cluster_migrates_on_upstream_goaway_inner() {
 		let upstream_origin = moq_tokio::origin::spawn();
 		let broadcast = upstream_origin.create_broadcast("cam").expect("create broadcast");
 		broadcast.announce(Default::default()).expect("create broadcast");
-		let track = broadcast.create_track("video", None).expect("create track");
+		let track = broadcast.create_track("video", timed()).expect("create track");
 
 		let (port_a, mut accepted_a, _handle_a) = spawn_upstream(upstream_origin.clone()).await;
 		let (port_b, mut accepted_b, _handle_b) = spawn_upstream(upstream_origin.clone()).await;
@@ -289,7 +294,7 @@ async fn cluster_migrates_on_upstream_goaway_inner() {
 		let mut client_config = moq_tokio::connect::Config::default();
 		client_config.tls.insecure = Some(true);
 		// Short handover so the test observes the old session close quickly.
-		client_config.goaway.handover = Duration::from_secs(2);
+		client_config.goaway.handover = Some(Duration::from_secs(2));
 		let client = client_config.init(Default::default()).expect("client init");
 
 		let mut cluster_config = cluster::Config::default();
@@ -414,7 +419,7 @@ async fn spawn_relay_with_upstream(
 	let mut client_config = moq_tokio::connect::Config::default();
 	client_config.tls.insecure = Some(true);
 	// Short handover so the test observes the old session close quickly.
-	client_config.goaway.handover = Duration::from_secs(2);
+	client_config.goaway.handover = Some(Duration::from_secs(2));
 	// Only lite-07 carries the epoch that lets a failover resume the subscription.
 	client_config.version = vec![LITE_07.parse().unwrap()];
 	let client = client_config.init(Default::default()).expect("client init");
@@ -440,7 +445,7 @@ async fn spawn_relay_with_upstream(
 				.with_shutdown(moq_relay::shutdown::Observer::disabled());
 			id += 1;
 			tokio::spawn(async move {
-				let _ = conn.run().await;
+				conn.run().await;
 			});
 		}
 	});
@@ -480,7 +485,7 @@ async fn cluster_diamond_goaway_seamless_failover_inner() {
 	broadcast
 		.announce(moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint()))
 		.expect("create broadcast");
-	let track = broadcast.create_track("video", None).expect("create track");
+	let track = broadcast.create_track("video", timed()).expect("create track");
 
 	let (top_port, mut top_accepted, _top_handle) = spawn_upstream(top_origin.clone()).await;
 	let top_url = format!("tcp://127.0.0.1:{top_port}/");
@@ -498,7 +503,7 @@ async fn cluster_diamond_goaway_seamless_failover_inner() {
 	let mut client_config = moq_tokio::connect::Config::default();
 	client_config.tls.insecure = Some(true);
 	// Short handover so the test observes the old session close quickly.
-	client_config.goaway.handover = Duration::from_secs(2);
+	client_config.goaway.handover = Some(Duration::from_secs(2));
 	client_config.version = vec![LITE_07.parse().unwrap()];
 	let mid_a_client = client_config.init(Default::default()).expect("mid-a client init");
 	let (_mid_a_upstream_client, mid_a_upstream) = within(
@@ -756,14 +761,14 @@ async fn cluster_reconnects_on_empty_uri_goaway_inner() {
 	broadcast
 		.announce(moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint()))
 		.expect("create broadcast");
-	let track = broadcast.create_track("video", None).expect("create track");
+	let track = broadcast.create_track("video", timed()).expect("create track");
 
 	let (port, mut accepted, _handle) = spawn_upstream(upstream_origin.clone()).await;
 
 	let mut client_config = moq_tokio::connect::Config::default();
 	client_config.tls.insecure = Some(true);
 	// Short handover so the test observes the old session close quickly.
-	client_config.goaway.handover = Duration::from_secs(2);
+	client_config.goaway.handover = Some(Duration::from_secs(2));
 	// Only lite-07 carries the epoch that lets the redial resume the subscription.
 	client_config.version = vec![LITE_07.parse().unwrap()];
 	let client = client_config.init(Default::default()).expect("client init");
@@ -890,11 +895,11 @@ async fn goaway_handover_is_enforced_while_the_replacement_dial_hangs_inner() {
 	let handover = Duration::from_millis(200);
 	let mut client_config = moq_tokio::connect::Config::default();
 	client_config.tls.insecure = Some(true);
-	client_config.goaway.handover = handover;
+	client_config.goaway.handover = Some(handover);
 	// The GOAWAY has to land on a *healthy* session, which is the path that goes
 	// straight into the replacement dial. Below this bar it takes the immediate
 	// redirect path instead, whose sleep polls the drain either way.
-	client_config.backoff.initial = Duration::from_millis(50);
+	client_config.backoff.initial = Some(Duration::from_millis(50));
 	let client = client_config.init(Default::default()).expect("client init");
 
 	let url: Url = format!("tcp://127.0.0.1:{port}/").parse().expect("parse url");

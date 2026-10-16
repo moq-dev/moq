@@ -3,8 +3,7 @@
 ## Goal
 
 The work in flight now, in two independent tracks. Relay hardening: legal
-moq-transport input never fails a session ahead of Seattle interop on
-2026-10-12, every resource a peer can make the relay hold is bounded by what
+moq-transport input never fails a session in current interop coverage, every resource a peer can make the relay hold is bounded by what
 it sent or by a budget, and no peer input panics the process. Identity: nothing treats who published a route as what it carries; a path and
 the epoch on its route are the only content identity, and every first-party
 publisher that can restart mints a fresh epoch, so #4741 stalls nobody.
@@ -53,18 +52,37 @@ connection idles out.
 Audio playout: the jitter target is default in both languages (#4162); the
 [line](/quest/m1/audio-jitter-target/README.md) moved to m1 in the
 2026-10-08 audit, since only a manual browser proof and a native trace replay
-remain and no release waits on them.
+remain and the release only requires the production clock and playback contracts
+that depend on them.
+
+Interop on main (2026-10-13): the cross-client matrix failed with `unroutable`
+whenever WebSocket won the connect race: since #5294, #4180's upgrade
+retired epochless handles before its held `Restart` reached anyone. Handles
+now retire only once it is deliverable. First-party consumers following it
+moved to m1 (maintainer, 2026-10-13), since the upgrade is removed.
+
+Crashes (2026-10-13, #5407): a publisher on a host whose wall clock reads
+before 2020 panics, and `panic = "abort"` turned any library panic into a
+dead host app. Both joined m0 (maintainer) and are fixed: the clock at its
+source, and unwinding so a panic closes only its connection.
+
+Nightly on main (triaged 2026-10-13): two build breaks from 2026-10-11 get
+quests here. The nixpkgs bump broke the Linux zigbuild release builds (its
+GCC 16 miscompiles lld 21, fixed upstream and waiting on `nixpkgs-unstable`),
+and fat LTO in the release profile broke the fuzz build. Audio quality has been
+red since it landed, against budgets recorded locally; re-measuring them on
+the runner moved here from Watch (maintainer, 2026-10-13). The other red jobs
+have fixes on `main`: macOS tests (#5335), drill-sensitivity (#5338), loom
+(#5389) and Windows tests (#5339).
 
 ## Required
 
-- [Self-hosted CI](/quest/m0/self-hosted-ci.md) - same-repo Check and Test run on a self-hosted NixOS runner with a main-written local cache, behind a `CI_RUNNER` kill switch
-- [CI host](/quest/m0/ci-host.md) - the maintainer brings up the spare desktop as the `moq-ci` and `moq-gpu` runner host
-- [Draft-22 media on 0.17](/quest/m0/release-22/README.md) - a 0.17.x with the LOCATION_FILTER and FIRST_OBJECT fixes and moq-noq 1.3.5, before Seattle
-- [TS duration fidelity](/quest/m0/ts-duration-fidelity.md) - Interop's TS compliance captures the whole round-tripped stream again, fixing a regression that turns Interop red on main
-- [Interop latecomer control](/quest/m0/interop-latecomer-control.md) - the lagging-latecomer control fails as designed, and a red Interop step no longer skips the TS steps
-- [Paused spinner](/quest/m0/watch-paused-spinner.md) - the watch buffering spinner never covers the paused play button, so Interop's resume step can click it
-- [Check base](/quest/m0/check-base.md) - `just check` diffs against the PR's base whatever the local branch tracks, so scoped checks stay scoped
+- [CI cost and latency](/quest/m0/ci/README.md) - PRs stop queueing behind hosted runner caps: macOS and Windows move to the merge queue, caches move to R2, and setup is skipped when no work is selected
+- [Draft-22 media on 0.17](/quest/m0/release-22/README.md) - a 0.17.x with the LOCATION_FILTER and FIRST_OBJECT fixes and moq-noq 1.3.5, then a patch with draft-20+ FETCH and the unset-clock and quiet-edge fixes
+- [nixpkgs ships the lld fix](/quest/m0/nixpkgs-lld-fix.md) - waiting on NixOS/nixpkgs#568680 to reach `nixpkgs-unstable`, which the release build fix bumps to
+- [Release builds link](/quest/m0/release-link.md) - the Linux zigbuild release binaries and moq-gst packages link again after the 2026-10-11 nixpkgs bump, so the next release cut can publish
+- [Windows relay stack](/quest/m0/relay-windows-stack.md) - a debug moq-relay starts on Windows instead of overflowing its 1 MiB main-thread stack (#5563)
 - [web-transport releases the qmux fixes](/quest/m0/qmux-credit-upstream.md) - waiting on moq-dev/web-transport#412 and #413 to merge and ship, which qmux credit bumps to
 - [qmux credit](/quest/m0/qmux-credit.md) - qmux returns connection credit for dropped and stopped streams and delivers its close frame, on both lines
-- [JS track takeover](/quest/m0/js-track-takeover.md) - JS `createTrack` answers a queued request and continues its sequences, as Rust does, so a re-announced `@moq/publish` catalog never restarts its groups
 - [Broadcast epochs](/quest/m0/broadcast-epoch/README.md) - every first-party publisher that can restart mints a fresh route epoch, the newest wins a path, and only routes with the same epoch resume a subscription
+- [iroh off by default in moq-cli](/quest/m0/iroh-opt-in.md) - `moq-cli` and every distribution build without iroh; `--features iroh` restores it

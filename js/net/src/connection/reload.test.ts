@@ -213,7 +213,7 @@ async function waitUntil(pred: () => boolean): Promise<void> {
 	throw new Error("timed out waiting for condition");
 }
 
-test("an announced request ends with its session, and a fresh one follows the reconnect", async () => {
+test("an announced request follows the reconnect on the same handle", async () => {
 	const original = globalThis.WebTransport;
 	const url = new URL("https://example.com/");
 
@@ -241,25 +241,16 @@ test("an announced request ends with its session, and a fresh one follows the re
 		consume: clientOrigin,
 	});
 	const watched = clientOrigin.request(Path.from("late"), { announced: true });
-	let again: ReturnType<typeof clientOrigin.request> | undefined;
 
 	try {
 		await waitUntil(() => watched.active.peek() !== undefined);
 		const first = watched.active.peek();
 
-		// The session dies: the request ends rather than clinging to a dead broadcast, since the
-		// reconnect's announcement is another publisher instance.
+		// The session dies; the same request follows the next session's announcement.
 		sessions[0]?.abort();
-		await waitUntil(() => watched.closed.peek() !== undefined);
-		expect(watched.active.peek()).toBeUndefined();
-
-		// A fresh request waits for the reconnect's announcement and consumes on the new session.
-		const fresh = clientOrigin.request(Path.from("late"), { announced: true });
-		again = fresh;
-		await waitUntil(() => fresh.active.peek() !== undefined);
-		expect(fresh.active.peek()).not.toBe(first);
+		await waitUntil(() => watched.active.peek() !== undefined && watched.active.peek() !== first);
+		expect(watched.closed.peek()).toBeUndefined();
 	} finally {
-		again?.close();
 		watched.close();
 		reload.close();
 		clientOrigin.close();
@@ -515,14 +506,16 @@ test("origins span reconnects: local re-announces, remote re-populates", async (
 
 	// Each connect attempt gets a fresh server session that publishes "remote" and records
 	// what the client announced to it.
-	const servers: { session: { abort: () => void }; saw: OriginProducer }[] = [];
+	const servers: { session: { abort: () => void }; saw: OriginProducer; watching: { close(): void } }[] = [];
 	const stub = function StubWebTransport() {
 		const pair = createMockTransportPair(Lite.ALPN_05);
 		const saw = new OriginProducer();
+		// The server watches everything, so it asks the client for announcements.
+		const watching = saw.announced();
 		const serverOrigin = new OriginProducer();
 		void accept(pair.server, url, { publish: serverOrigin.consume(), consume: saw }).then((session) => {
 			publish(serverOrigin, Path.from("remote"));
-			servers.push({ session, saw });
+			servers.push({ session, saw, watching });
 		});
 		return pair.client;
 	};
@@ -537,6 +530,8 @@ test("origins span reconnects: local re-announces, remote re-populates", async (
 		consume: subscribeOrigin,
 	});
 	const reader = subscribeOrigin.consume();
+	// A watch held across the reconnect: each session re-opens its announce request.
+	const watching = reader.announced();
 
 	try {
 		// First session: the server's broadcast lands in the client origin, and the client's
@@ -553,6 +548,8 @@ test("origins span reconnects: local re-announces, remote re-populates", async (
 		await waitUntil(() => wireOf(reader).routes(Path.from("remote")));
 		await waitUntil(() => (servers[1] ? wireOf(servers[1].saw).routes(Path.from("mine")) : false));
 	} finally {
+		watching.close();
+		for (const server of servers) server.watching.close();
 		reload.close();
 		publishOrigin.close();
 		subscribeOrigin.close();
@@ -566,7 +563,6 @@ test("closing an announce consumer during upstream teardown does not append retr
 	const reload = new Reload({ enabled: false });
 	reload.established.set({
 		probe: new Signal(undefined),
-		discovery: true,
 		announced: () => upstream.consume(),
 		stats: async () => undefined,
 	} as unknown as import("./established.ts").Established);

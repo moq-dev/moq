@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:moq/media.dart' as moq_media;
+import 'package:moq/flate.dart' as moq_flate;
 import 'package:moq/json.dart' as moq_json;
 import 'package:moq/moq.dart';
 import 'package:test/test.dart';
@@ -16,15 +17,100 @@ Future<AnnounceEvent> nextRoute(AnnounceConsumer announced) async {
 }
 
 void main() {
+  test('container timebase belongs to one broadcast', () {
+    final owner = BroadcastProducer();
+    final other = BroadcastProducer();
+    final timebase = moq_media.Timebase(broadcast: owner);
+    expect(
+      () => moq_media.ContainerProducer(
+        broadcast: other,
+        init: moq_media.ContainerInit(
+          format: moq_media.ContainerFormat.fmp4,
+          data: Uint8List(0),
+          timebase: timebase,
+        ),
+      ),
+      throwsA(isA<CodecMoqException>()),
+    );
+    expect(
+      () => moq_media.ContainerStreamProducer(
+        broadcast: other,
+        init: moq_media.ContainerStreamInit(
+          format: moq_media.ContainerFormat.fmp4,
+          timebase: timebase,
+        ),
+      ),
+      throwsA(isA<CodecMoqException>()),
+    );
+    owner.close();
+    expect(
+      () => moq_media.Timebase(broadcast: owner),
+      throwsA(isA<ClosedMoqException>()),
+    );
+    other.close();
+  });
+
+  test('diagnostic errors expose their named reason', () {
+    final error = TransportMoqException('reset');
+    expect(error.reason, 'reset');
+  });
+
   test('catalog handle closes with its broadcast', () {
     final broadcast = BroadcastProducer();
     final catalog = moq_media.CatalogProducer(broadcast: broadcast);
     catalog.setSection(name: 'app', json: '{"value":42}');
+    catalog.now();
     broadcast.close();
     expect(
       () => catalog.removeSection(name: 'app'),
       throwsA(isA<ClosedMoqException>()),
     );
+    expect(() => catalog.now(), throwsA(isA<ClosedMoqException>()));
+  });
+
+  for (final timestamp in <int?>[null, 123456]) {
+    for (final mode in ['snapshot', 'stream']) {
+      test('flate $mode preserves timestamp $timestamp', () async {
+        final broadcast = BroadcastProducer();
+        final info = timestamp == null ? null : TrackInfo(timescale: 1000000);
+        final track = broadcast.publishTrack(name: 'data', info: info);
+        final consumer = track.consume(subscription: null);
+        final payload = utf8.encode('payload');
+        if (mode == 'snapshot') {
+          final producer = moq_flate.SnapshotProducer(
+            broadcast: broadcast,
+            track: track,
+            config: moq_flate.Config(),
+          );
+          producer.update(payload: payload, timestampUs: timestamp);
+          producer.finish();
+        } else {
+          final producer = moq_flate.StreamProducer(
+            broadcast: broadcast,
+            track: track,
+            config: moq_flate.Config(),
+          );
+          producer.append(payload: payload, timestampUs: timestamp);
+          producer.finish();
+        }
+        final frame = await consumer.readFrame().timeout(timeout);
+        expect(frame?.payload, payload);
+        expect(frame?.timestampUs, timestamp);
+        broadcast.close();
+      });
+    }
+  }
+
+  test('raw writes without timestamps stay untimed', () async {
+    final broadcast = BroadcastProducer();
+    final track = broadcast.publishTrack(name: 'untimed', info: null);
+    final consumer = track.consume(subscription: null);
+    track.writeFrame(frame: Frame(payload: utf8.encode('payload')));
+    final frame = await consumer.readFrame().timeout(timeout);
+    expect(frame?.timestampUs, isNull);
+    expect(consumer.info().timescale, isNull);
+    track.finish();
+    broadcast.close();
   });
 
   test('connects, announces, subscribes, and delivers a frame', () async {
@@ -57,7 +143,10 @@ void main() {
       (event) => event is AnnounceEventStart,
     );
     final broadcast = relay.createBroadcast(path: 'live');
-    final track = broadcast.publishTrack(name: 'events', info: null);
+    final track = broadcast.publishTrack(
+      name: 'events',
+      info: TrackInfo(timescale: 1000000),
+    );
     broadcast.announce(route: MoqRoute());
     final announced =
         (await announcement.timeout(timeout) as AnnounceEventStart).announce;
@@ -222,6 +311,30 @@ void main() {
     broadcast.announce(route: MoqRoute());
     expect(await nextRoute(announced), isA<AnnounceEventStart>());
     await consumer.requestBroadcast(path: 'live').timeout(timeout);
+    announced.cancel();
+    announced.dispose();
+  });
+
+  test('a new epoch restarts announce consumers', () async {
+    final origin = MoqOriginProducer(config: MoqOriginConfig());
+    final announced = origin.consume().announced(config: MoqAnnounceConfig());
+    final broadcast = origin.createBroadcast(path: 'epoch');
+
+    final first = mintEpoch();
+    expect(
+      epochTime('018bcfe5-6800-7000-8000-000000000000'),
+      DateTime.utc(2023, 11, 14, 22, 13, 20),
+    );
+    broadcast.announce(route: MoqRoute(epoch: first));
+    final start = await nextRoute(announced) as AnnounceEventStart;
+    expect(start.announce.route.epoch, first);
+
+    final second = mintEpoch();
+    broadcast.announce(route: MoqRoute(epoch: second));
+    final restart = await nextRoute(announced) as AnnounceEventRestart;
+    expect(restart.announce.route.epoch, second);
+
+    expect(() => epochTime('not-an-epoch'), throwsA(isA<MoqException>()));
     announced.cancel();
     announced.dispose();
   });

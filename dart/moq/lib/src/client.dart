@@ -178,9 +178,9 @@ final class Moq {
   Future<BroadcastConsumer> requestBroadcast(String path) =>
       session.consume().requestBroadcast(path: path);
 
-  /// The connection epoch: 1 for the connect that built this session, one more
+  /// How many times this session has connected: 1 for the connect that built it, one more
   /// on each reconnect. A server-accepted session stays at 1.
-  int get epoch => session.epoch();
+  int get connects => session.connects();
 
   /// The session's bandwidth allocator.
   ///
@@ -189,7 +189,11 @@ final class Moq {
   /// the room back.
   Bandwidth bandwidth() => session.bandwidth();
 
-  /// Gracefully close the session and stop the client.
+  /// Drain within one second, then stop the client.
+  ///
+  /// Explicit `moq-lite-07-wip` waits for the peer to receive finished tails; older
+  /// Lite versions, including the default lite-06, wait only for transport ACKs.
+  /// IETF also waits for transport ACKs.
   Future<void> close() async {
     try {
       await session.shutdown();

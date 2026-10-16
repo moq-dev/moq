@@ -16,7 +16,10 @@ use crate::{Error, timer, udp};
 /// Submission queue depth. The SQ only holds SQEs staged between submits,
 /// never in-flight operations, so it needs no relation to the socket pools;
 /// [`Shared::push`] submits inline whenever it fills.
+#[cfg(not(test))]
 const SQ_ENTRIES: u32 = 256;
+#[cfg(test)]
+const SQ_ENTRIES: u32 = 128;
 
 /// Completion queue depth. Every in-flight operation can post a completion
 /// (one per send buffer with GSO on, one per provided receive buffer, the
@@ -30,7 +33,14 @@ const SQ_ENTRIES: u32 = 256;
 /// No larger: the ring is charged to `RLIMIT_MEMLOCK` at 16 bytes per entry,
 /// most of each worker's footprint, and that budget is shared by every
 /// io_uring the user runs.
-const CQ_ENTRIES: u32 = 2048;
+const PRODUCTION_CQ_ENTRIES: u32 = 2048;
+#[cfg(not(test))]
+const CQ_ENTRIES: u32 = PRODUCTION_CQ_ENTRIES;
+// Unit tests exercise overflow handling but do not need production pool capacity.
+// Small rings leave room for independent nextest invocations under one user.
+// Keep the CQ above twice the SQ so the explicit-sizing regression stays sensitive.
+#[cfg(test)]
+const CQ_ENTRIES: u32 = 512;
 
 /// Maximum completions copied at once while teardown is deadline-bounded.
 const TEARDOWN_CQE_BATCH: usize = 64;
@@ -672,21 +682,35 @@ mod tests {
 	use crate::Timer as Deadline;
 	use std::time::Duration;
 
-	/// Kernel-gated: `None` (with a loud skip) below the 6.12 floor, so these
-	/// tests pass vacuously on older CI kernels and run everywhere else.
+	/// Local unsupported kernels may skip; strict CI must exercise the worker.
 	fn worker() -> Option<Worker> {
 		worker_with(Config::default())
 	}
 
 	fn worker_with(config: Config) -> Option<Worker> {
-		match Worker::new(config) {
+		worker_result(Worker::new(config), std::env::var_os("MOQ_STRICT").is_some())
+	}
+
+	fn worker_result(result: Result<Worker, Error>, required: bool) -> Option<Worker> {
+		match result {
 			Ok(worker) => Some(worker),
-			Err(Error::Unsupported(reason)) => {
+			Err(Error::Unsupported(reason)) if !required => {
 				eprintln!("skipping io_uring test: {reason}");
 				None
 			}
 			Err(err) => panic!("worker setup failed: {err}"),
 		}
+	}
+
+	#[test]
+	#[should_panic(expected = "worker setup failed")]
+	fn strict_worker_refuses_unsupported() {
+		worker_result(Err(Error::Unsupported("test capability".into())), true);
+	}
+
+	#[test]
+	fn optional_worker_skips_unsupported() {
+		assert!(worker_result(Err(Error::Unsupported("test capability".into())), false).is_none());
 	}
 
 	#[test]
@@ -899,18 +923,21 @@ mod tests {
 		// ceilings (plus the futex), or the kernel's overflow slow path
 		// becomes steady state for the workload the ceilings exist to serve.
 		// Fails when someone raises the udp defaults without revisiting
-		// CQ_ENTRIES.
+		// PRODUCTION_CQ_ENTRIES.
 		let config = udp::Config::default();
 		let per_socket = u32::from(config.tx_buffers_max) + u32::from(config.rx_buffers_max);
-		assert!(CQ_ENTRIES > per_socket, "CQ_ENTRIES fell behind the pool defaults");
+		assert!(
+			PRODUCTION_CQ_ENTRIES > per_socket,
+			"PRODUCTION_CQ_ENTRIES fell behind the pool defaults"
+		);
 	}
 
 	#[test]
 	fn the_ring_honors_the_requested_cq_depth() {
 		// The kernel-reported geometry, not the constant: dropping the
-		// `setup_cqsize` call would silently fall back to a CQ of twice the SQ
-		// (512), and the overflow test below cannot catch that because it
-		// expects overflow. This one pins the operative fix.
+		// `setup_cqsize` call would silently fall back to a CQ of twice the SQ.
+		// Both builds request more; the overflow test below cannot catch a
+		// smaller queue because it expects overflow.
 		let Some(worker) = worker() else { return };
 		let cq = worker.shared.ring.borrow().params().cq_entries();
 		assert!(cq >= CQ_ENTRIES, "kernel granted a {cq}-entry CQ, wanted {CQ_ENTRIES}");

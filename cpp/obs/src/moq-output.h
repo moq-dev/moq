@@ -51,18 +51,25 @@ public:
 	};
 	bool TryGetConnectionStats(ConnectionStats *out);
 
-	// Successful (re)connects after the first for this Start(); 0 until epoch >= 2.
+	// Successful (re)connects after the first for this Start(); 0 until connects() >= 2.
 	int GetReconnectCount();
 
 	// True while the current Start() attempt has an open MoQ session.
 	// Prefer this over obs_output_get_connect_time_ms, which stays 0 for sub-ms connects.
 	bool IsLiveSession();
 
+	// Publisher epoch of this Start(), retained through session reconnects; empty when stopped.
+	std::string GetEpoch();
+
 	// Most recent connect/reconnect failure for this Start(), or empty when none.
 	// Thread-safe; the dock polls this while reconnecting and on stop.
 	void CopyLastFailure(int *code, std::string *reason);
 
 private:
+	friend struct MoQOutputStatsTest;
+	bool CommitConnectionStats(const std::shared_ptr<moq::Session> &current, ConnectionStats snapshot,
+				   ConnectionStats *out);
+
 	// One Start()'s connection: the client dialing, the session once it connects,
 	// and the pending call whose continuation reports on it. Replaced wholesale by
 	// the next Start() and dropped by Stop(), which cancels that call.
@@ -129,6 +136,7 @@ private:
 	bool connected = false;
 	bool live = false;
 	std::string url;
+	std::string epoch;
 	int last_failure_code = 0;
 	std::string last_failure_reason;
 

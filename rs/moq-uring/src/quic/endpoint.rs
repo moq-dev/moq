@@ -36,6 +36,8 @@ pub const CID_LEN: usize = 8;
 #[derive(Clone, Debug)]
 #[non_exhaustive]
 pub struct Config {
+	/// Tracks accepted connections from admission until transport closure.
+	pub activity: moq_net::server::Activity,
 	/// Accept incoming connections with this configuration. Without it the
 	/// endpoint only dials, and inbound handshakes are dropped.
 	pub server: Option<server::Config>,
@@ -47,13 +49,18 @@ pub struct Config {
 	/// peer retransmits and lands once the application drains the backlog or
 	/// a handshake fails.
 	pub backlog: usize,
+
+	/// How incoming handshakes are bounded.
+	pub handshake: super::handshake::Config,
 }
 
 impl Default for Config {
 	fn default() -> Self {
 		Self {
 			server: None,
+			activity: Default::default(),
 			backlog: 1024,
+			handshake: Default::default(),
 		}
 	}
 }

@@ -113,12 +113,16 @@ impl Video {
 		self.renditions.is_empty()
 	}
 
+	/// Iterate enabled renditions in quality order.
+	pub fn enabled(&self) -> impl Iterator<Item = (&String, &VideoConfig)> {
+		self.ranked().filter(|(_, config)| config.enabled)
+	}
+
 	/// Iterate the renditions best first: enabled, then largest picture, then highest bitrate.
 	///
 	/// A consumer that carries one rendition takes the first it supports, so the
-	/// picture doesn't depend on how the tracks are named. A disabled rendition sends
-	/// no frames, so it ranks below every enabled one. Unknown dimensions or bitrate
-	/// rank below known ones, and exact ties keep name order.
+	/// picture doesn't depend on how the tracks are named. Unknown dimensions or
+	/// bitrate rank below known ones, and exact ties keep name order.
 	pub fn ranked(&self) -> impl Iterator<Item = (&String, &VideoConfig)> {
 		let mut ranked: Vec<_> = self.renditions.iter().collect();
 		ranked.sort_by_key(|(_, config)| {
@@ -176,6 +180,16 @@ pub struct VideoConfig {
 	#[serde(default)]
 	pub broadcast: Option<moq_net::path::RelativeOwned>,
 
+	/// The track's name in its broadcast, when it differs from this entry's ID: its key in the
+	/// catalog. Absent means the ID is the track name, as in every catalog before this field.
+	///
+	/// Set it only when the ID can't be the name, such as two renditions of same-named tracks
+	/// from different broadcasts. Readers resolve the name with
+	/// [`Reference::track`](crate::catalog::Reference::track); one that predates the
+	/// field subscribes to the ID instead.
+	#[serde(default)]
+	pub track: Option<String>,
+
 	/// Human-readable rendition name for track pickers.
 	#[serde(default)]
 	pub label: Option<String>,
@@ -193,17 +207,18 @@ pub struct VideoConfig {
 	#[serde_as(as = "Option<Hex>")]
 	pub description: Option<Bytes>,
 
-	/// The encoded width/height of the media.
+	/// The largest encoded width/height the track carries, fixed for its name.
 	///
-	/// This is optional because it can be changed in-band for some codecs.
-	/// It's primarily a hint to allocate the correct amount of memory up-front.
+	/// The picture resizes in band at a keyframe below these ceilings, unless the
+	/// `description` pins it. Absent means unknown; a publisher may fill it once.
 	pub coded_width: Option<u32>,
 	pub coded_height: Option<u32>,
 
-	/// The display aspect ratio of the media.
+	/// The aspect ratio the whole picture is displayed at, as WebCodecs'
+	/// `VideoDecoderConfig.displayAspectWidth` / `displayAspectHeight`.
 	///
-	/// This allows you to stretch/shrink pixels of the video.
-	/// If not provided, the display aspect ratio is 1:1
+	/// Absent means the decoded picture's own shape. A publisher with non-square
+	/// samples sets the picture's aspect here, never the sample aspect.
 	///
 	/// The `displayRatio*` aliases decode catalogs from publishers predating the
 	/// rename to `displayAspect*`; the current name is what we emit.
@@ -225,7 +240,7 @@ pub struct VideoConfig {
 	)]
 	pub enabled: bool,
 
-	/// The frame rate of the video track, if known.
+	/// The maximum frame rate of the video track, if known.
 	#[serde(default)]
 	pub framerate: Option<f64>,
 
@@ -259,6 +274,12 @@ pub struct VideoConfig {
 	#[serde(default)]
 	pub jitter: Option<std::time::Duration>,
 
+	/// After a non-continuous join, decode from the group start, present at start plus warmup, and join that much earlier.
+	/// Serialized as whole milliseconds, rounded up so presentation never starts early.
+	#[serde_as(as = "Option<MillisCeil>")]
+	#[serde(default)]
+	pub warmup: Option<std::time::Duration>,
+
 	/// How far this rendition's frames reach the transport behind the broadcast's earliest
 	/// rendition, measured at the publisher from each rendition's minimum flush lateness.
 	/// Absent on the earliest rendition and on any rendition the publisher did not measure.
@@ -281,6 +302,7 @@ impl VideoConfig {
 	pub fn new(codec: impl Into<VideoCodec>) -> Self {
 		Self {
 			broadcast: None,
+			track: None,
 			label: None,
 			codec: codec.into(),
 			description: None,
@@ -294,6 +316,7 @@ impl VideoConfig {
 			optimize_for_latency: None,
 			container: Container::default(),
 			jitter: None,
+			warmup: None,
 			delay: None,
 		}
 	}
@@ -304,6 +327,31 @@ mod test {
 	use crate::catalog::{Container, H264};
 
 	use super::*;
+
+	#[test]
+	fn warmup_round_trips() {
+		let mut config = VideoConfig::new(VideoCodec::VP8);
+		assert!(serde_json::to_value(&config).unwrap().get("warmup").is_none());
+		for millis in [0, 80, 1_000] {
+			config.warmup = Some(std::time::Duration::from_millis(millis));
+			let encoded = serde_json::to_value(&config).unwrap();
+			assert_eq!(encoded["warmup"], millis);
+			let decoded: VideoConfig = serde_json::from_value(encoded).unwrap();
+			assert_eq!(decoded.warmup, config.warmup);
+		}
+	}
+
+	#[test]
+	fn warmup_rounds_up() {
+		let mut config = VideoConfig::new(VideoCodec::VP8);
+		for (nanos, millis) in [(1, 1), (499_999, 1), (333_200_000, 334)] {
+			config.warmup = Some(std::time::Duration::from_nanos(nanos));
+			let encoded = serde_json::to_value(&config).unwrap();
+			assert_eq!(encoded["warmup"], millis);
+			let decoded: VideoConfig = serde_json::from_value(encoded).unwrap();
+			assert_eq!(decoded.warmup, Some(std::time::Duration::from_millis(millis)));
+		}
+	}
 
 	#[test]
 	fn ranked_orders_by_picture_then_bitrate() {
@@ -333,10 +381,25 @@ mod test {
 		let names: Vec<_> = video.ranked().map(|(name, _)| name.as_str()).collect();
 		assert_eq!(names, ["f", "d", "e", "c", "b", "a"]);
 
-		// A disabled rendition sends no frames, so it ranks below every enabled one.
+		// Disabled renditions rank last, so catalog transforms can retain their metadata.
 		video.renditions.get_mut("f").unwrap().enabled = false;
 		let names: Vec<_> = video.ranked().map(|(name, _)| name.as_str()).collect();
 		assert_eq!(names, ["d", "e", "c", "b", "a", "f"]);
+		let names: Vec<_> = video.enabled().map(|(name, _)| name.as_str()).collect();
+		assert_eq!(names, ["d", "e", "c", "b", "a"]);
+	}
+
+	#[test]
+	fn disabled_renditions_are_ineligible_until_reenabled() {
+		let mut catalog = Video::default();
+		let config = VideoConfig::new(VideoCodec::VP8);
+		catalog.renditions.insert("track".into(), config);
+		assert_eq!(catalog.enabled().count(), 1);
+		catalog.renditions.get_mut("track").unwrap().enabled = false;
+		assert_eq!(catalog.enabled().count(), 0);
+		assert_eq!(catalog.ranked().count(), 1);
+		catalog.renditions.get_mut("track").unwrap().enabled = true;
+		assert_eq!(catalog.enabled().count(), 1);
 	}
 
 	#[test]

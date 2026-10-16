@@ -1,7 +1,8 @@
 //! The moq-transport error code registries, per negotiated draft.
 //!
-//! This module holds the stream reset registry; [`request`] holds the one for rejecting a
-//! request. The two are disjoint, so the same integer means different things in each.
+//! This module holds the stream reset registry and the session close encoder; [`request`]
+//! holds the one for rejecting a request. The reset and request registries are disjoint, so
+//! the same integer means different things in each.
 //!
 //! # Stream reset codes
 //!
@@ -117,6 +118,17 @@ pub fn from_stream_code(code: u32, version: Version) -> StreamError {
 	}
 }
 
+/// The code to close the session with.
+///
+/// The shared session registry, except moq-lite's own 0x30-0x3f range: a bridge must not
+/// carry those codes onto this wire, so an unknown one closes as unspecified instead.
+pub(crate) fn to_session_code(error: &SessionError) -> u32 {
+	match error {
+		SessionError::Unknown(0x30..=0x3f) => SessionError::Internal.to_code(),
+		error => error.to_code(),
+	}
+}
+
 /// The moq-transport request error registry, per negotiated draft.
 ///
 /// Sent in a rejection response to a request, and read back off one. Draft-14 gives each
@@ -141,7 +153,7 @@ pub fn from_stream_code(code: u32, version: Version) -> StreamError {
 /// without the draft in hand tells the peer the opposite of what happened.
 pub(crate) mod request {
 	use super::Version;
-	use crate::{Error, SessionError, StreamError};
+	use crate::{DecodeError, Error, SessionError, StreamError};
 
 	/// Which request the error answers, so draft-14 picks the right registry.
 	///
@@ -207,6 +219,12 @@ pub(crate) mod request {
 	/// The same condition from draft-15 on.
 	const MALFORMED_TRACK: u64 = 0x12;
 
+	/// A well-formed AUTHORIZATION TOKEN this endpoint cannot use, as draft-14 numbers it.
+	const MALFORMED_AUTH_TOKEN_14: u64 = 0x10;
+
+	/// The same condition from draft-15 on, where 0x10 became DOES_NOT_EXIST.
+	const MALFORMED_AUTH_TOKEN: u64 = 0x4;
+
 	/// The value for "the thing you asked for is not here", or `None` where the draft and
 	/// request assign none.
 	fn does_not_exist(kind: Kind, version: Version) -> Option<u64> {
@@ -267,6 +285,16 @@ pub(crate) mod request {
 		}
 	}
 
+	/// The value for an unusable token, or `None` where the draft and request assign none.
+	/// Draft-14 registers none on PUBLISH_ERROR.
+	fn malformed_auth_token(kind: Kind, version: Version) -> Option<u64> {
+		match (version, kind) {
+			(Version::Draft14, Kind::Publish) => None,
+			(Version::Draft14, _) => Some(MALFORMED_AUTH_TOKEN_14),
+			_ => Some(MALFORMED_AUTH_TOKEN),
+		}
+	}
+
 	/// The value for a draining session, or `None` before draft-17 registered one.
 	fn going_away(version: Version) -> Option<u64> {
 		match version {
@@ -290,7 +318,12 @@ pub(crate) mod request {
 			Error::Timeout | Error::Stream(StreamError::DeliveryTimeout) | Error::Session(SessionError::Timeout) => {
 				return TIMEOUT;
 			}
-			Error::Unsupported | Error::Version | Error::Session(SessionError::Version) => return NOT_SUPPORTED,
+			Error::Unsupported
+			| Error::Version
+			| Error::Decode(DecodeError::MultipleAuthTokens)
+			| Error::Session(SessionError::Version | SessionError::Unsupported) => {
+				return NOT_SUPPORTED;
+			}
 			// moq-transport has no code for a FETCH that reached a datagram, which is never
 			// cached, so it is a group that is not there. NOT_SUPPORTED would claim the peer
 			// does not implement FETCH at all.
@@ -307,6 +340,7 @@ pub(crate) mod request {
 				Kind::Subscribe | Kind::Fetch | Kind::TrackStatus => does_not_exist(kind, version),
 				Kind::Publish | Kind::PublishNamespace | Kind::SubscribeNamespace => uninterested(kind, version),
 			},
+			Error::Decode(DecodeError::MalformedAuthToken) => malformed_auth_token(kind, version),
 			// Our own parse failure is, from the peer's side, a malformed track.
 			Error::Decode(_)
 			| Error::BoundsExceeded(_)
@@ -368,11 +402,12 @@ pub(crate) mod request {
 		/// Every error a rejection distinguishes, plus one it does not, so the checks below cover
 		/// the whole registry rather than the variants someone remembered. A new arm in
 		/// [`to_code`] belongs here.
-		const EVERY_ERROR: [Error; 12] = [
+		const EVERY_ERROR: [Error; 13] = [
 			Error::Duplicate,
 			Error::Unauthorized,
 			Error::Timeout,
 			Error::Unsupported,
+			Error::Session(SessionError::Unsupported),
 			Error::NotFound,
 			Error::NotFetchable,
 			Error::InvalidRange,
@@ -447,6 +482,20 @@ pub(crate) mod request {
 				from_code(0x4, Kind::SubscribeNamespace, Version::Draft14),
 				Error::Remote(0x4)
 			));
+		}
+
+		/// Draft-15 swapped MALFORMED_AUTH_TOKEN and the missing-track code, and draft-14
+		/// gives PUBLISH_ERROR no value for it.
+		#[test]
+		fn a_malformed_token_uses_the_draft_s_own_number() {
+			let err = Error::Decode(DecodeError::MalformedAuthToken);
+			for kind in KINDS {
+				let draft14 = if kind == Kind::Publish { INTERNAL_ERROR } else { 0x10 };
+				assert_eq!(to_code(&err, kind, Version::Draft14), draft14);
+				for version in ALL.into_iter().skip(1) {
+					assert_eq!(to_code(&err, kind, version), 0x4);
+				}
+			}
 		}
 
 		/// GOING_AWAY arrived in draft-17. Sent to an earlier peer, 0x6 is unassigned there,
@@ -546,9 +595,11 @@ pub(crate) mod request {
 				}
 			}
 
+			// Sent but never read back as itself: a peer's MALFORMED_AUTH_TOKEN stays remote.
+			let malformed = Error::Decode(DecodeError::MalformedAuthToken);
 			for version in ALL {
 				for kind in KINDS {
-					for err in &EVERY_ERROR {
+					for err in EVERY_ERROR.iter().chain([&malformed]) {
 						let code = to_code(err, kind, version);
 						assert!(
 							registered(kind, version).contains(&code),
@@ -618,6 +669,26 @@ mod tests {
 			"the two spaces disagree about 0"
 		);
 		assert_eq!(SessionError::Cancel.to_code(), INTERNAL_ERROR);
+	}
+
+	/// moq-lite's own session range never reaches this wire, while the shared registry and
+	/// its reserved range pass through as on moq-lite.
+	#[test]
+	fn the_lite_session_range_is_not_sent() {
+		for code in 0x30..=0x3f {
+			assert_eq!(to_session_code(&SessionError::Unknown(code)), 0x1);
+			assert_eq!(
+				SessionError::Unknown(code).to_code(),
+				code,
+				"the shared encoder is unchanged"
+			);
+		}
+		assert_eq!(to_session_code(&SessionError::Unknown(0x20)), 0x20);
+		assert_eq!(
+			to_session_code(&SessionError::Unauthorized),
+			SessionError::Unauthorized.to_code()
+		);
+		assert_eq!(to_session_code(&SessionError::App(7)), 64 + 7);
 	}
 
 	/// Every code we send must decode back to what we meant on the same draft, or two
