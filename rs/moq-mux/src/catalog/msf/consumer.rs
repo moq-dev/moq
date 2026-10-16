@@ -17,8 +17,7 @@ use crate::catalog::msf::Error;
 /// hang types: MSF tracks become renditions, and the catalog's root sections become the
 /// extension `E`.
 pub struct Consumer<E: CatalogExt = ()> {
-	/// Access to the underlying track consumer.
-	pub track: moq_net::track::Ordered,
+	track: moq_net::track::Ordered,
 	group: Option<moq_net::group::Consumer>,
 	_ext: PhantomData<E>,
 }

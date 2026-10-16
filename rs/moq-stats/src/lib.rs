@@ -1,6 +1,6 @@
 //! Publish and consume MoQ traffic stats.
 //!
-//! `moq-net` collects per-session traffic counters in a
+//! `moq-net` collects session and request traffic counters in a
 //! [`stats::Registry`](moq_net::stats::Registry); this crate turns that
 //! registry into MoQ broadcasts and back:
 //!

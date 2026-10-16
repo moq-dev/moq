@@ -852,7 +852,6 @@ struct GroupPublisher {
 	traffic: TrackFamily<Traffic>,
 	sessions: TrackFamily<Presence>,
 	local: HashMap<PathOwned, HashMap<Tier, SideSlots>>,
-	session_local: HashMap<Tier, HashMap<PathOwned, SessionSlotState>>,
 	/// Track names per tier, built once so a drain never formats a name.
 	names: HashMap<Tier, TierNames>,
 	totals: TotalsTrack,
@@ -1013,7 +1012,6 @@ impl GroupPublisher {
 			traffic,
 			sessions,
 			local: HashMap::new(),
-			session_local: HashMap::new(),
 			names: HashMap::new(),
 			totals,
 			presence: HashMap::new(),
@@ -1043,7 +1041,6 @@ impl GroupPublisher {
 			traffic,
 			sessions,
 			local,
-			session_local,
 			names,
 			totals,
 			presence,
@@ -1092,20 +1089,21 @@ impl GroupPublisher {
 			});
 		}
 
+		// The registry reports a root only while a session or request holds its
+		// counters, plus its final readout, so every row is in the frame: a root
+		// held by an idle request must not drop out and return looking reset.
 		for &i in session_rows.iter() {
 			let entry = &report.sessions[i];
 			let names = names
 				.entry(entry.tier.clone())
 				.or_insert_with(|| TierNames::new(&entry.tier));
-			let state = session_local
-				.entry(entry.tier.clone())
-				.or_default()
-				.entry(entry.root.clone())
-				.or_default();
-			state.seen = tick;
-			process_session_slot(entry.presence, state, |snap| {
-				sessions.push(broadcast, requested, &names.sessions, entry.root.clone(), snap);
-			});
+			sessions.push(
+				broadcast,
+				requested,
+				&names.sessions,
+				entry.root.clone(),
+				entry.presence,
+			);
 		}
 	}
 
@@ -1125,10 +1123,6 @@ impl GroupPublisher {
 		self.local.retain(|_, tiers| {
 			tiers.retain(|_, slots| slots.seen == tick);
 			!tiers.is_empty()
-		});
-		self.session_local.retain(|_, roots| {
-			roots.retain(|_, state| state.seen == tick);
-			!roots.is_empty()
 		});
 	}
 
@@ -1304,14 +1298,6 @@ struct SideSlots {
 	seen: u64,
 }
 
-/// Change-detection state for one session-track root.
-#[derive(Default)]
-struct SessionSlotState {
-	prev_emitted: Option<Presence>,
-	/// The last drain that reported this root.
-	seen: u64,
-}
-
 /// Per-drain work for a single `(side, tier)` slot: hand `snap` to `emit` once
 /// the side has moved, on every drain until the registry drops the entry.
 fn process_slot(snap: Traffic, slot_state: &mut SlotState, emit: impl FnOnce(Traffic)) {
@@ -1327,21 +1313,6 @@ fn process_slot(snap: Traffic, slot_state: &mut SlotState, emit: impl FnOnce(Tra
 	// counter above zero, so it has always moved.
 	slot_state.moved |= snap != Traffic::default();
 	if slot_state.moved {
-		emit(snap);
-	}
-}
-
-/// Per-drain work for one session-track root: emit it while a session is
-/// connected, and on the drain its counters change. A root's counters are
-/// dropped with its last session, so it never idles in the registry.
-fn process_session_slot(snap: Presence, slot_state: &mut SessionSlotState, emit: impl FnOnce(Presence)) {
-	let live = snap.active() > 0;
-	let prev_snap = slot_state.prev_emitted.unwrap_or_default();
-	let changed = snap != prev_snap;
-	if changed {
-		slot_state.prev_emitted = Some(snap);
-	}
-	if live || changed {
 		emit(snap);
 	}
 }
@@ -2088,6 +2059,41 @@ mod tests {
 			.get("peer")
 			.expect("regional entry");
 		assert_eq!(snap.sessions_started, 1);
+	}
+
+	/// A root held only by requests has no live session, but it stays in every
+	/// frame until its last request ends: dropping out would read as a reset, and
+	/// the next admission would then count the earlier ones twice.
+	#[tokio::test(start_paused = true)]
+	async fn request_root_stays_in_the_frame_while_held() {
+		let (producer, origin) = test_producer(Some("sjc"));
+		let first = producer.registry().tier(Tier::default()).request("acme");
+		drive_tick().await;
+		let (_, broadcast) = announced(&origin).await;
+		let mut track = subscribe(&broadcast, "sessions.json").await;
+		let drain = |track: &mut track::Ordered| {
+			let mut frames = Vec::new();
+			while let Some(frame) = try_next_frame(track) {
+				let frame: BTreeMap<String, Presence> = serde_json::from_slice(&frame.payload).expect("json parse");
+				frames.push(frame.get("acme").map(|presence| presence.requests));
+			}
+			frames
+		};
+		assert_eq!(drain(&mut track).last(), Some(&Some(1)));
+
+		drive_tick().await;
+		drive_tick().await;
+		assert!(!drain(&mut track).contains(&None), "an idle request stays");
+
+		let second = producer.registry().tier(Tier::default()).request("acme");
+		drive_tick().await;
+		assert_eq!(drain(&mut track), [Some(2)]);
+
+		drop(first);
+		drop(second);
+		drive_tick().await;
+		drive_tick().await;
+		assert_eq!(drain(&mut track), [None], "gone once the last request ends");
 	}
 
 	#[tokio::test(start_paused = true)]

@@ -132,7 +132,10 @@ chooses a fresh reference on the same pads; playback does not require a wall clo
 A rendition that leaves the catalog
 gets EOS once its track ends. A broadcast that ends or loses its publisher holds
 its pads without EOS until it is announced again, so the pipeline does not end
-on its own; losing the relay connection posts an error. Properties: `url`,
+on its own. Losing the relay connection also holds the pads: `moqsrc` redials
+without a retry deadline and resumes when the broadcast returns. A refused
+connection, refused path or catalog, or malformed protocol input or catalog posts
+an error. Properties: `url`,
 `broadcast`, `tls-disable-verify`.
 
 Debug with `GST_DEBUG=*:4` for GStreamer and `RUST_LOG=debug` for the plugin.

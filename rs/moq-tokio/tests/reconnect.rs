@@ -78,7 +78,7 @@ async fn a_handshake_slower_than_the_retry_window_still_lands() {
 	let _server = tokio::spawn(async move {
 		let origin = moq_tokio::origin::spawn();
 		while let Some(request) = server.accept().await {
-			if let Ok(session) = request.with_publisher(&origin).ok().await {
+			if let Ok((session, _driver)) = request.with_publisher(&origin).ok().await {
 				let _ = accepted.send(session);
 			}
 		}
@@ -187,7 +187,7 @@ async fn spawn_server() -> (
 		while let Some(request) = server.accept().await {
 			let origin = moq_tokio::origin::spawn();
 			match request.with_publisher(&origin).ok().await {
-				Ok(session) => {
+				Ok((session, _driver)) => {
 					let _ = accepted.send(session);
 				}
 				Err(err) => tracing::warn!(%err, "accept failed"),
@@ -206,6 +206,32 @@ fn quick_client(redirect: moq_tokio::Redirect) -> moq_tokio::Client {
 	config.backoff.timeout = Some(Duration::ZERO);
 	config.goaway.redirect = redirect;
 	config.init(Default::default()).expect("failed to init client")
+}
+
+/// A protocol violation is a settled failure even after a successful session.
+#[tokio::test]
+async fn a_protocol_violation_ends_reconnect() {
+	let (port, mut sessions, task) = spawn_server().await;
+	let connection =
+		quick_client(Default::default()).connect(format!("tcp://127.0.0.1:{port}/").parse::<url::Url>().unwrap());
+	let first = sessions.recv().await.unwrap();
+	first.abort(moq_net::Error::ProtocolViolation);
+	let result = tokio::select! {
+		result = connection.closed() => result,
+		_ = sessions.recv() => panic!("redialed after a protocol violation"),
+		_ = tokio::time::sleep(Duration::from_secs(10)) => panic!("protocol failure did not end reconnect"),
+	};
+	task.abort();
+	let _ = task.await;
+	assert!(
+		matches!(
+			result,
+			Err(moq_tokio::Error::MoqNet(moq_net::Error::Session(
+				moq_net::SessionError::ProtocolViolation
+			)))
+		),
+		"{result:?}"
+	);
 }
 
 /// The default refuses a peer-selected host change, and the refusal ends the
@@ -375,7 +401,7 @@ async fn rides_out_a_drain(backoff: moq_tokio::Backoff, drained: usize) {
 		// Held, as a draining server does: each one closes when the client leaves it.
 		let mut held = Vec::new();
 		while let Some(request) = server.accept().await {
-			let Ok(session) = request.with_publisher(&origin).ok().await else {
+			let Ok((session, _driver)) = request.with_publisher(&origin).ok().await else {
 				continue;
 			};
 			if held.len() < drained {

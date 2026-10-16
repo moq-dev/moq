@@ -10,38 +10,40 @@ a ratio of two totals.
 
 ## Plan
 
-Branch from main. The loop in `Worker::block_on`
-(`rs/moq-uring/src/worker.rs`) runs one task pass, then `pump` (`submit`,
-then reap and dispatch), then `maybe_park`, whose enter
-(`submit_and_wait(1)` or a timed `enter(to_submit, 1,
-GETEVENTS|EXT_ARG|ABS_TIMER)`) carries whatever the SQ holds. When nothing is `NOTIFIED`, the turn pays both. tokio-uring, monoio,
-glommio, and compio all fold the tick's submit into the park enter.
+The worker placement, deferred-work fix, dependency floor, and observations
+are implemented on `quest/m2/perf/uring-one-enter`. Parked-turn and
+already-armed/full-SQ regressions fail with two enters and pass with one.
+The busy-turn regression fails with an empty-SQ early return and with
+io-uring 0.7.14; it passes with TASKRUN_FLAG and io-uring 0.7.15. Existing
+Snapshot counters stay, with `turns`, `sq_full_enters`, and nested `sqes` and
+`cqes` histograms added.
 
-- `pump` submits only when the turn will not park: when the unpark word is
-  `NOTIFIED`, or when the SQ is full enough that the park enter could not
-  carry it. Otherwise the staged SQEs ride `maybe_park`'s enter. Reaping
-  before the park stays as it is; it needs no enter.
-- `DEFER_TASKRUN` (set in `Worker::new`) runs deferred completion work
-  only on an enter carrying `GETEVENTS`. The locked `io-uring` 0.7.15's
-  `Submitter::submit_and_wait` already adds that flag while
-  `IORING_SQ_TASKRUN` is set, as liburing does; 0.7.14, which the workspace
-  still allows, does not. Raise the workspace floor to 0.7.15 and pin it with
-  a regression test: a worker that self-wakes every turn (a deep egress
-  backlog does) dispatches a completion that arrives mid-burst within one
-  turn. A submit this quest folds into the park enter must keep the flag.
-- Metrics (rs/moq-uring/src/metrics.rs): `turns`, `sq_full_enters`, and a
-  fixed-bucket histogram of SQEs per enter and CQEs per enter, one row per
-  worker. `enters` stays for the ratio the docs already describe.
+The Worker benchmark independently sweeps 1/4/16 sockets and 1/8/64 datagrams
+per burst. All nine measured means were unchanged or lower (0.1–6.2% lower)
+on one pinned CPU. Three rotated relay rounds on four CPUs compared main,
+main with identical observation counters, and the implementation. Chat total
+enters fell 13,805 to 3,218, while turns fell 30,103 to 2,769: enters/turn alone
+rises when the deferred-work fix removes empty busy turns. Median delivered
+throughput and p99 did not worsen against untouched main in those rounds.
 
-Decided in the 2026-10-05 audit: driver-touching perf work waits on the
-[hard fork](/quest/m1/quic/fork/README.md). This quest's worker loop,
-`Shared::push`, and metrics changes do not touch the QUIC driver
-(`rs/moq-uring/src/quic/noq`), so it can land first; any part that turns out
-to edit the driver moves to a follow-up after the fork.
+The strict end-to-end latency acceptance remains open. Fanout delivered the
+same 640 fps with no loss and median p99 of 1426 ms before/1425 ms after, but its
+median p50 was 2 ms before/3 ms after and relay CPU was 0.0300/0.0379 core. These
+are coarse, lifetime statistics dominated by startup; current p50 varied
+4/3/2 ms across rounds. Separate a real regression from startup, clock
+quantization, and machine variation with steady-state evidence before
+claiming the full latency goal is met. Retain the deferred-completion
+regression and do not mask the question with sleeps, retries, or timeout
+changes.
 
-Acceptance: enters per turn on the chat and fanout shapes via `just bench
-BASE` on Linux and the new counters; the deferred-completion regression
-fails on io-uring 0.7.14. Latency must not regress.
+The retained paired run uses the existing workload lifecycle. A first run
+stopped on the already-planned [relay-port race](/quest/m2/perf/bench-relay-port.md);
+the completed diagnostic used preflighted unique ports below the host's
+client ephemeral range, with no runtime retry. The benchmark CLI is unchanged.
+
+Driver-touching follow-ups still wait on the [hard fork](/quest/m1/quic/fork/README.md).
+The completed work changes only the Worker loop, Shared::push, observations,
+and their consumers, leaving `rs/moq-uring/src/quic/noq` alone.
 
 ## Related
 

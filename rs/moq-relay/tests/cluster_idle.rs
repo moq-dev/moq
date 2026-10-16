@@ -62,7 +62,7 @@ async fn spawn_peer() -> (u16, tokio::runtime::Runtime) {
 		while let Some(request) = listener.accept().await {
 			let origin = origin.clone();
 			tokio::spawn(async move {
-				if let Ok(session) = request.with_publisher(&origin).ok().await {
+				if let Ok((session, _driver)) = request.with_publisher(&origin).ok().await {
 					let _ = session.closed().await;
 				}
 			});

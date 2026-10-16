@@ -1,5 +1,4 @@
-//! Wakes for group reads parked on their subscription's drift budget, and for groups held
-//! across a route switch until the serving copy leaves them behind.
+//! Indexed wakes for group expiry, cache arrivals, and groups held across a route switch.
 //!
 //! The budget is judged on two clocks (see `TrackState::drifted`): media time, which only a
 //! frame write advances, and the wall clock, which the cache pool's driver advances.
@@ -51,6 +50,9 @@ struct Parked {
 	held: BTreeMap<u64, kio::WaiterList>,
 	/// The `held` size that sweeps out the lists every reader has left.
 	held_sweep: usize,
+	/// Exact cache arrivals, independent of the live edge and neighbouring groups.
+	arrivals: BTreeMap<u64, kio::WaiterList>,
+	arrival_sweep: usize,
 	/// Reads by wall-clock deadline, released by the pool's driver.
 	wall: BTreeMap<crate::time::Instant, kio::WaiterList>,
 	/// The earliest `wall` deadline the pool was asked to release, so arming a later one
@@ -167,6 +169,29 @@ impl Wakes {
 		parked.held.entry(sequence).or_default().register(waiter);
 	}
 
+	/// Park until this exact group is cached, or a declared boundary excludes it.
+	pub(crate) fn watch_arrival(&self, sequence: u64, waiter: &kio::Waiter) {
+		let mut parked = self.parked.lock();
+		if parked.arrivals.len() >= parked.arrival_sweep {
+			parked.arrivals.retain(|_, list| !list.is_empty());
+			parked.arrival_sweep = (parked.arrivals.len() * 2).max(HELD_SWEEP_MIN);
+		}
+		parked.arrivals.entry(sequence).or_default().register(waiter);
+	}
+
+	/// Wake only cache arrivals whose outcome this insertion or boundary changes.
+	pub(crate) fn arrived(&self, groups: impl std::ops::RangeBounds<u64>) {
+		let groups = (groups.start_bound().cloned(), groups.end_bound().cloned());
+		let mut woken = Vec::new();
+		{
+			let mut parked = self.parked.lock();
+			while let Some(at) = parked.arrivals.range(groups).next().map(|(at, _)| *at) {
+				woken.extend(parked.arrivals.remove(&at));
+			}
+		}
+		woken.iter_mut().for_each(kio::WaiterList::wake);
+	}
+
 	/// A servable group landed at `sequence`, so it succeeds every read from `below`, the
 	/// nearest servable group beneath it, up, and continues a held group of its own
 	/// sequence. Reads below `oldest`, the first group still cached, can no longer expire
@@ -200,7 +225,10 @@ impl Wakes {
 			std::mem::take(&mut *parked)
 		};
 		let lists = parked.deadlines.into_values().chain(parked.landings.into_values());
-		let lists = lists.chain(parked.held.into_values()).chain(parked.wall.into_values());
+		let lists = lists
+			.chain(parked.held.into_values())
+			.chain(parked.wall.into_values())
+			.chain(parked.arrivals.into_values());
 		for mut list in lists {
 			list.wake();
 		}
