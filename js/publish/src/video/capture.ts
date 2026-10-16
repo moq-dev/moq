@@ -20,7 +20,8 @@ type CaptureOutput = {
 	frames: Signal<Fanout<VideoFrame> | undefined>;
 	// The captured dimensions and source scale, sampled together for each frame.
 	display: Signal<{ width: number; height: number; scale?: number } | undefined>;
-	// Clockwise rotation needed to show the live frames upright.
+	// Clockwise rotation needed to show the live frames upright. Frames never carry their own
+	// VideoFrame.rotation: it is moved here, so every reader applies exactly one turn.
 	rotation: Signal<number>;
 };
 
@@ -42,8 +43,8 @@ export class Capture {
 	};
 	readonly out = readonlys(this.#out);
 
-	// The rotation the newest frame declares itself, via VideoFrame.rotation where supported.
-	#tagged = new Signal(0);
+	// The turn the newest frame declared via VideoFrame.rotation, or undefined where unsupported.
+	#native = new Signal<number | undefined>(undefined);
 
 	#signals = new Effect();
 
@@ -72,7 +73,7 @@ export class Capture {
 		effect.set(this.#out.frames, fanout, undefined);
 		effect.cleanup(() => {
 			this.#out.display.set(undefined);
-			this.#tagged.set(0);
+			this.#native.set(undefined);
 		});
 	}
 
@@ -82,20 +83,38 @@ export class Capture {
 		const display = effect.get(this.#out.display);
 		if (!display) return;
 
-		const tagged = effect.get(this.#tagged);
+		// A browser that exposes VideoFrame.rotation describes the frame fully, even when it says 0.
+		const native = effect.get(this.#native);
 		const landscape = display.width > display.height;
-		const rotation = tagged || (landscape ? effect.get(this.in.orientation) : 0);
+		const rotation = native ?? (landscape ? effect.get(this.in.orientation) : 0);
 		effect.set(this.#out.rotation, rotation, 0);
 	}
 
 	// Sample live source metadata even when the coded dimensions stay unchanged.
 	#measure(source: Source): TransformStream<VideoFrame, VideoFrame> {
 		return new TransformStream<VideoFrame, VideoFrame>({
-			transform: (frame, controller) => {
+			transform: (input, controller) => {
+				let frame = input;
 				try {
 					const scale = "frames" in source ? undefined : normalizeSource(source).scale;
 					this.#out.display.set({ width: frame.codedWidth, height: frame.codedHeight, scale });
-					this.#tagged.set((frame as VideoFrame & { rotation?: number }).rotation ?? 0);
+
+					// Readers would otherwise turn a tagged frame twice: once natively when drawing, again
+					// for `out.rotation`. The encoder would also copy it into its decoder config. A
+					// constructor rotation adds to the frame's own, so cancel it here.
+					const tagged = frame as VideoFrame & { rotation?: number; flip?: boolean };
+					let native = tagged.rotation;
+					if (native) {
+						// A mirrored frame subtracts a constructor rotation, and its mirror, drawn natively first,
+						// makes the picture need the opposite turn.
+						frame = new VideoFrame(input, {
+							rotation: tagged.flip ? native : 360 - native,
+						} as VideoFrameInit);
+						input.close();
+						if (tagged.flip) native = 360 - native;
+					}
+					this.#native.set(native);
+
 					controller.enqueue(frame);
 				} catch (error) {
 					frame.close();

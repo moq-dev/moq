@@ -18,10 +18,12 @@ class Frame {
 	timestamp: number;
 	closed = false;
 
-	constructor(source?: Frame, init?: { timestamp: number }) {
+	constructor(source?: Frame, init?: { timestamp?: number; rotation?: number }) {
 		this.codedWidth = source?.codedWidth ?? 1920;
 		this.codedHeight = source?.codedHeight ?? 1080;
-		this.rotation = source?.rotation;
+		// Like WebCodecs, a constructor rotation adds to the source frame's own.
+		this.rotation =
+			init?.rotation === undefined ? source?.rotation : ((source?.rotation ?? 0) + init.rotation) % 360;
 		this.timestamp = init?.timestamp ?? source?.timestamp ?? 0;
 		Frame.all.push(this);
 	}
@@ -108,7 +110,7 @@ test("rotation follows the live frames, not the track's settings", async () => {
 	const orientation = new Signal(90);
 	const capture = new Capture({ source: track, orientation });
 	try {
-		let display = capture.out.display.changed();
+		const display = capture.out.display.changed();
 		controller.enqueue(sized(720, 1280));
 		expect(await display).toMatchObject({ width: 720, height: 1280 });
 		await settle();
@@ -127,17 +129,28 @@ test("rotation follows the live frames, not the track's settings", async () => {
 		orientation.set(0);
 		expect(await rotation).toBe(0);
 
-		// A frame that declares its own rotation wins over the screen.
+		// A frame that declares its own rotation wins over the screen, and readers get it untagged so
+		// they turn it only once.
+		orientation.set(270);
+		expect(await capture.out.rotation.changed()).toBe(270);
 		rotation = capture.out.rotation.changed();
 		controller.enqueue(sized(1280, 720, 90));
 		expect(await rotation).toBe(90);
 
-		// Back to an upright portrait picture.
-		display = capture.out.display.changed();
-		controller.enqueue(sized(720, 1280));
-		await display;
-		await settle();
-		expect(capture.out.rotation.peek()).toBe(0);
+		const effect = new Effect();
+		try {
+			const reader = capture.out.frames.peek()?.subscribe(effect).getReader();
+			const held = (await reader?.read())?.value as unknown as Frame | undefined;
+			expect(held?.rotation).toBe(0);
+			held?.close();
+		} finally {
+			effect.close();
+		}
+
+		// A browser that reports an upright frame is believed, even on a portrait screen.
+		rotation = capture.out.rotation.changed();
+		controller.enqueue(sized(1280, 720, 0));
+		expect(await rotation).toBe(0);
 	} finally {
 		capture.close();
 		if (processor) Object.defineProperty(globalThis, "MediaStreamTrackProcessor", processor);
