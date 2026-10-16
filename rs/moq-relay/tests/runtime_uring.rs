@@ -763,10 +763,10 @@ async fn uring_auth_reports_distinct_quic_and_webtransport() {
 /// `listen.timeout` bounds every handshake phase from the first packet: TLS,
 /// HTTP/3 before CONNECT, and MoQ SETUP over raw QUIC and WebTransport. Each
 /// phase closes in its own error space.
-#[cfg(feature = "noq")]
+#[cfg(feature = "quic")]
 #[tokio::test]
 async fn uring_workers_bound_stalled_handshakes() {
-	use web_transport_moq::noq;
+	use moq_tokio::quic::{driver, web};
 	use web_transport_trait::Error as _;
 
 	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
@@ -788,10 +788,10 @@ async fn uring_workers_bound_stalled_handshakes() {
 	let crypto = |alpn: &[u8]| {
 		let mut tls = tls.clone();
 		tls.alpn_protocols = vec![alpn.to_vec()];
-		let crypto = noq::crypto::rustls::QuicClientConfig::try_from(tls).expect("QUIC crypto");
-		noq::ClientConfig::new(std::sync::Arc::new(crypto))
+		let crypto = driver::crypto::rustls::QuicClientConfig::try_from(tls).expect("QUIC crypto");
+		driver::ClientConfig::new(std::sync::Arc::new(crypto))
 	};
-	let client = noq::Endpoint::client("127.0.0.1:0".parse().unwrap()).expect("client");
+	let client = driver::Endpoint::client("127.0.0.1:0".parse().unwrap()).expect("client");
 
 	// TLS: the relay never hears more than the ClientHello, so only its own
 	// deadline can end the handshake before the idle timeout does.
@@ -806,7 +806,7 @@ async fn uring_workers_bound_stalled_handshakes() {
 	.await
 	.expect("listener did not bound the QUIC handshake");
 	assert!(
-		!matches!(error, noq::ConnectionError::TimedOut),
+		!matches!(error, driver::ConnectionError::TimedOut),
 		"the relay must close a stalled QUIC handshake: {error}"
 	);
 
@@ -823,11 +823,10 @@ async fn uring_workers_bound_stalled_handshakes() {
 				.unwrap();
 			if scheme == "https" {
 				let url: url::Url = format!("https://{addr}/stalled").parse().unwrap();
-				let request =
-					web_transport_moq::proto::ConnectRequest::new(url).with_protocol("moq-lite-06".to_string());
-				web_transport_moq::Session::connect(conn, request).await.unwrap()
+				let request = web::proto::ConnectRequest::new(url).with_protocol("moq-lite-06".to_string());
+				web::Session::connect(conn, request).await.unwrap()
 			} else {
-				web_transport_moq::Session::raw(conn)
+				web::Session::raw(conn)
 			}
 		})
 		.await
@@ -842,7 +841,7 @@ async fn uring_workers_bound_stalled_handshakes() {
 			"{scheme}: {error}"
 		);
 	}
-	client.close(noq::VarInt::from_u32(0), b"test complete");
+	client.close(driver::VarInt::from_u32(0), b"test complete");
 	client.wait_idle().await;
 	running.abort();
 	let _ = running.await;
@@ -851,7 +850,7 @@ async fn uring_workers_bound_stalled_handshakes() {
 /// A UDP hop to `server` that forwards one client's datagrams until the server
 /// first answers, and every answer back, so the server never sees the client
 /// finish its handshake. Returns the address to dial.
-#[cfg(feature = "noq")]
+#[cfg(feature = "quic")]
 async fn stall_after_hello(server: SocketAddr) -> SocketAddr {
 	let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.expect("bind hop");
 	let addr = socket.local_addr().expect("hop address");

@@ -2004,6 +2004,37 @@ fn initial_retransmit() {
     );
 }
 
+/// Each side tells its endpoint once that the connection stopped being active, before it drains,
+/// so a shutdown waiting on every connection can stop at the first of these
+#[test]
+fn draining_is_reported_once_before_drained() {
+    let _guard = subscribe();
+    let mut pair = Pair::default();
+    let (client_ch, server_ch) = pair.connect();
+    let now = pair.time;
+    pair.client_conn_mut(client_ch)
+        .close(now, VarInt(0), Bytes::new());
+    pair.drive();
+
+    let expected = [Lifecycle::Draining, Lifecycle::Drained];
+    let client: Vec<_> = pair
+        .client
+        .lifecycle
+        .iter()
+        .filter(|(ch, _)| *ch == client_ch)
+        .map(|(_, l)| *l)
+        .collect();
+    let server: Vec<_> = pair
+        .server
+        .lifecycle
+        .iter()
+        .filter(|(ch, _)| *ch == server_ch)
+        .map(|(_, l)| *l)
+        .collect();
+    assert_eq!(client, expected);
+    assert_eq!(server, expected);
+}
+
 #[test]
 fn instant_close_1() {
     let _guard = subscribe();
@@ -5999,6 +6030,123 @@ fn partial_poll_reports_starvation() {
     assert!(
         matches!(log.lock().unwrap().last(), Some(PacketEvent::AppLimited { in_flight }) if *in_flight > 0)
     );
+}
+
+/// Write what the client can and read what the server can, holding its credit, until neither
+/// makes progress. Returns the bytes read.
+fn pump_held(
+    pair: &mut Pair,
+    (client_ch, server_ch): (ConnectionHandle, ConnectionHandle),
+    s: StreamId,
+    msg: &[u8],
+    sent: &mut usize,
+    held: &mut Credit,
+) -> usize {
+    let mut total = 0;
+    loop {
+        // Deliver whatever credit the server queued since the last round.
+        pair.drive();
+        let mut wrote = 0;
+        if *sent < msg.len()
+            && let Ok(n) = pair.client_send(client_ch, s).write(&msg[*sent..])
+        {
+            wrote = n;
+            *sent += n;
+            if *sent == msg.len() {
+                pair.client_send(client_ch, s).finish().unwrap();
+            }
+        }
+        pair.drive();
+
+        let mut read = 0;
+        let mut recv = pair.server_recv(server_ch, s);
+        if let Ok(mut chunks) = recv.read(true) {
+            while let Ok(Some(chunk)) = chunks.next(usize::MAX) {
+                read += chunk.bytes.len();
+            }
+            held.merge(chunks.hold());
+            let _ = chunks.finalize();
+        }
+        if read == 0 && wrote == 0 {
+            return total;
+        }
+        total += read;
+    }
+}
+
+/// Held reads keep replenishing a stream window much smaller than the connection's, while the
+/// connection window stays spent until the bytes are released. A release far below the usual
+/// `MAX_DATA` threshold still unblocks the peer, without relying on its DATA_BLOCKED.
+#[test]
+fn held_credit_spends_connection_window_only() {
+    const WINDOW: usize = 4000;
+    let _guard = subscribe();
+    let mut transport = cubic_transport();
+    transport.receive_window((WINDOW as u32).into());
+    transport.stream_receive_window(1000u32.into());
+    let mut pair = Pair::new(
+        Default::default(),
+        ServerConfig {
+            transport: Arc::new(transport),
+            ..server_config()
+        },
+    );
+    let chs = pair.connect();
+    let (client_ch, server_ch) = chs;
+    let s = pair.client_streams(client_ch).open(Dir::Uni).unwrap();
+    let msg = vec![0xAB; 3 * WINDOW];
+    let (mut sent, mut held) = (0, Credit::default());
+
+    assert_eq!(
+        pump_held(&mut pair, chs, s, &msg, &mut sent, &mut held),
+        WINDOW
+    );
+    assert_eq!(held.len(), WINDOW as u64);
+    let stats = pair.server_conn_mut(server_ch).stats().credit;
+    assert_eq!((stats.held, stats.available), (WINDOW as u64, 0));
+
+    let small = held.split(100);
+    let _ = pair.server_conn_mut(server_ch).release(small);
+    assert_eq!(
+        pump_held(&mut pair, chs, s, &msg, &mut sent, &mut held),
+        100
+    );
+
+    // Credit too small to announce while the peer still has room goes out once the peer spends
+    // that room, even though the receiver reads nothing in between.
+    let big = held.split(600);
+    let _ = pair.server_conn_mut(server_ch).release(big);
+    pair.drive_server();
+    let small = held.split(100);
+    let _ = pair.server_conn_mut(server_ch).release(small);
+    let before = sent;
+    for _ in 0..4 {
+        if let Ok(n) = pair.client_send(client_ch, s).write(&msg[sent..]) {
+            sent += n;
+        }
+        pair.drive();
+    }
+    assert_eq!(sent - before, 700);
+    assert_eq!(
+        pump_held(&mut pair, chs, s, &msg, &mut sent, &mut held),
+        700
+    );
+
+    let mut total = WINDOW + 100 + 700;
+    while total < msg.len() {
+        let all = mem::take(&mut held);
+        let _ = pair.server_conn_mut(server_ch).release(all);
+        let read = pump_held(&mut pair, chs, s, &msg, &mut sent, &mut held);
+        assert!(read > 0, "a release unblocks the peer");
+        total += read;
+    }
+    assert_eq!(
+        pair.server_recv(server_ch, s).read(true).err(),
+        Some(ReadableError::ClosedStream),
+        "finished and reclaimed while its tail is still held"
+    );
+    let _ = pair.server_conn_mut(server_ch).release(held);
+    assert_eq!(pair.server_conn_mut(server_ch).stats().credit.held, 0);
 }
 
 #[test]

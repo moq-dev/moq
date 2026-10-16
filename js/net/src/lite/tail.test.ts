@@ -1,11 +1,12 @@
 import { describe, expect, test } from "bun:test";
+import { Milli } from "@moq/clock";
 import { ProtocolViolation, StreamCode, StreamError } from "../error.ts";
 import type { Consumer as GroupConsumer } from "../group.ts";
 import { randomHop } from "../hop.ts";
 import { createMockTransportPair } from "../mock.ts";
 import * as Path from "../path.ts";
 import { Reader, Stream } from "../stream.ts";
-import { Milli, Timescale } from "../time.ts";
+import { Timescale } from "../time.ts";
 import type { Groups } from "../track.ts";
 import { Group as GroupMessage } from "./group.ts";
 import { StreamId } from "./stream.ts";
