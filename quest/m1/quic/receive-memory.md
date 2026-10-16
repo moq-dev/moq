@@ -93,6 +93,5 @@ separate guide quest is needed.
 ## Related
 
 - [Scope track priority](/quest/m1/track-priority-scope.md) - broadcast fairness domains and subscription priority semantics
-- [Hierarchical stream scheduling](/quest/m1/quic/scheduler.md) - share priority semantics without requiring sender-side recovery
 - [QUIC bitrate caps](/quest/m2/rate-quic.md) - pace credit grants inside the independently bounded memory allowance
 - [Relay peers get wider limits](/quest/m1/quic/peer-limits.md) - client and peer windows must both fit supported units
