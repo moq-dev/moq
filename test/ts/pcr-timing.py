@@ -761,6 +761,13 @@ def main():
                     "packets": scan.packets,
                     "pcr_count": len(scan.pcr),
                     "live": args.live,
+                    "clock": "time.monotonic" if args.live else None,
+                    "pcr_samples": scan.pcr,
+                    "new_base": sorted(scan.new_base),
+                    "wraps": scan.wraps,
+                    "pcr_pid": scan.pcr_pid,
+                    "other_pcr_pids": scan.other_pcr_pids,
+                    "parameters": vars(args),
                     "checks": [
                         {"name": n, "severity": s, "ok": ok, "headline": h, "detail": d} for n, s, ok, h, d in results
                     ],

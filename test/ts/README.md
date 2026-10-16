@@ -295,6 +295,7 @@ are laid over the PCRs.
 | `continuity` | hard | no discontinuities, and a payload-less packet must not advance the counter (ISO 13818-1 2.4.3.3) (`--live` only) |
 | `pcr-value-interval` | hard | no interval above `--repetition-ms` (default 100, TR 101 290 V1.4.1), within one time base |
 | `pcr-release-timing` | hard | no more than `--release-pct-max` of intervals arrive further than `--release-ms` from the interval their own values assert, and accumulated drift stays within `--drift-ms`, being the standing lag the sender is allowed to hold; a sample below `--live-min-pcr` PCRs or `--live-cover-pct` of the window is a failure, not a pass (`--live` only) |
+| `pcr-rate` | hard | the fitted PCR rate against read arrivals stays within `--rate-ppm` (default 30), after excluding the first third and separating declared time bases (`--live` only) |
 | `pcr-position` | shape | share of PCR packets within `--adjacent-packets` of the previous one |
 | `pcr-schedule` | shape | share of PCR intervals whose bytes are within `--schedule-tolerance-pct` (default 1) or one packet of what `--mux-rate` implies (estimated from the capture if not given); hard, at that share, when `--schedule-pct-min` is given |
 
@@ -304,6 +305,16 @@ since two correct grids offset from one another pool into one that neither keeps
 grades both through TSDuck's `tsanalyze`, which also catches a payload-less
 packet advancing the counter. A pipe cannot go through TSDuck first without
 rebuffering the arrivals `release` stamps.
+
+Live runs write `pcr-timing.json` beside `timing.out`. Failures retain their run;
+set `MOQ_TEST_KEEP=1` to retain passing controls too. The JSON report keeps the
+graded PID's raw `[packet_index, unwrapped_pcr_ticks, arrival_seconds, pid]` samples,
+the indices that begin new time bases, wrap count, and grading parameters. PCR ticks
+are at 27 MHz; arrivals use the reader's `time.monotonic()` clock and are upper
+bounds on when the exporter released those bytes. These preserve the inputs to
+the rate, release and byte-position checks so their verdicts can be replayed.
+Arrival delays alone do not establish whether a source clock, exporter, pipe or
+reader caused the discrepancy.
 
 Accumulated drift has two shapes and only one is a defect, so the check bounds
 the total and reports the rate over the tail of the sample beside it. A sender

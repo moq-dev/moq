@@ -12,8 +12,8 @@ output from actual timing defects.
 Decided with the maintainer on 2026-10-11: investigate and fix this finding
 independently of the same-instance resume failure. Preserve strict publisher
 identity, the existing validation gates, and production negotiation defaults.
-Keep validation PR #5328 draft while its local readiness findings remain
-unresolved; a passing CI run alone does not explain the local failure.
+Validation PR #5328 merged on 2026-10-13; its local clock finding remains
+unresolved here. A passing CI run alone does not explain the local failure.
 
 The epoch-capable 120-second local run completed with publisher and exporter
 exit zero, but the grader reported -1382.60 ppm against its +/-30 ppm limit.
@@ -38,6 +38,16 @@ support its claim. Never obtain a pass by widening the limit, choosing a
 convenient measurement window, disabling fallback, or retrying. A necessary
 change to the externally promised timing contract needs a maintainer decision.
 Check current main and the related open work before duplicating a fix.
+
+The 2026-10-16 diagnostic control on `main` at `e6006793f`, using
+`just test ts --live --duration 120` with unchanged gates and negotiation,
+passed at +3.41 ppm over 4,641 PCR samples, with 0.5 ms accumulated release
+lag and both processes exiting zero. The grader now retains raw PCR values,
+packet positions, monotonic read arrivals, discontinuity indices and parameters
+in the live run's `pcr-timing.json`; its five PCR verdicts replay exactly from
+that report. Positive and negative rate controls preserve verdicts across a
+declared clock jump. This supplies missing diagnostic evidence, not a causal
+explanation of the earlier failure; the original fix goal remains open.
 
 Add deterministic positive and negative timing controls with the intended
 failure reason asserted. They should separate valid bounded delay and
