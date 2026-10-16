@@ -41,4 +41,4 @@ diff.
 The survey's line numbers for each uncovered path come from
 `cargo llvm-cov` on the baseline; [the coverage report](/quest/m1/quic/coverage/report.md)
 reproduces them. This quest uses today's `Pair` as is; seeded impairments
-belong to [the simulation](/quest/m1/quic/coverage/sim.md).
+belong to the simulation in `rs/moq-quic/src/tests/sim.rs`.
