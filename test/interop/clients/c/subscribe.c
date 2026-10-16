@@ -121,19 +121,35 @@ static void on_catalog(void *ud, int32_t catalog) {
     moq_consume_catalog_free((uint32_t)catalog);
 }
 
+// The context whose session a failure closes, once connected.
+static ctx_t *failing;
+
 // Report a failure and exit 1, for the paths where moq-c still holds &ctx.
 //
 // _exit rather than a return: it leaves main's frame (and so ctx) intact for the
-// callbacks still pointing at it, which is what the failure paths want. Draining
-// first would work too, but a client that has already failed should print its
-// reason and go, not block for up to ten seconds on a teardown that may be exactly
-// what is broken.
+// callbacks still pointing at it, which is what the failure paths want. Only the
+// session is closed first, so the relay sees a close rather than timing the
+// connection out; a client that has already failed should not wait on the rest of
+// a teardown that may be exactly what is broken.
 static _Noreturn void fail(const char *fmt, ...) {
     va_list ap;
     va_start(ap, fmt);
     vfprintf(stderr, fmt, ap);
     va_end(ap);
     fflush(stderr);
+
+    ctx_t *c = failing;
+    failing = NULL; // a failure while closing exits at once
+    if (c && moq_session_close((uint32_t)c->session) == 0) {
+        struct timespec deadline;
+        clock_gettime(CLOCK_REALTIME, &deadline);
+        deadline.tv_sec += 5;
+        pthread_mutex_lock(&c->mu);
+        while (!c->done_status) {
+            if (pthread_cond_timedwait(&c->cv, &c->mu, &deadline) != 0) break; // timed out
+        }
+        pthread_mutex_unlock(&c->mu);
+    }
     _exit(1);
 }
 
@@ -209,6 +225,7 @@ int main(int argc, char **argv) {
         fprintf(stderr, "error: moq_session_connect failed: %d\n", c.session);
         return 1;
     }
+    failing = &c;
 
     struct timespec deadline;
     clock_gettime(CLOCK_REALTIME, &deadline);
