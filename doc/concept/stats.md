@@ -171,7 +171,15 @@ should prefer the canonical name and fall back to the legacy one.
 ### Sessions
 
 ```json
-{ "acme": { "requests": 3, "sessions_started": 12, "sessions_ended": 10, "sessions": 12, "sessions_closed": 10, "announces_peak": 40, "subscriptions_peak": 900 } }
+{
+  "acme": {
+    "requests": 3, "sessions_started": 12, "sessions_ended": 10,
+    "sessions": 12, "sessions_closed": 10,
+    "sessions_refused": { "refused": 0, "unavailable": 0, "request": 0, "forbidden": 0, "lan": 0 },
+    "sessions_failed": { "idle_timeout": 1, "transport": 0, "application": 0, "expired": 0 },
+    "announces_peak": 40, "subscriptions_peak": 900
+  }
+}
 ```
 
 `sessions_started` and `sessions_ended` count connects and disconnects, whether
@@ -181,21 +189,16 @@ group on the tier for `totals.json`. `sessions` and `sessions_closed` are their
 legacy spellings. A session moved to a new tier ends on the old one and starts
 on the new.
 
-`sessions_refused` counts refusals by `refused`, `unavailable`, `request`,
-`forbidden`, and `lan`. Relay admission refusals have no resolved grant, so they
-belong to the empty root on the default tier. An embedder that refuses a session
-outside relay admission can record it on its stats handle under the root and tier
-it resolved. Refused sessions never increase the live session count.
+`sessions_refused` counts sessions turned away before admission, by reason.
+They never start a session. The relay's own refusals have no resolved root, so
+they count under the empty root on the default tier; an embedder can count one
+it refuses itself with `stats::Handle::refuse`, under the root and tier it
+resolved.
 
-`sessions_failed` counts abnormal ends by `idle_timeout`, `transport`,
-`application`, and `expired`. A clean peer close, local close, drain, or shutdown
-is not a failure. These are subsets of the sessions that end, leaving the live
-count unchanged. A reconnecting cluster dial retains one logical session across
-physical reconnects, so intermediate retry statuses add no failure; its typed
-terminal session error counts once when that logical session ends. Initial
-setup errors and configuration failures do not become admitted-session failures.
-Both objects default to zero when reading an older publisher;
-their counters survive pruning and follow the node epoch and reset rules.
+`sessions_failed` counts admitted sessions that ended abnormally, by kind: a
+subset of `sessions_ended`, so the live count is unchanged. A clean close by
+either side, a drain, or a shutdown is not a failure. A reader treats a missing
+object as zeros.
 
 `requests` counts admitted request/response exchanges under the token's root and
 tier, including HTTP `/fetch` and `/announced`. They never start or end a session.
