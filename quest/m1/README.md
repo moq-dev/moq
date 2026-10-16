@@ -14,9 +14,8 @@ Decided with the maintainer on 2026-10-13:
   through a stale route; a working backup recovers; matching-epoch handover
   preserves eligible content; a new epoch produces an explicit Restart.
   Catalogs, long-lived readers, and late joiners must obey the same contract.
-- Prioritize the QUIC library switch beside routing. Its clock prerequisite
-  lands first. Keep its correctness, interoperability, memory, and performance
-  evidence; a passing simulator alone does not validate a real transport.
+- Prioritize the in-tree QUIC stack (`moq-quic`) beside routing. Keep its
+  correctness, interoperability, memory, and performance evidence; a passing simulator alone does not validate a real transport.
 - Finish planned breaking APIs in this release, including public clocks,
   signed priority, binding shape, watch worker, and the QoS lag API. Keep
   prerequisites of those changes here even when a prerequisite is additive.
@@ -65,8 +64,7 @@ above them.
 - [Cluster routing](/quest/m1/cluster-routing/README.md) - prove shared routing contracts, implement per-origin routes, and connect outbound local clusters
 - [P2P](/quest/m1/p2p/README.md) - application-selected peer sessions use shared priorities, routing, and same-epoch handover
 - [Routing guide](/quest/m1/routing-guide.md) - concepts and practical outbound federation/P2P setup
-- [Controlled time](/quest/m1/time/README.md) - every crate and package reads time through moq-clock or @moq/clock, with regression tests for the changed contracts; ranks above the fork, whose switch adopts its instant
-- [Hard fork](/quest/m1/quic/fork/README.md) - quinn hard-forked in-tree as `moq-quic`, ranked ahead of perf; the rest of the QUIC line follows it
+- [Controlled time](/quest/m1/time/README.md) - every crate and package reads time through moq-clock or @moq/clock, with regression tests for the changed contracts
 - [Own the QUIC stack](/quest/m1/quic/README.md) - quinn hard-forked in-tree as `moq-quic`, carrying BBR, reliable reset, hierarchical scheduling, peer limits, and endpoint sharding
 - [Finalize moq-lite-07](/quest/m1/lite07-finalize.md) - when the maintainer cuts it, lite-07 negotiates as `moq-lite-07` and the next release ships it
 - [moq-transport passthrough](/quest/m1/ietf-extension/README.md) - object IDs, properties, end status, datagram objects, and unknown track properties survive moq-transport -> moq-relay (and a relay cluster) -> moq-transport; moxygen's moq-test sections 1-7 pass nightly, except cases that use a subgroup other than 0
