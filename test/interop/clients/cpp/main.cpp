@@ -136,10 +136,8 @@ int publish(const std::string &url, const std::string &path) {
     output.track = AUDIO_TRACK;
     output.frame_duration_us = AUDIO_FRAME_DURATION_US;
     auto audio = ok(
-        moq::AudioProducer::init(
-            broadcast, catalog, {moq::AudioSampleFormat::kF32, AUDIO_RATE, 1}, output, nullptr
-        ),
-        "encode_audio"
+        moq::AudioProducer::init(catalog, {moq::AudioSampleFormat::kF32, AUDIO_RATE, 1}, output, nullptr),
+        "audio producer"
     );
     ok(broadcast->announce({}), "announce");
     std::printf(

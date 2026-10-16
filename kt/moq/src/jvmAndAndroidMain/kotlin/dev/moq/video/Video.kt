@@ -1,26 +1,26 @@
 package dev.moq.video
 
-import dev.moq.Bandwidth
-import dev.moq.BroadcastConsumer
-import dev.moq.BroadcastProducer
-import dev.moq.media.CatalogProducer
-import dev.moq.media.Video
-
+/** Encodes raw pictures and publishes them as a track; construct it from the broadcast's `CatalogProducer`. */
 typealias Producer = uniffi.moq.MoqVideoProducer
+/** Encodes raw pictures without publishing them. */
 typealias Encoder = uniffi.moq.MoqVideoEncoder
-typealias Decoder = uniffi.moq.MoqVideoDecoder
+/** Subscribes to a catalog video rendition and yields decoded frames; open one with `Consumer.subscribe`. */
+typealias Consumer = uniffi.moq.MoqVideoConsumer
+/** The pixel layout, resolution, and framerate written to a [Producer]. */
 typealias EncoderInput = uniffi.moq.MoqVideoEncoderInput
+/** The track name, codec, bitrate, group mode, and backend preference. */
 typealias EncoderOutput = uniffi.moq.MoqVideoEncoderOutput
+/** What a [Consumer] delivers: an optional resize, a max delay, and the decoder's surface (macOS only). */
 typealias DecoderOutput = uniffi.moq.MoqVideoDecoderOutput
+/** One raw picture with its presentation timestamp. */
 typealias Frame = uniffi.moq.MoqVideoFrame
+/** One encoded access unit from an [Encoder]. */
 typealias Packet = uniffi.moq.MoqVideoPacket
+/** How pictures are split into independently decodable groups. */
 typealias Gop = uniffi.moq.MoqVideoGop
+/** H.264 or H.265. */
 typealias Codec = uniffi.moq.MoqVideoCodec
+/** A CPU pixel layout (I420 or RGBA). */
 typealias PixelFormat = uniffi.moq.MoqVideoPixelFormat
+/** The encoder backend preference. */
 typealias EncoderKind = uniffi.moq.MoqVideoEncoderKind
-
-fun producer(broadcast: BroadcastProducer, catalog: CatalogProducer, input: EncoderInput, output: EncoderOutput, bandwidth: Bandwidth? = null): Producer =
-    Producer(broadcast, catalog, input, output, bandwidth)
-
-suspend fun decoder(broadcast: BroadcastConsumer, name: String, rendition: Video, output: DecoderOutput = DecoderOutput()): Decoder =
-    uniffi.moq.moqVideoDecode(broadcast, name, rendition, output)

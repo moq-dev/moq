@@ -12,7 +12,7 @@ import uniffi.moq.MoqException
  * Stream of decoded audio frames in the layout declared by the
  * [AudioDecoderOutput] the consumer was created with.
  */
-fun dev.moq.audio.Decoder.frames(): Flow<dev.moq.audio.Frame> = flow {
+fun dev.moq.audio.Consumer.frames(): Flow<dev.moq.audio.Frame> = flow {
     while (true) {
         currentCoroutineContext().ensureActive()
         emit(next() ?: break)
@@ -25,7 +25,7 @@ fun dev.moq.audio.Decoder.frames(): Flow<dev.moq.audio.Frame> = flow {
  * Stream of decoded video frames. Each owns the decoder's surface: close it
  * (or `use` it) when done, since held frames stall the decoder.
  */
-fun dev.moq.video.Decoder.frames(): Flow<VideoDecodedFrame> = flow {
+fun dev.moq.video.Consumer.frames(): Flow<VideoDecodedFrame> = flow {
     while (true) {
         currentCoroutineContext().ensureActive()
         emit(next() ?: break)

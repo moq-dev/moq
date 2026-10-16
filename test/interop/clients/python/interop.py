@@ -63,8 +63,7 @@ async def publish(url: str, broadcast: str) -> None:
         media = moq.media.TrackStreamProducer.video(
             producer, moq.media.VideoInit(format=moq.media.VideoFormat.AVC3, data=b"")
         )
-        audio = moq.audio.producer(
-            producer,
+        audio = moq.audio.Producer(
             catalog,
             moq.audio.EncoderInput(format=moq.audio.SampleFormat.F32, sample_rate=AUDIO_RATE, channels=1),
             moq.audio.EncoderOutput(

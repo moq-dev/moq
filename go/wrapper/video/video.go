@@ -70,14 +70,14 @@ func (o DecoderOutput) ffi() (ffi.MoqVideoDecoderOutput, error) {
 // Producer encodes raw pictures and publishes them as a track in a broadcast's catalog.
 type Producer struct{ inner *ffi.MoqVideoProducer }
 
-// NewProducer opens a video track on broadcast, registering its rendition in catalog; bandwidth may be nil.
-func NewProducer(broadcast *moq.BroadcastProducer, catalog *media.CatalogProducer, input EncoderInput, output EncoderOutput, bandwidth *moq.Bandwidth) (*Producer, error) {
+// NewProducer opens a video track on the catalog's broadcast and registers its rendition; bandwidth may be nil.
+func NewProducer(catalog *media.CatalogProducer, input EncoderInput, output EncoderOutput, bandwidth *moq.Bandwidth) (*Producer, error) {
 	var bw **ffi.MoqBandwidth
 	if bandwidth != nil {
 		raw := bridge.Bandwidth(bandwidth)
 		bw = &raw
 	}
-	inner, err := ffi.NewMoqVideoProducer(bridge.BroadcastProducer(broadcast), bridge.CatalogProducer(catalog), input, output, bw)
+	inner, err := ffi.NewMoqVideoProducer(bridge.CatalogProducer(catalog), input, output, bw)
 	if err != nil {
 		return nil, err
 	}
@@ -162,25 +162,25 @@ func (e *Encoder) Flush() ([]Packet, error) { raw, err := e.inner.Flush(); retur
 // Finish drains and closes the encoder.
 func (e *Encoder) Finish() ([]Packet, error) { raw, err := e.inner.Finish(); return packets(raw), err }
 
-// Decoder subscribes to a video rendition and yields decoded frames.
-type Decoder struct{ inner *ffi.MoqVideoDecoder }
+// Consumer subscribes to a video rendition and yields decoded frames.
+type Consumer struct{ inner *ffi.MoqVideoConsumer }
 
-// NewDecoder subscribes to the named catalog rendition, following its broadcast reference.
-func NewDecoder(ctx context.Context, broadcast *moq.BroadcastConsumer, name string, rendition media.Video, output DecoderOutput) (*Decoder, error) {
+// Subscribe subscribes to the named catalog rendition, following its broadcast reference.
+func Subscribe(ctx context.Context, broadcast *moq.BroadcastConsumer, name string, rendition media.Video, output DecoderOutput) (*Consumer, error) {
 	out, err := output.ffi()
 	if err != nil {
 		return nil, err
 	}
-	inner, err := ffi.MoqVideoDecode(ctx, bridge.BroadcastConsumer(broadcast), name, rendition, out)
+	inner, err := ffi.MoqVideoConsumerSubscribe(ctx, bridge.BroadcastConsumer(broadcast), name, rendition, out)
 	if err != nil {
 		return nil, err
 	}
-	return &Decoder{inner}, nil
+	return &Consumer{inner}, nil
 }
 
 // Next returns the next decoded frame, or (nil, nil) when the track ends.
 // Close each frame when done with it.
-func (d *Decoder) Next(ctx context.Context) (*moq.VideoDecodedFrame, error) {
+func (d *Consumer) Next(ctx context.Context) (*moq.VideoDecodedFrame, error) {
 	raw, err := bridge.CallHandle(ctx, d.inner.Cancel, func(ctx context.Context) (*ffi.MoqVideoDecodedFrame, error) {
 		raw, err := d.inner.Next(ctx)
 		if err != nil || raw == nil {
@@ -195,9 +195,9 @@ func (d *Decoder) Next(ctx context.Context) (*moq.VideoDecodedFrame, error) {
 }
 
 // All ranges over decoded frames until the track ends or the loop breaks.
-func (d *Decoder) All(ctx context.Context) iter.Seq2[*moq.VideoDecodedFrame, error] {
+func (d *Consumer) All(ctx context.Context) iter.Seq2[*moq.VideoDecodedFrame, error] {
 	return bridge.Seq(ctx, d.Next)
 }
 
 // Cancel stops the stream.
-func (d *Decoder) Cancel() { d.inner.Cancel() }
+func (d *Consumer) Cancel() { d.inner.Cancel() }

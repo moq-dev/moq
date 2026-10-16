@@ -13,7 +13,6 @@ use crate::consumer::MoqBroadcastConsumer;
 use crate::demand::MoqTrackDemand;
 use crate::error::MoqError;
 use crate::ffi::Task;
-use crate::producer::MoqBroadcastProducer;
 
 /// Raw PCM sample format, mirroring WebCodecs `AudioData.format`.
 ///
@@ -114,7 +113,7 @@ pub struct MoqAudioEncoderOutput {
 	pub frame_duration_us: u32,
 }
 
-/// PCM layout the caller wants out of [`MoqAudioDecoder::next`].
+/// PCM layout the caller wants out of [`MoqAudioConsumer::next`].
 #[derive(uniffi::Record)]
 pub struct MoqAudioDecoderOutput {
 	pub format: MoqAudioSampleFormat,
@@ -266,7 +265,7 @@ impl TryFrom<MoqAudioFrame> for moq_audio::Frame {
 
 /// Producer for a raw-audio track.
 ///
-/// Constructed from a broadcast and its media catalog. Each
+/// Constructed from a broadcast's media catalog. Each
 /// [`write`](Self::write) accepts an [`MoqAudioFrame`] whose `data`
 /// is PCM in the format declared by the [`MoqAudioEncoderInput`]
 /// passed at publish time.
@@ -283,21 +282,6 @@ impl MoqAudioProducer {
 		let guard = self.inner.lock().unwrap();
 		let producer = guard.as_ref().ok_or(MoqError::Closed)?;
 		Ok(producer.demand())
-	}
-}
-
-#[cfg(test)]
-impl MoqBroadcastProducer {
-	pub(crate) fn encode_audio(
-		self: &Arc<Self>,
-		name: String,
-		input: MoqAudioEncoderInput,
-		mut output: MoqAudioEncoderOutput,
-		bandwidth: Option<Arc<MoqBandwidth>>,
-	) -> Result<Arc<MoqAudioProducer>, MoqError> {
-		output.track = Some(name);
-		let catalog = crate::media::MoqMediaCatalogProducer::new(self.clone())?;
-		MoqAudioProducer::new(self, &catalog, input, output, bandwidth)
 	}
 }
 
@@ -347,7 +331,7 @@ impl MoqAudioProducer {
 
 #[uniffi::export]
 impl MoqAudioProducer {
-	/// Open an audio track on this broadcast. The catalog rendition is
+	/// Open an audio track on the catalog's broadcast. The catalog rendition is
 	/// registered immediately so subscribers can find the track even
 	/// before the first frame is written.
 	///
@@ -355,21 +339,15 @@ impl MoqAudioProducer {
 	/// allocator. Following the grant waits on the Rust audio producer; this
 	/// call only claims the share so a co-resident video encoder sizes itself
 	/// against what is left.
-	#[uniffi::constructor]
+	#[uniffi::constructor(default(bandwidth = None))]
 	pub fn new(
-		broadcast: &MoqBroadcastProducer,
 		catalog: &crate::media::MoqMediaCatalogProducer,
 		input: MoqAudioEncoderInput,
 		output: MoqAudioEncoderOutput,
 		bandwidth: Option<Arc<MoqBandwidth>>,
 	) -> Result<Arc<MoqAudioProducer>, MoqError> {
 		let _guard = crate::ffi::runtime().enter();
-		catalog.broadcast()?;
-		if !catalog.belongs_to(broadcast) {
-			return Err(MoqError::Media {
-				reason: "catalog belongs to another broadcast".into(),
-			});
-		}
+		let broadcast = catalog.broadcast()?;
 
 		let format = input.format.into();
 		let layout = moq_audio::Layout::from_channels(input.channels)?;
@@ -435,12 +413,12 @@ impl ConsumerInner {
 
 /// Consumer for a raw-audio track.
 #[derive(uniffi::Object)]
-pub struct MoqAudioDecoder {
+pub struct MoqAudioConsumer {
 	task: Task<ConsumerInner>,
 }
 
 #[uniffi::export]
-impl MoqAudioDecoder {
+impl MoqAudioConsumer {
 	/// The next decoded frame, or `None` once the track ends.
 	pub async fn next(&self) -> Result<Option<MoqAudioFrame>, MoqError> {
 		self.task.run(|mut state| async move { state.next().await }).await
@@ -451,18 +429,6 @@ impl MoqAudioDecoder {
 	/// Terminal: the decoder session is released here, not when the handle is.
 	pub fn cancel(&self) {
 		self.task.cancel();
-	}
-}
-
-#[cfg(test)]
-impl MoqBroadcastConsumer {
-	pub(crate) async fn decode_audio(
-		&self,
-		name: String,
-		catalog_audio: crate::media::MoqAudio,
-		output: MoqAudioDecoderOutput,
-	) -> Result<Arc<MoqAudioDecoder>, MoqError> {
-		moq_audio_decode(self, name, catalog_audio, output).await
 	}
 }
 
@@ -490,7 +456,8 @@ fn audio_config(catalog_audio: crate::media::MoqAudio) -> Result<hang::catalog::
 	Ok(config)
 }
 
-impl MoqAudioDecoder {
+#[uniffi::export]
+impl MoqAudioConsumer {
 	/// Subscribe to an audio track. `catalog_audio_config` comes from
 	/// the catalog (see
 	/// [`MoqMediaCatalogConsumer::next`](crate::media::MoqMediaCatalogConsumer::next));
@@ -498,12 +465,13 @@ impl MoqAudioDecoder {
 	///
 	/// A rendition whose [`broadcast`](crate::media::MoqAudio::broadcast) names another broadcast
 	/// is subscribed there, so `name` is always read from the broadcast the catalog points at.
-	async fn create(
+	#[uniffi::constructor]
+	pub async fn subscribe(
 		broadcast: &MoqBroadcastConsumer,
 		name: String,
 		catalog_audio: crate::media::MoqAudio,
 		output: MoqAudioDecoderOutput,
-	) -> Result<Arc<MoqAudioDecoder>, MoqError> {
+	) -> Result<Arc<MoqAudioConsumer>, MoqError> {
 		// Reject the codec before resolving: resolving reaches the origin, which can invoke a
 		// dynamic handler and open an upstream subscription we would immediately drop.
 		let reference = catalog_audio.broadcast.clone();
@@ -521,21 +489,10 @@ impl MoqAudioDecoder {
 			.watch(async { Ok(moq_audio::decode::Consumer::new(&resolved, &cfg, name, config).await?) })
 			.await?;
 
-		Ok(Arc::new(MoqAudioDecoder {
+		Ok(Arc::new(MoqAudioConsumer {
 			task: Task::new(ConsumerInner { consumer }).supervised(broadcast.driver.clone()),
 		}))
 	}
-}
-
-/// Subscribe to and decode one catalog audio rendition.
-#[uniffi::export]
-pub async fn moq_audio_decode(
-	broadcast: &MoqBroadcastConsumer,
-	name: String,
-	catalog_audio: crate::media::MoqAudio,
-	output: MoqAudioDecoderOutput,
-) -> Result<Arc<MoqAudioDecoder>, MoqError> {
-	MoqAudioDecoder::create(broadcast, name, catalog_audio, output).await
 }
 
 #[cfg(test)]

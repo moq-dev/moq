@@ -50,7 +50,7 @@ namespace moq {
 using AnnounceConsumer = MoqAnnounceConsumer;
 using AnnouncedBroadcast = MoqAnnouncedBroadcast;
 using AudioCodec = MoqAudioCodec;
-using AudioDecoder = MoqAudioDecoder;
+using AudioConsumer = MoqAudioConsumer;
 using AudioEncoder = MoqAudioEncoder;
 using AudioProducer = MoqAudioProducer;
 using Bandwidth = MoqBandwidth;
@@ -91,7 +91,7 @@ using TrackDemand = MoqTrackDemand;
 using TrackDynamic = MoqTrackDynamic;
 using TrackProducer = MoqTrackProducer;
 using TrackRequest = MoqTrackRequest;
-using VideoDecoder = MoqVideoDecoder;
+using VideoConsumer = MoqVideoConsumer;
 using VideoEncoder = MoqVideoEncoder;
 using VideoProducer = MoqVideoProducer;
 using Announce = MoqAnnounce;

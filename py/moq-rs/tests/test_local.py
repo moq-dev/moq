@@ -1266,8 +1266,7 @@ def test_encode_audio_with_opus_object():
         broadcast = moq.BroadcastProducer()
         codec = moq.AudioCodec.opus()
         output = moq.audio.EncoderOutput(codec=codec, track="mic")
-        producer = moq.audio.producer(
-            broadcast,
+        producer = moq.audio.Producer(
             moq.media.CatalogProducer(broadcast),
             moq.AudioEncoderInput(format=moq.AudioSampleFormat.F32, sample_rate=48_000, channels=1),
             output,
@@ -1289,8 +1288,7 @@ async def test_decode_video_frame():
     """A decoded frame owns its picture and converts to either layout, even after its consumer is cancelled."""
     origin = moq.OriginProducer()
     broadcast = create_announced(origin, "video-decode-frame")
-    video = moq.video.producer(
-        broadcast,
+    video = moq.video.Producer(
         moq.media.CatalogProducer(broadcast),
         moq.VideoEncoderInput(format=moq.VideoPixelFormat.RGBA, width=320, height=240, framerate=30),
         # Software so the encode is deterministic everywhere. uniffi nests each
@@ -1315,7 +1313,7 @@ async def test_decode_video_frame():
     track_name = next(iter(catalog.video))
     rendition = catalog.video[track_name]
 
-    decoder = await moq.video.decoder(broadcast_consumer, track_name, rendition)
+    decoder = await moq.video.Consumer.subscribe(broadcast_consumer, track_name, rendition)
 
     # Keep the encoder fed so the decoder sees frames after it joined.
     for i in range(10, 40):

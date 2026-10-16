@@ -96,7 +96,7 @@ func publish(ctx context.Context, url, broadcast string) error {
 	if err != nil {
 		return err
 	}
-	audio, err := moqaudio.NewProducer(producer, catalog, moqaudio.EncoderInput{
+	audio, err := moqaudio.NewProducer(catalog, moqaudio.EncoderInput{
 		Format:     moq.AudioSampleFormatF32,
 		SampleRate: audioRate,
 		Channels:   1,

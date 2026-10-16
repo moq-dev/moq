@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from datetime import timedelta
 
 from moq_ffi import (
-    MoqAudioDecoder,
+    MoqAudioConsumer,
     MoqAudioDecoderOutput,
     MoqAudioEncoder,
     MoqAudioEncoderFinish,
@@ -14,12 +14,11 @@ from moq_ffi import (
     MoqAudioFrame,
     MoqAudioPacket,
     MoqAudioProducer,
-    moq_audio_decode,
 )
 
 from ._records import _from_us, _opt_us, _to_us
 from .media import Audio, CatalogProducer
-from .publish import BroadcastProducer, TrackDemand
+from .publish import TrackDemand
 from .session import Bandwidth, Reservation
 from .subscribe import BroadcastConsumer
 from .types import AudioCodec as Codec
@@ -66,7 +65,7 @@ class EncoderOutput:
 
 @dataclass(frozen=True)
 class DecoderOutput:
-    """The PCM layout a :class:`Decoder` delivers and how stale a group may get."""
+    """The PCM layout a :class:`Consumer` delivers and how stale a group may get."""
 
     format: SampleFormat
     sample_rate: int | None = None
@@ -83,14 +82,27 @@ class DecoderOutput:
 
 
 class Producer:
-    """Publish raw PCM, encoded on the way out. Built via :func:`producer`.
+    """Publish raw PCM, encoded on the way out. Construct it from the broadcast's catalog.
 
     The PCM layout, codec, bitrate, and frame duration are fixed at
     construction; each :meth:`write` passes only samples and a timestamp.
     """
 
-    def __init__(self, inner: MoqAudioProducer) -> None:
-        self._inner = inner
+    def __init__(
+        self,
+        catalog: CatalogProducer,
+        input: EncoderInput,
+        output: EncoderOutput,
+        *,
+        bandwidth: Bandwidth | None = None,
+    ) -> None:
+        """Open a audio track on the catalog's broadcast and register its rendition."""
+        self._inner = MoqAudioProducer(
+            catalog._inner,
+            input,
+            output._ffi(),
+            None if bandwidth is None else bandwidth._inner,
+        )
 
     def demand(self) -> TrackDemand:
         """A watch-only handle to whether this audio track has subscribers."""
@@ -114,14 +126,21 @@ class Producer:
         self._inner.finish()
 
 
-class Decoder:
-    """Async iterator of decoded PCM frames. Built via :func:`decoder`.
+class Consumer:
+    """Async iterator of decoded PCM frames. Construct with :meth:`subscribe`.
 
     The layout is fixed by the :class:`DecoderOutput` passed at subscribe time;
     each frame's ``data`` is raw bytes in that format.
     """
 
-    def __init__(self, inner: MoqAudioDecoder) -> None:
+    @classmethod
+    async def subscribe(
+        cls, broadcast: BroadcastConsumer, name: str, rendition: Audio, output: DecoderOutput
+    ) -> Consumer:
+        """Subscribe to one catalog audio rendition and decode it."""
+        return cls(await MoqAudioConsumer.subscribe(broadcast._inner, name, rendition, output._ffi()))
+
+    def __init__(self, inner: MoqAudioConsumer) -> None:
         self._inner = inner
 
     async def __aenter__(self):
@@ -144,26 +163,6 @@ class Decoder:
         self._inner.cancel()
 
 
-def producer(
-    broadcast: BroadcastProducer,
-    catalog: CatalogProducer,
-    input: EncoderInput,
-    output: EncoderOutput,
-    *,
-    bandwidth: Bandwidth | None = None,
-) -> Producer:
-    """Encode PCM and publish it into a broadcast's catalog."""
-    return Producer(
-        MoqAudioProducer(
-            broadcast._inner,
-            catalog._inner,
-            input,
-            output._ffi(),
-            None if bandwidth is None else bandwidth._inner,
-        )
-    )
-
-
 class Encoder:
     """Encode codec-sized interleaved f32 PCM without publishing it."""
 
@@ -184,18 +183,8 @@ class Encoder:
         return self._inner.finish(pcm or [])
 
 
-async def decoder(
-    broadcast: BroadcastConsumer,
-    name: str,
-    rendition: Audio,
-    output: DecoderOutput,
-) -> Decoder:
-    """Subscribe to and decode one catalog audio rendition."""
-    return Decoder(await moq_audio_decode(broadcast._inner, name, rendition, output._ffi()))
-
-
 __all__ = [
-    "Decoder",
+    "Consumer",
     "DecoderOutput",
     "Encoder",
     "EncoderInput",
@@ -204,6 +193,4 @@ __all__ = [
     "Codec",
     "SampleFormat",
     "Producer",
-    "decoder",
-    "producer",
 ]

@@ -6,18 +6,17 @@ from dataclasses import dataclass
 from datetime import timedelta
 
 from moq_ffi import (
-    MoqVideoDecoder,
+    MoqVideoConsumer,
     MoqVideoDecoderOutput,
     MoqVideoEncoder,
     MoqVideoFrame,
     MoqVideoPacket,
     MoqVideoProducer,
-    moq_video_decode,
 )
 
 from ._records import _from_us, _opt_us, _to_us
 from .media import CatalogProducer, Dimensions, Video
-from .publish import BroadcastProducer, TrackDemand
+from .publish import TrackDemand
 from .session import Bandwidth, Reservation
 from .subscribe import BroadcastConsumer
 from .types import VideoDecodedFrame
@@ -52,7 +51,7 @@ class Packet:
 
 @dataclass(frozen=True)
 class DecoderOutput:
-    """What a :class:`Decoder` delivers: an optional resize, a max delay, and the decoder's surface (macOS only)."""
+    """What a :class:`Consumer` delivers: an optional resize, a max delay, and the decoder's surface (macOS only)."""
 
     resize: Dimensions | None = None
     max_delay: timedelta | None = None
@@ -67,14 +66,27 @@ class DecoderOutput:
 
 
 class Producer:
-    """Publish raw pictures, encoded on the way out. Built via :func:`producer`.
+    """Publish raw pictures, encoded on the way out. Construct it from the broadcast's catalog.
 
     Pixel format, resolution, and framerate are fixed at construction; each
     :meth:`write` passes only pixels and a presentation timestamp.
     """
 
-    def __init__(self, inner: MoqVideoProducer) -> None:
-        self._inner = inner
+    def __init__(
+        self,
+        catalog: CatalogProducer,
+        input: EncoderInput,
+        output: EncoderOutput,
+        *,
+        bandwidth: Bandwidth | None = None,
+    ) -> None:
+        """Open a video track on the catalog's broadcast and register its rendition."""
+        self._inner = MoqVideoProducer(
+            catalog._inner,
+            input,
+            output,
+            None if bandwidth is None else bandwidth._inner,
+        )
 
     def demand(self) -> TrackDemand:
         """A watch-only handle to whether this video track has subscribers."""
@@ -113,15 +125,23 @@ class Producer:
         self._inner.finish()
 
 
-class Decoder:
-    """Async iterator of decoded frames. Built via :func:`decoder`.
+class Consumer:
+    """Async iterator of decoded frames. Construct with :meth:`subscribe`.
 
     Each frame owns its decoded picture until it is garbage collected;
     ``frame.pixels(format)`` converts it to tightly packed CPU pixels.
     ``output.resize`` is best effort, so read each frame's ``width()`` and ``height()``.
     """
 
-    def __init__(self, inner: MoqVideoDecoder) -> None:
+    @classmethod
+    async def subscribe(
+        cls, broadcast: BroadcastConsumer, name: str, rendition: Video, output: DecoderOutput | None = None
+    ) -> Consumer:
+        """Subscribe to one catalog video rendition and decode it."""
+        selected = output or DecoderOutput()
+        return cls(await MoqVideoConsumer.subscribe(broadcast._inner, name, rendition, selected._ffi()))
+
+    def __init__(self, inner: MoqVideoConsumer) -> None:
         self._inner = inner
 
     async def __aenter__(self):
@@ -142,26 +162,6 @@ class Decoder:
     def cancel(self) -> None:
         """Cancel the subscription and stop delivering video frames."""
         self._inner.cancel()
-
-
-def producer(
-    broadcast: BroadcastProducer,
-    catalog: CatalogProducer,
-    input: EncoderInput,
-    output: EncoderOutput,
-    *,
-    bandwidth: Bandwidth | None = None,
-) -> Producer:
-    """Encode raw pictures and publish them into a broadcast's catalog."""
-    return Producer(
-        MoqVideoProducer(
-            broadcast._inner,
-            catalog._inner,
-            input,
-            output,
-            None if bandwidth is None else bandwidth._inner,
-        )
-    )
 
 
 class Encoder:
@@ -191,19 +191,8 @@ class Encoder:
         return [Packet._from_ffi(value) for value in self._inner.finish()]
 
 
-async def decoder(
-    broadcast: BroadcastConsumer,
-    name: str,
-    rendition: Video,
-    output: DecoderOutput | None = None,
-) -> Decoder:
-    """Subscribe to and decode one catalog video rendition."""
-    selected = output or DecoderOutput()
-    return Decoder(await moq_video_decode(broadcast._inner, name, rendition, selected._ffi()))
-
-
 __all__ = [
-    "Decoder",
+    "Consumer",
     "DecoderOutput",
     "Encoder",
     "EncoderInput",
@@ -212,6 +201,4 @@ __all__ = [
     "Gop",
     "Packet",
     "Producer",
-    "decoder",
-    "producer",
 ]

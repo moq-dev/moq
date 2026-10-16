@@ -182,7 +182,7 @@ func TestEncodeAudioWithOpusObject(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		producer, err := moqaudio.NewProducer(broadcast, catalog, moqaudio.EncoderInput{
+		producer, err := moqaudio.NewProducer(catalog, moqaudio.EncoderInput{
 			Format:     moq.AudioSampleFormatF32,
 			SampleRate: 48000,
 			Channels:   1,
@@ -231,7 +231,7 @@ func TestEncodeAudioFrameDurations(t *testing.T) {
 		t.Fatal(err)
 	}
 	fineName := "fine"
-	fine, err := moqaudio.NewProducer(broadcast, catalog, input, moqaudio.EncoderOutput{Codec: moq.OpusAudioCodec(), Track: &fineName, FrameDuration: 2500 * time.Microsecond}, nil)
+	fine, err := moqaudio.NewProducer(catalog, input, moqaudio.EncoderOutput{Codec: moq.OpusAudioCodec(), Track: &fineName, FrameDuration: 2500 * time.Microsecond}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -244,7 +244,7 @@ func TestEncodeAudioFrameDurations(t *testing.T) {
 	}
 
 	coarseName := "coarse"
-	_, err = moqaudio.NewProducer(broadcast, catalog, input, moqaudio.EncoderOutput{Codec: moq.OpusAudioCodec(), Track: &coarseName, FrameDuration: 2 * time.Millisecond}, nil)
+	_, err = moqaudio.NewProducer(catalog, input, moqaudio.EncoderOutput{Codec: moq.OpusAudioCodec(), Track: &coarseName, FrameDuration: 2 * time.Millisecond}, nil)
 	if !errors.Is(err, moq.ErrAudio) {
 		t.Fatalf("err = %v, want ErrAudio: 2 ms is not an opus frame duration", err)
 	}
@@ -295,7 +295,7 @@ func testDecodeVideoFrame(t *testing.T, surface bool) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	video, err := moqvideo.NewProducer(broadcast, catalogProducer,
+	video, err := moqvideo.NewProducer(catalogProducer,
 		moqvideo.EncoderInput{Format: moq.VideoPixelFormatRgba, Width: 320, Height: 240, Framerate: 30},
 		// Software both ways so the test is deterministic everywhere.
 		moqvideo.EncoderOutput{Codec: moq.VideoCodecH264, Track: &track, Kind: moq.SoftwareEncoder()},
@@ -335,7 +335,7 @@ func testDecodeVideoFrame(t *testing.T, surface bool) {
 		t.Fatalf("catalog has no %q rendition: %v", track, catalog.Video)
 	}
 
-	decoder, err := moqvideo.NewDecoder(ctx, bc, track, rendition, moqvideo.DecoderOutput{Surface: surface})
+	decoder, err := moqvideo.Subscribe(ctx, bc, track, rendition, moqvideo.DecoderOutput{Surface: surface})
 	if surface && runtime.GOOS != "darwin" {
 		if !errors.Is(err, moq.ErrUnsupported) {
 			t.Fatalf("surface decode off macOS: err = %v, want ErrUnsupported", err)

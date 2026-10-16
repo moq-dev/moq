@@ -51,7 +51,7 @@ func (b *BroadcastConsumer) FetchGroup(
 // broadcast, anything else names a sibling relative to it (e.g. "./source"). Call it on a
 // rendition that carries one before media.NewTrackConsumer, SubscribeTrack, FetchGroup, or
 // media.FetchGroup, which take a track name rather than a rendition: the
-// rendition's Track, or its catalog key when nil. audio.NewDecoder and video.NewDecoder resolve both themselves.
+// rendition's Track, or its catalog key when nil. audio.Subscribe and video.Subscribe resolve both themselves.
 //
 // Errors if this broadcast came from a local producer rather than an origin, since a
 // standalone broadcast has no sibling to name.
@@ -190,7 +190,7 @@ func (t *TrackConsumer) Cancel() {
 
 // VideoDecodedFrame is one decoded video frame. It owns the decoder's surface
 // until Close, which returns it to the decoder: holding many frames stalls
-// decoding. It stays valid after its video.Decoder is cancelled.
+// decoding. It stays valid after its video.Consumer is cancelled.
 type VideoDecodedFrame struct {
 	inner *ffi.MoqVideoDecodedFrame
 }
@@ -216,7 +216,7 @@ func (f *VideoDecodedFrame) Pixels(format VideoPixelFormat) ([]byte, error) {
 }
 
 // Surface borrows the decoder's surface, or returns nil when the frame is in CPU
-// memory. Only a video.Decoder with DecoderOutput.Surface set produces one,
+// memory. Only a video.Consumer with DecoderOutput.Surface set produces one,
 // and it stays valid until Close.
 func (f *VideoDecodedFrame) Surface() VideoSurface {
 	if surface := f.inner.Surface(); surface != nil {

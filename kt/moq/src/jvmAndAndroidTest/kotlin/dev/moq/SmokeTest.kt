@@ -1,9 +1,9 @@
 package dev.moq
 
 import dev.moq.media.*
-import dev.moq.audio.producer as audioProducer
-import dev.moq.video.decoder as videoDecoder
-import dev.moq.video.producer as videoProducer
+import dev.moq.audio.Producer as AudioProducer
+import dev.moq.video.Consumer as VideoConsumer
+import dev.moq.video.Producer as VideoProducer
 
 import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.Flow
@@ -342,8 +342,8 @@ class SmokeTest {
      */
     @Test
     fun `video consumer exposes a frames flow like audio does`() {
-        val video: (dev.moq.video.Decoder) -> Flow<VideoDecodedFrame> = dev.moq.video.Decoder::frames
-        val audio: (dev.moq.audio.Decoder) -> Flow<dev.moq.audio.Frame> = dev.moq.audio.Decoder::frames
+        val video: (dev.moq.video.Consumer) -> Flow<VideoDecodedFrame> = dev.moq.video.Consumer::frames
+        val audio: (dev.moq.audio.Consumer) -> Flow<dev.moq.audio.Frame> = dev.moq.audio.Consumer::frames
         assertNotNull(video)
         assertNotNull(audio)
     }
@@ -545,8 +545,7 @@ class SmokeTest {
 
         BroadcastProducer().use { broadcast ->
             val catalog = CatalogProducer(broadcast)
-            val fine = audioProducer(
-                broadcast,
+            val fine = AudioProducer(
                 catalog,
                 input,
                 AudioEncoderOutput(codec = AudioCodec.opus(), track = "fine", frameDurationUs = 2_500u),
@@ -556,8 +555,7 @@ class SmokeTest {
             fine.finish()
 
             assertFailsWith<MoqException.Audio> {
-                audioProducer(
-                    broadcast,
+                AudioProducer(
                     catalog,
                     input,
                     AudioEncoderOutput(codec = AudioCodec.opus(), track = "coarse", frameDurationUs = 2_000u),
@@ -591,8 +589,7 @@ class SmokeTest {
     fun `decoded video frame owns its picture`() = runTest {
         OriginProducer(OriginConfig()).use { origin ->
             origin.createBroadcast("video-decode-frame").use { broadcast ->
-                val video = videoProducer(
-                    broadcast,
+                val video = VideoProducer(
                     CatalogProducer(broadcast),
                     VideoEncoderInput(format = VideoPixelFormat.RGBA, width = 320u, height = 240u, framerate = 30u),
                     // Software so the encode is deterministic everywhere.
@@ -612,7 +609,7 @@ class SmokeTest {
                 val catalog = CatalogConsumer.subscribe(consumer).next()!!
                 val rendition = catalog.video["camera"]!!
 
-                val decoder = videoDecoder(consumer, "camera", rendition, VideoDecoderOutput())
+                val decoder = VideoConsumer.subscribe(consumer, "camera", rendition, VideoDecoderOutput())
 
                 // Keep the encoder fed so the decoder sees frames after it joined.
                 for (i in 10 until 40) {
@@ -647,7 +644,7 @@ class SmokeTest {
             BroadcastProducer().use { broadcast ->
                 val codec = AudioCodec.opus()
                 val output = AudioEncoderOutput(codec = codec, track = "mic")
-                val producer = audioProducer(broadcast, CatalogProducer(broadcast), input, output)
+                val producer = AudioProducer(CatalogProducer(broadcast), input, output)
                 if (codecFirst) {
                     codec.close()
                 } else {

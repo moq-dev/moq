@@ -88,9 +88,7 @@ asyncio.run(main())
 
    Producer
    Encoder
-   Decoder
-   producer
-   decoder
+   Consumer
 ```
 
 ```{eval-rst}
@@ -102,9 +100,7 @@ asyncio.run(main())
 
    Producer
    Encoder
-   Decoder
-   producer
-   decoder
+   Consumer
 ```
 
 ## Media
