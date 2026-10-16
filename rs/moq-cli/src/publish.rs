@@ -231,6 +231,14 @@ enum PublishCatalog {
 }
 
 impl PublishCatalog {
+	fn abort(self, err: moq_net::Error) {
+		match self {
+			Self::Media(catalog) => catalog.abort(err),
+			Self::Ts(catalog) => catalog.abort(err),
+			Self::TsPrograms => {}
+		}
+	}
+
 	/// End the catalog tracks cleanly, keeping the renditions they last listed.
 	fn finish(&mut self) -> anyhow::Result<()> {
 		match self {
@@ -622,7 +630,9 @@ async fn decode(
 			Ok(())
 		}
 		Err(err) => {
-			decoder.abort(moq_net::Error::Transport(err.to_string()));
+			let reason = moq_net::Error::Transport(err.to_string());
+			catalog.abort(reason.clone());
+			decoder.abort(reason);
 			Err(err)
 		}
 	}
@@ -1542,6 +1552,45 @@ pub(crate) mod tests {
 			drop(stdin);
 			import.await.unwrap();
 		}
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn internal_stdin_failure_preserves_the_catalog_error() {
+		struct Broken;
+		impl tokio::io::AsyncRead for Broken {
+			fn poll_read(
+				self: std::pin::Pin<&mut Self>,
+				_cx: &mut std::task::Context<'_>,
+				_buf: &mut tokio::io::ReadBuf<'_>,
+			) -> std::task::Poll<std::io::Result<()>> {
+				std::task::Poll::Ready(Err(std::io::Error::other("stdin failed")))
+			}
+		}
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let publish = Publish::new(
+			broadcast.clone(),
+			&PublishFormat::Ts { program: None },
+			Default::default(),
+		)
+		.unwrap();
+		let mut catalog_reader = broadcast
+			.consume()
+			.track(hang::Catalog::DEFAULT_NAME)
+			.unwrap()
+			.subscribe(None)
+			.await
+			.unwrap();
+		#[allow(irrefutable_let_patterns)]
+		let Source::Stream { decoder, catalog } = publish.source else {
+			panic!("stream source");
+		};
+		let err = decode(decoder, catalog, Broken, Duration::ZERO, None)
+			.await
+			.unwrap_err();
+		assert_eq!(err.to_string(), "stdin failed");
+		assert!(
+			matches!(catalog_reader.recv_group().await, Err(moq_net::Error::Transport(ref reason)) if reason == "stdin failed")
+		);
 	}
 
 	/// Input that ends before declaring any track fails, rather than announcing a broadcast

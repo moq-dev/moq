@@ -1,6 +1,8 @@
+#[cfg(test)]
+use std::task::Poll;
+
 use std::{
 	ops::{Bound, RangeBounds, RangeFull, RangeTo, RangeToInclusive},
-	task::Poll,
 	time::Duration,
 };
 
@@ -184,6 +186,7 @@ impl Subscription {
 	// Fold this subscription into the running aggregate: Ready with the merged
 	// result when it demands more than `combined`, Pending when it's a subset
 	// (so callers can skip a redundant broadcast of the same aggregate).
+	#[cfg(test)]
 	pub(super) fn poll_combined(&self, combined: &Option<Subscription>) -> Poll<Subscription> {
 		let Some(combined) = combined else {
 			return Poll::Ready(self.clone());
@@ -361,6 +364,7 @@ pub(super) fn max_some<T: Ord>(a: Option<T>, b: Option<T>) -> Option<T> {
 /// The lower of two optional floors, `None` absorbing (no floor). The mirror of
 /// [`max_unbounded`]: both bounds only ever *restrict*, so a subscriber without one keeps
 /// the aggregate unrestricted.
+#[cfg(test)]
 pub(super) fn min_floored<T: Ord>(a: Option<T>, b: Option<T>) -> Option<T> {
 	match (a, b) {
 		(Some(a), Some(b)) => Some(a.min(b)),
@@ -369,6 +373,7 @@ pub(super) fn min_floored<T: Ord>(a: Option<T>, b: Option<T>) -> Option<T> {
 }
 
 /// The higher of two optional bounds, `None` absorbing (unbounded).
+#[cfg(test)]
 pub(super) fn max_unbounded<T: Ord>(a: Option<T>, b: Option<T>) -> Option<T> {
 	match (a, b) {
 		(Some(a), Some(b)) => Some(a.max(b)),
