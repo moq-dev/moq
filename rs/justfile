@@ -303,7 +303,9 @@ quic-sim:
     export MOQ_QUIC_SEED=${MOQ_QUIC_SEED:-$((RANDOM << 15 | RANDOM))}
     export MOQ_QUIC_CASES=${MOQ_QUIC_CASES:-4096}
     echo "MOQ_QUIC_SEED=$MOQ_QUIC_SEED MOQ_QUIC_CASES=$MOQ_QUIC_CASES"
-    cargo test --locked -p moq-quic --lib tests::sim::
+    # Release keeps the sweep inside nextest's hang budget; the checks stay on so it still catches what a debug run would.
+    export CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS=true CARGO_PROFILE_RELEASE_OVERFLOW_CHECKS=true
+    bash sh/rs/nextest.sh cargo nextest run --locked --release -p moq-quic --lib -E 'test(/^tests::sim::/)'
 
 # Prove downstream futures are Send at the default recursion limit on nightly.
 send-depth:
