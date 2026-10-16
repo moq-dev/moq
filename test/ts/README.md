@@ -647,6 +647,13 @@ the same access unit: AAC overlap and perceptual-noise state differ between a
 cold decoder and a decoder that saw earlier frames. No arbitrary warmup samples
 are discarded. PES boundaries and TS packetization may change.
 
+The suffix is the exporter's to choose, and it starts on a whole group: a join
+whose first group is cut short before anything of it went out starts at the next
+one. Anything lost after that fails. When it does, the harness prints what the
+exporter reported: the `TS export release clock` counts (`dropped` late,
+`trimmed` before the output began, `gaps` skipped upstream) and each loss it
+logged.
+
 `just test ts-controls` exercises unchanged input, remuxing with new timestamps
 and PES sizes, timestamp quantization, and a cold join. Negative controls require
 the intended failure for missing audio, changed pictures, changed audio, a lost
