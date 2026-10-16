@@ -416,16 +416,19 @@ impl VideoEncoder {
 	}
 
 	fn publish_finish(self) -> Result<(), Error> {
-		if let Some(followed) = &self.followed {
-			followed.check()?;
-		}
 		let VideoEncoder {
-			encoder, mut producer, ..
+			encoder,
+			mut producer,
+			followed,
+			..
 		} = self;
 		// Drain the codec into the track before ending it, so the last frames land
 		// in it rather than being dropped with the encoder.
 		let drained = block_on(encoder.finish()).and_then(|encoded| producer.publish(&encoded));
-		finalize(producer, drained)
+		finalize(producer, drained)?;
+		// A follower panic only stops rate adaptation, so the track still ends
+		// cleanly before the panic is reported.
+		followed.map_or(Ok(()), |followed| followed.check())
 	}
 }
 
@@ -1061,5 +1064,31 @@ mod tests {
 			err.to_string().contains("the codec lost the tail"),
 			"the abort should carry the drain failure: {err}"
 		);
+	}
+
+	/// A rate follower panic stops adaptation, not the track: finishing still ends
+	/// it cleanly, then reports the panic.
+	#[tokio::test]
+	async fn finish_ends_the_track_after_a_rate_follower_panic() {
+		let (producer, mut track) = track_under_test().await;
+		let mut config = moq_video::encode::Config::new(320, 240, moq_video::Rate::new(30, 1).unwrap());
+		config.kind = moq_video::encode::Kind::Software;
+		let encoder = moq_video::encode::Sink::open(&config).await.unwrap();
+		let followed = crate::ffi::Background::new(async { panic!("injected rate follower panic") });
+		assert!(matches!(followed.finished().await, Err(Error::Panic)));
+		let video = VideoEncoder {
+			encoder,
+			producer,
+			format: moq_video_pixel_format::MOQ_VIDEO_PIXEL_FORMAT_I420,
+			size: config.size(),
+			reservation: None,
+			follow: None,
+			followed: Some(followed),
+			ceiling: None,
+		};
+
+		let result = tokio::task::spawn_blocking(move || video.publish_finish()).await.unwrap();
+		assert!(matches!(result, Err(Error::Panic)), "{result:?}");
+		assert!(matches!(track.recv_group().await, Ok(None)), "expected a clean end");
 	}
 }

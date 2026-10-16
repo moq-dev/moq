@@ -402,7 +402,6 @@ impl MoqVideoProducer {
 
 	/// Flush any frames the codec is still holding and finalize the track.
 	pub fn finish(&self) -> Result<(), MoqError> {
-		self.check()?;
 		let _guard = crate::ffi::runtime().enter();
 		let producer = self
 			.inner
@@ -412,11 +411,17 @@ impl MoqVideoProducer {
 			.ok_or(MoqError::Closed)?;
 		// Stop following and release the share before draining, so siblings can
 		// take the room while the last frames go out.
-		if let Some(mut follow) = self.follow.lock().unwrap().take() {
-			follow.stop()?;
-		}
+		let followed = self
+			.follow
+			.lock()
+			.unwrap()
+			.take()
+			.map_or(Ok(()), |mut follow| follow.stop());
 		self.reservation.lock().unwrap().take();
-		producer.finish()
+		// A follower panic only stops rate adaptation, so the encoded frames still
+		// end the track cleanly before the panic is reported.
+		producer.finish()?;
+		followed
 	}
 }
 
@@ -898,5 +903,54 @@ mod decode_tests {
 	fn video_config_rejects_an_unknown_codec() {
 		let error = video_config(catalog_video("nope")).unwrap_err();
 		assert!(matches!(error, MoqError::Unsupported));
+	}
+}
+
+#[cfg(test)]
+mod finish_tests {
+	use super::*;
+
+	#[tokio::test]
+	async fn finish_ends_the_track_after_a_rate_follower_panic() {
+		let estimate = moq_net::bandwidth::Producer::new();
+		let bandwidth = Arc::new(MoqBandwidth::new(moq_net::bandwidth::Allocator::new(
+			estimate.consume(),
+		)));
+		let broadcast = MoqBroadcastProducer::new().unwrap();
+		let input = MoqVideoEncoderInput {
+			format: MoqVideoPixelFormat::Rgba,
+			width: 320,
+			height: 240,
+			framerate: 30,
+		};
+		let output = MoqVideoEncoderOutput {
+			codec: MoqVideoCodec::H264,
+			track: Some("camera".into()),
+			bitrate: Some(4_000_000),
+			gop: None,
+			kind: MoqVideoEncoderKind::Software,
+		};
+		let video = broadcast.encode_video(input, output, Some(bandwidth)).unwrap();
+		let track = broadcast
+			.consume()
+			.unwrap()
+			.subscribe_track("camera".into(), None)
+			.await
+			.unwrap();
+		// Stand in for a follower thread that panicked.
+		video
+			.follow
+			.lock()
+			.unwrap()
+			.as_ref()
+			.expect("published against an allocator")
+			.failed
+			.store(true, Ordering::Release);
+
+		let result = video.finish();
+		assert!(matches!(result, Err(MoqError::Task { .. })), "{result:?}");
+		drop(video);
+		let result = track.recv_group().await.map(|group| group.is_some());
+		assert!(matches!(result, Ok(false)), "the track should end cleanly: {result:?}");
 	}
 }
