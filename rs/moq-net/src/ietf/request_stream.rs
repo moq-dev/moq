@@ -119,6 +119,40 @@ impl Decode<Version> for Framed {
 	}
 }
 
+/// A message following the request on a request stream: `T`, or from draft 18 a GOAWAY
+/// migrating this one request (draft-21 section 9.2).
+#[derive(Debug)]
+pub(super) enum Next<T> {
+	Message(T),
+	GoAway,
+}
+
+impl<T: Decode<Version>> Decode<Version> for Next<T> {
+	fn decode(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
+		if !matches!(
+			version,
+			Version::Draft14 | Version::Draft15 | Version::Draft16 | Version::Draft17
+		) {
+			let mut peek = r.clone();
+			if peek.varint()? == super::GoAway::ID {
+				*r = peek;
+				super::GoAway::decode(r, version)?;
+				return Ok(Self::GoAway);
+			}
+		}
+		T::decode(r, version).map(Self::Message)
+	}
+}
+
+/// Note a GOAWAY on one request stream: the first is legal, and a second one closes the
+/// session (draft-21 section 9.2).
+pub(super) fn goaway(seen: &mut bool) -> Result<(), Error> {
+	match std::mem::replace(seen, true) {
+		true => Err(Error::ProtocolViolation),
+		false => Ok(()),
+	}
+}
+
 /// Refuse a modern request with its complete REQUEST_ERROR, then finish the response.
 pub(super) async fn reject<S: crate::transport::poll::Session>(
 	mut stream: Stream<S, Version>,
