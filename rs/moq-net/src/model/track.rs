@@ -2416,7 +2416,7 @@ impl Producer {
 		})
 	}
 
-	/// The track's largest frame: the current one at first, then each newer one (skipping any in between), and `None` once the track ends.
+	/// The track's largest frame: the current one, then each newer one, and `None` once the track ends.
 	#[cfg(feature = "async")]
 	pub async fn largest(&mut self) -> Option<Position> {
 		kio::wait(|waiter| self.poll_largest(waiter)).await
@@ -3367,15 +3367,30 @@ impl Consumer {
 
 	/// Poll for the track's largest frame; see [`Self::largest`].
 	pub fn poll_largest(&mut self, waiter: &kio::Waiter) -> Poll<Option<Position>> {
-		// A front's logical track follows the route serving it.
-		let state = self
-			.serving()
-			.map_or_else(|| self.state.clone(), |serving| serving.state);
-		let cache = state.read().cache.clone();
-		poll_largest(&cache, &mut self.largest, waiter, |waiter| state.poll_closed(waiter))
+		let mut seen = self.largest;
+		let next = self.poll_largest_after(&mut seen, waiter);
+		self.largest = seen;
+		next
 	}
 
-	/// The track's largest frame: the current one at first, then each newer one (skipping any in between), and `None` once the track ends.
+	/// Poll for a largest frame newer than `seen`, recording it there. A front's logical
+	/// track follows the route serving it.
+	pub(crate) fn poll_largest_after(
+		&self,
+		seen: &mut Option<Position>,
+		waiter: &kio::Waiter,
+	) -> Poll<Option<Position>> {
+		let (routes, cache) = {
+			let state = self.state.read();
+			(state.routes.clone(), state.cache.clone())
+		};
+		match routes {
+			Some(routes) => routes.poll_largest(seen, waiter),
+			None => poll_largest(&cache, seen, waiter, |waiter| self.state.poll_closed(waiter)),
+		}
+	}
+
+	/// The track's largest frame: the current one, then each newer one, and `None` once the track ends.
 	#[cfg(feature = "async")]
 	pub async fn largest(&mut self) -> Option<Position> {
 		kio::wait(|waiter| self.poll_largest(waiter)).await
@@ -4852,7 +4867,7 @@ impl Subscriber {
 		}
 	}
 
-	/// The track's largest frame: the current one at first, then each newer one (skipping any in between), and `None` once the track ends.
+	/// The track's largest frame: the current one, then each newer one, and `None` once the track ends.
 	#[cfg(feature = "async")]
 	pub async fn largest(&mut self) -> Option<Position> {
 		kio::wait(|waiter| self.poll_largest(waiter)).await
@@ -5001,7 +5016,7 @@ impl Ordered {
 		self.inner.poll_largest(waiter)
 	}
 
-	/// The track's largest frame: the current one at first, then each newer one (skipping any in between), and `None` once the track ends.
+	/// The track's largest frame: the current one, then each newer one, and `None` once the track ends.
 	#[cfg(feature = "async")]
 	pub async fn largest(&mut self) -> Option<Position> {
 		kio::wait(|waiter| self.poll_largest(waiter)).await
