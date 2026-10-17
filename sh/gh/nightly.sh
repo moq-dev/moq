@@ -24,6 +24,7 @@ case "${1:-}" in
             --run-ignored only --success-output immediate
         run just rs bench-feed-fetch
         run just rs test -p moq-relay -E 'test(benchmark_stun_sources)' --run-ignored only --success-output immediate
+        run just rs test -p moq-quic --release -E 'test(benchmark_receive_credit)' --run-ignored only --success-output immediate
         # Fuzz exposes moq-net's codec benches; it is not a feature of the other crates.
         run cargo bench --locked --no-fail-fast -p moq-net --features fuzz --bench '*' -- --test
         # Exercise the optional thread-CPU clock as well as the normal elapsed-time smoke.
@@ -33,10 +34,11 @@ case "${1:-}" in
         # One invocation unifies this release build instead of rebuilding shared crates
         # independently for each target. Keep the explicit targets: '*' would add coverage.
         run cargo bench --locked --no-fail-fast -p moq-relay -p moq-stats -p moq-mux -p moq-rtmp -p moq-uring -p moq-pattern \
-            --features moq-stats/bench \
+            -p moq-quic --features moq-stats/bench \
             --bench http_idle --bench auth --bench producer_tick --bench decode --bench aggregate \
             --bench catalog --bench ts_schedule --bench export --bench containers --bench matching \
-            --bench chunk_interleaving --bench worker_turns -- --test
+            --bench chunk_interleaving --bench worker_turns \
+            --bench streams --bench receive --bench endpoint --bench wire -- --test
         run just rs test -p moq-archive -p moq-mux -p moq-hls --no-fail-fast \
             -E 'test(benchmark_timeline_fetch_fanout) | test(benchmark_damage_pid_fanout) | test(benchmark_pes_staging) | test(benchmark_reference_handoff_fanout)' \
             --run-ignored only --success-output immediate

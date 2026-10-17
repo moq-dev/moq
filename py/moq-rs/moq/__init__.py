@@ -5,9 +5,12 @@ Real-time pub/sub with built-in caching, fan-out, and prioritization.
 
 from moq_ffi import MoqError as Error
 
+from . import audio as audio
+
 # Layer namespaces stay out of __all__; json would shadow the stdlib module.
 from . import flate as flate
 from . import json as json
+from . import video as video
 from .client import Client, connect
 from .epoch import epoch_time, mint_epoch
 from .errors import is_auth, is_shutdown, protocol_error
@@ -27,7 +30,6 @@ from .origin import (
     OriginProducer,
 )
 from .publish import (
-    AudioProducer,
     BroadcastDynamic,
     BroadcastProducer,
     GroupDemand,
@@ -37,23 +39,17 @@ from .publish import (
     TrackDynamic,
     TrackProducer,
     TrackRequest,
-    VideoProducer,
 )
 from .server import Request, Server, Transport
 from .session import Bandwidth, Reservation, Session
 from .subscribe import (
-    AudioConsumer,
     BroadcastConsumer,
     GroupConsumer,
     TrackConsumer,
-    VideoConsumer,
 )
 from .types import (
     AudioCodec,
-    AudioDecoderOutput,
     AudioEncoderInput,
-    AudioEncoderOutput,
-    AudioFrame,
     AudioSampleFormat,
     Backoff,
     ConnectionStats,
@@ -69,11 +65,9 @@ from .types import (
     TrackInfo,
     VideoCodec,
     VideoDecodedFrame,
-    VideoDecoderOutput,
     VideoEncoderInput,
     VideoEncoderKind,
     VideoEncoderOutput,
-    VideoFrame,
     VideoPixelFormat,
 )
 
@@ -87,13 +81,8 @@ __all__ = [
     "AnnounceEventStart",
     "AnnounceEventUpdate",
     "AudioCodec",
-    "AudioConsumer",
-    "AudioDecoderOutput",
     "AudioEncoderInput",
-    "AudioEncoderOutput",
     "AudioSampleFormat",
-    "AudioFrame",
-    "AudioProducer",
     "Backoff",
     "Bandwidth",
     "BroadcastConsumer",
@@ -134,12 +123,8 @@ __all__ = [
     "VideoEncoderInput",
     "VideoEncoderKind",
     "VideoEncoderOutput",
-    "VideoFrame",
-    "VideoConsumer",
     "VideoDecodedFrame",
-    "VideoDecoderOutput",
     "VideoPixelFormat",
-    "VideoProducer",
     "connect",
     "epoch_time",
     "is_auth",

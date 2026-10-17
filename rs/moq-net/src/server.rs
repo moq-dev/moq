@@ -1065,6 +1065,10 @@ mod tests {
 		) -> std::task::Poll<Result<Self::SendStream, Self::Error>> {
 			std::task::Poll::Pending
 		}
+		fn send_group(&mut self, _: i64) -> Option<crate::transport::poll::Ungrouped> {
+			None
+		}
+
 		fn poll_send_datagram(
 			&mut self,
 			_cx: &mut std::task::Context<'_>,
@@ -1102,6 +1106,7 @@ mod tests {
 	struct FakeSend;
 	impl crate::transport::poll::SendStream for FakeSend {
 		type Error = FakeError;
+		type Group = crate::transport::poll::Ungrouped;
 		fn poll_write(
 			&mut self,
 			_cx: &mut std::task::Context<'_>,
@@ -1109,7 +1114,11 @@ mod tests {
 		) -> std::task::Poll<Result<usize, Self::Error>> {
 			std::task::Poll::Ready(Ok(buf.len()))
 		}
-		fn set_priority(&mut self, _order: i32) {}
+		fn set_priority(&mut self, _order: i64) {}
+		fn set_group(&mut self, group: &Self::Group) {
+			match *group {}
+		}
+
 		fn finish(&mut self) -> Result<(), Self::Error> {
 			Ok(())
 		}

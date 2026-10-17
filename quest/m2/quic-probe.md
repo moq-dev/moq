@@ -51,6 +51,6 @@ requires it.
 
 - [Viewer up-switch](/quest/m2/viewer-upswitch.md) - the viewer side, which requires this
 - [Natural media drains](/quest/m2/quic-bbr-natural-drain.md) - separate ProbeRTT policy experiment
-- [QUIC receive-timestamps spike](/quest/m3/quic-gcc.md) - measures forward delay, which a later delay-based controller would read headroom from
+- [QUIC receive-timestamps spike](/quest/m3/quic-gcc.md) - evaluates delay variation and estimator accuracy for a later delay-based controller
 - [noq#811](https://github.com/n0-computer/noq/issues/811) - probing while app-limited, proposed to n0
 - [noq#476](https://github.com/n0-computer/noq/issues/476) - the earlier bitrate-probing ask

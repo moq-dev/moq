@@ -18,7 +18,7 @@ media, and request-accept children, and the remaining children PR straight to
   hand-porting concurrent moq-ffi changes onto a separate line branch.
 - The bindings still break once per release, not once per merge: binding
   releases (moq-ffi and the Python, Go, Swift, Kotlin, Dart, and C++
-  packages) wait until [Codecs](/quest/m1/ffi-shape/codec.md) merges
+  packages) wait until the codec namespace reshape merges
   (confirmed as a hard release gate in the 2026-10-10 audit), joining the
   named error fields and the broadcast-epoch renames (`connects()`,
   `reanchor()`) already on `main`. Codecs ranks first below for that reason.
@@ -51,7 +51,7 @@ Settled shape:
   `video.Producer(broadcast, catalog, config)` for Rust's
   `encode::Producer`, and the codec-only `video.Encoder(config)` for
   `encode::Encoder` (decided 2026-10-06, see
-  [Codecs](/quest/m1/ffi-shape/codec.md)).
+  the codec namespace reshape).
 - UniFFI 0.32 allows one namespace per crate, so moq-ffi groups by type and
   the wrappers supply real namespaces in each language's idiom: Python
   submodules, Go subpackages (`moq.dev/moq/json`, aliased on import next to
@@ -86,6 +86,5 @@ runs `just test interop --all`.
 
 ## Required
 
-- [Codecs](/quest/m1/ffi-shape/codec.md) - audio and video producers, codec-only encoders, and decoders move under their own namespaces, named as in Rust; binding releases wait for it
 - [Stream importer name](/quest/m1/ffi-shape/stream-producer-name.md) - the maintainer settles `media.ContainerStreamProducer`'s name before the binding release
 - [Layers guide](/quest/m1/ffi-shape/layers-guide.md) - a `doc/lib` page maps each Rust layer to every binding's module, once Codecs adds `audio` and `video`

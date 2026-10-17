@@ -18,7 +18,7 @@
 #   ./run.sh --with-eit            # add a synthetic EPG first, report which SI survived
 #   ./run.sh --live                # grade PCR release timing off the live pipe
 #   ./run.sh --pair                # two exporters of one broadcast, grade table anchoring
-#   ./run.sh --open-gop            # open-GOP clip; its leading pictures must survive
+#   ./run.sh --open-gop            # open-GOP clip; orphan leading pictures are trimmed
 #   ./run.sh --hrd                 # 1080p video filling a broadcast-sized 9 Mbit CPB
 #   ./run.sh --headroom            # the same with four audio PIDs, muxed above the video's Rx
 #   ./run.sh --leak                # 1080p video with no HRD, filling its level's 24 Mb/s leak
@@ -631,7 +631,15 @@ echo "### captured $(wc -c <"$SUB_TS" | tr -d ' ') bytes -> analyzing"
 # pair. Other arms retain their specific structural/model oracles until their
 # acquisition and decoder-priming contracts are covered by fixtures.
 if [[ -z "$SOURCE$OPEN_GOP$HRD$HEADROOM$LEAK$FULL" ]]; then
-    python3 "$DIR/decode.py" "$SRC_TS" "$SUB_TS" --output "$HARNESS_RUN/decode"
+    if ! python3 "$DIR/decode.py" "$SRC_TS" "$SUB_TS" --output "$HARNESS_RUN/decode"; then
+        # The exporter counts what it dropped (late), trimmed (before its output began),
+        # and lost upstream (gaps), and logs each loss, so the failure says which it was.
+        echo >&2
+        echo "error: the decoded capture differs from the source; the exporter reported:" >&2
+        grep -E 'TS export release clock|media skipped upstream|missed its deadline|group evicted' \
+            "$HARNESS_RUN/sub.log" | sed 's/^/  sub: /' >&2 || true
+        exit 1
+    fi
 else
     echo "decoded-content comparison: not covered for this profile"
 fi

@@ -25,7 +25,7 @@ flavors, and relay CPU via `just bench BASE` on Linux. The existing keep-alive
 and idle-timeout tests stay unchanged. Ban direct clock reads in moq-uring
 outside its backend (the ratchet).
 
-Move `uring_workers_bound_stalled_handshakes` (`rs/moq-relay/tests/runtime_uring.rs`)
+Move `uring_workers_bound_stalled_handshakes` (`rs/moq-relay/tests/integration/runtime_uring.rs`)
 onto controlled time too; it landed on the wall clock in #5244 rather than
 waiting for this quest.
 
