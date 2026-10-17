@@ -523,7 +523,7 @@ pub struct Bbr3 {
     /// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-4.1.2.3-2>
     rs_has_data: bool,
     /// The last ACK's own rate sample, if it delivered a tracked packet. A CE event is reported
-    /// after its ACK ends and after loss detection, which rewrites `rs` per lost packet.
+    /// after its ACK ends, when `rs` may still hold an earlier ACK's sample.
     ack_rs: Option<BbrRateSample>,
     /// equivalent to RS.newly_acked, accumulated over the ACK being processed. It is passed to
     /// the ACK's model steps rather than kept in `rs`, so no later `set_cwnd` counts it again.
@@ -3069,7 +3069,7 @@ mod test {
     ///     are dropped -> a per-round loss rate (4%) above `BBR.LossThresh` (2%).
     ///
     /// In PROBE_UP `bw_probe_samples` is true, so each lost packet is fed through
-    /// `process_lost_packet`; `is_inflight_too_high()` sees the loss exceed
+    /// `process_lost_packet`; the lost packet's own sample shows the loss exceed
     /// `LOSS_THRESH * tx_in_flight` and calls `handle_inflight_too_high`. Because
     /// the deciding sample is app-limited, the `!is_app_limited` guard in
     /// `handle_inflight_too_high` skips the `inflight_longterm` reduction (an
@@ -8089,8 +8089,8 @@ mod test {
     }
 
     /// The transport detects losses between an ACK and its CE event. A loss too small to show
-    /// inflight too high rewrites `rs` with the lost packet's flight, and CE still bounds the
-    /// probe by the marked ACK's own sample.
+    /// inflight too high leaves the probe running, and CE bounds it by the marked ACK's own
+    /// sample rather than the lost packet's flight.
     #[test]
     fn ce_after_loss_detection_bounds_by_the_ack_sample() {
         let mut sim = probing_up();
