@@ -55,14 +55,14 @@ impl Driver {
 		self.drain.publisher_frame_bytes()
 	}
 
-	/// Hold `root`'s presence track as a reader would, so every tick updates
+	/// Hold `label`'s presence track as a reader would, so every tick updates
 	/// it. Keep the returned subscriber: dropping it lets a tick reclaim the
 	/// track.
-	pub fn hold_presence(&mut self, root: &str) -> track::Subscriber {
+	pub fn hold_presence(&mut self, label: &str) -> track::Subscriber {
 		let group = self.drain.groups.get_mut("").expect("the depth 0 broadcast");
-		let root = PathOwned::from(root.to_string());
-		group.adopt_presence(&self.drain.report, root.clone(), PendingPair::default());
-		group.presence[&root].pair.plain.track.subscribe(None)
+		let label = PathOwned::from(label.to_string());
+		group.adopt_presence(&self.drain.report, label.clone(), PendingPair::default());
+		group.presence[&label].pair.plain.track.subscribe(None)
 	}
 
 	/// Hold broadcast prefix `path`'s track as a reader would; see

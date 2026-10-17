@@ -281,6 +281,27 @@ pub fn bump_publisher_bytes(
 	registry.bump_publisher_bytes(path, tier, n);
 }
 
+/// A payload-byte meter for the stats write-path benchmark.
+pub struct Meter(crate::stats::Meter);
+
+impl Meter {
+	/// Add publisher-side payload bytes.
+	pub fn bytes(&self, n: u64) {
+		self.0.bytes(n);
+	}
+}
+
+/// Build a session-local payload meter without exposing the model's private stats carriers.
+pub fn session_meter(registry: &crate::stats::Registry, tier: crate::stats::Tier, label: &str, path: &str) -> Meter {
+	let session = registry.tier(tier).session(label);
+	Meter(session.egress(path).meter())
+}
+
+/// Build the original per-path-only payload meter as the benchmark baseline.
+pub fn path_meter(registry: &crate::stats::Registry, tier: &crate::stats::Tier, path: &str) -> Meter {
+	Meter(registry.publisher_meter(path, tier))
+}
+
 /// Encode `announced` as a fresh [`AnnounceWriter`] stream.
 pub fn encode_announces(announced: &[Announced], compress: bool) -> Vec<u8> {
 	let mut writer = AnnounceWriter::new(compress);

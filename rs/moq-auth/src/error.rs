@@ -117,6 +117,9 @@ pub enum Error {
 	#[error("grant has already expired")]
 	GrantExpired,
 
+	#[error("invalid stats label: {0}")]
+	InvalidLabel(moq_pattern::InvalidPattern),
+
 	#[error("the auth server refused the session")]
 	Refused,
 
