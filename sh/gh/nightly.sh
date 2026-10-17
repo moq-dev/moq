@@ -54,7 +54,7 @@ case "${1:-}" in
         run just rs bench-gst-catalog -- --quick
         ;;
     js)
-        for benchmark in broadcasts request-ids requests forward reader frames varint lite-varint track interests priority; do
+        for benchmark in broadcasts request-ids requests forward reader frames varint lite-varint track resume interests priority; do
             run just js bench "$benchmark"
         done
         run just js catalog-bench

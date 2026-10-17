@@ -2506,3 +2506,87 @@ test.each([true, false])("a mid-group end caps later writes (declared first: %s)
 	expect(() => producer.writeGroup(overfull)).toThrow(ProtocolViolation);
 	producer.close();
 });
+
+function writeTimed(producer: TrackProducer, sequence: number, ms = sequence) {
+	const group = new GroupProducer(sequence);
+	producer.writeGroup(group);
+	group.writeFrame({ payload: enc.encode(`${sequence}`), timestamp: Timestamp.fromMillis(ms) });
+	group.close();
+	return group;
+}
+
+function drainGroups(subscriber: ReturnType<TrackProducer["subscribe"]>): number[] {
+	const sequences: number[] = [];
+	for (let group = subscriber.tryRecvGroup(); group; group = subscriber.tryRecvGroup())
+		sequences.push(group.sequence);
+	return sequences;
+}
+
+test("a re-created group is handed out once", () => {
+	const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI, maxAge: Milli(30_000) });
+	const subscriber = producer.subscribe({ maxDelay: Milli(30_000) });
+	writeTimed(producer, 0);
+	const aborted = new GroupProducer(1);
+	producer.writeGroup(aborted);
+	expect(drainGroups(subscriber)).toEqual([0, 1]);
+
+	aborted.close(new Error("aborted"));
+	writeTimed(producer, 1);
+	writeTimed(producer, 2);
+	expect(drainGroups(subscriber)).toEqual([2]);
+});
+
+// A gap is remembered until a group above it is past the budget, max delay or max age alike.
+// Then every group below that one counts as handed out.
+test("a gap is forgotten once a group above it is past the budget", () => {
+	const time = manualTime(1_000);
+	try {
+		const readers = [
+			{ info: { timescale: Timescale.MILLI, maxAge: Milli(30_000) }, maxDelay: Milli(10) },
+			{ info: { timescale: Timescale.MILLI, maxAge: Milli(10) }, maxDelay: Milli(3_600_000) },
+		];
+		for (const { info, maxDelay } of readers) {
+			const producer = new TrackProducer("test").accept(info);
+			const subscriber = producer.subscribe({ maxDelay });
+			// Group 3 never arrives.
+			for (const sequence of [0, 1, 2, 4, 5, 6]) writeTimed(producer, sequence);
+			expect(drainGroups(subscriber)).toEqual([0, 1, 2, 4, 5, 6]);
+			// Group 4 reaches until group 5 presents at 5ms, so it is past a 10ms budget once the
+			// edge presents at 15ms.
+			for (let sequence = 7; sequence <= 14; sequence++) {
+				writeTimed(producer, sequence);
+				expect(drainGroups(subscriber)).toEqual([sequence]);
+				expect(hooks.deliveredRuns(subscriber)).toBe(2);
+			}
+			writeTimed(producer, 15);
+			expect(drainGroups(subscriber)).toEqual([15]);
+			expect(hooks.deliveredRuns(subscriber)).toBe(1);
+		}
+	} finally {
+		time.restore();
+	}
+});
+
+test("an endless track with gaps remembers only those within the budget", () => {
+	const time = manualTime(1_000);
+	try {
+		const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI, maxAge: Milli(30_000) });
+		// Groups present 1ms apart, so the budget spans ten of them.
+		const subscriber = producer.subscribe({ maxDelay: Milli(10) });
+		let most = 0;
+		for (let sequence = 0; sequence < 3000; sequence++) {
+			// Every third group never arrives.
+			if (sequence % 3 === 1) continue;
+			writeTimed(producer, sequence);
+			expect(drainGroups(subscriber)).toEqual([sequence]);
+			most = Math.max(most, hooks.deliveredRuns(subscriber));
+		}
+		expect(most).toBe(5);
+
+		// A late unseen group within the budget is still delivered.
+		writeTimed(producer, 2995);
+		expect(drainGroups(subscriber)).toEqual([2995]);
+	} finally {
+		time.restore();
+	}
+});
