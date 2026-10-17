@@ -3,7 +3,8 @@
 ## Goal
 
 A moq-lite-07 SUBSCRIBE replaces FETCH. One subscription asks for any number
-of group ranges, past or live, in ascending or descending order, and the
+of group ranges, past or live, bounded by group or by time, in ascending or
+descending order, and the
 publisher serves their union from one cursor without sending a group twice.
 Every sequence in range either arrives or is named by a SUBSCRIBE_DROP, so
 nothing blocks on a cache miss. Relays fill misses upstream with ranges, not
@@ -21,7 +22,7 @@ relay bounds a sparse FETCH only if the model can request ranges:
   #5385; over moq-transport the upstream order is fixed at SUBSCRIBE, since no
   draft lets an update change it.
   Subscriber Max Age (the model's `max_delay`) stays as a cap alongside the
-  ranges, since a group's timestamp isn't always known. Decided 2026-10-10:
+  ranges, since an untimed track's groups have no timestamp to bound. Decided 2026-10-10:
   historical requests also obey that cap and publisher max-age. An omitted
   FETCH budget means publisher max-age alone; translation to a range must
   not accidentally give it the live SUBSCRIBE zero-delay default. SUBSCRIBE_UPDATE
@@ -61,6 +62,18 @@ relay bounds a sparse FETCH only if the model can request ranges:
   still caps every range, so `Absolute(0)..` means everything not stale.
   A relay that cannot resolve a relative end locally forwards it upstream as
   relative.
+- **Time ends** (maintainer, 2026-10-17, for DVR seek in the
+  [archive line](/quest/m1/archive/README.md)). A range end may also be
+  `Time(pts)`, in the track's timescale. Whoever holds the track resolves it:
+  the cache from its groups' timestamps, or a `track::Dynamic` handler such as
+  an archive consumer. A start resolves to the group containing pts, and an
+  end to just after that group. A lite-07 relay that cannot resolve one
+  forwards it upstream unchanged. An untimed track refuses a time end, and a
+  moq-transport bridge resolves it locally or refuses it, since moq-transport
+  has no time filter. It is part of lite-07 and must land before
+  [lite-07 finalizes](/quest/m1/lite07-finalize.md), which this line gates. This amends the 09-29
+  premise that ranges are group-only because a group's timestamp isn't always
+  known: timed tracks know it, and untimed ones refuse.
 - Ranges are frame-precise (`Position`), not whole groups. The IETF joining
   FETCH for a mid-group SUBSCRIBE's uncached prefix stays, because today's
   bridge relies on it (maintainer, 09-29).
@@ -73,7 +86,7 @@ every sequence delivered or dropped.
 
 ## Required
 
-- [Model ranges](/quest/m1/subscribe-ranges/model.md) - `Subscription` carries ranges, and `Dynamic` fills misses by range
+- [Model ranges](/quest/m1/subscribe-ranges/model.md) - `Subscription` carries ranges with absolute, relative, or time ends, and `Dynamic` fills misses by range
 - [SUBSCRIBE_DROP](/quest/m1/subscribe-drop.md) - publishers name every group they won't deliver
 - [Lite-07 ranges](/quest/m1/subscribe-ranges/lite.md) - the lite-07 wire, Rust publisher and subscriber, and the draft
 - [moq-transport upstream updates](/quest/m1/subscribe-ranges/ietf-update.md) - the upstream request follows the aggregate priority; its order stays fixed, as every draft requires

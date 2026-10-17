@@ -13,7 +13,11 @@ requests for misses instead of one request per group.
 See the [line](/quest/m1/subscribe-ranges/README.md) for the decisions.
 Guidance:
 
-- Ranges have `Absolute` or `Relative` ends (see the line). Aggregating
+- Ranges have `Absolute`, `Relative`, or `Time` ends (see the line). A
+  track resolves a `Time` end from its cached groups' timestamps and passes an
+  unresolved one to its `track::Dynamic` handler; an untimed track refuses
+  it. Test a time start and end against the cache, past it through a handler,
+  and refused on an untimed track. Aggregating
   subscribers onto one upstream request is the union of their ranges; a
   relative end resolves against the track's latest group when the publisher
   serves it. Ranges are served in the existing `Subscription::order`, which
@@ -31,7 +35,9 @@ Guidance:
   #5085 branch has reusable pieces (older-wire codec mappings, the JS fix
   keeping groups below a floor buffered, mocked-time tests).
 - Replace `requested_group` and `fetch_group` rather than keep both. Update
-  every caller (relay, moq-archive, hls, the ladder) in the same PR, plus the
+  every caller (relay, moq-archive, hls, the ladder) in the same PR,
+  including the archive consumer's time resolution from its key listing if it
+  has landed, plus the
   published surfaces built on them, per the cross-package table: moq-ffi
   (`fetch_group`, `requested_group`), moq-c (`poll_requested_group`), every
   binding wrapper and its `doc/lib` page, and `moq fetch` through

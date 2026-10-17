@@ -33,6 +33,10 @@ bounded FETCH that ends exactly at the track's last object reports
 when the track has finished and the FETCH reaches its final object, never from
 a live track's Largest Object, and test both cases.
 
+moq-transport has no time filter, so a downstream `Time(pts)` end is
+resolved against the relay's cache before it goes upstream as a group range,
+or refused when the cache cannot resolve it.
+
 ## Required
 
 - [Model ranges](/quest/m1/subscribe-ranges/model.md) - the range requests this answers
