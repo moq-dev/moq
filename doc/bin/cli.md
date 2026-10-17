@@ -444,7 +444,8 @@ constant rate (`--mux-rate`, or the catalog's), costing headroom over the
 source's (a 10 Mb/s channel needs about 12), and takes neither `--stitch` nor
 `--passthrough`. A group that starts behind the one before it, on a lane too
 narrow to absorb that one, is logged and counted in `overruns`: the legs can
-differ there.
+differ there. So can reordered video whose SPS declares no reorder depth
+(`max_num_reorder_frames`), which is logged.
 
 A stdout export ends with the broadcast. `export ts --linger 10s` waits that
 long for the same publisher instance to come back, and carries on with the same

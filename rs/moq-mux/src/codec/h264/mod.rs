@@ -154,6 +154,7 @@ pub(crate) fn sps_reorder(nal: &[u8]) -> Option<crate::codec::video::Reorder> {
 	Some(crate::codec::video::Reorder {
 		depth: vui.depth?,
 		period: vui.period,
+		fields: !vui.frame_only,
 	})
 }
 
@@ -847,29 +848,39 @@ mod tests {
 			sps_reorder(fixtures::SPS_IPB),
 			Some(Reorder {
 				depth: 1,
-				period: fixed
+				period: fixed,
+				fields: false
 			})
 		);
 		assert_eq!(
 			sps_reorder(fixtures::SPS_PYRAMID),
 			Some(Reorder {
 				depth: 2,
-				period: fixed
+				period: fixed,
+				fields: false
 			})
 		);
 		assert_eq!(
 			sps_reorder(fixtures::SPS_IPB_VARIABLE),
-			Some(Reorder { depth: 1, period: None })
-		);
-		// The field-capable SPS still declares its depth and tick; only the frame rate needs
-		// `pic_struct` to read it.
-		assert_eq!(
-			sps_reorder(fixtures::SPS_FIELD),
 			Some(Reorder {
-				depth: 0,
-				period: Some((2, 50))
+				depth: 1,
+				period: None,
+				fields: false
 			})
 		);
+		// The field-capable SPS still declares its depth and tick; only the frame rate needs
+		// `pic_struct` to read it. A field may follow the other field of its own frame.
+		let field = sps_reorder(fixtures::SPS_FIELD);
+		assert_eq!(
+			field,
+			Some(Reorder {
+				depth: 0,
+				period: Some((2, 50)),
+				fields: true
+			})
+		);
+		assert_eq!(field.map(Reorder::pictures), Some(1));
+		assert_eq!(sps_reorder(fixtures::SPS_PYRAMID).map(Reorder::pictures), Some(2));
 		// Baseline with no VUI declares nothing.
 		assert_eq!(sps_reorder(&[0x67, 0x42, 0xc0, 0x1f, 0xde]), None);
 		// A VUI cut short is no declaration rather than a wrong one.
@@ -902,7 +913,8 @@ mod tests {
 			sps_reorder(fixtures::SPS_HRD),
 			Some(Reorder {
 				depth: 1,
-				period: Some((2, 50))
+				period: Some((2, 50)),
+				fields: false
 			})
 		);
 		assert_eq!(sps_hrd(fixtures::SPS_IPB), None);

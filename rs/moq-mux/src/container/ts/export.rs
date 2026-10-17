@@ -396,9 +396,15 @@ impl Track {
 			jitter.lose(&self.pid, ahead);
 			return Ok(());
 		}
+		// Frames still held from a group cut short wait on frames that will not come, so under
+		// sync they go, as on a leg that never read them.
+		if self.sync.is_some() && self.held.is_some_and(|held| held != pending.cut) {
+			self.clock.discard();
+		}
 		self.held = Some(pending.cut);
 		if pending.frame.keyframe {
-			self.timing.describe(stream_type, self.source.description(), name);
+			self.timing
+				.describe(stream_type, self.source.description(), name, self.sync.is_some());
 		}
 		let pts = to_ticks(pending.frame.timestamp);
 		self.clock.push((pending, self.source.description().cloned()), pts);
@@ -809,10 +815,17 @@ impl Track {
 	/// silence: the jitter buffer drops them, where their own arrival would queue them behind a
 	/// schedule that has already gone past them. Nothing settles the frames still held when the
 	/// track ends, so they keep their own arrival and go out late if they must.
+	///
+	/// Under sync, a stream whose SPS declares its depth is settled by counting frames at the
+	/// SPS's delay, so a frame's DTS never depends on what the leg read before it.
 	fn release(&mut self, name: &str, jitter: &mut jitter::Buffer<u16, Queued>, flush: bool) -> anyhow::Result<()> {
 		let (delay, lookahead) = self.timing.reorder();
 		let lookahead = lookahead.max(self.timing.jitter);
-		while let Some(((mut pending, description), dts)) = self.clock.pop(lookahead, delay, flush) {
+		let counted = self.sync.as_ref().and(self.timing.depth());
+		while let Some(((mut pending, description), dts)) = match counted {
+			Some(depth) => self.clock.pop_counted(depth, delay, flush),
+			None => self.clock.pop(lookahead, delay, flush),
+		} {
 			if !self.finished {
 				pending.arrived = pending.arrived.max(self.empty);
 			}
@@ -925,7 +938,7 @@ impl Timing {
 	}
 
 	/// Read the reorder depth from the codec config a keyframe is carried with.
-	fn describe(&mut self, stream_type: StreamType, description: Option<&Bytes>, name: &str) {
+	fn describe(&mut self, stream_type: StreamType, description: Option<&Bytes>, name: &str, synced: bool) {
 		if self.description.as_ref() == description {
 			return;
 		}
@@ -933,6 +946,15 @@ impl Timing {
 		self.declared = description.and_then(|d| declared_reorder(stream_type, d));
 		self.hrd = description.and_then(|d| declared_hrd(stream_type, d));
 		tracing::debug!(track = %name, reorder = ?self.reorder(), "video reordering declared");
+		if synced && self.declared.is_none() {
+			tracing::warn!(track = %name, "no reorder depth declared: if it reorders, --sync legs may give it different DTS");
+		}
+	}
+
+	/// The frames a picture can follow in output order after preceding them in decode order,
+	/// when the SPS declares it ([`Reorder::pictures`]).
+	fn depth(&self) -> Option<usize> {
+		self.declared.map(Reorder::pictures)
 	}
 
 	/// The receiver's buffers (H.222.0 2.14.3.1, 2.17.2): EB is the HRD's CPB, else the
@@ -2304,7 +2326,9 @@ where
 			// The video lane's reach is its first keyframe's HRD, which every leg reads alike.
 			for (name, track) in self.tracks.iter_mut() {
 				if let Kind::Video(stream_type) = track.kind {
-					track.timing.describe(stream_type, track.source.description(), name);
+					track
+						.timing
+						.describe(stream_type, track.source.description(), name, true);
 				}
 			}
 		}

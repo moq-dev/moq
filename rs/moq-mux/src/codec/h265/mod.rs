@@ -275,6 +275,7 @@ pub(crate) fn sps_reorder(nal: &[u8]) -> Option<crate::codec::video::Reorder> {
 	Some(crate::codec::video::Reorder {
 		depth: u32::try_from(depth).ok()?,
 		period: sps_period(&sps.rbsp),
+		fields: false,
 	})
 }
 

@@ -31,6 +31,11 @@ const VIDEO_US: u64 = 40_000;
 const AUDIO_US: u64 = 21_333;
 /// Video frames per group: 600 ms.
 const GOP: u64 = 15;
+/// A B-pyramid group in decode order (`max_num_reorder_frames` 2): each frame's place in
+/// presentation order.
+const PYRAMID: [u64; GOP as usize] = [0, 4, 2, 1, 3, 8, 6, 5, 7, 12, 10, 9, 11, 14, 13];
+/// How many frames after its tick a B-pyramid frame is presented: its decode delay.
+const PYRAMID_DELAY: u64 = 2;
 /// Audio frames per group, roughly matching the video group duration.
 const AUDIO_GROUP: u64 = 28;
 
@@ -75,6 +80,8 @@ struct Live {
 	rate: u64,
 	/// The receivers render with [`Export::with_sync`].
 	sync: bool,
+	/// Video is a B-pyramid: see [`Self::reorder`].
+	reorder: bool,
 	/// The media time of the first frame, in µs.
 	origin: u64,
 	/// How much later than its video the source sends audio of the same media time, in µs;
@@ -143,6 +150,7 @@ impl Live {
 			scale,
 			rate: MUX_RATE,
 			sync: false,
+			reorder: false,
 			origin: 0,
 			audio_lag,
 			start: moq_clock::now(),
@@ -174,6 +182,30 @@ impl Live {
 		for config in catalog.video.renditions.values_mut() {
 			config.jitter = Some(jitter);
 		}
+	}
+
+	/// Send video as a B-pyramid in decode order, each frame [`PYRAMID_DELAY`] frames after its
+	/// tick, under an SPS that declares the depth.
+	fn reorder(&mut self) {
+		use crate::codec::h264::fixtures::{PPS as PYRAMID_PPS, SPS_PYRAMID};
+
+		let description =
+			crate::codec::h264::build_avcc(&[Bytes::from_static(SPS_PYRAMID)], &[Bytes::from_static(PYRAMID_PPS)])
+				.unwrap();
+		let mut catalog = self.catalog.modify().unwrap();
+		for config in catalog.video.renditions.values_mut() {
+			config.description = Some(description.clone());
+		}
+		self.reorder = true;
+	}
+
+	/// Abort the open video group, as a relay does to a subscriber left too far behind: the
+	/// subscriber reads it as evicted, and loses the rest of it.
+	fn evict(&mut self) {
+		if let Some(group) = self.group.take() {
+			group.abort(moq_net::Error::Old).unwrap();
+		}
+		self.stalling = true;
 	}
 
 	/// Send nothing for `gap`, as a publisher that died, then resume at the live edge on the
@@ -223,10 +255,13 @@ impl Live {
 			} else {
 				let tick = self.tick;
 				let keyframe = tick.is_multiple_of(GOP);
-				if keyframe && let Some(group) = self.group.take() {
-					match std::mem::take(&mut self.stalling) {
-						true => self.stalled.push(group),
-						false => group.finish().unwrap(),
+				if keyframe {
+					let stalled = std::mem::take(&mut self.stalling);
+					if let Some(group) = self.group.take() {
+						match stalled {
+							true => self.stalled.push(group),
+							false => group.finish().unwrap(),
+						}
 					}
 				}
 				if keyframe {
@@ -240,12 +275,16 @@ impl Live {
 					} else {
 						vec![0x41u8; 400]
 					};
+					let presented = match self.reorder {
+						true => (tick - tick % GOP + PYRAMID[(tick % GOP) as usize] + PYRAMID_DELAY) * VIDEO_US,
+						false => video,
+					};
 					let group = self.group.as_mut().expect("the first tick is a keyframe");
 					HangContainer::Legacy(crate::container::Kind::Video)
 						.write(
 							group,
 							&[Frame {
-								timestamp: Timestamp::from_micros(self.origin + video).unwrap(),
+								timestamp: Timestamp::from_micros(self.origin + presented).unwrap(),
 								duration: None,
 								payload: length_prefixed(&[&slice]),
 								keyframe,
@@ -866,8 +905,12 @@ async fn synced_on(
 	stall: impl Fn(u64) -> bool + Copy,
 ) -> (Leg, Leg, u64) {
 	let mut live = Live::new(scale, lag).await;
-	live.sync = true;
 	live.origin = origin;
+	synced_with(live, join, ticks, stall).await
+}
+
+async fn synced_with(mut live: Live, join: u64, ticks: u64, stall: impl Fn(u64) -> bool + Copy) -> (Leg, Leg, u64) {
+	live.sync = true;
 	let mut a = live.join(Duration::ZERO).await;
 	live.run(join, &mut [&mut a], stall).await;
 	let mut b = live.join(Duration::from_millis(100)).await;
@@ -958,18 +1001,64 @@ async fn synced_legs_render_the_same_packets() {
 	}
 }
 
+/// Legs of a B-pyramid render the same packets when the first lost a group's tail before the
+/// other joined, cut after a frame presented below one it never received.
+#[tokio::test(start_paused = true)]
+async fn synced_legs_render_reordered_video_the_same_way() {
+	let stall = |tick: u64| (2 * GOP + 8..3 * GOP).contains(&tick);
+	for lag in LAGS {
+		for join in [JOIN, JOIN + GOP, 4 * GOP + 2] {
+			let mut live = Live::new(1.0, lag).await;
+			live.reorder();
+			let (a, b, from) = synced_with(live, join, 12 * GOP, stall).await;
+			let alone = assert_same_synced(&a, &b, from);
+			assert_eq!(
+				alone, 0,
+				"lag {lag}, join {join}: clean legs differ in {alone} positions"
+			);
+		}
+	}
+}
+
 /// Each leg loses groups the other receives. Each renders the other's packets wherever it
 /// holds them, so one leg's stuffing is the other's content, and the two merged are a clean
 /// leg's output.
 #[tokio::test(start_paused = true)]
 async fn complementary_losses_stay_complementary() {
-	let lost_a = |tick: u64| (5 * GOP + 3..6 * GOP).contains(&tick);
+	complementary_losses(false, false).await;
+}
+
+/// As [`complementary_losses_stay_complementary`] on a B-pyramid, with leg A's loss cutting
+/// it between a reference and a frame presented before it.
+#[tokio::test(start_paused = true)]
+async fn complementary_losses_of_reordered_video_stay_complementary() {
+	complementary_losses(true, false).await;
+}
+
+/// Legs of a B-pyramid stopped in turn, as receiver processes can be: each falls behind, the
+/// relay evicts the group it was reading, and what its decode clock still held from that
+/// group goes. The legs stay complementary.
+#[tokio::test(start_paused = true)]
+async fn legs_stopped_in_turn_stay_complementary() {
+	complementary_losses(true, true).await;
+}
+
+/// Each leg loses part of the broadcast the other receives: with `stop`, by reading nothing
+/// for over a second while the relay evicts its group, else by the source stalling a group
+/// for that leg alone.
+async fn complementary_losses(reorder: bool, stop: bool) {
+	let lost_a = |tick: u64| (5 * GOP + 8..6 * GOP).contains(&tick);
 	let lost_b = |tick: u64| (7 * GOP + 5..8 * GOP).contains(&tick);
+	let stopped_a = |tick: u64| (5 * GOP + 8..7 * GOP).contains(&tick);
+	let stopped_b = |tick: u64| (8 * GOP + 5..10 * GOP).contains(&tick);
 	for lag in LAGS {
 		let mut paths = Vec::new();
 		for _ in 0..3 {
 			let mut live = Live::new(1.0, lag).await;
 			live.sync = true;
+			if reorder {
+				live.reorder();
+			}
 			paths.push(live);
 		}
 		let [mut clean, mut path_a, mut path_b] = <[Live; 3]>::try_from(paths).ok().unwrap();
@@ -979,8 +1068,26 @@ async fn complementary_losses_stay_complementary() {
 		let mut b = path_b.join(Duration::from_millis(100)).await;
 		for tick in 1..=12 * GOP {
 			clean.run(tick, &mut [&mut c], |_| false).await;
-			path_a.run(tick, &mut [&mut a], lost_a).await;
-			path_b.run(tick, &mut [&mut b], lost_b).await;
+			match (stop, stopped_a(tick)) {
+				(false, _) => path_a.run(tick, &mut [&mut a], lost_a).await,
+				(true, false) => path_a.run(tick, &mut [&mut a], |_| false).await,
+				(true, true) => {
+					if !stopped_a(tick - 1) {
+						path_a.evict();
+					}
+					path_a.run(tick, &mut [], |_| false).await
+				}
+			}
+			match (stop, stopped_b(tick)) {
+				(false, _) => path_b.run(tick, &mut [&mut b], lost_b).await,
+				(true, false) => path_b.run(tick, &mut [&mut b], |_| false).await,
+				(true, true) => {
+					if !stopped_b(tick - 1) {
+						path_b.evict();
+					}
+					path_b.run(tick, &mut [], |_| false).await
+				}
+			}
 		}
 		clean.finish(&mut [&mut c]).await;
 		path_a.finish(&mut [&mut a]).await;
