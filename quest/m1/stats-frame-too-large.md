@@ -15,6 +15,6 @@ reader learns the track stopped tracking the relay.
 - Abort only the flavor whose `update` failed (log at warn) and keep its
   sibling publishing: DEFLATE can shrink an oversized plain frame or
   slightly grow a fitting one. Test that the overflowing flavor ends with
-  `FrameTooLarge` while the other keeps updating. Prefix tracks get the same
-  rule from [Stats prefix tracks](/quest/m2/stats-prefix-tracks.md).
+  `FrameTooLarge` while the other keeps updating. Prefix tracks already do
+  this (#5811): set `TrackPair::abort_oversized` on the remaining tracks.
 - Found in #5719.
