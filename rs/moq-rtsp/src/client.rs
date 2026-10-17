@@ -1,0 +1,684 @@
+//! Pull one RTSP session into a broadcast.
+
+use futures::StreamExt;
+use moq_mux::codec::{aac, h264, h265};
+use moq_tokio::RedactedUrl;
+use retina::client::{Credentials, PlayOptions, Session, SessionOptions, SetupOptions, Transport};
+use retina::codec::{CodecItem, FrameFormat, ParameterSetInsertion, ParametersRef};
+use url::Url;
+
+use crate::{Error, Result};
+
+/// Annex-B with the parameter sets on every keyframe, so a camera that sends them only
+/// in the SDP still produces self-describing keyframes, and raw AAC with its
+/// AudioSpecificConfig out of band.
+const FRAME_FORMAT: FrameFormat = FrameFormat {
+	h26x_framing: retina::codec::h26x::Framing::AnnexB,
+	parameter_set_insertion: ParameterSetInsertion::EachKeyFrame,
+	aac_framing: retina::codec::aac::Framing::Raw,
+};
+
+/// How far a frame may land behind its stream's previous one before the session counts as
+/// restarted. Generous enough for B-frame reordering.
+const MAX_BACKWARD: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// How far a frame may land ahead of its stream's previous one before the session counts as
+/// restarted. A camera resetting its RTP clock lands anywhere in a 32-bit range, hours away.
+const MAX_FORWARD: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Why [`Client::pull`] returned without an error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum End {
+	/// The server ended the session.
+	Closed,
+	/// The session's RTP timeline jumped, so its tracks finished before the jump.
+	///
+	/// Its timestamps no longer continue the broadcast's, so the caller finishes the
+	/// broadcast and restarts every session sharing it under a fresh epoch.
+	Jumped,
+}
+
+/// An RTSP source to pull, such as an IP camera's stream URL.
+///
+/// Credentials ride the URL's userinfo, as every RTSP tool takes them
+/// (`rtsp://user:pass@camera/stream`).
+#[derive(Clone)]
+pub struct Client {
+	/// The URL without its userinfo.
+	url: Url,
+	creds: Option<Credentials>,
+}
+
+impl Client {
+	/// Pull from `url`, taking any credentials out of its userinfo.
+	pub fn new(mut url: Url) -> Result<Self> {
+		if url.scheme() != "rtsp" {
+			return Err(Error::InvalidUrl(format!(
+				"expected the rtsp scheme, got {}",
+				url.scheme()
+			)));
+		}
+		if url.host_str().is_none() {
+			return Err(Error::InvalidUrl("missing host".to_string()));
+		}
+
+		let creds = if url.username().is_empty() && url.password().is_none() {
+			None
+		} else {
+			let decode = |part: &str| {
+				percent_encoding::percent_decode_str(part)
+					.decode_utf8()
+					.map(|part| part.into_owned())
+					.map_err(|_| Error::InvalidUrl("credentials are not UTF-8".to_string()))
+			};
+			let creds = Credentials {
+				username: decode(url.username())?,
+				password: decode(url.password().unwrap_or_default())?,
+			};
+			// retina refuses a URL that still carries userinfo.
+			let _ = url.set_username("");
+			let _ = url.set_password(None);
+			Some(creds)
+		};
+
+		Ok(Self { url, creds })
+	}
+
+	/// Ingest one session into `broadcast`, publishing its renditions on `catalog`.
+	///
+	/// Publishes the session's H.264 and H.265 video and AAC audio, starting on a keyframe.
+	/// Audio the stack cannot play is skipped with a warning. The session's timestamps shift
+	/// onto the catalog's clock, so several sessions can publish renditions of one broadcast.
+	///
+	/// Never reconnects: returns once the session ends or its timeline jumps, finishing its
+	/// tracks, or fails, aborting them. The caller owns the broadcast and decides whether
+	/// to retry.
+	pub async fn pull(
+		&self,
+		broadcast: &moq_net::broadcast::Producer,
+		catalog: &moq_mux::catalog::Producer,
+	) -> Result<End> {
+		let options = SessionOptions::default()
+			.creds(self.creds.clone())
+			.user_agent(concat!("moq-rtsp/", env!("CARGO_PKG_VERSION")).to_string());
+		let mut session = Session::describe(self.url.clone(), options).await?;
+
+		// Every stream of one session shares one RTP-derived timebase, so its audio and
+		// video stay in sync, while another session sharing the catalog gets its own.
+		let timebase = catalog.timebase();
+		let mut tracks = Vec::new();
+		let mut skipped = Vec::new();
+		for (index, stream) in session.streams().iter().enumerate() {
+			let kind = match (stream.media(), stream.encoding_name()) {
+				("video", "h264") => Kind::H264,
+				("video", "h265") => Kind::H265,
+				("audio", "mpeg4-generic") => Kind::Aac,
+				(media, encoding) => {
+					skipped.push(format!("{media}/{encoding}"));
+					continue;
+				}
+			};
+			tracks.push((index, kind));
+		}
+
+		let url = RedactedUrl::new(&self.url);
+		if tracks.is_empty() {
+			return Err(Error::NoSupportedStream(skipped.join(", ")));
+		}
+		if !skipped.is_empty() {
+			tracing::warn!(%url, skipped = %skipped.join(", "), "skipping RTSP streams with a codec the stack cannot play");
+		}
+
+		for (index, _) in &tracks {
+			let setup = SetupOptions::default()
+				.transport(Transport::Tcp(Default::default()))
+				.frame_format(FRAME_FORMAT);
+			session.setup(*index, setup).await?;
+		}
+
+		let reserved = timebase.reserve();
+		let mut ingest = Ingest {
+			streams: Vec::new(),
+			video: tracks.iter().any(|(_, kind)| *kind != Kind::Aac),
+			started: false,
+		};
+		ingest.streams.resize_with(session.streams().len(), || None);
+		for (index, kind) in &tracks {
+			let track = match kind {
+				Kind::H264 => {
+					let track = broadcast.unique_track(".avc3", catalog.track_info(hang::catalog::PRIORITY.video))?;
+					Track::H264 {
+						split: h264::Split::new(),
+						import: h264::Import::new(track, reserved.clone(), Default::default())?,
+					}
+				}
+				Kind::H265 => {
+					let track = broadcast.unique_track(".hev1", catalog.track_info(hang::catalog::PRIORITY.video))?;
+					Track::H265 {
+						split: h265::Split::new(),
+						import: h265::Import::new(track, reserved.clone(), Default::default())?,
+					}
+				}
+				Kind::Aac => {
+					let Some(ParametersRef::Audio(params)) = session.streams()[*index].parameters() else {
+						return Err(Error::Rtsp("AAC stream without an AudioSpecificConfig".to_string()));
+					};
+					let config = aac::config(params.extra_data())?;
+					let track = broadcast.unique_track(".aac", catalog.track_info(hang::catalog::PRIORITY.audio))?;
+					Track::Aac(aac::Import::new(track, reserved.clone(), config)?)
+				}
+			};
+			ingest.streams[*index] = Some(Stream {
+				track,
+				last: None,
+				started: false,
+			});
+		}
+		// The catalog waits for each video rendition's first keyframe, not for this.
+		drop(reserved);
+
+		// Not every camera sends `rtptime` for every stream; fall back to the first
+		// packet rather than refusing it.
+		let play = PlayOptions::default().initial_timestamp(retina::client::InitialTimestampPolicy::Permissive);
+		let result: Result<End> = async {
+			let mut session = session.play(play).await?.demuxed()?;
+			tracing::info!(%url, streams = tracks.len(), "RTSP session playing");
+			while let Some(item) = session.next().await {
+				if ingest.push(item?)?.is_some() {
+					tracing::warn!(%url, "RTSP timeline jumped, ending the session");
+					return Ok(End::Jumped);
+				}
+			}
+			Ok(End::Closed)
+		}
+		.await;
+
+		match result {
+			Ok(end) => {
+				ingest.finish()?;
+				Ok(end)
+			}
+			Err(err) => {
+				ingest.abort(moq_net::Error::Transport(err.to_string()));
+				Err(err)
+			}
+		}
+	}
+}
+
+impl std::fmt::Debug for Client {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		// Never the credentials.
+		f.debug_struct("Client")
+			.field("url", &RedactedUrl::new(&self.url))
+			.finish_non_exhaustive()
+	}
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Kind {
+	H264,
+	H265,
+	Aac,
+}
+
+enum Track {
+	H264 { split: h264::Split, import: h264::Import },
+	H265 { split: h265::Split, import: h265::Import },
+	Aac(aac::Import),
+}
+
+struct Stream {
+	track: Track,
+	/// The previous frame's timestamp, in the stream's clock units since the session start.
+	last: Option<i64>,
+	/// Whether a keyframe has been published (video) or the session started (audio).
+	started: bool,
+}
+
+/// The session's tracks, indexed by retina stream id.
+struct Ingest {
+	streams: Vec<Option<Stream>>,
+	/// Whether the session carries video, so audio waits for its first keyframe.
+	video: bool,
+	/// Whether any video stream published its first keyframe.
+	started: bool,
+}
+
+/// Dropping the [`Client::pull`] future stops the session: its tracks end cleanly, so a caller
+/// restarting a broadcast never leaves subscribers with a dropped track.
+impl Drop for Ingest {
+	fn drop(&mut self) {
+		if let Err(err) = self.finish() {
+			tracing::warn!(%err, "failed to finish an RTSP track");
+		}
+	}
+}
+
+/// A frame's timestamp landed too far from its stream's previous one.
+struct Jump;
+
+impl Ingest {
+	/// Publish one depacketized item, or report that the timeline jumped.
+	fn push(&mut self, item: CodecItem) -> Result<Option<Jump>> {
+		let (stream_id, timestamp, keyframe, data) = match &item {
+			CodecItem::VideoFrame(frame) => (
+				frame.stream_id(),
+				frame.timestamp(),
+				frame.is_random_access_point(),
+				frame.data(),
+			),
+			CodecItem::AudioFrame(frame) => (frame.stream_id(), frame.timestamp(), true, frame.data()),
+			_ => return Ok(None),
+		};
+		let Some(stream) = self.streams.get_mut(stream_id).and_then(Option::as_mut) else {
+			return Ok(None);
+		};
+
+		let video = !matches!(stream.track, Track::Aac(_));
+		if !stream.started {
+			// Publish nothing before the first keyframe, audio included.
+			let ready = if video { keyframe } else { self.started || !self.video };
+			if !ready {
+				return Ok(None);
+			}
+			stream.started = true;
+			self.started |= video;
+		}
+
+		let elapsed = timestamp.elapsed();
+		let rate = i128::from(timestamp.clock_rate().get());
+		if let Some(last) = stream.last {
+			let delta = i128::from(elapsed) - i128::from(last);
+			let backward = MAX_BACKWARD.as_micros() as i128 * rate / 1_000_000;
+			let forward = MAX_FORWARD.as_micros() as i128 * rate / 1_000_000;
+			if delta < -backward || delta > forward {
+				return Ok(Some(Jump));
+			}
+		}
+		// Before the session's start is a jump too: nothing on the broadcast's clock is.
+		let Ok(units) = u64::try_from(elapsed) else {
+			return Ok(Some(Jump));
+		};
+		stream.last = Some(elapsed);
+		let pts = moq_net::Timestamp::from_scale(units, u64::from(timestamp.clock_rate().get()))
+			.map_err(moq_mux::Error::from)?;
+
+		match &mut stream.track {
+			Track::H264 { split, import } => {
+				// retina hands over one whole access unit, so flush to emit it.
+				let mut frames = split.decode(data, pts)?;
+				frames.extend(split.flush(pts)?);
+				import.decode(frames)?;
+			}
+			Track::H265 { split, import } => {
+				let mut frames = split.decode(data, pts)?;
+				frames.extend(split.flush(pts)?);
+				import.decode(frames)?;
+			}
+			Track::Aac(import) => {
+				import.decode(data, Some(pts))?;
+				// Each packet its own group (one QUIC stream), so relays forward it at once.
+				import.cut(None)?;
+			}
+		}
+		Ok(None)
+	}
+
+	/// Flush every track and end it cleanly, reporting the first failure.
+	fn finish(&mut self) -> Result<()> {
+		let mut result = Ok(());
+		for stream in self.streams.drain(..).flatten() {
+			let finished = match stream.track {
+				Track::H264 { mut import, .. } => import.finish(),
+				Track::H265 { mut import, .. } => import.finish(),
+				Track::Aac(mut import) => import.finish(),
+			};
+			result = result.and(finished.map_err(Error::from));
+		}
+		result
+	}
+
+	/// End every track with `err`, so subscribers see the cause.
+	fn abort(&mut self, err: moq_net::Error) {
+		for stream in self.streams.drain(..).flatten() {
+			match stream.track {
+				Track::H264 { import, .. } => import.abort(err.clone()),
+				Track::H265 { import, .. } => import.abort(err.clone()),
+				Track::Aac(import) => import.abort(err.clone()),
+			}
+		}
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use std::time::Duration;
+
+	use super::*;
+	use crate::fake::{self, Media, Server};
+
+	/// Real sockets, so a wall-clock bound on every wait instead of paused time.
+	const TIMEOUT: Duration = Duration::from_secs(10);
+	/// 30 fps at the RTP video clock.
+	const FRAME: u32 = 3000;
+
+	async fn within<T>(what: &str, step: impl Future<Output = T>) -> T {
+		tokio::time::timeout(TIMEOUT, step)
+			.await
+			.unwrap_or_else(|_| panic!("{what} timed out"))
+	}
+
+	fn broadcast() -> (moq_net::broadcast::Producer, moq_mux::catalog::Producer) {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+		(broadcast, catalog)
+	}
+
+	/// The first catalog snapshot with `video` video and `audio` audio renditions.
+	async fn catalog_with(
+		catalog: &moq_mux::catalog::Producer,
+		video: usize,
+		audio: usize,
+	) -> moq_mux::catalog::hang::Catalog {
+		let mut updates = catalog.consume().unwrap();
+		within("the catalog", async {
+			loop {
+				let snapshot = updates.next().await.expect("catalog update").expect("catalog open");
+				if snapshot.video.renditions.len() == video && snapshot.audio.renditions.len() == audio {
+					return snapshot;
+				}
+			}
+		})
+		.await
+	}
+
+	/// Subscribe to `name` from its first group, before it finishes and leaves the broadcast.
+	async fn subscribe(
+		broadcast: &moq_net::broadcast::Producer,
+		(name, container): (String, moq_mux::catalog::hang::Container),
+	) -> moq_mux::container::Consumer<moq_mux::catalog::hang::Container> {
+		let subscription = moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(60));
+		let track = broadcast
+			.consume()
+			.track(&name)
+			.unwrap()
+			.subscribe(subscription)
+			.await
+			.unwrap();
+		moq_mux::container::Consumer::new(track, container)
+	}
+
+	/// Every frame left on a track, failing unless it finishes cleanly.
+	async fn frames(
+		mut reader: moq_mux::container::Consumer<moq_mux::catalog::hang::Container>,
+	) -> Vec<moq_mux::container::Frame> {
+		let mut frames = Vec::new();
+		within("the track to finish", async {
+			while let Some(read) = reader.read().await.expect("track finishes cleanly") {
+				if let moq_mux::container::Read::Frame { frame, .. } = read {
+					frames.push(frame);
+				}
+			}
+		})
+		.await;
+		frames
+	}
+
+	fn video_track(snapshot: &moq_mux::catalog::hang::Catalog) -> (String, moq_mux::catalog::hang::Container) {
+		let (name, config) = snapshot.video.renditions.iter().next().unwrap();
+		(name.clone(), config.try_into().unwrap())
+	}
+
+	fn audio_track(snapshot: &moq_mux::catalog::hang::Catalog) -> (String, moq_mux::catalog::hang::Container) {
+		let (name, config) = snapshot.audio.renditions.iter().next().unwrap();
+		(name.clone(), config.try_into().unwrap())
+	}
+
+	/// H.264 with the parameter sets only in the SDP, plus AAC: nothing publishes before the
+	/// first keyframe, which carries the SDP's SPS and PPS in band.
+	#[tokio::test]
+	async fn h264_and_aac_start_on_a_keyframe() {
+		let server = Server::bind(vec![Media::H264 { sprop: true }, Media::Aac]).await;
+		let (broadcast, catalog) = broadcast();
+		let client = Client::new(server.url()).unwrap();
+		let pull = tokio::spawn({
+			let (broadcast, catalog) = (broadcast.clone(), catalog.clone());
+			async move { client.pull(&broadcast, &catalog).await }
+		});
+
+		let mut session = within("PLAY", server.accept(1000)).await;
+		// Before the first keyframe: dropped, audio included.
+		session.aac(1, 1000, b"early").await;
+		session.video(0, 1000, &[fake::H264_SLICE]).await;
+		// Only the slice in band; retina inserts the SDP's parameter sets.
+		session.video(0, 1000 + FRAME, &[fake::H264_IDR]).await;
+		session.aac(1, 1000 + 2048, b"audio").await;
+		session.video(0, 1000 + 2 * FRAME, &[fake::H264_SLICE]).await;
+
+		let snapshot = catalog_with(&catalog, 1, 1).await;
+		let video = snapshot.video.renditions.values().next().unwrap();
+		let hang::catalog::VideoCodec::H264(h264) = &video.codec else {
+			panic!("expected H.264, got {:?}", video.codec);
+		};
+		assert!(h264.inline, "parameter sets ride in band");
+		assert_eq!((h264.profile, h264.level), (0x42, 0x0d));
+		assert_eq!((video.coded_width, video.coded_height), (Some(320), Some(240)));
+		let audio = snapshot.audio.renditions.values().next().unwrap();
+		assert!(matches!(audio.codec, hang::catalog::AudioCodec::AAC(_)));
+		assert_eq!((audio.sample_rate, audio.channel_count), (48_000, 2));
+
+		let video = subscribe(&broadcast, video_track(&snapshot)).await;
+		let audio = subscribe(&broadcast, audio_track(&snapshot)).await;
+		session.close().await;
+		assert_eq!(within("the pull", pull).await.unwrap().unwrap(), End::Closed);
+
+		let video = frames(video).await;
+		assert_eq!(video.len(), 2, "the slice before the keyframe never publishes");
+		assert!(video[0].keyframe);
+		assert_eq!(
+			video[0].timestamp.as_micros(),
+			33_333,
+			"one frame past the session start"
+		);
+		let sps = [&[0, 0, 0, 1], fake::H264_SPS].concat();
+		assert!(
+			video[0].payload.windows(sps.len()).any(|window| window == sps),
+			"the keyframe carries the SDP's SPS"
+		);
+		assert!(!video[1].keyframe);
+
+		let audio = frames(audio).await;
+		assert_eq!(audio.len(), 1, "audio before the keyframe never publishes");
+		assert_eq!(audio[0].payload.as_ref(), b"audio");
+		assert_eq!(
+			audio[0].timestamp.as_micros(),
+			42_666,
+			"two AAC frames past the session start"
+		);
+	}
+
+	#[tokio::test]
+	async fn h265_publishes() {
+		let server = Server::bind(vec![Media::H265]).await;
+		let (broadcast, catalog) = broadcast();
+		let client = Client::new(server.url()).unwrap();
+		let pull = tokio::spawn({
+			let (broadcast, catalog) = (broadcast.clone(), catalog.clone());
+			async move { client.pull(&broadcast, &catalog).await }
+		});
+
+		let mut session = within("PLAY", server.accept(0)).await;
+		session.video(0, 0, &[fake::H265_IDR]).await;
+
+		let snapshot = catalog_with(&catalog, 1, 0).await;
+		let video = snapshot.video.renditions.values().next().unwrap();
+		assert!(
+			matches!(video.codec, hang::catalog::VideoCodec::H265(_)),
+			"{:?}",
+			video.codec
+		);
+		assert_eq!((video.coded_width, video.coded_height), (Some(320), Some(240)));
+
+		session.close().await;
+		assert_eq!(within("the pull", pull).await.unwrap().unwrap(), End::Closed);
+	}
+
+	/// G.711, common on cameras, is skipped with one warning and the broadcast goes on
+	/// video-only.
+	#[tokio::test]
+	#[tracing_test::traced_test]
+	async fn g711_is_skipped() {
+		let server = Server::bind(vec![Media::H264 { sprop: true }, Media::Pcmu]).await;
+		let (broadcast, catalog) = broadcast();
+		let client = Client::new(server.url()).unwrap();
+		let pull = tokio::spawn({
+			let (broadcast, catalog) = (broadcast.clone(), catalog.clone());
+			async move { client.pull(&broadcast, &catalog).await }
+		});
+
+		let mut session = within("PLAY", server.accept(0)).await;
+		session.video(0, 0, &[fake::H264_IDR]).await;
+		catalog_with(&catalog, 1, 0).await;
+		session.close().await;
+		assert_eq!(within("the pull", pull).await.unwrap().unwrap(), End::Closed);
+
+		assert!(logs_contain("audio/pcmu"));
+	}
+
+	#[tokio::test]
+	async fn no_supported_stream_is_refused() {
+		let server = Server::bind(vec![Media::Pcmu]).await;
+		let (broadcast, catalog) = broadcast();
+		let client = Client::new(server.url()).unwrap();
+		let pull = tokio::spawn(async move { client.pull(&broadcast, &catalog).await });
+		// DESCRIBE only: the client gives up before SETUP, so `accept` never sees a PLAY.
+		let _accept = tokio::spawn(async move { server.accept(0).await });
+		let err = within("the pull", pull).await.unwrap().unwrap_err();
+		assert!(matches!(err, Error::NoSupportedStream(_)), "{err}");
+	}
+
+	/// A camera resetting its RTP clock mid-session ends the pull with `Jumped`, finishing
+	/// the tracks cleanly with only the frames before the jump.
+	#[tokio::test]
+	async fn a_timestamp_jump_ends_the_session() {
+		let server = Server::bind(vec![Media::H264 { sprop: true }]).await;
+		let (broadcast, catalog) = broadcast();
+		let client = Client::new(server.url()).unwrap();
+		let pull = tokio::spawn({
+			let (broadcast, catalog) = (broadcast.clone(), catalog.clone());
+			async move { client.pull(&broadcast, &catalog).await }
+		});
+
+		let mut session = within("PLAY", server.accept(1000)).await;
+		session.video(0, 1000, &[fake::H264_IDR]).await;
+		let snapshot = catalog_with(&catalog, 1, 0).await;
+		let video = subscribe(&broadcast, video_track(&snapshot)).await;
+		session.video(0, 1000 + FRAME, &[fake::H264_SLICE]).await;
+		session.video(0, 0x8000_0000, &[fake::H264_IDR]).await;
+
+		assert_eq!(within("the pull", pull).await.unwrap().unwrap(), End::Jumped);
+		assert_eq!(frames(video).await.len(), 2);
+	}
+
+	/// Two sessions (a camera's SD and HD URLs) publish renditions of one broadcast. When one
+	/// session's timeline jumps, the caller ends the broadcast and restarts both under a fresh
+	/// epoch, each new broadcast with its own catalog.
+	#[tokio::test]
+	async fn two_sessions_restart_together_on_a_jump() {
+		let (origin, driver) = moq_net::origin::Producer::new(moq_net::origin::Config::default());
+		tokio::spawn(moq_net::time::run(driver));
+		let sd = Server::bind(vec![Media::H264 { sprop: true }]).await;
+		let hd = Server::bind(vec![Media::H265]).await;
+		let sd_client = Client::new(sd.url()).unwrap();
+		let hd_client = Client::new(hd.url()).unwrap();
+
+		let (published_tx, mut published) = tokio::sync::mpsc::unbounded_channel();
+		let caller = tokio::spawn({
+			let origin = origin.clone();
+			async move {
+				let mut ends = Vec::new();
+				for _ in 0..2 {
+					let epoch = moq_net::Epoch::mint();
+					let route = moq_net::origin::Route::default().with_epoch(epoch.clone());
+					let mut broadcast = origin.publish("camera", route).unwrap();
+					let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+					published_tx.send((epoch, broadcast.clone(), catalog.clone())).unwrap();
+					// The first session to return ends the run; dropping the other's pull
+					// finishes its tracks.
+					let end = tokio::select! {
+						end = sd_client.pull(&broadcast, &catalog) => end,
+						end = hd_client.pull(&broadcast, &catalog) => end,
+					};
+					ends.push(end.unwrap());
+					catalog.finish().unwrap();
+					broadcast.close();
+				}
+				ends
+			}
+		});
+
+		let mut epochs = Vec::new();
+		for run in 0..2 {
+			let (epoch, broadcast, catalog) = within("the broadcast", published.recv()).await.unwrap();
+			epochs.push(epoch);
+			let mut sd_session = within("SD PLAY", sd.accept(500)).await;
+			let mut hd_session = within("HD PLAY", hd.accept(9000)).await;
+			sd_session.video(0, 500, &[fake::H264_IDR]).await;
+			hd_session.video(0, 9000, &[fake::H265_IDR]).await;
+
+			let snapshot = catalog_with(&catalog, 2, 0).await;
+			if run == 0 {
+				let mut readers = Vec::new();
+				for (name, config) in &snapshot.video.renditions {
+					readers.push(subscribe(&broadcast, (name.clone(), config.try_into().unwrap())).await);
+				}
+				sd_session.video(0, 500 + FRAME, &[fake::H264_SLICE]).await;
+				hd_session.video(0, 0x8000_0000, &[fake::H265_IDR]).await;
+				// Both sessions' tracks finish cleanly: the jumped one's and the dropped one's.
+				for reader in readers {
+					assert!(frames(reader).await[0].keyframe);
+				}
+			} else {
+				sd_session.close().await;
+				hd_session.close().await;
+			}
+		}
+
+		let ends = within("the caller", caller).await.unwrap();
+		assert_eq!(ends[0], End::Jumped);
+		assert_eq!(ends[1], End::Closed);
+		assert!(epochs[1] > epochs[0], "the restart mints a fresh epoch");
+	}
+
+	/// Credentials come out of the URL, never reach a log, and still authenticate.
+	#[tokio::test]
+	async fn credentials_ride_the_userinfo() {
+		let server = Server::bind(vec![Media::H264 { sprop: true }])
+			.await
+			.with_basic_auth("admin", "p@ss word");
+		let mut url = server.url();
+		url.set_username("admin").unwrap();
+		url.set_password(Some("p%40ss%20word")).unwrap();
+
+		let client = Client::new(url).unwrap();
+		let debug = format!("{client:?}");
+		assert!(!debug.contains("admin") && !debug.contains("ss"), "{debug}");
+		assert!(client.url.username().is_empty() && client.url.password().is_none());
+
+		let (broadcast, catalog) = broadcast();
+		let pull = tokio::spawn(async move { client.pull(&broadcast, &catalog).await });
+		let session = within("PLAY", server.accept(0)).await;
+		session.close().await;
+		assert_eq!(within("the pull", pull).await.unwrap().unwrap(), End::Closed);
+	}
+
+	#[test]
+	fn only_rtsp_urls_are_accepted() {
+		assert!(matches!(
+			Client::new("http://camera/stream".parse().unwrap()),
+			Err(Error::InvalidUrl(_))
+		));
+	}
+}
