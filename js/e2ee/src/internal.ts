@@ -2,6 +2,7 @@
 import { Error as NetError, type Time } from "@moq/net";
 import type { TrackKey } from "./key.ts";
 import type { Pump } from "./pump.ts";
+import type { Terminal } from "./terminal.ts";
 
 /** State one track producer shares with its groups. */
 export interface Writer {
@@ -12,6 +13,14 @@ export interface Writer {
 	// Set by any close: no new writes.
 	closed: boolean;
 	aborted?: Error;
+}
+
+/** State one track consumer shares with its groups. */
+export interface Reader {
+	// One open in flight across the track's groups and datagrams; net reads wait outside it.
+	pump: Pump;
+	key: TrackKey;
+	terminal: Terminal;
 }
 
 /** Refuse a timestamp whose presence disagrees with the track's committed timescale. */

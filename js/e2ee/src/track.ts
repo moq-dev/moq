@@ -8,7 +8,7 @@ import type { Event } from "./datagram.ts";
 import { checkU53 } from "./derive.ts";
 import { Failure } from "./failure.ts";
 import * as Group from "./group.ts";
-import { checkTimed, type Writer } from "./internal.ts";
+import { checkTimed, type Reader, type Writer } from "./internal.ts";
 import type { TrackKey } from "./key.ts";
 import { MAX_DATAGRAM_PAYLOAD } from "./limits.ts";
 import { Pump } from "./pump.ts";
@@ -143,19 +143,17 @@ export class Consumer {
 	readonly name: string;
 
 	#inner: NetTrack.Subscriber;
-	#groupKey: TrackKey;
+	#reader: Reader;
 	#datagramKey: TrackKey;
 	#window = new DatagramWindow();
-	#terminal: Terminal;
 	// Datagram reads run one at a time, so the window and key see them in arrival order.
 	#datagrams: Promise<unknown> = Promise.resolve();
 
 	private constructor(inner: NetTrack.Subscriber, groupKey: TrackKey, datagramKey: TrackKey) {
 		this.#inner = inner;
 		this.name = inner.name;
-		this.#groupKey = groupKey;
+		this.#reader = { pump: new Pump(), key: groupKey, terminal: new Terminal(inner) };
 		this.#datagramKey = datagramKey;
-		this.#terminal = new Terminal(inner);
 	}
 
 	/** @internal */
@@ -169,19 +167,19 @@ export class Consumer {
 	 * Rejects with {@link Failure} `authentication` once a grouped frame has failed to open, or a net error.
 	 */
 	async recvGroup(): Promise<Group.Consumer | undefined> {
-		this.#terminal.check();
+		this.#reader.terminal.check();
 		let group: NetGroup.Consumer | undefined;
 		try {
 			group = await this.#inner.recvGroup();
 		} catch (err) {
-			this.#terminal.check();
+			this.#reader.terminal.check();
 			throw err;
 		}
-		if (this.#terminal.failed) {
+		if (this.#reader.terminal.failed) {
 			group?.close();
-			throw this.#terminal.failed;
+			throw this.#reader.terminal.failed;
 		}
-		return group && Group.Consumer.make(group, this.#groupKey, this.#terminal);
+		return group && Group.Consumer.make(group, this.#reader);
 	}
 
 	/**
@@ -198,15 +196,15 @@ export class Consumer {
 	}
 
 	async #recvDatagram(): Promise<Event | undefined> {
-		this.#terminal.check();
+		this.#reader.terminal.check();
 		let datagram: NetTrack.Datagram | undefined;
 		try {
 			datagram = await this.#inner.recvDatagram();
 		} catch (err) {
-			this.#terminal.check();
+			this.#reader.terminal.check();
 			throw err;
 		}
-		this.#terminal.check();
+		this.#reader.terminal.check();
 		if (!datagram) return undefined;
 
 		const { sequence, timestamp, payload } = datagram;
@@ -214,16 +212,16 @@ export class Consumer {
 		const iv = this.#datagramKey.admitOpen(sequence, 0, payload.byteLength, MAX_DATAGRAM_PAYLOAD);
 		let plaintext: Uint8Array;
 		try {
-			plaintext = await this.#datagramKey.decrypt(iv, payload);
+			plaintext = await this.#reader.pump.run(() => this.#datagramKey.decrypt(iv, payload));
 		} catch (err) {
 			// A grouped failure during the open still ends this read.
-			this.#terminal.check();
+			this.#reader.terminal.check();
 			// A bad datagram is not grouped failure: the track, its demand, and any parked grouped
 			// read stay up. `exhausted` is this key's own limit.
 			if (err instanceof Failure && err.code === "authentication") return { kind: "authentication", sequence };
 			throw err;
 		}
-		this.#terminal.check();
+		this.#reader.terminal.check();
 		this.#window.mark(sequence);
 		return { kind: "datagram", datagram: { sequence, timestamp, plaintext } };
 	}
@@ -233,6 +231,6 @@ export class Consumer {
 	 * after the frames they hold. Idempotent.
 	 */
 	close(): void {
-		this.#terminal.unsubscribe();
+		this.#reader.terminal.unsubscribe();
 	}
 }

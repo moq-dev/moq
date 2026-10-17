@@ -5,10 +5,8 @@
  */
 import type { Group as NetGroup, Time } from "@moq/net";
 import { Failure } from "./failure.ts";
-import { checkTimed, type Writer } from "./internal.ts";
-import type { TrackKey } from "./key.ts";
+import { checkTimed, type Reader, type Writer } from "./internal.ts";
 import { MAX_GROUPED_PAYLOAD, TAG_LEN } from "./limits.ts";
-import type { Terminal } from "./terminal.ts";
 
 /** A decrypted grouped frame. */
 export interface Frame {
@@ -120,21 +118,19 @@ export class Consumer {
 	readonly sequence: number;
 
 	#inner: NetGroup.Consumer;
-	#key: TrackKey;
-	#terminal: Terminal;
+	#reader: Reader;
 	// Reads run one at a time, so frames open in transport order.
 	#tail: Promise<unknown> = Promise.resolve();
 
-	private constructor(inner: NetGroup.Consumer, key: TrackKey, terminal: Terminal) {
+	private constructor(inner: NetGroup.Consumer, reader: Reader) {
 		this.#inner = inner;
-		this.#key = key;
-		this.#terminal = terminal;
+		this.#reader = reader;
 		this.sequence = inner.sequence;
 	}
 
 	/** @internal */
-	static make(inner: NetGroup.Consumer, key: TrackKey, terminal: Terminal): Consumer {
-		return new Consumer(inner, key, terminal);
+	static make(inner: NetGroup.Consumer, reader: Reader): Consumer {
+		return new Consumer(inner, reader);
 	}
 
 	/**
@@ -164,18 +160,14 @@ export class Consumer {
 
 		// The frame's transport index is the nonce half, so a group resumed above frame 0 still opens.
 		try {
-			const iv = this.#key.admitOpen(
-				this.sequence,
-				frame.sequence,
-				frame.payload.byteLength,
-				MAX_GROUPED_PAYLOAD,
-			);
-			const plaintext = await this.#key.decrypt(iv, frame.payload);
+			const { key, pump } = this.#reader;
+			const iv = key.admitOpen(this.sequence, frame.sequence, frame.payload.byteLength, MAX_GROUPED_PAYLOAD);
+			const plaintext = await pump.run(() => key.decrypt(iv, frame.payload));
 			this.#check();
 			return { timestamp: frame.timestamp, plaintext };
 		} catch (err) {
 			if (err instanceof Failure && (err.code === "authentication" || err.code === "identity")) {
-				this.#inner.close(this.#terminal.fail());
+				this.#inner.close(this.#reader.terminal.fail());
 			}
 			throw err;
 		}
@@ -183,7 +175,7 @@ export class Consumer {
 
 	// Once the track has failed, drop this group's net reader too, releasing its demand.
 	#check(): void {
-		const failed = this.#terminal.failed;
+		const failed = this.#reader.terminal.failed;
 		if (!failed) return;
 		this.#inner.close(failed);
 		throw failed;

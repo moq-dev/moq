@@ -1,8 +1,9 @@
 /**
  * Runs tasks one at a time in submit order: one AEAD call in flight, completions in order.
  *
- * Depth one keeps a frame's ordinal equal to its `@moq/net` write order without reservations.
- * The queue is the callers' own pending promises, so awaiting each write is the backpressure.
+ * A producer's depth one keeps a frame's ordinal equal to its `@moq/net` write order without
+ * reservations; the queue is the callers' own pending promises, so awaiting each write is the
+ * backpressure. A consumer runs only opens through it, never net waits.
  */
 export class Pump {
 	#tail: Promise<unknown> = Promise.resolve();

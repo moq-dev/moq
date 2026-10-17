@@ -43,9 +43,11 @@ generation cannot produce. Nothing survives a publisher instance: a restart mint
 
 ## Processing
 
-WebCrypto AES-GCM is asynchronous, so writes return promises. Each track runs one serial
-pump: one AEAD call in flight and net writes in call order, so a frame's index always
-matches its transport position. Await each write for backpressure.
+WebCrypto AES-GCM is asynchronous, so writes return promises. Each track producer and
+consumer runs one serial pump: one AEAD call in flight. Producer net writes land in call
+order, so a frame's index always matches its transport position. Await each write for
+backpressure. Consumer reads wait for the network outside the pump, so a stalled group
+never holds up another group's opens.
 
 A grouped authentication failure ends the track with `Failure` code `authentication`; a
 bad datagram is an `authentication` event and the track continues. A consumer keeps a

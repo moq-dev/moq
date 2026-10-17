@@ -18,6 +18,7 @@ import {
 	MAX_PLAINTEXT_BYTES,
 	MAX_U53,
 } from "./limits.ts";
+import { Pump } from "./pump.ts";
 import { Terminal } from "./terminal.ts";
 import type * as Track from "./track.ts";
 
@@ -87,25 +88,56 @@ function thrown(fn: () => unknown): string {
 	throw new Error("expected a failure");
 }
 
-// Let queued microtasks and signal notifications run.
-async function tick(): Promise<void> {
-	await new Promise((resolve) => setTimeout(resolve, 0));
+// Hold the first open until released, counting every open that starts.
+function holdFirstOpen() {
+	const decrypt = TrackKey.prototype.decrypt;
+	let release!: () => void;
+	const gate = new Promise<void>((resolve) => {
+		release = resolve;
+	});
+	let entered!: () => void;
+	const opening = new Promise<void>((resolve) => {
+		entered = resolve;
+	});
+	const hold = {
+		calls: 0,
+		opening,
+		release,
+		restore: () => {
+			TrackKey.prototype.decrypt = decrypt;
+			release();
+		},
+	};
+	TrackKey.prototype.decrypt = async function (this: TrackKey, ...args: Parameters<TrackKey["decrypt"]>) {
+		if (hold.calls++ === 0) {
+			entered();
+			await gate;
+		}
+		return decrypt.apply(this, args);
+	};
+	return hold;
 }
 
-// Whether `promise` is still pending after the event loop drains what it can.
-async function pending(promise: Promise<unknown>): Promise<boolean> {
-	const sentinel = Symbol();
-	promise.catch(() => {});
-	await tick();
-	return (
-		(await Promise.race([
-			promise.then(
-				() => undefined,
-				() => undefined,
-			),
-			Promise.resolve(sentinel),
-		])) === sentinel
-	);
+// Resolves once `count` opens are admitted. Awaiting it lets the admitting read run on
+// synchronously to its next suspension: the pump, or the open itself.
+function admitted(count: number) {
+	const admitOpen = TrackKey.prototype.admitOpen;
+	let calls = 0;
+	let resolve!: () => void;
+	const done = new Promise<void>((r) => {
+		resolve = r;
+	});
+	TrackKey.prototype.admitOpen = function (this: TrackKey, ...args: Parameters<TrackKey["admitOpen"]>) {
+		const iv = admitOpen.apply(this, args);
+		if (++calls === count) resolve();
+		return iv;
+	};
+	return {
+		done,
+		restore: () => {
+			TrackKey.prototype.admitOpen = admitOpen;
+		},
+	};
 }
 
 async function readText(group: Group.Consumer): Promise<string | undefined> {
@@ -171,9 +203,10 @@ test("sequences allocate monotonically", async () => {
 	expect(thrown(() => p.producer.createGroup(MAX_U53 + 1))).toBe("identity");
 	expect(thrown(() => p.producer.createGroup(1.5))).toBe("identity");
 
-	// Only the one admitted datagram reached the net track.
+	// Only the one admitted datagram reached the net track: a later sentinel is next.
 	expect((await subscriber.recvDatagram())?.sequence).toBe(6);
-	expect(await pending(subscriber.recvDatagram())).toBe(true);
+	p.net.insertDatagram(8, ms(2), new Uint8Array());
+	expect((await subscriber.recvDatagram())?.sequence).toBe(8);
 });
 
 test("oversize payloads are refused before an identity is spent", async () => {
@@ -312,13 +345,10 @@ test("grouped failure wakes pending reads and releases demand", async () => {
 	const forged = await recvGroup(p.consumer);
 	expect(badDemand.used.peek()).toBe(true);
 
-	// Sibling frame, next group, and datagram reads are already parked.
+	// Sibling frame, next group, and datagram reads have nothing to return until the failure.
 	const frame = good.readFrame();
 	const nextGroup = p.consumer.recvGroup();
 	const datagram = p.consumer.recvDatagram();
-	expect(await pending(frame)).toBe(true);
-	expect(await pending(nextGroup)).toBe(true);
-	expect(await pending(datagram)).toBe(true);
 
 	expect(await failure(forged.readFrame())).toBe("authentication");
 	expect(await failure(frame)).toBe("authentication");
@@ -331,7 +361,7 @@ test("grouped failure wakes pending reads and releases demand", async () => {
 	expect(p.net.closed.peek()).toBeUndefined();
 });
 
-test("grouped failure during a datagram open rejects the datagram", async () => {
+test("a grouped failure ahead of a datagram open rejects the datagram", async () => {
 	const p = await pair("audio");
 	const bad = new NetGroup.Producer(0);
 	p.net.writeGroup(bad);
@@ -339,32 +369,46 @@ test("grouped failure during a datagram open rejects the datagram", async () => 
 	p.net.insertDatagram(0, ms(2), await sealed(p, DATAGRAM, 0, 0, "late"));
 	const forged = await recvGroup(p.consumer);
 
-	// Hold the datagram's WebCrypto open until the grouped failure has ended the track.
-	const subtle = crypto.subtle;
-	const decrypt = subtle.decrypt.bind(subtle);
-	let release!: () => void;
-	const gate = new Promise<void>((resolve) => {
-		release = resolve;
-	});
-	let entered!: () => void;
-	const opening = new Promise<void>((resolve) => {
-		entered = resolve;
-	});
-	subtle.decrypt = async (...args: Parameters<SubtleCrypto["decrypt"]>) => {
-		subtle.decrypt = decrypt;
-		entered();
-		await gate;
-		return decrypt(...args);
-	};
+	const hold = holdFirstOpen();
+	const admit = admitted(2);
 	try {
+		const read = forged.readFrame();
+		await hold.opening;
+		// The datagram passes its terminal check, then queues behind the forged open.
 		const datagram = p.consumer.recvDatagram();
-		await opening;
-		expect(await failure(forged.readFrame())).toBe("authentication");
-		release();
-		expect(await failure(datagram)).toBe("authentication");
+		await admit.done;
+		hold.release();
+		expect(await Promise.all([failure(read), failure(datagram)])).toEqual(["authentication", "authentication"]);
 	} finally {
-		subtle.decrypt = decrypt;
-		release();
+		hold.restore();
+		admit.restore();
+	}
+});
+
+test("opens across a track's groups run one at a time", async () => {
+	const p = await pair("video");
+	const first = p.producer.appendGroup();
+	await first.writeFrame(ms(1), text("a"));
+	const second = p.producer.appendGroup();
+	await second.writeFrame(ms(2), text("b"));
+	const a = await recvGroup(p.consumer);
+	const b = await recvGroup(p.consumer);
+
+	const hold = holdFirstOpen();
+	const admit = admitted(2);
+	try {
+		const readA = readText(a);
+		await hold.opening;
+		const readB = readText(b);
+		await admit.done;
+		// B is admitted but waits for A's open instead of starting its own.
+		expect(hold.calls).toBe(1);
+		hold.release();
+		expect(await Promise.all([readA, readB])).toEqual(["a", "b"]);
+		expect(hold.calls).toBe(2);
+	} finally {
+		hold.restore();
+		admit.restore();
 	}
 });
 
@@ -376,7 +420,7 @@ test("closing the track consumer releases demand while a group is held", async (
 
 	const group = await recvGroup(p.consumer);
 	p.consumer.close();
-	await tick();
+	await demand.unused();
 	expect(demand.used.peek()).toBe(false);
 
 	// The held group is not failed by the unsubscribe: it ends after what it holds, as in @moq/net.
@@ -394,11 +438,10 @@ test("a bad datagram stays an event and keeps demand", async () => {
 
 	const good = await recvGroup(p.consumer);
 	expect(await readText(good)).toBe("ok");
+	// The parked grouped read survives the bad datagram: it later resolves with a newer frame.
 	const frame = good.readFrame();
-	expect(await pending(frame)).toBe(true);
 
 	expect(await p.consumer.recvDatagram()).toEqual({ kind: "authentication", sequence: 1 });
-	expect(await pending(frame)).toBe(true);
 	expect(demand.used.peek()).toBe(true);
 
 	await p.producer.insertDatagram(2, ms(3), text("next"));
@@ -563,7 +606,7 @@ test("a group read past the first frame opens at its transport index", async () 
 	if (!net) throw new Error("expected a net group");
 	expect(net.tryReadFrame()).toBeDefined();
 	const key = trackKey(p.consuming.credential, p.consuming.epoch, parse(p.net.name), GROUP);
-	const wrapped = Group.Consumer.make(net, key, new Terminal(subscribe(p.net)));
+	const wrapped = Group.Consumer.make(net, { pump: new Pump(), key, terminal: new Terminal(subscribe(p.net)) });
 	expect(await readText(wrapped)).toBe("one");
 });
 
