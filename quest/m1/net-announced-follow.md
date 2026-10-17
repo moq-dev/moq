@@ -35,9 +35,11 @@ requests. Decided with the maintainer on 2026-10-17: no blind fallback. The
 mode waits on an announced route as `routed_broadcast` does, and blind
 requests stay out of scope, so it differs from JS when discovery is
 unavailable. JS also watches the path so a `consume` session asks its peer about
-it; a moq-net session already asks for its whole granted scope at setup
-(`interest_prefixes` in `rs/moq-net/src/lite/subscriber.rs`), so there is
-nothing to watch.
+it. A moq-net session asks for its whole granted scope at setup today
+(`interest_prefixes` in `rs/moq-net/src/lite/subscriber.rs`), so this quest
+registers no interest. [Rust lazy discovery](/quest/m1/lazy-discovery/rust.md)
+narrows that to watched prefixes, lands after this quest, and owns making
+this mode watch its path, as JS does.
 
 JS returns a handle whose current broadcast changes per instance
 (`Request.active`); Rust's `request_broadcast` takes only an optional epoch
