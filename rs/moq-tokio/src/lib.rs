@@ -7,6 +7,7 @@
 //! - TCP via the `tcp://` (plaintext) and `tls://` schemes (qmux; requires `tcp` feature)
 //! - Unix domain socket via the `unix://` scheme (qmux, peer-credential aware; requires `uds` feature, unix-only)
 //! - Iroh P2P (requires `iroh` feature)
+//! - A WebRTC data channel with a browser peer, signaled by the caller (qmux; requires `webrtc` feature)
 //!
 //! See [`Client`] for connecting to relays and [`Server`] for accepting
 //! connections. The `mdns` feature finds peers to connect to on the local network.
@@ -62,15 +63,17 @@ pub mod worker;
 mod util;
 #[cfg(feature = "watch")]
 pub mod watch;
+#[cfg(feature = "webrtc")]
+pub mod webrtc;
 #[cfg(feature = "websocket")]
 pub mod websocket;
 
-/// Session settings for every qmux transport (WebSocket, `tcp://`, `tls://`, `unix://`).
+/// Session settings for every qmux transport (WebSocket, `tcp://`, `tls://`, `unix://`, WebRTC).
 ///
 /// moq-lite holds a stream open per subscription, so a qmux session grants the same
 /// stream count as QUIC rather than qmux's default of 100, past which a peer's opens
 /// wait on credit forever.
-#[cfg(any(feature = "websocket", feature = "tcp"))]
+#[cfg(any(feature = "websocket", feature = "tcp", feature = "webrtc"))]
 fn qmux_config() -> qmux::Config {
 	let mut config = qmux::Config::default();
 	config.max_streams_bidi = quic::DEFAULT_MAX_STREAMS;

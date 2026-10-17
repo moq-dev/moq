@@ -26,8 +26,10 @@ Decided with the maintainer on 2026-10-15:
   patching generated code. Both costs are one quest: same root, same
   generator, same proof. Prefer a shape that keeps the wrapper's API
   unchanged.
-- If [the BoltFFI spike](/quest/m2/boltffi.md) picks BoltFFI, re-plan this
-  against its Kotlin backend, or delete it if that backend already avoids JNA.
+- [The BoltFFI spike](/bench/ffi-gen/README.md) measured the target: BoltFFI's
+  JNI backend makes a no-op call in 6 ns and a 100 B `write_frame` in 134 ns,
+  against UniFFI's 3.2 and 12.8 us. If the maintainer picks BoltFFI, delete
+  this quest.
 
 Public API: none expected. Wire: none.
 

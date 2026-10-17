@@ -28,6 +28,9 @@ default = ["audio", "video"]
 
 audio = ["dep:moq-audio"]
 video = ["dep:moq-video", "dep:pollster"]
+# qlog trace capture (`MoqQuicConfig::qlog`). Off by default: it compiles the qlog
+# machinery in and is only wanted for debugging; `moq_qlog_supported` reports it.
+qlog = ["moq-tokio/qlog"]
 
 [dependencies]
 bytes = { workspace = true }

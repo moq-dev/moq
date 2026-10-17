@@ -294,13 +294,15 @@ export class Broadcast {
 		const format: CatalogFormat = catalogFormat ?? Catalog.detectFormat(name) ?? Catalog.DEFAULT_FORMAT;
 
 		if (format === "manual") {
-			// Mirror the caller-supplied catalog into the effective output. A caller-supplied
-			// catalog is rejected the same way a fetched one is, minus the throw: this runs in
-			// the effect body, where an exception would surface as an unhandled error.
+			// Parse the caller-supplied catalog into the effective output with the same schema and
+			// checks as a fetched one, minus the throw: this runs in the effect body, where an
+			// exception would surface as an unhandled error.
 			const catalog = effect.get(this.in.catalog);
 			let accepted: Catalog.Root | undefined;
 			try {
-				accepted = catalog && Catalog.checkResolvable(Catalog.checkRenditions(catalog), name);
+				accepted =
+					catalog &&
+					Catalog.checkResolvable(Catalog.checkRenditions(Catalog.RootSchema.parse(catalog)), name);
 			} catch (err) {
 				console.error("rejecting catalog", name, err);
 			}

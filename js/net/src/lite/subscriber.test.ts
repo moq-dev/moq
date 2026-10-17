@@ -1,5 +1,5 @@
 import { expect, jest, spyOn, test } from "bun:test";
-import { Milli } from "@moq/clock";
+import { Manual, Milli, Nano } from "@moq/clock";
 import { Signal } from "@moq/signals";
 import type { Grant } from "../auth.ts";
 import type { Probe as ProbeStats } from "../connection/stats.ts";
@@ -124,6 +124,8 @@ function announceHarness(version: Version, origin = 1n) {
 	return {
 		subscriber,
 		send,
+		// The peer FINs the announce stream.
+		finish: () => inbound.close(),
 		abortReason,
 		sessionEnded,
 		settle: () => new Promise((resolve) => setTimeout(resolve, 0)),
@@ -1088,7 +1090,7 @@ test("a lite subscribe whose SUBSCRIBE write stalls past the deadline closes its
 
 		jest.advanceTimersByTime(SUBSCRIBE_SETUP_TIMEOUT_MS);
 		await track.closed;
-		await streams[0].finished;
+		await streams[0].aborted;
 	} finally {
 		subscriber.close();
 		warn.mockRestore();
@@ -1825,5 +1827,125 @@ test("closing a broadcast while TRACK_INFO is pending leaves no unhandled reject
 	} finally {
 		process.off("unhandledRejection", onUnhandled);
 		subscriber.close();
+	}
+});
+
+const announceStart = (suffix: string) => (w: Writer) =>
+	encodeAnnounceBroadcast(w, { status: "active", suffix: Path.from(suffix), hops: [PUBLISHER_A] }, Version.DRAFT_06);
+
+test("a counted initial set syncs once the reader is past its last announce", async () => {
+	const { subscriber, send, settle } = announceHarness(Version.DRAFT_06);
+	const announced = subscriber.announced();
+	await settle();
+
+	await send((w) => new AnnounceOk(PEER, 2).encode(w, Version.DRAFT_06));
+	await send(announceStart("a"));
+	expect(await announced.next()).toMatchObject({ prefix: Path.from("a"), kind: "start" });
+	expect(announced.synced.peek()).toBe(false);
+
+	await send(announceStart("b"));
+	expect(await announced.next()).toMatchObject({ prefix: Path.from("b"), kind: "start" });
+	await settle();
+	// Still handling the last of them.
+	expect(announced.synced.peek()).toBe(false);
+
+	void announced.next();
+	await settle();
+	expect(announced.synced.peek()).toBe(true);
+
+	announced.close();
+	subscriber.close();
+});
+
+test("an empty initial set syncs on the answer", async () => {
+	const { subscriber, send, settle } = announceHarness(Version.DRAFT_06);
+	const announced = subscriber.announced();
+	await settle();
+	expect(announced.synced.peek()).toBe(false);
+
+	await send((w) => new AnnounceOk(PEER, 0).encode(w, Version.DRAFT_06));
+	await settle();
+	expect(announced.synced.peek()).toBe(true);
+
+	announced.close();
+	subscriber.close();
+});
+
+test("a counted initial set cut short is a protocol violation", async () => {
+	for (const cut of ["ended", "fin"] as const) {
+		const { subscriber, send, finish, sessionEnded, settle } = announceHarness(Version.DRAFT_06);
+		const announced = subscriber.announced();
+		await settle();
+
+		await send((w) => new AnnounceOk(PEER, 2).encode(w, Version.DRAFT_06));
+		await send(announceStart("a"));
+		if (cut === "ended") {
+			await send((w) => encodeAnnounceBroadcast(w, { status: "endedId", id: 0n }, Version.DRAFT_06));
+		} else {
+			finish();
+		}
+
+		expect(await announced.next()).toMatchObject({ prefix: Path.from("a"), kind: "start" });
+		await expect(announced.next()).rejects.toThrow("inside the initial set");
+		expect((await sessionEnded())?.closeCode).toBe(SessionCode.ProtocolViolation);
+		subscriber.close();
+	}
+});
+
+test("a version without a boundary syncs once the request is out", async () => {
+	const { subscriber, settle } = announceHarness(Version.DRAFT_03);
+	const announced = subscriber.announced();
+	await settle();
+	expect(announced.synced.peek()).toBe(true);
+
+	announced.close();
+	subscriber.close();
+});
+
+test("announce init is the initial set", async () => {
+	const { subscriber, send, settle } = announceHarness(Version.DRAFT_02);
+	const announced = subscriber.announced();
+	await settle();
+
+	await send((w) => new AnnounceInit([Path.from("room")]).encode(w, Version.DRAFT_02));
+	expect(await announced.next()).toMatchObject({ prefix: Path.from("room"), kind: "start" });
+	void announced.next();
+	await settle();
+	expect(announced.synced.peek()).toBe(true);
+
+	announced.close();
+	subscriber.close();
+});
+
+test.each(["answer", "credit"] as const)("FETCH shares the TRACK deadline while waiting for %s", async (stage) => {
+	const clock = new Manual();
+	const restore = clock.install();
+	const { quic, streams, opened } = fakeSession(stage === "credit" ? [1] : []);
+	const subscriber = new Subscriber(quic, Version.DRAFT_07, HopSchema.parse(1n));
+	let failure: unknown;
+	const fetch = subscriber.fetchGroup(Path.from("room"), "video", 0).catch((err: unknown) => {
+		failure = err;
+	});
+	try {
+		await opened(0);
+		await streams[0].reading;
+		await clock.advanceAsync(Nano.fromMilli(Milli(5_000)));
+		await answerTrackInfo(streams[0], Version.DRAFT_07);
+		await opened(1);
+		if (stage === "answer") await streams[1].reading;
+		await clock.advanceAsync(Nano.fromMilli(Milli(4_999)));
+		expect(failure).toBeUndefined();
+		await clock.advanceAsync(Nano.fromMilli(Milli(1)));
+		await fetch;
+		if (stage === "answer") expect((failure as StreamError).code).toBe(StreamCode.ControlTimeout);
+		else {
+			expect((failure as Error).name).toBe("NoStreamCredit");
+			streams[1].release();
+			await streams[1].aborted;
+			expect(streams[1].written).toEqual([]);
+		}
+	} finally {
+		subscriber.close();
+		restore();
 	}
 });

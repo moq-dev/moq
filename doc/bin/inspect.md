@@ -77,6 +77,7 @@ The node name (`local/host` here) is `stats.node`. Each fetch returns the
 newest snapshot of cumulative counters. `totals.json` sums each tier's traffic
 and sessions, `publisher.json` is egress per broadcast path,
 `subscriber.json` is ingress, and `sessions.json` counts sessions per auth
-root. Fetch twice and divide by the interval for a
+root. A subscriber may also ask for `<path>/traffic.json`, one broadcast
+prefix rolled up with each child, produced only while held. Fetch twice and divide by the interval for a
 rate. The `.json.z` twins carry compressed patches, which these tools print as
 raw bytes. [Stats](/concept/stats) describes every field.

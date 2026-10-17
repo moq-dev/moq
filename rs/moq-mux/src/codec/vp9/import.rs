@@ -54,7 +54,8 @@ impl Import {
 	}
 
 	fn init(&mut self, vp9: hang::catalog::VP9, width: u16, height: u16) -> crate::Result<()> {
-		let mut config = hang::catalog::VideoConfig::new(vp9);
+		let mut config = hang::catalog::VideoConfig::new(vp9.clone());
+		config.color = super::color(&vp9);
 		config.coded_width = Some(width as u32);
 		config.coded_height = Some(height as u32);
 

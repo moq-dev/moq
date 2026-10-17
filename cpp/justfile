@@ -14,6 +14,10 @@ check *args:
     python3 ../sh/cpp/ffi.test.py
     ../sh/cpp/check.sh "$@"
 
+# Run the in-process binding benchmark with the release library.
+bench:
+    bash ../sh/cpp/bench.sh
+
 # Runs in the caller's directory, so a relative `--output` means what it would
 # to the script itself.
 

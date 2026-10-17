@@ -1285,6 +1285,10 @@ struct AnnouncePrefix<S: crate::transport::poll::Session> {
 	subscriber: Subscriber<S>,
 	prefix: PathOwned,
 	state: PrefixState<S>,
+	/// Holds the origin's announce consumers under the prefix unsynced
+	/// until the peer's initial set is in. Dropped at the boundary the version
+	/// marks, or with the stream.
+	snapshot: Option<crate::model::Snapshot>,
 }
 
 enum PrefixState<S: crate::transport::poll::Session> {
@@ -1298,6 +1302,8 @@ enum PrefixState<S: crate::transport::poll::Session> {
 	Cost {
 		stream: Stream<S, Version>,
 		responder_origin: Option<crate::Hop>,
+		/// Lite05+: the ANNOUNCE_STARTs the publisher counted into its initial set.
+		initial: u64,
 	},
 	/// Lite01/02: reading the ANNOUNCE_INIT set.
 	ReadInit { stream: Stream<S, Version>, run: PrefixRun },
@@ -1320,14 +1326,21 @@ struct PrefixRun {
 	decoder: lite::AnnounceDecoder,
 	/// The auth epoch last applied, so a new limit holds back or brings back routes.
 	auth_epoch: u64,
+	/// Lite05+: the ANNOUNCE_STARTs of the initial set still to read. Anything else
+	/// before them, or the stream ending, cuts the counted set short.
+	initial: u64,
 }
 
 impl<S: crate::transport::poll::Session> AnnouncePrefix<S> {
 	fn new(subscriber: Subscriber<S>, prefix: PathOwned) -> Self {
+		// Taken now, while the session is being set up, so a consumer of the origin never
+		// reads as synced before the request even goes out.
+		let snapshot = Some(subscriber.origin.snapshot(&prefix));
 		Self {
 			subscriber,
 			prefix,
 			state: PrefixState::Open,
+			snapshot,
 		}
 	}
 
@@ -1369,20 +1382,29 @@ impl<S: crate::transport::poll::Session> AnnouncePrefix<S> {
 					let PrefixState::Send { stream } = std::mem::replace(&mut self.state, PrefixState::Open) else {
 						unreachable!()
 					};
-					self.state = match self.subscriber.version.has_announce_ok() {
+					let version = self.subscriber.version;
+					// Lite03/04 mark no initial set, so the request going out is the best
+					// boundary. Lite01/02 mark it with ANNOUNCE_INIT, newer ones with a count.
+					if !version.has_announce_ok() && !matches!(version, Version::Lite01 | Version::Lite02) {
+						self.snapshot = None;
+					}
+					self.state = match version.has_announce_ok() {
 						true => PrefixState::ReadOk { stream },
 						false => PrefixState::Cost {
 							stream,
 							responder_origin: None,
+							initial: 0,
 						},
 					};
 				}
 				PrefixState::ReadOk { stream } => {
 					// Lite05+: the publisher reports its own origin id, which we stamp onto
 					// every received Announce's hop chain since it no longer does so itself.
-					// Its `active` count marks where the initial set ends; nothing here needs
-					// that boundary, so it is read and dropped.
+					// Its `active` count marks where the initial set ends.
 					let ok = ready!(stream.reader.poll_decode::<lite::AnnounceOk>(&mut cx))?;
+					if ok.active == 0 {
+						self.snapshot = None;
+					}
 					// A peer may legally report id 0 (no identity). Keep it: the assigned
 					// identity stays on `via` and is never forwarded as a hop.
 					let origin = ok.origin;
@@ -1392,6 +1414,7 @@ impl<S: crate::transport::poll::Session> AnnouncePrefix<S> {
 					self.state = PrefixState::Cost {
 						stream,
 						responder_origin: Some(origin),
+						initial: ok.active,
 					};
 				}
 				PrefixState::Cost { .. } => {
@@ -1399,6 +1422,7 @@ impl<S: crate::transport::poll::Session> AnnouncePrefix<S> {
 					let PrefixState::Cost {
 						stream,
 						responder_origin,
+						initial,
 					} = std::mem::replace(&mut self.state, PrefixState::Open)
 					else {
 						unreachable!()
@@ -1410,6 +1434,7 @@ impl<S: crate::transport::poll::Session> AnnouncePrefix<S> {
 						announced: Announced::new(self.subscriber.announces.clone()),
 						decoder: lite::AnnounceDecoder::default(),
 						auth_epoch: 0,
+						initial,
 					};
 
 					// Lite01/02 send the initial set as one ANNOUNCE_INIT message, so they
@@ -1441,6 +1466,7 @@ impl<S: crate::transport::poll::Session> AnnouncePrefix<S> {
 					else {
 						unreachable!()
 					};
+					self.snapshot = None;
 					self.state = PrefixState::Run { stream, run };
 				}
 				PrefixState::Run { stream, run } => {
@@ -1464,7 +1490,22 @@ impl<S: crate::transport::poll::Session> AnnouncePrefix<S> {
 					loop {
 						match stream.reader.poll_decode_maybe::<lite::AnnounceBroadcast>(&mut cx) {
 							Poll::Ready(Ok(Some(announce))) => {
+								if run.initial > 0 {
+									match announce {
+										lite::AnnounceBroadcast::Active { .. } => run.initial -= 1,
+										// An unknown type is no change, so it neither counts nor cuts.
+										lite::AnnounceBroadcast::Skipped => {}
+										_ => return Poll::Ready(Err(Error::ProtocolViolation)),
+									}
+								}
 								self.subscriber.handle_announce(&self.prefix, announce, run)?;
+								// Released only once the last counted route is in the origin.
+								if run.initial == 0 {
+									self.snapshot = None;
+								}
+							}
+							Poll::Ready(Ok(None)) if run.initial > 0 => {
+								return Poll::Ready(Err(Error::ProtocolViolation));
 							}
 							Poll::Ready(Ok(None)) => {
 								// The publisher FINed: it has nothing (more) to announce for this
@@ -4173,6 +4214,185 @@ mod tests {
 
 		cursor.expect_next_active("a").await;
 		cursor.expect_next_active("b").await;
+	}
+
+	/// A peer's announce stream for the root, encoded for `version`.
+	fn announce_script(version: Version, messages: &[&dyn Fn(&mut crate::coding::Encoder<'_>)]) -> Vec<u8> {
+		let mut script = Vec::new();
+		for message in messages {
+			message(&mut crate::coding::Encoder::new(&mut script, version.into()));
+		}
+		script
+	}
+
+	/// An ANNOUNCE_OK counting `active` starts into the initial set.
+	fn announce_ok(version: Version, active: u64) -> impl Fn(&mut crate::coding::Encoder<'_>) {
+		move |w| {
+			lite::AnnounceOk {
+				origin: crate::Hop::new(9).unwrap(),
+				active,
+			}
+			.encode(w, version)
+			.unwrap()
+		}
+	}
+
+	/// An ANNOUNCE_START for `suffix`.
+	fn announce_start(version: Version, suffix: &'static str) -> impl Fn(&mut crate::coding::Encoder<'_>) {
+		move |w| {
+			lite::AnnounceBroadcast::Active {
+				epoch: None,
+				suffix: lite::PathRef::literal(Path::new(suffix)),
+				hops: lite::HopsRef::literal(crate::Hops::new()),
+				cost: crate::origin::Cost::default(),
+			}
+			.encode(w, version)
+			.unwrap()
+		}
+	}
+
+	/// The announce stream for the root of a fresh origin, its peer replaying `session`.
+	fn root_prefix(
+		version: Version,
+		session: crate::lite::test_transport::ScriptedSession,
+	) -> (
+		AnnouncePrefix<crate::lite::test_transport::ScriptedSession>,
+		origin::Consumer,
+	) {
+		let origin = origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let consumer = origin.consume();
+		let subscriber = Subscriber::new(SubscriberConfig {
+			runtime: crate::time::sim(),
+			session,
+			origin,
+			recv_bandwidth: None,
+			version,
+			peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Binding::InBand),
+			cost: Some(1),
+			peer_hop: None,
+			going_away: Default::default(),
+			auth: crate::auth::Handle::new(false),
+		});
+		(AnnouncePrefix::new(subscriber, Path::new("").to_owned()), consumer)
+	}
+
+	/// The origin's consumers sync once the counted starts are in and read, never before.
+	#[moq_clock::test]
+	async fn a_counted_initial_set_catches_up() {
+		const VERSION: Version = Version::Lite06;
+		let script = announce_script(
+			VERSION,
+			&[
+				&announce_ok(VERSION, 2),
+				&announce_start(VERSION, "a"),
+				&announce_start(VERSION, "b"),
+			],
+		);
+		let (mut prefix, consumer) = root_prefix(VERSION, crate::lite::test_transport::ScriptedSession::new(script));
+		let mut cursor = consumer.announced();
+		assert!(!cursor.is_synced(), "held from the request on");
+
+		let mut run = std::pin::pin!(kio::wait(|waiter| prefix.poll(waiter)));
+		assert!(futures::poll!(run.as_mut()).is_pending());
+
+		cursor.assert_next_active("a");
+		assert!(!cursor.is_synced(), "never before an earlier event is read");
+		cursor.assert_next_active("b");
+		assert!(cursor.is_synced());
+		// A consumer created after the boundary syncs on its replay.
+		let mut late = consumer.announced();
+		late.assert_next_active("a");
+		late.assert_next_active("b");
+		assert!(late.is_synced());
+	}
+
+	/// Part of a counted set is not synced, however much of it was read.
+	#[moq_clock::test]
+	async fn a_partial_initial_set_holds() {
+		const VERSION: Version = Version::Lite06;
+		let script = announce_script(VERSION, &[&announce_ok(VERSION, 2), &announce_start(VERSION, "a")]);
+		let (mut prefix, consumer) = root_prefix(VERSION, crate::lite::test_transport::ScriptedSession::new(script));
+		let mut cursor = consumer.announced();
+		let mut run = std::pin::pin!(kio::wait(|waiter| prefix.poll(waiter)));
+		assert!(futures::poll!(run.as_mut()).is_pending());
+
+		cursor.assert_next_active("a");
+		assert!(!cursor.is_synced());
+	}
+
+	/// A count of zero is synced on the ANNOUNCE_OK.
+	#[moq_clock::test]
+	async fn an_empty_initial_set_catches_up_at_once() {
+		const VERSION: Version = Version::Lite07;
+		let script = announce_script(VERSION, &[&announce_ok(VERSION, 0)]);
+		let (mut prefix, consumer) = root_prefix(VERSION, crate::lite::test_transport::ScriptedSession::new(script));
+		let cursor = consumer.announced();
+		let mut run = std::pin::pin!(kio::wait(|waiter| prefix.poll(waiter)));
+		assert!(futures::poll!(run.as_mut()).is_pending());
+		assert!(cursor.is_synced());
+	}
+
+	/// Anything but a start inside the counted set cuts it short: a protocol violation.
+	#[moq_clock::test]
+	async fn an_end_inside_the_initial_set_is_refused() {
+		const VERSION: Version = Version::Lite06;
+		let end =
+			|w: &mut crate::coding::Encoder<'_>| lite::AnnounceBroadcast::EndedId { id: 0 }.encode(w, VERSION).unwrap();
+		let script = announce_script(
+			VERSION,
+			&[&announce_ok(VERSION, 2), &announce_start(VERSION, "a"), &end],
+		);
+		let (mut prefix, _consumer) = root_prefix(VERSION, crate::lite::test_transport::ScriptedSession::new(script));
+		let err = kio::wait(|waiter| prefix.poll_run(waiter)).await.unwrap_err();
+		assert!(matches!(err, Error::ProtocolViolation), "{err}");
+	}
+
+	/// The stream ending inside the counted set cuts it short too.
+	#[moq_clock::test]
+	async fn a_fin_inside_the_initial_set_is_refused() {
+		const VERSION: Version = Version::Lite06;
+		let script = announce_script(VERSION, &[&announce_ok(VERSION, 2), &announce_start(VERSION, "a")]);
+		let session = crate::lite::test_transport::ScriptedSession::new(script);
+		session.close(crate::lite::test_transport::Close::Fin);
+		let (mut prefix, _consumer) = root_prefix(VERSION, session);
+		let err = kio::wait(|waiter| prefix.poll_run(waiter)).await.unwrap_err();
+		assert!(matches!(err, Error::ProtocolViolation), "{err}");
+	}
+
+	/// Lite03/04 mark no initial set: synced, best effort, once the request is sent.
+	#[moq_clock::test]
+	async fn an_unmarked_version_catches_up_on_the_request() {
+		const VERSION: Version = Version::Lite04;
+		let (mut prefix, consumer) =
+			root_prefix(VERSION, crate::lite::test_transport::ScriptedSession::new(Vec::new()));
+		let cursor = consumer.announced();
+		assert!(!cursor.is_synced());
+		let mut run = std::pin::pin!(kio::wait(|waiter| prefix.poll(waiter)));
+		assert!(futures::poll!(run.as_mut()).is_pending());
+		assert!(cursor.is_synced());
+	}
+
+	/// Lite01/02 mark the initial set with ANNOUNCE_INIT.
+	#[moq_clock::test]
+	async fn announce_init_is_the_initial_set() {
+		const VERSION: Version = Version::Lite02;
+		let init = |w: &mut crate::coding::Encoder<'_>| {
+			lite::AnnounceInit {
+				suffixes: vec![Path::new("a")],
+			}
+			.encode(w, VERSION)
+			.unwrap()
+		};
+		let (mut prefix, consumer) = root_prefix(
+			VERSION,
+			crate::lite::test_transport::ScriptedSession::new(announce_script(VERSION, &[&init])),
+		);
+		let mut cursor = consumer.announced();
+		let mut run = std::pin::pin!(kio::wait(|waiter| prefix.poll(waiter)));
+		assert!(futures::poll!(run.as_mut()).is_pending());
+		assert!(!cursor.is_synced());
+		cursor.assert_next_active("a");
+		assert!(cursor.is_synced());
 	}
 
 	/// An announce past the session's cap fails the session with TOO_MANY_REQUESTS, and
