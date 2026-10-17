@@ -248,10 +248,12 @@ replay row crosses no shaper, so the `shaper` void does not apply to it.
 profile, and ring. Under `--enforce` a run fails on a breach, a budgeted key the run left
 unmeasured, a void row, or a row with no budget. Tightening a ceiling is a visible diff; loosening
 one needs a reason in review. The file's `note` says how the current ceilings were measured: the
-browser rows come from several nightly runs, not a developer machine.
+browser rows come from several nightly runs, not a developer machine; the native rows are provisional,
+from a developer machine, until the nightly runner has measured them.
 
-The nightly `Audio quality` job runs the matrix under `--enforce` and keeps every run directory for a
-week as the `audio-quality-run` artifact: each process's log, the shaper's counters, every row's raw
+The nightly `Audio quality` job runs the browser rows under `--enforce` and the native rows reporting
+only, until an intermittent two-second device stall that voids about one AAC native row in seven is
+fixed. It keeps every run directory for a week as the `audio-quality-run` artifact: each process's log, the shaper's counters, every row's raw
 samples and summary. The
 replays also run under `--enforce` on every PR that touches the player's packages (`js/watch`,
 `js/hang`, `js/net`, `js/signals`) or the harness (`.github/workflows/audio-quality.yml`), so a
