@@ -54,8 +54,11 @@ Open, for the design:
   e2ee's nonce binds the group and frame sequence, so a per-frame map is not
   enough.
 - Whether flate and json become wrappers or stay codecs above a track.
-- Benchmark trait dispatch against the bridge hop. Sweep tracks × frames per
-  group, so a cost that grows with the table shows up as a slope.
+- Benchmark trait dispatch against the bridge hop on both sides: the write
+  bridge above, and its reverse for readers, where unwrapping once before a
+  local broadcast differs from unwrapping per reader. Sweep tracks × frames
+  per group, and readers on the read side, so a cost that grows with the table
+  shows up as a slope.
 
 ## Related
 
