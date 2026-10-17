@@ -13,7 +13,8 @@ Decided 2026-10-16 with the maintainer:
 
 - One implementation, in the hidden `fuzz` feature module. The Criterion
   benchmarks enable `--features fuzz`, as moq-net's already do, and replace
-  their bench-local no-op protection (ported from quinn `perf`'s
+  their bench-local no-op protection (`NoProtection*` in
+  `rs/moq-quic/benches/common/mod.rs`, ported from quinn `perf`'s
   `noprotection.rs`) with it.
 - The `connection` target switches to it, so injected and mutated packets
   decrypt instead of being dropped at the AEAD. Today it runs about 64
@@ -24,7 +25,3 @@ Decided 2026-10-16 with the maintainer:
   the streams and datagrams those packets touch; no-panic still covers every
   input.
 - Not a debug transport: nothing outside the `fuzz` feature can name it.
-
-## Required
-
-- [Benchmarks](/quest/m1/quic/coverage/bench.md) - lands the no-op protection this replaces
