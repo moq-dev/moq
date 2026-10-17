@@ -33,6 +33,7 @@ let encoder = Encoder::new(&encode::Config::new(width, height, rate))?;
 let mut config = encode::Config::new(width, height, rate);
 config.color = frame.surface.color();
 let encoder = Encoder::new(&config)?;
+```
 
 ### `encode::Producer` takes a catalog reservation (#5715)
 
