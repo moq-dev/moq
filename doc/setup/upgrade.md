@@ -39,6 +39,10 @@ These land with the next breaking release.
 - **Auth requests name `webtransport`** (#5293). Relays report a WebTransport
   session as `webtransport` instead of `quic`, and older auth servers reject the
   new value, so upgrade auth servers before relays.
+- **Capped grants need upgraded verifiers** (#5697). A token whose `publish`
+  or `subscribe` carries a `rate` cap encodes that role as an object, which
+  released verifiers reject, so upgrade every auth server and verifier before
+  issuing capped tokens.
 - **Archive timelines declare a duration** (#5715). Each catalog
   `archive.timelines` entry is an object instead of a track name. Neither side
   reads the other's shape, and a catalog it can't read keeps its live media but

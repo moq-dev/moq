@@ -9,6 +9,7 @@ How to update your code for each breaking change, newest first.
 Parsed `Claims`, `Grant`, and `authorize`'s permissions hold `publish` and `subscribe` as `Access`: path patterns plus an optional per-connection `rate` cap.
 Read the patterns from `.path`, as in `permissions.publish.path.matches(path)`. `Key.sign` still takes pattern strings, but a hand-built `Claims` value must come from `ClaimsSchema.parse`.
 A gateway must enforce a cap or refuse the grant before admitting media.
+Released verifiers reject a capped grant, so upgrade every verifier before an issuer sets `rate`.
 
 ### A token must carry its key's `kid` (#3943)
 

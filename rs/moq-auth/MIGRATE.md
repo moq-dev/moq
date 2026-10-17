@@ -9,6 +9,7 @@ How to update your code for each breaking change, newest first.
 `publish` and `subscribe` on `Claims`, `Permissions`, and `Grant` are `Access`, which holds the path patterns and an optional per-connection `Rate` cap.
 Read the patterns from `.path`; constructors and `Claims::with_publish` / `with_subscribe` take anything `Into<Access>`, such as a `Pattern`, `Patterns`, or array, so collect a pattern iterator first.
 A capped role serializes as `{"path":"alice/**","rate":8000000}`, and key scopes refuse caps.
+Released verifiers reject that form, so upgrade every verifier before issuing capped tokens.
 A gateway that embeds this crate must enforce a cap or refuse the grant before admitting media.
 
 ### Gateway transports and key sets are non-exhaustive (#3943)
