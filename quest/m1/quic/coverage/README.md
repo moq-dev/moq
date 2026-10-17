@@ -18,7 +18,7 @@ Decided in the 2026-10-16 plan with the maintainer:
   (#5711 scheduler, #5690 reliable reset, #5735 receive memory, #5688
   shard, #5674 peer limits) merge. #5690 and #5688 merged while this was
   planned, so they take the merged-first comparison in
-  [the benchmarks](/quest/m1/quic/coverage/bench.md) and the
+  [the benchmarks](/rs/moq-quic/benches/common/mod.rs) and the
   characterization tests are written against b30289127, then rebased. The net lands first so each rewrite can
   compare against it: benchmarks via `just bench` against the commit that
   lands them (Criterion only compares cases present at the base), tests by
@@ -42,9 +42,9 @@ and the harness defaults to Cubic while production runs BBR3.
 
 ## Required
 
-- [Benchmarks](/quest/m1/quic/coverage/bench.md) - Criterion sweeps of stream scheduling, receive and reset, endpoint routing, and the wire codec, on the baseline
 - [Characterization tests](/quest/m1/quic/coverage/characterize.md) - golden scheduling order, and every uncovered frame, reset, limit, and endpoint path, on today's harness
 - [Seeded simulation](/quest/m1/quic/coverage/sim.md) - a deterministic, impaired network in `Pair`, BBR3 as the harness default, and property tests over random workloads
+- [Pin benchmark cores](/quest/m1/quic/coverage/bench-pin.md) - local base/head comparisons run on one core type on hybrid CPUs
 
 ## Related
 
