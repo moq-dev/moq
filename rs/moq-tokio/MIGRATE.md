@@ -62,7 +62,7 @@ The reconnect counter is `connects()`; rename `epoch()` calls.
 
 `listen.lb_nonce` without `lb_id` fails to start, so set `lb_id` next to it.
 Setting `lb_id` (or `lb_nonce`) together with `load_balancer` also fails; `lb_id` used to win silently.
-Set one of them.
+Set `load_balancer`, or `lb_id` alone (nonce 8), or `lb_id` with `lb_nonce`.
 
 ### Settings no listener reads stop startup (#5006)
 

@@ -40,7 +40,7 @@ A qlog directory gets one file per endpoint instead of one per connection.
 
 `listen.lb_nonce` (`--listen-quic-lb-nonce`, `MOQ_LISTEN_QUIC_LB_NONCE`) without `lb_id` stops startup.
 Setting `lb_id` or `lb_nonce` together with `load_balancer` also stops; `lb_id` used to win.
-Choose either `load_balancer` or the `lb_id` and `lb_nonce` pair.
+Set `load_balancer`, or `lb_id` alone (nonce 8), or `lb_id` with `lb_nonce`.
 
 ### Settings no listener reads stop startup (#5006)
 
