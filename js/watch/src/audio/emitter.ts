@@ -1,8 +1,8 @@
-import { Time } from "@moq/net";
+import { Milli } from "@moq/clock";
 import { Effect, type Getter, getter, type Inputs, type Readonlys, readonlys, Signal } from "@moq/signals";
 import type { Decoder } from "./decoder";
 
-const FADE = Time.Milli(200);
+const FADE = Milli(200);
 
 export type EmitterInput = {
 	volume: Getter<number>;
@@ -21,7 +21,7 @@ export type EmitterProps = Inputs<EmitterInput> & {
 	source: Decoder;
 
 	/** How long a volume change ramps for. Defaults to 200 ms; 0 steps at once. */
-	fade?: Time.Milli | Signal<Time.Milli>;
+	fade?: Milli | Signal<Milli>;
 };
 
 type EmitterOutput = {
@@ -36,7 +36,7 @@ export class Emitter {
 	readonly in: Readonlys<EmitterInput>;
 
 	/** How long a volume change ramps for. 0 steps at once; a negative or non-finite fade throws and leaves the volume as it was. */
-	fade: Signal<Time.Milli>;
+	fade: Signal<Milli>;
 
 	readonly #out: EmitterOutput = {
 		enabled: new Signal<boolean>(false),
@@ -106,7 +106,7 @@ export class Emitter {
 			const volume = effect.get(this.in.volume);
 			const now = gain.context.currentTime;
 			if (fade === 0) gain.gain.setValueAtTime(volume, now);
-			else gain.gain.linearRampToValueAtTime(volume, now + Time.Milli.toSecond(fade));
+			else gain.gain.linearRampToValueAtTime(volume, now + Milli.toSecond(fade));
 		});
 	}
 

@@ -27,7 +27,7 @@
     # The quest CLI, which also serves the quest guide and skills the stubs in
     # .claude/skills call. Bump the rev to upgrade them.
     quest = {
-      url = "github:kixelated/quest/b7027a3ded4b0a36505f40eb7ed788c1023e7a49";
+      url = "github:kixelated/quest/fa5f1fc9b49c8e7f5dd85af1aabead22f681ec01";
       inputs.nixpkgs.follows = "nixpkgs";
       inputs.flake-utils.follows = "flake-utils";
     };
@@ -80,6 +80,9 @@
             "clippy"
             "rust-src"
             "rust-analyzer"
+            # llvm-cov and llvm-profdata for `just rs coverage`, which must
+            # match rustc's LLVM. cargo-llvm-cov finds them in the sysroot.
+            "llvm-tools"
           ];
           targets = [
             "wasm32-unknown-unknown"
@@ -138,6 +141,8 @@
             # unification would otherwise hide a broken single-crate build.
             cargo-hack
             cargo-nextest
+            # Source-based test coverage (`just rs coverage`).
+            cargo-llvm-cov
             # Browser/WASM bindings (rs/moq-wasm -> @moq/wasm via `just js wasm`).
             # wasm-bindgen-cli must match the `wasm-bindgen` crate version (the
             # crate is pinned to nixpkgs' CLI version); bump both together.

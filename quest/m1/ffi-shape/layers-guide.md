@@ -9,12 +9,7 @@ another.
 
 ## Plan
 
-Waits for [Codecs](/quest/m1/ffi-shape/codec.md), since `audio` and `video` have
-no namespace to map until then (decided 2026-10-09 on #4519). Keep it a table
+The `audio` and `video` namespaces are now available to map. Keep it a table
 per layer, not a method reference: the API docs own the names (see
 `doc/AGENTS.md`). C++ is one flat `moq::` namespace of the generated
 types, so its column names the `moq::Media*` types instead of a namespace.
-
-## Required
-
-- [Codecs](/quest/m1/ffi-shape/codec.md) - the `audio` and `video` namespaces the guide maps

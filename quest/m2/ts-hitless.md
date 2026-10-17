@@ -24,7 +24,7 @@ Decided 2026-10-13 by the maintainer: the coordinate the
 legs share is the broadcast's media timeline, each object's timestamp on its
 catalog clock, with a constant mux rate. Two exports of one broadcast
 already read the same objects and timestamps, so this needs no importer
-alignment; [same-epoch importers](/quest/m1/hop-aligned-import.md) extend it
+alignment; [same-epoch importers](/quest/m2/hop-aligned-import.md) extend it
 to legs fed by different importers of one epoch. Every byte a `--sync` leg
 renders from the objects it has (slot, PCR, table, PES header, continuity
 counter) is a function of those objects, that coordinate, the catalog, and
@@ -90,5 +90,5 @@ Public API: `moq export ts --sync`.
 ## Related
 
 - [TS over RTP legs](/quest/m2/ts-rtp-egress.md) - packetizes these slots with matching RTP headers for ST 2022-7
-- [Same-epoch importers](/quest/m1/hop-aligned-import.md) - extends the coordinate to legs fed by different importers
+- [Same-epoch importers](/quest/m2/hop-aligned-import.md) - extends the coordinate to legs fed by different importers
 - [TS passthrough export](/quest/m2/ts-passthrough-export.md) - identical packets for common objects by construction, in its own lane

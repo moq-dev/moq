@@ -129,9 +129,12 @@ impl Recording {
 		let mut encoders = HashMap::new();
 		for track in tracks {
 			// Legacy media is stamped in microseconds.
-			store.put_info(track, &Info::new(1, 1_000_000).unwrap()).await.unwrap();
 			store
-				.put_info(&timeline(track), &Info::new(0, 1000).unwrap())
+				.put_info(track, &Info::new(1, Some(1_000_000)).unwrap())
+				.await
+				.unwrap();
+			store
+				.put_info(&timeline(track), &Info::new(0, Some(1000)).unwrap())
 				.await
 				.unwrap();
 			let config = window::ProducerConfig::default()
@@ -239,7 +242,7 @@ fn legacy(track: &str, micros: u64, keyframe: bool) -> Frame {
 	let mut encoded = BytesMut::new();
 	frame.encode(&mut encoded).unwrap();
 	Frame {
-		timestamp: micros,
+		timestamp: Some(micros),
 		payload: encoded.freeze(),
 	}
 }
@@ -340,7 +343,7 @@ impl Replay {
 
 	async fn playlist(&self, kind: Kind, name: &str) -> String {
 		let rendition = self.rendition(kind, name);
-		tokio::time::timeout(Duration::from_secs(5), rendition.playlist(None))
+		tokio::time::timeout(Duration::from_secs(5), rendition.playlist(None, None))
 			.await
 			.expect("playlist renders")
 			.unwrap()
@@ -639,6 +642,89 @@ async fn history_mode_lists_a_durable_timeline_past_the_window() {
 			.await;
 		assert!(!playlist.contains("seg/29b1cd67.0.m4s\n"), "{playlist}");
 	}
+}
+
+/// A media-time range lists the overlapping durable segments, uses their source sequence, and
+/// becomes a VOD playlist once the requested end is covered. Independent edges agree.
+#[tokio::test(start_paused = true)]
+async fn range_playlist_clips_durable_history() {
+	let recording = bounded_segments(12).await;
+	let config = Config {
+		history: true,
+		..Config::default()
+	};
+	let first = Replay::open_with(&recording, 64 * 1024 * 1024, durable(), config.clone()).await;
+	let second = Replay::open_with(&recording, 64 * 1024 * 1024, durable(), config).await;
+	for replay in [&first, &second] {
+		replay
+			.playlist_until(Kind::Video, "1080p", |playlist| {
+				playlist.contains("seg/29b1cd67.11.m4s\n")
+			})
+			.await;
+	}
+	let range = super::Range::new(Duration::from_secs(5), Duration::from_secs(9)).unwrap();
+	let playlist = |replay: &Replay| {
+		replay
+			.rendition(Kind::Video, "1080p")
+			.range_playlist(range, Some("jwt=clip"))
+			.unwrap()
+			.unwrap()
+	};
+	let first_playlist = playlist(&first);
+	assert_eq!(first_playlist, playlist(&second));
+	assert!(first_playlist.contains("#EXT-X-MEDIA-SEQUENCE:2\n"), "{first_playlist}");
+	assert!(
+		first_playlist.contains("seg/29b1cd67.2.m4s?jwt=clip\n"),
+		"{first_playlist}"
+	);
+	assert!(
+		first_playlist.contains("seg/29b1cd67.4.m4s?jwt=clip\n"),
+		"{first_playlist}"
+	);
+	assert!(!first_playlist.contains("seg/29b1cd67.5.m4s"), "{first_playlist}");
+	assert!(first_playlist.ends_with("#EXT-X-ENDLIST\n"), "{first_playlist}");
+}
+
+/// An unsupported range is refused before waiting for media, so a server answers 416 rather than
+/// timing out.
+#[tokio::test(start_paused = true)]
+async fn range_playlist_refuses_non_durable_or_windowed_timelines() {
+	use futures::FutureExt;
+
+	let recording = bounded_segments(3).await;
+	let range = super::Range::new(Duration::ZERO, Duration::from_secs(2)).unwrap();
+	let windowed = Replay::open(&recording, 64 * 1024 * 1024, durable()).await;
+	assert!(matches!(
+		windowed
+			.rendition(Kind::Video, "1080p")
+			.playlist(Some(range), None)
+			.now_or_never(),
+		Some(Err(crate::Error::RangeUnavailable(_)))
+	));
+
+	let config = Config {
+		history: true,
+		..Config::default()
+	};
+	let live = Replay::open_with(&recording, 64 * 1024 * 1024, live(), config.clone()).await;
+	assert!(matches!(
+		live.rendition(Kind::Video, "1080p")
+			.playlist(Some(range), None)
+			.now_or_never(),
+		Some(Err(crate::Error::RangeNotDurable))
+	));
+
+	// A rendition without its own timeline would list only gaps.
+	let mut archive = durable();
+	archive.timelines.remove("360p");
+	let untimed = Replay::open_with(&recording, 64 * 1024 * 1024, archive, config).await;
+	assert!(matches!(
+		untimed
+			.rendition(Kind::Video, "360p")
+			.playlist(Some(range), None)
+			.now_or_never(),
+		Some(Err(crate::Error::RangeUnavailable(_)))
+	));
 }
 
 #[tokio::test(start_paused = true)]

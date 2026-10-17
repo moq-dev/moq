@@ -2070,7 +2070,7 @@ mod tests {
 	}
 
 	/// Invalid local configuration must end an unlimited reconnect loop without waiting.
-	#[cfg(all(feature = "noq", feature = "websocket"))]
+	#[cfg(all(feature = "quic", feature = "websocket"))]
 	#[tokio::test(start_paused = true)]
 	async fn an_unsupported_scheme_ends_unlimited_reconnects() {
 		let mut config = crate::connect::Config::default();
@@ -2088,7 +2088,7 @@ mod tests {
 	}
 
 	/// A URL host that parses but can never be a TLS server name ends an unlimited reconnect loop.
-	#[cfg(all(feature = "noq", feature = "websocket"))]
+	#[cfg(all(feature = "quic", feature = "websocket"))]
 	#[tokio::test(start_paused = true)]
 	async fn an_invalid_tls_server_name_ends_unlimited_reconnects() {
 		let mut config = crate::connect::Config::default();
@@ -2200,12 +2200,12 @@ mod tests {
 	///
 	/// Holding is what decides the transport race without depending on timing: the
 	/// QUIC dial cannot finish until the test says so.
-	#[cfg(all(feature = "websocket", feature = "noq"))]
+	#[cfg(all(feature = "websocket", feature = "quic"))]
 	struct Forwarder {
 		gate: tokio::sync::watch::Sender<bool>,
 	}
 
-	#[cfg(all(feature = "websocket", feature = "noq"))]
+	#[cfg(all(feature = "websocket", feature = "quic"))]
 	impl Forwarder {
 		async fn start(front: tokio::net::UdpSocket, server: std::net::SocketAddr) -> Self {
 			use std::sync::Arc;
@@ -2264,7 +2264,7 @@ mod tests {
 
 	/// When QUIC wins the race the WebSocket dial is cancelled at once: its socket
 	/// closes without carrying a session, and the one session runs over QUIC.
-	#[cfg(all(feature = "websocket", feature = "noq"))]
+	#[cfg(all(feature = "websocket", feature = "quic"))]
 	#[tokio::test]
 	async fn quic_winning_cancels_the_websocket_dial() {
 		use tokio::io::AsyncReadExt;

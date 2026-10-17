@@ -18,6 +18,5 @@ Public API: none beyond the binding changes owned by their quests. Wire: none.
 
 ## Required
 
-- [Codecs](/quest/m1/ffi-shape/codec.md) - the binding surface being packaged
 - [Client settings parity](/quest/m1/obs-client-config.md) - preserve existing OBS settings
 - [Session report parity](/quest/m1/obs-session-report.md) - preserve existing OBS reports
