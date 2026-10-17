@@ -293,7 +293,8 @@ in
       '';
 
       serviceConfig = {
-        Type = "simple";
+        # The relay reports ready only once it serves, which with ACME waits for issuance.
+        Type = "notify";
         User = cfg.user;
         Group = cfg.group;
 

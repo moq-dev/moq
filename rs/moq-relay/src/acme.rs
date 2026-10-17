@@ -271,8 +271,12 @@ impl Acme {
 	}
 
 	/// Renew in the background forever, keeping the current certificate serving through failures.
+	///
+	/// Never returns: the event stream is infinite, so its end panics, which stops
+	/// the relay through its critical tasks instead of silently ending renewal.
 	pub(crate) async fn run(mut self) {
-		while let Some(event) = self.state.next().await {
+		loop {
+			let event = self.state.next().await.expect("the ACME event stream ended");
 			match event {
 				Ok(EventOk::DeployedNewCert) => tracing::info!(domains = %self.domains, "renewed the ACME certificate"),
 				Ok(event) => tracing::debug!(?event, "ACME"),
