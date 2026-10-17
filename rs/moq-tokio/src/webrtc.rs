@@ -105,7 +105,7 @@ pub enum Error {
 	#[error("the data channel is already in use")]
 	Taken,
 
-	/// The channel's protocol is not a MoQ ALPN this endpoint speaks.
+	/// The protocol is not a MoQ ALPN this endpoint speaks, or the channel's is not the one signaling agreed.
 	#[error("unsupported MoQ protocol: {0:?}")]
 	Protocol(String),
 
@@ -270,9 +270,7 @@ impl Offerer {
 	}
 
 	async fn with_hosts(config: &Config, protocol: &str, hosts: Vec<IpAddr>) -> Result<(Self, Offer), Error> {
-		if protocol.is_empty() || protocol.contains(char::is_whitespace) {
-			return Err(Error::Protocol(protocol.to_string()));
-		}
+		let protocol = negotiated(protocol)?;
 		let socket = bind(&hosts)?;
 		let mut rtc = rtc(&socket.locals)?;
 
@@ -291,10 +289,7 @@ impl Offerer {
 			pending: Some(pending),
 		};
 		let peer = Peer::spawn(config, rtc, socket, role, None).await?;
-		let offerer = Self {
-			peer,
-			protocol: protocol.to_string(),
-		};
+		let offerer = Self { peer, protocol };
 		Ok((offerer, Offer(offer.to_sdp_string())))
 	}
 
@@ -344,15 +339,24 @@ impl Offerer {
 /// handle and any session over its data channel are gone.
 pub struct Answerer {
 	peer: Peer,
+	/// The MoQ ALPN the remote peer's channel must carry.
+	protocol: String,
 }
 
 impl Answerer {
-	/// Start a peer connection for the remote peer's offer, returning the answer to send.
-	pub async fn new(config: &Config, offer: &Offer) -> Result<(Self, Answer), Error> {
-		Self::with_hosts(config, offer, hosts()?).await
+	/// Start a peer connection for the remote peer's offer and MoQ `protocol`, the
+	/// ALPN the peers agreed through signaling, returning the answer to send.
+	pub async fn new(config: &Config, offer: &Offer, protocol: &str) -> Result<(Self, Answer), Error> {
+		Self::with_hosts(config, offer, protocol, hosts()?).await
 	}
 
-	async fn with_hosts(config: &Config, offer: &Offer, hosts: Vec<IpAddr>) -> Result<(Self, Answer), Error> {
+	async fn with_hosts(
+		config: &Config,
+		offer: &Offer,
+		protocol: &str,
+		hosts: Vec<IpAddr>,
+	) -> Result<(Self, Answer), Error> {
+		let protocol = negotiated(protocol)?;
 		let (sdp, mdns) = split_mdns(offer.as_str());
 		let max_message = max_message_size(offer.as_str())?;
 		let parsed = SdpOffer::from_sdp_string(&sdp).map_err(|err| Error::Sdp(err.to_string()))?;
@@ -366,7 +370,7 @@ impl Answerer {
 
 		let peer = Peer::spawn(config, rtc, socket, Role::Answerer, Some(max_message)).await?;
 		peer.resolve(mdns);
-		Ok((Self { peer }, Answer(answer.to_sdp_string())))
+		Ok((Self { peer, protocol }, Answer(answer.to_sdp_string())))
 	}
 
 	/// The next local candidate to send the remote peer, or `None` once gathering is done.
@@ -384,9 +388,22 @@ impl Answerer {
 		self.peer.add_candidate(candidate).await
 	}
 
+	/// The MoQ ALPN the remote peer's data channel must carry.
+	pub(crate) fn protocol(&self) -> &str {
+		&self.protocol
+	}
+
 	/// Wait for the remote peer's data channel to open, and take it.
 	pub(crate) async fn channel(&self) -> Result<Opened, Error> {
 		self.peer.channel().await
+	}
+}
+
+/// Check a MoQ ALPN agreed through signaling, as `@moq/p2p` does.
+fn negotiated(protocol: &str) -> Result<String, Error> {
+	match protocol.is_empty() || protocol.contains(char::is_whitespace) {
+		true => Err(Error::Protocol(protocol.to_string())),
+		false => Ok(protocol.to_string()),
 	}
 }
 

@@ -77,7 +77,9 @@ async fn transfer(offerer: &Offerer, answerer: &Answerer, payload: &[u8]) {
 async fn session_over_loopback() {
 	let config = Config::default();
 	let (offerer, offer) = Offerer::with_hosts(&config, protocol(), vec![LOOPBACK]).await.unwrap();
-	let (answerer, answer) = Answerer::with_hosts(&config, &offer, vec![LOOPBACK]).await.unwrap();
+	let (answerer, answer) = Answerer::with_hosts(&config, &offer, protocol(), vec![LOOPBACK])
+		.await
+		.unwrap();
 	offerer.accept(&answer).await.unwrap();
 
 	transfer(&offerer, &answerer, b"hello").await;
@@ -89,7 +91,9 @@ async fn session_over_loopback() {
 async fn large_frame_over_loopback() {
 	let config = Config::default();
 	let (offerer, offer) = Offerer::with_hosts(&config, protocol(), vec![LOOPBACK]).await.unwrap();
-	let (answerer, answer) = Answerer::with_hosts(&config, &offer, vec![LOOPBACK]).await.unwrap();
+	let (answerer, answer) = Answerer::with_hosts(&config, &offer, protocol(), vec![LOOPBACK])
+		.await
+		.unwrap();
 	offerer.accept(&answer).await.unwrap();
 
 	let payload: Vec<u8> = (0..1024 * 1024).map(|i| i as u8).collect();
@@ -100,7 +104,9 @@ async fn large_frame_over_loopback() {
 async fn channels() -> (Offerer, Answerer, Opened, Opened) {
 	let config = Config::default();
 	let (offerer, offer) = Offerer::with_hosts(&config, protocol(), vec![LOOPBACK]).await.unwrap();
-	let (answerer, answer) = Answerer::with_hosts(&config, &offer, vec![LOOPBACK]).await.unwrap();
+	let (answerer, answer) = Answerer::with_hosts(&config, &offer, protocol(), vec![LOOPBACK])
+		.await
+		.unwrap();
 	offerer.accept(&answer).await.unwrap();
 	let (sent, received) = tokio::time::timeout(TIMEOUT, async { tokio::join!(offerer.channel(), answerer.channel()) })
 		.await
@@ -203,7 +209,7 @@ async fn server_reflexive_candidate_is_offered_and_selected() {
 	let private = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 2));
 	let (mut offerer, offer) = Offerer::with_hosts(&config, protocol(), vec![private]).await.unwrap();
 	let offer = Offer::new(strip_candidates(offer.as_str()));
-	let (answerer, answer) = Answerer::with_hosts(&Config::default(), &offer, vec![LOOPBACK])
+	let (answerer, answer) = Answerer::with_hosts(&Config::default(), &offer, protocol(), vec![LOOPBACK])
 		.await
 		.unwrap();
 	offerer
@@ -237,6 +243,35 @@ async fn unsupported_protocol_is_refused() {
 	assert!(matches!(
 		client.connect_webrtc(&offerer).await,
 		Err(crate::Error::WebRtc(err)) if matches!(*err, Error::Protocol(_))
+	));
+}
+
+/// A channel carrying another supported ALPN than the one signaling agreed is refused.
+#[tokio::test]
+async fn unsignaled_protocol_is_refused() {
+	let versions = crate::connect::Config::default().versions();
+	let [agreed, other, ..] = versions.alpns()[..] else {
+		panic!("expected two supported ALPNs");
+	};
+	let config = Config::default();
+	let (offerer, offer) = Offerer::with_hosts(&config, other, vec![LOOPBACK]).await.unwrap();
+	let (answerer, answer) = Answerer::with_hosts(&config, &offer, agreed, vec![LOOPBACK])
+		.await
+		.unwrap();
+	offerer.accept(&answer).await.unwrap();
+
+	let listener = crate::listen::Config::default()
+		.init_streams()
+		.unwrap()
+		.listen()
+		.await
+		.unwrap();
+	let accepted = tokio::time::timeout(TIMEOUT, listener.accept_webrtc(&answerer))
+		.await
+		.expect("the channel did not open");
+	assert!(matches!(
+		accepted,
+		Err(crate::Error::WebRtc(err)) if matches!(&*err, Error::Protocol(protocol) if protocol == other)
 	));
 }
 
@@ -296,4 +331,34 @@ async fn ip_candidates_parse_without_mdns() {
 		.unwrap();
 	assert_eq!(candidate.addr(), "192.168.1.2:54321".parse().unwrap());
 	assert!(parse_candidate("candidate:2 1 udp nope").await.is_err());
+}
+
+/// Building a peer mutates its `Rtc` several times before the agent's first drain:
+/// a host candidate per address, then the channel or the answer. str0m wants a
+/// drain after each, which is a no-op while none of them queues output; pin that,
+/// so a str0m upgrade that changes it fails here.
+#[test]
+fn construction_queues_no_output() {
+	fn idle(rtc: &mut Rtc) {
+		assert!(matches!(rtc.poll_output(), Ok(str0m::Output::Timeout(_))));
+	}
+	fn host(rtc: &mut Rtc, addr: &str) {
+		let candidate = str0m::Candidate::host(addr.parse().unwrap(), "udp").unwrap();
+		rtc.add_local_candidate(candidate);
+		idle(rtc);
+	}
+
+	let mut offerer = Rtc::builder().build(Instant::now());
+	host(&mut offerer, "127.0.0.1:5000");
+	host(&mut offerer, "[::1]:5000");
+	let mut api = offerer.sdp_api();
+	api.add_channel(LABEL.to_string());
+	let (offer, _pending) = api.apply().unwrap();
+	idle(&mut offerer);
+
+	let mut answerer = Rtc::builder().build(Instant::now());
+	host(&mut answerer, "127.0.0.1:5001");
+	host(&mut answerer, "[::1]:5001");
+	answerer.sdp_api().accept_offer(offer).unwrap();
+	idle(&mut answerer);
 }

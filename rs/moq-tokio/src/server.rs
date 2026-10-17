@@ -882,21 +882,24 @@ impl Listener {
 	/// [`crate::webrtc::Answerer`], leaving admission to the returned [`Request`].
 	///
 	/// Waits for ICE and the channel to come up, bounded by the handshake timeout.
-	/// The channel's protocol must be a MoQ ALPN this server speaks. Returns
-	/// [`Error::Stopped`] once the listener is closing.
+	/// The channel must carry the answerer's protocol, a MoQ ALPN this server
+	/// speaks. Returns [`Error::Stopped`] once the listener is closing.
 	#[cfg(feature = "webrtc")]
 	pub async fn accept_webrtc(&self, peer: &crate::webrtc::Answerer) -> crate::Result<Request> {
 		use crate::webrtc::Error as WebRtcError;
 
 		let server = &self.server;
 		let active = server.activity.enter().ok_or(Error::Stopped)?;
+		if !server.versions.alpns().contains(&peer.protocol()) {
+			return Err(WebRtcError::Protocol(peer.protocol().to_string()).into());
+		}
 		let deadline = server
 			.timeout
 			.and_then(|timeout| tokio::time::Instant::now().checked_add(timeout));
 
 		let handshake = async {
 			let opened = peer.channel().await?;
-			if !server.versions.alpns().contains(&opened.protocol.as_str()) {
+			if opened.protocol != peer.protocol() {
 				return Err(WebRtcError::Protocol(opened.protocol));
 			}
 			let config = opened.config;
