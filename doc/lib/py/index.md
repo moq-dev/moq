@@ -73,7 +73,9 @@ async def main():
         audio.cut()   # audio has no keyframes, so this is what gives it groups
 
         # Or raw pixels, encoded inside the binding (VideoToolbox, Media Foundation, NVENC, openh264)
-        video = broadcast.encode_video(
+        catalog_producer = moq.media.CatalogProducer(broadcast)
+        video = moq.video.Producer(
+            catalog_producer,
             moq.VideoEncoderInput(format=moq.VideoPixelFormat.RGBA, width=1280, height=720, framerate=30),
             moq.VideoEncoderOutput(
                 codec=moq.VideoCodec.H264,
@@ -81,7 +83,7 @@ async def main():
                 kind=moq.VideoEncoderKind.AUTO(),  # pyright: ignore[reportArgumentType]
             ),
         )
-        video.write(moq.VideoFrame(timestamp_us=pts, data=rgba))
+        video.write(moq.video.Frame(timestamp=catalog_producer.now(), data=rgba))
 
         # Raw bytes and JSON
         events = broadcast.publish_track("events")
@@ -107,7 +109,7 @@ one to one; the API reference has the names.
 - **Context managers.** `async with` on a client or session awaits a graceful shutdown when the body exits cleanly, and cancels at once when it raises, so your exception survives.
 - **Audio needs cuts.** Video groups at its keyframes, but audio forms a group only where you call `cut()`: after every frame, or at a segment cadence to align with video.
 - **Live encoder timing.** After writing a frame you encoded yourself, call `flush(timestamp)` with the same timestamp so the catalog advertises your jitter. Skip it for file and network imports. On a seek or pause, call `discontinuity()`, then keep timestamps moving forward and resume video on a keyframe.
-- **Decoded frames hold decoder buffers.** Drop each frame from `decode_video` promptly, or the decoder stalls. `resize` is best effort, so read each frame's `width()` and `height()`.
+- **Decoded frames hold decoder buffers.** Drop each frame from a `moq.video.Consumer` promptly, or the decoder stalls. `resize` is best effort, so read each frame's `width()` and `height()`.
 - **Closing.** `await session.shutdown()` drains for up to one second and raises on failure. `cancel(code)` closes at once. Finish or abort live tracks first. Application delivery requires explicitly selecting `moq-lite-07-wip` on both peers; older Lite versions (including default lite-06) and IETF wait only for transport ACKs.
 - **Stats.** `session.stats()` reports `rtt`, `estimated_send_rate_bps`, `estimated_recv_rate_bps`, and the byte and packet counters (`bytes_sent`, `bytes_received`, `bytes_lost`, `packets_sent`, `packets_received`, `packets_lost`). A field is `None` when the transport does not report it, which is not the same as zero.
 - **Errors.** Read diagnostic payloads from `reason` and structured protocol failures from `details`.

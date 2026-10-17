@@ -315,6 +315,12 @@ impl Connection {
 		&self.shared.owner
 	}
 
+	/// Open a send group at `priority`, for streams to join with
+	/// [`SendStream::set_group`](super::SendStream::set_group).
+	pub fn send_group(&self, priority: i64) -> super::SendGroup {
+		super::SendGroup::new(self.shared.clone(), priority)
+	}
+
 	/// The peer's certificate chain in DER, leaf first, or `None` if it
 	/// presented none.
 	///
