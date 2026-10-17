@@ -235,7 +235,12 @@ async fn uring_workers_serve_every_configured_version() {
 
 	// moq-transport-14 and moq-lite-02 negotiate in the SETUP; 16 has its own
 	// ALPN but still a bidi SETUP; 22 reads its SETUP off a uni stream.
-	for name in ["moq-transport-22", "moq-transport-16", "moq-transport-14", "moq-lite-02"] {
+	for name in [
+		"moq-transport-22",
+		"moq-transport-16",
+		"moq-transport-14",
+		"moq-lite-02",
+	] {
 		for scheme in ["moql", "https"] {
 			let url: url::Url = format!("{scheme}://127.0.0.1:{port}/versions").parse().unwrap();
 			let (version, client) = pinned(name);

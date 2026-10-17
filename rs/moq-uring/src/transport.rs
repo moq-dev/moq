@@ -2,8 +2,8 @@
 mod adapter;
 mod pinned;
 pub use adapter::{Error, RecvStream, SendStream, Session};
-pub use pinned::Pinned;
 use adapter::{Grouped, GroupedSend};
+pub use pinned::Pinned;
 
 use crate::quic;
 
