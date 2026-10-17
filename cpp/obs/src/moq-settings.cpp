@@ -2,7 +2,6 @@
 #include "moq-settings.h"
 #include "logger.h"
 
-#include <algorithm>
 #include <cstring>
 #include <optional>
 #include <string>
@@ -47,14 +46,26 @@ const char *OptionalString(obs_data_t *settings, const char *key)
 	return (value && *value) ? value : nullptr;
 }
 
+// Keep the first reason a setting can't be applied, so Configure reports the earliest.
+void Refuse(std::string &error, std::string reason)
+{
+	if (error.empty())
+		error = std::move(reason);
+}
+
 // Resolve a tri-state choice (AUTO / "on" / "off") into an override, or nothing to leave
-// the choice to the transport.
-std::optional<bool> TriState(obs_data_t *settings, const char *key)
+// the choice to the transport. Any other stored value is refused.
+std::optional<bool> TriState(obs_data_t *settings, const char *key, std::string &error)
 {
 	const char *value = OptionalString(settings, key);
 	if (!value)
 		return std::nullopt;
-	return strcmp(value, "on") == 0;
+	if (strcmp(value, "on") == 0)
+		return true;
+	if (strcmp(value, "off") == 0)
+		return false;
+	Refuse(error, std::string("unknown ") + key + ": " + value);
+	return std::nullopt;
 }
 
 // A library default in microseconds, as the milliseconds the UI edits. moq-ffi reports
@@ -68,17 +79,24 @@ long long Millis(const std::optional<uint64_t> &us, const char *key)
 	return static_cast<long long>(*us / 1000);
 }
 
-// Read an integer setting inside the range declared by its Field. Scene collections
-// are editable JSON, so the widget bounds alone do not protect the unsigned API.
-uint64_t Amount(obs_data_t *settings, const char *key)
+// Read an integer setting, refusing one outside the range its Field declares. Scene
+// collections are editable JSON, so the widget bounds alone do not protect the unsigned
+// API, and clamping would turn a malformed value into a different setting: a negative
+// timeout into "wait forever".
+uint64_t Amount(obs_data_t *settings, const char *key, std::string &error)
 {
 	const long long value = obs_data_get_int(settings, key);
 	for (const Field &field : Fields()) {
-		if (strcmp(field.key, key) == 0)
-			return static_cast<uint64_t>(std::clamp(value, field.min, field.max));
+		if (strcmp(field.key, key) != 0)
+			continue;
+		if (value < field.min || value > field.max) {
+			Refuse(error, std::string(key) + " out of range: " + std::to_string(value));
+			return 0;
+		}
+		return static_cast<uint64_t>(value);
 	}
 
-	LOG_ERROR("Advanced integer setting has no Field: %s", key);
+	Refuse(error, std::string("advanced integer setting has no field: ") + key);
 	return 0;
 }
 
@@ -296,12 +314,14 @@ std::string Configure(obs_data_t *settings, moq::ClientConfig &config)
 	if (!settings || !obs_data_get_bool(settings, ENABLED))
 		return {}; // advanced off: the client keeps the library defaults
 
+	std::string error;
+
 	if (const char *version = OptionalString(settings, VERSION))
 		config.versions = {version};
 	if (const char *bind = OptionalString(settings, BIND))
 		config.bind = bind;
-	config.timeout_us = Amount(settings, CONNECT_TIMEOUT) * 1000;
-	config.race_us = Amount(settings, FAILOVER_DELAY) * 1000;
+	config.timeout_us = Amount(settings, CONNECT_TIMEOUT, error) * 1000;
+	config.race_us = Amount(settings, FAILOVER_DELAY, error) * 1000;
 
 	if (obs_data_get_bool(settings, TLS_DISABLE_VERIFY))
 		config.tls.insecure = true;
@@ -312,9 +332,9 @@ std::string Configure(obs_data_t *settings, moq::ClientConfig &config)
 	if (const char *host_name = OptionalString(settings, TLS_HOST_NAME))
 		config.tls.host_name = host_name;
 
-	config.backoff.initial_us = Amount(settings, BACKOFF_INITIAL) * 1000;
-	config.backoff.max_us = Amount(settings, BACKOFF_MAX) * 1000;
-	config.backoff.timeout_us = Amount(settings, BACKOFF_TIMEOUT) * 1000;
+	config.backoff.initial_us = Amount(settings, BACKOFF_INITIAL, error) * 1000;
+	config.backoff.max_us = Amount(settings, BACKOFF_MAX, error) * 1000;
+	config.backoff.timeout_us = Amount(settings, BACKOFF_TIMEOUT, error) * 1000;
 
 	// Automatic leaves the tri-states and the congestion family unset, which keeps the
 	// transport free to pick.
@@ -324,22 +344,26 @@ std::string Configure(obs_data_t *settings, moq::ClientConfig &config)
 		else if (strcmp(family, "loss") == 0)
 			config.quic.congestion_control = moq::CongestionControl::kLoss;
 		else
-			return std::string("unknown congestion control: ") + family;
+			Refuse(error, std::string("unknown congestion control: ") + family);
 	}
-	config.quic.max_streams = Amount(settings, QUIC_MAX_STREAMS);
-	config.quic.idle_timeout_us = Amount(settings, QUIC_IDLE_TIMEOUT) * 1000;
-	config.quic.keep_alive_us = Amount(settings, QUIC_KEEP_ALIVE) * 1000;
-	config.quic.gso = TriState(settings, QUIC_GSO);
-	config.quic.mtu_discovery = TriState(settings, QUIC_MTU_DISCOVERY);
+	config.quic.max_streams = Amount(settings, QUIC_MAX_STREAMS, error);
+	config.quic.idle_timeout_us = Amount(settings, QUIC_IDLE_TIMEOUT, error) * 1000;
+	config.quic.keep_alive_us = Amount(settings, QUIC_KEEP_ALIVE, error) * 1000;
+	config.quic.gso = TriState(settings, QUIC_GSO, error);
+	config.quic.mtu_discovery = TriState(settings, QUIC_MTU_DISCOVERY, error);
 	// A scene collection written by a qlog-capable build keeps the key even where the
-	// field is hidden, and applying it there would fail the dial for a setting the user
-	// can no longer see, let alone clear.
-	if (const char *qlog = OptionalString(settings, QUIC_QLOG); qlog && moq::qlog_supported())
-		config.quic.qlog = qlog;
+	// field is hidden. Refusing would block Go Live on a setting the user can no longer
+	// see, let alone clear, so the trace is skipped and the log says why.
+	if (const char *qlog = OptionalString(settings, QUIC_QLOG)) {
+		if (moq::qlog_supported())
+			config.quic.qlog = qlog;
+		else
+			LOG_WARNING("Skipping the qlog directory %s: this build cannot write qlog", qlog);
+	}
 
 	config.websocket.enabled = obs_data_get_bool(settings, WEBSOCKET_ENABLED);
-	config.websocket.delay_us = Amount(settings, WEBSOCKET_DELAY) * 1000;
-	return {};
+	config.websocket.delay_us = Amount(settings, WEBSOCKET_DELAY, error) * 1000;
+	return error;
 }
 
 } // namespace MoQSettings

@@ -79,7 +79,8 @@ void AddProperties(obs_properties_t *props);
 
 // Fill a client's config from these settings before the client is built.
 //
-// Returns why a setting can't be expressed in the config, or an empty string. Everything
+// Returns why a stored setting can't be expressed in the config, such as an unknown choice
+// or an integer outside its field's range, or an empty string. Everything
 // else is validated by moq-ffi when it builds the client: a value it rejects, such as a
 // bind address that doesn't parse, fails `moq::Client::init` with a `Config` error naming
 // it. Either way the caller should refuse to start rather than dial with a setting the

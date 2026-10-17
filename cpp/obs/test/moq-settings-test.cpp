@@ -208,6 +208,29 @@ int main()
 	}
 	printf("unknown congestion control refused: ok\n");
 
+	// An unknown tri-state refuses rather than reading as disabled.
+	{
+		obs_data settings;
+		MoQSettings::Defaults(&settings);
+		settings.bools["advanced"] = true;
+		settings.strings["quic_gso"] = "yes";
+		moq::ClientConfig config;
+		CHECK(MoQSettings::Configure(&settings, config) == "unknown quic_gso: yes");
+	}
+	printf("unknown tri-state refused: ok\n");
+
+	// An out-of-range integer refuses rather than clamping: a negative connect timeout
+	// would otherwise become 0, which waits forever.
+	{
+		obs_data settings;
+		MoQSettings::Defaults(&settings);
+		settings.bools["advanced"] = true;
+		settings.ints["connect_timeout_ms"] = -1;
+		moq::ClientConfig config;
+		CHECK(MoQSettings::Configure(&settings, config) == "connect_timeout_ms out of range: -1");
+	}
+	printf("out-of-range integer refused: ok\n");
+
 	moq::shutdown();
 	return g_failures == 0 ? 0 : 1;
 }
