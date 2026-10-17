@@ -707,6 +707,7 @@ export class Subscriber {
 		// Keep the request pending until SUBSCRIBE_OK supplies immutable track metadata.
 		// Group streams already wait on the alias, so early data stays behind this response.
 		const producer = hooks.pendingTrackProducer(request);
+		hooks.receiveTrack(producer);
 		const subscription: Subscription = { track: producer, tail: new Tail() };
 
 		// Open the stream and wait for SUBSCRIBE_OK under a timeout. State

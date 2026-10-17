@@ -23,6 +23,12 @@ let edge = match subscriber.poll_largest(&kio::Waiter::noop()) {
 };
 ```
 
+### A timed track refuses a group that rewinds (#5803)
+
+A local write whose first frame starts before a lower-sequence group's, or after a higher one's, fails with `TimestampMismatch`; `@moq/net` throws it the same way.
+Received groups are accepted as is, since their timestamps may be send times.
+A publisher whose timeline restarts, such as an HLS `EXT-X-DISCONTINUITY` that resets decode times, publishes a new broadcast instead.
+
 ### A bare track handle is not demand (#5820)
 
 Holding a `track::Consumer` sends nothing and no longer keeps the producer used.

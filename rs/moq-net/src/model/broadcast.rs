@@ -1656,6 +1656,36 @@ mod test {
 		);
 	}
 
+	/// A replacement continues the name's timeline, so its groups can't start before the
+	/// highest one an earlier producer checked, while a new broadcast starts over.
+	#[test]
+	fn replacement_refuses_a_rewind_past_its_predecessor() {
+		let at = |millis| crate::Timestamp::from_millis(millis).unwrap();
+		let producer = Info::new().produce();
+
+		let first = producer.create_track("media", crate::track::Info::timed()).unwrap();
+		let mut group = first.append_group().unwrap();
+		group.write_frame(at(1000), b"a".as_slice()).unwrap();
+		group.finish().unwrap();
+		drop((group, first));
+
+		let second = producer.create_track("media", crate::track::Info::timed()).unwrap();
+		let mut group = second.create_group(crate::group::Info { sequence: 1 }).unwrap();
+		assert!(matches!(
+			group.write_frame(at(500), b"b".as_slice()),
+			Err(Error::TimestampMismatch)
+		));
+		group.write_frame(at(1000), b"b".as_slice()).unwrap();
+
+		let next = Info::new().produce();
+		let track = next.create_track("media", crate::track::Info::timed()).unwrap();
+		track
+			.append_group()
+			.unwrap()
+			.write_frame(at(500), b"c".as_slice())
+			.unwrap();
+	}
+
 	/// Names requested but never served leave nothing behind, so a peer asking for
 	/// arbitrary names cannot grow the broadcast.
 	#[test]

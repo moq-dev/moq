@@ -99,7 +99,7 @@ pub struct MoqClientTls {
 /// one; `gso`, `mtu_discovery`, and `congestion_control` leave the choice to the backend.
 #[derive(Clone, Debug, Default, PartialEq, Eq, uniffi::Record)]
 pub struct MoqQuicConfig {
-	/// Cap on the concurrent QUIC streams the peer may open toward this endpoint.
+	/// Cap on the concurrent QUIC streams the peer may open toward this endpoint; 0 is refused.
 	///
 	/// MoQ opens a stream per group, and for a subscriber those arrive from the peer, so an
 	/// endpoint subscribing to many tracks wants this raised.

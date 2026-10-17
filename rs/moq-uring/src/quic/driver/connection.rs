@@ -362,25 +362,13 @@ impl Connection {
 		&self.handshake
 	}
 
-	/// Change the connection's flow-control limits; a raise reaches the peer
+	/// Change the flow-control limits `limits` sets; a raise reaches the peer
 	/// on the next packet.
 	///
-	/// Errors, changing nothing, on a stream limit past 2^60 or a receive window
-	/// past a QUIC varint, which a peer would refuse.
-	pub fn set_limits(&self, limits: crate::quic::Limits) -> Result<(), crate::Error> {
-		// A stream ID is a varint whose low two bits are its type (RFC 9000).
-		if limits.max_streams.get() > 1 << 60 {
-			return Err(crate::Error::StreamsRange);
-		}
-		let streams = VarInt::from_u64(limits.max_streams.get()).expect("checked above");
-		let window =
-			VarInt::from_u64(limits.receive_window.get()).map_err(|_| crate::Error::WindowRange("receive_window"))?;
-		let mut conn = self.shared.conn.borrow_mut();
-		conn.set_max_concurrent_streams(Dir::Bi, streams);
-		conn.set_max_concurrent_streams(Dir::Uni, streams);
-		conn.set_receive_window(window);
-		conn.set_send_window(limits.send_window.get());
-		drop(conn);
+	/// Errors, changing nothing, on limits [`Limits::validate`](crate::quic::Limits::validate)
+	/// refuses.
+	pub fn set_limits(&self, limits: crate::quic::Limits) -> Result<(), Error> {
+		self.shared.conn.borrow_mut().set_limits(limits)?;
 		self.shared.kick();
 		Ok(())
 	}

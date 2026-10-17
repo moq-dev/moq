@@ -2262,6 +2262,75 @@ mod tests {
 		}
 	}
 
+	/// Receive group 5 starting at 500ms over `version`, on a received timed track whose
+	/// group 4 starts at 1000ms, returning the stream's result and the track.
+	async fn receive_rewind(version: Version) -> (Result<(), Error>, track::Producer) {
+		use crate::transport::poll::Session as _;
+
+		let mut script = Vec::new();
+		let mut encoder = crate::coding::Encoder::new(&mut script, version.into());
+		lite::Group {
+			subscribe: 7,
+			sequence: 5,
+			frame_start: 0,
+		}
+		.encode(&mut encoder, version)
+		.unwrap();
+		// Frame 0 at 500ms: the first delta is absolute.
+		encoder.varint(crate::coding::varint::zigzag(500)).unwrap();
+		encoder.bytes(b"rewound").unwrap();
+		let mut session = crate::lite::test_transport::ScriptedSession::eof(script);
+		let subscriber = Subscriber::new(SubscriberConfig {
+			runtime: crate::time::sim(),
+			session: session.clone(),
+			origin: origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+			recv_bandwidth: None,
+			version,
+			peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Binding::InBand),
+			peer_hop: None,
+			cost: None,
+			going_away: Default::default(),
+			auth: crate::auth::Handle::new(false),
+		});
+
+		let track = track::Producer::new(
+			std::sync::Arc::new(crate::broadcast::Info::default()),
+			"video",
+			crate::track::Info::timed(),
+		);
+		track.received();
+		let mut before = track.create_group(4u64.into()).unwrap();
+		before
+			.write_frame(Timestamp::from_millis(1000).unwrap(), &b"before"[..])
+			.unwrap();
+		before.finish().unwrap();
+		subscriber.subscribes.lock().insert(
+			7,
+			TrackEntry {
+				producer: track.clone(),
+				timescale: Some(Timescale::MILLI),
+				tail: Default::default(),
+			},
+		);
+
+		let (_, recv) = session.open_bi().await.unwrap();
+		let mut group = GroupRecv::new(subscriber, Reader::new(recv, version));
+		let res = kio::wait(|waiter| group.poll_serve(waiter)).await;
+		(res, track)
+	}
+
+	/// A received timestamp may not be media time (lite-05/06 untimed tracks carry send
+	/// times), so a received group that rewinds is accepted at every version and the track
+	/// stays open. Only a local publisher's writes refuse a rewind.
+	#[moq_clock::test]
+	async fn a_received_rewind_is_accepted_at_every_version() {
+		for version in [Version::Lite05, Version::Lite06, Version::Lite07] {
+			let (res, track) = receive_rewind(version).await;
+			res.unwrap_or_else(|err| panic!("{version}: {err:?}"));
+			assert!(track.closed().now_or_never().is_none(), "{version}");
+		}
+	}
+
 	/// An idle copy that resubscribes gets its newest cached group again. That stream only
 	/// duplicates the cache, but lite-07's SUBSCRIBE_END still counts it, so the tail must
 	/// too, or the subscription waits out the grace before it ends.
@@ -5824,6 +5893,7 @@ impl<S: crate::transport::poll::Session> ServeLoop<S> {
 			false => request,
 		};
 		let serving = request.accept(info);
+		serving.received();
 		Self {
 			demand: serving.demand(),
 			serving,

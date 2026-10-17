@@ -524,13 +524,13 @@ mod test {
 			.unwrap();
 		let subscriber = track.subscribe(replaying());
 
-		// Publish sequence 1 before sequence 0, the way reordering delivers them.
+		// Publish sequence 1 before sequence 0, the way reordering delivers them. Each still
+		// starts after the one before it.
 		for sequence in [1u64, 0] {
 			let mut flate = crate::Encoder::new();
 			let mut group = track.create_group(moq_net::group::Info { sequence }).unwrap();
-			group
-				.write_frame(moq_net::Timestamp::now(), flate.frame(&[sequence as u8; 8]))
-				.unwrap();
+			let timestamp = moq_net::Timestamp::from_millis(sequence).unwrap();
+			group.write_frame(timestamp, flate.frame(&[sequence as u8; 8])).unwrap();
 			group.finish().unwrap();
 		}
 		track.finish().unwrap();

@@ -868,17 +868,17 @@ mod tests {
 			moq_mux::container::Consumer::new(subscriber, Container::Legacy(moq_mux::container::Kind::Video)),
 			Buffered(Vec::new()),
 		));
-		let picture = |index: u64| moq_mux::container::Frame {
+		let picture = |index: u64, keyframe: bool| moq_mux::container::Frame {
 			timestamp: moq_net::Timestamp::from_millis(index * 20).unwrap(),
 			duration: Some(moq_net::Timestamp::from_millis(20).unwrap()),
-			keyframe: index == 0,
+			keyframe,
 			payload: Bytes::from_static(b"picture"),
 		};
 		for index in 0..3 {
 			let mut pcm = packet(index, 0.25);
 			pcm.keyframe = index == 0;
 			audio.write(pcm).unwrap();
-			video.write(picture(index)).unwrap();
+			video.write(picture(index, index == 0)).unwrap();
 			tokio::time::sleep(PACKET_DURATION).await;
 		}
 		if audio_end {
@@ -889,12 +889,12 @@ mod tests {
 		}
 		for index in 0..3 {
 			if audio_end || index == 0 {
-				let mut pcm = packet(if audio_end { index } else { index + 3 }, 0.5);
+				let mut pcm = packet(index + 3, 0.5);
 				pcm.keyframe = index == 0;
 				audio.write(pcm).unwrap();
 			}
 			if video_end || index == 0 {
-				video.write(picture(if video_end { index } else { index + 3 })).unwrap();
+				video.write(picture(index + 3, video_end && index == 0)).unwrap();
 			}
 		}
 		if audio_end {
@@ -911,7 +911,7 @@ mod tests {
 					audio.write(packet(index, 0.5)).unwrap();
 				}
 				if !video_end {
-					video.write(picture(index)).unwrap();
+					video.write(picture(index, false)).unwrap();
 				}
 			}
 			tokio::task::yield_now().await;
@@ -1217,7 +1217,7 @@ mod tests {
 		video.discontinuity().unwrap();
 		// A burst longer than the age budget evicts this replacement's only keyframe.
 		for index in 0..15 {
-			video.write(picture(index * 20, index == 0)).unwrap();
+			video.write(picture(1_000 + index * 20, index == 0)).unwrap();
 		}
 		video.discontinuity().unwrap();
 		for index in 0..3 {

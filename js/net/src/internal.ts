@@ -174,6 +174,11 @@ export interface TrackSequence {
 	next: number;
 	/** Open producers writing through this namespace. */
 	holders: number;
+	/**
+	 * The highest-sequence checked group start any producer of the name wrote, which bounds a
+	 * replacement's groups the way the eviction watermark bounds a track's own.
+	 */
+	bound?: { sequence: number; start: Timestamp };
 }
 
 /**
@@ -239,6 +244,12 @@ export const hooks: {
 	 * any other second end. Mirrors the Rust `finish_at_pending`; assigned by `track.ts`.
 	 */
 	endTrack: (producer: Producer, end: Location) => void;
+	// pending: /quest/m1/public-model/ingest.md
+	/**
+	 * Mark a track as a session's copy of a remote one: its groups are never checked for a
+	 * rewind, since a received timestamp may not be media time.
+	 */
+	receiveTrack: (producer: Producer) => void;
 	/** Mint a track {@link Request}; assigned by `track.ts`. */
 	makeRequest: (options: TrackRequestOptions) => Request;
 	// pending: /quest/m1/public-model/ingest.md
@@ -293,6 +304,16 @@ export const hooks: {
 	 * Throws `ProtocolViolation` if a frame at or past the cap already exists.
 	 */
 	limitGroup: (group: GroupProducer, frames: number) => void;
+	/**
+	 * Check a group's first frame against a track it joined before the frame lands. `admit`
+	 * throws `TimestampMismatch` on a rewind, or returns the commit to run once every track
+	 * the group joined accepted it.
+	 */
+	admitGroupStart: (group: GroupProducer, admit: (start: Timestamp) => () => void) => void;
+	/** Return a group producer's first timestamp, if it already holds a frame. */
+	groupStart: (group: GroupProducer) => Timestamp | undefined;
+	/** Keep a mirror of a group accepted unverified below its track's eviction watermark out of media-time expiry. */
+	unverifyGroup: (group: GroupConsumer) => void;
 	/** Return a group's first timestamp, retained even after its first frame is read. */
 	groupTimestamp: (group: GroupConsumer) => Timestamp | undefined;
 	groupLatest: (group: GroupConsumer) => Timestamp | undefined;
@@ -326,6 +347,9 @@ export const hooks: {
 	/** Name the epoch of the route an origin resolved a broadcast handle through. */
 	stampEpoch: (target: BroadcastConsumer, epoch: Epoch.Valid | undefined) => void;
 } = {
+	receiveTrack: () => {
+		throw new Error("track.ts not loaded");
+	},
 	endTrack: () => {
 		throw new Error("track.ts not loaded");
 	},
@@ -372,6 +396,15 @@ export const hooks: {
 		throw new Error("group.ts not loaded");
 	},
 	limitGroup: () => {
+		throw new Error("group.ts not loaded");
+	},
+	admitGroupStart: () => {
+		throw new Error("group.ts not loaded");
+	},
+	groupStart: () => {
+		throw new Error("group.ts not loaded");
+	},
+	unverifyGroup: () => {
 		throw new Error("group.ts not loaded");
 	},
 	arriveGroup: () => {

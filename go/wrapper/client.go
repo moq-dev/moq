@@ -227,7 +227,7 @@ func WithResolutionDelay(delay time.Duration) ClientOption {
 }
 
 // WithQUICMaxStreams caps the concurrent QUIC streams the peer may open toward
-// this connection. MoQ opens a stream per group, and for a
+// this connection; 0 is refused. MoQ opens a stream per group, and for a
 // subscriber those arrive from the relay, so a client subscribing to many tracks
 // wants this raised. A publisher's own streams are bounded by the relay's
 // advertised limit, not this one. Ignored by the WebSocket fallback.
