@@ -588,11 +588,14 @@ impl Lease {
 	/// these ends only that credential's grant; the lease ends when no credential remains.
 	///
 	/// The session's [stats](Self::with_stats) record the end as a failure:
-	/// `expired` for an expired grant, `application` for any other.
+	/// `expired` for an expired grant, nothing for a shutdown, `application` for any other.
 	pub async fn ended(&mut self) -> lease::Reason {
 		let reason = self.uncovered().await;
-		self.stats
-			.fail(revoked(&reason).unwrap_or(moq_net::stats::Failure::Application));
+		// Any other reason here, the decider's own included, still ends a live session.
+		if reason != lease::Reason::Shutdown {
+			self.stats
+				.fail(revoked(&reason).unwrap_or(moq_net::stats::Failure::Application));
+		}
 		reason
 	}
 
@@ -1451,6 +1454,21 @@ mod outcome_tests {
 		let presence = registry.snapshot().sessions()[0].1;
 		assert_eq!(presence.sessions_failed.application, 1);
 		assert_eq!(presence.sessions_failed.expired, 0);
+		assert_eq!(presence.sessions_ended, 1);
+	}
+
+	#[tokio::test]
+	async fn a_lease_ended_by_shutdown_is_clean() {
+		let registry = moq_net::stats::Registry::new(Default::default());
+		let stats = registry.tier(Tier::default()).session("tenant");
+		let (producer, consumer) = lease::Producer::new(Grant::default());
+		let mut lease = Lease::new("/tenant", consumer).with_stats(stats.clone());
+		producer.revoke(lease::Reason::Shutdown);
+		let why = lease.ended().await;
+		lease.close(why, Bytes::default());
+		drop(stats);
+		let presence = registry.snapshot().sessions()[0].1;
+		assert_eq!(presence.sessions_failed, moq_net::stats::Failures::default());
 		assert_eq!(presence.sessions_ended, 1);
 	}
 
