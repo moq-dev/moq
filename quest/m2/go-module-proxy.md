@@ -43,6 +43,10 @@ and proxy.golang.org caches it like any other module.
 - Cutover is one table entry in `moq-dev/moq.dev`'s `worker/vanity.ts`: emit
   `mod https://go.moq.dev` for `/moq-ffi` and drop its `go-source` tag, since
   the generated `moq.go` lives in no repo.
+- Retarget the wrapper gate in `release-go.yml` before archiving: it looks
+  for the FFI tag and `go.mod` on the `moq-go-ffi` mirror, so a wrapper-only
+  release would defer forever. Query `moq.dev/moq-ffi/@v/<version>.mod` on
+  `go.moq.dev` instead, failing loudly on anything but a 200 or 404.
 - Verify from a clean module cache with both `GOPROXY=direct` and the default
   proxy, then archive `moq-dev/moq-go-ffi` without deleting it.
 - Decided: the `moq.dev/moq` wrapper is pure Go and stays on its git mirror.
