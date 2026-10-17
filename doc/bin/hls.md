@@ -45,6 +45,16 @@ missing groups from the Reader's stored timeline objects before following live
 edits. Missing or unreadable stored history ends that export with an error,
 and so does a recording whose start was pruned by retention.
 
+With `export::Config::history` enabled, a durable recording's media playlists
+also accept `start` and `end` query parameters in decimal media-time seconds.
+Both are required and name a half-open range, for example
+`media.m3u8?start=12.5&end=30`. The playlist includes every overlapping
+segment, widening its start to the preceding video sync point, and adds
+`EXT-X-ENDLIST` once media covers the requested end. It remains an event
+playlist while that end is still ahead of the live edge. A malformed range
+returns HTTP 400. A live-only timeline, pruned start, failed timeline, or range
+past a finished recording returns HTTP 416 instead of a partial clip.
+
 `--listen-tls-cert`/`--listen-tls-key` or `--listen-tls-generate` serve HTTPS,
 and `--cors-origin` opens it to browsers. See `moq export hls --help`.
 

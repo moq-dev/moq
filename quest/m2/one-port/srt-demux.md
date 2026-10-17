@@ -16,7 +16,7 @@ demuxed packets. That is more code, but it removes the dependency on
 upstream (now rosalyntg/srt-rs) has not been pushed since 2024-05, and its
 maintainer said they do not actively support it.
 
-The demux side is the flow table from [UDP demux](/quest/m1/p2p/udp-demux.md):
+The demux side is the flow table from [UDP demux](/quest/m2/p2p/udp-demux.md):
 a 4-tuple already pinned to WebRTC (ICE succeeded) is never tested for SRT.
 An unknown 4-tuple whose full SRT handshake header matches (control bit,
 type 0, and the SRT magic, not merely `80 00`) pins to SRT provisionally:
@@ -35,4 +35,4 @@ with a QUIC client active on the same port; a QUIC short header from a new
 
 ## Required
 
-- [UDP demux](/quest/m1/p2p/udp-demux.md)
+- [UDP demux](/quest/m2/p2p/udp-demux.md)

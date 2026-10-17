@@ -1,7 +1,7 @@
 /**
  * JSON catalog schema and types describing a broadcast's tracks: audio/video decoder configs for
  * WebCodecs, container format, and rendition layout, the `archive` entry and root `clock`,
- * plus the `json` and `binary` sections listing application data tracks that aren't media.
+ * plus the `json` and `binary` data sections and optional `stats` and `echo` discovery.
  *
  * @module
  */
@@ -25,6 +25,7 @@ export * from "./binary";
 export * from "./clock";
 export * from "./compression";
 export * from "./container";
+export * from "./echo";
 export * from "./format";
 export * from "./hex";
 export * from "./integers";
@@ -33,6 +34,7 @@ export * from "./mode";
 export * from "./path";
 export * from "./priority";
 export * from "./root";
+export * from "./stats";
 export * from "./text";
 export * from "./track";
 export type { VideoConfig } from "./video";

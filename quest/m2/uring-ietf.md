@@ -22,7 +22,7 @@ gap is in the worker's accept path, not in moq-net.
 - Serve the SETUP-negotiated lite versions the same way, or record why they
   stay refused; the operator-facing rule must be "the ring serves what the
   config lists".
-- `tests/runtime_uring.rs` gains an IETF session and a SETUP-negotiated
+- `tests/integration/runtime_uring.rs` gains an IETF session and a SETUP-negotiated
   session; both skip loudly below the kernel floor like the rest.
 - `doc/bin/relay/config.md` and the `moq-uring` README drop the lite-only
   caveat.

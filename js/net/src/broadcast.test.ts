@@ -1,10 +1,11 @@
 import { expect, setSystemTime, test } from "bun:test";
+import { Milli } from "@moq/clock";
 import { Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
 import { GroupTooLarge, NotFound } from "./error.ts";
 import { Producer as GroupProducer, MAX_GROUP_FRAMES } from "./group.ts";
 import { TrackSequences } from "./internal.ts";
 import { textFrame } from "./mock.ts";
-import { Milli, Timescale, Timestamp } from "./time.ts";
+import { Timescale, Timestamp } from "./time.ts";
 import type { Request as TrackRequest } from "./track.ts";
 import { wireOf } from "./wire.ts";
 
@@ -706,6 +707,27 @@ test("a fetch waits for a group still to come", async () => {
 	expect(group.sequence).toBe(1);
 	expect(await group.readString()).toBe("1");
 
+	broadcast.close();
+});
+
+test("fetch maxDelay tightens publisher retention without changing omission", async () => {
+	const broadcast = new BroadcastProducer();
+	const track = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: Milli(2000) });
+
+	for (const millis of [0, 1000]) {
+		const group = track.appendGroup();
+		group.writeFrame({
+			payload: new TextEncoder().encode(String(millis)),
+			timestamp: Timestamp.fromMillis(millis),
+		});
+		group.close();
+	}
+
+	const omitted = await wireOf(broadcast).fetchGroup("video", 0);
+	expect(omitted.sequence).toBe(0);
+	omitted.close();
+
+	await expect(wireOf(broadcast).fetchGroup("video", 0, { maxDelay: Milli(0) })).rejects.toBeInstanceOf(NotFound);
 	broadcast.close();
 });
 

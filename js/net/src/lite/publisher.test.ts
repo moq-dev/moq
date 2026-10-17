@@ -1,4 +1,5 @@
 import { expect, jest, mock, spyOn, test } from "bun:test";
+import { Milli } from "@moq/clock";
 import { Signal } from "@moq/signals";
 import type { Grant } from "../auth.ts";
 import { Producer as BroadcastProducer } from "../broadcast.ts";
@@ -11,7 +12,7 @@ import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { sendOrder } from "../priority.ts";
 import { Reader, Stream, Writer } from "../stream.ts";
-import { Milli, Timescale, Timestamp } from "../time.ts";
+import { Timescale, Timestamp } from "../time.ts";
 import { type AnnounceBroadcast, AnnounceRequest, decodeAnnounceBroadcast } from "./announce.ts";
 import { Fetch } from "./fetch.ts";
 import { Group as GroupMessage } from "./group.ts";
@@ -2043,6 +2044,54 @@ test("lite draft-06: a grant that shrinks mid-fetch resets the fetch", async () 
 	} finally {
 		resets.mockRestore();
 		group.close();
+		publisher.close();
+		client.close();
+		broadcast.close();
+		origin.close();
+	}
+});
+
+// A FIN would tell the requester the prefix it got is the whole group.
+test("lite draft-07: a fetch whose budget gives up partway resets as too old", async () => {
+	const pair = createMockTransportPair(ALPN_07_WIP);
+	const origin = new OriginProducer();
+	const publisher = new Publisher(pair.server, Version.DRAFT_07, randomHop(), origin.consume());
+	const broadcast = publish(origin, Path.from("live"));
+	const track = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const frame = (ms: number) => ({ payload: new TextEncoder().encode("x"), timestamp: Timestamp.fromMillis(ms) });
+	// Left open, so the fetch is still serving when the track runs on.
+	const open = new GroupProducer(0);
+	open.writeFrame(frame(0));
+	track.writeGroup(open);
+
+	const client = await Stream.open(pair.client, { version: Version.DRAFT_07 });
+	const server = await Stream.accept(pair.server, Version.DRAFT_07);
+	if (!server) throw new Error("publisher never accepted the fetch stream");
+
+	const resets = spyOn(Writer.prototype, "reset");
+	try {
+		const msg = new Fetch({
+			broadcast: Path.from("live"),
+			track: "video",
+			priority: 0,
+			maxDelay: Milli(500),
+			group: 0,
+		});
+		const serving = publisher.runFetch(msg, server);
+		// The first frame is on the wire before the track runs a second past its successor.
+		await client.reader.u8();
+		for (const ms of [1000, 2000]) {
+			const group = new GroupProducer(ms / 1000);
+			group.writeFrame(frame(ms));
+			group.close();
+			track.writeGroup(group);
+		}
+		await serving;
+
+		expect(resets.mock.calls.map(([reason]) => toStreamCode(reason as Error))).toContain(StreamCode.Old);
+	} finally {
+		resets.mockRestore();
+		open.close();
 		publisher.close();
 		client.close();
 		broadcast.close();

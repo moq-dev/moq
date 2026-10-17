@@ -48,8 +48,15 @@ pub struct Log {
 	streams: Arc<AtomicUsize>,
 	stops: Arc<Mutex<Vec<u32>>>,
 	closes: Arc<Mutex<Vec<(u32, String)>>>,
+	/// How long the trail and the stops were at the first session close.
+	closed_at: Arc<Mutex<Option<(usize, usize)>>>,
 	bi_opens: Arc<AtomicUsize>,
 	priorities: Arc<Mutex<Vec<u8>>>,
+	/// Hands each send group its id.
+	group_ids: Arc<AtomicUsize>,
+	groups: Arc<Mutex<Vec<(usize, i64)>>>,
+	joins: Arc<Mutex<Vec<(usize, usize)>>>,
+	orders: Arc<Mutex<Vec<(usize, i64)>>>,
 }
 
 /// One thing a send stream did, as recorded in [`Log::trail`].
@@ -58,6 +65,13 @@ pub enum Sent {
 	Write(Vec<u8>),
 	Finish,
 	Reset(u32),
+}
+
+/// What the streams sent ahead of the first session close. See [`Log::before_close`].
+#[derive(Debug)]
+pub struct BeforeClose {
+	pub trail: Vec<(usize, Sent)>,
+	pub stops: Vec<u32>,
 }
 
 impl Log {
@@ -94,10 +108,46 @@ impl Log {
 		self.priorities.lock().unwrap().clone()
 	}
 
+	/// Every send group's priority, as (group, priority) in call order: its opening, then
+	/// each move.
+	pub fn groups(&self) -> Vec<(usize, i64)> {
+		self.groups.lock().unwrap().clone()
+	}
+
+	/// Every send group a stream joined, as (stream, group) in call order.
+	pub fn joins(&self) -> Vec<(usize, usize)> {
+		self.joins.lock().unwrap().clone()
+	}
+
+	/// Every priority set on a stream in a send group, as (stream, priority) in call
+	/// order. [`Self::priorities`] keeps those of the streams outside every group.
+	pub fn orders(&self) -> Vec<(usize, i64)> {
+		self.orders.lock().unwrap().clone()
+	}
+
 	/// The session-level closes, as (code, reason). A list rather than a last-value so
 	/// a second close racing the first is visible.
 	pub fn closes(&self) -> Vec<(u32, String)> {
 		self.closes.lock().unwrap().clone()
+	}
+
+	/// The [`Self::trail`] and [`Self::stops`] up to the first session close, or `None`
+	/// before one. Nothing a stream sends after the close reaches the peer, so this is
+	/// what a peer sees ahead of the close.
+	pub fn before_close(&self) -> Option<BeforeClose> {
+		let (trail, stops) = (*self.closed_at.lock().unwrap())?;
+		Some(BeforeClose {
+			trail: self.trail()[..trail].to_vec(),
+			stops: self.stops()[..stops].to_vec(),
+		})
+	}
+
+	fn close(&self, code: u32, reason: &str) {
+		self.closed_at
+			.lock()
+			.unwrap()
+			.get_or_insert_with(|| (self.trail.lock().unwrap().len(), self.stops.lock().unwrap().len()));
+		self.closes.lock().unwrap().push((code, reason.to_owned()));
 	}
 
 	/// How many bidi streams the session has opened, so a test can pin down how many
@@ -123,6 +173,29 @@ pub struct SinkSend {
 	finished: bool,
 	/// A finished stream still parks, like a peer that has not acknowledged the FIN.
 	unacked_fin: bool,
+	/// The send group the stream joined.
+	group: Option<usize>,
+}
+
+/// A send group of a [`SinkSession::with_groups`], recording its moves in the [`Log`].
+#[derive(Clone)]
+pub struct SinkGroup {
+	id: usize,
+	log: Log,
+}
+
+impl SinkGroup {
+	fn open(log: Log, priority: i64) -> Self {
+		let id = log.group_ids.fetch_add(1, Ordering::Relaxed);
+		log.groups.lock().unwrap().push((id, priority));
+		Self { id, log }
+	}
+}
+
+impl poll::SendGroup for SinkGroup {
+	fn set_priority(&mut self, priority: i64) {
+		self.log.groups.lock().unwrap().push((self.id, priority));
+	}
 }
 
 impl SinkSend {
@@ -135,6 +208,7 @@ impl SinkSend {
 			park: kio::Park::default(),
 			finished: false,
 			unacked_fin: false,
+			group: None,
 		}
 	}
 
@@ -148,12 +222,14 @@ impl SinkSend {
 			park: kio::Park::default(),
 			finished: false,
 			unacked_fin: false,
+			group: None,
 		}
 	}
 }
 
 impl poll::SendStream for SinkSend {
 	type Error = SinkError;
+	type Group = SinkGroup;
 
 	fn poll_write(&mut self, cx: &mut Context<'_>, buf: &[u8]) -> Poll<Result<usize, Self::Error>> {
 		if self.prefix == 0
@@ -179,9 +255,18 @@ impl poll::SendStream for SinkSend {
 		Poll::Ready(Ok(buf.len()))
 	}
 
-	fn set_priority(&mut self, order: i32) {
-		let order = u8::try_from(order).expect("moq-net sends u8 send orders");
+	fn set_priority(&mut self, order: i64) {
+		if self.group.is_some() {
+			self.log.orders.lock().unwrap().push((self.id, order));
+			return;
+		}
+		let order = u8::try_from(order).expect("moq-net sends u8 send orders outside a group");
 		self.log.priorities.lock().unwrap().push(order);
+	}
+
+	fn set_group(&mut self, group: &Self::Group) {
+		self.group = Some(group.id);
+		self.log.joins.lock().unwrap().push((self.id, group.id));
 	}
 
 	fn finish(&mut self) -> Result<(), Self::Error> {
@@ -351,6 +436,10 @@ impl poll::Session for DeadStreamSession {
 		Poll::Ready(Ok(SinkSend::new(self.log.clone())))
 	}
 
+	fn send_group(&mut self, _: i64) -> Option<SinkGroup> {
+		None
+	}
+
 	fn poll_send_datagram(&mut self, _cx: &mut Context<'_>, _payload: &[u8]) -> Poll<Result<(), Self::Error>> {
 		Poll::Ready(Ok(()))
 	}
@@ -371,7 +460,7 @@ impl poll::Session for DeadStreamSession {
 	}
 
 	fn close(&mut self, code: u32, reason: &str) {
-		self.log.closes.lock().unwrap().push((code, reason.to_owned()));
+		self.log.close(code, reason);
 	}
 
 	fn poll_closed(&mut self, _cx: &mut Context<'_>) -> Poll<Self::Error> {
@@ -401,6 +490,8 @@ pub struct SinkSession {
 	uni_open_park: kio::Park,
 	/// Set by [`Self::with_unacked_fin`].
 	unacked_fin: bool,
+	/// Set by [`Self::with_groups`].
+	groups: bool,
 	/// The ALPN to report, for a test that needs a specific negotiated version rather
 	/// than the SETUP-negotiated fallback an absent one selects.
 	protocol: Option<&'static str>,
@@ -422,6 +513,12 @@ impl SinkSession {
 	/// finished group stays waiting on it.
 	pub fn with_unacked_fin(mut self) -> Self {
 		self.unacked_fin = true;
+		self
+	}
+
+	/// Open send groups, as native QUIC does, recording them in the log.
+	pub fn with_groups(mut self) -> Self {
+		self.groups = true;
 		self
 	}
 
@@ -539,6 +636,10 @@ impl poll::Session for SinkSession {
 		Poll::Ready(Ok(send))
 	}
 
+	fn send_group(&mut self, priority: i64) -> Option<SinkGroup> {
+		self.groups.then(|| SinkGroup::open(self.log.clone(), priority))
+	}
+
 	fn poll_send_datagram(&mut self, _cx: &mut Context<'_>, _payload: &[u8]) -> Poll<Result<(), Self::Error>> {
 		Poll::Ready(Ok(()))
 	}
@@ -559,7 +660,7 @@ impl poll::Session for SinkSession {
 	}
 
 	fn close(&mut self, code: u32, reason: &str) {
-		self.log.closes.lock().unwrap().push((code, reason.to_owned()));
+		self.log.close(code, reason);
 	}
 
 	fn poll_closed(&mut self, _cx: &mut Context<'_>) -> Poll<Self::Error> {
@@ -860,6 +961,10 @@ impl poll::Session for ScriptedSession {
 		Poll::Ready(Ok(SinkSend::new(self.log.clone())))
 	}
 
+	fn send_group(&mut self, _: i64) -> Option<SinkGroup> {
+		None
+	}
+
 	fn poll_send_datagram(&mut self, _cx: &mut Context<'_>, payload: &[u8]) -> Poll<Result<(), Self::Error>> {
 		self.log
 			.datagrams
@@ -885,7 +990,7 @@ impl poll::Session for ScriptedSession {
 	}
 
 	fn close(&mut self, code: u32, reason: &str) {
-		self.log.closes.lock().unwrap().push((code, reason.to_owned()));
+		self.log.close(code, reason);
 	}
 
 	fn poll_closed(&mut self, _cx: &mut Context<'_>) -> Poll<Self::Error> {

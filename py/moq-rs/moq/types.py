@@ -10,16 +10,7 @@ from moq_ffi import (
     MoqAudioCodec as AudioCodec,
 )
 from moq_ffi import (
-    MoqAudioDecoderOutput as AudioDecoderOutput,
-)
-from moq_ffi import (
     MoqAudioEncoderInput as AudioEncoderInput,
-)
-from moq_ffi import (
-    MoqAudioEncoderOutput as AudioEncoderOutput,
-)
-from moq_ffi import (
-    MoqAudioFrame as AudioFrame,
 )
 from moq_ffi import (
     MoqAudioSampleFormat as AudioSampleFormat,
@@ -55,9 +46,6 @@ from moq_ffi import (
     MoqVideoDecodedFrame as VideoDecodedFrame,
 )
 from moq_ffi import (
-    MoqVideoDecoderOutput as VideoDecoderOutput,
-)
-from moq_ffi import (
     MoqVideoEncoderInput as VideoEncoderInput,
 )
 from moq_ffi import (
@@ -67,7 +55,7 @@ from moq_ffi import (
     MoqVideoEncoderOutput as VideoEncoderOutput,
 )
 from moq_ffi import (
-    MoqVideoFrame as VideoFrame,
+    MoqVideoGop as VideoGop,
 )
 from moq_ffi import (
     MoqVideoPixelFormat as VideoPixelFormat,
@@ -78,11 +66,8 @@ from ._records import Backoff, ConnectionStats, Datagram, Frame, Subscription, T
 __all__ = [
     "Anchor",
     "AudioCodec",
-    "AudioDecoderOutput",
     "AudioEncoderInput",
-    "AudioEncoderOutput",
     "AudioSampleFormat",
-    "AudioFrame",
     "Backoff",
     "ConnectionStats",
     "ConnectionStatus",
@@ -100,9 +85,8 @@ __all__ = [
     "VideoCodec",
     "VideoEncoderInput",
     "VideoEncoderKind",
+    "VideoGop",
     "VideoEncoderOutput",
-    "VideoFrame",
     "VideoDecodedFrame",
-    "VideoDecoderOutput",
     "VideoPixelFormat",
 ]

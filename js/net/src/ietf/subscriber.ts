@@ -1,3 +1,4 @@
+import { Milli, Nano } from "@moq/clock";
 import { type Dispose, type GetPromise, type Getter, race, Signal } from "@moq/signals";
 import * as announce from "../announced.ts";
 import type { Grant } from "../auth.ts";
@@ -22,7 +23,7 @@ import { finalSequence, hiddenBelow, hooks, scopeCaptures, scopeHead, scopeOverl
 import * as Path from "../path.ts";
 import { type Cursor, Reader, type Stream } from "../stream.ts";
 import { Tail } from "../tail.ts";
-import { Milli, type Timescale, type Timestamp } from "../time.ts";
+import type { Timescale, Timestamp } from "../time.ts";
 import type * as track from "../track.ts";
 import { untilAborted } from "../util/abort.ts";
 import { LIMITS, type Limits, SlotMap, Slots } from "../util/limits.ts";
@@ -695,7 +696,7 @@ export class Subscriber {
 			// Returning demand keeps the same setup and its original deadline.
 			const accepted = withTimeout(
 				setup,
-				SUBSCRIBE_OK_TIMEOUT_MS,
+				Nano.fromMilli(Milli(SUBSCRIBE_OK_TIMEOUT_MS)),
 				`subscribe timed out after ${SUBSCRIBE_OK_TIMEOUT_MS}ms waiting for SUBSCRIBE_OK (browser stream limit reached?)`,
 			);
 			for (;;) {
@@ -1303,6 +1304,7 @@ export class Subscriber {
 				}
 
 				if (frame.endOfTrack) {
+					if (frame.hasProperties) throw new EndOfTrackProperties();
 					// No object at or past this location exists: after the group's last object
 					// the track ends with it, and at object 0 it ends before it.
 					if (producer && frame.idDelta !== 0) throw new ObjectIdGap(frame.idDelta);
@@ -1333,6 +1335,13 @@ export class Subscriber {
 			open().close();
 		} catch (err: unknown) {
 			const e = await sessionCause(this.#quic, err);
+			// The compact form names the subgroup by its first Object ID, so a nonzero one is
+			// subgroup N: stop the stream before any group exists for it.
+			if (producer === undefined && e instanceof ObjectIdGap && group.flags.hasSubgroupObject) {
+				console.warn(`subgroups are not supported: alias=${group.trackAlias} group=${group.groupId}`);
+				stream.stop(new Error("subgroups are not supported"));
+				return;
+			}
 			// The producer is still unopened only when the first object failed. On a draft
 			// with no FIRST_OBJECT bit, that non-zero delta is a headless group: drop the
 			// stream and leave the subscription up for the next group. Delivering the

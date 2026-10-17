@@ -31,12 +31,11 @@ cache becomes a range request on `Dynamic` rather than a group request.
   SUBSCRIBE zero-delay default. Preserve that distinction when translating
   FETCH into a range request. Sharing a range never relaxes a caller's
   budget or lets one expired caller cancel another still-valid reader.
-  [FETCH max-delay](/quest/m1/fetch-max-delay.md) owns the FETCH option and
-  enforcement; reuse its contract rather than restoring a historical exemption.
+  Reuse FETCH's optional per-reader budget and publisher clamp rather than
+  restoring a historical exemption.
 - Benchmark serving and filling over range count and span as separate axes,
   beside `track_subscription_ranges`, which covers aggregation.
 
 ## Related
 
 - [SUBSCRIBE_DROP](/quest/m1/subscribe-drop.md) - publishers name every group they won't deliver
-- [FETCH max-delay](/quest/m1/fetch-max-delay.md) - historical request budgets and per-caller enforcement

@@ -379,13 +379,13 @@ impl Subscription {
 	}
 }
 
-/// The most demanding request across subscribers, folded in one at a time.
-///
-/// Ranges are only collected per subscriber and merged once in [`Self::finish`], so an
-/// aggregate of many disjoint ranges costs one union rather than one per subscriber.
+/// The most demanding request across subscribers, folded in one at a time: the reference
+/// the track's counted aggregate is checked against.
+#[cfg(test)]
 #[derive(Default)]
 pub(super) struct Combined(Option<Subscription>);
 
+#[cfg(test)]
 impl Combined {
 	/// Fold in one subscriber's preferences.
 	pub(super) fn add(&mut self, sub: &Subscription) {

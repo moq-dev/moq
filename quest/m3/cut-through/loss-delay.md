@@ -13,7 +13,7 @@ production number that sizes the cut-through opportunity.
 Decided 2026-09-30: one monotonic byte counter, no hold-time histogram, on the
 ingress (`Role::Subscriber`) rows next to
 [publisher timeliness](/quest/m2/qos-publisher-timeliness.md)'s fields.
-Independent of the bench; it can start once `moq-quic` lands.
+Independent of the bench.
 
 - `moq-quic` counts per receive stream. The assembler stamps each chunk buffered past
   the contiguous frontier with its arrival time; when the frontier passes it,
@@ -39,10 +39,6 @@ Public API: an additive trait accessor. Wire: a new `moq-stats` field,
 additive on `main` since `Traffic` is `#[non_exhaustive]` and readers default
 missing fields.
 
-## Required
-
-- [Hard fork](/quest/m1/quic/fork/README.md) - the `moq-quic` assembler this counts in
-
 ## Related
 
-- [QoS](/quest/m1/qos/README.md) - the per-broadcast ingress conventions this follows
+- [QoS](/quest/m2/qos/README.md) - the per-broadcast ingress conventions this follows

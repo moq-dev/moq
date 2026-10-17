@@ -177,7 +177,9 @@ expires; under public rules or a client certificate it refuses them as
 
 A subscription or fetch that loses access resets with the `UNAUTHORIZED` stream
 code and the session stays up. A client that publishes outside its grant closes
-the session with `UNAUTHORIZED`, naming the path. moq-transport carries the same
+the session with `UNAUTHORIZED`, naming the path. A session whose last
+credential expires closes with `EXPIRED_AUTH_TOKEN` instead: refresh the token
+and reconnect, rather than treating the credential as invalid. moq-transport carries the same
 exchange on draft-17+ through the [MoQ Auth extension](/draft/moq-auth), limited
 to namespace prefixes. Older versions have no grant; the URL token keeps working
 everywhere.
@@ -195,7 +197,7 @@ Each subscription carries the knobs that decide behavior under congestion:
 
 | Knob | Effect |
 | --- | --- |
-| **Priority** (0..255) | Higher-priority tracks get bandwidth first. Audio above video, base layer above enhancement. |
+| **Priority** (0..255) | Higher-priority tracks get bandwidth first. Audio above video, base layer above enhancement. From a native Rust publisher over QUIC or WebTransport (iroh excepted), subscriptions at the same priority split stream bandwidth evenly by bytes, however many groups each has queued. Datagrams are not part of that split yet. |
 | **Order** | Which group to send first when several are pending. Newest first for live (the default), oldest first for catch-up. Needs moq-lite 07 or moq-transport; older moq-lite always sends newest first. |
 | **Max delay** | How long a non-latest group stays worth delivering before it is skipped. Zero means "live edge only", and raising it is also what asks for history. |
 | **Ranges** | Which groups to ask for: from a group, or a number of groups back from the latest, optionally up to an end. The default asks for everything max delay allows. Max delay still caps every range. |
@@ -239,6 +241,7 @@ zero keeps only the live edge. Relays preserve that declaration, and may still
 evict sooner under their own cache ceiling. Media tracks explicitly use 30
 seconds so a segmented egress can still find its segments. Retention ages a
 group by the same two clocks as max delay and always keeps the newest group.
+A fetch obeys the same window, and may name a tighter max delay of its own.
 IETF carries the same idea as `MAX_CACHE_DURATION`, measured in wall time alone.
 
 Put together, a conference might use:

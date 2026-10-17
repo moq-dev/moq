@@ -16,7 +16,8 @@ Decided in the 2026-09-30 plan:
 - **Scope is the Rust core plus adapters.** Port the prototype core and
   moq-dev/web-transport's TCP, TLS, WebSocket, and UDS adapters, ALPN
   negotiation, byte-stream framing, and socket stats (about 2.3k lines) onto
-  it, along with the `web-transport-trait` impl. The TypeScript `@moq/qmux`
+  it. Its session implements moq-net's `transport::poll` traits instead of
+  `web-transport-trait` ([Drop web-transport-trait](/quest/m2/drop-web-transport-trait.md)). The TypeScript `@moq/qmux`
   and `@moq/web-socket-stream` stay in moq-dev/web-transport with their own
   state machine and become the interop reference.
 - **All four wire versions stay**: draft-02, draft-01, draft-00, and the
@@ -44,8 +45,8 @@ receive-offset accessor, frame-iterator access, and limited datagram helper
 visibility. Review each exposure as a reusable internal boundary rather than
 making the whole QUIC connection public.
 
-`RESET_STREAM_AT` is a QUIC extension, not a qmux-specific frame. Once the
-reliable-reset quest lands, make qmux drive that shared send and receive state
+`RESET_STREAM_AT` is a QUIC extension, not a qmux-specific frame, and
+`moq-quic` now implements it (#5690). Make qmux drive that shared send and receive state
 instead of retaining the prototype's local parsing and transitions. Because
 qmux runs over a reliable ordered transport, serialization acknowledges the
 committed prefix immediately, but the receiver must still delay the reset
@@ -75,14 +76,6 @@ the uring runtime never unifies two copies of the stream state.
 
 Decided in the 2026-09-30 audit: moved to m2, since no m1 quest consumes it;
 the fork plan the same day kept it there.
-
-## Required
-
-- [Hard fork](/quest/m1/quic/fork/README.md) - qmux drives `moq-quic`
-- [Reliable stream reset](/quest/m1/quic/reliable-reset.md) - qmux reuses the
-  extension's stream state rather than implementing reset locally
-- [Hierarchical stream scheduling](/quest/m1/quic/scheduler.md) - qmux must
-  expose the same scheduling contract as native QUIC
 
 ## Related
 
