@@ -31,13 +31,6 @@ pub struct Color {
 	pub content_light: Option<ContentLight>,
 }
 
-impl Color {
-	/// True when no field is set, so the colour can be omitted.
-	pub fn is_empty(&self) -> bool {
-		self == &Self::default()
-	}
-}
-
 /// The colour volume of a mastering display, as SMPTE ST 2086.
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -130,7 +123,5 @@ mod test {
 			serde_json::to_value(&color).unwrap(),
 			serde_json::json!({ "matrix": 1 })
 		);
-		assert!(!color.is_empty());
-		assert!(Color::default().is_empty());
 	}
 }

@@ -55,9 +55,7 @@ impl Sps {
 			Err(_) => Err(Error::SpsParse),
 		}
 	}
-}
 
-impl Sps {
 	/// The colour the VUI's video signal type carries, when scuffle_h265 accepted the SPS.
 	pub(crate) fn color(&self) -> Option<hang::catalog::Color> {
 		let signal = &self.full.as_ref()?.vui_parameters.as_ref()?.video_signal_type;

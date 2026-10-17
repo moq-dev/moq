@@ -21,7 +21,7 @@ pub(crate) fn cicp(primaries: u8, transfer: u8, matrix: u8, full_range: Option<b
 	color.transfer = known(transfer, false);
 	color.matrix = known(matrix, true);
 	color.full_range = full_range;
-	(!color.is_empty()).then_some(color)
+	(color != Color::default()).then_some(color)
 }
 
 /// Fill the absent fields of `color` from `fallback`, a lower-precedence source named `source`.
