@@ -24,16 +24,12 @@ The hour split:
 Benchmarks are still being added to the group (#5663, #5675, #5698 since that
 run), so caching the shell alone leaves it close to the limit.
 
-Options, for the maintainer:
-
-1. Split the group in two matrix legs along profile lines (release
-   benches/tests vs the `test`-profile ignored tests), each with its own hour.
-   Recommended: it bounds each leg and keeps the shared-build rationale within
-   each leg.
-2. Raise this leg's `timeout-minutes`. Cheapest, but the group keeps growing
-   into whatever limit it gets.
-3. Rely on [the Nix cache](/quest/m0/ci/nix-cache.md) to recover the 13.5
-   minutes. Needed anyway, but not enough by itself.
+Decided: split the group into two matrix legs by build profile (release
+benches/tests vs the `test`-profile ignored tests), each with its own hour.
+That bounds each leg and keeps the shared-build rationale within each leg.
+Raising `timeout-minutes` alone lets the group grow into whatever limit it
+gets, and [the Nix cache](/quest/m0/ci/nix-cache.md) recovers the 13.5
+minutes but isn't enough by itself.
 
 ## Related
 
