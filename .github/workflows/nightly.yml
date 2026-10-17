@@ -90,6 +90,12 @@ jobs:
           - name: Audit
             recipe: rs audit
             uncached: true
+          # Uncached: the instrumented build bypasses mbx, so the cache can't serve it.
+          - name: moq-quic coverage
+            recipe: rs coverage moq-quic
+            uncached: true
+            artifact: moq-quic-coverage
+            artifact-path: target/coverage/moq-quic
           # OBS (over moq-ffi) and moq-c's C fixtures link a Rust staticlib from
           # outside cargo, so a stale `rs/moq-c/native-libs/*.txt` breaks them and
           # no cargo build. obs.yml's path filter can't list every such input;
