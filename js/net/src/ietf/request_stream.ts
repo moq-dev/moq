@@ -41,13 +41,17 @@ export async function refuseReserved(stream: Stream, version: IetfVersion): Prom
 	stream.close();
 }
 
-/** Whether a request stream has carried its one GOAWAY. @internal */
-export type GoAways = { seen: boolean };
+/**
+ * The GOAWAYs the peer sent on one request stream. `client` is our own role: only a server
+ * may name a new session.
+ * @internal
+ */
+export type GoAways = { client: boolean; seen: boolean };
 
 /**
  * Read the type of a request stream's next message, or undefined once the peer finishes.
- * From draft 18 on, the peer may send one GOAWAY on a request stream, consumed here; a second
- * is a protocol violation.
+ * From draft 18 on, the peer may send one GOAWAY on a request stream, consumed here; a second,
+ * or a client's naming a new session, is a protocol violation.
  * @internal
  */
 export async function nextMessage(reader: Reader, version: IetfVersion, goaway: GoAways): Promise<number | undefined> {
@@ -60,6 +64,8 @@ export async function nextMessage(reader: Reader, version: IetfVersion, goaway: 
 		// Draft-18's Request ID belongs on the control stream only.
 		const msg = await GoAway.decode(reader, version);
 		if (msg.requestId !== undefined) throw new ProtocolViolation("request stream GOAWAY carries a Request ID");
+		if (!goaway.client && msg.newSessionUri !== "")
+			throw new ProtocolViolation("client GOAWAY names a new session");
 	}
 }
 

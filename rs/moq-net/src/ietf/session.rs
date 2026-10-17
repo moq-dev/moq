@@ -3337,7 +3337,7 @@ mod tests {
 	///
 	/// Read off the transport, since a request task closes the session itself and the
 	/// scripted transport does not end the driver for it.
-	async fn serve_bidis(version: Version, payloads: Vec<Vec<u8>>) -> Option<SessionError> {
+	async fn serve_bidis(version: Version, client: bool, payloads: Vec<Vec<u8>>) -> Option<SessionError> {
 		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 		let session = crate::lite::test_transport::ScriptedSession::new(Vec::new()).with_incoming_bidis(payloads);
 		// The peer FINs each stream after its script, so a message it cuts short is malformed.
@@ -3349,8 +3349,7 @@ mod tests {
 			setup: None,
 			request_id_max: None,
 			limits: Default::default(),
-			// The peer is the server, so its Request IDs are odd.
-			client: true,
+			client,
 			publish: Some(origin.consume()),
 			subscribe: None,
 			peer_hop: None,
@@ -3423,7 +3422,7 @@ mod tests {
 				),
 				(truncated, SessionError::ProtocolViolation, "a body cut short by FIN"),
 			] {
-				let closed = serve_bidis(version, vec![payload]).await;
+				let closed = serve_bidis(version, true, vec![payload]).await;
 				assert_eq!(closed, Some(expected), "{version:?}: {why}");
 			}
 		}
@@ -3456,7 +3455,7 @@ mod tests {
 				subscribe_namespace_then(version, 3, &one),
 			];
 			assert!(
-				serve_bidis(version, distinct).await.is_none(),
+				serve_bidis(version, true, distinct).await.is_none(),
 				"{version:?}: a GOAWAY on each of two streams"
 			);
 
@@ -3466,8 +3465,36 @@ mod tests {
 				malformed.push((goaway(version, Some(0)), "a GOAWAY with a Request ID"));
 			}
 			for (after, why) in malformed {
-				let closed = serve_bidis(version, vec![subscribe_namespace_then(version, 1, &after)]).await;
+				let closed = serve_bidis(version, true, vec![subscribe_namespace_then(version, 1, &after)]).await;
 				assert_eq!(closed, Some(SessionError::ProtocolViolation), "{version:?}: {why}");
+			}
+		}
+	}
+
+	/// Only a server may name a new session in a request stream GOAWAY: a client that does
+	/// closes the session as a PROTOCOL_VIOLATION.
+	#[moq_net_sim::test]
+	async fn a_request_stream_goaway_redirects_only_from_a_server() {
+		for version in [Version::Draft18, Version::Draft21] {
+			let mut body = Vec::new();
+			ietf::GoAway {
+				new_session_uri: "https://example.com/moq".into(),
+				timeout: 0,
+				request_id: None,
+			}
+			.encode_msg(&mut crate::coding::Encoder::new(&mut body, version.into()), version)
+			.unwrap();
+			let redirect = frame(version, ietf::GoAway::ID, &body);
+
+			// A server's Request IDs are odd and a client's even.
+			for (client, request_id, expected) in [(true, 1, None), (false, 0, Some(SessionError::ProtocolViolation))] {
+				let closed = serve_bidis(
+					version,
+					client,
+					vec![subscribe_namespace_then(version, request_id, &redirect)],
+				)
+				.await;
+				assert_eq!(closed, expected, "{version:?}: served as client={client}");
 			}
 		}
 	}

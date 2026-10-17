@@ -557,7 +557,7 @@ export class Publisher {
 				unsubscribe = resolve;
 			});
 			const legacy = version === Version.DRAFT_14 || version === Version.DRAFT_15 || version === Version.DRAFT_16;
-			const goaway = { seen: false };
+			const goaway = { client: this.#session.client, seen: false };
 			const updates = (async () => {
 				for (;;) {
 					const type = await nextMessage(stream.reader, version, goaway).catch((err: unknown) => {
@@ -1164,7 +1164,7 @@ export class Publisher {
 		};
 
 		const ending = cancelled(stream, version);
-		const goaway = { seen: false };
+		const goaway = { client: this.#session.client, seen: false };
 		const readUpdate = () =>
 			namespaceUpdate(stream.reader, version, goaway).then(
 				(update) => ({ update }),

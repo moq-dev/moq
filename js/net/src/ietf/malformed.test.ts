@@ -291,6 +291,24 @@ for (const [requestId, code] of [
 }
 
 // Draft-18's GOAWAY Request ID belongs on the control stream only.
+for (const [version, alpn] of DRAFTS) {
+	test(`a client's request stream GOAWAY naming a new session closes ${alpn}`, async () => {
+		const logged = spyOn(console, "error").mockImplementation(() => undefined);
+		const { pair, stream, close } = await serving(version, alpn);
+		try {
+			await stream.writer.u53(SubscribeNamespace.id);
+			await new SubscribeNamespace({ requestId: 0n, namespace: Path.empty() }).encode(stream.writer, version);
+			expect(await stream.reader.u53()).toBe(RequestOk.id);
+			// New Session URI "a", then a zero timeout.
+			await stream.writer.write(frame(GoAway.id, [1, 0x61, 0]));
+			expect(await closeCode(pair.client)).toBe(SessionCode.ProtocolViolation);
+		} finally {
+			logged.mockRestore();
+			close();
+		}
+	});
+}
+
 test("a draft-18 request stream GOAWAY with a Request ID closes", async () => {
 	const logged = spyOn(console, "error").mockImplementation(() => undefined);
 	const { pair, stream, close } = await serving(Version.DRAFT_18, ALPN.DRAFT_18);

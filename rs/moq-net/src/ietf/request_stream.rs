@@ -124,7 +124,10 @@ impl Decode<Version> for Framed {
 #[derive(Debug)]
 pub(super) enum Next<T> {
 	Message(T),
-	GoAway,
+	/// `redirect` is whether it names a new session, which only a server may do.
+	GoAway {
+		redirect: bool,
+	},
 }
 
 impl<T: Decode<Version>> Decode<Version> for Next<T> {
@@ -136,23 +139,39 @@ impl<T: Decode<Version>> Decode<Version> for Next<T> {
 			let mut peek = r.clone();
 			if peek.varint()? == super::GoAway::ID {
 				*r = peek;
+				let msg = super::GoAway::decode(r, version)?;
 				// Draft-18's Request ID belongs on the control stream only.
-				if super::GoAway::decode(r, version)?.request_id.is_some() {
+				if msg.request_id.is_some() {
 					return Err(DecodeError::InvalidValue);
 				}
-				return Ok(Self::GoAway);
+				return Ok(Self::GoAway {
+					redirect: !msg.new_session_uri.is_empty(),
+				});
 			}
 		}
 		T::decode(r, version).map(Self::Message)
 	}
 }
 
-/// Note a GOAWAY on one request stream: the first is legal, and a second one closes the
-/// session (draft-21 section 9.2).
-pub(super) fn goaway(seen: &mut bool) -> Result<(), Error> {
-	match std::mem::replace(seen, true) {
-		true => Err(Error::ProtocolViolation),
-		false => Ok(()),
+/// The GOAWAYs the peer sent on one request stream (draft-21 section 9.2).
+pub(super) struct GoAways {
+	/// Our own role: a client's peer is a server, which may name a new session.
+	client: bool,
+	seen: bool,
+}
+
+impl GoAways {
+	pub fn new(client: bool) -> Self {
+		Self { client, seen: false }
+	}
+
+	/// Note a GOAWAY: the first is legal, but a second one, or a client naming a new
+	/// session, closes the session.
+	pub fn receive(&mut self, redirect: bool) -> Result<(), Error> {
+		if std::mem::replace(&mut self.seen, true) || (redirect && !self.client) {
+			return Err(Error::ProtocolViolation);
+		}
+		Ok(())
 	}
 }
 

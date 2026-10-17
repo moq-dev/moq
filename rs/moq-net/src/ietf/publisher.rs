@@ -372,11 +372,11 @@ impl<S: crate::transport::poll::Session> Target<S> {
 		}
 	}
 
-	/// `goaway` records whether the requester already sent a GOAWAY on this stream.
+	/// `goaways` checks each GOAWAY the requester sends on this stream.
 	fn poll_event(
 		&mut self,
 		finished: &mut bool,
-		goaway: &mut bool,
+		goaways: &mut super::request_stream::GoAways,
 		version: Version,
 		cx: &mut std::task::Context<'_>,
 	) -> Poll<NamespaceEvent> {
@@ -394,8 +394,8 @@ impl<S: crate::transport::poll::Session> Target<S> {
 		while !*finished {
 			match stream.reader.poll_decode_maybe::<Next<NamespaceUpdate>>(cx) {
 				Poll::Ready(Ok(Some(Next::Message(update)))) => return Poll::Ready(NamespaceEvent::Request(update)),
-				Poll::Ready(Ok(Some(Next::GoAway))) => {
-					if let Err(err) = super::request_stream::goaway(goaway) {
+				Poll::Ready(Ok(Some(Next::GoAway { redirect }))) => {
+					if let Err(err) = goaways.receive(redirect) {
 						return Poll::Ready(NamespaceEvent::Closed(Err(err)));
 					}
 				}
@@ -1311,8 +1311,7 @@ where
 		// carry no Request ID, so they must go out in the order the updates arrived. The stash is
 		// a FIFO bounded by MAX_REQUEST_UPDATES (counting the one being verified).
 		let mut renewal = request_update::Renewal::<super::request_stream::Update>::default();
-		// Whether the requester already sent a GOAWAY on this stream.
-		let mut goaway = false;
+		let mut goaways = super::request_stream::GoAways::new(self.control.client());
 
 		// What one turn of the loop resolved to.
 		enum Turn {
@@ -1382,8 +1381,8 @@ where
 									}
 									return Poll::Ready(Turn::Update(update));
 								}
-								Poll::Ready(Ok(Some(Next::GoAway))) => {
-									if let Err(err) = super::request_stream::goaway(&mut goaway) {
+								Poll::Ready(Ok(Some(Next::GoAway { redirect }))) => {
+									if let Err(err) = goaways.receive(redirect) {
 										return Poll::Ready(Turn::Malformed(err));
 									}
 								}
@@ -3330,7 +3329,7 @@ where
 		initial: Vec<crate::announce::Announce>,
 	) -> Result<(), Error> {
 		let mut finished = false;
-		let mut goaway = false;
+		let mut goaways = super::request_stream::GoAways::new(self.control.client());
 		let _withdrawing = self.withdrawal.register();
 		if self.withdrawal.poll(&kio::Waiter::noop()).is_ready() {
 			return Ok(());
@@ -3379,7 +3378,7 @@ where
 						return Poll::Ready(NamespaceEvent::Regrant(permit));
 					}
 					let mut cx = waiter.context();
-					if let Poll::Ready(event) = target.poll_event(&mut finished, &mut goaway, self.version, &mut cx) {
+					if let Poll::Ready(event) = target.poll_event(&mut finished, &mut goaways, self.version, &mut cx) {
 						return Poll::Ready(event);
 					}
 					if let Poll::Ready(next) = announced.poll_next(waiter) {
