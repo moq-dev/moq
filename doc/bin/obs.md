@@ -10,7 +10,7 @@ OBS Studio install.
 
 - **Publish**: Settings > Stream, choose "MoQ", enter the relay URL (with `?jwt=` if needed) and broadcast path, Start Streaming.
 - **Subscribe**: add a "MoQ Source", enter the relay URL and broadcast path, and the stream appears in the scene.
-- **Dock**: a **MoQ** dock with Go Live, encoding that uses the OBS Output settings or custom settings for this stream only, and live stats (RTT, bandwidth, loss).
+- **Dock**: a **MoQ** dock with Go Live, encoding that uses the OBS Output settings or custom settings for this stream only, and live stats (protocol, RTT, bandwidth, loss), and the reason while a stream reconnects.
 
 Each Start Streaming publishes a fresh epoch, shown in the dock's Stats tab.
 The client's automatic reconnects keep the same epoch. A stop/start, or an OBS

@@ -3294,6 +3294,7 @@ class MoqConnectionStats {
   final int? packetsSent;
   final int? packetsReceived;
   final int? packetsLost;
+  final String? version;
   MoqConnectionStats({
     this.rttUs,
     this.estimatedSendRateBps,
@@ -3304,6 +3305,7 @@ class MoqConnectionStats {
     this.packetsSent,
     this.packetsReceived,
     this.packetsLost,
+    this.version = null,
   });
 }
 
@@ -3359,6 +3361,11 @@ class FfiConverterMoqConnectionStats {
     );
     final packetsLost = packetsLost_lifted.value;
     new_offset += packetsLost_lifted.bytesRead;
+    final version_lifted = FfiConverterOptionalString.read(
+      Uint8List.view(buf.buffer, new_offset),
+    );
+    final version = version_lifted.value;
+    new_offset += version_lifted.bytesRead;
     return LiftRetVal(
       MoqConnectionStats(
         rttUs: rttUs,
@@ -3370,6 +3377,7 @@ class FfiConverterMoqConnectionStats {
         packetsSent: packetsSent,
         packetsReceived: packetsReceived,
         packetsLost: packetsLost,
+        version: version,
       ),
       new_offset - buf.offsetInBytes,
     );
@@ -3386,6 +3394,7 @@ class FfiConverterMoqConnectionStats {
         FfiConverterOptionalUInt64.allocationSize(value.packetsSent) +
         FfiConverterOptionalUInt64.allocationSize(value.packetsReceived) +
         FfiConverterOptionalUInt64.allocationSize(value.packetsLost) +
+        FfiConverterOptionalString.allocationSize(value.version) +
         0;
     final buf = Uint8List(total_length);
     write(value, buf);
@@ -3430,6 +3439,10 @@ class FfiConverterMoqConnectionStats {
       value.packetsLost,
       Uint8List.view(buf.buffer, new_offset),
     );
+    new_offset += FfiConverterOptionalString.write(
+      value.version,
+      Uint8List.view(buf.buffer, new_offset),
+    );
     return new_offset - buf.offsetInBytes;
   }
 
@@ -3443,6 +3456,7 @@ class FfiConverterMoqConnectionStats {
         FfiConverterOptionalUInt64.allocationSize(value.packetsSent) +
         FfiConverterOptionalUInt64.allocationSize(value.packetsReceived) +
         FfiConverterOptionalUInt64.allocationSize(value.packetsLost) +
+        FfiConverterOptionalString.allocationSize(value.version) +
         0;
   }
 }
@@ -11696,6 +11710,7 @@ abstract class MoqSessionInterface {
   Future<void> closed();
   int connects();
   MoqOriginConsumer consume();
+  MoqException? failure();
   MoqOriginProducer publish();
   Future<void> shutdown();
   MoqConnectionStats stats();
@@ -11783,6 +11798,17 @@ class MoqSession implements MoqSessionInterface {
         status,
       ),
       FfiConverterMoqOriginConsumer.lift,
+      null,
+    );
+  }
+
+  MoqException? failure() {
+    return rustCallWithLifter(
+      (status) => uniffi_moq_ffi_fn_method_moqsession_failure(
+        uniffiClonePointer(),
+        status,
+      ),
+      FfiConverterOptionalMoqException.lift,
       null,
     );
   }
@@ -13050,6 +13076,53 @@ class FfiConverterOptionalMoqDimensions {
     }
     buf[0] = 1;
     return FfiConverterMoqDimensions.write(
+          value,
+          Uint8List.view(buf.buffer, buf.offsetInBytes + 1),
+        ) +
+        1;
+  }
+}
+
+class FfiConverterOptionalMoqException {
+  static MoqException? lift(RustBuffer buf) {
+    return FfiConverterOptionalMoqException.read(buf.asUint8List()).value;
+  }
+
+  static LiftRetVal<MoqException?> read(Uint8List buf) {
+    if (ByteData.view(buf.buffer, buf.offsetInBytes).getInt8(0) == 0) {
+      return LiftRetVal(null, 1);
+    }
+    final result = FfiConverterMoqException.read(
+      Uint8List.view(buf.buffer, buf.offsetInBytes + 1),
+    );
+    return LiftRetVal<MoqException?>(result.value, result.bytesRead + 1);
+  }
+
+  static int allocationSize([MoqException? value]) {
+    if (value == null) {
+      return 1;
+    }
+    return FfiConverterMoqException.allocationSize(value) + 1;
+  }
+
+  static RustBuffer lower(MoqException? value) {
+    if (value == null) {
+      return toRustBuffer(Uint8List.fromList([0]));
+    }
+    final buf = Uint8List(
+      FfiConverterOptionalMoqException.allocationSize(value),
+    );
+    FfiConverterOptionalMoqException.write(value, buf);
+    return toRustBuffer(buf);
+  }
+
+  static int write(MoqException? value, Uint8List buf) {
+    if (value == null) {
+      buf[0] = 0;
+      return 1;
+    }
+    buf[0] = 1;
+    return FfiConverterMoqException.write(
           value,
           Uint8List.view(buf.buffer, buf.offsetInBytes + 1),
         ) +
@@ -16492,6 +16565,14 @@ external Pointer<Void> uniffi_moq_ffi_fn_method_moqsession_consume(
   Pointer<RustCallStatus> uniffiStatus,
 );
 
+@Native<RustBuffer Function(Pointer<Void>, Pointer<RustCallStatus>)>(
+  assetId: _uniffiAssetId,
+)
+external RustBuffer uniffi_moq_ffi_fn_method_moqsession_failure(
+  Pointer<Void> ptr,
+  Pointer<RustCallStatus> uniffiStatus,
+);
+
 @Native<Pointer<Void> Function(Pointer<Void>, Pointer<RustCallStatus>)>(
   assetId: _uniffiAssetId,
 )
@@ -17607,6 +17688,9 @@ external int uniffi_moq_ffi_checksum_method_moqsession_connects();
 external int uniffi_moq_ffi_checksum_method_moqsession_consume();
 
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
+external int uniffi_moq_ffi_checksum_method_moqsession_failure();
+
+@Native<Uint16 Function()>(assetId: _uniffiAssetId)
 external int uniffi_moq_ffi_checksum_method_moqsession_publish();
 
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
@@ -18268,6 +18352,9 @@ void _checkApiChecksums() {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqsession_consume() != 57909) {
+    throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
+  }
+  if (uniffi_moq_ffi_checksum_method_moqsession_failure() != 39419) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqsession_publish() != 15240) {

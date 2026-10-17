@@ -19,4 +19,3 @@ Public API: none beyond the binding changes owned by their quests. Wire: none.
 ## Required
 
 - [Generated C++ shape](/quest/m1/cpp-generated-shape.md) - the final generated names
-- [Session report parity](/quest/m1/obs-session-report.md) - preserve existing OBS reports
