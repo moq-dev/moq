@@ -37,7 +37,9 @@ pub enum Start {
 	///
 	/// What a live player wants. Without it a rebuilt decoder walks the whole
 	/// backlog at decode speed before reaching live media, which a viewer sees
-	/// as playback jumping backwards and then sprinting to catch up.
+	/// as playback jumping backwards and then sprinting to catch up. A
+	/// rendition with a catalog `warmup` also decodes the group before it, for
+	/// the max-delay decoder (see [`Consumer`]).
 	Latest,
 }
 
@@ -60,7 +62,8 @@ pub struct Options {
 	/// skipped. Defaults to [`std::time::Duration::ZERO`](std::time::Duration::ZERO)
 	/// (skip aggressively); set it to your playout buffer for a softer skip.
 	/// Applied to the transport subscription and inherited by
-	/// [`moq_mux::container::Consumer`].
+	/// [`moq_mux::container::Consumer`]. A rendition with a catalog `warmup`
+	/// runs a second decoder at this plus the warmup (see [`Consumer`]).
 	pub max_delay: std::time::Duration,
 }
 
@@ -96,10 +99,13 @@ pub struct Consumer {
 /// cancelled when the other lane wins, because a cancelled [`Sink`] call
 /// poisons the sink.
 enum Slot {
-	Idle(Reader),
-	Busy(Pin<Box<dyn Future<Output = (Reader, Result<Option<Frame>, Error>)> + Send>>),
+	Idle(Box<Reader>),
+	Busy(Step),
 	Closed,
 }
+
+/// A [`Reader::read`] in flight, handing the reader back with its result.
+type Step = Pin<Box<dyn Future<Output = (Box<Reader>, Result<Option<Frame>, Error>)> + Send>>;
 
 /// One subscription and the decoder it feeds.
 struct Reader {
@@ -159,7 +165,10 @@ impl Consumer {
 		Ok(Self {
 			name: min.decoder.name().to_owned(),
 			selector: Selector::new(max.is_some(), interval),
-			lanes: [Slot::Idle(min), max.map_or(Slot::Closed, Slot::Idle)],
+			lanes: [
+				Slot::Idle(Box::new(min)),
+				max.map_or(Slot::Closed, |max| Slot::Idle(Box::new(max))),
+			],
 		})
 	}
 

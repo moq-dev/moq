@@ -45,6 +45,13 @@ struct State {
 	done: bool,
 }
 
+impl State {
+	/// Done, with nothing left to show either.
+	fn exhausted(&self) -> bool {
+		self.done && self.queue.is_empty()
+	}
+}
+
 pub(super) struct Selector {
 	lanes: [State; 2],
 	source: Lane,
@@ -123,24 +130,23 @@ impl Selector {
 			// Max-delay pictures take over once that decoder has caught up to a
 			// min-delay picture, not merely decoded first: on a join it starts a
 			// sweep behind.
-			let caught_up = !max.done && min.newest.is_some() && max.newest >= min.newest;
-			let starved = min.done && min.queue.is_empty();
-			if caught_up || (starved && !max.done) {
+			let caught_up = !max.exhausted() && min.newest.is_some() && max.newest >= min.newest;
+			if caught_up || (min.exhausted() && !max.exhausted()) {
 				self.source = Lane::Max;
 			}
 		} else if let Some((held, at)) = min.queue.front() {
 			// A newer min-delay picture waits for the max-delay decoder to reach
 			// it, but never for longer than a frame: not when it already leads by
 			// more than that, not once a frame's worth of wall or media time has
-			// passed, and not after the max-delay decoder stops.
+			// passed, and not after the max-delay decoder has nothing left.
 			let held = Duration::from(held.timestamp);
 			let leads = max.newest.is_none_or(|newest| held > newest + interval);
 			let wall = now.saturating_duration_since(*at);
 			let media = min.newest.unwrap_or(held).saturating_sub(held);
-			if max.done || leads || wall.max(media) >= interval {
+			if max.exhausted() || leads || wall.max(media) >= interval {
 				self.source = Lane::Min;
 			}
-		} else if max.done {
+		} else if max.exhausted() {
 			self.source = Lane::Min;
 		}
 
@@ -152,7 +158,7 @@ impl Selector {
 			return Next::Frame(frame);
 		}
 
-		if self.lanes.iter().all(|state| state.done && state.queue.is_empty()) {
+		if self.lanes.iter().all(State::exhausted) {
 			return Next::End;
 		}
 
@@ -367,6 +373,16 @@ mod tests {
 		selector.push(Lane::Min, picture(33), now);
 		selector.finish(Lane::Min);
 		assert_eq!(drain(&mut selector, now), [0, 33]);
+		assert!(matches!(selector.next(now), Next::End));
+
+		// A lane that stopped still shows what it already decoded.
+		let mut selector = Selector::new(true, Some(FRAME));
+		selector.push(Lane::Min, picture(0), now);
+		assert_eq!(drain(&mut selector, now), [0]);
+		selector.finish(Lane::Min);
+		selector.push(Lane::Max, picture(33), now);
+		selector.finish(Lane::Max);
+		assert_eq!(drain(&mut selector, now), [33]);
 		assert!(matches!(selector.next(now), Next::End));
 	}
 
