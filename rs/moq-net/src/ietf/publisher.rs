@@ -3701,7 +3701,9 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 			return Ok(());
 		};
 		let mut subscription = self.track.subscription();
-		subscription.new_group = Some(request);
+		// Merged like requests from different subscribers, so a later, weaker request does
+		// not drop a stronger one still held.
+		subscription.new_group = subscription.new_group.max(Some(request));
 		self.track.update(subscription)
 	}
 
@@ -6266,13 +6268,13 @@ mod serve_tests {
 		}
 	}
 
-	/// A REQUEST_UPDATE carrying only a NEW_GROUP_REQUEST for `value`, framed for the
-	/// subscription's stream.
-	fn new_group_update(version: Version, value: u64) -> Vec<u8> {
+	/// A REQUEST_UPDATE with Request ID `id` carrying only a NEW_GROUP_REQUEST for `value`,
+	/// framed for the subscription's stream.
+	fn new_group_update(version: Version, id: u64, value: u64) -> Vec<u8> {
 		let mut body = Vec::new();
 		ietf::SubscribeUpdate {
 			new_group: Some(value),
-			request_id: RequestId(10),
+			request_id: RequestId(id),
 			subscription_request_id: matches!(version, Version::Draft15 | Version::Draft16).then_some(RequestId(0)),
 			start_location: Location { group: 0, object: 0 },
 			end_group: 0,
@@ -6356,7 +6358,7 @@ mod serve_tests {
 					..crate::track::Info::timed()
 				},
 			);
-			let mut session = ScriptedSession::new(new_group_update(version, 9));
+			let mut session = ScriptedSession::new(new_group_update(version, 10, 9));
 			let mut stream = Stream::open(&mut session, version).await.unwrap();
 			let mut serving = TrackServe::new(
 				h.session.clone(),
@@ -6383,13 +6385,49 @@ mod serve_tests {
 		}
 	}
 
+	/// A weaker request on the same subscription keeps the stronger one it still holds.
+	#[moq_net_sim::test]
+	async fn a_later_update_keeps_the_stronger_request() {
+		for version in [Version::Draft15, Version::Draft16, Version::Draft22] {
+			let h = serve_track(
+				version,
+				crate::track::Info {
+					dynamic_groups: true,
+					..crate::track::Info::timed()
+				},
+			);
+			let mut session =
+				ScriptedSession::new([new_group_update(version, 10, 9), new_group_update(version, 12, 0)].concat());
+			let mut stream = Stream::open(&mut session, version).await.unwrap();
+			let mut serving = TrackServe::new(
+				h.session.clone(),
+				h.track.subscribe(None),
+				RequestId(0),
+				version,
+				ServeRange::default(),
+				None,
+			);
+			let mut finished = false;
+			let mut run =
+				std::pin::pin!(
+					h.publisher
+						.run_subscription(&mut stream, &mut serving, &mut finished, async {}, None)
+				);
+			assert!(
+				futures::poll!(run.as_mut()).is_pending(),
+				"{version}: an update ended it"
+			);
+			assert_eq!(h.track.new_group(), Some(NewGroup { value: 9, first: 0 }), "{version}");
+		}
+	}
+
 	/// A track without DYNAMIC_GROUPS cannot honor a NEW_GROUP_REQUEST update, which fails
 	/// the subscription like any update it cannot apply.
 	#[moq_net_sim::test]
 	async fn a_new_group_update_without_dynamic_groups_fails() {
 		for version in [Version::Draft15, Version::Draft16, Version::Draft22] {
 			let h = serve(version);
-			let mut session = ScriptedSession::new(new_group_update(version, 9));
+			let mut session = ScriptedSession::new(new_group_update(version, 10, 9));
 			let mut stream = Stream::open(&mut session, version).await.unwrap();
 			let mut serving = TrackServe::new(
 				h.session.clone(),
