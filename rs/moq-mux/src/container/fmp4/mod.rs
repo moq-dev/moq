@@ -399,7 +399,12 @@ impl Container for Wire {
 			return Poll::Ready(Ok(Some(Vec::new())));
 		}
 
-		Poll::Ready(Ok(Some(decode(frame.payload, frame.timestamp, self.track()?)?)))
+		let frames = decode(frame.payload, frame.timestamp, self.track()?)?;
+		// An empty batch would read as a data track's marker, which only an object with no bytes is.
+		if frames.is_empty() && Container::kind(self) == crate::container::Kind::Data {
+			return Poll::Ready(Err(moq_net::Error::Decode(moq_net::DecodeError::ExpectedData).into()));
+		}
+		Poll::Ready(Ok(Some(frames)))
 	}
 }
 
