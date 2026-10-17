@@ -4506,6 +4506,298 @@ async fn server_client_roundtrip() {
 	server.cancel();
 }
 
+/// Subscribe to the first audio rendition in `broadcast`'s catalog.
+async fn subscribe_audio(broadcast: &MoqBroadcastConsumer) -> Arc<MoqMediaTrackConsumer> {
+	let catalogs = MoqMediaCatalogConsumer::subscribe(broadcast).await.unwrap();
+	let catalog = tokio::time::timeout(TIMEOUT, catalogs.next())
+		.await
+		.expect("timed out waiting for the catalog")
+		.unwrap()
+		.expect("expected a catalog");
+	let (id, config) = catalog.audio.iter().next().expect("an audio rendition");
+	MoqMediaTrackConsumer::subscribe(
+		broadcast,
+		MoqMediaTrackConfig {
+			rendition: MoqRendition::Audio {
+				id: id.clone(),
+				config: config.clone(),
+			},
+			subscription: None,
+		},
+	)
+	.await
+	.unwrap()
+}
+
+/// Write `payload` and read through `track` until it arrives, past what a new subscription
+/// starts with.
+async fn roundtrip(media: &MoqMediaTrackProducer, track: &MoqMediaTrackConsumer, payload: &[u8], timestamp_us: u64) {
+	media
+		.write_frame(MoqFrame {
+			payload: payload.to_vec(),
+			timestamp_us: Some(timestamp_us),
+		})
+		.unwrap();
+	loop {
+		let frame = tokio::time::timeout(TIMEOUT, track.next())
+			.await
+			.expect("timed out waiting for a frame")
+			.unwrap()
+			.expect("the track ended");
+		if frame.payload == payload {
+			return;
+		}
+	}
+}
+
+/// A replacement session from the same publisher re-announces every route while the old one
+/// is still open, as a GOAWAY drain does. Without an epoch that is another instance: the
+/// next `available()` hands it out, and reading it carries on past the old session's close.
+#[tokio::test]
+async fn announced_broadcast_follows_an_epochless_replacement() {
+	let server_origin = MoqOriginProducer::new(MoqOriginConfig::default());
+	let server = MoqServer::new(MoqServerConfig {
+		bind: Some("127.0.0.1:0".into()),
+		tls: localhost_tls(),
+		publish: Some(server_origin.clone()),
+		..Default::default()
+	})
+	.unwrap();
+	let addr = tokio::time::timeout(TIMEOUT, server.listen())
+		.await
+		.expect("listen timed out")
+		.expect("listen failed");
+	let url = format!("https://{addr}");
+	let accepting = server.clone();
+	let accept = tokio::spawn(async move {
+		let mut sessions = Vec::new();
+		while let Ok(Some(request)) = accepting.accept().await {
+			sessions.push(request.accept(None, None).await.expect("handshake failed"));
+		}
+		sessions
+	});
+
+	let broadcast = create_announced(&server_origin, "cam");
+	let media = MoqMediaTrackProducer::audio(
+		&broadcast,
+		MoqMediaTarget::Named { name: None },
+		audio_init(MoqAudioFormat::Opus, opus_head()),
+	)
+	.unwrap();
+
+	let viewer = MoqOriginProducer::new(MoqOriginConfig::default());
+	let connect = || async {
+		let client = MoqClient::new(MoqClientConfig {
+			tls: insecure_tls(),
+			bind: Some("127.0.0.1:0".into()),
+			consume: Some(viewer.clone()),
+			..Default::default()
+		})
+		.unwrap();
+		tokio::time::timeout(TIMEOUT, client.connect(url.clone()))
+			.await
+			.expect("connect timed out")
+			.expect("connect failed")
+	};
+
+	let first = connect().await;
+	let followed = viewer.consume().announced_broadcast("cam".into()).unwrap();
+	let old = tokio::time::timeout(TIMEOUT, followed.available())
+		.await
+		.expect("timed out waiting for the broadcast")
+		.unwrap();
+	let old_track = subscribe_audio(&old).await;
+	roundtrip(&media, &old_track, b"before", 1_000_000).await;
+
+	let second = connect().await;
+	let fresh = tokio::time::timeout(TIMEOUT, followed.available())
+		.await
+		.expect("the replacement was never handed out")
+		.unwrap();
+	first.shutdown().await.unwrap();
+
+	let fresh_track = subscribe_audio(&fresh).await;
+	roundtrip(&media, &fresh_track, b"after", 2_000_000).await;
+
+	media.finish().unwrap();
+	broadcast.close().unwrap();
+	second.shutdown().await.unwrap();
+	server.cancel();
+	drop(accept.await.unwrap());
+}
+
+/// A foreign cancel only drops the `available()` future, so a caller retrying after a timeout
+/// keeps the same handle. Dropped while the instance is covered but not yet served, the retry
+/// must still hand that instance out rather than wait for another.
+#[tokio::test]
+async fn announced_broadcast_retries_a_dropped_wait() {
+	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
+	let dynamic = serve(&origin, "");
+	let followed = origin.consume().announced_broadcast("live".into()).unwrap();
+
+	let waiting = followed.clone();
+	let dropped = tokio::spawn(async move { waiting.available().await });
+	let request = tokio::time::timeout(TIMEOUT, dynamic.requested_broadcast())
+		.await
+		.expect("the wait never asked for the broadcast")
+		.unwrap();
+	dropped.abort();
+	assert!(matches!(dropped.await, Err(err) if err.is_cancelled()));
+
+	let retry = tokio::spawn(async move { followed.available().await });
+	let served = MoqBroadcastProducer::new().unwrap();
+	request.accept(&served).unwrap();
+	tokio::time::timeout(TIMEOUT, retry)
+		.await
+		.expect("the retry waited for another instance")
+		.unwrap()
+		.unwrap();
+	served.close().unwrap();
+}
+
+/// Another instance taking over while `available()` resolves is the one it hands out, so the
+/// restart that announced it must not hand it out again while the caller holds it. `dynamic_at`
+/// is where the route the wait first resolves through covers the path: above it, the takeover's
+/// restart lands while resolving; at it, the origin holds that restart for
+/// [`moq_net::origin::DEFAULT_UPDATE_HOLD`].
+async fn announced_broadcast_hands_out_a_takeover_once(dynamic_at: &str) {
+	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
+	let dynamic = serve(&origin, dynamic_at);
+	let followed = origin.consume().announced_broadcast("live".into()).unwrap();
+
+	let waiting = followed.clone();
+	let first = tokio::spawn(async move { waiting.available().await });
+	// The wait is on the dynamic route's answer when the exact path takes over without an epoch.
+	let _unanswered = tokio::time::timeout(TIMEOUT, dynamic.requested_broadcast())
+		.await
+		.expect("the wait never asked for the broadcast")
+		.unwrap();
+	let takeover = create_announced(&origin, "live");
+	let _held = tokio::time::timeout(TIMEOUT, first)
+		.await
+		.expect("the takeover never resolved")
+		.unwrap()
+		.unwrap();
+
+	let next = tokio::spawn(async move { followed.available().await });
+	tokio::time::sleep(moq_net::origin::DEFAULT_UPDATE_HOLD * 2).await;
+	assert!(!next.is_finished(), "the takeover was handed out twice");
+	next.abort();
+	takeover.close().unwrap();
+}
+
+#[tokio::test]
+async fn announced_broadcast_hands_out_a_takeover_once_while_resolving() {
+	announced_broadcast_hands_out_a_takeover_once("").await;
+}
+
+#[tokio::test]
+async fn announced_broadcast_hands_out_a_held_takeover_once() {
+	announced_broadcast_hands_out_a_takeover_once("live").await;
+}
+
+/// An end is a gap that ended every request on the old route, even when a route above the path
+/// with the same epoch carries the instance on. So the instance serving the path afterwards is
+/// handed out again, though it is the one the caller still holds.
+#[tokio::test]
+async fn announced_broadcast_hands_out_the_instance_again_after_an_end() {
+	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
+	let followed = origin.consume().announced_broadcast("live".into()).unwrap();
+	let route = MoqRoute {
+		epoch: Some(moq_mint_epoch()),
+		..Default::default()
+	};
+	let broadcast = origin.create_broadcast("live".into()).unwrap();
+	broadcast.announce(route.clone()).unwrap();
+	let first = tokio::time::timeout(TIMEOUT, followed.available())
+		.await
+		.expect("timed out waiting for the broadcast")
+		.unwrap();
+
+	let dynamic = origin.dynamic("".into(), route).unwrap();
+	broadcast.unannounce().unwrap();
+	let again = tokio::spawn(async move { followed.available().await });
+	let request = tokio::time::timeout(TIMEOUT, dynamic.requested_broadcast())
+		.await
+		.expect("the instance never asked the route above the path")
+		.unwrap();
+	let served = MoqBroadcastProducer::new().unwrap();
+	request.accept(&served).unwrap();
+
+	let again = tokio::time::timeout(TIMEOUT, again)
+		.await
+		.expect("the instance was never handed out again")
+		.unwrap()
+		.unwrap();
+	assert!(
+		again.inner().is_clone(first.inner()),
+		"the route above did not carry the instance on"
+	);
+	served.close().unwrap();
+	broadcast.close().unwrap();
+}
+
+/// The route a wait resolves through leaving, and another instance arriving before it resolves,
+/// reach the follower as an end and a start after the wait hands the newcomer out. That start
+/// must not hand it out again.
+#[tokio::test]
+async fn announced_broadcast_hands_out_a_gap_while_resolving_once() {
+	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
+	let dynamic = serve(&origin, "");
+	let followed = origin.consume().announced_broadcast("live".into()).unwrap();
+
+	let waiting = followed.clone();
+	let first = tokio::spawn(async move { waiting.available().await });
+	let _unanswered = tokio::time::timeout(TIMEOUT, dynamic.requested_broadcast())
+		.await
+		.expect("the wait never asked for the broadcast")
+		.unwrap();
+	dynamic.cancel();
+	tokio::time::sleep(moq_net::origin::DEFAULT_UPDATE_HOLD * 2).await;
+	let arrival = create_announced(&origin, "live");
+	let _held = tokio::time::timeout(TIMEOUT, first)
+		.await
+		.expect("the arrival never resolved")
+		.unwrap()
+		.unwrap();
+
+	let next = tokio::spawn(async move { followed.available().await });
+	tokio::time::sleep(moq_net::origin::DEFAULT_UPDATE_HOLD * 2).await;
+	assert!(!next.is_finished(), "the arrival was handed out twice");
+	next.abort();
+	arrival.close().unwrap();
+}
+
+/// A handle the caller dropped no longer counts as handed out, so the restart that names it
+/// hands it out again rather than leaving the caller with nothing.
+#[tokio::test]
+async fn announced_broadcast_hands_out_a_dropped_takeover_again() {
+	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
+	let dynamic = serve(&origin, "live");
+	let followed = origin.consume().announced_broadcast("live".into()).unwrap();
+
+	let waiting = followed.clone();
+	let first = tokio::spawn(async move { waiting.available().await });
+	let _unanswered = tokio::time::timeout(TIMEOUT, dynamic.requested_broadcast())
+		.await
+		.expect("the wait never asked for the broadcast")
+		.unwrap();
+	let takeover = create_announced(&origin, "live");
+	drop(
+		tokio::time::timeout(TIMEOUT, first)
+			.await
+			.expect("the takeover never resolved")
+			.unwrap()
+			.unwrap(),
+	);
+
+	tokio::time::timeout(TIMEOUT, followed.available())
+		.await
+		.expect("the dropped takeover was never handed out again")
+		.unwrap();
+	takeover.close().unwrap();
+}
+
 #[tokio::test]
 async fn server_client_roundtrip_auto_origin() {
 	// Same shape as `server_client_roundtrip` but the client config omits

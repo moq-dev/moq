@@ -98,6 +98,10 @@ if (auto catalog = ok(catalogs->next().get())) {   // std::nullopt once the cata
 }
 ```
 
+Call `available()` again to wait for the next publisher instance at that path, such as a
+restarted publisher, and drop what was read from the previous one then: its tracks end
+when its session does.
+
 `MediaTrackConsumer` reads in decode order. For arrival-order reads, decode each group
 from `TrackConsumer::recv_group` with `moq::MediaGroupConsumer::init(group, container)`;
 frames carry container media time as they land.

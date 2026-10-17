@@ -496,6 +496,12 @@ These land with the next breaking release, not the 2026-09-23 train.
   pin to cores unless `--runtime-pin`, `MOQ_RUNTIME_PIN`, or `runtime.pin` is
   true, since every process pinned to the same first cores. Set it to keep
   pinning a relay that has the machine to itself.
+- **`moq_origin_announced_broadcast` delivers every publisher instance.** Its
+  callback gets a new broadcast handle each time another instance takes over
+  the path or the broadcast returns, and its terminal `0` only on cancel. Free
+  each handle with `moq_consume_close` once its successor arrives. A binding's
+  `AnnouncedBroadcast.available()` works the same way, and its first call is
+  unchanged.
 
 ## Wire
 

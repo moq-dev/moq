@@ -367,8 +367,8 @@ func (c *Client) Announced(options AnnounceOptions) (*AnnounceConsumer, error) {
 	return c.consumer.Announced(options)
 }
 
-// AnnouncedBroadcast waits for a route covering path, then resolves the
-// broadcast there.
+// AnnouncedBroadcast follows path, resolving each publisher instance that serves
+// it.
 func (c *Client) AnnouncedBroadcast(path string) (*AnnouncedBroadcast, error) {
 	return c.consumer.AnnouncedBroadcast(path)
 }
