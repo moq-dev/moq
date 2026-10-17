@@ -1203,6 +1203,8 @@ export class Subscriber {
 	// Every group sequence this reader handed out, so a re-created group or one a second route
 	// delivers is handed out once.
 	#delivered = new Delivered();
+	// Whether a resumed reader has read groups, so a datagram read keeps copies they still need.
+	#groupsRead = false;
 	#nextSequence = 0;
 	#cursor = new Signal<{ start: number; end?: number }>({ start: 0 });
 	// A FETCH's own budget in place of the subscription's; unlike SUBSCRIBE's zero
@@ -1693,6 +1695,7 @@ export class Subscriber {
 	// A group from the routes' copies; see #resume.
 	#tryResumed(ordered: boolean): Recv {
 		const resume = this.#resume as ResumeSource;
+		this.#groupsRead = true;
 		const closed = this.#state.closed.peek();
 		if (closed instanceof Error) return { kind: "error", error: closed };
 		if (closed !== undefined) return { kind: "done" };
@@ -1795,7 +1798,7 @@ export class Subscriber {
 			datagram.sequence >= start && (end === undefined || datagram.sequence < end);
 		if (this.#resume) {
 			for (;;) {
-				const recv = this.#resume.tryDatagram();
+				const recv = this.#resume.tryDatagram(this.#groupsRead ? this.#delivered : undefined);
 				if (recv.kind !== "datagram" || inRange(recv.datagram)) return recv;
 			}
 		}

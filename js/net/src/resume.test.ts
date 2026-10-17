@@ -500,3 +500,64 @@ test("a failed group on a route whose replacement was refused ends with the refu
 	a.close();
 	b.close();
 });
+
+test("draining groups to their end leaves buffered datagrams readable", async () => {
+	const front = new Front();
+	const a = new BroadcastProducer();
+	const ta = copy(a);
+	front.serve(a.consume());
+	const sub = front.consumer.track("seq").subscribe();
+	ta.write(0);
+	ta.producer.appendDatagram(undefined, enc.encode("d"));
+	ta.producer.close();
+	expect(drain(sub)).toEqual([0]);
+	expect(await sub.recvGroup()).toBeUndefined();
+	expect(dec.decode((await sub.recvDatagram())?.payload)).toBe("d");
+
+	sub.close();
+	front.consumer.close();
+	a.close();
+});
+
+test("a datagram read keeps a replaced copy a group reader still needs", async () => {
+	const front = new Front();
+	const a = new BroadcastProducer();
+	const b = new BroadcastProducer();
+	const ta = copy(a);
+	copy(b);
+	front.serve(a.consume());
+	const sub = front.consumer.track("seq").subscribe({ maxDelay: 10_000 as track.Subscription["maxDelay"] });
+	ta.write(0);
+	expect(drain(sub)).toEqual([0]);
+	ta.write(1);
+
+	front.serve(b.consume());
+	await settle();
+	void sub.recvDatagram();
+	expect(drain(sub)).toEqual([1]);
+
+	sub.close();
+	front.consumer.close();
+	a.close();
+	b.close();
+});
+
+test("a fetch never reads a replacement refused for its track properties", async () => {
+	const front = new Front();
+	const a = new BroadcastProducer();
+	const b = new BroadcastProducer();
+	a.createTrack("seq", { priority: 1 });
+	const tb = b.createTrack("seq", { priority: 2 });
+	const group = new GroupProducer(0);
+	tb.writeGroup(group);
+	group.writeFrame({ payload: enc.encode("b") });
+	group.close();
+	front.serve(a.consume());
+	await front.consumer.track("seq").info();
+	front.serve(b.consume());
+	await expect(front.consumer.track("seq").fetchGroup(0)).rejects.toThrow("changed its properties");
+
+	front.consumer.close();
+	a.close();
+	b.close();
+});

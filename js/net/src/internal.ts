@@ -224,8 +224,11 @@ export type RecvDatagram =
 export interface ResumeSource {
 	/** The next group not in `delivered`, in arrival or sequence order, without waiting. */
 	tryGroup(ordered: boolean, delivered: Delivered): Recv;
-	/** The next datagram in arrival order, without waiting. */
-	tryDatagram(): RecvDatagram;
+	/**
+	 * The next datagram in arrival order, without waiting. `delivered` is the group record once
+	 * groups are read too, so a copy that still holds one for them is kept.
+	 */
+	tryDatagram(delivered: Delivered | undefined): RecvDatagram;
 	/** Wake once a read may go differently; fires at most once. */
 	changed(fn: () => void): Dispose;
 	/** Forget the gaps in `delivered` below each group past the budget, judged on the newest copy. */

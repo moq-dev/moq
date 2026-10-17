@@ -50,8 +50,17 @@ const ROUTE_FAILURES: ReadonlySet<number> = new Set([
 	StreamCode.ControlTimeout,
 ]);
 
+/** A copy claiming the same content with different metadata: refused rather than reinterpreted. */
+class Incompatible extends Error {
+	constructor(name: string) {
+		super(`track ${name} changed its properties across routes`);
+		this.name = "Incompatible";
+	}
+}
+
 /** Whether `err` is the route failing rather than refusing: another route may still deliver what it failed. */
 function routeFailed(err: Error): boolean {
+	if (err instanceof Incompatible) return false;
 	return !(err instanceof StreamError) || ROUTE_FAILURES.has(err.code);
 }
 
@@ -69,10 +78,6 @@ function verdict(err: Error): boolean {
 /** Two copies claiming the same content must agree on what it is. */
 function compatible(a: track.Info, b: track.Info): boolean {
 	return a.timescale === b.timescale && a.maxAge === b.maxAge && a.priority === b.priority;
-}
-
-function incompatible(name: string): Error {
-	return new Error(`track ${name} changed its properties across routes`);
 }
 
 /** One route's broadcast, held while the front serves it or a reader still reads a copy of it. */
@@ -223,6 +228,8 @@ class Reader implements ResumeSource {
 	#changed = new Signal(0);
 	#dispose: Dispose[] = [];
 	#closed = false;
+	/** The channels that ran out cleanly. */
+	#drained = new Set<"groups" | "datagrams">();
 	/** Records the properties a copy committed, and which source it came from. */
 	#record: (info: track.Info, source: Source) => void;
 
@@ -364,7 +371,7 @@ class Reader implements ResumeSource {
 			}
 		}
 		this.#letGo(delivered);
-		return this.#end((copy) => copy.done);
+		return this.#end("groups", (copy) => copy.done);
 	}
 
 	// The copy whose next group in sequence order is the lowest deliverable one, dropping any it
@@ -388,7 +395,7 @@ class Reader implements ResumeSource {
 		return lowest?.copy;
 	}
 
-	tryDatagram(): RecvDatagram {
+	tryDatagram(delivered: Delivered | undefined): RecvDatagram {
 		this.sync();
 		for (let index = this.#copies.length - 1; index >= 0; index--) {
 			const copy = this.#copies[index];
@@ -407,8 +414,8 @@ class Reader implements ResumeSource {
 				break;
 			}
 		}
-		this.#letGo();
-		const end = this.#end((copy) => copy.datagramsDone);
+		this.#letGo(delivered);
+		const end = this.#end("datagrams", (copy) => copy.datagramsDone);
 		if (end.kind === "error" || end.kind === "done") return end;
 		return { kind: "idle" };
 	}
@@ -417,31 +424,41 @@ class Reader implements ResumeSource {
 	 * Whether the track ended, once the serving copy's channel (as `done` reads it) ran out:
 	 * cleanly, or with a verdict a route failure does not excuse.
 	 */
-	#end(done: (copy: Copy) => Error | null | undefined): Recv & { kind: "idle" | "done" | "error" } {
+	#end(
+		channel: "groups" | "datagrams",
+		done: (copy: Copy) => Error | null | undefined,
+	): Recv & { kind: "idle" | "done" | "error" } {
 		const route = this.route;
 		const last = this.#copies.at(-1);
 		const serving = last?.generation === this.#generation ? last : undefined;
 		const ended = serving ? done(serving) : undefined;
 		// The serving copy drained a complete track: that is its end, whichever route would
 		// serve it next.
-		if (serving && ended === null) return this.#finish({ kind: "done" });
+		if (serving && ended === null) return this.#finish({ kind: "done" }, channel);
 		if (ended instanceof Error) {
 			// A refusal from a route that still serves is the track's answer.
-			if (!routeFailed(ended)) return this.#finish({ kind: "error", error: ended });
-			if (route.refusal) return this.#finish({ kind: "error", error: route.refusal });
+			if (!routeFailed(ended)) return this.#finish({ kind: "error", error: ended }, channel);
+			if (route.refusal) return this.#finish({ kind: "error", error: route.refusal }, channel);
 		}
 		// Refused before any copy fed it: nothing will.
-		if (!last && route.refusal) return this.#finish({ kind: "error", error: route.refusal });
+		if (!last && route.refusal) return this.#finish({ kind: "error", error: route.refusal }, channel);
 		if (route.concluded) {
 			// No front is left to replace the copy: the track ends as it does.
-			if (!serving) return this.#finish({ kind: "error", error: dropped() });
-			if (ended instanceof Error) return this.#finish({ kind: "error", error: ended });
+			if (!serving) return this.#finish({ kind: "error", error: dropped() }, channel);
+			if (ended instanceof Error) return this.#finish({ kind: "error", error: ended }, channel);
 		}
 		return { kind: "idle" };
 	}
 
-	#finish<T extends Recv & { kind: "done" | "error" }>(end: T): T {
-		this.#shell.close(end.kind === "error" ? end.error : undefined);
+	// End the logical track on a failure, or cleanly once both channels drained: groups and
+	// datagrams end apart, and one running out leaves the other's backlog readable.
+	#finish<T extends Recv & { kind: "done" | "error" }>(end: T, channel: "groups" | "datagrams"): T {
+		if (end.kind === "error") {
+			this.#shell.close(end.error);
+			return end;
+		}
+		this.#drained.add(channel);
+		if (this.#drained.size === 2) this.#shell.close();
 		return end;
 	}
 
@@ -767,6 +784,8 @@ export class Front {
 	/** Bumped whenever the source changes, so an answer from a replaced one is dropped. */
 	#changed = new Signal(0);
 	#concluded = false;
+	/** The tracks each source was checked against the recorded properties for; see #verify. */
+	#verified = new WeakMap<Source, Set<string>>();
 	/** Whether any source it served came from a session, kept between routes. */
 	#fromSession = false;
 
@@ -848,7 +867,7 @@ export class Front {
 					// A copy claiming the same content with different metadata is refused rather
 					// than reinterpreted.
 					if (!expected || compatible(expected, info)) route.serve(source);
-					else route.refuse(incompatible(route.name));
+					else route.refuse(new Incompatible(route.name));
 				},
 				(err: unknown) => {
 					if (this.#source !== source) return;
@@ -876,6 +895,21 @@ export class Front {
 		if (this.#concluded) created.conclude();
 		else if (this.#source) this.#splice(created, this.#source);
 		return created;
+	}
+
+	// Check `source` claims the same properties for `name` as recorded, once per source: a fetch
+	// never reads a copy a subscription would refuse.
+	async #verify(name: string, source: Source): Promise<void> {
+		const recorded = this.#info.get(name);
+		if (!recorded || recorded.source === source) return;
+		let verified = this.#verified.get(source);
+		if (verified?.has(name)) return;
+		// A one-shot query: a hold would keep the track wanted for as long as the fetch's signal.
+		const info = await source.wire.resolveTrackInfo(name);
+		if (!compatible(recorded.info, info)) throw new Incompatible(name);
+		verified ??= new Set();
+		verified.add(name);
+		this.#verified.set(source, verified);
 	}
 
 	#record(name: string, info: track.Info, source: Source): void {
@@ -920,7 +954,7 @@ export class Front {
 			}
 			const recorded = this.#info.get(name);
 			// One logical track has one set of properties, whichever route answers.
-			if (recorded && !compatible(recorded.info, info)) throw incompatible(name);
+			if (recorded && !compatible(recorded.info, info)) throw new Incompatible(name);
 			this.#record(name, info, source);
 			return recorded?.info ?? info;
 		}
@@ -983,6 +1017,7 @@ export class Front {
 			}
 			source.retain();
 			try {
+				await this.#verify(name, source);
 				return { group: await source.wire.fetchGroup(name, sequence, options), source };
 			} catch (err) {
 				source.release();
