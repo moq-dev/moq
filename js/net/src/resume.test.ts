@@ -363,3 +363,62 @@ test("an ordered reader takes a replaced copy's buffered group before the new co
 	a.close();
 	b.close();
 });
+
+test("a late subscriber's first route is checked against properties an earlier source gave", async () => {
+	const front = new Front();
+	const a = new BroadcastProducer();
+	const b = new BroadcastProducer();
+	a.createTrack("seq", { priority: 1 });
+	b.createTrack("seq", { priority: 2 });
+	front.serve(a.consume());
+	expect((await front.consumer.track("seq").info()).priority).toBe(1);
+
+	// Nobody reads the track when the route moves, so nothing has been spliced yet.
+	front.serve(b.consume());
+	const sub = front.consumer.track("seq").subscribe();
+	await settle();
+	expect(() => sub.tryRecvGroup()).toThrow("changed its properties");
+
+	sub.close();
+	front.consumer.close();
+	a.close();
+	b.close();
+});
+
+test("a recovery fetch a later route supersedes is abandoned", async () => {
+	const front = new Front();
+	const a = new BroadcastProducer();
+	const b = new BroadcastProducer();
+	const c = new BroadcastProducer();
+	const ta = copy(a);
+	const tb = copy(b);
+	const tc = copy(c);
+	const stalled = ta.write(0, 1, false);
+	front.serve(a.consume());
+	const sub = front.consumer.track("seq").subscribe();
+	const group = sub.tryRecvGroup();
+	if (!group) throw new Error("expected group 0");
+	expect(dec.decode((await group.readFrame())?.payload)).toBe("0.0");
+
+	// The next route does not have the group yet: recovery fetches it there and waits.
+	front.serve(b.consume());
+	await settle();
+	stalled.close(new StreamError(StreamCode.SessionClosed));
+	const read = group.readFrame();
+	await settle();
+	const fetching = tb.producer.demand().used.peek();
+
+	// Another route has it cached: the group continues there, and the fetch from b stops.
+	tc.write(0, 2);
+	front.serve(c.consume());
+	expect(dec.decode((await read)?.payload)).toBe("0.1");
+	sub.close();
+	await settle();
+	expect(fetching).toBe(true);
+	expect(tb.producer.demand().used.peek()).toBe(false);
+
+	front.consumer.close();
+	a.close();
+	b.close();
+	c.close();
+});

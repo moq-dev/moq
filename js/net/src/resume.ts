@@ -216,10 +216,13 @@ class Reader implements ResumeSource {
 	#changed = new Signal(0);
 	#dispose: Dispose[] = [];
 	#closed = false;
+	/** Records the properties a copy committed, and which source it came from. */
+	#record: (info: track.Info, source: Source) => void;
 
-	constructor(route: Route, shell: ResumeShell) {
+	constructor(route: Route, shell: ResumeShell, record: (info: track.Info, source: Source) => void) {
 		this.route = route;
 		this.#shell = shell;
+		this.#record = record;
 		route.readers.add(this);
 		this.#dispose.push(
 			shell.subscription.subscribe(() => {
@@ -266,8 +269,12 @@ class Reader implements ResumeSource {
 		this.#bound(copy);
 		this.#copies.push(copy);
 		const shell = this.#shell;
+		const record = this.#record;
 		copy.sub.info().then(
-			(info) => shell.commit(info),
+			(info) => {
+				record(info, source);
+				shell.commit(info);
+			},
 			() => {},
 		);
 		this.#changed.update((n) => n + 1);
@@ -415,6 +422,8 @@ class Reader implements ResumeSource {
 			if (!routeFailed(ended)) return this.#finish({ kind: "error", error: ended });
 			if (route.refusal) return this.#finish({ kind: "error", error: route.refusal });
 		}
+		// Refused before any copy fed it: nothing will.
+		if (!last && route.refusal) return this.#finish({ kind: "error", error: route.refusal });
 		if (route.concluded) {
 			// No front is left to replace the copy: the track ends as it does.
 			if (!serving) return this.#finish({ kind: "error", error: dropped() });
@@ -549,6 +558,8 @@ interface Fetch {
 	outcome?: { group: GroupConsumer } | { error: Error };
 	/** Fires once it settles. */
 	settled: Signal<boolean>;
+	/** Abandon it, closing a group it returns, unless the caller kept that group. */
+	cancel(): void;
 }
 
 function startFetch(
@@ -558,26 +569,55 @@ function startFetch(
 	generation: number,
 	signal: AbortSignal,
 ): Fetch {
-	const fetch: Fetch = { generation, settled: new Signal(false) };
-	wire.fetchGroup(name, sequence, { signal })
+	// Its own controller, so a fetch a later route supersedes stops without ending the recovery.
+	const controller = new AbortController();
+	const onAbort = () => controller.abort(signal.reason);
+	signal.addEventListener("abort", onAbort, { once: true });
+	const fetch: Fetch = {
+		generation,
+		settled: new Signal(false),
+		cancel: () => {
+			signal.removeEventListener("abort", onAbort);
+			controller.abort();
+			if (fetch.outcome && "group" in fetch.outcome) fetch.outcome.group.close();
+		},
+	};
+	wire.fetchGroup(name, sequence, { signal: controller.signal })
 		.then(
 			(group) => {
 				fetch.outcome = { group };
+				// Abandoned while it was out: nobody reads it.
+				if (controller.signal.aborted) group.close();
 			},
 			(err: unknown) => {
 				fetch.outcome = { error: err instanceof Error ? err : new Error(String(err)) };
 			},
 		)
-		.finally(() => fetch.settled.set(true));
+		.finally(() => {
+			signal.removeEventListener("abort", onAbort);
+			fetch.settled.set(true);
+		});
 	return fetch;
 }
 
-/** Resolves once `signal` aborts. */
-function aborted(signal: AbortSignal): Promise<void> {
-	return new Promise((resolve) => {
-		if (signal.aborted) resolve();
-		else signal.addEventListener("abort", () => resolve(), { once: true });
+/** Wait for `change`, or throw once `signal` aborts, leaving no listener behind either way. */
+async function until(change: PromiseLike<unknown>, signal?: AbortSignal): Promise<void> {
+	signal?.throwIfAborted();
+	if (!signal) {
+		await race([change]);
+		return;
+	}
+	let onAbort = () => {};
+	const abort = new Promise<void>((resolve) => {
+		onAbort = resolve;
+		signal.addEventListener("abort", onAbort, { once: true });
 	});
+	try {
+		await race([change, abort]);
+	} finally {
+		signal.removeEventListener("abort", onAbort);
+	}
+	signal.throwIfAborted();
 }
 
 function dropped(): Error {
@@ -618,9 +658,29 @@ class Recover implements GroupRecover {
 	}
 
 	async replace(_index: number, failed: Error | undefined, signal: AbortSignal): Promise<Replacement> {
+		let fetch: Fetch | undefined;
+		let kept: GroupConsumer | undefined;
+		try {
+			const replacement = await this.#replace(failed, signal, (next) => {
+				fetch?.cancel();
+				fetch = next;
+			});
+			kept = replacement.group;
+			return replacement;
+		} finally {
+			// A fetch nothing continues from is abandoned, along with whatever it returns.
+			if (fetch?.outcome === undefined || !("group" in fetch.outcome) || fetch.outcome.group !== kept)
+				fetch?.cancel();
+		}
+	}
+
+	async #replace(
+		failed: Error | undefined,
+		signal: AbortSignal,
+		started: (fetch: Fetch) => void,
+	): Promise<Replacement> {
 		const reader = this.#reader;
 		const route = reader.route;
-		const abort = aborted(signal);
 		let fetch: Fetch | undefined;
 		for (;;) {
 			signal.throwIfAborted();
@@ -642,8 +702,10 @@ class Recover implements GroupRecover {
 					if (cached) return this.#replacement(cached, serving);
 				}
 				// Otherwise ask for it. The subscription may still deliver it first.
-				if (fetch?.generation !== generation)
+				if (fetch?.generation !== generation) {
 					fetch = startFetch(serving.source.wire, route.name, this.#sequence, generation, signal);
+					started(fetch);
+				}
 				const stale = hooks.staleAt(serving.sub, this.#sequence);
 				if (stale.expired()) throw new StreamError(StreamCode.Old, { message: "group is past the budget" });
 				waits.push(...stale.changed, ...(fetch.outcome ? [] : [fetch.settled]));
@@ -655,7 +717,7 @@ class Recover implements GroupRecover {
 					throw outcome.error;
 				}
 			}
-			await race([Signal.race(...waits), abort]);
+			await until(Signal.race(...waits), signal);
 		}
 	}
 
@@ -686,8 +748,8 @@ export class Front {
 	readonly consumer: broadcast.Consumer;
 	#source?: Source;
 	#routes = new Map<string, Route>();
-	/** Each track's properties as first committed, which every later copy must match. */
-	#info = new Map<string, track.Info>();
+	/** Each track's properties as first committed, and the source that said so: every later copy must match. */
+	#info = new Map<string, { info: track.Info; source: Source }>();
 	/** Bumped whenever the source changes, so an answer from a replaced one is dropped. */
 	#changed = new Signal(0);
 	#concluded = false;
@@ -738,8 +800,9 @@ export class Front {
 	#splice(route: Route, source: Source): void {
 		const recorded = this.#info.get(route.name);
 		const previous = route.served;
-		// The first copy of a track has nothing to match.
-		if (!recorded && !previous) {
+		// The first copy of a track has nothing to match, and the source that said what it is
+		// matches itself.
+		if ((!recorded && !previous) || recorded?.source === source) {
 			route.serve(source);
 			return;
 		}
@@ -748,10 +811,10 @@ export class Front {
 		source.retain();
 		previous?.retain();
 		const expected = recorded
-			? Promise.resolve(recorded)
+			? Promise.resolve(recorded.info)
 			: (previous as Source).wire.resolveTrackInfo(route.name).then(
 					(info) => {
-						this.#record(route.name, info);
+						this.#record(route.name, info, previous as Source);
 						return info;
 					},
 					() => undefined,
@@ -761,7 +824,7 @@ export class Front {
 				([expected, info]) => {
 					if (this.#source !== source) return;
 					// The copy it replaces never answered, so this one says what the track is.
-					if (!expected) this.#record(route.name, info);
+					if (!expected) this.#record(route.name, info, source);
 					// A copy claiming the same content with different metadata is refused rather
 					// than reinterpreted.
 					if (!expected || compatible(expected, info)) route.serve(source);
@@ -789,13 +852,14 @@ export class Front {
 			if (this.#routes.get(name) === created) this.#routes.delete(name);
 		};
 		this.#routes.set(name, created);
+		// A track whose properties another source already gave is checked like any replacement.
 		if (this.#concluded) created.conclude();
-		else if (this.#source) created.serve(this.#source);
+		else if (this.#source) this.#splice(created, this.#source);
 		return created;
 	}
 
-	#record(name: string, info: track.Info): void {
-		if (!this.#info.has(name)) this.#info.set(name, info);
+	#record(name: string, info: track.Info, source: Source): void {
+		if (!this.#info.has(name)) this.#info.set(name, { info, source });
 	}
 
 	subscribe(name: string, options?: track.Subscription): track.Subscriber {
@@ -804,22 +868,13 @@ export class Front {
 		return hooks.resumeSubscriber(
 			name,
 			options,
-			(shell) =>
-				new Reader(route, {
-					...shell,
-					commit: (info) => {
-						this.#record(name, info);
-						shell.commit(info);
-					},
-				}),
+			(shell) => new Reader(route, shell, (info, source) => this.#record(name, info, source)),
 		);
 	}
 
 	// Wait for the source to change, or `signal` to abort.
-	async #next(signal?: AbortSignal): Promise<void> {
-		signal?.throwIfAborted();
-		await race(signal ? [this.#changed.changed(), aborted(signal)] : [this.#changed.changed()]);
-		signal?.throwIfAborted();
+	#next(signal?: AbortSignal): Promise<void> {
+		return until(Signal.race(this.#changed), signal);
 	}
 
 	async resolveTrackInfo(name: string, hold?: AbortSignal): Promise<track.Info> {
@@ -833,7 +888,7 @@ export class Front {
 			source.retain();
 			try {
 				const info = await source.wire.resolveTrackInfo(name, hold);
-				this.#record(name, info);
+				this.#record(name, info, source);
 				return info;
 			} catch (err) {
 				const error = err instanceof Error ? err : new Error(String(err));
