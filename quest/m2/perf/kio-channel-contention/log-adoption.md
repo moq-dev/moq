@@ -5,7 +5,7 @@
 Every moq-net channel whose state is an append log with front eviction moves
 onto the [kio append-only log](/quest/m2/perf/kio-channel-contention/log.md),
 where it measures as a win. Each migrated channel lands with the contended
-bench or `just bench-lock` before and after; a channel that measures no win
+bench or `just bench-profile lock` before and after; a channel that measures no win
 stays on its mutex.
 
 ## Plan

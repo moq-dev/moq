@@ -286,6 +286,17 @@ impl Session {
 		}
 	}
 
+	/// Why a dialed session is reconnecting, or `None` while nothing has failed since the
+	/// last connect. A server-accepted session never reconnects, so it is always `None`.
+	///
+	/// Errors with [`Error::SessionNotFound`] if the handle is unknown.
+	pub fn failure(&self, id: Id) -> Result<Option<Error>, Error> {
+		Ok(match self.link(id)? {
+			Link::Dialed { monitor, .. } => monitor.failure().map(map_connect_error),
+			Link::Accepted(_) => None,
+		})
+	}
+
 	/// Forward connect counts to the status callback until the reconnect loop stops.
 	///
 	/// Returns the terminal error via `?`. Disconnects aren't reported: status 0 is reserved for a

@@ -42,6 +42,7 @@ export interface Announce {
  */
 export type Event = { kind: "start" | "update" | "restart" | "end" } & Announce;
 
+// pending: /quest/m1/public-model/answer.md
 /**
  * Options for an announcement stream.
  *
@@ -88,6 +89,7 @@ function closeState(state: AnnounceState, abort?: Error) {
 	state.synced.set(true);
 }
 
+// pending: /quest/m1/public-model/answer.md
 /**
  * The write side of an announcement stream.
  *
@@ -117,6 +119,7 @@ export class Producer {
 		});
 	}
 
+	// pending: /quest/m1/public-model/answer.md
 	/**
 	 * Marks the initial set as delivered: the stream syncs once the reader has taken
 	 * everything queued so far. A no-op until {@link behind} once marked.
@@ -130,6 +133,7 @@ export class Producer {
 		settle(state);
 	}
 
+	// pending: /quest/m1/public-model/answer.md
 	/**
 	 * Takes sync back until the next {@link synced}, as when another initial set starts.
 	 *

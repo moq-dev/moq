@@ -42,5 +42,4 @@ type. Wire: none.
 
 ## Required
 
-- [Swift, Dart, and C++ benchmarks](/quest/m2/ffi-bench-wrappers.md) - the other three wrappers' numbers
 - [Hard fork](/quest/m2/uniffi-fork.md) - the repository the core patch lands in
