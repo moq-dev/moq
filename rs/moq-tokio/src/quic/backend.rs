@@ -598,6 +598,8 @@ struct Socket {
 	/// Wakes every sender blocked on a full send buffer from the socket's single
 	/// write-readiness registration.
 	blocked: Arc<Blocked>,
+	/// When a send error was last logged, shared so a busy server logs one per interval.
+	last_send_error: Arc<Mutex<Option<driver::Instant>>>,
 }
 
 impl Socket {
@@ -610,6 +612,7 @@ impl Socket {
 			state: Arc::new(state),
 			local,
 			blocked: Default::default(),
+			last_send_error: Default::default(),
 		})
 	}
 
@@ -674,12 +677,15 @@ impl driver::UdpSender for Socket {
 			return Poll::Ready(Ok(()));
 		};
 		loop {
-			// `send` logs and drops a failed datagram rather than failing the connection, as
-			// UDP loss would; only `WouldBlock` comes back.
-			#[allow(deprecated)]
-			match io.try_io(tokio::io::Interest::WRITABLE, || self.state.send(io.into(), transmit)) {
+			match io.try_io(tokio::io::Interest::WRITABLE, || {
+				self.state.try_send(io.into(), transmit)
+			}) {
+				Ok(()) => return Poll::Ready(Ok(())),
 				Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {}
-				res => return Poll::Ready(res),
+				Err(err) => {
+					let mut last = self.last_send_error.lock().unwrap();
+					return Poll::Ready(driver::send_failed(&mut last, err, transmit));
+				}
 			}
 			// Every connection sends from its own task, but tokio keeps one waker per
 			// direction, so register a fan-out to all of them instead of this task's.
@@ -1032,6 +1038,39 @@ mod tests {
 	#[tokio::test]
 	async fn pinned_ipv6_connection_with_host_override() {
 		pinned_connection("[::1]:0", Some("localhost")).await;
+	}
+
+	/// The server's socket hands a send that finds no route back to the connection, as the
+	/// client's does, rather than logging it as loss. Linux refuses a v4-mapped destination on an
+	/// IPv6-only socket with `ENETUNREACH`, an unroutable family without touching the host's routes.
+	#[cfg(target_os = "linux")]
+	#[tokio::test]
+	async fn server_socket_returns_unreachable_sends() {
+		let socket = socket2::Socket::new(
+			socket2::Domain::IPV6,
+			socket2::Type::DGRAM,
+			Some(socket2::Protocol::UDP),
+		)
+		.unwrap();
+		socket.set_only_v6(true).unwrap();
+		socket.set_nonblocking(true).unwrap();
+		socket
+			.bind(&net::SocketAddr::from((net::Ipv6Addr::LOCALHOST, 0)).into())
+			.unwrap();
+		let socket = Socket::new(socket.into()).unwrap();
+
+		let transmit = moq_sock::udp::Transmit {
+			destination: net::SocketAddr::new(net::Ipv4Addr::LOCALHOST.to_ipv6_mapped().into(), 1),
+			ecn: None,
+			contents: b"hello",
+			segment_size: None,
+			src_ip: None,
+		};
+		let mut sender = driver::AsyncUdpSocket::create_sender(&socket);
+		let result = std::future::poll_fn(|cx| sender.as_mut().poll_send(&transmit, cx)).await;
+
+		let err = result.expect_err("an unroutable send must reach the connection");
+		assert_eq!(err.kind(), std::io::ErrorKind::NetworkUnreachable);
 	}
 
 	async fn pinned_connection(bind: &str, host_name: Option<&str>) {

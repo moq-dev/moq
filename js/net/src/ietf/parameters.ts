@@ -213,8 +213,8 @@ const MSG_PARAM_SUBGROUP_DELIVERY_TIMEOUT = 0x06n;
 const MSG_PARAM_MAX_CACHE_DURATION = 0x04n;
 const MSG_PARAM_EXPIRES = 0x08n;
 const MSG_PARAM_PUBLISHER_PRIORITY = 0x0en;
-const MSG_PARAM_FORWARD = 0x10n;
-const MSG_PARAM_SUBSCRIBER_PRIORITY = 0x20n;
+export const MSG_PARAM_FORWARD = 0x10n;
+export const MSG_PARAM_SUBSCRIBER_PRIORITY = 0x20n;
 const MSG_PARAM_GROUP_ORDER = 0x22n;
 /// INCLUDE_PROPERTIES, draft-20's opt-out from Track Properties.
 const MSG_PARAM_INCLUDE_PROPERTIES = 0x35n;
@@ -615,12 +615,14 @@ export class Parameters {
 		this.vars.set(MSG_PARAM_ROUTE_COST, v);
 	}
 
-	async encode(w: Writer, version: IetfVersion) {
+	/** Encode the block, leaving out the varints in `omit`, which the message carries as fixed fields. */
+	async encode(w: Writer, version: IetfVersion, omit: readonly bigint[] = []) {
 		const filter = this.#filter;
-		await w.u53(this.vars.size + this.bytes.size + this.#locations.size + (filter ? 1 : 0));
+		const vars = [...this.vars].filter(([id]) => !omit.includes(id));
+		await w.u53(vars.length + this.bytes.size + this.#locations.size + (filter ? 1 : 0));
 
 		if (version === Version.DRAFT_14 || version === Version.DRAFT_15) {
-			for (const [id, value] of this.vars) {
+			for (const [id, value] of vars) {
 				await w.u62(id);
 				await w.u62(value);
 			}
@@ -647,7 +649,7 @@ export class Parameters {
 		} else {
 			// d16+: Delta encoding, merge all parameter storage, sort by key
 			const all: { key: bigint; storage: "var" | "bytes" | "location" | "filter" }[] = [];
-			for (const id of this.vars.keys()) all.push({ key: id, storage: "var" });
+			for (const [id] of vars) all.push({ key: id, storage: "var" });
 			for (const id of this.bytes.keys()) all.push({ key: id, storage: "bytes" });
 			for (const id of this.#locations.keys()) all.push({ key: id, storage: "location" });
 			if (filter) all.push({ key: MSG_PARAM_SUBSCRIPTION_FILTER, storage: "filter" });

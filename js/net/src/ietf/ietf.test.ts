@@ -1014,6 +1014,29 @@ test("SubscribeUpdate drafts 14 to 16 round-trip the target separately from the 
 	}
 });
 
+// Draft 14 lifts SUBSCRIBER_PRIORITY and FORWARD into fixed fields; every other
+// parameter still rides the list rather than being dropped.
+test("SubscribeUpdate v14: keeps parameters beside the fixed fields", async () => {
+	const parameters = new Parameters();
+	parameters.subscriberPriority = 5;
+	parameters.forward = false;
+	parameters.vars.set(0x02n, 1000n); // DELIVERY_TIMEOUT
+	const msg = new Subscribe.SubscribeUpdate({ requestId: 4n, ownRequestId: 10n, parameters });
+
+	const encoded = await encodeVersioned(msg, Version.DRAFT_14);
+	const reader = new Reader(undefined, encoded, Version.DRAFT_14);
+	await reader.u16();
+	for (let i = 0; i < 5; i++) await reader.u62(); // own, target, start group, start object, end group
+	expect(await reader.u8()).toBe(5);
+	expect(await reader.bool()).toBe(false);
+	expect(await reader.u53()).toBe(1);
+
+	const decoded = await decodeVersioned(encoded, Subscribe.SubscribeUpdate.decode, Version.DRAFT_14);
+	expect(decoded.parameters.subscriberPriority).toBe(5);
+	expect(decoded.parameters.forward).toBe(false);
+	expect(decoded.parameters.vars.get(0x02n)).toBe(1000n);
+});
+
 test("SubscribeUpdate v17: round trip with requiredRequestIdDelta", async () => {
 	const msg = new Subscribe.SubscribeUpdate({ requestId: 42n });
 

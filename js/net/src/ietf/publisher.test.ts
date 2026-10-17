@@ -19,13 +19,21 @@ import type * as Cluster from "./cluster.ts";
 import { toRequestCode } from "./error.ts";
 import { Fetch, FetchHeader } from "./fetch.ts";
 import { Frame, Group as GroupMessage } from "./object.ts";
+import { Parameters } from "./parameters.ts";
 import { toWire } from "./priority.ts";
 import { PublishDone } from "./publish.ts";
 import { PublishNamespace, PublishNamespaceUpdate } from "./publish_namespace.ts";
 import { Publisher } from "./publisher.ts";
 import { RequestError, RequestOk } from "./request.ts";
 import { GroupOrder, Subscribe, SubscribeError, SubscribeOk, SubscribeUpdate, Unsubscribe } from "./subscribe.ts";
-import { SubscribeNamespace, SubscribeNamespaceEntry, SubscribeNamespaceEntryDone } from "./subscribe_namespace.ts";
+import {
+	SubscribeNamespace,
+	SubscribeNamespaceEntry,
+	SubscribeNamespaceEntryDone,
+	SubscribeNamespaceLegacy,
+	SubscribeNamespaceOk,
+	UnsubscribeNamespace,
+} from "./subscribe_namespace.ts";
 import { TRACK_STATUS_ERROR_14, TrackStatusOk, TrackStatusRequest } from "./track.ts";
 import { ALPN, type IetfVersion, Version } from "./version.ts";
 
@@ -1827,7 +1835,8 @@ test("subscription completion sends PUBLISH_DONE on every supported draft", asyn
 
 // The adapter delivers a draft-14 to -16 update to its subscription's stream. Left unread, it
 // keeps that stream from reporting closed, so a later UNSUBSCRIBE would never end the subscription.
-test("drafts 14 to 16 end a subscription on UNSUBSCRIBE after an update", async () => {
+// Applied, it reprices the subscription, which drafts 15 and 16 answer with REQUEST_OK naming it.
+test("drafts 14 to 16 apply an update and still end a subscription on UNSUBSCRIBE", async () => {
 	for (const version of [Version.DRAFT_14, Version.DRAFT_15, Version.DRAFT_16] as const) {
 		const pair = createMockTransportPair(ALPNS[version]);
 		const control = await Stream.open(pair.server, { version });
@@ -1839,7 +1848,7 @@ test("drafts 14 to 16 end a subscription on UNSUBSCRIBE after an update", async 
 		const path = Path.from("test");
 		const { pub, origin } = publisher(pair.server, { session: adapter });
 		const broadcast = publish(origin, path);
-		broadcast.createTrack("video", { timescale: Timescale.MILLI });
+		const track = broadcast.createTrack("video", { timescale: Timescale.MILLI });
 
 		await peer.writer.u53(Subscribe.id);
 		await new Subscribe({ requestId: 0n, trackNamespace: path, trackName: "video", subscriberPriority: 0 }).encode(
@@ -1854,13 +1863,76 @@ test("drafts 14 to 16 end a subscription on UNSUBSCRIBE after an update", async 
 		expect(await peer.reader.u53()).toBe(SubscribeOk.id);
 		await SubscribeOk.decode(peer.reader, version);
 
+		const parameters = new Parameters();
+		parameters.subscriberPriority = 10;
 		await peer.writer.u53(SubscribeUpdate.id);
-		await new SubscribeUpdate({ requestId: 0n, ownRequestId: 2n }).encode(peer.writer, version);
+		await new SubscribeUpdate({ requestId: 0n, ownRequestId: 2n, parameters }).encode(peer.writer, version);
+		if (version !== Version.DRAFT_14) {
+			expect(await peer.reader.u53()).toBe(RequestOk.id);
+			expect((await RequestOk.decode(peer.reader, version)).requestId).toBe(2n);
+		}
+		while (track.subscription.peek()?.priority !== 245) await track.subscription.changed();
+
 		await peer.writer.u53(Unsubscribe.id);
 		await new Unsubscribe({ requestId: 0n }).encode(peer.writer, version);
 
 		await running;
 		broadcast.close();
+		origin.close();
+		adapter.close();
+	}
+});
+
+// Drafts 14 to 16 define no namespace update, so one the adapter routes onto a namespace
+// subscription is refused, by name on drafts 15 and 16, and the subscription stands until
+// the peer ends it.
+test("drafts 14 to 16 refuse a namespace update without ending the subscription", async () => {
+	for (const version of [Version.DRAFT_14, Version.DRAFT_15, Version.DRAFT_16] as const) {
+		const pair = createMockTransportPair(ALPNS[version]);
+		const control = await Stream.open(pair.server, { version });
+		const adapter = new ControlStreamAdapter(pair.server, control, version, 100n, false);
+		void adapter.run().catch(() => undefined);
+		const peer = await Stream.accept(pair.client, version);
+		if (!peer) throw new Error("no control stream");
+
+		const { pub, origin } = publisher(pair.server, { session: adapter, requiresSolicitation: true });
+		// Draft 16 asks on a stream of its own, beyond the adapter's reach, so the adapter
+		// answers its update itself. Earlier drafts ride the control stream.
+		const ask = version === Version.DRAFT_16 ? await Stream.open(pair.client, { version }) : peer;
+		await ask.writer.u53(SubscribeNamespaceLegacy.id);
+		await new SubscribeNamespaceLegacy({ requestId: 0n, namespace: Path.from("") }).encode(ask.writer, version);
+		const server = await adapter.acceptBi();
+		if (!server) throw new Error("no namespace stream");
+		expect(await server.reader.u53()).toBe(SubscribeNamespaceLegacy.id);
+		const asked = await SubscribeNamespaceLegacy.decode(server.reader, version);
+		const running = pub.runSubscribeNamespace(
+			new SubscribeNamespace({ requestId: asked.requestId, namespace: asked.namespace }),
+			server,
+		);
+
+		expect(await ask.reader.u53()).toBe(version === Version.DRAFT_14 ? SubscribeNamespaceOk.id : RequestOk.id);
+		await ask.reader.read(await ask.reader.u16());
+
+		await peer.writer.u53(SubscribeUpdate.id);
+		await new SubscribeUpdate({ requestId: 0n, ownRequestId: 2n }).encode(peer.writer, version);
+		if (version !== Version.DRAFT_14) {
+			expect(await peer.reader.u53()).toBe(RequestError.id);
+			const refusal = await RequestError.decode(peer.reader, version);
+			expect(refusal.requestId).toBe(2n);
+			expect(refusal.errorCode).toBe(0x03);
+		}
+		if (version === Version.DRAFT_16) {
+			// Still subscribed: a new broadcast is advertised inline.
+			const broadcast = publish(origin, Path.from("after-update"));
+			expect(await ask.reader.u53()).toBe(SubscribeNamespaceEntry.id);
+			expect((await SubscribeNamespaceEntry.decode(ask.reader, version)).suffix).toBe(Path.from("after-update"));
+			broadcast.close();
+			ask.writer.close();
+		} else {
+			await peer.writer.u53(UnsubscribeNamespace.id);
+			await new UnsubscribeNamespace({ requestId: 0n }).encode(peer.writer, version);
+		}
+		await running;
 		origin.close();
 		adapter.close();
 	}

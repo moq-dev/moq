@@ -1353,6 +1353,18 @@ impl Connection {
         )
     }
 
+    /// Report that a send to the peer found no route, such as `ENETUNREACH`
+    ///
+    /// A handshake can never finish, so it fails at once with `NO_VIABLE_PATH`, sending no
+    /// CONNECTION_CLOSE the peer could not receive anyway. An established connection is left
+    /// alone, since a route that drops for a moment (a client switching networks) comes back, so
+    /// the datagram is just lost.
+    pub fn handle_unreachable(&mut self) {
+        if self.state.is_handshake() {
+            self.kill(TransportError::NO_VIABLE_PATH("no route to the peer").into());
+        }
+    }
+
     fn close_inner(&mut self, now: Instant, reason: Close) {
         let was_closed = self.state.is_closed();
         if !was_closed {
