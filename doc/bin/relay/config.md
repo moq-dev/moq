@@ -62,8 +62,8 @@ keep_alive = "3s"                    # Ping interval; "0s" disables it. iroh sti
 gso = true                           # UDP segmentation offload. iroh cannot turn it off.
 mtu_discovery = false                # Path MTU discovery. Default.
 receive_window = 67108864            # Whole-connection window, in bytes. Default (64 MiB).
-stream_receive_window = 8388608      # Per-stream window. Omit for the backend default.
-send_window = 33554432               # Unacknowledged outgoing data. Omit for the backend default.
+stream_receive_window = 4194304      # Per-stream window, in bytes. Default (4 MiB).
+send_window = 16777216               # Unacknowledged outgoing data, in bytes. Default (16 MiB).
 qlog = "/var/log/moq/qlog"           # Existing directory. Needs the `qlog` build feature.
 ```
 

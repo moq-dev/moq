@@ -115,6 +115,16 @@ pub const DEFAULT_MAX_STREAMS: u64 = 10_000;
 /// shares one connection, can still sustain several Gbps at intercontinental RTTs.
 pub const DEFAULT_RECEIVE_WINDOW: u64 = 64 << 20;
 
+/// Default per-stream receive window, used when [`Config::stream_receive_window`] is unset.
+///
+/// A quarter of [`DEFAULT_RECEIVE_WINDOW`], so one slow group can't take the whole
+/// connection, and enough for a single group stream to reach a few hundred Mbps at a
+/// 100 ms RTT.
+pub const DEFAULT_STREAM_RECEIVE_WINDOW: u64 = 4 << 20;
+
+/// Default cap on unacknowledged outgoing data, used when [`Config::send_window`] is unset.
+pub const DEFAULT_SEND_WINDOW: u64 = 16 << 20;
+
 /// Default idle timeout before an inactive connection is dropped.
 ///
 /// A peer that dies or drops off the network sends no close, so this is how long
@@ -248,7 +258,7 @@ pub struct Config {
 	)]
 	pub receive_window: Option<u64>,
 
-	/// Per-stream receive window, in bytes. Unset leaves the backend default.
+	/// Per-stream receive window, in bytes. Defaults to 4 MiB.
 	///
 	/// Keep it below [`receive_window`](Self::receive_window) so one slow group
 	/// can't starve the rest of the connection.
@@ -262,7 +272,7 @@ pub struct Config {
 	pub stream_receive_window: Option<u64>,
 
 	/// Cap on unacknowledged outgoing data, in bytes, regardless of what the peer
-	/// allows. Unset leaves the backend default.
+	/// allows. Defaults to 16 MiB.
 	///
 	/// This bounds the transport send buffer.
 	#[serde(skip_serializing_if = "Option::is_none")]
@@ -578,8 +588,8 @@ impl Config {
 			mtu_discovery: self.mtu_discovery.unwrap_or(false),
 			congestion_control: self.congestion_control,
 			receive_window: self.receive_window.unwrap_or(DEFAULT_RECEIVE_WINDOW),
-			stream_receive_window: self.stream_receive_window,
-			send_window: self.send_window,
+			stream_receive_window: self.stream_receive_window.unwrap_or(DEFAULT_STREAM_RECEIVE_WINDOW),
+			send_window: self.send_window.unwrap_or(DEFAULT_SEND_WINDOW),
 			qlog: self.qlog.clone(),
 		}
 	}
@@ -678,13 +688,14 @@ pub struct Resolved {
 	pub congestion_control: Option<CongestionControl>,
 	/// Connection-wide receive window in bytes, defaulting to [`DEFAULT_RECEIVE_WINDOW`].
 	///
-	/// Resolved here rather than by each backend, whose own defaults differ (moq-quic's
-	/// and iroh's are unlimited), so every runtime honors the same `[quic]` section.
+	/// The windows are resolved here rather than by each backend, whose own defaults
+	/// differ (moq-quic's and iroh's connection window is unlimited), so every runtime
+	/// honors the same `[quic]` section.
 	pub receive_window: u64,
-	/// Per-stream receive window in bytes, or `None` for the backend default.
-	pub stream_receive_window: Option<u64>,
-	/// Cap on unacknowledged outgoing data in bytes, or `None` for the backend default.
-	pub send_window: Option<u64>,
+	/// Per-stream receive window in bytes, defaulting to [`DEFAULT_STREAM_RECEIVE_WINDOW`].
+	pub stream_receive_window: u64,
+	/// Cap on unacknowledged outgoing data in bytes, defaulting to [`DEFAULT_SEND_WINDOW`].
+	pub send_window: u64,
 	/// Directory to write qlog traces into, or `None` to not capture them.
 	pub qlog: Option<PathBuf>,
 }
@@ -919,14 +930,13 @@ mod tests {
 		assert!(at_limit.validate().is_ok());
 	}
 
-	/// An unset connection window resolves to our default, so every backend applies the
-	/// same one; the other windows stay `None` for the backend default.
+	/// An unset window resolves to our default, so every backend applies the same one.
 	#[test]
 	fn windows_resolve_per_field() {
 		let unset = Config::default().resolve();
 		assert_eq!(unset.receive_window, DEFAULT_RECEIVE_WINDOW);
-		assert_eq!(unset.stream_receive_window, None);
-		assert_eq!(unset.send_window, None);
+		assert_eq!(unset.stream_receive_window, DEFAULT_STREAM_RECEIVE_WINDOW);
+		assert_eq!(unset.send_window, DEFAULT_SEND_WINDOW);
 
 		let set = Config {
 			receive_window: Some(64 << 20),
@@ -936,8 +946,8 @@ mod tests {
 		}
 		.resolve();
 		assert_eq!(set.receive_window, 64 << 20);
-		assert_eq!(set.stream_receive_window, Some(8 << 20));
-		assert_eq!(set.send_window, Some(32 << 20));
+		assert_eq!(set.stream_receive_window, 8 << 20);
+		assert_eq!(set.send_window, 32 << 20);
 	}
 
 	/// A zero window credits nothing, so it would wedge the connection rather than

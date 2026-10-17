@@ -73,18 +73,14 @@ fn apply_transport(transport: &mut driver::TransportConfig, quic: &Resolved) {
 	transport.congestion_controller_factory(congestion_factory(quic.congestion()));
 }
 
-/// Apply the flow-control windows. The connection window is always ours, since the
-/// backend's is unlimited; the others stay at the backend default when unset.
+/// Apply the flow-control windows `Config::resolve` settled, replacing moq-quic's own.
 fn apply_windows(transport: &mut driver::TransportConfig, quic: &Resolved) {
 	// Saturating rather than erroring: `Config::validate` already rejects a window
 	// past the varint, so this only bites a `Resolved` built without it.
 	transport.receive_window(driver::VarInt::from_u64(quic.receive_window).unwrap_or(driver::VarInt::MAX));
-	if let Some(window) = quic.stream_receive_window {
-		transport.stream_receive_window(driver::VarInt::from_u64(window).unwrap_or(driver::VarInt::MAX));
-	}
-	if let Some(window) = quic.send_window {
-		transport.send_window(window);
-	}
+	transport
+		.stream_receive_window(driver::VarInt::from_u64(quic.stream_receive_window).unwrap_or(driver::VarInt::MAX));
+	transport.send_window(quic.send_window);
 }
 
 /// The controller factory for a congestion control family. moq-quic's BBR is v3.
@@ -1082,9 +1078,8 @@ mod tests {
 	}
 
 	/// moq-quic exposes no getters for the flow-control windows, but its `Debug` prints
-	/// them, which is enough to prove each one reached the transport config, that an
-	/// unset connection window gets our finite default instead of moq-quic's unlimited one,
-	/// and that the other unset knobs leave moq-quic's own defaults in place.
+	/// them, which is enough to prove each one reached the transport config, and that
+	/// unset windows get our defaults instead of moq-quic's.
 	#[test]
 	fn apply_windows_writes_each_field() {
 		let quic = crate::quic::Config {
@@ -1108,14 +1103,14 @@ mod tests {
 
 		let mut untouched = driver::TransportConfig::default();
 		apply_windows(&mut untouched, &crate::quic::Config::default().resolve());
-		let mut expected = driver::TransportConfig::default();
-		expected.receive_window(driver::VarInt::from_u64(crate::quic::DEFAULT_RECEIVE_WINDOW).unwrap());
-		assert_eq!(format!("{:?}", untouched), format!("{:?}", expected));
-		assert_ne!(
-			format!("{:?}", untouched),
-			format!("{:?}", driver::TransportConfig::default()),
-			"moq-quic's own connection window is unlimited, so ours must replace it"
-		);
+		let applied = format!("{:?}", untouched);
+		for field in [
+			format!("receive_window: {}", crate::quic::DEFAULT_RECEIVE_WINDOW),
+			format!("stream_receive_window: {}", crate::quic::DEFAULT_STREAM_RECEIVE_WINDOW),
+			format!("send_window: {}", crate::quic::DEFAULT_SEND_WINDOW),
+		] {
+			assert!(applied.contains(&field), "{field} missing from {applied}");
+		}
 	}
 
 	/// Build a controller from each family's factory and downcast it to the

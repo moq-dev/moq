@@ -290,13 +290,9 @@ fn transport_config(quic: &crate::quic::Resolved) -> iroh::endpoint::QuicTranspo
 	}
 	let window = iroh::endpoint::VarInt::from_u64(quic.receive_window).unwrap_or(iroh::endpoint::VarInt::MAX);
 	transport = transport.receive_window(window);
-	if let Some(window) = quic.stream_receive_window {
-		let window = iroh::endpoint::VarInt::from_u64(window).unwrap_or(iroh::endpoint::VarInt::MAX);
-		transport = transport.stream_receive_window(window);
-	}
-	if let Some(window) = quic.send_window {
-		transport = transport.send_window(window);
-	}
+	let window = iroh::endpoint::VarInt::from_u64(quic.stream_receive_window).unwrap_or(iroh::endpoint::VarInt::MAX);
+	transport = transport.stream_receive_window(window);
+	transport = transport.send_window(quic.send_window);
 	transport.congestion_controller_factory(congestion_factory(quic.congestion()))
 }
 

@@ -423,13 +423,11 @@ fn transport(quic: &moq_tokio::quic::Resolved) -> anyhow::Result<moq_uring::quic
 	transport.idle_timeout = quic.idle_timeout;
 	transport.max_streams = quic.max_streams;
 	transport.keep_alive = quic.keep_alive;
-	// `[quic]` resolves the connection window, so both runtimes run the same
-	// default. Unset per-stream and send windows stay `None`, so the worker
-	// keeps its own credits. A set window has to land here: dropping it would
-	// leave the operator believing a limit that the workers are not running.
+	// `[quic]` resolves every window, defaults included, so both runtimes run
+	// the same ones rather than each backend's own.
 	transport.receive_window = Some(quic.receive_window);
-	transport.stream_receive_window = quic.stream_receive_window;
-	transport.send_window = quic.send_window;
+	transport.stream_receive_window = Some(quic.stream_receive_window);
+	transport.send_window = Some(quic.send_window);
 	transport.congestion = match quic.congestion_control {
 		Some(moq_tokio::quic::CongestionControl::Loss) => moq_uring::quic::Congestion::Loss,
 		// Unset means the backend's own default, and live media wants a steady
@@ -879,15 +877,37 @@ mod tests {
 		assert_eq!(transport.send_window, Some(32 << 20));
 	}
 
-	/// Leaving the windows unset is the ordinary case. The connection window is
-	/// `[quic]`'s documented default, the same the tokio workers run; the
-	/// worker keeps its own per-stream and send credits.
+	/// The same `[quic]` section runs the same windows on both runtimes, set or
+	/// left at the documented defaults: the tokio backends apply `Resolved`'s
+	/// windows as they are, and the workers must get exactly those.
 	#[test]
-	fn defaults_are_accepted() {
-		let transport = transport(&moq_tokio::quic::Config::default().resolve()).expect("defaults must build");
-		assert_eq!(transport.receive_window, Some(moq_tokio::quic::DEFAULT_RECEIVE_WINDOW));
-		assert_eq!(transport.stream_receive_window, None);
-		assert_eq!(transport.send_window, None);
+	#[allow(clippy::field_reassign_with_default)]
+	fn windows_match_the_tokio_runtime() {
+		let mut set = moq_tokio::quic::Config::default();
+		set.receive_window = Some(128 << 20);
+		set.stream_receive_window = Some(8 << 20);
+		set.send_window = Some(32 << 20);
+
+		for (quic, expected) in [
+			(moq_tokio::quic::Config::default(), (64 << 20, 4 << 20, 16 << 20)),
+			(set, (128 << 20, 8 << 20, 32 << 20)),
+		] {
+			let resolved = quic.resolve();
+			let tokio = (
+				resolved.receive_window,
+				resolved.stream_receive_window,
+				resolved.send_window,
+			);
+			assert_eq!(tokio, expected);
+
+			let transport = transport(&resolved).expect("windows must be accepted");
+			let uring = (
+				transport.receive_window,
+				transport.stream_receive_window,
+				transport.send_window,
+			);
+			assert_eq!(uring, (Some(tokio.0), Some(tokio.1), Some(tokio.2)));
+		}
 	}
 
 	/// An auth decision still pending at the drain deadline is abandoned then,
