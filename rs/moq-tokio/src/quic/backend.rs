@@ -73,13 +73,12 @@ fn apply_transport(transport: &mut driver::TransportConfig, quic: &Resolved) {
 	transport.congestion_controller_factory(congestion_factory(quic.congestion()));
 }
 
-/// Apply the flow-control windows. The connection window defaults to ours, since the
+/// Apply the flow-control windows. The connection window is always ours, since the
 /// backend's is unlimited; the others stay at the backend default when unset.
 fn apply_windows(transport: &mut driver::TransportConfig, quic: &Resolved) {
 	// Saturating rather than erroring: `Config::validate` already rejects a window
 	// past the varint, so this only bites a `Resolved` built without it.
-	let window = quic.receive_window.unwrap_or(crate::quic::DEFAULT_RECEIVE_WINDOW);
-	transport.receive_window(driver::VarInt::from_u64(window).unwrap_or(driver::VarInt::MAX));
+	transport.receive_window(driver::VarInt::from_u64(quic.receive_window).unwrap_or(driver::VarInt::MAX));
 	if let Some(window) = quic.stream_receive_window {
 		transport.stream_receive_window(driver::VarInt::from_u64(window).unwrap_or(driver::VarInt::MAX));
 	}
@@ -93,6 +92,22 @@ fn congestion_factory(family: CongestionControl) -> Arc<dyn driver::congestion::
 	match family {
 		CongestionControl::Loss => Arc::new(driver::congestion::CubicConfig::default()),
 		CongestionControl::Delay => Arc::new(driver::congestion::Bbr3Config::default()),
+	}
+}
+
+/// A live QUIC connection under a session, for tuning it once the peer is known.
+pub struct Connection(driver::Connection);
+
+impl Connection {
+	pub(crate) fn new(conn: driver::Connection) -> Self {
+		Self(conn)
+	}
+
+	/// Change the flow-control limits `limits` sets; a raise reaches the peer on the next packet.
+	///
+	/// Errors, changing nothing, on limits [`Limits::validate`](crate::quic::Limits::validate) refuses.
+	pub fn set_limits(&self, limits: crate::quic::Limits) -> Result<()> {
+		Ok(self.0.set_limits(limits)?)
 	}
 }
 
@@ -253,6 +268,10 @@ pub enum Error {
 	/// timeout. A host with a single address reports that error directly instead.
 	#[error("all {} connection attempts failed: {}", .0.len(), crate::failover::describe(.0))]
 	Failover(Vec<crate::failover::Attempt<Error>>),
+
+	/// The flow-control limits are ones a peer would refuse, so none were applied.
+	#[error("invalid quic limits: {0}")]
+	Limits(#[from] moq_quic::LimitsError),
 }
 
 impl crate::failover::Aggregate for Error {
@@ -484,7 +503,8 @@ impl Error {
 			| Self::InvalidDnsName
 			| Self::NoRuntime
 			| Self::NoInitialCipherSuite
-			| Self::ConnectRejected(_) => true,
+			| Self::ConnectRejected(_)
+			| Self::Limits(_) => true,
 			Self::Tls(err) => err.is_terminal(),
 			Self::Failover(failures) => {
 				!failures.is_empty() && failures.iter().all(|failure| failure.error.is_terminal())

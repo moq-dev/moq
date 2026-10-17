@@ -56,7 +56,7 @@ Transport tuning, applied to accepted and dialed connections alike.
 ```toml
 [quic]
 congestion_control = "delay"         # "delay" (BBR, the default) or "loss" (CUBIC).
-max_streams = 10000                  # Concurrent streams per connection, bidi and uni. Default.
+max_streams = 10000                  # Concurrent streams per connection, bidi and uni; 0 is refused. Default.
 idle_timeout = "10s"                 # Drop a connection after this long with nothing on it. Default.
 keep_alive = "3s"                    # Ping interval; "0s" disables it. iroh still pings at least every 5s. Default.
 gso = true                           # UDP segmentation offload. iroh cannot turn it off.

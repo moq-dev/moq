@@ -423,10 +423,11 @@ fn transport(quic: &moq_tokio::quic::Resolved) -> anyhow::Result<moq_uring::quic
 	transport.idle_timeout = quic.idle_timeout;
 	transport.max_streams = quic.max_streams;
 	transport.keep_alive = quic.keep_alive;
-	// Unset stays `None`, so the worker keeps its own credits. A set window
-	// has to land here: dropping it would leave the operator believing a
-	// limit that the workers are not running.
-	transport.receive_window = quic.receive_window;
+	// `[quic]` resolves the connection window, so both runtimes run the same
+	// default. Unset per-stream and send windows stay `None`, so the worker
+	// keeps its own credits. A set window has to land here: dropping it would
+	// leave the operator believing a limit that the workers are not running.
+	transport.receive_window = Some(quic.receive_window);
 	transport.stream_receive_window = quic.stream_receive_window;
 	transport.send_window = quic.send_window;
 	transport.congestion = match quic.congestion_control {
@@ -812,11 +813,7 @@ async fn serve_connection(
 
 	// A peer's QUIC limits widen before SETUP OK, so its first requests see them.
 	if let Some(limits) = serve.cluster.quic_limits(&lease) {
-		conn.set_limits(moq_uring::quic::Limits {
-			max_streams: limits.max_streams,
-			receive_window: limits.receive_window,
-			send_window: limits.send_window,
-		})?;
+		conn.set_limits(limits)?;
 	}
 	let mut request = request
 		.with_stats(stats.clone())
@@ -882,12 +879,13 @@ mod tests {
 		assert_eq!(transport.send_window, Some(32 << 20));
 	}
 
-	/// Leaving the windows unset is the ordinary case. The worker then keeps
-	/// its own credits rather than inheriting another backend's default.
+	/// Leaving the windows unset is the ordinary case. The connection window is
+	/// `[quic]`'s documented default, the same the tokio workers run; the
+	/// worker keeps its own per-stream and send credits.
 	#[test]
 	fn defaults_are_accepted() {
 		let transport = transport(&moq_tokio::quic::Config::default().resolve()).expect("defaults must build");
-		assert_eq!(transport.receive_window, None);
+		assert_eq!(transport.receive_window, Some(moq_tokio::quic::DEFAULT_RECEIVE_WINDOW));
 		assert_eq!(transport.stream_receive_window, None);
 		assert_eq!(transport.send_window, None);
 	}

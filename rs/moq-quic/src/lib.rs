@@ -65,12 +65,14 @@ pub use connection::qlog::QlogStream;
 pub use rustls;
 
 mod config;
+mod limits;
 #[cfg(feature = "qlog")]
 pub use config::QlogConfig;
 pub use config::{
     AckFrequencyConfig, ClientConfig, ConfigError, EndpointConfig, IdleTimeout, MtuDiscoveryConfig,
     ServerConfig, StdSystemTime, TimeSource, TransportConfig, ValidationTokenConfig,
 };
+pub use limits::{Limits, LimitsError};
 
 pub mod crypto;
 

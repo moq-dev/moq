@@ -81,7 +81,8 @@ pub struct MoqClientTls {
 /// QUIC transport tuning, mirroring moq-tokio's QUIC config.
 #[derive(Clone, Debug, Default, PartialEq, Eq, uniffi::Record)]
 pub struct MoqQuicConfig {
-	/// Cap on the concurrent QUIC streams the peer may open toward this endpoint. Null uses 1024.
+	/// Cap on the concurrent QUIC streams the peer may open toward this endpoint. Null uses 10,000,
+	/// and 0 is refused.
 	///
 	/// MoQ opens a stream per group, and for a subscriber those arrive from the peer, so an
 	/// endpoint subscribing to many tracks wants this raised. Ignored by the WebSocket fallback.

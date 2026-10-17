@@ -1089,7 +1089,7 @@ struct Work {
 pub struct Cluster {
 	session_limits: moq_net::session::Limits,
 	peer_limits: moq_net::session::Limits,
-	peer_quic: moq_tokio::quic::Limits,
+	peer_quic: crate::limits::Quic,
 	config: Config,
 	/// Dial template every peer dial is built from; see [`Self::peer_client`].
 	connect: Option<moq_tokio::connect::Config>,
@@ -1171,8 +1171,9 @@ impl Cluster {
 	}
 
 	/// The QUIC limits an admitted session widens to, if any: only a `peer` grant does.
-	pub(crate) fn quic_limits(&self, lease: &auth::Lease) -> Option<moq_tokio::quic::Limits> {
-		lease.token().peer.then_some(self.peer_quic)
+	#[cfg(any(feature = "quic", all(target_os = "linux", feature = "_uring")))]
+	pub(crate) fn quic_limits(&self, lease: &auth::Lease) -> Option<moq_quic::Limits> {
+		lease.token().peer.then(|| self.peer_quic.limits())
 	}
 
 	/// The origin ID used by this relay on the wire.
@@ -1216,6 +1217,7 @@ impl Cluster {
 		// matching the `--cluster-connect-api` validation, instead of silently
 		// keeping the first entry when dials spawn.
 		parse_peer_list(config.connect.clone(), None).context("invalid --cluster-connect peer list")?;
+		peer.quic.validate()?;
 		let critical = crate::critical::Critical::default();
 		let mut origin_config = origin::Config::new(id);
 		if let Some(cache) = cache {
@@ -1234,7 +1236,7 @@ impl Cluster {
 		Ok(Cluster {
 			session_limits: session.resolve(),
 			peer_limits: peer.resolve(),
-			peer_quic: peer.quic.resolve()?,
+			peer_quic: peer.quic,
 			config,
 			connect: None,
 			quic: None,
@@ -2086,9 +2088,7 @@ impl Cluster {
 			connect.tls.fingerprint = vec![fingerprint.to_string()];
 		}
 		let mut quic = self.quic.clone().unwrap_or_default();
-		quic.max_streams = Some(self.peer_quic.max_streams.get());
-		quic.receive_window = Some(self.peer_quic.receive_window.get());
-		quic.send_window = Some(self.peer_quic.send_window.get());
+		self.peer_quic.dial(&mut quic);
 		let client = connect.init(quic)?;
 		#[cfg(feature = "iroh")]
 		let client = match &self.iroh {

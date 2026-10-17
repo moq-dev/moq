@@ -121,7 +121,7 @@ func WithServerVersions(versions ...string) ServerOption {
 }
 
 // WithServerQUICMaxStreams caps the concurrent QUIC streams each peer may open
-// toward this server (default 1024).
+// toward this server (default 10,000; 0 is refused).
 func WithServerQUICMaxStreams(maxStreams uint64) ServerOption {
 	return func(c *serverConfig) { c.quicMaxStreams = &maxStreams }
 }

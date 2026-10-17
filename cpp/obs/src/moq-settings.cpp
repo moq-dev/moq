@@ -33,7 +33,7 @@ constexpr const char *WEBSOCKET_DELAY = "websocket_delay_ms";
 constexpr long long BACKOFF_INITIAL_DEFAULT_MS = 1000;
 constexpr long long BACKOFF_MAX_DEFAULT_MS = 5000;
 constexpr long long BACKOFF_TIMEOUT_DEFAULT_MS = 10000;
-constexpr long long QUIC_MAX_STREAMS_DEFAULT = 1024;
+constexpr long long QUIC_MAX_STREAMS_DEFAULT = 10000;
 constexpr bool WEBSOCKET_ENABLED_DEFAULT = true;
 constexpr long long WEBSOCKET_DELAY_DEFAULT_MS = 200;
 
