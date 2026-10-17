@@ -1016,7 +1016,9 @@ impl Started {
 	/// origin driver, cache governor, or certificate reload) panics.
 	///
 	/// Standalone, this only waits for such a panic. Returning, a failure
-	/// included, closes every dial as [`Cluster::close`] does.
+	/// included, closes every dial as [`Cluster::close`] does. A cancelled `run`
+	/// starts each link's close but cannot wait for it, so a caller that must have
+	/// peers told before exiting awaits [`Cluster::close`] or lets `run` return.
 	pub async fn run(self) -> anyhow::Result<()> {
 		// Registered only now, so a start that fails or never runs drops its client
 		// and frees the bind. A closed cluster has nothing left to run.
