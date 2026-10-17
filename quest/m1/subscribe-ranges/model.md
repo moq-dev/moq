@@ -55,10 +55,6 @@ Guidance:
   SUBSCRIBE zero-delay default. Preserve that distinction when translating
   FETCH into a range request. Sharing a range never relaxes a caller's
   budget or lets one expired caller cancel another still-valid reader.
-  [FETCH max-delay](/quest/m1/fetch-max-delay.md) owns the FETCH option and
-  enforcement; reuse its contract rather than restoring a historical exemption.
+  Reuse FETCH's optional per-reader budget and publisher clamp rather than
+  restoring a historical exemption.
 - Benchmark range count and span as separate axes (AGENTS.md fan-out rule).
-
-## Related
-
-- [FETCH max-delay](/quest/m1/fetch-max-delay.md) - historical request budgets and per-caller enforcement

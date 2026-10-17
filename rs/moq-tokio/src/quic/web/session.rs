@@ -269,7 +269,7 @@ impl Session {
 		// Otherwise the application could write data with lower priority than the header, resulting
 		// in queuing. Also the header is very important for determining the session ID
 		// without reliable reset.
-		send.set_priority(i32::MAX).ok();
+		send.set_priority(i64::MAX).ok();
 		Self::write_full(&mut send, &self.header_uni)
 			.await
 			.map_err(|e| self.map_error(e))?;
@@ -288,7 +288,7 @@ impl Session {
 		// Otherwise the application could write data with lower priority than the header, resulting
 		// in queuing. Also the header is very important for determining the session ID
 		// without reliable reset.
-		send.set_priority(i32::MAX).ok();
+		send.set_priority(i64::MAX).ok();
 		Self::write_full(&mut send, &self.header_bi)
 			.await
 			.map_err(|e| self.map_error(e))?;
@@ -370,6 +370,14 @@ impl Session {
 
 		result.map_err(|e| self.map_error(e))?;
 		Ok(())
+	}
+
+	/// Open a send group at `priority`, for streams to join with [`SendStream::set_group`].
+	///
+	/// See [`crate::quic::driver::SendGroup`]. The HTTP/3 streams stay outside every group,
+	/// so they go first.
+	pub fn send_group(&self, priority: i64) -> crate::quic::driver::SendGroup {
+		self.conn.send_group(priority)
 	}
 
 	/// Computes the maximum size of datagrams that may be passed to
