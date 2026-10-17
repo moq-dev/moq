@@ -5,9 +5,11 @@ description: The order to roll out a release across relays, auth servers, and cl
 
 # Upgrade
 
-Every published package keeps a `MIGRATE.md` with a before/after snippet for
-each breaking change, newest first. Read your package's file from the top down
-to the version you run. This page covers what spans packages: the wire changes
+Every hand-written published package keeps a `MIGRATE.md` with a before/after
+snippet for each breaking change, newest first. Read your package's file from
+the top down to the version you run. The generated UniFFI packages (such as
+`moq-ffi` on PyPI or Maven) follow
+[moq-ffi's](https://github.com/moq-dev/moq/blob/main/rs/moq-ffi/MIGRATE.md). This page covers what spans packages: the wire changes
 that decide the order to upgrade a deployment.
 
 A released flag, environment variable, or config key that was renamed is

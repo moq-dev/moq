@@ -4,6 +4,23 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Native codecs have `Audio` and `Video` namespaces (#5694)
+
+`BroadcastProducer.encodeAudio` / `encodeVideo` are `Audio.Producer` / `Video.Producer` initializers that take a `Media.CatalogProducer`.
+The audio track name moves into the encoder output's `track`, and a zero frame duration takes the codec's own frame.
+`BroadcastConsumer.decodeAudio` / `decodeVideo` are `Audio.Consumer.subscribe(broadcast:...)` / `Video.Consumer.subscribe(broadcast:...)`.
+Producers expose subscriber state only through `demand()`, and a video GOP is `Video.Gop.keyframe(interval:)`.
+`Audio.Encoder` / `Video.Encoder` encode without publishing.
+
+```swift
+// Before
+let video = try broadcast.encodeVideo(input: input, output: output)
+let frames = try await consumer.decodeVideo(name: name, catalogVideo: rendition, output: decoder)
+// After
+let video = try Video.Producer(catalog: Media.CatalogProducer(broadcast: broadcast), input: input, output: output)
+let frames = try await Video.Consumer.subscribe(broadcast: consumer, name: name, rendition: rendition, output: decoder)
+```
+
 ### Background panics are reported (#5562)
 
 A panic in a background task throws `MoqError.Task` with the panic message as `reason`, and other objects keep running.

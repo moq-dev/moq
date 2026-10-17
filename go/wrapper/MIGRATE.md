@@ -4,6 +4,26 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Native codecs have `audio` and `video` packages (#5694)
+
+`BroadcastProducer.EncodeAudio` / `EncodeVideo` are `audio.NewProducer` / `video.NewProducer` (`moq.dev/moq/audio`, `moq.dev/moq/video`), built from a `media.CatalogProducer`.
+The audio track name moves into `EncoderOutput.Track`, and durations and timestamps are `time.Duration` (`FrameDuration`, `Frame.Timestamp`); a zero `FrameDuration` takes the codec's own frame.
+`BroadcastConsumer.DecodeAudio` / `DecodeVideo` are `audio.Subscribe` / `video.Subscribe`, taking the broadcast after the context.
+Producers expose subscriber state only through `Demand()`, and a video GOP is `video.Keyframe(interval)`.
+`audio.NewEncoder` / `video.NewEncoder` encode without publishing.
+
+```go
+// Before
+video, err := broadcast.EncodeVideo(moq.VideoEncoderInput{...}, moq.VideoEncoderOutput{...}, nil)
+err = video.Write(moq.VideoFrame{TimestampUs: pts, Data: rgba})
+frames, err := consumer.DecodeVideo(ctx, name, rendition, output)
+// After
+catalog, err := moqmedia.NewCatalogProducer(broadcast)
+video, err := moqvideo.NewProducer(catalog, moqvideo.EncoderInput{...}, moqvideo.EncoderOutput{...}, nil)
+err = video.Write(moqvideo.Frame{Timestamp: time.Duration(pts) * time.Microsecond, Data: rgba})
+frames, err := moqvideo.Subscribe(ctx, consumer, name, rendition, output)
+```
+
 ### Background panics are reported (#5562)
 
 A panic in a background task returns an `ErrTask` error carrying the panic message, and other objects keep running.

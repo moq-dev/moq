@@ -4,6 +4,23 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Native codecs have `audio` and `video` packages (#5694)
+
+`BroadcastProducer.encodeAudio` / `encodeVideo` are the `dev.moq.audio.Producer` / `dev.moq.video.Producer` constructors, which take a `CatalogProducer`.
+The audio track name moves into the encoder output's `track`, and a zero `frameDurationUs` takes the codec's own frame.
+`BroadcastConsumer.decodeAudio` / `decodeVideo` are `dev.moq.audio.Consumer.subscribe(broadcast, ...)` / `dev.moq.video.Consumer.subscribe(broadcast, ...)`.
+Producers expose subscriber state only through `demand()`, and a video `gop` is `MoqVideoGop.Keyframe(interval)`.
+`dev.moq.audio.Encoder` / `dev.moq.video.Encoder` encode without publishing.
+
+```kotlin
+// Before
+val video = broadcast.encodeVideo(input, output)
+val frames = consumer.decodeVideo(name, rendition, decoder)
+// After
+val video = dev.moq.video.Producer(CatalogProducer(broadcast), input, output)
+val frames = dev.moq.video.Consumer.subscribe(consumer, name, rendition, decoder)
+```
+
 ### Background panics are reported (#5562)
 
 A panic in a background task throws `uniffi.moq.MoqException.Task` with the panic message as `reason`, and other objects keep running.

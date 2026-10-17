@@ -5,6 +5,25 @@ These are the UniFFI names; each language wrapper has its own `MIGRATE.md` in it
 
 ## Unreleased
 
+### Native codecs have audio and video namespaces (#5694)
+
+`MoqBroadcastProducer::encode_audio` / `encode_video` are the `MoqAudioProducer::new` / `MoqVideoProducer::new` constructors, which take the broadcast's `MoqMediaCatalogProducer`.
+The audio track name moves into `MoqAudioEncoderOutput::track`, and a zero `frame_duration_us` (the new default) takes the codec's own frame.
+`MoqBroadcastConsumer::decode_audio` / `decode_video` are `MoqAudioConsumer::subscribe` / `MoqVideoConsumer::subscribe`, taking the broadcast first.
+The producers' `name()`, `used()`, and `unused()` are gone; read subscriber state through `demand()`.
+`MoqVideoEncoderOutput::gop` is `Option<MoqVideoGop>`, so `Some(30)` is `Some(MoqVideoGop::Keyframe { interval: 30 })`.
+Codec-only `MoqAudioEncoder` / `MoqVideoEncoder` encode without publishing.
+
+```rust
+// Before
+let video = broadcast.encode_video(input, output, None)?;
+let frames = consumer.decode_video(name, rendition, decoder).await?;
+// After
+let catalog = MoqMediaCatalogProducer::new(broadcast)?;
+let video = MoqVideoProducer::new(&catalog, input, output, None)?;
+let frames = MoqVideoConsumer::subscribe(&consumer, name, rendition, decoder).await?;
+```
+
 ### Background panics are reported (#5562)
 
 A panic in a binding-owned background task reports `MoqError::Task { reason }` with the panic message, and other objects keep running.

@@ -4,6 +4,31 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Native codecs have `audio` and `video` modules (#5694)
+
+`BroadcastProducer.encode_audio` / `encode_video` are `moq.audio.Producer` / `moq.video.Producer`, built from a `moq.media.CatalogProducer`.
+The audio track name moves into `EncoderOutput(track=...)`, and durations and timestamps are `timedelta` (`frame_duration`, `Frame.timestamp`) instead of `_us` integers; a zero `frame_duration` takes the codec's own frame.
+`BroadcastConsumer.decode_audio` / `decode_video` are `await moq.audio.Consumer.subscribe(broadcast, ...)` / `moq.video.Consumer.subscribe`.
+Producers expose subscriber state only through `demand()`, and a video `gop` is `moq.video.Gop.KEYFRAME(interval=...)`.
+`moq.audio.Encoder` / `moq.video.Encoder` encode without publishing.
+
+```python
+# Before
+audio = broadcast.encode_audio(
+    "audio",
+    moq.AudioEncoderInput(format=moq.AudioSampleFormat.F32, sample_rate=48000, channels=1),
+    moq.AudioEncoderOutput(codec=moq.AudioCodec.opus(), frame_duration_us=20_000),
+)
+audio.write(moq.AudioFrame(timestamp_us=0, data=pcm))
+# After
+audio = moq.audio.Producer(
+    moq.media.CatalogProducer(broadcast),
+    moq.audio.EncoderInput(format=moq.audio.SampleFormat.F32, sample_rate=48000, channels=1),
+    moq.audio.EncoderOutput(codec=moq.audio.Codec.opus(), track="audio", frame_duration=timedelta(milliseconds=20)),
+)
+audio.write(moq.audio.Frame(timestamp=timedelta(0), data=pcm))
+```
+
 ### Background panics are reported (#5562)
 
 A panic in a background task raises `moq.Error.Task` with the panic message as `reason`, and other objects keep running.

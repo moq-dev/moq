@@ -11,7 +11,9 @@ import (
 	"time"
 
 	"moq.dev/moq"
+	moqaudio "moq.dev/moq/audio"
 	moqmedia "moq.dev/moq/media"
+	moqvideo "moq.dev/moq/video"
 )
 
 // testTimeout bounds the blocking stream calls so a regression fails the test
@@ -174,8 +176,13 @@ func TestEncodeAudioWithOpusObject(t *testing.T) {
 			t.Fatal(err)
 		}
 		codec := moq.OpusAudioCodec()
-		output := moq.AudioEncoderOutput{Codec: codec, FrameDurationUs: 20000}
-		producer, err := broadcast.EncodeAudio("mic", moq.AudioEncoderInput{
+		name := "mic"
+		output := moqaudio.EncoderOutput{Codec: codec, Track: &name, FrameDuration: 20 * time.Millisecond}
+		catalog, err := moqmedia.NewCatalogProducer(broadcast)
+		if err != nil {
+			t.Fatal(err)
+		}
+		producer, err := moqaudio.NewProducer(catalog, moqaudio.EncoderInput{
 			Format:     moq.AudioSampleFormatF32,
 			SampleRate: 48000,
 			Channels:   1,
@@ -185,21 +192,17 @@ func TestEncodeAudioWithOpusObject(t *testing.T) {
 		}
 		if codecFirst {
 			codec.Destroy()
-		} else {
-			// Dropping the config first must not invalidate the producer.
-			output.Destroy()
 		}
 		// One 20 ms Opus frame of silence at 48 kHz mono.
-		if err := producer.Write(moq.AudioFrame{TimestampUs: 0, Data: make([]byte, 960*4)}); err != nil {
+		if err := producer.Write(moqaudio.Frame{Data: make([]byte, 960*4)}); err != nil {
 			t.Fatal(err)
 		}
-		if codecFirst {
-			output.Destroy()
-		} else {
+		if !codecFirst {
 			codec.Destroy()
 		}
-		if name, err := producer.Name(); err != nil || name != "mic" {
-			t.Fatalf("name = %q err=%v, want mic", name, err)
+		demand, err := producer.Demand()
+		if err != nil || demand.Name() != "mic" {
+			t.Fatalf("demand name err=%v", err)
 		}
 		if err := producer.Finish(); err != nil {
 			t.Fatal(err)
@@ -217,31 +220,31 @@ func TestEncodeAudioFrameDurations(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	input := moq.AudioEncoderInput{
+	input := moqaudio.EncoderInput{
 		Format:     moq.AudioSampleFormatF32,
 		SampleRate: 48000,
 		Channels:   1,
 	}
 
-	fine, err := broadcast.EncodeAudio("fine", input, moq.AudioEncoderOutput{
-		Codec:           moq.OpusAudioCodec(),
-		FrameDurationUs: 2500,
-	}, nil)
+	catalog, err := moqmedia.NewCatalogProducer(broadcast)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fineName := "fine"
+	fine, err := moqaudio.NewProducer(catalog, input, moqaudio.EncoderOutput{Codec: moq.OpusAudioCodec(), Track: &fineName, FrameDuration: 2500 * time.Microsecond}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	// 2.5 ms of silence at 48 kHz mono f32: exactly one encoded frame.
-	if err := fine.Write(moq.AudioFrame{TimestampUs: 0, Data: make([]byte, 120*4)}); err != nil {
+	if err := fine.Write(moqaudio.Frame{Data: make([]byte, 120*4)}); err != nil {
 		t.Fatal(err)
 	}
 	if err := fine.Finish(); err != nil {
 		t.Fatal(err)
 	}
 
-	_, err = broadcast.EncodeAudio("coarse", input, moq.AudioEncoderOutput{
-		Codec:           moq.OpusAudioCodec(),
-		FrameDurationUs: 2000,
-	}, nil)
+	coarseName := "coarse"
+	_, err = moqaudio.NewProducer(catalog, input, moqaudio.EncoderOutput{Codec: moq.OpusAudioCodec(), Track: &coarseName, FrameDuration: 2 * time.Millisecond}, nil)
 	if !errors.Is(err, moq.ErrAudio) {
 		t.Fatalf("err = %v, want ErrAudio: 2 ms is not an opus frame duration", err)
 	}
@@ -288,10 +291,14 @@ func testDecodeVideoFrame(t *testing.T, surface bool) {
 		t.Fatal(err)
 	}
 	track := "camera"
-	video, err := broadcast.EncodeVideo(
-		moq.VideoEncoderInput{Format: moq.VideoPixelFormatRgba, Width: 320, Height: 240, Framerate: 30},
+	catalogProducer, err := moqmedia.NewCatalogProducer(broadcast)
+	if err != nil {
+		t.Fatal(err)
+	}
+	video, err := moqvideo.NewProducer(catalogProducer,
+		moqvideo.EncoderInput{Format: moq.VideoPixelFormatRgba, Width: 320, Height: 240, Framerate: 30},
 		// Software both ways so the test is deterministic everywhere.
-		moq.VideoEncoderOutput{Codec: moq.VideoCodecH264, Track: &track, Kind: moq.SoftwareEncoder()},
+		moqvideo.EncoderOutput{Codec: moq.VideoCodecH264, Track: &track, Kind: moq.SoftwareEncoder()},
 		nil,
 	)
 	if err != nil {
@@ -310,7 +317,7 @@ func testDecodeVideoFrame(t *testing.T, surface bool) {
 		t.Fatal(err)
 	}
 	for i := range 10 {
-		if err := video.Write(moq.VideoFrame{TimestampUs: uint64(i) * 33333, Data: rgba}); err != nil {
+		if err := video.Write(moqvideo.Frame{Timestamp: time.Duration(i) * 33333 * time.Microsecond, Data: rgba}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -328,7 +335,7 @@ func testDecodeVideoFrame(t *testing.T, surface bool) {
 		t.Fatalf("catalog has no %q rendition: %v", track, catalog.Video)
 	}
 
-	decoder, err := bc.DecodeVideo(ctx, track, rendition, moq.VideoDecoderOutput{Surface: surface})
+	decoder, err := moqvideo.Subscribe(ctx, bc, track, rendition, moqvideo.DecoderOutput{Surface: surface})
 	if surface && runtime.GOOS != "darwin" {
 		if !errors.Is(err, moq.ErrUnsupported) {
 			t.Fatalf("surface decode off macOS: err = %v, want ErrUnsupported", err)
@@ -341,7 +348,7 @@ func testDecodeVideoFrame(t *testing.T, surface bool) {
 
 	// Keep the encoder fed so the decoder sees frames after it joined.
 	for i := 10; i < 40; i++ {
-		if err := video.Write(moq.VideoFrame{TimestampUs: uint64(i) * 33333, Data: rgba}); err != nil {
+		if err := video.Write(moqvideo.Frame{Timestamp: time.Duration(i) * 33333 * time.Microsecond, Data: rgba}); err != nil {
 			t.Fatal(err)
 		}
 	}
