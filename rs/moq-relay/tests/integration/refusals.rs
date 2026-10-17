@@ -183,12 +183,27 @@ async fn lan_refusals_are_counted() {
 	relay.stop().await;
 }
 
-/// An auth server that cannot be reached is `unavailable`, apart from a refusal.
+/// An auth server whose connection fails is `unavailable`, apart from a refusal.
 #[tokio::test]
 async fn unavailable_auth_server_is_counted() {
-	let closed = std::net::TcpListener::bind("127.0.0.1:0").expect("reserve a port");
-	let auth_url = format!("http://{}/", closed.local_addr().expect("reserved address"));
-	drop(closed);
+	// Listen to reserve the port on every OS, then hang up before answering HTTP.
+	let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+		.await
+		.expect("auth listener");
+	let address = listener.local_addr().expect("reserved address");
+	assert!(
+		std::net::TcpListener::bind(address).is_err(),
+		"auth port must stay reserved"
+	);
+	let mut tasks = tokio::task::JoinSet::new();
+	tasks.spawn(async move {
+		loop {
+			let (stream, _) = listener.accept().await.expect("accept auth connection");
+			drop(stream);
+		}
+	});
+	let auth_url = format!("http://{address}/");
+	assert!(reqwest::get(&auth_url).await.is_err(), "auth endpoint must fail HTTP");
 
 	let dir = tempfile::tempdir().expect("tempdir");
 	let mut config = config(dir.path(), false);

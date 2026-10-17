@@ -694,8 +694,19 @@ test("Consumer measures arrivals as they land", async () => {
 	}
 	expect(consumer.spread.peek()).toBeLessThan(100 as Milli);
 
+	// A replacement on the same path continues the estimate rather than restarting cold.
+	const next = new Track.Producer("next");
+	const replacement = new Consumer(next.subscribe(), {
+		format: new LegacyFormat("audio"),
+		maxDelay: 5000 as Milli,
+		predecessor: consumer,
+	});
+	expect(replacement.spread.peek()).toBe(consumer.spread.peek());
+
 	track.close();
 	consumer.close();
+	next.close();
+	replacement.close();
 });
 
 // --- Ordering ---

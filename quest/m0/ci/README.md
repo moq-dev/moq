@@ -64,7 +64,6 @@ The historical samples locate candidates; they are not controlled benchmarks.
 
 - [Pin Quest's gate](/quest/m0/ci/quest-gate-pin.md) - make shared command admission available
 - [Share local check capacity](/quest/m0/ci/local-gate.md) - gate expensive phases and bound internal fanout
-- [Dart FFI build](/quest/m0/ci/dart-ffi-build.md) - the Dart check builds release `moq-ffi` once instead of twice
 - [Windows restart drill](/quest/m0/ci/platform-windows-drill.md) - the relay restart drill passes on Windows in the merge queue
 - [Require platform gates](/quest/m0/ci/platform-queue.md) - activate the consolidated platform checks in the main and release rulesets after the workflow lands
 - [mbx on R2](/quest/m0/ci/mbx-r2.md) - Rust builds on every OS read an R2 cache that only `main` writes, escaping the 10 GB Actions cache

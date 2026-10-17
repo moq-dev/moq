@@ -9,11 +9,11 @@
 
 set working-directory := '..'
 
-# `moq-net-fuzz` is a workspace member only so it shares the root lockfile; libFuzzer
+# The `*-fuzz` crates are workspace members only so they share the root lockfile; libFuzzer
 # needs a nightly toolchain and sanitizer flags, so `just rs fuzz` is the one recipe
 # that may compile it. Every `--workspace` below therefore carries this, as does
 # sh/rs/select.sh, since it cannot read this.
-no_fuzz := "--exclude moq-net-fuzz"
+no_fuzz := "--exclude moq-net-fuzz --exclude moq-quic-fuzz"
 
 default:
     just check
@@ -300,10 +300,10 @@ loom *args:
 send-depth:
     bash sh/rs/send-depth.sh
 
-# Needs nightly and cargo-fuzz; CI replays the corpus on stable through
-# moq-net's own tests instead. See rs/moq-net/fuzz/README.md.
+# Needs nightly and cargo-fuzz; CI replays the corpus on stable through each
+# crate's own tests instead. See rs/moq-net/fuzz/README.md and rs/moq-quic/fuzz/README.md.
 
-# Fuzz the moq-net wire codecs: `just rs fuzz lite -- -max_total_time=300`.
+# Fuzz a moq-net or moq-quic target by name: `just rs fuzz lite -- -max_total_time=300`.
 [positional-arguments]
 fuzz target *args:
     sh/rs/fuzz.sh "$@"
