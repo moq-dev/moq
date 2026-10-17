@@ -5257,6 +5257,8 @@ struct Interleave {
 	source: crate::Source,
 	/// The next audio frame to write.
 	audio_index: u64,
+	/// Audio frames per group.
+	audio_group: u64,
 	/// The paused clock's instant at media time zero, set by the first [`Self::at`].
 	start: Option<tokio::time::Instant>,
 }
@@ -5313,6 +5315,7 @@ impl Interleave {
 			video,
 			audio,
 			audio_index: 0,
+			audio_group: AUDIO_GROUP,
 			start: None,
 		}
 	}
@@ -5351,18 +5354,23 @@ impl Interleave {
 	/// polling `export` after each.
 	fn audio_until(&mut self, until: u64, export: &mut Export<crate::catalog::Consumer>, out: &mut Vec<Frame>) {
 		while self.audio_index * AUDIO_US < until {
-			let index = self.audio_index;
-			self.audio
-				.write(Frame {
-					timestamp: Timestamp::from_micros(index * AUDIO_US).unwrap(),
-					duration: None,
-					payload: Bytes::from_iter((0..180u16).map(|i| (i ^ index as u16) as u8)),
-					keyframe: index.is_multiple_of(AUDIO_GROUP),
-				})
-				.unwrap();
-			self.audio_index += 1;
+			self.audio_frame();
 			out.extend(poll_frames(export));
 		}
+	}
+
+	/// Write the next audio frame.
+	fn audio_frame(&mut self) {
+		let index = self.audio_index;
+		self.audio
+			.write(Frame {
+				timestamp: Timestamp::from_micros(index * AUDIO_US).unwrap(),
+				duration: None,
+				payload: Bytes::from_iter((0..180u16).map(|i| (i ^ index as u16) as u8)),
+				keyframe: index.is_multiple_of(self.audio_group),
+			})
+			.unwrap();
+		self.audio_index += 1;
 	}
 
 	fn finish(&mut self) {
@@ -5605,7 +5613,9 @@ async fn tune_in_does_not_wait_on_dropped_audio() {
 	let mut export = rig.export(delay).await;
 	let mut out = Vec::new();
 	rig.audio_until(3 * GOP * VIDEO_US, &mut export, &mut out);
-	for tick in GOP..2 * GOP {
+	// Under a delay's worth of the group, read at once: the whole group would leave its
+	// keyframe stale, and the audio would wait on the next.
+	for tick in GOP..GOP + 6 {
 		rig.video(tick);
 	}
 	out.extend(poll_frames(&mut export));
@@ -5762,6 +5772,50 @@ async fn audio_dropped_ahead_of_a_moved_start_is_not_started() {
 	assert!(
 		audio.iter().all(|&p| p >= pts(GOP)),
 		"no audio leads the keyframe: {audio:?}"
+	);
+	let stats = export.stats();
+	assert_eq!(stats.dropped, 0, "nothing was lost from the output");
+	assert!(stats.trimmed > 0);
+}
+
+/// A joiner's start group older than the delay goes stale at acquisition and is dropped
+/// whole, so the video holds nothing until its next keyframe lands. The audio due meanwhile
+/// presents after the dropped keyframe but before the next one, and is dropped rather than
+/// leading it.
+#[tokio::test(start_paused = true)]
+async fn a_stale_start_group_holds_the_audio_behind_the_next_keyframe() {
+	let delay = Duration::from_millis(100);
+	let mut rig = Interleave::new().await;
+	// A group per audio frame, so the joiner's audio starts at the live edge, fresher than the
+	// video's start group.
+	rig.audio_group = 1;
+	// Join 160 ms into the first group: older than the delay, with most of it still to come.
+	let join = 4;
+	for tick in 0..join {
+		rig.at(tick * VIDEO_US).await;
+		rig.video(tick);
+		while rig.audio_index * AUDIO_US < (tick + 1) * VIDEO_US {
+			rig.audio_frame();
+		}
+	}
+	let mut export = open_export(rig.source.clone()).await.unwrap().with_delay(delay);
+	let mut out = Vec::new();
+	for tick in join..3 * GOP {
+		rig.at(tick * VIDEO_US).await;
+		rig.video(tick);
+		out.extend(poll_frames(&mut export));
+		rig.audio_until((tick + 1) * VIDEO_US, &mut export, &mut out);
+	}
+	rig.finish();
+	out.extend(drain_frames(&mut export).await);
+
+	let ts: Vec<u8> = out.iter().flat_map(|f| f.payload.iter().copied()).collect();
+	let (video, audio) = collect_pes_pts(&ts);
+	let pts = |tick: u64| tick * VIDEO_US * 90 / 1_000;
+	assert_eq!(video.first(), Some(&pts(GOP)), "the stale start group is dropped");
+	assert!(
+		audio.iter().all(|&p| p >= pts(GOP)),
+		"no audio leads the keyframe the export starts at: {audio:?}"
 	);
 	let stats = export.stats();
 	assert_eq!(stats.dropped, 0, "nothing was lost from the output");
