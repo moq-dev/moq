@@ -51,8 +51,13 @@ impl<S: poll::Session> poll::Session for Local<S> {
 		self.0.send_group(priority).map(Local::new)
 	}
 
-	fn poll_send_datagram(&mut self, cx: &mut Context<'_>, payload: &[u8]) -> Poll<Result<(), Self::Error>> {
-		self.0.poll_send_datagram(cx, payload)
+	fn send_datagram(
+		&mut self,
+		payload: Bytes,
+		group: Option<&Local<<S::SendStream as poll::SendStream>::Group>>,
+		order: i64,
+	) -> Result<(), Self::Error> {
+		self.0.send_datagram(payload, group.map(|group| &*group.0), order)
 	}
 
 	fn poll_recv_datagram(&mut self, cx: &mut Context<'_>) -> Poll<Result<Bytes, Self::Error>> {

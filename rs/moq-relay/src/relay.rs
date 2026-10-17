@@ -1,7 +1,7 @@
 //! The assembled relay: every startup step, in one place, in the right order.
 //!
-//! [`Relay::load`] turns a [`Config`] into the running pieces (server, client,
-//! auth, cluster, stats, internal + web listeners), and [`Relay::run`] drives
+//! [`Relay::load`] turns a [`Config`] into the running pieces (server, auth,
+//! cluster, stats, internal + web listeners), and [`Relay::run`] drives
 //! them. `main.rs` is a thin wrapper over the two.
 //!
 //! # Why this is a type and not just `main`
@@ -50,7 +50,7 @@ impl Ready {
 /// shutdown join.
 ///
 /// The accessors borrow, and [`Self::run`] consumes the relay, so clone the
-/// application handles ([`Self::cluster`], [`Self::auth`], [`Self::client`],
+/// application handles ([`Self::cluster`], [`Self::auth`],
 /// [`Self::stats`], [`Self::shutdown`], [`Self::shutdown_trigger`]) first,
 /// then mount extra routes with [`Self::with_web`] / [`Self::with_internal`].
 /// An application that decides admissions itself leaves `[auth]` empty and
@@ -72,7 +72,6 @@ pub struct Relay {
 	ready: tokio::sync::watch::Sender<bool>,
 	config: Config,
 	server: moq_tokio::Listener,
-	client: moq_tokio::Client,
 	auth: auth::Auth,
 	/// The sessions the embedder decides, until it takes them. `None` when the
 	/// config named a source; `run` refuses to start while this is still held.
@@ -81,6 +80,8 @@ pub struct Relay {
 	stats: moq_stats::Producer,
 	internal: internal::Internal,
 	web: web::Web,
+	/// The ACME client, issuing before [`Self::run`] serves and renewing after.
+	acme: Option<crate::acme::Acme>,
 	stun: Option<crate::stun::Server>,
 	addr: Option<std::net::SocketAddr>,
 	shutdown: shutdown::Observer,
@@ -122,6 +123,11 @@ impl Relay {
 
 	async fn load_inner(mut config: Config) -> anyhow::Result<Self> {
 		config.resolve()?;
+		// Every TLS listener serves the ACME certificate, so install it before any is built.
+		let acme = config.acme.init(&config.listen.tls, &config.web.https)?;
+		if let Some(acme) = &acme {
+			config.listen.tls.resolver = Some(acme.resolver());
+		}
 		let resolved_config = config.clone();
 		let drain_timeout = config.drain_timeout();
 		// The name this relay reports in every auth request: the stats node label,
@@ -245,7 +251,6 @@ impl Relay {
 			true => server_config.init_streams()?,
 			false => server_config.init()?,
 		};
-		let client = config.connect.clone().init(config.quic.clone())?;
 
 		// `None` for a stream-only server (no QUIC); any other error is real.
 		#[cfg(all(target_os = "linux", feature = "_uring"))]
@@ -260,12 +265,6 @@ impl Relay {
 				Err(moq_tokio::Error::NoBackend(_)) => None,
 				Err(err) => return Err(err).context("failed to resolve the QUIC bind address"),
 			},
-		};
-
-		#[cfg(feature = "iroh")]
-		let client = match iroh {
-			Some(iroh) => client.with_iroh(iroh),
-			None => client,
 		};
 
 		let cache = config.cache.init()?;
@@ -289,10 +288,14 @@ impl Relay {
 		cluster_options.session = config.session;
 		cluster_options.peer = config.peer;
 		let cluster = cluster::Cluster::new(cluster_options)?
-			.with_client(client.clone())
 			.with_client_tls(config.connect.tls.build()?)
 			.with_connect(config.connect.clone(), config.quic.clone())
 			.with_advertise(advertise);
+		#[cfg(feature = "iroh")]
+		let cluster = match iroh {
+			Some(iroh) => cluster.with_iroh(iroh),
+			None => cluster,
+		};
 		let stats = config.stats.build(cluster.origin.clone());
 		// The cluster takes over keeping the publish task alive, so an embedder that
 		// drops the producer keeps publishing for as long as it serves.
@@ -301,6 +304,7 @@ impl Relay {
 		let sessions = crate::session::Registry::new();
 		let (ready, _) = tokio::sync::watch::channel(false);
 		let web = web::Web::new(auth.clone(), cluster.clone(), certificates, config.web)
+			.with_acme(acme.as_ref().map(crate::acme::Acme::resolver))
 			.with_shutdown(shutdown.clone())
 			.with_versions(server_versions)
 			.with_extensions(server_extensions)
@@ -348,13 +352,13 @@ impl Relay {
 			ready,
 			config: resolved_config,
 			server,
-			client,
 			auth,
 			admissions,
 			cluster,
 			stats,
 			internal,
 			web,
+			acme,
 			stun,
 			addr,
 			shutdown,
@@ -400,12 +404,6 @@ impl Relay {
 	/// The bound plain TCP (qmux) address, or `None` when `listen.tcp.bind` is unset.
 	pub fn tcp_addr(&self) -> Option<std::net::SocketAddr> {
 		self.server.tcp_local_addr()
-	}
-
-	/// The client used to dial cluster peers. Already handed to [`Self::cluster`];
-	/// clone it for your own outbound dials so they share the connection config.
-	pub fn client(&self) -> &moq_tokio::Client {
-		&self.client
 	}
 
 	/// Where every session's grant comes from: the auth server, the static public
@@ -530,6 +528,7 @@ impl Relay {
 			cluster,
 			internal,
 			web,
+			acme,
 			stun,
 			shutdown,
 			shutdown_trigger,
@@ -553,6 +552,17 @@ impl Relay {
 			admissions.is_none(),
 			"no --auth-url or --auth-public configured; nobody can authenticate (an embedder decides by taking Relay::admissions)"
 		);
+
+		// Nothing else serves or reports ready until the certificate exists: a
+		// self-signed placeholder would only fail every browser that connects.
+		if let Some(mut acme) = acme {
+			let listener = web.https_listener().context("ACME needs the HTTPS listener")?;
+			tokio::select! {
+				res = acme.issue(listener) => res?,
+				res = drain(shutdown_trigger.clone(), shutdown.clone(), signals) => return res,
+			}
+			cluster.critical.spawn("ACME renewal", acme.run());
+		}
 
 		// Validate the cluster and bind its LAN advertisement before claiming to be
 		// ready: the `cluster.run()` below is first polled after the notify, so a bad
@@ -696,6 +706,9 @@ impl Relay {
 			res = drain(shutdown_trigger, shutdown.clone(), signals) => res,
 			else => Ok(()),
 		};
+
+		// Before the runtime goes, so each dialed peer drops our routes at once.
+		cluster.close().await;
 
 		// Dropping the listener would leave its QUIC socket open until the
 		// endpoint's closing connections finish in the background, past `run`.

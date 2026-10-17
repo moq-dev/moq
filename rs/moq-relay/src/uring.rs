@@ -130,6 +130,7 @@ impl Workers {
 						&& listen.tls.generate.is_empty()
 						&& listen.tls.root.is_empty()
 						&& listen.tls.identity.is_none()
+						&& listen.tls.resolver.is_none()
 						&& listen.tls.peers.is_none(),
 					"a shared TLS policy cannot be combined with listen.tls settings"
 				);
@@ -653,13 +654,14 @@ async fn serve_connection(
 	};
 
 	deadline.close = Some(transport.clone());
+	let conn = transport.clone();
 	let server = moq_net::Server::new().with_versions(serve.versions.clone());
 	let binding = match url {
 		Some(_) => moq_net::transport::Binding::Uri,
 		None => moq_net::transport::Binding::InBand,
 	};
 	let session = moq_uring::transport::Session::new(transport, binding);
-	let now = std::time::Instant::now();
+	let now = moq_net::time::now();
 	// moq-lite on its own ALPN runs unboxed on this worker. Everything else
 	// (moq-transport, and the versions that negotiate in a bidi SETUP, which a
 	// browser offering no subprotocol falls back to) boxes its futures with a
@@ -670,6 +672,7 @@ async fn serve_connection(
 		.is_some_and(|version| version.is_lite());
 	let mut accepted = Accepted {
 		handle,
+		conn,
 		deadline,
 		serve,
 		id,
@@ -703,6 +706,7 @@ async fn serve_connection(
 /// before the moq handshake consumed it.
 struct Accepted {
 	handle: moq_uring::Handle,
+	conn: moq_uring::quic::web::Session,
 	deadline: Deadline,
 	serve: Serve,
 	id: u64,
@@ -720,6 +724,7 @@ async fn serve_request<S: moq_net::transport::poll::Session>(
 ) -> anyhow::Result<()> {
 	let Accepted {
 		handle,
+		conn,
 		mut deadline,
 		serve,
 		id,
@@ -806,8 +811,11 @@ async fn serve_request<S: moq_net::transport::poll::Session>(
 			.spawn(async move {
 				// Abandoned at the drain deadline: worker teardown only detaches this task.
 				let admitted = shutdown
-					.admit(cluster.admit_session(&auth, auth_request.clone()))
-					.await?;
+					.admit(async {
+						Ok::<_, crate::auth::Error>(cluster.admit_session(&auth, auth_request.clone()).await)
+					})
+					.await
+					.inspect_err(|err| cluster.refusals.record(err.into()))??;
 				Ok::<_, crate::auth::Error>((admitted, sessions.register(auth_request)))
 			})
 			.await
@@ -818,7 +826,6 @@ async fn serve_request<S: moq_net::transport::poll::Session>(
 				admitted
 			}
 			Err(err) => {
-				serve.cluster.refusals.record((&err).into());
 				// The status is what separates "your credential is bad" from "the
 				// auth server is down". Collapsing both into Unauthorized tells a
 				// client to stop reconnecting through an outage it could have
@@ -842,7 +849,17 @@ async fn serve_request<S: moq_net::transport::poll::Session>(
 		stats,
 	} = admitted;
 
-	let mut request = request.with_stats(stats).with_limits(serve.cluster.limits(&lease));
+	// A peer's QUIC limits widen before SETUP OK, so its first requests see them.
+	if let Some(limits) = serve.cluster.quic_limits(&lease) {
+		conn.set_limits(moq_uring::quic::Limits {
+			max_streams: limits.max_streams,
+			receive_window: limits.receive_window,
+			send_window: limits.send_window,
+		})?;
+	}
+	let mut request = request
+		.with_stats(stats.clone())
+		.with_limits(serve.cluster.limits(&lease));
 	if let Some(subscriber) = subscriber {
 		request = request.with_publisher(subscriber);
 	}
@@ -850,7 +867,10 @@ async fn serve_request<S: moq_net::transport::poll::Session>(
 		request = request.with_subscriber(publisher);
 	}
 	let lease = lease.preparing(request.auth(), request.role())?;
-	let (session, driver) = deadline.bound(request.ok()).await?;
+	let (session, driver) = deadline
+		.bound(request.ok())
+		.await
+		.inspect_err(|err| crate::connection::setup_failed(&stats, err.downcast_ref()))?;
 	let driver_handle = handle.clone();
 	let driver = async move {
 		match driver_handle.run(driver).await {

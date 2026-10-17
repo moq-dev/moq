@@ -34,5 +34,4 @@ Public API: none. Wire: none.
 
 ## Required
 
-- [Dropped session close](/quest/m2/uring-drop-close.md) - closes are delivered when a session is dropped on the ring
 - [One port on the io_uring workers](/quest/m2/uring-demux.md) - a one-port config is served on the ring too

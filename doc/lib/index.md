@@ -28,6 +28,7 @@ Rust core: Python, Kotlin, Swift, Go, Dart, and C++ are generated from one
 [UniFFI](https://mozilla.github.io/uniffi-rs/) crate (`moq-ffi`) and then
 wrapped in an idiomatic layer, while C gets a hand-written stable ABI
 (`moq-c`). A feature added to the core lands in all of them together.
+[Layers](/lib/layers) shows where each layer they wrap lives in every binding.
 
 ## What every binding can do
 
@@ -37,7 +38,7 @@ how it looks in that language:
 - **Connect** to a relay with TLS options and a JWT in the URL, or **serve** sessions yourself and accept or reject each request by path.
 - **Reconnect** automatically with backoff when the transport drops.
 - **Discover** broadcasts by prefix, wait for a specific one, or request one by path. Advertise an exact path (a created broadcast is invisible until announced), or claim a prefix and serve requests beneath it on demand.
-- **Publish and subscribe to media** with the hang catalog filled in from the bitstream, or hand over raw pixels and PCM and let the binding encode and decode (VideoToolbox, Media Foundation, NVENC, openh264, Opus). The built-in video encoder can follow the connection's send estimate.
+- **Publish and subscribe to media** with the hang catalog filled in from the bitstream, or hand over raw pixels and PCM and let the binding encode and decode (VideoToolbox, Media Foundation, NVENC, openh264, Opus). The built-in video encoder can follow the connection's send estimate. The audio decoder reports the playout delay to buffer ahead of the playhead, fixed or estimated from arrivals, so read each frame as soon as the last is handled rather than pacing reads to the speaker.
 - **Raw tracks** of arbitrary bytes, with per-subscriber priority and max delay, and best-effort datagrams.
 - **JSON tracks** as a latest value with merge-patch deltas, or as an append log.
 - **Fetch** a single cached group by sequence.
@@ -45,5 +46,4 @@ how it looks in that language:
 - **Routes**: see which relays a broadcast came through, and advertise a cost as a standby publisher.
 - **Connection stats** and **errors** that tell an auth rejection (don't retry) from a shutdown or a transport failure.
 
-Dart is the exception on codecs: its published binaries carry no encoder or
-decoder, so it moves already-encoded frames.
+C's audio decoder neither takes nor reports a playout delay.

@@ -26,6 +26,8 @@ pub mod hidden;
 mod location;
 pub mod message;
 mod namespace;
+#[cfg(feature = "async")]
+mod new_group;
 mod object;
 pub mod peer;
 mod priority;

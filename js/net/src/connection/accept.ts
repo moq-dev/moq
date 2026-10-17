@@ -122,7 +122,7 @@ async function acceptAlpn(
 		transport,
 		version,
 		"moq-lite-js",
-		wiring.extensions,
+		wiring,
 	);
 
 	return new Ietf.Connection({

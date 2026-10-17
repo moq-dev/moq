@@ -5,13 +5,23 @@
 # and compiles the doc samples. CXX picks the compiler on Unix; Windows uses MSVC.
 set -euo pipefail
 
+ffi_dir=""
+if [[ $# -gt 0 ]]; then
+    if [[ $# != 2 || "$1" != --ffi-dir ]]; then
+        echo "Usage: $0 [--ffi-dir DIR]" >&2
+        exit 1
+    fi
+    ffi_dir="$(cd "$2" && pwd)"
+fi
+
 cd "$(dirname "${BASH_SOURCE[0]}")/../../cpp"
 
 # Single-config generators build Debug. Visual Studio ignores CMAKE_BUILD_TYPE and gets
 # --config Release, since the Rust staticlib links the release CRT (/MD) either way.
 build=moq/build
+if [[ -n "$ffi_dir" ]]; then build=moq/build/prebuilt; fi
 prefix="$PWD/$build/prefix"
-cmake -S moq -B "$build/package" -DCMAKE_BUILD_TYPE=Debug -DCMAKE_INSTALL_LIBDIR=lib
+cmake -S moq -B "$build/package" -DCMAKE_BUILD_TYPE=Debug -DCMAKE_INSTALL_LIBDIR=lib -DMOQ_FFI_DIR="$ffi_dir"
 cmake --build "$build/package" --config Release
 rm -rf "$prefix"
 cmake --install "$build/package" --config Release --prefix "$prefix"

@@ -45,7 +45,7 @@ export type SourceInput = {
 
 	// The connection's PROBE estimates, used to auto-select a rendition when the target has no
 	// explicit bitrate. Usually wired from a `Connection`'s `probe`.
-	// Optional: without it auto-selection falls back to the preference order alone.
+	// Optional: without it auto-selection falls back to the rank order alone.
 	probe: Getter<Moq.Connection.Probe | undefined>;
 };
 
@@ -190,6 +190,13 @@ function enabledRenditions(renditions: Record<string, Catalog.VideoConfig>): Rec
 	return Object.fromEntries(Object.entries(renditions).filter(([, config]) => config.enabled !== false));
 }
 
+/** Keep only the highest preference: a lower one is a fallback for players that can't decode it. */
+function preferredRenditions(renditions: Record<string, Catalog.VideoConfig>): Record<string, Catalog.VideoConfig> {
+	const entries = Object.entries(renditions);
+	const top = Math.max(...entries.map(([, config]) => config.preference ?? 0));
+	return Object.fromEntries(entries.filter(([, config]) => (config.preference ?? 0) === top));
+}
+
 /**
  * Source handles catalog extraction, support checking, and rendition selection
  * for video playback. The Decoder consumes whichever rendition it picks.
@@ -323,7 +330,7 @@ export class Source {
 			}
 		}
 
-		const selected = this.#select(available, effectiveTarget);
+		const selected = this.#select(preferredRenditions(available), effectiveTarget);
 		if (!selected) return;
 
 		const config = available[selected];

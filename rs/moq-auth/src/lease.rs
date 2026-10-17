@@ -442,7 +442,10 @@ mod tests {
 	use std::time::SystemTime;
 
 	fn grant(publish: &str) -> Grant {
-		Grant::new([publish.parse().unwrap()].into_iter().collect(), Default::default())
+		Grant::new(
+			publish.parse::<moq_pattern::Pattern>().unwrap(),
+			moq_pattern::Patterns::new(),
+		)
 	}
 
 	fn poll<F: Future>(future: F) -> Poll<F::Output> {

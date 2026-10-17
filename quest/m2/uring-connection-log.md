@@ -53,4 +53,3 @@ Public API: none expected. Wire: none.
 ## Related
 
 - [Relay io_uring packages](/quest/m2/relay-io-uring-package.md) - ships the ring, whose operators read these logs
-- [Session outcomes](/quest/m1/session-outcomes.md) - counts refusals and ends on both paths, from the same duplicated admission

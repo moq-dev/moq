@@ -1,23 +1,36 @@
-//! Scheduling proofs through the real send path: streams written into send groups and
-//! drained into packets by `write_stream_frames`, with loss and resets applied the way
+//! Scheduling proofs through the real send path: streams and datagrams queued into send
+//! groups and drained into packets by `write_frames`, with loss and resets applied the way
 //! the connection applies them.
 
 use std::collections::HashMap;
+
+use bytes::{BufMut, Bytes, BytesMut};
 
 use super::state::StreamsState;
 use super::{SendDomain, SendGroup, SendGroups, SendStream, Streams};
 use crate::{
     Dir, Side, StreamId, VarInt,
     connection::{State as ConnState, spaces::Retransmits},
-    frame::StreamMeta,
+    frame::{self, Frame, StreamMeta},
     transport_parameters::TransportParameters,
 };
+
+/// One frame of a packet, in the order it was written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Sent {
+    Stream(StreamId),
+    /// A datagram, by the tag it was queued with.
+    Datagram(u64),
+}
 
 const PACKET: usize = 1200;
 
 /// How far two equally entitled groups may drift apart: each round robin may
 /// overdraw by a frame, at both the group and the domain tier.
 const SLACK: u64 = 2 * PACKET as u64;
+
+/// A PING frame's one byte, standing in for the control frames ahead of the streams.
+const PING: u8 = 0x01;
 
 /// A sender with more queued than the path takes, drained a packet at a time.
 struct Sender {
@@ -29,6 +42,12 @@ struct Sender {
     /// Bytes each stream's frames took on the wire, headers included, which is what
     /// the round robins share.
     wire: HashMap<StreamId, u64>,
+    /// Bytes each datagram tag took on the wire, headers included.
+    datagram_wire: HashMap<u64, u64>,
+    /// Every frame sent, in order.
+    order: Vec<Sent>,
+    /// The next datagram tag.
+    tag: u64,
 }
 
 impl Sender {
@@ -58,6 +77,9 @@ impl Sender {
             conn: ConnState::Established,
             sent: HashMap::new(),
             wire: HashMap::new(),
+            datagram_wire: HashMap::new(),
+            order: Vec::new(),
+            tag: 0,
         }
     }
 
@@ -99,10 +121,62 @@ impl Sender {
         assert_eq!(self.send(id).write(&vec![0; bytes]), Ok(bytes));
     }
 
-    /// Send one packet, returning its frames.
+    /// Queue a `bytes` payload datagram in `group` at `order`, returning its tag.
+    fn datagram(&mut self, group: Option<&SendGroup>, order: i64, bytes: usize) -> u64 {
+        let tag = self.tag;
+        self.tag += 1;
+        let mut data = BytesMut::with_capacity(bytes);
+        data.put_u64(tag);
+        data.resize(bytes, 0);
+        let datagram = frame::Datagram {
+            data: data.freeze(),
+        };
+        assert!(
+            self.state
+                .queue_datagram(datagram, group, order, usize::MAX)
+        );
+        tag
+    }
+
+    /// Send one packet, returning its stream frames.
     fn packet(&mut self) -> Vec<StreamMeta> {
-        let mut buf = Vec::with_capacity(PACKET);
-        let frames = self.state.write_stream_frames(&mut buf, PACKET, true);
+        self.packet_of(PACKET)
+    }
+
+    /// Send one packet of `size` bytes, returning its stream frames.
+    fn packet_of(&mut self, size: usize) -> Vec<StreamMeta> {
+        self.packet_after(&[], size)
+    }
+
+    /// Send one packet of `size` bytes that already holds the control frames `prefix`,
+    /// returning its stream frames.
+    fn packet_after(&mut self, prefix: &[u8], size: usize) -> Vec<StreamMeta> {
+        let mut buf = Vec::with_capacity(size);
+        buf.extend_from_slice(prefix);
+        let written = self.state.write_frames(&mut buf, 0..size, true);
+        let frames = written.streams;
+
+        // The packet's frames in order, and the wire bytes its datagrams took.
+        let mut datagram_bytes = 0;
+        let frames_in = match buf.is_empty() {
+            true => None,
+            false => Some(frame::Iter::new(Bytes::from(buf.clone())).unwrap()),
+        };
+        for frame in frames_in.into_iter().flatten() {
+            match frame.unwrap() {
+                Frame::Stream(stream) => self.order.push(Sent::Stream(stream.id)),
+                Frame::Datagram(datagram) => {
+                    let wire = datagram.size(true) as u64;
+                    let tag = u64::from_be_bytes(datagram.data[..8].try_into().unwrap());
+                    *self.datagram_wire.entry(tag).or_default() += wire;
+                    datagram_bytes += wire;
+                    self.order.push(Sent::Datagram(tag));
+                }
+                Frame::Ping => {}
+                frame => panic!("unexpected {frame:?}"),
+            }
+        }
+        let stream_bytes = (buf.len() - prefix.len()) as u64 - datagram_bytes;
 
         // Every frame carries its length but perhaps the last, which can run to the
         // end of the packet instead.
@@ -114,14 +188,11 @@ impl Sender {
                 (header.len() as u64, frame.offsets.end - frame.offsets.start)
             })
             .collect();
-        if sizes.iter().map(|(h, p)| h + p).sum::<u64>() != buf.len() as u64 {
+        if sizes.iter().map(|(h, p)| h + p).sum::<u64>() != stream_bytes {
             let (header, payload) = sizes.last_mut().unwrap();
             *header -= VarInt::from_u64(*payload).unwrap().size() as u64;
         }
-        assert_eq!(
-            sizes.iter().map(|(h, p)| h + p).sum::<u64>(),
-            buf.len() as u64
-        );
+        assert_eq!(sizes.iter().map(|(h, p)| h + p).sum::<u64>(), stream_bytes);
 
         for (frame, (header, payload)) in frames.iter().zip(sizes) {
             *self.sent.entry(frame.id).or_default() += payload;
@@ -152,9 +223,25 @@ impl Sender {
             .sum()
     }
 
+    /// Send `packets` packets, returning every frame in order.
+    fn drain_frames(&mut self, packets: usize) -> Vec<Sent> {
+        let start = self.order.len();
+        for _ in 0..packets {
+            self.packet();
+        }
+        self.order[start..].to_vec()
+    }
+
+    fn datagram_wire(&self, tags: &[u64]) -> u64 {
+        tags.iter()
+            .map(|tag| self.datagram_wire.get(tag).copied().unwrap_or(0))
+            .sum()
+    }
+
     fn clear(&mut self) {
         self.sent.clear();
         self.wire.clear();
+        self.datagram_wire.clear();
     }
 }
 
@@ -492,4 +579,187 @@ fn streams_can_leave_their_group() {
     sender.groups().close(group);
     assert!(sender.state.pending.is_clean());
     assert_eq!(sender.drain(1), [id]);
+}
+
+/// A low-priority datagram track waits behind a higher-priority stream rather than
+/// going out ahead of every stream.
+#[test]
+fn low_priority_datagrams_wait_behind_streams() {
+    let mut sender = Sender::new();
+    let high = sender.group(1);
+    let low = sender.group(0);
+    let tags: Vec<_> = (0..20)
+        .map(|seq| sender.datagram(Some(&low), seq, 1_000))
+        .collect();
+    let stream = sender.open(Some(&high), 0, 20_000);
+
+    let order = sender.drain_frames(100);
+    let first = order
+        .iter()
+        .position(|sent| matches!(sent, Sent::Datagram(_)))
+        .unwrap();
+    assert!(
+        order[..first]
+            .iter()
+            .all(|&sent| sent == Sent::Stream(stream))
+    );
+    assert!(
+        order[first..]
+            .iter()
+            .all(|sent| matches!(sent, Sent::Datagram(_)))
+    );
+    assert_eq!(sender.bytes(&[stream]), 20_000);
+    assert_eq!(order[first..].len(), tags.len());
+}
+
+/// A high-priority datagram track still goes ahead of lower-priority streams.
+#[test]
+fn high_priority_datagrams_preempt_streams() {
+    let mut sender = Sender::new();
+    let high = sender.group(1);
+    let low = sender.group(0);
+    let stream = sender.open(Some(&low), 0, 20_000);
+    let tags: Vec<_> = (0..20)
+        .map(|seq| sender.datagram(Some(&high), seq, 1_000))
+        .collect();
+
+    let order = sender.drain_frames(100);
+    // Newest first, as the group orders them.
+    let expected: Vec<_> = tags.iter().rev().map(|&tag| Sent::Datagram(tag)).collect();
+    assert_eq!(order[..tags.len()], expected[..]);
+    assert!(
+        order[tags.len()..]
+            .iter()
+            .all(|&sent| sent == Sent::Stream(stream))
+    );
+}
+
+/// Inside one group a datagram merges into the group order: it waits behind a stream
+/// for a newer group and goes ahead of a stream of its own group.
+#[test]
+fn datagrams_merge_into_their_group_order() {
+    let mut sender = Sender::new();
+    let group = sender.group(0);
+    let older = sender.datagram(Some(&group), 10, 100);
+    let newer = sender.open(Some(&group), 11, 3_000);
+    let tied = sender.open(Some(&group), 12, 3_000);
+    let ahead = sender.datagram(Some(&group), 12, 100);
+
+    let order = sender.drain_frames(20);
+    let position = |sent| order.iter().position(|&x| x == sent).unwrap();
+    let last = |sent| order.iter().rposition(|&x| x == sent).unwrap();
+    assert_eq!(position(Sent::Datagram(ahead)), 0);
+    assert!(last(Sent::Stream(tied)) < position(Sent::Stream(newer)));
+    assert!(last(Sent::Stream(newer)) < position(Sent::Datagram(older)));
+}
+
+/// A group's datagrams spend its fair share, so sending datagrams buys no extra bytes over
+/// an equal group of streams.
+#[test]
+fn datagrams_and_streams_share_a_groups_credit() {
+    let mut sender = Sender::new();
+    let datagrams = sender.group(0);
+    let streams = sender.group(0);
+    let tags: Vec<_> = (0..1_000)
+        .map(|seq| sender.datagram(Some(&datagrams), seq, 500))
+        .collect();
+    let stream = sender.open(Some(&streams), 0, 1_000_000);
+
+    sender.drain(200);
+    assert_fair(sender.datagram_wire(&tags), sender.wire(&[stream]));
+}
+
+/// With one domain per broadcast, two saturated datagram broadcasts both keep sending,
+/// one of many small datagrams and one of few large ones, each getting half the bytes.
+#[test]
+fn saturated_datagram_domains_share_bytes() {
+    let mut sender = Sender::new();
+    let small = sender.groups().open_domain();
+    let large = sender.groups().open_domain();
+    let small = sender.groups().open(0, Some(&small));
+    let large = sender.groups().open(9, Some(&large));
+    let small: Vec<_> = (0..2_000)
+        .map(|seq| sender.datagram(Some(&small), seq, 50))
+        .collect();
+    let large: Vec<_> = (0..200)
+        .map(|seq| sender.datagram(Some(&large), seq, 1_000))
+        .collect();
+
+    sender.drain(100);
+    assert_fair(sender.datagram_wire(&small), sender.datagram_wire(&large));
+}
+
+/// A datagram outside every group goes ahead of every group, like a control stream.
+#[test]
+fn ungrouped_datagrams_preempt_groups() {
+    let mut sender = Sender::new();
+    let group = sender.group(i64::MAX);
+    let stream = sender.open(Some(&group), i64::MAX, 3_000);
+    let tag = sender.datagram(None, 0, 100);
+
+    let order = sender.drain_frames(5);
+    assert_eq!(order[0], Sent::Datagram(tag));
+    assert!(order[1..].iter().all(|&sent| sent == Sent::Stream(stream)));
+}
+
+/// A datagram too large for the room left in a packet ends it and leads the next one,
+/// rather than letting what queues behind it go first.
+#[test]
+fn a_datagram_that_does_not_fit_leads_the_next_packet() {
+    let mut sender = Sender::new();
+    let group = sender.group(0);
+    let stream = sender.open(Some(&group), 0, 100);
+    let small = sender.datagram(Some(&group), 2, 300);
+    let large = sender.datagram(Some(&group), 1, 1_000);
+
+    assert_eq!(sender.drain_frames(1), [Sent::Datagram(small)]);
+    assert_eq!(
+        sender.drain_frames(1),
+        [Sent::Datagram(large), Sent::Stream(stream)]
+    );
+    assert!(!sender.state.can_send_stream_data());
+}
+
+/// A packet clamped below a queued datagram, such as a loss probe, still carries what fits
+/// behind it, and the datagram keeps its place.
+#[test]
+fn a_clamped_packet_sends_what_fits() {
+    let mut sender = Sender::new();
+    let group = sender.group(0);
+    let large = sender.datagram(Some(&group), 1, 1_000);
+    assert!(!sender.state.can_send_frames(500));
+    let stream = sender.open(Some(&group), 0, 2_000);
+    assert!(sender.state.can_send_frames(500));
+
+    sender.packet_of(500);
+    assert_eq!(sender.order, [Sent::Stream(stream)]);
+    assert_eq!(sender.drain_frames(1)[0], Sent::Datagram(large));
+}
+
+/// A packet already holding a control frame is not empty, so a datagram that no longer
+/// fits ends it rather than letting lower-ranked data ahead.
+#[test]
+fn a_datagram_behind_control_frames_ends_the_packet() {
+    let mut sender = Sender::new();
+    let group = sender.group(0);
+    let large = sender.datagram(Some(&group), 1, 1_000);
+    sender.open(Some(&group), 0, 2_000);
+
+    // The DATAGRAM frame (type, two-byte length, payload) would fill the packet alone,
+    // but a PING is already in it.
+    sender.packet_after(&[PING], 1 + 2 + 1_000);
+    assert_eq!(sender.order, []);
+    assert_eq!(sender.drain_frames(1)[0], Sent::Datagram(large));
+}
+
+/// A released group keeps its queued datagrams and frees once they are sent.
+#[test]
+fn a_released_group_sends_its_datagrams() {
+    let mut sender = Sender::new();
+    let group = sender.group(0);
+    let tag = sender.datagram(Some(&group), 0, 100);
+    sender.groups().close(group);
+    assert!(!sender.state.pending.is_clean());
+    assert_eq!(sender.drain_frames(1), [Sent::Datagram(tag)]);
+    assert!(sender.state.pending.is_clean());
 }
