@@ -4598,7 +4598,7 @@ mod serve_group_test {
 
 	/// A datagram goes in its subscription's send group, ranked like the stream carrying
 	/// its group from the start, so the transport merges it into the group order.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn datagrams_rank_within_their_subscription() {
 		let mut track = track::Producer::new(
 			Arc::new(broadcast::Info::default()),
@@ -4630,7 +4630,7 @@ mod serve_group_test {
 
 	/// A SUBSCRIBE_UPDATE that flips the group order reranks the next datagram, even with no
 	/// group served in between.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn datagrams_follow_an_updated_group_order() {
 		let mut track = track::Producer::new(
 			Arc::new(broadcast::Info::default()),
