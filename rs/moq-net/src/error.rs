@@ -572,6 +572,10 @@ impl Error {
 	/// [`StreamError::from_code`]. Reading a stream reset with the session table (or the
 	/// reverse) silently mistranslates, since e.g. 0 is "no error" for a session but an
 	/// internal error for a stream.
+	///
+	/// Without either code, the transport's [`close_kind`](crate::transport::Error::close_kind)
+	/// decides: an idle timeout is [`Error::IdleTimeout`], a local close is
+	/// `Error::Session(SessionError::Cancel)`, and anything else is [`Error::Transport`].
 	pub fn from_transport(err: impl crate::transport::Error) -> Self {
 		if let Some((code, _reason)) = err.session_error() {
 			return SessionError::from_code(code).into();
