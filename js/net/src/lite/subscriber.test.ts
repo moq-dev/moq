@@ -1756,6 +1756,27 @@ test("a lite-06 group sent out of order is accepted unchecked", async () => {
 	}
 });
 
+// A stream resumed past frame 0 starts at a later frame, whose timestamp says nothing about
+// where its group began.
+test("a lite-07 group resumed past frame 0 is accepted unchecked", async () => {
+	const { quic, streams, opened } = fakeSession();
+	const subscriber = new Subscriber(quic, Version.DRAFT_07, HopSchema.parse(1n));
+	const broadcast = subscriber.consume(Path.from("room"));
+	const track = broadcast.track("video").subscribe();
+	try {
+		await opened(0);
+		await answerTrackInfo(streams[0], Version.DRAFT_07, 1000);
+		await (await opened(1)).reading;
+		await subscriber.runGroup(new Group({ subscribe: 0n, sequence: 5 }), await groupStream(500));
+		await subscriber.runGroup(new Group({ subscribe: 0n, sequence: 4, frameStart: 1 }), await groupStream(1000));
+		expect(track.closed.peek()).toBeUndefined();
+	} finally {
+		track.close();
+		broadcast.close();
+		subscriber.close();
+	}
+});
+
 test("a publisher FIN without SUBSCRIBE_END still violates an open subscription", async () => {
 	const { quic, streams, opened, closes } = fakeSession();
 	const subscriber = new Subscriber(quic, Version.DRAFT_07, HopSchema.parse(1n));

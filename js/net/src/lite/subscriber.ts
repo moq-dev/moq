@@ -1339,7 +1339,9 @@ export class Subscriber {
 
 		const { track, timescale, tail } = entry;
 		const producer = new netGroup.Producer(group.sequence);
-		if (hasSendTimes(this.version)) hooks.skipRewindCheck(producer);
+		// A stream resumed past frame 0 doesn't carry where the group began, and lite-05/06
+		// timestamps may be send times: neither is held to the rewind rule.
+		if (group.frameStart !== 0 || hasSendTimes(this.version)) hooks.skipRewindCheck(producer);
 		const read = tail.open(group.sequence);
 
 		try {
