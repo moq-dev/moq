@@ -45,7 +45,6 @@ and the harness defaults to Cubic while production runs BBR3.
 - [Characterization tests](/quest/m1/quic/coverage/characterize.md) - golden scheduling order, and every uncovered frame, reset, limit, and endpoint path, on today's harness
 - [Plaintext fuzz crypto](/quest/m1/quic/coverage/fuzz-crypto.md) - a fuzz-only plaintext session so the connection target skips TLS and its injected packets decrypt
 - [Richer simulation workloads](/quest/m1/quic/coverage/sim-workloads.md) - resets, bidi streams, datagrams, and migration in the random workloads, each with its own invariant
-- [Pin benchmark cores](/quest/m1/quic/coverage/bench-pin.md) - local base/head comparisons run on one core type on hybrid CPUs
 
 ## Related
 
