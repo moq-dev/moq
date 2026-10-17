@@ -668,19 +668,28 @@ impl Lease {
 	/// End the lease with the session's close classification and the totals it
 	/// moved, and learn what ended the session: that, or for a gateway the
 	/// decider's reason if it revoked first. Dropping the consumer reports zero bytes.
-	pub fn close(self, reason: impl Into<lease::Reason>, bytes: Bytes) -> lease::Reason {
+	pub fn close(mut self, reason: impl Into<lease::Reason>, bytes: Bytes) -> lease::Reason {
+		use futures::FutureExt;
+
 		let mut reason = reason.into();
 		// A gateway has one credential, so its revocation caused the transfer to
-		// end. A refreshed session instead reports the result of its whole union:
-		// its first credential may have ended with a reason a replacement outlived.
-		let reason = if self.refresh.is_none() {
-			if let std::task::Poll::Ready(ended) = self.consumer.poll_closed(&moq_net::kio::Waiter::noop()) {
-				reason = ended;
+		// end. A refreshed session instead reports the result of its whole union,
+		// which may have ended before the supervisor saw it: its first credential
+		// may have ended with a reason a replacement outlived.
+		let reason = match &mut self.refresh {
+			None => {
+				if let std::task::Poll::Ready(ended) = self.consumer.poll_closed(&moq_net::kio::Waiter::noop()) {
+					reason = ended;
+				}
+				self.consumer.close(reason, bytes)
 			}
-			self.consumer.close(reason, bytes)
-		} else {
-			self.consumer.close(reason.clone(), bytes);
-			reason
+			Some(refresh) => {
+				if let Some(ended) = refresh.ended().now_or_never() {
+					reason = ended;
+				}
+				self.consumer.close(reason.clone(), bytes);
+				reason
+			}
 		};
 		if let Some(kind) = revoked(&reason) {
 			self.stats.fail(kind);

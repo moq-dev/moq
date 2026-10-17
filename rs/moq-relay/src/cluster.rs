@@ -2064,6 +2064,10 @@ fn remote_status(
 		}
 		// The retry window ran out after the link was lost, so the link failed to recover.
 		Err(moq_tokio::Error::Reconnect(_)) if *established => stats.fail(moq_net::stats::Failure::Transport),
+		// The peer sent GOAWAY and is draining; not following its redirect is no failure.
+		Err(moq_tokio::Error::RefusedRedirect(_) | moq_tokio::Error::PinnedRedirect) => {}
+		// Any other terminal error, such as a reconnect the peer refused, ends a live link.
+		Err(_) if *established => stats.fail(moq_net::stats::Failure::Application),
 		_ => {}
 	}
 	status
@@ -2240,7 +2244,7 @@ mod tests {
 
 	#[test]
 	fn remote_logical_outcome_ignores_retries_and_counts_one_terminal_close() {
-		use moq_net::stats::{Failure, Registry};
+		use moq_net::stats::Registry;
 		let registry = Registry::new(Default::default());
 		let stats = registry.tier(Tier::default()).session("");
 		let mut established = false;
@@ -2257,13 +2261,9 @@ mod tests {
 		] {
 			remote_status(&stats, &mut established, Ok(status)).unwrap();
 		}
-		let _ = remote_status(&stats, &mut established, Err(moq_tokio::Error::ConnectFailed));
 		assert_eq!(
-			registry.snapshot().sessions()[0]
-				.1
-				.sessions_failed
-				.count(Failure::Transport),
-			0
+			registry.snapshot().sessions()[0].1.sessions_failed,
+			moq_net::stats::Failures::default()
 		);
 		let _ = remote_status(
 			&stats,
@@ -2305,6 +2305,26 @@ mod tests {
 		};
 		assert_eq!(exhausted(false), 0);
 		assert_eq!(exhausted(true), 1);
+	}
+
+	#[test]
+	fn remote_terminal_errors_fail_an_established_link_except_a_refused_redirect() {
+		use moq_net::stats::{Failures, Registry};
+		let ended = |err: moq_tokio::Error| {
+			let registry = Registry::new(Default::default());
+			let stats = registry.tier(Tier::default()).session("");
+			let mut connected = false;
+			remote_status(&stats, &mut connected, Ok(moq_tokio::Status::Connected)).unwrap();
+			let _ = remote_status(&stats, &mut connected, Err(err));
+			drop(stats);
+			registry.snapshot().sessions()[0].1.sessions_failed
+		};
+		assert_eq!(ended(moq_tokio::Error::ConnectFailed).application, 1);
+		assert_eq!(ended(moq_tokio::Error::PinnedRedirect), Failures::default());
+		assert_eq!(
+			ended(moq_tokio::Error::RefusedRedirect("policy".into())),
+			Failures::default()
+		);
 	}
 
 	/// `?cost=` is read and stripped (it rides SETUP, not the URL), other
