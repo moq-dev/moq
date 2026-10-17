@@ -63,6 +63,10 @@ relay_config() {
         '[auth]' \
         'public = "**"' \
         "${runtime_config[@]}" >"$path"
+    if [[ $PROFILE == heap ]]; then
+        # Its /sessions list shows when the relay has dropped every session after the load.
+        printf '%s\n' '' '[internal]' "listen = \"127.0.0.1:$((port + 1))\"" >>"$path"
+    fi
 }
 
 # A connect can succeed against somebody else's listener while our child is alive.
@@ -290,8 +294,8 @@ run_workload() {
         return 1
     fi
     if [[ $PROFILE == heap ]]; then
-        # The generator closed its sessions on exit; give the relay a moment to drop their state.
-        python3 "$ROOT/bench/profile.py" snapshot "$relay_pid" "$profile" teardown --delay 1
+        python3 "$ROOT/bench/profile.py" snapshot "$relay_pid" "$profile" teardown \
+            --settled "http://127.0.0.1:$((RELAY_PORT + 1))/sessions"
     fi
     stop_relay
     if [[ $PROFILE == heap ]]; then

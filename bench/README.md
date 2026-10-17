@@ -149,8 +149,9 @@ the default allocator) and starts it with jemalloc profiling active from
 startup, accumulating allocations, at one sample per 64 KiB allocated. Once
 the relay has installed its SIGUSR1 handler, `rs/moq-tokio/src/jemalloc.rs`
 dumps a snapshot on each signal: `before` the load connects, `steady-start` and
-`steady-end` around the steady window, and `teardown` one second after the
-generator closed its sessions. `jeprof`, from the dev shell, symbolizes them:
+`steady-end` around the steady window, and `teardown` once the relay's internal
+`/sessions` list is empty after the generator closed its sessions (refused if
+that takes over 15 s). `jeprof`, from the dev shell, symbolizes them:
 
 - `heap/heap.json`: retained bytes at each snapshot, and allocation churn
   (bytes and allocations per second) between the two steady snapshots.

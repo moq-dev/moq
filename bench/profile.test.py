@@ -230,6 +230,17 @@ class Heap(unittest.TestCase):
             # A stack the base cancelled out is dropped from the flame graph.
             self.assertEqual((directory / 'churn.folded').read_text(), 'moq_relay::main;<moq_net::Session>::run;alloc 4096\n')
 
+    def test_teardown_waits_for_the_relay_to_drop_every_session(self):
+        clock = iter(range(0, 100, 1))
+        with patch.object(profile.time, 'monotonic', side_effect=lambda: next(clock)), \
+                patch.object(profile.time, 'sleep'), \
+                patch.object(profile, 'sessions', return_value=1), \
+                patch.object(profile.os, 'kill') as kill:
+            with self.assertRaisesRegex(ValueError, 'still holds sessions'):
+                profile.snapshot(1, Path('.'), ['teardown'], 0, 0, settled='http://relay/sessions')
+            # A teardown snapshot of live sessions would read as a leak; none is taken.
+            kill.assert_not_called()
+
     def test_missing_snapshot_refused(self):
         with tempfile.TemporaryDirectory() as directory:
             (Path(directory) / 'snapshots.tsv').write_text('before\t0\n')

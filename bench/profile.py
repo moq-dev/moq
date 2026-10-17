@@ -8,6 +8,7 @@ import shutil
 import signal
 import subprocess
 import time
+import urllib.request
 from collections import Counter
 from pathlib import Path
 
@@ -256,9 +257,20 @@ def poll(condition, timeout, failure):
         time.sleep(0.01)
 
 
-def snapshot(pid, directory, labels, delay, interval):
-    """Signal one jemalloc heap dump per label and keep each once the relay has closed it."""
+def sessions(url):
+    with urllib.request.urlopen(url, timeout=5) as response:
+        return len(json.load(response)['sessions'])
+
+
+def snapshot(pid, directory, labels, delay, interval, settled=None):
+    """Signal one jemalloc heap dump per label and keep each once the relay has closed it.
+
+    With `settled`, a relay's /sessions URL, wait until the relay has dropped every session first.
+    """
     time.sleep(delay)
+    if settled:
+        # Past the relay's 10 s default idle timeout, a session no close ended.
+        poll(lambda: sessions(settled) == 0, 15, f'the relay still holds sessions after the load ended ({settled})')
     for index, label in enumerate(labels):
         if index:
             time.sleep(interval)
@@ -335,6 +347,7 @@ def main():
     dumps.add_argument('labels', nargs='+', choices=SNAPSHOTS)
     dumps.add_argument('--delay', type=float, default=0)
     dumps.add_argument('--interval', type=float, default=0)
+    dumps.add_argument('--settled', help="the relay's /sessions URL, to wait until it holds no session")
     report = commands.add_parser('heap', help='report the snapshots in DIRECTORY against BINARY')
     report.add_argument('binary', type=Path)
     report.add_argument('directory', type=Path)
@@ -347,7 +360,7 @@ def main():
         elif args.command == 'cpu':
             cpu(args.pid, args.delay, args.duration, args.directory)
         elif args.command == 'snapshot':
-            snapshot(args.pid, args.directory, args.labels, args.delay, args.interval)
+            snapshot(args.pid, args.directory, args.labels, args.delay, args.interval, args.settled)
         else:
             heap(args.binary, args.directory)
     except (ValueError, OSError, subprocess.CalledProcessError) as error:
