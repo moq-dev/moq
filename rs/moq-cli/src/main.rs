@@ -529,10 +529,15 @@ async fn run_play(moq: MoqSide, args: play::Args, net: Net) -> anyhow::Result<()
 		consume: true,
 		..Default::default()
 	};
-	let Attached { origin, .. } = spawn_moq(&moq, &net, cluster.clone(), directions, &mut tasks).await?;
+	let Attached {
+		origin,
+		client,
+		connection,
+		..
+	} = spawn_moq(&moq, &net, cluster.clone(), directions, &mut tasks).await?;
 
 	let result = play::run(origin.consume(), name, args, tasks).await;
-	cluster.close().await;
+	detach(connection, client, &cluster).await;
 	result
 }
 
@@ -608,9 +613,20 @@ async fn run_stages(moq: MoqSide, stages: Vec<Command>, net: Net) -> anyhow::Res
 	}
 	.await;
 
-	// The process exits next, even on a setup error, so the relay only hears we left
-	// if the close goes out now. The connection first delivers what it queued, such
-	// as the finished tracks at stdin EOF, since the client's close discards it.
+	// Even on a setup error.
+	detach(connection, client, &cluster).await;
+	result
+}
+
+/// Close everything [`spawn_moq`] attached. The process exits next, so the relay
+/// and cluster peers only hear we left if the closes go out now. The connection
+/// first delivers what it queued, such as the finished tracks at stdin EOF, since
+/// the client's close discards it.
+async fn detach(
+	connection: Option<moq_tokio::Connection>,
+	client: Option<moq_tokio::Client>,
+	cluster: &moq_relay::cluster::Cluster,
+) {
 	if let Some(connection) = connection
 		&& let Err(err) = connection.close().await
 	{
@@ -620,7 +636,6 @@ async fn run_stages(moq: MoqSide, stages: Vec<Command>, net: Net) -> anyhow::Res
 		client.close().await;
 	}
 	cluster.close().await;
-	result
 }
 
 /// Run the non-Send pipelines on `local`, reporting each into `tasks`.

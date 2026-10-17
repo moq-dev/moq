@@ -1017,6 +1017,13 @@ impl Started {
 	///
 	/// Standalone, this only waits for such a panic.
 	pub async fn run(self) -> anyhow::Result<()> {
+		// Registered only now, so a start that fails or never runs drops its client
+		// and frees the bind. A closed cluster has nothing left to run.
+		if let Some(dial) = &self.cluster.dial
+			&& self.cluster.dialers.insert(dial).is_err()
+		{
+			return Ok(());
+		}
 		let critical = self.cluster.critical.clone();
 		let work = async move {
 			match self.work {
@@ -1075,7 +1082,7 @@ pub struct Cluster {
 	iroh: Option<moq_tokio::iroh::Endpoint>,
 	/// The client static and API peers share, on the template's bind address, so
 	/// a fixed `[connect]` bind port stays the cluster's egress port. Built by
-	/// [`Self::start`].
+	/// [`Self::start`] and joins [`Self::dialers`] once [`Started::run`] begins.
 	dial: Option<moq_tokio::Client>,
 	/// Every dial client, shared by all clones, for [`Self::close`].
 	dialers: Dialers,
@@ -1566,18 +1573,6 @@ impl Cluster {
 			});
 		}
 
-		// Built up front, so a bad template fails startup rather than every dial.
-		// Static and API peers share this client; LAN dials each build their own,
-		// so a LAN-only node builds one only to check the template.
-		let statics = !self.config.connect.is_empty() || self.config.connect_api.is_some();
-		let client = self
-			.peer_client(!statics, None)
-			.context("cluster peers configured but the dial template is unusable")?;
-		if statics {
-			self.dialers.insert(&client)?;
-			self.dial = Some(client);
-		}
-
 		// Build here so malformed API roots fail startup, before background work.
 		let http = if self.config.connect_api.as_deref().is_some_and(connect_api_is_http) {
 			let tls = self
@@ -1612,14 +1607,28 @@ impl Cluster {
 					.expect("--cluster-lan needs Cluster::with_advertise");
 				let secret = self.config.lan.secret.as_deref();
 				let app = self.config.lan.app.clone().unwrap_or_default();
-				let discovery = lan_discovery(advertise, node.as_deref(), secret, app).await?;
-				let _ = self.lan_auth.set(LanAuth {
-					credential: discovery.credential().to_string(),
-				});
-				Some(discovery)
+				Some(lan_discovery(advertise, node.as_deref(), secret, app).await?)
 			}
 			false => None,
 		};
+
+		// Built here, so a bad template fails startup rather than every dial, and
+		// last, so a start that fails earlier never binds a fixed `[connect]` port.
+		// Static and API peers share this client; LAN dials each build their own,
+		// so a LAN-only node builds one only to check the template.
+		let statics = !self.config.connect.is_empty() || self.config.connect_api.is_some();
+		let client = self
+			.peer_client(!statics, None)
+			.context("cluster peers configured but the dial template is unusable")?;
+		self.dial = statics.then_some(client);
+
+		// After everything fallible, so a failed start leaves no credential behind.
+		#[cfg(feature = "cluster-lan")]
+		if let Some(discovery) = &discovery {
+			let _ = self.lan_auth.set(LanAuth {
+				credential: discovery.credential().to_string(),
+			});
+		}
 
 		Ok(Started {
 			work: Some(Work {
@@ -3435,6 +3444,39 @@ mod tests {
 			try_next_announced(&mut local).is_none(),
 			"a peer's broadcast is not local"
 		);
+	}
+
+	/// A start that fails binds no dial socket, so a corrected start on the same
+	/// fixed `[connect]` port succeeds. One that never runs registers nothing, so
+	/// dropping it releases its client rather than leaving it to `close`.
+	#[tokio::test]
+	async fn a_failed_start_leaves_the_dial_bind_free() {
+		let _ = moq_tokio::crypto::install_default();
+		let dir = tempfile::tempdir().expect("tempdir");
+		let token = dir.path().join("token");
+		let config = Config {
+			connect: vec![Peer::new("moql://127.0.0.1:9/")],
+			token: Some(token.clone()),
+			..Default::default()
+		};
+		let mut connect = moq_tokio::connect::Config::default();
+		// Borrow a free port from the OS, then hand it to the dial template.
+		connect.bind = Some(
+			std::net::UdpSocket::bind("127.0.0.1:0")
+				.expect("probe socket")
+				.local_addr()
+				.expect("probe addr"),
+		);
+		let cluster = new_cluster(config)
+			.expect("cluster")
+			.with_connect(connect, Default::default());
+
+		let err = cluster.clone().start().await.expect_err("the token file is missing");
+		assert!(format!("{err:#}").contains("cluster token"), "{err:#}");
+		std::fs::write(&token, "secret").expect("write token");
+		let _started = cluster.clone().start().await.expect("a corrected start binds the port");
+		let registered = cluster.dialers.lock().open.as_ref().expect("open").clients.len();
+		assert_eq!(registered, 0, "a start registers its client only once it runs");
 	}
 
 	/// A second close awaits the shutdown the first started, and still finishes it
