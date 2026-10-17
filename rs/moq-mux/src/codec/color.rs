@@ -12,14 +12,16 @@ use hang::catalog::{Chromaticity, Color, ContentLight, Mastering};
 ///
 /// `None` when nothing is left, so a source that signals nothing adds no catalog field.
 pub(crate) fn cicp(primaries: u8, transfer: u8, matrix: u8, full_range: Option<bool>) -> Option<Color> {
-	// 2 is unspecified for all three and 3 is reserved; 0 is reserved for primaries and transfer
-	// but is the identity (RGB) matrix. Cameras ship zeroed descriptions, so a reserved value is
-	// treated as unsignalled rather than refusing the stream.
-	let known = |code: u8, zero: bool| (code != 2 && code != 3 && (zero || code != 0)).then_some(code);
+	// Only H.273's registered values, never 2 (unspecified). Cameras ship zeroed and other reserved
+	// descriptions, so a reserved value reads as unsignalled, letting a container fill it, rather
+	// than refusing the stream.
+	let registered = |code: u8, values: &[std::ops::RangeInclusive<u8>]| {
+		values.iter().any(|range| range.contains(&code)).then_some(code)
+	};
 	let mut color = Color::default();
-	color.primaries = known(primaries, false);
-	color.transfer = known(transfer, false);
-	color.matrix = known(matrix, true);
+	color.primaries = registered(primaries, &[1..=1, 4..=12, 22..=22]);
+	color.transfer = registered(transfer, &[1..=1, 4..=18]);
+	color.matrix = registered(matrix, &[0..=1, 4..=14]);
 	color.full_range = full_range;
 	(color != Color::default()).then_some(color)
 }
@@ -270,6 +272,7 @@ pub(crate) mod test {
 	fn cicp_drops_unspecified_and_reserved() {
 		assert_eq!(cicp(2, 2, 2, None), None);
 		assert_eq!(cicp(0, 0, 3, None), None);
+		assert_eq!(cicp(255, 19, 15, None), None, "past the registered values");
 		let color = cicp(9, 16, 0, Some(false)).unwrap();
 		assert_eq!(
 			(color.primaries, color.transfer, color.matrix, color.full_range),

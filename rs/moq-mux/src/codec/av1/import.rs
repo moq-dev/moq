@@ -109,9 +109,10 @@ impl Import {
 			full_range: false,
 		});
 		// configOBUs follow the four header bytes; samples need not repeat what they carry. A new
-		// record starts a new coded sequence, so earlier in-band HDR metadata no longer applies.
+		// record starts a new coded sequence, whose HDR metadata is what its configOBUs carry.
 		config.color = color(&data[4..]);
-		self.catalog.hdr(&mut self.track, Default::default(), true)?;
+		let hdr = find_hdr(&Bytes::copy_from_slice(&data[4..]));
+		self.catalog.hdr(&mut self.track, hdr, true)?;
 		self.apply_config(config)?;
 		Ok(())
 	}
@@ -248,7 +249,10 @@ impl Import {
 				let seq = find_sequence_header(&frame.payload);
 				// A new sequence header starts a coded sequence whose HDR metadata replaces the last
 				// one's. It goes first, so a keyframe that also configures publishes once.
-				let sequence = seq.as_ref().is_some_and(|seq| self.last_seq.as_ref() != Some(seq));
+				// The first header after an av1C is the record's own sequence, which sync samples repeat.
+				let sequence = seq
+					.as_ref()
+					.is_some_and(|seq| self.last_seq.as_ref().is_some_and(|last| last != seq));
 				self.catalog.hdr(&mut self.track, find_hdr(&frame.payload), sequence)?;
 				if let Some(seq) = seq {
 					self.configure_from_seq(&seq)?;
@@ -410,5 +414,40 @@ mod tests {
 			.expect("colour");
 		assert_eq!(color.content_light, crate::codec::color::test::hdr10().content_light);
 		assert!(color.mastering.is_some());
+
+		// The first sync sample repeats a sequence header but not the metadata OBUs.
+		let sequence = av1_sequence_header();
+		let pts = moq_net::Timestamp::from_micros(0).unwrap();
+		let mut split = super::super::Split::new();
+		let mut frames = split.decode(&sequence, pts).unwrap();
+		frames.extend(split.flush(pts).unwrap());
+		import.decode(frames).unwrap();
+		let color = catalog.snapshot().video.renditions["video"]
+			.color
+			.clone()
+			.expect("colour");
+		assert!(
+			color.mastering.is_some(),
+			"the av1C's HDR metadata survives the first sync sample"
+		);
+	}
+
+	/// A temporal unit of a temporal delimiter, the sequence header from `av1.mp4`'s av1C, and a frame.
+	fn av1_sequence_header() -> Vec<u8> {
+		let init = include_bytes!("../../container/fmp4/test_data/av1.mp4");
+		let mut cursor = std::io::Cursor::new(&init[..]);
+		let moov = loop {
+			match <mp4_atom::Any as mp4_atom::Decode>::decode(&mut cursor).unwrap() {
+				mp4_atom::Any::Moov(moov) => break moov,
+				_ => continue,
+			}
+		};
+		let mp4_atom::Codec::Av01(av01) = &moov.trak[0].mdia.minf.stbl.stsd.codecs[0] else {
+			panic!("expected av01");
+		};
+		let mut tu = vec![0x12, 0x00];
+		tu.extend_from_slice(&av01.av1c.config_obus);
+		tu.extend_from_slice(&[0x32, 0x01, 0x10]);
+		tu
 	}
 }

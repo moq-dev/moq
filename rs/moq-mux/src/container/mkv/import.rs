@@ -761,6 +761,9 @@ pub(super) fn matroska_color(children: &[MatroskaSpec]) -> Result<Option<hang::c
 						MatroskaSpec::LuminanceMin(x) => (9, x),
 						_ => continue,
 					};
+					if !value.is_finite() {
+						return Err(Error::InvalidColour("mastering value").into());
+					}
 					v[i] = Some(*value);
 				}
 				let xy = |i: usize| Some(Chromaticity { x: v[i]?, y: v[i + 1]? });
