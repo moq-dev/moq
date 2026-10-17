@@ -227,6 +227,7 @@ impl Client {
 			start.recv_bandwidth,
 			crate::driver::Protocol::Lite(Box::new(start.driver)),
 			crate::session::Handles {
+				stats: self.stats.clone(),
 				goaway: start.goaway,
 				auth: start.auth,
 				estimate: Some(start.estimate),
@@ -320,6 +321,7 @@ impl Client {
 					None,
 					crate::driver::Protocol::Ietf(protocol),
 					crate::session::Handles {
+						stats: self.stats.clone(),
 						goaway,
 						auth,
 						estimate: None,
@@ -493,7 +495,12 @@ impl Client {
 			version,
 			recv_bw,
 			protocol,
-			crate::session::Handles { goaway, auth, estimate },
+			crate::session::Handles {
+				stats: self.stats.clone(),
+				goaway,
+				auth,
+				estimate,
+			},
 		))
 	}
 }

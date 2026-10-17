@@ -2252,6 +2252,49 @@ fn idle_timeout() {
 }
 
 #[test]
+fn unreachable_handshake_fails_with_no_viable_path() {
+    let _guard = subscribe();
+    let mut pair = Pair::default();
+    let client_ch = pair.begin_connect(client_config());
+
+    pair.client_conn_mut(client_ch).handle_unreachable();
+
+    let conn = pair.client_conn_mut(client_ch);
+    assert!(conn.is_drained());
+    assert_matches!(
+        conn.poll(),
+        Some(Event::ConnectionLost {
+            reason: ConnectionError::TransportError(TransportError {
+                code: TransportErrorCode::NO_VIABLE_PATH,
+                ..
+            }),
+        })
+    );
+    // Not even a CONNECTION_CLOSE goes out.
+    pair.drive();
+    pair.server.assert_no_accept();
+}
+
+#[test]
+fn unreachable_is_loss_once_established() {
+    let _guard = subscribe();
+    let mut pair = Pair::default();
+    let (client_ch, server_ch) = pair.connect();
+
+    pair.client_conn_mut(client_ch).handle_unreachable();
+
+    assert!(!pair.client_conn_mut(client_ch).is_closed());
+    assert_matches!(pair.client_conn_mut(client_ch).poll(), None);
+    let s = pair.client_streams(client_ch).open(Dir::Uni).unwrap();
+    pair.client_send(client_ch, s).write(b"hello").unwrap();
+    pair.drive();
+    assert_matches!(
+        pair.server_conn_mut(server_ch).poll(),
+        Some(Event::Stream(StreamEvent::Opened { dir: Dir::Uni }))
+    );
+}
+
+#[test]
 fn connection_close_sends_acks() {
     let _guard = subscribe();
     let mut pair = Pair::default();

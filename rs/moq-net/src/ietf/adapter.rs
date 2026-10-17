@@ -96,9 +96,9 @@ impl<T> Default for Queue<T> {
 struct QueueWriter<T>(Queue<T>);
 
 impl<T> QueueWriter<T> {
-	/// Enqueue a message, dropped silently if the reader already closed its side.
-	fn push(&self, item: T) {
-		let _ = self.0.push(item);
+	/// Enqueue a message, returning false if the reader already closed its side.
+	fn push(&self, item: T) -> bool {
+		self.0.push(item)
 	}
 }
 
@@ -705,9 +705,11 @@ impl Shared {
 	}
 
 	/// Deliver a message to an open virtual stream, dropping it if the stream is gone.
-	fn push(&self, request_id: RequestId, raw: Bytes) {
-		if let Some(tx) = self.streams.lock().unwrap().get(&request_id) {
-			tx.push(raw);
+	/// Returns whether a stream took it.
+	fn push(&self, request_id: RequestId, raw: Bytes) -> bool {
+		match self.streams.lock().unwrap().get(&request_id) {
+			Some(tx) => tx.push(raw),
+			None => false,
 		}
 	}
 
@@ -829,6 +831,35 @@ impl<S: crate::transport::poll::Session> ControlStreamAdapter<S> {
 		}
 	}
 
+	/// Refuse an update no request here can apply, naming its own Request ID. Draft 14
+	/// answers no update.
+	fn refuse_update(&self, request_id: RequestId) {
+		if self.version == Version::Draft14 {
+			return;
+		}
+		let mut raw = Vec::new();
+		let mut w = crate::coding::Encoder::new(&mut raw, self.version.into());
+		let msg = ietf::RequestError {
+			request_id: Some(request_id),
+			error_code: super::error::request::to_code(
+				&crate::Error::Unsupported,
+				super::error::request::Kind::Subscribe,
+				self.version,
+			),
+			reason_phrase: "update not supported".into(),
+			retry_interval: 0,
+		};
+		if let Err(err) = w
+			.varint(ietf::RequestError::ID)
+			.and_then(|()| crate::coding::Encode::encode(&msg, &mut w, self.version))
+		{
+			tracing::warn!(%err, "failed to encode REQUEST_ERROR");
+			return;
+		}
+		// A closed control stream means the session is ending; there is no one to answer.
+		let _ = self.shared.control.push(raw.into());
+	}
+
 	/// Queue a MAX_REQUEST_ID granting the peer room up to `max`.
 	fn send_max_request_id(&self, max: RequestId) {
 		let mut raw = Vec::new();
@@ -877,12 +908,18 @@ impl<S: crate::transport::poll::Session> ControlStreamAdapter<S> {
 					let permit = self.control.accept(request_id)?;
 					self.shared.open_incoming(request_id, raw, permit)?
 				}
-				Route::Response(request_id) => self.shared.push(request_id, raw),
+				Route::Response(request_id) => {
+					self.shared.push(request_id, raw);
+				}
 				Route::FollowUp { own, target } => {
 					// SUBSCRIBE_UPDATE takes a request ID of its own (draft-14 section 9.1),
 					// done as soon as it is delivered, so it is granted straight back.
 					drop(self.control.accept(own)?);
-					self.shared.push(target, raw)
+					// An update whose request is gone, or rides a stream of its own like draft 16's
+					// SUBSCRIBE_NAMESPACE, is still owed its one answer.
+					if !self.shared.push(target, raw) {
+						self.refuse_update(own);
+					}
 				}
 				Route::CloseStream(request_id) => self.shared.close(request_id, raw),
 				Route::MaxRequestId(max) => self.control.max_request_id(max),
@@ -1938,6 +1975,44 @@ mod tests {
 			matches!(err, Error::Session(crate::SessionError::TooManyRequests)),
 			"{err:?}"
 		);
+	}
+
+	/// An update aimed at no open request, such as draft 16's SUBSCRIBE_NAMESPACE riding a
+	/// stream of its own, still gets its one answer on drafts 15 and 16: a REQUEST_ERROR
+	/// naming the update. Draft 14 answers no update.
+	#[moq_clock::test]
+	async fn an_unroutable_update_is_refused() {
+		use crate::lite::test_transport::{Log, ScriptedSession, SinkSend};
+		use crate::transport::poll::Session as _;
+
+		for version in [Version::Draft14, Version::Draft15, Version::Draft16] {
+			// Own Request ID 2, aimed at request 0, which nothing here holds. Draft 14 carries
+			// its fixed start, end group, priority and forward before the parameters.
+			let body: &[u8] = match version {
+				Version::Draft14 => &[2, 0, 0, 0, 0, 128, 1, 0],
+				_ => &[2, 0, 0],
+			};
+			let script = encode_raw(ietf::SubscribeUpdate::ID, &Bytes::copy_from_slice(body), version);
+			let mut session = ScriptedSession::new(script.to_vec());
+			let (_, recv) = session.open_bi().await.unwrap();
+			let adapter = ControlStreamAdapter::new(session, Control::new(None, false), version);
+			let log = Log::default();
+			let writer = Writer::new(SinkSend::new(log.clone()), version);
+			let (_, goaway) = crate::goaway::Handle::new(true);
+			let mut run = std::pin::pin!(adapter.run(Reader::new(recv, version), writer, goaway));
+			assert!(futures::poll!(run.as_mut()).is_pending(), "{version}");
+
+			let written = log.writes.lock().unwrap().clone();
+			match version {
+				Version::Draft14 => assert!(written.is_empty(), "{version}: {written:?}"),
+				// [type, length (2), Request ID, NOT_SUPPORTED, ...]
+				_ => assert_eq!(
+					(written[0], written[3], written[4]),
+					(ietf::RequestError::ID as u8, 2, 0x3),
+					"{version}: {written:?}"
+				),
+			}
+		}
 	}
 
 	/// Requests that end are granted back with MAX_REQUEST_ID, once half the window has.

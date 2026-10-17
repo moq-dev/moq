@@ -148,14 +148,27 @@ impl Default for Quic {
 impl Quic {
 	/// Refuses limits QUIC cannot advertise, as `[quic]` does, so the accept and
 	/// dial paths never disagree about them.
-	pub(crate) fn resolve(&self) -> anyhow::Result<moq_tokio::quic::Limits> {
-		let limits = moq_tokio::quic::Limits {
-			max_streams: self.max_streams,
-			receive_window: self.receive_window,
-			send_window: self.send_window,
-		};
-		limits.validate().context("invalid [peer.quic]")?;
-		Ok(limits)
+	pub(crate) fn validate(&self) -> anyhow::Result<()> {
+		let mut quic = moq_tokio::quic::Config::default();
+		self.dial(&mut quic);
+		quic.validate().context("invalid [peer.quic]")
+	}
+
+	/// Apply these limits to the `[quic]` section a peer link is dialed with.
+	pub(crate) fn dial(&self, quic: &mut moq_tokio::quic::Config) {
+		quic.max_streams = Some(self.max_streams.get());
+		quic.receive_window = Some(self.receive_window.get());
+		quic.send_window = Some(self.send_window.get());
+	}
+
+	/// The limits an accepted peer connection widens to, as either QUIC runtime takes them.
+	#[cfg(any(feature = "quic", all(target_os = "linux", feature = "_uring")))]
+	pub(crate) fn limits(&self) -> moq_quic::Limits {
+		let mut limits = moq_quic::Limits::default();
+		limits.max_streams = Some(self.max_streams);
+		limits.receive_window = Some(self.receive_window);
+		limits.send_window = Some(self.send_window);
+		limits
 	}
 }
 

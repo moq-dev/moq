@@ -10,9 +10,9 @@ description: RAII objects, futures, and moq::expected over the Rust core
 `<moq/moq.hpp>`: every `moq-ffi` object as a `std::shared_ptr`, every async
 call as a cancellable future, and every error as a returned `moq::expected`
 value, so it builds with exceptions and RTTI disabled (Unreal's defaults).
-C++17 is the floor; C++20 adds `co_await` on a future, and C++23 makes
-`moq::expected` a `std::expected`. The bindings are generated from the same
-[UniFFI](https://mozilla.github.io/uniffi-rs/) crate as the other wrappers, so
+C++17 is the floor, and C++20 adds `co_await` on a future. The bindings are
+generated from the same [UniFFI](https://mozilla.github.io/uniffi-rs/) crate as
+the other wrappers, so
 a method means the same thing here as in Python or Go. For a plain C ABI, use
 [moq-c](/lib/c/).
 
@@ -25,7 +25,6 @@ and `moq-cpp.pc`. Targets: Linux x86\_64 and aarch64, macOS arm64, Windows x64.
 No Rust toolchain is needed to consume it.
 
 ```cmake ignore
-set(CMAKE_CXX_STANDARD 23)       # optional; see "C++ standard" below
 find_package(moq-cpp REQUIRED)   # with CMAKE_PREFIX_PATH at the unpacked archive
 target_link_libraries(app PRIVATE moq::cpp)
 ```
@@ -38,21 +37,8 @@ c++ -std=c++17 app.cpp $(pkg-config --variable=sources moq-cpp) $(pkg-config --c
 The Windows archive is built for MSVC, so use the CMake package there.
 
 The generated bindings ship as source (`share/moq-cpp/moq.cpp`) and compile inside
-your build, because `uniffi::expected` is `std::expected` or a bundled
-`tl::expected` depending on the standard. On MSVC, link the release runtime
+your build, with your compiler and flags. On MSVC, link the release runtime
 (`/MD`), which the Rust library uses in every configuration.
-
-### C++ standard
-
-The bindings compile at your project's `CMAKE_CXX_STANDARD`, or the compiler's
-default (at least C++17) when it is unset, and must match the code that
-includes `<moq/moq.hpp>`. To use C++23, set it before `find_package`, or pass
-`-DCMAKE_CXX_STANDARD=23`. Raising the standard only on your own target
-(`target_compile_features(app PRIVATE cxx_std_23)`) does not reach the
-bindings, so the two disagree on `moq::expected` and the link fails with an
-undefined `moq_abi_std_expected` or `moq_abi_tl_expected` symbol rather than
-corrupting memory. With pkg-config, pass the same `-std` to the bindings
-source and to your code.
 
 From source, `add_subdirectory(cpp/moq)` in a checkout builds `moq-ffi` with
 cargo and renders the bindings with the pinned `uniffi-bindgen-cpp` (see
@@ -235,14 +221,16 @@ the simultaneous announcements or subscriptions, or ask the relay operator
 to adjust the [session limits](/bin/relay/config#session-and-peer), before
 reconnecting with the same workload.
 A session closed because its credential expired reports `ProtocolKind::kExpired`, and a request refused for an expired token is `moq::Error::kExpired`; refresh the token before retrying.
+A catalog that needs a newer moq-hang draft than this build reads is `moq::Error::kUnsupportedCatalog`; upgrade the library to read it.
 
-Check a result before reading it. With exceptions off below C++23, reading the
-value of an error is undefined, through `*result` and `value()` alike, since
-the bundled `tl::expected` has nothing to throw.
+Check a result before reading it. `moq::expected` is a bundled `tl::expected`
+at every standard, with the same members as `std::expected`. With exceptions
+off, `value()` on an error aborts with a message, while `*result` on an error
+is undefined.
 
 Everything else maps one to one onto the
-[shared feature list](/lib/#what-every-binding-can-do): each generated
-`moq::MoqFoo` is also `moq::Foo`, and each Rust method keeps its name.
+[shared feature list](/lib/#what-every-binding-can-do): moq-ffi's `MoqFoo` is
+`moq::Foo`, and each Rust method keeps its name.
 [Layers](/lib/layers) maps each wrapped Rust layer to its `moq::` types. The
 header is the reference; every method carries its doc comment.
 

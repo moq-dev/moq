@@ -4,7 +4,7 @@ import type { Order } from "../track.ts";
 import * as Filter from "./filter.ts";
 import * as Message from "./message.ts";
 import * as Namespace from "./namespace.ts";
-import { type MessageLocation, Parameters } from "./parameters.ts";
+import { type MessageLocation, MSG_PARAM_FORWARD, MSG_PARAM_SUBSCRIBER_PRIORITY, Parameters } from "./parameters.ts";
 import * as Properties from "./properties.ts";
 import { type IetfVersion, Version } from "./version.ts";
 
@@ -406,41 +406,47 @@ export class SubscribeUpdate {
 
 	requestId: bigint;
 
-	// This update's own Request ID, the first field on drafts 14 to 16.
-	#ownRequestId?: bigint;
+	/** This update's own Request ID, the first field on drafts 14 to 16, which their answer names. */
+	ownRequestId?: bigint;
 
-	constructor({ requestId, ownRequestId }: { requestId: bigint; ownRequestId?: bigint }) {
+	/** What the update changes. Draft 14's fixed SUBSCRIBER_PRIORITY and FORWARD fields land here too. */
+	parameters: Parameters;
+
+	constructor({
+		requestId,
+		ownRequestId,
+		parameters = new Parameters(),
+	}: { requestId: bigint; ownRequestId?: bigint; parameters?: Parameters }) {
 		this.requestId = requestId;
-		this.#ownRequestId = ownRequestId;
+		this.ownRequestId = ownRequestId;
+		this.parameters = parameters;
 	}
 
 	async #encode(w: Writer, version: IetfVersion): Promise<void> {
 		// Drafts 14 to 16 send a new Request ID and then the request being updated.
 		// Later drafts dropped the new id, so the one field left is the target.
 		if (version === Version.DRAFT_14 || version === Version.DRAFT_15 || version === Version.DRAFT_16) {
-			if (this.#ownRequestId === undefined) throw new Error("ownRequestId required for draft14-16");
-			await w.u62(this.#ownRequestId);
+			if (this.ownRequestId === undefined) throw new Error("ownRequestId required for draft14-16");
+			await w.u62(this.ownRequestId);
 			await w.u62(this.requestId);
 			if (version === Version.DRAFT_14) {
 				await w.u62(0n); // start_group
 				await w.u62(0n); // start_object
 				await w.u62(0n); // end_group
-				await w.u8(128); // subscriber_priority
-				await w.bool(true); // forward
-				await w.u53(0); // no parameters
+				await w.u8(this.parameters.subscriberPriority ?? 128);
+				await w.bool(this.parameters.forward ?? true);
+				await this.parameters.encode(w, version, [MSG_PARAM_SUBSCRIBER_PRIORITY, MSG_PARAM_FORWARD]);
 			} else {
-				const params = new Parameters();
-				await params.encode(w, version);
+				await this.parameters.encode(w, version);
 			}
 		} else {
-			if (this.#ownRequestId !== undefined) throw new Error("ownRequestId is only valid on draft14-16");
+			if (this.ownRequestId !== undefined) throw new Error("ownRequestId is only valid on draft14-16");
 			// v17+: REQUEST_UPDATE
 			await w.u62(this.requestId);
 			if (version === Version.DRAFT_17) {
 				await w.u62(0n); // required_request_id_delta (draft-17 only, removed in draft-18 per #1615)
 			}
-			const params = new Parameters();
-			await params.encode(w, version);
+			await this.parameters.encode(w, version);
 		}
 	}
 
@@ -456,17 +462,22 @@ export class SubscribeUpdate {
 		if (version === Version.DRAFT_14 || version === Version.DRAFT_15 || version === Version.DRAFT_16) {
 			const ownRequestId = await r.u62();
 			const requestId = await r.u62();
-			if (version === Version.DRAFT_14) {
-				await r.u62(); // start_group
-				await r.u62(); // start_object
-				await r.u62(); // end_group
-				await r.u8(); // subscriber_priority
-				await r.bool(); // forward
-				await Parameters.decode(r, version); // parameters
-			} else {
-				await Parameters.decode(r, version, "subscribe-update");
+			if (version !== Version.DRAFT_14) {
+				const parameters = await Parameters.decode(r, version, "subscribe-update");
+				return new SubscribeUpdate({ requestId, ownRequestId, parameters });
 			}
-			return new SubscribeUpdate({ requestId, ownRequestId });
+			// The range is left as it is: every field is mandatory, so a narrowed range cannot be
+			// told from a repeated one, and draft 14 accepts extra objects as the worst outcome
+			// of an update.
+			await r.u62(); // start_group
+			await r.u62(); // start_object
+			await r.u62(); // end_group
+			const priority = await r.u8();
+			const forward = await r.bool();
+			const parameters = await Parameters.decode(r, version, "subscribe-update");
+			parameters.subscriberPriority = priority;
+			parameters.forward = forward;
+			return new SubscribeUpdate({ requestId, ownRequestId, parameters });
 		}
 
 		// v17+: REQUEST_UPDATE. Request ID is the existing request.
@@ -474,8 +485,8 @@ export class SubscribeUpdate {
 		if (version === Version.DRAFT_17) {
 			await r.u62(); // required_request_id_delta (draft-17 only, removed in draft-18 per #1615)
 		}
-		await Parameters.decode(r, version, "subscribe-update");
-		return new SubscribeUpdate({ requestId });
+		const parameters = await Parameters.decode(r, version, "subscribe-update");
+		return new SubscribeUpdate({ requestId, parameters });
 	}
 }
 

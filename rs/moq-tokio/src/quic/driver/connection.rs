@@ -271,35 +271,22 @@ impl Future for ConnectionDriver {
             conn.terminate(e, &self.conn.shared);
             return Poll::Ready(Ok(()));
         }
-        let mut keep_going = match conn.drive_transmit(cx) {
-            Ok(keep_going) => keep_going,
-            // No route to the peer, so the handshake can never finish: fail it now rather than at
-            // the handshake timeout, which lets a dial race move on to the next address. The
-            // driver keeps running until the closed connection drains, so the endpoint forgets it
-            // even while the application still holds a handle.
-            Err(e) if moq_sock::udp::is_unreachable_err(&e) => {
-                if !conn.inner.is_closed() {
-                    // Closed, so dropping the last handle cannot overwrite the cause.
-                    conn.inner.close(Instant::now(), 0u32.into(), Bytes::new());
-                    let cause =
-                        TransportError::new(TransportErrorCode::NO_VIABLE_PATH, e.to_string());
-                    conn.terminate(cause.into(), &self.conn.shared);
-                }
-                true
+        let mut keep_going = conn.drive_transmit(cx).inspect_err(|_| {
+            // Transmit failed, so close the connection and clean state before returning the error.
+            if !conn.inner.is_closed() {
+                conn.implicit_close(&self.conn.shared);
             }
-            Err(e) => {
-                // Transmit failed, so close the connection and clean state before returning the error.
-                if !conn.inner.is_closed() {
-                    conn.implicit_close(&self.conn.shared);
-                }
-                return Poll::Ready(Err(e));
-            }
-        };
+        })?;
         // If a timer expires, there might be more to transmit. When we transmit something, we
         // might need to reset a timer. Hence, we must loop until neither happens.
         keep_going |= conn.drive_timer(cx);
         conn.forward_endpoint_events();
         conn.forward_app_events(&self.conn.shared);
+
+        // Every datagram sent or received passes through this poll.
+        let stats = conn.inner.stats();
+        self.conn.shared.wire.set_sent_bytes(stats.udp_tx.bytes);
+        self.conn.shared.wire.set_received_bytes(stats.udp_rx.bytes);
 
         if !conn.inner.is_drained() {
             if keep_going {
@@ -664,6 +651,11 @@ impl Connection {
         self.0.state.lock("stats").inner.stats()
     }
 
+    /// The wire counters the driver updates as it sends and receives.
+    pub(crate) fn wire(&self) -> moq_net::transport::Wire {
+        self.0.shared.wire.clone()
+    }
+
     /// Current state of the congestion control algorithm, for debugging purposes
     pub fn congestion_state(&self) -> Box<dyn Controller> {
         self.0
@@ -810,6 +802,15 @@ impl Connection {
         conn.inner.set_max_concurrent_streams(Dir::Bi, count);
         // May need to send MAX_STREAMS to make progress
         conn.wake();
+    }
+
+    /// See [`moq_quic::Connection::set_limits`]
+    pub fn set_limits(&self, limits: moq_quic::Limits) -> Result<(), moq_quic::LimitsError> {
+        let mut conn = self.0.state.lock("set_limits");
+        conn.inner.set_limits(limits)?;
+        // May need to send MAX_DATA or MAX_STREAMS to make progress
+        conn.wake();
+        Ok(())
     }
 }
 
@@ -1079,6 +1080,8 @@ pub(crate) struct Shared {
     connected: Arc<Notify>,
     /// Number of live handles that can used to initiate or handle I/O; excludes the driver
     ref_count: AtomicUsize,
+    /// Refreshed by every driver poll, so readers never wake the driver to sample.
+    wire: moq_net::transport::Wire,
 }
 
 pub(crate) struct State {
@@ -1180,12 +1183,10 @@ impl State {
                     self.buffered_transmit = Some(t);
                     return Ok(false);
                 }
-                // An established connection outlives a route that drops for a moment, such as a
-                // client switching networks, so the datagram is just lost.
-                Poll::Ready(Err(e))
-                    if moq_sock::udp::is_unreachable_err(&e) && !self.inner.is_handshaking() =>
-                {
-                    tracing::debug!(%e, "transmit failed; treating it as loss");
+                // The datagram is lost, and moq-quic decides whether the connection survives it.
+                Poll::Ready(Err(e)) if moq_sock::udp::is_unreachable_err(&e) => {
+                    tracing::debug!(%e, "no route to the peer");
+                    self.inner.handle_unreachable();
                 }
                 Poll::Ready(Err(e)) => return Err(e),
                 Poll::Ready(Ok(())) => {}

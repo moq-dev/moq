@@ -123,3 +123,40 @@ async fn ietf_stats_refresh_costs_one_driver_poll() {
 		assert_eq!(polls, reads, "{version}: one poll per refresh");
 	}
 }
+
+/// A stats tick reads the transport's wire counters and adds no sampler timer or session wake.
+#[moq_clock::test]
+async fn wire_collection_never_arms_the_idle_sampler() {
+	for version in ["moq-lite-06", "moq-lite-07-wip", "moq-transport-16", "moq-transport-22"] {
+		let registry = moq_net::stats::Registry::new(Default::default());
+		let polls = Arc::new(AtomicUsize::new(0));
+		let mut options = MockConnectOptions::new(version.parse().unwrap());
+		options.server_stats = registry.tier(Default::default()).session("room");
+		options.server_polls = Some(polls.clone());
+		let pair = connect_mock(options).await;
+		moq_clock::sleep(Duration::from_secs(1)).await;
+		let start_polls = polls.load(Ordering::Relaxed);
+		let start_reads = pair.server_transport.stats_reads();
+		for tick in 1..=60 {
+			pair.server_transport.wire().set_sent_bytes(tick);
+			pair.server_transport.wire().set_received_bytes(tick * 2);
+			let mut report = moq_net::stats::Report::default();
+			registry.report(&mut report);
+			assert_eq!(
+				(report.sessions[0].presence.wire_tx, report.sessions[0].presence.wire_rx),
+				(tick, tick * 2)
+			);
+			moq_clock::sleep(Duration::from_secs(1)).await;
+		}
+		assert_eq!(
+			polls.load(Ordering::Relaxed),
+			start_polls,
+			"{version}: a tick woke the session"
+		);
+		assert_eq!(
+			pair.server_transport.stats_reads(),
+			start_reads,
+			"{version}: a tick armed the sampler"
+		);
+	}
+}

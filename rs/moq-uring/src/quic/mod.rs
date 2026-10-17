@@ -32,6 +32,8 @@ mod driver;
 
 pub use driver::{Connection, Credit, RecvStream, SendGroup, SendOptions, SendStream};
 pub use endpoint::Endpoint;
+/// The flow-control limits a live connection can change; see [`Connection::set_limits`].
+pub use moq_quic::{Limits, LimitsError};
 
 /// The QUIC payload size every full datagram in a GSO train uses, and the
 /// stride GRO coalesces with.
@@ -161,22 +163,6 @@ impl Default for Transport {
 	}
 }
 
-/// The flow-control limits an established connection can change, such as a
-/// relay widening them once it knows the peer is another relay.
-///
-/// [`Connection::set_limits`] refuses a stream count past 2^60 or a receive
-/// window past a QUIC varint. Each is non-zero because zero streams or a zero
-/// window credits nothing and wedges the connection.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Limits {
-	/// Max concurrent streams the peer may open, per direction.
-	pub max_streams: std::num::NonZeroU64,
-	/// Connection-wide receive window, in bytes.
-	pub receive_window: std::num::NonZeroU64,
-	/// Cap on unacknowledged outgoing data, in bytes.
-	pub send_window: std::num::NonZeroU64,
-}
-
 /// The congestion control family a connection runs.
 ///
 /// CUBIC is used for loss-based control and BBRv3 for delay-based control.
@@ -264,6 +250,9 @@ pub enum Error {
 	/// This endpoint closed the connection locally.
 	#[error("locally closed")]
 	Closed,
+	/// The flow-control limits are ones a peer would refuse, so none were applied.
+	#[error("invalid quic limits: {0}")]
+	Limits(#[from] LimitsError),
 }
 
 impl web_transport_trait::Error for Error {
