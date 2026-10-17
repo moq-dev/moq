@@ -2358,7 +2358,8 @@ mod tests {
 	}
 
 	/// Lite-07's SUBSCRIBE_START says where the track is, so a reader knows its largest
-	/// frame before any group arrives, and the stream ends with the track.
+	/// frame before any group arrives. The FIN with no SUBSCRIBE_END then aborts the track,
+	/// and the stream ends with it.
 	#[moq_clock::test]
 	async fn subscribe_start_reports_the_largest() {
 		let version = Version::Lite07;
@@ -2412,7 +2413,8 @@ mod tests {
 		kio::wait(|waiter| kio::Task::poll(&mut running, waiter)).await;
 
 		assert_eq!(reader.largest().await, Some(largest));
-		assert_eq!(reader.largest().await, None, "the stream ends with the track");
+		assert_eq!(reader.largest().await, None, "the stream ends with the aborted track");
+		assert!(matches!(reader.recv_group().await, Err(Error::ProtocolViolation)));
 	}
 
 	/// Drive the subscriber with a peer's response bytes followed by FIN.
