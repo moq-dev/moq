@@ -1380,6 +1380,7 @@ fn register_verbatim<E: catalog::Catalog>(
 			pid,
 			descriptors,
 			verbatim: Some(catalog::Verbatim::new(stream_type, framing)),
+			pes_packet: None,
 		},
 	);
 	drop(guard);

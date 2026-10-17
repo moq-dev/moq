@@ -41,7 +41,7 @@ mod si;
 // they read as `ts::Catalog`, `ts::Mpegts`, ... instead of stuttering under `catalog`.
 mod catalog;
 
-pub use catalog::{Catalog, Descriptor, Ext, Framing, Mpegts, Program, SiEntry, Track, Verbatim};
+pub use catalog::{Catalog, Descriptor, Ext, Framing, Mpegts, PesPacket, Program, SiEntry, Track, Verbatim};
 pub use export::Export;
 pub use follower::Follower;
 pub use import::*;
