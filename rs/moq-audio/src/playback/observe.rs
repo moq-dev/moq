@@ -225,13 +225,16 @@ pub(super) struct Ledger {
 impl Ledger {
 	pub(super) fn new(shared: Arc<Shared>, rate: u32) -> Self {
 		let base = shared.clock.load(Ordering::Relaxed);
+		// A rebuilt stream continues the engine's counts: once anything has played,
+		// a quiet quantum while the new stream recovers is silence, not the first fill.
+		let started = shared.quanta.load(Ordering::Relaxed) > 0;
 		Self {
 			shared,
 			rate: rate as f64,
 			base,
 			frames: 0,
 			playing: false,
-			started: false,
+			started,
 			filled: 0,
 			missing: 0,
 			first: None,
@@ -356,10 +359,15 @@ impl Ledger {
 }
 
 impl Drop for Ledger {
-	/// A stream going away mid-gap still reports it. Runs on the driver thread,
-	/// which drops the stream.
+	/// A stream going away mid-gap still reports it, and nothing plays until the
+	/// next stream does. Runs on the driver thread, which drops the stream.
 	fn drop(&mut self) {
 		self.close();
+		if self.playing {
+			self.shared.stalled.store(true, Ordering::Relaxed);
+			let at = self.clock(self.frames);
+			self.send(Event::Stall(Stall { at, stalled: true }));
+		}
 	}
 }
 
@@ -498,6 +506,31 @@ mod tests {
 		let mut ledger = Ledger::new(shared, 44_100);
 		ledger.add(&buffer(441, 441), 2, 441, true);
 		assert_eq!(observer.read().unwrap().clock, ms(480) + Duration::from_millis(10));
+	}
+
+	#[test]
+	fn a_stream_dropped_while_playing_stalls_until_the_next_one_plays() {
+		let shared = Arc::new(Shared::default());
+		let mut observer = Observer::new(shared.clone()).unwrap();
+		let mut ledger = Ledger::new(shared.clone(), RATE);
+		add(&mut ledger, 128, 128);
+		drop(ledger);
+		let observation = observer.read().unwrap();
+		assert!(observation.stalled, "no stream is playing");
+		assert_eq!(
+			observation.stalls.last(),
+			Some(&Stall {
+				at: ms(128),
+				stalled: true
+			})
+		);
+
+		// The new stream recovers through empty quanta, which count: the engine already started.
+		let mut ledger = Ledger::new(shared, RATE);
+		ledger.add(&[0.0; 256 * 2], 2, 0, true);
+		let observation = observer.read().unwrap();
+		assert!(!observation.stalled);
+		assert_eq!((observation.quanta, observation.quiet), (3, 2));
 	}
 
 	#[test]
