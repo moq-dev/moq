@@ -291,6 +291,10 @@ pub(crate) struct TrackState {
 	// datagrams, so it can run ahead of any cached group.
 	max_sequence: Option<u64>,
 
+	// The first sequence appended, kept after it is evicted: where a relative start taken
+	// on an empty track counts back from.
+	first_sequence: Option<u64>,
+
 	// The name's sequence namespace within the broadcast, which can run past this track's
 	// `max_sequence` when an earlier producer of the name wrote further.
 	sequence: Sequence,
@@ -1278,6 +1282,7 @@ impl TrackState {
 	/// Record a written sequence, here and in the name's shared namespace.
 	fn advance(&mut self, sequence: u64) {
 		self.max_sequence = Some(self.max_sequence.map_or(sequence, |max| max.max(sequence)));
+		self.first_sequence.get_or_insert(sequence);
 		self.sequence.advance(sequence);
 	}
 
@@ -4386,15 +4391,8 @@ impl Cursor {
 	fn resolve_floor(&mut self) -> bool {
 		if self.floor_pending {
 			// The track was empty at subscribe, so the latest group then was the first to
-			// arrive, however many have arrived since.
-			let latest = {
-				let state = self.state.read();
-				state
-					.arrival
-					.front()
-					.map(|(sequence, _)| *sequence)
-					.or(state.max_sequence)
-			};
+			// arrive, however many have arrived or left since.
+			let latest = self.state.read().first_sequence;
 			if let Some(floor) = self.subscription.read().floor(latest) {
 				self.min_sequence = self.min_sequence.max(floor);
 				self.floor_pending = false;
@@ -12414,6 +12412,32 @@ mod test {
 		append_at(&mut producer, 0);
 		append_at(&mut producer, 1);
 		assert_eq!(drain(&mut live), vec![0, 1]);
+	}
+
+	/// A relative start on an empty track counts back from the first group to arrive, even
+	/// once that group is evicted before the subscriber reads.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_relative_start_on_an_empty_track_survives_its_first_group_leaving() {
+		let producer = untimed_producer();
+		let buffering = Range {
+			start: Anchor::Relative(2),
+			end: None,
+		};
+		let mut behind = producer.subscribe(replay().with_ranges([buffering]));
+		let write = |sequence| {
+			let mut group = producer.create_group(group::Info { sequence }).unwrap();
+			group.write_frame(None, &b"x"[..]).unwrap();
+			group.finish().unwrap();
+		};
+		write(10);
+		elapse(&producer, cache::DEFAULT_EXPIRY + Duration::from_secs(1));
+		write(11);
+		assert!(!producer.state.read().lookup.contains_key(&10), "group 10 evicted");
+		write(8);
+		let mut delivered = drain(&mut behind);
+		delivered.sort_unstable();
+		assert_eq!(delivered, vec![8, 11]);
 	}
 
 	/// A relative start buffers that many groups behind the live edge, whatever a range
