@@ -24,7 +24,3 @@ subscription with INTERNAL_ERROR. Remaining (maintainer, 2026-10-07, from
 
 Test: an update keeps a live subscription open and a later UNSUBSCRIBE still
 ends it, on d14, d15 and d16, in both languages.
-
-## Related
-
-- [JS group handover](/quest/m1/js-group-handover.md) - JS also lacks Rust's route-failure splice

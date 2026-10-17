@@ -36,7 +36,7 @@ import {
 	type ResumeShell,
 	type ResumeSource,
 } from "./internal.ts";
-import type * as track from "./track.ts";
+import * as track from "./track.ts";
 import { type Broadcast as BroadcastWire, registerWire, wireOf } from "./wire.ts";
 
 // Stream codes that report the route failing rather than refusing: another route may still
@@ -180,8 +180,19 @@ interface Copy {
 	lease: number;
 }
 
+/** Subscribe to a route's copy, or to a failed stand-in when that route can no longer serve. */
+function subscribe(wire: BroadcastWire, name: string, subscription: track.Subscription): track.Subscriber {
+	try {
+		return wire.subscribe(name, subscription);
+	} catch (err) {
+		const failed = new track.Producer(name);
+		failed.close(err instanceof Error ? err : new Error(String(err)));
+		return failed.subscribe(subscription);
+	}
+}
+
 /** The first group past where `copy` was replaced: 0 for one replaced before any group. */
-function copyEnd(copy: Copy): number | undefined {
+function copyEnd(copy: Pick<Copy, "until">): number | undefined {
 	if (copy.until === undefined) return undefined;
 	return copy.until === null ? 0 : copy.until + 1;
 }
@@ -237,16 +248,17 @@ class Reader implements ResumeSource {
 			this.#update(copy);
 			this.#bound(copy);
 		}
+		const floor = this.#newest;
 		const copy: Copy = {
 			generation: route.generation,
 			source,
-			floor: this.#newest,
+			// The wire request carries the floor from the first message: some sessions read the
+			// demand only once.
+			sub: subscribe(source.wire, route.name, this.#wire({ floor })),
+			floor,
 			datagramsSeen: this.#datagram,
 			lease: 0,
-		} as Copy;
-		// The wire request carries the floor from the first message: some sessions read the
-		// demand only once.
-		copy.sub = source.wire.subscribe(route.name, this.#wire(copy));
+		};
 		source.retain();
 		this.#bound(copy);
 		this.#copies.push(copy);
@@ -259,7 +271,7 @@ class Reader implements ResumeSource {
 	}
 
 	/** What `copy` is asked for: the reader's own preferences, from its floor and through its replacement. */
-	#wire(copy: Copy): track.Subscription {
+	#wire(copy: Pick<Copy, "floor" | "until">): track.Subscription {
 		const preferences = this.#shell.subscription.peek() ?? {};
 		const bounds = groupBounds(preferences.groups);
 		const start = Math.max(bounds.start, copy.floor ?? 0);
@@ -789,23 +801,65 @@ export class Front {
 	}
 
 	async fetchGroup(name: string, sequence: number, options?: track.FetchGroupOptions): Promise<GroupConsumer> {
+		const fetched = await this.#fetch(name, sequence, options);
+		let current = fetched.source;
+		void fetched.group.closed.then(() => current.release());
+		// Carried across route changes like a subscribed group, but by fetching again: a fetch has
+		// no copy of its own to find the rest in.
+		hooks.recoverGroup(fetched.group, {
+			changed: this.#changed,
+			wants: (failed) => {
+				// Too old and evicted judge a subscription's delivery, not whether the group
+				// exists, so only the application's refusal is a verdict on a fetch.
+				if (failed) return !(failed instanceof StreamError && failed.code >= 64);
+				return this.#source !== undefined && this.#source !== current;
+			},
+			replace: async (_index, failed, signal) => {
+				// A stalled fetch only moves to another route; a failed one may ask its own again.
+				const next = await this.#fetch(name, sequence, { ...options, signal }, failed ? undefined : current);
+				let adopted = false;
+				void next.group.closed.then(() => {
+					if (!adopted) next.source.release();
+				});
+				return {
+					group: next.group,
+					// The route applies the fetch's own budget.
+					expiry: { expired: () => false, changed: [] },
+					adopt: () => {
+						adopted = true;
+						current.release();
+						current = next.source;
+					},
+				};
+			},
+		});
+		return fetched.group;
+	}
+
+	// Fetch a group from whichever route serves the track, asking the next one when a route
+	// fails, and never `avoid`. The source comes back retained for as long as the group is read.
+	async #fetch(
+		name: string,
+		sequence: number,
+		options: track.FetchGroupOptions | undefined,
+		avoid?: Source,
+	): Promise<{ group: GroupConsumer; source: Source }> {
 		for (;;) {
 			const source = this.#source;
-			if (!source) {
+			if (!source || source === avoid) {
 				if (this.#concluded) throw new NotFound(`group ${sequence}`);
 				await this.#next(options?.signal);
 				continue;
 			}
 			source.retain();
 			try {
-				return await source.wire.fetchGroup(name, sequence, options);
+				return { group: await source.wire.fetchGroup(name, sequence, options), source };
 			} catch (err) {
+				source.release();
 				const error = err instanceof Error ? err : new Error(String(err));
 				// The route failed: ask the next one, unless none will come.
 				if (!routeFailed(error) || this.#concluded || options?.signal?.aborted) throw error;
 				if (this.#source === source) await this.#next(options?.signal);
-			} finally {
-				source.release();
 			}
 		}
 	}

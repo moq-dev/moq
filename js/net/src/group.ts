@@ -428,6 +428,8 @@ export class Consumer {
 	#verdict = new Once<Error | null>();
 	#closed?: CombinedClosed;
 	#pendingFrames = 0;
+	// Closed by its reader, which ends it whatever is left unread.
+	#released = false;
 
 	private constructor(state: GroupState) {
 		this.#state = state;
@@ -446,7 +448,7 @@ export class Consumer {
 			(value) =>
 				value instanceof Error
 					? !this.#recovers(value)
-					: this.#state.frames.peek().length === 0 && this.#pendingFrames === 0,
+					: this.#released || (this.#state.frames.peek().length === 0 && this.#pendingFrames === 0),
 		);
 		return this.#closed;
 	}
@@ -553,12 +555,8 @@ export class Consumer {
 		this.#state.frames.set([]);
 	}
 
-	async #changed(): Promise<void> {
-		await this.#changes();
-	}
-
 	// The next change a parked read waits for.
-	#changes(): GetPromise<unknown> {
+	#changed(): GetPromise<unknown> {
 		const changed: Getter<unknown>[] = [this.#state.frames, this.#state.closed];
 		if (this.#expiry) changed.push(...this.#expiry.changed);
 		if (this.#recover) changed.push(this.#recover.changed);
@@ -592,7 +590,7 @@ export class Consumer {
 		}
 		// A stalled copy may still deliver first; a failed one never will.
 		if (failed) await attempt.result;
-		else await race([attempt.result, this.#changes()]);
+		else await race([attempt.result, this.#changed()]);
 		// The copy being read moved first: look again, keeping the attempt out.
 		if (!attempt.settled) return true;
 		if (this.#attempt === attempt) this.#attempt = undefined;
@@ -801,8 +799,8 @@ export class Consumer {
 		this.#attempt = undefined;
 		this.#recover = undefined;
 		// Closing is terminal for this reader, even with frames still unread.
-		if (this.#verdict.peek() === undefined) this.#verdict.set(abort ?? null);
-		if (this.#state.closed.peek() !== undefined) return; // already closed
-		this.#state.closed.set(abort ?? null);
+		this.#released = true;
+		if (this.#state.closed.peek() === undefined) this.#state.closed.set(abort ?? null);
+		this.#closed?.refresh();
 	}
 }

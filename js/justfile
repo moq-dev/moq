@@ -47,7 +47,7 @@ test:
 test-changed list:
     python3 ../sh/js/workspace.py test '{{ list }}'
 
-# Run one net benchmark: broadcasts, forward, requests, reader, frames, track, interests, observed, varint, lite-varint, priority, or request-ids.
+# Run one net benchmark: broadcasts, forward, requests, reader, frames, track, resume, interests, observed, varint, lite-varint, priority, or request-ids.
 bench name:
     bun install --frozen-lockfile
     bun net/bench/{{ name }}.ts

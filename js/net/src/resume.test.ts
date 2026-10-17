@@ -290,3 +290,25 @@ test("a parked front keeps its readers on the copy they have", async () => {
 	a.close();
 	b.close();
 });
+
+test("a fetched group continues from the next route once its own fails", async () => {
+	const front = new Front();
+	const a = new BroadcastProducer();
+	const b = new BroadcastProducer();
+	const ta = copy(a);
+	const tb = copy(b);
+	const stalled = ta.write(5, 1, false);
+	front.serve(a.consume());
+	const group = await front.consumer.track("seq").fetchGroup(5);
+	expect(dec.decode((await group.readFrame())?.payload)).toBe("5.0");
+
+	tb.write(5, 2);
+	front.serve(b.consume());
+	stalled.close(new StreamError(StreamCode.SessionClosed));
+	expect(dec.decode((await group.readFrame())?.payload)).toBe("5.1");
+	expect(await group.readFrame()).toBeUndefined();
+
+	front.consumer.close();
+	a.close();
+	b.close();
+});

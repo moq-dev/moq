@@ -79,6 +79,5 @@ extension; no changes to unnegotiated published versions or broadcast paths.
 - [Broadcast epochs](/quest/m0/broadcast-epoch/README.md) - current lite-07 identity and legacy restart behavior
 - [Announcement takeover](/quest/m1/announce-takeover.md) - shared continuity model and lite-07 operation
 - [IETF takeover](/quest/m1/ietf-takeover.md) - independently advertised continuation of a claim-served instance
-- [JS track handover](/quest/m1/js-group-handover.md) - stable JS readers across same-epoch route changes
 - [Catalog references](/quest/m0/broadcast-epoch/catalog-references.md) - optional requested epochs become verifiable on this negotiated transport; epochless fallback remains best effort
 - [IETF fill timeout](/quest/m1/ietf-fill-timeout.md) - native wait-budget support is separate from epoch negotiation and adds no age extension

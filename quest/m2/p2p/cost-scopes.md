@@ -42,7 +42,6 @@ in Peers and native configuration. Wire: none beyond shared routing and existing
 
 ## Required
 
-- [JS track handover](/quest/m1/js-group-handover.md) - same-epoch browser migration
 - [Routes and announces](/quest/m1/cluster-routing/routes.md) - common identity and route ordering
 - [Signaling and policy](/quest/m2/p2p/signal.md) - explicit application peer selection
 - [moq-cli joins](/quest/m2/p2p/cli.md) - matching native controls
