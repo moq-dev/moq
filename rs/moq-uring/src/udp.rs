@@ -1603,7 +1603,11 @@ mod tests {
 		// SAFETY: `control` holds a header plus an int.
 		unsafe {
 			control.as_mut_ptr().cast::<libc::cmsghdr>().write_unaligned(header);
-			control.as_mut_ptr().add(header_len).cast::<libc::c_int>().write_unaligned(size);
+			control
+				.as_mut_ptr()
+				.add(header_len)
+				.cast::<libc::c_int>()
+				.write_unaligned(size);
 		}
 		control
 	}
