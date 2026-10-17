@@ -1994,7 +1994,7 @@ mod tests {
 			};
 			let script = encode_raw(ietf::SubscribeUpdate::ID, &Bytes::copy_from_slice(body), version);
 			let mut session = ScriptedSession::new(script.to_vec());
-			let (_, recv) = session.open_bi().await.unwrap();
+			let (_, recv) = session.open_bi(Default::default()).await.unwrap();
 			let adapter = ControlStreamAdapter::new(session, Control::new(None, false), version);
 			let log = Log::default();
 			let writer = Writer::new(SinkSend::new(log.clone()), version);

@@ -2285,7 +2285,10 @@ fn unreachable_is_loss_once_established() {
 
     assert!(!pair.client_conn_mut(client_ch).is_closed());
     assert_matches!(pair.client_conn_mut(client_ch).poll(), None);
-    let s = pair.client_streams(client_ch).open(Dir::Uni).unwrap();
+    let s = pair
+        .client_streams(client_ch)
+        .open(Dir::Uni, Default::default())
+        .unwrap();
     pair.client_send(client_ch, s).write(b"hello").unwrap();
     pair.drive();
     assert_matches!(
