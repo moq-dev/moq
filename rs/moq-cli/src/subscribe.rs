@@ -547,8 +547,10 @@ impl Replacement {
 
 		tokio::pin!(export);
 		tokio::select! {
-			end = &mut export => return end,
+			// A replacement on hand when the old instance ends still fails the export.
+			biased;
 			() = replaced => {}
+			end = &mut export => return end,
 		}
 		let path = &self.path;
 		tracing::info!(%path, "broadcast replaced, exporting the old instance until it ends");
@@ -622,6 +624,30 @@ mod tests {
 
 		end.send(()).unwrap();
 		task.await.unwrap().unwrap();
+	}
+
+	/// The old instance can end before the guard runs again, leaving the replacement and the
+	/// finished export both on hand. The replacement must still fail it. `select!` picks among
+	/// ready branches at random unless biased, so try enough times to catch either order.
+	#[tokio::test]
+	async fn a_replacement_on_hand_at_the_end_fails_the_export() {
+		tokio::time::pause();
+		for _ in 0..16 {
+			let origin = moq_tokio::origin::spawn();
+			let _old = announce(&origin, &moq_net::Epoch::mint());
+			let consumer = origin.consume();
+			consumer.routed("room").await.unwrap();
+			let replacement = Replacement::watch(&consumer, &"room".into()).unwrap();
+
+			let _new = announce(&origin, &moq_net::Epoch::mint());
+			tokio::time::sleep(moq_net::origin::DEFAULT_UPDATE_HOLD * 2).await;
+
+			let err = replacement
+				.guard(std::future::ready(Ok(())))
+				.await
+				.expect_err("a replaced export ended cleanly");
+			assert!(err.to_string().contains("replaced broadcast `room`"), "{err:#}");
+		}
 	}
 
 	/// A broadcast that goes offline ends the export as it always has, so what returns
