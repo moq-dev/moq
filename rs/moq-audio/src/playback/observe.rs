@@ -190,11 +190,12 @@ impl Observer {
 
 impl Drop for Observer {
 	fn drop(&mut self) {
-		self.shared.observer.store(0, Ordering::Release);
-		// Free the queue's slots; anything a racing send adds later carries this
-		// generation, which the next observer skips.
+		// Drain before releasing the slot, so the next observer's events can only
+		// arrive after this teardown has stopped draining. A send that races it
+		// still carries this generation, which the next observer skips.
 		let received = self.shared.received.lock().unwrap();
 		while received.try_recv().is_ok() {}
+		self.shared.observer.store(0, Ordering::Release);
 	}
 }
 

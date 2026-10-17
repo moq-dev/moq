@@ -595,7 +595,7 @@ mod tests {
 	}
 
 	#[test]
-	fn a_writing_sink_running_dry_is_a_gap_and_a_finished_one_a_stall() {
+	fn a_writing_sink_running_dry_is_a_gap_and_a_finished_tail_plays_out() {
 		let shared = Arc::new(Shared::default());
 		let mut observer = super::super::Observer::new(shared.observe.clone()).unwrap();
 		let engine = Arc::new(super::super::Handle {
@@ -625,20 +625,28 @@ mod tests {
 		assert!(!observation.stalled);
 		assert_eq!(observation.gaps.len(), 1, "the sink ran dry once: {observation:?}");
 
+		// A finished sink still plays its tail: no stall while it lasts.
 		let _drain = sink.finish();
+		mixer.fill(&mut out, Duration::ZERO);
+		let observation = observer.read().unwrap();
+		assert!(!observation.stalled && observation.stalls.is_empty(), "{observation:?}");
+		let tail = observation.clock;
+
 		for _ in 0..4 {
 			mixer.fill(&mut out, Duration::ZERO);
 		}
 		observer.finish();
 		mixer.fill(&mut out, Duration::ZERO);
-		// The tail running out mid-buffer opens nothing: the only gap is the
-		// stall after it, which starts where the stall does.
+		// Once the tail runs out nothing plays. The gap where it ran out lands in
+		// the buffer before the stall, which the analyzer attributes to the stall.
 		let observation = observer.read().unwrap();
-		assert!(observation.stalled, "a finished sink is not playing");
+		assert!(observation.stalled, "{observation:?}");
 		let ([gap], [stall]) = (&observation.gaps[..], &observation.stalls[..]) else {
 			panic!("one gap and one stall: {observation:?}");
 		};
-		assert_eq!((gap.at, gap.short), (stall.at, 0), "{observation:?}");
+		let buffer = Duration::from_secs_f64(512.0 / 48_000.0);
+		assert!(stall.at >= tail, "{observation:?}");
+		assert!(gap.at <= stall.at && stall.at - gap.at < buffer, "{observation:?}");
 	}
 
 	/// The resampler only converts whole blocks and its filter lags the input, so

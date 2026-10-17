@@ -316,9 +316,12 @@ impl Mixer {
 
 			// What the observer counts: frames every sink still being written
 			// supplied, and whether any of them is readable at all. A finished
-			// sink running out is its tail ending, not a gap.
+			// sink plays its tail, which carries the mix while nothing written
+			// is readable yet (a rendition switch), but it running out is the
+			// tail ending, not a gap.
 			let mut supplied = frames;
 			let mut playing = false;
+			let mut tail = 0;
 
 			for entry in entries.iter_mut() {
 				// Read even at zero volume: this is live audio, so a muted sink
@@ -332,15 +335,18 @@ impl Mixer {
 				) {
 					entry.played_at = played_at;
 				}
-				if entry.completion.writing() {
-					match status {
-						ReadStatus::InputNotReady => {}
-						ReadStatus::UnderflowOccurred { num_frames_read } => {
-							playing = true;
-							supplied = supplied.min(num_frames_read);
-						}
-						ReadStatus::Ok | ReadStatus::OverflowCorrected { .. } => playing = true,
+				let read = match status {
+					ReadStatus::InputNotReady => None,
+					ReadStatus::UnderflowOccurred { num_frames_read } => Some(num_frames_read),
+					ReadStatus::Ok | ReadStatus::OverflowCorrected { .. } => Some(frames),
+				};
+				match read {
+					Some(read) if entry.completion.writing() => {
+						playing = true;
+						supplied = supplied.min(read);
 					}
+					Some(read) => tail = tail.max(read),
+					None => {}
 				}
 
 				let target = entry.gain.volume();
@@ -366,6 +372,9 @@ impl Mixer {
 			// Summing sinks can exceed full scale; clip rather than wrap.
 			for sample in &mut bus[..samples] {
 				*sample = sample.clamp(-1.0, 1.0);
+			}
+			if !playing && tail > 0 {
+				(playing, supplied) = (true, tail);
 			}
 			ledger.add(&bus[..samples], channels, supplied, playing);
 
