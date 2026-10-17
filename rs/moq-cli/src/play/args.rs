@@ -87,7 +87,7 @@ pub struct Args {
 	/// and how many were quiet, and the gaps and stalls since the line before, in the metric
 	/// schema of `test/audio-quality`, whose analyzer reduces it to underruns, skips, and
 	/// silence. Audio only, so it needs `--no-video`.
-	#[usage(long, requires = "--no-video", value_hint = usage::ValueHint::FilePath, extensions("ndjson"))]
+	#[usage(long, requires = "--no-video", value_name = "PATH", value_hint = usage::ValueHint::FilePath, extensions("ndjson"))]
 	pub metrics: Option<PathBuf>,
 }
 
