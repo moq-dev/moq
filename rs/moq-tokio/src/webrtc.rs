@@ -180,7 +180,13 @@ impl FromStr for Stun {
 					Some((host, port)) => (host, Some(port)),
 					None => (rest, None),
 				};
-				if host.is_empty() || host.contains(['/', '?', '@', '[', ']']) {
+				// A DNS name or IPv4 address, so a fragment or stray character fails here
+				// instead of as a lookup that only warns.
+				if host.is_empty()
+					|| !host
+						.chars()
+						.all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | '_'))
+				{
 					return Err(invalid());
 				}
 				(host.to_string(), port)

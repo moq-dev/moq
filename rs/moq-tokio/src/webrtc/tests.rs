@@ -258,6 +258,9 @@ fn stun_urls() {
 		"stun:host:3478?transport=udp",
 		"stun:[::1]x",
 		"stun:[nope]",
+		"stun:server.example#fragment",
+		"stun:server example",
+		"stun:server\texample",
 		"stun.example.com",
 	] {
 		assert_eq!(parse(bad), None, "{bad}");
