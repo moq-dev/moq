@@ -413,6 +413,7 @@ pub(crate) struct SockShared {
 	/// The worker, as the I/O built on this socket carries it.
 	owner: Owner,
 	/// This socket's slot in a steered reuseport group, if it is in one.
+	#[cfg_attr(not(feature = "quic"), allow(dead_code))]
 	shard: Option<moq_sock::shard::Shard>,
 	/// The worker's counters, held directly rather than reached through
 	/// `owner`, so counting a datagram is not a `Weak::upgrade`.
@@ -665,11 +666,13 @@ impl Socket {
 	}
 
 	/// The worker driving this socket, which everything built on it runs on.
+	#[cfg_attr(not(feature = "quic"), allow(dead_code))]
 	pub(crate) fn owner(&self) -> Owner {
 		self.shared.owner.clone()
 	}
 
 	/// This socket's slot in a steered reuseport group, if it is in one.
+	#[cfg_attr(not(feature = "quic"), allow(dead_code))]
 	pub(crate) fn shard(&self) -> Option<moq_sock::shard::Shard> {
 		self.shared.shard
 	}

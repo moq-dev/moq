@@ -592,6 +592,7 @@ pub(crate) struct Owner {
 	/// Held directly: a timer on a dropped worker still has to exist, since
 	/// the driver that owns it is torn down by the same drop that would need
 	/// it.
+	#[cfg_attr(not(feature = "quic"), allow(dead_code))]
 	timers: Rc<RefCell<timer::Heap>>,
 }
 
@@ -615,6 +616,7 @@ impl Owner {
 	}
 
 	/// Run a `!Send` future on the worker, or drop it if the worker is gone.
+	#[cfg_attr(not(feature = "quic"), allow(dead_code))]
 	pub fn spawn(&self, future: impl Future<Output = ()> + 'static) {
 		if let Some(handle) = self.handle() {
 			handle.spawn(future);
@@ -622,11 +624,13 @@ impl Owner {
 	}
 
 	/// A disarmed timer on the worker.
+	#[cfg_attr(not(feature = "quic"), allow(dead_code))]
 	pub fn timer(&self) -> crate::Timer {
 		crate::Timer::from_heap(self.timers.clone())
 	}
 
 	/// A timer that expires after `duration`.
+	#[cfg_attr(not(feature = "quic"), allow(dead_code))]
 	pub fn after(&self, duration: Duration) -> crate::Timer {
 		let mut timer = self.timer();
 		timer.set(Instant::now().checked_add(duration));
