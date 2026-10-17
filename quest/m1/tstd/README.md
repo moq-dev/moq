@@ -42,6 +42,20 @@ content-loss coverage through the TS reliability line. Run TSDuck, FFmpeg
 software decode, and the custom model as automated assertions with known-bad
 controls. A model pass is not independent proof of decoded content.
 
+Measured (2026-10-16): `just test ts --loss <percent>` rebuilds the #4613
+path with `moq-shaper` (random loss on the relay's datagrams to the
+subscriber, 25 ms each way), no privileges needed, and `holes.py` fails a
+generated clip's capture on any media missing from its timestamps. Nightly
+runs `--hrd --loss 1 --duration 120`. `--hrd` passes at 1 % and 3 %; at 5 %
+and above its groups are evicted `Old` and the export refuses a false clock
+drift. The `--headroom` feed passes T-STD at 3 % with its video stopped 27 s
+into 120 s, and at 1 % keeps 0.2-0.4 s of audio holes after the join. The
+ceiling is BBRv3's 2 % `LOSS_THRESH`: raised to 20 % as an experiment,
+`--hrd --loss 10` passed T-STD with 1.56 s of video still late at the 1 s
+delay. CUBIC delivered nothing at 10 %. The 10 % requirement therefore waits
+on a maintainer decision about the congestion response to random loss; see
+`test/ts/README.md#lossy-path---loss`.
+
 The current model does not cover every codec/layout. Name those exclusions and
 assumptions in the profile report. Do not relabel the current subset a full
 standards check.
