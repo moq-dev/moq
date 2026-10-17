@@ -14,8 +14,9 @@ GitHub's 1 GB guidance within weeks.
 
 ## Plan
 
-Recommended by the [Go mirror delivery](https://github.com/moq-dev/moq/pull/5853)
-evaluation, which rejected the alternatives:
+Decided 2026-10-17 in the [Go mirror delivery](https://github.com/moq-dev/moq/pull/5853)
+evaluation: our own proxy at `go.moq.dev`, run from `infra/go`. It rejected
+the alternatives:
 
 - Orphan or squashed mirror history still stores every tagged release, unless
   old tags are deleted, and deleting them breaks `GOPROXY=direct`.
@@ -44,5 +45,7 @@ and proxy.golang.org caches it like any other module.
   the generated `moq.go` lives in no repo.
 - Verify from a clean module cache with both `GOPROXY=direct` and the default
   proxy, then archive `moq-dev/moq-go-ffi` without deleting it.
-- The `moq.dev/moq` wrapper is pure Go and stays on its git mirror.
+- Decided: the `moq.dev/moq` wrapper is pure Go and stays on its git mirror.
 - Update `go/ffi/README.md`, `doc/lib/go`, and the `infra/README.md` table.
+- Keep the per-platform split out of this quest; it lands in
+  [Go per-platform lib modules](/quest/m2/go-ffi-platform-modules.md).

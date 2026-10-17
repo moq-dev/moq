@@ -11,7 +11,8 @@ host's lib, about 16 MiB instead of 61 MiB, and `go mod vendor` builds.
 Prototyped against the published v0.4.16 libs on linux/amd64, served from a
 static GOPROXY layout:
 
-- Lib modules are `moq.dev/moq-ffi/lib/<goos>_<goarch>`. Each holds its
+- Decided 2026-10-17: lib modules are `moq.dev/moq-ffi/lib/<goos>_<goarch>`,
+  so the one `moq.dev/moq-ffi` vanity entry covers them. Each holds its
   staticlib plus a cgo file whose `LDFLAGS` name the archive and the system
   libraries that `moq/cgo.go` lists today, so the archive precedes its
   dependencies on the link line.
