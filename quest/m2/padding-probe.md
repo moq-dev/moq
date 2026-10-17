@@ -1,14 +1,16 @@
-# [L] Publishers pad to find room for a stopped rendition
+# [L] Publishers can pad to find room above their media
 
 ## Goal
 
-A publisher that stopped a simulcast rendition for lack of bandwidth sends
-short, low-priority padding bursts at that rendition's resume rate, so the
-congestion controller can measure room above the media it still sends. When
-the uplink recovers, the bandwidth estimate rises and the rendition resumes.
-When the uplink doesn't recover, the padding stays within its budget and never
-delays media. This holds for native publishers (moq-net over any QUIC backend)
-and browser publishers (`@moq/publish` over WebTransport).
+A publisher can ask its session for short, low-priority padding bursts at a
+chosen rate, on a bounded backoff schedule, so the congestion controller
+measures room above the media the publisher is sending. When the uplink has
+room, the bandwidth estimate rises past media plus the burst rate. When it
+doesn't, the padding stays within its budget and never delays media. This
+holds for native publishers (moq-net over any QUIC backend) and browser
+publishers (`js/net` over WebTransport). The first user is a simulcast
+rendition stopped for lack of bandwidth, which
+[rung disable](/quest/m2/simulcast-rung-disable.md) resumes with it.
 
 ## Plan
 
@@ -39,11 +41,15 @@ and over landing without probing):
   five seconds after the stop and doubling to a 60 s cap, and resuming resets
   it. A burst ends early when the estimate falls, since that means it found
   congestion. Padding runs at the lowest send priority, below all media.
-- **The rate policy decides; the session pads.** `moq_mux::rate::Rung` and its
-  JS mirror (`js/publish/src/rate.ts`) tell the publisher when to probe and up to
-  what rate, under the same mocked time they already take. `moq-net` and
-  `js/net` own the sender: the publisher asks the session to pad at a rate and
-  gets back a handle, and dropping the handle stops the padding. No callbacks.
+- **This quest builds the mechanism; rung disable wires it in.** `moq-net` and
+  `js/net` own the sender: a publisher asks the session to pad at a rate and gets
+  back a handle, and dropping the handle stops the padding. No callbacks. The
+  burst schedule (backoff, burst length, early stop on a falling estimate) is a
+  policy-agnostic type in `moq_mux::rate`, mirrored in `js/publish/src/rate.ts`,
+  taking mocked time like `Control`. It knows nothing about renditions.
+  [Simulcast rung disable](/quest/m2/simulcast-rung-disable.md) (#5850) then
+  drives it from `Rung` and the publishers once this lands, so neither quest
+  waits on the other's code.
 - **Wire: a moq-lite padding stream.** Add a unidirectional padding stream type
   to moq-lite that the receiver reads and discards, matching moq-transport's
   PADDING stream, which moq-net already discards
@@ -51,7 +57,10 @@ and over landing without probing):
   the unknown stream without closing the session, as the spec requires, so the
   burst just ends and the rendition keeps today's behavior. Update
   `drafts/draft-lcurley-moq-lite.md` and the probe draft. On moq-transport
-  sessions, send the existing PADDING type.
+  sessions, send the existing PADDING type only from draft-18 on. Drafts 14
+  to 17 treat it as an unknown stream type and close the session
+  (`UniType::classify`), so the handle reports padding as unsupported there
+  and the rendition keeps today's behavior.
 
 Open while implementing: the public shape of the session's padding handle
 (name, and whether it takes a rate or a byte budget). Propose it with
@@ -59,24 +68,25 @@ alternatives in the PR.
 
 Tests, with mocked time:
 
-- `Rung`, Rust and JS: no probe while enabled. The first burst comes five
-  seconds after the stop, then the backoff doubles to the cap and resets on
-  resume. A falling estimate ends a burst. The burst rate is the resume rate.
+- The burst schedule, Rust and JS: the first burst comes five seconds after
+  it starts, then the backoff doubles to the cap and resets when stopped. A
+  falling estimate ends a burst.
 - moq-net, under its simulated transport: the padding handle sends about
   rate × duration bytes on a padding stream at the lowest priority, then
-  stops when dropped. Lite and IETF receivers discard it. A lite peer without
-  the stream type resets it, and the session stays up.
+  stops when dropped. Lite and IETF draft-18 receivers discard it. A lite peer
+  without the stream type resets it, and the session stays up. On drafts 14 to
+  17 the handle refuses to pad, and nothing is sent.
 - moq-quic end to end, in the seeded simulation (`rs/moq-quic/src/tests/`):
-  extend `Bottleneck` to step its rate mid-run. A publisher sends 2.5 Mbit/s of
-  media with a stopped 5 Mbit/s rendition while the path steps from 4 to
-  10 Mbit/s. With padding, BBR3's estimate clears the resume rate within a
-  bounded number of bursts. Without padding it never does: that is the
-  regression this quest exists for. On a path held at 4 Mbit/s, the bursts
-  never resume the rendition and media frame delay stays within budget.
-- `js/net` and `@moq/publish`: a padding writer over a fake WebTransport under
-  `@moq/clock`'s `Manual`, and an encoder test showing a stopped rendition
-  probes and resumes once the fake estimate rises.
-- One manual shaped-uplink run in Chrome, reported in the PR.
+  extend `Bottleneck` to step its rate mid-run. A sender sends 2.5 Mbit/s of
+  media while the path steps from 4 to 10 Mbit/s, and pads 3.5 Mbit/s bursts
+  on the schedule. With padding, BBR3's estimate rises past media plus the
+  burst rate within a bounded number of bursts. Without padding it never does:
+  that is the regression this quest exists for. On a path held at 4 Mbit/s,
+  the estimate stays put and media frame delay stays within budget.
+- `js/net`: a padding writer over a fake WebTransport under `@moq/clock`'s
+  `Manual`.
+- One manual shaped-uplink run in Chrome, padding over a constrained uplink,
+  reported in the PR. The stopped-rendition run belongs to rung disable.
 
 Wire these into CI, the moq-quic simulation at least nightly.
 

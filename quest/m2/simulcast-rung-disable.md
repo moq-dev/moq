@@ -55,7 +55,7 @@ publishers expose for it. Wire: none; `enabled` already exists.
 
 ## Required
 
-- [Padding probe](/quest/m2/padding-probe.md) - a stopped rendition can find room to resume; the estimators stop learning while app-limited
+- [Padding probe](/quest/m2/padding-probe.md) - the padding handle and burst schedule a stopped rendition probes with, since the estimators stop learning while app-limited; this quest drives them from `Rung`
 
 ## Related
 
