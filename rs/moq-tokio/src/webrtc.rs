@@ -670,7 +670,7 @@ impl Driver {
 					Ok(Bytes::from(data.data))
 				};
 				if !open.reads.push(record) {
-					tracing::debug!("closing the data channel: the peer ignored qmux flow control");
+					tracing::debug!("closing the data channel: the peer broke qmux framing or flow control");
 					let id = open.id;
 					self.agent.rtc_mut().direct_api().close_data_channel(id);
 					self.channel = Some(Err(Error::Closed));
@@ -816,12 +816,14 @@ fn bind(hosts: &[IpAddr]) -> Result<moq_ice::Socket, Error> {
 	let socket = crate::bind::udp(crate::bind::Udp::new("[::]:0".parse().unwrap()))
 		.or_else(|_| crate::bind::udp(crate::bind::Udp::new("0.0.0.0:0".parse().unwrap())))?;
 	socket.set_nonblocking(true)?;
+	// A `[::]` socket that stayed v6-only can't send to IPv4 candidates.
+	let ipv4 = socket.local_addr()?.is_ipv4() || crate::bind::udp_is_dual_stack(&socket);
 	let socket = UdpSocket::from_std(socket)?;
 	let local = socket.local_addr()?;
 
 	let locals: Vec<SocketAddr> = hosts
 		.iter()
-		.filter(|ip| local.is_ipv6() || ip.is_ipv4())
+		.filter(|ip| if ip.is_ipv4() { ipv4 } else { local.is_ipv6() })
 		.map(|&ip| SocketAddr::new(ip, local.port()))
 		.collect();
 	if locals.is_empty() {

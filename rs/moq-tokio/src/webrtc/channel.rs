@@ -77,16 +77,29 @@ pub(crate) struct Inbox {
 }
 
 impl Inbox {
-	/// Queue a record for the session, or end its reads with a flow control error
-	/// and return false once that would leave more than the budget unread.
+	/// Queue a record for the session, returning false once its reads have ended:
+	/// on an error, or with a flow control error when the record would leave more
+	/// than the budget unread.
 	pub fn push(&self, record: Result<Bytes, qmux::Error>) -> bool {
-		let len = record.as_ref().map_or(0, |data| data.len() as u64);
+		// A closed reader drops the record.
+		let data = match record {
+			Ok(data) => data,
+			Err(err) => {
+				let _ = self.tx.send(Err(err));
+				return false;
+			}
+		};
+		// qmux records are never empty, so the byte budget also bounds their count.
+		if data.is_empty() {
+			let _ = self.tx.send(Err(qmux::Error::ProtocolViolation));
+			return false;
+		}
+		let len = data.len() as u64;
 		if self.unread.fetch_add(len, Ordering::Relaxed) + len > self.budget {
 			let _ = self.tx.send(Err(qmux::Error::FlowControlError));
 			return false;
 		}
-		// A closed reader drops the record.
-		let _ = self.tx.send(record);
+		let _ = self.tx.send(Ok(data));
 		true
 	}
 }
@@ -125,5 +138,17 @@ mod tests {
 		assert_eq!(reader.recv().await.unwrap()[0], 1);
 		assert_eq!(reader.recv().await.unwrap()[0], 2);
 		assert!(matches!(reader.recv().await, Err(qmux::Error::FlowControlError)));
+	}
+
+	#[tokio::test]
+	async fn queue_ends_on_empty_or_error_records() {
+		// Neither costs any bytes, so the budget alone would never stop a flood of them.
+		let (inbox, mut reader) = queue(10);
+		assert!(!inbox.push(Ok(Bytes::new())));
+		assert!(matches!(reader.recv().await, Err(qmux::Error::ProtocolViolation)));
+
+		let (inbox, mut reader) = queue(10);
+		assert!(!inbox.push(Err(qmux::Error::FrameTooLarge)));
+		assert!(matches!(reader.recv().await, Err(qmux::Error::FrameTooLarge)));
 	}
 }
