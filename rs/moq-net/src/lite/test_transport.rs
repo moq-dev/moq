@@ -315,16 +315,16 @@ pub struct PendingRecv;
 
 impl poll::RecvStream for PendingRecv {
 	type Error = SinkError;
+	// Never handed out.
+	type Lease<'a> = poll::BufferedLease<'a>;
 
-	fn poll_read(&mut self, _cx: &mut Context<'_>, _dst: &mut [u8]) -> Poll<Result<Option<usize>, Self::Error>> {
+	fn poll_lease(&mut self, _cx: &mut Context<'_>, _want: usize) -> Poll<Result<Self::Lease<'_>, Self::Error>> {
 		Poll::Pending
 	}
+
+	fn set_priority(&mut self, _priority: i64) {}
 
 	fn stop(&mut self, _code: u32) {}
-
-	fn poll_closed(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-		Poll::Pending
-	}
 }
 
 /// A RESET_STREAM as the transport reports it. `Some(code)` decodes as
@@ -362,16 +362,16 @@ pub struct DeadRecv(ResetError);
 
 impl poll::RecvStream for DeadRecv {
 	type Error = ResetError;
+	// Never handed out.
+	type Lease<'a> = poll::BufferedLease<'a>;
 
-	fn poll_read(&mut self, _cx: &mut Context<'_>, _dst: &mut [u8]) -> Poll<Result<Option<usize>, Self::Error>> {
+	fn poll_lease(&mut self, _cx: &mut Context<'_>, _want: usize) -> Poll<Result<Self::Lease<'_>, Self::Error>> {
 		Poll::Ready(Err(self.0))
 	}
+
+	fn set_priority(&mut self, _priority: i64) {}
 
 	fn stop(&mut self, _code: u32) {}
-
-	fn poll_closed(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-		Poll::Ready(Err(self.0))
-	}
 }
 
 /// Incoming streams that die before their first byte: `accept_uni` / `accept_bi`
@@ -747,7 +747,10 @@ impl crate::transport::Stats for SinkStats {
 ///
 /// Parks once the script is exhausted rather than reporting EOF: a read loop that saw
 /// EOF would exit, and a test usually wants to assert against the loop still running.
-pub struct ScriptedRecv {
+pub type ScriptedRecv = poll::Buffered<Script>;
+
+/// The plain reads of a [`ScriptedRecv`].
+pub struct Script {
 	script: Arc<Mutex<Vec<u8>>>,
 	/// How the peer's send side ends once the script runs out; `None` parks.
 	close: Arc<Mutex<Option<Close>>>,
@@ -761,38 +764,32 @@ pub enum Close {
 	Reset,
 }
 
-impl poll::RecvStream for ScriptedRecv {
+impl poll::Chunks for Script {
 	type Error = SinkError;
 
-	fn poll_read(&mut self, _cx: &mut Context<'_>, dst: &mut [u8]) -> Poll<Result<Option<usize>, Self::Error>> {
-		let take = {
+	fn poll_read_chunk(
+		&mut self,
+		_cx: &mut Context<'_>,
+		max: usize,
+	) -> Poll<Result<Option<bytes::Bytes>, Self::Error>> {
+		let chunk: bytes::Bytes = {
 			let mut script = self.script.lock().unwrap();
-			if script.is_empty() {
-				0
-			} else {
-				let take = dst.len().min(script.len());
-				dst[..take].copy_from_slice(&script[..take]);
-				script.drain(..take);
-				take
-			}
+			let take = max.min(script.len());
+			script.drain(..take).collect()
 		};
 
-		match take {
-			0 => match *self.close.lock().unwrap() {
+		match chunk.is_empty() {
+			true => match *self.close.lock().unwrap() {
 				Some(Close::Fin) => Poll::Ready(Ok(None)),
 				Some(Close::Reset) => Poll::Ready(Err(SinkError)),
 				None => Poll::Pending,
 			},
-			take => Poll::Ready(Ok(Some(take))),
+			false => Poll::Ready(Ok(Some(chunk))),
 		}
 	}
 
 	fn stop(&mut self, code: u32) {
 		self.log.stops.lock().unwrap().push(code);
-	}
-
-	fn poll_closed(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-		Poll::Pending
 	}
 }
 
@@ -944,11 +941,11 @@ impl poll::Session for ScriptedSession {
 		let Some(script) = self.incoming_unis.lock().unwrap().pop_front() else {
 			return Poll::Pending;
 		};
-		Poll::Ready(Ok(ScriptedRecv {
+		Poll::Ready(Ok(poll::Buffered::new(Script {
 			script: Arc::new(Mutex::new(script)),
 			close: self.close.clone(),
 			log: self.log.clone(),
-		}))
+		})))
 	}
 
 	fn poll_accept_bi(&mut self, _cx: &mut Context<'_>) -> Poll<Result<poll::BiStreams<Self>, Self::Error>> {
@@ -957,11 +954,11 @@ impl poll::Session for ScriptedSession {
 		};
 		Poll::Ready(Ok((
 			SinkSend::new(self.log.clone()),
-			ScriptedRecv {
+			poll::Buffered::new(Script {
 				script: Arc::new(Mutex::new(script)),
 				close: self.close.clone(),
 				log: self.log.clone(),
-			},
+			}),
 		)))
 	}
 
@@ -987,11 +984,11 @@ impl poll::Session for ScriptedSession {
 		send.unacked_fin = self.unacked_fin;
 		Poll::Ready(Ok((
 			send,
-			ScriptedRecv {
+			poll::Buffered::new(Script {
 				script,
 				close: self.close.clone(),
 				log: self.log.clone(),
-			},
+			}),
 		)))
 	}
 

@@ -176,6 +176,14 @@ async fn unadvertisable_quic_limits_are_refused_at_load() {
 	.await;
 	assert!(err.contains("[peer.quic]") && err.contains("receive_window"), "{err}");
 
+	// Incomplete messages hold connection credit, so the window has to fit the largest.
+	let err = refused_at_load(|config| {
+		let window = moq_net::transport::MIN_RECEIVE_WINDOW - 1;
+		config.peer.quic.receive_window = std::num::NonZeroU64::new(window).unwrap();
+	})
+	.await;
+	assert!(err.contains("[peer.quic]") && err.contains("largest message"), "{err}");
+
 	let err = refused_at_load(|config| {
 		config.peer.quic.max_streams = std::num::NonZeroU64::new((1 << 60) + 1).unwrap();
 	})

@@ -191,6 +191,11 @@ video:
 max-age:
     cargo nextest run --locked -p moq-tokio --test integration -E 'test(/^max_age::/)' --run-ignored all
 
+# A JavaScript sender exhausts each native receiver's connection credit, which recovers.
+receive-credit:
+    cargo nextest run --locked -p moq-tokio --test integration -E 'test(/^receive_credit::javascript_/)' --run-ignored only
+    cargo nextest run --locked -p moq-uring --test integration -E 'test(/^receive_credit::javascript_/)' --run-ignored only
+
 # Cross-language subscription termination over in-memory transports.
 bare-fin:
     just rs test -p moq-net --lib bare_fin_interop --run-ignored all

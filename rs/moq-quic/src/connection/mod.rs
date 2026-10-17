@@ -79,9 +79,6 @@ mod stats;
 pub(crate) struct ConnectionTag(u64);
 
 impl ConnectionTag {
-    /// No connection, for state that has not come from one yet.
-    pub(crate) const NONE: Self = Self(0);
-
     /// A tag no other connection in this process has.
     pub(crate) fn next() -> Self {
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
@@ -93,9 +90,9 @@ pub use stats::{ConnectionStats, CreditStats, FrameStats, PathStats, UdpStats};
 mod streams;
 pub(crate) use streams::StreamsState;
 pub use streams::{
-    Checkpoint, Chunks, ClosedStream, Credit, FinishError, ReadError, ReadableError, RecvStream,
-    SendDomain, SendGroup, SendGroups, SendStream, ShouldTransmit, StreamEvent, Streams,
-    WriteError, Written,
+    Checkpoint, Chunks, ClosedStream, FinishError, LeaseError, Leased, ReadError, ReadableError,
+    RecvStream, SendDomain, SendGroup, SendGroups, SendStream, ShouldTransmit, StreamEvent,
+    Streams, WriteError, Written,
 };
 
 mod timer;
@@ -1393,17 +1390,9 @@ impl Connection {
         stats
     }
 
-    /// Return connection flow control credit taken by [`Chunks::hold()`] to the peer.
-    ///
-    /// If [`ShouldTransmit::should_transmit()`] returns `true`, call
-    /// [`Self::poll_transmit()`] soon so the peer learns of the larger window.
-    ///
-    /// # Panics
-    /// If `credit` came from another connection.
-    pub fn release(&mut self, credit: Credit) -> ShouldTransmit {
-        let transmit = self.streams.release(credit);
-        self.spaces[SpaceId::Data].pending.max_data |= transmit.should_transmit();
-        transmit
+    /// The bytes leased from receive stream `id` with [`RecvStream::lease()`], if it has a lease
+    pub fn leased(&self, id: StreamId) -> Option<&Leased> {
+        self.streams.leased(id)
     }
 
     /// Ping the remote endpoint

@@ -18,16 +18,15 @@ peer-visible QUIC flow control instead of a separate header quota error.
 The native transport primitive is a separate prerequisite; do not activate
 whole-message retention without its recovery policy in this quest.
 
-That primitive landed as a provisional seam to finalize here: both native
-drivers' receive streams have a copying `poll_read_held` that yields a
-`Credit` for exactly the bytes read. Dropping a `Credit` returns it, so a
-reader buffer keeps one merged `Credit` and drops `split(n)` for each
-complete unit; read-ahead stays in the remainder. io_uring's `poll_closed`
-read-ahead keeps its credit until the application reads it. Both drivers'
-`Connection::stats().credit` reports held and still-available credit.
-`poll_read_held` stays separate until this quest folds it into `poll_read`.
-moq-net's transport trait and the WebTransport wrappers do not carry it yet;
-reshape any of it to fit the consumer.
+Decided 2026-10-17: the primitive is a receive lease, replacing the held
+`Credit` that landed first. Bytes stay in the transport and moq-net never
+holds credit. `RecvStream::poll_lease(cx, want)` borrows a stream's
+unconsumed bytes once `want` have arrived; `consume(n)` returns their credit,
+and dropping a lease consumes nothing. A want the connection window can never
+hold is an error. `set_priority(i64)` ranks the stream: higher keeps it
+longer. moq-quic keeps the lease state, so the tokio and io_uring drivers
+share it. iroh, WebAssembly, qmux, and the memory transport read through
+moq-net's `Buffered`, which bounds nothing.
 
 Hold connection credit through reader buffers, type/length prefixes, headers,
 extensions, and frame assembly. Attribute read-ahead bytes to the next unit
@@ -61,8 +60,11 @@ minimum; already-advertised credit cannot be revoked. A rate limit can pace
 a smaller amount of outstanding credit while the memory allowance remains
 large enough for the complete unit.
 
-MoQ selects victims; the transport only reports pressure and sends
-STOP_SENDING. Do not add sender-initiated shedding. This keeps recovery
+MoQ ranks streams and the native QUIC stack evicts: when the peer has spent
+the connection window and no reader can make progress, the lowest-ranked
+lease (the newest on a tie) loses its bytes and credit, and its next lease
+fails. The peer hears STOP_SENDING once moq-net stops the stream with its own
+code. Do not add sender-initiated shedding. This keeps recovery
 available with browser senders and avoids treating intentional rate pacing
 as receiver deadlock. The sender's required RESET_STREAM response is still
 normal QUIC behavior, not a second recovery policy.
@@ -74,9 +76,10 @@ complete after cancellation, including when incoming streams keep arriving;
 merely cycling through victims is not recovery. Distinguish bytes still able
 to arrive under advertised credit from memory held by incomplete units.
 
-Within the existing broadcast fairness domains, cancel lower-priority media
-and less useful groups first, respecting subscription priority and group
-order. Prefer low-priority attributed media over unidentified headers so
+Cancel lower-priority media and less useful groups first, respecting
+subscription priority and group order. The receive rank is one `i64`, so it
+compares subscription priorities across broadcasts; ranking within the
+existing broadcast fairness domains first is a follow-up. Prefer low-priority attributed media over unidentified headers so
 headers have a chance to identify themselves; unidentified streams remain
 eligible if they prevent progress. Control streams have the highest priority
 but are eligible too. If canceling an essential control stream terminates the

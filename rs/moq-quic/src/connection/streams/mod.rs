@@ -11,13 +11,15 @@ use crate::{
     frame,
 };
 
+mod lease;
+pub use lease::{LeaseError, Leased};
 mod recv;
 use recv::Recv;
 
 #[cfg(test)]
 mod saturated;
 mod schedule;
-pub use recv::{Chunks, Credit, ReadError, ReadableError};
+pub use recv::{Chunks, ReadError, ReadableError};
 use schedule::{Next, Schedule};
 
 mod send;
@@ -132,6 +134,9 @@ impl RecvStream<'_> {
     /// Discards unread data and notifies the peer to stop transmitting. Once stopped, further
     /// attempts to operate on a stream will yield `ClosedStream` errors.
     pub fn stop(&mut self, error_code: VarInt) -> Result<(), ClosedStream> {
+        if self.drop_lease(error_code) {
+            return Ok(());
+        }
         let mut entry = match self.state.recv.entry(self.id) {
             hash_map::Entry::Occupied(s) => s,
             hash_map::Entry::Vacant(_) => return Err(ClosedStream { _private: () }),

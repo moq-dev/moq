@@ -1089,6 +1089,8 @@ pub fn seeds() -> Vec<Seed> {
 	seeds
 }
 
+type FrameReader = coding::Reader<crate::transport::poll::Buffered<Chunks>, lite::Version>;
+
 /// Frames arriving on concurrent group streams, as the frame bench times them: one
 /// frame per stream, read a chunk per stream per poll turn so the streams interleave
 /// the way a session's do.
@@ -1097,7 +1099,7 @@ pub fn seeds() -> Vec<Seed> {
 /// every declared size when the first byte lands and `Some(0)` grows every buffer with
 /// the bytes received.
 pub struct FrameRecv {
-	streams: Vec<Option<(coding::Reader<Chunks, lite::Version>, frame::ProducerOwned)>>,
+	streams: Vec<Option<(FrameReader, frame::ProducerOwned)>>,
 	groups: Vec<group::Producer>,
 	// Keeps the groups' track alive.
 	_track: track::Producer,
@@ -1136,7 +1138,10 @@ impl FrameRecv {
 					chunk,
 					ready: true,
 				};
-				Some((coding::Reader::new(stream, lite::Version::Lite05), frame))
+				Some((
+					coding::Reader::new(crate::transport::poll::Buffered::new(stream), lite::Version::Lite05),
+					frame,
+				))
 			})
 			.collect();
 
@@ -1176,22 +1181,8 @@ struct Chunks {
 	ready: bool,
 }
 
-impl crate::transport::poll::RecvStream for Chunks {
+impl crate::transport::poll::Chunks for Chunks {
 	type Error = NoError;
-
-	fn poll_read(
-		&mut self,
-		cx: &mut std::task::Context<'_>,
-		dst: &mut [u8],
-	) -> std::task::Poll<Result<Option<usize>, NoError>> {
-		let max = dst.len();
-		self.poll_read_chunk(cx, max).map_ok(|chunk| {
-			chunk.map(|chunk| {
-				dst[..chunk.len()].copy_from_slice(&chunk);
-				chunk.len()
-			})
-		})
-	}
 
 	// Zero-copy, like the QUIC stacks, so only the frame buffer's own copy is timed.
 	fn poll_read_chunk(
@@ -1211,10 +1202,6 @@ impl crate::transport::poll::RecvStream for Chunks {
 	}
 
 	fn stop(&mut self, _code: u32) {}
-
-	fn poll_closed(&mut self, _cx: &mut std::task::Context<'_>) -> std::task::Poll<Result<(), NoError>> {
-		std::task::Poll::Pending
-	}
 }
 
 /// [`Chunks`] never fails.

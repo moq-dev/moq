@@ -21,18 +21,23 @@ impl RecvStream {
 		Self { inner: stream, close }
 	}
 
-	/// Decode the peer's reset code, and report a session error as the session's close reason.
 	fn map_error(&self, e: crate::quic::driver::ReadError) -> ReadError {
-		match e {
-			crate::quic::driver::ReadError::Reset(code) => match self.close.decode_stream_code(code) {
-				Some(code) => ReadError::Reset(code),
-				None => ReadError::InvalidReset(code),
-			},
-			e => match ReadError::from(e) {
-				ReadError::SessionError(e) => ReadError::SessionError(self.close.map(e)),
-				e => e,
-			},
-		}
+		map_error(&self.close, e)
+	}
+
+	/// Lease the stream's unconsumed bytes. See [`crate::quic::driver::RecvStream::poll_lease`].
+	pub fn poll_lease(
+		&mut self,
+		cx: &mut Context<'_>,
+		want: usize,
+	) -> Poll<Result<crate::quic::driver::Lease<'_>, ReadError>> {
+		let close = &self.close;
+		self.inner.poll_lease(cx, want).map_err(|e| map_error(close, e))
+	}
+
+	/// Rank this stream for eviction. See [`crate::quic::driver::RecvStream::set_priority`].
+	pub fn set_priority(&mut self, priority: i64) {
+		self.inner.set_priority(priority);
 	}
 
 	/// Tell the other end to stop sending data with the given error code. See
@@ -101,6 +106,20 @@ impl RecvStream {
 	}
 
 	// We purposely don't expose the 0RTT because it's not valid with WebTransport
+}
+
+/// Decode the peer's reset code, and report a session error as the session's close reason.
+fn map_error(close: &CloseReason, e: crate::quic::driver::ReadError) -> ReadError {
+	match e {
+		crate::quic::driver::ReadError::Reset(code) => match close.decode_stream_code(code) {
+			Some(code) => ReadError::Reset(code),
+			None => ReadError::InvalidReset(code),
+		},
+		e => match ReadError::from(e) {
+			ReadError::SessionError(e) => ReadError::SessionError(close.map(e)),
+			e => e,
+		},
+	}
 }
 
 impl tokio::io::AsyncRead for RecvStream {

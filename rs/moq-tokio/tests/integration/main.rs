@@ -8,6 +8,7 @@ mod backend;
 mod broadcast;
 mod close_code;
 mod max_age;
+mod receive_credit;
 mod reconnect;
 mod stream_code;
 mod subscription_end_integrity;

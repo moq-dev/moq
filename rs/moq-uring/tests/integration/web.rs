@@ -13,6 +13,7 @@ use std::net::UdpSocket;
 
 use moq_net::origin;
 use moq_uring::{Config, Error, Worker, quic, udp};
+use web_transport_trait::Stats as _;
 use web_transport_trait::poll::{RecvStream as _, SendStream as _, Session as _};
 
 fn worker() -> Option<Worker> {
@@ -903,7 +904,9 @@ fn cancelling_a_pending_web_handshake(send_settings: bool) {
 			let mut watch = conn.clone();
 			let mut control = None;
 			if send_settings {
-				let before = watch.stats().udp_rx.bytes;
+				let before = web_transport_trait::poll::Session::stats(&watch)
+					.bytes_received()
+					.expect("counted");
 				let mut stream = std::future::poll_fn(|cx| peer.poll_open_uni(cx))
 					.await
 					.expect("control stream");
@@ -921,7 +924,10 @@ fn cancelling_a_pending_web_handshake(send_settings: bool) {
 				control = Some(stream);
 				within(&handle, "peer SETTINGS to arrive", async {
 					loop {
-						if watch.stats().udp_rx.bytes > before {
+						if web_transport_trait::poll::Session::stats(&watch)
+							.bytes_received()
+							.expect("counted") > before
+						{
 							break;
 						}
 						let mut tick = moq_uring::Timer::after(&handle, std::time::Duration::from_millis(10));

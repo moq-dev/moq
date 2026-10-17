@@ -673,6 +673,15 @@ impl<S: web_transport_trait::RecvStream + 'static> RecvStream<S> {
 		}
 	}
 
+	/// The wrapped stream, before any read: the backend leases it natively instead.
+	#[cfg(feature = "quic")]
+	fn into_inner(mut self) -> S {
+		match self.state.get_mut().unwrap().take() {
+			Some(RecvState::Idle(stream)) => stream,
+			_ => unreachable!("unwrapped before any read"),
+		}
+	}
+
 	/// Pop read-ahead into `self.buffer` if the head is empty.
 	fn unqueue(&mut self) {
 		if self.buffer.is_empty()
@@ -862,6 +871,13 @@ impl<S: web_transport_trait::RecvStream + 'static> Drop for RecvStream<S> {
 
 #[cfg(feature = "quic")]
 impl Grouped for crate::quic::web::Session {
+	// Leased in the QUIC stack, so the receive window bounds what an incomplete message holds.
+	type Recv = crate::quic::web::RecvStream;
+
+	fn recv(stream: RecvStream<Self::RecvStream>) -> Self::Recv {
+		stream.into_inner()
+	}
+
 	fn wire(&self) -> Option<moq_net::transport::Wire> {
 		Some(crate::quic::driver::Connection::wire(self))
 	}
@@ -902,7 +918,13 @@ impl moq_net::transport::poll::SendGroup for crate::quic::driver::SendGroup {
 }
 
 #[cfg(feature = "iroh")]
-impl Grouped for web_transport_iroh::Session {}
+impl Grouped for web_transport_iroh::Session {
+	type Recv = moq_net::transport::poll::Buffered<RecvStream<Self::RecvStream>>;
+
+	fn recv(stream: RecvStream<Self::RecvStream>) -> Self::Recv {
+		moq_net::transport::poll::Buffered::new(stream)
+	}
+}
 
 #[cfg(feature = "iroh")]
 impl GroupedSend for web_transport_iroh::SendStream {
@@ -914,7 +936,13 @@ impl GroupedSend for web_transport_iroh::SendStream {
 }
 
 #[cfg(any(feature = "websocket", feature = "tcp", feature = "webrtc"))]
-impl Grouped for qmux::Session {}
+impl Grouped for qmux::Session {
+	type Recv = moq_net::transport::poll::Buffered<RecvStream<Self::RecvStream>>;
+
+	fn recv(stream: RecvStream<Self::RecvStream>) -> Self::Recv {
+		moq_net::transport::poll::Buffered::new(stream)
+	}
+}
 
 #[cfg(any(feature = "websocket", feature = "tcp", feature = "webrtc"))]
 impl GroupedSend for qmux::SendStream {
@@ -1429,7 +1457,13 @@ mod tests {
 	#[derive(Clone)]
 	struct FakeSession;
 
-	impl Grouped for FakeSession {}
+	impl Grouped for FakeSession {
+		type Recv = moq_net::transport::poll::Buffered<RecvStream<FakeRecv>>;
+
+		fn recv(stream: RecvStream<FakeRecv>) -> Self::Recv {
+			moq_net::transport::poll::Buffered::new(stream)
+		}
+	}
 
 	impl web_transport_trait::Session for FakeSession {
 		type SendStream = FakeSend;

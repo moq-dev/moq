@@ -965,10 +965,26 @@ pub struct RecvStream {
 
 impl RecvStream {
 	fn map(&self, err: Error) -> Error {
-		match self.web {
-			true => unmap_err(err),
-			false => unmap_legacy(err),
-		}
+		map(self.web, err)
+	}
+
+	/// Lease the stream's unconsumed bytes. See [`super::RecvStream::poll_lease`].
+	pub fn poll_lease(&mut self, cx: &mut Context<'_>, want: usize) -> Poll<Result<super::Lease<'_>, Error>> {
+		let web = self.web;
+		self.inner.poll_lease(cx, want).map_err(|err| map(web, err))
+	}
+
+	/// Rank this stream for eviction. See [`super::RecvStream::set_priority`].
+	pub fn set_priority(&mut self, priority: i64) {
+		self.inner.set_priority(priority);
+	}
+}
+
+/// Unmap a stream error's code from the session's code space.
+fn map(web: bool, err: Error) -> Error {
+	match web {
+		true => unmap_err(err),
+		false => unmap_legacy(err),
 	}
 }
 

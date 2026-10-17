@@ -226,14 +226,6 @@ impl Inner {
 		self.state.borrow_mut().forget_recv(id);
 	}
 
-	/// Wake anyone parked on stream `id` being readable.
-	pub(crate) fn wake_readable(&self, id: StreamId) {
-		let mut state = self.state.borrow_mut();
-		if let Some(mut waiters) = state.readable.remove(&id) {
-			waiters.wake();
-		}
-	}
-
 	/// Close the connection with a full-width application code.
 	///
 	/// The [`web_transport_trait::poll::Session::close`] surface narrows codes
@@ -371,11 +363,6 @@ impl Connection {
 		self.shared.conn.borrow_mut().set_limits(limits)?;
 		self.shared.kick();
 		Ok(())
-	}
-
-	/// Returns connection statistics.
-	pub fn stats(&self) -> moq_quic::ConnectionStats {
-		self.shared.conn.borrow().stats()
 	}
 
 	/// The wire counters this connection updates as it sends and receives.

@@ -13,6 +13,9 @@
 //! with a code and drops what it queued. Closing the session keeps queued messages
 //! readable, and leaves streams as they were, so the peer reads them, then the close.
 //!
+//! Reads return the channel's room as they go, so streams lease through
+//! [`Buffered`](poll::Buffered) and are not bounded by a receive window.
+//!
 //! Datagrams ignore their send group and order, and are dropped when oversized or when the
 //! peer's queue is full, as a network would.
 
@@ -22,7 +25,7 @@ use std::{
 	task::{Context, Poll, ready},
 };
 
-use bytes::{Buf, BufMut, Bytes};
+use bytes::{Buf, Bytes};
 
 use super::{StatsUnavailable, poll};
 
@@ -163,12 +166,12 @@ impl Conn {
 			done: false,
 			park: Default::default(),
 		};
-		let recv = RecvStream {
+		let recv = poll::Buffered::new(Chunks {
 			channel,
 			close: self.close.clone(),
 			stopped: false,
 			park: Default::default(),
-		};
+		});
 		(send, recv)
 	}
 }
@@ -490,8 +493,11 @@ impl Drop for SendStream {
 	}
 }
 
-/// The reading half of an in-memory stream.
-pub struct RecvStream {
+/// The reading half of an in-memory stream, leased through [`poll::Buffered`].
+pub type RecvStream = poll::Buffered<Chunks>;
+
+/// The plain reads of an in-memory stream.
+pub struct Chunks {
 	channel: kio::Shared<Channel>,
 	close: Close,
 	/// This side stopped the stream.
@@ -499,27 +505,8 @@ pub struct RecvStream {
 	park: kio::Park,
 }
 
-impl poll::RecvStream for RecvStream {
+impl poll::Chunks for Chunks {
 	type Error = Error;
-
-	fn poll_read(&mut self, cx: &mut Context<'_>, dst: &mut [u8]) -> Poll<Result<Option<usize>, Error>> {
-		let Some(chunk) = ready!(self.poll_read_chunk(cx, dst.len()))? else {
-			return Poll::Ready(Ok(None));
-		};
-		dst[..chunk.len()].copy_from_slice(&chunk);
-		Poll::Ready(Ok(Some(chunk.len())))
-	}
-
-	fn poll_read_buf<B: BufMut>(&mut self, cx: &mut Context<'_>, buf: &mut B) -> Poll<Result<Option<usize>, Error>> {
-		// The same cap the default uses, but without zeroing a destination first.
-		let max = buf.remaining_mut().min(64 * 1024);
-		let Some(chunk) = ready!(self.poll_read_chunk(cx, max))? else {
-			return Poll::Ready(Ok(None));
-		};
-		let size = chunk.len();
-		buf.put(chunk);
-		Poll::Ready(Ok(Some(size)))
-	}
 
 	/// Pop the next message, or split off its first `max` bytes.
 	fn poll_read_chunk(&mut self, cx: &mut Context<'_>, max: usize) -> Poll<Result<Option<Bytes>, Error>> {
@@ -570,32 +557,12 @@ impl poll::RecvStream for RecvStream {
 			channel.abort(End::Stop(code));
 		}
 	}
-
-	/// Ready once the writer finished or reset the stream, or this side stopped it.
-	fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
-		if self.stopped {
-			return Poll::Ready(Ok(()));
-		}
-		let waiter = self.park.hold(cx);
-		// Check the close first, so an end that came before it is still seen below.
-		let closed = poll_close(&self.close, waiter);
-		if let Poll::Ready(channel) = self.channel.poll(waiter, |channel| match channel.end.is_some() {
-			true => Poll::Ready(()),
-			false => Poll::Pending,
-		}) {
-			return Poll::Ready(match channel.end {
-				Some(End::Reset(code)) => Err(Error::Reset(code)),
-				_ => Ok(()),
-			});
-		}
-		closed.map(Err)
-	}
 }
 
-impl Drop for RecvStream {
+impl Drop for Chunks {
 	/// Stop, so the writer learns nobody reads and the queued messages are freed.
 	fn drop(&mut self) {
-		poll::RecvStream::stop(self, 0);
+		poll::Chunks::stop(self, 0);
 	}
 }
 
@@ -647,8 +614,9 @@ mod tests {
 		send.poll_write_buf(&mut noop(), &mut chunk.clone())
 	}
 
+	/// Below the lease buffering, so each read sees the channel itself.
 	fn read(recv: &mut RecvStream, max: usize) -> Poll<Result<Option<Bytes>, Error>> {
-		recv.poll_read_chunk(&mut noop(), max)
+		poll::Chunks::poll_read_chunk(recv.get_mut(), &mut noop(), max)
 	}
 
 	fn text(chunk: Poll<Result<Option<Bytes>, Error>>) -> Bytes {
@@ -735,7 +703,6 @@ mod tests {
 		ready(write(&mut send, &Bytes::from_static(b"01234567"))).unwrap();
 		send.reset(7);
 		assert!(ready(send.poll_closed(&mut noop())).is_ok());
-		assert!(matches!(ready(recv.poll_closed(&mut noop())), Err(Error::Reset(7))));
 		assert!(matches!(ready(read(&mut recv, usize::MAX)), Err(Error::Reset(7))));
 		assert!(matches!(
 			ready(write(&mut send, &Bytes::from_static(b"x"))),
@@ -751,7 +718,6 @@ mod tests {
 		ready(write(&mut send, &Bytes::from_static(b"done"))).unwrap();
 		send.finish().unwrap();
 		assert!(matches!(send.finish(), Err(Error::Closed)));
-		assert!(ready(recv.poll_closed(&mut noop())).is_ok());
 
 		// The writer's close waits for the reader to take every message.
 		assert!(send.poll_closed(&mut noop()).is_pending());
@@ -795,7 +761,6 @@ mod tests {
 		));
 		assert!(matches!(send.finish(), Err(Error::Stopped(3))));
 		assert!(matches!(ready(read(&mut recv, usize::MAX)), Err(Error::Closed)));
-		assert!(ready(recv.poll_closed(&mut noop())).is_ok());
 	}
 
 	#[test]

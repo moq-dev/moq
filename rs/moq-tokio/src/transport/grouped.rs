@@ -11,6 +11,13 @@
 /// [`wire`](moq_net::transport::poll::Session::wire) reach a backend through this. A
 /// backend without either implements it empty.
 pub trait Grouped: web_transport_trait::Session<SendStream: GroupedSend> {
+	/// The receive stream moq-net reads: the backend's own lease where it has one, or
+	/// [`Buffered`](moq_net::transport::poll::Buffered) reads otherwise.
+	type Recv: moq_net::transport::poll::RecvStream;
+
+	/// Adapt one of the backend's receive streams, freshly accepted or opened.
+	fn recv(stream: super::RecvStream<Self::RecvStream>) -> Self::Recv;
+
 	/// The wire counters the backend updates as it sends and receives, or `None` when it has none.
 	fn wire(&self) -> Option<moq_net::transport::Wire> {
 		None

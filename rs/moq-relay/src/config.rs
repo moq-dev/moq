@@ -987,7 +987,7 @@ congestion_control = "delay"
 
 		let toml = r#"
 [quic]
-receive_window = 67108864
+receive_window = 134217728
 stream_receive_window = 8388608
 send_window = 33554432
 "#;
@@ -999,7 +999,7 @@ send_window = 33554432
 		let args = vec![std::ffi::OsString::from("moq-relay"), std::ffi::OsString::from(&path)];
 		let config = Config::parse_and_merge(args).expect("config load");
 
-		assert_eq!(config.quic.receive_window, Some(67108864));
+		assert_eq!(config.quic.receive_window, Some(134217728));
 		assert_eq!(config.quic.stream_receive_window, Some(8388608));
 		assert_eq!(
 			config.quic.send_window,

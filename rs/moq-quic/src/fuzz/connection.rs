@@ -16,7 +16,7 @@ use bytes::{Bytes, BytesMut};
 use rustls::{RootCertStore, client::WebPkiServerVerifier, pki_types::PrivateKeyDer};
 
 use crate::{
-    ClientConfig, Connection, ConnectionHandle, Credit, DatagramEvent, Dir, Duration, Endpoint,
+    ClientConfig, Connection, ConnectionHandle, DatagramEvent, Dir, Duration, Endpoint,
     EndpointConfig, Event, Instant, ReadError, ServerConfig, Side, StreamId,
     crypto::rustls::{QuicClientConfig, QuicServerConfig, configured_provider},
 };
@@ -108,12 +108,14 @@ enum Op {
         stream: u8,
         priority: i8,
     },
+    /// Read up to `max` bytes in order, or on a leased stream lease what arrived and consume up
+    /// to `max` of it.
     Read {
         who: Who,
         stream: u8,
         max: u16,
-        hold: bool,
     },
+    /// Consume everything every leased stream holds.
     Release {
         who: Who,
     },
@@ -199,7 +201,6 @@ struct Peer {
     /// How far each stream has been read, in order.
     read: HashMap<StreamId, u64>,
     checkpoints: Vec<crate::Checkpoint>,
-    held: Vec<Credit>,
     /// The length of each datagram this side sent, indexed by the sequence number it carries.
     datagrams_sent: Vec<usize>,
     /// The sequence numbers of the datagrams this side received.
@@ -224,7 +225,6 @@ impl Peer {
             recv: Vec::new(),
             read: HashMap::new(),
             checkpoints: Vec::new(),
-            held: Vec::new(),
             datagrams_sent: Vec::new(),
             datagrams_received: HashSet::new(),
         }
@@ -509,23 +509,20 @@ impl Pair {
                     let _ = conn.send_stream(id).set_priority(priority.into());
                 }
             }
-            Op::Read {
-                who,
-                stream,
-                max,
-                hold,
-            } => {
+            Op::Read { who, stream, max } => {
                 let (peer, sent) = self.writer(who);
                 if let Some(id) = pick(&peer.recv, stream) {
-                    read(peer, sent, id, max.into(), hold);
+                    match leased(id) {
+                        true => lease(peer, sent, id, max.into()),
+                        false => read(peer, sent, id, max.into()),
+                    }
                 }
             }
             Op::Release { who } => {
-                let peer = self.peer(who);
-                let held = std::mem::take(&mut peer.held);
-                if let Some(conn) = peer.conn() {
-                    for credit in held {
-                        let _ = conn.release(credit);
+                let (peer, sent) = self.writer(who);
+                for id in peer.recv.clone() {
+                    if leased(id) {
+                        lease(peer, sent, id, usize::MAX);
                     }
                 }
             }
@@ -652,7 +649,10 @@ impl Pair {
                     }
                 }
                 for id in peer.recv.clone() {
-                    read(peer, &self.sent, id, usize::MAX, false);
+                    match leased(id) {
+                        true => lease(peer, &self.sent, id, usize::MAX),
+                        false => read(peer, &self.sent, id, usize::MAX),
+                    }
                 }
             }
             self.tick();
@@ -689,13 +689,7 @@ fn send_stream(peer: &mut Peer, index: u8) -> Option<(StreamId, &mut Connection)
 }
 
 /// Read up to `max` bytes from a stream in order, checking each against what was sent.
-fn read(
-    peer: &mut Peer,
-    sent: &HashMap<(Side, StreamId), Sent>,
-    id: StreamId,
-    max: usize,
-    hold: bool,
-) {
+fn read(peer: &mut Peer, sent: &HashMap<(Side, StreamId), Sent>, id: StreamId, max: usize) {
     let writer = !peer.side;
     let Some((_, conn)) = &mut peer.conn else {
         return;
@@ -741,10 +735,47 @@ fn read(
         }
     }
 
-    if hold {
-        peer.held.push(chunks.hold());
-    }
     let _ = chunks.finalize();
+}
+
+/// Odd streams are read through leases, since a plain read would skip what a lease holds.
+fn leased(id: StreamId) -> bool {
+    id.index() % 2 == 1
+}
+
+/// Lease what has arrived on a stream, then check and consume up to `max` bytes of it.
+fn lease(peer: &mut Peer, sent: &HashMap<(Side, StreamId), Sent>, id: StreamId, max: usize) {
+    let writer = !peer.side;
+    let Some((_, conn)) = &mut peer.conn else {
+        return;
+    };
+    // Evicted, reset, or stopped: nothing left to check.
+    if conn.recv_stream(id).lease(0).is_err() {
+        return;
+    }
+    let Some(lease) = conn.leased(id) else {
+        return;
+    };
+    let offset = peer.read.entry(id).or_default();
+    let n = max.min(lease.len());
+    let written = sent.get(&(writer, id)).map_or(0, |sent| sent.len);
+    assert!(
+        *offset + lease.len() as u64 <= written,
+        "leased past what was written"
+    );
+    let mut checked = 0;
+    for chunk in lease.chunks() {
+        for &byte in chunk.iter().take(n - checked) {
+            assert_eq!(
+                byte,
+                stream_byte(writer, id, *offset),
+                "corrupt stream data"
+            );
+            *offset += 1;
+            checked += 1;
+        }
+    }
+    let _ = conn.recv_stream(id).consume(n);
 }
 
 /// The byte a writer puts at `offset` of a stream, unique enough to catch misplaced data.

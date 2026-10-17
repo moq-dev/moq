@@ -1,4 +1,4 @@
-use bytes::{Buf, BufMut, Bytes};
+use bytes::{Buf, Bytes};
 use moq_net::transport::{self as moq, poll};
 use std::task::{Context, Poll};
 use web_transport_trait::{self as wt, poll as backend};
@@ -49,19 +49,25 @@ impl<S: wt::Stats> moq::Stats for Stats<S> {
 }
 impl<S: super::Grouped<SendStream: 'static, RecvStream: 'static>> poll::Session for super::Session<S> {
 	type SendStream = super::SendStream<S::SendStream>;
-	type RecvStream = super::RecvStream<S::RecvStream>;
+	type RecvStream = S::Recv;
 	type Error = Error<S::Error>;
 	fn poll_accept_uni(&mut self, cx: &mut Context<'_>) -> Poll<Result<Self::RecvStream, Self::Error>> {
-		backend::Session::poll_accept_uni(self, cx).map_err(Error)
+		backend::Session::poll_accept_uni(self, cx)
+			.map_ok(S::recv)
+			.map_err(Error)
 	}
 	fn poll_accept_bi(&mut self, cx: &mut Context<'_>) -> Poll<Result<poll::BiStreams<Self>, Self::Error>> {
-		backend::Session::poll_accept_bi(self, cx).map_err(Error)
+		backend::Session::poll_accept_bi(self, cx)
+			.map_ok(|(send, recv)| (send, S::recv(recv)))
+			.map_err(Error)
 	}
 	fn poll_open_uni(&mut self, cx: &mut Context<'_>) -> Poll<Result<Self::SendStream, Self::Error>> {
 		backend::Session::poll_open_uni(self, cx).map_err(Error)
 	}
 	fn poll_open_bi(&mut self, cx: &mut Context<'_>) -> Poll<Result<poll::BiStreams<Self>, Self::Error>> {
-		backend::Session::poll_open_bi(self, cx).map_err(Error)
+		backend::Session::poll_open_bi(self, cx)
+			.map_ok(|(send, recv)| (send, S::recv(recv)))
+			.map_err(Error)
 	}
 	fn send_group(&mut self, priority: i64) -> Option<<S::SendStream as super::GroupedSend>::Group> {
 		self.session.send_group(priority)
@@ -124,30 +130,57 @@ impl<S: super::GroupedSend + 'static> poll::SendStream for super::SendStream<S> 
 		backend::SendStream::poll_closed(self, cx).map_err(Error)
 	}
 }
-impl<S: wt::RecvStream + 'static> poll::RecvStream for super::RecvStream<S> {
+impl<S: wt::RecvStream + 'static> poll::Chunks for super::RecvStream<S> {
 	type Error = Error<S::Error>;
-	fn poll_read(&mut self, cx: &mut Context<'_>, dst: &mut [u8]) -> Poll<Result<Option<usize>, Self::Error>> {
-		backend::RecvStream::poll_read(self, cx, dst).map_err(Error)
-	}
-	fn poll_read_buf<B: BufMut>(
-		&mut self,
-		cx: &mut Context<'_>,
-		buf: &mut B,
-	) -> Poll<Result<Option<usize>, Self::Error>> {
-		backend::RecvStream::poll_read_buf(self, cx, buf).map_err(Error)
-	}
 	fn poll_read_chunk(&mut self, cx: &mut Context<'_>, max: usize) -> Poll<Result<Option<Bytes>, Self::Error>> {
 		backend::RecvStream::poll_read_chunk(self, cx, max).map_err(Error)
 	}
 	fn stop(&mut self, code: u32) {
 		backend::RecvStream::stop(self, code)
 	}
-	fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-		backend::RecvStream::poll_closed(self, cx).map_err(Error)
+}
+
+#[cfg(feature = "quic")]
+impl poll::RecvStream for crate::quic::web::RecvStream {
+	type Error = Error<crate::quic::web::ReadError>;
+	type Lease<'a> = crate::quic::driver::Lease<'a>;
+
+	fn poll_lease(&mut self, cx: &mut Context<'_>, want: usize) -> Poll<Result<Self::Lease<'_>, Self::Error>> {
+		crate::quic::web::RecvStream::poll_lease(self, cx, want).map_err(Error)
+	}
+	fn set_priority(&mut self, priority: i64) {
+		crate::quic::web::RecvStream::set_priority(self, priority)
+	}
+	fn stop(&mut self, code: u32) {
+		// A stream already closed has nobody left to tell.
+		crate::quic::web::RecvStream::stop(self, code).ok();
+	}
+}
+
+#[cfg(feature = "quic")]
+impl poll::Lease for crate::quic::driver::Lease<'_> {
+	fn len(&self) -> usize {
+		crate::quic::driver::Lease::len(self)
+	}
+	fn is_fin(&self) -> bool {
+		crate::quic::driver::Lease::is_fin(self)
+	}
+	fn chunks(&self) -> impl Iterator<Item = &[u8]> {
+		crate::quic::driver::Lease::chunks(self)
+	}
+	fn take(&mut self, max: usize) -> Bytes {
+		crate::quic::driver::Lease::take(self, max)
+	}
+	fn consume(self, n: usize) {
+		crate::quic::driver::Lease::consume(self, n)
 	}
 }
 
 fn close_kind(error: &(dyn std::error::Error + 'static)) -> moq::CloseKind {
+	#[cfg(feature = "quic")]
+	if let Some(crate::quic::web::ReadError::Evicted) = error.downcast_ref::<crate::quic::web::ReadError>() {
+		return moq::CloseKind::Evicted;
+	}
 	#[cfg(feature = "quic")]
 	if let Some(error) = error.downcast_ref::<crate::quic::web::SessionError>() {
 		use crate::quic::{driver::ConnectionError, web::SessionError};

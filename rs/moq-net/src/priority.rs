@@ -501,6 +501,24 @@ impl PriorityHandle {
 	}
 }
 
+/// The receive priority of a control stream, kept over every other stream when the
+/// receive window fills: nothing downstream proceeds without it, and it is small.
+///
+/// A stream not yet identified keeps the transport's default of 0, which every group
+/// stream sits below.
+pub const RECV_CONTROL: i64 = i64::MAX;
+
+/// The receive priority of a group stream: always below a control stream or an
+/// unidentified one, ranked by its subscription's `priority` like the sender ranks it,
+/// then the older group first to go, since a live track that falls behind skips to its
+/// newest group anyway.
+pub fn recv_group(priority: u8, sequence: u64) -> i64 {
+	// Saturating the sequence at 2^48 keeps the band negative; no track gets that far.
+	const SEQUENCE: u32 = 48;
+	let sequence = sequence.min((1 << SEQUENCE) - 1) as i64;
+	i64::MIN / 2 + (i64::from(priority) << SEQUENCE) + sequence
+}
+
 #[cfg(test)]
 mod tests {
 	use std::sync::{
@@ -565,6 +583,16 @@ mod tests {
 		fn counts(&self) -> Vec<usize> {
 			self.wakes.iter().map(|w| w.0.load(AtomicOrdering::Relaxed)).collect()
 		}
+	}
+
+	/// Every group sits below an unidentified stream, and so below a control stream, with
+	/// more urgent subscriptions and then newer groups kept longer.
+	#[test]
+	fn recv_group_stays_below_unidentified_streams() {
+		assert!(recv_group(0, 0) < recv_group(0, 1));
+		assert!(recv_group(0, u64::MAX) < recv_group(1, 0));
+		assert!(recv_group(u8::MAX, u64::MAX) < 0);
+		assert!(recv_group(0, 0) > i64::MIN);
 	}
 
 	/// A group whose rank didn't move must not be re-polled. Every queued group parks on

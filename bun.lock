@@ -462,6 +462,13 @@
         "vite": "^8.3.2",
       },
     },
+    "test/receive-credit": {
+      "name": "@moq/receive-credit-test",
+      "dependencies": {
+        "@moq/net": "workspace:*",
+        "@moq/web-transport": "^0.1.5",
+      },
+    },
     "test/video": {
       "name": "@moq/video-test",
       "dependencies": {
@@ -787,6 +794,8 @@
     "@moq/publish": ["@moq/publish@workspace:js/publish"],
 
     "@moq/qmux": ["@moq/qmux@0.3.3", "", { "dependencies": { "@moq/web-socket-stream": "^0.1.1" } }, "sha512-Ez1GCVwpyNGB0eWvhKIXOjXrfRlMdmO0lpJ7gqInZFzsOsYTyML0WRgh24Itczp9Kev0CXsUA/K+XrGs1dRKUA=="],
+
+    "@moq/receive-credit-test": ["@moq/receive-credit-test@workspace:test/receive-credit"],
 
     "@moq/room": ["@moq/room@workspace:js/room"],
 
