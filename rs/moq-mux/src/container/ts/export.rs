@@ -482,11 +482,7 @@ impl Track {
 		else {
 			return None;
 		};
-		self.descriptors.iter().find_map(|descriptor| match descriptor.tag {
-			AC3_DESCRIPTOR => Some(Dolby::Ac3),
-			EAC3_DESCRIPTOR => Some(Dolby::Eac3),
-			_ => None,
-		})
+		Dolby::described(&self.descriptors)
 	}
 
 	/// The samples an audio frame of `payload` lasts and their rate, if it may share a PES with
@@ -2339,8 +2335,8 @@ where
 	/// first byte going out at the frame's timestamp, the source's placement, and no earlier.
 	///
 	/// A PID the T-STD models holds the PES's bytes in its decoder buffer until they decode,
-	/// timed by the PTS in its header. For DVB AC-3 that times only the first sync frame
-	/// that begins in it, so each one after counts on from there and leaves at its own time.
+	/// timed by the PTS in its header. For DVB Dolby audio that times only the first access
+	/// unit that begins in it, so each one after counts on from there and leaves at its own time.
 	/// The bytes ahead of the first end a frame an earlier PES began; they leave with it,
 	/// which only overstates what the buffer holds. A PES without a PTS holds nothing there.
 	fn place(&mut self, name: &str, stream_type: u8, frame: &Frame, tables: Vec<u8>) -> anyhow::Result<()> {
@@ -2350,9 +2346,9 @@ where
 		let pid = track.pid;
 		let place = frame.timestamp.as_nanos();
 		let decode = pes.pts.map(|pts| unwrap_pts(pts, frame.timestamp));
-		let ac3 = stream_type == 0x06 && track.descriptors.iter().any(|d| d.tag == AC3_DESCRIPTOR);
-		let frames = match decode {
-			Some(decode) if ac3 => ac3_removals(&frame.payload[pes.payload..], decode),
+		let dolby = Dolby::described(&track.descriptors).filter(|_| stream_type == 0x06);
+		let frames = match (decode, dolby) {
+			(Some(decode), Some(codec)) => dolby_removals(codec, &frame.payload[pes.payload..], decode),
 			_ => Vec::new(),
 		};
 		let buffer = track.buffer();
@@ -3013,29 +3009,36 @@ fn unwrap_pts(pts: u64, at: Timestamp) -> u128 {
 	(ticks.max(0) as u128) * 1_000_000_000 / 90_000
 }
 
-/// When each AC-3 sync frame that begins in a PES's `payload` leaves the decoder buffer and
+/// When each Dolby access unit that begins in a PES's `payload` leaves the decoder buffer and
 /// the bytes it takes, counting on from `decode`, the PES's PTS: [`Schedule::push_placed`]'s
-/// frames. The bytes ahead of the first frame go with it, and a frame the PES leaves
-/// unfinished keeps its time for the bytes it holds. Empty with fewer than two frames,
+/// frames. The bytes ahead of the first unit go with it, and a frame the PES leaves
+/// unfinished keeps its unit's time for the bytes it holds. Empty with fewer than two units,
 /// where the whole PES leaves at once.
-fn ac3_removals(payload: &[u8], decode: u128) -> Vec<(u128, usize)> {
-	let codec = &crate::codec::ac3::DESCRIPTOR;
-	let Some(first) = ac3_sync(payload) else {
+fn dolby_removals(codec: Dolby, payload: &[u8], decode: u128) -> Vec<(u128, usize)> {
+	let Some(mut offset) = dolby_sync(codec, payload) else {
 		return Vec::new();
 	};
 	let mut frames: Vec<(u128, usize)> = Vec::new();
-	let (mut at, mut offset) = (decode, first);
+	let (mut at, mut lead) = (decode, offset);
 	while offset < payload.len() {
-		let Ok(header) = (codec.parse)(&payload[offset..]) else {
+		let rest = &payload[offset..];
+		let Ok(header) = codec.parse(rest) else {
 			break;
 		};
-		let len = header.len.min(payload.len() - offset);
-		frames.push((at, len));
-		at += 1_000_000_000 * u128::from(header.samples) / u128::from(header.sample_rate.max(1));
+		let len = header.len.min(rest.len());
+		match frames.last_mut() {
+			// A substream leaves with its access unit, or the first when that began earlier.
+			Some((_, bytes)) if !codec.begins_unit(rest) => *bytes += len,
+			None if !codec.begins_unit(rest) => lead += len,
+			_ => {
+				frames.push((at, len));
+				at += 1_000_000_000 * u128::from(header.samples) / u128::from(header.sample_rate.max(1));
+			}
+		}
 		offset += len.max(1);
 	}
 	if let Some(head) = frames.first_mut() {
-		head.1 += first;
+		head.1 += lead;
 	}
 	if let Some(tail) = frames.last_mut() {
 		tail.1 += payload.len().saturating_sub(offset);
@@ -3351,6 +3354,15 @@ enum Dolby {
 }
 
 impl Dolby {
+	/// The Dolby audio a private-data stream's descriptors identify.
+	fn described(descriptors: &[catalog::Descriptor]) -> Option<Self> {
+		descriptors.iter().find_map(|descriptor| match descriptor.tag {
+			AC3_DESCRIPTOR => Some(Self::Ac3),
+			EAC3_DESCRIPTOR => Some(Self::Eac3),
+			_ => None,
+		})
+	}
+
 	/// Bytes needed to attempt a header parse.
 	fn min_header_len(self) -> usize {
 		match self {
@@ -3854,8 +3866,8 @@ mod tests {
 	use moq_net::Timestamp;
 
 	use super::{
-		Buffer, DecodeClock, Kind, PSI_INTERVAL, PesPacket, ac3_removals, due, is_complete_section, si_due, slot,
-		unwrap_pts, verbatim_buffer,
+		Buffer, DecodeClock, Dolby, Kind, PSI_INTERVAL, PesPacket, dolby_removals, due, is_complete_section, si_due,
+		slot, unwrap_pts, verbatim_buffer,
 	};
 
 	fn ms(value: u64) -> Timestamp {
@@ -4352,19 +4364,40 @@ mod tests {
 	}
 
 	#[test]
-	fn ac3_removals_count_on_from_the_pts() {
+	fn dolby_removals_count_on_from_the_pts() {
 		// 32 kb/s 48 kHz sync frames: 128 bytes, 32 ms each.
 		let mut sync = vec![0x0b, 0x77, 0x00, 0x00, 0x00, 0x40, 0x40];
 		sync.resize(128, 0);
 		let mut payload = vec![0xee; 10];
 		payload.extend(sync.repeat(2));
 		payload.extend_from_slice(&sync[..50]);
-		let removals = ac3_removals(&payload, 1_000_000_000);
+		let removals = dolby_removals(Dolby::Ac3, &payload, 1_000_000_000);
 		// The tail of an earlier frame goes with the first, and the cut frame keeps its time.
 		assert_eq!(
 			removals,
 			vec![(1_000_000_000, 138), (1_032_000_000, 128), (1_064_000_000, 50)]
 		);
-		assert!(ac3_removals(&[0xee; 20], 0).is_empty(), "no sync frame begins");
+		assert!(
+			dolby_removals(Dolby::Ac3, &[0xee; 20], 0).is_empty(),
+			"no sync frame begins"
+		);
+	}
+
+	/// E-AC-3 substreams leave with their access unit, so a PES's units leave a 32 ms interval
+	/// apart whatever substreams each carries.
+	#[test]
+	fn dolby_removals_keep_eac3_substreams_with_their_unit() {
+		let (independent, dependent) = (eac3(0x00, 0x3f), eac3(0x40, 0x3f));
+		let payload = [
+			&dependent[..],
+			&independent,
+			&dependent,
+			&independent,
+			&dependent[..100],
+		]
+		.concat();
+		let removals = dolby_removals(Dolby::Eac3, &payload, 1_000_000_000);
+		// The substream ending an earlier unit goes with the first, the cut one with the last.
+		assert_eq!(removals, vec![(1_000_000_000, 1_536), (1_032_000_000, 612)]);
 	}
 }
