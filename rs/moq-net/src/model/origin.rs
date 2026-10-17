@@ -3699,7 +3699,7 @@ struct SnapshotEntry {
 /// (see [`AnnounceConsumer::poll_caught_up`]) until this drops: once the session
 /// has inserted the announcements its peer counted, or it gave up on them.
 pub(crate) struct Snapshot {
-	shared: Option<kio::Shared<OriginState>>,
+	shared: Option<SendCell<kio::Shared<OriginState>>>,
 	prefix: PathOwned,
 	id: u64,
 }

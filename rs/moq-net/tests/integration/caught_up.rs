@@ -4,12 +4,12 @@
 //! peer's initial announcements: exactly on versions that mark the boundary, and
 //! on the answer, as a best effort, on the rest.
 
-mod support;
-
 use std::collections::BTreeSet;
 use std::time::Duration;
 
 use moq_net::{Hop, Version, announce, origin};
+
+use crate::support;
 use support::harness::{MockConnectOptions, connect_mock};
 
 /// Long enough, in virtual time, for anything in flight to reach the far side.

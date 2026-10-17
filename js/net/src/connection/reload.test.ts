@@ -629,7 +629,7 @@ test("a watcher catches up with the server's initial set, and again after a reco
 			enabled: true,
 			url,
 			websocket: { enabled: false },
-			delay: { initial: Time.Milli(10), multiplier: 1, max: Time.Milli(10) },
+			delay: { initial: Milli(10), multiplier: 1, max: Milli(10) },
 			consume: clientOrigin,
 		});
 		const watching = clientOrigin.announced();
