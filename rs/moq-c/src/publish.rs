@@ -24,9 +24,10 @@ struct TrackRequest {
 	request: moq_net::track::Request,
 }
 
-/// A request a handler pulled, before it has a handle.
+/// A request a handler pulled, before it has a handle. A track request is boxed: it is
+/// several times the size of a group request.
 enum Request {
-	Track(TrackRequest),
+	Track(Box<TrackRequest>),
 	Group(moq_net::group::Request),
 }
 
@@ -632,7 +633,7 @@ impl Publish {
 				res = kio::wait(|waiter| match &mut dynamic {
 					Dynamic::Broadcast(dynamic, broadcast) => dynamic
 						.poll_requested_track(waiter)
-						.map_ok(|request| Request::Track(TrackRequest { broadcast: *broadcast, request })),
+						.map_ok(|request| Request::Track(Box::new(TrackRequest { broadcast: *broadcast, request }))),
 					Dynamic::Track(dynamic) => dynamic.poll_requested_group(waiter).map_ok(Request::Group),
 				}) => res,
 			};
@@ -647,7 +648,7 @@ impl Publish {
 			// Hold the lock only to buffer the request; release it before the callback.
 			let mut state = State::lock();
 			let id = match request {
-				Request::Track(request) => state.publish.track_request.insert(request)?,
+				Request::Track(request) => state.publish.track_request.insert(*request)?,
 				Request::Group(request) => state.publish.group_request.insert(request)?,
 			};
 			drop(state);

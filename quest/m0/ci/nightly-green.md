@@ -38,5 +38,4 @@ have not run yet; triage them from the next Nightly too.
 
 ## Related
 
-- [Rust benchmark group fits its hour](/quest/m0/ci/nightly-rust-bench.md) - the cancelled Rust group
 - [First shared FFI release](/quest/m0/ci/nightly-ffi-reuse.md) - the check that found these
