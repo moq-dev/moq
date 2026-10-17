@@ -40,6 +40,11 @@ Things to carry over and check:
   ends only that read or still ends the stream. If it changes, update the
   doc, the tests, and the PR's API report; the other wrappers face the same
   question.
+- **Latch wakes.** A wake that lands after a poll returns `Pending` but
+  before the native future parks must not be lost. The spike's Go waker was a
+  buffered channel, and its Python one swapped in a fresh future before each
+  poll. Each backend needs an equivalent handshake and a test that forces
+  that interleaving.
 - **Prove no-loss per backend.** A sync poll only moves the race into the
   generated glue: if it polls an item out and then sees its future cancelled,
   the item is gone. Each backend that can cancel must force that window in a
@@ -47,7 +52,8 @@ Things to carry over and check:
   spike's Python and Go cancel probes are a starting point.
 - **Concurrent pollers on one handle share one waker.** Pick a semantic and
   test it: either reject a second concurrent read, or wake every poller.
-- Measure Kotlin and Swift too; the spike covered only Go and Python. Sweep
+- Measure every generated wrapper (Go, Python, Kotlin, Swift, Dart, C++);
+  the spike covered only Go and Python. Sweep
   publishers as well as subscribers, since the generator's callback-handle map
   is shared process-wide.
 
@@ -59,6 +65,7 @@ terminal to per-read. Wire: none.
 
 - [Hard-fork the binding generator](/quest/m2/uniffi-fork.md) - the generators that emit the protocol
 - [Poll-native async](/quest/m2/ffi-poll-migrate.md) - the kio poll each export wraps, with `ffi::Task` gone
+- [Swift, Dart, and C++ benchmarks](/quest/m2/ffi-bench-wrappers.md) - runners for the wrappers this protocol changes
 
 ## Related
 
