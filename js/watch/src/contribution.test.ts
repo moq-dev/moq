@@ -77,9 +77,10 @@ it("lists contributions without demand and keeps selected rendition IDs in their
 		const { value: request } = await requests.next();
 		expect(request?.path).toBe(Path.from("room/absent.hang"));
 		request?.reject(new Error("contribution unavailable"));
-		await missing.out.error.changed();
+		await settle();
+		// Like a rendition's reference, an unavailable contribution is offline.
 		expect(missing.out.active.peek()).toBeUndefined();
-		expect(missing.out.error.peek()?.message).toBe("contribution unavailable");
+		expect(missing.out.status.peek()).toBe("offline");
 		expect(source.out.catalog.peek()?.video?.renditions.video.codec).toBe("avc1.42001f");
 		selection.close();
 		await contribution.demand().unused();
@@ -257,6 +258,64 @@ it("never reads a contribution proven to be another epoch, but reads an epochles
 		catalog.set(contributions(served));
 		await settle();
 		expect(refused.out.active.peek()?.epoch).toBe(served);
+	} finally {
+		owner.close();
+		parent.close();
+		origin.close();
+	}
+});
+
+it("shares the parent's resolution, so a new epoch checks the held handle", async () => {
+	const origin = new Origin.Producer();
+	const [served, other] = [Epoch.mint(), Epoch.mint()];
+	const main = origin.createBroadcast(Path.from("room/main.hang"));
+	main.announce({ epoch: served });
+	const extra = origin.createBroadcast(Path.from("room/extra.hang"));
+	extra.announce({ epoch: served });
+	const entries = (epoch?: Epoch.Valid) =>
+		Catalog.RootSchema.parse({
+			contributions: {
+				sibling: { broadcast: "./extra.hang", epoch },
+				self: { broadcast: "./main.hang", epoch },
+			},
+		});
+	const catalog = new Signal(entries());
+	const parent = new Broadcast({
+		origin,
+		name: Path.from("room/main.hang"),
+		catalogFormat: "manual",
+		catalog,
+		announced: false,
+	});
+	const owner = new Effect();
+	try {
+		const sibling = parent.contribution(owner, "sibling");
+		const self = parent.contribution(owner, "self");
+		await settle();
+		const held = sibling.out.active.peek();
+		expect(held?.epoch).toBe(served);
+		// A self-reference is the parent's own handle, not a request of its own.
+		expect(self.out.active.peek()).toBe(parent.out.active.peek());
+
+		let withdrawals = 0;
+		owner.cleanup(
+			extra.demand().used.subscribe((used) => {
+				if (!used) withdrawals += 1;
+			}),
+		);
+
+		// Naming the held instance keeps the same handle rather than resolving the path again.
+		catalog.set(entries(served));
+		await settle();
+		expect(sibling.out.active.peek()).toBe(held);
+		expect(self.out.active.peek()).toBe(parent.out.active.peek());
+		expect(withdrawals).toBe(0);
+
+		// Naming another instance fails the held one.
+		catalog.set(entries(other));
+		await quietly(settle);
+		expect(sibling.out.active.peek()).toBeUndefined();
+		expect(self.out.active.peek()).toBeUndefined();
 	} finally {
 		owner.close();
 		parent.close();

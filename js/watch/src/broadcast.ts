@@ -89,10 +89,6 @@ export type BroadcastInput = {
 	// The broadcast name.
 	name: Getter<Moq.Path.Valid>;
 
-	// The publisher instance to read: a broadcast proven to be another one reads as offline.
-	// A route without an epoch cannot prove one, so there it is best effort. Omitted to accept any.
-	epoch: Getter<Moq.Epoch.Valid | undefined>;
-
 	// Whether to wait for the broadcast to be announced before subscribing.
 	// Defaults to true; pass false to subscribe immediately without waiting for an announcement.
 	announced: Getter<boolean>;
@@ -156,6 +152,10 @@ export class Broadcast {
 	// strands the filtered copy on the previous contents.
 	readonly #raw = new Signal<Catalog.Root | undefined>(undefined);
 
+	// Set only on a contribution: its broadcast resolves through the parent catalog's references,
+	// so the two never resolve one path independently.
+	readonly #resolve = new Signal<((effect: Effect) => Moq.Broadcast.Consumer | undefined) | undefined>(undefined);
+
 	#signals: Effect;
 
 	constructor(props?: Inputs<BroadcastInput>) {
@@ -166,7 +166,6 @@ export class Broadcast {
 		this.in = {
 			origin: getter(props?.origin),
 			name: getter(props?.name ?? Path.empty()),
-			epoch: getter<Moq.Epoch.Valid | undefined>(props?.epoch),
 			enabled: getter(props?.enabled ?? true),
 			announced: getter(props?.announced ?? true),
 			catalogFormat: getter<CatalogFormat | undefined>(props?.catalogFormat),
@@ -249,14 +248,18 @@ export class Broadcast {
 		const enabled = effect.get(this.in.enabled);
 		if (!enabled) return;
 
+		const resolve = effect.get(this.#resolve);
+		if (resolve) {
+			effect.set(this.#out.active, resolve(effect), undefined);
+			return;
+		}
+
 		const origin = effect.get(this.in.origin);
 		if (!origin) return;
 
 		const name = effect.get(this.in.name);
 		const announced = effect.get(this.in.announced);
 
-		// The epoch is checked against the stamped one rather than passed to the origin, which
-		// would refuse every epochless route and so break best effort on older sessions.
 		let request: Moq.Origin.Requesting;
 		try {
 			request = origin.request(name, { announced });
@@ -269,11 +272,6 @@ export class Broadcast {
 		effect.run((nested) => {
 			const active = nested.get(request.active);
 			if (active) resolved = true;
-			const epoch = nested.get(this.in.epoch);
-			if (active && epoch !== undefined && active.epoch !== undefined && active.epoch !== epoch) {
-				console.warn("ignoring broadcast: it serves another epoch", name, active.epoch, epoch);
-				return;
-			}
 			nested.set(this.#out.active, active, undefined);
 		});
 		effect.run((nested) => {
@@ -468,20 +466,26 @@ export class Broadcast {
 	 * ```
 	 */
 	contribution(effect: Effect, id: string): Broadcast {
-		// Deduplicated, so a catalog update that leaves this entry alone keeps the child's request.
-		const target = effect.computed((run): { name: Moq.Path.Valid; epoch?: Moq.Epoch.Valid } | undefined => {
+		// Each computed only notifies on a real change, so an update that leaves the child's path
+		// alone (such as a new `epoch`) never restarts its catalog.
+		const entry = effect.computed((run) => {
 			const contributions = run.get(this.out.catalog)?.contributions;
-			if (!contributions || !Object.hasOwn(contributions, id)) return undefined;
-			const { broadcast, epoch } = contributions[id];
-			const name = Path.tryResolve(run.get(this.in.name), broadcast);
-			return name === undefined ? undefined : { name, epoch };
+			return contributions && Object.hasOwn(contributions, id) ? contributions[id] : undefined;
 		});
+		const name = effect.computed((run) => {
+			const broadcast = run.get(entry)?.broadcast;
+			return broadcast && Path.tryResolve(run.get(this.in.name), broadcast);
+		});
+		const enabled = effect.computed((run) => run.get(entry) !== undefined);
 		const child = new Broadcast({
 			origin: this.in.origin,
-			name: new Derived([target], (target) => target?.name ?? Path.empty()),
-			epoch: new Derived([target], (target) => target?.epoch),
-			enabled: new Derived([target, this.in.enabled], (target, enabled) => target !== undefined && enabled),
+			name: new Derived([name], (name) => name ?? Path.empty()),
+			enabled: new Derived([enabled], (enabled) => enabled === true),
 			announced: this.in.announced,
+		});
+		child.#resolve.set((run) => {
+			const selected = run.get(entry);
+			return selected && this.relativeBroadcast(run, selected.broadcast, selected.epoch);
 		});
 		effect.cleanup(() => child.close());
 		return child;
