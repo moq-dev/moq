@@ -9,7 +9,7 @@ use url::Url;
 
 use crate::moq::{ImportTarget, notify_ready};
 
-/// The first reconnect delay, and how long a run must last to reset it.
+/// The first reconnect delay, and the one a run that published resets to.
 const BACKOFF_INITIAL: Duration = Duration::from_secs(1);
 /// The longest reconnect delay.
 const BACKOFF_MAX: Duration = Duration::from_secs(30);
@@ -35,17 +35,17 @@ pub async fn connect_import(target: ImportTarget, url: Url) -> anyhow::Result<()
 
 	let mut backoff = BACKOFF_INITIAL;
 	loop {
-		let started = tokio::time::Instant::now();
-		let result = run(&target, &client).await;
-		// A run that lasted resets the backoff; one that did not keeps a broken camera from
+		let mut published = false;
+		let result = run(&target, &client, &mut published).await;
+		// A run that published resets the backoff; one that did not keeps a broken camera from
 		// being redialed in a tight loop.
-		let healthy = started.elapsed() >= BACKOFF_INITIAL;
-		if healthy {
+		if published {
 			backoff = BACKOFF_INITIAL;
 		}
 		match result {
 			// A restarted timeline: restart the broadcast at once.
-			Ok(moq_rtsp::End::Jumped) if healthy => continue,
+			Ok(moq_rtsp::End::Jumped) if published => continue,
+			Ok(moq_rtsp::End::Jumped) => tracing::warn!(%url, "RTSP timeline jumped before publishing"),
 			Ok(_) => tracing::info!(%url, "RTSP session ended"),
 			Err(err) if is_fatal(&err) => return Err(err),
 			Err(err) => tracing::warn!(%url, "RTSP session failed: {err:#}"),
@@ -65,8 +65,9 @@ fn is_fatal(err: &anyhow::Error) -> bool {
 	)
 }
 
-/// Publish one session as one broadcast, announced once its catalog names a track.
-async fn run(target: &ImportTarget, client: &moq_rtsp::Client) -> anyhow::Result<moq_rtsp::End> {
+/// Publish one session as one broadcast, announced once its catalog names a track, setting
+/// `published` then.
+async fn run(target: &ImportTarget, client: &moq_rtsp::Client, published: &mut bool) -> anyhow::Result<moq_rtsp::End> {
 	let mut broadcast = target
 		.origin
 		.create_broadcast(&target.name)
@@ -89,6 +90,7 @@ async fn run(target: &ImportTarget, client: &moq_rtsp::Client) -> anyhow::Result
 			.announce(moq_net::origin::Route::default().with_epoch(epoch.clone()))
 			.context("failed to announce broadcast")?;
 		tracing::info!(name = %target.name, %epoch, "publishing RTSP broadcast");
+		*published = true;
 		std::future::pending::<anyhow::Result<moq_rtsp::End>>().await
 	};
 
@@ -96,10 +98,14 @@ async fn run(target: &ImportTarget, client: &moq_rtsp::Client) -> anyhow::Result
 		end = client.pull(&broadcast, &catalog) => end.map_err(anyhow::Error::from),
 		err = announce => err,
 	};
-	match &end {
-		Ok(_) => catalog.finish()?,
-		Err(err) => catalog.abort(moq_net::Error::Transport(format!("{err:#}"))),
-	}
+	let finished = match &end {
+		Ok(_) => catalog.finish(),
+		Err(err) => {
+			catalog.abort(moq_net::Error::Transport(format!("{err:#}")));
+			Ok(())
+		}
+	};
 	broadcast.close();
+	finished?;
 	end
 }

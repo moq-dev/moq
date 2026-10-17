@@ -24,6 +24,10 @@ pub enum Error {
 	#[error("RTSP server refused the credentials: {0}")]
 	Unauthorized(String),
 
+	/// A request went unanswered, or the session sent no frame, for this long.
+	#[error("RTSP session stalled for {0:?}")]
+	Stalled(std::time::Duration),
+
 	/// The session offers no stream the stack can publish.
 	#[error("no H.264, H.265, or AAC stream in the session (found {0})")]
 	NoSupportedStream(String),

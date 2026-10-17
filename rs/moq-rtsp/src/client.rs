@@ -29,6 +29,10 @@ const MAX_BACKWARD: std::time::Duration = std::time::Duration::from_secs(1);
 /// restarted. A camera resetting its RTP clock lands anywhere in a 32-bit range, hours away.
 const MAX_FORWARD: std::time::Duration = std::time::Duration::from_secs(10);
 
+/// How long a request may go unanswered, or the session without a frame, before it counts as
+/// stuck. retina's keepalives only prove the server answers, not that the camera sends media.
+const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// Why [`Client::pull`] returned without an error.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -51,6 +55,8 @@ pub struct Client {
 	/// The URL without its userinfo.
 	url: Url,
 	creds: Option<Credentials>,
+	/// [`TIMEOUT`], shortened by tests.
+	timeout: std::time::Duration,
 }
 
 impl Client {
@@ -85,7 +91,11 @@ impl Client {
 			Some(creds)
 		};
 
-		Ok(Self { url, creds })
+		Ok(Self {
+			url,
+			creds,
+			timeout: TIMEOUT,
+		})
 	}
 
 	/// Ingest one session into `broadcast`, publishing its renditions on `catalog`.
@@ -95,8 +105,9 @@ impl Client {
 	/// onto the catalog's clock, so several sessions can publish renditions of one broadcast.
 	///
 	/// Never reconnects: returns once the session ends or its timeline jumps, finishing its
-	/// tracks, or fails, aborting them. The caller owns the broadcast and decides whether
-	/// to retry.
+	/// tracks, or fails, aborting them, including when a request or the media stalls. The
+	/// caller owns the broadcast and decides whether to retry. Dropping the future stops the
+	/// session and finishes its tracks.
 	pub async fn pull(
 		&self,
 		broadcast: &moq_net::broadcast::Producer,
@@ -105,10 +116,10 @@ impl Client {
 		let options = SessionOptions::default()
 			.creds(self.creds.clone())
 			.user_agent(concat!("moq-rtsp/", env!("CARGO_PKG_VERSION")).to_string());
-		let mut session = Session::describe(self.url.clone(), options).await?;
+		let mut session = self.within(Session::describe(self.url.clone(), options)).await??;
 
-		// Every stream of one session shares one RTP-derived timebase, so its audio and
-		// video stay in sync, while another session sharing the catalog gets its own.
+		// Every stream of one session shares one timebase, so its audio and video stay in sync,
+		// while another session sharing the catalog gets its own.
 		let timebase = catalog.timebase();
 		let mut tracks = Vec::new();
 		let mut skipped = Vec::new();
@@ -137,7 +148,7 @@ impl Client {
 			let setup = SetupOptions::default()
 				.transport(Transport::Tcp(Default::default()))
 				.frame_format(FRAME_FORMAT);
-			session.setup(*index, setup).await?;
+			self.within(session.setup(*index, setup)).await??;
 		}
 
 		let reserved = timebase.reserve();
@@ -181,13 +192,13 @@ impl Client {
 		// The catalog waits for each video rendition's first keyframe, not for this.
 		drop(reserved);
 
-		// Not every camera sends `rtptime` for every stream; fall back to the first
-		// packet rather than refusing it.
+		// Not every camera sends `rtptime` for every stream; fall back to the first packet
+		// rather than refusing it, leaving those streams only roughly in sync.
 		let play = PlayOptions::default().initial_timestamp(retina::client::InitialTimestampPolicy::Permissive);
 		let result: Result<End> = async {
-			let mut session = session.play(play).await?.demuxed()?;
+			let mut session = self.within(session.play(play)).await??.demuxed()?;
 			tracing::info!(%url, streams = tracks.len(), "RTSP session playing");
-			while let Some(item) = session.next().await {
+			while let Some(item) = self.within(session.next()).await? {
 				if ingest.push(item?, session.streams())?.is_some() {
 					tracing::warn!(%url, "RTSP timeline jumped, ending the session");
 					return Ok(End::Jumped);
@@ -207,6 +218,15 @@ impl Client {
 				Err(err)
 			}
 		}
+	}
+}
+
+impl Client {
+	/// Fail `step` once it takes longer than the timeout.
+	async fn within<T>(&self, step: impl Future<Output = T>) -> Result<T> {
+		tokio::time::timeout(self.timeout, step)
+			.await
+			.map_err(|_| Error::Stalled(self.timeout))
 	}
 }
 
@@ -336,6 +356,11 @@ impl Drop for Ingest {
 	}
 }
 
+/// [`MAX_BACKWARD`] in units of a `rate` Hz clock.
+fn backward(rate: u32) -> i128 {
+	MAX_BACKWARD.as_micros() as i128 * i128::from(rate) / 1_000_000
+}
+
 /// A frame's timestamp landed too far from its stream's previous one.
 struct Jump;
 
@@ -355,15 +380,20 @@ impl Ingest {
 		let rate = timestamp.clock_rate().get();
 		if let Some(last) = stream.last {
 			let delta = i128::from(elapsed) - i128::from(last);
-			let backward = MAX_BACKWARD.as_micros() as i128 * i128::from(rate) / 1_000_000;
 			let forward = MAX_FORWARD.as_micros() as i128 * i128::from(rate) / 1_000_000;
-			if delta < -backward || delta > forward {
+			if delta < -backward(rate) || delta > forward {
 				return Ok(Some(Jump));
 			}
 		}
 		let Ok(units) = u64::try_from(elapsed) else {
-			// A reordered picture can land before the session's start, such as the leading
-			// pictures of the keyframe it opened on. Undecodable from here, so drop it.
+			// A reordered picture can land just before the session's start, such as a leading
+			// picture of the keyframe it opened on. Undecodable from here, so drop it. Further
+			// back, the server's `rtptime` is wrong and nothing would ever publish.
+			if i128::from(elapsed) < -backward(rate) {
+				return Err(Error::Rtsp(format!(
+					"stream {stream_id} starts {elapsed} units before the server's rtptime"
+				)));
+			}
 			return Ok(None);
 		};
 		let pts = moq_net::Timestamp::from_scale(units, u64::from(rate)).map_err(moq_mux::Error::from)?;
@@ -374,16 +404,16 @@ impl Ingest {
 					Some(ParametersRef::Video(params)) => Some(params),
 					_ => None,
 				};
-				let frames = video.split(data, params, pts)?;
 				if !stream.started {
-					// Publish nothing before the first keyframe. retina's own flag misses an
-					// H.265 CRA, so gate on the splitter's, which drives grouping anyway.
-					if !frames.first().is_some_and(|frame| frame.keyframe) {
+					// Publish nothing before the first keyframe: one that `split` puts the
+					// parameter sets on, after which the splitter carries them to the rest.
+					if !video.is_keyframe(data) {
 						return Ok(None);
 					}
 					stream.started = true;
 					self.started = true;
 				}
+				let frames = video.split(data, params, pts)?;
 				stream.last = Some(elapsed);
 				video.decode(frames)?;
 			}
@@ -521,7 +551,7 @@ mod tests {
 		// Before the first keyframe: dropped, audio included.
 		session.aac(1, 1000, b"early").await;
 		session.video(0, 1000, &[fake::H264_SLICE]).await;
-		// Only the slice in band; retina inserts the SDP's parameter sets.
+		// Only the slice in band; the ingest inserts the SDP's parameter sets.
 		session.video(0, 1000 + FRAME, &[fake::H264_IDR]).await;
 		session.aac(1, 1000 + 2048, b"audio").await;
 		session.video(0, 1000 + 2 * FRAME, &[fake::H264_SLICE]).await;
@@ -747,6 +777,7 @@ mod tests {
 
 	/// Credentials come out of the URL, never reach a log, and still authenticate.
 	#[tokio::test]
+	#[tracing_test::traced_test]
 	async fn credentials_ride_the_userinfo() {
 		let server = Server::bind(vec![Media::H264 { sprop: true }])
 			.await
@@ -765,6 +796,41 @@ mod tests {
 		let session = within("PLAY", server.accept(0)).await;
 		session.close().await;
 		assert_eq!(within("the pull", pull).await.unwrap().unwrap(), End::Closed);
+		assert!(logs_contain("RTSP session playing"));
+		assert!(!logs_contain("p@ss") && !logs_contain("p%40ss"));
+	}
+
+	/// A camera that keeps the session up but stops sending media ends the pull, so a caller
+	/// redials it rather than waiting forever.
+	#[tokio::test]
+	async fn a_silent_session_stalls() {
+		let server = Server::bind(vec![Media::H264 { sprop: true }]).await;
+		let (broadcast, catalog) = broadcast();
+		let mut client = Client::new(server.url()).unwrap();
+		client.timeout = Duration::from_millis(200);
+		let started = tokio::time::Instant::now();
+		let pull = tokio::spawn(async move { client.pull(&broadcast, &catalog).await });
+
+		let _session = within("PLAY", server.accept(0)).await;
+		let err = within("the pull", pull).await.unwrap().unwrap_err();
+		assert!(matches!(err, Error::Stalled(_)), "{err}");
+		assert!(started.elapsed() >= Duration::from_millis(200));
+	}
+
+	/// A server whose `rtptime` lands well after its packets would never publish anything, so
+	/// the pull fails rather than idling.
+	#[tokio::test]
+	async fn a_wrong_rtptime_fails() {
+		// retina reads `rtptime` only when playing several streams.
+		let server = Server::bind(vec![Media::H264 { sprop: true }, Media::Aac]).await;
+		let (broadcast, catalog) = broadcast();
+		let client = Client::new(server.url()).unwrap();
+		let pull = tokio::spawn(async move { client.pull(&broadcast, &catalog).await });
+
+		let mut session = within("PLAY", server.accept(10 * 90_000)).await;
+		session.video(0, 0, &[fake::H264_IDR]).await;
+		let err = within("the pull", pull).await.unwrap().unwrap_err();
+		assert!(matches!(err, Error::Rtsp(_)), "{err}");
 	}
 
 	#[tokio::test]
