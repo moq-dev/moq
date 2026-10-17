@@ -82,8 +82,9 @@ export class Producer {
 	 *
 	 * Plaintext is capped at `MAX_DATAGRAM_PLAINTEXT` and copied, so the caller may reuse its
 	 * buffer. A predictable failure is refused before the sequence is allocated; once admitted,
-	 * the identity is spent even if the net write fails. Rejects with {@link Failure} `reuse`,
-	 * `identity`, `exhausted`, or `oversize`, or a net error.
+	 * the identity is spent even if the net write fails, including a timestamp the net track
+	 * refuses before this producer has observed its committed timescale. Rejects with
+	 * {@link Failure} `reuse`, `identity`, `exhausted`, or `oversize`, or a net error.
 	 */
 	async insertDatagram(
 		sequence: number,
