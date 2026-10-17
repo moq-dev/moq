@@ -253,7 +253,7 @@ impl Peer {
         for (index, sending) in self.sends.iter_mut().enumerate() {
             let id = match sending.id {
                 Some(id) => id,
-                None => match conn.streams().open(Dir::Uni) {
+                None => match conn.streams().open(Dir::Uni, Default::default()) {
                     Some(id) => {
                         assert_eq!(id.index(), index as u64);
                         conn.send_stream(id)

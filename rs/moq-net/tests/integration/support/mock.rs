@@ -553,10 +553,11 @@ impl poll::Session for MockSession {
 	fn poll_open_bi(
 		&mut self,
 		cx: &mut Context<'_>,
+		options: poll::SendOptions<'_, poll::Ungrouped>,
 	) -> Poll<Result<(Self::SendStream, Self::RecvStream), Self::Error>> {
 		let link = &self.side.out;
 		let mut lines = link.bi.lock().unwrap();
-		let (send, recv) = ready!(self.inner.poll_open_bi(cx))?;
+		let (send, recv) = ready!(self.inner.poll_open_bi(cx, options))?;
 		let held = link.held_bi.lock().unwrap().is_some();
 		let forward = Arc::new(Line {
 			held,
@@ -575,14 +576,14 @@ impl poll::Session for MockSession {
 		Poll::Ready(Ok((send, self.recv(recv, back))))
 	}
 
-	fn poll_open_uni(&mut self, cx: &mut Context<'_>) -> Poll<Result<Self::SendStream, Self::Error>> {
+	fn poll_open_uni(&mut self, cx: &mut Context<'_>, options: poll::SendOptions<'_, poll::Ungrouped>) -> Poll<Result<Self::SendStream, Self::Error>> {
 		if self.side.withheld.load(Ordering::Relaxed) {
 			return Poll::Ready(Err(ready!(self.closer.poll_closed(cx))));
 		}
 
 		let link = &self.side.out;
 		let mut lines = link.uni.lock().unwrap();
-		let send = ready!(self.inner.poll_open_uni(cx))?;
+		let send = ready!(self.inner.poll_open_uni(cx, options))?;
 		let line = Arc::new(Line {
 			held: link.held_uni.lock().unwrap().is_some(),
 			split: link.split.lock().unwrap().clone(),
@@ -600,16 +601,11 @@ impl poll::Session for MockSession {
 		None
 	}
 
-	fn send_datagram(
-		&mut self,
-		payload: Bytes,
-		group: Option<&poll::Ungrouped>,
-		order: i64,
-	) -> Result<(), Self::Error> {
+	fn send_datagram(&mut self, payload: Bytes, options: poll::SendOptions<'_, poll::Ungrouped>) -> Result<(), Self::Error> {
 		if self.side.lossy.load(Ordering::Relaxed) {
 			return Ok(());
 		}
-		self.inner.send_datagram(payload, group, order)
+		self.inner.send_datagram(payload, options)
 	}
 
 	fn poll_recv_datagram(&mut self, cx: &mut Context<'_>) -> Poll<Result<Bytes, Self::Error>> {

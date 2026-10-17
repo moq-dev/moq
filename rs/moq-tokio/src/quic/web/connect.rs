@@ -113,7 +113,7 @@ impl Connected {
 		let request = request.into();
 
 		// Create a new stream that will be used to send the CONNECT frame.
-		let (mut send, mut recv) = conn.open_bi().await?;
+		let (mut send, mut recv) = conn.open_bi(Default::default()).await?;
 
 		tracing::debug!(?request, "sending CONNECT request");
 		request.write(&mut send).await?;

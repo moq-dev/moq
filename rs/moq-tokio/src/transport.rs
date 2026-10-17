@@ -337,6 +337,14 @@ impl<S: GroupedSend + 'static> SendStream<S> {
 		}
 	}
 
+	/// Schedule a newly opened stream by its options.
+	fn schedule(&mut self, options: moq_net::transport::poll::SendOptions<'_, S::Group>) {
+		self.prioritize(options.priority);
+		if let Some(group) = options.group {
+			self.join(group);
+		}
+	}
+
 	/// Join `group`, deferred like [`prioritize`](Self::prioritize).
 	fn join(&mut self, group: &S::Group) {
 		match self.state.get_mut().unwrap().as_mut() {
@@ -866,10 +874,13 @@ impl Grouped for crate::quic::web::Session {
 	fn send_datagram(
 		&self,
 		payload: Bytes,
-		group: Option<&crate::quic::driver::SendGroup>,
-		order: i64,
+		options: moq_net::transport::poll::SendOptions<'_, crate::quic::driver::SendGroup>,
 	) -> Result<(), Self::Error> {
-		Self::send_datagram(self, payload, group, order)
+		let options = crate::quic::driver::SendOptions {
+			group: options.group,
+			priority: options.priority,
+		};
+		Self::send_datagram(self, payload, options)
 	}
 }
 

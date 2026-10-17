@@ -1191,7 +1191,7 @@ mod tests {
             state: &mut server,
             conn_state: &state,
         }
-        .open(Dir::Uni)
+        .open(Dir::Uni, Default::default())
         .unwrap();
         SendStream {
             id,
@@ -1258,7 +1258,7 @@ mod tests {
             state: &mut server,
             conn_state: &state,
         }
-        .open(Dir::Uni)
+        .open(Dir::Uni, Default::default())
         .unwrap();
         SendStream {
             id,
@@ -1616,7 +1616,7 @@ mod tests {
             state: &mut server,
             conn_state: &state,
         }
-        .open(Dir::Uni)
+        .open(Dir::Uni, Default::default())
         .unwrap();
 
         let mut stream = SendStream {
@@ -1679,9 +1679,9 @@ mod tests {
             conn_state: &state,
         };
 
-        let id_high = streams.open(Dir::Bi).unwrap();
-        let id_mid = streams.open(Dir::Bi).unwrap();
-        let id_low = streams.open(Dir::Bi).unwrap();
+        let id_high = streams.open(Dir::Bi, Default::default()).unwrap();
+        let id_mid = streams.open(Dir::Bi, Default::default()).unwrap();
+        let id_low = streams.open(Dir::Bi, Default::default()).unwrap();
 
         let mut mid = SendStream {
             id: id_mid,
@@ -1735,8 +1735,8 @@ mod tests {
                 state: &mut server,
                 conn_state: &state,
             };
-            let id_low = streams.open(Dir::Bi).unwrap();
-            let id_high = streams.open(Dir::Bi).unwrap();
+            let id_low = streams.open(Dir::Bi, Default::default()).unwrap();
+            let id_high = streams.open(Dir::Bi, Default::default()).unwrap();
 
             let mut low = SendStream {
                 id: id_low,
@@ -1797,8 +1797,8 @@ mod tests {
             conn_state: &state,
         };
 
-        let id_high = streams.open(Dir::Bi).unwrap();
-        let id_mid = streams.open(Dir::Bi).unwrap();
+        let id_high = streams.open(Dir::Bi, Default::default()).unwrap();
+        let id_mid = streams.open(Dir::Bi, Default::default()).unwrap();
 
         let mut mid = SendStream {
             id: id_mid,
@@ -1866,9 +1866,9 @@ mod tests {
             };
 
             // a, b and c all have the same priority
-            let id_a = streams.open(Dir::Bi).unwrap();
-            let id_b = streams.open(Dir::Bi).unwrap();
-            let id_c = streams.open(Dir::Bi).unwrap();
+            let id_a = streams.open(Dir::Bi, Default::default()).unwrap();
+            let id_b = streams.open(Dir::Bi, Default::default()).unwrap();
+            let id_c = streams.open(Dir::Bi, Default::default()).unwrap();
 
             let mut stream_a = SendStream {
                 id: id_a,
@@ -1948,9 +1948,9 @@ mod tests {
         };
 
         // a, and b have the same priority, c has higher priority
-        let id_a = streams.open(Dir::Bi).unwrap();
-        let id_b = streams.open(Dir::Bi).unwrap();
-        let id_c = streams.open(Dir::Bi).unwrap();
+        let id_a = streams.open(Dir::Bi, Default::default()).unwrap();
+        let id_b = streams.open(Dir::Bi, Default::default()).unwrap();
+        let id_c = streams.open(Dir::Bi, Default::default()).unwrap();
 
         let mut stream_a = SendStream {
             id: id_a,
@@ -2055,7 +2055,7 @@ mod tests {
             conn_state: &state,
         };
 
-        let id = streams.open(Dir::Uni).unwrap();
+        let id = streams.open(Dir::Uni, Default::default()).unwrap();
         let mut stream = SendStream {
             id,
             state: &mut server,
@@ -2502,7 +2502,7 @@ mod tests {
             state: &mut server,
             conn_state: &conn_state,
         }
-        .open(Dir::Uni)
+        .open(Dir::Uni, Default::default())
         .expect("should be able to open a stream");
 
         let mut stream = SendStream {
@@ -2577,7 +2577,7 @@ mod tests {
             state: &mut server,
             conn_state: &conn_state,
         }
-        .open(Dir::Uni)
+        .open(Dir::Uni, Default::default())
         .expect("should be able to open a stream");
 
         let mut stream = SendStream {
@@ -2907,7 +2907,7 @@ mod tests {
             state: &mut server,
             conn_state: &state,
         }
-        .open(Dir::Uni)
+        .open(Dir::Uni, Default::default())
         .unwrap();
         let mut stream = SendStream {
             id,
@@ -2951,7 +2951,7 @@ mod tests {
             state: &mut server,
             conn_state: &state,
         }
-        .open(Dir::Uni)
+        .open(Dir::Uni, Default::default())
         .unwrap();
         let mut stream = SendStream {
             id,
@@ -2980,7 +2980,7 @@ mod tests {
             state: &mut server,
             conn_state: &state,
         }
-        .open(Dir::Uni)
+        .open(Dir::Uni, Default::default())
         .unwrap();
         let mut stream = SendStream {
             id,
@@ -3023,7 +3023,7 @@ mod tests {
                 state: &mut server,
                 conn_state: &state,
             }
-            .open(Dir::Uni)
+            .open(Dir::Uni, Default::default())
             .unwrap();
             let mut stream = SendStream {
                 id,
@@ -3056,7 +3056,7 @@ mod tests {
             state: &mut server,
             conn_state: &state,
         }
-        .open(Dir::Uni)
+        .open(Dir::Uni, Default::default())
         .unwrap();
         let mut stream = SendStream {
             id,
@@ -3097,7 +3097,7 @@ mod tests {
             state: &mut server,
             conn_state: &state,
         }
-        .open(Dir::Uni)
+        .open(Dir::Uni, Default::default())
         .unwrap();
         let mut stream = SendStream {
             id,
@@ -3272,8 +3272,8 @@ mod tests {
     fn send_group_from_another_connection() {
         let mut a = make(Side::Client);
         let mut b = make(Side::Client);
-        let group = crate::SendGroups { state: &mut a }.open(0, None);
-        let _other = crate::SendGroups { state: &mut b }.open(0, None);
+        let group = crate::SendGroups { state: &mut a }.open(0);
+        let _other = crate::SendGroups { state: &mut b }.open(0);
         crate::SendGroups { state: &mut b }.set_priority(&group, 1);
     }
 
@@ -3284,7 +3284,7 @@ mod tests {
         let mut b = make(Side::Client);
         let domain = crate::SendGroups { state: &mut a }.open_domain();
         let _other = crate::SendGroups { state: &mut b }.open_domain();
-        let _ = crate::SendGroups { state: &mut b }.open(0, Some(&domain));
+        let _ = crate::SendGroups { state: &mut b }.open_in(0, &domain);
     }
 
     /// Another connection holding at least as much credit still refuses it.

@@ -10,13 +10,24 @@ use super::Shared;
 /// connection's other groups: a higher priority group preempts every lower one, and groups of
 /// equal priority get an equal share of bytes however many streams each has queued. A stream's
 /// own priority orders it only against the group's other streams, and a datagram sent in the
-/// group is ordered among them by its `order`. Streams and datagrams outside any group go
+/// group is ordered among them by its priority. Streams and datagrams outside any group go
 /// before every group. See [`moq_quic::SendGroups`].
 ///
 /// Clones share one group, released once the last clone is dropped and its streams finish
 /// and its datagrams are sent.
 #[derive(Clone)]
 pub struct SendGroup(Rc<Inner>);
+
+/// How an outgoing datagram is scheduled: its [`SendGroup`] and priority.
+pub type SendOptions<'a> = moq_quic::SendOptions<'a, SendGroup>;
+
+/// The options as the connection knows them.
+pub(crate) fn to_quic(options: SendOptions<'_>) -> moq_quic::SendOptions<'_> {
+	moq_quic::SendOptions {
+		group: options.group.map(SendGroup::id),
+		priority: options.priority,
+	}
+}
 
 struct Inner {
 	shared: Shared,
@@ -25,7 +36,7 @@ struct Inner {
 
 impl SendGroup {
 	pub(crate) fn new(shared: Shared, priority: i64) -> Self {
-		let group = shared.conn.borrow_mut().send_groups().open(priority, None);
+		let group = shared.conn.borrow_mut().send_groups().open(priority);
 		Self(Rc::new(Inner {
 			shared,
 			group: Some(group),

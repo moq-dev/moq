@@ -219,11 +219,6 @@ impl<S: crate::transport::poll::SendStream, V: StreamCodes> Writer<S, V> {
 		self.stream.as_mut().unwrap().set_priority(priority);
 	}
 
-	/// Move the stream into a send group from its session.
-	pub fn set_group(&mut self, group: &S::Group) {
-		self.stream.as_mut().unwrap().set_group(group);
-	}
-
 	/// Cast the writer to a different version, used during version negotiation.
 	pub fn with_version<O>(mut self, version: O) -> Writer<S, O> {
 		Writer {

@@ -8,13 +8,24 @@ use crate::quic::driver::connection::ConnectionInner;
 /// the connection's other groups: a higher priority group preempts every lower one, and groups
 /// of equal priority get an equal share of bytes however many streams each has queued. A
 /// stream's own priority orders it only against the group's other streams, and a datagram sent
-/// in the group is ordered among them by its `order`. Streams and datagrams outside any group go
-/// before every group. See [`moq_quic::SendGroups`].
+/// in the group is ordered among them by its priority. Streams and datagrams outside any group
+/// go before every group. See [`moq_quic::SendGroups`].
 ///
 /// Clones share one group, released once the last clone is dropped and its streams finish
 /// and its datagrams are sent. A group does not keep its connection open.
 #[derive(Debug, Clone)]
 pub struct SendGroup(Arc<Inner>);
+
+/// How an outgoing stream or datagram is scheduled: its [`SendGroup`] and priority
+pub type SendOptions<'a> = moq_quic::SendOptions<'a, SendGroup>;
+
+/// The options as the connection knows them.
+pub(crate) fn to_quic(options: SendOptions<'_>) -> moq_quic::SendOptions<'_> {
+    moq_quic::SendOptions {
+        group: options.group.map(SendGroup::id),
+        priority: options.priority,
+    }
+}
 
 #[derive(Debug)]
 struct Inner {
@@ -29,7 +40,7 @@ impl SendGroup {
             .lock("SendGroup::new")
             .inner
             .send_groups()
-            .open(priority, None);
+            .open(priority);
         Self(Arc::new(Inner {
             conn,
             group: Some(group),

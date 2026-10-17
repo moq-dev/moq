@@ -79,7 +79,7 @@ pub use crate::quic::driver::recv_stream::{
 #[cfg(test)]
 pub(crate) use crate::quic::driver::runtime::wrap_udp_socket;
 pub use crate::quic::driver::runtime::{AsyncUdpSocket, UdpSender};
-pub use crate::quic::driver::send_group::SendGroup;
+pub use crate::quic::driver::send_group::{SendGroup, SendOptions};
 pub use crate::quic::driver::send_stream::{Checkpoint, SendStream, StoppedError, WriteError};
 
 #[cfg(test)]
