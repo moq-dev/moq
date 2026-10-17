@@ -95,6 +95,11 @@ Other guidance:
   its name, so process-local data never reads as device capacity.
 - Health also comes from the backends' own errors: `VK_ERROR_DEVICE_LOST` and
   its CUDA and VA-API equivalents.
+- Both in-process values reach the monitor through one process-wide record
+  per device identity: each encoder and decoder registers its session there
+  for its lifetime and marks the device lost when its backend returns a
+  device-lost error, and `snapshot()` reads that record. A monitor created
+  after the failure still sees it.
 - A snapshot call, not a callback; cheap enough to poll about once a second.
 - The snapshot is additive and keys by the surface's identity. Publish it
   after the vendor implementations it reports are validated. It does not gate
