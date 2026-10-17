@@ -53,10 +53,15 @@ impl<S: wt::Stats> moq::Stats for Stats<S> {
 /// through [`GroupedSend`]. The module is private and the trait is not re-exported, so
 /// other crates can neither name nor implement it.
 ///
-/// The backend interface has no groups, so moq-net's
-/// [`send_group`](poll::Session::send_group) reaches a backend through this. A backend
-/// without groups implements it empty.
+/// The backend interface has no groups or wire counters, so moq-net's
+/// [`send_group`](poll::Session::send_group) and [`wire`](poll::Session::wire) reach a
+/// backend through this. A backend without either implements it empty.
 pub trait Grouped: backend::Session<SendStream: GroupedSend> {
+	/// The wire counters the backend updates as it sends and receives, or `None` when it has none.
+	fn wire(&self) -> Option<moq::Wire> {
+		None
+	}
+
 	/// Open a send group at `priority`, or `None` when the backend has none.
 	fn send_group(&mut self, priority: i64) -> Option<<Self::SendStream as GroupedSend>::Group> {
 		let _ = priority;
@@ -160,6 +165,9 @@ impl<S: Grouped<SendStream: 'static, RecvStream: 'static> + Clone + 'static> pol
 	}
 	fn stats(&self) -> impl moq::Stats {
 		Stats(backend::Session::stats(&self.0))
+	}
+	fn wire(&self) -> Option<moq::Wire> {
+		Grouped::wire(&self.0)
 	}
 }
 /// An outgoing WebTransport stream adapted to moq-net.

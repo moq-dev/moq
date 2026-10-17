@@ -136,6 +136,8 @@ type ConnectionStats struct {
 	PacketsSent          *uint64
 	PacketsReceived      *uint64
 	PacketsLost          *uint64
+	// Version is the negotiated protocol version, spelled like WithVersions.
+	Version *string
 }
 
 func connectionStatsFromFFI(s ffi.MoqConnectionStats) ConnectionStats {
@@ -149,5 +151,6 @@ func connectionStatsFromFFI(s ffi.MoqConnectionStats) ConnectionStats {
 		PacketsSent:          s.PacketsSent,
 		PacketsReceived:      s.PacketsReceived,
 		PacketsLost:          s.PacketsLost,
+		Version:              s.Version,
 	}
 }

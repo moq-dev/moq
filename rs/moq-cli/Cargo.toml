@@ -26,7 +26,7 @@ path = "src/main.rs"
 doc = false
 
 [features]
-default = ["cluster-lan", "quic", "websocket", "nvidia", "s3", "gcs", "azure"]
+default = ["cluster-lan", "quic", "websocket", "webrtc", "nvidia", "s3", "gcs", "azure"]
 # Experimental transport with a heavy dependency tree, enabled only on request.
 iroh = ["moq-relay/iroh", "moq-tokio/iroh"]
 # LAN discovery and meshing (`--cluster-lan`).
@@ -38,6 +38,8 @@ quic = ["moq-tokio/quic"]
 # congestion-control testing.
 qlog = ["moq-tokio/qlog"]
 websocket = ["moq-tokio/websocket"]
+# Native WebRTC data channels, for holding sessions with browser peers.
+webrtc = ["moq-tokio/webrtc"]
 # The cloud object stores `export archive` and `import archive` reach (`s3://`,
 # `gs://`, `az://`). Local `file://` URLs need none of them.
 s3 = ["object_store/aws"]
@@ -101,6 +103,7 @@ axum = { workspace = true }
 axum-server = { workspace = true }
 base64 = { workspace = true }
 bytes = { workspace = true }
+futures = { workspace = true }
 hang = { workspace = true }
 humantime = { workspace = true }
 moq-archive = { workspace = true }

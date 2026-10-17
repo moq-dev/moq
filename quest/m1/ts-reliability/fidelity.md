@@ -24,8 +24,8 @@ Audit findings to reproduce and scope:
   identity together. A name must never identify different content after a
   restart or PID reuse.
 - MPEG-1/2 video is handled as a clock stream and its payload discarded.
-  Unknown stream-type bytes can import as opaque but fail export's closed
-  enum conversion. A known stream type is not proof of supported carriage.
+  Unknown stream-type bytes survive opaque carriage and export. A known
+  stream type is not proof of supported carriage.
 - SI ingest recognizes fixed DVB PIDs. ATSC PSIP, CAT/conditional access,
   dynamically signalled tables, descriptors and private sections need
   explicit profile decisions. Packet passthrough can retain mechanisms the
@@ -35,8 +35,7 @@ Audit findings to reproduce and scope:
   browser cue API; basic carriage should not depend on that API existing.
 - Private PES loses optional header semantics today; the
   [whole-PES quests](/quest/m1/ts-reliability/pes-import.md) carry it
-  byte-exact, and [raw stream types](/quest/m1/ts-reliability/stream-type.md)
-  fixes the export enum conversion.
+  byte-exact.
 
 The maintainer decides whether a supported profile handles live PMT changes
 in place with fresh track identities, replaces the broadcast, or initially

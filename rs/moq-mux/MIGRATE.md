@@ -4,6 +4,24 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `ts::Programs::finish` returns each program's `Finish` (#5795)
+
+`Programs::finish` returns `anyhow::Result<Vec<moq_net::broadcast::Finish>>` instead of `anyhow::Result<()>`.
+Each handle keeps its program's broadcast servable until its media is stale, and dropping it closes that program.
+Await `Finish::wait` to linger, or drop the handles to close every program now.
+
+```rust
+// Before
+programs.finish()?;
+
+// After: serve the finished programs until their media is stale
+let finished = programs.finish()?;
+futures::future::join_all(finished.into_iter().map(moq_net::broadcast::Finish::wait)).await;
+
+// After: close every program now
+drop(programs.finish()?);
+```
+
 ### Timeline durations are hints (#5715)
 
 `timeline::Config::duration_max`, `with_duration_max`, and `DEFAULT_DURATION_MAX` are gone; set `duration_hint` with `with_duration_hint`, the expected record duration such as the GOP, and the split ceiling follows from it.

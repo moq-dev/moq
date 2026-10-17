@@ -29,6 +29,8 @@ const TRAIN_SEGMENTS: usize = 63;
 /// waiter without ever holding both.
 pub(crate) struct Inner {
 	pub(crate) conn: RefCell<moq_quic::Connection>,
+	/// Updated by packet ingress and egress, so readers never wake the worker to sample.
+	pub(crate) wire: moq_net::transport::Wire,
 	pub(crate) state: RefCell<State>,
 	/// The worker driving this connection, which anything layered on it
 	/// (the WebTransport handshake, say) runs on too.
@@ -168,18 +170,6 @@ impl Inner {
 		state.fail(err);
 	}
 
-	/// Fail the connection because its peer has no route, closing it so the
-	/// driver still drains it out of the endpoint.
-	pub(crate) fn unreachable(&self, err: &std::io::Error) {
-		self.conn
-			.borrow_mut()
-			.close(moq_clock::Instant::now(), 0u32.into(), Bytes::new());
-		self.state.borrow_mut().fail(Error::Transport {
-			code: moq_quic::TransportErrorCode::NO_VIABLE_PATH.into(),
-			reason: err.to_string(),
-		});
-	}
-
 	/// Park `waiter` until stream `id` is writable again.
 	pub(crate) fn park_writable(&self, id: StreamId, waiter: &kio::Waiter) {
 		let mut state = self.state.borrow_mut();
@@ -275,8 +265,8 @@ impl Inner {
 /// concurrent pending operations don't trample each other's wakeups. Dropping
 /// every handle (and every stream) drops the driver's `Rc` peers, but the
 /// driver itself keeps the connection alive until it ends; close explicitly
-/// with [`close`](web_transport_trait::poll::Session::close) (which moq's
-/// session machine does).
+/// with [`close`](web_transport_trait::poll::Session::close), or wrap it in
+/// [`crate::quic::web::Session`], whose last handle closes it.
 ///
 /// That close only records the code: the driver task is what frames the
 /// CONNECTION_CLOSE and hands it to the socket. Drive the worker until
@@ -399,6 +389,11 @@ impl Connection {
 	pub fn stats(&self) -> moq_quic::ConnectionStats {
 		self.shared.conn.borrow().stats()
 	}
+
+	/// The wire counters this connection updates as it sends and receives.
+	pub(crate) fn wire(&self) -> moq_net::transport::Wire {
+		self.shared.wire.clone()
+	}
 }
 
 impl Clone for Connection {
@@ -427,7 +422,13 @@ pub(crate) fn launch(
 	key: ConnectionHandle,
 	conn: moq_quic::Connection,
 ) -> (Shared, impl Future<Output = ()> + use<>) {
+	// The handshake's first datagrams arrived before this driver existed.
+	let stats = conn.stats();
+	let wire = moq_net::transport::Wire::new();
+	wire.set_sent_bytes(stats.udp_tx.bytes);
+	wire.set_received_bytes(stats.udp_rx.bytes);
 	let shared = Rc::new(Inner {
+		wire,
 		conn: RefCell::new(conn),
 		state: RefCell::new(State::new()),
 		owner: owner.clone(),
@@ -898,6 +899,7 @@ impl Driver {
 			let Some(transmit) = conn.poll_transmit(moq_clock::Instant::now(), segments, &mut tx) else {
 				return Poll::Pending;
 			};
+			self.shared.wire.set_sent_bytes(conn.stats().udp_tx.bytes);
 			// Once closed, moq-quic transmits nothing but the CONNECTION_CLOSE.
 			(transmit, conn.is_closed())
 		};
