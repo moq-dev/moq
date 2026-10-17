@@ -63,7 +63,7 @@ export class Connection implements Established {
 	readonly probe: Getter<Probe> = new Signal<Probe>({});
 
 	/** Our tokens and grants, when the peer negotiated MoQ Auth; see {@link Established.auth}. */
-	get auth(): Auth.Auth {
+	get auth(): Auth.Handle {
 		return this.#auth;
 	}
 
@@ -192,6 +192,7 @@ export class Connection implements Established {
 		const session = this.#session;
 		this.#auth = new AuthSession({
 			wire: auth && authSupported(version) ? new IetfAuthWire(session) : undefined,
+			requests: true,
 			peerGrant: {
 				publish: new Path.Patterns([Path.Pattern.all()]),
 				subscribe: new Path.Patterns(publish ? [Path.Pattern.all()] : []),
@@ -211,6 +212,7 @@ export class Connection implements Established {
 			hidden,
 			cluster,
 			grant: this.#auth.grant,
+			auth: this.#auth,
 			ready: this.#auth.setupAnswered(),
 		});
 		this.#solicit = solicit;

@@ -21,6 +21,20 @@
         "remark-stringify": "^11.0.0",
       },
     },
+    "bench/browser": {
+      "name": "@moq/bench-browser",
+      "dependencies": {
+        "@moq/clock": "workspace:*",
+        "@moq/hang": "workspace:*",
+        "@moq/net": "workspace:*",
+        "@moq/publish": "workspace:*",
+        "@moq/signals": "workspace:*",
+        "@moq/watch": "workspace:*",
+      },
+      "devDependencies": {
+        "playwright": "^1.63.0",
+      },
+    },
     "demo/boy": {
       "name": "@moq/demo-boy",
       "version": "0.2.0",
@@ -718,6 +732,8 @@
     "@moq/audio-quality": ["@moq/audio-quality@workspace:test/audio-quality/clients/js"],
 
     "@moq/auth": ["@moq/auth@workspace:js/auth"],
+
+    "@moq/bench-browser": ["@moq/bench-browser@workspace:bench/browser"],
 
     "@moq/boy": ["@moq/boy@workspace:js/moq-boy"],
 

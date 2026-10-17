@@ -23,6 +23,10 @@ by [VA-API external images](/quest/m2/vaapi-vulkan-import.md).
   YUY2 cameras.
 - **A live camera run per platform**: capture needs device permission that a
   headless or agent process cannot grant itself.
+- **OBS follows its grant on a shaped uplink**: stream from a real OBS build
+  through `tc netem` (or `rs/moq-shaper`), narrow and reopen the link, and
+  confirm the Stats tab's video target drops at once, climbs back over a few
+  seconds, and the encoder output follows (`cpp/obs/src/moq-rate.h`).
 
 ### PipeWire DMA-BUF capture on KDE
 

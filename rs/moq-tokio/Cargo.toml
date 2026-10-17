@@ -105,7 +105,7 @@ subtle = { workspace = true, optional = true }
 thiserror = "2"
 tikv-jemalloc-ctl = { version = "0.6", optional = true }
 tikv-jemallocator = { version = "0.6", features = ["profiling", "unprefixed_malloc_on_supported_platforms"], optional = true }
-time = "0.3"
+time = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 toml = { workspace = true }
 tracing = "0.1"
@@ -115,7 +115,7 @@ usage = { workspace = true, features = ["config"] }
 web-transport-iroh = { workspace = true, optional = true }
 web-transport-proto = { workspace = true, optional = true }
 web-transport-trait = { workspace = true }
-x509-parser = "0.18"
+x509-parser = { workspace = true }
 
 [target.'cfg(target_os = "android")'.dependencies]
 # Android's platform verifier needs a JNI handle to the app Context (see

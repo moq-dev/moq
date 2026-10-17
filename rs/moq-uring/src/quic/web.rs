@@ -958,6 +958,13 @@ impl web_transport_trait::poll::RecvStream for RecvStream {
 		}
 	}
 
+	fn poll_read_chunk(&mut self, cx: &mut Context<'_>, max: usize) -> Poll<Result<Option<Bytes>, Self::Error>> {
+		match web_transport_trait::poll::RecvStream::poll_read_chunk(&mut self.inner, cx, max) {
+			Poll::Ready(Err(err)) => Poll::Ready(Err(self.map(err))),
+			other => other,
+		}
+	}
+
 	fn stop(&mut self, code: u32) {
 		match self.web {
 			true => self.inner.stop_code(proto::error_to_http3(code)),

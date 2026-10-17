@@ -11,12 +11,12 @@ use crate::{Error, abort::AbortOnDrop};
 
 /// Present session tokens across every session of a connection.
 #[derive(Clone)]
-pub struct Auth {
+pub struct Handle {
 	pub(super) connection: kio::Consumer<State>,
 	pub(super) pacing: Pacing,
 }
 
-impl Auth {
+impl Handle {
 	/// Watch the current session's union, clearing it while disconnected.
 	pub fn grant(&self) -> Watch {
 		Watch {
@@ -26,7 +26,7 @@ impl Auth {
 	}
 
 	/// Present a token now and on later sessions until its handle is dropped or refused.
-	pub async fn add(&self, token: impl Into<Bytes>) -> crate::Result<Token> {
+	pub async fn add(&self, token: impl Into<Bytes>) -> crate::Result<Auth> {
 		let producer = kio::Producer::<Granted>::default();
 		let state = producer.consume();
 		let connection = self.connection.clone();
@@ -46,21 +46,21 @@ impl Auth {
 			}
 		}));
 		answer.await.map_err(|_| Error::from(moq_net::Error::Cancel))??;
-		Ok(Token { _task: task, state })
+		Ok(Auth { _task: task, state })
 	}
 }
 
 /// A presented token; dropping it withdraws it from live and draining sessions.
-pub struct Token {
+pub struct Auth {
 	_task: AbortOnDrop,
 	state: kio::Consumer<Granted>,
 }
 
-impl Token {
+impl Auth {
 	/// Watch this token's grant on the current session.
 	pub fn grant(&self) -> Watch {
 		Watch {
-			source: Source::Token(self.state.clone()),
+			source: Source::Auth(self.state.clone()),
 			last: None,
 		}
 	}
@@ -84,7 +84,7 @@ struct Granted {
 #[derive(Clone)]
 enum Source {
 	Connection(kio::Consumer<State>),
-	Token(kio::Consumer<Granted>),
+	Auth(kio::Consumer<Granted>),
 }
 
 /// Observe a grant as tokens change and the connection replaces its session.
@@ -108,7 +108,7 @@ impl Watch {
 					.as_ref()
 					.and_then(|session| session.auth().grant().peek())
 			}
-			Source::Token(state) => {
+			Source::Auth(state) => {
 				if state.poll_closed(&kio::Waiter::noop()).is_ready() {
 					return None;
 				}
@@ -136,7 +136,7 @@ impl Watch {
 				Ok(grant) => Ok(grant),
 				Err(state) => Err(terminal(&state)),
 			},
-			Source::Token(state) => match ready!(state.poll(waiter, |state| {
+			Source::Auth(state) => match ready!(state.poll(waiter, |state| {
 				if state.grant != self.last {
 					Poll::Ready(state.grant.clone())
 				} else {
@@ -274,7 +274,7 @@ async fn present(
 		}
 		// A migrated session may still be serving its streams during GOAWAY drain.
 		// Keep its grant until that session ends or the application drops this token.
-		draining.retain(|(session, _): &(moq_net::Session, auth::Token)| session.closed().now_or_never().is_none());
+		draining.retain(|(session, _): &(moq_net::Session, auth::Auth)| session.closed().now_or_never().is_none());
 		draining.push((session, token));
 	}
 }
@@ -304,7 +304,7 @@ mod tests {
 			qmux::Session::accept(stream(server), config())
 		)
 		.unwrap();
-		let now = tokio::time::Instant::now().into_std();
+		let now = moq_net::time::now();
 		let client = async {
 			let (session, driver) = moq_net::Client::new()
 				.with_versions(versions.clone())
@@ -419,8 +419,8 @@ mod tests {
 		drop(token);
 	}
 
-	fn retained(connection: &kio::Producer<State>) -> Auth {
-		Auth {
+	fn retained(connection: &kio::Producer<State>) -> Handle {
+		Handle {
 			connection: connection.consume(),
 			pacing: Pacing::new(&super::super::Backoff::default()),
 		}
