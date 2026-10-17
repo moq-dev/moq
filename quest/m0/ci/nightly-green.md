@@ -3,9 +3,8 @@
 ## Goal
 
 Every Nightly workload that failed on 2026-10-16 (run 38897397428, commit
-b4eab0db1) passes on the next scheduled run, except the ones other quests own:
-the Linux release builds ([Release builds link again](/quest/m0/release-link.md))
-and the Windows relay drill ([Windows restart drill](/quest/m0/ci/platform-windows-drill.md)).
+b4eab0db1) passes on the next scheduled run, except the Linux release builds,
+which [Release builds link again](/quest/m0/release-link.md) owns.
 
 ## Plan
 
