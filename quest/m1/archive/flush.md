@@ -15,7 +15,7 @@ Decided:
 
 - Time decisions use elapsed = max(wall clock, pts) everywhere, so the existing
   cutting rule does the work with no new setting: an open group idle past
-  `duration_max` (10 s by default) splits between frames, and a finished sparse
+  internal safety ceiling splits between frames, and a finished sparse
   group (minimum 0) stores at once. Peer timestamps alone can never stall a
   cut, since the local wall clock bounds them. A forward pts leap can close a
   record early; a new record then starts at the leaping frame, so each leap

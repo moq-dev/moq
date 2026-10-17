@@ -22,6 +22,7 @@ mod source;
 #[cfg(test)]
 pub(crate) mod test_util;
 mod text;
+mod ttml;
 
 pub mod flv;
 pub mod fmp4;

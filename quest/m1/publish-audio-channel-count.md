@@ -51,4 +51,3 @@ harness cannot exercise it.
 
 - [Watch jitter target](/quest/m1/audio-jitter-target/watch.md) - a ring that runs dry re-stalls and refills to the target
 - [Test flakes, round 2](/quest/m1/test-flakes-2/README.md) - load flakes fixed at their cause
-- [Browser benchmarks](/quest/m2/browser-benchmarks.md) - the other place browser-side capture and encode costs get measured

@@ -25,7 +25,9 @@ pub(super) async fn read(
 	let name = section
 		.timelines
 		.get(track)
-		.ok_or_else(|| moq_mux::Error::TimelineMissing(track.to_string()))?;
+		.ok_or_else(|| moq_mux::Error::TimelineMissing(track.to_string()))?
+		.track
+		.as_str();
 	let scale = moq_net::Timescale::new(section.timescale as u64)
 		.map_err(|_| moq_mux::Error::InvalidTimescale(section.timescale))?;
 	let track = broadcast.track(name)?;
@@ -50,7 +52,7 @@ pub(super) async fn read(
 				Ok(group) => group,
 				// Retention prunes a recording's start, which this path cannot list from yet.
 				Err(moq_net::Error::NotFound | moq_net::Error::Stream(moq_net::StreamError::NotFound)) if next == 0 => {
-					return Err(crate::Error::HistoryPruned(name.clone()));
+					return Err(crate::Error::HistoryPruned(name.to_string()));
 				}
 				Err(err) => return Err(err.into()),
 			};

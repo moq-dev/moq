@@ -54,7 +54,7 @@ round-trip test first.
   header, so rebasing leaves it valid; assert that with a CRC fixture), extension data, stuffing, and the special stream-ID forms
   that have no optional header. Each PES keeps its own stream_id.
 - **Catalog.** The entry records `pid`, `descriptors` and the `pesPacket`
-  member that [export](/quest/m1/ts-reliability/pes-export.md) reads, and
+  member that export reads, and
   no `verbatim` record. A published exporter ignores such an entry and
   silently leaves the stream out of its TS; that is the accepted cost.
 - **Refusal.** A PES carrying a clock this does not rebase (ESCR, a
@@ -96,7 +96,3 @@ Update `drafts/draft-lcurley-moq-mpegts.md` (the importer writes
 `pesPacket` and states what it refuses; `framing` is `"section"` only and
 required, `streamId` removed, changelog -01 noting the break with -00) and
 the TS lines of `doc/bin/cli.md` and `doc/lib/rs/moq-mux.md`.
-
-## Required
-
-- [Whole-PES export](/quest/m1/ts-reliability/pes-export.md) - export reads `pesPacket` before import writes it

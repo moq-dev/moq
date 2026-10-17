@@ -38,7 +38,7 @@ fn produce_origin(hop: u64) -> origin::Producer {
 
 /// Let every task settle. Time is paused, so this returns once the runtime is idle.
 async fn settle() {
-	moq_net_sim::sleep(Duration::from_millis(500)).await;
+	moq_clock::sleep(Duration::from_millis(500)).await;
 }
 
 /// `P` pushes everything it publishes to `cdn`.
@@ -83,7 +83,7 @@ type Delivery = (u64, moq_net::Result<(Option<Timestamp>, Vec<u8>)>);
 /// Read every group in full, reporting each frame as it arrives.
 fn read(mut sub: track::Subscriber) -> mpsc::UnboundedReceiver<Delivery> {
 	let (tx, rx) = mpsc::unbounded();
-	moq_net_sim::spawn(async move {
+	moq_clock::sim::spawn(async move {
 		loop {
 			let mut group = match sub.recv_group().await {
 				Ok(Some(group)) => group,
@@ -117,7 +117,7 @@ fn read(mut sub: track::Subscriber) -> mpsc::UnboundedReceiver<Delivery> {
 
 /// The next frame the reader reports, failing on an error or a hang.
 async fn next(rx: &mut mpsc::UnboundedReceiver<Delivery>) -> (u64, Option<Timestamp>, Vec<u8>) {
-	let (group, frame) = moq_net_sim::timeout(Duration::from_secs(10), rx.next())
+	let (group, frame) = moq_clock::timeout(Duration::from_secs(10), rx.next())
 		.await
 		.expect("reader hung")
 		.expect("reader ended");
@@ -267,9 +267,9 @@ fn assert_continuous(seen: &[(u64, Vec<u8>, Option<Timestamp>)], groups: u64) {
 
 /// Two lite-07 CDNs under one epoch: `S` reads through `A` although `B` is cheaper,
 /// resumes on `B` when `A` goes, and moves back once `A` returns, every frame once.
-#[moq_net_sim::test]
+#[moq_clock::test]
 async fn preferred_cdn_fails_over_and_back() {
-	moq_net_sim::timeout(TEST_TIMEOUT, async {
+	moq_clock::timeout(TEST_TIMEOUT, async {
 		let mut topology = Topology::new("moq-lite-07-wip".parse().unwrap()).await;
 		let mut announced = topology.subscriber.consume().announced();
 		let start = announced.next().await.expect("announced");
@@ -309,9 +309,9 @@ async fn preferred_cdn_fails_over_and_back() {
 /// A moq-transport `B` carries no epoch, so `S` cannot resume onto it: losing `A`
 /// restarts the path and ends the subscription, and a re-request lands on `B`. `A`
 /// returning is another restart, and a re-request lands back on `A`.
-#[moq_net_sim::test]
+#[moq_clock::test]
 async fn transport_secondary_restarts() {
-	moq_net_sim::timeout(TEST_TIMEOUT, async {
+	moq_clock::timeout(TEST_TIMEOUT, async {
 		let mut topology = Topology::new("moq-transport-22".parse().unwrap()).await;
 		let mut announced = topology.subscriber.consume().announced();
 		let start = announced.next().await.expect("announced");
@@ -329,7 +329,7 @@ async fn transport_secondary_restarts() {
 		);
 		topology.group();
 		settle().await;
-		match moq_net_sim::timeout(Duration::from_secs(10), rx.next())
+		match moq_clock::timeout(Duration::from_secs(10), rx.next())
 			.await
 			.expect("reader hung")
 		{

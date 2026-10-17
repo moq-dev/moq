@@ -97,10 +97,27 @@ pub trait Stats {
 pub struct StatsUnavailable;
 impl Stats for StatsUnavailable {}
 
+/// The typed transport condition when no application code was received.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum CloseKind {
+	/// The transport failed without a more specific classification.
+	#[default]
+	Transport,
+	/// The connection reached its idle deadline.
+	IdleTimeout,
+	/// This endpoint closed the connection locally.
+	Closed,
+}
+
 /// A transport failure with optional session and stream application codes.
 ///
 /// Session codes and stream codes belong to separate registries.
 pub trait Error: std::error::Error + MaybeSend + MaybeSync + 'static {
+	/// The typed transport condition, independent of application close codes.
+	fn close_kind(&self) -> CloseKind {
+		CloseKind::Transport
+	}
 	/// Returns the error code and reason if this was an application error.
 	///
 	/// Close reasons are exposed as UTF-8 strings at the transport boundary.
@@ -164,24 +181,27 @@ pub mod poll {
 		/// handle is dropped and its streams finish.
 		fn send_group(&mut self, priority: i64) -> Option<<Self::SendStream as SendStream>::Group>;
 
-		/// Poll to send a datagram over the network.
+		/// Send a datagram in `group` at `order`, best-effort.
 		///
-		/// Returns [`Poll::Pending`] while the transport has no room for it, so a caller
-		/// can wait for capacity rather than having the payload dropped underneath it.
+		/// `order` ranks the datagram among the group's streams like a stream's own
+		/// [priority](SendStream::set_priority), and a datagram goes ahead of a stream of equal
+		/// order. Without a group it is ranked among the ungrouped streams. A transport that
+		/// cannot rank datagrams against streams ignores both.
 		///
-		/// `payload` is taken by reference, not by value or as a [`Buf`]: a
-		/// [`Poll::Pending`] return means the caller retries with the same datagram, and
-		/// both of those would have consumed it. (A datagram also needs *contiguous*
-		/// bytes, and the only way to get those from a generic [`Buf`] is
-		/// [`Buf::copy_to_bytes`], which consumes.)
+		/// Never blocks: a transport with no room drops a queued datagram, the lowest priority
+		/// first where it can tell, exactly as the network is allowed to.
 		///
 		/// Accepting a datagram is not delivery. QUIC datagrams may still be dropped:
 		/// - Network congestion.
 		/// - Random packet loss.
 		/// - Payload is larger than `max_datagram_size()`
 		/// - Peer is not receiving datagrams.
-		/// - ???
-		fn poll_send_datagram(&mut self, cx: &mut Context<'_>, payload: &[u8]) -> Poll<Result<(), Self::Error>>;
+		fn send_datagram(
+			&mut self,
+			payload: Bytes,
+			group: Option<&<Self::SendStream as SendStream>::Group>,
+			order: i64,
+		) -> Result<(), Self::Error>;
 
 		/// Poll for a datagram from the network.
 		fn poll_recv_datagram(&mut self, cx: &mut Context<'_>) -> Poll<Result<Bytes, Self::Error>>;
@@ -240,16 +260,6 @@ pub mod poll {
 		/// Receive the next datagram from the peer.
 		fn recv_datagram(&mut self) -> RecvDatagram<'_, Self> {
 			RecvDatagram(self)
-		}
-
-		/// Send a datagram, best-effort: if the transport has no room for it right
-		/// now, the datagram is dropped, exactly as the network is allowed to do.
-		fn send_datagram(&mut self, payload: &[u8]) -> Result<(), Self::Error> {
-			let mut cx = Context::from_waker(std::task::Waker::noop());
-			match self.poll_send_datagram(&mut cx, payload) {
-				Poll::Ready(res) => res,
-				Poll::Pending => Ok(()),
-			}
 		}
 
 		/// Wait until the session is closed by either side, returning the reason.

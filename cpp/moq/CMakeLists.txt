@@ -8,22 +8,52 @@ endif()
 
 project(moq-cpp VERSION ${_version} LANGUAGES CXX)
 
-# Builds moq-ffi as a staticlib with cargo and renders its bindings with uniffi-bindgen-cpp,
-# the same no-Corrosion custom target rs/moq-c/CMakeLists.txt uses. The cargo profile follows
-# CMAKE_BUILD_TYPE (release unless Debug), even on a multi-config generator (Visual Studio),
-# whose --config never changes it: the staticlib links the release CRT either way.
 set(_workspace "${CMAKE_CURRENT_SOURCE_DIR}/../..")
-if(CMAKE_BUILD_TYPE STREQUAL "Debug")
-    set(_profile debug)
-    set(_cargo_flags "")
+set(MOQ_FFI_DIR "" CACHE PATH "Extracted default-feature moq-ffi native package")
+if(MOQ_FFI_DIR)
+    get_filename_component(MOQ_FFI_DIR "${MOQ_FFI_DIR}" ABSOLUTE)
+    file(READ "${MOQ_FFI_DIR}/manifest.json" _manifest)
+    foreach(_field version target features profile source)
+        string(JSON _input_${_field} GET "${_manifest}" ${_field})
+    endforeach()
+    if(NOT _input_features STREQUAL "default" OR NOT _input_profile STREQUAL "release")
+        message(FATAL_ERROR "Prebuilt moq-ffi requires default features and release profile")
+    endif()
+    if(NOT _input_version MATCHES "^[0-9]+\\.[0-9]+\\.[0-9]+([-+][0-9A-Za-z.+-]+)?$")
+        message(FATAL_ERROR "Malformed prebuilt moq-ffi version: ${_input_version}")
+    endif()
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64)$")
+            set(_ffi_target aarch64-unknown-linux-gnu)
+        elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64)$")
+            set(_ffi_target x86_64-unknown-linux-gnu)
+        endif()
+    elseif(APPLE AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64)$")
+        set(_ffi_target aarch64-apple-darwin)
+    elseif(MSVC AND CMAKE_SIZEOF_VOID_P EQUAL 8 AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(AMD64|x86_64)$")
+        set(_ffi_target x86_64-pc-windows-msvc)
+    endif()
+    if(NOT DEFINED _ffi_target OR NOT _ffi_target STREQUAL _input_target)
+        message(FATAL_ERROR "Prebuilt moq-ffi target ${_input_target} does not match this host")
+    endif()
 else()
-    set(_profile release)
-    set(_cargo_flags --release)
+    if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+        set(_profile debug)
+        set(_cargo_flags "")
+    else()
+        set(_profile release)
+        set(_cargo_flags --release)
+    endif()
+    if(DEFINED ENV{CARGO_TARGET_DIR})
+        set(_cargo_target "$ENV{CARGO_TARGET_DIR}")
+    else()
+        set(_cargo_target "${_workspace}/target")
+    endif()
 endif()
-if(DEFINED ENV{CARGO_TARGET_DIR})
-    set(_cargo_target "$ENV{CARGO_TARGET_DIR}")
-else()
-    set(_cargo_target "${_workspace}/target")
+
+if(MOQ_FFI_DIR)
+    set(_cargo_target "${MOQ_FFI_DIR}/lib")
+    set(_profile "")
 endif()
 if(WIN32)
     set(MOQ_FFI_LIB "${_cargo_target}/${_profile}/moq_ffi.lib")
@@ -34,6 +64,17 @@ elseif(APPLE)
 else()
     set(MOQ_FFI_LIB "${_cargo_target}/${_profile}/libmoq_ffi.a")
     set(_metadata "${_cargo_target}/${_profile}/libmoq_ffi.so")
+endif()
+if(MOQ_FFI_DIR)
+    foreach(_input "${MOQ_FFI_LIB}" "${_metadata}" "${MOQ_FFI_DIR}/native-libs.txt")
+        if(NOT EXISTS "${_input}")
+            message(FATAL_ERROR "Missing prebuilt FFI input: ${_input}")
+        endif()
+    endforeach()
+    set(_build_ffi "")
+else()
+    set(_build_ffi COMMAND cargo build --locked --package moq-ffi ${_cargo_flags})
+    set(_ffi_byproducts "${MOQ_FFI_LIB}" "${_metadata}")
 endif()
 
 find_program(UNIFFI_BINDGEN_CPP uniffi-bindgen-cpp REQUIRED)
@@ -49,15 +90,15 @@ list(TRANSFORM _generated_files PREPEND "${_generated}/" OUTPUT_VARIABLE _genera
 set(_render "${CMAKE_CURRENT_BINARY_DIR}/render")
 list(TRANSFORM _generated_files PREPEND "${_render}/" OUTPUT_VARIABLE _render_paths)
 add_custom_target(moq_ffi ALL
-    COMMAND cargo build --locked --package moq-ffi ${_cargo_flags}
+    ${_build_ffi}
     COMMAND ${CMAKE_COMMAND} -E rm -rf "${_render}"
     COMMAND "${UNIFFI_BINDGEN_CPP}" --library "${_metadata}"
         --config "${CMAKE_CURRENT_SOURCE_DIR}/uniffi.toml" --out-dir "${_render}"
     COMMAND ${CMAKE_COMMAND} -E make_directory "${_generated}"
     COMMAND ${CMAKE_COMMAND} -E copy_if_different ${_render_paths} "${_generated}"
     WORKING_DIRECTORY "${_workspace}"
-    BYPRODUCTS "${MOQ_FFI_LIB}" "${_metadata}" ${_generated_paths}
-    COMMENT "Building moq-ffi and rendering its C++ bindings"
+    BYPRODUCTS ${_ffi_byproducts} ${_generated_paths}
+    COMMENT "Preparing moq-ffi and rendering its C++ bindings"
     VERBATIM
 )
 # System libraries the staticlib needs from an external linker. moq-ffi and moq-c share one
@@ -69,7 +110,12 @@ elseif(WIN32)
 else()
     set(_platform linux)
 endif()
-file(STRINGS "${_workspace}/rs/moq-c/native-libs/${_platform}.txt" _lines)
+if(MOQ_FFI_DIR)
+    set(_native_libs "${MOQ_FFI_DIR}/native-libs.txt")
+else()
+    set(_native_libs "${_workspace}/rs/moq-c/native-libs/${_platform}.txt")
+endif()
+file(STRINGS "${_native_libs}" _lines)
 set(MOQ_NATIVE_LIBS "")
 foreach(_line IN LISTS _lines)
     string(STRIP "${_line}" _line)

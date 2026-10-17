@@ -6,11 +6,13 @@ import { ArchiveSchema } from "./archive";
 import { AudioSchema } from "./audio";
 import { BinarySchema } from "./binary";
 import { ClockSchema } from "./clock";
+import { EchoSchema } from "./echo";
 import { TRACK } from "./format";
 import { JsonSchema } from "./json";
 import type { RelativeBroadcast } from "./path";
 import { PRIORITY } from "./priority";
-import { section } from "./section";
+import { named, section } from "./section";
+import { StatsSchema } from "./stats";
 import { TextSchema } from "./text";
 import { VideoSchema } from "./video";
 
@@ -20,7 +22,8 @@ import { VideoSchema } from "./video";
  * The media sections are `video`, `audio`, and `text`, alongside the broadcast's `archive`
  * (the segment index and any durable recording) and its `clock` (the one wall-clock mapping);
  * `json` and `binary` list application data tracks that aren't media. A section is omitted
- * when it holds no tracks.
+ * when it holds no tracks. `stats` names the publisher's media snapshot track, and `echo`
+ * solicits viewer feedback under a relative broadcast prefix.
  *
  * This is a *loose* object: unknown root sections pass through validation untouched, so an
  * application can add its own sections (e.g. `scte35`) without modifying hang. A base consumer
@@ -35,6 +38,10 @@ export const RootSchema = z.looseObject({
 	// The broadcast's one continuous clock, if the publisher exposes one. Independent of
 	// `archive`: a live-only publisher exposes its mapping without creating a segment index.
 	clock: z.optional(ClockSchema),
+	// Decoded leniently like `text` below: a value without a string `track` or `path` is someone
+	// else's and decodes as absent. See `named`.
+	stats: named(StatsSchema, "track"),
+	echo: named(EchoSchema, "path"),
 	// `text`, `json`, and `binary` are generic enough keys that an application could have been
 	// carrying its own before these sections were reserved, so a value that isn't a section decodes
 	// as absent rather than failing the whole catalog. A value that IS a section but carries a
@@ -114,6 +121,7 @@ export function checkResolvable(root: Root, base: Moq.Path.Valid): Root {
 			if (broadcast && Path.tryResolve(base, broadcast) === undefined) throw new EscapingBroadcast(broadcast);
 		}
 	}
+	if (root.echo && Path.tryResolve(base, root.echo.path) === undefined) throw new EscapingBroadcast(root.echo.path);
 	return root;
 }
 

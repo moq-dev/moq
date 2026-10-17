@@ -537,6 +537,9 @@ struct Alive {
 	// out of `GroupState` has to read both under one guard, or the two halves can
 	// straddle the abort: see `Producer::live_first_frame`.
 	aborted: AtomicBool,
+	// Whether the abort was the publisher giving the group up rather than cache policy
+	// (`Old`, `Timeout`, `Evicted`). Stored before `aborted`, under the same rules.
+	cut: AtomicBool,
 	// The cache stamp `GroupState::charge` maintains, held here as well so the
 	// eviction and expiry walks can weigh a candidate without taking the group lock
 	// they already hold the track lock over.
@@ -657,6 +660,7 @@ impl Producer {
 			info,
 			state: state.clone(),
 			aborted: AtomicBool::new(false),
+			cut: AtomicBool::new(false),
 			access,
 		});
 		Self {
@@ -1061,11 +1065,13 @@ impl Producer {
 	}
 
 	fn commit_abort(&self, mut guard: kio::Mut<'_, GroupState>, err: Error) {
+		let cut = !matches!(err, Error::Old | Error::Timeout | Error::Evicted);
 		guard.abort = Some(err);
+		self.alive.cut.store(cut, Ordering::Release);
 		self.alive.aborted.store(true, Ordering::Release);
 		guard.release();
 		guard.close();
-		self.cache.aborted(self.sequence);
+		self.cache.aborted(self.sequence, cut);
 	}
 
 	/// Abort a write that would grow the group past its budget, holding the lock already
@@ -1073,10 +1079,11 @@ impl Producer {
 	fn abort_too_large(&self, mut state: kio::Mut<'_, GroupState>) -> Error {
 		let err = Error::GroupTooLarge;
 		state.abort = Some(err.clone());
+		self.alive.cut.store(true, Ordering::Release);
 		self.alive.aborted.store(true, Ordering::Release);
 		state.release();
 		state.close();
-		self.cache.aborted(self.sequence);
+		self.cache.aborted(self.sequence, true);
 		err
 	}
 
@@ -1089,6 +1096,13 @@ impl Producer {
 	/// which hands out a group whose consumer then surfaces the abort.
 	pub(crate) fn is_aborted(&self) -> bool {
 		self.alive.aborted.load(Ordering::Acquire)
+	}
+
+	/// Whether the publisher gave this group up, rather than cache policy skipping it.
+	///
+	/// Reads the mirror, like [`Self::is_aborted`], so a track scan never takes the group lock.
+	pub(crate) fn is_cut(&self) -> bool {
+		self.alive.cut.load(Ordering::Acquire)
 	}
 
 	/// Whether the group was finished: it holds every frame it will ever have.
@@ -3138,7 +3152,7 @@ mod test {
 	/// a write guard was mutably accessed, so `frame_notify` must mark the guard
 	/// modified; a guard dropped untouched wakes nobody and the reader would
 	/// stall until the frame completed.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	#[cfg(feature = "async")]
 	async fn chunk_write_wakes_parked_reader() {
 		let mut producer = Info { sequence: 0 }.produce();
@@ -3150,11 +3164,11 @@ mod test {
 			})
 			.unwrap();
 		let mut f = consumer.next_frame().await.unwrap().unwrap();
-		let handle = moq_net_sim::spawn(async move { f.read_chunk().await });
+		let handle = moq_clock::sim::spawn(async move { f.read_chunk().await });
 		// Let the reader park on the empty partial before the chunk lands.
-		moq_net_sim::sleep(std::time::Duration::from_millis(50)).await;
+		moq_clock::sleep(std::time::Duration::from_millis(50)).await;
 		frame.write(Bytes::from_static(b"foo")).unwrap();
-		let chunk = moq_net_sim::timeout(std::time::Duration::from_secs(2), handle)
+		let chunk = moq_clock::timeout(std::time::Duration::from_secs(2), handle)
 			.await
 			.expect("parked chunk reader was never woken by the chunk write")
 			.unwrap()

@@ -4,10 +4,10 @@ C++17 bindings for [rs/moq-ffi](../../rs/moq-ffi): the sources `uniffi-bindgen-c
 
 ## Layout
 
-- `CMakeLists.txt` builds moq-ffi as a staticlib with cargo, renders the bindings into the build tree, and compiles them as the `moq::cpp` target. Use it with `add_subdirectory`, or install it for `find_package(moq-cpp)` and `moq-cpp.pc`.
+- `CMakeLists.txt` builds moq-ffi as a staticlib with cargo, or consumes an explicit `MOQ_FFI_DIR` native input, renders the bindings into the build tree, and compiles them as the `moq::cpp` target. Use it with `add_subdirectory`, or install it for `find_package(moq-cpp)` and `moq-cpp.pc`.
 - `src/moq.cpp` compiles the generated `moq/ffi/moq.cpp`. It ships as source so it builds with the consumer's standard and flags.
 - `cmake/` holds the installed CMake package and pkg-config templates.
-- `build.sh` builds the release archive `release-cpp.yml` publishes.
+- `build.sh` builds the release archive `release-cpp.yml` publishes. `--ffi-dir DIR` selects an extracted default-feature native package; otherwise an `FFI_VERSION` pin fetches the release archive verified against `FFI_SHA256.json`. The pin remains unset until the first four-target release passes its installed-consumer checks.
 - `test/probe.cpp` exercises the installed package over a real QUIC session.
 
 ## Checking

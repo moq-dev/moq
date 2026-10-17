@@ -413,7 +413,7 @@ mod tests {
 		});
 		let admission = admissions.next().await.unwrap();
 		trigger.start();
-		let all = || [moq_auth::Pattern::all()].into_iter().collect();
+		let all = moq_auth::Pattern::all;
 		let (_lease, consumer) = moq_auth::lease::Producer::new(moq_auth::Grant::new(all(), all()));
 		admission.grant(consumer);
 		let connection = connecting.await.unwrap().unwrap();

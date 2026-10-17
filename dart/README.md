@@ -6,7 +6,7 @@ This directory contains two packages:
 - `moq` is the independently-versioned ergonomic API applications should use.
 
 Run `just dart check` from the repository root. The check rebuilds
-`moq-ffi` without optional codec features, verifies the generated source,
+`moq-ffi` with its default codec features, verifies the generated source,
 analyzes and tests both packages, and validates their publish layout.
 
 `dart test` drives the Native Assets hook, so the round-trip tests in
