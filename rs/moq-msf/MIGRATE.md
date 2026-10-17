@@ -8,9 +8,3 @@ How to update your code for each breaking change, newest first.
 
 The non-standard `stalled` track field is gone and no longer written.
 Drop it from any `Track` you build.
-
-```rust
-// Before
-track.stalled = Some(true);
-// After: delete the assignment
-```

@@ -11,12 +11,4 @@ How to update your code for each breaking change, newest first.
 `Object::decode(buf, timed)` and `Store::get_segments(track, segment, timed)` take whether the track is timed.
 `Error::Untimed` now means a DVR cannot record an untimed track; mismatched timing is `Error::Timing`.
 Untimed recordings use the version 2 format, which an older version 2 reader refuses.
-
-```rust
-// Before
-let info = Info::new(priority, timescale)?;
-let segments = store.get_segments(track, segment).await?;
-// After
-let info = Info::new(priority, Some(timescale))?;
-let segments = store.get_segments(track, segment, info.timescale.is_some()).await?;
-```
+Pass `Some(timescale)` to `Info::new`, and `info.timescale.is_some()` as `timed`.

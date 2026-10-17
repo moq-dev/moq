@@ -9,27 +9,11 @@ How to update your code for each breaking change, newest first.
 `export::Rendition::playlist(query)` is `playlist(range, query)`.
 Pass `None` for the live or history playlist.
 
-```rust
-// Before
-let playlist = rendition.playlist(query).await?;
-// After
-let playlist = rendition.playlist(None, query).await?;
-```
-
 ### Discontinuities are absolute sequences
 
 `export::segments::Segment::discontinuity` is a `u64` sequence, absolute within one `Broadcaster`, instead of a `bool` or a per-cursor count.
 Store the value with each segment and use the first retained one as `EXT-X-DISCONTINUITY-SEQUENCE`.
 A new `Broadcaster` starts a new sequence namespace: start a new recording, or map its sequences behind a discontinuity.
-
-```rust
-// Before
-if segment.discontinuity {
-	sequence += 1;
-}
-// After
-let sequence = segment.discontinuity;
-```
 
 ### Playlists are bounded (#4978)
 
@@ -46,10 +30,4 @@ config.history = true;
 
 `Broadcaster::new` no longer awaits or fails.
 A rendition whose sibling broadcast ends now ends its playlist instead of rebinding to a replacement.
-
-```rust
-// Before
-let broadcaster = Broadcaster::new(source, config).await?;
-// After
-let broadcaster = Broadcaster::new(source, config);
-```
+Drop the `.await?`.

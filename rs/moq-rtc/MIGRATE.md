@@ -8,10 +8,3 @@ How to update your code for each breaking change, newest first.
 
 `Client::publish` and `Client::subscribe` return `Result<wire::Source>` instead of `Result<()>`.
 Read per-peer byte counts with `source.stats()`, or discard it.
-
-```rust
-// Before
-client.subscribe(url, broadcast).await?;
-// After
-let _source = client.subscribe(url, broadcast).await?;
-```

@@ -10,30 +10,12 @@ The opaque `snapshot` and `stream` tracks moved beside the codec, so `moq_binary
 `moq_binary::Error::Flate(e)` is the matching `moq_flate::Error` variant (`Decompress`, `TooLarge`).
 `moq_flate::Error` carries `moq_net::Error`, so it is no longer `PartialEq`.
 
-```rust
-// Before
-use moq_binary::snapshot;
-// After
-use moq_flate::snapshot;
-```
-
 ### Demand is read through `demand()`
 
-```rust
-// Before
-if producer.is_used() {}
-// After
-if producer.demand().is_used() {}
-```
+Call `producer.demand().is_used()` instead of `producer.is_used()`.
 
 ### Timestamps are explicit
 
 Snapshot and stream producers publish `at: None` untimed, so their track must be untimed; pass a timestamp on a timed track.
 Snapshot `modify(at)` and `mutate(at, f)` carry the caller's optional time.
-
-```rust
-// Before
-producer.update(bytes)?;
-// After
-producer.update(Timed::from(bytes).at(timestamp))?;
-```
+Wrap each update as `Timed::from(bytes).at(timestamp)`.

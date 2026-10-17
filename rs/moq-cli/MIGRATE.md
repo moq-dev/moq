@@ -8,36 +8,18 @@ How to update your invocation and config for each breaking change, newest first.
 
 The output trails a TS source by the delay instead of twice it.
 With a multiplex rate, video whose HRD declares a longer buffer delay than `--delay` stops the export, naming the delay it needs.
-
-```bash
-# Before
-moq export ts --delay 500ms ...
-# After
-moq export ts --delay 1s ...
-```
+Double an explicit `--delay` to keep the same trail, such as `500ms` to `1s`.
 
 ### `--max-age` on fMP4, H.264, H.265, and RTMP exports is `--max-delay`
 
 `moq export fmp4`, `h264`, `h265`, and `rtmp` refuse `--max-age`.
 `moq import --max-age` is unchanged: it is the publisher's retention.
-
-```bash
-# Before
-moq export fmp4 --max-age 2s ...
-# After
-moq export fmp4 --max-delay 2s ...
-```
+Rename `--max-age` to `--max-delay` on those exports.
 
 ### `moq export ts`, `flv`, and `mkv` take `--delay` (#4645)
 
 Each frame is written that long after its decode time; the older staleness spellings are refused with `--delay` named.
-
-```bash
-# Before
-moq export ts --max-age 500ms ...
-# After
-moq export ts --delay 500ms ...
-```
+Rename `--max-age` to `--delay`.
 
 ### `moq export ts --linger` follows only the same publisher instance
 
@@ -63,25 +45,12 @@ Annex-B H.264 and H.265 sources get an `avc3` or `hev1` init from the catalog wh
 `auto` is measured from how late frames arrive instead of derived from RTT.
 Pass `--delay 100ms` to keep the old fixed delay.
 
-```bash
-# Before
-moq ... play
-# After
-moq ... play --delay 100ms
-```
-
 ### `--hop` is removed; `--epoch` replaces it (#4969)
 
 A redundant pair shares an epoch, a UUIDv7 such as `uuidgen -7` prints, instead of a Hop ID.
 `--hop` is an unknown flag and `MOQ_HOP` is silently ignored, so remove it: a pair still keyed on `MOQ_HOP` mints an epoch per process and each restart replaces the other's broadcast.
 A node that pinned its cluster id with `--hop` passes `--cluster-id` instead.
-
-```bash
-# Before
-MOQ_HOP=7 moq import ...
-# After
-MOQ_EPOCH=$(uuidgen -7) moq import ...   # the same value on both members
-```
+Give both members the same `MOQ_EPOCH`, such as one `uuidgen -7` value.
 
 ### Settings no listener reads stop startup (#5006)
 
@@ -89,13 +58,6 @@ MOQ_EPOCH=$(uuidgen -7) moq import ...   # the same value on both members
 A stream-only listener (TCP or Unix, no `--listen`) refuses the QUIC-only flags, a client CA, and a `--listen-tls-*` certificate unless `--listen-tcp-tls` serves it.
 `--listen-quic-lb-nonce` needs `--listen-quic-lb-id`.
 Each used to be ignored: drop it, or add the listener it configures.
-
-```bash
-# Before
-moq --connect https://relay.example.com/anon --auth-public 'anon/**' import ...
-# After
-moq --connect https://relay.example.com/anon import ...
-```
 
 ### `moq --listen` with an invalid auth config stops at startup (#4912)
 
@@ -105,25 +67,11 @@ It used to start and refuse every session.
 
 Rename it in `--features` when building from source.
 
-```bash
-# Before
-cargo install moq-cli --no-default-features --features "noq,websocket,play"
-# After
-cargo install moq-cli --no-default-features --features "quic,websocket,play"
-```
-
 ## 0.13 -> 0.14
 
 ### Gossip discovery is removed (#4601)
 
 `--cluster-mesh` and TOML `mesh` are refused: list every peer with `--cluster-connect`.
-
-```bash
-# Before
-moq --cluster-mesh --cluster-connect https://root.example/ import ...
-# After
-moq --cluster-connect https://root.example/,https://b.example/ import ...
-```
 
 ## 0.12 -> 0.13
 
@@ -132,13 +80,7 @@ moq --cluster-connect https://root.example/,https://b.example/ import ...
 `moq auth serve` never re-checks or expires a session by default; `--revalidate` needs `--expires`, and `--limit-*` needs `--revalidate`.
 It refuses a session presenting both a JWT and a certificate.
 `--key` takes a file, not an https or JWKS URL.
-
-```bash
-# Before
-moq auth serve --key-dir keys/ ...
-# After
-moq auth serve --key-dir keys/ --revalidate 1m --expires 1d ...
-```
+Pass `--revalidate 1m --expires 1d` to keep re-checking sessions.
 
 ## 0.11 -> 0.12
 
@@ -161,10 +103,4 @@ A renamed flag or environment variable is refused with its replacement named.
 ### `moq --listen` needs auth
 
 A listener refuses to start without `--auth-url` or `--auth-public` instead of accepting everyone.
-
-```bash
-# Before
-moq --listen '[::]:4443' ... import ts
-# After
-moq --listen '[::]:4443' --auth-public '**' ... import ts
-```
+Pass `--auth-public '**'` to keep accepting everyone.

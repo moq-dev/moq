@@ -9,10 +9,3 @@ How to update your pipelines for each breaking change, newest first.
 ### Rate estimates are `estimated-*-rate`
 
 The `moqsink` properties `estimated-send-bitrate` and `estimated-recv-bitrate` are `estimated-send-rate` and `estimated-recv-rate`, with no alias: an application or `gst-launch` line naming the old ones fails at runtime.
-
-```c
-// Before
-g_object_get(sink, "estimated-send-bitrate", &rate, NULL);
-// After
-g_object_get(sink, "estimated-send-rate", &rate, NULL);
-```

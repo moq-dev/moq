@@ -10,26 +10,11 @@ Rolling a cluster across a release also follows the [upgrade guide](https://moq.
 A `[quic]` `max_streams` of 0 stops startup, as `[peer.quic]` already did, since zero streams wedge the connection.
 Remove it to keep the default.
 
-```toml
-# Before
-[quic]
-max_streams = 0
-# After: omit max_streams for the default
-[quic]
-```
-
 ### Auth roles carry `moq_auth::Access` (#5697)
 
 `auth::Token::publish` and `subscribe` are `moq_auth::Access`, so an embedder reads the patterns from `.path`.
 The relay refuses every grant with a bitrate cap, including one added in-band or at revalidation, because no transport meters it yet; HTTP `/fetch` and `/announced` always refuse caps.
 An embedder running its own gateway must enforce the cap or refuse the grant before forwarding media.
-
-```rust
-// Before
-let patterns = &token.publish;
-// After
-let patterns = &token.publish.path;
-```
 
 ### Workers default to unpinned (#5688)
 
@@ -46,37 +31,16 @@ pin = true
 The default build has no iroh listener and no `--iroh-*` flags or `[iroh]` table.
 Build with `--features iroh` to keep it.
 
-```bash
-# Before
-cargo install moq-relay
-# After
-cargo install moq-relay --features iroh
-```
-
 ### The `noq` cargo feature is `quic`
 
 Rename it wherever you enable it; the QUIC stack is MoQ's own `moq-quic`.
 A qlog directory gets one file per endpoint instead of one per connection.
-
-```bash
-# Before
-cargo build -p moq-relay --no-default-features --features noq
-# After
-cargo build -p moq-relay --no-default-features --features quic
-```
 
 ### A QUIC load-balancer nonce needs its server id (#5114)
 
 `listen.lb_nonce` (`--listen-quic-lb-nonce`, `MOQ_LISTEN_QUIC_LB_NONCE`) without `lb_id` stops startup.
 Setting `lb_id` or `lb_nonce` together with `load_balancer` also stops; `lb_id` used to win.
 Choose either `load_balancer` or the `lb_id` and `lb_nonce` pair.
-
-```bash
-# Before
-moq-relay --listen-quic-lb-nonce 8 ...
-# After
-moq-relay --listen-quic-lb-id 0a --listen-quic-lb-nonce 8 ...
-```
 
 ### Settings no listener reads stop startup (#5006)
 
@@ -85,25 +49,11 @@ It also refuses `--listen-tls-cert`, `-key`, or `-generate` unless `--listen-tcp
 `--listen-unix-allow-*` needs `--listen-unix-bind`, and `web.https.cert`, `key`, and `root` need `web.https.listen`.
 Each used to be ignored: drop it, or add the listener it configures.
 
-```bash
-# Before
-moq-relay --listen-tcp-bind 127.0.0.1:4443 --listen-preferred-v4 203.0.113.1:443 ...
-# After
-moq-relay --listen-tcp-bind 127.0.0.1:4443 ...
-```
-
 ### `--cluster-mesh` and `--cluster-linger` are unknown flags (#4818)
 
 They, TOML `mesh` and `linger`, and `MOQ_CLUSTER_MESH` / `MOQ_CLUSTER_LINGER` are no longer read.
 List every peer with `--cluster-connect` or `--cluster-connect-api`.
 In Rust, `cluster::Config` has no `mesh` or `linger` field.
-
-```bash
-# Before
-moq-relay --cluster-mesh --cluster-linger 10s --cluster-connect https://root.example/ ...
-# After
-moq-relay --cluster-connect https://root.example/,https://b.example/ ...
-```
 
 ### A route without a publisher keeps hop 0 (#4969)
 
@@ -112,27 +62,12 @@ A route that names no publisher keeps its 0 instead of gaining a random hop.
 ### Embedding: auth takes the client-CA answer (#4912)
 
 `auth::Config::validate` and `init` take `client_ca: bool`, whether any listener verifies client certificates, and `validate_client_ca` is gone.
-
-```rust
-// Before
-config.auth.validate()?;
-config.auth.validate_client_ca()?;
-// After
-config.auth.validate(client_ca)?;
-```
+Pass `client_ca` to `validate` and delete the `validate_client_ca` call.
 
 ### Embedding: io\_uring workers bind from the server config (#5312)
 
 `uring::Workers::bind` takes a `moq_tokio::server::Config`, so generated and rotating certificates work in both worker modes.
-
-```rust
-// Before
-let workers = uring::Workers::bind(&listen, &quic, worker)?;
-// After
-let mut server = moq_tokio::server::Config::default();
-(server.listen, server.quic) = (listen, quic);
-let workers = uring::Workers::bind(server, worker)?;
-```
+Set `listen` and `quic` on a `moq_tokio::server::Config` and pass it to `bind`.
 
 ## 0.16 -> 0.17
 
@@ -141,13 +76,6 @@ let workers = uring::Workers::bind(server, worker)?;
 A relay dials only the peers it lists or finds on the LAN, never a URL learned from an announcement, and no longer announces `.internal/origins`.
 `--cluster-mesh` and TOML `mesh` are refused by name: list every peer with `--cluster-connect` or `--cluster-connect-api`.
 The `/nodes` endpoint lists only peers this relay dialed.
-
-```bash
-# Before
-moq-relay --cluster-mesh --cluster-connect https://root.example/ ...
-# After
-moq-relay --cluster-connect https://root.example/,https://b.example/ ...
-```
 
 ## 0.15 -> 0.16
 
@@ -158,14 +86,7 @@ moq-relay --cluster-connect https://root.example/,https://b.example/ ...
 - A token's `iss`, `sub`, and `jti` are ignored and `nbf` is enforced; any other claim, `aud` and `cluster` included, refuses the token.
 - A relay on `--auth-public` refuses a session presenting a token, including a peer's `cluster.token`, and refuses to start with a client CA.
 
-```toml
-# Before
-[auth]
-key_dir = "keys/"
-# After
-[auth]
-url = "http://127.0.0.1:4440"   # moq auth serve --key-dir keys/
-```
+Replace `key_dir` with `moq auth serve --key-dir keys/` and point `[auth]` `url` at it, such as `http://127.0.0.1:4440`.
 
 ## 0.14 -> 0.15
 
@@ -198,9 +119,6 @@ The flag-by-flag mapping is in [Migrating from the relay flags](https://moq.dev/
 A verified client certificate admits nothing on its own; the auth server grants it.
 
 ```bash
-# Before
-moq-relay --auth-key-dir keys/ --auth-public anon
-# After
 moq auth serve --key-dir keys/ --public-publish 'anon/**' --public-subscribe 'anon/**' &
 moq-relay --auth-url http://127.0.0.1:4440
 ```
@@ -212,22 +130,8 @@ This applies to `--auth-public`, TOML `public`, and `[auth.public]`, which is no
 A public or mTLS pattern with no wildcard refuses to start, naming the subtree to write.
 JWT `publish` and `subscribe` claims are patterns too, so a token granting `alice` covers only `alice`.
 
-```bash
-# Before
-moq-relay --auth-public anon ...
-# After
-moq-relay --auth-public 'anon/**' ...
-```
-
 ### Embedding
 
-`Relay` fields are private (#3638): clone the handles you need, mount routes, then call `Relay::run`.
+`Relay` fields are private (#3638): clone the handles you need, such as `relay.cluster().origin.clone()`, mount routes, then call `Relay::run`.
 `Cluster::with_cache` moved to `cluster::Options`.
 The `quinn` and `quiche` features and the backend setting are gone (#3811).
-
-```rust
-// Before
-let origin = relay.cluster.origin.clone();
-// After
-let origin = relay.cluster().origin.clone();
-```
