@@ -61,9 +61,10 @@ Notes on scope:
 
 - `VK_EXT_memory_budget`'s `heapUsage` is this process's allocation, and
   `heapBudget` is the driver's estimate of what this process may use given
-  other activity on the system. Budget minus usage is the one memory figure
-  every vendor provides, but it is headroom for this process, not device-wide
-  use.
+  other activity on the system. Budget minus usage, per device-local heap and
+  saturating at zero since usage may exceed the budget, is the one memory
+  figure every vendor provides; it is headroom for this process, not
+  device-wide use. Host heaps are system RAM and never count as GPU memory.
 - DRM fdinfo counters are per client. They attribute this process's use but
   cannot sum to a device-wide figure, so they back no field above.
 - Intel's PMU engine counters are device-wide per engine but need perf access
