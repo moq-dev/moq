@@ -114,13 +114,14 @@ export function statsTab(parent: Effect, publish: MoqPublish): HTMLElement {
 			reader.cancel().catch(() => {});
 		});
 
+		// Not raced against teardown, which would drop a frame whose read had already resolved.
 		effect.spawn(async () => {
 			for (;;) {
-				const next = await effect.race(reader.read());
-				if (!next?.value) break;
+				const { value: frame } = await reader.read();
+				if (!frame) break;
 
 				frames++;
-				next.value.close();
+				frame.close();
 			}
 		});
 	});
