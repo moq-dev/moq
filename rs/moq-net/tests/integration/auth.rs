@@ -1347,10 +1347,13 @@ async fn a_narrowing_resets_a_fetch_in_flight(version: &'static str) {
 				Err(err) => break err,
 			}
 		};
-		// The narrowing also retracts the route, and a fetch-only track whose route
-		// leaves ends `Dropped` locally, so the reader may see either. The wire carries
+		// The narrowing also retracts the route, and the fetch's track ends `Unroutable`
+		// locally when its route leaves, so the reader may see either. The wire carries
 		// the revocation regardless.
-		assert!(unauthorized(&err) || matches!(err, moq_net::Error::Dropped), "{err:?}");
+		assert!(
+			unauthorized(&err) || matches!(err, moq_net::Error::Unroutable),
+			"{err:?}"
+		);
 		let resets = pair.server_transport.resets();
 		assert!(resets.contains(&StreamError::Unauthorized.to_code()), "{resets:x?}");
 		drop(group);

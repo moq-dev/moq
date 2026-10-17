@@ -3203,7 +3203,7 @@ impl Consumer {
 				result: None,
 				hit: None,
 				stats: self.stats.clone(),
-				resume: Some(Box::new(resume.fetch_group(sequence, options))),
+				resume: Some(Box::new(resume.fetch_group(sequence, options, state.clone()))),
 			});
 		}
 
@@ -3604,7 +3604,7 @@ impl kio::Task for Fetching {
 			let options = group::Fetch::default()
 				.with_priority(self.priority)
 				.with_frame_start(self.frame_start);
-			self.resume = Some(Box::new(routes.fetch_group(self.sequence, options)));
+			self.resume = Some(Box::new(routes.fetch_group(self.sequence, options, self.state.clone())));
 		}
 		if let Some(resume) = &mut self.resume {
 			let group = ready!(kio::Task::poll(&mut **resume, waiter))?;
