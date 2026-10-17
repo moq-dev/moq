@@ -103,14 +103,25 @@ impl Import {
 		let mut nals = NalIterator::new(&mut scan);
 		while let Some(nal) = nals.next().transpose()? {
 			if is_sps(&nal) {
-				self.configure_from_sps(&nal)?;
+				self.seed_sps(&nal)?;
 			}
 		}
 		if let Some(nal) = nals.flush()?
 			&& is_sps(&nal)
 		{
-			self.configure_from_sps(&nal)?;
+			self.seed_sps(&nal)?;
 		}
+		Ok(())
+	}
+
+	/// Configure from an SPS in a seed buffer. A new one starts a coded sequence, so the last one's
+	/// HDR metadata is dropped before the config publishes; the seed's own SEI arrives with its
+	/// keyframe through the splitter.
+	fn seed_sps(&mut self, sps: &Bytes) -> Result<()> {
+		if self.last_sps.as_ref() != Some(sps) {
+			self.catalog.hdr(&mut self.track, Default::default(), true)?;
+		}
+		self.configure_from_sps(sps)?;
 		Ok(())
 	}
 
@@ -375,6 +386,44 @@ mod tests {
 
 	use super::*;
 	use crate::codec::h265::{Split, fixtures};
+
+	/// Seeding an Annex-B importer with a new SPS starts a new coded sequence, dropping the last
+	/// one's HDR metadata before the new config publishes.
+	#[tokio::test(start_paused = true)]
+	async fn a_new_seed_sps_drops_stale_hdr_metadata() {
+		let annexb = |nals: &[&[u8]]| {
+			let mut buf = BytesMut::new();
+			for nal in nals {
+				buf.extend_from_slice(&[0, 0, 0, 1]);
+				buf.extend_from_slice(nal);
+			}
+			buf
+		};
+		let (track, catalog) = setup("video");
+		let mut import = Import::new(track, catalog.reserve(), Default::default()).unwrap();
+		let mut split = Split::new();
+		let pts = moq_net::Timestamp::from_micros(0).unwrap();
+		let idr: &[u8] = &[0x26, 0x01, 0x80, 0xaa]; // IdrWRadl (19)
+		let au = annexb(&[
+			fixtures::VPS,
+			fixtures::SPS_HDR10,
+			fixtures::PPS,
+			fixtures::SEI_CONTENT_LIGHT,
+			fixtures::SEI_MASTERING,
+			idr,
+		]);
+		let mut frames = split.decode(&au, pts).unwrap();
+		frames.extend(split.flush(pts).unwrap());
+		import.decode(frames).unwrap();
+		let color = || catalog.snapshot().video.renditions["video"].color.clone();
+		assert!(color().unwrap().mastering.is_some());
+
+		// An SPS that signals no colour: nothing is left once the stale metadata goes.
+		import
+			.initialize(&annexb(&[fixtures::VPS, fixtures::SPS, fixtures::PPS]))
+			.unwrap();
+		assert_eq!(color(), None);
+	}
 
 	/// An HDR10 keyframe publishes its VUI colour and the static HDR metadata its SEI carries.
 	#[tokio::test(start_paused = true)]

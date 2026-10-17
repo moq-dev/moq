@@ -1178,6 +1178,8 @@ fn unrepresentable_colour_is_refused() {
 		MatroskaSpec::MaxFALL(65_536),
 		MatroskaSpec::Primaries(300),
 		MatroskaSpec::MasteringMetadata(Master::Full(vec![MatroskaSpec::LuminanceMax(f64::NAN)])),
+		MatroskaSpec::MasteringMetadata(Master::Full(vec![MatroskaSpec::LuminanceMin(-1.0)])),
+		MatroskaSpec::MasteringMetadata(Master::Full(vec![MatroskaSpec::PrimaryRChromaticityX(1.5)])),
 	] {
 		assert!(super::import::matroska_color(&[child]).is_err());
 	}

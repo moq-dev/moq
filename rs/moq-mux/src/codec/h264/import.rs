@@ -100,14 +100,25 @@ impl Import {
 		let mut nals = NalIterator::new(&mut scan);
 		while let Some(nal) = nals.next().transpose()? {
 			if is_sps(&nal) {
-				self.configure_from_sps(&nal)?;
+				self.seed_sps(&nal)?;
 			}
 		}
 		if let Some(nal) = nals.flush()?
 			&& is_sps(&nal)
 		{
-			self.configure_from_sps(&nal)?;
+			self.seed_sps(&nal)?;
 		}
+		Ok(())
+	}
+
+	/// Configure from an SPS in a seed buffer. A new one starts a coded sequence, so the last one's
+	/// HDR metadata is dropped before the config publishes; the seed's own SEI arrives with its
+	/// keyframe through the splitter.
+	fn seed_sps(&mut self, sps: &Bytes) -> Result<()> {
+		if self.last_sps.as_ref() != Some(sps) {
+			self.catalog.hdr(&mut self.track, Default::default(), true)?;
+		}
+		self.configure_from_sps(sps)?;
 		Ok(())
 	}
 
@@ -407,6 +418,37 @@ mod tests {
 		assert!(color().mastering.is_some());
 
 		import.initialize(&avcc(SPS_BT709)).unwrap();
+		assert_eq!(color().primaries, Some(1));
+		assert_eq!((color().mastering, color().content_light), (None, None));
+	}
+
+	/// Seeding an Annex-B importer with a new SPS starts a new coded sequence, dropping the last
+	/// one's HDR metadata before the new config publishes.
+	#[tokio::test(start_paused = true)]
+	async fn a_new_seed_sps_drops_stale_hdr_metadata() {
+		use crate::codec::h264::fixtures::{PPS, SEI_CONTENT_LIGHT, SEI_MASTERING, SPS_BT709, SPS_HDR10};
+
+		let annexb = |nals: &[&[u8]]| {
+			let mut buf = BytesMut::new();
+			for nal in nals {
+				buf.extend_from_slice(&[0, 0, 0, 1]);
+				buf.extend_from_slice(nal);
+			}
+			buf
+		};
+		let (track, catalog) = setup("video");
+		let mut import = Import::new(track, catalog.reserve(), Default::default()).unwrap();
+		let mut split = Split::new();
+		let pts = moq_net::Timestamp::from_micros(0).unwrap();
+		let idr: &[u8] = &[0x65, 0x88, 0x84, 0x21];
+		let au = annexb(&[SPS_HDR10, PPS, SEI_MASTERING, SEI_CONTENT_LIGHT, idr]);
+		let mut frames = split.decode(&au, pts).unwrap();
+		frames.extend(split.flush(pts).unwrap());
+		import.decode(frames).unwrap();
+		let color = || catalog.snapshot().video.renditions["video"].color.clone().unwrap();
+		assert!(color().mastering.is_some());
+
+		import.initialize(&annexb(&[SPS_BT709, PPS])).unwrap();
 		assert_eq!(color().primaries, Some(1));
 		assert_eq!((color().mastering, color().content_light), (None, None));
 	}

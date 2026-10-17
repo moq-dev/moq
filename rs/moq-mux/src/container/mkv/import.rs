@@ -761,7 +761,12 @@ pub(super) fn matroska_color(children: &[MatroskaSpec]) -> Result<Option<hang::c
 						MatroskaSpec::LuminanceMin(x) => (9, x),
 						_ => continue,
 					};
-					if !value.is_finite() {
+					// Chromaticities lie in 0..=1 and luminances are nonnegative (Matroska's ranges).
+					let valid = match i {
+						0..=7 => (0.0..=1.0).contains(value),
+						_ => value.is_finite() && *value >= 0.0,
+					};
+					if !valid {
 						return Err(Error::InvalidColour("mastering value").into());
 					}
 					v[i] = Some(*value);

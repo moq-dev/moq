@@ -79,8 +79,12 @@ impl Import {
 			return Ok(());
 		}
 
-		// Raw OBUs: resolve the config from any sequence header.
+		// Raw OBUs: resolve the config from any sequence header. A new one starts a coded sequence,
+		// so the last one's HDR metadata is dropped before the config publishes.
 		if let Some(seq) = find_sequence_header(data) {
+			if self.last_seq.as_ref() != Some(&seq) {
+				self.catalog.hdr(&mut self.track, Default::default(), true)?;
+			}
 			self.configure_from_seq(&seq)?;
 		}
 		Ok(())
@@ -430,6 +434,26 @@ mod tests {
 			color.mastering.is_some(),
 			"the av1C's HDR metadata survives the first sync sample"
 		);
+	}
+
+	/// Seeding with raw OBUs whose sequence header is new starts a new coded sequence, dropping the
+	/// HDR metadata the last one carried.
+	#[tokio::test(start_paused = true)]
+	async fn a_new_raw_sequence_drops_stale_hdr_metadata() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+		let track = broadcast
+			.create_track("video", hang::container::track_info(hang::catalog::PRIORITY.video))
+			.unwrap();
+		let mut import = Import::new(track, catalog.reserve(), Default::default()).unwrap();
+		let mut av1c = vec![0x81, 0x08, 0x0c, 0x00];
+		av1c.extend(hdr10_obus());
+		import.initialize(&av1c).unwrap();
+		let color = || catalog.snapshot().video.renditions["video"].color.clone().unwrap();
+		assert!(color().mastering.is_some());
+
+		import.initialize(&av1_sequence_header()).unwrap();
+		assert_eq!((color().mastering, color().content_light), (None, None));
 	}
 
 	/// A temporal unit of a temporal delimiter, the sequence header from `av1.mp4`'s av1C, and a frame.

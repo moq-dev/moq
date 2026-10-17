@@ -21,7 +21,7 @@ pub(crate) fn cicp(primaries: u8, transfer: u8, matrix: u8, full_range: Option<b
 	let mut color = Color::default();
 	color.primaries = registered(primaries, &[1..=1, 4..=12, 22..=22]);
 	color.transfer = registered(transfer, &[1..=1, 4..=18]);
-	color.matrix = registered(matrix, &[0..=1, 4..=14]);
+	color.matrix = registered(matrix, &[0..=1, 4..=17]);
 	color.range = full_range.map(|full| if full { Range::Full } else { Range::Limited });
 	(color != Color::default()).then_some(color)
 }
@@ -272,7 +272,11 @@ pub(crate) mod test {
 	fn cicp_drops_unspecified_and_reserved() {
 		assert_eq!(cicp(2, 2, 2, None), None);
 		assert_eq!(cicp(0, 0, 3, None), None);
-		assert_eq!(cicp(255, 19, 15, None), None, "past the registered values");
+		assert_eq!(cicp(255, 19, 18, None), None, "past the registered values");
+		for matrix in 15..=17 {
+			// IPT-C2, YCgCo-Re, and YCgCo-Ro, registered since H.273 V3.
+			assert_eq!(cicp(2, 2, matrix, None).unwrap().matrix, Some(matrix));
+		}
 		let color = cicp(9, 16, 0, Some(false)).unwrap();
 		assert_eq!(
 			(color.primaries, color.transfer, color.matrix, color.range),
