@@ -870,12 +870,15 @@ impl TxBuf {
 	pub fn send(mut self, transmit: Transmit) -> io::Result<()> {
 		let Transmit { to, segment, ecn } = transmit;
 		let len = self.data.len();
+		let cap = self.sock.config.tx_buffer_len;
 		// `UDP_SEGMENT` is a u16, so an oversized segment would silently
 		// truncate into a tiny stride and explode the implied segment count.
-		if len == 0 || segment == 0 || segment > usize::from(u16::MAX) {
+		// A buffer grown past the pool's size is refused rather than sent, so
+		// the configured ceiling holds for every train.
+		if len == 0 || len > cap || segment == 0 || segment > usize::from(u16::MAX) {
 			return Err(io::Error::new(
 				io::ErrorKind::InvalidInput,
-				format!("invalid send: {len} bytes in {segment} byte segments"),
+				format!("invalid send: {len} bytes in {segment} byte segments from a {cap} byte buffer"),
 			));
 		}
 		let shared = match self.sock.owner.upgrade() {

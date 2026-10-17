@@ -1250,6 +1250,33 @@ mod tests {
 	}
 
 	#[test]
+	fn buffer_grown_past_the_pool_is_rejected() {
+		let Some(worker) = worker() else { return };
+		let handle = worker.handle();
+		let config = udp::Config {
+			tx_buffer_len: 2048,
+			..Default::default()
+		};
+		let sock = handle
+			.udp(std::net::UdpSocket::bind("127.0.0.1:0").expect("bind"), config)
+			.expect("socket");
+		let to = sock.local_addr().expect("addr");
+		let Poll::Ready(Ok(mut tx)) = sock.poll_acquire(&kio::Waiter::noop()) else {
+			panic!("no tx buffer");
+		};
+		tx.resize(4096, 0);
+		let err = tx
+			.send(udp::Transmit {
+				to,
+				segment: 1024,
+				ecn: None,
+			})
+			.expect_err("4096 bytes from a 2048 byte buffer");
+		assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+		drop(worker);
+	}
+
+	#[test]
 	fn oversized_gso_segment_is_rejected() {
 		let Some(worker) = worker() else { return };
 		let handle = worker.handle();
