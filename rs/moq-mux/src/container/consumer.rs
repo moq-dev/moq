@@ -85,6 +85,9 @@ pub struct Consumer<F: Container> {
 	// subscription names no start. Cleared once a first group is chosen.
 	startup: bool,
 
+	// Latch onto the newest group to arrive instead, discarding what arrived below it.
+	newest: bool,
+
 	// How far we may drift from the live edge before skipping a group.
 	max_delay: std::time::Duration,
 
@@ -166,6 +169,7 @@ impl<F: Container> Consumer<F> {
 			current: start.unwrap_or(0),
 			pending: VecDeque::new(),
 			startup: start.is_none(),
+			newest: false,
 			max_delay,
 			edge: None,
 			start: None,
@@ -175,6 +179,15 @@ impl<F: Container> Consumer<F> {
 			next: None,
 			group: 0,
 		}
+	}
+
+	/// Start at the newest group to arrive, the live edge, rather than the floor or the oldest
+	/// group the publisher serves. The subscription keeps its budget, so every group after the
+	/// start arrives as it would for any reader; what arrived below the start is discarded.
+	pub(crate) fn live(mut self) -> Self {
+		self.startup = true;
+		self.newest = true;
+		self
 	}
 
 	/// The group sequence of the last event read.
@@ -274,7 +287,17 @@ impl<F: Container> Consumer<F> {
 				!group.empty
 			});
 			if any_frame {
-				self.current = self.pending.front().expect("a group has a frame").sequence;
+				// A live reader takes the newest group announced so far, though its frames may
+				// still be on their way, and discards the older ones the budget also delivers.
+				let start = match self.newest {
+					true => self.pending.back(),
+					false => self.pending.front(),
+				}
+				.expect("a group has a frame")
+				.sequence;
+				// Nothing has been read, so discarding what lies below the start is no gap.
+				self.pending.retain(|group| group.sequence >= start);
+				self.current = start;
 				self.startup = false;
 			}
 		}

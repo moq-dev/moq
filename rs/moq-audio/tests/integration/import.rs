@@ -34,7 +34,7 @@ async fn ts_surround_opus_decodes() {
 	// Canonical 5.1 order: FL, FR, FC, LFE, SL, SR.
 	let mut energy = [0.0f64; 6];
 	let mut frames = 0;
-	while let Some(frame) = tokio::time::timeout(Duration::from_secs(5), consumer.read())
+	while let Some(frame) = tokio::time::timeout(Duration::from_secs(5), next_frame(&mut consumer))
 		.await
 		.expect("decoded frame timed out")
 		.unwrap()
@@ -60,5 +60,15 @@ async fn ts_surround_opus_decodes() {
 			other < center / 100.0,
 			"channel {channel} should be near silent: {energy:?}"
 		);
+	}
+}
+
+async fn next_frame(consumer: &mut decode::Consumer) -> Result<Option<moq_audio::Frame>, moq_audio::Error> {
+	loop {
+		match consumer.read().await? {
+			Some(decode::Read::Frame { frame, .. }) => return Ok(Some(frame)),
+			Some(decode::Read::End { .. }) => {}
+			None => return Ok(None),
+		}
 	}
 }

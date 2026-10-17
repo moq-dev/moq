@@ -44,6 +44,8 @@ export const SessionCode = Object.freeze(
 		KeyValueFormatting: 0x6 as SessionCode,
 		/** The peer went past what the session allows: a request ID past MAX_REQUEST_ID, or too many announcements or subscriptions. */
 		TooManyRequests: 0x7 as SessionCode,
+		/** A PATH the peer may not send, such as a server sending one at all. */
+		InvalidPath: 0x8 as SessionCode,
 		/** The peer did not close within the GOAWAY drain deadline. */
 		GoawayTimeout: 0x10 as SessionCode,
 		/** A control message took too long. */
@@ -54,6 +56,8 @@ export const SessionCode = Object.freeze(
 		Version: 0x15 as SessionCode,
 		/** A token named an alias that was never registered. */
 		UnknownAuthTokenAlias: 0x17 as SessionCode,
+		/** An AUTHORITY the peer may not send, such as a server sending one at all. */
+		InvalidAuthority: 0x19 as SessionCode,
 		/** The peer cannot support the requested feature; moq-lite only. */
 		Unsupported: 0x30 as SessionCode,
 		/** The peer left more request updates unanswered than MAX_REQUEST_UPDATES allows. */
@@ -372,6 +376,18 @@ function localStreamCode(err: unknown): StreamCode {
 	// Session-scoped: the peer learns which rule it broke from the session close, not from here.
 	if (err instanceof ProtocolViolation) return StreamCode.SessionClosed;
 	return StreamCode.Internal;
+}
+
+/**
+ * The transport refused a request stream or failed to grant stream credit before its deadline.
+ *
+ * This local failure is terminal and has no wire code. The request is not retried.
+ */
+export class NoStreamCredit extends Error {
+	constructor(options?: ErrorOptions) {
+		super("no stream credit", options);
+		this.name = "NoStreamCredit";
+	}
 }
 
 /**

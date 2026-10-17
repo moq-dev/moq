@@ -58,7 +58,7 @@ export interface OriginProducer {
 	// pending: /quest/m1/public-model/answer.md
 	receive(
 		prefix: Path.Valid,
-		route?: Route | { epoch?: Route["epoch"]; hops?: Route["hops"]; cost?: Route["cost"] },
+		route?: Route | { epoch?: Route["epoch"]; hops?: Route["hops"]; cost?: Route["cost"]; auth?: Route["auth"] },
 	): origin.Dynamic;
 	// pending: /quest/m1/public-model/answer.md
 	attach(discovery: boolean): Dispose;

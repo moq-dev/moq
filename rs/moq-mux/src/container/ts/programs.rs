@@ -36,25 +36,25 @@ struct Program {
 	broadcast: moq_net::broadcast::Producer,
 	import: Import<Ext>,
 	catalog: catalog::Producer<Ext>,
-	/// The route and catalog track until the catalog first goes out, which waits for the
-	/// program's PMT: announced any sooner, a relay would ask for tracks it cannot serve yet.
+	/// The route and catalog track until the catalog first names a servable track: announced any
+	/// sooner, a relay would ask for tracks it cannot serve yet.
 	pending: Option<(moq_net::origin::Route, moq_net::track::Consumer)>,
 }
 
 impl Program {
 	/// Announce the broadcast once its catalog has gone out.
-	fn announce_if_listed(&mut self) -> anyhow::Result<()> {
+	fn announce_if_listed(&mut self) -> anyhow::Result<bool> {
 		let Some((route, listed)) = &self.pending else {
-			return Ok(());
+			return Ok(true);
 		};
 		if listed.latest().is_none() {
-			return Ok(());
+			return Ok(false);
 		}
 		self.broadcast
 			.announce(route.clone())
 			.with_context(|| format!("failed to announce program {}", self.number))?;
 		self.pending = None;
-		Ok(())
+		Ok(true)
 	}
 }
 
@@ -147,16 +147,16 @@ impl Programs {
 
 	/// Finish each program's tracks, then its catalog while it still lists them.
 	///
-	/// Fails when the input ended before its PAT listed a program.
+	/// Fails when the input ended before its PAT listed a program or any program declared a track.
 	pub fn finish(&mut self) -> anyhow::Result<()> {
 		anyhow::ensure!(!self.programs.is_empty(), "input ended before its PAT listed a program");
+		let mut announced = false;
 		for program in &mut self.programs {
 			program.import.finish()?;
-			// EOF releases the catalog reservations, so this announces even a program whose PMT
-			// never arrived.
-			program.announce_if_listed()?;
+			announced |= program.announce_if_listed()?;
 			program.catalog.finish()?;
 		}
+		anyhow::ensure!(announced, "input ended before any program declared a track");
 		Ok(())
 	}
 
@@ -401,6 +401,26 @@ mod test {
 		programs.decode(&null).unwrap();
 		let err = programs.finish().expect_err("no PAT");
 		assert!(err.to_string().contains("PAT"), "{err:#}");
+	}
+
+	/// PAT and PMT metadata can name elementary streams before their codec config is known. EOF
+	/// there must fail without making an empty program discoverable.
+	#[test]
+	fn input_ending_after_pmts_but_before_media_fails_unannounced() {
+		let origin = crate::source::produce_origin();
+		let mut programs = Programs::new(origin, "event.hang", catalog::Config::default());
+		let input = two_programs();
+		programs.decode(&input[..3 * 188]).unwrap();
+
+		let err = programs.finish().expect_err("the PMTs have no configured media");
+		assert!(err.to_string().contains("declared a track"), "{err:#}");
+		assert!(
+			programs
+				.programs
+				.iter()
+				.all(|program| program.broadcast.route().is_none()),
+			"no empty program is announced"
+		);
 	}
 
 	/// A partial PAT holds only itself, not the multiplex that follows it.

@@ -12,9 +12,9 @@ use std::time::Duration;
 
 use bytes::{Bytes, BytesMut};
 use hang::catalog::{AAC, AudioConfig, Container, H264, VideoConfig};
+use moq_clock::Instant;
 use moq_net::Timestamp;
 use mpeg2ts::ts::{ReadTsPacket, TsPacketReader, TsPayload};
-use tokio::time::Instant;
 
 use crate::catalog::hang::Container as HangContainer;
 use crate::container::ts::Export;
@@ -139,7 +139,7 @@ impl Live {
 			scale,
 			rate: MUX_RATE,
 			audio_lag,
-			start: Instant::now(),
+			start: moq_clock::now(),
 			tick: 0,
 			audio_index: 0,
 		}
@@ -174,7 +174,7 @@ impl Live {
 	/// same timeline from the next group, as its replacement or the other half of a 1+1 pair
 	/// would.
 	async fn fall_silent(&mut self, gap: Duration, legs: &mut [&mut Leg]) {
-		let resume = Instant::now() + gap;
+		let resume = moq_clock::now() + gap;
 		advance(resume, legs).await;
 		let media = (resume.duration_since(self.start).as_secs_f64() * self.scale * 1e6) as u64;
 		self.tick = media.div_ceil(VIDEO_US * GOP) * GOP;
@@ -191,7 +191,7 @@ impl Live {
 		Leg {
 			export,
 			every,
-			next_poll: Instant::now(),
+			next_poll: moq_clock::now(),
 			out: Vec::new(),
 		}
 	}
@@ -321,7 +321,7 @@ impl Leg {
 
 	fn poll(&mut self) {
 		let waiter = kio::Waiter::noop();
-		let now = Instant::now();
+		let now = moq_clock::now();
 		while let std::task::Poll::Ready(frame) = self.export.poll_next(&waiter) {
 			match frame.expect("exporter error") {
 				Some(frame) => self.out.push((now, frame)),
@@ -335,11 +335,11 @@ impl Leg {
 		loop {
 			self.poll();
 			if let Some(deadline) = self.export.next_due() {
-				tokio::time::sleep_until(deadline).await;
+				moq_clock::sleep_until(deadline).await;
 				continue;
 			}
 			match tokio::time::timeout(Duration::from_millis(10), self.export.next()).await {
-				Ok(Ok(Some(frame))) => self.out.push((Instant::now(), frame)),
+				Ok(Ok(Some(frame))) => self.out.push((moq_clock::now(), frame)),
 				Ok(Ok(None)) => break,
 				Err(_) if self.export.next_due().is_none() => break,
 				Err(_) => {}
@@ -362,8 +362,8 @@ async fn advance(at: Instant, legs: &mut [&mut Leg]) {
 		.filter(|wake| *wake <= at)
 		.min()
 	{
-		tokio::time::sleep_until(wake).await;
-		let now = Instant::now();
+		moq_clock::sleep_until(wake).await;
+		let now = moq_clock::now();
 		for leg in legs.iter_mut() {
 			if leg.wake().is_some_and(|wake| wake <= now) {
 				leg.poll();
@@ -375,7 +375,7 @@ async fn advance(at: Instant, legs: &mut [&mut Leg]) {
 			}
 		}
 	}
-	tokio::time::sleep_until(at).await;
+	moq_clock::sleep_until(at).await;
 	// Read up to the instant the next frame arrives, so the arrival is timed exactly.
 	for leg in legs.iter_mut() {
 		leg.poll_now();
@@ -616,7 +616,7 @@ async fn frames_held_through_a_silence_drop_as_late() {
 		let mut leg = live.join(Duration::ZERO).await;
 		live.run(8 * GOP + 5, &mut [&mut leg], |_| false).await;
 		live.fall_silent(Duration::from_secs(3), &mut [&mut leg]).await;
-		let resumed = Instant::now();
+		let resumed = moq_clock::now();
 		live.run(live.tick + 8 * GOP, &mut [&mut leg], |_| false).await;
 
 		let dropped = leg.export.dropped();

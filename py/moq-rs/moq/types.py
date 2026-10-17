@@ -10,6 +10,9 @@ from moq_ffi import (
     MoqAudioEncoderInput as AudioEncoderInput,
 )
 from moq_ffi import (
+    MoqAudioPreset as AudioPreset,
+)
+from moq_ffi import (
     MoqAudioSampleFormat as AudioSampleFormat,
 )
 from moq_ffi import (
@@ -57,6 +60,7 @@ from ._records import Backoff, ConnectionStats, Datagram, Frame, Subscription, T
 __all__ = [
     "AudioCodec",
     "AudioEncoderInput",
+    "AudioPreset",
     "AudioSampleFormat",
     "Backoff",
     "ConnectionStats",

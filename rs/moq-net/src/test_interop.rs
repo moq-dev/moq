@@ -429,6 +429,7 @@ fn ietf_track_status_interop() {
 				// Only draft-20 can carry the opt-out.
 				_ if !wanted && ietf::Filter::is_draft20(version) => ietf::Properties::default(),
 				_ => ietf::Properties {
+					dynamic_groups: false,
 					max_cache_duration: Some(std::time::Duration::from_millis(5000)),
 					timescale: Some(crate::Timescale::MILLI),
 					// The JS track's priority 2, lower-first on the wire.

@@ -134,6 +134,8 @@ target_sources(
   obs-moq
   PRIVATE
     src/obs-moq.cpp
+    src/moq-audio-encoder.cpp
+    src/moq-audio-encoder.h
     src/moq-worker.h
     src/moq-output.h
     src/moq-service.h
