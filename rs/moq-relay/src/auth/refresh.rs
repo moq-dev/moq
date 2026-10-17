@@ -383,7 +383,7 @@ impl Refresh {
 					let credential = self.credentials.get_mut(&id).expect("observed credential");
 					credential.expires = grant.deadline();
 					if credential.initial {
-						self.stats.retag(fresh.tier, &fresh.label);
+						self.stats.retag(fresh.tier, fresh.label);
 					}
 					credential.grant = grant;
 					if let Some(issued) = &credential.issued {
@@ -588,7 +588,7 @@ mod tests {
 	async fn a_cap_added_before_protocol_setup_is_refused() {
 		let (producer, consumer) = lease::Producer::new(grant("a/**", 3000));
 		let registry = moq_net::stats::Registry::new(Default::default());
-		let stats = registry.tier(moq_net::stats::Tier::default()).session("room");
+		let stats = registry.tier(moq_net::stats::Tier::default()).session("room", None);
 		let lease = super::super::Lease::new("/room", consumer).with_stats(stats.clone());
 		let (client_transport, server) = transports().await;
 		let now = moq_net::time::now();
@@ -693,7 +693,7 @@ mod tests {
 			admissions.next().await.unwrap().grant(consumer);
 		});
 		let registry = moq_net::stats::Registry::new(Default::default());
-		let stats = registry.tier(moq_net::stats::Tier::default()).session("room");
+		let stats = registry.tier(moq_net::stats::Tier::default()).session("room", None);
 		let (client, session, lease) = connect(lease.unwrap().with_stats(stats.clone())).await;
 
 		producer.revoke(lease::Reason::Refused);
@@ -715,7 +715,7 @@ mod tests {
 			admissions.next().await.unwrap().grant(consumer);
 		});
 		let registry = moq_net::stats::Registry::new(Default::default());
-		let stats = registry.tier(moq_net::stats::Tier::default()).session("room");
+		let stats = registry.tier(moq_net::stats::Tier::default()).session("room", None);
 		let (client, session, lease) = connect(lease.unwrap().with_stats(stats.clone())).await;
 
 		let mut capped = grant("a/**", 3000);
@@ -740,7 +740,7 @@ mod tests {
 			admissions.next().await.unwrap().grant(consumer);
 		});
 		let registry = moq_net::stats::Registry::new(Default::default());
-		let stats = registry.tier(moq_net::stats::Tier::default()).session("room");
+		let stats = registry.tier(moq_net::stats::Tier::default()).session("room", None);
 		let (client, session, mut lease) = connect(lease.unwrap().with_stats(stats.clone())).await;
 		let (close, closing) = tokio::sync::oneshot::channel::<()>();
 		let server = tokio::spawn(async move {

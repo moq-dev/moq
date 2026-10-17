@@ -423,8 +423,8 @@ pub struct Token {
 	pub publish: moq_auth::Access,
 	/// The tier this session's stats record under.
 	pub tier: Tier,
-	/// The path this session's stats record under.
-	pub label: PathOwned,
+	/// The stats label this session's usage is attributed to, if the grant named one.
+	pub label: Option<PathOwned>,
 	/// Whether the session is a cluster peer, so its routes entered elsewhere.
 	pub peer: bool,
 	/// Whether the peer is upstream, so it is never offered another upstream's routes.
@@ -439,7 +439,6 @@ impl Token {
 	/// they say.
 	pub fn new(path: &str, grant: &Grant) -> Self {
 		let root = grant.root.as_deref().unwrap_or(path);
-		let label = grant.label.as_deref().unwrap_or(root);
 		Self {
 			path: path.to_string(),
 			root: Path::new(root).to_owned(),
@@ -451,7 +450,7 @@ impl Token {
 			subscribe: grant.subscribe.clone(),
 			publish: grant.publish.clone(),
 			tier: crate::configured_tier(grant.tier.clone()),
-			label: Path::new(label).to_owned(),
+			label: grant.label.as_deref().map(|label| Path::new(label).to_owned()),
 			peer: grant.peer,
 			upstream: grant.upstream,
 		}
@@ -657,8 +656,8 @@ impl Lease {
 							}
 						}
 						if fresh.tier != self.token.tier || fresh.label != self.token.label {
-							tracing::info!(tier = %fresh.tier, label = %fresh.label, "stats label changed");
-							self.stats.retag(fresh.tier.clone(), &fresh.label);
+							tracing::info!(tier = %fresh.tier, label = ?fresh.label, "stats tier or label changed");
+							self.stats.retag(fresh.tier.clone(), fresh.label.clone());
 							self.token.tier = fresh.tier;
 							self.token.label = fresh.label;
 						}
@@ -1147,11 +1146,7 @@ mod tests {
 		wildcard.label = Some("project/*".into());
 		producer.update(wildcard);
 		assert!(lease.ended().await.to_string().contains("invalid stats label"));
-		assert_eq!(
-			lease.token().label,
-			Path::new("room").to_owned(),
-			"the label never applied"
-		);
+		assert_eq!(lease.token().label, None, "the label never applied");
 	}
 
 	#[test]
@@ -1425,12 +1420,12 @@ mod tests {
 		assert_eq!(token.publish, patterns(&["alice/**"]));
 		assert_eq!(token.subscribe, patterns(&["**"]));
 		assert_eq!(token.tier, Tier::new("gold"));
-		assert_eq!(token.label, Path::new("project/key/123").to_owned());
+		assert_eq!(token.label, Some(Path::new("project/key/123").to_owned()));
 
 		let patterns = patterns(&["*/chat", "alice", ""]);
 		let token = Token::new("/", &Grant::new(patterns.clone(), Patterns::new()));
 		assert_eq!(token.publish, patterns);
-		assert_eq!(token.label, token.root, "an absent label defaults to the auth root");
+		assert_eq!(token.label, None, "an absent label stays absent");
 	}
 
 	#[test]
@@ -1500,7 +1495,7 @@ mod outcome_tests {
 	#[tokio::test]
 	async fn a_revoked_lease_fails_its_session_as_application() {
 		let registry = moq_net::stats::Registry::new(Default::default());
-		let stats = registry.tier(Tier::default()).session("tenant");
+		let stats = registry.tier(Tier::default()).session("tenant", None);
 		let (producer, consumer) = lease::Producer::new(Grant::default());
 		let mut lease = Lease::new("/tenant", consumer).with_stats(stats.clone());
 		producer.revoke(lease::Reason::Refused);
@@ -1516,7 +1511,7 @@ mod outcome_tests {
 	#[tokio::test]
 	async fn a_lease_ended_by_shutdown_is_clean() {
 		let registry = moq_net::stats::Registry::new(Default::default());
-		let stats = registry.tier(Tier::default()).session("tenant");
+		let stats = registry.tier(Tier::default()).session("tenant", None);
 		let (producer, consumer) = lease::Producer::new(Grant::default());
 		let mut lease = Lease::new("/tenant", consumer).with_stats(stats.clone());
 		producer.revoke(lease::Reason::Shutdown);
@@ -1531,7 +1526,7 @@ mod outcome_tests {
 	#[test]
 	fn a_revocation_wins_a_racing_clean_close() {
 		let registry = moq_net::stats::Registry::new(Default::default());
-		let stats = registry.tier(Tier::default()).session("tenant");
+		let stats = registry.tier(Tier::default()).session("tenant", None);
 		let (producer, consumer) = lease::Producer::new(Grant::default());
 		let lease = Lease::new("/tenant", consumer).with_stats(stats.clone());
 		producer.revoke(lease::Reason::Refused);
@@ -1545,7 +1540,7 @@ mod outcome_tests {
 	#[test]
 	fn typed_expiry_wins_a_racing_transport_close_without_string_classification() {
 		let registry = moq_net::stats::Registry::new(Default::default());
-		let stats = registry.tier(Tier::default()).session("tenant");
+		let stats = registry.tier(Tier::default()).session("tenant", None);
 		let (producer, consumer) = lease::Producer::new(Grant::default());
 		let lease = Lease::new("/tenant", consumer).with_stats(stats.clone());
 		producer.revoke(lease::Reason::Expired);

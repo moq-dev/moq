@@ -499,12 +499,12 @@ async fn a_moved_tier_retags_the_live_session() {
 		report
 			.sessions
 			.into_iter()
-			.map(|entry| {
+			.filter_map(|entry| {
 				let presence = entry.presence;
-				(
-					(entry.tier, entry.root.to_string()),
+				Some((
+					(entry.tier, entry.label?.to_string()),
 					(presence.active(), presence.sent_bytes, presence.received_bytes),
-				)
+				))
 			})
 			.collect::<HashMap<_, _>>()
 	};

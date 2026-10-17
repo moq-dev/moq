@@ -28,7 +28,9 @@ fn registry(broadcasts: usize, tiers: usize) -> Registry {
 		.collect();
 	let cursors = (0..tiers)
 		.map(|t| {
-			let session = registry.tier(stats::Tier::new(format!("tier{t}"))).session("root");
+			let session = registry
+				.tier(stats::Tier::new(format!("tier{t}")))
+				.session("root", None);
 			let mut cursor = producer.consume().with_stats(session).announced();
 			// Each announce the cursor replays records under its tier.
 			while cursor.next().now_or_never().flatten().is_some() {}
@@ -73,13 +75,13 @@ fn request(c: &mut Criterion) {
 			for tier in 0..tiers {
 				let handle = registry.tier(stats::Tier::new(format!("tier{tier}")));
 				for root in 0..roots {
-					contexts.push(handle.request(format!("room/{root}")));
+					contexts.push(handle.request(format!("room/{root}"), None));
 				}
 			}
 			let handle = registry.tier(stats::Tier::new(format!("tier{}", tiers - 1)));
 			let root = format!("room/{}", roots - 1);
 			group.bench_function(BenchmarkId::from_parameter(format!("{roots}x{tiers}")), |b| {
-				b.iter(|| std::hint::black_box(handle.request(&root)));
+				b.iter(|| std::hint::black_box(handle.request(&root, None)));
 			});
 			std::hint::black_box(contexts);
 		}
@@ -105,7 +107,8 @@ fn session_report(c: &mut Criterion) {
 			let contexts: Vec<_> = (0..labels)
 				.flat_map(|label| {
 					let handle = handle.clone();
-					(0..sessions).map(move |_| handle.session(format!("project/key/{label}")))
+					(0..sessions)
+						.map(move |_| handle.session("project/room", Some(format!("project/key/{label}").into())))
 				})
 				.collect();
 			let mut report = stats::Report::default();
@@ -130,7 +133,8 @@ fn retag(c: &mut Criterion) {
 			let mut contexts: Vec<_> = (0..labels)
 				.flat_map(|label| {
 					let handle = handle.clone();
-					(0..sessions).map(move |_| handle.session(format!("project/key/{label}")))
+					(0..sessions)
+						.map(move |_| handle.session("project/room", Some(format!("project/key/{label}").into())))
 				})
 				.collect();
 			let moving = contexts.split_off(contexts.len() - sessions);
@@ -138,10 +142,10 @@ fn retag(c: &mut Criterion) {
 			group.bench_function(BenchmarkId::from_parameter(format!("{labels}x{sessions}")), |b| {
 				b.iter(|| {
 					for session in moving.iter().rev() {
-						session.retag(tier.clone(), "project/moved");
+						session.retag(tier.clone(), Some("project/moved".into()));
 					}
 					for session in moving.iter().rev() {
-						session.retag(tier.clone(), format!("project/key/{}", labels - 1));
+						session.retag(tier.clone(), Some(format!("project/key/{}", labels - 1).into()));
 					}
 				});
 			});

@@ -4,6 +4,21 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Session stats take an optional label (#5731)
+
+`stats::Handle::session` and `stats::Handle::request` take the stats label after the auth root, `None` for none.
+`Session::set_tier` is now `Session::retag`, which also moves the session to a new label.
+`SessionEntry` gains a `label` field; its `root` is still the auth root.
+
+```rust
+// Before
+let session = handle.session(&root);
+session.set_tier(tier);
+// After
+let session = handle.session(&root, label); // label: Option<PathOwned>
+session.retag(tier, label);
+```
+
 ### A bare track handle is not demand (#5820)
 
 Holding a `track::Consumer` sends nothing and no longer keeps the producer used.

@@ -105,7 +105,7 @@ impl Relay {
 		let tier_labels: Vec<_> = (0..tiers)
 			.map(|tier| {
 				let tier = stats::Tier::new(format!("t{tier}"));
-				let session = registry.tier(tier.clone()).session("root");
+				let session = registry.tier(tier.clone()).session("root", None);
 				let mut cursor = origin.consume().with_stats(session.clone()).announced();
 				while cursor.next().now_or_never().flatten().is_some() {}
 				cursors.push(cursor);
@@ -267,7 +267,7 @@ impl Presence {
 		let names: Vec<String> = (0..roots).map(|index| format!("room/{index:05}")).collect();
 		let sessions = names
 			.iter()
-			.map(|root| registry.tier(stats::Tier::default()).session(root.as_str()))
+			.map(|root| registry.tier(stats::Tier::default()).session(root.as_str(), None))
 			.collect();
 		let mut driver = Driver::new(registry.clone(), origin.clone()).expect("stats broadcast");
 		driver.tick();

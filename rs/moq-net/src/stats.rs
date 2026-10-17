@@ -10,9 +10,10 @@
 //! Traffic is bucketed by an arbitrary [`Tier`] label chosen by business logic
 //! (billing class, region, ...) and, within a tier, by broadcast path and
 //! [`Role`] (publisher = egress, subscriber = ingress). Connected sessions are
-//! tracked separately per (tier, label), counting presence regardless of
-//! whether any data flows. The label is a stats key the auth decider picks,
-//! defaulting to the session's auth root.
+//! tracked separately per (tier, auth root, label), counting presence
+//! regardless of whether any data flows. The label is an optional stats key the
+//! auth decider picks, so usage can be attributed apart from what a session may
+//! access.
 //!
 //! # Where counting happens
 //!
@@ -56,19 +57,19 @@
 //!   bumps `groups`, `frames`, and `bytes`; this counter breaks out how many of
 //!   those took the datagram path.
 //! * `requests` ([`Presence`]): cumulative request/response admissions under the
-//!   label and tier at admission. [`Handle::request`] meters their traffic
+//!   auth root, label, and tier at admission. [`Handle::request`] meters their traffic
 //!   without starting or ending a connected session.
 //! * `sent_bytes` / `received_bytes` ([`Presence`]): cumulative payload bytes
-//!   this node sent to, or received from, the sessions and requests under a
-//!   label. Each session counts its own bytes, so a write touches no shared
-//!   row; a readout sums them.
+//!   this node sent to, or received from, the sessions and requests on a row.
+//!   Each session counts its own bytes, so a write touches no shared row; a
+//!   readout sums them.
 //! * `sessions_started` / `sessions_ended` ([`Presence`]): cumulative count of
-//!   sessions connected/disconnected under a label on this tier.
+//!   sessions connected/disconnected under an auth root and label on this tier.
 //!   Driven by [`Handle::session`] (the [`Session`] context); a
-//!   [`Session::retag`] ends the session on the old label and starts it on
-//!   the new one.
+//!   [`Session::retag`] ends the session on the old tier and label and starts
+//!   it on the new ones.
 //! * `announces_peak` / `subscriptions_peak` ([`Presence`]): the most
-//!   announcements, or subscriptions, any one session under the label held
+//!   announcements, or subscriptions, any one session on the row held
 //!   at once, to compare against its `crate::session::Limits`. A peak never
 //!   goes down; a rollup takes the largest rather than the sum.
 //!
@@ -273,8 +274,8 @@ impl Content {
 	}
 }
 
-/// Per-(tier, label) session gauge. One of these is shared (via `Arc`) by every
-/// [`Session`] guard for the same label on the same tier: `sessions_started`
+/// Per-(tier, root, label) session gauge. One of these is shared (via `Arc`) by every
+/// [`Session`] guard for the same auth root and label on the same tier: `sessions_started`
 /// bumps on connect, `sessions_ended` on disconnect.
 #[derive(Default, Debug)]
 struct SessionCounters {
@@ -324,7 +325,7 @@ impl SessionCounters {
 	}
 }
 
-/// The payload bytes of one `(tier, label)` row.
+/// The payload bytes of one `(tier, root, label)` row.
 #[derive(Default, Debug)]
 struct SessionBytes {
 	/// Bytes recorded here by sessions that have since ended or retagged away.
@@ -623,7 +624,7 @@ impl Traffic {
 	}
 }
 
-/// Request admissions and connected-session presence for a label on a tier, or their sum.
+/// Request admissions and connected-session presence for one row, or their sum.
 /// The session counters are cumulative connects and disconnects. `sessions_started
 /// - sessions_ended` is the current live session count. The peaks show how close
 /// one session came to its `crate::session::Limits`.
@@ -645,9 +646,9 @@ pub struct Presence {
 	pub sessions_started: u64,
 	/// Cumulative sessions disconnected.
 	pub sessions_ended: u64,
-	/// Cumulative payload bytes sent by sessions under this label.
+	/// Cumulative payload bytes this node sent to the sessions and requests.
 	pub sent_bytes: u64,
-	/// Cumulative payload bytes received by sessions under this label.
+	/// Cumulative payload bytes this node received from the sessions and requests.
 	pub received_bytes: u64,
 	/// The most broadcasts (moq-transport: namespaces) any one session has held announced
 	/// to us at once.
@@ -882,14 +883,14 @@ impl Snapshot {
 }
 
 /// The per-broadcast detail [`Registry::report`] fills: one traffic entry per
-/// `(broadcast, tier)` and one session entry per `(tier, label)`. Entries are
+/// `(broadcast, tier)` and one session entry per `(tier, root, label)`. Entries are
 /// unordered. Reuse one across drains to keep its capacity.
 #[derive(Debug, Default, Clone)]
 #[non_exhaustive]
 pub struct Report {
 	/// Per-`(broadcast, tier)` traffic, both roles per entry.
 	pub traffic: Vec<TrafficEntry>,
-	/// Per-`(tier, label)` connected-session presence.
+	/// Per-`(tier, root, label)` connected-session presence.
 	pub sessions: Vec<SessionEntry>,
 }
 
@@ -910,18 +911,20 @@ pub struct TrafficEntry {
 	pub closed: bool,
 }
 
-/// One `(tier, label)` row of a [`Report`].
+/// One `(tier, root, label)` row of a [`Report`].
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct SessionEntry {
 	/// The tier the sessions recorded under.
 	pub tier: Tier,
-	/// The label the sessions record under: their stats label, or else their auth root.
+	/// The auth root the sessions connected under.
 	pub root: PathOwned,
+	/// The stats label the sessions record under, if their grant named one.
+	pub label: Option<PathOwned>,
 	/// Cumulative request admissions and connect/disconnect gauge.
 	pub presence: Presence,
-	/// This is the label's final readout: its last session or request ended, so the
-	/// registry pruned it, and a later context under the label starts from zero.
+	/// This is the row's final readout: its last session or request ended, so the
+	/// registry pruned it, and a later context on the row starts from zero.
 	pub closed: bool,
 }
 
@@ -973,12 +976,15 @@ struct Shared {
 	/// so a snapshot sees each entry either here or live, never both or neither.
 	retired: Lock<Snapshot>,
 	entries: Lock<HashMap<PathOwned, Arc<BroadcastEntry>>>,
-	/// Connected-session gauges keyed by `(tier, label)`. Independent of any
+	/// Connected-session gauges keyed by `(tier, (auth root, label))`. Independent of any
 	/// broadcast; surfaced on the per-tier session tracks and in the totals and
 	/// presence tracks. A tier's inner map is
 	/// created the first time a session records under it.
-	sessions: Lock<HashMap<Tier, HashMap<PathOwned, Arc<SessionCounters>>>>,
+	sessions: Lock<HashMap<Tier, HashMap<RowKey, Arc<SessionCounters>>>>,
 }
+
+/// What a session row is keyed by within a tier: the auth root and the optional stats label.
+type RowKey = (PathOwned, Option<PathOwned>);
 
 /// Per-broadcast counters, lazily split by tier. A tier's [`TierCounters`] is
 /// created the first time a guard records under that label, so the set of tiers
@@ -1107,18 +1113,17 @@ impl Registry {
 		)
 	}
 
-	/// Get-or-create the session gauge for `label` on `tier`. `None` for a
-	/// disabled registry. Unlike [`Self::entry`], labels key sessions rather than
-	/// broadcasts, so no cycle-breaking filter is needed.
-	fn session_counters(&self, tier: &Tier, label: impl AsPath) -> Option<Arc<SessionCounters>> {
+	/// Get-or-create the session gauge for `key` on `tier`. `None` for a
+	/// disabled registry. Unlike [`Self::entry`], roots are auth scopes (never
+	/// under a stats prefix), so no cycle-breaking filter is needed.
+	fn session_counters(&self, tier: &Tier, key: RowKey) -> Option<Arc<SessionCounters>> {
 		let shared = self.shared.as_ref()?;
-		let owned = label.as_path().to_owned();
 		let mut sessions = shared.sessions.lock();
 		Some(
 			sessions
 				.entry(tier.clone())
 				.or_default()
-				.entry(owned)
+				.entry(key)
 				.or_default()
 				.clone(),
 		)
@@ -1207,7 +1212,7 @@ impl Registry {
 		});
 
 		shared.sessions.lock().retain(|tier, roots| {
-			roots.retain(|root, counters| {
+			roots.retain(|(root, label), counters| {
 				// Nothing can join a row only the map holds (that needs the lock held here),
 				// but a meter outliving its session still writes until its last clone drops.
 				let unheld = Arc::strong_count(counters) == 1;
@@ -1216,6 +1221,7 @@ impl Registry {
 				report.sessions.push(SessionEntry {
 					tier: tier.clone(),
 					root: root.clone(),
+					label: label.clone(),
 					presence,
 					closed,
 				});
@@ -1247,7 +1253,11 @@ pub struct Handle {
 impl Handle {
 	/// Count a session refused outside relay admission under its resolved root and tier.
 	pub fn refuse(&self, root: impl AsPath, reason: Refusal) {
-		if let Some(presence) = self.stats.session_counters(&self.tier, root) {
+		// A refusal comes before admission, so it carries no stats label.
+		if let Some(presence) = self
+			.stats
+			.session_counters(&self.tier, (root.as_path().to_owned(), None))
+		{
 			presence
 				.sessions_refused
 				.counter(reason)
@@ -1265,24 +1275,22 @@ impl Handle {
 		&self.tier
 	}
 
-	/// Record a connected session under `label` on this tier. Hold
-	/// the returned guard for the session's lifetime; dropping it bumps
-	/// `sessions_ended`. Counts presence regardless of any data flow, so a
-	/// session that merely connects is still billable. Surfaced on the session
-	/// track for this tier, keyed by `label`, in its totals, and in `label`'s
-	/// presence track.
-	pub fn session(&self, label: impl AsPath) -> Session {
-		self.context(label, true)
+	/// Record a connected session authenticated under `root`, and counted under
+	/// `label` if given, on this tier. Hold the returned guard for the session's
+	/// lifetime; dropping it bumps `sessions_ended`. Counts presence regardless of
+	/// any data flow, so a session that merely connects is still billable.
+	pub fn session(&self, root: impl AsPath, label: Option<PathOwned>) -> Session {
+		self.context(root, label, true)
 	}
 
-	/// Count one admitted request under `label` and meter its traffic without session presence.
-	pub fn request(&self, label: impl AsPath) -> Session {
-		self.context(label, false)
+	/// Count one admitted request under `root` and `label` and meter its traffic without session presence.
+	pub fn request(&self, root: impl AsPath, label: Option<PathOwned>) -> Session {
+		self.context(root, label, false)
 	}
 
-	fn context(&self, label: impl AsPath, connected: bool) -> Session {
-		let label = label.as_path().to_owned();
-		let presence = self.stats.session_counters(&self.tier, &label);
+	fn context(&self, root: impl AsPath, label: Option<PathOwned>, connected: bool) -> Session {
+		let root = root.as_path().to_owned();
+		let presence = self.stats.session_counters(&self.tier, (root.clone(), label.clone()));
 		if let Some(presence) = &presence {
 			if connected {
 				presence.sessions_started.fetch_add(1, Ordering::Relaxed);
@@ -1301,6 +1309,7 @@ impl Handle {
 				current: Mutex::new(Current {
 					failure: None,
 					tier: self.tier.clone(),
+					root,
 					label,
 					presence,
 				}),
@@ -1345,15 +1354,15 @@ impl Side {
 /// of a session (its publish and subscribe halves) so presence and viewer counts
 /// are never double-attributed. It carries three things:
 ///
-/// * the tier and label, so any broadcast reached through a tagged origin handle
-///   resolves the right per-`(path, tier)` counters and its bytes count toward the label,
+/// * the tier, auth root, and label, so any broadcast reached through a tagged origin
+///   handle resolves the right per-`(path, tier)` counters and its bytes count toward its row,
 /// * the presence gauge: `sessions_started` bumps when the context is created and
 ///   `sessions_ended` when the last clone drops; a request instead bumps `requests`
 ///   once at admission and never touches session presence,
 /// * the egress viewer refcount map (first/last active subscription per broadcast),
 ///   driving `broadcasts_started` / `broadcasts_ended`.
 ///
-/// [`Session::retag`] moves a live context to another tier and label: presence and traffic
+/// [`Session::retag`] moves a live context to another tier or label: presence and traffic
 /// recorded afterwards land there, while what was already counted stays put and an
 /// open subscription or announce closes on the tier it opened on.
 ///
@@ -1380,7 +1389,7 @@ struct SessionInner {
 	/// Requests meter traffic but never open or close connected-session presence.
 	connected: bool,
 	registry: Registry,
-	/// The current tier, label, and presence gauge, swapped together by [`Session::retag`].
+	/// The current row and its presence gauge, swapped together by [`Session::retag`].
 	current: Mutex<Current>,
 	/// This session's payload bytes, shared with the meters it hands out.
 	traffic: Arc<SessionTraffic>,
@@ -1395,12 +1404,14 @@ struct SessionInner {
 	held: Mutex<Vec<(Cap, Weak<AtomicUsize>)>>,
 }
 
-/// The tier and label a [`Session`] records under right now.
+/// The row a [`Session`] records on right now.
 struct Current {
 	failure: Option<Failure>,
 	tier: Tier,
-	label: PathOwned,
-	/// The presence gauge for `(tier, label)`, or `None` for a disabled registry.
+	/// The auth root, fixed for the session's life.
+	root: PathOwned,
+	label: Option<PathOwned>,
+	/// The presence gauge for `(tier, root, label)`, or `None` for a disabled registry.
 	presence: Option<Arc<SessionCounters>>,
 }
 
@@ -1438,15 +1449,17 @@ impl Session {
 		}
 	}
 
-	/// Record later traffic and session presence under `(tier, label)`; a request stays counted where admitted.
-	pub fn retag(&self, tier: Tier, label: impl AsPath) {
+	/// Record later traffic and session presence under `tier` and `label`, keeping the auth root;
+	/// a request stays counted where admitted.
+	pub fn retag(&self, tier: Tier, label: Option<PathOwned>) {
 		let Some(inner) = &self.inner else { return };
-		let label = label.as_path().to_owned();
 		let mut current = inner.current.lock().unwrap_or_else(PoisonError::into_inner);
 		if current.tier == tier && current.label == label {
 			return;
 		}
-		let presence = inner.registry.session_counters(&tier, &label);
+		let presence = inner
+			.registry
+			.session_counters(&tier, (current.root.clone(), label.clone()));
 		// Bytes before the cut stay on the old row; later ones, through any meter, go to the new.
 		let cut = match &current.presence {
 			Some(old) => old.bytes().leave(&inner.traffic),
@@ -1493,7 +1506,7 @@ impl Session {
 	}
 
 	/// Record that this session holds `held` of what `cap` limits, raising that peak on its
-	/// tier and label.
+	/// tier, root, and label.
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub(crate) fn hold(&self, cap: Cap, held: u64) {
 		let Some(inner) = &self.inner else { return };
@@ -1863,9 +1876,9 @@ mod tests {
 		let stats = test_stats();
 		let handle = stats.tier(Tier::new("gateway"));
 		handle.refuse("root", Refusal::Forbidden);
-		let session = handle.session("root");
+		let session = handle.session("root", None);
 		let clone = session.clone();
-		session.retag(Tier::new("next"), "root");
+		session.retag(Tier::new("next"), None);
 		clone.fail(Failure::IdleTimeout);
 		session.fail(Failure::Application);
 		drop(clone);
@@ -1893,7 +1906,10 @@ mod tests {
 		assert_eq!(before.sessions(), after.sessions(), "retirement keeps outcomes once");
 		let disabled = Registry::disabled();
 		disabled.tier(Tier::default()).refuse("root", Refusal::Refused);
-		disabled.tier(Tier::default()).session("root").fail(Failure::Expired);
+		disabled
+			.tier(Tier::default())
+			.session("root", None)
+			.fail(Failure::Expired);
 		assert!(disabled.snapshot().sessions().is_empty());
 	}
 
@@ -1935,14 +1951,23 @@ mod tests {
 			.tier(tier)
 	}
 
-	/// The [`Presence`] for `(tier, root)`, or `None` if absent.
+	/// The [`Presence`] for `(tier, root)` with no label, or `None` if absent.
 	fn session_snapshot(stats: &Registry, tier: &Tier, root: &str) -> Option<Presence> {
+		row_snapshot(stats, tier, root, None)
+	}
+
+	/// The [`Presence`] for `(tier, root, label)`, or `None` if absent.
+	fn row_snapshot(stats: &Registry, tier: &Tier, root: &str, label: Option<&str>) -> Option<Presence> {
+		let key = (
+			PathOwned::from(root.to_string()),
+			label.map(|label| PathOwned::from(label.to_string())),
+		);
 		stats
 			.shared()
 			.sessions
 			.lock()
 			.get(tier)
-			.and_then(|roots| roots.get(&PathOwned::from(root.to_string())).map(|c| c.snapshot()))
+			.and_then(|rows| rows.get(&key).map(|c| c.snapshot()))
 	}
 
 	fn test_stats() -> Registry {
@@ -1952,8 +1977,8 @@ mod tests {
 	#[test]
 	fn default_and_named_tiers_are_independent() {
 		let stats = test_stats();
-		let default = stats.tier(Tier::default()).session("root");
-		let regional = stats.tier(Tier::new("region/sjc")).session("root");
+		let default = stats.tier(Tier::default()).session("root", None);
+		let regional = stats.tier(Tier::new("region/sjc")).session("root", None);
 
 		default.egress("demo/bbb").meter().bytes(100);
 		regional.ingress("demo/bbb").meter().bytes(7);
@@ -1975,7 +2000,7 @@ mod tests {
 
 		let stats = test_stats();
 		let tier = stats.tier(Tier::default());
-		let (s1, s2) = (tier.session("acme"), tier.session("acme"));
+		let (s1, s2) = (tier.session("acme", None), tier.session("acme", None));
 		let announces = Slots::new(10).with_stats(&s1, Cap::Announces);
 		let subscriptions = Slots::new(10).with_stats(&s2, Cap::Subscriptions);
 		let other = Slots::new(10).with_stats(&s2, Cap::Announces);
@@ -2007,13 +2032,13 @@ mod tests {
 		use crate::session::Slots;
 
 		let stats = test_stats();
-		let session = stats.tier(Tier::default()).session("acme");
+		let session = stats.tier(Tier::default()).session("acme", None);
 		let subscriptions = Slots::new(10).with_stats(&session, Cap::Subscriptions);
 		let mut held: Vec<_> = (0..5).map(|_| subscriptions.acquire().unwrap()).collect();
 		held.truncate(3);
 
 		let gold = Tier::new("gold");
-		session.retag(gold.clone(), "acme");
+		session.retag(gold.clone(), None);
 
 		let peak = |tier: &Tier| {
 			let (_, presence) = stats
@@ -2035,9 +2060,9 @@ mod tests {
 		let regional = stats.tier(Tier::new("region/sjc"));
 
 		// Two default-tier sessions under one root, one regional; presence sums them.
-		let s1 = default.session("acme");
-		let _s2 = default.session("acme");
-		let s3 = regional.session("peer");
+		let s1 = default.session("acme", None);
+		let _s2 = default.session("acme", None);
+		let s3 = regional.session("peer", None);
 
 		// Default-tier egress across two broadcasts; the snapshot sums them.
 		{
@@ -2099,7 +2124,7 @@ mod tests {
 	fn report_reuses_capacity() {
 		// A reused report is cleared, not appended to, and keeps its buffers.
 		let stats = test_stats();
-		let ctx = stats.tier(Tier::default()).session("root");
+		let ctx = stats.tier(Tier::default()).session("root", None);
 		let _scopes: Vec<_> = (0..8).map(|i| ctx.egress(format!("b/{i}").as_str())).collect();
 
 		let mut report = Report::default();
@@ -2122,7 +2147,7 @@ mod tests {
 		// after the last guard drops (returning the final values that once).
 		let stats = test_stats();
 		let key = PathOwned::from("foo/bar");
-		let ctx = stats.tier(Tier::default()).session("root");
+		let ctx = stats.tier(Tier::default()).session("root", None);
 		let scope = ctx.egress("foo/bar");
 		let sub = scope.subscribe();
 		scope.meter().bytes(42);
@@ -2170,7 +2195,7 @@ mod tests {
 		// subscription could still begin at any moment.
 		let stats = test_stats();
 		let key = PathOwned::from("foo/bar");
-		let ctx = stats.tier(Tier::default()).session("root");
+		let ctx = stats.tier(Tier::default()).session("root", None);
 		let scope = ctx.egress("foo/bar");
 		let guard = scope.announce();
 
@@ -2195,7 +2220,7 @@ mod tests {
 		// Once the last session under a root disconnects, the root leaves the
 		// registry on the drain that reports its final gauge.
 		let stats = test_stats();
-		let session = stats.tier(Tier::default()).session("acme");
+		let session = stats.tier(Tier::default()).session("acme", None);
 
 		let report = drain(&stats);
 		let row = report
@@ -2223,11 +2248,11 @@ mod tests {
 	fn snapshot_preserves_retired_counters() {
 		let stats = test_stats();
 		let tier = Tier::default();
-		let live = stats.tier(tier.clone()).session("live");
+		let live = stats.tier(tier.clone()).session("live", None);
 		let scope = live.egress("live/video");
 		let _live_sub = scope.subscribe();
 		for _ in 0..2 {
-			let session = stats.tier(tier.clone()).session("retired");
+			let session = stats.tier(tier.clone()).session("retired", None);
 			let scope = session.egress("retired/video");
 			let sub = scope.subscribe();
 			scope.meter().bytes(100);
@@ -2270,7 +2295,7 @@ mod tests {
 		let worker = std::thread::spawn(move || {
 			for i in 0..256 {
 				let path = format!("root/{i}");
-				let session = worker_stats.tier(Tier::default()).session(path.as_str());
+				let session = worker_stats.tier(Tier::default()).session(path.as_str(), None);
 				session.ingress(path.as_str()).meter().bytes(1);
 				drop(session);
 				drain(&worker_stats);
@@ -2311,7 +2336,7 @@ mod tests {
 		// Our own stats broadcasts (and any sibling category under the same
 		// prefix) must not feed back into the registry.
 		let stats = test_stats();
-		let ctx = stats.tier(Tier::default()).session("root");
+		let ctx = stats.tier(Tier::default()).session("root", None);
 		let scope = ctx.egress(".stats/node/sjc");
 		scope.meter().bytes(100);
 		let _guard = scope.announce();
@@ -2325,7 +2350,7 @@ mod tests {
 		// and bumps are dropped.
 		let stats = Registry::default();
 		assert!(stats.shared.is_none());
-		let ctx = stats.tier(Tier::default()).session("root");
+		let ctx = stats.tier(Tier::default()).session("root", None);
 		let scope = ctx.egress("demo/bbb");
 		scope.meter().bytes(100);
 		let _guard = scope.announce();
@@ -2345,9 +2370,9 @@ mod tests {
 			session_snapshot(&stats, &Tier::default(), root).map(|p| (p.sessions_started, p.sessions_ended))
 		};
 
-		let a1 = ext.session("acme");
-		let a2 = ext.session("acme");
-		let b1 = ext.session("globex");
+		let a1 = ext.session("acme", None);
+		let a2 = ext.session("acme", None);
+		let b1 = ext.session("globex", None);
 		assert_eq!(snap("acme"), Some((2, 0)), "two sessions under one root");
 		assert_eq!(snap("globex"), Some((1, 0)), "a distinct root is counted separately");
 
@@ -2421,7 +2446,7 @@ mod tests {
 			session_snapshot(&stats, &Tier::default(), root).map(|p| (p.sessions_started, p.sessions_ended))
 		};
 
-		let ctx = stats.tier(Tier::default()).session("acme");
+		let ctx = stats.tier(Tier::default()).session("acme", None);
 		assert_eq!(snap("acme"), Some((1, 0)));
 
 		let clone = ctx.clone();
@@ -2439,11 +2464,11 @@ mod tests {
 		let gold = Tier::new("gold");
 		let snap = |tier: &Tier| session_snapshot(&stats, tier, "acme").map(|p| (p.sessions_started, p.sessions_ended));
 
-		let ctx = stats.tier(Tier::default()).session("acme");
-		ctx.retag(Tier::default(), "acme");
+		let ctx = stats.tier(Tier::default()).session("acme", None);
+		ctx.retag(Tier::default(), None);
 		assert_eq!(snap(&Tier::default()), Some((1, 0)), "the same tier is a no-op");
 
-		ctx.retag(gold.clone(), "acme");
+		ctx.retag(gold.clone(), None);
 		assert_eq!(snap(&Tier::default()), Some((1, 1)));
 		assert_eq!(snap(&gold), Some((1, 0)));
 
@@ -2455,7 +2480,7 @@ mod tests {
 	fn retag_moves_subsequent_traffic() {
 		let stats = test_stats();
 		let gold = Tier::new("gold");
-		let ctx = stats.tier(Tier::default()).session("acme");
+		let ctx = stats.tier(Tier::default()).session("acme", None);
 		let scope = ctx.egress("demo/bbb");
 		let clone = scope.clone();
 
@@ -2464,7 +2489,7 @@ mod tests {
 		let announce = scope.announce();
 		before.bytes(10);
 
-		ctx.retag(gold.clone(), "acme");
+		ctx.retag(gold.clone(), None);
 		// A meter handed out earlier keeps its tier; everything after moves.
 		before.bytes(1);
 		scope.meter().bytes(5);
@@ -2501,31 +2526,42 @@ mod tests {
 	fn retag_moves_presence_between_labels_on_one_tier() {
 		let stats = test_stats();
 		let tier = Tier::default();
-		let session = stats.tier(tier.clone()).session("project/root");
-		session.egress("project/live").meter().bytes(5);
+		let session = stats.tier(tier.clone()).session("project/room", None);
+		session.egress("project/room/live").meter().bytes(5);
 
-		session.retag(tier.clone(), "project/key/123");
-		session.egress("project/live").meter().bytes(7);
+		session.retag(tier.clone(), Some("project/key/123".into()));
+		session.egress("project/room/live").meter().bytes(7);
 
-		let root = session_snapshot(&stats, &tier, "project/root").unwrap();
-		let key = session_snapshot(&stats, &tier, "project/key/123").unwrap();
-		assert_eq!((root.sessions_started, root.sessions_ended, root.sent_bytes), (1, 1, 5));
-		assert_eq!((key.sessions_started, key.sessions_ended, key.sent_bytes), (1, 0, 7));
+		let unlabeled = row_snapshot(&stats, &tier, "project/room", None).unwrap();
+		let labeled = row_snapshot(&stats, &tier, "project/room", Some("project/key/123")).unwrap();
+		assert_eq!(
+			(
+				unlabeled.sessions_started,
+				unlabeled.sessions_ended,
+				unlabeled.sent_bytes
+			),
+			(1, 1, 5)
+		);
+		assert_eq!(
+			(labeled.sessions_started, labeled.sessions_ended, labeled.sent_bytes),
+			(1, 0, 7),
+			"the label moves while the root stays"
+		);
 	}
 
 	#[test]
 	fn retag_back_counts_bytes_once() {
 		let stats = test_stats();
 		let tier = Tier::default();
-		let session = stats.tier(tier.clone()).session("a");
-		let meter = session.ingress("a/live").meter();
+		let session = stats.tier(tier.clone()).session("room", Some("a".into()));
+		let meter = session.ingress("room/live").meter();
 		meter.bytes(1);
-		session.retag(tier.clone(), "b");
+		session.retag(tier.clone(), Some("b".into()));
 		meter.bytes(2);
-		session.retag(tier.clone(), "a");
+		session.retag(tier.clone(), Some("a".into()));
 		meter.bytes(4);
 
-		let received = |label| session_snapshot(&stats, &tier, label).unwrap().received_bytes;
+		let received = |label| row_snapshot(&stats, &tier, "room", Some(label)).unwrap().received_bytes;
 		assert_eq!((received("a"), received("b")), (5, 2));
 	}
 
@@ -2533,14 +2569,14 @@ mod tests {
 	fn session_bytes_outlive_the_session() {
 		let stats = test_stats();
 		let tier = Tier::default();
-		let session = stats.tier(tier.clone()).session("acme");
+		let session = stats.tier(tier.clone()).session("acme", None);
 		let meter = session.egress("acme/live").meter();
 		meter.bytes(3);
 		drop(session);
 
 		let mut report = Report::default();
 		stats.report(&mut report);
-		assert!(!report.sessions[0].closed, "a live meter keeps its label's row open");
+		assert!(!report.sessions[0].closed, "a live meter keeps its row open");
 		meter.datagram(4);
 		drop(meter);
 
@@ -2558,7 +2594,7 @@ mod tests {
 	fn excluded_paths_skip_session_bytes() {
 		let stats = test_stats();
 		let tier = Tier::default();
-		let session = stats.tier(tier.clone()).session("acme");
+		let session = stats.tier(tier.clone()).session("acme", None);
 		session.egress(".stats/node").meter().bytes(9);
 		assert_eq!(session_snapshot(&stats, &tier, "acme").unwrap().sent_bytes, 0);
 	}
@@ -2567,7 +2603,7 @@ mod tests {
 	fn meter_bumps_the_right_side() {
 		// A payload meter records on its own side only.
 		let stats = test_stats();
-		let ctx = stats.tier(Tier::default()).session("root");
+		let ctx = stats.tier(Tier::default()).session("root", None);
 
 		let egress = ctx.egress("demo/bbb").meter();
 		egress.group();
@@ -2591,7 +2627,7 @@ mod tests {
 		// An egress subscription bumps `subscriptions_started` and, being the context's first
 		// for the broadcast, `broadcasts_started`. Dropping closes both.
 		let stats = test_stats();
-		let ctx = stats.tier(Tier::default()).session("root");
+		let ctx = stats.tier(Tier::default()).session("root", None);
 		let raw = || tier_counters(&stats, "demo/bbb", &Tier::default()).publisher.snapshot();
 
 		let scope = ctx.egress("demo/bbb");
@@ -2616,9 +2652,17 @@ mod tests {
 		let stats = test_stats();
 		let raw = || tier_counters(&stats, "demo/bbb", &Tier::default()).publisher.snapshot();
 
-		let v1 = stats.tier(Tier::default()).session("a").egress("demo/bbb").subscribe();
+		let v1 = stats
+			.tier(Tier::default())
+			.session("a", None)
+			.egress("demo/bbb")
+			.subscribe();
 		assert_eq!(raw().broadcasts_started, 1);
-		let v2 = stats.tier(Tier::default()).session("b").egress("demo/bbb").subscribe();
+		let v2 = stats
+			.tier(Tier::default())
+			.session("b", None)
+			.egress("demo/bbb")
+			.subscribe();
 		assert_eq!(raw().broadcasts_started, 2, "two distinct contexts => two viewers");
 
 		drop(v1);
@@ -2632,7 +2676,7 @@ mod tests {
 		// An ingress (producer-lifetime) subscription bumps subscriptions but never
 		// the viewer refcount, which is egress-only.
 		let stats = test_stats();
-		let ctx = stats.tier(Tier::default()).session("root");
+		let ctx = stats.tier(Tier::default()).session("root", None);
 		let guard = ctx.ingress("demo/bbb").subscribe();
 		let sub = tier_counters(&stats, "demo/bbb", &Tier::default())
 			.subscriber
@@ -2652,10 +2696,10 @@ mod tests {
 	#[test]
 	fn request_admission_survives_clones_retiering_and_retirement_without_presence() {
 		let stats = test_stats();
-		let request = stats.tier(Tier::new("old")).request("root");
+		let request = stats.tier(Tier::new("old")).request("root", None);
 		let clone = request.clone();
 		request.egress("root/video").meter().bytes(7);
-		request.retag(Tier::new("new"), "root");
+		request.retag(Tier::new("new"), None);
 		clone.egress("root/video").meter().bytes(11);
 		drop(request);
 		drop(clone);
@@ -2712,7 +2756,7 @@ mod tests {
 	fn fetch_counts_separately_from_subscriptions() {
 		// A fetch bumps `fetches`, not `subscriptions_started` or the viewer refcount.
 		let stats = test_stats();
-		let ctx = stats.tier(Tier::default()).session("root");
+		let ctx = stats.tier(Tier::default()).session("root", None);
 		let scope = ctx.egress("demo/bbb");
 		scope.fetch();
 		scope.fetch();
@@ -2727,7 +2771,7 @@ mod tests {
 		// The announce guard bumps `announces_started` + the path length on open, and
 		// `announces_ended` + the path length again on drop.
 		let stats = test_stats();
-		let ctx = stats.tier(Tier::default()).session("root");
+		let ctx = stats.tier(Tier::default()).session("root", None);
 		let path_len = "demo/bbb".len() as u64;
 
 		let guard = ctx.egress("demo/bbb").announce();

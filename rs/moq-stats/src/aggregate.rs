@@ -18,8 +18,8 @@ use moq_net::track::Subscribing;
 use moq_net::{AsPath, Epoch, PathOwned, origin};
 
 use crate::{
-	PresenceFrame, Result, SessionsFrame, Totals, TotalsFrame, TrafficFrame, parse_node_path, presence_track,
-	sessions_track, totals_track, traffic_track,
+	LabelsFrame, PresenceFrame, Result, SessionsFrame, Totals, TotalsFrame, TrafficFrame, labels_track,
+	parse_node_path, presence_track, sessions_track, totals_track, traffic_track,
 };
 
 /// Configuration for an [`Consumer`]. Construct with [`Config::new`] and chain
@@ -118,8 +118,8 @@ impl Default for Config {
 /// contribution carries across; a different known epoch keeps its own entry,
 /// even when an unversioned reader resolves it first.
 ///
-/// A sessions track is the exception: it is a gauge, so a departed node stops
-/// counting its sessions immediately.
+/// The sessions and labels tracks are the exception: they are gauges, so a
+/// departed node stops counting its sessions immediately.
 ///
 /// The totals and presence tracks never regress: a node's counter going down
 /// is that node resetting (a restart on a route without an epoch, or a
@@ -165,6 +165,14 @@ impl Consumer {
 	pub fn sessions(&self, tier: &Tier) -> SessionsConsumer {
 		let name = sessions_track(tier, self.config.compression);
 		SessionsConsumer {
+			inner: Merged::new(self.origin.clone(), &self.config, name),
+		}
+	}
+
+	/// A merged reader over the labels track for `tier`; see [`Self::totals`].
+	pub fn labels(&self, tier: &Tier) -> LabelsConsumer {
+		let name = labels_track(tier, self.config.compression);
+		LabelsConsumer {
 			inner: Merged::new(self.origin.clone(), &self.config, name),
 		}
 	}
@@ -220,6 +228,20 @@ impl SessionsConsumer {
 	pub async fn next(&mut self) -> Result<Option<SessionsFrame>> {
 		let frame = kio::wait(|waiter| self.inner.poll_next(waiter)).await?;
 		Ok(frame.map(|frame| frame.into_iter().map(|(root, gauge)| (root, gauge.0)).collect()))
+	}
+}
+
+/// A merged reader over one labels track across every node in the group; see
+/// [`TotalsConsumer`].
+pub struct LabelsConsumer {
+	inner: Merged<Gauge>,
+}
+
+impl LabelsConsumer {
+	/// The next merged frame, or `None` once the announce stream ends.
+	pub async fn next(&mut self) -> Result<Option<LabelsFrame>> {
+		let frame = kio::wait(|waiter| self.inner.poll_next(waiter)).await?;
+		Ok(frame.map(|frame| frame.into_iter().map(|(label, gauge)| (label, gauge.0)).collect()))
 	}
 }
 
@@ -933,7 +955,7 @@ mod tests {
 	/// `tier`/`root`, by driving a throwaway tagged broadcast. The broadcast lives
 	/// on its own origin so it never lands on the stats origin.
 	async fn feed(producer: &Producer, tier: Tier, root: &str, path: &str, bytes: usize) -> Feed {
-		let ctx = producer.registry().tier(tier).session(root);
+		let ctx = producer.registry().tier(tier).session(root, None);
 		let feed_origin = produce_origin();
 		let egress = feed_origin.consume().with_stats(ctx.clone());
 
@@ -1632,7 +1654,7 @@ mod tests {
 
 	#[tokio::test(start_paused = true)]
 	async fn merges_sessions_across_nodes() {
-		// Session presence sums per stats label across nodes.
+		// Session presence sums per auth root across nodes.
 		let origin = produce_origin();
 		let node_a = node_producer(&origin, "a");
 		let node_b = node_producer(&origin, "b");
@@ -1641,8 +1663,8 @@ mod tests {
 		// group.
 		let _fa = feed(&node_a, Tier::default(), "acme", "acme/room", 8).await;
 		let _fb = feed(&node_b, Tier::default(), "acme", "acme/room", 8).await;
-		let _sa = node_a.registry().tier(Tier::default()).session("acme");
-		let _sb = node_b.registry().tier(Tier::default()).session("acme");
+		let _sa = node_a.registry().tier(Tier::default()).session("acme", None);
+		let _sb = node_b.registry().tier(Tier::default()).session("acme", None);
 		drive_tick().await;
 
 		let agg = Consumer::new(origin.consume(), Config::new().with_depth(1));
@@ -1668,8 +1690,8 @@ mod tests {
 
 		let _fa = feed(&node_a, Tier::default(), "acme", "acme/room", 8).await;
 		let fb = feed(&node_b, Tier::default(), "acme", "acme/room", 8).await;
-		let _sa = node_a.registry().tier(Tier::default()).session("acme");
-		let sb = node_b.registry().tier(Tier::default()).session("acme");
+		let _sa = node_a.registry().tier(Tier::default()).session("acme", None);
+		let sb = node_b.registry().tier(Tier::default()).session("acme", None);
 		drive_tick().await;
 
 		let agg = Consumer::new(origin.consume(), Config::new().with_depth(1));
