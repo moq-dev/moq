@@ -1101,10 +1101,9 @@ export class Publisher {
 							const floor = start ?? (resolvesStart(this.version) ? 0 : undefined);
 							// Before SUBSCRIBE_START nothing is owed yet; the start accounts for it.
 							if (floor !== undefined && startSequence !== undefined) {
-								// A raised floor gives up what the subscription was owed below it.
-								const current = Math.max(requested ?? startSequence, startSequence);
-								if (floor > current && !(await drop(current, floor))) return false;
-								// A lowered one owes the groups it newly asks for, so the end sweep covers them.
+								// A lowered floor owes the groups it newly asks for, so the end sweep covers them.
+								// A raised one sends no early drop: the subscriber already stops owing below
+								// its floor, and a later update may lower it again to reopen those groups.
 								startSequence = Math.min(startSequence, floor);
 							}
 							bounds.startGroup = update.startGroup;

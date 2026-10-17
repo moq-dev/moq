@@ -755,6 +755,28 @@ test("lite draft-06: an update lowering the start is swept at the end", async ()
 	}
 });
 
+// A raised floor sends no early drop: a later update may lower it again, and the
+// subscriber cannot take back a drop for the groups that reopens.
+test("lite draft-06: a raised floor is not dropped early", async () => {
+	const sub = await servedSubscription({ version: Version.DRAFT_06, startGroup: 0 });
+	try {
+		sub.serve(0);
+		expect(await sub.servedSequence()).toBe(0);
+		await replayUpdate({ priority: 0, startGroup: 5 }).encode(sub.client.writer, Version.DRAFT_06);
+		await flush();
+		await replayUpdate({ priority: 0, startGroup: 1 }).encode(sub.client.writer, Version.DRAFT_06);
+		await flush();
+		for (const sequence of [1, 2, 3, 4]) {
+			sub.serve(sequence);
+			expect(await sub.servedSequence()).toBe(sequence);
+		}
+		sub.track.close();
+		expect(await drops(sub.client.reader, Version.DRAFT_06)).toEqual([]);
+	} finally {
+		await sub.close();
+	}
+});
+
 // An unfloored pre-06 subscribe joins at the publisher's start. SUBSCRIBE_START makes
 // that group the floor: a straggler below it is dropped even though arrival-order
 // serving would otherwise surface it.

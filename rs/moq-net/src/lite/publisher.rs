@@ -1,7 +1,7 @@
 use crate::{SessionError, announce, frame, group, origin, track};
 use rangemap::RangeSet;
 use std::{
-	collections::{BTreeSet, HashMap, VecDeque},
+	collections::{BTreeSet, HashMap},
 	ops::{Bound, ControlFlow, Range},
 	sync::{
 		Arc, Mutex,
@@ -3298,8 +3298,6 @@ struct TrackRun<S: crate::transport::poll::Session> {
 	// cannot tell when the subscriber stopped waiting for it.
 	// `None` on other versions.
 	served: Option<RangeSet<u64>>,
-	/// Ranges an update raised the floor past after SUBSCRIBE_START, waiting for the writer.
-	pending_drops: VecDeque<Range<u64>>,
 	// Serve datagrams off this same subscriber, but only on lite-05+ over a
 	// datagram-capable transport (qmux/WebSocket/TCP/UDS report size 0). No group
 	// fallback: otherwise off.
@@ -3332,7 +3330,6 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 			end_sent: false,
 			count_streams,
 			served,
-			pending_drops: VecDeque::new(),
 			datagrams,
 			children: kio::Tasks::new(),
 		}
@@ -3392,12 +3389,9 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 			self.track.start_at(start);
 			// Before SUBSCRIBE_START nothing is owed yet; the start accounts for it.
 			if let Some(resolved) = self.start {
-				// A raised floor gives up what the subscription was owed below it.
-				let current = requested.map_or(resolved, |requested| requested.max(resolved));
-				if start > current && self.served.is_some() {
-					self.pending_drops.push_back(current..start);
-				}
-				// A lowered one owes the groups it newly asks for, so the end sweep covers them.
+				// A lowered floor owes the groups it newly asks for, so the end sweep covers them.
+				// A raised one sends no early drop: the subscriber already stops owing below its
+				// floor, and a later update may lower it again to reopen those groups.
 				self.start = Some(resolved.min(start));
 			}
 		}
@@ -3438,10 +3432,6 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 		// Lite-05/06 name a sequence as soon as this cursor gives it up. Before
 		// SUBSCRIBE_START there is no owed range yet, so the eventual start accounts
 		// for it instead.
-		if let Some(range) = self.pending_drops.pop_front() {
-			self.drop_range(range, writer)?;
-			return Poll::Ready(Ok(ControlFlow::Continue(())));
-		}
 		if self.start.is_some()
 			&& self.served.is_some()
 			&& let Poll::Ready(range) = self.track.poll_drop(waiter)
@@ -5026,6 +5016,49 @@ mod serve_group_test {
 		drop(track);
 		kio::wait(|waiter| run.poll(&mut writer, waiter)).await.unwrap();
 		assert_eq!(drops(&mut writer, &log, version).await, [(1, 4)]);
+	}
+
+	/// A raised floor sends no early drop: a later update may lower it again, and the
+	/// subscriber cannot take back a drop for the groups that reopens.
+	#[moq_net_sim::test]
+	async fn a_raised_floor_is_not_dropped_early() {
+		let version = Version::Lite06;
+		let mut track = track::Producer::new(
+			Arc::new(broadcast::Info::default()),
+			"test",
+			crate::track::Info::timed(),
+		);
+		let subscription = track::Subscription::default()
+			.with_start(track::Position::group(0))
+			.with_max_delay(Duration::from_secs(10));
+		let subscriber = track.subscribe(subscription);
+		let (mut run, mut writer, log) = lite_run(version, SinkSession::new(Log::default()), subscriber);
+		write_group(&mut track, 0, 0);
+		while run.start.is_none() {
+			assert!(run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready());
+		}
+
+		let update = |start_group| lite::SubscribeUpdate {
+			order: crate::track::Order::Ascending,
+			priority: 0,
+			max_delay: Duration::from_secs(10),
+			start_group: Some(start_group),
+			end_group: None,
+			start_frame: 0,
+			end_frame: None,
+		};
+		run.update(update(5));
+		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+		assert_eq!(drops(&mut writer, &log, version).await, []);
+
+		run.update(update(0));
+		for sequence in 1..5 {
+			write_group(&mut track, sequence, 0);
+		}
+		track.finish_at(track::Position::group(5)).unwrap();
+		drop(track);
+		kio::wait(|waiter| run.poll(&mut writer, waiter)).await.unwrap();
+		assert_eq!(drops(&mut writer, &log, version).await, []);
 	}
 
 	/// Pre-06 an absent Group Start is the latest group, so an update that drops a named
