@@ -11,7 +11,7 @@ binding, are unchanged.
 
 ## Plan
 
-Shape A from [the spike](https://github.com/moq-dev/moq/pull/TBD), pending
+Shape A from [the spike](https://github.com/moq-dev/moq/pull/5851), pending
 the maintainer's pick there. The prototype is on the
 `spike/ffi-poll-prototype` branch.
 
