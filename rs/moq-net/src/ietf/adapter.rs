@@ -1177,10 +1177,15 @@ impl<S: crate::transport::poll::Session> crate::transport::poll::Session for Con
 		self.inner.send_group(priority)
 	}
 
-	fn poll_send_datagram(&mut self, cx: &mut Context<'_>, payload: &[u8]) -> Poll<Result<(), Self::Error>> {
+	fn send_datagram(
+		&mut self,
+		payload: Bytes,
+		group: Option<&<Self::SendStream as crate::transport::poll::SendStream>::Group>,
+		order: i64,
+	) -> Result<(), Self::Error> {
 		self.inner
-			.poll_send_datagram(cx, payload)
-			.map(|r| r.map_err(|_| crate::Error::Closed))
+			.send_datagram(payload, group, order)
+			.map_err(|_| crate::Error::Closed)
 	}
 
 	fn poll_recv_datagram(&mut self, cx: &mut Context<'_>) -> Poll<Result<Bytes, Self::Error>> {

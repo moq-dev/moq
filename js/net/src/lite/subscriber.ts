@@ -23,7 +23,7 @@ import { Cost, type Hop, MAX_HOPS, type Route, routesEqual, UNKNOWN_HOP } from "
 import { groupBounds, hiddenBelow, scopeCaptures, scopeHead, scopeOverlaps } from "../internal.ts";
 import * as Path from "../path.ts";
 import { sendOrder } from "../priority.ts";
-import { type OpenOptions, type Reader, Stream } from "../stream.ts";
+import { type OpenOptions, type Reader, Stream, Writer } from "../stream.ts";
 import { TAIL_GRACE_MS, Tail } from "../tail.ts";
 import * as Time from "../time.ts";
 import type * as track from "../track.ts";
@@ -768,8 +768,8 @@ export class Subscriber {
 
 			// Terminal conditions (stream end, track close, a failed subscription update) settle at most
 			// once; race them into one stable promise so the demand loop doesn't re-subscribe each pass.
-			// Updates stop quietly at the FIN, which can land before the responses ahead of it are
-			// decoded, so only their failure is terminal on its own.
+			// Updates stop quietly at the FIN or a failed write, either of which can land before the
+			// responses ahead of it are decoded, so only a refused update is terminal on its own.
 			const terminal: PromiseLike<unknown>[] = [closed, producer.closed];
 			if (subscriptionUpdates !== undefined) terminal.push(subscriptionUpdates.then(() => closed));
 			const done = race(terminal);
@@ -1237,7 +1237,7 @@ export class Subscriber {
 	/**
 	 * Send SUBSCRIBE_UPDATE messages whenever the track's aggregate subscription changes.
 	 *
-	 * Resolves cleanly when the stream or track closes, so the caller can include
+	 * Resolves cleanly when the stream or track closes, or a write fails, so the caller can include
 	 * this in a race without leaving a dangling pending write that would
 	 * become an unhandled rejection if the user calls update after close.
 	 *
@@ -1293,7 +1293,17 @@ export class Subscriber {
 				startGroup: current.groups?.start === undefined ? undefined : bounds.start,
 				endGroup: inclusiveGroupEnd(bounds.end),
 			});
-			await update.encode(stream.writer, this.version);
+			// Encoded apart from the write, so a bound the wire can't carry still fails the track.
+			const encoded: Uint8Array[] = [];
+			const buffer = new WritableStream<Uint8Array>({ write: (chunk) => void encoded.push(chunk.slice()) });
+			await update.encode(new Writer(buffer, this.version), this.version);
+			// A failed write means the publisher stopped reading, as it does once it finishes the
+			// track. The responses decide how the track ends, cleanly at the FIN or with a reset's error.
+			try {
+				for (const chunk of encoded) await stream.writer.write(chunk);
+			} catch {
+				return;
+			}
 			lastSent = { ...current };
 			console.debug(`subscribe update: id=${id} broadcast=${broadcast} track=${track.name}`);
 		}
