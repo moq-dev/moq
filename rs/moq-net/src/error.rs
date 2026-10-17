@@ -646,7 +646,7 @@ impl From<&Error> for SessionError {
 			// says an unrecognized code is an unspecified error. Send that instead.
 			Error::Remote(_) => Self::Internal,
 			// Our own transport failed: there is no code to say so.
-			Error::Transport(_) => Self::Internal,
+			Error::Transport(_) | Error::IdleTimeout => Self::Internal,
 			// Stream-scoped conditions have no session code.
 			Error::Old
 			| Error::Evicted
@@ -680,7 +680,7 @@ impl From<&Error> for StreamError {
 			// A stream that can still be reset outlived the session that failed, so that was
 			// another one: the route this stream was served through. The path lost its route;
 			// this session is fine, and the failed session's code means nothing here.
-			Error::Session(_) | Error::Transport(_) => Self::Unroutable,
+			Error::Session(_) | Error::Transport(_) | Error::IdleTimeout => Self::Unroutable,
 			Error::Cancel | Error::Closed => Self::Cancel,
 			Error::SessionClosed => Self::Session(SessionError::Cancel),
 			Error::Decode(coding::DecodeError::Session(err)) => Self::Session(err.clone()),
@@ -930,9 +930,10 @@ mod tests {
 			);
 		}
 		assert_eq!(
-			StreamError::from(&Error::Transport("idle timeout".into())),
+			StreamError::from(&Error::Transport("reset".into())),
 			StreamError::Unroutable
 		);
+		assert_eq!(StreamError::from(&Error::IdleTimeout), StreamError::Unroutable);
 
 		// A producer dropped without an end is a bug, never given a meaning.
 		assert_eq!(StreamError::from(&Error::Dropped), StreamError::Internal);
