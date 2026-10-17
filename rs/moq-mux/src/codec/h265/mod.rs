@@ -569,6 +569,22 @@ pub(crate) mod fixtures {
 		0x02, 0x00, 0x00, 0x03, 0x00, 0x3c, 0x10,
 	];
 	pub(crate) const PPS: &[u8] = &[0x44, 0x01, 0xc1, 0x72, 0xb4, 0x62, 0x40];
+
+	/// SPS from a 64x64 Main 10 x265 encode with `colorprim=bt2020:transfer=smpte2084:colormatrix=bt2020nc`.
+	pub(crate) const SPS_HDR10: &[u8] = &[
+		0x42, 0x01, 0x01, 0x02, 0x20, 0x00, 0x00, 0x03, 0x00, 0x90, 0x00, 0x00, 0x03, 0x00, 0x00, 0x03, 0x00, 0x1e,
+		0xa0, 0x20, 0x81, 0x04, 0xd9, 0x65, 0x65, 0x4a, 0x4c, 0x2f, 0x01, 0x6a, 0x12, 0x20, 0x12, 0x08, 0x00, 0x00,
+		0x03, 0x00, 0x08, 0x00, 0x00, 0x03, 0x00, 0xc8, 0x40,
+	];
+	/// The same encode's `max-cll=1000,400` prefix SEI.
+	pub(crate) const SEI_CONTENT_LIGHT: &[u8] = &[
+		0x4e, 0x01, 0x90, 0x04, 0x03, 0xe8, 0x01, 0x90, 0x80,
+	];
+	/// The same encode's `master-display` prefix SEI: a 1000-nit BT.2020 display with a D65 white point.
+	pub(crate) const SEI_MASTERING: &[u8] = &[
+		0x4e, 0x01, 0x89, 0x18, 0x21, 0x34, 0x9b, 0xaa, 0x19, 0x96, 0x08, 0xfc, 0x8a, 0x48, 0x39, 0x08, 0x3d, 0x13,
+		0x40, 0x42, 0x00, 0x98, 0x96, 0x80, 0x00, 0x00, 0x03, 0x00, 0x32, 0x80,
+	];
 	/// SPS from a 64x64, 25 fps x265 encode with `bframes=3:b-pyramid=1` and HRD signalling
 	/// (`sps_max_num_reorder_pics` 2).
 	pub(crate) const SPS_PYRAMID: &[u8] = &[
@@ -689,6 +705,26 @@ mod tests {
 
 	/// The real-SPS fixture resolves a full out-of-band config: dimensions from
 	/// the parsed SPS and the hvcC itself as the catalog `description`.
+	/// The hvcC's SPS signals the colour; a refused SPS signals none rather than failing.
+	#[test]
+	fn hvcc_color_reads_the_sps_vui() {
+		let hvcc = |sps: &'static [u8]| {
+			build_hvcc(
+				&[Bytes::from_static(fixtures::VPS)],
+				&[Bytes::from_static(sps)],
+				&[Bytes::from_static(fixtures::PPS)],
+			)
+			.unwrap()
+		};
+		let color = config_from_hvcc(&hvcc(fixtures::SPS_HDR10)).unwrap().color.unwrap();
+		assert_eq!(
+			(color.primaries, color.transfer, color.matrix, color.full_range),
+			(Some(9), Some(16), Some(9), Some(false))
+		);
+		assert_eq!(hvcc_color(&hvcc(fixtures::SPS)), None);
+		assert_eq!(hvcc_color(&hvcc(fixtures::SPS_ZERO_COLOUR)), None);
+	}
+
 	#[test]
 	fn config_from_hvcc_resolves_real_sps() {
 		let hvcc = fixtures::hvcc();

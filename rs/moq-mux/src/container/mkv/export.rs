@@ -729,7 +729,7 @@ fn build_video_track_entry(
 }
 
 /// The Matroska `Colour` element for a catalog colour, carrying only the fields it sets.
-fn matroska_colour(color: &hang::catalog::Color) -> Option<MatroskaSpec> {
+pub(super) fn matroska_colour(color: &hang::catalog::Color) -> Option<MatroskaSpec> {
 	let mut children = Vec::new();
 	if let Some(v) = color.matrix {
 		children.push(MatroskaSpec::MatrixCoefficients(v.into()));

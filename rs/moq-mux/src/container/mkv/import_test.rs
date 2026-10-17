@@ -1106,3 +1106,59 @@ fn subtitle_codec_state_is_refused() {
 		"{result:?}"
 	);
 }
+
+/// The SPS outranks the Colour element, which still fills what the SPS leaves unsaid: here the
+/// static HDR metadata.
+#[test]
+fn sps_color_outranks_colour_which_fills_its_gaps() {
+	use crate::codec::h264::fixtures::{PPS, SPS_BT709};
+
+	let hdr = crate::codec::color::test::hdr10();
+	let mut container = crate::codec::color::cicp(9, 16, 9, Some(true)).unwrap();
+	container.mastering = hdr.mastering;
+	container.content_light = hdr.content_light;
+	let colour = super::export::matroska_colour(&container).unwrap();
+
+	let avcc = crate::codec::h264::build_avcc(&[bytes::Bytes::from_static(SPS_BT709)], &[bytes::Bytes::from_static(PPS)]).unwrap();
+	let entry = MatroskaSpec::TrackEntry(Master::Full(vec![
+		MatroskaSpec::TrackNumber(1),
+		MatroskaSpec::TrackUID(1),
+		MatroskaSpec::TrackType(1),
+		MatroskaSpec::CodecID("V_MPEG4/ISO/AVC".to_string()),
+		MatroskaSpec::CodecPrivate(avcc.to_vec()),
+		MatroskaSpec::Video(Master::Full(vec![
+			MatroskaSpec::PixelWidth(64),
+			MatroskaSpec::PixelHeight(64),
+			colour,
+		])),
+	]));
+	let data = MkvBuilder::new()
+		.header("matroska")
+		.segment_start()
+		.info(1_000_000)
+		.tracks(vec![entry])
+		.segment_end()
+		.build();
+
+	let catalog = run(&data);
+	let color = catalog.video.renditions.values().next().unwrap().color.clone().unwrap();
+	assert_eq!(
+		(color.primaries, color.transfer, color.matrix, color.full_range),
+		(Some(1), Some(1), Some(1), Some(false))
+	);
+	assert_eq!((color.mastering, color.content_light), (hdr.mastering, hdr.content_light));
+}
+
+/// Every catalog colour field survives a Matroska Colour element.
+#[test]
+fn colour_element_round_trips() {
+	let hdr = crate::codec::color::test::hdr10();
+	let mut color = crate::codec::color::cicp(9, 18, 9, Some(true)).unwrap();
+	color.mastering = hdr.mastering;
+	color.content_light = hdr.content_light;
+	let MatroskaSpec::Colour(Master::Full(children)) = super::export::matroska_colour(&color).unwrap() else {
+		panic!("expected a full Colour element");
+	};
+	assert_eq!(super::import::matroska_color(&children), Some(color));
+	assert_eq!(super::export::matroska_colour(&hang::catalog::Color::default()), None);
+}

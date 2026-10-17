@@ -373,6 +373,40 @@ mod tests {
 	use super::*;
 	use crate::codec::h265::{Split, fixtures};
 
+	/// An HDR10 keyframe publishes its VUI colour and the static HDR metadata its SEI carries.
+	#[tokio::test(start_paused = true)]
+	async fn hev1_keyframe_publishes_hdr10_color() {
+		let idr: &[u8] = &[0x26, 0x01, 0x80, 0xaa]; // IdrWRadl (19)
+		let mut annexb = BytesMut::new();
+		for nal in [
+			fixtures::VPS,
+			fixtures::SPS_HDR10,
+			fixtures::PPS,
+			fixtures::SEI_CONTENT_LIGHT,
+			fixtures::SEI_MASTERING,
+			idr,
+		] {
+			annexb.extend_from_slice(&[0, 0, 0, 1]);
+			annexb.extend_from_slice(nal);
+		}
+
+		let mut split = Split::new();
+		let (track, catalog) = setup("video");
+		let mut import = Import::new(track, catalog.reserve(), Default::default()).unwrap();
+		let pts = moq_net::Timestamp::from_micros(0).unwrap();
+		let mut frames = split.decode(&annexb, pts).expect("split keyframe");
+		frames.extend(split.flush(pts).expect("flush keyframe"));
+		import.decode(frames).expect("decode keyframe");
+
+		let color = catalog.snapshot().video.renditions["video"].color.clone().expect("colour");
+		assert_eq!(
+			(color.primaries, color.transfer, color.matrix, color.full_range),
+			(Some(9), Some(16), Some(9), Some(false))
+		);
+		let hdr = crate::codec::color::test::hdr10();
+		assert_eq!((color.mastering, color.content_light), (hdr.mastering, hdr.content_light));
+	}
+
 	fn setup(name: &str) -> (moq_net::track::Producer, crate::catalog::Producer) {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();

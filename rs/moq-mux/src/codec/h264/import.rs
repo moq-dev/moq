@@ -309,6 +309,56 @@ mod tests {
 		(track, catalog)
 	}
 
+	/// An HDR10 keyframe publishes its VUI colour and the static HDR metadata its SEI carries.
+	#[tokio::test(start_paused = true)]
+	async fn avc3_keyframe_publishes_hdr10_color() {
+		use crate::codec::h264::fixtures::{PPS, SEI_CONTENT_LIGHT, SEI_MASTERING, SPS_HDR10};
+
+		let idr: &[u8] = &[0x65, 0x88, 0x84, 0x21];
+		let mut annexb = BytesMut::new();
+		for nal in [SPS_HDR10, PPS, SEI_MASTERING, SEI_CONTENT_LIGHT, idr] {
+			annexb.extend_from_slice(&[0, 0, 0, 1]);
+			annexb.extend_from_slice(nal);
+		}
+
+		let mut split = Split::new();
+		let (track, catalog) = setup("video");
+		let mut import = Import::new(track, catalog.reserve(), Default::default()).unwrap();
+		let pts = moq_net::Timestamp::from_micros(0).unwrap();
+		let mut frames = split.decode(&annexb, pts).expect("split keyframe");
+		frames.extend(split.flush(pts).expect("flush keyframe"));
+		import.decode(frames).expect("decode keyframe");
+
+		let color = catalog.snapshot().video.renditions["video"].color.clone().expect("colour");
+		assert_eq!(
+			(color.primaries, color.transfer, color.matrix, color.full_range),
+			(Some(9), Some(16), Some(9), Some(false))
+		);
+		let hdr = crate::codec::color::test::hdr10();
+		assert_eq!((color.mastering, color.content_light), (hdr.mastering, hdr.content_light));
+	}
+
+	/// The stream outranks the caller's hint, which only fills what the stream leaves unsaid.
+	#[tokio::test(start_paused = true)]
+	async fn stream_color_outranks_the_hint() {
+		use crate::codec::h264::fixtures::{PPS, SPS_BT709};
+
+		let mut hinted = hang::catalog::Color::default();
+		hinted.primaries = Some(9);
+		hinted.content_light = crate::codec::color::test::hdr10().content_light;
+		let mut hint = crate::catalog::VideoHint::default();
+		hint.color = Some(hinted);
+
+		let (track, catalog) = setup("video");
+		let mut import = Import::new(track, catalog.reserve(), hint).unwrap();
+		let avcc = crate::codec::h264::build_avcc(&[Bytes::from_static(SPS_BT709)], &[Bytes::from_static(PPS)]).unwrap();
+		import.initialize(&avcc).unwrap();
+
+		let color = catalog.snapshot().video.renditions["video"].color.clone().expect("colour");
+		assert_eq!(color.primaries, Some(1), "the SPS outranks the hint");
+		assert_eq!(color.content_light, crate::codec::color::test::hdr10().content_light);
+	}
+
 	/// Only a fixed-rate SPS states the frame rate; without `fixed_frame_rate_flag` its tick is a
 	/// ceiling, left for the catalog estimator to measure.
 	#[test]

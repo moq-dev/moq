@@ -232,7 +232,7 @@ fn sei_mastering(p: &[u8]) -> Mastering {
 pub(crate) mod test {
 	use super::*;
 
-	/// The HDR10 mastering display and light levels the fixtures below encode.
+	/// The HDR10 mastering display and light levels the x264 and x265 SEI fixtures carry.
 	pub(crate) fn hdr10() -> Hdr {
 		Hdr {
 			mastering: Some(Mastering {
@@ -248,21 +248,6 @@ pub(crate) mod test {
 				max_fall: 400,
 			}),
 		}
-	}
-
-	/// An SEI RBSP carrying [`hdr10`]: a mastering display then a content light level message.
-	pub(crate) fn hdr10_sei() -> Vec<u8> {
-		let mut rbsp = vec![137, 24];
-		for v in [8500u16, 39850, 6550, 2300, 35400, 14600, 15635, 16450] {
-			rbsp.extend_from_slice(&v.to_be_bytes());
-		}
-		rbsp.extend_from_slice(&10_000_000u32.to_be_bytes());
-		rbsp.extend_from_slice(&50u32.to_be_bytes());
-		rbsp.extend_from_slice(&[144, 4]);
-		rbsp.extend_from_slice(&1000u16.to_be_bytes());
-		rbsp.extend_from_slice(&400u16.to_be_bytes());
-		rbsp.push(0x80);
-		rbsp
 	}
 
 	#[test]
@@ -296,7 +281,30 @@ pub(crate) mod test {
 
 	#[test]
 	fn sei_reads_hdr10() {
-		assert_eq!(sei(&hdr10_sei()), hdr10());
+		use crate::codec::h264::fixtures::{SEI_CONTENT_LIGHT, SEI_MASTERING};
+		let mut hdr = Hdr::default();
+		for nal in [SEI_MASTERING, SEI_CONTENT_LIGHT] {
+			hdr.update(sei(&h264_parser::nal::ebsp_to_rbsp(&nal[1..])));
+		}
+		assert_eq!(hdr, hdr10());
+	}
+
+	#[test]
+	fn access_unit_reads_both_shapes() {
+		use crate::codec::h264::fixtures::{PPS, SEI_CONTENT_LIGHT, SEI_MASTERING, SPS_HDR10};
+		let is_sei = |h: u8| h & 0x1f == 6;
+		let nals = [SPS_HDR10, PPS, SEI_MASTERING, SEI_CONTENT_LIGHT];
+
+		let mut annexb = Vec::new();
+		let mut prefixed = Vec::new();
+		for nal in nals {
+			annexb.extend_from_slice(&[0, 0, 0, 1]);
+			annexb.extend_from_slice(nal);
+			prefixed.extend_from_slice(&(nal.len() as u32).to_be_bytes());
+			prefixed.extend_from_slice(nal);
+		}
+		assert_eq!(access_unit(&annexb.into(), None, 1, is_sei), hdr10());
+		assert_eq!(access_unit(&prefixed.into(), Some(4), 1, is_sei), hdr10());
 	}
 
 	#[test]

@@ -722,7 +722,7 @@ fn build_video_config(
 
 /// The colour a Matroska `Colour` element signals. Its code points are H.273's, `Range` counts 0
 /// as unspecified, 1 as limited, and 2 as full, and a partial mastering display is dropped.
-fn matroska_color(children: &[MatroskaSpec]) -> Option<hang::catalog::Color> {
+pub(super) fn matroska_color(children: &[MatroskaSpec]) -> Option<hang::catalog::Color> {
 	use hang::catalog::{Chromaticity, ContentLight, Mastering};
 
 	let (mut primaries, mut transfer, mut matrix, mut full_range) = (2, 2, 2, None);
