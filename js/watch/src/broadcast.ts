@@ -300,7 +300,8 @@ export class Broadcast {
 			const catalog = effect.get(this.in.catalog);
 			let accepted: Catalog.Root | undefined;
 			try {
-				accepted = catalog && Catalog.checkResolvable(Catalog.checkRenditions(catalog), name);
+				accepted =
+					catalog && Catalog.checkResolvable(Catalog.checkRenditions(Catalog.checkVersion(catalog)), name);
 			} catch (err) {
 				console.error("rejecting catalog", name, err);
 			}

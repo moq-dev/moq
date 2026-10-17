@@ -37,10 +37,16 @@ const VersionSchema = z.number().check(
 	z.int(),
 	z.nonnegative(),
 	z.refine((version) => {
-		if (Number.isInteger(version) && version > VERSION) throw new UnsupportedVersion(version);
+		if (Number.isInteger(version)) checkVersion({ version });
 		return true;
 	}),
 );
+
+/** Refuse a root needing a newer moq-hang draft than {@link VERSION}, for one that skipped {@link RootSchema}. */
+export function checkVersion<T extends { version?: number }>(root: T): T {
+	if (root.version !== undefined && root.version > VERSION) throw new UnsupportedVersion(root.version);
+	return root;
+}
 
 /**
  * The root catalog: the base sections every hang broadcast carries.

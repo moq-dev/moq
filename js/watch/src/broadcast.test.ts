@@ -141,6 +141,12 @@ describe("relativeBroadcast", () => {
 		expect(await rejection(catalog)).toBeInstanceOf(Catalog.EscapingBroadcast);
 	});
 
+	it("rejects a catalog needing a newer reader", async () => {
+		// A manual catalog skips the schema, so it needs the same refusal a fetched one gets.
+		const catalog = { version: Catalog.VERSION + 1, video: { renditions: { good: rendition() } } } as Catalog.Root;
+		expect(await rejection(catalog)).toBeInstanceOf(Catalog.UnsupportedVersion);
+	});
+
 	it("rejects a catalog whose text or data track escapes the root", async () => {
 		// The shared hang check runs here too, so every section it covers rejects the catalog.
 		const broadcast = Path.normalizeRelative("../../x");
