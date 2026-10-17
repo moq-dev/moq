@@ -26,8 +26,12 @@ once this lands.
   and cut CPU per frame 20 to 30 percent across 1 to 64 subscribers. Python
   was within noise, since asyncio's own wakeup dominates. With
   no read lane, a cancelled read that UniFFI has not freed yet no longer
-  blocks the next read, so this needs no UniFFI change. kio-only reads also
-  keep working after `moq_ffi_shutdown`.
+  blocks the next read, so this needs no UniFFI change.
+- **Keep shutdown's contract**: `moq_ffi_shutdown` documents that every
+  parked and later call resolves `Cancelled`. The spike's prototype broke
+  that: its kio reads delivered frames after shutdown. Each poll checks the
+  stopped flag first. kio reads need no in-flight counter, since nothing they
+  poll touches the stopped runtime.
 - **Handle state**: a std `Mutex` held only across one poll, never across a
   wait. Cancel closes a kio channel that every poll checks, then drops the
   state. Driver supervision (`Background`) is kio already, so poll it in the
@@ -36,6 +40,13 @@ once this lands.
   both park, and each poll takes the next item atomically. Iteration order
   (sequence or arrival) is unchanged; only which concurrent call gets which
   item is. Check wrapper docs that promise serialization.
+- **Multi-step reads**: an operation that spans polls through shared handle
+  state must tolerate another call changing it between polls. The track's
+  `read_frame` acquires a group into the shared `pending` slot, then reads
+  from it on a later poll. A concurrent `next_group`, or a second
+  `read_frame`, can take that group in between, and the current `expect` would
+  panic. Either make the whole step one poll, re-acquire when the slot is
+  empty, or keep per-operation ownership for these reads.
 - **Still lost on cancel**: when a RustFuture finishes and the foreign side
   then drops it as cancelled (Python asyncio cancel, Go ctx), the result is
   gone. The spike measured this in both `Task` and Shape A. Keep the Go
@@ -50,8 +61,10 @@ once this lands.
   this quest's goal.
 - **Tests**: a read cancelled but not yet freed does not block the next read
   on the same handle (drive `rust_future_*` directly, as the spike did). A
-  read parked across shutdown resolves without a crash. Two reads parked on
-  one handle each wake, and between them they take every item exactly once.
+  read parked across shutdown resolves `Cancelled` without a crash. Two reads
+  parked on one handle each wake, and between them they take every item
+  exactly once. That includes a mixed `read_frame` and `next_group` on one
+  track.
 - **Benchmark both fan-out axes**: the spike swept subscribers at one
   publisher. Confirm the gain on the binding benchmark across publishers and
   subscribers before and after; the Go runner should move.
