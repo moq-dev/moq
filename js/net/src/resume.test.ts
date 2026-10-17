@@ -561,3 +561,48 @@ test("a fetch never reads a replacement refused for its track properties", async
 	a.close();
 	b.close();
 });
+
+test("the first fetch of a track says what the track is for later routes", async () => {
+	const front = new Front();
+	const a = new BroadcastProducer();
+	const b = new BroadcastProducer();
+	for (const [source, priority] of [
+		[a, 1],
+		[b, 2],
+	] as const) {
+		const producer = source.createTrack("seq", { priority });
+		const group = new GroupProducer(0);
+		producer.writeGroup(group);
+		group.writeFrame({ payload: enc.encode(`${priority}`) });
+		group.close();
+	}
+	front.serve(a.consume());
+	(await front.consumer.track("seq").fetchGroup(0)).close();
+	front.serve(b.consume());
+	await expect(front.consumer.track("seq").fetchGroup(0)).rejects.toThrow("changed its properties");
+
+	front.consumer.close();
+	a.close();
+	b.close();
+});
+
+test("aborting a fetch stops it while its route's properties are still being checked", async () => {
+	const front = new Front();
+	const a = new BroadcastProducer();
+	const b = new BroadcastProducer();
+	a.createTrack("seq");
+	// b serves tracks on demand but never answers, so its properties never arrive.
+	void wireOf(b).requested();
+	front.serve(a.consume());
+	await front.consumer.track("seq").info();
+	front.serve(b.consume());
+	const abort = new AbortController();
+	const fetching = front.consumer.track("seq").fetchGroup(0, { signal: abort.signal });
+	await settle();
+	abort.abort(new Error("cancelled"));
+	await expect(fetching).rejects.toThrow("cancelled");
+
+	front.consumer.close();
+	a.close();
+	b.close();
+});

@@ -901,12 +901,15 @@ export class Front {
 	// never reads a copy a subscription would refuse.
 	async #verify(name: string, source: Source): Promise<void> {
 		const recorded = this.#info.get(name);
-		if (!recorded || recorded.source === source) return;
+		if (recorded?.source === source) return;
 		let verified = this.#verified.get(source);
 		if (verified?.has(name)) return;
 		// A one-shot query: a hold would keep the track wanted for as long as the fetch's signal.
 		const info = await source.wire.resolveTrackInfo(name);
-		if (!compatible(recorded.info, info)) throw new Incompatible(name);
+		// The first answer says what the track is; later sources have to match it.
+		const expected = this.#info.get(name);
+		if (!expected) this.#record(name, info, source);
+		else if (!compatible(expected.info, info)) throw new Incompatible(name);
 		verified ??= new Set();
 		verified.add(name);
 		this.#verified.set(source, verified);
@@ -1017,7 +1020,7 @@ export class Front {
 			}
 			source.retain();
 			try {
-				await this.#verify(name, source);
+				await until(this.#verify(name, source), options?.signal);
 				return { group: await source.wire.fetchGroup(name, sequence, options), source };
 			} catch (err) {
 				source.release();

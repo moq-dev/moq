@@ -598,8 +598,8 @@ export class Consumer {
 		if (this.#attempt === attempt) this.#attempt = undefined;
 		const replacement = attempt.replacement;
 		if (!replacement) return true;
-		if (!failed && this.#state.frames.peek().length > 0) {
-			// The copy being read delivered meanwhile; keep reading it.
+		if (!failed && (this.#state.frames.peek().length > 0 || this.#state.closed.peek() !== undefined)) {
+			// The copy being read delivered or ended meanwhile; keep reading it.
 			replacement.group.close();
 			return true;
 		}
@@ -628,7 +628,7 @@ export class Consumer {
 		}
 		replacement.adopt();
 		// The copy left behind stops teeing into the state this consumer read.
-		this.#state.closed.peek() ?? this.#state.closed.set(null);
+		if (this.#state.closed.peek() === undefined) this.#state.closed.set(null);
 		this.#state = next;
 		this.#expiry = replacement.expiry;
 		this.#skip = index;
