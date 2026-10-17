@@ -46,7 +46,8 @@ use ndk::media_error::MediaError;
 
 use super::super::encoder::{Applied, Codec, Config, Gop};
 use super::{Backend, Encoded};
-use crate::{Color, Error, Frame, I420};
+use crate::color::{Matrix, Primaries, Range, Transfer};
+use crate::{Error, Frame, I420};
 
 pub(crate) const NAME: &str = "mediacodec";
 
@@ -90,8 +91,12 @@ const PRIORITY_REALTIME: i32 = 0;
 // `MediaFormat.COLOR_STANDARD_*` / `COLOR_TRANSFER_*` / `COLOR_RANGE_*`, the
 // codes MediaCodec translates into the bitstream's VUI.
 const COLOR_STANDARD_BT709: i32 = 1;
+const COLOR_STANDARD_BT601_PAL: i32 = 2;
 const COLOR_STANDARD_BT601_NTSC: i32 = 4;
+const COLOR_STANDARD_BT2020: i32 = 6;
 const COLOR_TRANSFER_SDR_VIDEO: i32 = 3;
+const COLOR_TRANSFER_ST2084: i32 = 6;
+const COLOR_TRANSFER_HLG: i32 = 7;
 const COLOR_RANGE_FULL: i32 = 1;
 const COLOR_RANGE_LIMITED: i32 = 2;
 
@@ -160,7 +165,7 @@ impl MediaCodec {
 
 		let codec = media_codec::MediaCodec::from_encoder_type(mime)
 			.ok_or_else(|| Error::Codec(anyhow::anyhow!("no MediaCodec encoder for {mime}")))?;
-		let format = encoder_format(config, mime);
+		let format = encoder_format(config, mime)?;
 		codec
 			.configure(&format, None, MediaCodecDirection::Encoder)
 			.map_err(|e| codec_err("configure", e))?;
@@ -429,7 +434,7 @@ impl Backend for MediaCodec {
 }
 
 /// The `AMediaFormat` describing what we want encoded and how.
-fn encoder_format(config: &Config, mime: &str) -> MediaFormat {
+fn encoder_format(config: &Config, mime: &str) -> Result<MediaFormat, Error> {
 	let mut format = MediaFormat::new();
 	format.set_str(KEY_MIME, mime);
 	format.set_i32(KEY_WIDTH, config.width as i32);
@@ -453,27 +458,37 @@ fn encoder_format(config: &Config, mime: &str) -> MediaFormat {
 	format.set_i32(KEY_MAX_B_FRAMES, 0);
 
 	// State the color space so the encoder writes it into the bitstream's VUI and
-	// a decoder doesn't fall back to guessing it from the frame height. BT.601
-	// goes out as the NTSC standard (SMPTE 170M primaries and matrix, both code
-	// point 6) with the BT.709 transfer curve, which is what every other backend
-	// emits: the two curves are defined identically and 709 is the only one all
-	// of them can name.
+	// a decoder doesn't fall back to guessing it from the frame height. A color
+	// standard names primaries and matrix together, so a pair it has no standard
+	// for is refused rather than signalled as its nearest neighbour.
 	let color = config.resolved_color();
-	let standard = match color {
-		Color::Bt601Limited | Color::Bt601Full => COLOR_STANDARD_BT601_NTSC,
-		Color::Bt709Limited | Color::Bt709Full => COLOR_STANDARD_BT709,
+	let standard = match (color.primaries, color.matrix) {
+		(Primaries::Bt709, Matrix::Bt709) => COLOR_STANDARD_BT709,
+		(Primaries::Bt470bg, Matrix::Bt601) => COLOR_STANDARD_BT601_PAL,
+		(Primaries::Smpte170m, Matrix::Bt601) => COLOR_STANDARD_BT601_NTSC,
+		(Primaries::Bt2020, Matrix::Bt2020) => COLOR_STANDARD_BT2020,
+		_ => {
+			return Err(Error::Unsupported(format!(
+				"MediaCodec has no color standard for {:?} primaries with the {:?} matrix",
+				color.primaries, color.matrix
+			)));
+		}
+	};
+	let transfer = match color.transfer {
+		Transfer::Bt709 => COLOR_TRANSFER_SDR_VIDEO,
+		Transfer::Pq => COLOR_TRANSFER_ST2084,
+		Transfer::Hlg => COLOR_TRANSFER_HLG,
 	};
 	format.set_i32(KEY_COLOR_STANDARD, standard);
-	format.set_i32(KEY_COLOR_TRANSFER, COLOR_TRANSFER_SDR_VIDEO);
+	format.set_i32(KEY_COLOR_TRANSFER, transfer);
 	format.set_i32(
 		KEY_COLOR_RANGE,
-		if color.limited() {
-			COLOR_RANGE_LIMITED
-		} else {
-			COLOR_RANGE_FULL
+		match color.range {
+			Range::Limited => COLOR_RANGE_LIMITED,
+			Range::Full => COLOR_RANGE_FULL,
 		},
 	);
-	format
+	Ok(format)
 }
 
 /// Write `i420` into a MediaCodec input buffer as tightly packed NV12.

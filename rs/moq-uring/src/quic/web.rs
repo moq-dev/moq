@@ -478,6 +478,12 @@ impl Session {
 		}
 	}
 
+	/// Change the underlying connection's flow-control limits; see
+	/// [`Connection::set_limits`].
+	pub fn set_limits(&self, limits: super::Limits) -> Result<(), crate::Error> {
+		self.conn.set_limits(limits)
+	}
+
 	/// Assemble the web flavor and spawn its capsule reader.
 	fn establish(request: Request, protocol: Option<String>) -> Self {
 		let Request {

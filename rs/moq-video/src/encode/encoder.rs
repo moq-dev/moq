@@ -197,8 +197,11 @@ pub struct Config {
 	/// what the crate's own RGB conversions produce and what a player falls back
 	/// to, so leaving it unset keeps the pixels and the label in agreement.
 	///
-	/// Set it only when feeding frames the crate did not convert and whose space
-	/// you know from elsewhere.
+	/// Set it to the first frame's [`Surface::color`](crate::Surface::color)
+	/// when that is known: a decoded or resized frame keeps its source's space,
+	/// which need not be the one this size infers. [`Encoder::encode`] refuses a
+	/// frame labelled differently with [`Error::ColorMismatch`] rather than
+	/// mislabel it.
 	pub color: Option<Color>,
 	/// External Vulkan input device, required before opening a GPU-only encoder.
 	/// `None` retains selection for CPU and native decoder/capture surfaces.
@@ -503,24 +506,16 @@ impl Encoder {
 			)));
 		}
 		// The VUI is fixed when the session opens, so a frame in a different space
-		// gets encoded under the wrong label. Reached by resizing across the
+		// would be encoded under the wrong label. Reached by resizing across the
 		// standard-definition boundary, where the pixels keep their space but the
-		// encoder was sized into another one; `Config::color` is the way to pin it.
-		//
-		// Warn rather than reject: a live gateway transcoding a source whose VUI
-		// disagrees with its resolution should keep serving a mislabeled stream
-		// rather than drop it, and this is no worse than the untagged stream that
-		// came before. Once, because it would otherwise fire every frame.
+		// encoder was sized into another one, and by a source whose space changes
+		// mid-stream.
 		if let Some(color) = frame.surface.color()
 			&& color != self.color
 		{
-			static WARN_ONCE: std::sync::Once = std::sync::Once::new();
-			WARN_ONCE.call_once(|| {
-				tracing::warn!(
-					frame = ?color,
-					encoder = ?self.color,
-					"frame color space differs from the one written into the bitstream; set encode::Config::color"
-				);
+			return Err(Error::ColorMismatch {
+				frame: color,
+				encoder: self.color,
 			});
 		}
 		let encoded = self.backend.encode(frame, self.pending_cut)?;
@@ -1511,11 +1506,12 @@ mod tests {
 
 	/// Resizing across the standard-definition boundary keeps the pixels' color
 	/// space but moves the encoder into another one, which would emit BT.709
-	/// pixels under a BT.601 label. `Config::color` pins the real space, and the
-	/// bitstream then says so.
+	/// pixels under a BT.601 label. The encoder refuses that frame, and
+	/// `Config::color` pins the real space so the bitstream says so.
 	#[test]
 	#[cfg(feature = "openh264")]
 	fn config_color_pins_the_space_a_resize_carried() {
+		use super::backend::test_util::{BT709_DESCRIBED, declared_color};
 		use crate::Color;
 
 		let big = Size::new(1280, 720);
@@ -1528,33 +1524,32 @@ mod tests {
 			moq_net::Timestamp::from_micros(0).unwrap(),
 		);
 		let scaled = frame.resize(small, &crate::resize::Config::default()).unwrap();
-		assert_eq!(
-			scaled.surface.color(),
-			Some(Color::Bt709Limited),
-			"resize keeps the space"
-		);
+		assert_eq!(scaled.surface.color(), Some(Color::BT709), "resize keeps the space");
 
-		// Left to infer, a 480p encoder writes BT.601 over those BT.709 samples. It
-		// still encodes (a live gateway keeps serving) but the label is wrong, which
-		// is what `Config::color` exists to fix.
+		// Left to infer, a 480p encoder would write BT.601 over those BT.709
+		// samples, so it refuses them instead.
 		let config = Config {
 			kind: Kind::Software,
 			..Config::new(small.width, small.height, crate::Rate::new(30, 1).unwrap())
 		};
 		let mut encoder = Encoder::new(&config).unwrap();
 		encoder.cut().unwrap();
-		let frames = encoder.encode(&scaled).expect("a mismatch warns rather than fails");
-		use super::backend::test_util::{BT601_DESCRIBED, BT709_DESCRIBED, declared_color};
-		assert_eq!(
-			declared_color(&frames.first().expect("a keyframe").payload),
-			Some(BT601_DESCRIBED),
-			"the inferred label is the wrong one, which is the case Config::color covers"
+		let err = encoder.encode(&scaled).expect_err("a mismatched frame is refused");
+		assert!(
+			matches!(
+				err,
+				Error::ColorMismatch {
+					frame: Color::BT709,
+					encoder: Color::BT601
+				}
+			),
+			"{err}"
 		);
 
 		// Declaring the real space fixes the label.
 		let config = Config {
 			kind: Kind::Software,
-			color: Some(Color::Bt709Limited),
+			color: Some(Color::BT709),
 			..Config::new(small.width, small.height, crate::Rate::new(30, 1).unwrap())
 		};
 		let mut encoder = Encoder::new(&config).unwrap();
@@ -1563,6 +1558,135 @@ mod tests {
 
 		let keyframe = frames.first().expect("a keyframe");
 		assert_eq!(declared_color(&keyframe.payload), Some(BT709_DESCRIBED));
+	}
+
+	/// A transcode takes the space from the source's SPS, not from either size.
+	/// The decoder (openh264, which reports none) labels its pictures with the
+	/// signalled space, even where the source's size would guess another: they
+	/// convert back to the red they started as. A rung whose size guesses a
+	/// different space re-signals the source's, or refuses to mislabel it,
+	/// BT.2020 PQ and HLG included.
+	#[test]
+	#[cfg(feature = "openh264")]
+	fn transcode_keeps_the_space_the_source_signalled() {
+		use super::backend::test_util::{Described, declared_color};
+		use crate::Color;
+		use crate::color::{Matrix, Primaries, Range, Transfer};
+
+		let hdr = |transfer| Color {
+			matrix: Matrix::Bt2020,
+			range: Range::Limited,
+			primaries: Primaries::Bt2020,
+			transfer,
+		};
+		let rate = crate::Rate::new(30, 1).unwrap();
+		let red = [255u8, 0, 0];
+		for (source, rung, color) in [
+			// The source's own guess, scaled across 576 lines.
+			(Size::new(1280, 720), Size::new(640, 480), Color::BT709),
+			// Spaces neither size would guess.
+			(Size::new(1280, 720), Size::new(1920, 1080), Color::BT601),
+			(
+				Size::new(640, 480),
+				Size::new(1280, 720),
+				Color::BT709.with_range(Range::Full),
+			),
+			// HDR survives the round trip with its primaries and curve.
+			(Size::new(1280, 720), Size::new(640, 480), hdr(Transfer::Pq)),
+			(
+				Size::new(640, 480),
+				Size::new(1280, 720),
+				hdr(Transfer::Hlg).with_range(Range::Full),
+			),
+		] {
+			let codes = color.code_points();
+			let described = || Described {
+				primaries: codes.primaries,
+				transfer: codes.transfer,
+				matrix: codes.matrix,
+				full_range: color.range == Range::Full,
+			};
+
+			// Solid red, converted in `color` rather than in the size guess.
+			let [y, u, v] = color.coefficients().apply(red);
+			let luma = source.pixels() as usize;
+			let mut data = vec![y; luma];
+			data.extend(std::iter::repeat_n(u, luma / 4));
+			data.extend(std::iter::repeat_n(v, luma / 4));
+			let frame = Frame::new(Surface::I420(I420::new(source, data).unwrap().with_color(color)), at(0));
+
+			let config = Config {
+				kind: Kind::Software,
+				color: Some(color),
+				..Config::new(source.width, source.height, rate)
+			};
+			let mut encoder = Encoder::new(&config).unwrap();
+			encoder.cut().unwrap();
+			let mut encoded = encoder.encode(&frame).unwrap();
+			encoded.extend(encoder.finish().unwrap());
+			assert_eq!(
+				declared_color(&encoded[0].payload),
+				Some(described()),
+				"{source} source SPS"
+			);
+
+			let catalog = hang::catalog::VideoConfig::new(hang::catalog::H264 {
+				inline: true,
+				profile: 0x42,
+				constraints: 0xc0,
+				level: 0x1f,
+			});
+			let mut decode = crate::decode::Config::new();
+			decode.kind = crate::decode::Kind::Software;
+			let mut decoder = crate::decode::Decoder::new(&catalog, &decode).unwrap();
+			let mut decoded = Vec::new();
+			for unit in &encoded {
+				decoded.extend(decoder.decode(&unit.payload, unit.timestamp, unit.keyframe).unwrap());
+			}
+			decoded.extend(decoder.flush().unwrap());
+			let picture = decoded.first().expect("a decoded picture");
+			assert_eq!(picture.surface.color(), Some(color), "{source} decoded label");
+
+			// The label is the one the samples were made in, so they read back as red.
+			let rgba = picture.surface.to_rgba(&crate::convert::Config::default()).unwrap();
+			let center = (rgba.stride() * source.height as usize / 2) + source.width as usize / 2 * 4;
+			for (channel, expected) in red.iter().enumerate() {
+				let actual = rgba.data()[center + channel];
+				assert!(
+					actual.abs_diff(*expected) <= 8,
+					"{source} {color:?} channel {channel}: {actual}, expected {expected}"
+				);
+			}
+
+			let scaled = picture.resize(rung, &crate::resize::Config::default()).unwrap();
+			assert_eq!(scaled.surface.color(), Some(color), "{rung} rung label");
+
+			// Left to the rung's size guess, the encoder refuses rather than mislabel.
+			let mut guessed = Encoder::new(&Config {
+				kind: Kind::Software,
+				..Config::new(rung.width, rung.height, rate)
+			})
+			.unwrap();
+			assert!(matches!(
+				guessed.encode(&scaled),
+				Err(Error::ColorMismatch { frame, .. }) if frame == color
+			));
+
+			// Opened from the frame's label, the rung signals the source's space.
+			let mut encoder = Encoder::new(&Config {
+				kind: Kind::Software,
+				color: scaled.surface.color(),
+				..Config::new(rung.width, rung.height, rate)
+			})
+			.unwrap();
+			encoder.cut().unwrap();
+			let encoded = encoder.encode(&scaled).unwrap();
+			assert_eq!(
+				declared_color(&encoded[0].payload),
+				Some(described()),
+				"{rung} rung SPS"
+			);
+		}
 	}
 
 	#[cfg(all(target_os = "windows", feature = "capture", feature = "openh264"))]

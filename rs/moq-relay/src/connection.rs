@@ -124,6 +124,13 @@ impl Connection {
 			stats,
 		} = admitted;
 
+		// A peer's QUIC limits widen before SETUP OK, so its first requests see them.
+		if let Some(limits) = self.cluster.quic_limits(&lease)
+			&& let Err(err) = self.request.set_quic_limits(limits)
+		{
+			tracing::debug!(%err, "cluster peer keeps its transport's limits");
+		}
+
 		// Accept the connection.
 		// NOTE: subscribe and publish seem backwards because of how relays work.
 		// We publish the tracks the client is allowed to subscribe to.
