@@ -4,12 +4,18 @@ import type { TrackKey } from "./key.ts";
 import type { Pump } from "./pump.ts";
 import type { Terminal } from "./terminal.ts";
 
+/** A track's grouped-frame and datagram keys. */
+export interface Keys {
+	group: TrackKey;
+	datagram: TrackKey;
+}
+
 /** State one track producer shares with its groups. */
 export interface Writer {
 	pump: Pump;
 	key: TrackKey;
-	// Whether the net track is timed, once its info has resolved.
-	timed?: boolean;
+	// Whether the net track is timed, from its committed info.
+	timed: boolean;
 	// Set by any close: no new writes.
 	closed: boolean;
 	aborted?: Error;
@@ -25,7 +31,7 @@ export interface Reader {
 
 /** Refuse a timestamp whose presence disagrees with the track's committed timescale. */
 export function checkTimed(writer: Writer, timestamp: Time.Timestamp | undefined): void {
-	if (writer.timed !== undefined && writer.timed !== (timestamp !== undefined)) {
+	if (writer.timed !== (timestamp !== undefined)) {
 		throw new NetError.TimestampMismatch();
 	}
 }

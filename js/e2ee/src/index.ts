@@ -14,7 +14,7 @@
  * const credential = new Credential({ context, kid, secret });
  * const generation = credential.produce();
  * const broadcast = origin.createBroadcast(await credential.path("meeting.hang"));
- * const video = generation.produce(broadcast.createTrack(await generation.name("video"), { timescale }));
+ * const video = await generation.produce(broadcast.createTrack(await generation.name("video"), { timescale }));
  * broadcast.announce({ epoch: generation.epoch });
  *
  * const group = video.appendGroup();

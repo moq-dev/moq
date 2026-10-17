@@ -8,7 +8,7 @@ import type { Event } from "./datagram.ts";
 import { checkU53 } from "./derive.ts";
 import { Failure } from "./failure.ts";
 import * as Group from "./group.ts";
-import { checkTimed, type Reader, type Writer } from "./internal.ts";
+import { checkTimed, type Keys, type Reader, type Writer } from "./internal.ts";
 import type { TrackKey } from "./key.ts";
 import { MAX_DATAGRAM_PAYLOAD } from "./limits.ts";
 import { Pump } from "./pump.ts";
@@ -30,26 +30,17 @@ export class Producer {
 	#writer: Writer;
 	#datagramKey: TrackKey;
 	#next = 0;
-	// Datagrams waiting in the pump for admission; later ones queue behind them.
-	#pending = 0;
 
-	private constructor(inner: NetTrack.Producer, groupKey: TrackKey, datagramKey: TrackKey) {
+	private constructor(inner: NetTrack.Producer, timed: boolean, keys: Keys) {
 		this.#inner = inner;
 		this.name = inner.name;
-		this.#writer = { pump: new Pump(), key: groupKey, closed: false };
-		this.#datagramKey = datagramKey;
-		const writer = this.#writer;
-		inner.info().then(
-			(info) => {
-				writer.timed = info.timescale != null;
-			},
-			() => {},
-		);
+		this.#writer = { pump: new Pump(), key: keys.group, timed, closed: false };
+		this.#datagramKey = keys.datagram;
 	}
 
 	/** @internal */
-	static make(inner: NetTrack.Producer, groupKey: TrackKey, datagramKey: TrackKey): Producer {
-		return new Producer(inner, groupKey, datagramKey);
+	static make(inner: NetTrack.Producer, timed: boolean, keys: Keys): Producer {
+		return new Producer(inner, timed, keys);
 	}
 
 	/** Allocate the next sequence and start a group there; throws {@link Failure} `identity` past `2^53-1`. */
@@ -72,13 +63,11 @@ export class Producer {
 		return Group.Producer.make(inner, this.#writer);
 	}
 
-	/**
-	 * Encrypt `plaintext` at the next sequence and insert the datagram, resolving to that sequence.
-	 *
-	 * The rules of {@link insertDatagram} apply.
-	 */
+	/** Encrypt `plaintext` at the next sequence and insert the datagram, resolving to that sequence. */
 	async appendDatagram(timestamp: Time.Timestamp | undefined, plaintext: Uint8Array): Promise<number> {
-		return this.#insert(undefined, timestamp, plaintext);
+		const sequence = this.#next;
+		await this.insertDatagram(sequence, timestamp, plaintext);
+		return sequence;
 	}
 
 	/**
@@ -87,65 +76,24 @@ export class Producer {
 	 * Plaintext is capped at `MAX_DATAGRAM_PLAINTEXT` and copied, so the caller may reuse its
 	 * buffer. A predictable failure, including a mismatched timestamp, is refused before the
 	 * sequence is allocated; once admitted, the identity is spent even if the net write fails.
-	 * Until this producer has observed the track's committed timescale, admission waits for it
-	 * in the serial pump, so the sequence is allocated there, and later datagrams queue behind it. Rejects with {@link Failure}
-	 * `reuse`, `identity`, `exhausted`, or `oversize`, or a net error.
+	 * Rejects with {@link Failure} `reuse`, `identity`, `exhausted`, or `oversize`, or a net error.
 	 */
 	async insertDatagram(
 		sequence: number,
 		timestamp: Time.Timestamp | undefined,
 		plaintext: Uint8Array,
 	): Promise<void> {
-		await this.#insert(sequence, timestamp, plaintext);
-	}
-
-	// Admit at `sequence`, or the next one when undefined, then encrypt and write in the pump.
-	#insert(
-		sequence: number | undefined,
-		timestamp: Time.Timestamp | undefined,
-		plaintext: Uint8Array,
-	): Promise<number> {
 		this.#writable();
-		const owned = plaintext.slice();
-		const writer = this.#writer;
-		if (writer.timed !== undefined && this.#pending === 0) {
-			const admitted = sequence ?? this.#next;
-			const write = this.#admit(admitted, timestamp, owned);
-			return writer.pump.run(async () => {
-				await write();
-				return admitted;
-			});
-		}
-		// Admitting in the pump keeps this ahead of a close or write submitted after it.
-		this.#pending++;
-		return writer.pump.run(async () => {
-			let write: () => Promise<void>;
-			let admitted: number;
-			try {
-				const info = await this.#inner.info();
-				writer.timed = info.timescale != null;
-				if (writer.aborted) throw writer.aborted;
-				admitted = sequence ?? this.#next;
-				write = this.#admit(admitted, timestamp, owned);
-			} finally {
-				this.#pending--;
-			}
-			await write();
-			return admitted;
-		});
-	}
-
-	// Refuse or spend the datagram's identity now, returning its encrypt-and-write step.
-	#admit(sequence: number, timestamp: Time.Timestamp | undefined, owned: Uint8Array<ArrayBuffer>) {
 		this.#reserve(sequence);
 		checkTimed(this.#writer, timestamp);
-		const iv = this.#datagramKey.admitSeal(sequence, 0, owned.byteLength, MAX_DATAGRAM_PAYLOAD);
+		const iv = this.#datagramKey.admitSeal(sequence, 0, plaintext.byteLength, MAX_DATAGRAM_PAYLOAD);
 		this.#next = sequence + 1;
-		return async (): Promise<void> => {
+		const owned = plaintext.slice();
+		return this.#writer.pump.run(async () => {
 			const payload = await this.#datagramKey.encrypt(iv, owned);
 			if (this.#writer.aborted) throw this.#writer.aborted;
 			this.#inner.insertDatagram(sequence, timestamp, payload);
-		};
+		});
 	}
 
 	/**
@@ -194,16 +142,16 @@ export class Consumer {
 	// Datagram reads run one at a time, so the window and key see them in arrival order.
 	#datagrams: Promise<unknown> = Promise.resolve();
 
-	private constructor(inner: NetTrack.Subscriber, groupKey: TrackKey, datagramKey: TrackKey) {
+	private constructor(inner: NetTrack.Subscriber, keys: Keys) {
 		this.#inner = inner;
 		this.name = inner.name;
-		this.#reader = { pump: new Pump(), key: groupKey, terminal: new Terminal(inner) };
-		this.#datagramKey = datagramKey;
+		this.#reader = { pump: new Pump(), key: keys.group, terminal: new Terminal(inner) };
+		this.#datagramKey = keys.datagram;
 	}
 
 	/** @internal */
-	static make(inner: NetTrack.Subscriber, groupKey: TrackKey, datagramKey: TrackKey): Consumer {
-		return new Consumer(inner, groupKey, datagramKey);
+	static make(inner: NetTrack.Subscriber, keys: Keys): Consumer {
+		return new Consumer(inner, keys);
 	}
 
 	/**

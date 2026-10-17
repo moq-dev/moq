@@ -16,7 +16,8 @@ Relays forward ciphertext. Content keys never enter `@moq/net`.
 The application distributes a `Credential { context, kid, secret }` over its own
 authenticated channel. `credential.produce()` mints a fresh epoch and returns a
 `Generation.Producer`, which derives opaque track names and keys for that instance alone.
-It accepts no explicit epoch, and claims each track it produces for good.
+It accepts no explicit epoch, and claims each track it produces for good. `produce(track)`
+resolves once the net track has committed its timescale, so every write is checked against it.
 
 ```ts
 import { Credential } from "@moq/e2ee";
@@ -25,7 +26,7 @@ import { Time } from "@moq/net";
 const credential = new Credential({ context, kid, secret });
 const generation = credential.produce();
 const broadcast = origin.createBroadcast(await credential.path("meeting.hang"));
-const video = generation.produce(
+const video = await generation.produce(
 	broadcast.createTrack(await generation.name("video"), { timescale: Time.Timescale.MILLI }),
 );
 broadcast.announce({ epoch: generation.epoch });

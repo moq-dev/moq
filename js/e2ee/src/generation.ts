@@ -7,9 +7,17 @@ import type { Epoch, Track as NetTrack } from "@moq/net";
 import type { Credential } from "./credential.ts";
 import { DATAGRAM, encode, GROUP, type Name, nameInfo, parse } from "./derive.ts";
 import { Failure } from "./failure.ts";
+import type { Keys } from "./internal.ts";
 import { trackKey } from "./key.ts";
 import { expand } from "./secret.ts";
 import * as Track from "./track.ts";
+
+function keys(credential: Credential, epoch: Epoch.Valid, name: Name): Keys {
+	return {
+		group: trackKey(credential, epoch, name, GROUP),
+		datagram: trackKey(credential, epoch, name, DATAGRAM),
+	};
+}
 
 /** A consume-only generation bound to a discovered epoch. */
 export class Consumer {
@@ -36,12 +44,7 @@ export class Consumer {
 
 	/** Open a net subscription whose track name is a physical name; throws {@link Failure} `identity` if it is not one. */
 	consume(track: NetTrack.Subscriber): Track.Consumer {
-		const name = parse(track.name);
-		return Track.Consumer.make(
-			track,
-			trackKey(this.credential, this.epoch, name, GROUP),
-			trackKey(this.credential, this.epoch, name, DATAGRAM),
-		);
+		return Track.Consumer.make(track, keys(this.credential, this.epoch, parse(track.name)));
 	}
 }
 
@@ -77,17 +80,16 @@ export class Producer {
 	/**
 	 * Protect a net track whose name is a physical name, claiming it for this generation.
 	 *
-	 * Throws {@link Failure} `identity` if the track name is not a physical name, and `reuse`
-	 * if this generation already produced it.
+	 * Resolves once the track's info is committed, at once for an accepted track, so every
+	 * write is checked against its timescale before an identity is spent. Rejects with
+	 * {@link Failure} `identity` if the track name is not a physical name, `reuse` if this
+	 * generation already produced it, or the net error if the track closes before accepting.
 	 */
-	produce(track: NetTrack.Producer): Track.Producer {
+	async produce(track: NetTrack.Producer): Promise<Track.Producer> {
 		const name = parse(track.name);
 		if (this.#claims.has(name)) throw new Failure("reuse");
 		this.#claims.add(name);
-		return Track.Producer.make(
-			track,
-			trackKey(this.credential, this.epoch, name, GROUP),
-			trackKey(this.credential, this.epoch, name, DATAGRAM),
-		);
+		const info = await track.info();
+		return Track.Producer.make(track, info.timescale != null, keys(this.credential, this.epoch, name));
 	}
 }

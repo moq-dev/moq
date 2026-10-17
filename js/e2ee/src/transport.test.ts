@@ -64,7 +64,7 @@ for (const [name, protocol, routed, timed] of transports) {
 		const broadcast = publisher.createBroadcast(path);
 		const physical = await generation.name("video");
 		const net = broadcast.createTrack(physical, { timescale: Time.Timescale.MILLI });
-		const video = generation.produce(net);
+		const video = await generation.produce(net);
 		broadcast.announce({ epoch: generation.epoch });
 
 		const group = video.appendGroup();
@@ -116,7 +116,7 @@ for (const [name, protocol] of [
 		const path = await cred.path("meeting.hang");
 		const broadcast = publisher.createBroadcast(path);
 		const physical = await generation.name("audio");
-		const audio = generation.produce(broadcast.createTrack(physical, { timescale: Time.Timescale.MILLI }));
+		const audio = await generation.produce(broadcast.createTrack(physical, { timescale: Time.Timescale.MILLI }));
 		broadcast.announce({ epoch: generation.epoch });
 
 		// A group first, so the subscription is serving before datagrams, which are never cached.

@@ -63,7 +63,6 @@ export class Producer {
 
 	async #write(timestamp: Time.Timestamp | undefined, plaintext: Uint8Array<ArrayBuffer>): Promise<void> {
 		this.#check();
-		checkTimed(this.#writer, timestamp);
 		const frame = this.#next;
 		const iv = this.#writer.key.admitSeal(this.sequence, frame, plaintext.byteLength, MAX_GROUPED_PAYLOAD);
 		this.#next = frame + 1;
