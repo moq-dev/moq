@@ -667,6 +667,9 @@ async fn decode(
 		}
 		Err(err) => {
 			let reason = moq_net::Error::Transport(err.to_string());
+			if let Some(stats) = stats {
+				stats.abort(reason.clone());
+			}
 			catalog.abort(reason.clone());
 			decoder.abort(reason);
 			Err(err)

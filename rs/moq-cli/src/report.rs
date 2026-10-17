@@ -24,13 +24,17 @@ pub const STATS_TRACK: &str = "stats.json";
 /// The suffix naming a snapshot track's compressed sibling.
 const COMPRESSED: &str = ".z";
 
+/// Lines `export echo` queues for stdout before its readers wait for it to catch up.
+const LINES: usize = 64;
+
 /// Below every media track, so a report never delays the media it describes.
 const PRIORITY: u8 = 0;
 
-/// A snapshot track and its compressed `.z` sibling, written together.
+/// A snapshot track and its compressed `.z` sibling, written together. Either is `None` once a
+/// write failed and closed it.
 struct Pair<T> {
-	plain: moq_json::snapshot::Producer<T>,
-	compressed: moq_json::snapshot::Producer<T>,
+	plain: Option<moq_json::snapshot::Producer<T>>,
+	compressed: Option<moq_json::snapshot::Producer<T>>,
 }
 
 impl<T: serde::Serialize> Pair<T> {
@@ -42,33 +46,54 @@ impl<T: serde::Serialize> Pair<T> {
 		let mut deflate = moq_json::snapshot::Config::default();
 		deflate.compression = moq_json::Compression::Deflate;
 		Ok(Self {
-			plain: moq_json::snapshot::Producer::new(plain, moq_json::snapshot::Config::default().with_delta_ratio(0)),
-			compressed: moq_json::snapshot::Producer::new(compressed, deflate),
+			plain: Some(moq_json::snapshot::Producer::new(
+				plain,
+				moq_json::snapshot::Config::default().with_delta_ratio(0),
+			)),
+			compressed: Some(moq_json::snapshot::Producer::new(compressed, deflate)),
 		})
 	}
 
 	/// Publish `value` on both tracks, unless nobody subscribes to either.
 	fn update(&mut self, value: &T) {
-		if self.plain.demand().is_used() || self.compressed.demand().is_used() {
+		let used = [&self.plain, &self.compressed]
+			.into_iter()
+			.flatten()
+			.any(|track| track.demand().is_used());
+		if used {
 			self.write(value);
 		}
 	}
 
-	/// Publish `value` on both tracks.
+	/// Publish `value` on both tracks. A track that refuses a write would refuse every later one,
+	/// so it is closed with the cause, which its subscribers then read, and reported once.
 	fn write(&mut self, value: &T) {
-		for track in [&mut self.plain, &mut self.compressed] {
+		for slot in [&mut self.plain, &mut self.compressed] {
+			let Some(track) = slot else {
+				continue;
+			};
 			if let Err(err) = track.update(value) {
-				tracing::debug!(%err, "failed to write a report");
+				tracing::warn!(%err, "a report track failed; closing it");
+				if let Some(track) = slot.take() {
+					let _ = track.abort(moq_net::Error::Transport(err.to_string()));
+				}
 			}
 		}
 	}
 
 	/// End both tracks cleanly, keeping the last snapshot.
 	fn finish(&mut self) {
-		for track in [&mut self.plain, &mut self.compressed] {
+		for track in [&mut self.plain, &mut self.compressed].into_iter().flatten() {
 			if let Err(err) = track.finish() {
-				tracing::debug!(%err, "failed to finish a report");
+				tracing::warn!(%err, "failed to finish a report");
 			}
+		}
+	}
+
+	/// Close both tracks with `err`, so subscribers read why the report ended.
+	fn abort(self, err: moq_net::Error) {
+		for track in [self.plain, self.compressed].into_iter().flatten() {
+			let _ = track.abort(err.clone());
 		}
 	}
 }
@@ -155,6 +180,11 @@ impl Stats {
 		self.tracks.write(&last);
 		self.tracks.finish();
 	}
+
+	/// End the track with the import's failure, as its media tracks end.
+	pub fn abort(self, err: moq_net::Error) {
+		self.tracks.abort(err);
+	}
 }
 
 /// An `export --echo` name: the one path segment a feedback broadcast is published at, before
@@ -168,6 +198,11 @@ impl std::str::FromStr for EchoName {
 	fn from_str(name: &str) -> Result<Self, Self::Err> {
 		if name.is_empty() || name.contains('/') || matches!(name, "." | ".." | "*" | "**") {
 			return Err(format!("`{name}` is not a single path segment"));
+		}
+		if name.starts_with('.') {
+			return Err(format!(
+				"`{name}` starts with `.`, which hides its feedback from discovery"
+			));
 		}
 		Ok(Self(name.to_string()))
 	}
@@ -386,14 +421,17 @@ pub async fn print_echo(origin: moq_net::origin::Consumer, prefix: String) -> an
 	let mut stdout = tokio::io::stdout();
 	let prefix = moq_net::Path::new(&prefix).to_owned();
 	let mut announced = origin.announced();
-	let (lines, mut written) = tokio::sync::mpsc::unbounded_channel::<String>();
+	let (lines, mut written) = tokio::sync::mpsc::channel::<String>(LINES);
 	let mut readers = HashMap::new();
 	loop {
 		tokio::select! {
 			event = announced.next() => {
 				let event = event.context("announcements ended")?;
 				let (announce, active) = match event {
-					moq_net::announce::Event::Start(announce) => (announce, true),
+					// A restart is another publisher instance, which a reader still on the old one never sees.
+					moq_net::announce::Event::Start(announce) | moq_net::announce::Event::Restart(announce) => {
+						(announce, true)
+					}
 					moq_net::announce::Event::End(announce) => (announce, false),
 					_ => continue,
 				};
@@ -403,9 +441,13 @@ pub async fn print_echo(origin: moq_net::origin::Consumer, prefix: String) -> an
 				}
 				if active {
 					let reader = tokio::spawn(read_echo(origin.clone(), path.clone(), lines.clone()));
-					readers.insert(path, reader);
-				} else if let Some(reader) = readers.remove(&path) {
-					reader.abort();
+					if let Some(previous) = readers.insert(path, reader) {
+						previous.abort();
+					}
+				} else {
+					// Detached, not aborted: the final snapshot can still be in flight, and the reader
+					// ends with its track.
+					readers.remove(&path);
 				}
 			}
 			Some(line) = written.recv() => {
@@ -420,7 +462,7 @@ pub async fn print_echo(origin: moq_net::origin::Consumer, prefix: String) -> an
 async fn read_echo(
 	origin: moq_net::origin::Consumer,
 	path: moq_net::PathOwned,
-	lines: tokio::sync::mpsc::UnboundedSender<String>,
+	lines: tokio::sync::mpsc::Sender<String>,
 ) {
 	let read = async {
 		let broadcast = origin.request_broadcast(&path, None).await?;
@@ -431,7 +473,11 @@ async fn read_echo(
 				broadcast: path.as_str(),
 				feedback,
 			};
-			if lines.send(format!("{}\n", serde_json::to_string(&line)?)).is_err() {
+			if lines
+				.send(format!("{}\n", serde_json::to_string(&line)?))
+				.await
+				.is_err()
+			{
 				break;
 			}
 		}

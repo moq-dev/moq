@@ -8,7 +8,7 @@
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 use std::sync::{Arc, Mutex, PoisonError};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, UNIX_EPOCH};
 
 /// What one published track has written.
 #[derive(Default)]
@@ -52,12 +52,12 @@ impl Received {
 		self.frames.fetch_add(1, Relaxed);
 		self.bytes.fetch_add(bytes as u64, Relaxed);
 		// A clock before the MoQ epoch has no wire encoding, so such an arrival is never recorded.
-		let wall = SystemTime::now()
+		let Some(wall) = crate::clock::host_wall() else {
+			return;
+		};
+		let wall = wall
 			.duration_since(UNIX_EPOCH)
 			.map_or(0, |since| u64::try_from(since.as_millis()).unwrap_or(0));
-		if wall < hang::catalog::MOQ_EPOCH_UNIX_MILLIS {
-			return;
-		}
 		let micros = u64::try_from(timestamp.as_micros()).unwrap_or(u64::MAX);
 		self.timestamp.store(micros, Relaxed);
 		self.wall.store(wall, Relaxed);
@@ -156,13 +156,26 @@ mod tests {
 		let track = registry.track("hd");
 		assert_eq!(registry.received()["hd"].arrival, None);
 
-		let before = SystemTime::now();
+		let wall = UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+		crate::clock::fake_host_wall(wall);
 		track.frame(moq_net::Timestamp::from_millis(40).unwrap(), 100);
 		track.frame(moq_net::Timestamp::from_millis(80).unwrap(), 50);
 		let report = &registry.received()["hd"];
 		assert_eq!((report.frames, report.bytes), (2, 150));
 		let arrival = report.arrival.as_ref().unwrap();
 		assert_eq!(arrival.timestamp.as_millis(), 80);
-		assert!(arrival.wall + Duration::from_millis(1) >= before);
+		assert_eq!(arrival.wall, wall);
+	}
+
+	/// A host clock before the MoQ epoch has no wire encoding: the frame counts, its arrival doesn't.
+	#[test]
+	fn an_unset_host_clock_records_no_arrival() {
+		let registry = Registry::<Received>::default();
+		let track = registry.track("hd");
+		crate::clock::fake_host_wall(UNIX_EPOCH + Duration::from_secs(86_400));
+		track.frame(moq_net::Timestamp::from_millis(40).unwrap(), 100);
+		let report = &registry.received()["hd"];
+		assert_eq!((report.frames, report.bytes), (1, 100));
+		assert_eq!(report.arrival, None);
 	}
 }

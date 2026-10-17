@@ -366,8 +366,15 @@ impl Invocation {
 						"--echo reports what a stdout container export reads, and `export {sink}` is not one"
 					);
 				}
+				let msf = match export.catalog_format {
+					Some(format) => matches!(format, CatalogFormatArg::Msf),
+					None => matches!(
+						moq_mux::catalog::CatalogFormat::detect(&command.broadcast(&self.moq)),
+						Some(moq_mux::catalog::CatalogFormat::Msf)
+					),
+				};
 				anyhow::ensure!(
-					!matches!(export.catalog_format, Some(CatalogFormatArg::Msf)),
+					!msf,
 					"--echo follows the hang catalog's `echo` section, which the MSF catalog does not carry"
 				);
 			}
@@ -982,7 +989,7 @@ pub struct Export {
 
 	/// Publish feedback where the broadcast's catalog solicits it: a `<NAME>.echo` broadcast
 	/// under the catalog's `echo` path, reporting what each rendition this export reads has
-	/// received. One path segment. The stdout container exports only.
+	/// received. One path segment, not starting with `.`. The stdout container exports only.
 	#[usage(long)]
 	pub echo: Option<crate::report::EchoName>,
 
@@ -1514,12 +1521,26 @@ mod tests {
 				.unwrap_err();
 			assert!(err.to_string().contains("--echo"), "{sink:?}: {err}");
 		}
-		let err = export(&["--echo", "alice", "--catalog-format", "msf", "fmp4"])
-			.unwrap()
-			.validate()
-			.unwrap_err();
-		assert!(err.to_string().contains("MSF"), "{err}");
-		for name in ["", "a/b", ".", "..", "*"] {
+		for flags in [
+			["--echo", "alice", "--catalog-format", "msf", "fmp4"].as_slice(),
+			&["--broadcast", "live.msf", "--echo", "alice", "fmp4"],
+		] {
+			let err = export(flags).unwrap().validate().unwrap_err();
+			assert!(err.to_string().contains("MSF"), "{flags:?}: {err}");
+		}
+		export(&[
+			"--broadcast",
+			"live.msf",
+			"--catalog-format",
+			"hang",
+			"--echo",
+			"alice",
+			"fmp4",
+		])
+		.unwrap()
+		.validate()
+		.unwrap();
+		for name in ["", "a/b", ".", "..", "*", ".alice"] {
 			assert!(export(&["--echo", name, "fmp4"]).is_err(), "`{name}` must be refused");
 		}
 		for sink in ["stats", "echo"] {

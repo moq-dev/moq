@@ -13,7 +13,7 @@ use tokio::process::{Child, ChildStdout};
 
 const TIMEOUT: Duration = Duration::from_secs(30);
 /// Five seconds of HEVC and Opus at a constant 400 kb/s.
-const CLIP: &[u8] = include_bytes!("../../moq-mux/src/container/ts/test_data/bbb5s_cbr.ts");
+const CLIP: &[u8] = include_bytes!("../../../moq-mux/src/container/ts/test_data/bbb5s_cbr.ts");
 /// Bytes fed every [`PACE`], which keeps [`CLIP`] near real time.
 const CHUNK: usize = 188 * 40;
 const PACE: Duration = Duration::from_millis(150);

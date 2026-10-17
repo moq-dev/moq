@@ -492,7 +492,6 @@ where
 			// Buffered frames are measured on the way in instead. The flush that eventually writes
 			// them takes the track down with it when it fails, so there is nothing to unwind.
 			self.estimator.write(frame.timestamp, frame.payload.len());
-			self.count(frame.payload.len(), frame.keyframe);
 			self.observe_end(frame.timestamp, frame.duration);
 			self.buffer.push(frame);
 
@@ -735,6 +734,10 @@ where
 		self.container.write(group, &self.buffer)?;
 		if let Some(recorder) = self.recorder.as_mut() {
 			recorder.frame(position, self.buffer[0].timestamp, self.buffer[0].keyframe);
+		}
+		// Counted only once written: an abort discards the buffer, and those frames were never sent.
+		for frame in &self.buffer {
+			self.count(frame.payload.len(), frame.keyframe);
 		}
 		self.buffer.clear();
 

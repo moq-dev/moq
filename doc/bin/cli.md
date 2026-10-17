@@ -408,8 +408,10 @@ capture, the gateways, `archive`, and `ts --program all` refuse it.
 `export --echo <name>` answers a publisher that solicits feedback: under the
 catalog's `echo` path it publishes `<name>.echo`, reporting what each rendition
 the export reads has received and its newest arrival, until the export ends.
-The name is one path segment. It covers the stdout container exports and reads
-the solicitation from the hang catalog, so `--catalog-format msf` refuses it.
+The name is one path segment, not starting with `.`, which would hide it from
+discovery. It covers the stdout container exports and reads the solicitation
+from the hang catalog, so an MSF catalog, named or detected from a `.msf`
+broadcast, refuses it.
 
 The `stats` and `echo` sinks print reports as JSON lines. `export stats`
 follows one broadcast's stats track until the broadcast ends; `export echo`
