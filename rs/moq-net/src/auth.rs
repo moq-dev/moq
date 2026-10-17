@@ -1369,7 +1369,7 @@ impl RequestGrant {
 	}
 
 	/// Resolve with the refusal that ends the request: the deadline lapsing
-	/// ([`Error::Unauthorized`]), the acceptor revoking or dropping the grant (its code and
+	/// ([`Error::Expired`]), the acceptor revoking or dropping the grant (its code and
 	/// reason), or an acceptor-side update that no longer covers the request
 	/// ([`Error::Unauthorized`]). A covering update, such as a lowered expiry, is folded in and
 	/// polling continues. Never resolves while the grant still stands.
@@ -1377,7 +1377,7 @@ impl RequestGrant {
 		let mut held = self.held();
 		loop {
 			if held.deadline.poll(waiter).is_ready() {
-				return Poll::Ready(Refusal::new(Error::Unauthorized, "request token expired"));
+				return Poll::Ready(Refusal::new(Error::Expired, "request token expired"));
 			}
 			match held.verdict.poll_reply(waiter) {
 				Poll::Ready(Reply::Grant(grant)) => {
@@ -1400,15 +1400,14 @@ impl RequestGrant {
 
 	/// Run `body`, everything a request does once admitted, until it finishes or `grant`
 	/// (when its token admitted it) ends. See [`until`].
-	pub(crate) async fn guard<F: std::future::Future>(
+	pub(crate) fn guard<F: std::future::Future + kio::MaybeSend>(
 		grant: Option<&Self>,
 		body: F,
-	) -> std::result::Result<F::Output, Refusal> {
-		until(body, |waiter| match grant {
+	) -> impl std::future::Future<Output = std::result::Result<F::Output, Refusal>> + kio::MaybeSend {
+		crate::util::sendable(until(body, move |waiter| match grant {
 			Some(grant) => grant.poll_ended(waiter),
 			None => Poll::Pending,
-		})
-		.await
+		}))
 	}
 }
 
@@ -2228,10 +2227,10 @@ mod request_token_tests {
 		assert_ne!(second_expires, first_expires);
 	}
 
-	/// With no accepted renewal, the deadline ends the request UNAUTHORIZED, and the
+	/// With no accepted renewal, the deadline ends the request as Expired, and the
 	/// session is not closed by it.
 	#[moq_net_sim::test]
-	async fn the_deadline_ends_the_request_unauthorized_without_renewal() {
+	async fn the_deadline_expires_the_request_without_renewal() {
 		let runtime = crate::time::Clock::sim();
 		let handle = Handle::new(true);
 		let mut requests = handle.requests().unwrap();
@@ -2250,7 +2249,7 @@ mod request_token_tests {
 		.unwrap();
 
 		let err = kio::wait(|waiter| request_grant.poll_ended(waiter)).await.error;
-		assert!(matches!(err, Error::Unauthorized), "{err:?}");
+		assert!(matches!(err, Error::Expired), "{err:?}");
 		assert_eq!(handle.grant().peek(), None, "the session grant is untouched");
 	}
 
@@ -2299,7 +2298,7 @@ mod request_token_tests {
 		// when that lapses.
 		assert_eq!(request_grant.grant().expires, first_expires);
 		let err = kio::wait(|waiter| request_grant.poll_ended(waiter)).await.error;
-		assert!(matches!(err, Error::Unauthorized), "{err:?}");
+		assert!(matches!(err, Error::Expired), "{err:?}");
 	}
 
 	/// An acceptor-side update that no longer covers the request ends it, even when the

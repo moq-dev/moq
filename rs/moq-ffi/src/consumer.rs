@@ -53,11 +53,18 @@ pub struct MoqFetchGroupOptions {
 	/// Delivery priority for the fetch stream; higher values preempt lower ones.
 	#[uniffi(default = 0)]
 	pub priority: u8,
+	/// Maximum age behind the live edge in microseconds; null uses publisher retention alone.
+	#[uniffi(default = None)]
+	pub max_delay_us: Option<u64>,
 }
 
 impl From<MoqFetchGroupOptions> for moq_net::group::Fetch {
 	fn from(options: MoqFetchGroupOptions) -> Self {
-		moq_net::group::Fetch::default().with_priority(options.priority)
+		let fetch = moq_net::group::Fetch::default().with_priority(options.priority);
+		match options.max_delay_us {
+			Some(max_delay) => fetch.with_max_delay(std::time::Duration::from_micros(max_delay)),
+			None => fetch,
+		}
 	}
 }
 
@@ -153,7 +160,7 @@ impl MoqBroadcastConsumer {
 	/// this broadcast, anything else names a sibling relative to it (e.g. `./source`). Call it on a
 	/// rendition that carries one before [`crate::media::MoqMediaTrackConsumer::subscribe`], [`Self::subscribe_track`],
 	/// [`Self::fetch_group`], or [`crate::media::MoqMediaGroupConsumer::fetch`], which take a track name rather than a
-	/// rendition; `decode_video` and `decode_audio` resolve it themselves.
+	/// rendition; `MoqVideoConsumer::subscribe` and `MoqAudioConsumer::subscribe` resolve it themselves.
 	///
 	/// Errors if this broadcast came from a local producer rather than an origin, since a
 	/// standalone broadcast has no sibling to name, and reports a sibling that exists but is not

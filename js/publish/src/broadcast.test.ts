@@ -55,7 +55,13 @@ test("sibling broadcasts on one page advertise the same capture clock", async ()
 });
 
 test("folds video and audio renditions into the catalog by full track name", async () => {
-	const broadcast = new Broadcast({ enabled: true, display: { width: 1920, height: 1080 }, flip: true });
+	const rotation = new Signal(90);
+	const broadcast = new Broadcast({
+		enabled: true,
+		display: { width: 1920, height: 1080 },
+		flip: true,
+		rotation,
+	});
 
 	broadcast.video("video/hd").config.set(videoConfig);
 	broadcast.audio("audio/data").config.set(audioConfig);
@@ -63,10 +69,26 @@ test("folds video and audio renditions into the catalog by full track name", asy
 
 	const catalog = await readCatalog(broadcast);
 	expect(catalog?.video?.renditions["video/hd"]?.codec).toBe("avc1.640028");
-	expect(Number(catalog?.video?.display?.width)).toBe(1920);
-	expect(Number(catalog?.video?.display?.height)).toBe(1080);
+	// The catalog display is the size to render at, so a quarter turn swaps the captured size.
+	expect(Number(catalog?.video?.display?.width)).toBe(1080);
+	expect(Number(catalog?.video?.display?.height)).toBe(1920);
 	expect(catalog?.video?.flip).toBe(true);
+	expect(catalog?.video?.rotation).toBe(90);
 	expect(catalog?.audio?.renditions["audio/data"]?.codec).toBe("opus");
+
+	rotation.set(270);
+	await settle();
+	const turned = await readCatalog(broadcast);
+	expect(turned?.video?.rotation).toBe(270);
+	expect(Number(turned?.video?.display?.width)).toBe(1080);
+	expect(Number(turned?.video?.display?.height)).toBe(1920);
+
+	rotation.set(0);
+	await settle();
+	const upright = await readCatalog(broadcast);
+	expect(upright?.video?.rotation).toBeUndefined();
+	expect(Number(upright?.video?.display?.width)).toBe(1920);
+	expect(Number(upright?.video?.display?.height)).toBe(1080);
 
 	broadcast.close();
 });

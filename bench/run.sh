@@ -8,6 +8,7 @@ set -euo pipefail
 # on the current tree. The current load generator drives every relay so the
 # workloads stay identical. `--audio` isolates the audio grouping/load-shape matrix.
 # `--lock` records relay worker off-CPU stacks to attribute std mutex waits.
+# `--shard` sweeps the QUIC shard count against the connection count.
 
 MODE=${1:-}
 ROUNDS=${MOQ_BENCH_RUNTIME_ROUNDS:-3}
@@ -26,6 +27,17 @@ case $MODE in
         LOCK_WORKERS=${MOQ_BENCH_LOCK_WORKERS:-1 4 16}
         # Without frame pointers, perf's DWARF unwinder stops at the first relay frame.
         export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-C force-frame-pointers=yes"
+        ;;
+    --shard)
+        BASE=
+        SHARD_COUNTS=${MOQ_BENCH_SHARD_COUNTS:-0 1 4 16}
+        SHARD_CONNECTIONS=${MOQ_BENCH_SHARD_CONNECTIONS:-16 64 256}
+        for value in $SHARD_COUNTS $SHARD_CONNECTIONS; do
+            if [[ ! $value =~ ^[0-9]+$ ]]; then
+                printf 'shard benchmark counts must be integers, got %q\n' "$value" >&2
+                exit 1
+            fi
+        done
         ;;
     --runtime)
         BASE=
@@ -492,6 +504,61 @@ run_runtime_comparison() {
     print_runtime_comparison
 }
 
+# Each workload's load axis is its connection count: every room connection
+# publishes and subscribes, while fanout adds subscribers to one publisher. A
+# cost that grows with the shard count or the load shows up as a slope across
+# the shard counts or the connection counts, which one default-versus-single-
+# socket run cannot show.
+run_shard_sweep() {
+    if [[ $(uname -s) != Linux ]]; then
+        printf 'shard sweep needs Linux: only it steers a reuseport group\n' >&2
+        return 1
+    fi
+    generate_certificate
+
+    printf 'Building relay and load generator...\n'
+    CARGO_TARGET_DIR=$CURRENT_TARGET cargo build --locked --release -p moq-relay -p moq-bench
+    LOAD_BIN=$CURRENT_TARGET/release/moq-bench
+    HOST_BIN=$CURRENT_TARGET/release/moq-bench-host
+
+    local cpus workload connections shards label
+    cpus=$(getconf _NPROCESSORS_ONLN)
+    for workload in video fanout; do
+        for connections in $SHARD_CONNECTIONS; do
+            for shards in $SHARD_COUNTS; do
+                label=shard-$shards-$connections
+                printf '  %s: %d connections, %d shards\n' "$workload" "$connections" "$shards"
+                # Zero shards is the shared runtime, given every CPU.
+                if ((shards == 0)); then
+                    run_workload "$label" "$CURRENT_TARGET/release/moq-relay" "$workload" tokio-shared "$cpus" \
+                        --connections "$connections"
+                else
+                    run_workload "$label" "$CURRENT_TARGET/release/moq-relay" "$workload" tokio-workers "$shards" \
+                        --connections "$connections"
+                fi
+            done
+        done
+    done
+
+    printf '\nShard sweep (0 shards is the shared runtime on %d threads)\n' "$cpus"
+    printf '%-8s %11s %7s %10s %10s %8s %7s %8s %9s %9s\n' \
+        workload connections shards recv-Mbps recv-fps p99-ms loss-% CPU CPU/conn RSS-MiB
+    for workload in video fanout; do
+        for connections in $SHARD_CONNECTIONS; do
+            for shards in $SHARD_COUNTS; do
+                jq -r --arg connections "$connections" --arg shards "$shards" '[
+                    .workload, $connections, $shards, .recv_mbps, .recv_fps, .latency_p99_ms, .loss_pct,
+                    .cpu_cores, (.cpu_cores / ($connections | tonumber)), (.rss_bytes / 1048576)
+                ] | @tsv' "$RUN/relay/shard-$shards-$connections/$workload/summary.json" |
+                    while IFS=$'\t' read -r name conns count recv fps p99 loss cpu per rss; do
+                        printf '%-8s %11s %7s %10.3f %10.1f %8.1f %7.3f %8.3f %9.5f %9.1f\n' \
+                            "$name" "$conns" "$count" "$recv" "$fps" "$p99" "$loss" "$cpu" "$per" "$rss"
+                    done
+            done
+        done
+    done
+}
+
 run_lock_profile() {
     if [[ $(uname -s) != Linux ]]; then
         printf 'lock profiling needs Linux for perf and /proc schedstat\n' >&2
@@ -542,6 +609,9 @@ elif [[ $MODE == --runtime ]]; then
     exit 0
 elif [[ $MODE == --lock ]]; then
     run_lock_profile
+    exit 0
+elif [[ $MODE == --shard ]]; then
+    run_shard_sweep
     exit 0
 elif [[ -n $BASE ]]; then
     BASE_COMMIT=$(git rev-parse --verify "$BASE^{commit}")

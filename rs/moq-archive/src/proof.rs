@@ -121,7 +121,9 @@ async fn record<S: ObjectStore + Clone>(store: &Store<S>) {
 	let control = writer.control();
 	for name in TRACKS {
 		let config = match MEDIA.contains(&name) {
-			true => moq_mux::timeline::Config::default(),
+			// Keep this storage-layout proof at one record per 2s source segment. The default
+			// timeline minimum is tested in moq-mux and is not part of this fixture's contract.
+			true => moq_mux::timeline::Config::default().with_duration_min(Duration::from_secs(2)),
 			false => moq_mux::timeline::Config::default().with_duration_min(Duration::ZERO),
 		};
 		control.track(name, config).await.unwrap();
@@ -227,10 +229,14 @@ async fn recordings_are_byte_identical_on_every_backend() {
 		if let crate::Key::Segments { track, .. } = key
 			&& !track.ends_with(hang::timeline::SUFFIX)
 		{
-			let object = crate::Object::decode(bytes.clone()).unwrap();
+			let object = crate::Object::decode(bytes.clone(), true).unwrap();
 			assert_eq!(object.frame_start, 0, "no source group outlived the maximum");
 			for group in object.groups {
-				let frames = group.frames.into_iter().map(|f| (f.timestamp, f.payload)).collect();
+				let frames = group
+					.frames
+					.into_iter()
+					.map(|f| (f.timestamp.unwrap(), f.payload))
+					.collect();
 				stored.insert((track.clone(), group.sequence), frames);
 			}
 		}
@@ -327,7 +333,7 @@ async fn an_offline_reader_follows_dvr_expiry() {
 	let committed = |segment: u64| {
 		let store = store.clone();
 		async move {
-			while store.get_segments(&timeline("video"), segment).await.is_err() {
+			while store.get_segments(&timeline("video"), segment, true).await.is_err() {
 				tokio::time::sleep(Duration::from_millis(5)).await;
 			}
 		}
@@ -350,7 +356,9 @@ async fn an_offline_reader_follows_dvr_expiry() {
 	}
 	committed(8).await;
 	// Records 7 and 8 hold the 2s window, and the newest timeline object restates both.
-	while store.get_segments("video", 6).await.is_ok() || store.get_segments(&timeline("video"), 7).await.is_ok() {
+	while store.get_segments("video", 6, true).await.is_ok()
+		|| store.get_segments(&timeline("video"), 7, true).await.is_ok()
+	{
 		tokio::time::sleep(Duration::from_millis(5)).await;
 	}
 

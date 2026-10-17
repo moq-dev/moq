@@ -11,7 +11,7 @@ use crate::{
 use super::token::RequestToken;
 
 use super::Message;
-use super::namespace::{decode_namespace, encode_namespace};
+use super::namespace::{decode_track, encode_namespace};
 
 use super::Version;
 
@@ -65,8 +65,8 @@ impl Message for Subscribe<'_> {
 		if version == Version::Draft17 {
 			let _required_request_id_delta = r.varint()?;
 		}
-		let track_namespace = decode_namespace(r)?;
-		let track_name = Cow::Owned(r.string()?);
+		let (track_namespace, track_name) = decode_track(r)?;
+		let track_name = Cow::Owned(track_name);
 
 		match version {
 			Version::Draft14 => {
@@ -666,8 +666,7 @@ mod tests {
 		if version == Version::Draft17 {
 			r.varint().unwrap();
 		}
-		decode_namespace(r).unwrap();
-		r.string().unwrap();
+		decode_track(r).unwrap();
 
 		// draft-14/15 write absolute keys, draft-16+ deltas, but the first is absolute either way.
 		let count = r.varint().unwrap();
@@ -936,6 +935,24 @@ mod tests {
 
 		let result: Result<Subscribe, _> = decode_message(&invalid_bytes, Version::Draft14);
 		assert!(result.is_err());
+	}
+
+	/// Draft-16 registers Filter Types 0x1-0x4 and requires PROTOCOL_VIOLATION for any
+	/// other. Moxygen's `SubscribeRequest::make` defaults to its unregistered LargestGroup
+	/// (0xFA), so its interop client sends this exact SUBSCRIBE; refuse it rather than
+	/// guess a meaning.
+	#[test]
+	fn test_subscribe_v16_rejects_unregistered_filter_type() {
+		let subscribe = |filter_type: &[u8]| {
+			let mut bytes = vec![0x00]; // request_id
+			bytes.extend_from_slice(b"\x01\x0bnonexistent\x0dno-such-track"); // namespace, name
+			bytes.extend_from_slice(&[0x01, 0x21, filter_type.len() as u8]); // one SUBSCRIPTION_FILTER
+			bytes.extend_from_slice(filter_type);
+			decode_message::<Subscribe>(&bytes, Version::Draft16)
+		};
+
+		assert!(matches!(subscribe(&[0x40, 0xfa]), Err(DecodeError::InvalidValue)));
+		assert_eq!(subscribe(&[0x02]).unwrap().filter, Filter::NextObject);
 	}
 
 	#[test]

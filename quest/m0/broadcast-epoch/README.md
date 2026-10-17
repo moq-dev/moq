@@ -65,11 +65,11 @@ Decided:
   the lite-07 cut, not this release. It replaces the response-only claim-epoch
   proposal: an independent route explicitly continues the same served
   instance, rather than inferring continuity from an epochless claim.
-- Decided in the 2026-10-10 resume audit: a catalog reference pins its first
-  resolved sibling for the catalog instance's lifetime in players and
-  exporters. Optional reference epochs constrain the first resolution on
-  epoch-aware transports; on epochless transports they remain best effort.
-  This supersedes following the newest sibling by name. The
+- Decided 2026-10-14: announcement-following readers handle a referenced
+  sibling's replacement as Restart; other readers pin their first resolution
+  for the catalog instance's lifetime. Optional reference epochs constrain
+  resolution on epoch-aware transports and remain best effort on epochless
+  transports. Following never turns a replacement into seamless resume. The
   [catalog references quest](/quest/m0/broadcast-epoch/catalog-references.md)
   owns the schemas, readers, and compatibility documentation.
 - Every first-party publisher that can restart mints its own: the apps,
@@ -108,22 +108,25 @@ maintainer's pre-release merge of `release` into `main` keeps `main`'s
 The 2026-10-10 resume audit adds release gates for newly issued requests
 through retired handles and for late duplicate delivery after same-epoch
 handover. Keep existing reads sticky; stopping new unpinned wire work is a
-separate boundary. The catalog-reference work applies the same pinning
-policy to players and exporters. Wall-clock expiry, live DROP dispositions,
+separate boundary. Catalog references apply the same identity policy to
+players and exporters, distinguishing announcement followers from readers
+that retain lifetime pins. Wall-clock expiry, live DROP dispositions,
 FETCH budgets, seamless JS handover, and the IETF extension remain m1.
 
 Extend the line's relay/media tests to hold catalog and media from A while B
 replaces it, exercise later metadata/subscription/FETCH operations, and prove
-that following the replacement starts a fresh catalog with fresh pins. Check
+that replacing the catalog starts fresh pins. A followed sibling replacement
+restarts that sibling while preserving the catalog's explicit epoch
+constraints; it never mixes instances through an old handle. Check
 exact and covering routes, matching/different/absent epochs, and legacy
 End+Start. The child quests own their focused regressions.
 
 ## Required
 
-- [Catalog references](/quest/m0/broadcast-epoch/catalog-references.md) - players and exporters pin siblings consistently, with optional reference epochs and documented legacy best effort
+- [Catalog references](/quest/m0/broadcast-epoch/catalog-references.md) - announcement followers restart replaced siblings; other readers retain pins, with optional epochs and legacy best effort
 
 ## Related
 
 - [JS consume identity](https://github.com/moq-dev/moq/pull/5254) - requests carry the serving prefix's epoch and new winners cannot reuse an old cached broadcast
 
-- [Stats prefix tracks](/quest/m1/stats-prefix-tracks.md) - remains in the breaking release with QoS, independently of epoch correctness
+- [Stats prefix tracks](/quest/m2/stats-prefix-tracks.md) - deferred with QoS to m2; neither gates epoch correctness or the next cut

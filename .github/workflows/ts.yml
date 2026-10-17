@@ -52,11 +52,6 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Free disk space
-        uses: jlumbroso/free-disk-space@ceedf095f4ec1a097402bc6bd80831f2e1a6fde6 # main
-        with:
-          tool-cache: false
-
       - uses: DeterminateSystems/nix-installer-action@1d87d45818068401a10cf16bdc5f00b24994a83f # main
         with:
           determinate: false
@@ -141,11 +136,11 @@ jobs:
           MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
         shell: bash -leo pipefail {0}
 
-      # The same round-trip over an open-GOP clip: every leading picture after a
-      # recovery point must come back, in decode order.
+      # The same round-trip over an open-GOP clip: recovery-group orphans are trimmed,
+      # continuous leading pictures stay in decode order, and all shape checks gate.
       - name: TS open GOP
         if: ${{ !cancelled() }}
-        run: nix develop --command just test ts --open-gop
+        run: nix develop --command just test ts --open-gop --strict
         env:
           MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
         shell: bash -leo pipefail {0}
