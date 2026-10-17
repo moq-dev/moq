@@ -440,13 +440,14 @@ loss never reports an END:
 
   | Rule | Revivals | False ENDs | Re-announcements | Reader events | Claim KiB |
   | --- | --- | --- | --- | --- | --- |
-  | Next-hop authority | 386 | 424 | 393 | 8853 | 884 |
-  | Snapshot barrier | 231 | 175 | 260 | 9086 | 856 |
-  | Merged floors | 0 | 0 | 30 | 9020 | 829 |
+  | Next-hop authority | 386 | 424 | 393 | 8853 | 858 |
+  | Snapshot barrier | 231 | 175 | 260 | 9086 | 827 |
+  | Merged floors | 0 | 0 | 30 | 9020 | 801 |
 
   Merged floors' re-announcements follow an offline period or a collection,
   never a known withdrawal. Byte counts are estimates in virtual time, and
-  charge each batch its full region list.
+  charge each batch its full region list,
+  with paths as suffixes of the interest.
 
 Decided with the maintainer 2026-10-16, from the handoff proof:
 

@@ -391,24 +391,26 @@ impl View {
 		});
 	}
 
-	/// Estimated bytes to move a receiver from `old` to `self`: changed floors
-	/// and changed or removed items, each with its path and a varint or two.
-	fn diff_bytes(&self, old: Option<&View>) -> (usize, usize) {
+	/// Estimated bytes to move a receiver watching `interest` from `old` to
+	/// `self`: every floor and the changed or removed items, each with its
+	/// path as a suffix of the interest and a varint or two.
+	fn diff_bytes(&self, old: Option<&View>, interest: &str) -> (usize, usize) {
 		let empty = View::default();
 		let old = old.unwrap_or(&empty);
+		let suffix = |path: &str| path.strip_prefix(interest).map_or(path.len(), str::len);
 		// One ANNOUNCE_FLOOR lists every region, changed or not: a count, then a
 		// suffix and a revision per region.
-		let floors = 1 + self.floors.keys().map(|region| region.len() + 4).sum::<usize>();
+		let floors = 1 + self.floors.keys().map(|region| suffix(region) + 4).sum::<usize>();
 		let changed: Vec<usize> = self
 			.items
 			.iter()
 			.filter(|(claim, item)| old.items.get(*claim) != Some(item))
-			.map(|(claim, _)| claim.len() + 8)
+			.map(|(claim, _)| suffix(claim) + 8)
 			.chain(
 				old.items
 					.keys()
 					.filter(|claim| !self.items.contains_key(*claim))
-					.map(|claim| claim.len()),
+					.map(|claim| suffix(claim)),
 			)
 			.collect();
 		(changed.len(), 9 + floors + changed.iter().sum::<usize>())
@@ -536,10 +538,19 @@ struct State {
 	shown: BTreeMap<(Id, &'static str), Shown>,
 	/// How many times this node restarted.
 	restarts: u32,
-	/// Per origin, each time this node forgot part of its claims: everything
-	/// overlapping none of the listed regions, so a stale replay is excused
-	/// only for a claim it actually forgot.
-	forgot: BTreeMap<Id, Vec<Vec<&'static str>>>,
+	/// Per claim this node has shown, how many times it forgot that claim, so a
+	/// stale replay is excused only for a claim it actually forgot. Fixture
+	/// bookkeeping, not relay state: it labels reader events.
+	forgot: BTreeMap<(Id, &'static str), u32>,
+}
+
+/// Counts a forget against each shown claim of `id` overlapping none of `kept`.
+fn forget(forgot: &mut BTreeMap<(Id, &'static str), u32>, id: Id, kept: &[&str]) {
+	for ((key, claim), count) in forgot.iter_mut() {
+		if *key == id && !kept.iter().any(|region| overlaps(claim, region)) {
+			*count += 1;
+		}
+	}
 }
 
 /// An identity serving everything under a prefix.
@@ -953,7 +964,7 @@ impl Net {
 		state.heard_on.retain(|(_, key), _| *key != id);
 		state.pending.remove(&id);
 		state.gave_up.remove(&id);
-		state.forgot.entry(id).or_default().push(Vec::new());
+		forget(&mut state.forgot, id, &[]);
 		self.advertise(node);
 	}
 
@@ -1217,7 +1228,7 @@ impl Net {
 					let kept = merged.retire(state.watch);
 					if kept != *merged {
 						*merged = kept;
-						state.forgot.entry(id).or_default().push(vec![state.watch]);
+						forget(&mut state.forgot, id, &[state.watch]);
 					}
 				}
 				// The batch's floor list replaces the session's regions: one left
@@ -1498,7 +1509,7 @@ impl Net {
 		};
 		let state = &mut self.nodes[node];
 		state.views.insert(id, rebuilt);
-		state.forgot.entry(id).or_default().push(remembered);
+		forget(&mut state.forgot, id, &remembered);
 	}
 
 	/// The view `node` shows and forwards for `id`.
@@ -1608,7 +1619,8 @@ impl Net {
 					continue;
 				}
 				// Each floor names its region: the stream's interest, or a scope below it.
-				let view = view.restrict(self.nodes[peer].watch);
+				let watch = self.nodes[peer].watch;
+				let view = view.restrict(watch);
 				let state = &mut self.nodes[node];
 				let unchanged = match state.sent_views.get(&(peer, id)) {
 					Some(sent) => *sent == view,
@@ -1617,7 +1629,7 @@ impl Net {
 				if unchanged {
 					continue;
 				}
-				let (items, bytes) = view.diff_bytes(state.sent_views.get(&(peer, id)));
+				let (items, bytes) = view.diff_bytes(state.sent_views.get(&(peer, id)), watch);
 				state.sent_views.insert((peer, id), view.clone());
 				self.stats.claim_msgs += 1;
 				self.stats.claim_items += items;
@@ -1807,11 +1819,7 @@ impl Net {
 					since,
 					forgot: (
 						self.nodes[node].restarts,
-						self.nodes[node].forgot.get(&id).map_or(0, |log| {
-							log.iter()
-								.filter(|kept| !kept.iter().any(|region| overlaps(claim, region)))
-								.count() as u32
-						}),
+						self.nodes[node].forgot.get(&(id, claim)).copied().unwrap_or(0),
 					),
 					withdrawn: self
 						.truth(origin, claim, self.revision(origin))
@@ -1819,6 +1827,9 @@ impl Net {
 				}
 			})
 			.collect();
+		for event in &events {
+			self.nodes[node].forgot.entry((event.id, event.claim)).or_insert(0);
+		}
 		self.events.extend(events);
 		self.nodes[node].shown = shown;
 	}
