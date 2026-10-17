@@ -530,11 +530,7 @@ mod tests {
 		let start = Instant::now();
 		let last = moq_net::Timestamp::from_millis(1_980).unwrap();
 		if speaker {
-			media
-				.presentation
-				.lock()
-				.unwrap()
-				.audio(Duration::ZERO, delay, start);
+			media.presentation.lock().unwrap().audio(Duration::ZERO, delay, start);
 		}
 		let decoder = Buffered::default();
 		let decoded = decoder.decoded.clone();
@@ -808,10 +804,7 @@ mod tests {
 			.unwrap()
 			.due(moq_net::Timestamp::from_millis(66).unwrap())
 			.unwrap();
-		assert!(
-			Instant::now() < last,
-			"the track closed after its tail was due"
-		);
+		assert!(Instant::now() < last, "the track closed after its tail was due");
 		let audio = Role::new(media.presentation.clone(), super::super::playback::Kind::Audio);
 		let transition = audio.declare();
 		audio.resume(transition, moq_net::Timestamp::ZERO, None).await.unwrap();

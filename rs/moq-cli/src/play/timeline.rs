@@ -614,10 +614,7 @@ mod tests {
 		tokio::time::pause();
 		let now = moq_clock::now();
 		let presentation = std::sync::Arc::new(std::sync::Mutex::new(Presentation::new(DELAY)));
-		presentation
-			.lock()
-			.unwrap()
-			.audio(Duration::from_secs(10), DELAY, now);
+		presentation.lock().unwrap().audio(Duration::from_secs(10), DELAY, now);
 		let audio = Role::new(presentation.clone(), Kind::Audio);
 		let video = Role::new(presentation.clone(), Kind::Video);
 		let transition = audio.declare();
@@ -642,10 +639,7 @@ mod tests {
 		tokio::time::pause();
 		let now = moq_clock::now();
 		let presentation = std::sync::Arc::new(std::sync::Mutex::new(Presentation::new(DELAY)));
-		presentation
-			.lock()
-			.unwrap()
-			.audio(Duration::from_secs(10), DELAY, now);
+		presentation.lock().unwrap().audio(Duration::from_secs(10), DELAY, now);
 		let audio = Role::new(presentation.clone(), Kind::Audio);
 		let video = Role::new(presentation.clone(), Kind::Video);
 		let transition = audio.declare();
@@ -673,10 +667,7 @@ mod tests {
 		tokio::time::pause();
 		let now = moq_clock::now();
 		let presentation = std::sync::Arc::new(std::sync::Mutex::new(Presentation::new(DELAY)));
-		presentation
-			.lock()
-			.unwrap()
-			.audio(Duration::from_secs(10), DELAY, now);
+		presentation.lock().unwrap().audio(Duration::from_secs(10), DELAY, now);
 		let audio = Role::new(presentation.clone(), Kind::Audio);
 		let video = Role::new(presentation.clone(), Kind::Video);
 		let transition = audio.declare();
@@ -705,10 +696,7 @@ mod tests {
 		tokio::time::pause();
 		let now = moq_clock::now();
 		let presentation = std::sync::Arc::new(std::sync::Mutex::new(Presentation::new(DELAY)));
-		presentation
-			.lock()
-			.unwrap()
-			.audio(Duration::from_secs(10), DELAY, now);
+		presentation.lock().unwrap().audio(Duration::from_secs(10), DELAY, now);
 		let audio = Role::new(presentation.clone(), Kind::Audio);
 		let video = Role::new(presentation.clone(), Kind::Video);
 		let transition = audio.declare();
@@ -737,10 +725,7 @@ mod tests {
 		tokio::time::pause();
 		let now = moq_clock::now();
 		let presentation = std::sync::Arc::new(std::sync::Mutex::new(Presentation::new(DELAY)));
-		presentation
-			.lock()
-			.unwrap()
-			.audio(Duration::from_secs(10), DELAY, now);
+		presentation.lock().unwrap().audio(Duration::from_secs(10), DELAY, now);
 		let audio = Role::new(presentation.clone(), Kind::Audio);
 		let video = Role::new(presentation.clone(), Kind::Video);
 		let transition = audio.declare();
@@ -764,10 +749,7 @@ mod tests {
 		tokio::time::pause();
 		let now = moq_clock::now();
 		let presentation = std::sync::Arc::new(std::sync::Mutex::new(Presentation::new(DELAY)));
-		presentation
-			.lock()
-			.unwrap()
-			.audio(Duration::from_secs(10), DELAY, now);
+		presentation.lock().unwrap().audio(Duration::from_secs(10), DELAY, now);
 		let audio = Role::new(presentation.clone(), Kind::Audio);
 		let video = Role::new(presentation.clone(), Kind::Video);
 		let transition = audio.declare();
@@ -793,10 +775,7 @@ mod tests {
 		tokio::time::pause();
 		let now = moq_clock::now();
 		let presentation = std::sync::Arc::new(std::sync::Mutex::new(Presentation::new(DELAY)));
-		presentation
-			.lock()
-			.unwrap()
-			.audio(Duration::from_secs(10), DELAY, now);
+		presentation.lock().unwrap().audio(Duration::from_secs(10), DELAY, now);
 		let audio = Role::new(presentation.clone(), Kind::Audio);
 		let video = Role::new(presentation.clone(), Kind::Video);
 		audio.declare();
@@ -819,10 +798,7 @@ mod tests {
 		tokio::time::pause();
 		let now = moq_clock::now();
 		let presentation = std::sync::Arc::new(std::sync::Mutex::new(Presentation::new(DELAY)));
-		presentation
-			.lock()
-			.unwrap()
-			.audio(Duration::from_secs(10), DELAY, now);
+		presentation.lock().unwrap().audio(Duration::from_secs(10), DELAY, now);
 		let audio = Role::new(presentation.clone(), Kind::Audio);
 		let video = Role::new(presentation.clone(), Kind::Video);
 		audio.declare();
@@ -845,10 +821,7 @@ mod tests {
 		tokio::time::pause();
 		let now = moq_clock::now();
 		let presentation = std::sync::Arc::new(std::sync::Mutex::new(Presentation::new(DELAY)));
-		presentation
-			.lock()
-			.unwrap()
-			.audio(Duration::from_secs(10), DELAY, now);
+		presentation.lock().unwrap().audio(Duration::from_secs(10), DELAY, now);
 		let audio = Role::new(presentation.clone(), Kind::Audio);
 		let video = Role::new(presentation.clone(), Kind::Video);
 		audio.declare();
@@ -871,10 +844,7 @@ mod tests {
 		tokio::time::pause();
 		let now = moq_clock::now();
 		let presentation = std::sync::Arc::new(std::sync::Mutex::new(Presentation::new(DELAY)));
-		presentation
-			.lock()
-			.unwrap()
-			.audio(Duration::from_secs(10), DELAY, now);
+		presentation.lock().unwrap().audio(Duration::from_secs(10), DELAY, now);
 		let audio = Role::new(presentation.clone(), Kind::Audio);
 		let video = Role::new(presentation.clone(), Kind::Video);
 		audio.declare();
@@ -895,10 +865,7 @@ mod tests {
 		tokio::time::pause();
 		let now = moq_clock::now();
 		let presentation = std::sync::Arc::new(std::sync::Mutex::new(Presentation::new(DELAY)));
-		presentation
-			.lock()
-			.unwrap()
-			.audio(Duration::from_secs(10), DELAY, now);
+		presentation.lock().unwrap().audio(Duration::from_secs(10), DELAY, now);
 		let audio = Role::new(presentation.clone(), Kind::Audio);
 		let video = Role::new(presentation.clone(), Kind::Video);
 		let transition = audio.declare();

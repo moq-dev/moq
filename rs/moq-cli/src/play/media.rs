@@ -1802,11 +1802,7 @@ mod tests {
 		let due = media.presentation.lock().unwrap().due(last);
 		task.abort();
 		let _ = task.await;
-		assert_eq!(
-			due,
-			Some(now + delay),
-			"the decoder did not observe the live edge"
-		);
+		assert_eq!(due, Some(now + delay), "the decoder did not observe the live edge");
 		assert!(recorder.present(&media).is_none(), "nothing is due before its delay");
 	}
 }
