@@ -291,9 +291,9 @@ pub(crate) struct TrackState {
 	// datagrams, so it can run ahead of any cached group.
 	max_sequence: Option<u64>,
 
-	// The first sequence appended, kept after it is evicted: where a relative start taken
-	// on an empty track counts back from.
-	first_sequence: Option<u64>,
+	// The first group cached, kept after it is evicted: where a relative start taken on a
+	// track without groups counts back from.
+	first_group: Option<u64>,
 
 	// The name's sequence namespace within the broadcast, which can run past this track's
 	// `max_sequence` when an earlier producer of the name wrote further.
@@ -1282,7 +1282,6 @@ impl TrackState {
 	/// Record a written sequence, here and in the name's shared namespace.
 	fn advance(&mut self, sequence: u64) {
 		self.max_sequence = Some(self.max_sequence.map_or(sequence, |max| max.max(sequence)));
-		self.first_sequence.get_or_insert(sequence);
 		self.sequence.advance(sequence);
 	}
 
@@ -1345,6 +1344,7 @@ impl TrackState {
 				self.evict.push_back((latest, prev.stamp));
 			}
 			self.latest_group = Some(sequence);
+			self.first_group.get_or_insert(sequence);
 		}
 		if !self.protects(sequence) {
 			group.cache_demote();
@@ -4319,7 +4319,8 @@ impl Cursor {
 		let (floor, datagram_index) = {
 			let preferences = subscription.read();
 			let state = state.read();
-			let floor = preferences.floor(state.max_sequence);
+			// Relative starts count groups, so datagrams sharing the sequences don't move them.
+			let floor = preferences.floor(state.latest_group);
 			// Arrival order need not be timestamp order. Only skip the initial stale prefix;
 			// subsequent delivery stays in arrival order, including late datagrams.
 			let newest = state.datagrams.iter().filter_map(|datagram| datagram.timestamp).max();
@@ -4390,9 +4391,9 @@ impl Cursor {
 	/// count a relative start back from. Returns whether the floor is settled.
 	fn resolve_floor(&mut self) -> bool {
 		if self.floor_pending {
-			// The track was empty at subscribe, so the latest group then was the first to
+			// The track had no group at subscribe, so the latest group then was the first to
 			// arrive, however many have arrived or left since.
-			let latest = self.state.read().first_sequence;
+			let latest = self.state.read().first_group;
 			if let Some(floor) = self.subscription.read().floor(latest) {
 				self.min_sequence = self.min_sequence.max(floor);
 				self.floor_pending = false;
@@ -12412,6 +12413,22 @@ mod test {
 		append_at(&mut producer, 0);
 		append_at(&mut producer, 1);
 		assert_eq!(drain(&mut live), vec![0, 1]);
+	}
+
+	/// A live range starts at the newest group even when a datagram took a later sequence.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_live_range_ignores_a_datagram_past_the_newest_group() {
+		let mut producer = track_producer("test", Info::timed());
+		append_at(&mut producer, 0);
+		assert_eq!(
+			producer
+				.append_datagram(Timestamp::from_millis(1).unwrap(), &b"x"[..])
+				.unwrap(),
+			1
+		);
+		let mut live = producer.subscribe(replay().with_ranges([Range::live()]));
+		assert_eq!(drain(&mut live), vec![0]);
 	}
 
 	/// A relative start on an empty track counts back from the first group to arrive, even
