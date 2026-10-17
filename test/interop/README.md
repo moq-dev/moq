@@ -111,7 +111,7 @@ until moq-ffi exposes one, and the browser's shared connection keeps its session
 private, so their cells check media alone. AUTH is only on the work-in-progress
 moq-lite-07, so the printing clients dial `moq-lite-07-wip` alone and a printing
 client that reports nothing never got its grant. The native JS subscribers dial
-WebTransport alone, since the WebSocket fallback cannot offer it. The rest keep
+WebTransport alone and offer it there. The rest keep
 their defaults, so the matrix also crosses versions through the relay, which
 accepts both.
 

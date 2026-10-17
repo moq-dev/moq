@@ -10,6 +10,7 @@ import { spreadHash } from "./internal.ts";
 import type { Consumer, Table } from "./origin.ts";
 import { Preference, Producer } from "./origin.ts";
 import * as Path from "./path.ts";
+import { readsFrom } from "./resume.test-util";
 import { Timescale } from "./time.ts";
 import { overrideBroadcastWire, wireOf } from "./wire.ts";
 
@@ -1123,12 +1124,12 @@ test("a request prefers a cheaper received route over an announced local broadca
 	const announced = consumer.announced();
 	expect(await announced.next()).toMatchObject({ prefix: path, route: { hops: [PEER] } });
 
-	// Re-priced below it, the local broadcast of the same instance wins at once, and the remote
-	// front it replaced closes.
+	// Re-priced below it, the local broadcast of the same instance wins at once: the request's
+	// broadcast stays, and its tracks read the local one.
 	local.announce({ epoch: EPOCH, cost: 0n });
 	expect(await announced.next()).toMatchObject({ prefix: path, kind: "update", route: { epoch: EPOCH, hops: [] } });
-	expect(request.active.peek()).not.toBe(remote);
-	expect(remote?.closed.peek()).not.toBeUndefined();
+	expect(request.active.peek()).toBe(remote);
+	expect(readsFrom(remote, local)).toBe(true);
 
 	announced.close();
 	request.close();
@@ -1543,13 +1544,13 @@ test("an outranked route keeps serving until its replacement answers", async () 
 	await settle();
 	expect(request.active.peek()).toBe(first);
 
-	// Once it answers, the request swaps straight across.
+	// Once it answers, the request's tracks read it, under the same broadcast.
 	const replacement = new BroadcastProducer();
 	const { value: req } = await asked;
 	req?.accept(replacement.consume());
 	await settle();
-	expect(request.active.peek()).toBeDefined();
-	expect(request.active.peek()).not.toBe(first);
+	expect(request.active.peek()).toBe(first);
+	expect(readsFrom(first, replacement)).toBe(true);
 	expect(gaps).toBe(0);
 
 	stop();
@@ -1662,10 +1663,9 @@ test("a request on a replaced epoch fails over to another route of it", async ()
 	disposePrimary();
 	await settle();
 	expect(request.closed.peek()).toBeUndefined();
-	const failed = request.active.peek();
-	expect(failed).toBeDefined();
-	expect(failed).not.toBe(first);
-	expect(failed?.epoch).toBe(EPOCH);
+	expect(request.active.peek()).toBe(first);
+	expect(first?.epoch).toBe(EPOCH);
+	expect(readsFrom(first, replica)).toBe(true);
 
 	const fresh = consumer.request(path);
 	await settle();
@@ -1711,10 +1711,9 @@ test("a request on a replaced epoch fails over to a local replica of it", async 
 	disposePrimary();
 	await settle();
 	expect(request.closed.peek()).toBeUndefined();
-	const failed = request.active.peek();
-	expect(failed).toBeDefined();
-	expect(failed).not.toBe(first);
-	expect(failed?.epoch).toBe(EPOCH);
+	expect(request.active.peek()).toBe(first);
+	expect(first?.epoch).toBe(EPOCH);
+	expect(readsFrom(first, local)).toBe(true);
 
 	const fresh = consumer.request(path);
 	await settle();

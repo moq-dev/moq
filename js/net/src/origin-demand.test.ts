@@ -14,6 +14,7 @@ import { Version as LiteVersion } from "./lite/version.ts";
 import { createMockTransportPair } from "./mock.ts";
 import { Producer } from "./origin.ts";
 import * as Path from "./path.ts";
+import { readsFrom } from "./resume.test-util";
 import { Stream } from "./stream.ts";
 import { wireOf } from "./wire.ts";
 
@@ -381,7 +382,7 @@ test.each(["answer", "release"] as const)(
 			if (action === "release") expect(close).toHaveBeenCalledTimes(1);
 			else {
 				expect(close).not.toHaveBeenCalled();
-				expect(held.active.peek()?.closed).toBe(late.closed);
+				expect(readsFrom(held.active.peek(), late)).toBe(true);
 			}
 		} finally {
 			close.mockRestore();
@@ -439,7 +440,7 @@ test.each([0, 1])(
 			expect(close).toHaveBeenCalledTimes(1);
 			pending[1 - released].accept(replacement);
 			await wait;
-			expect(entries[1 - released].held.active.peek()?.closed).toBe(replacement.closed);
+			expect(readsFrom(entries[1 - released].held.active.peek(), replacement)).toBe(true);
 		} finally {
 			close.mockRestore();
 			for (const entry of entries) entry.held.close();

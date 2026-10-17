@@ -10,7 +10,11 @@
  *
  *     bun drain.ts --a-port 4470 --b-port 4471 --proxy-port 4472 --a-pid 1234 --timeout 60
  *
- * Exits 0 once the viewer has migrated, read groups on both relays with none missing in
+ * The viewer subscribes once, at no latency budget, and reads the same subscription throughout:
+ * the publisher mints an epoch, so B's route serves the same broadcast and the origin resumes the
+ * track there from the first group the viewer lacks.
+ *
+ * Exits 0 once the viewer has migrated, read groups through both relays with none missing in
  * between, and left A on its own; 1 otherwise.
  *
  * @module
@@ -48,14 +52,10 @@ const GROUP_INTERVAL_MS = 100;
 // How long the viewer's old session may keep serving after the GOAWAY. Well inside the relay's
 // 20s drain window, so the relay's exit log can prove the viewer left on its own.
 const HANDOVER = Milli(2000);
-// The viewer's latency budget, as a player sets one (the interop subscribers use the same).
-// Following the route means resubscribing on B, and B has to subscribe upstream afresh once A
-// drops its pull; the budget is what lets that resubscribe reach back to a group that was in
-// flight across the swap instead of starting at the next one. With none, a group boundary
-// landing inside the swap drops that group.
-const MAX_DELAY = Milli(1000);
 
 const path = Moq.Path.from("drain");
+// Publisher epochs travel on the work-in-progress moq-lite-07 only, which nothing offers by default.
+const websocket = { protocols: ["moq-lite-07-wip"] };
 const trackName = "seq";
 
 function log(message: string) {
@@ -111,8 +111,13 @@ await new Promise<void>((resolve, reject) => {
 const published = new Moq.Origin.Producer();
 const broadcast = published.createBroadcast(path);
 const track = broadcast.createTrack(trackName, { timescale: Moq.Time.Timescale.MILLI });
-broadcast.announce();
-const publisher = new Moq.Connection({ url: new URL(`http://127.0.0.1:${bPort}/`), publish: published.consume() });
+// The epoch is what says B's route serves the same broadcast as A's.
+broadcast.announce({ epoch: Moq.Epoch.mint() });
+const publisher = new Moq.Connection({
+	url: new URL(`http://127.0.0.1:${bPort}/`),
+	publish: published.consume(),
+	websocket,
+});
 
 let lastPublished = -1;
 const ticker = setInterval(() => {
@@ -126,112 +131,75 @@ const ticker = setInterval(() => {
 }, GROUP_INTERVAL_MS);
 
 // ── viewer through the name ───────────────────────────────────────────────────
-/** Which relay delivered each group: the generation of the broadcast it was read from. */
-const seen = new Map<number, Set<number>>();
-let generation = -1;
+/** How many times each group was read: once, through whichever relay served it then. */
+const seen = new Map<number, number>();
 /** A group whose payload is not its sequence number: fails the run however the swap goes. */
 let corrupt: string | undefined;
+/** Why the subscription ended, if it did: it must outlive the migration. */
+let ended: string | undefined;
 
 const watched = new Moq.Origin.Producer();
 const viewer = new Moq.Connection({
 	url: new URL(`http://127.0.0.1:${proxyPort}/`),
 	consume: watched,
 	goaway: { handover: HANDOVER },
+	websocket,
 });
-async function read(sub: Moq.Track.Subscriber, gen: number): Promise<void> {
+
+// One request and one subscription, at the default zero budget, read for the whole run: the
+// route moving from A to B re-sources the track underneath.
+const request = watched.request(path, { announced: true });
+await until("the broadcast to resolve", () => request.active.peek() !== undefined);
+const active = request.active.peek() as Moq.Broadcast.Consumer;
+log("watching");
+const sub = active.track(trackName).subscribe();
+void (async () => {
 	try {
 		for (;;) {
 			const group = await sub.recvGroup();
-			if (!group) return;
-			const text = await group.readString();
-			if (text !== String(group.sequence)) {
-				corrupt ??= `generation ${gen}: group ${group.sequence} carried ${text}`;
+			if (!group) {
+				ended = "the subscription finished";
 				return;
 			}
-			let gens = seen.get(group.sequence);
-			if (!gens) {
-				gens = new Set();
-				seen.set(group.sequence, gens);
+			const text = await group.readString();
+			if (text !== String(group.sequence)) {
+				corrupt ??= `group ${group.sequence} carried ${text}`;
+				return;
 			}
-			gens.add(gen);
+			seen.set(group.sequence, (seen.get(group.sequence) ?? 0) + 1);
 		}
 	} catch (err) {
-		// The broadcast it was read from went away; its successor picks up from here.
-		log(`generation ${gen} ended: ${err instanceof Error ? err.message : String(err)}`);
-	}
-}
-
-// Follow whichever broadcast the path routes to, as a player does: subscribe to the new one and
-// drop the old one each time the route changes. A request stays on the publisher instance it
-// resolved, and without an epoch the other relay's route is another instance, so a player
-// requests again whenever the path is announced (a start or a restart), keeping its request when
-// the fresh one resolves the same broadcast, and never because its request ended.
-let current: { broadcast: Moq.Broadcast.Consumer; sub: Moq.Track.Subscriber } | undefined;
-const follow = (active: Moq.Broadcast.Consumer | undefined) => {
-	if (!active || active === current?.broadcast) return;
-	generation++;
-	log(`watching generation ${generation}`);
-	const sub = active.track(trackName).subscribe({ maxDelay: MAX_DELAY });
-	void read(sub, generation);
-	current?.sub.close();
-	current = { broadcast: active, sub };
-};
-let request = watched.request(path, { announced: true });
-// Subscribed before the first peek, so no route change can land between reading it and listening.
-let unfollow = request.active.subscribe(follow);
-follow(request.active.peek());
-
-const announced = watched.announced(Moq.Path.Pattern.literal(path), { hidden: true });
-void (async () => {
-	for (;;) {
-		const entry = await announced.next();
-		if (!entry) break;
-		if (entry.kind === "end" || entry.kind === "update") continue;
-		if (!Moq.Path.hasPrefix(entry.prefix, path)) continue;
-		const fresh = watched.request(path, { announced: true });
-		const same =
-			request.closed.peek() === undefined && request.active.peek()?.closed === fresh.active.peek()?.closed;
-		if (same) {
-			fresh.close();
-			continue;
-		}
-		log(`path ${entry.kind}: requesting again`);
-		const old = request;
-		unfollow();
-		request = fresh;
-		unfollow = request.active.subscribe(follow);
-		follow(request.active.peek());
-		old.close();
+		ended = err instanceof Error ? err.message : String(err);
 	}
 })();
 
-const readOn = (gen: number) => [...seen.values()].filter((gens) => gens.has(gen)).length;
-const newestOn = (gen: number) => Math.max(-1, ...[...seen].filter(([, gens]) => gens.has(gen)).map(([seq]) => seq));
+const newest = () => Math.max(-1, ...seen.keys());
 
 let failure: Error | undefined;
 try {
-	await until(`${GROUPS_PER_RELAY} groups through relay A`, () => generation === 0 && readOn(0) >= GROUPS_PER_RELAY);
+	await until(`${GROUPS_PER_RELAY} groups through relay A`, () => seen.size >= GROUPS_PER_RELAY);
 	if (a.dialed !== 1 || b.dialed !== 0) throw new Error(`expected one dial to A, saw A=${a.dialed} B=${b.dialed}`);
 
 	log("withdrawing A from the name, then draining it");
 	resolved = b;
 	process.kill(aPid, "SIGTERM");
 
-	// Counted past the last group A delivered: B's first answer can include recent groups the
-	// viewer already had, which prove nothing about B being live.
-	// Bounded well inside A's 20s drain window: a viewer that only reconnects once A cuts it off
-	// at the deadline would otherwise pass, just late.
-	await until(
-		`${GROUPS_PER_RELAY} new groups through relay B`,
-		() => generation >= 1 && newestOn(generation) >= newestOn(0) + GROUPS_PER_RELAY,
-		HANDOVER * 3,
-	);
 	// The old session leaves at the handover cap, before A's own deadline would cut it.
 	await until("the viewer to leave relay A", () => a.open === 0, HANDOVER * 3);
+	// Counted past the newest group when A went: only B can have delivered these. Bounded well
+	// inside A's 20s drain window: a viewer that only reconnects once A cuts it off at the
+	// deadline would otherwise pass, just late.
+	const left = newest();
+	await until(
+		`${GROUPS_PER_RELAY} new groups through relay B`,
+		() => newest() >= left + GROUPS_PER_RELAY,
+		HANDOVER * 3,
+	);
 
-	if (generation !== 1) throw new Error(`expected exactly one migration, saw ${generation}`);
 	if (a.dialed !== 1) throw new Error(`the viewer redialed the withdrawn relay (${a.dialed} dials)`);
 	if (b.dialed < 1) throw new Error("the viewer never dialed relay B");
+	if (request.active.peek() !== active) throw new Error("the request swapped its broadcast across the migration");
+	if (ended) throw new Error(`the subscription ended across the migration: ${ended}`);
 
 	const sequences = [...seen.keys()].sort((x, y) => x - y);
 	const first = sequences[0] ?? 0;
@@ -240,17 +208,16 @@ try {
 	for (let seq = first; seq <= last; seq++) {
 		if (!seen.has(seq)) missing.push(seq);
 	}
-	const both = sequences.filter((seq) => seen.get(seq)?.size === 2).length;
-	log(`read groups ${first}..${last} (published up to ${lastPublished}); ${both} arrived from both relays`);
+	const repeated = sequences.filter((seq) => (seen.get(seq) ?? 0) > 1);
+	log(`read groups ${first}..${last} (published up to ${lastPublished}); left A after ${left}`);
 	if (missing.length > 0) throw new Error(`dropped groups across the migration: ${missing.join(", ")}`);
-	if (corrupt) throw new Error(`corrupt group from ${corrupt}`);
+	if (repeated.length > 0) throw new Error(`groups handed out twice: ${repeated.join(", ")}`);
+	if (corrupt) throw new Error(`corrupt group: ${corrupt}`);
 	log("migrated without a dropped group");
 } catch (err) {
 	failure = err instanceof Error ? err : new Error(String(err));
 } finally {
-	announced.close();
-	unfollow();
-	current?.sub.close();
+	sub.close();
 	clearInterval(ticker);
 	request.close();
 	viewer.close();
