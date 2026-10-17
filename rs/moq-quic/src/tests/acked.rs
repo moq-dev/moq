@@ -80,6 +80,36 @@ fn excludes_ack_delay() {
     );
 }
 
+/// A reordered packet acknowledged after a later one keeps its receive instant: the ACK's delay
+/// describes the later packet, so none is subtracted.
+#[test]
+fn reordered_ack_keeps_its_delay() {
+    const HOLD: Duration = Duration::from_millis(1);
+    let _guard = subscribe();
+    let mut pair = pair(true);
+    let (client_ch, server_ch) = pair.connect();
+    let s = open(&mut pair, client_ch, server_ch);
+
+    // The first packet is held back, so it arrives after the second
+    pair.client_send(client_ch, s).write(b"held").unwrap();
+    let held = pair.client_send(client_ch, s).checkpoint();
+    pair.client.drive(pair.time, pair.server.addr);
+    pair.client.delay_outbound();
+    pair.client_send(client_ch, s).write(b"ahead").unwrap();
+    pair.drive_client();
+
+    pair.time += HOLD;
+    let released = pair.time;
+    pair.client.finish_delay();
+    pair.drive_client();
+    pair.drive();
+
+    // The peer acknowledges it at once, as out of order, after it already acknowledged the
+    // later packet
+    let at = acked(&mut pair, client_ch, &held).unwrap().unwrap();
+    assert_eq!(at - released, 2 * LATENCY);
+}
+
 /// A checkpoint resolves only once every byte before it is acknowledged, by the ACK that fills
 /// the gap, however much of the stream that ACK covers.
 #[test]

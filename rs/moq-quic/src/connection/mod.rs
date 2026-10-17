@@ -1609,8 +1609,13 @@ impl Connection {
                 Duration::from_micros(ack.delay << self.peer_params.ack_delay_exponent.0),
             )
         };
-        // When the peer received the data, plus the ACK's trip back
-        let acked_at = now.checked_sub(ack_delay).unwrap_or(now);
+        // When the peer received the data, plus the ACK's trip back. The delay is for the
+        // largest packet acknowledged, so an ACK that repeats it only newly covers packets that
+        // arrived since, at an unknown point within that delay.
+        let acked_at = match new_largest {
+            true => now.checked_sub(ack_delay).unwrap_or(now),
+            false => now,
+        };
 
         let mut ack_eliciting_acked = false;
         for packet in newly_acked.elts() {

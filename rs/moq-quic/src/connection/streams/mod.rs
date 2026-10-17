@@ -482,9 +482,11 @@ impl Checkpoint {
     /// The instant is when the ACK that brought the stream's contiguous acknowledged prefix to the
     /// checkpoint was received, less the ACK delay the peer reported, capped at its
     /// `max_ack_delay`. That leaves out the peer's delayed-ACK timer, but still includes the ACK's
-    /// one-way trip back. It is never earlier than the data's packet was sent. A checkpoint taken
-    /// once everything written was already acknowledged gets the ACK that got it there, and one
-    /// taken before anything was written gets the stream's next ACK.
+    /// one-way trip back. The delay is only subtracted from an ACK that raises the largest
+    /// acknowledged packet, since it describes that packet, not reordered ones the ACK repeats it
+    /// for. The instant is never earlier than the data's packet was sent. A checkpoint taken once
+    /// everything written was already acknowledged gets the ACK that got it there, and one taken
+    /// before anything was written gets the stream's next ACK, or fails if a reset comes first.
     ///
     /// [`StreamEvent::Acked`] reports when this resolves. Like a [`StreamEvent::Finished`] stream,
     /// an acknowledgment only means the peer's QUIC stack holds the data, not that its

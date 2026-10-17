@@ -213,10 +213,19 @@ impl SendBuffer {
     ///
     /// The buffer then ends at `end`, so the caller tracks the stream's final size.
     pub(super) fn truncate(&mut self, end: u64) {
+        self.watches.fail_past(end);
+        self.cut(end);
+        // Only a checkpoint taken before anything was acknowledged can still wait, and with
+        // nothing left to acknowledge, no ACK will resolve it
+        if self.is_fully_acked() {
+            self.watches.fail_all();
+        }
+    }
+
+    fn cut(&mut self, end: u64) {
         if end >= self.offset {
             return;
         }
-        self.watches.fail_past(end);
         let base_offset = self.offset - self.unacked_len as u64;
         let mut keep = end.saturating_sub(base_offset) as usize;
         if keep == 0 {
@@ -624,6 +633,17 @@ mod tests {
         // A stream that goes away fails what it never acknowledged
         drop(buf);
         assert_eq!(kept.get(), Some(&Err(ClosedStream::default())));
+    }
+
+    /// A checkpoint on an empty stream fails, and is reported, once a reset leaves nothing to
+    /// acknowledge.
+    #[test]
+    fn watch_fails_on_empty_reset() {
+        let mut buf = SendBuffer::new();
+        let empty = buf.watch();
+        buf.truncate(0);
+        assert_eq!(empty.get(), Some(&Err(ClosedStream::default())));
+        assert!(buf.take_resolved());
     }
 
     #[test]
