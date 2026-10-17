@@ -66,8 +66,8 @@ nix develop --command just bench-runtime 5 16
 ```
 
 Runtime comparison requires Linux because io\_uring and relay process metrics
-come from Linux interfaces. The default worker count is the number of online
-logical CPUs.
+come from Linux interfaces. The default worker count is the number of logical
+CPUs the run may use.
 
 Sweep the relay's QUIC shard count against the connection count, for the
 room (`video`: every connection publishes and subscribes) and `fanout` (one
@@ -78,7 +78,7 @@ nix develop --command just bench-shard
 nix develop --command just bench-shard "0 1 8 24" "64 512"
 ```
 
-Zero shards is the shared runtime with one Tokio thread per logical CPU; any
+Zero shards is the shared runtime with one Tokio thread per usable CPU; any
 other count is that many unpinned Tokio workers. The table reports CPU per
 connection, so a steering, dispatch, or per-shard cost that grows with either
 axis reads as a slope. Linux only, since nothing else steers a reuseport
@@ -116,7 +116,9 @@ waited, in flamegraph folded format.
 Linux only. A switch-out is sampled in kernel context, and 16 workers need a
 larger ring buffer than the unprivileged locked-memory limit allows, so the
 recipe refuses before building until `perf_event_paranoid` is -1. A recording
-that still drops events is refused rather than reported.
+that still drops events is refused rather than reported. On an arm64 host with
+SVE, perf's DWARF unwinding requests the SVE `VG` register, which the kernel
+refuses for a software event, so the recording fails to open; profile on x86.
 
 ```bash
 sudo sysctl -w kernel.perf_event_paranoid=-1
@@ -144,6 +146,13 @@ work.
 
 Benchmark output is informational and machine-specific. Crashes, zero delivery,
 and invalid samples still fail the command.
+
+On a hybrid CPU the same case measures far apart on performance and efficiency
+cores, so `run.sh` pins itself, and every build and benchmark process it starts,
+to the performance cores wherever the kernel lists them
+(`/sys/devices/cpu_core/cpus` on Intel hybrid parts), within the CPUs it was
+already allowed, so an outer `taskset` or cpuset still narrows it. The run prints the pinned cores beside its result and records
+them as `affinity` in the metadata. A CPU with one core type runs unpinned.
 
 BASE comparisons run paired rounds (default three, `MOQ_BENCH_RUNTIME_ROUNDS`),
 alternating base/current order. Startup remains outside the final five-second
@@ -209,6 +218,76 @@ directory and refuses a runner that produces no report. Dart's native asset
 hook builds its usual minimal-feature release library; C++ and Swift use
 their default-feature release libraries. No codec work is timed here.
 C++ and Dart process CPU measurement supports Linux and macOS.
+
+## Browser
+
+Measure the JS transport, CMAF, and publish/watch paths in a real browser over
+real WebTransport, against a temporary relay:
+
+```bash
+nix develop --command just bench-browser
+nix develop --command just bench-browser origin/main
+nix develop --command just bench-browser --smoke
+```
+
+`bench/browser/run.sh` bundles one set of pages per variant: `current`, `aa` (an
+identical second bundle, so the A/A spread shows the noise floor), `copy` (one
+extra copy of every received stream chunk injected into `@moq/net`, the control
+that shows the suite can see a copy-heavy change), and `base` when a revision is
+given. Each variant resolves `@moq/*` from its own checkout. Variants alternate
+within each round, with the starting variant rotated, after one warmup round
+(`--rounds`, `--warmup`, `--scenarios transport,cmaf,media`).
+
+- `transport`: a publisher page writes 160 B through 1 MiB frames, a consumer page
+  subscribes and reads them all. Connection setup and fixture generation stay
+  outside the timed interval, which starts at SUBSCRIBE.
+- `cmaf`: CMAF fragment encode and decode of fixed audio (50 x 160 B) and video
+  (a 64 KiB keyframe and 29 x 4 KiB) fixtures, with no network.
+- `media`: `@moq/publish` encodes a scrolling 1280x720 canvas at 30 fps (H.264,
+  2.5 Mb/s, 1 s keyframes) and `@moq/watch` plays it on a 2D canvas. After a
+  warmup, a 10 s window reports published, received, decoded and presented frame
+  rates, decode backlog, frames decoded but never painted, decoder queue depth,
+  long tasks, and the watcher's heap slope. Frame counters are read at the
+  window's edges, so decoded-but-unpainted can be off by a frame or two; decoder
+  queue depth (mean, and maximum within the window) comes from a thin
+  `VideoDecoder` wrapper present in every pass.
+
+Costs are split by where they run. Main-thread CPU is CDP `TaskDuration` in
+thread ticks; process CPU is each page's renderer (every thread, including
+software decode) plus the browser's shared network service process, where
+WebTransport and QUIC run, and the GPU and browser processes. Separate passes
+keep instrumentation out of timed samples: a traced pass retains a gzipped Chrome
+trace per workload and reports GC pauses and reclaimed JS heap; a counted pass
+wraps typed-array constructors, `set` and `slice` to report JS-visible bytes
+copied and allocated per payload byte during delivery, with connection setup
+subtracted; a probed pass reads each presented
+frame's painted id back to report frame delay percentiles. Native copies inside
+WebTransport and WebCodecs are unavailable, and the report says so.
+
+Chromium runs headless with `--disable-gpu`, so decode and rendering are
+software on every host, and with background throttling disabled. A page that is
+not visible fails the run. `report.json` keeps every raw sample with host load,
+the browser version, flags and per-page environment, source revisions, a
+per-variant summary, and paired per-round deltas against `current` with their
+range and whether the sign held. The pairs are `current` against `base`, and each
+control (`aa`, `copy`) against `current`. `BROWSER_BIN` runs an identified local
+browser instead of Playwright's Chromium.
+
+Read process CPU with its granularity in mind: Chromium reports it in 10 ms ticks,
+so a sub-second transport sample carries a few percent of quantization; main-thread
+CPU has microsecond resolution. The renderer's process CPU minus its main thread
+is mostly software decode, compositing, and GC helper threads. On a shared host the
+A/A spread is wide, so a single extra copy shows reliably in the counted pass, not
+in timing; compare timing only across a change larger than the `aa` range.
+
+Every transport frame carries its index and a patterned payload: timed passes
+check sampled bytes, the counted pass checks every byte, and frame counts and an
+order-independent digest must match, so skipped work cannot read as a speedup.
+CMAF output is decoded and checked byte for byte in a separate call after each
+phase's CPU and trace snapshots.
+Crashes, wrong bytes, missing frames, a window that presents nothing, or an
+unavailable CPU clock fail the run; timing never does. The nightly runs
+`--smoke` and keeps its run directory as the `bench-browser` artifact.
 
 ## Pattern and container coverage
 

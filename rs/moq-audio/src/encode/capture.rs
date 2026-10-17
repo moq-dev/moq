@@ -3,8 +3,9 @@
 use std::fmt;
 use std::sync::Arc;
 use std::task::Poll;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
+use moq_net::time::Instant;
 use rand::RngExt;
 
 use moq_mux::catalog::hang::CatalogExt;
@@ -2107,7 +2108,7 @@ mod tests {
 	/// the broadcast clock's own correlation, so the published timestamp is exactly that
 	/// instant however late the read happens.
 	mod clock {
-		use std::time::{Duration, Instant, SystemTime};
+		use std::time::{Duration, SystemTime};
 
 		use super::*;
 

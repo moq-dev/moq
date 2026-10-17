@@ -8,9 +8,9 @@ typealias Encoder = uniffi.moq.MoqAudioEncoder
 typealias Consumer = uniffi.moq.MoqAudioConsumer
 /** The PCM layout written to a [Producer]. */
 typealias EncoderInput = uniffi.moq.MoqAudioEncoderInput
-/** The codec side: codec, track name, rate, channels, bitrate, and frame duration (0 takes the codec's own frame). */
+/** The codec side: codec, track name, rate, channels, bitrate, frame duration (0 takes the preset's or codec's own frame), and preset. */
 typealias EncoderOutput = uniffi.moq.MoqAudioEncoderOutput
-/** The PCM layout a [Consumer] delivers and how stale a group may get. */
+/** The PCM layout a [Consumer] delivers, how stale a group may get, and its playout delay. */
 typealias DecoderOutput = uniffi.moq.MoqAudioDecoderOutput
 /** Interleaved PCM with its presentation timestamp. */
 typealias Frame = uniffi.moq.MoqAudioFrame
@@ -20,5 +20,7 @@ typealias Packet = uniffi.moq.MoqAudioPacket
 typealias EncoderFinish = uniffi.moq.MoqAudioEncoderFinish
 /** The audio codec: `Codec.opus()` or `Codec.aac()`. */
 typealias Codec = uniffi.moq.MoqAudioCodec
+/** How the encoder trades latency for compression; `null` is `BALANCED`. */
+typealias Preset = uniffi.moq.MoqAudioPreset
 /** A raw PCM sample layout. */
 typealias SampleFormat = uniffi.moq.MoqAudioSampleFormat

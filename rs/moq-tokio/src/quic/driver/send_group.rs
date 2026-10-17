@@ -7,11 +7,12 @@ use crate::quic::driver::connection::ConnectionInner;
 /// Streams that [join](crate::quic::driver::SendStream::set_group) a group share bytes with
 /// the connection's other groups: a higher priority group preempts every lower one, and groups
 /// of equal priority get an equal share of bytes however many streams each has queued. A
-/// stream's own priority orders it only against the group's other streams. Streams outside any
-/// group go before every group. See [`moq_quic::SendGroups`].
+/// stream's own priority orders it only against the group's other streams, and a datagram sent
+/// in the group is ordered among them by its `order`. Streams and datagrams outside any group go
+/// before every group. See [`moq_quic::SendGroups`].
 ///
-/// Clones share one group, released once the last clone is dropped and its streams finish. A
-/// group does not keep its connection open.
+/// Clones share one group, released once the last clone is dropped and its streams finish
+/// and its datagrams are sent. A group does not keep its connection open.
 #[derive(Debug, Clone)]
 pub struct SendGroup(Arc<Inner>);
 
