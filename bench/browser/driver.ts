@@ -165,20 +165,24 @@ try {
 		const label = round < warmup ? "warmup" : `round ${round - warmup + 1}/${rounds}`;
 		console.log(`── ${label}: ${order.join(", ")}`);
 		if (scenarios.has("transport"))
-			for (const shape of TRANSPORT) for (const variant of order) await transport(variant, shape, round, "timed");
+			for (const shape of TRANSPORT)
+				for (const variant of order) await sample(transport(variant, shape, round, "timed"));
 		if (scenarios.has("cmaf"))
-			for (const shape of CMAF) for (const variant of order) await cmaf(variant, shape, round, "timed");
-		if (scenarios.has("media")) for (const variant of order) await media(variant, round, "timed");
+			for (const shape of CMAF) for (const variant of order) await sample(cmaf(variant, shape, round, "timed"));
+		if (scenarios.has("media")) for (const variant of order) await sample(media(variant, round, "timed"));
 	}
 	console.log("── traced and counted passes");
 	for (const variant of variants) {
 		if (scenarios.has("transport"))
 			for (const shape of TRANSPORT) {
-				await transport(variant, shape, -1, "traced");
-				await transport(variant, shape, -1, "counted");
+				await sample(transport(variant, shape, -1, "traced"));
+				await sample(transport(variant, shape, -1, "counted"));
 			}
-		if (scenarios.has("cmaf")) for (const shape of CMAF) await cmaf(variant, shape, -1, "traced");
-		if (scenarios.has("media")) await media(variant, -1, "probed");
+		if (scenarios.has("cmaf")) for (const shape of CMAF) await sample(cmaf(variant, shape, -1, "traced"));
+		if (scenarios.has("media")) {
+			await sample(media(variant, -1, "traced"));
+			await sample(media(variant, -1, "probed"));
+		}
 	}
 } finally {
 	await browser.close();
@@ -301,21 +305,25 @@ function processCpu(
 	};
 }
 
-async function bounded<T>(task: Promise<T>, what: string): Promise<T> {
+async function bounded<T>(task: Promise<T>, what: string, limit = timeout): Promise<T> {
 	let timer: ReturnType<typeof setTimeout> | undefined;
 	try {
 		return await Promise.race([
 			task,
 			new Promise<never>((_, reject) => {
-				timer = setTimeout(
-					() => reject(new Error(`${what} did not finish within ${timeout / 1000}s`)),
-					timeout,
-				);
+				timer = setTimeout(() => reject(new Error(`${what} did not finish within ${limit / 1000}s`)), limit);
 			}),
 		]);
 	} finally {
 		clearTimeout(timer);
 	}
+}
+
+// Every step of a sample is bounded, but a renderer stuck in synchronous code also stalls the
+// CDP and evaluate calls between them. Bounding the whole sample fails the run instead, and the
+// outer finally closes the browser.
+function sample(task: Promise<void>): Promise<void> {
+	return bounded(task, "a sample", 4 * timeout + MEDIA_WARMUP_MS + MEDIA_WINDOW_MS);
 }
 
 function record(row: Row) {
@@ -521,7 +529,7 @@ async function media(variant: string, round: number, pass: Pass) {
 			processes: await processes(),
 		});
 		const before = await snapshot();
-		await Bun.sleep(MEDIA_WINDOW_MS);
+		const events = await trace(pass, watcher.page, `media-${variant}`, () => Bun.sleep(MEDIA_WINDOW_MS));
 		const after = await snapshot();
 		const inside = await watcher.page.evaluate(
 			([start, end]) => window.media.window(start, end),
@@ -600,6 +608,7 @@ async function media(variant: string, round: number, pass: Pass) {
 				),
 				long_task_ms_per_s: inside.long_tasks.total_ms / seconds,
 				heap_slope_kib_per_s: slope(inside.heap) / 1024,
+				...(events && gcMetrics(collections(events, watcher.pid))),
 				...delay,
 			},
 			heap: { before: before.watched.heap, after: after.watched.heap },
