@@ -1,4 +1,4 @@
-//! A relay's NEW_GROUP_REQUEST forwarding (moq-transport draft-16 section 9.2.2.9 through
+//! A relay's NEW_GROUP_REQUEST forwarding (moq-transport draft-15 section 9.2.1.12 through
 //! draft-22 section 9.20.19, unchanged across them).
 //!
 //! Downstream subscribers' requests reach one upstream subscription as the highest one any
@@ -39,10 +39,11 @@ impl Outstanding {
 		if value != 0 && largest.is_some_and(|largest| value <= largest) {
 			return false;
 		}
-		if self.0.is_some_and(|sent| sent.reach() >= value) {
+		let request = Sent { value, largest };
+		if self.0.is_some_and(|sent| sent.reach() >= request.reach()) {
 			return false;
 		}
-		self.0 = Some(Sent { value, largest });
+		self.0 = Some(request);
 		true
 	}
 }
@@ -123,6 +124,14 @@ mod tests {
 		assert!(outstanding.forward(0, None));
 		assert!(!outstanding.forward(0, None));
 		assert!(outstanding.forward(0, Some(0)));
+	}
+
+	#[test]
+	fn a_stale_subscribe_request_covers_no_zero() {
+		let mut outstanding = Outstanding::default();
+		// SUBSCRIBE_OK showed group 5 already existed, so the request asked for nothing.
+		outstanding.subscribed(5, Some(7));
+		assert!(outstanding.forward(0, Some(7)));
 	}
 
 	#[test]
