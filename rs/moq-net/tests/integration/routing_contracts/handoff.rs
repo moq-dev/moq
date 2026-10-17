@@ -959,6 +959,7 @@ fn sweep_scoped_handoff() {
 	const SCOPES: [&str; 2] = ["live/a/", "live/b/"];
 	let (origin, r1, r2, client) = (0, 1, 2, 3);
 	let mut rng = XorShift(0x5c0b_ed00);
+	let mut live_starts = 0;
 	for scenario in 0..150 {
 		let mut net = Net::new(config(FLOORS, Requests::HopByHop), 4);
 		net.leaf(origin);
@@ -1052,7 +1053,15 @@ fn sweep_scoped_handoff() {
 			.map(|((_, claim), _)| *claim)
 			.collect();
 		assert_eq!(shown, expected, "scenario {scenario} watching {watch:?}");
+		live_starts += net
+			.events
+			.iter()
+			.filter(|event| event.id == id && event.kind == Kind::Start && !event.withdrawn)
+			.count();
 	}
+	// Qualified events are judged against the origin's history, so a live
+	// claim's Start is not mistaken for a withdrawn one.
+	assert!(live_starts > 0);
 }
 
 /// Random meshes with two origins and a client under random churn: claims

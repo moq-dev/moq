@@ -1681,16 +1681,20 @@ impl Net {
 		}
 		let events: Vec<Event> = log
 			.into_iter()
-			.map(|(id, claim, kind, since)| Event {
-				node,
-				id,
-				claim,
-				kind,
-				since,
-				forgot: self.nodes[node].forgot,
-				withdrawn: self
-					.truth(id, claim, self.revision(id))
-					.is_none_or(|item| item.since != since),
+			.map(|(id, claim, kind, since)| {
+				// A qualified identity answers to the history of the origin it names.
+				let origin = self.source(id).unwrap_or(id);
+				Event {
+					node,
+					id,
+					claim,
+					kind,
+					since,
+					forgot: self.nodes[node].forgot,
+					withdrawn: self
+						.truth(origin, claim, self.revision(origin))
+						.is_none_or(|item| item.since != since),
+				}
 			})
 			.collect();
 		self.events.extend(events);
