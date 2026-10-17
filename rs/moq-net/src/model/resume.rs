@@ -140,19 +140,21 @@ impl Consumer {
 	}
 
 	/// Poll for a largest frame newer than `seen` on the serving copy, recording it there.
-	/// A copy ending is its route failing, so the logical track ends only with the route.
+	/// A copy ending is its route failing, so the logical track ends only with the route:
+	/// at once when the front ends it, or with the last copy once the front concluded.
 	pub(crate) fn poll_largest(&self, seen: &mut Option<Position>, waiter: &kio::Waiter) -> Poll<Option<Position>> {
 		loop {
 			let (generation, copy) = {
 				let route = self.state.read();
 				(route.generation, route.copy.clone())
 			};
-			let ended = self.end().is_some();
+			let end = self.end();
 			// A replacement copy can start below what an earlier one reported.
 			match copy.map(|copy| copy.poll_largest_after(seen, waiter)) {
 				Some(Poll::Ready(Some(largest))) => return Poll::Ready(Some(largest)),
-				Some(Poll::Pending) if ended => return Poll::Pending,
-				Some(Poll::Ready(None)) | None if ended => return Poll::Ready(None),
+				_ if matches!(end, Some(Some(_))) => return Poll::Ready(None),
+				Some(Poll::Pending) if end.is_some() => return Poll::Pending,
+				Some(Poll::Ready(None)) | None if end.is_some() => return Poll::Ready(None),
 				_ => {}
 			}
 			ready!(self.poll_changed(generation, waiter));
@@ -1410,6 +1412,23 @@ mod test {
 	}
 
 	/// A track reader waiting before any route serves is woken by the first one's frame.
+	/// The front ending the track ends the stream, though the copy's producer stays open.
+	#[test]
+	fn largest_ends_with_the_route() {
+		let routes = Producer::new();
+		let mut consumer = logical(&routes).consume();
+		let a = copy();
+		routes.serve(a.consume());
+		write(&a, 5);
+		let noop = kio::Waiter::noop();
+		assert_eq!(consumer.poll_largest(&noop), Poll::Ready(Some(Position::group(5))));
+		assert!(consumer.poll_largest(&noop).is_pending(), "the copy is still open");
+
+		routes.end(Ok(()));
+		assert_eq!(consumer.poll_largest(&noop), Poll::Ready(None));
+		drop(a);
+	}
+
 	#[test]
 	fn largest_waits_for_a_serving_copy() {
 		use std::sync::atomic::{AtomicBool, Ordering};

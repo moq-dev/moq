@@ -1819,6 +1819,24 @@ test("largest names the newest frame written", async () => {
 
 // A subscriber that arrives after the frames were written reads mirrors. largest is the
 // last frame successfully written, even after an overflow aborts the group.
+test("largest ends at the declared end while the producer stays open", async () => {
+	const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI });
+	const subscriber = producer.subscribe();
+
+	const group = producer.appendGroup();
+	group.writeFrame({ payload: enc.encode("a"), timestamp: Timestamp.now() });
+	expect(await subscriber.largest()).toEqual({ group: 0, frame: 0 });
+
+	// The end is reached, but the open group can still raise the largest.
+	producer.finishAt({ group: 1, frame: 0 });
+	const ended = subscriber.largest();
+	expect(await Promise.race([ended.then(() => "ready"), Promise.resolve("pending")])).toBe("pending");
+
+	group.close();
+	expect(await ended).toBeUndefined();
+	producer.close();
+});
+
 test("largest survives a mirror replay of an aborted group", async () => {
 	const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI });
 

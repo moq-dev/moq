@@ -436,6 +436,8 @@ class TrackState {
 	info = new Signal<Info | undefined>(undefined);
 	/** Greatest real frame reported by the publisher, including a wire answer. */
 	largest = new Signal<Location | undefined>(undefined);
+	// Set once {@link largest} can no longer advance while the track stays open.
+	largestEnded = new Signal(false);
 
 	constructor(subscription?: Subscription) {
 		this.update = new Signal(subscription === undefined ? undefined : subscriptionDefaults(subscription));
@@ -483,8 +485,8 @@ async function nextLargest(
 			commit(largest);
 			return largest;
 		}
-		if (state.closed.peek() !== undefined) return undefined;
-		await Signal.race(state.largest, state.closed);
+		if (state.closed.peek() !== undefined || state.largestEnded.peek()) return undefined;
+		await Signal.race(state.largest, state.closed, state.largestEnded);
 	}
 }
 
@@ -747,6 +749,7 @@ export class Producer {
 		const info = this.#state.info.peek();
 		if (info) sink.info.set(info);
 		sink.largest.set(this.#state.largest.peek());
+		sink.largestEnded.set(this.#state.largestEnded.peek());
 
 		const closed = this.#state.closed.peek();
 		if (closed === undefined) {
@@ -993,7 +996,10 @@ export class Producer {
 		const stop = hooks.groupProgress(group, (total) => {
 			if (total > 0) this.#advanceLargest({ group: group.sequence, frame: total - 1 });
 		});
-		void group.closed.then(stop);
+		void group.closed.then(() => {
+			stop();
+			this.#endLargest();
+		});
 		// Give held mirrors the new live edge before pruning their timeline entry,
 		// so their latency guard can preserve a terminal expiry verdict.
 		this.#prune();
@@ -1003,6 +1009,7 @@ export class Producer {
 	#advance(sequence: number): void {
 		this.#received = Math.max(this.#received, sequence + 1);
 		this.#sequence.next = Math.max(this.#sequence.next, sequence + 1);
+		this.#endLargest();
 	}
 
 	// The sequence the next append takes: one past this producer's own writes. The
@@ -1192,6 +1199,18 @@ export class Producer {
 		end = { group, frame };
 		this.#state.end.set(end);
 		for (const sink of this.#sinks) sink.end.set(end);
+		this.#endLargest();
+	}
+
+	// End the largest stream while the track stays open, once it can no longer advance: the
+	// declared end is reached, and every group at or above the largest takes no more frames.
+	#endLargest(): void {
+		if (this.#state.largestEnded.peek()) return;
+		const end = this.#state.end.peek();
+		if (end === undefined || this.#received < finalSequence(end)) return;
+		const from = this.#state.largest.peek()?.group ?? 0;
+		if (!this.#cache.every(({ group }) => group.sequence < from || group.closed.peek() !== undefined)) return;
+		for (const state of [this.#state, ...this.#sinks]) state.largestEnded.set(true);
 	}
 
 	/**
