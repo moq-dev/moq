@@ -59,4 +59,4 @@ racing the old track's finish (`stream aborted by the remote server`).
 
 - [Rust identity enforcement](/quest/m1/catalog-identity-rs.md) - the same contract for the Rust publishers
 - [Capture channel count and cold-start tone](/quest/m1/publish-audio-channel-count.md) - already owns the unpinned cold-start audio-tone symptom
-- [Isolated Opus target](/quest/m1/audio-jitter-target/opus-isolated-target.md) - related playout stalls, with no shared cause established
+- [Isolated Opus target (#5807)](https://github.com/moq-dev/moq/pull/5807) - related playout stalls, with no shared cause established
