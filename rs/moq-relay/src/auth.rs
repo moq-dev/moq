@@ -524,7 +524,9 @@ impl Lease {
 		handle: moq_net::auth::Handle,
 		role: Option<moq_net::Role>,
 	) -> Result<Self, moq_net::Error> {
-		self.refresh = Some(refresh::Refresh::new(&mut self, handle, role)?);
+		let refresh = refresh::Refresh::new(&mut self, handle, role)
+			.inspect_err(|err| crate::connection::setup_failed(&self.stats, Some(err)))?;
+		self.refresh = Some(refresh);
 		Ok(self)
 	}
 

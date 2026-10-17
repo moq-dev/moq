@@ -580,7 +580,9 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn a_cap_added_before_protocol_setup_is_refused() {
 		let (producer, consumer) = lease::Producer::new(grant("a/**", 3000));
-		let lease = super::super::Lease::new("/room", consumer);
+		let registry = moq_net::stats::Registry::new(Default::default());
+		let stats = registry.tier(moq_net::stats::Tier::default()).session("room");
+		let lease = super::super::Lease::new("/room", consumer).with_stats(stats.clone());
 		let (client_transport, server) = transports().await;
 		let now = tokio::time::Instant::now().into_std();
 		let origin = moq_tokio::origin::spawn();
@@ -621,6 +623,13 @@ mod tests {
 		let ((session, driver), ()) = tokio::join!(connecting, refusing);
 		assert!(driver.await.unwrap().to_string().contains("unauthorized"));
 		drop(session);
+		drop(stats);
+		let presence = registry.snapshot().sessions()[0].1;
+		assert_eq!(presence.sessions_ended, 1);
+		assert_eq!(
+			presence.sessions_failed.application, 1,
+			"an admitted session refused before SETUP is a failure"
+		);
 	}
 
 	#[tokio::test(start_paused = true)]
