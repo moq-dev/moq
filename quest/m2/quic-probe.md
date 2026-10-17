@@ -50,6 +50,7 @@ requires it.
 ## Related
 
 - [Viewer up-switch](/quest/m2/viewer-upswitch.md) - the viewer side, which requires this
+- [Padding probe](/quest/m2/padding-probe.md) - application-level padding for a stopped rendition, a candidate padding arm here
 - [Natural media drains](/quest/m2/quic-bbr-natural-drain.md) - separate ProbeRTT policy experiment
 - [QUIC receive-timestamps spike](/quest/m3/quic-gcc.md) - evaluates delay variation and estimator accuracy for a later delay-based controller
 - [noq#811](https://github.com/n0-computer/noq/issues/811) - probing while app-limited, proposed to n0
