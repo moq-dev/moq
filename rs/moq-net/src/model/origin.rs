@@ -1330,9 +1330,14 @@ impl TableCursor {
 			.map(|(_, captures)| captures)
 	}
 
-	/// Whether this cursor waits on `snapshot`: what it delivers could present here.
+	/// Whether this cursor waits on `snapshot`: what it delivers could present here,
+	/// as [`Self::visible`] judges a route at or beneath its prefix.
 	fn awaits(&self, snapshot: &SnapshotEntry) -> bool {
-		self.horizon.admits_link(snapshot.link) && self.allowed.overlaps(&snapshot.claim)
+		self.horizon.admits_link(snapshot.link)
+			&& self.allowed.overlaps(&snapshot.claim)
+			&& !self.holes.iter().any(|hole| snapshot.prefix.has_prefix(hole))
+			// Too deep for the mount to name means everything beneath is too.
+			&& self.named.as_ref().is_none_or(|(mount, _)| mount.names(&snapshot.prefix))
 	}
 
 	/// Whether this cursor may observe `entry` at all: advertised, not behind
@@ -1987,6 +1992,7 @@ impl Producer {
 				id,
 				link: self.link,
 				claim,
+				prefix: prefix.clone(),
 			},
 		);
 		Snapshot {
@@ -3687,6 +3693,8 @@ struct SnapshotEntry {
 	link: Link,
 	/// The prefix's [`prefix_claim`], so a cursor whose patterns miss it never waits on it.
 	claim: Pattern,
+	/// The absolute prefix, so a cursor that could see nothing beneath it never waits on it.
+	prefix: PathOwned,
 }
 
 /// A session still delivering its peer's initial announcements under a prefix.
@@ -6321,6 +6329,23 @@ mod tests {
 		let _peer = producer.clone().peer().snapshot("room");
 		assert!(producer.consume().local().announced().is_caught_up());
 		assert!(!producer.consume().announced().is_caught_up());
+	}
+
+	/// A source shadowed by a mount can present nothing on the handle, so it never holds it.
+	#[test]
+	fn a_shadowed_snapshot_never_holds() {
+		let producer = origin(1).produce();
+		let project = mounted(&producer, "p1", &["**"]).with_hidden(true);
+		let announced = project.announced();
+		assert!(announced.is_caught_up());
+
+		let shadowed = producer.snapshot("p1/.svc");
+		assert!(announced.is_caught_up(), "a snapshot in flight under the hole");
+		assert!(project.announced().is_caught_up(), "a reader registering past one");
+		drop(shadowed);
+
+		let _target = producer.snapshot(".svc/p1");
+		assert!(!announced.is_caught_up(), "the mount's target does hold it");
 	}
 
 	/// A waiter parked on catching up is woken when it does.
