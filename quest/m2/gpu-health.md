@@ -46,7 +46,7 @@ none does:
 | Memory headroom for this process | `VK_EXT_memory_budget` | `VK_EXT_memory_budget` | `VK_EXT_memory_budget` |
 | Memory used and total, device-wide | NVML | sysfs `mem_info_vram_*` | absent until a source is proven |
 | Video engine utilization | NVML encoder and decoder utilization | `gpu_metrics` VCN activity, where the ASIC reports it | PMU video engine busyness: i915 `vcs*-busy`, xe `engine-active-ticks` |
-| Health | NVML errors, `VK_ERROR_DEVICE_LOST` | DRM wedged uevent, `VK_ERROR_DEVICE_LOST` | DRM wedged uevent, i915 `RESET` uevent, `VK_ERROR_DEVICE_LOST` |
+| Health | NVML errors, `VK_ERROR_DEVICE_LOST` | DRM wedged uevent (recovered resets only), `VK_ERROR_DEVICE_LOST` | DRM wedged uevent, i915 `RESET` uevent, `VK_ERROR_DEVICE_LOST` |
 | Model | Vulkan `deviceName` | Vulkan `deviceName` | Vulkan `deviceName` |
 
 Sources:
@@ -74,13 +74,14 @@ Notes on scope:
   utilization is its delta over the elapsed time between reads. xe's
   `engine-active-ticks` must be read in one perf group with
   `engine-total-ticks`, and utilization is the ratio of their deltas.
-- amdgpu, i915, and xe send the DRM wedged uevent when a device is unusable;
-  its `WEDGED=` method names the recovery it needs. A reset the driver
-  recovered from (usable, but its work was lost) arrives differently per
-  driver: amdgpu sends the wedged uevent with `WEDGED=none` after a
-  successful ring reset, i915 sends its own `RESET=1` then `ERROR=0`
-  uevents, and xe sends nothing, so a recovered reset caused by another
-  process is absent on xe. Uevents are one-shot, so seeing them needs a
+- i915 and xe send the DRM wedged uevent when a device is unusable; its
+  `WEDGED=` method names the recovery it needs. amdgpu sends it only as
+  `WEDGED=none` after a successful reset and stays silent when recovery
+  fails, so an unusable AMD device shows only through this process's own
+  `VK_ERROR_DEVICE_LOST`. A reset the driver recovered from (usable, but its
+  work was lost) arrives as that `WEDGED=none` on amdgpu, as `RESET=1` then
+  `ERROR=0` uevents on i915, and not at all on xe, so a recovered reset
+  caused by another process is absent on xe. Uevents are one-shot, so seeing them needs a
   listener that outlives a single poll.
 - NVML may not report the consumer-card encoder session cap at all; verify on
   hardware rather than assume it.
