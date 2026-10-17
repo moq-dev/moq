@@ -26,6 +26,12 @@ const DEFAULT_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 /// How long a validation connection may take to finish its handshake.
 const CHALLENGE_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// How long each systemd start-timeout extension lasts while issuance is pending.
+const EXTEND_USEC: u32 = 90_000_000;
+
+/// How often the start timeout is extended, well inside [`EXTEND_USEC`].
+const EXTEND_INTERVAL: Duration = Duration::from_secs(30);
+
 /// Challenge handshakes in flight at once; connections past this are closed unanswered,
 /// so a flood cannot exhaust descriptors. Far above the handful of vantage points a
 /// directory validates from, so idle scanners do not crowd the validator out.
@@ -116,7 +122,14 @@ impl Config {
 			);
 			return Ok(None);
 		}
-		for domain in &self.domains {
+		if cfg!(not(unix)) {
+			anyhow::bail!("acme is only supported on unix, where acme.dir can be kept owner-only");
+		}
+		// One canonical set, so reordering or recasing the same names reuses the cached certificate.
+		let mut domains: Vec<String> = self.domains.iter().map(|domain| domain.to_ascii_lowercase()).collect();
+		domains.sort();
+		domains.dedup();
+		for domain in &domains {
 			anyhow::ensure!(
 				!domain.contains('*'),
 				"acme.domains cannot include the wildcard {domain}: TLS-ALPN-01 cannot issue one"
@@ -150,9 +163,9 @@ impl Config {
 			.map_or(rustls_acme::acme::LETS_ENCRYPT_PRODUCTION_DIRECTORY, Url::as_str);
 		let cache = Cache { dir };
 		let failures = Failures {
-			path: cache.path("failures", &self.domains, directory),
+			path: cache.path("failures", &domains, directory),
 		};
-		let state = rustls_acme::AcmeConfig::new(&self.domains)
+		let state = rustls_acme::AcmeConfig::new(&domains)
 			.contact(self.contact.iter().map(Url::as_str))
 			.directory(directory)
 			.cache(cache)
@@ -161,7 +174,7 @@ impl Config {
 		Ok(Some(Acme {
 			state,
 			failures,
-			domains: self.domains.join(", "),
+			domains: domains.join(", "),
 			timeout: self.timeout().unwrap_or(DEFAULT_TIMEOUT),
 		}))
 	}
@@ -201,18 +214,13 @@ impl Acme {
 		let challenge = tokio_rustls::TlsAcceptor::from(self.state.challenge_rustls_config());
 		let mut handshakes = tokio::task::JoinSet::new();
 		let health = moq_tokio::accept::Health::new("acme");
-		// Readiness waits on issuance, so stretch systemd's start timeout over the
-		// budget instead of letting a shorter unit default kill the relay first.
-		#[cfg(unix)]
-		{
-			let usec = (self.timeout + Duration::from_secs(30)).as_micros();
-			let _ = sd_notify::notify(&[sd_notify::NotifyState::ExtendTimeoutUsec(
-				u32::try_from(usec).unwrap_or(u32::MAX),
-			)]);
-		}
+		// Readiness waits on issuance, so keep extending systemd's start timeout
+		// rather than letting the unit's default kill the relay inside the budget.
+		let mut extend = tokio::time::interval(EXTEND_INTERVAL);
 		let deadline = tokio::time::sleep(self.timeout);
 		tokio::pin!(deadline);
 		let mut last = None;
+		let mut issued = false;
 
 		loop {
 			tokio::select! {
@@ -221,11 +229,16 @@ impl Acme {
 						tracing::info!(domains = %self.domains, "serving the cached ACME certificate");
 						return self.failures.clear();
 					}
+					// Not ready until it is saved: a certificate lost on restart would be ordered again.
 					Ok(EventOk::DeployedNewCert) => {
 						tracing::info!(domains = %self.domains, "issued an ACME certificate");
-						return self.failures.clear();
+						issued = true;
 					}
+					Ok(EventOk::CertCacheStore) if issued => return self.failures.clear(),
 					Ok(event) => tracing::debug!(?event, "ACME"),
+					Err(rustls_acme::EventError::CertCacheStore(err)) => {
+						return Err(anyhow::Error::new(err).context("failed to save the issued ACME certificate in acme.dir"));
+					}
 					// The directory marked an authorization invalid: one failed validation.
 					Err(err @ rustls_acme::EventError::Order(rustls_acme::OrderError::BadAuth(_))) => {
 						failed = self.failures.record()?;
@@ -258,6 +271,10 @@ impl Acme {
 					}
 				},
 				Some(_) = handshakes.join_next() => {}
+				_ = extend.tick() => {
+					#[cfg(unix)]
+					let _ = sd_notify::notify(&[sd_notify::NotifyState::ExtendTimeoutUsec(EXTEND_USEC)]);
+				}
 				_ = &mut deadline => {
 					let last = last.as_deref().unwrap_or("no response from the directory");
 					anyhow::bail!(
@@ -355,7 +372,7 @@ impl Failures {
 			.map_or(SystemTime::now(), |oldest| *oldest + FAILURE_WINDOW);
 		let last = last.map(|last| format!("; last error: {last}")).unwrap_or_default();
 		anyhow::anyhow!(
-			"ACME validation for {domains} failed {} times in the last hour; stopping before Let's Encrypt's limit of 5 failed validations per hostname per hour locks it out. Check that each domain resolves to this relay and that TCP port 443 reaches web.https.listen ({addr}), then restart after {} or delete {}{last}",
+			"ACME validation for {domains} failed {} times in the last hour; stopping before the directory's failed-validation limit locks the hostname out (Let's Encrypt allows 5 failed validations per hostname per hour). Check that each domain resolves to this relay and that TCP port 443 reaches web.https.listen ({addr}), then restart after {} or delete {}{last}",
 			failed.len(),
 			humantime::format_rfc3339_seconds(retry),
 			self.path.display(),
@@ -448,5 +465,5 @@ impl rustls_acme::AccountCache for Cache {
 	}
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests;

@@ -499,6 +499,15 @@ async fn restart_reuses_only_a_matching_cache() {
 	assert_eq!(restarted.served(&directory, DOMAIN).await, leaf);
 	restarted.stop().await;
 
+	// The same names recased and repeated are one certificate, not a new order.
+	let recased = Running::start(
+		relay_config(&directory.url, dir.path(), &["RELAY.test", DOMAIN]),
+		&directory,
+	)
+	.await;
+	assert_eq!(directory.issued().len(), 1, "a recased domain set must reuse the cache");
+	recased.stop().await;
+
 	let widened = Running::start(
 		relay_config(&directory.url, dir.path(), &[DOMAIN, "other.test"]),
 		&directory,

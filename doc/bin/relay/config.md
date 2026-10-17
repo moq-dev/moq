@@ -162,7 +162,7 @@ See [HTTP endpoints](/bin/relay/http).
 ## \[acme]
 
 The relay provisions and renews a publicly trusted certificate itself, for QUIC
-and HTTPS alike:
+and HTTPS alike (Unix only, where the key can be kept owner-only):
 
 ```toml
 [acme]
