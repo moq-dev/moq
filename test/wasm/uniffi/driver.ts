@@ -9,9 +9,13 @@ import { parseArgs } from "node:util";
 import { chromium } from "playwright";
 import type { Relay, Report } from "./cases.ts";
 
-const { values } = parseArgs({ options: { relays: { type: "string" }, timeout: { type: "string", default: "120" } } });
+// `--timeout` bounds each page, init and cases and bench together, in seconds. Each case
+// carries its own 15 s bound in the page; this catches a hang outside them.
+const { values } = parseArgs({ options: { relays: { type: "string" }, timeout: { type: "string", default: "300" } } });
 const run = process.env.MOQ_TEST_RUN;
-if (!values.relays || !run) throw new Error("needs --relays and MOQ_TEST_RUN");
+const timeout = Number(values.timeout) * 1000;
+if (!values.relays || !run || !Number.isFinite(timeout) || timeout <= 0)
+	throw new Error("needs --relays, MOQ_TEST_RUN, and a positive --timeout");
 const relays = (await Bun.file(values.relays).json()) as Relay[];
 const here = new URL(".", import.meta.url).pathname;
 const dist = join(here, "../dist");
@@ -56,7 +60,10 @@ try {
 		});
 		await page.goto(`http://127.0.0.1:${server.port}/${mode === "strict" ? "?strict" : ""}`);
 		await page.waitForFunction(() => typeof window.uniffiCases === "function");
-		const report = await page.evaluate((value) => window.uniffiCases(value), relays);
+		const report = await bounded(
+			page.evaluate((value) => window.uniffiCases(value), relays),
+			mode,
+		);
 		if (errors.length) throw new Error(`${mode}: ${errors.join("; ")}`);
 		reports[mode] = report;
 		if (report.eval !== (mode === "jit")) throw new Error(`${mode}: new Function allowed = ${report.eval}`);
@@ -77,4 +84,21 @@ try {
 if (failed) {
 	console.error(`${failed} UniFFI case(s) failed`);
 	process.exit(1);
+}
+
+async function bounded<T>(task: Promise<T>, mode: string): Promise<T> {
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	try {
+		return await Promise.race([
+			task,
+			new Promise<never>((_resolve, reject) => {
+				timer = setTimeout(
+					() => reject(new Error(`${mode}: page did not finish in ${timeout / 1000}s`)),
+					timeout,
+				);
+			}),
+		]);
+	} finally {
+		clearTimeout(timer);
+	}
 }
