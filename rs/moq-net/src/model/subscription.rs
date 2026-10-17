@@ -415,10 +415,10 @@ impl Subscription {
 	/// The lowest group this subscription's ranges start at, resolving relative starts
 	/// against `latest`. `None` while one waits on a latest group that does not exist yet.
 	///
-	/// No ranges at all floor nowhere: group 0.
+	/// Empty ranges ask for nothing, and no ranges at all floor nowhere: group 0.
 	pub(crate) fn floor(&self, latest: Option<u64>) -> Option<u64> {
 		let mut floor = None;
-		for range in &self.ranges {
+		for range in self.ranges.iter().filter(|range| !range.is_empty()) {
 			let start = range.resolve_start(latest)?.group;
 			floor = Some(floor.map_or(start, |floor: u64| floor.min(start)));
 		}
@@ -673,8 +673,10 @@ mod tests {
 		assert_eq!(mixed.floor(Some(9)), Some(4));
 		assert_eq!(mixed.floor(None), None);
 
-		// Nothing asked for floors nowhere.
+		// Nothing asked for floors nowhere, and an empty range asks for nothing.
 		assert_eq!(Subscription::default().with_ranges([]).floor(None), Some(0));
+		let empty = Subscription::default().with_ranges([Range::groups(5..5), Range::groups(10..)]);
+		assert_eq!(empty.floor(None), Some(10));
 	}
 
 	/// The bounds a wire without ranges carries: the lowest absolute start and the highest
