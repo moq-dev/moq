@@ -19,6 +19,9 @@ on:
       - "rs/moq-relay/**"
       - "rs/moq-loc/**"
       - "rs/moq-json/**"
+      # The lossy-path step's transport and shaper.
+      - "rs/moq-quic/**"
+      - "rs/moq-shaper/**"
       # Workspace dependencies of moq-net, moq-tokio and moq-mux on the TS path.
       - "rs/kio/**"
       - "rs/moq-flate/**"
@@ -174,6 +177,15 @@ jobs:
       - name: TS live release timing
         if: ${{ !cancelled() && github.event_name != 'pull_request' }}
         run: nix develop --command just test ts --live --duration 120
+        env:
+          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
+
+      # 1% random loss and 25 ms each way on the subscriber's leg (moq-dev/moq#4613), through
+      # moq-shaper: QUIC retransmission must keep the export T-STD compliant with no media lost.
+      # `--hrd`, since `--headroom` still loses audio just after the join at 1%.
+      - name: TS lossy path
+        if: ${{ !cancelled() && github.event_name != 'pull_request' }}
+        run: nix develop --command just test ts --hrd --loss 1 --duration 120
         env:
           MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
 
