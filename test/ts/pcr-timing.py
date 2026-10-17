@@ -444,10 +444,13 @@ def check_rate(scan, args):
     receiver locks to the rate it sees the PCR arrive at. `release` cannot see this: a
     clock running at a steady wrong rate keeps its intervals and only adds to the drift.
     The rate is the least-squares slope of PCR value against arrival over each time base,
-    after the first third of the sample (the start-up fill), which averages the per-PCR
-    release jitter down to a few ppm.
+    after the first third of the sample (the start-up fill).
 
-    An interval `release` grades outside its tolerance is a release fault, not clock
+    Two things move arrival that are not the clock, and the fit is shaped to exclude both.
+    A read stamp is an upper bound on its release, so scheduling and pipe delay only ever
+    add to it: the fit takes the least-delayed PCR in each second, the floor those delays
+    sit on, rather than averaging milliseconds of one-sided wander into the slope. And an
+    interval `release` grades outside its tolerance is a release fault, not clock
     evidence, so the fit breaks there and pools the runs between faults, each about its
     own mean. Fit across one, a stall the sender caught up from is a step in the line,
     and a least-squares slope reads a step of D seconds at fraction f of a span T as a
@@ -475,7 +478,15 @@ def check_rate(scan, args):
         prev = point
     rates = []
     for runs in bases:
-        runs = [points for points in runs if len(points) >= 2]
+        floors = []
+        for points in runs:
+            least = {}
+            for x, y in points:
+                second = int(y - points[0][1])
+                if second not in least or x - y < least[second][0] - least[second][1]:
+                    least[second] = (x, y)
+            floors.append(list(least.values()))
+        runs = [points for points in floors if len(points) >= 2]
         if sum(points[-1][0] - points[0][0] for points in runs) < 1.0:
             continue
         var = cov = 0.0

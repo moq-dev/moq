@@ -3,6 +3,7 @@ import importlib.util
 import io
 import json
 import pathlib
+import random
 import sys
 import tempfile
 import types
@@ -49,6 +50,19 @@ class Rate(unittest.TestCase):
         rate = timing.check_rate(scan, self.ARGS)
         self.assertTrue(rate[2], rate)
         self.assertEqual(rate[4]["release_faults"], 29)
+
+    def test_read_delay_wander_is_not_rate(self):
+        # Reads only ever land late: up to 4 ms through the start of the graded window, under
+        # 0.5 ms either side, on a clock at exactly the media rate.
+        rng = random.Random(7)
+        scan = types.SimpleNamespace(new_base=set(), pcr=[
+            (i * 166, round(i * 0.025 * 27_000_000),
+             1000.0 + i * 0.025 + rng.uniform(0, 0.004 if 1600 <= i < 2600 else 0.0005), 256)
+            for i in range(4648)
+        ])
+        rate = timing.check_rate(scan, self.ARGS)
+        self.assertTrue(rate[2], rate)
+        self.assertLess(abs(rate[4]["ppm"][0]), 3.0)
 
     def test_off_rate_clock_fails_through_a_stall(self):
         rate = timing.check_rate(self.stalled(1.001), self.ARGS)
