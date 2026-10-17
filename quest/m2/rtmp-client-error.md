@@ -11,5 +11,6 @@ with "rtmp server closed before publish was accepted" once the server closes.
 ## Plan
 
 Match the publish and play `_error` in `rs/moq-rtmp`'s client and surface it
-through `dial.rs`. Test against a server that refuses a publish and one that
-refuses a play, asserting the code and description in both.
+through `dial.rs`. Test against a server that answers a publish with `_error`
+and one that answers a play with `_error`, asserting the code and description
+in both.
