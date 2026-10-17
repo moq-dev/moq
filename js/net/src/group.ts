@@ -316,6 +316,8 @@ let makeConsumer: (state: GroupState) => Consumer;
 
 // A replacement copy asked for on behalf of one consumer, settled or still out.
 interface Attempt {
+	/** Asked for a copy that failed, rather than one that stalled. */
+	failed: boolean;
 	abort: AbortController;
 	result: Promise<void>;
 	settled: boolean;
@@ -579,10 +581,12 @@ export class Consumer {
 	async #resume(failed: Error | undefined): Promise<boolean> {
 		const recover = this.#recover;
 		if (!recover?.wants(failed)) return false;
+		// A stall's attempt learns nothing of a failure since: ask again with it.
+		if (failed && this.#attempt && !this.#attempt.failed) this.#abandon();
 		let attempt = this.#attempt;
 		if (!attempt) {
 			const abort = new AbortController();
-			const started: Attempt = { abort, result: Promise.resolve(), settled: false };
+			const started: Attempt = { failed: failed !== undefined, abort, result: Promise.resolve(), settled: false };
 			started.result = recover.replace(this.#index(), failed, abort.signal).then(
 				(replacement) => {
 					started.settled = true;

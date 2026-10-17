@@ -322,3 +322,24 @@ test("a group recovered twice reads on and settles", async () => {
 	expect(await consumer.readFrame()).toBeUndefined();
 	expect(await consumer.closed).toBeNull();
 });
+
+test("a stalled group whose copy then fails asks again with the failure", async () => {
+	const producer = new Producer(0);
+	const consumer = producer.mirror();
+	const route = new Signal(0);
+	const verdict = new Error("refused");
+	hooks.recoverGroup(consumer, {
+		changed: route,
+		wants: (failed) => failed !== undefined || route.peek() > 0,
+		// A stall waits for the route; a failure gets the route's verdict.
+		replace: (_index, failed) => (failed ? Promise.reject(verdict) : new Promise(() => {})),
+	});
+	producer.writeFrame({ payload: new Uint8Array([0]) });
+	await consumer.readFrame();
+
+	route.set(1);
+	const read = consumer.readFrame();
+	await new Promise((resolve) => setTimeout(resolve, 0));
+	producer.close(new Error("route failed"));
+	await expect(read).rejects.toBe(verdict);
+});

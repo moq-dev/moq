@@ -762,3 +762,47 @@ test("a fetch waits for the copy being read to say what the track is", async () 
 	a.close();
 	b.close();
 });
+
+test("an arrival read takes a replaced copy's buffered group before the new copy's later one", async () => {
+	const front = new Front();
+	const a = new BroadcastProducer();
+	const b = new BroadcastProducer();
+	const ta = copy(a);
+	const tb = copy(b);
+	front.serve(a.consume());
+	const sub = front.consumer.track("seq").subscribe({ maxDelay: 10_000 as track.Subscription["maxDelay"] });
+	ta.write(0);
+	expect(drain(sub)).toEqual([0]);
+	// Both buffered when the read starts: the lower one comes first.
+	ta.write(1);
+	tb.write(2);
+	front.serve(b.consume());
+	await settle();
+	expect(drain(sub)).toEqual([1, 2]);
+
+	sub.close();
+	front.consumer.close();
+	a.close();
+	b.close();
+});
+
+test("a fetch still out on the old route moves to the new one", async () => {
+	const front = new Front();
+	const a = new BroadcastProducer();
+	const b = new BroadcastProducer();
+	// a has the track but not group 5 yet, so its fetch waits.
+	a.createTrack("seq");
+	const tb = copy(b);
+	tb.write(5);
+	front.serve(a.consume());
+	const fetching = front.consumer.track("seq").fetchGroup(5);
+	await settle();
+	front.serve(b.consume());
+	const group = await fetching;
+	expect(dec.decode((await group.readFrame())?.payload)).toBe("5.0");
+
+	group.close();
+	front.consumer.close();
+	a.close();
+	b.close();
+});

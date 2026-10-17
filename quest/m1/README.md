@@ -106,7 +106,7 @@ lands before the cut.
 - [TS fidelity and recovery](/quest/m1/ts-reliability/README.md) - both modes have explicit profiles, automated validation, loss tests, and a dedicated guide
 - [Draft 14-16 updates](/quest/m1/ietf-legacy-updates.md) - Rust and JS apply and answer moq-transport 14-16 request updates without ending or leaking the request
 - [Resume reorder](/quest/m1/resume-reorder.md) - a group whose stream header arrives after its successor's still resumes on failover; only a dropped or long-gone group fails
-- [Rust resume ordered reads](/quest/m1/resume-ordered.md) - a Rust ordered reader takes the lowest group across route copies, as JS does
+- [Rust resumed reads](/quest/m1/resume-ordered.md) - a Rust reader takes the lowest group across route copies in both orders, as JS does
 - [Refuse rewinds](/quest/m1/refuse-rewinds.md) - a timed track refuses a group whose first frame is earlier than the previous group's, in Rust and js/net, on every hop
 - [JS pending tail](/quest/m1/js-pending-tail.md) - a JS reader holds for a track's pending tail like Rust
 - [WebGPU on Safari](/quest/m1/webgpu-safari.md) - the WebGPU renderer is verified on Safari 26 for macOS and iOS

@@ -335,8 +335,8 @@ export const hooks: {
 	 * the cursor gives up is reported once as a `drop`.
 	 */
 	tryRecvGroup: (subscriber: Subscriber, dispositions: boolean) => Recv;
-	/** The sequence {@link tryNextGroup} would take next, without taking it. */
-	peekNextGroup: (subscriber: Subscriber) => number | undefined;
+	/** The sequence {@link tryNextGroup} (`ordered`) or {@link tryRecvGroup} would take next, without taking it. */
+	peekGroup: (subscriber: Subscriber, ordered: boolean) => number | undefined;
 	/** Take the next group in sequence order without waiting, as {@link tryRecvGroup} does in arrival order. */
 	tryNextGroup: (subscriber: Subscriber) => Recv;
 	/** Wake once a subscriber's datagram cursor may read differently; fires at most once. */
@@ -432,7 +432,7 @@ export const hooks: {
 	tryNextGroup: () => {
 		throw new Error("track.ts not loaded");
 	},
-	peekNextGroup: () => {
+	peekGroup: () => {
 		throw new Error("track.ts not loaded");
 	},
 	forgetPastBudget: () => {

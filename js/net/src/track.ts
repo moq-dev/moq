@@ -1438,7 +1438,7 @@ export class Subscriber {
 		makeSubscriber = (name, state) => new Subscriber(name, state);
 		hooks.tryRecvGroup = (subscriber, started) => subscriber.#tryRecvGroup(started);
 		hooks.tryNextGroup = (subscriber) => subscriber.#tryNextGroup();
-		hooks.peekNextGroup = (subscriber) => subscriber.#peekNextGroup();
+		hooks.peekGroup = (subscriber, ordered) => subscriber.#peekGroup(ordered);
 		hooks.forgetPastBudget = (subscriber, delivered) => subscriber.#forgetPastBudget(delivered);
 		hooks.tryRecvDatagram = (subscriber) => subscriber.#tryDatagram();
 		hooks.deliveredRuns = (subscriber) => subscriber.#delivered.runs;
@@ -1930,15 +1930,16 @@ export class Subscriber {
 		}
 	}
 
-	// The sequence #tryNextGroup would take next: the first buffered group in range the budget spares.
-	#peekNextGroup(): number | undefined {
+	// The sequence #tryNextGroup (`ordered`) or #tryRecvGroup would take next: the lowest buffered
+	// group in range, not yet handed out, that the budget spares.
+	#peekGroup(ordered: boolean): number | undefined {
 		const cursor = this.#cursor.peek();
-		const start = Math.max(cursor.start, this.#nextSequence);
+		const start = ordered ? Math.max(cursor.start, this.#nextSequence) : cursor.start;
 		const drift = this.#drift();
 		for (const group of this.#state.groups.peek()) {
 			if (group.sequence < start) continue;
 			if (cursor.end !== undefined && group.sequence >= cursor.end) return undefined;
-			if (!this.#isStale(group, drift)) return group.sequence;
+			if (!this.#delivered.has(group.sequence) && !this.#isStale(group, drift)) return group.sequence;
 		}
 		return undefined;
 	}

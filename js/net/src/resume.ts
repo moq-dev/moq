@@ -227,6 +227,11 @@ function subscribe(wire: BroadcastWire, name: string, subscription: track.Subscr
 	}
 }
 
+/** Take a copy's next group, in sequence or arrival order. */
+function take(copy: Copy, ordered: boolean): Recv {
+	return ordered ? hooks.tryNextGroup(copy.sub) : hooks.tryRecvGroup(copy.sub, false);
+}
+
 /** The first group past where `copy` was replaced: 0 for one replaced before any group. */
 function copyEnd(copy: Pick<Copy, "until">): number | undefined {
 	if (copy.until === undefined) return undefined;
@@ -373,16 +378,15 @@ class Reader implements ResumeSource {
 
 	tryGroup(ordered: boolean, delivered: Delivered): Recv {
 		this.sync();
-		// In sequence order, the lowest group any copy holds next, so a replaced copy's buffered
-		// group is not skipped for a later one the serving copy already has.
-		if (ordered) {
-			const next = this.#lowest(delivered);
-			if (next) {
-				const recv = hooks.tryNextGroup(next.sub);
-				if (recv.kind === "group") {
-					this.#observe(next, recv.group.sequence);
-					return { kind: "group", group: this.#handOut(next, recv.group) };
-				}
+		// The lowest group any copy holds next, in either order: a replaced copy's buffered group
+		// comes before a later one the serving copy already has. Arrival order still delivers a
+		// lower group that truly arrives later.
+		const next = this.#lowest(ordered, delivered);
+		if (next) {
+			const recv = take(next, ordered);
+			if (recv.kind === "group") {
+				this.#observe(next, recv.group.sequence);
+				return { kind: "group", group: this.#handOut(next, recv.group) };
 			}
 		}
 		// The serving copy first: it is the one that keeps delivering.
@@ -390,7 +394,7 @@ class Reader implements ResumeSource {
 			const copy = this.#copies[index];
 			if (copy.done !== undefined) continue;
 			for (;;) {
-				const recv = ordered ? hooks.tryNextGroup(copy.sub) : hooks.tryRecvGroup(copy.sub, false);
+				const recv = take(copy, ordered);
 				if (recv.kind === "group") {
 					this.#observe(copy, recv.group.sequence);
 					if (!this.#deliverable(copy, recv.group.sequence, delivered)) {
@@ -410,20 +414,20 @@ class Reader implements ResumeSource {
 		return this.#end("groups", (copy) => copy.done);
 	}
 
-	// The copy whose next group in sequence order is the lowest deliverable one, dropping any it
-	// holds next that are not.
-	#lowest(delivered: Delivered): Copy | undefined {
+	// The copy whose next group is the lowest deliverable one, dropping any it holds next that
+	// are not.
+	#lowest(ordered: boolean, delivered: Delivered): Copy | undefined {
 		let lowest: { copy: Copy; sequence: number } | undefined;
 		for (const copy of this.#copies) {
 			if (copy.done !== undefined) continue;
 			for (;;) {
-				const sequence = hooks.peekNextGroup(copy.sub);
+				const sequence = hooks.peekGroup(copy.sub, ordered);
 				if (sequence === undefined) break;
 				if (this.#deliverable(copy, sequence, delivered)) {
 					if (!lowest || sequence < lowest.sequence) lowest = { copy, sequence };
 					break;
 				}
-				const recv = hooks.tryNextGroup(copy.sub);
+				const recv = take(copy, ordered);
 				if (recv.kind !== "group") break;
 				this.#observe(copy, recv.group.sequence);
 				recv.group.close();
@@ -1096,11 +1100,15 @@ export class Front {
 				continue;
 			}
 			source.retain();
+			// Abandoned once another route takes over, and asked of that one instead.
+			const retired = this.#retire.signal;
+			const signal = options?.signal ? AbortSignal.any([options.signal, retired]) : retired;
 			try {
-				await until(this.#verify(name, source), options?.signal);
-				return { group: await source.wire.fetchGroup(name, sequence, options), source };
+				await until(this.#verify(name, source), signal);
+				return { group: await source.wire.fetchGroup(name, sequence, { ...options, signal }), source };
 			} catch (err) {
 				source.release();
+				if (retired.aborted && !options?.signal?.aborted && !this.#concluded) continue;
 				const error = err instanceof Error ? err : new Error(String(err));
 				// The route failed: ask the next one, unless none will come.
 				if (!routeFailed(error) || this.#concluded || options?.signal?.aborted) throw error;
