@@ -46,7 +46,7 @@ use moq_nvenc::{Encoder, EncoderInitParams, Session};
 
 use super::super::encoder::{Applied, Codec, Config, Gop, Preset};
 use super::{Backend, Encoded, keyframe_annexb};
-use crate::color::{Matrix, Primaries, Transfer};
+use crate::color::{Matrix, Primaries, Range, Transfer};
 use crate::frame::{Surface, cuda, interleave_uv, vulkan};
 use crate::{Error, Frame};
 
@@ -176,7 +176,7 @@ impl Nvenc {
 					let vui = &mut cfg.encodeCodecConfig.h264Config.h264VUIParameters;
 					vui.videoSignalTypePresentFlag = 1;
 					vui.videoFormat = NV_ENC_VUI_VIDEO_FORMAT::NV_ENC_VUI_VIDEO_FORMAT_UNSPECIFIED;
-					vui.videoFullRangeFlag = u32::from(!color.limited());
+					vui.videoFullRangeFlag = u32::from(color.range == Range::Full);
 					vui.colourDescriptionPresentFlag = 1;
 					vui.colourPrimaries = primaries;
 					vui.transferCharacteristics = transfer;
@@ -189,7 +189,7 @@ impl Nvenc {
 					let vui = &mut cfg.encodeCodecConfig.hevcConfig.hevcVUIParameters;
 					vui.videoSignalTypePresentFlag = 1;
 					vui.videoFormat = NV_ENC_VUI_VIDEO_FORMAT::NV_ENC_VUI_VIDEO_FORMAT_UNSPECIFIED;
-					vui.videoFullRangeFlag = u32::from(!color.limited());
+					vui.videoFullRangeFlag = u32::from(color.range == Range::Full);
 					vui.colourDescriptionPresentFlag = 1;
 					vui.colourPrimaries = primaries;
 					vui.transferCharacteristics = transfer;

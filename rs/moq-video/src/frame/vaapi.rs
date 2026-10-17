@@ -116,7 +116,7 @@ pub(crate) fn color(color: Color) -> Result<moq_vaapi::Color, Error> {
 	};
 	Ok(moq_vaapi::Color {
 		matrix,
-		full_range: !color.limited(),
+		full_range: color.range == color::Range::Full,
 	})
 }
 

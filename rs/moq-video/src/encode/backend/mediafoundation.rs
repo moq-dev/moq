@@ -45,7 +45,7 @@ use windows::core::{GUID, Interface};
 
 use super::super::encoder::{Applied, Codec, Config, Gop};
 use super::{Backend, Encoded, keyframe_annexb};
-use crate::color::{Matrix, Primaries, Transfer};
+use crate::color::{Matrix, Primaries, Range, Transfer};
 use crate::frame::{Surface, interleave_uv};
 use crate::mf::{ComGuard, mf_err, pack_2x32};
 use crate::{Color, Error, Frame};
@@ -248,9 +248,9 @@ impl MediaFoundation {
 			Matrix::Bt709 => MFVideoTransferMatrix_BT709,
 			Matrix::Bt2020 => MFVideoTransferMatrix_BT2020_10,
 		};
-		let range = match self.color.limited() {
-			true => MFNominalRange_16_235,
-			false => MFNominalRange_0_255,
+		let range = match self.color.range {
+			Range::Limited => MFNominalRange_16_235,
+			Range::Full => MFNominalRange_0_255,
 		};
 
 		unsafe {

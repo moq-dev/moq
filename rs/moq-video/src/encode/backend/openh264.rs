@@ -16,7 +16,7 @@ use openh264_sys2::{ENCODER_OPTION_COMPLEXITY, LOW_COMPLEXITY, MEDIUM_COMPLEXITY
 
 use super::super::encoder::{Applied, Config, Gop, Preset};
 use super::{Backend, Encoded};
-use crate::color::{Matrix, Primaries, Transfer};
+use crate::color::{Matrix, Primaries, Range, Transfer};
 use crate::{Error, Frame};
 
 pub(crate) const NAME: &str = "openh264";
@@ -61,7 +61,7 @@ impl Openh264 {
 				Matrix::Bt709 => MatrixCoefficients::Bt709,
 				Matrix::Bt2020 => MatrixCoefficients::Bt2020Ncl,
 			})
-			.full_range(!color.limited());
+			.full_range(color.range == Range::Full);
 
 		// Measured at 720p and 1080p (see `examples/encode-presets.rs`): Low saves
 		// about 1.5 ms and 15% CPU per frame over Medium for under 0.1 dB, and High

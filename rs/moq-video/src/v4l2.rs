@@ -43,7 +43,7 @@ use moq_v4l::sys::{
 };
 use moq_v4l::v4l2::vidioc;
 
-use crate::color::{Matrix, Primaries, Transfer};
+use crate::color::{Matrix, Primaries, Range, Transfer};
 use crate::frame::I420;
 use crate::{Color, Error, Size};
 
@@ -396,9 +396,9 @@ impl Device {
 					Transfer::Pq => v4l2_xfer_func_V4L2_XFER_FUNC_SMPTE2084,
 					Transfer::Hlg => return Err(Error::Unsupported("V4L2 cannot signal the HLG transfer".into())),
 				} as u8;
-				pix.quantization = match color.limited() {
-					true => v4l2_quantization_V4L2_QUANTIZATION_LIM_RANGE as u8,
-					false => v4l2_quantization_V4L2_QUANTIZATION_FULL_RANGE as u8,
+				pix.quantization = match color.range {
+					Range::Limited => v4l2_quantization_V4L2_QUANTIZATION_LIM_RANGE as u8,
+					Range::Full => v4l2_quantization_V4L2_QUANTIZATION_FULL_RANGE as u8,
 				};
 			}
 		}

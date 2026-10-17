@@ -1,6 +1,6 @@
 //! D3D11 processor configuration, testable without a GPU or Windows host.
 
-use crate::color::Matrix;
+use crate::color::{Matrix, Range};
 use crate::{Color, Error, Size};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -56,14 +56,16 @@ fn space(color: Color) -> Result<u32, Error> {
 		Matrix::Bt709 => 1,
 		Matrix::Bt2020 => return Err(Error::Unsupported(format!("D3D11 cannot process {color:?}"))),
 	};
-	let range = if color.limited() { 1 } else { 2 };
+	let range = match color.range {
+		Range::Limited => 1,
+		Range::Full => 2,
+	};
 	Ok((matrix << 2) | (range << 4))
 }
 
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use crate::color::Range;
 
 	#[test]
 	fn odd_capture_crops_instead_of_scaling() {

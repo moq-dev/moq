@@ -1592,7 +1592,7 @@ mod tests {
 				primaries: codes.primaries,
 				transfer: codes.transfer,
 				matrix: codes.matrix,
-				full_range: !color.limited(),
+				full_range: color.range == Range::Full,
 			};
 
 			// Solid red, converted in `color` rather than in the size guess.

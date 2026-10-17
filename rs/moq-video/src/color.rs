@@ -133,11 +133,6 @@ impl Color {
 		Self { range, ..self }
 	}
 
-	/// Whether luma is 16..235 rather than 0..255.
-	pub(crate) fn limited(self) -> bool {
-		self.range == Range::Limited
-	}
-
 	/// The VUI code points for this space.
 	///
 	/// BT.601's matrix goes out as SMPTE 170M (6) whatever the primaries, since
@@ -220,9 +215,9 @@ impl Color {
 	pub(crate) fn coefficients(self) -> Coefficients {
 		let (kr, kb) = self.matrix.weights();
 		let kg = 1.0 - kr - kb;
-		let (luma_scale, chroma_scale, luma_offset) = match self.limited() {
-			true => (219.0 / 255.0, 224.0 / 255.0, 16.0),
-			false => (1.0, 1.0, 0.0),
+		let (luma_scale, chroma_scale, luma_offset) = match self.range {
+			Range::Limited => (219.0 / 255.0, 224.0 / 255.0, 16.0),
+			Range::Full => (1.0, 1.0, 0.0),
 		};
 		// Cb = (B - Y') / (2 (1 - Kb)) and Cr = (R - Y') / (2 (1 - Kr)), with Y'
 		// substituted so each channel is one weighted sum.
@@ -253,6 +248,7 @@ impl Color {
 
 impl Matrix {
 	/// The luma weights (`kr`, `kb`) the matrix is derived from.
+	#[cfg(any(test, feature = "render", all(target_os = "linux", feature = "nvidia")))]
 	pub(crate) fn weights(self) -> (f32, f32) {
 		match self {
 			Matrix::Bt601 => (0.299, 0.114),

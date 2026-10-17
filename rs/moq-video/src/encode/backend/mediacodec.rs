@@ -46,7 +46,7 @@ use ndk::media_error::MediaError;
 
 use super::super::encoder::{Applied, Codec, Config, Gop};
 use super::{Backend, Encoded};
-use crate::color::{Matrix, Primaries, Transfer};
+use crate::color::{Matrix, Primaries, Range, Transfer};
 use crate::{Error, Frame, I420};
 
 pub(crate) const NAME: &str = "mediacodec";
@@ -483,10 +483,9 @@ fn encoder_format(config: &Config, mime: &str) -> Result<MediaFormat, Error> {
 	format.set_i32(KEY_COLOR_TRANSFER, transfer);
 	format.set_i32(
 		KEY_COLOR_RANGE,
-		if color.limited() {
-			COLOR_RANGE_LIMITED
-		} else {
-			COLOR_RANGE_FULL
+		match color.range {
+			Range::Limited => COLOR_RANGE_LIMITED,
+			Range::Full => COLOR_RANGE_FULL,
 		},
 	);
 	Ok(format)
