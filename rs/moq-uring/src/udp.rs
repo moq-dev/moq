@@ -1257,8 +1257,7 @@ pub(crate) fn on_recv(
 	match received {
 		Ok((_, Some(queued))) => {
 			sock.metrics.rx_receives.add(1);
-			// A zero stride would be a kernel that reported a `UDP_GRO` size of
-			// zero; count the receive as one datagram rather than dividing by it.
+			// Only an empty datagram has a zero stride; it is still one datagram.
 			sock.metrics
 				.rx_datagrams
 				.add(queued.len.div_ceil(queued.stride.max(1)) as u64);
@@ -1449,7 +1448,8 @@ fn resend_unsegmented(op: &SendOp, base: NonNull<u8>, one: &SendOne) -> io::Resu
 /// What the kernel said about one receive, from its control buffer.
 #[derive(Default)]
 struct RecvMeta {
-	/// The `UDP_GRO` segment size, if the receive was coalesced.
+	/// The `UDP_GRO` segment size, if the receive was coalesced. Never zero:
+	/// splitting a payload into zero-byte datagrams would never finish.
 	stride: Option<usize>,
 	/// The ECN codepoint from `IP_TOS` or `IPV6_TCLASS`, if marked.
 	ecn: Option<Ecn>,
@@ -1473,7 +1473,9 @@ impl RecvMeta {
 			let data = &control[offset + header_len..offset + message_len];
 			match (header.cmsg_level, header.cmsg_type) {
 				(libc::SOL_UDP, libc::UDP_GRO) => {
-					meta.stride = read_int(data).and_then(|value| usize::try_from(value).ok());
+					meta.stride = read_int(data)
+						.and_then(|value| usize::try_from(value).ok())
+						.filter(|&stride| stride > 0);
 				}
 				// Linux reports the TOS byte itself, but the traffic class as an int.
 				(libc::IPPROTO_IP, libc::IP_TOS) => {
@@ -1587,6 +1589,30 @@ fn decode_addr(name: &[u8]) -> Option<SocketAddr> {
 mod tests {
 	use super::*;
 	use std::net::{Ipv4Addr, Ipv6Addr, SocketAddrV4};
+
+	/// One `UDP_GRO` control message carrying `size`.
+	fn gro(size: libc::c_int) -> Vec<u8> {
+		let space = unsafe { libc::CMSG_SPACE(std::mem::size_of::<libc::c_int>() as _) } as usize;
+		let mut control = vec![0u8; space];
+		let header = libc::cmsghdr {
+			cmsg_len: unsafe { libc::CMSG_LEN(std::mem::size_of::<libc::c_int>() as _) } as _,
+			cmsg_level: libc::SOL_UDP,
+			cmsg_type: libc::UDP_GRO,
+		};
+		let header_len = unsafe { libc::CMSG_LEN(0) } as usize;
+		// SAFETY: `control` holds a header plus an int.
+		unsafe {
+			control.as_mut_ptr().cast::<libc::cmsghdr>().write_unaligned(header);
+			control.as_mut_ptr().add(header_len).cast::<libc::c_int>().write_unaligned(size);
+		}
+		control
+	}
+
+	#[test]
+	fn a_zero_gro_size_is_no_stride() {
+		assert_eq!(RecvMeta::parse(&gro(1200)).stride, Some(1200));
+		assert_eq!(RecvMeta::parse(&gro(0)).stride, None);
+	}
 
 	/// Round-trip an address through the kernel wire encoding.
 	fn roundtrip(addr: SocketAddr) -> Option<SocketAddr> {
