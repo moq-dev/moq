@@ -115,9 +115,7 @@ function localGroup(sequence = 0n) {
 	return { broadcast, track, group, consumer: group.consume() };
 }
 
-type Case = (relays: Relay[]) => Promise<string | undefined>;
-
-const local: Record<string, Case> = {
+const local: Record<string, () => Promise<string | undefined>> = {
 	"u64 above 2^53 round-trips locally": async () => {
 		for (const sequence of HIGH) {
 			const { group, consumer } = localGroup(sequence);
@@ -385,7 +383,7 @@ async function run(relays: Relay[]): Promise<Report> {
 			cases.push({ name, ok: false, error: err instanceof Error ? err.message : String(err) });
 		}
 	};
-	for (const [name, body] of Object.entries(local)) await record(name, () => body(relays));
+	for (const [name, body] of Object.entries(local)) await record(name, body);
 	for (const relay of relays)
 		for (const [name, body] of Object.entries(remote)) await record(`${relay.name}: ${name}`, () => body(relay));
 
