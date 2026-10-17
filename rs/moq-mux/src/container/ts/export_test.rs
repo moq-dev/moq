@@ -106,6 +106,14 @@ async fn drain_with<S: crate::catalog::Stream>(exporter: Export<S>) -> BytesMut
 where
 	S::Ext: tscat::Catalog,
 {
+	drain_stats(exporter).await.0
+}
+
+/// `drain_with`, also returning the exporter's stats once drained.
+async fn drain_stats<S: crate::catalog::Stream>(exporter: Export<S>) -> (BytesMut, super::stats::Export)
+where
+	S::Ext: tscat::Catalog,
+{
 	let mut exporter = exporter.with_delay(RECORDING_MAX_AGE).with_replay();
 	let mut out = BytesMut::new();
 	// `while let Ok` stops on the first timeout (`Pending`: no more output).
@@ -115,7 +123,7 @@ where
 		};
 		out.extend_from_slice(&frame.payload);
 	}
-	out
+	(out, exporter.stats())
 }
 
 /// An adaptation-field-only single-packet frame: the exporter's PCR carriage.
@@ -1606,20 +1614,22 @@ async fn export_skips_an_unconfirmed_ac3_sync_word_at_a_join() {
 }
 
 /// A declared marker breaks the timeline even where the timestamps run on, so a frame left
-/// unfinished before it is dropped rather than completed with the first bytes after it. A
-/// data track declares the break by skipping a sequence after its group ended, so nothing it
-/// held before the break is trimmed.
+/// unfinished before it is dropped rather than completed with the first bytes after it. The
+/// marker follows a group that ended, so nothing held before the break is trimmed, and it is
+/// declared, so it is no gap.
 #[tokio::test(start_paused = true)]
 async fn export_drops_an_ac3_frame_cut_by_a_marker() {
 	let stream: Vec<u8> = (0..4).flat_map(ac3_frame).collect();
-	let timed = exported_ac3_frames(vec![
+	let (pes, stats) = exported_ac3_pes(vec![
 		Ac3Write::Pes(0, stream[..200].to_vec()),
 		Ac3Write::Marker,
 		Ac3Write::Pes(64, stream[256..].to_vec()),
 	])
 	.await;
+	let timed = ac3_frames(pes);
 	let frames: Vec<&Vec<u8>> = timed.iter().map(|(_, bytes)| bytes).collect();
 	assert_eq!(frames, [&ac3_frame(0), &ac3_frame(2), &ac3_frame(3)]);
+	assert_eq!(stats.gaps, 0, "the declared break is not media lost upstream");
 }
 
 /// AC-3 sync frames that run on share a PES, as many as DVB's 5,696-byte B holds with the
@@ -1627,7 +1637,7 @@ async fn export_drops_an_ac3_frame_cut_by_a_marker() {
 #[tokio::test(start_paused = true)]
 async fn export_packs_ac3_frames_up_to_their_buffer() {
 	let stream: Vec<u8> = (0..100).flat_map(ac3_frame).collect();
-	let pes = exported_ac3_pes(vec![Ac3Write::Pes(0, stream.clone())]).await;
+	let (pes, _) = exported_ac3_pes(vec![Ac3Write::Pes(0, stream.clone())]).await;
 	// 44 of the 128-byte frames to a PES, and the first frame alone, sent as it starts.
 	assert!(
 		pes.len() <= 100usize.div_ceil(44) + 1,
@@ -1679,8 +1689,8 @@ enum Ac3Write {
 }
 
 /// Export `input` on an AC-3 passthrough PID beside bbb's media, and return the PTS and
-/// payload of every PES on that PID.
-async fn exported_ac3_pes(input: Vec<Ac3Write>) -> Vec<(u64, Vec<u8>)> {
+/// payload of every PES on that PID, and the export's stats.
+async fn exported_ac3_pes(input: Vec<Ac3Write>) -> (Vec<(u64, Vec<u8>)>, super::stats::Export) {
 	const AC3_PID: u16 = 0x104;
 	let data = include_bytes!("test_data/bbb.ts");
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
@@ -1732,7 +1742,7 @@ async fn exported_ac3_pes(input: Vec<Ac3Write>) -> Vec<(u64, Vec<u8>)> {
 	let mut import = crate::container::ts::Import::new(broadcast, reserved);
 	import.decode(&BytesMut::from(&data[..])).unwrap();
 	import.finish().unwrap();
-	let ts = drain_with(
+	let (ts, stats) = drain_stats(
 		open_ts(
 			crate::source::announced(&consumer).await,
 			crate::catalog::CatalogFormat::Hang,
@@ -1767,14 +1777,19 @@ async fn exported_ac3_pes(input: Vec<Ac3Write>) -> Vec<(u64, Vec<u8>)> {
 			last.1.extend_from_slice(body);
 		}
 	}
-	pes
+	(pes, stats)
 }
 
 /// Export `input` as [`exported_ac3_pes`] does, and return each sync frame on the AC-3 PID,
 /// timed by its PES's PTS and the frames ahead of it there.
 async fn exported_ac3_frames(input: Vec<Ac3Write>) -> Vec<(u64, Vec<u8>)> {
+	ac3_frames(exported_ac3_pes(input).await.0)
+}
+
+/// Each sync frame of `pes`, timed by its PES's PTS and the frames ahead of it there.
+fn ac3_frames(pes: Vec<(u64, Vec<u8>)>) -> Vec<(u64, Vec<u8>)> {
 	let mut frames = Vec::new();
-	for (mut pts, mut payload) in exported_ac3_pes(input).await {
+	for (mut pts, mut payload) in pes {
 		while !payload.is_empty() {
 			let header = crate::codec::ac3::parse_header(&payload).expect("the PES carries whole sync frames");
 			let rest = payload.split_off(header.len);

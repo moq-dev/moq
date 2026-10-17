@@ -6316,16 +6316,17 @@ pub(super) mod test {
 
 	/// Read every retained frame of `name`, with the count of timeline breaks the consumer
 	/// crossed reading them.
-	async fn read_breaks(consumer: &moq_net::broadcast::Consumer, name: &str) -> (Vec<crate::container::Frame>, u64) {
+	async fn read_breaks(
+		consumer: &moq_net::broadcast::Consumer,
+		name: &str,
+		kind: crate::container::Kind,
+	) -> (Vec<crate::container::Frame>, u64) {
 		// A generous max delay: the default of zero would shed every non-latest group, the
 		// declared breaks among them, and the subscribe start is resolved from it too, so
 		// it has to reach back past a 30 s leap to the first frame.
 		let subscription = moq_net::track::Subscription::default().with_max_delay(std::time::Duration::from_secs(3600));
 		let track = consumer.track(name).unwrap().subscribe(subscription).await.unwrap();
-		let mut reader = crate::container::Consumer::new(
-			track,
-			crate::catalog::hang::Container::Legacy(crate::container::Kind::Audio),
-		);
+		let mut reader = crate::container::Consumer::new(track, crate::catalog::hang::Container::Legacy(kind));
 		let mut frames = Vec::new();
 		let mut breaks = 0;
 		while let Ok(Ok(Some(read))) = tokio::time::timeout(std::time::Duration::from_millis(50), reader.read()).await {
@@ -6345,7 +6346,7 @@ pub(super) mod test {
 		let names: Vec<String> = catalog.snapshot().audio.renditions.keys().cloned().collect();
 		let mut out = Vec::new();
 		for name in names {
-			out.push(read_breaks(consumer, &name).await);
+			out.push(read_breaks(consumer, &name, crate::container::Kind::Audio).await);
 		}
 		assert_eq!(out.len(), 2, "both renditions must exist");
 		out
@@ -6412,7 +6413,7 @@ pub(super) mod test {
 		let snapshot = catalog.snapshot();
 		let names: Vec<_> = snapshot.audio.renditions.keys().collect();
 		assert_eq!(names.len(), 1, "only program 2's stream: {names:?}");
-		let (frames, _) = read_breaks(&consumer, names[0]).await;
+		let (frames, _) = read_breaks(&consumer, names[0], crate::container::Kind::Audio).await;
 		assert!(!frames.is_empty(), "program 2 published");
 		assert!(
 			frames
@@ -6734,11 +6735,11 @@ pub(super) mod test {
 		import.decode(pes_packet(PCR_PID, 90_000).as_slice()).unwrap();
 		import.finish().unwrap();
 		let name = catalog.snapshot().ext.mpegts.tracks.keys().next().unwrap().clone();
-		let (frames, breaks) = read_breaks(&consumer, &name).await;
+		let (frames, breaks) = read_breaks(&consumer, &name, crate::container::Kind::Data).await;
 		assert_eq!(frames.len(), 3);
 		assert_eq!(
-			breaks, 0,
-			"a data sequence hole whose timestamps do not jump is not a playhead event"
+			breaks, 2,
+			"each break on the data track reads once, as its declared end"
 		);
 	}
 

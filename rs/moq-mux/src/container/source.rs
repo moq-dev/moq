@@ -411,13 +411,12 @@ impl ExportSource {
 						frame
 					}
 					Some(Item::Read(Read::Gap { timestamp, duration })) => {
-						// Say what the export never receives and where. A data track declares a
-						// break by skipping a sequence, which reads the same though nothing is lost.
+						// Say what the export never receives and where.
 						tracing::warn!(
 							track = consumer.name(),
 							at = ?std::time::Duration::from(timestamp),
 							skipped = ?std::time::Duration::from(duration),
-							"media skipped upstream, or a data track's declared break; resuming at the next group"
+							"media skipped upstream; resuming at the next group"
 						);
 						self.finish_ends();
 						self.skips += 1;
@@ -709,6 +708,102 @@ mod tests {
 		assert_eq!(frame.timestamp.as_micros(), 72_000);
 		assert_eq!(export.skips(), 0, "nothing below the start counts as skipped");
 	}
+	/// A live source picks the newest group without narrowing what the publisher sends: a
+	/// narrower budget on the wire, widened after the first read, lets the publisher skip the
+	/// groups of a burst written before the widening reaches it, a gap no update recovers.
+	#[tokio::test(start_paused = true)]
+	async fn a_live_start_loses_no_group_the_publisher_bursts() {
+		use std::time::Duration;
+
+		use crate::container::Container as _;
+		use crate::container::test_util::raw_frame;
+		use moq_net::transport::memory;
+
+		let origin = |hop| {
+			let config = moq_net::origin::Config::new(moq_net::Hop::new(hop).unwrap());
+			let (producer, driver) = moq_net::origin::Producer::new(config);
+			tokio::spawn(moq_net::time::run(driver));
+			producer
+		};
+		let (publisher, subscriber) = (origin(1), origin(2));
+		let version: moq_net::Version = "moq-lite-07-wip".parse().unwrap();
+		let mut config = memory::Config::default();
+		config.protocol = Some(version.alpn().to_string());
+		let (client_transport, server_transport) = memory::pair(config);
+		let client = moq_net::Client::new()
+			.with_versions(version.into())
+			.with_publisher(publisher.consume());
+		let server = moq_net::Server::new()
+			.with_versions(version.into())
+			.with_subscriber(subscriber.clone());
+		// Each driver runs as soon as its handshake resolves: the accept waits on the client's SETUP.
+		let _sessions = tokio::join!(
+			async {
+				let (session, driver) = client.connect(moq_net::time::now(), client_transport).await.unwrap();
+				tokio::spawn(moq_net::time::run(driver));
+				session
+			},
+			async {
+				let (session, driver) = server.accept(moq_net::time::now(), server_transport).await.unwrap();
+				tokio::spawn(moq_net::time::run(driver));
+				session
+			}
+		);
+
+		let broadcast = publisher.create_broadcast("room").unwrap();
+		let track = broadcast
+			.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
+			.unwrap();
+		broadcast.announce(Default::default()).unwrap();
+		let consumer = subscriber.consume();
+		consumer.routed("room").await.unwrap();
+		let remote = consumer.request_broadcast("room", None).await.unwrap();
+		let source = crate::Source::new(consumer, remote);
+		let mut export = ExportSource::for_audio(&source, "audio", &audio(None), Duration::from_secs(1))
+			.unwrap()
+			.unwrap()
+			.live();
+
+		// One 24 ms frame per group, as the TS import publishes MPEG-1 audio.
+		let wire = HangContainer::Legacy(crate::container::Kind::Audio);
+		let write = |sequence: u64| {
+			let mut group = track.create_group(moq_net::group::Info { sequence }).unwrap();
+			wire.write(&mut group, &[raw_frame(sequence * 24_000, b"audio", true)])
+				.unwrap();
+			group.finish().unwrap();
+		};
+		let mut read = async || {
+			tokio::time::timeout(Duration::from_millis(100), kio::wait(|waiter| export.poll_read(waiter)))
+				.await
+				.ok()
+				.map(|frame| frame.unwrap().map(|frame| frame.timestamp.as_micros()))
+		};
+
+		assert_eq!(read().await, None, "subscribed, with nothing published yet");
+		write(0);
+		tokio::time::sleep(Duration::from_millis(10)).await;
+		// A PES carrying several frames publishes them in one pass, before the publisher's
+		// session runs again, and the export reads the first group in the meantime.
+		for sequence in 1..4 {
+			write(sequence);
+		}
+		let mut timestamps = Vec::new();
+		while let Some(Some(timestamp)) = read().await {
+			timestamps.push(timestamp);
+		}
+		for sequence in 4..8 {
+			write(sequence);
+		}
+		track.finish().unwrap();
+		while let Some(Some(timestamp)) = read().await {
+			timestamps.push(timestamp);
+		}
+
+		let expected: Vec<u128> = (0..8).map(|sequence| sequence * 24_000).collect();
+		assert_eq!(timestamps, expected, "the burst reached the export whole");
+		assert_eq!(export.skips(), 0);
+	}
+
 	async fn audio_export() -> (moq_net::track::Producer, ExportSource) {
 		use std::time::Duration;
 		let live = Live::audio(audio(None));

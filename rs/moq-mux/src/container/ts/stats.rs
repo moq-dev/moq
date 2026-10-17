@@ -186,8 +186,8 @@ pub struct Export {
 	/// Nothing is missing from the output for these.
 	pub trimmed: u64,
 	/// Times a source skipped media it will never deliver: a group lost or expired upstream,
-	/// or a resubscription. A data track's declared break is a skipped sequence, so it counts
-	/// here too, though nothing of it is lost. Each is logged with the span it skipped.
+	/// or a resubscription. A declared break is not one. Each is logged with the span it
+	/// skipped.
 	pub gaps: u64,
 	/// How fast the source's clock runs against ours, in parts per million (positive runs
 	/// fast), as last measured. `None` until there is a measurement.

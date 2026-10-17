@@ -572,8 +572,12 @@
             ++ dartDeps
             ++ devTools
             ++ [ quest-cli ]
-            # perf records relay worker off-CPU stacks for `just bench-lock`.
-            ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.perf ];
+            # `just bench-profile`: perf records relay waits and CPU stacks, and
+            # jemalloc's jeprof symbolizes heap snapshots.
+            ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
+              pkgs.perf
+              pkgs.jemalloc
+            ];
 
           # jemalloc's configure uses -O0 test builds, which conflict with
           # Nix's _FORTIFY_SOURCE hardening (requires -O).

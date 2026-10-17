@@ -31,6 +31,8 @@ struct Object {
 struct Imported {
 	catalog: hang::catalog::Catalog,
 	objects: Vec<Object>,
+	/// The sequence of each break marker: a group of one object with no bytes.
+	markers: Vec<u64>,
 }
 
 impl Imported {
@@ -90,8 +92,13 @@ async fn import_onto(
 		.subscribe(moq_net::track::Subscription::default().with_max_delay(RECORDING_MAX_DELAY))
 		.await?;
 	let mut objects = Vec::new();
+	let mut markers = Vec::new();
 	while let Some(mut group) = tokio::time::timeout(Duration::from_secs(1), track.recv_group()).await?? {
 		while let Some(frame) = group.read_frame().await? {
+			if frame.payload.is_empty() {
+				markers.push(group.sequence);
+				continue;
+			}
 			let frame = hang::container::Frame::decode(frame.payload)?;
 			objects.push(Object {
 				group: group.sequence,
@@ -103,6 +110,7 @@ async fn import_onto(
 	Ok(Imported {
 		catalog: catalog.snapshot(),
 		objects,
+		markers,
 	})
 }
 
@@ -561,10 +569,11 @@ async fn a_flagged_jump_forward_starts_a_group_behind_a_break() {
 		assert!((11_959_000..11_960_000).contains(&before), "{before}");
 		assert!((29_999_000..30_000_000).contains(&after), "{after}");
 		assert_eq!(
-			groups[jump][0].group,
-			groups[jump - 1][0].group + 2,
-			"a skipped sequence marks the break, random access {random_access}"
+			imported.markers,
+			[groups[jump - 1][0].group + 1],
+			"a marker group between them declares the break, random access {random_access}"
 		);
+		assert_eq!(groups[jump][0].group, groups[jump - 1][0].group + 2);
 		assert_eq!(imported.section().random_access, random_access);
 	}
 }
@@ -677,6 +686,7 @@ async fn a_retransmitted_break_declares_one_jump() {
 		.filter(|group| header(&group[0].payload).discontinuity)
 		.count();
 	assert_eq!(breaks, 1);
+	assert_eq!(imported.markers.len(), 1, "one marker for the one jump");
 	assert_suffix(&data, &imported);
 }
 
