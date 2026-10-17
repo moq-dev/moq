@@ -136,6 +136,17 @@ impl<O: Output> Video<O> {
 				let ended = match read {
 					Some(Read::Frame { group, frame }) => {
 						if let Some((_, transition)) = end.take_if(|(end, _)| *end != group) {
+							// A superseded segment never receives another picture, so one that
+							// eviction emptied can never resume.
+							let mut index = 1;
+							while index < buffers.len() {
+								if buffers[index].oldest().is_some() {
+									index += 1;
+								} else if let Some(skipped) = buffers.remove(index).and_then(|skipped| skipped.resumes)
+								{
+									role.abandon(skipped);
+								}
+							}
 							role.plan(transition, frame.timestamp, None);
 							buffers.push_back(Segment {
 								resumes: Some(transition),
@@ -878,6 +889,59 @@ mod tests {
 			shown < SEGMENTS,
 			"pictures held behind the resume past the age budget were queued, not evicted: {shown}"
 		);
+	}
+
+	#[tokio::test]
+	async fn an_emptied_superseded_segment_is_discarded() {
+		tokio::time::pause();
+		let delay = Duration::from_millis(200);
+		let media = media(delay);
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let source = broadcast
+			.create_track("video", hang::container::track_info(hang::catalog::PRIORITY.video))
+			.unwrap();
+		// The network keeps every group; only the player's age budget evicts.
+		let subscriber = source
+			.consume()
+			.subscribe(moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(10)))
+			.await
+			.unwrap();
+		let format = || moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Video);
+		let mut producer = moq_mux::container::Producer::new(source, format());
+		let track = moq_mux::container::Consumer::new(subscriber, format());
+		let task = tokio::spawn(playback(&media, delay).run(track, Buffered::new(0)));
+		// Audio's end two seconds out holds every replacement back.
+		let audio = Role::new(
+			media.presentation.clone(),
+			media.drained.clone(),
+			super::super::playback::Kind::Audio,
+		);
+		audio.declare();
+		audio.end(moq_net::Timestamp::from_millis(2_000).unwrap()).unwrap();
+		producer.write(frame(0, true)).unwrap();
+		// Each replacement is one GOP longer than the age budget, so eviction
+		// takes its only keyframe and leaves it empty.
+		const SEGMENTS: u64 = 10;
+		for segment in 0..SEGMENTS {
+			producer.discontinuity().unwrap();
+			for index in 0..15 {
+				producer
+					.write(frame(20 + segment * 300 + index * 20, index == 0))
+					.unwrap();
+			}
+		}
+		tokio::time::advance(Duration::from_millis(500)).await;
+		tokio::task::yield_now().await;
+		let pending = media.presentation.lock().unwrap().pending();
+		assert!(pending <= 3, "emptied segments kept their transitions: {pending}");
+		producer.finish().unwrap();
+		drop(audio);
+		for _ in 0..1_000 {
+			tokio::task::yield_now().await;
+			media.output.present(&media);
+			tokio::time::advance(Duration::from_millis(1)).await;
+		}
+		task.await.unwrap().unwrap();
 	}
 
 	#[tokio::test]

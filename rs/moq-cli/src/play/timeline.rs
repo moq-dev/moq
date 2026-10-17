@@ -87,6 +87,12 @@ impl Presentation {
 		}
 	}
 
+	/// How many transitions are still pending.
+	#[cfg(test)]
+	pub(super) fn pending(&self) -> usize {
+		self.transitions.len()
+	}
+
 	fn transition(&mut self, id: Transition) -> Option<&mut Pending> {
 		self.transitions.iter_mut().find(|pending| pending.id == id)
 	}
