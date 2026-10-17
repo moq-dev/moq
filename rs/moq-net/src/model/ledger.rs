@@ -12,10 +12,12 @@ use crate::time::Instant;
 ///
 /// Bounds the wait on IETF, and on moq-lite when the subscription has no max delay to bound
 /// it with. Matches `@moq/net`, so a reader cannot tell which side it is talking to.
+// pending: /quest/m1/public-model/ingest.md
 pub(crate) const GRACE: Duration = Duration::from_secs(1);
 
 /// The grace for a subscription with `max_delay`: how long the subscriber was willing to
 /// wait for a late group anyway, or [`GRACE`] without one.
+// pending: /quest/m1/public-model/ingest.md
 pub(crate) fn grace(max_delay: Duration) -> Duration {
 	match max_delay.is_zero() {
 		true => GRACE,
@@ -33,6 +35,7 @@ struct Run {
 
 /// The sequences accounted for, and how late each gap between them is.
 #[derive(Debug)]
+// pending: /quest/m1/public-model/ingest.md
 pub(crate) struct Ledger {
 	// Disjoint, sorted, non-adjacent runs of accounted sequences. A gap older than the grace
 	// can no longer be waited for, so it folds into the runs around it, which bounds this by
