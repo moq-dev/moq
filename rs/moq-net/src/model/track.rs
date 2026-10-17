@@ -2761,7 +2761,8 @@ pub(crate) struct Hold {
 
 impl TrackWeak {
 	/// Hold the track open if it finished cleanly, so lookups keep finding it after its
-	/// producers drop. `None` for a track still live, aborted, never published, or gone.
+	/// producers drop. `None` for a track still live (even one with a declared end ahead of
+	/// its live edge), aborted, never published, or gone.
 	#[cfg(feature = "async")]
 	pub(crate) fn hold_finished(&self) -> Option<Hold> {
 		let alive = self.alive.upgrade()?;
@@ -2769,7 +2770,8 @@ impl TrackWeak {
 			return None;
 		}
 		let state = alive.state.read();
-		if state.end.is_none() || state.abort.is_some() {
+		// A declared end the live edge has yet to reach still has groups to come.
+		if !state.is_complete() || state.abort.is_some() {
 			return None;
 		}
 		let max_age = state.info.as_ref().and_then(|info| info.max_age);

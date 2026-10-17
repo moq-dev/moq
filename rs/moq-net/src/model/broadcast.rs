@@ -421,13 +421,14 @@ impl Producer {
 	/// backlog, can still request and drain the finished tracks. The broadcast stays announced
 	/// and holds every track finished by now, so their producers can drop, for the longest of
 	/// their [`max_age`](track::Info::max_age)s. Then it [closes](Self::close). Tracks still
-	/// live, and tracks without a max-age, add nothing to the wait.
+	/// live, including one whose declared end the live edge has yet to reach, and tracks
+	/// without a max-age, add nothing to the wait.
 	///
 	/// The tracks are held, and the wait counts, from this call rather than the first poll.
 	/// Dropping the future closes the broadcast early, which is how an interrupt ends the
 	/// wait; a [`Self::close`] elsewhere ends it too.
 	#[cfg(feature = "async")]
-	pub fn finish(&self) -> impl Future<Output = ()> + use<> {
+	pub fn finish(self) -> impl Future<Output = ()> + use<> {
 		let held: Vec<track::Hold> = self
 			.state
 			.lock()
@@ -437,7 +438,7 @@ impl Producer {
 			.collect();
 		let linger = held.iter().filter_map(|hold| hold.max_age).max().unwrap_or_default();
 		let expired = super::clock::sleep(linger);
-		let closing = CloseOnDrop(self.clone());
+		let closing = CloseOnDrop(self);
 		async move {
 			{
 				let expired = std::pin::pin!(expired);
@@ -1901,7 +1902,8 @@ mod test {
 
 	/// A finished broadcast keeps serving its finished tracks after their producers drop,
 	/// so a late subscriber still gets the media, and closes once the longest max-age passes.
-	/// A live track and a track without a max-age add nothing to the wait.
+	/// A live track, a track whose declared end is still ahead of its live edge, and a track
+	/// without a max-age add nothing to the wait.
 	#[moq_net_sim::test]
 	#[cfg(feature = "async")]
 	async fn finish_serves_finished_tracks_until_stale() {
@@ -1912,14 +1914,18 @@ mod test {
 		let audio = producer.create_track("audio", secs(5)).unwrap();
 		let catalog = producer.create_track("catalog", None).unwrap();
 		let live = producer.create_track("live", secs(60)).unwrap();
-		for track in [&video, &audio, &catalog] {
+		let mut tail = producer.create_track("tail", secs(60)).unwrap();
+		for track in [&video, &audio, &catalog, &tail] {
 			track.append_group().unwrap().finish().unwrap();
+		}
+		for track in [&video, &audio, &catalog] {
 			track.finish().unwrap();
 		}
+		tail.finish_at(crate::track::Position::group(2)).unwrap();
 
 		let start = moq_net_sim::now();
 		let finish = moq_net_sim::spawn(producer.finish());
-		drop((video, audio, catalog, producer));
+		drop((video, audio, catalog));
 
 		moq_net_sim::sleep(Duration::from_secs(4)).await;
 		let mut late = consumer.track("audio").unwrap().subscribe(None).await.unwrap();
@@ -1931,6 +1937,7 @@ mod test {
 		assert!(consumer.is_closed());
 		assert!(matches!(consumer.track("audio"), Err(Error::Unroutable)));
 		live.finish().unwrap();
+		drop(tail);
 	}
 
 	/// Dropping the wait, the library's interrupt, closes the broadcast at once, even
@@ -1948,7 +1955,7 @@ mod test {
 			.unwrap();
 		track.finish().unwrap();
 
-		let finish = producer.finish();
+		let finish = producer.clone().finish();
 		assert!(!consumer.is_closed());
 		drop(finish);
 		assert!(consumer.is_closed());

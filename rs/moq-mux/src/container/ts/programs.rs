@@ -159,7 +159,7 @@ impl Programs {
 			// never arrived.
 			program.announce_if_listed()?;
 			program.catalog.finish()?;
-			lingers.push(program.broadcast.finish());
+			lingers.push(program.broadcast.clone().finish());
 		}
 		// Each wait counts from its `finish`, so awaiting them in turn ends with the longest.
 		Ok(async move {
