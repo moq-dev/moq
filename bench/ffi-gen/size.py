@@ -86,8 +86,8 @@ def table(title: str, header: list[str], rows: list[list[str]]) -> None:
 
 
 native = [
-    ("slice, UniFFI", files("cargo/uniffi/release/libmoq_ffi_gen.*[so]")),
-    ("slice, BoltFFI", files("cargo/boltffi/release/libmoq_ffi_gen.*[so]")),
+    ("slice, UniFFI", files("cargo/uniffi/release/libmoq_ffi_gen.so", "cargo/uniffi/release/libmoq_ffi_gen.dylib")),
+    ("slice, BoltFFI", files("cargo/boltffi/release/libmoq_ffi_gen.so", "cargo/boltffi/release/libmoq_ffi_gen.dylib")),
     ("BoltFFI Python extension (`_native`)", files("boltffi/python-site/moq_ffi_gen/_native*")),
     ("BoltFFI Kotlin JNI glue", files("cargo/boltffi/release/libmoq_ffi_gen_jni.*")),
     ("moq-ffi, default features", files("cargo/moq-ffi/libmoq_ffi-default.*")),
