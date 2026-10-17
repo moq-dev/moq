@@ -7,7 +7,7 @@
 //! and native peers (raw QUIC) alike, on every version the listener is
 //! configured for. moq-lite on its own ALPN runs unboxed on the worker;
 //! moq-transport and the SETUP-negotiated versions run through
-//! [`moq_uring::transport::Pinned`], since their drivers need `Send`.
+//! [`moq_uring::transport::Local`], since their drivers need `Send`.
 //!
 //! The split of work mirrors the relay's topology: a worker owns everything
 //! transport-shaped (the handshake, the session's protocol machine), while
@@ -663,7 +663,7 @@ async fn serve_connection(
 	// moq-lite on its own ALPN runs unboxed on this worker. Everything else
 	// (moq-transport, and the versions that negotiate in a bidi SETUP, which a
 	// browser offering no subprotocol falls back to) boxes its futures with a
-	// native `Send` bound, which only a `Pinned` session meets.
+	// native `Send` bound, which only a `Local` session meets.
 	let unboxed = alpn
 		.as_deref()
 		.and_then(moq_net::Version::from_alpn)
@@ -691,7 +691,7 @@ async fn serve_connection(
 		false => {
 			let request = accepted
 				.deadline
-				.bound(server.accept_request(now, moq_uring::transport::Pinned::new(session)))
+				.bound(server.accept_request(now, moq_uring::transport::Local::new(session)))
 				.await
 				.context("moq handshake failed")?;
 			serve_request(accepted, request).await

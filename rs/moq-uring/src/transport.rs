@@ -1,9 +1,9 @@
 //! Adapt backend poll sessions to moq-net without changing thread affinity.
 mod adapter;
-mod pinned;
+mod local;
 pub use adapter::{Error, RecvStream, SendStream, Session};
 use adapter::{Grouped, GroupedSend};
-pub use pinned::Pinned;
+pub use local::Local;
 
 use crate::quic;
 

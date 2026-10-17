@@ -35,7 +35,7 @@ task set, and the UDP sockets bound through it.
   the session and its driver; poll the driver or await it inside a
   `Handle::spawn` task to run it on the worker. moq-transport and the
   SETUP-negotiated moq-lite versions box their futures with a native `Send`
-  bound, so wrap the session once more in `transport::Pinned`, which checks
+  bound, so wrap the session once more in `transport::Local`, which checks
   the thread on every use, before `accept_request`/`connect`. Web mode maps stream and close codes through the
   HTTP/3 error space.
 - **qlog**: `quic::qlog::Sink` points a group of workers at a directory and

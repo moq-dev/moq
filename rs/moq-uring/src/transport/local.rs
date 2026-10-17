@@ -13,42 +13,42 @@ use std::task::{Context, Poll};
 /// proving it at compile time. moq-lite needs none of it: hand the session to
 /// `accept_request_lite` or `connect_lite` directly.
 #[derive(Clone)]
-pub struct Pinned<T>(SendWrapper<T>);
+pub struct Local<T>(SendWrapper<T>);
 
-impl<T> Pinned<T> {
-	/// Pin `inner` to the current thread.
+impl<T> Local<T> {
+	/// Bind `inner` to the current thread.
 	pub fn new(inner: T) -> Self {
 		Self(SendWrapper::new(inner))
 	}
 }
 
-impl<S: poll::Session> poll::Session for Pinned<S> {
-	type SendStream = Pinned<S::SendStream>;
-	type RecvStream = Pinned<S::RecvStream>;
+impl<S: poll::Session> poll::Session for Local<S> {
+	type SendStream = Local<S::SendStream>;
+	type RecvStream = Local<S::RecvStream>;
 	type Error = S::Error;
 
 	fn poll_accept_uni(&mut self, cx: &mut Context<'_>) -> Poll<Result<Self::RecvStream, Self::Error>> {
-		self.0.poll_accept_uni(cx).map_ok(Pinned::new)
+		self.0.poll_accept_uni(cx).map_ok(Local::new)
 	}
 
 	fn poll_accept_bi(&mut self, cx: &mut Context<'_>) -> Poll<Result<poll::BiStreams<Self>, Self::Error>> {
 		self.0
 			.poll_accept_bi(cx)
-			.map_ok(|(send, recv)| (Pinned::new(send), Pinned::new(recv)))
+			.map_ok(|(send, recv)| (Local::new(send), Local::new(recv)))
 	}
 
 	fn poll_open_uni(&mut self, cx: &mut Context<'_>) -> Poll<Result<Self::SendStream, Self::Error>> {
-		self.0.poll_open_uni(cx).map_ok(Pinned::new)
+		self.0.poll_open_uni(cx).map_ok(Local::new)
 	}
 
 	fn poll_open_bi(&mut self, cx: &mut Context<'_>) -> Poll<Result<poll::BiStreams<Self>, Self::Error>> {
 		self.0
 			.poll_open_bi(cx)
-			.map_ok(|(send, recv)| (Pinned::new(send), Pinned::new(recv)))
+			.map_ok(|(send, recv)| (Local::new(send), Local::new(recv)))
 	}
 
-	fn send_group(&mut self, priority: i64) -> Option<Pinned<<S::SendStream as poll::SendStream>::Group>> {
-		self.0.send_group(priority).map(Pinned::new)
+	fn send_group(&mut self, priority: i64) -> Option<Local<<S::SendStream as poll::SendStream>::Group>> {
+		self.0.send_group(priority).map(Local::new)
 	}
 
 	fn poll_send_datagram(&mut self, cx: &mut Context<'_>, payload: &[u8]) -> Poll<Result<(), Self::Error>> {
@@ -84,9 +84,9 @@ impl<S: poll::Session> poll::Session for Pinned<S> {
 	}
 }
 
-impl<T: poll::SendStream> poll::SendStream for Pinned<T> {
+impl<T: poll::SendStream> poll::SendStream for Local<T> {
 	type Error = T::Error;
-	type Group = Pinned<T::Group>;
+	type Group = Local<T::Group>;
 
 	fn poll_write(&mut self, cx: &mut Context<'_>, buf: &[u8]) -> Poll<Result<usize, Self::Error>> {
 		self.0.poll_write(cx, buf)
@@ -117,7 +117,7 @@ impl<T: poll::SendStream> poll::SendStream for Pinned<T> {
 	}
 }
 
-impl<T: poll::RecvStream> poll::RecvStream for Pinned<T> {
+impl<T: poll::RecvStream> poll::RecvStream for Local<T> {
 	type Error = T::Error;
 
 	fn poll_read(&mut self, cx: &mut Context<'_>, dst: &mut [u8]) -> Poll<Result<Option<usize>, Self::Error>> {
@@ -145,7 +145,7 @@ impl<T: poll::RecvStream> poll::RecvStream for Pinned<T> {
 	}
 }
 
-impl<T: poll::SendGroup> poll::SendGroup for Pinned<T> {
+impl<T: poll::SendGroup> poll::SendGroup for Local<T> {
 	fn set_priority(&mut self, priority: i64) {
 		self.0.set_priority(priority)
 	}
@@ -161,14 +161,14 @@ mod tests {
 	#[test]
 	fn meets_the_boxed_driver_bounds() {
 		fn boxable<S: poll::Boxable>() {}
-		boxable::<Pinned<super::super::Session<crate::quic::web::Session>>>();
+		boxable::<Local<super::super::Session<crate::quic::web::Session>>>();
 	}
 
 	/// Touching it off its thread fails loud rather than racing the worker.
 	#[test]
 	fn panics_off_its_thread() {
 		let (session, _peer) = memory::pair(Default::default());
-		let session = Pinned::new(session);
+		let session = Local::new(session);
 		let other = session.clone();
 		let (panicked, other) = std::thread::spawn(move || {
 			let used = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
