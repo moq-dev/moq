@@ -116,7 +116,9 @@ waited, in flamegraph folded format.
 Linux only. A switch-out is sampled in kernel context, and 16 workers need a
 larger ring buffer than the unprivileged locked-memory limit allows, so the
 recipe refuses before building until `perf_event_paranoid` is -1. A recording
-that still drops events is refused rather than reported.
+that still drops events is refused rather than reported. On an arm64 host with
+SVE, perf's DWARF unwinding requests the SVE `VG` register, which the kernel
+refuses for a software event, so the recording fails to open; profile on x86.
 
 ```bash
 sudo sysctl -w kernel.perf_event_paranoid=-1
