@@ -370,26 +370,27 @@
         # rs/moq-ffi/Cargo.toml. The other places name the same tag and must be
         # bumped together: the `cargo install` lines in rs/moq-ffi/build.sh,
         # cpp/moq/README.md, .github/workflows/cpp.yml,
-        # .github/workflows/obs.yml, .github/workflows/platform.yml,
-        # .github/workflows/release-cpp.yml, and .github/workflows/release-shared-ffi.yml.
+        # .github/workflows/platform.yml, .github/workflows/release-cpp.yml, and
+        # .github/workflows/release-shared-ffi.yml.
         #
         # This points at a fork of LiveKit's async branch (livekit/uniffi-bindgen-cpp
         # PR #1): neither LiveKit nor NordSecurity has a uniffi 0.32 generator,
-        # and the fork adds `error_style = "expected"`, which cpp/moq/uniffi.toml
-        # turns on. Its tags add a `-kixelated.N` pre-release so they never
-        # collide with upstream's. Move back upstream once one tags both.
+        # and the fork adds `error_style = "expected"` and `strip_type_prefix`,
+        # which cpp/moq/uniffi.toml turns on. Its tags add a `-kixelated.N`
+        # pre-release so they never collide with upstream's. Move back upstream
+        # once one tags both.
         uniffi-bindgen-cpp = pkgs.rustPlatform.buildRustPackage rec {
           pname = "uniffi-bindgen-cpp";
-          version = "0.11.0-kixelated.4+v0.32.2";
+          version = "0.11.0-kixelated.5+v0.32.2";
 
           src = pkgs.fetchFromGitHub {
             owner = "kixelated";
             repo = "uniffi-bindgen-cpp";
             rev = "v${version}";
-            hash = "sha256-pmk9M5Wt6DYlXZYPjJ2Nn0tbDi1ve3wCH0Lel9xomCY=";
+            hash = "sha256-y148irMNOsMrfjbUT/f3jlNmpxT0/z/2LVlP+t1oq8I=";
           };
 
-          cargoHash = "sha256-/DRrwhJiKFCzibiJU2D3QaBM3XTmieRgUNc7tHDiGXI=";
+          cargoHash = "sha256-QBURLIg255O6J4A+wzZVk4cUJPdJb6JepZKofX0fLZg=";
 
           # The workspace's other member is the fixture crate, which pulls the
           # uniffi examples in from git; build only the generator.
