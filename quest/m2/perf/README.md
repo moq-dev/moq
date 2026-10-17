@@ -55,8 +55,7 @@ profiling recipe and One enter per turn rank next: they produce the numbers
 that decide the rest.
 
 Decided 2026-10-08: the CPU and allocation profile merged into the profiling
-recipe ([Relay profiling](/quest/m2/perf/lock-profile.md)), so the relay has
-one recipe with capture modes; #3199 moved to m2 beside 3200, since it is an
+recipe (`just bench-profile`), so the relay has one recipe with capture modes; #3199 moved to m2 beside 3200, since it is an
 equally unmeasured ring micro-opt; cache shard was deleted, since #5031's
 profile shows no pool contention.
 
@@ -72,10 +71,8 @@ optimization.
 ## Required
 
 - [kio channel contention](/quest/m2/perf/kio-channel-contention/README.md) - workers spend less time blocked on kio channel-state mutexes (up to 215% of worker CPU on chat at 16 tokio workers), via a version counter, per-thread spikes, and an append-only log
-- [Relay profiling](/quest/m2/perf/lock-profile.md) - one recipe captures lock wait by stack (first), CPU stacks, and heap profiles, with no code in kio
 - [Run to quiescence](/quest/m2/perf/uring-quiescence.md) - a received packet's reply is staged in the same turn, under a pass and train budget that keeps the fairness rule
 - [Ingest batch](/quest/m2/perf/ingest-batch.md) - relay ingest pays one lock, wake, and clock read per burst of whole frames instead of per frame
-- [Remove moq-uring copies](/quest/m2/perf/uring-copies.md) - egress, stream send and receive, and datagram receive stop copying where the QUIC core already allows it, with before/after measurements on `moq-quic`
 - [Shard by default](/quest/m2/perf/shard-default.md) - a saturating shard sweep decides whether an unset `runtime.workers` runs one worker per core on Linux
 
 ## Related

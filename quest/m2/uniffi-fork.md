@@ -14,13 +14,15 @@ are unchanged by the move itself.
 Decided with the maintainer on 2026-10-13, after a review of how moq uses
 UniFFI:
 
-- **Base**: [the BoltFFI spike](/quest/m2/boltffi.md) decides whether the
-  fork starts from UniFFI or BoltFFI. The plan below assumes UniFFI. If
-  BoltFFI is chosen, re-plan this quest against it (the repo name, the
+- **Base**: the maintainer picks UniFFI or BoltFFI from
+  [the BoltFFI spike](/bench/ffi-gen/README.md), which recommends UniFFI.
+  The plan below assumes UniFFI. If BoltFFI is chosen, re-plan this quest
+  against it (the repo name, the
   crate names, porting the Go, Dart, and C++/C generators to BoltFFI) along
   with the quests that name UniFFI internals:
   [Payload bytes](/quest/m2/ffi-bytes.md),
-  [Poll-native async](/quest/m2/ffi-poll.md),
+  [Poll-native async](/quest/m2/ffi-poll-migrate.md),
+  [Foreign poll for hot reads](/quest/m2/ffi-poll-protocol.md),
   [Zero-copy byte returns](/quest/m2/ffi-bytes-return.md),
   [Kotlin calls](/quest/m2/kt-ffi-calls.md), and
   [Namespaced external types](/quest/m2/uniffi-namespaces.md).
@@ -66,12 +68,9 @@ UniFFI:
 
 Public API: none at the move; moq-ffi's dependency names change. Wire: none.
 
-## Required
-
-- [BoltFFI or UniFFI](/quest/m2/boltffi.md) - picks the base this fork starts from
-
 ## Related
 
 - [Payload bytes](/quest/m2/ffi-bytes.md) - the first patch the fork carries
 - [Kotlin calls](/quest/m2/kt-ffi-calls.md) - a Kotlin generator patch the fork carries
 - [Namespaced external types](/quest/m2/uniffi-namespaces.md) - fixes mozilla/uniffi-rs#3026 in the fork
+- [Foreign poll for hot reads](/quest/m2/ffi-poll-protocol.md) - a generated poll protocol the fork carries; dropping a future at cancel is optional here, since no moq quest waits on it

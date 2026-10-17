@@ -33,7 +33,7 @@ fn timestamp_lt(left: moq_net::Timestamp, right: moq_net::Timestamp) -> bool {
 /// [`cut`](Self::cut) closes the current group early, ideally saying where its content
 /// ends; the next write must be a keyframe. Reach for it when the following keyframe won't
 /// supply that boundary in time, or to bound each group of an accumulating audio track.
-/// [`discontinuity`](Self::discontinuity) publishes a marker group of one empty frame, for
+/// [`discontinuity`](Self::discontinuity) publishes a marker group with no media, for
 /// when the timeline is about to jump rather than merely continue. Timestamps never fall
 /// below the live edge earlier groups reached.
 ///
@@ -239,7 +239,7 @@ where
 
 	/// Record when a locally encoded frame reached the transport. Imported media must leave
 	/// this clock observation out and rely on its container batch and reorder measurements.
-	pub fn flush(&mut self, timestamp: moq_net::Timestamp, now: std::time::Instant) -> crate::Result<()> {
+	pub fn flush(&mut self, timestamp: moq_net::Timestamp, now: moq_clock::Instant) -> crate::Result<()> {
 		self.estimator.flush(timestamp, now);
 		self.publish_estimate()
 	}
@@ -621,9 +621,10 @@ where
 	///
 	/// Audio and video write one empty frame at the exclusive end of the previous epoch.
 	/// That object exists on moq-transport, so the live edge moves immediately; a consumer
-	/// MUST NOT submit it to a decoder. Data tracks skip a sequence with no object, because
-	/// an empty payload is data. The next [`write`](Self::write) opens the group after the
-	/// marker and may not start below the last media group's start.
+	/// MUST NOT submit it to a decoder. An empty payload is data on a data track, so its
+	/// marker is one object with no bytes at all, not even the container's timestamp. The
+	/// next [`write`](Self::write) opens the group after the marker and may not start below
+	/// the last media group's start.
 	///
 	/// To bound the closing group's final frame, [`cut(end)`](Self::cut) before calling this.
 	/// Otherwise the open group closes without a duration marker: what resumes may land sooner
@@ -635,15 +636,6 @@ where
 		// the gap to the far side is not a frame duration.
 		self.estimator.discontinuity();
 		self.cadence = None;
-		if self.container.kind() == Kind::Data {
-			// Empty is payload on a data track, so skip this sequence with no object.
-			let skipped = match self.pending_sequence.take() {
-				Some(sequence) => sequence,
-				None => self.inner.latest().map_or(0, |s| s + 1),
-			};
-			self.pending_sequence = Some(skipped + 1);
-			return Ok(());
-		}
 		let mut group = match self.pending_sequence.take() {
 			Some(sequence) => self.inner.create_group(moq_net::group::Info { sequence })?,
 			None => self.inner.append_group()?,
@@ -653,15 +645,18 @@ where
 			recorder.frame(hang::timeline::Position::group(group.sequence), timestamp, false);
 			recorder.end(timestamp);
 		}
-		self.container.write(
-			&mut group,
-			&[Frame {
-				timestamp,
-				payload: Bytes::new(),
-				keyframe: false,
-				duration: None,
-			}],
-		)?;
+		match self.container.kind() {
+			Kind::Data => group.write_frame(timestamp, Bytes::new())?,
+			Kind::Audio | Kind::Video => self.container.write(
+				&mut group,
+				&[Frame {
+					timestamp,
+					payload: Bytes::new(),
+					keyframe: false,
+					duration: None,
+				}],
+			)?,
+		}
 		group.finish()?;
 		if let Some(recorder) = self.recorder.as_mut() {
 			recorder.finish_group(group.sequence);
@@ -850,7 +845,7 @@ mod tests {
 			tracks.push(track);
 		}
 
-		let anchor = std::time::Instant::now();
+		let anchor = moq_clock::Instant::now();
 		let ms = std::time::Duration::from_millis;
 		let pts = |millis: u64| Timestamp::from_micros(millis * 1_000).unwrap();
 		tracks[0].flush(pts(0), anchor).unwrap();

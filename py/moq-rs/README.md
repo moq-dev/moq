@@ -36,10 +36,8 @@ async def main():
             broadcast = await client.request_broadcast(event.announce.prefix)
             catalog = await moq.media.catalog(broadcast)
 
-            for name, audio in catalog.audio.items():
-                # The track is the rendition's `track` when set, otherwise its catalog key.
-                track = audio.track if audio.track is not None else name
-                frames = await moq.media.TrackConsumer.subscribe(broadcast, track, audio.container)
+            for id, audio in catalog.audio.items():
+                frames = await moq.media.TrackConsumer.subscribe(broadcast, id, audio)
                 async with frames:
                     async for frame in frames:
                         print(f"Got frame: {len(frame.payload)} bytes, ts={frame.timestamp}")
@@ -153,7 +151,7 @@ client = moq.Client(
   - `.cancel(code)`, `await session.shutdown()`. Cancel immediately, or drain within one second, raising on failure. Explicit `moq-lite-07-wip` waits for the peer to receive finished tails; older Lite versions, including default lite-06, wait only for transport ACKs. IETF also waits for transport ACKs.
   - `.publish() → OriginProducer`, `.consume() → OriginConsumer`. The wired origin sides.
   - `.stats() → ConnectionStats`. Snapshot RTT, bandwidth estimates, and byte/packet counters.
-  - `await .status() → ConnectionStatus`, `.connects()`. Watch reconnects; `connects()` counts connections, 1 on the first.
+  - `await .status() → ConnectionStatus`, `.connects()`, `.failure()`. Watch reconnects; `connects()` counts connections, 1 on the first, and `failure()` says why a reconnect is under way.
   - `.bandwidth() → Bandwidth`. Divide the send estimate between encoders and app-owned tracks.
 
 ### Publishing
@@ -194,10 +192,11 @@ client = moq.Client(
   the clock for subsequent producers.
 - `await media.CatalogConsumer.subscribe(broadcast)` streams catalog snapshots;
   `await media.catalog(broadcast)` reads one snapshot and releases its subscription.
-- `await media.TrackConsumer.subscribe(broadcast, name, container, *, subscription=None)`
-  decodes live media. Pass the catalog rendition's `track` (or its key when unset) and `container`.
-- `await media.GroupConsumer.fetch(broadcast, name, sequence, container, *, options=None)`
-  fetches and decodes exactly one group.
+- `await media.TrackConsumer.subscribe(broadcast, id, rendition, *, subscription=None)`
+  decodes live media from a catalog rendition: its ID (catalog key) and its `Video` or `Audio`
+  config. It follows the rendition's `broadcast` and `track` itself.
+- `await media.GroupConsumer.fetch(broadcast, id, rendition, sequence, *, options=None)`
+  fetches and decodes exactly one group of a catalog rendition.
 - `media.GroupConsumer(group, container)` decodes a raw group, such as one from
   `TrackConsumer.recv_group()` for arrival-order reads, with container media time on each frame
   as it lands.

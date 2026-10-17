@@ -18,7 +18,7 @@ fn produce_origin(hop: u64) -> moq_net::origin::Producer {
 	producer
 }
 
-#[moq_net_sim::test]
+#[moq_clock::test]
 async fn a_group_cut_by_an_idle_cancel_is_refetched_whole() {
 	let publisher = produce_origin(1);
 	let broadcast = publisher.create_broadcast("bcast").unwrap();
@@ -40,27 +40,27 @@ async fn a_group_cut_by_an_idle_cancel_is_refetched_whole() {
 	let _pair = connect_mock(options).await;
 
 	let consumer = client.consume();
-	moq_net_sim::timeout(TIMEOUT, consumer.routed("bcast"))
+	moq_clock::timeout(TIMEOUT, consumer.routed("bcast"))
 		.await
 		.unwrap()
 		.unwrap();
-	let remote = moq_net_sim::timeout(TIMEOUT, consumer.request_broadcast("bcast", None))
+	let remote = moq_clock::timeout(TIMEOUT, consumer.request_broadcast("bcast", None))
 		.await
 		.unwrap()
 		.unwrap();
 
 	{
-		let mut subscriber = moq_net_sim::timeout(TIMEOUT, remote.track("audio").unwrap().subscribe(None))
+		let mut subscriber = moq_clock::timeout(TIMEOUT, remote.track("audio").unwrap().subscribe(None))
 			.await
 			.unwrap()
 			.unwrap();
-		let mut group = moq_net_sim::timeout(TIMEOUT, subscriber.recv_group())
+		let mut group = moq_clock::timeout(TIMEOUT, subscriber.recv_group())
 			.await
 			.unwrap()
 			.unwrap()
 			.unwrap();
 		assert_eq!(group.sequence, 1);
-		let frame = moq_net_sim::timeout(TIMEOUT, group.read_frame())
+		let frame = moq_clock::timeout(TIMEOUT, group.read_frame())
 			.await
 			.unwrap()
 			.unwrap()
@@ -69,7 +69,7 @@ async fn a_group_cut_by_an_idle_cancel_is_refetched_whole() {
 	}
 
 	// The relay cancels the idle upstream subscription.
-	moq_net_sim::timeout(TIMEOUT, track.demand().unused())
+	moq_clock::timeout(TIMEOUT, track.demand().unused())
 		.await
 		.unwrap()
 		.unwrap();
@@ -81,13 +81,13 @@ async fn a_group_cut_by_an_idle_cancel_is_refetched_whole() {
 
 	let track = remote.track("audio").unwrap();
 	let _feed = track.subscribe(None);
-	let mut group = moq_net_sim::timeout(TIMEOUT, track.fetch_group(1, None))
+	let mut group = moq_clock::timeout(TIMEOUT, track.fetch_group(1, None))
 		.await
 		.unwrap()
 		.unwrap();
 	let mut frames = Vec::new();
 	loop {
-		match moq_net_sim::timeout(TIMEOUT, group.read_frame())
+		match moq_clock::timeout(TIMEOUT, group.read_frame())
 			.await
 			.expect("group 1 hangs")
 		{

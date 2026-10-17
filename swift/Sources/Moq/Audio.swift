@@ -6,7 +6,7 @@ public enum Audio {
     public typealias EncoderInput = AudioEncoderInput
     /// The codec side: codec, track name, rate, channels, bitrate, frame duration, and preset.
     public typealias EncoderOutput = AudioEncoderOutput
-    /// The PCM layout a `Consumer` delivers and how stale a group may get.
+    /// The PCM layout a `Consumer` delivers, how stale a group may get, and its playout delay.
     public typealias DecoderOutput = AudioDecoderOutput
     /// Interleaved PCM with its presentation timestamp.
     public typealias Frame = AudioFrame
@@ -74,16 +74,16 @@ public enum Audio {
             self.ffi = ffi
         }
 
-        /// Subscribe to one catalog audio rendition and decode it.
+        /// Subscribe to the catalog audio rendition `id` and decode it.
         public static func subscribe(
             broadcast: BroadcastConsumer,
-            name: String,
+            id: String,
             rendition: Media.Audio,
             output: DecoderOutput
         ) async throws -> Consumer {
             Consumer(try await MoqAudioConsumer.subscribe(
                 broadcast: broadcast.ffi,
-                name: name,
+                id: id,
                 catalogAudio: rendition,
                 output: output
             ))
@@ -93,6 +93,10 @@ public enum Audio {
         public func next() async throws -> Frame? {
             try await ffi.next()
         }
+
+        /// The playout delay to hold ahead of the playhead, in microseconds: the fixed
+        /// `DecoderOutput.delayUs`, or the estimate from every frame read so far.
+        public var delayUs: UInt64 { ffi.delayUs() }
 
         /// Cancel all current and future reads.
         public func cancel() {

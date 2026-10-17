@@ -515,7 +515,7 @@ impl Client {
 			.with_versions(self.versions.clone())
 			.with_publisher(&publish.inner)
 			.with_subscriber(subscribe.inner.clone())
-			.connect(web_async::time::Instant::now(), transport)
+			.connect(moq_clock::now(), transport)
 			.await?;
 
 		crate::ffi::spawn(async move {
@@ -638,10 +638,15 @@ pub struct MoqConnectionStats {
 	pub packets_received: Option<u64>,
 	/// Total datagrams detected as lost.
 	pub packets_lost: Option<u64>,
+	/// The protocol version the connection negotiated, spelled like
+	/// [`MoqClientConfig::versions`]. Sampled with the rest, so a reconnect can't pair one
+	/// connection's version with another's numbers.
+	#[uniffi(default = None)]
+	pub version: Option<String>,
 }
 
-impl From<moq_net::session::Stats> for MoqConnectionStats {
-	fn from(stats: moq_net::session::Stats) -> Self {
+impl MoqConnectionStats {
+	fn new(stats: moq_net::session::Stats, version: Option<moq_net::Version>) -> Self {
 		Self {
 			rtt_us: stats.rtt.map(|d| d.as_micros() as u64),
 			estimated_send_rate_bps: stats.estimated_send_rate.map(moq_net::bandwidth::Rate::as_bps),
@@ -652,6 +657,7 @@ impl From<moq_net::session::Stats> for MoqConnectionStats {
 			packets_sent: stats.packets_sent,
 			packets_received: stats.packets_received,
 			packets_lost: stats.packets_lost,
+			version: version.map(|version| version.to_string()),
 		}
 	}
 }
@@ -953,10 +959,26 @@ impl MoqSession {
 		let _guard = crate::ffi::enter();
 		match &self.inner {
 			#[cfg(not(target_arch = "wasm32"))]
-			Inner::Connection(connection) => connection.monitor().stats(),
-			Inner::Session(session) => Some(session.stats()),
+			Inner::Connection(connection) => match connection.monitor().snapshot() {
+				Some(snapshot) => MoqConnectionStats::new(snapshot.stats, Some(snapshot.version)),
+				None => MoqConnectionStats::new(Default::default(), None),
+			},
+			Inner::Session(session) => MoqConnectionStats::new(session.stats(), Some(session.version())),
 		}
-		.unwrap_or_default()
-		.into()
+	}
+
+	/// Why a client session is reconnecting: the error that ended the last connection or
+	/// failed the latest redial, or `None` once a connection lands.
+	///
+	/// A redial that keeps failing never changes [`status`](Self::status), so poll this
+	/// while it reports `Disconnected` to show the reason, such as a refused dial.
+	/// Giving up for good reports through [`closed`](Self::closed) instead. A
+	/// server-accepted session never reconnects, so it is always `None`.
+	pub fn failure(&self) -> Option<MoqError> {
+		match &self.inner {
+			#[cfg(not(target_arch = "wasm32"))]
+			Inner::Connection(connection) => connection.monitor().failure().map(map_closed_error),
+			Inner::Session(_) => None,
+		}
 	}
 }

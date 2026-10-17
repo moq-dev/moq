@@ -3,6 +3,10 @@
 //! Maps the AV1CodecConfigurationRecord (av1C) flag bits into the
 //! catalog's AV1 codec struct, and provides an [`Import`] that publishes
 //! raw AV1 bitstreams (OBU-framed) to a moq broadcast.
+//!
+//! The sequence header has no sample aspect. AV1's per-frame
+//! [`render_size`](https://aomediacodec.github.io/av1-spec/#render-size-syntax)
+//! hint can change between frames, so it does not establish a display aspect for the whole rendition.
 
 mod import;
 mod split;

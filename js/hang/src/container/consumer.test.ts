@@ -114,9 +114,9 @@ test("LegacyFormat always returns exactly one frame", () => {
 	expect(result).toHaveLength(1);
 });
 
-test("LegacyFormat throws on empty input", () => {
-	const format = new LegacyFormat("data");
-	expect(() => format.decode(new Uint8Array(0))).toThrow();
+test("LegacyFormat decodes no frame from a data track's empty object and throws on a media track's", () => {
+	expect(new LegacyFormat("data").decode(new Uint8Array(0))).toEqual([]);
+	expect(() => new LegacyFormat("video").decode(new Uint8Array(0))).toThrow();
 });
 
 test("Legacy Producer refuses a group below the previous group start", () => {
@@ -347,20 +347,55 @@ test("Legacy Producer discontinuity writes no end estimated from the cadence", a
 	]);
 });
 
-test("Legacy Producer discontinuity marks nothing on a data track or before any frame", async () => {
-	const data = new Track.Producer("data");
-	const producer = new LegacyProducer(data, new LegacyFormat("data"));
-	producer.encode(new Uint8Array([1]), 0 as Micro, true);
-	producer.discontinuity();
-	expect(data.appendGroup().sequence).toBe(1);
-
+test("Legacy Producer discontinuity marks nothing before any frame", async () => {
 	const empty = new Track.Producer("empty");
 	new LegacyProducer(empty, new LegacyFormat("video")).discontinuity();
 	expect(empty.appendGroup().sequence).toBe(0);
 });
 
+// An empty payload is data on a data track, so its marker is an object with no bytes, which reads
+// as an end where the reader got to rather than as a gap.
+test("Legacy Producer discontinuity on a data track reads as an end at the edge", async () => {
+	const track = new Track.Producer("data");
+	const subscriber = replay(track);
+	const producer = new LegacyProducer(track, new LegacyFormat("data"));
+	producer.encode(new Uint8Array([1]), 0 as Micro, true);
+	producer.encode(new Uint8Array(), 20_000 as Micro, true);
+	producer.discontinuity();
+	producer.encode(new Uint8Array([1]), 5_000_000 as Micro, true);
+	producer.close();
+
+	const consumer = new Consumer(subscriber, { format: new LegacyFormat("data"), maxDelay: 30_000 as Milli });
+	const items: string[] = [];
+	for (let read = await consumer.next(); read; read = await consumer.next()) items.push(describe(read));
+	expect(items).toEqual(["0", "20000", "end 20000", "5000000"]);
+	consumer.close();
+});
+
 // A group's reach runs to its successor's first frame, so without the marker the group before a
 // pause would stretch across the whole gap and read as live to anyone joining after the resume.
+// A data track's marker is alone in its group, so one sharing it is refused rather than read as
+// a break or dropped in silence.
+test("Consumer refuses a data marker that shares its group", async () => {
+	for (const second of [new Uint8Array(), encodeLegacyFrame(10_000 as Micro, new Uint8Array([1]))]) {
+		const track = new Track.Producer("data");
+		const consumer = new Consumer(replay(track), { format: new LegacyFormat("data"), maxDelay: 500 as Milli });
+		const error = spyOn(console, "error").mockImplementation(() => {});
+		try {
+			const group = track.appendGroup();
+			group.writeFrame({ payload: new Uint8Array(), timestamp: Time.Timestamp.fromMicros(0) });
+			group.writeFrame({ payload: second, timestamp: Time.Timestamp.fromMicros(10_000) });
+			group.close();
+			await settle();
+			expect(error).toHaveBeenCalledWith("spawn error", expect.any(Error));
+		} finally {
+			consumer.close();
+			track.close();
+			error.mockRestore();
+		}
+	}
+});
+
 test("Legacy Producer discontinuity keeps pre-pause media from reading as live", async () => {
 	const track = new Track.Producer("test");
 	const producer = new LegacyProducer(track, new LegacyFormat("video"));
@@ -1842,7 +1877,8 @@ test("a group reset does not hide a later container decode failure", async () =>
 		reset.close(new NetError.Stream(StreamCode.Cancel));
 		await settle();
 		const malformed = track.appendGroup();
-		malformed.writeFrame({ payload: new Uint8Array(), timestamp: Time.Timestamp.now() });
+		// A truncated timestamp varint.
+		malformed.writeFrame({ payload: new Uint8Array([0x80]), timestamp: Time.Timestamp.now() });
 		malformed.close();
 		await settle();
 		expect(error).toHaveBeenCalledWith("spawn error", expect.any(Error));

@@ -27,7 +27,8 @@ use crate::catalog::Estimator;
 /// - Opus
 /// - FLAC
 ///
-/// **Text:** WebVTT (`wvtt`), reconstructed as timed text; unsupported subtitle codecs are skipped.
+/// **Text:** WebVTT (`wvtt`), reconstructed as timed text, and TTML (`stpp`) documents moved onto the
+/// catalog clock; unsupported subtitle codecs, including other XML namespaces, are skipped.
 pub struct Import<E: crate::catalog::hang::CatalogExt = ()> {
 	/// The broadcast being produced
 	broadcast: moq_net::broadcast::Producer,
@@ -370,15 +371,22 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	}
 
 	fn init_text(&mut self, trak: &Trak, moov: &Moov, reserved: &crate::catalog::Reserved<E>) -> Result<bool> {
-		let [mp4_atom::Codec::Wvtt(codec)] = trak.mdia.minf.stbl.stsd.codecs.as_slice() else {
-			return Ok(false);
+		let (format, mut config) = match trak.mdia.minf.stbl.stsd.codecs.as_slice() {
+			[mp4_atom::Codec::Wvtt(codec)] => {
+				if codec.plaintext.data_reference_index != 1 {
+					return Err(Error::InvalidSubtitle("external subtitle data reference").into());
+				}
+				let header = crate::container::text::header(&codec.config.config).map_err(Error::InvalidSubtitle)?;
+				let mut config = hang::catalog::TextConfig::new(hang::catalog::TextFormat::Vtt);
+				config.role = crate::container::text::role(&header);
+				(super::text::Format::Vtt { header }, config)
+			}
+			[mp4_atom::Codec::Unknown(kind, body)] if kind.as_ref() == b"stpp" && super::text::stpp(body)? => (
+				super::text::Format::Ttml,
+				hang::catalog::TextConfig::new(hang::catalog::TextFormat::Ttml),
+			),
+			_ => return Ok(false),
 		};
-		if codec.plaintext.data_reference_index != 1 {
-			return Err(Error::InvalidSubtitle("external subtitle data reference").into());
-		}
-		let header = crate::container::text::header(&codec.config.config).map_err(Error::InvalidSubtitle)?;
-		let mut config = hang::catalog::TextConfig::new(hang::catalog::TextFormat::Vtt);
-		config.role = crate::container::text::role(&header);
 		config.lang = Some(trak.mdia.mdhd.language.clone());
 		// The picker label is the HandlerBox name; `vlab` is an opaque source identifier.
 		config.label = (!trak.mdia.hdlr.name.is_empty()).then(|| trak.mdia.hdlr.name.clone());
@@ -392,7 +400,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			trak.tkhd.track_id,
 			super::text::Track {
 				producer,
-				header,
+				format,
 				defaults: sample::Defaults::from_moov(moov, trak.tkhd.track_id),
 				timescale: moq_net::Timescale::new(trak.mdia.mdhd.timescale as u64)?,
 				end_decode_time: None,
@@ -510,6 +518,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	) -> Result<VideoConfig> {
 		let mut description = BytesMut::new();
 		avcc.encode_body(&mut description)?;
+		let metadata = crate::codec::h264::config(&description)?;
 
 		let mut config = VideoConfig::new(H264 {
 			profile: avcc.avc_profile_indication,
@@ -519,6 +528,9 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		});
 		config.coded_width = Some(visual.width as _);
 		config.coded_height = Some(visual.height as _);
+		config.framerate = metadata.framerate;
+		config.display_aspect_width = metadata.display_aspect_width;
+		config.display_aspect_height = metadata.display_aspect_height;
 		config.description = Some(description.freeze());
 		config.container = container;
 		Ok(config)
@@ -546,6 +558,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		config.description = Some(description.freeze());
 		config.coded_width = Some(visual.width as _);
 		config.coded_height = Some(visual.height as _);
+		crate::codec::h265::apply_hvcc_sps(hvcc, &mut config)?;
 		config.container = container;
 		Ok(config)
 	}

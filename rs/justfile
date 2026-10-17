@@ -138,17 +138,17 @@ macos-test:
     just rs test -p moq-sock --features fast-apple-datapath
     just rs test -p moq-video --no-default-features -E 'test(encode::backend::videotoolbox::tests)'
 
-# Compile and lint the capture feature, which the default check skips.
+# Compile and lint the capture and playback features, which the default check skips.
 [positional-arguments]
 capture *args:
-    cargo clippy --locked -p moq-video -p moq-audio --all-targets --features moq-video/capture,moq-audio/capture "$@" -- -D warnings
+    cargo clippy --locked -p moq-video -p moq-audio --all-targets --features moq-video/capture,moq-audio/capture,moq-audio/playback "$@" -- -D warnings
 
-# The capture tests drive synthetic devices, so they need no hardware.
+# The capture and playback tests drive synthetic devices, so they need no hardware.
 
-# Test the capture feature, which the default test pass skips.
+# Test the capture and playback features, which the default test pass skips.
 [positional-arguments]
 capture-test *args:
-    just rs test -p moq-video -p moq-audio --features moq-video/capture,moq-audio/capture "$@"
+    just rs test -p moq-video -p moq-audio --features moq-video/capture,moq-audio/capture,moq-audio/playback "$@"
 
 # Compare SHM and GetImage through production capture on the current X11 display.
 x11-bench:
@@ -196,9 +196,11 @@ android *args:
 wasm *args:
     cargo clippy --locked -p moq-wasm -p moq-mux -p moq-ffi -p moq-clock --target wasm32-unknown-unknown --lib "$@" -- -D warnings
 
-# Run the browser clock backend on the Playwright Chromium installed by wasm.yml.
+# Run the browser clock backend on the Playwright Chromium installed by wasm.yml,
+# with the runtime and with reads alone.
 wasm-test:
     CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER="bun {{ justfile_directory() }}/test/wasm/rust.ts" cargo test --locked -p moq-clock --lib --target wasm32-unknown-unknown
+    CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER="bun {{ justfile_directory() }}/test/wasm/rust.ts" cargo test --locked -p moq-clock --lib --target wasm32-unknown-unknown --no-default-features
 
 # Auto-fix the browser/WASM bindings.
 [positional-arguments]

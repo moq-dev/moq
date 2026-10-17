@@ -899,6 +899,7 @@ mod tests {
 			largest_location: None,
 			forward: true,
 			properties: Properties {
+				dynamic_groups: false,
 				max_cache_duration: None,
 				timescale: None,
 				priority: None,
@@ -935,6 +936,7 @@ mod tests {
 			largest_location: None,
 			forward: true,
 			properties: Properties {
+				dynamic_groups: false,
 				max_cache_duration: None,
 				timescale: None,
 				priority: None,

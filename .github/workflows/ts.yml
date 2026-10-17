@@ -25,6 +25,7 @@ on:
       # Workspace dependencies of moq-net, moq-tokio and moq-mux on the TS path.
       - "rs/kio/**"
       - "rs/moq-flate/**"
+      - "rs/moq-ice/**"
       - "rs/moq-msf/**"
       - "rs/moq-pattern/**"
       - "rs/moq-sock/**"
@@ -87,6 +88,34 @@ jobs:
       - name: TS fragmented PES headers
         if: ${{ !cancelled() }}
         run: nix develop --command just test ts --fragment-pes
+        env:
+          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
+        shell: bash -leo pipefail {0}
+
+      # `import/export ts --passthrough`: from its first packet the capture is the source's
+      # packets in place, and every compliance check grades it as it grades that interval of
+      # the source. The generated clip fails the T-STD model on its own; the capture must too.
+      - name: TS passthrough
+        if: ${{ !cancelled() }}
+        run: nix develop --command just test ts --passthrough
+        env:
+          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
+        shell: bash -leo pipefail {0}
+
+      # The same over a hardware encoder's capture the T-STD model passes, with a dirty start
+      # the importer acquires past.
+      - name: TS passthrough of a broadcast capture
+        if: ${{ !cancelled() }}
+        run: nix develop --command just test ts-passthrough-capture
+        env:
+          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
+        shell: bash -leo pipefail {0}
+
+      # The same over a whole MPTS: two programs on their own PCR PIDs, whose recovery points
+      # rarely line up.
+      - name: TS passthrough of an MPTS
+        if: ${{ !cancelled() }}
+        run: nix develop --command just test ts --passthrough --mpts
         env:
           MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
         shell: bash -leo pipefail {0}
@@ -186,6 +215,13 @@ jobs:
       - name: TS lossy path
         if: ${{ !cancelled() && github.event_name != 'pull_request' }}
         run: nix develop --command just test ts --hrd --loss 1 --duration 120
+        env:
+          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
+
+      # The passthrough over the same path: retransmission must leave no packet missing or moved.
+      - name: TS passthrough lossy path
+        if: ${{ !cancelled() && github.event_name != 'pull_request' }}
+        run: nix develop --command just test ts --passthrough --loss 1 --duration 120
         env:
           MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
 

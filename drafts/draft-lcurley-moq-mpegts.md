@@ -93,7 +93,7 @@ What remains is media in a codec-neutral catalog, plus the signaling a demultipl
 | | mpeg2ts packaging | mpegts section |
 |:--------|:--------|:--------|
 | MoQ track | one per program or multiplex | one per elementary stream |
-| Object payload | whole source packets | one media frame, or one verbatim PES payload or section |
+| Object payload | whole source packets | one media frame, or one verbatim PES payload, PES packet, or section |
 | Packaging | `mpeg2ts` | none defined; media keeps its own |
 | Catalog | `mpeg2ts*` members on each track | one `mpegts` root member |
 | Relay | caches and drops whole objects | drops and prioritizes per elementary stream |
@@ -126,6 +126,7 @@ type Track = {
   "pid": number,
   "descriptors": Descriptor[] | undefined,
   "verbatim": Verbatim | undefined,
+  "pesPacket": PesPacket | undefined,
 }
 ~~~
 
@@ -134,9 +135,10 @@ A publisher MUST NOT record 0x0000 (PAT) or 0x1FFF (null packets), which carry n
 
 `descriptors` are the track's ES-level descriptors from the PMT ({{descriptor}}), in PMT order.
 
-`verbatim` marks a track carrying an undecoded elementary stream ({{verbatim}}).
+`verbatim` and `pesPacket` mark a track carrying an undecoded elementary stream ({{verbatim}}).
+An entry MUST NOT carry both, and a consumer MUST refuse a catalog with one that does.
 A decoded track MAY appear here too, to preserve its `pid` and `descriptors`.
-A consumer MUST ignore an entry with neither a `verbatim` record nor a track the catalog describes.
+A consumer MUST ignore an entry with no `verbatim` record, no `pesPacket` record, and no track the catalog describes, so one that predates `pesPacket` drops such a track from the stream it rebuilds.
 
 ## programDescriptors
 The PMT's program-level descriptors (`program_info`), in PMT order ({{descriptor}}).
@@ -243,7 +245,22 @@ A publisher SHOULD record it, since strict demultiplexers reject a relabeled PES
 
 Each frame MUST be a keyframe in its own group: a verbatim payload is all-or-nothing.
 
-A verbatim track has no codec, dimensions, or decoder configuration, so a publisher MUST NOT describe it as a media rendition and MUST describe it only by its `tracks` entry.
+A track can instead carry each PES whole, header included:
+
+~~~
+type PesPacket = {
+  "streamType": number,
+}
+~~~
+
+`streamType` is the PMT `stream_type` to re-announce, as for `Verbatim`.
+Each frame MUST be exactly one PES packet, from its start code through its payload, with a `PES_packet_length` that matches the frame, or zero only where {{mpeg2}} lets a video stream leave it unbounded.
+The `stream_id`, the PTS and DTS when present, and every other header field ride in the frame, with the PTS and DTS on the catalog clock; a PES without a PTS carries none.
+The frame's timestamp is the packet's placement: the program clock at its first byte, on the same timeline.
+A consumer MUST refuse a frame that is not one well-formed PES packet.
+The record is a member beside `verbatim` rather than a `framing` value, so a consumer that predates it ignores the track instead of refusing the catalog.
+
+A verbatim or whole-PES track has no codec, dimensions, or decoder configuration, so a publisher MUST NOT describe it as a media rendition and MUST describe it only by its `tracks` entry, and a consumer MUST refuse a catalog that describes one as both.
 Nothing there declares a container, so its frames use hang's `legacy` container ({{hang}}): a varint microsecond timestamp followed by the payload.
 
 
@@ -302,7 +319,7 @@ A byte between two PCRs is placed at the rate between them; a byte past the last
 
 PCRs are unwrapped into a 64-bit count of 27 MHz ticks, and timestamps never decrease.
 A step forward of at most half the 2^33 × 300 tick period adds to the count, across the wrap included, so a wrap is not a discontinuity.
-A PCR with `discontinuity_indicator` set whose step is forward by that measure adds its step too, after the bytes before it are timed at the rate before it, and the group it starts MUST follow a skipped group sequence, hang's break marker.
+A PCR with `discontinuity_indicator` set whose step is forward by that measure adds its step too, after the bytes before it are timed at the rate before it, and the group it starts MUST follow hang's discontinuity marker ({{hang}}).
 A PCR that steps backwards MUST end the track with an error, flagged or not: a flagged one is a restart, which is new content, so a publisher that carries on publishes it as a new broadcast.
 
 The timeline depends only on the bytes since the publisher's first PCR, so two publishers that start at the same packet of one input publish identical frames.
@@ -349,6 +366,7 @@ A consumer rebuilding a transport stream:
 - MUST re-emit each track's `descriptors` as its ES-level descriptors, and `programDescriptors` as the PMT's `program_info`.
 - MUST re-emit each `si` entry's sections byte-for-byte on that entry's PID, reading them from its track ({{si-track}}), at least as often as its `interval` when declared.
 - MUST repacketize each verbatim track per its `framing` and `streamType`, using `streamId` when recorded.
+- MUST packetize each `pesPacket` frame unchanged on its track's PID, its first byte going out no earlier than the frame's timestamp, and SHOULD send it as close to that as the multiplex allows.
 - SHOULD pad the output with null packets to `muxRate` when present, so the rebuilt stream is constant-rate again; a source that exceeds the rate is passed through rather than delayed or dropped.
 
 With no `program` the consumer synthesizes an identity, and SHOULD then omit any carried `si`, which describes a program that no longer exists.
@@ -423,6 +441,8 @@ A broadcast demultiplexed from a DVB transport stream: video and audio described
 {:numbered="false"}
 
 - Added the `m2ts` section, a transport stream carried whole, with its mapping onto MSFTS; the comparison uses MSFTS's `mpeg2ts` names.
+- Added the `pesPacket` record: each frame one whole PES packet, timestamped with its placement. A consumer that predates it drops the track rather than refusing the catalog.
+- A flagged PCR jump on an `m2ts` track follows hang's discontinuity marker rather than a skipped group sequence.
 
 ## draft-lcurley-moq-mpegts-00
 {:numbered="false"}

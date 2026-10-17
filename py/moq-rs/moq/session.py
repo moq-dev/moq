@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from moq_ffi import MoqBandwidth, MoqReservation, MoqSession
+from moq_ffi import MoqBandwidth, MoqError, MoqReservation, MoqSession
 
 from .origin import OriginConsumer, OriginProducer
-from .publish import TrackProducer
+from .publish import TrackDemand
 from .types import ConnectionStats, ConnectionStatus
 
 
@@ -67,6 +67,15 @@ class Session:
         ``CONNECTED`` status whose count grew is a reconnect."""
         return self._inner.connects()
 
+    def failure(self) -> MoqError | None:
+        """Why a client session is reconnecting: the error that ended the last
+        connection or failed the latest redial, or ``None`` once a connection lands.
+
+        A redial that keeps failing never changes :meth:`status`, so poll this while
+        it reports ``DISCONNECTED`` to show the reason. Giving up for good raises from
+        :meth:`closed` instead. A server-accepted session always returns ``None``."""
+        return self._inner.failure()
+
     def cancel(self, code: int) -> None:
         """Close the session with the given error code."""
         self._inner.cancel(code)
@@ -118,13 +127,14 @@ class Bandwidth:
     def __init__(self, inner: MoqBandwidth) -> None:
         self._inner = inner
 
-    def reserve(self, track: TrackProducer, max_bps: int) -> Reservation:
-        """Reserve up to ``max_bps`` for ``track``.
+    def reserve(self, demand: TrackDemand, max_bps: int) -> Reservation:
+        """Reserve up to ``max_bps`` for the track ``demand`` watches.
 
-        ``max_bps`` is a ceiling, not a measurement: reserve the most the track
-        can ever send. Drop the reservation to hand the room back.
+        Every track producer hands out its ``demand()``. ``max_bps`` is a
+        ceiling, not a measurement: reserve the most the track can ever send.
+        Drop the reservation to hand the room back.
         """
-        return Reservation(self._inner.reserve(track._inner, max_bps))
+        return Reservation(self._inner.reserve(demand._inner, max_bps))
 
 
 class Reservation:

@@ -18,7 +18,7 @@ name: Nightly
 # the wheel builds in a manylinux container, the Kotlin/Swift/Go/Dart packages
 # link the FFI on every platform) and nothing notices until the tag is pushed.
 #
-# `audio-quality` is here because of what it measures. It plays twenty-four rows of
+# `audio-quality` is here because of what it measures. It plays thirty-six rows of
 # audio in real time, a minute each, which no merge gate should carry, and every
 # number it grades is a timing one that moves with whatever else the runner is
 # doing. A per-PR arm would fail on unrelated load often enough to be ignored;
@@ -46,18 +46,19 @@ jobs:
   x11:
     uses: ./.github/workflows/x11.yml
 
-  # Each independent workload gets its own hour. Rust and JS benchmark groups
-  # keep one build environment each, so splitting the feature compile does not
-  # turn every benchmark into a fresh compile of the same dependencies.
+  # Each independent workload gets its own hour. Each benchmark group keeps one
+  # build environment, so a benchmark reuses the dependencies its group already
+  # compiled. The Rust benchmarks outgrew one hour, so they split by harness:
+  # nextest's ignored benchmark tests and cargo's bench targets share few builds.
   nightly:
     name: Nightly (${{ matrix.name }})
-    runs-on: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner || 'ubuntu-24.04-arm' }}
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
-        # Unset keys default to the plain dev shell, the Rust cache, no perf
-        # sampling, no Chromium, and nextest's default profile.
+        # Unset keys default to the ARM runner, the plain dev shell, the Rust
+        # cache, no perf sampling, no Chromium, and nextest's default profile.
         include:
           - name: Features
             recipe: rs features
@@ -66,16 +67,30 @@ jobs:
             recipe: bench-ffi
             artifact: bench-ffi
             artifact-path: target/bench/ffi
+          # Keeps the BoltFFI and UniFFI slice building and running for the
+          # browser generator comparison, which reuses it. It skips the size
+          # step, whose moq-ffi and moq-wasm builds double the time and are
+          # already built elsewhere.
+          - name: Generator comparison
+            recipe: bench-ffi-gen build bench
+            artifact: bench-ffi-gen
+            artifact-path: target/ffi-gen/results
           - name: Audio grouping relay benchmark
             recipe: bench-audio
           - name: Relay shard sweep
             recipe: bench-shard
-          # Smoke-tests the capture path: exact off-CPU waits, resolved worker stacks and CPU.
-          - name: Relay lock-wait profile
-            recipe: bench-lock fanout-heavy 4
+          # Smoke-tests each capture path: exact off-CPU waits, CPU stacks, and
+          # heap snapshots, each refused without resolved relay stacks.
+          # x86: on the SVE-capable ARM runner, perf's DWARF unwinding asks for the SVE VG
+          # register, which the kernel refuses for the software context-switches event.
+          - name: Relay profiles
+            recipe: bench-profile "lock cpu heap" fanout-heavy 4
             perf: true
-          - name: Rust benchmarks
-            recipe: gh nightly rust
+            runner: ubuntu-24.04
+          - name: Rust benchmark tests
+            recipe: gh nightly rust-test
+          - name: Rust bench targets
+            recipe: gh nightly rust-bench
           - name: JS benchmarks
             recipe: gh nightly js
             uncached: true
@@ -87,6 +102,12 @@ jobs:
             chromium: true
             artifact: wasm-backend-baseline
             artifact-path: target/test
+          # Bounded: fails on crashes, missing output, or invalid samples, never on timing.
+          - name: Browser benchmark smoke
+            recipe: bench-browser --smoke
+            chromium: true
+            artifact: bench-browser
+            artifact-path: target/bench/browser
           - name: Audit
             recipe: rs audit
             uncached: true
@@ -127,7 +148,7 @@ jobs:
         if: ${{ !matrix.uncached }}
         uses: ./.github/actions/rust-cache
 
-      # perf samples worker switch-outs in kernel context into a large buffer; bench-lock refuses without it.
+      # perf samples the relay in kernel context into large buffers; bench-profile refuses without it.
       - name: Allow perf kernel sampling
         if: matrix.perf
         run: sudo sysctl -w kernel.perf_event_paranoid=-1
@@ -225,6 +246,10 @@ jobs:
         run: nix develop --command just test media --media-engines ${{ matrix.engine }}
         env:
           MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
+          # Playwright checks a browser's libraries with the `ldd` on PATH, which in the
+          # dev shell is Nix glibc's and can't see the ones `--with-deps` installed, so
+          # it refuses a Firefox or WebKit that launches fine.
+          PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS: 1
       - name: Preserve measurements and traces
         if: ${{ failure() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -237,14 +262,14 @@ jobs:
   platform:
     uses: ./.github/workflows/platform.yml
 
-  # Plays the matrix in headless Chromium through moq-shaper and grades what the
-  # listener heard against test/audio-quality/budgets.json. ARM64 like wasm.yml,
-  # the only architecture cache.yml warms a Rust store for.
+  # Plays the matrix in headless Chromium and the native player through moq-shaper
+  # and grades what the listener heard against test/audio-quality/budgets.json.
+  # ARM64 like wasm.yml, the only architecture cache.yml warms a Rust store for.
   audio-quality:
     name: Audio quality
     runs-on: ubuntu-24.04-arm
-    # Twenty-four rows at a minute each, plus the relay, CLI, and shaper built from source.
-    timeout-minutes: 60
+    # Thirty-six rows at a minute each, plus the relay, CLI, and shaper built from source.
+    timeout-minutes: 90
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -277,12 +302,22 @@ jobs:
           MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
       - name: Audio quality
         if: ${{ !cancelled() }}
-        run: nix develop --command just test audio-quality --enforce --capture
+        run: nix develop --command just test audio-quality --rings isolated,plain --enforce --capture
         shell: bash -leo pipefail {0}
         env:
           # Somewhere upload-artifact can reach; the harness default is under $TMPDIR.
           MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
           # A passing run is kept too: budgets.json is measured from these nights.
+          MOQ_TEST_KEEP: 1
+      # The native player's rows, graded but not enforced: an intermittent device
+      # stall voids about one AAC row in seven, which would fail most nights until
+      # it is fixed. Kept beside the browser run so its ceilings can be re-measured.
+      - name: Native audio quality
+        if: ${{ !cancelled() }}
+        run: nix develop --command just test audio-quality --rings pulse
+        shell: bash -leo pipefail {0}
+        env:
+          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
           MOQ_TEST_KEEP: 1
       # The run directory is the diagnosis: each process's log, the shaper's
       # counters, the raw samples, and every row's summary.
@@ -339,7 +374,11 @@ jobs:
 
   release-cpp:
     name: Release Cpp
+    needs: [release-shared-ffi]
+    if: ${{ always() && !cancelled() }}
     uses: ./.github/workflows/release-cpp.yml
+    with:
+      reuse-native: true
     permissions:
       contents: write
 

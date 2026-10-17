@@ -379,6 +379,18 @@ function localStreamCode(err: unknown): StreamCode {
 }
 
 /**
+ * The transport refused a request stream or failed to grant stream credit before its deadline.
+ *
+ * This local failure is terminal and has no wire code. The request is not retried.
+ */
+export class NoStreamCredit extends Error {
+	constructor(options?: ErrorOptions) {
+		super("no stream credit", options);
+		this.name = "NoStreamCredit";
+	}
+}
+
+/**
  * The {@link StreamCode.ControlTimeout} error for a control request the peer never answered.
  *
  * A control request that outlives its deadline is not late content, so it does not go out as

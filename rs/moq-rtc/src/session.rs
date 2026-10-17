@@ -1,9 +1,7 @@
 //! str0m session driver shared by every HTTP role / media direction.
 //!
-//! str0m is sans-IO, so we drive the [`str0m::Rtc`] instance from a tokio
-//! task that owns a UDP socket. [`Session::run`] alternates between
-//! [`Rtc::poll_output`] (drain pending transmits / events) and
-//! [`Rtc::handle_input`] (feed UDP packets or timeouts).
+//! [`moq_ice::Agent`] drives the sans-IO [`str0m::Rtc`] over UDP;
+//! [`Session::run`] feeds it egress writes and handles the media events it surfaces.
 //!
 //! The session itself doesn't care whether the [`Rtc`] was populated by
 //! accepting an SDP offer (server side) or by minting one and posting it
@@ -13,52 +11,20 @@
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use str0m::{Candidate, Event, IceConnectionState, Input, Output, Rtc, net::Receive};
+use str0m::{Candidate, Event, Rtc};
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 
-use crate::egress::{EgressClock, EgressSource, WriteRequest};
+use crate::egress::{EgressClock, EgressSource, Format, WriteRequest};
 use crate::{Error, Result, codec};
-
-/// One inbound UDP datagram plus its source address, the unit fed to a session.
-/// The [`server`](crate::server) paths get these from the shared-socket demux
-/// (`crate::server::mux`); the client paths get them from a 1:1 reader
-/// ([`spawn_socket_reader`]).
-pub(crate) type Packet = (Vec<u8>, SocketAddr);
-
-pub(crate) struct Inbound {
-	pub packets: mpsc::Receiver<Packet>,
-	pub wire: crate::wire::Source,
-}
-
-/// Bound on a session's inbound datagram queue, sized like a socket buffer:
-/// past this, datagrams are dropped rather than buffered (WebRTC tolerates loss
-/// and a stalled session must not grow memory without limit).
-pub(crate) const SESSION_INBOX: usize = 256;
 
 /// str0m's outbound video buffer depth (packets), which also backs NACK resends.
 /// Raised above the str0m default (1000) so a late-joining peer can recover a
 /// large keyframe and the rest of the current group via NACK; see
 /// [`rtc_config_with_codecs`].
 const EGRESS_SEND_BUFFER_VIDEO: usize = 3000;
-
-/// Backstop deadline for a session to reach a connected ICE state, covering the one
-/// case str0m's ICE agent deliberately never times out: a peer that answers the SDP
-/// but provides NO remote candidates and sends nothing (an abandoned WHIP/WHEP
-/// offer, or a probe that only exercises signalling). str0m DOES end a connection
-/// whose candidate pairs were tried and exhausted -- the agent goes to
-/// `IceConnectionState::Disconnected` (handled in `handle_event`) after
-/// ~`StunTiming::timeout()` (~21s at the defaults). But when `remote_candidates`
-/// stays empty the agent treats the session as "still possible" forever (trickle
-/// ICE: more candidates could arrive), so it sits in `Checking` indefinitely,
-/// pinning this task, its broadcast announcement, and its mux registration. Nothing
-/// upstream ends it, so we do. Set ABOVE str0m's ~21s pair-exhaustion so a
-/// connection that actually started checks is ended by str0m's native path (and a
-/// slow-but-real TURN/lossy peer isn't clipped); this only fires for the
-/// never-any-candidate case.
-const ICE_ESTABLISH_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Receives `MediaData` events from str0m and dispatches to the right codec
 /// [`Bridge`](codec::Bridge). Used as the per-session sink in [`Session::run`]
@@ -114,23 +80,7 @@ impl MediaFlow {
 /// `inbound` rather than being read off the socket directly, so several
 /// sessions can share one socket behind the `crate::server::mux`.
 pub struct Session {
-	rtc: Rtc,
-	/// Send side. Shared across sessions on the server (the mux socket); owned
-	/// 1:1 on the client. Receiving happens via `inbound`, not this socket.
-	socket: Arc<UdpSocket>,
-	/// The local ICE candidates we advertised. Each inbound datagram is tagged
-	/// (for str0m) with the candidate whose address family matches the packet's
-	/// source, so a dual-stack peer reaching us over IPv6 isn't told the packet
-	/// arrived on an IPv4 host candidate. MUST be the advertised candidates, not
-	/// the socket's bind address: str0m drops a STUN binding request whose
-	/// destination doesn't match a host candidate ("unknown interface"), and the
-	/// shared mux socket binds a wildcard (`0.0.0.0`) while advertising concrete
-	/// IPs. Never empty (falls back to the bound address).
-	locals: Vec<SocketAddr>,
-	/// Inbound datagrams routed to this session (demux on the server, a 1:1
-	/// reader on the client). `None` from `recv` means every sender dropped, so
-	/// the session is done.
-	inbound: Inbound,
+	agent: moq_ice::Agent,
 	role: MediaRole,
 	opened_media: HashSet<str0m::media::Mid>,
 	/// Egress write requests. `Some` only for [`MediaRole::Egress`]
@@ -146,53 +96,35 @@ pub struct Session {
 }
 
 impl Session {
-	/// Convenience for the ingest case (WHIP server, WHEP client). `locals` are the
-	/// advertised ICE candidates (see the field docs), not the socket bind.
-	pub fn ingest(
-		rtc: Rtc,
-		socket: Arc<UdpSocket>,
-		locals: Vec<SocketAddr>,
-		inbound: Inbound,
-		sink: Box<dyn MediaSink>,
-	) -> Self {
-		Self {
-			rtc,
-			socket,
-			locals,
-			inbound,
+	/// Convenience for the ingest case (WHIP server, WHEP client). The socket's
+	/// `inbound` comes from the server mux, or [`moq_ice::reader`] for a 1:1 client socket.
+	pub fn ingest(rtc: Rtc, socket: moq_ice::Socket, sink: Box<dyn MediaSink>) -> Result<Self> {
+		Ok(Self {
+			agent: moq_ice::Agent::new(rtc, socket)?,
 			role: MediaRole::Ingest(sink),
 			opened_media: HashSet::new(),
 			writes_rx: None,
 			ingest_clock: IngestClock::default(),
 			egress_clock: EgressClock::default(),
-		}
+		})
 	}
 
-	/// Convenience for the egress case (WHEP server, WHIP client). `locals` are the
-	/// advertised ICE candidates (see the field docs), not the socket bind.
-	pub fn egress(
-		rtc: Rtc,
-		socket: Arc<UdpSocket>,
-		locals: Vec<SocketAddr>,
-		inbound: Inbound,
-		mut source: EgressSource,
-	) -> Self {
+	/// Convenience for the egress case (WHEP server, WHIP client). The socket's
+	/// `inbound` comes from the server mux, or [`moq_ice::reader`] for a 1:1 client socket.
+	pub fn egress(rtc: Rtc, socket: moq_ice::Socket, mut source: EgressSource) -> Result<Self> {
 		let writes_rx = source.take_writes();
-		Self {
-			rtc,
-			socket,
-			locals,
-			inbound,
+		Ok(Self {
+			agent: moq_ice::Agent::new(rtc, socket)?,
 			role: MediaRole::Egress(Box::new(source)),
 			opened_media: HashSet::new(),
 			writes_rx: Some(writes_rx),
 			ingest_clock: IngestClock::default(),
 			egress_clock: EgressClock::default(),
-		}
+		})
 	}
 
 	pub(crate) fn wire(&self) -> crate::wire::Source {
-		self.inbound.wire.clone()
+		crate::wire::Source::new(self.agent.wire().clone())
 	}
 
 	/// Open a locally offered media line after its answer has been applied.
@@ -215,96 +147,29 @@ impl Session {
 	}
 
 	async fn run_loop(&mut self) -> Result<()> {
-		let started = Instant::now();
-		let mut connected = false;
-		// str0m hands back the canonical destination we fed it, so a dual-stack
-		// socket needs IPv4 re-mapped before each send (see crate::net).
-		let socket_v6 = self.socket.local_addr().map_err(Error::Io)?.is_ipv6();
 		loop {
-			// A dead Rtc (DTLS/SDP failure, explicit disconnect) makes poll_output
-			// return a never-firing timeout instead of erroring, which would hang
-			// this task forever holding the broadcast announcement + mux
-			// registration. Bail so those release.
-			if !self.rtc.is_alive() {
-				return Err(Error::SessionClosed);
-			}
-
-			// Abort a session that never finishes connecting (see
-			// ICE_ESTABLISH_TIMEOUT); once connected, str0m's own timeouts take over.
-			if !connected && started.elapsed() >= ICE_ESTABLISH_TIMEOUT {
-				return Err(Error::IceTimeout);
-			}
-
-			let timeout = match self.rtc.poll_output().map_err(Error::rtc)? {
-				Output::Timeout(t) => t,
-				Output::Transmit(t) => {
-					let dst = crate::net::to_family(t.destination, socket_v6);
-					if let Err(err) = transmit(&self.socket, &self.inbound.wire, &t.contents, dst).await {
-						tracing::warn!(%err, %dst, "send failed");
-					}
-					continue;
-				}
-				Output::Event(event) => {
-					if let Event::IceConnectionStateChange(state) = &event {
-						connected |= state.is_connected();
-					}
-					self.handle_event(event)?;
-					continue;
-				}
-			};
-
-			let now = Instant::now();
-			let mut duration = timeout.saturating_duration_since(now);
-			// While still connecting, never sleep past the establishment deadline, so
-			// the check above fires on time even if str0m scheduled a far-off timeout.
-			if !connected {
-				duration = duration.min(ICE_ESTABLISH_TIMEOUT.saturating_sub(started.elapsed()));
-			}
-			if duration.is_zero() {
-				self.rtc.handle_input(Input::Timeout(now)).map_err(Error::rtc)?;
-				continue;
-			}
-
-			// Wait for the earliest of: an inbound UDP packet, an egress
-			// write request (if egress), or the str0m-requested timeout.
 			tokio::select! {
+				// Egress writes get drained promptly; `Agent::next` is cancel safe.
 				biased;
 
-				// Egress writes get drained promptly. Without `biased` an
-				// idle socket select could starve them.
 				Some(req) = async {
 					match self.writes_rx.as_mut() {
 						Some(rx) => rx.recv().await,
 						None => std::future::pending::<Option<WriteRequest>>().await,
 					}
 				} => {
-					let now = Instant::now();
-					let wallclock = self.egress_clock.wallclock(req.time, now);
-					crate::egress::dispatch(&mut self.rtc, req, wallclock);
+					let wallclock = self.egress_clock.wallclock(req.time, Instant::now());
+					crate::egress::dispatch(&mut self.agent.rtc_mut(), req, wallclock);
 				}
 
-				packet = self.inbound.packets.recv() => {
-					match packet {
-						Some((data, src)) => {
-							let now = Instant::now();
-							// Tag the packet with the advertised candidate matching its
-							// address family, not the socket bind (see the `locals` docs).
-							let local = pick_local(&self.locals, src);
-							let recv = Receive::new(str0m::net::Protocol::Udp, src, local, &data)
-								.map_err(Error::rtc_input)?;
-							self.rtc.handle_input(Input::Receive(now, recv)).map_err(Error::rtc)?;
-						}
-						// Every sender dropped: the demux unregistered us (or the
-						// 1:1 reader stopped). Nothing more will arrive, so end.
-						None => return Err(Error::SessionClosed),
-					}
-				}
-
-				_ = tokio::time::sleep(duration) => {
-					self.rtc
-						.handle_input(Input::Timeout(Instant::now()))
-						.map_err(Error::rtc)?;
-				}
+				event = self.agent.next() => match event {
+					Ok(moq_ice::Event::Rtc(event)) => self.handle_event(event)?,
+					// No STUN servers are configured, so there is nothing to trickle.
+					Ok(_) => {}
+					Err(moq_ice::Error::Closed) => return Err(Error::SessionClosed),
+					Err(moq_ice::Error::Timeout) => return Err(Error::IceTimeout),
+					Err(err) => return Err(Error::rtc(err)),
+				},
 			}
 		}
 	}
@@ -313,9 +178,6 @@ impl Session {
 		match event {
 			Event::IceConnectionStateChange(state) => {
 				tracing::debug!(?state, "ice state");
-				if state == IceConnectionState::Disconnected {
-					return Err(Error::SessionClosed);
-				}
 			}
 			Event::MediaAdded(added) => self.handle_media(added.mid)?,
 			Event::MediaData(data) => {
@@ -354,9 +216,9 @@ impl Session {
 			return Ok(());
 		}
 
-		// str0m's CodecConfig is the negotiated set; pick the first
-		// codec advertised for this `mid`.
-		let Some(media) = self.rtc.media(mid) else {
+		// str0m's CodecConfig is the negotiated set; `remote_pts` lists this
+		// `mid`'s share of it in the peer's order.
+		let Some(media) = self.agent.rtc().media(mid) else {
 			tracing::warn!(?mid, "negotiated media is missing; ignoring");
 			return Ok(());
 		};
@@ -368,21 +230,29 @@ impl Session {
 		if !flow.accepts(media.direction()) {
 			return Ok(());
 		}
-		let pt = media.remote_pts().first().copied();
-		let params = pt.and_then(|pt| self.rtc.codec_config().params().iter().find(|p| p.pt() == pt).copied());
-		let params = match params {
-			Some(p) => p,
-			None => {
-				tracing::warn!(?mid, "no codec params for media; ignoring");
-				return Ok(());
-			}
+		let negotiated: Vec<_> = media
+			.remote_pts()
+			.iter()
+			.filter_map(|pt| {
+				self.agent
+					.rtc()
+					.codec_config()
+					.params()
+					.iter()
+					.find(|p| p.pt() == *pt)
+					.copied()
+			})
+			.collect();
+		let Some(first) = negotiated.first() else {
+			tracing::warn!(?mid, "no codec params for media; ignoring");
+			return Ok(());
 		};
-		let spec = params.spec();
-		let codec = spec.codec;
+		let spec = first.spec();
 		self.opened_media.insert(mid);
 
 		match &mut self.role {
 			MediaRole::Ingest(sink) => {
+				let codec = spec.codec;
 				let audio_params = if codec.is_audio() {
 					Some((spec.clock_rate.get(), spec.channels.unwrap_or(1) as u32))
 				} else {
@@ -390,18 +260,21 @@ impl Session {
 				};
 				sink.on_track(mid, kind, codec, audio_params)?;
 			}
+			// Any negotiated codec may be sent, so the catalog picks among all of them.
 			MediaRole::Egress(source) => {
-				source.on_track(mid, codec, params.pt(), spec.clock_rate)?;
+				let formats = negotiated
+					.iter()
+					.map(|params| Format {
+						codec: params.spec().codec,
+						pt: params.pt(),
+						clock_rate: params.spec().clock_rate,
+					})
+					.collect();
+				source.on_track(mid, formats)?;
 			}
 		}
 		Ok(())
 	}
-}
-
-async fn transmit(socket: &UdpSocket, wire: &crate::wire::Source, data: &[u8], dst: SocketAddr) -> std::io::Result<()> {
-	let len = socket.send_to(data, dst).await?;
-	wire.sent(len);
-	Ok(())
 }
 
 /// Per-session clock that rebases each ingested track's raw RTP timestamps onto
@@ -550,18 +423,6 @@ pub(crate) fn log_session_end(role: &str, result: &Result<()>) {
 	}
 }
 
-/// Pick the advertised local candidate to tag an inbound packet with: the first
-/// one whose address family matches `src`, falling back to the first candidate
-/// (the list is never empty). Keeps a dual-stack peer's packets tagged with a
-/// same-family host candidate so str0m's ICE pairing stays consistent.
-fn pick_local(locals: &[SocketAddr], src: SocketAddr) -> SocketAddr {
-	locals
-		.iter()
-		.find(|l| l.is_ipv4() == src.is_ipv4())
-		.copied()
-		.unwrap_or(locals[0])
-}
-
 /// Convert a str0m [`MediaTime`](str0m::media::MediaTime) to microseconds.
 fn media_time_to_micros(time: &str0m::media::MediaTime) -> u64 {
 	// MediaTime stores `numer / denom` seconds; cast through i128 so the
@@ -648,19 +509,21 @@ pub fn rtc_with_codecs(codecs: &[str0m::format::Codec]) -> Rtc {
 	rtc_config_with_codecs(codecs).build(std::time::Instant::now())
 }
 
-/// Bind an ephemeral UDP socket for a single client session and return it
-/// (shared with its [reader task](spawn_socket_reader)) plus the ICE candidates
-/// to advertise.
+/// Bind an ephemeral UDP socket for a single client session, read by its own
+/// [`moq_ice::reader`], with the ICE candidates to advertise.
 ///
 /// The client paths are 1:1 (one socket per dialed session, no demux); the
 /// server paths share one socket via `crate::server::mux` instead. `advertise`
 /// IPs are used verbatim (reusing the bound port); empty falls back to the
 /// bound address, substituting loopback when that address is unspecified.
-pub async fn bind_udp(advertise: &[SocketAddr]) -> Result<(Arc<UdpSocket>, Vec<SocketAddr>)> {
-	let socket = UdpSocket::bind(("0.0.0.0", 0)).await?;
-	let local = socket.local_addr()?;
-	let candidates = advertised_candidates(advertise, local)?;
-	Ok((Arc::new(socket), candidates))
+pub async fn bind_udp(advertise: &[SocketAddr]) -> Result<moq_ice::Socket> {
+	let udp = Arc::new(UdpSocket::bind(("0.0.0.0", 0)).await?);
+	let locals = advertised_candidates(advertise, udp.local_addr()?)?;
+	Ok(moq_ice::Socket {
+		inbound: moq_ice::reader(udp.clone()),
+		udp,
+		locals,
+	})
 }
 
 /// Pair configured ICE candidates with the bound UDP port and validate them.
@@ -690,41 +553,6 @@ pub(crate) fn advertised_candidates(advertise: &[SocketAddr], local: SocketAddr)
 	Ok(candidates)
 }
 
-/// Spawn a 1:1 reader pumping every datagram from `socket` into a channel, for
-/// the client paths (one socket per session, so no demux is needed). Mirrors the
-/// inbound side of `crate::server::mux` for a single session.
-pub fn spawn_socket_reader(socket: Arc<UdpSocket>) -> Inbound {
-	let (tx, rx) = mpsc::channel(SESSION_INBOX);
-	let wire = crate::wire::Source::new();
-	let source = wire.clone();
-	tokio::spawn(async move {
-		let mut buf = vec![0u8; 65_535];
-		loop {
-			let packet = tokio::select! {
-				biased;
-				_ = tx.closed() => break,
-				packet = socket.recv_from(&mut buf) => packet,
-			};
-			match packet {
-				// Bounded like a socket buffer: drop on full, stop once the
-				// session's receiver is gone.
-				Ok((len, src)) => {
-					source.received(len);
-					let src = crate::net::canonical(src);
-					if let Err(mpsc::error::TrySendError::Closed(_)) = tx.try_send((buf[..len].to_vec(), src)) {
-						break;
-					}
-				}
-				Err(err) => {
-					tracing::warn!(%err, "webrtc client socket recv failed");
-					break;
-				}
-			}
-		}
-	});
-	Inbound { packets: rx, wire }
-}
-
 #[cfg(test)]
 mod tests {
 	use std::time::{Duration, UNIX_EPOCH};
@@ -734,33 +562,6 @@ mod tests {
 	use str0m::rtp::rtcp::SenderInfo;
 
 	use super::*;
-
-	#[tokio::test]
-	async fn wire_tx_counts_only_successful_udp_payload() {
-		let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-		let peer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-		let wire = crate::wire::Source::new();
-		let packet = [42; 73];
-		transmit(&socket, &wire, &packet, peer.local_addr().unwrap())
-			.await
-			.unwrap();
-		let mut buffer = [0; 100];
-		let (len, _) = tokio::time::timeout(Duration::from_secs(5), peer.recv_from(&mut buffer))
-			.await
-			.unwrap()
-			.unwrap();
-		assert_eq!(&buffer[..len], &packet);
-		assert_eq!(wire.stats(), crate::wire::Stats { tx: 73, rx: 0 });
-		// An oversized datagram is refused by UDP, never counted as sent.
-		assert!(
-			transmit(&socket, &wire, &vec![0; 65_536], peer.local_addr().unwrap())
-				.await
-				.is_err()
-		);
-		assert_eq!(wire.stats().tx, 73);
-		drop(socket);
-		assert_eq!(wire.stats().tx, 73);
-	}
 
 	#[test]
 	fn media_flow_respects_negotiated_direction() {
@@ -813,19 +614,6 @@ mod tests {
 		let local: SocketAddr = "127.0.0.1:4444".parse().unwrap();
 		let advertised = vec!["0.0.0.0:1000".parse().unwrap()];
 		assert!(advertised_candidates(&advertised, local).is_err());
-	}
-
-	#[test]
-	fn pick_local_matches_address_family() {
-		let v4: SocketAddr = "1.2.3.4:5000".parse().unwrap();
-		let v6: SocketAddr = "[2001:db8::1]:5000".parse().unwrap();
-		let locals = vec![v4, v6];
-		let src_v4: SocketAddr = "9.9.9.9:1".parse().unwrap();
-		let src_v6: SocketAddr = "[2001:db8::2]:1".parse().unwrap();
-		assert_eq!(pick_local(&locals, src_v4), v4);
-		assert_eq!(pick_local(&locals, src_v6), v6);
-		// No same-family candidate falls back to the first.
-		assert_eq!(pick_local(&[v4], src_v6), v4);
 	}
 
 	#[test]

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #pragma once
 #include <obs-module.h>
+#include <obs.hpp>
 
 #include <moq/moq.hpp>
 
@@ -14,6 +15,7 @@
 #include <string>
 #include <vector>
 #include "logger.h"
+#include "moq-rate.h"
 #include "moq-worker.h"
 
 class MoQOutput {
@@ -65,10 +67,21 @@ public:
 	// Thread-safe; the dock polls this while reconnecting and on stop.
 	void CopyLastFailure(int *code, std::string *reason);
 
+	// The bitrate the video encoders follow the bandwidth grant at, summed over
+	// every encoder that follows, beside the configured rate that caps it.
+	// False when no video encoder follows the grant.
+	struct VideoRate {
+		uint64_t target_bps = 0;
+		uint64_t configured_bps = 0;
+	};
+	bool TryGetVideoRate(VideoRate *out);
+
 private:
 	friend struct MoQOutputStatsTest;
 	bool CommitConnectionStats(const std::shared_ptr<moq::Session> &current, ConnectionStats snapshot,
 				   ConnectionStats *out);
+	// Between reconnects: name why the session is down, for CopyLastFailure.
+	void RecordReconnectFailure(const std::shared_ptr<moq::Session> &current);
 
 	// One Start()'s connection: the client dialing, the session once it connects,
 	// and the pending call whose continuation reports on it. Replaced wholesale by
@@ -100,10 +113,25 @@ private:
 	// Tear down the publish state without telling OBS.
 	void Reset();
 
+	// One encoder's track. A null producer means its init failed, so it isn't retried.
+	struct Track {
+		std::shared_ptr<moq::MediaTrackProducer> producer;
+		// The configured bitrate this track reserves, or 0 to reserve nothing.
+		uint64_t bitrate_bps = 0;
+		// Claimed on the first frame after the session connects.
+		std::shared_ptr<moq::Reservation> reservation;
+		// Video only, when the encoder can retune: the grant it follows, and a
+		// weak ref so Reset() can hand the configured bitrate back.
+		std::optional<MoQRate> rate;
+		OBSWeakEncoder encoder;
+	};
+
 	void VideoInit(obs_encoder_t *encoder);
 	void VideoData(struct encoder_packet *packet);
 	void AudioInit(obs_encoder_t *encoder);
 	void AudioData(struct encoder_packet *packet);
+	// NOTE: Caller must hold media_mutex.
+	void Reserve(Track &track);
 
 	obs_output_t *output;
 
@@ -148,9 +176,11 @@ private:
 	std::mutex media_mutex;
 	std::shared_ptr<moq::OriginProducer> origin;
 	std::shared_ptr<moq::BroadcastProducer> broadcast;
-	// An encoder maps to null when its track failed to initialize, so it isn't retried.
-	std::map<obs_encoder_t *, std::shared_ptr<moq::MediaTrackProducer>> video_tracks;
-	std::map<obs_encoder_t *, std::shared_ptr<moq::MediaTrackProducer>> audio_tracks;
+	std::map<obs_encoder_t *, Track> video_tracks;
+	std::map<obs_encoder_t *, Track> audio_tracks;
+	// The session's allocator once it connects. It survives reconnects: grants
+	// read empty while disconnected and resume on the next connection.
+	std::shared_ptr<moq::Bandwidth> bandwidth;
 
 	// Retired sessions still draining their finished tracks, which the destructor
 	// waits out. Guarded by signal_mutex.

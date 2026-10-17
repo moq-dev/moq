@@ -152,7 +152,7 @@ impl Import {
 	}
 
 	/// Record a locally encoded frame's transport handoff for catalog jitter measurement.
-	pub fn flush(&mut self, timestamp: moq_net::Timestamp, now: std::time::Instant) -> crate::Result<()> {
+	pub fn flush(&mut self, timestamp: moq_net::Timestamp, now: moq_clock::Instant) -> crate::Result<()> {
 		self.track.flush(timestamp, now)
 	}
 
@@ -248,7 +248,9 @@ fn config_from_avcc(avcc_bytes: &[u8]) -> Result<hang::catalog::VideoConfig> {
 	});
 	config.coded_width = avcc.coded_width;
 	config.coded_height = avcc.coded_height;
-	config.framerate = avcc.sps.first().and_then(|sps| super::sps_framerate(sps));
+	if let Some(vui) = avcc.sps.first().and_then(|sps| super::sps_vui(sps)) {
+		vui.apply(&mut config);
+	}
 	config.description = Some(Bytes::copy_from_slice(avcc_bytes));
 	Ok(config)
 }
@@ -266,7 +268,9 @@ fn config_from_sps(sps_nal: &[u8]) -> Result<hang::catalog::VideoConfig> {
 	});
 	config.coded_width = Some(sps.coded_width);
 	config.coded_height = Some(sps.coded_height);
-	config.framerate = super::sps_framerate(sps_nal);
+	if let Some(vui) = super::sps_vui(sps_nal) {
+		vui.apply(&mut config);
+	}
 	Ok(config)
 }
 
@@ -300,6 +304,36 @@ mod tests {
 			.create_track(name, hang::container::track_info(hang::catalog::PRIORITY.video))
 			.unwrap();
 		(track, catalog)
+	}
+
+	#[test]
+	fn annexb_resolves_display_aspect() {
+		use crate::codec::h264::fixtures;
+		for (sps, expected) in [
+			(fixtures::SPS_IPB, (None, None)),
+			(fixtures::SPS_ANAMORPHIC, (Some(16), Some(9))),
+			(fixtures::SPS_EXTENDED_SAR, (Some(28), Some(15))),
+		] {
+			let mut inline = vec![0, 0, 0, 1];
+			inline.extend_from_slice(sps);
+			let config = config(&inline).unwrap();
+			assert_eq!((config.display_aspect_width, config.display_aspect_height), expected);
+		}
+	}
+
+	#[test]
+	fn avcc_resolves_display_aspect() {
+		use crate::codec::h264::fixtures;
+		for (sps, expected) in [
+			(fixtures::SPS_IPB, (None, None)),
+			(fixtures::SPS_ANAMORPHIC, (Some(16), Some(9))),
+			(fixtures::SPS_EXTENDED_SAR, (Some(28), Some(15))),
+		] {
+			let avcc =
+				super::super::build_avcc(&[Bytes::from_static(sps)], &[Bytes::from_static(fixtures::PPS)]).unwrap();
+			let config = config(&avcc).unwrap();
+			assert_eq!((config.display_aspect_width, config.display_aspect_height), expected);
+		}
 	}
 
 	/// Only a fixed-rate SPS states the frame rate; without `fixed_frame_rate_flag` its tick is a
