@@ -3143,14 +3143,16 @@ mod session_tests {
 		url: url::Url,
 		task: tokio::task::JoinHandle<()>,
 		close: tokio::sync::mpsc::UnboundedSender<moq_net::Error>,
+		/// Reject every later session as forbidden. Set before a `close` so the redial meets it.
+		refuse: std::sync::Arc<std::sync::atomic::AtomicBool>,
 	}
 
 	impl Relay {
 		fn new() -> Self {
-			Self::bind("127.0.0.1:0".parse().unwrap(), false)
+			Self::bind("127.0.0.1:0".parse().unwrap())
 		}
 
-		fn bind(addr: std::net::SocketAddr, refuse: bool) -> Self {
+		fn bind(addr: std::net::SocketAddr) -> Self {
 			super::RUNTIME.block_on(async {
 				let origin = moq_tokio::origin::spawn();
 				let mut config = moq_tokio::listen::Config::default();
@@ -3158,6 +3160,8 @@ mod session_tests {
 				let mut server = config.init(Default::default()).unwrap().listen().await.unwrap();
 				let port = server.tcp_local_addr().unwrap().port();
 				let serving = origin.clone();
+				let refuse = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+				let refusing = refuse.clone();
 				let (close, mut closing) = tokio::sync::mpsc::unbounded_channel::<moq_net::Error>();
 				let task = tokio::spawn(async move {
 					let mut sessions: Vec<moq_net::Session> = Vec::new();
@@ -3168,7 +3172,7 @@ mod session_tests {
 							}
 							request = server.accept() => {
 								let Some(request) = request else { break };
-								if refuse {
+								if refusing.load(Ordering::Relaxed) {
 									request.reject(moq_tokio::server::Reject::Forbidden).await.unwrap();
 								} else if let Ok((session, _driver)) = request.with_publisher(&serving).with_subscriber(serving.clone()).ok().await {
 									sessions.push(session);
@@ -3182,6 +3186,7 @@ mod session_tests {
 					url: format!("tcp://127.0.0.1:{port}/").parse().unwrap(),
 					task,
 					close,
+					refuse,
 				}
 			})
 		}
@@ -3326,7 +3331,7 @@ mod session_tests {
 		// Real sockets use the real clock: this exercises the deployed 10s retry budget.
 		std::thread::sleep(Duration::from_secs(11));
 		while pull(Duration::ZERO).is_some() {}
-		let replacement = Relay::bind(addr, false);
+		let replacement = Relay::bind(addr);
 		play();
 		assert_eq!(
 			pipeline.by_name("src").unwrap().src_pads(),
@@ -3342,18 +3347,18 @@ mod session_tests {
 	fn a_refused_redial_posts_a_bus_error_after_playback() {
 		let _pad_ids = pad_ids();
 		let relay = Relay::new();
-		let addr = format!("127.0.0.1:{}", relay.url.port().unwrap()).parse().unwrap();
 		let mut publisher = Publisher::new(&relay.origin, epoch(), video_rendition());
 		let (pipeline, sink) = pipeline(&relay.url);
 		rendered(&sink, &mut publisher, 1);
-		relay.stop();
-		let refusing = Relay::bind(addr, true);
+		// The same listener refuses the redial: rebinding a freed port races its release.
+		relay.refuse.store(true, Ordering::Relaxed);
+		relay.close.send(moq_net::Error::GoingAway).unwrap();
 		let error = pipeline
 			.bus()
 			.unwrap()
 			.timed_pop_filtered(gst::ClockTime::from_seconds(10), &[gst::MessageType::Error]);
 		pipeline.set_state(gst::State::Null).unwrap();
-		refusing.stop();
+		relay.stop();
 		let error = error.expect("refused redial did not fail the pipeline");
 		let gst::MessageView::Error(error) = error.view() else {
 			unreachable!()

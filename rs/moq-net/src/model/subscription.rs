@@ -88,6 +88,7 @@ pub struct Subscription {
 	/// Relay-only, so it stays out of the public API: the aggregate the public getters
 	/// report leaves it out. Cleared once this subscriber is handed a group that answers
 	/// it, so a request never outlives what it asked for.
+	// private: passthrough
 	pub(crate) new_group: Option<NewGroup>,
 }
 
@@ -97,6 +98,7 @@ pub struct Subscription {
 /// answers both. Between requests answered alike, the higher value says the most upstream,
 /// and any value says more than a 0.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+// private: passthrough
 pub(crate) struct NewGroup {
 	/// The first group sequence that answers it here: the one after the newest this hop
 	/// held when it arrived, not the one the subscriber is about to join.
@@ -335,6 +337,7 @@ impl Subscription {
 	/// from the latest group (or none is asked for).
 	///
 	/// The form a wire without ranges carries: a floor below which nothing is requested.
+	// pending: /quest/m1/public-model/serve.md
 	pub(crate) fn start(&self) -> Option<Position> {
 		let mut floor: Option<Position> = None;
 		for range in &self.ranges {
@@ -351,6 +354,7 @@ impl Subscription {
 	///
 	/// The form a wire without ranges carries, alongside [`Self::start`].
 	#[cfg(any(feature = "async", test))]
+	// pending: /quest/m1/public-model/serve.md
 	pub(crate) fn end(&self) -> Option<Position> {
 		let mut end = Some(Position::default());
 		for range in &self.ranges {
@@ -365,6 +369,7 @@ impl Subscription {
 	/// Replace the ranges with one from `start` (or [`Range::oldest`]'s) to `end`: the form
 	/// a wire without ranges carries.
 	#[cfg(any(feature = "async", test))]
+	// pending: /quest/m1/public-model/serve.md
 	pub(crate) fn set_bounds(&mut self, start: Option<Position>, end: Option<Position>) {
 		self.ranges = vec![Range {
 			start: start.map_or(Range::oldest().start, Anchor::Absolute),
@@ -374,6 +379,7 @@ impl Subscription {
 
 	/// Replace the start of [`Self::set_bounds`]'s one range, keeping its end.
 	#[cfg(feature = "async")]
+	// pending: /quest/m1/public-model/serve.md
 	pub(crate) fn with_start(mut self, start: impl Into<Option<Position>>) -> Self {
 		self.set_bounds(start.into(), self.end());
 		self
@@ -381,6 +387,7 @@ impl Subscription {
 
 	/// Replace the end of [`Self::set_bounds`]'s one range, keeping its start.
 	#[cfg(any(feature = "async", test))]
+	// pending: /quest/m1/public-model/serve.md
 	pub(crate) fn with_end(mut self, end: impl Into<Option<Position>>) -> Self {
 		self.set_bounds(self.start(), end.into());
 		self
@@ -392,7 +399,7 @@ impl Subscription {
 	/// A relative anchor becomes the bound itself, since which of the two is tighter
 	/// depends on a latest group this hop may not know. That asks for no less than the
 	/// range would.
-	pub(crate) fn clamped(&self, floor: Option<Position>, end: Option<Position>) -> Self {
+	pub(super) fn clamped(&self, floor: Option<Position>, end: Option<Position>) -> Self {
 		let ranges = self
 			.ranges
 			.iter()
@@ -416,7 +423,7 @@ impl Subscription {
 	/// against `latest`. `None` while one waits on a latest group that does not exist yet.
 	///
 	/// Empty ranges ask for nothing, and no ranges at all floor nowhere: group 0.
-	pub(crate) fn floor(&self, latest: Option<u64>) -> Option<u64> {
+	pub(super) fn floor(&self, latest: Option<u64>) -> Option<u64> {
 		let mut floor = None;
 		for range in self.ranges.iter().filter(|range| !range.is_empty()) {
 			let start = range.resolve_start(latest)?.group;
@@ -519,6 +526,7 @@ impl Position {
 	}
 
 	/// The first group this exclusive end excludes whole, `None` past the last group.
+	// pending: /quest/m1/public-model/serve.md
 	pub(crate) fn final_sequence(self) -> Option<u64> {
 		self.group.checked_add(u64::from(self.frame != 0))
 	}
@@ -530,13 +538,14 @@ impl Position {
 /// before 5, `..=5` reads through it, and `..` removes the cap. A [`Bound`] converts
 /// too, for callers holding one (a decoded wire field, or [`Position::group_end`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+// pending: /quest/m1/public-model/serve.md
 pub(crate) struct Cap(Option<u64>);
 
 impl Cap {
 	/// The first index withheld, or `None` for no cap. Cursors store this form and
 	/// compare with [`before_end`]. An inclusive bound at `u64::MAX` has nothing above
 	/// it, so it is no cap at all.
-	pub(crate) fn exclusive(self) -> Option<u64> {
+	pub(super) fn exclusive(self) -> Option<u64> {
 		self.0
 	}
 }

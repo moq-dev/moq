@@ -462,23 +462,23 @@ impl Inner {
 		self.task_waiters.borrow_mut().wake();
 	}
 
-	/// A send to `addr` found no route, so a handshake dialing it can never
-	/// finish: fail it now rather than at the handshake timeout. An established
-	/// connection rides it out as loss, since a route that drops for a moment
-	/// (a client switching networks) comes back.
+	/// A send to `addr` found no route: tell every connection to that peer,
+	/// and moq-quic decides which of them give up.
 	fn unreachable(&self, addr: SocketAddr, err: &std::io::Error) {
+		tracing::debug!(%addr, %err, "no route to the peer");
 		let conns: Vec<connection::Shared> = {
 			let all = self.conns.borrow();
 			self.peers
 				.borrow()
 				.range((addr, ConnectionHandle(0))..=(addr, ConnectionHandle(usize::MAX)))
 				.filter_map(|(_, key)| all.get(key))
-				.filter(|shared| shared.conn.borrow().is_handshaking())
 				.cloned()
 				.collect()
 		};
 		for conn in conns {
-			conn.unreachable(err);
+			conn.conn.borrow_mut().handle_unreachable();
+			// The driver reports a failed handshake and drains it out of the table.
+			conn.kick();
 		}
 	}
 

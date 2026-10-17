@@ -17,9 +17,14 @@ import { Connection } from "./connection.ts";
 import { ObjectDatagram } from "./datagram.ts";
 import { EndOfTrackProperties, encodeObjectExtensions, type GroupFlags, Group as GroupMessage } from "./object.ts";
 import type { Properties } from "./properties.ts";
-import { PublishNamespace, PublishNamespaceCancel, PublishNamespaceUpdate } from "./publish_namespace.ts";
+import {
+	PublishNamespace,
+	PublishNamespaceCancel,
+	PublishNamespaceOk,
+	PublishNamespaceUpdate,
+} from "./publish_namespace.ts";
 import { MaxRequestId, RequestError, RequestOk } from "./request.ts";
-import { Subscribe, SubscribeOk, Unsubscribe } from "./subscribe.ts";
+import { Subscribe, SubscribeOk, SubscribeUpdate, Unsubscribe } from "./subscribe.ts";
 import { SubscribeNamespace, SubscribeNamespaceEntry, SubscribeNamespaceEntryDone } from "./subscribe_namespace.ts";
 import { Subscriber } from "./subscriber.ts";
 import { ALPN, type IetfVersion, Version } from "./version.ts";
@@ -719,6 +724,43 @@ test("a draft-16 PUBLISH_NAMESPACE update is answered by its own Request ID", as
 	expect((await PublishNamespaceCancel.decode(peer.reader, version)).requestId).toBe(1n);
 
 	await handler;
+});
+
+// Drafts 14 and 15 have no update for an advertisement. One routed onto it changes nothing
+// and leaves it standing, and draft 15 still answers it with a REQUEST_ERROR naming the update.
+test("a legacy update on a PUBLISH_NAMESPACE is refused and the advertisement stands", async () => {
+	for (const [version, alpn] of [
+		[Version.DRAFT_14, ALPN.DRAFT_14],
+		[Version.DRAFT_15, ALPN.DRAFT_15],
+	] as const) {
+		const pair = createMockTransportPair(alpn);
+		const session = new NativeSession(pair.server, version, true);
+		const subscriber = new Subscriber({ session });
+		const announced = subscriber.announced();
+
+		const request = await Stream.open(pair.server, { version });
+		const handler = subscriber.runPublishNamespace(
+			new PublishNamespace({ requestId: 0n, trackNamespace: Path.from("theirs") }),
+			request,
+		);
+		const peer = await nextStream(pair.client);
+		if (!peer) throw new Error("no PUBLISH_NAMESPACE stream");
+		expect(await peer.reader.u53()).toBe(version === Version.DRAFT_14 ? PublishNamespaceOk.id : RequestOk.id);
+		await peer.reader.read(await peer.reader.u16());
+		expect(await announced.next()).toMatchObject({ prefix: Path.from("theirs"), kind: "start" });
+
+		await peer.writer.u53(SubscribeUpdate.id);
+		await new SubscribeUpdate({ requestId: 0n, ownRequestId: 2n }).encode(peer.writer, version);
+		if (version === Version.DRAFT_15) {
+			expect(await peer.reader.u53()).toBe(RequestError.id);
+			expect((await RequestError.decode(peer.reader, version)).requestId).toBe(2n);
+		}
+
+		// Only the withdrawal ends the advertisement.
+		peer.close();
+		await handler;
+		expect(await announced.next()).toMatchObject({ prefix: Path.from("theirs"), kind: "end" });
+	}
 });
 
 /**

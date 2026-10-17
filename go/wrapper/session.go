@@ -47,6 +47,19 @@ func (s *Session) Connects() uint64 {
 	return s.inner.Connects()
 }
 
+// Failure reports why a client session is reconnecting: the error that ended
+// the last connection or failed the latest redial, or nil once a connection
+// lands. A redial that keeps failing never changes Status, so poll this while it
+// reports ConnectionStatusDisconnected to show the reason. Giving up for good
+// returns from Closed instead. A server-accepted session always returns nil.
+func (s *Session) Failure() error {
+	failure := s.inner.Failure()
+	if failure == nil || *failure == nil {
+		return nil
+	}
+	return *failure
+}
+
 // Stats snapshots the current connection statistics.
 func (s *Session) Stats() ConnectionStats {
 	return connectionStatsFromFFI(s.inner.Stats())

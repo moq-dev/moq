@@ -8,13 +8,14 @@ use std::time::Duration;
 use std::task::Poll;
 
 use moq_clock::Instant;
-use moq_net::stats::{Presence, Registry, Report, Role, Tier, Traffic};
+use moq_net::stats::{Presence, Registry, Report, Role, Tier, Traffic, TrafficEntry};
 use moq_net::{Epoch, Path, PathOwned, broadcast, kio, origin, track};
 use serde::Serialize;
 use web_async::spawn;
 
 use crate::{
-	COMPRESSED_SUFFIX, Totals, parse_presence_track, presence_track, sessions_track, totals_track, traffic_track,
+	COMPRESSED_SUFFIX, Prefix, Totals, Usage, parse_prefix_track, parse_presence_track, prefix_track, presence_track,
+	sessions_track, totals_track, traffic_track,
 };
 
 /// Settings for a [`Producer`]. Construct with [`Config::new`] and chain
@@ -381,7 +382,7 @@ impl Drain {
 			// Serve consumer requests for tracks no drain has created yet: a
 			// tier's tracks appear lazily on its first traffic, and a root's
 			// presence track only while requested. See `serve_requests`.
-			group.serve_requests(&self.report, depth);
+			group.serve_requests(&self.report, depth, self.tick);
 		}
 	}
 
@@ -871,6 +872,9 @@ struct GroupPublisher {
 	totals: TotalsTrack,
 	/// Held presence tracks, keyed by auth root.
 	presence: HashMap<PathOwned, PresenceTrack>,
+	/// Held prefix tracks, keyed by broadcast prefix. A `String` key, so a
+	/// drain looks each row's ancestors up by `&str` without allocating.
+	prefixes: HashMap<String, PrefixTrack>,
 	/// This drain's entries for the group, as indices into the report.
 	traffic_rows: Vec<usize>,
 	session_rows: Vec<usize>,
@@ -911,6 +915,22 @@ struct Sum<V> {
 	current: V,
 }
 
+impl<V: Copy> Sum<V> {
+	/// Start a drain: the value is its folded part until the drain's rows are
+	/// added.
+	fn reset(&mut self) {
+		self.current = self.folded;
+	}
+
+	/// Add one readout, folding it for good when it is `closed`.
+	fn add(&mut self, closed: bool, add: impl Fn(&mut V)) {
+		add(&mut self.current);
+		if closed {
+			add(&mut self.folded);
+		}
+	}
+}
+
 impl<V: Copy + Default> Cumulative<V> {
 	fn new() -> Self {
 		Self { tiers: HashMap::new() }
@@ -920,21 +940,13 @@ impl<V: Copy + Default> Cumulative<V> {
 	/// rows are added.
 	fn reset(&mut self) {
 		for sum in self.tiers.values_mut() {
-			sum.current = sum.folded;
+			sum.reset();
 		}
 	}
 
 	/// Add one readout to `tier`, folding it for good when it is `closed`.
 	fn add(&mut self, tier: &Tier, closed: bool, add: impl Fn(&mut V)) {
-		// Look up before inserting, so a steady drain never clones a tier.
-		if !self.tiers.contains_key(tier) {
-			self.tiers.insert(tier.clone(), Sum::default());
-		}
-		let sum = self.tiers.get_mut(tier).expect("just ensured");
-		add(&mut sum.current);
-		if closed {
-			add(&mut sum.folded);
-		}
+		tier_entry(&mut self.tiers, tier).add(closed, add);
 	}
 
 	/// Fill `frame` with each tier's current value.
@@ -943,6 +955,15 @@ impl<V: Copy + Default> Cumulative<V> {
 			.entries
 			.extend(self.tiers.iter().map(|(tier, sum)| (tier.label().clone(), sum.current)));
 	}
+}
+
+/// `tier`'s value in `tiers`, inserted on first sight. Looks up before
+/// inserting, so a steady drain never clones a tier.
+fn tier_entry<'a, V: Default>(tiers: &'a mut HashMap<Tier, V>, tier: &Tier) -> &'a mut V {
+	if !tiers.contains_key(tier) {
+		tiers.insert(tier.clone(), V::default());
+	}
+	tiers.get_mut(tier).expect("just ensured")
 }
 
 /// The always-present `totals.json` pair and its per-tier sums. Never pruned
@@ -959,6 +980,107 @@ struct PresenceTrack {
 	name: String,
 	pair: TrackPair<Presence>,
 	sums: Cumulative<Presence>,
+}
+
+/// One broadcast prefix's requested `traffic.json` pair and its per-tier sums,
+/// cumulative from when it was first held. Reclaimed once nobody reads it.
+struct PrefixTrack {
+	/// The plain track name, for logs.
+	name: String,
+	pair: TrackPair<Prefix>,
+	tiers: HashMap<Tier, PrefixSums>,
+}
+
+/// One tier's sums on a [`PrefixTrack`].
+#[derive(Default)]
+struct PrefixSums {
+	/// Every path at or under the prefix.
+	rollup: Sum<Usage>,
+	/// The path at exactly the prefix.
+	own: Sum<Usage>,
+	/// Keyed by the child's next path segment. A child is dropped on the first
+	/// drain with no row under it, so its folded tail stays only in `rollup`.
+	children: HashMap<String, ChildSum>,
+}
+
+#[derive(Default)]
+struct ChildSum {
+	sum: Sum<Usage>,
+	/// The last drain that carried a row under this child.
+	seen: u64,
+}
+
+impl PrefixTrack {
+	fn reset(&mut self) {
+		for sums in self.tiers.values_mut() {
+			sums.rollup.reset();
+			sums.own.reset();
+			for child in sums.children.values_mut() {
+				child.sum.reset();
+			}
+		}
+	}
+
+	/// Add one row at or under the prefix: at it when `child` is `None`, else
+	/// under that direct child.
+	fn add(&mut self, entry: &TrafficEntry, child: Option<&str>, tick: u64) {
+		let usage = Usage {
+			publisher: entry.publisher,
+			subscriber: entry.subscriber,
+		};
+		let add = |sum: &mut Usage| sum.add(usage);
+		let sums = tier_entry(&mut self.tiers, &entry.tier);
+		sums.rollup.add(entry.closed, add);
+		let Some(child) = child else {
+			sums.own.add(entry.closed, add);
+			return;
+		};
+		if !sums.children.contains_key(child) {
+			sums.children.insert(child.to_string(), ChildSum::default());
+		}
+		let state = sums.children.get_mut(child).expect("just ensured");
+		state.seen = tick;
+		state.sum.add(entry.closed, add);
+	}
+
+	/// Publish each tier's sums, dropping children this drain carried no row
+	/// for.
+	fn publish(&mut self, tick: u64) {
+		for (tier, sums) in self.tiers.iter_mut() {
+			sums.children.retain(|_, child| child.seen == tick);
+			self.pair.frame.entries.push((
+				tier.label().clone(),
+				Prefix {
+					publisher: sums.rollup.current.publisher,
+					subscriber: sums.rollup.current.subscriber,
+					own: sums.own.current,
+					children: sums
+						.children
+						.iter()
+						.map(|(segment, child)| (segment.clone(), child.sum.current))
+						.collect(),
+				},
+			));
+		}
+		self.pair.publish(&self.name);
+	}
+}
+
+/// Each prefix of `path` from the root down to `path` itself, paired with the
+/// next segment below it (`None` at `path`).
+fn ancestors(path: &str) -> impl Iterator<Item = (&str, Option<&str>)> {
+	let mut at = Some(0);
+	std::iter::from_fn(move || {
+		let end = at?;
+		if end == path.len() {
+			at = None;
+			return Some((path, None));
+		}
+		let start = if end == 0 { 0 } else { end + 1 };
+		let next = path[start..].find('/').map_or(path.len(), |i| start + i);
+		at = Some(next);
+		Some((&path[..end], Some(&path[start..next])))
+	})
 }
 
 impl GroupPublisher {
@@ -1029,6 +1151,7 @@ impl GroupPublisher {
 			names: HashMap::new(),
 			totals,
 			presence: HashMap::new(),
+			prefixes: HashMap::new(),
 			traffic_rows: Vec::new(),
 			session_rows: Vec::new(),
 			empty_since: None,
@@ -1047,7 +1170,7 @@ impl GroupPublisher {
 	}
 
 	/// Run this drain's rows through change detection into the pending frames,
-	/// and add them to the totals and every held presence track.
+	/// and add them to the totals and every held presence and prefix track.
 	fn collect(&mut self, report: &Report, tick: u64) {
 		let Self {
 			broadcast,
@@ -1058,10 +1181,27 @@ impl GroupPublisher {
 			names,
 			totals,
 			presence,
+			prefixes,
 			traffic_rows,
 			session_rows,
 			..
 		} = self;
+
+		// Each row looks its ancestors up in the held set, so the cost is rows
+		// times path depth, and nothing when no prefix is held.
+		if !prefixes.is_empty() {
+			for track in prefixes.values_mut() {
+				track.reset();
+			}
+			for &i in traffic_rows.iter() {
+				let entry = &report.traffic[i];
+				for (prefix, child) in ancestors(entry.path.as_str()) {
+					if let Some(track) = prefixes.get_mut(prefix) {
+						track.add(entry, child, tick);
+					}
+				}
+			}
+		}
 
 		totals.sums.reset();
 		for &i in traffic_rows.iter() {
@@ -1133,6 +1273,9 @@ impl GroupPublisher {
 			track.sums.fill(&mut track.pair.frame);
 			track.pair.publish(&track.name);
 		}
+		for track in self.prefixes.values_mut() {
+			track.publish(tick);
+		}
 
 		self.local.retain(|_, tiers| {
 			tiers.retain(|_, slots| slots.seen == tick);
@@ -1154,8 +1297,9 @@ impl GroupPublisher {
 	/// A presence track is held only while requested, for a root in this group,
 	/// and answered at once with the root's current counters from `report`.
 	/// It is reclaimed once its last consumer leaves, so the held set follows
-	/// live readers. Any other name is rejected.
-	fn serve_requests(&mut self, report: &Report, depth: usize) {
+	/// live readers. A prefix track follows the same rules for a broadcast
+	/// prefix in this group. Any other name is rejected.
+	fn serve_requests(&mut self, report: &Report, depth: usize, tick: u64) {
 		// Reclaim before parking and adopting, so a freed slot is usable by
 		// this very drain.
 		self.traffic.reclaim(&mut self.requested);
@@ -1167,19 +1311,34 @@ impl GroupPublisher {
 			track.pair.finish();
 			false
 		});
+		self.prefixes.retain(|_, track| {
+			if track.pair.is_used() {
+				return true;
+			}
+			track.pair.finish();
+			false
+		});
 
 		// Pop everything queued, grouping the two flavors of one plain name so
 		// a pair is built from the actual requests where present. Only tier
 		// names past the parked bound are rejected.
 		let mut roots: HashMap<PathOwned, PendingPair> = HashMap::new();
+		let mut paths: HashMap<PathOwned, PendingPair> = HashMap::new();
 		let noop = kio::Waiter::noop();
 		while let Poll::Ready(Ok(request)) = self.dynamic.poll_requested_track(&noop) {
-			if let Some((root, compressed)) = parse_presence_track(request.name()) {
-				if group_key(root.as_str(), depth) != self.key.as_str() {
+			let keyed = match parse_presence_track(request.name()) {
+				Some((root, compressed)) => Some((&mut roots, root, compressed)),
+				None => parse_prefix_track(request.name())
+					// No broadcast path is deeper than `MAX_PARTS`.
+					.filter(|(path, _)| path.parts().count() <= Path::MAX_PARTS)
+					.map(|(path, compressed)| (&mut paths, path, compressed)),
+			};
+			if let Some((held, key, compressed)) = keyed {
+				if group_key(key.as_str(), depth) != self.key.as_str() {
 					request.reject(moq_net::Error::NotFound);
 					continue;
 				}
-				let pending = roots.entry(root).or_default();
+				let pending = held.entry(key).or_default();
 				let slot = match compressed {
 					true => &mut pending.compressed,
 					false => &mut pending.plain,
@@ -1205,6 +1364,9 @@ impl GroupPublisher {
 		self.sessions.adopt_parked(&self.broadcast, &mut self.requested);
 		for (root, pending) in roots {
 			self.adopt_presence(report, root, pending);
+		}
+		for (path, pending) in paths {
+			self.adopt_prefix(report, path, pending, tick);
 		}
 	}
 
@@ -1241,12 +1403,48 @@ impl GroupPublisher {
 		self.presence.insert(root, track);
 	}
 
+	/// Hold a requested prefix track, publishing its current counters so the
+	/// subscription resolves at once. Cumulative from here on.
+	fn adopt_prefix(&mut self, report: &Report, path: PathOwned, pending: PendingPair, tick: u64) {
+		// Defensive only, as in `adopt_presence`.
+		if self.prefixes.contains_key(path.as_str()) {
+			pending.reject(moq_net::Error::NotFound);
+			return;
+		}
+		let name = prefix_track(&path, false);
+		let pair = match pending.adopt(&self.broadcast, &name, self.traffic.sequence.clone()) {
+			Ok(pair) => pair,
+			Err(err) => {
+				tracing::warn!(?err, name, "stats: failed to adopt prefix track");
+				return;
+			}
+		};
+		let mut track = PrefixTrack {
+			name,
+			pair,
+			tiers: HashMap::new(),
+		};
+		for &i in &self.traffic_rows {
+			let entry = &report.traffic[i];
+			let Some(rest) = entry.path.strip_prefix(&path) else {
+				continue;
+			};
+			let child = rest.as_str().split('/').next().filter(|child| !child.is_empty());
+			track.add(entry, child, tick);
+		}
+		track.publish(tick);
+		self.prefixes.insert(path.as_str().to_string(), track);
+	}
+
 	/// Deliberately end the broadcast: finish every pair, then close the broadcast.
 	fn finish(mut self) {
 		self.traffic.finish();
 		self.sessions.finish();
 		self.totals.pair.finish();
 		for track in self.presence.values_mut() {
+			track.pair.finish();
+		}
+		for track in self.prefixes.values_mut() {
 			track.pair.finish();
 		}
 		self.broadcast.close();
@@ -1491,7 +1689,7 @@ mod tests {
 	use moq_net::{Timestamp, announce, broadcast, track};
 
 	use super::*;
-	use crate::{PresenceFrame, TotalsFrame};
+	use crate::{PrefixFrame, PresenceFrame, TotalsFrame};
 
 	fn test_producer(node: Option<&str>) -> (Producer, origin::Producer) {
 		let origin = produce_origin();
@@ -2357,6 +2555,233 @@ mod tests {
 		subscribing.await.expect("the compressed sibling of a held root");
 	}
 
+	/// Subscribe to `path`'s prefix track on `broadcast`, driving a tick so the
+	/// producer adopts the request.
+	async fn hold_prefix(broadcast: &moq_net::broadcast::Consumer, path: &str) -> track::Ordered {
+		let subscribing = broadcast
+			.track(&prefix_track(path, false))
+			.expect("track")
+			.subscribe(None);
+		drive_tick().await;
+		subscribing.await.expect("held").ordered()
+	}
+
+	/// The latest buffered prefix frame, `None` when nothing is buffered.
+	fn last_prefix(track: &mut track::Ordered) -> Option<PrefixFrame> {
+		let mut last = None;
+		while let Some(frame) = try_next_frame(track) {
+			last = Some(serde_json::from_slice(&frame.payload).expect("json parse"));
+		}
+		last
+	}
+
+	#[test]
+	fn ancestors_walk_from_the_root() {
+		let walk = |path| ancestors(path).collect::<Vec<_>>();
+		assert_eq!(walk(""), [("", None)]);
+		assert_eq!(walk("a"), [("", Some("a")), ("a", None)]);
+		assert_eq!(
+			walk("a/bc/d"),
+			[
+				("", Some("a")),
+				("a", Some("bc")),
+				("a/bc", Some("d")),
+				("a/bc/d", None)
+			]
+		);
+	}
+
+	/// A held prefix carries its rollup, the broadcast at exactly the prefix,
+	/// and one level of children, each summing everything beneath it.
+	#[tokio::test(start_paused = true)]
+	async fn prefix_track_rolls_up_self_and_children() {
+		let (producer, origin, _events) = grouped_producer(DEFAULT_LINGER);
+		let registry = producer.registry();
+		let _own = feed(registry, Tier::default(), "acme", true, 1, 1).await;
+		let _live = feed(registry, Tier::default(), "acme/live", true, 1, 10).await;
+		let _cam = feed(registry, Tier::default(), "acme/live/cam", true, 1, 100).await;
+		let _rtmp = feed(registry, Tier::new("rtmp"), "acme/vod", true, 1, 1000).await;
+		let _other = feed(registry, Tier::default(), "beta/live", true, 1, 5).await;
+		drive_tick().await;
+		let acme = origin.consume().request_broadcast(ACME, None).await.expect("resolve");
+
+		let mut track = hold_prefix(&acme, "acme").await;
+		let frame = last_prefix(&mut track).expect("answered at once");
+		let default = &frame[""];
+		assert_eq!(default.publisher.bytes, 111);
+		assert_eq!(default.own.publisher.bytes, 1);
+		assert_eq!(default.children.len(), 1);
+		assert_eq!(
+			default.children["live"].publisher.bytes, 110,
+			"a child rolls up its subtree"
+		);
+		assert_eq!(frame["rtmp"].publisher.bytes, 1000, "every tier the prefix records on");
+		assert_eq!(frame["rtmp"].children["vod"].publisher.bytes, 1000);
+		assert_eq!(frame.len(), 2);
+
+		let mut track = hold_prefix(&acme, "acme/live/cam").await;
+		let frame = last_prefix(&mut track).expect("answered at once");
+		assert_eq!(frame[""].own.publisher.bytes, 100);
+		assert!(frame[""].children.is_empty());
+
+		// A prefix outside the group, or deeper than any path, is refused.
+		for path in [
+			"beta".to_string(),
+			"".to_string(),
+			["acme"; Path::MAX_PARTS + 1].join("/"),
+		] {
+			let subscribing = acme
+				.track(&prefix_track(path.as_str(), false))
+				.expect("track")
+				.subscribe(None);
+			drive_tick().await;
+			assert!(
+				matches!(subscribing.await, Err(moq_net::Error::NotFound)),
+				"{path} is refused"
+			);
+		}
+	}
+
+	/// Counters follow presence: a prefix held while 300 subscriptions are
+	/// live counts all 300 as active, and every one leaving reads as ended.
+	/// The child leaves the map after its closing readout; its tail stays in
+	/// the rollup.
+	#[tokio::test(start_paused = true)]
+	async fn prefix_held_mid_stream_counts_active_exactly() {
+		let (producer, origin) = test_producer(Some("sjc"));
+		let registry = producer.registry();
+		let data = produce_origin();
+		let source = data
+			.clone()
+			.with_stats(registry.tier(Tier::default()).session("publisher"))
+			.publish("acme/live", origin::Route::default())
+			.expect("publish");
+		let video = source.create_track("video", timed()).expect("create_track");
+		let egress = data
+			.consume()
+			.with_stats(registry.tier(Tier::default()).session("viewer"));
+		let broadcast = egress.request_broadcast("acme/live", None).await.expect("resolve");
+		let mut subs = Vec::new();
+		for _ in 0..300 {
+			let track = broadcast.track("video").expect("track");
+			subs.push(track.subscribe(None).await.expect("subscribe"));
+		}
+		{
+			let mut group = video.append_group().expect("group");
+			group.write_frame(Timestamp::ZERO, vec![0u8; 10]).expect("write");
+			group.finish().expect("finish");
+		}
+		drive_tick().await;
+		let (_, stats) = announced(&origin).await;
+
+		let mut track = hold_prefix(&stats, "acme").await;
+		let frame = last_prefix(&mut track).expect("answered at once");
+		assert_eq!(frame[""].publisher.active_subscriptions(), 300);
+		assert_eq!(frame[""].children["live"].publisher.active_subscriptions(), 300);
+
+		drop(subs);
+		drive_tick().await;
+		let frame = last_prefix(&mut track).expect("the leave");
+		assert_eq!(frame[""].publisher.subscriptions_started, 300);
+		assert_eq!(frame[""].publisher.active_subscriptions(), 0);
+
+		// The broadcast ends: once its counters are dropped the child leaves the
+		// map, and the rollup keeps everything.
+		let before = frame[""].publisher;
+		drop((video, source, broadcast));
+		for _ in 0..3 {
+			drive_tick().await;
+		}
+		let frame = last_prefix(&mut track).expect("the child leaves");
+		assert!(frame[""].children.is_empty(), "{frame:?}");
+		assert_eq!(frame[""].publisher.subscriptions_started, before.subscriptions_started);
+		assert_eq!(frame[""].publisher.bytes, before.bytes);
+		assert_eq!(frame[""].publisher.active_subscriptions(), 0);
+	}
+
+	/// A nested broadcast ending leaves the parent's own counters flat, while
+	/// its rollup keeps the nested broadcast's tail.
+	#[tokio::test(start_paused = true)]
+	async fn nested_broadcast_ending_keeps_the_parent_self_flat() {
+		let (producer, origin) = test_producer(Some("sjc"));
+		let registry = producer.registry();
+		let _parent = feed(registry, Tier::default(), "acme/live", true, 1, 10).await;
+		let nested = feed(registry, Tier::default(), "acme/live/cam", true, 1, 100).await;
+		drive_tick().await;
+		let (_, stats) = announced(&origin).await;
+
+		let mut track = hold_prefix(&stats, "acme/live").await;
+		let frame = last_prefix(&mut track).expect("answered at once");
+		let own = frame[""].own;
+		assert_eq!(own.publisher.bytes, 10);
+		assert_eq!(frame[""].publisher.bytes, 110);
+
+		drop(nested);
+		for _ in 0..3 {
+			drive_tick().await;
+		}
+		let frame = last_prefix(&mut track).expect("the nested broadcast ended");
+		assert!(frame[""].children.is_empty(), "{frame:?}");
+		assert_eq!(frame[""].own, own, "the parent's own counters stay flat");
+		assert_eq!(frame[""].publisher.bytes, 110, "the rollup keeps the nested tail");
+		assert_eq!(frame[""].publisher.active_subscriptions(), 1, "the parent's viewer");
+	}
+
+	/// A prefix with no members is held open at zero, carries its first
+	/// member on the same subscription, and is reclaimed once its last
+	/// consumer leaves.
+	#[tokio::test(start_paused = true)]
+	async fn prefix_track_for_an_idle_prefix_is_held_then_reclaimed() {
+		let registry = Registry::new(moq_net::stats::Config::new());
+		let origin = produce_origin();
+		let mut drain = Drain::new(Task {
+			registry: registry.clone(),
+			origin: origin.clone(),
+			prefix: PathOwned::from(".stats"),
+			node: None,
+			depth: 0,
+			linger: DEFAULT_LINGER,
+			interval: Duration::from_secs(1),
+		})
+		.expect("drain");
+		let mut tick = || {
+			drain.collect();
+			drain.publish(moq_clock::now());
+			drain.groups[""].prefixes.len()
+		};
+		let broadcast = origin
+			.consume()
+			.request_broadcast(".stats/node", None)
+			.await
+			.expect("resolve");
+
+		let subscribing = broadcast
+			.track(&prefix_track("acme", false))
+			.expect("track")
+			.subscribe(None);
+		for _ in 0..8 {
+			tokio::task::yield_now().await;
+		}
+		assert_eq!(tick(), 1, "held");
+		let mut track = subscribing.await.expect("held").ordered();
+		assert_eq!(last_prefix(&mut track), Some(PrefixFrame::new()), "held at zero");
+
+		let _feed = feed(&registry, Tier::default(), "acme/live", true, 1, 7).await;
+		tick();
+		let frame = last_prefix(&mut track).expect("recorded");
+		assert_eq!(frame[""].children["live"].publisher.bytes, 7);
+
+		drop(track);
+		for _ in 0..4 {
+			tokio::task::yield_now().await;
+		}
+		tokio::time::advance(Duration::from_secs(31)).await;
+		for _ in 0..4 {
+			tokio::task::yield_now().await;
+		}
+		assert_eq!(tick(), 0, "reclaimed");
+	}
+
 	#[tokio::test(start_paused = true)]
 	async fn unused_slots_dont_surface() {
 		// A broadcast that only sees default-tier publisher traffic must NOT
@@ -2717,8 +3142,9 @@ mod tests {
 	async fn steady_drain_collects_without_allocating() {
 		// Once every group, track, and buffer exists, draining the registry
 		// into the pending frames allocates nothing, however many broadcasts
-		// and tiers there are. Encoding the frames (moq-json) is out of scope.
-		for depth in [0, 1] {
+		// and tiers there are, or whether a prefix is held. Encoding the frames
+		// (moq-json) is out of scope.
+		for (depth, hold) in [(0, false), (1, false), (0, true), (1, true)] {
 			for (broadcasts, tiers) in [(1, 1), (16, 1), (1, 4), (16, 4)] {
 				let registry = Registry::new(moq_net::stats::Config::new());
 				let mut feeds = Vec::new();
@@ -2748,6 +3174,15 @@ mod tests {
 					drain.collect();
 					drain.publish(moq_clock::now());
 				}
+				// Hold a prefix with a child per tier, as a reader would.
+				let _held = hold.then(|| {
+					let tick = drain.tick;
+					let group = drain.groups.get_mut(group_key("room0/cam", depth)).expect("group");
+					group.adopt_prefix(&drain.report, PathOwned::from("room0"), PendingPair::default(), tick);
+					group.prefixes["room0"].pair.plain.track.subscribe(None)
+				});
+				drain.collect();
+				drain.publish(moq_clock::now());
 
 				let before = counting::allocs();
 				drain.collect();
@@ -2760,7 +3195,17 @@ mod tests {
 					.map(|group| group.traffic_rows.len() + group.session_rows.len())
 					.sum();
 				assert!(pending > 0, "the drain carried entries");
-				assert_eq!(allocs, 0, "depth {depth}, {broadcasts} broadcasts x {tiers} tiers");
+				assert_eq!(
+					allocs, 0,
+					"depth {depth}, {broadcasts} broadcasts x {tiers} tiers, held prefix {hold}"
+				);
+				if hold {
+					assert_eq!(
+						drain.groups[group_key("room0/cam", depth)].prefixes.len(),
+						1,
+						"still held"
+					);
+				}
 			}
 		}
 	}

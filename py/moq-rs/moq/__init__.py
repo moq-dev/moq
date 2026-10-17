@@ -11,7 +11,7 @@ from . import audio as audio
 from . import flate as flate
 from . import json as json
 from . import video as video
-from .client import Client, connect
+from .client import Client, CongestionControl, connect, qlog_supported, versions
 from .epoch import epoch_time, mint_epoch
 from .errors import is_auth, is_shutdown, protocol_error
 from .log import log_level
@@ -94,6 +94,7 @@ __all__ = [
     "BroadcastProducer",
     "BroadcastRequest",
     "Client",
+    "CongestionControl",
     "ConnectionStats",
     "ConnectionStatus",
     "Datagram",
@@ -138,6 +139,8 @@ __all__ = [
     "log_level",
     "mint_epoch",
     "protocol_error",
+    "qlog_supported",
+    "versions",
 ]
 
 from . import media as media

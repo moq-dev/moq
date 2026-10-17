@@ -133,7 +133,7 @@ fn remove<T: Ord>(counts: &mut BTreeMap<T, usize>, value: T) -> bool {
 
 /// Clones share one contribution, including controls and pending subscriptions.
 #[derive(Clone)]
-pub(crate) struct Preferences(Arc<Preference>);
+pub(in crate::model) struct Preferences(Arc<Preference>);
 
 struct Preference {
 	value: kio::Producer<Subscription>,
@@ -196,16 +196,20 @@ impl Preferences {
 }
 
 impl Preferences {
-	pub(crate) fn same_channel(&self, other: &Self) -> bool {
+	pub(in crate::model) fn same_channel(&self, other: &Self) -> bool {
 		self.0.value.same_channel(&other.0.value)
 	}
-	pub(crate) fn read(&self) -> kio::Ref<'_, Subscription> {
+	pub(in crate::model) fn read(&self) -> kio::Ref<'_, Subscription> {
 		self.0.value.read()
 	}
-	pub(crate) fn consume(&self) -> kio::Consumer<Subscription> {
+	pub(in crate::model) fn consume(&self) -> kio::Consumer<Subscription> {
 		self.0.value.consume()
 	}
-	pub(crate) fn poll_ref<F, R>(&self, waiter: &kio::Waiter, f: F) -> Poll<Result<R, kio::Ref<'_, Subscription>>>
+	pub(in crate::model) fn poll_ref<F, R>(
+		&self,
+		waiter: &kio::Waiter,
+		f: F,
+	) -> Poll<Result<R, kio::Ref<'_, Subscription>>>
 	where
 		F: FnOnce(&kio::Ref<'_, Subscription>) -> Poll<R>,
 	{

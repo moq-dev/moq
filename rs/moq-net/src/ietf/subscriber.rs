@@ -584,6 +584,14 @@ struct BroadcastState {
 	_slot: crate::auth::Hold,
 }
 
+/// A namespace request and the authorization selected at dispatch.
+struct IncomingNamespace<'a> {
+	msg: ietf::PublishNamespace<'a>,
+	peer: cluster::Peer,
+	declared: Option<bool>,
+	gate: crate::auth::Gate,
+}
+
 /// What authorized one advertisement.
 enum Admit {
 	/// The session, so the limit holds it back while it does not cover the namespace.
@@ -1253,8 +1261,19 @@ where
 					return Err(Error::WrongSize);
 				}
 				tracing::debug!(message = ?msg, "received publish_namespace");
+				let gate = crate::auth::Gate::new(
+					this.auth.clone(),
+					msg.track_namespace.to_owned(),
+					crate::auth::Direction::Subscribe,
+				);
+				let incoming = IncomingNamespace {
+					msg,
+					peer,
+					declared,
+					gate,
+				};
 				async move {
-					if let Err(err) = this.run_publish_namespace_stream(stream, msg, peer, declared).await {
+					if let Err(err) = this.serve_publish_namespace_stream(stream, incoming).await {
 						// An advertisement update is decoded here rather than in the
 						// dispatcher, so nothing else would surface a malformed one. The
 						// cluster draft requires closing the session on those; a stream
@@ -1328,13 +1347,42 @@ where
 	}
 
 	/// Handle an incoming PUBLISH_NAMESPACE on its bidi stream.
+	#[cfg(test)]
 	async fn run_publish_namespace_stream(
 		&mut self,
-		mut stream: Stream<S, Version>,
+		stream: Stream<S, Version>,
 		msg: ietf::PublishNamespace<'_>,
 		peer: cluster::Peer,
 		declared: Option<bool>,
 	) -> Result<(), Error> {
+		let gate = crate::auth::Gate::new(
+			self.auth.clone(),
+			msg.track_namespace.to_owned(),
+			crate::auth::Direction::Subscribe,
+		);
+		self.serve_publish_namespace_stream(
+			stream,
+			IncomingNamespace {
+				msg,
+				peer,
+				declared,
+				gate,
+			},
+		)
+		.await
+	}
+
+	async fn serve_publish_namespace_stream(
+		&mut self,
+		mut stream: Stream<S, Version>,
+		incoming: IncomingNamespace<'_>,
+	) -> Result<(), Error> {
+		let IncomingNamespace {
+			msg,
+			peer,
+			declared,
+			gate,
+		} = incoming;
 		if let Some(error) = super::namespace::refusal(&msg.track_namespace, self.version) {
 			return super::request_stream::reject(stream, error).await;
 		}
@@ -1367,7 +1415,7 @@ where
 		// request-token), even where the limit covers it, and a verified one is exempt from the
 		// limit while it lasts.
 		let token = match &msg.authorization_token {
-			Some(token) if self.auth.token_decides(crate::auth::Direction::Subscribe) => Some(token.0.clone()),
+			Some(token) if gate.token_decides() => Some(token.0.clone()),
 			_ => None,
 		};
 		let (admit, token_grant) = match token {
@@ -1379,7 +1427,7 @@ where
 					true => None,
 					false => Some(std::sync::Arc::new(self.acquire_announce()?)),
 				};
-				let verdict = self.auth.verify_request(token, slot.clone());
+				let verdict = gate.verify(token, slot.clone());
 				// The session closing or the peer withdrawing the announce withdraws the token.
 				let mut session = self.session.clone();
 				let version = self.version;
@@ -1660,8 +1708,10 @@ where
 			};
 
 			// Drafts 14-15 have no update for an advertisement, so a SUBSCRIBE_UPDATE the adapter
-			// routed here changes nothing. Draft-16's REQUEST_UPDATE renews its token.
+			// routed here is refused and changes nothing. Draft-16's REQUEST_UPDATE renews its token.
 			if type_id == ietf::SubscribeUpdate::ID && matches!(self.version, Version::Draft14 | Version::Draft15) {
+				super::request_stream::refuse_update(&mut stream.writer, &body, self.version)?;
+				std::future::poll_fn(|cx| stream.writer.poll_flush(cx)).await?;
 				continue;
 			}
 			let terminal = self.terminal_publish_namespace(type_id);
@@ -4748,7 +4798,7 @@ where
 				let mut cx = std::task::Context::from_waker(waiter.waker());
 				let closed = match self.version {
 					Version::Draft14 | Version::Draft15 | Version::Draft16 => {
-						super::request_stream::poll_legacy_end(&mut stream, &mut cx)
+						super::request_stream::poll_legacy_end(&mut stream, self.version, &mut cx)
 					}
 					_ => stream.reader.poll_closed(&mut cx),
 				};
@@ -7591,6 +7641,81 @@ mod tests {
 			routed_now(&consumer, "room/host").is_none(),
 			"an explicit withdrawal must close the broadcast",
 		);
+	}
+
+	/// Drafts 14 and 15 have no update for an advertisement, so a SUBSCRIBE_UPDATE the
+	/// adapter routes onto one changes nothing and leaves it standing until the withdrawal.
+	/// Draft 15 still owes the update an answer: a REQUEST_ERROR naming it.
+	#[moq_clock::test]
+	async fn a_legacy_update_on_an_advertisement_is_answered() {
+		for version in [Version::Draft14, Version::Draft15] {
+			let path = crate::Path::new("room/host").to_owned();
+			// Own Request ID 10, aimed at the advertisement (0). Draft 14 carries its fixed
+			// start, end group, priority and forward before the parameters.
+			let body: &[u8] = match version {
+				Version::Draft14 => &[10, 0, 0, 0, 0, 128, 1, 0],
+				_ => &[10, 0, 0],
+			};
+			let mut script = vec![ietf::SubscribeUpdate::ID as u8, 0, body.len() as u8];
+			script.extend_from_slice(body);
+			let log = crate::lite::test_transport::Log::default();
+			let mut writer =
+				crate::coding::Writer::new(crate::lite::test_transport::SinkSend::new(log.clone()), version);
+			writer
+				.encode_message(&ietf::PublishNamespaceDone {
+					track_namespace: path.borrow(),
+					request_id: RequestId(0),
+				})
+				.await
+				.unwrap();
+			script.extend(log.writes.lock().unwrap().iter());
+
+			let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+			let session = crate::lite::test_transport::ScriptedSession::eof(script);
+			let (tasks, task_set) = crate::util::TaskSet::new();
+			std::mem::forget(task_set);
+			let mut subscriber = Subscriber::new(
+				crate::time::sim(),
+				session.clone(),
+				origin,
+				Control::new(None, false),
+				None,
+				peer::PeerSetup::default(),
+				crate::Hop::new(1).unwrap(),
+				None,
+				version,
+				tasks,
+				Default::default(),
+			);
+
+			let stream = Stream::open(&mut session.clone(), version).await.unwrap();
+			let msg = ietf::PublishNamespace {
+				request_id: RequestId(0),
+				track_namespace: path.borrow(),
+				cluster: None,
+				authorization_token: None,
+			};
+			subscriber
+				.run_publish_namespace_stream(stream, msg, cluster::Peer::default(), None)
+				.await
+				.unwrap_or_else(|err| panic!("{version}: {err}"));
+
+			let written = session.log.writes.lock().unwrap().clone();
+			let mut rest = written.as_slice();
+			let mut sent = Vec::new();
+			while !rest.is_empty() {
+				let id = crate::coding::decode_varint(&mut rest, version).unwrap();
+				let len = usize::from(u16::from_be_bytes([rest[0], rest[1]]));
+				sent.push((id, rest.get(2).copied()));
+				rest = &rest[2 + len..];
+			}
+			let expected = match version {
+				Version::Draft14 => vec![(ietf::PublishNamespaceOk::ID, Some(0))],
+				_ => vec![(ietf::RequestOk::ID, Some(0)), (ietf::RequestError::ID, Some(10))],
+			};
+			assert_eq!(sent, expected, "{version}");
+			assert!(session.log.closes().is_empty(), "{version}: the session stays up");
+		}
 	}
 
 	/// A PUBLISH_NAMESPACE stream that dies mid-advertisement detaches it, closing the

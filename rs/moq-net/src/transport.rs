@@ -712,4 +712,42 @@ mod tests {
 			Poll::Ready(Ok(Some(0)))
 		));
 	}
+
+	#[test]
+	fn default_read_buf_caps_the_initialized_slice_on_ready_and_pending() {
+		struct ReadSpan(bool);
+		impl super::poll::RecvStream for ReadSpan {
+			type Error = crate::Error;
+			fn poll_read(&mut self, _: &mut Context<'_>, dst: &mut [u8]) -> Poll<Result<Option<usize>, Self::Error>> {
+				assert_eq!(
+					dst.len(),
+					64 * 1024,
+					"one poll must not initialize the whole spare capacity"
+				);
+				assert!(dst.iter().all(|byte| *byte == 0));
+				if self.0 {
+					return Poll::Pending;
+				}
+				dst.fill(7);
+				Poll::Ready(Ok(Some(dst.len())))
+			}
+			fn stop(&mut self, _: u32) {}
+			fn poll_closed(&mut self, _: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+				Poll::Pending
+			}
+		}
+		for pending in [false, true] {
+			let mut buf = BytesMut::with_capacity(256 * 1024);
+			let mut cx = Context::from_waker(std::task::Waker::noop());
+			let result = ReadSpan(pending).poll_read_buf(&mut cx, &mut buf);
+			if pending {
+				assert!(result.is_pending());
+				assert!(buf.is_empty());
+			} else {
+				assert!(matches!(result, Poll::Ready(Ok(Some(65536)))));
+				assert_eq!(buf.len(), 64 * 1024);
+				assert!(buf.iter().all(|byte| *byte == 7));
+			}
+		}
+	}
 }

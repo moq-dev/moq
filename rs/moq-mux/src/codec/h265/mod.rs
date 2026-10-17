@@ -199,20 +199,66 @@ impl Hvcc {
 pub(crate) fn config_from_hvcc(hvcc: &[u8]) -> Result<hang::catalog::VideoConfig> {
 	let params = Hvcc::parse(hvcc)?;
 	let sps_nal = params.sps.first().ok_or(Error::MissingSps)?;
-	let sps = Sps::parse(sps_nal)?.head;
-
-	let mut config = hang::catalog::VideoConfig::new(hang::catalog::H265 {
-		in_band: false,
-		profile_space: sps.profile_space,
-		profile_idc: sps.profile_idc,
-		profile_compatibility_flags: sps.profile_compatibility_flags,
-		tier_flag: sps.tier_flag,
-		level_idc: sps.level_idc,
-		constraint_flags: sps.constraint_flags,
-	});
-	config.coded_width = Some(sps.width);
-	config.coded_height = Some(sps.height);
+	let mut config = config_from_sps(sps_nal, false)?;
 	config.description = Some(Bytes::copy_from_slice(hvcc));
+	Ok(config)
+}
+
+/// Copy the frame rate, display aspect, and colour from a decoded hvcC's first SPS.
+///
+/// An hev1 record may list no SPS, leaving them unset.
+pub(crate) fn apply_hvcc_sps(hvcc: &mp4_atom::Hvcc, config: &mut hang::catalog::VideoConfig) -> Result<()> {
+	let Some(sps) = hvcc
+		.arrays
+		.iter()
+		.filter(|array| array.nal_unit_type == NALUnitType::SpsNut.0)
+		.flat_map(|array| &array.nalus)
+		.next()
+	else {
+		return Ok(());
+	};
+	let metadata = config_from_sps(sps, false)?;
+	config.framerate = metadata.framerate;
+	config.display_aspect_width = metadata.display_aspect_width;
+	config.display_aspect_height = metadata.display_aspect_height;
+	config.color = metadata.color;
+	Ok(())
+}
+
+/// Resolve either sample framing from the same SPS dimensions and VUI metadata.
+pub(crate) fn config_from_sps(sps_nal: &[u8], in_band: bool) -> Result<hang::catalog::VideoConfig> {
+	let sps = Sps::parse(sps_nal)?;
+	let color = sps.color();
+	let Sps { head, full } = sps;
+	let mut config = hang::catalog::VideoConfig::new(hang::catalog::H265 {
+		in_band,
+		profile_space: head.profile_space,
+		profile_idc: head.profile_idc,
+		profile_compatibility_flags: head.profile_compatibility_flags,
+		tier_flag: head.tier_flag,
+		level_idc: head.level_idc,
+		constraint_flags: head.constraint_flags,
+	});
+	config.coded_width = Some(head.width);
+	config.coded_height = Some(head.height);
+	config.framerate = full
+		.as_ref()
+		.and_then(sps_period)
+		.map(|(units, scale)| scale as f64 / units as f64);
+	let sample_aspect = full
+		.as_ref()
+		.and_then(|sps| sps.vui_parameters.as_ref())
+		.and_then(|vui| match vui.aspect_ratio_info {
+			scuffle_h265::AspectRatioInfo::ExtendedSar { sar_width, sar_height } => {
+				Some((u32::from(sar_width), u32::from(sar_height)))
+			}
+			scuffle_h265::AspectRatioInfo::Predefined(idc) => crate::codec::video::sample_aspect(idc.0),
+		});
+	let display_aspect =
+		sample_aspect.and_then(|sample| crate::codec::video::display_aspect(head.width, head.height, sample));
+	config.display_aspect_width = display_aspect.map(|(width, _)| width);
+	config.display_aspect_height = display_aspect.map(|(_, height)| height);
+	config.color = color;
 	Ok(config)
 }
 
@@ -562,6 +608,20 @@ pub(crate) mod fixtures {
 		0x02, 0x00, 0x00, 0x03, 0x00, 0x3c, 0x10,
 	];
 	pub(crate) const PPS: &[u8] = &[0x44, 0x01, 0xc1, 0x72, 0xb4, 0x62, 0x40];
+
+	/// SPS from a 64x64 Main 10 x265 encode with `colorprim=bt2020:transfer=smpte2084:colormatrix=bt2020nc`.
+	pub(crate) const SPS_HDR10: &[u8] = &[
+		0x42, 0x01, 0x01, 0x02, 0x20, 0x00, 0x00, 0x03, 0x00, 0x90, 0x00, 0x00, 0x03, 0x00, 0x00, 0x03, 0x00, 0x1e,
+		0xa0, 0x20, 0x81, 0x04, 0xd9, 0x65, 0x65, 0x4a, 0x4c, 0x2f, 0x01, 0x6a, 0x12, 0x20, 0x12, 0x08, 0x00, 0x00,
+		0x03, 0x00, 0x08, 0x00, 0x00, 0x03, 0x00, 0xc8, 0x40,
+	];
+	/// The same encode's `max-cll=1000,400` prefix SEI.
+	pub(crate) const SEI_CONTENT_LIGHT: &[u8] = &[0x4e, 0x01, 0x90, 0x04, 0x03, 0xe8, 0x01, 0x90, 0x80];
+	/// The same encode's `master-display` prefix SEI: a 1000-nit BT.2020 display with a D65 white point.
+	pub(crate) const SEI_MASTERING: &[u8] = &[
+		0x4e, 0x01, 0x89, 0x18, 0x21, 0x34, 0x9b, 0xaa, 0x19, 0x96, 0x08, 0xfc, 0x8a, 0x48, 0x39, 0x08, 0x3d, 0x13,
+		0x40, 0x42, 0x00, 0x98, 0x96, 0x80, 0x00, 0x00, 0x03, 0x00, 0x32, 0x80,
+	];
 	/// SPS from a 64x64, 25 fps x265 encode with `bframes=3:b-pyramid=1` and HRD signalling
 	/// (`sps_max_num_reorder_pics` 2).
 	pub(crate) const SPS_PYRAMID: &[u8] = &[
@@ -682,6 +742,26 @@ mod tests {
 
 	/// The real-SPS fixture resolves a full out-of-band config: dimensions from
 	/// the parsed SPS and the hvcC itself as the catalog `description`.
+	/// The hvcC's SPS signals the colour; a refused SPS signals none rather than failing.
+	#[test]
+	fn hvcc_config_reads_the_sps_colour() {
+		let hvcc = |sps: &'static [u8]| {
+			build_hvcc(
+				&[Bytes::from_static(fixtures::VPS)],
+				&[Bytes::from_static(sps)],
+				&[Bytes::from_static(fixtures::PPS)],
+			)
+			.unwrap()
+		};
+		let color = config_from_hvcc(&hvcc(fixtures::SPS_HDR10)).unwrap().color.unwrap();
+		assert_eq!(
+			(color.primaries, color.transfer, color.matrix, color.range),
+			(Some(9), Some(16), Some(9), Some(hang::catalog::Range::Limited))
+		);
+		assert_eq!(config_from_hvcc(&hvcc(fixtures::SPS)).unwrap().color, None);
+		assert_eq!(config_from_hvcc(&hvcc(fixtures::SPS_ZERO_COLOUR)).unwrap().color, None);
+	}
+
 	#[test]
 	fn config_from_hvcc_resolves_real_sps() {
 		let hvcc = fixtures::hvcc();

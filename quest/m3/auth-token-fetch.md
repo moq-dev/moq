@@ -19,7 +19,7 @@ peer can subscribe to a track but cannot look it up or fetch its history.
 Open question for the maintainer. This reverses a settled decision:
 "standalone FETCH gains no request-token authority" (2026-10-12, in
 [#5148](https://github.com/moq-dev/moq/pull/5148)'s quest and
-[Request gate](/quest/m1/auth/request-gate.md)).
+[the request gate refactor](https://github.com/moq-dev/moq/pull/5782)).
 
 1. (recommended) Do it in m1, after the request gate. Move this file under
    [In-band auth](/quest/m1/auth/README.md) and list it in that epic's
@@ -49,7 +49,3 @@ token. Run cross-language interop for the wire change.
 Public API: none expected beyond widening what `auth::RequestKind` names.
 Wire: the existing AUTHORIZATION TOKEN parameter (0x03), now sent and honored
 on TRACK_STATUS and FETCH.
-
-## Required
-
-- [Request gate](/quest/m1/auth/request-gate.md) - the dispatcher-owned gate this extends to two more request types
