@@ -142,6 +142,12 @@ impl MoqBroadcastProducer {
 	}
 }
 
+impl Default for MoqBroadcastProducer {
+	fn default() -> Self {
+		Self::new()
+	}
+}
+
 #[export]
 impl MoqBroadcastProducer {
 	/// A standalone broadcast, outside any origin.

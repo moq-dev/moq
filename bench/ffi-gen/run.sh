@@ -2,7 +2,7 @@
 # Build the slice with each generator, generate its bindings, then run the benchmarks
 # and the size table. See README.md.
 #
-#   bench/ffi-gen/run.sh [build|bench|size|all]   (default: all)
+#   bench/ffi-gen/run.sh [build|bench|size|all]...   (default: all)
 #
 # MOQ_BENCH_SECONDS sets each case's time budget (default 1). MOQ_BENCH_ROUNDS sets how
 # many times each runner repeats, alternating which generator goes first (default 3).
@@ -42,13 +42,11 @@ build_tools() {
             "@boltffi/runtime@$boltffi_version"
     [[ -x "$out/venv/bin/python" ]] || uv venv --quiet --seed --python "$(command -v python3)" "$out/venv"
     uv pip install --quiet --python "$out/venv/bin/python" setuptools
-    # moq's own UniFFI bindgen: the generator fork the language packages ship from.
-    cargo build --locked --release --package uniffi-bindgen --manifest-path "$root/Cargo.toml"
 }
 
+# moq's own UniFFI bindgen: the generator fork the language packages ship from.
 bindgen() {
-    "$(cargo metadata --format-version 1 --no-deps --manifest-path "$root/Cargo.toml" |
-        sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')/release/uniffi-bindgen" "$@"
+    cargo run --locked --quiet --release --package uniffi-bindgen --features cli --manifest-path "$root/Cargo.toml" -- "$@"
 }
 
 build_uniffi() {
@@ -153,22 +151,32 @@ bench() {
     python3 "$dir/report.py" "$out/results"
 }
 
-case "${1:-all}" in
-    build)
-        build_tools
-        build_uniffi
-        build_boltffi
-        build_reference
-        ;;
-    bench) bench ;;
-    size) python3 "$dir/size.py" "$out" ;;
-    all)
-        "$0" build
-        "$0" bench
-        "$0" size
-        ;;
-    *)
-        echo "usage: $0 [build|bench|size|all]" >&2
-        exit 1
-        ;;
-esac
+step() {
+    case "$1" in
+        build)
+            build_tools
+            build_uniffi
+            build_boltffi
+            ;;
+        bench) bench ;;
+        # Only the size table needs moq-ffi and moq-wasm, which take longer to build than
+        # the slice, so the nightly's `build bench` skips them.
+        size)
+            build_reference
+            python3 "$dir/size.py" "$out"
+            ;;
+        all)
+            step build
+            step bench
+            step size
+            ;;
+        *)
+            echo "usage: $0 [build|bench|size|all]..." >&2
+            exit 1
+            ;;
+    esac
+}
+
+for arg in "${@:-all}"; do
+    step "$arg"
+done

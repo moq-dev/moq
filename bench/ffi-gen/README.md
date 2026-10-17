@@ -28,18 +28,21 @@ local path dependencies and fails on moq-tokio (see the gaps below).
 From the Nix dev shell (cargo, uv, npm, gradle, a JDK, wasm-bindgen):
 
 ```bash
-bench/ffi-gen/run.sh            # build, bench, size
-bench/ffi-gen/run.sh build      # or one step: build | bench | size
+just bench-ffi-gen              # build, bench, size
+just bench-ffi-gen build bench  # or some steps: build | bench | size
 ```
 
 `build` installs `boltffi_cli` 0.31.1, `tsc`, and `@boltffi/runtime` under
 `target/ffi-gen`, then builds the slice with each generator, its Python, Kotlin, and
-Swift bindings, both `.wasm` builds, BoltFFI's web package, and moq-ffi and moq-wasm for
-reference. `bench` runs `MOQ_BENCH_ROUNDS` rounds (default 3), alternating which
-generator goes first, and writes `target/ffi-gen/results/report.md`. Each case gets 3
-warmup steps and a `MOQ_BENCH_SECONDS` budget (default 1). Throughput mirrors
-`just bench-ffi`: `clamp(8 MiB / size, 1, 64)` frames per group, every byte checked, and
-CPU from `getrusage`.
+Swift bindings, both `.wasm` builds, and BoltFFI's web package. `bench` runs
+`MOQ_BENCH_ROUNDS` rounds (default 3), alternating which generator goes first, and
+writes `target/ffi-gen/results/report.md`. Each case gets 3 warmup steps and a
+`MOQ_BENCH_SECONDS` budget (default 1). Throughput mirrors `just bench-ffi`:
+`clamp(8 MiB / size, 1, 64)` frames per group, every byte checked, and CPU from
+`getrusage`. `size` builds moq-ffi and moq-wasm for reference, then prints the size
+tables.
+
+The nightly runs `build bench` and keeps `target/ffi-gen/results` as an artifact.
 
 ## Results
 

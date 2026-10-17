@@ -137,7 +137,10 @@ async fn run() {
 		.unwrap();
 	let mut group = track.append_group().unwrap();
 	let consumer = track.consume().unwrap();
-	report.call("noop", || black_box(noop()));
+	report.call("noop", || {
+		noop();
+		black_box(());
+	});
 	report.call("sequence", || {
 		black_box(black_box(&group).sequence());
 	});
@@ -147,7 +150,7 @@ async fn run() {
 	let mut writes = 0u64;
 	report.call("write_frame/100", || {
 		writes += 1;
-		if writes % 1000 == 0 {
+		if writes.is_multiple_of(1000) {
 			group.finish().unwrap();
 			group = track.append_group().unwrap();
 		}
