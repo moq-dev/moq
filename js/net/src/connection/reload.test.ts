@@ -1,16 +1,18 @@
 import { expect, spyOn, test } from "bun:test";
 import { Milli } from "@moq/clock";
 import { Effect, Signal } from "@moq/signals";
+import * as Announce from "../announced.ts";
 import type { Producer as BroadcastProducer } from "../broadcast.ts";
 import { SessionCode, SessionError, StreamCode, toTransport } from "../error.ts";
 import { Route } from "../hop.ts";
+import { ALPN as IetfALPN } from "../ietf/version.ts";
 import * as Lite from "../lite/index.ts";
 import { createMockTransportPair } from "../mock.ts";
 import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { wireOf } from "../wire.ts";
 import { type AcceptProps, accept as acceptSession } from "./index.ts";
-import { Reload, type ReloadProps } from "./reload.ts";
+import { pumpAnnounced, Reload, type ReloadProps } from "./reload.ts";
 
 function accept(transport: WebTransport, url: URL, props: Omit<AcceptProps, "transport" | "url"> = {}) {
 	return acceptSession({ transport, url, ...props });
@@ -599,4 +601,104 @@ test("announced accepts a non-prefix scope before any session exists", () => {
 	} finally {
 		reload.close();
 	}
+});
+
+/**
+ * A watcher on the consume origin syncs only once the session has delivered the
+ * server's initial set, exactly on versions that count it (lite-05+, MoQ Active Count), and
+ * a reconnect takes it back until the next session's set lands.
+ */
+test("a watcher syncs with the server's initial set, and again after a reconnect", async () => {
+	// Through the consume origin, and through the handle's own stream without one.
+	for (const [alpn, viaOrigin] of [
+		[Lite.ALPN_06, true],
+		[IetfALPN.DRAFT_19, true],
+		[Lite.ALPN_06, false],
+		[IetfALPN.DRAFT_19, false],
+	] as const) {
+		const original = globalThis.WebTransport;
+		const url = new URL("https://example.com/");
+
+		const serverOrigin = new OriginProducer();
+		const published = [publish(serverOrigin, Path.from("a")), publish(serverOrigin, Path.from("b"))];
+		const sessions: { abort: () => void }[] = [];
+		const stub = function StubWebTransport() {
+			const pair = createMockTransportPair(alpn);
+			void accept(pair.server, url, { publish: serverOrigin.consume() }).then((server) => {
+				sessions.push(server);
+			});
+			return pair.client;
+		};
+		globalThis.WebTransport = stub as unknown as typeof WebTransport;
+
+		const clientOrigin = new OriginProducer();
+		const reload = new Reload({
+			enabled: true,
+			url,
+			websocket: { enabled: false },
+			delay: { initial: Milli(10), multiplier: 1, max: Milli(10) },
+			consume: viaOrigin ? clientOrigin : undefined,
+		});
+		const watching = viaOrigin ? clientOrigin.announced() : reload.announced();
+		const seen = new Set<string>();
+		void (async () => {
+			for await (const event of watching) {
+				if (event.kind === "end") seen.delete(event.prefix);
+				else seen.add(event.prefix);
+			}
+		})();
+
+		try {
+			// Nothing is connected yet, which is not the same as nothing being announced.
+			expect(watching.synced.peek()).toBe(false);
+			await waitUntil(() => watching.synced.peek());
+			expect([...seen].sort()).toEqual(["a", "b"]);
+
+			sessions[0]?.abort();
+			await waitUntil(() => !watching.synced.peek());
+			await waitUntil(() => sessions.length > 1 && watching.synced.peek());
+			expect([...seen].sort()).toEqual(["a", "b"]);
+		} finally {
+			watching.close();
+			reload.close();
+			clientOrigin.close();
+			for (const broadcast of published) broadcast.close();
+			serverOrigin.close();
+			for (const session of sessions) session.abort();
+			globalThis.WebTransport = original;
+		}
+	}
+});
+
+/** Replacing a synced upstream with one already synced still owes the old routes' ends. */
+test("a pump owes the retractions of the upstream it replaces", async () => {
+	const tick = async () => {
+		for (let i = 0; i < 16; i++) await Promise.resolve();
+	};
+	const producer = new Announce.Producer();
+	const consumer = producer.consume();
+
+	const first = new Announce.Producer();
+	first.append({ prefix: Path.from("a"), captures: undefined, kind: "start", route: Route.default });
+	first.synced();
+	const upstream = new Signal(first);
+	const pump = new Effect((effect) => pumpAnnounced(effect, effect.get(upstream).consume(), producer));
+
+	expect(await consumer.next()).toMatchObject({ prefix: Path.from("a"), kind: "start" });
+	const parked = consumer.next();
+	await tick();
+	expect(consumer.synced.peek()).toBe(true);
+
+	const second = new Announce.Producer();
+	second.synced();
+	upstream.set(second);
+	expect(await parked).toMatchObject({ prefix: Path.from("a"), kind: "end" });
+	await tick();
+	expect(consumer.synced.peek()).toBe(false);
+	void consumer.next();
+	await tick();
+	expect(consumer.synced.peek()).toBe(true);
+
+	pump.close();
+	producer.close();
 });

@@ -17,8 +17,8 @@ default:
 # wrapper, both editable into the workspace venv. `--no-deps` on the wrapper
 
 # keeps uv from fetching moq-ffi off PyPI; maturin just installed it locally.
-_develop:
-    cd moq-ffi && uv run --no-sync maturin develop --locked --uv
+_develop *args:
+    cd moq-ffi && uv run --no-sync maturin develop --locked --uv {{ args }}
     uv pip install --no-deps -e moq-rs
 
 # Lint + format + editable build + pyright + doc samples + docs. `--no-install-workspace`
@@ -49,10 +49,10 @@ fix:
     uv run --no-sync ruff check --fix .
     uv run --no-sync ruff format .
 
-# Run the unit tests.
+# Run the unit tests, on a build with the test clock (`moq.testing`).
 test:
     uv sync --locked --no-install-workspace
-    just _develop
+    just _develop --features testing
     uv run --no-sync pytest moq-rs/tests/ moq-ffi/tests/
 
 # Local dev build: editable install of moq-ffi (with the cdylib + uniffi

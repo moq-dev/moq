@@ -75,6 +75,8 @@ just after its last byte leaves TB, but before the rest of that packet has; its
 last frame is cut off by the end of the capture:
 
     straddling audio    as built                                      must pass
+    DVB E-AC-3 reference three 512-byte frames per PES, DVB buffer     must pass
+    DVB E-AC-3 unsplit   sixteen frames in one PES                     B overflow
     mid-packet overflow seven frames per PES, the first decoded as    B overflow
                         B passes its size partway through a packet
 
@@ -255,20 +257,25 @@ def synthetic(path: str, layout: str) -> None:
         handle.write(b"".join(out))
 
 
-def synthetic_audio(path: str, frames: int, decode_s: float) -> None:
-    """MPEG-1 Layer II at 192 kb/s, `frames` 576-byte frames per PES, the first decoded
-    `decode_s` after its PES starts arriving."""
+def synthetic_audio(path: str, frames: int, decode_s: float, enhanced: bool = False) -> None:
+    """MPEG audio or DVB E-AC-3, `frames` per PES, decoded `decode_s` after arrival."""
     audio_pid, pcr_pid = 0x101, 0x102
     pat = section(0x00, 1, (1).to_bytes(2, "big") + (0xE000 | PMT_PID).to_bytes(2, "big"))
     pmt = section(0x02, 1, bytes([0xE1, 0x02, 0xF0, 0x00, 0x03, 0xE1, 0x01, 0xF0, 0x00]))
     frame = bytes([0xFF, 0xFD, 0xA4, 0x00]) + b"\xaa" * 572
+    interval = 0.024
+    if enhanced:
+        # DVB private-data E-AC-3, six 48 kHz blocks per 512-byte sync frame.
+        pmt = section(0x02, 1, bytes.fromhex("e102 f000 06 e101 f003 7a0100"))
+        frame = bytes.fromhex("0b7700ff3f80") + b"\xaa" * 506
+        interval = 0.032
     # An audio packet every six slots, past TB's 0.75 ms drain, so each one meets an
     # empty TB and its byte j leaves (j + 1) x 4 us after it starts arriving.
     every = 6
     cc = 0
     out: list[bytes] = []
     for n in range(20):
-        begin = round(n * frames * 0.024 / SLOT_S)
+        begin = round(n * frames * interval / SLOT_S)
         while len(out) < begin:
             out.append(packet(0x1FFF, 0, b"\xff" * 184))
         ticks = round((1.0 + begin * SLOT_S + decode_s) * compliance.PTS_HZ)
@@ -286,7 +293,7 @@ def synthetic_audio(path: str, frames: int, decode_s: float) -> None:
         pcr = round((1.0 + len(out) * SLOT_S) * compliance.PCR_HZ)
         field = bytes([0x10]) + ((pcr // 300) << 15 | 0x7E00 | pcr % 300).to_bytes(6, "big")
         out.append(packet(pcr_pid, 0, adaptation=field))
-    while len(out) < round(20 * frames * 0.024 / SLOT_S):
+    while len(out) < round(20 * frames * interval / SLOT_S):
         out.append(packet(0x1FFF, 0, b"\xff" * 184))
     with open(path, "wb") as handle:
         handle.write(b"".join(out))
@@ -470,11 +477,11 @@ def system(layout: str):
     return build
 
 
-def audio(frames: int, decode_s: float):
+def audio(frames: int, decode_s: float, enhanced: bool = False):
     """A builder for one synthetic audio stream."""
 
     def build(path: str) -> str:
-        synthetic_audio(path, frames, decode_s)
+        synthetic_audio(path, frames, decode_s, enhanced)
         return path
 
     return build
@@ -531,6 +538,8 @@ CASES = [
     ("unclocked tables", system("unclocked tables"), ("system-buffers", {"outside a clocked time base"})),
     ("straddling audio", audio(4, STRADDLE_S), "pass"),
     ("mid-packet overflow", audio(7, MID_PACKET_S), {"B overflow"}),
+    ("DVB E-AC-3 reference", audio(3, 0.04, enhanced=True), "pass"),
+    ("DVB E-AC-3 unsplit PES", audio(16, 0.1, enhanced=True), {"B overflow"}),
 ]
 
 def grade(path: str) -> dict[str, compliance.Check]:

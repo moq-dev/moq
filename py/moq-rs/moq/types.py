@@ -4,6 +4,9 @@ Records with duration fields are owned in `_records` instead, so they read as `t
 """
 
 from moq_ffi import (
+    MoqAnchor as Anchor,
+)
+from moq_ffi import (
     MoqAudioCodec as AudioCodec,
 )
 from moq_ffi import (
@@ -25,10 +28,16 @@ from moq_ffi import (
     MoqFetchGroupOptions as FetchGroupOptions,
 )
 from moq_ffi import (
+    MoqOrder as Order,
+)
+from moq_ffi import (
     MoqProtocolError as ProtocolError,
 )
 from moq_ffi import (
     MoqProtocolKind as ProtocolKind,
+)
+from moq_ffi import (
+    MoqRange as Range,
 )
 from moq_ffi import (
     MoqRoute as Route,
@@ -58,6 +67,7 @@ from moq_ffi import (
 from ._records import Backoff, ConnectionStats, Datagram, Frame, Subscription, TrackInfo
 
 __all__ = [
+    "Anchor",
     "AudioCodec",
     "AudioEncoderInput",
     "AudioPreset",
@@ -69,8 +79,10 @@ __all__ = [
     "ErrorScope",
     "Frame",
     "FetchGroupOptions",
+    "Order",
     "ProtocolError",
     "ProtocolKind",
+    "Range",
     "Route",
     "Subscription",
     "TrackInfo",

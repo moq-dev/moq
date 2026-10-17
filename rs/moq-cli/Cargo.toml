@@ -103,6 +103,7 @@ axum = { workspace = true }
 axum-server = { workspace = true }
 base64 = { workspace = true }
 bytes = { workspace = true }
+futures = { workspace = true }
 hang = { workspace = true }
 humantime = { workspace = true }
 moq-archive = { workspace = true }

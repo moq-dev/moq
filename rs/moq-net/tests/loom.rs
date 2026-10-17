@@ -102,7 +102,7 @@ fn back_to_back_groups_arrive_in_order() {
 		});
 
 		let from_start = moq_net::track::Subscription::default()
-			.with_start(moq_net::track::Position::group(0))
+			.with_groups(0..)
 			.with_max_delay(std::time::Duration::MAX);
 		let mut subscriber = block_on(track_consumer.subscribe(from_start)).expect("subscribe");
 		let first = block_on(subscriber.recv_group()).expect("recv").expect("first group");
@@ -513,8 +513,7 @@ fn an_aborted_parked_group_releases_a_finished_track() {
 		let track = broadcast.create_track("parked", timed()).unwrap();
 		let group = track.append_group().unwrap();
 		group.clone().finish().unwrap();
-		let mut subscriber =
-			track.subscribe(moq_net::track::Subscription::default().with_start(moq_net::track::Position::group(0)));
+		let mut subscriber = track.subscribe(moq_net::track::Subscription::default().with_groups(0..));
 		subscriber.set_groups(..0);
 		track.finish().unwrap();
 		let aborting = thread::spawn(move || group.abort(Error::Old).unwrap());

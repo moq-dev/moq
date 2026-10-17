@@ -26,3 +26,4 @@ mod shutdown_signal;
 mod smoke;
 mod stack;
 mod upstream_links;
+mod wire_stats;

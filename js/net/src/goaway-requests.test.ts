@@ -283,3 +283,109 @@ test("announcing and subscribing after GOAWAY still open streams, on the adapter
 		subscriber.close();
 	}
 });
+
+/**
+ * A route change alone is never fatal, but a dead route is: once the replacement wins, the
+ * subscription already open on the draining session keeps going while the old publisher
+ * serves it, and that session closing ends the subscription with an error, never cleanly.
+ * The old session closes either before the `restart` reaches the viewer or after.
+ */
+async function routeDeath(kind: "lite" | "ietf", after: boolean): Promise<void> {
+	const protocol = kind === "lite" ? ALPN_06 : ALPN.DRAFT_17;
+	const pair = createMockTransportPair(protocol);
+	const inject = kind === "ietf" ? captureFirstUni(pair.server) : undefined;
+	const goawayBytes = kind === "ietf" ? await encodeIetfGoaway() : undefined;
+
+	const consume = new OriginProducer();
+	const publish = new OriginProducer();
+	const broadcast = publish.createBroadcast(Path.from("room"));
+	broadcast.announce();
+
+	const served: TrackProducer[] = [];
+	const serving = (async () => {
+		for (;;) {
+			const req = await wireOf(broadcast).requested();
+			if (!req) break;
+			const track = req.accept({ timescale: Timescale.MILLI });
+			track.writeFrame(textFrame("one"));
+			served.push(track);
+		}
+	})();
+
+	const [client, server] = await Promise.all([
+		connect({ url, transport: pair.client, consume }),
+		accept({ transport: pair.server, url, publish: publish.consume() }),
+	]);
+
+	const watching = consume.announced();
+	const request = consume.request(Path.from("room"));
+	let routes: ReturnType<typeof consume.announced> | undefined;
+	let replacement: Awaited<ReturnType<typeof connect>> | undefined;
+	let replacementServer: Awaited<ReturnType<typeof accept>> | undefined;
+
+	try {
+		expect((await watching.next())?.kind).toBe("start");
+		await waitUntil(() => request.active.peek() !== undefined);
+		const front = request.active.peek();
+		if (!front) throw new Error("no route");
+		const video = front.track("video").subscribe().ordered();
+		expect(await video.readString()).toBe("one");
+
+		if (inject && goawayBytes) await inject.inject(goawayBytes);
+		else await sendLiteGoaway(pair.server);
+		await wireOf(client).goaway;
+
+		routes = consume.announced();
+		expect((await routes.next())?.kind).toBe("start");
+		const pair2 = createMockTransportPair(protocol);
+		[replacement, replacementServer] = await Promise.all([
+			connect({ url, transport: pair2.client, consume }),
+			accept({ transport: pair2.server, url, publish: publish.consume() }),
+		]);
+		if (after) {
+			// Skip the drain cost reaching the route, if it lands after the start.
+			let event = await routes.next();
+			while (event?.kind === "update") event = await routes.next();
+			expect(event).toMatchObject({ prefix: Path.from("room"), kind: "restart" });
+		}
+
+		// The old publisher still serves the old instance, so its subscription carries on.
+		for (const producer of served) {
+			if (producer.closed.peek() === undefined) producer.writeFrame(textFrame("two"));
+		}
+		expect(await video.readString()).toBe("two");
+
+		// A draining close of a session still serving a live track gives up after its drain.
+		await server.close().catch(() => {});
+		await expect(
+			(async () => {
+				for (;;) {
+					if ((await video.readString()) === undefined) return "ended cleanly";
+				}
+			})(),
+		).rejects.toThrow();
+		video.close();
+	} finally {
+		watching.close();
+		routes?.close();
+		request.close();
+		replacement?.abort();
+		replacementServer?.abort();
+		client.abort();
+		server.abort();
+		broadcast.close();
+		await serving;
+		publish.close();
+		consume.close();
+	}
+}
+
+for (const kind of ["lite", "ietf"] as const) {
+	test(`${kind}: the draining session closing before the restart errors its subscription`, async () => {
+		await routeDeath(kind, false);
+	});
+
+	test(`${kind}: the draining session closing after the restart errors its subscription`, async () => {
+		await routeDeath(kind, true);
+	});
+}

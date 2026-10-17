@@ -1649,7 +1649,8 @@ async fn import_refuses_a_restart() {
 }
 
 /// Skipping sequences (an HLS media-sequence gap) is not a new timeline: a rewound decode time
-/// after a seek is still refused. Only a signalled discontinuity starts the comparison afresh.
+/// after a seek is still refused. A signalled discontinuity skips the import's own comparison,
+/// but the track still refuses a group that starts before the one before it.
 #[tokio::test]
 async fn seek_keeps_the_decode_time_until_a_discontinuity() {
 	let (init, _, _) = bbb_init();
@@ -1671,8 +1672,11 @@ async fn seek_keeps_the_decode_time_until_a_discontinuity() {
 
 	fmp4.discontinuity();
 	fmp4.seek(200).unwrap();
-	fmp4.decode(&live_session(0, 5))
-		.expect("a signalled discontinuity starts a new timeline");
+	let err = fmp4.decode(&live_session(0, 5)).unwrap_err();
+	assert!(
+		matches!(err, crate::Error::Moq(moq_net::Error::TimestampMismatch)),
+		"{err:?}"
+	);
 }
 
 /// The catalog is first published at the first fragment, carrying the clock that fragment

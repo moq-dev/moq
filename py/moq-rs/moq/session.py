@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from moq_ffi import MoqBandwidth, MoqError, MoqReservation, MoqSession
+from moq_ffi import MoqBandwidth, MoqBandwidthConsumer, MoqError, MoqReservation, MoqSession
 
 from .origin import OriginConsumer, OriginProducer
 from .publish import TrackDemand
@@ -107,6 +107,11 @@ class Session:
         Individual fields are ``None`` when the transport backend doesn't report them."""
         return ConnectionStats._from_ffi(self._inner.stats())
 
+    def recv_bandwidth(self) -> Bandwidth.Consumer | None:
+        """Hold an owned receive-estimate consumer; releasing the last one stops PROBE."""
+        inner = self._inner.recv_bandwidth()
+        return None if inner is None else Bandwidth.Consumer(inner)
+
     def bandwidth(self) -> Bandwidth:
         """The session's bandwidth allocator.
 
@@ -123,6 +128,24 @@ class Bandwidth:
 
     Minted by :meth:`Session.bandwidth`. Clones share one reservation registry.
     """
+
+    class Consumer:
+        """An owned bandwidth estimate, in bits per second."""
+
+        def __init__(self, inner: MoqBandwidthConsumer) -> None:
+            self._inner = inner
+
+        def peek(self) -> int | None:
+            """Read the current estimate, or None while unavailable."""
+            return self._inner.peek()
+
+        async def changed(self) -> int | None:
+            """Wait for the estimate to change, raising when its producer closes."""
+            return await self._inner.changed()
+
+        def cancel(self) -> None:
+            """Release this consumer's demand, including a pending wait."""
+            self._inner.cancel()
 
     def __init__(self, inner: MoqBandwidth) -> None:
         self._inner = inner

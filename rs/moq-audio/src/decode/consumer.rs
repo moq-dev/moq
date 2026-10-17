@@ -192,7 +192,7 @@ impl Consumer {
 			)
 			.await?;
 		// Latest skips cached history unless decoder warmup needs it. Move the
-		// local cursor, not Subscription::group_start: the latter is aggregated
+		// local cursor, not Subscription::ranges: the latter is aggregated
 		// across subscribers and can ask the publisher to rewind for everyone.
 		if options.start == Start::Latest
 			&& warmup.is_zero()

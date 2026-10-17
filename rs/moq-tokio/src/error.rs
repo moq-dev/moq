@@ -105,13 +105,9 @@ pub enum Error {
 	#[error("quic {0} must be non-zero and fit a QUIC varint")]
 	WindowRange(&'static str),
 
-	/// A QUIC stream limit is past the 2^60 a peer accepts.
-	#[error("quic max_streams must be at most 2^60")]
+	/// A QUIC stream limit is zero or past the 2^60 a peer accepts.
+	#[error("quic max_streams must be between 1 and 2^60")]
 	StreamsRange,
-
-	/// A session's QUIC limits were changed on a transport that is not QUIC.
-	#[error("{0} sessions have no QUIC limits to change")]
-	QuicLimits(crate::Transport),
 
 	/// Every backend we tried gave up without reporting why.
 	#[error("failed to connect to server")]
@@ -265,7 +261,6 @@ impl Error {
 			| Self::IdleTimeoutRange
 			| Self::WindowRange(_)
 			| Self::StreamsRange
-			| Self::QuicLimits(_)
 			| Self::QlogUnsupported
 			| Self::Connect(_) => true,
 			#[cfg(feature = "quic")]

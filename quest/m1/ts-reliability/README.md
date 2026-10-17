@@ -103,6 +103,7 @@ remain with their current quests.
 - [Plan: semantic fidelity](/quest/m1/ts-reliability/fidelity.md) - explicit profiles and PMT lifecycle contracts produce implementation quests
 - [Whole-PES import](/quest/m1/ts-reliability/pes-import.md) - private PES travels whole at its source placement, a missing PTS stays missing, and the `pes` framing is deleted
 - [Section placement](/quest/m1/ts-reliability/section-placement.md) - sections share the PCR placement clock instead of the video PTS
+- [Sequence holes get a time budget](/quest/m1/ts-reliability/hole-budget.md) - a hole gives up on max(wall, pts), so a break marker behind it on a paused track is delivered
 - [Loss and recovery tests](/quest/m1/ts-reliability/recovery.md) - actual MoQ omissions exercise reacquisition and unaffected tracks
 
 ## Related

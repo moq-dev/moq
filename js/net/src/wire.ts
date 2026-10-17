@@ -65,6 +65,12 @@ export interface OriginProducer {
 	// pending: /quest/m1/public-model/answer.md
 	expect(): Dispose;
 	// pending: /quest/m1/public-model/answer.md
+	/**
+	 * Hold the origin's announcement streams overlapping `prefix` unsynced until
+	 * the returned dispose: a session holds one while its peer's initial set is in flight.
+	 */
+	snapshot(prefix: Path.Valid): Dispose;
+	// pending: /quest/m1/public-model/answer.md
 	readonly requests: Getter<ReadonlyMap<Path.Valid, origin.RequestSlot> | undefined>;
 	// pending: /quest/m1/public-model/answer.md
 	changed(): GetPromise<unknown>;

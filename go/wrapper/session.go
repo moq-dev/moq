@@ -132,3 +132,26 @@ func (s *Session) abort() {
 func (s *Session) Cancel(code uint32) {
 	s.inner.Cancel(code)
 }
+
+// RecvBandwidth holds receive-estimate demand until its consumer is closed.
+func (s *Session) RecvBandwidth() *BandwidthConsumer {
+	inner := s.inner.RecvBandwidth()
+	if inner == nil {
+		return nil
+	}
+	return &BandwidthConsumer{inner: *inner}
+}
+
+// BandwidthConsumer owns a bandwidth estimate, in bits per second.
+type BandwidthConsumer struct{ inner *ffi.MoqBandwidthConsumer }
+
+// Peek reads the current estimate, or nil while unavailable.
+func (b *BandwidthConsumer) Peek() *uint64 { return b.inner.Peek() }
+
+// Changed waits for the estimate to change, or its producer to close.
+func (b *BandwidthConsumer) Changed(ctx context.Context) (*uint64, error) {
+	return bridge.Call(ctx, b.inner.Cancel, b.inner.Changed)
+}
+
+// Close releases this consumer's demand, including a pending wait.
+func (b *BandwidthConsumer) Close() { b.inner.Cancel() }

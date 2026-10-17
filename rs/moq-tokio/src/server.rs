@@ -732,7 +732,7 @@ impl Server {
 							let Accepted { session, url, identity, authority, mut link } = within(deadline, crate::quic::accept(_conn, alpns)).await?;
 							link.local = local;
 							let binding = match url { Some(_) => moq_net::transport::Binding::Uri, None => moq_net::transport::Binding::InBand };
-							let quic = Some(session.clone());
+							let quic = Some(crate::quic::Connection::new((*session).clone()));
 							let (request, deadline) = accept_request(&setup.server, session, binding, deadline).await?;
 							// Only WebTransport carries a request URL; raw QUIC puts the path in the SETUP.
 							let transport = match url { Some(_) => Transport::WebTransport, None => Transport::Quic };
@@ -1658,10 +1658,9 @@ pub struct Request {
 	/// The link facts the transport could see.
 	link: Link,
 	kind: RequestKind,
-	/// The connection under a QUIC or WebTransport request, for
-	/// [`Request::set_quic_limits`].
+	/// The connection under a QUIC or WebTransport request, for [`Request::quic`].
 	#[cfg(feature = "quic")]
-	quic: Option<crate::quic::web::Session>,
+	quic: Option<crate::quic::Connection>,
 	/// What remains of the handshake deadline, which also bounds [`Request::ok`].
 	deadline: Option<Deadline>,
 }
@@ -1780,29 +1779,11 @@ impl Request {
 		self
 	}
 
-	/// Change this connection's QUIC flow-control limits, such as widening them
-	/// once the peer is known to be another relay.
-	///
-	/// Errors on a transport that is not QUIC (qmux streams, iroh), which keeps
-	/// the limits its own config set, and on limits [`Limits::validate`](crate::quic::Limits::validate)
-	/// refuses, leaving the limits unchanged.
-	pub fn set_quic_limits(&self, limits: crate::quic::Limits) -> crate::Result<()> {
-		#[cfg(feature = "quic")]
-		if let Some(conn) = &self.quic {
-			use crate::quic::driver::VarInt;
-			limits.validate()?;
-			let window = VarInt::from_u64(limits.receive_window.get()).expect("validated");
-			// Windows first: each setter can flush on its own, and the stream credit is
-			// what a peer waits on, so it must not overtake the window.
-			conn.set_receive_window(window);
-			conn.set_send_window(limits.send_window.get());
-			let streams = VarInt::from_u64(limits.max_streams.get()).expect("validated");
-			conn.set_max_concurrent_bi_streams(streams);
-			conn.set_max_concurrent_uni_streams(streams);
-			return Ok(());
-		}
-		let _ = limits;
-		Err(Error::QuicLimits(self.transport))
+	/// The QUIC connection under this request, to change its limits before answering
+	/// SETUP. `None` on a transport moq-quic does not drive (qmux streams, iroh).
+	#[cfg(feature = "quic")]
+	pub fn quic(&self) -> Option<&crate::quic::Connection> {
+		self.quic.as_ref()
 	}
 
 	/// Accept the session and return its supervised driver task.

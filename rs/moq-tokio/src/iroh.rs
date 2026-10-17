@@ -288,17 +288,11 @@ fn transport_config(quic: &crate::quic::Resolved) -> iroh::endpoint::QuicTranspo
 	if !quic.mtu_discovery {
 		transport = transport.mtu_discovery_config(None);
 	}
-	// iroh's connection window is unlimited, so apply ours when unset.
-	let window = quic.receive_window.unwrap_or(crate::quic::DEFAULT_RECEIVE_WINDOW);
-	let window = iroh::endpoint::VarInt::from_u64(window).unwrap_or(iroh::endpoint::VarInt::MAX);
+	let window = iroh::endpoint::VarInt::from_u64(quic.receive_window).unwrap_or(iroh::endpoint::VarInt::MAX);
 	transport = transport.receive_window(window);
-	if let Some(window) = quic.stream_receive_window {
-		let window = iroh::endpoint::VarInt::from_u64(window).unwrap_or(iroh::endpoint::VarInt::MAX);
-		transport = transport.stream_receive_window(window);
-	}
-	if let Some(window) = quic.send_window {
-		transport = transport.send_window(window);
-	}
+	let window = iroh::endpoint::VarInt::from_u64(quic.stream_receive_window).unwrap_or(iroh::endpoint::VarInt::MAX);
+	transport = transport.stream_receive_window(window);
+	transport = transport.send_window(quic.send_window);
 	transport.congestion_controller_factory(congestion_factory(quic.congestion()))
 }
 
