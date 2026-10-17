@@ -278,6 +278,7 @@ pub(crate) fn timebase<E: moq_mux::catalog::hang::CatalogExt>(
 		timebase
 			.place(moq_net::Timestamp::ZERO, zero)
 			.with_context(|| format!("failed to place the clock on epoch {epoch}"))?;
+		timebase.align_groups();
 	}
 	Ok(timebase)
 }

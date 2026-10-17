@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use super::hang::CatalogExt;
@@ -19,6 +20,7 @@ use super::{Producer, Reserved};
 pub struct Timebase<E: CatalogExt = ()> {
 	pub(super) catalog: Producer<E>,
 	offset: Arc<OnceLock<Offset>>,
+	aligned: Arc<AtomicBool>,
 }
 
 impl<E: CatalogExt> Timebase<E> {
@@ -26,6 +28,7 @@ impl<E: CatalogExt> Timebase<E> {
 		Self {
 			catalog,
 			offset: Default::default(),
+			aligned: Default::default(),
 		}
 	}
 
@@ -50,10 +53,25 @@ impl<E: CatalogExt> Timebase<E> {
 	/// frame, this places the catalog's clock if it is not yet fixed and offsets onto it otherwise.
 	/// A placement alone publishes nothing: the clock goes out with the catalog's first track.
 	/// Refused once this timebase has an offset, and when the host's wall clock was unset, leaving no
-	/// wall to place it on.
+	/// wall to place it on. Importers that must also agree on their groups call
+	/// [`align_groups`](Self::align_groups) too.
 	pub fn place(&self, pts: moq_net::Timestamp, wall: std::time::SystemTime) -> crate::Result<()> {
 		self.catalog.clone().anchor(&self.offset, pts, Some(wall))?;
 		Ok(())
+	}
+
+	/// Group every track reserved from now on by the catalog clock's one-second grid (see
+	/// [`container::Producer`](crate::container::Producer#grid)), for the publishers of one shared
+	/// epoch: [placed](Self::place) on it and fed one stream, they then publish the same groups under
+	/// the same sequences wherever each started, which a relay that resumes one's subscriptions on
+	/// another needs.
+	pub fn align_groups(&self) {
+		self.aligned.store(true, Ordering::Relaxed);
+	}
+
+	/// Whether [`align_groups`](Self::align_groups) was called on this timebase or a clone.
+	pub(crate) fn aligned(&self) -> bool {
+		self.aligned.load(Ordering::Relaxed)
 	}
 
 	/// Anchor on the first frame's timestamp `pts`, returning the timebase's offset.
@@ -113,6 +131,7 @@ impl<E: CatalogExt> Clone for Timebase<E> {
 		Self {
 			catalog: self.catalog.clone(),
 			offset: self.offset.clone(),
+			aligned: self.aligned.clone(),
 		}
 	}
 }

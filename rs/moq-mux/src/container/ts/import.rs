@@ -636,6 +636,7 @@ impl<E: catalog::Catalog> Import<E> {
 						pid.as_u16(),
 						stream_type,
 						descriptors,
+						self.timebase.aligned(),
 					) {
 						Ok(stream) => Stream::Verbatim(Box::new(stream)),
 						Err(err) => {
@@ -708,6 +709,7 @@ impl<E: catalog::Catalog> Import<E> {
 			pid.as_u16(),
 			stream_type,
 			descriptors,
+			self.timebase.aligned(),
 		)?;
 		stream.retained = Retained::new(self.staging.clone());
 		self.sections.insert(pid.as_u16(), stream);
@@ -779,6 +781,7 @@ impl<E: catalog::Catalog> Import<E> {
 			// previous one's.
 			if pts.is_some() {
 				self.last_pts = on_clock(pts, offset)?;
+				self.advance_data()?;
 			}
 		}
 		if pts.is_some() {
@@ -814,6 +817,23 @@ impl<E: catalog::Catalog> Import<E> {
 
 		if complete {
 			self.flush(pid)?;
+		}
+		Ok(())
+	}
+
+	/// Carry the media clock to the data tracks, which with aligned groups group on its grid
+	/// whether or not they carry anything.
+	fn advance_data(&mut self) -> anyhow::Result<()> {
+		let Some(now) = self.last_pts else {
+			return Ok(());
+		};
+		for section in self.sections.values_mut() {
+			section.track.advance(now)?;
+		}
+		for stream in self.streams.values_mut() {
+			if let Stream::Verbatim(stream) = stream {
+				stream.track.advance(now)?;
+			}
 		}
 		Ok(())
 	}
@@ -1350,6 +1370,7 @@ fn register_verbatim<E: catalog::Catalog>(
 	stream_type: u8,
 	framing: catalog::Framing,
 	descriptors: Vec<catalog::Descriptor>,
+	grid: bool,
 ) -> anyhow::Result<crate::container::Producer<crate::catalog::hang::Container>> {
 	// Verbatim payloads ride the legacy container, which normalizes the per-frame
 	// timestamp to microseconds on the wire (see `hang::container::Frame::encode`),
@@ -1366,10 +1387,13 @@ fn register_verbatim<E: catalog::Catalog>(
 	// timeline track can collide), and the `VerbatimEntry` that removes this catalog
 	// entry on drop only exists once this function returns successfully, so an entry
 	// published first would be stranded.
-	let media = catalog.media_raw(
+	let mut media = catalog.media_raw(
 		track,
 		crate::catalog::hang::Container::Legacy(crate::container::Kind::Data),
 	)?;
+	if grid {
+		media = media.with_grid();
+	}
 
 	let mut guard = catalog.modify()?;
 	let Some(mpegts) = guard.ext.mpegts_mut() else {
@@ -1438,6 +1462,7 @@ impl<E: catalog::Catalog> SectionStream<E> {
 		pid: u16,
 		stream_type: u8,
 		descriptors: Vec<catalog::Descriptor>,
+		grid: bool,
 	) -> anyhow::Result<Self> {
 		let track = register_verbatim(
 			&mut broadcast,
@@ -1446,6 +1471,7 @@ impl<E: catalog::Catalog> SectionStream<E> {
 			stream_type,
 			catalog::Framing::Section,
 			descriptors,
+			grid,
 		)?;
 		let entry = VerbatimEntry {
 			name: track.name().to_string(),
@@ -1510,7 +1536,8 @@ impl<E: catalog::Catalog> SectionStream<E> {
 	fn discontinuity(&mut self, published: bool) -> anyhow::Result<()> {
 		// The half-reassembled section is stamped with the clock that just ended.
 		self.reassembler = SectionReassembler::default();
-		if published {
+		// The grid's watch runs on the media clock's ticks, before anything publishes.
+		if published || self.track.on_grid() {
 			self.track.discontinuity()?;
 		}
 		Ok(())
@@ -1582,6 +1609,7 @@ impl<E: catalog::Catalog> VerbatimStream<E> {
 		pid: u16,
 		stream_type: u8,
 		descriptors: Vec<catalog::Descriptor>,
+		grid: bool,
 	) -> anyhow::Result<Self> {
 		let track = register_verbatim(
 			&mut broadcast,
@@ -1590,6 +1618,7 @@ impl<E: catalog::Catalog> VerbatimStream<E> {
 			stream_type,
 			catalog::Framing::Pes,
 			descriptors,
+			grid,
 		)?;
 		let entry = VerbatimEntry {
 			name: track.name().to_string(),
@@ -1634,7 +1663,8 @@ impl<E: catalog::Catalog> VerbatimStream<E> {
 	}
 
 	fn discontinuity(&mut self, published: bool) -> anyhow::Result<()> {
-		if published {
+		// The grid's watch runs on the media clock's ticks, before anything publishes.
+		if published || self.track.on_grid() {
 			self.track.discontinuity()?;
 		}
 		Ok(())
@@ -6996,6 +7026,7 @@ pub(super) mod test {
 		timebase
 			.place(Timestamp::ZERO, epoch - Duration::from_micros(WRAP_MICROS))
 			.unwrap();
+		timebase.align_groups();
 		let mut import = super::Import::new(broadcast, timebase.reserve());
 		let pmt = synth_pmt(
 			&[(StreamType::Mpeg1Audio, PCR_PID), (StreamType::Mpeg1Audio, PEER_PID)],
@@ -7033,9 +7064,34 @@ pub(super) mod test {
 		frames
 	}
 
-	/// Importers placed by one epoch publish one timeline wherever each joined the source: one
-	/// from before a wrap, one at it with its streams' first values either side of it, and one
-	/// after it on a host clock 7 ms ahead, taking the source 40 ms late.
+	/// Each rendition `catalog` lists, by name: every group's sequence and the fills of its frames.
+	async fn groups(
+		consumer: &moq_net::broadcast::Consumer,
+		catalog: &crate::catalog::Producer,
+	) -> BTreeMap<String, Vec<(u64, Vec<u8>)>> {
+		let mut tracks = BTreeMap::new();
+		for name in catalog.snapshot().audio.renditions.into_keys() {
+			let subscription = moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(3600));
+			let mut track = consumer.track(&name).unwrap().subscribe(subscription).await.unwrap();
+			let mut groups = Vec::new();
+			while let Ok(Ok(Some(mut group))) =
+				tokio::time::timeout(Duration::from_millis(50), track.recv_group()).await
+			{
+				let mut fills = Vec::new();
+				while let Some(frame) = group.read_frame().await.unwrap() {
+					let frame = hang::container::Frame::decode(frame.payload).unwrap();
+					fills.extend(frame.payload.get(4));
+				}
+				groups.push((group.sequence, fills));
+			}
+			tracks.insert(name, groups);
+		}
+		tracks
+	}
+
+	/// Importers placed by one epoch publish one timeline and the same groups wherever each joined
+	/// the source: one from before a wrap, one at it with its streams' first values either side of
+	/// it, and one after it on a host clock 7 ms ahead, taking the source 40 ms late.
 	#[tokio::test(start_paused = true)]
 	async fn importers_sharing_an_epoch_publish_one_timeline_wherever_each_started() {
 		let epoch = epoch_time();
@@ -7043,7 +7099,7 @@ pub(super) mod test {
 		let first = WRAP - 10 * STEP;
 		let (consumer, catalog, mut import) = epoch_import(epoch, start);
 		let (mut at_wrap, mut late) = (None, None);
-		for i in 0..30 {
+		for i in 0..40 {
 			let now = start + Duration::from_micros(i * 144_000);
 			if i == 10 {
 				at_wrap = Some(epoch_import(epoch, now));
@@ -7064,13 +7120,30 @@ pub(super) mod test {
 		}
 		import.finish().unwrap();
 		let all = timeline(&consumer, &catalog).await;
-		assert_eq!(all.len(), 120, "every frame of both streams");
-		let pcr: Vec<i64> = (1..=60).map(|fill| all[&fill]).collect();
+		// Nothing from the second it started in, at most fourteen 72 ms frames, then every frame.
+		let pcr: Vec<u8> = all.keys().copied().filter(|fill| *fill <= 80).collect();
+		let peer: Vec<u8> = all.keys().copied().filter(|fill| *fill > 80).collect();
+		assert!(
+			pcr.len() >= 66 && pcr == (81 - pcr.len() as u8..=80).collect::<Vec<_>>(),
+			"{pcr:?}"
+		);
+		assert!(
+			peer.len() >= 66 && peer == (0xd0 - peer.len() as u8..=0xcf).collect::<Vec<_>>(),
+			"{peer:?}"
+		);
+		let pcr: Vec<i64> = pcr.iter().map(|fill| all[fill]).collect();
 		assert!(
 			pcr.windows(2).all(|w| (71_999..=72_001).contains(&(w[1] - w[0]))),
 			"the first importer runs on through the wrap: {pcr:?}"
 		);
 		assert_eq!(catalog.snapshot().clock, Some(epoch_clock(epoch)));
+		let first_groups = groups(&consumer, &catalog).await;
+		for (name, groups) in &first_groups {
+			assert!(
+				groups.windows(2).all(|pair| pair[1].0 == pair[0].0 + 1),
+				"{name}: consecutive sequences through the wrap"
+			);
+		}
 
 		let names =
 			|catalog: &crate::catalog::Producer| catalog.snapshot().audio.renditions.into_keys().collect::<Vec<_>>();
@@ -7088,10 +7161,12 @@ pub(super) mod test {
 					"frame {fill:#x} of the importer joined {when}"
 				);
 			}
-			if when == "at the wrap" {
+			for (name, groups) in groups(&consumer, &joined_catalog).await {
+				assert!(!groups.is_empty(), "{when}: {name} published no group");
 				assert!(
-					frames.contains_key(&21) && frames.contains_key(&0x94),
-					"its streams began either side of the wrap"
+					first_groups[&name].ends_with(&groups),
+					"{when}: {name}'s groups {groups:?} are not the first importer's {:?}",
+					first_groups[&name]
 				);
 			}
 		}
@@ -7396,7 +7471,7 @@ pub(super) mod test {
 		let jump = 600 * 90_000;
 		let (consumer, catalog, mut import) = epoch_import(epoch, start);
 		let mut joined = None;
-		for i in 0..20 {
+		for i in 0..30 {
 			if i == 15 {
 				joined = Some(epoch_import(epoch, start + Duration::from_micros(i * 144_000)));
 			}
@@ -7420,16 +7495,24 @@ pub(super) mod test {
 			"the jump adds its step: {step} µs"
 		);
 
+		let first_groups = groups(&consumer, &catalog).await;
 		let (consumer, joined_catalog, mut joined) = joined.unwrap();
 		joined.finish().unwrap();
 		assert_eq!(joined_catalog.snapshot().clock, catalog.snapshot().clock);
 		let frames = timeline(&consumer, &joined_catalog).await;
-		assert!(frames.contains_key(&31), "{frames:?}");
+		assert!(frames.len() >= 20, "{frames:?}");
 		for (fill, micros) in &frames {
 			assert_eq!(
 				all.get(fill),
 				Some(micros),
 				"frame {fill:#x} of the importer that joined after the jump"
+			);
+		}
+		for (name, groups) in groups(&consumer, &joined_catalog).await {
+			assert!(
+				first_groups[&name].ends_with(&groups),
+				"{name}'s groups {groups:?} are not the first importer's {:?}",
+				first_groups[&name]
 			);
 		}
 	}
@@ -7467,20 +7550,21 @@ pub(super) mod test {
 		// An hour short of the wrap.
 		let first = WRAP - 3600 * 90_000;
 		let (consumer, catalog, mut import) = epoch_import(epoch, start);
-		for i in 0..5 {
+		for i in 0..20 {
 			import.decode(&source_pes(i, first + i * STEP)).unwrap();
 			tokio::time::advance(Duration::from_millis(144)).await;
 		}
 		import.finish().unwrap();
 		let before = timeline(&consumer, &catalog).await;
+		let stopped = groups(&consumer, &catalog).await;
 		let clock = catalog.snapshot().clock;
 		drop((consumer, catalog, import));
 
 		let outage = Duration::from_secs(2 * 3600);
 		tokio::time::advance(outage).await;
-		let resumed = start + Duration::from_micros(5 * 144_000) + outage;
+		let resumed = start + Duration::from_micros(20 * 144_000) + outage;
 		let (consumer, catalog, mut import) = epoch_import(epoch, resumed);
-		for i in 5..10 {
+		for i in 20..40 {
 			let pts = (first + i * STEP + outage.as_secs() * 90_000) % WRAP;
 			import.decode(&source_pes(i, pts)).unwrap();
 			tokio::time::advance(Duration::from_millis(144)).await;
@@ -7488,11 +7572,18 @@ pub(super) mod test {
 		import.finish().unwrap();
 		let after = timeline(&consumer, &catalog).await;
 		assert_eq!(catalog.snapshot().clock, clock);
-		let gap = after[&11] - before[&1];
+		// The last step of each run, since a run publishes nothing from the second it started in.
+		let gap = after[&79] - before[&39];
 		assert!(
-			(7_200_719_999..=7_200_720_001).contains(&gap),
+			(7_202_879_999..=7_202_880_001).contains(&gap),
 			"the outage is a gap of {gap} µs"
 		);
+		for (name, groups) in groups(&consumer, &catalog).await {
+			// 7,200.072 s from the last frame before the outage to the first after it, plus the
+			// second the resumed run drops.
+			let (last, first) = (stopped[&name].last().unwrap().0, groups[0].0);
+			assert!((7_201..=7_202).contains(&(first - last)), "{name}: {last} then {first}");
+		}
 	}
 
 	/// A 5-byte PES timestamp field with the 4-bit `prefix` (0b0010 PTS only, 0b0011 PTS of a

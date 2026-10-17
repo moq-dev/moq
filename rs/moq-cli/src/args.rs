@@ -446,7 +446,8 @@ pub struct MoqSide {
 	/// then off by the source clock's reading at the epoch's time, which for a TS program
 	/// clock is anywhere within half a wrap. Near either end of that range, processes whose
 	/// clocks or delivery differ can place one timestamp a wrap apart, and redundant `flv`
-	/// imports stop matching at FLV's 49.7-day millisecond wrap.
+	/// imports stop matching at FLV's 49.7-day millisecond wrap. Groups are numbered by the
+	/// second of that clock they open in, so the publishers agree on those too.
 	#[usage(long, env = "MOQ_EPOCH", help_heading = "MoQ")]
 	pub epoch: Option<hang::moq_net::Epoch>,
 

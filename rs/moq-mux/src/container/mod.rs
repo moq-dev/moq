@@ -16,6 +16,7 @@ use bytes::Bytes;
 
 mod consumer;
 mod decode;
+mod grid;
 mod group;
 mod producer;
 mod source;

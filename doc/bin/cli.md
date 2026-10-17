@@ -335,8 +335,14 @@ On moq-lite 07, two processes that pass the same `--epoch` (a UUIDv7, such as
 `uuidgen -7` prints) are one publisher: relays fail over between them
 mid-group, so they must produce identical tracks with aligned groups. Each
 derives its catalog clock from the epoch's wall time, so fed one stream they
-publish the same clock and timestamps wherever each started, without reading
-anything from the other; group numbering is not aligned yet. PTS zero is the
+publish the same clock, timestamps, and media groups wherever each started,
+without reading anything from the other; the catalog and timeline tracks are not
+aligned yet. Every media track groups on that clock's one-second
+grid: a group opens at the first place one may start in a second (a keyframe,
+or any audio frame or data unit) and takes that second's number, later ones in
+the second join it, and a second with none gets an empty group. A process
+publishes nothing from the second it started in, and a source's timestamp break
+publishes no break marker, only the jump. PTS zero is the
 epoch's time, and for `ts` one 33-bit wrap before it. The wall mapping is
 therefore off by the source clock's reading at the epoch's time: for a TS
 program clock, anywhere within 13.25 hours. Each process picks a TS timestamp's

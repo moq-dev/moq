@@ -27,6 +27,14 @@
 //! a random access point. A group the PCR discontinuity starts is behind a break even when it is
 //! also a random access point.
 //!
+//! On a timebase whose groups are [aligned](crate::catalog::Timebase::align_groups), the track
+//! groups on the catalog clock's one-second grid (see
+//! [`container::Producer`](crate::container::Producer#grid)), and the fallback grid's lines are
+//! that clock's. A group then opens only at the first start in a second, numbered by that
+//! second, and later starts in it join it, a flagged jump's included. A second with no start gets
+//! an empty group, and no break marker is published. A group that reaches either bound ends the
+//! import with [`GroupFullError`], since it cannot be split.
+//!
 //! Bytes before the first group are dropped: until the PMT, a PCR, and a group start have all
 //! been seen there is no group to put them in. A jump before the first group starts none, and a
 //! line of the grid starts it only once the importer has watched for random access through the
@@ -68,8 +76,8 @@
 //! wrap back. The timeline therefore depends only on the bytes and the clock, and the grids above
 //! lie on it, so two importers of one feed whose timebases one shared epoch placed (see
 //! [`Timebase::place`](crate::catalog::Timebase::place)) publish identical objects, groups and
-//! sections wherever each started, from the later one's first group on (group sequence numbers
-//! aside). Objects timed past the last PCR before a flagged jump smaller than their lead can land
+//! sections wherever each started, from the later one's first group on, under the same group
+//! sequences. Objects timed past the last PCR before a flagged jump smaller than their lead can land
 //! after the first ones behind it; if one of them starts a group, the group behind the break would
 //! start before it, and the import ends there.
 
@@ -81,6 +89,7 @@ use mpeg2ts::ts::{Pid, TsPacket};
 use super::import::{Framer, PatReader, SectionReassembler, adaptation_valid, discontinuity_indicator, pcr};
 use super::mux_rate::{PCR_WRAP, WINDOW, Windows};
 use super::psi::{self, Pmt};
+use crate::container::grid::GRID_MICROS;
 
 /// The PCR clock, in Hz.
 const PCR_HZ: u64 = 27_000_000;
@@ -179,6 +188,23 @@ pub struct PcrRestartError {
 	pub to: u64,
 }
 
+/// On a timebase whose groups are [aligned](crate::catalog::Timebase::align_groups), a group
+/// outgrew [`GROUP_BYTES_MAX`] or [`GROUP_OBJECTS_MAX`].
+///
+/// Groups are then numbered by the second they start in, so one cannot be split to stay under
+/// the bound as it is otherwise.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+#[error("group {sequence} reached {bytes} bytes in {objects} objects; an aligned group cannot split")]
+pub struct GroupFullError {
+	/// The group's sequence.
+	pub sequence: u64,
+	/// The bytes it holds.
+	pub bytes: u64,
+	/// The objects it holds.
+	pub objects: usize,
+}
+
 /// The clock PID carried no PCR across more bytes than a group may hold.
 ///
 /// Those bytes cannot be timed, and holding them for a PCR that may never come is unbounded.
@@ -204,6 +230,11 @@ pub struct Passthrough<E: crate::catalog::hang::CatalogExt = ()> {
 	/// Puts every PCR in its era and shifts every object's PCR time onto the catalog clock,
 	/// anchored by the first PCR.
 	shift: crate::catalog::Timebase<E>,
+	/// Whether the timebase was placed, so the track groups on the catalog clock's grid and the
+	/// fallback cuts on its lines (see [`container::Producer`](crate::container::Producer#grid)).
+	grid: bool,
+	/// On the grid, the group the producer holds open and what it holds.
+	held: Option<(u64, Group)>,
 	media: crate::container::Producer<crate::catalog::hang::Container>,
 	/// The section as last written to the catalog, `None` before the first group.
 	section: Option<Section<E>>,
@@ -330,13 +361,20 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 	pub fn new(broadcast: moq_net::broadcast::Producer, reserved: crate::catalog::Reserved<E>) -> crate::Result<Self> {
 		let catalog = reserved.producer();
 		let track = broadcast.unique_track(".m2ts", catalog.track_info(hang::catalog::PRIORITY.video))?;
-		let media = catalog.media_raw(
+		let shift = reserved.timebase();
+		let grid = shift.aligned();
+		let mut media = catalog.media_raw(
 			track,
 			crate::catalog::hang::Container::Legacy(crate::container::Kind::Data),
 		)?;
+		if grid {
+			media = media.with_grid();
+		}
 		Ok(Self {
 			catalog,
-			shift: reserved.timebase(),
+			shift,
+			grid,
+			held: None,
 			reservation: Some(reserved),
 			media,
 			section: None,
@@ -560,12 +598,15 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 				raw,
 				samples: VecDeque::from([Sample { at, ticks }]),
 			});
-			self.watching_since = self.mapped.then_some(ticks);
+			if self.mapped {
+				self.watch(ticks)?;
+			}
 			// A flagged first PCR is a jump an importer running since before counted against the
 			// grid, the original if this one is a retransmitted copy, so it counts here too.
 			if flagged {
 				self.last_mark = Some(ticks);
 			}
+			self.advance(ticks)?;
 			self.windows.pcr(ticks, false);
 			self.window_random_access = self.single;
 			return Ok(None);
@@ -594,6 +635,12 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 			// before this one's first group.
 			self.last_mark = Some(ticks);
 			self.end_window(ticks, true)?;
+			// On the catalog clock's grid the break lands here, between the bytes timed on
+			// either side of it, whether or not this importer has started.
+			if self.grid {
+				self.media.discontinuity()?;
+			}
+			self.advance(ticks)?;
 			return Ok(self.started().then_some(Start::Discontinuity));
 		}
 
@@ -603,19 +650,66 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 			timebase.samples.pop_front();
 		}
 		self.drain_queue()?;
+		self.advance(ticks)?;
 		self.end_window(ticks, false)?;
-		if self.mapped {
-			self.watching_since.get_or_insert(ticks);
+		if self.mapped && self.watching_since.is_none() {
+			self.watch(ticks)?;
 		}
 
 		// The first PCR at or past a line of the grid cuts there, unless a random access point or
 		// a jump fell in the spacing before the line. Before the first group, only a line whose
 		// whole spacing was watched may: an importer running since before would cut there too.
-		let line = ticks / FALLBACK_TICKS * FALLBACK_TICKS;
-		let crossed = last < line;
-		let marked = self.last_mark.is_some_and(|mark| mark + FALLBACK_TICKS >= line);
-		let watched = self.started() || self.watching_since.is_some_and(|since| since + FALLBACK_TICKS <= line);
+		// With aligned groups the lines are the catalog clock's, which number the groups.
+		let spacing = match self.grid {
+			true => i128::from(GRID_MICROS),
+			false => i128::from(FALLBACK_TICKS),
+		};
+		let point = |at: u64| -> anyhow::Result<i128> {
+			Ok(match self.grid {
+				true => self.catalog_time(at)?.as_micros() as i128,
+				false => i128::from(at),
+			})
+		};
+		let line = point(ticks)?.div_euclid(spacing) * spacing;
+		let crossed = point(last)? < line;
+		let marked = match self.last_mark {
+			Some(mark) => point(mark)? + spacing >= line,
+			None => false,
+		};
+		let watched = self.started()
+			|| match self.watching_since {
+				Some(since) => point(since)? + spacing <= line,
+				None => false,
+			};
 		Ok((crossed && !marked && watched && self.can_start()).then_some(Start::Fallback))
+	}
+
+	/// The catalog clock's time at `ticks` on the PCR timeline, as an object there is stamped.
+	fn catalog_time(&self, ticks: u64) -> anyhow::Result<moq_net::Timestamp> {
+		let timestamp = moq_net::Timestamp::from_micros(ticks / (PCR_HZ / 1_000_000))?;
+		Ok(self.shift.shift(timestamp)?)
+	}
+
+	/// Every random access point from the PCR at `ticks` on will be seen. On the grid the track
+	/// learns which cells it watched whole: those whose line comes a spacing after it, as a
+	/// fallback cut there needs.
+	fn watch(&mut self, ticks: u64) -> anyhow::Result<()> {
+		self.watching_since = Some(ticks);
+		if self.grid {
+			let since = self.catalog_time(ticks + FALLBACK_TICKS)?;
+			self.media.watch(since);
+		}
+		Ok(())
+	}
+
+	/// On the grid, carry the PCR at `ticks` to the track, so the cells it passes with no group
+	/// start get their empty groups.
+	fn advance(&mut self, ticks: u64) -> anyhow::Result<()> {
+		if self.grid && self.watching_since.is_some() {
+			let now = self.catalog_time(ticks)?;
+			self.media.advance(now)?;
+		}
+		Ok(())
 	}
 
 	/// The section for the window a PCR at `ticks` ended, if it ended one: written once the window
@@ -667,18 +761,19 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 	}
 
 	fn write(&mut self, object: Object, ticks: u64) -> anyhow::Result<()> {
-		let timestamp = moq_net::Timestamp::from_micros(ticks / (PCR_HZ / 1_000_000))?;
-		let timestamp = self.shift.shift(timestamp)?;
+		let timestamp = self.catalog_time(ticks)?;
 		let size = object.payload.len() as u64;
 		let start = object.start.or_else(|| {
 			self.group
 				.as_ref()
-				.filter(|group| group.bytes + size > GROUP_BYTES_MAX || group.objects >= GROUP_OBJECTS_MAX)
+				.filter(|group| {
+					!self.grid && (group.bytes + size > GROUP_BYTES_MAX || group.objects >= GROUP_OBJECTS_MAX)
+				})
 				.map(|_| Start::Full)
 		});
 
 		if let Some(start) = start {
-			if object.discontinuity && self.group.is_some() {
+			if object.discontinuity && self.group.is_some() && !self.grid {
 				self.media.discontinuity()?;
 			}
 			if start != Start::RandomAccess || !self.single {
@@ -693,12 +788,37 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 		let group = self.group.as_mut().expect("the first object starts a group");
 		group.bytes += size;
 		group.objects += 1;
-		self.media.write(crate::container::Frame {
+		// On the grid an object in a second this importer publishes nothing from has no group.
+		match self.media.write(crate::container::Frame {
 			timestamp,
 			duration: None,
 			payload: object.payload.freeze(),
 			keyframe: start.is_some(),
-		})?;
+		}) {
+			Err(crate::Error::MissingKeyframe(_)) if self.grid => return Ok(()),
+			written => written?,
+		}
+
+		// A start in a cell already open joins its group, so the bound is kept on the group as the
+		// grid holds it, and reaching it ends the import rather than splitting the cell.
+		if self.grid
+			&& let Some(sequence) = self.media.open_group()
+		{
+			if self.held.as_ref().is_none_or(|(held, _)| *held != sequence) {
+				self.held = Some((sequence, Group::default()));
+			}
+			let (_, held) = self.held.as_mut().expect("held above");
+			held.bytes += size;
+			held.objects += 1;
+			if held.bytes > GROUP_BYTES_MAX || held.objects > GROUP_OBJECTS_MAX {
+				return Err(GroupFullError {
+					sequence,
+					bytes: held.bytes,
+					objects: held.objects,
+				}
+				.into());
+			}
+		}
 		Ok(())
 	}
 

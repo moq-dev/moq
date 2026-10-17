@@ -7,6 +7,7 @@ use std::collections::{HashMap, HashSet};
 use super::{Error, Kind, sample};
 use crate::Result;
 use crate::catalog::Estimator;
+use crate::container::grid::Place;
 
 /// Converts fMP4/CMAF files into MoQ broadcast streams using CMAF passthrough.
 ///
@@ -126,6 +127,10 @@ struct Fmp4Track<E: crate::catalog::hang::CatalogExt> {
 	// The segment this track's open group belongs to. A mismatch with `Import::segment` rolls the
 	// group, which is what keeps audio on the same boundaries as video.
 	segment: Option<u64>,
+
+	// Set when the timebase aligns groups, where a segment's first fragment opens one only on the grid
+	// (see `container::Producer`'s grid) and `seek` does nothing.
+	grid: Option<crate::container::grid::Grid>,
 
 	// Measures the track's catalog jitter and bitrate from the fragments; the descriptor's own
 	// bitrate, when it declares one, still wins over what this measures.
@@ -349,6 +354,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 					track,
 					group: None,
 					segment: None,
+					grid: self.timebase.aligned().then(Default::default),
 					recorder: Some(recorder),
 					last_decode_time: None,
 					sample_duration: None,
@@ -993,7 +999,21 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			// The keyframe bit no longer decides that: audio flags every sample a sync sample, so
 			// keying off it opened a group (a QUIC stream) per audio fragment.
 			let new_segment = track.segment != Some(self.segment);
-			let start_group = track.group.is_none() || new_segment;
+			let mut start_group = track.group.is_none() || new_segment;
+			// A dropped fragment still moves the track into its segment, or the segment's next
+			// fragment would read as a start that an importer which kept this one does not see.
+			track.segment = Some(self.segment);
+			let mut fill = 0..0;
+			if let Some(grid) = track.grid.as_mut() {
+				match grid.place(timestamp, start_group, track.group.is_some()) {
+					Place::Drop => continue,
+					Place::Join => start_group = false,
+					Place::Open { fill: empty, sequence } => {
+						fill = empty;
+						track.pending_sequence = Some(sequence);
+					}
+				}
+			}
 			let mut g = if start_group {
 				if let Some(prev) = track.group.take() {
 					prev.finish()?;
@@ -1001,7 +1021,9 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 						recorder.finish_group(prev.sequence);
 					}
 				}
-				track.segment = Some(self.segment);
+				for sequence in fill {
+					track.track.create_group(moq_net::group::Info { sequence })?.finish()?;
+				}
 				match track.pending_sequence.take() {
 					Some(sequence) => track.track.create_group(moq_net::group::Info { sequence })?,
 					None => track.track.append_group()?,
@@ -1102,13 +1124,14 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	/// control is intentionally not exposed. Skipping sequences is not a new timeline, so the
 	/// next fragment must still advance past the last decode time; see
 	/// [`discontinuity`](Self::discontinuity). Text spends a group per cue, so a text track that
-	/// is already past `sequence` continues from its own next group instead.
+	/// is already past `sequence` continues from its own next group instead. On a timebase a shared
+	/// epoch placed, the grid numbers the groups and this does nothing.
 	pub fn seek(&mut self, sequence: u64) -> Result<()> {
 		for track in self.text.values_mut() {
 			let next = track.producer.next_sequence();
 			track.producer.seek(sequence.max(next))?;
 		}
-		for track in self.tracks.values_mut() {
+		for track in self.tracks.values_mut().filter(|track| track.grid.is_none()) {
 			track.estimator.cut(None);
 			track.publish_estimate()?;
 			if let Some(g) = track.group.take() {
@@ -1132,6 +1155,9 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		}
 		for track in self.tracks.values_mut() {
 			track.last_decode_time = None;
+			if let Some(grid) = track.grid.as_mut() {
+				grid.restart();
+			}
 		}
 	}
 }

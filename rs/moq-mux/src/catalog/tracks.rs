@@ -465,9 +465,14 @@ impl<E: CatalogExt> Reserved<E> {
 		crate::Error: From<C::Error>,
 	{
 		let rendition = self.init(track.name())?;
-		self.timebase
+		let producer = self
+			.timebase
 			.catalog
-			.media(track, container, rendition, config.into(), self.timeline_hint)
+			.media(track, container, rendition, config.into(), self.timeline_hint)?;
+		Ok(match self.timebase.aligned() {
+			true => producer.with_grid(),
+			false => producer,
+		})
 	}
 
 	/// Resolve a timestamp on the broadcast's shared clock (see [`Producer::timestamp`]).

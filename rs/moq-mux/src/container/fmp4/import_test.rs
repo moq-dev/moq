@@ -2535,3 +2535,104 @@ fn colr_nclc_keeps_its_code_points() {
 	);
 	assert!(super::colr_color(&mp4_atom::Colr::new(300, 1, 1, false).unwrap()).is_err());
 }
+
+// ---- Shared epoch ----
+
+/// Where the shared-epoch source starts each segment, in milliseconds past ten minutes on from the
+/// epoch: two pairs of segments share a second, and four seconds start none.
+const PLACED_SEGMENTS: [u64; 11] = [
+	0, 1_500, 1_900, 3_000, 4_500, 4_800, 6_000, 7_500, 9_000, 10_500, 12_000,
+];
+
+/// Every group a finished track holds: its sequence and how many frames it carries.
+fn drain_groups(track: &mut moq_net::track::Subscriber) -> Vec<(u64, usize)> {
+	let mut groups = Vec::new();
+	while let Some(mut group) = track.recv_group().now_or_never().and_then(|r| r.ok().flatten()) {
+		let mut frames = 0;
+		while group
+			.next_frame()
+			.now_or_never()
+			.and_then(|r| r.ok().flatten())
+			.is_some()
+		{
+			frames += 1;
+		}
+		groups.push((group.sequence, frames));
+	}
+	groups
+}
+
+/// The video and audio groups of an fMP4 import on a shared epoch's timebase, fed bbb's
+/// init and then [`PLACED_SEGMENTS`] from segment `from` on, each segment one fragment per track.
+async fn placed_groups(from: usize) -> [Vec<(u64, usize)>; 2] {
+	let epoch = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_millis(1_760_000_000_000);
+	crate::clock::fake_host_wall(epoch + std::time::Duration::from_secs(600));
+	let (init, video, audio) = bbb_init();
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+	let timebase = catalog.timebase();
+	timebase.place(moq_net::Timestamp::ZERO, epoch).unwrap();
+	timebase.align_groups();
+	let mut fmp4 = super::Import::new(broadcast, timebase.reserve());
+	fmp4.decode(&init).unwrap();
+
+	let snapshot = catalog.snapshot();
+	let names = [
+		snapshot.video.renditions.keys().next().unwrap(),
+		snapshot.audio.renditions.keys().next().unwrap(),
+	];
+	let mut tracks = Vec::new();
+	for name in names {
+		tracks.push(consumer.track(name).unwrap().subscribe(replay()).await.unwrap());
+	}
+	for (i, segment) in PLACED_SEGMENTS.iter().enumerate().skip(from) {
+		let next = PLACED_SEGMENTS.get(i + 1).map_or(segment + 1_000, |next| *next);
+		let (start, end) = (600_000_000 + segment * 1_000, 600_000_000 + next * 1_000);
+		fmp4.decode(&styp()).unwrap();
+		for (id, scale) in [video, audio] {
+			let frames = [sample(start, true, Some(end - start))];
+			fmp4.decode(&super::encode_fragment(info(id, scale, i as u32), &frames).unwrap())
+				.unwrap();
+		}
+	}
+	fmp4.finish().unwrap();
+	let [video, audio] = &mut tracks[..] else {
+		unreachable!("two tracks")
+	};
+	[drain_groups(video), drain_groups(audio)]
+}
+
+/// fMP4 importers placed by one epoch publish the same groups wherever each started: one per
+/// second of the catalog clock that starts a segment, numbered by that second, with segments that
+/// share a second sharing its group and an empty group for each second that starts none. Neither
+/// publishes from the second it started in.
+#[tokio::test]
+async fn importers_sharing_an_epoch_number_segments_alike() {
+	let expected = vec![
+		(601, 2),
+		(602, 0),
+		(603, 1),
+		(604, 2),
+		(605, 0),
+		(606, 1),
+		(607, 1),
+		(608, 0),
+		(609, 1),
+		(610, 1),
+		(611, 0),
+		(612, 1),
+	];
+	let first = placed_groups(0).await;
+	assert_eq!(first, [expected.clone(), expected], "video, then audio");
+	for from in 1..PLACED_SEGMENTS.len() - 1 {
+		let joined = placed_groups(from).await;
+		for (track, (first, joined)) in ["video", "audio"].into_iter().zip(first.iter().zip(&joined)) {
+			assert!(!joined.is_empty(), "{track} from segment {from} published nothing");
+			assert!(
+				first.ends_with(joined),
+				"{track} from segment {from}: {joined:?} vs {first:?}"
+			);
+		}
+	}
+}
