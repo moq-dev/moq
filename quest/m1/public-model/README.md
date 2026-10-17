@@ -36,8 +36,7 @@ Rules every child follows:
     would close it (the idle copy in [ingest](/quest/m1/public-model/ingest.md)).
 - Items replaced by another quest's new API wait for that quest instead of
   growing a public shape it deletes: fetch and per-group requests
-  ([Model ranges](/quest/m1/subscribe-ranges/model.md)), largest and
-  liveness ([Live largest location](/quest/m1/largest.md)), announce
+  ([Model ranges](/quest/m1/subscribe-ranges/model.md)), announce
   interest ([Rust lazy discovery](/quest/m1/lazy-discovery/rust.md)).
 
 Inventory method, to rerun before each child starts (counts drift). Rust:

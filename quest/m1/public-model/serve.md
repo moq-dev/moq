@@ -19,9 +19,10 @@ Rust items (`rs/moq-net/src/model/`), as they stood at b4eab0db1:
 - `track::Subscriber::poll_start` (lite publisher): public. A publisher
   reports the resolved start to its peer (SUBSCRIBE_START, SUBSCRIBE_OK).
 - `track::Subscriber::poll_live` (both publishers): remove the need through
-  [Live largest location](/quest/m1/largest.md), whose public
-  `poll_largest` answers "the largest position once the cache is live".
-  Check that it waits out an idle copy the way `poll_live` does.
+  the public `poll_largest` (#5725). It does not wait out an idle copy the
+  way `poll_live` does: it follows the source's reported largest, which can
+  name a frame the cache does not hold yet, so the publishers still answer
+  with the buffered edge. Decide here whether wire answers move to it.
 - **Cursor** (`track::Subscriber::start_at`, `raise_start_to`, `end_at`,
   `subscription::Cap`; both publishers). **Decision**:
   - ✅ One public method assigns the floor and the cap in either direction,
@@ -90,8 +91,9 @@ JS items (`js/net/src/`):
   reads): moved to the deferred quest with the cache peeks.
 - `wire.ts` `Broadcast.subscribe`, `fetchGroup`: remove the need; the public
   `Broadcast.Consumer.track(name)` paths cover them.
-- `wire.ts` `Broadcast.largest` and `hooks.cachedLargest`: remove the need
-  through Live largest location.
+- `wire.ts` `Broadcast.largest`, `hooks.cachedLargest`, and
+  `hooks.bufferedLargest`: remove the need through the public `largest()`
+  stream (#5725), under the same caveat as `poll_live`.
 - `wire.ts` `Broadcast.resolveTrackInfo(name, hold)` (both publishers):
   public as an option on the track's info lookup (an `AbortSignal` that keeps
   the track wanted until it fires), mirrored by whatever Rust's `query`
@@ -110,7 +112,6 @@ cover the behavior.
 ## Required
 
 - [Narrow the model before it goes public](/quest/m1/public-model/narrow.md) - its visibility rewrite and marker lint guard every model API this child edits
-- [Live largest location](/quest/m1/largest.md) - its `poll_largest` replaces `poll_live` and the cached-largest reads
 
 ## Related
 

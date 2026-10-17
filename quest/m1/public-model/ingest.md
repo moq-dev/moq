@@ -39,9 +39,9 @@ Rust items (`rs/moq-net/src/model/`), as they stood at b4eab0db1:
     for received groups: with arrival order immediate and the judgments
     gated, the whole moq-net suite passes except the two tests that assert
     the old design. Consequences:
-    - `largest()` stops reporting a frameless newest group as (N, 0) and
-      reports the last frame that exists. This touches
-      [Live largest location](/quest/m1/largest.md); align with it there.
+    - The cache's internal largest stops reporting a frameless newest group
+      as (N, 0) and reports the last frame that exists, as the public
+      `largest()` stream (#5725) already does.
     - Regression guard: `rejoin_waits_for_the_answers_first_frame`
       (`rs/moq-net/tests/integration/rejoin.rs`, fails when the judgments count a
       frameless group) and
