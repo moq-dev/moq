@@ -13,7 +13,8 @@ use serde::{Deserialize, Serialize};
 /// `archive` (each track's timeline and any durable recording), the optional `clock` (the
 /// broadcast's one wall-clock mapping), the data sections
 /// (`json`, `binary`) for application tracks that aren't media, and the optional `m2ts` (a
-/// transport stream carried whole).
+/// transport stream carried whole), plus `stats` naming the publisher's media snapshot track and
+/// `echo` soliciting viewer feedback under a relative broadcast prefix.
 /// Applications extend it with their own root sections (e.g. `scte35`) through `E`. The catalog
 /// does not deny unknown fields, so a base consumer ignores the extra sections and an extended
 /// catalog stays wire-compatible. See the `extension_roundtrip` test.
@@ -106,6 +107,19 @@ pub struct Catalog<E = ()> {
 	/// packets, verbatim. See [`M2ts`](crate::catalog::M2ts). Omitted from the wire when absent.
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub m2ts: Option<crate::catalog::M2ts>,
+
+	/// The publisher's optional media snapshot track.
+	///
+	/// A `stats` value without a string `track` decodes as absent rather than failing the
+	/// catalog, for the same reason as [`json`](Self::json).
+	#[serde(default, deserialize_with = "crate::catalog::deserialize_stats")]
+	pub stats: Option<crate::catalog::Stats>,
+
+	/// The optional prefix soliciting viewer feedback broadcasts.
+	///
+	/// An `echo` value without a string `path` decodes as absent, the same as [`stats`](Self::stats).
+	#[serde(default, deserialize_with = "crate::catalog::deserialize_echo")]
+	pub echo: Option<crate::catalog::Echo>,
 
 	/// Application-defined root sections, flattened alongside the base catalog sections.
 	#[serde(flatten)]
@@ -751,6 +765,26 @@ mod test {
 		}
 	}
 
+	/// `stats` and `echo` are as generic as `json`: a value without their string field is someone
+	/// else's and decodes as absent, while one with it is ours.
+	#[test]
+	fn a_foreign_stats_or_echo_value_does_not_fail_the_catalog() {
+		for foreign in ["{}", "5", r#""on""#, r#"{"track":5}"#, r#"{"path":["a"]}"#, "null"] {
+			for section in ["stats", "echo"] {
+				let wire = format!(r#"{{"video":{{"renditions":{{}}}},"{section}":{foreign}}}"#);
+				let catalog = Catalog::<()>::from_str(&wire)
+					.unwrap_or_else(|err| panic!("{section}: {foreign} took the catalog down: {err}"));
+				assert!(
+					catalog.stats.is_none() && catalog.echo.is_none(),
+					"{section}: {foreign}"
+				);
+			}
+		}
+		let catalog = Catalog::<()>::from_str(r#"{"stats":{"track":"stats.json"},"echo":{"path":"viewers"}}"#).unwrap();
+		assert_eq!(catalog.stats, Some(crate::catalog::Stats::new("stats.json")));
+		assert_eq!(catalog.echo, Some(crate::catalog::Echo::new("viewers")));
+	}
+
 	#[test]
 	fn data_sections_stay_off_the_wire_when_empty() {
 		// Empty sections stay off the wire, video and audio included.
@@ -810,7 +844,7 @@ mod test {
 		assert_eq!(clock.wall.scale().as_u64(), 1_000_000);
 
 		let archive = catalog.archive.expect("the fixture carries an archive");
-		assert_eq!(archive.timelines["video"], "video.timeline.z");
+		assert_eq!(archive.timelines["video"].track, "video.timeline.z");
 		assert_eq!(archive.timescale, 1000);
 
 		// Archive PTS 2000 (ms) lands 2s after the wall epoch, whatever the track timescale.
@@ -827,10 +861,10 @@ mod test {
 	#[test]
 	fn archive_roundtrips_at_the_root() {
 		let mut archive = crate::catalog::Archive::new();
-		archive
-			.timelines
-			.insert("video".to_string(), "video.timeline.z".to_string());
-		archive.duration_max = Some(2000);
+		archive.timelines.insert(
+			"video".to_string(),
+			crate::catalog::Timeline::new("video.timeline.z", 2_000),
+		);
 		archive.replay = Some(moq_net::path::RelativeOwned::new("recordings/clip"));
 		archive.version = Some(crate::catalog::Archive::VERSION);
 
@@ -841,7 +875,7 @@ mod test {
 
 		let json = catalog.to_json().expect("failed to encode");
 		assert!(
-			json.contains(r#""archive":{"timelines":{"video":"video.timeline.z"}"#),
+			json.contains(r#""archive":{"timelines":{"video":{"track":"video.timeline.z","duration":2000}"#),
 			"{json}"
 		);
 		assert!(

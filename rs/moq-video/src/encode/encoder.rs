@@ -75,6 +75,18 @@ impl Gop {
 		}
 	}
 
+	/// The nominal time between groups at `framerate`.
+	pub fn duration(self, framerate: Rate) -> std::time::Duration {
+		match self {
+			Self::Keyframe { interval } => std::time::Duration::from_nanos(
+				(u128::from(interval) * 1_000_000_000 * u128::from(framerate.denominator())
+					/ u128::from(framerate.numerator()))
+				.try_into()
+				.unwrap_or(u64::MAX),
+			),
+		}
+	}
+
 	/// Refuse a configuration no backend can honor, before one is opened.
 	pub(crate) fn validate(&self) -> Result<(), Error> {
 		match *self {

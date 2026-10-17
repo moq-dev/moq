@@ -12,15 +12,14 @@
 //!
 //! Every track follows one rule, parameterized by its [`Config`]:
 //!
-//! - A record ends at the first group boundary at least [`Config::duration_min`] (2s by default)
+//! - A record ends at the first group boundary at least [`Config::duration_min`] (4s by default)
 //!   past its own start, so short groups (audio) pack into one record and long ones (video GOPs)
 //!   get one each. Only sparse data, such as a catalog that may not publish again for the rest of
 //!   the broadcast, uses a zero minimum: every group is then its own record, ended as soon as the
 //!   group finishes.
-//! - A group still open [`Config::duration_max`] (10s by default) past the record's start is split
-//!   at the next reported frame, so an append-only group that never closes is still indexed as it
-//!   grows. Frames farther apart than the maximum leave nothing to split at, so the record's
-//!   duration stops at the maximum and the rest of the gap is uncovered.
+//! - A group still open three declared durations past the record's start is split at the next
+//!   reported frame, so an append-only group that never closes is still indexed as it grows.
+//!   Before an unhinted track declares, the ceiling is ten seconds, or the minimum if longer.
 //! - A skipped group sequence always closes the record at its newest reported content time, so a
 //!   record's groups are contiguous and a pause is not absorbed into its duration.
 //! - [`Segmenter::cut`] adds an application boundary, such as a video keyframe cutting audio so a
@@ -50,17 +49,20 @@ use std::sync::{Arc, Mutex};
 use std::task::Poll;
 use std::time::Duration;
 
-use hang::catalog::Archive;
+use hang::catalog::{Archive, Timeline};
 use hang::timeline::{Position, Record, RecordExt};
 use moq_json::window::Checkpoint;
 
 use moq_net::{Timescale, Timestamp};
 
-/// The default [`Config::duration_min`] (2 seconds). Only sparse data, such as a catalog, uses zero.
-pub const DEFAULT_DURATION_MIN: Duration = Duration::from_secs(2);
+/// The default [`Config::duration_min`] (4 seconds). Only sparse data, such as a catalog, uses zero.
+pub const DEFAULT_DURATION_MIN: Duration = Duration::from_secs(4);
 
-/// The default [`Config::duration_max`] (10 seconds).
-pub const DEFAULT_DURATION_MAX: Duration = Duration::from_secs(10);
+/// The safety ceiling before an unhinted track declares its duration, unless the minimum is longer.
+const DEFAULT_DURATION_CEILING: Duration = Duration::from_secs(10);
+
+/// Records may overrun their target to reach a keyframe, but not indefinitely.
+const DURATION_CEILING_MULTIPLIER: u32 = 3;
 
 /// Recent records repeated when the window track rolls to a new group.
 const CHECKPOINT_RECORDS: usize = 256;
@@ -68,8 +70,8 @@ const CHECKPOINT_RECORDS: usize = 256;
 /// How a track's records are cut.
 ///
 /// Every track follows one rule: a record ends at the first group boundary at least
-/// [`duration_min`](Self::duration_min) past its start, and a group still open
-/// [`duration_max`](Self::duration_max) past it is split between frames.
+/// [`duration_min`](Self::duration_min) past its start. A hint fixes the nominal target to its
+/// smallest multiple at or beyond that minimum.
 #[derive(Clone, Debug)]
 #[non_exhaustive]
 pub struct Config {
@@ -80,10 +82,8 @@ pub struct Config {
 	/// every group its own record, ended as soon as the group finishes.
 	pub duration_min: Duration,
 
-	/// The longest a record may run before a frame inside a group splits it.
-	///
-	/// The longest enrolled maximum is advertised in the catalog as `durationMax`.
-	pub duration_max: Duration,
+	/// The application's nominal group duration, when known.
+	pub duration_hint: Option<Duration>,
 }
 
 impl Config {
@@ -93,9 +93,9 @@ impl Config {
 		self
 	}
 
-	/// Set [`duration_max`](Self::duration_max).
-	pub fn with_duration_max(mut self, duration: Duration) -> Self {
-		self.duration_max = duration;
+	/// Set [`duration_hint`](Self::duration_hint).
+	pub fn with_duration_hint(mut self, duration: impl Into<Option<Duration>>) -> Self {
+		self.duration_hint = duration.into();
 		self
 	}
 }
@@ -104,7 +104,7 @@ impl Default for Config {
 	fn default() -> Self {
 		Self {
 			duration_min: DEFAULT_DURATION_MIN,
-			duration_max: DEFAULT_DURATION_MAX,
+			duration_hint: None,
 		}
 	}
 }
@@ -114,7 +114,11 @@ const TIMESCALE: Timescale = Timescale::MILLI;
 
 /// A duration in wire units, rounded up so a bound never understates itself.
 fn units(duration: Duration) -> u64 {
-	(duration.as_micros() * TIMESCALE.as_u64() as u128).div_ceil(1_000_000) as u64
+	u64::try_from((duration.as_micros() * TIMESCALE.as_u64() as u128).div_ceil(1_000_000)).unwrap_or(u64::MAX)
+}
+
+fn duration(units: u64) -> Duration {
+	Duration::from_micros(units.saturating_mul(1_000_000) / TIMESCALE.as_u64())
 }
 
 fn wire(pts: Timestamp) -> u64 {
@@ -137,6 +141,9 @@ struct Open {
 /// Closed records queue until [`Iterator::next`] takes them.
 pub struct Segmenter {
 	config: Config,
+	/// Fixed nominal duration; absent until an unhinted track's first record closes. Kept unrounded
+	/// so pacing hits a fractional-millisecond GOP's boundary; only the wire declaration rounds.
+	declared: Option<Duration>,
 	/// The number the next closed record gets.
 	sequence: u64,
 	open: Option<Open>,
@@ -159,8 +166,17 @@ pub struct Segmenter {
 impl Segmenter {
 	/// A segmenter numbering its records from zero.
 	pub fn new(config: Config) -> Self {
+		let declared = match config.duration_hint.filter(|hint| !hint.is_zero()) {
+			Some(hint) => {
+				let multiple = config.duration_min.as_nanos().div_ceil(hint.as_nanos()).max(1);
+				Some(hint.saturating_mul(u32::try_from(multiple).unwrap_or(u32::MAX)))
+			}
+			None if config.duration_min.is_zero() => Some(Duration::ZERO),
+			None => None,
+		};
 		Self {
 			config,
+			declared,
 			sequence: 0,
 			open: None,
 			last: None,
@@ -172,6 +188,25 @@ impl Segmenter {
 			ready: VecDeque::new(),
 			closed: false,
 		}
+	}
+
+	/// The fixed nominal record duration, once known, in timeline units. An untimed track has no
+	/// duration to declare.
+	pub fn declared_duration(&self) -> Option<u64> {
+		self.declared.filter(|_| self.timed != Some(false)).map(units)
+	}
+
+	fn target(&self) -> Duration {
+		self.declared
+			.filter(|value| !value.is_zero())
+			.unwrap_or(self.config.duration_min)
+	}
+
+	fn ceiling(&self) -> Duration {
+		self.declared
+			.filter(|value| !value.is_zero())
+			.and_then(|value| value.checked_mul(DURATION_CEILING_MULTIPLIER))
+			.unwrap_or(DEFAULT_DURATION_CEILING.max(self.config.duration_min))
 	}
 
 	/// Number the next record `sequence`, continuing a resumed timeline.
@@ -215,13 +250,15 @@ impl Segmenter {
 		}
 
 		if let (Some(start), Some(last)) = (self.open.as_ref().map(|open| open.pts), self.last) {
-			let end = match (start, pts) {
-				(Some(start), Some(pts)) => self.timed_end(start, pts, position, last),
+			match (start, pts) {
+				(Some(start), Some(pts)) => {
+					if let Some(end) = self.timed_end(start, pts, position, last) {
+						self.emit(end, Some(pts), true);
+					}
+				}
 				// An untimed record holds one group, ended where the next one starts.
-				_ => (position.group != last.group).then_some((Position::group(last.group + 1), None)),
-			};
-			if let Some((end, pts)) = end {
-				self.emit(end, pts);
+				_ if position.group != last.group => self.emit(Position::group(last.group + 1), None, true),
+				_ => {}
 			}
 		}
 
@@ -241,27 +278,23 @@ impl Segmenter {
 		Ok(())
 	}
 
-	/// Where a timed record that started at `start` ends, if a frame at `position` and `pts` ends it.
-	fn timed_end(
-		&mut self,
-		start: Timestamp,
-		pts: Timestamp,
-		position: Position,
-		last: Position,
-	) -> Option<(Position, Option<Timestamp>)> {
+	/// Where pacing ends a timed record that started at `start`, if a frame at `position` and `pts`
+	/// ends it there. A gap instead closes the record itself and returns `None`.
+	fn timed_end(&mut self, start: Timestamp, pts: Timestamp, position: Position, last: Position) -> Option<Position> {
 		let elapsed = pts.as_micros().saturating_sub(start.as_micros());
 		if position.group == last.group {
-			return (elapsed >= self.config.duration_max.as_micros()).then_some((position, Some(pts)));
+			return (elapsed >= self.ceiling().as_micros()).then_some(position);
 		}
 		let contiguous = position.group == last.group + 1 && position.frame == 0;
 		if !contiguous {
 			// A skipped sequence or a group joined mid-way always closes, so a record's groups are
 			// contiguous and the reader never has to guess what lies between. The skipped time is
 			// not content, so the record ends at its newest report rather than at this frame.
-			return Some((Position::group(last.group + 1), self.frontier));
+			self.emit(Position::group(last.group + 1), self.frontier, false);
+			return None;
 		}
-		if elapsed >= self.config.duration_max.as_micros() || self.boundary(start, pts, elapsed) {
-			return Some((Position::group(last.group + 1), Some(pts)));
+		if elapsed >= self.ceiling().as_micros() || self.boundary(start, pts, elapsed) {
+			return Some(Position::group(last.group + 1));
 		}
 		None
 	}
@@ -281,7 +314,7 @@ impl Segmenter {
 			}
 			return true;
 		}
-		!self.manual && elapsed >= self.config.duration_min.as_micros()
+		!self.manual && elapsed >= self.target().as_micros()
 	}
 
 	/// Report that group `group` can gain no more frames.
@@ -295,7 +328,7 @@ impl Segmenter {
 		self.finished = true;
 		let each = self.config.duration_min.is_zero() || self.timed == Some(false);
 		if each && self.open.is_some() {
-			self.emit(Position::group(group + 1), self.frontier);
+			self.emit(Position::group(group + 1), self.frontier, true);
 		}
 	}
 
@@ -349,7 +382,7 @@ impl Segmenter {
 			true => Position::group(last.group + 1),
 			false => Position::new(last.group, last.frame + 1),
 		};
-		self.emit(end, self.frontier);
+		self.emit(end, self.frontier, false);
 	}
 
 	/// Flush, then ignore every later report.
@@ -359,8 +392,8 @@ impl Segmenter {
 	}
 
 	/// Close the open record at `end`, its content running to `pts`, which is `None` only when
-	/// the track is untimed.
-	fn emit(&mut self, end: Position, pts: Option<Timestamp>) {
+	/// the track is untimed. `paced` is false when a gap or flush closes the record early.
+	fn emit(&mut self, end: Position, pts: Option<Timestamp>, paced: bool) {
 		let Some(open) = self.open.take() else {
 			return;
 		};
@@ -370,7 +403,13 @@ impl Segmenter {
 				let pts = pts.expect("a timed record has a frontier");
 				// Frames farther apart than the maximum leave nothing to split at, so the record stops at
 				// the advertised bound and the rest of the gap is uncovered.
-				let duration = wire(pts).saturating_sub(start).min(units(self.config.duration_max));
+				let duration = wire(pts).saturating_sub(start).min(units(self.ceiling()));
+				// The first record fixes an unhinted declaration. One closed early says nothing about
+				// the cadence, so the target falls back to the minimum.
+				self.declared.get_or_insert(match paced {
+					true => self::duration(duration),
+					false => self.config.duration_min,
+				});
 				Record::new(self.sequence, start, duration, open.start, end)
 			}
 			None => Record::untimed(self.sequence, open.start, end),
@@ -486,6 +525,8 @@ fn json(err: moq_json::Error) -> crate::Error {
 /// A live track's segmenter and the timeline it publishes to.
 struct Live {
 	segmenter: Segmenter,
+	/// Publishes an unhinted declaration with the first complete record.
+	on_declare: Option<OnDeclare>,
 	/// `None` once a publish failed: the timeline is an optional sidecar, so it stops instead.
 	output: Option<Producer>,
 	/// Whether a [`Recorder`] owns the segmenter, so a second enrollment can't share it.
@@ -504,6 +545,11 @@ impl Live {
 				self.output = None;
 			}
 		}
+		if let Some(duration) = self.segmenter.declared_duration()
+			&& let Some(on_declare) = self.on_declare.take()
+		{
+			on_declare(duration);
+		}
 	}
 
 	fn finish(&mut self) {
@@ -514,6 +560,8 @@ impl Live {
 		}
 	}
 }
+
+type OnDeclare = Box<dyn FnOnce(u64) + Send>;
 
 struct Registry {
 	/// Each enrolled track's timeline, by track name. Kept after its recorder drops, so a finished
@@ -570,7 +618,11 @@ impl Timelines {
 			live.segmenter.flush();
 			live.publish();
 			let sequence = live.segmenter.sequence();
+			let declared = live.segmenter.declared;
 			live.segmenter = Segmenter::new(config).with_sequence(sequence);
+			if declared.is_some() {
+				live.segmenter.declared = declared;
+			}
 			drop(live);
 			return Ok(Recorder { live: existing.clone() });
 		}
@@ -580,6 +632,7 @@ impl Timelines {
 		#[allow(clippy::arc_with_non_send_sync)]
 		let live = Arc::new(Mutex::new(Live {
 			segmenter: Segmenter::new(config),
+			on_declare: None,
 			output: Some(Producer::new(track)),
 			recording: true,
 		}));
@@ -587,23 +640,33 @@ impl Timelines {
 		Ok(Recorder { live })
 	}
 
-	/// The catalog's root `archive` entry advertising every enrolled track's timeline, bounded by
-	/// the longest maximum any of them is cut by.
+	/// The catalog's root `archive` entry advertising every timeline whose duration is known.
 	pub fn section(&self) -> Archive {
 		let registry = self.registry.lock().unwrap();
 		let mut section = Archive::new();
 		section.timescale = TIMESCALE.as_u64() as u32;
-		section.duration_max = registry
-			.tracks
-			.values()
-			.map(|(_, live)| units(live.lock().unwrap().segmenter.config.duration_max))
-			.max();
 		section.timelines = registry
 			.tracks
 			.iter()
-			.map(|(name, (timeline, _))| (name.clone(), timeline.clone()))
+			.filter_map(|(name, (track, live))| {
+				live.lock()
+					.unwrap()
+					.segmenter
+					.declared_duration()
+					.map(|duration| (name.clone(), Timeline::new(track, duration)))
+			})
 			.collect();
 		section
+	}
+
+	/// Close every open record now, publishing any declaration it fixes.
+	pub(crate) fn flush(&self) {
+		let registry = self.registry.lock().unwrap();
+		for (_, live) in registry.tracks.values() {
+			let mut live = live.lock().unwrap();
+			live.segmenter.flush();
+			live.publish();
+		}
 	}
 
 	/// Flush every open record and finish every timeline track. Later enrollments fail.
@@ -626,6 +689,10 @@ pub struct Recorder {
 }
 
 impl Recorder {
+	/// Run `callback` once when an unhinted track learns its fixed duration.
+	pub(crate) fn on_declare(&mut self, callback: impl FnOnce(u64) + Send + 'static) {
+		self.live.lock().unwrap().on_declare = Some(Box::new(callback));
+	}
 	fn report(&mut self, f: impl FnOnce(&mut Segmenter)) {
 		let mut live = self.live.lock().unwrap();
 		f(&mut live.segmenter);
@@ -768,13 +835,13 @@ impl<E: RecordExt> Consumer<E> {
 		section: &Archive,
 		track: &str,
 	) -> crate::Result<Self> {
-		let name = section
+		let timeline = section
 			.timelines
 			.get(track)
 			.ok_or_else(|| crate::Error::TimelineMissing(track.to_string()))?;
 		let timescale =
 			Timescale::new(section.timescale as u64).map_err(|_| crate::Error::InvalidTimescale(section.timescale))?;
-		let track = broadcast.track(name)?.subscribe(None).await?;
+		let track = broadcast.track(&timeline.track)?.subscribe(None).await?;
 		let config = moq_json::window::ConsumerConfig::default().with_compression(true);
 		Ok(Self {
 			inner: moq_json::window::Consumer::new(track, config),
@@ -821,6 +888,11 @@ mod test {
 		Config::default().with_duration_min(Duration::ZERO)
 	}
 
+	/// Media whose encoder reports a 4s cadence, so its timeline declares before any record.
+	fn hinted() -> Config {
+		Config::default().with_duration_hint(Duration::from_secs(4))
+	}
+
 	fn ms(v: u64) -> Timestamp {
 		Timestamp::from_millis(v).unwrap()
 	}
@@ -864,11 +936,7 @@ mod test {
 
 		assert_eq!(
 			drain(&mut video),
-			vec![
-				(0, 2_000, at(0), at(1)),
-				(2_000, 2_000, at(1), at(2)),
-				(4_000, 2_000, at(2), at(3)),
-			]
+			vec![(0, 4_000, at(0), at(2)), (4_000, 2_000, at(2), at(3))]
 		);
 	}
 
@@ -889,8 +957,89 @@ mod test {
 	}
 
 	#[test]
-	fn a_long_group_splits_by_frame_at_the_maximum() {
-		let mut video = Segmenter::new(Config::default().with_duration_max(Duration::from_secs(3)));
+	fn a_hint_declares_its_smallest_multiple_at_or_past_the_minimum() {
+		let segmenter = Segmenter::new(Config::default().with_duration_hint(Duration::from_millis(1_500)));
+		assert_eq!(segmenter.declared_duration(), Some(4_500));
+	}
+
+	/// A 60-frame GOP at 29.97fps lasts 2002.002ms. Rounding the hint before multiplying would aim
+	/// at 4006ms, past the second GOP's end, and pace three GOPs per record instead of two.
+	#[test]
+	fn a_fractional_hint_paces_on_its_own_boundaries() {
+		let gop = Duration::from_nanos(2_002_002_002);
+		let mut video = Segmenter::new(Config::default().with_duration_hint(gop));
+		assert_eq!(video.declared_duration(), Some(4_005));
+		for group in 0..5 {
+			let pts = Timestamp::from_micros((gop * group as u32).as_micros() as u64).unwrap();
+			video.frame(at(group), pts, true).unwrap();
+			video.finish_group(group);
+		}
+
+		assert_eq!(
+			drain(&mut video),
+			vec![(0, 4_004, at(0), at(2)), (4_004, 4_004, at(2), at(4))]
+		);
+	}
+
+	#[test]
+	fn a_hint_remains_the_target_when_the_minimum_is_zero() {
+		let segmenter = Segmenter::new(
+			Config::default()
+				.with_duration_min(Duration::ZERO)
+				.with_duration_hint(Duration::from_secs(3)),
+		);
+		assert_eq!(segmenter.declared_duration(), Some(3_000));
+	}
+
+	#[test]
+	fn packet_groups_estimate_a_record_instead_of_one_packet() {
+		let mut audio = Segmenter::new(Config::default());
+		groups(&mut audio, 0..202, 20);
+		assert_eq!(audio.declared_duration(), Some(4_000));
+		assert_eq!(audio.next().unwrap().duration, Some(4_000));
+	}
+
+	#[test]
+	fn an_early_first_record_declares_the_minimum() {
+		// A flushed tail is not a cadence: one frame would otherwise declare zero, as if sparse.
+		let mut flushed = Segmenter::new(Config::default());
+		flushed.frame(at(0), ms(0), true).unwrap();
+		flushed.flush();
+		assert_eq!(flushed.next().unwrap().duration, Some(0));
+		assert_eq!(flushed.declared_duration(), Some(4_000));
+
+		// A skipped sequence ends the record early too.
+		let mut skipped = Segmenter::new(Config::default());
+		skipped.frame(at(0), ms(0), true).unwrap();
+		skipped.frame(at(2), ms(9_000), true).unwrap();
+		assert_eq!(skipped.next().unwrap().duration, Some(0));
+		assert_eq!(skipped.declared_duration(), Some(4_000));
+
+		// Later paced records keep the declaration.
+		skipped.frame(at(3), ms(15_000), true).unwrap();
+		assert_eq!(skipped.next().unwrap().duration, Some(6_000));
+		assert_eq!(skipped.declared_duration(), Some(4_000));
+	}
+
+	#[test]
+	fn the_first_estimate_survives_later_longer_records() {
+		let mut video = Segmenter::new(Config::default());
+		groups(&mut video, 0..3, 2_000);
+		assert_eq!(video.next().unwrap().duration, Some(4_000));
+		assert_eq!(video.declared_duration(), Some(4_000));
+
+		groups(&mut video, 3..5, 6_000);
+		assert_eq!(video.next().unwrap().duration, Some(12_000));
+		assert_eq!(video.declared_duration(), Some(4_000));
+	}
+
+	#[test]
+	fn a_long_group_splits_by_frame_at_the_safety_ceiling() {
+		let mut video = Segmenter::new(
+			Config::default()
+				.with_duration_min(Duration::from_secs(1))
+				.with_duration_hint(Duration::from_secs(1)),
+		);
 		for frame in 0..8 {
 			video
 				.frame(Position::new(0, frame), ms(frame * 1_000), frame == 0)
@@ -930,7 +1079,11 @@ mod test {
 	#[test]
 	fn an_append_only_group_is_indexed_as_it_grows() {
 		// A never-closing log: one frame a second, split every three seconds.
-		let mut log = Segmenter::new(sparse().with_duration_max(Duration::from_secs(3)));
+		let mut log = Segmenter::new(
+			Config::default()
+				.with_duration_min(Duration::from_secs(1))
+				.with_duration_hint(Duration::from_secs(1)),
+		);
 		for frame in 0..7 {
 			log.frame(Position::new(0, frame), ms(frame * 1_000), true).unwrap();
 		}
@@ -986,22 +1139,30 @@ mod test {
 	}
 
 	#[test]
-	fn a_record_never_exceeds_the_maximum() {
-		// A quiet log: nothing between its frames to split at.
-		let mut log = Segmenter::new(sparse().with_duration_max(Duration::from_secs(10)));
+	fn an_unhinted_first_record_declares_the_default_ceiling_when_it_hits_it() {
+		let mut log = Segmenter::new(Config::default());
 		log.frame(Position::new(0, 0), ms(0), true).unwrap();
 		log.frame(Position::new(0, 1), ms(20_000), true).unwrap();
-		log.frame(at(1), ms(45_000), true).unwrap();
-		log.close();
 
 		assert_eq!(
 			drain(&mut log),
-			vec![
-				(0, 10_000, Position::new(0, 0), Position::new(0, 1)),
-				(20_000, 10_000, Position::new(0, 1), at(1)),
-				(45_000, 0, at(1), Position::new(1, 1)),
-			]
+			vec![(0, 10_000, Position::new(0, 0), Position::new(0, 1))]
 		);
+		assert_eq!(log.declared_duration(), Some(10_000));
+	}
+
+	#[test]
+	fn an_unhinted_ceiling_never_undercuts_a_longer_minimum() {
+		let mut log = Segmenter::new(Config::default().with_duration_min(Duration::from_secs(12)));
+		log.frame(Position::new(0, 0), ms(0), true).unwrap();
+		log.frame(Position::new(0, 1), ms(11_000), true).unwrap();
+		log.frame(Position::new(0, 2), ms(20_000), true).unwrap();
+
+		assert_eq!(
+			drain(&mut log),
+			vec![(0, 12_000, Position::new(0, 0), Position::new(0, 2))]
+		);
+		assert_eq!(log.declared_duration(), Some(12_000));
 	}
 
 	#[test]
@@ -1038,8 +1199,8 @@ mod test {
 		let mut video = Segmenter::new(Config::default());
 		video.frame(at(0), ms(0), true).unwrap();
 		// A mid-stream join: the group doesn't open on an IDR.
-		video.frame(at(1), ms(2_000), false).unwrap();
-		video.frame(at(2), ms(4_000), true).unwrap();
+		video.frame(at(1), ms(4_000), false).unwrap();
+		video.frame(at(2), ms(8_000), true).unwrap();
 
 		let records: Vec<Record> = std::iter::from_fn(|| video.next()).collect();
 		assert!(records[0].keyframe);
@@ -1056,21 +1217,21 @@ mod test {
 				Err(crate::Error::TimelinePosition { last, .. }) if last == at(3)
 			));
 		}
-		video.frame(at(4), ms(2_000), true).unwrap();
-		assert_eq!(drain(&mut video), vec![(0, 2_000, at(3), at(4))]);
+		video.frame(at(4), ms(4_000), true).unwrap();
+		assert_eq!(drain(&mut video), vec![(0, 4_000, at(3), at(4))]);
 	}
 
 	#[test]
 	fn a_resumed_segmenter_continues_the_numbering() {
 		let mut video = Segmenter::new(Config::default()).with_sequence(7);
-		groups(&mut video, 10..12, 2_000);
+		groups(&mut video, 10..13, 2_000);
 		assert_eq!(video.next().unwrap().sequence, 7);
 	}
 
 	#[test]
 	fn an_untimed_track_records_each_group_without_timing() {
-		// The minimum and maximum measure time, which an untimed track has none of.
-		let mut data = Segmenter::new(Config::default().with_duration_max(Duration::from_secs(1)));
+		// The minimum and hint measure time, which an untimed track has none of.
+		let mut data = Segmenter::new(Config::default().with_duration_hint(Duration::from_secs(1)));
 		data.frame(Position::new(0, 0), None, true).unwrap();
 		data.frame(Position::new(0, 1), None, false).unwrap();
 		assert!(data.next().is_none(), "nothing splits an untimed group");
@@ -1090,6 +1251,17 @@ mod test {
 				Record::untimed(2, at(3), Position::new(3, 2)),
 			]
 		);
+		assert_eq!(data.declared_duration(), None, "an untimed track declares no duration");
+	}
+
+	#[test]
+	fn a_sparse_untimed_track_declares_no_duration() {
+		let mut data = Segmenter::new(Config::default().with_duration_min(Duration::ZERO));
+		assert_eq!(data.declared_duration(), Some(0), "unknown timing defaults to sparse");
+		data.frame(at(0), None, true).unwrap();
+		data.finish_group(0);
+		assert_eq!(data.next(), Some(Record::untimed(0, at(0), at(1))));
+		assert_eq!(data.declared_duration(), None);
 	}
 
 	#[test]
@@ -1156,7 +1328,7 @@ mod test {
 	async fn tracks_publish_independent_timelines() {
 		let broadcast = moq_net::broadcast::Info::new().produce();
 		let timelines = Timelines::new(&broadcast);
-		let mut video = timelines.track("video0", Config::default()).unwrap();
+		let mut video = timelines.track("video0", hinted()).unwrap();
 		let mut catalog = timelines.track("catalog.json", sparse()).unwrap();
 
 		catalog.frame(at(0), ms(0), true);
@@ -1170,15 +1342,41 @@ mod test {
 		timelines.finish();
 
 		let section = timelines.section();
-		assert_eq!(section.timelines["video0"], "video0.timeline.z");
-		assert_eq!(section.timelines["catalog.json"], "catalog.json.timeline.z");
-		assert_eq!(section.duration_max, Some(10_000));
+		assert_eq!(section.timelines["video0"], Timeline::new("video0.timeline.z", 4_000));
+		assert_eq!(
+			section.timelines["catalog.json"],
+			Timeline::new("catalog.json.timeline.z", 0)
+		);
 
 		let video = read(&broadcast, &section, "video0").await;
-		assert_eq!(video.len(), 3);
-		assert_eq!(video[2].end, at(3), "the terminal flush ends after the finished group");
+		assert_eq!(video.len(), 2);
+		assert_eq!(video[1].end, at(3), "the terminal flush ends after the finished group");
 		let catalog = read(&broadcast, &section, "catalog.json").await;
 		assert_eq!(catalog.len(), 1, "the catalog does not wait for the video");
+	}
+
+	#[test]
+	fn an_empty_enrollment_does_not_mask_a_later_hint() {
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let timelines = Timelines::new(&broadcast);
+		drop(timelines.track("video", Config::default()).unwrap());
+		let _video = timelines
+			.track("video", Config::default().with_duration_hint(Duration::from_secs(6)))
+			.unwrap();
+		assert_eq!(timelines.section().timelines["video"].duration, Some(6_000));
+	}
+
+	#[test]
+	fn an_unhinted_timeline_waits_for_its_first_record() {
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let timelines = Timelines::new(&broadcast);
+		let mut video = timelines.track("video", Config::default()).unwrap();
+		assert!(!timelines.section().timelines.contains_key("video"));
+
+		video.frame(at(0), ms(0), true);
+		video.finish_group(0);
+		video.frame(at(1), ms(4_000), true);
+		assert_eq!(timelines.section().timelines["video"].duration, Some(4_000));
 	}
 
 	#[tokio::test]
@@ -1197,7 +1395,7 @@ mod test {
 	async fn a_rejected_report_fails_the_timeline() {
 		let broadcast = moq_net::broadcast::Info::new().produce();
 		let timelines = Timelines::new(&broadcast);
-		let mut video = timelines.track("video0", Config::default()).unwrap();
+		let mut video = timelines.track("video0", hinted()).unwrap();
 		let mut consumer = Consumer::<()>::subscribe(&broadcast.consume(), &timelines.section(), "video0")
 			.await
 			.unwrap();
@@ -1291,7 +1489,7 @@ mod test {
 		let mut section = Archive::new();
 		section
 			.timelines
-			.insert("video0".to_string(), "video0.timeline.z".to_string());
+			.insert("video0".to_string(), Timeline::new("video0.timeline.z", 4_000));
 		let entries = read(&broadcast, &section, "video0").await;
 		assert_eq!(
 			entries.iter().map(|entry| entry.sequence).collect::<Vec<_>>(),
@@ -1327,7 +1525,7 @@ mod test {
 	async fn rejects_an_invalid_timescale() {
 		let broadcast = moq_net::broadcast::Info::new().produce();
 		let timelines = Timelines::new(&broadcast);
-		let _recorder = timelines.track("video0", Config::default()).unwrap();
+		let _recorder = timelines.track("video0", hinted()).unwrap();
 		let mut section = timelines.section();
 		section.timescale = 0;
 		let err = Consumer::<()>::subscribe(&broadcast.consume(), &section, "video0").await;

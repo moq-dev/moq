@@ -464,6 +464,8 @@ async fn retired_fetch(version: &str, explicit: bool) {
 	{
 		assert_ne!(info.priority, 17, "{version}: late track resolved replacement");
 	}
+	// A held query keeps reading the retired instance; a bare handle would not.
+	let _reading = track.query();
 	drop(subscription);
 	settle().await;
 	let resumed = track.subscribe(None).await;
