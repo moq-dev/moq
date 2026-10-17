@@ -5,7 +5,7 @@ use std::{
 	collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
 	fmt,
 	sync::Arc,
-	sync::atomic::{AtomicBool, AtomicU64, Ordering},
+	sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
 	task::{Context, Poll, Wake, Waker, ready},
 	time::Duration,
 };
@@ -797,7 +797,10 @@ struct OriginConsumerState {
 	ended: bool,
 	/// Snapshots in flight that can present on this consumer's cursors, counted
 	/// once per cursor they touch. See [`AnnounceConsumer::poll_caught_up`].
-	waiting: usize,
+	///
+	/// Changed through a read guard, so a session joining wakes none of the cursors it
+	/// holds back: nothing waits on losing caught up. Only the table lock writes it.
+	waiting: AtomicUsize,
 	/// The pending prefixes the consumer still owes reading from before the last
 	/// snapshot landed. Caught up once empty and nothing is `waiting`.
 	owed: BTreeSet<PathOwned>,
@@ -807,15 +810,7 @@ impl OriginConsumerState {
 	/// Whether the consumer has read everything its sources announced before they
 	/// caught up. A torn-down origin has no sources left to wait on.
 	fn caught_up(&self) -> bool {
-		(self.waiting == 0 || self.ended) && self.owed.is_empty()
-	}
-
-	/// A snapshot that can present here landed.
-	fn landed(&mut self) {
-		self.waiting -= 1;
-		if self.waiting == 0 {
-			self.owe();
-		}
+		(self.waiting.load(Ordering::Relaxed) == 0 || self.ended) && self.owed.is_empty()
 	}
 
 	/// Owe every pending update that changes which prefixes are announced: a start
@@ -4329,10 +4324,12 @@ impl OriginState {
 		snapshots.retain(|snapshot| cursor.awaits(snapshot));
 		snapshots.sort_unstable_by_key(|snapshot| snapshot.id);
 		snapshots.dedup_by_key(|snapshot| snapshot.id);
-		if !snapshots.is_empty()
-			&& let Ok(mut state) = cursor.state.write()
-		{
-			state.waiting += snapshots.len();
+		if !snapshots.is_empty() {
+			cursor
+				.state
+				.read()
+				.waiting
+				.fetch_add(snapshots.len(), Ordering::Relaxed);
 		}
 
 		self.cursors.insert(id, cursor);
@@ -4343,9 +4340,8 @@ impl OriginState {
 		for id in self.routes.cursors_touching(prefix) {
 			if let Some(cursor) = self.cursors.get(&id)
 				&& cursor.awaits(&snapshot)
-				&& let Ok(mut state) = cursor.state.write()
 			{
-				state.waiting += 1;
+				cursor.state.read().waiting.fetch_add(1, Ordering::Relaxed);
 			}
 		}
 		self.routes
@@ -4367,9 +4363,11 @@ impl OriginState {
 		for id in self.routes.cursors_touching(prefix) {
 			if let Some(cursor) = self.cursors.get(&id)
 				&& cursor.awaits(&snapshot)
+				// Only the last landing changes what a caught-up waiter sees, so only it wakes.
+				&& cursor.state.read().waiting.fetch_sub(1, Ordering::Relaxed) == 1
 				&& let Ok(mut state) = cursor.state.write()
 			{
-				state.landed();
+				state.owe();
 			}
 		}
 	}
@@ -5666,7 +5664,7 @@ impl AnnounceConsumer {
 			}
 			// Under the table lock, so no snapshot lands between the count and this.
 			if let Ok(mut state) = state.write()
-				&& state.waiting == 0
+				&& state.waiting.load(Ordering::Relaxed) == 0
 			{
 				state.owe();
 			}
@@ -6330,6 +6328,32 @@ mod tests {
 		drop(snapshot);
 		assert!(woken.0.load(Ordering::SeqCst), "not woken");
 		assert!(announced.poll_caught_up(&waiter).is_ready());
+	}
+
+	/// A session joining or landing short of the last one wakes no parked cursor, so a
+	/// relay's announce feeds stay idle while peers connect.
+	#[test]
+	fn holding_back_wakes_nobody() {
+		struct Woken(AtomicBool);
+		impl Wake for Woken {
+			fn wake(self: Arc<Self>) {
+				self.0.store(true, Ordering::SeqCst);
+			}
+		}
+
+		let producer = origin(1).produce();
+		let mut announced = producer.consume().announced();
+		let woken = Arc::new(Woken(AtomicBool::new(false)));
+		let waiter = kio::Waiter::new(std::task::Waker::from(woken.clone()));
+		assert!(announced.poll_next(&waiter).is_pending());
+		assert!(announced.poll_caught_up(&waiter).is_ready());
+
+		let first = producer.snapshot("");
+		let second = producer.snapshot("room");
+		drop(first);
+		assert!(!woken.0.load(Ordering::SeqCst), "woken while still held back");
+		drop(second);
+		assert!(woken.0.load(Ordering::SeqCst), "the last landing wakes");
 	}
 
 	/// A `.`-prefixed segment below the requested prefix hides a route from
