@@ -150,7 +150,9 @@ impl MoqAudioEncoderOutput {
 				settings.frame_duration = Duration::from_micros(us.into());
 				Ok(settings)
 			}
-			(Some(_), _) => Err(moq_audio::Error::Unsupported("set preset or frame_duration_us, not both".into()).into()),
+			(Some(_), _) => {
+				Err(moq_audio::Error::Unsupported("set preset or frame_duration_us, not both".into()).into())
+			}
 		}
 	}
 }
