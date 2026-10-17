@@ -12435,6 +12435,19 @@ mod test {
 		assert_eq!(drain(&mut live), vec![0]);
 	}
 
+	/// A live range on a track without groups delivers datagrams as they arrive, rather than
+	/// holding them for a group a datagram-only track never produces.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_live_range_on_a_track_without_groups_delivers_datagrams() {
+		let mut producer = track_producer("test", Info::timed());
+		let mut live = producer.subscribe(replay().with_ranges([Range::live()]));
+		producer
+			.append_datagram(Timestamp::from_millis(0).unwrap(), &b"x"[..])
+			.unwrap();
+		assert_eq!(recv_datagram(&mut live).sequence, 0);
+	}
+
 	/// Fetched backfill past the newest produced group moves no relative start, whether the
 	/// track had a produced group at subscribe or not.
 	#[moq_clock::test]
