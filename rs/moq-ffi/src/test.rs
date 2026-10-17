@@ -690,6 +690,7 @@ async fn raw_audio_decode_delay() {
 			channels: None,
 			bitrate: None,
 			frame_duration_us: FRAME_US as u32,
+			preset: None,
 		},
 		None,
 	)
