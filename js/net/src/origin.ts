@@ -2039,10 +2039,14 @@ export class Consumer {
 				}
 				active = next;
 
-				// Caught up once no session is still delivering an initial set this stream sees.
+				// Caught up once no session is still delivering an initial set this stream could
+				// list: one under a hidden segment holds only a reader that opts in.
 				let behind = false;
 				for (const prefix of this.#state.snapshots.peek().keys()) {
-					if (patterns.overlaps(Path.Pattern.subtree(prefix))) behind = true;
+					for (const pattern of patterns) {
+						if (!pattern.overlaps(Path.Pattern.subtree(prefix))) continue;
+						if (hidden || !hiddenBelow(scopeHead(pattern), prefix)) behind = true;
+					}
 				}
 				if (behind) producer.behind();
 				else producer.caughtUp();

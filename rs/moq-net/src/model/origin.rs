@@ -1335,6 +1335,7 @@ impl TableCursor {
 	fn awaits(&self, snapshot: &SnapshotEntry) -> bool {
 		self.horizon.admits_link(snapshot.link)
 			&& self.allowed.overlaps(&snapshot.claim)
+			&& self.hidden.reaches(&self.heads, &snapshot.prefix)
 			&& !self.holes.iter().any(|hole| snapshot.prefix.has_prefix(hole))
 			// Too deep for the mount to name means everything beneath is too.
 			&& self.named.as_ref().is_none_or(|(mount, _)| mount.names(&snapshot.prefix))
@@ -1591,8 +1592,14 @@ pub(crate) struct Hidden {
 impl Hidden {
 	/// Whether a cursor hanging at `heads` reports a route at `prefix`.
 	fn discovers(&self, heads: &[PathOwned], prefix: &Path) -> bool {
-		(self.include || !hides(self.from.as_ref().map(std::slice::from_ref).unwrap_or(heads), prefix))
-			&& self.beyond.as_ref().is_none_or(|outer| hides(outer, prefix))
+		self.reaches(heads, prefix) && self.beyond.as_ref().is_none_or(|outer| hides(outer, prefix))
+	}
+
+	/// Whether a cursor hanging at `heads` could report a route at or beneath `prefix`.
+	/// A hidden segment hides everything beneath it, while a top-up feed's rule turns
+	/// on the rest of the path, so only the first can rule a prefix out.
+	fn reaches(&self, heads: &[PathOwned], prefix: &Path) -> bool {
+		self.include || !hides(self.from.as_ref().map(std::slice::from_ref).unwrap_or(heads), prefix)
 	}
 
 	/// This rule for a cursor reading through `mount`, whose heads sit on the
@@ -6346,6 +6353,20 @@ mod tests {
 
 		let _target = producer.snapshot(".svc/p1");
 		assert!(!announced.is_caught_up(), "the mount's target does hold it");
+	}
+
+	/// A source under a hidden segment holds only the readers that opt into hidden routes.
+	#[test]
+	fn a_hidden_snapshot_holds_only_hidden_readers() {
+		let producer = origin(1).produce();
+		let announced = producer.consume().announced();
+		let _stats = producer.snapshot(".stats");
+		assert!(announced.is_caught_up(), "a snapshot in flight under a hidden segment");
+		assert!(
+			producer.consume().announced().is_caught_up(),
+			"a reader registering past one"
+		);
+		assert!(!producer.consume().with_hidden(true).announced().is_caught_up());
 	}
 
 	/// A waiter parked on catching up is woken when it does.

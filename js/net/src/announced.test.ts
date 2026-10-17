@@ -243,3 +243,16 @@ test("a snapshot elsewhere never holds a scoped stream", async () => {
 	other();
 	scoped.close();
 });
+
+test("a snapshot under a hidden segment holds only a reader that opts in", async () => {
+	const origin = new OriginProducer();
+	const stats = wireOf(origin).snapshot(p(".stats"));
+	const all = origin.consume().announced();
+	const hidden = origin.consume().announced(Path.Pattern.all(), { hidden: true });
+	await tick();
+	expect(all.caughtUp.peek()).toBe(true);
+	expect(hidden.caughtUp.peek()).toBe(false);
+	stats();
+	all.close();
+	hidden.close();
+});
