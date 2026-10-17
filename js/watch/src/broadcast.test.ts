@@ -141,10 +141,16 @@ describe("relativeBroadcast", () => {
 		expect(await rejection(catalog)).toBeInstanceOf(Catalog.EscapingBroadcast);
 	});
 
-	it("rejects a catalog needing a newer reader", async () => {
-		// A manual catalog skips the schema, so it needs the same refusal a fetched one gets.
-		const catalog = { version: Catalog.VERSION + 1, video: { renditions: { good: rendition() } } } as Catalog.Root;
-		expect(await rejection(catalog)).toBeInstanceOf(Catalog.UnsupportedVersion);
+	it("rejects a catalog needing a newer reader or with a malformed version", async () => {
+		// A manual catalog goes through the same schema as a fetched one.
+		const catalog = (version: unknown) =>
+			({ version, video: { renditions: { good: rendition() } } }) as unknown as Catalog.Root;
+		expect(await rejection(catalog(Catalog.VERSION + 1))).toBeInstanceOf(Catalog.UnsupportedVersion);
+		for (const malformed of [-1, Number.NaN, 4.5, "4"]) {
+			const err = await rejection(catalog(malformed));
+			expect(err).toBeInstanceOf(Error);
+			expect(err).not.toBeInstanceOf(Catalog.UnsupportedVersion);
+		}
 	});
 
 	it("rejects a catalog whose text or data track escapes the root", async () => {
@@ -152,9 +158,14 @@ describe("relativeBroadcast", () => {
 		const broadcast = Path.normalizeRelative("../../x");
 		for (const section of ["text", "json", "binary"] as const) {
 			const key = section === "text" ? "renditions" : "tracks";
+			// Otherwise valid, so the schema passes it and the reference check is what refuses it.
+			const entry =
+				section === "text"
+					? { broadcast, format: "vtt", container: { kind: "legacy" } }
+					: { broadcast, mode: "stream" };
 			const catalog = {
 				video: { renditions: { good: rendition() } },
-				[section]: { [key]: { entry: { broadcast } } },
+				[section]: { [key]: { entry } },
 			} as Catalog.Root;
 			expect(await rejection(catalog)).toBeInstanceOf(Catalog.EscapingBroadcast);
 		}
