@@ -100,29 +100,21 @@ Other guidance:
   after the vendor implementations it reports are validated. It does not gate
   [the multi-vendor release](/quest/m2/gpu-release.md) or the next cut.
 
-Open, support floor (recommended first):
+✅ Decided 2026-10-16, support floor: ship per vendor with every value
+optional. NVIDIA's device-wide adapter lands with the values every vendor has
+(in-process sessions, Vulkan memory headroom, model, lost device); AMD and
+Intel driver values join as their hardware tests prove them. Reason: no AMD
+or Intel driver reports device-wide codec sessions, so waiting for parity
+would block indefinitely, and dropping driver sources would put vendor code
+back in callers.
 
-1. Ship the table as it stands: NVIDIA's device-wide adapter plus the fields
-   every vendor has (in-process sessions, Vulkan memory headroom, model, lost
-   device) first; AMD and Intel driver fields join as their hardware tests
-   prove them.
-2. Parity first: publish only when all three vendors fill the same fields.
-   No AMD or Intel driver reports device-wide codec sessions, so this blocks
-   indefinitely.
-3. Process scope only: report what this process knows, with no driver
-   adapters, and leave device-wide data to the caller's NVML. Smallest, but
-   reverses the 2026-10-05 decision that callers write no vendor code.
-
-Open, API shape (recommended first):
-
-1. A handle: `gpu::Monitor::new(&frame::vulkan::Device)`, then
-   `monitor.snapshot()` returns a `gpu::Snapshot` whose values nest under
-   `process` and `device`. The handle owns what polling needs between calls:
-   NVML's init, the PMU counters, and the wedged-uevent listener.
-2. A free function `gpu::snapshot(&frame::vulkan::Device)`. Simplest call
-   site, but it must hide the same state in a process-global cache per device.
-3. A provider trait the caller implements. No in-tree NVML, but every caller
-   then picks and owns vendor backends, the vendor code the Goal rules out.
+✅ Decided 2026-10-16, API shape: a handle.
+`gpu::Monitor::new(&frame::vulkan::Device)`, then `monitor.snapshot()`
+returns a `gpu::Snapshot` whose values nest under `process` and `device`.
+Reason: polling needs state between calls (NVML's init, the PMU counters
+whose deltas give utilization, and the uevent listener), which a free
+function would hide in a global cache and a provider trait would push onto
+every caller.
 
 Test: a unit test of each source's parsing against recorded fixtures, and
 ignored hardware tests in `just rs gpu`'s per-vendor branches (the recipe
