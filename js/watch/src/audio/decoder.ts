@@ -122,8 +122,9 @@ export class Decoder {
 	// The container consumer's arrival estimate, unset while nothing is subscribed.
 	#measured = new Signal<Milli | undefined>(undefined);
 
-	// The newest container consumer and the path it reads, whose estimate a replacement continues.
-	#consumer?: { path: Moq.Path.Valid; consumer: Container.Consumer };
+	// The newest container consumer, the path it reads, and its codec, whose estimate a replacement
+	// continues.
+	#consumer?: { path: Moq.Path.Valid; codec: string; consumer: Container.Consumer };
 
 	// The subscription's max delay: the shared budget, raised to the estimator's ceiling in "auto".
 	#subscribeMaxDelay = new Signal<Milli>(Milli.zero);
@@ -351,9 +352,6 @@ export class Decoder {
 		}
 
 		const config = identity.decoder;
-		// Opus states no constant, so the outgoing duration holds until the replacement's first packet.
-		const frame = frameDuration(config);
-		if (frame !== undefined) this.#frame.set(frame);
 
 		if (!active || !key) {
 			this.#retire();
@@ -435,7 +433,7 @@ export class Decoder {
 			config.container.kind === "loc" ? new Container.Loc.Format("audio") : new Container.Legacy.Format(config);
 		// Create consumer with slightly less latency than the render worklet to avoid underflowing.
 		// TODO include JITTER_UNDERHEAD
-		const consumer = this.#consume(effect, sub, format, path);
+		const consumer = this.#consume(effect, sub, format, { config, path });
 
 		effect.spawn(async () => {
 			const loaded = await Util.Libav.polyfill();
@@ -531,7 +529,7 @@ export class Decoder {
 					? Util.Hex.toBytes(config.description)
 					: init.description;
 
-		const consumer = this.#consume(effect, sub, new Container.Cmaf.Format(init), path);
+		const consumer = this.#consume(effect, sub, new Container.Cmaf.Format(init), { config, path });
 
 		effect.spawn(async () => {
 			const loaded = await Util.Libav.polyfill();
@@ -606,16 +604,22 @@ export class Decoder {
 		effect: Effect,
 		sub: Moq.Track.Subscriber,
 		format: Container.Format,
-		path: Moq.Path.Valid,
+		{ config, path }: { config: DecoderConfig; path: Moq.Path.Valid },
 	): Container.Consumer {
 		const outgoing = this.#consumer;
+		const continues = outgoing?.path === path;
 		const consumer = new Container.Consumer(sub, {
 			format,
 			maxDelay: this.#maxDelay,
-			predecessor: outgoing?.path === path ? outgoing.consumer : undefined,
+			predecessor: continues ? outgoing.consumer : undefined,
 		});
 		effect.cleanup(() => consumer.close());
-		this.#consumer = { path, consumer };
+		this.#consumer = { path, codec: config.codec, consumer };
+
+		// Opus states its duration only per packet, so the same codec continuing keeps the outgoing
+		// one until the first packet refines it. Anything else starts from the codec's own constant.
+		const frame = frameDuration(config);
+		if (frame !== undefined || !continues || outgoing.codec !== config.codec) this.#frame.set(frame);
 
 		// Combine network jitter buffer with decode buffer
 		effect.run((inner) => {
