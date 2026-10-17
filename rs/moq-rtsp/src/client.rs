@@ -208,8 +208,17 @@ impl Client {
 			let mut session = self.within(session.play(play)).await??.demuxed()?;
 			tracing::info!(%url, streams = tracks.len(), "RTSP session playing");
 			let playing = tokio::time::Instant::now();
-			while let Some(item) = self.within(session.next()).await? {
-				if ingest.push(item?, session.streams())?.is_some() {
+			// Measured from the last frame, so RTCP reports alone cannot keep a dead camera alive.
+			let mut deadline = playing + self.timeout;
+			while let Some(item) = tokio::time::timeout_at(deadline, session.next())
+				.await
+				.map_err(|_| Error::Stalled(self.timeout))?
+			{
+				let item = item?;
+				if matches!(item, CodecItem::VideoFrame(_) | CodecItem::AudioFrame(_)) {
+					deadline = tokio::time::Instant::now() + self.timeout;
+				}
+				if ingest.push(item, session.streams())?.is_some() {
 					tracing::warn!(%url, "RTSP timeline jumped, ending the session");
 					return Ok(End::Jumped);
 				}
@@ -873,6 +882,30 @@ mod tests {
 		let err = within("the pull", pull).await.unwrap().unwrap_err();
 		assert!(matches!(err, Error::Stalled(_)), "{err}");
 		assert!(started.elapsed() >= Duration::from_millis(200));
+	}
+
+	/// A camera that stops sending media but keeps sending RTCP reports still stalls.
+	#[tokio::test]
+	async fn rtcp_alone_stalls() {
+		let server = Server::bind(vec![Media::H264 { sprop: true }]).await;
+		let (broadcast, catalog) = broadcast();
+		let mut client = Client::new(server.url()).unwrap();
+		client.timeout = Duration::from_millis(200);
+		let mut pull = tokio::spawn(async move { client.pull(&broadcast, &catalog).await });
+
+		let mut session = within("PLAY", server.accept(0)).await;
+		session.video(0, 0, &[fake::H264_IDR]).await;
+		let err = within("the pull", async {
+			loop {
+				session.rtcp(0, 0).await;
+				tokio::select! {
+					result = &mut pull => return result.unwrap().unwrap_err(),
+					_ = tokio::time::sleep(Duration::from_millis(30)) => {}
+				}
+			}
+		})
+		.await;
+		assert!(matches!(err, Error::Stalled(_)), "{err}");
 	}
 
 	/// A video stream that never sends a keyframe would withhold the catalog while its audio

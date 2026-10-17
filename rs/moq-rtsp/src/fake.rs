@@ -266,6 +266,22 @@ impl Session {
 		let _ = self.write.lock().await.write_all(&frame).await;
 	}
 
+	/// Send an RTCP sender report for `track`, which carries no media.
+	pub async fn rtcp(&mut self, track: usize, rtptime: u32) {
+		let channel = self.channels[track].expect("track was set up") + 1;
+		// V=2, PT=200 (SR), length 6 (32-bit words minus one), then SSRC, NTP, RTP time, counts.
+		let mut packet = vec![0x80, 200, 0, 6];
+		packet.extend_from_slice(&(0x1000 + track as u32).to_be_bytes());
+		packet.extend_from_slice(&[0; 8]);
+		packet.extend_from_slice(&rtptime.to_be_bytes());
+		packet.extend_from_slice(&[0; 8]);
+
+		let mut frame = vec![b'$', channel];
+		frame.extend_from_slice(&(packet.len() as u16).to_be_bytes());
+		frame.extend_from_slice(&packet);
+		let _ = self.write.lock().await.write_all(&frame).await;
+	}
+
 	/// Hang up, ending the session.
 	pub async fn close(self) {
 		let _ = self.write.lock().await.shutdown().await;
