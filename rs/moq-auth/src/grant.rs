@@ -45,7 +45,7 @@ pub struct Grant {
 	/// An opaque label handed to stats, so traffic can be bucketed.
 	pub tier: Option<String>,
 
-	/// The literal path this session's usage is attributed to in stats, beside its root. Absent means none.
+	/// The literal path this session's stats record under, independent of its root. Absent records under the empty label.
 	pub label: Option<String>,
 
 	/// The session is a cluster peer (another relay): what it announces entered

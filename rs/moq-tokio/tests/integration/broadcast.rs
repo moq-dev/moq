@@ -2675,7 +2675,7 @@ async fn idle_subscription_releases_the_viewer_count() {
 
 	// The publisher counts viewers through a stats context, exactly like the relay.
 	let registry = moq_net::stats::Registry::new(moq_net::stats::Config::new());
-	let stats = registry.tier(moq_net::stats::Tier::default()).session("", None);
+	let stats = registry.tier(moq_net::stats::Tier::default()).session("");
 
 	let sub_origin = moq_tokio::origin::spawn();
 	let sub_consumer = sub_origin.consume();

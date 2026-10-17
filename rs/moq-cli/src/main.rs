@@ -216,11 +216,7 @@ impl Serving {
 			anyhow::bail!("grant allows nothing this endpoint serves at {}", token.root);
 		}
 
-		let stats = self
-			.cluster
-			.stats
-			.tier(token.tier.clone())
-			.session(&token.root, token.label.clone());
+		let stats = self.cluster.stats.tier(token.tier.clone()).session(&token.label);
 		let lease = lease.with_stats(stats.clone());
 		let mut request = request.with_stats(stats);
 		if let Some(publish) = publish {

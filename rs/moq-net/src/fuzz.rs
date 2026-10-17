@@ -292,8 +292,8 @@ impl Meter {
 }
 
 /// Build a session-local payload meter without exposing the model's private stats carriers.
-pub fn session_meter(registry: &crate::stats::Registry, tier: crate::stats::Tier, root: &str, path: &str) -> Meter {
-	let session = registry.tier(tier).session(root, None);
+pub fn session_meter(registry: &crate::stats::Registry, tier: crate::stats::Tier, label: &str, path: &str) -> Meter {
+	let session = registry.tier(tier).session(label);
 	Meter(session.egress(path).meter())
 }
 
@@ -1332,7 +1332,7 @@ mod tests {
 		let (origin, driver) = crate::origin::Producer::new(crate::origin::Config::default());
 		let _driver = driver;
 		let tier = crate::stats::Tier::new("t");
-		let session = registry.tier(tier.clone()).session("root", None);
+		let session = registry.tier(tier.clone()).session("root");
 		let _broadcast = origin.publish("room/1", crate::origin::Route::default()).unwrap();
 		let mut cursor = origin.consume().with_stats(session).announced();
 		while cursor.next().now_or_never().flatten().is_some() {}

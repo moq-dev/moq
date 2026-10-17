@@ -1156,7 +1156,7 @@ mod tests {
 	#[test]
 	fn request_metrics_never_open_a_session() {
 		let stats = moq_net::stats::Registry::new(Default::default());
-		let request = stats.tier(moq_net::stats::Tier::new("http")).request("root", None);
+		let request = stats.tier(moq_net::stats::Tier::new("http")).request("root");
 		drop(request);
 		let body = render_metrics(&stats.snapshot(), &[], &[]);
 		assert!(body.contains("# TYPE moq_relay_requests_total counter"), "{body}");
@@ -1175,7 +1175,7 @@ mod tests {
 	async fn announce_metrics_keep_retired_totals() {
 		let stats = moq_net::stats::Registry::new(Default::default());
 		let producer =
-			moq_tokio::origin::spawn().with_stats(stats.tier(moq_net::stats::Tier::new("edge")).session("root", None));
+			moq_tokio::origin::spawn().with_stats(stats.tier(moq_net::stats::Tier::new("edge")).session("root"));
 		let broadcast = producer.create_broadcast("demo/retired").unwrap();
 		broadcast.announce(Default::default()).unwrap();
 
@@ -1218,7 +1218,7 @@ mod tests {
 
 		// Default-tier egress: an untagged local publisher writes, a tagged egress
 		// consumer reads it out, so publisher `bytes` advance on the default tier.
-		let default_ctx = stats.tier(Tier::default()).session("acme", None);
+		let default_ctx = stats.tier(Tier::default()).session("acme");
 		let pub_origin = moq_tokio::origin::spawn();
 		let egress = pub_origin.consume().with_stats(default_ctx.clone());
 		let mut announced = egress.announced();
@@ -1228,7 +1228,7 @@ mod tests {
 
 		// Named-tier ingress: a tagged ingress producer writes, so subscriber
 		// `bytes` advance on the regional tier.
-		let regional_ctx = stats.tier(Tier::new("region/sjc")).session("peer", None);
+		let regional_ctx = stats.tier(Tier::new("region/sjc")).session("peer");
 		let sub_origin = moq_tokio::origin::spawn().with_stats(regional_ctx.clone());
 		let sub_source = sub_origin.create_broadcast("demo/x").unwrap();
 		sub_source.announce(Default::default()).unwrap();

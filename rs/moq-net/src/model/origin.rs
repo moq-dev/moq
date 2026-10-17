@@ -6344,7 +6344,7 @@ mod tests {
 		let producer = origin(1).produce();
 		let _foo = producer.publish(".svc/p1/foo", Route::default()).unwrap();
 		let project = mounted(&producer, "p1", &["**"])
-			.with_stats(registry.tier(stats::Tier::default()).session("p1", None))
+			.with_stats(registry.tier(stats::Tier::default()).session("p1"))
 			.with_hidden(true);
 
 		let mut announced = project.announced();
@@ -7236,7 +7236,7 @@ mod tests {
 		let registry = stats::Registry::new(stats::Config::new());
 		let producer = origin(1)
 			.produce()
-			.with_stats(registry.tier(stats::Tier::default()).session("root", None));
+			.with_stats(registry.tier(stats::Tier::default()).session("root"));
 		let announces = || {
 			registry
 				.snapshot()

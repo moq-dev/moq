@@ -316,7 +316,7 @@ relay dials and LAN peers it admits), which is what makes billing per customer o
 Each run, and each group returning after its linger, announces under a fresh
 [epoch](/concept/moq-lite#publisher-epochs), so a restart is a new broadcast at
 the same path. Each group's totals count everything since its epoch began, so
-billing reads those; per-path traffic and per-root and per-label sessions and HTTP requests are for
+billing reads those; per-path traffic and per-label sessions and HTTP requests are for
 dashboards. Session counters report how close sessions come to the
 per-session limits, past which one is closed with `TOO_MANY_REQUESTS`.
 [Stats](/concept/stats) describes the paths, tracks, and encodings; read them

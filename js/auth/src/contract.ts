@@ -168,7 +168,7 @@ export const GrantSchema = z
 		revalidate: z.optional(z.int().check(z.positive())),
 		/** An opaque label handed to stats, so traffic can be bucketed. */
 		tier: z.optional(z.string()),
-		/** The literal path this session's usage is attributed to in stats, beside its root. Absent means none. */
+		/** The literal path this session's stats record under, independent of its root. Absent records under the empty label. */
 		label: z.optional(PathSchema),
 		/** The session is a cluster peer (another relay): what it announces entered the cluster elsewhere. */
 		peer: z.optional(z.boolean()),

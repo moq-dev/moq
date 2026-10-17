@@ -4,19 +4,20 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### Session stats take an optional label (#5731)
+### Session stats are keyed by label, not auth root (#5731)
 
-`stats::Handle::session` and `stats::Handle::request` take the stats label after the auth root, `None` for none.
+`stats::Handle::session`, `stats::Handle::request`, and `stats::Handle::refuse` take the stats label where they took the auth root.
+Pass the empty path for a session without one.
 `Session::set_tier` is now `Session::retag`, which also moves the session to a new label.
-`SessionEntry` gains a `label` field; its `root` is still the auth root.
+`SessionEntry::root` is renamed `SessionEntry::label`.
 
 ```rust
 // Before
 let session = handle.session(&root);
 session.set_tier(tier);
 // After
-let session = handle.session(&root, label); // label: Option<PathOwned>
-session.retag(tier, label);
+let session = handle.session(&label);
+session.retag(tier, &label);
 ```
 
 ### A bare track handle is not demand (#5820)

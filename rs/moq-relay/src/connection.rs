@@ -333,7 +333,7 @@ mod tests {
 	fn a_failed_setup_reply_ends_the_admitted_session_by_its_cause() {
 		let outcome = |cause: Option<&Error>| {
 			let registry = moq_net::stats::Registry::new(Default::default());
-			let stats = registry.tier(moq_net::stats::Tier::default()).session("root", None);
+			let stats = registry.tier(moq_net::stats::Tier::default()).session("root");
 			setup_failed(&stats, cause);
 			drop(stats);
 			registry.snapshot().sessions()[0].1.sessions_failed

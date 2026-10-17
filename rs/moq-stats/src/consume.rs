@@ -4,8 +4,8 @@ use moq_net::stats::{Role, Tier};
 use moq_net::{AsPath, broadcast};
 
 use crate::{
-	LabelsFrame, PresenceFrame, Result, SessionsFrame, TotalsFrame, TrafficFrame, labels_track, presence_track,
-	sessions_track, totals_track, traffic_track,
+	PresenceFrame, Result, SessionsFrame, TotalsFrame, TrafficFrame, presence_track, sessions_track, totals_track,
+	traffic_track,
 };
 
 /// Configuration for a [`Consumer`]. Construct with [`Config::new`]
@@ -36,10 +36,9 @@ impl Config {
 /// yielding typed frames per track.
 ///
 /// Subscribe to the tracks you care about with [`Self::totals`],
-/// [`Self::traffic`], [`Self::sessions`], [`Self::labels`], and
-/// [`Self::presence`]. A named
+/// [`Self::traffic`], [`Self::sessions`], and [`Self::presence`]. A named
 /// tier's tracks are held open with an empty frame until the tier records, and
-/// a root's presence track is produced only while subscribed.
+/// a label's presence track is produced only while subscribed.
 pub struct Consumer {
 	broadcast: broadcast::Consumer,
 	config: Config,
@@ -78,20 +77,11 @@ impl Consumer {
 		})
 	}
 
-	/// Subscribe to the labels track for `tier`, awaiting the subscription
-	/// handshake.
-	pub async fn labels(&self, tier: &Tier) -> Result<Labels> {
-		let name = labels_track(tier, self.config.compression);
-		Ok(Labels {
-			inner: self.subscribe(&name).await?,
-		})
-	}
-
-	/// Subscribe to the presence track for auth `root`, awaiting the
+	/// Subscribe to the presence track for `label`, awaiting the
 	/// subscription handshake. Fails with
-	/// [`NotFound`](moq_net::Error::NotFound) for a root outside the group.
-	pub async fn presence(&self, root: impl AsPath) -> Result<Presence> {
-		let name = presence_track(root, self.config.compression);
+	/// [`NotFound`](moq_net::Error::NotFound) for a label outside the group.
+	pub async fn presence(&self, label: impl AsPath) -> Result<Presence> {
+		let name = presence_track(label, self.config.compression);
 		Ok(Presence {
 			inner: self.subscribe(&name).await?,
 		})
@@ -133,18 +123,6 @@ impl Sessions {
 	}
 }
 
-/// A typed reader over one labels track; see [`Traffic`].
-pub struct Labels {
-	inner: moq_json::snapshot::Consumer<LabelsFrame>,
-}
-
-impl Labels {
-	/// The next frame, or `None` once the track ends (the producer went away).
-	pub async fn next(&mut self) -> Result<Option<LabelsFrame>> {
-		Ok(self.inner.next().await?)
-	}
-}
-
 /// A typed reader over the totals track; see [`Traffic`].
 pub struct Totals {
 	inner: moq_json::snapshot::Consumer<TotalsFrame>,
@@ -157,7 +135,7 @@ impl Totals {
 	}
 }
 
-/// A typed reader over one root's presence track; see [`Traffic`].
+/// A typed reader over one label's presence track; see [`Traffic`].
 pub struct Presence {
 	inner: moq_json::snapshot::Consumer<PresenceFrame>,
 }
@@ -219,7 +197,7 @@ mod tests {
 	}
 
 	/// A tagged egress feed into a producer's registry, holding the handles needed
-	/// to write more traffic incrementally. Presence is recorded under `root`.
+	/// to write more traffic incrementally. Presence is recorded under `label`.
 	struct Feed {
 		track: track::Producer,
 		sub: track::Subscriber,
@@ -240,8 +218,8 @@ mod tests {
 		}
 	}
 
-	async fn feed(producer: &Producer, tier: Tier, root: &str, path: &str) -> Feed {
-		let ctx = producer.registry().tier(tier).session(root, Some("acme/key".into()));
+	async fn feed(producer: &Producer, tier: Tier, label: &str, path: &str) -> Feed {
+		let ctx = producer.registry().tier(tier).session(label);
 		let feed_origin = produce_origin();
 		let egress = feed_origin.consume().with_stats(ctx.clone());
 
@@ -321,10 +299,6 @@ mod tests {
 		let mut sessions = compressed.sessions(&tier).await.expect("subscribe sessions");
 		let frame = sessions.next().await.expect("read").expect("frame");
 		assert_eq!(frame.get("acme").expect("root").active(), 1);
-
-		let mut labels = compressed.labels(&tier).await.expect("subscribe labels");
-		let frame = labels.next().await.expect("read").expect("frame");
-		assert_eq!(frame.get("acme/key").expect("label").active(), 1);
 
 		let mut totals = compressed.totals().await.expect("subscribe totals");
 		let frame = totals.next().await.expect("read").expect("frame");

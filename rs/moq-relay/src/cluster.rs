@@ -1331,10 +1331,7 @@ impl Cluster {
 			)));
 		}
 
-		let stats = self
-			.stats
-			.tier(token.tier.clone())
-			.session(&token.root, token.label.clone());
+		let stats = self.stats.tier(token.tier.clone()).session(&token.label);
 		tracing::info!(transport = %request.transport, ?request.role, tier = %token.tier, root = %token.root,
 			publish = ?publisher.as_ref().map(origin::Producer::allowed),
 			subscribe = ?subscriber.as_ref().map(origin::Producer::allowed),
@@ -2025,7 +2022,7 @@ impl Cluster {
 			true => self.origin.clone().upstream(),
 			false => self.origin.clone().peer(),
 		};
-		let stats = self.stats.tier(self.cluster_tier()).session("", None);
+		let stats = self.stats.tier(self.cluster_tier()).session("");
 		let mut client = client
 			.with_publisher(origin.consume().with_hidden(true))
 			.with_subscriber(origin)
@@ -2475,7 +2472,7 @@ mod tests {
 	fn remote_logical_outcome_ignores_retries_and_counts_one_terminal_close() {
 		use moq_net::stats::Registry;
 		let registry = Registry::new(Default::default());
-		let stats = registry.tier(Tier::default()).session("", None);
+		let stats = registry.tier(Tier::default()).session("");
 		let mut established = false;
 		let _ = remote_status(
 			&stats,
@@ -2519,7 +2516,7 @@ mod tests {
 		use moq_net::stats::{Failure, Registry};
 		let exhausted = |established: bool| {
 			let registry = Registry::new(Default::default());
-			let stats = registry.tier(Tier::default()).session("", None);
+			let stats = registry.tier(Tier::default()).session("");
 			let mut connected = false;
 			if established {
 				remote_status(&stats, &mut connected, Ok(moq_tokio::Status::Connected)).unwrap();
@@ -2541,7 +2538,7 @@ mod tests {
 		use moq_net::stats::{Failures, Registry};
 		let ended = |err: moq_tokio::Error| {
 			let registry = Registry::new(Default::default());
-			let stats = registry.tier(Tier::default()).session("", None);
+			let stats = registry.tier(Tier::default()).session("");
 			let mut connected = false;
 			remote_status(&stats, &mut connected, Ok(moq_tokio::Status::Connected)).unwrap();
 			let _ = remote_status(&stats, &mut connected, Err(err));
