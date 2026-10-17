@@ -55,19 +55,26 @@ impl<E: CatalogExt> State<E> {
 	/// waits for.
 	///
 	/// Root metadata and application sections can describe a stream before its media config is
-	/// known, and must not make an empty broadcast discoverable. A listed rendition covers
-	/// application-defined sections the base fields can't see, and an importer that lists tracks in
-	/// the extension reports them through [`ext_tracks`](Self::ext_tracks).
+	/// known, and must not make an empty broadcast discoverable. A disabled video or audio rendition
+	/// promises no frames, so it doesn't count. A listed rendition covers application-defined
+	/// sections the base fields can't see, and an importer that lists tracks in the extension
+	/// reports them through [`ext_tracks`](Self::ext_tracks).
 	fn lists_track(&mut self) -> bool {
+		use std::any::TypeId;
+		// Video and audio carry `enabled`, which only the base check reads.
+		let base = [
+			TypeId::of::<hang::catalog::VideoConfig>(),
+			TypeId::of::<hang::catalog::AudioConfig>(),
+		];
 		let catalog = &mut self.catalog;
-		!catalog.video.renditions.is_empty()
-			|| !catalog.audio.renditions.is_empty()
+		catalog.video.enabled().next().is_some()
+			|| catalog.audio.enabled().next().is_some()
 			|| !catalog.text.renditions.is_empty()
 			|| !catalog.json.tracks.is_empty()
 			|| !catalog.binary.tracks.is_empty()
 			|| catalog.m2ts.is_some()
 			|| self.ext_tracks.is_some_and(|lists| lists(&mut catalog.ext))
-			|| self.owned.values().any(|&listed| listed)
+			|| self.owned.iter().any(|((ty, _), &listed)| listed && !base.contains(ty))
 	}
 }
 
@@ -2452,6 +2459,44 @@ mod test {
 			other => panic!("expected a catalog naming the track, got {other:?}"),
 		};
 		assert!(snapshot.video.renditions.contains_key("video0"));
+	}
+
+	/// A disabled rendition promises no frames, so it lists no track until it is enabled.
+	#[test]
+	fn a_disabled_rendition_does_not_publish_the_initial_catalog() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let config = Config::default().with_catalog(Catalog::<Extra>::default());
+		let catalog = Producer::new(&mut broadcast, config).unwrap();
+		let mut consumer: Consumer<Extra> = Consumer::new(catalog.outputs.hang.consume());
+		let waiter = kio::Waiter::noop();
+
+		let net = broadcast
+			.create_track("audio0", catalog.track_info(hang::catalog::PRIORITY.audio))
+			.unwrap();
+		let mut audio = catalog
+			.audio(
+				net,
+				crate::catalog::hang::Container::Legacy(crate::container::Kind::Audio),
+				None,
+			)
+			.unwrap();
+		let reserved = catalog.reserve();
+		let mut disabled = AudioConfig::new(AudioCodec::Opus, 48_000, 2);
+		disabled.enabled = false;
+		audio.set(disabled.clone()).unwrap();
+		drop(reserved);
+		assert!(
+			matches!(consumer.poll_next(&waiter), Poll::Pending),
+			"a disabled rendition is not a servable track"
+		);
+
+		disabled.enabled = true;
+		audio.set(disabled).unwrap();
+		let snapshot = match consumer.poll_next(&waiter) {
+			Poll::Ready(Ok(Some(c))) => c,
+			other => panic!("expected a catalog naming the track, got {other:?}"),
+		};
+		assert!(snapshot.audio.renditions["audio0"].enabled);
 	}
 
 	// Dropping a reservation without fulfilling it (a stream that never produced a config) still opens
