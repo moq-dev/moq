@@ -97,7 +97,7 @@ moq-auth = { path = "../moq-auth", features = ["client", "serve"] }
 moq-shaper = { path = "../moq-shaper", features = ["test"] }
 qmux = { workspace = true, features = ["tcp"] }
 rand = { workspace = true }
-rcgen = "0.14"
+rcgen = { workspace = true, features = ["pem", "ring"] }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
 tracing-subscriber = { workspace = true }

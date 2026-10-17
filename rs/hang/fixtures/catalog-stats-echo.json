@@ -1,0 +1,18 @@
+{
+  "video": {
+    "renditions": {
+      "hd": {
+        "codec": "avc1.64001f",
+        "container": {
+          "kind": "legacy"
+        }
+      }
+    }
+  },
+  "stats": {
+    "track": "stats.json"
+  },
+  "echo": {
+    "path": "viewers"
+  }
+}

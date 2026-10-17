@@ -2440,21 +2440,21 @@ mod tests {
 			for samples in [&first, &second] {
 				let mut track = fixture.subscribe().await;
 				live.push(fixture.deliver(samples, &mut track, &live).await);
-				// The rendition, and with it the archive, registers once the input is discovered.
-				if timeline.is_none() {
+				drop(track);
+				wait_for(&mut fixture.publication, Status::Waiting).await;
+				// The second run's first group closes the unhinted timeline's first record.
+				if timeline.is_none() && live.len() > 1 {
 					let section = fixture
 						.catalog
 						.snapshot()
 						.archive
-						.expect("the audio track enrolls an archive");
+						.expect("the audio track declares its archive after the run closes");
 					timeline = Some(
 						moq_mux::timeline::Consumer::<()>::subscribe(&fixture.consumer, &section, "audio")
 							.await
 							.unwrap(),
 					);
 				}
-				drop(track);
-				wait_for(&mut fixture.publication, Status::Waiting).await;
 				// Idle past the minimum segment, so each run is archived as its own record.
 				tokio::time::sleep(moq_mux::timeline::DEFAULT_DURATION_MIN + Duration::from_millis(100)).await;
 			}

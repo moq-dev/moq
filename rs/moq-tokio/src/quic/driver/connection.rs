@@ -25,7 +25,7 @@ use tracing::{Instrument, Span, debug_span};
 
 use crate::quic::driver::{
     ConnectionEvent, Duration, Instant, VarInt, mutex::Mutex, recv_stream::RecvStream,
-    runtime::UdpSender, send_stream::SendStream, udp_transmit,
+    runtime::UdpSender, send_group::SendGroup, send_stream::SendStream, udp_transmit,
 };
 use moq_quic::{
     ConnectionError, ConnectionHandle, ConnectionStats, Dir, EndpointEvent, Side, StreamEvent,
@@ -266,12 +266,30 @@ impl Future for ConnectionDriver {
             conn.terminate(e, &self.conn.shared);
             return Poll::Ready(Ok(()));
         }
-        let mut keep_going = conn.drive_transmit(cx).inspect_err(|_| {
-            // Transmit failed, so close the connection and clean state before returning the error.
-            if !conn.inner.is_closed() {
-                conn.implicit_close(&self.conn.shared);
+        let mut keep_going = match conn.drive_transmit(cx) {
+            Ok(keep_going) => keep_going,
+            // No route to the peer, so the handshake can never finish: fail it now rather than at
+            // the handshake timeout, which lets a dial race move on to the next address. The
+            // driver keeps running until the closed connection drains, so the endpoint forgets it
+            // even while the application still holds a handle.
+            Err(e) if moq_sock::udp::is_unreachable_err(&e) => {
+                if !conn.inner.is_closed() {
+                    // Closed, so dropping the last handle cannot overwrite the cause.
+                    conn.inner.close(Instant::now(), 0u32.into(), Bytes::new());
+                    let cause =
+                        TransportError::new(TransportErrorCode::NO_VIABLE_PATH, e.to_string());
+                    conn.terminate(cause.into(), &self.conn.shared);
+                }
+                true
             }
-        })?;
+            Err(e) => {
+                // Transmit failed, so close the connection and clean state before returning the error.
+                if !conn.inner.is_closed() {
+                    conn.implicit_close(&self.conn.shared);
+                }
+                return Poll::Ready(Err(e));
+            }
+        };
         // If a timer expires, there might be more to transmit. When we transmit something, we
         // might need to reset a timer. Hence, we must loop until neither happens.
         keep_going |= conn.drive_timer(cx);
@@ -326,6 +344,13 @@ impl Connection {
             conn: &self.0,
             notify: self.0.shared.stream_budget_available[Dir::Uni as usize].notified(),
         }
+    }
+
+    /// Open a send group at `priority`, for streams to join with [`SendStream::set_group`].
+    ///
+    /// [`SendStream::set_group`]: crate::quic::driver::SendStream::set_group
+    pub fn send_group(&self, priority: i64) -> SendGroup {
+        SendGroup::new(self.0.0.clone(), priority)
     }
 
     /// Initiate a new outgoing bidirectional stream.
@@ -496,47 +521,40 @@ impl Connection {
         }
     }
 
-    /// Transmit `data` as an unreliable, unordered application datagram
+    /// Transmit `data` as an unreliable, unordered application datagram in `group` at `order`
     ///
     /// Application datagrams are a low-level primitive. They may be lost or delivered out of order,
     /// and `data` must both fit inside a single QUIC packet and be smaller than the maximum
     /// dictated by the peer.
     ///
-    /// Previously queued datagrams which are still unsent may be discarded to make space for this
-    /// datagram, in order of oldest to newest.
-    pub fn send_datagram(&self, data: Bytes) -> Result<(), SendDatagramError> {
+    /// The datagram is scheduled like one of the group's streams at priority `order`, or among
+    /// the ungrouped streams without a group. Sending never blocks: a full buffer drops the
+    /// oldest datagram of the lowest-priority group, see [`moq_quic::Datagrams::send`].
+    pub fn send_datagram(
+        &self,
+        data: Bytes,
+        group: Option<&SendGroup>,
+        order: i64,
+    ) -> Result<(), SendDatagramError> {
         let conn = &mut *self.0.state.lock("send_datagram");
         if let Some(x) = &conn.error {
             return Err(SendDatagramError::ConnectionLost(x.clone()));
         }
         use moq_quic::SendDatagramError::*;
-        match conn.inner.datagrams().send(data, true) {
+        match conn
+            .inner
+            .datagrams()
+            .send(data, group.map(SendGroup::id), order)
+        {
             Ok(()) => {
                 conn.wake();
                 Ok(())
             }
             Err(e) => Err(match e {
-                Blocked(..) => unreachable!(),
                 UnsupportedByPeer => SendDatagramError::UnsupportedByPeer,
                 Disabled => SendDatagramError::Disabled,
                 TooLarge => SendDatagramError::TooLarge,
             }),
-        }
-    }
-
-    /// Transmit `data` as an unreliable, unordered application datagram
-    ///
-    /// Unlike [`send_datagram()`], this method will wait for buffer space during congestion
-    /// conditions, which effectively prioritizes old datagrams over new datagrams.
-    ///
-    /// See [`send_datagram()`] for details.
-    ///
-    /// [`send_datagram()`]: Connection::send_datagram
-    pub fn send_datagram_wait(&self, data: Bytes) -> SendDatagram<'_> {
-        SendDatagram {
-            conn: &self.0,
-            data: Some(data),
-            notify: self.0.shared.datagrams_unblocked.notified(),
         }
     }
 
@@ -946,55 +964,6 @@ impl Future for ReadDatagram<'_> {
     }
 }
 
-pin_project! {
-    /// Future produced by [`Connection::send_datagram_wait`]
-    pub struct SendDatagram<'a> {
-        conn: &'a ConnectionRef,
-        data: Option<Bytes>,
-        #[pin]
-        notify: Notified<'a>,
-    }
-}
-
-impl Future for SendDatagram<'_> {
-    type Output = Result<(), SendDatagramError>;
-    fn poll(self: Pin<&mut Self>, ctx: &mut Context<'_>) -> Poll<Self::Output> {
-        let mut this = self.project();
-        let mut state = this.conn.state.lock("SendDatagram::poll");
-        if let Some(e) = &state.error {
-            return Poll::Ready(Err(SendDatagramError::ConnectionLost(e.clone())));
-        }
-        use moq_quic::SendDatagramError::*;
-        match state
-            .inner
-            .datagrams()
-            .send(this.data.take().unwrap(), false)
-        {
-            Ok(()) => {
-                state.wake();
-                Poll::Ready(Ok(()))
-            }
-            Err(e) => Poll::Ready(Err(match e {
-                Blocked(data) => {
-                    this.data.replace(data);
-                    loop {
-                        match this.notify.as_mut().poll(ctx) {
-                            Poll::Pending => return Poll::Pending,
-                            // Spurious wakeup, get a new future
-                            Poll::Ready(()) => this
-                                .notify
-                                .set(this.conn.shared.datagrams_unblocked.notified()),
-                        }
-                    }
-                }
-                UnsupportedByPeer => SendDatagramError::UnsupportedByPeer,
-                Disabled => SendDatagramError::Disabled,
-                TooLarge => SendDatagramError::TooLarge,
-            })),
-        }
-    }
-}
-
 /// Watcher produced by [`Connection::watch_remote_address`]
 pub struct RemoteAddressWatcher {
     receiver: watch::Receiver<SocketAddr>,
@@ -1015,7 +984,7 @@ impl RemoteAddressWatcher {
 }
 
 #[derive(Debug)]
-pub(crate) struct ConnectionRef(Arc<ConnectionInner>);
+pub(crate) struct ConnectionRef(pub(crate) Arc<ConnectionInner>);
 
 impl ConnectionRef {
     fn stable_id(&self) -> usize {
@@ -1070,7 +1039,6 @@ pub(crate) struct Shared {
     /// Notified when the peer has initiated a new stream
     stream_incoming: [Notify; 2],
     datagram_received: Notify,
-    datagrams_unblocked: Notify,
     closed: Notify,
     connected: Arc<Notify>,
     /// Number of live handles that can used to initiate or handle I/O; excludes the driver
@@ -1176,6 +1144,13 @@ impl State {
                     self.buffered_transmit = Some(t);
                     return Ok(false);
                 }
+                // An established connection outlives a route that drops for a moment, such as a
+                // client switching networks, so the datagram is just lost.
+                Poll::Ready(Err(e))
+                    if moq_sock::udp::is_unreachable_err(&e) && !self.inner.is_handshaking() =>
+                {
+                    tracing::debug!(%e, "transmit failed; treating it as loss");
+                }
                 Poll::Ready(Err(e)) => return Err(e),
                 Poll::Ready(Ok(())) => {}
             }
@@ -1267,9 +1242,6 @@ impl State {
                 DatagramReceived => {
                     shared.datagram_received.notify_waiters();
                 }
-                DatagramsUnblocked => {
-                    shared.datagrams_unblocked.notify_waiters();
-                }
                 Stream(StreamEvent::Readable { id }) => wake_stream(id, &mut self.blocked_readers),
                 Stream(StreamEvent::Available { dir }) => {
                     // Might mean any number of streams are ready, so we wake up everyone
@@ -1351,7 +1323,6 @@ impl State {
         shared.stream_incoming[Dir::Uni as usize].notify_waiters();
         shared.stream_incoming[Dir::Bi as usize].notify_waiters();
         shared.datagram_received.notify_waiters();
-        shared.datagrams_unblocked.notify_waiters();
         shared.handshake_confirmed.notify_waiters();
         wake_all_notify(&mut self.stopped);
         shared.closed.notify_waiters();

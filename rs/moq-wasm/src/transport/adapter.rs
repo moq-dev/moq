@@ -77,8 +77,17 @@ impl<S: backend::Session<SendStream: 'static, RecvStream: 'static> + Clone + 'st
 			.map_err(Error)
 			.map(|res| res.map(|(send, recv)| (SendStream(send), RecvStream(recv))))
 	}
-	fn poll_send_datagram(&mut self, cx: &mut Context<'_>, payload: &[u8]) -> Poll<Result<(), Self::Error>> {
-		backend::Session::poll_send_datagram(&mut self.0, cx, payload).map_err(Error)
+	fn send_group(&mut self, _: i64) -> Option<poll::Ungrouped> {
+		None
+	}
+	/// The backend cannot rank a datagram against a stream, so the group and order are ignored,
+	/// and a datagram it has no room for is dropped.
+	fn send_datagram(&mut self, payload: Bytes, _: Option<&poll::Ungrouped>, _: i64) -> Result<(), Self::Error> {
+		let mut cx = Context::from_waker(std::task::Waker::noop());
+		match backend::Session::poll_send_datagram(&mut self.0, &mut cx, &payload) {
+			Poll::Ready(res) => res.map_err(Error),
+			Poll::Pending => Ok(()),
+		}
 	}
 	fn poll_recv_datagram(&mut self, cx: &mut Context<'_>) -> Poll<Result<Bytes, Self::Error>> {
 		backend::Session::poll_recv_datagram(&mut self.0, cx).map_err(Error)
@@ -106,14 +115,19 @@ impl<S: backend::Session<SendStream: 'static, RecvStream: 'static> + Clone + 'st
 pub struct SendStream<S>(S);
 impl<S: backend::SendStream + 'static> poll::SendStream for SendStream<S> {
 	type Error = Error<S::Error>;
+	type Group = poll::Ungrouped;
 	fn poll_write(&mut self, cx: &mut Context<'_>, buf: &[u8]) -> Poll<Result<usize, Self::Error>> {
 		backend::SendStream::poll_write(&mut self.0, cx, buf).map_err(Error)
 	}
 	fn poll_write_buf<B: Buf>(&mut self, cx: &mut Context<'_>, buf: &mut B) -> Poll<Result<usize, Self::Error>> {
 		backend::SendStream::poll_write_buf(&mut self.0, cx, buf).map_err(Error)
 	}
-	fn set_priority(&mut self, order: i32) {
+	fn set_priority(&mut self, order: i64) {
+		let order = order.clamp(i32::MIN.into(), i32::MAX.into()) as i32;
 		backend::SendStream::set_priority(&mut self.0, order)
+	}
+	fn set_group(&mut self, group: &Self::Group) {
+		match *group {}
 	}
 	fn finish(&mut self) -> Result<(), Self::Error> {
 		backend::SendStream::finish(&mut self.0).map_err(Error)
