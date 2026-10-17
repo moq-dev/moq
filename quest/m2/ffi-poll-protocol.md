@@ -40,6 +40,11 @@ Things to carry over and check:
   ends only that read or still ends the stream. If it changes, update the
   doc, the tests, and the PR's API report; the other wrappers face the same
   question.
+- **Prove no-loss per backend.** A sync poll only moves the race into the
+  generated glue: if it polls an item out and then sees its future cancelled,
+  the item is gone. Each backend that can cancel must force that window in a
+  test. Either the result is delivered or the next read gets the item. The
+  spike's Python and Go cancel probes are a starting point.
 - **Concurrent pollers on one handle share one waker.** Pick a semantic and
   test it: either reject a second concurrent read, or wake every poller.
 - Measure Kotlin and Swift too; the spike covered only Go and Python. Sweep
