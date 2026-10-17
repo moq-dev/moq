@@ -20,12 +20,20 @@ ROUNDS=$((10#$ROUNDS))
 
 # One case measures far apart on performance and efficiency cores, so on a
 # hybrid CPU pin this shell, and with it every build and benchmark process, to
-# the performance cores. The kernel only lists them on Intel hybrid parts.
+# the performance cores. The kernel only lists them on Intel hybrid parts, and
+# intersects the request with any cpuset, so report the mask it applied.
 PINNED=
 if [[ -r /sys/devices/cpu_core/cpus ]]; then
-    PINNED=$(</sys/devices/cpu_core/cpus)
-    taskset -pc "$PINNED" $$ >/dev/null
+    if ! PINNED=$(taskset -pc "$(</sys/devices/cpu_core/cpus)" $$ | sed -n 's/.*new affinity list: //p'); then
+        printf 'cannot pin to the performance cores: none are in the allowed CPU set\n' >&2
+        exit 1
+    fi
 fi
+
+# nproc counts the allowed CPUs, unless OpenMP variables override it.
+usable_cpus() {
+    env -u OMP_NUM_THREADS -u OMP_THREAD_LIMIT nproc
+}
 case $MODE in
     --audio)
         BASE=
@@ -52,7 +60,7 @@ case $MODE in
         BASE=
         RUNTIME_WORKERS=${MOQ_BENCH_RUNTIME_WORKERS:-}
         if [[ -z $RUNTIME_WORKERS ]]; then
-            RUNTIME_WORKERS=$(nproc)
+            RUNTIME_WORKERS=$(usable_cpus)
             if ((RUNTIME_WORKERS > 256)); then
                 RUNTIME_WORKERS=256
             fi
@@ -534,7 +542,7 @@ run_shard_sweep() {
     HOST_BIN=$CURRENT_TARGET/release/moq-bench-host
 
     local cpus workload connections shards label
-    cpus=$(nproc)
+    cpus=$(usable_cpus)
     for workload in video fanout; do
         for connections in $SHARD_CONNECTIONS; do
             for shards in $SHARD_COUNTS; do
