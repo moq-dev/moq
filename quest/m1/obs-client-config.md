@@ -31,7 +31,3 @@ again, under the same keys.
   options and `doc/lib/*`; `doc/bin/obs.md` lists the restored settings.
 
 Public API: additive on moq-ffi and every binding. Wire: none.
-
-## Related
-
-- [Session report parity](/quest/m1/obs-session-report.md) - the dock's other gaps after the migration

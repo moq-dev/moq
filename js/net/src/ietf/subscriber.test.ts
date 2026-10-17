@@ -1235,7 +1235,7 @@ test.each(["acceptance", "timeout"])("returning demand preserves pending setup u
 	} else {
 		jest.advanceTimersByTime(4_000);
 		expect(await info).toBeInstanceOf(Error);
-		expect(((await info) as Error).message).toContain("subscribe timed out after 10000ms");
+		expect(((await info) as Error).message).toContain("request timed out after 10000ms");
 	}
 	expect(opening).toHaveBeenCalledTimes(1);
 });

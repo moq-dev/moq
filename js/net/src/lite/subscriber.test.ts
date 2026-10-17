@@ -1,5 +1,5 @@
 import { expect, jest, spyOn, test } from "bun:test";
-import { Milli } from "@moq/clock";
+import { Manual, Milli, Nano } from "@moq/clock";
 import { Signal } from "@moq/signals";
 import type { Grant } from "../auth.ts";
 import type { Probe as ProbeStats } from "../connection/stats.ts";
@@ -1088,7 +1088,7 @@ test("a lite subscribe whose SUBSCRIBE write stalls past the deadline closes its
 
 		jest.advanceTimersByTime(SUBSCRIBE_SETUP_TIMEOUT_MS);
 		await track.closed;
-		await streams[0].finished;
+		await streams[0].aborted;
 	} finally {
 		subscriber.close();
 		warn.mockRestore();
@@ -1825,5 +1825,38 @@ test("closing a broadcast while TRACK_INFO is pending leaves no unhandled reject
 	} finally {
 		process.off("unhandledRejection", onUnhandled);
 		subscriber.close();
+	}
+});
+
+test.each(["answer", "credit"] as const)("FETCH shares the TRACK deadline while waiting for %s", async (stage) => {
+	const clock = new Manual();
+	const restore = clock.install();
+	const { quic, streams, opened } = fakeSession(stage === "credit" ? [1] : []);
+	const subscriber = new Subscriber(quic, Version.DRAFT_07, HopSchema.parse(1n));
+	let failure: unknown;
+	const fetch = subscriber.fetchGroup(Path.from("room"), "video", 0).catch((err: unknown) => {
+		failure = err;
+	});
+	try {
+		await opened(0);
+		await streams[0].reading;
+		await clock.advanceAsync(Nano.fromMilli(Milli(5_000)));
+		await answerTrackInfo(streams[0], Version.DRAFT_07);
+		await opened(1);
+		if (stage === "answer") await streams[1].reading;
+		await clock.advanceAsync(Nano.fromMilli(Milli(4_999)));
+		expect(failure).toBeUndefined();
+		await clock.advanceAsync(Nano.fromMilli(Milli(1)));
+		await fetch;
+		if (stage === "answer") expect((failure as StreamError).code).toBe(StreamCode.ControlTimeout);
+		else {
+			expect((failure as Error).name).toBe("NoStreamCredit");
+			streams[1].release();
+			await streams[1].aborted;
+			expect(streams[1].written).toEqual([]);
+		}
+	} finally {
+		subscriber.close();
+		restore();
 	}
 });

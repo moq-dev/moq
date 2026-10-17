@@ -104,6 +104,16 @@ public final class Session: Sendable {
         ffi.connects()
     }
 
+    /// Why a client session is reconnecting: the error that ended the last
+    /// connection or failed the latest redial, or `nil` once a connection lands.
+    ///
+    /// A redial that keeps failing never changes `status()`, so poll this while it
+    /// reports `.disconnected` to show the reason. Giving up for good throws from
+    /// `closed()` instead. A server-accepted session always returns `nil`.
+    public func failure() -> MoqError? {
+        ffi.failure()
+    }
+
     /// Close the session with the given error code. Code 0 means "no error";
     /// prefer `shutdown()` for that case.
     public func cancel(code: UInt32) {
