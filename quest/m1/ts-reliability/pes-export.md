@@ -71,4 +71,3 @@ change: nothing in `js/` interprets the section.
 ## Related
 
 - [Raw stream types](/quest/m1/ts-reliability/stream-type.md) - unknown stream types are the other way a verbatim track fails export
-- [T-STD TS export](/quest/m1/tstd/README.md) - the schedule this placement feeds

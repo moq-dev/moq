@@ -87,7 +87,6 @@ Public API: a new export mode; nothing existing breaks.
 ## Related
 
 - [Deterministic TS legs](/quest/m2/ts-hitless.md) - the demultiplexed lane's common packet identity under `--sync`
-- [T-STD TS export](/quest/m1/tstd/README.md) - the jitter buffer and clock recovery this release shares
 - [TS validation](/test/ts/README.md) - shared automatic graders and controls
 - [Loss and recovery](/quest/m1/ts-reliability/recovery.md) - actual missing content and reacquisition proof
 - [Same-epoch importers](/quest/m2/hop-aligned-import.md) - identical common objects do not prove independent importers publish identical groups

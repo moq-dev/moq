@@ -743,7 +743,7 @@ mod tests {
 		let allocator = Allocator::new(estimate.consume());
 
 		let (_first_broadcast, first) = track(VIDEO);
-		let _first_sub = first.consume();
+		let _first_sub = first.subscribe(None);
 		let first = allocator.reserve(&first.demand(), bps(4_000_000));
 		let mut first_share = first.consumer();
 
@@ -754,7 +754,7 @@ mod tests {
 		// A second encoder starts. The first must give half back without anyone
 		// telling it to, or the two together target 200% of the uplink.
 		let (_second_broadcast, second) = track(VIDEO);
-		let _second_sub = second.consume();
+		let _second_sub = second.subscribe(None);
 		let second_share = allocator.reserve(&second.demand(), bps(4_000_000));
 
 		assert_eq!(first_share.changed().await.unwrap(), Some(bps(1_000_000)));
@@ -770,7 +770,7 @@ mod tests {
 		estimate.set(Some(bps(2_000_000))).unwrap();
 
 		let (_watched_broadcast, watched) = track(VIDEO);
-		let _watched_sub = watched.consume();
+		let _watched_sub = watched.subscribe(None);
 		let watched_share = allocator.reserve(&watched.demand(), bps(4_000_000));
 
 		let (_idle_broadcast, idle) = track(VIDEO);
@@ -782,7 +782,7 @@ mod tests {
 		assert_eq!(idle_share.peek(), None);
 
 		// It joins, and the split happens.
-		let _idle_sub = idle.consume();
+		let _idle_sub = idle.subscribe(None);
 		assert_eq!(watched_share.peek(), Some(bps(1_000_000)));
 		assert_eq!(idle_share.peek(), Some(bps(1_000_000)));
 	}
@@ -797,12 +797,12 @@ mod tests {
 		estimate.set(Some(bps(2_000_000))).unwrap();
 
 		let (_mine_broadcast, mine) = track(VIDEO);
-		let _mine_sub = mine.consume();
+		let _mine_sub = mine.subscribe(None);
 		let mine_share_reserved = allocator.reserve(&mine.demand(), bps(4_000_000));
 		let mut mine_share = mine_share_reserved.consumer();
 
 		let (_sibling_broadcast, sibling) = track(VIDEO);
-		let sibling_sub = sibling.consume();
+		let sibling_sub = sibling.subscribe(None);
 		let _sibling_share = allocator.reserve(&sibling.demand(), bps(4_000_000));
 
 		assert_eq!(mine_share.changed().await.unwrap(), Some(bps(1_000_000)));
@@ -857,7 +857,7 @@ mod tests {
 		let allocator = Allocator::new(estimate.consume());
 
 		let (_broadcast, track) = track(VIDEO);
-		let _sub = track.consume();
+		let _sub = track.subscribe(None);
 		let share_reserved = allocator.reserve(&track.demand(), bps(4_000_000));
 		let mut share = share_reserved.consumer();
 
@@ -885,12 +885,12 @@ mod tests {
 		estimate.set(Some(bps(2_000_000))).unwrap();
 
 		let (_mine_broadcast, mine) = track(VIDEO);
-		let _mine_sub = mine.consume();
+		let _mine_sub = mine.subscribe(None);
 		let share_reserved = allocator.reserve(&mine.demand(), bps(4_000_000));
 		let mut share = share_reserved.consumer();
 
 		let (_sibling_broadcast, sibling) = track(VIDEO);
-		let sibling_sub = sibling.consume();
+		let sibling_sub = sibling.subscribe(None);
 		let _sibling_share = allocator.reserve(&sibling.demand(), bps(4_000_000));
 
 		assert_eq!(share.changed().await.unwrap(), Some(bps(1_000_000)));
@@ -910,7 +910,7 @@ mod tests {
 		let allocator = Allocator::new(estimate.consume());
 
 		let (_broadcast, track) = track(VIDEO);
-		let _sub = track.consume();
+		let _sub = track.subscribe(None);
 		let share_reserved = allocator.reserve(&track.demand(), bps(4_000_000));
 		let mut share = share_reserved.consumer();
 
@@ -955,11 +955,11 @@ mod tests {
 		estimate.set(Some(bps(2_000_000))).unwrap();
 
 		let (_first_broadcast, first) = track(VIDEO);
-		let _first_sub = first.consume();
+		let _first_sub = first.subscribe(None);
 		let first_reserved = allocator.reserve(&first.demand(), bps(4_000_000));
 
 		let (_second_broadcast, second) = track(VIDEO);
-		let _second_sub = second.consume();
+		let _second_sub = second.subscribe(None);
 		let second_reserved = allocator.reserve(&second.demand(), bps(4_000_000));
 		assert_eq!(second_reserved.peek(), Some(bps(1_000_000)));
 
@@ -989,11 +989,11 @@ mod tests {
 		estimate.set(Some(bps(6_000_000))).unwrap();
 
 		let (_small_broadcast, small) = track(VIDEO);
-		let _small_sub = small.consume();
+		let _small_sub = small.subscribe(None);
 		let small_reserved = allocator.reserve(&small.demand(), bps(1_000_000));
 
 		let (_large_broadcast, large) = track(VIDEO);
-		let _large_sub = large.consume();
+		let _large_sub = large.subscribe(None);
 		let large_reserved = allocator.reserve(&large.demand(), bps(8_000_000));
 
 		// Max-min fair: the small claim is satisfied in full, the rest goes to the other.
@@ -1022,7 +1022,7 @@ mod tests {
 		estimate.set(Some(bps(6_000_000))).unwrap();
 
 		let (_broadcast, producer) = track(VIDEO);
-		let _sub = producer.consume();
+		let _sub = producer.subscribe(None);
 		let reserved = allocator.reserve(&producer.demand(), bps(1_000_000));
 		let mut share = reserved.consumer();
 		assert_eq!(share.changed().await.unwrap(), Some(bps(1_000_000)));
@@ -1044,7 +1044,7 @@ mod tests {
 		let allocator = Allocator::new(estimate.consume());
 
 		let (_broadcast, producer) = track(VIDEO);
-		let _sub = producer.consume();
+		let _sub = producer.subscribe(None);
 		let share_reserved = allocator.reserve(&producer.demand(), bps(4_000_000));
 		let mut share = share_reserved.consumer();
 

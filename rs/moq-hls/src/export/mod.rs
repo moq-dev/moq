@@ -692,7 +692,13 @@ mod tests {
 
 	impl CatalogTestExt for moq_mux::catalog::Producer {
 		fn enroll_test(&self, track: &str) -> moq_mux::Result<moq_mux::timeline::Recorder> {
-			let recorder = self.timeline().track(track, moq_mux::timeline::Config::default())?;
+			let duration = Duration::from_secs(2);
+			let recorder = self.timeline().track(
+				track,
+				moq_mux::timeline::Config::default()
+					.with_duration_min(duration)
+					.with_duration_hint(duration),
+			)?;
 			let section = self.timeline().section();
 			let mut producer = self.clone();
 			let mut catalog = producer.modify()?;
@@ -718,9 +724,10 @@ mod tests {
 	fn archive(tracks: &[&str]) -> hang::catalog::Archive {
 		let mut archive = hang::catalog::Archive::new();
 		for track in tracks {
-			archive
-				.timelines
-				.insert(track.to_string(), hang::timeline::default_name(track));
+			archive.timelines.insert(
+				track.to_string(),
+				hang::catalog::Timeline::new(hang::timeline::default_name(track), 4_000),
+			);
 		}
 		archive
 	}
@@ -2407,7 +2414,15 @@ mod tests {
 		// Write the catalog track directly: a moq-mux catalog producer always advertises its clock,
 		// as a publisher on a host whose wall clock is set does.
 		let timelines = moq_mux::timeline::Timelines::new(&broadcast);
-		let recorder = timelines.track("video0", moq_mux::timeline::Config::default()).unwrap();
+		let duration = Duration::from_secs(2);
+		let recorder = timelines
+			.track(
+				"video0",
+				moq_mux::timeline::Config::default()
+					.with_duration_min(duration)
+					.with_duration_hint(duration),
+			)
+			.unwrap();
 		let mut snapshot = moq_mux::catalog::hang::Catalog::<()>::default();
 		snapshot.video.renditions.insert("video0".to_string(), video_config());
 		snapshot.archive = Some(timelines.section());
@@ -2712,9 +2727,8 @@ mod tests {
 		drop((audio, registration, broadcast));
 	}
 
-	// The catalog's durationMax is the record split ceiling, far above a GOP, so the exporter
-	// derives EXT-X-TARGETDURATION from the segments it has: a playlist whose EXTINF exceeds its
-	// target duration is invalid, and one far above them delays every player.
+	// The declared duration is nominal, so the exporter derives EXT-X-TARGETDURATION from the
+	// segments it has. A playlist whose EXTINF exceeds its target duration is invalid.
 	#[tokio::test]
 	async fn target_duration_follows_the_observed_segments() {
 		let origin = produce_origin();

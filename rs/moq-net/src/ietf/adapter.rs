@@ -805,6 +805,7 @@ impl<S: crate::transport::poll::Session> ControlStreamAdapter<S> {
 		let msg = crate::ietf::GoAway {
 			new_session_uri: std::borrow::Cow::Borrowed(uri),
 			timeout: timeout_ms,
+			request_id: None,
 		};
 
 		// The size prefix is a u16 on a stream shared with every other request, so the

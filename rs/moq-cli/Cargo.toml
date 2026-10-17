@@ -58,7 +58,7 @@ transcode = ["dep:moq-transcode", "dep:moq-video"]
 # Native playback (`moq ... play`): decode into a wgpu window and a cpal
 # speaker. Off by default because it pulls both graphics and audio device stacks
 # into a binary that may only be routing containers or serving gateways.
-play = ["dep:moq-video", "moq-video/render", "dep:moq-audio", "moq-audio/playback", "dep:moq-clock", "dep:pollster", "dep:winit"]
+play = ["dep:moq-video", "moq-video/render", "dep:moq-audio", "moq-audio/playback", "dep:pollster", "dep:winit"]
 # NVIDIA hardware codecs (NVENC + NVDEC) on Linux, on by default. Just turns on
 # the matching moq-video feature, so it only bites when something else pulls in
 # moq-video: `capture`, `transcode`, or `play`. For a build with no CUDA
@@ -106,7 +106,7 @@ humantime = { workspace = true }
 moq-archive = { workspace = true }
 moq-audio = { workspace = true, optional = true, features = ["aac"] }
 moq-auth = { workspace = true, features = ["serve"] }
-moq-clock = { workspace = true, optional = true }
+moq-clock = { workspace = true }
 # `server` enables the HTTP egress server for `moq export hls`; the importer is always available.
 moq-hls = { workspace = true, features = ["server"] }
 # Names the MSF catalog track `export archive` records.

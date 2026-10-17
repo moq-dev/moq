@@ -18,8 +18,8 @@ const URL_ = new URL("https://example.com");
 async function handshake(client: Extensions, server: Extensions) {
 	const pair = createMockTransportPair(ALPN.DRAFT_18);
 	const [dialed, accepted] = await Promise.all([
-		exchangeSetup(pair.client, VERSION, "test", offered(client)),
-		exchangeSetup(pair.server, VERSION, "test", offered(server)),
+		exchangeSetup(pair.client, VERSION, "test", { client: true, extensions: offered(client) }),
+		exchangeSetup(pair.server, VERSION, "test", { client: false, extensions: offered(server) }),
 	]);
 	return { dialed, accepted };
 }
@@ -28,7 +28,7 @@ async function handshake(client: Extensions, server: Extensions) {
 async function acceptWith(extensions: Extensions) {
 	const pair = createMockTransportPair(ALPN.DRAFT_18);
 	const [peer, connection] = await Promise.all([
-		exchangeSetup(pair.client, VERSION, "test", offered()),
+		exchangeSetup(pair.client, VERSION, "test", { client: true, extensions: offered() }),
 		accept({ transport: pair.server, url: URL_, extensions }),
 	]);
 	return { pair, peer, connection };

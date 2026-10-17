@@ -1014,7 +1014,7 @@ async fn a_certificate_admits_only_what_the_server_grants() {
 
 	// A narrow grant: the certificate publishes under `mine/**` and nothing else.
 	let narrow = serve(policy(moq_auth::Permissions::new(
-		["mine/**".parse().unwrap()].into_iter().collect(),
+		"mine/**".parse::<moq_auth::Pattern>().unwrap(),
 		Patterns::new(),
 	)))
 	.await;
@@ -1414,7 +1414,7 @@ async fn quic_and_webtransport_report_distinct_auth_transports() {
 #[tokio::test]
 async fn in_band_tokens_widen_and_withdraw_live_prefixes() {
 	for scheme in ["tcp", "ws"] {
-		let mut initial = Grant::new(all(), ["a/**".parse().unwrap()].into_iter().collect());
+		let mut initial = Grant::new(all(), "a/**".parse::<moq_auth::Pattern>().unwrap());
 		initial.expires = Some(SystemTime::now() + Duration::from_secs(3600));
 		let script = Script::new(initial);
 		let auth = build_auth(script.spawn().await);
@@ -1464,7 +1464,7 @@ async fn in_band_tokens_widen_and_withdraw_live_prefixes() {
 			.unwrap()
 			.unwrap();
 		let mut a_sub = a_read.track("video").unwrap().subscribe(None).await.unwrap();
-		let mut replacement = Grant::new(all(), ["b/**".parse().unwrap()].into_iter().collect());
+		let mut replacement = Grant::new(all(), "b/**".parse::<moq_auth::Pattern>().unwrap());
 		replacement.expires = Some(SystemTime::now() + Duration::from_secs(3600));
 		script.on_connect(Answer::Grant(replacement));
 		let token = tokio::time::timeout(TIMEOUT, subscriber.auth().add("replacement"))

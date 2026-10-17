@@ -4,7 +4,7 @@ use std::borrow::Cow;
 
 use crate::coding::*;
 
-use super::Message;
+use super::{Message, RequestId};
 
 use super::Version;
 
@@ -14,6 +14,9 @@ pub struct GoAway<'a> {
 	pub new_session_uri: Cow<'a, str>,
 	/// Draft-17: timeout in milliseconds before closing the session
 	pub timeout: u64,
+	/// Draft-18 only: the smallest of the receiver's Request IDs the sender has not
+	/// processed. Required on the control stream and absent on a request stream.
+	pub request_id: Option<RequestId>,
 }
 
 impl Message for GoAway<'_> {
@@ -25,14 +28,11 @@ impl Message for GoAway<'_> {
 		if !matches!(version, Version::Draft14 | Version::Draft15 | Version::Draft16) {
 			w.varint(self.timeout)?;
 		}
-		// Draft-18 (#1559) requires a Request ID when GOAWAY is sent on the
-		// control stream, which is the only place we send it. We don't track
-		// per-request completion, so advertise 0 ("no requests processed");
-		// omitting the field entirely would be a length mismatch that a
-		// conformant peer must treat as a PROTOCOL_VIOLATION. Draft-19
-		// removed the field again (#1623).
-		if matches!(version, Version::Draft18) {
-			w.varint(0)?;
+		// Draft-18 (#1559) added the Request ID; draft-19 removed it again (#1623).
+		if version == Version::Draft18
+			&& let Some(request_id) = self.request_id
+		{
+			request_id.encode(w, version)?;
 		}
 		Ok(())
 	}
@@ -44,24 +44,24 @@ impl Message for GoAway<'_> {
 		if new_session_uri.len() > 8192 {
 			return Err(DecodeError::InvalidValue);
 		}
-		let timeout = match version {
-			Version::Draft14 | Version::Draft15 | Version::Draft16 => 0,
+		let (timeout, request_id) = match version {
+			Version::Draft14 | Version::Draft15 | Version::Draft16 => (0, None),
+			// The Request ID is present only on the control stream; each caller checks it
+			// against the stream it read from.
 			Version::Draft18 => {
 				let timeout = r.varint()?;
-				// Draft-18 trailing Request ID (#1559): required on the control
-				// stream, but tolerate its absence from lenient peers. We don't
-				// act on per-request GOAWAY so the value is discarded. Draft-19
-				// removed this field again (#1623).
-				if !r.is_empty() {
-					let _ = r.varint()?;
-				}
-				timeout
+				let request_id = match r.is_empty() {
+					true => None,
+					false => Some(RequestId::decode(r, version)?),
+				};
+				(timeout, request_id)
 			}
-			_ => r.varint()?,
+			_ => (r.varint()?, None),
 		};
 		Ok(Self {
 			new_session_uri,
 			timeout,
+			request_id,
 		})
 	}
 }
@@ -87,6 +87,7 @@ mod tests {
 		let msg = GoAway {
 			new_session_uri: "https://example.com/new".into(),
 			timeout: 0,
+			request_id: None,
 		};
 
 		let encoded = encode_message(&msg);
@@ -100,6 +101,7 @@ mod tests {
 		let msg = GoAway {
 			new_session_uri: "".into(),
 			timeout: 0,
+			request_id: None,
 		};
 
 		let encoded = encode_message(&msg);
@@ -113,6 +115,7 @@ mod tests {
 		let msg = GoAway {
 			new_session_uri: "https://example.com/new".into(),
 			timeout: 5000,
+			request_id: None,
 		};
 
 		let mut buf = Vec::new();
@@ -131,6 +134,7 @@ mod tests {
 		let msg = GoAway {
 			new_session_uri: "moqt://relay.example/".into(),
 			timeout: 5000,
+			request_id: Some(RequestId(1)),
 		};
 
 		let mut buf = Vec::new();
@@ -149,6 +153,7 @@ mod tests {
 
 		assert_eq!(decoded.new_session_uri, "moqt://relay.example/");
 		assert_eq!(decoded.timeout, 5000);
+		assert_eq!(decoded.request_id, Some(RequestId(1)));
 	}
 
 	/// Draft-19 (#1623) removed the Request ID again: the body is just URI + timeout,
@@ -158,6 +163,7 @@ mod tests {
 		let msg = GoAway {
 			new_session_uri: "moqt://relay.example/".into(),
 			timeout: 5000,
+			request_id: None,
 		};
 
 		let mut buf = Vec::new();
@@ -172,7 +178,7 @@ mod tests {
 	}
 
 	/// Draft-18 added an optional trailing Request ID (#1559). A peer that emits
-	/// one must not break our decoder; we drain and discard it.
+	/// one must not break our decoder; we keep it for the parity check.
 	#[test]
 	fn test_goaway_v18_drains_optional_request_id() {
 		// Hand-construct a draft-18 GOAWAY body that includes the optional Request ID.
@@ -189,6 +195,7 @@ mod tests {
 
 		assert_eq!(decoded.new_session_uri, "moqt://relay.example/");
 		assert_eq!(decoded.timeout, 5000);
+		assert_eq!(decoded.request_id, Some(RequestId(42)));
 		assert!(bytes.is_empty(), "trailing Request ID should be consumed");
 	}
 }

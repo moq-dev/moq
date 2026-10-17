@@ -941,9 +941,10 @@ mod tests {
 			.insert("video", source(1920, 1080, Some(6_000_000)))
 			.unwrap();
 		let mut archive = hang::catalog::Archive::new();
-		archive
-			.timelines
-			.insert("video".to_string(), "video.timeline.z".to_string());
+		archive.timelines.insert(
+			"video".to_string(),
+			hang::catalog::Timeline::new("video.timeline.z", 4_000),
+		);
 		archive.replay = Some(RelativeOwned::from("./recordings/clip".to_string()));
 		archive.version = Some(hang::catalog::Archive::VERSION);
 		child.archive = Some(archive.clone());
