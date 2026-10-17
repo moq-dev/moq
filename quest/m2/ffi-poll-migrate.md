@@ -11,9 +11,15 @@ binding, are unchanged.
 
 ## Plan
 
-Shape A from [the spike](https://github.com/moq-dev/moq/pull/5851), pending
-the maintainer's pick there. The prototype is on the
-`spike/ffi-poll-prototype` branch.
+Decided with the maintainer on 2026-10-16, after
+[the spike](https://github.com/moq-dev/moq/pull/5851): Shape A. The
+prototype is on the `spike/ffi-poll-prototype` branch; delete that branch
+once this lands.
+
+- **No UniFFI change on this path**: dropping a future at
+  `rust_future_cancel` (mozilla/uniffi-rs#2771) is optional in
+  [the fork](/quest/m2/uniffi-fork.md). Shape A has no read lane for an
+  unfreed future to hold, so this quest must not wait for it.
 
 - **What the spike found**: in Go, Shape A cut a ready `read_frame` from 2.3
   to 1.2 µs, and where every read parks it raised throughput 13 to 32 percent
@@ -32,7 +38,8 @@ the maintainer's pick there. The prototype is on the
 - **Still lost on cancel**: when a RustFuture finishes and the foreign side
   then drops it as cancelled (Python asyncio cancel, Go ctx), the result is
   gone. The spike measured this in both `Task` and Shape A. Keep the Go
-  wrapper's terminal cancel. Only a foreign poll protocol fixes it.
+  wrapper's terminal cancel. [Foreign poll](/quest/m2/ffi-poll-protocol.md)
+  fixes it later for the hot reads.
 - **What stays**: exports that need tokio I/O (session connect, server
   accept, demand) stay `detached`. Keep shutdown's in-flight counter only for
   those.
@@ -45,5 +52,5 @@ Public API: none, apart from per-handle FIFO queueing. Wire: none.
 
 ## Related
 
-- [Hard-fork the binding generator](/quest/m2/uniffi-fork.md) - where a generated foreign poll protocol (the spike's Shape B′) would live
+- [Foreign poll for hot reads](/quest/m2/ffi-poll-protocol.md) - the generated protocol that follows this, once the fork exists
 - [Runtime trait](/quest/m2/runtime-trait.md) - moq-ffi's remaining tokio use may move behind it

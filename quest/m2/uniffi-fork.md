@@ -75,3 +75,4 @@ Public API: none at the move; moq-ffi's dependency names change. Wire: none.
 - [Payload bytes](/quest/m2/ffi-bytes.md) - the first patch the fork carries
 - [Kotlin calls](/quest/m2/kt-ffi-calls.md) - a Kotlin generator patch the fork carries
 - [Namespaced external types](/quest/m2/uniffi-namespaces.md) - fixes mozilla/uniffi-rs#3026 in the fork
+- [Foreign poll for hot reads](/quest/m2/ffi-poll-protocol.md) - a generated poll protocol the fork carries; dropping a future at cancel is optional here, since no moq quest waits on it
