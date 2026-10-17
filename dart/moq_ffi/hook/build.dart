@@ -94,7 +94,6 @@ Future<_Resolved> _build(Uri workspace, String target, String library) async {
     '--release',
     '--package',
     'moq-ffi',
-    '--no-default-features',
     '--manifest-path',
     workspace.resolve('Cargo.toml').toFilePath(),
   ];
