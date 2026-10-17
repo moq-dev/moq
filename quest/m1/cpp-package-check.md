@@ -18,6 +18,5 @@ Public API: none beyond the binding changes owned by their quests. Wire: none.
 
 ## Required
 
-- [Codecs](/quest/m1/ffi-shape/codec.md) - the binding surface being packaged
 - [Generated C++ shape](/quest/m1/cpp-generated-shape.md) - the final generated names
 - [Client settings parity](/quest/m1/obs-client-config.md) - preserve existing OBS settings

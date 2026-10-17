@@ -23,12 +23,13 @@ import {
 	type BrowserErrors,
 	check,
 	command,
+	ENGINES,
+	type Engine,
 	Failure,
 	finishTraces,
 	inspect,
 	launch,
 	open,
-	type PlayerState,
 	POLL_INTERVAL_MS,
 	pageUrl,
 	pause,
@@ -45,7 +46,16 @@ import {
 	waitForState,
 	waitForWatch,
 } from "./harness";
-import { type CaptureState, FAULTS, leakedPlayerStarted, reachesLive, SAMPLE_MS, SAMPLE_RATE } from "./src/contract";
+import { type Capabilities, missing, probe, type Role } from "./src/capabilities";
+import {
+	type CaptureState,
+	FAULTS,
+	leakedPlayerStarted,
+	reachesLive,
+	SAMPLE_MS,
+	SAMPLE_RATE,
+	type Sample,
+} from "./src/contract";
 import * as Pattern from "./src/pattern";
 import { resumeSkew } from "./src/resume";
 
@@ -56,6 +66,7 @@ type Case = (typeof CASES)[number];
 const { values } = parseArgs({
 	options: {
 		url: { type: "string" },
+		"player-engine": { type: "string", default: "chromium" },
 		timeout: { type: "string", default: "30" },
 		fault: { type: "string", default: "none" },
 		cases: { type: "string" },
@@ -69,16 +80,25 @@ const url = values.url;
 const timeoutMs = Number.parseFloat(values.timeout ?? "30") * 1000;
 const fault = values.fault ?? "none";
 const expectFail = values["expect-fail"];
+const requestedEngine = values["player-engine"] ?? "chromium";
 const selected = new Set<string>(
 	values.cases === undefined ? CASES : values.cases === "none" ? [] : values.cases.split(","),
 );
 const unknown = [...selected].filter((name) => !CASES.some((c) => c === name));
-if (!url || !Number.isFinite(timeoutMs) || timeoutMs <= 0 || !FAULTS.some((f) => f === fault) || unknown.length > 0) {
+if (
+	!url ||
+	!Number.isFinite(timeoutMs) ||
+	timeoutMs <= 0 ||
+	!FAULTS.some((f) => f === fault) ||
+	unknown.length > 0 ||
+	!ENGINES.some((engine) => engine === requestedEngine)
+) {
 	console.error(
-		`usage: media.ts --url U [--timeout S>0] [--fault ${FAULTS.join("|")}] [--cases none|${CASES.join(",")}] [--leak] [--lag] [--expect-fail TEXT]`,
+		`usage: media.ts --url U [--player-engine ${ENGINES.join("|")}] [--timeout S>0] [--fault ${FAULTS.join("|")}] [--cases none|${CASES.join(",")}] [--leak] [--lag] [--expect-fail TEXT]`,
 	);
 	process.exit(2);
 }
+const playerEngine = requestedEngine as Engine;
 const wants = (name: Case) => selected.has(name);
 
 // process.exit narrows `url` above, but not inside the function declarations below.
@@ -118,8 +138,8 @@ const percentile = (values: number[], p: number) => {
 };
 
 /** Collect distinct samples from the player for `ms`, so a window can be measured after the fact. */
-async function collect(page: Page, errors: BrowserErrors, ms: number): Promise<PlayerState[]> {
-	const samples: PlayerState[] = [];
+async function collect(page: Page, errors: BrowserErrors, ms: number): Promise<Sample[]> {
+	const samples: Sample[] = [];
 	const deadline = Date.now() + ms;
 	while (Date.now() < deadline) {
 		throwPageErrors(errors);
@@ -278,7 +298,7 @@ async function measurePlayback(player: Page, playerErrors: BrowserErrors, label:
 // One sample as a line: elapsed time, the frame on the canvas, the tone step heard against the one
 // that frame belongs to, how far the tone stood above the noise floor, and whether audio was
 // arriving at all, which separates a silent player from a publisher that stopped sending.
-function traceLine(sample: PlayerState, start: number): string {
+function traceLine(sample: Sample, start: number): string {
 	const step = sample.frameId === undefined ? "?" : Pattern.expectedStep(sample.frameId);
 	const margin = sample.toneDb !== undefined && sample.noiseDb !== undefined ? sample.toneDb - sample.noiseDb : 0;
 	return (
@@ -296,7 +316,7 @@ function traceLine(sample: PlayerState, start: number): string {
  * the tone off the graph root that feeds the speakers. A failure prints every reading in the window,
  * so the summary can be traced back to the readings behind it.
  */
-function assertMedia(samples: PlayerState[], label: string): void {
+function assertMedia(samples: Sample[], label: string): void {
 	try {
 		measure(samples, label);
 	} catch (err) {
@@ -307,7 +327,7 @@ function assertMedia(samples: PlayerState[], label: string): void {
 	}
 }
 
-function measure(samples: PlayerState[], label: string): void {
+function measure(samples: Sample[], label: string): void {
 	check(samples.length >= 10, "sampling", () => `${label}: only ${samples.length} samples in the window`);
 
 	const readable = samples.filter((s) => s.frameId !== undefined);
@@ -373,67 +393,45 @@ function measure(samples: PlayerState[], label: string): void {
 	);
 }
 
-/** Probe every platform API the player needs, rather than assuming this engine has them. */
-async function capabilities(page: Page): Promise<void> {
-	// The fixture's own configuration, so the probe answers "can this browser run this fixture"
-	// rather than "can it run something like it".
-	const wanted = { sampleRate: SAMPLE_RATE, width: Pattern.WIDTH, height: Pattern.HEIGHT };
-	const found = await inspect(
-		page,
-		async (wanted) => {
-			const has = (name: string) => typeof (globalThis as Record<string, unknown>)[name] === "function";
-			const probe = async (fn: () => Promise<{ supported?: boolean }>) => {
-				try {
-					return (await fn()).supported === true;
-				} catch {
-					return false;
-				}
+// The capability page has its own context. Evaluation may grant activation there,
+// but cannot unlock the measured fixture or player's audio graph.
+const observed = new Map<Engine, { version: string; found: Capabilities }>();
+async function capabilities(browser: Browser, engine: Engine, role: Role): Promise<void> {
+	let record = observed.get(engine);
+	if (!record) {
+		const page = await browser.newPage();
+		try {
+			await page.route("**/*", (route) =>
+				route.fulfill({ contentType: "text/html", body: "<!doctype html><title>Capabilities</title>" }),
+			);
+			await page.goto(server.origin);
+			record = {
+				version: browser.version(),
+				found: await page.evaluate(probe, {
+					sampleRate: SAMPLE_RATE,
+					width: Pattern.WIDTH,
+					height: Pattern.HEIGHT,
+				}),
 			};
-			return {
-				WebTransport: has("WebTransport"),
-				VideoDecoder: has("VideoDecoder"),
-				VideoEncoder: has("VideoEncoder"),
-				AudioDecoder: has("AudioDecoder"),
-				AudioEncoder: has("AudioEncoder"),
-				AudioWorkletNode: has("AudioWorkletNode"),
-				MediaStreamTrackProcessor: has("MediaStreamTrackProcessor"),
-				"canvas.captureStream": typeof HTMLCanvasElement.prototype.captureStream === "function",
-				"encode avc1.42001f": await probe(() =>
-					VideoEncoder.isConfigSupported({
-						codec: "avc1.42001f",
-						width: wanted.width,
-						height: wanted.height,
-					}),
-				),
-				"encode opus": await probe(() =>
-					AudioEncoder.isConfigSupported({
-						codec: "opus",
-						sampleRate: wanted.sampleRate,
-						numberOfChannels: 1,
-					}),
-				),
-				"decode opus": await probe(() =>
-					AudioDecoder.isConfigSupported({
-						codec: "opus",
-						sampleRate: wanted.sampleRate,
-						numberOfChannels: 1,
-					}),
-				),
-			};
-		},
-		wanted,
-	);
-
-	for (const [name, ok] of Object.entries(found)) console.error(`  ${ok ? "yes" : "NO "}  ${name}`);
-
-	const missing = Object.entries(found)
-		.filter(([, ok]) => !ok)
-		.map(([name]) => name);
-	const version = page.context().browser()?.version() ?? "unknown";
+			observed.set(engine, record);
+		} finally {
+			await page.close();
+		}
+		console.error(`=== engine capabilities: ${engine} ${record.version} ===`);
+		for (const [name, ok] of Object.entries(record.found)) console.error(`  ${ok ? "yes" : "NO "} ${name}`);
+		console.error(
+			`  engine matrix: ${JSON.stringify({ engine, version: record.version, publisherMissing: missing(record.found, "publisher"), playerMissing: missing(record.found, "player") })}`,
+		);
+		if (engine === "webkit")
+			console.error(
+				"  Playwright WebKit is not Safari; Safari transport and device defects still need a manual run",
+			);
+	}
+	const absent = missing(record.found, role);
 	check(
-		missing.length === 0,
+		absent.length === 0,
 		"capabilities",
-		() => `chromium ${version} lacks ${missing.join(", ")}; these checks cannot run against it`,
+		() => `${engine} ${record.version} cannot run ${role}: missing ${absent.join(", ")}`,
 	);
 }
 
@@ -443,9 +441,15 @@ const browsers: Browser[] = [];
 // One browser per role. Chromium's default autoplay behavior varies with engagement and when the
 // graph is built, so require a gesture in this QA run. Pages in one browser share a renderer
 // scheduler, and the one that is not frontmost is throttled and reported hidden.
-async function browserFor(args: string[] = []): Promise<Browser> {
-	const browser = await launch(["--autoplay-policy=document-user-activation-required", ...args]);
+async function browserFor(role: Role, args: string[] = []): Promise<Browser> {
+	const engine = role === "publisher" ? "chromium" : playerEngine;
+	console.error(`=== launching ${engine} ${role} ===`);
+	const browser = await launch(
+		engine === "chromium" ? ["--autoplay-policy=document-user-activation-required", ...args] : [],
+		engine,
+	);
 	browsers.push(browser);
+	await capabilities(browser, engine, role);
 	return browser;
 }
 
@@ -466,9 +470,21 @@ async function subscriber(
 ): Promise<[Page, BrowserErrors]> {
 	// visible="always" because the window is never frontmost in a headless run, and the default
 	// policy would stop downloading video and leave the canvas black.
-	const params: Record<string, string> = { url: relay, broadcast, visible: "always", muted: String(muted) };
+	const address = new URL(relay);
+	if (playerEngine !== "chromium") address.protocol = address.protocol === "https:" ? "wss:" : "ws:";
+	const params: Record<string, string> = {
+		url: address.toString(),
+		broadcast,
+		visible: "always",
+		muted: String(muted),
+	};
 	if (delay !== undefined) params.delay = delay;
-	const [page, errors] = await open(await browserFor(), pageUrl(server.origin, "subscribe", params), label, trace);
+	const [page, errors] = await open(
+		await browserFor("player"),
+		pageUrl(server.origin, "subscribe", params),
+		label,
+		trace,
+	);
 	await waitForWatch(page);
 	return [page, errors];
 }
@@ -491,7 +507,7 @@ async function captureDenial(broadcast: string): Promise<void> {
 	console.error("=== capture denial and grant ===");
 	const [viewer, viewerErrors] = await subscriber(broadcast, "capture viewer", { muted: true });
 	const [publisher, publisherErrors] = await open(
-		await browserFor(["--use-fake-device-for-media-stream"]),
+		await browserFor("publisher", ["--use-fake-device-for-media-stream"]),
 		pageUrl(server.origin, "publish", { url: relay, broadcast }),
 		"capture publisher",
 		false,
@@ -565,13 +581,10 @@ try {
 
 	// ── publisher ────────────────────────────────────────────────────────────
 	const [publisher, publisherErrors] = await open(
-		await browserFor(),
+		await browserFor("publisher"),
 		pageUrl(server.origin, "fixture", { url: relay, broadcast, fault }),
 		"fixture",
 	);
-
-	console.error("=== capabilities ===");
-	await capabilities(publisher);
 
 	console.error("=== publisher readiness ===");
 	const beforePublisherGesture = await readFixtureState(publisher);
@@ -854,7 +867,9 @@ if (expectFail !== undefined) {
 	console.error(`FAIL ${failure.message}`);
 	code = 1;
 } else {
-	console.error("media: all checks passed");
+	console.error(
+		`media: ${playerEngine} player over ${playerEngine === "chromium" ? "automatic transport selection" : "WebSocket fallback"} measured; all checks passed (Chromium publisher)`,
+	);
 }
 
 await finishTraces(code !== 0);

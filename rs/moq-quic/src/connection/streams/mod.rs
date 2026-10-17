@@ -8,11 +8,15 @@ use thiserror::Error;
 use tracing::trace;
 
 use super::spaces::{Retransmits, ThinRetransmits};
-use crate::{Dir, StreamId, VarInt, connection::streams::state::get_or_insert_recv, frame};
+use crate::{
+    Dir, StreamId, VarInt,
+    connection::{ConnectionTag, streams::state::get_or_insert_recv},
+    frame,
+};
 
 mod recv;
 use recv::Recv;
-pub use recv::{Chunks, ReadError, ReadableError};
+pub use recv::{Chunks, Credit, ReadError, ReadableError};
 
 mod send;
 pub(crate) use send::{ByteSlice, BytesArray};
@@ -20,8 +24,7 @@ use send::{BytesSource, Send, SendState};
 pub use send::{FinishError, WriteError, Written};
 
 mod state;
-#[allow(unreachable_pub)] // fuzzing only
-pub use state::StreamsState;
+pub(crate) use state::StreamsState;
 
 /// Access to streams
 pub struct Streams<'a> {
@@ -29,10 +32,11 @@ pub struct Streams<'a> {
     pub(super) conn_state: &'a super::State,
 }
 
-#[allow(clippy::needless_lifetimes)] // Needed for cfg(fuzzing)
+#[allow(clippy::needless_lifetimes)] // `new` names the lifetime, under the fuzz harness
 impl<'a> Streams<'a> {
-    #[cfg(fuzzing)]
-    pub fn new(state: &'a mut StreamsState, conn_state: &'a super::State) -> Self {
+    /// Drive a bare `StreamsState` without a connection, for the `streams` fuzz target
+    #[cfg(any(test, feature = "fuzz"))]
+    pub(crate) fn new(state: &'a mut StreamsState, conn_state: &'a super::State) -> Self {
         Self { state, conn_state }
     }
 
@@ -46,6 +50,7 @@ impl<'a> Streams<'a> {
 
         if self.state.next[dir as usize] >= self.state.max[dir as usize] {
             self.state.streams_blocked[dir as usize] = true;
+            self.state.open_refused[dir as usize] = true;
             return None;
         }
 
@@ -72,11 +77,6 @@ impl<'a> Streams<'a> {
         }
 
         Some(StreamId::new(!self.state.side, dir, x))
-    }
-
-    #[cfg(fuzzing)]
-    pub fn state(&mut self) -> &mut StreamsState {
-        self.state
     }
 
     /// The number of streams that may have unacknowledged data.
@@ -196,10 +196,11 @@ pub struct SendStream<'a> {
     pub(super) conn_state: &'a super::State,
 }
 
-#[allow(clippy::needless_lifetimes)] // Needed for cfg(fuzzing)
+#[allow(clippy::needless_lifetimes)] // `new` names the lifetime, under the fuzz harness
 impl<'a> SendStream<'a> {
-    #[cfg(fuzzing)]
-    pub fn new(
+    /// Drive a bare `StreamsState` without a connection, for the `streams` fuzz target
+    #[cfg(any(test, feature = "fuzz"))]
+    pub(crate) fn new(
         id: StreamId,
         state: &'a mut StreamsState,
         pending: &'a mut Retransmits,
@@ -324,7 +325,31 @@ impl<'a> SendStream<'a> {
     /// # Panics
     /// - when applied to a receive stream
     pub fn reset(&mut self, error_code: VarInt) -> Result<(), ClosedStream> {
+        self.reset_to(error_code, 0)
+    }
+
+    /// Mark the data written so far, so a later [`Checkpoint::reset`] still delivers it
+    ///
+    /// # Panics
+    /// - when applied to a receive stream
+    pub fn checkpoint(&self) -> Checkpoint {
+        let offset = match self.state.send.get(&self.id) {
+            Some(Some(stream)) => stream.offset(),
+            // Not written yet, or already closed, where the reset fails anyway
+            _ => 0,
+        };
+        Checkpoint {
+            id: self.id,
+            tag: self.state.tag,
+            generation: self.state.generation,
+            offset,
+        }
+    }
+
+    /// Reset the stream, still delivering its first `reliable_size` bytes
+    fn reset_to(&mut self, error_code: VarInt, reliable_size: u64) -> Result<(), ClosedStream> {
         let max_send_data = self.state.max_send_data(self.id);
+        let at = self.state.peer_reset_stream_at;
         let stream = self
             .state
             .send
@@ -332,17 +357,27 @@ impl<'a> SendStream<'a> {
             .ok_or(ClosedStream { _private: () })?
             .get_or_insert_with(|| Send::new(max_send_data));
 
-        if matches!(stream.state, SendState::ResetSent) {
+        if stream.is_reset() {
             // Redundant reset call
             return Err(ClosedStream { _private: () });
         }
+        // A checkpoint names its stream's connection and generation, so it never runs past the data
+        debug_assert!(reliable_size <= stream.offset());
+        // The peer that sent STOP_SENDING will not read the prefix
+        let reliable_size = match stream.stop_reason {
+            Some(_) => 0,
+            None => reliable_size,
+        };
 
         // Restore the portion of the send window consumed by the data that we aren't about to
         // send. We leave flow control alone because the peer's responsible for issuing additional
         // credit based on the final offset communicated in the RESET_STREAM frame we send.
-        self.state.buffered_data -= stream.pending.buffered();
-        stream.reset();
-        self.pending.reset_stream.push((self.id, error_code));
+        let buffered = stream.pending.buffered();
+        let send = stream.reset(error_code, reliable_size, at);
+        self.state.buffered_data -= buffered - stream.pending.buffered();
+        if let Some(reliable_size) = send {
+            self.pending.reset_stream.push((self.id, reliable_size));
+        }
 
         // Don't reopen an already-closed stream we haven't forgotten yet
         Ok(())
@@ -377,6 +412,51 @@ impl<'a> SendStream<'a> {
             .ok_or(ClosedStream { _private: () })?;
 
         Ok(stream.as_ref().map(|s| s.priority).unwrap_or_default())
+    }
+}
+
+/// The data written to a send stream up to some point, which a reset can still deliver
+///
+/// Taken with [`SendStream::checkpoint`], and only valid on the connection it came from.
+#[derive(Debug)]
+pub struct Checkpoint {
+    id: StreamId,
+    tag: ConnectionTag,
+    generation: u64,
+    offset: u64,
+}
+
+impl Checkpoint {
+    /// Abandon the stream, but still deliver everything written before the checkpoint
+    ///
+    /// Nothing past the checkpoint is sent or retransmitted. A peer that accepts RESET_STREAM_AT
+    /// gets it at once, and reads the data before the error. Otherwise the data keeps being
+    /// retransmitted, and a plain RESET_STREAM follows once the peer has acknowledged all of it, a
+    /// round trip later. An acknowledgment only means the peer's QUIC stack holds the data:
+    /// RFC 9000 lets it discard data its application has not read yet on RESET_STREAM, so this
+    /// only reliably delivers data the peer parses on arrival, like a WebTransport stream header.
+    /// A peer that asked us to stop sending gets the reset at once, without the data.
+    ///
+    /// Fails with [`ClosedStream`] if the stream was already reset or is gone, including one
+    /// rejected 0-RTT discarded, even if a new stream has since taken its id.
+    ///
+    /// # Panics
+    /// If the checkpoint came from another connection.
+    pub fn reset(
+        self,
+        conn: &mut crate::Connection,
+        error_code: VarInt,
+    ) -> Result<(), ClosedStream> {
+        let mut stream = conn.send_stream(self.id);
+        assert!(
+            self.tag == stream.state.tag,
+            "checkpoint used on another connection"
+        );
+        // Rejected 0-RTT discarded the stream, and a new one may have its id
+        if self.generation != stream.state.generation {
+            return Err(ClosedStream { _private: () });
+        }
+        stream.reset_to(error_code, self.offset)
     }
 }
 

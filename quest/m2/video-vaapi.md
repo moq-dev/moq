@@ -59,4 +59,4 @@ already falls back cleanly, since `Encoder::new` returns `Err` and
 
 ## Related
 
-- [VA-API encodes an external Vulkan image](/quest/m1/vaapi-vulkan-import.md) - explicit-sync DMA-BUF input and render-node selection by device, H.264 only
+- [VA-API encodes an external Vulkan image](/quest/m2/vaapi-vulkan-import.md) - explicit-sync DMA-BUF input and render-node selection by device, H.264 only
