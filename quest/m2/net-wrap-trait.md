@@ -19,7 +19,7 @@ Non-goals:
 
 Decided 2026-10-17:
 
-- **Why now.** E2EE needs this seam first. moq-mux importers write into a
+- **Why now.** E2EE is the first wrapper. moq-mux importers write into a
   concrete `moq_net::broadcast::Producer` (about 108 `create_track` call
   sites). flate and json take a concrete `track::Producer`, but each already
   splits a codec layer (`Encoder`/`Decoder`) from track ownership.
@@ -46,7 +46,8 @@ Open, for the design:
 
 - Trait versus bridge. Weigh the trait's generic spread or `dyn` cost against
   the bridge's extra in-memory hop.
-- Scope: broadcast, track, and group levels; producer, consumer, or both.
+- Scope: which of the broadcast, track, and group levels it covers, for both
+  producers and consumers.
 - Generic or `dyn` in the frame write hot path. No `Send` bounds that native
   needs and wasm can't satisfy (see `rs/AGENTS.md`).
 - Group lifecycle hooks. flate's DEFLATE is group-scoped and stateful, and
