@@ -544,10 +544,9 @@ impl Lease {
 			Some(_) => error.to_string(),
 			None => "closed".to_string(),
 		};
-		// An expired lease already recorded its own failure kind.
-		if self.close(reason, bytes) != lease::Reason::Expired
-			&& let Some(kind) = failure
-		{
+		// A lease the decider ended first records its kind in `close`, and the first kind wins.
+		self.close(reason, bytes);
+		if let Some(kind) = failure {
 			stats.fail(kind);
 		}
 	}
@@ -592,10 +591,8 @@ impl Lease {
 	/// `expired` for an expired grant, `application` for any other.
 	pub async fn ended(&mut self) -> lease::Reason {
 		let reason = self.uncovered().await;
-		self.stats.fail(match reason {
-			lease::Reason::Expired => moq_net::stats::Failure::Expired,
-			_ => moq_net::stats::Failure::Application,
-		});
+		self.stats
+			.fail(revoked(&reason).unwrap_or(moq_net::stats::Failure::Application));
 		reason
 	}
 
@@ -682,10 +679,19 @@ impl Lease {
 			self.consumer.close(reason.clone(), bytes);
 			reason
 		};
-		if reason == lease::Reason::Expired {
-			self.stats.fail(moq_net::stats::Failure::Expired);
+		if let Some(kind) = revoked(&reason) {
+			self.stats.fail(kind);
 		}
 		reason
+	}
+}
+
+/// The failure a lease end records when the grant, not the session, ended it.
+fn revoked(reason: &lease::Reason) -> Option<moq_net::stats::Failure> {
+	match reason {
+		lease::Reason::Expired => Some(moq_net::stats::Failure::Expired),
+		lease::Reason::Shutdown | lease::Reason::Session(_) => None,
+		_ => Some(moq_net::stats::Failure::Application),
 	}
 }
 
@@ -1445,6 +1451,20 @@ mod outcome_tests {
 		let presence = registry.snapshot().sessions()[0].1;
 		assert_eq!(presence.sessions_failed.application, 1);
 		assert_eq!(presence.sessions_failed.expired, 0);
+		assert_eq!(presence.sessions_ended, 1);
+	}
+
+	#[test]
+	fn a_revocation_wins_a_racing_clean_close() {
+		let registry = moq_net::stats::Registry::new(Default::default());
+		let stats = registry.tier(Tier::default()).session("tenant");
+		let (producer, consumer) = lease::Producer::new(Grant::default());
+		let lease = Lease::new("/tenant", consumer).with_stats(stats.clone());
+		producer.revoke(lease::Reason::Refused);
+		lease.close_session(&moq_net::Error::Cancel, Bytes::default());
+		drop(stats);
+		let presence = registry.snapshot().sessions()[0].1;
+		assert_eq!(presence.sessions_failed.application, 1);
 		assert_eq!(presence.sessions_ended, 1);
 	}
 
