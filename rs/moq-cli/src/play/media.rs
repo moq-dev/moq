@@ -663,7 +663,8 @@ async fn play_audio<O: Output>(
 			// so a deeper target could never fill. The advertised floor needs the cap,
 			// being a number the publisher declared about itself, unbounded. The budget
 			// is also what the sink's ring was sized to hold.
-			let target = samples(delay.min(max_delay).max(AUDIO_BUFFER_MIN));
+			let held = delay.min(max_delay).max(AUDIO_BUFFER_MIN);
+			let target = samples(held);
 			let fit = fit(dry, buffered, target, slack, timing.silence + length as u64);
 			dry = false;
 
@@ -682,10 +683,11 @@ async fn play_audio<O: Output>(
 			// is the only half of the pipeline that cannot skip ahead. A move has to
 			// wake the window: it is asleep on a deadline computed from the old anchor,
 			// and every queued frame is due earlier now.
-			let moved = presentation
-				.lock()
-				.unwrap()
-				.audio(timing.end, sink.buffered(), Instant::now());
+			let moved = {
+				let mut presentation = presentation.lock().unwrap();
+				presentation.hold(held);
+				presentation.audio(timing.end, sink.buffered(), Instant::now())
+			};
 			if moved {
 				changed.notify_one();
 				output.send(Event::Wake);
@@ -1270,6 +1272,7 @@ mod tests {
 			broadcast: "room".to_string(),
 			args: Args {
 				catalog_format: None,
+				metrics: None,
 				delay: Delay::Fixed(delay),
 				select: Default::default(),
 			},

@@ -78,12 +78,18 @@ class EncoderOutput:
 
 @dataclass(frozen=True)
 class DecoderOutput:
-    """The PCM layout a :class:`Consumer` delivers and how stale a group may get."""
+    """The PCM layout a :class:`Consumer` delivers, how stale a group may get, and its playout delay.
+
+    ``delay`` fixes the jitter buffer to hold ahead of the playhead; ``None``
+    estimates it from arrival timing. ``max_delay`` only bounds how stale a
+    group may get before it is skipped, and adds no buffering.
+    """
 
     format: SampleFormat
     sample_rate: int | None = None
     channels: int | None = None
     max_delay: timedelta | None = None
+    delay: timedelta | None = None
 
     def _ffi(self) -> MoqAudioDecoderOutput:
         return MoqAudioDecoderOutput(
@@ -91,6 +97,7 @@ class DecoderOutput:
             sample_rate=self.sample_rate,
             channels=self.channels,
             max_delay_us=_opt_us(self.max_delay, "max_delay"),
+            delay_us=_opt_us(self.delay, "delay"),
         )
 
 
@@ -170,6 +177,15 @@ class Consumer:
         if value is None:
             raise StopAsyncIteration
         return Frame._from_ffi(value)
+
+    @property
+    def delay(self) -> timedelta:
+        """The playout delay to hold ahead of the playhead: the fixed one, or the estimate so far.
+
+        The estimate measures when each frame is read, so read the next frame as
+        soon as the previous one is handled rather than pacing reads to the speaker.
+        """
+        return _from_us(self._inner.delay_us())
 
     def cancel(self) -> None:
         """Cancel the subscription and stop delivering audio frames."""

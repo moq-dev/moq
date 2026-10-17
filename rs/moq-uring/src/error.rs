@@ -11,6 +11,14 @@ pub enum Error {
 	/// An io_uring or socket operation failed.
 	#[error("io error: {0}")]
 	Io(#[from] std::io::Error),
+
+	/// A QUIC flow-control window does not fit a QUIC varint; names which one.
+	#[error("quic {0} must fit a QUIC varint")]
+	WindowRange(&'static str),
+
+	/// A QUIC stream limit is past the 2^60 a peer accepts.
+	#[error("quic max_streams must be at most 2^60")]
+	StreamsRange,
 }
 
 impl Error {

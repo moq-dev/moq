@@ -289,6 +289,7 @@ impl Session {
 
 /// The handles a protocol driver shares with its [`Session`].
 pub(super) struct Handles {
+	pub stats: crate::stats::Session,
 	pub goaway: goaway::Handle,
 	pub auth: auth::Handle,
 	/// Where the driver publishes [`Estimate`] changes, for a protocol that reports
@@ -308,7 +309,13 @@ impl Session {
 	where
 		S: crate::transport::poll::Session,
 	{
-		let Handles { goaway, auth, estimate } = handles;
+		let Handles {
+			goaway,
+			auth,
+			estimate,
+			stats: context,
+		} = handles;
+		let wire = session.wire().map(|counters| context.wire(counters));
 		let sample = snapshot(&session);
 		if let Some(estimate) = &estimate
 			&& let Ok(mut current) = estimate.write()
@@ -341,6 +348,7 @@ impl Session {
 			close: Some(close.consume()),
 			closed,
 			stats: stats.clone(),
+			wire,
 			send_bandwidth: send_producer,
 			estimate,
 			sampled: None,
@@ -401,6 +409,8 @@ pub(crate) struct Supervisor<S> {
 	sampled: Option<crate::time::Instant>,
 	mode: SamplerMode,
 	drain: Drain,
+	/// The transport's wire counters, registered under the session's root; dropping records the last reading.
+	wire: Option<crate::stats::Wire>,
 }
 
 /// A [`Session::close`] waiting for the protocol to deliver what it queued.
@@ -436,6 +446,7 @@ impl<S: crate::transport::poll::Session> Supervisor<S> {
 			// this cell, so leave it holding the session's final counters
 			// rather than whichever sample the last demand happened to catch.
 			self.stats.lock().sample = snapshot(&self.session);
+			self.wire.take();
 			let drain = match std::mem::replace(&mut self.drain, Drain::Idle) {
 				Drain::Done(res) => Some(res),
 				_ => None,

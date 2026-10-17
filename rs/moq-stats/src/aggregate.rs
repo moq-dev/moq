@@ -18,8 +18,8 @@ use moq_net::track::Subscribing;
 use moq_net::{AsPath, Epoch, PathOwned, origin};
 
 use crate::{
-	PresenceFrame, Result, SessionsFrame, Totals, TotalsFrame, TrafficFrame, parse_node_path, presence_track,
-	sessions_track, totals_track, traffic_track,
+	Prefix, PrefixFrame, PresenceFrame, Result, SessionsFrame, Totals, TotalsFrame, TrafficFrame, Usage,
+	parse_node_path, prefix_track, presence_track, sessions_track, totals_track, traffic_track,
 };
 
 /// Configuration for an [`Consumer`]. Construct with [`Config::new`] and chain
@@ -99,7 +99,7 @@ impl Default for Config {
 ///
 /// Scope an [`origin::Consumer`] to a single group (e.g. `.stats/<pid>`) and
 /// hand it here; each [`Self::totals`] / [`Self::traffic`] / [`Self::presence`]
-/// call opens its own announce cursor and subscribes to that track on every
+/// / [`Self::prefix`] call opens its own announce cursor and subscribes to that track on every
 /// node broadcast in the group, summing the cumulative counters per key, so
 /// the merged track has the same format as one node's.
 ///
@@ -121,10 +121,13 @@ impl Default for Config {
 /// A sessions track is the exception: it is a gauge, so a departed node stops
 /// counting its sessions immediately.
 ///
-/// The totals and presence tracks never regress: a node's counter going down
-/// is that node resetting (a restart on a route without an epoch, or a
-/// presence track held again from zero), so its previous readout is kept as a
-/// baseline the new one adds to. A node that resumes after its departure
+/// The totals, presence, and prefix tracks never regress: a node's counter
+/// going down is that node resetting (a restart on a route without an epoch,
+/// or a presence or prefix track held again from zero), so its previous
+/// readout is kept as a baseline the new one adds to. A prefix's children are
+/// the exception: they sum the live nodes' current children, so a child leaves
+/// the merged map with the last node carrying it while its tail stays in the
+/// rollup. A node that resumes after its departure
 /// closed its open pairs reopens them as new starts rather than lowering their
 /// ends. Per-path traffic also reopens pairs when a node resumes without
 /// regressing, but keeps the reset contract of a single node: a route without
@@ -174,6 +177,15 @@ impl Consumer {
 	pub fn presence(&self, root: impl AsPath) -> PresenceConsumer {
 		let name = presence_track(root, self.config.compression);
 		PresenceConsumer {
+			inner: Merged::new(self.origin.clone(), &self.config, name),
+		}
+	}
+
+	/// A merged reader over broadcast prefix `path`'s track, holding it on
+	/// every node broadcast in the group; see [`Self::totals`].
+	pub fn prefix(&self, path: impl AsPath) -> PrefixConsumer {
+		let name = prefix_track(path, self.config.compression);
+		PrefixConsumer {
 			inner: Merged::new(self.origin.clone(), &self.config, name),
 		}
 	}
@@ -236,8 +248,21 @@ impl PresenceConsumer {
 	}
 }
 
+/// A merged reader over one broadcast prefix's track across every node in the
+/// group; see [`TotalsConsumer`].
+pub struct PrefixConsumer {
+	inner: Merged<Prefix>,
+}
+
+impl PrefixConsumer {
+	/// The next merged frame, or `None` once the announce stream ends.
+	pub async fn next(&mut self) -> Result<Option<PrefixFrame>> {
+		kio::wait(|waiter| self.inner.poll_next(waiter)).await
+	}
+}
+
 /// A per-key cumulative counter that folds across nodes.
-trait Mergeable: serde::de::DeserializeOwned + Default + Copy + PartialEq + 'static {
+trait Mergeable: serde::de::DeserializeOwned + Default + Clone + PartialEq + 'static {
 	/// Whether a node's last contribution survives its departure, with its
 	/// open pairs closed. Only the sessions gauge drops it instead.
 	const STICKY: bool = true;
@@ -361,7 +386,9 @@ impl Mergeable for Presence {
 	}
 
 	fn regressed(&self, prev: &Self) -> bool {
-		self.sessions_refused.regressed(&prev.sessions_refused)
+		self.wire_tx < prev.wire_tx
+			|| self.wire_rx < prev.wire_rx
+			|| self.sessions_refused.regressed(&prev.sessions_refused)
 			|| self.sessions_failed.regressed(&prev.sessions_failed)
 			|| self.requests < prev.requests
 			|| self.sessions_started < prev.sessions_started
@@ -428,6 +455,71 @@ impl Mergeable for Totals {
 	}
 }
 
+impl Mergeable for Usage {
+	const RESETS: bool = true;
+
+	fn merge(acc: &mut Self, other: Self) {
+		acc.add(other);
+	}
+
+	fn retire(self) -> Self {
+		Self {
+			publisher: self.publisher.retire(),
+			subscriber: self.subscriber.retire(),
+		}
+	}
+
+	fn reopen(self, next: &Self) -> Self {
+		Self {
+			publisher: self.publisher.reopen(&next.publisher),
+			subscriber: self.subscriber.reopen(&next.subscriber),
+		}
+	}
+
+	fn regressed(&self, prev: &Self) -> bool {
+		self.publisher.regressed(&prev.publisher) || self.subscriber.regressed(&prev.subscriber)
+	}
+}
+
+impl Mergeable for Prefix {
+	const RESETS: bool = true;
+
+	fn merge(acc: &mut Self, other: Self) {
+		acc.publisher.add(other.publisher);
+		acc.subscriber.add(other.subscriber);
+		acc.own.add(other.own);
+		for (segment, child) in other.children {
+			acc.children.entry(segment).or_default().add(child);
+		}
+	}
+
+	/// A departed node's children leave the map; their tails stay in the rollup.
+	fn retire(self) -> Self {
+		Self {
+			publisher: self.publisher.retire(),
+			subscriber: self.subscriber.retire(),
+			own: self.own.retire(),
+			children: BTreeMap::new(),
+		}
+	}
+
+	fn reopen(self, next: &Self) -> Self {
+		Self {
+			publisher: self.publisher.reopen(&next.publisher),
+			subscriber: self.subscriber.reopen(&next.subscriber),
+			own: self.own.reopen(&next.own),
+			children: BTreeMap::new(),
+		}
+	}
+
+	/// Children are left out: one leaving or returning lower is not a reset.
+	fn regressed(&self, prev: &Self) -> bool {
+		self.publisher.regressed(&prev.publisher)
+			|| self.subscriber.regressed(&prev.subscriber)
+			|| self.own.regressed(&prev.own)
+	}
+}
+
 /// One node's subscription to the merged track.
 enum Reader<V: Mergeable> {
 	/// Resolving the announced path into a broadcast. `queued` records whether
@@ -489,7 +581,10 @@ impl<V: Mergeable> Node<V> {
 			return false;
 		}
 		self.stale = true;
-		self.last.iter().flatten().any(|(_, value)| value.retire() != *value)
+		self.last
+			.iter()
+			.flatten()
+			.any(|(_, value)| value.clone().retire() != *value)
 	}
 
 	/// Take a fresh frame. A resume reopens the closed pairs still open as new
@@ -524,10 +619,13 @@ impl<V: Mergeable> Node<V> {
 	/// Add this node's contribution to `acc`.
 	fn contribute(&self, acc: &mut BTreeMap<String, V>) {
 		for (key, value) in &self.base {
-			V::merge(acc.entry(key.clone()).or_default(), *value);
+			V::merge(acc.entry(key.clone()).or_default(), value.clone());
 		}
 		for (key, value) in self.last.iter().flatten() {
-			let value = if self.stale { value.retire() } else { *value };
+			let value = match self.stale {
+				true => value.clone().retire(),
+				false => value.clone(),
+			};
 			V::merge(acc.entry(key.clone()).or_default(), value);
 		}
 	}
@@ -1171,6 +1269,29 @@ mod tests {
 	}
 
 	#[test]
+	fn a_wire_only_drop_starts_a_new_presence_segment() {
+		for received in [false, true] {
+			let (mut merged, key) = hand_merged::<Presence>();
+			let value = |wire| {
+				let mut presence = Presence::default();
+				presence.sessions_started = 1;
+				if received {
+					presence.wire_rx = wire;
+				} else {
+					presence.wire_tx = wire;
+				}
+				presence
+			};
+			let node = merged.nodes.get_mut(&key).unwrap();
+			node.observe(BTreeMap::from([(String::new(), value(10))]));
+			node.observe(BTreeMap::from([(String::new(), value(3))]));
+			let combined = &merged.merged()[""];
+			assert_eq!(if received { combined.wire_rx } else { combined.wire_tx }, 13);
+			assert_eq!(combined.active(), 1, "retiring closes the earlier segment");
+		}
+	}
+
+	#[test]
 	fn outgoing_epoch_metadata_migrates_without_choosing_a_grace_entry() {
 		let origin = produce_origin();
 		let path = PathOwned::from(".stats/acme/node/a");
@@ -1709,7 +1830,7 @@ mod tests {
 				.expect("frame");
 			if let Some(prev) = &prev {
 				for (key, before) in prev {
-					let after = frame.get(key).copied().unwrap_or_default();
+					let after = frame.get(key).cloned().unwrap_or_default();
 					assert!(monotonic(before, &after), "{key} regressed: {before:?} -> {after:?}");
 				}
 			}
@@ -2170,5 +2291,97 @@ mod tests {
 		let _fb = feed(&node_b, Tier::default(), "acme", "acme/room", 8).await;
 		let frame = read_until(&mut presence.inner, grew, |frame| frame[""].active() == 2).await;
 		assert_eq!(frame[""].sessions_started, 3);
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn prefix_survives_join_leave_and_restart() {
+		// One prefix held across nodes: a node joining adds its traffic and its
+		// children, one leaving closes its subscriptions and drops its children
+		// but keeps its rollup, and a restarted node is a new epoch that adds to
+		// it. The merged rollup never goes down.
+		let origin = produce_origin();
+		let node_a = node_producer(&origin, "a");
+		let _fa = feed(&node_a, Tier::default(), "acme", "acme/room", 8).await;
+		drive_tick().await;
+
+		let agg = Consumer::new(origin.consume(), Config::new().with_depth(1));
+		let mut prefix = agg.prefix("acme");
+		let grew = |before: &Prefix, after: &Prefix| !after.regressed(before);
+		let live = |count| {
+			move |frame: &PrefixFrame| {
+				frame
+					.get("")
+					.is_some_and(|p| p.publisher.active_subscriptions() == count)
+			}
+		};
+		let frame = read_until(&mut prefix.inner, grew, live(1)).await;
+		assert_eq!(frame[""].children["room"].publisher.bytes, 8);
+
+		// Join.
+		let node_b = node_producer(&origin, "b");
+		let fb = feed(&node_b, Tier::default(), "acme", "acme/other", 5).await;
+		let frame = read_until(&mut prefix.inner, grew, live(2)).await;
+		assert_eq!(frame[""].publisher.bytes, 13);
+		assert_eq!(frame[""].children.len(), 2);
+
+		// Leave: node b's child leaves the map, its tail stays in the rollup.
+		drop(fb);
+		drop(node_b);
+		let frame = read_until(&mut prefix.inner, grew, live(1)).await;
+		assert_eq!(frame[""].publisher.bytes, 13);
+		assert_eq!(frame[""].publisher.subscriptions_started, 2);
+		assert!(!frame[""].children.contains_key("other"), "{frame:?}");
+
+		// Restart: a new epoch at node b's path.
+		let node_b = node_producer(&origin, "b");
+		let _fb = feed(&node_b, Tier::default(), "acme", "acme/other", 3).await;
+		let frame = read_until(&mut prefix.inner, grew, |frame| {
+			live(2)(frame) && frame[""].publisher.bytes == 16
+		})
+		.await;
+		assert_eq!(frame[""].publisher.subscriptions_started, 3);
+		assert_eq!(frame[""].children["other"].publisher.bytes, 3, "the new epoch's child");
+	}
+
+	#[test]
+	fn a_prefix_reset_keeps_the_rollup_and_drops_the_children() {
+		let (mut merged, key) = hand_merged::<Prefix>();
+		let prefix = |bytes, child: Option<u64>| {
+			let mut prefix = Prefix::default();
+			prefix.publisher.bytes = bytes;
+			prefix.own.publisher.bytes = bytes;
+			if let Some(child) = child {
+				let mut usage = Usage::default();
+				usage.publisher.bytes = child;
+				prefix.children.insert("cam".into(), usage);
+			}
+			prefix
+		};
+		let node = merged.nodes.get_mut(&key).expect("node");
+		node.observe(BTreeMap::from([(String::new(), prefix(10, Some(4)))]));
+		assert_eq!(merged.merged()[""], prefix(10, Some(4)));
+
+		// A child leaving the map is not a reset.
+		let node = merged.nodes.get_mut(&key).expect("node");
+		node.observe(BTreeMap::from([(String::new(), prefix(10, None))]));
+		assert_eq!(merged.merged()[""], prefix(10, None));
+
+		// Held again from zero: the old rollup is a baseline, the children are
+		// only the live ones.
+		let node = merged.nodes.get_mut(&key).expect("node");
+		node.observe(BTreeMap::from([(String::new(), prefix(3, Some(1)))]));
+		assert_eq!(merged.merged()[""], {
+			let mut expected = prefix(13, Some(1));
+			expected.own.publisher.bytes = 13;
+			expected
+		});
+
+		// A departed node keeps its rollup and drops its children.
+		merged.nodes.get_mut(&key).expect("node").depart();
+		assert_eq!(merged.merged()[""], {
+			let mut expected = prefix(13, None);
+			expected.own.publisher.bytes = 13;
+			expected
+		});
 	}
 }

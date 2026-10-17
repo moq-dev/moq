@@ -105,6 +105,14 @@ pub enum Error {
 	#[error("quic {0} must be non-zero and fit a QUIC varint")]
 	WindowRange(&'static str),
 
+	/// A QUIC stream limit is past the 2^60 a peer accepts.
+	#[error("quic max_streams must be at most 2^60")]
+	StreamsRange,
+
+	/// A session's QUIC limits were changed on a transport that is not QUIC.
+	#[error("{0} sessions have no QUIC limits to change")]
+	QuicLimits(crate::Transport),
+
 	/// Every backend we tried gave up without reporting why.
 	#[error("failed to connect to server")]
 	ConnectFailed,
@@ -191,11 +199,11 @@ pub enum Error {
 	#[error("{0}")]
 	Reconnect(String),
 
-	/// The connection was stopped locally, by closing it or dropping the last handle.
+	/// The connection or listener was stopped locally, by closing it or dropping the last handle.
 	///
 	/// Not a failure: it is what a caller asked for. Distinct from [`Self::Reconnect`]
 	/// so a status watcher can tell an expected teardown from a connection that gave up.
-	#[error("connection stopped")]
+	#[error("stopped locally")]
 	Stopped,
 
 	/// A task serving this connection panicked. The panic itself is logged.
@@ -230,6 +238,11 @@ pub enum Error {
 	#[cfg(all(feature = "uds", unix))]
 	#[error(transparent)]
 	Unix(Arc<crate::unix::Error>),
+
+	/// The WebRTC data channel transport failed.
+	#[cfg(feature = "webrtc")]
+	#[error(transparent)]
+	WebRtc(Arc<crate::webrtc::Error>),
 }
 
 impl Error {
@@ -251,6 +264,8 @@ impl Error {
 			| Self::Deprecated(_)
 			| Self::IdleTimeoutRange
 			| Self::WindowRange(_)
+			| Self::StreamsRange
+			| Self::QuicLimits(_)
 			| Self::QlogUnsupported
 			| Self::Connect(_) => true,
 			#[cfg(feature = "quic")]
@@ -391,6 +406,13 @@ impl From<crate::tcp::Error> for Error {
 impl From<crate::unix::Error> for Error {
 	fn from(err: crate::unix::Error) -> Self {
 		Self::Unix(Arc::new(err))
+	}
+}
+
+#[cfg(feature = "webrtc")]
+impl From<crate::webrtc::Error> for Error {
+	fn from(err: crate::webrtc::Error) -> Self {
+		Self::WebRtc(Arc::new(err))
 	}
 }
 

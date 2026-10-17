@@ -473,6 +473,7 @@ mod tests {
 			args: Args {
 				delay: Delay::Fixed(delay),
 				catalog_format: None,
+				metrics: None,
 				select: Default::default(),
 			},
 			video: Default::default(),

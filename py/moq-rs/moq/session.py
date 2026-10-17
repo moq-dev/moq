@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from moq_ffi import MoqBandwidth, MoqReservation, MoqSession
+from moq_ffi import MoqBandwidth, MoqError, MoqReservation, MoqSession
 
 from .origin import OriginConsumer, OriginProducer
 from .publish import TrackDemand
@@ -66,6 +66,15 @@ class Session:
         Pair it with :meth:`status` to log each reconnect by number; a
         ``CONNECTED`` status whose count grew is a reconnect."""
         return self._inner.connects()
+
+    def failure(self) -> MoqError | None:
+        """Why a client session is reconnecting: the error that ended the last
+        connection or failed the latest redial, or ``None`` once a connection lands.
+
+        A redial that keeps failing never changes :meth:`status`, so poll this while
+        it reports ``DISCONNECTED`` to show the reason. Giving up for good raises from
+        :meth:`closed` instead. A server-accepted session always returns ``None``."""
+        return self._inner.failure()
 
     def cancel(self, code: int) -> None:
         """Close the session with the given error code."""

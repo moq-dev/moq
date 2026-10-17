@@ -260,6 +260,19 @@ struct Peer {
 	subscriptions: Option<usize>,
 	#[usage(env = "MOQ_PEER_FETCHES", cli("--peer-fetches"))]
 	fetches: Option<usize>,
+	#[usage(flatten)]
+	quic: PeerQuic,
+}
+
+#[derive(usage::Config)]
+#[usage(prefix = "peer.quic")]
+struct PeerQuic {
+	#[usage(env = "MOQ_PEER_QUIC_MAX_STREAMS", cli("--peer-quic-max-streams"))]
+	max_streams: Option<u64>,
+	#[usage(env = "MOQ_PEER_QUIC_RECEIVE_WINDOW", cli("--peer-quic-receive-window"))]
+	receive_window: Option<u64>,
+	#[usage(env = "MOQ_PEER_QUIC_SEND_WINDOW", cli("--peer-quic-send-window"))]
+	send_window: Option<u64>,
 }
 
 #[derive(usage::Config)]

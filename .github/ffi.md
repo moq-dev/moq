@@ -3,7 +3,8 @@
 `release-shared-ffi.yml` owns the existing `moq-ffi-v*` tag trigger for Go,
 Kotlin and Swift. Nightly calls the same coordinator without publisher secrets.
 It builds nine distinct default-feature targets, replacing fourteen native
-builds across those packages. Dart retains its eleven minimal-feature targets;
+builds across those packages. Dart retains its own eleven default-feature
+targets, a superset that adds `x86_64-apple-darwin` and `x86_64-apple-ios`;
 Python retains its wheel builds and Python-specific environment.
 
 C++ retains source builds as its default and independent `cpp-v*` release tags.

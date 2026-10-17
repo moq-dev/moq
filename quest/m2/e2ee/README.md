@@ -45,8 +45,6 @@ The Rust and TypeScript cores expose the same surface, and nothing else:
 
 ## Required
 
-- [TypeScript E2EE core](/quest/m2/e2ee/typescript.md) - the `@moq/e2ee` package
-  mirroring the Rust surface, with WebCrypto in a serial pump
 - [Rust protected publisher seams](/quest/m2/e2ee/rust-publish.md) - Rust media
   and catalog publishers accept opaque physical names and emit no plaintext
   semantic catalog in E2EE mode

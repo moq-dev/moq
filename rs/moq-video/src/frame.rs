@@ -538,12 +538,20 @@ impl Surface {
 	/// A GPU scaler that a driver refuses falls back to downloading and scaling
 	/// on the CPU where the surface permits readback. External Vulkan surfaces fail
 	/// instead because their contract forbids CPU pixel access.
+	///
+	/// The result keeps the source's [`color`](Self::color). An unlabelled source
+	/// means what [`Color::infer`] guesses for its own size, so the result is
+	/// labelled with that: scaling across 576 lines would otherwise change the
+	/// guess without changing the samples.
 	pub fn resize(&self, size: Size, config: &crate::resize::Config) -> Result<Surface, Error> {
 		// Counts as a use on builds where every GPU arm is compiled out.
 		let _ = config;
 		size.validate("resize to")?;
 
-		Ok(match self {
+		let implied = self
+			.color()
+			.unwrap_or_else(|| Color::infer(Size::new(self.width(), self.height())));
+		let mut resized = match self {
 			Surface::I420(i420) => Surface::I420(i420.resize(size)?),
 			#[cfg(apple)]
 			Surface::PixelBuffer(pixels) if config.output == crate::Output::Cpu => {
@@ -610,7 +618,9 @@ impl Surface {
 			},
 			#[allow(unreachable_patterns)]
 			other => Surface::I420(other.to_i420()?.into_owned().resize(size)?),
-		})
+		};
+		resized.label(implied);
+		Ok(resized)
 	}
 
 	/// The pixels as tightly-packed I420 (YUV 4:2:0): Y (`width * height` bytes),
@@ -673,14 +683,15 @@ impl Surface {
 	}
 
 	/// The color space these samples are in, when it is known rather than
-	/// guessed. `None` for a GPU surface whose format names none, and for pixels
-	/// that merely passed through without anything naming their space.
+	/// guessed. A decoded frame carries its stream's; `None` for pixels that
+	/// merely passed through without anything naming their space, a camera's raw
+	/// YUYV among them.
 	///
-	/// Worth reading before encoding pixels you resized: [`resize`](Self::resize)
-	/// carries the space across, so a frame scaled past 576 lines no longer
-	/// matches what an encoder sized for the result would infer. Pass this to
+	/// Worth reading before encoding pixels you resized or decoded: they keep
+	/// their source's space, which need not match what an encoder sized for them
+	/// would infer. Pass this to
 	/// [`encode::Config::color`](crate::encode::Config::color) to keep the label
-	/// honest.
+	/// honest; the encoder refuses a frame that disagrees with it.
 	pub fn color(&self) -> Option<Color> {
 		match self {
 			#[cfg(apple)]
@@ -694,9 +705,34 @@ impl Surface {
 			#[cfg(all(target_os = "linux", feature = "dmabuf"))]
 			Surface::DmaBuf(d) => d.color,
 			#[cfg(all(target_os = "android", feature = "mediacodec"))]
-			Surface::HardwareBuffer(_) => None,
+			Surface::HardwareBuffer(b) => b.color,
 			Surface::I420(i) => i.color(),
 		}
+	}
+
+	/// Name the space of a surface that names none, leaving one that does alone.
+	///
+	/// For what the crate knows and the surface cannot carry on its own: the
+	/// stream a decoder read, or the size a frame had before a resize. A CoreVideo
+	/// buffer's attachment names only the matrix, so a label overrides it; an
+	/// external Vulkan image is RGB and takes none.
+	pub(crate) fn label(&mut self, color: Color) {
+		let slot = match self {
+			#[cfg(apple)]
+			Surface::PixelBuffer(buffer) => &mut buffer.color,
+			#[cfg(target_os = "windows")]
+			Surface::Texture(texture) => &mut texture.color,
+			#[cfg(all(target_os = "linux", feature = "nvidia"))]
+			Surface::Cuda(cuda) => &mut cuda.color,
+			#[cfg(target_os = "linux")]
+			Surface::Vulkan(_) => return,
+			#[cfg(all(target_os = "linux", feature = "dmabuf"))]
+			Surface::DmaBuf(buffer) => &mut buffer.color,
+			#[cfg(all(target_os = "android", feature = "mediacodec"))]
+			Surface::HardwareBuffer(buffer) => &mut buffer.color,
+			Surface::I420(i420) => &mut i420.color,
+		};
+		slot.get_or_insert(color);
 	}
 
 	/// A CPU I420 view, downloading a GPU frame only if necessary.
@@ -1273,7 +1309,7 @@ pub mod android {
 	use ndk::media::image_reader::{Image, ImageReader};
 
 	use super::I420;
-	use crate::{Error, Size};
+	use crate::{Color, Error, Size};
 
 	// Plane indices of an `AIMAGE_FORMAT_YUV_420_888` image. The format always
 	// reports three planes in this order, whether the device laid the picture out
@@ -1330,6 +1366,8 @@ pub mod android {
 		pub(crate) top: u32,
 		pub(crate) width: u32,
 		pub(crate) height: u32,
+		/// The space the samples are in, from the stream the decoder read.
+		pub(crate) color: Option<Color>,
 	}
 
 	// SAFETY: an `AImage` is an owned handle to one buffer-queue slot, so it is not
@@ -1351,6 +1389,7 @@ pub mod android {
 				top,
 				width,
 				height,
+				color: None,
 			}
 		}
 
@@ -1424,7 +1463,7 @@ pub mod android {
 				width: self.width,
 				height: self.height,
 				data,
-				color: None,
+				color: self.color,
 			})
 		}
 
@@ -1560,6 +1599,9 @@ pub mod apple {
 		pub(crate) buffer: CFRetained<CVPixelBuffer>,
 		pub(crate) width: u32,
 		pub(crate) height: u32,
+		/// The space the decoder read from the stream's VUI, which names the
+		/// primaries and transfer the matrix attachment leaves out.
+		pub(crate) color: Option<Color>,
 	}
 
 	// SAFETY: CVPixelBuffer is a reference-counted CoreFoundation wrapper around
@@ -1592,7 +1634,12 @@ pub mod apple {
 		}
 
 		pub(crate) fn new(buffer: CFRetained<CVPixelBuffer>, width: u32, height: u32) -> Self {
-			Self { buffer, width, height }
+			Self {
+				buffer,
+				width,
+				height,
+				color: None,
+			}
 		}
 
 		/// Scale into an NV12 buffer owned by the destination-size pool.
@@ -1635,29 +1682,30 @@ pub mod apple {
 			// Compare against the constants rather than the string literals: these
 			// are CFString identities Apple owns, not values we should spell out.
 			if name == unsafe { kCVImageBufferYCbCrMatrix_ITU_R_709_2 } {
-				Color::Bt709Limited
+				Color::BT709
 			} else if name == unsafe { kCVImageBufferYCbCrMatrix_ITU_R_601_4 } {
-				Color::Bt601Limited
+				Color::BT601
 			} else {
-				// BT.2020 and the P3 matrices land here. We have no variant for them,
-				// so the size guess is the least wrong answer available.
+				// BT.2020 and the P3 matrices land here. A decoded buffer carries the
+				// decoder's label instead, so only an unlabelled one guesses.
 				inferred
 			}
 		}
 
-		/// The color space these samples are in: the matrix from the buffer's
-		/// attachment paired with the range its pixel format names. `None` for a
-		/// format that names neither.
+		/// The color space these samples are in: the decoder's label, or else the
+		/// matrix from the buffer's attachment, paired with the range its pixel
+		/// format names (VideoToolbox converts to the format it was asked for).
+		/// `None` for a format that names no range.
 		pub(crate) fn color(&self) -> Option<Color> {
 			let format = CVPixelBufferGetPixelFormatType(&self.buffer);
-			let limited = if format == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange {
-				true
+			let range = if format == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange {
+				crate::color::Range::Limited
 			} else if format == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange {
-				false
+				crate::color::Range::Full
 			} else {
 				return None;
 			};
-			Some(self.matrix().with_range(limited))
+			Some(self.color.unwrap_or_else(|| self.matrix()).with_range(range))
 		}
 
 		/// Download an NV12 surface to packed I420 (the CPU encode path).
@@ -2812,19 +2860,51 @@ mod tests {
 		let converted = I420::from_rgba(&rgba, size.width * 4, size).expect("rgba to i420");
 		assert_eq!(
 			converted.color(),
-			Some(Color::Bt601Limited),
+			Some(Color::BT601),
 			"an RGB conversion knows the matrix it used"
 		);
 
 		// Resampling moves samples around; it does not reinterpret them.
 		let resized = converted.resize(Size::new(32, 32)).expect("resize");
-		assert_eq!(resized.color(), Some(Color::Bt601Limited), "resize preserves the space");
+		assert_eq!(resized.color(), Some(Color::BT601), "resize preserves the space");
 
 		// A passthrough leaves it open for the consumer to infer.
 		let size = Size::new(64, 64);
 		let raw = I420::new(size, vec![0; I420::len(size).unwrap()]).expect("i420");
 		assert_eq!(raw.color(), None);
-		assert_eq!(raw.with_color(Color::Bt709Full).color(), Some(Color::Bt709Full));
+		assert_eq!(
+			raw.with_color(Color::BT709.with_range(crate::color::Range::Full))
+				.color(),
+			Some(Color::BT709.with_range(crate::color::Range::Full))
+		);
+	}
+
+	/// An unlabelled 720p frame means BT.709 to every player. Scaled to 480p it
+	/// would read as BT.601, so the resize names the space it came from.
+	#[test]
+	fn resize_labels_the_space_an_unlabelled_source_implied() {
+		use super::{I420, Surface};
+		use crate::{Color, Size};
+
+		let hd = Size::new(1280, 720);
+		let sd = Size::new(640, 480);
+		let raw = Surface::I420(I420::new(hd, vec![0x80; I420::len(hd).unwrap()]).unwrap());
+		assert_eq!(raw.color(), None);
+
+		let config = crate::resize::Config::default();
+		let scaled = raw.resize(sd, &config).unwrap();
+		assert_eq!(scaled.color(), Some(Color::BT709));
+
+		// A labelled source keeps its own label, not the size guess.
+		let full = Surface::I420(
+			I420::new(hd, vec![0x80; I420::len(hd).unwrap()])
+				.unwrap()
+				.with_color(Color::BT601.with_range(crate::color::Range::Full)),
+		);
+		assert_eq!(
+			full.resize(sd, &config).unwrap().color(),
+			Some(Color::BT601.with_range(crate::color::Range::Full))
+		);
 	}
 
 	/// V4L2 hands back YUYV already in the camera's color space, so the 4:2:2 ->
@@ -2897,13 +2977,13 @@ mod tests {
 
 		let pixels = I420::new(size, vec![0x80; I420::len(size).unwrap()])
 			.unwrap()
-			.with_color(Color::Bt709Full);
+			.with_color(Color::BT709.with_range(crate::color::Range::Full));
 		let allocation = pixels.data().as_ptr();
 		let pixels = Surface::I420(pixels).into_i420().unwrap();
 
 		assert_eq!(pixels.size(), size);
 		assert_ne!(pixels.size(), transposed);
-		assert_eq!(pixels.color(), Some(Color::Bt709Full));
+		assert_eq!(pixels.color(), Some(Color::BT709.with_range(crate::color::Range::Full)));
 		assert_eq!(pixels.data().as_ptr(), allocation);
 		assert_eq!(pixels.into_data().len(), I420::len(size).unwrap());
 	}
@@ -3012,10 +3092,10 @@ mod tests {
 		};
 
 		for (size, expected) in [
-			(Size::new(720, 480), Color::Bt601Limited),
-			(Size::new(720, 576), Color::Bt601Limited),
-			(Size::new(1280, 720), Color::Bt709Limited),
-			(Size::new(1920, 1080), Color::Bt709Limited),
+			(Size::new(720, 480), Color::BT601),
+			(Size::new(720, 576), Color::BT601),
+			(Size::new(1280, 720), Color::BT709),
+			(Size::new(1920, 1080), Color::BT709),
 		] {
 			let i420 = red(size);
 			assert_eq!(i420.color(), Some(expected), "{size} reported color");

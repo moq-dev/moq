@@ -4,16 +4,16 @@
 //! advertises, then reports changes on the same stream. Nothing in moq-transport says
 //! where the first part ends, so a subscriber can only guess from the stream going
 //! quiet. When both endpoints declare the ACTIVE_COUNT option, the publisher puts on its
-//! REQUEST_OK how many NAMESPACE messages come before the subscription is caught up.
+//! REQUEST_OK how many NAMESPACE messages come before the subscription is synced.
 
 use super::Version;
 
 /// ACTIVE_COUNT Setup Option: the sender counts the NAMESPACE messages before a
-/// subscription is caught up, and reads the peer's count. Even, so the value is a bare varint.
+/// subscription is synced, and reads the peer's count. Even, so the value is a bare varint.
 pub const ACTIVE_COUNT: u64 = 0x40B64;
 
 /// ACTIVE_COUNT REQUEST_OK parameter: how many NAMESPACE messages immediately follow
-/// before the subscription is caught up. Only answers SUBSCRIBE_NAMESPACE.
+/// before the subscription is synced. Only answers SUBSCRIBE_NAMESPACE.
 /// Even, so the value is a bare varint.
 pub const ACTIVE_COUNT_PARAM: u64 = 0x40B66;
 

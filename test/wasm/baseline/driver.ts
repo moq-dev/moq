@@ -19,6 +19,9 @@ const dist = join(root, "test/wasm/dist");
 const wasm = join(root, "js/wasm/dist");
 const output = join(run, "backend.json");
 const smoke = process.env.MOQ_WASM_BASELINE_SMOKE === "1";
+// moq-ffi over ubrn's wasm2 player, built by uniffi/build.sh; see README.md.
+const uniffi = process.env.MOQ_WASM_UNIFFI === "1";
+const generated = join(root, "test/wasm/uniffi/dist");
 const relays = (await Bun.file(values.relays).json()) as RelayFixture[];
 if (!relays.length) throw new Error("no relay fixtures");
 const server = Bun.serve({
@@ -30,7 +33,11 @@ const server = Bun.serve({
 			return new Response(`<script type="module" src="/${path.slice(1)}.js"></script>`, {
 				headers: { "content-type": "text/html", "cache-control": "no-store" },
 			});
-		const file = path.startsWith("/wasm/") ? Bun.file(join(wasm, path.slice(6))) : Bun.file(join(dist, path));
+		const file = path.startsWith("/wasm/")
+			? Bun.file(join(wasm, path.slice(6)))
+			: path.startsWith("/uniffi/")
+				? Bun.file(join(generated, path.slice(8)))
+				: Bun.file(join(dist, path));
 		return (await file.exists())
 			? new Response(file, { headers: { "cache-control": "no-store" } })
 			: new Response("not found", { status: 404 });
@@ -68,6 +75,9 @@ const report = {
 		revision: command("git", "rev-parse", "HEAD"),
 		status: command("git", "status", "--porcelain"),
 		features: "moq-wasm defaults; wasm-release; repository browser cfgs; bindgen web target; Binaryen not invoked",
+		uniffi: uniffi
+			? "moq-ffi defaults pinned to UniFFI 0.31 (uniffi/pin.patch); wasm-release; ubrn 0.31.0-6 wasm2; bundled with bun --minify"
+			: "not run",
 	},
 	tools: {
 		rust: command("rustc", "--version"),
@@ -86,6 +96,8 @@ const report = {
 	assets: {
 		js: [await asset(join(dist, "net.js"))],
 		wasm: await Promise.all((await wasmAssets(wasm)).map(asset)),
+		// The bundled bindings, @ubjs runtime and wasm-bindgen glue, plus the staged module.
+		uniffi: uniffi ? [await asset(join(dist, "uniffi.js")), await asset(join(generated, "moq_ffi.wasm"))] : [],
 		harness: [await asset(join(dist, "consumer.js")), await asset(join(dist, "publisher.js"))],
 	},
 	limits: [
@@ -104,7 +116,13 @@ const report = {
 await Bun.write(output, JSON.stringify(report, null, 2));
 const browser = await chromium.launch({ channel: "chromium", headless: true });
 report.tools.browser = browser.version();
-const order = ["js", "js", "wasm", "wasm", "js", "wasm"] as const;
+// Alternating and consecutive A/A rounds, so drift on a shared host hits every backend:
+// three rounds each, in an order that puts every backend first, last, and twice in a row.
+const backendsEnabled: Sample["backend"][] = ["js", "wasm", ...(uniffi ? (["uniffi"] as const) : [])];
+const order: Sample["backend"][] =
+	backendsEnabled.length === 2
+		? ["js", "js", "wasm", "wasm", "js", "wasm"]
+		: [...backendsEnabled, ...[...backendsEnabled].reverse(), ...backendsEnabled];
 let serial = 0;
 try {
 	for (const relay of smoke ? relays.slice(0, 1) : relays) {
@@ -131,7 +149,10 @@ try {
 			})),
 		];
 		for (const shape of smoke ? [shapes[0], shapes[13]] : shapes) {
-			for (const [round, backend] of (smoke ? (["js", "wasm"] as const) : order).entries()) {
+			const backends: Sample["backend"][] = smoke
+				? ["js", "wasm", ...(uniffi ? (["uniffi"] as const) : [])]
+				: order;
+			for (const [round, backend] of backends.entries()) {
 				const config: Sample = {
 					...shape,
 					id: `baseline/${serial++}`,
@@ -139,7 +160,7 @@ try {
 					version: relay.version,
 					backend,
 					transport: "webtransport",
-					module: `${endpoint}/${backend === "js" ? "net.js" : "wasm/moq.js"}`,
+					module: `${endpoint}/${{ js: "net.js", wasm: "wasm/moq.js", uniffi: "uniffi.js" }[backend]}`,
 				};
 				await sample(config, round);
 			}

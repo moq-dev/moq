@@ -44,6 +44,11 @@ pub(super) struct Presentation {
 	declared: [Transition; 2],
 	next: Transition,
 	reference: Option<Timestamp>,
+	/// The last speaker write: the media time it ends at, when that sounds, and
+	/// the playhead it may not fall back behind on the same timeline.
+	written: Option<(Duration, Instant, Option<Duration>)>,
+	/// The playout target the speaker holds, once audio is playing.
+	target: Option<Duration>,
 	/// Wakes every pending resume when a boundary, a transition or the anchor
 	/// changes. Kept apart from the window's and the decoders' wakeups, so a
 	/// resume can never take a wakeup meant for them.
@@ -89,6 +94,8 @@ impl Presentation {
 			declared: Default::default(),
 			next: Transition(1),
 			reference: None,
+			written: None,
+			target: None,
 			timeline: Default::default(),
 		}
 	}
@@ -166,6 +173,11 @@ impl Presentation {
 	/// A move makes every queued video frame due earlier, so the window has to
 	/// recompute the deadline it is already asleep on.
 	pub(super) fn audio(&mut self, end: Duration, buffered: Duration, now: Instant) -> bool {
+		// Silence padded ahead of the frame to refill the speaker is not media: the
+		// playhead holds where it was until the padding has played, rather than
+		// projecting back over media already heard. A new timeline starts afresh.
+		let floor = (self.speaker && !self.restart).then(|| self.playhead(now)).flatten();
+		self.written = now.checked_add(buffered).map(|sounds| (end, sounds, floor));
 		let timestamp = media(end);
 		self.reference = Some(timestamp);
 		let edge = now
@@ -210,6 +222,29 @@ impl Presentation {
 	pub(super) fn stopped(&mut self) {
 		self.speaker = false;
 		self.restart = false;
+		self.written = None;
+		self.target = None;
+	}
+
+	/// Record the playout target the speaker is being held on.
+	pub(super) fn hold(&mut self, target: Duration) {
+		self.target = Some(target);
+	}
+
+	/// The media time sounding at `now`, or `None` with no speaker.
+	///
+	/// Projected from the last write at the wall rate, held at its end (a speaker
+	/// with nothing left plays nothing further), and never behind where it stood
+	/// at that write (refill padding plays no media).
+	pub(super) fn playhead(&self, now: Instant) -> Option<Duration> {
+		let (end, sounds, floor) = self.written?;
+		let projected = end.saturating_sub(sounds.saturating_duration_since(now));
+		Some(floor.map_or(projected, |floor| projected.max(floor)).min(end))
+	}
+
+	/// The playout target the speaker is held on, or `None` with no speaker.
+	pub(super) fn target(&self) -> Option<Duration> {
+		self.target
 	}
 
 	/// When `timestamp` should be presented, or `None` before any frame has
@@ -589,6 +624,51 @@ mod tests {
 
 	fn ms(millis: u64) -> Timestamp {
 		Timestamp::from_millis(millis).unwrap()
+	}
+
+	/// The playhead runs at the wall rate from the last write and stops at its
+	/// end, which is what a speaker that ran dry is still sounding.
+	#[test]
+	fn the_playhead_projects_the_last_write_and_holds_at_its_end() {
+		let now = Instant::now();
+		let mut presentation = Presentation::new(DELAY);
+		assert_eq!(presentation.playhead(now), None);
+
+		presentation.audio(Duration::from_secs(10), Duration::from_millis(200), now);
+		presentation.hold(DELAY);
+		assert_eq!(presentation.playhead(now), Some(Duration::from_millis(9_800)));
+		let later = now + Duration::from_millis(150);
+		assert_eq!(presentation.playhead(later), Some(Duration::from_millis(9_950)));
+		let dry = now + Duration::from_secs(1);
+		assert_eq!(presentation.playhead(dry), Some(Duration::from_secs(10)));
+		assert_eq!(presentation.target(), Some(DELAY));
+
+		presentation.stopped();
+		assert_eq!((presentation.playhead(dry), presentation.target()), (None, None));
+	}
+
+	/// Silence padded ahead of a frame after the speaker ran dry plays no media,
+	/// so the playhead holds instead of replaying media already heard.
+	#[test]
+	fn the_playhead_holds_through_refill_padding() {
+		let now = Instant::now();
+		let mut presentation = Presentation::new(DELAY);
+		presentation.audio(Duration::from_secs(10), Duration::from_millis(200), now);
+		let dry = now + Duration::from_secs(1);
+		assert_eq!(presentation.playhead(dry), Some(Duration::from_secs(10)));
+
+		// 100 ms of padding, then a 20 ms frame continuing from 10 s.
+		presentation.audio(Duration::from_millis(10_020), Duration::from_millis(120), dry);
+		assert_eq!(presentation.playhead(dry), Some(Duration::from_secs(10)));
+		let padded = dry + Duration::from_millis(100);
+		assert_eq!(presentation.playhead(padded), Some(Duration::from_secs(10)));
+		let played = dry + Duration::from_millis(110);
+		assert_eq!(presentation.playhead(played), Some(Duration::from_millis(10_010)));
+
+		// A new timeline may start anywhere.
+		presentation.restarted();
+		presentation.audio(Duration::from_secs(2), Duration::from_millis(100), played);
+		assert_eq!(presentation.playhead(played), Some(Duration::from_millis(1_900)));
 	}
 
 	#[tokio::test]

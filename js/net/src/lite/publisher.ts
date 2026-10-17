@@ -1,6 +1,7 @@
 import { Instant, Milli, Nano, now, sleep } from "@moq/clock";
 import { type Dispose, type Getter, Once, race, Signal } from "@moq/signals";
 import type { Grant } from "../auth.ts";
+import { Gate } from "../auth_gate.ts";
 import { enforceGrant } from "../auth_session.ts";
 import type * as broadcast from "../broadcast.ts";
 import { Withdrawal } from "../connection/withdrawal.ts";
@@ -398,6 +399,8 @@ export class Publisher {
 	// withdraws what it no longer covers. Undefined until the peer answers, and forever on a
 	// version without AUTH, which allows everything.
 	#grant?: Getter<Grant | undefined>;
+	// Holds every incoming request to that grant from dispatch to its end.
+	#gate: Gate;
 
 	// Resolves once the tokens this session presented at setup are answered, so nothing is
 	// announced before the grant it would be checked against.
@@ -435,6 +438,7 @@ export class Publisher {
 		this.#interests = new Interests(new Slots(limits.subscriptions, { quic, reason: "too many subscriptions" }));
 		this.#fetches = new Slots(limits.fetches, { quic, reason: "too many fetches" });
 		this.#grant = auth?.grant;
+		this.#gate = new Gate(auth?.grant);
 		this.#ready = auth?.ready ?? Promise.resolve();
 		this.version = version;
 		this.hop = hop;
@@ -681,7 +685,7 @@ export class Publisher {
 		// broadcast resolves is never missed.
 		const revoked = unauthorized(msg.broadcast);
 		let serving: track.Subscriber | undefined;
-		const watch = this.#watch(msg.broadcast, () => {
+		const watch = this.#gate.watch(msg.broadcast, () => {
 			console.debug(`publish revoked: broadcast=${msg.broadcast} track=${msg.track}`);
 			serving?.close(revoked);
 			stream.abort(revoked);
@@ -694,19 +698,6 @@ export class Publisher {
 			watch.dispose();
 			interest.release();
 		}
-	}
-
-	// Watch whether our grant still lets us publish `broadcast`, calling `onRevoke` once
-	// it does not. Arm it before the request's first check.
-	#watch(broadcast: Path.Valid, onRevoke: () => void): { revoked: () => boolean; dispose: () => void } {
-		let revoked = false;
-		const dispose =
-			this.#grant?.subscribe(() => {
-				if (revoked || !this.#denied(broadcast)) return;
-				revoked = true;
-				onRevoke();
-			}) ?? (() => {});
-		return { revoked: () => revoked || this.#denied(broadcast), dispose };
 	}
 
 	async #serveSubscribe(
@@ -869,7 +860,7 @@ export class Publisher {
 			// open as long as its track, so a check at accept alone would keep serving after a shrink.
 			const revoked = unauthorized(msg.broadcast);
 			let fetched: group.Consumer | undefined;
-			const watch = this.#watch(msg.broadcast, () => {
+			const watch = this.#gate.watch(msg.broadcast, () => {
 				console.debug(`fetch revoked: broadcast=${msg.broadcast} track=${msg.track} group=${msg.group}`);
 				fetched?.close(revoked);
 				stream.abort(revoked);
@@ -1280,7 +1271,7 @@ export class Publisher {
 		hold.signal.addEventListener("abort", () => interest.release(), { once: true });
 		// Armed before the first check and held until the answer is acknowledged, so a grant
 		// that shrinks while the answer is blocked on flow control resets it, never sends it.
-		const watch = this.#watch(msg.broadcast, () => {
+		const watch = this.#gate.watch(msg.broadcast, () => {
 			console.debug(`track info revoked: broadcast=${msg.broadcast} track=${msg.track}`);
 			hold.abort();
 			stream.writer.reset(unauthorized(msg.broadcast));
@@ -1321,12 +1312,6 @@ export class Publisher {
 		} finally {
 			watch.dispose();
 		}
-	}
-
-	// Whether our grant excludes publishing this broadcast. No grant yet allows it.
-	#denied(broadcast: Path.Valid): boolean {
-		const grant = this.#grant?.peek();
-		return grant !== undefined && !grant.publish.matches(broadcast);
 	}
 
 	// Resolve (and cache) a track's immutable TRACK_INFO by asking the application.

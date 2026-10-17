@@ -1,0 +1,147 @@
+// Protected tracks over real moq-lite and MoQ Transport sessions: relays forward ciphertext.
+import { expect, test } from "bun:test";
+import { Milli } from "@moq/clock";
+import { type Broadcast, Connection, Origin, type Path, Time } from "@moq/net";
+// The in-memory WebTransport pair @moq/net tests with; not part of its published surface.
+import { createMockTransportPair } from "../../net/src/mock.ts";
+import { Credential } from "./credential.ts";
+
+const encoder = new TextEncoder();
+const decoder = new TextDecoder();
+const url = new URL("https://localhost:4443/test");
+const ms = (value: number) => Time.Timestamp.fromMillis(value);
+
+function credential(): Credential {
+	return new Credential({
+		context: encoder.encode("example.com/meeting-123"),
+		kid: 7,
+		secret: encoder.encode("moq-e2ee-00 test secret!!!!!!!!!"),
+	});
+}
+
+async function session(protocol: string) {
+	const pair = createMockTransportPair(protocol);
+	const publisher = new Origin.Producer();
+	const subscriber = new Origin.Producer();
+	const [client, server] = await Promise.all([
+		Connection.connect({ url, transport: pair.client, consume: subscriber }),
+		Connection.accept({ url, transport: pair.server, publish: publisher.consume() }),
+	]);
+	return {
+		publisher,
+		subscriber,
+		close() {
+			client.abort();
+			server.abort();
+		},
+	};
+}
+
+async function active(origin: Origin.Producer, path: Path.Valid): Promise<Broadcast.Consumer> {
+	const request = origin.request(path, { announced: true });
+	for (;;) {
+		const front = request.active.peek();
+		if (front) return front;
+		await request.active.changed();
+	}
+}
+
+// Whether the wire carries the route's epoch, and the track's timestamps. Neither is
+// authenticated, so the frames open either way.
+const transports = [
+	["moq-lite-07", "moq-lite-07-wip", true, true],
+	["moq-lite-05", "moq-lite-05", false, true],
+	["moq-transport-16", "moqt-16", false, false],
+	["moq-transport-17", "moqt-17", false, true],
+] as const;
+
+for (const [name, protocol, routed, timed] of transports) {
+	test(`${name}: grouped frames roundtrip encrypted`, async () => {
+		const { publisher, subscriber, close } = await session(protocol);
+		const cred = credential();
+		const generation = cred.produce();
+		const path = await cred.path("meeting.hang");
+		const broadcast = publisher.createBroadcast(path);
+		const physical = await generation.name("video");
+		const net = broadcast.createTrack(physical, { timescale: Time.Timescale.MILLI });
+		const video = await generation.produce(net);
+		broadcast.announce({ epoch: generation.epoch });
+
+		const group = video.appendGroup();
+		await group.writeFrame(ms(1), encoder.encode("keyframe"));
+		await group.writeFrame(ms(2), encoder.encode("delta"));
+
+		const remote = await active(subscriber, path);
+		// The epoch rides the route where the wire carries it; elsewhere the application supplies it.
+		if (routed) expect(remote.epoch).toBe(generation.epoch);
+		const epoch = routed && remote.epoch ? remote.epoch : generation.epoch;
+		const consumer = cred.consume(epoch).consume(remote.track(physical).subscribe({ maxDelay: Milli(60_000) }));
+
+		const received = await consumer.recvGroup();
+		if (!received) throw new Error("expected a group");
+		expect(received.sequence).toBe(0);
+		const first = await received.readFrame();
+		expect(decoder.decode(first?.plaintext)).toBe("keyframe");
+		expect(first?.timestamp?.as(Time.Timescale.MILLI)).toBe(timed ? 1 : undefined);
+		expect(decoder.decode((await received.readFrame())?.plaintext)).toBe("delta");
+
+		// Later frames on the open group, and a second group.
+		await group.writeFrame(ms(3), encoder.encode("late"));
+		group.close();
+		expect(decoder.decode((await received.readFrame())?.plaintext)).toBe("late");
+		expect(await received.readFrame()).toBeUndefined();
+
+		const next = video.appendGroup();
+		await next.writeFrame(ms(4), encoder.encode("next"));
+		next.close();
+		const second = await consumer.recvGroup();
+		expect(second?.sequence).toBe(1);
+		expect(decoder.decode((await second?.readFrame())?.plaintext)).toBe("next");
+
+		consumer.close();
+		video.close();
+		broadcast.close();
+		close();
+	});
+}
+
+for (const [name, protocol] of [
+	["moq-lite-07", "moq-lite-07-wip"],
+	["moq-transport-17", "moqt-17"],
+] as const)
+	test(`${name}: datagrams roundtrip encrypted`, async () => {
+		const { publisher, subscriber, close } = await session(protocol);
+		const cred = credential();
+		const generation = cred.produce();
+		const path = await cred.path("meeting.hang");
+		const broadcast = publisher.createBroadcast(path);
+		const physical = await generation.name("audio");
+		const audio = await generation.produce(broadcast.createTrack(physical, { timescale: Time.Timescale.MILLI }));
+		broadcast.announce({ epoch: generation.epoch });
+
+		// A group first, so the subscription is serving before datagrams, which are never cached.
+		const group = audio.appendGroup();
+		await group.writeFrame(ms(0), encoder.encode("init"));
+		group.close();
+
+		const remote = await active(subscriber, path);
+		const consumer = cred
+			.consume(remote.epoch ?? generation.epoch)
+			.consume(remote.track(physical).subscribe({ maxDelay: Milli(60_000) }));
+		expect(decoder.decode((await (await consumer.recvGroup())?.readFrame())?.plaintext)).toBe("init");
+
+		// Sequences continue past the group, preserved hop to hop by insertDatagram.
+		const sequence = await audio.appendDatagram(ms(20), encoder.encode("opus"));
+		expect(sequence).toBe(1);
+		const event = await consumer.recvDatagram();
+		expect(event?.kind).toBe("datagram");
+		if (event?.kind !== "datagram") return;
+		expect(event.datagram.sequence).toBe(1);
+		expect(event.datagram.timestamp?.as(Time.Timescale.MILLI)).toBe(20);
+		expect(decoder.decode(event.datagram.plaintext)).toBe("opus");
+
+		consumer.close();
+		audio.close();
+		broadcast.close();
+		close();
+	});

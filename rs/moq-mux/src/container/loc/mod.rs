@@ -53,6 +53,11 @@ impl Container for Wire {
 		let Some(frame) = ready!(group.poll_read_frame(waiter)?) else {
 			return Poll::Ready(Ok(None));
 		};
+		// On a data track an object with no bytes is its discontinuity marker, not a frame.
+		// Elsewhere it is malformed, so it fails to decode below.
+		if self.0 == Kind::Data && frame.payload.is_empty() {
+			return Poll::Ready(Ok(Some(Vec::new())));
+		}
 
 		let loc = moq_loc::decode(frame.payload)?;
 		// `loc.timescale == Some(0)` is a malformed wire (caught by moq_loc::decode itself),

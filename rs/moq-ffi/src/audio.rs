@@ -6,6 +6,7 @@
 //! Opus and AAC encode/decode inside the FFI boundary.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use crate::bandwidth::{MoqBandwidth, MoqReservation};
@@ -174,12 +175,16 @@ pub struct MoqAudioDecoderOutput {
 	/// [`MoqSubscription::max_delay_us`](crate::consumer::MoqSubscription::max_delay_us):
 	/// when a group stalls and a newer group is more than this far ahead,
 	/// the consumer skips. `None` keeps the moq-mux default of zero (skip
-	/// aggressively). Named `_max` to leave room for a future
-	/// `min_buffer_us` (jitter-buffer floor), which is a distinct knob: this
-	/// one bounds how stale a group may be, that one how much to hold before
-	/// presenting.
+	/// aggressively). Distinct from [`delay_us`](Self::delay_us): this one
+	/// bounds how stale a group may be and adds no buffering.
 	#[uniffi(default = None)]
 	pub max_delay_us: Option<u64>,
+	/// A fixed playout delay in microseconds, or `None` to estimate it from
+	/// arrival timing. This is the jitter buffer to hold ahead of the playhead,
+	/// reported by [`MoqAudioConsumer::delay_us`]. A fixed delay beyond the
+	/// track's retention is refused.
+	#[uniffi(default = None)]
+	pub delay_us: Option<u64>,
 }
 
 /// One audio frame: payload bytes plus a presentation timestamp.
@@ -472,12 +477,15 @@ impl MoqAudioProducer {
 
 struct ConsumerInner {
 	consumer: moq_audio::decode::Consumer,
+	delay: Arc<AtomicU64>,
 }
 
 impl ConsumerInner {
 	async fn next(&mut self) -> Result<Option<MoqAudioFrame>, MoqError> {
 		loop {
-			match self.consumer.read().await? {
+			let read = self.consumer.read().await;
+			self.delay.store(micros(self.consumer.delay()), Ordering::Relaxed);
+			match read? {
 				Some(moq_audio::decode::Read::Frame { frame, .. }) => return Ok(Some(frame.into())),
 				Some(moq_audio::decode::Read::End { .. }) => {}
 				None => return Ok(None),
@@ -486,10 +494,17 @@ impl ConsumerInner {
 	}
 }
 
+fn micros(duration: Duration) -> u64 {
+	duration.as_micros().try_into().unwrap_or(u64::MAX)
+}
+
 /// Consumer for a raw-audio track.
 #[derive(uniffi::Object)]
 pub struct MoqAudioConsumer {
 	task: Task<ConsumerInner>,
+	/// Mirrors the decoder's delay after each read, so it stays readable while
+	/// [`Self::next`] holds the decoder.
+	delay: Arc<AtomicU64>,
 }
 
 #[uniffi::export]
@@ -497,6 +512,17 @@ impl MoqAudioConsumer {
 	/// The next decoded frame, or `None` once the track ends.
 	pub async fn next(&self) -> Result<Option<MoqAudioFrame>, MoqError> {
 		self.task.run(|mut state| async move { state.next().await }).await
+	}
+
+	/// The playout delay to hold ahead of the playhead, in microseconds: the
+	/// fixed [`MoqAudioDecoderOutput::delay_us`], or the estimate from every
+	/// frame read so far.
+	///
+	/// The estimate measures when [`Self::next`] returns each frame, so call it
+	/// again as soon as the previous frame is handled rather than pacing reads
+	/// to the speaker.
+	pub fn delay_us(&self) -> u64 {
+		self.delay.load(Ordering::Relaxed)
 	}
 
 	/// Make current and future reads return `Cancelled`.
@@ -528,6 +554,7 @@ fn audio_config(catalog_audio: crate::media::MoqAudio) -> Result<hang::catalog::
 	config.bitrate = catalog_audio.bitrate;
 	config.description = catalog_audio.description.map(Into::into);
 	config.container = catalog_audio.container.into();
+	config.jitter = catalog_audio.jitter_us.map(Duration::from_micros);
 	Ok(config)
 }
 
@@ -559,14 +586,21 @@ impl MoqAudioConsumer {
 		config.output.sample_rate = output.sample_rate;
 		config.output.layout = output.channels.map(moq_audio::Layout::from_channels).transpose()?;
 		config.max_delay = output.max_delay_us.map(Duration::from_micros).unwrap_or_default();
+		config.delay = output.delay_us.map(Duration::from_micros);
 
 		let consumer = broadcast
 			.driver
 			.watch(async { Ok(moq_audio::decode::Consumer::new(&resolved, &cfg, id, config).await?) })
 			.await?;
 
+		let delay = Arc::new(AtomicU64::new(micros(consumer.delay())));
 		Ok(Arc::new(MoqAudioConsumer {
-			task: Task::new(ConsumerInner { consumer }).supervised(broadcast.driver.clone()),
+			task: Task::new(ConsumerInner {
+				consumer,
+				delay: delay.clone(),
+			})
+			.supervised(broadcast.driver.clone()),
+			delay,
 		}))
 	}
 }
@@ -588,6 +622,7 @@ mod tests {
 			bitrate: None,
 			enabled: true,
 			container: MoqContainer::Legacy,
+			jitter_us: None,
 		}
 	}
 
@@ -623,6 +658,16 @@ mod tests {
 		// In the catalog, and decodable in a browser, but not by moq-audio.
 		let error = audio_config(catalog_audio("flac")).unwrap_err();
 		assert!(matches!(error, MoqError::Unsupported));
+	}
+
+	/// The advertised jitter floors the estimated playout delay, so it must survive the trip
+	/// through the FFI record.
+	#[test]
+	fn audio_config_keeps_the_advertised_jitter() {
+		let mut audio = catalog_audio("opus");
+		audio.jitter_us = Some(60_000);
+		let config = audio_config(audio).unwrap();
+		assert_eq!(config.jitter, Some(Duration::from_millis(60)));
 	}
 
 	#[test]

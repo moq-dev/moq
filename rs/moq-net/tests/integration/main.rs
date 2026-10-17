@@ -45,6 +45,7 @@ mod settled_end_survives_abort;
 mod subscribe_tracks;
 mod subscription_end_integrity;
 mod support;
+mod synced;
 mod track_abort_over_session;
 mod track_info_cancel;
 mod track_stream_demand;
