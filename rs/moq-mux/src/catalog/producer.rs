@@ -629,8 +629,10 @@ impl<E: CatalogExt> Producer<E> {
 	/// withheld until every reservation is dropped and every created producer either publishes its
 	/// config or drops, and after that until the catalog names a track. A one-shot muxer therefore
 	/// publishes the complete track list in its first snapshot instead of a half-converged one, and
-	/// input that declares no track publishes nothing. Producers created directly on a catalog that
-	/// never reserved publish incrementally.
+	/// input that declares no track publishes nothing. An application's extension track counts only
+	/// once a track constructor such as [`track`](Self::track) publishes it; one seeded or written
+	/// through [`modify`](Self::modify) is invisible to this check. Producers created directly on a
+	/// catalog that never reserved publish incrementally.
 	///
 	/// Each call is a fresh [`Timebase`](super::Timebase): an importer handed it shifts its timestamps by
 	/// its own offset. Reserve through one timebase instead for importers sharing a timestamp base.
