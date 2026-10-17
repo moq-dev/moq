@@ -4,7 +4,7 @@ import type { Order } from "../track.ts";
 import * as Filter from "./filter.ts";
 import * as Message from "./message.ts";
 import * as Namespace from "./namespace.ts";
-import { type MessageLocation, Parameters } from "./parameters.ts";
+import { type MessageLocation, MSG_PARAM_FORWARD, MSG_PARAM_SUBSCRIBER_PRIORITY, Parameters } from "./parameters.ts";
 import * as Properties from "./properties.ts";
 import { type IetfVersion, Version } from "./version.ts";
 
@@ -436,7 +436,7 @@ export class SubscribeUpdate {
 				await w.u62(0n); // end_group
 				await w.u8(this.parameters.subscriberPriority ?? 128);
 				await w.bool(this.parameters.forward ?? true);
-				await w.u53(0); // no parameters
+				await this.parameters.encode(w, version, [MSG_PARAM_SUBSCRIBER_PRIORITY, MSG_PARAM_FORWARD]);
 			} else {
 				await this.parameters.encode(w, version);
 			}
