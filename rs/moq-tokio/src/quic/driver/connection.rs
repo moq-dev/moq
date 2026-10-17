@@ -543,23 +543,11 @@ impl Connection {
         if let Some(x) = &conn.error {
             return Err(SendDatagramError::ConnectionLost(x.clone()));
         }
-        use moq_quic::SendDatagramError::*;
-        match conn
-            .inner
+        conn.inner
             .datagrams()
-            .send(data, send_group::to_quic(options))
-        {
-            Ok(()) => {
-                conn.wake();
-                Ok(())
-            }
-            Err(e) => Err(match e {
-                UnsupportedByPeer => SendDatagramError::UnsupportedByPeer,
-                Disabled => SendDatagramError::Disabled,
-                TooLarge => SendDatagramError::TooLarge,
-                e => unreachable!("unmapped datagram error: {e}"),
-            }),
-        }
+            .send(data, send_group::to_quic(options))?;
+        conn.wake();
+        Ok(())
     }
 
     /// Compute the maximum size of datagrams that may be passed to [`send_datagram()`].
@@ -1432,18 +1420,9 @@ fn wake_all_notify(wakers: &mut FxHashMap<StreamId, Arc<Notify>>) {
 #[derive(Debug, Error, Clone, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum SendDatagramError {
-    /// The peer does not support receiving datagram frames
-    #[error("datagrams not supported by peer")]
-    UnsupportedByPeer,
-    /// Datagram support is disabled locally
-    #[error("datagram support disabled")]
-    Disabled,
-    /// The datagram is larger than the connection can currently accommodate
-    ///
-    /// Indicates that the path MTU minus overhead or the limit advertised by the peer has been
-    /// exceeded.
-    #[error("datagram too large")]
-    TooLarge,
+    /// The connection refused the datagram.
+    #[error(transparent)]
+    Refused(#[from] moq_quic::SendDatagramError),
     /// The connection was lost
     #[error("connection lost")]
     ConnectionLost(#[from] ConnectionError),

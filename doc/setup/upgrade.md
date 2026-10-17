@@ -468,16 +468,14 @@ These land with the next breaking release, not the 2026-09-23 train.
   send-ahead: 2 s at the new default, where `--delay 500ms` keeps the 1 s it
   had. moq-srt egress runs at its SRT latency or 1 s, whichever is longer.
 - **Custom transports schedule streams and datagrams by send options.** A
-  transport handed straight to moq-net implements
-  `poll::Session::send_group(priority)`, returning its `SendStream::Group`, or
-  `None` with `poll::Ungrouped` when it has no groups, and
-  `SendStream::set_group`. `poll_open_uni(cx)` and `poll_open_bi(cx)` take a
-  `poll::SendOptions { group, priority }` the new stream starts with, as do the
-  `open_uni` and `open_bi` helpers; `SendOptions::default()` is ungrouped at
-  priority 0. `poll_send_datagram(cx, payload)` is
-  `send_datagram(payload, options)`, which never blocks.
-  `SendStream::set_priority` takes an `i64` instead of a `u8`, higher first.
-  moq-tokio and moq-uring sessions implement all of it already.
+  transport handed straight to moq-net implements the
+  [`transport::poll`](https://docs.rs/moq-net/latest/moq_net/transport/poll/index.html)
+  traits, which now add send groups. Opening a stream takes a
+  `poll::SendOptions { group, priority }` it starts with, and a datagram is
+  sent with `send_datagram(payload, options)`, which never blocks.
+  `SendOptions::default()` is ungrouped at priority 0, and priorities are an
+  `i64` instead of a `u8`, higher first. moq-tokio and moq-uring sessions
+  implement all of it already.
 - **moq-relay builds its cluster dials from a template.** `Relay::client()` and
   `Cluster::with_client` are removed. Give the cluster
   `with_connect(connect, quic)`, plus `with_iroh(endpoint)` for `iroh://`
