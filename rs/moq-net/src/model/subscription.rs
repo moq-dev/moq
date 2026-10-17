@@ -104,7 +104,11 @@ pub enum Order {
 ///
 /// A relative anchor resolves against the latest group of the hop that serves it, once,
 /// when it starts serving. Before any group exists it resolves at the first one, so
-/// [`Range::live`] starts there. A relay that cannot resolve it forwards it upstream as is.
+/// [`Range::live`] starts there.
+///
+/// No published wire carries one yet: upstream, a relative start is no floor, the same
+/// request as [`Range::oldest`], and a relative end is no end. Behind a moq-transport upstream,
+/// which joins without a floor at the live group, `Relative(n)..` starts there.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Anchor {
 	/// This exact position.
