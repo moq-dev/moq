@@ -1884,6 +1884,34 @@ mod test {
 	}
 
 	#[test]
+	fn a_track_finished_before_its_catalog_is_advertised() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = Producer::new(&mut broadcast, Config::default()).unwrap();
+		let net = broadcast
+			.create_track("video0", catalog.track_info(hang::catalog::PRIORITY.video))
+			.unwrap();
+		let mut video = catalog
+			.video(
+				net,
+				crate::catalog::hang::Container::Legacy(crate::container::Kind::Video),
+				VideoConfig::new(hang::catalog::VideoCodec::VP8),
+			)
+			.unwrap();
+		video
+			.write(crate::container::Frame {
+				timestamp: catalog.timestamp(None).unwrap(),
+				duration: None,
+				payload: Bytes::from_static(b"keyframe"),
+				keyframe: true,
+			})
+			.unwrap();
+
+		video.finish().unwrap();
+		let archive = catalog.snapshot().archive.expect("the catalog timeline is advertised");
+		assert_eq!(archive.timelines["video0"].duration, Some(4_000));
+	}
+
+	#[test]
 	fn a_configured_hint_applies_to_media_but_not_the_catalog() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let config = Config::default()

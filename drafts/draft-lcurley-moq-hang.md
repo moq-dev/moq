@@ -827,7 +827,7 @@ The RECOMMENDED policy is one rule for every track:
 - A skipped group sequence ends the record at its newest known content, not where the next group starts, so a pause is not counted as content.
 
 A minimum of 4 seconds is RECOMMENDED.
-Before an unhinted track declares, a safety ceiling of 10 seconds is RECOMMENDED.
+Before an unhinted track declares, a safety ceiling of 10 seconds, or the minimum if longer, is RECOMMENDED.
 Sparse data that publishes on its own schedule, such as a catalog, SHOULD use a minimum of zero: each group is then its own record, ended as soon as the group finishes, so its newest group is indexed without waiting for another that may never come.
 An untimed track has no duration to measure: each group is its own record, ended as soon as the group finishes or the next group starts, and no group is split between frames.
 

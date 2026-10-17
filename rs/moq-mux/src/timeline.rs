@@ -19,7 +19,7 @@
 //!   group finishes.
 //! - A group still open three declared durations past the record's start is split at the next
 //!   reported frame, so an append-only group that never closes is still indexed as it grows.
-//!   Before an unhinted track declares, the ceiling is ten seconds.
+//!   Before an unhinted track declares, the ceiling is ten seconds, or the minimum if longer.
 //! - A skipped group sequence always closes the record at its newest reported content time, so a
 //!   record's groups are contiguous and a pause is not absorbed into its duration.
 //! - [`Segmenter::cut`] adds an application boundary, such as a video keyframe cutting audio so a
@@ -58,7 +58,7 @@ use moq_net::{Timescale, Timestamp};
 /// The default [`Config::duration_min`] (4 seconds). Only sparse data, such as a catalog, uses zero.
 pub const DEFAULT_DURATION_MIN: Duration = Duration::from_secs(4);
 
-/// The safety ceiling before an unhinted track declares its duration.
+/// The safety ceiling before an unhinted track declares its duration, unless the minimum is longer.
 const DEFAULT_DURATION_CEILING: Duration = Duration::from_secs(10);
 
 /// Records may overrun their target to reach a keyframe, but not indefinitely.
@@ -206,7 +206,7 @@ impl Segmenter {
 		self.declared
 			.filter(|value| !value.is_zero())
 			.and_then(|value| value.checked_mul(DURATION_CEILING_MULTIPLIER))
-			.unwrap_or(DEFAULT_DURATION_CEILING)
+			.unwrap_or(DEFAULT_DURATION_CEILING.max(self.config.duration_min))
 	}
 
 	/// Number the next record `sequence`, continuing a resumed timeline.
@@ -1149,6 +1149,20 @@ mod test {
 			vec![(0, 10_000, Position::new(0, 0), Position::new(0, 1))]
 		);
 		assert_eq!(log.declared_duration(), Some(10_000));
+	}
+
+	#[test]
+	fn an_unhinted_ceiling_never_undercuts_a_longer_minimum() {
+		let mut log = Segmenter::new(Config::default().with_duration_min(Duration::from_secs(12)));
+		log.frame(Position::new(0, 0), ms(0), true).unwrap();
+		log.frame(Position::new(0, 1), ms(11_000), true).unwrap();
+		log.frame(Position::new(0, 2), ms(20_000), true).unwrap();
+
+		assert_eq!(
+			drain(&mut log),
+			vec![(0, 12_000, Position::new(0, 0), Position::new(0, 2))]
+		);
+		assert_eq!(log.declared_duration(), Some(12_000));
 	}
 
 	#[test]

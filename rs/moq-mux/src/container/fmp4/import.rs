@@ -1035,6 +1035,8 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 				}
 			}
 			track.track.finish()?;
+			// Dropping the recorder flushes the open record, so the track is advertised.
+			track.recorder = None;
 		}
 		Ok(())
 	}
