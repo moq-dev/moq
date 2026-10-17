@@ -3,7 +3,7 @@
 ## Goal
 
 `moq-uring`'s `a_published_close_has_already_left_the_client`
-(`rs/moq-uring/tests/teardown.rs`) passes under a loaded `just check`,
+(`rs/moq-uring/tests/integration/teardown.rs`) passes under a loaded `just check`,
 fixed at its cause. It still proves that a close the client reported as
 published reaches the server as the application code, not an idle timeout.
 

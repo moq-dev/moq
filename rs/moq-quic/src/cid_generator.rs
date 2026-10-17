@@ -39,11 +39,12 @@ pub struct InvalidCid;
 /// Generates purely random connection IDs of a specified length
 ///
 /// Random CIDs can be smaller than those produced by [`HashedConnectionIdGenerator`], but cannot be
-/// usefully [`validate`](ConnectionIdGenerator::validate)d.
+/// usefully [`validate`](ConnectionIdGenerator::validate)d unless they name a shard.
 #[derive(Debug, Clone, Copy)]
 pub struct RandomConnectionIdGenerator {
     cid_len: usize,
     lifetime: Option<Duration>,
+    shard: Option<Shard>,
 }
 
 impl Default for RandomConnectionIdGenerator {
@@ -51,9 +52,40 @@ impl Default for RandomConnectionIdGenerator {
         Self {
             cid_len: 8,
             lifetime: None,
+            shard: None,
         }
     }
 }
+
+/// One endpoint's slot in a group sharing a port, which its connection IDs name.
+#[derive(Debug, Clone, Copy)]
+struct Shard {
+    index: u16,
+    count: u16,
+}
+
+impl Shard {
+    /// A first byte congruent to `index` modulo `count`, keeping as much of the byte random as
+    /// the group size leaves: `256 / count` values.
+    fn prefix(self) -> u8 {
+        let count = u32::from(self.count);
+        let stride = rand::rng().random_range(0..256 / count);
+        (stride * count + u32::from(self.index)) as u8
+    }
+
+    /// Whether `cid` carries this shard's prefix and the marker.
+    fn owns(self, cid: &[u8]) -> bool {
+        cid.len() > SHARD_MARKER_BYTE
+            && u16::from(cid[0]) % self.count == self.index
+            && cid[SHARD_MARKER_BYTE] & SHARD_MARKER == SHARD_MARKER
+    }
+}
+
+/// The byte of a sharded CID that carries [`SHARD_MARKER`].
+const SHARD_MARKER_BYTE: usize = 3;
+/// Both bits overlay the reserved key-encryption pattern of an SRT data header; see
+/// [`RandomConnectionIdGenerator::set_shard`].
+const SHARD_MARKER: u8 = 0x18;
 
 impl RandomConnectionIdGenerator {
     /// Initialize Random CID generator with a fixed CID length
@@ -72,14 +104,53 @@ impl RandomConnectionIdGenerator {
         self.lifetime = Some(d);
         self
     }
+
+    /// Name shard `index` of a `count`-endpoint group in every CID
+    ///
+    /// The first byte is congruent to `index` modulo `count`, so a `SO_REUSEPORT` steering filter
+    /// that reduces a packet's first destination CID byte modulo the group size delivers it to the
+    /// endpoint that issued the CID. The fourth byte also sets both bits of `0x18`, which overlay
+    /// the reserved key-encryption pattern of an SRT data header, so the filter can tell a short
+    /// header from another protocol sharing the port. Every other bit stays random: a client
+    /// chooses the Initial's destination CID, so it can steer every connection to one shard, and
+    /// that shard alone has to have IDs to spare. [`validate`](ConnectionIdGenerator::validate)
+    /// then refuses a CID without this shard's prefix and the marker, so a stray packet is dropped
+    /// rather than answered with a stateless reset for a connection a sibling owns.
+    ///
+    /// Panics unless `index < count <= 256`, since one byte cannot name more shards, or if the
+    /// CIDs are too short to carry the marker.
+    pub fn set_shard(&mut self, index: u16, count: u16) -> &mut Self {
+        assert!(
+            index < count && count <= 256,
+            "shard {index} of {count} cannot be named by one byte"
+        );
+        assert!(
+            self.cid_len > SHARD_MARKER_BYTE,
+            "a {}-byte CID cannot carry the shard marker",
+            self.cid_len
+        );
+        self.shard = Some(Shard { index, count });
+        self
+    }
 }
 
 impl ConnectionIdGenerator for RandomConnectionIdGenerator {
     fn generate_cid(&mut self) -> ConnectionId {
         let mut bytes_arr = [0; MAX_CID_SIZE];
         rand::rng().fill_bytes(&mut bytes_arr[..self.cid_len]);
+        if let Some(shard) = self.shard {
+            bytes_arr[0] = shard.prefix();
+            bytes_arr[SHARD_MARKER_BYTE] |= SHARD_MARKER;
+        }
 
         ConnectionId::new(&bytes_arr[..self.cid_len])
+    }
+
+    fn validate(&self, cid: ConnectionId) -> Result<(), InvalidCid> {
+        match self.shard {
+            Some(shard) if !shard.owns(&cid) => Err(InvalidCid),
+            _ => Ok(()),
+        }
     }
 
     /// Provide the length of dst_cid in short header packet
@@ -176,5 +247,95 @@ mod tests {
         let mut generator = HashedConnectionIdGenerator::new();
         let cid = generator.generate_cid();
         generator.validate(cid).unwrap();
+    }
+
+    fn sharded(index: u16, count: u16) -> RandomConnectionIdGenerator {
+        let mut generator = RandomConnectionIdGenerator::default();
+        generator.set_shard(index, count);
+        generator
+    }
+
+    /// Bits that vary across `cids`: a fixed bit is entropy the generator lost.
+    fn varying_bits(cids: &[ConnectionId]) -> u32 {
+        let (mut ones, mut zeros) = ([0u8; 8], [0u8; 8]);
+        for cid in cids {
+            for (i, byte) in cid.iter().enumerate() {
+                ones[i] |= byte;
+                zeros[i] |= !byte;
+            }
+        }
+        (0..8).map(|i| (ones[i] & zeros[i]).count_ones()).sum()
+    }
+
+    /// The steering filter's only requirement: whatever first byte a shard issues reduces back
+    /// to that shard, at every group size including the one-value-per-shard ceiling.
+    #[test]
+    fn a_shard_cid_names_its_shard() {
+        for count in [1u16, 2, 3, 7, 8, 64, 255, 256] {
+            for index in 0..count {
+                let mut generator = sharded(index, count);
+                for _ in 0..32 {
+                    let cid = generator.generate_cid();
+                    assert_eq!(cid.len(), generator.cid_len());
+                    assert_eq!(u16::from(cid[0]) % count, index);
+                    assert_eq!(cid[3] & 0x18, 0x18, "CID lacks the non-SRT marker");
+                    generator.validate(cid).unwrap();
+                }
+            }
+        }
+    }
+
+    /// A client picks the Initial's destination CID, so it can steer every connection to one
+    /// shard, and that shard alone has to keep a wide space: only the prefix byte and the two
+    /// marker bits are spent on the encoding. When the prefix took a byte of a 3-byte nonce, a
+    /// 256-way shard had 65,536 CIDs, and the endpoint spins looking for a free one once they are
+    /// taken.
+    #[test]
+    fn a_full_size_shard_keeps_its_entropy() {
+        let mut generator = sharded(0, 256);
+        let cids: Vec<_> = (0..1024).map(|_| generator.generate_cid()).collect();
+        assert_eq!(varying_bits(&cids), 64 - 8 - 2);
+    }
+
+    /// The unsharded path spends nothing on the encoding.
+    #[test]
+    fn an_unsharded_cid_keeps_its_entropy() {
+        let mut generator = RandomConnectionIdGenerator::default();
+        let cids: Vec<_> = (0..1024).map(|_| generator.generate_cid()).collect();
+        assert_eq!(varying_bits(&cids), 64);
+    }
+
+    /// A shard refuses a sibling's CIDs and CIDs without the marker, so a misrouted or foreign
+    /// packet is dropped rather than reset.
+    #[test]
+    fn a_shard_refuses_what_it_did_not_issue() {
+        let first = sharded(0, 4);
+        let cid = sharded(1, 4).generate_cid();
+        assert!(first.validate(cid).is_err(), "took a sibling's CID");
+
+        let mut unmarked = sharded(0, 4).generate_cid();
+        unmarked[3] &= !0x18;
+        assert!(
+            first.validate(unmarked).is_err(),
+            "took a CID without the marker"
+        );
+    }
+
+    #[test]
+    #[should_panic]
+    fn a_shard_past_the_group_is_refused() {
+        RandomConnectionIdGenerator::default().set_shard(4, 4);
+    }
+
+    #[test]
+    #[should_panic]
+    fn a_group_past_one_byte_is_refused() {
+        RandomConnectionIdGenerator::default().set_shard(0, 257);
+    }
+
+    #[test]
+    #[should_panic]
+    fn a_cid_too_short_for_the_marker_is_refused() {
+        RandomConnectionIdGenerator::new(3).set_shard(0, 2);
     }
 }
