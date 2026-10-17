@@ -127,15 +127,17 @@ int publish(const std::string &url, const std::string &path) {
 
     // Hold the producer for the lifetime of the publish loop; close() unpublishes.
     auto broadcast = ok(session->publish()->create_broadcast(path), "create_broadcast");
+    auto catalog = ok(moq::MediaCatalogProducer::init(broadcast), "catalog producer");
     auto media = ok(
         moq::MediaTrackStreamProducer::video(broadcast, moq::MediaTarget::kNamed{}, {moq::VideoFormat::kAvc3, {}}),
         "video stream producer"
     );
     moq::AudioEncoderOutput output{moq::AudioCodec::opus()};
+    output.track = AUDIO_TRACK;
     output.frame_duration_us = AUDIO_FRAME_DURATION_US;
     auto audio = ok(
-        broadcast->encode_audio(AUDIO_TRACK, {moq::AudioSampleFormat::kF32, AUDIO_RATE, 1}, output, nullptr),
-        "encode_audio"
+        moq::AudioProducer::init(catalog, {moq::AudioSampleFormat::kF32, AUDIO_RATE, 1}, output, nullptr),
+        "audio producer"
     );
     ok(broadcast->announce({}), "announce");
     std::printf(

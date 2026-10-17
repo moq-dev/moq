@@ -119,6 +119,8 @@ explicit exception to the public model audit.
 - [Binding track resolver](/quest/m1/binding-track-helper.md) - binding apps subscribe to a rendition without inlining `track` or the key
 - [Exporters follow a rendition to a new track](/quest/m1/export-rendition-rebind.md) - the fMP4, TS, MKV and FLV exporters rebuild a rendition whose resolved `track` or `broadcast` changes under the same ID
 
+- [Stats fail loud](/quest/m1/stats-frame-too-large.md) - a stats track whose frame outgrows the cache ends with FrameTooLarge instead of serving a stale snapshot
+
 - [C++ and OBS package proof](/quest/m1/cpp-package-check.md) - the installed artifacts pass before their first release
 
 ## Related

@@ -18,13 +18,13 @@ use tokio::task::JoinHandle;
 
 const TIMEOUT: Duration = Duration::from_secs(30);
 /// About three seconds of HEVC and Opus.
-const CLIP: &[u8] = include_bytes!("../../moq-mux/src/container/ts/test_data/bbb_cbr.ts");
+const CLIP: &[u8] = include_bytes!("../../../moq-mux/src/container/ts/test_data/bbb_cbr.ts");
 /// Five seconds of the same capture at the same rate, which leaves media to come once an export
 /// has waited out the PCR-rate window and its delay (`ffmpeg -i scte35/bbb5s.ts -c copy
 /// -muxrate 400000 -f mpegts bbb5s_cbr.ts`).
-const LONG: &[u8] = include_bytes!("../../moq-mux/src/container/ts/test_data/bbb5s_cbr.ts");
+const LONG: &[u8] = include_bytes!("../../../moq-mux/src/container/ts/test_data/bbb5s_cbr.ts");
 /// Fragmented AV1, which the TS export does not carry.
-const AV1: &[u8] = include_bytes!("../../moq-mux/src/container/fmp4/test_data/av1.mp4");
+const AV1: &[u8] = include_bytes!("../../../moq-mux/src/container/fmp4/test_data/av1.mp4");
 
 type Output = Arc<Mutex<Vec<u8>>>;
 

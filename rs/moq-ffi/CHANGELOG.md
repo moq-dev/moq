@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Native audio and video producers move out of broadcast handles: construct
+  `MoqAudioProducer` / `MoqVideoProducer` from the broadcast's catalog, and
+  subscribe with `MoqAudioConsumer::subscribe` / `MoqVideoConsumer::subscribe`.
+  Codec-only `MoqAudioEncoder` / `MoqVideoEncoder` are available alongside them.
+- Audio frame duration defaults to the codec's own frame; video GOP mode is an enum.
+
 ## [0.4.12](https://github.com/moq-dev/moq/compare/moq-ffi-v0.4.11...moq-ffi-v0.4.12) - 2026-10-06
 
 ### Other
