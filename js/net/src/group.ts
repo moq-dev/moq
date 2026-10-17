@@ -576,7 +576,9 @@ export class Consumer {
 			started.result = recover.replace(this.#state.start, failed, abort.signal).then(
 				(replacement) => {
 					started.settled = true;
-					started.replacement = replacement;
+					// Abandoned while it was out: nobody reads it.
+					if (abort.signal.aborted) replacement.group.close();
+					else started.replacement = replacement;
 				},
 				(err: unknown) => {
 					started.settled = true;
@@ -603,6 +605,15 @@ export class Consumer {
 		}
 		this.#adopt(replacement);
 		return true;
+	}
+
+	// Give up a replacement still being asked for, or one nobody adopted: the group ended without it.
+	#abandon(): void {
+		const attempt = this.#attempt;
+		if (!attempt) return;
+		this.#attempt = undefined;
+		attempt.abort.abort();
+		attempt.replacement?.group.close();
 	}
 
 	// Read the rest of the group from `replacement`, from the frame this one reached.
@@ -703,11 +714,15 @@ export class Consumer {
 	/** Resolves once {@link readFrame} would not block. */
 	async readable(): Promise<void> {
 		for (;;) {
-			if (this.#terminal || this.#ended) return;
+			if (this.#terminal || this.#ended) {
+				this.#abandon();
+				return;
+			}
 			if (this.#state.frames.peek().length > 0) return;
 			const closed = this.#state.closed.peek();
 			if (closed instanceof Error && (await this.#resume(closed))) continue;
 			if (closed !== undefined) {
+				this.#abandon();
 				this.#closed?.refresh();
 				return;
 			}
@@ -730,8 +745,14 @@ export class Consumer {
 
 	async #readFramePosition(pending = false, from = 0): Promise<ReadGroupFrame | undefined> {
 		for (;;) {
-			if (this.#terminal) throw this.#terminal;
-			if (this.#ended) return;
+			if (this.#terminal) {
+				this.#abandon();
+				throw this.#terminal;
+			}
+			if (this.#ended) {
+				this.#abandon();
+				return;
+			}
 
 			const read = this.#readBufferedFrame(pending);
 			if (read) {
@@ -746,9 +767,12 @@ export class Consumer {
 			const closed = this.#state.closed.peek();
 			if (closed instanceof Error) {
 				if (await this.#resume(closed)) continue;
+				this.#abandon();
 				throw closed;
 			}
 			if (closed !== undefined) {
+				// The copy finished the group: a replacement asked for meanwhile is moot.
+				this.#abandon();
 				this.#closed?.refresh();
 				return;
 			}
@@ -795,8 +819,7 @@ export class Consumer {
 
 	/** Closes the group, optionally with an error to abort readers. Idempotent. */
 	close(abort?: Error) {
-		this.#attempt?.abort.abort();
-		this.#attempt = undefined;
+		this.#abandon();
 		this.#recover = undefined;
 		// Closing is terminal for this reader, even with frames still unread.
 		this.#released = true;

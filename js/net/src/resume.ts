@@ -701,6 +701,8 @@ class Recover implements GroupRecover {
 			reader.sync();
 			const current = this.#copy;
 			if (!current) throw new Error("group closed");
+			// The front refused the route that would continue it: nothing will.
+			if (failed && route.refusal) throw route.refusal;
 			const generation = route.generation;
 			const serving = route.source ? reader.copy(generation) : undefined;
 			const waits: Getter<unknown>[] = [route.changed];

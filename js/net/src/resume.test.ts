@@ -473,3 +473,30 @@ test("a front remembers it served a session's broadcast between routes", () => {
 	front.consumer.close();
 	a.close();
 });
+
+test("a failed group on a route whose replacement was refused ends with the refusal", async () => {
+	const front = new Front();
+	const a = new BroadcastProducer();
+	const b = new BroadcastProducer();
+	const ta = a.createTrack("seq", { priority: 1 });
+	b.createTrack("seq", { priority: 2 });
+	front.serve(a.consume());
+	const sub = front.consumer.track("seq").subscribe();
+	const stalled = new GroupProducer(0);
+	ta.writeGroup(stalled);
+	stalled.writeFrame({ payload: enc.encode("0.0") });
+	const group = sub.tryRecvGroup();
+	if (!group) throw new Error("expected group 0");
+	await group.readFrame();
+	await sub.info();
+
+	front.serve(b.consume());
+	await settle();
+	stalled.close(new StreamError(StreamCode.SessionClosed));
+	await expect(group.readFrame()).rejects.toThrow("changed its properties");
+
+	sub.close();
+	front.consumer.close();
+	a.close();
+	b.close();
+});

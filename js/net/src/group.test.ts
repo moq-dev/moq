@@ -1,6 +1,8 @@
 import { expect, test } from "bun:test";
+import { Signal } from "@moq/signals";
 import { FrameTooLarge, GroupTooLarge } from "./error.ts";
 import { MAX_GROUP_CACHE_BYTES, MAX_GROUP_FRAMES, Producer } from "./group.ts";
+import { hooks } from "./internal.ts";
 import { textFrame } from "./mock.ts";
 import { Timestamp } from "./time.ts";
 
@@ -226,4 +228,31 @@ test("a frame larger than the cache is rejected rather than silently dropped", (
 	const consumer = producer.consume();
 	producer.close();
 	expect(consumer.tryReadFrame()).toBeUndefined();
+});
+
+test("a group that ends on its own abandons the replacement it asked for", async () => {
+	const producer = new Producer(0);
+	const consumer = producer.mirror();
+	const route = new Signal(0);
+	let signal: AbortSignal | undefined;
+	hooks.recoverGroup(consumer, {
+		changed: route,
+		// A stall looks past the copy once the route moved.
+		wants: (failed) => failed !== undefined || route.peek() > 0,
+		replace: (_index, _failed, abort) => {
+			signal = abort;
+			return new Promise(() => {});
+		},
+	});
+	producer.writeFrame({ payload: new Uint8Array([0]) });
+	await consumer.readFrame();
+
+	route.set(1);
+	const read = consumer.readFrame();
+	await new Promise((resolve) => setTimeout(resolve, 0));
+	expect(signal?.aborted).toBe(false);
+
+	producer.close();
+	expect(await read).toBeUndefined();
+	expect(signal?.aborted).toBe(true);
 });
