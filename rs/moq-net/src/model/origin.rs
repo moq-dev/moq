@@ -799,7 +799,8 @@ struct OriginConsumerState {
 	/// once per cursor they touch. See [`AnnounceConsumer::poll_caught_up`].
 	///
 	/// Changed through a read guard, so a session joining wakes none of the cursors it
-	/// holds back: nothing waits on losing caught up. Only the table lock writes it.
+	/// holds back (nothing waits on losing caught up), except the last landing, which
+	/// takes the write guard to owe the queue too. Only the table lock changes it.
 	waiting: AtomicUsize,
 	/// The pending prefixes the consumer still owes reading from before the last
 	/// snapshot landed. Caught up once empty and nothing is `waiting`.
@@ -4361,13 +4362,26 @@ impl OriginState {
 			return;
 		};
 		for id in self.routes.cursors_touching(prefix) {
-			if let Some(cursor) = self.cursors.get(&id)
-				&& cursor.awaits(&snapshot)
-				// Only the last landing changes what a caught-up waiter sees, so only it wakes.
-				&& cursor.state.read().waiting.fetch_sub(1, Ordering::Relaxed) == 1
-				&& let Ok(mut state) = cursor.state.write()
+			let Some(cursor) = self.cursors.get(&id).filter(|cursor| cursor.awaits(&snapshot)) else {
+				continue;
+			};
+			// Only the last landing changes what a caught-up waiter sees, so only it takes the
+			// write guard and wakes. It zeroes the count and owes the queue in one critical
+			// section, so no poll sees nothing waiting before the owed set is in. The table
+			// lock keeps the count from moving between the two guards.
 			{
-				state.owe();
+				let state = cursor.state.read();
+				if state.waiting.load(Ordering::Relaxed) > 1 {
+					state.waiting.fetch_sub(1, Ordering::Relaxed);
+					continue;
+				}
+			}
+			match cursor.state.write() {
+				Ok(mut state) => {
+					state.waiting.store(0, Ordering::Relaxed);
+					state.owe();
+				}
+				Err(state) => state.waiting.store(0, Ordering::Relaxed),
 			}
 		}
 	}
