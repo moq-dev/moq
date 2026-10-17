@@ -382,6 +382,19 @@ mod tests {
 			map_closed_error(moq_tokio::ConnectError::Forbidden.into()),
 			MoqError::Forbidden
 		));
+
+		// A session close keeps its 0x18 code; a refused request's expiry has none.
+		match map_closed_error(moq_net::Error::from(moq_net::SessionError::Expired).into()) {
+			MoqError::Protocol { details: protocol } => {
+				assert_eq!(protocol.kind, crate::error::MoqProtocolKind::Expired);
+				assert_eq!(protocol.code, 0x18);
+			}
+			other => panic!("expected Protocol Expired, got {other:?}"),
+		}
+		assert!(matches!(
+			map_closed_error(moq_net::Error::Expired.into()),
+			MoqError::Expired
+		));
 	}
 
 	/// `new` is where a bad value surfaces, rather than at the first connect.

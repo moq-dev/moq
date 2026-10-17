@@ -6,8 +6,9 @@
 checks for explicitly supported profiles, with admitted decodable access
 units complete by their decode time and no modelled buffer overflow. Under
 loss, validate the surviving content, declared discontinuities and recovery;
-missing source units cannot all be decoded. Packet passthrough also needs
-timing and recovery evidence before making a distribution-readiness claim.
+missing source units cannot all be decoded. The deferred packet-passthrough
+export owns its timing and recovery proof before claiming readiness; it does
+not gate the semantic export proof here.
 
 ## Plan
 
@@ -47,6 +48,6 @@ standards check.
 
 ## Related
 
-- [TS passthrough export](/quest/m2/ts-passthrough-export.md) - the passthrough lane named in the Goal
+- [TS passthrough export](/quest/m2/ts-passthrough-export.md) - the later passthrough lane owns its own output proof
 - [Automated validation](/test/ts/README.md) - independent decode, profile coverage and CI ownership
 - [Loss and recovery](/quest/m1/ts-reliability/recovery.md) - actual object/group omissions and recovery

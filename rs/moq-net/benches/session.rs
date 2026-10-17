@@ -45,7 +45,7 @@
 // Custom timings measure the real time the work took, not the ambient clock.
 #![allow(clippy::disallowed_methods)]
 
-#[path = "../tests/support/mod.rs"]
+#[path = "../tests/integration/support/mod.rs"]
 mod support;
 
 use std::alloc::{GlobalAlloc, Layout, System};

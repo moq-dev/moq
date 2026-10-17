@@ -597,14 +597,10 @@ impl Socket {
 		})
 	}
 
-	/// Close the socket, unless a [`crate::server::SocketRetainer`] still holds it.
+	/// Close the socket. A reuseport member stays in its group regardless: the
+	/// group retains a handle of its own.
 	fn release(&self) {
 		self.io.write().unwrap().take();
-	}
-
-	/// A handle keeping the socket open after it is released, or `None` once it is.
-	fn retain(&self) -> Option<Arc<tokio::net::UdpSocket>> {
-		self.io.read().unwrap().clone()
 	}
 }
 
@@ -779,7 +775,11 @@ impl Server {
 				count = shard.count(),
 				"encoding the shard in connection IDs"
 			);
-			endpoint_config.cid_generator(Arc::new(move || Box::new(ShardIdGenerator::new(shard))));
+			endpoint_config.cid_generator(Arc::new(move || {
+				let mut cids = moq_quic::RandomConnectionIdGenerator::default();
+				cids.set_shard(shard.index(), shard.count());
+				Box::new(cids)
+			}));
 		} else if let Some(load_balancer) = load_balancer {
 			let server_id = load_balancer.id;
 			let nonce_len = load_balancer.nonce;
@@ -840,16 +840,27 @@ impl Server {
 	/// Close every connection, wait until each has sent its close to the peer,
 	/// then release the socket.
 	pub async fn shutdown(self) {
-		self.close();
-		// Not `wait_idle`, which also sits out each connection's 3 PTO closing
-		// period: that only repeats the close to a peer that already has it.
-		self.quic.wait_all_draining().await;
+		self.closer().close().await;
 		self.socket.release();
 	}
 
-	/// A handle keeping the socket open after this server is gone.
-	pub fn retain(&self) -> Option<Arc<tokio::net::UdpSocket>> {
-		self.socket.retain()
+	/// A handle that closes this server's connections from wherever its owner
+	/// went, for a worker that has to flush them before its runtime is dropped.
+	pub fn closer(&self) -> Closer {
+		Closer(self.quic.clone())
+	}
+}
+
+/// Closes a [`Server`]'s connections without owning it; see [`Server::closer`].
+pub(crate) struct Closer(driver::Endpoint);
+
+impl Closer {
+	/// Close every connection and wait until each has sent its close to the peer.
+	pub async fn close(self) {
+		self.0.close(driver::VarInt::from_u32(0), b"server shutdown");
+		// Not `wait_idle`, which also sits out each connection's 3 PTO closing
+		// period: that only repeats the close to a peer that already has it.
+		self.0.wait_all_draining().await;
 	}
 }
 
@@ -950,34 +961,6 @@ pub(crate) async fn accept(
 			})
 		}
 		_ => Err(Error::UnsupportedAlpn(alpn)),
-	}
-}
-
-// ── ShardIdGenerator ────────────────────────────────────────────────
-
-/// Connection IDs whose first byte names the reuseport member that owns them,
-/// so the group's steering filter can route later packets back to it.
-struct ShardIdGenerator {
-	shard: crate::listen::Shard,
-}
-
-impl ShardIdGenerator {
-	fn new(shard: crate::listen::Shard) -> Self {
-		Self { shard }
-	}
-}
-
-impl driver::ConnectionIdGenerator for ShardIdGenerator {
-	fn generate_cid(&mut self) -> driver::ConnectionId {
-		driver::ConnectionId::new(&moq_sock::shard::cid(self.shard))
-	}
-
-	fn cid_len(&self) -> usize {
-		moq_sock::shard::CID_LEN
-	}
-
-	fn cid_lifetime(&self) -> Option<Duration> {
-		None
 	}
 }
 

@@ -69,10 +69,7 @@ mod send_buffer;
 
 mod sent_packets;
 mod spaces;
-#[cfg(fuzzing)]
-pub use spaces::Retransmits;
-#[cfg(not(fuzzing))]
-use spaces::Retransmits;
+pub(crate) use spaces::Retransmits;
 use spaces::{PacketNumberFilter, PacketSpace, SendableFrames, SentPacket, ThinRetransmits};
 
 mod stats;
@@ -94,13 +91,11 @@ impl ConnectionTag {
 pub use stats::{ConnectionStats, CreditStats, FrameStats, PathStats, UdpStats};
 
 mod streams;
-#[cfg(fuzzing)]
-pub use streams::StreamsState;
-#[cfg(not(fuzzing))]
-use streams::StreamsState;
+pub(crate) use streams::StreamsState;
 pub use streams::{
-    Chunks, ClosedStream, Credit, FinishError, ReadError, ReadableError, RecvStream, SendStream,
-    ShouldTransmit, StreamEvent, Streams, WriteError, Written,
+    Checkpoint, Chunks, ClosedStream, Credit, FinishError, ReadError, ReadableError, RecvStream,
+    SendDomain, SendGroup, SendGroups, SendStream, ShouldTransmit, StreamEvent, Streams,
+    WriteError, Written,
 };
 
 mod timer;
@@ -445,6 +440,14 @@ impl Connection {
         Streams {
             state: &mut self.streams,
             conn_state: &self.state,
+        }
+    }
+
+    /// Provide control over the send groups that schedule outgoing streams
+    #[must_use]
+    pub fn send_groups(&mut self) -> SendGroups<'_> {
+        SendGroups {
+            state: &mut self.streams,
         }
     }
 
@@ -1781,13 +1784,20 @@ impl Connection {
 
         // Update state for confirmed delivery of frames
         if let Some(retransmits) = info.retransmits.get() {
-            for (id, _) in retransmits.reset_stream.iter() {
-                self.streams.reset_acked(*id);
+            for &(id, reliable_size) in retransmits.reset_stream.iter() {
+                self.streams.reset_acked(id, reliable_size);
             }
         }
 
         for frame in info.stream_frames {
-            self.streams.received_ack_of(frame);
+            let id = frame.id;
+            // A reset held for a peer without RESET_STREAM_AT goes out once it holds the data
+            if let Some(reliable_size) = self.streams.received_ack_of(frame) {
+                self.spaces[SpaceId::Data]
+                    .pending
+                    .reset_stream
+                    .push((id, reliable_size));
+            }
         }
     }
 
@@ -3104,6 +3114,13 @@ impl Connection {
                     self.streams.received_max_streams(dir, count)?;
                 }
                 Frame::ResetStream(frame) => {
+                    if frame.reliable_size.is_some() && !self.config.reset_stream_at {
+                        // We never advertised it, so it is an unknown frame type
+                        let mut err =
+                            TransportError::FRAME_ENCODING_ERROR("unsupported RESET_STREAM_AT");
+                        err.frame = Some(frame::FrameType::RESET_STREAM_AT);
+                        return Err(err);
+                    }
                     if self.streams.received_reset(frame)?.should_transmit() {
                         self.spaces[SpaceId::Data].pending.max_data = true;
                     }
@@ -3147,7 +3164,13 @@ impl Connection {
                             "STOP_SENDING on unopened stream",
                         ));
                     }
-                    self.streams.received_stop_sending(id, error_code);
+                    if let Some(reliable_size) = self.streams.received_stop_sending(id, error_code)
+                    {
+                        self.spaces[SpaceId::Data]
+                            .pending
+                            .reset_stream
+                            .push((id, reliable_size));
+                    }
                 }
                 Frame::RetireConnectionId { sequence } => {
                     let allow_more_cids = self
@@ -4250,9 +4273,8 @@ impl From<ConnectionError> for io::Error {
     }
 }
 
-#[allow(unreachable_pub)] // fuzzing only
 #[derive(Clone)]
-pub enum State {
+pub(crate) enum State {
     Handshake(state::Handshake),
     Established,
     Closed(state::Closed),
@@ -4288,9 +4310,8 @@ impl State {
 mod state {
     use super::*;
 
-    #[allow(unnameable_types, unreachable_pub)] // fuzzing only
     #[derive(Clone)]
-    pub struct Handshake {
+    pub(crate) struct Handshake {
         /// Whether the remote CID has been set by the peer yet
         ///
         /// Always set for servers
@@ -4305,9 +4326,8 @@ mod state {
         pub(super) client_hello: Option<Bytes>,
     }
 
-    #[allow(unnameable_types, unreachable_pub)] // fuzzing only
     #[derive(Clone)]
-    pub struct Closed {
+    pub(crate) struct Closed {
         pub(super) reason: Close,
     }
 }

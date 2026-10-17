@@ -12,7 +12,7 @@ use tracing::trace;
 use super::assembler::Assembler;
 use super::sent_packets::SentPackets;
 use crate::{
-    Dir, Duration, Instant, SocketAddr, StreamId, TransportError, VarInt, cid_queue::CidQueue,
+    Dir, Duration, Instant, SocketAddr, StreamId, TransportError, cid_queue::CidQueue,
     connection::StreamsState, crypto::Keys, frame, packet::SpaceId, range_set::ArrayRangeSet,
     shared::IssuedCid,
 };
@@ -319,14 +319,14 @@ pub(super) struct LostPacket {
 }
 
 /// Retransmittable data queue
-#[allow(unreachable_pub)] // fuzzing only
 #[derive(Debug, Default, Clone)]
-pub struct Retransmits {
+pub(crate) struct Retransmits {
     pub(super) max_data: bool,
     pub(super) data_blocked: bool,
     pub(super) max_stream_id: [bool; 2],
     pub(super) streams_blocked: [bool; 2],
-    pub(super) reset_stream: Vec<(StreamId, VarInt)>,
+    /// Each reset stream with the Reliable Size it delivers when its reset frame was sent
+    pub(super) reset_stream: Vec<(StreamId, u64)>,
     pub(super) stop_sending: Vec<frame::StopSending>,
     pub(super) max_stream_data: FxHashSet<StreamId>,
     pub(super) stream_data_blocked: FxHashSet<StreamId>,

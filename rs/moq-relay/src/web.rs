@@ -1086,7 +1086,7 @@ impl ServeGroup {
 			},
 			why = lease.ended() => {
 				tracing::info!(%why, "lease ended, closing fetch");
-				Err(moq_net::Error::Unauthorized)
+				Err(crate::auth::error(&why))
 			}
 		}
 	}

@@ -197,21 +197,23 @@ impl Message for AuthError {
 /// The REQUEST_ERROR codes AUTH_ERROR carries.
 const UNAUTHORIZED: u64 = 0x1;
 const NOT_SUPPORTED: u64 = 0x3;
+const EXPIRED_AUTH_TOKEN: u64 = 0x5;
 
 /// The AUTH_ERROR code for a refusal. The public API speaks session codes, and the
-/// only distinction this registry carries is unsupported versus unauthorized.
+/// actionable distinctions this registry carries are unsupported, expired, and unauthorized.
 fn to_code(code: SessionError) -> u64 {
 	match code {
 		SessionError::Version | SessionError::Unsupported => NOT_SUPPORTED,
+		SessionError::Expired => EXPIRED_AUTH_TOKEN,
 		_ => UNAUTHORIZED,
 	}
 }
 
-/// Read an AUTH_ERROR code. NOT_SUPPORTED means the acceptor could not tell the grant,
-/// not that it refused one; every other code is a refusal.
+/// Read an AUTH_ERROR code, preserving expiration so the presenter can refresh.
 fn from_code(code: u64) -> Error {
 	match code {
 		NOT_SUPPORTED => Error::Unsupported,
+		EXPIRED_AUTH_TOKEN => Error::Expired,
 		_ => Error::Session(SessionError::Unauthorized),
 	}
 }
@@ -761,5 +763,7 @@ mod tests {
 			Error::Session(SessionError::Unauthorized)
 		));
 		assert_eq!(to_code(SessionError::Unauthorized), UNAUTHORIZED);
+		assert!(matches!(from_code(EXPIRED_AUTH_TOKEN), Error::Expired));
+		assert_eq!(to_code(SessionError::Expired), EXPIRED_AUTH_TOKEN);
 	}
 }

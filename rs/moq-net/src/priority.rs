@@ -99,6 +99,22 @@ impl PartialOrd for Priority {
 	}
 }
 
+/// A stream's send order within its subscription's send group, where higher goes first.
+///
+/// The [`Priority`] ranking minus the parts the group itself carries: the group sequence in
+/// the subscription's `order`, then a group's first stream ahead of a later `start` in the
+/// same group. The low bit only splits a stream from the start of its group (`start == 0`)
+/// from the rest, which is the joining prefix beside the live stream; any other two streams
+/// of one group share. Sequences are wire varints below 2^62, so doubling one fits.
+pub fn in_group(group: u64, start: u64, order: Order) -> i64 {
+	let group = i64::try_from(group).unwrap_or(i64::MAX).saturating_mul(2);
+	let group = match order {
+		Order::Descending => group,
+		Order::Ascending => -group,
+	};
+	group.saturating_add(i64::from(start == 0))
+}
+
 #[derive(Debug, Clone)]
 struct PriorityItem {
 	id: usize,

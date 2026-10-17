@@ -122,8 +122,20 @@ name = "track"
 harness = false
 required-features = ["async"]
 
+# Declares a pending tail through the hidden `fuzz` module.
+[[bench]]
+name = "tail"
+harness = false
+required-features = ["fuzz"]
+
 [[bench]]
 name = "priority"
+harness = false
+required-features = ["async"]
+
+# Compiles moq-quic's send scheduler from source to compare it with the priority queue.
+[[bench]]
+name = "schedule"
 harness = false
 required-features = ["async"]
 

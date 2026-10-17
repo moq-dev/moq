@@ -20,6 +20,10 @@ tokio, which auto-advances to a timer before the OS event arrives, and never
 on a fixed sleep. moq-relay's integration tests move onto the sim in
 [the relay seam](/quest/m1/time/relay-seam.md), not here.
 
+The targeted moq-auth grant conversion belongs to
+[auth refresh](/quest/m1/test-flakes-2/auth-refresh-mock-time.md); reuse that
+change rather than implementing a second migration. It need not wait here.
+
 Fix mixed clocks first: anything that reads std time but waits on tokio time
 (a backoff's stability window, a gate computed with std `Instant` and slept
 with tokio) is a bug under paused time.

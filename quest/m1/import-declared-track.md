@@ -47,4 +47,4 @@ Public API: none expected. Wire: none.
 
 ## Related
 
-- [Same-epoch importers](/quest/m1/hop-aligned-import.md) - same-epoch importers publish identical tracks
+- [Same-epoch importers](/quest/m2/hop-aligned-import.md) - same-epoch importers publish identical tracks

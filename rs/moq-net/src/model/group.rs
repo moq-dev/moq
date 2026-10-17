@@ -1787,9 +1787,9 @@ impl Consumer {
 		self.cursor.expiry_pending()
 	}
 
-	/// Whether this cursor failed because its subscription max delay budget expired.
-	#[cfg(test)]
-	#[cfg(feature = "async")]
+	/// Whether a max delay budget gave up on this group, including a clean end of a drained
+	/// one: a server must not answer that end as if the group were whole.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub(crate) fn latency_expired(&self) -> bool {
 		self.expired
 	}
@@ -2241,6 +2241,12 @@ pub struct Fetch {
 	/// Delivery priority for the fetched group's stream. Defaults to 0.
 	pub priority: u8,
 
+	/// Maximum age behind the live edge this caller accepts.
+	///
+	/// `None` applies only the publisher's retention bound. An explicit value can
+	/// tighten, but never relax, that bound.
+	pub max_delay: Option<std::time::Duration>,
+
 	/// Index of the first frame to fetch within the group. Defaults to 0, the whole group.
 	///
 	/// Use this to fill a hole left by a route change: the group's head is already
@@ -2258,6 +2264,12 @@ impl Fetch {
 	/// Set the delivery priority, returning `self` for chaining.
 	pub fn with_priority(mut self, priority: u8) -> Self {
 		self.priority = priority;
+		self
+	}
+
+	/// Limit how far behind the live edge the fetched group may fall.
+	pub fn with_max_delay(mut self, max_delay: std::time::Duration) -> Self {
+		self.max_delay = Some(max_delay);
 		self
 	}
 
@@ -2283,6 +2295,7 @@ pub struct Request {
 	pub(crate) fetch: kio::Shared<track::FetchState>,
 	pub(crate) sequence: u64,
 	pub(crate) priority: u8,
+	pub(crate) max_delay: Option<std::time::Duration>,
 	pub(crate) frame_start: u64,
 	pub(crate) result: kio::Producer<track::FetchOutcome>,
 	pub(crate) done: bool,

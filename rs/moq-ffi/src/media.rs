@@ -628,6 +628,13 @@ pub struct MoqMediaCatalogProducer {
 	broadcast: Weak<MoqBroadcastProducer>,
 }
 
+impl MoqMediaCatalogProducer {
+	#[cfg(all(any(feature = "audio", feature = "video"), not(target_arch = "wasm32")))]
+	pub(crate) fn broadcast(&self) -> Result<Arc<MoqBroadcastProducer>, MoqError> {
+		self.broadcast.upgrade().ok_or(MoqError::Closed)
+	}
+}
+
 #[uniffi::export]
 impl MoqMediaCatalogProducer {
 	/// Construct a weak catalog handle for this broadcast.
