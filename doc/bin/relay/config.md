@@ -181,7 +181,9 @@ or forwarded. `[acme]` cannot be combined with `listen.tls.cert`, `key`, or
 With no usable certificate in `dir` (missing, expired, missing a domain, or
 from another directory), startup answers only the challenge until one is
 issued; QUIC, the other routes, and readiness wait for it, and startup fails
-with the ACME error once `timeout` runs out. Renewal runs in the background
+with the ACME error once `timeout` runs out. It also fails after 3 failed
+validations within an hour, counting earlier starts recorded in `dir`, so a
+restart loop stops short of Let's Encrypt's limit of 5 per hostname per hour. Renewal runs in the background
 well before expiry and reaches every listener on its next handshake. A failed
 renewal keeps the current certificate serving and retries.
 

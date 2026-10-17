@@ -48,6 +48,8 @@ struct Server {
 	orders: Mutex<Vec<Order>>,
 	/// Successful TLS-ALPN-01 validations.
 	validated: AtomicUsize,
+	/// Failed TLS-ALPN-01 validations.
+	failed: AtomicUsize,
 	/// Certificates handed out, in order.
 	issued: tokio::sync::watch::Sender<Vec<CertificateDer<'static>>>,
 	/// Orders refused once this many certificates were issued.
@@ -59,7 +61,8 @@ struct Server {
 
 struct Order {
 	domains: Vec<String>,
-	valid: Vec<bool>,
+	/// Each authorization: `None` pending, then whether validation succeeded.
+	valid: Vec<Option<bool>>,
 	cert: Option<String>,
 }
 
@@ -90,6 +93,7 @@ impl Directory {
 			target: Mutex::new(None),
 			orders: Mutex::new(Vec::new()),
 			validated: AtomicUsize::new(0),
+			failed: AtomicUsize::new(0),
 			issued: tokio::sync::watch::channel(Vec::new()).0,
 			refuse_after: AtomicUsize::new(usize::MAX),
 			refused: tokio::sync::watch::channel(0).0,
@@ -133,10 +137,11 @@ impl Directory {
 impl Server {
 	fn order_json(&self, n: usize, order: &Order) -> Value {
 		let base = &self.base;
-		let status = match (&order.cert, order.valid.iter().all(|valid| *valid)) {
-			(Some(_), _) => "valid",
-			(None, true) => "ready",
-			(None, false) => "pending",
+		let status = match &order.cert {
+			Some(_) => "valid",
+			None if order.valid.contains(&Some(false)) => "invalid",
+			None if order.valid.iter().all(|valid| *valid == Some(true)) => "ready",
+			None => "pending",
 		};
 		let mut json = json!({
 			"status": status,
@@ -159,7 +164,9 @@ impl Server {
 			.with_custom_certificate_verifier(Arc::new(Validator))
 			.with_no_client_auth();
 		tls.alpn_protocols = vec![rustls_acme::acme::ACME_TLS_ALPN_NAME.to_vec()];
-		let stream = tokio::net::TcpStream::connect(target).await.unwrap();
+		let Ok(stream) = tokio::net::TcpStream::connect(target).await else {
+			return false;
+		};
 		let name = ServerName::try_from(domain.to_string()).unwrap();
 		let Ok(stream) = tokio_rustls::TlsConnector::from(Arc::new(tls))
 			.connect(name, stream)
@@ -271,7 +278,7 @@ async fn new_order(State(state): State<Arc<Server>>, body: String) -> Response {
 		.collect();
 	let mut orders = state.orders.lock().unwrap();
 	let order = Order {
-		valid: vec![false; domains.len()],
+		valid: vec![None; domains.len()],
 		domains,
 		cert: None,
 	};
@@ -290,7 +297,11 @@ async fn authz(State(state): State<Arc<Server>>, Route((n, i)): Route<(usize, us
 	let orders = state.orders.lock().unwrap();
 	let order = &orders[n];
 	axum::Json(json!({
-		"status": if order.valid[i] { "valid" } else { "pending" },
+		"status": match order.valid[i] {
+			None => "pending",
+			Some(true) => "valid",
+			Some(false) => "invalid",
+		},
 		"identifier": { "type": "dns", "value": order.domains[i] },
 		"challenges": [{
 			"type": "tls-alpn-01",
@@ -302,16 +313,18 @@ async fn authz(State(state): State<Arc<Server>>, Route((n, i)): Route<(usize, us
 
 async fn challenge(State(state): State<Arc<Server>>, Route((n, i)): Route<(usize, usize)>) -> axum::Json<Value> {
 	let domain = state.orders.lock().unwrap()[n].domains[i].clone();
+	// Like a real directory, one failed attempt invalidates the authorization.
 	let valid = state.validate(&domain).await;
-	if valid {
-		state.validated.fetch_add(1, Ordering::Relaxed);
-		state.orders.lock().unwrap()[n].valid[i] = true;
-	}
+	match valid {
+		true => state.validated.fetch_add(1, Ordering::Relaxed),
+		false => state.failed.fetch_add(1, Ordering::Relaxed),
+	};
+	state.orders.lock().unwrap()[n].valid[i] = Some(valid);
 	axum::Json(json!({
 		"type": "tls-alpn-01",
 		"url": format!("{}/challenge/{n}/{i}", state.base),
 		"token": format!("token-{n}-{i}"),
-		"status": if valid { "valid" } else { "pending" },
+		"status": if valid { "valid" } else { "invalid" },
 	}))
 }
 
@@ -532,6 +545,48 @@ async fn unreachable_directory_fails_inside_the_budget() {
 	assert!(
 		ready.wait().await.is_err(),
 		"a relay without a certificate never reports ready"
+	);
+}
+
+/// Repeated failed validations stop the first issuance short of Let's Encrypt's
+/// failed-validation limit, and a restart inside the hour does not try again.
+#[tokio::test]
+async fn failed_validations_stop_short_of_the_rate_limit() {
+	let directory = Directory::start(false).await;
+	// Nothing listens here, so every validation fails like an unforwarded port 443.
+	let closed = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+	*directory.state.target.lock().unwrap() = Some(closed.local_addr().unwrap());
+	drop(closed);
+	let dir = tempfile::tempdir().unwrap();
+	let start = || async {
+		let mut config = relay_config(&directory.url, dir.path(), &[DOMAIN]);
+		config.acme.timeout = Some(TIMEOUT);
+		let relay = Relay::load(config).await.unwrap().with_signals(false);
+		let err = tokio::time::timeout(TIMEOUT, relay.run())
+			.await
+			.expect("failed validations must end startup before the budget")
+			.expect_err("no certificate means no relay");
+		format!("{err:#}")
+	};
+
+	let message = start().await;
+	assert_eq!(directory.state.failed.load(Ordering::Relaxed), FAILURE_LIMIT);
+	assert!(
+		message.contains("5 failed validations per hostname per hour"),
+		"{message}"
+	);
+	assert!(message.contains(DOMAIN), "{message}");
+
+	let orders = directory.state.orders.lock().unwrap().len();
+	let message = start().await;
+	assert_eq!(
+		directory.state.orders.lock().unwrap().len(),
+		orders,
+		"a restart within the hour must not order again"
+	);
+	assert!(
+		message.contains("5 failed validations per hostname per hour"),
+		"{message}"
 	);
 }
 
