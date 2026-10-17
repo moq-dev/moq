@@ -289,31 +289,32 @@ impl Origin {
 			Err(err) => return Err(err.into()),
 		};
 		let mut delivered = false;
+		let mut unseen = false;
+		// The origin closing ends the wait, cleanly once a handle was delivered.
+		let closed = |delivered: bool| match delivered {
+			true => Ok(()),
+			false => Err(Error::BroadcastNotFound),
+		};
 
 		// Deliver each publisher instance serving the path: the first, then each one that takes
 		// over or returns. `biased` so a pending close always wins.
 		loop {
 			// Apply every change on hand before resolving, so a burst of them delivers only the
 			// instance serving the path now.
-			let mut unseen = false;
-			loop {
-				let event = match follow.poll_next(&kio::Waiter::noop()) {
-					std::task::Poll::Ready(event) => event,
-					std::task::Poll::Pending if unseen => break,
-					std::task::Poll::Pending => tokio::select! {
-						biased;
-						_ = &mut close => return Ok(()),
-						event = follow.next() => event,
-					},
+			if settle(&mut follow, &mut unseen).is_none() {
+				return closed(delivered);
+			}
+			if !unseen {
+				let event = tokio::select! {
+					biased;
+					_ = &mut close => return Ok(()),
+					event = follow.next() => event,
 				};
-				match event {
-					None if delivered => return Ok(()),
-					None => return Err(Error::BroadcastNotFound),
-					Some(moq_net::announce::Event::Start(_) | moq_net::announce::Event::Restart(_)) => unseen = true,
-					Some(moq_net::announce::Event::End(_)) => unseen = false,
-					// The same instance over another route, which its subscriptions ride out.
-					Some(moq_net::announce::Event::Update(_)) => {}
-				}
+				let Some(event) = event else {
+					return closed(delivered);
+				};
+				apply(&mut unseen, event);
+				continue;
 			}
 
 			// `routed_broadcast` rides out the churn between something covering the path
@@ -324,13 +325,19 @@ impl Origin {
 				_ = &mut close => return Ok(()),
 				resolved = consumer.routed_broadcast(path.as_str()) => match resolved {
 					Ok(broadcast) => broadcast,
-					Err(moq_net::Error::Closed) if delivered => return Ok(()),
-					Err(moq_net::Error::Unauthorized | moq_net::Error::Closed) => {
-						return Err(Error::BroadcastNotFound);
-					}
+					Err(moq_net::Error::Closed) => return closed(delivered),
+					Err(moq_net::Error::Unauthorized) => return Err(Error::BroadcastNotFound),
 					Err(err) => return Err(err.into()),
 				},
 			};
+
+			// A change that landed while resolving may name the instance just resolved, or one
+			// after it. Resolve again rather than deliver a stale one, or the same one twice.
+			match settle(&mut follow, &mut unseen) {
+				None => return closed(delivered),
+				Some(true) => continue,
+				Some(false) => unseen = false,
+			}
 
 			// Hold the lock only to buffer the broadcast; release it before the callback.
 			let broadcast_id = State::lock().consume.start(broadcast, Some(consumer.clone()))?;
@@ -530,6 +537,27 @@ impl Origin {
 		self.active.remove(origin).ok_or(Error::OriginNotFound)?;
 		Ok(())
 	}
+}
+
+/// Apply every change on hand to `unseen`, returning whether the instance serving the path
+/// moved, or `None` once the origin closed.
+fn settle(follow: &mut moq_net::announce::Follow, unseen: &mut bool) -> Option<bool> {
+	let mut moved = false;
+	while let std::task::Poll::Ready(event) = follow.poll_next(&kio::Waiter::noop()) {
+		moved |= apply(unseen, event?);
+	}
+	Some(moved)
+}
+
+/// Apply one change to `unseen`, returning whether the instance serving the path moved.
+fn apply(unseen: &mut bool, event: moq_net::announce::Event) -> bool {
+	match event {
+		moq_net::announce::Event::Start(_) | moq_net::announce::Event::Restart(_) => *unseen = true,
+		moq_net::announce::Event::End(_) => *unseen = false,
+		// The same instance over another route, which its subscriptions ride out.
+		moq_net::announce::Event::Update(_) => return false,
+	}
+	true
 }
 
 #[cfg(test)]

@@ -214,31 +214,33 @@ struct AnnouncedBroadcast {
 
 impl AnnouncedBroadcast {
 	async fn available(&mut self) -> Result<Arc<MoqBroadcastConsumer>, MoqError> {
-		let broadcast = self
-			.driver
+		let driver = self.driver.clone();
+		let broadcast = driver
 			.watch(async {
-				// Apply every change on hand before resolving, so a burst of them hands out
-				// only the instance serving the path now.
 				loop {
-					let event = match self.follow.poll_next(&kio::Waiter::noop()) {
-						std::task::Poll::Ready(event) => event,
-						std::task::Poll::Pending if self.unseen => break,
-						std::task::Poll::Pending => self.follow.next().await,
-					};
-					match event.ok_or(MoqError::Closed)? {
-						moq_net::announce::Event::Start(_) | moq_net::announce::Event::Restart(_) => self.unseen = true,
-						moq_net::announce::Event::End(_) => self.unseen = false,
-						// The same instance over another route, which its subscriptions ride out.
-						moq_net::announce::Event::Update(_) => {}
+					// Apply every change on hand before resolving, so a burst of them hands out
+					// only the instance serving the path now.
+					self.settle()?;
+					if !self.unseen {
+						let event = self.follow.next().await;
+						self.apply(event)?;
+						continue;
+					}
+
+					// `routed_broadcast` rides out the churn between something covering the path
+					// and the path actually resolving (failover, an advertise-only announce
+					// racing its handler). The instance stays unseen until it resolves: a foreign
+					// cancel only drops this future, and the caller may call again.
+					let broadcast = self.origin.routed_broadcast(&self.path).await?;
+
+					// A change that landed while resolving may name the instance just resolved,
+					// or one after it. Resolve again rather than hand out a stale one, or the
+					// same one twice.
+					if !self.settle()? {
+						self.unseen = false;
+						return Ok(broadcast);
 					}
 				}
-				// `routed_broadcast` rides out the churn between something covering the path
-				// and the path actually resolving (failover, an advertise-only announce
-				// racing its handler). The instance stays unseen until it resolves: a foreign
-				// cancel only drops this future, and the caller may call again.
-				let broadcast = self.origin.routed_broadcast(&self.path).await?;
-				self.unseen = false;
-				Ok(broadcast)
 			})
 			.await?;
 		Ok(Arc::new(MoqBroadcastConsumer::routed(
@@ -246,6 +248,26 @@ impl AnnouncedBroadcast {
 			self.origin.clone(),
 			self.driver.clone(),
 		)))
+	}
+
+	/// Apply every change on hand, returning whether the instance serving the path moved.
+	fn settle(&mut self) -> Result<bool, MoqError> {
+		let mut moved = false;
+		while let std::task::Poll::Ready(event) = self.follow.poll_next(&kio::Waiter::noop()) {
+			moved |= self.apply(event)?;
+		}
+		Ok(moved)
+	}
+
+	/// Apply one change, returning whether the instance serving the path moved.
+	fn apply(&mut self, event: Option<moq_net::announce::Event>) -> Result<bool, MoqError> {
+		match event.ok_or(MoqError::Closed)? {
+			moq_net::announce::Event::Start(_) | moq_net::announce::Event::Restart(_) => self.unseen = true,
+			moq_net::announce::Event::End(_) => self.unseen = false,
+			// The same instance over another route, which its subscriptions ride out.
+			moq_net::announce::Event::Update(_) => return Ok(false),
+		}
+		Ok(true)
 	}
 }
 

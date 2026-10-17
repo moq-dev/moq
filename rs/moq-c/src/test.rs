@@ -3159,6 +3159,46 @@ fn consume_announced_follows_a_restart() {
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
+/// Another instance taking over while the wait resolves is the one it delivers, so the restart
+/// that announced it must not deliver it again.
+#[test]
+fn consume_announced_delivers_a_takeover_once() {
+	let origin = id(moq_origin_create());
+	let dynamic = {
+		let _runtime = crate::ffi::RUNTIME.enter();
+		let origin = crate::Id::try_from(origin).unwrap();
+		let route = moq_net::origin::Route::default();
+		State::lock().origin.get(origin).unwrap().dynamic("", route).unwrap()
+	};
+	let cb = Callback::new();
+	let path = b"live";
+	let task = id(unsafe {
+		moq_origin_announced_broadcast(
+			origin,
+			path.as_ptr() as *const c_char,
+			path.len(),
+			Some(channel_callback),
+			cb.ptr,
+		)
+	});
+
+	// The dynamic route covers the path, so the wait is on its answer when the exact path, a
+	// more specific route without an epoch, takes over.
+	let _unanswered = crate::ffi::RUNTIME.block_on(dynamic.requested_broadcast()).unwrap();
+	let takeover = publish_run(origin, "live");
+	let delivered = id(cb.recv());
+	assert!(
+		cb.rx.recv_timeout(Duration::from_millis(50)).is_err(),
+		"the takeover was delivered twice"
+	);
+
+	assert_eq!(moq_consume_close(delivered), 0);
+	assert_eq!(moq_origin_announced_broadcast_cancel(task), 0);
+	assert_eq!(cb.recv_terminal(), 0, "cancel delivers terminal 0");
+	drop((takeover, dynamic));
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
 #[test]
 fn video_publish_consume() {
 	let origin = id(moq_origin_create());

@@ -4412,6 +4412,36 @@ async fn announced_broadcast_retries_a_dropped_wait() {
 	served.close().unwrap();
 }
 
+/// Another instance taking over while `available()` resolves is the one it hands out, so the
+/// restart that announced it must not hand it out again.
+#[tokio::test]
+async fn announced_broadcast_hands_out_a_takeover_once() {
+	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
+	let dynamic = serve(&origin, "");
+	let followed = origin.consume().announced_broadcast("live".into()).unwrap();
+
+	let waiting = followed.clone();
+	let first = tokio::spawn(async move { waiting.available().await });
+	// The dynamic route covers the path, so the wait is on its answer when the exact path,
+	// a more specific route without an epoch, takes over.
+	let _unanswered = tokio::time::timeout(TIMEOUT, dynamic.requested_broadcast())
+		.await
+		.expect("the wait never asked for the broadcast")
+		.unwrap();
+	let takeover = create_announced(&origin, "live");
+	tokio::time::timeout(TIMEOUT, first)
+		.await
+		.expect("the takeover never resolved")
+		.unwrap()
+		.unwrap();
+
+	let next = tokio::spawn(async move { followed.available().await });
+	tokio::time::sleep(Duration::from_millis(50)).await;
+	assert!(!next.is_finished(), "the takeover was handed out twice");
+	next.abort();
+	takeover.close().unwrap();
+}
+
 #[tokio::test]
 async fn server_client_roundtrip_auto_origin() {
 	// Same shape as `server_client_roundtrip` but the client config omits
