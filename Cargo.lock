@@ -4751,6 +4751,7 @@ dependencies = [
  "hex-literal",
  "lru-slab",
  "moq-clock",
+ "proptest",
  "qlog",
  "rand 0.10.3",
  "rand_pcg",

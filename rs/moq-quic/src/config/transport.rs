@@ -326,9 +326,12 @@ impl TransportConfig {
     /// While datagrams are sent ASAP, it is possible for an application to generate data faster
     /// than the link, or even the underlying hardware, can transmit them. This limits the amount of
     /// memory that may be consumed in that case. When the send buffer is full and a new datagram is
-    /// sent, older datagrams are dropped until sufficient space is available.
+    /// sent, the domain holding the most datagram bytes drops the oldest datagram of its
+    /// lowest-priority send group until the new one fits; see
+    /// [`Datagrams::send`](crate::Datagrams::send).
     ///
-    /// The amount of payload data buffered may be smaller than `value` due to overhead.
+    /// Counts each datagram's frame bytes, so the payload buffered is a little smaller than
+    /// `value`.
     pub fn datagram_send_buffer_size(&mut self, value: usize) -> &mut Self {
         self.datagram_send_buffer_size = value;
         self

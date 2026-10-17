@@ -63,8 +63,13 @@ impl<S: super::Grouped<SendStream: 'static, RecvStream: 'static>> poll::Session 
 	fn send_group(&mut self, priority: i64) -> Option<<S::SendStream as super::GroupedSend>::Group> {
 		self.session.send_group(priority)
 	}
-	fn poll_send_datagram(&mut self, cx: &mut Context<'_>, payload: &[u8]) -> Poll<Result<(), Self::Error>> {
-		backend::Session::poll_send_datagram(self, cx, payload).map_err(Error)
+	fn send_datagram(
+		&mut self,
+		payload: Bytes,
+		group: Option<&<S::SendStream as super::GroupedSend>::Group>,
+		order: i64,
+	) -> Result<(), Self::Error> {
+		super::Grouped::send_datagram(&self.session, payload, group, order).map_err(Error)
 	}
 	fn poll_recv_datagram(&mut self, cx: &mut Context<'_>) -> Poll<Result<Bytes, Self::Error>> {
 		backend::Session::poll_recv_datagram(self, cx).map_err(Error)

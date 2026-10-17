@@ -59,6 +59,22 @@ pub trait Grouped: backend::Session<SendStream: GroupedSend> {
 		let _ = priority;
 		None
 	}
+
+	/// Send a datagram in `group` at `order`; a backend without groups ignores both and
+	/// drops the datagram when it has no room.
+	fn send_datagram(
+		&mut self,
+		payload: Bytes,
+		group: Option<&<Self::SendStream as GroupedSend>::Group>,
+		order: i64,
+	) -> Result<(), Self::Error> {
+		let _ = (group, order);
+		let mut cx = Context::from_waker(std::task::Waker::noop());
+		match backend::Session::poll_send_datagram(self, &mut cx, &payload) {
+			Poll::Ready(res) => res,
+			Poll::Pending => Ok(()),
+		}
+	}
 }
 
 /// A backend send stream that may join its [`Grouped`] session's send groups.
@@ -113,8 +129,13 @@ impl<S: Grouped<SendStream: 'static, RecvStream: 'static> + Clone + 'static> pol
 	fn send_group(&mut self, priority: i64) -> Option<<S::SendStream as GroupedSend>::Group> {
 		Grouped::send_group(&mut self.0, priority)
 	}
-	fn poll_send_datagram(&mut self, cx: &mut Context<'_>, payload: &[u8]) -> Poll<Result<(), Self::Error>> {
-		backend::Session::poll_send_datagram(&mut self.0, cx, payload).map_err(Error)
+	fn send_datagram(
+		&mut self,
+		payload: Bytes,
+		group: Option<&<S::SendStream as GroupedSend>::Group>,
+		order: i64,
+	) -> Result<(), Self::Error> {
+		Grouped::send_datagram(&mut self.0, payload, group, order).map_err(Error)
 	}
 	fn poll_recv_datagram(&mut self, cx: &mut Context<'_>) -> Poll<Result<Bytes, Self::Error>> {
 		backend::Session::poll_recv_datagram(&mut self.0, cx).map_err(Error)
