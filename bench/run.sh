@@ -17,6 +17,34 @@ if [[ ! $ROUNDS =~ ^[0-9]+$ ]] || ((10#$ROUNDS < 1)); then
     exit 1
 fi
 ROUNDS=$((10#$ROUNDS))
+
+# One case measures far apart on performance and efficiency cores, so on a
+# hybrid CPU pin this shell, and with it every build and benchmark process, to
+# the performance cores it may already use. The kernel only lists them on Intel
+# hybrid parts.
+PINNED=
+if [[ -r /sys/devices/cpu_core/cpus ]]; then
+    PINNED=$(
+        python3 - "$$" <<'EOF'
+import os, sys
+pid = int(sys.argv[1])
+cores = set()
+for part in open("/sys/devices/cpu_core/cpus").read().strip().split(","):
+    first, _, last = part.partition("-")
+    cores.update(range(int(first), int(last or first) + 1))
+allowed = cores & os.sched_getaffinity(pid)
+if not allowed:
+    sys.exit("cannot pin to the performance cores: none are in the allowed CPU set")
+os.sched_setaffinity(pid, allowed)
+print(",".join(map(str, sorted(allowed))))
+EOF
+    )
+fi
+
+# nproc counts the allowed CPUs, unless OpenMP variables override it.
+usable_cpus() {
+    env -u OMP_NUM_THREADS -u OMP_THREAD_LIMIT nproc
+}
 case $MODE in
     --audio)
         BASE=
@@ -43,7 +71,7 @@ case $MODE in
         BASE=
         RUNTIME_WORKERS=${MOQ_BENCH_RUNTIME_WORKERS:-}
         if [[ -z $RUNTIME_WORKERS ]]; then
-            RUNTIME_WORKERS=$(getconf _NPROCESSORS_ONLN)
+            RUNTIME_WORKERS=$(usable_cpus)
             if ((RUNTIME_WORKERS > 256)); then
                 RUNTIME_WORKERS=256
             fi
@@ -115,6 +143,9 @@ cleanup() {
         exec 3>&- 4>&-
     fi
     printf 'Benchmark evidence retained: %s\n' "$RUN"
+    if [[ -n $PINNED ]]; then
+        printf 'Pinned to performance cores: %s\n' "$PINNED"
+    fi
 }
 trap cleanup EXIT
 trap 'exit 130' INT
@@ -522,7 +553,7 @@ run_shard_sweep() {
     HOST_BIN=$CURRENT_TARGET/release/moq-bench-host
 
     local cpus workload connections shards label
-    cpus=$(getconf _NPROCESSORS_ONLN)
+    cpus=$(usable_cpus)
     for workload in video fanout; do
         for connections in $SHARD_CONNECTIONS; do
             for shards in $SHARD_COUNTS; do

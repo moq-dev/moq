@@ -5,6 +5,19 @@ These are the UniFFI names; each language wrapper has its own `MIGRATE.md` in it
 
 ## Unreleased
 
+### Media subscribe and fetch take a catalog rendition (#5834)
+
+`MoqMediaTrackConfig` and `MoqMediaGroupConfig` replace `name` and `container` with a `rendition` (`MoqRendition::Video` or `Audio`: the catalog `id` and its config) and follow its `broadcast` and `track` themselves, so drop the `resolve` call and the `track`-or-ID fallback.
+The audio and video decode consumers' `name` argument is `id`.
+
+```rust
+// Before
+let track = video.track.clone().unwrap_or(id.clone());
+let config = MoqMediaTrackConfig { name: track, container: video.container, subscription: None };
+// After
+let config = MoqMediaTrackConfig { rendition: MoqRendition::Video { id, config: video }, subscription: None };
+```
+
 ### Native codecs have audio and video namespaces (#5694)
 
 `MoqBroadcastProducer::encode_audio` / `encode_video` are the `MoqAudioProducer::new` / `MoqVideoProducer::new` constructors, which take the broadcast's `MoqMediaCatalogProducer`.

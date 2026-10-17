@@ -87,4 +87,3 @@ runs `just test interop --all`.
 ## Required
 
 - [Stream importer name](/quest/m1/ffi-shape/stream-producer-name.md) - the maintainer settles `media.ContainerStreamProducer`'s name before the binding release
-- [Layers guide](/quest/m1/ffi-shape/layers-guide.md) - a `doc/lib` page maps each Rust layer to every binding's module, once Codecs adds `audio` and `video`

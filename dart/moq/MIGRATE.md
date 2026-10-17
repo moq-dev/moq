@@ -4,6 +4,17 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Media subscribe and fetch take a catalog rendition (#5834)
+
+`media.TrackConfig` and `media.GroupConfig` replace `name` and `container` with a `rendition` (`media.VideoRendition` or `media.AudioRendition`) and follow its broadcast and track themselves.
+
+```dart
+// Before
+final config = media.TrackConfig(name: id, container: video.container);
+// After
+final config = media.TrackConfig(rendition: media.VideoRendition(id: id, config: video));
+```
+
 ### Background panics are reported (#5562)
 
 A panic in a background task throws `TaskMoqException` with the panic message as `reason`, and other objects keep running.

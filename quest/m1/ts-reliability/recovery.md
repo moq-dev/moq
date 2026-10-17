@@ -30,6 +30,14 @@ around PAT/PMT or catalog acquisition, codec configuration and recovery
 points, audio/video skew, PCR/PTS wrap and declared clock discontinuity.
 Choose fixtures from declared supported profiles, not an unbounded matrix.
 
+The raw passthrough lane already has the packet/position and release-schedule
+oracle (`rs/moq-mux/src/container/ts/oracle.rs`, `test/ts/passthrough.py`)
+with skipped-group, cut-group and late-object regressions in `release_test.rs`;
+extend it rather than build a second harness. Assert there that each omission
+shows in the release's counters: `dropped` counts late objects, and the
+skipped and cut groups need the `gaps` count
+[#5849](https://github.com/moq-dev/moq/pull/5849) adds to `Release::stats`.
+
 Use mocked time for the Rust scheduling regressions. Integration captures
 record exactly which content was delivered, omitted or late, so the oracle
 does not explain every output gap as acceptable loss. Decode surviving

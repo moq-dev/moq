@@ -106,6 +106,7 @@ humantime = { workspace = true }
 moq-archive = { workspace = true }
 moq-audio = { workspace = true, optional = true, features = ["aac"] }
 moq-auth = { workspace = true, features = ["serve"] }
+moq-clock = { workspace = true }
 # `server` enables the HTTP egress server for `moq export hls`; the importer is always available.
 moq-hls = { workspace = true, features = ["server"] }
 # Names the MSF catalog track `export archive` records.

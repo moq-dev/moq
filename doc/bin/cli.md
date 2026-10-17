@@ -144,6 +144,7 @@ error names the `--delay` it needs.
 moq --connect https://relay.example.com/anon --broadcast my-stream.hang play
 moq ... play --delay 500ms          # fix the delay instead of measuring it
 moq ... play --no-video             # audio only, without a window
+moq ... play --no-video --metrics play.ndjson   # log what the speaker played
 ```
 
 Decodes H.264, H.265, and AV1 video with the platform hardware decoder where
@@ -156,7 +157,11 @@ default, `auto`, sizes the buffer to how unevenly audio arrives, with the same
 [algorithm](/concept/audio-jitter) as the browser player. A duration fixes the
 delay and is also how long a stalled group is waited on before it is skipped.
 Each role follows the catalog, switching rendition when the publisher retires
-the one playing.
+the one playing. With `--no-video`, `--metrics <PATH>` writes a JSON line every
+250 ms with the playhead, the delay, and every gap and stall the speaker hit, in
+the schema the
+[audio quality harness](https://github.com/moq-dev/moq/tree/main/test/audio-quality)
+reduces to underruns, skips, and silence.
 
 The broadcast's announcement is its online signal, followed until the window
 closes. Playback starts when the name is announced. A
@@ -311,9 +316,10 @@ program, or `--passthrough`) accept it. The RTMP, SRT, and WHIP ingests and
 `import ts --program all` refuse it because they mint their own, and `import
 avc3`, `capture`, `rtc --connect`, `archive`, and `transcode` because their
 timestamps or bytes come from the instance rather than the input. Each that
-accepts it announces once its input has declared its tracks (for `ts`, the
-first PMT), so a standby started ahead of its feed is never asked for tracks it
-cannot serve yet; empty input exits 1 without announcing.
+accepts it announces once its catalog names a servable track, so a standby
+started ahead of its feed is never asked for tracks it cannot serve yet. Input
+that ends before then, such as an empty input or a PMT or header that
+configures no track, exits 1 without announcing.
 
 ## Cluster
 

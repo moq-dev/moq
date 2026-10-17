@@ -99,7 +99,7 @@ fn traffic(registry: &stats::Registry, role: stats::Role) -> stats::Traffic {
 /// The hop the dialer attributed `path` to, once that announce has arrived.
 async fn learned_hop(dialer: &origin::Producer, path: &str) -> Hop {
 	let mut announced = dialer.consume().announced();
-	let event = moq_net_sim::timeout(SETTLE, async {
+	let event = moq_clock::timeout(SETTLE, async {
 		loop {
 			let event = announced.next().await.expect("announce cursor closed");
 			let announce = match event {
@@ -126,7 +126,7 @@ async fn learned_hop(dialer: &origin::Producer, path: &str) -> Hop {
 /// announced a namespace is not told about it, and the other edge is. A
 /// subscribe from that other edge is fetched from the announcer and is not
 /// sent back to the subscriber.
-#[moq_net_sim::test]
+#[moq_clock::test]
 async fn dialed_anonymous_session_does_not_echo_or_route_subscribe_back() {
 	let dialer = produce(1);
 	let publisher = produce(2);
@@ -148,7 +148,7 @@ async fn dialed_anonymous_session_does_not_echo_or_route_subscribe_back() {
 	// The other edge learns the namespace, attributed to a different hop, so the
 	// two dials are not one endpoint.
 	let mut subscriber_announced = subscriber.consume().announced();
-	let subscriber_saw = moq_net_sim::timeout(SETTLE, subscriber_announced.next())
+	let subscriber_saw = moq_clock::timeout(SETTLE, subscriber_announced.next())
 		.await
 		.expect("the other edge never learned the namespace")
 		.expect("announce cursor closed");
@@ -163,7 +163,7 @@ async fn dialed_anonymous_session_does_not_echo_or_route_subscribe_back() {
 	assert_ne!(subscriber_hop, publisher_hop, "each dial gets its own hop");
 	assert_ne!(subscriber_hop, Hop::UNKNOWN);
 
-	moq_net_sim::sleep(SETTLE).await;
+	moq_clock::sleep(SETTLE).await;
 
 	let echoed = traffic(&to_publisher.registry, stats::Role::Subscriber);
 	assert_eq!(
@@ -191,12 +191,12 @@ async fn dialed_anonymous_session_does_not_echo_or_route_subscribe_back() {
 		.subscribe(subscription)
 		.await
 		.expect("subscriber subscribes");
-	moq_net_sim::timeout(SETTLE, track.demand().used())
+	moq_clock::timeout(SETTLE, track.demand().used())
 		.await
 		.expect("the subscribe never reached the announcer")
 		.unwrap();
 
-	moq_net_sim::sleep(SETTLE).await;
+	moq_clock::sleep(SETTLE).await;
 
 	let from_announcer = traffic(&to_publisher.registry, stats::Role::Publisher);
 	assert_eq!(

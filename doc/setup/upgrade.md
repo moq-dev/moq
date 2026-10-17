@@ -7,9 +7,9 @@ description: The order to roll out a release across relays, auth servers, and cl
 
 Every hand-written published package keeps a `MIGRATE.md` with a before/after
 snippet for each breaking change, newest first. The links below track `main`;
-for a release, open the file at its tag (such as `moq-relay-v0.17.6`) and apply
-the sections from the version you run up to that one. `Unreleased` applies only
-when you build from `main`. Most binding users install a wrapper,
+for a published version, read the file on the `release` branch and apply the
+sections from the version you run up to the one you install. `Unreleased`
+applies only when you build from `main`. Most binding users install a wrapper,
 such as `moq-rs` on PyPI or `dev.moq:moq` on Maven, whose guide is in the index
 below. The raw UniFFI packages published as `moq-ffi` have no guide of their
 own: [moq-ffi's](https://github.com/moq-dev/moq/blob/main/rs/moq-ffi/MIGRATE.md)
@@ -87,6 +87,6 @@ in any order, apart from these:
   `--cluster-mesh` is upgraded, keep client grants off `.internal/`: an older
   relay still dials any URL announced there with `cluster.token`, and an
   upgraded peer still forwards it.
-- **Stats counters** are `*_started` / `*_ended` (`sessions_started`,
-  `announces_ended`, ...). Relays still write the old `announced` /
-  `*_closed` names beside them, so move consumers now.
+- **Stats counters were renamed.** Relays still write the legacy names beside
+  the new ones, so move consumers to the new names now; [Stats](/concept/stats#traffic)
+  lists both.

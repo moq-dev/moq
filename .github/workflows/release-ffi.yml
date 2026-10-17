@@ -19,10 +19,6 @@ on:
         description: "Generate and upload the bindings for `language`"
         type: boolean
         default: true
-      default-features:
-        description: "Build moq-ffi with its default features (audio and video)"
-        type: boolean
-        default: true
       reuse-native:
         description: "Consume the coordinator's native libraries and bindings"
         type: boolean
@@ -109,15 +105,10 @@ jobs:
         env:
           BUILD_TARGET: ${{ matrix.target }}
           BUILD_VERSION: ${{ needs.parse-version.outputs.version }}
-          DEFAULT_FEATURES: ${{ inputs.default-features }}
           # Set iOS deployment target to avoid ___chkstk_darwin linker errors.
           IPHONEOS_DEPLOYMENT_TARGET: ${{ contains(matrix.target, 'apple-ios') && '16.0' || '' }}
         run: |
-          args=(--target "$BUILD_TARGET" --version "$BUILD_VERSION" --output dist)
-          if [[ "$DEFAULT_FEATURES" == false ]]; then
-            args+=(--no-default-features)
-          fi
-          just rs package-ffi "${args[@]}"
+          just rs package-ffi --target "$BUILD_TARGET" --version "$BUILD_VERSION" --output dist
 
       - name: Upload lib
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -175,14 +166,10 @@ jobs:
         env:
           BUILD_VERSION: ${{ needs.parse-version.outputs.version }}
           REUSE_LIBRARY: ${{ contains(fromJSON(inputs.targets), 'x86_64-unknown-linux-gnu') }}
-          DEFAULT_FEATURES: ${{ inputs.default-features }}
         run: |
           args=(--bindings-only --version "$BUILD_VERSION" --output dist)
           if [[ "$REUSE_LIBRARY" == true ]]; then
             args+=(--library binding-library/libmoq_ffi.so)
-          fi
-          if [[ "$DEFAULT_FEATURES" == false ]]; then
-            args+=(--no-default-features)
           fi
           just rs package-ffi "${args[@]}"
 

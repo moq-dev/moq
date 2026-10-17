@@ -4,6 +4,17 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Media subscribe and fetch take a catalog rendition (#5834)
+
+`TrackConfig` and `GroupConfig` in `dev.moq.media` replace `name` and `container` with a `rendition` (`VideoRendition` or `AudioRendition`) and follow its broadcast and track themselves.
+
+```kotlin
+// Before
+val config = TrackConfig(name = id, container = video.container)
+// After
+val config = TrackConfig(rendition = VideoRendition(id, video))
+```
+
 ### Native codecs have `audio` and `video` packages (#5694)
 
 `BroadcastProducer.encodeAudio` / `encodeVideo` are the `dev.moq.audio.Producer` / `dev.moq.video.Producer` constructors, which take a `CatalogProducer`.

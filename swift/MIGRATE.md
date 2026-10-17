@@ -4,6 +4,20 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Media subscribe and fetch take a catalog rendition (#5834)
+
+`Media.TrackConfig` and `Media.GroupConfig` replace `name` and `container` with a `Media.Rendition` and follow its broadcast and track themselves.
+`Audio.Consumer.subscribe` and `Video.Consumer.subscribe` label the catalog key `id:` instead of `name:`.
+
+```swift
+// Before
+let config = Media.TrackConfig(name: id, container: video.container)
+let decoder = try await Video.Consumer.subscribe(broadcast: consumer, name: id, rendition: video)
+// After
+let config = Media.TrackConfig(rendition: .video(id: id, config: video))
+let decoder = try await Video.Consumer.subscribe(broadcast: consumer, id: id, rendition: video)
+```
+
 ### Native codecs have `Audio` and `Video` namespaces (#5694)
 
 `BroadcastProducer.encodeAudio` / `encodeVideo` are `Audio.Producer` / `Video.Producer` initializers that take a `Media.CatalogProducer`.

@@ -4,10 +4,21 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Media subscribe and fetch take a catalog rendition (#5834)
+
+`media.TrackConfig` and `media.GroupConfig` replace `Name` and `Container` with a `Rendition`, built by `media.VideoRendition` or `media.AudioRendition`, and follow its broadcast and track themselves.
+
+```go
+// Before
+config := media.TrackConfig{Name: id, Container: video.Container}
+// After
+config := media.TrackConfig{Rendition: media.VideoRendition(id, video)}
+```
+
 ### Native codecs have `audio` and `video` packages (#5694)
 
 `BroadcastProducer.EncodeAudio` / `EncodeVideo` are `audio.NewProducer` / `video.NewProducer` (`moq.dev/moq/audio`, `moq.dev/moq/video`), built from a `media.CatalogProducer`.
-The audio track name moves into `EncoderOutput.Track`, and durations and timestamps are `time.Duration` (`FrameDuration`, `Frame.Timestamp`); a zero `FrameDuration` takes the codec's own frame.
+The audio track name moves into `EncoderOutput.Track`, and durations and timestamps are `time.Duration` (`FrameDuration`, `audio.Frame.Timestamp`, `video.Frame.Timestamp`); a zero `FrameDuration` takes the codec's own frame.
 `BroadcastConsumer.DecodeAudio` / `DecodeVideo` are `audio.Subscribe` / `video.Subscribe`, taking the broadcast after the context.
 Producers expose subscriber state only through `Demand()`, and a video GOP is `video.Keyframe(interval)`.
 `audio.NewEncoder` / `video.NewEncoder` encode without publishing.

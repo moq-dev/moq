@@ -349,8 +349,8 @@ impl MockRecvStream {
 			if self.landing != Some(arrival) {
 				self.landing = Some(arrival);
 				let waker = cx.waker().clone();
-				drop(moq_net_sim::spawn(async move {
-					moq_net_sim::sleep_until(arrival).await;
+				drop(moq_clock::sim::spawn(async move {
+					moq_clock::sleep_until(arrival).await;
 					waker.wake();
 				}));
 			}
@@ -374,8 +374,8 @@ impl MockRecvStream {
 			poll::RecvStream::stop(&mut inner, code);
 			return;
 		}
-		drop(moq_net_sim::spawn(async move {
-			moq_net_sim::sleep(latency).await;
+		drop(moq_clock::sim::spawn(async move {
+			moq_clock::sleep(latency).await;
 			poll::RecvStream::stop(&mut inner, code);
 		}));
 	}
@@ -600,11 +600,16 @@ impl poll::Session for MockSession {
 		None
 	}
 
-	fn poll_send_datagram(&mut self, cx: &mut Context<'_>, payload: &[u8]) -> Poll<Result<(), Self::Error>> {
+	fn send_datagram(
+		&mut self,
+		payload: Bytes,
+		group: Option<&poll::Ungrouped>,
+		order: i64,
+	) -> Result<(), Self::Error> {
 		if self.side.lossy.load(Ordering::Relaxed) {
-			return Poll::Ready(Ok(()));
+			return Ok(());
 		}
-		self.inner.poll_send_datagram(cx, payload)
+		self.inner.send_datagram(payload, group, order)
 	}
 
 	fn poll_recv_datagram(&mut self, cx: &mut Context<'_>) -> Poll<Result<Bytes, Self::Error>> {

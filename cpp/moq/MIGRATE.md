@@ -4,6 +4,17 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Media subscribe and fetch take a catalog rendition (#5834)
+
+`moq::MediaTrackConfig` and `moq::MediaGroupConfig` replace `name` and `container` with a `moq::Rendition` and follow its broadcast and track themselves.
+
+```cpp
+// Before
+auto media = ok(moq::MediaTrackConsumer::subscribe(broadcast, {video.track.value_or(id), video.container}).get());
+// After
+auto media = ok(moq::MediaTrackConsumer::subscribe(broadcast, {moq::Rendition::kVideo{id, video}}).get());
+```
+
 ### Native codecs have audio and video types (#5694)
 
 `BroadcastProducer::encode_audio` / `encode_video` are `moq::AudioProducer::init` / `moq::VideoProducer::init`, which take a `moq::MediaCatalogProducer`.

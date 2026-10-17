@@ -70,7 +70,3 @@ Decided 2026-10-16 (see the [epic](/quest/m1/refresh/README.md)).
 Public API: breaking (`Demand` in Rust, JS, moq-ffi, and every binding;
 `track::Info::refresh` and `MoqTrackInfo::refresh` added). Wire: none in this quest. IETF fields are
 interpreted as described above.
-
-## Required
-
-- [Relay requests for dynamic groups](/quest/m1/ietf-extension/dynamic-groups.md) - the crate-private request path this promotes

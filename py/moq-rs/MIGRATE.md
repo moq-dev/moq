@@ -4,6 +4,19 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Media subscribe and fetch take a catalog rendition (#5834)
+
+`media.TrackConsumer.subscribe` and `media.GroupConsumer.fetch` take the catalog ID and its `Video` or `Audio` config instead of a track name and container, and follow the rendition's broadcast and track; `fetch` takes them before `sequence`.
+The decode consumers' `name` argument is `id`.
+
+```python
+# Before
+track = audio.track if audio.track is not None else id
+frames = await moq.media.TrackConsumer.subscribe(broadcast, track, audio.container)
+# After
+frames = await moq.media.TrackConsumer.subscribe(broadcast, id, audio)
+```
+
 ### Native codecs have `audio` and `video` modules (#5694)
 
 `BroadcastProducer.encode_audio` / `encode_video` are `moq.audio.Producer` / `moq.video.Producer`, built from a `moq.media.CatalogProducer`.
