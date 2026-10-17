@@ -13,7 +13,7 @@ type (
 	// AudioCodec selects the audio encoder codec. Build one with OpusAudioCodec or AacAudioCodec;
 	// adding a codec later adds a constructor, not a breaking enum change.
 	AudioCodec = ffi.MoqAudioCodec
-	// AudioDecoderOutput configures the PCM format, sample rate, and channels DecodeAudio delivers.
+	// AudioDecoderOutput configures the PCM format, sample rate, and channels an audio.Consumer delivers.
 	AudioDecoderOutput = ffi.MoqAudioDecoderOutput
 	// AudioEncoderInput declares the PCM sample format, sample rate, and channel count of frames written to an audio producer.
 	AudioEncoderInput = ffi.MoqAudioEncoderInput
@@ -52,7 +52,7 @@ type (
 	// AnnounceEventRestart reports another publisher instance now serving a prefix:
 	// drop what was resolved under it and request afresh.
 	AnnounceEventRestart = ffi.MoqAnnounceEventRestart
-	// VideoDecoderOutput configures what DecodeVideo delivers: an optional resize, a max delay, and whether frames keep the decoder's surface (macOS only; refused elsewhere).
+	// VideoDecoderOutput configures what a video.Consumer delivers: an optional resize, a max delay, and whether frames keep the decoder's surface (macOS only; refused elsewhere).
 	VideoDecoderOutput = ffi.MoqVideoDecoderOutput
 	// VideoSurface is a decoded frame's platform surface, from VideoDecodedFrame.Surface: VideoSurfacePixelBuffer on macOS and iOS.
 	VideoSurface = ffi.MoqVideoSurface
@@ -60,7 +60,7 @@ type (
 	VideoSurfacePixelBuffer = ffi.MoqVideoSurfacePixelBuffer
 	// VideoCodec identifies a published video track's codec: H.264 or H.265.
 	VideoCodec = ffi.MoqVideoCodec
-	// VideoPixelFormat is a CPU pixel layout (I420 or RGBA): written to a VideoProducer, or read from a VideoDecodedFrame.
+	// VideoPixelFormat is a CPU pixel layout (I420 or RGBA): written to video.Producer, or read from a VideoDecodedFrame.
 	VideoPixelFormat = ffi.MoqVideoPixelFormat
 	// VideoEncoderInput declares the pixel layout, resolution, and framerate of frames written to a video producer.
 	VideoEncoderInput = ffi.MoqVideoEncoderInput
@@ -81,13 +81,13 @@ type (
 	VideoEncoderKindNamed = ffi.MoqVideoEncoderKindNamed
 )
 
-// OpusAudioCodec selects Opus (RFC 6716) for EncodeAudio.
+// OpusAudioCodec selects Opus (RFC 6716) for an audio encoder.
 func OpusAudioCodec() *AudioCodec {
 	return ffi.MoqAudioCodecOpus()
 }
 
-// AacAudioCodec selects AAC-LC through the platform's encoder for EncodeAudio.
-// A host without one refuses it. Leave FrameDurationUs at 0 for AAC's own frame.
+// AacAudioCodec selects AAC-LC through the platform's encoder for an audio encoder.
+// A host without one refuses it. Leave FrameDuration at 0 for AAC's own frame.
 func AacAudioCodec() *AudioCodec {
 	return ffi.MoqAudioCodecAac()
 }

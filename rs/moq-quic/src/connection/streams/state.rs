@@ -66,8 +66,7 @@ impl StreamRecv {
     }
 }
 
-#[allow(unreachable_pub)] // fuzzing only
-pub struct StreamsState {
+pub(crate) struct StreamsState {
     pub(super) side: Side,
     // Set of streams that are currently open, or could be immediately opened by the peer
     pub(super) send: FxHashMap<StreamId, Option<Box<Send>>>,
@@ -150,6 +149,8 @@ pub struct StreamsState {
     receive_window_shrink_debt: u64,
     /// Whether the locally-initiated stream limit has been hit, per direction
     pub(super) streams_blocked: [bool; 2],
+    /// Whether an open was refused since the stream limit last rose, per direction
+    pub(super) open_refused: [bool; 2],
     /// Value of `max_data` for which a `DATA_BLOCKED` frame was most recently queued
     ///
     /// A new frame is only queued once the peer has raised the limit.
@@ -157,8 +158,7 @@ pub struct StreamsState {
 }
 
 impl StreamsState {
-    #[allow(unreachable_pub)] // fuzzing only
-    pub fn new(
+    pub(crate) fn new(
         side: Side,
         max_remote_uni: VarInt,
         max_remote_bi: VarInt,
@@ -203,6 +203,7 @@ impl StreamsState {
             generation: 0,
             receive_window_shrink_debt: 0,
             streams_blocked: [false, false],
+            open_refused: [false, false],
             data_blocked_limit: None,
         }
     }
@@ -212,8 +213,18 @@ impl StreamsState {
         self.initial_max_stream_data_bidi_local = params.initial_max_stream_data_bidi_local;
         self.initial_max_stream_data_bidi_remote = params.initial_max_stream_data_bidi_remote;
         self.peer_reset_stream_at = params.reset_stream_at;
-        self.max[Dir::Bi as usize] = params.initial_max_streams_bidi.into();
-        self.max[Dir::Uni as usize] = params.initial_max_streams_uni.into();
+        for (dir, count) in [
+            (Dir::Bi, params.initial_max_streams_bidi),
+            (Dir::Uni, params.initial_max_streams_uni),
+        ] {
+            let count = count.into();
+            // A 0.5-RTT server holds the connection before a ClientHello that spans several
+            // packets has arrived, so an open can be refused before the limit is known.
+            if count > self.max[dir as usize] && mem::take(&mut self.open_refused[dir as usize]) {
+                self.events.push_back(StreamEvent::Available { dir });
+            }
+            self.max[dir as usize] = count;
+        }
         self.received_max_data(params.initial_max_data);
         for (&id, slot) in self.send.iter_mut() {
             if id.initiator() != self.side
@@ -317,8 +328,7 @@ impl StreamsState {
     /// Process incoming RESET_STREAM frame
     ///
     /// If successful, returns whether a `MAX_DATA` frame needs to be transmitted
-    #[allow(unreachable_pub)] // fuzzing only
-    pub fn received_reset(
+    pub(crate) fn received_reset(
         &mut self,
         frame: frame::ResetStream,
     ) -> Result<ShouldTransmit, TransportError> {
@@ -384,8 +394,11 @@ impl StreamsState {
     ///
     /// Returns the Reliable Size of 0 for a reset to send now, since the peer will not read the
     /// data a reset still delivers.
-    #[allow(unreachable_pub)] // fuzzing only
-    pub fn received_stop_sending(&mut self, id: StreamId, error_code: VarInt) -> Option<u64> {
+    pub(crate) fn received_stop_sending(
+        &mut self,
+        id: StreamId,
+        error_code: VarInt,
+    ) -> Option<u64> {
         self.insert_remote(id);
 
         let max_send_data = self.max_send_data(id);
@@ -802,6 +815,7 @@ impl StreamsState {
         if count > *current {
             *current = count;
             self.streams_blocked[dir as usize] = false;
+            self.open_refused[dir as usize] = false;
             self.events.push_back(StreamEvent::Available { dir });
         }
 
