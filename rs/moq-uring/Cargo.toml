@@ -58,7 +58,7 @@ io-uring = { workspace = true }
 libc = { workspace = true }
 moq-tokio = { path = "../moq-tokio", default-features = false, features = ["quic", "aws-lc-rs"] }
 nix = { workspace = true }
-rcgen = { version = "0.14", default-features = false, features = ["pem", "aws_lc_rs"] }
+rcgen = { workspace = true, features = ["pem", "aws_lc_rs"] }
 rustls = "0.23"
 # The qlog test parses every record of a trace, which is what catches a
 # truncated or interleaved write.

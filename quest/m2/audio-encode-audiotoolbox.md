@@ -32,9 +32,6 @@ the encode seam as the platform candidate on macOS and iOS.
   so a zero epoch stamps `[0, 0, 0, 20_000]`, and `decode::Consumer` reads the
   duplicates as holes and resets AAC between them. Shift the whole timeline by
   the deficit instead, including the terminal end (found in #4081 review).
-- Until [FFI codec namespaces](/quest/m1/ffi-shape/codec.md) fixes the
-  frame duration default, binding callers pass `frame_duration_us: 0` with
-  `aac()`.
 
 ## Required
 
