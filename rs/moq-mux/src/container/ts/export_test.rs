@@ -1738,6 +1738,24 @@ async fn export_times_a_dvb_eac3_substream_by_its_access_unit_across_pes() {
 	}
 }
 
+/// A PES without a sync frame holds nothing a decoder can use, so it goes nowhere rather
+/// than out whole.
+#[tokio::test(start_paused = true)]
+async fn export_drops_a_dvb_eac3_pes_with_no_sync_frame() {
+	let frame = eac3_frame(false);
+	let pes = exported_dolby_pes(
+		vec![
+			Ac3Write::Pes(0, frame.clone()),
+			Ac3Write::Pes(32, vec![0xee; 300]),
+			Ac3Write::Pes(64, frame.clone()),
+		],
+		0x7a,
+	)
+	.await;
+	assert_eq!(pes.len(), 2, "{pes:?}");
+	assert!(pes.iter().all(|(_, payload)| *payload == frame));
+}
+
 /// A dependent substream ahead of the first independent one belongs to an access unit that
 /// began before the join, so it goes nowhere.
 #[tokio::test(start_paused = true)]

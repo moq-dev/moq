@@ -439,17 +439,6 @@ impl Track {
 			read,
 		} = pending;
 		let frames = dolby_units(codec, &mut self.dolby_carry, skip, frame.timestamp, &frame.payload)?;
-		let Some(frames) = frames else {
-			let pending = Pending {
-				frame,
-				restart,
-				skip,
-				cut,
-				arrived,
-				read,
-			};
-			return self.push(name, pending, None, None, jitter);
-		};
 		for (timestamp, payload) in frames {
 			let frame = Frame {
 				timestamp,
@@ -3417,7 +3406,7 @@ struct DolbyUnit {
 }
 
 /// The Dolby access units a PES's `payload` completes or holds, each with its presentation
-/// time, or `None` if no sync frame can begin in it. An AC-3 access unit is one sync frame; an
+/// time; none when no sync frame can begin in it. An AC-3 access unit is one sync frame; an
 /// E-AC-3 one is independent substream 0 with every substream after it (ETSI TS 102 366
 /// E.1.3.1.2), which share its presentation interval.
 ///
@@ -3439,8 +3428,9 @@ fn dolby_units(
 	skip: u64,
 	start: Timestamp,
 	payload: &Bytes,
-) -> anyhow::Result<Option<Vec<(Timestamp, Bytes)>>> {
+) -> anyhow::Result<Vec<(Timestamp, Bytes)>> {
 	let duration = |samples: u64, rate: u32| Timestamp::from_micros(samples * 1_000_000 / u64::from(rate.max(1)));
+	let joined = carry.as_ref().is_none_or(|head| head.skip != skip);
 	let mut units = Vec::new();
 	let mut open = None;
 	let mut offset = None;
@@ -3470,7 +3460,7 @@ fn dolby_units(
 				// Even the header runs on past this PES.
 				head.bytes.extend_from_slice(payload);
 				*carry = Some(head);
-				return Ok(Some(units));
+				return Ok(units);
 			}
 			match codec.parse(&probe) {
 				Ok(header) => {
@@ -3479,7 +3469,7 @@ fn dolby_units(
 						// The frame runs on past this PES as well.
 						head.bytes.extend_from_slice(payload);
 						*carry = Some(head);
-						return Ok(Some(units));
+						return Ok(units);
 					};
 					let at = match (codec.begins_unit(&probe), head.unit) {
 						(false, Some(unit)) => unit.at,
@@ -3511,7 +3501,12 @@ fn dolby_units(
 		None if payload.is_empty() => 0,
 		None => {
 			let Some(first) = dolby_sync(codec, payload) else {
-				return Ok(None);
+				// No decoder can use a PES without a sync frame either, so it goes nowhere.
+				match joined {
+					true => tracing::debug!(bytes = payload.len(), "dropped a PES begun before the join"),
+					false => tracing::warn!(bytes = payload.len(), "dropped a PES with no Dolby sync frame"),
+				}
+				return Ok(units);
 			};
 			if first > 0 {
 				tracing::debug!(
@@ -3556,7 +3551,7 @@ fn dolby_units(
 		unit: open.filter(|_| codec == Dolby::Eac3),
 		bytes: left,
 	});
-	Ok(Some(units))
+	Ok(units)
 }
 
 /// File the whole sync frame `frame` in `units`: as a new access unit presented at `next`, or
@@ -3957,7 +3952,6 @@ mod tests {
 			Timestamp::from_micros(0).unwrap(),
 			&payload,
 		)
-		.unwrap()
 		.unwrap();
 		assert_eq!(units.len(), 30);
 		for (k, (at, _)) in units.iter().enumerate() {
@@ -3975,7 +3969,6 @@ mod tests {
 		let unit = [core, eac3(0x40, 0x3f)].concat();
 		let payload = bytes::Bytes::from(unit.repeat(2));
 		let units = super::dolby_units(Dolby::Eac3, &mut None, 0, Timestamp::from_micros(0).unwrap(), &payload)
-			.unwrap()
 			.unwrap();
 		let at: Vec<_> = units
 			.iter()
