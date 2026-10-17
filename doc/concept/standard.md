@@ -42,7 +42,7 @@ ignores unknown parameters: [cluster](/draft/moq-cluster) routing hop lists,
 [hidden](/draft/moq-hidden) to keep `.`-named namespaces out of discovery,
 [auth](/draft/moq-auth) to tell each peer what it may publish and subscribe to,
 [active-count](/draft/moq-active-count) to count the `NAMESPACE` messages
-before a `SUBSCRIBE_NAMESPACE` is caught up, and
+before a `SUBSCRIBE_NAMESPACE` is synced, and
 [probe](/draft/moq-probe) for bandwidth estimation. Rust sessions request PROBE
 only while an owned `recv_bandwidth()` consumer is held. Read estimates through
 its `peek()` or `changed()` methods; session statistics do not request PROBE.

@@ -445,6 +445,11 @@ pub struct Session {
 }
 
 impl Session {
+	/// The wire counters the connection updates as it sends and receives.
+	pub(crate) fn wire(&self) -> moq_net::transport::Wire {
+		self.conn.wire()
+	}
+
 	/// Open a send group at `priority`, for streams to join with
 	/// [`SendStream::set_group`]. The HTTP/3 streams stay outside every
 	/// group, so they go first.

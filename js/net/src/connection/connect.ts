@@ -313,6 +313,7 @@ async function negotiate(url: URL, session: WebTransport, wiring: SessionProps):
 	params.setBytes(Ietf.SetupOption.Implementation, encoder.encode("moq-lite-js"));
 	Extensions.intoSetup(params, wiring.extensions, setupVersion);
 	Ietf.hiddenIntoSetup(params);
+	Ietf.activeCountIntoSetup(params, setupVersion);
 
 	const client = new Ietf.ClientSetup({
 		versions:
@@ -352,6 +353,7 @@ async function negotiate(url: URL, session: WebTransport, wiring: SessionProps):
 			version: server.version as Ietf.IetfVersion,
 			solicit: Ietf.solicitFromSetup(server.parameters),
 			hidden: Ietf.hiddenFromSetup(server.parameters),
+			activeCount: Ietf.activeCountFromSetup(server.parameters, server.version as Ietf.IetfVersion),
 		});
 	} else {
 		throw new Error(`unsupported server version: ${server.version.toString()}`);
@@ -368,7 +370,7 @@ async function handshakeAlpn(
 	version: Ietf.IetfVersion,
 	wiring: SessionProps,
 ): Promise<Established> {
-	const { control, early, solicit, hidden, cluster, auth } = await exchangeSetup(
+	const { control, early, solicit, hidden, activeCount, cluster, auth } = await exchangeSetup(
 		session,
 		version,
 		"moq-lite-js",
@@ -384,6 +386,7 @@ async function handshakeAlpn(
 		early,
 		solicit,
 		hidden,
+		activeCount,
 		cluster,
 		auth,
 		// v17+ uses NativeSession which manages its own request IDs; maxRequestId is unused.

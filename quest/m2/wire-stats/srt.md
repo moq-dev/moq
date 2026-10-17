@@ -15,9 +15,9 @@ the same definition as QUIC's `udp_tx`.
   count is SRT packet bytes. The stats arrive on the socket's
   `statistics()` watch.
 - `serve_subscribe` and the publish path own the socket today and expose
-  nothing. Hand the embedder a cumulative `(tx, rx)` source per connection,
-  in the shape [Presence wire counters](/quest/m2/wire-stats/presence.md)
-  registers.
+  nothing. Update a `moq_net::transport::Wire` per connection
+  from each statistics update and hand it to the embedder, which registers it
+  with `moq_net::stats::Handle::wire`.
 - Target the shared-socket integration that drives `srt-protocol` directly,
   not `srt-tokio` socket handling.
 - Test: an SRT pull's reported tx covers at least the TS payload it sent.

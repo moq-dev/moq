@@ -99,12 +99,21 @@ pub(crate) struct Catalog {
 	hint: VideoHint,
 	/// The last config published, so an unchanged re-resolve doesn't re-mirror the rendition.
 	last: Option<hang::catalog::VideoConfig>,
+	/// The last config resolved, before the overlays, so new HDR metadata can republish it.
+	resolved: Option<hang::catalog::VideoConfig>,
+	/// The static HDR metadata the bitstream carried in band, overlaid onto every config.
+	hdr: crate::codec::color::Hdr,
 }
 
 impl Catalog {
 	/// Hold `hint` for every publish.
 	pub(crate) fn new(hint: VideoHint) -> Self {
-		Self { hint, last: None }
+		Self {
+			hint,
+			last: None,
+			resolved: None,
+			hdr: Default::default(),
+		}
 	}
 
 	/// The config the hint alone resolves to, for importers that publish the catalog before parsing
@@ -123,6 +132,8 @@ impl Catalog {
 	/// publish. A changed config just re-mirrors the rendition; there are no fixed tracks to
 	/// reject a reconfiguration.
 	pub(crate) fn publish(&mut self, track: &mut Track, mut config: hang::catalog::VideoConfig) -> crate::Result<()> {
+		self.resolved = Some(config.clone());
+		self.hdr.apply(&mut config.color);
 		self.hint.apply(&mut config);
 		if self.last.as_ref() == Some(&config) {
 			return Ok(());
@@ -131,5 +142,32 @@ impl Catalog {
 		track.set(config.clone())?;
 		self.last = Some(config);
 		Ok(())
+	}
+
+	/// Overlay the HDR metadata a keyframe carried in band, republishing the last config if it changed.
+	///
+	/// `sequence` marks a keyframe that starts a new coded sequence (a new SPS or sequence header):
+	/// its metadata replaces the old rather than merging, so an HDR-to-SDR switch drops stale HDR10
+	/// values, and it is left for the new config's publish.
+	pub(crate) fn hdr(
+		&mut self,
+		track: &mut Track,
+		hdr: crate::codec::color::Hdr,
+		sequence: bool,
+	) -> crate::Result<()> {
+		if sequence {
+			self.hdr = hdr;
+			return Ok(());
+		}
+		let mut next = self.hdr;
+		next.update(hdr);
+		if next == self.hdr {
+			return Ok(());
+		}
+		self.hdr = next;
+		match self.resolved.clone() {
+			Some(config) => self.publish(track, config),
+			None => Ok(()),
+		}
 	}
 }

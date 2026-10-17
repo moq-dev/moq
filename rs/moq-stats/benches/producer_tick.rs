@@ -273,6 +273,7 @@ struct Presence {
 	_origin: origin::Producer,
 	_origin_driver: origin::Driver,
 	_sessions: Vec<stats::Session>,
+	_wire: Vec<stats::Wire>,
 	_held: Vec<moq_net::track::Subscriber>,
 }
 
@@ -281,9 +282,14 @@ impl Presence {
 		let registry = stats::Registry::new(stats::Config::new());
 		let (origin, origin_driver) = origin::Producer::new(origin::Config::default());
 		let names: Vec<String> = (0..roots).map(|index| format!("room/{index:05}")).collect();
-		let sessions = names
+		let sessions: Vec<_> = names
 			.iter()
 			.map(|root| registry.tier(stats::Tier::default()).session(root.as_str()))
+			.collect();
+		// One set of wire counters per connection, independently of held presence tracks.
+		let wire = sessions
+			.iter()
+			.map(|session| session.wire(moq_net::transport::Wire::new()))
 			.collect();
 		let mut driver = Driver::new(registry.clone(), origin.clone()).expect("stats broadcast");
 		driver.tick();
@@ -294,6 +300,7 @@ impl Presence {
 			_origin: origin,
 			_origin_driver: origin_driver,
 			_sessions: sessions,
+			_wire: wire,
 			_held: held,
 		}
 	}

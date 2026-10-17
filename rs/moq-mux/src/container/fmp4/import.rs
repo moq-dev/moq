@@ -462,23 +462,43 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			_ => return Err(Error::MultipleCodecs.into()),
 		};
 
-		let config = match codec {
-			mp4_atom::Codec::Avc1(avc1) => self.init_h264(false, &avc1.avcc, &avc1.visual, container)?,
-			mp4_atom::Codec::Avc3(avc3) => self.init_h264(true, &avc3.avcc, &avc3.visual, container)?,
-			mp4_atom::Codec::Hev1(hev1) => self.init_h265(true, &hev1.hvcc, &hev1.visual, container)?,
-			mp4_atom::Codec::Hvc1(hvc1) => self.init_h265(false, &hvc1.hvcc, &hvc1.visual, container)?,
+		let (mut config, colr) = match codec {
+			mp4_atom::Codec::Avc1(avc1) => (
+				self.init_h264(false, &avc1.avcc, &avc1.visual, container)?,
+				avc1.colr.as_ref(),
+			),
+			mp4_atom::Codec::Avc3(avc3) => (
+				self.init_h264(true, &avc3.avcc, &avc3.visual, container)?,
+				avc3.colr.as_ref(),
+			),
+			mp4_atom::Codec::Hev1(hev1) => (
+				self.init_h265(true, &hev1.hvcc, &hev1.visual, container)?,
+				hev1.colr.as_ref(),
+			),
+			mp4_atom::Codec::Hvc1(hvc1) => (
+				self.init_h265(false, &hvc1.hvcc, &hvc1.visual, container)?,
+				hvc1.colr.as_ref(),
+			),
 			mp4_atom::Codec::Vp08(vp08) => {
 				let mut config = VideoConfig::new(VideoCodec::VP8);
+				// vpcC carries VP8's colour too; its range is always explicit.
+				let vpcc = &vp08.vpcc;
+				config.color = crate::codec::color::cicp(
+					vpcc.color_primaries,
+					vpcc.transfer_characteristics,
+					vpcc.matrix_coefficients,
+					Some(vpcc.video_full_range_flag),
+				);
 				config.coded_width = Some(vp08.visual.width as _);
 				config.coded_height = Some(vp08.visual.height as _);
 				config.container = container;
-				config
+				(config, vp08.colr.as_ref())
 			}
 			mp4_atom::Codec::Vp09(vp09) => {
 				// https://github.com/gpac/mp4box.js/blob/325741b592d910297bf609bc7c400fc76101077b/src/box-codecs.js#L238
 				let vpcc = &vp09.vpcc;
 
-				let mut config = VideoConfig::new(VP9 {
+				let vp9 = VP9 {
 					profile: vpcc.profile,
 					level: vpcc.level,
 					bit_depth: vpcc.bit_depth,
@@ -487,22 +507,28 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 					transfer_characteristics: vpcc.transfer_characteristics,
 					matrix_coefficients: vpcc.matrix_coefficients,
 					full_range: vpcc.video_full_range_flag,
-				});
+				};
+				let mut config = VideoConfig::new(vp9.clone());
+				config.color = crate::codec::vp9::color(&vp9);
 				config.coded_width = Some(vp09.visual.width as _);
 				config.coded_height = Some(vp09.visual.height as _);
 				config.container = container;
-				config
+				(config, vp09.colr.as_ref())
 			}
 			mp4_atom::Codec::Av01(av01) => {
 				let mut config = VideoConfig::new(crate::codec::av1::av1_from_av1c(&av01.av1c));
+				config.color = crate::codec::av1::color(&av01.av1c.config_obus);
 				config.coded_width = Some(av01.visual.width as _);
 				config.coded_height = Some(av01.visual.height as _);
 				config.container = container;
-				config
+				(config, av01.colr.as_ref())
 			}
 			mp4_atom::Codec::Unknown(unknown, _) => return Err(Error::UnknownCodec(*unknown).into()),
 			unsupported => return Err(Error::UnsupportedCodec(Box::new(unsupported.clone())).into()),
 		};
+		// The codec config outranks the colr box a muxer added, which only fills its gaps.
+		let colr = colr.map(super::colr_color).transpose()?.flatten();
+		crate::codec::color::fill(&mut config.color, colr.as_ref(), "colr");
 
 		Ok(config)
 	}
@@ -531,6 +557,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		config.framerate = metadata.framerate;
 		config.display_aspect_width = metadata.display_aspect_width;
 		config.display_aspect_height = metadata.display_aspect_height;
+		config.color = metadata.color;
 		config.description = Some(description.freeze());
 		config.container = container;
 		Ok(config)

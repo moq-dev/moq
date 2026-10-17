@@ -114,6 +114,7 @@ the simultaneous announcements or subscriptions, or ask the relay operator
 to adjust the [session limits](/bin/relay/config#session-and-peer), before
 reconnecting with the same workload.
 A session closed because its credential expired reports `ProtocolKind.expired`, and a request refused for an expired token raises `MoqError.Expired`; refresh the token before retrying.
+A catalog that needs a newer moq-hang draft than this build reads raises `MoqError.UnsupportedCatalog`; upgrade the library to read it.
 
 ## Reference
 

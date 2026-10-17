@@ -307,6 +307,9 @@ export class Subscriber {
 			// It no longer stamps itself onto each hop chain, so we append it here to
 			// keep the reflected-announce loop check seeing the full chain.
 			let responderOrigin: Hop | undefined;
+			// The ANNOUNCEs still owed of the peer's initial set (lite-05+). Older versions
+			// mark no boundary, so they sync once the request is out, as a best effort.
+			let initial = 0;
 			if (hasAnnounceOk(this.version)) {
 				const ok = await race([AnnounceOk.decode(stream.reader, this.version), announced.closed]);
 				// A consumer that leaves before the peer answers ends the request now, not on the answer.
@@ -318,6 +321,7 @@ export class Subscriber {
 				// anonymous mark and must travel the reconstructed chain. Assigned identities
 				// stay off this hop and are never forwarded.
 				responderOrigin = ok.hop;
+				initial = ok.active;
 			}
 
 			switch (this.version) {
@@ -381,13 +385,27 @@ export class Subscriber {
 
 			// Receive announce updates (for Draft03+, this includes initial state)
 			for (;;) {
+				if (initial === 0) announced.synced();
+
 				const announce = await race([
 					decodeAnnounceBroadcastMaybe(stream.reader, this.version),
 					announced.closed,
 				]);
 				// undefined: the stream ended. null: the consumer closed cleanly.
+				if (announce === undefined && initial > 0) {
+					throw new ProtocolViolation("announce stream ended inside the initial set");
+				}
 				if (!announce) break;
 				if (announce instanceof Error) throw announce;
+
+				// The counted initial set is ANNOUNCEs only, so anything else cuts it short. An
+				// unknown message counts for nothing either way.
+				if (initial > 0 && announce.status !== "skipped") {
+					if (announce.status !== "active") {
+						throw new ProtocolViolation(`${announce.status} inside the initial set`);
+					}
+					initial -= 1;
+				}
 
 				let path: Path.Valid;
 				let active: boolean;

@@ -2,13 +2,50 @@ import * as z from "@zod/mini";
 import { compareName, compareNumber } from "./compare";
 import { ContainerSchema } from "./container";
 import { hexSchema } from "./hex";
-import { u53Schema } from "./integers";
+import { u8Schema, u53Schema } from "./integers";
 import { RelativeBroadcastSchema } from "./path";
 
 // Backwards compatibility: old track schema
 const TrackSchema = z.object({
 	name: z.string(),
 });
+
+// A CIE 1931 xy chromaticity coordinate.
+const ChromaticitySchema = z.object({ x: z.number(), y: z.number() });
+
+// A CTA-861.3 light level in candelas per square metre; zero means unknown.
+const lightSchema = z.number().check(z.int(), z.nonnegative(), z.lte(0xffff));
+
+/**
+ * Schema for the colour a rendition's pixels carry. The code points are ITU-T H.273's, which every
+ * codec and container shares; an absent field was left unspecified by the source.
+ */
+export const ColorSchema = z.object({
+	// H.273 ColourPrimaries: 1 is BT.709, 9 is BT.2020.
+	primaries: z.optional(u8Schema),
+	// H.273 TransferCharacteristics: 1 is BT.709, 16 is PQ, 18 is HLG.
+	transfer: z.optional(u8Schema),
+	// H.273 MatrixCoefficients: 0 is RGB, 1 is BT.709, 9 is BT.2020 non-constant luminance.
+	matrix: z.optional(u8Schema),
+	// The numeric range of the samples: studio swing, or every code used.
+	range: z.optional(z.enum(["limited", "full"])),
+	// The display the content was mastered on, as SMPTE ST 2086, luminance in cd/m².
+	mastering: z.optional(
+		z.object({
+			red: ChromaticitySchema,
+			green: ChromaticitySchema,
+			blue: ChromaticitySchema,
+			white: ChromaticitySchema,
+			maxLuminance: z.number(),
+			minLuminance: z.number(),
+		}),
+	),
+	// The content's light levels, as CTA-861.3.
+	contentLight: z.optional(z.object({ maxCll: lightSchema, maxFall: lightSchema })),
+});
+
+/** The colour a rendition's pixels carry: H.273 code points plus static HDR metadata. */
+export type Color = z.infer<typeof ColorSchema>;
 
 /** Schema for a single video rendition's decoder config. Mirrors WebCodecs VideoDecoderConfig. */
 export const VideoConfigSchema = z.object({
@@ -43,6 +80,9 @@ export const VideoConfigSchema = z.object({
 	// displayAspectWidth/displayAspectHeight. Absent means the decoded picture's own shape.
 	displayAspectWidth: z.optional(u53Schema),
 	displayAspectHeight: z.optional(u53Schema),
+
+	// The colour the decoded pixels carry, so a renderer need not guess or reparse the bitstream.
+	color: z.optional(ColorSchema),
 
 	// The maximum frame rate of the video in frames per second.
 	framerate: z.optional(z.number()),

@@ -142,6 +142,21 @@ class SmokeTest {
         }
     }
 
+    /** A settings UI reads its defaults and menus from the library rather than repeating them. */
+    @Test
+    fun `client defaults and versions come from the library`() {
+        val defaults = clientDefaults()
+        assertNotNull(defaults.quic.maxStreams)
+        assertNotNull(defaults.quic.idleTimeout)
+        assertNotNull(defaults.timeout)
+        assertNull(defaults.quic.congestionControl)
+        assertTrue(versions().isNotEmpty())
+        val congestion: CongestionControl = CongestionControl.DELAY
+        assertEquals(congestion, QuicConfig(congestionControl = congestion).congestionControl)
+        // Dialing with the reported defaults is the same as dialing with none.
+        Client(defaults).close()
+    }
+
     /**
      * The `dev.moq` typealiases resolve to the FFI objects, and the wrapper
      * extensions apply to them. Constructing through an alias is enough to

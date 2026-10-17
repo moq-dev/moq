@@ -204,12 +204,17 @@ bool MoQOutput::Start()
 	moq::ClientConfig config;
 	config.publish = next_origin;
 	OBSDataAutoRelease service_settings = obs_service_get_settings(service);
-	MoQSettings::Configure(service_settings, config);
-	auto client = moq::Client::init(config);
+	std::string invalid = MoQSettings::Configure(service_settings, config);
+	std::shared_ptr<moq::Client> client;
+	if (invalid.empty()) {
+		if (auto init = moq::Client::init(config))
+			client = *init;
+		else
+			invalid = init.error().to_string();
+	}
 	if (!client) {
 		// Refusing to start beats connecting with a setting the user asked for
 		// quietly dropped.
-		std::string invalid = client.error().to_string();
 		LOG_ERROR("Invalid advanced MoQ settings: %s", invalid.c_str());
 		std::lock_guard<std::recursive_mutex> signal_lock(signal_mutex);
 		obs_output_set_last_error(output, ("Invalid advanced MoQ settings: " + invalid).c_str());
@@ -218,7 +223,7 @@ bool MoQOutput::Start()
 	}
 
 	auto next = std::make_shared<Attempt>();
-	next->client = *client;
+	next->client = client;
 	next->url = server;
 
 	LOG_INFO("Connecting to MoQ server: %s", MoQRedactUrl(server).c_str());

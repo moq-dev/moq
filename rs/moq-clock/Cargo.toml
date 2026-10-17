@@ -14,7 +14,7 @@ keywords = ["moq", "time", "clock", "timer", "simulation"]
 categories = ["asynchronous", "date-and-time", "development-tools::testing"]
 
 [package.metadata.docs.rs]
-features = ["sim"]
+features = ["manual", "sim"]
 
 # The self dev-dependency below only enables a feature; no code names it.
 [package.metadata.cargo-shear]
@@ -26,6 +26,9 @@ default = ["runtime"]
 # dev-dependencies, so production builds never compile it.
 sim = ["dep:futures", "dep:moq-clock-macros"]
 runtime = ["dep:tokio", "dep:web-async"]
+# `Manual::install`: a clock that only a test moves, as one tokio runtime's ambient
+# clock. Native only. Meant for test builds, so production builds never compile it.
+manual = ["runtime"]
 
 [dependencies]
 futures = { workspace = true, optional = true }
@@ -52,4 +55,6 @@ wasm-bindgen = "=0.2.127"
 wasm-bindgen-test = "=0.3.77"
 
 [target.'cfg(any(not(target_arch = "wasm32"), target_os = "wasi"))'.dev-dependencies]
+# Test the installed manual clock, which needs tokio's runtime and so is native only.
+moq-clock = { path = ".", default-features = false, features = ["manual", "sim"] }
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "test-util", "time"] }
