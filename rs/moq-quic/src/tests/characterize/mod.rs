@@ -117,6 +117,19 @@ fn lost(conn: &mut Connection) -> Option<ConnectionError> {
     lost
 }
 
+/// Drains `conn`'s events, panicking unless it connected and was never lost
+fn assert_connected(conn: &mut Connection) {
+    let mut connected = false;
+    while let Some(event) = conn.poll() {
+        match event {
+            Event::Connected => connected = true,
+            Event::ConnectionLost { reason } => panic!("lost: {reason:?}"),
+            _ => {}
+        }
+    }
+    assert!(connected, "never connected");
+}
+
 /// The transport error code `conn` was lost with, panicking if it is still up or lost otherwise
 fn lost_code(conn: &mut Connection) -> TransportErrorCode {
     match lost(conn) {

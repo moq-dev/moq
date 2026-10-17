@@ -261,9 +261,7 @@ fn second_retry_is_discarded() {
     let _guard = subscribe();
     let (mut pair, client_ch, _) = retried(second);
     pair.drive();
-    let conn = pair.client_conn_mut(client_ch);
-    assert!(!conn.is_handshaking());
-    assert!(lost(conn).is_none());
+    assert_connected(pair.client_conn_mut(client_ch));
 }
 
 /// A discarded Retry still counts as an authenticated packet, so the client then discards the
@@ -275,7 +273,7 @@ fn retry_after_invalid_retry() {
     for mangle in [bad_tag as Mangle, same_cid] {
         let (mut pair, client_ch, _) = retried(mangle);
         pair.drive();
-        assert!(!pair.client_conn_mut(client_ch).is_handshaking());
+        assert_connected(pair.client_conn_mut(client_ch));
     }
 }
 
