@@ -50,5 +50,5 @@ C's audio decoder neither takes nor reports a playout delay.
 
 ## Upgrading
 
-Each package keeps a `MIGRATE.md` with a before/after snippet for every
-breaking change; [Upgrade](/setup/upgrade#migration-guides) links them all.
+Each package keeps a `MIGRATE.md` saying how to migrate past every breaking
+change; [Upgrade](/setup/upgrade#migration-guides) links them all.

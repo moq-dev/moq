@@ -42,8 +42,8 @@ Decided 2026-10-16 (maintainer interview):
   2026-09-23 train have no transition section yet (moq-json 0.4 -> 0.5,
   moq-flate 0.1 -> 0.2, and possibly moq-audio and moq-video), because their
   breaks predate the backfill's merge base.
-- Compile-check the after snippets of every `MIGRATE.md` section the cut
-  ships against the candidate. Nothing else builds them.
+- Compile-check the code in every `MIGRATE.md` section the cut ships against
+  the candidate. Nothing else builds it.
 - Required by the cut, after m1's breaking work has landed.
 
 ## Required
