@@ -3133,6 +3133,9 @@ where
 		version: Version,
 		unanswered: &AtomicU64,
 	) -> Result<u64, Error> {
+		// A refused update is followed by PUBLISH_DONE, which ends the subscription. Its
+		// count stays, so no further update goes out meanwhile, and no answer is owed.
+		let mut refused = false;
 		loop {
 			let type_id = match reader.varint_maybe().await? {
 				Some(type_id) => type_id,
@@ -3145,23 +3148,23 @@ where
 				return Ok(msg.stream_count);
 			}
 			let answer = matches!(type_id, ietf::RequestOk::ID | ietf::RequestError::ID)
-				&& unanswered
-					.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| count.checked_sub(1))
-					.is_ok();
+				&& !refused
+				&& unanswered.load(Ordering::Relaxed) > 0;
 			if !answer {
 				return Err(Error::UnexpectedMessage);
 			}
 			let body: ietf::Body = reader.decode().await?;
 			let mut data = body.decoder(version);
-			// A refused update is followed by PUBLISH_DONE, which ends the subscription.
 			match type_id {
 				ietf::RequestOk::ID => {
 					let msg = ietf::RequestOk::decode_msg(&mut data, version)?;
 					tracing::debug!(message = ?msg, "new group request ok");
+					unanswered.fetch_sub(1, Ordering::Relaxed);
 				}
 				_ => {
 					let msg = ietf::RequestError::decode_msg(&mut data, version)?;
 					tracing::debug!(message = ?msg, "new group request refused");
+					refused = true;
 				}
 			}
 		}
@@ -14442,6 +14445,32 @@ mod new_group_tests {
 		answer(&mut stream).await;
 		assert_eq!(update(&mut stream).await, Some(8));
 		answer(&mut stream).await;
+		quiet(&mut stream).await;
+		relay.serving.abort();
+	}
+
+	/// A refused update ends the subscription, so nothing more goes up while PUBLISH_DONE
+	/// is on its way, even for a request that coalesced behind it.
+	#[moq_net_sim::test]
+	async fn a_refused_update_sends_no_more() {
+		let (mut relay, _first) = relay(None).await;
+		let (mut stream, _) = relay.accept().await;
+		accept(&mut stream, true, 5).await;
+
+		let _a = subscribe(&relay.track, Some(6));
+		assert_eq!(update(&mut stream).await, Some(6));
+		let _b = subscribe(&relay.track, Some(8));
+		stream.writer.varint(ietf::RequestError::ID).await.unwrap();
+		stream
+			.writer
+			.encode(&ietf::RequestError {
+				request_id: None,
+				error_code: 0,
+				reason_phrase: "refused".into(),
+				retry_interval: 0,
+			})
+			.await
+			.unwrap();
 		quiet(&mut stream).await;
 		relay.serving.abort();
 	}
