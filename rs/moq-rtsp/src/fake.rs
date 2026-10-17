@@ -20,6 +20,8 @@ pub const H264_SPS: &[u8] = &[
 pub const H264_PPS: &[u8] = &[0x68, 0xcb, 0x83, 0xcb, 0x20];
 /// An IDR slice; its contents are never decoded.
 pub const H264_IDR: &[u8] = &[0x65, 0x88, 0x84, 0x21, 0xa0];
+/// A recovery-point SEI: the non-IDR I-picture after it is an open-GOP keyframe.
+pub const H264_RECOVERY: &[u8] = &[0x06, 0x06, 0x02, 0x00, 0x40, 0x80];
 /// A non-IDR slice.
 pub const H264_SLICE: &[u8] = &[0x41, 0x9a, 0x02, 0x04, 0x80];
 

@@ -14,7 +14,7 @@ use crate::{Error, Result};
 /// Annex-B video and raw AAC with its AudioSpecificConfig out of band.
 ///
 /// retina strips in-band parameter sets and would re-insert them only ahead of an IDR, missing
-/// an H.265 CRA, so [`Video::split`] inserts them ahead of every keyframe instead.
+/// an H.265 CRA and an H.264 recovery point, so the ingest hands them to the splitter instead.
 const FRAME_FORMAT: FrameFormat = FrameFormat {
 	h26x_framing: retina::codec::h26x::Framing::AnnexB,
 	parameter_set_insertion: ParameterSetInsertion::Never,
@@ -187,6 +187,7 @@ impl Client {
 				track,
 				last: None,
 				started: false,
+				fresh: true,
 			});
 		}
 		// The catalog waits for each video rendition's first keyframe, not for this.
@@ -279,7 +280,7 @@ enum Video {
 }
 
 impl Video {
-	/// Split one whole access unit into frames, inserting `params` ahead of a keyframe.
+	/// Split one whole access unit into frames, inserting `params` ahead of it.
 	///
 	/// Flushes, since retina hands over no partial access units.
 	fn split(
@@ -289,7 +290,7 @@ impl Video {
 		pts: moq_net::Timestamp,
 	) -> moq_mux::Result<Vec<moq_mux::container::Frame>> {
 		let mut prefix = Vec::new();
-		if let Some(params) = params.filter(|_| self.is_keyframe(data)) {
+		if let Some(params) = params {
 			let sets: &[&[u8]] = match params.codec_params() {
 				VideoParametersCodec::H264 { sps, pps } => &[sps, pps],
 				VideoParametersCodec::H265 { vps, sps, pps } => &[vps, sps, pps],
@@ -311,16 +312,6 @@ impl Video {
 		Ok(frames)
 	}
 
-	/// Whether the access unit holds an IDR (H.264) or any IRAP picture (H.265).
-	fn is_keyframe(&self, data: &[u8]) -> bool {
-		// retina's Annex-B has no start code inside a NAL, so each `00 00 01` opens one.
-		let mut headers = data.windows(4).filter(|w| w[..3] == [0, 0, 1]).map(|w| w[3]);
-		match self {
-			Self::H264 { .. } => headers.any(|header| header & 0x1f == 5),
-			Self::H265 { .. } => headers.any(|header| (16..=23).contains(&((header >> 1) & 0x3f))),
-		}
-	}
-
 	fn decode(&mut self, frames: Vec<moq_mux::container::Frame>) -> moq_mux::Result<()> {
 		match self {
 			Self::H264 { import, .. } => import.decode(frames),
@@ -335,6 +326,9 @@ struct Stream {
 	last: Option<i64>,
 	/// Whether a keyframe has been published (video) or the session started (audio).
 	started: bool,
+	/// Whether retina's parameter sets still need inserting: until the splitter emits a keyframe
+	/// carrying them, after which it re-inserts them ahead of every keyframe itself.
+	fresh: bool,
 }
 
 /// The session's tracks, indexed by retina stream id.
@@ -367,9 +361,14 @@ struct Jump;
 impl Ingest {
 	/// Publish one depacketized item, or report that the timeline jumped.
 	fn push(&mut self, item: CodecItem, streams: &[retina::client::Stream]) -> Result<Option<Jump>> {
-		let (stream_id, timestamp, data) = match &item {
-			CodecItem::VideoFrame(frame) => (frame.stream_id(), frame.timestamp(), frame.data()),
-			CodecItem::AudioFrame(frame) => (frame.stream_id(), frame.timestamp(), frame.data()),
+		let (stream_id, timestamp, data, changed) = match &item {
+			CodecItem::VideoFrame(frame) => (
+				frame.stream_id(),
+				frame.timestamp(),
+				frame.data(),
+				frame.has_new_parameters(),
+			),
+			CodecItem::AudioFrame(frame) => (frame.stream_id(), frame.timestamp(), frame.data(), false),
 			_ => return Ok(None),
 		};
 		let Some(stream) = self.streams.get_mut(stream_id).and_then(Option::as_mut) else {
@@ -400,20 +399,23 @@ impl Ingest {
 
 		match &mut stream.track {
 			Track::Video(video) => {
+				stream.fresh |= changed;
 				let params = match streams.get(stream_id).and_then(|stream| stream.parameters()) {
-					Some(ParametersRef::Video(params)) => Some(params),
+					Some(ParametersRef::Video(params)) if stream.fresh => Some(params),
 					_ => None,
 				};
+				let frames = video.split(data, params, pts)?;
+				let keyframe = frames.iter().any(|frame| frame.keyframe);
+				stream.fresh &= !keyframe;
 				if !stream.started {
-					// Publish nothing before the first keyframe: one that `split` puts the
-					// parameter sets on, after which the splitter carries them to the rest.
-					if !video.is_keyframe(data) {
+					// Publish nothing before the first keyframe, by the splitter's reckoning
+					// (an IDR, an H.264 recovery point, or any H.265 IRAP picture).
+					if !frames.first().is_some_and(|frame| frame.keyframe) {
 						return Ok(None);
 					}
 					stream.started = true;
 					self.started = true;
 				}
-				let frames = video.split(data, params, pts)?;
 				stream.last = Some(elapsed);
 				video.decode(frames)?;
 			}
@@ -595,6 +597,42 @@ mod tests {
 			audio[0].timestamp.as_micros(),
 			42_666,
 			"two AAC frames past the session start"
+		);
+	}
+
+	/// An H.264 recovery point starts the broadcast, though retina flags only an IDR as a
+	/// keyframe, and it carries the SDP's parameter sets.
+	#[tokio::test]
+	async fn h264_starts_on_a_recovery_point() {
+		let server = Server::bind(vec![Media::H264 { sprop: true }]).await;
+		let (broadcast, catalog) = broadcast();
+		let client = Client::new(server.url()).unwrap();
+		let pull = tokio::spawn({
+			let (broadcast, catalog) = (broadcast.clone(), catalog.clone());
+			async move { client.pull(&broadcast, &catalog).await }
+		});
+
+		let mut session = within("PLAY", server.accept(0)).await;
+		session.video(0, 0, &[fake::H264_SLICE]).await;
+		session.video(0, FRAME, &[fake::H264_RECOVERY, fake::H264_SLICE]).await;
+
+		let snapshot = catalog_with(&catalog, 1, 0).await;
+		let reader = subscribe(&broadcast, video_track(&snapshot)).await;
+		session.video(0, 2 * FRAME, &[fake::H264_SLICE]).await;
+		session.close().await;
+		assert_eq!(within("the pull", pull).await.unwrap().unwrap(), End::Closed);
+
+		let frames = frames(reader).await;
+		assert_eq!(frames.len(), 2, "the slice before the recovery point never publishes");
+		assert!(frames[0].keyframe && !frames[1].keyframe);
+		let sps = [&[0, 0, 0, 1], fake::H264_SPS].concat();
+		assert!(
+			frames[0].payload.windows(sps.len()).any(|window| window == sps),
+			"the recovery point carries the SDP's SPS"
+		);
+		assert!(
+			!frames[1].payload.windows(sps.len()).any(|window| window == sps),
+			"a delta frame carries no parameter sets"
 		);
 	}
 
