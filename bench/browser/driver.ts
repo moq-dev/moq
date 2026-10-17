@@ -433,9 +433,11 @@ async function transport(
 		};
 		record(row);
 		log(row);
+		// Page-side cleanup only after success: a page stuck in synchronous code would never
+		// answer it, while closing the context is handled by the browser process.
+		await publisher.page.evaluate(() => window.transport.stop());
+		await consumer.page.evaluate(() => window.transport.stop());
 	} finally {
-		await publisher.page.evaluate(() => window.transport.stop()).catch(() => {});
-		await consumer.page.evaluate(() => window.transport.stop()).catch(() => {});
 		await publisher.close();
 		await consumer.close();
 	}
@@ -605,9 +607,10 @@ async function media(variant: string, round: number, pass: Pass) {
 		};
 		record(row);
 		log(row);
+		// Page-side cleanup only after success; see transport.
+		await watcher.page.evaluate(() => window.media.stop());
+		await publisher.page.evaluate(() => window.media.stop());
 	} finally {
-		await watcher.page.evaluate(() => window.media.stop()).catch(() => {});
-		await publisher.page.evaluate(() => window.media.stop()).catch(() => {});
 		await watcher.close();
 		await publisher.close();
 	}
