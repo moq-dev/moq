@@ -41,6 +41,9 @@
 //! wall clock: each empty group is handed out like any other, so a walk over the rest of
 //! the run per group shows up as a slope over it.
 //!
+//! `track_fetch_expiry` polls budgeted fetched readers over independent fanout and
+//! retained-history axes, so expiry work that scans either table appears as a slope.
+//!
 //! Run with `cargo bench -p moq-net --bench track`.
 
 use std::hint::black_box;
@@ -92,6 +95,61 @@ const AGED_GROUPS: [usize; 3] = [1, 32, 1_024];
 
 /// The budget a parked read's wall deadline is armed for, past any setup on the real clock.
 const AGED_BUDGET: Duration = Duration::from_secs(3600);
+
+/// Fetched readers and retained groups sweep both sides of the expiry lookup.
+const FETCH_HISTORY: [usize; 3] = [1, 32, 512];
+
+struct FetchReaders {
+	_broadcast: broadcast::Producer,
+	_open: moq_net::group::Producer,
+	readers: Vec<moq_net::group::Consumer>,
+	waiters: Vec<kio::Waiter>,
+}
+
+impl FetchReaders {
+	fn new(readers: usize, history: usize) -> Self {
+		let broadcast = broadcast::Producer::new(broadcast::Info::default());
+		let track = broadcast.create_track("bench", timed()).unwrap();
+		let mut open = track.append_group().unwrap();
+		open.write_frame(Timestamp::ZERO, Bytes::from_static(b"f")).unwrap();
+		for sequence in 1..=history {
+			let mut group = track.append_group().unwrap();
+			group
+				.write_frame(
+					Timestamp::from_millis(sequence as u64).unwrap(),
+					Bytes::from_static(b"f"),
+				)
+				.unwrap();
+			group.finish().unwrap();
+		}
+
+		let consumer = track.consume();
+		let options = moq_net::group::Fetch::default().with_max_delay(AGED_BUDGET);
+		let waiter = kio::Waiter::noop();
+		let mut fetched = Vec::with_capacity(readers);
+		for _ in 0..readers {
+			let mut pending = consumer.fetch_group(0, options.clone());
+			let Poll::Ready(Ok(mut group)) = kio::Task::poll(&mut *pending, &waiter) else {
+				panic!("cached fetch must resolve");
+			};
+			assert!(matches!(group.poll_read_frame(&waiter), Poll::Ready(Ok(Some(_)))));
+			assert!(group.poll_read_frame(&waiter).is_pending());
+			fetched.push(group);
+		}
+		Self {
+			_broadcast: broadcast,
+			_open: open,
+			readers: fetched,
+			waiters: (0..readers).map(|_| kio::Waiter::noop()).collect(),
+		}
+	}
+
+	fn poll(&mut self) {
+		for (reader, waiter) in self.readers.iter_mut().zip(&self.waiters) {
+			assert!(reader.poll_read_frame(waiter).is_pending());
+		}
+	}
+}
 
 /// Keeps the ownership chain alive around the track and its subscribers.
 struct Fanout {
@@ -394,6 +452,24 @@ fn bench_fanout(c: &mut Criterion) {
 	group.finish();
 }
 
+fn bench_fetch_expiry(c: &mut Criterion) {
+	let mut group = c.benchmark_group("track_fetch_expiry");
+	for history in FETCH_HISTORY {
+		for readers in FANOUT {
+			group.throughput(Throughput::Elements(readers as u64));
+			group.bench_with_input(
+				BenchmarkId::new(format!("history_{history}"), readers),
+				&(readers, history),
+				|b, &(readers, history)| {
+					let mut fetched = FetchReaders::new(readers, history);
+					b.iter(|| fetched.poll());
+				},
+			);
+		}
+	}
+	group.finish();
+}
+
 /// Write `iterations` single-frame groups across independent tracks sharing one pool.
 fn parallel_write(pool: &cache::Pool, writers: usize, iterations: u64) -> Duration {
 	let barrier = Arc::new(Barrier::new(writers + 1));
@@ -517,11 +593,22 @@ fn bench_subscriber_join(c: &mut Criterion) {
 }
 
 /// Preference changes and an extreme holder leaving, over the already held audience.
+///
+/// Each held reader asks for distinct values, so the aggregate's tables grow with the audience.
 fn bench_subscriber_preferences(c: &mut Criterion) {
 	let ordinary = track::Subscription::default()
 		.with_start(track::Position::group(100))
 		.with_end(track::Position::group(200))
 		.with_order(track::Order::Ascending);
+	let held = |i: usize| {
+		let i = i as u64;
+		track::Subscription::default()
+			.with_priority((i % 255) as u8)
+			.with_max_delay(Duration::from_micros(i))
+			.with_start(track::Position::group(100 + i))
+			.with_end(track::Position::group(200 + i))
+			.with_order(track::Order::Ascending)
+	};
 	let extreme = track::Subscription::default()
 		.with_priority(255)
 		.with_max_delay(Duration::from_secs(10));
@@ -531,8 +618,8 @@ fn bench_subscriber_preferences(c: &mut Criterion) {
 			group.throughput(Throughput::Elements(2 * touched as u64));
 			group.bench_function(BenchmarkId::new(format!("update/{steady}"), touched), |b| {
 				let mut setup = Churn::new(steady, 0);
-				for subscriber in &mut setup._steady {
-					subscriber.update(ordinary.clone()).unwrap();
+				for (i, subscriber) in setup._steady.iter_mut().enumerate() {
+					subscriber.update(held(i)).unwrap();
 				}
 				let mut viewer = setup.track.subscribe(ordinary.clone());
 				assert!(setup.track.poll_subscription_changed(&setup.waiter).is_ready());
@@ -549,8 +636,8 @@ fn bench_subscriber_preferences(c: &mut Criterion) {
 		group.throughput(Throughput::Elements(1));
 		group.bench_function(BenchmarkId::new("extreme_leave", steady), |b| {
 			let mut setup = Churn::new(steady, 0);
-			for subscriber in &mut setup._steady {
-				subscriber.update(ordinary.clone()).unwrap();
+			for (i, subscriber) in setup._steady.iter_mut().enumerate() {
+				subscriber.update(held(i)).unwrap();
 			}
 			assert!(setup.track.poll_subscription_changed(&setup.waiter).is_ready());
 			b.iter_custom(|iterations| {
@@ -962,6 +1049,7 @@ criterion_group!(
 	benches,
 	bench_parked_abort,
 	bench_fanout,
+	bench_fetch_expiry,
 	bench_parallel_write,
 	bench_aborted_scan,
 	bench_gc,

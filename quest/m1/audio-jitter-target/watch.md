@@ -51,9 +51,9 @@ about 22 s with skip-aheads on the way down.
   output. Audio now defaults `groupDuration` to 20 ms. A/B that default
   against a group of 100 ms or so in the same run.
 
-Decided 2026-10-08: moves to m1 with the rest of the line. The estimator
-defaults on and only this manual proof is left, so it no longer gates a
-release.
+Decided 2026-10-15: keep this proof in m1 with the existing playback and
+A/V clock work. The estimator defaults on; deferring watch-worker does not
+defer validation of the current player.
 
 ## Required
 
