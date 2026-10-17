@@ -432,6 +432,23 @@ impl View {
 	}
 }
 
+/// A path costs its suffix bytes however the interest above it is spelled.
+#[test]
+fn a_suffix_costs_the_same_however_its_interest_is_spelled() {
+	let item = Item {
+		seed: 0,
+		epoch: None,
+		since: 1,
+	};
+	let view = View {
+		floors: BTreeMap::from([("live/a/x", 1)]),
+		items: BTreeMap::from([("live/a/x", item)]),
+	};
+	// A batch header, then a region count, `x` and its revision, then `x` and its attributes.
+	assert_eq!(view.diff_bytes(None, "live/a/"), (1, 9 + 1 + 5 + 9));
+	assert_eq!(view.diff_bytes(None, "live/a"), (1, 9 + 1 + 5 + 9));
+}
+
 /// One change an origin made to its own claims.
 struct Change {
 	rev: Rev,
