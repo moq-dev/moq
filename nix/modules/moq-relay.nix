@@ -272,7 +272,13 @@ in
     systemd.services.moq-relay = {
       description = "Media over QUIC relay server";
       wantedBy = [ "multi-user.target" ];
-      after = [ "network.target" ] ++ lib.optional cfg.auth.enable "moq-auth.service";
+      # ACME validates inbound right away, so wait until the host is reachable.
+      after = [
+        "network.target"
+      ]
+      ++ lib.optional cfg.auth.enable "moq-auth.service"
+      ++ lib.optional (cfg.acme.domains != [ ]) "network-online.target";
+      wants = lib.optional (cfg.acme.domains != [ ]) "network-online.target";
 
       preStart = ''
         # Generate cluster token for leaf nodes
