@@ -167,17 +167,16 @@ struct CatalogTimeline {
 }
 
 impl CatalogTimeline {
-	/// Report a newly published plaintext catalog group once. Each catalog group is one complete
-	/// snapshot, so it finishes as soon as it is reported.
-	fn record(&mut self, track: &moq_net::track::Producer) {
-		let (Some(recorder), Some(sequence)) = (self.recorder.as_mut(), track.latest()) else {
+	/// Report a newly published plaintext catalog group. Each catalog group is one complete
+	/// snapshot, so it finishes as soon as it is reported. Only this producer writes the track,
+	/// one group per catalog from zero, so the sequence is counted here.
+	fn record(&mut self) {
+		// Counted before enrollment too, so the first recorded group has its real sequence.
+		let sequence = self.last_sequence.map_or(0, |sequence| sequence + 1);
+		self.last_sequence = Some(sequence);
+		let Some(recorder) = self.recorder.as_mut() else {
 			return;
 		};
-		if self.last_sequence == Some(sequence) {
-			return;
-		}
-
-		self.last_sequence = Some(sequence);
 		recorder.frame(
 			hang::timeline::Position::group(sequence),
 			moq_net::Timestamp::now(),
@@ -214,9 +213,12 @@ impl<E: CatalogExt> Outputs<E> {
 		// Every consumer refuses a catalog that fails this, so refuse it before it reaches one.
 		catalog.check_renditions()?;
 		// One snapshot per group while deltas are disabled; the `.z` track carries the identical catalog.
-		self.hang
+		let written = self
+			.hang
 			.update(moq_net::Timed::from(catalog).at(moq_net::Timestamp::now()))?;
-		self.catalog_timeline.lock().unwrap().record(&self.hang_track);
+		if written.is_some() {
+			self.catalog_timeline.lock().unwrap().record();
+		}
 		self.hangz
 			.update(moq_net::Timed::from(catalog).at(moq_net::Timestamp::now()))?;
 
@@ -1749,7 +1751,7 @@ mod test {
 		// A closure that changes nothing publishes nothing: the catalog track runs one snapshot per
 		// group, so a third publish would open a third group.
 		catalog.mutate(|_| {}).unwrap();
-		assert_eq!(catalog.outputs.hang_track.latest(), Some(1));
+		assert_eq!(sent(&catalog), Some(1));
 
 		let expected = catalog.snapshot();
 		let waiter = kio::Waiter::noop();
@@ -1823,7 +1825,7 @@ mod test {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let config = Config::default().with_catalog(Catalog::<Extra>::default());
 		let mut catalog = Producer::<Extra>::new(&mut broadcast, config).unwrap();
-		let track = catalog.outputs.hang.consume();
+		let mut track = catalog.outputs.hang.consume();
 
 		let mut guard = catalog.modify().unwrap();
 		guard
@@ -1837,7 +1839,7 @@ mod test {
 		// The caller got the error, so the tracks stay usable once the catalog fits again.
 		catalog.modify().unwrap().remove_section("big").unwrap();
 		catalog.finish().unwrap();
-		assert_eq!(track.latest(), Some(0));
+		assert!(matches!(track.poll_largest(&kio::Waiter::noop()), Poll::Ready(Some(position)) if position.group == 0));
 	}
 
 	/// Every consumer refuses an ID naming both a video and an audio rendition, so the producer
@@ -1846,7 +1848,7 @@ mod test {
 	fn a_cross_kind_duplicate_id_is_refused() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let mut catalog = Producer::new(&mut broadcast, Config::default()).unwrap();
-		let track = catalog.outputs.hang.consume();
+		let mut track = catalog.outputs.hang.consume();
 
 		let result = catalog.mutate(|catalog| {
 			catalog.video.renditions.insert(
@@ -1862,14 +1864,17 @@ mod test {
 			result,
 			Err(crate::Error::Hang(hang::Error::DuplicateRendition(id))) if id == "main"
 		));
-		assert_eq!(track.latest(), None, "the refused catalog reached the wire");
+		assert!(
+			matches!(track.poll_largest(&kio::Waiter::noop()), Poll::Pending),
+			"the refused catalog reached the wire"
+		);
 	}
 
 	#[test]
 	fn commit_publishes_once() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let mut catalog = Producer::new(&mut broadcast, Config::default()).unwrap();
-		let track = catalog.outputs.hang.consume();
+		let mut track = catalog.outputs.hang.consume();
 
 		let mut guard = catalog.modify().unwrap();
 		guard
@@ -1880,7 +1885,7 @@ mod test {
 
 		// The drop that follows `commit` must not publish a second snapshot.
 		catalog.finish().unwrap();
-		assert_eq!(track.latest(), Some(0));
+		assert!(matches!(track.poll_largest(&kio::Waiter::noop()), Poll::Ready(Some(position)) if position.group == 0));
 	}
 
 	#[test]
@@ -3031,7 +3036,11 @@ mod test {
 
 	/// How many catalogs have gone out on the wire.
 	fn sent(catalog: &Producer) -> Option<u64> {
-		catalog.outputs.hang_track.latest()
+		let mut track = catalog.outputs.hang_track.consume();
+		match track.poll_largest(&kio::Waiter::noop()) {
+			Poll::Ready(Some(position)) => Some(position.group),
+			Poll::Ready(None) | Poll::Pending => None,
+		}
 	}
 
 	/// The catalog a viewer joining now receives.

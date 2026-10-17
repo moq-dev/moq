@@ -4749,6 +4749,7 @@ version = "0.2.0"
 dependencies = [
  "bytes",
  "flate2",
+ "futures",
  "kio 0.6.2",
  "moq-net",
  "thiserror 2.0.21",
@@ -4822,6 +4823,7 @@ version = "0.5.8"
 dependencies = [
  "bytes",
  "criterion",
+ "futures",
  "json-patch",
  "kio 0.6.2",
  "moq-flate",

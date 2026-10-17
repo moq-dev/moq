@@ -686,7 +686,10 @@ impl Consume {
 		let subscription = subscription.unwrap_or_default();
 		// Reads start where the lowest range does. Without a floor of its own (the oldest
 		// range, the default) a raw reader joins at the latest group.
-		let latest = track.latest();
+		let latest = match track.poll_largest(&kio::Waiter::noop()) {
+			std::task::Poll::Ready(Some(position)) => Some(position.group),
+			_ => None,
+		};
 		let start = subscription
 			.ranges
 			.iter()

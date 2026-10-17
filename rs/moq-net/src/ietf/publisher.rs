@@ -4035,7 +4035,7 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 		match range.start {
 			Some(start) => track.start_at(start.group),
 			None => {
-				if let Some(latest) = track.latest() {
+				if let Some(latest) = track.latest_sequence() {
 					track.start_at(latest);
 				}
 			}
@@ -4101,7 +4101,7 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 	/// Hold the subscriber's NEW_GROUP_REQUEST until a group answers it; the upstream
 	/// session decides whether it goes further. One a held group answers asks nothing.
 	fn request_new_group(&mut self, value: u64) -> Result<(), Error> {
-		let Some(request) = NewGroup::new(value, self.track.latest()) else {
+		let Some(request) = NewGroup::new(value, self.track.latest_sequence()) else {
 			return Ok(());
 		};
 		let mut subscription = self.track.subscription();
@@ -14251,7 +14251,7 @@ struct LiveEdge {
 
 /// Snapshot the live edge of a track.
 fn live_edge(track: &track::Consumer) -> LiveEdge {
-	let Some(latest) = track.latest() else {
+	let Some(latest) = track.latest_sequence() else {
 		return LiveEdge::default();
 	};
 

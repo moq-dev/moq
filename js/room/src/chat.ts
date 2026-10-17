@@ -75,6 +75,8 @@ export class Publisher {
 export class Subscriber {
 	#track: Track.Subscriber;
 	#consumer: Json.Window.Consumer<unknown>;
+	// Resolves once the reader starts at the newest window, instead of replaying older ones.
+	#positioned: Promise<void>;
 
 	/** Subscribe to the newest retained window on a broadcast. */
 	static subscribe(broadcast: Broadcast.Consumer): Subscriber {
@@ -83,14 +85,16 @@ export class Subscriber {
 
 	/** Read window changes from an existing subscription. */
 	constructor(track: Track.Subscriber) {
-		const latest = track.latest();
-		if (latest !== undefined) track.setGroups({ start: { included: latest } });
 		this.#track = track;
 		this.#consumer = new Json.Window.Consumer({ track });
+		this.#positioned = track.largest().then((largest) => {
+			if (largest) track.setGroups({ start: { included: largest.group } });
+		});
 	}
 
 	/** Return the next window change, or undefined on clean completion; failures throw. */
 	async recv(): Promise<Event | undefined> {
+		await this.#positioned;
 		const event = await this.#consumer.next();
 		if (!event) return undefined;
 		if ("push" in event) {

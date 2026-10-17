@@ -1474,7 +1474,6 @@ test("local cursor bounds can skip, pause, and release buffered groups", async (
 
 	for (let sequence = 0; sequence < 5; sequence++) producer.writeGroup(new GroupProducer(sequence));
 
-	expect(track.latest()).toBe(4);
 	track.setGroups({ start: { included: 1 } });
 	track.setGroups({ end: { excluded: 3 } });
 	expect((await track.nextGroup())?.sequence).toBe(1);
@@ -1791,33 +1790,53 @@ test("largest names the newest frame written", async () => {
 	const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI });
 	const subscriber = producer.subscribe({ maxDelay: Milli(1_000) });
 
-	// Nothing published yet.
-	expect(subscriber.largest()).toBeUndefined();
+	// Nothing published yet, so the first read waits.
+	const initial = subscriber.largest();
+	expect(await Promise.race([initial.then(() => "ready"), Promise.resolve("pending")])).toBe("pending");
 
 	const first = producer.appendGroup();
 	first.writeFrame({ payload: enc.encode("a"), timestamp: Timestamp.now() });
 	first.writeFrame({ payload: enc.encode("b"), timestamp: Timestamp.now() });
-	expect(subscriber.largest()).toEqual({ group: 0, frame: 1 });
+	expect(await initial).toEqual({ group: 0, frame: 1 });
 	first.close();
 
 	// A group with no frames yet has no object of its own, so the edge stays in the group
 	// before it rather than reading as an empty track.
 	const second = producer.appendGroup();
-	expect(subscriber.largest()).toEqual({ group: 0, frame: 1 });
+	const next = subscriber.largest();
+	expect(await Promise.race([next.then(() => "ready"), Promise.resolve("pending")])).toBe("pending");
 
 	second.writeFrame({ payload: enc.encode("c"), timestamp: Timestamp.now() });
-	expect(subscriber.largest()).toEqual({ group: 1, frame: 0 });
+	expect(await next).toEqual({ group: 1, frame: 0 });
 	second.close();
 
 	// Reading a group does not move the edge: it is what the track produced, not what is left.
 	await subscriber.recvGroup();
-	expect(subscriber.largest()).toEqual({ group: 1, frame: 0 });
-
+	const ended = subscriber.largest();
 	producer.close();
+	expect(await ended).toBeUndefined();
 });
 
 // A subscriber that arrives after the frames were written reads mirrors. largest is the
 // last frame successfully written, even after an overflow aborts the group.
+test("largest ends at the declared end while the producer stays open", async () => {
+	const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI });
+	const subscriber = producer.subscribe();
+
+	const group = producer.appendGroup();
+	group.writeFrame({ payload: enc.encode("a"), timestamp: Timestamp.now() });
+	expect(await subscriber.largest()).toEqual({ group: 0, frame: 0 });
+
+	// The end is reached, but the open group can still raise the largest.
+	producer.finishAt({ group: 1, frame: 0 });
+	const ended = subscriber.largest();
+	expect(await Promise.race([ended.then(() => "ready"), Promise.resolve("pending")])).toBe("pending");
+
+	group.close();
+	expect(await ended).toBeUndefined();
+	producer.close();
+});
+
 test("largest survives a mirror replay of an aborted group", async () => {
 	const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI });
 
@@ -1829,7 +1848,7 @@ test("largest survives a mirror replay of an aborted group", async () => {
 
 	// Subscribing now replays into a fresh sink; the last legal frame is still the edge.
 	const late = producer.subscribe();
-	expect(late.largest()).toEqual({ group: 0, frame: MAX_GROUP_FRAMES - 1 });
+	expect(await late.largest()).toEqual({ group: 0, frame: MAX_GROUP_FRAMES - 1 });
 
 	producer.close();
 });
@@ -2447,7 +2466,7 @@ test("a mid-group end survives eviction and a filtered late reader", async () =>
 		producer.close();
 		await clock.advance(10_000 + CACHE_WINDOW_MS + 1);
 		const reader = producer.subscribe().withGroups({ end: { excluded: 5 } });
-		expect(reader.largest()).toBeUndefined();
+		expect(await reader.largest()).toEqual({ group: 5, frame: 4 });
 		expect(reader.end()).toEqual({ group: 5, frame: 5 });
 		reader.close();
 	} finally {

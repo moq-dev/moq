@@ -329,8 +329,11 @@ impl Pending {
 	}
 
 	/// Announce the broadcast if its catalog has gone out, returning whether it has.
-	fn announce(&self) -> anyhow::Result<bool> {
-		if self.catalog.latest().is_none() {
+	fn announce(&mut self) -> anyhow::Result<bool> {
+		if !matches!(
+			self.catalog.poll_largest(&moq_net::kio::Waiter::noop()),
+			std::task::Poll::Ready(Some(_))
+		) {
 			return Ok(false);
 		}
 		self.broadcast
@@ -575,7 +578,7 @@ async fn decode(
 				return Ok(()); // EOF
 			}
 			decoder.decode_chunk(&buffer)?;
-			if let Some(announce) = &pending
+			if let Some(announce) = &mut pending
 				&& announce.announce()?
 			{
 				pending = None;
@@ -597,9 +600,13 @@ async fn decode(
 	let outcome = result.and_then(|()| decoder.finish());
 	// The drain can release the first catalog. Without one the input declared no track, and
 	// announcing would only advertise an empty broadcast.
-	let outcome = outcome.and_then(|finished| match &pending {
-		Some(announce) if !announce.announce()? => anyhow::bail!("input ended before it declared a track"),
-		_ => Ok(finished),
+	let outcome = outcome.and_then(|finished| {
+		if let Some(announce) = &mut pending
+			&& !announce.announce()?
+		{
+			anyhow::bail!("input ended before it declared a track");
+		}
+		Ok(finished)
 	});
 	// The drain at end of input can publish a frame nothing vouched for, so the
 	// final snapshot is only complete after `finish`.

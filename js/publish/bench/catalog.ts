@@ -49,13 +49,19 @@ async function measure(tracks: number, viewers: number) {
 	});
 	// Initial configuration is outside the estimate traffic being measured.
 	for (const viewer of subscribers) await viewer.catalog.latest();
-	let latest = subscribers[0].subscriber.latest();
+	// Its own subscriber, since a stream yields each location once per reader. The first call
+	// yields the configured group, so later ones yield only estimate updates.
+	const publishing = output.subscribe();
+	await publishing.largest();
+	let largest = publishing.largest();
 	let publishes = 0;
 	let updates = 0;
 	const receive = async () => {
-		const next = subscribers[0].subscriber.latest();
-		if (next === latest) return;
-		latest = next;
+		// Microtasks drain before a macrotask, so a group just published has settled `largest`.
+		await new Promise((resolve) => setImmediate(resolve));
+		const next = await Promise.race([largest, Promise.resolve(undefined)]);
+		if (!next) return;
+		largest = publishing.largest();
 		publishes++;
 		for (const viewer of subscribers) {
 			const root = (await viewer.catalog.latest())?.value;
@@ -86,6 +92,7 @@ async function measure(tracks: number, viewers: number) {
 	}
 	console.log(`${tracks},${viewers},${publishes},${updates},${1000 * tracks * viewers},${elapsed.toFixed(1)}`);
 	scope.close();
+	publishing.close();
 	output.close();
 	for (const viewer of subscribers) {
 		viewer.subscriber.close();

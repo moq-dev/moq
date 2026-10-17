@@ -530,7 +530,7 @@ export class Publisher {
 					end: range.end ? { included: Number(range.end.group) } : undefined,
 				},
 			});
-			const startGroup = range.start ? Number(range.start.group) : track.latest();
+			const startGroup = range.start ? Number(range.start.group) : hooks.latestSequence(track);
 			if (startGroup !== undefined) track.setGroups({ start: { included: startGroup } });
 
 			// A fill reads the group cache through its own consumer, independent of the
@@ -2135,10 +2135,10 @@ function saturatingSub(a: bigint, b: bigint): bigint {
 
 /** Snapshot the live edge of a track. */
 function liveEdge(track: TrackSubscriber): LiveEdge {
-	const latest = track.latest();
+	const latest = hooks.latestSequence(track);
 	if (latest === undefined) return {};
 
-	const largest = track.largest();
+	const largest = hooks.bufferedLargest(track);
 	if (!largest) return { latest: BigInt(latest), next: { group: BigInt(latest), object: 0n } };
 
 	const group = BigInt(largest.group);

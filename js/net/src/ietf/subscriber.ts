@@ -1005,6 +1005,14 @@ export class Subscriber {
 			priority: fromWire(ok.properties.priority ?? 128),
 			maxAge: maxCacheDuration === undefined ? undefined : Milli(Number(maxCacheDuration)),
 		});
+		if (ok.largest) {
+			if (ok.largest.groupId > BigInt(Number.MAX_SAFE_INTEGER)) {
+				throw new RangeError("largest group exceeds safe integers");
+			}
+			// Object IDs can start past zero or skip, while readers see frame ordinals, so only
+			// the group carries over: its first frame is the edge a reader can count on.
+			hooks.reportedLargest(subscription.track, { group: Number(ok.largest.groupId), frame: 0 });
+		}
 
 		try {
 			this.#aliases.set(ok.trackAlias, subscription, { broadcast, name: request.name });

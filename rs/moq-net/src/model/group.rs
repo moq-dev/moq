@@ -584,6 +584,8 @@ struct Alive {
 	// Whether the abort was the publisher giving the group up rather than cache policy
 	// (`Old`, `Timeout`, `Evicted`). Stored before `aborted`, under the same rules.
 	cut: AtomicBool,
+	// Monotone mirror of `GroupState::fin`, read like `aborted`.
+	finished: AtomicBool,
 	// The cache stamp `GroupState::charge` maintains, held here as well so the
 	// eviction and expiry walks can weigh a candidate without taking the group lock
 	// they already hold the track lock over.
@@ -710,6 +712,7 @@ impl Producer {
 			aborted: AtomicBool::new(false),
 			checked: AtomicBool::new(false),
 			cut: AtomicBool::new(false),
+			finished: AtomicBool::new(false),
 			access,
 		});
 		Self {
@@ -838,6 +841,10 @@ impl Producer {
 		// With the group lock released (lock order is track then group), settle
 		// eviction debt if enough has been written since the track last paid.
 		self.cache.settle(now);
+		self.cache.advance_largest(track::Position {
+			group: self.info.sequence,
+			frame: (next_index - 1) as u64,
+		});
 		// An untimed frame presents nothing, so it can expire no read.
 		if let Some(timestamp) = timestamp {
 			self.cache.wakes().presented(timestamp);
@@ -923,6 +930,12 @@ impl Producer {
 		drop(track);
 
 		self.cache.settle(now);
+		if count > 0 {
+			self.cache.advance_largest(track::Position {
+				group: self.info.sequence,
+				frame: (next_index - 1) as u64,
+			});
+		}
 		if let Some(latest) = latest {
 			self.cache.wakes().presented(latest);
 		}
@@ -1089,11 +1102,16 @@ impl Producer {
 		}
 		state.frames.push_back(frame);
 		state.committed = state.next_index;
+		let frame = (state.next_index - 1) as u64;
 		drop(state);
 
 		// With the group lock released (lock order is track then group), settle
 		// eviction debt and age idle content out, reusing the tick above.
 		self.cache.settle(now);
+		self.cache.advance_largest(track::Position {
+			group: self.info.sequence,
+			frame,
+		});
 		Ok(())
 	}
 
@@ -1137,6 +1155,9 @@ impl Producer {
 			return Err(Error::FrameOpen);
 		}
 		state.fin = Some(state.next_index);
+		self.alive.finished.store(true, Ordering::Release);
+		// A finished group can no longer raise the track's largest, which may end its stream.
+		self.cache.touch_largest();
 		Ok(())
 	}
 
@@ -1210,6 +1231,12 @@ impl Producer {
 	/// Reads the mirror, like [`Self::is_aborted`], so a track scan never takes the group lock.
 	pub(super) fn is_cut(&self) -> bool {
 		self.alive.cut.load(Ordering::Acquire)
+	}
+
+	/// Whether the group takes no more frames: finished or aborted. Reads the mirrors, like
+	/// [`Self::is_aborted`], so a track scan never takes the group lock.
+	pub(super) fn is_done(&self) -> bool {
+		self.alive.finished.load(Ordering::Acquire) || self.alive.aborted.load(Ordering::Acquire)
 	}
 
 	/// Whether the group was finished: it holds every frame it will ever have.

@@ -4,6 +4,25 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Track readers follow `largest()` instead of reading `latest()` (#5725)
+
+`latest()` on `track::{Producer, Consumer, Subscriber, Ordered}` is gone.
+`largest()` streams the newest frame's location: the current one at once, then each newer one, and `None` once the track ends.
+It can name a frame the publisher reported before its group arrives, and an empty group is not reported.
+Poll it once with a no-op waiter where you read the edge without waiting.
+
+```rust
+// Before
+let edge = subscriber.latest(); // Option<u64>
+// After
+let edge = subscriber.largest().await.map(|position| position.group);
+// Or, without waiting
+let edge = match subscriber.poll_largest(&kio::Waiter::noop()) {
+	Poll::Ready(Some(position)) => Some(position.group),
+	_ => None,
+};
+```
+
 ### A timed track refuses a group that rewinds (#5803)
 
 A local write whose first frame starts before a lower-sequence group's, or after a higher one's, fails with `TimestampMismatch`; `@moq/net` throws it the same way.

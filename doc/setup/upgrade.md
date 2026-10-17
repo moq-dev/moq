@@ -467,6 +467,13 @@ These land with the next breaking release, not the 2026-09-23 train.
   decode time (RTMP, a browser) trails by the delay plus the video's
   send-ahead: 2 s at the new default, where `--delay 500ms` keeps the 1 s it
   had. moq-srt egress runs at its SRT latency or 1 s, whichever is longer.
+- **Track readers follow `largest()` instead of reading `latest()`.** Replace
+  `latest()` on a Rust track producer, consumer, subscriber, or ordered reader,
+  and on a JS track subscriber or ordered reader, with `largest()`, and read
+  `.group` where you used the sequence. It streams the newest frame's location:
+  the current one at once, then each newer one, ending with the track. It can
+  name a frame the publisher reported before its group arrives, and in JS it is
+  now async. Rust adds `poll_largest(waiter)`.
 - **`moq_origin_announced_broadcast` delivers every publisher instance.** Its
   callback gets a new broadcast handle each time another instance takes over
   the path or the broadcast returns, and its terminal `0` only on cancel. Free

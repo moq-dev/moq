@@ -6741,21 +6741,32 @@ async fn debounce_opens_without_a_media_clock() {
 	rig.import.decode(&BytesMut::from(&input[..])).unwrap();
 
 	let name = rig.catalog.snapshot().ext.mpegts.si[&0x0011][&0x42].track.clone();
-	let track = rig.consumer.track(&name).unwrap().subscribe(None).await.unwrap();
-	assert_eq!(track.latest(), Some(0), "the first snapshot cut immediately");
+	let mut track = rig.consumer.track(&name).unwrap().subscribe(None).await.unwrap();
+	assert_eq!(
+		track.largest().await.map(|position| position.group),
+		Some(0),
+		"the first snapshot cut immediately"
+	);
 
 	// A revision inside the window is coalesced...
 	rig.import
 		.decode(&BytesMut::from(&si_packet_cc(0x0011, &sdt(1, 0xbb), 2)[..]))
 		.unwrap();
-	assert_eq!(track.latest(), Some(0), "a revision inside the window is held");
+	assert!(
+		track.poll_largest(&kio::Waiter::noop()).is_pending(),
+		"a revision inside the window is held"
+	);
 
 	// ...and publishes once the window passes on the host clock, no finish, no PTS.
 	tokio::time::advance(Duration::from_millis(1200)).await;
 	rig.import
 		.decode(&BytesMut::from(&si_packet_cc(0x0011, &sdt(1, 0xbb), 3)[..]))
 		.unwrap();
-	assert_eq!(track.latest(), Some(1), "the held revision cut after the window");
+	assert_eq!(
+		track.largest().await.map(|position| position.group),
+		Some(1),
+		"the held revision cut after the window"
+	);
 }
 
 /// Every PCR packet in transport order: its packet index in the stream, its value

@@ -337,6 +337,16 @@ where
 		self.group.is_none()
 	}
 
+	/// One past the group of the track's largest frame: where a group continues after what
+	/// the track holds. A newer group with no frame yet is not counted, so a seek onto it is
+	/// [`moq_net::Error::Duplicate`].
+	pub(crate) fn next_sequence(&self) -> u64 {
+		match self.inner.clone().poll_largest(&moq_net::kio::Waiter::noop()) {
+			std::task::Poll::Ready(Some(largest)) => largest.group + 1,
+			_ => 0,
+		}
+	}
+
 	/// Buffer up to `duration` of frames into each container frame.
 	///
 	/// When non-zero, frames are buffered and flushed together once the buffered duration exceeds
@@ -1093,14 +1103,15 @@ mod tests {
 		let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.audio));
 		let mut producer = Producer::new(track, Container::Legacy(crate::container::Kind::Audio));
 
+		let mut edge = producer.track().clone();
+
 		producer.write(frame(0, true)).unwrap();
-		let stale = producer.track().latest();
+		let stale = edge.largest().await.map(|largest| largest.group);
 
 		producer.discontinuity().unwrap();
-		let edge = producer.track().latest();
+		let fresh = edge.largest().await.map(|largest| largest.group);
 
-		assert_ne!(edge, stale, "the marker group is the live edge now");
-		assert_eq!(edge, stale.map(|s| s + 1));
+		assert_eq!(fresh, stale.map(|s| s + 1), "the marker group is the live edge now");
 	}
 
 	/// The marker sits at the duration marker a cut wrote, not at the last frame below it,
