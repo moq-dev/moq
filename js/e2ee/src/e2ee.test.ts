@@ -582,6 +582,18 @@ test("a refused timestamp does not burn the frame", async () => {
 	expect(await readText(await recvGroup(p.consumer))).toBe("ok");
 });
 
+test("a datagram right after wrapping waits for the timescale before spending", async () => {
+	const generation = credential().produce();
+	const net = netTrack(await generation.name("audio"));
+	const consumer = generation.credential.consume(generation.epoch).consume(subscribe(net));
+	// Called in the same tick as the wrap, before the producer could observe the timescale.
+	const producer = generation.produce(net);
+	const refused = producer.insertDatagram(0, undefined, text("untimed"));
+	await expect(refused).rejects.toThrow("timestamp");
+	await producer.insertDatagram(0, ms(1), text("ok"));
+	expect(datagramText(await consumer.recvDatagram())).toBe("ok");
+});
+
 test("a failed net write after encryption aborts the group", async () => {
 	const p = await pair("video");
 	const group = p.producer.appendGroup();
