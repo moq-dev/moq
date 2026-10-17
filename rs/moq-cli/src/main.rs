@@ -432,8 +432,6 @@ async fn spawn_moq(
 	directions: Directions,
 	tasks: &mut JoinSet<anyhow::Result<()>>,
 ) -> anyhow::Result<Attached> {
-	let mut bandwidth = moq_net::bandwidth::Allocator::unlimited();
-	let mut connection = None;
 	let cluster = cluster
 		.with_client_tls(moq.client.tls.build()?)
 		.with_connect(moq.client.clone(), moq.quic.clone());
@@ -446,21 +444,34 @@ async fn spawn_moq(
 
 	// Built only to dial `--connect`: the cluster binds its own client from the
 	// same `[connect]` config, so a second one would contend for a fixed bind port.
-	let mut dialer = None;
-	if let Some(url) = moq.client.url.clone() {
-		let mut client = net.client(moq.client.clone())?;
-		dialer = Some(client.clone());
+	// Built before the listener so a bad config fails before readiness, but dialed
+	// only after it: a later startup failure would drop a live dial unclosed.
+	let dialer = match moq.client.url.clone() {
+		Some(url) => Some((url, net.client(moq.client.clone())?)),
+		None => None,
+	};
+
+	let (started, shutdown) =
+		notify_when_initialized(spawn_server(tasks, moq, &cluster, net, directions), moq::notify_ready).await?;
+	// Even standalone: it is what reports a panic in the origin driver.
+	tasks.spawn(async move { started.run().await });
+
+	let mut bandwidth = moq_net::bandwidth::Allocator::unlimited();
+	let mut connection = None;
+	let mut client = None;
+	if let Some((url, mut dialer)) = dialer {
+		client = Some(dialer.clone());
 		if directions.publish {
-			client = client.with_publisher(origin.consume());
+			dialer = dialer.with_publisher(origin.consume());
 		}
 		if directions.consume {
-			client = client.with_subscriber(origin.clone());
+			dialer = dialer.with_subscriber(origin.clone());
 		}
 
 		// Both directions ride one connection, so this dials directly rather than
 		// through `Client::publish` / `Client::consume`, which each attach a single
 		// direction and dial the same URL.
-		let reconnect = client.connect(url);
+		let reconnect = dialer.connect(url);
 		// Read before the handle moves into the task. This consumer is persistent: it
 		// survives reconnects, reading `None` while down, so it can be wired up before
 		// anything connects.
@@ -470,15 +481,10 @@ async fn spawn_moq(
 		connection = Some(reconnect);
 	}
 
-	let (started, shutdown) =
-		notify_when_initialized(spawn_server(tasks, moq, &cluster, net, directions), moq::notify_ready).await?;
-	// Even standalone: it is what reports a panic in the origin driver.
-	tasks.spawn(async move { started.run().await });
-
 	Ok(Attached {
 		bandwidth,
 		origin,
-		client: dialer,
+		client,
 		connection,
 		shutdown,
 	})
@@ -1113,6 +1119,43 @@ mod tests {
 		assert!(err.to_string().contains("failed to bind listeners"), "{err:#}");
 		assert!(!ready.get(), "readiness must be withheld after a bind failure");
 		assert!(tasks.is_empty(), "nothing should be spawned after a bind failure");
+	}
+
+	/// `--connect` dials only once the listener is up, so a bind failure leaves no
+	/// live dial to drop without its close.
+	#[tokio::test]
+	async fn a_stream_bind_failure_starts_no_dial() {
+		let _ = moq_tokio::crypto::install_default();
+		let occupied = std::net::TcpListener::bind("127.0.0.1:0").expect("occupy a port");
+		let addr = occupied.local_addr().expect("occupied address").to_string();
+		let invocation = Invocation::try_parse_from([
+			"moq",
+			"--connect",
+			"http://127.0.0.1:9/",
+			"--listen-tcp-bind",
+			&addr,
+			"--auth-public",
+			"**",
+			"import",
+			"ts",
+		])
+		.expect("parse");
+		let cluster = invocation.moq.cluster().expect("create cluster");
+		let net = Net {
+			quic: invocation.moq.quic.clone(),
+			#[cfg(feature = "iroh")]
+			iroh: None,
+		};
+		let mut tasks = JoinSet::new();
+		let directions = Directions {
+			publish: true,
+			consume: false,
+		};
+		let Err(err) = spawn_moq(&invocation.moq, &net, cluster, directions, &mut tasks).await else {
+			panic!("the occupied port must fail startup");
+		};
+		assert!(err.to_string().contains("failed to bind listeners"), "{err:#}");
+		assert!(tasks.is_empty(), "no dial starts before the listener is up");
 	}
 
 	/// An explicit listener with no auth source stops startup instead of refusing
