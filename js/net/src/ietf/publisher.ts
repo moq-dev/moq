@@ -779,9 +779,12 @@ export class Publisher {
 			}
 
 			// A revocation bridged from upstream, such as a moq-lite UNAUTHORIZED reset, is one here too.
+			// PUBLISH_DONE's EXPIRED means the subscription's own lifetime ran out, so an expired
+			// token is reported as no longer granted.
 			if (
 				(publishError instanceof StreamError && publishError.code === StreamCode.Unauthorized) ||
-				(publishError instanceof SessionError && publishError.code === SessionCode.Unauthorized)
+				(publishError instanceof SessionError &&
+					(publishError.code === SessionCode.Unauthorized || publishError.code === SessionCode.Expired))
 			) {
 				unauthorized = true;
 			}

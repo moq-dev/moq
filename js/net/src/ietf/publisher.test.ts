@@ -4,7 +4,7 @@ import { Signal } from "@moq/signals";
 import type { Auth, Grant } from "../auth.ts";
 import { Producer as BroadcastProducer } from "../broadcast.ts";
 import * as Epoch from "../epoch.ts";
-import { error, ProtocolViolation, StreamCode, unauthorized } from "../error.ts";
+import { error, ProtocolViolation, SessionCode, SessionError, StreamCode, unauthorized } from "../error.ts";
 import { Producer as GroupProducer, MAX_GROUP_FRAMES } from "../group.ts";
 import { type Hop, HopSchema } from "../hop.ts";
 import { createMockTransportPair } from "../mock.ts";
@@ -1923,6 +1923,7 @@ test("subscription completion sends PUBLISH_DONE on every supported draft", asyn
 			[undefined, 0x2],
 			[new Error("failed"), 0x0],
 			[unauthorized("test"), 0x1],
+			[new SessionError(SessionCode.Expired), 0x1],
 		] as const) {
 			const pair = createMockTransportPair(ALPN.DRAFT_19);
 			const session = new NativeSession(pair.server, version, true);
