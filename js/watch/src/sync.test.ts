@@ -228,3 +228,75 @@ describe("recorded ingress", () => {
 		}
 	});
 });
+
+describe("skip floor", () => {
+	// Arrivals are on the local clock, pinned here so a skip's playhead does not depend on wall time.
+	let clock: Manual;
+	let restore: () => void;
+	beforeEach(() => {
+		clock = new Manual();
+		clock.advance(Nano.fromMilli(Milli(5000)));
+		restore = clock.install();
+	});
+	afterEach(() => restore());
+
+	it("a skip passes over only frames behind the playhead it jumped to", async () => {
+		const sync = new Sync({ delay: Milli(100) });
+		await flush();
+		sync.received(Milli(1000), "video", Milli(5000));
+		expect(sync.skipped(Milli(0))).toBe(false);
+
+		// A startup burst with no buffer: audio 50ms newer skips the playhead to 950ms.
+		sync.received(Milli(1050), "audio", Milli(5000));
+		expect(sync.skipped(Milli(1000))).toBe(false);
+		expect(sync.skipped(Milli(949))).toBe(true);
+
+		// A large skip passes over the earlier frame.
+		sync.received(Milli(10_000), "audio", Milli(5000));
+		expect(sync.skipped(Milli(1000))).toBe(true);
+		expect(sync.skipped(Milli(9900))).toBe(false);
+		sync.close();
+	});
+
+	it("a skip never lowers the floor and a reset clears it", async () => {
+		const delay = new Signal<Delay>(Milli(100));
+		const sync = new Sync({ delay });
+		await flush();
+		sync.received(Milli(0), "video", Milli(5000));
+		sync.received(Milli(10_000), "audio", Milli(5000));
+		expect(sync.skipped(Milli(9000))).toBe(true);
+
+		// A larger cap re-anchors to a lower playhead, but cannot revive what was passed over.
+		delay.set(Milli(5000));
+		await flush();
+		sync.received(Milli(11_000), "audio", Milli(5000));
+		expect(sync.skipped(Milli(9000))).toBe(true);
+
+		// A new timeline may start its timestamps over.
+		sync.reset();
+		expect(sync.skipped(Milli(9000))).toBe(false);
+		sync.close();
+	});
+
+	it("a skip counts how long the skipping frame waited after ingress", async () => {
+		const sync = new Sync({ delay: Milli(100) });
+		await flush();
+		sync.received(Milli(0), "video", Milli(5000));
+
+		// Reordering held this audio for 200ms, so the new reference puts the playhead at 10.1s now.
+		clock.advance(Nano.fromMilli(Milli(200)));
+		sync.received(Milli(10_000), "audio", Milli(5000));
+		expect(sync.skipped(Milli(10_050))).toBe(true);
+		expect(sync.skipped(Milli(10_100))).toBe(false);
+		sync.close();
+	});
+
+	it("instant skips pass over nothing", async () => {
+		const sync = new Sync({ delay: "instant" });
+		await flush();
+		sync.received(Milli(0), "video", Milli(5000));
+		sync.received(Milli(10_000), "video", Milli(5000));
+		expect(sync.skipped(Milli(0))).toBe(false);
+		sync.close();
+	});
+});

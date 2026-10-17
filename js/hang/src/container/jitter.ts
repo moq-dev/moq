@@ -106,6 +106,18 @@ export class Jitter {
 		this.#peak = delay;
 	}
 
+	/**
+	 * A new estimator that keeps what this one learned but measures arrivals afresh, for a track that
+	 * replaces this one on the same path. Its frames are measured against their own fastest, never
+	 * against this track's.
+	 */
+	fork(): Jitter {
+		const fork = new Jitter();
+		fork.#histogram = Float64Array.from(this.#histogram);
+		fork.#count = this.#count;
+		return fork;
+	}
+
 	/** The measured term: the upper edge of the bucket holding the 95th percentile. */
 	get measured(): Milli {
 		let cumulative = 0;

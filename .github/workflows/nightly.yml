@@ -68,6 +68,8 @@ jobs:
             artifact-path: target/bench/ffi
           - name: Audio grouping relay benchmark
             recipe: bench-audio
+          - name: Relay shard sweep
+            recipe: bench-shard
           # Smoke-tests the capture path: exact off-CPU waits, resolved worker stacks and CPU.
           - name: Relay lock-wait profile
             recipe: bench-lock fanout-heavy 4
@@ -88,6 +90,12 @@ jobs:
           - name: Audit
             recipe: rs audit
             uncached: true
+          # Uncached: the instrumented build bypasses mbx, so the cache can't serve it.
+          - name: moq-quic coverage
+            recipe: rs coverage moq-quic
+            uncached: true
+            artifact: moq-quic-coverage
+            artifact-path: target/coverage/moq-quic
           # OBS (over moq-ffi) and moq-c's C fixtures link a Rust staticlib from
           # outside cargo, so a stale `rs/moq-c/native-libs/*.txt` breaks them and
           # no cargo build. obs.yml's path filter can't list every such input;
@@ -99,11 +107,6 @@ jobs:
             recipe: rs c-tests
 
     steps:
-      - name: Free disk space
-        uses: jlumbroso/free-disk-space@ceedf095f4ec1a097402bc6bd80831f2e1a6fde6 # main
-        with:
-          tool-cache: false
-
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -163,11 +166,10 @@ jobs:
         # js/net, or the wire between them.
         # `gh test` exercises workflow and release tooling, which no pull request runs.
         recipe: ["rs doctest --workspace", "rs loom", "test drill-sensitivity", "rs uring", "test drain", "gh test", "test json-properties"]
+        include:
+          - recipe: rs send-depth
+            nightly: true
     steps:
-      - name: Free disk space
-        uses: jlumbroso/free-disk-space@ceedf095f4ec1a097402bc6bd80831f2e1a6fde6 # main
-        with:
-          tool-cache: false
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -182,11 +184,53 @@ jobs:
             extra-trusted-public-keys = kixelated.cachix.org-1:CmFcV0lyM6KuVM2m9mih0q4SrAa0XyCsiM7GHrz3KKk=
       - name: Rust cache
         uses: ./.github/actions/rust-cache
+      - name: Install nightly Rust
+        if: matrix.nightly
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          toolchain: nightly
       - name: Test
         run: nix develop --command just ${{ matrix.recipe }}
         env:
           NEXTEST_PROFILE: ci
           MOQ_STRICT: 1
+
+  # Media QA with non-Chromium players against a Chromium fixture. The Chromium
+  # player already runs in interop.yml, on PRs and nightly.
+  media-engines:
+    name: Media (${{ matrix.engine }} player)
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        engine: [firefox, webkit]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: DeterminateSystems/nix-installer-action@1d87d45818068401a10cf16bdc5f00b24994a83f # main
+        with:
+          determinate: false
+          extra-conf: |
+            extra-substituters = https://kixelated.cachix.org
+            extra-trusted-public-keys = kixelated.cachix.org-1:CmFcV0lyM6KuVM2m9mih0q4SrAa0XyCsiM7GHrz3KKk=
+      - name: Rust cache
+        uses: ./.github/actions/rust-cache
+      - name: Install publisher and player engines
+        run: nix develop --command bash -c "bun install --frozen-lockfile && bunx playwright install --with-deps chromium ${{ matrix.engine }}"
+      - name: Media and negative controls
+        run: nix develop --command just test media --media-engines ${{ matrix.engine }}
+        env:
+          MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
+      - name: Preserve measurements and traces
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: media-${{ matrix.engine }}
+          path: ${{ runner.temp }}/moq-test-runs
+          if-no-files-found: error
 
   # Full platform coverage without rebuilding after every main queue merge.
   platform:
@@ -203,10 +247,6 @@ jobs:
     # Twenty-four rows at a minute each, plus the relay, CLI, and shaper built from source.
     timeout-minutes: 60
     steps:
-      - name: Free disk space
-        uses: jlumbroso/free-disk-space@ceedf095f4ec1a097402bc6bd80831f2e1a6fde6 # main
-        with:
-          tool-cache: false
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -380,12 +420,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [lite, announce, ietf, varint, path, pattern]
+        target: [lite, announce, ietf, varint, path, pattern, packet, params, streamid, streams, frame, connection]
     steps:
-      - name: Free disk space
-        uses: jlumbroso/free-disk-space@ceedf095f4ec1a097402bc6bd80831f2e1a6fde6 # main
-        with:
-          tool-cache: false
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -411,5 +447,5 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: fuzz-${{ matrix.target }}
-          path: rs/moq-net/fuzz/artifacts/
+          path: rs/*/fuzz/artifacts/
           if-no-files-found: ignore

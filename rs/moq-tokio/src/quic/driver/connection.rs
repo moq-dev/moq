@@ -25,7 +25,7 @@ use tracing::{Instrument, Span, debug_span};
 
 use crate::quic::driver::{
     ConnectionEvent, Duration, Instant, VarInt, mutex::Mutex, recv_stream::RecvStream,
-    runtime::UdpSender, send_stream::SendStream, udp_transmit,
+    runtime::UdpSender, send_group::SendGroup, send_stream::SendStream, udp_transmit,
 };
 use moq_quic::{
     ConnectionError, ConnectionHandle, ConnectionStats, Dir, EndpointEvent, Side, StreamEvent,
@@ -266,12 +266,30 @@ impl Future for ConnectionDriver {
             conn.terminate(e, &self.conn.shared);
             return Poll::Ready(Ok(()));
         }
-        let mut keep_going = conn.drive_transmit(cx).inspect_err(|_| {
-            // Transmit failed, so close the connection and clean state before returning the error.
-            if !conn.inner.is_closed() {
-                conn.implicit_close(&self.conn.shared);
+        let mut keep_going = match conn.drive_transmit(cx) {
+            Ok(keep_going) => keep_going,
+            // No route to the peer, so the handshake can never finish: fail it now rather than at
+            // the handshake timeout, which lets a dial race move on to the next address. The
+            // driver keeps running until the closed connection drains, so the endpoint forgets it
+            // even while the application still holds a handle.
+            Err(e) if moq_sock::udp::is_unreachable_err(&e) => {
+                if !conn.inner.is_closed() {
+                    // Closed, so dropping the last handle cannot overwrite the cause.
+                    conn.inner.close(Instant::now(), 0u32.into(), Bytes::new());
+                    let cause =
+                        TransportError::new(TransportErrorCode::NO_VIABLE_PATH, e.to_string());
+                    conn.terminate(cause.into(), &self.conn.shared);
+                }
+                true
             }
-        })?;
+            Err(e) => {
+                // Transmit failed, so close the connection and clean state before returning the error.
+                if !conn.inner.is_closed() {
+                    conn.implicit_close(&self.conn.shared);
+                }
+                return Poll::Ready(Err(e));
+            }
+        };
         // If a timer expires, there might be more to transmit. When we transmit something, we
         // might need to reset a timer. Hence, we must loop until neither happens.
         keep_going |= conn.drive_timer(cx);
@@ -326,6 +344,13 @@ impl Connection {
             conn: &self.0,
             notify: self.0.shared.stream_budget_available[Dir::Uni as usize].notified(),
         }
+    }
+
+    /// Open a send group at `priority`, for streams to join with [`SendStream::set_group`].
+    ///
+    /// [`SendStream::set_group`]: crate::quic::driver::SendStream::set_group
+    pub fn send_group(&self, priority: i64) -> SendGroup {
+        SendGroup::new(self.0.0.clone(), priority)
     }
 
     /// Initiate a new outgoing bidirectional stream.
@@ -1015,7 +1040,7 @@ impl RemoteAddressWatcher {
 }
 
 #[derive(Debug)]
-pub(crate) struct ConnectionRef(Arc<ConnectionInner>);
+pub(crate) struct ConnectionRef(pub(crate) Arc<ConnectionInner>);
 
 impl ConnectionRef {
     fn stable_id(&self) -> usize {
@@ -1175,6 +1200,13 @@ impl State {
                 Poll::Pending => {
                     self.buffered_transmit = Some(t);
                     return Ok(false);
+                }
+                // An established connection outlives a route that drops for a moment, such as a
+                // client switching networks, so the datagram is just lost.
+                Poll::Ready(Err(e))
+                    if moq_sock::udp::is_unreachable_err(&e) && !self.inner.is_handshaking() =>
+                {
+                    tracing::debug!(%e, "transmit failed; treating it as loss");
                 }
                 Poll::Ready(Err(e)) => return Err(e),
                 Poll::Ready(Ok(())) => {}

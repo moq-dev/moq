@@ -86,4 +86,3 @@ Public API: none expected; error values consumers observe change. Wire: none.
 ## Related
 
 - [#4179](https://github.com/moq-dev/moq/pull/4179) - owns the revoked-upstream path
-- [No made-up Dropped](/quest/m1/dropped-internal.md) - the same rule for internal sites in the subscribers, origin, and transcode

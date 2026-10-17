@@ -24,7 +24,7 @@
 //!
 //! Run with `cargo bench -p moq-net --bench origin`.
 
-#[path = "../tests/support/mod.rs"]
+#[path = "../tests/integration/support/mod.rs"]
 mod support;
 
 use std::task::Poll;

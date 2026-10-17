@@ -154,6 +154,16 @@ pub mod poll {
 		/// concurrent streams.
 		fn poll_open_bi(&mut self, cx: &mut Context<'_>) -> Poll<Result<BiStreams<Self>, Self::Error>>;
 
+		/// Open a send group at `priority`, or `None` when the transport orders streams by
+		/// their own priority alone.
+		///
+		/// Streams that [join](SendStream::set_group) a group share bytes with the session's
+		/// other groups: a higher priority group preempts every lower one, and groups of equal
+		/// priority get an equal share of bytes however many streams each has queued. Streams
+		/// outside every group go before all of them. The group is released once its last
+		/// handle is dropped and its streams finish.
+		fn send_group(&mut self, priority: i64) -> Option<<Self::SendStream as SendStream>::Group>;
+
 		/// Poll to send a datagram over the network.
 		///
 		/// Returns [`Poll::Pending`] while the transport has no room for it, so a caller
@@ -295,19 +305,54 @@ pub mod poll {
 	/// boxed drivers (`Send` boxes on native): what the moq-transport path
 	/// requires until it too becomes named machines. Implemented automatically.
 	pub trait Boxable:
-		Session<SendStream: MaybeSend, RecvStream: MaybeSend, Error: MaybeSend> + MaybeSend + MaybeSync
+		Session<
+			SendStream: MaybeSend + SendStream<Group: MaybeSend + MaybeSync>,
+			RecvStream: MaybeSend,
+			Error: MaybeSend,
+		> + MaybeSend
+		+ MaybeSync
 	{
 	}
 
 	impl<S> Boxable for S where
-		S: Session<SendStream: MaybeSend, RecvStream: MaybeSend, Error: MaybeSend> + MaybeSend + MaybeSync
+		S: Session<
+				SendStream: MaybeSend + SendStream<Group: MaybeSend + MaybeSync>,
+				RecvStream: MaybeSend,
+				Error: MaybeSend,
+			> + MaybeSend
+			+ MaybeSync
 	{
+	}
+
+	/// The send group of a session's streams.
+	#[cfg(feature = "async")]
+	pub(crate) type GroupOf<S> = <<S as Session>::SendStream as SendStream>::Group;
+
+	/// A transport's send group, from [`Session::send_group`].
+	///
+	/// Clones share the group.
+	pub trait SendGroup: Clone + 'static {
+		/// Change the group's priority: higher preempts lower.
+		fn set_priority(&mut self, priority: i64);
+	}
+
+	/// The send group of a transport that has none, which cannot be constructed.
+	#[derive(Clone, Debug)]
+	pub enum Ungrouped {}
+
+	impl SendGroup for Ungrouped {
+		fn set_priority(&mut self, _: i64) {
+			match *self {}
+		}
 	}
 
 	/// An outgoing stream with partial writes, priorities, and reset codes.
 	pub trait SendStream: 'static {
 		/// The error type for every operation on this stream.
 		type Error: Error;
+
+		/// The transport's send group, [`Ungrouped`] for a transport without them.
+		type Group: SendGroup;
 
 		/// Poll to write some of the buffer to the stream, returning how many bytes were
 		/// written. See [`poll_write_buf`](Self::poll_write_buf) for the partial-write
@@ -338,17 +383,18 @@ pub mod poll {
 			Poll::Ready(Ok(size))
 		}
 
-		/// Set the stream's priority.
+		/// Set the priority within the stream's send group, or session-wide when ungrouped.
 		///
 		/// Streams with higher values will be sent first, but are not guaranteed to
 		/// arrive first. This matches the W3C WebTransport `sendOrder` convention (and
 		/// quinn's scheduler).
 		///
-		/// The full `i32` range is available so callers can bit-pack a composite ordering
-		/// (for example a track priority in the high bits and a sequence number in the low
-		/// bits) into a single value. Backends that cannot express that many distinct
-		/// levels approximate it, so treat the ordering as best-effort.
-		fn set_priority(&mut self, order: i32);
+		/// Backends with a narrower priority saturate or approximate it, so treat the
+		/// ordering as best-effort.
+		fn set_priority(&mut self, priority: i64);
+
+		/// Move the stream into `group`, which belongs to this stream's session.
+		fn set_group(&mut self, group: &Self::Group);
 
 		/// Mark the stream as finished, erroring on any future writes.
 		///
