@@ -122,6 +122,9 @@ export class Decoder {
 	// The container consumer's arrival estimate, unset while nothing is subscribed.
 	#measured = new Signal<Milli | undefined>(undefined);
 
+	// The newest container consumer and the path it reads, whose estimate a replacement continues.
+	#consumer?: { path: Moq.Path.Valid; consumer: Container.Consumer };
+
 	// The subscription's max delay: the shared budget, raised to the estimator's ceiling in "auto".
 	#subscribeMaxDelay = new Signal<Milli>(Milli.zero);
 	#maxDelay = new Signal<Milli>(Milli.zero);
@@ -342,15 +345,26 @@ export class Decoder {
 			this.#out.error.set(undefined);
 		}
 
-		if (!running || !broadcast || !track || !identity) return;
+		if (!running || !broadcast || !track || !identity) {
+			this.#retire();
+			return;
+		}
 
 		const config = identity.decoder;
-		this.#frame.set(frameDuration(config));
+		// Opus states no constant, so the outgoing duration holds until the replacement's first packet.
+		const frame = frameDuration(config);
+		if (frame !== undefined) this.#frame.set(frame);
 
-		if (!active || !key) return;
+		if (!active || !key) {
+			this.#retire();
+			return;
+		}
 
 		// This source already failed; wait for another.
-		if (this.#failed) return;
+		if (this.#failed) {
+			this.#retire();
+			return;
+		}
 		// Closing this effect releases both its container reader and track subscription.
 		const failure = new Signal<Error | undefined>(undefined);
 		let attempt: Effect | undefined;
@@ -365,6 +379,7 @@ export class Decoder {
 			};
 			this.#out.error.set(error);
 			attempt?.close();
+			this.#retire();
 		});
 
 		// Another broadcast (a new name, or a republish) brings its own timeline, which a ring and a
@@ -394,12 +409,16 @@ export class Decoder {
 				priority: Catalog.PRIORITY.audio,
 				maxDelay: this.#subscribeMaxDelay,
 			});
-			if (!sub) return;
+			if (!sub) {
+				this.#retire();
+				return;
+			}
 
+			const props = { config, failure, path: active.path };
 			if (config.container.kind === "cmaf") {
-				this.#runCmafDecoder(run, sub, { config, failure });
+				this.#runCmafDecoder(run, sub, props);
 			} else {
-				this.#runLegacyDecoder(run, sub, { config, failure });
+				this.#runLegacyDecoder(run, sub, props);
 			}
 		});
 	}
@@ -407,7 +426,7 @@ export class Decoder {
 	#runLegacyDecoder(
 		effect: Effect,
 		sub: Moq.Track.Subscriber,
-		{ config, failure }: { config: DecoderConfig; failure: Signal<Error | undefined> },
+		{ config, failure, path }: { config: DecoderConfig; failure: Signal<Error | undefined>; path: Moq.Path.Valid },
 	): void {
 		const preSkip =
 			config.codec === "opus" && config.description ? Util.Opus.preSkip(Util.Hex.toBytes(config.description)) : 0;
@@ -416,23 +435,7 @@ export class Decoder {
 			config.container.kind === "loc" ? new Container.Loc.Format("audio") : new Container.Legacy.Format(config);
 		// Create consumer with slightly less latency than the render worklet to avoid underflowing.
 		// TODO include JITTER_UNDERHEAD
-		const consumer = new Container.Consumer(sub, {
-			format,
-			maxDelay: this.#maxDelay,
-		});
-		effect.cleanup(() => consumer.close());
-
-		// Combine network jitter buffer with decode buffer
-		effect.run((inner) => {
-			const network = inner.get(consumer.buffered);
-			const decode = inner.get(this.#decodeBuffered);
-			this.#out.buffered.update(() => Container.mergeBufferedRanges(network, decode));
-		});
-
-		// Feed the arrival estimate into the playout target. Cleared on teardown so a departed track
-		// stops holding the buffer open.
-		effect.run((inner) => this.#measured.set(inner.get(consumer.spread)));
-		effect.cleanup(() => this.#measured.set(undefined));
+		const consumer = this.#consume(effect, sub, format, path);
 
 		effect.spawn(async () => {
 			const loaded = await Util.Libav.polyfill();
@@ -510,7 +513,7 @@ export class Decoder {
 	#runCmafDecoder(
 		effect: Effect,
 		sub: Moq.Track.Subscriber,
-		{ config, failure }: { config: DecoderConfig; failure: Signal<Error | undefined> },
+		{ config, failure, path }: { config: DecoderConfig; failure: Signal<Error | undefined>; path: Moq.Path.Valid },
 	): void {
 		if (config.container.kind !== "cmaf") return; // just to help typescript
 
@@ -528,23 +531,7 @@ export class Decoder {
 					? Util.Hex.toBytes(config.description)
 					: init.description;
 
-		const consumer = new Container.Consumer(sub, {
-			format: new Container.Cmaf.Format(init),
-			maxDelay: this.#maxDelay,
-		});
-		effect.cleanup(() => consumer.close());
-
-		// Combine network jitter buffer with decode buffer
-		effect.run((inner) => {
-			const network = inner.get(consumer.buffered);
-			const decode = inner.get(this.#decodeBuffered);
-			this.#out.buffered.update(() => Container.mergeBufferedRanges(network, decode));
-		});
-
-		// Feed the arrival estimate into the playout target. Cleared on teardown so a departed track
-		// stops holding the buffer open.
-		effect.run((inner) => this.#measured.set(inner.get(consumer.spread)));
-		effect.cleanup(() => this.#measured.set(undefined));
+		const consumer = this.#consume(effect, sub, new Container.Cmaf.Format(init), path);
 
 		effect.spawn(async () => {
 			const loaded = await Util.Libav.polyfill();
@@ -610,6 +597,43 @@ export class Decoder {
 				);
 			}
 		});
+	}
+
+	// Reorders groups and frames up to the shared max delay. A rename is not a cold start: the path's
+	// arrivals are what they were, so the estimate continues from whatever read it before. Another
+	// path's arrivals have nothing to do with what this one learned.
+	#consume(
+		effect: Effect,
+		sub: Moq.Track.Subscriber,
+		format: Container.Format,
+		path: Moq.Path.Valid,
+	): Container.Consumer {
+		const outgoing = this.#consumer;
+		const consumer = new Container.Consumer(sub, {
+			format,
+			maxDelay: this.#maxDelay,
+			predecessor: outgoing?.path === path ? outgoing.consumer : undefined,
+		});
+		effect.cleanup(() => consumer.close());
+		this.#consumer = { path, consumer };
+
+		// Combine network jitter buffer with decode buffer
+		effect.run((inner) => {
+			const network = inner.get(consumer.buffered);
+			const decode = inner.get(this.#decodeBuffered);
+			this.#out.buffered.update(() => Container.mergeBufferedRanges(network, decode));
+		});
+
+		// Feed the arrival estimate into the playout target. It outlives this consumer, so the target
+		// holds until the replacement takes over; see #retire.
+		effect.run((inner) => this.#measured.set(inner.get(consumer.spread)));
+		return consumer;
+	}
+
+	// No consumer replaces the outgoing one, so its estimate stops holding the buffer open.
+	#retire(): void {
+		this.#consumer = undefined;
+		this.#measured.set(undefined);
 	}
 
 	// The ring, once the worklet has loaded. Decoding waits for it, so the frames that arrive first
