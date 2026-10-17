@@ -23,6 +23,11 @@ let rate = bandwidth.as_ref().and_then(|b| b.peek());
 `MoqAnnouncedBroadcast::available` returns the broadcast serving the path on its first call, as before.
 Each later call waits for the next instance to take over the path, instead of returning whatever serves it now.
 
+### A timed track refuses a group that rewinds (#5803)
+
+`write_frame` on a `MoqTrackProducer` or `MoqGroupProducer` fails with a `MoqError::Protocol` of kind `TimestampMismatch` when a group's first frame starts before a lower-sequence group's, or after a higher one's.
+A publisher whose timeline restarts publishes a new broadcast instead.
+
 ### Bandwidth reserves a track's demand (#5845)
 
 `MoqBandwidth::reserve` takes a `MoqTrackDemand` instead of a `MoqTrackProducer`, so raw, media, and JSON tracks reserve the same way, and it no longer fails.

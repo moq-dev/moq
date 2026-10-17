@@ -13,10 +13,22 @@ Hold the consumer `Session.RecvBandwidth` returns to request PROBE, read it with
 // Before
 rate := session.Stats().EstimatedRecvRateBps
 // After
-bandwidth := session.RecvBandwidth()
-defer bandwidth.Close()
-rate := bandwidth.Peek()
+var rate *uint64
+if bandwidth := session.RecvBandwidth(); bandwidth != nil { // nil when the version has no PROBE
+	defer bandwidth.Close()
+	rate = bandwidth.Peek()
+}
 ```
+
+### `AnnouncedBroadcast.Available` waits for the next publisher instance (#5700)
+
+The first call returns the broadcast serving the path, as before.
+Each later call waits for the next instance to take over the path, instead of returning whatever serves it now.
+
+### A timed track refuses a group that rewinds (#5803)
+
+Writing a frame fails with `TimestampMismatch` when a group's first frame starts before a lower-sequence group's, or after a higher one's.
+A publisher whose timeline restarts publishes a new broadcast instead.
 
 ### Bandwidth reserves a track's demand (#5845)
 

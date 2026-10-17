@@ -29,6 +29,11 @@ if (consumer > 0) {
 Its callback gets a new broadcast handle each time another instance takes over the path or the broadcast returns, and its terminal `0` only on cancel.
 Free each handle with `moq_consume_close` once its successor arrives.
 
+### A timed track refuses a group that rewinds (#5803)
+
+A frame write fails with a protocol error of kind `MOQ_PROTOCOL_KIND_TIMESTAMP_MISMATCH` when a group's first frame starts before a lower-sequence group's, or after a higher one's.
+A publisher whose timeline restarts publishes a new broadcast instead.
+
 ### libmoq is moq-c (#4288)
 
 The C bindings ship as the `moq-c` crate, starting at 0.7.0.
