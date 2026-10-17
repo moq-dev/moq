@@ -259,7 +259,7 @@ impl MoqAudioEncoder {
 	/// The init that publishes this encoder's packets through
 	/// [`MoqMediaTrackProducer::audio`](crate::media::MoqMediaTrackProducer::audio):
 	/// an OpusHead or an AudioSpecificConfig.
-	pub fn init(&self) -> Result<crate::media::MoqAudioInit, MoqError> {
+	pub fn track_init(&self) -> Result<crate::media::MoqAudioInit, MoqError> {
 		let guard = self.inner.lock().unwrap();
 		let encoder = guard.as_ref().ok_or(MoqError::Closed)?;
 		let format = match encoder.codec() {
@@ -675,7 +675,7 @@ mod tests {
 	#[test]
 	fn codec_only_encoder_reports_its_opus_head() {
 		let encoder = MoqAudioEncoder::new(opus_output(None, 0)).unwrap();
-		let init = encoder.init().unwrap();
+		let init = encoder.track_init().unwrap();
 		assert!(matches!(init.format, crate::media::MoqAudioFormat::Opus));
 		assert_eq!(&init.data[..8], b"OpusHead");
 		// Channel count, then a nonzero pre-skip for the codec lookahead.
@@ -691,6 +691,6 @@ mod tests {
 		assert!(!encoder.encode(vec![0.0; samples]).unwrap().data.is_empty());
 		encoder.finish(Vec::new()).unwrap();
 		assert!(matches!(encoder.set_bitrate(64_000), Err(MoqError::Closed)));
-		assert!(matches!(encoder.init(), Err(MoqError::Closed)));
+		assert!(matches!(encoder.track_init(), Err(MoqError::Closed)));
 	}
 }
