@@ -32,7 +32,7 @@ fn moq_micros(wall: SystemTime) -> i128 {
 }
 
 /// The host's wall clock, or `None` while it reads before the moq epoch (2020): unset.
-fn host_wall() -> Option<SystemTime> {
+pub(crate) fn host_wall() -> Option<SystemTime> {
 	let now = SystemTime::from(moq_clock::wall());
 	#[cfg(test)]
 	let now = HOST_WALL.get().unwrap_or(now);

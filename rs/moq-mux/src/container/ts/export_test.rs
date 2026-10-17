@@ -1041,7 +1041,7 @@ async fn export_trims_leading_pictures_after_each_delivery_break() {
 		video, expected,
 		"continuous leading pictures survive; only join and later-hole orphans are trimmed"
 	);
-	let stats = export.stats();
+	let stats = export.stats().release;
 	assert_eq!(
 		(stats.dropped, stats.trimmed),
 		(2, 2),
@@ -2114,6 +2114,53 @@ async fn read_frames(consumer: &moq_net::broadcast::Consumer, name: &str, kind: 
 		frames.push(frame.payload.to_vec());
 	}
 	frames
+}
+
+/// The import counts what each rendition writes and the export what it reads: both agree with
+/// the frames a subscriber reads back, and only video counts keyframes.
+#[tokio::test(start_paused = true)]
+async fn stats_count_what_the_import_writes_and_the_export_reads() {
+	let data = include_bytes!("test_data/bbb_cbr.ts");
+
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+	let mut import = crate::container::ts::Import::new(broadcast, catalog.reserve());
+	import.decode(&BytesMut::from(&data[..])).unwrap();
+	import.finish().unwrap();
+
+	let snapshot = catalog.snapshot();
+	let sent = catalog.stats();
+	let video = snapshot.video.renditions.keys().map(|name| (name, Kind::Video));
+	let audio = snapshot.audio.renditions.keys().map(|name| (name, Kind::Audio));
+	let renditions: Vec<_> = video.chain(audio).collect();
+	assert_eq!(
+		renditions.len(),
+		2,
+		"the clip carries one video and one audio rendition"
+	);
+	assert_eq!(sent.len(), renditions.len(), "a report per rendition: {sent:?}");
+	for (name, kind) in renditions {
+		let frames = read_frames(&consumer, name, kind).await;
+		let report = &sent[name];
+		assert!(!frames.is_empty(), "{name} carries frames");
+		assert_eq!(report.frames, frames.len() as u64, "{name} frames");
+		assert_eq!(
+			report.bytes,
+			frames.iter().map(Vec::len).sum::<usize>() as u64,
+			"{name} bytes"
+		);
+		assert_eq!(report.keyframes > 0, kind == Kind::Video, "{name} keyframes");
+	}
+
+	let source = crate::source::announced(&consumer).await;
+	drain_with(open_export(source.clone()).await.unwrap()).await;
+	let received = source.stats();
+	for (name, report) in &sent {
+		assert_eq!(received[name].frames, report.frames, "{name} frames read");
+		assert_eq!(received[name].bytes, report.bytes, "{name} bytes read");
+		assert!(received[name].arrival.is_some(), "{name} records its newest arrival");
+	}
 }
 
 /// Both real Kyrion MP2 programs must survive TS -> MoQ -> TS byte-for-byte, and
@@ -5698,7 +5745,7 @@ async fn a_start_group_cut_short_starts_at_the_next() {
 		audio.iter().all(|&p| p >= pts(GOP)),
 		"no audio leads the keyframe the export starts at: {audio:?}"
 	);
-	let stats = export.stats();
+	let stats = export.stats().release;
 	assert_eq!(stats.dropped, 0, "nothing that went out lost a frame");
 	assert_eq!(stats.gaps, 1, "the cut is counted");
 	assert!(stats.trimmed >= 5, "the cut-off start is counted: {}", stats.trimmed);
@@ -5775,7 +5822,7 @@ async fn audio_dropped_ahead_of_a_moved_start_is_not_started() {
 		audio.iter().all(|&p| p >= pts(GOP)),
 		"no audio leads the keyframe: {audio:?}"
 	);
-	let stats = export.stats();
+	let stats = export.stats().release;
 	assert_eq!(stats.dropped, 0, "nothing was lost from the output");
 	assert!(stats.trimmed > 0);
 }
@@ -5819,7 +5866,7 @@ async fn a_stale_start_group_holds_the_audio_behind_the_next_keyframe() {
 		audio.iter().all(|&p| p >= pts(GOP)),
 		"no audio leads the keyframe the export starts at: {audio:?}"
 	);
-	let stats = export.stats();
+	let stats = export.stats().release;
 	assert_eq!(stats.dropped, 0, "nothing was lost from the output");
 	assert!(stats.trimmed > 0);
 }
