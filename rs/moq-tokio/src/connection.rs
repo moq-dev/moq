@@ -639,6 +639,16 @@ impl Monitor {
 		self.state.read().session.as_ref().map(moq_net::Session::stats)
 	}
 
+	/// Why the loop is retrying: the error that ended the last session or failed the
+	/// latest dial, or `None` once a session connects.
+	///
+	/// Read it while [`Connection::status`] reports [`Status::Disconnected`]: a redial
+	/// that keeps failing never changes the status, so this is where its reason shows.
+	/// The loop giving up reports through [`Connection::closed`] instead.
+	pub fn failure(&self) -> Option<Error> {
+		self.state.read().failure.clone()
+	}
+
 	/// Snapshot statistics and protocol together, or `None` while disconnected.
 	pub fn snapshot(&self) -> Option<Snapshot> {
 		let state = self.state.read();
@@ -1181,16 +1191,6 @@ impl Connection {
 	/// between sessions.
 	pub fn version(&self) -> Option<Version> {
 		self.state.read().version
-	}
-
-	/// Why the loop is retrying: the error that ended the last session or failed the
-	/// latest redial, or `None` once a session connects.
-	///
-	/// Read it while [`status`](Self::status) reports [`Status::Disconnected`]: a redial
-	/// that keeps failing never changes the status, so this is where its reason shows.
-	/// The loop giving up reports through [`closed`](Self::closed) instead.
-	pub fn failure(&self) -> Option<Error> {
-		self.state.read().failure.clone()
 	}
 
 	/// What the live session runs on, or `None` while disconnected.
@@ -2202,10 +2202,11 @@ mod tests {
 		config.backoff.timeout = Some(Duration::ZERO);
 		let client = config.init(Default::default()).unwrap();
 		let mut connection = client.connect(url(&format!("tcp://{HOST}:1/")));
+		let monitor = connection.monitor();
 
 		let failure = tokio::time::timeout(WAIT, async {
 			loop {
-				if let Some(err) = connection.failure() {
+				if let Some(err) = monitor.failure() {
 					break err;
 				}
 				tokio::time::sleep(MIN_BACKOFF).await;
@@ -2223,7 +2224,7 @@ mod tests {
 			.expect("never connected once the name moved")
 			.unwrap();
 		assert_eq!(status, Status::Connected);
-		assert!(connection.failure().is_none(), "the connect must clear the failure");
+		assert!(monitor.failure().is_none(), "the connect must clear the failure");
 		let _session = tokio::time::timeout(WAIT, accepted.recv()).await.unwrap().unwrap();
 	}
 

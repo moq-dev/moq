@@ -977,7 +977,7 @@ impl MoqSession {
 	pub fn failure(&self) -> Option<MoqError> {
 		match &self.inner {
 			#[cfg(not(target_arch = "wasm32"))]
-			Inner::Connection(connection) => connection.failure().map(map_closed_error),
+			Inner::Connection(connection) => connection.monitor().failure().map(map_closed_error),
 			Inner::Session(_) => None,
 		}
 	}
