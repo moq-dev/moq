@@ -100,6 +100,8 @@ pub(super) struct Shared {
 	overflowed: AtomicU64,
 	/// The generation that ended its measurement, or 0.
 	finished: AtomicU64,
+	/// The generation whose end a callback has closed out, or 0.
+	acknowledged: AtomicU64,
 	events: SyncSender<(u64, Event)>,
 	received: Mutex<Receiver<(u64, Event)>>,
 }
@@ -117,6 +119,7 @@ impl Default for Shared {
 			generation: AtomicU64::new(0),
 			overflowed: AtomicU64::new(0),
 			finished: AtomicU64::new(0),
+			acknowledged: AtomicU64::new(0),
 			events,
 			received: Mutex::new(received),
 		}
@@ -185,6 +188,12 @@ impl Observer {
 	/// stop counting, so the read after it is final. Only the clock moves on.
 	pub fn finish(&self) {
 		self.shared.finished.store(self.generation, Ordering::Release);
+	}
+
+	/// Whether a callback, or the stream going away, has closed out the
+	/// measurement since [`finish`](Self::finish), so the next read is final.
+	pub fn finished(&self) -> bool {
+		self.shared.acknowledged.load(Ordering::Acquire) == self.generation
 	}
 }
 
@@ -271,7 +280,7 @@ impl Ledger {
 		let frames = mix.len() / channels;
 		if self.finished() {
 			// The measurement is over: report what was open, count nothing after it.
-			self.close();
+			self.acknowledge();
 			(self.filled, self.missing, self.first, self.power) = (0, 0, None, 0.0);
 			self.frames += frames as u64;
 			self.shared.clock.store(self.nanos(self.frames), Ordering::Relaxed);
@@ -365,6 +374,14 @@ impl Ledger {
 		self.send(Event::Gap(gap));
 	}
 
+	/// Close a gap still open and tell the observer its measurement is final.
+	/// The gap is queued before the acknowledgement, so a read after it sees it.
+	fn acknowledge(&mut self) {
+		self.close();
+		let observer = self.shared.observer.load(Ordering::Acquire);
+		self.shared.acknowledged.store(observer, Ordering::Release);
+	}
+
 	/// Whether the reading observer has ended its measurement.
 	fn finished(&self) -> bool {
 		let observer = self.shared.observer.load(Ordering::Acquire);
@@ -394,8 +411,12 @@ impl Drop for Ledger {
 	/// A stream going away mid-gap still reports it, and nothing plays until the
 	/// next stream does. Runs on the driver thread, which drops the stream.
 	fn drop(&mut self) {
+		if self.finished() {
+			self.acknowledge();
+			return;
+		}
 		self.close();
-		if self.playing && !self.finished() {
+		if self.playing {
 			self.shared.stalled.store(true, Ordering::Relaxed);
 			let at = self.clock(self.frames);
 			self.send(Event::Stall(Stall { at, stalled: true }));
@@ -518,7 +539,9 @@ mod tests {
 		add(&mut ledger, 128, 128);
 		add(&mut ledger, 128, 0);
 		observer.finish();
+		assert!(!observer.finished(), "no callback has seen it yet");
 		add(&mut ledger, 128, 0);
+		assert!(observer.finished());
 		add(&mut ledger, 128, 128);
 		add(&mut ledger, 128, 0);
 		ledger.add(&buffer(128, 0), 2, 0, false);

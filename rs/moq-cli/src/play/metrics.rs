@@ -25,6 +25,9 @@ use super::timeline::Presentation;
 /// How often a sample is taken, the browser probe's interval.
 const INTERVAL: Duration = Duration::from_millis(250);
 
+/// Intervals to wait for the speaker to close out the measurement.
+const FINISH_TICKS: usize = 4;
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct Sample {
@@ -130,8 +133,19 @@ impl Metrics {
 	pub(super) async fn finish(mut self) -> anyhow::Result<()> {
 		if let Some((observer, _)) = &self.current {
 			observer.finish();
+			// The audio thread closes the gap on its next buffer. One that never
+			// comes is a device that stopped pulling, which the render clock
+			// already shows, so the wait is bounded rather than hung on it.
+			for _ in 0..FINISH_TICKS {
+				self.interval.tick().await;
+				if observer.finished() {
+					break;
+				}
+			}
+			if !observer.finished() {
+				tracing::warn!("the speaker never closed out the measurement; the last gap may be missing");
+			}
 		}
-		// The audio thread closes the gap on its next buffer, well inside an interval.
 		self.tick().await
 	}
 
