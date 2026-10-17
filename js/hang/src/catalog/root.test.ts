@@ -277,7 +277,8 @@ test("a supported catalog version is read", () => {
 // Only a field an older reader would misread raises the version.
 test("the catalog version is needed only for misread fields", () => {
 	const audio = { ...opus, warmup: 80 };
-	const root = (hd: object) => RootSchema.parse({ video: { renditions: { hd } }, audio: { renditions: { en: audio } } });
+	const root = (hd: object) =>
+		RootSchema.parse({ video: { renditions: { hd } }, audio: { renditions: { en: audio } } });
 
 	expect(minVersion(root(avc))).toBeUndefined();
 	expect(minVersion(root({ ...avc, track: "hd" }))).toBeUndefined();
