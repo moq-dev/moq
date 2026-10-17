@@ -1658,15 +1658,23 @@ mod tests {
 
 	// ---- Malformed rewind ----
 
+	/// The track refuses a group whose first frame rewinds, but not a later frame that does,
+	/// so the consumer floors every frame against the previous group's start.
 	#[tokio::test]
-	async fn a_group_starting_below_the_previous_start_aborts() {
+	async fn a_frame_below_the_previous_start_aborts() {
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let mut consumer = Consumer::new(track.subscribe(None), Container::Legacy(crate::container::Kind::Data));
 		write_group(&mut track, 0, &[ts(100_000)]);
 		assert_eq!(consumer.read_frame().await.unwrap().unwrap().timestamp, ts(100_000));
-		write_group(&mut track, 1, &[ts(0)]);
+		write_group(&mut track, 1, &[ts(100_000), ts(0)]);
 		track.finish().unwrap();
-		let err = consumer.read().await.unwrap_err();
+		let err = loop {
+			match consumer.read().await {
+				Ok(Some(_)) => continue,
+				Ok(None) => panic!("the rewound frame ended the track cleanly"),
+				Err(err) => break err,
+			}
+		};
 		assert!(matches!(
 			err,
 			crate::Error::TimestampRewind(TimestampRewind { timestamp, floor })

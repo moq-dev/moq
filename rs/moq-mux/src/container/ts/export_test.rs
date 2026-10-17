@@ -1656,6 +1656,145 @@ async fn export_packs_ac3_frames_up_to_their_buffer() {
 	);
 }
 
+/// One six-block 48 kHz E-AC-3 sync frame, with an optional dependent substream.
+fn eac3_frame(dependent: bool) -> Vec<u8> {
+	let mut frame = vec![0x0b, 0x77, if dependent { 0x40 } else { 0 }, 0xff, 0x3f, 0x80];
+	frame.resize(512, 0xaa);
+	frame
+}
+
+#[tokio::test(start_paused = true)]
+async fn export_splits_dvb_eac3_access_units() {
+	let frame = eac3_frame(false);
+	let (pes, _) = exported_dolby_pes(vec![Ac3Write::Pes(0, frame.repeat(3))], 0x7a).await;
+	assert_eq!(pes.len(), 3);
+	for (i, (pts, payload)) in pes.iter().enumerate() {
+		assert_eq!(*pts, pes[0].0 + i as u64 * 2_880);
+		assert_eq!(*payload, frame);
+	}
+}
+
+#[tokio::test(start_paused = true)]
+async fn export_keeps_dvb_eac3_dependent_substreams_on_one_interval() {
+	let unit = [eac3_frame(false), eac3_frame(true)].concat();
+	let (pes, _) = exported_dolby_pes(vec![Ac3Write::Pes(0, unit.repeat(3))], 0x7a).await;
+	assert_eq!(pes.len(), 3);
+	for (i, (pts, payload)) in pes.iter().enumerate() {
+		assert_eq!(*pts, pes[0].0 + i as u64 * 2_880, "one 32 ms interval per access unit");
+		assert_eq!(*payload, unit);
+	}
+}
+
+#[tokio::test(start_paused = true)]
+async fn export_drops_dvb_eac3_partial_frames() {
+	let frame = eac3_frame(false);
+	let payload = [frame.clone(), frame[..60].to_vec()].concat();
+	let (pes, _) = exported_dolby_pes(vec![Ac3Write::Pes(0, payload)], 0x7a).await;
+	assert_eq!(pes.len(), 1);
+	assert_eq!(pes[0].1, frame);
+}
+
+/// A source that leaves `data_alignment_indicator` clear splits E-AC-3 sync frames across PES,
+/// as it does AC-3's, and each still goes out whole, a frame after the last.
+#[tokio::test(start_paused = true)]
+async fn export_reassembles_dvb_eac3_frames_split_across_pes() {
+	let frame = eac3_frame(false);
+	let stream = frame.repeat(6);
+	// Cut mid-frame into frames 0-1, 1-3 and 3-5, timed by frames 0, 2 and 4.
+	let (pes, _) = exported_dolby_pes(
+		vec![
+			Ac3Write::Pes(0, stream[..800].to_vec()),
+			Ac3Write::Pes(64, stream[800..2000].to_vec()),
+			Ac3Write::Pes(128, stream[2000..].to_vec()),
+		],
+		0x7a,
+	)
+	.await;
+	assert_eq!(pes.len(), 6, "every sync frame");
+	for (k, (pts, payload)) in pes.iter().enumerate() {
+		assert_eq!(*payload, frame, "frame {k} whole");
+		assert_eq!(*pts, pes[0].0 + k as u64 * 2_880, "frame {k} 32 ms after the last");
+	}
+}
+
+/// A dependent substream the next PES carries, whole or completing, goes out after its access
+/// unit's independent substream at that unit's time, not the next unit's.
+#[tokio::test(start_paused = true)]
+async fn export_times_a_dvb_eac3_substream_by_its_access_unit_across_pes() {
+	let (independent, dependent) = (eac3_frame(false), eac3_frame(true));
+	let unit = [independent.clone(), dependent.clone()].concat();
+	let stream = unit.repeat(3);
+	// Cut between unit 0's substreams, then inside its dependent substream.
+	for cut in [512, 800] {
+		let (pes, _) = exported_dolby_pes(
+			vec![
+				Ac3Write::Pes(0, stream[..cut].to_vec()),
+				Ac3Write::Pes(32, stream[cut..].to_vec()),
+			],
+			0x7a,
+		)
+		.await;
+		let start = pes[0].0;
+		assert_eq!(
+			pes,
+			[
+				(start, independent.clone()),
+				(start, dependent.clone()),
+				(start + 2_880, unit.clone()),
+				(start + 5_760, unit.clone()),
+			],
+			"cut at {cut}"
+		);
+	}
+}
+
+/// A PES of only a dependent substream, timed by the access unit it extends as the export's
+/// own output is, still joins that unit, and the next unit keeps its own time.
+#[tokio::test(start_paused = true)]
+async fn export_keeps_a_dvb_eac3_substream_pes_timed_by_its_unit() {
+	let (independent, dependent) = (eac3_frame(false), eac3_frame(true));
+	let unit = [independent.clone(), dependent.clone()].concat();
+	let (pes, _) = exported_dolby_pes(
+		vec![
+			Ac3Write::Pes(0, independent.clone()),
+			Ac3Write::Pes(0, [dependent.clone(), unit.clone()].concat()),
+		],
+		0x7a,
+	)
+	.await;
+	let start = pes[0].0;
+	assert_eq!(pes, [(start, independent), (start, dependent), (start + 2_880, unit)]);
+}
+
+/// A PES without a sync frame holds nothing a decoder can use, so it goes nowhere rather
+/// than out whole.
+#[tokio::test(start_paused = true)]
+async fn export_drops_a_dvb_eac3_pes_with_no_sync_frame() {
+	let frame = eac3_frame(false);
+	let (pes, _) = exported_dolby_pes(
+		vec![
+			Ac3Write::Pes(0, frame.clone()),
+			Ac3Write::Pes(32, vec![0xee; 300]),
+			Ac3Write::Pes(64, frame.clone()),
+		],
+		0x7a,
+	)
+	.await;
+	assert_eq!(pes.len(), 2, "{pes:?}");
+	assert!(pes.iter().all(|(_, payload)| *payload == frame));
+}
+
+/// A dependent substream ahead of the first independent one belongs to an access unit that
+/// began before the join, so it goes nowhere.
+#[tokio::test(start_paused = true)]
+async fn export_drops_dvb_eac3_substreams_before_the_join() {
+	let unit = [eac3_frame(false), eac3_frame(true)].concat();
+	let payload = [eac3_frame(true), unit.clone()].concat();
+	let (pes, _) = exported_dolby_pes(vec![Ac3Write::Pes(0, payload)], 0x7a).await;
+	assert_eq!(pes.len(), 1);
+	assert_eq!(pes[0].1, unit);
+}
+
 /// A 32 kb/s 48 kHz 2/0 AC-3 sync frame: 128 bytes, 1,536 samples (32 ms).
 fn ac3_sync() -> Vec<u8> {
 	let mut sync = vec![0x0b, 0x77, 0x00, 0x00, 0x00, 0x40, 0x40];
@@ -1691,6 +1830,11 @@ enum Ac3Write {
 /// Export `input` on an AC-3 passthrough PID beside bbb's media, and return the PTS and
 /// payload of every PES on that PID, and the export's stats.
 async fn exported_ac3_pes(input: Vec<Ac3Write>) -> (Vec<(u64, Vec<u8>)>, super::stats::Export) {
+	exported_dolby_pes(input, 0x6a).await
+}
+
+/// [`exported_ac3_pes`] for the Dolby audio `descriptor` tags.
+async fn exported_dolby_pes(input: Vec<Ac3Write>, descriptor: u8) -> (Vec<(u64, Vec<u8>)>, super::stats::Export) {
 	const AC3_PID: u16 = 0x104;
 	let data = include_bytes!("test_data/bbb.ts");
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
@@ -1710,7 +1854,7 @@ async fn exported_ac3_pes(input: Vec<Ac3Write>) -> (Vec<(u64, Vec<u8>)>, super::
 		let mut track = tscat::Track::new(AC3_PID);
 		track.verbatim = Some(tscat::Verbatim::new(0x06, tscat::Framing::Pes));
 		track.descriptors = vec![tscat::Descriptor {
-			tag: 0x6a,
+			tag: descriptor,
 			data: Bytes::from_static(&[0x00]),
 		}];
 		catalog
@@ -7881,14 +8025,16 @@ async fn a_timeline_restarting_at_zero_fails_the_export() {
 		.unwrap()
 		.with_delay(Duration::from_millis(500));
 	let start = tokio::time::Instant::now();
-	// One-second groups of 20 ms frames for 10 s, then a group back at zero.
+	// One-second groups of 20 ms frames for 10 s, then a group back at zero. The track refuses
+	// a group whose first frame rewinds, so that group opens at the previous start.
 	for sequence in 0..11u64 {
 		tokio::time::sleep_until(start + Duration::from_secs(sequence)).await;
 		let base = if sequence < 10 { sequence * 1_000 } else { 0 };
 		let mut group = track.create_group(moq_net::group::Info { sequence }).unwrap();
 		for k in 0..50u64 {
+			let millis = if sequence == 10 && k == 0 { 9_000 } else { base + k * 20 };
 			let frame = Frame {
-				timestamp: Timestamp::from_millis(base + k * 20).unwrap(),
+				timestamp: Timestamp::from_millis(millis).unwrap(),
 				duration: None,
 				payload: Bytes::from_static(&[0x21, 0x10, 0x04, 0x60]),
 				keyframe: k == 0,

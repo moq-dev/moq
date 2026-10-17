@@ -56,7 +56,7 @@ impl Delivered {
 	}
 
 	/// The lowest sequence handed out above a gap: once it is past the reader's budget,
-	/// so is the gap, since group timestamps on a track never rewind.
+	/// so is the gap, since a timed track refuses a group whose start rewinds.
 	pub fn above_gap(&self) -> Option<u64> {
 		let mut runs = self.runs.keys();
 		match runs.next()? {

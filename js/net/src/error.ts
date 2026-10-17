@@ -257,8 +257,8 @@ export class GroupTooLarge extends Stream {
 }
 
 /**
- * A frame's timedness doesn't match its track: a timestamp on a track with no timescale, or
- * none on a track that has one.
+ * A frame's timestamp doesn't fit its track: a timestamp on a track with no timescale, none
+ * on a track that has one, or a group's first frame starting before the group below it.
  *
  * Raised locally by a frame or datagram write, and decoded from a moq-lite peer's
  * `TIMESTAMP_MISMATCH` reset. Mirrors the Rust `Error::TimestampMismatch`.
@@ -269,7 +269,7 @@ export class TimestampMismatch extends Stream {
 	constructor(options?: { cause?: unknown }) {
 		super(StreamCode.TimestampMismatch, {
 			...options,
-			message: "frame timestamp doesn't match track timescale",
+			message: "frame timestamp doesn't fit its track",
 		});
 		this.name = "TimestampMismatch";
 	}

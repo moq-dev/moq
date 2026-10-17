@@ -1841,7 +1841,7 @@ pub extern "C" fn moq_origin_announced_cancel(announced: u32) -> i32 {
 	})
 }
 
-/// Consume a broadcast from an origin by path, waiting until something can serve it.
+/// Follow a broadcast on an origin by path, delivering each publisher instance that serves it.
 ///
 /// Resolves against future announcements: it waits for the announcement to arrive (e.g. over the
 /// network) and then delivers the broadcast handle via `on_broadcast`. Use it right after
@@ -1849,9 +1849,12 @@ pub extern "C" fn moq_origin_announced_cancel(announced: u32) -> i32 {
 /// reachable now, use [moq_origin_request] instead. A broadcast created on this origin
 /// resolves once it is announced, like a remote one.
 ///
-/// `on_broadcast` is invoked with a positive broadcast handle once announced, then exactly once
-/// more with a terminal code: `0` (the wait finished, including after
-/// [moq_origin_announced_broadcast_cancel]) or a negative error. After the terminal (`<= 0`) callback,
+/// `on_broadcast` is invoked with a positive broadcast handle once announced, and again with a
+/// new handle each time another publisher instance takes over (a restarted publisher, or a
+/// replacement session) or the broadcast returns after it went offline. Drop what was read
+/// from the previous handle then: its tracks end when its session does. The wait ends with
+/// exactly one terminal code: `0` (after [moq_origin_announced_broadcast_cancel], or the origin
+/// closing once a handle was delivered) or a negative error. After the terminal (`<= 0`) callback,
 /// `on_broadcast` is never called again and `user_data` is never touched again, so release
 /// `user_data` there. The broadcast handle is usable with [moq_consume_catalog] / [moq_consume_track]
 /// and must be freed separately with [moq_consume_close].

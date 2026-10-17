@@ -5020,6 +5020,7 @@ dependencies = [
  "libc",
  "moq-auth 0.2.1",
  "moq-net",
+ "moq-quic",
  "moq-shaper",
  "moq-sock",
  "moq-stats",

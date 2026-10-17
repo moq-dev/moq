@@ -197,7 +197,7 @@ class Client:
         return self._require_consumer().announced(prefix, filter=filter, hidden=hidden)
 
     def announced_broadcast(self, path: str) -> AnnouncedBroadcast:
-        """Await announcement of the broadcast at exactly ``path``.
+        """Follow the broadcast at exactly ``path`` across its publisher instances.
 
         See :meth:`OriginConsumer.announced_broadcast`.
         """
