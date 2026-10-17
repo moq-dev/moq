@@ -11,8 +11,8 @@ instead of guessing or reparsing the bitstream.
 
 Deferred to m2 with HDR. The
 [WebGPU HDR](/quest/m2/webgpu-hdr.md) renderer is the consumer this model
-waited for. Encoder colour correctness stays in m1 as
-[Encoder colour](/quest/m1/color-model.md).
+waited for. Encoder colour landed in m1 (#5808): moq-video's `Color`
+carries primaries and transfer, so a catalog field can reuse its names.
 
 `rs/hang/src/catalog/video/mod.rs` has carried a bare `// TODO color space` since
 the config was written. Two codecs already expose colour per their own syntax:
@@ -55,4 +55,4 @@ stays byte-identical.
 
 ## Related
 
-- [Encoder colour](/quest/m1/color-model.md) - encoders signal the colour they actually produce
+- [WebGPU HDR](/quest/m2/webgpu-hdr.md) - the renderer that consumes this model

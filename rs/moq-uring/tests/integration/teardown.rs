@@ -57,10 +57,9 @@ fn a_send_staged_on_the_way_out_still_goes() {
 	worker
 		.block_on(async {
 			let mut tx = sock.acquire().await.expect("acquire");
-			tx[..3].copy_from_slice(b"bye");
+			tx.extend_from_slice(b"bye");
 			tx.send(udp::Transmit {
 				to: peer_addr,
-				len: 3,
 				segment: 3,
 				ecn: None,
 			})

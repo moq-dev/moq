@@ -69,7 +69,7 @@ pub use moq_quic::{QlogConfig, QlogStream};
 
 pub use crate::quic::driver::connection::{
     AcceptBi, AcceptUni, Connecting, Connection, OpenBi, OpenUni, ReadDatagram,
-    RemoteAddressWatcher, SendDatagram, SendDatagramError,
+    RemoteAddressWatcher, SendDatagramError,
 };
 pub use crate::quic::driver::endpoint::{Accept, Endpoint, EndpointStats};
 pub use crate::quic::driver::incoming::{Incoming, IncomingFuture, RetryError};

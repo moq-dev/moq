@@ -377,6 +377,7 @@ mod tests {
 	#[test]
 	fn test_track_status_ok_round_trip() {
 		let properties = Properties {
+			dynamic_groups: false,
 			max_cache_duration: Some(std::time::Duration::from_secs(30)),
 			timescale: Some(crate::Timescale::MILLI),
 			priority: Some(7),

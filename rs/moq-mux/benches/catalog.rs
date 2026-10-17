@@ -10,11 +10,15 @@
 //! back for every subscriber, exercising namespace resolution over both fanout axes.
 //! The rate window runs on tokio's paused clock, so the counts are deterministic.
 //!
+//! The teardown case drops a reserved importer whose declared tracks never got a config, as at the
+//! end of malformed input. Each drop releases one reservation, so a per-release scan of the
+//! remaining tracks would show up as a quadratic slope over the track count.
+//!
 //! Run with `cargo bench -p moq-mux --bench catalog`.
 
 use std::hint::black_box;
 use std::task::Poll;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use moq_mux::catalog::Stream;
@@ -37,7 +41,7 @@ struct Fanout {
 	tracks: Vec<moq_mux::container::Producer<Container, hang::catalog::VideoConfig>>,
 	subscribers: Vec<moq_mux::catalog::Consumer>,
 	waiter: kio::Waiter,
-	anchor: Instant,
+	anchor: moq_clock::Instant,
 }
 
 impl Fanout {
@@ -74,7 +78,7 @@ impl Fanout {
 			_catalog: catalog,
 			tracks,
 			waiter: kio::Waiter::noop(),
-			anchor: Instant::now(),
+			anchor: moq_clock::now(),
 		};
 		// The initial track set is configuration, not estimate traffic.
 		fanout.receive();
@@ -172,5 +176,49 @@ fn bench_estimate_fanout(c: &mut Criterion) {
 	group.finish();
 }
 
-criterion_group!(benches, bench_estimate_fanout);
+/// Declared tracks on an importer that ends before configuring any.
+const UNRESOLVED: [usize; 3] = [1, 64, 1024];
+
+struct Unresolved {
+	_broadcast: moq_net::broadcast::Producer,
+	_catalog: moq_mux::catalog::Producer,
+	tracks: Vec<moq_mux::container::Producer<Container, hang::catalog::VideoConfig>>,
+}
+
+impl Unresolved {
+	fn new(tracks: usize) -> Self {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+		let reserved = catalog.reserve();
+		let tracks = (0..tracks)
+			.map(|index| {
+				let info = reserved.track_info(hang::catalog::PRIORITY.video);
+				let track = broadcast.create_track(format!("v{index}"), info).unwrap();
+				reserved.video(track, Container::Legacy(Kind::Video), None).unwrap()
+			})
+			.collect();
+		Self {
+			_broadcast: broadcast,
+			_catalog: catalog,
+			tracks,
+		}
+	}
+}
+
+fn bench_unresolved_teardown(c: &mut Criterion) {
+	let mut group = c.benchmark_group("catalog_unresolved_teardown");
+	for tracks in UNRESOLVED {
+		group.throughput(Throughput::Elements(tracks as u64));
+		group.bench_with_input(BenchmarkId::from_parameter(tracks), &tracks, |b, &tracks| {
+			b.iter_batched(
+				|| Unresolved::new(tracks),
+				|mut unresolved| unresolved.tracks.clear(),
+				BatchSize::SmallInput,
+			);
+		});
+	}
+	group.finish();
+}
+
+criterion_group!(benches, bench_estimate_fanout, bench_unresolved_teardown);
 criterion_main!(benches);

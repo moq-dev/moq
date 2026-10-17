@@ -18,7 +18,7 @@ use recv::Recv;
 mod saturated;
 mod schedule;
 pub use recv::{Chunks, Credit, ReadError, ReadableError};
-use schedule::Schedule;
+use schedule::{Next, Schedule};
 
 mod send;
 pub(crate) use send::{ByteSlice, BytesArray};
@@ -231,6 +231,25 @@ impl<'a> SendStream<'a> {
     /// the chunk will be advanced and contain only non-written data after the call.
     pub fn write_chunks(&mut self, data: &mut [Bytes]) -> Result<Written, WriteError> {
         self.write_source(&mut BytesArray::from_chunks(data))
+    }
+
+    /// How many bytes a write would accept right now
+    ///
+    /// Zero when a write would block or fail. Lets a caller size a chunk before taking it from a
+    /// buffer it cannot put bytes back into.
+    pub fn write_limit(&self) -> usize {
+        if self.conn_state.is_closed() {
+            return 0;
+        }
+        let budget = match self.state.send.get(&self.id) {
+            None => return 0,
+            Some(None) => self.state.max_send_data(self.id).into_inner(),
+            Some(Some(stream)) if !stream.is_writable() || stream.stop_reason.is_some() => {
+                return 0;
+            }
+            Some(Some(stream)) => stream.max_data - stream.offset(),
+        };
+        usize::try_from(budget.min(self.state.write_limit())).unwrap_or(usize::MAX)
     }
 
     fn write_source<B: BytesSource>(&mut self, source: &mut B) -> Result<Written, WriteError> {
@@ -502,7 +521,8 @@ impl Checkpoint {
 /// A send group shares bytes with the other groups of its domain: a higher priority group
 /// preempts every lower one, and groups of equal priority get an equal share of bytes no
 /// matter how many streams each has queued. Domains share bytes equally whatever their
-/// groups' priorities. Streams outside any group go before all of it.
+/// groups' priorities. Streams outside any group go before all of it. A group's datagrams,
+/// from [`Datagrams::send`](crate::Datagrams::send), share its bytes in the same order.
 pub struct SendGroups<'a> {
     pub(super) state: &'a mut StreamsState,
 }
@@ -564,6 +584,47 @@ impl SendGroups<'_> {
     pub fn close_domain(&mut self, domain: SendDomain) {
         let index = domain.index(self.state.tag);
         self.state.pending.close_domain(index);
+    }
+}
+
+impl StreamsState {
+    /// Queue a datagram in `group` at `order`, within `budget` bytes of queued datagrams.
+    ///
+    /// Returns whether it stayed queued rather than being evicted itself.
+    ///
+    /// # Panics
+    /// - when `group` was opened on another connection
+    pub(crate) fn queue_datagram(
+        &mut self,
+        datagram: frame::Datagram,
+        group: Option<&SendGroup>,
+        order: i64,
+        budget: usize,
+    ) -> bool {
+        let group = group.map(|g| g.index(self.tag));
+        let frame = datagram.size(true);
+        self.pending
+            .push_datagram(group, order, datagram, frame, budget)
+    }
+
+    /// Drop queued datagrams with a payload over `max_payload` bytes, returning whether any was.
+    pub(crate) fn drop_oversized_datagrams(&mut self, max_payload: usize) -> bool {
+        self.pending.retain_datagrams(|datagram| {
+            let keep = datagram.data.len() <= max_payload;
+            if !keep {
+                trace!(
+                    "dropping {} byte datagram violating {} byte limit",
+                    datagram.data.len(),
+                    max_payload
+                );
+            }
+            keep
+        })
+    }
+
+    /// Frame bytes queued datagrams hold against the send buffer.
+    pub(crate) fn datagram_bytes(&self) -> usize {
+        self.pending.datagram_bytes()
     }
 }
 

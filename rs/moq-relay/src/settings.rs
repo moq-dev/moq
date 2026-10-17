@@ -38,6 +38,9 @@ pub struct Settings {
 	web: Web,
 
 	#[usage(flatten)]
+	acme: Acme,
+
+	#[usage(flatten)]
 	stats: Stats,
 
 	#[usage(flatten)]
@@ -177,6 +180,25 @@ struct WebHttps {
 }
 
 #[derive(usage::Config)]
+#[usage(prefix = "acme")]
+struct Acme {
+	#[usage(env = "MOQ_ACME_DOMAINS", cli("--acme-domains"), parse = "list_by_comma")]
+	domains: Option<Vec<String>>,
+
+	#[usage(env = "MOQ_ACME_CONTACT", cli("--acme-contact"), parse = "list_by_comma")]
+	contact: Option<Vec<String>>,
+
+	#[usage(env = "MOQ_ACME_DIR", cli("--acme-dir"))]
+	dir: Option<String>,
+
+	#[usage(env = "MOQ_ACME_DIRECTORY", cli("--acme-directory"))]
+	directory: Option<String>,
+
+	#[usage(env = "MOQ_ACME_TIMEOUT", cli("--acme-timeout"))]
+	timeout: Option<String>,
+}
+
+#[derive(usage::Config)]
 #[usage(prefix = "stats")]
 struct Stats {
 	#[usage(env = "MOQ_STATS_ENABLED", cli("--stats-enabled"))]
@@ -238,6 +260,19 @@ struct Peer {
 	subscriptions: Option<usize>,
 	#[usage(env = "MOQ_PEER_FETCHES", cli("--peer-fetches"))]
 	fetches: Option<usize>,
+	#[usage(flatten)]
+	quic: PeerQuic,
+}
+
+#[derive(usage::Config)]
+#[usage(prefix = "peer.quic")]
+struct PeerQuic {
+	#[usage(env = "MOQ_PEER_QUIC_MAX_STREAMS", cli("--peer-quic-max-streams"))]
+	max_streams: Option<u64>,
+	#[usage(env = "MOQ_PEER_QUIC_RECEIVE_WINDOW", cli("--peer-quic-receive-window"))]
+	receive_window: Option<u64>,
+	#[usage(env = "MOQ_PEER_QUIC_SEND_WINDOW", cli("--peer-quic-send-window"))]
+	send_window: Option<u64>,
 }
 
 #[derive(usage::Config)]

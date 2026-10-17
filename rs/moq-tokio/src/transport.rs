@@ -206,7 +206,10 @@ where
 	fn poll_send_datagram(&mut self, _cx: &mut Context<'_>, payload: &[u8]) -> Poll<Result<(), Self::Error>> {
 		// The async interface's send is non-blocking (the transport queues or
 		// drops), so there is never a reason to return Pending.
-		Poll::Ready(self.session.send_datagram(Bytes::copy_from_slice(payload)))
+		Poll::Ready(web_transport_trait::Session::send_datagram(
+			&self.session,
+			Bytes::copy_from_slice(payload),
+		))
 	}
 
 	fn poll_recv_datagram(&mut self, cx: &mut Context<'_>) -> Poll<Result<Bytes, Self::Error>> {
@@ -858,6 +861,15 @@ impl<S: web_transport_trait::RecvStream + 'static> Drop for RecvStream<S> {
 impl Grouped for crate::quic::web::Session {
 	fn send_group(&self, priority: i64) -> Option<crate::quic::driver::SendGroup> {
 		Some(Self::send_group(self, priority))
+	}
+
+	fn send_datagram(
+		&self,
+		payload: Bytes,
+		group: Option<&crate::quic::driver::SendGroup>,
+		order: i64,
+	) -> Result<(), Self::Error> {
+		Self::send_datagram(self, payload, group, order)
 	}
 }
 
