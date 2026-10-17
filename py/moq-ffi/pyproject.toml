@@ -34,6 +34,8 @@ Repository = "https://github.com/moq-dev/moq"
 [tool.maturin]
 bindings = "uniffi"
 manifest-path = "../../rs/moq-ffi/Cargo.toml"
+# The OpenH264 software fallback is opt-in in Rust; the wheel ships it.
+features = ["openh264"]
 python-source = "."
 module-name = "moq_ffi._uniffi"
 # `maturin develop` writes the bindings into the source tree, where a later wheel build
