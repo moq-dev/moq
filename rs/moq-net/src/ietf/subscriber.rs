@@ -2772,6 +2772,12 @@ where
 			true => track.start_at(largest.map_or(0, |largest| largest.group)),
 			false => track.start_at(start.map(|start| start.group)),
 		};
+		if let Some(largest) = largest {
+			track.report_largest(track::Position {
+				group: largest.group,
+				frame: largest.object,
+			});
+		}
 		let mut fetching: Option<JoiningTask> = None;
 		{
 			let mut state = self.state.lock();
@@ -6660,6 +6666,19 @@ mod tests {
 				track.producer.as_ref().unwrap().publisher_priority(),
 				255 - priority.unwrap_or(128),
 				"SUBSCRIBE_OK priority must be committed before alias registration"
+			);
+			// The answer's largest is known before any group arrives.
+			let mut reader = track.producer.clone().unwrap();
+			let reported = match reader.poll_largest(&kio::Waiter::noop()) {
+				Poll::Ready(reported) => reported,
+				Poll::Pending => None,
+			};
+			assert_eq!(
+				reported,
+				largest.map(|largest| track::Position {
+					group: largest.group,
+					frame: largest.object,
+				})
 			);
 			let fill = track.fill.read();
 			fill.outstanding()
@@ -11860,12 +11879,20 @@ mod stitch_tests {
 			let mut stream = h.stream().await.with_version(version);
 			let result = h.subscriber.clone().recv_group(&mut stream).await;
 			assert!(matches!(result, Err(Error::Unsupported)), "{version}: {result:?}");
-			assert_eq!(h.track.latest(), None, "{version}: the refused subgroup opened a group");
+			assert_eq!(
+				h.track.latest_sequence(),
+				None,
+				"{version}: the refused subgroup opened a group"
+			);
 
 			let mut stream = h.stream().await.with_version(version);
 			let result = h.subscriber.clone().recv_group(&mut stream).await;
 			assert!(matches!(result, Err(Error::Unsupported)), "{version}: {result:?}");
-			assert_eq!(h.track.latest(), None, "{version}: a truncated subgroup opened a group");
+			assert_eq!(
+				h.track.latest_sequence(),
+				None,
+				"{version}: a truncated subgroup opened a group"
+			);
 
 			let mut stream = h.stream().await.with_version(version);
 			h.subscriber.clone().recv_group(&mut stream).await.unwrap();

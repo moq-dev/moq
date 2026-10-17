@@ -129,15 +129,16 @@ struct CatalogTimeline {
 }
 
 impl CatalogTimeline {
-	/// Report a newly published plaintext catalog group once. Each catalog group is one complete
-	/// snapshot, so it finishes as soon as it is reported.
+	/// Report a newly published plaintext catalog group. Each catalog group is one complete
+	/// snapshot, so it finishes as soon as it is reported. Only this producer writes the track,
+	/// one group per catalog from zero, so the sequence is counted here.
 	fn record(&mut self) {
+		// Counted before enrollment too, so the first recorded group has its real sequence.
+		let sequence = self.last_sequence.map_or(0, |sequence| sequence + 1);
+		self.last_sequence = Some(sequence);
 		let Some(recorder) = self.recorder.as_mut() else {
 			return;
 		};
-		let sequence = self.last_sequence.map_or(0, |sequence| sequence + 1);
-
-		self.last_sequence = Some(sequence);
 		recorder.frame(
 			hang::timeline::Position::group(sequence),
 			moq_net::Timestamp::now(),
@@ -174,9 +175,12 @@ impl<E: CatalogExt> Outputs<E> {
 		// Every consumer refuses a catalog that fails this, so refuse it before it reaches one.
 		catalog.check_renditions()?;
 		// One snapshot per group while deltas are disabled; the `.z` track carries the identical catalog.
-		self.hang
+		let written = self
+			.hang
 			.update(moq_net::Timed::from(catalog).at(moq_net::Timestamp::now()))?;
-		self.catalog_timeline.lock().unwrap().record();
+		if written.is_some() {
+			self.catalog_timeline.lock().unwrap().record();
+		}
 		self.hangz
 			.update(moq_net::Timed::from(catalog).at(moq_net::Timestamp::now()))?;
 

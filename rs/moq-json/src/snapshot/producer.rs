@@ -282,6 +282,8 @@ impl<T> Inner<T> {
 			return Err(err.clone());
 		}
 
+		// Any declared end refuses: the track's next sequence is its own, so an end declared ahead
+		// of the live edge can't be told apart from one the next group would cross.
 		let track = &self.track.inner;
 		if track.is_closed() || track.end().is_some() {
 			return Err(moq_net::Error::Closed.into());

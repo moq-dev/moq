@@ -330,7 +330,7 @@ impl Pending {
 	/// Announce the broadcast if its catalog has gone out, returning whether it has.
 	fn announce(&mut self) -> anyhow::Result<bool> {
 		if !matches!(
-			self.catalog.poll_largest(&kio::Waiter::noop()),
+			self.catalog.poll_largest(&moq_net::kio::Waiter::noop()),
 			std::task::Poll::Ready(Some(_))
 		) {
 			return Ok(false);

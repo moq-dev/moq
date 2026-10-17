@@ -1093,7 +1093,7 @@ export class Publisher {
 				// Exactly-once arrival-order serving. This synchronous package-internal pop
 				// and frameRange call are the operation's linearization point.
 				// Popping or filtering a group removes the subscriber's view of its edge.
-				const largest = !startSent && hasLargest(this.version) ? hooks.largestSnapshot(track) : undefined;
+				const largest = !startSent && hasLargest(this.version) ? hooks.bufferedLargest(track) : undefined;
 				const recv = hooks.tryRecvGroup(track);
 				switch (recv.kind) {
 					case "error":

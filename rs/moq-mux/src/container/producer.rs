@@ -340,8 +340,8 @@ where
 		self.group.is_none()
 	}
 
-	/// The sequence that would be allocated for the next appended group.
-	pub fn next_sequence(&self) -> u64 {
+	/// One past the newest group this producer opened, where the next one goes by default.
+	pub(crate) fn next_sequence(&self) -> u64 {
 		self.next_sequence
 	}
 

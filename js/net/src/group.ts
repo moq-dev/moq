@@ -166,7 +166,10 @@ export class Producer {
 	}
 
 	static {
-		hooks.groupProgress = (group, fn) => group.#state.total.subscribe(fn);
+		hooks.groupProgress = (group, fn) => {
+			fn(group.#state.total.peek());
+			return group.#state.total.subscribe(fn);
+		};
 		hooks.bindGroupTimed = (group, timed) => {
 			const state = group.#state;
 			if (state.timed === timed) return;

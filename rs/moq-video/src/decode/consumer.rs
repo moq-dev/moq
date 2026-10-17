@@ -126,7 +126,7 @@ impl Consumer {
 		// sequence there asks the publisher to rewind the track for everyone
 		// reading it. What a player wants is to skip what it already has.
 		if options.start == Start::Latest
-			&& let Some(live_edge) = subscriber.largest().await
+			&& let std::task::Poll::Ready(Some(live_edge)) = subscriber.poll_largest(&moq_net::kio::Waiter::noop())
 		{
 			subscriber.set_groups(live_edge.group..);
 		}

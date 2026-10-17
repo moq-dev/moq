@@ -406,22 +406,26 @@ impl Subscriber {
 		self.reader().latest()
 	}
 
-	/// Poll for a newer largest frame on the currently serving copy.
+	/// Poll for a largest frame newer than `seen` on the serving copy; see
+	/// [`track::Subscriber::largest`].
 	pub(crate) fn poll_largest(&mut self, seen: &mut Option<Position>, waiter: &kio::Waiter) -> Poll<Option<Position>> {
 		let mut reader = self.reader();
-		let sub = ready!(reader.poll_serving(waiter));
-		let Some(sub) = sub else {
-			return Poll::Ready(None);
-		};
 		loop {
-			match ready!(sub.poll_largest(waiter)) {
-				Some(largest) if seen.is_none_or(|seen| largest > seen) => {
+			let Some(sub) = ready!(reader.poll_serving(waiter)) else {
+				return Poll::Ready(None);
+			};
+			// A replacement copy can start below what an earlier one reported.
+			while let Some(largest) = ready!(sub.poll_largest(waiter)) {
+				if seen.is_none_or(|seen| largest > seen) {
 					*seen = Some(largest);
 					return Poll::Ready(Some(largest));
 				}
-				Some(_) => continue,
-				None => return Poll::Ready(None),
 			}
+			// The serving copy ended, which ends the logical track only with its route.
+			if reader.route.end().is_some() {
+				return Poll::Ready(None);
+			}
+			ready!(reader.route.poll_changed(reader.generation.unwrap_or_default(), waiter));
 		}
 	}
 
@@ -1354,6 +1358,36 @@ mod test {
 		routes.serve(b.consume());
 		assert_eq!(recv(&mut sub).sequence, 2);
 		assert!(sub.recv_group().now_or_never().is_none());
+	}
+
+	/// The largest frame follows the serving copy across a failover without moving back,
+	/// and ends only with the route.
+	#[test]
+	#[cfg(feature = "async")]
+	fn largest_follows_the_serving_copy() {
+		let routes = Producer::new();
+		let logical = logical(&routes);
+		let a = copy();
+		routes.serve(a.consume());
+		let mut sub = subscribe(&logical, HOUR);
+		write(&a, 3);
+		assert_eq!(sub.largest().now_or_never(), Some(Some(Position::group(3))));
+
+		// The route fails: its copy's stream ends, the logical track's does not.
+		a.clone().abort(Error::Dropped).unwrap();
+		assert!(sub.largest().now_or_never().is_none());
+
+		// The replacement starts behind what is already known.
+		let b = copy();
+		write(&b, 2);
+		routes.serve(b.consume());
+		assert!(sub.largest().now_or_never().is_none());
+		write(&b, 4);
+		assert_eq!(sub.largest().now_or_never(), Some(Some(Position::group(4))));
+
+		routes.end(Ok(()));
+		drop(b);
+		assert_eq!(sub.largest().now_or_never(), Some(None));
 	}
 
 	/// A budget that never writes off a group in these tests.

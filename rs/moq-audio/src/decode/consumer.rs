@@ -171,7 +171,7 @@ impl Consumer {
 		// across subscribers and can ask the publisher to rewind for everyone.
 		if options.start == Start::Latest
 			&& warmup.is_zero()
-			&& let Some(live_edge) = subscriber.largest().await
+			&& let std::task::Poll::Ready(Some(live_edge)) = subscriber.poll_largest(&moq_net::kio::Waiter::noop())
 		{
 			subscriber.set_groups(live_edge.group..);
 		}

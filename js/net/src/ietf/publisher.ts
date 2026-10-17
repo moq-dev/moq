@@ -2025,7 +2025,7 @@ function liveEdge(track: TrackSubscriber): LiveEdge {
 	const latest = hooks.latestSequence(track);
 	if (latest === undefined) return {};
 
-	const largest = hooks.largestSnapshot(track);
+	const largest = hooks.bufferedLargest(track);
 	if (!largest) return { latest: BigInt(latest), next: { group: BigInt(latest), object: 0n } };
 
 	const group = BigInt(largest.group);

@@ -194,10 +194,10 @@ export const hooks: {
 	reportedLargest: (producer: Producer, largest: Location | undefined) => void;
 	/** Snapshot the latest group sequence for wire positioning; assigned by `track.ts`. */
 	latestSequence: (subscriber: Subscriber) => number | undefined;
-	/** Snapshot the reported largest frame for wire responses; assigned by `track.ts`. */
-	largestSnapshot: (subscriber: Subscriber) => Location | undefined;
-	/** Observe a group's frame count; assigned by `group.ts`. */
-	groupProgress: (group: GroupProducer, fn: () => void) => Dispose;
+	/** The newest frame buffered for a subscriber, which wire answers name; assigned by `track.ts`. */
+	bufferedLargest: (subscriber: Subscriber) => Location | undefined;
+	/** Call `fn` with a group's frame count now and on every change; assigned by `group.ts`. */
+	groupProgress: (group: GroupProducer, fn: (total: number) => void) => Dispose;
 	/**
 	 * Take the next group the subscriber's cursor allows, without waiting; assigned by `track.ts`.
 	 *
@@ -276,7 +276,7 @@ export const hooks: {
 	latestSequence: () => {
 		throw new Error("track.ts not loaded");
 	},
-	largestSnapshot: () => {
+	bufferedLargest: () => {
 		throw new Error("track.ts not loaded");
 	},
 	groupProgress: () => {

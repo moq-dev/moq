@@ -867,7 +867,7 @@ export class Producer {
 		for (const sink of this.#sinks) sink.largest.set(largest);
 	}
 
-	/** Wait for the current or next newer largest frame, ending with the track. */
+	/** The track's largest frame, as {@link Subscriber.largest} follows it. */
 	async largest(): Promise<Location | undefined> {
 		return nextLargest(this.#state, this.#largestSeen, (largest) => (this.#largestSeen = largest));
 	}
@@ -949,12 +949,10 @@ export class Producer {
 		this.#advance(group.sequence);
 		this.#state.latest = Math.max(this.#state.latest ?? 0, group.sequence);
 		for (const sink of this.#sinks) this.#mirror(entry, sink);
-		const advance = () => {
-			const count = group.consume().frameCount;
-			if (count > 0) this.#advanceLargest({ group: group.sequence, frame: count - 1 });
-		};
-		advance();
-		const stop = hooks.groupProgress(group, advance);
+		// Follow the group's frames as they land: the largest names the newest real frame.
+		const stop = hooks.groupProgress(group, (total) => {
+			if (total > 0) this.#advanceLargest({ group: group.sequence, frame: total - 1 });
+		});
 		void group.closed.then(stop);
 		// Give held mirrors the new live edge before pruning their timeline entry,
 		// so their latency guard can preserve a terminal expiry verdict.
@@ -1397,7 +1395,7 @@ export class Subscriber {
 		makeSubscriber = (name, state) => new Subscriber(name, state);
 		hooks.tryRecvGroup = (subscriber) => subscriber.#tryRecvGroup();
 		hooks.latestSequence = (subscriber) => subscriber.#state.latest;
-		hooks.largestSnapshot = (subscriber) => subscriber.#state.largest.peek();
+		hooks.bufferedLargest = (subscriber) => subscriber.#bufferedLargest();
 		hooks.groupChanged = (subscriber, fn) => subscriber.#groupChanged(fn);
 		hooks.fetchBudget = (subscriber, maxDelay) => {
 			subscriber.#fetchBudget = maxDelay ?? Number.POSITIVE_INFINITY;
@@ -1474,9 +1472,32 @@ export class Subscriber {
 		}
 	}
 
-	/** Wait for the current or next newer largest frame, ending with the track. */
+	/**
+	 * The track's largest frame: the current one at first, then each newer one (skipping any
+	 * in between), and `undefined` once the track ends. Seeded by the publisher's report, so it
+	 * can name a frame before its group arrives.
+	 */
 	async largest(): Promise<Location | undefined> {
 		return nextLargest(this.#state, this.#largestSeen, (largest) => (this.#largestSeen = largest));
+	}
+
+	// The newest frame buffered for this subscriber, which a wire answer names as its edge:
+	// a newest group with no frames yet falls back to the newest older group that does, and it
+	// reads as undefined once the newest group was evicted or received, since what is left can
+	// no longer say where the edge is.
+	#bufferedLargest(): Location | undefined {
+		const latest = this.#state.latest;
+		if (latest === undefined) return undefined;
+
+		const groups = this.#state.groups.peek();
+		const newest = groups[groups.length - 1];
+		if (!newest || newest.sequence !== latest) return undefined;
+
+		for (let i = groups.length - 1; i >= 0; i--) {
+			const count = groups[i].frameCount;
+			if (count > 0) return { group: groups[i].sequence, frame: count - 1 };
+		}
+		return undefined;
 	}
 
 	/**
@@ -1886,7 +1907,7 @@ export class Ordered {
 		return this.#subscriber.subscription;
 	}
 
-	/** Wait for the current or next newer largest frame, ending with the track. */
+	/** The track's largest frame; see {@link Subscriber.largest}. */
 	largest(): Promise<Location | undefined> {
 		return this.#subscriber.largest();
 	}

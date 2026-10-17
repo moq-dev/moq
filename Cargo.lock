@@ -4426,7 +4426,6 @@ dependencies = [
  "bytes",
  "hang",
  "humantime",
- "kio 0.6.2",
  "libc",
  "moq-archive",
  "moq-audio",

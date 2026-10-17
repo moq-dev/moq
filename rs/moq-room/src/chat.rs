@@ -140,7 +140,11 @@ impl Subscriber {
 	}
 
 	/// Read window changes from an existing subscription.
-	pub fn new(track: track::Subscriber) -> Self {
+	pub fn new(mut track: track::Subscriber) -> Self {
+		// Start at the newest window known now rather than replaying older ones.
+		if let Poll::Ready(Some(largest)) = track.poll_largest(&kio::Waiter::noop()) {
+			track.set_groups(largest.group..);
+		}
 		Self {
 			consumer: moq_json::window::Consumer::new(track, Default::default()),
 		}
