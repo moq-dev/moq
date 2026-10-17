@@ -1469,6 +1469,14 @@ impl Connection {
         !self.spaces[SpaceId::Data].pending.is_empty(&self.streams)
     }
 
+    /// Whether a [`Checkpoint::reset`] reaches the peer's application, which needs the peer to
+    /// accept RESET_STREAM_AT
+    ///
+    /// Without it, the data before the checkpoint only reaches the peer's QUIC stack.
+    pub fn reliable_reset(&self) -> bool {
+        self.peer_params.reset_stream_at
+    }
+
     /// Look up whether we're the client or server of this Connection
     pub fn side(&self) -> Side {
         self.side.side()

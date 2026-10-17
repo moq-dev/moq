@@ -19,6 +19,7 @@ author:
 normative:
   moqt: I-D.ietf-moq-transport
   qmux: I-D.ietf-quic-qmux
+  reset-stream-at: I-D.ietf-quic-reliable-stream-reset
   qmuxws:
     title: "QMux over WebSocket"
     target: https://datatracker.ietf.org/doc/draft-lcurley-qmux-websocket/
@@ -714,6 +715,7 @@ A subscriber assembling a Group from more than one publisher does so across sepa
 
 Both the publisher and subscriber MAY reset the stream at any time.
 This is not a fatal error and the session remains active.
+A publisher that declared [Reliable Reset](#reliable-reset-parameter) resets a Group Stream with RESET_STREAM_AT, so the GROUP message still arrives and the subscriber can account for the stream.
 The subscriber MAY cache the error and potentially retry later.
 
 ## Datagrams
@@ -840,6 +842,8 @@ The following Setup Parameters are defined:
 |------|-----------|-------------|
 | 0x5  | Hop       | Hop ID (i)  |
 |------|-----------|-------------|
+| 0x6  | Reliable Reset | Flag (i) |
+|------|-----------|-------------|
 
 ### Probe Parameter {#probe-parameter}
 The Probe Parameter advertises the sender's capability level when acting as a publisher on a [Probe Stream](#probe).
@@ -900,6 +904,21 @@ The Parameter Value is a variable-length integer; a value of 0 carries no identi
 Declaring it at setup gives the receiver the peer's identity before any other stream arrives, so route selection applies the same exclusion to the peer's subscriptions as to its announcements (see [Routing](#routing)), even on a session that never opens an Announce Stream.
 Either endpoint MAY send it; a subscriber-only endpoint with no identity MAY omit it, but a publisher SHOULD have a Hop ID regardless (see [ANNOUNCE_OK](#announce-ok)).
 A relay MUST NOT forward it.
+
+### Reliable Reset Parameter {#reliable-reset-parameter}
+The Reliable Reset Parameter declares that every Group Stream the sender counts in a [SUBSCRIBE_END](#subscribe-end) `Stream Count` delivers its GROUP message, even when the sender resets it.
+The Parameter Value is a variable-length integer: `1` declares it, and `0` is equivalent to omitting the parameter.
+A receiver MUST close the session with a PROTOCOL_VIOLATION on any other value.
+
+A sender that declares it MUST count a Group Stream only once its GROUP message is written, and MUST reset a counted Group Stream with RESET_STREAM_AT [reset-stream-at], giving a Reliable Size that covers the GROUP message.
+A Group Stream reset before its GROUP message is written is not counted.
+It MUST NOT declare it unless the peer negotiated the reset_stream_at transport parameter, so it applies only to bindings 1 and 2, and only on a version whose SUBSCRIBE_END carries a `Stream Count`.
+An endpoint whose transport API cannot reset a stream that way does not declare it.
+
+A subscriber whose publisher declared it waits for every counted Group Stream without a bound, since each is sure to arrive; see [SUBSCRIBE_END](#subscribe-end).
+A lost datagram is not counted and does not change that.
+
+Either endpoint MAY send it, and the two directions are independent. A relay MUST NOT forward it: each hop declares what its own transport does.
 
 
 ## ANNOUNCE_REQUEST {#announce-request}
@@ -1331,6 +1350,7 @@ A relay counts the Group Streams it opened itself, never the count it received u
 The publisher MUST NOT send SUBSCRIBE_END until every Group Stream it will open for the subscription has been opened, so the count is final; it does not wait for them to finish.
 The subscriber has received every Group Stream once it has read the header of `Stream Count` of them, which MAY happen after SUBSCRIBE_END or the FIN since streams are not ordered.
 A Group Stream reset before its header arrived is never seen, so a subscriber SHOULD bound how long it waits for the rest, for example by `Subscriber Max Age`.
+When the publisher declared [Reliable Reset](#reliable-reset-parameter), every counted Group Stream delivers its header, so the subscriber SHOULD NOT bound the wait.
 
 ## FETCH
 FETCH is sent by a subscriber to request a single group from a track.
@@ -1600,6 +1620,7 @@ The `Message Length` describes the payload size on the wire.
 - Hid routes with a `.`-prefixed segment below the requested prefix from announce discovery, and added the ANNOUNCE_REQUEST `Hidden` field to opt in.
 - Added `Stream Count` to SUBSCRIBE_END: the number of Group Streams opened for the subscription. SUBSCRIBE_END is now sent once every counted Group Stream has opened, rather than as soon as the final group is known.
 - Removed SUBSCRIBE_DROP and its type 0x2; a group without a Group Stream is not counted.
+- Added the SETUP `Reliable Reset` parameter (0x6): the sender counts a Group Stream only once its GROUP message is written and resets it with RESET_STREAM_AT keeping that message, so a subscriber waits for every counted stream without a bound.
 - The Subscribe Stream FIN now follows once every counted Group Stream has finished or been reset.
 - Added the Spread Hash tie-break after the shortest path: a hash of the requested path and the route's Hop IDs, so equal-cost advertisers of one prefix share its paths.
 - Added a local link preference to route selection, after the newest Epoch and before the 0 Hop ID check: the higher preference a subscriber assigns to the arriving link wins, and an unassigned link is neutral. Not carried on the wire.

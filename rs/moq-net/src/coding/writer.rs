@@ -211,6 +211,13 @@ impl<S: crate::transport::poll::SendStream, V: StreamCodes> Writer<S, V> {
 		self.stream.as_mut().unwrap().set_priority(send_order.into());
 	}
 
+	/// Mark what has flushed so far for a later reset to still deliver, where the session
+	/// supports it. See [`crate::transport::poll::SendStream::checkpoint`].
+	pub fn checkpoint(&mut self) {
+		debug_assert_eq!(self.flushed, self.buffer.len(), "checkpoint with unflushed bytes");
+		self.stream.as_mut().unwrap().checkpoint();
+	}
+
 	/// Cast the writer to a different version, used during version negotiation.
 	pub fn with_version<O>(mut self, version: O) -> Writer<S, O> {
 		Writer {

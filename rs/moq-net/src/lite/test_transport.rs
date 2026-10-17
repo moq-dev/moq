@@ -58,6 +58,8 @@ pub enum Sent {
 	Write(Vec<u8>),
 	Finish,
 	Reset(u32),
+	/// A later reset keeps what was written so far.
+	Checkpoint,
 }
 
 impl Log {
@@ -195,6 +197,10 @@ impl poll::SendStream for SinkSend {
 	fn reset(&mut self, code: u32) {
 		self.log.resets.lock().unwrap().push(code);
 		self.log.record(self.id, Sent::Reset(code));
+	}
+
+	fn checkpoint(&mut self) {
+		self.log.record(self.id, Sent::Checkpoint);
 	}
 
 	fn poll_closed(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {

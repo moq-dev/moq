@@ -200,6 +200,7 @@ impl Client {
 				cost: self.cost,
 				// Filled by `lite::start` from the attached origin handles.
 				hop: None,
+				reliable_reset: lite::Setup::detect_reliable_reset(&session, version),
 			}
 		} else {
 			lite::Setup::default()

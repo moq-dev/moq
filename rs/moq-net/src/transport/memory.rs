@@ -10,7 +10,8 @@
 //!
 //! [`finish`](poll::SendStream::finish) closes the channel cleanly once its messages are
 //! read. A [`reset`](poll::SendStream::reset) or [`stop`](poll::RecvStream::stop) closes it
-//! with a code and drops what it queued. Closing the session keeps queued messages
+//! with a code and drops what it queued, except that a reset with
+//! [`Config::reliable_reset`] still delivers what was written before its checkpoint. Closing the session keeps queued messages
 //! readable, and leaves streams as they were, so the peer reads them, then the close.
 //!
 //! Datagrams are copied, since [`poll::Session::poll_send_datagram`] borrows them, and
@@ -42,6 +43,9 @@ pub struct Config {
 	pub stream_buffer: usize,
 	/// The application protocol both sides report, standing in for a negotiated ALPN.
 	pub protocol: Option<String>,
+	/// Whether a reset still delivers the data before a stream's checkpoint, like a QUIC
+	/// peer that accepts RESET_STREAM_AT.
+	pub reliable_reset: bool,
 }
 
 impl Default for Config {
@@ -51,6 +55,7 @@ impl Default for Config {
 		Self {
 			stream_buffer: 1024 * 1024,
 			protocol: None,
+			reliable_reset: false,
 		}
 	}
 }
@@ -160,6 +165,8 @@ impl Conn {
 			channel: channel.clone(),
 			close: self.close.clone(),
 			buffer: self.config.stream_buffer,
+			reliable: self.config.reliable_reset,
+			checkpoint: None,
 			done: false,
 			park: Default::default(),
 		};
@@ -334,6 +341,10 @@ impl poll::Session for Session {
 	fn stats(&self) -> impl super::Stats {
 		StatsUnavailable
 	}
+
+	fn reliable_reset(&self) -> bool {
+		self.conn().config.reliable_reset
+	}
 }
 
 /// One direction of a stream: the messages its writer queued for its reader.
@@ -342,6 +353,9 @@ struct Channel {
 	messages: VecDeque<Bytes>,
 	/// The bytes in `messages`.
 	queued: usize,
+	/// The bytes ever queued and read, which place a checkpoint among the messages.
+	written: u64,
+	read: u64,
 	/// How the channel closed, once it has.
 	end: Option<End>,
 }
@@ -357,14 +371,19 @@ enum End {
 }
 
 impl Channel {
-	/// Close with a reset or stop code and drop what is queued. An earlier end stands,
-	/// unless it was a finish the reader has not fully read.
-	fn abort(&mut self, end: End) {
+	/// Close with a reset or stop code and drop what is queued past its first `keep`
+	/// bytes. An earlier end stands, unless it was a finish the reader has not fully read.
+	fn abort(&mut self, end: End, keep: usize) {
 		if self.end.is_none() || !self.messages.is_empty() {
 			self.end = Some(end);
 		}
-		self.messages.clear();
-		self.queued = 0;
+		let mut kept = 0;
+		self.messages.retain_mut(|message| {
+			message.truncate(keep - kept);
+			kept += message.len();
+			!message.is_empty()
+		});
+		self.queued = kept;
 	}
 
 	/// How the writer sees the channel close: reset, stopped, or finished and drained.
@@ -383,6 +402,10 @@ pub struct SendStream {
 	channel: kio::Shared<Channel>,
 	close: Close,
 	buffer: usize,
+	/// Whether a reset keeps the bytes before the checkpoint.
+	reliable: bool,
+	/// The bytes written when the stream was last checkpointed.
+	checkpoint: Option<u64>,
 	/// This side finished or reset the stream.
 	done: bool,
 	park: kio::Park,
@@ -425,6 +448,7 @@ impl poll::SendStream for SendStream {
 		let size = buf.remaining();
 		channel.messages.push_back(buf.copy_to_bytes(size));
 		channel.queued += size;
+		channel.written += size as u64;
 
 		Poll::Ready(Ok(size))
 	}
@@ -456,7 +480,15 @@ impl poll::SendStream for SendStream {
 		// close is checked under the channel lock so a concurrent close can't land between.
 		let mut channel = self.channel.lock();
 		if closed(&self.close).is_none() {
-			channel.abort(End::Reset(code));
+			// What the reader has yet to take of the checkpointed prefix.
+			let keep = self.checkpoint.map_or(0, |at| at.saturating_sub(channel.read));
+			channel.abort(End::Reset(code), keep as usize);
+		}
+	}
+
+	fn checkpoint(&mut self) {
+		if self.reliable {
+			self.checkpoint = Some(self.channel.lock().written);
 		}
 	}
 
@@ -546,6 +578,7 @@ impl poll::RecvStream for RecvStream {
 			false => channel.messages.pop_front().expect("front exists"),
 		};
 		channel.queued -= chunk.len();
+		channel.read += chunk.len() as u64;
 
 		Poll::Ready(Ok(Some(chunk)))
 	}
@@ -558,7 +591,7 @@ impl poll::RecvStream for RecvStream {
 		// as in `reset`.
 		let mut channel = self.channel.lock();
 		if closed(&self.close).is_none() {
-			channel.abort(End::Stop(code));
+			channel.abort(End::Stop(code), 0);
 		}
 	}
 
@@ -732,6 +765,49 @@ mod tests {
 			ready(write(&mut send, &Bytes::from_static(b"x"))),
 			Err(Error::Closed)
 		));
+	}
+
+	/// A reliable reset delivers the unread part of what came before the checkpoint, then
+	/// the code; a checkpoint without it changes nothing.
+	#[test]
+	fn reset_keeps_the_checkpoint() {
+		for reliable_reset in [true, false] {
+			let (mut a, mut b) = pair(Config {
+				reliable_reset,
+				..Default::default()
+			});
+			assert_eq!(a.reliable_reset(), reliable_reset);
+			let (mut send, mut recv) = uni(&mut a, &mut b);
+
+			ready(write(&mut send, &Bytes::from_static(b"0123"))).unwrap();
+			assert_eq!(text(read(&mut recv, 1)), "0");
+			ready(write(&mut send, &Bytes::from_static(b"45"))).unwrap();
+			send.checkpoint();
+			ready(write(&mut send, &Bytes::from_static(b"6789"))).unwrap();
+			send.reset(7);
+
+			if reliable_reset {
+				assert_eq!(text(read(&mut recv, usize::MAX)), "123");
+				assert_eq!(text(read(&mut recv, usize::MAX)), "45");
+			}
+			assert!(matches!(ready(read(&mut recv, usize::MAX)), Err(Error::Reset(7))));
+		}
+	}
+
+	/// A peer that stopped reading gets nothing, checkpoint or not.
+	#[test]
+	fn stop_drops_the_checkpoint() {
+		let (mut a, mut b) = pair(Config {
+			reliable_reset: true,
+			..Default::default()
+		});
+		let (mut send, mut recv) = uni(&mut a, &mut b);
+		ready(write(&mut send, &Bytes::from_static(b"01"))).unwrap();
+		send.checkpoint();
+		recv.stop(3);
+		send.reset(7);
+		assert!(matches!(ready(send.poll_closed(&mut noop())), Err(Error::Stopped(3))));
+		assert!(matches!(ready(read(&mut recv, usize::MAX)), Err(Error::Closed)));
 	}
 
 	#[test]

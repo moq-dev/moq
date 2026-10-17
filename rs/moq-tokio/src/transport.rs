@@ -132,6 +132,16 @@ fn poll_op<T>(slot: &mut OpSlot<T>, cx: &mut Context<'_>, start: impl FnOnce() -
 }
 
 impl<S: web_transport_trait::Session> Session<S> {
+	/// Whether a send stream's checkpoint survives a reset. Only moq-quic's sessions can
+	/// say, and the async interface has no word for it, so they are recognized by type.
+	pub(crate) fn reliable_reset(&self) -> bool {
+		#[cfg(feature = "quic")]
+		if let Some(session) = (&self.session as &dyn std::any::Any).downcast_ref::<crate::quic::web::Session>() {
+			return session.reliable_reset();
+		}
+		false
+	}
+
 	/// Wrap an async-interface transport session.
 	pub fn new(session: S, binding: moq_net::transport::Binding) -> Self {
 		Self {
@@ -249,6 +259,8 @@ pub struct SendStream<S: web_transport_trait::SendStream + 'static> {
 	state: std::sync::Mutex<Option<SendState<S>>>,
 	// Deferred actions, applied when the in-flight operation settles.
 	priority: Option<i32>,
+	/// Applied before a deferred reset, so the reset still delivers what it marks.
+	checkpoint: bool,
 	finish: bool,
 	reset: Option<u32>,
 	/// Bytes already transmitted but not yet reported to the caller: a write the
@@ -288,6 +300,7 @@ impl<S: web_transport_trait::SendStream + 'static> SendStream<S> {
 		Self {
 			state: std::sync::Mutex::new(Some(SendState::Idle(stream))),
 			priority: None,
+			checkpoint: false,
 			finish: false,
 			reset: None,
 			completed: Bytes::new(),
@@ -295,10 +308,32 @@ impl<S: web_transport_trait::SendStream + 'static> SendStream<S> {
 		}
 	}
 
+	/// Mark the data written so far for a later reset to deliver, deferred like a reset
+	/// while an operation holds the stream. Only moq-quic's streams can, recognized by
+	/// type as in [`Session::reliable_reset`].
+	pub(crate) fn checkpoint(&mut self) {
+		match self.state.get_mut().unwrap().as_mut() {
+			Some(SendState::Idle(stream)) => Self::checkpoint_stream(stream),
+			_ => self.checkpoint = true,
+		}
+	}
+
+	fn checkpoint_stream(stream: &mut S) {
+		#[cfg(feature = "quic")]
+		if let Some(stream) = (stream as &mut dyn std::any::Any).downcast_mut::<crate::quic::web::SendStream>() {
+			stream.checkpoint();
+		}
+		#[cfg(not(feature = "quic"))]
+		let _ = stream;
+	}
+
 	/// Apply actions deferred while an operation was in flight.
 	fn settle(&mut self, stream: &mut S) {
 		if let Some(order) = self.priority.take() {
 			stream.set_priority(order);
+		}
+		if std::mem::take(&mut self.checkpoint) {
+			Self::checkpoint_stream(stream);
 		}
 		if let Some(code) = self.reset.take() {
 			self.finish = false;

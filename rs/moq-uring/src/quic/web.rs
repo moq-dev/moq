@@ -443,6 +443,11 @@ pub struct Session {
 }
 
 impl Session {
+	/// Whether a stream's checkpoint survives a reset: the peer accepts RESET_STREAM_AT.
+	pub(crate) fn reliable_reset(&self) -> bool {
+		self.conn.reliable_reset()
+	}
+
 	/// Wrap a raw-QUIC connection in a session, with no
 	/// WebTransport layering: streams and datagrams pass through untouched.
 	pub fn raw(conn: Connection) -> Self {
@@ -842,9 +847,15 @@ impl SendStream {
 	}
 
 	/// Reset a WebTransport stream, still delivering the header of one we
-	/// opened.
+	/// opened, or what was written before [`checkpoint`](Self::checkpoint).
 	fn reset_web(&mut self, code: u64) {
 		self.inner.reset_code(code, self.header.take());
+	}
+
+	/// Mark the data written so far, so a later reset still delivers it. It
+	/// replaces the checkpoint after the WebTransport header, which it covers.
+	pub(crate) fn checkpoint(&mut self) {
+		self.header = Some(self.inner.checkpoint());
 	}
 }
 
@@ -876,7 +887,7 @@ impl web_transport_trait::poll::SendStream for SendStream {
 	fn reset(&mut self, code: u32) {
 		match self.web {
 			true => self.reset_web(proto::error_to_http3(code)),
-			false => web_transport_trait::poll::SendStream::reset(&mut self.inner, code),
+			false => self.inner.reset_code(u64::from(code), self.header.take()),
 		}
 	}
 

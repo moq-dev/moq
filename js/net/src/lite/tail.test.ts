@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { Milli } from "@moq/clock";
+import { Signal } from "@moq/signals";
 import { ProtocolViolation, StreamCode, StreamError } from "../error.ts";
 import type { Consumer as GroupConsumer } from "../group.ts";
 import { randomHop } from "../hop.ts";
@@ -9,6 +10,7 @@ import { Reader, Stream } from "../stream.ts";
 import { Timescale } from "../time.ts";
 import type { Groups } from "../track.ts";
 import { Group as GroupMessage } from "./group.ts";
+import { Setup } from "./setup.ts";
 import { StreamId } from "./stream.ts";
 import {
 	encodeSubscribeResponse,
@@ -53,9 +55,15 @@ function groupStream(subscriber: Subscriber, sequence: number) {
  * it answers TRACK_INFO, then writes whatever responses the test asks for on the subscribe
  * stream and FINs it when told.
  */
-async function subscribed(version: Version, maxDelay = GRACE, groups?: Groups) {
+async function subscribed(version: Version, maxDelay = GRACE, groups?: Groups, peerSetup?: Setup) {
 	const pair = createMockTransportPair(ALPN_05);
-	const subscriber = new Subscriber(pair.client, version, randomHop());
+	const subscriber = new Subscriber(
+		pair.client,
+		version,
+		randomHop(),
+		undefined,
+		new Signal<Setup | undefined>(peerSetup),
+	);
 	const reader = subscriber.consume(Path.from("room")).track("video").subscribe({ maxDelay, groups });
 
 	const info = await Stream.accept(pair.server, version);
@@ -92,7 +100,7 @@ async function readAll(group: GroupConsumer | undefined): Promise<string[]> {
 }
 
 /** Whether `promise` settles within `ms`. */
-async function settlesWithin(promise: Promise<unknown>, ms: number): Promise<boolean> {
+async function settlesWithin(promise: PromiseLike<unknown>, ms: number): Promise<boolean> {
 	let timer: ReturnType<typeof setTimeout> | undefined;
 	const pending = new Promise<false>((resolve) => {
 		timer = setTimeout(() => resolve(false), ms);
@@ -361,6 +369,41 @@ test("lite-07 zero count ends without grace even when the announced range is non
 	expect(await settlesWithin(reader.recvGroup(), 1000)).toBe(true);
 	expect(await reader.closed).toBeNull();
 	expect(reader.end()).toEqual({ group: 3, frame: 0 });
+});
+
+// A publisher that declared reliable reset delivers the header of every stream it counts, so
+// a missing one is still on its way: the subscription waits past the grace for it.
+for (const reliableReset of [false, true]) {
+	test(`lite-07 ${reliableReset ? "waits past" : "gives up after"} the grace for a counted stream with reliable reset ${reliableReset ? "declared" : "undeclared"}`, async () => {
+		const peer = new Setup({ reliableReset });
+		const { subscriber, reader, respond, fin } = await subscribed(Version.DRAFT_07, GRACE, undefined, peer);
+		await respond({ start: new SubscribeStart(0) });
+		await respond({ end: new SubscribeEnd(1, 1) });
+		await fin();
+
+		const ended = settlesWithin(reader.closed, GRACE * 3);
+		expect(await ended).toBe(!reliableReset);
+		if (!reliableReset) return;
+
+		const late = groupStream(subscriber, 0);
+		late.write("late");
+		late.finish();
+		await late.handled;
+		expect(await readAll(await reader.recvGroup())).toEqual(["late"]);
+		expect(await settlesWithin(reader.recvGroup(), 1000)).toBe(true);
+		expect(await reader.closed).toBeNull();
+	});
+}
+
+// The declaration only drops the grace where SUBSCRIBE_END counts streams; older drafts
+// cannot tell a datagram hole from a stream in flight.
+test("lite-06 keeps the grace even when the publisher declared reliable reset", async () => {
+	const peer = new Setup({ reliableReset: true });
+	const { reader, respond, fin } = await subscribed(Version.DRAFT_06, GRACE, undefined, peer);
+	await respond({ start: new SubscribeStart(0) });
+	await respond({ end: new SubscribeEnd(1) });
+	await fin();
+	expect(await settlesWithin(reader.closed, GRACE * 3)).toBe(true);
 });
 
 for (const started of [false, true]) {

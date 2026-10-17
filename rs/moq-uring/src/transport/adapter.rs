@@ -101,6 +101,9 @@ impl<S: backend::Session<SendStream: 'static, RecvStream: 'static> + Clone + 'st
 	fn stats(&self) -> impl moq::Stats {
 		Stats(backend::Session::stats(&self.0))
 	}
+	fn reliable_reset(&self) -> bool {
+		super::reliable_reset(&self.0)
+	}
 }
 /// An outgoing WebTransport stream adapted to moq-net.
 pub struct SendStream<S>(S);
@@ -120,6 +123,9 @@ impl<S: backend::SendStream + 'static> poll::SendStream for SendStream<S> {
 	}
 	fn reset(&mut self, code: u32) {
 		backend::SendStream::reset(&mut self.0, code)
+	}
+	fn checkpoint(&mut self) {
+		super::checkpoint(&mut self.0)
 	}
 	fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
 		backend::SendStream::poll_closed(&mut self.0, cx).map_err(Error)

@@ -557,6 +557,11 @@ impl Session {
 		}
 	}
 
+	/// Whether a stream's checkpoint survives a reset: the peer accepts RESET_STREAM_AT.
+	pub(crate) fn reliable_reset(&self) -> bool {
+		self.conn.reliable_reset()
+	}
+
 	/// Returns the [`ConnectRequest`] if this session was established over HTTP/3,
 	/// or `None` for a raw QUIC session.
 	pub fn request(&self) -> Option<&ConnectRequest> {
@@ -1324,6 +1329,44 @@ mod tests {
 		let (uni, bi) = tokio::time::timeout(Duration::from_secs(10), read).await.unwrap();
 		assert!(matches!(uni, crate::quic::web::ReadError::Reset(7)), "{uni:?}");
 		assert!(matches!(bi, crate::quic::web::ReadError::Reset(8)), "{bi:?}");
+	}
+
+	/// Through moq-net's transport, a checkpoint keeps what was written before it across a
+	/// reset, past the WebTransport header.
+	#[tokio::test]
+	async fn reset_delivers_the_checkpoint() {
+		use moq_net::transport::poll::{SendStream as _, Session as _};
+
+		let (client_conn, server_conn, _endpoints) = pair().await;
+		let (client, server) = tokio::join!(
+			Session::connect(client_conn, url::Url::parse("https://localhost/").unwrap()),
+			async { crate::quic::web::Request::accept(server_conn).await.unwrap().ok().await },
+		);
+		let (client, server) = (client.unwrap(), server.unwrap());
+		let mut client = crate::transport::Session::new(client, moq_net::transport::Binding::Uri);
+		assert!(client.reliable_reset());
+
+		let mut send = std::future::poll_fn(|cx| client.poll_open_uni(cx)).await.unwrap();
+		let n = std::future::poll_fn(|cx| send.poll_write(cx, b"kept")).await.unwrap();
+		assert_eq!(n, 4);
+		send.checkpoint();
+		std::future::poll_fn(|cx| send.poll_write(cx, b"maybe")).await.unwrap();
+		send.reset(7);
+
+		let read = async {
+			let mut uni = server.accept_uni().await.unwrap();
+			let mut data = Vec::new();
+			loop {
+				match uni.read_chunk(usize::MAX).await {
+					Ok(Some(chunk)) => data.extend_from_slice(&chunk),
+					Ok(None) => panic!("finished instead of reset"),
+					Err(err) => return (data, err),
+				}
+			}
+		};
+		let (data, err) = tokio::time::timeout(Duration::from_secs(10), read).await.unwrap();
+		assert!(data.starts_with(b"kept"), "{data:?}");
+		assert!(matches!(err, crate::quic::web::ReadError::Reset(7)), "{err:?}");
 	}
 
 	/// A stream that names another session is still reported as `UnknownSession`.

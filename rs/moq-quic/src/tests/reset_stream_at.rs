@@ -142,6 +142,17 @@ fn stop_sending_abandons_prefix_unsupported() {
     stop_sending_abandons_prefix(false);
 }
 
+/// The client learns from the server's transport parameters whether its checkpoints survive
+#[test]
+fn reports_reliable_reset() {
+    let _guard = subscribe();
+    for supported in [true, false] {
+        let mut pair = pair(supported);
+        let (client_ch, _) = pair.connect();
+        assert_eq!(pair.client_conn_mut(client_ch).reliable_reset(), supported);
+    }
+}
+
 #[test]
 fn delivers_prefix_before_error() {
     let _guard = subscribe();

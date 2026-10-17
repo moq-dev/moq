@@ -5294,7 +5294,7 @@ enum ServeMode<S: crate::transport::poll::Session> {
 	/// The upstream FIN'd, so the track is over, but QUIC does not order streams: keep
 	/// the subscription routable until the counted headers arrive (lite-07), or every
 	/// owed group is accounted for (older drafts). The grace bounds a stream reset
-	/// before its header arrived.
+	/// before its header arrived, unless the publisher declared its resets keep it.
 	Tail {
 		settle: Settle,
 		owed: Option<std::ops::Range<u64>>,
@@ -5726,14 +5726,21 @@ impl<S: crate::transport::poll::Session> ServeLoop<S> {
 									));
 									tail.expire(serve.subscriber.runtime.now());
 								}
+								let streams = active
+									.end
+									.as_ref()
+									.filter(|_| serve.subscriber.version.has_stream_count())
+									.map(|end| end.streams);
+								// Every counted stream delivers its header when the publisher
+								// promised its resets keep it, so nothing is given up on.
+								let settle = match streams.is_some() && serve.subscriber.peer_setup.reliable_reset() {
+									true => Settle::exact(active.tail.consume()),
+									false => Settle::new(&serve.subscriber.runtime, active.tail.consume()),
+								};
 								self.mode = ServeMode::Tail {
-									settle: Settle::new(&serve.subscriber.runtime, active.tail.consume()),
+									settle,
 									owed: active.owed(requested_end),
-									streams: active
-										.end
-										.as_ref()
-										.filter(|_| serve.subscriber.version.has_stream_count())
-										.map(|end| end.streams),
+									streams,
 								};
 								continue;
 							}

@@ -44,6 +44,12 @@ impl SendStream {
 		}
 	}
 
+	/// Mark the data written so far, so a later [`reset`](Self::reset) still delivers it. It
+	/// replaces the checkpoint after the WebTransport header, which it covers.
+	pub(crate) fn checkpoint(&mut self) {
+		self.header = Some(self.stream.checkpoint());
+	}
+
 	/// Abruptly reset the stream with the provided error code. See [`crate::quic::driver::SendStream::reset`].
 	/// This is a u32 with WebTransport because we share the error space with HTTP/3.
 	/// A raw QUIC session sends the code as is.

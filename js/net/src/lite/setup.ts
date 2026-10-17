@@ -26,6 +26,8 @@ const PARAM_PATH = 0x2n;
 const PARAM_ROLE = 0x3n;
 /** Setup Parameter id for the endpoint's Hop ID. */
 const PARAM_HOP = 0x5n;
+/** Setup Parameter id declaring that the endpoint's group resets keep their header. */
+const PARAM_RELIABLE_RESET = 0x6n;
 
 /** Cap on the number of parameters in a bag, matching the Rust decoder. */
 const MAX_PARAMS = 64;
@@ -182,6 +184,8 @@ export interface SetupProps {
 	role?: Role;
 	/** See {@link Setup.hop}. Omitted by default. */
 	hop?: Hop;
+	/** See {@link Setup.reliableReset}. Defaults to `false`. */
+	reliableReset?: boolean;
 }
 
 /**
@@ -219,11 +223,20 @@ export class Setup {
 	 */
 	hop?: Hop;
 
-	constructor({ probe, path, role, hop }: SetupProps = {}) {
+	/**
+	 * Whether this endpoint counts a group stream only once its GROUP message is written,
+	 * and delivers that message even when it resets the stream (lite-07+). The peer then
+	 * waits for each counted stream rather than giving up after a grace. A browser cannot
+	 * reset that way, so `@moq/net` never declares it.
+	 */
+	reliableReset: boolean;
+
+	constructor({ probe, path, role, hop, reliableReset }: SetupProps = {}) {
 		this.probe = probe ?? ProbeLevel.None;
 		this.path = path;
 		this.role = role ?? Role.Both;
 		this.hop = hop;
+		this.reliableReset = reliableReset ?? false;
 	}
 
 	static #guard(version: Version) {
@@ -248,6 +261,9 @@ export class Setup {
 		if (this.hop !== undefined && this.hop !== 0n) {
 			params.setVarint(PARAM_HOP, this.hop, version);
 		}
+		if (this.reliableReset) {
+			params.setVarint(PARAM_RELIABLE_RESET, 1n, version);
+		}
 		await params.encode(w);
 	}
 
@@ -269,7 +285,13 @@ export class Setup {
 		const hopRaw = await params.getVarint(PARAM_HOP, version);
 		const hop = hopRaw === undefined || hopRaw === 0n ? undefined : HopSchema.parse(hopRaw);
 
-		const setup = new Setup({ probe, path, role, hop });
+		const reliableRaw = await params.getVarint(PARAM_RELIABLE_RESET, version);
+		if (reliableRaw !== undefined && reliableRaw > 1n) {
+			throw new Error(`invalid reliable reset value: ${reliableRaw}`);
+		}
+		const reliableReset = reliableRaw === 1n;
+
+		const setup = new Setup({ probe, path, role, hop, reliableReset });
 		if (pathBytes !== undefined || roleCode !== undefined) clientParameters.add(setup);
 		return setup;
 	}

@@ -167,6 +167,7 @@ impl Server {
 				cost: None,
 				// Filled by `lite::start` from the attached origin handles.
 				hop: None,
+				reliable_reset: lite::Setup::detect_reliable_reset(&session, version),
 			}
 		} else {
 			lite::Setup::default()
@@ -1160,6 +1161,7 @@ mod tests {
 			role,
 			cost: None,
 			hop,
+			reliable_reset: false,
 		}
 		.encode(&mut crate::coding::Encoder::new(&mut buf, v.into()), v)
 		.unwrap();

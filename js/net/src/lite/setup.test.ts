@@ -11,6 +11,7 @@ const PARAM_PROBE = 0x1n;
 const PARAM_PATH = 0x2n;
 const PARAM_ROLE = 0x3n;
 const PARAM_HOP = 0x5n;
+const PARAM_RELIABLE_RESET = 0x6n;
 
 function concat(chunks: Uint8Array[]): Uint8Array {
 	const total = chunks.reduce((sum, c) => sum + c.byteLength, 0);
@@ -145,6 +146,14 @@ test("hop 0 decodes as absent", async () => {
 	// 0 carries no identity (it cannot be excluded), so it decodes as undefined.
 	const got = await decodeParam(PARAM_HOP, Varint.encode(0));
 	expect(got.hop).toBeUndefined();
+});
+
+test("reliable reset round-trips as a 0/1 flag", async () => {
+	expect((await roundTrip(new Setup({ reliableReset: true }))).reliableReset).toBe(true);
+	expect((await roundTrip(new Setup())).reliableReset).toBe(false);
+	expect((await decodeParam(PARAM_RELIABLE_RESET, Varint.encode(0))).reliableReset).toBe(false);
+	expect((await decodeParam(PARAM_RELIABLE_RESET, Varint.encode(1))).reliableReset).toBe(true);
+	await expect(decodeParam(PARAM_RELIABLE_RESET, Varint.encode(2))).rejects.toThrow();
 });
 
 test("SETUP is rejected before draft-05", async () => {

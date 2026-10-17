@@ -30,7 +30,8 @@ export interface TailOptions {
  * waits on them.
  *
  * A lost datagram is not owed: it leaves a hole that waits out the grace like a stream reset
- * before its header.
+ * before its header. A publisher whose resets keep the header (reliable reset) needs no
+ * grace: on lite-07 every stream it counts arrives.
  *
  * @internal
  */
@@ -103,21 +104,23 @@ export class Tail {
 	 *
 	 * A stream still being read is always waited for: a group ends on its own stream's FIN
 	 * or reset, never because its track ended. The grace only gives up on streams that never
-	 * arrived.
+	 * arrived, and `exact` skips it for a publisher that promised every owed stream arrives.
 	 */
-	async settle(complete: () => boolean, closed: GetPromise<unknown>): Promise<void> {
+	async settle(complete: () => boolean, closed: GetPromise<unknown>, { exact = false } = {}): Promise<void> {
 		// A gap that aged past the grace since the last insert is no longer waited for either.
 		this.#expire(now());
 
 		let expired = false;
 		const timer = new AbortController();
-		void sleep(Nano.fromMilli(this.#grace()), { signal: timer.signal }).then(
-			() => {
-				expired = true;
-				this.#bump();
-			},
-			() => {},
-		);
+		if (!exact) {
+			void sleep(Nano.fromMilli(this.#grace()), { signal: timer.signal }).then(
+				() => {
+					expired = true;
+					this.#bump();
+				},
+				() => {},
+			);
+		}
 		try {
 			while (closed.peek() === undefined) {
 				if (this.#active === 0 && (expired || complete())) return;

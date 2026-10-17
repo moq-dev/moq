@@ -255,6 +255,10 @@ impl poll::SendStream for MockSendStream {
 		}
 	}
 
+	fn checkpoint(&mut self) {
+		self.inner.checkpoint();
+	}
+
 	fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
 		if self.conn.hold_fins.load(Ordering::Relaxed) {
 			return Poll::Ready(Err(ready!(poll::Session::poll_closed(&mut self.session, cx))));
@@ -620,6 +624,10 @@ impl poll::Session for MockSession {
 
 	fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Self::Error> {
 		self.inner.poll_closed(cx)
+	}
+
+	fn reliable_reset(&self) -> bool {
+		self.inner.reliable_reset()
 	}
 
 	fn stats(&self) -> impl moq_net::transport::Stats {

@@ -596,6 +596,12 @@ impl Connection {
         self.0.state.lock("side").inner.side()
     }
 
+    /// Whether a [`Checkpoint::reset()`](crate::quic::driver::Checkpoint::reset) reaches the
+    /// peer's application: the peer accepts RESET_STREAM_AT
+    pub fn reliable_reset(&self) -> bool {
+        self.0.state.lock("reliable_reset").inner.reliable_reset()
+    }
+
     /// The peer's UDP address
     ///
     /// If `ServerConfig::migration` is `true`, clients may change addresses at will, e.g. when

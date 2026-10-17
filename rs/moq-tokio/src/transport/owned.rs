@@ -84,6 +84,9 @@ impl<S: wt::Session<SendStream: 'static, RecvStream: 'static>> poll::Session for
 	fn stats(&self) -> impl moq::Stats {
 		Stats(backend::Session::stats(self))
 	}
+	fn reliable_reset(&self) -> bool {
+		super::Session::reliable_reset(self)
+	}
 }
 impl<S: wt::SendStream + 'static> poll::SendStream for super::SendStream<S> {
 	type Error = Error<S::Error>;
@@ -101,6 +104,9 @@ impl<S: wt::SendStream + 'static> poll::SendStream for super::SendStream<S> {
 	}
 	fn reset(&mut self, code: u32) {
 		backend::SendStream::reset(self, code)
+	}
+	fn checkpoint(&mut self) {
+		super::SendStream::checkpoint(self)
 	}
 	fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
 		backend::SendStream::poll_closed(self, cx).map_err(Error)

@@ -4,7 +4,8 @@
 //! but QUIC does not order streams, so one opened before the end can still reach us after
 //! it. The subscriber keeps the subscription routable until each owed group is accounted
 //! for, or a grace expires for a group whose stream was reset before its header arrived.
-//! A reset that keeps the header (reliable reset) would make the grace unnecessary.
+//! A publisher whose resets keep the header (reliable reset) needs no grace: on lite-07
+//! every stream it counts arrives.
 //!
 //! A stream whose header arrived is read to its end whatever the grace says: a group ends
 //! on its own stream's FIN or reset, never because its track ended. A lost datagram is not
@@ -291,7 +292,8 @@ impl Drop for Reading {
 /// Waits out a subscription's tail: until the owed streams are accounted for, or the grace.
 pub(crate) struct Settle {
 	tail: kio::Consumer<Tail>,
-	grace: Deadline,
+	/// `None` when every owed stream is sure to arrive.
+	grace: Option<Deadline>,
 }
 
 impl Settle {
@@ -300,14 +302,20 @@ impl Settle {
 		let grace = tail.read().grace;
 		Self {
 			tail,
-			grace: Deadline::after(runtime, grace),
+			grace: Some(Deadline::after(runtime, grace)),
 		}
+	}
+
+	/// Wait on `tail` without a grace, for a publisher that promised every owed stream
+	/// delivers its header.
+	pub fn exact(tail: kio::Consumer<Tail>) -> Self {
+		Self { tail, grace: None }
 	}
 
 	/// Ready once no stream is being read and either `complete` holds or the grace
 	/// expired, or once the subscription is gone.
 	pub fn poll(&mut self, waiter: &kio::Waiter, mut complete: impl FnMut(&Tail) -> bool) -> Poll<()> {
-		let expired = self.grace.poll(waiter).is_ready();
+		let expired = self.grace.as_mut().is_some_and(|grace| grace.poll(waiter).is_ready());
 		self.tail
 			.poll(waiter, |tail| match tail.active == 0 && (expired || complete(tail)) {
 				true => Poll::Ready(()),

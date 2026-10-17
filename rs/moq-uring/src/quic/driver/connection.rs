@@ -354,6 +354,11 @@ impl Connection {
 	pub fn stats(&self) -> moq_quic::ConnectionStats {
 		self.shared.conn.borrow().stats()
 	}
+
+	/// Whether a stream's checkpoint survives a reset: the peer accepts RESET_STREAM_AT.
+	pub fn reliable_reset(&self) -> bool {
+		self.shared.conn.borrow().reliable_reset()
+	}
 }
 
 impl Clone for Connection {

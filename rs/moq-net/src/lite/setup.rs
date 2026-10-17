@@ -15,6 +15,8 @@ const PARAM_ROLE: u64 = 0x3;
 const PARAM_COST: u64 = 0x4;
 /// Setup Parameter id for the endpoint's Hop ID.
 const PARAM_HOP: u64 = 0x5;
+/// Setup Parameter id declaring that the endpoint's group resets keep their header.
+const PARAM_RELIABLE_RESET: u64 = 0x6;
 
 /// The cost of crossing a link that neither end priced.
 ///
@@ -182,6 +184,18 @@ pub struct Setup {
 	/// applies). `None` when the endpoint has no meaningful identity (a
 	/// leaf that never forwards); a wire value of 0 decodes as `None`.
 	pub hop: Option<crate::Hop>,
+	/// Whether every Group Stream this endpoint counts in SUBSCRIBE_END delivers its
+	/// GROUP message, even when reset (lite-07+). The peer then waits for each counted
+	/// stream rather than giving up after a grace.
+	pub reliable_reset: bool,
+}
+
+impl Setup {
+	/// Whether `session` can keep that promise on `version`: it needs the stream count to
+	/// make, and a transport whose resets keep a checkpoint.
+	pub fn detect_reliable_reset<S: crate::transport::poll::Session>(session: &S, version: Version) -> bool {
+		version.has_stream_count() && session.reliable_reset()
+	}
 }
 
 impl Message for Setup {
@@ -214,6 +228,9 @@ impl Message for Setup {
 		}
 		if let Some(hop) = self.hop {
 			params.set_varint(PARAM_HOP, hop.id(), version)?;
+		}
+		if self.reliable_reset {
+			params.set_varint(PARAM_RELIABLE_RESET, 1, version)?;
 		}
 
 		params.encode(w, version)
@@ -256,6 +273,11 @@ impl Message for ReceivedSetup {
 		let hop = params
 			.get_varint(PARAM_HOP, version)?
 			.and_then(|id| crate::Hop::new(id).ok());
+		let reliable_reset = match params.get_varint(PARAM_RELIABLE_RESET, version)? {
+			None | Some(0) => false,
+			Some(1) => true,
+			Some(_) => return Err(DecodeError::InvalidValue),
+		};
 
 		Ok(Self {
 			role_present: role_code.is_some(),
@@ -265,6 +287,7 @@ impl Message for ReceivedSetup {
 				role,
 				cost,
 				hop,
+				reliable_reset,
 			},
 		})
 	}
@@ -343,6 +366,12 @@ impl PeerSetup {
 	/// parameter. `None` when it declared none: a leaf with no identity worth excluding.
 	pub fn poll_hop(&self, waiter: &kio::Waiter) -> std::task::Poll<Option<crate::Hop>> {
 		self.poll_get(waiter, |setup| setup.hop)
+	}
+
+	/// Whether the peer declared that its group resets keep their header. False until its
+	/// SETUP arrives, which only costs a grace.
+	pub fn reliable_reset(&self) -> bool {
+		self.0.read().setup.as_ref().is_some_and(|setup| setup.reliable_reset)
 	}
 
 	/// Poll for a field of the peer's SETUP.
@@ -495,6 +524,42 @@ mod tests {
 			..Default::default()
 		};
 		assert_eq!(round_trip(&msg), msg);
+	}
+
+	/// The declaration is a 0/1 flag; any other value is malformed.
+	#[test]
+	fn reliable_reset_round_trip() {
+		let msg = Setup {
+			reliable_reset: true,
+			..Default::default()
+		};
+		assert_eq!(round_trip(&msg), msg);
+
+		let version = Version::Lite07;
+		for (value, want) in [(0, Some(false)), (1, Some(true)), (2, None)] {
+			let mut params = Parameters::default();
+			params.set_varint(super::PARAM_RELIABLE_RESET, value, version).unwrap();
+			let mut buf = Vec::new();
+			params
+				.encode(&mut Encoder::new(&mut buf, version.into()), version)
+				.unwrap();
+			let got = Setup::decode_msg(&mut Decoder::new(&buf, version.into()), version);
+			assert_eq!(got.ok().map(|setup| setup.reliable_reset), want, "{value}");
+		}
+	}
+
+	/// Only lite-07 counts the streams the promise is about.
+	#[test]
+	fn reliable_reset_needs_the_stream_count_and_the_transport() {
+		use crate::transport::memory;
+		for reliable_reset in [true, false] {
+			let (session, _peer) = memory::pair(memory::Config {
+				reliable_reset,
+				..Default::default()
+			});
+			assert_eq!(Setup::detect_reliable_reset(&session, Version::Lite07), reliable_reset);
+			assert!(!Setup::detect_reliable_reset(&session, Version::Lite06));
+		}
 	}
 
 	// A declared id of 0 carries no identity (it cannot be excluded), so it

@@ -207,6 +207,15 @@ pub mod poll {
 		/// rather than defaulted for the same reason as [`protocol`](Self::protocol).
 		fn stats(&self) -> impl Stats;
 
+		/// Whether a reset after [`SendStream::checkpoint`] still delivers the data written
+		/// before it to the peer's application, as QUIC's RESET_STREAM_AT does.
+		///
+		/// Only true once the peer has agreed to it. A transport that reports this must
+		/// implement [`SendStream::checkpoint`], since a peer is told to rely on it.
+		fn reliable_reset(&self) -> bool {
+			false
+		}
+
 		/// Accept the next unidirectional stream opened by the peer.
 		fn accept_uni(&mut self) -> AcceptUni<'_, Self> {
 			AcceptUni(self)
@@ -370,6 +379,12 @@ pub mod poll {
 		/// and so it matches [`finish`](Self::finish), which must not consume the stream
 		/// for exactly that reason.
 		fn reset(&mut self, code: u32);
+
+		/// Mark the data written so far, so a later [`reset`](Self::reset) still delivers it.
+		///
+		/// Only does so on a session whose [`Session::reliable_reset`] holds; elsewhere a
+		/// reset discards it as before. A peer that stopped the stream gets nothing.
+		fn checkpoint(&mut self) {}
 
 		/// Poll until the stream is closed by either side.
 		///

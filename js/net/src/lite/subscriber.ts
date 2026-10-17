@@ -1192,7 +1192,8 @@ export class Subscriber {
 	//
 	// lite-07 counts streams, so skipped sequences owe nothing. Older drafts account for
 	// the range using received headers and SUBSCRIBE_DROP. A counted stream reset before
-	// its header leaves no trace, so the grace still bounds that wait. Streams whose
+	// its header leaves no trace, so the grace still bounds that wait, unless the publisher
+	// declared reliable reset: then every counted stream delivers its header. Streams whose
 	// headers arrived keep reading until their own FIN or reset.
 	#settleTail(entry: SubscribeEntry): Promise<void> {
 		const { tail, track } = entry;
@@ -1213,7 +1214,8 @@ export class Subscriber {
 			return tail.covers(start, end);
 		};
 
-		return tail.settle(complete, track.closed);
+		const exact = entry.streams !== undefined && this.#peerSetup?.peek()?.reliableReset === true;
+		return tail.settle(complete, track.closed, { exact });
 	}
 
 	/**

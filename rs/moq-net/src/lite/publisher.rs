@@ -3156,8 +3156,10 @@ struct Subscription<S: crate::transport::poll::Session> {
 
 /// Counts a subscription's group streams for lite-07's SUBSCRIBE_END.
 ///
-/// A group is pending from the moment it is queued until its stream opens, or it gives
-/// up first (expired, or the open failed) and is never counted.
+/// A group is pending from the moment it is queued until its GROUP message is written to
+/// its stream, or it gives up first (expired, cancelled, or the open failed) and is never
+/// counted. Only a written header is checkpointed, so on a session that declared reliable
+/// resets every counted stream reaches the subscriber.
 ///
 /// `unencodable` rides along because every group machine and the run loop already share
 /// this handle. A header that cannot be encoded writes nothing, so the group-stream
@@ -3167,6 +3169,16 @@ struct Opens {
 	pending: AtomicU64,
 	opened: AtomicU64,
 	unencodable: Mutex<Option<Error>>,
+}
+
+impl Opens {
+	/// Stop waiting on a pending group, counting its stream if its header was written.
+	fn settle(&self, opened: bool) {
+		self.pending.fetch_sub(1, Ordering::Relaxed);
+		if opened {
+			self.opened.fetch_add(1, Ordering::Relaxed);
+		}
+	}
 }
 
 impl<S: crate::transport::poll::Session> Subscription<S> {
@@ -3649,6 +3661,8 @@ enum GroupState<S: crate::transport::poll::Session> {
 	/// then the pending frame, then the next frame.
 	Serve {
 		writer: Writer<S::SendStream, Version>,
+		/// The GROUP message is still in the write buffer, so the stream is not counted.
+		header: bool,
 		frame: Option<frame::Consumer>,
 		chunk: Option<bytes::Bytes>,
 		batch: Box<frame::Buffer>,
@@ -3680,14 +3694,6 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 			prev_ts: 0,
 			state: GroupState::Open,
 			budget: kio::coop::Budget::new(32),
-		}
-	}
-
-	/// Leave [`GroupState::Open`], counting the stream if it opened.
-	fn settle_open(&mut self, opened: bool) {
-		self.ctx.opens.pending.fetch_sub(1, Ordering::Relaxed);
-		if opened {
-			self.ctx.opens.opened.fetch_add(1, Ordering::Relaxed);
 		}
 	}
 
@@ -3723,7 +3729,7 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 			match &mut self.state {
 				GroupState::Open => {
 					if self.group.poll_expired(waiter) {
-						self.settle_open(false);
+						self.ctx.opens.settle(false);
 						self.state = GroupState::Done;
 						return Poll::Ready(Err(Error::Old));
 					}
@@ -3731,12 +3737,11 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 					let stream = match ready!(self.ctx.session.poll_open_uni(&mut cx)) {
 						Ok(stream) => stream,
 						Err(err) => {
-							self.settle_open(false);
+							self.ctx.opens.settle(false);
 							self.state = GroupState::Done;
 							return Poll::Ready(Err(crate::lite::error::from_transport(err)));
 						}
 					};
-					self.settle_open(true);
 					let mut writer = Writer::new(stream, self.ctx.version);
 					writer.set_priority(self.priority.send_order());
 
@@ -3750,12 +3755,14 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 						// it to this subscription. The run loop reads the slot and resets the
 						// subscribe stream instead.
 						self.ctx.note_unencodable(&err);
+						self.ctx.opens.settle(false);
 						self.state = GroupState::Done;
 						writer.abort(&err);
 						return Poll::Ready(Err(err));
 					}
 					self.state = GroupState::Serve {
 						writer,
+						header: true,
 						frame: None,
 						chunk: None,
 						batch: Box::new(frame::Buffer::new()),
@@ -3764,6 +3771,7 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 				}
 				GroupState::Serve {
 					writer,
+					header,
 					frame,
 					chunk,
 					batch,
@@ -3779,6 +3787,13 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 						loop {
 							ready!(self.budget.poll_yield(waiter));
 							match writer.poll_flush(&mut cx) {
+								// The header is the first flush, so a reset from here on still
+								// tells the subscriber which group it was.
+								Poll::Ready(Ok(())) if *header => {
+									*header = false;
+									writer.checkpoint();
+									self.ctx.opens.settle(true);
+								}
 								Poll::Ready(Ok(())) => {}
 								Poll::Ready(Err(err)) => break 'serve Err(err),
 								// Parking on the transport is the one stall the group cursor cannot
@@ -3871,9 +3886,13 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 						}
 					};
 
-					let GroupState::Serve { writer, .. } = std::mem::replace(&mut self.state, GroupState::Done) else {
+					let GroupState::Serve { writer, header, .. } = std::mem::replace(&mut self.state, GroupState::Done)
+					else {
 						unreachable!()
 					};
+					if header {
+						self.ctx.opens.settle(false);
+					}
 					match outcome {
 						Ok(()) => {
 							let mut writer = writer;
@@ -4099,6 +4118,63 @@ mod serve_group_test {
 
 		assert!(matches!(serve.await, Err(Error::Old)));
 		assert_eq!(log.resets(), vec![crate::StreamError::Old.to_code()]);
+
+		// The checkpoint sits right after the header, so the reset keeps it and drops the
+		// frame behind it.
+		let trail: Vec<_> = log.trail().into_iter().map(|(_, sent)| sent).collect();
+		let [Sent::Write(_), Sent::Checkpoint, .., Sent::Reset(_)] = trail.as_slice() else {
+			panic!("{trail:?}");
+		};
+	}
+
+	/// A group stream counts once its header is written, which is also what its checkpoint
+	/// keeps. One that gives up before then is not counted, since no reset could deliver it.
+	#[moq_net_sim::test]
+	async fn a_stream_counts_once_its_header_is_written() {
+		for open in [true, false] {
+			let gate = kio::Producer::new(open);
+			let session = SinkSession::gated_uni(gate.consume());
+			let log = session.log.clone();
+			let steer = kio::Producer::new(Steer::default());
+			let opens = Arc::new(Opens::default());
+			let subscription = Subscription {
+				session,
+				id: 0,
+				track_name: "test".into(),
+				priority: PriorityQueue::default(),
+				steer: steer.consume(),
+				steer_seen: Steer::default(),
+				version: Version::Lite07,
+				timescale: Some(crate::Timescale::MILLI),
+				runtime: crate::time::Clock::sim(),
+				opens: opens.clone(),
+			};
+
+			let track = track::Producer::new(
+				Arc::new(broadcast::Info::default()),
+				"test",
+				crate::track::Info::timed(),
+			);
+			let mut subscriber = track.subscribe(None);
+			let mut old = track.append_group().unwrap();
+			old.write_frame(Timestamp::ZERO, b"old".as_slice()).unwrap();
+			let group = subscriber.recv_group().await.unwrap().expect("old group");
+			let handle = subscription.priority.insert(Priority::new(0, 0, 0));
+			let mut serve = std::pin::pin!(subscription.serve_group(0, 0, handle, group));
+			assert!(futures::poll!(serve.as_mut()).is_pending());
+			assert_eq!(opens.pending.load(Ordering::Relaxed), u64::from(!open));
+
+			// A successor a second on gives the group up, header written or not.
+			moq_net_sim::advance(Duration::from_secs(1)).await;
+			let mut edge = track.append_group().unwrap();
+			edge.write_frame(Timestamp::from_millis(1000).unwrap(), b"edge".as_slice())
+				.unwrap();
+			let _ = serve.await;
+			assert_eq!(opens.pending.load(Ordering::Relaxed), 0);
+			assert_eq!(opens.opened.load(Ordering::Relaxed), u64::from(open), "{open}");
+			let checkpoints = log.trail().iter().filter(|(_, sent)| *sent == Sent::Checkpoint).count();
+			assert_eq!(checkpoints, usize::from(open));
+		}
 	}
 
 	/// A subscription group keeps checking the max delay while a transport write is
