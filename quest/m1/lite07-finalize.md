@@ -83,6 +83,7 @@ is published; older versions are unchanged.
 - [Announcement takeover](/quest/m1/announce-takeover.md) - ANNOUNCE_TAKEOVER preserves a proven instance under a new independent route
 - [Refresh on the lite wire](/quest/m1/refresh/lite.md) - TRACK_INFO carries the refresh ratio and SUBSCRIBE_UPDATE the wanted group
 - [Compressed tracks in Rust](/quest/m1/compress/core.md) - TRACK_INFO carries the compress flag and the frame header each compressed frame's inflated size
+- [Compressed tracks in js/net](/quest/m1/compress/js.md) - JS reads and writes compressed lite-07 tracks instead of refusing them
 
 ## Related
 
