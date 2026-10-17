@@ -4,9 +4,11 @@
 //! against [`model`], under the rule that fails and the rule that holds. The
 //! model is a reference for the contract, not the relay: when lite-07's route
 //! layer lands, these topologies become its acceptance tests. Failover fixtures
-//! advance the origin's seqno by hand where the seqno request would. It sits in
+//! here advance the origin's seqno by hand where the seqno request would;
+//! [`handoff`] runs the request exchange and the announcement layer. It sits in
 //! `tests/` rather than inline because it tests no moq-net module.
 
+mod handoff;
 mod model;
 
 use model::{Aggregate, Config, Export, Forward, Grant, Link, Metric, Net, Outcome, Rule, TieBreak, qualified};
@@ -118,7 +120,10 @@ fn collected_incarnation_returns_only_while_its_retraction_is_in_flight() {
 	assert!(net.deliver(a, b), "the held update");
 	assert!(net.route(b, 7).is_some(), "the dead incarnation is back at b");
 	assert!(net.run());
-	assert!(net.route(c, 7).is_none(), "c's feasibility distance refuses b's copy");
+	// c drained its distance, so b's copy spreads to it, but the path ends at a,
+	// which let go: a stale dead end until the retraction lands, never a loop.
+	assert_eq!(net.route(c, 7).and_then(|route| route.next), Some(b));
+	assert!(net.route(a, 7).is_none());
 
 	net.release(a, b);
 	assert!(net.run());
@@ -128,6 +133,214 @@ fn collected_incarnation_returns_only_while_its_retraction_is_in_flight() {
 			"node {node} still routes to a dead incarnation"
 		);
 	}
+}
+
+/// No route entry is not proof that no advertisement derived from this node's
+/// own is still in flight. b's echo from c waits on c's session while b loses
+/// its only entry. b keeps its feasibility distance until every neighbor it
+/// advertised to echoes the ROUTE_END back, so the queued echo is refused
+/// rather than letting b route via c while c still routes via b. A leaf never
+/// advertises the identity back, so only an explicit echo of the ROUTE_END,
+/// which it sends too, ends the drain. Once the echoes land nothing is left.
+#[test]
+fn collection_keeps_the_feasibility_distance_against_a_queued_echo() {
+	let (origin, b, c, leaf) = (0, 1, 2, 3);
+	let mut net = Net::new(Config::default(), 4);
+	net.leaf(leaf);
+	net.join(origin, b, 1);
+	net.join(b, c, 1);
+	net.join(b, leaf, 1);
+	net.hold(c, b);
+	net.originate(origin, 7, 0);
+	assert!(net.run());
+	assert_eq!(net.route(c, 7).and_then(|route| route.next), Some(b));
+	assert!(net.queued(c, b) > 0, "c's echo waits");
+
+	net.hold(b, c);
+	net.hold(leaf, b);
+	net.disconnect(origin, b);
+	assert!(!net.holds(b, 7));
+	net.collect(b, 7);
+	assert!(net.remembers(b, 7), "draining: the ROUTE_ENDs are not echoed yet");
+	assert!(net.deliver(c, b), "the echo of b's own advertisement");
+	assert!(net.route(b, 7).is_none(), "b refuses its own echo");
+	assert!(net.starved(b, 7));
+
+	net.release(b, c);
+	net.release(c, b);
+	assert!(net.run());
+	assert!(net.queued_acks(leaf, b) > 0, "the leaf's echo waits");
+	assert!(net.remembers(b, 7), "the leaf may still hold b's advertisement");
+	net.release(leaf, b);
+	assert!(net.run());
+	for node in [b, c, leaf] {
+		assert!(
+			net.route(node, 7).is_none(),
+			"node {node} routes to an unreachable origin"
+		);
+		assert!(!net.holds(node, 7), "node {node}");
+		assert!(!net.remembers(node, 7), "node {node} keeps a drained distance");
+	}
+}
+
+/// Every node's next-hop chain toward `id` ends without revisiting a node.
+fn assert_loop_free(net: &Net, nodes: usize, id: u64) {
+	for node in 0..nodes {
+		let mut at = node;
+		for hop in 0.. {
+			let Some(next) = net.route(at, id).and_then(|route| route.next) else {
+				break;
+			};
+			assert!(hop < nodes, "{id} loops from node {node}");
+			at = next;
+		}
+	}
+}
+
+/// A restarted relay loses every feasibility distance, yet stays loop-free:
+/// its sessions close with the process, and each neighbor drops what it
+/// learned on them, so no neighbor still holds an advertisement the new
+/// process never made. A stale echo still reaches it through a third node's
+/// session that outlived it, and is safe, because every node on that echo's
+/// path kept its own distance.
+#[test]
+fn restart_drops_the_feasibility_distance_with_every_session() {
+	let (origin, b, c, d) = (0, 1, 2, 3);
+	let mut net = Net::new(Config::default(), 4);
+	net.join(origin, b, 1);
+	net.join(b, c, 1);
+	net.join(c, d, 1);
+	net.join(d, b, 10);
+	net.originate(origin, 7, 0);
+	assert!(net.run());
+	assert_eq!(net.route(d, 7).and_then(|route| route.next), Some(c));
+
+	// The update c sends d after losing b waits on a session that outlives b.
+	net.hold(c, d);
+	net.kill(b);
+	assert!(net.run());
+	assert_loop_free(&net, 4, 7);
+	assert!(net.route(c, 7).is_none());
+	assert_eq!(net.route(d, 7).and_then(|route| route.next), Some(c), "stale");
+
+	net.connect(b, d);
+	assert!(net.run());
+	assert_eq!(
+		net.route(b, 7).and_then(|route| route.next),
+		Some(d),
+		"the echo of the old advertisement reaches the new process"
+	);
+	assert_loop_free(&net, 4, 7);
+	net.connect(b, c);
+	assert!(net.run());
+	assert!(net.route(c, 7).is_none(), "the distance at c refuses the longer copy");
+	assert_loop_free(&net, 4, 7);
+
+	net.release(c, d);
+	assert!(net.run());
+	assert_loop_free(&net, 4, 7);
+	net.connect(origin, b);
+	assert!(net.run());
+	assert_loop_free(&net, 4, 7);
+	for node in [b, c, d] {
+		assert!(net.route(node, 7).is_some(), "node {node} recovers");
+	}
+}
+
+/// Random meshes churn links, hold and deliver messages out of step, and
+/// collect route-less identities, then drop the feasibility distance. Dropped
+/// once no route entry is left, it loops; dropped once every neighbor has
+/// processed the retraction, as its echoed ROUTE_ENDs or a restart
+/// prove, it never does. Only the edge to each neighbor matters, since every
+/// node farther away keeps its own distance.
+#[test]
+fn sweep_forgetting_distances() {
+	let mut loops = [0; 2];
+	let mut forgotten = [0; 2];
+	for (acked, (loops, forgotten)) in [false, true].into_iter().zip(loops.iter_mut().zip(&mut forgotten)) {
+		let mut rng = XorShift(0x5eed_f0d5);
+		for _ in 0..300 {
+			let nodes = RELAYS + 2;
+			let mut net = Net::new(Config::default(), nodes);
+			let mut links = Vec::new();
+			for a in 0..RELAYS {
+				for b in a + 1..RELAYS {
+					if b == a + 1 || rng.chance(40) {
+						net.join(a, b, 1 + rng.next(3));
+						links.push((a, b));
+					}
+				}
+			}
+			let ids = [RELAYS as u64, RELAYS as u64 + 1];
+			for origin in RELAYS..nodes {
+				let relay = rng.next(RELAYS as u64) as usize;
+				net.join(origin, relay, 1);
+				links.push((relay, origin));
+				net.originate(origin, origin as u64, 0);
+			}
+			assert!(net.run());
+
+			for _ in 0..60 {
+				match rng.next(8) {
+					0 => {
+						let (a, b) = links[rng.next(links.len() as u64) as usize];
+						if net.connected(a, b) {
+							net.disconnect(a, b);
+						} else {
+							net.connect(a, b);
+						}
+					}
+					1 | 2 => {
+						let (a, b) = links[rng.next(links.len() as u64) as usize];
+						let (from, to) = if rng.chance(50) { (a, b) } else { (b, a) };
+						if rng.chance(60) {
+							net.hold(from, to);
+						} else {
+							net.release(from, to);
+						}
+					}
+					3 => {
+						let busy = net.busy();
+						if !busy.is_empty() {
+							let (from, to) = busy[rng.next(busy.len() as u64) as usize];
+							net.deliver(from, to);
+						}
+					}
+					4 => net.bump(RELAYS + rng.next(2) as usize),
+					_ => {
+						let node = rng.next(RELAYS as u64) as usize;
+						let id = ids[rng.next(2) as usize];
+						if !net.holds(node, id) {
+							net.collect(node, id);
+							if !acked || net.retracted(node, id) {
+								net.forget(node, id);
+								*forgotten += 1;
+							}
+						}
+					}
+				}
+				net.settle(1);
+				for &id in &ids {
+					for node in 0..nodes {
+						let mut at = node;
+						let mut hops = 0;
+						while let Some(next) = net.route(at, id).and_then(|route| route.next) {
+							hops += 1;
+							if hops > nodes {
+								*loops += 1;
+								break;
+							}
+							at = next;
+						}
+					}
+				}
+			}
+		}
+	}
+	println!("distances dropped {forgotten:?}, loops {loops:?}: at no entry, then once retracted");
+	assert!(loops[0] > 0, "the sweep must reach the unsafe drop");
+	assert!(forgotten[1] > 0);
+	assert_eq!(loops[1], 0);
 }
 
 // Metric: strictly positive link costs, checked, with no hop count.

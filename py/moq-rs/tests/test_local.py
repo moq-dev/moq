@@ -2,6 +2,7 @@
 
 import asyncio
 import struct
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from typing import cast
 
@@ -1270,6 +1271,23 @@ def test_audio_encoder_returns_namespaced_records():
     assert packet.data
     finish = encoder.finish()
     assert isinstance(finish, moq.audio.EncoderFinish)
+
+
+def test_audio_encoder_preset_init_and_bitrate():
+    """A preset sets the frame size, the encoder reports its OpusHead, and the bitrate retunes live."""
+    output = moq.audio.EncoderOutput(
+        codec=moq.AudioCodec.opus(), sample_rate=48000, channels=1, preset=moq.audio.Preset.LOW_LATENCY
+    )
+    encoder = moq.audio.Encoder(output)
+    assert encoder.frame_size == 480
+    init = encoder.track_init()
+    assert init.format == moq.media.AudioFormat.OPUS
+    assert init.data[:8] == b"OpusHead"
+    encoder.set_bitrate(32_000)
+    assert encoder.encode([0.0] * encoder.frame_size).data
+
+    with pytest.raises(moq.Error.Audio):  # type: ignore[attr-defined]
+        moq.audio.Encoder(replace(output, frame_duration=timedelta(milliseconds=20)))
 
 
 def test_video_namespace_names_its_configuration_types():

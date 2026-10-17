@@ -144,6 +144,7 @@ using VideoProperties = MoqVideoProperties;
 using WebSocketConfig = MoqWebSocketConfig;
 using AnnounceEvent = MoqAnnounceEvent;
 using AudioFormat = MoqAudioFormat;
+using AudioPreset = MoqAudioPreset;
 using AudioSampleFormat = MoqAudioSampleFormat;
 using ConnectionStatus = MoqConnectionStatus;
 using Container = MoqContainer;

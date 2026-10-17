@@ -28,6 +28,7 @@ Rust core: Python, Kotlin, Swift, Go, Dart, and C++ are generated from one
 [UniFFI](https://mozilla.github.io/uniffi-rs/) crate (`moq-ffi`) and then
 wrapped in an idiomatic layer, while C gets a hand-written stable ABI
 (`moq-c`). A feature added to the core lands in all of them together.
+[Layers](/lib/layers) shows where each layer they wrap lives in every binding.
 
 ## What every binding can do
 

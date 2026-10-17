@@ -440,6 +440,7 @@ mod test {
 				display_aspect_height: None,
 				bitrate: None,
 				enabled: true,
+				preference: 0,
 				framerate: None,
 				optimize_for_latency: None,
 				container: Container::Legacy,

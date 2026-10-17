@@ -17,12 +17,13 @@ from moq_ffi import (
 )
 
 from ._records import _from_us, _opt_us, _to_us
-from .media import Audio, CatalogProducer
+from .media import Audio, AudioInit, CatalogProducer
 from .publish import TrackDemand
 from .session import Bandwidth, Reservation
 from .subscribe import BroadcastConsumer
 from .types import AudioCodec as Codec
 from .types import AudioEncoderInput as EncoderInput
+from .types import AudioPreset as Preset
 from .types import AudioSampleFormat as SampleFormat
 
 Packet = MoqAudioPacket
@@ -49,7 +50,11 @@ class Frame:
 
 @dataclass(frozen=True)
 class EncoderOutput:
-    """Codec-side settings. A zero ``frame_duration`` takes the codec's own frame."""
+    """Codec-side settings.
+
+    A zero ``frame_duration`` takes the ``preset``'s frame, or the codec's own.
+    ``preset`` defaults to ``Balanced`` and is refused alongside a nonzero ``frame_duration``.
+    """
 
     codec: Codec
     track: str | None = None
@@ -57,6 +62,7 @@ class EncoderOutput:
     channels: int | None = None
     bitrate: int | None = None
     frame_duration: timedelta = timedelta(0)
+    preset: Preset | None = None
 
     def _ffi(self) -> MoqAudioEncoderOutput:
         return MoqAudioEncoderOutput(
@@ -66,6 +72,7 @@ class EncoderOutput:
             channels=self.channels,
             bitrate=self.bitrate,
             frame_duration_us=_to_us(self.frame_duration, "frame_duration"),
+            preset=self.preset,
         )
 
 
@@ -180,6 +187,14 @@ class Encoder:
         """Samples per channel required by each encode call."""
         return self._inner.frame_size()
 
+    def track_init(self) -> AudioInit:
+        """The OpusHead or AudioSpecificConfig that publishes these packets via :meth:`TrackProducer.audio`."""
+        return self._inner.track_init()
+
+    def set_bitrate(self, bitrate: int) -> None:
+        """Retune the live encoder in bits per second."""
+        self._inner.set_bitrate(bitrate)
+
     def encode(self, pcm: list[float]) -> Packet:
         """Encode one full PCM frame."""
         return self._inner.encode(pcm)
@@ -199,6 +214,7 @@ __all__ = [
     "Frame",
     "Codec",
     "Packet",
+    "Preset",
     "Producer",
     "SampleFormat",
 ]

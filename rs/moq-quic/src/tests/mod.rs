@@ -42,6 +42,7 @@ use crate::{
 mod util;
 use util::*;
 
+mod characterize;
 mod reset_stream_at;
 mod sim;
 mod token;

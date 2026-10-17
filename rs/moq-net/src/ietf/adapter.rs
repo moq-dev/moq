@@ -1367,6 +1367,7 @@ mod tests {
 
 		for version in [Version::Draft14, Version::Draft15, Version::Draft16] {
 			let update = ietf::SubscribeUpdate {
+				new_group: None,
 				request_id: update_id,
 				subscription_request_id: Some(target_id),
 				start_location: ietf::Location { group: 1, object: 2 },
@@ -1903,6 +1904,7 @@ mod tests {
 	async fn an_update_past_the_window_closes_the_session() {
 		const VERSION: Version = Version::Draft14;
 		let update = ietf::SubscribeUpdate {
+			new_group: None,
 			request_id: RequestId(4),
 			subscription_request_id: Some(RequestId(0)),
 			start_location: ietf::Location { group: 0, object: 0 },

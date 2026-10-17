@@ -9,8 +9,10 @@ default:
     just check
 
 # Build the package and run the probe and doc samples against its install.
-check:
-    ../sh/cpp/check.sh
+[positional-arguments]
+check *args:
+    python3 ../sh/cpp/ffi.test.py
+    ../sh/cpp/check.sh "$@"
 
 # Runs in the caller's directory, so a relative `--output` means what it would
 # to the script itself.
@@ -24,3 +26,9 @@ package *args:
 # Remove the package builds.
 clean:
     rm -rf moq/build
+
+# Stage, archive, fetch, or publish the pinned default-feature native input.
+[no-cd]
+[positional-arguments]
+ffi *args:
+    python3 {{ quote(justfile_directory() / "sh/cpp/ffi.py") }} "$@"
