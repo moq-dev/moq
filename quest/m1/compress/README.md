@@ -54,7 +54,9 @@ Every interview prompt and the selected answer (✅) are in the planning PR.
 - **Ranges.** A range starting at frame N of a compressed group is served
   from N. The requester only asks from N because it holds 0..N-1, so it
   inflates from its own cached prefix. Reading frame N without 0..N-1 is a
-  non-goal: groups are delta encoded anyway.
+  non-goal: groups are delta encoded anyway. The requesting model enforces
+  it: a start on a compressed group it lacks the prefix for widens to frame
+  0 before the request leaves, and a server serves exactly what is asked.
 - **Specs:** draft-lcurley-moq-flate keeps the codec and becomes the IETF
   extension; draft-lcurley-moq-lite specifies the lite-07 field and size and
   references it for the codec.

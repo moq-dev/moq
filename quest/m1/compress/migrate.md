@@ -38,10 +38,16 @@ See the [epic](/quest/m1/compress/README.md) for the decisions.
   and the moq-ffi flate tracks with every wrapper's `flate` namespace and
   `doc/lib/*` entry, per the cross-package sync table.
 
-Public API: removals listed above. Wire: none; catalog JSON loses
-`compression`.
+- Hang format: drop the `compression` field and the `catalog.json.z` and
+  `.z` sibling text from `drafts/draft-lcurley-moq-hang.md` (validate with
+  `just drafts check`), the `js/hang` catalog schema, and `doc/concept`, in
+  step with `rs/hang`.
+
+Public API: removals listed above. Wire: the hang catalog loses
+`compression` and the `.z` tracks, in its draft too; moq-net none.
 
 ## Required
 
 - [Core](/quest/m1/compress/core.md) - Rust compresses opted-in tracks
 - [JavaScript](/quest/m1/compress/js.md) - js/publish and js/watch need the JS side before they drop `.z`
+- [Data consumer timestamps](/quest/m1/data-consumer-timestamps.md) - in review on the same flate and binary consumers this deletes; one owner at a time
