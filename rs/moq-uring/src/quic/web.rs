@@ -443,6 +443,13 @@ pub struct Session {
 }
 
 impl Session {
+	/// Open a send group at `priority`, for streams to join with
+	/// [`SendStream::set_group`]. The HTTP/3 streams stay outside every
+	/// group, so they go first.
+	pub fn send_group(&self, priority: i64) -> super::SendGroup {
+		self.conn.send_group(priority)
+	}
+
 	/// Wrap a raw-QUIC connection in a session, with no
 	/// WebTransport layering: streams and datagrams pass through untouched.
 	pub fn raw(conn: Connection) -> Self {
@@ -822,6 +829,17 @@ impl SendStream {
 		}
 	}
 
+	/// Set the priority within the stream's send group, or session-wide when ungrouped.
+	pub fn set_priority(&mut self, priority: i64) {
+		self.inner.set_priority(priority);
+	}
+
+	/// Move the stream into a send group, or with `None` back out. See
+	/// [`super::SendStream::set_group`].
+	pub fn set_group(&mut self, group: Option<&super::SendGroup>) {
+		self.inner.set_group(group);
+	}
+
 	/// Write the WebTransport header of a stream we opened, checkpointing it
 	/// once it is all written.
 	fn poll_header(&mut self, cx: &mut Context<'_>, header: &mut Bytes) -> Poll<Result<(), Error>> {
@@ -866,7 +884,7 @@ impl web_transport_trait::poll::SendStream for SendStream {
 	}
 
 	fn set_priority(&mut self, order: i32) {
-		web_transport_trait::poll::SendStream::set_priority(&mut self.inner, order);
+		self.inner.set_priority(order.into());
 	}
 
 	fn finish(&mut self) -> Result<(), Self::Error> {

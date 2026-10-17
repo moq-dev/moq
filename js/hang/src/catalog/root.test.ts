@@ -257,3 +257,24 @@ test("an ID used by both video and audio is refused", () => {
 	const parsed = RootSchema.parse({ video: { renditions: { main: avc } }, audio: { renditions: { main: opus } } });
 	expect(() => checkRenditions(parsed)).toThrow(DuplicateRendition);
 });
+
+test("shared stats and echo discovery round trips without changing old catalogs", async () => {
+	const fixture = await Bun.file(
+		new URL("../../../../rs/hang/fixtures/catalog-stats-echo.json", import.meta.url),
+	).json();
+	expect(RootSchema.parse(fixture)).toEqual(fixture);
+	expect(RootSchema.parse({})).toEqual({});
+});
+
+test("a foreign stats or echo value decodes as absent instead of failing the catalog", () => {
+	for (const foreign of [{}, 5, "on", { track: 5 }, { path: ["a"] }, null]) {
+		for (const key of ["stats", "echo"]) {
+			const parsed = RootSchema.parse({ video: { renditions: {} }, [key]: foreign });
+			expect(parsed.stats).toBeUndefined();
+			expect(parsed.echo).toBeUndefined();
+		}
+	}
+	const parsed = RootSchema.parse({ stats: { track: "stats.json" }, echo: { path: "viewers" } });
+	expect(parsed.stats).toEqual({ track: "stats.json" });
+	expect(parsed.echo?.path).toBe("viewers" as RelativeBroadcast);
+});

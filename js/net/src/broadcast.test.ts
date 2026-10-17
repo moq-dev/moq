@@ -710,6 +710,27 @@ test("a fetch waits for a group still to come", async () => {
 	broadcast.close();
 });
 
+test("fetch maxDelay tightens publisher retention without changing omission", async () => {
+	const broadcast = new BroadcastProducer();
+	const track = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: Milli(2000) });
+
+	for (const millis of [0, 1000]) {
+		const group = track.appendGroup();
+		group.writeFrame({
+			payload: new TextEncoder().encode(String(millis)),
+			timestamp: Timestamp.fromMillis(millis),
+		});
+		group.close();
+	}
+
+	const omitted = await wireOf(broadcast).fetchGroup("video", 0);
+	expect(omitted.sequence).toBe(0);
+	omitted.close();
+
+	await expect(wireOf(broadcast).fetchGroup("video", 0, { maxDelay: Milli(0) })).rejects.toBeInstanceOf(NotFound);
+	broadcast.close();
+});
+
 test("aborting a fetch rejects with the signal's reason", async () => {
 	const broadcast = new BroadcastProducer();
 	broadcast.createTrack("video", { timescale: Timescale.MILLI });

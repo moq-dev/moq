@@ -127,6 +127,8 @@ type Catalog = {
   "video": VideoSchema | undefined,
   "archive": ArchiveSchema | undefined,
   "clock": ClockSchema | undefined,
+  "stats": { "track": string } | undefined,
+  "echo": { "path": string } | undefined,
   "text": TextSchema | undefined,
   "json": JsonTracks | undefined,
   "binary": BinaryTracks | undefined,
@@ -142,7 +144,7 @@ For example, a chat entry should name a chat track, not carry individual chat me
 This way catalog updates are rare and a client MAY choose to not subscribe.
 The `json` and `binary` sections ({{data}}) are how a track like that is listed.
 
-This specification defines audio, video, and text media tracks, plus an optional `archive` entry ({{archive-catalog}}) naming the timeline track ({{timeline}}) that indexes each track, an optional root `clock` entry ({{clock}}) mapping content time to wall time, and the application data tracks in {{data}}.
+This specification defines audio, video, and text media tracks, plus an optional `archive` entry ({{archive-catalog}}) naming the timeline track ({{timeline}}) that indexes each track, an optional root `clock` entry ({{clock}}) mapping content time to wall time, the application data tracks in {{data}}, and optional publisher statistics and solicited viewer feedback ({{media-stats}}).
 
 ## Clock {#clock}
 The catalog's root `clock` field is the broadcast's one continuous clock:
@@ -601,6 +603,80 @@ If absent, `enabled` defaults to true; a publisher SHOULD only write it when fal
 
 Earlier versions defined a video `stalled` field instead.
 A publisher MUST NOT write `stalled`, and a consumer MUST ignore it.
+
+# Media Statistics and Viewer Feedback {#media-stats}
+
+The optional catalog `stats` section names the publisher's snapshot track in the catalog's own broadcast: `{ "track": "stats.json" }`.
+A publisher snapshot covers only renditions that publisher writes, omitting references to another broadcast.
+
+The optional catalog `echo` section solicits feedback: `{ "path": "viewers" }`.
+The path is relative to the broadcast serving the catalog, with the same URL-style resolution and root containment as {{field-broadcast}}.
+For example, from `room/live`, `viewers` resolves to `room/viewers`, and `live/viewers` resolves to `room/live/viewers`.
+A consumer MUST reject a catalog whose echo path resolves above its connection root.
+After reading the soliciting catalog, a viewer MAY announce one broadcast under that prefix at an application-assigned name plus `.echo`, for example `room/viewers/alice.echo`.
+Each such broadcast belongs to one soliciting catalog and carries the fixed `feedback.json` track; it has no catalog of its own.
+A reader recognizes feedback by the `.echo` suffix on the broadcast's final path segment, so it does not list feedback as playable media.
+The application controls names and publish/subscribe authorization; a report is not authenticated beyond those rights.
+Without `echo`, no feedback is solicited.
+
+An application may already carry its own `stats` or `echo` root key, so a reader MUST treat a `stats` value without a string `track`, or an `echo` value without a string `path`, as absent rather than refuse the catalog.
+
+Both tracks carry JSON snapshots, optionally with the `.z` sibling encoding of JSON snapshots.
+The uncompressed track carries a complete snapshot in a group's single UTF-8 JSON frame.
+The compressed sibling starts each group with a full snapshot and continues with RFC 7396 merge patches in the DEFLATE stream defined in {{compression}}.
+A producer SHOULD update about once per second while observed; a report need not leave the process when unsubscribed.
+A reader takes the newest complete snapshot and treats the reporting broadcast's replacement or decreasing cumulative counters as a reset.
+
+~~~
+type PublisherSnapshot = {
+  transport?: Transport,
+  renditions?: { [renditionId: string]: PublisherRendition },
+  // ... any container or application sections ...
+}
+type ViewerSnapshot = {
+  transport?: Transport,
+  renditions?: { [renditionId: string]: ViewerRendition },
+  // ... any container or application sections ...
+}
+type PublisherRendition = {
+  frames?: number, bytes?: number, keyframes?: number, skipped?: number,
+  bitrate?: number,
+}
+type ViewerRendition = {
+  frames?: number, bytes?: number, decoded?: number, late?: number,
+  errors?: number, stalls?: number, stalled?: number, underruns?: number,
+  arrival?: { timestamp: number, wall: number }, latency?: number,
+}
+type Transport = {
+  rtt?: number, rate?: number, lostBytes?: number, lostPackets?: number, age?: number,
+}
+~~~
+
+Every number is a nonnegative integer no larger than 2^53 - 1; malformed or out-of-range known fields MUST be refused.
+Unknown fields MUST be ignored; application and container sections MAY be flattened beside `transport` and `renditions`.
+Absent rendition counters mean zero, and zero counters MAY be omitted; JavaScript preserves omission instead of synthesizing fields.
+Unavailable gauges and transport measurements MUST remain absent, and a known zero MUST remain explicit.
+A reader treats JSON `null` in an optional `stats` or `echo` catalog section, gauge, transport measurement, or `arrival` as absent; publishers omit unavailable fields.
+An `arrival` MUST carry both `timestamp` and `wall`; a reader MUST refuse one missing either.
+Rendition IDs are the unique keys from the soliciting catalog, independent of media kind and wire track name.
+A viewer reports referenced renditions under the IDs in the catalog it read, even when their media comes from another broadcast.
+An empty rendition entry is valid and represents zero cumulative counters; its ID MUST NOT be removed merely because its counters are zero.
+
+`frames` and `bytes` count cumulative media payload frames and bytes sent or received, according to the report's role.
+Publisher `keyframes` counts sent keyframes; `skipped` counts frames skipped before sending.
+Viewer `decoded`, `late`, and `errors` count decoded frames, frames too late for playout, and decode errors.
+`stalls` counts playout stalls, `stalled` is cumulative stalled duration, and `underruns` counts audio buffer underruns.
+`bitrate` is the latest target encoder bitrate, `latency` the latest playout latency, and `arrival` pairs the newest received media timestamp with its arrival wall time.
+Durations and media timestamps are milliseconds; `arrival.wall` is milliseconds since the MoQ epoch (2020-01-01T00:00:00Z).
+Sub-millisecond durations and timestamps are floored when encoded.
+Rates are bits per second.
+
+`transport` describes the reporting connection: latest round-trip time `rtt`, estimated bitrate `rate`, cumulative loss counters `lostBytes` and `lostPackets`, and sample `age` at reporting time.
+All transport measurements are optional; a browser may know only its PROBE round-trip time.
+Loss is a pair of cumulative counters, never a gauge or fraction: a reader derives loss over the same interval as rendition rates and handles resets.
+Gauges MUST NOT be summed across reports.
+
+The MSF catalog conversion carries neither `stats` nor `echo`; their transport through MSF `publishTracks` is not defined here.
 
 # Container {#container}
 Audio, video, and text tracks use a container to encapsulate the media payload.
@@ -1136,6 +1212,7 @@ This document has no IANA actions.
 {:numbered="false"}
 
 - Derived HLS and DASH exports hand disabled references to enabled renditions at the first record numbered past the advertised ones, keeping the record `sequence` as the HLS media sequence and starting a DASH period.
+- Added optional `stats` and `echo` catalog sections, publisher/viewer snapshots keyed by rendition ID, and the `.echo` feedback broadcast convention.
 
 - Fixed a track's identity for its name ({{identity}}): codec, description, container, display aspect, sample rate, and channel count never change, while every other field, including size, bitrate, and framerate, updates in place. A change of identity takes a new track name, which a rendition may name with `track` while keeping its ID, or a new Epoch.
 - Specified MSF text metadata preservation and refusal of unrepresentable text packaging during gateway conversion.

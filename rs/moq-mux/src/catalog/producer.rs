@@ -1328,6 +1328,17 @@ mod test {
 		}
 	}
 
+	#[test]
+	fn msf_omits_media_report_discovery() {
+		let catalog =
+			hang::Catalog::<()>::from_str(include_str!("../../../hang/fixtures/catalog-stats-echo.json")).unwrap();
+		let msf = to_msf::<()>(&catalog, &moq_net::Path::empty());
+		let value = serde_json::to_value(msf).unwrap();
+		assert!(value.get("stats").is_none());
+		assert!(value.get("echo").is_none());
+		assert!(!value["tracks"].as_array().unwrap().is_empty());
+	}
+
 	#[tokio::test(start_paused = true)]
 	async fn abort_preserves_the_cause_on_every_catalog_format_and_clone() {
 		let mut broadcast = moq_net::broadcast::Info::default().produce();

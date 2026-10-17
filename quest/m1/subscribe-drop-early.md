@@ -69,4 +69,3 @@ Tests, with mock time:
 ## Related
 
 - [SUBSCRIBE_DROP](/quest/m1/subscribe-drop.md) - the parent: lite-07, resets before the header, readers
-- [Tail arrivals](/quest/m1/tail-arrivals.md) - per-track live dispositions survive cache eviction

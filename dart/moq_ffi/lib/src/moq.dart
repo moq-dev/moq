@@ -14,7 +14,8 @@ export "uniffi_runtime.dart";
 
 class MoqFetchGroupOptions {
   final int priority;
-  MoqFetchGroupOptions({this.priority = 0});
+  final int? maxDelayUs;
+  MoqFetchGroupOptions({this.priority = 0, this.maxDelayUs = null});
 }
 
 class FfiConverterMoqFetchGroupOptions {
@@ -29,14 +30,22 @@ class FfiConverterMoqFetchGroupOptions {
     );
     final priority = priority_lifted.value;
     new_offset += priority_lifted.bytesRead;
+    final maxDelayUs_lifted = FfiConverterOptionalUInt64.read(
+      Uint8List.view(buf.buffer, new_offset),
+    );
+    final maxDelayUs = maxDelayUs_lifted.value;
+    new_offset += maxDelayUs_lifted.bytesRead;
     return LiftRetVal(
-      MoqFetchGroupOptions(priority: priority),
+      MoqFetchGroupOptions(priority: priority, maxDelayUs: maxDelayUs),
       new_offset - buf.offsetInBytes,
     );
   }
 
   static RustBuffer lower(MoqFetchGroupOptions value) {
-    final total_length = FfiConverterUInt8.allocationSize(value.priority) + 0;
+    final total_length =
+        FfiConverterUInt8.allocationSize(value.priority) +
+        FfiConverterOptionalUInt64.allocationSize(value.maxDelayUs) +
+        0;
     final buf = Uint8List(total_length);
     write(value, buf);
     return toRustBuffer(buf);
@@ -48,11 +57,17 @@ class FfiConverterMoqFetchGroupOptions {
       value.priority,
       Uint8List.view(buf.buffer, new_offset),
     );
+    new_offset += FfiConverterOptionalUInt64.write(
+      value.maxDelayUs,
+      Uint8List.view(buf.buffer, new_offset),
+    );
     return new_offset - buf.offsetInBytes;
   }
 
   static int allocationSize(MoqFetchGroupOptions value) {
-    return FfiConverterUInt8.allocationSize(value.priority) + 0;
+    return FfiConverterUInt8.allocationSize(value.priority) +
+        FfiConverterOptionalUInt64.allocationSize(value.maxDelayUs) +
+        0;
   }
 }
 

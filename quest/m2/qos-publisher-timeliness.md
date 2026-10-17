@@ -55,8 +55,3 @@ excluded.
 ## Required
 
 - [Viewer lag histogram](/quest/m2/qos/lag-histogram.md) - the egress histogram whose type and edges this reuses
-
-## Related
-
-- [Media stats](/quest/m2/stats/schema.md) - the publisher's own view
-  of the same uplink, in the transport section of its stats track

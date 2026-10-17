@@ -44,7 +44,7 @@ impl<S: wt::Stats> moq::Stats for Stats<S> {
 		self.0.estimated_send_rate()
 	}
 }
-impl<S: wt::Session<SendStream: 'static, RecvStream: 'static>> poll::Session for super::Session<S> {
+impl<S: super::Grouped<SendStream: 'static, RecvStream: 'static>> poll::Session for super::Session<S> {
 	type SendStream = super::SendStream<S::SendStream>;
 	type RecvStream = super::RecvStream<S::RecvStream>;
 	type Error = Error<S::Error>;
@@ -59,6 +59,9 @@ impl<S: wt::Session<SendStream: 'static, RecvStream: 'static>> poll::Session for
 	}
 	fn poll_open_bi(&mut self, cx: &mut Context<'_>) -> Poll<Result<poll::BiStreams<Self>, Self::Error>> {
 		backend::Session::poll_open_bi(self, cx).map_err(Error)
+	}
+	fn send_group(&mut self, priority: i64) -> Option<<S::SendStream as super::GroupedSend>::Group> {
+		self.session.send_group(priority)
 	}
 	fn poll_send_datagram(&mut self, cx: &mut Context<'_>, payload: &[u8]) -> Poll<Result<(), Self::Error>> {
 		backend::Session::poll_send_datagram(self, cx, payload).map_err(Error)
@@ -85,16 +88,20 @@ impl<S: wt::Session<SendStream: 'static, RecvStream: 'static>> poll::Session for
 		Stats(backend::Session::stats(self))
 	}
 }
-impl<S: wt::SendStream + 'static> poll::SendStream for super::SendStream<S> {
+impl<S: super::GroupedSend + 'static> poll::SendStream for super::SendStream<S> {
 	type Error = Error<S::Error>;
+	type Group = S::Group;
 	fn poll_write(&mut self, cx: &mut Context<'_>, buf: &[u8]) -> Poll<Result<usize, Self::Error>> {
 		backend::SendStream::poll_write(self, cx, buf).map_err(Error)
 	}
 	fn poll_write_buf<B: Buf>(&mut self, cx: &mut Context<'_>, buf: &mut B) -> Poll<Result<usize, Self::Error>> {
 		backend::SendStream::poll_write_buf(self, cx, buf).map_err(Error)
 	}
-	fn set_priority(&mut self, order: i32) {
-		backend::SendStream::set_priority(self, order)
+	fn set_priority(&mut self, priority: i64) {
+		self.prioritize(priority)
+	}
+	fn set_group(&mut self, group: &Self::Group) {
+		self.join(group)
 	}
 	fn finish(&mut self) -> Result<(), Self::Error> {
 		backend::SendStream::finish(self).map_err(Error)
