@@ -456,7 +456,8 @@ impl Pump {
 	/// Whether the line can switch to a new rendition at `frame`: one the peer can start
 	/// decoding at, past what was already written.
 	fn joins(&self, (format, frame): &(Format, codec::PacketizedFrame)) -> bool {
-		(frame.keyframe || format.codec.is_audio()) && self.playhead.is_none_or(|playhead| frame.timestamp_us > playhead)
+		(frame.keyframe || format.codec.is_audio())
+			&& self.playhead.is_none_or(|playhead| frame.timestamp_us > playhead)
 	}
 
 	/// Forward one frame to the session loop, or return false once the session is gone.
@@ -790,9 +791,7 @@ mod tests {
 			.await
 			.unwrap();
 		let mut writes = egress.take_writes();
-		egress
-			.on_track(Mid::from("0"), vec![format(Codec::Vp8, 96)])
-			.unwrap();
+		egress.on_track(Mid::from("0"), vec![format(Codec::Vp8, 96)]).unwrap();
 
 		high.write(frame(0, b"high-0", true)).unwrap();
 		low.write(frame(0, b"low-0", true)).unwrap();
@@ -895,9 +894,7 @@ mod tests {
 			.await
 			.unwrap();
 		let mut writes = egress.take_writes();
-		egress
-			.on_track(Mid::from("0"), vec![format(Codec::Vp8, 96)])
-			.unwrap();
+		egress.on_track(Mid::from("0"), vec![format(Codec::Vp8, 96)]).unwrap();
 
 		high.write(frame(0, b"high-0", true)).unwrap();
 		low.write(frame(0, b"low-0", true)).unwrap();
@@ -948,9 +945,7 @@ mod tests {
 			.await
 			.unwrap();
 		let mut writes = egress.take_writes();
-		egress
-			.on_track(Mid::from("0"), vec![format(Codec::Vp8, 96)])
-			.unwrap();
+		egress.on_track(Mid::from("0"), vec![format(Codec::Vp8, 96)]).unwrap();
 
 		high.write(frame(0, b"high-0", true)).unwrap();
 		low.write(frame(0, b"low-0", true)).unwrap();
@@ -990,9 +985,7 @@ mod tests {
 			.await
 			.unwrap();
 		let mut writes = egress.take_writes();
-		egress
-			.on_track(Mid::from("0"), vec![format(Codec::Vp8, 96)])
-			.unwrap();
+		egress.on_track(Mid::from("0"), vec![format(Codec::Vp8, 96)]).unwrap();
 		low.write(frame(0, b"low-0", true)).unwrap();
 		assert_eq!(written(&mut writes).await.as_ref(), b"low-0");
 
@@ -1038,9 +1031,7 @@ mod tests {
 			.await
 			.unwrap();
 		let mut writes = egress.take_writes();
-		egress
-			.on_track(Mid::from("0"), vec![format(Codec::Vp8, 96)])
-			.unwrap();
+		egress.on_track(Mid::from("0"), vec![format(Codec::Vp8, 96)]).unwrap();
 		low.write(frame(0, b"low-0", true)).unwrap();
 		assert_eq!(written(&mut writes).await.as_ref(), b"low-0");
 

@@ -431,8 +431,18 @@ describe("Source rendition preference", () => {
 	it("steps down a transcoded ladder that shares its source's preference", async () => {
 		const source = new Source({
 			broadcast: mockBroadcast({
-				video: config("hvc1.1.6.L93.B0", { codedWidth: 1920, codedHeight: 1080, bitrate: 5_000_000, preference: 1 }),
-				"video/360p": config("avc1.64001e", { codedWidth: 640, codedHeight: 360, bitrate: 600_000, preference: 1 }),
+				video: config("hvc1.1.6.L93.B0", {
+					codedWidth: 1920,
+					codedHeight: 1080,
+					bitrate: 5_000_000,
+					preference: 1,
+				}),
+				"video/360p": config("avc1.64001e", {
+					codedWidth: 640,
+					codedHeight: 360,
+					bitrate: 600_000,
+					preference: 1,
+				}),
 				other: config("avc1.640028", { codedWidth: 1280, codedHeight: 720, bitrate: 900_000 }),
 			}),
 			target: { bitrate: 1_000_000 },
