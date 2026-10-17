@@ -28,9 +28,11 @@ See the [epic](/quest/m1/compress/README.md) for the decisions.
   the PR.
 - moq-json and `@moq/json` encoders and decoders drop `Config::compression`
   and their direct codec calls (`snapshot`, `window`, `stream`). JSON tracks
-  compress by default (maintainer, 2026-10-17: "always useful"): wherever
-  moq-json, `@moq/json`, or moq-mux's JSON helpers create a track's `Info`,
-  `compress` is `true` unless the caller turns it off. Delete `rs/moq-mux/src/binary.rs` and its
+  compress by default (maintainer, 2026-10-17: "always useful"): the default
+  lives where a track is created: moq-mux's JSON helpers and the docs' JSON
+  examples set `compress: true`. `Producer::new(track, config)` keeps
+  wrapping a caller-built track, per [FFI shape](/quest/m1/ffi-shape/README.md),
+  and its docs say to set `compress` on that `Info`. Delete `rs/moq-mux/src/binary.rs` and its
   users; opaque bytes are a plain track.
 - Delete `rs/moq-flate`, `js/flate`, `rs/hang/src/catalog/compression.rs`,
   and the moq-ffi flate tracks with every wrapper's `flate` namespace and

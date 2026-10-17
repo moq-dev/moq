@@ -36,7 +36,10 @@ Every interview prompt and the selected answer (✅) are in the planning PR.
   inflated size, so `frame::Info.size` stays the size applications see and a
   relay can write an IETF payload length before inflating. Inflated output
   that differs from the declared size is an error. A zip bomb then costs no more than a plain frame
-  of the declared size, so there is no separate inflate cap constant.
+  of the declared size, so there is no separate inflate cap constant: the
+  declared size meets the same group and pool limits as a plain frame's
+  before any inflate starts, and inflating is incremental, billed as output
+  is produced, never preallocated from the declaration.
 - **One stored form.** The model stores what arrived, or what the local
   producer compressed. A plain reader (an in-process consumer, or egress to a
   peer that cannot signal compression) reads one inflated copy per group,

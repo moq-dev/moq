@@ -20,11 +20,15 @@ See the [epic](/quest/m1/compress/README.md) for the decisions.
 - `track::Info` gains a documented `pub compress: bool`, default `false`.
 - Producer: writing a frame on a compressed track compresses it through the
   group's encoder and records the plain size on `frame::Info.size`. A group
-  keeps one encoder from its first frame to its finish.
+  keeps one encoder from its first frame to its finish. A frame written in
+  chunks (`create_frame`) buffers until it finishes, since the wire needs
+  its compressed size first; ingress already knows both sizes from the
+  header, so it streams.
 - Storage: the model stores the compressed slices. Ingress from a session
   stores what arrived, never recompressing. The shared inflated copy hangs
   off the group, is built on first plain read, is billed to `cache::Pool`,
-  and drops with the group. A frame whose inflated output differs from its
+  and drops with the group. The declared size is checked against the same
+  limits as a plain frame's before inflating. A frame whose inflated output differs from its
   declared size, larger or smaller, fails the group, since IETF egress has
   already written that size as the payload length.
 - Egress: a lite-07 session writes the compressed slices with the flag in
@@ -52,7 +56,8 @@ See the [epic](/quest/m1/compress/README.md) for the decisions.
 Tests: a compressed track round-trips through a relay to a lite-07 and a
 lite-06 subscriber; N plain readers of one group inflate once; a frame that
 inflates to more or less than its declared size fails; a compressed
-datagram round-trips; a range from frame N decodes against
+datagram round-trips; an oversized declaration is refused before
+inflating; a chunked frame on a compressed track publishes whole; a range from frame N decodes against
 a cached prefix. Run `just test interop --all`. Add a bench swept over plain
 readers and compressed groups so the inflate cost stays per group, not per
 reader.
