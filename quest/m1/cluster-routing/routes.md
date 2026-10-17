@@ -440,12 +440,13 @@ loss never reports an END:
 
   | Rule | Revivals | False ENDs | Re-announcements | Reader events | Claim KiB |
   | --- | --- | --- | --- | --- | --- |
-  | Next-hop authority | 386 | 424 | 393 | 8853 | 840 |
-  | Snapshot barrier | 231 | 175 | 260 | 9086 | 814 |
-  | Merged floors | 0 | 0 | 30 | 9020 | 789 |
+  | Next-hop authority | 386 | 424 | 393 | 8853 | 884 |
+  | Snapshot barrier | 231 | 175 | 260 | 9086 | 856 |
+  | Merged floors | 0 | 0 | 30 | 9020 | 829 |
 
   Merged floors' re-announcements follow an offline period or a collection,
-  never a known withdrawal. Byte counts are estimates in virtual time.
+  never a known withdrawal. Byte counts are estimates in virtual time, and
+  charge each batch its full region list.
 
 Decided with the maintainer 2026-10-16, from the handoff proof:
 
@@ -523,7 +524,10 @@ Decided with the maintainer 2026-10-16, from the handoff proof:
 
 Open, for this quest's implementation: any further wire detail of the region
 list, such as its order, is settled there with Rust and JS interop, not in
-the proof.
+the proof. So is whether letting go of a region keeps each still-certified
+region's knowledge independently: the proof keeps them all or, if any lost
+floor is newer than a kept one, rebuilds them all, a collection whose replay
+is bounded like any other.
 
 Why not a hold-down: #4644 retracted at once and re-announced a replacement
 after 1 s, which ended a downstream front whose only path ran through the

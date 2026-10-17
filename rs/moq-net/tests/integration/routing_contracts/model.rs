@@ -396,12 +396,9 @@ impl View {
 	fn diff_bytes(&self, old: Option<&View>) -> (usize, usize) {
 		let empty = View::default();
 		let old = old.unwrap_or(&empty);
-		let floors = self
-			.floors
-			.iter()
-			.filter(|(region, floor)| old.floors.get(*region) != Some(floor))
-			.map(|(region, _)| region.len() + 4)
-			.sum::<usize>();
+		// One ANNOUNCE_FLOOR lists every region, changed or not: a count, then a
+		// suffix and a revision per region.
+		let floors = 1 + self.floors.keys().map(|region| region.len() + 4).sum::<usize>();
 		let changed: Vec<usize> = self
 			.items
 			.iter()
@@ -456,8 +453,8 @@ pub struct Event {
 	pub claim: &'static str,
 	pub kind: Kind,
 	pub since: Rev,
-	/// How many times the node had restarted, and then forgotten this origin's
-	/// claims by collecting or retiring them, before this event.
+	/// How many times the node had restarted, and then forgotten this claim of
+	/// this origin by collecting or retiring it, before this event.
 	pub forgot: (u32, u32),
 	/// Whether the origin had withdrawn or replaced this life of the claim by
 	/// then. An `End` without it is a false END.
@@ -491,6 +488,8 @@ pub struct Retained {
 	pub sent: usize,
 	/// Region floors in those per-session views.
 	pub sent_floors: usize,
+	/// ROUTE_ENDs sent and not yet echoed back.
+	pub echoes: usize,
 	pub pending: usize,
 	/// Feasibility distances for identities a node does not serve.
 	pub distances: usize,
@@ -537,9 +536,10 @@ struct State {
 	shown: BTreeMap<(Id, &'static str), Shown>,
 	/// How many times this node restarted.
 	restarts: u32,
-	/// Per origin, how many times this node collected it or retired a region
-	/// of its claims, so a stale replay is excused only for that origin.
-	forgot: BTreeMap<Id, u32>,
+	/// Per origin, each time this node forgot part of its claims: everything
+	/// overlapping none of the listed regions, so a stale replay is excused
+	/// only for a claim it actually forgot.
+	forgot: BTreeMap<Id, Vec<Vec<&'static str>>>,
 }
 
 /// An identity serving everything under a prefix.
@@ -953,7 +953,7 @@ impl Net {
 		state.heard_on.retain(|(_, key), _| *key != id);
 		state.pending.remove(&id);
 		state.gave_up.remove(&id);
-		*state.forgot.entry(id).or_default() += 1;
+		state.forgot.entry(id).or_default().push(Vec::new());
 		self.advertise(node);
 	}
 
@@ -1217,7 +1217,7 @@ impl Net {
 					let kept = merged.retire(state.watch);
 					if kept != *merged {
 						*merged = kept;
-						*state.forgot.entry(id).or_default() += 1;
+						state.forgot.entry(id).or_default().push(vec![state.watch]);
 					}
 				}
 				// The batch's floor list replaces the session's regions: one left
@@ -1487,18 +1487,18 @@ impl Net {
 		for &region in &regions {
 			kept.merge(&merged.restrict(region), scoped);
 		}
-		let rebuilt = if kept.floors.values().all(|&floor| floor >= lost) {
-			kept
+		let (rebuilt, remembered) = if kept.floors.values().all(|&floor| floor >= lost) {
+			(kept, regions)
 		} else {
 			let mut rebuilt = View::default();
 			for next in self.certifiers(node, id) {
 				rebuilt.merge(&self.nodes[node].heard[&(next, id)], scoped);
 			}
-			rebuilt
+			(rebuilt, Vec::new())
 		};
 		let state = &mut self.nodes[node];
 		state.views.insert(id, rebuilt);
-		*state.forgot.entry(id).or_default() += 1;
+		state.forgot.entry(id).or_default().push(remembered);
 	}
 
 	/// The view `node` shows and forwards for `id`.
@@ -1807,7 +1807,11 @@ impl Net {
 					since,
 					forgot: (
 						self.nodes[node].restarts,
-						self.nodes[node].forgot.get(&id).copied().unwrap_or_default(),
+						self.nodes[node].forgot.get(&id).map_or(0, |log| {
+							log.iter()
+								.filter(|kept| !kept.iter().any(|region| overlaps(claim, region)))
+								.count() as u32
+						}),
 					),
 					withdrawn: self
 						.truth(origin, claim, self.revision(origin))
@@ -1927,6 +1931,7 @@ impl Net {
 			out.heard_floors += state.heard.values().map(|view| view.floors.len()).sum::<usize>();
 			out.sent += state.sent_views.values().map(|view| view.items.len()).sum::<usize>();
 			out.sent_floors += state.sent_views.values().map(|view| view.floors.len()).sum::<usize>();
+			out.echoes += state.unacked.values().map(|&count| count as usize).sum::<usize>();
 			out.pending += state.pending.len();
 			out.distances += state.fd.keys().filter(|id| !state.origins.contains_key(id)).count();
 			out.certified += state.current.values().map(Vec::len).sum::<usize>();

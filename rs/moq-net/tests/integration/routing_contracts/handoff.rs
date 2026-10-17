@@ -1102,6 +1102,7 @@ fn announcement_cost_follows_sessions_and_live_claims() {
 		let after = net.retained();
 		assert_eq!(after.items, relays * (claims - 1));
 		assert_eq!(after.floors, retained.floors, "no tombstones");
+		assert_eq!(after.echoes, 0, "every ROUTE_END echo drained");
 		net.check().unwrap();
 
 		// The client cycles through disjoint regions, one with a live claim.
