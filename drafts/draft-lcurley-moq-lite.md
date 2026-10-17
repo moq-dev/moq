@@ -299,6 +299,8 @@ Sent when terminating the session, via the transport's session close.
 | ------- | ------------- | ----------- |
 |  0x7   | TOO_MANY_REQUESTS | The peer held more announcements or subscriptions than the endpoint allows. |
 | ------- | ------------- | ----------- |
+|  0x8   | INVALID_PATH | A moq-transport PATH was sent where that draft forbids it, such as by a server; moq-lite has no PATH. |
+| ------- | ------------- | ----------- |
 |  0x10  | GOAWAY_TIMEOUT | The peer did not close within the GOAWAY drain deadline. |
 | ------- | ------------- | ----------- |
 |  0x11  | CONTROL_MESSAGE_TIMEOUT | The peer took too long to respond to a control message. |
@@ -310,6 +312,8 @@ Sent when terminating the session, via the transport's session close.
 |  0x17  | UNKNOWN_AUTH_TOKEN_ALIAS | A token named an alias that was never registered. |
 | ------- | ------------- | ----------- |
 |  0x18  | EXPIRED_AUTH_TOKEN | The endpoint's token expired. Unlike UNAUTHORIZED, refreshed credentials may succeed. |
+| ------- | ------------- | ----------- |
+|  0x19  | INVALID_AUTHORITY | A moq-transport AUTHORITY was sent where that draft forbids it, such as by a server; moq-lite has no AUTHORITY. |
 | ------- | ------------- | ----------- |
 |  0x1B  | TOO_MANY_REQUEST_UPDATES | The peer left more request updates unanswered than the endpoint allows. |
 | ------- | ------------- | ----------- |
@@ -1614,6 +1618,7 @@ The `Message Length` describes the payload size on the wire.
 - Capped the Message Length of every message except FRAME at 65,535 bytes.
 - Added the TOO_MANY_REQUESTS (0x7) session code, closing a session whose peer goes past the endpoint's bound on subscriptions or announcements.
 - Added the AUTH_TOKEN_CACHE_OVERFLOW (0x13), UNKNOWN_AUTH_TOKEN_ALIAS (0x17), and TOO_MANY_REQUEST_UPDATES (0x1B) session codes, with moq-transport's meaning.
+- Added the INVALID_PATH (0x8) and INVALID_AUTHORITY (0x19) session codes, with moq-transport's meaning.
 - Limited AUTH_OK Expires to 2^53 - 1 milliseconds, with an out-of-range value closing the session with PROTOCOL_VIOLATION.
 - Invalid UTF-8 or an oversized AUTH_ERROR reason closes the session with PROTOCOL_VIOLATION.
 - An Auth Stream message that fails to decode, has trailing body bytes, or has an unexpected type, or a second AUTH from the opener, closes the session with PROTOCOL_VIOLATION.
