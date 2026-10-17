@@ -55,6 +55,10 @@ Open, for the design:
   e2ee's nonce binds the group and frame sequence, so a per-frame map is not
   enough.
 - Whether flate and json become wrappers or stay codecs above a track.
+- Demand and preference propagation. moq-mux and the browser publisher gate
+  output on `track::Demand`, so a wrapper must not keep encoders active with
+  no downstream viewer or drop downstream preference updates. Compare both
+  designs on idle and active demand, not only throughput.
 - Benchmark trait dispatch against the bridge hop on both sides: the write
   bridge above, and its reverse for readers, where unwrapping once before a
   local broadcast differs from unwrapping per reader. Include a datagram
