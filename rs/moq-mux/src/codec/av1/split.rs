@@ -20,7 +20,7 @@ use crate::Result;
 /// stdin); call [`flush`](Self::flush) to emit the final in-flight temporal unit.
 pub struct Split {
 	current: Au,
-	zero: Option<web_async::time::Instant>,
+	zero: Option<moq_clock::Instant>,
 	pending: Vec<crate::container::Frame>,
 	// Bytes carried across calls: a partial OBU at the tail of one `decode` waits
 	// here for the rest to arrive on the next call.
@@ -169,7 +169,7 @@ impl Split {
 		if let Some(pts) = hint {
 			return Ok(pts);
 		}
-		let zero = self.zero.get_or_insert_with(web_async::time::Instant::now);
+		let zero = self.zero.get_or_insert_with(moq_clock::Instant::now);
 		Ok(moq_net::Timestamp::from_micros(zero.elapsed().as_micros() as u64)?)
 	}
 }

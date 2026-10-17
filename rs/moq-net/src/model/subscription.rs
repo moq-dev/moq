@@ -100,6 +100,45 @@ pub struct Subscription {
 	/// subscribers fresh. Each subscriber's own publisher (a relay's downstream session)
 	/// still serves it in its own order.
 	pub order: Order,
+	/// A moq-transport NEW_GROUP_REQUEST this subscriber is waiting on.
+	///
+	/// Relay-only, so it stays out of the public API: the aggregate the public getters
+	/// report leaves it out. Cleared once this subscriber is handed a group that answers
+	/// it, so a request never outlives what it asked for.
+	pub(crate) new_group: Option<NewGroup>,
+}
+
+/// A NEW_GROUP_REQUEST as one hop holds it.
+///
+/// Subscribers' requests combine as the greatest: the one answered later, whose answer
+/// answers both. Between requests answered alike, the higher value says the most upstream,
+/// and any value says more than a 0.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct NewGroup {
+	/// The first group sequence that answers it here: the one after the newest this hop
+	/// held when it arrived, not the one the subscriber is about to join.
+	pub first: u64,
+	/// The value as received, which is what goes upstream: the subscriber's largest known
+	/// group plus one, or 0 when it knows none.
+	pub value: u64,
+}
+
+impl NewGroup {
+	/// A request for `value`, arriving while this hop's newest group is `latest`, or `None`
+	/// when a group the hop holds already answers it.
+	///
+	/// Any newer group answers it here, even one below a value past the newest held. The
+	/// subscriber learned of its groups from the publisher, which so answers with a group at
+	/// or past the value; holding out for that exact group would only ask again, and a
+	/// value naming a group that never existed would ask on every group.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	pub fn new(value: u64, latest: Option<u64>) -> Option<Self> {
+		if value != 0 && latest.is_some_and(|latest| value <= latest) {
+			return None;
+		}
+		let first = latest.map_or(0, |latest| latest.saturating_add(1));
+		Some(Self { first, value })
+	}
 }
 
 /// Which of a subscription's pending groups the publisher sends first.
@@ -124,6 +163,7 @@ impl Default for Subscription {
 			start: None,
 			end: None,
 			order: Order::Descending,
+			new_group: None,
 		}
 	}
 }
@@ -205,6 +245,7 @@ impl Subscription {
 				(Order::Ascending, Order::Ascending) => Order::Ascending,
 				_ => Order::Descending,
 			},
+			new_group: self.new_group.max(combined.new_group),
 		};
 
 		if &merged != combined {
@@ -545,5 +586,29 @@ mod tests {
 		let combined = combine(&[early, late]).unwrap();
 
 		assert_eq!(combined.end, Some(Position::group(21)));
+	}
+
+	/// Any group newer than the hop held answers a request, a value it already holds asks
+	/// nothing, and merged requests are answered once every subscriber's would be.
+	#[test]
+	fn new_group_requests_merge() {
+		let zero = NewGroup::new(0, Some(5)).unwrap();
+		assert_eq!(zero, NewGroup { value: 0, first: 6 });
+		// A value past the next group is still answered by it, so it can never ask again.
+		let nine = NewGroup::new(9, Some(5)).unwrap();
+		assert_eq!(nine, NewGroup { value: 9, first: 6 });
+		assert_eq!(NewGroup::new(4, None), Some(NewGroup { value: 4, first: 0 }));
+		// A value the hop already holds is answered.
+		assert_eq!(NewGroup::new(5, Some(5)), None);
+		// Answered alike, the value goes up in place of the 0, and the higher value wins.
+		assert_eq!(zero.max(nine), nine);
+		assert_eq!(nine.max(zero), nine);
+		let six = NewGroup::new(6, Some(5)).unwrap();
+		assert_eq!(six.max(nine), nine);
+		assert_eq!(nine.max(six), nine);
+		// Otherwise the one answered later.
+		let later = NewGroup::new(0, Some(7)).unwrap();
+		assert_eq!(nine.max(later), later);
+		assert_eq!(later.max(nine), later);
 	}
 }

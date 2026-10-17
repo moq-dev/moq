@@ -8,10 +8,7 @@ use std::{
 };
 
 use bytes::{BufMut, Bytes, BytesMut};
-use rand::{
-    Rng, RngExt, SeedableRng,
-    rngs::{StdRng, SysRng},
-};
+use rand::{Rng, RngExt, SeedableRng, rngs::StdRng};
 use rustc_hash::FxHashMap;
 use slab::Slab;
 use thiserror::Error;
@@ -65,7 +62,7 @@ impl Endpoint {
     /// better performance. This requires that outgoing packets are never fragmented, which can be
     /// achieved via e.g. the `IPV6_DONTFRAG` socket option.
     ///
-    /// Returns an error if the endpoint cannot be seeded from the operating system random source.
+    /// Panics if the endpoint cannot be seeded from the operating system random source.
     pub fn new(
         config: Arc<EndpointConfig>,
         server_config: Option<Arc<ServerConfig>>,
@@ -74,8 +71,7 @@ impl Endpoint {
         Self {
             rng: match config.rng_seed {
                 Some(seed) => StdRng::from_seed(seed),
-                None => StdRng::try_from_rng(&mut SysRng)
-                    .expect("failed to seed random number generator from system"),
+                None => crate::entropy::std_rng(),
             },
             index: ConnectionIndex::default(),
             connections: Slab::new(),

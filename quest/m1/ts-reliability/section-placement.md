@@ -15,8 +15,7 @@ derives from the PCR in `SectionStream`, replacing `last_pts`/`start_pts`
 and the edge clamp in `SectionStream::emit`. SCTE-35 splice times live in
 the section bytes and keep their `pts_adjustment` rebasing.
 
-Export treats the new timestamp the way
-[whole-PES export](/quest/m1/ts-reliability/pes-export.md) treats
+Export treats the new timestamp the way it treats
 `pesPacket`: an arrival time on the same placement path, so the first
 section byte goes out at the placement and never earlier, with the TS
 header and pointer field just before it (not `Track::push`'s decode

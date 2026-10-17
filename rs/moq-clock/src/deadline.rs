@@ -208,6 +208,14 @@ impl Deadline {
 	}
 }
 
+impl kio::Task for Deadline {
+	type Output = ();
+
+	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
+		self.poll(waiter)
+	}
+}
+
 impl Drop for Deadline {
 	fn drop(&mut self) {
 		self.set(None);

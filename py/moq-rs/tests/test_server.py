@@ -68,9 +68,7 @@ async def test_server_client_roundtrip():
                     track_name, audio = next(iter(catalog.audio.items()))
                     assert audio.codec == "opus"
 
-                    media_consumer = await moq.media.TrackConsumer.subscribe(
-                        broadcast_consumer, track_name, audio.container
-                    )
+                    media_consumer = await moq.media.TrackConsumer.subscribe(broadcast_consumer, track_name, audio)
 
                     payload = b"hello over the wire"
                     media.write_frame(payload, timedelta(microseconds=1_000_000))

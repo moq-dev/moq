@@ -44,10 +44,9 @@ Decided with the maintainer on 2026-10-16.
   unit as moq-json's `delta_ratio`, which it replaces. `None` means joins
   never trigger groups. It is the only home of the ratio: producers that
   receive a created track read it from there.
-- **Order.** [Relay requests for dynamic groups](/quest/m1/ietf-extension/dynamic-groups.md)
-  lands first as relay-internal IETF support. The core quest then makes its
-  private request path public, so the work is promoted rather than
-  redone.
+- **Order.** Relay requests for dynamic groups landed first (#5708) as
+  relay-internal IETF support. The core quest makes its private request
+  path public, so the work is promoted rather than redone.
 - **m1.** Replacing `Demand` is a breaking API change, and m1 finishes the
   planned breaking APIs before the cut.
 

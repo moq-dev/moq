@@ -301,7 +301,7 @@ pub(crate) struct Enforce<S: crate::transport::poll::Session> {
 
 impl<S: crate::transport::poll::Session> Enforce<S> {
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
-	pub fn new(runtime: &crate::time::Clock, session: S, timeout: Option<Duration>) -> Self {
+	pub fn new(runtime: &crate::time::Deadlines, session: S, timeout: Option<Duration>) -> Self {
 		Self {
 			session,
 			deadline: timeout.map(|timeout| (crate::time::Deadline::after(runtime, timeout), timeout)),
@@ -333,7 +333,7 @@ impl<S: crate::transport::poll::Session> Enforce<S> {
 /// The async form of [`Enforce`], for drivers that are still `async` themselves.
 #[cfg(feature = "async")]
 pub(crate) async fn enforce<S: crate::transport::poll::Session>(
-	runtime: &crate::time::Clock,
+	runtime: &crate::time::Deadlines,
 	session: &mut S,
 	timeout: Option<Duration>,
 ) {
@@ -489,7 +489,7 @@ mod tests {
 	}
 
 	/// The consumer reports the recorded GOAWAY both synchronously and by polling.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	#[cfg(feature = "async")]
 	async fn consumer_observes_the_recorded_goaway() {
 		let (handle, protocol) = Handle::new(true);
@@ -508,7 +508,7 @@ mod tests {
 
 	/// A session that closes without a GOAWAY resolves `recv` rather than parking
 	/// forever, so a caller watching for one can stop.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	#[cfg(feature = "async")]
 	async fn recv_resolves_when_the_session_closes() {
 		let (handle, protocol) = Handle::new(true);

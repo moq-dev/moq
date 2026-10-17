@@ -193,12 +193,12 @@ int subscribe(const std::string &url, const std::string &path, double timeout) {
             fail("catalog stream ended without a video track");
         }
     }
-    const auto &[name, video] = *catalog->video.begin();
+    const auto &[id, video] = *catalog->video.begin();
 
     moq::Subscription subscription;
     subscription.max_delay_us = MAX_DELAY_US;
     auto media = until(
-        moq::MediaTrackConsumer::subscribe(consumer, {name, video.container, subscription}), deadline,
+        moq::MediaTrackConsumer::subscribe(consumer, {moq::Rendition::kVideo{id, video}, subscription}), deadline,
         "container consumer"
     );
 

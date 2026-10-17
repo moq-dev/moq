@@ -169,25 +169,6 @@ impl Ledger {
 			Some((gap, run.since.checked_add(self.grace)?))
 		})
 	}
-
-	/// The runs of `groups` not accounted for, in order.
-	pub fn gaps(&self, groups: Range<u64>) -> Vec<Range<u64>> {
-		let mut gaps = Vec::new();
-		let mut next = groups.start;
-		for run in &self.runs {
-			if next >= groups.end {
-				break;
-			}
-			if run.groups.start > next {
-				gaps.push(next..run.groups.start.min(groups.end));
-			}
-			next = next.max(run.groups.end);
-		}
-		if next < groups.end {
-			gaps.push(next..groups.end);
-		}
-		gaps
-	}
 }
 
 #[cfg(test)]

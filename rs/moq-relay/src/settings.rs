@@ -38,6 +38,9 @@ pub struct Settings {
 	web: Web,
 
 	#[usage(flatten)]
+	acme: Acme,
+
+	#[usage(flatten)]
 	stats: Stats,
 
 	#[usage(flatten)]
@@ -174,6 +177,25 @@ struct WebHttps {
 
 	#[usage(env = "MOQ_WEB_HTTPS_ROOT", cli("--web-https-root"), parse = "list_by_comma")]
 	root: Option<Vec<String>>,
+}
+
+#[derive(usage::Config)]
+#[usage(prefix = "acme")]
+struct Acme {
+	#[usage(env = "MOQ_ACME_DOMAINS", cli("--acme-domains"), parse = "list_by_comma")]
+	domains: Option<Vec<String>>,
+
+	#[usage(env = "MOQ_ACME_CONTACT", cli("--acme-contact"), parse = "list_by_comma")]
+	contact: Option<Vec<String>>,
+
+	#[usage(env = "MOQ_ACME_DIR", cli("--acme-dir"))]
+	dir: Option<String>,
+
+	#[usage(env = "MOQ_ACME_DIRECTORY", cli("--acme-directory"))]
+	directory: Option<String>,
+
+	#[usage(env = "MOQ_ACME_TIMEOUT", cli("--acme-timeout"))]
+	timeout: Option<String>,
 }
 
 #[derive(usage::Config)]
