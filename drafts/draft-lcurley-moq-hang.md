@@ -359,7 +359,7 @@ The `renditions` field maps rendition IDs to text configurations, typically one 
 The `format` field selects the cue serialization, and tells a consumer how to parse each frame's payload:
 
 - `vtt`: WebVTT ([W3C WebVTT](https://www.w3.org/TR/webvtt1/)). Each payload is a self-contained `WEBVTT` segment whose cues carry absolute timing. A cue's embedded start time MUST match its enclosing frame timestamp.
-- `ttml`: TTML / IMSC1 ([W3C IMSC](https://www.w3.org/TR/ttml-imsc1.1/)) fragment (XML) with absolute timing. A cue's embedded start time MUST match its enclosing frame timestamp.
+- `ttml`: TTML / IMSC1 ([W3C IMSC](https://www.w3.org/TR/ttml-imsc1.1/)). Each payload is one complete TTML document in the `media` time base with absolute timing, clipped to the frame. Its `body` begin MUST match the enclosing frame timestamp, and its `body` end bounds everything the document presents.
 - `utf8`: raw UTF-8 text with no embedded timing or styling. The cue is shown from its frame timestamp until the next cue; an empty payload clears it.
 
 A consumer MUST ignore a rendition whose `format` it does not recognize.
