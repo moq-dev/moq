@@ -601,8 +601,10 @@ mod tests {
 		let engine = Arc::new(super::super::Handle {
 			commands: super::super::driver::Commands::default(),
 		});
-		let mut input = Input::default();
-		input.latency = Duration::from_millis(1);
+		let input = Input {
+			latency: Duration::from_millis(1),
+			..Default::default()
+		};
 		let (mut sink, mut registration) = new(0, 48_000, Layout::Stereo, input, shared.clone(), engine).unwrap();
 		let (commands, rx) = std::sync::mpsc::sync_channel(8);
 		let (retired, _rx) = std::sync::mpsc::sync_channel(8);
