@@ -25,7 +25,7 @@ being useful if the original was lost does not make redundancy free. Keep
 all bytes in congestion accounting and count unique media delivery once.
 Wire-capacity evidence must remain distinct from application goodput.
 
-Implement only the measured winning mechanism in the fork's recovery and
+Implement only the measured winning mechanism in `moq-quic`'s recovery and
 pacing layer. For redundant probes, evaluate the existing IMMEDIATE_ACK
 extension so ACK delay does not obscure a short sample. Enable probing only
 while an active application requests headroom, within explicit byte/time
@@ -47,14 +47,10 @@ retain the baseline and record why before exposing an ineffective option.
 Promoted from m2 on 2026-10-09 by maintainer priority: the viewer up-switch
 requires it.
 
-## Required
-
-- [Hard fork](/quest/m1/quic/fork/README.md) - the change lands in `moq-quic`, not the frozen fork
-
 ## Related
 
 - [Viewer up-switch](/quest/m2/viewer-upswitch.md) - the viewer side, which requires this
 - [Natural media drains](/quest/m2/quic-bbr-natural-drain.md) - separate ProbeRTT policy experiment
-- [QUIC receive-timestamps spike](/quest/m3/quic-gcc.md) - measures forward delay, which a later delay-based controller would read headroom from
+- [QUIC receive-timestamps spike](/quest/m3/quic-gcc.md) - evaluates delay variation and estimator accuracy for a later delay-based controller
 - [noq#811](https://github.com/n0-computer/noq/issues/811) - probing while app-limited, proposed to n0
 - [noq#476](https://github.com/n0-computer/noq/issues/476) - the earlier bitrate-probing ask

@@ -653,6 +653,14 @@ fn join(patterns: &Patterns) -> String {
 		.join(",")
 }
 
+/// The session failure a lease end exposes to a client.
+pub(crate) fn error(reason: &lease::Reason) -> moq_net::Error {
+	match reason {
+		lease::Reason::Expired => moq_net::Error::Expired,
+		_ => moq_net::Error::Unauthorized,
+	}
+}
+
 /// Run gateway work while its admission lease still covers the session.
 ///
 /// Work is dropped when the lease expires, narrows, or is revoked. A completed

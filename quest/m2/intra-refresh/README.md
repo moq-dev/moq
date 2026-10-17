@@ -56,7 +56,3 @@ make these presentation guarantees true even when sweep lengths change.
 - [H.264 import](/quest/m2/intra-refresh/h264-import.md) - the splitter keeps `recovery_frame_cnt` and import publishes `warmup` from it
 - [H.265 import](/quest/m2/intra-refresh/h265-import.md) - the splitter reads the recovery-point SEI so an HEVC intra-refresh stream forms groups and publishes `warmup`
 - [Export sync flags](/quest/m2/intra-refresh/export-sync-flags.md) - fmp4, MKV, and HLS stop advertising a refresh group start as a sync sample
-
-## Related
-
-- [Open-GOP leading pictures](/quest/m1/open-gop-leading-pictures.md) - frames stamped before the group's keyframe are the other tune-in trim

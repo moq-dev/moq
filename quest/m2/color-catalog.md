@@ -9,7 +9,7 @@ instead of guessing or reparsing the bitstream.
 
 ## Plan
 
-Decided 2026-10-08 (WebGPU renderer interview): moved to m1. The
+Deferred to m2 with HDR. The
 [WebGPU HDR](/quest/m2/webgpu-hdr.md) renderer is the consumer this model
 waited for. Encoder colour correctness stays in m1 as
 [Encoder colour](/quest/m1/color-model.md).

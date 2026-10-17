@@ -1,7 +1,8 @@
 import { expect, test } from "bun:test";
+import { Manual, Milli, Nano } from "@moq/clock";
 import * as Catalog from "@moq/hang/catalog";
 import * as Json from "@moq/json";
-import { Origin, Path, Time, Track } from "@moq/net";
+import { Origin, Path, Track } from "@moq/net";
 import { Effect, Signal } from "@moq/signals";
 import { Broadcast } from "./broadcast.ts";
 
@@ -54,7 +55,13 @@ test("sibling broadcasts on one page advertise the same capture clock", async ()
 });
 
 test("folds video and audio renditions into the catalog by full track name", async () => {
-	const broadcast = new Broadcast({ enabled: true, display: { width: 1920, height: 1080 }, flip: true });
+	const rotation = new Signal(90);
+	const broadcast = new Broadcast({
+		enabled: true,
+		display: { width: 1920, height: 1080 },
+		flip: true,
+		rotation,
+	});
 
 	broadcast.video("video/hd").config.set(videoConfig);
 	broadcast.audio("audio/data").config.set(audioConfig);
@@ -62,10 +69,26 @@ test("folds video and audio renditions into the catalog by full track name", asy
 
 	const catalog = await readCatalog(broadcast);
 	expect(catalog?.video?.renditions["video/hd"]?.codec).toBe("avc1.640028");
-	expect(Number(catalog?.video?.display?.width)).toBe(1920);
-	expect(Number(catalog?.video?.display?.height)).toBe(1080);
+	// The catalog display is the size to render at, so a quarter turn swaps the captured size.
+	expect(Number(catalog?.video?.display?.width)).toBe(1080);
+	expect(Number(catalog?.video?.display?.height)).toBe(1920);
 	expect(catalog?.video?.flip).toBe(true);
+	expect(catalog?.video?.rotation).toBe(90);
 	expect(catalog?.audio?.renditions["audio/data"]?.codec).toBe("opus");
+
+	rotation.set(270);
+	await settle();
+	const turned = await readCatalog(broadcast);
+	expect(turned?.video?.rotation).toBe(270);
+	expect(Number(turned?.video?.display?.width)).toBe(1080);
+	expect(Number(turned?.video?.display?.height)).toBe(1920);
+
+	rotation.set(0);
+	await settle();
+	const upright = await readCatalog(broadcast);
+	expect(upright?.video?.rotation).toBeUndefined();
+	expect(Number(upright?.video?.display?.width)).toBe(1920);
+	expect(Number(upright?.video?.display?.height)).toBe(1080);
 
 	broadcast.close();
 });
@@ -343,7 +366,7 @@ test("replacing a closed rendition track keeps the broadcast and publishes a fre
 });
 
 test("changing maxAge publishes a new network broadcast", async () => {
-	const maxAge = new Signal<Time.Milli | undefined>(Time.Milli(1000));
+	const maxAge = new Signal<Milli | undefined>(Milli(1000));
 	const broadcast = new Broadcast({
 		enabled: true,
 		origin: new Origin.Producer(),
@@ -355,20 +378,19 @@ test("changing maxAge publishes a new network broadcast", async () => {
 	const before = broadcast.net.peek();
 
 	// A track's retention is fixed at creation, so the tracks move to a fresh broadcast.
-	maxAge.set(Time.Milli(2000));
+	maxAge.set(Milli(2000));
 	await settle();
 	const after = broadcast.net.peek();
 	expect(after).toBeDefined();
 	expect(after).not.toBe(before);
-	expect((await after?.track("video").info())?.maxAge).toBe(Time.Milli(2000));
+	expect((await after?.track("video").info())?.maxAge).toBe(Milli(2000));
 
 	broadcast.close();
 });
 
 test("keeps the current catalog snapshot for a reconnecting viewer", async () => {
-	const real = performance.now.bind(performance);
-	let now = real();
-	performance.now = () => now;
+	const clock = new Manual();
+	const restore = clock.install();
 
 	try {
 		const broadcast = new Broadcast({
@@ -388,14 +410,14 @@ test("keeps the current catalog snapshot for a reconnecting viewer", async () =>
 
 		// A reconnect past the idle cache window must still receive the live track's newest
 		// snapshot instead of waiting forever for an edit that may never come.
-		now += 60_000;
+		await clock.advanceAsync(Nano.fromMilli(Milli(60_000)));
 		const second = net.track(Broadcast.CATALOG_TRACK).subscribe();
 		expect((await new Json.Snapshot.Consumer<Catalog.Root>({ track: second }).latest())?.value.video).toBeDefined();
 		second.close();
 
 		broadcast.close();
 	} finally {
-		performance.now = real;
+		restore();
 	}
 });
 

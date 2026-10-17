@@ -2,20 +2,21 @@
 
 ## Goal
 
-The next breaking release carries the neutral `Surface::Vulkan`, Vulkan
-Video encode on AMD, and VA-API import of external Vulkan images on Intel.
-Both vendor proofs validate the input surface before publication.
+A later release carries Vulkan Video encode on AMD and VA-API import of
+external Vulkan images on Intel. Both vendor proofs validate their use of
+the neutral `Surface::Vulkan` before multi-vendor support is published.
 
 ## Plan
 
-Decided 2026-10-13: ship these changes in the next main-to-release cut.
-GPU capacity and health reporting is additive and remains separate. This is
-a publication condition; the implementation and vendor proofs gate m1.
+Decided 2026-10-15: defer AMD/Intel implementation and publication together.
+The next breaking cut makes no new AMD/Intel GPU-input support promise.
+The existing surface on main is not evidence that those backends work.
+GPU capacity and health reporting remains a separate additive follow-up.
 
 ## Required
 
-- [Vulkan Video encode on AMD](/quest/m1/vulkan-encode.md) - AMD proof
-- [VA-API Vulkan import](/quest/m1/vaapi-vulkan-import.md) - Intel proof
+- [Vulkan Video encode on AMD](/quest/m2/vulkan-encode.md) - AMD proof
+- [VA-API Vulkan import](/quest/m2/vaapi-vulkan-import.md) - Intel proof
 
 ## Related
 

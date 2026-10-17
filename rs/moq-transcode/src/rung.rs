@@ -189,8 +189,8 @@ async fn live(rung: &Rung, producer: &mut moq_net::track::Producer) -> Result<En
 				return Ok(Ended::Closed);
 			},
 			() = rung.broadcast.closed() => {
-				// The source went away while idle; end the rung with it.
-				producer.clone().abort(moq_net::Error::Dropped)?;
+				// A broadcast end carries no error; stop the idle rung explicitly.
+				producer.clone().abort(moq_net::Error::Cancel)?;
 				return Ok(Ended::Closed);
 			}
 			() = retire.fired() => {
@@ -777,6 +777,56 @@ fn scale_hint(size: moq_video::Size, output: moq_video::Output) -> Option<moq_vi
 mod tests {
 	use super::*;
 	use moq_video::Output;
+
+	#[tokio::test(start_paused = true)]
+	async fn internal_idle_source_end_is_cancel() {
+		use std::future::Future;
+		let source = moq_net::broadcast::Info::default().produce();
+		let broadcast = source.consume();
+		let config = hang::catalog::VideoConfig::new(hang::catalog::H264 {
+			inline: true,
+			profile: 0x42,
+			constraints: 0,
+			level: 30,
+		});
+		let (_retire, retire) = Retire::channel();
+		let rung = Rung {
+			info: Resolved {
+				name: "video/120p".into(),
+				short_side: 120,
+				size: moq_video::Size::new(160, 120),
+				bitrate: moq_net::bandwidth::Rate::from_bps(100_000),
+				framerate: None,
+			},
+			source: "video".into(),
+			feed: Feed::new(
+				broadcast.clone(),
+				"video".into(),
+				config.clone(),
+				moq_video::decode::Config::new(),
+			),
+			broadcast,
+			config,
+			encoder: moq_video::encode::Kind::Software,
+			decoder: moq_video::decode::Kind::Software,
+			resize: Default::default(),
+			active: Default::default(),
+			retire,
+		};
+		let output = moq_net::broadcast::Info::default().produce();
+		let mut track = output.create_track("video/120p", None).unwrap();
+		let observed = track.clone();
+		let mut running = std::pin::pin!(live(&rung, &mut track));
+		assert!(
+			running
+				.as_mut()
+				.poll(&mut std::task::Context::from_waker(std::task::Waker::noop()))
+				.is_pending()
+		);
+		source.close();
+		assert!(matches!(running.await, Ok(Ended::Closed)));
+		assert!(matches!(observed.closed().await, moq_net::Error::Cancel));
+	}
 
 	/// A fetched NVDEC group reaches `Frame::resize` at native size when
 	/// CPU output is forced, rather than being resized in the decoder first.
