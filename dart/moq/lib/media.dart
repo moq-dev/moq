@@ -81,7 +81,7 @@ typedef Named = NamedMoqMediaTarget;
 /// A subscriber-requested track.
 typedef Requested = RequestedMoqMediaTarget;
 
-/// A catalog rendition: its key and its video or audio config.
+/// A catalog rendition: its ID (catalog key) and its video or audio config.
 typedef Rendition = MoqRendition;
 
 /// A catalog video rendition.

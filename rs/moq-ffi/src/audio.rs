@@ -538,12 +538,13 @@ impl MoqAudioConsumer {
 	/// [`MoqMediaCatalogConsumer::next`](crate::media::MoqMediaCatalogConsumer::next));
 	/// the codec is inferred from it. Only Opus, AAC-LC, and PCM are supported.
 	///
-	/// A rendition whose [`broadcast`](crate::media::MoqAudio::broadcast) names another broadcast
-	/// is subscribed there, so `name` is always read from the broadcast the catalog points at.
+	/// `id` is the rendition's catalog key. Its [`track`](crate::media::MoqAudio::track), or `id`
+	/// when unset, is subscribed in the broadcast its
+	/// [`broadcast`](crate::media::MoqAudio::broadcast) reference names.
 	#[uniffi::constructor]
 	pub async fn subscribe(
 		broadcast: &MoqBroadcastConsumer,
-		name: String,
+		id: String,
 		catalog_audio: crate::media::MoqAudio,
 		output: MoqAudioDecoderOutput,
 	) -> Result<Arc<MoqAudioConsumer>, MoqError> {
@@ -561,7 +562,7 @@ impl MoqAudioConsumer {
 
 		let consumer = broadcast
 			.driver
-			.watch(async { Ok(moq_audio::decode::Consumer::new(&resolved, &cfg, name, config).await?) })
+			.watch(async { Ok(moq_audio::decode::Consumer::new(&resolved, &cfg, id, config).await?) })
 			.await?;
 
 		Ok(Arc::new(MoqAudioConsumer {

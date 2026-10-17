@@ -292,10 +292,10 @@ class TrackStreamProducer:
         self._inner.finish()
 
 
-def _rendition(name: str, rendition: Video | Audio) -> MoqRendition:
+def _rendition(id: str, rendition: Video | Audio) -> MoqRendition:
     if isinstance(rendition, Video):
-        return cast(MoqRendition, MoqRendition.VIDEO(name=name, config=rendition))
-    return cast(MoqRendition, MoqRendition.AUDIO(name=name, config=rendition))
+        return cast(MoqRendition, MoqRendition.VIDEO(id=id, config=rendition))
+    return cast(MoqRendition, MoqRendition.AUDIO(id=id, config=rendition))
 
 
 class TrackConsumer:
@@ -309,13 +309,13 @@ class TrackConsumer:
     async def subscribe(
         cls,
         broadcast: BroadcastConsumer,
-        name: str,
+        id: str,
         rendition: Video | Audio,
         *,
         subscription: Subscription | None = None,
     ) -> TrackConsumer:
-        """Subscribe to one catalog rendition and decode its container, following its broadcast and track."""
-        config = MoqMediaTrackConfig(rendition=_rendition(name, rendition), subscription=_subscription(subscription))
+        """Subscribe to the catalog rendition ``id`` and decode its container, following its broadcast and track."""
+        config = MoqMediaTrackConfig(rendition=_rendition(id, rendition), subscription=_subscription(subscription))
         return cls(await MoqMediaTrackConsumer.subscribe(broadcast._inner, config))
 
     def __init__(self, inner: MoqMediaTrackConsumer) -> None:
@@ -371,14 +371,14 @@ class GroupConsumer:
     async def fetch(
         cls,
         broadcast: BroadcastConsumer,
-        name: str,
+        id: str,
         rendition: Video | Audio,
         sequence: int,
         *,
         options: FetchGroupOptions | None = None,
     ) -> GroupConsumer:
-        """Fetch and decode exactly one group of a catalog rendition, following its broadcast and track."""
-        config = MoqMediaGroupConfig(rendition=_rendition(name, rendition), sequence=sequence, options=options)
+        """Fetch and decode one group of the catalog rendition ``id``, following its broadcast and track."""
+        config = MoqMediaGroupConfig(rendition=_rendition(id, rendition), sequence=sequence, options=options)
         return cls._from_inner(await MoqMediaGroupConsumer.fetch(broadcast._inner, config))
 
     @property

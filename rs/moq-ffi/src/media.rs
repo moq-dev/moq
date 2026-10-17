@@ -99,8 +99,8 @@ pub struct MoqVideo {
 	/// (e.g. `./source`). Absent or empty means the catalog's broadcast.
 	#[uniffi(default = None)]
 	pub broadcast: Option<String>,
-	/// The track's name in its broadcast, when it differs from the rendition's key. Absent means
-	/// the key is the track name.
+	/// The track's name in its broadcast, when it differs from the rendition's ID. Absent means
+	/// the ID is the track name.
 	#[uniffi(default = None)]
 	pub track: Option<String>,
 	pub codec: String,
@@ -124,8 +124,8 @@ pub struct MoqAudio {
 	/// (e.g. `./source`). Absent or empty means the catalog's broadcast.
 	#[uniffi(default = None)]
 	pub broadcast: Option<String>,
-	/// The track's name in its broadcast, when it differs from the rendition's key. Absent means
-	/// the key is the track name.
+	/// The track's name in its broadcast, when it differs from the rendition's ID. Absent means
+	/// the ID is the track name.
 	#[uniffi(default = None)]
 	pub track: Option<String>,
 	pub codec: String,
@@ -1166,26 +1166,26 @@ fn reserve_track(
 	})
 }
 
-/// A catalog rendition: its key in the catalog and its config.
+/// A catalog rendition: its ID (its key in the catalog) and its config.
 ///
 /// The consumers that take one resolve the rendition's broadcast reference and track name
-/// themselves, so pass the key exactly as the catalog lists it.
+/// themselves, so pass the ID exactly as the catalog lists it.
 #[derive(Clone, uniffi::Enum)]
 pub enum MoqRendition {
 	/// A video rendition.
-	Video { name: String, config: MoqVideo },
+	Video { id: String, config: MoqVideo },
 	/// An audio rendition.
-	Audio { name: String, config: MoqAudio },
+	Audio { id: String, config: MoqAudio },
 }
 
 impl MoqRendition {
 	/// Split into the broadcast reference, the track name, and the container.
 	fn into_parts(self) -> (Option<String>, String, MoqContainer) {
-		let (name, broadcast, track, container) = match self {
-			Self::Video { name, config } => (name, config.broadcast, config.track, config.container),
-			Self::Audio { name, config } => (name, config.broadcast, config.track, config.container),
+		let (id, broadcast, track, container) = match self {
+			Self::Video { id, config } => (id, config.broadcast, config.track, config.container),
+			Self::Audio { id, config } => (id, config.broadcast, config.track, config.container),
 		};
-		(broadcast, track.unwrap_or(name), container)
+		(broadcast, track.unwrap_or(id), container)
 	}
 }
 

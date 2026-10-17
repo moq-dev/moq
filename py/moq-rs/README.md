@@ -36,8 +36,8 @@ async def main():
             broadcast = await client.request_broadcast(event.announce.prefix)
             catalog = await moq.media.catalog(broadcast)
 
-            for name, audio in catalog.audio.items():
-                frames = await moq.media.TrackConsumer.subscribe(broadcast, name, audio)
+            for id, audio in catalog.audio.items():
+                frames = await moq.media.TrackConsumer.subscribe(broadcast, id, audio)
                 async with frames:
                     async for frame in frames:
                         print(f"Got frame: {len(frame.payload)} bytes, ts={frame.timestamp}")
@@ -192,10 +192,10 @@ client = moq.Client(
   the clock for subsequent producers.
 - `await media.CatalogConsumer.subscribe(broadcast)` streams catalog snapshots;
   `await media.catalog(broadcast)` reads one snapshot and releases its subscription.
-- `await media.TrackConsumer.subscribe(broadcast, name, rendition, *, subscription=None)`
-  decodes live media from a catalog rendition: its key and its `Video` or `Audio` config. It
-  follows the rendition's `broadcast` and `track` itself.
-- `await media.GroupConsumer.fetch(broadcast, name, rendition, sequence, *, options=None)`
+- `await media.TrackConsumer.subscribe(broadcast, id, rendition, *, subscription=None)`
+  decodes live media from a catalog rendition: its ID (catalog key) and its `Video` or `Audio`
+  config. It follows the rendition's `broadcast` and `track` itself.
+- `await media.GroupConsumer.fetch(broadcast, id, rendition, sequence, *, options=None)`
   fetches and decodes exactly one group of a catalog rendition.
 - `media.GroupConsumer(group, container)` decodes a raw group, such as one from
   `TrackConsumer.recv_group()` for arrival-order reads, with container media time on each frame

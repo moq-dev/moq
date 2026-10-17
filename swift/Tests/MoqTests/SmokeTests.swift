@@ -481,7 +481,7 @@ final class SmokeTests: XCTestCase {
         let catalog = try XCTUnwrap(nextCatalog)
         let rendition = try XCTUnwrap(catalog.video["camera"])
 
-        let decoder = try await Video.Consumer.subscribe(broadcast: consumer, name: "camera", rendition: rendition)
+        let decoder = try await Video.Consumer.subscribe(broadcast: consumer, id: "camera", rendition: rendition)
 
         // Keep the encoder fed so the decoder sees frames after it joined.
         for i in 10..<40 {

@@ -97,9 +97,9 @@ auto announced = ok(session->consume()->announced_broadcast("my-stream.hang"));
 auto broadcast = ok(announced->available().get());
 auto catalogs = ok(moq::MediaCatalogConsumer::subscribe(broadcast).get());
 if (auto catalog = ok(catalogs->next().get())) {   // std::nullopt once the catalog ends
-    for (const auto &[name, video] : catalog->video) {
+    for (const auto &[id, video] : catalog->video) {
         // The rendition carries its own broadcast and track, which the subscribe follows.
-        auto media = ok(moq::MediaTrackConsumer::subscribe(broadcast, {moq::Rendition::kVideo{name, video}}).get());
+        auto media = ok(moq::MediaTrackConsumer::subscribe(broadcast, {moq::Rendition::kVideo{id, video}}).get());
         auto frame = ok(media->next().get());   // std::nullopt once the track ends
     }
 }

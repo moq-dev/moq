@@ -8,9 +8,7 @@ import "dart:ffi";
 import "dart:io" show Platform, File, Directory;
 import "dart:isolate";
 import "dart:typed_data";
-
 import "package:ffi/ffi.dart";
-
 import "uniffi_runtime.dart";
 export "uniffi_runtime.dart";
 
@@ -4850,23 +4848,23 @@ class FfiConverterMoqRendition {
 }
 
 class VideoMoqRendition extends MoqRendition {
-  final String name;
+  final String id;
   final MoqVideo config;
-  VideoMoqRendition({required String this.name, required MoqVideo this.config});
-  VideoMoqRendition._(String this.name, MoqVideo this.config);
+  VideoMoqRendition({required String this.id, required MoqVideo this.config});
+  VideoMoqRendition._(String this.id, MoqVideo this.config);
   static LiftRetVal<VideoMoqRendition> read(Uint8List buf) {
     int new_offset = buf.offsetInBytes;
-    final name_lifted = FfiConverterString.read(
+    final id_lifted = FfiConverterString.read(
       Uint8List.view(buf.buffer, new_offset),
     );
-    final name = name_lifted.value;
-    new_offset += name_lifted.bytesRead;
+    final id = id_lifted.value;
+    new_offset += id_lifted.bytesRead;
     final config_lifted = FfiConverterMoqVideo.read(
       Uint8List.view(buf.buffer, new_offset),
     );
     final config = config_lifted.value;
     new_offset += config_lifted.bytesRead;
-    return LiftRetVal(VideoMoqRendition._(name, config), new_offset);
+    return LiftRetVal(VideoMoqRendition._(id, config), new_offset);
   }
 
   @override
@@ -4878,7 +4876,7 @@ class VideoMoqRendition extends MoqRendition {
 
   @override
   int allocationSize() {
-    return FfiConverterString.allocationSize(name) +
+    return FfiConverterString.allocationSize(id) +
         FfiConverterMoqVideo.allocationSize(config) +
         4;
   }
@@ -4888,7 +4886,7 @@ class VideoMoqRendition extends MoqRendition {
     buf.buffer.asByteData(buf.offsetInBytes).setInt32(0, 1);
     int new_offset = buf.offsetInBytes + 4;
     new_offset += FfiConverterString.write(
-      name,
+      id,
       Uint8List.view(buf.buffer, new_offset),
     );
     new_offset += FfiConverterMoqVideo.write(
@@ -4900,23 +4898,23 @@ class VideoMoqRendition extends MoqRendition {
 }
 
 class AudioMoqRendition extends MoqRendition {
-  final String name;
+  final String id;
   final MoqAudio config;
-  AudioMoqRendition({required String this.name, required MoqAudio this.config});
-  AudioMoqRendition._(String this.name, MoqAudio this.config);
+  AudioMoqRendition({required String this.id, required MoqAudio this.config});
+  AudioMoqRendition._(String this.id, MoqAudio this.config);
   static LiftRetVal<AudioMoqRendition> read(Uint8List buf) {
     int new_offset = buf.offsetInBytes;
-    final name_lifted = FfiConverterString.read(
+    final id_lifted = FfiConverterString.read(
       Uint8List.view(buf.buffer, new_offset),
     );
-    final name = name_lifted.value;
-    new_offset += name_lifted.bytesRead;
+    final id = id_lifted.value;
+    new_offset += id_lifted.bytesRead;
     final config_lifted = FfiConverterMoqAudio.read(
       Uint8List.view(buf.buffer, new_offset),
     );
     final config = config_lifted.value;
     new_offset += config_lifted.bytesRead;
-    return LiftRetVal(AudioMoqRendition._(name, config), new_offset);
+    return LiftRetVal(AudioMoqRendition._(id, config), new_offset);
   }
 
   @override
@@ -4928,7 +4926,7 @@ class AudioMoqRendition extends MoqRendition {
 
   @override
   int allocationSize() {
-    return FfiConverterString.allocationSize(name) +
+    return FfiConverterString.allocationSize(id) +
         FfiConverterMoqAudio.allocationSize(config) +
         4;
   }
@@ -4938,7 +4936,7 @@ class AudioMoqRendition extends MoqRendition {
     buf.buffer.asByteData(buf.offsetInBytes).setInt32(0, 2);
     int new_offset = buf.offsetInBytes + 4;
     new_offset += FfiConverterString.write(
-      name,
+      id,
       Uint8List.view(buf.buffer, new_offset),
     );
     new_offset += FfiConverterMoqAudio.write(

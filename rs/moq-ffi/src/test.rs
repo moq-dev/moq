@@ -250,10 +250,10 @@ async fn next_announced(announced: &MoqAnnounceConsumer) -> MoqAnnounce {
 	}
 }
 
-/// A rendition keyed by its track name, for a track with no catalog of its own.
-fn rendition(name: &str, container: MoqContainer) -> MoqRendition {
+/// A rendition whose ID is its track name, for a track with no catalog of its own.
+fn rendition(id: &str, container: MoqContainer) -> MoqRendition {
 	MoqRendition::Video {
-		name: name.into(),
+		id: id.into(),
 		config: MoqVideo {
 			label: None,
 			broadcast: None,
@@ -560,7 +560,7 @@ async fn raw_audio_activity() {
 		.unwrap()
 		.expect("expected a raw audio catalog");
 	let rendition = MoqRendition::Audio {
-		name: "microphone".into(),
+		id: "microphone".into(),
 		config: catalog.audio["microphone"].clone(),
 	};
 	let subscription = MoqMediaTrackConsumer::subscribe(
@@ -2403,7 +2403,7 @@ async fn media_consumers_follow_a_rendition_track_in_a_sibling_broadcast() {
 	config.broadcast = Some("./source".into());
 	config.track = Some("camera".into());
 	let rendition = MoqRendition::Video {
-		name: "hd".into(),
+		id: "hd".into(),
 		config,
 	};
 
@@ -2723,7 +2723,7 @@ async fn local_publish_consume_audio() {
 		&broadcast_consumer,
 		MoqMediaTrackConfig {
 			rendition: MoqRendition::Audio {
-				name: track_name.clone(),
+				id: track_name.clone(),
 				config: audio.clone(),
 			},
 			subscription: None,
@@ -2794,7 +2794,7 @@ async fn video_publish_consume() {
 		&broadcast_consumer,
 		MoqMediaTrackConfig {
 			rendition: MoqRendition::Video {
-				name: track_name.clone(),
+				id: track_name.clone(),
 				config: video.clone(),
 			},
 			subscription: None,
@@ -2909,7 +2909,7 @@ async fn video_raw_publish_consume() {
 		&broadcast_consumer,
 		MoqMediaTrackConfig {
 			rendition: MoqRendition::Video {
-				name: track_name.clone(),
+				id: track_name.clone(),
 				config: rendition.clone(),
 			},
 			subscription: None,
@@ -3265,7 +3265,7 @@ async fn multiple_frames_ordering() {
 		&broadcast_consumer,
 		MoqMediaTrackConfig {
 			rendition: MoqRendition::Audio {
-				name: track_name.clone(),
+				id: track_name.clone(),
 				config: audio.clone(),
 			},
 			subscription: None,
@@ -4353,7 +4353,7 @@ async fn server_client_roundtrip() {
 		&bc,
 		MoqMediaTrackConfig {
 			rendition: MoqRendition::Audio {
-				name: track_name.clone(),
+				id: track_name.clone(),
 				config: audio.clone(),
 			},
 			subscription: None,

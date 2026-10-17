@@ -83,7 +83,7 @@ public enum Media {
         }
         var ffi: MoqContainerStreamInit { MoqContainerStreamInit(format: format, timebase: timebase?.ffi) }
     }
-    /// A catalog rendition: its key and its video or audio config.
+    /// A catalog rendition: its ID (catalog key) and its video or audio config.
     public typealias Rendition = MoqRendition
     /// A catalog rendition and live delivery options.
     public typealias TrackConfig = MoqMediaTrackConfig

@@ -87,7 +87,7 @@ release the timebase handle on the calling goroutine.
 `NewCatalogProducer` holds its broadcast weakly and owns catalog properties and sections.
 `NewCatalogConsumer`, `NewTrackConsumer`, and `FetchGroup` read
 catalog snapshots, live media, and one fetched media group. The last two take a `Rendition`
-(`VideoRendition` or `AudioRendition`: a catalog key and its config) and follow its broadcast
+(`VideoRendition` or `AudioRendition`: a catalog ID and its config) and follow its broadcast
 and track themselves. `NewGroupConsumer`
 decodes a raw group, such as one from `moq.TrackConsumer.RecvGroup` for arrival-order reads.
 Frames and `Flush` use `time.Duration`; `Demand()` owns track names and subscriber waits.

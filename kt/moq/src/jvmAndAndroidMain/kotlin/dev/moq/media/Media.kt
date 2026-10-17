@@ -66,7 +66,7 @@ typealias Target = uniffi.moq.MoqMediaTarget
 typealias Named = uniffi.moq.MoqMediaTarget.Named
 /** A subscriber-requested track. */
 typealias Requested = uniffi.moq.MoqMediaTarget.Requested
-/** A catalog rendition: its key and its video or audio config. */
+/** A catalog rendition: its ID (catalog key) and its video or audio config. */
 typealias Rendition = uniffi.moq.MoqRendition
 /** A catalog video rendition. */
 typealias VideoRendition = uniffi.moq.MoqRendition.Video

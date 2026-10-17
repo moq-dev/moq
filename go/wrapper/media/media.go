@@ -45,7 +45,7 @@ type (
 	ContainerCmaf = ffi.MoqContainerCmaf
 	// ContainerLoc is the low-overhead container variant of Container; build one with LocContainer.
 	ContainerLoc = ffi.MoqContainerLoc
-	// Rendition is a catalog rendition: its key and config. Build one with VideoRendition or AudioRendition.
+	// Rendition is a catalog rendition: its ID (catalog key) and config. Build one with VideoRendition or AudioRendition.
 	Rendition = ffi.MoqRendition
 	// RenditionVideo is the video variant of Rendition; build one with VideoRendition.
 	RenditionVideo = ffi.MoqRenditionVideo
@@ -289,14 +289,14 @@ func NewGroupConsumer(group *moq.GroupConsumer, container Container) (*GroupCons
 	return &GroupConsumer{inner: inner}, nil
 }
 
-// VideoRendition selects the video rendition the catalog lists under name.
-func VideoRendition(name string, config Video) Rendition {
-	return RenditionVideo{Name: name, Config: config}
+// VideoRendition selects the video rendition the catalog lists under id.
+func VideoRendition(id string, config Video) Rendition {
+	return RenditionVideo{Id: id, Config: config}
 }
 
-// AudioRendition selects the audio rendition the catalog lists under name.
-func AudioRendition(name string, config Audio) Rendition {
-	return RenditionAudio{Name: name, Config: config}
+// AudioRendition selects the audio rendition the catalog lists under id.
+func AudioRendition(id string, config Audio) Rendition {
+	return RenditionAudio{Id: id, Config: config}
 }
 
 // LegacyContainer selects the legacy hang container for a media subscription.
