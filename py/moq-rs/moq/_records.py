@@ -183,6 +183,8 @@ class ConnectionStats:
     packets_sent: int | None
     packets_received: int | None
     packets_lost: int | None
+    version: str | None = None
+    """The negotiated protocol version, spelled like ``Client(versions=...)``."""
 
     @staticmethod
     def _from_ffi(stats: MoqConnectionStats) -> ConnectionStats:
@@ -196,4 +198,5 @@ class ConnectionStats:
             packets_sent=stats.packets_sent,
             packets_received=stats.packets_received,
             packets_lost=stats.packets_lost,
+            version=stats.version,
         )

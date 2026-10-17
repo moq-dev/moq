@@ -7,7 +7,7 @@ selected by their applications connect directly across a NAT: ICE finds a
 path through host and server-reflexive candidates, then a `moq-quic`
 connection runs over the nominated pair, with each side's certificate pinned
 by the fingerprint the other sent in its offer or answer. A pair with a
-browser still uses a [data channel](/quest/m2/p2p/webrtc.md).
+browser still uses a data channel (`moq_tokio::webrtc`).
 
 ## Plan
 
@@ -18,9 +18,10 @@ Decided with the maintainer on 2026-10-13:
   the relay as rendezvous and fallback.
 - ICE is str0m's standalone sans-IO agent, the `is` crate (0.11, already in
   the lockfile through str0m; str0m re-exports it as `str0m::ice`). Gather
-  candidates through the module [webrtc](/quest/m2/p2p/webrtc.md) lifts out
-  of `moq-rtc`, with host candidates, `.local` resolution, and the STUN
-  Binding client; don't copy it.
+  candidates with `moq_tokio::webrtc`'s host gathering, `.local` resolution,
+  and the STUN Binding client in `moq-ice`; don't copy them. The first two
+  are private to the data channel transport today, so move them into
+  `moq-ice` rather than export them from `moq-tokio`.
 - QUIC is `moq-quic`, fed datagrams from the nominated pair.
 - Authentication: each side generates a self-signed certificate and sends
   its SHA-256 fingerprint in its offer or answer, as DTLS fingerprints ride
@@ -60,5 +61,4 @@ covers LAN and NAT pairs between two `moq-cli --p2p` nodes.
 ## Required
 
 - [UDP demux](/quest/m2/p2p/udp-demux.md) - the classifier that splits STUN from QUIC
-- [Native data channel transport](/quest/m2/p2p/webrtc.md) - the shared ICE gathering module
 - [Signaling and policy](/quest/m2/p2p/signal.md) - the offer schema and roster this extends

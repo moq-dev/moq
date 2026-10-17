@@ -1,6 +1,7 @@
 import { Instant, Milli, Nano, now, sleep } from "@moq/clock";
 import { type GetPromise, Signal } from "@moq/signals";
 
+// private: plumbing
 /**
  * How long a subscriber waits for a group stream it cannot account for once the publisher
  * has ended the subscription.
@@ -21,6 +22,7 @@ export interface TailOptions {
 	grace?: () => Milli;
 }
 
+// private: plumbing
 /**
  * The group streams a subscription has received, so its end can wait for the ones still owed.
  *

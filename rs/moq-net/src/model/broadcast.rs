@@ -229,14 +229,14 @@ impl Producer {
 
 	/// Attach an ingress stats scope, inherited by the tracks created on this
 	/// broadcast. Set by a tagged `origin::Producer` at `create_broadcast`.
-	pub(crate) fn with_stats(mut self, scope: stats::Scope) -> Self {
+	pub(super) fn with_stats(mut self, scope: stats::Scope) -> Self {
 		self.stats = scope;
 		self
 	}
 
 	/// Attach the advertisement of this broadcast's exact path. Set by
 	/// `origin::Producer::create_broadcast`; a standalone broadcast has none.
-	pub(crate) fn with_announcer(self, announcer: Announcer) -> Self {
+	pub(super) fn with_announcer(self, announcer: Announcer) -> Self {
 		*self.alive.announcer.lock() = Some(announcer);
 		self
 	}
@@ -421,16 +421,17 @@ impl Producer {
 	}
 
 	/// Whether any [`Consumer`] handle exists, unlike [`Self::demand`], which counts tracks.
-	pub(crate) fn is_held(&self) -> bool {
+	pub(super) fn is_held(&self) -> bool {
 		self.alive.token.is_used()
 	}
 
 	/// `Ready(Ok)` once a [`Consumer`] handle exists, `Ready(Err)` once the broadcast ended.
-	pub(crate) fn poll_held(&self, waiter: &kio::Waiter) -> Poll<Result<(), kio::Closed>> {
+	pub(super) fn poll_held(&self, waiter: &kio::Waiter) -> Poll<Result<(), kio::Closed>> {
 		self.alive.token.poll_used(waiter)
 	}
 
 	/// `Ready(Ok)` once no [`Consumer`] handle is left, `Ready(Err)` once the broadcast ended.
+	// pending: /quest/m1/public-model/answer.md
 	pub(crate) fn poll_unheld(&self, waiter: &kio::Waiter) -> Poll<Result<(), kio::Closed>> {
 		self.alive.token.poll_unused(waiter)
 	}
@@ -438,6 +439,7 @@ impl Producer {
 	/// [`Self::close`], unless a [`Consumer`] holds the broadcast or a track it asked for
 	/// still waits for a handler. Atomic with minting a consumer, so a holder either keeps
 	/// the broadcast or only ever sees it closed. Returns whether the broadcast is closed.
+	// pending: /quest/m1/public-model/answer.md
 	pub(crate) fn close_unheld(&self) -> bool {
 		self.alive.close_unheld()
 	}
@@ -538,6 +540,7 @@ impl Drop for Alive {
 /// Whether a path request still names the source that handed out its track.
 #[derive(Clone, Default)]
 #[cfg_attr(not(feature = "async"), allow(dead_code))]
+// pending: /quest/m1/public-model/answer.md
 pub(crate) enum RequestValidity {
 	#[default]
 	Unrestricted,
@@ -549,11 +552,13 @@ pub(crate) enum RequestValidity {
 
 impl RequestValidity {
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	// pending: /quest/m1/public-model/answer.md
 	pub(crate) fn token(route: Option<kio::Consumer<()>>) -> Self {
 		route.map(Self::Route).unwrap_or_default()
 	}
 
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	// pending: /quest/m1/public-model/answer.md
 	pub(crate) fn for_source(route: &crate::origin::Dynamic, path: &crate::Path) -> Self {
 		route
 			.request_validity(path)
@@ -563,6 +568,7 @@ impl RequestValidity {
 
 	/// Capture one selection period so a pending request never revives after a replacement.
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	// pending: /quest/m1/public-model/answer.md
 	pub(crate) fn start(&self) -> Self {
 		match self {
 			Self::Selected(selected) => Self::Period(selected.current(), selected.clone()),
@@ -571,6 +577,7 @@ impl RequestValidity {
 	}
 
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	// pending: /quest/m1/public-model/answer.md
 	pub(crate) fn check(&self, waiter: &kio::Waiter) -> Result<(), crate::Error> {
 		match self {
 			Self::Route(route) if route.poll_closed(waiter).is_ready() => Err(crate::Error::Unroutable),
@@ -586,6 +593,7 @@ impl RequestValidity {
 	}
 
 	#[cfg(feature = "async")]
+	// pending: /quest/m1/public-model/answer.md
 	pub(crate) async fn run<T>(
 		&self,
 		future: impl std::future::Future<Output = Result<T, crate::Error>>,
@@ -619,6 +627,7 @@ impl Producer {
 /// A peer's retraction and a dead session end the source the same way: a broadcast
 /// carries no end cause past this hop. Shared by the lite and IETF subscribers.
 #[cfg_attr(not(feature = "async"), allow(dead_code))]
+// pending: /quest/m1/public-model/answer.md
 pub(crate) struct SourceGuard(Producer);
 
 impl SourceGuard {
@@ -826,7 +835,7 @@ impl Clone for Consumer {
 impl Consumer {
 	/// Attach an egress stats scope, inherited by the tracks subscribed through this
 	/// handle. Set by a tagged `origin::Consumer` at the broadcast handoff.
-	pub(crate) fn with_stats(mut self, scope: stats::Scope) -> Self {
+	pub(super) fn with_stats(mut self, scope: stats::Scope) -> Self {
 		self.stats = scope;
 		self
 	}
@@ -838,7 +847,7 @@ impl Consumer {
 	/// references resolve against is where the *reader* found the broadcast, not where its
 	/// producer happened to create it. Free when the two already agree, which is the case
 	/// for a broadcast created at the path an unrooted cursor asks for.
-	pub(crate) fn with_path(mut self, path: crate::PathOwned) -> Self {
+	pub(super) fn with_path(mut self, path: crate::PathOwned) -> Self {
 		if self.info.path != path {
 			let mut info = (*self.info).clone();
 			info.path = path;
@@ -848,7 +857,7 @@ impl Consumer {
 	}
 
 	/// Stamp the epoch of the route this handle was resolved through, overriding [`Info::epoch`].
-	pub(crate) fn with_epoch(mut self, epoch: Option<crate::Epoch>) -> Self {
+	pub(super) fn with_epoch(mut self, epoch: Option<crate::Epoch>) -> Self {
 		if self.info.epoch != epoch {
 			let mut info = (*self.info).clone();
 			info.epoch = epoch;
@@ -895,7 +904,7 @@ impl Consumer {
 
 	/// Join the demand of the track serving `name`, requesting it from a [`Dynamic`]
 	/// when nothing serves it yet. Errors as [`Self::track`] does.
-	pub(crate) fn resolve_track(&self, name: &str) -> Result<kio::Consumer<track::TrackState>, Error> {
+	pub(super) fn resolve_track(&self, name: &str) -> Result<kio::Consumer<track::TrackState>, Error> {
 		let mut state = self.state.lock();
 
 		if state.closing {
@@ -939,7 +948,7 @@ impl Consumer {
 
 	/// Read the track serving `name` now, without joining its demand or requesting it.
 	/// Once the broadcast has ended, `ended` stands in for a track it no longer serves.
-	pub(crate) fn peek_track(
+	pub(super) fn peek_track(
 		&self,
 		name: &str,
 		ended: Option<&kio::ConsumerWeak<track::TrackState>>,
@@ -977,7 +986,7 @@ impl Consumer {
 	/// Whether the broadcast has ended, observed under the state lock. The origin's
 	/// dispatcher treats a rejection from such a source as imminent detach rather
 	/// than a strike.
-	pub(crate) fn is_closing(&self) -> bool {
+	pub(super) fn is_closing(&self) -> bool {
 		self.state.read().closing
 	}
 
@@ -999,7 +1008,7 @@ impl Consumer {
 	///
 	/// Used to deduplicate dynamically-served broadcasts in the origin: a live weak yields
 	/// a shared clone, a closed one is discarded so the next request re-serves.
-	pub(crate) fn weak(&self) -> WeakConsumer {
+	pub(super) fn weak(&self) -> WeakConsumer {
 		WeakConsumer {
 			info: self.info.clone(),
 			alive: self.alive.weak(),
@@ -1015,7 +1024,7 @@ impl Consumer {
 /// Only the `alive` handle needs to be weak; a [`kio::Shared`] carries no liveness,
 /// so holding the state outright pins nothing.
 #[derive(Clone)]
-pub(crate) struct WeakConsumer {
+pub(super) struct WeakConsumer {
 	info: Arc<Info>,
 	alive: kio::ConsumerWeak<()>,
 	state: kio::Shared<BroadcastState>,
