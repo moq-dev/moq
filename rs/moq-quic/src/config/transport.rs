@@ -354,13 +354,13 @@ impl TransportConfig {
     /// How to construct new `congestion::Controller`s
     ///
     /// Typically the refcounted configuration of a `congestion::Controller`,
-    /// e.g. a `congestion::NewRenoConfig`. Defaults to `congestion::Bbr3Config`.
+    /// e.g. a `congestion::CubicConfig`. Defaults to `congestion::Bbr3Config`.
     ///
     /// # Example
     /// ```
     /// # use moq_quic::*; use std::sync::Arc;
     /// let mut config = TransportConfig::default();
-    /// config.congestion_controller_factory(Arc::new(congestion::NewRenoConfig::default()));
+    /// config.congestion_controller_factory(Arc::new(congestion::CubicConfig::default()));
     /// ```
     pub fn congestion_controller_factory(
         &mut self,
