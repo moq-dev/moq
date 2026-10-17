@@ -491,8 +491,9 @@ pub struct Finish {
 
 impl Finish {
 	/// How long to keep this handle: the longest [`max_age`](track::Info::max_age) of the
-	/// held tracks, each capped by the broadcast's [`cache_duration`](Info::cache_duration). Tracks still live, including one whose declared end the live edge has
-	/// yet to reach, and tracks without a max-age, add nothing.
+	/// held tracks, each capped by the broadcast's [`cache_duration`](Info::cache_duration).
+	/// Tracks still live, including one whose declared end the live edge has yet to reach
+	/// or with a group still open, and tracks without a max-age, add nothing.
 	pub fn linger(&self) -> Duration {
 		self.linger
 	}
@@ -2093,6 +2094,21 @@ mod test {
 			track.finish().unwrap();
 		}
 		assert_eq!(producer.finish().linger(), Duration::from_secs(5));
+	}
+
+	/// A track with a group still open takes frames past the linger, so it is not held.
+	#[test]
+	fn finish_skips_a_track_with_an_open_group() {
+		let producer = Info::new().produce();
+		let track = producer
+			.create_track(
+				"video",
+				crate::track::Info::timed().with_max_age(Duration::from_secs(30)),
+			)
+			.unwrap();
+		let _group = track.append_group().unwrap();
+		track.finish().unwrap();
+		assert_eq!(producer.finish().linger(), Duration::ZERO);
 	}
 
 	/// A held track takes no more groups, even one below its end, so nothing lands after

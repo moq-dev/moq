@@ -2939,7 +2939,7 @@ pub(crate) struct Hold {
 impl TrackWeak {
 	/// Hold the track open if it finished cleanly, so lookups keep finding it after its
 	/// producers drop. `None` for a track still live (even one with a declared end ahead of
-	/// its live edge), aborted, never published, or gone.
+	/// its live edge, or a group still open), aborted, never published, or gone.
 	///
 	/// Seals a held track: a lower group a surviving producer creates afterward would
 	/// outlive the linger fixed here, so it is refused instead.
@@ -2951,6 +2951,11 @@ impl TrackWeak {
 		let mut state = alive.state.write().ok()?;
 		// A declared end the live edge has yet to reach still has groups to come.
 		if !state.is_complete() || state.abort.is_some() {
+			return None;
+		}
+		// An open group still takes frames, which could land after the linger fixed here.
+		let open = |group: &group::Producer| !group.is_finished() && !group.is_aborted();
+		if state.lookup.values().any(|slot| slot.copies().any(open)) {
 			return None;
 		}
 		state.sealed = true;
