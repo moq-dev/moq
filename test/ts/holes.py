@@ -40,9 +40,13 @@ def holes(dts: list[int], frame: int) -> list[tuple[int, int]]:
     return [(a, b - a) for a, b in zip(dts, dts[1:]) if 2 * (b - a) > 3 * frame]
 
 
-def cuts(source: tuple[Fraction, Fraction], capture: tuple[Fraction, Fraction], frame: Fraction) -> list[str]:
-    """How a capture's (first, last) presentation times, in seconds, fall short of its source's."""
-    late, short = capture[0] - source[0], source[1] - capture[1]
+Span = tuple[Fraction, Fraction, Fraction]
+
+
+def cuts(source: Span, capture: Span, frame: Fraction) -> list[str]:
+    """How a capture's (first PTS, last PTS, last DTS), in seconds, falls short of its source's."""
+    # Both ends: losing trailing B pictures leaves the last PTS, and losing the last P picture the last DTS.
+    late, short = capture[0] - source[0], max(source[1] - capture[1], source[2] - capture[2])
     found = []
     if late > JOIN:
         found.append(f"starts {float(late):.3f}s after its source, past the {float(JOIN)}s join")
@@ -51,8 +55,8 @@ def cuts(source: tuple[Fraction, Fraction], capture: tuple[Fraction, Fraction], 
     return found
 
 
-def probe(path: str) -> dict[str, tuple[dict, list[int], tuple[Fraction, Fraction]]]:
-    """Each audio and video stream by PID: the stream, its decode timestamps, and its first and last PTS in seconds."""
+def probe(path: str) -> dict[str, tuple[dict, list[int], Span]]:
+    """Each audio and video stream by PID: the stream, its decode timestamps, and its span."""
     report = json.loads(subprocess.run(
         ["ffprobe", "-v", "error", "-show_entries", "stream=index,id,codec_type,codec_name,time_base:packet=stream_index,dts,pts",
          "-of", "json", path],
@@ -67,7 +71,7 @@ def probe(path: str) -> dict[str, tuple[dict, list[int], tuple[Fraction, Fractio
             dts[index].append(int(packet["dts"]))
             pts[index].append(int(packet.get("pts", packet["dts"])))
     return {
-        s["id"]: (s, dts[index], (min(pts[index]) * Fraction(s["time_base"]), max(pts[index]) * Fraction(s["time_base"])))
+        s["id"]: (s, dts[index], tuple(t * Fraction(s["time_base"]) for t in (min(pts[index]), max(pts[index]), dts[index][-1])))
         for index, s in streams.items() if pts[index]
     }
 

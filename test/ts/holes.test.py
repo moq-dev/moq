@@ -35,19 +35,27 @@ class Holes(unittest.TestCase):
 
 
 class Cuts(unittest.TestCase):
-    SOURCE = (Fraction(1), Fraction(31))
+    # First PTS, last PTS, last DTS: the last pictures in decode order are B pictures presented before the P.
+    SOURCE = (Fraction(1), Fraction(31), Fraction(30) + Fraction(23, 25))
     FRAME = Fraction(1, 25)
 
     def test_joined_on_a_later_group(self):
-        self.assertEqual(holes.cuts(self.SOURCE, (Fraction(3), Fraction(31)), self.FRAME), [])
+        capture = (Fraction(3), *self.SOURCE[1:])
+        self.assertEqual(holes.cuts(self.SOURCE, capture, self.FRAME), [])
 
     def test_lost_tail(self):
         # One continuous stream that stops early has no hole and nothing to compare against.
-        self.assertEqual(len(holes.cuts(self.SOURCE, (Fraction(3), Fraction(27)), self.FRAME)), 1)
+        capture = (Fraction(3), Fraction(27), Fraction(26))
+        self.assertEqual(len(holes.cuts(self.SOURCE, capture, self.FRAME)), 1)
+
+    def test_lost_trailing_b_pictures(self):
+        # The last P picture still presents last, and nothing after it leaves a step.
+        capture = (Fraction(3), Fraction(31), Fraction(30) + Fraction(20, 25))
+        self.assertEqual(len(holes.cuts(self.SOURCE, capture, self.FRAME)), 1)
 
     def test_lost_prefix(self):
-        self.assertEqual(len(holes.cuts(self.SOURCE, (Fraction(10), Fraction(31)), self.FRAME)), 1)
-
+        capture = (Fraction(10), *self.SOURCE[1:])
+        self.assertEqual(len(holes.cuts(self.SOURCE, capture, self.FRAME)), 1)
 
 if __name__ == "__main__":
     unittest.main()
