@@ -1,11 +1,13 @@
 mod av1;
 mod codec;
+mod color;
 mod h264;
 mod h265;
 mod vp9;
 
 pub use av1::*;
 pub use codec::*;
+pub use color::*;
 pub use h264::*;
 pub use h265::*;
 pub use vp9::*;
@@ -229,7 +231,12 @@ pub struct VideoConfig {
 	#[serde(alias = "displayRatioHeight")]
 	pub display_aspect_height: Option<u32>,
 
-	// TODO color space
+	/// The colour the decoded pixels carry, so a renderer need not guess or reparse the bitstream.
+	///
+	/// Live state, not identity: a publisher may fill it in once the bitstream reveals it.
+	#[serde(default)]
+	pub color: Option<Color>,
+
 	/// The maximum bitrate of the video track, if known.
 	#[serde(default)]
 	pub bitrate: Option<u64>,
@@ -318,6 +325,7 @@ impl VideoConfig {
 			coded_height: None,
 			display_aspect_width: None,
 			display_aspect_height: None,
+			color: None,
 			bitrate: None,
 			enabled: true,
 			preference: 0,

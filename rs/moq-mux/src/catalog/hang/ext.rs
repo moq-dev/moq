@@ -39,8 +39,8 @@ impl CatalogExt for () {}
 /// cross. Publish/consume a [`hang::Catalog<Extra>`] and use [`set`](Self::set)/[`get`](Self::get).
 /// The default extension stays `()` (unknown sections dropped); opt into `Extra` explicitly.
 ///
-/// `video`, `audio`, `text`, `archive`, `clock`, `json`, `binary`, `stats`, `echo`, and the
-/// retired `timeline` key are reserved, so decoding and [`set`](Self::set) reject them to keep the wire JSON free of
+/// `version`, `video`, `audio`, `text`, `archive`, `clock`, `json`, `binary`, `stats`, `echo`, and
+/// the retired `timeline` key are reserved, so decoding and [`set`](Self::set) reject them to keep the wire JSON free of
 /// duplicate or retired keys.
 #[derive(Serialize, Clone, Default, Debug, PartialEq)]
 #[serde(transparent)]
@@ -61,7 +61,13 @@ impl<'de> Deserialize<'de> for Extra {
 fn reserved(name: &str) -> bool {
 	matches!(
 		name,
-		"video" | "audio" | "text" | "archive" | "clock" | "json" | "binary" | "stats" | "echo" | "timeline"
+		"version"
+			| "video" | "audio"
+			| "text" | "archive"
+			| "clock" | "json"
+			| "binary"
+			| "stats" | "echo"
+			| "timeline"
 	) || moq_msf::reserved_root(name)
 }
 
@@ -87,8 +93,8 @@ impl Extra {
 	}
 
 	/// Set (or replace) a section. Errors if `name` collides with a reserved member of either
-	/// catalog: hang's base sections (`video`/`audio`/`text`/`archive`/`clock`/`json`/`binary`/
-	/// `stats`/`echo`),
+	/// catalog: hang's root `version` and base sections
+	/// (`video`/`audio`/`text`/`archive`/`clock`/`json`/`binary`/`stats`/`echo`),
 	/// the retired `timeline` key that the wire format forbids beside `archive`, or a root member
 	/// MSF defines ([`moq_msf::reserved_root`]).
 	///

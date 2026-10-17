@@ -10,8 +10,10 @@ use crate::Result;
 
 /// Reads typed catalog roots from an already subscribed catalog track.
 pub struct Consumer<E = ()> {
-	inner: moq_json::snapshot::Consumer<Catalog<E>>,
+	// Decoded in two steps, so a catalog needing a newer reader fails with a typed error.
+	inner: moq_json::snapshot::Consumer<serde_json::Value>,
 	base: PathOwned,
+	_ext: std::marker::PhantomData<E>,
 }
 
 impl<E: DeserializeOwned + Default> Consumer<E> {
@@ -31,12 +33,14 @@ impl<E: DeserializeOwned + Default> Consumer<E> {
 		Self {
 			base: track.broadcast().path.clone(),
 			inner: moq_json::snapshot::Consumer::new(track, config),
+			_ext: std::marker::PhantomData,
 		}
 	}
 
 	/// Poll for the next catalog update.
 	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Catalog<E>>>> {
-		let catalog = ready!(self.inner.poll_next(waiter)).map_err(|err| crate::Error::Json(err.to_string()))?;
+		let value = ready!(self.inner.poll_next(waiter)).map_err(|err| crate::Error::Json(err.to_string()))?;
+		let catalog = value.map(Catalog::from_value).transpose()?;
 		if let Some(catalog) = catalog.as_ref() {
 			catalog.check_renditions()?;
 			check_resolvable(&self.base, catalog)?;
@@ -141,5 +145,23 @@ mod test {
 			.unwrap();
 		group.finish().unwrap();
 		assert_eq!(consumer.next().await.unwrap(), Some(published));
+	}
+
+	#[tokio::test]
+	async fn a_newer_version_is_a_typed_refusal() {
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let track = broadcast
+			.create_track(Catalog::DEFAULT_NAME, Catalog::default_track_info())
+			.unwrap();
+		let mut consumer = Catalog::<()>::subscribe(&broadcast.consume()).await.unwrap();
+		let mut group = track.append_group().unwrap();
+		group
+			.write_frame(moq_net::Timestamp::ZERO, r#"{"version":5,"video":[]}"#)
+			.unwrap();
+		group.finish().unwrap();
+		assert!(matches!(
+			consumer.next().await,
+			Err(crate::Error::UnsupportedVersion(5))
+		));
 	}
 }

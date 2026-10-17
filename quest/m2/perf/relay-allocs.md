@@ -25,7 +25,3 @@ that grows with the table shows as a slope.
 Decided 2026-10-17 (maintainer): m2, under perf.
 
 Public API: none expected. Wire: none.
-
-## Required
-
-- [Relay profiling](/quest/m2/perf/lock-profile.md) - the heap and CPU recipe

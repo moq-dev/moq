@@ -25,4 +25,4 @@ with duplicate keys, previously accepted, are refused.
 
 ## Related
 
-- [Catalog version](/quest/m1/catalog-version.md) - adds the duplicate `version` refusal
+- #5806 - adds the duplicate `version` refusal

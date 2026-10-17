@@ -319,7 +319,7 @@ A byte between two PCRs is placed at the rate between them; a byte past the last
 
 PCRs are unwrapped into a 64-bit count of 27 MHz ticks, and timestamps never decrease.
 A step forward of at most half the 2^33 × 300 tick period adds to the count, across the wrap included, so a wrap is not a discontinuity.
-A PCR with `discontinuity_indicator` set whose step is forward by that measure adds its step too, after the bytes before it are timed at the rate before it, and the group it starts MUST follow a skipped group sequence, hang's break marker.
+A PCR with `discontinuity_indicator` set whose step is forward by that measure adds its step too, after the bytes before it are timed at the rate before it, and the group it starts MUST follow hang's discontinuity marker ({{hang}}).
 A PCR that steps backwards MUST end the track with an error, flagged or not: a flagged one is a restart, which is new content, so a publisher that carries on publishes it as a new broadcast.
 
 The timeline depends only on the bytes since the publisher's first PCR, so two publishers that start at the same packet of one input publish identical frames.
@@ -442,6 +442,7 @@ A broadcast demultiplexed from a DVB transport stream: video and audio described
 
 - Added the `m2ts` section, a transport stream carried whole, with its mapping onto MSFTS; the comparison uses MSFTS's `mpeg2ts` names.
 - Added the `pesPacket` record: each frame one whole PES packet, timestamped with its placement. A consumer that predates it drops the track rather than refusing the catalog.
+- A flagged PCR jump on an `m2ts` track follows hang's discontinuity marker rather than a skipped group sequence.
 
 ## draft-lcurley-moq-mpegts-00
 {:numbered="false"}

@@ -79,11 +79,12 @@ jobs:
             recipe: bench-audio
           - name: Relay shard sweep
             recipe: bench-shard
-          # Smoke-tests the capture path: exact off-CPU waits, resolved worker stacks and CPU.
+          # Smoke-tests each capture path: exact off-CPU waits, CPU stacks, and
+          # heap snapshots, each refused without resolved relay stacks.
           # x86: on the SVE-capable ARM runner, perf's DWARF unwinding asks for the SVE VG
           # register, which the kernel refuses for the software context-switches event.
-          - name: Relay lock-wait profile
-            recipe: bench-lock fanout-heavy 4
+          - name: Relay profiles
+            recipe: bench-profile "lock cpu heap" fanout-heavy 4
             perf: true
             runner: ubuntu-24.04
           - name: Rust benchmark tests
@@ -97,7 +98,7 @@ jobs:
             recipe: pub check-bbb
             uncached: true
           - name: Browser backend baseline
-            recipe: test wasm-baseline
+            recipe: test wasm-baseline --uniffi
             chromium: true
             artifact: wasm-backend-baseline
             artifact-path: target/test
@@ -147,7 +148,7 @@ jobs:
         if: ${{ !matrix.uncached }}
         uses: ./.github/actions/rust-cache
 
-      # perf samples worker switch-outs in kernel context into a large buffer; bench-lock refuses without it.
+      # perf samples the relay in kernel context into large buffers; bench-profile refuses without it.
       - name: Allow perf kernel sampling
         if: matrix.perf
         run: sudo sysctl -w kernel.perf_event_paranoid=-1
@@ -260,6 +261,8 @@ jobs:
   # Full platform coverage without rebuilding after every main queue merge.
   platform:
     uses: ./.github/workflows/platform.yml
+    with:
+      benchmarks: true
 
   # Plays the matrix in headless Chromium and the native player through moq-shaper
   # and grades what the listener heard against test/audio-quality/budgets.json.

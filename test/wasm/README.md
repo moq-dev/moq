@@ -172,3 +172,15 @@ WASM-to-JS measurements are separate, unverified results here. Full network
 sequences above 2^53 need a native publisher and a JS model that can represent
 them before adoption. WASM frame timestamps and complete publish/backpressure
 API parity remain explicit gaps too.
+
+## Generated bindings
+
+```bash
+just test wasm-baseline --uniffi
+```
+
+`--uniffi` adds moq-ffi, bound by UniFFI over ubrn's `wasm2` player, as a third
+baseline backend. It also runs parity cases and per-call timings in `uniffi/` against
+every relay, once normally and once under a strict CSP. It builds from a scratch
+checkout, since ubrn needs a UniFFI pin that does not land.
+[generator.md](generator.md) is the report that chose this binding.

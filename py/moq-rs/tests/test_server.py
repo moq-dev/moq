@@ -240,6 +240,46 @@ async def test_client_websocket_fallback_options():
         moq.Client("https://localhost", websocket_delay=timedelta(milliseconds=-1))
 
 
+async def test_client_connection_knobs():
+    """Every connection knob reaches the native client, and the dial still connects."""
+    assert moq.versions()
+    async with moq.Server("127.0.0.1:0", tls_generate=["localhost"]) as server:
+        sessions: list = []
+
+        async def accept_loop() -> None:
+            async for request in server:
+                sessions.append(await request.accept())
+
+        accept_task = asyncio.create_task(accept_loop())
+        try:
+            async with moq.Client(
+                f"https://{server.local_addr}",
+                tls_fingerprints=server.cert_fingerprints(),
+                tls_host_name="localhost",
+                bind="127.0.0.1:0",
+                versions=moq.versions(),
+                timeout=timedelta(seconds=5),
+                race=timedelta(0),
+                resolution_delay=timedelta(0),
+                idle_timeout=timedelta(seconds=5),
+                keep_alive=timedelta(0),
+                gso=False,
+                mtu_discovery=True,
+                congestion_control=moq.CongestionControl.LOSS,
+                websocket_enabled=False,
+            ) as client:
+                assert client.session is not None
+        finally:
+            accept_task.cancel()
+            try:
+                await accept_task
+            except asyncio.CancelledError:
+                pass
+
+    with pytest.raises(ValueError):
+        moq.Client("https://localhost", idle_timeout=timedelta(milliseconds=-1))
+
+
 async def test_invalid_config_fails_on_enter():
     """A value the native side cannot use fails the connect or listen, not a later call."""
     with pytest.raises(moq.Error.Config):  # type: ignore[attr-defined]

@@ -15,7 +15,3 @@ the broadcast is down. Mirror the shape in Rust consumers' error so native
 players can say the same.
 
 Public API: a new broadcast status value in `@moq/watch`. Wire: none.
-
-## Required
-
-- [Catalog version](/quest/m1/catalog-version.md) - defines `UnsupportedVersion`

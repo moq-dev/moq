@@ -14,7 +14,3 @@ moq-transport 17+ client. Closes delivered on the ring is part of the
 packaged-relay parity bar.
 
 Public API: none. Wire: none.
-
-## Required
-
-- [moq-transport on io_uring](/quest/m2/uring-ietf.md) - the ring serves moq-transport at all

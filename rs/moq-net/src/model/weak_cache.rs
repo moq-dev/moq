@@ -10,7 +10,7 @@ use std::{
 ///
 /// Implemented by the weak consumer handles cached for dynamic dedup
 /// ([`super::broadcast::WeakConsumer`], [`super::track::TrackWeak`]).
-pub(crate) trait WeakEntry {
+pub(super) trait WeakEntry {
 	/// True once the underlying channel has closed (every producer dropped).
 	fn is_closed(&self) -> bool;
 
@@ -40,7 +40,7 @@ const GC_PROBE: usize = 2;
 /// rotating cursor in kio's `WaiterList`) and drops any that have closed or been
 /// superseded. The cache stays bounded by the number of currently-live handles
 /// without ever scanning all of it.
-pub(crate) struct WeakCache<K, V> {
+pub(super) struct WeakCache<K, V> {
 	map: HashMap<K, V>,
 
 	// Rotating probe queue, one entry per key plus transient junk: keys already

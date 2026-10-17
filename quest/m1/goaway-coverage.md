@@ -33,4 +33,4 @@ fields.
 ## Related
 
 - [Drain cleanup](/quest/m1/drain-cleanup.md) - what a drain does to sessions at its deadline
-- [Draft 14-16 updates](/quest/m1/ietf-legacy-updates.md) - the legacy drafts' request handling
+- #5798 - the legacy drafts' request handling

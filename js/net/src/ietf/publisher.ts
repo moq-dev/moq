@@ -1,6 +1,7 @@
 import { Instant, Milli, Nano, now, sleep } from "@moq/clock";
 import { type Dispose, type Getter, race, Signal } from "@moq/signals";
 import type { Auth, Grant } from "../auth.ts";
+import { Gate } from "../auth_gate.ts";
 import { enforceGrant } from "../auth_session.ts";
 import type * as broadcast from "../broadcast.ts";
 import { Withdrawal } from "../connection/withdrawal.ts";
@@ -304,6 +305,8 @@ export class Publisher {
 	// shrink withdraws what it no longer covers. Undefined until the peer answers, which
 	// allows everything.
 	#grant: Getter<Grant | undefined>;
+	// Holds every incoming request to that grant from dispatch to its end.
+	#gate: Gate;
 
 	// Resolves once the tokens this session presented at setup are answered, so nothing is
 	// advertised before the grant it would be checked against.
@@ -354,6 +357,7 @@ export class Publisher {
 		this.#subscriptions = new Slots(limits.subscriptions, { quic, reason: "too many subscriptions" });
 		this.#fetches = new Slots(limits.fetches, { quic, reason: "too many fetches" });
 		this.#grant = grant;
+		this.#gate = new Gate(grant);
 		this.#auth = auth;
 		this.#ready = ready;
 		this.#session = session;
@@ -390,7 +394,7 @@ export class Publisher {
 		}
 		// Only a subscription we would serve holds a slot, as in Rust: a refused one ends at
 		// once. A peer past the cap loses the session.
-		const charged = msg.forward && !msg.rangeFilters && !this.#denied(msg.trackNamespace);
+		const charged = msg.forward && !msg.rangeFilters && this.#gate.allows(msg.trackNamespace);
 		if (charged) this.#subscriptions.acquire();
 		try {
 			await this.#serveSubscribe(msg, stream);
@@ -430,7 +434,7 @@ export class Publisher {
 				),
 				reasonPhrase: unsupported,
 			};
-		} else if (this.#denied(name)) {
+		} else if (!this.#gate.allows(name)) {
 			// Serve only what our grant lets us publish. Checked before resolving, so a denied
 			// request never reaches the origin.
 			refusal = { errorCode: toRequestCode("unauthorized", "subscribe", version), reasonPhrase: "not granted" };
@@ -596,43 +600,41 @@ export class Publisher {
 					}
 					if (type !== 0x02)
 						throw new ProtocolViolation(`unexpected message on a subscription: 0x${type.toString(16)}`);
-					// Drafts 15 and 16 name the update's own Request ID; later drafts name none.
+					// Draft 14 answers no update. Drafts 15 and 16 name the update's own Request ID;
+					// later drafts name none.
 					const refuse = async (
 						condition: "not_supported" | "malformed_auth_token",
 						reasonPhrase: string,
-						requestId?: bigint,
+						requestId: bigint | undefined,
 					) => {
+						if (version === Version.DRAFT_14) return new UpdateFailed();
 						await stream.writer.u53(RequestError.id);
 						await new RequestError({
-							requestId,
+							requestId: legacy ? requestId : undefined,
 							errorCode: toRequestCode(condition, "subscribe", version),
 							reasonPhrase,
 						}).encode(stream.writer, version);
 						return new UpdateFailed();
 					};
-					if (legacy) {
-						// Not applied yet, but read anyway: an unread update keeps the adapter's
-						// stream from closing, which is how UNSUBSCRIBE arrives.
-						try {
-							await SubscribeUpdate.decode(stream.reader, version);
-						} catch (err) {
-							if (!(err instanceof MalformedAuthToken)) throw err;
-							// Draft 14 answers no update, so the refusal only ends the subscription.
-							if (version === Version.DRAFT_14) throw new UpdateFailed();
-							throw await refuse("malformed_auth_token", err.message, err.requestId);
-						}
-						continue;
-					}
+					let ownRequestId: bigint | undefined;
 					let params: Parameters;
 					try {
-						params = await Message.decode(stream.reader, async (r) => {
-							this.#session.spendRequest(await r.u62());
-							if (version === Version.DRAFT_17) await r.u62();
-							return Parameters.decode(r, version, "request-update");
-						});
+						if (legacy) {
+							// The adapter already spent the update's own Request ID.
+							const update = await SubscribeUpdate.decode(stream.reader, version);
+							ownRequestId = update.ownRequestId;
+							params = update.parameters;
+						} else {
+							params = await Message.decode(stream.reader, async (r) => {
+								this.#session.spendRequest(await r.u62());
+								if (version === Version.DRAFT_17) await r.u62();
+								return Parameters.decode(r, version, "request-update");
+							});
+						}
 					} catch (err) {
 						// Section 8.9 rejects the update, which says more than that we do not support it.
-						if (err instanceof MalformedAuthToken) throw await refuse("malformed_auth_token", err.message);
+						if (err instanceof MalformedAuthToken)
+							throw await refuse("malformed_auth_token", err.message, err.requestId);
 						throw malformed(err, "REQUEST_UPDATE");
 					}
 					if (params.trackPropertyFilter)
@@ -641,17 +643,20 @@ export class Publisher {
 						);
 					const unsupported =
 						params.forward === false ||
+						params.subscriptionFilter !== undefined ||
 						params.bytes.size > 0 ||
 						params.rangeFilters ||
 						[...params.vars.keys()].some(
 							(key) => key !== 0x02n && key !== 0x06n && key !== 0x10n && key !== 0x20n,
 						);
-					if (unsupported) throw await refuse("not_supported", "REQUEST_UPDATE parameters not supported");
+					if (unsupported)
+						throw await refuse("not_supported", "REQUEST_UPDATE parameters not supported", ownRequestId);
 					// update() replaces every option, so carry the rest over as Rust does.
 					if (params.subscriberPriority !== undefined)
 						track.update({ ...track.subscription.peek(), priority: fromWire(params.subscriberPriority) });
+					if (version === Version.DRAFT_14) continue;
 					await stream.writer.u53(RequestOk.id);
-					await new RequestOk({ requestId: undefined }).encode(stream.writer, version);
+					await new RequestOk({ requestId: ownRequestId }).encode(stream.writer, version);
 				}
 			})();
 			const requestEnded = legacy ? updates : race([updates, stream.writer.closed]);
@@ -728,11 +733,9 @@ export class Publisher {
 			const revoked = new Promise<"revoked">((resolve) => {
 				revoke = () => resolve("revoked");
 			});
-			const disposeGrant = this.#grant.subscribe(() => {
-				if (this.#denied(name)) revoke();
-			});
+			const watch = this.#gate.watch(name, revoke);
 			// The grant may have shrunk during setup, before this watcher existed.
-			if (this.#denied(name)) revoke();
+			if (watch.revoked()) revoke();
 
 			let publishError: Error | undefined;
 			let unauthorized = false;
@@ -749,7 +752,7 @@ export class Publisher {
 			} catch (err: unknown) {
 				publishError = error(err);
 			} finally {
-				disposeGrant();
+				watch.dispose();
 			}
 			// An update that broke the protocol, such as one whose AUTHORIZATION TOKEN names an
 			// alias, closes the session: the connection answers a thrown violation with its code.
@@ -780,6 +783,8 @@ export class Publisher {
 
 			// PUBLISH_DONE is required for every supported draft. The peer may have already
 			// closed its side to unsubscribe, in which case there is nowhere to send it.
+			// Draft 14 registers no UPDATE_FAILED, so a failed update ends there as any error does.
+			const updateFailed = publishError instanceof UpdateFailed && version !== Version.DRAFT_14;
 			try {
 				await stream.writer.u53(PublishDone.id);
 				const done = new PublishDone({
@@ -789,7 +794,7 @@ export class Publisher {
 							: undefined,
 					statusCode: unauthorized
 						? PublishDoneStatus.UNAUTHORIZED
-						: publishError instanceof UpdateFailed
+						: updateFailed
 							? PublishDoneStatus.UPDATE_FAILED
 							: publishError
 								? PublishDoneStatus.INTERNAL_ERROR
@@ -797,7 +802,7 @@ export class Publisher {
 					streamCount: BigInt(streams.opened),
 					reasonPhrase: unauthorized
 						? "not granted"
-						: publishError instanceof UpdateFailed
+						: updateFailed
 							? "update failed"
 							: publishError
 								? "internal error"
@@ -1139,12 +1144,6 @@ export class Publisher {
 		}
 	}
 
-	// Whether our grant excludes publishing this broadcast. No grant yet allows it.
-	#denied(broadcast: Path.Valid): boolean {
-		const grant = this.#grant.peek();
-		return grant !== undefined && !grant.publish.matches(broadcast);
-	}
-
 	/**
 	 * Close the session when our origin publishes a broadcast our grant does not cover;
 	 * see {@link enforceGrant}.
@@ -1197,7 +1196,8 @@ export class Publisher {
 				(update) => ({ update }),
 				(err) => ({ error: error(err) }),
 			);
-		let updating = version >= Version.DRAFT_18 ? readUpdate() : undefined;
+		// Drafts 14-16 route an update onto the stream too, which stays open behind one left unread.
+		let updating = version !== Version.DRAFT_17 ? readUpdate() : undefined;
 		try {
 			// Send OK response
 			if (version === Version.DRAFT_14) {
@@ -1219,7 +1219,7 @@ export class Publisher {
 			const carries = (covered: Path.Valid) =>
 				visible(covered) &&
 				(legacy ? this.#requiresSolicitation || (this.#hidden && hiddenBelow(Path.empty(), covered)) : true) &&
-				!this.#denied(covered);
+				this.#gate.allows(covered);
 
 			// Nothing is advertised before the grant it would be checked against.
 			await this.#ready;
@@ -1303,19 +1303,27 @@ export class Publisher {
 					const update = next.update;
 					updating = undefined;
 					if (!update) continue;
-					this.#session.spendRequest(update.requestId);
+					// Drafts 14-16 spend the update's own Request ID in the adapter and name it in
+					// the answer. They define no namespace update, so refusing one leaves the
+					// subscription standing, and draft 14 answers no update at all.
+					const keyed = version <= Version.DRAFT_16;
+					if (!keyed) this.#session.spendRequest(update.requestId);
 					if (update.refused || (update.prefix !== undefined && Namespace.reserved(update.prefix, version))) {
-						await stream.writer.u53(RequestError.id);
-						await new RequestError({
-							requestId: undefined,
-							errorCode: toRequestCode(
-								update.refused ?? "does_not_exist",
-								"subscribe_namespace",
-								version,
-							),
-							reasonPhrase: "namespace update refused",
-						}).encode(stream.writer, version);
-						break;
+						if (version !== Version.DRAFT_14) {
+							await stream.writer.u53(RequestError.id);
+							await new RequestError({
+								requestId: keyed ? update.requestId : undefined,
+								errorCode: toRequestCode(
+									update.refused ?? "does_not_exist",
+									"subscribe_namespace",
+									version,
+								),
+								reasonPhrase: "namespace update refused",
+							}).encode(stream.writer, version);
+						}
+						if (!keyed) break;
+						updating = readUpdate();
+						continue;
 					}
 					if (update.prefix !== undefined && update.prefix !== prefix) {
 						for (const suffix of ns.active.keys()) await target.withdraw(suffix);
@@ -1438,7 +1446,7 @@ export class Publisher {
 					// nothing our grant does not cover reaches the peer at all (MoQ Auth).
 					if (
 						(this.#hidden && hiddenBelow(Path.empty(), covered)) ||
-						this.#denied(covered) ||
+						!this.#gate.allows(covered) ||
 						candidates.length === 0
 					)
 						continue;
@@ -1793,7 +1801,7 @@ export class Publisher {
 
 		// Answer only for what our grant lets us publish. Checked before the track resolves,
 		// so a denied request never reaches the origin.
-		if (this.#denied(name)) {
+		if (!this.#gate.allows(name)) {
 			await this.#refuse(stream, msg.requestId, TRACK_STATUS_ERROR_14, denied);
 			return;
 		}
@@ -1807,8 +1815,7 @@ export class Publisher {
 		// A grant that narrows abandons the lookup, and resets an answer the transport has
 		// not taken yet rather than delivering it.
 		let answering = false;
-		const disposeGrant = this.#grant.subscribe(() => {
-			if (!this.#denied(name)) return;
+		const watch = this.#gate.watch(name, () => {
 			hold.abort();
 			if (answering) stream.abort(unauthorized(name));
 		});
@@ -1839,7 +1846,7 @@ export class Publisher {
 					stream.abort(cancel);
 					return;
 				}
-				const refusal = this.#denied(name) ? denied : this.#failed(err, "track_status");
+				const refusal = !this.#gate.allows(name) ? denied : this.#failed(err, "track_status");
 				await this.#refuse(stream, msg.requestId, TRACK_STATUS_ERROR_14, refusal);
 				return;
 			}
@@ -1851,7 +1858,7 @@ export class Publisher {
 			stream.close();
 			await stream.writer.closed.catch(() => undefined);
 		} finally {
-			disposeGrant();
+			watch.dispose();
 			hold.abort();
 		}
 	}

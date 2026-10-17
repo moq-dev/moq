@@ -42,6 +42,7 @@ export interface Announce {
  */
 export type Event = { kind: "start" | "update" | "restart" | "end" } & Announce;
 
+// pending: /quest/m1/public-model/answer.md
 /**
  * Options for an announcement stream.
  *
@@ -72,6 +73,7 @@ function closeState(state: AnnounceState, abort?: Error) {
 	});
 }
 
+// pending: /quest/m1/public-model/answer.md
 /**
  * The write side of an announcement stream.
  *

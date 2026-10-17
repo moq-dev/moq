@@ -37,5 +37,5 @@ export * from "./root";
 export * from "./stats";
 export * from "./text";
 export * from "./track";
-export type { VideoConfig } from "./video";
-export { VideoConfigSchema, VideoSchema } from "./video";
+export type { Color, VideoConfig } from "./video";
+export { ColorSchema, VideoConfigSchema, VideoSchema } from "./video";
