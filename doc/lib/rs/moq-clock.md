@@ -72,6 +72,16 @@ timer is armed panics as a deadlock instead of hanging. `sim::advance()` and
 `sim::step_wall()` move time by hand, and `sim::attach(&deadlines)` keeps a
 `Deadlines` queue in step until it drops.
 
+## Driving a tokio runtime by hand
+
+Paused tokio and the simulator both jump to the next timer once everything
+idles. A harness outside the runtime, like a Python test loop driving the
+bindings, needs time that moves only when it says so. The `manual` feature adds
+`Manual::install(&handle)`, which makes a `Manual` clock the ambient clock of
+one tokio runtime. Its timers fire only when the returned handle's `advance()`
+reaches them, and other runtimes and threads keep the host clock. Python's
+`moq.testing.Clock` wraps it in builds made with moq-ffi's `testing` feature.
+
 Tests that do real I/O (sockets, browsers, codecs) can't use the simulator.
 They wait on events and use the host clock only for a watchdog.
 

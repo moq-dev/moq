@@ -28,6 +28,9 @@ default = ["audio", "video"]
 
 audio = ["dep:moq-audio"]
 video = ["dep:moq-video", "dep:pollster"]
+# Test-only control of the runtime clock, for the Python suite (`just py test`). Released
+# builds leave it off, so they never carry the `moq_ffi_test_clock_*` symbols.
+testing = ["moq-clock/manual"]
 
 [dependencies]
 bytes = { workspace = true }

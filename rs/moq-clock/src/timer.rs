@@ -24,6 +24,8 @@ enum Timer {
 	Host(crate::runtime::Timer),
 	#[cfg(feature = "sim")]
 	Sim(crate::sim::Timer),
+	#[cfg(feature = "manual")]
+	Installed(crate::installed::Timer),
 }
 
 /// Complete once the ambient clock reaches `at`; at once if it already has.
@@ -33,6 +35,14 @@ pub fn sleep_until(at: Instant) -> Sleep {
 		return Sleep {
 			at: Some(at),
 			timer: Timer::Sim(timer),
+			parked: None,
+		};
+	}
+	#[cfg(feature = "manual")]
+	if let Some(clock) = crate::installed::current() {
+		return Sleep {
+			at: Some(at),
+			timer: Timer::Installed(crate::installed::Timer::new(clock, at)),
 			parked: None,
 		};
 	}
@@ -73,6 +83,8 @@ impl Sleep {
 			Timer::Host(timer) => timer.reset(at),
 			#[cfg(feature = "sim")]
 			Timer::Sim(timer) => timer.reset(at),
+			#[cfg(feature = "manual")]
+			Timer::Installed(timer) => timer.reset(at),
 		}
 		// The reset may come from another task than the one parked here.
 		if let Some(parked) = self.parked.take() {
@@ -94,6 +106,8 @@ impl Future for Sleep {
 			Timer::Host(timer) => timer.poll(cx),
 			#[cfg(feature = "sim")]
 			Timer::Sim(timer) => timer.poll(cx),
+			#[cfg(feature = "manual")]
+			Timer::Installed(timer) => timer.poll(cx),
 		}
 	}
 }
