@@ -1,11 +1,11 @@
 import { expect, test } from "bun:test";
+import { Milli } from "@moq/clock";
 import { ProtocolViolation } from "../error.ts";
 import type { Consumer as GroupConsumer } from "../group.ts";
 import { createMockTransportPair } from "../mock.ts";
 import * as Path from "../path.ts";
 import { Reader, Stream } from "../stream.ts";
 import { TAIL_GRACE_MS } from "../tail.ts";
-import { Milli } from "../time.ts";
 import { NativeSession } from "./adapter.ts";
 import { type GroupFlags, Group as GroupMessage } from "./object.ts";
 import { PublishDone } from "./publish.ts";

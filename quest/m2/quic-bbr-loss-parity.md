@@ -25,9 +25,8 @@ requires. Preserve that behavior and its regression.
 While in the file, move the remaining draft-05 links and renamed pseudocode
 identifiers (such as `probe_up_acked_per_inc`) to draft-06; comment-only.
 
-Decided in the 2026-10-05 audit: this waits on the hard fork, which the
-maintainer prioritizes, and lands in `moq-quic`'s BBR3, not in the frozen
-moq-dev/noq. Add failing regressions on the shared test `Sim`: a loss before the
+Decided in the 2026-10-05 audit: this lands in `moq-quic`'s BBR3, not in
+the frozen moq-dev/noq. Add failing regressions on the shared test `Sim`: a loss before the
 first ACK sample, and a loss between ACKs that must not alter the next ACK's
 sample. Retain the spurious-loss undo coverage through Refill. Internal only;
 no `Controller` or wire change.
@@ -35,8 +34,3 @@ no `Controller` or wire change.
 Decided in the 2026-09-30 audit: moved to m2. The seven correctness fixes
 already shipped, and this remaining gap has no observed impact on MoQ
 traffic yet.
-
-
-## Related
-
-- [Switch](/quest/m1/quic/fork/switch.md) - MoQ runs on `moq-quic`; not a blocker, since this is a local `rs/moq-quic` fix

@@ -25,6 +25,7 @@
 		"pako": "^3.0.2"
 	},
 	"devDependencies": {
+		"@moq/clock": "workspace:^",
 		"@types/bun": "^1.4.2",
 		"fflate": "^0.8.2",
 		"rimraf": "^6.1.3",

@@ -62,6 +62,6 @@ Public API: none. Wire: none (ordering only).
 ## Related
 
 - [Pipelined SUBSCRIBE](/quest/m2/pipeline-requests/subscribe.md) - the same change for subscriptions
-- [moq-transport ranges](/quest/m1/subscribe-ranges/ietf.md) - adjacent code in `ietf/subscriber.rs` and `model/origin.rs`; this lands first and ranges rebases
+- [moq-transport ranges](/quest/m1/subscribe-ranges/ietf.md) - adjacent code in `ietf/subscriber.rs` and `model/origin.rs`; ranges remains in m1; this optional m2 optimization adapts to the landed range API
 - [Retired requests](https://github.com/moq-dev/moq/pull/5294) - staged requests retain their selected instance; retries cannot resolve a replacement by path
 - [FETCH max-delay](/quest/m1/fetch-max-delay.md) - setup and recovery do not reset or bypass the reader's age budget

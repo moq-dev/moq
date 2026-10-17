@@ -1,8 +1,10 @@
+import { Milli } from "@moq/clock";
 import * as Catalog from "@moq/hang/catalog";
 import * as Container from "@moq/hang/container";
 import * as Json from "@moq/json";
 import * as Moq from "@moq/net";
 import { Effect, type Getter, getter, type Inputs, type Readonlys, Signal } from "@moq/signals";
+import { rotateVideoDimensions } from "@moq/video";
 import { CatalogProducer } from "./catalog";
 import { errors } from "./internal";
 import { Baseline } from "./jitter";
@@ -27,12 +29,16 @@ export type BroadcastInput = {
 	// The broadcast name.
 	name: Getter<Moq.Path.Valid>;
 
-	// Catalog video-section display size, shared by all video renditions. Usually wired from a
-	// Video.Capture's `display` output. Omitted from the catalog when undefined.
+	// The captured picture size, shared by all video renditions. Usually wired from a
+	// Video.Capture's `display` output. The catalog display swaps it for a quarter-turn `rotation`,
+	// since it is the size to render at. Omitted from the catalog when undefined.
 	display: Getter<{ width: number; height: number } | undefined>;
 
 	// Whether the video should be flipped horizontally on playback. Catalog video-section metadata.
 	flip: Getter<boolean>;
+
+	// Clockwise video rotation in degrees. Catalog video-section metadata.
+	rotation: Getter<number>;
 
 	/**
 	 * How long relays keep a non-latest group of this broadcast's media tracks fetchable, in
@@ -44,7 +50,7 @@ export type BroadcastInput = {
 	 * shortens how far back a fetch can reach. A track's retention is fixed when it is created,
 	 * so changing this publishes a new network broadcast.
 	 */
-	maxAge: Getter<Moq.Time.Milli | undefined>;
+	maxAge: Getter<Milli | undefined>;
 };
 
 /**
@@ -119,6 +125,7 @@ export class Broadcast {
 			name: getter(props?.name ?? Moq.Path.empty()),
 			display: getter(props?.display),
 			flip: getter(props?.flip ?? false),
+			rotation: getter(props?.rotation ?? 0),
 			maxAge: getter(props?.maxAge),
 		};
 
@@ -142,7 +149,7 @@ export class Broadcast {
 	 *
 	 * Set the returned rendition's `config` to a {@link Catalog.TextConfig}, then write one cue per
 	 * group into its `track` with `Hang.Container.Legacy.Producer` (each cue is a keyframe, so it opens
-	 * its own group). See the module docs for the cue framing. Stamp cues with `performance.now()` in
+	 * its own group). See the module docs for the cue framing. Stamp cues with `@moq/clock`'s `now()` in
 	 * microseconds, the broadcast clock the catalog advertises.
 	 */
 	text(name: string): Rendition<Catalog.TextConfig> {
@@ -232,15 +239,18 @@ export class Broadcast {
 
 		const display = effect.get(this.in.display);
 		const flip = effect.get(this.in.flip);
+		const rotation = effect.get(this.in.rotation);
 
 		this.catalog.mutate((catalog) => {
 			if (Object.keys(video).length > 0) {
 				const section: Catalog.Video = { renditions: video };
 				// display is optional in the schema, so it gates only itself, not the whole section.
 				if (display) {
-					section.display = { width: Catalog.u53(display.width), height: Catalog.u53(display.height) };
+					const { width, height } = rotateVideoDimensions(display, rotation);
+					section.display = { width: Catalog.u53(width), height: Catalog.u53(height) };
 				}
 				if (flip) section.flip = true;
+				if (rotation) section.rotation = rotation;
 				catalog.video = section;
 			} else {
 				delete catalog.video;
@@ -365,7 +375,7 @@ export class Broadcast {
 					const track = broadcast.createTrack(name, {
 						// Each catalog snapshot is stamped when written.
 						timescale: Moq.Time.Timescale.MILLI,
-						maxAge: Moq.Time.Milli(Number.MAX_SAFE_INTEGER),
+						maxAge: Milli(Number.MAX_SAFE_INTEGER),
 						priority: Catalog.PRIORITY.catalog,
 					});
 					effect.cleanup(() => track.close());

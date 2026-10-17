@@ -513,25 +513,25 @@ async fn raw_audio_activity() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let consumer = broadcast.consume().unwrap();
 	let catalog_consumer = MoqMediaCatalogConsumer::subscribe(&consumer).await.unwrap();
-	let audio = broadcast
-		.encode_audio(
-			"microphone".into(),
-			MoqAudioEncoderInput {
-				format: MoqAudioSampleFormat::F32,
-				sample_rate: SAMPLE_RATE,
-				channels: 1,
-			},
-			MoqAudioEncoderOutput {
-				codec: MoqAudioCodec::opus(),
-				sample_rate: None,
-				channels: None,
-				bitrate: None,
-				frame_duration_us: FRAME_DURATION_US,
-			},
-			None,
-		)
-		.unwrap();
-	assert_eq!(audio.name().unwrap(), "microphone");
+	let audio = MoqAudioProducer::new(
+		&MoqMediaCatalogProducer::new(broadcast.clone()).unwrap(),
+		MoqAudioEncoderInput {
+			format: MoqAudioSampleFormat::F32,
+			sample_rate: SAMPLE_RATE,
+			channels: 1,
+		},
+		MoqAudioEncoderOutput {
+			track: Some("microphone".into()),
+			codec: MoqAudioCodec::opus(),
+			sample_rate: None,
+			channels: None,
+			bitrate: None,
+			frame_duration_us: FRAME_DURATION_US,
+		},
+		None,
+	)
+	.unwrap();
+	assert_eq!(audio.demand().unwrap().name(), "microphone");
 
 	let catalog = tokio::time::timeout(TIMEOUT, catalog_consumer.next())
 		.await
@@ -549,7 +549,7 @@ async fn raw_audio_activity() {
 	)
 	.await
 	.unwrap();
-	tokio::time::timeout(TIMEOUT, audio.used())
+	tokio::time::timeout(TIMEOUT, audio.demand().unwrap().used())
 		.await
 		.expect("timed out waiting for raw audio to become used")
 		.unwrap();
@@ -567,7 +567,7 @@ async fn raw_audio_activity() {
 	assert_eq!(first.timestamp_us, FIRST_TIMESTAMP_US);
 
 	drop(subscription);
-	tokio::time::timeout(TIMEOUT, audio.unused())
+	tokio::time::timeout(TIMEOUT, audio.demand().unwrap().unused())
 		.await
 		.expect("timed out waiting for raw audio to become unused")
 		.unwrap();
@@ -582,7 +582,7 @@ async fn raw_audio_activity() {
 	)
 	.await
 	.unwrap();
-	tokio::time::timeout(TIMEOUT, audio.used())
+	tokio::time::timeout(TIMEOUT, audio.demand().unwrap().used())
 		.await
 		.expect("timed out waiting for raw audio to become used again")
 		.unwrap();
@@ -624,7 +624,9 @@ async fn raw_audio_frame_durations() {
 		sample_rate: 48_000,
 		channels: 1,
 	};
-	let output = |frame_duration_us| MoqAudioEncoderOutput {
+	let catalog = MoqMediaCatalogProducer::new(broadcast.clone()).unwrap();
+	let output = |track: &str, frame_duration_us| MoqAudioEncoderOutput {
+		track: Some(track.into()),
 		codec: MoqAudioCodec::opus(),
 		sample_rate: None,
 		channels: None,
@@ -632,9 +634,7 @@ async fn raw_audio_frame_durations() {
 		frame_duration_us,
 	};
 
-	let audio = broadcast
-		.encode_audio("fine".into(), input(), output(2_500), None)
-		.unwrap();
+	let audio = MoqAudioProducer::new(&catalog, input(), output("fine", 2_500), None).unwrap();
 	// 2.5 ms of silence at 48 kHz, mono f32: exactly one encoded frame.
 	audio
 		.write(MoqAudioFrame {
@@ -644,7 +644,7 @@ async fn raw_audio_frame_durations() {
 		.unwrap();
 	audio.finish().unwrap();
 
-	let coarse = broadcast.encode_audio("coarse".into(), input(), output(2_000), None);
+	let coarse = MoqAudioProducer::new(&catalog, input(), output("coarse", 2_000), None);
 	assert!(
 		matches!(coarse, Err(MoqError::Audio { .. })),
 		"2 ms is not an opus frame duration"
@@ -666,7 +666,9 @@ async fn raw_audio_codec_default_frame() {
 		sample_rate: 48_000,
 		channels: 2,
 	};
-	let output = |codec| MoqAudioEncoderOutput {
+	let catalog = MoqMediaCatalogProducer::new(broadcast.clone()).unwrap();
+	let output = |track: &str, codec| MoqAudioEncoderOutput {
+		track: Some(track.into()),
 		codec,
 		sample_rate: None,
 		channels: None,
@@ -674,23 +676,21 @@ async fn raw_audio_codec_default_frame() {
 		frame_duration_us: 0,
 	};
 
-	let opus = broadcast
-		.encode_audio("opus".into(), input(), output(MoqAudioCodec::opus()), None)
-		.unwrap();
+	let opus = MoqAudioProducer::new(&catalog, input(), output("opus", MoqAudioCodec::opus()), None).unwrap();
 	opus.finish().unwrap();
 
 	assert_eq!(MoqAudioCodec::aac().codec(), moq_audio::encode::Codec::Aac);
-	let aac = broadcast.encode_audio("aac".into(), input(), output(MoqAudioCodec::aac()), None);
+	let aac = MoqAudioProducer::new(&catalog, input(), output("aac", MoqAudioCodec::aac()), None);
 	let Err(MoqError::Audio { reason: message }) = aac else {
 		panic!("no platform AAC encoder on this host");
 	};
 	assert!(message.contains("no aac audio encoder"), "{message}");
 
 	// 0 still means 1024 samples after an output-rate override, not the input rate.
-	let mut resampled = output(MoqAudioCodec::aac());
+	let mut resampled = output("aac-rate", MoqAudioCodec::aac());
 	resampled.sample_rate = Some(48_000);
-	let aac = broadcast.encode_audio(
-		"aac-rate".into(),
+	let aac = MoqAudioProducer::new(
+		&catalog,
 		MoqAudioEncoderInput {
 			format: MoqAudioSampleFormat::F32,
 			sample_rate: 44_100,
@@ -2281,7 +2281,7 @@ async fn announced_broadcast_keeps_the_requested_path() {
 /// find the track or silently decodes a same-named local one with mismatched metadata.
 #[cfg(feature = "audio")]
 #[tokio::test]
-async fn decode_audio_follows_a_sibling_broadcast_reference() {
+async fn audio_consumer_follows_a_sibling_broadcast_reference() {
 	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
 	let consumer = origin.consume();
 
@@ -2296,7 +2296,12 @@ async fn decode_audio_follows_a_sibling_broadcast_reference() {
 
 	let decoded = tokio::time::timeout(
 		TIMEOUT,
-		broadcast.decode_audio("audio".into(), sibling_audio("./source"), audio_output()),
+		crate::audio::MoqAudioConsumer::subscribe(
+			&broadcast,
+			"audio".into(),
+			sibling_audio("./source"),
+			audio_output(),
+		),
 	)
 	.await
 	.expect("timed out subscribing to the referenced track");
@@ -2305,7 +2310,7 @@ async fn decode_audio_follows_a_sibling_broadcast_reference() {
 	// Without the reference the same call has nowhere to find the track.
 	let missing = tokio::time::timeout(
 		TIMEOUT,
-		broadcast.decode_audio("audio".into(), sibling_audio(""), audio_output()),
+		crate::audio::MoqAudioConsumer::subscribe(&broadcast, "audio".into(), sibling_audio(""), audio_output()),
 	)
 	.await
 	.expect("timed out subscribing to the catalog broadcast");
@@ -2685,7 +2690,7 @@ async fn video_publish_consume() {
 	broadcast.close().unwrap();
 }
 
-/// The raw-video publish path: hand mid-gray RGBA to `encode_video` and check
+/// The raw-video publish path: hand mid-gray RGBA to `MoqVideoProducer` and check
 /// that the encoder's own output reaches a subscriber, described by a catalog
 /// rendition the importer built from the encoded keyframe.
 #[cfg(feature = "video")]
@@ -2696,35 +2701,35 @@ async fn video_raw_publish_consume() {
 	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
 	let broadcast = create_announced(&origin, "video-raw-test");
 
-	let video = broadcast
-		.encode_video(
-			MoqVideoEncoderInput {
-				format: MoqVideoPixelFormat::Rgba,
-				width: 320,
-				height: 240,
-				framerate: 30,
-			},
-			MoqVideoEncoderOutput {
-				codec: MoqVideoCodec::H264,
-				track: Some("camera".into()),
-				bitrate: None,
-				gop: None,
-				// Software so the test is deterministic everywhere: `Auto` would
-				// reach for a hardware backend that CI runners don't have.
-				kind: MoqVideoEncoderKind::Software,
-			},
-			None,
-		)
-		.unwrap();
-	assert_eq!(video.name().unwrap(), "camera");
+	let video = crate::video::MoqVideoProducer::new(
+		&crate::media::MoqMediaCatalogProducer::new(broadcast.clone()).unwrap(),
+		MoqVideoEncoderInput {
+			format: MoqVideoPixelFormat::Rgba,
+			width: 320,
+			height: 240,
+			framerate: 30,
+		},
+		MoqVideoEncoderOutput {
+			codec: MoqVideoCodec::H264,
+			track: Some("camera".into()),
+			bitrate: None,
+			gop: None,
+			// Software so the test is deterministic everywhere: `Auto` would
+			// reach for a hardware backend that CI runners don't have.
+			kind: MoqVideoEncoderKind::Software,
+		},
+		None,
+	)
+	.unwrap();
+	assert_eq!(video.demand().unwrap().name(), "camera");
 	let local_consumer = broadcast.consume().unwrap();
 	let demand_consumer = local_consumer.subscribe_track("camera".into(), None).await.unwrap();
-	tokio::time::timeout(TIMEOUT, video.used())
+	tokio::time::timeout(TIMEOUT, video.demand().unwrap().used())
 		.await
 		.expect("timed out waiting for video demand")
 		.unwrap();
 	drop(demand_consumer);
-	tokio::time::timeout(TIMEOUT, video.unused())
+	tokio::time::timeout(TIMEOUT, video.demand().unwrap().unused())
 		.await
 		.expect("timed out waiting for video demand to clear")
 		.unwrap();
@@ -2813,25 +2818,25 @@ async fn video_decode_frame_ownership() {
 	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
 	let broadcast = create_announced(&origin, "video-decode-frame");
 
-	let video = broadcast
-		.encode_video(
-			MoqVideoEncoderInput {
-				format: MoqVideoPixelFormat::Rgba,
-				width: 320,
-				height: 240,
-				framerate: 30,
-			},
-			MoqVideoEncoderOutput {
-				codec: MoqVideoCodec::H264,
-				track: Some("camera".into()),
-				bitrate: None,
-				gop: None,
-				// Software so the encode is deterministic everywhere.
-				kind: MoqVideoEncoderKind::Software,
-			},
-			None,
-		)
-		.unwrap();
+	let video = crate::video::MoqVideoProducer::new(
+		&crate::media::MoqMediaCatalogProducer::new(broadcast.clone()).unwrap(),
+		MoqVideoEncoderInput {
+			format: MoqVideoPixelFormat::Rgba,
+			width: 320,
+			height: 240,
+			framerate: 30,
+		},
+		MoqVideoEncoderOutput {
+			codec: MoqVideoCodec::H264,
+			track: Some("camera".into()),
+			bitrate: None,
+			gop: None,
+			// Software so the encode is deterministic everywhere.
+			kind: MoqVideoEncoderKind::Software,
+		},
+		None,
+	)
+	.unwrap();
 
 	// Seed the track so a subscriber joining below lands on encoded media.
 	let rgba = vec![0x80u8; 320 * 240 * 4];
@@ -2855,17 +2860,25 @@ async fn video_decode_frame_ownership() {
 		.expect("expected catalog");
 	let (track, rendition) = catalog.video.iter().next().unwrap();
 
-	let portable = broadcast_consumer
-		.decode_video(track.clone(), rendition.clone(), MoqVideoDecoderOutput::default())
-		.await
-		.unwrap();
+	let portable = crate::video::MoqVideoConsumer::subscribe(
+		&broadcast_consumer,
+		track.clone(),
+		rendition.clone(),
+		MoqVideoDecoderOutput::default(),
+	)
+	.await
+	.unwrap();
 	let surface_output = MoqVideoDecoderOutput {
 		surface: true,
 		..Default::default()
 	};
-	let retaining = broadcast_consumer
-		.decode_video(track.clone(), rendition.clone(), surface_output)
-		.await;
+	let retaining = crate::video::MoqVideoConsumer::subscribe(
+		&broadcast_consumer,
+		track.clone(),
+		rendition.clone(),
+		surface_output,
+	)
+	.await;
 	// A platform with no surface variant refuses the opt-in up front, rather than
 	// decoding to a surface the caller can neither view nor always download.
 	let retaining = if cfg!(any(target_os = "macos", target_os = "ios")) {
@@ -2952,26 +2965,26 @@ async fn video_raw_publish_from_many_threads() {
 	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
 	let broadcast = create_announced(&origin, "video-raw-threads");
 
-	let video = broadcast
-		.encode_video(
-			MoqVideoEncoderInput {
-				format: MoqVideoPixelFormat::Rgba,
-				width: 320,
-				height: 240,
-				framerate: 30,
-			},
-			MoqVideoEncoderOutput {
-				codec: MoqVideoCodec::H264,
-				track: None,
-				// An explicit ceiling so the retunes below stay under the rate the
-				// encoder opened at, which openh264 requires.
-				bitrate: Some(1_000_000),
-				gop: None,
-				kind: MoqVideoEncoderKind::Software,
-			},
-			None,
-		)
-		.unwrap();
+	let video = crate::video::MoqVideoProducer::new(
+		&crate::media::MoqMediaCatalogProducer::new(broadcast.clone()).unwrap(),
+		MoqVideoEncoderInput {
+			format: MoqVideoPixelFormat::Rgba,
+			width: 320,
+			height: 240,
+			framerate: 30,
+		},
+		MoqVideoEncoderOutput {
+			codec: MoqVideoCodec::H264,
+			track: None,
+			// An explicit ceiling so the retunes below stay under the rate the
+			// encoder opened at, which openh264 requires.
+			bitrate: Some(1_000_000),
+			gop: None,
+			kind: MoqVideoEncoderKind::Software,
+		},
+		None,
+	)
+	.unwrap();
 
 	// A fresh caller thread per frame, never the one that published.
 	let rgba = std::sync::Arc::new(vec![0x80u8; 320 * 240 * 4]);
@@ -3045,19 +3058,25 @@ async fn video_raw_publish_rejects_bad_frames() {
 
 	// A zero framerate is rejected before any track is advertised.
 	assert!(
-		broadcast
-			.encode_video(
-				MoqVideoEncoderInput {
-					framerate: 0,
-					..input(320, 240)
-				},
-				output(),
-				None,
-			)
-			.is_err()
+		crate::video::MoqVideoProducer::new(
+			&crate::media::MoqMediaCatalogProducer::new(broadcast.clone()).unwrap(),
+			MoqVideoEncoderInput {
+				framerate: 0,
+				..input(320, 240)
+			},
+			output(),
+			None,
+		)
+		.is_err()
 	);
 
-	let video = broadcast.encode_video(input(320, 240), output(), None).unwrap();
+	let video = crate::video::MoqVideoProducer::new(
+		&crate::media::MoqMediaCatalogProducer::new(broadcast.clone()).unwrap(),
+		input(320, 240),
+		output(),
+		None,
+	)
+	.unwrap();
 
 	// A 640x480 buffer against a 320x240 encoder: the frame carries no dimensions
 	// of its own, so this is caught as a wrong-sized picture.
@@ -4981,24 +5000,24 @@ async fn video_encoder_follows_a_shrinking_grant() {
 	)));
 
 	let broadcast = MoqBroadcastProducer::new().unwrap();
-	let video = broadcast
-		.encode_video(
-			MoqVideoEncoderInput {
-				format: MoqVideoPixelFormat::Rgba,
-				width: 320,
-				height: 240,
-				framerate: 30,
-			},
-			MoqVideoEncoderOutput {
-				codec: MoqVideoCodec::H264,
-				track: Some("camera".into()),
-				bitrate: Some(4_000_000),
-				gop: None,
-				kind: MoqVideoEncoderKind::Software,
-			},
-			Some(bandwidth),
-		)
-		.unwrap();
+	let video = crate::video::MoqVideoProducer::new(
+		&crate::media::MoqMediaCatalogProducer::new(broadcast.clone()).unwrap(),
+		MoqVideoEncoderInput {
+			format: MoqVideoPixelFormat::Rgba,
+			width: 320,
+			height: 240,
+			framerate: 30,
+		},
+		MoqVideoEncoderOutput {
+			codec: MoqVideoCodec::H264,
+			track: Some("camera".into()),
+			bitrate: Some(4_000_000),
+			gop: None,
+			kind: MoqVideoEncoderKind::Software,
+		},
+		Some(bandwidth),
+	)
+	.unwrap();
 
 	let reservation = video.reservation().expect("published against an allocator");
 	assert_eq!(reservation.grant(), None, "no demand yet");
@@ -5066,7 +5085,13 @@ async fn dropping_a_video_producer_stops_the_rate_follower() {
 	)));
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let (input, output) = software_camera(4_000_000);
-	let video = broadcast.encode_video(input, output, Some(bandwidth)).unwrap();
+	let video = crate::video::MoqVideoProducer::new(
+		&crate::media::MoqMediaCatalogProducer::new(broadcast.clone()).unwrap(),
+		input,
+		output,
+		Some(bandwidth),
+	)
+	.unwrap();
 
 	tokio::time::timeout(TIMEOUT, tokio::task::spawn_blocking(move || drop(video)))
 		.await
@@ -5086,7 +5111,13 @@ async fn set_bitrate_caps_a_later_bandwidth_grant() {
 	)));
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let (input, output) = software_camera(4_000_000);
-	let video = broadcast.encode_video(input, output, Some(bandwidth)).unwrap();
+	let video = crate::video::MoqVideoProducer::new(
+		&crate::media::MoqMediaCatalogProducer::new(broadcast.clone()).unwrap(),
+		input,
+		output,
+		Some(bandwidth),
+	)
+	.unwrap();
 	let reservation = video.reservation().expect("published against an allocator");
 
 	let consumer = broadcast.consume().unwrap();

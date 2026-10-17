@@ -17,7 +17,7 @@ grant per token, the union of every accepted token as the session's scope,
 and a loud failure when a publish can never be honored. It ends with the
 credential able to travel in band, while the URL keeps working for every peer
 that predates the stream. Node-bound peer grants for direct sessions belong to
-[P2P](/quest/m1/p2p/peer-grant.md), their only consumer.
+[P2P](/quest/m2/p2p/peer-grant.md), their only consumer.
 
 ## Plan
 
@@ -134,8 +134,6 @@ because `main` assigned 0x3A to NOT_FETCHABLE first.
 - [Requests name their auth](/quest/m1/auth/request-auth-id.md) - lite-07 AUTH carries an ID and each request names the auth that admits it
 - [Request gate](/quest/m1/auth/request-gate.md) - every incoming request is
   refused up front and held to the grant through a gate its dispatcher owns
-- [Expired token error](/quest/m1/auth/expired-error.md) - an expired token
-  reports `Error::Expired`, not `Unauthorized`, in Rust, JS, and the bindings
 - [Bindings](/quest/m1/auth/bindings.md) - grants and tokens reach every
   binding through moq-ffi
 - [Token in band](/quest/m1/auth/token-in-band.md) - the credential can leave
@@ -161,7 +159,7 @@ because `main` assigned 0x3A to NOT_FETCHABLE first.
   session with PROTOCOL_VIOLATION in Rust and JS
 - [JS fetch grant watch](https://github.com/moq-dev/moq/pull/5260) - a JS `fetchGroup` ends `Unauthorized` when its path leaves the grant
 
-- [Peer grants](/quest/m1/p2p/peer-grant.md) - P2P's node-bound credential,
+- [Peer grants](/quest/m2/p2p/peer-grant.md) - P2P's node-bound credential,
   built on this line's relay tokens
 
 - [#5269](https://github.com/moq-dev/moq/pull/5269) - explicit Lite AUTH NOT_SUPPORTED, including grant updates

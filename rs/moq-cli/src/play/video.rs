@@ -248,6 +248,7 @@ mod tests {
 	};
 	use super::*;
 	use hang::moq_net;
+	use moq_mux::container::Container as _;
 
 	/// A codec whose reorder buffer holds `depth` pictures and bumps the
 	/// earliest one out, the way a real decoder returns display order.
@@ -496,6 +497,62 @@ mod tests {
 			.collect::<Vec<_>>();
 		assert_eq!(queued, [500], "old decoder output crossed the discontinuity");
 		assert_eq!(media.output.present(&media).unwrap().as_millis(), 500);
+	}
+
+	#[tokio::test]
+	async fn leading_pictures_are_trimmed_before_native_decode() {
+		tokio::time::pause();
+		let delay = Duration::from_secs(1);
+		let media = media(delay);
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let published = broadcast
+			.create_track("video", hang::container::track_info(hang::catalog::PRIORITY.video))
+			.unwrap();
+		let subscriber = published
+			.consume()
+			.subscribe(moq_net::track::Subscription::default().with_max_delay(delay))
+			.await
+			.unwrap();
+		let format = moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Video);
+		let write = |sequence, stamps: Vec<u64>| {
+			let mut group = published.create_group(moq_net::group::Info { sequence }).unwrap();
+			let frames: Vec<_> = stamps
+				.into_iter()
+				.enumerate()
+				.map(|(index, ms)| frame(ms, index == 0))
+				.collect();
+			format.write(&mut group, &frames).unwrap();
+			group.finish().unwrap();
+		};
+		write(10, vec![100, 80, 90, 110]);
+		write(11, vec![200, 180, 190, 210]);
+		let track = moq_mux::container::Consumer::new(
+			subscriber,
+			moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Video),
+		);
+		let decoder = Buffered::new(0);
+		let decoded = decoder.decoded.clone();
+		let task = tokio::spawn(playback(&media, delay).run(track, decoder));
+		for _ in 0..1300 {
+			tokio::task::yield_now().await;
+			media.output.present(&media);
+			tokio::time::advance(Duration::from_millis(1)).await;
+		}
+		assert_eq!(
+			decoded.lock().unwrap().len(),
+			6,
+			"continuous media reached the codec before the later delivery hole"
+		);
+		write(13, vec![400, 380, 390, 410]);
+		published.finish().unwrap();
+		for _ in 0..1300 {
+			tokio::task::yield_now().await;
+			media.output.present(&media);
+			tokio::time::advance(Duration::from_millis(1)).await;
+		}
+		task.await.unwrap().unwrap();
+		let got: Vec<_> = decoded.lock().unwrap().iter().map(|(at, _)| at.as_millis()).collect();
+		assert_eq!(got, [100, 110, 200, 180, 190, 210, 400, 410]);
 	}
 
 	#[tokio::test]

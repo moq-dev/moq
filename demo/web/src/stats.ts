@@ -23,6 +23,7 @@
  */
 
 import "./highlight";
+import { Milli, Nano, wall } from "@moq/clock";
 import { Net, Signals } from "@moq/hang";
 
 const RELAY_URL = import.meta.env.VITE_RELAY_URL ?? "http://localhost:4443";
@@ -31,7 +32,7 @@ const RELAY_URL = import.meta.env.VITE_RELAY_URL ?? "http://localhost:4443";
 const STATS_PREFIX = ".stats/node";
 
 // Rolling history window for the charts.
-const SAMPLE_MS = 1000;
+const SAMPLE = Nano.fromMilli(Milli(1000));
 const MAX_SAMPLES = 90;
 
 const $ = <T extends HTMLElement>(id: string): T => {
@@ -299,7 +300,7 @@ sampler.run((effect) => {
 	effect.interval(() => {
 		const all = nodeStats.peek();
 		const nodes = Object.keys(all).sort();
-		const t = Date.now();
+		const t = wall();
 
 		const agg: Sample = {
 			t,
@@ -341,7 +342,7 @@ sampler.run((effect) => {
 		}
 
 		clock.update((n) => n + 1);
-	}, SAMPLE_MS);
+	}, SAMPLE);
 });
 
 // Convert a cumulative-counter series into a per-second rate series.
