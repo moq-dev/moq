@@ -29,6 +29,26 @@ val Backoff.timeout: Duration?
 val WebSocketConfig.delay: Duration?
     get() = delayUs?.toLong()?.microseconds
 
+/** How long one connect may take, or null for the default. [Duration.ZERO] waits forever. */
+val ClientConfig.timeout: Duration?
+    get() = timeoutUs?.toLong()?.microseconds
+
+/** Happy Eyeballs stagger between address attempts, or null for the default. */
+val ClientConfig.race: Duration?
+    get() = raceUs?.toLong()?.microseconds
+
+/** How long IPv4 waits for the full DNS answer, or null for the default. */
+val ClientConfig.resolutionDelay: Duration?
+    get() = resolutionDelayUs?.toLong()?.microseconds
+
+/** How long an idle connection survives, or null for the default. */
+val QuicConfig.idleTimeout: Duration?
+    get() = idleTimeoutUs?.toLong()?.microseconds
+
+/** Keep-alive ping interval, or null for the default. [Duration.ZERO] disables it. */
+val QuicConfig.keepAlive: Duration?
+    get() = keepAliveUs?.toLong()?.microseconds
+
 /** Upper bound on buffering before a stalled group is skipped. */
 val Subscription.maxDelay: Duration
     get() = maxDelayUs.toLong().microseconds

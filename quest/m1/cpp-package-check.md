@@ -16,6 +16,3 @@ The first publication and released-download proof stay in release execution.
 
 Public API: none beyond the binding changes owned by their quests. Wire: none.
 
-## Required
-
-- [Client settings parity](/quest/m1/obs-client-config.md) - preserve existing OBS settings

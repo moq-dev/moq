@@ -31,6 +31,5 @@ release. The nightly dry-run preparation can proceed independently.
 
 - [Breaking release cut](/quest/m2/release/cut.md) - prepared code reaches release before artifact publication and installed proof
 
-- [Client settings parity](/quest/m1/obs-client-config.md) - the OBS Advanced settings the migration dropped come back
 
 - [Nightly package proof](/quest/m1/cpp-package-check.md) - the release path is exercised before the tag

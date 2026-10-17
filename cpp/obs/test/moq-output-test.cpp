@@ -59,6 +59,8 @@ uint32_t g_encoder_caps = OBS_ENCODER_CAP_DYN_BITRATE;
 std::mutex g_updates_mutex;
 std::vector<std::pair<obs_encoder_t *, long long>> g_updates;
 std::atomic<bool> g_settings_ok{true};
+// A reason Configure reports itself, for a setting the config cannot express.
+std::string g_settings_error;
 // Lets a test run something inside obs_output_signal_stop, standing in for a
 // frontend that stops the output straight from the signal handler.
 std::function<void()> g_on_signal;
@@ -240,12 +242,13 @@ void obs_encoder_release(obs_encoder_t *) {}
 // back within a test's patience. An unparseable bind address is what moq-ffi refuses
 // when it builds the client.
 namespace MoQSettings {
-void Configure(obs_data_t *, moq::ClientConfig &config)
+std::string Configure(obs_data_t *, moq::ClientConfig &config)
 {
 	if (!g_settings_ok)
 		config.bind = "not an address";
 	config.backoff.initial_us = 10'000;
 	config.backoff.max_us = 50'000;
+	return g_settings_error;
 }
 } // namespace MoQSettings
 
@@ -292,6 +295,7 @@ void reset(std::string url)
 	g_on_signal = nullptr;
 	g_begin_capture = 0;
 	g_settings_ok = true;
+	g_settings_error.clear();
 	g_rate_control = "CBR";
 	g_encoder_caps = OBS_ENCODER_CAP_DYN_BITRATE;
 	{
@@ -674,6 +678,16 @@ int main()
 		CHECK(signalCount() == 1);
 		CHECK(signalAt(0).code == OBS_OUTPUT_CONNECT_FAILED);
 		CHECK(signalAt(0).last_error.find("bind") != std::string::npos);
+	}
+	{
+		reset(BAD_URL);
+		g_settings_error = "unknown congestion control: fast";
+		MoQOutput o(nullptr, OUTPUT);
+		CHECK(!o.Start());
+		CHECK(g_begin_capture == 0);
+		CHECK(signalCount() == 1);
+		CHECK(signalAt(0).code == OBS_OUTPUT_CONNECT_FAILED);
+		CHECK(signalAt(0).last_error.find("congestion") != std::string::npos);
 	}
 	printf("invalid advanced settings: ok\n");
 

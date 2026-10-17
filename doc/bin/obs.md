@@ -77,9 +77,11 @@ Xcode or Visual Studio 2022, plus Rust and
 ## Advanced settings
 
 Off by default; the defaults suit a normal relay. They cover what you would
-otherwise pass to `moq` on the command line: the local bind address,
-trusting a self-signed relay or private CA, reconnect pacing, the QUIC
-stream limit, and the WebSocket fallback race. A rejected value stops the
+otherwise pass to `moq` on the command line: pinning a protocol version, the
+local bind address and connect timing, trusting a self-signed relay or private
+CA, reconnect pacing, QUIC tuning (congestion control, idle timeout,
+keep-alive, segmentation offload, MTU discovery, and qlog traces when the build
+supports them), and the WebSocket fallback race. A rejected value stops the
 stream with the reason in the log rather than silently using a default.
 
 The plugin is C++ over the [generated C++ bindings](/lib/cpp/) and ships with
