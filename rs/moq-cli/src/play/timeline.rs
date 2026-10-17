@@ -43,6 +43,10 @@ pub(super) struct Presentation {
 	declared: [Transition; 2],
 	next: Transition,
 	reference: Option<Timestamp>,
+	/// Wakes every pending resume when a boundary, a transition or the anchor
+	/// changes. Kept apart from the window's and the decoders' wakeups, so a
+	/// resume can never take a wakeup meant for them.
+	timeline: std::sync::Arc<tokio::sync::Notify>,
 }
 
 /// One encoder restart, shared by the roles whose ends declared it.
@@ -84,6 +88,7 @@ impl Presentation {
 			declared: Default::default(),
 			next: Transition(1),
 			reference: None,
+			timeline: Default::default(),
 		}
 	}
 
@@ -132,13 +137,18 @@ impl Presentation {
 
 		self.reference = Some(timestamp);
 		let before = self.pacer.due(timestamp);
-		before != Some(self.pacer.pace(timestamp, now))
+		let moved = before != Some(self.pacer.pace(timestamp, now));
+		if moved {
+			self.timeline.notify_waiters();
+		}
+		moved
 	}
 
 	/// Start a new video timeline without taking ownership from a speaker.
 	pub(super) fn video_restarted(&mut self) {
 		if !self.speaker {
 			self.pacer = moq_mux::Pacer::default().with_delay(self.delay);
+			self.timeline.notify_waiters();
 		}
 	}
 
@@ -175,7 +185,11 @@ impl Presentation {
 		};
 		self.speaker = true;
 
-		before != Some(after)
+		let moved = before != Some(after);
+		if moved {
+			self.timeline.notify_waiters();
+		}
+		moved
 	}
 
 	/// The speaker restarted on a new timeline, so the media either side of the
@@ -208,7 +222,7 @@ impl Presentation {
 /// Maps each encoder segment onto the shared playback clock.
 pub(super) struct Role {
 	presentation: std::sync::Arc<std::sync::Mutex<Presentation>>,
-	changed: std::sync::Arc<tokio::sync::Notify>,
+	timeline: std::sync::Arc<tokio::sync::Notify>,
 	role: Kind,
 	mapping: std::sync::Mutex<Mapping>,
 }
@@ -241,14 +255,11 @@ impl Mapping {
 }
 
 impl Role {
-	pub(super) fn new(
-		presentation: std::sync::Arc<std::sync::Mutex<Presentation>>,
-		changed: std::sync::Arc<tokio::sync::Notify>,
-		role: Kind,
-	) -> Self {
+	pub(super) fn new(presentation: std::sync::Arc<std::sync::Mutex<Presentation>>, role: Kind) -> Self {
+		let timeline = presentation.lock().unwrap().timeline.clone();
 		Self {
 			presentation,
-			changed,
+			timeline,
 			role,
 			mapping: Default::default(),
 		}
@@ -312,7 +323,7 @@ impl Role {
 		});
 		presentation.declared[own] = id;
 		drop(presentation);
-		self.changed.notify_waiters();
+		self.timeline.notify_waiters();
 		id
 	}
 
@@ -323,7 +334,7 @@ impl Role {
 			starts: mapping.starts,
 			end: timestamp(mapping.map(source)?),
 		});
-		self.changed.notify_waiters();
+		self.timeline.notify_waiters();
 		Ok(())
 	}
 
@@ -338,13 +349,13 @@ impl Role {
 			});
 		}
 		drop(presentation);
-		self.changed.notify_waiters();
+		self.timeline.notify_waiters();
 	}
 
 	/// Media was lost: nothing waits for the discarded tail.
 	pub(super) fn gap(&self) {
 		self.presentation.lock().unwrap().ends[self.role as usize] = None;
-		self.changed.notify_waiters();
+		self.timeline.notify_waiters();
 	}
 
 	/// This role will never resume `transition`, so a peer must not pair with its plan.
@@ -357,7 +368,7 @@ impl Role {
 		}
 		presentation.prune(tokio::time::Instant::now().into_std());
 		drop(presentation);
-		self.changed.notify_waiters();
+		self.timeline.notify_waiters();
 	}
 
 	pub(super) fn apply(&self, transition: Transition, mapping: Mapping) {
@@ -368,7 +379,7 @@ impl Role {
 		}
 		presentation.prune(tokio::time::Instant::now().into_std());
 		drop(presentation);
-		self.changed.notify_waiters();
+		self.timeline.notify_waiters();
 	}
 
 	/// Drain declared old media, then map `transition`'s replacement onto the
@@ -382,7 +393,7 @@ impl Role {
 		loop {
 			// Armed before reading the boundaries, so a change made between the read
 			// and the wait still wakes it.
-			let changed = self.changed.notified();
+			let changed = self.timeline.notified();
 			let mut changed = std::pin::pin!(changed);
 			changed.as_mut().enable();
 			let now = tokio::time::Instant::now().into_std();
@@ -460,7 +471,7 @@ impl Drop for Role {
 			presentation.declared[own] = Transition::default();
 			presentation.prune(tokio::time::Instant::now().into_std());
 		}
-		self.changed.notify_waiters();
+		self.timeline.notify_waiters();
 	}
 }
 
@@ -584,8 +595,8 @@ mod tests {
 		tokio::time::pause();
 		let start = tokio::time::Instant::now();
 		let presentation = std::sync::Arc::new(std::sync::Mutex::new(Presentation::new(DELAY)));
-		let audio = Role::new(presentation.clone(), Default::default(), Kind::Audio);
-		let video = Role::new(presentation.clone(), Default::default(), Kind::Video);
+		let audio = Role::new(presentation.clone(), Kind::Audio);
+		let video = Role::new(presentation.clone(), Kind::Video);
 		presentation.lock().unwrap().video(ms(10_000), start.into_std());
 		let transition = audio.declare();
 		audio.end(ms(10_020)).unwrap();
@@ -606,8 +617,8 @@ mod tests {
 			.lock()
 			.unwrap()
 			.audio(Duration::from_secs(10), DELAY, now.into_std());
-		let audio = Role::new(presentation.clone(), Default::default(), Kind::Audio);
-		let video = Role::new(presentation.clone(), Default::default(), Kind::Video);
+		let audio = Role::new(presentation.clone(), Kind::Audio);
+		let video = Role::new(presentation.clone(), Kind::Video);
 		let transition = audio.declare();
 		assert_eq!(video.declare(), transition, "one restart");
 		audio.end(ms(10_020)).unwrap();
@@ -634,8 +645,8 @@ mod tests {
 			.lock()
 			.unwrap()
 			.audio(Duration::from_secs(10), DELAY, now.into_std());
-		let audio = Role::new(presentation.clone(), Default::default(), Kind::Audio);
-		let video = Role::new(presentation.clone(), Default::default(), Kind::Video);
+		let audio = Role::new(presentation.clone(), Kind::Audio);
+		let video = Role::new(presentation.clone(), Kind::Video);
 		let transition = audio.declare();
 		video.declare();
 		audio.end(ms(10_020)).unwrap();
@@ -665,8 +676,8 @@ mod tests {
 			.lock()
 			.unwrap()
 			.audio(Duration::from_secs(10), DELAY, now.into_std());
-		let audio = Role::new(presentation.clone(), Default::default(), Kind::Audio);
-		let video = Role::new(presentation.clone(), Default::default(), Kind::Video);
+		let audio = Role::new(presentation.clone(), Kind::Audio);
+		let video = Role::new(presentation.clone(), Kind::Video);
 		let transition = audio.declare();
 		video.declare();
 		audio.end(ms(10_020)).unwrap();
@@ -697,8 +708,8 @@ mod tests {
 			.lock()
 			.unwrap()
 			.audio(Duration::from_secs(10), DELAY, now.into_std());
-		let audio = Role::new(presentation.clone(), Default::default(), Kind::Audio);
-		let video = Role::new(presentation.clone(), Default::default(), Kind::Video);
+		let audio = Role::new(presentation.clone(), Kind::Audio);
+		let video = Role::new(presentation.clone(), Kind::Video);
 		let transition = audio.declare();
 		video.declare();
 		audio.end(ms(10_020)).unwrap();
@@ -729,8 +740,8 @@ mod tests {
 			.lock()
 			.unwrap()
 			.audio(Duration::from_secs(10), DELAY, now.into_std());
-		let audio = Role::new(presentation.clone(), Default::default(), Kind::Audio);
-		let video = Role::new(presentation.clone(), Default::default(), Kind::Video);
+		let audio = Role::new(presentation.clone(), Kind::Audio);
+		let video = Role::new(presentation.clone(), Kind::Video);
 		let transition = audio.declare();
 		video.declare();
 		audio.end(ms(10_020)).unwrap();
@@ -756,8 +767,8 @@ mod tests {
 			.lock()
 			.unwrap()
 			.audio(Duration::from_secs(10), DELAY, now.into_std());
-		let audio = Role::new(presentation.clone(), Default::default(), Kind::Audio);
-		let video = Role::new(presentation.clone(), Default::default(), Kind::Video);
+		let audio = Role::new(presentation.clone(), Kind::Audio);
+		let video = Role::new(presentation.clone(), Kind::Video);
 		let transition = audio.declare();
 		video.declare();
 		audio.end(ms(10_020)).unwrap();
@@ -785,8 +796,8 @@ mod tests {
 			.lock()
 			.unwrap()
 			.audio(Duration::from_secs(10), DELAY, now.into_std());
-		let audio = Role::new(presentation.clone(), Default::default(), Kind::Audio);
-		let video = Role::new(presentation.clone(), Default::default(), Kind::Video);
+		let audio = Role::new(presentation.clone(), Kind::Audio);
+		let video = Role::new(presentation.clone(), Kind::Video);
 		audio.declare();
 		audio.end(ms(10_200)).unwrap();
 		// Cancelled with its sink, so nothing plays the tail.
@@ -811,8 +822,8 @@ mod tests {
 			.lock()
 			.unwrap()
 			.audio(Duration::from_secs(10), DELAY, now.into_std());
-		let audio = Role::new(presentation.clone(), Default::default(), Kind::Audio);
-		let video = Role::new(presentation.clone(), Default::default(), Kind::Video);
+		let audio = Role::new(presentation.clone(), Kind::Audio);
+		let video = Role::new(presentation.clone(), Kind::Video);
 		audio.declare();
 		audio.end(ms(10_200)).unwrap();
 		// The track closed, but its returned sink still plays the tail up to the end.
@@ -837,8 +848,8 @@ mod tests {
 			.lock()
 			.unwrap()
 			.audio(Duration::from_secs(10), DELAY, now.into_std());
-		let audio = Role::new(presentation.clone(), Default::default(), Kind::Audio);
-		let video = Role::new(presentation.clone(), Default::default(), Kind::Video);
+		let audio = Role::new(presentation.clone(), Kind::Audio);
+		let video = Role::new(presentation.clone(), Kind::Video);
 		audio.declare();
 		audio.end(ms(10_200)).unwrap();
 		audio.retire(Some((now + Duration::from_millis(300)).into_std()));
@@ -863,13 +874,13 @@ mod tests {
 			.lock()
 			.unwrap()
 			.audio(Duration::from_secs(10), DELAY, now.into_std());
-		let audio = Role::new(presentation.clone(), Default::default(), Kind::Audio);
-		let video = Role::new(presentation.clone(), Default::default(), Kind::Video);
+		let audio = Role::new(presentation.clone(), Kind::Audio);
+		let video = Role::new(presentation.clone(), Kind::Video);
 		audio.declare();
 		audio.end(ms(10_200)).unwrap();
 		audio.retire(Some((now + Duration::from_millis(300)).into_std()));
 		// The next rendition fails while the retired sink still plays.
-		let successor = Role::new(presentation.clone(), Default::default(), Kind::Audio);
+		let successor = Role::new(presentation.clone(), Kind::Audio);
 		successor.declare();
 		drop(successor);
 		let transition = video.declare();
@@ -887,8 +898,8 @@ mod tests {
 			.lock()
 			.unwrap()
 			.audio(Duration::from_secs(10), DELAY, now.into_std());
-		let audio = Role::new(presentation.clone(), Default::default(), Kind::Audio);
-		let video = Role::new(presentation.clone(), Default::default(), Kind::Video);
+		let audio = Role::new(presentation.clone(), Kind::Audio);
+		let video = Role::new(presentation.clone(), Kind::Video);
 		let transition = audio.declare();
 		video.declare();
 		audio.end(ms(10_020)).unwrap();

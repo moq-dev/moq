@@ -102,11 +102,7 @@ impl<O: Output> Video<O> {
 		let buffers = Mutex::new(VecDeque::from([Segment::default()]));
 		// Signalled when a segment held behind a resume becomes the front.
 		let advanced = tokio::sync::Notify::new();
-		let role = Role::new(
-			self.presentation.clone(),
-			self.changed.clone(),
-			super::playback::Kind::Video,
-		);
+		let role = Role::new(self.presentation.clone(), super::playback::Kind::Video);
 		let receive = async {
 			// The group of a declared end whose restart waits for a later group, so the
 			// media buffered before the end still plays out, and the transition that
@@ -816,11 +812,7 @@ mod tests {
 			Instant::now().into_std() < last,
 			"the track closed after its tail was due"
 		);
-		let audio = Role::new(
-			media.presentation.clone(),
-			media.drained.clone(),
-			super::super::playback::Kind::Audio,
-		);
+		let audio = Role::new(media.presentation.clone(), super::super::playback::Kind::Audio);
 		let transition = audio.declare();
 		audio.resume(transition, moq_net::Timestamp::ZERO, None).await.unwrap();
 		assert!(Instant::now().into_std() >= last, "audio resumed over the video tail");
@@ -844,11 +836,7 @@ mod tests {
 		let mut producer = moq_mux::container::Producer::new(source, format());
 		let track = moq_mux::container::Consumer::new(subscriber, format());
 		let task = tokio::spawn(playback(&media, delay).run(track, Buffered::new(0)));
-		let audio = Role::new(
-			media.presentation.clone(),
-			media.drained.clone(),
-			super::super::playback::Kind::Audio,
-		);
+		let audio = Role::new(media.presentation.clone(), super::super::playback::Kind::Audio);
 		// Two-picture segments, one per restart, published live for two seconds
 		// while audio's end holds the first replacement back.
 		const SEGMENTS: u64 = 50;
@@ -911,11 +899,7 @@ mod tests {
 		let track = moq_mux::container::Consumer::new(subscriber, format());
 		let task = tokio::spawn(playback(&media, delay).run(track, Buffered::new(0)));
 		// Audio's end two seconds out holds every replacement back.
-		let audio = Role::new(
-			media.presentation.clone(),
-			media.drained.clone(),
-			super::super::playback::Kind::Audio,
-		);
+		let audio = Role::new(media.presentation.clone(), super::super::playback::Kind::Audio);
 		audio.declare();
 		audio.end(moq_net::Timestamp::from_millis(2_000).unwrap()).unwrap();
 		producer.write(frame(0, true)).unwrap();
@@ -937,6 +921,75 @@ mod tests {
 		producer.finish().unwrap();
 		drop(audio);
 		for _ in 0..1_000 {
+			tokio::task::yield_now().await;
+			media.output.present(&media);
+			tokio::time::advance(Duration::from_millis(1)).await;
+		}
+		task.await.unwrap().unwrap();
+	}
+
+	#[tokio::test]
+	async fn a_waiting_resume_leaves_the_decoders_wakeup_alone() {
+		tokio::time::pause();
+		let delay = Duration::from_millis(200);
+		let media = media(delay);
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let source = broadcast
+			.create_track("video", hang::container::track_info(hang::catalog::PRIORITY.video))
+			.unwrap();
+		let subscriber = source
+			.consume()
+			.subscribe(moq_net::track::Subscription::default().with_max_delay(delay))
+			.await
+			.unwrap();
+		let format = || moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Video);
+		let mut producer = moq_mux::container::Producer::new(source, format());
+		let track = moq_mux::container::Consumer::new(subscriber, format());
+		let decoder = Buffered::new(0);
+		let decoded = decoder.decoded.clone();
+		let task = tokio::spawn(playback(&media, delay).run(track, decoder));
+		for ms in [0, 20, 40] {
+			producer.write(frame(ms, ms == 0)).unwrap();
+		}
+		// Present until `count` pictures are decoded, or give up after 20 s.
+		let step = async |count: usize| {
+			for _ in 0..20_000 {
+				if decoded.lock().unwrap().len() >= count {
+					break;
+				}
+				tokio::task::yield_now().await;
+				media.output.present(&media);
+				tokio::time::advance(Duration::from_millis(1)).await;
+			}
+		};
+		step(3).await;
+		// Audio waits on an end ten seconds out while the decoder idles.
+		let audio = Role::new(media.presentation.clone(), super::super::playback::Kind::Audio);
+		let transition = audio.declare();
+		audio.end(moq_net::Timestamp::from_secs(10).unwrap()).unwrap();
+		let resume = tokio::spawn(async move {
+			audio
+				.resume(transition, moq_net::Timestamp::ZERO, None)
+				.await
+				.map(|_| ())
+		});
+		for _ in 0..200 {
+			tokio::task::yield_now().await;
+			media.output.present(&media);
+			tokio::time::advance(Duration::from_millis(1)).await;
+		}
+		// The publisher sends one more picture after the pause.
+		producer.write(frame(60, false)).unwrap();
+		let sent = Instant::now();
+		step(4).await;
+		assert!(
+			sent.elapsed() < Duration::from_millis(50),
+			"the decoder missed the new picture for {:?}",
+			sent.elapsed()
+		);
+		producer.finish().unwrap();
+		resume.abort();
+		for _ in 0..500 {
 			tokio::task::yield_now().await;
 			media.output.present(&media);
 			tokio::time::advance(Duration::from_millis(1)).await;

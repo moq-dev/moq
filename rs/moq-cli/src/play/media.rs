@@ -432,7 +432,7 @@ async fn play_audio<O: Output>(
 	// until the old sink drains. The window
 	// schedules video against where the speaker actually is, which keeps the two
 	// together whatever the target does.
-	let role = Role::new(presentation.clone(), changed.clone(), Kind::Audio);
+	let role = Role::new(presentation.clone(), Kind::Audio);
 	let received = Mutex::new(VecDeque::new());
 	let arrived = tokio::sync::Notify::new();
 	let popped = tokio::sync::Notify::new();
@@ -1138,7 +1138,7 @@ mod tests {
 			tokio::time::sleep(PACKET_DURATION).await;
 		}
 		// Video declares an end two seconds out, holding the audio replacement back.
-		let video = Role::new(presentation.clone(), changed.clone(), Kind::Video);
+		let video = Role::new(presentation.clone(), Kind::Video);
 		video.declare();
 		video.end(moq_net::Timestamp::from_millis(2_000).unwrap()).unwrap();
 		producer.discontinuity().unwrap();
