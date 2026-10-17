@@ -131,6 +131,11 @@ impl Metrics {
 
 	/// End the measurement: close any gap still open and write one last sample.
 	pub(super) async fn finish(mut self) -> anyhow::Result<()> {
+		// A speaker reopened since the last sample is the one playing now: adopt it
+		// first, so it is the one told to finish.
+		if !self.observers.is_empty() {
+			self.sample()?;
+		}
 		if let Some((observer, _)) = &self.current {
 			observer.finish();
 			// The audio thread closes the gap on its next buffer. One that never

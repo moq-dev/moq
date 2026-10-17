@@ -278,9 +278,9 @@ impl Ledger {
 	/// whether any sink was readable at all.
 	pub(super) fn add(&mut self, mix: &[f32], channels: usize, supplied: usize, playing: bool) {
 		let frames = mix.len() / channels;
-		if self.finished() {
+		if let Some(observer) = self.finished() {
 			// The measurement is over: report what was open, count nothing after it.
-			self.acknowledge();
+			self.acknowledge(observer);
 			(self.filled, self.missing, self.first, self.power) = (0, 0, None, 0.0);
 			self.frames += frames as u64;
 			self.shared.clock.store(self.nanos(self.frames), Ordering::Relaxed);
@@ -299,6 +299,11 @@ impl Ledger {
 		while done < frames {
 			let take = (QUANTUM - self.filled).min(frames - done);
 			let full = supplied.saturating_sub(done).min(take);
+			// The first audio landing mid-quantum is the first fill, not a gap:
+			// forget the missing frames ahead of it when nothing else preceded them.
+			if !self.started && full > 0 && self.missing == self.filled {
+				(self.missing, self.first) = (0, None);
+			}
 			if full < take {
 				self.first.get_or_insert(self.frames + (done + full) as u64);
 				self.missing += take - full;
@@ -374,18 +379,19 @@ impl Ledger {
 		self.send(Event::Gap(gap));
 	}
 
-	/// Close a gap still open and tell the observer its measurement is final.
-	/// The gap is queued before the acknowledgement, so a read after it sees it.
-	fn acknowledge(&mut self) {
+	/// Close a gap still open and tell `observer`, the generation that asked,
+	/// its measurement is final. The gap is queued before the acknowledgement,
+	/// so a read after it sees it, and a replacement observer is never the one
+	/// acknowledged.
+	fn acknowledge(&mut self, observer: u64) {
 		self.close();
-		let observer = self.shared.observer.load(Ordering::Acquire);
 		self.shared.acknowledged.store(observer, Ordering::Release);
 	}
 
-	/// Whether the reading observer has ended its measurement.
-	fn finished(&self) -> bool {
+	/// The reading observer's generation, if it has ended its measurement.
+	fn finished(&self) -> Option<u64> {
 		let observer = self.shared.observer.load(Ordering::Acquire);
-		observer != 0 && self.shared.finished.load(Ordering::Acquire) == observer
+		(observer != 0 && self.shared.finished.load(Ordering::Acquire) == observer).then_some(observer)
 	}
 
 	fn nanos(&self, frames: u64) -> u64 {
@@ -411,8 +417,8 @@ impl Drop for Ledger {
 	/// A stream going away mid-gap still reports it, and nothing plays until the
 	/// next stream does. Runs on the driver thread, which drops the stream.
 	fn drop(&mut self) {
-		if self.finished() {
-			self.acknowledge();
+		if let Some(observer) = self.finished() {
+			self.acknowledge(observer);
 			return;
 		}
 		self.close();
@@ -482,6 +488,17 @@ mod tests {
 		);
 		assert_eq!(observation.quanta, 5);
 		assert_eq!(observation.quiet, 1, "only the empty quantum is quiet");
+	}
+
+	#[test]
+	fn the_first_fill_landing_mid_quantum_is_not_a_gap() {
+		let (mut ledger, mut observer) = observed();
+		// Nothing readable for 200 frames, then audio from frame 200 on, mid-quantum.
+		ledger.add(&buffer(200, 0), 2, 0, false);
+		add(&mut ledger, 312, 312);
+		let observation = observer.read().unwrap();
+		assert!(observation.gaps.is_empty(), "{observation:?}");
+		assert_eq!(observation.quanta, 3, "the quantum it landed in counts from there");
 	}
 
 	#[test]

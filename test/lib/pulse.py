@@ -82,7 +82,10 @@ def run():
             return subprocess.run(command, env=env).returncode
         finally:
             pulse.terminate()
-            pulse.wait(timeout=5)
+            try:
+                pulse.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                pass  # the outer finally kills it; the command's status stands
             forward.join(timeout=5)
     finally:
         if pulse.poll() is None:
