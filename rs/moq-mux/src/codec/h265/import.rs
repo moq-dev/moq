@@ -90,6 +90,8 @@ impl Import {
 		// Only switch to hvc1 mode once the hvcC actually parses, so a parse failure leaves the
 		// importer in hev1 mode where inline-SPS keyframes still self-initialize.
 		let config = super::config_from_hvcc(hvcc_bytes)?;
+		// A new record starts a new coded sequence, whose HDR metadata the samples will carry.
+		self.catalog.hdr(&mut self.track, Default::default(), true)?;
 		self.length_size = Some(super::Hvcc::parse(hvcc_bytes)?.length_size);
 		self.apply_config(config)?;
 		Ok(())

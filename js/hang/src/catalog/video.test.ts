@@ -185,6 +185,7 @@ test("color parses the H.273 code points and HDR10 metadata a Rust publisher wri
 	};
 	const config = VideoConfigSchema.parse({ codec: "hvc1.2.4.L93.B0", container: { kind: "legacy" }, color });
 	expect(config.color).toEqual(color as typeof config.color);
+	expect(Catalog.ColorSchema.parse(color)).toEqual(config.color as Catalog.Color);
 	expect(VideoConfigSchema.parse({ codec: "vp8", container: { kind: "legacy" } }).color).toBeUndefined();
 });
 

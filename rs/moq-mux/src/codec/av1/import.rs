@@ -108,8 +108,10 @@ impl Import {
 			matrix_coefficients: 1,
 			full_range: false,
 		});
-		// configOBUs follow the four header bytes; samples need not repeat what they carry.
+		// configOBUs follow the four header bytes; samples need not repeat what they carry. A new
+		// record starts a new coded sequence, so earlier in-band HDR metadata no longer applies.
 		config.color = color(&data[4..]);
+		self.catalog.hdr(&mut self.track, Default::default(), true)?;
 		self.apply_config(config)?;
 		Ok(())
 	}

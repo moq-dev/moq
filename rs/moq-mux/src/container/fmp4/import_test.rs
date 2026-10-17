@@ -2367,14 +2367,24 @@ fn vp9_vpcc_carries_the_resolved_color() {
 	});
 	config.coded_width = Some(64);
 	config.coded_height = Some(64);
-	config.color = Some(color(9, 16, 9, false));
-	let trak = super::synthesize_video_trak(1, 90_000, &config, None).unwrap();
-	let trex = mp4_atom::Trex {
-		track_id: 1,
-		default_sample_description_index: 1,
-		..Default::default()
+	let reimport = |resolved: hang::catalog::Color| {
+		let mut config = config.clone();
+		config.color = Some(resolved);
+		let trak = super::synthesize_video_trak(1, 90_000, &config, None).unwrap();
+		let trex = mp4_atom::Trex {
+			track_id: 1,
+			default_sample_description_index: 1,
+			..Default::default()
+		};
+		let catalog = run_fmp4(&super::encode_init(None, vec![trak], vec![trex]).unwrap());
+		catalog.video.renditions.values().next().unwrap().color.clone()
 	};
-	let catalog = run_fmp4(&super::encode_init(None, vec![trak], vec![trex]).unwrap());
-	let video = catalog.video.renditions.values().next().unwrap();
-	assert_eq!(video.color, Some(color(9, 16, 9, false)));
+
+	assert_eq!(reimport(color(9, 16, 9, false)), Some(color(9, 16, 9, false)));
+
+	// A partial colour leaves the rest unspecified, never the placeholder's BT.709.
+	let mut primaries = hang::catalog::Color::default();
+	primaries.primaries = Some(9);
+	let back = reimport(primaries).unwrap();
+	assert_eq!((back.primaries, back.transfer, back.matrix), (Some(9), None, None));
 }

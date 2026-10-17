@@ -785,16 +785,17 @@ fn color_colr(color: Option<&hang::catalog::Color>) -> Option<mp4_atom::Colr> {
 	})
 }
 
-/// Overlay the catalog colour on a `vpcC`, so it never contradicts the `colr` box written beside
-/// it; a VP9 codec string may still carry a container's placeholder BT.709.
+/// Write the catalog colour into a `vpcC`, so it never contradicts the `colr` box written beside
+/// it. A VP9 codec string may carry a container's placeholder BT.709, so once the catalog knows any
+/// colour, the fields it leaves out are written unspecified (2) rather than kept.
 fn vpcc_color(mut vpcc: mp4_atom::VpcC, color: Option<&hang::catalog::Color>) -> mp4_atom::VpcC {
 	let Some(color) = color else {
 		return vpcc;
 	};
-	vpcc.color_primaries = color.primaries.unwrap_or(vpcc.color_primaries);
-	vpcc.transfer_characteristics = color.transfer.unwrap_or(vpcc.transfer_characteristics);
-	vpcc.matrix_coefficients = color.matrix.unwrap_or(vpcc.matrix_coefficients);
-	vpcc.video_full_range_flag = color.full_range.unwrap_or(vpcc.video_full_range_flag);
+	vpcc.color_primaries = color.primaries.unwrap_or(2);
+	vpcc.transfer_characteristics = color.transfer.unwrap_or(2);
+	vpcc.matrix_coefficients = color.matrix.unwrap_or(2);
+	vpcc.video_full_range_flag = color.full_range.unwrap_or(false);
 	vpcc
 }
 

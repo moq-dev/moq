@@ -86,6 +86,8 @@ impl Import {
 		// Only switch to avc1 mode once the avcC actually parses, so a parse failure leaves the
 		// importer in avc3 mode where inline-SPS keyframes still self-initialize.
 		let config = config_from_avcc(avcc_bytes)?;
+		// A new record starts a new coded sequence, whose HDR metadata the samples will carry.
+		self.catalog.hdr(&mut self.track, Default::default(), true)?;
 		self.length_size = Some(super::Avcc::parse(avcc_bytes)?.length_size);
 		self.apply_config(config)?;
 		Ok(())
@@ -377,6 +379,36 @@ mod tests {
 		let color = keyframe(80, &[SPS_BT709, PPS, idr]);
 		assert_eq!(color.primaries, Some(1));
 		assert_eq!((color.mastering, color.content_light), (None, None));
+	}
+
+	/// A new out-of-band avcC starts a new coded sequence, so in-band HDR metadata from the last one
+	/// is dropped.
+	#[tokio::test(start_paused = true)]
+	async fn a_new_avcc_drops_stale_hdr_metadata() {
+		use crate::codec::h264::fixtures::{PPS, SEI_CONTENT_LIGHT, SEI_MASTERING, SPS_BT709, SPS_HDR10};
+
+		let avcc = |sps: &'static [u8]| {
+			crate::codec::h264::build_avcc(&[Bytes::from_static(sps)], &[Bytes::from_static(PPS)]).unwrap()
+		};
+		let (track, catalog) = setup("video");
+		let mut import = Import::new(track, catalog.reserve(), Default::default()).unwrap();
+		import.initialize(&avcc(SPS_HDR10)).unwrap();
+
+		let mut au = Vec::new();
+		for nal in [SEI_MASTERING, SEI_CONTENT_LIGHT, &[0x65, 0x88, 0x84, 0x21][..]] {
+			au.extend_from_slice(&(nal.len() as u32).to_be_bytes());
+			au.extend_from_slice(nal);
+		}
+		let pts = moq_net::Timestamp::from_micros(0).unwrap();
+		import
+			.decode([crate::codec::h264::avc1_frame(au, 4, pts).unwrap()])
+			.unwrap();
+		let color = || catalog.snapshot().video.renditions["video"].color.clone().unwrap();
+		assert!(color().mastering.is_some());
+
+		import.initialize(&avcc(SPS_BT709)).unwrap();
+		assert_eq!(color().primaries, Some(1));
+		assert_eq!((color().mastering, color().content_light), (None, None));
 	}
 
 	/// The stream outranks the caller's hint, which only fills what the stream leaves unsaid.
