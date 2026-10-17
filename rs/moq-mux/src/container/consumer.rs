@@ -363,8 +363,7 @@ impl<F: Container> Consumer<F> {
 					Poll::Ready(Ok(None)) => {
 						// A data track's marker carries no timestamp, so it ends where this reader
 						// got to. Before the first item there is nothing to end.
-						if self.format.kind() == super::Kind::Data
-							&& group.marker() && group.max_end.is_none()
+						if group.bare
 							&& !std::mem::replace(&mut group.ended, true)
 							&& let Some(edge) = self.edge
 						{
@@ -614,8 +613,14 @@ struct GroupBuffer {
 	// Whether a decodable (non-marker) frame was buffered.
 	media: bool,
 
+	// Whether this is a data track's marker group: one object with no bytes.
+	bare: bool,
+
 	// Whether a marker with no timestamp of its own was read as an end.
 	ended: bool,
+
+	// A data track's marker shared its group, which every later read reports.
+	malformed: bool,
 
 	// Read frames that haven't been consumed yet.
 	buffered: VecDeque<Frame>,
@@ -641,7 +646,9 @@ impl GroupBuffer {
 			index: 0,
 			empty: true,
 			media: false,
+			bare: false,
 			ended: false,
+			malformed: false,
 			buffered: VecDeque::new(),
 			markers: VecDeque::new(),
 			delivered: 0,
@@ -672,10 +679,22 @@ impl GroupBuffer {
 	//
 	// Returns false if the group is finished.
 	fn buffer_once<F: Container>(&mut self, waiter: &kio::Waiter, format: &F) -> Poll<Result<bool, F::Error>> {
+		let malformed = || moq_net::Error::Decode(moq_net::DecodeError::ExpectedEnd).into();
+		if self.malformed {
+			return Poll::Ready(Err(malformed()));
+		}
 		let Some(frames) = ready!(format.poll_read(&mut self.group, waiter)?) else {
 			return Poll::Ready(Ok(false));
 		};
 		self.empty = false;
+		if format.kind() == super::Kind::Data {
+			// A data track's marker is one object with no bytes, alone in its group.
+			if self.bare || (frames.is_empty() && self.media) {
+				self.malformed = true;
+				return Poll::Ready(Err(malformed()));
+			}
+			self.bare = frames.is_empty();
+		}
 
 		for mut frame in frames {
 			if let Some(bound) = format.end(&frame) {
@@ -1086,6 +1105,55 @@ mod tests {
 			match kind {
 				crate::container::Kind::Data => assert!(matches!(read, Ok(Some(frames)) if frames.is_empty())),
 				_ => assert!(read.is_err(), "{kind:?}: {read:?}"),
+			}
+		}
+	}
+
+	/// A data track's marker is alone in its group: one sharing it with another object, a
+	/// frame or a second marker, is malformed rather than a break or a frame.
+	#[tokio::test(start_paused = true)]
+	async fn a_data_marker_sharing_its_group_is_malformed() {
+		for second in [Bytes::new(), Bytes::from_static(b"a")] {
+			for marker_first in [true, false] {
+				let mut track = track_producer("data", hang::container::track_info(hang::catalog::PRIORITY.audio));
+				let subscription = moq_net::track::Subscription::default()
+					.with_max_delay(Duration::from_secs(10))
+					.with_groups(0..);
+				let mut reader = Consumer::new(
+					track.subscribe(subscription),
+					Container::Legacy(crate::container::Kind::Data),
+				);
+				write_group(&mut track, 0, &[ts(0)]);
+				let mut group = track.create_group(moq_net::group::Info { sequence: 1 }).unwrap();
+				let mut objects = [Bytes::new(), second.clone()];
+				if !marker_first {
+					objects.reverse();
+				}
+				for object in objects {
+					match object.is_empty() {
+						true => group.write_frame(ts(10_000), object).unwrap(),
+						false => hang::container::Frame {
+							timestamp: ts(10_000),
+							payload: object,
+						}
+						.write_to(&mut group)
+						.unwrap(),
+					}
+				}
+				group.finish().unwrap();
+				track.finish().unwrap();
+
+				let error = loop {
+					match reader.read().await {
+						// A frame ahead of the marker goes out before the marker is seen.
+						Ok(Some(Read::Frame { .. })) => continue,
+						other => break other,
+					}
+				};
+				assert!(
+					error.is_err(),
+					"second {second:?}, marker first {marker_first}: {error:?}"
+				);
 			}
 		}
 	}

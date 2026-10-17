@@ -374,6 +374,28 @@ test("Legacy Producer discontinuity on a data track reads as an end at the edge"
 
 // A group's reach runs to its successor's first frame, so without the marker the group before a
 // pause would stretch across the whole gap and read as live to anyone joining after the resume.
+// A data track's marker is alone in its group, so one sharing it is refused rather than read as
+// a break or dropped in silence.
+test("Consumer refuses a data marker that shares its group", async () => {
+	for (const second of [new Uint8Array(), encodeLegacyFrame(10_000 as Micro, new Uint8Array([1]))]) {
+		const track = new Track.Producer("data");
+		const consumer = new Consumer(replay(track), { format: new LegacyFormat("data"), maxDelay: 500 as Milli });
+		const error = spyOn(console, "error").mockImplementation(() => {});
+		try {
+			const group = track.appendGroup();
+			group.writeFrame({ payload: new Uint8Array(), timestamp: Time.Timestamp.fromMicros(0) });
+			group.writeFrame({ payload: second, timestamp: Time.Timestamp.fromMicros(10_000) });
+			group.close();
+			await settle();
+			expect(error).toHaveBeenCalledWith("spawn error", expect.any(Error));
+		} finally {
+			consumer.close();
+			track.close();
+			error.mockRestore();
+		}
+	}
+});
+
 test("Legacy Producer discontinuity keeps pre-pause media from reading as live", async () => {
 	const track = new Track.Producer("test");
 	const producer = new LegacyProducer(track, new LegacyFormat("video"));
