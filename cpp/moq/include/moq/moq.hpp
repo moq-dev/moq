@@ -52,6 +52,7 @@ using AnnouncedBroadcast = MoqAnnouncedBroadcast;
 using AudioCodec = MoqAudioCodec;
 using AudioConsumer = MoqAudioConsumer;
 using AudioEncoder = MoqAudioEncoder;
+using AudioPreset = MoqAudioPreset;
 using AudioProducer = MoqAudioProducer;
 using Bandwidth = MoqBandwidth;
 using BroadcastConsumer = MoqBroadcastConsumer;
