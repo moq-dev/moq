@@ -195,6 +195,10 @@ fn timing<R>(
 			_ => {}
 		}
 	}
+	// Timing on the root is not TTML, and would give the body a parent begin past its frame.
+	if element.local_name().as_ref() == "tt" && (begin.is_some() || end.is_some() || dur.is_some()) {
+		return Err("timing on the TTML root element");
+	}
 	let body = element.local_name().as_ref() == "body";
 
 	let offset = begin.as_ref().map(|(_, value)| rates.time(value)).transpose()?;
@@ -207,7 +211,10 @@ fn timing<R>(
 		(None, false) => (parent.implicit, parent.implicit),
 		(Some(_), false) => (clock.map(source), clock.map(source)),
 	};
-	let relative = mapped - parent.mapped;
+	// Only a body nested in timed content can begin before its parent.
+	let relative = mapped
+		.checked_sub(parent.mapped)
+		.ok_or("TTML body inside timed content")?;
 	match (begin, offset) {
 		(Some((raw, _)), Some(offset)) if offset != relative => edit.replace(raw, relative),
 		(None, _) if body || relative != 0 => edit.insert(element, "begin", relative),
@@ -246,8 +253,8 @@ fn timing<R>(
 
 /// The root's timing parameters, which give frame and tick expressions their length.
 struct Rates {
-	/// Frames per second as a fraction, when `ttp:frameRate` declares it.
-	frame: Option<(u128, u128)>,
+	/// The frame rate, when `ttp:frameRate` declares it.
+	frame: Option<FrameRate>,
 	/// Ticks per second, when `ttp:tickRate` declares it.
 	tick: Option<u128>,
 }
@@ -281,8 +288,14 @@ impl Rates {
 			}
 		}
 		let frame = match (frame, multiplier) {
-			(Some(rate), Some((num, den))) => Some((rate.checked_mul(num).ok_or("TTML time overflow")?, den)),
-			(Some(rate), None) => Some((rate, 1)),
+			(Some(nominal), multiplier) => {
+				let (num, den) = multiplier.unwrap_or((1, 1));
+				Some(FrameRate {
+					nominal,
+					num: nominal.checked_mul(num).ok_or("TTML time overflow")?,
+					den,
+				})
+			}
 			(None, Some(_)) => return Err("TTML frame rate multiplier without a frame rate"),
 			(None, None) => None,
 		};
@@ -325,15 +338,14 @@ impl Rates {
 					if frames.len() < 2 || frames.contains('.') {
 						return Err("unsupported TTML sub-frame time expression");
 					}
-					let (rate, den) = self.frame.ok_or("TTML frame time without ttp:frameRate")?;
+					let rate = self.frame.as_ref().ok_or("TTML frame time without ttp:frameRate")?;
 					let frames = integer(frames)?;
-					let (Some(scaled), Some(unit)) = (frames.checked_mul(den), NANOS.checked_mul(den)) else {
-						return Err("TTML time overflow");
-					};
-					if scaled >= rate {
+					// The frame field counts nominal frames, whatever the multiplier.
+					if frames >= rate.nominal {
 						return Err(INVALID);
 					}
-					decimal_ratio(frames, 0, unit, rate)?
+					let unit = NANOS.checked_mul(rate.den).ok_or("TTML time overflow")?;
+					decimal_ratio(frames, 0, unit, rate.num)?
 				}
 				_ => 0,
 			};
@@ -349,14 +361,21 @@ impl Rates {
 			"s" => (NANOS, 1),
 			"ms" => (NANOS / 1000, 1),
 			"f" => {
-				let (rate, den) = self.frame.ok_or("TTML frame time without ttp:frameRate")?;
-				(NANOS.checked_mul(den).ok_or("TTML time overflow")?, rate)
+				let rate = self.frame.as_ref().ok_or("TTML frame time without ttp:frameRate")?;
+				(NANOS.checked_mul(rate.den).ok_or("TTML time overflow")?, rate.num)
 			}
 			"t" => (NANOS, self.tick.ok_or("TTML tick time without ttp:tickRate")?),
 			_ => return Err(INVALID),
 		};
 		decimal(whole, fraction, num, den)
 	}
+}
+
+/// `ttp:frameRate` and the effective rate its multiplier gives, `num / den` frames per second.
+struct FrameRate {
+	nominal: u128,
+	num: u128,
+	den: u128,
 }
 
 /// `whole.fraction` times `num / den`, rounded to the nearest.
@@ -468,7 +487,11 @@ mod tests {
 	#[test]
 	fn time_expressions() {
 		let rates = Rates {
-			frame: Some((30_000, 1001)),
+			frame: Some(FrameRate {
+				nominal: 30,
+				num: 30_000,
+				den: 1001,
+			}),
 			tick: Some(90_000),
 		};
 		for (value, nanos) in [
@@ -506,10 +529,33 @@ mod tests {
 			assert!(rates.time(value).is_err(), "{value}");
 		}
 		let huge = Rates {
-			frame: Some((u128::MAX, u128::MAX)),
+			frame: Some(FrameRate {
+				nominal: 100,
+				num: u128::MAX,
+				den: u128::MAX,
+			}),
 			tick: None,
 		};
 		assert!(huge.time("00:00:00:99").is_err());
+		// The frame field is bounded by the nominal rate, not the effective one.
+		let halved = Rates {
+			frame: Some(FrameRate {
+				nominal: 30,
+				num: 30,
+				den: 2,
+			}),
+			tick: None,
+		};
+		assert_eq!(halved.time("00:00:00:20"), Ok(1_333_333_333));
+		let doubled = Rates {
+			frame: Some(FrameRate {
+				nominal: 30,
+				num: 60,
+				den: 1,
+			}),
+			tick: None,
+		};
+		assert!(doubled.time("00:00:00:45").is_err());
 		let unset = Rates {
 			frame: None,
 			tick: None,
@@ -537,6 +583,8 @@ mod tests {
 			format!(r#"{ROOT} ttp:frameRateMultiplier="1000 1001"/>"#),
 			format!(r#"{ROOT} ttp:frameRate="0"/>"#),
 			format!(r#"{ROOT}><body timeContainer="seq"/></tt>"#),
+			format!(r#"{ROOT} begin="1s"><body/></tt>"#),
+			format!(r#"{ROOT}><head><region begin="5s"><body/></region></head></tt>"#),
 			format!(r#"{ROOT}><body><p begin="1f"/></body></tt>"#),
 			format!(r#"{ROOT}><body><p begin="wallclock(2026-01-01)"/></body></tt>"#),
 			format!(r#"{ROOT}><body></tt>"#),
