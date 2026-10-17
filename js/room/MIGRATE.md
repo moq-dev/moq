@@ -7,21 +7,9 @@ How to update your code for each breaking change, newest first.
 ### `HISTORY` is a `Nano` (#5706)
 
 `HISTORY` is a `Nano` from `@moq/clock` instead of milliseconds.
-
-```ts
-// Before
-const ms = HISTORY;
-// After
-const ms = Milli.fromNano(HISTORY);
-```
+Use `Milli.fromNano(HISTORY)` where you need milliseconds.
 
 ### Chat tracks are timed (#4968)
 
 `Chat.info()` includes a `timescale`, so a chat track you create yourself must declare one before writing timestamps.
-
-```ts
-// Before
-const track = broadcast.createTrack(Chat.TRACK, { priority });
-// After
-const track = broadcast.createTrack(Chat.TRACK, Chat.info());
-```
+Create it with `broadcast.createTrack(Chat.TRACK, Chat.info())`.

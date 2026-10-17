@@ -7,14 +7,7 @@ How to update your code for each breaking change, newest first.
 ### A disabled rendition stays in the catalog (#4915)
 
 `enabled: false` keeps the rendition in the catalog with `enabled: false` instead of removing it, and viewers skip it.
-Check any code that read a missing rendition as disabled.
-
-```ts
-// Before
-const disabled = !catalog.video?.renditions[name];
-// After
-const disabled = catalog.video?.renditions[name]?.enabled === false;
-```
+Code that read a missing rendition as disabled should check `catalog.video?.renditions[name]?.enabled === false`.
 
 ### Tracks persist for the broadcast's life (#5068)
 
@@ -26,22 +19,8 @@ A `maxAge` change, or replacing a closed rendition track, recreates `broadcast.n
 Opus DTX is always off, since Chromium's DTX output shifts the audio timeline.
 Remove the field; a plain-JS caller still passing it is ignored.
 
-```ts
-// Before
-{ codec: "opus", usedtx: true }
-// After
-{ codec: "opus" }
-```
-
 ## 0.4 -> 0.5
 
 ### Publish takes an origin
 
-Pass the connection's origin instead of a `connection` signal.
-
-```ts
-// Before
-new Publish.Broadcast({ connection });
-// After
-new Publish.Broadcast({ origin: connection.origin });
-```
+Pass `origin: connection.origin` to `Publish.Broadcast` instead of a `connection` signal.

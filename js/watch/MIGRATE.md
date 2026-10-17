@@ -12,14 +12,7 @@ A numeric `delay` is taken literally instead of having the rendition's own delay
 
 ### Staleness is `maxDelay`
 
-`Sync.out.maxAge` is `Sync.out.maxDelay`.
-
-```ts
-// Before
-const budget = sync.out.maxAge.peek();
-// After
-const budget = sync.out.maxDelay.peek();
-```
+Rename `Sync.out.maxAge` to `Sync.out.maxDelay`.
 
 ### Disabled renditions are never selected (#4915)
 
@@ -31,13 +24,6 @@ With no video rendition selectable, the picture clears to black.
 With `announced` off, the player no longer moves to a later publisher at the same path.
 Turn `announced` on to follow restarts.
 
-```ts
-// Before
-new Watch.Player({ origin: connection.origin, name, announced: false });
-// After
-new Watch.Player({ origin: connection.origin, name, announced: true });
-```
-
 ## 0.5 -> 0.6
 
 ### Delay attributes need a unit (#3396, #3817)
@@ -46,19 +32,9 @@ new Watch.Player({ origin: connection.origin, name, announced: true });
 `reload` is `announced`.
 
 ```html
-<!-- Before -->
-<moq-watch url="..." name="demo" latency="100" reload></moq-watch>
-<!-- After -->
 <moq-watch url="..." name="demo" delay="100ms" buffer="30s" announced></moq-watch>
 ```
 
 ### `Watch.Broadcast` is `Watch.Player`
 
-The player takes the connection's origin.
-
-```ts
-// Before
-new Watch.Broadcast({ connection, name });
-// After
-new Watch.Player({ origin: connection.origin, name });
-```
+Rename `Watch.Broadcast` to `Watch.Player` and pass `origin: connection.origin` instead of `connection`.
