@@ -220,21 +220,34 @@ fn lifecycle() {
     assert_eq!(pair.server.known_cids(), 0);
 }
 
+/// Which client datagram a `close_before_the_server_has_the_finished` run loses.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LostFlight {
+    None,
+    /// The one carrying the Finished, sent before the close.
+    Finished,
+    /// The first close, which the client resends for the server's retransmitted handshake.
+    Close,
+}
+
 /// A client that closes as soon as it is `Connected`, before its Finished has left, still lets
 /// the server complete the handshake and read the application close.
 #[test]
 fn close_before_the_client_finished_leaves() {
-    close_before_the_client_finished(false);
+    close_before_the_server_has_the_finished(LostFlight::None);
 }
 
-/// The same, when the first close flight is lost and the client resends it in answer to the
-/// server's retransmitted handshake.
+#[test]
+fn close_after_the_client_finished_is_lost() {
+    close_before_the_server_has_the_finished(LostFlight::Finished);
+}
+
 #[test]
 fn close_before_the_client_finished_leaves_survives_a_lost_flight() {
-    close_before_the_client_finished(true);
+    close_before_the_server_has_the_finished(LostFlight::Close);
 }
 
-fn close_before_the_client_finished(lose_first: bool) {
+fn close_before_the_server_has_the_finished(lost: LostFlight) {
     let _guard = subscribe();
     let mut pair = Pair::default();
     let client_ch = pair.begin_connect(client_config());
@@ -257,12 +270,18 @@ fn close_before_the_client_finished(lose_first: bool) {
 
     const REASON: &[u8] = b"whee";
     let now = pair.time;
+    let server = pair.server.addr;
     let client = pair.client_conn_mut(client_ch);
     assert_matches!(client.poll(), Some(Event::HandshakeDataReady));
     assert_matches!(client.poll(), Some(Event::Connected));
-    client.close(now, VarInt(42), REASON.into());
-    if lose_first {
-        let server = pair.server.addr;
+    if lost == LostFlight::Finished {
+        pair.client.drive(now, server);
+        assert!(!pair.client.outbound.is_empty());
+        pair.client.outbound.clear();
+    }
+    pair.client_conn_mut(client_ch)
+        .close(now, VarInt(42), REASON.into());
+    if lost == LostFlight::Close {
         pair.client.drive(now, server);
         assert!(!pair.client.outbound.is_empty());
         pair.client.outbound.clear();
