@@ -72,8 +72,7 @@ pub(crate) struct ExportSource {
 	/// Wire format, consumed when the subscription resolves into a consumer.
 	media: Option<HangContainer>,
 	max_delay: std::time::Duration,
-	/// Start at the newest group, rather than the oldest the max delay still reaches, and
-	/// apply the max delay once it is read.
+	/// Start at the newest group, rather than the oldest the max delay still reaches.
 	live: bool,
 	/// The first group to read, so a resubscription skips groups already read.
 	start: Option<u64>,
@@ -252,9 +251,10 @@ impl ExportSource {
 		})
 	}
 
-	/// Start at the newest group the publisher has, the live edge, rather than the oldest
-	/// one the max delay still reaches; the max delay applies from the first frame on, to the
-	/// groups that follow.
+	/// Start at the newest group to arrive, the live edge, rather than the oldest one the max
+	/// delay still reaches. The subscription carries the max delay from the start: under a zero
+	/// budget every hop drops each group a newer one supersedes, and raising it later cannot
+	/// recover the groups that follow the edge.
 	pub fn live(mut self) -> Self {
 		self.live = true;
 		self
@@ -367,12 +367,7 @@ impl ExportSource {
 				};
 				(ready!(pending.poll_broadcast(waiter))?, name.clone())
 			};
-			// A zero budget asks only for the newest group.
-			let max_delay = match self.live {
-				true => std::time::Duration::ZERO,
-				false => self.max_delay,
-			};
-			let mut subscription = moq_net::track::Subscription::default().with_max_delay(max_delay);
+			let mut subscription = moq_net::track::Subscription::default().with_max_delay(self.max_delay);
 			if let Some(start) = self.start {
 				subscription = subscription.with_groups(start..);
 			}
@@ -392,7 +387,12 @@ impl ExportSource {
 				.media
 				.take()
 				.expect("media present until the subscription resolves");
-			self.state = SourceState::Active(Box::new(Consumer::new(track, media)));
+			let consumer = Consumer::new(track, media);
+			let consumer = match self.live {
+				true => consumer.live(),
+				false => consumer,
+			};
+			self.state = SourceState::Active(Box::new(consumer));
 		}
 
 		loop {
@@ -402,12 +402,7 @@ impl ExportSource {
 				let SourceState::Active(consumer) = &mut self.state else {
 					unreachable!("subscription resolved into an Active consumer");
 				};
-				let event = ready!(consumer.poll_item(waiter))?;
-				if std::mem::take(&mut self.live) {
-					// Started at the live edge: from here the budget tolerates reordering.
-					consumer.set_max_delay(self.max_delay);
-				}
-				match event {
+				match ready!(consumer.poll_item(waiter))? {
 					Some(Item::Read(Read::Frame { group, frame })) => {
 						if self.ends.is_some_and(|(end_group, _)| end_group != group) {
 							self.finish_ends();
@@ -416,13 +411,12 @@ impl ExportSource {
 						frame
 					}
 					Some(Item::Read(Read::Gap { timestamp, duration })) => {
-						// Say what the export never receives and where. A data track declares a
-						// break by skipping a sequence, which reads the same though nothing is lost.
+						// Say what the export never receives and where.
 						tracing::warn!(
 							track = consumer.name(),
 							at = ?std::time::Duration::from(timestamp),
 							skipped = ?std::time::Duration::from(duration),
-							"media skipped upstream, or a data track's declared break; resuming at the next group"
+							"media skipped upstream; resuming at the next group"
 						);
 						self.finish_ends();
 						self.skips += 1;
@@ -659,27 +653,157 @@ mod tests {
 		}
 	}
 
-	/// The requested budget must be present on the first SUBSCRIBE. Updating it
-	/// after SUBSCRIBE_OK cannot recover backlog the publisher already skipped.
+	/// The requested budget must be present on the first SUBSCRIBE, a live start's too. Updating
+	/// it after SUBSCRIBE_OK cannot recover backlog the publisher already skipped, nor the groups a
+	/// zero budget drops as superseded before the update lands.
 	#[tokio::test]
 	async fn latency_is_sent_with_the_initial_subscription() {
-		let live = Live::avc3();
-		let max_delay = std::time::Duration::from_secs(10);
-		let mut export = ExportSource::for_video(&live.source().await, live.track.name(), &video(None), max_delay)
-			.unwrap()
-			.expect("fixture should produce a video rendition");
+		for live_start in [false, true] {
+			let live = Live::avc3();
+			let max_delay = std::time::Duration::from_secs(10);
+			let export = ExportSource::for_video(&live.source().await, live.track.name(), &video(None), max_delay)
+				.unwrap()
+				.expect("fixture should produce a video rendition");
+			let mut export = match live_start {
+				true => export.live(),
+				false => export,
+			};
 
-		let observed = kio::wait(|waiter| {
-			let _ = export.poll_read(waiter);
-			match live.track.subscription() {
-				Some(subscription) => Poll::Ready(subscription.max_delay),
-				None => Poll::Pending,
-			}
-		})
-		.await;
+			let observed = kio::wait(|waiter| {
+				let _ = export.poll_read(waiter);
+				match live.track.subscription() {
+					Some(subscription) => Poll::Ready(subscription.max_delay),
+					None => Poll::Pending,
+				}
+			})
+			.await;
 
-		assert_eq!(observed, max_delay);
+			assert_eq!(observed, max_delay, "live start: {live_start}");
+		}
 	}
+
+	/// A live start reads from the newest group, though the budget delivers older ones too.
+	#[tokio::test(start_paused = true)]
+	async fn a_live_start_reads_from_the_newest_group() {
+		use crate::container::test_util::raw_frame;
+
+		let mut live = Live::audio(audio(None));
+		for timestamp in [0, 24_000, 48_000] {
+			live.track.write(raw_frame(timestamp, b"audio", true)).unwrap();
+		}
+		let mut export = ExportSource::for_audio(
+			&live.source().await,
+			live.track.name(),
+			&audio(None),
+			std::time::Duration::from_secs(10),
+		)
+		.unwrap()
+		.unwrap()
+		.live();
+
+		let frame = kio::wait(|waiter| export.poll_read(waiter)).await.unwrap().unwrap();
+		assert_eq!(frame.timestamp.as_micros(), 48_000);
+		live.track.write(raw_frame(72_000, b"audio", true)).unwrap();
+		let frame = kio::wait(|waiter| export.poll_read(waiter)).await.unwrap().unwrap();
+		assert_eq!(frame.timestamp.as_micros(), 72_000);
+		assert_eq!(export.skips(), 0, "nothing below the start counts as skipped");
+	}
+	/// A live source picks the newest group without narrowing what the publisher sends: a
+	/// narrower budget on the wire, widened after the first read, lets the publisher skip the
+	/// groups of a burst written before the widening reaches it, a gap no update recovers.
+	#[tokio::test(start_paused = true)]
+	async fn a_live_start_loses_no_group_the_publisher_bursts() {
+		use std::time::Duration;
+
+		use crate::container::Container as _;
+		use crate::container::test_util::raw_frame;
+		use moq_net::transport::memory;
+
+		let origin = |hop| {
+			let config = moq_net::origin::Config::new(moq_net::Hop::new(hop).unwrap());
+			let (producer, driver) = moq_net::origin::Producer::new(config);
+			tokio::spawn(moq_net::time::run(driver));
+			producer
+		};
+		let (publisher, subscriber) = (origin(1), origin(2));
+		let version: moq_net::Version = "moq-lite-07-wip".parse().unwrap();
+		let mut config = memory::Config::default();
+		config.protocol = Some(version.alpn().to_string());
+		let (client_transport, server_transport) = memory::pair(config);
+		let client = moq_net::Client::new()
+			.with_versions(version.into())
+			.with_publisher(publisher.consume());
+		let server = moq_net::Server::new()
+			.with_versions(version.into())
+			.with_subscriber(subscriber.clone());
+		// Each driver runs as soon as its handshake resolves: the accept waits on the client's SETUP.
+		let _sessions = tokio::join!(
+			async {
+				let (session, driver) = client.connect(moq_net::time::now(), client_transport).await.unwrap();
+				tokio::spawn(moq_net::time::run(driver));
+				session
+			},
+			async {
+				let (session, driver) = server.accept(moq_net::time::now(), server_transport).await.unwrap();
+				tokio::spawn(moq_net::time::run(driver));
+				session
+			}
+		);
+
+		let broadcast = publisher.create_broadcast("room").unwrap();
+		let track = broadcast
+			.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
+			.unwrap();
+		broadcast.announce(Default::default()).unwrap();
+		let consumer = subscriber.consume();
+		consumer.routed("room").await.unwrap();
+		let remote = consumer.request_broadcast("room", None).await.unwrap();
+		let source = crate::Source::new(consumer, remote);
+		let mut export = ExportSource::for_audio(&source, "audio", &audio(None), Duration::from_secs(1))
+			.unwrap()
+			.unwrap()
+			.live();
+
+		// One 24 ms frame per group, as the TS import publishes MPEG-1 audio.
+		let wire = HangContainer::Legacy(crate::container::Kind::Audio);
+		let write = |sequence: u64| {
+			let mut group = track.create_group(moq_net::group::Info { sequence }).unwrap();
+			wire.write(&mut group, &[raw_frame(sequence * 24_000, b"audio", true)])
+				.unwrap();
+			group.finish().unwrap();
+		};
+		let mut read = async || {
+			tokio::time::timeout(Duration::from_millis(100), kio::wait(|waiter| export.poll_read(waiter)))
+				.await
+				.ok()
+				.map(|frame| frame.unwrap().map(|frame| frame.timestamp.as_micros()))
+		};
+
+		assert_eq!(read().await, None, "subscribed, with nothing published yet");
+		write(0);
+		tokio::time::sleep(Duration::from_millis(10)).await;
+		// A PES carrying several frames publishes them in one pass, before the publisher's
+		// session runs again, and the export reads the first group in the meantime.
+		for sequence in 1..4 {
+			write(sequence);
+		}
+		let mut timestamps = Vec::new();
+		while let Some(Some(timestamp)) = read().await {
+			timestamps.push(timestamp);
+		}
+		for sequence in 4..8 {
+			write(sequence);
+		}
+		track.finish().unwrap();
+		while let Some(Some(timestamp)) = read().await {
+			timestamps.push(timestamp);
+		}
+
+		let expected: Vec<u128> = (0..8).map(|sequence| sequence * 24_000).collect();
+		assert_eq!(timestamps, expected, "the burst reached the export whole");
+		assert_eq!(export.skips(), 0);
+	}
+
 	async fn audio_export() -> (moq_net::track::Producer, ExportSource) {
 		use std::time::Duration;
 		let live = Live::audio(audio(None));

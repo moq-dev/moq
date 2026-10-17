@@ -84,18 +84,25 @@ connection, so a steering, dispatch, or per-shard cost that grows with either
 axis reads as a slope. Linux only, since nothing else steers a reuseport
 group. It runs nightly.
 
-Attribute relay worker lock waits to the stacks that blocked, as a share of
-each worker's CPU:
+Profile the relay under a workload, in one or more capture modes: `lock`
+(worker std mutex waits by stack), `cpu` (CPU stacks of every relay thread),
+or `heap` (jemalloc retained heap and allocation churn):
 
 ```bash
-nix develop --command just bench-lock
-nix develop --command just bench-lock fanout-heavy "4 16"
+nix develop --command just bench-profile lock
+nix develop --command just bench-profile "cpu heap" fanout-heavy "4 16"
 ```
 
 This builds the relay with `[profile.profiling]` and frame pointers, then runs
-the workload on Tokio workers at each count twice: an unprofiled control, then
-a profiled run, so the throughput and CPU difference shows the profiler's
-overhead. During the profiled run's steady window, `perf record` samples every
+the workload on Tokio workers at each count twice per mode: an unprofiled
+control, then a profiled run, so the throughput and CPU difference shows the
+profiler's overhead. Each mode captures only the relay process, never the load
+generator, during the profiled run's 5 s steady window, the same window as the
+summary's throughput. Linux only.
+
+### Lock wait
+
+During the profiled run's steady window, `perf record` samples every
 worker switch-out (the `context-switches` event with a period of 1) with a
 DWARF-unwound stack, plus each switch-in, so every off-CPU interval has an
 exact duration. glibc's `syscall` wrapper keeps no frame pointer, so
@@ -113,16 +120,52 @@ recorded CPU denominator; wait/CPU can exceed one.
 `lock/mutex.folded` holds the blocking stacks, weighted by microseconds
 waited, in flamegraph folded format.
 
-Linux only. A switch-out is sampled in kernel context, and 16 workers need a
-larger ring buffer than the unprivileged locked-memory limit allows, so the
-recipe refuses before building until `perf_event_paranoid` is -1. A recording
-that still drops events is refused rather than reported. On an arm64 host with
-SVE, perf's DWARF unwinding requests the SVE `VG` register, which the kernel
-refuses for a software event, so the recording fails to open; profile on x86.
+On an arm64 host with SVE, perf's DWARF unwinding requests the SVE `VG`
+register, which the kernel refuses for a software event, so the lock recording
+fails to open; profile lock waits on x86.
+
+### CPU
+
+`perf record` samples every relay thread with the `cpu-clock` event at 999 Hz,
+unwinding by frame pointer. Kernel time stays in the profile as a `[kernel]`
+leaf under the user stack that entered it, so `sendmsg` and `recvmsg` cost
+lands on its caller; kernel frames themselves are discarded. A frameless libc
+leaf (`memcpy`, the syscall wrappers) hides only its direct caller.
+`cpu/cpu.folded` holds the stacks in flamegraph folded format, each rooted at
+the thread's role (`moq-quic-0..N` fold into `moq-quic`). `cpu/cpu.json`
+counts samples per thread; its `sampled_cores` should track the host sampler's
+relay CPU, which shows the capture saw the whole process. A capture without
+resolved MoQ frames is refused.
+
+Both perf modes sample in kernel context, and per-thread ring buffers exceed
+the unprivileged locked-memory limit, so the recipe refuses before building
+until `perf_event_paranoid` is -1. A recording that still drops events is
+refused rather than reported.
 
 ```bash
 sudo sysctl -w kernel.perf_event_paranoid=-1
 ```
+
+### Heap
+
+The heap mode builds the relay with `moq-relay/jemalloc` (the other modes keep
+the default allocator) and starts it with jemalloc profiling active from
+startup, accumulating allocations, at one sample per 64 KiB allocated. Once
+the relay has installed its SIGUSR1 handler, `rs/moq-tokio/src/jemalloc.rs`
+dumps a snapshot on each signal: `before` the load connects, `steady-start` and
+`steady-end` around the steady window, and `teardown` once the relay's internal
+`/sessions` list is empty after the generator closed its sessions (refused if
+that takes over 15 s). `jeprof`, from the dev shell, symbolizes them:
+
+- `heap/heap.json`: retained bytes at each snapshot, and allocation churn
+  (bytes and allocations per second) between the two steady snapshots.
+- `heap/churn.folded`: what the steady window allocated, by stack.
+- `heap/retained.folded`: what the heap held at `steady-end`.
+- `heap/teardown.folded`: what the load left behind after teardown, net of
+  `before`; a leak candidate when it grows.
+
+All are jemalloc's sampled estimates. A run without resolved MoQ frames in its
+churn is refused.
 
 ## Workloads
 

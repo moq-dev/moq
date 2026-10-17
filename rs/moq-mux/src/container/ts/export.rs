@@ -32,10 +32,10 @@ use hang::catalog::{AudioCodec, AudioConfig, Container, VideoCodec, VideoConfig}
 use mpeg2ts::es::StreamId;
 use mpeg2ts::es::StreamType;
 use mpeg2ts::time::Timestamp as TsTimestamp;
-use mpeg2ts::ts::payload::{Bytes as TsBytes, Pat, Pes, Pmt, Section};
+use mpeg2ts::ts::payload::{Bytes as TsBytes, Pat, Pes, Section};
 use mpeg2ts::ts::{
-	AdaptationField, ContinuityCounter, Descriptor, EsInfo, Pid, ProgramAssociation, TransportScramblingControl,
-	TsHeader, TsPacket, TsPacketWriter, TsPayload, VersionNumber, WriteTsPacket,
+	AdaptationField, ContinuityCounter, Pid, ProgramAssociation, TransportScramblingControl, TsHeader, TsPacket,
+	TsPacketWriter, TsPayload, VersionNumber, WriteTsPacket,
 };
 
 use moq_net::Timestamp;
@@ -2054,48 +2054,40 @@ where
 			.map(|t| t.pid)
 			.context("TS export requires a video or audio track for the PCR")?;
 
-		let es_info = tracks
+		let streams = tracks
 			.iter()
 			.map(|t| {
 				let stream_type = match &t.kind {
-					Kind::Video(stream_type) => *stream_type,
-					Kind::Aac { .. } => StreamType::AdtsAac,
+					Kind::Video(stream_type) => *stream_type as u8,
+					Kind::Aac { .. } => StreamType::AdtsAac as u8,
 					// Opus rides private-data PES; the registration + extension descriptors
 					// below tell the demuxer it's Opus.
-					Kind::Opus { .. } => StreamType::from_u8(0x06).map_err(anyhow::Error::msg)?,
+					Kind::Opus { .. } => 0x06,
 					// Half-rate MPEG-2 BC audio (< 32 kHz) re-announces as 0x04; the full
 					// rates are MPEG-1 (0x03). The catalog sample rate came from the frame
 					// header, so the mapping is faithful.
-					Kind::Mp2 { sample_rate } if *sample_rate < 32000 => StreamType::Mpeg2HalvedSampleRateAudio,
-					Kind::Mp2 { .. } => StreamType::Mpeg1Audio,
-					Kind::Ac3 => StreamType::DolbyDigitalUpToSixChannelAudio,
-					Kind::Eac3 => StreamType::DolbyDigitalPlusUpTo16ChannelAudioForAtsc,
-					Kind::Verbatim { stream_type, .. } | Kind::PesPacket { stream_type } => {
-						StreamType::from_u8(*stream_type).map_err(anyhow::Error::msg)?
-					}
+					Kind::Mp2 { sample_rate } if *sample_rate < 32000 => StreamType::Mpeg2HalvedSampleRateAudio as u8,
+					Kind::Mp2 { .. } => StreamType::Mpeg1Audio as u8,
+					Kind::Ac3 => StreamType::DolbyDigitalUpToSixChannelAudio as u8,
+					Kind::Eac3 => StreamType::DolbyDigitalPlusUpTo16ChannelAudioForAtsc as u8,
+					Kind::Verbatim { stream_type, .. } | Kind::PesPacket { stream_type } => *stream_type,
 				};
 				// Prefer the descriptors captured verbatim on import; otherwise synthesize
 				// the ATSC Dolby registration so a fresh (non-TS) AC-3/E-AC-3 track is
 				// still announced the way the import path expects.
 				let descriptors = if !t.descriptors.is_empty() {
-					to_pmt_descriptors(&t.descriptors)
+					t.descriptors.clone()
 				} else {
 					match &t.kind {
-						Kind::Ac3 => vec![Descriptor {
-							tag: 0x05,
-							data: b"AC-3".to_vec(),
-						}],
-						Kind::Eac3 => vec![Descriptor {
-							tag: 0x05,
-							data: b"EAC3".to_vec(),
-						}],
+						Kind::Ac3 => vec![registration(b"AC-3")],
+						Kind::Eac3 => vec![registration(b"EAC3")],
 						Kind::Opus { channel_config_code } => opus_descriptors(*channel_config_code),
 						_ => Vec::new(),
 					}
 				};
-				Ok(EsInfo {
+				Ok(super::psi::Es {
 					stream_type,
-					elementary_pid: Pid::new(t.pid)?,
+					pid: Pid::new(t.pid)?,
 					descriptors,
 				})
 			})
@@ -2104,7 +2096,7 @@ where
 		// Re-emit the captured program-level descriptors. With none (a non-TS source),
 		// derive the SCTE-35 'CUEI' registration when a 0x86 verbatim stream is present.
 		let program_info = if !self.program_descriptors.is_empty() {
-			to_pmt_descriptors(&self.program_descriptors)
+			self.program_descriptors.clone()
 		} else if tracks.iter().any(|t| {
 			// Only derive CUEI for section-framed 0x86 (SCTE-35); a PES-framed 0x86
 			// (e.g. DTS audio) must not advertise SCTE-35 section signaling.
@@ -2117,10 +2109,7 @@ where
 				}
 			)
 		}) {
-			vec![Descriptor {
-				tag: 0x05,
-				data: b"CUEI".to_vec(),
-			}]
+			vec![registration(b"CUEI")]
 		} else {
 			Vec::new()
 		};
@@ -2144,12 +2133,11 @@ where
 				program_map_pid: Pid::new(pmt_pid)?,
 			}],
 		};
-		let pmt = Pmt {
-			program_num: program_number,
+		let pmt = super::psi::Pmt {
+			program_number,
 			pcr_pid: Some(Pid::new(pcr_pid)?),
-			version_number: self.version,
 			program_info,
-			es_info,
+			streams,
 		};
 
 		self.schedule.set_tables(pmt_pid);
@@ -2159,7 +2147,7 @@ where
 		}
 		self.psi = Some(Psi {
 			pat: super::psi::encode_pat(&pat)?,
-			pmt: super::psi::encode_pmt(&pmt)?,
+			pmt: super::psi::encode_pmt(&pmt, self.version)?,
 			pcr_pid,
 			pmt_pid,
 		});
@@ -3555,18 +3543,23 @@ fn audio_kind(config: &AudioConfig, name: &str) -> anyhow::Result<Kind> {
 ///
 /// `channel_config_code` is already a plain code ([`opus_channel_code`]): 1 is mono,
 /// 2 is stereo, and 3..=8 is the Vorbis family 1 mapping for that many channels.
-fn opus_descriptors(channel_config_code: u8) -> Vec<Descriptor> {
+fn opus_descriptors(channel_config_code: u8) -> Vec<catalog::Descriptor> {
 	vec![
-		Descriptor {
-			tag: 0x05,
-			data: b"Opus".to_vec(),
-		},
-		Descriptor {
+		registration(b"Opus"),
+		catalog::Descriptor {
 			tag: 0x7f,
 			// extension_descriptor_tag 0x80, then the plain channel_config_code.
-			data: vec![0x80, channel_config_code],
+			data: Bytes::copy_from_slice(&[0x80, channel_config_code]),
 		},
 	]
+}
+
+/// A registration descriptor (tag 0x05) naming the format identifier.
+fn registration(format: &'static [u8; 4]) -> catalog::Descriptor {
+	catalog::Descriptor {
+		tag: 0x05,
+		data: Bytes::from_static(format),
+	}
 }
 
 /// Plain `channel_config_code` for an Opus track the extension descriptor can name.
@@ -3675,17 +3668,6 @@ fn track_descriptors(mpegts: &catalog::Mpegts, name: &str) -> Vec<catalog::Descr
 		.get(name)
 		.map(|t| t.descriptors.clone())
 		.unwrap_or_default()
-}
-
-/// Convert catalog descriptors (base64 bytes) to mpeg2ts PMT descriptors.
-fn to_pmt_descriptors(descriptors: &[catalog::Descriptor]) -> Vec<Descriptor> {
-	descriptors
-		.iter()
-		.map(|d| Descriptor {
-			tag: d.tag,
-			data: d.data.to_vec(),
-		})
-		.collect()
 }
 
 /// One section-framed verbatim frame must be exactly one section: at least the

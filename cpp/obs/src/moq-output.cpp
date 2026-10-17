@@ -461,21 +461,19 @@ bool MoQOutput::TryGetConnectionStats(ConnectionStats *out)
 
 	std::shared_ptr<moq::Session> current;
 	std::string dial_url;
+	bool current_live = false;
 	{
 		std::lock_guard<std::mutex> lock(mutex);
 		if (!session)
 			return false;
-		if (!live) {
-			// Between reconnects. Keep a more specific prior failure (unauthorized)
-			// over a generic offline blip.
-			if (last_failure_reason.empty() || LooksGenericOffline(last_failure_reason)) {
-				last_failure_code = MoQError::Offline;
-				last_failure_reason = "offline";
-			}
-			return false;
-		}
 		current = session;
 		dial_url = url;
+		current_live = live;
+	}
+
+	if (!current_live) {
+		RecordReconnectFailure(current);
+		return false;
 	}
 
 	const moq::ConnectionStats raw = current->stats();
@@ -497,9 +495,29 @@ bool MoQOutput::TryGetConnectionStats(ConnectionStats *out)
 		snapshot.loss_pct =
 			100.0 * static_cast<double>(*raw.packets_lost) / static_cast<double>(*raw.packets_sent);
 	}
+	snapshot.protocol = raw.version.value_or("");
 	snapshot.dial = DialSchemeLabel(dial_url);
 
 	return CommitConnectionStats(current, std::move(snapshot), out);
+}
+
+void MoQOutput::RecordReconnectFailure(const std::shared_ptr<moq::Session> &current)
+{
+	// Read outside the lock: it calls into moq-ffi.
+	const auto failure = current->failure();
+
+	std::lock_guard<std::mutex> lock(mutex);
+	// A Stop(), restart, or reconnect while failure() ran made this one stale.
+	if (session != current || live)
+		return;
+	if (failure) {
+		last_failure_code = FailureCode(*failure);
+		last_failure_reason = failure->to_string();
+	} else if (last_failure_reason.empty() || LooksGenericOffline(last_failure_reason)) {
+		// Nothing named yet. Keep a more specific prior failure over a generic blip.
+		last_failure_code = MoQError::Offline;
+		last_failure_reason = "offline";
+	}
 }
 
 bool MoQOutput::CommitConnectionStats(const std::shared_ptr<moq::Session> &current, ConnectionStats snapshot,

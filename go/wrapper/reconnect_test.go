@@ -217,6 +217,12 @@ func TestReconnectAcrossRelayRestart(t *testing.T) {
 	if frame, err := trackConsumer.ReadFrame(ctx); err != nil || frame == nil {
 		t.Fatalf("frame before restart: frame=%+v err=%v", frame, err)
 	}
+	if err := subscriber.Session().Failure(); err != nil {
+		t.Fatalf("failure before any drop: %v", err)
+	}
+	if version := subscriber.Session().Stats().Version; version == nil || *version == "" {
+		t.Fatal("a live session must report its negotiated version")
+	}
 
 	// Drop every session and the listener, then bind a replacement on the same
 	// port: a deploy, with an origin the replacement has never seen.
@@ -226,6 +232,10 @@ func TestReconnectAcrossRelayRestart(t *testing.T) {
 	// Both workers observe the reconnect and advance their connect count past the first.
 	waitConnects(t, ctx, publisher.Session(), 2)
 	waitConnects(t, ctx, subscriber.Session(), 2)
+	// The connect that advanced the count also cleared the drop's reason.
+	if err := subscriber.Session().Failure(); err != nil {
+		t.Fatalf("failure after reconnect: %v", err)
+	}
 
 	// The publisher re-announces the broadcast the fresh relay never saw.
 	awaitAnnouncement(t, ctx, announced, "live")

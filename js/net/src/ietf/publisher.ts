@@ -8,6 +8,7 @@ import * as DatagramStream from "../datagram_stream.ts";
 import {
 	controlTimeout,
 	error,
+	NoStreamCredit,
 	NotFound,
 	ProtocolViolation,
 	reason,
@@ -25,6 +26,7 @@ import { type Stream, Writer } from "../stream.ts";
 import { Timescale } from "../time.ts";
 import type { Location as TrackLocation, Subscriber as TrackSubscriber } from "../track.ts";
 import { untilAborted } from "../util/abort.ts";
+import { Deadline, REQUEST_TIMEOUT_MS, requestOptions } from "../util/deadline.ts";
 import { LIMITS, type Limits, Slots } from "../util/limits.ts";
 import { TimeoutError, withTimeout } from "../util/timeout.ts";
 import * as Varint from "../varint.ts";
@@ -119,11 +121,11 @@ function sameHops(a: Hop[], b: Hop[]): boolean {
 }
 
 /**
- * How long one advertisement may take to be answered. Matches the Rust publisher, and the
- * peer accepting the stream is only half the exchange: one it never answers on holds the
+ * How long one advertisement may take to be answered. Accepting the stream is only half
+ * the exchange: one it never answers on holds the
  * loop just as effectively as one it never grants.
  */
-const ADVERTISE_TIMEOUT_MS = 5000;
+const ADVERTISE_TIMEOUT_MS = REQUEST_TIMEOUT_MS;
 const ADVERTISE_TIMEOUT = Nano.fromMilli(Milli(ADVERTISE_TIMEOUT_MS));
 
 /** Sleep `delay`, jittered, so a relay's namespaces don't all retry on the same tick. */
@@ -132,12 +134,12 @@ function retryAfter(delay: number): Promise<void> {
 }
 
 /**
- * What a refusal said about re-offering the namespace.
+ * What prevents re-offering the namespace.
  *
  * A peer answers a request it declines with a retry interval, and ignoring it is how a
  * permanent refusal (unauthorized, uninterested) turns into a request every few seconds
- * for the life of the session. `"never"` is an interval of 0; a number is the epoch
- * milliseconds before which we must not come back.
+ * for the life of the session. `"never"` is an interval of 0 or a terminal local failure;
+ * a number is the epoch milliseconds before which we must not come back.
  */
 type Refused = "never" | number;
 
@@ -1529,9 +1531,8 @@ export class Publisher {
 
 		ns.active = held;
 
-		// Whatever we wanted up and could not get up. Stream credit freeing, a transient
-		// failure clearing, or the peer starting to answer raises no signal of its own, so
-		// the only way back is to ask again on a timer.
+		// Keep the backoff only for a peer refusal that permits another offer. Local
+		// credit failures and unanswered requests are terminal for this broadcast instance.
 		return [...updated].some(
 			([key, snap]) =>
 				this.#change(key, held.get(key), snap, target) !== "same" && this.#pending(key, ns.refused),
@@ -1586,7 +1587,7 @@ export class Publisher {
 	 * Distinct from {@link offerable}, and the difference is what arms the retry: a
 	 * namespace waiting out a minimum is not offerable yet but is still pending, and
 	 * gating the timer on offerable instead would disarm it for exactly the wait it is
-	 * supposed to be counting. Only a refusal that forbids retrying ends it.
+	 * supposed to be counting. A terminal failure or a refusal that forbids retrying ends it.
 	 */
 	#pending(key: Path.Valid, refused: Map<Path.Valid, Refused>): boolean {
 		return refused.get(key) !== "never";
@@ -1621,18 +1622,14 @@ export class Publisher {
 		// Opening is inside the try because it fails like any other advertisement does:
 		// a peer out of stream credit rejects here, and letting that escape would unwind
 		// the announce loop and take discovery down for the whole session, rather than
-		// costing this one namespace a turn.
+		// leaving this one namespace unadvertised.
 		let request: Stream | undefined;
 		try {
-			request = await this.#session.openBi();
-			const stream = request;
-
-			// Bounded, like the subscriber's own request: the loop is single-threaded over
-			// advertisements, so a peer that takes the stream and answers nothing strands
-			// every publish and withdrawal behind it. Timing out costs this namespace a
-			// turn and leaves it outstanding, which the retry above re-offers.
-			const answer = await withTimeout(
+			const deadline = new Deadline();
+			const answer = await deadline.wait(
 				(async (): Promise<Answer> => {
+					request = await deadline.open(this.#session.openBi(requestOptions));
+					const stream = request;
 					await stream.writer.u53(PublishNamespace.id);
 					const token = this.#auth?.carried(auth);
 					const msg = new PublishNamespace({ requestId, trackNamespace: path, cluster, token });
@@ -1663,18 +1660,18 @@ export class Publisher {
 					}
 					return "held";
 				})(),
-				ADVERTISE_TIMEOUT,
-				`advertisement timed out after ${ADVERTISE_TIMEOUT_MS}ms waiting for the peer's answer`,
 			);
 
-			if (answer === "held") requests.set(path, { path, requestId, stream, auth });
+			if (answer === "held" && request) requests.set(path, { path, requestId, stream: request, auth });
 			return answer;
 		} catch (err: unknown) {
 			// The peer never answered the advertisement: a control timeout, not late content.
 			const e = err instanceof TimeoutError ? controlTimeout(err) : error(err);
 			console.warn(`announce failed: broadcast=${path} error=${reason(e)}`);
 			request?.abort(e);
-			return "dropped";
+			return e instanceof NoStreamCredit || (e instanceof StreamError && e.code === StreamCode.ControlTimeout)
+				? "never"
+				: "dropped";
 		}
 	}
 

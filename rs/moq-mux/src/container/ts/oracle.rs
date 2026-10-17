@@ -20,7 +20,8 @@ use crate::container::Frame;
 
 const PACKET: usize = 188;
 
-/// One object as published: its group, the PCR time of its first byte, and its packets.
+/// One object as published: its group, the PCR time of its first byte, and its packets. A break
+/// marker, an object with no bytes, has an empty payload and the time of the object before it.
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct Object {
 	pub group: u64,
