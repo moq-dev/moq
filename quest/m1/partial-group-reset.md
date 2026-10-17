@@ -3,9 +3,10 @@
 ## Goal
 
 A subscription group whose max-delay budget expires before the publisher
-finishes it resets with `Old` instead of ending normally, on every hop, in
-Rust and JS. A relay that receives it never caches the prefix as the complete
-group.
+finishes it fails with `Old` instead of ending normally, for every reader:
+a local reader at the group's tail and a publisher serving it alike, on every
+hop, in Rust and JS. A serving publisher resets the stream with `Old`, so a
+relay that receives it never caches the prefix as the complete group.
 
 Today a reader that has taken every frame the group holds treats expiry as
 losing nothing and ends the group cleanly: `expired_truncates` in
@@ -22,10 +23,13 @@ Decided with the maintainer on 2026-10-17: the goal as drafted, from the
 follow-up to [#5680](https://github.com/moq-dev/moq/pull/5680), which made an
 expiring FETCH reset with `OLD` for the same reason.
 
-The clean end was chosen for a local reader stalled at a group's tail. A
-serving publisher cannot tell whether the producer would have written more,
-so expiry there is truncation. Decide whether a local reader keeps the clean
-end, and keep Rust and JS consistent either way.
+Decided with the maintainer on 2026-10-17: every reader, local or served,
+gets `Old` when an unfinished group expires. Rejected: resetting only on the
+serving path, which leaves a local reader unable to tell a truncated group
+from a whole one, and a separate expired-at-tail state, which adds API for
+the same outcome. The clean end was chosen for a local reader stalled at a
+group's tail; it goes, along with `expired_truncates`' distinction. Readers
+already treat `Old` like a latency skip.
 
 Add a regression test that fails without the fix: an upstream group stalls
 past the budget after its last frame, and the downstream hop holds no

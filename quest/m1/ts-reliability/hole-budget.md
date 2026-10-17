@@ -34,9 +34,10 @@ The two anchors, matching the timers the TS line already uses:
   `rs/moq-mux/src/jitter.rs`). A timer wakes the reader at the anchor plus
   the budget, with no new group needed.
 
-The hole is lost once either side reaches the budget. Open for the
-maintainer: the threshold. Recommendation: the subscription's max delay,
-which already drives latency skips, so both sides share one number.
+The hole is lost once either side reaches the budget. Decided with the
+maintainer on 2026-10-17: the budget is the subscription's max delay, which
+already drives latency skips, so both sides share one number. With the
+default of zero, a hole counts as lost as soon as the reader blocks on it.
 
 Test with mocked time in both languages: read group N, lose N+1, receive a
 closed marker as N+2 on a paused track; after the budget the reader reports a
