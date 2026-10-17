@@ -81,6 +81,8 @@ have fixes on `main`: macOS tests (#5335), drill-sensitivity (#5338), loom
 
 - [qmux release backport](/quest/m0/qmux-credit-backport.md) - adopt the 0.5 fix independently of the next breaking cut
 
+- [A discarded Retry no longer blocks the genuine one](/quest/m0/retry-after-invalid-retry.md) - one injected or corrupted Retry no longer kills a handshake, on `main` and then `release`
+
 - [CI cost and latency](/quest/m0/ci/README.md) - PRs stop queueing behind hosted runner caps: macOS and Windows move to the merge queue, caches move to R2, and setup is skipped when no work is selected
 - [Draft-22 media on 0.17](/quest/m0/release-22/README.md) - a 0.17.x with the LOCATION_FILTER and FIRST_OBJECT fixes and moq-noq 1.3.5, then a patch with draft-20+ FETCH and the unset-clock and quiet-edge fixes
 - [nixpkgs ships the lld fix](/quest/m0/nixpkgs-lld-fix.md) - waiting on NixOS/nixpkgs#568680 to reach `nixpkgs-unstable`, which the release build fix bumps to

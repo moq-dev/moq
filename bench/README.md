@@ -66,8 +66,8 @@ nix develop --command just bench-runtime 5 16
 ```
 
 Runtime comparison requires Linux because io\_uring and relay process metrics
-come from Linux interfaces. The default worker count is the number of online
-logical CPUs.
+come from Linux interfaces. The default worker count is the number of logical
+CPUs the run may use.
 
 Sweep the relay's QUIC shard count against the connection count, for the
 room (`video`: every connection publishes and subscribes) and `fanout` (one
@@ -78,7 +78,7 @@ nix develop --command just bench-shard
 nix develop --command just bench-shard "0 1 8 24" "64 512"
 ```
 
-Zero shards is the shared runtime with one Tokio thread per logical CPU; any
+Zero shards is the shared runtime with one Tokio thread per usable CPU; any
 other count is that many unpinned Tokio workers. The table reports CPU per
 connection, so a steering, dispatch, or per-shard cost that grows with either
 axis reads as a slope. Linux only, since nothing else steers a reuseport
@@ -144,6 +144,13 @@ work.
 
 Benchmark output is informational and machine-specific. Crashes, zero delivery,
 and invalid samples still fail the command.
+
+On a hybrid CPU the same case measures far apart on performance and efficiency
+cores, so `run.sh` pins itself, and every build and benchmark process it starts,
+to the performance cores wherever the kernel lists them
+(`/sys/devices/cpu_core/cpus` on Intel hybrid parts), within the CPUs it was
+already allowed, so an outer `taskset` or cpuset still narrows it. The run prints the pinned cores beside its result and records
+them as `affinity` in the metadata. A CPU with one core type runs unpinned.
 
 BASE comparisons run paired rounds (default three, `MOQ_BENCH_RUNTIME_ROUNDS`),
 alternating base/current order. Startup remains outside the final five-second
