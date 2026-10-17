@@ -2662,7 +2662,7 @@ mod tests {
         }
     }
 
-    fn receive(state: &mut StreamsState, id: StreamId, data: std::ops::Range<u64>) {
+    fn receive(state: &mut StreamsState, id: StreamId, data: Range<u64>) {
         let len = (data.end - data.start) as usize;
         let _ = state
             .received(
