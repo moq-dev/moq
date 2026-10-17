@@ -220,6 +220,49 @@ fn lifecycle() {
     assert_eq!(pair.server.known_cids(), 0);
 }
 
+/// A client that closes as soon as it is `Connected`, before its Finished has left, still lets
+/// the server complete the handshake and read the application close.
+#[test]
+fn close_before_the_client_finished_leaves() {
+    let _guard = subscribe();
+    let mut pair = Pair::default();
+    let client_ch = pair.begin_connect(client_config());
+    pair.drive_client();
+    pair.drive_server();
+
+    // Hand the client the server's flight without letting it transmit, as a pacer would.
+    let mut buf = Vec::new();
+    while let Some((recv_time, ecn, packet)) = pair.client.inbound.pop_front() {
+        let server = pair.server.addr;
+        let Some(DatagramEvent::ConnectionEvent(_, event)) = pair
+            .client
+            .endpoint
+            .handle(recv_time, server, None, ecn, packet, &mut buf)
+        else {
+            panic!("expected a connection event");
+        };
+        pair.client_conn_mut(client_ch).handle_event(event);
+    }
+
+    const REASON: &[u8] = b"whee";
+    let now = pair.time;
+    let client = pair.client_conn_mut(client_ch);
+    assert_matches!(client.poll(), Some(Event::HandshakeDataReady));
+    assert_matches!(client.poll(), Some(Event::Connected));
+    client.close(now, VarInt(42), REASON.into());
+    pair.drive();
+
+    let server_ch = pair.server.assert_accept();
+    let server = pair.server_conn_mut(server_ch);
+    assert_matches!(server.poll(), Some(Event::HandshakeDataReady));
+    assert_matches!(server.poll(), Some(Event::HandshakeConfirmed));
+    assert_matches!(server.poll(), Some(Event::Connected));
+    assert_matches!(server.poll(),
+                    Some(Event::ConnectionLost { reason: ConnectionError::ApplicationClosed(
+                        ApplicationClose { error_code: VarInt(42), reason }
+                    )}) if reason == REASON);
+}
+
 #[test]
 fn stats_include_congestion_controller_bandwidth_estimate() {
     const WINDOW: u64 = 12_000;
