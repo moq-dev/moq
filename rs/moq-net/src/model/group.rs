@@ -737,6 +737,7 @@ impl Producer {
 	/// Accept frame 0 without checking it against the track's other groups, so it never
 	/// bounds theirs either: for a wire whose timestamps may be send times rather than
 	/// media time. Call it before the first write.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub(crate) fn skip_rewind_check(&self) {
 		self.alive.checked.store(true, Ordering::Relaxed);
 	}
