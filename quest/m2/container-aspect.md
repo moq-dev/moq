@@ -30,16 +30,11 @@ The two signals mean different things, so each maps on its own:
   other unit requires both fields, so a track missing one fails the import
   as malformed.
 
-When the container and the SPS both signal an aspect and disagree, the
-precedence is open for the maintainer. #5846 ordered colour bitstream first:
-`rs/moq-mux/src/codec/color.rs` resolves the codec's colour and fills only
-its gaps from the container, logging a conflict, because a muxer may get the
-box wrong. FFmpeg's `av_guess_sample_aspect_ratio` does the opposite for
-aspect, since a container aspect is often a deliberate remux fix.
-Recommendation: match colour, so the SPS wins and the container fills an
-SPS that signals no aspect. Whichever wins, add a conflicting-signal test
-through an avc1 or hvc1 entry that carries both, including a 1:1 `pasp`
-against a non-square SPS.
+Decided with the maintainer on 2026-10-17: the SPS wins, and the container
+fills only an SPS that signals no aspect, logging any conflict, as #5846
+orders colour in `rs/moq-mux/src/codec/color.rs` (a muxer may get the box
+wrong). Rejected: the container first, as FFmpeg's
+`av_guess_sample_aspect_ratio` does to honour a remux fix.
 
 Tests, through both importers, including an AV1 track and a headerless avc3
 initializer:
@@ -55,5 +50,9 @@ initializer:
   the import.
 - Matroska without crop or display dimensions, or with ones matching the
   pixel ratio, leaves the field unset.
+- An avc1 or hvc1 entry with a 1:1 `pasp` against a non-square SPS keeps
+  the SPS aspect and logs the conflict.
+- An avc1 entry whose SPS signals no aspect takes `pasp` 4:3 on 1440x1080
+  as 16:9.
 
 In-band SPS acquisition for headerless initializers is separate work.
