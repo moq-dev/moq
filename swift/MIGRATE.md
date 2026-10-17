@@ -43,7 +43,7 @@ let video = try broadcast.encodeVideo(input: input, output: output)
 let frames = try await consumer.decodeVideo(name: name, catalogVideo: rendition, output: decoder)
 // After
 let video = try Video.Producer(catalog: Media.CatalogProducer(broadcast: broadcast), input: input, output: output)
-let frames = try await Video.Consumer.subscribe(broadcast: consumer, name: name, rendition: rendition, output: decoder)
+let frames = try await Video.Consumer.subscribe(broadcast: consumer, id: name, rendition: rendition, output: decoder)
 ```
 
 ### Background panics are reported (#5562)
