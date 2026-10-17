@@ -4,6 +4,7 @@ import { Milli } from "@moq/clock";
 import { type Broadcast, Connection, Origin, type Path, Time } from "@moq/net";
 // The in-memory WebTransport pair @moq/net tests with; not part of its published surface.
 import { createMockTransportPair } from "../../net/src/mock.ts";
+import * as Protected from "./broadcast.ts";
 import { Credential } from "./credential.ts";
 
 const encoder = new TextEncoder();
@@ -62,9 +63,9 @@ for (const [name, protocol, routed, timed] of transports) {
 		const generation = cred.produce();
 		const path = await cred.path("meeting.hang");
 		const broadcast = publisher.createBroadcast(path);
-		const physical = await generation.name("video");
-		const net = broadcast.createTrack(physical, { timescale: Time.Timescale.MILLI });
-		const video = await generation.produce(net);
+		const video = await new Protected.Producer(broadcast, generation).createTrack("video", {
+			timescale: Time.Timescale.MILLI,
+		});
 		broadcast.announce({ epoch: generation.epoch });
 
 		const group = video.appendGroup();
@@ -75,7 +76,9 @@ for (const [name, protocol, routed, timed] of transports) {
 		// The epoch rides the route where the wire carries it; elsewhere the application supplies it.
 		if (routed) expect(remote.epoch).toBe(generation.epoch);
 		const epoch = routed && remote.epoch ? remote.epoch : generation.epoch;
-		const consumer = cred.consume(epoch).consume(remote.track(physical).subscribe({ maxDelay: Milli(60_000) }));
+		const consumer = await new Protected.Consumer(remote, cred.consume(epoch)).subscribe("video", {
+			maxDelay: Milli(60_000),
+		});
 
 		const received = await consumer.recvGroup();
 		if (!received) throw new Error("expected a group");
@@ -115,8 +118,9 @@ for (const [name, protocol] of [
 		const generation = cred.produce();
 		const path = await cred.path("meeting.hang");
 		const broadcast = publisher.createBroadcast(path);
-		const physical = await generation.name("audio");
-		const audio = await generation.produce(broadcast.createTrack(physical, { timescale: Time.Timescale.MILLI }));
+		const audio = await new Protected.Producer(broadcast, generation).createTrack("audio", {
+			timescale: Time.Timescale.MILLI,
+		});
 		broadcast.announce({ epoch: generation.epoch });
 
 		// A group first, so the subscription is serving before datagrams, which are never cached.
@@ -125,9 +129,10 @@ for (const [name, protocol] of [
 		group.close();
 
 		const remote = await active(subscriber, path);
-		const consumer = cred
-			.consume(remote.epoch ?? generation.epoch)
-			.consume(remote.track(physical).subscribe({ maxDelay: Milli(60_000) }));
+		const consumer = await new Protected.Consumer(remote, cred.consume(remote.epoch ?? generation.epoch)).subscribe(
+			"audio",
+			{ maxDelay: Milli(60_000) },
+		);
 		expect(decoder.decode((await (await consumer.recvGroup())?.readFrame())?.plaintext)).toBe("init");
 
 		// Sequences continue past the group, preserved hop to hop by insertDatagram.
