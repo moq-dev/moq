@@ -16,6 +16,7 @@ The reference implementation. Every crate is on
 | [moq-pattern](https://docs.rs/moq-pattern) | Path patterns such as `room/**`. Re-exported by moq-net and moq-auth. |
 | [moq-tokio](https://docs.rs/moq-tokio) | Connects and listens over QUIC, WebSocket, or iroh, from config or CLI flags. |
 | [moq-sock](https://docs.rs/moq-sock) | Socket binding and CPU pinning for thread-per-core listeners. |
+| [moq-ice](https://docs.rs/moq-ice) | The ICE agent behind native WebRTC: drives a str0m connection over UDP, with a STUN client. |
 | [moq-uring](https://docs.rs/moq-uring) | Experimental Linux io\_uring server for moq-lite. |
 | [hang](/lib/rs/hang) | The media layer: catalog, containers, ordered frame delivery. |
 | [moq-mux](/lib/rs/moq-mux) | Import and export fMP4/CMAF, MPEG-TS, Matroska, FLV, and Annex-B. |

@@ -37,6 +37,8 @@ rustls = { version = "0.23", optional = true }
 # OS-native server-cert verifier for the rustls backends. Version matched to
 # the copy moq-tokio pulls in, to avoid duplication.
 rustls-platform-verifier = { version = "0.7", optional = true }
+# Runtime thread checks for the session moq-transport's `Send` drivers capture.
+send_wrapper = { workspace = true }
 slab = "0.4"
 thiserror = "2"
 tracing = "0.1"

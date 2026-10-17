@@ -518,6 +518,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	) -> Result<VideoConfig> {
 		let mut description = BytesMut::new();
 		avcc.encode_body(&mut description)?;
+		let metadata = crate::codec::h264::config(&description)?;
 
 		let mut config = VideoConfig::new(H264 {
 			profile: avcc.avc_profile_indication,
@@ -527,6 +528,9 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		});
 		config.coded_width = Some(visual.width as _);
 		config.coded_height = Some(visual.height as _);
+		config.framerate = metadata.framerate;
+		config.display_aspect_width = metadata.display_aspect_width;
+		config.display_aspect_height = metadata.display_aspect_height;
 		config.description = Some(description.freeze());
 		config.container = container;
 		Ok(config)
@@ -554,6 +558,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		config.description = Some(description.freeze());
 		config.coded_width = Some(visual.width as _);
 		config.coded_height = Some(visual.height as _);
+		crate::codec::h265::apply_hvcc_sps(hvcc, &mut config)?;
 		config.container = container;
 		Ok(config)
 	}

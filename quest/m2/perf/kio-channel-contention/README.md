@@ -51,7 +51,7 @@ producer and 4,096 consumers on one channel, ns per consumer:
 Spreading the same consumers over more cores makes the whole cycle slower,
 not faster: each acquire that changes cores costs 50 to 500 ns.
 
-`just bench-lock`, mutex wait over worker CPU in the 5 s steady window, tokio
+`just bench-profile lock`, mutex wait over worker CPU in the 5 s steady window, tokio
 workers (`chat` is `bench/workloads/chat.toml`, pinned at 10 messages/s; its
 frame size, then rolled once per run from 200 to 400 bytes, is now pinned at 300):
 
@@ -85,7 +85,7 @@ one before naming `GroupState` frames as its target.
 Decided (maintainer, 2026-10-07):
 
 - Decide the fix from the stacks. First run the
-  [profiling recipe](/quest/m2/perf/lock-profile.md)'s lock-wait mode to
+  profiling recipe's lock-wait mode (`just bench-profile lock`) to
   name the contended channels (track, group, broadcast, origin state) from
   the callers above these sites. Then bring the options back with numbers.
   Submitting staged io_uring SQEs before a blocking acquire only hides the
@@ -97,8 +97,8 @@ Decided (maintainer, 2026-10-14):
 
 - This became an epic: a contended micro-bench names the targets, then two
   independent fixes each land their own before and after. This README keeps
-  the end-to-end `just bench-lock` before and after once the children merge.
-- The lock-wait mode `just bench-lock` already shipped, so the epic no
+  the end-to-end `just bench-profile lock` before and after once the children merge.
+- The lock-wait mode `just bench-profile lock` already shipped, so the epic no
   longer waits on the rest of the profiling recipe (CPU and heap modes).
 - Scope is `Producer`/`Consumer` only. `Shared` and `Queue` mutate from both
   sides, so a reader-optimized design buys them little; they stay on the
@@ -158,7 +158,3 @@ Decided (maintainer, 2026-10-14, per-thread follow-up):
 - [Cluster spike](/quest/m2/perf/kio-channel-contention/spike-cluster.md) - measures a relay per thread clustered over the in-memory transport, nothing shared
 - [Append-only log](/quest/m2/perf/kio-channel-contention/log.md) - a kio log primitive with lock-free cursor reads and front eviction, if the shared model survives the spikes
 - [Log adoption](/quest/m2/perf/kio-channel-contention/log-adoption.md) - the rest of moq-net's log-shaped state moves onto the log where it measures as a win
-
-## Related
-
-- [Relay profiling](/quest/m2/perf/lock-profile.md) - the lock-wait recipe that measures before and after

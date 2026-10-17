@@ -31,7 +31,17 @@ on:
   merge_group:
     types: [checks_requested]
   workflow_call:
+    inputs:
+      benchmarks:
+        description: Measure Swift against Rust baselines on this runner
+        type: boolean
+        default: false
   workflow_dispatch:
+    inputs:
+      benchmarks:
+        description: Measure Swift against Rust baselines on this runner
+        type: boolean
+        default: false
 
 concurrency:
   group: platform-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
@@ -151,6 +161,16 @@ jobs:
       - name: Swift
         if: needs.scope.outputs.swift == 'true'
         run: just swift check
+      - name: Swift binding benchmark
+        if: inputs.benchmarks
+        run: just bench-ffi swift
+      - name: Preserve Swift benchmark
+        if: inputs.benchmarks && !cancelled()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: bench-ffi-swift
+          path: target/bench/ffi/
+          if-no-files-found: error
       - name: OBS
         if: needs.scope.outputs.obs == 'true'
         run: just obs package --target aarch64-apple-darwin --output "$RUNNER_TEMP/obs"

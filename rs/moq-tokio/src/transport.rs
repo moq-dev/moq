@@ -37,6 +37,8 @@ pub enum Transport {
 	Unix,
 	/// WebTransport over HTTP/3 on QUIC.
 	WebTransport,
+	/// A WebRTC data channel using qmux framing.
+	WebRtc,
 }
 
 impl Transport {
@@ -49,6 +51,7 @@ impl Transport {
 			Self::Tcp => "tcp",
 			Self::Unix => "unix",
 			Self::WebTransport => "webtransport",
+			Self::WebRtc => "webrtc",
 		}
 	}
 }
@@ -906,10 +909,10 @@ impl GroupedSend for web_transport_iroh::SendStream {
 	}
 }
 
-#[cfg(any(feature = "websocket", feature = "tcp"))]
+#[cfg(any(feature = "websocket", feature = "tcp", feature = "webrtc"))]
 impl Grouped for qmux::Session {}
 
-#[cfg(any(feature = "websocket", feature = "tcp"))]
+#[cfg(any(feature = "websocket", feature = "tcp", feature = "webrtc"))]
 impl GroupedSend for qmux::SendStream {
 	type Group = moq_net::transport::poll::Ungrouped;
 

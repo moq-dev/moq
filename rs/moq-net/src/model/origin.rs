@@ -79,6 +79,7 @@ impl Hop {
 
 	/// Build a hop from an id read off the wire, where 0 is legal.
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	// pending: /quest/m1/public-model/answer.md
 	pub(crate) fn from_wire(id: u64) -> Result<Self, DecodeError> {
 		if id >= 1u64 << 62 {
 			return Err(DecodeError::InvalidValue);
@@ -208,7 +209,7 @@ impl<V> Decode<V> for Hop {
 /// Caps pathological or loop-induced announcements at a reasonable cluster
 /// diameter; appending past this limit returns [`InvalidHop::TooMany`] rather than
 /// silently truncating.
-pub(crate) const MAX_HOPS: usize = 32;
+pub(super) const MAX_HOPS: usize = 32;
 
 /// Bounded, loop-free list of [`Hop`] entries: the hop chain of a broadcast.
 ///
@@ -386,10 +387,12 @@ impl Cost {
 	/// A peer without a wire cost: the same as [`Cost::default`], so only the
 	/// local link price counts.
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	// pending: /quest/m1/public-model/answer.md
 	pub(crate) const UNKNOWN: Self = Self(0);
 
 	/// Add a link's static price without overflowing the wire ceiling.
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	// pending: /quest/m1/public-model/answer.md
 	pub(crate) fn charged(self, link_cost: u64) -> Self {
 		Self::new(self.0.saturating_add(link_cost))
 	}
@@ -478,9 +481,11 @@ pub struct Route {
 	/// Local selection state: split-horizon matches this as well as the chain, so a
 	/// route is never advertised back to the session it came from even when that
 	/// session withheld an identity (hop 0). Never forwarded.
+	// pending: /quest/m1/public-model/answer.md
 	pub(crate) via: Hop,
 
 	/// Where the route entered this origin; see [`Self::source`]. Never forwarded.
+	// pending: /quest/m1/public-model/answer.md
 	pub(crate) source: Source,
 }
 
@@ -542,6 +547,7 @@ impl Route {
 	/// Not part of the advertised route: an assigned identity is private selection
 	/// state and must not be forwarded.
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	// pending: /quest/m1/public-model/answer.md
 	pub(crate) fn with_via(mut self, via: Hop) -> Self {
 		self.via = via;
 		self
@@ -1526,6 +1532,7 @@ impl Default for OriginScope {
 
 /// The announce-interest prefixes that cover a pattern scope on a prefix-only
 /// wire: each member's literal head, minus heads another already covers.
+// pending: /quest/m1/public-model/answer.md
 pub(crate) fn interest_prefixes(allowed: &Patterns) -> Vec<PathOwned> {
 	let mut heads: Vec<PathOwned> = allowed
 		.iter()
@@ -1545,7 +1552,7 @@ pub(crate) fn interest_prefixes(allowed: &Patterns) -> Vec<PathOwned> {
 /// lists what is under it. Only discovery is affected: a request by exact path
 /// resolves either way.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(crate) struct Hidden {
+pub(super) struct Hidden {
 	/// Report hidden routes too.
 	include: bool,
 	/// Measure visibility from the request prefix instead of authorization heads.
@@ -1708,6 +1715,7 @@ impl Producer {
 
 	/// The ingress stats context this handle was tagged with.
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	// pending: /quest/m1/public-model/answer.md
 	pub(crate) fn stats(&self) -> &stats::Session {
 		&self.stats
 	}
@@ -1781,6 +1789,7 @@ impl Producer {
 	/// subscriber issues no ANNOUNCE_PLEASE). Used to fill an unset session half
 	/// so both the publisher and subscriber loops still run.
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	// pending: /quest/m1/public-model/answer.md
 	pub(crate) fn empty(hop: Hop) -> Self {
 		// No allowed prefixes means no broadcast is ever created, so nothing will
 		// ever be queued on the detached submission handle.
@@ -1903,6 +1912,7 @@ impl Producer {
 	/// [`Dynamic`] requests with one of these; the requester already holds
 	/// the request's result channel, so the table never needs to resolve it.
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	// pending: /quest/m1/public-model/answer.md
 	pub(crate) fn create_source(&self, path: impl AsPath) -> broadcast::Producer {
 		let path = path.as_path();
 		let full = self.root.join(&path).to_owned();
@@ -1926,6 +1936,7 @@ impl Producer {
 	/// advertises through a broadcast ([`broadcast::Producer::announce`]) or a
 	/// [`Dynamic`] handler, which serve what they claim.
 	#[cfg(test)]
+	// private: test
 	pub(crate) fn announce(&self, prefix: impl AsPath, route: Route) -> Result<AnnounceProducer, Error> {
 		Announcing::new(self, prefix)?.announce(
 			route,
@@ -2208,7 +2219,7 @@ struct Serving {
 ///
 /// Handed to the broadcast by [`Producer::create_broadcast`], so a standalone
 /// broadcast has none and cannot announce.
-pub(crate) struct Announcer {
+pub(super) struct Announcer {
 	entry: AnnounceProducer,
 	/// The ingress counters an advertised interval's announce guard comes from.
 	ingress: stats::Scope,
@@ -2220,7 +2231,7 @@ pub(crate) struct Announcer {
 
 impl Announcer {
 	/// Advertise the broadcast's path with `route`, or re-price it in place.
-	pub(crate) fn announce(&mut self, route: Route) -> Result<(), Error> {
+	pub(super) fn announce(&mut self, route: Route) -> Result<(), Error> {
 		self.entry.update(route)?;
 		if self.entry.guard.is_none() {
 			self.entry.guard = Some(self.ingress.announce());
@@ -2229,13 +2240,13 @@ impl Announcer {
 	}
 
 	/// Withdraw the advertisement from local and remote consumers alike.
-	pub(crate) fn withdraw(&mut self) {
+	pub(super) fn withdraw(&mut self) {
 		self.entry.withdraw();
 		self.entry.guard = None;
 	}
 
 	/// The route the broadcast's path is advertised with, if it is.
-	pub(crate) fn route(&self) -> Option<Route> {
+	pub(super) fn route(&self) -> Option<Route> {
 		self.entry.route()
 	}
 }
@@ -2247,6 +2258,7 @@ impl Announcer {
 /// retracts the route, which [`AnnounceConsumer`]s observe and sessions withdraw
 /// from their peers.
 #[must_use = "dropping an announcement retracts the route"]
+// private: test
 pub(crate) struct AnnounceProducer {
 	shared: SendCell<kio::Shared<OriginState>>,
 	/// The table entries this advertisement created, by prefix and id. A prefix
@@ -3549,6 +3561,7 @@ impl Selected {
 
 /// The lifetime of path requests while this peer still selects the held instance.
 #[cfg_attr(not(feature = "async"), allow(dead_code))]
+// pending: /quest/m1/public-model/answer.md
 pub(crate) struct Selection {
 	shared: SendCell<kio::Shared<OriginState>>,
 	path: PathOwned,
@@ -3558,7 +3571,7 @@ pub(crate) struct Selection {
 
 impl Selection {
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
-	pub(crate) fn current(&self) -> kio::Consumer<()> {
+	pub(super) fn current(&self) -> kio::Consumer<()> {
 		self.signal
 			.read()
 			.current
@@ -3570,7 +3583,7 @@ impl Selection {
 	/// `Ready` once the current period's replacement is released, registering
 	/// `waiter` until then.
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
-	pub(crate) fn poll_retired(&self, waiter: &kio::Waiter) -> Poll<()> {
+	pub(super) fn poll_retired(&self, waiter: &kio::Waiter) -> Poll<()> {
 		match self.signal.poll(waiter, |selected| match &selected.retiring {
 			Some(release) => release.poll(waiter),
 			None => Poll::Pending,
@@ -4322,7 +4335,7 @@ pub struct Dynamic {
 
 impl Dynamic {
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
-	pub(crate) fn request_validity(&self, path: &Path) -> Option<Selection> {
+	pub(super) fn request_validity(&self, path: &Path) -> Option<Selection> {
 		let shared = &self.announcement.shared;
 		let mut table = shared.lock();
 		if table.closed {
@@ -4386,6 +4399,7 @@ impl Dynamic {
 	/// Retire an explicit peer withdrawal, hiding derived paths only once its
 	/// last live advertisement at the prefix is gone. A lost session just drops.
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	// pending: /quest/m1/public-model/answer.md
 	pub(crate) fn withdrawn(self) {
 		self.announcement.retract(true);
 	}
@@ -4902,6 +4916,7 @@ impl Consumer {
 	/// anonymous route from echoing back. Pass [`Hop::UNKNOWN`] for an anonymous
 	/// peer.
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	// pending: /quest/m1/public-model/answer.md
 	pub(crate) fn excluding(mut self, peer: Hop) -> Self {
 		self.horizon.exclude = Some(peer);
 		self
@@ -4930,6 +4945,7 @@ impl Consumer {
 	/// A clone whose [`announced`](Self::announced) reports only the routes a feed
 	/// from `outer` hides, for a stream topping up that feed.
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	// pending: /quest/m1/public-model/answer.md
 	pub(crate) fn beyond(mut self, outer: &Consumer) -> Self {
 		self.hidden.beyond = Some(
 			outer
@@ -4944,6 +4960,7 @@ impl Consumer {
 
 	/// Set wire discovery visibility relative to this consumer's requested root.
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	// pending: /quest/m1/public-model/answer.md
 	pub(crate) fn discovery(mut self, hidden: bool) -> Self {
 		self.hidden.include = hidden;
 		self.hidden.from = Some(self.root.clone());
@@ -4952,12 +4969,14 @@ impl Consumer {
 
 	/// Whether [`announced`](Self::announced) reports hidden routes too.
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	// pending: /quest/m1/public-model/answer.md
 	pub(crate) fn includes_hidden(&self) -> bool {
 		self.hidden.include
 	}
 
 	/// The egress stats context this handle was tagged with.
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	// pending: /quest/m1/public-model/answer.md
 	pub(crate) fn stats(&self) -> &stats::Session {
 		&self.stats
 	}
@@ -4985,6 +5004,7 @@ impl Consumer {
 	/// announce-interest for a prefix outside our scope by announcing nothing,
 	/// rather than tearing the stream down.
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	// pending: /quest/m1/public-model/answer.md
 	pub(crate) fn empty(&self) -> Self {
 		Self {
 			scope: OriginScope::empty(),
@@ -5111,6 +5131,7 @@ impl Consumer {
 	/// The newest broadcast published on this origin at exactly `path`, if any.
 	/// Test-only: a request goes through the table like any other.
 	#[cfg(test)]
+	// private: test
 	pub(crate) fn get_broadcast(&self, path: impl AsPath) -> Option<broadcast::Consumer> {
 		let full = self.root.join(path).to_owned();
 		if !self.scope.permits(&full) {
@@ -5270,6 +5291,7 @@ impl Consumer {
 	/// [`Self::request_broadcast`], refused with [`Error::Unroutable`] unless the
 	/// winning route serves `epoch`: a peer asking for one publisher instance must
 	/// not be handed another.
+	// pending: /quest/m1/public-model/answer.md
 	pub(crate) fn request(&self, path: Path<'_>, epoch: Option<&crate::Epoch>) -> kio::Pending<Requesting> {
 		// The path as this handle names it, absolute: what its scope authorizes and
 		// what its egress is counted under, so a read through a mount bills where
@@ -5463,12 +5485,14 @@ impl AnnounceConsumer {
 	}
 
 	#[cfg(test)]
+	// private: test
 	pub(crate) async fn expect_next_active(&mut self, expected: impl AsPath) -> Route {
 		let event = self.expect_next().await;
 		Self::active(event, &expected.as_path())
 	}
 
 	#[cfg(test)]
+	// private: test
 	pub(crate) async fn expect_next_restarted(&mut self, expected: impl AsPath) -> Route {
 		match self.expect_next().await {
 			AnnounceEvent::Restart(announce) => {
@@ -5480,6 +5504,7 @@ impl AnnounceConsumer {
 	}
 
 	#[cfg(test)]
+	// private: test
 	pub(crate) async fn expect_next_ended(&mut self, expected: impl AsPath) {
 		match self.expect_next().await {
 			AnnounceEvent::End(announce) => assert_eq!(announce.prefix, expected.as_path(), "wrong prefix"),
@@ -5827,6 +5852,7 @@ impl AnnounceConsumer {
 /// the test executor, mirroring what `moq_tokio::origin::spawn` does for
 /// applications.
 #[cfg(test)]
+// private: test
 pub(crate) trait ProduceTest {
 	fn produce(self) -> Producer;
 }

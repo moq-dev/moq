@@ -11,7 +11,8 @@ those buffers with the ring is
 ## Plan
 
 Decided in the 2026-09-30 plan: commit to the redesign, but start only after
-a `moq-quic` profile shows where ingress and egress spend their time.
+a `moq-quic` profile shows where ingress and egress spend their time
+(`just bench-profile cpu`).
 No current profile is from `moq-quic`, and moq-uring already avoids every
 other copy the current API allows.
 
@@ -36,7 +37,3 @@ the same workloads.
 ## Related
 
 - [Relay egress profile](/quest/m2/quic-egress-profile.md) - its send-buffer pool lever touches the same `SendBuffer` seam
-
-## Required
-
-- [Relay profiling recipe](/quest/m2/perf/lock-profile.md) - the captures that rank the candidates
