@@ -423,6 +423,11 @@ impl<F: Container> Consumer<F> {
 				}
 			}
 
+			// Lookahead drops decode errors, so fail on a malformed group it found before a skip drops it.
+			if self.pending.iter().any(|group| group.malformed) {
+				return Poll::Ready(Err(moq_net::Error::Decode(moq_net::DecodeError::ExpectedEnd).into()));
+			}
+
 			// Walk the cursor over missing sequences below the first arrived group.
 			// Groups race on independent QUIC streams (newer ones at higher priority),
 			// so a buffered higher sequence proves nothing: the missing one may be
@@ -438,7 +443,9 @@ impl<F: Container> Consumer<F> {
 				&& let Some((_, next_start)) = next_group
 				&& (finished || max_timestamp.saturating_sub(next_start) >= self.max_delay)
 			{
-				if !pts_contiguous(current_end.or(self.presented_end), next_start) {
+				// A data marker has no timestamp to show the missing sequences held nothing.
+				let bare = self.pending.front().is_some_and(|group| group.bare);
+				if bare || !pts_contiguous(current_end.or(self.presented_end), next_start) {
 					self.lose();
 				}
 				self.current = front_sequence;
@@ -488,13 +495,14 @@ impl<F: Container> Consumer<F> {
 				&& front_sequence > self.current
 			{
 				let _ = self.pending.front_mut().unwrap().buffer_all(waiter, &self.format);
-				let next_start = self
-					.pending
-					.front()
-					.and_then(|group| group.min_timestamp.map(std::time::Duration::from).or(group.max_end));
-				if let Some(start) = next_start
-					&& !pts_contiguous(current_end.or(self.presented_end), start)
-				{
+				let front = self.pending.front().unwrap();
+				let next_start = front.min_timestamp.map(std::time::Duration::from).or(front.max_end);
+				// A data marker has no timestamp to show the missing sequences held nothing.
+				let lost = match next_start {
+					Some(start) => !pts_contiguous(current_end.or(self.presented_end), start),
+					None => front.bare,
+				};
+				if lost {
 					self.lose();
 				}
 				self.current = front_sequence;
@@ -1085,6 +1093,68 @@ mod tests {
 		producer.finish().unwrap();
 
 		assert_eq!(items(&mut reader).await, ["0", "10000", "end 10000", "2405070000"]);
+	}
+
+	/// A data marker has no timestamp, so the sequences missing before it are lost, not covered
+	/// by the break it declares.
+	#[tokio::test(start_paused = true)]
+	async fn a_hole_before_a_terminal_data_marker_is_a_gap() {
+		let mut track = track_producer("data", hang::container::track_info(hang::catalog::PRIORITY.audio));
+		let subscription = moq_net::track::Subscription::default()
+			.with_max_delay(Duration::from_secs(10))
+			.with_groups(0..);
+		let mut reader = Consumer::new(
+			track.subscribe(subscription),
+			Container::Legacy(crate::container::Kind::Data),
+		);
+		write_group(&mut track, 0, &[ts(0), ts(10_000)]);
+		let mut group = track.create_group(moq_net::group::Info { sequence: 2 }).unwrap();
+		group.write_frame(ts(0), Bytes::new()).unwrap();
+		group.finish().unwrap();
+		track.finish().unwrap();
+
+		assert_eq!(items(&mut reader).await, ["0", "10000", "gap 10000+0", "end 10000"]);
+	}
+
+	/// A malformed data marker group found while looking ahead fails the reader, rather than
+	/// reading as a gap when a latency skip passes over it.
+	#[tokio::test(start_paused = true)]
+	async fn a_malformed_marker_passed_by_a_skip_fails_the_reader() {
+		let mut track = track_producer("data", hang::container::track_info(hang::catalog::PRIORITY.audio));
+		let subscription = moq_net::track::Subscription::default()
+			.with_max_delay(Duration::from_secs(10))
+			.with_groups(0..);
+		let mut reader = Consumer::new(
+			track.subscribe(subscription),
+			Container::Legacy(crate::container::Kind::Data),
+		);
+		reader.max_delay = Duration::ZERO;
+		// The current group stays open, so only a skip moves past it.
+		let mut slow = track.create_group(moq_net::group::Info { sequence: 0 }).unwrap();
+		hang::container::Frame {
+			timestamp: ts(0),
+			payload: Bytes::from_static(b"a"),
+		}
+		.write_to(&mut slow)
+		.unwrap();
+		let mut group = track.create_group(moq_net::group::Info { sequence: 1 }).unwrap();
+		group.write_frame(ts(10_000), Bytes::new()).unwrap();
+		hang::container::Frame {
+			timestamp: ts(10_000),
+			payload: Bytes::from_static(b"b"),
+		}
+		.write_to(&mut group)
+		.unwrap();
+		group.finish().unwrap();
+		write_group(&mut track, 2, &[ts(1_000_000)]);
+
+		let read = loop {
+			match reader.read().await {
+				Ok(Some(Read::Frame { frame, .. })) if frame.timestamp == ts(0) => continue,
+				other => break other,
+			}
+		};
+		assert!(read.is_err(), "{read:?}");
 	}
 
 	/// An object with no bytes marks a break only on a data track: on a media track it is
