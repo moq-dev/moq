@@ -769,8 +769,6 @@ pub struct MoqConnectionStats {
 	pub rtt_us: Option<u64>,
 	/// Estimated send bandwidth from the congestion controller, in bits per second.
 	pub estimated_send_rate_bps: Option<u64>,
-	/// Estimated receive bandwidth from MoQ PROBE, in bits per second.
-	pub estimated_recv_rate_bps: Option<u64>,
 	/// Total bytes sent, including retransmissions and overhead.
 	pub bytes_sent: Option<u64>,
 	/// Total bytes received, including duplicates and overhead.
@@ -795,7 +793,6 @@ impl MoqConnectionStats {
 		Self {
 			rtt_us: stats.rtt.map(|d| d.as_micros() as u64),
 			estimated_send_rate_bps: stats.estimated_send_rate.map(moq_net::bandwidth::Rate::as_bps),
-			estimated_recv_rate_bps: stats.estimated_recv_rate.map(moq_net::bandwidth::Rate::as_bps),
 			bytes_sent: stats.bytes_sent,
 			bytes_received: stats.bytes_received,
 			bytes_lost: stats.bytes_lost,
@@ -1094,12 +1091,23 @@ impl MoqSession {
 		self.bandwidth.clone()
 	}
 
+	/// Hold receive-estimate demand until the returned consumer is released.
+	pub fn recv_bandwidth(&self) -> Option<Arc<crate::bandwidth::MoqBandwidthConsumer>> {
+		let consumer = match &self.inner {
+			#[cfg(not(target_arch = "wasm32"))]
+			Inner::Connection(connection) => Some(connection.recv_bandwidth()),
+			Inner::Session(session) => session.recv_bandwidth(),
+		}?;
+		Some(Arc::new(crate::bandwidth::MoqBandwidthConsumer::new(consumer)))
+	}
+
 	/// Snapshot the current connection statistics (RTT, bandwidth estimates,
 	/// byte/packet counters). Cheap to call; intended for periodic polling.
 	///
 	/// Individual fields are `None` when the transport backend doesn't report
 	/// them, or (on a client session) while the connection is between sessions;
 	/// see [`MoqConnectionStats`].
+	/// Reading statistics does not request receive estimates.
 	pub fn stats(&self) -> MoqConnectionStats {
 		let _guard = crate::ffi::enter();
 		match &self.inner {

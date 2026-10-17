@@ -223,7 +223,7 @@ fn filled_track(n: usize, payload: &Bytes) -> TrackCtx {
 fn replay() -> track::Subscription {
 	track::Subscription::default()
 		.with_max_delay(Duration::MAX)
-		.with_start(track::Position::group(0))
+		.with_groups(0..)
 }
 
 /// Drain N cached groups from a track, in arrival order and in sequence order.

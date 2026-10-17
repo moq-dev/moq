@@ -3405,7 +3405,7 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 		// Feed the full update into the model subscriber so the producer's
 		// aggregate reflects it (and a relay re-forwards it upstream).
 		// Read first: `update` replaces these preferences.
-		let requested = self.track.subscription().start.map(|start| start.group);
+		let requested = self.track.subscription().start().map(|start| start.group);
 		let floored = requested.is_some_and(|group| group > 0);
 		let bounds = Bounds::from(&upd);
 		let _ = self.track.update(crate::track::Subscription {
@@ -3512,7 +3512,7 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 		if self.emit_range
 			&& self.start.is_none()
 			&& self.ctx.version.has_largest()
-			&& let Some(start) = self.track.subscription().start
+			&& let Some(start) = self.track.subscription().start()
 			&& let Poll::Ready(Some(largest)) = self.track.poll_live(waiter)
 			&& start > largest
 		{
@@ -3670,7 +3670,7 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 			return Ok(());
 		};
 		// A cap below the end bounds what the subscriber is owed, as on its side.
-		let end = final_sequence(self.track.subscription().end.map_or(fin, |end| end.min(fin)));
+		let end = final_sequence(self.track.subscription().end().map_or(fin, |end| end.min(fin)));
 		self.drop_range(start..end, writer)
 	}
 }
@@ -3718,7 +3718,7 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 		// floor. Lite-06 encodes a floor of group 0 as 0, which decodes as no named floor;
 		// that 0 is group 0, so it is not pinned. Raised, not assigned: an update that
 		// landed while the group was held may already have raised it past.
-		if self.track.subscription().start.is_none() && !self.ctx.version.resolves_start() {
+		if self.track.subscription().start().is_none() && !self.ctx.version.resolves_start() {
 			self.track.raise_start_to(start);
 		}
 		self.serve(group);
@@ -4107,13 +4107,13 @@ mod serve_group_test {
 			end_group: Some(5),
 			end_frame: None,
 		};
-		assert_eq!(whole.positions().end, Some(track::Position::group(6)));
+		assert_eq!(whole.positions().end(), Some(track::Position::group(6)));
 
 		let capped = Bounds {
 			end_frame: Some(2),
 			..whole
 		};
-		assert_eq!(capped.positions().end, Some(track::Position { group: 5, frame: 3 }));
+		assert_eq!(capped.positions().end(), Some(track::Position { group: 5, frame: 3 }));
 
 		let started = Bounds {
 			start_group: Some(5),
@@ -4122,8 +4122,8 @@ mod serve_group_test {
 			end_frame: None,
 		};
 		let positions = started.positions();
-		assert_eq!(positions.start, Some(track::Position { group: 5, frame: 3 }));
-		assert_eq!(positions.end, None);
+		assert_eq!(positions.start(), Some(track::Position { group: 5, frame: 3 }));
+		assert_eq!(positions.end(), None);
 
 		// A frame bound the peer sent without its group has nothing to count from, so it
 		// cannot reach the model at all.
@@ -4133,7 +4133,7 @@ mod serve_group_test {
 			end_group: None,
 			end_frame: Some(7),
 		};
-		assert_eq!((orphan.positions().start, orphan.positions().end), (None, None));
+		assert_eq!((orphan.positions().start(), orphan.positions().end()), (None, None));
 	}
 
 	/// A group whose head the publisher no longer holds is skipped, not served short:

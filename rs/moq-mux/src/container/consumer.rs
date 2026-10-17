@@ -44,8 +44,8 @@ pub(crate) enum Item {
 /// skipped. A missing sequence gets the same tolerance: there is no way to tell a stream
 /// that lost the delivery race from one the cache evicted.
 ///
-/// Delivery starts at the [`Subscription::start`](moq_net::track::Subscription::start)
-/// floor when one is named, waiting for that group under the budget; without one it
+/// Delivery starts at the lowest absolute start among the
+/// [`Subscription::ranges`](moq_net::track::Subscription::ranges) when every range names one, waiting for that group under the budget; without one it
 /// starts wherever the publisher does, adopted from the first served groups. From there
 /// the same budget is the one rule that catches the consumer up to the live edge, and
 /// history the publisher no longer serves expires like any other gap, since its reach
@@ -161,7 +161,17 @@ impl<F: Container> Consumer<F> {
 		// edge from there. The budget is clamped to the track's retention window,
 		// since history the publisher no longer keeps can't be waited for and would
 		// otherwise stall the catch-up by the excess.
-		let start = subscription.start.map(|position| position.group);
+		// Only absolute starts name a floor: a relative one counts back from wherever the
+		// publisher is, which the first arrivals say.
+		let start = subscription
+			.ranges
+			.iter()
+			.map(|range| match range.start {
+				moq_net::track::Anchor::Absolute(start) => Some(start.group),
+				moq_net::track::Anchor::Relative(_) => None,
+			})
+			.collect::<Option<Vec<_>>>()
+			.and_then(|starts| starts.into_iter().min());
 		let max_delay = subscription
 			.max_delay
 			.min(track.info().max_age.unwrap_or(std::time::Duration::MAX));
@@ -2360,7 +2370,7 @@ mod tests {
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer_track = track.subscribe(
 			moq_net::track::Subscription::default()
-				.with_start(moq_net::track::Position::group(0))
+				.with_groups(0..)
 				.with_max_delay(Duration::from_millis(500)),
 		);
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy(crate::container::Kind::Data));

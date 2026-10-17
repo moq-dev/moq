@@ -474,6 +474,12 @@ These land with the next breaking release, not the 2026-09-23 train.
   the current one at once, then each newer one, ending with the track. It can
   name a frame the publisher reported before its group arrives, and in JS it is
   now async. Rust adds `poll_largest(waiter)`.
+- **`moq_origin_announced_broadcast` delivers every publisher instance.** Its
+  callback gets a new broadcast handle each time another instance takes over
+  the path or the broadcast returns, and its terminal `0` only on cancel. Free
+  each handle with `moq_consume_close` once its successor arrives. A binding's
+  `AnnouncedBroadcast.available()` works the same way, and its first call is
+  unchanged.
 
 ## Wire
 
@@ -607,8 +613,9 @@ Other changes to a deployment:
   `write_datagram(Datagram)` is `insert_datagram(sequence, timestamp, payload)`
   (#3666); `append_datagram` is unchanged. `track::SubscriberControl` is
   `track::Control`, `track::GroupRequest` is `group::Request`, and
-  `ConnectionStats` is `session::Stats` with `estimated_send_rate` /
-  `estimated_recv_rate`.
+  `ConnectionStats` is `session::Stats` with `estimated_send_rate`. Receive
+  estimates come from an owned `session.recv_bandwidth()` consumer: hold it to
+  request PROBE and drop the last consumer to stop it.
 - **Oversized groups abort** with `GroupTooLarge` instead of shedding their head
   (#3585).
 - **Catalog edits are fallible** (#3644, #3813). moq-mux and moq-json `lock()`
@@ -663,7 +670,10 @@ own casing:
   encoder paths that used to be `publish_audio` / `publish_video` are
   `encode_audio` / `encode_video`.
 - **Durations are microseconds** (`max_age_us`, `MoqBackoff.initial_us`), and
-  rate estimates are `estimated_send_rate` / `estimated_recv_rate`.
+  send estimates are `estimated_send_rate_bps`. Read receive estimates through
+  the owned generic bandwidth consumer returned by `recv_bandwidth()`; its
+  `peek()` reads the estimate and `changed()` waits for a new one. Stats no
+  longer carry a receive estimate or request PROBE.
 - **Setters are fallible** (#3642). Client and server configuration setters
   return an error (`Busy` during connect or listen) instead of dropping the
   value. `set_tls_disable_verify(bool)` is `set_tls_verify(bool)`.

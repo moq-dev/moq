@@ -156,6 +156,11 @@ public final class Session: Sendable {
         ffi.stats()
     }
 
+    /// Hold receive-estimate demand until the returned consumer is released.
+    public func recvBandwidth() -> Bandwidth.Consumer? {
+        ffi.recvBandwidth().map(Bandwidth.Consumer.init)
+    }
+
     /// The session's bandwidth allocator.
     ///
     /// Every call returns a handle to the same registry, so reservations made

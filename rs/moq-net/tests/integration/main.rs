@@ -43,6 +43,7 @@ mod routing_contracts;
 mod session_close;
 mod session_panic;
 mod settled_end_survives_abort;
+mod subscribe_ranges;
 mod subscribe_tracks;
 mod subscription_end_integrity;
 mod support;

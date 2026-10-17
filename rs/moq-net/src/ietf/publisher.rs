@@ -1196,14 +1196,16 @@ where
 					// cover the group with no gap and no overlap.
 					let edge = live_edge(&cache);
 					let range = subscribe_range(&msg, edge, self.version);
-					subscription.start = range.start.map(|start| track::Position {
-						group: start.group,
-						frame: start.object,
-					});
-					subscription.end = range.end.and_then(|end| match end.object {
-						Some(object) => track::Position::after(end.group, object),
-						None => track::Position::after_group(end.group),
-					});
+					subscription.set_bounds(
+						range.start.map(|start| track::Position {
+							group: start.group,
+							frame: start.object,
+						}),
+						range.end.and_then(|end| match end.object {
+							Some(object) => track::Position::after(end.group, object),
+							None => track::Position::after_group(end.group),
+						}),
+					);
 					// The live edge is only known once subscribed.
 					subscription.new_group = msg.new_group.and_then(|value| NewGroup::new(value, edge.latest));
 					let _ = track.update(subscription);

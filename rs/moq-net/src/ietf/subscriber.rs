@@ -2571,12 +2571,12 @@ where
 	) -> Option<Idle> {
 		let validity = self.validity.start();
 		let subscription = target.subscription();
-		let start = subscription.as_ref().and_then(|s| s.start);
+		let start = subscription.as_ref().and_then(|s| s.start());
 		// A live join delivers nothing below the group SUBSCRIBE_OK names as Largest.
 		let live = start.is_none();
 		let join = match subscribe_join(
-			subscription.as_ref().and_then(|s| s.start),
-			subscription.as_ref().and_then(|s| s.end),
+			subscription.as_ref().and_then(|s| s.start()),
+			subscription.as_ref().and_then(|s| s.end()),
 			self.version,
 		) {
 			Ok(join) => join,
@@ -2620,7 +2620,7 @@ where
 				TrackState {
 					resume: subscription
 						.as_ref()
-						.and_then(|s| s.start)
+						.and_then(|s| s.start())
 						.filter(|start| start.frame != 0),
 					// A resumed copy is the session's to abort from here on.
 					producer: target.producer().cloned(),

@@ -24,7 +24,7 @@ use std::task::{Poll, ready};
 use crate::{Error, Result, StreamError, group, stats, track};
 
 use super::delivered::Delivered;
-use super::subscription::{Cap, Position, Subscription, max_some};
+use super::subscription::{Cap, Position, Subscription};
 
 /// What the front says about a logical track: the copy to read now, and how it ended.
 #[derive(Default)]
@@ -277,22 +277,17 @@ struct Copy {
 	lease: Arc<()>,
 }
 
+// Boxed: a subscriber is twice a pending answer, and a copy holds one for its whole life.
 enum Sub {
 	Pending(kio::Pending<track::Subscribing>),
-	Ready(track::Subscriber),
+	Ready(Box<track::Subscriber>),
 }
 
 impl Copy {
 	/// What this copy is asked for: the reader's own preferences, from no earlier than
 	/// where it was asked to start, and through no later than where it was replaced.
 	fn wire(&self, reader: &Subscription) -> Subscription {
-		let mut wire = Subscription {
-			start: max_some(reader.start, self.floor),
-			..reader.clone()
-		};
-		if let Some(end) = self.end().map(Position::group) {
-			wire.end = Some(wire.end.map_or(end, |requested| requested.min(end)));
-		}
+		let mut wire = reader.clamped(self.floor, self.end().map(Position::group));
 		// A replaced copy only finishes what it had, so a new group from it never arrives.
 		if self.until.is_some() {
 			wire.new_group = None;
@@ -321,7 +316,7 @@ impl Copy {
 			let mut sub = ready!(pending.poll_ok(waiter))?;
 			sub.raise_start_to(groups.0);
 			sub.end_at(groups.1);
-			self.sub = Sub::Ready(sub);
+			self.sub = Sub::Ready(Box::new(sub));
 		}
 		let Sub::Ready(sub) = &mut self.sub else { unreachable!() };
 		Poll::Ready(Ok(sub))
@@ -536,10 +531,7 @@ impl Reader {
 		let floor = self.newest.map(Position::group);
 		// The wire request carries the floor from the first message: some sessions read
 		// the demand only once.
-		let wire = Subscription {
-			start: max_some(self.mirrored.start, floor),
-			..self.mirrored.clone()
-		};
+		let wire = self.mirrored.clamped(floor, None);
 		self.copies.push(Copy {
 			generation,
 			sub: Sub::Pending(track.subscribe(wire)),
@@ -1707,13 +1699,10 @@ mod test {
 			let mut reader = sub.reader.lock().unwrap();
 			let old = &mut reader.copies[0];
 			old.until = Some(last);
-			assert_eq!(old.wire(&Subscription::default()).end, end);
+			assert_eq!(old.wire(&Subscription::default()).end(), end);
 			// A reader's narrower bound survives an unbounded replacement cap.
-			let requested = Subscription {
-				end: Some(Position::group(7)),
-				..Default::default()
-			};
-			assert_eq!(old.wire(&requested).end, Some(end.unwrap_or(Position::group(7))));
+			let requested = Subscription::default().with_end(Position::group(7));
+			assert_eq!(old.wire(&requested).end(), Some(end.unwrap_or(Position::group(7))));
 		}
 	}
 
