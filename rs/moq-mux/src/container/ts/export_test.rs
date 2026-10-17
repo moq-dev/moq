@@ -9409,8 +9409,10 @@ async fn a_midstream_stitch_bound_survives_route_updates() {
 		.unwrap();
 	let _unanswered = second.dynamic();
 	let reprice = async {
-		for cost in 1u64.. {
+		let mut cost = 0u64;
+		loop {
 			tokio::time::sleep(Duration::from_secs(1)).await;
+			cost += 1;
 			second.announce(second.route().unwrap().with_cost(cost)).unwrap();
 		}
 	};
