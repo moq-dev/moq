@@ -655,6 +655,9 @@ struct Largest {
 	position: Option<Position>,
 	// The track ended, so no newer position can follow.
 	ended: bool,
+	// Bumped when a group stops taking frames, waking the readers that check whether the
+	// track's largest can still advance.
+	settled: u64,
 }
 
 impl Track {
@@ -664,6 +667,17 @@ impl Track {
 		if largest.position.is_none_or(|current| position > current) {
 			largest.position = Some(position);
 		}
+	}
+
+	/// The group of the track's largest frame, if any.
+	pub(super) fn largest_group(&self) -> Option<u64> {
+		self.largest.read().position.map(|position| position.group)
+	}
+
+	/// Wake the largest's readers to check whether it can still advance.
+	pub(crate) fn touch_largest(&self) {
+		let mut largest = self.largest.lock();
+		largest.settled = largest.settled.wrapping_add(1);
 	}
 
 	/// End the largest stream once the track ends: no newer frame can follow.
@@ -752,6 +766,7 @@ impl Track {
 		if let Some(aborts) = self.aborts.get() {
 			aborts.notify(sequence, cut);
 		}
+		self.touch_largest();
 	}
 
 	/// Park `waiter` until the pool's wall clock reaches `at`. While no driver collects the

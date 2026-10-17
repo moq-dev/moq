@@ -540,6 +540,8 @@ struct Alive {
 	// Whether the abort was the publisher giving the group up rather than cache policy
 	// (`Old`, `Timeout`, `Evicted`). Stored before `aborted`, under the same rules.
 	cut: AtomicBool,
+	// Monotone mirror of `GroupState::fin`, read like `aborted`.
+	finished: AtomicBool,
 	// The cache stamp `GroupState::charge` maintains, held here as well so the
 	// eviction and expiry walks can weigh a candidate without taking the group lock
 	// they already hold the track lock over.
@@ -661,6 +663,7 @@ impl Producer {
 			state: state.clone(),
 			aborted: AtomicBool::new(false),
 			cut: AtomicBool::new(false),
+			finished: AtomicBool::new(false),
 			access,
 		});
 		Self {
@@ -1047,6 +1050,9 @@ impl Producer {
 			return Err(Error::FrameOpen);
 		}
 		state.fin = Some(state.next_index);
+		self.alive.finished.store(true, Ordering::Release);
+		// A finished group can no longer raise the track's largest, which may end its stream.
+		self.cache.touch_largest();
 		Ok(())
 	}
 
@@ -1118,6 +1124,12 @@ impl Producer {
 	/// Reads the mirror, like [`Self::is_aborted`], so a track scan never takes the group lock.
 	pub(crate) fn is_cut(&self) -> bool {
 		self.alive.cut.load(Ordering::Acquire)
+	}
+
+	/// Whether the group takes no more frames: finished or aborted. Reads the mirrors, like
+	/// [`Self::is_aborted`], so a track scan never takes the group lock.
+	pub(crate) fn is_done(&self) -> bool {
+		self.alive.finished.load(Ordering::Acquire) || self.alive.aborted.load(Ordering::Acquire)
 	}
 
 	/// Whether the group was finished: it holds every frame it will ever have.

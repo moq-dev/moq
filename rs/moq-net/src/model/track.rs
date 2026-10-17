@@ -1650,6 +1650,17 @@ impl TrackState {
 		reached && (self.abort.is_none() || self.settled)
 	}
 
+	/// Whether the largest frame can no longer advance while a producer is still held: the
+	/// track reached its declared end, and every group at or above the largest takes no more
+	/// frames.
+	fn largest_settled(&self) -> bool {
+		if !self.is_complete() {
+			return false;
+		}
+		let from = self.cache.largest_group().unwrap_or(0);
+		self.lookup.range(from..).all(|(_, slot)| slot.group.is_done())
+	}
+
 	/// One past the highest sequence produced: where the live edge stands against the end.
 	fn edge(&self) -> u64 {
 		self.max_sequence.map_or(0, |max| max.saturating_add(1))
@@ -1925,19 +1936,28 @@ fn commit_abort(mut state: kio::Mut<'_, TrackState>, err: Error) {
 	state.close();
 }
 
-/// Poll `cache` for a largest frame newer than `seen`. `closed` polls the track's channel,
-/// which ends the stream when the track closes without ending it (a dropped request).
+/// Poll `cache` for a largest frame newer than `seen`. `ended` polls the track for
+/// [`TrackState::largest_settled`], or its channel closing without ending the cache (a
+/// dropped request), either of which ends the stream.
 fn poll_largest(
 	cache: &cache::Track,
 	seen: &mut Option<Position>,
 	waiter: &kio::Waiter,
-	closed: impl FnOnce(&kio::Waiter) -> Poll<()>,
+	ended: impl FnOnce(&kio::Waiter) -> Poll<()>,
 ) -> Poll<Option<Position>> {
 	if let Poll::Ready(next) = cache.poll_largest(seen, waiter) {
 		return Poll::Ready(next);
 	}
-	ready!(closed(waiter));
+	ready!(ended(waiter));
 	Poll::Ready(cache.take_largest(seen))
+}
+
+/// Ready once the track's largest can no longer advance; see [`TrackState::largest_settled`].
+fn largest_ended(state: &TrackState) -> Poll<()> {
+	match state.largest_settled() {
+		true => Poll::Ready(()),
+		false => Poll::Pending,
+	}
 }
 
 /// A producer for a track, used to create new groups.
@@ -2485,7 +2505,7 @@ impl Producer {
 	pub fn poll_largest(&mut self, waiter: &kio::Waiter) -> Poll<Option<Position>> {
 		let cache = self.state.read().cache.clone();
 		poll_largest(&cache, &mut self.largest, waiter, |waiter| {
-			self.state.poll_closed(waiter)
+			self.state.poll(waiter, |state| largest_ended(state)).map(|_| ())
 		})
 	}
 
@@ -3588,7 +3608,9 @@ impl Consumer {
 			};
 			match routes {
 				Some(routes) => routes.poll_largest(seen, waiter),
-				None => poll_largest(&cache, seen, waiter, |waiter| state.poll_closed(waiter)),
+				None => poll_largest(&cache, seen, waiter, |waiter| {
+					state.poll(waiter, |state| largest_ended(state)).map(|_| ())
+				}),
 			}
 		})
 	}
@@ -5221,7 +5243,7 @@ impl Subscriber {
 			Inner::Plain(cursor) => {
 				let cache = cursor.state.read().cache.clone();
 				poll_largest(&cache, &mut self.largest, waiter, |waiter| {
-					cursor.state.poll_closed(waiter)
+					cursor.state.poll(waiter, |state| largest_ended(state)).map(|_| ())
 				})
 			}
 			Inner::Resume(resume, _) => resume.poll_largest(&mut self.largest, waiter),
@@ -5766,6 +5788,52 @@ mod test {
 		drop(group);
 		drop(producer);
 		assert_eq!(subscriber.largest().await, None);
+	}
+
+	/// A finished track ends the stream while its producer is still held, once the last
+	/// group takes no more frames, and finishing that group wakes a parked reader.
+	#[test]
+	fn largest_ends_at_the_declared_end() {
+		use std::sync::atomic::{AtomicBool, Ordering};
+
+		struct Flag(AtomicBool);
+		impl futures::task::ArcWake for Flag {
+			fn wake_by_ref(flag: &Arc<Self>) {
+				flag.0.store(true, Ordering::SeqCst);
+			}
+		}
+
+		let producer = track_producer("test", Info::default());
+		let mut subscriber = producer.subscribe(replay());
+		let mut group = producer.append_group().unwrap();
+		group.write_frame(None, &b"a"[..]).unwrap();
+		let noop = kio::Waiter::noop();
+		assert_eq!(
+			subscriber.poll_largest(&noop),
+			Poll::Ready(Some(Position { group: 0, frame: 0 }))
+		);
+
+		producer.finish().unwrap();
+		assert!(
+			subscriber.poll_largest(&noop).is_pending(),
+			"the open group can still grow"
+		);
+		group.write_frame(None, &b"b"[..]).unwrap();
+		assert_eq!(
+			subscriber.poll_largest(&noop),
+			Poll::Ready(Some(Position { group: 0, frame: 1 }))
+		);
+
+		let flag = Arc::new(Flag(AtomicBool::new(false)));
+		let waiter = kio::Waiter::new(futures::task::waker(flag.clone()));
+		assert!(subscriber.poll_largest(&waiter).is_pending());
+		group.finish().unwrap();
+		assert!(
+			flag.0.load(Ordering::SeqCst),
+			"finishing the last group woke the reader"
+		);
+		assert_eq!(subscriber.poll_largest(&noop), Poll::Ready(None));
+		drop(producer);
 	}
 
 	#[cfg(feature = "async")]
