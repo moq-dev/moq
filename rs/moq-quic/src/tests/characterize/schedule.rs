@@ -42,7 +42,7 @@ fn assert_golden(pair: &mut Pair, golden: &str) {
 }
 
 /// Opens a client uni stream at `priority` and queues `LEN` bytes and a FIN on it
-fn queue(pair: &mut Pair, ch: ConnectionHandle, priority: i32) -> StreamId {
+fn queue(pair: &mut Pair, ch: ConnectionHandle, priority: i64) -> StreamId {
     let s = pair.client_streams(ch).open(Dir::Uni).unwrap();
     pair.client_send(ch, s).set_priority(priority).unwrap();
     assert_eq!(pair.client_send(ch, s).write(&[0; LEN]).unwrap(), LEN);
