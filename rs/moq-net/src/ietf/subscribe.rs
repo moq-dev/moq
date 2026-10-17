@@ -42,14 +42,14 @@ pub struct Subscribe<'a> {
 	/// The `AUTHORIZATION TOKEN` (0x03) this request presents. At most one is
 	/// accepted: decoding refuses a repeated or second token.
 	pub authorization_token: Option<RequestToken>,
-	/// NEW_GROUP_REQUEST (0x32, draft-16+): the subscriber's largest known Group ID plus
+	/// NEW_GROUP_REQUEST (0x32, draft-15+): the subscriber's largest known Group ID plus
 	/// one, or 0 when it knows none. Never encoded where the draft has no such parameter.
 	pub new_group: Option<u64>,
 }
 
-/// NEW_GROUP_REQUEST (0x32) arrived in draft-16.
+/// NEW_GROUP_REQUEST (0x32) and DYNAMIC_GROUPS (0x30) arrived in draft-15.
 pub(super) fn has_new_group_request(version: Version) -> bool {
-	!matches!(version, Version::Draft14 | Version::Draft15)
+	version != Version::Draft14
 }
 
 /// The Range Filters (0x25-0x29) arrived in draft-19.
@@ -258,10 +258,13 @@ impl Message for SubscribeOk {
 					Version::Draft15 => self.properties.group_order,
 					_ => None,
 				};
+				// Draft-15 has no properties block, so DYNAMIC_GROUPS is a parameter there.
+				let dynamic_groups = (version == Version::Draft15 && self.properties.dynamic_groups).then_some(1u64);
 
 				encode_params!(w, version,
 					0x09 => self.largest,
 					0x22 => group_order,
+					0x30 => dynamic_groups,
 				);
 
 				// Track Properties are the final field, so nothing may follow.
@@ -307,11 +310,16 @@ impl Message for SubscribeOk {
 					0x08 => _expires: Option<u64>,
 					0x09 => largest: Option<Location>,
 					0x22 => group_order: Option<GroupOrder> where version == Version::Draft15,
+					0x30 => dynamic_groups: Option<u64> where version == Version::Draft15,
 				);
 				properties = Properties::decode(r, version)?;
 				properties.group_order = properties.group_order.or(group_order);
 				if version == Version::Draft15 {
 					properties.max_cache_duration = max_cache_duration.map(std::time::Duration::from_millis);
+					properties.dynamic_groups = dynamic_groups
+						.map(super::properties::dynamic_groups)
+						.transpose()?
+						.unwrap_or(false);
 				}
 
 				return Ok(Self {
@@ -1326,6 +1334,40 @@ mod tests {
 
 		let decoded: SubscribeOk = decode_message(&expected, Version::Draft15).unwrap();
 		assert_eq!(decoded.properties.group_order, Some(GroupOrder::Descending));
+	}
+
+	/// Draft-15 has no properties block, so DYNAMIC_GROUPS is a SUBSCRIBE_OK parameter.
+	#[test]
+	fn test_subscribe_ok_v15_dynamic_groups_is_a_parameter() {
+		let msg = SubscribeOk {
+			request_id: Some(RequestId(7)),
+			track_alias: 42,
+			largest: None,
+			properties: Properties {
+				dynamic_groups: true,
+				..Default::default()
+			},
+		};
+
+		#[rustfmt::skip]
+		let expected = vec![
+			7,    // request id
+			42,   // track alias
+			1,    // one message parameter
+			0x30, // DYNAMIC_GROUPS
+			0x01,
+		];
+		assert_eq!(encode_message(&msg, Version::Draft15), expected);
+		assert!(
+			decode_message::<SubscribeOk>(&expected, Version::Draft15)
+				.unwrap()
+				.properties
+				.dynamic_groups
+		);
+
+		// A boolean: anything above 1 is malformed.
+		let malformed = [7, 42, 1, 0x30, 0x02];
+		assert!(decode_message::<SubscribeOk>(&malformed, Version::Draft15).is_err());
 	}
 
 	/// Draft-16 has the block too, under the name Track Extensions. We don't write one there,

@@ -6311,6 +6311,8 @@ mod serve_tests {
 	#[moq_net_sim::test]
 	async fn a_subscribe_new_group_request_reaches_the_track() {
 		for (version, dynamic_groups) in [
+			(Version::Draft15, true),
+			(Version::Draft15, false),
 			(Version::Draft16, true),
 			(Version::Draft16, false),
 			(Version::Draft22, true),
@@ -6346,7 +6348,7 @@ mod serve_tests {
 	/// answered with REQUEST_OK.
 	#[moq_net_sim::test]
 	async fn a_new_group_update_reaches_a_dynamic_track() {
-		for version in [Version::Draft16, Version::Draft22] {
+		for version in [Version::Draft15, Version::Draft16, Version::Draft22] {
 			let h = serve_track(
 				version,
 				crate::track::Info {
@@ -6385,7 +6387,7 @@ mod serve_tests {
 	/// the subscription like any update it cannot apply.
 	#[moq_net_sim::test]
 	async fn a_new_group_update_without_dynamic_groups_fails() {
-		for version in [Version::Draft16, Version::Draft22] {
+		for version in [Version::Draft15, Version::Draft16, Version::Draft22] {
 			let h = serve(version);
 			let mut session = ScriptedSession::new(new_group_update(version, 9));
 			let mut stream = Stream::open(&mut session, version).await.unwrap();

@@ -35,7 +35,8 @@ const DEFAULT_PUBLISHER_PRIORITY: u64 = 0x0e;
 const DEFAULT_PUBLISHER_GROUP_ORDER: u64 = 0x22;
 
 /// DYNAMIC_GROUPS (0x30): a subscriber may ask the original publisher for a new group with
-/// NEW_GROUP_REQUEST. Draft-16 calls it a Track Extension; same number and meaning.
+/// NEW_GROUP_REQUEST. Draft-16 calls it a Track Extension and draft-15 a SUBSCRIBE_OK
+/// parameter; same number and meaning.
 const DYNAMIC_GROUPS: u64 = 0x30;
 
 /// Immutable Properties (0x0b): Key-Value-Pairs the original publisher sealed, which a
@@ -208,14 +209,18 @@ impl Properties {
 	}
 }
 
+/// A DYNAMIC_GROUPS value, which is a boolean: anything but 0 or 1 is malformed.
+pub(super) fn dynamic_groups(value: u64) -> Result<bool, DecodeError> {
+	match value {
+		0 => Ok(false),
+		1 => Ok(true),
+		_ => Err(DecodeError::InvalidValue),
+	}
+}
+
 /// Record a DYNAMIC_GROUPS value, refusing anything but 0 or 1, and a second occurrence.
 fn set_dynamic_groups(dynamic_groups: &mut Option<bool>, value: u64) -> Result<(), DecodeError> {
-	let value = match value {
-		0 => false,
-		1 => true,
-		_ => return Err(DecodeError::InvalidValue),
-	};
-	match dynamic_groups.replace(value) {
+	match dynamic_groups.replace(self::dynamic_groups(value)?) {
 		Some(_) => Err(DecodeError::InvalidValue),
 		None => Ok(()),
 	}
@@ -458,7 +463,8 @@ mod tests {
 		.unwrap();
 		assert_eq!(buf, [0x30, 0x01]);
 
-		// Draft 16 defines DYNAMIC_GROUPS but not TIMESCALE, and drafts 14 and 15 have no block.
+		// Draft 16 defines DYNAMIC_GROUPS but not TIMESCALE, and drafts 14 and 15 have no block
+		// (draft 15 carries DYNAMIC_GROUPS as a SUBSCRIBE_OK parameter instead).
 		let both = Properties {
 			dynamic_groups: true,
 			timescale: Some(Timescale::MILLI),

@@ -143,7 +143,7 @@ pub(super) struct Update {
 	pub(super) refused: Option<Error>,
 	/// The AUTHORIZATION TOKEN renewing the request's credential.
 	pub(super) authorization_token: Option<super::token::RequestToken>,
-	/// NEW_GROUP_REQUEST (draft-16+), which only a track advertising DYNAMIC_GROUPS takes.
+	/// NEW_GROUP_REQUEST (draft-15+), which only a track advertising DYNAMIC_GROUPS takes.
 	pub(super) new_group: Option<u64>,
 }
 
