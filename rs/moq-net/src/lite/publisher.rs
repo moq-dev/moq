@@ -2104,8 +2104,8 @@ impl<S: crate::transport::poll::Session> Request<S> for FetchServe {
 				msg.group,
 				group::Fetch {
 					priority: msg.priority,
+					max_delay: msg.max_delay,
 					frame_start: msg.start_frame,
-					..Default::default()
 				},
 			)
 			.into_inner();
@@ -2196,7 +2196,7 @@ impl<S: crate::transport::poll::Session> Request<S> for FetchServe {
 									*batch_pos = 0;
 									return Poll::Ready(Ok(ControlFlow::Continue(())));
 								}
-								Poll::Ready(Ok(_)) => return Poll::Ready(Ok(ControlFlow::Break(()))),
+								Poll::Ready(Ok(_)) => return Poll::Ready(fetch_end(group)),
 								Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
 								Poll::Pending => {}
 							}
@@ -2213,13 +2213,23 @@ impl<S: crate::transport::poll::Session> Request<S> for FetchServe {
 									*frame = Some(next);
 									return Poll::Ready(Ok(ControlFlow::Continue(())));
 								}
-								None => return Poll::Ready(Ok(ControlFlow::Break(()))),
+								None => return Poll::Ready(fetch_end(group)),
 							}
 						}
 					}
 				}
 			}
 		}
+	}
+}
+
+/// End a FETCH response once its group's read ends. A budget giving up on a drained
+/// group ends that read cleanly, but a FIN would tell the requester the group is whole,
+/// so it resets as too old instead.
+fn fetch_end(group: &group::Consumer) -> Result<ControlFlow<()>, Error> {
+	match group.latency_expired() {
+		true => Err(Error::Old),
+		false => Ok(ControlFlow::Break(())),
 	}
 }
 
@@ -5731,6 +5741,7 @@ mod tests {
 						broadcast: broadcast.clone(),
 						track: "video".into(),
 						priority: 0,
+						max_delay: None,
 						group: 0,
 						start_frame: 0,
 						end_frame: None,
@@ -6114,6 +6125,74 @@ mod tests {
 		}
 	}
 
+	/// A FETCH whose own budget gives up on its group partway resets as too old: a FIN
+	/// would tell the requester the prefix it got is the whole group.
+	#[moq_net_sim::test]
+	async fn an_expired_fetch_resets_rather_than_finishing() {
+		const VERSION: Version = Version::Lite07;
+		let origin = crate::origin::Config::new(Hop::new(1).unwrap()).produce();
+		let broadcast = origin.create_broadcast("room").unwrap();
+		let track = broadcast.create_track("video", track::Info::timed()).unwrap();
+		broadcast.announce(Default::default()).unwrap();
+		let mut open = track.append_group().unwrap();
+		open.write_frame(crate::Timestamp::ZERO, b"a".to_vec()).unwrap();
+
+		let peer_setup = crate::lite::PeerSetup::new(false, crate::transport::Binding::InBand);
+		peer_setup.set(crate::lite::Setup::default());
+		let (_, goaway) = crate::goaway::Handle::new(true);
+		let publisher = Publisher::new(PublisherConfig {
+			runtime: crate::time::Clock::sim(),
+			session: ScriptedSession::new(Vec::new()),
+			origin: origin.consume(),
+			version: VERSION,
+			peer_setup,
+			goaway,
+			peer_hop: None,
+			auth: crate::auth::Handle::new(false),
+			peer_grant: Default::default(),
+			client: false,
+			subscriptions: Default::default(),
+			fetches: Default::default(),
+			estimate: kio::Producer::default().weak(),
+		});
+		let mut script = Vec::new();
+		lite::Fetch {
+			epoch: None,
+			broadcast: crate::Path::new("room"),
+			track: "video".into(),
+			priority: 0,
+			max_delay: Some(Duration::from_millis(500)),
+			group: 0,
+			start_frame: 0,
+			end_frame: None,
+		}
+		.encode(&mut crate::coding::Encoder::new(&mut script, VERSION.into()), VERSION)
+		.unwrap();
+		let mut session = ScriptedSession::new(script);
+		let (send, recv) = futures::future::poll_fn(|cx| {
+			<ScriptedSession as crate::transport::poll::Session>::poll_open_bi(&mut session, cx)
+		})
+		.await
+		.unwrap();
+		let stream = Stream::<ScriptedSession, Version> {
+			writer: Writer::new(send, VERSION),
+			reader: crate::coding::Reader::new(recv, VERSION),
+		};
+		let mut serve = RequestServe::<_, FetchServe>::new(publisher.shared.clone(), stream);
+		assert!(!drive(&mut serve).await, "the open group holds the response");
+
+		// The track runs a full second past the group's successor.
+		for ms in [1000, 2000] {
+			let mut group = track.append_group().unwrap();
+			group
+				.write_frame(crate::Timestamp::from_millis(ms).unwrap(), b"x".to_vec())
+				.unwrap();
+			group.finish().unwrap();
+		}
+		assert!(drive(&mut serve).await, "the budget ends the response");
+		assert_eq!(session.log.resets(), vec![crate::StreamError::Old.to_code()]);
+	}
+
 	/// Shared model demand never shares admission slots between wire FETCH streams.
 	#[moq_net_sim::test]
 	async fn coalesced_fetches_each_hold_their_own_slot() {
@@ -6149,6 +6228,7 @@ mod tests {
 			broadcast: crate::Path::new("room"),
 			track: "video".into(),
 			priority: 0,
+			max_delay: None,
 			group: 7,
 			start_frame: 0,
 			end_frame: None,

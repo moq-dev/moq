@@ -166,7 +166,14 @@ async fn read_fetch(
 		_ => skip,
 	};
 	let mut group = track
-		.fetch_group(sequence, group::Fetch { priority, frame_start })
+		.fetch_group(
+			sequence,
+			group::Fetch {
+				priority,
+				frame_start,
+				..Default::default()
+			},
+		)
 		.await?;
 	let mut first = skip;
 	let mut frames = Vec::new();
@@ -198,6 +205,11 @@ async fn read_fetch(
 		if until.is_some_and(|until| id.saturating_add(1) >= until) {
 			break;
 		}
+	}
+	// Retention giving up on the group ends its read cleanly, but the prefix is not the
+	// group: answering it would let the requester cache it as whole.
+	if group.latency_expired() {
+		return Err(Error::Old);
 	}
 	// A bounded range can reach the group's end without reading its terminal None, and a
 	// start past the end is already there.
@@ -5326,6 +5338,32 @@ mod group_priority_test {
 mod subscribe_cursor_test {
 	use super::*;
 	use crate::lite::test_transport::{Log, SinkSession};
+
+	/// A group retention gives up on while a FETCH reads it is refused as too old, rather
+	/// than answered with the prefix read so far.
+	#[moq_net_sim::test]
+	async fn a_fetch_past_retention_is_refused_not_truncated() {
+		let track = track::Producer::new(
+			std::sync::Arc::new(crate::broadcast::Info::default()),
+			"video",
+			crate::track::Info::timed().with_max_age(std::time::Duration::from_millis(500)),
+		);
+		let mut open = track.append_group().unwrap();
+		open.write_frame(crate::Timestamp::ZERO, b"a".to_vec()).unwrap();
+
+		let consumer = track.consume();
+		let read = moq_net_sim::spawn(async move { read_fetch(&consumer, 0, 0, None, 0).await.map(|_| ()) });
+		moq_net_sim::yield_now().await;
+		// The track runs a full second past the group's successor.
+		for ms in [1000, 2000] {
+			let mut group = track.append_group().unwrap();
+			group
+				.write_frame(crate::Timestamp::from_millis(ms).unwrap(), b"x".to_vec())
+				.unwrap();
+			group.finish().unwrap();
+		}
+		assert!(matches!(read.await.unwrap(), Err(Error::Old)));
+	}
 
 	/// A subscription's cursor starts at the oldest cached group, so serving it verbatim
 	/// replays every retained group at once, each on its own stream. Relays reject the burst

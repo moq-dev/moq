@@ -492,6 +492,9 @@ pub(crate) struct PendingFetch {
 	// The most demanding delivery priority across the joined fetches.
 	priority: u8,
 
+	// The most tolerant reader budget. None is unbounded and therefore dominates.
+	max_delay: Option<Duration>,
+
 	// The lowest start across the joined fetches, so serving the attempt once satisfies
 	// every one of them. Only widened while the request is still queued: once a handler
 	// has taken it, its range is already on the wire.
@@ -507,6 +510,9 @@ pub(crate) struct PendingFetch {
 #[derive(Default)]
 pub(crate) struct FetchOutcome {
 	pub(crate) rejected: Option<Error>,
+	// The budget the rejected attempt asked its handler for, so a looser joiner can tell
+	// that an `Old` refusal was not its own.
+	asked: Option<Duration>,
 	// An accept still refuses joined fetches the cached group cannot cover, without
 	// giving the request's demand watcher a rejection reason.
 	accepted: bool,
@@ -2477,6 +2483,7 @@ fn poll_requested_group(
 		// `Fetching` leaving.
 		let pending = guard.get(&sequence).expect("popped key must be pending");
 		let priority = pending.priority;
+		let max_delay = pending.max_delay;
 		let frame_start = pending.frame_start;
 		let result = pending.result.clone();
 		drop(guard);
@@ -2485,6 +2492,7 @@ fn poll_requested_group(
 			fetch: fetch.clone(),
 			sequence,
 			priority,
+			max_delay,
 			frame_start,
 			result,
 			done: false,
@@ -3135,12 +3143,13 @@ impl Consumer {
 		}
 	}
 
-	/// Poll for group `sequence` falling a full `budget` behind this track's live edge,
-	/// as a reader would judge it, whether the track holds it or not; see
-	/// `TrackState::drifted`. Parks in this track's expiry index, so only a change that can
-	/// make the group stale, or land it here, wakes it. Pending for good once the track closes.
+	/// Poll for group `sequence` falling a full `budget`, clamped to this track's retention,
+	/// behind its live edge, as a reader would judge it, whether the track holds it or not;
+	/// see `TrackState::drifted`. Parks in this track's expiry index, so only a change that
+	/// can make the group stale, or land it here, wakes it. Pending for good once the track closes.
 	pub(crate) fn poll_stale(&self, sequence: u64, budget: Duration, waiter: &kio::Waiter) -> Poll<()> {
 		let state = self.state.read();
+		let budget = clamp_max_delay(budget, state.max_age_bound());
 		state.cache.wakes().watch_held(sequence, waiter);
 		match state.poll_drifted(sequence, None, budget, waiter) {
 			true => Poll::Ready(()),
@@ -3200,6 +3209,7 @@ impl Consumer {
 				sequence,
 				frame_start: options.frame_start,
 				priority: options.priority,
+				max_delay: options.max_delay,
 				result: None,
 				hit: None,
 				stats: self.stats.clone(),
@@ -3226,35 +3236,7 @@ impl Consumer {
 		};
 
 		if unresolved {
-			let mut fetch = fetch.lock();
-			if let Some(pending) = fetch.join(&sequence) {
-				// Join the in-flight attempt for this sequence (queued or already being
-				// served): share its result channel, raising its priority if ours is higher
-				// and widening its range if ours starts earlier.
-				//
-				// Widening only reaches the handler while the attempt is still queued;
-				// once popped, the `group::Request` holds an immutable copy and its range is
-				// already on the wire. What protects the late caller either way is the
-				// coverage check above: it refuses a group starting above what it asked
-				// for, so it fails cleanly and its retry queues a fresh attempt.
-				pending.priority = pending.priority.max(options.priority);
-				pending.frame_start = pending.frame_start.min(options.frame_start);
-				result = Some(Joined::new(&pending.result));
-			} else {
-				// Queue a new attempt. The handler gate is atomic with a handler
-				// dropping (no fetch stranded on a queue nobody drains); with no
-				// handler, `Fetching::poll` fails fast instead.
-				let producer = kio::Producer::<FetchOutcome>::default();
-				let joined = Joined::new(&producer);
-				let attempt = PendingFetch {
-					priority: options.priority,
-					frame_start: options.frame_start,
-					result: producer,
-				};
-				if fetch.insert(sequence, attempt).is_ok() {
-					result = Some(joined);
-				}
-			}
+			result = queue(&fetch, sequence, &options);
 		}
 
 		kio::Pending::new(Fetching {
@@ -3263,6 +3245,7 @@ impl Consumer {
 			sequence,
 			frame_start: options.frame_start,
 			priority: options.priority,
+			max_delay: options.max_delay,
 			result,
 			hit,
 			stats: self.stats.clone(),
@@ -3437,6 +3420,12 @@ impl group::Request {
 		self.priority
 	}
 
+	/// The widest age budget among callers sharing this upstream fetch, for a handler that forwards it.
+	/// Each caller still enforces its own, so a handler serving locally can ignore it.
+	pub fn max_delay(&self) -> Option<Duration> {
+		self.max_delay
+	}
+
 	/// The first frame of the group the consumer wants; 0 is the whole group.
 	///
 	/// The group [`accept`](Self::accept) returns already starts here, so the frames a
@@ -3497,6 +3486,7 @@ impl group::Request {
 		self.remove();
 		if let Ok(mut outcome) = self.result.write() {
 			outcome.rejected = Some(err);
+			outcome.asked = self.max_delay;
 		}
 	}
 
@@ -3507,6 +3497,41 @@ impl group::Request {
 			pending.result.same_channel(&self.result)
 		});
 	}
+}
+
+/// Join the attempt for `sequence`, or queue a new one; `None` when no handler exists.
+fn queue(fetch: &kio::Shared<FetchState>, sequence: u64, options: &group::Fetch) -> Option<Box<Joined>> {
+	let mut fetch = fetch.lock();
+	if let Some(pending) = fetch.join(&sequence) {
+		// Join the in-flight attempt for this sequence (queued or already being
+		// served): share its result channel, raising its priority if ours is higher,
+		// widening its range if ours starts earlier, and its budget if ours is looser.
+		//
+		// Widening only reaches the handler while the attempt is still queued;
+		// once popped, the `group::Request` holds an immutable copy that is already on
+		// the wire. What protects the late caller either way: the coverage check
+		// refuses a group starting above what it asked for, so it fails cleanly and its
+		// retry queues a fresh attempt, and `Fetching::poll` re-queues a looser budget
+		// that a tighter one got refused as too old.
+		pending.priority = pending.priority.max(options.priority);
+		pending.max_delay = match (pending.max_delay, options.max_delay) {
+			(Some(current), Some(joined)) => Some(current.max(joined)),
+			(None, _) | (_, None) => None,
+		};
+		pending.frame_start = pending.frame_start.min(options.frame_start);
+		return Some(Joined::new(&pending.result));
+	}
+	// Queue a new attempt. The handler gate is atomic with a handler dropping (no fetch
+	// stranded on a queue nobody drains); with no handler, `Fetching::poll` fails fast.
+	let producer = kio::Producer::<FetchOutcome>::default();
+	let joined = Joined::new(&producer);
+	let attempt = PendingFetch {
+		priority: options.priority,
+		max_delay: options.max_delay,
+		frame_start: options.frame_start,
+		result: producer,
+	};
+	fetch.insert(sequence, attempt).ok().map(|()| joined)
 }
 
 /// Remove the attempt for `sequence` if it is still `ours`. Reads first: the attempt is
@@ -3543,6 +3568,8 @@ pub struct Fetching {
 	frame_start: u64,
 	// This caller's priority, for a fetch that moves to a front's routes.
 	priority: u8,
+	// This caller's own age cap. None means only the publisher's max age.
+	max_delay: Option<Duration>,
 	// The attempt this fetch joined; `None` on a cache hit, or when no handler
 	// existed to queue on. Boxed: a miss already allocates, and the handle stays small.
 	result: Option<Box<Joined>>,
@@ -3601,9 +3628,11 @@ impl kio::Task for Fetching {
 		if self.resume.is_none()
 			&& let Some(routes) = self.state.read().routes.clone()
 		{
-			let options = group::Fetch::default()
-				.with_priority(self.priority)
-				.with_frame_start(self.frame_start);
+			let options = group::Fetch {
+				priority: self.priority,
+				max_delay: self.max_delay,
+				frame_start: self.frame_start,
+			};
 			self.resume = Some(Box::new(routes.fetch_group(self.sequence, options)));
 		}
 		if let Some(resume) = &mut self.resume {
@@ -3617,12 +3646,25 @@ impl kio::Task for Fetching {
 			self.frame_start,
 			self.result.as_ref(),
 		);
+		{
+			let state = state.read();
+			let budget = clamp_max_delay(self.max_delay.unwrap_or(Duration::MAX), state.max_age_bound());
+			state.cache.wakes().watch_landing(sequence, waiter);
+			if state.poll_drifted(sequence, None, budget, waiter) {
+				return Poll::Ready(Err(Error::Old));
+			}
+		}
 
 		// Hand back a consumer sitting where the caller asked rather than at the group's
 		// own start. Coverage was checked first, so this can only skip frames they excluded.
+		let expiry: Arc<dyn group::Expiry> = Arc::new(FetchExpiry {
+			state: state.weak(),
+			sequence,
+			max_delay: self.max_delay,
+		});
 		let resolve = |mut group: group::Consumer| {
 			group.start_at(frame_start);
-			group.with_meter(self.stats.meter())
+			group.with_meter(self.stats.meter()).with_expiry(expiry.clone())
 		};
 		if let Some(group) = &self.hit {
 			return Poll::Ready(Ok(resolve((**group).clone())));
@@ -3659,21 +3701,38 @@ impl kio::Task for Fetching {
 
 		// An answered attempt fails joined fetches the cache cannot cover. The channel
 		// closing without an answer means its handlers went away.
-		let err = match result.outcome.poll(waiter, |outcome| match &outcome.rejected {
-			Some(err) => Poll::Ready(err.clone()),
-			None if outcome.accepted => Poll::Ready(Error::NotFound),
+		let (err, asked) = match result.outcome.poll(waiter, |outcome| match &outcome.rejected {
+			Some(err) => Poll::Ready((err.clone(), outcome.asked)),
+			None if outcome.accepted => Poll::Ready((Error::NotFound, None)),
 			None => Poll::Pending,
 		}) {
-			Poll::Ready(Ok(err)) => err,
-			Poll::Ready(Err(_closed)) => Error::NotFound,
+			Poll::Ready(Ok(res)) => res,
+			Poll::Ready(Err(_closed)) => (Error::NotFound, None),
 			Poll::Pending => return Poll::Pending,
 		};
 		// An accept caches the group before it answers the channel, which may land
 		// between the track check above and this one: look again before failing.
-		match cached(waiter) {
-			Poll::Ready(res) => Poll::Ready(res),
-			Poll::Pending => Poll::Ready(Err(err)),
+		if let Poll::Ready(res) = cached(waiter) {
+			return Poll::Ready(res);
 		}
+		// Joined after a tighter budget went on the wire, which judged the group too old
+		// for that budget, not ours: ask again with ours. Terminates, since the new
+		// attempt asks at least our budget.
+		let looser = match (asked, self.max_delay) {
+			(Some(asked), Some(ours)) => ours > asked,
+			(Some(_), None) => true,
+			(None, _) => false,
+		};
+		if matches!(err, Error::Old) && looser {
+			let options = group::Fetch {
+				priority: self.priority,
+				max_delay: self.max_delay,
+				frame_start: self.frame_start,
+			};
+			self.result = queue(&self.fetch, self.sequence, &options);
+			return self.poll(waiter);
+		}
+		Poll::Ready(Err(err))
 	}
 }
 
@@ -3761,6 +3820,36 @@ struct GroupExpiry {
 	/// The cursor's drift cap; see [`Cursor::drift_cap`].
 	cap: kio::Consumer<Option<u64>>,
 	sequence: u64,
+}
+
+/// Keeps one fetched group tied to this caller's age budget without adding live demand.
+struct FetchExpiry {
+	state: kio::ConsumerWeak<TrackState>,
+	sequence: u64,
+	max_delay: Option<Duration>,
+}
+
+impl group::Expiry for FetchExpiry {
+	fn for_track(&self, track: &Consumer) -> Arc<dyn group::Expiry> {
+		Arc::new(Self {
+			state: track.state.weak(),
+			sequence: self.sequence,
+			max_delay: self.max_delay,
+		})
+	}
+
+	fn is_expired(&self, max_delay: Option<Duration>, waiter: &kio::Waiter) -> bool {
+		let state = self.state.read();
+		let budget = match (self.max_delay, max_delay) {
+			(Some(fetch), Some(route)) => fetch.min(route),
+			(Some(fetch), None) => fetch,
+			(None, Some(route)) => route,
+			(None, None) => Duration::MAX,
+		};
+		let budget = clamp_max_delay(budget, state.max_age_bound());
+		state.cache.wakes().watch_landing(self.sequence, waiter);
+		state.poll_drifted(self.sequence, None, budget, waiter) && state.lookup.contains_key(&self.sequence)
+	}
 }
 
 impl group::Expiry for GroupExpiry {
@@ -7815,17 +7904,95 @@ mod test {
 	}
 
 	#[test]
-	fn fetch_ignores_the_budget() {
+	fn fetch_omission_keeps_unbounded_history() {
 		let mut producer = track_producer("test", Info::timed());
 		for second in 0..4 {
 			append_at(&mut producer, second * 1000);
 		}
 
-		// A fetch names one old group explicitly, so there is no live edge to drift
-		// from: the budget bounds a subscription, not a request for a specific group.
+		// Omission adds no reader bound when the publisher declared none.
 		let consumer = producer.consume();
 		let group = consumer.fetch_group(0, None).now_or_never().unwrap().unwrap();
 		assert_eq!(group.sequence, 0);
+	}
+
+	#[test]
+	fn fetch_applies_zero_and_publisher_budgets() {
+		let mut producer = track_producer("test", Info::timed().with_max_age(Duration::from_millis(1500)));
+		for second in 0..4 {
+			append_at(&mut producer, second * 1000);
+		}
+
+		let consumer = producer.consume();
+		let zero = group::Fetch::default().with_max_delay(Duration::ZERO);
+		assert!(matches!(
+			consumer.fetch_group(2, zero).now_or_never().unwrap(),
+			Err(Error::Old)
+		));
+		assert!(matches!(
+			consumer.fetch_group(0, None).now_or_never().unwrap(),
+			Err(Error::Old)
+		));
+
+		// A reader cannot relax max_age, but can tighten it independently.
+		let loose = group::Fetch::default().with_max_delay(Duration::from_secs(60));
+		assert_eq!(
+			consumer.fetch_group(2, loose).now_or_never().unwrap().unwrap().sequence,
+			2
+		);
+		let tight = group::Fetch::default().with_max_delay(Duration::from_millis(500));
+		assert!(matches!(
+			consumer.fetch_group(1, tight).now_or_never().unwrap(),
+			Err(Error::Old)
+		));
+	}
+
+	#[test]
+	fn cold_fetch_expires_without_waiting_for_the_upstream_group() {
+		let mut producer = track_producer("test", Info::timed());
+		let _dynamic = producer.dynamic();
+		let mut successor = producer.create_group(group::Info { sequence: 1 }).unwrap();
+		successor
+			.write_frame(Timestamp::from_millis(1000).unwrap(), bytes::Bytes::from_static(b"x"))
+			.unwrap();
+		successor.finish().unwrap();
+		append_at(&mut producer, 2000);
+
+		let options = group::Fetch::default().with_max_delay(Duration::ZERO);
+		assert!(matches!(
+			producer.consume().fetch_group(0, options).now_or_never().unwrap(),
+			Err(Error::Old)
+		));
+	}
+
+	#[moq_net_sim::test]
+	#[cfg(feature = "async")]
+	async fn fetched_group_keeps_its_budget_while_reading() {
+		let mut producer = track_producer("test", Info::timed());
+		let mut old = producer.append_group().unwrap();
+		old.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"first"))
+			.unwrap();
+
+		let consumer = producer.consume();
+		let options = group::Fetch::default().with_max_delay(Duration::from_millis(500));
+		let mut fetched = consumer.fetch_group(0, options).await.unwrap();
+		assert!(fetched.read_frame().await.unwrap().is_some());
+
+		let pending = moq_net_sim::spawn(async move {
+			let result = fetched.read_frame().await;
+			(result, fetched.latency_expired())
+		});
+		moq_net_sim::yield_now().await;
+		elapse(&producer, Duration::from_secs(1));
+		append_at(&mut producer, 1000);
+		append_at(&mut producer, 2000);
+
+		let (result, expired) = pending.await.unwrap();
+		assert!(
+			matches!(result, Ok(None)),
+			"a fully drained group ends cleanly: {result:?}"
+		);
+		assert!(expired, "the fetch budget caused that end");
 	}
 
 	/// A fetched group installs metadata but never accepts the track's live feed.
@@ -10228,8 +10395,18 @@ mod test {
 
 		// Two fetches for the same uncached group produce ONE handler request,
 		// carrying the higher of the two priorities.
-		let mut first = consumer.fetch_group(5, group::Fetch::default().with_priority(1));
-		let second = consumer.fetch_group(5, group::Fetch::default().with_priority(7));
+		let mut first = consumer.fetch_group(
+			5,
+			group::Fetch::default()
+				.with_priority(1)
+				.with_max_delay(Duration::from_secs(1)),
+		);
+		let second = consumer.fetch_group(
+			5,
+			group::Fetch::default()
+				.with_priority(7)
+				.with_max_delay(Duration::from_secs(10)),
+		);
 		assert!(kio::Task::poll(&mut *first, &kio::Waiter::noop()).is_pending());
 
 		let req = dynamic
@@ -10239,6 +10416,7 @@ mod test {
 			.unwrap();
 		assert_eq!(req.sequence(), 5);
 		assert_eq!(req.priority(), 7);
+		assert_eq!(req.max_delay(), Some(Duration::from_secs(10)));
 		assert!(
 			dynamic.poll_requested_group(&kio::Waiter::noop()).is_pending(),
 			"the second fetch queued a duplicate request"
@@ -10257,6 +10435,35 @@ mod test {
 		assert_eq!(first.await.unwrap().sequence, 5);
 		assert_eq!(second.await.unwrap().sequence, 5);
 		assert_eq!(third.await.unwrap().sequence, 5);
+	}
+
+	/// A looser caller that joined after a tighter budget went on the wire is not failed by
+	/// that budget's `Old`: it asks again with its own.
+	#[moq_net_sim::test]
+	#[cfg(feature = "async")]
+	async fn a_late_looser_fetch_asks_again_after_old() {
+		let producer = track_producer("test", Info::timed());
+		let dynamic = producer.dynamic();
+		let consumer = producer.consume();
+
+		let tight = consumer.fetch_group(5, group::Fetch::default().with_max_delay(Duration::from_secs(1)));
+		let req = dynamic.requested_group().now_or_never().unwrap().unwrap();
+		assert_eq!(req.max_delay(), Some(Duration::from_secs(1)));
+		let mut loose = consumer.fetch_group(5, None);
+		assert!(kio::Task::poll(&mut *loose, &kio::Waiter::noop()).is_pending());
+
+		req.reject(Error::Old);
+		assert!(matches!(tight.await, Err(Error::Old)));
+		assert!(kio::Task::poll(&mut *loose, &kio::Waiter::noop()).is_pending());
+
+		let req = dynamic.requested_group().now_or_never().unwrap().unwrap();
+		assert_eq!(req.max_delay(), None);
+		let mut group = req.accept(Info::timed()).unwrap();
+		group
+			.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"hi"))
+			.unwrap();
+		group.finish().unwrap();
+		assert_eq!(loose.await.unwrap().sequence, 5);
 	}
 
 	#[moq_net_sim::test]
