@@ -3105,14 +3105,11 @@ impl Consumer {
 	}
 
 	/// Run `f` on the track instance this handle reads now, without joining its consumer
-	/// count: `None` when a broadcast serves nothing under the name yet.
+	/// count: `None` when an open broadcast serves nothing under the name now.
 	fn with_state<R>(&self, f: impl FnOnce(Option<&kio::ConsumerWeak<TrackState>>) -> R) -> R {
 		match &self.source {
 			Source::Track(state) => f(Some(state)),
-			Source::Broadcast(broadcast, current) => match broadcast.peek_track(&self.name) {
-				Some(state) => f(Some(&state)),
-				None => f(current.as_ref()),
-			},
+			Source::Broadcast(broadcast, current) => f(broadcast.peek_track(&self.name, current.as_ref()).as_ref()),
 		}
 	}
 

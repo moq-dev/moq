@@ -938,8 +938,14 @@ impl Consumer {
 	}
 
 	/// Read the track serving `name` now, without joining its demand or requesting it.
-	pub(crate) fn peek_track(&self, name: &str) -> Option<kio::ConsumerWeak<track::TrackState>> {
-		self.state.lock().peek(name)
+	/// Once the broadcast has ended, `ended` stands in for a track it no longer serves.
+	pub(crate) fn peek_track(
+		&self,
+		name: &str,
+		ended: Option<&kio::ConsumerWeak<track::TrackState>>,
+	) -> Option<kio::ConsumerWeak<track::TrackState>> {
+		let mut state = self.state.lock();
+		state.peek(name).or_else(|| ended.filter(|_| state.closing).cloned())
 	}
 
 	/// A watch-only handle to the broadcast's demand. See [`Demand`].
@@ -1156,6 +1162,33 @@ mod test {
 		drop(track);
 		assert!(matches!(consumer.track("0.opus"), Err(Error::NotFound)));
 		assert_eq!(producer.unique_name(".opus"), "1.opus");
+	}
+
+	/// A track handle reads what an open broadcast serves now, so a track that went away
+	/// reads empty rather than its stale cache.
+	#[test]
+	fn a_handle_forgets_a_track_its_open_broadcast_dropped() {
+		let producer = Info::new().produce();
+		let consumer = producer.consume();
+		let track = producer.create_track("a", crate::track::Info::timed()).unwrap();
+		track.append_group().unwrap();
+		let handle = consumer.track("a").unwrap();
+		assert_eq!(handle.latest(), Some(0));
+		drop(track);
+		assert_eq!(handle.latest(), None);
+	}
+
+	/// Once the broadcast ends, a handle keeps reading the track it saw when it was made.
+	#[test]
+	fn a_handle_keeps_its_track_once_the_broadcast_ends() {
+		let producer = Info::new().produce();
+		let consumer = producer.consume();
+		let track = producer.create_track("a", crate::track::Info::timed()).unwrap();
+		track.append_group().unwrap();
+		let handle = consumer.track("a").unwrap();
+		producer.close();
+		drop(track);
+		assert_eq!(handle.latest(), Some(0));
 	}
 
 	#[test]
