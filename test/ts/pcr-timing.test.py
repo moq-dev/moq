@@ -49,7 +49,7 @@ class Rate(unittest.TestCase):
         self.assertLess(abs(release[4]["tail_drift_rate_ms_per_s"]), 0.01)
         rate = timing.check_rate(scan, self.ARGS)
         self.assertTrue(rate[2], rate)
-        self.assertEqual(rate[4]["release_faults"], 29)
+        self.assertEqual(rate[4]["lag_steps"], 1)
 
     def test_read_delay_wander_is_not_rate(self):
         # Reads only ever land late: up to 4 ms through the start of the graded window, under
