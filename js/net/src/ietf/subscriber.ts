@@ -1304,11 +1304,6 @@ export class Subscriber {
 				}
 
 				if (frame.endOfTrack) {
-					// A compact stream opening on a marker at a nonzero Object ID is subgroup N,
-					// refused below like a payload object there, rather than the track's end.
-					if (!producer && group.flags.hasSubgroupObject && frame.idDelta !== 0) {
-						throw new ObjectIdGap(frame.idDelta);
-					}
 					if (frame.hasProperties) throw new EndOfTrackProperties();
 					// No object at or past this location exists: after the group's last object
 					// the track ends with it, and at object 0 it ends before it.

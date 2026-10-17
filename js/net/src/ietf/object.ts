@@ -343,6 +343,9 @@ export class Frame {
 		// a sequential group is a zero delta throughout, and any other value means the group
 		// either starts partway through or has a gap that would renumber the frames after it.
 		const delta = c.u53();
+		// A compact stream's first Object ID is its subgroup and any later delta a gap. Neither
+		// is supported, so refuse it before the rest of the object can fail differently.
+		if (flags.hasSubgroupObject && delta !== 0) throw new ObjectIdGap(delta);
 
 		let timestamp: Timestamp | undefined;
 		let hasProperties = false;
