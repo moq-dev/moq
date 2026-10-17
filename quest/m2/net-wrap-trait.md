@@ -54,6 +54,10 @@ Open, for the design:
 - Group lifecycle hooks. flate's DEFLATE is group-scoped and stateful, and
   e2ee's nonce binds the group and frame sequence, so a per-frame map is not
   enough.
+- Terminal propagation. Finish, typed aborts (such as e2ee's authentication
+  error), and handle teardown must cross the wrapper at the broadcast, track,
+  and group levels, not collapse into `Error::Dropped` or keep a producer
+  alive.
 - Whether flate and json become wrappers or stay codecs above a track.
 - Demand and preference propagation. moq-mux and the browser publisher gate
   output on `track::Demand`, so a wrapper must not keep encoders active with
