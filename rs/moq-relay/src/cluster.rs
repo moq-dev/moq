@@ -554,11 +554,19 @@ impl DialMap {
 	}
 }
 
-/// Every QUIC client the cluster dials peers with, so [`Cluster::close`] can send
-/// each peer its close before the runtime stops: a dropped link only queues the
-/// close, and the peer then keeps the link and its routes until its idle timeout.
+/// Every dial task and QUIC client the cluster dials peers with, so
+/// [`Cluster::close`] can end each link and send the peer its close before the
+/// runtime stops: a dropped QUIC link only queues the close, and the peer then
+/// keeps the link and its routes until its idle timeout.
 #[derive(Clone)]
-struct Dialers(Arc<Mutex<Option<DialersState>>>);
+struct Dialers {
+	state: Arc<Mutex<Option<DialersState>>>,
+	/// Set on close. Each dial task holds a receiver, so [`watch::Sender::closed`]
+	/// waits for every one of them to end.
+	///
+	/// [`watch::Sender::closed`]: tokio::sync::watch::Sender::closed
+	stop: Arc<tokio::sync::watch::Sender<bool>>,
+}
 
 /// `None` in [`Dialers`] once closed, which refuses any further dial.
 struct DialersState {
@@ -572,16 +580,19 @@ struct DialersState {
 impl Dialers {
 	fn new() -> Self {
 		let (closing, finished) = tokio::sync::mpsc::channel(1);
-		Self(Arc::new(Mutex::new(Some(DialersState {
-			clients: HashMap::new(),
-			next: 0,
-			closing,
-			finished,
-		}))))
+		Self {
+			state: Arc::new(Mutex::new(Some(DialersState {
+				clients: HashMap::new(),
+				next: 0,
+				closing,
+				finished,
+			}))),
+			stop: Arc::new(tokio::sync::watch::Sender::new(false)),
+		}
 	}
 
 	fn lock(&self) -> std::sync::MutexGuard<'_, Option<DialersState>> {
-		self.0.lock().unwrap_or_else(PoisonError::into_inner)
+		self.state.lock().unwrap_or_else(PoisonError::into_inner)
 	}
 
 	/// Keep `client` until [`Self::close`].
@@ -603,16 +614,24 @@ impl Dialers {
 		})
 	}
 
-	fn is_closed(&self) -> bool {
-		self.lock().is_none()
+	/// Run one dial task until it ends or [`Self::close`] stops it.
+	async fn supervise(&self, dial: impl std::future::Future<Output = ()>) {
+		let mut stop = self.stop.subscribe();
+		tokio::select! {
+			// First, so a dial spawned just before the close never starts.
+			biased;
+			_ = stop.wait_for(|stopped| *stopped) => {}
+			() = dial => {}
+		}
 	}
 
-	/// Close every client, including those a dropped guard is still closing, and
-	/// refuse further dials.
+	/// Stop every dial task and close every client, including those a dropped
+	/// guard is still closing, and refuse further dials.
 	async fn close(&self) {
 		let Some(state) = self.lock().take() else {
 			return;
 		};
+		self.stop.send_replace(true);
 		let DialersState {
 			clients,
 			closing,
@@ -623,6 +642,8 @@ impl Dialers {
 		drop(closing);
 		// Nothing is ever sent: this returns `None` once every sender has dropped.
 		let _ = finished.recv().await;
+		// Each stopped task dropped its link, which ends a non-QUIC one.
+		self.stop.closed().await;
 	}
 }
 
@@ -1466,8 +1487,8 @@ impl Cluster {
 		Ok(())
 	}
 
-	/// Close every peer link this cluster dialed, and wait until each peer has been
-	/// sent its close. Call it before the runtime stops: a dropped link only queues
+	/// Close every peer link this cluster dialed, on any transport, and wait until
+	/// each peer has been sent its close. Call it before the runtime stops: a dropped link only queues
 	/// its close, so the peer would keep the link and its routes until its idle
 	/// timeout. Dialing stops for good, on every clone. [`Relay::run`](crate::Relay::run)
 	/// calls it on the way out.
@@ -1844,9 +1865,14 @@ impl Cluster {
 
 	async fn supervise_remote(self, target: DialTarget, token: String) {
 		let log_peer = target.key.clone();
-		if let Err(err) = self.run_remote(&target, token).await {
-			tracing::warn!(%err, peer = %log_peer, "cluster peer connection ended");
-		}
+		let dialers = self.dialers.clone();
+		dialers
+			.supervise(async move {
+				if let Err(err) = self.run_remote(&target, token).await {
+					tracing::warn!(%err, peer = %log_peer, "cluster peer connection ended");
+				}
+			})
+			.await;
 	}
 
 	#[tracing::instrument("remote", skip_all, err, fields(remote = %target.key))]
@@ -1893,9 +1919,6 @@ impl Cluster {
 				}
 			}
 
-			if self.dialers.is_closed() {
-				return Ok(());
-			}
 			tokio::time::sleep(backoff).await;
 		}
 	}

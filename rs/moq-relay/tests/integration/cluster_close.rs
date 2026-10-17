@@ -87,6 +87,46 @@ async fn closing_a_cluster_closes_its_static_dials() {
 	assert_closed_by_shutdown(conn).await;
 }
 
+/// `Client::close` reaches only QUIC, so a WebSocket link ends only because the
+/// close stops its dial task. The runtime keeps running, as an embedder's would.
+#[cfg(feature = "websocket")]
+#[tokio::test]
+async fn closing_a_cluster_ends_its_websocket_dials() {
+	use tokio::io::AsyncReadExt;
+
+	let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+	let port = listener.local_addr().expect("addr").port();
+	let mut options = moq_relay::cluster::Options::new(Default::default());
+	options.config.connect = vec![moq_relay::cluster::Peer::new(format!("ws://127.0.0.1:{port}/"))];
+	let (connect, quic) = dial_template();
+	let cluster = moq_relay::cluster::Cluster::new(options)
+		.expect("cluster init")
+		.with_connect(connect, quic);
+	let started = cluster.clone().start().await.expect("cluster start");
+	let running = tokio::spawn(started.run());
+
+	// Never answers the upgrade, so the dial holds the socket until stopped.
+	let (mut socket, _) = tokio::time::timeout(TIMEOUT, listener.accept())
+		.await
+		.expect("dial timeout")
+		.expect("accept");
+	tokio::time::timeout(TIMEOUT, cluster.close())
+		.await
+		.expect("close waits on a stopped dial");
+
+	let mut buf = vec![0; 4096];
+	loop {
+		// Brief: the socket is already closed once `close` returns.
+		let read = tokio::time::timeout(Duration::from_secs(2), socket.read(&mut buf))
+			.await
+			.expect("the dial still holds its socket");
+		if read.map_or(true, |n| n == 0) {
+			break;
+		}
+	}
+	running.abort();
+}
+
 #[tokio::test]
 async fn a_relay_shutdown_closes_its_cluster_dials() {
 	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
