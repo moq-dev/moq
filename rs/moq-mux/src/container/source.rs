@@ -91,6 +91,9 @@ pub(crate) struct ExportSource {
 	absorbed_keyframe: bool,
 	skips: u64,
 	markers: u64,
+	/// Whether a frame of the group being read went out and the group has not ended since.
+	open: bool,
+	cuts: u64,
 	// A stopped encoder may still emit final packets in this group on the old timeline.
 	ends: Option<(u64, u64)>,
 }
@@ -176,6 +179,8 @@ impl ExportSource {
 			absorbed_keyframe: false,
 			skips: 0,
 			markers: 0,
+			open: false,
+			cuts: 0,
 			ends: None,
 		};
 		source.resolve_video_dimensions(&[])?;
@@ -211,6 +216,8 @@ impl ExportSource {
 			absorbed_keyframe: false,
 			skips: 0,
 			markers: 0,
+			open: false,
+			cuts: 0,
 			ends: None,
 		}))
 	}
@@ -239,6 +246,8 @@ impl ExportSource {
 			absorbed_keyframe: false,
 			skips: 0,
 			markers: 0,
+			open: false,
+			cuts: 0,
 			ends: None,
 		})
 	}
@@ -298,6 +307,12 @@ impl ExportSource {
 	/// Declared ends this source has advanced past.
 	pub fn markers(&self) -> u64 {
 		self.markers
+	}
+
+	/// Gaps that lost the rest of a group this source had begun delivering, rather than whole
+	/// groups after one that ended.
+	pub fn cuts(&self) -> u64 {
+		self.cuts
 	}
 
 	/// True if the codec config is resolved (either present in the catalog,
@@ -397,11 +412,21 @@ impl ExportSource {
 						if self.ends.is_some_and(|(end_group, _)| end_group != group) {
 							self.finish_ends();
 						}
+						self.open = true;
 						frame
 					}
-					Some(Item::Read(Read::Gap { .. })) => {
+					Some(Item::Read(Read::Gap { timestamp, duration })) => {
+						// Say what the export never receives and where. A data track declares a
+						// break by skipping a sequence, which reads the same though nothing is lost.
+						tracing::warn!(
+							track = consumer.name(),
+							at = ?std::time::Duration::from(timestamp),
+							skipped = ?std::time::Duration::from(duration),
+							"media skipped upstream, or a data track's declared break; resuming at the next group"
+						);
 						self.finish_ends();
 						self.skips += 1;
+						self.cuts += u64::from(std::mem::take(&mut self.open));
 						return Poll::Ready(Ok(Some(Event::GroupEnd)));
 					}
 					Some(Item::Read(Read::End { group, end })) => {
@@ -414,6 +439,7 @@ impl ExportSource {
 					Some(Item::FrameEnd(end)) => return Poll::Ready(Ok(Some(Event::FrameEnd { end, opens: false }))),
 					Some(Item::GroupEnd) => {
 						self.finish_ends();
+						self.open = false;
 						return Poll::Ready(Ok(Some(Event::GroupEnd)));
 					}
 					None => {
@@ -675,6 +701,41 @@ mod tests {
 		);
 		export.state = SourceState::Active(Box::new(consumer));
 		(track, export)
+	}
+
+	/// A gap that loses the rest of a group already begun is a cut; whole groups missing after
+	/// one that ended are not.
+	#[tokio::test(start_paused = true)]
+	async fn only_a_gap_inside_a_group_cuts_it() {
+		use crate::container::Container as _;
+		use crate::container::test_util::raw_frame;
+
+		let (track, mut export) = audio_export().await;
+		let wire = HangContainer::Legacy(crate::container::Kind::Audio);
+		let group = |sequence: u64, timestamp: u64| {
+			let mut group = track.create_group(moq_net::group::Info { sequence }).unwrap();
+			wire.write(&mut group, &[raw_frame(timestamp, b"audio", true)]).unwrap();
+			group
+		};
+		// Group 1 is missing whole; group 3 is cut short after its first frame.
+		group(0, 0).finish().unwrap();
+		group(2, 40_000).finish().unwrap();
+		let cut = group(3, 60_000);
+		group(4, 80_000).finish().unwrap();
+		track.finish().unwrap();
+
+		let waiter = kio::Waiter::noop();
+		let read = |export: &mut ExportSource| {
+			let Poll::Ready(Ok(Some(frame))) = export.poll_read(&waiter) else {
+				panic!("frame ready")
+			};
+			(frame.timestamp.as_micros(), export.skips(), export.cuts())
+		};
+		assert_eq!(read(&mut export), (0, 0, 0));
+		assert_eq!(read(&mut export), (40_000, 1, 0), "group 1 is missing whole");
+		assert_eq!(read(&mut export), (60_000, 1, 0));
+		cut.abort(moq_net::Error::Old).unwrap();
+		assert_eq!(read(&mut export), (80_000, 2, 1), "group 3 was cut short");
 	}
 
 	#[tokio::test(start_paused = true)]

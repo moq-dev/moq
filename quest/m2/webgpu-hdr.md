@@ -12,7 +12,7 @@ drawn as if it were SDR as today.
 
 Decided 2026-10-08 in the WebGPU renderer `/quest-plan` interview: SDR and
 wide gamut first in the `@moq/video` WebGPU renderer (`js/video`), HDR here,
-both in m1.
+HDR and its catalog extension now follow in m2.
 
 Facts (2026-10):
 

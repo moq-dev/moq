@@ -21,8 +21,7 @@ send stream offsets in any order.
 
 Decided 2026-10-02: the line moved from m2 to m3. It is a speculative
 optimization with no consumer asking for it, so it parks until one does and
-is deleted if it goes stale. The QUIC primitives land in `moq-quic`, the
-[hard fork](/quest/m1/quic/fork/README.md)'s stack.
+is deleted if it goes stale. The QUIC primitives land in `moq-quic`.
 
 Decided 2026-10-08: the four build quests were deleted. They churned with
 every frame-model and transport change while waiting on a verdict nobody had
@@ -77,5 +76,5 @@ stats field, which its quest documents inline.
 ## Related
 
 - [Hierarchical stream scheduling](/quest/m1/quic/scheduler.md) - orders streams; offset writes order ranges within one
-- [QoS](/quest/m1/qos/README.md) - the loss-delay counter follows its per-broadcast ingress row conventions
+- [QoS](/quest/m2/qos/README.md) - the loss-delay counter follows its per-broadcast ingress row conventions
 - [Frame slots are cached for free](https://github.com/moq-dev/moq/pull/5239) - changes how the cache charges the in-flight frames a cut-through build would hold

@@ -2,9 +2,9 @@
 
 ## Goal
 
-MoQ uses a published `web-transport-moq` release containing the acknowledged
-close fix, and the Interop browser close-code test reliably reports a refused
-session as `unauthorized`, never as "Connection lost".
+MoQ carries the acknowledged close fix, and the Interop browser close-code
+test reliably reports a refused session as `unauthorized`, never as
+"Connection lost".
 
 ## Plan
 
@@ -24,9 +24,10 @@ passed. Full `just test interop --all` passed with an adapter-only temporary
 patch, including Chromium's exact code 2 and `unauthorized`. That patch was
 removed; no unpublished dependency belongs in this adoption.
 
-- Once the release condition clears, update the compatible published adapter
-  requirement and lockfile on `main`. The current requirement is 2.0.4.
-- Run strict `just check` and `just test interop --all` on the committed pin,
+- `main` already carries the fix: #5664 copied `web-transport-moq` from
+  moq-dev/noq#40's merge commit into moq-tokio's `quic::web`, with its regressions
+  (`close_waits_for_capsule_ack`, `close_ack_wait_ends_with_connection`).
+- Run strict `just check` and `just test interop --all` on `main`,
   preserving the exact refusal assertion and the source regression. Do not
   retry for green, increase the grace, or accept alternate errors.
 - Recommend a `release` backport after main lands. That branch pins the
@@ -36,10 +37,6 @@ removed; no unpublished dependency belongs in this adoption.
 
 Public API: none expected. Wire: existing CLOSE capsule framing and codes
 are unchanged; refusal delivery is corrected.
-
-## Required
-
-- [WebTransport publishes the close fix](/quest/m1/test-flakes-2/interop-close-release.md) - a compatible stable adapter release contains the acknowledged-close fix
 
 ## Related
 

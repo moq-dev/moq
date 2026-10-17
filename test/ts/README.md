@@ -33,7 +33,7 @@ just test ts --strict           # also fail on broadcast-shape warnings
 just test ts --with-eit         # add a synthetic EPG first, report which SI survived
 just test ts --live             # grade PCR release timing off the live pipe
 just test ts --pair             # two exporters of one broadcast, grade table anchoring
-just test ts --open-gop         # open-GOP clip; its leading pictures must survive
+just test ts --open-gop         # open-GOP clip; orphan leading pictures are trimmed
 just test ts --hrd              # 1080p video filling a broadcast-sized 9 Mbit CPB
 just test ts --headroom         # the same with four audio PIDs, muxed above the video's Rx
 just test ts --leak             # 1080p video with no HRD, filling its level's 24 Mb/s leak
@@ -102,6 +102,7 @@ Severities: **hard** checks fail the run by default; **shape** checks report as
 | `duration-fidelity` | hard | exported PCR span tracks the source's duration (round-trip only) |
 | `service-descriptors` | shape | an SDT naming the service is present |
 | `tstd` | hard | the supported elementary-stream T-STD models: no TB, MB, EB or B overflow, no access unit incomplete at its decoding time (see [T-STD](#t-std)) |
+| `system-buffers` | hard | each program's TBsys and Bsys: neither overflows, and TBsys empties at least once a second (see [T-STD](#t-std)) |
 
 Every timing check reads the stream's own PCR, so a PCR emitted on the wrong
 clock rate stays internally consistent and passes them all. `duration-fidelity`
@@ -153,9 +154,27 @@ Opus is graded against ADTS's buffers for the same channel count: the Opus-in-TS
 draft gives Rx (2 Mb/s for 1-2 channels, matching ADTS) but leaves the buffer size
 unset, so that size is borrowed rather than specified. A stream with no parameters
 at all is refused by name rather than skipped, which fails the check: MPEG-1/2
-video, DVB E-AC-3, and HEVC beyond Main/Main 10. The PSI system buffer is not implemented. Sections and private data
+video, DVB E-AC-3, and HEVC beyond Main/Main 10. Sections and private data
 (SCTE-35, teletext) are listed as not graded; passing elementary-stream buffers
-does not establish conformance for them. A signalled PCR discontinuity starts fresh buffers, since the timestamps
+does not establish conformance for them.
+
+`system-buffers` runs each program's PIDs 0-3 and PMT through one TBsys (512 B at
+Rxsys = 1 Mb/s) and on into one Bsys (1,536 B, emptied at Rsys = max(80 kb/s,
+transport rate / 500)), on the program's PCR, as 2.4.2.3 specifies: a packet's
+bytes enter Bsys as they leave TBsys, and a duplicate (2.4.3.3, the same bytes
+but for a refreshed PCR or OPCR) enters TBsys but not Bsys. Each program is
+followed through the PAT and its PMTs, as a receiver would: its packets on the PMT
+PID then in force count, timed on the PCR PID then in force, and both buffers keep
+their bytes when either PID moves, until a complete PAT drops the program. Across a
+PCR PID move the last PCR on the old PID and the first on the new are the program's
+successive PCRs, so unless the move signals a discontinuity they must increase and lie
+within 0.1 s (2.7.2). Rsys drains Bsys at the transport rate each pair
+of PCRs gives, so a rate change takes effect where it happens. A system packet on a
+stretch of the PCR PID with fewer than two PCRs fails, since nothing checked it;
+a program declaring no PCR (0x1FFF) has no clock to model. The
+exporter paces its tables against both buffers only when it pads to a
+multiplex rate. Unpadded output makes no system-buffer claim: its tables go out
+as muxed. A signalled PCR discontinuity starts fresh buffers, since the timestamps
 on either side of it are on different clocks.
 
 Every packet on an elementary stream's PID enters TB, including adaptation-only
@@ -217,6 +236,14 @@ a PCR packet between them. Each case fails without the handling it names:
 | four adaptation-only packets after an access unit | TB overflow |
 | an access unit's first packet sent twice | pass |
 | the PMT declares a PCR PID that carries no PCR | `pcr-presence` fails |
+| a PAT and three PMT copies back to back | TBsys overflow |
+| ten PMT copies, each arriving as TBsys passes the last on | Bsys overflow |
+| PMT copies at Rxsys for 1.5 s, one packet ahead | TBsys not emptied within 1 s, Bsys overflow |
+| six PMT copies sent twice, the second with a refreshed OPCR | pass |
+| the PAT moves the PMT, then ten PMT copies on its new PID | Bsys overflow |
+
+A tables-only stream fills Bsys at 100 Mb/s and sends three more PMT copies once
+its rate falls to 25 Mb/s, where Rsys is 80 kb/s rather than 200: Bsys overflow.
 
 Synthetic MPEG audio streams pack several 576-byte frames per PES, so frames end
 partway through packets, and the last is cut off by the end of the capture:
@@ -457,12 +484,18 @@ Controls run in PR CI; the real pair runs nightly and on manual TS validation.
 
 ## Open GOP (`open-gop.py`)
 
+`just test harness` also runs the actual JS container and player against generated
+open-GOP access units with Chromium's software WebCodecs decoder forced. It
+checks a join, continuous GOPs, and a later delivery hole; disabling the trim
+reproduces `EncodingError` instead of silently accepting orphan references.
+
 Broadcast contribution encoders commonly send open GOP: after the first IDR, each
 keyframe is a non-IDR I picture flagged by a recovery-point SEI, and the B pictures
 that follow it in decode order but are presented before it (its leading pictures)
 reference the previous GOP. Only a viewer that already holds that GOP can decode
-them. Dropping them is right at a tune-in, which the transport cannot see, so the
-round-trip has to hand every one of them on, in decode order.
+them. The consumer trims the recovery group's orphan leading pictures at a join
+or after a delivery gap. Continuous groups keep every picture in decode order.
+A declared end is a fresh encoder boundary, not a delivery gap.
 
 `--open-gop` swaps the generated clip for an x264 `open-gop=1` encode whose 24-frame
 GOP and fixed B placement put three leading pictures behind every recovery point,
@@ -481,8 +514,8 @@ rebase.
 | Check | Severity | What it verifies |
 |---|---|---|
 | `fixture` | hard | the source has at least two non-IDR recovery points with leading pictures |
-| `decode-order` | hard | the capture is one contiguous run of the source's access units from a random-access point, with DTS strictly increasing |
-| `leading-pictures` | hard | every leading picture in that run is there and keeps the presentation offset the source gave it |
+| `decode-order` | hard | each delivered segment starts at a random-access point, omits only its orphan leading pictures, and keeps DTS strictly increasing |
+| `leading-pictures` | hard | every continuous leading picture is kept with its source presentation offset; recovery-group orphans are absent |
 | `random-access-indicator` | shape | the exporter flags exactly the random-access access units |
 | `recovery-point-sei` | shape | each recovery point keeps its SEI |
 | `dts-before-pts` | shape | no access unit is stamped to decode after it presents |
@@ -613,6 +646,13 @@ tail fails. Exact PCM comparison uses a fresh decode of source AAC starting at
 the same access unit: AAC overlap and perceptual-noise state differ between a
 cold decoder and a decoder that saw earlier frames. No arbitrary warmup samples
 are discarded. PES boundaries and TS packetization may change.
+
+The suffix is the exporter's to choose, and it starts on a whole group: a join
+whose first group is cut short before anything of it went out starts at the next
+one. Anything lost after that fails. When it does, the harness prints what the
+exporter reported: the `TS export release clock` counts (`dropped` late,
+`trimmed` before the output began, `gaps` skipped upstream) and each loss it
+logged.
 
 `just test ts-controls` exercises unchanged input, remuxing with new timestamps
 and PES sizes, timestamp quantization, and a cold join. Negative controls require

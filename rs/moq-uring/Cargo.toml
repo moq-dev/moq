@@ -13,13 +13,13 @@ keywords = ["quic", "io-uring", "networking", "linux"]
 categories = ["asynchronous", "network-programming", "os::linux-apis"]
 
 [features]
-default = ["noq"]
-# moq-noq-proto, with TLS through rustls.
-noq = ["dep:moq-noq-proto", "dep:rustls", "dep:rustls-platform-verifier"]
+default = ["quic"]
+# QUIC and WebTransport on moq-quic, with TLS through rustls.
+quic = ["dep:moq-quic", "dep:moq-clock", "dep:rustls", "dep:rustls-platform-verifier"]
 # Capture qlog traces (`quic::Transport::qlog`). Off by default: it compiles the
-# qlog crate and its serde_json encoder into noq, which a production build has
+# qlog crate and its serde_json encoder into moq-quic, which a production build has
 # no use for.
-qlog = ["moq-noq-proto?/qlog"]
+qlog = ["moq-quic?/qlog"]
 
 [target.'cfg(target_os = "linux")'.dependencies]
 bytes = "1"
@@ -27,9 +27,10 @@ http = "1"
 io-uring = { workspace = true }
 kio = { workspace = true }
 libc = { workspace = true }
+# The QUIC driver hands moq-quic its clock's instants.
+moq-clock = { workspace = true, optional = true }
 moq-net = { workspace = true }
-# default-features off so the crypto provider is ours to pick.
-moq-noq-proto = { workspace = true, features = ["bloom", "tracing-log", "rustls-aws-lc-rs"], optional = true }
+moq-quic = { workspace = true, features = ["bloom", "rustls-aws-lc-rs"], optional = true }
 moq-sock = { workspace = true }
 rand = "0.10"
 rustc-hash = { workspace = true }
@@ -56,7 +57,7 @@ web-transport-trait = { workspace = true }
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 io-uring = { workspace = true }
 libc = { workspace = true }
-moq-tokio = { path = "../moq-tokio", default-features = false, features = ["noq", "aws-lc-rs"] }
+moq-tokio = { path = "../moq-tokio", default-features = false, features = ["quic", "aws-lc-rs"] }
 nix = { workspace = true }
 rcgen = { version = "0.14", default-features = false, features = ["pem", "aws_lc_rs"] }
 rustls = "0.23"
@@ -65,7 +66,6 @@ rustls = "0.23"
 serde_json = { workspace = true }
 tempfile = { workspace = true }
 tracing = "0.1"
-web-transport-moq = { workspace = true }
 
 [[bench]]
 name = "udp_tokio"
@@ -76,10 +76,9 @@ name = "udp_uring"
 harness = false
 
 [[bench]]
-name = "echo_noq"
-path = "benches/echo_noq.rs"
+name = "echo_quic"
 harness = false
-required-features = ["noq"]
+required-features = ["quic"]
 
 [[bench]]
 name = "session_lite"
@@ -88,3 +87,8 @@ harness = false
 [[bench]]
 name = "worker_turns"
 harness = false
+
+[[bench]]
+name = "unreachable_dials"
+harness = false
+required-features = ["quic"]

@@ -21,3 +21,7 @@ the same definition as QUIC's `udp_tx`.
 - Target the shared-socket integration that drives `srt-protocol` directly,
   not `srt-tokio` socket handling.
 - Test: an SRT pull's reported tx covers at least the TS payload it sent.
+
+## Required
+
+- [Shared SRT socket](/quest/m2/one-port/srt-demux.md) - replaces today's srt-tokio ownership with the direct srt-protocol integration this source targets
