@@ -26,8 +26,7 @@ use send::{BytesSource, Send, SendState};
 pub use send::{FinishError, WriteError, Written};
 
 mod state;
-#[allow(unreachable_pub)] // fuzzing only
-pub use state::StreamsState;
+pub(crate) use state::StreamsState;
 
 /// Access to streams
 pub struct Streams<'a> {
@@ -35,10 +34,11 @@ pub struct Streams<'a> {
     pub(super) conn_state: &'a super::State,
 }
 
-#[allow(clippy::needless_lifetimes)] // Needed for cfg(fuzzing)
+#[allow(clippy::needless_lifetimes)] // `new` names the lifetime, under the fuzz harness
 impl<'a> Streams<'a> {
-    #[cfg(fuzzing)]
-    pub fn new(state: &'a mut StreamsState, conn_state: &'a super::State) -> Self {
+    /// Drive a bare `StreamsState` without a connection, for the `streams` fuzz target
+    #[cfg(any(test, feature = "fuzz"))]
+    pub(crate) fn new(state: &'a mut StreamsState, conn_state: &'a super::State) -> Self {
         Self { state, conn_state }
     }
 
@@ -52,6 +52,7 @@ impl<'a> Streams<'a> {
 
         if self.state.next[dir as usize] >= self.state.max[dir as usize] {
             self.state.streams_blocked[dir as usize] = true;
+            self.state.open_refused[dir as usize] = true;
             return None;
         }
 
@@ -78,11 +79,6 @@ impl<'a> Streams<'a> {
         }
 
         Some(StreamId::new(!self.state.side, dir, x))
-    }
-
-    #[cfg(fuzzing)]
-    pub fn state(&mut self) -> &mut StreamsState {
-        self.state
     }
 
     /// The number of streams that may have unacknowledged data.
@@ -202,10 +198,11 @@ pub struct SendStream<'a> {
     pub(super) conn_state: &'a super::State,
 }
 
-#[allow(clippy::needless_lifetimes)] // Needed for cfg(fuzzing)
+#[allow(clippy::needless_lifetimes)] // `new` names the lifetime, under the fuzz harness
 impl<'a> SendStream<'a> {
-    #[cfg(fuzzing)]
-    pub fn new(
+    /// Drive a bare `StreamsState` without a connection, for the `streams` fuzz target
+    #[cfg(any(test, feature = "fuzz"))]
+    pub(crate) fn new(
         id: StreamId,
         state: &'a mut StreamsState,
         pending: &'a mut Retransmits,

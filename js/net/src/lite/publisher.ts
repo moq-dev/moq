@@ -936,6 +936,7 @@ export class Publisher {
 				// A group that has not arrived yet holds this FETCH's slot until the requester leaves.
 				group = await wireOf(front).fetchGroup(msg.track, msg.group, {
 					priority: msg.priority,
+					maxDelay: msg.maxDelay,
 					signal: left.signal,
 				});
 				serving(group);
@@ -949,6 +950,10 @@ export class Publisher {
 					start: msg.startFrame,
 					end: msg.endFrame,
 				});
+				// A budget giving up on a drained group ends its read cleanly, but a FIN would
+				// tell the requester the group is whole.
+				if (hooks.groupExpired(group))
+					throw new StreamError(StreamCode.Old, { message: "fetch exceeded its max delay" });
 				console.debug(`fetch done: broadcast=${msg.broadcast} track=${msg.track} group=${msg.group}`);
 				stream.close();
 				group.close();

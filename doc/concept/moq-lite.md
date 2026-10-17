@@ -235,6 +235,7 @@ zero keeps only the live edge. Relays preserve that declaration, and may still
 evict sooner under their own cache ceiling. Media tracks explicitly use 30
 seconds so a segmented egress can still find its segments. Retention ages a
 group by the same two clocks as max delay and always keeps the newest group.
+A fetch obeys the same window, and may name a tighter max delay of its own.
 IETF carries the same idea as `MAX_CACHE_DURATION`, measured in wall time alone.
 
 Put together, a conference might use:
