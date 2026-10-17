@@ -209,6 +209,8 @@ struct AnnouncedBroadcast {
 	follow: moq_net::announce::Follow,
 	/// An instance serves the path that was not handed out yet.
 	unseen: bool,
+	/// The instance handed out last.
+	last: Option<moq_net::broadcast::Consumer>,
 	driver: Background,
 }
 
@@ -232,14 +234,16 @@ impl AnnouncedBroadcast {
 					// racing its handler). The instance stays unseen until it resolves: a foreign
 					// cancel only drops this future, and the caller may call again.
 					let broadcast = self.origin.routed_broadcast(&self.path).await?;
+					self.unseen = false;
 
-					// A change that landed while resolving may name the instance just resolved,
-					// or one after it. Resolve again rather than hand out a stale one, or the
-					// same one twice.
-					if !self.settle()? {
-						self.unseen = false;
-						return Ok(broadcast);
+					// Resolving can run ahead of the follower: a takeover resolves at once while
+					// its restart is held, or lands while resolving. That restart then names the
+					// instance already handed out.
+					if self.last.as_ref().is_some_and(|last| last.is_clone(&broadcast)) {
+						continue;
 					}
+					self.last = Some(broadcast.clone());
+					return Ok(broadcast);
 				}
 			})
 			.await?;
@@ -250,24 +254,23 @@ impl AnnouncedBroadcast {
 		)))
 	}
 
-	/// Apply every change on hand, returning whether the instance serving the path moved.
-	fn settle(&mut self) -> Result<bool, MoqError> {
-		let mut moved = false;
+	/// Apply every change on hand.
+	fn settle(&mut self) -> Result<(), MoqError> {
 		while let std::task::Poll::Ready(event) = self.follow.poll_next(&kio::Waiter::noop()) {
-			moved |= self.apply(event)?;
+			self.apply(event)?;
 		}
-		Ok(moved)
+		Ok(())
 	}
 
-	/// Apply one change, returning whether the instance serving the path moved.
-	fn apply(&mut self, event: Option<moq_net::announce::Event>) -> Result<bool, MoqError> {
+	/// Apply one change to the path.
+	fn apply(&mut self, event: Option<moq_net::announce::Event>) -> Result<(), MoqError> {
 		match event.ok_or(MoqError::Closed)? {
 			moq_net::announce::Event::Start(_) | moq_net::announce::Event::Restart(_) => self.unseen = true,
 			moq_net::announce::Event::End(_) => self.unseen = false,
 			// The same instance over another route, which its subscriptions ride out.
-			moq_net::announce::Event::Update(_) => return Ok(false),
+			moq_net::announce::Event::Update(_) => {}
 		}
-		Ok(true)
+		Ok(())
 	}
 }
 
@@ -518,6 +521,7 @@ impl MoqOriginConsumer {
 				path,
 				follow,
 				unseen: false,
+				last: None,
 				driver: self.driver.clone(),
 			}),
 		}))

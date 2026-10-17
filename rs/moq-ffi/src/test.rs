@@ -4413,17 +4413,18 @@ async fn announced_broadcast_retries_a_dropped_wait() {
 }
 
 /// Another instance taking over while `available()` resolves is the one it hands out, so the
-/// restart that announced it must not hand it out again.
-#[tokio::test]
-async fn announced_broadcast_hands_out_a_takeover_once() {
+/// restart that announced it must not hand it out again. `dynamic_at` is where the route the
+/// wait first resolves through covers the path: above it, the takeover's restart lands while
+/// resolving; at it, the origin holds that restart for
+/// [`moq_net::origin::DEFAULT_UPDATE_HOLD`].
+async fn announced_broadcast_hands_out_a_takeover_once(dynamic_at: &str) {
 	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
-	let dynamic = serve(&origin, "");
+	let dynamic = serve(&origin, dynamic_at);
 	let followed = origin.consume().announced_broadcast("live".into()).unwrap();
 
 	let waiting = followed.clone();
 	let first = tokio::spawn(async move { waiting.available().await });
-	// The dynamic route covers the path, so the wait is on its answer when the exact path,
-	// a more specific route without an epoch, takes over.
+	// The wait is on the dynamic route's answer when the exact path takes over without an epoch.
 	let _unanswered = tokio::time::timeout(TIMEOUT, dynamic.requested_broadcast())
 		.await
 		.expect("the wait never asked for the broadcast")
@@ -4436,10 +4437,20 @@ async fn announced_broadcast_hands_out_a_takeover_once() {
 		.unwrap();
 
 	let next = tokio::spawn(async move { followed.available().await });
-	tokio::time::sleep(Duration::from_millis(50)).await;
+	tokio::time::sleep(moq_net::origin::DEFAULT_UPDATE_HOLD * 2).await;
 	assert!(!next.is_finished(), "the takeover was handed out twice");
 	next.abort();
 	takeover.close().unwrap();
+}
+
+#[tokio::test]
+async fn announced_broadcast_hands_out_a_takeover_once_while_resolving() {
+	announced_broadcast_hands_out_a_takeover_once("").await;
+}
+
+#[tokio::test]
+async fn announced_broadcast_hands_out_a_held_takeover_once() {
+	announced_broadcast_hands_out_a_takeover_once("live").await;
 }
 
 #[tokio::test]
