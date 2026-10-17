@@ -78,7 +78,7 @@ func (b *Bandwidth) Reserve(track *TrackProducer, maxBps uint64) (*Reservation, 
 
 // Reservation is one track's standing claim on a Bandwidth.
 //
-// Grant is a snapshot: nil means no estimate or no demand, so hold the current
+// Grant is a snapshot: nil means no estimate, so hold the current
 // rate, and 0 is a real zero grant.
 type Reservation struct {
 	inner *ffi.MoqReservation

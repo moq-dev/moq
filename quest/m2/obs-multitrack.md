@@ -7,7 +7,7 @@ simulcast renditions of one broadcast, one rendition per track, each with
 its own size and bitrate in the catalog. A user configures them the way OBS
 multitrack video is configured, including over obs-websocket. Disabling the
 top renditions as the bandwidth grant falls is
-[simulcast rung disable](/quest/m2/simulcast-rung-disable.md)'s work, not
+[OBS rung disable](/quest/m2/obs-rung-disable.md)'s work, not
 this quest's.
 
 ## Plan
@@ -34,6 +34,6 @@ at least two video tracks watched in `<moq-watch>`.
 
 ## Related
 
-- [Simulcast rung disable](/quest/m2/simulcast-rung-disable.md) - the grant-driven rung disable these renditions follow
+- [OBS rung disable](/quest/m2/obs-rung-disable.md) - the grant-driven rung disable these renditions follow
 - [MoQ in obs-studio](/quest/m2/obs-studio/README.md) - the native output this configuration carries into
 - [OBS native codecs](/quest/m2/obs-moq-video/README.md) - the encoders behind each track when MoQ encoders are chosen

@@ -2,7 +2,8 @@
 //!
 //! [`Control`] turns each grant from a [`bandwidth::Consumer`] into the target
 //! rate a sender should produce, so audio, video, and transcode back off the
-//! same way.
+//! same way. [`Rung`] adds the cutoff for one rendition of several: below it the
+//! rendition stops and viewers fall back to a lower one.
 
 use std::time::Instant;
 
@@ -166,6 +167,103 @@ impl Control {
 		self.target = next;
 		self.applied = Some(now);
 		Some(next)
+	}
+}
+
+/// What a [`Rung`] should be doing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Target {
+	/// Encode at this rate and advertise the rendition as enabled.
+	Enabled(bandwidth::Rate),
+	/// Stop encoding and advertise the rendition as disabled.
+	Disabled,
+}
+
+/// Rate control for one rendition of a source encoded at several bitrates.
+///
+/// A [`Control`] that also turns the rendition off once its grant falls below its
+/// band, the point where the next lower rendition serves viewers better than a
+/// starved copy of this one. Turning it off stops the encoder rather than
+/// shrinking the advertised maximum, so the lower renditions keep their share
+/// instead of every rendition degrading together.
+///
+/// It turns back on once the grant clears the cutoff by the same hysteresis
+/// [`Control`] applies to every move, restarting at the cutoff and ramping from
+/// there. Feed it the grant of a reservation whose track is idle too: once viewers
+/// leave a disabled rendition, nothing else would ever bring it back.
+///
+/// ```
+/// # use moq_mux::rate::{Policy, Rung, Target};
+/// # use moq_net::bandwidth::Rate;
+/// # use std::time::Instant;
+/// // A 5 Mbps rendition above a 2.5 Mbps one turns off below 3.33 Mbps.
+/// let mut rung = Rung::new(Policy::new(Rate::from_mbps(5)), Rate::from_kbps(2_500));
+/// assert_eq!(rung.update(Some(Rate::from_mbps(3)), Instant::now()), Some(Target::Disabled));
+/// ```
+#[derive(Clone, Debug)]
+pub struct Rung {
+	control: Control,
+	cutoff: bandwidth::Rate,
+	enabled: bool,
+}
+
+impl Rung {
+	/// A rendition per `policy`, above a rendition sending at most `lower`.
+	///
+	/// The cutoff is `(max + 2 * lower) / 3`. Pass zero for the lowest rendition to
+	/// turn it off below a third of its maximum, or use a plain [`Control`] to never
+	/// turn it off.
+	///
+	/// # Panics
+	///
+	/// When `lower` is not below [`Policy::max`], which leaves no band to encode in.
+	pub fn new(policy: Policy, lower: bandwidth::Rate) -> Self {
+		assert!(
+			lower < policy.max,
+			"lower rendition ({lower:?}) must be below this one's maximum ({:?})",
+			policy.max
+		);
+		let cutoff = (policy.max.as_bps() + 2 * lower.as_bps()) / 3;
+		Self {
+			control: Control::new(policy),
+			cutoff: bandwidth::Rate::from_bps(cutoff),
+			enabled: true,
+		}
+	}
+
+	/// What the rendition should be doing right now.
+	pub fn target(&self) -> Target {
+		match self.enabled {
+			true => Target::Enabled(self.control.target),
+			false => Target::Disabled,
+		}
+	}
+
+	/// Feed a new estimate, returning the new target when it changed enough to be
+	/// worth applying and `None` when it didn't. See [`Control::update`].
+	pub fn update(&mut self, estimate: Option<bandwidth::Rate>, now: Instant) -> Option<Target> {
+		if !self.enabled {
+			let max = self.control.policy.max;
+			// Capped at the ceiling, or a cutoff within the hysteresis of it could
+			// never be cleared by an estimate the policy clamps to that ceiling.
+			let resume = self.cutoff.scaled(1.0 + HYSTERESIS).min(max);
+			if estimate?.min(max) < resume {
+				return None;
+			}
+
+			// Restart low and ramp: the estimate was measured while this rendition
+			// sent nothing, so its full share is the least trustworthy number here.
+			self.enabled = true;
+			self.control.target = self.cutoff;
+			self.control.applied = Some(now);
+			return Some(self.target());
+		}
+
+		let next = self.control.update(estimate, now)?;
+		if next < self.cutoff {
+			self.enabled = false;
+		}
+		Some(self.target())
 	}
 }
 
@@ -360,6 +458,176 @@ mod tests {
 		assert_eq!(
 			control.update(Some(bps(1_600_000)), now + Duration::from_secs(2)),
 			Some(bps(1_600_000))
+		);
+	}
+
+	/// 5 Mbps above a 2.5 Mbps rendition, so the cutoff lands on 3_333_333.
+	fn rung() -> Rung {
+		Rung::new(Policy::new(bps(5_000_000)), bps(2_500_000))
+	}
+
+	#[test]
+	fn a_rung_disables_below_its_cutoff() {
+		let mut rung = rung();
+		let start = Instant::now();
+		assert_eq!(rung.target(), Target::Enabled(bps(5_000_000)));
+
+		// Squeezed, but still above the band: it adapts like any sender.
+		assert_eq!(
+			rung.update(Some(bps(3_500_000)), start),
+			Some(Target::Enabled(bps(3_500_000)))
+		);
+		// Below it, the lower rendition is the better picture, so stop.
+		assert_eq!(
+			rung.update(Some(bps(3_000_000)), start + Duration::from_millis(100)),
+			Some(Target::Disabled)
+		);
+		assert_eq!(rung.target(), Target::Disabled);
+	}
+
+	#[test]
+	fn the_lowest_rung_disables_below_a_third() {
+		let mut rung = Rung::new(Policy::new(bps(350_000)), bandwidth::Rate::ZERO);
+		let now = Instant::now();
+		assert_eq!(
+			rung.update(Some(bps(120_000)), now),
+			Some(Target::Enabled(bps(120_000)))
+		);
+		assert_eq!(
+			rung.update(Some(bps(110_000)), now + Duration::from_millis(100)),
+			Some(Target::Disabled)
+		);
+	}
+
+	#[test]
+	fn a_rung_resumes_past_the_hysteresis_and_ramps() {
+		let mut rung = rung();
+		let start = Instant::now();
+		rung.update(Some(bps(3_000_000)), start).unwrap();
+		assert_eq!(rung.target(), Target::Disabled);
+
+		// Back over the cutoff, but not by the 5% hysteresis: stay off.
+		assert_eq!(rung.update(Some(bps(3_400_000)), start + Duration::from_secs(1)), None);
+		assert_eq!(rung.update(Some(bps(3_499_000)), start + Duration::from_secs(2)), None);
+
+		// Clear of it: resume at the cutoff rather than the whole estimate.
+		let resumed = start + Duration::from_secs(3);
+		assert_eq!(
+			rung.update(Some(bps(5_000_000)), resumed),
+			Some(Target::Enabled(bps(3_333_333)))
+		);
+
+		// Then ramp at 25%/s like any raise.
+		assert_eq!(
+			rung.update(Some(bps(5_000_000)), resumed + Duration::from_secs(1)),
+			Some(Target::Enabled(bps(3_333_333).scaled(1.25)))
+		);
+	}
+
+	/// A grant jittering around the cutoff must not flap the catalog: the deadband
+	/// keeps a rung on until the grant falls well under its applied target, and
+	/// the resume margin keeps it off until the grant is clearly back.
+	#[test]
+	fn jitter_at_the_cutoff_does_not_flap() {
+		let mut rung = rung();
+		let start = Instant::now();
+		rung.update(Some(bps(3_400_000)), start).unwrap();
+
+		// +-3% around 3.33M, every 100ms for 10s: inside the deadband of 3.4M.
+		for tick in 1..=100u64 {
+			let estimate = if tick % 2 == 0 { 3_250_000 } else { 3_430_000 };
+			assert_eq!(
+				rung.update(Some(bps(estimate)), start + Duration::from_millis(100 * tick)),
+				None,
+				"tick {tick} at {estimate}"
+			);
+		}
+		assert_eq!(rung.target(), Target::Enabled(bps(3_400_000)));
+
+		// A real drop turns it off, and the same jitter can't bring it back.
+		let off = start + Duration::from_secs(20);
+		assert_eq!(rung.update(Some(bps(3_000_000)), off), Some(Target::Disabled));
+		for tick in 1..=100u64 {
+			let estimate = if tick % 2 == 0 { 3_250_000 } else { 3_430_000 };
+			assert_eq!(
+				rung.update(Some(bps(estimate)), off + Duration::from_millis(100 * tick)),
+				None
+			);
+		}
+		assert_eq!(rung.target(), Target::Disabled);
+	}
+
+	#[test]
+	fn a_missing_estimate_holds_a_disabled_rung() {
+		let mut rung = rung();
+		let now = Instant::now();
+		rung.update(Some(bps(1_000_000)), now).unwrap();
+		assert_eq!(rung.update(None, now + Duration::from_secs(10)), None);
+		assert_eq!(rung.target(), Target::Disabled);
+	}
+
+	/// A resume margin above the ceiling could never be met by an estimate clamped
+	/// to that ceiling, so it is capped there.
+	#[test]
+	fn a_rung_near_its_lower_still_resumes() {
+		let mut rung = Rung::new(Policy::new(bps(1_000_000)), bps(950_000));
+		let now = Instant::now();
+		rung.update(Some(bps(500_000)), now).unwrap();
+		assert_eq!(rung.target(), Target::Disabled);
+		assert!(matches!(
+			rung.update(Some(bps(10_000_000)), now + Duration::from_secs(1)),
+			Some(Target::Enabled(_))
+		));
+	}
+
+	#[test]
+	#[should_panic(expected = "must be below")]
+	fn a_rung_without_a_band_is_refused() {
+		Rung::new(Policy::new(bps(1_000_000)), bps(1_000_000));
+	}
+
+	/// End to end through the allocator: descending priority down the renditions
+	/// fills the lower one first, so a shrinking estimate turns the top one off and
+	/// leaves the lower one at its full share. The top one comes back once the
+	/// estimate does, even after its viewers have left.
+	#[test]
+	fn the_top_rung_yields_to_the_lower_one() {
+		use moq_net::{broadcast, track};
+
+		let estimate = bandwidth::Producer::new();
+		let allocator = bandwidth::Allocator::new(estimate.consume());
+		let broadcast = broadcast::Info::default().produce();
+		let mut renditions = Vec::new();
+		for (name, priority) in [("low", 60), ("high", 59)] {
+			let track = broadcast
+				.create_track(name, track::Info::default().with_priority(priority))
+				.unwrap();
+			let viewer = track.subscribe(None);
+			renditions.push((track, viewer));
+		}
+		let low = allocator.reserve(&renditions[0].0.demand(), bps(2_500_000));
+		let high = allocator.reserve(&renditions[1].0.demand(), bps(5_000_000));
+
+		let mut low_control = Control::new(Policy::new(bps(2_500_000)));
+		let mut high_rung = Rung::new(Policy::new(bps(5_000_000)), bps(2_500_000));
+		let start = Instant::now();
+
+		estimate.set(Some(bps(4_000_000))).unwrap();
+		assert_eq!(
+			low_control.update(low.peek(), start),
+			None,
+			"the lower rendition keeps its ceiling"
+		);
+		assert_eq!(high_rung.update(high.peek(), start), Some(Target::Disabled));
+
+		// Its viewers fall back to the lower rendition and leave.
+		let (_high_track, high_viewer) = renditions.pop().unwrap();
+		drop(high_viewer);
+
+		estimate.set(Some(bps(6_000_000))).unwrap();
+		assert_eq!(
+			high_rung.update(high.peek(), start + Duration::from_secs(5)),
+			Some(Target::Enabled(bps(3_333_333)))
 		);
 	}
 

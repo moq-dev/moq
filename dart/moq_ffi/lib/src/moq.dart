@@ -13852,7 +13852,7 @@ void _checkApiChecksums() {
   if (uniffi_moq_ffi_checksum_method_moqbandwidth_reserve() != 60458) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
-  if (uniffi_moq_ffi_checksum_method_moqreservation_grant() != 59401) {
+  if (uniffi_moq_ffi_checksum_method_moqreservation_grant() != 19938) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqreservation_update() != 9626) {

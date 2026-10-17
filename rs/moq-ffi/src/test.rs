@@ -5037,7 +5037,7 @@ async fn video_encoder_follows_a_shrinking_grant() {
 	.unwrap();
 
 	let reservation = video.reservation().expect("published against an allocator");
-	assert_eq!(reservation.grant(), None, "no demand yet");
+	assert_eq!(reservation.grant(), None, "no estimate yet");
 
 	let consumer = broadcast.consume().unwrap();
 	let _sub = consumer.subscribe_track("camera".into(), None).await.unwrap();

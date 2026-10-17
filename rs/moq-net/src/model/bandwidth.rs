@@ -262,8 +262,11 @@ impl Allocator {
 	/// handle and reserving never keeps a track alive.
 	///
 	/// Read the current slice through [`Reservation::consumer`], which reports `None`
-	/// while nothing is subscribed to the track or the connection has no estimate.
-	/// That tells a sender to hold its current rate rather than encode at zero.
+	/// while the connection has no estimate, telling a sender to hold its current rate.
+	/// While nothing is subscribed to the track it claims nothing from the others, but
+	/// its own slice still counts it, reporting what it would get once watched again.
+	/// A rendition that stopped sending because its slice was too small relies on
+	/// that to learn when to resume after its viewers have left.
 	pub fn reserve(&self, track: &track::Demand, max: Rate) -> Reservation {
 		// Read the track before taking the registry lock, so the two are never held
 		// at once and there's no order to get wrong.
@@ -328,7 +331,7 @@ impl Reservation {
 	/// A handle reading this reservation's current slice of the estimate.
 	///
 	/// Cloneable and independent of the reservation: once the reservation is dropped
-	/// these report `None`, the same "hold your rate" a track nobody is watching reports.
+	/// these report `None`, the same "hold your rate" a missing estimate reports.
 	pub fn consumer(&self) -> Consumer {
 		Consumer {
 			inner: Inner::Share(Box::new(self.share.clone())),
@@ -429,7 +432,10 @@ impl Share {
 		let wants: Vec<Want> = self
 			.claims()
 			.into_iter()
-			.filter(|(_, demand)| demand.is_used())
+			.filter(|(want, demand)| match want.id == self.id {
+				true => !demand.is_closed(),
+				false => demand.is_used(),
+			})
 			.map(|(want, _)| want)
 			.collect();
 		allocate(estimate, &wants, self.id)
@@ -463,11 +469,12 @@ impl Share {
 		let wants: Vec<Want> = self
 			.claims()
 			.into_iter()
-			.filter(|(_, demand)| match demand.poll_state(waiter) {
+			.filter(|(want, demand)| match demand.poll_state(waiter) {
 				track::DemandState::Active => true,
-				// An idle track claims nothing, so an unwatched encoder's reservation
-				// goes to whoever is actually sending.
-				track::DemandState::Idle => false,
+				// An idle track claims nothing from its siblings, so an unwatched
+				// encoder's reservation goes to whoever is actually sending. Its own
+				// slice still counts it, reporting what it would get back on rejoining.
+				track::DemandState::Idle => want.id == self.id,
 				// Gone for good, and pruned by the next `register`.
 				track::DemandState::Closed => false,
 			})
@@ -511,8 +518,8 @@ impl Share {
 /// A reservation is what a sender can use, so handing it more is not a reason to
 /// send more than it was configured for.
 ///
-/// `None` when `id` isn't among the wants, which is how an idle or closed track
-/// reports "hold your rate" instead of a grant of zero.
+/// `None` when `id` isn't among the wants, which is how a closed track reports
+/// "hold your rate" instead of a grant of zero.
 fn allocate(estimate: Rate, wants: &[Want], id: u64) -> Option<Rate> {
 	// Plain bits per second inside: this is where the division actually happens, and
 	// wrapping every intermediate would need arithmetic on `Rate` that no caller wants.
@@ -761,8 +768,9 @@ mod tests {
 		assert_eq!(second_share.peek(), Some(bps(1_000_000)));
 	}
 
-	/// An unwatched track releases its reservation, since `publish_capture` stops
-	/// encoding entirely while nothing is subscribed.
+	/// An unwatched track claims nothing from its siblings, since `publish_capture`
+	/// stops encoding entirely while nothing is subscribed, but still reads the slice
+	/// it would get back, so a rendition its viewers left can tell when to resume.
 	#[test]
 	fn an_idle_track_claims_nothing() {
 		let estimate = Producer::new();
@@ -777,14 +785,31 @@ mod tests {
 		let idle_share = allocator.reserve(&idle.demand(), bps(4_000_000));
 
 		assert_eq!(watched_share.peek(), Some(bps(2_000_000)));
-		// Not zero: an idle share reports "no opinion" so a sender that is mid-shutdown
-		// holds its rate instead of retuning to the floor on the way out.
-		assert_eq!(idle_share.peek(), None);
+		// What it would get on rejoining, which is an even split.
+		assert_eq!(idle_share.peek(), Some(bps(1_000_000)));
 
 		// It joins, and the split happens.
 		let _idle_sub = idle.subscribe(None);
 		assert_eq!(watched_share.peek(), Some(bps(1_000_000)));
 		assert_eq!(idle_share.peek(), Some(bps(1_000_000)));
+	}
+
+	/// A share whose own viewers left keeps following the estimate, so a rendition
+	/// that stopped for lack of room learns when the room comes back.
+	#[moq_net_sim::test]
+	#[cfg(feature = "async")]
+	async fn an_idle_share_follows_the_estimate() {
+		let estimate = Producer::new();
+		let allocator = Allocator::new(estimate.consume());
+		estimate.set(Some(bps(1_000_000))).unwrap();
+
+		let (_broadcast, idle) = track(VIDEO);
+		let reservation = allocator.reserve(&idle.demand(), bps(4_000_000));
+		let mut share = reservation.consumer();
+		assert_eq!(share.changed().await.unwrap(), Some(bps(1_000_000)));
+
+		estimate.set(Some(bps(3_000_000))).unwrap();
+		assert_eq!(share.changed().await.unwrap(), Some(bps(3_000_000)));
 	}
 
 	/// Demand transitions have to wake a parked share, not just change what a later

@@ -54,7 +54,10 @@ bitrate, and framerate change in place, while a codec or audio format change
 keeps the rendition's catalog ID under a fresh `track` name that viewers
 follow through the catalog. For
 simulcast, drop the element and register several encoders on a
-`Publish.Broadcast`, as below.
+`Publish.Broadcast`, as below. Give each rendition a `lowerBitrate` naming the
+ceiling of the one below it, and a lower `priority` than that one, and a
+congested uplink stops the top renditions (advertised `enabled: false`) instead
+of degrading every rendition at once. They resume once the bandwidth returns.
 
 Audio groups carry at least 20 ms by default, packing shorter codec frames
 together. `el.audio.groupDuration` changes that minimum; `Milli(0)` puts
@@ -132,12 +135,20 @@ const broadcast = new Publish.Broadcast({
 });
 
 // Each encoder registers a rendition on the broadcast (`broadcast.video(name)`) and
-// encodes only while someone is subscribed.
-new Publish.Video.Encoder("video/hd", { broadcast, capture, enabled: true });
-new Publish.Video.Encoder("video/sd", { broadcast, capture, enabled: true, config: { maxScale: 0.25 } });
+// encodes only while someone is subscribed. Sharing the connection's bandwidth
+// fills sd before hd, and stops hd while it can't beat sd.
+const bandwidth = connection.bandwidth;
+new Publish.Video.Encoder("video/sd", {
+    broadcast, capture, bandwidth, enabled: true,
+    config: { maxScale: 0.25, maxBitrate: 500_000 },
+});
+new Publish.Video.Encoder("video/hd", {
+    broadcast, capture, bandwidth, enabled: true, priority: 59,
+    config: { lowerBitrate: 500_000 },
+});
 const audioSource = new Publish.Signals.Computed((effect) => effect.get(microphone.out.source)?.audio);
 const audioCapture = new Publish.Audio.Capture({ source: audioSource });
-new Publish.Audio.Encoder("audio", { broadcast, capture: audioCapture, enabled: true });
+new Publish.Audio.Encoder("audio", { broadcast, capture: audioCapture, bandwidth, enabled: true });
 ```
 
 Standalone components start enabled unless you pass `enabled: false` (or a

@@ -1,4 +1,4 @@
-import { Micro, Milli, type Second } from "@moq/clock";
+import { Micro, Milli, now, type Second } from "@moq/clock";
 import * as Catalog from "@moq/hang/catalog";
 import * as Container from "@moq/hang/container";
 import type * as Moq from "@moq/net";
@@ -16,6 +16,7 @@ import {
 import type { Broadcast } from "../broadcast";
 import { errors } from "../internal";
 import { type Baseline, Estimator } from "../jitter";
+import * as Rate from "../rate";
 import { hardwareReliable } from "../support/video";
 import type { Capture } from "./capture";
 import { normalizeSource, type Source } from "./types";
@@ -58,6 +59,13 @@ export interface Config {
 	// NOTE: This is multiplied by the codecScale (1.0 for h264) to get the final scale.
 	bitrateScale?: number;
 
+	// The bitrate ceiling of the next lower rendition of the same source, for simulcast. Set it and this
+	// rendition stops encoding, advertised `enabled: false`, while its bandwidth grant falls below
+	// `(ceiling + 2 * lowerBitrate) / 3`, where the lower rendition is the better picture, and resumes
+	// once the grant recovers. Pass 0 on the lowest rendition to stop it below a third of its ceiling.
+	// Unset never stops. Needs `bandwidth`, and a `priority` above this rendition's on the lower one.
+	lowerBitrate?: number;
+
 	// Cap the encoded frame rate. If set below the captured rate, frames are dropped to hit this target.
 	// Also feeds the bitrate calculation and the encoder config. If unset, the captured track's rate is used.
 	frameRate?: number;
@@ -86,6 +94,11 @@ export type EncoderInput = {
 export type EncoderProps = Inputs<EncoderInput> & {
 	// User tuning knobs. Seed a value or wire a Signal; also live-editable via `encoder.config`.
 	config?: Config | Signal<Config | undefined>;
+
+	// The track priority, higher served first, fixed like the name. Defaults to `Catalog.PRIORITY.video`.
+	// For simulcast, rank each rendition above the next higher one so the bandwidth allocator fills the
+	// lower renditions first.
+	priority?: number;
 };
 
 type EncoderOutput = {
@@ -133,6 +146,9 @@ export class Encoder {
 		return this.in.capture.peek();
 	}
 
+	// The track priority, higher served first, or undefined for the broadcast's default.
+	readonly #priority: number | undefined;
+
 	readonly #out: EncoderOutput = {
 		error: new Signal<Error | undefined>(undefined),
 		catalog: new Signal<Catalog.VideoConfig | undefined>(undefined),
@@ -161,8 +177,11 @@ export class Encoder {
 	// Uncapped target bitrate (pixels, maxBitrate), the reservation's ceiling.
 	#ceiling = new Signal<number | undefined>(undefined);
 
-	// This rendition's claim on the connection, held while a track is live.
+	// This rendition's claim on the connection, held from its first subscriber on.
 	#reservation = new Signal<Moq.Bandwidth.Reservation | undefined>(undefined);
+
+	// What the rate policy makes of the reservation's grant, or undefined without one.
+	#rate = new Signal<Rate.Target | undefined>(undefined);
 
 	// Only the knobs the probe encodes with, narrowed out of `config` and the source so tuning any
 	// other knob, or a bandwidth grant, doesn't re-probe the hardware.
@@ -204,6 +223,7 @@ export class Encoder {
 
 	constructor(name: string, props?: EncoderProps) {
 		this.name = name;
+		this.#priority = props?.priority;
 		this.in = {
 			enabled: getter(props?.enabled ?? true),
 			broadcast: getter(props?.broadcast),
@@ -243,6 +263,7 @@ export class Encoder {
 			this.#runResolved,
 			this.#runDimensions,
 			this.#runCeiling,
+			this.#runRate,
 		]) {
 			this.#signals.run((effect) => {
 				try {
@@ -317,16 +338,16 @@ export class Encoder {
 		const broadcast = effect.get(this.in.broadcast);
 		if (!broadcast) return;
 
-		const rendition = broadcast.video(this.name);
+		const rendition = broadcast.video(this.name, { priority: this.#priority });
 		errors.set(rendition, failure);
 		effect.cleanup(() => rendition.close());
 
 		// Publish the resolved catalog config; undefined (until one resolves) leaves it out of the catalog.
 		effect.proxy(rendition.config, this.out.catalog);
 
-		// Encode only while enabled and a subscriber is attached (the demand gate).
+		// Encode only while enabled, funded, and a subscriber is attached (the demand gate).
 		effect.run((effect) => {
-			const enabled = effect.get(this.in.enabled);
+			const enabled = effect.get(this.in.enabled) && effect.get(this.#rate)?.enabled !== false;
 			const track = effect.get(rendition.track);
 			const error = effect.get(this.#out.error);
 			effect.set(this.#out.active, enabled && !!track && !error, false);
@@ -335,13 +356,27 @@ export class Encoder {
 			this.#encode(track, broadcast.baseline, effect);
 		});
 
-		// Reserve against the connection for as long as this track is live. Wait
-		// for a ceiling so we never claim 0 and starve siblings for a tick. The
-		// allocator ignores an idle track, and closing the reservation hands the
-		// room to siblings.
+		// The broadcast keeps a rendition's track across demand gaps, so the last one served is still the
+		// one a returning subscriber gets, until it closes. A closed one's replacement is only handed over
+		// on demand, so forget it: the rate policy starts over, re-advertising a stopped rendition rather
+		// than leaving it stopped on a track nobody can reach.
+		const served = new Signal<Moq.Track.Producer | undefined>(undefined);
+		effect.run((effect) => {
+			const track = effect.get(rendition.track);
+			if (track) served.set(track);
+		});
+		effect.run((effect) => {
+			const track = effect.get(served);
+			if (track && effect.get(track.closed) !== undefined) served.set(undefined);
+		});
+
+		// Reserve against the connection from the first subscriber on, across demand gaps: an idle track
+		// claims nothing from its siblings, but its grant keeps reporting what it would get, which is how
+		// a rendition its viewers left after it stopped learns when to resume. Wait for a ceiling so we
+		// never claim 0 and starve siblings for a tick.
 		effect.run((effect) => {
 			const enabled = effect.get(this.in.enabled);
-			const track = effect.get(rendition.track);
+			const track = effect.get(served);
 			const allocator = effect.get(this.in.bandwidth);
 			if (!enabled || !track || !allocator || effect.get(this.#out.error)) return;
 
@@ -562,7 +597,9 @@ export class Encoder {
 		};
 
 		track.last = catalog;
-		effect.set(this.#out.catalog, catalog);
+		// Stopped for lack of bandwidth: advertise the same config disabled, maxima untouched.
+		const funded = effect.get(this.#rate)?.enabled !== false;
+		effect.set(this.#out.catalog, funded ? catalog : { ...catalog, enabled: false });
 	}
 
 	// Probe the hardware for the best codec at the coded-size ceiling. Deliberately depends on as little
@@ -623,7 +660,36 @@ export class Encoder {
 		});
 	}
 
-	// Size the probed config to the current dimensions and cap its bitrate by the bandwidth grant.
+	// Follow the reservation's grant through the shared rate policy: drops apply at once, raises ramp,
+	// small moves are ignored, and with `lowerBitrate` a grant below the band stops the rendition. A new
+	// ceiling starts the policy over, like a reopened encoder in Rust.
+	#runRate(effect: Effect): void {
+		const max = effect.get(this.#ceiling);
+		const reservation = effect.get(this.#reservation);
+		const lower = effect.get(this.config)?.lowerBitrate;
+		if (max === undefined || !reservation) {
+			this.#rate.set(undefined);
+			return;
+		}
+
+		const policy = Rate.policy(max);
+		const rung = lower === undefined ? undefined : new Rate.Rung(policy, lower);
+		const control = new Rate.Control(policy);
+		const update = (grant: number | undefined): Rate.Target | undefined => {
+			const at = now();
+			if (rung) return rung.update(grant, at);
+			const bitrate = control.update(grant, at);
+			return bitrate === undefined ? undefined : { enabled: true, bitrate };
+		};
+
+		this.#rate.set(rung ? rung.target : { enabled: true, bitrate: control.target });
+		effect.subscribe(reservation.grant, (grant) => {
+			const next = update(grant);
+			if (next) this.#rate.set(next);
+		});
+	}
+
+	// Size the probed config to the current dimensions and cap its bitrate by the rate policy's target.
 	// Synchronous, so a new bandwidth estimate updates the config within the same microtask instead of
 	// leaving it blank while something re-derives it. The codec comes from the probe as-is, and the size
 	// never exceeds the probe's, so the resolved config is always one the hardware accepted or smaller.
@@ -647,12 +713,8 @@ export class Encoder {
 		let bitrate = Math.min(ceiling(detected.config.codec, { width, height }, target), detected.config.bitrate);
 		effect.set(this.#ceiling, bitrate);
 
-		const reservation = effect.get(this.#reservation);
-		if (reservation) {
-			const grant = reservation.peek();
-			effect.get(reservation.grant);
-			if (grant != null) bitrate = Math.min(bitrate, grant);
-		}
+		const rate = effect.get(this.#rate);
+		if (rate?.enabled) bitrate = Math.min(bitrate, rate.bitrate);
 
 		const config = { ...detected.config, width, height, bitrate };
 		effect.set(this.#out.resolved, config);

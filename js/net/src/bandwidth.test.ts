@@ -99,13 +99,28 @@ test("an idle track claims nothing", () => {
 	const idle = allocator.reserve(idleTrack.demand(), 4_000_000);
 
 	expect(watched.peek()).toBe(2_000_000);
-	// Not zero: an idle share reports "no opinion" so a sender that is mid-shutdown
-	// holds its rate instead of retuning to the floor on the way out.
-	expect(idle.peek()).toBeUndefined();
+	// What it would get on rejoining, which is an even split, so a rendition its viewers
+	// left can tell when to resume.
+	expect(idle.peek()).toBe(1_000_000);
+	expect(idle.grant.peek()).toBe(1_000_000);
 
 	idleTrack.subscribe();
 	expect(watched.peek()).toBe(1_000_000);
 	expect(idle.peek()).toBe(1_000_000);
+
+	allocator.close();
+});
+
+test("an idle share follows the estimate", async () => {
+	const estimate = new Signal<number | undefined>(1_000_000);
+	const allocator = new Allocator(estimate);
+
+	const idle = allocator.reserve(track(VIDEO).demand(), 4_000_000);
+	expect(idle.grant.peek()).toBe(1_000_000);
+
+	const next = idle.grant.changed();
+	estimate.set(3_000_000);
+	expect(await next).toBe(3_000_000);
 
 	allocator.close();
 });

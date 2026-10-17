@@ -36,8 +36,8 @@ export interface Want {
  * A reservation is what a sender can use, so handing it more is not a reason to
  * send more than it was configured for.
  *
- * `undefined` when `id` isn't among the wants, which is how an idle or closed
- * track reports "hold your rate" instead of a grant of zero.
+ * `undefined` when `id` isn't among the wants, which is how a closed track
+ * reports "hold your rate" instead of a grant of zero.
  *
  * Rates are bits per second.
  */
@@ -89,11 +89,14 @@ interface Registry {
 	release(id: number): void;
 }
 
-function wantsOf(entries: readonly Entry[]): Want[] {
+// The claims `id` divides with: every demanded track, plus `id` itself while it is open. An idle
+// track claims nothing from its siblings, but its own slice still reports what it would get once
+// watched again, which is how a rendition its viewers left learns when to resume.
+function wantsOf(entries: readonly Entry[], id: number): Want[] {
 	const wants: Want[] = [];
 	for (const entry of entries) {
 		if (entry.demand.closed.peek() !== undefined) continue;
-		if (!entry.demand.used.peek()) continue;
+		if (entry.id !== id && !entry.demand.used.peek()) continue;
 		wants.push({ id: entry.id, priority: entry.priority, max: entry.max });
 	}
 	return wants;
@@ -198,8 +201,10 @@ export class Allocator implements Handle {
 	 * {@link Reservation.update}, and close it to hand the room back.
 	 *
 	 * {@link Reservation.peek} / {@link Reservation.grant} report `undefined`
-	 * while nothing is subscribed to the track or the connection has no estimate.
-	 * That tells a sender to hold its current rate rather than encode at zero.
+	 * while the connection has no estimate, telling a sender to hold its current
+	 * rate. While nothing is subscribed to the track it claims nothing from the
+	 * others, but its own slice still counts it, reporting what it would get once
+	 * watched again.
 	 */
 	reserve(track: Demand, max: number): Reservation {
 		max = ceiling(max);
@@ -246,9 +251,8 @@ export class Allocator implements Handle {
 		if (!this.#alive.peek()) return;
 		const estimate = this.#estimate?.peek();
 		const entries = this.#entries.peek();
-		const wants = wantsOf(entries);
 		for (const entry of entries) {
-			entry.grant.set(estimate == null ? undefined : allocate(estimate, wants, entry.id));
+			entry.grant.set(estimate == null ? undefined : allocate(estimate, wantsOf(entries, entry.id), entry.id));
 		}
 	}
 
@@ -258,7 +262,7 @@ export class Allocator implements Handle {
 		if (estimate == null) return undefined;
 		const entries = this.#entries.peek();
 		if (!entries.some((entry) => entry.id === id)) return undefined;
-		return allocate(estimate, wantsOf(entries), id);
+		return allocate(estimate, wantsOf(entries, id), id);
 	}
 
 	#update(id: number, max: number): void {
@@ -322,9 +326,9 @@ export class Reservation implements Disposable {
 	/**
 	 * This reservation's current slice of the estimate.
 	 *
-	 * `undefined` while nothing is subscribed, the connection has no estimate, or
-	 * this reservation has been closed: hold the current rate rather than encode
-	 * at zero.
+	 * `undefined` while the connection has no estimate or this reservation has
+	 * been closed: hold the current rate rather than encode at zero. An idle track
+	 * reads what it would get once watched again.
 	 */
 	get grant(): Getter<number | undefined> {
 		return this.#grant;

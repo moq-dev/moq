@@ -62,10 +62,11 @@ once a target at or above the same boundary is successfully applied. Catalog sta
 *accepted*, not the one the controller requested, so a transient rate-control
 failure retains the last applied target rather than lying.
 
-Start with the shared rate policy's five percent hysteresis, immediate
-decreases, and gradual upward ramp (`moq_mux::rate::Control`).
-No second re-entry threshold and no dwell timer until measurements show the
-catalog state flaps.
+`moq_mux::rate::Rung` implements this band on top of the shared rate policy's
+five percent hysteresis, immediate decreases, and gradual upward ramp
+(`moq_mux::rate::Control`): a rung resumes once its share clears the boundary
+by that hysteresis, at the boundary, and ramps from there. No dwell timer until
+measurements show the catalog state flaps.
 
 ### Non-goals
 

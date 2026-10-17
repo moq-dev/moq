@@ -255,6 +255,91 @@ test("a bandwidth estimate updates the bitrate without blanking the config or re
 	}
 });
 
+// A simulcast rung stops when its grant can't beat the rendition below it, and resumes once the grant
+// recovers even after its viewers fell back to that rendition and left.
+test("a rung stops below its band and resumes after its viewers left", async () => {
+	using _videoEncoder = installFakeVideoEncoder();
+
+	const track = new Moq.Track.Producer("video").accept({ timescale: Moq.Time.Timescale.MILLI, priority: 59 });
+	const sub = track.subscribe();
+	const rendition = {
+		config: new Signal(undefined),
+		track: new Signal<Moq.Track.Producer | undefined>(track),
+		close: () => track.close(),
+	};
+	const capture = {
+		in: {
+			source: new Signal({
+				getSettings: () => ({ frameRate: 30 }),
+				getConstraints: () => ({}),
+			} as never),
+		},
+		out: {
+			display: new Signal({ width: 640, height: 480 }),
+			frames: new Signal(undefined),
+		},
+	};
+	const estimate = new Signal<number | undefined>(10_000_000);
+	const bandwidth = new Moq.Bandwidth.Allocator(estimate);
+
+	const encoder = new Encoder("video", {
+		enabled: true,
+		broadcast: { video: () => rendition, baseline: new Baseline() } as never,
+		capture: capture as never,
+		bandwidth,
+		// 640x480@30 at 0.07 bits per pixel is a 645_120 ceiling, so the cutoff is 415_040.
+		config: { lowerBitrate: 300_000 },
+	});
+
+	try {
+		await settle();
+		expect(encoder.out.active.peek()).toBe(true);
+		const advertised = encoder.out.catalog.peek();
+		expect(advertised?.bitrate).toBe(Catalog.u53(645_120));
+		expect(advertised?.enabled).toBeUndefined();
+
+		// Squeezed within the band: it adapts like any rendition.
+		estimate.set(500_000);
+		await settle();
+		expect(encoder.out.resolved.peek()?.bitrate).toBe(500_000);
+		expect(encoder.out.active.peek()).toBe(true);
+
+		// Below it: stop encoding and advertise disabled, without touching the maximum.
+		estimate.set(400_000);
+		await settle();
+		expect(encoder.out.active.peek()).toBe(false);
+		expect(encoder.out.catalog.peek()).toEqual({ ...advertised, enabled: false } as never);
+
+		// Its viewers fall back and leave.
+		sub.close();
+		rendition.track.set(undefined);
+		await settle();
+
+		// Past the cutoff, but within the hysteresis: still off.
+		estimate.set(430_000);
+		await settle();
+		expect(encoder.out.catalog.peek()?.enabled).toBe(false);
+
+		// Clear of it: advertised again, resuming at the cutoff, with nobody subscribed.
+		estimate.set(2_000_000);
+		await settle();
+		expect(encoder.out.catalog.peek()).toEqual(advertised);
+		expect(encoder.out.resolved.peek()?.bitrate).toBe(415_040);
+
+		// Stopped again, then its track closes. Its replacement is only handed over on demand, so the
+		// rendition is advertised again rather than left stopped where no viewer would subscribe.
+		estimate.set(300_000);
+		await settle();
+		expect(encoder.out.catalog.peek()?.enabled).toBe(false);
+		track.close();
+		await settle();
+		expect(encoder.out.catalog.peek()).toEqual(advertised);
+	} finally {
+		encoder.close();
+		bandwidth.close();
+	}
+});
+
 async function settle(): Promise<void> {
 	await new Promise((resolve) => setTimeout(resolve, 200));
 }

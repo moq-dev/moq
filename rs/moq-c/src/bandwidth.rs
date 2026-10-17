@@ -87,7 +87,7 @@ pub extern "C" fn moq_bandwidth_reserve(bandwidth: u32, track: u32, max_bps: u64
 
 /// This reservation's slice right now, in bits per second.
 ///
-/// `present` is false when there is no estimate or no demand: hold the current
+/// `present` is false when there is no estimate: hold the current
 /// rate. `present` true and `bps` 0 is a real zero grant.
 ///
 /// # Safety

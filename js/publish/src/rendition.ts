@@ -17,6 +17,9 @@ export class Rendition<Config> {
 	/** Which catalog section this rendition lands in. */
 	readonly kind: Kind;
 
+	/** Its track's priority, higher served first. */
+	readonly priority: number;
+
 	/**
 	 * The catalog entry for this rendition, written by its producer (usually an encoder).
 	 * `undefined` omits it from the catalog (e.g. while disabled). Changing a field a decoder must
@@ -38,9 +41,16 @@ export class Rendition<Config> {
 	#closed = false;
 
 	/** @internal Constructed by {@link Broadcast}; `track` and `close` are owned by it. */
-	constructor(name: string, kind: Kind, track: Getter<Moq.Track.Producer | undefined>, close: () => void) {
+	constructor(
+		name: string,
+		kind: Kind,
+		priority: number,
+		track: Getter<Moq.Track.Producer | undefined>,
+		close: () => void,
+	) {
 		this.name = name;
 		this.kind = kind;
+		this.priority = priority;
 		this.track = track;
 		this.#close = close;
 	}

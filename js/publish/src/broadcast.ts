@@ -96,8 +96,8 @@ export class Broadcast {
 	// A static network track is exposed here only while at least one subscriber uses it.
 	readonly #tracks = new Map<string, Signal<Moq.Track.Producer | undefined>>();
 
-	// The kind of each rendition track in the current network broadcast. A new one starts over.
-	#kinds = new Map<string, Kind>();
+	// The kind and priority of each rendition track in the current network broadcast. A new one starts over.
+	#held = new Map<string, Held>();
 
 	// Each catalog ID's track name in the current network broadcast, when it is not the ID itself.
 	// A replacement for a closed track, or a rendition whose media identity changed, keeps its
@@ -133,9 +133,14 @@ export class Broadcast {
 		this.#signals.run(this.#run.bind(this));
 	}
 
-	/** Register a video rendition under a full track name (e.g. `"video/hd"`). Throws if the name is taken. */
-	video(name: string): Rendition<Catalog.VideoConfig> {
-		return this.#register<Catalog.VideoConfig>(name, "video");
+	/**
+	 * Register a video rendition under a full track name (e.g. `"video/hd"`). Throws if the name is taken.
+	 *
+	 * `priority` ranks its track, higher served first, defaulting to `Catalog.PRIORITY.video`. A name keeps
+	 * its track, and so its priority, for the life of the network broadcast.
+	 */
+	video(name: string, options?: { priority?: number }): Rendition<Catalog.VideoConfig> {
+		return this.#register<Catalog.VideoConfig>(name, "video", options?.priority);
 	}
 
 	/** Register an audio rendition under a full track name (e.g. `"audio/data"`). Throws if the name is taken. */
@@ -156,14 +161,20 @@ export class Broadcast {
 		return this.#register<Catalog.TextConfig>(name, "text");
 	}
 
-	#register<C>(name: string, kind: Kind): Rendition<C> {
+	#register<C>(name: string, kind: Kind, priority: number = Catalog.PRIORITY[kind]): Rendition<C> {
 		if (this.#renditions.peek()[name]) {
 			throw new Error(`rendition already registered: ${name}`);
 		}
-		// A name keeps its track, so it keeps its kind: different media takes a different name.
-		const previous = this.#kinds.get(name);
-		if (previous !== undefined && previous !== kind) {
-			throw new Error(`rendition ${name} was registered as ${previous}, not ${kind}`);
+		// A name keeps its track, so it keeps its kind and priority: different media takes a different name.
+		const previous = this.#held.get(name);
+		if (previous !== undefined && previous.kind !== kind) {
+			throw new Error(`rendition ${name} was registered as ${previous.kind}, not ${kind}`);
+		}
+		if (!Number.isInteger(priority) || priority < 0 || priority > 255) {
+			throw new RangeError(`rendition ${name} priority must be an integer in 0..=255: ${priority}`);
+		}
+		if (previous !== undefined && previous.priority !== priority) {
+			throw new Error(`rendition ${name} was registered at priority ${previous.priority}, not ${priority}`);
 		}
 		// A replacement track holds or held the name, so another rendition's media owns it.
 		if (this.#replacements.has(name)) {
@@ -173,7 +184,7 @@ export class Broadcast {
 		const track = new Signal<Moq.Track.Producer | undefined>(undefined);
 		this.#tracks.set(name, track);
 
-		const rendition = new Rendition<C>(name, kind, track, () => this.#unregister(name));
+		const rendition = new Rendition<C>(name, kind, priority, track, () => this.#unregister(name));
 		this.#renditions.update((renditions) => ({ ...renditions, [name]: rendition as Rendition<unknown> }));
 
 		return rendition;
@@ -284,7 +295,7 @@ export class Broadcast {
 			...(this.#served?.keys() ?? []),
 			...Object.keys(this.#renditions.peek()),
 			// Every ID that held a track here, even one removed before it had a config.
-			...this.#kinds.keys(),
+			...this.#held.keys(),
 		]);
 		// A no-op edit is the catalog's only read; it publishes nothing.
 		this.catalog.mutate((catalog) => {
@@ -344,11 +355,11 @@ export class Broadcast {
 		this.#names.set({});
 		this.#replacements = new Set();
 		this.#served = undefined;
-		const kinds = new Map<string, Kind>();
-		this.#kinds = kinds;
+		const held = new Map<string, Held>();
+		this.#held = held;
 		effect.cleanup(() => {
 			for (const { track } of tracks.values()) track.close();
-			if (this.#kinds === kinds) this.#kinds = new Map();
+			if (this.#held === held) this.#held = new Map();
 		});
 
 		let serving = false;
@@ -415,11 +426,11 @@ export class Broadcast {
 				if (!entry) {
 					const track = broadcast.createTrack(
 						name,
-						Container.trackInfo({ maxAge, priority: Catalog.PRIORITY[rendition.kind] }),
+						Container.trackInfo({ maxAge, priority: rendition.priority }),
 					);
 					entry = { track, owner: rendition };
 					tracks.set(rendition.name, entry);
-					kinds.set(rendition.name, rendition.kind);
+					held.set(rendition.name, { kind: rendition.kind, priority: rendition.priority });
 				} else {
 					entry.owner = rendition;
 				}
@@ -445,6 +456,9 @@ export class Broadcast {
 
 // The fields a consumer can't change without reinitializing its decoder (or demuxer, for
 // `container`), so changing any of them takes a new track name.
+// What a rendition's track was created with, which a later registration of its name must match.
+type Held = { kind: Kind; priority: number };
+
 type Identity = Pick<
 	Partial<Catalog.AudioConfig & Catalog.VideoConfig>,
 	| "codec"

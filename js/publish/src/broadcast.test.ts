@@ -301,6 +301,26 @@ test("a rendition keeps its track across rendition changes", async () => {
 	broadcast.close();
 });
 
+test("a video rendition's track takes its priority and keeps it", async () => {
+	const broadcast = new Broadcast({ enabled: true, origin: new Origin.Producer(), name: Path.from("test.hang") });
+	const video = broadcast.video("video/hd", { priority: 59 });
+	await settle();
+	const net = broadcast.net.peek();
+	if (!net) throw new Error("expected a network producer once connected");
+	const subscriber = net.track("video/hd").subscribe();
+	await settle();
+	expect(video.track.peek()?.priority).toBe(59);
+
+	// The name keeps its track, so a registration at another priority is refused.
+	video.close();
+	expect(() => broadcast.video("video/hd")).toThrow("registered at priority 59");
+	expect(() => broadcast.video("video/sd", { priority: 256 })).toThrow("0..=255");
+	expect(() => broadcast.video("video/hd", { priority: 59 })).not.toThrow();
+
+	subscriber.close();
+	broadcast.close();
+});
+
 test("a rendition name may change kind on a new network broadcast", async () => {
 	const name = new Signal(Path.from("one.hang"));
 	const broadcast = new Broadcast({ enabled: true, origin: new Origin.Producer(), name });

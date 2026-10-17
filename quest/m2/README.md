@@ -57,7 +57,8 @@ ranked just below deterministic TS legs, which it requires.
 - [mp4-atom dOps mapping](/quest/m2/mp4-atom-dops-mapping.md) - a released mp4-atom reads and writes any `dOps` channel mapping family and table
 - [CMAF surround Opus](/quest/m2/cmaf-opus-surround.md) - fMP4 import and export carry an Opus channel mapping table
 - [GPU CI](/quest/m2/gpu-ci.md) - NVIDIA tests run nightly on real hardware, and `just rs nvidia` runs them locally instead of skipping
-- [Simulcast rung disable](/quest/m2/simulcast-rung-disable.md) - JS, Rust/FFI, and OBS publishers stop encoding the top renditions their grant cannot fund, advertise `enabled: false`, and re-enable with hysteresis
+- [moq-ffi rung disable](/quest/m2/simulcast-rung-disable-ffi.md) - moq-ffi video producers stop encoding the top renditions their grant cannot fund, advertise `enabled: false`, and resume with hysteresis
+- [OBS rung disable](/quest/m2/obs-rung-disable.md) - the obs-moq output does the same per OBS video encoder
 - [WHEP switch pacing](/quest/m2/whep-switch-pacing.md) - a WHEP line still switches to a rung whose keyframes arrive more than a frame behind the current one
 - [Discover media headroom](/quest/m2/quic-probe.md) - test useful-media pacing before adding redundant probe traffic
 - [Viewer up-switch](/quest/m2/viewer-upswitch.md) - a viewer capped by its small rendition finds headroom through PROBE and moves up

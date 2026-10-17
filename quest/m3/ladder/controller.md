@@ -18,7 +18,8 @@ today's fixed-rate behavior exactly and never publishes congestion-induced
 `enabled` state, which is what keeps this additive.
 
 The controller subdivides that estimate across the ladder and applies the
-band boundary from the [questline](/quest/m3/ladder/README.md), including the
+band boundary from the [questline](/quest/m3/ladder/README.md) through
+`moq_mux::rate::Rung`, including the
 lowest rung's `max / 3` case. `moq_transcode::Ladder` is ascending: `new`
 sorts by configured maximum (`rs/moq-transcode/src/ladder.rs`) and
 `rungs()` is lowest first, so the next lower rendition the
@@ -54,8 +55,9 @@ lower one still gets what it asked for.
 - **An idle rung must be able to recover.** Only demanded rungs consume
   allocation, but a rung that loses all demand while disabled cannot be left
   permanently disabled. Evaluate its hypothetical share against the current
-  estimate and active lower-priority reservations, without giving it a real
-  share or encoding probe traffic.
+  estimate and active higher-priority reservations, without giving it a real
+  share or encoding probe traffic. A reservation's grant already reports that
+  for an idle track, so keep the reservation across demand gaps.
 
 Acceptance: one demanded rung reaching its configured maximum on a permissive
 uplink; several rungs sharing one uplink with lower ones protected; a
