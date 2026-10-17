@@ -46,9 +46,10 @@ jobs:
   x11:
     uses: ./.github/workflows/x11.yml
 
-  # Each independent workload gets its own hour. Rust and JS benchmark groups
-  # keep one build environment each, so splitting the feature compile does not
-  # turn every benchmark into a fresh compile of the same dependencies.
+  # Each independent workload gets its own hour. Each benchmark group keeps one
+  # build environment, so a benchmark reuses the dependencies its group already
+  # compiled. The Rust benchmarks outgrew one hour, so they split by harness:
+  # nextest's ignored benchmark tests and cargo's bench targets share few builds.
   nightly:
     name: Nightly (${{ matrix.name }})
     runs-on: ubuntu-24.04-arm
@@ -74,8 +75,10 @@ jobs:
           - name: Relay lock-wait profile
             recipe: bench-lock fanout-heavy 4
             perf: true
-          - name: Rust benchmarks
-            recipe: gh nightly rust
+          - name: Rust benchmark tests
+            recipe: gh nightly rust-test
+          - name: Rust bench targets
+            recipe: gh nightly rust-bench
           - name: JS benchmarks
             recipe: gh nightly js
             uncached: true
