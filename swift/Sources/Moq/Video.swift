@@ -94,16 +94,16 @@ public enum Video {
             self.ffi = ffi
         }
 
-        /// Subscribe to one catalog video rendition and decode it.
+        /// Subscribe to the catalog video rendition `id` and decode it.
         public static func subscribe(
             broadcast: BroadcastConsumer,
-            name: String,
+            id: String,
             rendition: Media.Video,
             output: DecoderOutput = DecoderOutput()
         ) async throws -> Consumer {
             Consumer(try await MoqVideoConsumer.subscribe(
                 broadcast: broadcast.ffi,
-                name: name,
+                id: id,
                 catalogVideo: rendition,
                 output: output
             ))

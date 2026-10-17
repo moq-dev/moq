@@ -183,7 +183,11 @@ credential expires closes with `EXPIRED_AUTH_TOKEN` instead: refresh the token
 and reconnect, rather than treating the credential as invalid. moq-transport carries the same
 exchange on draft-17+ through the [MoQ Auth extension](/draft/moq-auth), limited
 to namespace prefixes. Older versions have no grant; the URL token keeps working
-everywhere.
+everywhere. On moq-transport an added token is kept even without the extension,
+so an announcement can name it: it rides that `PUBLISH_NAMESPACE` as its
+authorization token. The token belongs to the session that added it, so after a
+reconnect the application adds it again and re-announces. moq-lite has no
+per-request token yet, so there an announcement rides the session's scope.
 
 ## Subscriptions
 
@@ -198,7 +202,7 @@ Each subscription carries the knobs that decide behavior under congestion:
 
 | Knob | Effect |
 | --- | --- |
-| **Priority** (0..255) | Higher-priority tracks get bandwidth first. Audio above video, base layer above enhancement. From a native Rust publisher over QUIC or WebTransport (iroh excepted), subscriptions at the same priority split stream bandwidth evenly by bytes, however many groups each has queued. Datagrams are not part of that split yet. |
+| **Priority** (0..255) | Higher-priority tracks get bandwidth first. Audio above video, base layer above enhancement. From a native Rust publisher over QUIC or WebTransport (iroh excepted), subscriptions at the same priority split bandwidth evenly by bytes, streams and datagrams alike, however many groups each has queued. A browser publisher and other transports without send groups are not covered. |
 | **Order** | Which group to send first when several are pending. Newest first for live (the default), oldest first for catch-up. Needs moq-lite 07 or moq-transport; older moq-lite always sends newest first. |
 | **Max delay** | How long a non-latest group stays worth delivering before it is skipped. Zero means "live edge only", and raising it is also what asks for history. |
 
@@ -255,6 +259,12 @@ Since moq-lite 05, a publisher can send a tiny single-frame group as a QUIC
 datagram: unreliable, unordered, under about 1200 bytes, and never
 retransmitted. It suits real-time audio and sensor data. There is no stream
 fallback, so a datagram that doesn't fit isn't delivered that way.
+
+A datagram shares its subscription's priority and group order with streams,
+so a low-priority datagram waits behind higher-priority groups instead of
+jumping the queue. From a native Rust publisher over QUIC or WebTransport
+(iroh excepted), a full send buffer drops the lowest-priority subscription's
+oldest datagram.
 
 Nothing caches a datagram. A subscription gets the ones inside its group
 range, and a new one may get the few still in the publisher's short send

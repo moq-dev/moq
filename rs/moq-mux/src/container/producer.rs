@@ -57,6 +57,8 @@ pub struct Producer<C: Container, R = ()> {
 	/// Sequence to use for the next group opened by [`Self::write`].
 	/// Set by [`Self::seek`] and consumed on the next group creation.
 	pending_sequence: Option<u64>,
+	/// One past the newest group, which a discontinuity skips. Seeded from the track's largest
+	/// frame, so it continues after what the track already holds.
 	next_sequence: u64,
 
 	/// Reports each written frame and finished group into this rendition's timeline, when the
@@ -139,6 +141,14 @@ where
 	}
 }
 
+/// One past the track's largest frame's group, so a wrapper continues after what it already holds.
+fn next_sequence(track: &moq_net::track::Producer) -> u64 {
+	match track.clone().poll_largest(&moq_net::kio::Waiter::noop()) {
+		std::task::Poll::Ready(Some(largest)) => largest.group + 1,
+		_ => 0,
+	}
+}
+
 impl<C: Container> Producer<C> {
 	/// Create a Producer wrapping the given moq-lite producer, muxing into `container`.
 	///
@@ -146,6 +156,7 @@ impl<C: Container> Producer<C> {
 	/// [`with_buffer`](Self::with_buffer); the timeline recorder is wired by the catalog (see
 	/// [`catalog::Producer::video`](crate::catalog::Producer::video) and its sibling APIs.
 	pub fn new(track: moq_net::track::Producer, container: C) -> Self {
+		let next_sequence = next_sequence(&track);
 		Self {
 			inner: track,
 			container,
@@ -153,7 +164,7 @@ impl<C: Container> Producer<C> {
 			buffer: Vec::new(),
 			buffer_duration: std::time::Duration::ZERO,
 			pending_sequence: None,
-			next_sequence: 0,
+			next_sequence,
 			recorder: None,
 			end: None,
 			live_edge: None,
@@ -183,6 +194,7 @@ where
 		E: crate::catalog::hang::CatalogExt,
 		R: crate::catalog::RenditionConfig<E>,
 	{
+		let next_sequence = next_sequence(&track);
 		Self {
 			inner: track,
 			container,
@@ -190,7 +202,7 @@ where
 			buffer: Vec::new(),
 			buffer_duration: std::time::Duration::ZERO,
 			pending_sequence: None,
-			next_sequence: 0,
+			next_sequence,
 			recorder: None,
 			end: None,
 			live_edge: None,
@@ -242,7 +254,7 @@ where
 
 	/// Record when a locally encoded frame reached the transport. Imported media must leave
 	/// this clock observation out and rely on its container batch and reorder measurements.
-	pub fn flush(&mut self, timestamp: moq_net::Timestamp, now: std::time::Instant) -> crate::Result<()> {
+	pub fn flush(&mut self, timestamp: moq_net::Timestamp, now: moq_clock::Instant) -> crate::Result<()> {
 		self.estimator.flush(timestamp, now);
 		self.publish_estimate()
 	}
@@ -860,7 +872,7 @@ mod tests {
 			tracks.push(track);
 		}
 
-		let anchor = std::time::Instant::now();
+		let anchor = moq_clock::Instant::now();
 		let ms = std::time::Duration::from_millis;
 		let pts = |millis: u64| Timestamp::from_micros(millis * 1_000).unwrap();
 		tracks[0].flush(pts(0), anchor).unwrap();
@@ -1144,6 +1156,32 @@ mod tests {
 			);
 			assert_eq!(groups[1], vec![(marker, 0)], "cut({end:?}) then discontinuity");
 		}
+	}
+
+	/// A producer wrapping a track that already holds groups skips past them on a discontinuity,
+	/// rather than numbering its next group below what the track holds.
+	#[tokio::test]
+	async fn discontinuity_continues_after_the_tracks_groups() {
+		let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
+		let mut consumer = track.subscribe(replay());
+		let mut earlier = Producer::new(track.clone(), Container::Legacy(crate::container::Kind::Data));
+		earlier.write(frame(0, true)).unwrap();
+		earlier.cut(None).unwrap();
+
+		let mut producer = Producer::new(track, Container::Legacy(crate::container::Kind::Data));
+		producer.discontinuity().unwrap();
+		producer.write(frame(10_000, true)).unwrap();
+		producer.finish().unwrap();
+
+		let mut sequences = Vec::new();
+		while let Some(group) = consumer.recv_group().await.unwrap() {
+			sequences.push(group.sequence);
+		}
+		assert_eq!(
+			sequences,
+			vec![0, 2],
+			"the discontinuity skips the sequence after group 0"
+		);
 	}
 
 	/// Explicit keyframe closes the current group and starts a new one.

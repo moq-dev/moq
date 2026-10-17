@@ -80,8 +80,14 @@ impl<S: backend::Session<SendStream: 'static, RecvStream: 'static> + Clone + 'st
 	fn send_group(&mut self, _: i64) -> Option<poll::Ungrouped> {
 		None
 	}
-	fn poll_send_datagram(&mut self, cx: &mut Context<'_>, payload: &[u8]) -> Poll<Result<(), Self::Error>> {
-		backend::Session::poll_send_datagram(&mut self.0, cx, payload).map_err(Error)
+	/// The backend cannot rank a datagram against a stream, so the group and order are ignored,
+	/// and a datagram it has no room for is dropped.
+	fn send_datagram(&mut self, payload: Bytes, _: Option<&poll::Ungrouped>, _: i64) -> Result<(), Self::Error> {
+		let mut cx = Context::from_waker(std::task::Waker::noop());
+		match backend::Session::poll_send_datagram(&mut self.0, &mut cx, &payload) {
+			Poll::Ready(res) => res.map_err(Error),
+			Poll::Pending => Ok(()),
+		}
 	}
 	fn poll_recv_datagram(&mut self, cx: &mut Context<'_>) -> Poll<Result<Bytes, Self::Error>> {
 		backend::Session::poll_recv_datagram(&mut self.0, cx).map_err(Error)

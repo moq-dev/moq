@@ -60,17 +60,17 @@ async fn setup(version: Version) -> Setup {
 	let pair = connect_mock(options).await;
 
 	let consumer = subscriber.consume();
-	moq_net_sim::timeout(TIMEOUT, consumer.routed("room"))
+	moq_clock::timeout(TIMEOUT, consumer.routed("room"))
 		.await
 		.expect("announce timeout")
 		.expect("routed");
-	let remote = moq_net_sim::timeout(TIMEOUT, consumer.request_broadcast("room", None))
+	let remote = moq_clock::timeout(TIMEOUT, consumer.request_broadcast("room", None))
 		.await
 		.expect("resolve timeout")
 		.expect("broadcast resolves");
 
 	let (tx, frames) = futures::channel::mpsc::unbounded();
-	moq_net_sim::spawn(async move {
+	moq_clock::sim::spawn(async move {
 		let mut sub = remote.track("video").unwrap().subscribe(None).await.expect("subscribe");
 		while let Ok(Some(mut group)) = sub.recv_group().await {
 			while let Ok(Some(frame)) = group.read_frame().await {
@@ -79,7 +79,7 @@ async fn setup(version: Version) -> Setup {
 		}
 	});
 
-	moq_net_sim::timeout(TIMEOUT, track.demand().used())
+	moq_clock::timeout(TIMEOUT, track.demand().used())
 		.await
 		.expect("no subscriber appeared")
 		.unwrap();
@@ -96,7 +96,7 @@ async fn deliver(setup: &mut Setup, payload: &'static [u8]) {
 	let mut group = setup.track.append_group().unwrap();
 	group.write_frame(Timestamp::ZERO, payload).unwrap();
 	group.finish().unwrap();
-	let got = moq_net_sim::timeout(TIMEOUT, setup.frames.next())
+	let got = moq_clock::timeout(TIMEOUT, setup.frames.next())
 		.await
 		.expect("frame timed out")
 		.expect("the subscription ended");
@@ -111,7 +111,7 @@ async fn subscribe_tracks(pair: &MockPair) -> Vec<u8> {
 
 	let mut reply = Vec::new();
 	let mut buf = [0u8; 64];
-	while let Some(n) = moq_net_sim::timeout(TIMEOUT, recv.read(&mut buf))
+	while let Some(n) = moq_clock::timeout(TIMEOUT, recv.read(&mut buf))
 		.await
 		.expect("reply timed out")
 		.expect("read")
@@ -123,7 +123,7 @@ async fn subscribe_tracks(pair: &MockPair) -> Vec<u8> {
 
 /// Draft-18 defines SUBSCRIBE_TRACKS, so a limited endpoint answers NOT_SUPPORTED and
 /// the subscription already on the session keeps going.
-#[moq_net_sim::test]
+#[moq_clock::test]
 async fn subscribe_tracks_is_refused_per_request() {
 	for version in [
 		"moq-transport-18",
@@ -145,13 +145,13 @@ async fn subscribe_tracks_is_refused_per_request() {
 }
 
 /// Before draft-18, 0x51 is not a message at all, so it is still a protocol violation.
-#[moq_net_sim::test]
+#[moq_clock::test]
 async fn subscribe_tracks_before_draft_18_closes_the_session() {
 	let setup = setup("moq-transport-17".parse().unwrap()).await;
 	let (mut send, _recv) = setup.pair.server_transport.clone().open_bi().await.expect("open_bi");
 	send.write(SUBSCRIBE_TRACKS).await.expect("write");
 
-	moq_net_sim::timeout(TIMEOUT, setup.pair.client.closed())
+	moq_clock::timeout(TIMEOUT, setup.pair.client.closed())
 		.await
 		.expect("the session stayed open");
 }

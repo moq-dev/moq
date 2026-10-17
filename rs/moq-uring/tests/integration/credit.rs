@@ -1,6 +1,7 @@
-//! Held receive credit through the io_uring driver: held reads keep the
-//! connection window spent until their credit drops, and bytes `poll_closed`
-//! reads ahead keep theirs until the application reads them.
+//! Credit through the io_uring driver: held reads keep the connection window
+//! spent until their credit drops, bytes `poll_closed` reads ahead keep theirs
+//! until the application reads them, and a chunked write takes no more from
+//! its buffer than the peer's window admits.
 //!
 //! Unsupported local kernels skip loudly; MOQ_STRICT makes CI refuse them.
 
@@ -9,8 +10,10 @@
 use crate::support;
 
 use std::net::UdpSocket;
-use std::task::Poll;
+use std::task::{Context, Poll, Waker};
 use std::time::Duration;
+
+use bytes::Bytes;
 
 use moq_uring::{Config, Error, Worker, quic, udp};
 use web_transport_trait::poll::{RecvStream as _, SendStream as _, Session as _};
@@ -180,6 +183,110 @@ fn held_reads_spend_the_connection_window() {
 			assert_eq!(accepted.stats().credit.held, 500, "credit outlives its stream");
 			drop(taken);
 			assert_eq!(accepted.stats().credit.held, 0);
+		})
+		.expect("worker");
+}
+
+#[test]
+fn chunked_writes_stop_at_the_window() {
+	const STREAM_WINDOW: usize = 4096;
+
+	let Some(mut worker) = worker() else { return };
+	let handle = worker.handle();
+	let certs = support::certs().expect("certificates");
+
+	let socket = |handle: &moq_uring::Handle| {
+		handle
+			.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
+			.expect("socket")
+	};
+	let mut server_config = quic::server::Config::new(
+		quic::Identity::open(&certs.cert, &certs.key)
+			.expect("identity")
+			.server(&[ALPN], quic::server::ClientAuth::None)
+			.expect("tls"),
+	);
+	server_config.transport.stream_receive_window = Some(STREAM_WINDOW as u64);
+	let server = quic::Endpoint::new(
+		socket(&handle),
+		quic::endpoint::Config::default().with_server(server_config),
+	)
+	.expect("server endpoint");
+	let client = quic::Endpoint::new(socket(&handle), quic::endpoint::Config::default()).expect("dial-only endpoint");
+	let mut dial = quic::client::Config::new(server.local_addr(), "localhost");
+	dial.alpn = vec![ALPN.to_string()];
+	dial.verify = false;
+
+	let payload: Bytes = (0..3 * STREAM_WINDOW).map(|i| (i * 31 % 251) as u8).collect();
+
+	worker
+		.block_on(async move {
+			let mut dialed = client.connect(&dial).await.expect("dial");
+			let mut accepted = server.accept().await.expect("accept");
+
+			let mut send = std::future::poll_fn(|cx| dialed.poll_open_uni(cx))
+				.await
+				.expect("open_uni");
+
+			// The bytes past the window stay in the caller's buffer, untaken,
+			// and moq-quic keeps the ones it took by reference, not as a copy.
+			let mut cx = Context::from_waker(Waker::noop());
+			let mut buf = Bytes::copy_from_slice(&payload);
+			assert!(buf.is_unique());
+			assert!(matches!(
+				send.poll_write_buf(&mut cx, &mut buf),
+				Poll::Ready(Ok(STREAM_WINDOW))
+			));
+			assert_eq!(buf, payload.slice(STREAM_WINDOW..));
+			assert!(!buf.is_unique(), "moq-quic copied the chunk");
+			assert!(send.poll_write_buf(&mut cx, &mut buf).is_pending());
+			assert_eq!(buf, payload.slice(STREAM_WINDOW..));
+
+			handle.spawn(async move {
+				while !buf.is_empty() {
+					std::future::poll_fn(|cx| send.poll_write_buf(cx, &mut buf))
+						.await
+						.expect("write");
+				}
+				send.finish().expect("finish");
+				let _ = std::future::poll_fn(|cx| send.poll_closed(cx)).await;
+			});
+
+			let mut recv = within(
+				&handle,
+				"the stream",
+				std::future::poll_fn(|cx| accepted.poll_accept_uni(cx)),
+			)
+			.await
+			.expect("accept_uni");
+
+			// Straight out of moq-quic, capped at `max`.
+			let first = within(
+				&handle,
+				"stream data",
+				std::future::poll_fn(|cx| recv.poll_read_chunk(cx, 1000)),
+			)
+			.await
+			.expect("read")
+			.expect("not finished");
+			assert!(!first.is_empty() && first.len() <= 1000);
+
+			// Then out of the read-ahead backlog.
+			within(&handle, "the FIN", std::future::poll_fn(|cx| recv.poll_closed(cx)))
+				.await
+				.expect("finished");
+			let mut received = first.to_vec();
+			while let Some(chunk) = within(
+				&handle,
+				"stream data",
+				std::future::poll_fn(|cx| recv.poll_read_chunk(cx, usize::MAX)),
+			)
+			.await
+			.expect("read")
+			{
+				received.extend_from_slice(&chunk);
+			}
+			assert_eq!(received, payload);
 		})
 		.expect("worker");
 }

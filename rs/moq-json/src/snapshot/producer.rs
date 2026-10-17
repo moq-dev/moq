@@ -282,10 +282,19 @@ impl<T> Inner<T> {
 			return Err(err.clone());
 		}
 
-		// Any declared end refuses: the track's next sequence is its own, so an end declared ahead
-		// of the live edge can't be told apart from one the next group would cross.
+		// The same test `append_group` applies: a boundary declared ahead of the live edge still
+		// admits the groups below it. The next group follows the largest frame, unless a newer
+		// group holds none yet; `append_group` then refuses the publish instead.
 		let track = &self.track.inner;
-		if track.is_closed() || track.end().is_some() {
+		let next = match track.clone().poll_largest(&moq_net::kio::Waiter::noop()) {
+			std::task::Poll::Ready(Some(largest)) => largest.group.saturating_add(1),
+			_ => 0,
+		};
+		if track.is_closed()
+			|| track
+				.end()
+				.is_some_and(|end| moq_net::track::Position::group(next) >= end)
+		{
 			return Err(moq_net::Error::Closed.into());
 		}
 		Ok(())

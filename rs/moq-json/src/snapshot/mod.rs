@@ -594,6 +594,25 @@ mod test {
 		assert_eq!(drain(consumer), vec![json!({ "count": "1", "other": 1 })]);
 	}
 
+	/// An end declared ahead of the live edge still admits the edit below it, and refuses the one
+	/// that would cross it.
+	#[test]
+	fn modify_admits_an_edit_below_a_declared_end() {
+		let mut track = moq_net::broadcast::Info::new()
+			.produce()
+			.create_track("test", moq_net::track::Info::default())
+			.unwrap();
+		let mut producer = Producer::<Value>::new(track.clone(), cfg(0));
+		producer.update(&json!({ "a": 1 })).unwrap();
+		track.finish_at(moq_net::track::Position::group(2)).unwrap();
+
+		producer.modify(None).unwrap()["a"] = json!(2);
+		assert!(matches!(
+			producer.modify(None),
+			Err(crate::Error::Net(moq_net::Error::Closed))
+		));
+	}
+
 	#[test]
 	fn modify_composes_independent_owners() {
 		// Mirrors the catalog use case: separate owners each edit their own field through the guard.

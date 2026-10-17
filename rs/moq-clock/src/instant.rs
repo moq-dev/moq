@@ -9,7 +9,8 @@ use std::{
 /// The methods mirror [`std::time::Instant`]'s, so swapping one for the other is an
 /// import change. Instants are only comparable within one clock: the simulator
 /// starts at [`Instant::ZERO`], and the runtime backends count from an origin they
-/// pick once, so an instant has no conversion back to the host clock.
+/// pick once, reading far past zero there so earlier moments stay representable.
+/// An instant has no conversion back to the host clock.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Instant(u64);
 
