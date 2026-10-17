@@ -45,7 +45,7 @@ pub use format::*;
 pub use producer::{Config, Guard, Producer};
 pub use select::Select;
 pub use stream::Stream;
-pub(crate) use timebase::Offset;
 pub use timebase::Timebase;
+pub(crate) use timebase::{Offset, Wrap};
 pub(crate) use tracks::{AudioTrack, Rendition, VideoTrack};
 pub use tracks::{RenditionConfig, Reserved, VideoHint};
