@@ -52,6 +52,7 @@ lands before the cut.
 - [qmux credit](/quest/m0/qmux-credit.md) - dropped/stopped streams return credit and close is delivered
 
 - [Per-package MIGRATE.md](/quest/m1/migrate.md) - every published package documents how to migrate each breaking change, and breaking PRs add their entry
+- [moq-net follows announced instances](/quest/m1/net-announced-follow.md) - the Rust equivalent of JS `request(path, { announced: true })`, replacing the follow loops in moq-ffi and moq-c
 - [Sink restart follow](/quest/m1/sink-restart-follow.md) - moq-cli's server and push sinks follow an epochless `Restart` where their output can mark it, and fail loud otherwise
 - [OBS restart follow](/quest/m1/obs-restart-follow.md) - the OBS source keeps playing across a GOAWAY drain or a publisher replacement
 - [Cluster routing](/quest/m1/cluster-routing/README.md) - prove shared routing contracts, implement per-origin routes, and connect outbound local clusters
