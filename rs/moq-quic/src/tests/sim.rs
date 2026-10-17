@@ -35,7 +35,7 @@ struct Limits {
 struct Spec {
     from_client: bool,
     len: usize,
-    priority: i32,
+    priority: i64,
 }
 
 /// How long a run may take before it counts as stalled
@@ -196,7 +196,7 @@ fn limits() -> impl Strategy<Value = Limits> {
 }
 
 fn spec() -> impl Strategy<Value = Spec> {
-    (any::<bool>(), 0usize..=65_536, -2i32..=2).prop_map(|(from_client, len, priority)| Spec {
+    (any::<bool>(), 0usize..=65_536, -2i64..=2).prop_map(|(from_client, len, priority)| Spec {
         from_client,
         len,
         priority,
