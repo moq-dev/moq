@@ -55,6 +55,7 @@ if (session < 0)
 The rest of the [shared feature list](/lib/#what-every-binding-can-do) is
 here, from media publish and consume to raw pixels and PCM with the codec
 inside. The header is the reference: each function carries a doc comment.
+[Layers](/lib/layers) maps each wrapped Rust layer to its function prefixes.
 
 - **Handles and callbacks.** Every object is an integer handle, and every async result arrives on a `moq_status_callback` with your `void *user_data`. A status `> 0` is a live result, `0` a clean close, and `< 0` an error. The last two are terminal: moq-c never touches `user_data` again, so free it there. `*_close` and `*_cancel` only request shutdown; the terminal callback still fires.
 - **Errors.** Negative return codes are named by `MOQ_ERROR_*`, and `moq_error()` gives the reason on the calling thread. Auth rejections have their own codes so you don't retry them. For the peer's protocol code use `moq_error_protocol()`; do not parse `moq_error()`. A panic in a binding background task reports `MOQ_ERROR_PANIC` through its terminal callback; unrelated objects keep running. A session closed because its credential expired has kind `MOQ_PROTOCOL_KIND_EXPIRED`, and a request refused for an expired token returns `MOQ_ERROR_EXPIRED`; refresh the token before retrying. A request-cap closure has kind `MOQ_PROTOCOL_KIND_TOO_MANY_REQUESTS`; reduce the workload or adjust the relay's [session limits](/bin/relay/config#session-and-peer) before reconnecting.

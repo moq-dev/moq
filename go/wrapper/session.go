@@ -65,15 +65,12 @@ type Bandwidth struct {
 	inner *ffi.MoqBandwidth
 }
 
-// Reserve claims up to maxBps for track. maxBps is a ceiling, not a
-// measurement: reserve the most the track can ever send. Drop the reservation
-// to hand the room back.
-func (b *Bandwidth) Reserve(track *TrackProducer, maxBps uint64) (*Reservation, error) {
-	inner, err := b.inner.Reserve(track.inner, maxBps)
-	if err != nil {
-		return nil, err
-	}
-	return &Reservation{inner: inner}, nil
+// Reserve claims up to maxBps for the track demand watches; every track
+// producer hands out its Demand. maxBps is a ceiling, not a measurement:
+// reserve the most the track can ever send. Drop the reservation to hand the
+// room back.
+func (b *Bandwidth) Reserve(demand *TrackDemand, maxBps uint64) *Reservation {
+	return &Reservation{inner: b.inner.Reserve(demand.inner, maxBps)}
 }
 
 // Reservation is one track's standing claim on a Bandwidth.

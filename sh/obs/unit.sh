@@ -48,7 +48,7 @@ trap 'rm -rf "$out"' EXIT
 # One binary per source under test: each test file defines its own libobs
 # stubs, so two of them can't share a link. Header-only helpers (quality
 # defaults) build as separate binaries with no plugin source.
-for name in moq-output moq-source obs-moq; do
+for name in moq-audio-encoder moq-output moq-source obs-moq; do
     # $ffmpeg and $moq_libs stay unquoted on purpose: pkg-config hands back
     # one space-separated string, and splitting it is the intended reading.
     sources=("test/$name-test.cpp")
@@ -60,7 +60,7 @@ for name in moq-output moq-source obs-moq; do
         -o "$out/$name-test" "${sources[@]}" "$out/moq.o" $moq_libs
     TSAN_OPTIONS="halt_on_error=1 suppressions=$PWD/test/tsan.supp" "$out/$name-test"
 done
-for name in moq-quality-defaults moq-dock-stop moq-error moq-encoder-latency moq-dial moq-spark; do
+for name in moq-quality-defaults moq-dock-stop moq-error moq-encoder-latency moq-dial moq-spark moq-rate; do
     "$cxx" "${flags[@]}" "${includes[@]}" \
         -o "$out/$name-test" "test/$name-test.cpp"
     TSAN_OPTIONS="halt_on_error=1 suppressions=$PWD/test/tsan.supp" "$out/$name-test"

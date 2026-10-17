@@ -46,8 +46,3 @@ Acceptance: turns and enters per received datagram on the chat shape
 (request-reply is the worst case), CPU per Gbps and p99 latency on the fanout
 shape, via `just bench BASE` on Linux. The existing starvation test keeps its
 meaning with a budget of 1 and gains a sibling proving the budget bound.
-
-## Required
-
-- [One enter per turn](/quest/m2/perf/uring-one-enter.md) - the metrics and
-  the submit placement this sweep is measured with

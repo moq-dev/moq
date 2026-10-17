@@ -9,7 +9,7 @@ const RELIABLE: usize = 6;
 /// A pair whose server does or does not advertise `reset_stream_at`
 fn pair(server_reset_stream_at: bool) -> Pair {
     let mut config = server_config();
-    let mut transport = cubic_transport();
+    let mut transport = TransportConfig::default();
     transport.reset_stream_at(server_reset_stream_at);
     config.transport = Arc::new(transport);
     Pair::new(Default::default(), config)
@@ -305,7 +305,7 @@ fn after_finish() {
 fn flow_control_blocked() {
     let _guard = subscribe();
     let mut config = server_config();
-    let mut transport = cubic_transport();
+    let mut transport = TransportConfig::default();
     transport.stream_receive_window(10u32.into());
     config.transport = Arc::new(transport);
     let mut pair = Pair::new(Default::default(), config);
@@ -484,7 +484,7 @@ fn unsupported_close_while_held() {
 fn unsupported_returns_flow_control() {
     let _guard = subscribe();
     let mut config = server_config();
-    let mut transport = cubic_transport();
+    let mut transport = TransportConfig::default();
     transport.reset_stream_at(false);
     transport.receive_window((MSG.len() as u32).into());
     config.transport = Arc::new(transport);
@@ -630,10 +630,7 @@ fn zero_rtt() {
         .close(pair.time, VarInt(0), [][..].into());
     pair.drive();
 
-    pair.client.addr = SocketAddr::new(
-        Ipv6Addr::LOCALHOST.into(),
-        CLIENT_PORTS.lock().unwrap().next().unwrap(),
-    );
+    pair.client.addr = SocketAddr::new(Ipv6Addr::LOCALHOST.into(), pair.next_port());
     let client_ch = pair.begin_connect(config);
     assert!(pair.client_conn_mut(client_ch).has_0rtt());
     let s = pair.client_streams(client_ch).open(Dir::Uni).unwrap();

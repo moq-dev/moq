@@ -1,6 +1,7 @@
+use moq_clock::Instant;
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, PoisonError};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use moq_net::Timestamp;
 
@@ -476,7 +477,7 @@ mod tests {
 	#[test]
 	fn batch_flush_at_its_end_reports_its_media_span() {
 		let mut estimator = Estimator::new();
-		let anchor = Instant::now();
+		let anchor = moq_clock::now();
 		estimator.flush(micros(0), anchor);
 		estimator.flush(micros(0), anchor + Duration::from_millis(120));
 		estimator.flush(micros(40_000), anchor + Duration::from_millis(120));
@@ -486,7 +487,7 @@ mod tests {
 	#[test]
 	fn constant_encoder_delay_is_not_jitter() {
 		let mut estimator = Estimator::new();
-		let anchor = Instant::now();
+		let anchor = moq_clock::now();
 		estimator.flush(micros(0), anchor + Duration::from_millis(200));
 		estimator.flush(micros(240_000), anchor + Duration::from_millis(440));
 		assert_eq!(estimator.estimate().jitter, None);
@@ -495,7 +496,7 @@ mod tests {
 	#[test]
 	fn discontinuity_resets_the_flush_baseline() {
 		let mut estimator = Estimator::new();
-		let anchor = Instant::now();
+		let anchor = moq_clock::now();
 		estimator.flush(micros(0), anchor);
 		estimator.flush(micros(40_000), anchor + Duration::from_millis(50));
 		assert_eq!(estimator.estimate().jitter, Some(Duration::from_millis(10)));
@@ -510,7 +511,7 @@ mod tests {
 	#[test]
 	fn baseline_expires_drift() {
 		let mut estimator = Estimator::new();
-		let anchor = Instant::now();
+		let anchor = moq_clock::now();
 		for second in 0..100u64 {
 			estimator.flush(
 				micros(second * 1_000_000),
@@ -524,7 +525,7 @@ mod tests {
 	#[test]
 	fn early_flush_keeps_lowering_the_baseline() {
 		let mut estimator = Estimator::new();
-		let anchor = Instant::now();
+		let anchor = moq_clock::now();
 		for second in 0..100u64 {
 			estimator.flush(micros(second * 2_000_000), anchor + Duration::from_secs(second));
 		}
@@ -539,7 +540,7 @@ mod tests {
 			Estimator::with_broadcast(broadcast.clone()),
 			Estimator::with_broadcast(broadcast),
 		];
-		let anchor = Instant::now();
+		let anchor = moq_clock::now();
 		for frame in 0..seconds * 10 {
 			let pts = frame * 100;
 			for (estimator, lateness) in estimators.iter_mut().zip([fast(pts), slow(pts)]) {
@@ -584,7 +585,7 @@ mod tests {
 		let broadcast = Baseline::default();
 		let mut audio = Estimator::with_broadcast(broadcast.clone());
 		let mut video = Estimator::with_broadcast(broadcast);
-		let anchor = Instant::now();
+		let anchor = moq_clock::now();
 		audio.flush(micros(0), anchor);
 		video.flush(micros(0), anchor + Duration::from_millis(50));
 		assert_eq!(video.estimate().delay, Some(Duration::from_millis(50)));

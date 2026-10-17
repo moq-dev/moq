@@ -78,9 +78,9 @@ export class Consumer implements AsyncIterable<Event> {
 
 	/** Subscribe to `track`'s timeline as named by the catalog's archive entry. Throws if it has none. */
 	static subscribe(broadcast: Moq.Broadcast.Consumer, archive: Catalog.Archive, track: string): Consumer {
-		const name = archive.timelines[track];
-		if (name === undefined) throw new Error(`no timeline for track ${track}`);
-		return new Consumer(broadcast.track(name).subscribe(), archive);
+		const timeline = archive.timelines[track];
+		if (timeline === undefined) throw new Error(`no timeline for track ${track}`);
+		return new Consumer(broadcast.track(timeline.track).subscribe(), archive);
 	}
 
 	/** Get the next timeline event, or `undefined` when the track ends. Throws on an untimed record. */

@@ -327,7 +327,7 @@ impl Broadcaster {
 
 	/// Build every rendition's init segment, so the manifest can name each by its hash. A
 	/// rendition whose init can't be built yet is left out of the render.
-	#[cfg(feature = "server")]
+	#[cfg_attr(not(feature = "server"), allow(dead_code))]
 	pub(crate) async fn build_inits(&self) {
 		for rendition in self.renditions.snapshot() {
 			if let Err(err) = rendition.init().await {
@@ -692,7 +692,13 @@ mod tests {
 
 	impl CatalogTestExt for moq_mux::catalog::Producer {
 		fn enroll_test(&self, track: &str) -> moq_mux::Result<moq_mux::timeline::Recorder> {
-			let recorder = self.timeline().track(track, moq_mux::timeline::Config::default())?;
+			let duration = Duration::from_secs(2);
+			let recorder = self.timeline().track(
+				track,
+				moq_mux::timeline::Config::default()
+					.with_duration_min(duration)
+					.with_duration_hint(duration),
+			)?;
 			let section = self.timeline().section();
 			let mut producer = self.clone();
 			let mut catalog = producer.modify()?;
@@ -718,9 +724,10 @@ mod tests {
 	fn archive(tracks: &[&str]) -> hang::catalog::Archive {
 		let mut archive = hang::catalog::Archive::new();
 		for track in tracks {
-			archive
-				.timelines
-				.insert(track.to_string(), hang::timeline::default_name(track));
+			archive.timelines.insert(
+				track.to_string(),
+				hang::catalog::Timeline::new(hang::timeline::default_name(track), 4_000),
+			);
 		}
 		archive
 	}
@@ -2350,7 +2357,7 @@ mod tests {
 		// PTS zero at exactly the moq epoch, so every timestamp maps to a fixed string.
 		let wall = UNIX_EPOCH + Duration::from_millis(hang::catalog::MOQ_EPOCH_UNIX_MILLIS);
 		let config = moq_mux::catalog::Config::default()
-			.with_clock(moq_mux::Clock::at(std::time::Instant::now(), wall).expect("a representable wall"));
+			.with_clock(moq_mux::Clock::at(moq_net::time::now(), wall).expect("a representable wall"));
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, config).unwrap();
 
 		let reserved = catalog.reserve();
@@ -2407,7 +2414,15 @@ mod tests {
 		// Write the catalog track directly: a moq-mux catalog producer always advertises its clock,
 		// as a publisher on a host whose wall clock is set does.
 		let timelines = moq_mux::timeline::Timelines::new(&broadcast);
-		let recorder = timelines.track("video0", moq_mux::timeline::Config::default()).unwrap();
+		let duration = Duration::from_secs(2);
+		let recorder = timelines
+			.track(
+				"video0",
+				moq_mux::timeline::Config::default()
+					.with_duration_min(duration)
+					.with_duration_hint(duration),
+			)
+			.unwrap();
 		let mut snapshot = moq_mux::catalog::hang::Catalog::<()>::default();
 		snapshot.video.renditions.insert("video0".to_string(), video_config());
 		snapshot.archive = Some(timelines.section());
@@ -2712,9 +2727,8 @@ mod tests {
 		drop((audio, registration, broadcast));
 	}
 
-	// The catalog's durationMax is the record split ceiling, far above a GOP, so the exporter
-	// derives EXT-X-TARGETDURATION from the segments it has: a playlist whose EXTINF exceeds its
-	// target duration is invalid, and one far above them delays every player.
+	// The declared duration is nominal, so the exporter derives EXT-X-TARGETDURATION from the
+	// segments it has. A playlist whose EXTINF exceeds its target duration is invalid.
 	#[tokio::test]
 	async fn target_duration_follows_the_observed_segments() {
 		let origin = produce_origin();
@@ -4109,7 +4123,7 @@ mod tests {
 					fanout.push(at, entry(at, at), &refs[0]);
 				}
 				// Aligned references share record numbers, so every handoff continues seamlessly.
-				let started = std::time::Instant::now();
+				let started = moq_net::time::now();
 				for at in retained..retained + 1_024 {
 					let reference = &refs[(at % 2) as usize];
 					fanout.select(Some(reference.clone()));
