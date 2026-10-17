@@ -21,11 +21,17 @@ if (permissions.publish.rate !== undefined) throw new Error("bitrate caps are no
 ### A token must carry its key's `kid` (#3943)
 
 `Key.verify` refuses a token whose `kid` header does not match the key's, and a key set accepts a token without a `kid` only when it holds one key that has none.
-The strict transport schema also accepts `rtmp`, `srt`, and `webrtc`, so an exhaustive `switch` over it needs those arms.
+The strict transport schema also accepts `rtmp`, `srt`, `webrtc`, and `webtransport`, so an exhaustive `switch` over it needs those arms.
+A WebTransport session reports `webtransport` instead of `quic` (#5293), so a policy keyed on `quic` must accept both.
 
 ```ts
 // Sign with the key that will verify it, so the kid matches.
 const token = await Key.sign(key, claims);
+
+// Before
+const overQuic = transport === "quic";
+// After
+const overQuic = transport === "quic" || transport === "webtransport";
 ```
 
 ## @moq/token 0.3 -> @moq/auth 0.2
