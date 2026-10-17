@@ -36,8 +36,9 @@ orders colour in `rs/moq-mux/src/codec/color.rs` (a muxer may get the box
 wrong). Rejected: the container first, as FFmpeg's
 `av_guess_sample_aspect_ratio` does to honour a remux fix.
 
-Tests, through both importers, including an AV1 track and a headerless avc3
-initializer:
+Tests, through both importers, including an AV1 track and headerless avc3
+and hev1 initializers, since `init_h264` and `init_h265` in
+`rs/moq-mux/src/container/fmp4/import.rs` are separate paths:
 
 - 1440x1080 with `pasp` 4:3 imports as 16:9.
 - 1440x1080 with `pasp` 1:1 leaves the field unset.
@@ -50,9 +51,9 @@ initializer:
   the import.
 - Matroska without crop or display dimensions, or with ones matching the
   pixel ratio, leaves the field unset.
-- An avc1 or hvc1 entry with a 1:1 `pasp` against a non-square SPS keeps
-  the SPS aspect and logs the conflict.
-- An avc1 entry whose SPS signals no aspect takes `pasp` 4:3 on 1440x1080
-  as 16:9.
+- An avc1 entry and an hvc1 entry, each with a 1:1 `pasp` against a
+  non-square SPS, keep the SPS aspect and log the conflict.
+- An avc1 entry and an hvc1 entry whose SPS signals no aspect take `pasp`
+  4:3 on 1440x1080 as 16:9.
 
 In-band SPS acquisition for headerless initializers is separate work.

@@ -44,6 +44,10 @@ this mode watch its path, as JS does.
 JS returns a handle whose current broadcast changes per instance
 (`Request.active`); Rust's `request_broadcast` takes only an optional epoch
 today. Propose the Rust shape in the PR. Keep #5700's binding tests passing
-unchanged as the regression, and add moq-net tests for the three cases.
+unchanged as the regression, and add moq-net tests for the three cases plus
+a pinned epoch: an announced request that pins epoch A refuses a replacement
+announced with epoch B instead of following it, mirroring JS `an
+epoch-pinned announced request refuses another instance`
+(`js/net/src/origin-request.test.ts`).
 Public API: a new moq-net request mode or handle, and simpler binding
 internals with no binding API change. Wire: none.
