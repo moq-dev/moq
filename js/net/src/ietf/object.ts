@@ -1,6 +1,7 @@
 import { ProtocolViolation, StreamCode, Stream as StreamError } from "../error.ts";
 import { asIetf, type Cursor, type Reader, Writer } from "../stream.ts";
 import { type Timescale, Timestamp } from "../time.ts";
+import { U64 } from "../util/u64.ts";
 import { type IetfVersion, Version } from "./version.ts";
 
 // Implementation limit for object extension blocks, independent of the IETF draft.
@@ -256,7 +257,7 @@ export class Group {
  * a subgroup that starts partway through or a hole later in the stream.
  */
 export class ObjectIdGap extends Error {
-	constructor(delta: number) {
+	constructor(delta: number | U64) {
 		super(`object IDs must start at 0 and increment by 1, got a delta of ${delta}`);
 		this.name = "ObjectIdGap";
 	}
@@ -342,10 +343,16 @@ export class Frame {
 		// plus the delta plus one. moq-lite groups start at object 0 and never skip one, so
 		// a sequential group is a zero delta throughout, and any other value means the group
 		// either starts partway through or has a gap that would renumber the frames after it.
-		const delta = c.u53();
-		// A compact stream's first Object ID is its subgroup and any later delta a gap. Neither
-		// is supported, so refuse it before the rest of the object can fail differently.
-		if (flags.hasSubgroupObject && delta !== 0) throw new ObjectIdGap(delta);
+		let delta = 0;
+		if (flags.hasSubgroupObject) {
+			// A compact stream's first Object ID is its subgroup and any later delta a gap.
+			// Neither is supported, so refuse one of any size before the rest of the object
+			// can fail differently.
+			const id = c.varint();
+			if (!id.equals(U64.ZERO)) throw new ObjectIdGap(id);
+		} else {
+			delta = c.u53();
+		}
 
 		let timestamp: Timestamp | undefined;
 		let hasProperties = false;

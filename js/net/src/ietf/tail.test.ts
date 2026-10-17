@@ -199,6 +199,11 @@ test("a compact stream starting at object 5 is subgroup 5, refused without a gro
 	end.write(new Uint8Array([5, 0, 0x4]));
 	end.finish();
 	await end.handled;
+	// The largest Object ID, past what a number holds exactly, is refused the same way.
+	const huge = groupStream(subscriber, 3, { ...FLAGS, hasSubgroupObject: true });
+	huge.write(new Uint8Array([...new Array(9).fill(0xff), 1, 42]));
+	huge.finish();
+	await huge.handled;
 	expect(reader.end()).toBeUndefined();
 
 	const group = groupStream(subscriber, 6, { ...FLAGS, hasSubgroupObject: true });
