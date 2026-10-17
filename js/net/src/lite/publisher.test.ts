@@ -739,6 +739,32 @@ test("lite draft-06: a cut group is dropped early, once", async () => {
 	}
 });
 
+// A cut this subscription already dropped stays dropped: the subscriber accounted for it, so
+// a group the publisher re-creates under it afterwards is not served.
+test("lite draft-06: a cut dropped then re-created is not served", async () => {
+	const sub = await servedSubscription({ version: Version.DRAFT_06, startGroup: 0 });
+	try {
+		sub.serve(0);
+		expect(await sub.servedSequence()).toBe(0);
+		expect("start" in (await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_06))).toBe(true);
+
+		const cut = new GroupProducer(1);
+		sub.track.writeGroup(cut);
+		cut.close(new Error("cut"));
+		const resp = await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_06);
+		if (!("drop" in resp)) throw new Error("expected SUBSCRIBE_DROP");
+		expect([resp.drop.start, resp.drop.end]).toEqual([1, 1]);
+
+		sub.serve(1);
+		sub.serve(2);
+		expect(await sub.servedSequence()).toBe(2);
+		sub.track.close();
+		expect(await drops(sub.client.reader, Version.DRAFT_06)).toEqual([]);
+	} finally {
+		await sub.close();
+	}
+});
+
 // An update that lowers the start below SUBSCRIBE_START asks for those groups too, so the
 // end sweep drops them, as the Rust publisher does.
 test("lite draft-06: an update lowering the start is swept at the end", async () => {

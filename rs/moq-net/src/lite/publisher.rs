@@ -4881,6 +4881,36 @@ mod serve_group_test {
 		assert_eq!(drops(&mut writer, &log, version).await, []);
 	}
 
+	/// A cut this run already dropped stays dropped: the subscriber accounted for it, so a
+	/// group the publisher re-creates under it afterwards is not served.
+	#[moq_net_sim::test]
+	async fn a_cut_dropped_then_recreated_is_not_served() {
+		let version = Version::Lite06;
+		let mut track = track::Producer::new(
+			Arc::new(broadcast::Info::default()),
+			"test",
+			crate::track::Info::timed(),
+		);
+		let subscriber = track.subscribe(track::Subscription::default().with_max_delay(Duration::from_secs(60)));
+		let (mut run, mut writer, log) = lite_run(version, SinkSession::new(Log::default()), subscriber);
+		write_group(&mut track, 0, 0);
+		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+		assert!(run.start.is_some());
+
+		let group = track.create_group(group::Info { sequence: 1 }).unwrap();
+		group.abort(Error::App(1)).unwrap();
+		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+		assert_eq!(drops(&mut writer, &log, version).await, [(1, 1)]);
+
+		write_group(&mut track, 1, 1);
+		write_group(&mut track, 2, 2);
+		track.finish_at(track::Position::group(3)).unwrap();
+		drop(track);
+		kio::wait(|waiter| run.poll(&mut writer, waiter)).await.unwrap();
+		assert_eq!(drops(&mut writer, &log, version).await, [(1, 1)]);
+		assert_eq!(run.ctx.opens.opened.load(Ordering::Relaxed), 2, "groups 0 and 2 only");
+	}
+
 	/// A SUBSCRIBE_UPDATE that lowers the start below SUBSCRIBE_START asks for those groups
 	/// too, so the drops at the end count from there.
 	#[moq_net_sim::test]

@@ -1647,6 +1647,12 @@ export class Subscriber {
 			const group = groups[0];
 			if (!group || (end !== undefined && group.sequence >= end)) break;
 			groups.shift();
+			// A sequence this cursor already reported dropped stays dropped: the subscriber
+			// accounted for it, so a group re-created under it is not served.
+			if (dispositions && runGaps(this.#reported, group.sequence, group.sequence + 1).length === 0) {
+				group.close();
+				continue;
+			}
 			if (dispositions && group.closed.peek() instanceof Error) {
 				const dropped = report(group.sequence, group.sequence + 1);
 				if (dropped) return dropped;

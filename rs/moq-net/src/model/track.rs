@@ -4417,6 +4417,16 @@ impl Cursor {
 				}
 			};
 
+			// A sequence this cursor already reported dropped stays dropped: the subscriber
+			// accounted for it, so a group re-created under it is not served.
+			if self
+				.drops
+				.as_ref()
+				.is_some_and(|drops| drops.reported.contains(&consumer.sequence))
+			{
+				continue;
+			}
+
 			// Drop a group the drift budget has given up on and keep scanning, so one
 			// poll walks a whole backlog off rather than handing it out group by group.
 			if ready!(self.poll_stale(&consumer, drift, waiter))? {
