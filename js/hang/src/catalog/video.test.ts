@@ -172,7 +172,7 @@ test("color parses the H.273 code points and HDR10 metadata a Rust publisher wri
 		primaries: 9,
 		transfer: 16,
 		matrix: 9,
-		fullRange: false,
+		range: "limited",
 		mastering: {
 			red: { x: 0.708, y: 0.292 },
 			green: { x: 0.17, y: 0.797 },
@@ -195,4 +195,6 @@ test("color refuses out-of-range code points and light levels", () => {
 	expect(parse({ primaries: 256 })).toBe(false);
 	expect(parse({ contentLight: { maxCll: 65536, maxFall: 0 } })).toBe(false);
 	expect(parse({ matrix: 0 })).toBe(true);
+	expect(parse({ range: "full" })).toBe(true);
+	expect(parse({ range: true })).toBe(false);
 });

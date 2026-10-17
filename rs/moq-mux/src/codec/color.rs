@@ -6,7 +6,7 @@
 //! travels with the elementary stream, while a muxer adds the box and may get it wrong. So an
 //! importer resolves the bitstream's colour first and [`fill`]s only its gaps from the container.
 
-use hang::catalog::{Chromaticity, Color, ContentLight, Mastering};
+use hang::catalog::{Chromaticity, Color, ContentLight, Mastering, Range};
 
 /// The colour a set of H.273 code points signals, leaving each unspecified or reserved one absent.
 ///
@@ -22,7 +22,7 @@ pub(crate) fn cicp(primaries: u8, transfer: u8, matrix: u8, full_range: Option<b
 	color.primaries = registered(primaries, &[1..=1, 4..=12, 22..=22]);
 	color.transfer = registered(transfer, &[1..=1, 4..=18]);
 	color.matrix = registered(matrix, &[0..=1, 4..=14]);
-	color.full_range = full_range;
+	color.range = full_range.map(|full| if full { Range::Full } else { Range::Limited });
 	(color != Color::default()).then_some(color)
 }
 
@@ -58,7 +58,7 @@ pub(crate) fn fill(color: &mut Option<Color>, fallback: Option<&Color>, source: 
 	field("primaries", source, &mut color.primaries, &fallback.primaries);
 	field("transfer", source, &mut color.transfer, &fallback.transfer);
 	field("matrix", source, &mut color.matrix, &fallback.matrix);
-	field("full_range", source, &mut color.full_range, &fallback.full_range);
+	field("range", source, &mut color.range, &fallback.range);
 	field("mastering", source, &mut color.mastering, &fallback.mastering);
 	field(
 		"content_light",
@@ -275,8 +275,8 @@ pub(crate) mod test {
 		assert_eq!(cicp(255, 19, 15, None), None, "past the registered values");
 		let color = cicp(9, 16, 0, Some(false)).unwrap();
 		assert_eq!(
-			(color.primaries, color.transfer, color.matrix, color.full_range),
-			(Some(9), Some(16), Some(0), Some(false))
+			(color.primaries, color.transfer, color.matrix, color.range),
+			(Some(9), Some(16), Some(0), Some(hang::catalog::Range::Limited))
 		);
 	}
 
@@ -288,7 +288,11 @@ pub(crate) mod test {
 		assert_eq!(color.primaries, Some(1), "the stream wins a conflict");
 		assert_eq!(color.matrix, Some(1));
 		assert_eq!(color.transfer, Some(1), "the container fills an unspecified field");
-		assert_eq!(color.full_range, Some(true), "the container fills an unsignalled range");
+		assert_eq!(
+			color.range,
+			Some(hang::catalog::Range::Full),
+			"the container fills an unsignalled range"
+		);
 	}
 
 	#[test]

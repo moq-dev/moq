@@ -784,14 +784,14 @@ pub(crate) fn colr_color(colr: &mp4_atom::Colr) -> Result<Option<hang::catalog::
 /// An absent code point is written as unspecified (2) and an absent range as limited.
 fn color_colr(color: Option<&hang::catalog::Color>) -> Option<mp4_atom::Colr> {
 	let color = color?;
-	if color.primaries.is_none() && color.transfer.is_none() && color.matrix.is_none() && color.full_range.is_none() {
+	if color.primaries.is_none() && color.transfer.is_none() && color.matrix.is_none() && color.range.is_none() {
 		return None;
 	}
 	Some(mp4_atom::Colr::Nclx {
 		colour_primaries: color.primaries.unwrap_or(2).into(),
 		transfer_characteristics: color.transfer.unwrap_or(2).into(),
 		matrix_coefficients: color.matrix.unwrap_or(2).into(),
-		full_range_flag: color.full_range.unwrap_or(false),
+		full_range_flag: color.range == Some(hang::catalog::Range::Full),
 	})
 }
 
@@ -805,7 +805,7 @@ fn vpcc_color(mut vpcc: mp4_atom::VpcC, color: Option<&hang::catalog::Color>) ->
 	vpcc.color_primaries = color.primaries.unwrap_or(2);
 	vpcc.transfer_characteristics = color.transfer.unwrap_or(2);
 	vpcc.matrix_coefficients = color.matrix.unwrap_or(2);
-	vpcc.video_full_range_flag = color.full_range.unwrap_or(false);
+	vpcc.video_full_range_flag = color.range == Some(hang::catalog::Range::Full);
 	vpcc
 }
 

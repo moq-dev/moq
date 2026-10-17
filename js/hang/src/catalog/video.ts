@@ -27,8 +27,8 @@ export const ColorSchema = z.object({
 	transfer: z.optional(u8Schema),
 	// H.273 MatrixCoefficients: 0 is RGB, 1 is BT.709, 9 is BT.2020 non-constant luminance.
 	matrix: z.optional(u8Schema),
-	// True for full-range samples, false for limited (studio) range.
-	fullRange: z.optional(z.boolean()),
+	// The numeric range of the samples: studio swing, or every code used.
+	range: z.optional(z.enum(["limited", "full"])),
 	// The display the content was mastered on, as SMPTE ST 2086, luminance in cd/m².
 	mastering: z.optional(
 		z.object({

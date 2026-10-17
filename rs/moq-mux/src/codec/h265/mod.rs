@@ -716,8 +716,8 @@ mod tests {
 		};
 		let color = config_from_hvcc(&hvcc(fixtures::SPS_HDR10)).unwrap().color.unwrap();
 		assert_eq!(
-			(color.primaries, color.transfer, color.matrix, color.full_range),
-			(Some(9), Some(16), Some(9), Some(false))
+			(color.primaries, color.transfer, color.matrix, color.range),
+			(Some(9), Some(16), Some(9), Some(hang::catalog::Range::Limited))
 		);
 		assert_eq!(hvcc_color(&hvcc(fixtures::SPS)), None);
 		assert_eq!(hvcc_color(&hvcc(fixtures::SPS_ZERO_COLOUR)), None);

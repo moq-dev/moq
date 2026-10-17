@@ -271,7 +271,10 @@ fn test_av1_catalog() {
 	assert!(video.codec.to_string().starts_with("av01."), "codec: {}", video.codec);
 	// The av1C's sequence header leaves the code points unspecified, but AV1 always states the range.
 	let color = video.color.as_ref().expect("the range");
-	assert_eq!((color.primaries, color.full_range), (None, Some(false)));
+	assert_eq!(
+		(color.primaries, color.range),
+		(None, Some(hang::catalog::Range::Limited))
+	);
 	assert!(matches!(video.container, Container::Cmaf { .. }));
 
 	let Container::Cmaf { init, .. } = &video.container else {
@@ -2234,6 +2237,7 @@ async fn ttml_body_begins_at_the_serialized_frame_timestamp() {
 		payload.contains(r#"<body begin="00:01:40.000011" end="00:01:44.000011">"#),
 		"{payload}"
 	);
+}
 
 /// An avc1 init whose avcC carries `sps` and whose sample entry carries the `colr` box for `color`.
 fn avc1_init(sps: &'static [u8], color: Option<hang::catalog::Color>) -> bytes::Bytes {
@@ -2400,7 +2404,7 @@ fn colr_nclc_keeps_its_code_points() {
 	};
 	let color = super::colr_color(&nclc).unwrap().unwrap();
 	assert_eq!(
-		(color.primaries, color.transfer, color.matrix, color.full_range),
+		(color.primaries, color.transfer, color.matrix, color.range),
 		(Some(9), Some(16), Some(9), None)
 	);
 	assert!(super::colr_color(&mp4_atom::Colr::new(300, 1, 1, false).unwrap()).is_err());

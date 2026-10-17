@@ -252,7 +252,7 @@ type Color = {
   "primaries": number | undefined,
   "transfer": number | undefined,
   "matrix": number | undefined,
-  "fullRange": boolean | undefined,
+  "range": "limited" | "full" | undefined,
   "mastering": {
     "red": Chromaticity,
     "green": Chromaticity,
@@ -270,7 +270,7 @@ type Color = {
 type Chromaticity = { "x": number, "y": number }
 ~~~
 
-`primaries`, `transfer`, and `matrix` are the ColourPrimaries, TransferCharacteristics, and MatrixCoefficients code points of {{h273}}, and `fullRange` is its VideoFullRangeFlag.
+`primaries`, `transfer`, and `matrix` are the ColourPrimaries, TransferCharacteristics, and MatrixCoefficients code points of {{h273}}, and `range` is its VideoFullRangeFlag: `full` for 1 and `limited` for 0.
 `mastering` is the {{st2086}} mastering display: CIE 1931 xy chromaticities and luminance in candelas per square metre.
 `contentLight` is the {{cta861}} MaxCLL and MaxFALL in candelas per square metre, where 0 means unknown.
 A publisher MUST omit a field its source leaves unspecified rather than write a default, and SHOULD prefer the value signalled in the elementary stream over a container's when they disagree.

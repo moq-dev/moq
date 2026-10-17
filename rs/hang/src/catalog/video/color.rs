@@ -21,14 +21,24 @@ pub struct Color {
 	/// The matrix between RGB and Y'CbCr, as H.273 `MatrixCoefficients` (0 is RGB, 1 is BT.709, 9 is BT.2020 NCL).
 	pub matrix: Option<u8>,
 
-	/// True for full-range samples, false for limited (studio) range.
-	pub full_range: Option<bool>,
+	/// The numeric range of the samples.
+	pub range: Option<Range>,
 
 	/// The display the content was mastered on, as SMPTE ST 2086.
 	pub mastering: Option<Mastering>,
 
 	/// The content's light levels, as CTA-861.3.
 	pub content_light: Option<ContentLight>,
+}
+
+/// The numeric range of the samples, as H.273's `VideoFullRangeFlag`.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Range {
+	/// Studio swing: 8-bit luma spans 16..235 and chroma 16..240.
+	Limited,
+	/// Full swing: every 8-bit code is used.
+	Full,
 }
 
 /// The colour volume of a mastering display, as SMPTE ST 2086.
@@ -76,7 +86,7 @@ mod test {
 			primaries: Some(9),
 			transfer: Some(16),
 			matrix: Some(9),
-			full_range: Some(false),
+			range: Some(Range::Limited),
 			mastering: Some(Mastering {
 				red: Chromaticity { x: 0.708, y: 0.292 },
 				green: Chromaticity { x: 0.17, y: 0.797 },
@@ -98,7 +108,7 @@ mod test {
 				"primaries": 9,
 				"transfer": 16,
 				"matrix": 9,
-				"fullRange": false,
+				"range": "limited",
 				"mastering": {
 					"red": { "x": 0.708, "y": 0.292 },
 					"green": { "x": 0.17, "y": 0.797 },

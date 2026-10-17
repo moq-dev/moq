@@ -1147,8 +1147,8 @@ fn sps_color_outranks_colour_which_fills_its_gaps() {
 	let catalog = run(&data);
 	let color = catalog.video.renditions.values().next().unwrap().color.clone().unwrap();
 	assert_eq!(
-		(color.primaries, color.transfer, color.matrix, color.full_range),
-		(Some(1), Some(1), Some(1), Some(false))
+		(color.primaries, color.transfer, color.matrix, color.range),
+		(Some(1), Some(1), Some(1), Some(hang::catalog::Range::Limited))
 	);
 	assert_eq!(
 		(color.mastering, color.content_light),

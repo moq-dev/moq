@@ -734,8 +734,11 @@ pub(super) fn matroska_colour(color: &hang::catalog::Color) -> Option<MatroskaSp
 	if let Some(v) = color.matrix {
 		children.push(MatroskaSpec::MatrixCoefficients(v.into()));
 	}
-	if let Some(full) = color.full_range {
-		children.push(MatroskaSpec::Range(if full { 2 } else { 1 }));
+	if let Some(range) = color.range {
+		children.push(MatroskaSpec::Range(match range {
+			hang::catalog::Range::Limited => 1,
+			hang::catalog::Range::Full => 2,
+		}));
 	}
 	if let Some(v) = color.transfer {
 		children.push(MatroskaSpec::TransferCharacteristics(v.into()));
