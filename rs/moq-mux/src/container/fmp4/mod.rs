@@ -748,25 +748,35 @@ fn trun_duration(duration: Timestamp, timescale: moq_net::Timescale) -> Result<u
 /// the sample entry is avc3 or hev1; the sets stay in the samples. A record built
 /// from the bitstream still carries them. VP8 carries no out-of-band config, so
 /// `description` is `None` for it.
-/// The colour an ISOBMFF `colr` box signals. Only `nclx` carries H.273 code points and a range;
-/// QuickTime's `nclc` has no range, and an ICC profile has no code points at all. A code point
-/// past 255 has no H.273 meaning, so it is refused.
+/// The colour an ISOBMFF `colr` box signals. `nclx` carries H.273 code points and a range,
+/// QuickTime's `nclc` the code points alone, and an ICC profile none at all. A code point past 255
+/// has no H.273 meaning, so it is refused.
 pub(crate) fn colr_color(colr: &mp4_atom::Colr) -> Result<Option<hang::catalog::Color>> {
-	let mp4_atom::Colr::Nclx {
-		colour_primaries,
-		transfer_characteristics,
-		matrix_coefficients,
-		full_range_flag,
-	} = *colr
-	else {
-		return Ok(None);
+	let (primaries, transfer, matrix, full_range) = match *colr {
+		mp4_atom::Colr::Nclx {
+			colour_primaries,
+			transfer_characteristics,
+			matrix_coefficients,
+			full_range_flag,
+		} => (
+			colour_primaries,
+			transfer_characteristics,
+			matrix_coefficients,
+			Some(full_range_flag),
+		),
+		mp4_atom::Colr::Nclc {
+			colour_primaries,
+			transfer_characteristics,
+			matrix_coefficients,
+		} => (colour_primaries, transfer_characteristics, matrix_coefficients, None),
+		_ => return Ok(None),
 	};
 	let code = |value: u16| u8::try_from(value).map_err(|_| Error::InvalidColr(value));
 	Ok(crate::codec::color::cicp(
-		code(colour_primaries)?,
-		code(transfer_characteristics)?,
-		code(matrix_coefficients)?,
-		Some(full_range_flag),
+		code(primaries)?,
+		code(transfer)?,
+		code(matrix)?,
+		full_range,
 	))
 }
 

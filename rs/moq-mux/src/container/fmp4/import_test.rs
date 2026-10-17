@@ -2388,3 +2388,20 @@ fn vp9_vpcc_carries_the_resolved_color() {
 	let back = reimport(primaries).unwrap();
 	assert_eq!((back.primaries, back.transfer, back.matrix), (Some(9), None, None));
 }
+
+/// QuickTime's `nclc` carries the code points without a range, and keeps them; a code point past
+/// 255 is refused.
+#[test]
+fn colr_nclc_keeps_its_code_points() {
+	let nclc = mp4_atom::Colr::Nclc {
+		colour_primaries: 9,
+		transfer_characteristics: 16,
+		matrix_coefficients: 9,
+	};
+	let color = super::colr_color(&nclc).unwrap().unwrap();
+	assert_eq!(
+		(color.primaries, color.transfer, color.matrix, color.full_range),
+		(Some(9), Some(16), Some(9), None)
+	);
+	assert!(super::colr_color(&mp4_atom::Colr::new(300, 1, 1, false).unwrap()).is_err());
+}
