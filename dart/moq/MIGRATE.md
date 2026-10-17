@@ -4,6 +4,17 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Bandwidth reserves a track's demand (#5845)
+
+`Bandwidth.reserve` takes the track's `demand()` instead of the producer, and no longer throws.
+
+```dart
+// Before
+final reservation = bandwidth.reserve(track: track, maxBps: maxBps);
+// After
+final reservation = bandwidth.reserve(demand: track.demand(), maxBps: maxBps);
+```
+
 ### Media subscribe and fetch take a catalog rendition (#5834)
 
 `media.TrackConfig` and `media.GroupConfig` replace `name` and `container` with a `rendition` (`media.VideoRendition` or `media.AudioRendition`) and follow its broadcast and track themselves.

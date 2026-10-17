@@ -4,6 +4,17 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Bandwidth reserves a track's demand (#5845)
+
+`Bandwidth.reserve` takes the track's `demand()` instead of the producer, and no longer throws.
+
+```kotlin
+// Before
+val reservation = bandwidth.reserve(track, maxBps)
+// After
+val reservation = bandwidth.reserve(track.demand(), maxBps)
+```
+
 ### Media subscribe and fetch take a catalog rendition (#5834)
 
 `TrackConfig` and `GroupConfig` in `dev.moq.media` replace `name` and `container` with a `rendition` (`VideoRendition` or `AudioRendition`) and follow its broadcast and track themselves.

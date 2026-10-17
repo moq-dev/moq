@@ -4,6 +4,17 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Bandwidth reserves a track's demand (#5845)
+
+`Bandwidth.reserve` takes the track's `demand()` instead of the producer.
+
+```python
+# Before
+reservation = bandwidth.reserve(track, max_bps)
+# After
+reservation = bandwidth.reserve(track.demand(), max_bps)
+```
+
 ### Media subscribe and fetch take a catalog rendition (#5834)
 
 `media.TrackConsumer.subscribe` and `media.GroupConsumer.fetch` take the catalog ID and its `Video` or `Audio` config instead of a track name and container, and follow the rendition's broadcast and track; `fetch` takes them before `sequence`.

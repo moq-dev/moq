@@ -4,6 +4,18 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### The catalog root reserves `version` (#5806)
+
+`version` is the oldest moq-hang draft that reads the catalog, and parsing throws `UnsupportedVersion` for one newer than this reader.
+Rename an extension field that was called `version`.
+
+```ts
+// Before
+const Schema = z.extend(RootSchema, { version: z.string() });
+// After
+const Schema = z.extend(RootSchema, { appVersion: z.string() });
+```
+
 ### Archive timelines declare a per-track duration (#5715)
 
 Each `archive.timelines` value is `{ track, duration }` instead of the timeline track's name, and `archive.durationMax` is removed.

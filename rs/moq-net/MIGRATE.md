@@ -4,6 +4,34 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `auth::Token` is `auth::Auth` (#5695)
+
+`auth::Handle::add` returns an `auth::Auth`, which is `Clone` and compares by identity, so a route can name it with `origin::Route::with_auth`.
+
+```rust
+// Before
+let token: auth::Token = session.auth().add(bytes).await?;
+// After
+let auth: auth::Auth = session.auth().add(bytes).await?;
+```
+
+### Custom transports send datagrams without polling (#5770)
+
+`transport::poll::Session::send_datagram` replaces `poll_send_datagram`.
+It takes the payload as `Bytes`, the send group to schedule it in (`None` for ungrouped), and an order, and never blocks.
+
+```rust
+// Before
+fn poll_send_datagram(&mut self, cx: &mut Context<'_>, payload: &[u8]) -> Poll<Result<(), Self::Error>> { ... }
+// After
+fn send_datagram(
+	&mut self,
+	payload: Bytes,
+	group: Option<&<Self::SendStream as SendStream>::Group>,
+	order: i64,
+) -> Result<(), Self::Error> { ... }
+```
+
 ### A bare track handle is not demand (#5820)
 
 Holding a `track::Consumer` sends nothing and no longer keeps the producer used.

@@ -4,6 +4,17 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `Auth.Auth` is `Auth.Handle`, and `Auth.Token` is `Auth.Auth` (#5695)
+
+```ts
+// Before
+const handle: Auth.Auth = connection.auth;
+const token: Auth.Token = await handle.add(bytes);
+// After
+const handle: Auth.Handle = connection.auth;
+const auth: Auth.Auth = await handle.add(bytes);
+```
+
 ### Superseded groups age by wall clock too (#5548)
 
 A superseded group is stale once its successor arrived a full `maxDelay` ago, as well as by media time.

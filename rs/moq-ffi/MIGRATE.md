@@ -5,6 +5,17 @@ These are the UniFFI names; each language wrapper has its own `MIGRATE.md` in it
 
 ## Unreleased
 
+### Bandwidth reserves a track's demand (#5845)
+
+`MoqBandwidth::reserve` takes a `MoqTrackDemand` instead of a `MoqTrackProducer`, so raw, media, and JSON tracks reserve the same way, and it no longer fails.
+
+```rust
+// Before
+let reservation = bandwidth.reserve(&track, max_bps)?;
+// After
+let reservation = bandwidth.reserve(&track.demand()?, max_bps);
+```
+
 ### Media subscribe and fetch take a catalog rendition (#5834)
 
 `MoqMediaTrackConfig` and `MoqMediaGroupConfig` replace `name` and `container` with a `rendition` (`MoqRendition::Video` or `Audio`: the catalog `id` and its config) and follow its `broadcast` and `track` themselves, so drop the `resolve` call and the `track`-or-ID fallback.

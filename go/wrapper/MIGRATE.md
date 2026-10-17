@@ -4,6 +4,18 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Bandwidth reserves a track's demand (#5845)
+
+`Bandwidth.Reserve` takes the track's `Demand()` instead of the producer, and no longer returns an error.
+
+```go
+// Before
+reservation, err := bandwidth.Reserve(track, maxBps)
+// After
+demand, err := track.Demand()
+reservation := bandwidth.Reserve(demand, maxBps)
+```
+
 ### Media subscribe and fetch take a catalog rendition (#5834)
 
 `media.TrackConfig` and `media.GroupConfig` replace `Name` and `Container` with a `Rendition`, built by `media.VideoRendition` or `media.AudioRendition`, and follow its broadcast and track themselves.

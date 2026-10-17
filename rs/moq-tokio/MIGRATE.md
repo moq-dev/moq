@@ -4,6 +4,32 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Auth handles live in `connection::auth` (#5695)
+
+The root `Auth` re-export is gone.
+`Connection::auth` returns a `connection::auth::Handle`, and its `add` returns a `connection::auth::Auth` instead of a `Token`.
+
+```rust
+// Before
+let handle: moq_tokio::Auth = connection.auth();
+let token: moq_tokio::connection::auth::Token = handle.add(bytes).await?;
+// After
+let handle: moq_tokio::connection::auth::Handle = connection.auth();
+let auth: moq_tokio::connection::auth::Auth = handle.add(bytes).await?;
+```
+
+### Datagrams take a send group and order (#5770)
+
+`quic::driver::Connection::send_datagram` and `quic::web::Session::send_datagram` take the send group (`None` for ungrouped) and an order, and never block.
+`send_datagram_wait` and `SendDatagram` are gone.
+
+```rust
+// Before
+session.send_datagram_wait(data).await?;
+// After
+session.send_datagram(data, None, 0)?;
+```
+
 ### The `noq` feature is `quic` (#5664)
 
 The QUIC stack is MoQ's own `moq-quic` instead of the `moq-noq` crates.
