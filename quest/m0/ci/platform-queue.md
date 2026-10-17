@@ -36,7 +36,6 @@ the implementation PR.
 ## Required
 
 - [Windows restart drill](/quest/m0/ci/platform-windows-drill.md) - a required Platform gate would block every merge while it fails
-- [macOS zero-RTT test](/quest/m0/ci/platform-macos-zero-rtt.md) - a required Platform gate would block every merge while it fails
 
 ## Related
 
