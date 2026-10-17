@@ -339,6 +339,8 @@ test("toStreamCode: a local condition maps to the code the peer can act on", () 
 	// A session's close reaching a stream came from the route it was served through. Its code is
 	// not forwarded: the registries are disjoint (session 0x4 is a stream GOING_AWAY).
 	expect(toStreamCode(new SessionError(SessionCode.GoawayTimeout))).toBe(StreamCode.Unroutable);
+	// An application code means the same in both registries, so the source's own error survives.
+	expect(toStreamCode(new SessionError(SessionCode(70)))).toBe(StreamCode(70));
 });
 
 // A control request that outlived its deadline is not late content. It carries its own code so a
