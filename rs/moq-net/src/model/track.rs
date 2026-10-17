@@ -5353,6 +5353,7 @@ mod test {
 	/// A datagram answers a NEW_GROUP_REQUEST the way a group does, so the request never
 	/// outlives its answer.
 	#[test]
+	#[cfg(feature = "async")]
 	fn a_datagram_answers_a_new_group_request() {
 		let info = Info {
 			dynamic_groups: true,
