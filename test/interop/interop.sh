@@ -60,6 +60,7 @@ URL=""
 KEY="" # the HMAC key every cell's token is signed with (set once the relay's auth server starts)
 NEGATIVE=0
 MEDIA=0
+MEDIA_CASES=""
 MEDIA_ENGINES="chromium"
 TAIL_ONLY=0
 
@@ -110,6 +111,11 @@ while [[ $# -gt 0 ]]; do
             MEDIA=1
             shift
             ;;
+        --media-cases)
+            require_value "$@"
+            MEDIA_CASES="$2"
+            shift 2
+            ;;
         --media-engines)
             require_value "$@"
             MEDIA_ENGINES="$2"
@@ -130,6 +136,11 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+if [[ -n "$MEDIA_CASES" && "$MEDIA" -ne 1 ]]; then
+    echo "error: --media-cases requires --media" >&2
+    exit 2
+fi
 
 # Numeric guards so a fat-fingered --timeout / INTEROP_PORT fails clearly here
 # instead of surfacing later as a cryptic `timeout` or relay-bind error.
@@ -1101,6 +1112,10 @@ if [[ "$MEDIA" -eq 1 ]]; then
     else
         echo "=== media output and lifecycle ==="
         for engine in "${MEDIA_ENGINE_LIST[@]}"; do
+            if [[ -n "$MEDIA_CASES" ]]; then
+                run_media "$engine: media cases: $MEDIA_CASES" --player-engine "$engine" --cases "$MEDIA_CASES" --focused
+                continue
+            fi
             run_media "$engine: media output + lifecycle" --player-engine "$engine"
             run_media "$engine: control: frozen video" --player-engine "$engine" --fault frozen-video --cases none --expect-fail "video progress"
             run_media "$engine: control: silent audio" --player-engine "$engine" --fault silent-audio --cases none --expect-fail "audio tone"

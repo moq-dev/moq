@@ -439,6 +439,7 @@ export class Consumer {
 		hooks.expireGroup = (group, expiry) => {
 			group.#expiry = expiry;
 		};
+		hooks.groupExpired = (group) => group.#ended;
 		hooks.guardGroup = (group, operation) => group.#guard(operation);
 		hooks.readGroupFrame = (group, from) => group.#readFramePosition(true, from);
 		hooks.evictGroup = (group) => {

@@ -9585,7 +9585,6 @@ dependencies = [
  "anyhow",
  "cargo_metadata",
  "uniffi_bindgen 0.32.2 (registry+https://github.com/rust-lang/crates.io-index)",
- "uniffi_build",
  "uniffi_core 0.32.2 (registry+https://github.com/rust-lang/crates.io-index)",
  "uniffi_macros 0.32.2 (registry+https://github.com/rust-lang/crates.io-index)",
  "uniffi_pipeline 0.32.2 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -9662,17 +9661,6 @@ dependencies = [
  "uniffi_meta 0.32.2 (git+https://github.com/kixelated/uniffi-rs?rev=88d835d)",
  "uniffi_pipeline 0.32.2 (git+https://github.com/kixelated/uniffi-rs?rev=88d835d)",
  "uniffi_udl 0.32.2 (git+https://github.com/kixelated/uniffi-rs?rev=88d835d)",
-]
-
-[[package]]
-name = "uniffi_build"
-version = "0.32.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "925be5c36297fff0d416fa2f03585ace718b6e6c635466754128d00f0862d5f1"
-dependencies = [
- "anyhow",
- "camino",
- "uniffi_bindgen 0.32.2 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 
 [[package]]
