@@ -307,11 +307,8 @@ impl Relay {
 
 		let sessions = crate::session::Registry::new();
 		let (ready, _) = tokio::sync::watch::channel(false);
-		let mut web = web::Web::new(auth.clone(), cluster.clone(), certificates, config.web);
-		if let Some(acme) = &acme {
-			web = web.with_acme(acme.resolver());
-		}
-		let web = web
+		let web = web::Web::new(auth.clone(), cluster.clone(), certificates, config.web)
+			.with_acme(acme.as_ref().map(crate::acme::Acme::resolver))
 			.with_shutdown(shutdown.clone())
 			.with_versions(server_versions)
 			.with_extensions(server_extensions)

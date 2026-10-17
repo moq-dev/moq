@@ -273,8 +273,8 @@ impl Web {
 	}
 
 	/// Serve HTTPS from the ACME resolver, which also answers TLS-ALPN-01 challenges.
-	pub(crate) fn with_acme(mut self, resolver: Arc<dyn rustls::server::ResolvesServerCert>) -> Self {
-		self.acme = Some(resolver);
+	pub(crate) fn with_acme(mut self, resolver: Option<Arc<dyn rustls::server::ResolvesServerCert>>) -> Self {
+		self.acme = resolver;
 		self
 	}
 

@@ -627,7 +627,8 @@ fn config_refuses_what_acme_cannot_serve() {
 	assert_eq!(init(valid()), Ok(true));
 	assert_eq!(init(RelayConfig::default()), Ok(false));
 
-	let cases: [(&str, fn(&mut RelayConfig)); 6] = [
+	type Mutate = fn(&mut RelayConfig);
+	let cases: [(&str, Mutate); 6] = [
 		("listen.tls.cert", |config| {
 			config.listen.tls.cert = vec!["cert.pem".into()]
 		}),
