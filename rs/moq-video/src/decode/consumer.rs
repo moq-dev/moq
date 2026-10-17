@@ -253,7 +253,10 @@ mod tests {
 			..EncodeConfig::new(320, 240, crate::Rate::new(30, 1).unwrap())
 		};
 		let rendition = config.probe().await.unwrap();
-		let mut producer = EncodeProducer::new(source_broadcast, source_catalog, rendition).unwrap();
+		let reserved = source_catalog
+			.reserve()
+			.with_timeline_hint(config.gop.duration(config.framerate));
+		let mut producer = EncodeProducer::new(source_broadcast, reserved, rendition).unwrap();
 		let mut encoder = Encoder::new(&config).unwrap();
 		let rgba = vec![0x80u8; 320 * 240 * 4];
 		for index in 0..2 {

@@ -5618,9 +5618,8 @@ impl<S: crate::transport::poll::Session> ServeLoop<S> {
 							.poll_decode_maybe::<lite::SubscribeResponse>(&mut cx)
 					{
 						// The publisher answered the SUBSCRIBE, so its demand stands on the
-						// subscription now. A bare `track::Consumer` still held after that
-						// subscription ends keeps local `Demand` used while the publisher sees
-						// unused: accepted, since nothing holds a handle that way.
+						// subscription now. A query still held once that subscription ends
+						// stays local: nothing reopens the TRACK for it.
 						self.held = None;
 						match res {
 							Ok(Some(msg)) => {

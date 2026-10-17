@@ -87,8 +87,9 @@ authorization and hidden names work exactly as without one.
   winning the path, is announced as a restart. Subscriptions already open stay
   on the old instance until dropped or its route goes, while new requests get
   the new one, so a player follows the restart by requesting the path again.
-  Held handles can still read their old cached content, but cannot open new
-  epochless requests once the restart is delivered. Request the path again for
+  Held handles can still read their old cached content while a subscription
+  on the old instance stays open, but cannot open new epochless requests once
+  the restart is delivered. Request the path again for
   new content.
   That is how a restarted encoder, whose group numbers start over, takes the
   name instead of stalling viewers on the old sequence. A relay drops its copy

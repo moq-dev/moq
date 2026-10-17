@@ -89,6 +89,7 @@ arbitrary = { version = "1.5", features = ["derive"] }
 assert_matches = "1.1"
 criterion = { workspace = true }
 hex-literal = "1"
+proptest = { workspace = true }
 rcgen = { workspace = true, features = ["pem", "ring"] }
 # The benches build their own TLS configs, which the crate only re-exports behind `rustls`.
 rustls = { version = "0.23.5", default-features = false, features = ["std", "ring"] }

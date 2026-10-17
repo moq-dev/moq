@@ -121,7 +121,9 @@ async fn record<S: ObjectStore + Clone>(store: &Store<S>) {
 	let control = writer.control();
 	for name in TRACKS {
 		let config = match MEDIA.contains(&name) {
-			true => moq_mux::timeline::Config::default(),
+			// Keep this storage-layout proof at one record per 2s source segment. The default
+			// timeline minimum is tested in moq-mux and is not part of this fixture's contract.
+			true => moq_mux::timeline::Config::default().with_duration_min(Duration::from_secs(2)),
 			false => moq_mux::timeline::Config::default().with_duration_min(Duration::ZERO),
 		};
 		control.track(name, config).await.unwrap();

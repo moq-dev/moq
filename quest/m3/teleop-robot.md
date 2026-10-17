@@ -79,7 +79,7 @@ The framing is where the guarantee lives, not the subscription flags:
   opaque-bytes ones for binary frames (`moq-flate`).
 - Per-stage timestamp instrumentation, generalised from moq-boy's `status`
   track. Check it against the publisher-reported stats track
-  ([media stats](/quest/m2/stats/schema.md), moq#2734) before adding a
+  ([media stats](/doc/concept/stats.md#media-reports), moq#2734) before adding a
   second stats surface. Capability only: publishing a competitive benchmark
   is out of scope, because Transitive's breakdown puts camera plus USB at
   roughly 100 ms of a 130 ms glass-to-glass total, so we would mostly be

@@ -320,7 +320,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			// Enroll every track in the broadcast's timelines: passthrough writes groups by hand
 			// (no `container::Producer`), so the recorder is fed directly at each fragment. The
 			// reservation holds the archive entry back until the whole track set is declared.
-			let recorder = self.catalog.enroll(track.name())?;
+			let recorder = self.catalog.enroll(track.name(), None)?;
 
 			// Whatever the descriptor declared (a bitrate) is authoritative; the rest is filled by
 			// `estimate` as fragments arrive.
@@ -1035,6 +1035,8 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 				}
 			}
 			track.track.finish()?;
+			// Dropping the recorder flushes the open record, so the track is advertised.
+			track.recorder = None;
 		}
 		Ok(())
 	}
