@@ -747,6 +747,12 @@ impl Socket {
 		if let Some(id) = tx.free.pop() {
 			let mut data = std::mem::take(&mut tx.bufs[id as usize].data);
 			data.clear();
+			// A checkout is a `Vec` its holder may have shrunk or regrown before
+			// dropping it; every checkout holds exactly one pool-sized train.
+			let cap = self.shared.config.tx_buffer_len;
+			if data.capacity() != cap {
+				data = Vec::with_capacity(cap);
+			}
 			return Poll::Ready(Ok(TxBuf {
 				sock: self.shared.clone(),
 				id,

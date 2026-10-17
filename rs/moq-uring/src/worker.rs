@@ -1250,6 +1250,39 @@ mod tests {
 	}
 
 	#[test]
+	fn a_resized_checkout_comes_back_pool_sized() {
+		let Some(worker) = worker() else { return };
+		let handle = worker.handle();
+		let config = udp::Config {
+			tx_buffers_max: 1,
+			tx_buffer_len: 2048,
+			..Default::default()
+		};
+		let sock = handle
+			.udp(std::net::UdpSocket::bind("127.0.0.1:0").expect("bind"), config)
+			.expect("socket");
+		let acquire = || {
+			let Poll::Ready(Ok(tx)) = sock.poll_acquire(&kio::Waiter::noop()) else {
+				panic!("no tx buffer");
+			};
+			tx
+		};
+
+		let mut tx = acquire();
+		assert_eq!(tx.capacity(), 2048);
+		tx.shrink_to_fit();
+		drop(tx);
+		let mut tx = acquire();
+		assert_eq!((tx.len(), tx.capacity()), (0, 2048));
+		tx.resize(8192, 7);
+		drop(tx);
+		let tx = acquire();
+		assert_eq!((tx.len(), tx.capacity()), (0, 2048));
+		drop(tx);
+		drop(worker);
+	}
+
+	#[test]
 	fn buffer_grown_past_the_pool_is_rejected() {
 		let Some(worker) = worker() else { return };
 		let handle = worker.handle();
