@@ -8,8 +8,12 @@ It is off by default.
 
 ## Plan
 
-Decided with the maintainer on 2026-10-17: the goal as drafted, from the
-follow-ups of [#5726](https://github.com/moq-dev/moq/pull/5726).
+Decided with the maintainer on 2026-10-17:
+
+- The goal comes from the follow-ups of
+  [#5726](https://github.com/moq-dev/moq/pull/5726).
+- A standalone m2 quest, not a child of the obs-studio epic, which is about
+  the native port into obs-studio rather than the plugin's build.
 
 `cpp/moq/CMakeLists.txt` runs the `cargo build` for moq-ffi, and `cpp/obs`
 builds it in-tree. A prebuilt package (`MOQ_FFI_DIR`) is default-features

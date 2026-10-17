@@ -29,7 +29,6 @@ Open, for when the port starts:
 ## Required
 
 - [obs-studio maintainers agree](/quest/m2/obs-studio/maintainers.md) - condition: agreement in principle to a native MoQ output and service
-- [CMake qlog option](/quest/m2/obs-studio/cmake-qlog.md) - an OBS build can opt into qlog trace capture
 
 ## Related
 
