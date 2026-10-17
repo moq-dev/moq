@@ -341,13 +341,19 @@ impl<'a> SendStream<'a> {
     /// - when applied to a receive stream
     pub fn checkpoint(&mut self) -> Checkpoint {
         let max_send_data = self.state.max_send_data(self.id);
+        let closed = || Arc::new(AckSlot::from(Err(ClosedStream::default())));
         let (offset, acked) = match self.state.send.get_mut(&self.id) {
             Some(stream) => {
                 let stream = stream.get_or_insert_with(|| Send::new(max_send_data));
-                (stream.offset(), stream.pending.watch())
+                // A stopped or reset stream fails its checkpoints, so a new one does too
+                let acked = match stream.stop_reason.is_some() || stream.is_reset() {
+                    true => closed(),
+                    false => stream.pending.watch(),
+                };
+                (stream.offset(), acked)
             }
             // Already closed, where the reset fails anyway
-            None => (0, Arc::new(AckSlot::from(Err(ClosedStream::default())))),
+            None => (0, closed()),
         };
         Checkpoint {
             id: self.id,
@@ -494,7 +500,8 @@ impl Checkpoint {
     ///
     /// Fails with [`ClosedStream`] once the peer will never acknowledge it, or no longer reads
     /// it: the stream was reset before the checkpoint's data was acknowledged, the peer sent
-    /// STOP_SENDING, rejected 0-RTT discarded the stream, or the connection closed.
+    /// STOP_SENDING, rejected 0-RTT discarded the stream, or the connection closed. A checkpoint
+    /// taken once the stream was reset or stopped fails at once.
     ///
     /// # Panics
     /// If the checkpoint came from another connection.

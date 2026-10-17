@@ -230,6 +230,54 @@ fn stop_sending_fails() {
     assert!(reported(&mut pair, client_ch, s));
 }
 
+/// A checkpoint taken after the peer stopped reading fails at once, though data in flight is
+/// still acknowledged.
+#[test]
+fn checkpoint_after_stop_sending_fails() {
+    let _guard = subscribe();
+    let mut pair = pair(true);
+    let (client_ch, server_ch) = pair.connect();
+    let s = open(&mut pair, client_ch, server_ch);
+
+    pair.client_send(client_ch, s).write(b"in flight").unwrap();
+    pair.server_recv(server_ch, s).stop(VarInt(7)).unwrap();
+    pair.drive();
+    assert_eq!(
+        pair.client_send(client_ch, s).stopped(),
+        Ok(Some(VarInt(7)))
+    );
+
+    let checkpoint = pair.client_send(client_ch, s).checkpoint();
+    pair.drive();
+    assert_eq!(
+        acked(&mut pair, client_ch, &checkpoint),
+        Err(ClosedStream::default())
+    );
+}
+
+/// A checkpoint taken after a reset fails at once, though the reset still delivers its prefix.
+#[test]
+fn checkpoint_after_reset_fails() {
+    let _guard = subscribe();
+    let mut pair = pair(true);
+    let (client_ch, server_ch) = pair.connect();
+    let s = open(&mut pair, client_ch, server_ch);
+
+    pair.client_send(client_ch, s).write(b"prefix").unwrap();
+    let reset = pair.client_send(client_ch, s).checkpoint();
+    lose_client_packets(&mut pair);
+    reset
+        .reset(pair.client_conn_mut(client_ch), VarInt(42))
+        .unwrap();
+
+    let checkpoint = pair.client_send(client_ch, s).checkpoint();
+    pair.drive();
+    assert_eq!(
+        acked(&mut pair, client_ch, &checkpoint),
+        Err(ClosedStream::default())
+    );
+}
+
 /// Nothing is acknowledged on a closed connection.
 #[test]
 fn close_fails() {
