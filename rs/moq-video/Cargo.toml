@@ -113,12 +113,11 @@ bytes = { workspace = true }
 # CPU I420 resize (SIMD per-plane convolution), the software fallback for
 # Frame::resize; CUDA and macOS pixel-buffer frames resize on the GPU instead.
 fast_image_resize = "6"
-# Catalog types (VideoConfig / VideoCodec) the decode consumer reads.
-hang = { workspace = true }
 # Reading the color space an H.264 / H.265 SPS signals, to label decoded
 # pictures whose backend does not. The same versions moq-mux and the tests use.
 h264-reader = "0.9.0"
-scuffle-h265 = "0.2.2"
+# Catalog types (VideoConfig / VideoCodec) the decode consumer reads.
+hang = { workspace = true }
 # The capture publish's control handle.
 kio = { workspace = true, optional = true }
 # libvpx bindings for the `vpx` feature. The library itself comes from the build
@@ -136,6 +135,7 @@ openh264 = { version = "0.9.8", optional = true }
 # features it needs; cargo unifies this on the same version it depends on, so the
 # raw API types stay identical.
 openh264-sys2 = { version = "0.9.8", default-features = false, optional = true }
+scuffle-h265 = "0.2.2"
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt", "macros", "sync", "time"] }
 tracing = { workspace = true }
