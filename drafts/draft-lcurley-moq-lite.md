@@ -176,6 +176,7 @@ Each frame of a timed Track carries a presentation timestamp expressed in the Tr
 A Track without a `Timescale` is untimed: its frames and datagrams carry no timestamp.
 A timed Group's frame 0 timestamp MUST NOT be earlier than that of any lower-sequence Group; a receiver closes the Track with TIMESTAMP_MISMATCH when one is.
 lite-05 and lite-06 cannot encode an untimed Track, so a publisher on those versions declares a `Timescale` of 1000 for it and stamps every frame and datagram with its send time in milliseconds.
+Send times need not rise with sequence, and a receiver cannot tell them from presentation timestamps, so it does not apply this check to Groups received over lite-05 or lite-06.
 
 ## Positions {#positions}
 A Position is a (Group Sequence, Frame Index) pair identifying one frame within a Track.
@@ -1578,7 +1579,7 @@ The `Message Length` describes the payload size on the wire.
 
 ## moq-lite-07
 
-- A timed Group's frame 0 timestamp must not be earlier than a lower-sequence Group's; TIMESTAMP_MISMATCH covers a violation.
+- A timed Group's frame 0 timestamp must not be earlier than a lower-sequence Group's; TIMESTAMP_MISMATCH covers a violation. Groups received over lite-05 or lite-06 are exempt, since their timestamps may be send times.
 - Added the reliable ordered RTCDataChannel binding, with one Qmux Record per binary message and no datagrams.
 
 - Added `Group Order` to SUBSCRIBE and SUBSCRIBE_UPDATE: descending (0x0, the previous fixed order) or ascending (0x1). A relay requests descending upstream unless every subscription it serves is ascending.

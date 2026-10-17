@@ -236,8 +236,9 @@ enum Timeline {
 /// [`track::Neighbors`]), which decides whether it bounds theirs.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum Origin {
-	/// Not checked: untimed, started past frame 0, or written with no open track. A start
-	/// read off a later frame is not where the group began, so it bounds nothing.
+	/// Not checked: untimed, started past frame 0, written with no open track, or received
+	/// over a wire whose timestamps may be send times. A start read off a later frame is
+	/// not where the group began, so it bounds nothing.
 	#[default]
 	Unchecked,
 	/// Frame 0 fit between its neighbors, so its start bounds theirs.
@@ -567,9 +568,9 @@ struct Alive {
 	// out of `GroupState` has to read both under one guard, or the two halves can
 	// straddle the abort: see `Producer::live_first_frame`.
 	aborted: AtomicBool,
-	// Set once the first frame is written, so later writes skip the track lock the first
-	// one's rewind check takes. A stale false only takes that lock once more.
-	started: AtomicBool,
+	// Set once frame 0's rewind check ran or was skipped, so later writes skip the track
+	// lock it takes. A stale false after a write only takes that lock once more.
+	checked: AtomicBool,
 	// The cache stamp `GroupState::charge` maintains, held here as well so the
 	// eviction and expiry walks can weigh a candidate without taking the group lock
 	// they already hold the track lock over.
@@ -690,7 +691,7 @@ impl Producer {
 			info,
 			state: state.clone(),
 			aborted: AtomicBool::new(false),
-			started: AtomicBool::new(false),
+			checked: AtomicBool::new(false),
 			access,
 		});
 		Self {
@@ -725,12 +726,19 @@ impl Producer {
 	///
 	/// The caller holds its lock until the frame is recorded, so the check and the stamp are
 	/// one step against every other group's (locks are ordered track then group). Only a
-	/// timed group not yet started pays for it, once.
+	/// timed group not yet checked pays for it, once.
 	fn first_frame_track(&self) -> Option<kio::Producer<track::TrackState>> {
-		if self.track.timescale.is_none() || self.alive.started.load(Ordering::Relaxed) {
+		if self.track.timescale.is_none() || self.alive.checked.load(Ordering::Relaxed) {
 			return None;
 		}
 		self.cache.track()
+	}
+
+	/// Accept frame 0 without checking it against the track's other groups, so it never
+	/// bounds theirs either: for a wire whose timestamps may be send times rather than
+	/// media time. Call it before the first write.
+	pub(crate) fn skip_rewind_check(&self) {
+		self.alive.checked.store(true, Ordering::Relaxed);
 	}
 
 	/// Start the group at frame `index` rather than 0, so the first frame written lands
@@ -807,7 +815,7 @@ impl Producer {
 		state.committed = state.next_index;
 		state.origin = origin;
 		state.stamp(timestamp);
-		self.alive.started.store(true, Ordering::Relaxed);
+		self.alive.checked.store(true, Ordering::Relaxed);
 		drop(state);
 		drop(track);
 
@@ -889,7 +897,7 @@ impl Producer {
 		state.committed = next_index;
 		state.origin = origin;
 		if count > 0 {
-			self.alive.started.store(true, Ordering::Relaxed);
+			self.alive.checked.store(true, Ordering::Relaxed);
 		}
 		drop(state);
 		drop(track);
@@ -1002,7 +1010,7 @@ impl Producer {
 		// place in time is known before a single payload byte streams in.
 		state.origin = origin;
 		state.stamp(timestamp);
-		self.alive.started.store(true, Ordering::Relaxed);
+		self.alive.checked.store(true, Ordering::Relaxed);
 		drop(state);
 		drop(track);
 

@@ -225,6 +225,11 @@ export const hooks: {
 	admitGroupStart: (group: GroupProducer, admit: (start: Timestamp) => () => void) => void;
 	/** Return a group producer's first timestamp, if it already holds a frame. */
 	groupStart: (group: GroupProducer) => Timestamp | undefined;
+	/**
+	 * Accept a group's first frame without checking it against any track it joins, so it
+	 * bounds none of their neighbors either: for a wire whose timestamps may be send times.
+	 */
+	skipRewindCheck: (group: GroupProducer) => void;
 	/** Keep a mirror of a group accepted unverified below its track's eviction watermark out of media-time expiry. */
 	unverifyGroup: (group: GroupConsumer) => void;
 	/** Return a group's first timestamp, retained even after its first frame is read. */
@@ -294,6 +299,9 @@ export const hooks: {
 		throw new Error("group.ts not loaded");
 	},
 	groupStart: () => {
+		throw new Error("group.ts not loaded");
+	},
+	skipRewindCheck: () => {
 		throw new Error("group.ts not loaded");
 	},
 	unverifyGroup: () => {

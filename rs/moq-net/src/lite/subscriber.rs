@@ -915,6 +915,9 @@ impl<S: crate::transport::poll::Session> GroupRecv<S> {
 						// from where the publisher said they start so a front continuing the
 						// group across routes lines them up.
 						group.start_at(hdr.frame_start)?;
+						if self.subscriber.version.has_send_times() {
+							group.skip_rewind_check();
+						}
 						(group, entry.producer.clone(), entry.timescale, reading)
 					};
 
@@ -2225,13 +2228,11 @@ mod tests {
 		}
 	}
 
-	/// A received group whose first frame rewinds past the group before it condemns the
-	/// track, not just its stream, and the session stays up.
-	#[moq_net_sim::test]
-	async fn a_rewound_group_aborts_the_track() {
+	/// Receive group 5 starting at 500ms over `version`, on a timed track whose group 4
+	/// starts at 1000ms, returning the stream's result and the track.
+	async fn receive_rewind(version: Version) -> (Result<(), Error>, track::Producer) {
 		use crate::transport::poll::Session as _;
 
-		let version = Version::Lite07;
 		let mut script = Vec::new();
 		let mut encoder = crate::coding::Encoder::new(&mut script, version.into());
 		lite::Group {
@@ -2280,8 +2281,31 @@ mod tests {
 		let (_, recv) = session.open_bi().await.unwrap();
 		let mut group = GroupRecv::new(subscriber, Reader::new(recv, version));
 		let res = kio::wait(|waiter| group.poll_serve(waiter)).await;
+		(res, track)
+	}
+
+	/// A received group whose first frame rewinds past the group before it condemns the
+	/// track, not just its stream, and the session stays up.
+	#[moq_net_sim::test]
+	async fn a_rewound_group_aborts_the_track() {
+		let (res, track) = receive_rewind(Version::Lite07).await;
 		assert!(matches!(res, Err(Error::TimestampMismatch)), "{res:?}");
 		assert!(matches!(track.closed().now_or_never(), Some(Error::TimestampMismatch)));
+	}
+
+	/// Lite-06 stamps an untimed track's frames with their send time, and groups served
+	/// concurrently go out in any order, so a later group can carry an earlier stamp. It is
+	/// accepted unchecked and bounds nothing, while a local write still refuses a rewind.
+	#[moq_net_sim::test]
+	async fn a_lite06_group_sent_out_of_order_is_accepted_unchecked() {
+		let (res, track) = receive_rewind(Version::Lite06).await;
+		res.unwrap();
+		assert!(track.closed().now_or_never().is_none());
+
+		// Group 5 lends no 500ms floor, so group 6 is held to group 4's 1000ms.
+		let mut after = track.create_group(6u64.into()).unwrap();
+		let res = after.write_frame(Timestamp::from_millis(600).unwrap(), &b"after"[..]);
+		assert!(matches!(res, Err(Error::TimestampMismatch)), "{res:?}");
 	}
 
 	/// An idle copy that resubscribes gets its newest cached group again. That stream only
@@ -6094,6 +6118,9 @@ impl<S: crate::transport::poll::Session> kio::Task for FetchServeRun<S> {
 						stream.writer.abort(&err);
 						let _ = producer.abort(err);
 						return Poll::Ready(());
+					}
+					if self.serve.subscriber.version.has_send_times() {
+						producer.skip_rewind_check();
 					}
 
 					self.state = FetchRunState::Ingest {

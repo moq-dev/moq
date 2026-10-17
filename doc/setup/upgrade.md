@@ -381,7 +381,8 @@ These land with the next breaking release, not the 2026-09-23 train.
   rendition flags.
 - **A timed track refuses a group that rewinds.** A group whose first frame
   starts before a lower-sequence group's, or after a higher one's, fails the
-  write with `TimestampMismatch`, and a received one closes the track. A
+  write with `TimestampMismatch`, and a received one closes the track, except
+  over moq-lite 05/06, whose timestamps may be send times. A
   publisher whose timeline restarts, such as an HLS `EXT-X-DISCONTINUITY` that
   resets decode times, publishes a new broadcast instead.
 - **A track is timed or untimed, and nothing fills in a timestamp on

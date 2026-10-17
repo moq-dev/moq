@@ -1691,12 +1691,12 @@ test("a local unsubscribe owes no SUBSCRIBE_END", async () => {
 	}
 });
 
-// A lite-07 group stream carrying one frame at `timestamp` (zigzag delta from 0) in the track's scale.
-async function groupStream(timestamp: number): Promise<Reader> {
+// A group stream carrying one frame at `timestamp` (zigzag delta from 0) in the track's scale.
+async function groupStream(timestamp: number, version: Version = Version.DRAFT_07): Promise<Reader> {
 	const chunks: Uint8Array[] = [];
 	const writer = new Writer(
 		new WritableStream<Uint8Array>({ write: (chunk) => void chunks.push(new Uint8Array(chunk)) }),
-		Version.DRAFT_07,
+		version,
 	);
 	await writer.u62(BigInt(timestamp) * 2n);
 	await writer.u53(1);
@@ -1709,7 +1709,7 @@ async function groupStream(timestamp: number): Promise<Reader> {
 			},
 		}),
 		undefined,
-		Version.DRAFT_07,
+		version,
 	);
 }
 
@@ -1728,6 +1728,27 @@ test("a rewound group closes the track", async () => {
 		// A higher sequence starting earlier can never be repaired by a later group.
 		await subscriber.runGroup(new Group({ subscribe: 0n, sequence: 5 }), await groupStream(500));
 		expect(await track.closed).toBeInstanceOf(TimestampMismatch);
+	} finally {
+		track.close();
+		broadcast.close();
+		subscriber.close();
+	}
+});
+
+// Lite-06 stamps an untimed track's frames with their send time, and groups served
+// concurrently go out in any order, so a lower sequence can carry a later stamp.
+test("a lite-06 group sent out of order is accepted unchecked", async () => {
+	const { quic, streams, opened } = fakeSession();
+	const subscriber = new Subscriber(quic, Version.DRAFT_06, HopSchema.parse(1n));
+	const broadcast = subscriber.consume(Path.from("room"));
+	const track = broadcast.track("video").subscribe();
+	try {
+		await opened(0);
+		await answerTrackInfo(streams[0], Version.DRAFT_06, 1000);
+		await (await opened(1)).reading;
+		await subscriber.runGroup(new Group({ subscribe: 0n, sequence: 5 }), await groupStream(500, Version.DRAFT_06));
+		await subscriber.runGroup(new Group({ subscribe: 0n, sequence: 4 }), await groupStream(1000, Version.DRAFT_06));
+		expect(track.closed.peek()).toBeUndefined();
 	} finally {
 		track.close();
 		broadcast.close();
