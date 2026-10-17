@@ -378,21 +378,18 @@
         # which cpp/moq/uniffi.toml turns on. Its tags add a `-kixelated.N`
         # pre-release so they never collide with upstream's. Move back upstream
         # once one tags both.
-        #
-        # TODO: pin v0.11.0-kixelated.5+v0.32.2 once kixelated/uniffi-bindgen-cpp#4
-        # is released; until then this is that PR's head.
         uniffi-bindgen-cpp = pkgs.rustPlatform.buildRustPackage rec {
           pname = "uniffi-bindgen-cpp";
-          version = "0.11.0-kixelated.4+v0.32.2";
+          version = "0.11.0-kixelated.5+v0.32.2";
 
           src = pkgs.fetchFromGitHub {
             owner = "kixelated";
             repo = "uniffi-bindgen-cpp";
-            rev = "40c99525a125acd3ac0f2eb792c452640dbae388";
-            hash = "sha256-x39ZeM4mh96FjUKXCgPBSWVojvcPiUpSLcTFr/hNvnM=";
+            rev = "v${version}";
+            hash = "sha256-y148irMNOsMrfjbUT/f3jlNmpxT0/z/2LVlP+t1oq8I=";
           };
 
-          cargoHash = "sha256-/DRrwhJiKFCzibiJU2D3QaBM3XTmieRgUNc7tHDiGXI=";
+          cargoHash = "sha256-QBURLIg255O6J4A+wzZVk4cUJPdJb6JepZKofX0fLZg=";
 
           # The workspace's other member is the fixture crate, which pulls the
           # uniffi examples in from git; build only the generator.
