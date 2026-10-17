@@ -22,6 +22,7 @@ mod source;
 #[cfg(test)]
 pub(crate) mod test_util;
 mod text;
+mod ttml;
 
 pub mod flv;
 pub mod fmp4;
@@ -200,6 +201,10 @@ pub trait Container {
 	/// (e.g. a CMAF fragment with zero samples). That is not end-of-group; poll
 	/// again for the next batch. Callers accumulating frames must not treat an
 	/// empty batch as completion.
+	///
+	/// On a data track an empty batch is the discontinuity marker, so a data
+	/// container returns one only for an object with no bytes, and refuses any
+	/// other object that decodes to no frames.
 	fn poll_read(
 		&self,
 		group: &mut moq_net::group::Consumer,

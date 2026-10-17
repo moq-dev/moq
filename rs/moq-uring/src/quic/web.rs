@@ -429,8 +429,10 @@ struct State {
 ///
 /// [`Request::respond`] builds the web
 /// flavor; [`Session::raw`] wraps a raw-QUIC [`Connection`] with the layering
-/// disabled. Clones share the session.
+/// disabled. Clones share the session; dropping the last closes the connection.
 pub struct Session {
+	// Capsule tasks retain Web/Connection, but only public session handles own this.
+	handles: Rc<()>,
 	conn: Connection,
 	web: Option<Rc<Web>>,
 	/// What [`protocol`](web_transport_trait::poll::Session::protocol)
@@ -450,17 +452,39 @@ impl Session {
 		self.conn.send_group(priority)
 	}
 
+	/// Send a datagram in `group` at `order`, scheduled like one of the group's streams.
+	///
+	/// See [`Connection::send_datagram`].
+	pub fn send_datagram(&self, payload: Bytes, group: Option<&super::SendGroup>, order: i64) -> Result<(), Error> {
+		let Some(web) = &self.web else {
+			return self.conn.send_datagram(payload, group, order);
+		};
+		let mut framed = BytesMut::with_capacity(web.header_datagram.len() + payload.len());
+		framed.extend_from_slice(&web.header_datagram);
+		framed.extend_from_slice(&payload);
+		self.conn
+			.send_datagram(framed.freeze(), group, order)
+			.map_err(unmap_err)
+	}
+
 	/// Wrap a raw-QUIC connection in a session, with no
 	/// WebTransport layering: streams and datagrams pass through untouched.
 	pub fn raw(conn: Connection) -> Self {
 		let protocol = web_transport_trait::poll::Session::protocol(&conn).map(str::to_owned);
 		Self {
+			handles: Rc::new(()),
 			conn,
 			web: None,
 			protocol,
 			opening_uni: None,
 			opening_bi: None,
 		}
+	}
+
+	/// Change the underlying connection's flow-control limits; see
+	/// [`Connection::set_limits`].
+	pub fn set_limits(&self, limits: super::Limits) -> Result<(), crate::Error> {
+		self.conn.set_limits(limits)
 	}
 
 	/// Assemble the web flavor and spawn its capsule reader.
@@ -522,6 +546,7 @@ impl Session {
 			.spawn(async move { read_capsules(capsules, capsule_conn, recv).await });
 
 		Self {
+			handles: Rc::new(()),
 			conn,
 			web: Some(web),
 			protocol,
@@ -542,11 +567,20 @@ impl Session {
 impl Clone for Session {
 	fn clone(&self) -> Self {
 		Self {
+			handles: self.handles.clone(),
 			conn: self.conn.clone(),
 			web: self.web.clone(),
 			protocol: self.protocol.clone(),
 			opening_uni: None,
 			opening_bi: None,
+		}
+	}
+}
+
+impl Drop for Session {
+	fn drop(&mut self) {
+		if Rc::strong_count(&self.handles) == 1 {
+			web_transport_trait::poll::Session::close(self, 0, "dropped");
 		}
 	}
 }
@@ -657,14 +691,8 @@ impl web_transport_trait::poll::Session for Session {
 		Poll::Ready(result.map(|()| (send, recv)))
 	}
 
-	fn poll_send_datagram(&mut self, cx: &mut Context<'_>, payload: &[u8]) -> Poll<Result<(), Self::Error>> {
-		let Some(web) = &self.web else {
-			return web_transport_trait::poll::Session::poll_send_datagram(&mut self.conn, cx, payload);
-		};
-		let mut framed = Vec::with_capacity(web.header_datagram.len() + payload.len());
-		framed.extend_from_slice(&web.header_datagram);
-		framed.extend_from_slice(payload);
-		web_transport_trait::poll::Session::poll_send_datagram(&mut self.conn, cx, &framed).map_err(unmap_err)
+	fn poll_send_datagram(&mut self, _: &mut Context<'_>, payload: &[u8]) -> Poll<Result<(), Self::Error>> {
+		Poll::Ready(Self::send_datagram(self, Bytes::copy_from_slice(payload), None, 0))
 	}
 
 	fn poll_recv_datagram(&mut self, cx: &mut Context<'_>) -> Poll<Result<Bytes, Self::Error>> {
@@ -944,6 +972,13 @@ impl web_transport_trait::poll::RecvStream for RecvStream {
 
 	fn poll_read(&mut self, cx: &mut Context<'_>, dst: &mut [u8]) -> Poll<Result<Option<usize>, Self::Error>> {
 		match web_transport_trait::poll::RecvStream::poll_read(&mut self.inner, cx, dst) {
+			Poll::Ready(Err(err)) => Poll::Ready(Err(self.map(err))),
+			other => other,
+		}
+	}
+
+	fn poll_read_chunk(&mut self, cx: &mut Context<'_>, max: usize) -> Poll<Result<Option<Bytes>, Self::Error>> {
+		match web_transport_trait::poll::RecvStream::poll_read_chunk(&mut self.inner, cx, max) {
 			Poll::Ready(Err(err)) => Poll::Ready(Err(self.map(err))),
 			other => other,
 		}

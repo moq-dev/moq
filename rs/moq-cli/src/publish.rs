@@ -307,8 +307,8 @@ pub struct Publish {
 
 /// A broadcast's announcement, held until its catalog first goes out.
 ///
-/// The catalog withholds its first snapshot until the input has declared every track (for TS,
-/// the first PMT). A relay queries a broadcast's tracks the moment it is announced, so a standby
+/// The catalog withholds its first snapshot until the input names at least one servable track. A
+/// relay queries a broadcast's tracks the moment it is announced, so a standby
 /// announced any sooner refuses the tracks its epoch's live partner is serving, and the relay
 /// keeps those refusals.
 struct Pending {
@@ -411,7 +411,7 @@ impl Publish {
 	/// named after `name` (`event.hang` becomes `event/1.hang`, `event/2.hang`, ...).
 	///
 	/// The programs aren't known until the PAT arrives, so each broadcast is created then and
-	/// announced once its PMT has declared its tracks, and [`announce`](Self::announce) has
+	/// announced once its catalog has named a servable track, and [`announce`](Self::announce) has
 	/// nothing to do.
 	pub fn ts_programs(origin: moq_net::origin::Producer, name: String, config: moq_mux::catalog::Config) -> Self {
 		Self {
@@ -1105,9 +1105,9 @@ pub(crate) mod tests {
 	}
 
 	/// The passthrough track crosses a relay byte for byte on the lite and the IETF wire, through
-	/// a flagged PCR jump twenty seconds forward. The jump crosses as one skipped sequence, which
-	/// neither the relay nor a late subscriber waits on, and the timestamps carry it, so a budget
-	/// shorter than the jump drops the groups before it.
+	/// a flagged PCR jump twenty seconds forward. The jump crosses as one marker group, an object
+	/// with no bytes, and the timestamps carry it, so a budget shorter than the jump drops the
+	/// groups before it.
 	#[tokio::test]
 	async fn ts_passthrough_crosses_a_relay_through_a_flagged_jump() {
 		const KYRION: &[u8] = include_bytes!("../../moq-mux/src/container/ts/test_data/kyrion_mpeg2av_ac3.ts");
@@ -1211,7 +1211,7 @@ pub(crate) mod tests {
 				(track, first)
 			};
 			// Each group's sequence and frames, read until the track ends. A read cut off as
-			// stale leaves `None` for that group's frames.
+			// stale leaves `None` for that group's frames, and a marker leaves none.
 			let read = |(mut track, first): (moq_net::track::Subscriber, Option<moq_net::group::Consumer>)| {
 				tokio::spawn(tokio::time::timeout(WAIT, async move {
 					let mut groups = Vec::new();
@@ -1220,6 +1220,7 @@ pub(crate) mod tests {
 						let mut frames = Some(Vec::new());
 						loop {
 							match group.read_frame().await {
+								Ok(Some(frame)) if frame.payload.is_empty() => {}
 								Ok(Some(frame)) => frames
 									.as_mut()
 									.unwrap()
@@ -1262,21 +1263,28 @@ pub(crate) mod tests {
 				input.ends_with(&output),
 				"{version}: byte-identical from the first group"
 			);
-			let first = |frames: &[hang::container::Frame]| frames[0].timestamp;
-			let jump = recording
+			let media: Vec<_> = recording.iter().filter(|(_, frames)| !frames.is_empty()).collect();
+			let first = |frames: &[hang::container::Frame]| frames[0].timestamp.as_micros();
+			let jump = media
 				.windows(2)
-				.find(|pair| first(&pair[1].1).as_micros() > first(&pair[0].1).as_micros() + 10_000_000)
+				.find(|pair| first(&pair[1].1) > first(&pair[0].1) + 10_000_000)
 				.map(|pair| pair[1].0)
 				.unwrap_or_else(|| panic!("{version}: no jump crossed"));
 			let last = recording.last().unwrap().0;
 			assert_eq!(
 				recording.iter().map(|(sequence, _)| *sequence).collect::<Vec<_>>(),
-				(recording[0].0..jump - 1).chain(jump..=last).collect::<Vec<_>>(),
-				"{version}: no group missing but the break marker"
+				(recording[0].0..=last).collect::<Vec<_>>(),
+				"{version}: no group missing"
 			);
+			let markers: Vec<u64> = recording
+				.iter()
+				.filter(|(_, frames)| frames.is_empty())
+				.map(|(sequence, _)| *sequence)
+				.collect();
+			assert_eq!(markers, [jump - 1], "{version}: the break marker precedes the jump");
 
 			// Joining once every group is out, with a budget half the jump, reads every group
-			// after it past the skipped sequence, and none of the groups the jump left more than
+			// after it past the marker, and none of the groups the jump left more than
 			// the budget behind. An IETF subscription starts at the newest group, so only lite
 			// has the groups behind it to read.
 			if version.starts_with("moq-lite") {
@@ -1594,29 +1602,35 @@ pub(crate) mod tests {
 	}
 
 	/// Input that ends before declaring any track fails, rather than announcing a broadcast
-	/// with nothing in it.
+	/// with nothing in it. These inputs hold only metadata (a PMT, an FLV header, an AUD)
+	/// that configures no track.
 	#[tokio::test(start_paused = true)]
 	async fn an_import_with_no_track_fails_unannounced() {
-		let origin = moq_tokio::origin::spawn();
-		let mut announced = origin.consume().announced();
-		let broadcast = origin.create_broadcast("demo").unwrap();
-		let publish = Publish::new(
-			broadcast.clone(),
-			&PublishFormat::Ts { program: None },
-			Default::default(),
-		)
-		.unwrap();
-		#[allow(irrefutable_let_patterns)]
-		let Source::Stream { decoder, catalog } = publish.source else {
-			panic!("expected a stream source");
-		};
-		let pending = Pending::new(broadcast, Default::default()).unwrap();
-		let err = decode(decoder, catalog, &[][..], Duration::ZERO, Some(pending))
-			.await
-			.unwrap_err();
-		assert!(err.to_string().contains("declared"), "{err:#}");
-		let event = tokio::time::timeout(Duration::from_secs(1), announced.next()).await;
-		assert!(event.is_err(), "announced an empty broadcast: {event:?}");
+		let tables = two_programs()[..3 * 188].to_vec();
+		let flv_header = b"FLV\x01\x05\x00\x00\x00\x09\x00\x00\x00\x00".to_vec();
+		let aud = vec![0, 0, 0, 1, 9, 0xf0];
+		for (format, input) in [
+			(PublishFormat::Ts { program: None }, Vec::new()),
+			(PublishFormat::Ts { program: Some(1) }, tables),
+			(PublishFormat::Flv, flv_header),
+			(PublishFormat::Avc3, aud),
+		] {
+			let origin = moq_tokio::origin::spawn();
+			let mut announced = origin.consume().announced();
+			let broadcast = origin.create_broadcast("demo").unwrap();
+			let publish = Publish::new(broadcast.clone(), &format, Default::default()).unwrap();
+			#[allow(irrefutable_let_patterns)]
+			let Source::Stream { decoder, catalog } = publish.source else {
+				panic!("expected a stream source");
+			};
+			let pending = Pending::new(broadcast, Default::default()).unwrap();
+			let err = decode(decoder, catalog, &input[..], Duration::ZERO, Some(pending))
+				.await
+				.unwrap_err();
+			assert!(err.to_string().contains("declared"), "{err:#}");
+			let event = tokio::time::timeout(Duration::from_secs(1), announced.next()).await;
+			assert!(event.is_err(), "announced an empty broadcast: {event:?}");
+		}
 	}
 
 	/// A PAT listing two programs, then one MP2 PES of each: program 1 on PID `0x61` at 1 s

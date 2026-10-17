@@ -180,6 +180,9 @@ impl<E: catalog::Catalog> Import<E> {
 		// may carry the section by value, and a snapshot clones under the mutex (no publish).
 		let mut snapshot = catalog.snapshot();
 		let supports_mpegts = snapshot.ext.mpegts_mut().is_some();
+		if supports_mpegts {
+			catalog.count_ext_tracks(|ext: &mut E| ext.mpegts_mut().is_some_and(|mpegts| mpegts.has_track()));
+		}
 		let si = super::si::Capture::new(broadcast.clone(), catalog.clone());
 		let mux_rate_reservation = supports_mpegts.then(|| reserved.clone());
 		Self {
@@ -262,7 +265,7 @@ impl<E: catalog::Catalog> Import<E> {
 	/// now completes. The buffer is fully consumed; a trailing partial packet
 	/// (< 188 bytes) is retained for the next call.
 	pub fn decode(&mut self, data: &[u8]) -> anyhow::Result<()> {
-		self.damage_log.flush(web_async::time::Instant::now());
+		self.damage_log.flush(moq_clock::now());
 		self.scratch.extend_from_slice(data);
 
 		// Route one whole packet at a time, so a PMT is parsed (and any PID it declares
@@ -1380,6 +1383,7 @@ fn register_verbatim<E: catalog::Catalog>(
 			pid,
 			descriptors,
 			verbatim: Some(catalog::Verbatim::new(stream_type, framing)),
+			pes_packet: None,
 		},
 	);
 	drop(guard);
@@ -3946,6 +3950,62 @@ pub(super) mod test {
 		);
 	}
 
+	// An application extension composing the `mpegts` section counts its verbatim tracks as
+	// servable without implementing anything beyond `ts::Catalog`, so an input whose only track
+	// is a cue announces.
+	#[tokio::test(start_paused = true)]
+	async fn a_composed_extension_publishes_a_cue_only_catalog() {
+		use crate::catalog::hang::{Catalog, CatalogExt};
+		use crate::container::ts::catalog::{Catalog as TsCatalog, Mpegts};
+
+		#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Default, PartialEq)]
+		struct Composed {
+			#[serde(default, skip_serializing_if = "Mpegts::is_empty")]
+			mpegts: Mpegts,
+			#[serde(default, skip_serializing_if = "Option::is_none")]
+			app: Option<u32>,
+		}
+		impl CatalogExt for Composed {}
+		impl TsCatalog for Composed {
+			fn mpegts_mut(&mut self) -> Option<&mut Mpegts> {
+				Some(&mut self.mpegts)
+			}
+		}
+
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = crate::catalog::Producer::new(
+			&mut broadcast,
+			crate::catalog::Config::default().with_catalog(Catalog::<Composed>::default()),
+		)
+		.unwrap();
+		let mut updates = catalog.consume().unwrap();
+		let mut import = super::Import::new(broadcast, catalog.reserve());
+
+		let mut bytes = bytes::BytesMut::new();
+		bytes.extend_from_slice(&synth_pmt(
+			&[
+				(StreamType::Mpeg2Video, PCR_PID),
+				(StreamType::Dts8ChannelLosslessAudio, 0x21),
+			],
+			true,
+		));
+		bytes.extend_from_slice(&packet(true, 0, 0, &CUE));
+		bytes.extend_from_slice(&pes_packet(PCR_PID, 90_000));
+		import.decode(&bytes).unwrap();
+		import.finish().unwrap();
+
+		let first = tokio::time::timeout(Duration::from_secs(10), updates.next())
+			.await
+			.expect("the cue track publishes the initial catalog")
+			.unwrap()
+			.unwrap();
+		assert!(
+			first.video.renditions.is_empty() && first.audio.renditions.is_empty(),
+			"only the extension lists a track"
+		);
+		assert_eq!(first.ext.mpegts.tracks.len(), 1, "the cue track is listed");
+	}
+
 	// The base catalog (`Catalog<()>`) can't carry cues, so a detected CUEI PID routes to
 	// Stream::Ignored: dropped before the reader (no abort), with no ScteStream created, so
 	// the publishing lock is never taken and the catalog is never republished empty.
@@ -6256,16 +6316,17 @@ pub(super) mod test {
 
 	/// Read every retained frame of `name`, with the count of timeline breaks the consumer
 	/// crossed reading them.
-	async fn read_breaks(consumer: &moq_net::broadcast::Consumer, name: &str) -> (Vec<crate::container::Frame>, u64) {
+	async fn read_breaks(
+		consumer: &moq_net::broadcast::Consumer,
+		name: &str,
+		kind: crate::container::Kind,
+	) -> (Vec<crate::container::Frame>, u64) {
 		// A generous max delay: the default of zero would shed every non-latest group, the
 		// declared breaks among them, and the subscribe start is resolved from it too, so
 		// it has to reach back past a 30 s leap to the first frame.
 		let subscription = moq_net::track::Subscription::default().with_max_delay(std::time::Duration::from_secs(3600));
 		let track = consumer.track(name).unwrap().subscribe(subscription).await.unwrap();
-		let mut reader = crate::container::Consumer::new(
-			track,
-			crate::catalog::hang::Container::Legacy(crate::container::Kind::Audio),
-		);
+		let mut reader = crate::container::Consumer::new(track, crate::catalog::hang::Container::Legacy(kind));
 		let mut frames = Vec::new();
 		let mut breaks = 0;
 		while let Ok(Ok(Some(read))) = tokio::time::timeout(std::time::Duration::from_millis(50), reader.read()).await {
@@ -6285,7 +6346,7 @@ pub(super) mod test {
 		let names: Vec<String> = catalog.snapshot().audio.renditions.keys().cloned().collect();
 		let mut out = Vec::new();
 		for name in names {
-			out.push(read_breaks(consumer, &name).await);
+			out.push(read_breaks(consumer, &name, crate::container::Kind::Audio).await);
 		}
 		assert_eq!(out.len(), 2, "both renditions must exist");
 		out
@@ -6352,7 +6413,7 @@ pub(super) mod test {
 		let snapshot = catalog.snapshot();
 		let names: Vec<_> = snapshot.audio.renditions.keys().collect();
 		assert_eq!(names.len(), 1, "only program 2's stream: {names:?}");
-		let (frames, _) = read_breaks(&consumer, names[0]).await;
+		let (frames, _) = read_breaks(&consumer, names[0], crate::container::Kind::Audio).await;
 		assert!(!frames.is_empty(), "program 2 published");
 		assert!(
 			frames
@@ -6674,11 +6735,11 @@ pub(super) mod test {
 		import.decode(pes_packet(PCR_PID, 90_000).as_slice()).unwrap();
 		import.finish().unwrap();
 		let name = catalog.snapshot().ext.mpegts.tracks.keys().next().unwrap().clone();
-		let (frames, breaks) = read_breaks(&consumer, &name).await;
+		let (frames, breaks) = read_breaks(&consumer, &name, crate::container::Kind::Data).await;
 		assert_eq!(frames.len(), 3);
 		assert_eq!(
-			breaks, 0,
-			"a data sequence hole whose timestamps do not jump is not a playhead event"
+			breaks, 2,
+			"each break on the data track reads once, as its declared end"
 		);
 	}
 
@@ -8059,7 +8120,7 @@ pub(super) mod test {
 			let mut updates = catalog.consume().unwrap();
 			let mut import = super::Import::new(broadcast, catalog.reserve());
 			import
-				.decode(&synth_pmt(&[(StreamType::Mpeg2Video, PCR_PID)], false))
+				.decode(&synth_pmt(&[(StreamType::Mpeg2PacketizedData, PCR_PID)], false))
 				.unwrap();
 			import.decode(&pes_packet(PCR_PID, 90_000)).unwrap();
 			let waiter = kio::Waiter::noop();
@@ -8103,7 +8164,7 @@ pub(super) mod test {
 		let mut updates = catalog.consume().unwrap();
 		let mut import = super::Import::new(broadcast, catalog.reserve());
 		import
-			.decode(&synth_pmt(&[(StreamType::Mpeg2Video, PCR_PID)], false))
+			.decode(&synth_pmt(&[(StreamType::Mpeg2PacketizedData, PCR_PID)], false))
 			.unwrap();
 		let waiter = kio::Waiter::noop();
 		for frame in 0..100 {
@@ -8120,7 +8181,7 @@ pub(super) mod test {
 	/// A source whose clock keeps resetting before a window completes still releases its
 	/// catalog once enough media time has passed in total.
 	#[test]
-	fn a_ts_resetting_its_clock_releases_its_catalog_after_four_seconds_of_media() {
+	fn a_ts_resetting_its_clock_does_not_release_without_a_configured_track() {
 		use crate::catalog::hang::Catalog;
 		use crate::container::ts::catalog::Ext;
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
@@ -8141,13 +8202,11 @@ pub(super) mod test {
 				import.decode(&pes_packet(PCR_PID, 90_000 + frame * 3_600)).unwrap();
 			}
 			import.decode(&flag_discontinuity(pcr_packet(PCR_PID, 0))).unwrap();
-			let released = updates.poll_next(&waiter).is_ready();
-			assert_eq!(released, epoch >= 4, "released after epoch {epoch}");
-			if released {
-				return;
-			}
+			assert!(
+				updates.poll_next(&waiter).is_pending(),
+				"metadata-only catalog released after epoch {epoch}"
+			);
 		}
-		unreachable!();
 	}
 
 	/// A clock break after a measured window but before the first catalog publishes voids the
@@ -8165,7 +8224,7 @@ pub(super) mod test {
 		let mut updates = catalog.consume().unwrap();
 		let mut import = super::Import::new(broadcast, catalog.reserve());
 		import
-			.decode(&synth_pmt(&[(StreamType::Mpeg2Video, PCR_PID)], false))
+			.decode(&synth_pmt(&[(StreamType::Mpeg2PacketizedData, PCR_PID)], false))
 			.unwrap();
 		let window = |import: &mut super::Import<Ext>, stuffing: usize| {
 			for i in 0..=50 {
@@ -8208,7 +8267,7 @@ pub(super) mod test {
 		let mut updates = catalog.consume().unwrap();
 		let mut import = super::Import::new(broadcast, catalog.reserve());
 		import
-			.decode(&synth_pmt(&[(StreamType::Mpeg2Video, PCR_PID)], false))
+			.decode(&synth_pmt(&[(StreamType::Mpeg2PacketizedData, PCR_PID)], false))
 			.unwrap();
 		let waiter = kio::Waiter::noop();
 		// Starts two seconds before the rollover.
@@ -8241,7 +8300,7 @@ pub(super) mod test {
 		let mut updates = catalog.consume().unwrap();
 		let mut import = super::Import::new(broadcast, catalog.reserve());
 		import
-			.decode(&synth_pmt(&[(StreamType::Mpeg2Video, PCR_PID)], false))
+			.decode(&synth_pmt(&[(StreamType::Mpeg2PacketizedData, PCR_PID)], false))
 			.unwrap();
 		import.decode(&pes_packet(PCR_PID, 90_000)).unwrap();
 		import.decode(&pcr_packet(PCR_PID, 0)).unwrap();

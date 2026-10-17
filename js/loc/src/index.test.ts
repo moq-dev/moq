@@ -44,6 +44,11 @@ test("Format preserves empty data payloads", () => {
 	expect(fmt.end(decoded)).toBeUndefined();
 });
 
+test("Format decodes no frame from a data track's empty object and throws on a media track's", () => {
+	expect(new Format("data").decode(new Uint8Array(0))).toEqual([]);
+	expect(() => new Format("video").decode(new Uint8Array(0))).toThrow();
+});
+
 test("Format decodes timestamp at default microseconds timescale", () => {
 	const props = concat(Varint.encode(PROP_TIMESTAMP), Varint.encode(12_345));
 	const payload = new Uint8Array([0xde, 0xad, 0xbe, 0xef]);

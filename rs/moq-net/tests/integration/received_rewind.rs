@@ -54,11 +54,11 @@ async fn relay(downstream: &str) -> (Option<moq_net::Timescale>, Vec<u64>) {
 	let pair = connect_mock(options).await;
 
 	let consumer = subscriber.consume();
-	moq_net_sim::timeout(TIMEOUT, consumer.routed("bcast"))
+	moq_clock::timeout(TIMEOUT, consumer.routed("bcast"))
 		.await
 		.expect("announce timeout")
 		.expect("routed");
-	let remote = moq_net_sim::timeout(TIMEOUT, consumer.request_broadcast("bcast", None))
+	let remote = moq_clock::timeout(TIMEOUT, consumer.request_broadcast("bcast", None))
 		.await
 		.expect("resolve timeout")
 		.expect("broadcast resolves");
@@ -66,7 +66,7 @@ async fn relay(downstream: &str) -> (Option<moq_net::Timescale>, Vec<u64>) {
 	let subscription = Subscription::default()
 		.with_max_delay(BUDGET)
 		.with_start(Some(Position::group(0)));
-	let reader = moq_net_sim::spawn(async move {
+	let reader = moq_clock::sim::spawn(async move {
 		let mut sub = remote
 			.track("data")
 			.unwrap()
@@ -76,13 +76,13 @@ async fn relay(downstream: &str) -> (Option<moq_net::Timescale>, Vec<u64>) {
 		let timescale = sub.info().timescale;
 		let mut got = Vec::new();
 		loop {
-			let next = moq_net_sim::timeout(TIMEOUT, sub.recv_group())
+			let next = moq_clock::timeout(TIMEOUT, sub.recv_group())
 				.await
 				.expect("recv_group timed out");
 			let Some(mut group) = next.expect("recv_group") else {
 				break;
 			};
-			while moq_net_sim::timeout(TIMEOUT, group.read_frame())
+			while moq_clock::timeout(TIMEOUT, group.read_frame())
 				.await
 				.expect("read_frame timed out")
 				.expect("read_frame")
@@ -93,18 +93,18 @@ async fn relay(downstream: &str) -> (Option<moq_net::Timescale>, Vec<u64>) {
 		(timescale, got)
 	});
 
-	moq_net_sim::timeout(TIMEOUT, track.demand().used())
+	moq_clock::timeout(TIMEOUT, track.demand().used())
 		.await
 		.expect("no subscriber appeared")
 		.unwrap();
-	moq_net_sim::sleep(Duration::from_millis(10)).await;
+	moq_clock::sleep(Duration::from_millis(10)).await;
 	write_group(&track, 1);
 	// Sent later, so group 0's send time lands after group 1's.
-	moq_net_sim::sleep(Duration::from_millis(10)).await;
+	moq_clock::sleep(Duration::from_millis(10)).await;
 	write_group(&track, 0);
 	track.finish().unwrap();
 
-	let got = moq_net_sim::timeout(TIMEOUT * 3, reader)
+	let got = moq_clock::timeout(TIMEOUT * 3, reader)
 		.await
 		.expect("reader hung")
 		.expect("reader panicked");
@@ -112,7 +112,7 @@ async fn relay(downstream: &str) -> (Option<moq_net::Timescale>, Vec<u64>) {
 	got
 }
 
-#[moq_net_sim::test]
+#[moq_clock::test]
 async fn a_relay_forwards_descending_send_times_without_closing_the_track() {
 	let mut failures = Vec::new();
 	for downstream in ["moq-lite-06", "moq-lite-07-wip", "moq-transport-22"] {

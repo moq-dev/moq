@@ -2,7 +2,7 @@ import { Once } from "@moq/signals";
 import { Mutex } from "async-mutex";
 import type { Drain } from "../connection/goaway.ts";
 import { error, ProtocolViolation, SessionCode, SessionError } from "../error.ts";
-import { Reader, Stream, type Writer } from "../stream.ts";
+import { type OpenOptions, Reader, Stream, type Writer } from "../stream.ts";
 import { untilAborted } from "../util/abort.ts";
 import * as Varint from "../varint.ts";
 import { GoAway } from "./goaway.ts";
@@ -26,14 +26,16 @@ export class RequestWindowError extends Error {
  * Implemented by both ControlStreamAdapter (v14-v16) and NativeSession (v17).
  */
 export interface Session {
-	openBi(): Stream | Promise<Stream>;
-	openNativeBi?(): Promise<Stream>;
+	openBi(options?: Partial<OpenOptions>): Stream | Promise<Stream>;
+	openNativeBi?(options?: Partial<OpenOptions>): Promise<Stream>;
 	acceptBi(): Promise<Stream | undefined>;
 	nextRequestId(signal?: AbortSignal): Promise<bigint | undefined>;
 	/** Spend a request ID the peer used without holding a request open, closing the session if it cannot. */
 	spendRequest(id: bigint): void;
 	close(): void;
 	readonly version: IetfVersion;
+	/** Whether we opened the session. */
+	readonly client: boolean;
 }
 
 /**
@@ -48,10 +50,12 @@ export class NativeSession implements Session {
 	// The peer's IDs, of the other parity. Draft 17 has no window, yet an ID stays spent.
 	#spent: SpentIds;
 	readonly version: IetfVersion;
+	readonly client: boolean;
 
 	constructor(quic: WebTransport, version: IetfVersion, client: boolean) {
 		this.#quic = quic;
 		this.version = version;
+		this.client = client;
 		this.#requestId = client ? 0n : 1n;
 		this.#spent = new SpentIds(client ? 1n : 0n);
 	}
@@ -65,8 +69,8 @@ export class NativeSession implements Session {
 		}
 	}
 
-	async openBi(): Promise<Stream> {
-		return Stream.open(this.#quic, { version: this.version });
+	async openBi(options?: Partial<OpenOptions>): Promise<Stream> {
+		return Stream.open(this.#quic, { ...options, version: this.version });
 	}
 
 	async acceptBi(): Promise<Stream | undefined> {
@@ -291,7 +295,7 @@ export class ControlStreamAdapter implements Session {
 	#closed = false;
 
 	// Whether this side opened the session. Only a server may name a redirect.
-	#client: boolean;
+	readonly client: boolean;
 
 	constructor(
 		quic: WebTransport,
@@ -317,7 +321,7 @@ export class ControlStreamAdapter implements Session {
 		this.#peerMissing = version === Version.DRAFT_16 ? new MissingRuns() : undefined;
 		this.#requestId = client ? 0n : 1n;
 		this.#sendNext = version === Version.DRAFT_16 ? undefined : this.#requestId;
-		this.#client = client;
+		this.client = client;
 	}
 
 	/**
@@ -402,8 +406,8 @@ export class ControlStreamAdapter implements Session {
 	/**
 	 * Open a real WebTransport bidi stream (for v16 SubscribeNamespace).
 	 */
-	async openNativeBi(): Promise<Stream> {
-		return Stream.open(this.#quic, { version: this.version });
+	async openNativeBi(options?: Partial<OpenOptions>): Promise<Stream> {
+		return Stream.open(this.#quic, { ...options, version: this.version });
 	}
 
 	/**
@@ -473,7 +477,7 @@ export class ControlStreamAdapter implements Session {
 					const msg = await GoAway.decodeBody(body, this.version);
 					if (this.goaway.peek() !== undefined) throw new ProtocolViolation("duplicate GOAWAY");
 					// A client may leave, but only the server may name where to go.
-					if (!this.#client && msg.newSessionUri !== "") {
+					if (!this.client && msg.newSessionUri !== "") {
 						throw new ProtocolViolation("client GOAWAY must not name a redirect");
 					}
 					this.goaway.set(msg.drain());
@@ -626,9 +630,9 @@ export class ControlStreamAdapter implements Session {
 			// section 9.5 assign an ID past the maximum to TOO_MANY_REQUESTS.
 			this.#refuse(SessionCode.TooManyRequests, "request id exceeds max");
 		}
-		// Even IDs are the client's. `#client` is this side, so the peer's IDs are the other parity.
+		// Even IDs are the client's. `client` is this side, so the peer's IDs are the other parity.
 		const even = (requestId & 1n) === 0n;
-		if (even === this.#client) {
+		if (even === this.client) {
 			this.#refuse(SessionCode.InvalidRequestId, "request id has the wrong parity");
 		}
 	}

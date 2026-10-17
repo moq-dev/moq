@@ -210,6 +210,7 @@ fn normalize_video(config: &VideoConfig) -> VideoConfig {
 	config.delay = None;
 	config.label = None;
 	config.enabled = true;
+	config.preference = 0;
 	// Publishers estimate it and republish once it settles. The rendition keeps the fMP4
 	// timescale it was built with, and the framerate is refreshed in place like the bitrate.
 	config.framerate = None;
@@ -710,8 +711,7 @@ impl Rendition {
 
 	fn snapshot_from_window(&self, window: segments::Window, finished: bool, generation: Option<Arc<str>>) -> Snapshot {
 		// HLS requires EXT-X-TARGETDURATION to be at least every EXTINF, rounded up to whole
-		// seconds. The catalog's `durationMax` is only the ceiling a record is split at, far above a
-		// typical GOP, and a target that large would push every player's live edge back by it.
+		// seconds. The catalog duration is nominal, while actual records can be longer.
 		let target_duration = window
 			.segments
 			.iter()

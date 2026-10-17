@@ -33,9 +33,8 @@ The per-broadcast verdict combining client reports, the relay's starvation,
 and publisher timeliness lives downstream. This line only reports the
 counters.
 
-Decided (2026-10-06 audit): [stats prefix
-tracks](/quest/m2/stats-prefix-tracks.md) lands first, since it is
-a prerequisite of the lag API; both are deferred to m2 by the maintainer
+Decided (2026-10-06 audit): stats prefix tracks (`<path>/traffic.json`)
+landed first, since they are a prerequisite of the lag API; both are deferred to m2 by the maintainer
 on 2026-10-15; the lag histogram lands on the stats totals and
 prefix tracks rather than the per-path `publisher.json` and
 `subscriber.json` map rows, which stay unchanged for existing readers
@@ -61,9 +60,6 @@ on `main`.
 
 ## Related
 
-- [Stats prefix tracks](/quest/m2/stats-prefix-tracks.md) -
-  lands first beside the map rows; this line's histograms land on the
-  totals and prefix tracks
 - [Media stats](/quest/m2/stats/README.md) - publishers and viewers report
   their own media, transport, and playback health, the media half of a verdict
 - [Loss delay](/quest/m3/cut-through/loss-delay.md) - an ingress counter of

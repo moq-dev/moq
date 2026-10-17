@@ -1,14 +1,16 @@
 //! Tests for [`Release`](super::Release).
 //!
-//! Each imports a hardware encoder's capture with [`Passthrough`] and releases the track it
-//! publishes, either replayed whole or republished object by object on a paused clock.
+//! Each imports a hardware encoder's capture or a [fixture](super::fixture) with [`Passthrough`]
+//! and releases the track it publishes, either replayed whole or republished object by object on
+//! a paused clock, and grades the output with the [oracle](super::oracle).
 
 use std::time::Duration;
 
 use bytes::Bytes;
 use tokio::time::Instant;
 
-use super::{Passthrough, Release};
+use super::oracle::{Admitted, Loss, Object};
+use super::{Passthrough, Release, fixture};
 use crate::catalog::CatalogFormat;
 use crate::container::Frame;
 
@@ -20,13 +22,8 @@ const RECORDING: Duration = Duration::from_secs(30);
 /// How long a drain waits for the next object before taking the release to have stalled.
 const STALL: Duration = RECORDING.saturating_mul(2);
 
-/// One object as published.
-#[derive(Clone, Debug, PartialEq)]
-struct Object {
-	group: u64,
-	micros: u64,
-	payload: Bytes,
-}
+/// How far off its PCR time a release may write an object.
+const TOLERANCE: Duration = Duration::from_millis(1);
 
 /// A capture imported whole, with what keeps its broadcast up.
 struct Imported {
@@ -59,6 +56,15 @@ async fn import(data: &[u8]) -> Imported {
 		.unwrap()
 	{
 		while let Some(frame) = group.read_frame().await.unwrap() {
+			if frame.payload.is_empty() {
+				let micros = objects.last().map_or(0, |object: &Object| object.micros);
+				objects.push(Object {
+					group: group.sequence,
+					micros,
+					payload: Bytes::new(),
+				});
+				continue;
+			}
 			let frame = hang::container::Frame::decode(frame.payload).unwrap();
 			objects.push(Object {
 				group: group.sequence,
@@ -80,6 +86,17 @@ async fn import(data: &[u8]) -> Imported {
 /// each once `at` says it is due after the start and not before the one ahead of it, as a relay
 /// delivering them would.
 fn republish(objects: Vec<Object>, at: impl Fn(usize, &Object) -> Duration + Send + 'static) -> Republished {
+	republish_cut(objects, &[], at)
+}
+
+/// [`republish`], aborting each group in `cut` once its last object in `objects` is out, as a
+/// relay that evicts a group partway does.
+fn republish_cut(
+	objects: Vec<Object>,
+	cut: &[u64],
+	at: impl Fn(usize, &Object) -> Duration + Send + 'static,
+) -> Republished {
+	let cut = cut.to_vec();
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let mut catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
 	let track = broadcast
@@ -99,25 +116,39 @@ fn republish(objects: Vec<Object>, at: impl Fn(usize, &Object) -> Duration + Sen
 			due = due.max(at(i, &object));
 			tokio::time::sleep_until(start + due).await;
 			if group.as_ref().map(|(sequence, _)| *sequence) != Some(object.group) {
-				if let Some((_, group)) = group.take() {
-					group.finish().unwrap();
+				if let Some((sequence, group)) = group.take() {
+					end(sequence, group, &cut);
 				}
 				let info = moq_net::group::Info { sequence: object.group };
 				group = Some((object.group, track.create_group(info).unwrap()));
 			}
+			let timestamp = moq_net::Timestamp::from_micros(object.micros).unwrap();
+			let group = &mut group.as_mut().unwrap().1;
+			if object.payload.is_empty() {
+				group.write_frame(timestamp, Bytes::new()).unwrap();
+				continue;
+			}
 			let frame = hang::container::Frame {
-				timestamp: moq_net::Timestamp::from_micros(object.micros).unwrap(),
+				timestamp,
 				payload: object.payload,
 			};
-			frame.write_to(&mut group.as_mut().unwrap().1).unwrap();
+			frame.write_to(group).unwrap();
 		}
-		if let Some((_, group)) = group {
-			group.finish().unwrap();
+		if let Some((sequence, group)) = group {
+			end(sequence, group, &cut);
 		}
 		track.finish().unwrap();
 		std::future::pending::<()>().await;
 	});
 	Republished { consumer, task }
+}
+
+/// Finish `group`, or abort it as evicted if it is one of the `cut`.
+fn end(sequence: u64, group: moq_net::group::Producer, cut: &[u64]) {
+	match cut.contains(&sequence) {
+		true => group.abort(moq_net::Error::Old).unwrap(),
+		false => group.finish().unwrap(),
+	}
 }
 
 struct Republished {
@@ -161,16 +192,9 @@ fn bytes<'a>(payloads: impl IntoIterator<Item = &'a Bytes>) -> Vec<u8> {
 		.collect()
 }
 
-/// How much later than the first object each one went out, less how much later its PCR time is.
-fn lag(released: &[(Instant, Frame)]) -> Vec<i128> {
-	let (start, first) = &released[0];
-	released
-		.iter()
-		.map(|(at, frame)| {
-			let out = at.duration_since(*start).as_micros() as i128;
-			out - (frame.timestamp.as_micros() as i128 - first.timestamp.as_micros() as i128)
-		})
-		.collect()
+/// Every byte `released` wrote, in order.
+fn payloads(released: &[(Instant, Frame)]) -> Vec<u8> {
+	bytes(released.iter().map(|(_, frame)| &frame.payload))
 }
 
 #[tokio::test(start_paused = true)]
@@ -185,16 +209,9 @@ async fn a_capture_is_released_byte_identical_on_its_own_pcr() {
 			.with_replay();
 		let (released, release) = drain(release).await;
 
-		let out = bytes(released.iter().map(|(_, frame)| &frame.payload));
-		assert!(
-			out == bytes(imported.objects.iter().map(|object| &object.payload)),
-			"every published object goes out, in order"
-		);
-		assert!(data.ends_with(&out), "the output is the input from the first group on");
+		let admitted = Admitted::new(data, &imported.objects);
+		assert_eq!(admitted.grade(&released, TOLERANCE), Loss::default());
 		assert_eq!(release.dropped(), 0);
-		for (i, lag) in lag(&released).into_iter().enumerate() {
-			assert!(lag.abs() < 1_000, "object {i} goes out {lag} us off its PCR time");
-		}
 	}
 }
 
@@ -219,8 +236,8 @@ async fn a_flagged_jump_crosses_without_holding_the_output() {
 	let input = [KYRION, &second].concat();
 	let objects = import(&input).await.objects;
 	assert!(
-		objects.windows(2).any(|pair| pair[1].group > pair[0].group + 1),
-		"the break skips a sequence"
+		objects.iter().any(|object| object.payload.is_empty()),
+		"a marker declares the break"
 	);
 
 	// The bytes keep coming at the source's pace across the jump: only the PCR leaps.
@@ -276,17 +293,10 @@ async fn releases_fed_with_different_skew_write_the_same_bytes() {
 
 	assert_eq!(steady_release.dropped(), 0);
 	assert_eq!(skewed_release.dropped(), 0);
-	let payloads = |released: &[(Instant, Frame)]| bytes(released.iter().map(|(_, frame)| &frame.payload));
+	let admitted = Admitted::new(KYRION, &objects);
+	assert_eq!(admitted.grade(&steady_out, TOLERANCE), Loss::default());
+	assert_eq!(admitted.grade(&skewed_out, TOLERANCE), Loss::default());
 	assert!(payloads(&steady_out) == payloads(&skewed_out), "the same bytes go out");
-	assert!(
-		payloads(&steady_out) == bytes(objects.iter().map(|object| &object.payload)),
-		"from the first group"
-	);
-	for released in [&steady_out, &skewed_out] {
-		for (i, lag) in lag(released).into_iter().enumerate() {
-			assert!(lag.abs() < 1_000, "object {i} goes out {lag} us off its PCR time");
-		}
-	}
 }
 
 #[tokio::test(start_paused = true)]
@@ -311,34 +321,140 @@ async fn an_object_past_its_deadline_is_a_gap_in_that_release_only() {
 	let (stalled_out, stalled_release) = stalled_task.await.unwrap();
 
 	assert_eq!(steady_release.dropped(), 0);
-	let dropped = stalled_release.dropped() as usize;
-	assert!(dropped > 0, "the stall makes objects late");
+	let admitted = Admitted::new(KYRION, &objects);
+	assert_eq!(admitted.grade(&steady_out, TOLERANCE), Loss::default());
+
+	// The stalled release writes the steady one's objects less a run of the late ones, each
+	// counted, and the rest on the same clock as before the stall.
+	let loss = admitted.grade(&stalled_out, TOLERANCE);
+	assert_eq!(loss.first, 0);
+	assert!(!loss.missing.is_empty(), "the stall makes objects late");
 	assert_eq!(
-		stalled_out.len() + dropped,
-		steady_out.len(),
+		loss.missing.len() as u64,
+		stalled_release.dropped(),
 		"every late object is counted"
 	);
+	assert!(
+		loss.missing.windows(2).all(|pair| pair[1] == pair[0] + 1),
+		"one run is missing: {:?}",
+		loss.missing
+	);
+	assert!(payloads(&stalled_out) == admitted.expected(&loss));
+}
 
-	// The stalled release writes the steady one's objects less a run of the late ones.
-	let gap = steady_out
+/// The published capture, republished at its PCR pace, less the objects `omit` picks; groups in
+/// `cut` end aborted, as the path evicting them partway would.
+async fn release_omitting(cut: &[u64], omit: impl Fn(usize, &Object) -> bool) -> (Loss, Release) {
+	let objects = import(KYRION).await.objects;
+	let first = objects[0].micros;
+	let delivered = objects
 		.iter()
-		.zip(&stalled_out)
-		.position(|((_, steady), (_, stalled))| steady.payload != stalled.payload)
-		.expect("a gap");
-	let frames = |released: &[(Instant, Frame)]| -> Vec<(u64, Bytes)> {
-		released
-			.iter()
-			.map(|(_, frame)| (frame.timestamp.as_micros() as u64, frame.payload.clone()))
-			.collect()
-	};
-	let mut expected = frames(&steady_out);
-	expected.drain(gap..gap + dropped);
-	assert!(frames(&stalled_out) == expected, "only the late objects are missing");
+		.enumerate()
+		.filter(|(i, object)| !omit(*i, object))
+		.map(|(_, object)| object.clone())
+		.collect();
+	let republished = republish_cut(delivered, cut, move |_, object| {
+		Duration::from_micros(object.micros - first) + Duration::from_millis(40)
+	});
+	let (released, release) = spawn_release(&republished).await.unwrap();
+	let loss = Admitted::new(KYRION, &objects).grade(&released, TOLERANCE);
+	(loss, release)
+}
 
-	// The rest still go out on time: on the same clock as before the stall.
-	for (i, lag) in lag(&stalled_out).into_iter().enumerate() {
-		assert!(lag.abs() < 1_000, "object {i} goes out {lag} us off its PCR time");
+/// A group the path never delivers, as a relay that drops it whole: the rest go out on their
+/// PCR time, leaving its time empty, and it is not late.
+#[tokio::test(start_paused = true)]
+async fn a_group_never_delivered_leaves_its_time_out() {
+	let objects = import(KYRION).await.objects;
+	let skipped = objects[objects.len() / 2].group;
+	let (loss, release) = release_omitting(&[], |_, object| object.group == skipped).await;
+	let expected: Vec<usize> = (0..objects.len()).filter(|&i| objects[i].group == skipped).collect();
+	assert_eq!(
+		loss,
+		Loss {
+			first: 0,
+			missing: expected
+		}
+	);
+	assert_eq!(release.dropped(), 0, "nothing arrived late");
+}
+
+/// A group cut short loses the objects after the cut alone.
+#[tokio::test(start_paused = true)]
+async fn a_group_cut_short_loses_only_its_tail() {
+	let objects = import(KYRION).await.objects;
+	let cut = objects[objects.len() / 2].group;
+	let members: Vec<usize> = (0..objects.len()).filter(|&i| objects[i].group == cut).collect();
+	assert!(members.len() > 2, "a group of several objects");
+	let tail = members[members.len() / 2..].to_vec();
+	let (loss, release) = release_omitting(&[cut], |i, _| tail.contains(&i)).await;
+	assert_eq!(
+		loss,
+		Loss {
+			first: 0,
+			missing: tail
+		}
+	);
+	assert_eq!(release.dropped(), 0, "nothing arrived late");
+}
+
+/// What the captures don't carry goes out at its exact position too: null packets, tables, a PID
+/// no table lists, adaptation stuffing, a PES split across objects, the clock's wrap, and an MPTS
+/// whose programs keep clocks and random access points of their own.
+#[tokio::test(start_paused = true)]
+async fn fixtures_are_released_at_their_exact_positions() {
+	const GOP: u64 = 25;
+	let fixtures = [
+		(
+			"assorted",
+			fixture::assorted(fixture::WRAP - 2_000 * fixture::MS, 150, GOP),
+		),
+		("mpts", fixture::mpts(150, GOP)),
+	];
+	for (name, data) in fixtures {
+		let objects = import(&data).await.objects;
+		let groups = objects.last().unwrap().group - objects[0].group + 1;
+		assert!(
+			groups >= 5,
+			"{name}: {groups} groups, one per random access point of program 1"
+		);
+		let admitted = Admitted::new(&data, &objects);
+		assert!(
+			admitted.prefix() < data.len() / 150 * GOP as usize,
+			"{name}: acquisition withholds {} bytes, more than a group",
+			admitted.prefix()
+		);
+
+		let first = objects[0].micros;
+		let skewed = republish(objects.clone(), move |i, object| {
+			Duration::from_micros(object.micros - first) + Duration::from_millis(40 + 30 * (i as u64 % 3))
+		});
+		let (released, release) = spawn_release(&skewed).await.unwrap();
+		assert_eq!(admitted.grade(&released, TOLERANCE), Loss::default(), "{name}");
+		assert_eq!(release.dropped(), 0, "{name}");
+
+		let pids = pids(&payloads(&released));
+		for pid in [0x0000, 0x1fff] {
+			assert!(pids.contains(&pid), "{name}: the output carries PID {pid:#x}");
+		}
+		if name == "assorted" {
+			assert!(
+				pids.contains(&0x0011) && pids.contains(&0x1abc),
+				"{name}: the SDT and the unlisted PID"
+			);
+			let last = released.last().unwrap().1.timestamp.as_micros() as u64;
+			assert!(last > fixture::WRAP / 27, "{name}: the release crosses the wrap");
+		}
 	}
+}
+
+/// Every PID `data`'s packets carry.
+fn pids(data: &[u8]) -> std::collections::BTreeSet<u16> {
+	data.as_chunks::<188>()
+		.0
+		.iter()
+		.map(|pkt| u16::from_be_bytes([pkt[1] & 0x1f, pkt[2]]))
+		.collect()
 }
 
 /// The MSF catalog never names the `m2ts` track, so a release reading it would wait forever.

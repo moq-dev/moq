@@ -4,7 +4,7 @@
 use crate::transport::{MaybeSend, MaybeSync};
 
 use crate::origin;
-use crate::time::{Clock, Instant};
+use crate::time::{Deadlines, Instant};
 use crate::{
 	ALPN_14, ALPN_15, ALPN_16, ALPN_17, ALPN_18, ALPN_19, ALPN_20, ALPN_21, ALPN_22, ALPN_LITE, ALPN_LITE_03,
 	ALPN_LITE_04, ALPN_LITE_05, ALPN_LITE_06, ALPN_LITE_07_WIP, Consume, Error, NEGOTIATED, Role, Session,
@@ -144,7 +144,7 @@ impl Server {
 	/// with our SETUP, and return the session and its driver.
 	fn start_lite<S>(
 		&self,
-		runtime: Clock,
+		runtime: Deadlines,
 		session: S,
 		version: lite::Version,
 		client_setup: Option<lite::AcceptedSetup<S>>,
@@ -235,7 +235,7 @@ impl Server {
 	where
 		S: crate::transport::poll::Session,
 	{
-		let runtime = Clock::new(now);
+		let runtime = Deadlines::new(now);
 		let (path, role, origin, handshake) = match session.protocol() {
 			Some(alpn @ (ALPN_LITE_05 | ALPN_LITE_06 | ALPN_LITE_07_WIP)) => {
 				let version = match alpn {
@@ -360,7 +360,7 @@ impl Server {
 		S::SendStream: MaybeSync,
 		S::RecvStream: MaybeSync,
 	{
-		let runtime = Clock::new(now);
+		let runtime = Deadlines::new(now);
 		let (encoding, supported) = match session.protocol() {
 			Some(alpn @ (ALPN_22 | ALPN_21 | ALPN_20 | ALPN_19 | ALPN_18 | ALPN_17)) => {
 				let draft = match alpn {
@@ -455,8 +455,12 @@ impl Server {
 			origin: None,
 			token,
 			assigned_hop: crate::Hop::random(),
-			// Lite 01/02 and moq-transport 14-16 carry no AUTH.
-			auth: crate::auth::Handle::new(false),
+			// Lite 01/02 and moq-transport 14-16 carry no AUTH, though a moq-transport request
+			// still carries a token.
+			auth: match version {
+				Version::Ietf(_) => crate::auth::Handle::ietf(false),
+				Version::Lite(_) => crate::auth::Handle::new(false),
+			},
 			inner: Some(RequestInner {
 				server: self.clone(),
 				runtime,
@@ -475,7 +479,7 @@ impl Server {
 	/// then pause. `ok()` starts the session and hands the stream back for GOAWAY.
 	async fn accept_ietf_modern<S>(
 		&self,
-		runtime: Clock,
+		runtime: Deadlines,
 		mut session: S,
 		version: ietf::Version,
 	) -> Result<Handshake<S>, Error>
@@ -495,7 +499,7 @@ impl Server {
 			assigned_hop: crate::Hop::random(),
 			// The client's SETUP already settled whether it offered MoQ Auth, so it is
 			// negotiated exactly when we offer it too.
-			auth: crate::auth::Handle::new(peer_setup.declared.auth && self.extensions.auth),
+			auth: crate::auth::Handle::ietf(peer_setup.declared.auth && self.extensions.auth),
 			inner: Some(RequestInner {
 				server: self.clone(),
 				runtime,
@@ -536,7 +540,7 @@ pub struct Handshake<S: crate::transport::poll::Session> {
 struct RequestInner<S: crate::transport::poll::Session> {
 	server: Server,
 	/// Supplies the clock and timers for the accepted session.
-	runtime: Clock,
+	runtime: Deadlines,
 	handshake: PausedHandshake<S>,
 }
 
@@ -574,7 +578,7 @@ trait Paused<S: crate::transport::poll::Session>: MaybeSend + MaybeSync {
 	fn ok(
 		self: Box<Self>,
 		server: Server,
-		runtime: Clock,
+		runtime: Deadlines,
 		peer_hop: Option<crate::Hop>,
 		auth: crate::auth::Handle,
 	) -> Accept<S>;
@@ -601,7 +605,7 @@ where
 	fn ok(
 		self: Box<Self>,
 		server: Server,
-		runtime: Clock,
+		runtime: Deadlines,
 		peer_hop: Option<crate::Hop>,
 		auth: crate::auth::Handle,
 	) -> Accept<S> {
@@ -680,7 +684,7 @@ where
 	fn ok(
 		self: Box<Self>,
 		server: Server,
-		runtime: Clock,
+		runtime: Deadlines,
 		peer_hop: Option<crate::Hop>,
 		auth: crate::auth::Handle,
 	) -> Accept<S> {
@@ -1069,12 +1073,13 @@ mod tests {
 			None
 		}
 
-		fn poll_send_datagram(
+		fn send_datagram(
 			&mut self,
-			_cx: &mut std::task::Context<'_>,
-			_payload: &[u8],
-		) -> std::task::Poll<Result<(), Self::Error>> {
-			std::task::Poll::Ready(Ok(()))
+			_: Bytes,
+			_: Option<&crate::transport::poll::Ungrouped>,
+			_: i64,
+		) -> Result<(), Self::Error> {
+			Ok(())
 		}
 		fn poll_recv_datagram(
 			&mut self,
@@ -1232,7 +1237,7 @@ mod tests {
 	/// pre-ok consumer instead of falling to the `Unsupported` default, and granting admits.
 	/// Both a no-AUTH-extension legacy session (draft-14, `Handle::new(false)`) and the modern
 	/// uni-SETUP path (draft-18); a QUIC server has no other point to install the verifier.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn a_pre_ok_verifier_governs_the_session() {
 		let cases = [
 			(
@@ -1248,7 +1253,7 @@ mod tests {
 
 		for (session, version) in cases {
 			let request = Server::new()
-				.accept_request(moq_net_sim::now(), session)
+				.accept_request(moq_clock::now(), session)
 				.await
 				.unwrap_or_else(|e| panic!("accept at {version:?}: {e}"));
 
@@ -1273,7 +1278,7 @@ mod tests {
 		}
 	}
 
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn accept_request_exposes_the_setup_token() {
 		let modern = FakeSession::new(
 			ALPN_19,
@@ -1287,24 +1292,24 @@ mod tests {
 			token_params(ietf::Version::Draft16),
 		));
 		for (name, session) in [("draft-19", modern), ("draft-16", legacy)] {
-			let request = Server::new().accept_request(moq_net_sim::now(), session).await.unwrap();
+			let request = Server::new().accept_request(moq_clock::now(), session).await.unwrap();
 			assert_eq!(request.token(), Some(&setup_token()), "{name}");
 		}
 	}
 
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn accept_request_without_a_token_reports_none() {
 		let ietf = FakeSession::new(ALPN_19, [ietf_setup(ietf::Version::Draft19, None)]);
 		let lite = FakeSession::new(ALPN_LITE_05, [lite05_setup(None, None, None)]);
 		for (name, session) in [("draft-19", ietf), ("lite-05", lite)] {
-			let request = Server::new().accept_request(moq_net_sim::now(), session).await.unwrap();
+			let request = Server::new().accept_request(moq_clock::now(), session).await.unwrap();
 			assert_eq!(request.token(), None, "{name}");
 		}
 	}
 
 	/// A SETUP the server refuses closes the session with the code naming why, on both
 	/// the draft-17+ uni stream and the draft 14-16 bidi stream.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn a_refused_setup_token_closes_with_its_code() {
 		let delete = [0x0, 0x7]; // DELETE alias 7
 		let truncated = [0x3]; // USE_VALUE with no Token Type
@@ -1318,14 +1323,14 @@ mod tests {
 			let modern = FakeSession::new(ALPN_19, [ietf_setup_with(ietf::Version::Draft19, params.clone())]);
 			let legacy = FakeSession::new(ALPN_16, []).with_bi(legacy_setup(ietf::Version::Draft16, params));
 			for (name, session) in [("draft-19", modern), ("draft-16", legacy)] {
-				let result = Server::new().accept_request(moq_net_sim::now(), session.clone()).await;
+				let result = Server::new().accept_request(moq_clock::now(), session.clone()).await;
 				assert!(result.is_err(), "{name}");
 				assert_eq!(session.close_code(), Some(code.to_code()), "{name} {code}");
 			}
 		}
 	}
 
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn accept_request_reads_ietf_path() {
 		// Every draft-17+ version gates on the SETUP stream before starting, so the
 		// path is known at authorization time just like lite-05.
@@ -1335,22 +1340,22 @@ mod tests {
 			(ALPN_19, ietf::Version::Draft19),
 		] {
 			let session = FakeSession::new(alpn, [ietf_setup(version, Some("/team/room"))]);
-			let request = Server::new().accept_request(moq_net_sim::now(), session).await.unwrap();
+			let request = Server::new().accept_request(moq_clock::now(), session).await.unwrap();
 			assert_eq!(request.path(), "/team/room", "{alpn}");
 		}
 	}
 
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn accept_request_ietf_without_path_is_empty() {
 		let session = FakeSession::new(ALPN_19, [ietf_setup(ietf::Version::Draft19, None)]);
-		let request = Server::new().accept_request(moq_net_sim::now(), session).await.unwrap();
+		let request = Server::new().accept_request(moq_clock::now(), session).await.unwrap();
 		assert_eq!(request.path(), "");
 	}
 
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn accept_request_ietf_empty_path_is_accepted() {
 		let session = FakeSession::new(ALPN_19, [ietf_setup(ietf::Version::Draft19, Some(""))]);
-		let request = Server::new().accept_request(moq_net_sim::now(), session).await.unwrap();
+		let request = Server::new().accept_request(moq_clock::now(), session).await.unwrap();
 		assert_eq!(request.path(), "");
 	}
 
@@ -1366,31 +1371,31 @@ mod tests {
 		buf
 	}
 
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn accept_request_reads_lite05_path() {
 		let session = FakeSession::new(ALPN_LITE_05, [lite05_setup(Some("/team/room"), None, None)]);
-		let request = Server::new().accept_request(moq_net_sim::now(), session).await.unwrap();
+		let request = Server::new().accept_request(moq_clock::now(), session).await.unwrap();
 		assert_eq!(request.path(), "/team/room");
 		assert_eq!(request.role(), None, "a client that omits the role is bidirectional");
 	}
 
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn accept_request_lite05_without_path_is_empty() {
 		let session = FakeSession::new(ALPN_LITE_05, [lite05_setup(None, None, None)]);
-		let request = Server::new().accept_request(moq_net_sim::now(), session).await.unwrap();
+		let request = Server::new().accept_request(moq_clock::now(), session).await.unwrap();
 		assert_eq!(request.path(), "");
 	}
 
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn accept_request_lite05_empty_path_is_accepted() {
 		// An empty path is valid on the wire and means the same as omitting it, so a
 		// client that wants the root doesn't have to special-case the parameter.
 		let session = FakeSession::new(ALPN_LITE_05, [lite05_setup(Some(""), None, None)]);
-		let request = Server::new().accept_request(moq_net_sim::now(), session).await.unwrap();
+		let request = Server::new().accept_request(moq_clock::now(), session).await.unwrap();
 		assert_eq!(request.path(), "");
 	}
 
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn uri_binding_rejects_setup_path_presence() {
 		for alpn in [ALPN_LITE_05, ALPN_LITE_06, ALPN_LITE_07_WIP] {
 			for path in ["", "/team/room"] {
@@ -1399,7 +1404,7 @@ mod tests {
 				let observed = session.clone();
 				let result = Server::new()
 					.with_versions(alpn.parse::<Version>().unwrap().into())
-					.accept_request_lite(moq_net_sim::now(), session)
+					.accept_request_lite(moq_clock::now(), session)
 					.await;
 				assert!(
 					matches!(result, Err(Error::ProtocolViolation)),
@@ -1410,28 +1415,28 @@ mod tests {
 		}
 	}
 
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn uri_binding_accepts_setup_without_path() {
 		let mut session = FakeSession::new(ALPN_LITE_05, [lite05_setup(None, None, None)]);
 		session.binding = crate::transport::Binding::Uri;
 		let request = Server::new()
-			.accept_request_lite(moq_net_sim::now(), session)
+			.accept_request_lite(moq_clock::now(), session)
 			.await
 			.unwrap();
 		assert_eq!(request.path(), "");
 	}
 
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn accept_request_reads_lite05_role() {
 		let session = FakeSession::new(
 			ALPN_LITE_05,
 			[lite05_setup(Some("/team/room"), Some(Role::Publisher), None)],
 		);
-		let request = Server::new().accept_request(moq_net_sim::now(), session).await.unwrap();
+		let request = Server::new().accept_request(moq_clock::now(), session).await.unwrap();
 		assert_eq!(request.role(), Some(Role::Publisher));
 	}
 
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn accept_request_holds_uni_stream_before_setup() {
 		let session = FakeSession::new(
 			ALPN_LITE_05,
@@ -1439,47 +1444,47 @@ mod tests {
 		);
 		let stops = session.stops.clone();
 		let request = Server::new()
-			.accept_request_lite(moq_net_sim::now(), session)
+			.accept_request_lite(moq_clock::now(), session)
 			.await
 			.unwrap();
 		assert_eq!(request.path(), "/team/room");
 		assert!(stops.lock().unwrap().is_empty(), "the early stream must stay open");
 	}
 
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn accept_request_reads_buffered_setup_after_transport_close() {
 		let mut session = FakeSession::new(ALPN_LITE_05, [lite05_setup(Some("/closed"), None, None)]);
 		crate::transport::poll::Session::close(&mut session, SessionError::Cancel.to_code(), "closed");
 		let request = Server::new()
-			.accept_request_lite(moq_net_sim::now(), session)
+			.accept_request_lite(moq_clock::now(), session)
 			.await
 			.unwrap();
 		assert_eq!(request.path(), "/closed");
 	}
 
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn accepted_lite_setup_refuses_a_second_setup_stream() {
 		let session = FakeSession::new(ALPN_LITE_05, [lite05_setup(None, None, None)]);
 		let transport = session.clone();
 		let request = Server::new()
-			.accept_request_lite(moq_net_sim::now(), session)
+			.accept_request_lite(moq_clock::now(), session)
 			.await
 			.unwrap();
 		let (_session, mut driver) = request.ok().await.unwrap();
 		transport.uni.lock().unwrap().push_back(vec![1]);
-		let _ = driver.poll(moq_net_sim::now(), &kio::Waiter::noop());
+		let _ = driver.poll(moq_clock::now(), &kio::Waiter::noop());
 		assert_eq!(transport.close_code(), Some(SessionError::ProtocolViolation.to_code()));
 	}
 
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn accept_request_reads_lite05_peer_hop() {
 		let hop = Hop::new(42).unwrap();
 		let session = FakeSession::new(ALPN_LITE_05, [lite05_setup(None, None, Some(hop))]);
-		let request = Server::new().accept_request(moq_net_sim::now(), session).await.unwrap();
+		let request = Server::new().accept_request(moq_clock::now(), session).await.unwrap();
 		assert_eq!(request.peer_hop(), Some(hop));
 	}
 
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn anonymous_peer_hop_filters_routes_from_server_session() {
 		let other = Hop::new(778).unwrap();
 		let origin = crate::origin::Config::new(Hop::new(1).unwrap()).produce();
@@ -1494,10 +1499,10 @@ mod tests {
 			origin: None,
 			token: None,
 			assigned_hop: Hop::random(),
-			auth: crate::auth::Handle::new(false),
+			auth: crate::auth::Handle::ietf(false),
 			inner: Some(RequestInner {
 				server: Server::new().with_publisher(&origin),
-				runtime: Clock::new(moq_net_sim::now()),
+				runtime: Deadlines::new(moq_clock::now()),
 				handshake: PausedHandshake::Boxed(Box::new(PausedIetfModern {
 					session: transport,
 					version,
@@ -1534,13 +1539,13 @@ mod tests {
 			.unwrap();
 
 		let (session, driver) = request.ok().await.unwrap();
-		moq_net_sim::spawn(crate::time::run_sim(driver));
+		moq_clock::sim::spawn(crate::time::run(driver));
 
 		for _ in 0..100 {
 			if occurrences(&log, b"local-route") > 0 {
 				break;
 			}
-			moq_net_sim::sleep(std::time::Duration::from_millis(1)).await;
+			moq_clock::sleep(std::time::Duration::from_millis(1)).await;
 		}
 
 		assert_eq!(occurrences(&log, b"echoed-route"), 0);

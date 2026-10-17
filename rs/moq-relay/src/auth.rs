@@ -417,10 +417,10 @@ pub struct Token {
 	/// Subtrees read from elsewhere on the origin: each path, relative to `root`,
 	/// resolves at the absolute path it maps to.
 	pub mounts: Vec<(PathOwned, PathOwned)>,
-	/// The patterns the holder may subscribe to, relative to `root`.
-	pub subscribe: Patterns,
-	/// The patterns the holder may publish to, relative to `root`.
-	pub publish: Patterns,
+	/// Subscribe paths and an optional download cap, relative to `root`.
+	pub subscribe: moq_auth::Access,
+	/// Publish paths and an optional upload cap, relative to `root`.
+	pub publish: moq_auth::Access,
 	/// The tier this session's stats record under.
 	pub tier: Tier,
 	/// Whether the session is a cluster peer, so its routes entered elsewhere.
@@ -453,6 +453,10 @@ impl Token {
 		}
 	}
 
+	pub(crate) fn uncapped(&self) -> Result<(), Error> {
+		check_rates(&self.publish, &self.subscribe)
+	}
+
 	/// Rebuild the token from a re-checked grant, relative to the same dialed path,
 	/// so a grant that drops its `root` alias resolves back to what was dialed.
 	pub(crate) fn recheck(&self, grant: &Grant) -> Self {
@@ -460,12 +464,13 @@ impl Token {
 	}
 
 	/// Whether `other` still covers everything this token scopes: the same root and
-	/// mounts, and every grant still held.
+	/// mounts, and every path still held. Caps are not compared: a cap change is
+	/// applied to the live connection rather than ending it.
 	pub(crate) fn covered_by(&self, other: &Self) -> bool {
 		self.root == other.root
 			&& self.mounts == other.mounts
-			&& other.subscribe.covers(&self.subscribe)
-			&& other.publish.covers(&self.publish)
+			&& other.subscribe.path.covers(&self.subscribe.path)
+			&& other.publish.path.covers(&self.publish.path)
 	}
 }
 
@@ -519,7 +524,9 @@ impl Lease {
 		handle: moq_net::auth::Handle,
 		role: Option<moq_net::Role>,
 	) -> Result<Self, moq_net::Error> {
-		self.refresh = Some(refresh::Refresh::new(&mut self, handle, role)?);
+		let refresh = refresh::Refresh::new(&mut self, handle, role)
+			.inspect_err(|err| crate::connection::setup_failed(&self.stats, Some(err)))?;
+		self.refresh = Some(refresh);
 		Ok(self)
 	}
 
@@ -528,6 +535,20 @@ impl Lease {
 	pub(crate) fn authorizing(mut self, session: &moq_net::Session) -> Self {
 		self.session = Some(session.auth());
 		self
+	}
+
+	pub(crate) fn close_session(self, error: &moq_net::Error, bytes: Bytes) {
+		let stats = self.stats.clone();
+		let failure = crate::connection::failure(error);
+		let reason = match failure {
+			Some(_) => error.to_string(),
+			None => "closed".to_string(),
+		};
+		// A lease the decider ended first records its kind in `close`, and the first kind wins.
+		self.close(reason, bytes);
+		if let Some(kind) = failure {
+			stats.fail(kind);
+		}
 	}
 
 	/// Attach the session's stats context, so a re-checked tier retags it live.
@@ -565,7 +586,18 @@ impl Lease {
 	///
 	/// Once the relay answers the session's AUTH requests itself, each of
 	/// these ends only that credential's grant; the lease ends when no credential remains.
+	///
+	/// The session's [stats](Self::with_stats) record the end as a failure:
+	/// `expired` for an expired grant, nothing for a shutdown, `application` for any other.
 	pub async fn ended(&mut self) -> lease::Reason {
+		let reason = self.uncovered().await;
+		if let Some(kind) = uncovered(&reason) {
+			self.stats.fail(kind);
+		}
+		reason
+	}
+
+	async fn uncovered(&mut self) -> lease::Reason {
 		if let Some(refresh) = &mut self.refresh {
 			return refresh.ended().await;
 		}
@@ -580,6 +612,9 @@ impl Lease {
 				changed = self.consumer.changed() => match changed {
 					Ok(grant) => {
 						let fresh = self.token.recheck(&grant);
+						if let Err(err) = fresh.uncapped() {
+							return err.to_string().into();
+						}
 						if fresh.root != self.token.root {
 							return lease::Reason::Narrowed;
 						}
@@ -598,13 +633,13 @@ impl Lease {
 							match &self.session {
 								Some(session) => {
 									tracing::info!(
-										publish = %join(&fresh.publish),
-										subscribe = %join(&fresh.subscribe),
+										publish = %join(&fresh.publish.path),
+										subscribe = %join(&fresh.subscribe.path),
 										"grant changed; re-authorizing the session",
 									);
 									session.authorize(&moq_net::auth::Grant {
-										publish: fresh.publish.clone(),
-										subscribe: fresh.subscribe.clone(),
+										publish: fresh.publish.path.clone(),
+										subscribe: fresh.subscribe.path.clone(),
 										expires: None,
 									});
 									self.token.publish = fresh.publish;
@@ -629,18 +664,56 @@ impl Lease {
 	}
 
 	/// End the lease with the session's close classification and the totals it
-	/// moved, and learn what it ended with: that, or the decider's reason if it
-	/// revoked first. Dropping the consumer reports zero bytes.
-	pub fn close(self, reason: impl Into<lease::Reason>, bytes: Bytes) -> lease::Reason {
+	/// moved, and learn what ended the session: that, or for a gateway the
+	/// decider's reason if it revoked first. Dropping the consumer reports zero bytes.
+	pub fn close(mut self, reason: impl Into<lease::Reason>, bytes: Bytes) -> lease::Reason {
+		use futures::FutureExt;
+
 		let mut reason = reason.into();
 		// A gateway has one credential, so its revocation caused the transfer to
-		// end. A refreshed session instead reports the result of its whole union.
-		if self.refresh.is_none()
-			&& let std::task::Poll::Ready(ended) = self.consumer.poll_closed(&moq_net::kio::Waiter::noop())
-		{
-			reason = ended;
+		// end. A refreshed session instead reports the result of its whole union,
+		// which may have ended before the supervisor saw it: its first credential
+		// may have ended with a reason a replacement outlived.
+		let reason = match &mut self.refresh {
+			None => {
+				if let std::task::Poll::Ready(ended) = self.consumer.poll_closed(&moq_net::kio::Waiter::noop()) {
+					reason = ended;
+				}
+				self.consumer.close(reason, bytes)
+			}
+			Some(refresh) => {
+				if let Some(ended) = refresh.ended().now_or_never() {
+					if let Some(kind) = uncovered(&ended) {
+						self.stats.fail(kind);
+					}
+					reason = ended;
+				}
+				self.consumer.close(reason.clone(), bytes);
+				reason
+			}
+		};
+		if let Some(kind) = revoked(&reason) {
+			self.stats.fail(kind);
 		}
-		self.consumer.close(reason, bytes)
+		reason
+	}
+}
+
+/// The failure a lease records when it stops covering a live session. Any reason but a
+/// shutdown, the relay's or the decider's own words included, ends that session.
+fn uncovered(reason: &lease::Reason) -> Option<moq_net::stats::Failure> {
+	match reason {
+		lease::Reason::Shutdown => None,
+		_ => Some(revoked(reason).unwrap_or(moq_net::stats::Failure::Application)),
+	}
+}
+
+/// The failure a lease end records when the grant, not the session, ended it.
+fn revoked(reason: &lease::Reason) -> Option<moq_net::stats::Failure> {
+	match reason {
+		lease::Reason::Expired => Some(moq_net::stats::Failure::Expired),
+		lease::Reason::Shutdown | lease::Reason::Session(_) => None,
+		_ => Some(moq_net::stats::Failure::Application),
 	}
 }
 
@@ -800,6 +873,7 @@ impl Auth {
 	pub async fn admit(&self, request: Request) -> Result<Lease, Error> {
 		let consumer = self.decide(request.clone()).await?;
 		let mut lease = Lease::new(&request.path, consumer);
+		lease.token.uncapped()?;
 		lease.source = Some(Source {
 			auth: self.clone(),
 			request,
@@ -849,8 +923,18 @@ fn answered_with(
 	answered: Result<Result<lease::Consumer, Error>, oneshot::error::RecvError>,
 ) -> Result<lease::Consumer, Error> {
 	let consumer = answered.map_err(|_| Error::Unavailable("the admission went unanswered".into()))??;
-	consumer.grant().validate()?;
+	let grant = consumer.grant();
+	grant.validate()?;
+	check_rates(&grant.publish, &grant.subscribe)?;
 	Ok(consumer)
+}
+
+/// Refuse caps before reducing a grant to the paths its origin can enforce.
+fn check_rates(publish: &moq_auth::Access, subscribe: &moq_auth::Access) -> Result<(), Error> {
+	if publish.rate.is_some() || subscribe.rate.is_some() {
+		return Err(Error::Forbidden("this transport cannot enforce bitrate caps".into()));
+	}
+	Ok(())
 }
 
 /// The sessions an embedded [`Auth`] is waiting to admit, in arrival order.
@@ -914,17 +998,7 @@ impl Admission {
 /// The `moq_auth::Request` for an accepted transport request: every fact the
 /// transport knows, nothing parsed on the server's behalf.
 pub fn request_for(auth: &Auth, request: &moq_tokio::server::Request) -> Request {
-	let transport = match request.transport() {
-		moq_tokio::Transport::Quic => moq_auth::Transport::Quic,
-		moq_tokio::Transport::WebTransport => moq_auth::Transport::WebTransport,
-		moq_tokio::Transport::Iroh => moq_auth::Transport::Iroh,
-		moq_tokio::Transport::WebSocket => moq_auth::Transport::WebSocket,
-		moq_tokio::Transport::Tcp => moq_auth::Transport::Tcp,
-		moq_tokio::Transport::Unix => moq_auth::Transport::Unix,
-		// A transport this build does not know is still a session on the wire; the
-		// server sees the same facts either way.
-		other => unreachable!("unknown transport {other}"),
-	};
+	let transport = transport(request.transport());
 	// A URL-less transport reports its root as empty; the contract says what was dialed.
 	let path = match request.path() {
 		"" => "/".to_string(),
@@ -946,6 +1020,22 @@ pub fn request_for(auth: &Auth, request: &moq_tokio::server::Request) -> Request
 	out.role = request.role().and_then(role);
 	out.tls = request.peer_identity().as_ref().and_then(peer);
 	out
+}
+
+/// The auth transport for a session's transport.
+fn transport(transport: moq_tokio::Transport) -> moq_auth::Transport {
+	match transport {
+		moq_tokio::Transport::Quic => moq_auth::Transport::Quic,
+		moq_tokio::Transport::WebTransport => moq_auth::Transport::WebTransport,
+		moq_tokio::Transport::Iroh => moq_auth::Transport::Iroh,
+		moq_tokio::Transport::WebSocket => moq_auth::Transport::WebSocket,
+		moq_tokio::Transport::Tcp => moq_auth::Transport::Tcp,
+		moq_tokio::Transport::Unix => moq_auth::Transport::Unix,
+		moq_tokio::Transport::WebRtc => moq_auth::Transport::WebRtc,
+		// A transport this build does not know is still a session on the wire; the
+		// server sees the same facts either way.
+		other => unreachable!("unknown transport {other}"),
+	}
 }
 
 /// The auth role for a session role, `None` for one `moq-auth` cannot name yet.
@@ -973,7 +1063,7 @@ mod tests {
 	use super::*;
 	use std::time::SystemTime;
 
-	fn patterns(texts: &[&str]) -> Patterns {
+	fn patterns(texts: &[&str]) -> moq_auth::Access {
 		texts.iter().map(|text| text.parse().unwrap()).collect()
 	}
 
@@ -985,6 +1075,73 @@ mod tests {
 		}
 	}
 
+	#[tokio::test(start_paused = true)]
+	async fn capped_grants_are_refused_on_every_transport() {
+		use moq_auth::Transport::*;
+		for transport in [
+			Quic,
+			Iroh,
+			WebSocket,
+			Tcp,
+			Unix,
+			Http,
+			Rtmp,
+			Srt,
+			WebRtc,
+			WebTransport,
+			Unknown,
+		] {
+			for publish in [false, true] {
+				let (auth, mut admissions) = Auth::embedded("test");
+				let request = auth.request(transport, "/room");
+				let (result, ()) = tokio::join!(auth.admit(request), async {
+					let mut grant = Grant::new(moq_net::Pattern::all(), moq_net::Pattern::all());
+					let access = if publish {
+						&mut grant.publish
+					} else {
+						&mut grant.subscribe
+					};
+					access.rate = Some(moq_auth::Rate::from_bps(8000).unwrap());
+					admissions.next().await.unwrap().grant(lease::Consumer::fixed(grant));
+				});
+				let Err(Error::Forbidden(message)) = result else {
+					panic!("{transport} admitted a cap")
+				};
+				assert!(
+					message.contains("cannot enforce bitrate caps"),
+					"{transport}: {message}"
+				);
+			}
+		}
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn a_cap_added_at_revalidation_ends_the_lease() {
+		let grant = Grant::new(moq_net::Pattern::all(), moq_net::Pattern::all());
+		let (producer, consumer) = lease::Producer::new(grant.clone());
+		let mut lease = Lease::new("/room", consumer);
+		let mut capped = grant;
+		capped.subscribe.rate = Some(moq_auth::Rate::from_bps(8000).unwrap());
+		producer.update(capped);
+		assert!(lease.ended().await.to_string().contains("cannot enforce bitrate caps"));
+	}
+
+	#[test]
+	fn every_transport_has_an_auth_name() {
+		use moq_tokio::Transport as T;
+		for transport in [
+			T::Quic,
+			T::WebTransport,
+			T::Iroh,
+			T::WebSocket,
+			T::Tcp,
+			T::Unix,
+			T::WebRtc,
+		] {
+			assert_eq!(super::transport(transport).as_str(), transport.as_str());
+		}
+	}
+
 	#[test]
 	fn exactly_one_source() {
 		assert!(config(None, &[]).validate(false).is_err());
@@ -993,7 +1150,7 @@ mod tests {
 		assert!(config(None, &["anon/**"]).validate(false).is_ok());
 
 		let split = Config {
-			public_subscribe: patterns(&["anon/**"]).into_iter().collect(),
+			public_subscribe: patterns(&["anon/**"]).path.into_iter().collect(),
 			..Default::default()
 		};
 		assert!(split.validate(false).is_ok());
@@ -1037,8 +1194,8 @@ mod tests {
 	#[tokio::test]
 	async fn public_rules_are_rooted_at_slash() {
 		let auth = Config {
-			public_publish: patterns(&["anon/**"]).into_iter().collect(),
-			public_subscribe: patterns(&["anon/**", "*/chat"]).into_iter().collect(),
+			public_publish: patterns(&["anon/**"]).path.into_iter().collect(),
+			public_subscribe: patterns(&["anon/**", "*/chat"]).path.into_iter().collect(),
 			..Default::default()
 		}
 		.init("relay-1", &moq_tokio::tls::Connect::default(), false)
@@ -1126,7 +1283,7 @@ mod tests {
 			assert!(err.contains(&format!("`{hint}`")), "{public}: {err}");
 		}
 		let split = Config {
-			public_subscribe: patterns(&["anon/**", "live"]).into_iter().collect(),
+			public_subscribe: patterns(&["anon/**", "live"]).path.into_iter().collect(),
 			..Default::default()
 		};
 		let err = split.validate(false).unwrap_err().to_string();
@@ -1318,5 +1475,70 @@ mod tests {
 		assert_eq!(token.recheck(&aliased).root, token.root);
 		// A grant without the alias is relative to what was dialed, not to the old root.
 		assert_eq!(token.recheck(&everything()).root, Path::new("vanity/room").to_owned());
+	}
+}
+
+#[cfg(test)]
+mod outcome_tests {
+	use super::*;
+
+	#[tokio::test]
+	async fn a_revoked_lease_fails_its_session_as_application() {
+		let registry = moq_net::stats::Registry::new(Default::default());
+		let stats = registry.tier(Tier::default()).session("tenant");
+		let (producer, consumer) = lease::Producer::new(Grant::default());
+		let mut lease = Lease::new("/tenant", consumer).with_stats(stats.clone());
+		producer.revoke(lease::Reason::Refused);
+		let why = lease.ended().await;
+		lease.close(why, Bytes::default());
+		drop(stats);
+		let presence = registry.snapshot().sessions()[0].1;
+		assert_eq!(presence.sessions_failed.application, 1);
+		assert_eq!(presence.sessions_failed.expired, 0);
+		assert_eq!(presence.sessions_ended, 1);
+	}
+
+	#[tokio::test]
+	async fn a_lease_ended_by_shutdown_is_clean() {
+		let registry = moq_net::stats::Registry::new(Default::default());
+		let stats = registry.tier(Tier::default()).session("tenant");
+		let (producer, consumer) = lease::Producer::new(Grant::default());
+		let mut lease = Lease::new("/tenant", consumer).with_stats(stats.clone());
+		producer.revoke(lease::Reason::Shutdown);
+		let why = lease.ended().await;
+		lease.close(why, Bytes::default());
+		drop(stats);
+		let presence = registry.snapshot().sessions()[0].1;
+		assert_eq!(presence.sessions_failed, moq_net::stats::Failures::default());
+		assert_eq!(presence.sessions_ended, 1);
+	}
+
+	#[test]
+	fn a_revocation_wins_a_racing_clean_close() {
+		let registry = moq_net::stats::Registry::new(Default::default());
+		let stats = registry.tier(Tier::default()).session("tenant");
+		let (producer, consumer) = lease::Producer::new(Grant::default());
+		let lease = Lease::new("/tenant", consumer).with_stats(stats.clone());
+		producer.revoke(lease::Reason::Refused);
+		lease.close_session(&moq_net::Error::Cancel, Bytes::default());
+		drop(stats);
+		let presence = registry.snapshot().sessions()[0].1;
+		assert_eq!(presence.sessions_failed.application, 1);
+		assert_eq!(presence.sessions_ended, 1);
+	}
+
+	#[test]
+	fn typed_expiry_wins_a_racing_transport_close_without_string_classification() {
+		let registry = moq_net::stats::Registry::new(Default::default());
+		let stats = registry.tier(Tier::default()).session("tenant");
+		let (producer, consumer) = lease::Producer::new(Grant::default());
+		let lease = Lease::new("/tenant", consumer).with_stats(stats.clone());
+		producer.revoke(lease::Reason::Expired);
+		lease.close_session(&moq_net::Error::Transport("closed".into()), Bytes::default());
+		drop(stats);
+		let presence = registry.snapshot().sessions()[0].1;
+		assert_eq!(presence.sessions_failed.expired, 1);
+		assert_eq!(presence.sessions_failed.transport, 0);
+		assert_eq!(presence.sessions_ended, 1);
 	}
 }

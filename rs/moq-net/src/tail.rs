@@ -118,11 +118,6 @@ impl Tail {
 		self.ledger.folds()
 	}
 
-	/// See [`Ledger::gaps`].
-	pub fn gaps(&self, groups: Range<u64>) -> Vec<Range<u64>> {
-		self.ledger.gaps(groups)
-	}
-
 	/// Data streams received, whether they finished or were reset.
 	pub fn streams(&self) -> u64 {
 		self.streams
@@ -196,7 +191,7 @@ pub(crate) struct Settle {
 
 impl Settle {
 	/// Start waiting on `tail`, giving up on missing streams after its grace.
-	pub fn new(runtime: &crate::time::Clock, tail: kio::Consumer<Tail>) -> Self {
+	pub fn new(runtime: &crate::time::Deadlines, tail: kio::Consumer<Tail>) -> Self {
 		let grace = tail.read().ledger.grace();
 		Self {
 			tail,
@@ -223,15 +218,15 @@ mod tests {
 
 	/// The grace gives up on streams that never arrived, never on one still being read:
 	/// its group, or the END_OF_TRACK it carries, still belongs to the track.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn the_grace_waits_for_a_stream_being_read() {
-		let runtime = crate::time::Clock::sim();
+		let runtime = crate::time::sim();
 		let tail = kio::Producer::new(Tail::default());
 		let reading = Reading::open(&tail, Some(0), runtime.now());
 		let mut settle = Settle::new(&runtime, tail.consume());
 		let mut settled = std::pin::pin!(kio::wait(|waiter| settle.poll(waiter, |_| false)));
 
-		moq_net_sim::sleep(GRACE * 2).await;
+		moq_clock::sleep(GRACE * 2).await;
 		assert!(
 			futures::poll!(settled.as_mut()).is_pending(),
 			"a stream is still being read"
@@ -242,9 +237,9 @@ mod tests {
 	}
 
 	/// A stream parked on another one does not hold the end open.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn a_parked_stream_does_not_hold_the_end() {
-		let runtime = crate::time::Clock::sim();
+		let runtime = crate::time::sim();
 		let tail = kio::Producer::new(Tail::default());
 		let mut reading = Reading::open(&tail, None, runtime.now());
 		reading.park();

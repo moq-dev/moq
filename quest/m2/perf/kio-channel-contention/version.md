@@ -5,7 +5,7 @@
 A `Consumer` re-poll that opts into version tracking and finds nothing
 changed returns without taking the channel mutex, and parking a waiter no
 longer contends with readers of the value. Lands with the contended bench (`rs/kio/benches/contended.rs`) and
-`just bench-lock` before and after, against the
+`just bench-profile lock` before and after, against the
 [epic](/quest/m2/perf/kio-channel-contention/README.md)'s baseline; a measured no-win abandons it.
 
 ## Plan

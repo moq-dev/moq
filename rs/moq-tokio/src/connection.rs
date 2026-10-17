@@ -1,7 +1,6 @@
 //! The reconnect loop around a session, and the [`Monitor`] that observes it.
 
 pub mod auth;
-pub use auth::Auth;
 
 use std::task::{Poll, ready};
 use std::time::Duration;
@@ -484,6 +483,9 @@ struct State {
 	transport: Option<crate::Transport>,
 	/// Set when the reconnect loop permanently gives up (reconnect timeout exceeded).
 	error: Option<Error>,
+	/// Why nothing is live while the loop retries: the last session's close reason or
+	/// the latest failed dial. Cleared by the next connect.
+	failure: Option<Error>,
 	/// The currently-connected session, or `None` while reconnecting. Read by
 	/// [`Monitor`] to snapshot live connection stats.
 	session: Option<moq_net::Session>,
@@ -525,6 +527,7 @@ impl Shared {
 			state.status = Some(Status::Connected);
 			state.connects += 1;
 			state.presence.sessions_started += 1;
+			state.failure = None;
 			state.version = Some(session.version());
 			state.transport = Some(transport);
 			state.session = Some(session.clone());
@@ -562,10 +565,19 @@ impl Shared {
 		let _ = self.recv_bw.set(None);
 	}
 
-	/// Record the error the loop gave up with, for [`Connection::closed`].
+	/// Record why the loop is retrying, for [`Monitor::failure`].
+	fn retrying(&self, err: &Error) {
+		if let Ok(mut state) = self.state.write() {
+			state.failure = Some(err.clone());
+		}
+	}
+
+	/// Record the error the loop gave up with, for [`Connection::closed`]. Nothing is
+	/// retrying anymore, so [`Monitor::failure`] stops reporting.
 	fn failed(&self, err: Error) {
 		if let Ok(mut state) = self.state.write() {
 			state.error = Some(err);
+			state.failure = None;
 		}
 	}
 }
@@ -579,6 +591,10 @@ impl Drop for Shared {
 		// nothing left able to reach it. Releasing it drops the last clone, which
 		// is what closes the transport.
 		self.disconnected();
+		// Nothing retries anymore, however the loop ended.
+		if let Ok(mut state) = self.state.write() {
+			state.failure = None;
+		}
 	}
 }
 
@@ -626,6 +642,16 @@ impl Monitor {
 	/// Snapshot the current connection's stats, or `None` if not currently connected.
 	pub fn stats(&self) -> Option<moq_net::session::Stats> {
 		self.state.read().session.as_ref().map(moq_net::Session::stats)
+	}
+
+	/// Why the loop is retrying: the error that ended the last session or failed the
+	/// latest dial, or `None` once a session connects.
+	///
+	/// Read it while [`Connection::status`] reports [`Status::Disconnected`]: a redial
+	/// that keeps failing never changes the status, so this is where its reason shows.
+	/// The loop giving up reports through [`Connection::closed`] instead.
+	pub fn failure(&self) -> Option<Error> {
+		self.state.read().failure.clone()
 	}
 
 	/// Snapshot statistics and protocol together, or `None` while disconnected.
@@ -845,6 +871,15 @@ impl Connection {
 					// persistent producers meanwhile so consumers track the live stats across the
 					// connection, and draining any predecessor left over from a migration.
 					let ended = run_session(shared, &session, &mut draining).await;
+					// Before any status moves, so a watcher woken by `Disconnected` finds why. Only
+					// a retry has a reason to report; a session that ends the loop reports through
+					// `closed` instead.
+					if let Ended::Closed(Err(err)) = &ended
+						&& client.reconnect
+						&& !err.is_terminal()
+					{
+						shared.retrying(err);
+					}
 
 					// A session that stayed up past the initial backoff is healthy; one that
 					// ended sooner counts as a failed attempt however it ended.
@@ -918,7 +953,9 @@ impl Connection {
 						// peers bouncing us between them eventually give up.
 						let restarting = msg.uri().is_empty();
 						if !restarting {
-							retry.last_error = Some(Error::Reconnect("peer redirected immediately".to_string()));
+							let err = Error::Reconnect("peer redirected immediately".to_string());
+							shared.retrying(&err);
+							retry.last_error = Some(err);
 						}
 						// A restart's pacing is not capped by the window: a delay longer than the
 						// window would otherwise spend it all and end the loop without a redial.
@@ -996,6 +1033,7 @@ impl Connection {
 					if err.is_terminal() || !client.reconnect {
 						return Err(err);
 					}
+					shared.retrying(&err);
 					retry.last_error = Some(err);
 				}
 			}
@@ -1222,8 +1260,9 @@ impl Connection {
 	}
 
 	/// Present tokens that survive session replacement and observe the live grant union.
-	pub fn auth(&self) -> Auth {
-		Auth {
+	/// A route names a session's own `moq_net::auth::Auth` instead, re-added after a reconnect.
+	pub fn auth(&self) -> auth::Handle {
+		auth::Handle {
 			connection: self.state.clone(),
 			pacing: self.pacing,
 		}
@@ -2144,6 +2183,119 @@ mod tests {
 		assert!(matches!(err, Error::Reconnect(_)), "{err}");
 		assert!(err.to_string().contains(&refused), "{err}");
 		assert!(started.elapsed() >= Duration::from_millis(100));
+	}
+
+	/// A redial that keeps failing reports why while it retries, and the connect that
+	/// finally lands clears it. Without this a caller only learns the reason once the
+	/// loop gives up, which with no retry window is never.
+	#[cfg(feature = "tcp")]
+	#[tokio::test]
+	async fn a_failing_redial_reports_why_until_it_connects() {
+		const WAIT: Duration = Duration::from_secs(10);
+
+		// Nothing listens here, so every dial is refused until the name moves.
+		let refused = std::net::TcpListener::bind("127.0.0.1:0")
+			.expect("bind")
+			.local_addr()
+			.expect("local addr");
+		let reason = std::net::TcpStream::connect(refused)
+			.expect_err("nothing listens")
+			.to_string();
+		let (live, mut accepted, _task) = serve(crate::origin::spawn()).await;
+
+		// Unique to this test: the table is process-wide.
+		const HOST: &str = "failing-redial.test";
+		crate::resolve::hosts::point(HOST, [refused]);
+
+		let mut config = crate::connect::Config::default();
+		config.backoff.initial = Some(MIN_BACKOFF);
+		config.backoff.max = Some(MIN_BACKOFF);
+		config.backoff.timeout = Some(Duration::ZERO);
+		let client = config.init(Default::default()).unwrap();
+		let mut connection = client.connect(url(&format!("tcp://{HOST}:1/")));
+		let monitor = connection.monitor();
+
+		let failure = tokio::time::timeout(WAIT, async {
+			loop {
+				if let Some(err) = monitor.failure() {
+					break err;
+				}
+				tokio::time::sleep(MIN_BACKOFF).await;
+			}
+		})
+		.await
+		.expect("the refused redial never reported a failure");
+		assert!(failure.to_string().contains(&reason), "{failure}");
+		let transition = futures::FutureExt::now_or_never(connection.status());
+		assert!(transition.is_none(), "a failed redial is no status transition");
+
+		crate::resolve::hosts::point(HOST, [live]);
+		let status = tokio::time::timeout(WAIT, connection.status())
+			.await
+			.expect("never connected once the name moved")
+			.unwrap();
+		assert_eq!(status, Status::Connected);
+		assert!(monitor.failure().is_none(), "the connect must clear the failure");
+		let _session = tokio::time::timeout(WAIT, accepted.recv()).await.unwrap().unwrap();
+	}
+
+	/// Closing a connection between retries ends the retry, so its reason goes with it.
+	#[cfg(feature = "tcp")]
+	#[tokio::test]
+	async fn closing_between_retries_clears_the_failure() {
+		const WAIT: Duration = Duration::from_secs(10);
+
+		// Nothing listens here, so every dial is refused.
+		let refused = std::net::TcpListener::bind("127.0.0.1:0")
+			.expect("bind")
+			.local_addr()
+			.expect("local addr");
+		let mut config = crate::connect::Config::default();
+		config.backoff.initial = Some(MIN_BACKOFF);
+		config.backoff.max = Some(MIN_BACKOFF);
+		config.backoff.timeout = Some(Duration::ZERO);
+		let client = config.init(Default::default()).unwrap();
+		let connection = client.connect(url(&format!("tcp://{refused}/")));
+		let mut monitor = connection.monitor();
+
+		tokio::time::timeout(WAIT, async {
+			while monitor.failure().is_none() {
+				tokio::time::sleep(MIN_BACKOFF).await;
+			}
+		})
+		.await
+		.expect("the refused dial never reported a failure");
+
+		connection.close().await.expect("close");
+		// Resolves with an error once the loop's state is final.
+		let ended = tokio::time::timeout(WAIT, monitor.presence_changed())
+			.await
+			.expect("the loop never ended");
+		assert!(ended.is_err(), "nothing connected, so only the end moves presence");
+		assert!(monitor.failure().is_none(), "nothing is retrying");
+	}
+
+	/// A session that ends the loop reports through `closed`, not as a retry reason.
+	#[cfg(feature = "tcp")]
+	#[tokio::test]
+	async fn a_session_that_ends_the_loop_reports_no_failure() {
+		const WAIT: Duration = Duration::from_secs(10);
+
+		let (addr, mut accepted, _task) = serve(crate::origin::spawn()).await;
+		let client = crate::connect::Config::default()
+			.init(Default::default())
+			.unwrap()
+			.with_reconnect(false);
+		let connection = client.connect(url(&format!("tcp://{addr}/")));
+		let monitor = connection.monitor();
+
+		let session = tokio::time::timeout(WAIT, accepted.recv()).await.unwrap().unwrap();
+		session.abort(moq_net::Error::App(7));
+		let closed = tokio::time::timeout(WAIT, connection.closed())
+			.await
+			.expect("the connection did not close");
+		assert!(closed.is_err(), "the abort ends the loop with an error");
+		assert!(monitor.failure().is_none(), "nothing is retrying");
 	}
 
 	/// A settled answer from one candidate ends the walk instead of being buried.

@@ -6,7 +6,7 @@ The relay's `moq-stats` egress side reports, per broadcast, how far behind
 its viewers are according to what the network has acknowledged: a
 byte-weighted cumulative `lag` histogram and `dropped` counters (duration,
 bytes, and groups dropped before they were acknowledged), on the stats totals
-and [prefix tracks](/quest/m2/stats-prefix-tracks.md). A spliced subscription
+and prefix tracks (`<path>/traffic.json`). A spliced subscription
 stays exact across a route switch, and a closing subscription records its
 last partial interval.
 
@@ -55,6 +55,3 @@ monotonic so readers diff two samples and sum nodes bucket by bucket. Update
 Public API: breaking in `moq-stats`, as the line already decided. Wire: the
 stats JSON gains the egress fields.
 
-## Required
-
-- [Stats prefix tracks](/quest/m2/stats-prefix-tracks.md) - the prefix tracks the histogram lands on, beside the totals

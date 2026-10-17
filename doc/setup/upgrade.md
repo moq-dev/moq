@@ -35,6 +35,12 @@ These land with the next breaking release, not the 2026-09-23 train.
   `catalog::hang::Consumer` with `.into()`, then read it through `catalog::Stream`.
   Its `Hang`, `Msf`, and `Closed` variants and `catalog::msf::Consumer::track`
   are private.
+- **Rust audio reads carry encoder ends.** `moq_audio::decode::Consumer::read()`
+  returns `decode::Read` events: `Frame { discontinuity, frame }` and
+  `End { discontinuity, end }`; `None` still means the track is finished. An
+  `End` can be followed by final PCM with the same `discontinuity` before a fresh
+  encoder bumps it. A bump with no `End` before it is a loss.
+  Binding audio frame APIs keep their existing shape.
 - **JS catalog ranking names its media kind.** Replace `Catalog.ranked(renditions)`
   with `Catalog.Video.ranked(renditions)`. `Catalog.Audio.ranked(renditions)`
   orders audio by enabled state, bitrate, sample rate, channel count, and name.
@@ -190,6 +196,16 @@ These land with the next breaking release, not the 2026-09-23 train.
   Kotlin, `package:moq/media.dart` in Dart, and `Media` in Swift. Go fetches a
   group with `media.FetchGroup`; its `NewGroupConsumer` decodes
   a raw group instead.
+- **Media subscribe and fetch take a catalog rendition.** `MoqMediaTrackConfig`
+  and `MoqMediaGroupConfig` replace `name` and `container` with a `rendition`
+  (`MoqRendition::Video` or `Audio`: the rendition's catalog `id` and its
+  config), and follow the rendition's `broadcast` and `track` themselves, so drop
+  the `resolve` call and the `track`-or-ID fallback before them. Python passes
+  the ID and config (`TrackConsumer.subscribe(broadcast, id, rendition)`,
+  `GroupConsumer.fetch(broadcast, id, rendition, sequence)`); Go builds one with
+  `media.VideoRendition` or `media.AudioRendition`. The audio and video decode
+  consumers' `name` argument is `id` too, matching hang and `@moq/hang`: Swift's
+  `subscribe(broadcast:name:rendition:)` is `subscribe(broadcast:id:rendition:)`.
 - **moq-ffi error payloads are named.** `MoqError` cases that carried a
   positional string (`Transport`, `Internal`, `Connect`, ...) name it
   `reason` (`Reason` in Go, the `reason:` label in Swift). The Display text is
@@ -379,12 +395,6 @@ These land with the next breaking release, not the 2026-09-23 train.
   (`source.catalog(format)`) and narrow it with `catalog::Stream::select`
   before constructing the export. `moq export flv` still applies the same
   rendition flags.
-- **A timed track refuses a group that rewinds.** A group whose first frame
-  starts before a lower-sequence group's, or after a higher one's, fails the
-  write with `TimestampMismatch`. Only local writes are checked: a received
-  group is accepted as is, since its timestamps may be send times. A
-  publisher whose timeline restarts, such as an HLS `EXT-X-DISCONTINUITY` that
-  resets decode times, publishes a new broadcast instead.
 - **A track is timed or untimed, and nothing fills in a timestamp on
   receive.** An untimed track (no timescale) arrives untimed, except over
   moq-lite 05 and later, which can't encode absence yet and carry a send time

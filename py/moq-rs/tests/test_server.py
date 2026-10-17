@@ -68,9 +68,7 @@ async def test_server_client_roundtrip():
                     track_name, audio = next(iter(catalog.audio.items()))
                     assert audio.codec == "opus"
 
-                    media_consumer = await moq.media.TrackConsumer.subscribe(
-                        broadcast_consumer, track_name, audio.container
-                    )
+                    media_consumer = await moq.media.TrackConsumer.subscribe(broadcast_consumer, track_name, audio)
 
                     payload = b"hello over the wire"
                     media.write_frame(payload, timedelta(microseconds=1_000_000))
@@ -128,6 +126,8 @@ async def test_client_reconnects_and_resumes_announcements():
                 session = client.session
                 assert session is not None
                 assert await session.status() == moq.ConnectionStatus.CONNECTED
+                assert session.failure() is None
+                assert session.stats().version is not None
 
                 # Kill the transport under the client, like a relay restart.
                 await asyncio.wait_for(accepted.wait(), timeout=10)
@@ -136,11 +136,15 @@ async def test_client_reconnects_and_resumes_announcements():
                 # Nothing accepts the redial until the gate opens, so DISCONNECTED
                 # is still the current status when we ask for it.
                 assert await asyncio.wait_for(session.status(), timeout=10) == moq.ConnectionStatus.DISCONNECTED
+                # The drop's reason is recorded before the status moves.
+                assert session.failure() is not None
+                assert session.stats().version is None
 
                 # The client redials on its own; the accept loop serves it.
                 regate.set()
                 while await asyncio.wait_for(session.status(), timeout=10) != moq.ConnectionStatus.CONNECTED:
                     pass
+                assert session.failure() is None
 
                 # A broadcast published only after the reconnect still arrives.
                 broadcast = server.create_broadcast("after-reconnect")

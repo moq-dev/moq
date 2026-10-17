@@ -251,7 +251,9 @@ fn legacy(track: &str, micros: u64, keyframe: bool) -> Frame {
 fn live() -> hang::catalog::Archive {
 	let mut archive = hang::catalog::Archive::new();
 	for track in ["360p", "1080p", "audio"] {
-		archive.timelines.insert(track.to_string(), timeline(track));
+		archive
+			.timelines
+			.insert(track.to_string(), hang::catalog::Timeline::new(timeline(track), 4_000));
 	}
 	archive
 }

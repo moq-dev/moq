@@ -29,8 +29,9 @@ export class Format implements ContainerFormat {
 		return this.kind !== "data" && frame.payload.byteLength === 0 ? frame.timestamp : undefined;
 	}
 
-	/** Decode one legacy frame, including an empty-payload duration marker. */
+	/** Decode one legacy frame, including an empty-payload duration marker. On a data track an object with no bytes is the discontinuity marker, so it decodes to no frame. */
 	decode(frame: Uint8Array): Frame[] {
+		if (this.kind === "data" && frame.byteLength === 0) return [];
 		const [timestamp, data] = Moq.Varint.decode(frame);
 		return [{ payload: data, timestamp: timestamp as Micro, keyframe: false }];
 	}
@@ -127,9 +128,9 @@ export class Producer {
 	 * `end`, or at the live edge without one. Without the marker, a group's reach runs to its
 	 * successor's first frame, so the group before a pause reads as live until whatever resumes it,
 	 * and a subscriber joining mid-break is handed that stale media. The marker bounds it, and it is
-	 * the latest group a joiner lands on. Data tracks only close the group, since an empty payload is
-	 * data. No marker is written until a frame follows the last one. Throws if `end` precedes the last
-	 * video frame.
+	 * the latest group a joiner lands on. An empty payload is data on a data track, so its marker is one
+	 * object with no bytes at all. No marker is written until a frame follows the last one. Throws if
+	 * `end` precedes the last video frame.
 	 */
 	discontinuity(end?: Micro) {
 		// Nothing is measured across the break, so a missing end has no cadence to estimate from.
@@ -138,11 +139,11 @@ export class Producer {
 		this.#close(end);
 		this.#interval = undefined;
 		const timestamp = end ?? this.#liveEdge;
-		if (this.#format.kind === "data" || this.#marked || timestamp === undefined) return;
+		if (this.#marked || timestamp === undefined) return;
 
 		const group = this.#track.appendGroup();
 		group.writeFrame({
-			payload: encodeFrame(new Uint8Array(), timestamp),
+			payload: this.#format.kind === "data" ? new Uint8Array() : encodeFrame(new Uint8Array(), timestamp),
 			timestamp: Time.Timestamp.fromMicros(timestamp),
 		});
 		group.close();

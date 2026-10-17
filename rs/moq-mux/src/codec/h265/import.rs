@@ -157,7 +157,7 @@ impl Import {
 	}
 
 	/// Record a locally encoded frame's transport handoff for catalog jitter measurement.
-	pub fn flush(&mut self, timestamp: moq_net::Timestamp, now: std::time::Instant) -> crate::Result<()> {
+	pub fn flush(&mut self, timestamp: moq_net::Timestamp, now: moq_clock::Instant) -> crate::Result<()> {
 		self.track.flush(timestamp, now)
 	}
 
@@ -175,7 +175,7 @@ impl Import {
 		if self.last_sps.as_ref() == Some(sps_nal) {
 			return Ok(());
 		}
-		let config = config_from_sps(sps_nal)?;
+		let config = super::config_from_sps(sps_nal, true)?;
 		self.last_sps = Some(sps_nal.clone());
 		self.apply_config(config)?;
 		Ok(())
@@ -231,39 +231,7 @@ pub fn config(buf: &[u8]) -> Result<hang::catalog::VideoConfig> {
 		return Ok(super::config_from_hvcc(buf)?);
 	}
 	let sps = find_sps(buf).ok_or(Error::NotInitialized)?;
-	config_from_sps(&sps)
-}
-
-/// The config an inline SPS describes (`in_band: true`, the hev1 shape). No `description`: the
-/// parameter sets ride with every keyframe.
-fn config_from_sps(sps_nal: &[u8]) -> Result<hang::catalog::VideoConfig> {
-	let super::Sps { head, full } = super::Sps::parse(sps_nal)?;
-	// The VUI (frame rate, aspect ratio) only comes with scuffle_h265's full parse.
-	let vui_data = full
-		.as_ref()
-		.and_then(|sps| sps.vui_parameters.as_ref())
-		.map(VuiData::new)
-		.unwrap_or_default();
-
-	let mut config = hang::catalog::VideoConfig::new(hang::catalog::H265 {
-		in_band: true, // An inline SPS is the hev1 shape; hvc1 configs come from `config_from_hvcc`.
-		profile_space: head.profile_space,
-		profile_idc: head.profile_idc,
-		profile_compatibility_flags: head.profile_compatibility_flags,
-		tier_flag: head.tier_flag,
-		level_idc: head.level_idc,
-		constraint_flags: head.constraint_flags,
-	});
-	config.coded_width = Some(head.width);
-	config.coded_height = Some(head.height);
-	config.framerate = full
-		.as_ref()
-		.and_then(super::sps_period)
-		.map(|(units, scale)| scale as f64 / units as f64);
-	let display_aspect = vui_data.display_aspect(head.width, head.height);
-	config.display_aspect_width = display_aspect.map(|(width, _)| width);
-	config.display_aspect_height = display_aspect.map(|(_, height)| height);
-	Ok(config)
+	Ok(super::config_from_sps(&sps, true)?)
 }
 
 fn is_sps(nal: &[u8]) -> bool {
@@ -281,80 +249,6 @@ fn find_sps(payload: &[u8]) -> Option<Bytes> {
 		}
 	}
 	nals.flush().ok().flatten().filter(|nal| is_sps(nal))
-}
-
-#[derive(Default)]
-struct VuiData {
-	sample_aspect_width: Option<u32>,
-	sample_aspect_height: Option<u32>,
-}
-
-impl VuiData {
-	fn new(vui: &scuffle_h265::VuiParameters) -> Self {
-		let (sample_aspect_width, sample_aspect_height) = match &vui.aspect_ratio_info {
-			// Extended SAR has explicit arbitrary values for width and height.
-			scuffle_h265::AspectRatioInfo::ExtendedSar { sar_width, sar_height } => {
-				(Some(*sar_width as u32), Some(*sar_height as u32))
-			}
-			// Predefined map to known values.
-			scuffle_h265::AspectRatioInfo::Predefined(idc) => aspect_ratio_from_idc(*idc)
-				.map(|(w, h)| (Some(w), Some(h)))
-				.unwrap_or((None, None)),
-		};
-
-		VuiData {
-			sample_aspect_width,
-			sample_aspect_height,
-		}
-	}
-
-	/// The aspect a `width` by `height` picture is shown at, or none when its samples are square.
-	fn display_aspect(&self, width: u32, height: u32) -> Option<(u32, u32)> {
-		let (Some(sample_width), Some(sample_height)) = (self.sample_aspect_width, self.sample_aspect_height) else {
-			return None;
-		};
-		if sample_width == 0 || sample_height == 0 || sample_width == sample_height {
-			return None;
-		}
-		let shown_width = u64::from(width) * u64::from(sample_width);
-		let shown_height = u64::from(height) * u64::from(sample_height);
-		let divisor = gcd(shown_width, shown_height);
-		Some((
-			u32::try_from(shown_width / divisor).ok()?,
-			u32::try_from(shown_height / divisor).ok()?,
-		))
-	}
-}
-
-fn gcd(mut a: u64, mut b: u64) -> u64 {
-	while b != 0 {
-		(a, b) = (b, a % b);
-	}
-	a
-}
-
-fn aspect_ratio_from_idc(idc: scuffle_h265::AspectRatioIdc) -> Option<(u32, u32)> {
-	match idc {
-		scuffle_h265::AspectRatioIdc::Unspecified => None,
-		scuffle_h265::AspectRatioIdc::Square => Some((1, 1)),
-		scuffle_h265::AspectRatioIdc::Aspect12_11 => Some((12, 11)),
-		scuffle_h265::AspectRatioIdc::Aspect10_11 => Some((10, 11)),
-		scuffle_h265::AspectRatioIdc::Aspect16_11 => Some((16, 11)),
-		scuffle_h265::AspectRatioIdc::Aspect40_33 => Some((40, 33)),
-		scuffle_h265::AspectRatioIdc::Aspect24_11 => Some((24, 11)),
-		scuffle_h265::AspectRatioIdc::Aspect20_11 => Some((20, 11)),
-		scuffle_h265::AspectRatioIdc::Aspect32_11 => Some((32, 11)),
-		scuffle_h265::AspectRatioIdc::Aspect80_33 => Some((80, 33)),
-		scuffle_h265::AspectRatioIdc::Aspect18_11 => Some((18, 11)),
-		scuffle_h265::AspectRatioIdc::Aspect15_11 => Some((15, 11)),
-		scuffle_h265::AspectRatioIdc::Aspect64_33 => Some((64, 33)),
-		scuffle_h265::AspectRatioIdc::Aspect160_99 => Some((160, 99)),
-		scuffle_h265::AspectRatioIdc::Aspect4_3 => Some((4, 3)),
-		scuffle_h265::AspectRatioIdc::Aspect3_2 => Some((3, 2)),
-		scuffle_h265::AspectRatioIdc::Aspect2_1 => Some((2, 1)),
-		scuffle_h265::AspectRatioIdc::ExtendedSar => None,
-		_ => None, // Reserved
-	}
 }
 
 #[cfg(test)]
@@ -410,6 +304,23 @@ mod tests {
 			(config.display_aspect_width, config.display_aspect_height),
 			(Some(16), Some(9))
 		);
+	}
+
+	#[test]
+	fn hvcc_resolves_display_aspect() {
+		for (sps, expected) in [
+			(fixtures::SPS_NVENC, (None, None)),
+			(fixtures::SPS_ANAMORPHIC, (Some(16), Some(9))),
+		] {
+			let hvcc = super::super::build_hvcc(
+				&[Bytes::from_static(fixtures::VPS)],
+				&[Bytes::from_static(sps)],
+				&[Bytes::from_static(fixtures::PPS)],
+			)
+			.unwrap();
+			let config = config(&hvcc).unwrap();
+			assert_eq!((config.display_aspect_width, config.display_aspect_height), expected);
+		}
 	}
 
 	/// An hvcC initializer resolves a config with the hvcC stored as `description`.

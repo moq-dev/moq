@@ -22,7 +22,6 @@ type Wasm = typeof import("@moq/wasm");
 type Session = import("@moq/wasm").Session;
 type Broadcast = import("@moq/wasm").Broadcast;
 type Track = import("@moq/wasm").Track;
-type Group = import("@moq/wasm").Group;
 
 /** One relay the suite runs against, and the version it must negotiate. */
 export interface RelayFixture {
@@ -71,9 +70,6 @@ const FIXTURE: Uint8Array[] = [encode("wasm-frame-0"), encode("wasm-frame-1"), p
 /** How many consecutive groups the round trip reads before it is satisfied. */
 const GROUPS_TO_READ = 2;
 
-/** How often the fixture publisher appends a group. */
-const GROUP_INTERVAL_MS = 50;
-
 function encode(text: string): Uint8Array {
 	return new TextEncoder().encode(text);
 }
@@ -91,8 +87,6 @@ function hexToBytes(hex: string): Uint8Array {
 	for (let i = 0; i < bytes.length; i++) bytes[i] = Number.parseInt(hex.slice(i * 2, i * 2 + 2), 16);
 	return bytes;
 }
-
-const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
 /** Load and initialize the generated module once per page. */
 let loading: Promise<Wasm> | undefined;
@@ -127,16 +121,25 @@ async function connect(wasm: Wasm, relay: RelayFixture): Promise<Session> {
 }
 
 /**
- * Publish {@link FIXTURE} on `path` for the duration of `run`, one group every
- * {@link GROUP_INTERVAL_MS}.
+ * Publish {@link FIXTURE} on `path` for the duration of `run`: one group once the
+ * track has a subscriber, then one more per call to the `advance` handed to `run`.
  *
- * It keeps publishing rather than writing a fixed number of groups and closing:
- * a track that ends before the subscriber's stream is wired up is only reachable
- * through the relay's cache, so the test would be measuring retention, and would
- * race. A live edge that keeps moving has neither problem. The `missing` track
- * is rejected when subscribed, which is what the refusal case reads.
+ * The reader paces the publisher, not a timer. The wasm subscription has the default
+ * `Latency::REAL_TIME` budget, which gives up on a group still arriving once a newer
+ * one lands. A loaded runner can deliver a 128 KiB group slower than any fixed
+ * interval, so every group is superseded mid-read and none arrives whole. With no
+ * newer group until the reader asks, whole delivery is guaranteed rather than raced.
+ *
+ * The track stays open rather than ending after a fixed number of groups: a track
+ * that ends before the subscriber's stream is wired up is only reachable through
+ * the relay's cache, so the test would be measuring retention, and would race. The
+ * `missing` track is rejected when subscribed, which is what the refusal case reads.
  */
-async function withPublisher<T>(relay: RelayFixture, path: string, run: () => Promise<T>): Promise<T> {
+async function withPublisher<T>(
+	relay: RelayFixture,
+	path: string,
+	run: (advance: () => void) => Promise<T>,
+): Promise<T> {
 	// The session serves an origin rather than individual broadcasts, so the path is
 	// published into the origin and the session announces the table.
 	const origin = new Moq.Origin.Producer();
@@ -149,18 +152,27 @@ async function withPublisher<T>(relay: RelayFixture, path: string, run: () => Pr
 	const connection = await Moq.Connection.connect({ url: new URL(relay.url), publish: origin.consume() });
 
 	let stopped = false;
+	let wanted = 1;
+	let wake: (() => void) | undefined;
+	const advance = () => {
+		wanted++;
+		wake?.();
+	};
 	const writer = (async () => {
 		while (!stopped && track.closed.peek() === undefined) {
-			if (!used.peek()) {
-				await Promise.race([used.changed(), track.closed]);
+			if (!used.peek() || wanted === 0) {
+				const advanced = new Promise<void>((resolve) => {
+					wake = resolve;
+				});
+				await Promise.race([used.changed(), track.closed, advanced]);
 				continue;
 			}
+			wanted--;
 			const group = track.appendGroup();
 			for (const frame of FIXTURE) {
 				group.writeFrame({ payload: frame, timestamp: Moq.Time.Timestamp.now() });
 			}
 			group.close();
-			await Promise.race([sleep(GROUP_INTERVAL_MS), used.changed(), track.closed]);
 		}
 		track.close();
 	})();
@@ -172,7 +184,7 @@ async function withPublisher<T>(relay: RelayFixture, path: string, run: () => Pr
 	})();
 
 	try {
-		return await run();
+		return await run(advance);
 	} finally {
 		stopped = true;
 		track.close();
@@ -206,56 +218,37 @@ async function consume(session: Session, path: string): Promise<Broadcast> {
 }
 
 /**
- * Read `count` groups off a track and check each one against {@link FIXTURE}.
+ * Read `count` consecutive groups off a track, asking the publisher for each next one
+ * with `advance`, and check each against {@link FIXTURE}.
  *
- * The first sequence is whatever the live edge was at subscribe time, so only
- * the step between groups is asserted, not the starting number.
+ * Every group must arrive whole: nothing newer exists while one is read (see
+ * {@link withPublisher}), so a skip or a short group is a bug, not real-time delivery.
+ * The first sequence is whatever the live edge was at subscribe time, so only the
+ * step between groups is asserted, not the starting number.
  */
-async function expectGroups(track: Track, count: number): Promise<void> {
+async function expectGroups(track: Track, count: number, advance: () => void): Promise<void> {
 	let previous: bigint | undefined;
-	let read = 0;
 
-	// A skip is legal (see `isOld`) and real-time delivery puts no bound on how many
-	// can occur. The case deadline still catches a subscription that makes no progress.
-	while (read < count) {
-		let group: Group | undefined;
+	for (let i = 0; i < count; i++) {
+		const group = await track.recvGroup();
+		if (!group) throw new Error(`track ended after ${i} groups, want ${count}`);
 		try {
-			group = await track.recvGroup();
-			if (!group) throw new Error(`track ended after ${read} groups, want ${count}`);
-
-			// Forward, not consecutive: a skipped group leaves a gap in the sequence.
-			if (previous !== undefined && group.sequence <= previous) {
-				throw new Error(`group ${read}: sequence is ${group.sequence}, want greater than ${previous}`);
+			if (previous !== undefined && group.sequence !== previous + 1n) {
+				throw new Error(`group ${i}: sequence is ${group.sequence}, want ${previous + 1n}`);
 			}
 			previous = group.sequence;
 
 			for (const [j, want] of FIXTURE.entries()) {
 				const frame = await group.readFrame();
-				if (!frame) throw new Error(`group ${read}: ended after ${j} frames, want ${FIXTURE.length}`);
-				expectBytes(frame, want, `group ${read} frame ${j}`);
+				if (!frame) throw new Error(`group ${i}: ended after ${j} frames, want ${FIXTURE.length}`);
+				expectBytes(frame, want, `group ${i} frame ${j}`);
 			}
-			if (await group.readFrame()) throw new Error(`group ${read}: got more than ${FIXTURE.length} frames`);
-			read++;
-		} catch (err) {
-			if (!isOld(err)) throw err;
+			if (await group.readFrame()) throw new Error(`group ${i}: got more than ${FIXTURE.length} frames`);
 		} finally {
-			group?.free();
+			group.free();
 		}
+		advance();
 	}
-}
-
-/**
- * Whether the live edge passed this group before it was delivered whole.
- *
- * The subscription's budget is the default `Latency::REAL_TIME`, which drops a group
- * the edge has moved past rather than delivering it late, so the publisher writing one
- * every {@link GROUP_INTERVAL_MS} can legitimately retire a group the reader is still
- * on. Treating that as a case failure asserts a guarantee real-time delivery does not
- * make, and loses the race on a loaded runner. What has to hold is that a group which
- * *is* delivered arrives in order and whole, which the checks above still cover.
- */
-function isOld(err: unknown): boolean {
-	return err instanceof Error && err.message === "old";
 }
 
 function expectBytes(got: Uint8Array, want: Uint8Array, where: string): void {
@@ -308,12 +301,12 @@ const CASES: Case[] = [
 		name: "reads a published broadcast",
 		run: async (wasm, relay) => {
 			const path = `wasm-test/${relay.name}`;
-			await withPublisher(relay, path, async () => {
+			await withPublisher(relay, path, async (advance) => {
 				await withSession(wasm, relay, async (session) => {
 					const broadcast = await consume(session, path);
 					const track = await broadcast.subscribe(TRACK);
 					try {
-						await expectGroups(track, GROUPS_TO_READ);
+						await expectGroups(track, GROUPS_TO_READ, advance);
 					} finally {
 						track.free();
 						broadcast.free();

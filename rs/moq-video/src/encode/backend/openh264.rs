@@ -6,8 +6,8 @@
 use bytes::Bytes;
 use openh264::OpenH264API;
 use openh264::encoder::{
-	BitRate, Complexity, Encoder, EncoderConfig, FrameRate, FrameType, IntraFramePeriod, RateControlMode,
-	TransferCharacteristics, UsageType, VuiConfig,
+	BitRate, ColorPrimaries, Complexity, Encoder, EncoderConfig, FrameRate, FrameType, IntraFramePeriod,
+	MatrixCoefficients, RateControlMode, TransferCharacteristics, UsageType, VuiConfig,
 };
 use openh264::formats::YUVSlices;
 use openh264_sys2::{ENCODER_OPTION_BITRATE, SBitrateInfo, SPATIAL_LAYER_ALL};
@@ -16,7 +16,8 @@ use openh264_sys2::{ENCODER_OPTION_COMPLEXITY, LOW_COMPLEXITY, MEDIUM_COMPLEXITY
 
 use super::super::encoder::{Applied, Config, Gop, Preset};
 use super::{Backend, Encoded};
-use crate::{Color, Error, Frame};
+use crate::color::{Matrix, Primaries, Range, Transfer};
+use crate::{Error, Frame};
 
 pub(crate) const NAME: &str = "openh264";
 
@@ -40,20 +41,27 @@ impl Openh264 {
 		let Gop::Keyframe { interval } = config.gop;
 		let color = config.resolved_color();
 		// State the color space in the SPS so a decoder doesn't fall back to
-		// guessing it from the frame height.
-		//
-		// `VuiConfig::bt601()` would pair SMPTE 170M primaries and matrix with the
-		// SMPTE 170M transfer curve (code point 6). We override the curve to BT.709
-		// (1), which is defined identically, because CoreVideo's 170M transfer
-		// constant is deprecated and Media Foundation has none, so 1 is the only
-		// value every backend can emit. Same curve, one number across all of them.
-		let vui = match color {
-			Color::Bt601Limited | Color::Bt601Full => {
-				VuiConfig::bt601().transfer_characteristics(TransferCharacteristics::Bt709)
-			}
-			Color::Bt709Limited | Color::Bt709Full => VuiConfig::bt709(),
-		}
-		.full_range(!color.limited());
+		// guessing it from the frame height. The SDR curve goes out as BT.709 (1)
+		// whatever the matrix, as every backend emits it; see
+		// [`Color::code_points`].
+		let vui = VuiConfig::new()
+			.color_primaries(match color.primaries {
+				Primaries::Smpte170m => ColorPrimaries::Smpte170M,
+				Primaries::Bt470bg => ColorPrimaries::Bt470BG,
+				Primaries::Bt709 => ColorPrimaries::Bt709,
+				Primaries::Bt2020 => ColorPrimaries::Bt2020,
+			})
+			.transfer_characteristics(match color.transfer {
+				Transfer::Bt709 => TransferCharacteristics::Bt709,
+				Transfer::Pq => TransferCharacteristics::Smpte2084,
+				Transfer::Hlg => TransferCharacteristics::Hlg,
+			})
+			.matrix_coefficients(match color.matrix {
+				Matrix::Bt601 => MatrixCoefficients::Smpte170M,
+				Matrix::Bt709 => MatrixCoefficients::Bt709,
+				Matrix::Bt2020 => MatrixCoefficients::Bt2020Ncl,
+			})
+			.full_range(color.range == Range::Full);
 
 		// Measured at 720p and 1080p (see `examples/encode-presets.rs`): Low saves
 		// about 1.5 ms and 15% CPU per frame over Medium for under 0.1 dB, and High
