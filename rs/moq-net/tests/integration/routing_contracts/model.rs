@@ -404,10 +404,11 @@ impl View {
 		let empty = View::default();
 		let old = old.unwrap_or(&empty);
 		// Every path overlaps the interest, so one not under it covers it and
-		// goes out as an empty suffix.
+		// goes out as an empty suffix. The separator after the interest is
+		// model notation, not an encoded byte.
 		let suffix = |path: &str| {
 			if within(path, interest) {
-				path.len() - interest.len()
+				path[interest.len()..].trim_start_matches('/').len()
 			} else {
 				0
 			}
