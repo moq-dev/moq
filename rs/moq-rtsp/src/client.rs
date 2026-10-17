@@ -206,6 +206,7 @@ impl Client {
 					track,
 					last: None,
 					started: false,
+					damaged: false,
 					fresh: true,
 				});
 			}
@@ -350,6 +351,14 @@ impl Video {
 		Ok(frames)
 	}
 
+	/// Drop any access unit the splitter holds, keeping its parameter sets.
+	fn reset(&mut self) {
+		match self {
+			Self::H264 { split, .. } => split.reset(),
+			Self::H265 { split, .. } => split.reset(),
+		}
+	}
+
 	fn decode(&mut self, frames: Vec<moq_mux::container::Frame>) -> moq_mux::Result<()> {
 		match self {
 			Self::H264 { import, .. } => import.decode(frames),
@@ -365,6 +374,8 @@ struct Stream {
 	last: Option<(i64, std::time::Instant)>,
 	/// Whether a keyframe has been published (video) or the session started (audio).
 	started: bool,
+	/// Whether a lost packet broke the video's reference chain, so it waits for a keyframe.
+	damaged: bool,
 	/// Whether retina's parameter sets still need inserting: until the splitter emits a keyframe
 	/// carrying them, after which it re-inserts them ahead of every keyframe itself.
 	fresh: bool,
@@ -402,13 +413,14 @@ struct Jump;
 impl Ingest {
 	/// Publish one depacketized item, or report that the timeline jumped.
 	fn push(&mut self, item: CodecItem, streams: &[retina::client::Stream]) -> Result<Option<Jump>> {
-		let (stream_id, timestamp, data, changed, received) = match &item {
+		let (stream_id, timestamp, data, changed, received, loss) = match &item {
 			CodecItem::VideoFrame(frame) => (
 				frame.stream_id(),
 				frame.timestamp(),
 				frame.data(),
 				frame.has_new_parameters(),
 				frame.end_ctx().received(),
+				frame.loss(),
 			),
 			CodecItem::AudioFrame(frame) => (
 				frame.stream_id(),
@@ -416,6 +428,8 @@ impl Ingest {
 				frame.data(),
 				false,
 				frame.ctx().received(),
+				// AAC packets decode alone, and the decoder conceals a lost one.
+				0,
 			),
 			_ => return Ok(None),
 		};
@@ -448,6 +462,13 @@ impl Ingest {
 
 		match &mut stream.track {
 			Track::Video(video) => {
+				if loss > 0 && stream.started && !stream.damaged {
+					// The pictures after a lost packet reference what it carried, so hold the
+					// video until the next keyframe rather than publish a broken chain.
+					tracing::warn!(stream_id, loss, "RTP packets lost, waiting for the next keyframe");
+					video.reset();
+					stream.damaged = true;
+				}
 				stream.fresh |= changed;
 				let params = match streams.get(stream_id).and_then(|stream| stream.parameters()) {
 					Some(ParametersRef::Video(params)) if stream.fresh => Some(params),
@@ -456,13 +477,14 @@ impl Ingest {
 				let frames = video.split(data, params, pts)?;
 				let keyframe = frames.iter().any(|frame| frame.keyframe);
 				stream.fresh &= !keyframe;
-				if !stream.started {
-					// Publish nothing before the first keyframe, by the splitter's reckoning
-					// (an IDR, an H.264 recovery point, or any H.265 IRAP picture).
+				if !stream.started || stream.damaged {
+					// Publish nothing before a keyframe, by the splitter's reckoning (an IDR, an
+					// H.264 recovery point, or any H.265 IRAP picture).
 					if !frames.first().is_some_and(|frame| frame.keyframe) {
 						return Ok(None);
 					}
 					stream.started = true;
+					stream.damaged = false;
 					self.started = true;
 				}
 				stream.last = Some((elapsed, received));
@@ -985,6 +1007,39 @@ mod tests {
 		session.close().await;
 		assert_eq!(within("the pull", pull).await.unwrap().unwrap(), End::Closed);
 		assert_eq!(frames(reader).await.len(), 2);
+	}
+
+	/// A lost packet holds the video until the next keyframe rather than publishing pictures
+	/// whose references never arrived.
+	#[tokio::test]
+	async fn packet_loss_waits_for_a_keyframe() {
+		let server = Server::bind(vec![Media::H264 { sprop: true }]).await;
+		let (broadcast, catalog) = broadcast();
+		let client = Client::new(server.url()).unwrap();
+		let pull = tokio::spawn({
+			let (broadcast, catalog) = (broadcast.clone(), catalog.clone());
+			async move { client.pull(&broadcast, &catalog).await }
+		});
+
+		let mut session = within("PLAY", server.accept(0)).await;
+		session.video(0, 0, &[fake::H264_IDR]).await;
+		let snapshot = catalog_with(&catalog, 1, 0).await;
+		let reader = subscribe(&broadcast, video_track(&snapshot)).await;
+		session.video(0, FRAME, &[fake::H264_SLICE]).await;
+		session.lose(0, 1);
+		session.video(0, 3 * FRAME, &[fake::H264_SLICE]).await;
+		session.video(0, 4 * FRAME, &[fake::H264_SLICE]).await;
+		session.video(0, 5 * FRAME, &[fake::H264_IDR]).await;
+		session.close().await;
+		assert_eq!(within("the pull", pull).await.unwrap().unwrap(), End::Closed);
+
+		let frames = frames(reader).await;
+		let keyframes: Vec<bool> = frames.iter().map(|frame| frame.keyframe).collect();
+		assert_eq!(
+			keyframes,
+			[true, false, true],
+			"the slices after the loss never publish"
+		);
 	}
 
 	/// A server whose `rtptime` lands well after its packets would never publish anything, so

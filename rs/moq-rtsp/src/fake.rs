@@ -233,7 +233,7 @@ impl Server {
 			write,
 			media: self.media.clone(),
 			channels,
-			seq: 0,
+			seq: vec![0; self.media.len()],
 		}
 	}
 }
@@ -243,7 +243,8 @@ pub struct Session {
 	write: Arc<Mutex<OwnedWriteHalf>>,
 	media: Vec<Media>,
 	channels: Vec<Option<u8>>,
-	seq: u16,
+	/// Each track's next RTP sequence number.
+	seq: Vec<u16>,
 }
 
 impl Session {
@@ -266,17 +267,22 @@ impl Session {
 		let channel = self.channels[track].expect("track was set up");
 		let pt = self.media[track].payload_type(track);
 		let mut packet = vec![0x80, pt | if marker { 0x80 } else { 0 }];
-		packet.extend_from_slice(&self.seq.to_be_bytes());
+		packet.extend_from_slice(&self.seq[track].to_be_bytes());
 		packet.extend_from_slice(&rtptime.to_be_bytes());
 		packet.extend_from_slice(&(0x1000 + track as u32).to_be_bytes());
 		packet.extend_from_slice(payload);
-		self.seq = self.seq.wrapping_add(1);
+		self.seq[track] = self.seq[track].wrapping_add(1);
 
 		let mut frame = vec![b'$', channel];
 		frame.extend_from_slice(&(packet.len() as u16).to_be_bytes());
 		frame.extend_from_slice(&packet);
 		// A client that already hung up is the test's to notice, not the writer's.
 		let _ = self.write.lock().await.write_all(&frame).await;
+	}
+
+	/// Skip `packets` of `track`'s RTP sequence numbers, as if the network lost them.
+	pub fn lose(&mut self, track: usize, packets: u16) {
+		self.seq[track] = self.seq[track].wrapping_add(packets);
 	}
 
 	/// Send an RTCP sender report for `track`, which carries no media.
