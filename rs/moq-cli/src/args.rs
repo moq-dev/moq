@@ -557,7 +557,7 @@ impl MoqSide {
 			!(self.client.url.is_some()
 				&& self.cluster_dials()
 				&& self.client.bind.is_some_and(|bind| bind.port() != 0)),
-			"--connect-bind with a fixed port cannot serve both --connect and --cluster-connect / --cluster-connect-api, which each bind it: use port 0, or drop --connect"
+			"--connect-bind with a fixed port cannot serve both --connect and --cluster-connect / --cluster-connect-api, which each bind it: use port 0, or drop --connect (unset MOQ_CONNECT if it supplies the URL)"
 		);
 		#[cfg(feature = "cluster-lan")]
 		{
