@@ -911,6 +911,51 @@ test("a solicited legacy advertisement refused once is retried", async () => {
 	origin.close();
 });
 
+/** The solicited legacy path carries a route's token too, so closing it remakes the request. */
+test("closing a solicited legacy advertisement's token makes it again without it", async () => {
+	// No retry timer can stand in for the wake.
+	jest.useFakeTimers();
+	const pair = createMockTransportPair(ALPN.DRAFT_19);
+	const inner = new NativeSession(pair.server, Version.DRAFT_15, true);
+	const session: Session = {
+		version: inner.version,
+		acceptBi: () => inner.acceptBi(),
+		nextRequestId: () => inner.nextRequestId(),
+		spendRequest: (id) => inner.spendRequest(id),
+		close: () => inner.close(),
+		openBi: () => inner.openBi(),
+	};
+	const tokens = new Tokens();
+	const { pub, origin } = publisher(pair.server, { requiresSolicitation: true, session, auth: tokens });
+	const { sent, restore } = carriedTokens();
+	try {
+		const token = tokens.issue("first");
+		origin.createBroadcast(Path.from("mine")).announce({ auth: token });
+
+		const subscription = await Stream.open(pair.client, { version: Version.DRAFT_15 });
+		const accepted = await Stream.accept(pair.server, Version.DRAFT_15);
+		if (!accepted) throw new Error("the subscription stream was never accepted");
+		void pub.runSubscribeNamespace(new SubscribeNamespace({ requestId: 0n, namespace: Path.empty() }), accepted);
+
+		const old = await nextStream(pair.client);
+		if (!old) throw new Error("never advertised");
+		expect(await readPublishNamespace(old)).toBe(Path.from("mine"));
+		await acceptPublishNamespace(old);
+		await flush();
+		token.close();
+
+		const again = await nextStream(pair.client);
+		if (!again) throw new Error("never advertised again");
+		expect(await readPublishNamespace(again)).toBe(Path.from("mine"));
+		expect(sent).toEqual(["first", undefined]);
+		subscription.close();
+	} finally {
+		restore();
+		origin.close();
+		jest.useRealTimers();
+	}
+});
+
 /**
  * A SUBSCRIBE_NAMESPACE below an advertised route still hears that route: it serves the
  * requested prefix, so it lands as the empty suffix, then paths beneath the prefix follow
