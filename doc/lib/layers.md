@@ -20,7 +20,7 @@ namespace tells them apart: `media.TrackConsumer` reads what
 Exceptions:
 
 - **C++** is one flat `moq::` namespace with the layer folded into the name (`moq::MediaTrackProducer`, `moq::JsonSnapshotProducer`).
-- **C** is the hand-written moq-c ABI, grouped by direction (`moq_publish_*`, `moq_consume_*`) rather than by layer, so its rows name function prefixes. Its `moq_publish_video` and `moq_consume_video` move encoded frames (media); the codecs are `moq_encode_*` and `moq_decode_*`.
+- **C** is the hand-written moq-c ABI, grouped by direction (`moq_publish_*`, `moq_consume_*`) rather than by layer, so its rows name function prefixes. Its `moq_publish_video` and `moq_consume_video` move encoded frames (media); the codecs are `moq_encode_*` and `moq_decode_*`, which always publish to or subscribe from a broadcast, so C has no codec-only `Encoder`.
 - **Dart** has no `audio` or `video` library, because its published binaries carry no codecs.
 - **TypeScript** is a separate implementation with its own [packages](/lib/js/), so it is not mapped here.
 
