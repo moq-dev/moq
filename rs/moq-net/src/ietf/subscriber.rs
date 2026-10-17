@@ -3776,6 +3776,16 @@ struct FirstObject {
 #[derive(Debug)]
 struct PeekFirst<const EXTENSIONS: bool>(FirstObject);
 
+/// The first Object ID alone, which names a compact stream's subgroup.
+#[derive(Debug)]
+struct PeekId(u64);
+
+impl Decode<Version> for PeekId {
+	fn decode(buf: &mut Decoder<'_>, _: Version) -> Result<Self, DecodeError> {
+		Ok(Self(buf.varint()?))
+	}
+}
+
 impl<const EXTENSIONS: bool> Decode<Version> for PeekFirst<EXTENSIONS> {
 	fn decode(buf: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
 		let id = buf.varint()?;
@@ -3820,6 +3830,17 @@ where
 		// through the tagged `track::Producer`.
 		let create = |track: &mut track::Producer| track.create_group(group::Info { sequence });
 
+		// The compact form names the subgroup by its first Object ID, so check it before the
+		// rest of the object can fail and open the group as subgroup 0. A stream with no
+		// objects names none, and a failed read fails again in the full peek below.
+		if header.flags.has_subgroup_object
+			&& let Ok(Some(PeekId(id))) = stream.decode_peek_maybe::<PeekId>().await
+			&& id != 0
+		{
+			tracing::warn!(sub_group_id = id, "subgroup ID is not supported, dropping stream");
+			return Err(Error::Unsupported);
+		}
+
 		let peeked = match header.flags.has_extensions {
 			true => stream
 				.decode_peek_maybe::<PeekFirst<true>>()
@@ -3842,16 +3863,6 @@ where
 				return Err(err);
 			}
 		};
-		// The compact form names the subgroup by its first Object ID, so this is where a
-		// nonzero one shows, before it can open the group as subgroup 0. A stream with no
-		// objects names none.
-		if header.flags.has_subgroup_object
-			&& let Some(first) = first
-			&& first.id != 0
-		{
-			tracing::warn!(sub_group_id = first.id, "subgroup ID is not supported, dropping stream");
-			return Err(Error::Unsupported);
-		}
 		if let Some(first) = first.filter(|first| first.end_of_track) {
 			return Ok(Opened::EndOfTrack {
 				object: first.id,
@@ -11806,8 +11817,9 @@ mod stitch_tests {
 	}
 
 	/// A compact header names its subgroup by the first Object ID, so one starting at object
-	/// 2 is subgroup 2: refused like an explicit one, never taken as subgroup 0. A compact
-	/// stream with no objects names no subgroup and is subgroup 0.
+	/// 2 is subgroup 2: refused like an explicit one, never taken as subgroup 0, even when the
+	/// rest of that object is cut off. A compact stream with no objects names no subgroup and
+	/// is subgroup 0.
 	#[moq_net_sim::test]
 	async fn a_compact_non_zero_subgroup_is_refused() {
 		for version in [Version::Draft14, Version::Draft22] {
@@ -11833,8 +11845,11 @@ mod stitch_tests {
 				}
 				bytes
 			};
+			let mut truncated = compact(SEQUENCE + 3, None);
+			Encoder::new(&mut truncated, version.into()).varint(2u64).unwrap();
 			let scripts = vec![
 				compact(SEQUENCE, Some(2)),
+				truncated,
 				compact(SEQUENCE + 1, Some(0)),
 				compact(SEQUENCE + 2, None),
 			];
@@ -11846,6 +11861,11 @@ mod stitch_tests {
 			let result = h.subscriber.clone().recv_group(&mut stream).await;
 			assert!(matches!(result, Err(Error::Unsupported)), "{version}: {result:?}");
 			assert_eq!(h.track.latest(), None, "{version}: the refused subgroup opened a group");
+
+			let mut stream = h.stream().await.with_version(version);
+			let result = h.subscriber.clone().recv_group(&mut stream).await;
+			assert!(matches!(result, Err(Error::Unsupported)), "{version}: {result:?}");
+			assert_eq!(h.track.latest(), None, "{version}: a truncated subgroup opened a group");
 
 			let mut stream = h.stream().await.with_version(version);
 			h.subscriber.clone().recv_group(&mut stream).await.unwrap();
