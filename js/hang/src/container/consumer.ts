@@ -18,6 +18,13 @@ export interface ConsumerProps {
 	 */
 	// Read-only: a Getter (e.g. another component's output) is accepted directly.
 	maxDelay?: GetterInit<Milli>;
+	/**
+	 * The consumer this one replaces on the same path, such as the previous rendition.
+	 *
+	 * Its arrival estimate carries over instead of restarting from the cold-start prior, so a
+	 * switch neither lowers nor raises {@link Consumer.spread} on its own.
+	 */
+	predecessor?: Consumer;
 }
 
 /** One item of a {@link Consumer.next} read, in delivery order. Mirrors Rust's `container::Read`. */
@@ -122,15 +129,15 @@ export class Consumer {
 	/** The time ranges currently buffered and ready to play. */
 	readonly buffered: Getter<BufferedRanges> = this.#buffered;
 
-	#jitter = new Jitter();
-	#spread = new Signal<Milli>(this.#jitter.measured);
+	#jitter: Jitter;
+	#spread: Signal<Milli>;
 	/**
 	 * How much buffer late arrivals need, measured as frames come off the transport.
 	 *
 	 * The measured term of doc/concept/audio-jitter.md, excluding the codec frame and any advertised
-	 * floor. Starts at the cold-start estimate before any frame arrives.
+	 * floor. Starts at the predecessor's estimate, or the cold-start estimate without one.
 	 */
-	readonly spread: Getter<Milli> = this.#spread;
+	readonly spread: Getter<Milli>;
 
 	#signals = new Effect();
 	#closed = new Once<Error | null>();
@@ -141,6 +148,9 @@ export class Consumer {
 		this.#track = track;
 		this.#format = props.format;
 		this.#maxDelay = getter(props.maxDelay ?? Milli.zero);
+		this.#jitter = props.predecessor ? props.predecessor.#jitter.fork() : new Jitter();
+		this.#spread = new Signal(this.#jitter.measured);
+		this.spread = this.#spread;
 
 		this.#signals.spawn(this.#run.bind(this));
 		this.#signals.cleanup(() => {

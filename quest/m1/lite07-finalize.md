@@ -47,7 +47,7 @@ The cut:
   draft (whose text already names the rename), and at every site spelling
   the wip ALPN: `rs/moq-tokio/src/connect.rs` and `listen.rs`,
   `rs/moq-tokio/tests/`, `rs/moq-relay/src/cluster.rs`,
-  `rs/moq-relay/tests/smoke.rs`,
+  `rs/moq-relay/tests/integration/smoke.rs`,
   `test/interop/bare-fin.ts`, `test/interop/lite-varint.ts`, and
   `doc/concept/moq-lite.md`; grep for `moq-lite-07-wip` to catch new ones. A wip peer and a final peer refuse each other by ALPN
   rather than misparse; no compatibility shim.
@@ -78,9 +78,9 @@ is published; older versions are unchanged.
 - [Identity proof](/quest/m1/cluster-routing/identity.md) - lite-07 carries the routing key and its per-session proof
 - [Routes and announces](/quest/m1/cluster-routing/routes.md) - lite-07 carries the route layer: ROUTE per origin node and path-less ANNOUNCE, with the hop list gone
 - [SUBSCRIBE_DROP](/quest/m1/subscribe-drop.md) - lite-07 restores SUBSCRIBE_DROP in place of `Stream Count`
-- [FETCH max-delay](/quest/m1/fetch-max-delay.md) - historical requests have a reader budget, carried by FETCH while present and by ranges after its removal
 - [Subscribe ranges](/quest/m1/subscribe-ranges/README.md) - SUBSCRIBE carries ranges and an order and lite FETCH is gone, in Rust and JS
 - [Announcement takeover](/quest/m1/announce-takeover.md) - ANNOUNCE_TAKEOVER preserves a proven instance under a new independent route
+- [Refresh on the lite wire](/quest/m1/refresh/lite.md) - TRACK_INFO carries the refresh ratio and SUBSCRIBE_UPDATE the wanted group
 
 ## Related
 

@@ -49,7 +49,7 @@ import {
 	PublishNamespaceUpdate,
 } from "./publish_namespace.ts";
 import { RequestError, RequestOk } from "./request.ts";
-import { cancelled, finCancels, namespaceUpdate, refuseReserved } from "./request_stream.ts";
+import { cancelled, finCancels, malformed, namespaceUpdate, nextMessage, refuseReserved } from "./request_stream.ts";
 import { GroupOrder, type Subscribe, SubscribeError, SubscribeOk, SubscribeUpdate } from "./subscribe.ts";
 import {
 	type SubscribeNamespace,
@@ -557,13 +557,18 @@ export class Publisher {
 				unsubscribe = resolve;
 			});
 			const legacy = version === Version.DRAFT_14 || version === Version.DRAFT_15 || version === Version.DRAFT_16;
+			const goaway = { client: this.#session.client, seen: false };
 			const updates = (async () => {
 				for (;;) {
-					if (await stream.reader.done()) {
+					const type = await nextMessage(stream.reader, version, goaway).catch((err: unknown) => {
+						throw malformed(err, "subscription message");
+					});
+					if (type === undefined) {
 						if (legacy || finCancels(version)) return;
 						return stream.writer.closed;
 					}
-					if ((await stream.reader.u53()) !== 0x02) throw new Error("unexpected message on subscribe stream");
+					if (type !== 0x02)
+						throw new ProtocolViolation(`unexpected message on a subscription: 0x${type.toString(16)}`);
 					// Drafts 15 and 16 name the update's own Request ID; later drafts name none.
 					const refuse = async (
 						condition: "not_supported" | "malformed_auth_token",
@@ -601,7 +606,7 @@ export class Publisher {
 					} catch (err) {
 						// Section 8.9 rejects the update, which says more than that we do not support it.
 						if (err instanceof MalformedAuthToken) throw await refuse("malformed_auth_token", err.message);
-						throw err;
+						throw malformed(err, "REQUEST_UPDATE");
 					}
 					if (params.trackPropertyFilter)
 						throw new ProtocolViolation(
@@ -1159,8 +1164,9 @@ export class Publisher {
 		};
 
 		const ending = cancelled(stream, version);
+		const goaway = { client: this.#session.client, seen: false };
 		const readUpdate = () =>
-			namespaceUpdate(stream.reader, version).then(
+			namespaceUpdate(stream.reader, version, goaway).then(
 				(update) => ({ update }),
 				(err) => ({ error: error(err) }),
 			);

@@ -208,6 +208,23 @@ export function hasOrder(version: Version): boolean {
 	}
 }
 
+/** Whether FETCH carries the subscriber's optional max delay. Added in lite-07; an earlier
+ * fetch is bounded by the publisher's retention alone. */
+export function hasFetchMaxDelay(version: Version): boolean {
+	// Explicitly list older versions so future versions keep the lite-07+ behavior.
+	switch (version) {
+		case Version.DRAFT_01:
+		case Version.DRAFT_02:
+		case Version.DRAFT_03:
+		case Version.DRAFT_04:
+		case Version.DRAFT_05:
+		case Version.DRAFT_06:
+			return false;
+		default:
+			return true;
+	}
+}
+
 /** Whether SUBSCRIBE, SUBSCRIBE_UPDATE, SUBSCRIBE_OK, and TRACK_INFO carry the retired
  * `Ordered` byte.
  *
