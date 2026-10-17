@@ -1111,6 +1111,21 @@ test("a draft-14 END_OF_TRACK carrying properties ends the subscription as unsup
 	}
 });
 
+test("a draft-14 compact END_OF_TRACK at object 5 with properties is subgroup 5, refused without ending the track", async () => {
+	const { subscriber, track } = await subscribeTrack({ version: Version.DRAFT_14 });
+	const header = stampedGroup(0);
+	header.flags.hasSubgroupObject = true;
+	// Object ID 5, one unknown integer property, an empty payload, then END_OF_TRACK.
+	const reader = new Reader(undefined, new Uint8Array([5, 2, 0x20, 7, 0, 4]), Version.DRAFT_14);
+	const stop = spyOn(reader, "stop");
+
+	await subscriber.handleGroup(header, reader);
+
+	expect(stop.mock.calls[0][0]).not.toBeInstanceOf(EndOfTrackProperties);
+	expect(track.closed.peek()).toBeUndefined();
+	stop.mockRestore();
+});
+
 test("older peer without priority property inherits wire priority 128", async () => {
 	const { subscriber, track } = await subscribeTrack();
 	expect((await track.info()).priority).toBe(0xff - 128);

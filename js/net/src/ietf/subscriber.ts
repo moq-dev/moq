@@ -1310,6 +1310,7 @@ export class Subscriber {
 						stream.stop(new Error("subgroups are not supported"));
 						return;
 					}
+					if (frame.hasProperties) throw new EndOfTrackProperties();
 					// No object at or past this location exists: after the group's last object
 					// the track ends with it, and at object 0 it ends before it.
 					if (producer && frame.idDelta !== 0) throw new ObjectIdGap(frame.idDelta);

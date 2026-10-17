@@ -283,6 +283,8 @@ export class Frame {
 	endOfTrack: boolean;
 	/** Absolute object ID for a standalone terminal; zero for sequential objects. */
 	idDelta = 0;
+	/** An END_OF_TRACK that carries properties, which a track end has nowhere to keep. */
+	hasProperties = false;
 
 	constructor({
 		payload,
@@ -375,9 +377,9 @@ export class Frame {
 
 		// Defined on every implemented draft, whether or not the header marks the group's end.
 		if (status === END_OF_TRACK) {
-			if (hasProperties) throw new EndOfTrackProperties();
 			const frame = new Frame({ endOfTrack: true });
 			frame.idDelta = delta;
+			frame.hasProperties = hasProperties;
 			return frame;
 		}
 		if (delta !== 0) throw new ObjectIdGap(delta);
