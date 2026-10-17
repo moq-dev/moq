@@ -1220,6 +1220,8 @@ impl Net {
 						*state.forgot.entry(id).or_default() += 1;
 					}
 				}
+				// The batch's floor list replaces the session's regions: one left
+				// out is no longer certified, and an empty list certifies nothing.
 				state.heard.insert((from, id), view);
 				state.heard_on.insert((from, id), interest);
 			}

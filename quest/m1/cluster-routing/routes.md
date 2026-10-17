@@ -47,10 +47,13 @@ The handoff contract below, decided 2026-10-16, settles claim freshness:
   announcements while it recovers. ROUTE_END means the sender let go of the
   origin on this stream; neither is proof that the origin withdrew its
   claims (see the handoff contract). Each batch of ANNOUNCEs for a route
-  closes with one floor per region it certifies: the region, as a suffix of
-  the stream's interest prefix (empty for the whole interest), and the origin
-  revision as of which the stream's set for that route in that region is
-  complete.
+  closes with one ANNOUNCE_FLOOR listing every region the sender certifies
+  for that route: a count, then per region a suffix of the stream's interest
+  prefix (empty for the whole interest) and the origin revision as of which
+  the stream's set for that route in that region is complete. The list
+  replaces the previous one, so a region left out is no longer certified,
+  and a count of zero answers a stream whose interest none of the sender's
+  regions meets.
   ROUTE_REQUEST (node id, seqno) travels
   the other way on the same stream, toward the neighbour that sent the route,
   and so does the echo of every ROUTE_END: the receiver sends the same
@@ -65,11 +68,12 @@ The handoff contract below, decided 2026-10-16, settles claim freshness:
   ROUTE_START  node=0x7a3f seqno=41 metric=12   -> route 0
   ANNOUNCE_START prefix=transcode/ route=0 cost=10    -> announce 0
   ANNOUNCE_START prefix=transcode/foobar route=0 cost=1 -> announce 1
-  ANNOUNCE_FLOOR route=0 region= revision=7     # complete as of revision 7
+  ANNOUNCE_FLOOR route=0 count=1 ""@7           # complete as of revision 7
   ROUTE_UPDATE route=0 seqno=42 metric=15
   ANNOUNCE_END announce=1                       # this origin withdraws a claim
-  ANNOUNCE_FLOOR route=0 region= revision=8
-  ANNOUNCE_FLOOR route=1 region=live/a/ revision=3  # a scoped key: only live/a/
+  ANNOUNCE_FLOOR route=0 count=1 ""@8
+  ANNOUNCE_FLOOR route=1 count=2 "live/a/"@3 "live/b/"@5  # a scoped key
+  ANNOUNCE_FLOOR route=1 count=1 "live/b/"@6    # live/a/ is no longer certified
   ROUTE_UPDATE route=0 seqno=42 metric=inf      # held: unusable, still recovering
   ROUTE_END    route=0                          # let go: forget it on this stream
   ROUTE_END    route=0                          # <- the receiver echoes it back
@@ -445,9 +449,8 @@ loss never reports an END:
 
 Decided with the maintainer 2026-10-16, from the handoff proof:
 
-1. Floor encoding: ✅ ANNOUNCE_FLOOR (Route ID, region, revision) closes
-   each batch, and ANNOUNCEs carry no revision. The region field came with
-   decision 7. Rejected: a revision on every ANNOUNCE,
+1. Floor encoding: ✅ one ANNOUNCE_FLOOR closes each batch, and ANNOUNCEs
+   carry no revision. Its regions came with decisions 7 and 8. Rejected: a revision on every ANNOUNCE,
    which adds bytes and removes no state, since a receiver still needs each
    session's last view to apply a batch from a sender whose own view jumped;
    and the floor on ROUTE_UPDATE, which ties claim churn to route processing.
@@ -507,15 +510,20 @@ Decided with the maintainer 2026-10-16, from the handoff proof:
    implementation, which leaves the proof's freshness claim false for scoped
    delivery.
 
-Open, for the maintainer: how a batch frames its region set. The model
-replaces a session's regions with each batch's, so the wire must let a sender
-stop certifying a region it lost and answer a stream with no region at all.
-Recommended: one ANNOUNCE_FLOOR per batch carrying every region the sender
-certifies for the route, (Route ID, count, region suffix and revision per
-region); the set replaces the last, and a count of zero answers an interest
-it cannot certify. Alternative: one region per ANNOUNCE_FLOOR, where a floor
-at revision 0 (which certifies nothing) drops that region and answers an
-interest with no region; no new field, but revision 0 gains a meaning.
+8. Region-set framing: ✅ one ANNOUNCE_FLOOR per batch lists every region
+   the sender certifies for the route: (Route ID, count, then a region suffix
+   and revision per region). The list replaces the last, so a sender stops
+   certifying a region it lost by leaving it out, and a count of zero answers
+   an interest it cannot certify, which its peer needs to stop waiting
+   (`a_disjoint_interest_is_answered_with_nothing`). The common case is one
+   empty suffix, one byte over (Route ID, revision). Rejected: one region per
+   ANNOUNCE_FLOOR with revision 0 dropping a region, which gives revision 0 a
+   meaning and costs a floor per dropped region; and an end-of-batch marker,
+   a message for what one floor frames.
+
+Open, for this quest's implementation: any further wire detail of the region
+list, such as its order, is settled there with Rust and JS interop, not in
+the proof.
 
 Why not a hold-down: #4644 retracted at once and re-announced a replacement
 after 1 s, which ended a downstream front whose only path ran through the
