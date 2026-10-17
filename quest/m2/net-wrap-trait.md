@@ -47,7 +47,8 @@ Open, for the design:
 - Trait versus bridge. Weigh the trait's generic spread or `dyn` cost against
   the bridge's extra in-memory hop.
 - Scope: which of the broadcast, track, and group levels it covers, for both
-  producers and consumers.
+  producers and consumers. Datagrams are in scope too: e2ee wraps them, and
+  they have their own append and receive APIs and drop rules.
 - Generic or `dyn` in the frame write hot path. No `Send` bounds that native
   needs and wasm can't satisfy (see `rs/AGENTS.md`).
 - Group lifecycle hooks. flate's DEFLATE is group-scoped and stateful, and
@@ -56,9 +57,9 @@ Open, for the design:
 - Whether flate and json become wrappers or stay codecs above a track.
 - Benchmark trait dispatch against the bridge hop on both sides: the write
   bridge above, and its reverse for readers, where unwrapping once before a
-  local broadcast differs from unwrapping per reader. Sweep tracks × frames
-  per group, and readers on the read side, so a cost that grows with the table
-  shows up as a slope.
+  local broadcast differs from unwrapping per reader. Include a datagram
+  workload. Sweep tracks × frames per group, and readers on the read side, so
+  a cost that grows with the table shows up as a slope.
 
 ## Related
 
