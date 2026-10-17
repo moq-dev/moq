@@ -45,7 +45,7 @@ none does:
 | Hard session limit | absent unless NVML proves the consumer cap | absent, none known | absent, none known |
 | Memory headroom for this process | `VK_EXT_memory_budget` | `VK_EXT_memory_budget` | `VK_EXT_memory_budget` |
 | Memory used and total, device-wide | NVML | sysfs `mem_info_vram_*` | absent until a source is proven |
-| Video engine utilization | NVML encoder and decoder utilization | `gpu_metrics` VCN activity, where the ASIC reports it | PMU engine ticks, video class |
+| Video engine utilization | NVML encoder and decoder utilization | `gpu_metrics` VCN activity, where the ASIC reports it | PMU video engine busyness: i915 busy ticks, xe `engine-active-ticks` |
 | Health | NVML errors, `VK_ERROR_DEVICE_LOST` | DRM wedged uevent, `VK_ERROR_DEVICE_LOST` | DRM wedged uevent, `VK_ERROR_DEVICE_LOST` |
 | Model | Vulkan `deviceName` | Vulkan `deviceName` | Vulkan `deviceName` |
 
@@ -67,11 +67,16 @@ Notes on scope:
 - DRM fdinfo counters are per client. They attribute this process's use but
   cannot sum to a device-wide figure, so they back no field above.
 - Intel's PMU engine counters are device-wide per engine but need perf access
-  (`CAP_PERFMON` or a relaxed `perf_event_paranoid`); without it the field is
-  absent. Utilization is the delta between two reads.
-- The DRM wedged uevent is how amdgpu, i915, and xe declare a device dead
-  after a failed recovery. It is a one-shot event, so seeing it needs a
-  listener that outlives a single poll.
+  (`CAP_PERFMON` or a relaxed `perf_event_paranoid`). xe's engine activity
+  events are recent (GuC-backed) and listed under
+  `/sys/bus/event_source/devices/xe_*/events`; where the event or the access
+  is missing, the field is absent. Utilization is the delta between two reads.
+- amdgpu, i915, and xe send the DRM wedged uevent on resets. Its `WEDGED=`
+  recovery method decides health: `none` reports a reset the driver already
+  recovered from (amdgpu sends it after a successful ring reset), so the
+  device is usable but its work was lost; any other method means the device
+  is unusable until that recovery runs. It is a one-shot event, so seeing it
+  needs a listener that outlives a single poll.
 - NVML may not report the consumer-card encoder session cap at all; verify on
   hardware rather than assume it.
 
