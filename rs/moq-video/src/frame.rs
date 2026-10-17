@@ -714,12 +714,12 @@ impl Surface {
 	///
 	/// For what the crate knows and the surface cannot carry on its own: the
 	/// stream a decoder read, or the size a frame had before a resize. A CoreVideo
-	/// buffer names its own space and an external Vulkan image is RGB, so both
-	/// keep theirs.
+	/// buffer's attachment names only the matrix, so a label overrides it; an
+	/// external Vulkan image is RGB and takes none.
 	pub(crate) fn label(&mut self, color: Color) {
 		let slot = match self {
 			#[cfg(apple)]
-			Surface::PixelBuffer(_) => return,
+			Surface::PixelBuffer(buffer) => &mut buffer.color,
 			#[cfg(target_os = "windows")]
 			Surface::Texture(texture) => &mut texture.color,
 			#[cfg(all(target_os = "linux", feature = "nvidia"))]
@@ -1599,6 +1599,9 @@ pub mod apple {
 		pub(crate) buffer: CFRetained<CVPixelBuffer>,
 		pub(crate) width: u32,
 		pub(crate) height: u32,
+		/// The space the decoder read from the stream's VUI, which names the
+		/// primaries and transfer the matrix attachment leaves out.
+		pub(crate) color: Option<Color>,
 	}
 
 	// SAFETY: CVPixelBuffer is a reference-counted CoreFoundation wrapper around
@@ -1631,7 +1634,12 @@ pub mod apple {
 		}
 
 		pub(crate) fn new(buffer: CFRetained<CVPixelBuffer>, width: u32, height: u32) -> Self {
-			Self { buffer, width, height }
+			Self {
+				buffer,
+				width,
+				height,
+				color: None,
+			}
 		}
 
 		/// Scale into an NV12 buffer owned by the destination-size pool.
@@ -1678,16 +1686,16 @@ pub mod apple {
 			} else if name == unsafe { kCVImageBufferYCbCrMatrix_ITU_R_601_4 } {
 				Color::BT601
 			} else {
-				// BT.2020 and the P3 matrices land here. Labelling them would also
-				// need the primaries and transfer attachments, so the size guess
-				// stands in until this reads those too.
+				// BT.2020 and the P3 matrices land here. A decoded buffer carries the
+				// decoder's label instead, so only an unlabelled one guesses.
 				inferred
 			}
 		}
 
-		/// The color space these samples are in: the matrix from the buffer's
-		/// attachment paired with the range its pixel format names. `None` for a
-		/// format that names neither.
+		/// The color space these samples are in: the decoder's label, or else the
+		/// matrix from the buffer's attachment, paired with the range its pixel
+		/// format names (VideoToolbox converts to the format it was asked for).
+		/// `None` for a format that names no range.
 		pub(crate) fn color(&self) -> Option<Color> {
 			let format = CVPixelBufferGetPixelFormatType(&self.buffer);
 			let range = if format == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange {
@@ -1697,7 +1705,7 @@ pub mod apple {
 			} else {
 				return None;
 			};
-			Some(self.matrix().with_range(range))
+			Some(self.color.unwrap_or_else(|| self.matrix()).with_range(range))
 		}
 
 		/// Download an NV12 surface to packed I420 (the CPU encode path).
