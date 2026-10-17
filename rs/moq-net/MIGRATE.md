@@ -10,9 +10,6 @@ The connection stats no longer carry a receive estimate.
 Hold the consumer `Session::recv_bandwidth` returns to request PROBE, read it with `peek()` or wait with `changed()`, and drop it to stop.
 
 ```rust
-// Before
-let rate = session.stats().estimated_recv_rate;
-// After
 let bandwidth = session.recv_bandwidth();
 let rate = bandwidth.as_ref().and_then(|b| b.peek());
 ```
@@ -37,14 +34,8 @@ producer.finish().wait().await;
 
 ### `auth::Token` is `auth::Auth` (#5695)
 
+Rename `auth::Token` to `auth::Auth`.
 `auth::Handle::add` returns an `auth::Auth`, which is `Clone` and compares by identity, so a route can name it with `origin::Route::with_auth`.
-
-```rust
-// Before
-let token: auth::Token = session.auth().add(bytes).await?;
-// After
-let auth: auth::Auth = session.auth().add(bytes).await?;
-```
 
 ### Custom transports send datagrams without polling (#5770)
 
@@ -52,9 +43,6 @@ let auth: auth::Auth = session.auth().add(bytes).await?;
 It takes the payload as `Bytes`, the send group to schedule it in (`None` for ungrouped), and an order, and never blocks.
 
 ```rust
-// Before
-fn poll_send_datagram(&mut self, cx: &mut Context<'_>, payload: &[u8]) -> Poll<Result<(), Self::Error>> { ... }
-// After
 fn send_datagram(
 	&mut self,
 	payload: Bytes,
@@ -67,15 +55,7 @@ fn send_datagram(
 
 Holding a `track::Consumer` sends nothing and no longer keeps the producer used.
 Only a query, subscription, or fetch made from it counts, until it is dropped.
-Hold one of those for as long as you want the track.
-
-```rust
-// Before
-let track = broadcast.track("video")?; // kept the producer used
-// After
-let track = broadcast.track("video")?;
-let _sub = track.subscribe(None); // or `track.query()` to only learn its info
-```
+Hold one of those, such as `track.subscribe(None)` or `track.query()` to only learn its info, for as long as you want the track.
 
 ### Dynamic broadcasts see requests when they are made (#5820)
 
@@ -88,9 +68,6 @@ A `transport::poll::SendStream` declares `type Group` (`Ungrouped` when the tran
 A `transport::poll::Session` implements `send_group`, returning `None` without groups.
 
 ```rust
-// Before
-fn set_priority(&mut self, order: i32) { ... }
-// After
 type Group = Ungrouped;
 fn set_priority(&mut self, priority: i64) { ... }
 fn set_group(&mut self, group: &Ungrouped) { match *group {} }
@@ -110,26 +87,12 @@ let sub = track::Subscription::default().with_max_delay(Duration::from_secs(1));
 
 ### `cache::Pool::gc` takes a waiter
 
-Call it again when the waiter wakes, since a parked read can arm an earlier deadline than the one returned.
-
-```rust
-// Before
-let next = pool.gc(now);
-// After
-let next = pool.gc(now, &waiter);
-```
+Call `pool.gc(now, &waiter)`, and call it again when the waiter wakes, since a parked read can arm an earlier deadline than the one returned.
 
 ### A replacement track owns its start sequence (#5068)
 
 `append_group` and `append_datagram` on a track that replaces an earlier producer of the same name return `Error::Duplicate` instead of continuing past the earlier producer's sequence.
-Pick the start sequence yourself with `create_group`, or publish a new broadcast.
-
-```rust
-// Before
-let group = track.append_group()?; // continued past the earlier producer
-// After
-let group = track.create_group(group::Info { sequence })?;
-```
+Pick the start sequence yourself with `create_group(group::Info { sequence })`, or publish a new broadcast.
 
 ### Announcements are `Start`, `Update`, `End`, and `Restart` events
 
@@ -139,14 +102,6 @@ let group = track.create_group(group::Info { sequence })?;
 A newer epoch no longer ends open subscriptions with `Unroutable`; they stay on the old instance until dropped or its route goes.
 
 ```rust
-// Before
-while let Some(update) = announced.next().await {
-	if !update.kind.is_active() {
-		continue;
-	}
-	let broadcast = origin.request_broadcast(&update.prefix).await?;
-}
-// After
 while let Some(event) = announced.next().await {
 	match event {
 		announce::Event::Start(a) | announce::Event::Restart(a) => {
@@ -161,41 +116,19 @@ while let Some(event) = announced.next().await {
 ### Routes carry the publisher epoch (#4942)
 
 An epoch is a property of the route, not the path.
-`Path::join_epoch` and `Path::split_epoch` are gone; set it with `Route::with_epoch` and read `Route::epoch`.
+`Path::join_epoch` and `Path::split_epoch` are gone; publish the plain path with `route.with_epoch(epoch)` and read `Route::epoch`.
 Nothing mints an epoch by default, and a route without one does not resume across routes.
-
-```rust
-// Before
-let path = path.join_epoch(epoch);
-origin.publish(path, route);
-// After
-origin.publish(path, route.with_epoch(epoch));
-```
 
 ### `request_broadcast` takes an epoch
 
 Pass `None` to accept any publisher instance, or an `Epoch` to refuse every other one.
 A dynamic route updated to another epoch refuses the requests its handler still holds with `Unroutable`.
 
-```rust
-// Before
-let broadcast = origin.request_broadcast(path).await?;
-// After
-let broadcast = origin.request_broadcast(path, None).await?;
-```
-
 ### Demand is read through `demand()`
 
-`track::Producer`'s `is_used`, `used`, `unused`, and `poll_unused`, and `group::Producer`'s `used` and `unused`, moved to `demand()`.
+`track::Producer`'s `is_used`, `used`, `unused`, and `poll_unused`, and `group::Producer`'s `used` and `unused`, moved to `demand()`: `track.unused().await` is `track.demand().unused().await?`.
 `track::Request`, `track::Dynamic`, and `group::Request` poll it through `demand().poll_unused`, which returns `Poll<Result<()>>`: treat `Err` (the request closed) as unused too.
 A `group::Request` is withdrawn once its last `fetch_group` caller leaves, so a handler that sees it unused just drops it; a later fetch queues a fresh request, and serving the abandoned one returns `Error::Duplicate`.
-
-```rust
-// Before
-track.unused().await;
-// After
-track.demand().unused().await?;
-```
 
 ### moq-net owns its transport traits
 
@@ -215,14 +148,8 @@ impl moq_net::transport::poll::Session for MySession {
 ### Data publishes keep optional timestamps
 
 `Timed<P>` drops its clock type parameter and its `at` is an `Option<Timestamp>`.
+Build it as `Timed { value, at: Some(at) }`.
 Publish `at: None` only on an untimed track; pass a timestamp on a timed one.
-
-```rust
-// Before
-Timed::<Value, Clock>::new(value, at)
-// After
-Timed { value, at: Some(at) }
-```
 
 ### A track is timed or untimed
 
@@ -230,49 +157,22 @@ Timed { value, at: Some(at) }
 `Frame.timestamp`, `frame::Info.timestamp`, and `Datagram.timestamp` are `Option<Timestamp>`, and `group::{Producer, Consumer}::timescale()` return `Option<Timescale>`.
 A write whose timedness does not match its track fails with `TimestampMismatch`.
 Tracks from moq-lite before 05 and moq-transport without `TIMESCALE` arrive untimed instead of stamped with their arrival time.
-
-```rust
-// Before
-let track = broadcast.create_track("video", None)?; // milliseconds
-// After
-let info = track::Info::default().with_timescale(Timescale::MILLI);
-let track = broadcast.create_track("video", info)?;
-```
+To keep millisecond timestamps, pass `track::Info::default().with_timescale(Timescale::MILLI)` to `create_track` instead of `None`.
 
 ### Subscriber staleness is `max_delay`
 
 How far a group may fall behind the live edge before a subscriber skips it is no longer named `max_age`, which stays the publisher's retention on `track::Info`.
-
-```rust
-// Before
-let sub = track::Subscription::default().with_max_age(delay);
-// After
-let sub = track::Subscription::default().with_max_delay(delay);
-```
+Call `track::Subscription::with_max_delay` instead of `with_max_age`.
 
 ### Publisher retention is optional (#4242)
 
 `track::Info::max_age` is `Option<Duration>`, `None` meaning no publisher limit.
-`track::DEFAULT_MAX_AGE` and `origin::Config::default_max_age` are gone.
-
-```rust
-// Before
-let info = track::Info::default().with_max_age(track::DEFAULT_MAX_AGE);
-// After
-let info = track::Info::default().with_max_age(Duration::from_secs(30));
-```
+`track::DEFAULT_MAX_AGE` and `origin::Config::default_max_age` are gone: pass your own `Duration` to `with_max_age`.
 
 ### Route cost is one value (#4661)
 
 `Cost` is opaque: construct it with `Cost::new` and read it with `value()`.
 The `warm` and `cold` fields are gone.
-
-```rust
-// Before
-let cost = Cost { warm: 10, cold: 10 };
-// After
-let cost = Cost::new(10);
-```
 
 ### Datagrams are unfetchable and bounded by the group range (#4982)
 
@@ -299,44 +199,18 @@ A publisher that restarts its group numbering must publish under a new broadcast
 Close a broadcast with `close()`; its end carries no cause.
 `broadcast::Consumer::is_finished` is gone, and `closed()` on `Consumer` and `Dynamic` returns `()`.
 
-```rust
-// Before
-producer.finish();
-let err = consumer.closed().await;
-// After
-producer.close();
-consumer.closed().await;
-```
-
 ### No `VarInt`
 
 Varints are plain `u64`s.
-
-```rust
-// Before
-let v = VarInt::decode_quic(buf)?.into_inner();
-VarInt::try_from(v)?.encode_quic(buf);
-// After
-let v = moq_net::varint::decode_quic(buf)?;
-moq_net::varint::encode_quic(v, buf)?; // fails past varint::MAX_QUIC
-```
+Use `moq_net::varint::decode_quic(buf)` and `moq_net::varint::encode_quic(v, buf)`, which fails past `varint::MAX_QUIC`.
 
 ## 0.2 -> 0.3
 
 ### Origins (#3400, #3804)
 
-`create_broadcast(path, route)` is `origin.publish(path, route)`, or `create_broadcast(path)` then `broadcast.announce(route)`.
+`create_broadcast(path, route)` is `origin.publish(path, route)?`, or `create_broadcast(path)` then `broadcast.announce(route)`.
 `with_root` plus `scope(prefixes)` is one `scope(root, &patterns)` returning `Result`.
 `origin::Info` is `origin::Config`.
-
-```rust
-// Before
-let broadcast = origin.create_broadcast(path, route);
-let scoped = origin.with_root(root).scope(&prefixes);
-// After
-let broadcast = origin.publish(path, route)?;
-let scoped = origin.scope(root, &patterns)?;
-```
 
 ### Announcements are prefix routes (#3225, #3770)
 
