@@ -2,7 +2,7 @@
 import { Milli } from "@moq/clock";
 import * as Moq from "@moq/net";
 import { check, payload } from "../fixture.ts";
-import { longTasks } from "./observe.ts";
+import { longTasks, nextTask } from "./observe.ts";
 
 /** One transport workload: `frames` frames of `size` bytes, `group` frames per group. */
 export interface Transport {
@@ -123,6 +123,8 @@ async function consume(config: Transport): Promise<Delivery> {
 	}
 	await Promise.all(readers);
 	const end = performance.now();
+	// The final reads may still be one long task; its entry only exists once that task ends.
+	await nextTask();
 	return { frames, bytes, digest, elapsed_ms: end - start, long_tasks: longTasks(start, end) };
 }
 

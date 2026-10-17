@@ -226,7 +226,8 @@ within each round, with the starting variant rotated, after one warmup round
   rates, decode backlog, frames decoded but never painted, decoder queue depth,
   long tasks, and the watcher's heap slope. Frame counters are read at the
   window's edges, so decoded-but-unpainted can be off by a frame or two; decoder
-  queue depth comes from a thin `VideoDecoder` wrapper present in every pass.
+  queue depth (mean, and maximum within the window) comes from a thin
+  `VideoDecoder` wrapper present in every pass.
 
 Costs are split by where they run. Main-thread CPU is CDP `TaskDuration` in
 thread ticks; process CPU is each page's renderer (every thread, including
@@ -235,7 +236,8 @@ WebTransport and QUIC run, and the GPU and browser processes. Separate passes
 keep instrumentation out of timed samples: a traced pass retains a gzipped Chrome
 trace per workload and reports GC pauses and reclaimed JS heap; a counted pass
 wraps typed-array constructors, `set` and `slice` to report JS-visible bytes
-copied and allocated per payload byte; a probed pass reads each presented
+copied and allocated per payload byte during delivery, with connection setup
+subtracted; a probed pass reads each presented
 frame's painted id back to report frame delay percentiles. Native copies inside
 WebTransport and WebCodecs are unavailable, and the report says so.
 
@@ -258,7 +260,8 @@ in timing; compare timing only across a change larger than the `aa` range.
 Every transport frame carries its index and a patterned payload: timed passes
 check sampled bytes, the counted pass checks every byte, and frame counts and an
 order-independent digest must match, so skipped work cannot read as a speedup.
-CMAF output is decoded and checked byte for byte after each timed interval.
+CMAF output is decoded and checked byte for byte in a separate call after each
+phase's CPU and trace snapshots.
 Crashes, wrong bytes, missing frames, a window that presents nothing, or an
 unavailable CPU clock fail the run; timing never does. The nightly runs
 `--smoke` and keeps its run directory as the `bench-browser` artifact.

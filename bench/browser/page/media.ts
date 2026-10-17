@@ -245,14 +245,16 @@ function probe(frame: VideoFrame): void {
 		.finally(() => clone.close());
 }
 
-/** Watcher counters, read at the window's edges. */
+/** Watcher counters, read at the window's edges. The queue maximum restarts at each read. */
 function watched() {
 	const stats = player?.video.out.stats.peek();
+	const snapshot = { ...decoder };
+	decoder.queue_max = 0;
 	return {
 		presented,
 		received: stats?.frameCount ?? 0,
 		bytes: stats?.bytesReceived ?? 0,
-		decoder: { ...decoder },
+		decoder: snapshot,
 		heap: heap.length ? heap[heap.length - 1][1] : null,
 	};
 }

@@ -12,11 +12,10 @@ export interface Cmaf {
 	iterations: number;
 }
 
-/** The fragments and frames one phase handled, and its page-side cost. */
+/** The fragments and bytes one phase handled, and its page-side cost. */
 export interface Phase {
 	fragments: number;
 	bytes: number;
-	digest: number;
 	elapsed_ms: number;
 	long_tasks: { count: number; total_ms: number };
 }
@@ -37,6 +36,8 @@ const AUDIO = Catalog.AudioConfigSchema.parse({
 
 let frames: Uint8Array[] = [];
 let fragments: Uint8Array[] = [];
+// The last decode's output, or undefined after an encode.
+let decoded: Container.Cmaf.Sample[][] | undefined;
 let init: Container.Cmaf.InitSegment | undefined;
 let config: Cmaf | undefined;
 
@@ -84,14 +85,10 @@ async function encode(): Promise<Phase> {
 	}
 	const end = performance.now();
 	await nextTask();
-	const segment = init;
-	if (!segment) throw new Error("encode before prepare");
-	// Checked after the interval: the encoder must carry every frame byte for byte.
-	const digest = verify(fragments.map((fragment) => Container.Cmaf.decodeDataSegment(fragment, segment, undefined)));
+	decoded = undefined;
 	return {
 		fragments: config.iterations * frames.length,
 		bytes,
-		digest,
 		elapsed_ms: end - start,
 		long_tasks: longTasks(start, end),
 	};
@@ -102,7 +99,6 @@ async function decode(): Promise<Phase> {
 	if (!config || !segment || fragments.length !== frames.length) throw new Error("decode before encode");
 	await nextTask();
 	const start = performance.now();
-	let decoded: Container.Cmaf.Sample[][] = [];
 	let bytes = 0;
 	for (let iteration = 0; iteration < config.iterations; iteration++) {
 		decoded = fragments.map((fragment) => {
@@ -115,27 +111,35 @@ async function decode(): Promise<Phase> {
 	return {
 		fragments: config.iterations * fragments.length,
 		bytes,
-		digest: verify(decoded),
 		elapsed_ms: end - start,
 		long_tasks: longTasks(start, end),
 	};
 }
 
-function verify(decoded: Container.Cmaf.Sample[][]): number {
-	if (!config) throw new Error("verify before prepare");
+/**
+ * Digest of the last phase's output, checked byte for byte.
+ *
+ * A separate call, so the driver's CPU and trace snapshots for a phase exclude it. After
+ * encode it decodes the retained fragments, since the encoder must carry every frame.
+ */
+function verify(): number {
+	const segment = init;
+	if (!config || !segment) throw new Error("verify before prepare");
+	const samples =
+		decoded ?? fragments.map((fragment) => Container.Cmaf.decodeDataSegment(fragment, segment, undefined));
 	let digest = 0;
-	for (const [frame, samples] of decoded.entries()) {
-		if (samples.length !== 1) throw new Error(`fragment ${frame}: ${samples.length} samples`);
-		if (config.kind === "video" && samples[0].keyframe !== (frame === 0))
+	for (const [frame, sample] of samples.entries()) {
+		if (sample.length !== 1) throw new Error(`fragment ${frame}: ${sample.length} samples`);
+		if (config.kind === "video" && sample[0].keyframe !== (frame === 0))
 			throw new Error(`fragment ${frame}: keyframe flag lost`);
-		digest = (digest + check(samples[0].data, config.sizes[frame], frame, true)) >>> 0;
+		digest = (digest + check(sample[0].data, config.sizes[frame], frame, true)) >>> 0;
 	}
 	return digest;
 }
 
 declare global {
 	interface Window {
-		cmaf: { prepare: typeof prepare; encode: typeof encode; decode: typeof decode };
+		cmaf: { prepare: typeof prepare; encode: typeof encode; decode: typeof decode; verify: typeof verify };
 	}
 }
-window.cmaf = { prepare, encode, decode };
+window.cmaf = { prepare, encode, decode, verify };

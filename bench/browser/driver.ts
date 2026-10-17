@@ -372,6 +372,8 @@ async function transport(
 			consumer.page.evaluate((config) => window.transport.prepare(config), config),
 			"consumer setup",
 		);
+		// Setup copies (bundle start, connect, SUBSCRIBE plumbing) are not the stream path's.
+		const setup = pass === "counted" ? await consumer.page.evaluate(read) : undefined;
 		const before = {
 			consumer: await metrics(consumer),
 			publisher: await metrics(publisher),
@@ -403,7 +405,9 @@ async function transport(
 			throw new Error(
 				`${key} ${variant}: delivered ${delivery.frames} frames, digest ${delivery.digest} != ${expected}`,
 			);
-		const counts = pass === "counted" ? await consumer.page.evaluate(read) : undefined;
+		const total = setup && (await consumer.page.evaluate(read));
+		const counts = setup &&
+			total && { copied: total.copied - setup.copied, allocated: total.allocated - setup.allocated };
 		const row: Row = {
 			scenario: "transport",
 			key,
@@ -461,10 +465,10 @@ async function cmaf(variant: string, shape: Cmaf, round: number, pass: Pass) {
 			};
 			const events = await trace(pass, opened.page, `cmaf-${shape.kind}-${phase}-${variant}`, run);
 			const after = await metrics(opened);
+			const checked = await opened.page.evaluate(() => window.cmaf.verify());
 			if (opened.errors.length) throw new Error(opened.errors.join("; "));
 			if (!result) throw new Error("no result");
-			if (result.digest !== expected)
-				throw new Error(`${key} ${phase} ${variant}: digest ${result.digest} != ${expected}`);
+			if (checked !== expected) throw new Error(`${key} ${phase} ${variant}: digest ${checked} != ${expected}`);
 			const row: Row = {
 				scenario: "cmaf",
 				key: `${key} ${phase}`,
@@ -472,7 +476,7 @@ async function cmaf(variant: string, shape: Cmaf, round: number, pass: Pass) {
 				variant,
 				round,
 				pass,
-				delivered: { frames: result.fragments, bytes: result.bytes, digest: result.digest },
+				delivered: { frames: result.fragments, bytes: result.bytes, digest: checked },
 				metrics: {
 					wall_ms: result.elapsed_ms,
 					main_ms: (after.main_s - before.main_s) * 1000,
