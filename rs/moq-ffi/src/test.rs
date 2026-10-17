@@ -4372,6 +4372,20 @@ async fn server_new_validates_the_config() {
 		..Default::default()
 	});
 	assert!(matches!(version, Err(MoqError::Config { .. })));
+
+	// A build that cannot write qlog refuses the directory here, not later as a bind error.
+	let qlog = MoqServer::new(MoqServerConfig {
+		quic: MoqQuicConfig {
+			qlog: Some(std::env::temp_dir().display().to_string()),
+			..Default::default()
+		},
+		..Default::default()
+	});
+	if moq_qlog_supported() {
+		assert!(qlog.is_ok());
+	} else {
+		assert!(matches!(qlog, Err(MoqError::Config { .. })));
+	}
 }
 
 /// A settings UI shows these, so each must be what an unset knob actually dials with.
