@@ -196,6 +196,63 @@ machine. The nightly runs it, prints the table in the job summary, and keeps the
 results as the `bench-ffi` artifact. Each language also has its own recipe
 (`just go bench`, `just py bench`, `just kt bench`).
 
+## Browser
+
+Measure the JS transport, CMAF, and publish/watch paths in a real browser over
+real WebTransport, against a temporary relay:
+
+```bash
+nix develop --command just bench-browser
+nix develop --command just bench-browser origin/main
+nix develop --command just bench-browser --smoke
+```
+
+`bench/browser/run.sh` bundles one set of pages per variant: `current`, `aa` (an
+identical second bundle, so the A/A spread shows the noise floor), `copy` (one
+extra copy of every received stream chunk injected into `@moq/net`, the control
+that shows the suite can see a copy-heavy change), and `base` when a revision is
+given. Each variant resolves `@moq/*` from its own checkout. Variants alternate
+within each round, with the starting variant rotated, after one warmup round
+(`--rounds`, `--warmup`, `--scenarios transport,cmaf,media`).
+
+- `transport`: a publisher page writes 160 B through 1 MiB frames, a consumer page
+  subscribes and reads them all. Connection setup and fixture generation stay
+  outside the timed interval, which starts at SUBSCRIBE.
+- `cmaf`: CMAF fragment encode and decode of fixed audio (50 x 160 B) and video
+  (a 64 KiB keyframe and 29 x 4 KiB) fixtures, with no network.
+- `media`: `@moq/publish` encodes a scrolling 1280x720 canvas at 30 fps (H.264,
+  2.5 Mb/s, 1 s keyframes) and `@moq/watch` plays it on a 2D canvas. After a
+  warmup, a 10 s window reports published, received, decoded and presented frame
+  rates, decode backlog, frames decoded but never painted, decoder queue depth,
+  long tasks, and the watcher's heap slope.
+
+Costs are split by where they run. Main-thread CPU is CDP `TaskDuration` in
+thread ticks; process CPU is each page's renderer (every thread, including
+software decode) plus the browser's shared network service process, where
+WebTransport and QUIC run, and the GPU and browser processes. Separate passes
+keep instrumentation out of timed samples: a traced pass retains a gzipped Chrome
+trace per workload and reports GC pauses and reclaimed JS heap; a counted pass
+wraps typed-array constructors, `set` and `slice` to report JS-visible bytes
+copied and allocated per payload byte; a probed pass reads each presented
+frame's painted id back to report frame delay percentiles. Native copies inside
+WebTransport and WebCodecs are unavailable, and the report says so.
+
+Chromium runs headless with `--disable-gpu`, so decode and rendering are
+software on every host, and with background throttling disabled. A page that is
+not visible fails the run. `report.json` keeps every raw sample with host load,
+the browser version, flags and per-page environment, source revisions, a
+per-variant summary, and paired per-round deltas against `current` with their
+range and whether the sign held. `BROWSER_BIN` runs an identified local browser
+instead of Playwright's Chromium.
+
+Every transport frame carries its index and a patterned payload: timed passes
+check sampled bytes, the counted pass checks every byte, and frame counts and an
+order-independent digest must match, so skipped work cannot read as a speedup.
+CMAF output is decoded and checked byte for byte after each timed interval.
+Crashes, wrong bytes, missing frames, a window that presents nothing, or an
+unavailable CPU clock fail the run; timing never does. The nightly runs
+`--smoke` and keeps its run directory as the `bench-browser` artifact.
+
 ## Pattern and container coverage
 
 Rust Criterion coverage includes `moq-pattern`'s

@@ -87,6 +87,12 @@ jobs:
             chromium: true
             artifact: wasm-backend-baseline
             artifact-path: target/test
+          # Bounded: fails on crashes, missing output, or invalid samples, never on timing.
+          - name: Browser benchmark smoke
+            recipe: bench-browser --smoke
+            chromium: true
+            artifact: bench-browser
+            artifact-path: target/bench/browser
           - name: Audit
             recipe: rs audit
             uncached: true
