@@ -598,9 +598,12 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			}
 			mp4_atom::Codec::Opus(opus) => {
 				// dOps carries the OpusHead fields in ISOBMFF byte order; republish them as the
-				// OpusHead description so decoders apply its pre-skip and gain. mp4-atom already
-				// refuses a nonzero channel mapping family, so the table is never dropped here.
+				// OpusHead description so decoders apply its pre-skip and gain. A mapping table
+				// is refused rather than dropped, since the head built here is family 0.
 				let dops = &opus.dops;
+				if let Some(mapping) = &dops.channel_mapping {
+					return Err(crate::codec::opus::Error::UnsupportedMappingFamily(mapping.family).into());
+				}
 				let mut head =
 					crate::codec::opus::Config::new(dops.input_sample_rate, dops.output_channel_count as u32)
 						.with_pre_skip(dops.pre_skip);

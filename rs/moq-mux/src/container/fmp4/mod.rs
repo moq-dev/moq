@@ -884,6 +884,7 @@ pub(crate) fn synthesize_audio_trak(track_id: u32, timescale: u64, config: &Audi
 					pre_skip: head.pre_skip,
 					input_sample_rate: head.sample_rate,
 					output_gain: head.output_gain,
+					channel_mapping: None,
 				},
 				btrt: None,
 			})

@@ -692,19 +692,23 @@ fn opus_init(entry_rate: u16) -> (mp4_atom::Dops, Vec<u8>) {
 		pre_skip: 312,
 		input_sample_rate: 44_100,
 		output_gain: -1536,
+		channel_mapping: None,
 	};
+	(dops.clone(), opus_init_with(entry_rate, dops))
+}
+
+fn opus_init_with(entry_rate: u16, dops: mp4_atom::Dops) -> Vec<u8> {
 	let opus = mp4_atom::Opus {
 		audio: mp4_atom::Audio {
 			data_reference_index: 1,
-			channel_count: 2,
+			channel_count: dops.output_channel_count as u16,
 			sample_size: 16,
 			sample_rate: mp4_atom::FixedPoint::from(entry_rate),
 		},
-		dops: dops.clone(),
+		dops,
 		btrt: None,
 	};
-	let data = audio_init(super::build_audio_trak(1, 48_000, mp4_atom::Codec::from(opus)));
-	(dops, data)
+	audio_init(super::build_audio_trak(1, 48_000, mp4_atom::Codec::from(opus)))
 }
 
 /// dOps becomes the OpusHead description, and a track re-exported from that description
@@ -747,17 +751,33 @@ fn opus_catalog_uses_the_decode_rate() {
 /// A dOps with a channel mapping table is refused rather than imported without it.
 #[test]
 fn opus_dops_mapping_family_is_refused() {
-	let (_, mut data) = opus_init(48_000);
-
-	// The mapping family byte follows version, channels, pre-skip, rate, and gain.
-	let at = data.windows(4).position(|w| w == b"dOps").unwrap() + 4 + 10;
-	assert_eq!(data[at], 0);
-	data[at] = 1;
+	let data = opus_init_with(
+		48_000,
+		mp4_atom::Dops {
+			output_channel_count: 2,
+			pre_skip: 312,
+			input_sample_rate: 48_000,
+			output_gain: 0,
+			channel_mapping: Some(mp4_atom::OpusChannelMapping {
+				family: 1,
+				stream_count: 1,
+				coupled_count: 1,
+				channel_mapping: vec![0, 1],
+			}),
+		},
+	);
 
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
 	let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog.reserve());
-	assert!(fmp4.decode(&bytes::BytesMut::from(data.as_slice())).is_err());
+	let err = fmp4.decode(&bytes::BytesMut::from(data.as_slice())).unwrap_err();
+	assert!(
+		matches!(
+			err,
+			crate::Error::Opus(crate::codec::opus::Error::UnsupportedMappingFamily(1))
+		),
+		"{err:?}"
+	);
 	assert!(catalog.snapshot().audio.renditions.is_empty());
 }
 

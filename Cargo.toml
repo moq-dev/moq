@@ -258,6 +258,8 @@ zeroize = { version = "1", features = ["derive"] }
 # this, the lock carries a second kio whose pin drifts behind the member, and the
 # next publish that reaches both fails to resolve a single version (#3551).
 kio = { path = "rs/kio" }
+# TEMP: carries the dOps channel mapping until kixelated/mp4-atom#246 releases.
+mp4-atom = { git = "https://github.com/kixelated/mp4-atom", branch = "dops-channel-mapping" }
 
 [profile.dev]
 # Full DWARF is what makes a debug build enormous: the debug `libmoq_ffi.a`

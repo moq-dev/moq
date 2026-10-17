@@ -5279,8 +5279,7 @@ dependencies = [
 [[package]]
 name = "mp4-atom"
 version = "0.16.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b6f6638ef4f165c7eb423d7ab9666fff423c8ab53f0dc67ec523aa49530729a7"
+source = "git+https://github.com/kixelated/mp4-atom?branch=dops-channel-mapping#6cb4683d98372b0bb8c209d32bdb11332b33c7fd"
 dependencies = [
  "bytes",
  "derive_more 2.1.1",
