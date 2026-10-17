@@ -2408,7 +2408,7 @@ impl Producer {
 		self.state.read().max_sequence
 	}
 
-	/// Poll for the track's largest frame; see [`Self::largest`].
+	/// Poll for the track's largest frame: the current one, then each newer one, and `None` once the track ends.
 	pub fn poll_largest(&mut self, waiter: &kio::Waiter) -> Poll<Option<Position>> {
 		let cache = self.state.read().cache.clone();
 		poll_largest(&cache, &mut self.largest, waiter, |waiter| {
@@ -3365,7 +3365,7 @@ impl Consumer {
 		})
 	}
 
-	/// Poll for the track's largest frame; see [`Self::largest`].
+	/// Poll for the track's largest frame: the current one, then each newer one, and `None` once the track ends.
 	pub fn poll_largest(&mut self, waiter: &kio::Waiter) -> Poll<Option<Position>> {
 		let mut seen = self.largest;
 		let next = self.poll_largest_after(&mut seen, waiter);
@@ -4854,7 +4854,7 @@ impl Subscriber {
 		channel.update(subscription)
 	}
 
-	/// Poll for the track's largest frame; see [`Self::largest`].
+	/// Poll for the track's largest frame: the current one, then each newer one, and `None` once the track ends.
 	pub fn poll_largest(&mut self, waiter: &kio::Waiter) -> Poll<Option<Position>> {
 		match &mut self.inner {
 			Inner::Plain(cursor) => {
@@ -5011,7 +5011,7 @@ impl Ordered {
 		kio::wait(|waiter| self.poll_finished(waiter)).await
 	}
 
-	/// Poll for the track's largest frame; see [`Self::largest`].
+	/// Poll for the track's largest frame: the current one, then each newer one, and `None` once the track ends.
 	pub fn poll_largest(&mut self, waiter: &kio::Waiter) -> Poll<Option<Position>> {
 		self.inner.poll_largest(waiter)
 	}
