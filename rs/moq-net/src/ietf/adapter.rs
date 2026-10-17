@@ -10,6 +10,7 @@ use crate::{
 	Error, PathOwned,
 	coding::{Decode, Decoder, Encoder, Reader, Writer},
 	ietf::{self, RequestId},
+	transport::{Credit, Unheld},
 };
 
 use super::{Control, Message, Version, control::RequestPermit};
@@ -159,12 +160,20 @@ impl VirtualRecvStream {
 	}
 }
 
+/// The routed control messages a virtual stream holds were complete when the real control
+/// stream handed them off, so their connection credit is already returned.
 impl crate::transport::poll::RecvStream for VirtualRecvStream {
 	type Error = crate::Error;
+	type Credit = Unheld;
+	type Stopper = VirtualStopper;
 
-	fn poll_read(&mut self, cx: &mut Context<'_>, dst: &mut [u8]) -> Poll<Result<Option<usize>, Self::Error>> {
+	fn stopper(&self) -> VirtualStopper {
+		VirtualStopper(self.rx.clone())
+	}
+
+	fn poll_read(&mut self, cx: &mut Context<'_>, dst: &mut [u8]) -> Poll<Result<Option<Unheld>, Self::Error>> {
 		if dst.is_empty() {
-			return Poll::Ready(Ok(Some(0)));
+			return Poll::Ready(Ok(Some(Unheld(0))));
 		}
 
 		std::task::ready!(self.poll_fill(cx));
@@ -175,16 +184,16 @@ impl crate::transport::poll::RecvStream for VirtualRecvStream {
 		let n = dst.len().min(self.buffer.len());
 		dst[..n].copy_from_slice(&self.buffer[..n]);
 		self.buffer.advance(n);
-		Poll::Ready(Ok(Some(n)))
+		Poll::Ready(Ok(Some(Unheld(n as u64))))
 	}
 
 	fn poll_read_buf<B: BufMut>(
 		&mut self,
 		cx: &mut Context<'_>,
 		buf: &mut B,
-	) -> Poll<Result<Option<usize>, Self::Error>> {
+	) -> Poll<Result<Option<Unheld>, Self::Error>> {
 		if !buf.has_remaining_mut() {
-			return Poll::Ready(Ok(Some(0)));
+			return Poll::Ready(Ok(Some(Unheld(0))));
 		}
 
 		std::task::ready!(self.poll_fill(cx));
@@ -194,12 +203,16 @@ impl crate::transport::poll::RecvStream for VirtualRecvStream {
 
 		let n = buf.remaining_mut().min(self.buffer.len());
 		buf.put(self.buffer.split_to(n));
-		Poll::Ready(Ok(Some(n)))
+		Poll::Ready(Ok(Some(Unheld(n as u64))))
 	}
 
-	fn poll_read_chunk(&mut self, cx: &mut Context<'_>, max: usize) -> Poll<Result<Option<Bytes>, Self::Error>> {
+	fn poll_read_chunk(
+		&mut self,
+		cx: &mut Context<'_>,
+		max: usize,
+	) -> Poll<Result<Option<(Bytes, Unheld)>, Self::Error>> {
 		if max == 0 {
-			return Poll::Ready(Ok(Some(Bytes::new())));
+			return Poll::Ready(Ok(Some((Bytes::new(), Unheld(0)))));
 		}
 
 		std::task::ready!(self.poll_fill(cx));
@@ -208,7 +221,7 @@ impl crate::transport::poll::RecvStream for VirtualRecvStream {
 		}
 
 		let n = max.min(self.buffer.len());
-		Poll::Ready(Ok(Some(self.buffer.split_to(n))))
+		Poll::Ready(Ok(Some((self.buffer.split_to(n), Unheld(n as u64)))))
 	}
 
 	fn stop(&mut self, _code: u32) {
@@ -232,6 +245,15 @@ impl crate::transport::poll::RecvStream for VirtualRecvStream {
 				Poll::Pending => return Poll::Pending,
 			}
 		}
+	}
+}
+
+/// Stops a [`VirtualRecvStream`] without borrowing it, discarding what is routed to it.
+pub struct VirtualStopper(Queue<Bytes>);
+
+impl crate::transport::Stopper for VirtualStopper {
+	fn stop(&self, _code: u32) {
+		self.0.close();
 	}
 }
 
@@ -469,13 +491,73 @@ pub enum AdapterRecv<S: crate::transport::poll::Session> {
 	Virtual(VirtualRecvStream),
 }
 
+/// The credit of an [`AdapterRecv`]: the real stream's, or none for a virtual one.
+pub enum AdapterCredit<C> {
+	Real(C),
+	Virtual(Unheld),
+}
+
+impl<C: Credit> Credit for AdapterCredit<C> {
+	fn len(&self) -> u64 {
+		match self {
+			Self::Real(c) => c.len(),
+			Self::Virtual(c) => c.len(),
+		}
+	}
+
+	fn split(&mut self, bytes: u64) -> Self {
+		match self {
+			Self::Real(c) => Self::Real(c.split(bytes)),
+			Self::Virtual(c) => Self::Virtual(c.split(bytes)),
+		}
+	}
+
+	fn merge(&mut self, other: Self) {
+		match (self, other) {
+			(Self::Real(c), Self::Real(other)) => c.merge(other),
+			(Self::Virtual(c), Self::Virtual(other)) => c.merge(other),
+			_ => panic!("merged a real stream's credit with a virtual one's"),
+		}
+	}
+}
+
+type RealCredit<S> = <<S as crate::transport::poll::Session>::RecvStream as crate::transport::poll::RecvStream>::Credit;
+type RealStopper<S> =
+	<<S as crate::transport::poll::Session>::RecvStream as crate::transport::poll::RecvStream>::Stopper;
+
+/// Stops an [`AdapterRecv`] without borrowing it.
+pub enum AdapterStopper<T> {
+	Real(T),
+	Virtual(VirtualStopper),
+}
+
+impl<T: crate::transport::Stopper> crate::transport::Stopper for AdapterStopper<T> {
+	fn stop(&self, code: u32) {
+		match self {
+			Self::Real(s) => s.stop(code),
+			Self::Virtual(s) => s.stop(code),
+		}
+	}
+}
+
 impl<S: crate::transport::poll::Session> crate::transport::poll::RecvStream for AdapterRecv<S> {
 	type Error = crate::Error;
+	type Credit = AdapterCredit<RealCredit<S>>;
+	type Stopper = AdapterStopper<RealStopper<S>>;
 
-	fn poll_read(&mut self, cx: &mut Context<'_>, dst: &mut [u8]) -> Poll<Result<Option<usize>, Self::Error>> {
+	fn stopper(&self) -> Self::Stopper {
 		match self {
-			Self::Real(s) => s.poll_read(cx, dst).map(|r| r.map_err(|_| crate::Error::Closed)),
-			Self::Virtual(s) => s.poll_read(cx, dst),
+			Self::Real(s) => AdapterStopper::Real(s.stopper()),
+			Self::Virtual(s) => AdapterStopper::Virtual(s.stopper()),
+		}
+	}
+
+	fn poll_read(&mut self, cx: &mut Context<'_>, dst: &mut [u8]) -> Poll<Result<Option<Self::Credit>, Self::Error>> {
+		match self {
+			Self::Real(s) => s
+				.poll_read(cx, dst)
+				.map(|r| r.map(|c| c.map(AdapterCredit::Real)).map_err(|_| crate::Error::Closed)),
+			Self::Virtual(s) => s.poll_read(cx, dst).map_ok(|c| c.map(AdapterCredit::Virtual)),
 		}
 	}
 
@@ -483,17 +565,28 @@ impl<S: crate::transport::poll::Session> crate::transport::poll::RecvStream for 
 		&mut self,
 		cx: &mut Context<'_>,
 		buf: &mut B,
-	) -> Poll<Result<Option<usize>, Self::Error>> {
+	) -> Poll<Result<Option<Self::Credit>, Self::Error>> {
 		match self {
-			Self::Real(s) => s.poll_read_buf(cx, buf).map(|r| r.map_err(|_| crate::Error::Closed)),
-			Self::Virtual(s) => s.poll_read_buf(cx, buf),
+			Self::Real(s) => s
+				.poll_read_buf(cx, buf)
+				.map(|r| r.map(|c| c.map(AdapterCredit::Real)).map_err(|_| crate::Error::Closed)),
+			Self::Virtual(s) => s.poll_read_buf(cx, buf).map_ok(|c| c.map(AdapterCredit::Virtual)),
 		}
 	}
 
-	fn poll_read_chunk(&mut self, cx: &mut Context<'_>, max: usize) -> Poll<Result<Option<Bytes>, Self::Error>> {
+	fn poll_read_chunk(
+		&mut self,
+		cx: &mut Context<'_>,
+		max: usize,
+	) -> Poll<Result<Option<(Bytes, Self::Credit)>, Self::Error>> {
 		match self {
-			Self::Real(s) => s.poll_read_chunk(cx, max).map(|r| r.map_err(|_| crate::Error::Closed)),
-			Self::Virtual(s) => s.poll_read_chunk(cx, max),
+			Self::Real(s) => s.poll_read_chunk(cx, max).map(|r| {
+				r.map(|c| c.map(|(b, c)| (b, AdapterCredit::Real(c))))
+					.map_err(|_| crate::Error::Closed)
+			}),
+			Self::Virtual(s) => s
+				.poll_read_chunk(cx, max)
+				.map_ok(|c| c.map(|(b, c)| (b, AdapterCredit::Virtual(c)))),
 		}
 	}
 
@@ -1213,6 +1306,10 @@ impl<S: crate::transport::poll::Session> crate::transport::poll::Session for Con
 		self.inner.poll_closed(cx).map(|_| crate::Error::Closed)
 	}
 
+	fn poll_credit_exhausted(&mut self, cx: &mut Context<'_>) -> Poll<()> {
+		self.inner.poll_credit_exhausted(cx)
+	}
+
 	fn stats(&self) -> impl crate::transport::Stats {
 		self.inner.stats()
 	}
@@ -1392,14 +1489,14 @@ mod tests {
 				.unwrap();
 			let (_, mut recv) = shared.incoming.pop().await.unwrap();
 			assert_eq!(
-				recv.read_chunk(usize::MAX).await.unwrap(),
+				recv.read_chunk(usize::MAX).await.unwrap().map(|(b, _)| b),
 				Some(Bytes::from_static(b"request"))
 			);
 
 			assert_eq!(routed, target_id, "{version}: update {update_id} routed to {routed}");
 			shared.push(routed, raw.clone());
 			assert_eq!(
-				recv.read_chunk(usize::MAX).await.unwrap(),
+				recv.read_chunk(usize::MAX).await.unwrap().map(|(b, _)| b),
 				Some(raw),
 				"{version}: update {update_id} did not reach {target_id}"
 			);
@@ -1463,12 +1560,12 @@ mod tests {
 
 		// Read initial data
 		let mut buf = [0u8; 32];
-		let n = stream.read(&mut buf).await.unwrap().unwrap();
+		let n = stream.read(&mut buf).await.unwrap().unwrap().0 as usize;
 		assert_eq!(&buf[..n], b"initial");
 
 		// Send follow-up
 		tx.push(Bytes::from_static(b"followup"));
-		let n = stream.read(&mut buf).await.unwrap().unwrap();
+		let n = stream.read(&mut buf).await.unwrap().unwrap().0 as usize;
 		assert_eq!(&buf[..n], b"followup");
 
 		// Drop the writer → FIN
@@ -1484,14 +1581,14 @@ mod tests {
 
 		// Read small chunks
 		let mut buf = [0u8; 5];
-		let n = stream.read(&mut buf).await.unwrap().unwrap();
+		let n = stream.read(&mut buf).await.unwrap().unwrap().0 as usize;
 		assert_eq!(&buf[..n], b"hello");
 
-		let n = stream.read(&mut buf).await.unwrap().unwrap();
+		let n = stream.read(&mut buf).await.unwrap().unwrap().0 as usize;
 		assert_eq!(&buf[..n], b" worl");
 
 		let mut buf = [0u8; 1];
-		let n = stream.read(&mut buf).await.unwrap().unwrap();
+		let n = stream.read(&mut buf).await.unwrap().unwrap().0 as usize;
 		assert_eq!(&buf[..n], b"d");
 	}
 
@@ -1589,7 +1686,7 @@ mod tests {
 		// Drain the advertisement the stream opened with, so both halves are quiescent
 		// and a later read only sees what the terminal message routes.
 		assert_eq!(
-			recv.read_chunk(usize::MAX).await.unwrap(),
+			recv.read_chunk(usize::MAX).await.unwrap().map(|(b, _)| b),
 			Some(encode_msg(&msg, version))
 		);
 		recv

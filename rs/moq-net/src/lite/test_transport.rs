@@ -315,8 +315,11 @@ pub struct PendingRecv;
 
 impl poll::RecvStream for PendingRecv {
 	type Error = SinkError;
+	type Credit = crate::transport::Unheld;
+	type Stopper = ();
+	fn stopper(&self) {}
 
-	fn poll_read(&mut self, _cx: &mut Context<'_>, _dst: &mut [u8]) -> Poll<Result<Option<usize>, Self::Error>> {
+	fn poll_read(&mut self, _cx: &mut Context<'_>, _dst: &mut [u8]) -> Poll<Result<Option<Self::Credit>, Self::Error>> {
 		Poll::Pending
 	}
 
@@ -362,8 +365,11 @@ pub struct DeadRecv(ResetError);
 
 impl poll::RecvStream for DeadRecv {
 	type Error = ResetError;
+	type Credit = crate::transport::Unheld;
+	type Stopper = ();
+	fn stopper(&self) {}
 
-	fn poll_read(&mut self, _cx: &mut Context<'_>, _dst: &mut [u8]) -> Poll<Result<Option<usize>, Self::Error>> {
+	fn poll_read(&mut self, _cx: &mut Context<'_>, _dst: &mut [u8]) -> Poll<Result<Option<Self::Credit>, Self::Error>> {
 		Poll::Ready(Err(self.0))
 	}
 
@@ -489,6 +495,10 @@ impl poll::Session for DeadStreamSession {
 
 	fn poll_closed(&mut self, _cx: &mut Context<'_>) -> Poll<Self::Error> {
 		Poll::Pending
+	}
+
+	fn poll_credit_exhausted(&mut self, _cx: &mut std::task::Context<'_>) -> std::task::Poll<()> {
+		std::task::Poll::Pending
 	}
 
 	fn stats(&self) -> impl crate::transport::Stats {
@@ -705,6 +715,10 @@ impl poll::Session for SinkSession {
 		Poll::Pending
 	}
 
+	fn poll_credit_exhausted(&mut self, _cx: &mut std::task::Context<'_>) -> std::task::Poll<()> {
+		std::task::Poll::Pending
+	}
+
 	fn stats(&self) -> impl crate::transport::Stats {
 		*self.stats.lock().unwrap()
 	}
@@ -761,10 +775,26 @@ pub enum Close {
 	Reset,
 }
 
+/// Records a [`ScriptedRecv`]'s stops from outside it, as its own `stop` does.
+#[derive(Clone)]
+pub struct ScriptedStopper(Log);
+
+impl crate::transport::Stopper for ScriptedStopper {
+	fn stop(&self, code: u32) {
+		self.0.stops.lock().unwrap().push(code);
+	}
+}
+
 impl poll::RecvStream for ScriptedRecv {
 	type Error = SinkError;
+	type Credit = crate::transport::Unheld;
+	type Stopper = ScriptedStopper;
 
-	fn poll_read(&mut self, _cx: &mut Context<'_>, dst: &mut [u8]) -> Poll<Result<Option<usize>, Self::Error>> {
+	fn stopper(&self) -> ScriptedStopper {
+		ScriptedStopper(self.log.clone())
+	}
+
+	fn poll_read(&mut self, _cx: &mut Context<'_>, dst: &mut [u8]) -> Poll<Result<Option<Self::Credit>, Self::Error>> {
 		let take = {
 			let mut script = self.script.lock().unwrap();
 			if script.is_empty() {
@@ -783,7 +813,7 @@ impl poll::RecvStream for ScriptedRecv {
 				Some(Close::Reset) => Poll::Ready(Err(SinkError)),
 				None => Poll::Pending,
 			},
-			take => Poll::Ready(Ok(Some(take))),
+			take => Poll::Ready(Ok(Some(crate::transport::Unheld(take as u64)))),
 		}
 	}
 
@@ -1034,6 +1064,10 @@ impl poll::Session for ScriptedSession {
 
 	fn poll_closed(&mut self, _cx: &mut Context<'_>) -> Poll<Self::Error> {
 		Poll::Pending
+	}
+
+	fn poll_credit_exhausted(&mut self, _cx: &mut std::task::Context<'_>) -> std::task::Poll<()> {
+		std::task::Poll::Pending
 	}
 
 	fn stats(&self) -> impl crate::transport::Stats {

@@ -8,7 +8,7 @@ use std::time::Instant;
 
 use bytes::Bytes;
 use moq_quic::{ConnectionHandle, Dir, StreamId, VarInt};
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use super::super::{Error, SEGMENT};
 use super::endpoint;
@@ -58,6 +58,9 @@ pub(crate) struct State {
 	/// driver's per-event path, and moq-quic assigns the ids.
 	readable: FxHashMap<StreamId, kio::WaiterList>,
 	writable: FxHashMap<StreamId, kio::WaiterList>,
+	/// Receive streams a [`Stopper`](super::Stopper) stopped, so their handle's next read
+	/// fails rather than reading the discarded tail as the stream's end.
+	stopped: FxHashSet<StreamId>,
 	/// Send streams waiting for their end: a FIN the peer acknowledged, or a
 	/// `STOP_SENDING`.
 	finishing: FxHashMap<StreamId, kio::WaiterList>,
@@ -72,6 +75,11 @@ pub(crate) struct State {
 	sends: FxHashMap<StreamId, Option<End>>,
 
 	datagram_recv_waiters: kio::WaiterList,
+
+	/// Held credit filled the receive window since
+	/// [`Connection::poll_credit_exhausted`] last resolved.
+	credit_exhausted: bool,
+	credit_waiters: kio::WaiterList,
 
 	/// The terminal error, set exactly once; everything fails with it after.
 	closed: Option<Error>,
@@ -99,9 +107,12 @@ impl State {
 			open_waiters: kio::WaiterList::new(),
 			readable: FxHashMap::default(),
 			writable: FxHashMap::default(),
+			stopped: FxHashSet::default(),
 			finishing: FxHashMap::default(),
 			sends: FxHashMap::default(),
 			datagram_recv_waiters: kio::WaiterList::new(),
+			credit_exhausted: false,
+			credit_waiters: kio::WaiterList::new(),
 			closed: None,
 			closed_waiters: kio::WaiterList::new(),
 			dead: false,
@@ -121,6 +132,7 @@ impl State {
 	/// be parked.
 	fn forget_recv(&mut self, id: StreamId) {
 		self.readable.remove(&id);
+		self.stopped.remove(&id);
 	}
 
 	/// Terminate with `err` (the first one wins) and wake absolutely everyone,
@@ -153,6 +165,18 @@ impl Inner {
 	/// The terminal error, if the connection has one.
 	pub(crate) fn closed(&self) -> Option<Error> {
 		self.state.borrow().closed.clone()
+	}
+
+	/// Note when held credit comes to fill the receive window, waking whoever
+	/// watches for it.
+	///
+	/// Call after anything that holds, returns, or discards connection credit.
+	pub(crate) fn check_credit(&self) {
+		if self.conn.borrow_mut().poll_credit_exhausted() {
+			let mut state = self.state.borrow_mut();
+			state.credit_exhausted = true;
+			state.credit_waiters.wake();
+		}
 	}
 
 	/// Wake the driver so it flushes what a handle just queued.
@@ -234,6 +258,21 @@ impl Inner {
 	/// The same for the read half, which parks on its own table.
 	pub(crate) fn forget_recv(&self, id: StreamId) {
 		self.state.borrow_mut().forget_recv(id);
+	}
+
+	/// Record that a [`Stopper`](super::Stopper) stopped receive stream `id`, waking a read
+	/// parked on it: a stop produces no readable event.
+	pub(crate) fn stop_recv(&self, id: StreamId) {
+		let mut state = self.state.borrow_mut();
+		state.stopped.insert(id);
+		if let Some(mut waiters) = state.readable.remove(&id) {
+			waiters.wake();
+		}
+	}
+
+	/// Whether a [`Stopper`](super::Stopper) stopped receive stream `id`.
+	pub(crate) fn recv_stopped(&self, id: StreamId) -> bool {
+		self.state.borrow().stopped.contains(&id)
 	}
 
 	/// Wake anyone parked on stream `id` being readable.
@@ -375,6 +414,23 @@ impl Connection {
 	/// Returns connection statistics.
 	pub fn stats(&self) -> moq_quic::ConnectionStats {
 		self.shared.conn.borrow().stats()
+	}
+
+	/// Poll until held [`Credit`](super::Credit) fills the receive window: the
+	/// peer may send nothing more and every byte it sent is held, so no stream
+	/// makes progress until some credit is dropped.
+	///
+	/// Resolves once per stall, and again only after more credit is held or
+	/// credit drops without relieving it.
+	pub fn poll_credit_exhausted(&mut self, cx: &mut Context<'_>) -> Poll<()> {
+		let waiter = self.park.hold(cx);
+		let mut state = self.shared.state.borrow_mut();
+		// Credit may have dropped since the stall was noted.
+		if std::mem::take(&mut state.credit_exhausted) && self.shared.conn.borrow().stats().credit.exhausted() {
+			return Poll::Ready(());
+		}
+		waiter.register(&mut state.credit_waiters);
+		Poll::Pending
 	}
 }
 
@@ -736,6 +792,9 @@ impl Driver {
 		loop {
 			self.endpoint_events();
 			self.sweep();
+			// Data for a stopped stream or a reset returns its credit, possibly
+			// without relieving a stall.
+			self.shared.check_credit();
 
 			if self.shared.state.borrow().dead {
 				return Poll::Ready(());

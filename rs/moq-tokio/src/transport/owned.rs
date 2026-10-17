@@ -1,6 +1,6 @@
 use bytes::{Buf, BufMut, Bytes};
 use moq_net::transport::{self as moq, poll};
-use std::task::{Context, Poll};
+use std::task::{Context, Poll, ready};
 use web_transport_trait::{self as wt, poll as backend};
 
 /// A backend failure preserving the session and stream code registries.
@@ -47,7 +47,9 @@ impl<S: wt::Stats> moq::Stats for Stats<S> {
 		self.0.estimated_send_rate()
 	}
 }
-impl<S: super::Grouped<SendStream: 'static, RecvStream: 'static>> poll::Session for super::Session<S> {
+impl<S: super::HeldSession<SendStream: 'static, RecvStream: 'static> + super::Grouped> poll::Session
+	for super::Session<S>
+{
 	type SendStream = super::SendStream<S::SendStream>;
 	type RecvStream = super::RecvStream<S::RecvStream>;
 	type Error = Error<S::Error>;
@@ -92,6 +94,9 @@ impl<S: super::Grouped<SendStream: 'static, RecvStream: 'static>> poll::Session 
 	fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Self::Error> {
 		backend::Session::poll_closed(self, cx).map(Error)
 	}
+	fn poll_credit_exhausted(&mut self, cx: &mut Context<'_>) -> Poll<()> {
+		super::HeldSession::poll_credit_exhausted(&self.session, cx)
+	}
 	fn stats(&self) -> impl moq::Stats {
 		Stats(backend::Session::stats(self))
 	}
@@ -121,20 +126,39 @@ impl<S: super::GroupedSend + 'static> poll::SendStream for super::SendStream<S> 
 		backend::SendStream::poll_closed(self, cx).map_err(Error)
 	}
 }
-impl<S: wt::RecvStream + 'static> poll::RecvStream for super::RecvStream<S> {
+impl<S: super::HeldRecvStream + 'static> poll::RecvStream for super::RecvStream<S> {
 	type Error = Error<S::Error>;
-	fn poll_read(&mut self, cx: &mut Context<'_>, dst: &mut [u8]) -> Poll<Result<Option<usize>, Self::Error>> {
-		backend::RecvStream::poll_read(self, cx, dst).map_err(Error)
+	type Credit = super::Credit<S::Credit>;
+	type Stopper = S::Stopper;
+	fn stopper(&self) -> S::Stopper {
+		self.stopper.clone()
+	}
+	fn poll_read(&mut self, cx: &mut Context<'_>, dst: &mut [u8]) -> Poll<Result<Option<Self::Credit>, Self::Error>> {
+		let read = ready!(self.poll_read_held(cx, dst.len())).map_err(Error)?;
+		Poll::Ready(Ok(read.map(|(bytes, credit)| {
+			dst[..bytes.len()].copy_from_slice(&bytes);
+			credit
+		})))
 	}
 	fn poll_read_buf<B: BufMut>(
 		&mut self,
 		cx: &mut Context<'_>,
 		buf: &mut B,
-	) -> Poll<Result<Option<usize>, Self::Error>> {
-		backend::RecvStream::poll_read_buf(self, cx, buf).map_err(Error)
+	) -> Poll<Result<Option<Self::Credit>, Self::Error>> {
+		// Hand over the chunk the backend owns, without zeroing a destination first.
+		let max = buf.remaining_mut().min(64 * 1024);
+		let read = ready!(self.poll_read_held(cx, max)).map_err(Error)?;
+		Poll::Ready(Ok(read.map(|(bytes, credit)| {
+			buf.put(bytes);
+			credit
+		})))
 	}
-	fn poll_read_chunk(&mut self, cx: &mut Context<'_>, max: usize) -> Poll<Result<Option<Bytes>, Self::Error>> {
-		backend::RecvStream::poll_read_chunk(self, cx, max).map_err(Error)
+	fn poll_read_chunk(
+		&mut self,
+		cx: &mut Context<'_>,
+		max: usize,
+	) -> Poll<Result<Option<(Bytes, Self::Credit)>, Self::Error>> {
+		self.poll_read_held(cx, max).map_err(Error)
 	}
 	fn stop(&mut self, code: u32) {
 		backend::RecvStream::stop(self, code)

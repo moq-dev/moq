@@ -269,40 +269,35 @@ impl RecvStream {
 		}
 	}
 
-	/// Read into `dst`, keeping the connection flow control credit for exactly
-	/// the bytes read, or `None` once the peer has finished the stream.
+	/// Read up to `max` bytes, keeping the connection flow control credit for
+	/// exactly the bytes read, or `None` once the peer has finished the stream.
 	///
 	/// Stream credit still advances, so a stream window smaller than an
 	/// application message keeps the message flowing, while the connection
 	/// window these bytes occupy stays spent until the credit is dropped.
-	pub fn poll_read_held(&mut self, cx: &mut Context<'_>, dst: &mut [u8]) -> Poll<Result<Option<Credit>, Error>> {
+	pub fn poll_read_held(&mut self, cx: &mut Context<'_>, max: usize) -> Poll<Result<Option<(Bytes, Credit)>, Error>> {
 		let mut held = moq_quic::Credit::default();
-		self.poll_read_into(cx, dst, Some(&mut held)).map_ok(|read| {
-			read.map(|_| Credit {
+		let chunk = ready!(self.poll_chunk(cx, max, Some(&mut held)))?;
+		Poll::Ready(Ok(chunk.map(|bytes| {
+			let credit = Credit {
 				shared: self.shared.clone(),
 				inner: held,
-			})
-		})
+			};
+			(bytes, credit)
+		})))
 	}
 
-	/// [`poll_read`](web_transport_trait::poll::RecvStream::poll_read), with
-	/// the credit for the bytes read moved into `held` instead of returned to
-	/// the peer.
-	fn poll_read_into(
-		&mut self,
-		cx: &mut Context<'_>,
-		dst: &mut [u8],
-		held: Option<&mut moq_quic::Credit>,
-	) -> Poll<Result<Option<usize>, Error>> {
-		let Some(chunk) = ready!(self.poll_chunk(cx, dst.len(), held))? else {
+	/// [`poll_read`](web_transport_trait::poll::RecvStream::poll_read), which
+	/// returns the credit for the bytes read to the peer.
+	fn poll_read_plain(&mut self, cx: &mut Context<'_>, dst: &mut [u8]) -> Poll<Result<Option<usize>, Error>> {
+		let Some(chunk) = ready!(self.poll_chunk(cx, dst.len(), None))? else {
 			return Poll::Ready(Ok(None));
 		};
 		dst[..chunk.len()].copy_from_slice(&chunk);
 		Poll::Ready(Ok(Some(chunk.len())))
 	}
 
-	/// [`poll_read_chunk`](web_transport_trait::poll::RecvStream::poll_read_chunk),
-	/// with the credit for the bytes read moved into `held` instead of
+	/// Up to `max` bytes, with the credit for them moved into `held` or else
 	/// returned to the peer.
 	fn poll_chunk(
 		&mut self,
@@ -323,6 +318,11 @@ impl RecvStream {
 		match Self::read(&self.shared, self.id, max, held) {
 			// moq-quic hands out at most `max`.
 			Read::Chunk(bytes) => Poll::Ready(Ok(Some(bytes))),
+			// What a stop discarded is not the stream's end.
+			Read::Finished if self.shared.recv_stopped(self.id) => {
+				self.stopped = true;
+				Poll::Ready(Err(Error::Quic("stream stopped".to_string())))
+			}
 			Read::Finished => {
 				self.finished = true;
 				Poll::Ready(Ok(None))
@@ -344,6 +344,14 @@ impl RecvStream {
 		self.finished || self.stopped
 	}
 
+	/// A handle that stops this stream without borrowing it.
+	pub fn stopper(&self) -> Stopper {
+		Stopper {
+			shared: self.shared.clone(),
+			id: self.id,
+		}
+	}
+
 	/// [`stop`](web_transport_trait::poll::RecvStream::stop) with a
 	/// full-width code, for the WebTransport HTTP/3 error mapping.
 	pub(crate) fn stop_code(&mut self, code: u64) {
@@ -360,6 +368,7 @@ impl RecvStream {
 			.recv_stream(self.id)
 			.stop(VarInt::from_u64(code).unwrap_or(VarInt::MAX));
 		self.stopped = true;
+		self.shared.check_credit();
 		self.shared.kick();
 	}
 
@@ -393,6 +402,7 @@ impl RecvStream {
 		if transmit {
 			shared.kick();
 		}
+		shared.check_credit();
 		read
 	}
 
@@ -419,7 +429,7 @@ impl web_transport_trait::poll::RecvStream for RecvStream {
 	type Error = Error;
 
 	fn poll_read(&mut self, cx: &mut Context<'_>, dst: &mut [u8]) -> Poll<Result<Option<usize>, Self::Error>> {
-		self.poll_read_into(cx, dst, None)
+		self.poll_read_plain(cx, dst)
 	}
 
 	fn poll_read_chunk(&mut self, cx: &mut Context<'_>, max: usize) -> Poll<Result<Option<Bytes>, Self::Error>> {
@@ -455,6 +465,11 @@ impl web_transport_trait::poll::RecvStream for RecvStream {
 			}
 			match Self::read(&self.shared, self.id, READ_CHUNK, Some(&mut self.backlog_credit)) {
 				Read::Chunk(bytes) => self.backlog.extend_from_slice(&bytes),
+				// What a stop discarded is not the stream's end, so the next read fails.
+				Read::Finished if self.shared.recv_stopped(self.id) => {
+					self.stopped = true;
+					return Poll::Ready(Ok(()));
+				}
 				Read::Finished => {
 					self.finished = true;
 					return Poll::Ready(Ok(()));
@@ -469,6 +484,41 @@ impl web_transport_trait::poll::RecvStream for RecvStream {
 				Read::Reset(code) => return Poll::Ready(Err(Error::Reset(code))),
 			}
 		}
+	}
+}
+
+/// Stops a [`RecvStream`] without borrowing it.
+///
+/// The stream's own handle learns of it on its next read, which fails as stopped, and a
+/// read parked on the stream is woken for it. What its closed-watch read ahead stays with
+/// that handle until it stops or drops.
+#[derive(Clone)]
+pub struct Stopper {
+	shared: Shared,
+	id: StreamId,
+}
+
+impl Stopper {
+	/// Stop the stream with `code`, as [`stop`](web_transport_trait::poll::RecvStream::stop)
+	/// does.
+	pub fn stop(&self, code: u32) {
+		self.stop_code(code.into());
+	}
+
+	/// [`RecvStream::stop_code`] from outside the stream.
+	pub(crate) fn stop_code(&self, code: u64) {
+		let stopped = self
+			.shared
+			.conn
+			.borrow_mut()
+			.recv_stream(self.id)
+			.stop(VarInt::from_u64(code).unwrap_or(VarInt::MAX));
+		// Err means the stream is already gone, which is what we wanted.
+		if stopped.is_ok() {
+			self.shared.stop_recv(self.id);
+		}
+		self.shared.check_credit();
+		self.shared.kick();
 	}
 }
 
@@ -502,6 +552,7 @@ fn release(shared: &Shared, credit: moq_quic::Credit) {
 	if shared.conn.borrow_mut().release(credit).should_transmit() {
 		shared.kick();
 	}
+	shared.check_credit();
 }
 
 /// Connection flow control credit for bytes read with

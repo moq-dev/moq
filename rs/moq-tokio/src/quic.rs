@@ -107,11 +107,15 @@ pub const DEFAULT_MAX_STREAMS: u64 = 10_000;
 
 /// Default connection-wide receive window, used when [`Config::receive_window`] is unset.
 ///
-/// Bounds how much unread data one peer can make us buffer across all of its streams,
-/// which the backends otherwise leave unlimited. Sized so a relay-to-relay session, which
-/// shares one connection, can still sustain several Gbps at intercontinental RTTs.
+/// Bounds how much unread data and incomplete messages one peer can make us buffer across
+/// all of its streams, which the backends otherwise leave unlimited. On iroh, which returns
+/// credit as it reads, it bounds only the unread data. Sized to fit the
+/// largest message with room to spare, so a relay-to-relay session, which shares one
+/// connection, can still sustain several Gbps at intercontinental RTTs.
 #[cfg(any(feature = "quic", feature = "iroh"))]
-pub(crate) const DEFAULT_RECEIVE_WINDOW: u64 = 64 << 20;
+pub(crate) const DEFAULT_RECEIVE_WINDOW: u64 = 128 << 20;
+#[cfg(any(feature = "quic", feature = "iroh"))]
+const _: () = assert!(DEFAULT_RECEIVE_WINDOW >= moq_net::transport::MIN_RECEIVE_WINDOW);
 
 /// Default idle timeout before an inactive connection is dropped.
 ///
@@ -231,7 +235,12 @@ pub struct Config {
 	pub congestion_control: Option<CongestionControl>,
 
 	/// Connection-wide receive window, in bytes: how much data the peer may have
-	/// in flight across every stream at once. Defaults to 64 MiB.
+	/// in flight or in incomplete messages across every stream at once. Defaults to
+	/// 128 MiB, and must fit the largest message a session assembles, just over 64 MiB.
+	///
+	/// iroh returns credit as it reads, so there this bounds only unread data, and
+	/// incomplete messages are bounded by [`max_streams`](Self::max_streams) streams
+	/// of up to the largest message each.
 	///
 	/// Raise it when a fat, long path is idling below the link rate: the window
 	/// has to cover the bandwidth-delay product or the peer stalls waiting for
@@ -245,10 +254,13 @@ pub struct Config {
 	)]
 	pub receive_window: Option<u64>,
 
-	/// Per-stream receive window, in bytes. Unset leaves the backend default.
+	/// Per-stream receive window, in bytes. Unset follows
+	/// [`receive_window`](Self::receive_window).
 	///
-	/// Keep it below [`receive_window`](Self::receive_window) so one slow group
-	/// can't starve the rest of the connection.
+	/// Stream credit returns as bytes are read, whether or not their message is
+	/// complete, so a smaller window only adds round trips to a large frame. The
+	/// connection window bounds what incomplete messages hold, and when they fill
+	/// it the least urgent stream is cancelled.
 	#[serde(skip_serializing_if = "Option::is_none")]
 	#[usage(
 		name = "quic-stream-receive-window",
@@ -607,9 +619,17 @@ const MAX_VARINT: u64 = (1 << 62) - 1;
 /// Zero is rejected everywhere: a window of zero credits nothing, so it would wedge
 /// the connection rather than tighten it. The receive windows additionally have to
 /// fit a varint, since they are sent as transport parameters; the send window is
-/// local bookkeeping and only has to be non-zero.
+/// local bookkeeping and only has to be non-zero. The connection receive window has
+/// to fit the largest message, which holds its credit until it is complete.
 #[cfg(feature = "_transport")]
 fn validate_windows(quic: &Config) -> crate::Result<()> {
+	if let Some(window) = quic.receive_window
+		&& window < moq_net::transport::MIN_RECEIVE_WINDOW
+	{
+		return Err(crate::Error::ReceiveWindowTooSmall(
+			moq_net::transport::MIN_RECEIVE_WINDOW,
+		));
+	}
 	for (name, window, wire) in [
 		("receive_window", quic.receive_window, true),
 		("stream_receive_window", quic.stream_receive_window, true),
@@ -655,9 +675,9 @@ pub struct Resolved {
 	pub mtu_discovery: bool,
 	/// Congestion control override, or `None` for the default.
 	pub congestion_control: Option<CongestionControl>,
-	/// Connection-wide receive window in bytes, or `None` for the 64 MiB default.
+	/// Connection-wide receive window in bytes, or `None` for the 128 MiB default.
 	pub receive_window: Option<u64>,
-	/// Per-stream receive window in bytes, or `None` for the backend default.
+	/// Per-stream receive window in bytes, or `None` to follow the connection window.
 	pub stream_receive_window: Option<u64>,
 	/// Cap on unacknowledged outgoing data in bytes, or `None` for the backend default.
 	pub send_window: Option<u64>,
@@ -923,13 +943,6 @@ mod tests {
 	fn zero_windows_are_rejected() {
 		for (name, config) in [
 			(
-				"receive_window",
-				Config {
-					receive_window: Some(0),
-					..Default::default()
-				},
-			),
-			(
 				"stream_receive_window",
 				Config {
 					stream_receive_window: Some(0),
@@ -979,6 +992,29 @@ mod tests {
 			..Default::default()
 		};
 		assert!(at_limit.validate().is_ok());
+	}
+
+	/// Incomplete messages hold connection credit, so a connection window that can't fit
+	/// the largest one could stall it forever.
+	#[cfg(feature = "_transport")]
+	#[test]
+	fn the_receive_window_fits_the_largest_message() {
+		let min = moq_net::transport::MIN_RECEIVE_WINDOW;
+		for window in [0, min - 1] {
+			let config = Config {
+				receive_window: Some(window),
+				..Default::default()
+			};
+			assert!(matches!(
+				config.validate(),
+				Err(crate::Error::ReceiveWindowTooSmall(got)) if got == min
+			));
+		}
+		let config = Config {
+			receive_window: Some(min),
+			..Default::default()
+		};
+		assert!(config.validate().is_ok());
 	}
 
 	#[test]

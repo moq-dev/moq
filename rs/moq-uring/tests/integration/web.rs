@@ -82,8 +82,8 @@ type ClientFuture = std::pin::Pin<Box<dyn Future<Output = ()> + Send>>;
 async fn read_all(recv: &mut moq_tokio::quic::web::RecvStream) -> Vec<u8> {
 	let mut out = Vec::new();
 	let mut buf = [0u8; 4096];
-	while let Some(n) = recv.read(&mut buf).await.expect("read") {
-		out.extend_from_slice(&buf[..n]);
+	while let Some(credit) = recv.read(&mut buf).await.expect("read") {
+		out.extend_from_slice(&buf[..credit.len() as usize]);
 	}
 	out
 }
@@ -495,7 +495,7 @@ fn a_dropped_stream_carries_a_webtransport_code() {
 			// The server writes this and then drops the stream unfinished.
 			let mut recv = session.accept_uni().await.expect("accept_uni");
 			let mut buf = [0u8; 4096];
-			let n = recv.read(&mut buf).await.expect("read").expect("payload");
+			let n = recv.read(&mut buf).await.expect("read").expect("payload").len() as usize;
 			assert_eq!(&buf[..n], PAYLOAD);
 
 			// Tell it we have the payload, so the reset below cannot race it.

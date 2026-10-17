@@ -1770,6 +1770,48 @@ async fn stream_drop_removes_blocked_reader() {
     }
 }
 
+/// A read parked on a stream wakes when a `Stopper` stops it, and fails as closed.
+#[tokio::test]
+async fn stopper_wakes_a_parked_read() {
+    let _guard = subscribe();
+    let endpoint_factory = EndpointFactory::new();
+    let server = endpoint_factory.endpoint();
+    let server_address = server.local_addr().unwrap();
+    let client = endpoint_factory.endpoint();
+
+    let server_task = tokio::spawn(async move {
+        let conn = server.accept().await.unwrap().await.unwrap();
+        let mut stream = conn.accept_uni().await.unwrap();
+        let mut buf = [0u8; 5];
+        stream.read_exact(&mut buf).await.unwrap();
+
+        let stopper = stream.stopper();
+        let (waker, wake_counter) = new_count_waker();
+        let mut cx = Context::from_waker(&waker);
+        let mut buf = [0u8; 64];
+        let read_fut = stream.read(&mut buf);
+        tokio::pin!(read_fut);
+        assert!(matches!(read_fut.as_mut().poll(&mut cx), Poll::Pending));
+
+        stopper.stop(0u32.into()).unwrap();
+        assert_eq!(wake_counter.wakes(), 1, "the parked read was not woken");
+        assert!(matches!(
+            read_fut.as_mut().poll(&mut cx),
+            Poll::Ready(Err(crate::quic::driver::ReadError::ClosedStream))
+        ));
+        conn.close(0u32.into(), b"done");
+    });
+
+    let conn = client
+        .connect(server_address, "localhost")
+        .unwrap()
+        .await
+        .unwrap();
+    let mut stream = conn.open_uni().await.unwrap();
+    stream.write_all(b"hello").await.unwrap();
+    server_task.await.unwrap();
+}
+
 /// Test that dropping a `RecvStream` after cancelling a read and then
 /// explicitly `stop`ing it doesn't panic.
 #[tokio::test]
@@ -1902,12 +1944,129 @@ async fn held_reads_spend_the_connection_window() {
     writer.await.unwrap();
 }
 
+/// Held chunks filling the window resolve `poll_credit_exhausted` once, and plain reads after the
+/// credit drops never do.
+#[tokio::test]
+async fn filling_the_window_with_held_credit_is_reported_once() {
+    const WINDOW: usize = 32 * 1024;
+    let _guard = subscribe();
+    let mut transport = TransportConfig::default();
+    transport.receive_window((WINDOW as u32).into());
+    let endpoint = endpoint_with_config(transport);
+
+    let (client, server) = tokio::try_join!(
+        endpoint
+            .connect(endpoint.local_addr().unwrap(), "localhost")
+            .unwrap(),
+        async { endpoint.accept().await.unwrap().await }
+    )
+    .unwrap();
+    let mut send = client.open_uni().await.unwrap();
+    let writer = tokio::spawn(async move {
+        // The receiver walks away before this finishes.
+        let _ = send.write_all(&[7; 4 * WINDOW]).await;
+    });
+
+    let (waker, counter) = new_count_waker();
+    let mut cx = Context::from_waker(&waker);
+    assert!(server.poll_credit_exhausted(&mut cx).is_pending());
+
+    let mut recv = server.accept_uni().await.unwrap();
+    let mut held = recv.read_chunk(usize::MAX, true).await.unwrap().unwrap().1;
+    while (held.len() as usize) < WINDOW {
+        held.merge(recv.read_chunk(usize::MAX, true).await.unwrap().unwrap().1);
+    }
+    assert_eq!(counter.wakes(), 1);
+    assert!(server.poll_credit_exhausted(&mut cx).is_ready());
+    assert!(server.poll_credit_exhausted(&mut cx).is_pending());
+
+    drop(held);
+    let mut buf = vec![0; WINDOW];
+    recv.read_exact(&mut buf).await.unwrap();
+    assert!(server.poll_credit_exhausted(&mut cx).is_pending());
+    assert_eq!(counter.wakes(), 1);
+    drop(recv);
+    writer.await.unwrap();
+}
+
+/// Stream 256 MiB over loopback, reading chunks whose credit returns inside the read, or drops
+/// straight after it as `read_chunk` does: the per-read cost of handing credit to the caller.
+/// Run by nightly.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "release benchmark, run by nightly"]
+async fn benchmark_held_reads() {
+    const BYTES: usize = 256 << 20;
+    const RUNS: usize = 3;
+    let _guard = subscribe();
+    println!("max_chunk,reads,plain_ns_per_read,held_ns_per_read");
+    for max in [1200usize, 16 * 1024, 64 * 1024] {
+        let mut ns = [f64::MAX; 2];
+        let mut reads = 0;
+        // Alternate the modes so drift in the host hits both alike; keep each best run.
+        for _ in 0..RUNS {
+            for (mode, held) in [false, true].into_iter().enumerate() {
+                let endpoint = endpoint();
+                let (client, server) = tokio::try_join!(
+                    endpoint
+                        .connect(endpoint.local_addr().unwrap(), "localhost")
+                        .unwrap(),
+                    async { endpoint.accept().await.unwrap().await }
+                )
+                .unwrap();
+                let mut send = client.open_uni().await.unwrap();
+                let writer = tokio::spawn(async move {
+                    let block = vec![7u8; 1 << 20];
+                    for _ in 0..BYTES / block.len() {
+                        send.write_all(&block).await.unwrap();
+                    }
+                    send.finish().unwrap();
+                    // Keep the connection up until the reader is done.
+                    let _ = send.stopped().await;
+                });
+
+                let mut recv = server.accept_uni().await.unwrap();
+                let (mut read, mut count) = (0, 0);
+                let start = std::time::Instant::now();
+                loop {
+                    let len = if held {
+                        match recv.read_chunk(max, true).await.unwrap() {
+                            Some((chunk, credit)) => {
+                                drop(credit);
+                                chunk.bytes.len()
+                            }
+                            None => break,
+                        }
+                    } else {
+                        // `read_to_end`'s path, which returns the credit before handing over.
+                        match std::future::poll_fn(|cx| recv.poll_read_chunk(cx, max, true))
+                            .await
+                            .unwrap()
+                        {
+                            Some(chunk) => chunk.bytes.len(),
+                            None => break,
+                        }
+                    };
+                    read += len;
+                    count += 1;
+                }
+                let elapsed = start.elapsed().as_nanos() as f64 / count as f64;
+                assert_eq!(read, BYTES);
+                ns[mode] = ns[mode].min(elapsed);
+                reads = count;
+                drop(recv);
+                writer.await.unwrap();
+            }
+        }
+        println!("{max},{reads},{:.1},{:.1}", ns[0], ns[1]);
+    }
+}
+
 /// Fill `buf` with held reads, returning the credit for all of it.
 async fn read_held_exact(recv: &mut RecvStream, buf: &mut [u8]) -> Credit {
-    let mut held = recv.read_held(buf).await.unwrap().unwrap();
+    let mut held = recv.read(buf).await.unwrap().unwrap();
     while (held.len() as usize) < buf.len() {
         let read = held.len() as usize;
-        held.merge(recv.read_held(&mut buf[read..]).await.unwrap().unwrap());
+        held.merge(recv.read(&mut buf[read..]).await.unwrap().unwrap());
     }
     held
 }

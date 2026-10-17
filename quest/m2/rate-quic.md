@@ -18,8 +18,8 @@ backpressure the peer cannot ignore, rather than metering and closing.
   so a modified client cannot exceed the cap. An honest one goes
   flow-control limited (its congestion controller does not back off) and
   queues until [the grant](/quest/m2/rate-grant.md) clamps its encoder.
-  Keep rate pacing separate from the connection memory allowance in
-  [message assembly](/quest/m1/quic/receive-memory.md). The memory allowance
+  Keep rate pacing separate from the connection memory allowance that
+  message assembly holds credit against. The memory allowance
   must fit the largest supported encoded unit even when it takes many rate
   intervals to receive. Limit each grant by both rate allowance and available
   memory backing; do not wait for a whole-message credit release to grant
@@ -90,4 +90,3 @@ that a one-second rate window can also be the complete assembly allowance.
 ## Required
 
 - [Peer limits](/quest/m1/quic/peer-limits.md) - adds the runtime `set_limits(Limits)` seam and shrink-as-debt behavior this extends
-- [Bound message assembly](/quest/m1/quic/receive-memory.md) - separate retained memory from paced outstanding credit

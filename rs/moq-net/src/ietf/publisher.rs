@@ -614,6 +614,8 @@ pub(super) struct Publisher<S: crate::transport::poll::Session> {
 	// Subscriptions the peer may hold at once (`session::Limits::subscriptions`).
 	pub(super) subscriptions: crate::session::Slots,
 	pub(super) fetches: crate::session::Slots,
+	/// Tracks each stream this half opens.
+	pub(super) pressure: crate::pressure::Pressure<crate::pressure::Erased>,
 	// Ranks every subscription's group streams against each other for the transport.
 	priority: PriorityQueue,
 }
@@ -690,6 +692,7 @@ where
 			owed: Default::default(),
 			subscriptions: Default::default(),
 			fetches: Default::default(),
+			pressure: Default::default(),
 			priority: Default::default(),
 		}
 	}
@@ -3323,7 +3326,12 @@ where
 	/// peer is waiting on us to retire. Failing instead keeps the loop moving.
 	async fn open_request(&self) -> Result<Option<Stream<S, Version>>, Error> {
 		let mut session = self.session.clone();
-		let mut open = std::pin::pin!(Stream::open(&mut session, self.version));
+		let pressure = self.pressure.clone();
+		let mut open = std::pin::pin!(async {
+			let mut stream = Stream::open(&mut session, self.version).await?;
+			stream.reader.track(&pressure, crate::pressure::Rank::Control);
+			Ok(stream)
+		});
 		let mut timeout = crate::time::Deadline::after(&self.runtime, ADVERTISE_TIMEOUT);
 
 		kio::wait(|waiter| {

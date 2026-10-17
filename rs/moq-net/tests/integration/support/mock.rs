@@ -23,7 +23,7 @@ use std::{
 use bytes::{Buf, BufMut, Bytes};
 use moq_net::{
 	time::Instant,
-	transport::{memory, poll},
+	transport::{Credit as _, memory, poll},
 };
 
 use super::harness::now;
@@ -283,20 +283,22 @@ impl Drop for MockSendStream {
 // ── RecvStream ──────────────────────────────────────────────────────
 
 /// What the transport handed over: a chunk, the FIN, or an error.
-type Event = Result<Option<Bytes>, memory::Error>;
+type Event = Result<Option<(Bytes, memory::Credit)>, memory::Error>;
 
 /// A receive stream that delivers each event once its arrival has passed.
 pub struct MockRecvStream {
 	/// Taken once this side stops reading.
 	inner: Option<memory::RecvStream>,
+	/// What [`MockStopper`] stops, kept because `inner` goes once this side stops.
+	stopper: memory::Stopper,
 	line: Arc<Line>,
 	conn: Arc<Conn>,
 	/// The next event, read from the transport but still crossing the link.
 	flight: Option<(Instant, Event)>,
 	/// The arrival a wake is already scheduled for, so each flight schedules one.
 	landing: Option<Instant>,
-	/// The rest of a chunk a smaller read split.
-	buf: Bytes,
+	/// The rest of a chunk a smaller read split, with its credit.
+	buf: Option<(Bytes, memory::Credit)>,
 	/// Data chunks handed to the reader so far.
 	chunks: usize,
 	park: kio::Park,
@@ -305,12 +307,13 @@ pub struct MockRecvStream {
 impl MockRecvStream {
 	fn new(inner: memory::RecvStream, line: Arc<Line>, conn: Arc<Conn>) -> Self {
 		Self {
+			stopper: poll::RecvStream::stopper(&inner),
 			inner: Some(inner),
 			line,
 			conn,
 			flight: None,
 			landing: None,
-			buf: Bytes::new(),
+			buf: None,
 			chunks: 0,
 			park: Default::default(),
 		}
@@ -381,43 +384,79 @@ impl MockRecvStream {
 	}
 }
 
+/// Stops a [`MockRecvStream`] without borrowing it, telling the writer once the latency
+/// has passed.
+#[derive(Clone)]
+pub struct MockStopper {
+	inner: memory::Stopper,
+	conn: Arc<Conn>,
+}
+
+impl moq_net::transport::Stopper for MockStopper {
+	fn stop(&self, code: u32) {
+		let latency = self.conn.latency();
+		if latency.is_zero() {
+			return moq_net::transport::Stopper::stop(&self.inner, code);
+		}
+		let inner = self.inner.clone();
+		drop(moq_clock::sim::spawn(async move {
+			moq_clock::sleep(latency).await;
+			moq_net::transport::Stopper::stop(&inner, code);
+		}));
+	}
+}
+
 impl poll::RecvStream for MockRecvStream {
 	type Error = memory::Error;
+	type Credit = memory::Credit;
+	type Stopper = MockStopper;
 
-	fn poll_read(&mut self, cx: &mut Context<'_>, dst: &mut [u8]) -> Poll<Result<Option<usize>, Self::Error>> {
-		let Some(chunk) = ready!(self.poll_read_chunk(cx, dst.len()))? else {
+	fn stopper(&self) -> MockStopper {
+		MockStopper {
+			inner: self.stopper.clone(),
+			conn: self.conn.clone(),
+		}
+	}
+
+	fn poll_read(&mut self, cx: &mut Context<'_>, dst: &mut [u8]) -> Poll<Result<Option<Self::Credit>, Self::Error>> {
+		let Some((chunk, credit)) = ready!(self.poll_read_chunk(cx, dst.len()))? else {
 			return Poll::Ready(Ok(None));
 		};
 		dst[..chunk.len()].copy_from_slice(&chunk);
-		Poll::Ready(Ok(Some(chunk.len())))
+		Poll::Ready(Ok(Some(credit)))
 	}
 
 	fn poll_read_buf<B: BufMut>(
 		&mut self,
 		cx: &mut Context<'_>,
 		buf: &mut B,
-	) -> Poll<Result<Option<usize>, Self::Error>> {
+	) -> Poll<Result<Option<Self::Credit>, Self::Error>> {
 		let max = buf.remaining_mut().min(64 * 1024);
-		let Some(chunk) = ready!(self.poll_read_chunk(cx, max))? else {
+		let Some((chunk, credit)) = ready!(self.poll_read_chunk(cx, max))? else {
 			return Poll::Ready(Ok(None));
 		};
-		let size = chunk.len();
 		buf.put(chunk);
-		Poll::Ready(Ok(Some(size)))
+		Poll::Ready(Ok(Some(credit)))
 	}
 
-	fn poll_read_chunk(&mut self, cx: &mut Context<'_>, max: usize) -> Poll<Result<Option<Bytes>, Self::Error>> {
-		if max == 0 {
-			return Poll::Ready(Ok(Some(Bytes::new())));
-		}
-		if self.buf.is_empty() {
+	fn poll_read_chunk(
+		&mut self,
+		cx: &mut Context<'_>,
+		max: usize,
+	) -> Poll<Result<Option<(Bytes, Self::Credit)>, Self::Error>> {
+		if self.buf.is_none() {
 			match ready!(self.poll_event(cx))? {
-				Some(chunk) => self.buf = chunk,
+				Some(chunk) => self.buf = Some(chunk),
 				None => return Poll::Ready(Ok(None)),
 			}
 		}
-		let size = max.min(self.buf.len());
-		Poll::Ready(Ok(Some(self.buf.split_to(size))))
+		let (buf, credit) = self.buf.as_mut().expect("filled above");
+		let size = max.min(buf.len());
+		let chunk = (buf.split_to(size), credit.split(size as u64));
+		if buf.is_empty() {
+			self.buf = None;
+		}
+		Poll::Ready(Ok(Some(chunk)))
 	}
 
 	fn stop(&mut self, code: u32) {
@@ -634,6 +673,10 @@ impl poll::Session for MockSession {
 
 	fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Self::Error> {
 		self.inner.poll_closed(cx)
+	}
+
+	fn poll_credit_exhausted(&mut self, cx: &mut Context<'_>) -> Poll<()> {
+		self.inner.poll_credit_exhausted(cx)
 	}
 
 	fn stats(&self) -> impl moq_net::transport::Stats {

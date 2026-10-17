@@ -2,7 +2,7 @@ use std::{
     any::Any,
     fmt,
     future::Future,
-    io,
+    io, mem,
     net::{IpAddr, SocketAddr},
     pin::Pin,
     sync::{
@@ -647,6 +647,25 @@ impl Connection {
         self.0.state.lock("stats").inner.stats()
     }
 
+    /// Poll until held [`Credit`](crate::quic::driver::Credit) fills the receive window: the peer
+    /// may send nothing more and every byte it sent is held, so no stream makes progress until
+    /// some credit is dropped.
+    ///
+    /// Resolves once per stall, and again only after more credit is held or credit drops without
+    /// relieving it. Only the most recent task to poll is woken.
+    pub fn poll_credit_exhausted(&self, cx: &mut Context<'_>) -> Poll<()> {
+        let mut conn = self.0.state.lock("poll_credit_exhausted");
+        // Credit may have dropped since the stall was noted.
+        if mem::take(&mut conn.credit_exhausted) && conn.inner.stats().credit.exhausted() {
+            return Poll::Ready(());
+        }
+        match conn.credit_waker.as_mut() {
+            Some(waker) => waker.clone_from(cx.waker()),
+            None => conn.credit_waker = Some(cx.waker().clone()),
+        }
+        Poll::Pending
+    }
+
     /// Current state of the congestion control algorithm, for debugging purposes
     pub fn congestion_state(&self) -> Box<dyn Controller> {
         self.0
@@ -1059,6 +1078,11 @@ pub(crate) struct State {
     pub(crate) blocked_writers: FxHashMap<StreamId, Waker>,
     pub(crate) blocked_readers: FxHashMap<StreamId, Waker>,
     pub(crate) stopped: FxHashMap<StreamId, Arc<Notify>>,
+    /// Held credit filled the receive window since [`Connection::poll_credit_exhausted`] last
+    /// resolved
+    credit_exhausted: bool,
+    /// The task watching for held credit to fill the receive window
+    credit_waker: Option<Waker>,
     /// Always set to Some before the connection becomes drained
     pub(crate) error: Option<ConnectionError>,
     sender: Pin<Box<dyn UdpSender>>,
@@ -1094,6 +1118,8 @@ impl State {
             blocked_writers: FxHashMap::default(),
             blocked_readers: FxHashMap::default(),
             stopped: FxHashMap::default(),
+            credit_exhausted: false,
+            credit_waker: None,
             error: None,
             sender,
             send_buffer: Vec::new(),
@@ -1262,6 +1288,9 @@ impl State {
                 _ => {}
             }
         }
+        // Data for a stopped stream or a reset returns its credit, possibly without relieving
+        // a stall.
+        self.check_credit();
     }
 
     fn drive_timer(&mut self, cx: &mut Context<'_>) -> bool {
@@ -1301,6 +1330,18 @@ impl State {
         self.inner.handle_timeout(Instant::now());
         self.timer_deadline = None;
         true
+    }
+
+    /// Note when held credit comes to fill the receive window, waking the task watching for it.
+    ///
+    /// Call after anything that holds, returns, or discards connection credit.
+    pub(crate) fn check_credit(&mut self) {
+        if self.inner.poll_credit_exhausted() {
+            self.credit_exhausted = true;
+            if let Some(waker) = self.credit_waker.take() {
+                waker.wake();
+            }
+        }
     }
 
     /// Wake up a blocked `Driver` task to process I/O

@@ -134,6 +134,10 @@ pub(crate) struct StreamsState {
     /// Bytes read with [`Chunks::hold`](super::Chunks::hold) whose connection credit the
     /// application has not released yet
     pub(super) held: u64,
+    /// Connection credit returned for received bytes so far: read, released, or discarded
+    credited: u64,
+    /// Held credit was left filling the window since the application last asked
+    pub(crate) stalled: bool,
     /// Which connection [`Credit`]s handed out here belong to
     pub(super) tag: ConnectionTag,
     /// Total quantity of outgoing data retained in send buffers, including acknowledged data
@@ -202,6 +206,8 @@ impl StreamsState {
             data_sent: 0,
             data_recvd: 0,
             held: 0,
+            credited: 0,
+            stalled: false,
             tag: ConnectionTag::next(),
             buffered_data: 0,
             send_window,
@@ -1060,6 +1066,14 @@ impl StreamsState {
     /// suppress sending further updates until the window increases significantly
     /// again.
     pub(super) fn add_read_credits(&mut self, credits: u64) -> ShouldTransmit {
+        self.credited += credits;
+        debug_assert!(
+            self.credited + self.held <= self.data_recvd,
+            "credited {} and held {} past the {} bytes received",
+            self.credited,
+            self.held,
+            self.data_recvd
+        );
         if credits > self.receive_window_shrink_debt {
             let net_credits = credits - self.receive_window_shrink_debt;
             self.local_max_data = self.local_max_data.saturating_add(net_credits);
@@ -1067,6 +1081,10 @@ impl StreamsState {
         } else {
             self.receive_window_shrink_debt -= credits;
         }
+
+        // Every change to held or returned credit ends here, a hold included (its `finalize`
+        // returns nothing), so this sees each moment that leaves the window stalled.
+        self.stalled |= self.held > 0 && self.credit_stats().exhausted();
 
         ShouldTransmit(self.max_data_due())
     }
@@ -1107,6 +1125,7 @@ impl StreamsState {
         CreditStats {
             held: self.held,
             available: self.local_max_data.saturating_sub(self.data_recvd),
+            unread: self.data_recvd - self.credited - self.held,
         }
     }
 
@@ -2424,6 +2443,8 @@ mod tests {
 
         // credit, expecting all of them added to local_max_data
         let credits = 1024u64;
+        // As if that many bytes arrived and were read: credit never outruns what was received.
+        server.data_recvd += credits;
         let should_transmit = server.add_read_credits(credits);
         assert_eq!(server.receive_window_shrink_debt, 0);
         assert_eq!(server.local_max_data, prev_local_max_data + credits);
@@ -2449,6 +2470,7 @@ mod tests {
         let credits = 1024u64;
         for _ in 0..2 {
             let expected_receive_window_shrink_debt = server.receive_window_shrink_debt - credits;
+            server.data_recvd += credits;
             let should_transmit = server.add_read_credits(credits);
             assert_eq!(
                 server.receive_window_shrink_debt,
@@ -2463,6 +2485,7 @@ mod tests {
         let prev_local_max_data = server.local_max_data;
         let expected_local_max_data =
             server.local_max_data + (credits - server.receive_window_shrink_debt);
+        server.data_recvd += credits;
         let _should_transmit = server.add_read_credits(credits);
         assert_eq!(server.receive_window_shrink_debt, 0);
         assert_eq!(server.local_max_data, expected_local_max_data);
@@ -2471,6 +2494,7 @@ mod tests {
         // credit again, all should be added to local_max_data
         let credits = 1024 * 512;
         let expected_local_max_data = server.local_max_data + credits;
+        server.data_recvd += credits;
         let should_transmit = server.add_read_credits(credits);
         assert_eq!(server.receive_window_shrink_debt, 0);
         assert_eq!(server.local_max_data, expected_local_max_data);
@@ -3124,6 +3148,8 @@ mod tests {
         Stop,
         Reset,
         StopThenReset,
+        ResetThenStop,
+        ReliableReset,
     }
 
     fn data(client: &mut StreamsState, id: StreamId, offset: u64, len: usize, fin: bool) {
@@ -3170,7 +3196,14 @@ mod tests {
     /// it takes and whether the held bytes are released before or after its state is reclaimed.
     #[test]
     fn held_credit_returns_once() {
-        for end in [End::Fin, End::Stop, End::Reset, End::StopThenReset] {
+        for end in [
+            End::Fin,
+            End::Stop,
+            End::Reset,
+            End::StopThenReset,
+            End::ResetThenStop,
+            End::ReliableReset,
+        ] {
             let mut client = make(Side::Client);
             let initial = client.local_max_data;
             let id = StreamId::new(Side::Server, Dir::Uni, 0);
@@ -3236,6 +3269,34 @@ mod tests {
                     reset(&mut client, id, 128);
                     128
                 }
+                End::ResetThenStop => {
+                    // The reset returns what it abandons past its Reliable Size; the stop adds
+                    // only the gap below it, which the reset still owed.
+                    let _ = client
+                        .received_reset(reset_at(id, 0, 128, Some(48)))
+                        .unwrap();
+                    let mut pending = Retransmits::default();
+                    RecvStream {
+                        id,
+                        state: &mut client,
+                        pending: &mut pending,
+                    }
+                    .stop(0u32.into())
+                    .unwrap();
+                    128
+                }
+                End::ReliableReset => {
+                    // Data past the Reliable Size is dropped on arrival, and reading the owed
+                    // bytes reaches the reset.
+                    let _ = client
+                        .received_reset(reset_at(id, 0, 128, Some(48)))
+                        .unwrap();
+                    data(&mut client, id, 32, 32, false);
+                    let owed = read_held(&mut client, id);
+                    assert_eq!(owed.len(), 16, "{end:?}");
+                    let _ = client.release(owed);
+                    128
+                }
             };
             assert!(
                 !client.recv.contains_key(&id),
@@ -3263,6 +3324,101 @@ mod tests {
         client.set_receive_window((client.receive_window - 16).try_into().unwrap());
         let _ = client.release(credit);
         assert_eq!(client.local_max_data, initial + 16);
+    }
+
+    /// Exhausted only once every byte the peer may send arrived and is held: unread bytes, gaps
+    /// still owed, and unadvertised credit all mean something can still move.
+    #[test]
+    fn exhausted_when_every_byte_is_held() {
+        let mut client = StreamsState::new(
+            Side::Client,
+            128u32.into(),
+            128u32.into(),
+            1024 * 1024,
+            64u32.into(),
+            (1024 * 1024u32).into(),
+        );
+        let id = StreamId::new(Side::Server, Dir::Uni, 0);
+        assert!(!client.credit_stats().exhausted(), "nothing held");
+
+        // A readable prefix, then a gap below the last byte: the gap is still owed.
+        data(&mut client, id, 0, 32, false);
+        data(&mut client, id, 48, 16, false);
+        let prefix = read_held(&mut client, id);
+        let stats = client.credit_stats();
+        assert_eq!((stats.held, stats.available, stats.unread), (32, 0, 32));
+        assert!(!stats.exhausted(), "the gap can still arrive");
+
+        // The gap fills, so everything is readable, but not read yet.
+        data(&mut client, id, 32, 16, false);
+        assert!(
+            !client.credit_stats().exhausted(),
+            "unread bytes can still be read"
+        );
+
+        let rest = read_held(&mut client, id);
+        let stats = client.credit_stats();
+        assert_eq!((stats.held, stats.available, stats.unread), (64, 0, 0));
+        assert!(stats.exhausted());
+
+        // Releasing any of it lets the peer send again.
+        let _ = client.release(prefix);
+        assert!(!client.credit_stats().exhausted());
+        let _ = client.release(rest);
+        assert_eq!(client.credit_stats().unread, 0);
+    }
+
+    /// A stall reports once, and again whenever credit moves without relieving it.
+    #[test]
+    fn stall_reports_once_per_change() {
+        let mut client = StreamsState::new(
+            Side::Client,
+            128u32.into(),
+            128u32.into(),
+            1024 * 1024,
+            64u32.into(),
+            (1024 * 1024u32).into(),
+        );
+        let take = |state: &mut StreamsState| {
+            mem::take(&mut state.stalled) && state.credit_stats().exhausted()
+        };
+        let id = StreamId::new(Side::Server, Dir::Uni, 0);
+        data(&mut client, id, 0, 64, false);
+        let mut held = read_held(&mut client, id);
+        assert!(take(&mut client));
+        assert!(!take(&mut client), "reported already");
+
+        // Shrinking the window absorbs a release, so the peer still may send nothing.
+        client.set_receive_window(32u32.into());
+        let _ = client.release(held.split(16));
+        assert!(take(&mut client), "still stalled after a release");
+
+        // A release past the debt relieves it.
+        let _ = client.release(held.split(32));
+        assert!(!take(&mut client));
+        let _ = client.release(held);
+    }
+
+    /// Bytes read without holding return their credit, so they never count as held or unread.
+    #[test]
+    fn plain_reads_are_neither_held_nor_unread() {
+        let mut client = make(Side::Client);
+        let id = StreamId::new(Side::Server, Dir::Uni, 0);
+        data(&mut client, id, 0, 32, false);
+        assert_eq!(client.credit_stats().unread, 32);
+
+        let mut pending = Retransmits::default();
+        let mut recv = RecvStream {
+            id,
+            state: &mut client,
+            pending: &mut pending,
+        };
+        let mut chunks = recv.read(true).unwrap();
+        while let Ok(Some(_)) = chunks.next(usize::MAX) {}
+        let _ = chunks.finalize();
+
+        let stats = client.credit_stats();
+        assert_eq!((stats.held, stats.unread), (0, 0));
     }
 
     /// A group token indexes its own connection's schedule, so another connection refuses it

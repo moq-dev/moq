@@ -1,7 +1,8 @@
 //! Credit through the io_uring driver: held reads keep the connection window
 //! spent until their credit drops, bytes `poll_closed` reads ahead keep theirs
-//! until the application reads them, and a chunked write takes no more from
-//! its buffer than the peer's window admits.
+//! until the application reads them, the connection reports each time held
+//! credit fills the window, and a chunked write takes no more from its buffer
+//! than the peer's window admits.
 //!
 //! Unsupported local kernels skip loudly; MOQ_STRICT makes CI refuse them.
 
@@ -51,18 +52,18 @@ async fn within<T>(handle: &moq_uring::Handle, what: &str, future: impl Future<O
 
 /// Read exactly `len` bytes, keeping their credit.
 async fn read_held(handle: &moq_uring::Handle, recv: &mut quic::RecvStream, len: usize) -> quic::Credit {
-	let mut buf = vec![0u8; len];
 	let mut held: Option<quic::Credit> = None;
 	while held.as_ref().map_or(0, quic::Credit::len) < len as u64 {
 		let filled = held.as_ref().map_or(0, |held| held.len() as usize);
-		let credit = within(
+		let (bytes, credit) = within(
 			handle,
 			"stream data",
-			std::future::poll_fn(|cx| recv.poll_read_held(cx, &mut buf[filled..])),
+			std::future::poll_fn(|cx| recv.poll_read_held(cx, len - filled)),
 		)
 		.await
 		.expect("read")
 		.expect("not finished");
+		assert_eq!(bytes.len() as u64, credit.len(), "credit covers exactly the bytes read");
 		match &mut held {
 			Some(held) => held.merge(credit),
 			None => held = Some(credit),
@@ -148,14 +149,22 @@ fn held_reads_spend_the_connection_window() {
 			.await
 			.expect("accept_uni");
 
+			let mut cx = Context::from_waker(Waker::noop());
+			let mut exhausted = |conn: &mut quic::Connection| conn.poll_credit_exhausted(&mut cx).is_ready();
+			assert!(!exhausted(&mut accepted));
+
 			let mut held = read_held(&handle, &mut recv, WINDOW).await;
 			let stats = accepted.stats().credit;
 			assert_eq!((stats.held, stats.available), (WINDOW as u64, 0));
+			assert!(exhausted(&mut accepted), "held credit filled the window");
+			assert!(!exhausted(&mut accepted), "reported once per stall");
 
 			// Far below the usual update threshold, and still enough to unblock.
 			drop(held.split(100));
+			assert!(!exhausted(&mut accepted), "a release relieves the stall");
 			held.merge(read_held(&handle, &mut recv, 100).await);
 			assert_eq!(accepted.stats().credit.held, WINDOW as u64);
+			assert!(exhausted(&mut accepted), "holding the room again stalls again");
 
 			// Read-ahead keeps the credit the application has not taken yet.
 			drop(held);
@@ -183,6 +192,94 @@ fn held_reads_spend_the_connection_window() {
 			assert_eq!(accepted.stats().credit.held, 500, "credit outlives its stream");
 			drop(taken);
 			assert_eq!(accepted.stats().credit.held, 0);
+		})
+		.expect("worker");
+}
+
+/// A read parked on a stream wakes when its `Stopper` stops it, and fails rather than
+/// reading what the stop discarded as the stream's end, even after the closed-watch saw
+/// the stop first.
+#[test]
+fn a_stopper_wakes_and_fails_a_parked_read() {
+	use std::sync::{
+		Arc,
+		atomic::{AtomicUsize, Ordering},
+	};
+
+	#[derive(Default)]
+	struct Wakes(AtomicUsize);
+
+	impl std::task::Wake for Wakes {
+		fn wake(self: Arc<Self>) {
+			self.0.fetch_add(1, Ordering::Relaxed);
+		}
+	}
+
+	let Some(mut worker) = worker() else { return };
+	let handle = worker.handle();
+	let certs = support::certs().expect("certificates");
+
+	let socket = |handle: &moq_uring::Handle| {
+		handle
+			.udp(UdpSocket::bind("127.0.0.1:0").expect("bind"), udp::Config::default())
+			.expect("socket")
+	};
+	let server_config = quic::server::Config::new(
+		quic::Identity::open(&certs.cert, &certs.key)
+			.expect("identity")
+			.server(&[ALPN], quic::server::ClientAuth::None)
+			.expect("tls"),
+	);
+	let server = quic::Endpoint::new(
+		socket(&handle),
+		quic::endpoint::Config::default().with_server(server_config),
+	)
+	.expect("server endpoint");
+	let client = quic::Endpoint::new(socket(&handle), quic::endpoint::Config::default()).expect("dial-only endpoint");
+	let mut dial = quic::client::Config::new(server.local_addr(), "localhost");
+	dial.alpn = vec![ALPN.to_string()];
+	dial.verify = false;
+
+	worker
+		.block_on(async move {
+			let mut dialed = client.connect(&dial).await.expect("dial");
+			let mut accepted = server.accept().await.expect("accept");
+
+			// Held open, so the stream never finishes on its own.
+			let mut send = std::future::poll_fn(|cx| dialed.poll_open_uni(cx))
+				.await
+				.expect("open_uni");
+			let written = within(
+				&handle,
+				"the write",
+				std::future::poll_fn(|cx| send.poll_write(cx, b"hello")),
+			)
+			.await
+			.expect("write");
+			let mut recv = within(
+				&handle,
+				"the stream",
+				std::future::poll_fn(|cx| accepted.poll_accept_uni(cx)),
+			)
+			.await
+			.expect("accept_uni");
+			read(&handle, &mut recv, written).await;
+
+			let stopper = recv.stopper();
+			let wakes = Arc::new(Wakes::default());
+			let waker = Waker::from(wakes.clone());
+			let mut cx = Context::from_waker(&waker);
+			let mut buf = [0u8; 64];
+			assert!(recv.poll_read(&mut cx, &mut buf).is_pending());
+
+			stopper.stop(0);
+			assert_eq!(wakes.0.load(Ordering::Relaxed), 1, "the parked read was not woken");
+			assert!(recv.poll_closed(&mut cx).is_ready(), "the closed-watch missed the stop");
+			assert!(
+				matches!(recv.poll_read(&mut cx, &mut buf), Poll::Ready(Err(_))),
+				"a stopped stream read as finished"
+			);
+			drop(send);
 		})
 		.expect("worker");
 }

@@ -192,4 +192,15 @@ pub struct CreditStats {
     /// Bytes the peer may still send before it needs more credit, including credit not yet
     /// advertised
     pub available: u64,
+    /// Bytes received, or owed for a gap below a received offset, that the application has not
+    /// read yet
+    pub unread: u64,
+}
+
+impl CreditStats {
+    /// Whether held credit is all the peer may send: nothing more can arrive and nothing
+    /// received is left to read, so only releasing [`held`](Self::held) credit makes progress.
+    pub fn exhausted(&self) -> bool {
+        self.held > 0 && self.available == 0 && self.unread == 0
+    }
 }

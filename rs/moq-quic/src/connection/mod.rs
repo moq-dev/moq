@@ -1394,6 +1394,15 @@ impl Connection {
         transmit
     }
 
+    /// Whether held credit came to fill the receive window since the last call.
+    ///
+    /// True when [`CreditStats::exhausted()`] holds now and some read, release, or discarded
+    /// stream since the last call left it so: nothing more can arrive until held credit is
+    /// released. Check after holding, releasing, stopping, or handling incoming data.
+    pub fn poll_credit_exhausted(&mut self) -> bool {
+        mem::take(&mut self.streams.stalled) && self.streams.credit_stats().exhausted()
+    }
+
     /// Ping the remote endpoint
     ///
     /// Causes an ACK-eliciting packet to be transmitted.

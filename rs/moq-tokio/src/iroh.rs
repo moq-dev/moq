@@ -288,14 +288,14 @@ fn transport_config(quic: &crate::quic::Resolved) -> iroh::endpoint::QuicTranspo
 	if !quic.mtu_discovery {
 		transport = transport.mtu_discovery_config(None);
 	}
-	// iroh's connection window is unlimited, so apply ours when unset.
+	// iroh's connection window is unlimited, so apply ours when unset, and the stream
+	// window follows it as on the native backend.
 	let window = quic.receive_window.unwrap_or(crate::quic::DEFAULT_RECEIVE_WINDOW);
+	let stream = quic.stream_receive_window.unwrap_or(window);
 	let window = iroh::endpoint::VarInt::from_u64(window).unwrap_or(iroh::endpoint::VarInt::MAX);
+	let stream = iroh::endpoint::VarInt::from_u64(stream).unwrap_or(iroh::endpoint::VarInt::MAX);
 	transport = transport.receive_window(window);
-	if let Some(window) = quic.stream_receive_window {
-		let window = iroh::endpoint::VarInt::from_u64(window).unwrap_or(iroh::endpoint::VarInt::MAX);
-		transport = transport.stream_receive_window(window);
-	}
+	transport = transport.stream_receive_window(stream);
 	if let Some(window) = quic.send_window {
 		transport = transport.send_window(window);
 	}
@@ -500,7 +500,6 @@ mod tests {
 	async fn bind_rejects_invalid_windows_before_reading_secret() {
 		let dir = tempfile::tempdir().unwrap();
 		for (name, value) in [
-			("receive_window", 0),
 			("stream_receive_window", 0),
 			("send_window", 0),
 			("receive_window", 1 << 62),

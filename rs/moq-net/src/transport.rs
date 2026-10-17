@@ -97,6 +97,77 @@ pub trait Stats {
 pub struct StatsUnavailable;
 impl Stats for StatsUnavailable {}
 
+/// The smallest connection receive window a transport that holds [`Credit`] may offer.
+///
+/// A session holds the credit of each unit it is still assembling, so the window has to
+/// fit the largest one with its framing: a legacy announcement set, past any frame payload.
+pub const MIN_RECEIVE_WINDOW: u64 = {
+	// A type and a size prefix, each a varint of at most 8 bytes.
+	const PREFIXES: u64 = 16;
+	let message = <crate::lite::AnnounceInit<'static> as crate::lite::Message>::MAX_SIZE as u64 + PREFIXES;
+	let frame = crate::group::MAX_CACHE_BYTES;
+	if message > frame { message } else { frame }
+};
+
+/// Connection flow-control credit for bytes read from a [`poll::RecvStream`].
+///
+/// A transport that bounds receive memory keeps the connection window those bytes
+/// occupy spent until their credit is dropped, so a receiver holds it until the unit
+/// the bytes belong to is complete. Stream credit is unaffected and advances on reads.
+/// Dropping a credit returns it, even after its stream is gone.
+pub trait Credit: 'static {
+	/// The number of bytes this credit covers.
+	fn len(&self) -> u64;
+
+	/// Whether this credit covers no bytes.
+	fn is_empty(&self) -> bool {
+		self.len() == 0
+	}
+
+	/// Split off the credit for the first `bytes`, keeping the rest.
+	///
+	/// Panics if `bytes` exceeds [`len`](Self::len).
+	fn split(&mut self, bytes: u64) -> Self;
+
+	/// Take over the bytes covered by `other`, read from the same session.
+	fn merge(&mut self, other: Self);
+}
+
+/// The credit of a transport that returns connection credit as soon as bytes are read:
+/// only a byte count.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct Unheld(pub u64);
+
+impl Credit for Unheld {
+	fn len(&self) -> u64 {
+		self.0
+	}
+
+	fn split(&mut self, bytes: u64) -> Self {
+		assert!(bytes <= self.0, "split {bytes} of {} bytes", self.0);
+		self.0 -= bytes;
+		Self(bytes)
+	}
+
+	fn merge(&mut self, other: Self) {
+		self.0 += other.0;
+	}
+}
+
+/// Stops a [`poll::RecvStream`] without borrowing it, as [`stop`](poll::RecvStream::stop)
+/// would, for when the stream's reader is parked somewhere else.
+///
+/// A no-op once the stream has ended. A transport whose reads return their credit (an
+/// [`Unheld`] credit) never needs a stream stopped this way, so it may use `()`.
+pub trait Stopper: 'static {
+	/// Send STOP_SENDING with a stream `code`, unless the stream already ended.
+	fn stop(&self, code: u32);
+}
+
+impl Stopper for () {
+	fn stop(&self, _code: u32) {}
+}
+
 /// The typed transport condition when no application code was received.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
@@ -135,7 +206,7 @@ pub mod poll {
 	pub type BiStreams<S> = (<S as Session>::SendStream, <S as Session>::RecvStream);
 	use std::task::{Context, Poll, ready};
 
-	use super::{Error, MaybeSend, MaybeSync, Stats};
+	use super::{Credit, Error, MaybeSend, MaybeSync, Stats};
 	use bytes::BytesMut;
 	use bytes::{Buf, BufMut, Bytes};
 
@@ -231,6 +302,17 @@ pub mod poll {
 		/// Poll until the connection is closed by either side.
 		fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Self::Error>;
 
+		/// Poll until held [`Credit`] fills the receive allowance: the peer may send
+		/// nothing more and every byte it sent is held, so no stream progresses until
+		/// some credit is dropped.
+		///
+		/// Resolves once each time it starts holding, then pends until it holds again
+		/// after some credit was dropped, so a receiver evicts once per stall. A transport whose reads
+		/// return their credit (an [`Unheld`](super::Unheld) credit) never fills it, so
+		/// it always pends. Required rather than defaulted: a transport that holds
+		/// credit and forgets to report this parks its receiver forever.
+		fn poll_credit_exhausted(&mut self, cx: &mut Context<'_>) -> Poll<()>;
+
 		/// Return connection-level statistics.
 		///
 		/// Return [`super::StatsUnavailable`] if the transport does not track them. Required
@@ -317,7 +399,7 @@ pub mod poll {
 	pub trait Boxable:
 		Session<
 			SendStream: MaybeSend + SendStream<Group: MaybeSend + MaybeSync>,
-			RecvStream: MaybeSend,
+			RecvStream: MaybeSend + RecvStream<Credit: MaybeSend + MaybeSync, Stopper: MaybeSend + MaybeSync>,
 			Error: MaybeSend,
 		> + MaybeSend
 		+ MaybeSync
@@ -327,7 +409,7 @@ pub mod poll {
 	impl<S> Boxable for S where
 		S: Session<
 				SendStream: MaybeSend + SendStream<Group: MaybeSend + MaybeSync>,
-				RecvStream: MaybeSend,
+				RecvStream: MaybeSend + RecvStream<Credit: MaybeSend + MaybeSync, Stopper: MaybeSend + MaybeSync>,
 				Error: MaybeSend,
 			> + MaybeSend
 			+ MaybeSync
@@ -508,19 +590,32 @@ pub mod poll {
 	}
 
 	/// An incoming stream with reads, stop codes, and closure notification.
+	///
+	/// Every read returns the [`Credit`] for exactly the bytes it read. A caller that
+	/// does not bound its receive memory drops it straight away.
 	pub trait RecvStream: 'static {
 		/// The error type for every operation on this stream.
 		type Error: Error;
 
+		/// The connection credit each read returns.
+		type Credit: Credit;
+
+		/// What [`stopper`](Self::stopper) returns.
+		type Stopper: super::Stopper;
+
 		/// Poll to read some data into the provided slice.
 		///
-		/// Returns the number of bytes read, or `None` once the peer has finished the
-		/// stream. An empty `dst` reads nothing and returns `Some(0)`: asking for no
-		/// bytes is not end of stream.
-		fn poll_read(&mut self, cx: &mut Context<'_>, dst: &mut [u8]) -> Poll<Result<Option<usize>, Self::Error>>;
+		/// Returns the credit for the bytes read ([`Credit::len`] counts them), or
+		/// `None` once the peer has finished the stream. An empty `dst` reads nothing
+		/// and returns an empty credit: asking for no bytes is not end of stream.
+		fn poll_read(
+			&mut self,
+			cx: &mut Context<'_>,
+			dst: &mut [u8],
+		) -> Poll<Result<Option<Self::Credit>, Self::Error>>;
 
-		/// Poll to read some data into the provided buffer, advancing it by the number
-		/// of bytes read.
+		/// Poll to read some data into the provided buffer, advancing it by the bytes
+		/// read, which the returned credit covers.
 		///
 		/// Override this to avoid a copy when the underlying transport already owns the
 		/// bytes as a [`Bytes`], which can be handed to [`BufMut::put`] directly.
@@ -528,7 +623,7 @@ pub mod poll {
 			&mut self,
 			cx: &mut Context<'_>,
 			buf: &mut B,
-		) -> Poll<Result<Option<usize>, Self::Error>> {
+		) -> Poll<Result<Option<Self::Credit>, Self::Error>> {
 			// Cap the slice: it is zeroed on every poll, Pending included, and a
 			// read may be partial anyway.
 			let len = buf.chunk_mut().len().min(64 * 1024);
@@ -536,7 +631,7 @@ pub mod poll {
 			// A destination with no room is not a closed stream. Collapsing the two
 			// would turn "buffer full" into "stream ended", which reads as truncation.
 			if len == 0 {
-				return Poll::Ready(Ok(Some(0)));
+				return self.poll_read(cx, &mut []);
 			}
 
 			// `poll_read` is safe and may inspect its input, so initialize spare
@@ -547,26 +642,32 @@ pub mod poll {
 				std::slice::from_raw_parts_mut(chunk.as_mut_ptr(), len)
 			};
 
-			let size = match ready!(self.poll_read(cx, dst))? {
-				Some(size) if size > 0 => size,
-				Some(_) => return Poll::Ready(Ok(Some(0))),
-				None => return Poll::Ready(Ok(None)),
+			let Some(credit) = ready!(self.poll_read(cx, dst))? else {
+				return Poll::Ready(Ok(None));
 			};
 
+			let size = credit.len() as usize;
 			assert!(size <= len, "transport read exceeded its destination");
 			unsafe { buf.advance_mut(size) };
 
-			Poll::Ready(Ok(Some(size)))
+			Poll::Ready(Ok(Some(credit)))
 		}
 
-		/// Poll for the next chunk of data, up to `max` bytes.
+		/// Poll for the next chunk of data, up to `max` bytes, with its credit.
 		///
 		/// Override this when the transport can hand over a [`Bytes`] it already owns;
 		/// the default allocates and copies.
-		fn poll_read_chunk(&mut self, cx: &mut Context<'_>, max: usize) -> Poll<Result<Option<Bytes>, Self::Error>> {
+		#[allow(clippy::type_complexity)]
+		fn poll_read_chunk(
+			&mut self,
+			cx: &mut Context<'_>,
+			max: usize,
+		) -> Poll<Result<Option<(Bytes, Self::Credit)>, Self::Error>> {
 			// As in `poll_read_buf`: asking for nothing is not end of stream.
 			if max == 0 {
-				return Poll::Ready(Ok(Some(Bytes::new())));
+				return self
+					.poll_read(cx, &mut [])
+					.map_ok(|read| read.map(|credit| (Bytes::new(), credit)));
 			}
 
 			// Don't allocate too much. Override this to avoid the copy, or to use a
@@ -574,16 +675,15 @@ pub mod poll {
 			let capacity = max.min(8 * 1024);
 			let mut buf = BytesMut::zeroed(capacity);
 
-			let size = match ready!(self.poll_read(cx, &mut buf))? {
-				Some(size) if size > 0 => size,
-				Some(_) => return Poll::Ready(Ok(Some(Bytes::new()))),
-				None => return Poll::Ready(Ok(None)),
+			let Some(credit) = ready!(self.poll_read(cx, &mut buf))? else {
+				return Poll::Ready(Ok(None));
 			};
 
+			let size = credit.len() as usize;
 			assert!(size <= capacity, "transport read exceeded its destination");
 			buf.truncate(size);
 
-			Poll::Ready(Ok(Some(buf.freeze())))
+			Poll::Ready(Ok(Some((buf.freeze(), credit))))
 		}
 
 		/// Send a `STOP_SENDING` QUIC code, informing the peer that no more data will be
@@ -593,6 +693,9 @@ pub mod poll {
 		/// Call this method manually if you want to specify a code yourself.
 		fn stop(&mut self, code: u32);
 
+		/// A handle that stops this stream as [`stop`](Self::stop) does, without borrowing it.
+		fn stopper(&self) -> Self::Stopper;
+
 		/// Poll until the stream has been closed by either side.
 		///
 		/// This includes:
@@ -601,17 +704,17 @@ pub mod poll {
 		/// - We received a FIN via [`SendStream::finish`] and read all data.
 		fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>>;
 
-		/// Read some bytes into the slice, or `None` once the stream is finished.
+		/// Read some bytes into the slice, returning their credit, or `None` once finished.
 		fn read<'a>(&'a mut self, dst: &'a mut [u8]) -> Read<'a, Self> {
 			Read { stream: self, dst }
 		}
 
-		/// Read some bytes into the buffer, advancing it, or `None` once finished.
+		/// Read some bytes into the buffer, advancing it and returning their credit, or `None`.
 		fn read_buf<'a, B: BufMut>(&'a mut self, buf: &'a mut B) -> ReadBuf<'a, Self, B> {
 			ReadBuf { stream: self, buf }
 		}
 
-		/// Read the next chunk of data, up to `max` bytes, or `None` once finished.
+		/// Read the next chunk, up to `max` bytes, with its credit, or `None` once finished.
 		fn read_chunk(&mut self, max: usize) -> ReadChunk<'_, Self> {
 			ReadChunk { stream: self, max }
 		}
@@ -629,7 +732,7 @@ pub mod poll {
 	}
 
 	impl<S: RecvStream> Future for Read<'_, S> {
-		type Output = Result<Option<usize>, S::Error>;
+		type Output = Result<Option<S::Credit>, S::Error>;
 
 		fn poll(mut self: std::pin::Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
 			let this = &mut *self;
@@ -644,7 +747,7 @@ pub mod poll {
 	}
 
 	impl<S: RecvStream, B: BufMut> Future for ReadBuf<'_, S, B> {
-		type Output = Result<Option<usize>, S::Error>;
+		type Output = Result<Option<S::Credit>, S::Error>;
 
 		fn poll(mut self: std::pin::Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
 			let this = &mut *self;
@@ -659,7 +762,7 @@ pub mod poll {
 	}
 
 	impl<S: RecvStream> Future for ReadChunk<'_, S> {
-		type Output = Result<Option<Bytes>, S::Error>;
+		type Output = Result<Option<(Bytes, S::Credit)>, S::Error>;
 
 		fn poll(mut self: std::pin::Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
 			let this = &mut *self;
@@ -670,18 +773,21 @@ pub mod poll {
 
 #[cfg(test)]
 mod tests {
-	use super::poll::RecvStream as _;
+	use super::{Unheld, poll::RecvStream as _};
 	use bytes::{Bytes, BytesMut};
 	use std::task::{Context, Poll};
 	struct Read;
 	impl super::poll::RecvStream for Read {
 		type Error = crate::Error;
-		fn poll_read(&mut self, _: &mut Context<'_>, dst: &mut [u8]) -> Poll<Result<Option<usize>, Self::Error>> {
+		type Credit = Unheld;
+		type Stopper = ();
+		fn stopper(&self) {}
+		fn poll_read(&mut self, _: &mut Context<'_>, dst: &mut [u8]) -> Poll<Result<Option<Unheld>, Self::Error>> {
 			// A safe transport may read its destination before overwriting it.
 			assert!(dst.iter().all(|byte| *byte == 0));
 			let size = dst.len().min(2);
 			dst[..size].copy_from_slice(&b"hi"[..size]);
-			Poll::Ready(Ok(Some(size)))
+			Poll::Ready(Ok(Some(Unheld(size as u64))))
 		}
 		fn stop(&mut self, _: u32) {}
 		fn poll_closed(&mut self, _: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
@@ -695,21 +801,23 @@ mod tests {
 		let mut buf = BytesMut::with_capacity(8);
 		assert!(matches!(
 			read.poll_read_buf(&mut cx, &mut buf),
-			Poll::Ready(Ok(Some(2)))
+			Poll::Ready(Ok(Some(Unheld(2))))
 		));
 		assert_eq!(buf, b"hi"[..]);
-		let Poll::Ready(Ok(Some(chunk))) = read.poll_read_chunk(&mut cx, 1) else {
+		let Poll::Ready(Ok(Some((chunk, credit)))) = read.poll_read_chunk(&mut cx, 1) else {
 			panic!("missing chunk")
 		};
 		assert_eq!(chunk, Bytes::from_static(b"h"));
-		let Poll::Ready(Ok(Some(chunk))) = read.poll_read_chunk(&mut cx, 0) else {
+		assert_eq!(credit, Unheld(1));
+		let Poll::Ready(Ok(Some((chunk, credit)))) = read.poll_read_chunk(&mut cx, 0) else {
 			panic!("missing empty chunk")
 		};
 		assert!(chunk.is_empty());
+		assert_eq!(credit, Unheld(0));
 		let mut empty: &mut [u8] = &mut [];
 		assert!(matches!(
 			read.poll_read_buf(&mut cx, &mut empty),
-			Poll::Ready(Ok(Some(0)))
+			Poll::Ready(Ok(Some(Unheld(0))))
 		));
 	}
 }

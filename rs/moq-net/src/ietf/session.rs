@@ -3,6 +3,7 @@ use crate::{
 	Error, Hop, SessionError, StreamError,
 	coding::{Decode, DecodeError, Encode, Reader, Stream, Writer},
 	ietf::{self, FetchHeader, RequestId},
+	pressure::Rank,
 	setup,
 	util::{MaybeBoxedExt, MaybeSendBox, TaskSet, err_only},
 };
@@ -178,9 +179,14 @@ where
 		None => {}
 	}
 
+	// Every stream the session reads holds its credit until a whole message arrives, and
+	// the monitor cancels one by rank whenever that fills the receive allowance.
+	let pressure = crate::pressure::Pressure::<crate::pressure::Erased>::default();
+
 	let driver = async move {
 		// Held for the life of the session.
 		let _setup_token = setup_token;
+		let mut monitor = crate::pressure::Monitor::new(session.clone(), pressure.clone());
 		// Released on any exit, so nothing waits on a token the session will never answer.
 		let _auth_close = AuthClose(auth.clone());
 		// Decided once, before any Auth request can be accepted: the app took the requests
@@ -205,7 +211,7 @@ where
 
 		let res = match version {
 			Version::Draft14 | Version::Draft15 | Version::Draft16 => {
-				let Some(setup) = setup else {
+				let Some(mut setup) = setup else {
 					let err = Error::ProtocolViolation;
 					session.close(
 						super::error::to_session_code(&SessionError::from(&err)),
@@ -213,6 +219,7 @@ where
 					);
 					return Err(err);
 				};
+				setup.reader.track(&pressure, Rank::Control);
 				let control = Control::new(request_id_max, client).with_window(limits.requests(), client, version);
 				let adapter = ControlStreamAdapter::new(session.clone(), control.clone(), version);
 
@@ -228,6 +235,7 @@ where
 				)
 				.with_auth(auth.clone());
 				let (tasks, mut task_set) = TaskSet::new();
+				publisher.pressure = pressure.clone();
 				publisher.withdrawal = withdrawing.clone();
 				publisher.owed = serving.clone();
 				publisher.subscriptions = subscriptions;
@@ -246,6 +254,7 @@ where
 					tasks.clone(),
 					goaway.going_away.clone(),
 				)
+				.with_pressure(pressure.clone())
 				.with_auth(auth.clone())
 				.with_solicit(extensions.solicit);
 				subscriber.announces = announces;
@@ -315,7 +324,7 @@ where
 						let mut sub_ns = sub_ns.clone();
 						let sub_ns_adapter = sub_ns_adapter.clone();
 						prefixes.push(async move {
-							let stream = match version {
+							let mut stream = match version {
 								Version::Draft16 => {
 									let mut sub_ns_adapter = sub_ns_adapter;
 									let (send, recv) = sub_ns_adapter.open_native_bi().await?;
@@ -326,6 +335,7 @@ where
 								}
 								_ => Stream::open(&mut sub_ns_adapter.clone(), version).await?,
 							};
+							stream.reader.track(&sub_ns.pressure, Rank::Control);
 							if let Err(err) = sub_ns.run_subscribe_namespace(stream, prefix).await {
 								// The peer breaking the protocol is fatal, and the driver
 								// below turns this into the session close the draft wants.
@@ -345,6 +355,7 @@ where
 
 				let res = kio::wait(|waiter| {
 					use std::task::Poll;
+					let _ = monitor.poll(&mut waiter.context());
 					if let Poll::Ready(err) = waiter.poll_future(adapter_run.as_mut()) {
 						return Poll::Ready(Err::<(), Error>(err));
 					}
@@ -435,6 +446,7 @@ where
 				)
 				.with_auth(auth.clone());
 				let (tasks, mut task_set) = TaskSet::new();
+				publisher.pressure = pressure.clone();
 				publisher.withdrawal = withdrawing.clone();
 				publisher.owed = serving.clone();
 				publisher.subscriptions = subscriptions;
@@ -453,6 +465,7 @@ where
 					tasks,
 					goaway.going_away.clone(),
 				)
+				.with_pressure(pressure.clone())
 				.with_auth(auth.clone())
 				.with_solicit(extensions.solicit);
 
@@ -465,6 +478,7 @@ where
 					peer_setup.clone(),
 					version,
 					goaway.going_away.clone(),
+					pressure.clone(),
 				);
 				// Only a side that offered MoQ Auth answers the peer's Auth requests: one that
 				// arrives otherwise falls through to the protocol violation in `run_dispatch`.
@@ -483,9 +497,14 @@ where
 				// arrives on the wire.
 				let goaway_recv = {
 					let goaway = goaway.clone();
+					let pressure = pressure.clone();
 					async move {
 						match peer_setup_stream {
-							Some(reader) => run_goaway(reader.with_version(version), version, client, goaway).await,
+							Some(reader) => {
+								let mut reader = reader.with_version(version);
+								reader.track(&pressure, Rank::Control);
+								run_goaway(reader, version, client, goaway).await
+							}
 							None => std::future::pending().await,
 						}
 					}
@@ -530,7 +549,8 @@ where
 						let sub_ns_session = sub_ns_session.clone();
 						prefixes.push(async move {
 							let mut sub_ns_session = sub_ns_session;
-							let stream = Stream::open(&mut sub_ns_session, version).await?;
+							let mut stream = Stream::open(&mut sub_ns_session, version).await?;
+							stream.reader.track(&sub_ns.pressure, Rank::Control);
 							if let Err(err) = sub_ns.run_subscribe_namespace(stream, prefix).await {
 								// The peer breaking the protocol is fatal, and the driver
 								// below turns this into the session close the draft wants.
@@ -550,6 +570,7 @@ where
 
 				let res = kio::wait(|waiter| {
 					use std::task::Poll;
+					let _ = monitor.poll(&mut waiter.context());
 					if let Poll::Ready(err) = waiter.poll_future(unis.as_mut()) {
 						return Poll::Ready(Err::<(), Error>(err));
 					}
@@ -942,7 +963,7 @@ where
 	let mut early = early.into_iter();
 
 	loop {
-		let reader = match early.next() {
+		let mut reader = match early.next() {
 			Some(reader) => reader,
 			None => {
 				let recv = tasks
@@ -978,6 +999,7 @@ where
 				Reader::new(recv, outer_version)
 			}
 		};
+		reader.track(&subscriber.pressure, Rank::Unidentified);
 
 		let uni = uni.clone();
 		let fatal = fatal.clone();
@@ -1063,6 +1085,7 @@ impl<S: crate::transport::poll::Boxable> Uni<S> {
 				if seen_setup.swap(true, std::sync::atomic::Ordering::Relaxed) {
 					return Err(Error::ProtocolViolation);
 				}
+				reader.rank(Rank::Control);
 
 				// The negotiation gates the announce and dispatch loops, so a SETUP we
 				// cannot read must end the session rather than leave them parked on a
@@ -1215,10 +1238,11 @@ where
 				Stream::poll_accept(&mut session, version, &mut cx)
 			})
 			.await;
-		let stream = match accepted {
+		let mut stream = match accepted {
 			Ok(stream) => stream,
 			Err(err) => break err,
 		};
+		stream.reader.track(&bidi.subscriber.pressure, Rank::Control);
 
 		// QUIC may expose an earlier stream before its bytes arrive. Reading the
 		// header here could block later streams whose unread data holds flow control.

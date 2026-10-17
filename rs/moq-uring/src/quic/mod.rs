@@ -30,7 +30,7 @@ pub mod web;
 
 mod driver;
 
-pub use driver::{Connection, Credit, RecvStream, SendGroup, SendStream};
+pub use driver::{Connection, Credit, RecvStream, SendGroup, SendStream, Stopper};
 pub use endpoint::Endpoint;
 
 /// The QUIC payload size every full datagram in a GSO train uses, and the
@@ -115,14 +115,17 @@ pub struct Transport {
 	/// may have open at once. MoQ opens a stream per group, so busy endpoints
 	/// want this high.
 	pub max_streams: u64,
-	/// How much unread data one peer may have in flight across every stream,
-	/// in bytes. `None` leaves the 16 MiB default.
+	/// How much unread data and incomplete messages one peer may have in flight
+	/// across every stream, in bytes. `None` leaves the 128 MiB default. A moq
+	/// session needs it to fit the largest message it assembles,
+	/// [`MIN_RECEIVE_WINDOW`](moq_net::transport::MIN_RECEIVE_WINDOW), or a
+	/// partial one can stall the connection.
 	pub receive_window: Option<u64>,
 	/// How much unread data one peer may have in flight on a single stream,
-	/// in bytes. `None` leaves the 4 MiB default.
+	/// in bytes. `None` follows [`receive_window`](Self::receive_window).
 	///
-	/// Keep it under [`receive_window`](Self::receive_window) so one stream
-	/// cannot fill the connection.
+	/// Stream credit returns as bytes are read, whether or not their message is
+	/// complete, so a smaller window only adds round trips to a large frame.
 	pub stream_receive_window: Option<u64>,
 	/// How much unacknowledged outgoing data to buffer, in bytes, whatever
 	/// the peer allows. `None` leaves the 16 MiB default.

@@ -545,6 +545,11 @@ impl Session {
 		}
 	}
 
+	/// See [`Connection::poll_credit_exhausted`].
+	pub fn poll_credit_exhausted(&mut self, cx: &mut Context<'_>) -> Poll<()> {
+		self.conn.poll_credit_exhausted(cx)
+	}
+
 	/// Rewrite error codes out of the HTTP/3 mapping in web mode.
 	fn map_err(&self, err: Error) -> Error {
 		match self.web {
@@ -939,11 +944,49 @@ pub struct RecvStream {
 	web: bool,
 }
 
+/// Stops a [`RecvStream`] without borrowing it, with the same code mapping as its `stop`.
+#[derive(Clone)]
+pub struct Stopper {
+	inner: super::Stopper,
+	web: bool,
+}
+
+impl Stopper {
+	/// Stop the stream with an application `code`.
+	pub fn stop(&self, code: u32) {
+		match self.web {
+			true => self.inner.stop_code(proto::error_to_http3(code)),
+			false => self.inner.stop_code(u64::from(code)),
+		}
+	}
+}
+
 impl RecvStream {
+	/// A handle that stops this stream without borrowing it.
+	pub fn stopper(&self) -> Stopper {
+		Stopper {
+			inner: self.inner.stopper(),
+			web: self.web,
+		}
+	}
+
 	fn map(&self, err: Error) -> Error {
 		match self.web {
 			true => unmap_err(err),
 			false => unmap_legacy(err),
+		}
+	}
+
+	/// Read up to `max` bytes with their connection credit. See
+	/// [`super::RecvStream::poll_read_held`].
+	pub fn poll_read_held(
+		&mut self,
+		cx: &mut Context<'_>,
+		max: usize,
+	) -> Poll<Result<Option<(bytes::Bytes, super::Credit)>, Error>> {
+		match self.inner.poll_read_held(cx, max) {
+			Poll::Ready(Err(err)) => Poll::Ready(Err(self.map(err))),
+			other => other,
 		}
 	}
 }

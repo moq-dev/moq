@@ -10,7 +10,9 @@ use crate::{
 	coding::{Decode, DecodeError, Decoder, Reader, Stream, Writer},
 	frame, group,
 	ietf::{self, Control, FetchType, Filter, GroupOrder, RequestId},
-	origin, track,
+	origin,
+	pressure::{Pressure, Rank},
+	track,
 	util::{MaybeBoxedExt, MaybeSendBox, TaskSet, Tasks},
 };
 
@@ -500,8 +502,9 @@ struct TrackState {
 
 	// The broadcast this track was subscribed from. With the track name it forms the full
 	// track name, which is what decides whether a repeated alias is the fatal collision
-	// (one alias, two tracks) or the legal sharing of an alias across subscriptions.
-	broadcast: PathOwned,
+	// (one alias, two tracks) or the legal sharing of an alias across subscriptions. Shared
+	// with the rank of every stream it carries, so victim choice compares one pointer.
+	broadcast: std::sync::Arc<PathOwned>,
 
 	// Units for this track's object Timestamps, from the TIMESCALE Track Property in
 	// SUBSCRIBE_OK. `None` until it arrives, and for a track that declares none: its
@@ -524,6 +527,11 @@ struct TrackState {
 
 	// The data streams read so far, which PUBLISH_DONE's Stream Count is checked against.
 	tail: kio::Producer<Tail>,
+
+	// The priority and group order this subscription was sent with, which rank its data
+	// streams when held receive credit fills.
+	priority: u8,
+	order: track::Order,
 }
 
 impl TrackState {
@@ -545,7 +553,7 @@ impl TrackState {
 			pending: None,
 			name,
 			alias: None,
-			broadcast,
+			broadcast: std::sync::Arc::new(broadcast),
 			timescale: None,
 			fill,
 			largest: None,
@@ -553,6 +561,18 @@ impl TrackState {
 			joining,
 			resume: None,
 			tail: Default::default(),
+			priority: 0,
+			order: Default::default(),
+		}
+	}
+
+	/// The rank of this subscription's data stream for `group`, starting at `start`.
+	fn rank(&self, subscribe: RequestId, group: u64, start: u64) -> Rank {
+		Rank::Media {
+			broadcast: self.broadcast.clone(),
+			priority: crate::priority::Priority::new(self.priority, subscribe.0, group)
+				.with_order(self.order)
+				.with_start(start),
 		}
 	}
 }
@@ -698,6 +718,8 @@ pub(super) struct Subscriber<S: crate::transport::poll::Session> {
 	frames: frame::Budget,
 	// Namespaces the peer may have announced at once (`session::Limits::announces`).
 	pub(super) announces: crate::session::Slots,
+	// Every stream this half reads, cancelled by rank when held receive credit fills.
+	pub(super) pressure: Pressure<crate::pressure::Erased>,
 }
 
 /// The prefixes to issue SUBSCRIBE_NAMESPACE for: `origin`'s permitted scope,
@@ -782,8 +804,16 @@ where
 			auth: crate::auth::Handle::new(false),
 			frames: Default::default(),
 			announces: Default::default(),
+			pressure: Default::default(),
 			validity: Default::default(),
 		}
+	}
+
+	/// Open a request stream, its reads tracked as control.
+	async fn open_stream(&self) -> Result<Stream<S, Version>, Error> {
+		let mut stream = Stream::open(&mut self.session.clone(), self.version).await?;
+		stream.reader.track(&self.pressure, Rank::Control);
+		Ok(stream)
 	}
 
 	/// Bound what we subscribe to by the grant this session's tokens earn (MoQ Auth),
@@ -792,6 +822,13 @@ where
 		self.auth = auth;
 		let this = self.clone();
 		self.tasks.push(async move { this.run_limit().await });
+		self
+	}
+
+	/// Track the streams this half reads with the session's `pressure`. Set before the
+	/// halves that clone this subscriber start.
+	pub fn with_pressure(mut self, pressure: Pressure<crate::pressure::Erased>) -> Self {
+		self.pressure = pressure;
 		self
 	}
 
@@ -2521,7 +2558,7 @@ where
 			}
 		};
 
-		let mut stream = match Stream::open(&mut self.session.clone(), self.version).await {
+		let mut stream = match self.open_stream().await {
 			Ok(s) => s,
 			Err(err) => {
 				tracing::debug!(%err, "failed to open subscribe stream");
@@ -2537,6 +2574,11 @@ where
 			true => Fill::Requested,
 			false => Fill::Done,
 		});
+		// The aggregate is read now: a subscriber can join while the request ID and stream
+		// were awaited, and nothing updates the priority or order after.
+		let aggregate = target.subscription();
+		let priority = aggregate.as_ref().map(|s| s.priority).unwrap_or(0);
+		let order = aggregate.map(|s| s.order).unwrap_or_default();
 		{
 			let mut state = self.state.lock();
 			state.subscribes.insert(
@@ -2548,18 +2590,15 @@ where
 						.filter(|start| start.frame != 0),
 					// A resumed copy is the session's to abort from here on.
 					producer: target.producer().cloned(),
+					priority,
+					order,
 					..TrackState::pending(track_name.to_owned(), broadcast_path.to_owned(), fill.clone(), joining)
 				},
 			);
 		}
 
-		// Write Subscribe message. The aggregate is read now: a subscriber can join while
-		// the request ID and stream were awaited, and nothing updates the priority or
-		// order after.
-		let aggregate = target.subscription();
-		let priority = aggregate.as_ref().map(|s| s.priority).unwrap_or(0);
-		let order = aggregate.map(|s| s.order).unwrap_or_default();
-		// Without an Established subscription, a relay includes the request it holds.
+		// Write Subscribe message. Without an Established subscription, a relay includes the
+		// request it holds.
 		let new_group = target
 			.new_group()
 			.filter(|_| super::subscribe::has_new_group_request(self.version));
@@ -3275,7 +3314,7 @@ where
 		let work = async move {
 			// No ID is spent while opening a stream, so dropping a blocked open
 			// cannot leave a gap in the peer's sequential request IDs.
-			let mut stream = match Stream::open(&mut this.session.clone(), this.version).await {
+			let mut stream = match this.open_stream().await {
 				Ok(stream) => stream,
 				Err(err) => {
 					tracing::debug!(%err, "failed to open joining FETCH stream");
@@ -3476,7 +3515,7 @@ where
 				return None;
 			}
 		};
-		let mut stream = match Stream::open(&mut self.session.clone(), self.version).await {
+		let mut stream = match self.open_stream().await {
 			Ok(stream) => stream,
 			Err(err) => {
 				request.reject(err);
@@ -3622,6 +3661,7 @@ where
 		let (mut track, timescale, fill, resume, mut reading) = {
 			let state = self.state.lock();
 			let track = state.subscribes.get(&request_id).ok_or(Error::NotFound)?;
+			stream.rank(track.rank(request_id, group.group_id, 0));
 			(
 				track.producer.clone().ok_or(Error::NotFound)?,
 				track.timescale,
@@ -4093,7 +4133,7 @@ where
 /// Pumps moq-transport subgroup objects from a reader into a group producer:
 /// the id delta, the extension headers (carrying the timestamp), the size, the
 /// status for empty objects, and the streamed payload.
-struct GroupIngest {
+struct GroupIngest<R: crate::transport::poll::RecvStream> {
 	has_extensions: bool,
 	timescale: Option<Timescale>,
 	version: Version,
@@ -4103,11 +4143,11 @@ struct GroupIngest {
 	gap: Option<u64>,
 	/// The object being read is one the group started past, so it is read and dropped.
 	dropping: bool,
-	phase: IngestPhase,
+	phase: IngestPhase<R>,
 	budget: frame::Budget,
 }
 
-enum IngestPhase {
+enum IngestPhase<R: crate::transport::poll::RecvStream> {
 	/// Reading the object id delta. Stream end here ends the group.
 	Delta,
 	/// Reading the extension block's size.
@@ -4119,14 +4159,14 @@ enum IngestPhase {
 	/// Reading the status of an empty object.
 	Status { timestamp: Option<crate::Timestamp> },
 	/// Streaming the object payload.
-	Payload { frame: frame::ProducerOwned },
+	Payload { frame: crate::coding::HeldFrame<R> },
 	/// Discarding a dropped object's payload: the bytes of it still to read.
 	Skip { size: usize },
 	/// An explicit end-of-group or end-of-track status arrived.
 	Finished(Ended),
 }
 
-impl GroupIngest {
+impl<R: crate::transport::poll::RecvStream> GroupIngest<R> {
 	fn new<S: crate::transport::poll::Boxable>(
 		subscriber: &Subscriber<S>,
 		group: &ietf::GroupHeader,
@@ -4177,6 +4217,9 @@ where
 			let joined = state.fetches.get(&header.request_id).copied();
 			let subscribe_id = joined.unwrap_or(header.request_id);
 			let track = state.subscribes.get(&subscribe_id).ok_or(Error::NotFound)?;
+			// The head of the group the subscription joined, as urgent as its live edge.
+			let group = track.largest.map_or(0, |largest| largest.group);
+			stream.rank(track.rank(subscribe_id, group, 0));
 			// A fill is one of the subscription's own data streams, so PUBLISH_DONE counts
 			// it. A joining FETCH is a request of its own.
 			let counted = joined
@@ -4523,7 +4566,7 @@ where
 			info: frame::Info { size, timestamp },
 			fields,
 		};
-		let mut frame = producer.create_frame_owned(header, &self.frames)?;
+		let mut frame = crate::coding::HeldFrame::new(producer.create_frame_owned(header, &self.frames)?);
 		if let Err(err) = std::future::poll_fn(|cx| stream.poll_read_frame(cx, &mut frame)).await {
 			let _ = frame.abort(err.clone());
 			return Err(err);
@@ -4561,7 +4604,7 @@ where
 		let slot = kio::Producer::new(GroupFetch::Pending);
 		let registered = GroupFetchEntry::new(&self.state, fetch_id, slot.clone());
 
-		let mut stream = match Stream::open(&mut self.session.clone(), self.version).await {
+		let mut stream = match self.open_stream().await {
 			Ok(stream) => stream,
 			Err(err) => return request.reject(err),
 		};
@@ -5238,7 +5281,7 @@ fn object_time(
 	}
 }
 
-impl GroupIngest {
+impl<R: crate::transport::poll::RecvStream> GroupIngest<R> {
 	fn header(&mut self, group: &group::Producer, info: frame::Info) -> Result<frame::Header, Error> {
 		let id = self.prior_object.expect("payload follows object ID");
 		group.mark_gap(self.prior_object.expect("properties follow Object ID"), self.gap)?;
@@ -5257,7 +5300,7 @@ impl GroupIngest {
 	/// `Ready(Ok(_))` once the stream FINs on an object boundary, or an explicit
 	/// end-of-group or end-of-track status arrives. The caller finishes or aborts the
 	/// group; an object cut short mid-payload was already aborted here with the reason.
-	fn poll<R: crate::transport::poll::RecvStream>(
+	fn poll(
 		&mut self,
 		reader: &mut Reader<R, Version>,
 		group: &mut group::Producer,
@@ -5309,7 +5352,9 @@ impl GroupIngest {
 					let timestamp = object_time(self.timescale, *timestamp)?;
 					let header = self.header(group, frame::Info { size, timestamp })?;
 					let frame = group.create_frame_owned(header, &self.budget)?;
-					self.phase = IngestPhase::Payload { frame };
+					self.phase = IngestPhase::Payload {
+						frame: crate::coding::HeldFrame::new(frame),
+					};
 				}
 				IngestPhase::Status { timestamp } => {
 					let status = ready!(reader.poll_varint(&mut cx))?;
@@ -11035,6 +11080,45 @@ mod stitch_tests {
 			]
 		);
 		assert!(matches!(*h.fill.read(), Fill::Done), "the head was claimed");
+	}
+
+	/// A tail parked on its head, holding the read-ahead it peeked, lets go the moment the
+	/// pressure monitor chooses it: the eviction itself returns the credit, which the head may
+	/// need to arrive, and stops the stream, without the tail being polled. The head still
+	/// lands, and the tail finishes from what it had already buffered.
+	#[moq_clock::test]
+	async fn an_evicted_tail_waiting_on_its_fill_lets_go() {
+		use crate::coding::StreamCodes as _;
+
+		let h = Harness::new(
+			Fill::Serving(Some(Timescale::MICRO)),
+			vec![
+				tail_stream(SEQUENCE, 2, &[b"tail-2"]),
+				fill_stream(SEQUENCE, &[b"head-0", b"head-1"]),
+			],
+		);
+		let pressure = h.subscriber.pressure.clone();
+		let mut tail = h.stream().await;
+		tail.track(&pressure, Rank::Unidentified);
+		let evicted = vec![VERSION.encode_stream_code(&crate::StreamError::Evicted)];
+
+		let mut serve_tail = h.subscriber.clone();
+		let mut parked = std::pin::pin!(serve_tail.recv_group(&mut tail));
+		let waited = moq_clock::timeout(std::time::Duration::from_secs(1), parked.as_mut()).await;
+		assert!(waited.is_err(), "the tail did not wait for its head: {waited:?}");
+		assert!(pressure.held() > 0, "the parked tail holds its read-ahead");
+
+		assert!(pressure.evict());
+		assert_eq!(pressure.held(), 0, "the eviction let go of the parked tail's credit");
+		assert_eq!(h.session.log.stops(), evicted, "the eviction stopped the parked tail");
+
+		let mut fill = h.stream().await;
+		h.subscriber.clone().recv_fill(&mut fill).await.expect("the head lands");
+		moq_clock::timeout(std::time::Duration::from_secs(1), parked)
+			.await
+			.expect("the tail never took its head")
+			.expect("the tail finishes from its buffer");
+		assert_eq!(h.session.log.stops(), evicted, "an evicted stream is stopped once");
 	}
 
 	/// A tail parked on its head stops holding the end open, so the finished fill does until

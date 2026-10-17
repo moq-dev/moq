@@ -74,15 +74,15 @@ fn apply_transport(transport: &mut driver::TransportConfig, quic: &Resolved) {
 }
 
 /// Apply the flow-control windows. The connection window defaults to ours, since the
-/// backend's is unlimited; the others stay at the backend default when unset.
+/// backend's is unlimited, and the stream window follows it; the send window stays at
+/// the backend default when unset.
 fn apply_windows(transport: &mut driver::TransportConfig, quic: &Resolved) {
 	// Saturating rather than erroring: `Config::validate` already rejects a window
 	// past the varint, so this only bites a `Resolved` built without it.
 	let window = quic.receive_window.unwrap_or(crate::quic::DEFAULT_RECEIVE_WINDOW);
+	let stream = quic.stream_receive_window.unwrap_or(window);
 	transport.receive_window(driver::VarInt::from_u64(window).unwrap_or(driver::VarInt::MAX));
-	if let Some(window) = quic.stream_receive_window {
-		transport.stream_receive_window(driver::VarInt::from_u64(window).unwrap_or(driver::VarInt::MAX));
-	}
+	transport.stream_receive_window(driver::VarInt::from_u64(stream).unwrap_or(driver::VarInt::MAX));
 	if let Some(window) = quic.send_window {
 		transport.send_window(window);
 	}
@@ -1064,7 +1064,8 @@ mod tests {
 	/// moq-quic exposes no getters for the flow-control windows, but its `Debug` prints
 	/// them, which is enough to prove each one reached the transport config, that an
 	/// unset connection window gets our finite default instead of moq-quic's unlimited one,
-	/// and that the other unset knobs leave moq-quic's own defaults in place.
+	/// that an unset stream window follows it, and that an unset send window leaves
+	/// moq-quic's own default in place.
 	#[test]
 	fn apply_windows_writes_each_field() {
 		let quic = crate::quic::Config {
@@ -1089,7 +1090,9 @@ mod tests {
 		let mut untouched = driver::TransportConfig::default();
 		apply_windows(&mut untouched, &crate::quic::Config::default().resolve());
 		let mut expected = driver::TransportConfig::default();
-		expected.receive_window(driver::VarInt::from_u64(crate::quic::DEFAULT_RECEIVE_WINDOW).unwrap());
+		let window = driver::VarInt::from_u64(crate::quic::DEFAULT_RECEIVE_WINDOW).unwrap();
+		expected.receive_window(window);
+		expected.stream_receive_window(window);
 		assert_eq!(format!("{:?}", untouched), format!("{:?}", expected));
 		assert_ne!(
 			format!("{:?}", untouched),

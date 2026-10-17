@@ -116,7 +116,7 @@ async fn subscribe_tracks(pair: &MockPair) -> Vec<u8> {
 		.expect("reply timed out")
 		.expect("read")
 	{
-		reply.extend_from_slice(&buf[..n]);
+		reply.extend_from_slice(&buf[..moq_net::transport::Credit::len(&n) as usize]);
 	}
 	reply
 }

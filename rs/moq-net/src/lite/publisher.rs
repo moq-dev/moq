@@ -173,6 +173,8 @@ pub(super) struct Publisher<S: crate::transport::poll::Session> {
 	children: kio::Tasks<Control<S>>,
 	/// Aborts the session on a publication outside our grant (dialing side only).
 	enforce: Option<Enforce>,
+	/// Tracks each accepted control stream's reads.
+	pub(super) pressure: crate::pressure::Of<S>,
 }
 
 impl<S: crate::transport::poll::Session> Publisher<S> {
@@ -208,6 +210,7 @@ impl<S: crate::transport::poll::Session> Publisher<S> {
 			runtime: config.runtime,
 			accept,
 			children: kio::Tasks::new(),
+			pressure: Default::default(),
 		}
 	}
 }
@@ -229,7 +232,8 @@ where
 		let mut cx = waiter.context();
 		loop {
 			match Stream::poll_accept(&mut self.accept, self.shared.version, &mut cx) {
-				Poll::Ready(Ok(stream)) => {
+				Poll::Ready(Ok(mut stream)) => {
+					stream.reader.track(&self.pressure, crate::pressure::Rank::Control);
 					self.children.push(Control {
 						shared: self.shared.clone(),
 						runtime: self.runtime.clone(),

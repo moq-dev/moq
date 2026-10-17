@@ -657,6 +657,10 @@ mod tests {
 			Poll::Ready(FakeError)
 		}
 
+		fn poll_credit_exhausted(&mut self, _cx: &mut std::task::Context<'_>) -> std::task::Poll<()> {
+			std::task::Poll::Pending
+		}
+
 		fn stats(&self) -> impl crate::transport::Stats {
 			FakeStats {
 				send_rate: *self.state.send_rate.lock().unwrap(),
@@ -717,8 +721,15 @@ mod tests {
 
 	impl crate::transport::poll::RecvStream for FakeRecvStream {
 		type Error = FakeError;
+		type Credit = crate::transport::Unheld;
+		type Stopper = ();
+		fn stopper(&self) {}
 
-		fn poll_read(&mut self, _cx: &mut Context<'_>, dst: &mut [u8]) -> Poll<Result<Option<usize>, Self::Error>> {
+		fn poll_read(
+			&mut self,
+			_cx: &mut Context<'_>,
+			dst: &mut [u8],
+		) -> Poll<Result<Option<Self::Credit>, Self::Error>> {
 			if self.data.is_empty() {
 				return Poll::Ready(Ok(None));
 			}
@@ -727,7 +738,7 @@ mod tests {
 			for slot in dst.iter_mut().take(size) {
 				*slot = self.data.pop_front().unwrap();
 			}
-			Poll::Ready(Ok(Some(size)))
+			Poll::Ready(Ok(Some(crate::transport::Unheld(size as u64))))
 		}
 
 		fn stop(&mut self, _code: u32) {}
@@ -1056,6 +1067,10 @@ mod tests {
 			self.inner.poll_closed(cx)
 		}
 
+		fn poll_credit_exhausted(&mut self, _cx: &mut std::task::Context<'_>) -> std::task::Poll<()> {
+			std::task::Poll::Pending
+		}
+
 		fn stats(&self) -> impl crate::transport::Stats {
 			self.inner.stats()
 		}
@@ -1092,8 +1107,15 @@ mod tests {
 
 	impl crate::transport::poll::RecvStream for LocalRecv {
 		type Error = FakeError;
+		type Credit = crate::transport::Unheld;
+		type Stopper = ();
+		fn stopper(&self) {}
 
-		fn poll_read(&mut self, cx: &mut Context<'_>, dst: &mut [u8]) -> Poll<Result<Option<usize>, Self::Error>> {
+		fn poll_read(
+			&mut self,
+			cx: &mut Context<'_>,
+			dst: &mut [u8],
+		) -> Poll<Result<Option<Self::Credit>, Self::Error>> {
 			self.inner.poll_read(cx, dst)
 		}
 

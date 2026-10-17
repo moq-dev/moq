@@ -966,7 +966,7 @@ async fn accept_request<S>(
 	deadline: Option<tokio::time::Instant>,
 ) -> crate::Result<(PendingRequest<crate::transport::Session<S>>, Option<Deadline>)>
 where
-	S: crate::transport::Grouped,
+	S: crate::transport::HeldSession + crate::transport::Grouped,
 	crate::transport::Session<S>: moq_net::transport::poll::Boxable,
 	<crate::transport::Session<S> as moq_net::transport::poll::Session>::SendStream: moq_net::transport::MaybeSync,
 	<crate::transport::Session<S> as moq_net::transport::poll::Session>::RecvStream: moq_net::transport::MaybeSync,
@@ -2212,6 +2212,9 @@ mod tests {
 			std::future::pending().await
 		}
 	}
+
+	#[cfg(feature = "websocket")]
+	crate::transport::held::unheld!(Scripted, ScriptedRecv);
 
 	#[cfg(feature = "websocket")]
 	impl web_transport_trait::Session for Scripted {

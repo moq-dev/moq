@@ -16,6 +16,20 @@ pub struct RecvStream {
 	close: Arc<CloseReason>,
 }
 
+/// Stops a [`RecvStream`] without borrowing it.
+#[derive(Clone)]
+pub struct Stopper {
+	inner: crate::quic::driver::Stopper,
+	close: Arc<CloseReason>,
+}
+
+impl Stopper {
+	/// Stop accepting data, as [`RecvStream::stop`] does.
+	pub fn stop(&self, code: u32) -> Result<(), crate::quic::driver::ClosedStream> {
+		self.inner.stop(self.close.encode_stream_code(code))
+	}
+}
+
 impl RecvStream {
 	pub(crate) fn new(stream: crate::quic::driver::RecvStream, close: Arc<CloseReason>) -> Self {
 		Self { inner: stream, close }
@@ -43,10 +57,19 @@ impl RecvStream {
 		self.inner.stop(code)
 	}
 
+	/// A handle that stops this stream as [`stop`](Self::stop) does, without borrowing it.
+	pub fn stopper(&self) -> Stopper {
+		Stopper {
+			inner: self.inner.stopper(),
+			close: self.close.clone(),
+		}
+	}
+
 	// Unfortunately, we have to wrap ReadError for a bunch of functions.
 
-	/// Read some data into the buffer and return the amount read. See [`crate::quic::driver::RecvStream::read`].
-	pub async fn read(&mut self, buf: &mut [u8]) -> Result<Option<usize>, ReadError> {
+	/// Read some data into the buffer, returning the credit for the bytes read. See
+	/// [`crate::quic::driver::RecvStream::read`].
+	pub async fn read(&mut self, buf: &mut [u8]) -> Result<Option<crate::quic::driver::Credit>, ReadError> {
 		self.inner.read(buf).await.map_err(|e| self.map_error(e))
 	}
 
@@ -58,12 +81,16 @@ impl RecvStream {
 		})
 	}
 
-	/// Read a chunk of data from the stream. See [`crate::quic::driver::RecvStream::read_chunk`].
-	pub async fn read_chunk(&mut self, max_length: usize) -> Result<Option<Bytes>, ReadError> {
+	/// Read a chunk of data from the stream, with the credit for its bytes. See
+	/// [`crate::quic::driver::RecvStream::read_chunk`].
+	pub async fn read_chunk(
+		&mut self,
+		max_length: usize,
+	) -> Result<Option<(Bytes, crate::quic::driver::Credit)>, ReadError> {
 		self.inner
 			.read_chunk(max_length, true)
 			.await
-			.map(|chunk| chunk.map(|chunk| chunk.bytes))
+			.map(|read| read.map(|(chunk, credit)| (chunk.bytes, credit)))
 			.map_err(|e| self.map_error(e))
 	}
 
@@ -116,12 +143,13 @@ impl web_transport_trait::RecvStream for RecvStream {
 		Self::stop(self, code).ok();
 	}
 
+	// This interface has no credit, so it returns each read's as it reads.
 	async fn read(&mut self, dst: &mut [u8]) -> Result<Option<usize>, Self::Error> {
-		self.read(dst).await
+		Ok(self.read(dst).await?.map(|credit| credit.len() as usize))
 	}
 
 	async fn read_chunk(&mut self, max: usize) -> Result<Option<Bytes>, Self::Error> {
-		self.read_chunk(max).await
+		Ok(self.read_chunk(max).await?.map(|(bytes, _)| bytes))
 	}
 
 	async fn closed(&mut self) -> Result<(), Self::Error> {

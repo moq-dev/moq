@@ -100,6 +100,8 @@ mod lite;
 mod model;
 pub mod path;
 #[cfg(feature = "async")]
+mod pressure;
+#[cfg(feature = "async")]
 mod priority;
 #[cfg(feature = "async")]
 mod recv;

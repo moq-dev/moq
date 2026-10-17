@@ -14,12 +14,67 @@ use std::task::{Context, Poll, ready};
 
 use bytes::Bytes;
 use futures::FutureExt;
+use moq_net::transport::Credit as _;
 use web_transport_trait::poll as wt_poll;
 
 mod grouped;
+pub(crate) mod held;
 mod owned;
 pub(crate) use grouped::{Grouped, GroupedSend};
 pub use owned::Error;
+
+/// A backend receive stream that can keep the connection credit of what it reads.
+///
+/// A backend whose reads return their credit straight away reads plain chunks and counts them
+/// as [`Unheld`](moq_net::transport::Unheld).
+pub trait HeldRecvStream: web_transport_trait::RecvStream {
+	/// The connection credit a read keeps until it is dropped.
+	type Credit: moq_net::transport::Credit + Send + Sync;
+
+	/// What [`stopper`](Self::stopper) returns.
+	type Stopper: moq_net::transport::Stopper + Clone + Send + Sync;
+
+	/// Read the next chunk, up to `max` bytes, with its credit, or `None` once finished.
+	fn read_chunk_held(
+		&mut self,
+		max: usize,
+	) -> impl Future<Output = Result<Option<(Bytes, Self::Credit)>, Self::Error>> + Send;
+
+	/// A handle that stops this stream without borrowing it.
+	fn stopper(&self) -> Self::Stopper;
+}
+
+/// A backend session that reports when held credit fills its receive window.
+pub trait HeldSession: web_transport_trait::Session<RecvStream: HeldRecvStream> {
+	/// See [`poll_credit_exhausted`](moq_net::transport::poll::Session::poll_credit_exhausted).
+	fn poll_credit_exhausted(&self, cx: &mut Context<'_>) -> Poll<()>;
+}
+
+/// The connection credit for bytes read through a [`RecvStream`], none for an empty read.
+#[derive(Debug)]
+pub struct Credit<C>(Option<C>);
+
+impl<C: moq_net::transport::Credit> moq_net::transport::Credit for Credit<C> {
+	fn len(&self) -> u64 {
+		self.0.as_ref().map_or(0, |credit| credit.len())
+	}
+
+	fn split(&mut self, bytes: u64) -> Self {
+		match &mut self.0 {
+			_ if bytes == 0 => Self(None),
+			Some(credit) => Self(Some(credit.split(bytes))),
+			None => panic!("split {bytes} of 0 bytes"),
+		}
+	}
+
+	fn merge(&mut self, other: Self) {
+		match (&mut self.0, other.0) {
+			(_, None) => {}
+			(Some(credit), Some(other)) => credit.merge(other),
+			(empty, other) => *empty = other,
+		}
+	}
+}
 
 /// The network transport carrying a MoQ session, on either side of it.
 #[non_exhaustive]
@@ -159,7 +214,7 @@ impl<S: web_transport_trait::Session> Clone for Session<S> {
 
 impl<S> wt_poll::Session for Session<S>
 where
-	S: Grouped,
+	S: Grouped<RecvStream: HeldRecvStream>,
 	S::SendStream: 'static,
 	S::RecvStream: 'static,
 {
@@ -622,16 +677,17 @@ impl<S: GroupedSend + 'static> Drop for SendStream<S> {
 
 /// The receive half produced by [`Session`]: an async-interface stream adapted to
 /// the poll interface. See [`Session`] for the deferred `stop` behavior.
-pub struct RecvStream<S: web_transport_trait::RecvStream + 'static> {
+pub struct RecvStream<S: HeldRecvStream + 'static> {
 	// See [`SendStream::state`] for why this Mutex exists; it is never locked.
 	state: std::sync::Mutex<Option<RecvState<S>>>,
-	/// Bytes already read from the transport but not yet handed to the caller.
-	buffer: Bytes,
+	/// A chunk already read from the transport but not yet handed to the caller, never empty,
+	/// with the credit it keeps.
+	buffer: Option<(Bytes, S::Credit)>,
 	/// Read-ahead pulled in by the closed-watch while payload sat undelivered, so
 	/// a FIN right behind buffered data still resolves the watch. Drained by the
 	/// read methods before the transport is polled again; bounded by
-	/// [`READ_AHEAD_CAP`].
-	queued: std::collections::VecDeque<Bytes>,
+	/// [`READ_AHEAD_CAP`]. It keeps its credit until the caller reads it.
+	queued: std::collections::VecDeque<(Bytes, S::Credit)>,
 	/// Total bytes across `queued`, so the cap check is O(1).
 	queued_len: usize,
 	/// The peer finished the stream.
@@ -642,6 +698,8 @@ pub struct RecvStream<S: web_transport_trait::RecvStream + 'static> {
 	/// waiting behind blocked I/O. Fired by [`stop`](wt_poll::RecvStream::stop)
 	/// and by [`Drop`].
 	interrupt: Option<futures::channel::oneshot::Sender<()>>,
+	/// Taken up front, since an in-flight read owns the stream.
+	stopper: S::Stopper,
 }
 
 /// How much the closed-watch may read ahead of the caller before it parks and
@@ -649,19 +707,23 @@ pub struct RecvStream<S: web_transport_trait::RecvStream + 'static> {
 /// stream nobody is reading.
 const READ_AHEAD_CAP: usize = 64 * 1024;
 
-enum RecvState<S: web_transport_trait::RecvStream + 'static> {
+/// A chunk read from a backend with its credit, or `None` once finished.
+type Held<S> = Option<(Bytes, <S as HeldRecvStream>::Credit)>;
+
+enum RecvState<S: HeldRecvStream + 'static> {
 	Idle(S),
 	/// A read in flight; a `None` result means it was interrupted by a stop
 	/// (see [`RecvStream::interrupt`]).
-	Reading(#[allow(clippy::type_complexity)] OpBox<(S, Option<Result<Option<Bytes>, S::Error>>)>),
+	Reading(#[allow(clippy::type_complexity)] OpBox<(S, Option<Result<Held<S>, S::Error>>)>),
 }
 
-impl<S: web_transport_trait::RecvStream + 'static> RecvStream<S> {
+impl<S: HeldRecvStream + 'static> RecvStream<S> {
 	/// Wrap an async-interface receive stream.
 	pub fn new(stream: S) -> Self {
 		Self {
+			stopper: stream.stopper(),
 			state: std::sync::Mutex::new(Some(RecvState::Idle(stream))),
-			buffer: Bytes::new(),
+			buffer: None,
 			queued: std::collections::VecDeque::new(),
 			queued_len: 0,
 			fin: false,
@@ -670,18 +732,49 @@ impl<S: web_transport_trait::RecvStream + 'static> RecvStream<S> {
 		}
 	}
 
-	/// Pop read-ahead into `self.buffer` if the head is empty.
-	fn unqueue(&mut self) {
-		if self.buffer.is_empty()
-			&& let Some(next) = self.queued.pop_front()
-		{
-			self.queued_len -= next.len();
-			self.buffer = next;
+	/// Take up to `max` buffered bytes with their credit, read-ahead first.
+	fn take(&mut self, max: usize) -> Option<(Bytes, S::Credit)> {
+		if self.buffer.is_none() {
+			let next = self.queued.pop_front()?;
+			self.queued_len -= next.0.len();
+			self.buffer = Some(next);
+		}
+		let (bytes, credit) = self.buffer.as_mut().expect("just filled");
+		if bytes.len() <= max {
+			return self.buffer.take();
+		}
+		Some((bytes.split_to(max), credit.split(max as u64)))
+	}
+
+	/// Read up to `max` bytes with their credit, or `None` once the peer finished the stream.
+	#[allow(clippy::type_complexity)]
+	pub(crate) fn poll_read_held(
+		&mut self,
+		cx: &mut Context<'_>,
+		max: usize,
+	) -> Poll<Result<Option<(Bytes, Credit<S::Credit>)>, S::Error>> {
+		if max == 0 {
+			return Poll::Ready(Ok(Some((Bytes::new(), Credit(None)))));
+		}
+
+		loop {
+			if let Some((bytes, credit)) = self.take(max) {
+				return Poll::Ready(Ok(Some((bytes, Credit(Some(credit))))));
+			}
+			if self.fin {
+				return Poll::Ready(Ok(None));
+			}
+			// An empty chunk carries nothing worth buffering.
+			if let Some(chunk) = ready!(self.poll_fill(cx, max))?
+				&& !chunk.0.is_empty()
+			{
+				self.buffer = Some(chunk);
+			}
 		}
 	}
 
 	/// Read the next chunk from the transport, setting `self.fin` on the FIN.
-	fn poll_fill(&mut self, cx: &mut Context<'_>, max: usize) -> Poll<Result<Option<Bytes>, S::Error>> {
+	fn poll_fill(&mut self, cx: &mut Context<'_>, max: usize) -> Poll<Result<Held<S>, S::Error>> {
 		loop {
 			match self.state.get_mut().unwrap().take().expect("in-flight") {
 				RecvState::Idle(mut stream) => {
@@ -692,7 +785,7 @@ impl<S: web_transport_trait::RecvStream + 'static> RecvStream<S> {
 					self.interrupt = Some(tx);
 					let fut = async move {
 						let res = {
-							let mut op = std::pin::pin!(stream.read_chunk(max).fuse());
+							let mut op = std::pin::pin!(stream.read_chunk_held(max).fuse());
 							let mut rx = rx.fuse();
 							loop {
 								futures::select_biased! {
@@ -740,48 +833,20 @@ impl<S: web_transport_trait::RecvStream + 'static> RecvStream<S> {
 	}
 }
 
-impl<S: web_transport_trait::RecvStream + 'static> wt_poll::RecvStream for RecvStream<S> {
+// This view returns connection credit as it reads; moq-net reads through the held one.
+impl<S: HeldRecvStream + 'static> wt_poll::RecvStream for RecvStream<S> {
 	type Error = S::Error;
 
 	fn poll_read(&mut self, cx: &mut Context<'_>, dst: &mut [u8]) -> Poll<Result<Option<usize>, Self::Error>> {
-		if dst.is_empty() {
-			return Poll::Ready(Ok(Some(0)));
-		}
-
-		loop {
-			self.unqueue();
-			if !self.buffer.is_empty() {
-				let n = dst.len().min(self.buffer.len());
-				dst[..n].copy_from_slice(&self.buffer.split_to(n));
-				return Poll::Ready(Ok(Some(n)));
-			}
-			if self.fin {
-				return Poll::Ready(Ok(None));
-			}
-			if let Some(bytes) = ready!(self.poll_fill(cx, dst.len()))? {
-				self.buffer = bytes;
-			}
-		}
+		let read = ready!(self.poll_read_held(cx, dst.len()))?;
+		Poll::Ready(Ok(read.map(|(bytes, _)| {
+			dst[..bytes.len()].copy_from_slice(&bytes);
+			bytes.len()
+		})))
 	}
 
 	fn poll_read_chunk(&mut self, cx: &mut Context<'_>, max: usize) -> Poll<Result<Option<Bytes>, Self::Error>> {
-		if max == 0 {
-			return Poll::Ready(Ok(Some(Bytes::new())));
-		}
-
-		loop {
-			self.unqueue();
-			if !self.buffer.is_empty() {
-				let n = max.min(self.buffer.len());
-				return Poll::Ready(Ok(Some(self.buffer.split_to(n))));
-			}
-			if self.fin {
-				return Poll::Ready(Ok(None));
-			}
-			if let Some(bytes) = ready!(self.poll_fill(cx, max))? {
-				self.buffer = bytes;
-			}
-		}
+		self.poll_read_held(cx, max).map_ok(|read| read.map(|(bytes, _)| bytes))
 	}
 
 	fn stop(&mut self, code: u32) {
@@ -809,15 +874,15 @@ impl<S: web_transport_trait::RecvStream + 'static> wt_poll::RecvStream for RecvS
 			if self.fin {
 				return Poll::Ready(Ok(()));
 			}
-			if self.buffer.len() + self.queued_len >= READ_AHEAD_CAP {
+			if self.buffer.as_ref().map_or(0, |(bytes, _)| bytes.len()) + self.queued_len >= READ_AHEAD_CAP {
 				// The caller's own reads are what drain the backlog, and their
 				// re-poll of this watch is what resumes it.
 				return Poll::Pending;
 			}
 			match ready!(self.poll_fill(cx, 8 * 1024)) {
-				Ok(Some(bytes)) => {
+				Ok(Some((bytes, credit))) => {
 					self.queued_len += bytes.len();
-					self.queued.push_back(bytes);
+					self.queued.push_back((bytes, credit));
 				}
 				Ok(None) => {}
 				// A read error is also a closed stream.
@@ -827,7 +892,7 @@ impl<S: web_transport_trait::RecvStream + 'static> wt_poll::RecvStream for RecvS
 	}
 }
 
-impl<S: web_transport_trait::RecvStream + 'static> Drop for RecvStream<S> {
+impl<S: HeldRecvStream + 'static> Drop for RecvStream<S> {
 	fn drop(&mut self) {
 		match self.state.get_mut().unwrap().take() {
 			// Apply a deferred stop if the stream is idle.
@@ -1422,6 +1487,7 @@ mod tests {
 	#[derive(Clone)]
 	struct FakeSession;
 
+	super::held::unheld!(FakeSession, FakeRecv);
 	impl Grouped for FakeSession {}
 
 	impl web_transport_trait::Session for FakeSession {

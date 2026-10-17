@@ -235,6 +235,7 @@ pub(super) fn peer_grant(
 /// says it negotiated the extension. Never returns: a session without it just fails
 /// the tokens as unsupported.
 #[cfg(feature = "async")]
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn run_present<S>(
 	runtime: crate::time::Deadlines,
 	session: S,
@@ -243,6 +244,7 @@ pub(super) async fn run_present<S>(
 	peer_setup: peer::PeerSetup,
 	version: Version,
 	going_away: crate::goaway::GoingAway,
+	pressure: crate::pressure::Pressure<crate::pressure::Erased>,
 ) -> Result<(), Error>
 where
 	S: crate::transport::poll::Boxable,
@@ -273,6 +275,7 @@ where
 			handle: handle.clone(),
 			version,
 			id,
+			pressure: pressure.clone(),
 		};
 		let going_away = going_away.clone();
 		let violation = violation.clone();
@@ -308,6 +311,7 @@ struct Present<S: crate::transport::poll::Session> {
 	handle: Handle,
 	version: Version,
 	id: u64,
+	pressure: crate::pressure::Pressure<crate::pressure::Erased>,
 }
 
 #[cfg(feature = "async")]
@@ -323,6 +327,7 @@ impl<S: crate::transport::poll::Boxable> Present<S> {
 			Ok(stream) => stream,
 			Err(err) => return err,
 		};
+		stream.reader.track(&self.pressure, crate::pressure::Rank::Control);
 		if let Err(err) = stream.writer.encode_message(&Auth { request_id, token }).await {
 			return err;
 		}

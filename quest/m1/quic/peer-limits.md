@@ -35,9 +35,10 @@ its own.
 - Refuse a `peer` value below the client default rather than silently
   shrinking.
 
-The [receive-memory plan](/quest/m1/quic/receive-memory.md) requires client
-and peer memory allowances to fit the largest supported encoded unit,
-including framing. Preserve that validation and retained-credit accounting
+Message assembly holds connection credit until each unit is complete, so
+client and peer receive windows must fit the largest supported encoded unit,
+`moq_net::transport::MIN_RECEIVE_WINDOW`; the relay refuses a smaller
+`[quic]` window at config load. Preserve that validation and retained-credit accounting
 when applying runtime limits; wider stream counts must not create a second
 unbounded assembly pool.
 

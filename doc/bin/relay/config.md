@@ -61,8 +61,8 @@ idle_timeout = "10s"                 # Drop a connection after this long with no
 keep_alive = "3s"                    # Ping interval; "0s" disables it. iroh still pings at least every 5s. Default.
 gso = true                           # UDP segmentation offload. iroh cannot turn it off.
 mtu_discovery = false                # Path MTU discovery. Default.
-receive_window = 67108864            # Whole-connection window, in bytes. Default (64 MiB).
-stream_receive_window = 8388608      # Per-stream window. Omit for the backend default.
+receive_window = 134217728           # Whole-connection window, in bytes. Default (128 MiB).
+stream_receive_window = 8388608      # Per-stream window. Omit to follow receive_window.
 send_window = 33554432               # Unacknowledged outgoing data. Omit for the backend default.
 qlog = "/var/log/moq/qlog"           # Existing directory. Needs the `qlog` build feature.
 ```
@@ -72,11 +72,17 @@ sessions, and so its [cluster routes](/bin/relay/cluster#failure-detection).
 QUIC uses the smaller of the two endpoints' values, so this also bounds the
 other end. Keep `keep_alive` under a third of it.
 
-Raise the receive windows when a fat, long path idles below the link rate. The
-64 MiB `receive_window` default carries several Gbps at a 100 ms RTT and bounds
-how much unread data one peer can make the relay buffer. Keep
-`stream_receive_window` well under it so one slow group cannot starve the
-connection.
+Raise `receive_window` when a fat, long path idles below the link rate. The
+128 MiB default carries several Gbps at a 100 ms RTT and bounds how much unread
+data and incomplete messages one peer can make the relay buffer. A message holds
+its share until it is complete, so the window must fit the largest one, just over
+64 MiB, and the relay refuses to start with less. When incomplete messages fill
+it, the relay cancels the least urgent stream and carries on. iroh returns credit
+as it reads, so there the window bounds only unread data, and incomplete messages
+are bounded by `max_streams` streams of up to the largest message each.
+
+Stream credit returns as data is read, so a `stream_receive_window` under
+`receive_window` only adds round trips to a large frame.
 
 ## \[session] and \[peer]
 

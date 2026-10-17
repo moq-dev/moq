@@ -1328,16 +1328,17 @@ async fn connect_once(
 
 // ── flow control ────────────────────────────────────────────────────
 
-/// Run a connect with every flow-control window pinned well under the payload, so
-/// the frame only arrives if the receiver keeps issuing credit as it drains.
+/// Run a connect with the stream and send windows pinned well under the payload, so
+/// the frame only arrives if the receiver keeps issuing stream credit as it drains.
+/// The connection window sits at the smallest that fits the largest message, which
+/// holds its credit until it is complete.
 ///
 /// The size is the point: a frame that fits inside one window would pass whether or
 /// not the setting ever reached the backend.
-///
 #[cfg(feature = "quic")]
 async fn window_test(scheme: &str) {
 	let mut quic = moq_tokio::quic::Config::default();
-	quic.receive_window = Some(64 * 1024);
+	quic.receive_window = Some(moq_net::transport::MIN_RECEIVE_WINDOW);
 	quic.stream_receive_window = Some(16 * 1024);
 	quic.send_window = Some(32 * 1024);
 

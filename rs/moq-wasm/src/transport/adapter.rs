@@ -107,6 +107,9 @@ impl<S: backend::Session<SendStream: 'static, RecvStream: 'static> + Clone + 'st
 	fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Self::Error> {
 		backend::Session::poll_closed(&mut self.0, cx).map(Error)
 	}
+	fn poll_credit_exhausted(&mut self, _: &mut Context<'_>) -> Poll<()> {
+		Poll::Pending
+	}
 	fn stats(&self) -> impl moq::Stats {
 		Stats(backend::Session::stats(&self.0))
 	}
@@ -141,20 +144,39 @@ impl<S: backend::SendStream + 'static> poll::SendStream for SendStream<S> {
 }
 /// An incoming WebTransport stream adapted to moq-net.
 pub struct RecvStream<S>(S);
+// The WebTransport backend returns connection credit as it reads, so there is none to hold.
 impl<S: backend::RecvStream + 'static> poll::RecvStream for RecvStream<S> {
 	type Error = Error<S::Error>;
-	fn poll_read(&mut self, cx: &mut Context<'_>, dst: &mut [u8]) -> Poll<Result<Option<usize>, Self::Error>> {
-		backend::RecvStream::poll_read(&mut self.0, cx, dst).map_err(Error)
+	type Credit = moq::Unheld;
+	type Stopper = ();
+	fn stopper(&self) {}
+	fn poll_read(&mut self, cx: &mut Context<'_>, dst: &mut [u8]) -> Poll<Result<Option<moq::Unheld>, Self::Error>> {
+		backend::RecvStream::poll_read(&mut self.0, cx, dst)
+			.map_err(Error)
+			.map_ok(|n| n.map(|n| moq::Unheld(n as u64)))
 	}
 	fn poll_read_buf<B: BufMut>(
 		&mut self,
 		cx: &mut Context<'_>,
 		buf: &mut B,
-	) -> Poll<Result<Option<usize>, Self::Error>> {
-		backend::RecvStream::poll_read_buf(&mut self.0, cx, buf).map_err(Error)
+	) -> Poll<Result<Option<moq::Unheld>, Self::Error>> {
+		backend::RecvStream::poll_read_buf(&mut self.0, cx, buf)
+			.map_err(Error)
+			.map_ok(|n| n.map(|n| moq::Unheld(n as u64)))
 	}
-	fn poll_read_chunk(&mut self, cx: &mut Context<'_>, max: usize) -> Poll<Result<Option<Bytes>, Self::Error>> {
-		backend::RecvStream::poll_read_chunk(&mut self.0, cx, max).map_err(Error)
+	fn poll_read_chunk(
+		&mut self,
+		cx: &mut Context<'_>,
+		max: usize,
+	) -> Poll<Result<Option<(Bytes, moq::Unheld)>, Self::Error>> {
+		backend::RecvStream::poll_read_chunk(&mut self.0, cx, max)
+			.map_err(Error)
+			.map_ok(|chunk| {
+				chunk.map(|b| {
+					let n = b.len() as u64;
+					(b, moq::Unheld(n))
+				})
+			})
 	}
 	fn stop(&mut self, code: u32) {
 		backend::RecvStream::stop(&mut self.0, code)
@@ -309,7 +331,7 @@ mod tests {
 		let Poll::Ready(Ok(Some(chunk))) = poll::RecvStream::poll_read_chunk(&mut recv, &mut cx, 2) else {
 			panic!("read failed")
 		};
-		assert_eq!(chunk, b"hi"[..]);
+		assert_eq!(chunk.0, b"hi"[..]);
 		poll::RecvStream::stop(&mut recv, 13);
 		assert_eq!(state.get(), 13);
 		let Poll::Ready(Err(error)) = poll::SendStream::poll_closed(&mut send, &mut cx) else {
