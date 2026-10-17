@@ -209,6 +209,10 @@ pub struct VideoHint {
 	/// Unlike the other fields this is a choice, not a hint: the bitstream never reveals a
 	/// container, so it is applied to every config the importer publishes rather than filling a gap.
 	pub container: hang::catalog::Container,
+	/// The rendition's [`preference`](hang::catalog::VideoConfig::preference).
+	///
+	/// A choice like the container: the bitstream never reveals it, so every config gets it.
+	pub preference: i32,
 }
 
 /// Fill `slot` from `value` only when the slot is still empty, so a value the stream detected always
@@ -240,6 +244,7 @@ impl From<hang::catalog::VideoConfig> for VideoHint {
 			jitter: config.jitter,
 			delay: config.delay,
 			container: config.container,
+			preference: config.preference,
 		}
 	}
 }
@@ -264,6 +269,7 @@ impl VideoHint {
 		fill(&mut config.jitter, self.jitter);
 		fill(&mut config.delay, self.delay);
 		config.container = self.container.clone();
+		config.preference = self.preference;
 	}
 
 	/// Build a config from these fields alone, or `None` if the codec is missing. Used to publish
@@ -599,6 +605,7 @@ impl<E: CatalogExt, C: RenditionConfig<E>> Rendition<E, C> {
 			serde_json::to_writer(std::io::sink(), &next).map_err(moq_json::Error::from)?;
 			self.present = true;
 			*guard = next;
+			guard.list::<C>(&self.name);
 			guard.commit()?;
 		}
 		self.supplied = supplied;
@@ -931,19 +938,22 @@ mod tests {
 		moq_net::Timestamp::from_micros(micros).unwrap()
 	}
 
-	// Legacy unless selected, and a clone (what an importer is handed) carries the selection.
+	// Legacy and 0 unless selected, and a clone (what an importer is handed) carries the selection.
 	#[test]
-	fn a_video_hint_applies_its_container_to_every_config() {
+	fn a_video_hint_applies_its_container_and_preference_to_every_config() {
 		let mut config = hang::catalog::VideoConfig::new(hang::catalog::VideoCodec::VP8);
 		VideoHint::default().apply(&mut config);
 		assert_eq!(config.container, hang::catalog::Container::Legacy);
+		assert_eq!(config.preference, 0);
 
 		let hint = VideoHint {
 			container: hang::catalog::Container::Loc,
+			preference: -1,
 			..Default::default()
 		};
 		hint.apply(&mut config);
 		assert_eq!(config.container, hang::catalog::Container::Loc);
+		assert_eq!(config.preference, -1);
 	}
 
 	/// Feed ~40ms 100 kB frames over more than the bitrate window, with a measured

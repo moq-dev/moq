@@ -428,32 +428,50 @@ impl Directions {
 async fn spawn_moq(
 	moq: &MoqSide,
 	net: &Net,
-	client: moq_tokio::Client,
 	cluster: moq_relay::cluster::Cluster,
 	directions: Directions,
 	tasks: &mut JoinSet<anyhow::Result<()>>,
 ) -> anyhow::Result<Attached> {
-	let mut bandwidth = moq_net::bandwidth::Allocator::unlimited();
-	let mut connection = None;
 	let cluster = cluster
-		.with_client(client.clone())
 		.with_client_tls(moq.client.tls.build()?)
 		.with_connect(moq.client.clone(), moq.quic.clone());
+	#[cfg(feature = "iroh")]
+	let cluster = match net.iroh.clone() {
+		Some(iroh) => cluster.with_iroh(iroh),
+		None => cluster,
+	};
 	let origin = cluster.origin.clone();
 
-	if let Some(url) = moq.client.url.clone() {
-		let mut client = client;
+	// Built only to dial `--connect`: the cluster binds its own client from the
+	// same `[connect]` config, so a second one would contend for a fixed bind port.
+	// Built before the listener so a bad config fails before readiness, but dialed
+	// only after it: a later startup failure would drop a live dial unclosed.
+	let dialer = match moq.client.url.clone() {
+		Some(url) => Some((url, net.client(moq.client.clone())?)),
+		None => None,
+	};
+
+	let (started, shutdown) =
+		notify_when_initialized(spawn_server(tasks, moq, &cluster, net, directions), moq::notify_ready).await?;
+	// Even standalone: it is what reports a panic in the origin driver.
+	tasks.spawn(async move { started.run().await });
+
+	let mut bandwidth = moq_net::bandwidth::Allocator::unlimited();
+	let mut connection = None;
+	let mut client = None;
+	if let Some((url, mut dialer)) = dialer {
+		client = Some(dialer.clone());
 		if directions.publish {
-			client = client.with_publisher(origin.consume());
+			dialer = dialer.with_publisher(origin.consume());
 		}
 		if directions.consume {
-			client = client.with_subscriber(origin.clone());
+			dialer = dialer.with_subscriber(origin.clone());
 		}
 
 		// Both directions ride one connection, so this dials directly rather than
 		// through `Client::publish` / `Client::consume`, which each attach a single
 		// direction and dial the same URL.
-		let reconnect = client.connect(url);
+		let reconnect = dialer.connect(url);
 		// Read before the handle moves into the task. This consumer is persistent: it
 		// survives reconnects, reading `None` while down, so it can be wired up before
 		// anything connects.
@@ -463,14 +481,10 @@ async fn spawn_moq(
 		connection = Some(reconnect);
 	}
 
-	let (started, shutdown) =
-		notify_when_initialized(spawn_server(tasks, moq, &cluster, net, directions), moq::notify_ready).await?;
-	// Even standalone: it is what reports a panic in the origin driver.
-	tasks.spawn(async move { started.run().await });
-
 	Ok(Attached {
 		bandwidth,
 		origin,
+		client,
 		connection,
 		shutdown,
 	})
@@ -480,6 +494,8 @@ async fn spawn_moq(
 struct Attached {
 	bandwidth: moq_net::bandwidth::Allocator,
 	origin: moq_net::origin::Producer,
+	/// The client that dialed `--connect`, to close its endpoint on exit.
+	client: Option<moq_tokio::Client>,
 	/// The relay connection, when `--connect` dialed one.
 	connection: Option<moq_tokio::Connection>,
 	shutdown: Option<Shutdown>,
@@ -513,10 +529,16 @@ async fn run_play(moq: MoqSide, args: play::Args, net: Net) -> anyhow::Result<()
 		consume: true,
 		..Default::default()
 	};
-	let client = net.client(moq.client.clone())?;
-	let Attached { origin, .. } = spawn_moq(&moq, &net, client, cluster, directions, &mut tasks).await?;
+	let Attached {
+		origin,
+		client,
+		connection,
+		..
+	} = spawn_moq(&moq, &net, cluster.clone(), directions, &mut tasks).await?;
 
-	play::run(origin.consume(), name, args, tasks).await
+	let result = play::run(origin.consume(), name, args, tasks).await;
+	detach(connection, client, &cluster).await;
+	result
 }
 
 /// Run every stage over one Origin and one MoQ attachment.
@@ -537,15 +559,17 @@ async fn run_stages(moq: MoqSide, stages: Vec<Command>, net: Net) -> anyhow::Res
 
 	// The stage combinations were refused up front by `Invocation::validate`, before
 	// anything bound a port or dialed out.
-	let client = net.client(moq.client.clone())?;
+	let mut client = None;
 	let mut connection = None;
 	let result = async {
 		let Attached {
 			bandwidth,
 			origin,
+			client: dialer,
 			connection: attached,
 			shutdown,
-		} = spawn_moq(&moq, &net, client.clone(), cluster, Directions::of(&stages), &mut tasks).await?;
+		} = spawn_moq(&moq, &net, cluster.clone(), Directions::of(&stages), &mut tasks).await?;
+		client = dialer;
 		connection = attached;
 
 		// stdin and stdout are one resource each, so two stages can't share them.
@@ -589,16 +613,29 @@ async fn run_stages(moq: MoqSide, stages: Vec<Command>, net: Net) -> anyhow::Res
 	}
 	.await;
 
-	// The process exits next, even on a setup error, so the relay only hears we left
-	// if the close goes out now. The connection first delivers what it queued, such
-	// as the finished tracks at stdin EOF, since the client's close discards it.
+	// Even on a setup error.
+	detach(connection, client, &cluster).await;
+	result
+}
+
+/// Close everything [`spawn_moq`] attached. The process exits next, so the relay
+/// and cluster peers only hear we left if the closes go out now. The connection
+/// first delivers what it queued, such as the finished tracks at stdin EOF, since
+/// the client's close discards it.
+async fn detach(
+	connection: Option<moq_tokio::Connection>,
+	client: Option<moq_tokio::Client>,
+	cluster: &moq_relay::cluster::Cluster,
+) {
 	if let Some(connection) = connection
 		&& let Err(err) = connection.close().await
 	{
 		tracing::warn!(%err, "closed before delivering everything");
 	}
-	client.close().await;
-	result
+	if let Some(client) = client {
+		client.close().await;
+	}
+	cluster.close().await;
 }
 
 /// Run the non-Send pipelines on `local`, reporting each into `tasks`.
@@ -1099,6 +1136,43 @@ mod tests {
 		assert!(tasks.is_empty(), "nothing should be spawned after a bind failure");
 	}
 
+	/// `--connect` dials only once the listener is up, so a bind failure leaves no
+	/// live dial to drop without its close.
+	#[tokio::test]
+	async fn a_stream_bind_failure_starts_no_dial() {
+		let _ = moq_tokio::crypto::install_default();
+		let occupied = std::net::TcpListener::bind("127.0.0.1:0").expect("occupy a port");
+		let addr = occupied.local_addr().expect("occupied address").to_string();
+		let invocation = Invocation::try_parse_from([
+			"moq",
+			"--connect",
+			"http://127.0.0.1:9/",
+			"--listen-tcp-bind",
+			&addr,
+			"--auth-public",
+			"**",
+			"import",
+			"ts",
+		])
+		.expect("parse");
+		let cluster = invocation.moq.cluster().expect("create cluster");
+		let net = Net {
+			quic: invocation.moq.quic.clone(),
+			#[cfg(feature = "iroh")]
+			iroh: None,
+		};
+		let mut tasks = JoinSet::new();
+		let directions = Directions {
+			publish: true,
+			consume: false,
+		};
+		let Err(err) = spawn_moq(&invocation.moq, &net, cluster, directions, &mut tasks).await else {
+			panic!("the occupied port must fail startup");
+		};
+		assert!(err.to_string().contains("failed to bind listeners"), "{err:#}");
+		assert!(tasks.is_empty(), "no dial starts before the listener is up");
+	}
+
 	/// An explicit listener with no auth source stops startup instead of refusing
 	/// every session, even for a caller that skipped `MoqSide::validate`.
 	#[tokio::test]
@@ -1191,17 +1265,10 @@ mod tests {
 		])
 		.expect("parse");
 		assert!(invocation.moq.validate().is_ok());
-		let net = Net {
-			quic: invocation.moq.quic.clone(),
-			#[cfg(feature = "iroh")]
-			iroh: None,
-		};
-		let client = net.client(invocation.moq.client.clone()).expect("client");
 		let cluster = invocation
 			.moq
 			.cluster()
 			.expect("cluster")
-			.with_client(client)
 			.with_connect(invocation.moq.client.clone(), invocation.moq.quic.clone());
 		let err = cluster
 			.clone()
@@ -1216,6 +1283,51 @@ mod tests {
 			.start()
 			.await
 			.expect("http API with TLS");
+	}
+
+	/// Without `--connect`, only the cluster binds `--connect-bind`, so a fixed
+	/// port with a WAN cluster peer starts instead of colliding with itself.
+	#[tokio::test]
+	async fn a_fixed_connect_bind_with_a_cluster_peer_starts() {
+		let _ = moq_tokio::crypto::install_default();
+		// Borrow a free port from the OS, then hand it to `--connect-bind`.
+		let bind = std::net::UdpSocket::bind("127.0.0.1:0")
+			.expect("probe socket")
+			.local_addr()
+			.expect("probe addr")
+			.to_string();
+		let invocation = Invocation::try_parse_from([
+			"moq",
+			"--connect-bind",
+			&bind,
+			"--cluster-connect",
+			"moql://127.0.0.1:9/",
+			"import",
+			"ts",
+		])
+		.expect("parse");
+		invocation.moq.validate().expect("validate");
+		let cluster = invocation.moq.cluster().expect("cluster");
+		let net = Net {
+			quic: invocation.moq.quic.clone(),
+			#[cfg(feature = "iroh")]
+			iroh: None,
+		};
+		let mut tasks = JoinSet::new();
+		let attached = spawn_moq(
+			&invocation.moq,
+			&net,
+			cluster,
+			Directions {
+				publish: true,
+				consume: false,
+			},
+			&mut tasks,
+		)
+		.await
+		.expect("a fixed bind with a cluster peer starts");
+		assert!(attached.client.is_none(), "no --connect, so no client of its own");
+		tasks.abort_all();
 	}
 
 	#[test]

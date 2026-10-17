@@ -39,4 +39,3 @@ From the first `Shipping sizes` run:
 ## Related
 
 - [Release builds link again](/quest/m0/release-link.md) - unblocks `Shipping sizes`
-- [Nightly workloads pass](/quest/m0/ci/nightly-green.md) - the Nightly failures this check found

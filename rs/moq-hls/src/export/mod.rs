@@ -327,7 +327,7 @@ impl Broadcaster {
 
 	/// Build every rendition's init segment, so the manifest can name each by its hash. A
 	/// rendition whose init can't be built yet is left out of the render.
-	#[cfg(feature = "server")]
+	#[cfg_attr(not(feature = "server"), allow(dead_code))]
 	pub(crate) async fn build_inits(&self) {
 		for rendition in self.renditions.snapshot() {
 			if let Err(err) = rendition.init().await {
@@ -2357,7 +2357,7 @@ mod tests {
 		// PTS zero at exactly the moq epoch, so every timestamp maps to a fixed string.
 		let wall = UNIX_EPOCH + Duration::from_millis(hang::catalog::MOQ_EPOCH_UNIX_MILLIS);
 		let config = moq_mux::catalog::Config::default()
-			.with_clock(moq_mux::Clock::at(std::time::Instant::now(), wall).expect("a representable wall"));
+			.with_clock(moq_mux::Clock::at(moq_net::time::now(), wall).expect("a representable wall"));
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, config).unwrap();
 
 		let reserved = catalog.reserve();
@@ -4123,7 +4123,7 @@ mod tests {
 					fanout.push(at, entry(at, at), &refs[0]);
 				}
 				// Aligned references share record numbers, so every handoff continues seamlessly.
-				let started = std::time::Instant::now();
+				let started = moq_net::time::now();
 				for at in retained..retained + 1_024 {
 					let reference = &refs[(at % 2) as usize];
 					fanout.select(Some(reference.clone()));

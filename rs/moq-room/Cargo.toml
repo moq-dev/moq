@@ -15,10 +15,10 @@ categories = ["multimedia", "network-programming"]
 [dependencies]
 kio = { workspace = true }
 moq-auth = { workspace = true }
+moq-clock = { workspace = true }
 moq-json = { workspace = true }
 moq-net = { workspace = true }
 thiserror = { workspace = true }
-web-async = { workspace = true }
 
 [dev-dependencies]
 moq-tokio = { path = "../moq-tokio", default-features = false }

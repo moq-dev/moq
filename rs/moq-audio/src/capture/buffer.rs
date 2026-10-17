@@ -2,8 +2,9 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
+use moq_net::time::Instant;
 use ringbuf::traits::{Consumer, Observer, Producer, Split};
 use ringbuf::{CachingCons, CachingProd, HeapCons, HeapProd, HeapRb};
 use tokio::sync::mpsc;

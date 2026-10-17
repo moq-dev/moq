@@ -1271,6 +1271,11 @@ void MoQDock::UpdateStatus()
 			lines << QString("Protocol %1").arg(QString::fromStdString(stats.protocol));
 		if (!stats.dial.empty())
 			lines << QString("Dial %1").arg(QString::fromStdString(stats.dial));
+		MoQOutput::VideoRate rate;
+		if (moq->TryGetVideoRate(&rate))
+			lines << QString("Video target %1 of %2 configured")
+					 .arg(FormatBitrate(static_cast<double>(rate.target_bps)),
+					      FormatBitrate(static_cast<double>(rate.configured_bps)));
 		statsBox->setText(lines.isEmpty() ? QString("Connected.") : lines.join('\n'));
 	}
 
