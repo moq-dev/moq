@@ -169,23 +169,10 @@ impl Workers {
 		// The group owns the reuseport invariants: it locks the port against a
 		// concurrently-constructing same-UID group (the bind probe covers one
 		// that already holds it), refuses a size the steering filter could not
-		// address, and hands out members in the order the kernel numbers them
-		// by.
-		let mut forming = moq_sock::shard::Group::acquire(requested, config.count)
-			.with_context(|| format!("failed to take the reuseport group on {requested}"))?;
-		let count = forming.count();
-
-		let mut claims = Vec::with_capacity(count as usize);
-		while let Some(member) = forming.member() {
-			let shard = member.shard();
-			let claim = member
-				.bind()
-				.with_context(|| format!("failed to bind worker {} on {}", shard.index(), forming.addr()))?;
-			claims.push(claim);
-		}
-		let mut group = forming
-			.complete(claims)
-			.context("failed to complete the reuseport group")?;
+		// address, and binds members in the order the kernel numbers them by.
+		let mut group = moq_sock::shard::bind(requested, config.count)
+			.with_context(|| format!("failed to bind the reuseport group on {requested}"))?;
+		let count = group.count();
 		let mut members = Vec::with_capacity(count as usize);
 		while let Some(member) = group.member().context("failed to clone a reuseport member")? {
 			members.push(member);

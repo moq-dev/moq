@@ -41,7 +41,7 @@ Recommendations:
   harness filters:
   - An io_uring session shows its `conn` span and its close, like
     `relay_websocket_logs_its_close_under_a_cluster_id` in
-    `rs/moq-relay/tests/smoke.rs`. It belongs in `tests/runtime_uring.rs`,
+    `rs/moq-relay/tests/integration/smoke.rs`. It belongs in `tests/integration/runtime_uring.rs`,
     which skips loudly below the kernel floor.
   - A panic inside the lifecycle owner, forced on the ring's
     shared-runtime supervision, still logs that connection's close. This is

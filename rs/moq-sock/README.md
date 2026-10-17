@@ -7,13 +7,14 @@ runtimes (`moq-tokio` and `moq-uring`).
   `SO_REUSEPORT` for worker-per-core groups (Linux-only, refused loudly
   elsewhere).
 - **`shard`**: forming and steering a reuseport group by QUIC connection id.
-  A `shard::Group` holds the port (probing and locking against a second
-  same-UID group), fixes the member count, and hands out one `Member` per slot
-  in index order. Binding a member yields an opaque claim, and completing the
-  group with every claim attaches a classic-BPF filter before any socket is
-  released for serving. The completed group retains every member socket, so
-  dropping one serving handle cannot renumber the survivors. A `Shard` names
-  the slot a member ended up in, and `cid` makes an issued id that names it.
+  `shard::bind` holds the port (probing and locking against a second same-UID
+  group), binds every member in index order, and attaches a classic-BPF filter
+  before any socket is released for serving. The bound group retains every
+  member socket, so dropping one serving handle cannot renumber the survivors.
+  A `Shard` names the slot a member holds, which the endpoint serving it names
+  in every connection id it issues, alongside a marker no SRT data header
+  carries (`moq_quic::RandomConnectionIdGenerator::set_shard`). Anything else
+  on the port, including other protocols, keeps the kernel's 4-tuple hash.
 - **`cpu`**: pinning worker threads to cores.
 - **`udp`**: sending and receiving with GSO, GRO, and ECN, a hard fork of
   [quinn-udp](https://github.com/quinn-rs/quinn). All credit for it goes to
