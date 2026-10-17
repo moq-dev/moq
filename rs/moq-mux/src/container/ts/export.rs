@@ -3409,7 +3409,8 @@ struct DolbyUnit {
 /// first sync frame with nothing carried. No decoder can use them.
 ///
 /// An E-AC-3 substream whose access unit went out with the last PES goes out on its own, at
-/// that unit's time. One whose access unit began before the join is dropped.
+/// that unit's time, whether its PES is timed by that unit or the next. One whose access unit
+/// began before the join is dropped.
 fn dolby_units(
 	codec: Dolby,
 	carry: &mut Option<DolbyCarry>,
@@ -3422,6 +3423,8 @@ fn dolby_units(
 	let mut units = Vec::new();
 	let mut open = None;
 	let mut offset = None;
+	// When the next access unit to begin in this PES is presented.
+	let mut base = start;
 	match carry.take() {
 		None => {}
 		Some(head) if head.skip != skip => {
@@ -3434,8 +3437,14 @@ fn dolby_units(
 			if let Some(unit) = head.unit {
 				let length = duration(unit.samples, unit.rate)?;
 				let end = unit.at.checked_add(length)?;
-				if end.as_micros().abs_diff(start.as_micros()) <= length.as_micros() / 2 {
+				let near = |at: Timestamp| at.as_micros().abs_diff(start.as_micros()) <= length.as_micros() / 2;
+				if near(end) {
 					open = Some(unit);
+				} else if near(unit.at) {
+					// Timed by the unit it extends, as a PES of only its substreams is: the
+					// next unit still begins where that one ends.
+					open = Some(unit);
+					base = end;
 				} else {
 					tracing::warn!(?end, ?start, "closed an E-AC-3 access unit at a gap between PES");
 				}
@@ -3509,7 +3518,7 @@ fn dolby_units(
 	let mut left = Vec::new();
 	while offset < payload.len() {
 		let rest = &payload[offset..];
-		let next = start.checked_add(duration(samples, rate)?)?;
+		let next = base.checked_add(duration(samples, rate)?)?;
 		let header = match codec.parse(rest) {
 			Ok(header) => header,
 			// A header cut short at the end, which the next PES completes.
@@ -3535,7 +3544,7 @@ fn dolby_units(
 	}
 	*carry = Some(DolbyCarry {
 		skip,
-		next: start.checked_add(duration(samples, rate)?)?,
+		next: base.checked_add(duration(samples, rate)?)?,
 		unit: open.filter(|_| codec == Dolby::Eac3),
 		bytes: left,
 	});

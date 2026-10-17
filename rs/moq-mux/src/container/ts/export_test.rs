@@ -1748,6 +1748,24 @@ async fn export_times_a_dvb_eac3_substream_by_its_access_unit_across_pes() {
 	}
 }
 
+/// A PES of only a dependent substream, timed by the access unit it extends as the export's
+/// own output is, still joins that unit, and the next unit keeps its own time.
+#[tokio::test(start_paused = true)]
+async fn export_keeps_a_dvb_eac3_substream_pes_timed_by_its_unit() {
+	let (independent, dependent) = (eac3_frame(false), eac3_frame(true));
+	let unit = [independent.clone(), dependent.clone()].concat();
+	let (pes, _) = exported_dolby_pes(
+		vec![
+			Ac3Write::Pes(0, independent.clone()),
+			Ac3Write::Pes(0, [dependent.clone(), unit.clone()].concat()),
+		],
+		0x7a,
+	)
+	.await;
+	let start = pes[0].0;
+	assert_eq!(pes, [(start, independent), (start, dependent), (start + 2_880, unit)]);
+}
+
 /// A PES without a sync frame holds nothing a decoder can use, so it goes nowhere rather
 /// than out whole.
 #[tokio::test(start_paused = true)]
