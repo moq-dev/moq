@@ -19,6 +19,11 @@ use crate::{Inbound, Socket, Wire};
 /// tried and exhausted (after ~21s at its defaults), but with no remote candidates
 /// it treats the session as still possible forever, since trickle ICE could add
 /// one. Set above str0m's own exhaustion so a slow but real peer is not clipped.
+///
+/// It counts from when the peer could hold every local candidate: once gathering
+/// ends, so a caller that sends its description only after the last candidate is
+/// not clipped by an unreachable STUN server's retransmissions, and for an
+/// [`Agent::awaiting_answer`], once the answer applies.
 const ESTABLISH_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// RFC 8489 section 6.2.1: the first retransmission timeout of a STUN request.
@@ -94,7 +99,8 @@ pub struct Agent {
 	locals: Vec<SocketAddr>,
 	inbound: Inbound,
 	stun: Vec<Query>,
-	gathered: bool,
+	/// When every STUN query answered or gave up, once [`Event::Gathered`] went out.
+	gathered: Option<Instant>,
 	events: VecDeque<Event>,
 	/// Why the connection ended, found while draining and reported by the next [`Agent::next`].
 	failed: Option<Error>,
@@ -130,7 +136,7 @@ impl Agent {
 			locals,
 			inbound,
 			stun: Vec::new(),
-			gathered: false,
+			gathered: None,
 			events: VecDeque::new(),
 			failed: None,
 			timeout: now,
@@ -210,8 +216,8 @@ impl Agent {
 			if let Some(err) = self.failed.take() {
 				return Err(err);
 			}
-			if !self.gathered && self.stun.is_empty() {
-				self.gathered = true;
+			if self.gathered.is_none() && self.stun.is_empty() {
+				self.gathered = Some(Instant::now());
 				return Ok(Event::Gathered);
 			}
 
@@ -228,10 +234,7 @@ impl Agent {
 			if !self.rtc.is_alive() {
 				return Err(Error::Closed);
 			}
-			let establish = self
-				.started
-				.filter(|_| !self.connected)
-				.map(|at| at + ESTABLISH_TIMEOUT);
+			let establish = self.establish();
 			if establish.is_some_and(|at| at <= Instant::now()) {
 				return Err(Error::Timeout);
 			}
@@ -260,6 +263,14 @@ impl Agent {
 				self.fail(Error::rtc(err));
 			}
 			self.retransmit(now);
+		}
+	}
+
+	/// When [`ESTABLISH_TIMEOUT`] expires, or `None` while it is held or ICE connected.
+	fn establish(&self) -> Option<Instant> {
+		match (self.started, self.gathered) {
+			(Some(started), Some(gathered)) if !self.connected => Some(started.max(gathered) + ESTABLISH_TIMEOUT),
+			_ => None,
 		}
 	}
 
@@ -519,6 +530,18 @@ mod tests {
 		assert_eq!(agent.started, None);
 		drop(agent.rtc_mut());
 		assert!(agent.started.is_some());
+	}
+
+	#[tokio::test]
+	async fn gathering_holds_the_deadline() {
+		let mut agent = unpolled().with_stun(&["127.0.0.1:3478".parse().unwrap()]);
+		// An unreachable STUN server retransmits for longer than the deadline, so the
+		// deadline waits for gathering to end.
+		assert_eq!(agent.establish(), None);
+		agent.stun.clear();
+		assert!(matches!(agent.next().await, Ok(Event::Gathered)));
+		let gathered = agent.gathered.unwrap();
+		assert_eq!(agent.establish(), Some(gathered + ESTABLISH_TIMEOUT));
 	}
 
 	#[test]
