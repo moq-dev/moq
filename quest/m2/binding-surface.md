@@ -19,12 +19,8 @@ configure and observe audio playout delay.
 Decided in the 2026-10-06 audit: the native decode delay API is on `main`
 (#4162, `rs/moq-audio/src/decode/consumer.rs`), so this no longer waits on
 the jitter-target line, whose remaining Watch proof bindings do not use.
-It waits on Codecs instead, so each wrapper adds delay to the reshaped audio
-decoder rather than to `BroadcastConsumer.decode_audio`, which Codecs removes.
-
-## Required
-
-- [Codecs](/quest/m1/ffi-shape/codec.md) - the reshaped audio decoder each wrapper adds delay to
+Each wrapper adds delay to the reshaped audio decoder rather than to the
+removed `BroadcastConsumer.decode_audio`.
 
 ## Related
 

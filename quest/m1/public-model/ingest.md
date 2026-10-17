@@ -108,13 +108,17 @@ Rust items (`rs/moq-net/src/model/`), as they stood at b4eab0db1:
 - **Received end** (`track::Producer::finish_at_pending`, `set_tail_pending`;
   both subscribers). Without it, a custom subscriber over unordered streams
   ends readers at a hole. **Decision**:
-  - Public after [Tail arrivals](/quest/m1/tail-arrivals.md), as one call
-    that returns a handle the session settles when its tail is in.
+  - Public after Tail arrivals, as one call that returns a handle the
+    session settles when its tail is in.
   - Keep it private.
   - ✅ Public after Tail arrivals, with the shape left to that quest. Once
     the model records arrivals per track bounded by the subscription's
     grace, it may own the grace timer itself, so a plain `finish_at` on a
     received track could be enough and no settle handle is needed.
+  - Tail arrivals landed the record (`TrackState::arrivals`) without a
+    timer: the model folds a gap only on a write, so the session still
+    settles the tail with `set_tail_pending(false)`. The shape is this
+    quest's to settle.
 - **Session end** (`track::Producer::close`, `abort_session`; both
   subscribers): public. Fold `abort_session` into the public `abort` (abort
   open groups too) unless the implementer finds a reader-visible difference,
@@ -181,7 +185,6 @@ cover the behavior.
 ## Required
 
 - [Narrow the model before it goes public](/quest/m1/public-model/narrow.md) - its visibility rewrite and marker lint guard every model API this child edits
-- [Tail arrivals](/quest/m1/tail-arrivals.md) - settles the received-end semantics before they become public
 
 ## Related
 

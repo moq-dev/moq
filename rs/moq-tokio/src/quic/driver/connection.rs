@@ -25,7 +25,7 @@ use tracing::{Instrument, Span, debug_span};
 
 use crate::quic::driver::{
     ConnectionEvent, Duration, Instant, VarInt, mutex::Mutex, recv_stream::RecvStream,
-    runtime::UdpSender, send_stream::SendStream, udp_transmit,
+    runtime::UdpSender, send_group::SendGroup, send_stream::SendStream, udp_transmit,
 };
 use moq_quic::{
     ConnectionError, ConnectionHandle, ConnectionStats, Dir, EndpointEvent, Side, StreamEvent,
@@ -344,6 +344,13 @@ impl Connection {
             conn: &self.0,
             notify: self.0.shared.stream_budget_available[Dir::Uni as usize].notified(),
         }
+    }
+
+    /// Open a send group at `priority`, for streams to join with [`SendStream::set_group`].
+    ///
+    /// [`SendStream::set_group`]: crate::quic::driver::SendStream::set_group
+    pub fn send_group(&self, priority: i64) -> SendGroup {
+        SendGroup::new(self.0.0.clone(), priority)
     }
 
     /// Initiate a new outgoing bidirectional stream.
