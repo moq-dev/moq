@@ -6,8 +6,10 @@ description: The order to roll out a release across relays, auth servers, and cl
 # Upgrade
 
 Every hand-written published package keeps a `MIGRATE.md` with a before/after
-snippet for each breaking change, newest first. Read your package's file from
-the top down to the version you run. Most binding users install a wrapper,
+snippet for each breaking change, newest first. The links below track `main`;
+for a release, open the file at its tag (such as `moq-relay-v0.17.6`) and apply
+the sections from the version you run up to that one. `Unreleased` applies only
+when you build from `main`. Most binding users install a wrapper,
 such as `moq-rs` on PyPI or `dev.moq:moq` on Maven, whose guide is in the index
 below. The raw UniFFI packages published as `moq-ffi` have no guide of their
 own: [moq-ffi's](https://github.com/moq-dev/moq/blob/main/rs/moq-ffi/MIGRATE.md)
