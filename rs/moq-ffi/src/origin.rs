@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 use crate::consumer::MoqBroadcastConsumer;
 use crate::error::MoqError;
@@ -209,15 +209,16 @@ struct AnnouncedBroadcast {
 	follow: moq_net::announce::Follow,
 	/// An instance serves the path that was not handed out yet.
 	unseen: bool,
-	/// The instance handed out last.
-	last: Option<moq_net::broadcast::Consumer>,
+	/// The handle handed out last, until the caller drops it or the path goes offline. Weak, so
+	/// it never keeps an instance the caller let go of from retiring.
+	last: Weak<MoqBroadcastConsumer>,
 	driver: Background,
 }
 
 impl AnnouncedBroadcast {
 	async fn available(&mut self) -> Result<Arc<MoqBroadcastConsumer>, MoqError> {
 		let driver = self.driver.clone();
-		let broadcast = driver
+		driver
 			.watch(async {
 				loop {
 					// Apply every change on hand before resolving, so a burst of them hands out
@@ -234,43 +235,54 @@ impl AnnouncedBroadcast {
 					// racing its handler). The instance stays unseen until it resolves: a foreign
 					// cancel only drops this future, and the caller may call again.
 					let broadcast = self.origin.routed_broadcast(&self.path).await?;
+
+					// A change that came through while resolving may predate the answer, such as
+					// an end and a start for the instance it resolved. Resolve afresh once caught up.
+					if self.settle()? {
+						continue;
+					}
 					self.unseen = false;
 
 					// Resolving can run ahead of the follower: a takeover resolves at once while
-					// its restart is held, or lands while resolving. That restart then names the
-					// instance already handed out.
-					if self.last.as_ref().is_some_and(|last| last.is_clone(&broadcast)) {
+					// its restart is held, and that restart then names the instance handed out.
+					if self.last.upgrade().is_some_and(|last| last.inner.is_clone(&broadcast)) {
 						continue;
 					}
-					self.last = Some(broadcast.clone());
+					let broadcast = Arc::new(MoqBroadcastConsumer::routed(
+						broadcast,
+						self.origin.clone(),
+						self.driver.clone(),
+					));
+					self.last = Arc::downgrade(&broadcast);
 					return Ok(broadcast);
 				}
 			})
-			.await?;
-		Ok(Arc::new(MoqBroadcastConsumer::routed(
-			broadcast,
-			self.origin.clone(),
-			self.driver.clone(),
-		)))
+			.await
 	}
 
-	/// Apply every change on hand.
-	fn settle(&mut self) -> Result<(), MoqError> {
+	/// Apply every change on hand, returning whether any came through.
+	fn settle(&mut self) -> Result<bool, MoqError> {
+		let mut changed = false;
 		while let std::task::Poll::Ready(event) = self.follow.poll_next(&kio::Waiter::noop()) {
-			self.apply(event)?;
+			changed |= self.apply(event)?;
 		}
-		Ok(())
+		Ok(changed)
 	}
 
-	/// Apply one change to the path.
-	fn apply(&mut self, event: Option<moq_net::announce::Event>) -> Result<(), MoqError> {
+	/// Apply one change to the path, returning whether it is one.
+	fn apply(&mut self, event: Option<moq_net::announce::Event>) -> Result<bool, MoqError> {
 		match event.ok_or(MoqError::Closed)? {
 			moq_net::announce::Event::Start(_) | moq_net::announce::Event::Restart(_) => self.unseen = true,
-			moq_net::announce::Event::End(_) => self.unseen = false,
+			// An end is a gap that ended every request on the old route, so whatever serves the
+			// path next is handed out, even the same instance coming back.
+			moq_net::announce::Event::End(_) => {
+				self.unseen = false;
+				self.last = Weak::new();
+			}
 			// The same instance over another route, which its subscriptions ride out.
-			moq_net::announce::Event::Update(_) => {}
+			moq_net::announce::Event::Update(_) => return Ok(false),
 		}
-		Ok(())
+		Ok(true)
 	}
 }
 
@@ -521,7 +533,7 @@ impl MoqOriginConsumer {
 				path,
 				follow,
 				unseen: false,
-				last: None,
+				last: Weak::new(),
 				driver: self.driver.clone(),
 			}),
 		}))
@@ -659,8 +671,8 @@ impl MoqAnnouncedBroadcast {
 	/// The first call resolves the instance serving the path, once one is announced. Each later
 	/// call waits for another to take over, as a restarted publisher or a replacement session
 	/// does, or for the broadcast to return after it went offline. Drop everything read from the
-	/// previous instance then and read the new one: the old one's tracks end when its session
-	/// does, and look finished.
+	/// previous instance then and read the new one: the old one's tracks end when its route
+	/// dies, with an error unless this side closed that session.
 	pub async fn available(&self) -> Result<Arc<MoqBroadcastConsumer>, MoqError> {
 		self.task.run(|mut state| async move { state.available().await }).await
 	}

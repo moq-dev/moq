@@ -289,8 +289,10 @@ impl Origin {
 			Err(err) => return Err(err.into()),
 		};
 		let mut unseen = false;
-		// The instance delivered last.
-		let mut last: Option<moq_net::broadcast::Consumer> = None;
+		let mut delivered = false;
+		// The handle delivered last, until the caller frees it or the path goes offline. An id
+		// rather than the broadcast, so it never keeps an instance the caller freed from retiring.
+		let mut last: Option<Id> = None;
 		// The origin closing ends the wait, cleanly once a handle was delivered.
 		let closed = |delivered: bool| match delivered {
 			true => Ok(()),
@@ -302,8 +304,8 @@ impl Origin {
 		loop {
 			// Apply every change on hand before resolving, so a burst of them delivers only the
 			// instance serving the path now.
-			if settle(&mut follow, &mut unseen).is_none() {
-				return closed(last.is_some());
+			if settle(&mut follow, &mut unseen, &mut last).is_none() {
+				return closed(delivered);
 			}
 			if !unseen {
 				let event = tokio::select! {
@@ -312,9 +314,9 @@ impl Origin {
 					event = follow.next() => event,
 				};
 				let Some(event) = event else {
-					return closed(last.is_some());
+					return closed(delivered);
 				};
-				apply(&mut unseen, event);
+				apply(&mut unseen, &mut last, event);
 				continue;
 			}
 
@@ -326,24 +328,32 @@ impl Origin {
 				_ = &mut close => return Ok(()),
 				resolved = consumer.routed_broadcast(path.as_str()) => match resolved {
 					Ok(broadcast) => broadcast,
-					Err(moq_net::Error::Closed) => return closed(last.is_some()),
+					Err(moq_net::Error::Closed) => return closed(delivered),
 					Err(moq_net::Error::Unauthorized) => return Err(Error::BroadcastNotFound),
 					Err(err) => return Err(err.into()),
 				},
 			};
 
-			unseen = false;
-
-			// Resolving can run ahead of the follower: a takeover resolves at once while its
-			// restart is held, or lands while resolving. That restart then names the instance
-			// already delivered.
-			if last.as_ref().is_some_and(|last| last.is_clone(&broadcast)) {
-				continue;
+			// A change that came through while resolving may predate the answer, such as an end
+			// and a start for the instance it resolved. Resolve afresh once caught up.
+			match settle(&mut follow, &mut unseen, &mut last) {
+				None => return closed(delivered),
+				Some(true) => continue,
+				Some(false) => unseen = false,
 			}
-			last = Some(broadcast.clone());
 
 			// Hold the lock only to buffer the broadcast; release it before the callback.
-			let broadcast_id = State::lock().consume.start(broadcast, Some(consumer.clone()))?;
+			let broadcast_id = {
+				let mut state = State::lock();
+				// Resolving can run ahead of the follower: a takeover resolves at once while its
+				// restart is held, and that restart then names the instance already delivered.
+				if last.is_some_and(|last| state.consume.holds(last, &broadcast)) {
+					continue;
+				}
+				state.consume.start(broadcast, Some(consumer.clone()))?
+			};
+			last = Some(broadcast_id);
+			delivered = true;
 			callback.call(broadcast_id);
 		}
 	}
@@ -541,22 +551,30 @@ impl Origin {
 	}
 }
 
-/// Apply every change on hand to `unseen`, or return `None` once the origin closed.
-fn settle(follow: &mut moq_net::announce::Follow, unseen: &mut bool) -> Option<()> {
+/// Apply every change on hand, returning whether any came through, or `None` once the origin
+/// closed.
+fn settle(follow: &mut moq_net::announce::Follow, unseen: &mut bool, last: &mut Option<Id>) -> Option<bool> {
+	let mut changed = false;
 	while let std::task::Poll::Ready(event) = follow.poll_next(&kio::Waiter::noop()) {
-		apply(unseen, event?);
+		changed |= apply(unseen, last, event?);
 	}
-	Some(())
+	Some(changed)
 }
 
-/// Apply one change to `unseen`.
-fn apply(unseen: &mut bool, event: moq_net::announce::Event) {
+/// Apply one change to the path, returning whether it is one.
+fn apply(unseen: &mut bool, last: &mut Option<Id>, event: moq_net::announce::Event) -> bool {
 	match event {
 		moq_net::announce::Event::Start(_) | moq_net::announce::Event::Restart(_) => *unseen = true,
-		moq_net::announce::Event::End(_) => *unseen = false,
+		// An end is a gap that ended every request on the old route, so whatever serves the path
+		// next is delivered, even the same instance coming back.
+		moq_net::announce::Event::End(_) => {
+			*unseen = false;
+			*last = None;
+		}
 		// The same instance over another route, which its subscriptions ride out.
-		moq_net::announce::Event::Update(_) => {}
+		moq_net::announce::Event::Update(_) => return false,
 	}
+	true
 }
 
 #[cfg(test)]
