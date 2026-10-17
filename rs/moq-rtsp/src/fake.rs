@@ -111,6 +111,8 @@ pub struct Server {
 	url: url::Url,
 	/// The `Authorization` header every request must carry, if any.
 	auth: Option<String>,
+	/// Whether every request is refused with 403 Forbidden.
+	forbidden: bool,
 }
 
 impl Server {
@@ -124,7 +126,14 @@ impl Server {
 			media,
 			url,
 			auth: None,
+			forbidden: false,
 		}
+	}
+
+	/// Refuse every request with 403 Forbidden, as for credentials without access to the stream.
+	pub fn forbidden(mut self) -> Self {
+		self.forbidden = true;
+		self
 	}
 
 	/// Challenge every request for HTTP Basic credentials.
@@ -151,6 +160,10 @@ impl Server {
 		loop {
 			let request = read_request(&mut read).await.expect("a request before PLAY");
 			let mut headers = vec![format!("CSeq: {}", request.header("cseq").unwrap_or("0"))];
+			if self.forbidden {
+				respond(&write, "403 Forbidden", &headers, "").await;
+				continue;
+			}
 			if let Some(auth) = &self.auth
 				&& request.header("authorization") != Some(auth.as_str())
 			{

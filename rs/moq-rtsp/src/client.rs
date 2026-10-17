@@ -978,6 +978,17 @@ mod tests {
 		assert!(matches!(err, Error::Unauthorized(_)), "{err}");
 	}
 
+	#[tokio::test]
+	async fn forbidden_is_unauthorized() {
+		let server = Server::bind(vec![Media::H264 { sprop: true }]).await.forbidden();
+		let client = Client::new(server.url()).unwrap();
+		let (broadcast, catalog) = broadcast();
+		let pull = tokio::spawn(async move { client.pull(&broadcast, &catalog).await });
+		let _accept = tokio::spawn(async move { server.accept(0).await });
+		let err = within("the pull", pull).await.unwrap().unwrap_err();
+		assert!(matches!(err, Error::Unauthorized(_)), "{err}");
+	}
+
 	#[test]
 	fn only_rtsp_urls_are_accepted() {
 		assert!(matches!(
