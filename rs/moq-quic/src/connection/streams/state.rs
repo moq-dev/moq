@@ -13,7 +13,7 @@ use super::{
     StreamHalf, ThinRetransmits,
 };
 use crate::{
-    Dir, MAX_STREAM_COUNT, Side, StreamId, TransportError, VarInt,
+    Dir, Instant, MAX_STREAM_COUNT, Side, StreamId, TransportError, VarInt,
     coding::BufMutExt,
     connection::ConnectionTag,
     connection::stats::{CreditStats, FrameStats},
@@ -103,7 +103,7 @@ pub(crate) struct StreamsState {
     /// Streams with outgoing data queued, sorted by priority
     pub(super) pending: PendingStreamsQueue,
 
-    events: VecDeque<StreamEvent>,
+    pub(super) events: VecDeque<StreamEvent>,
     /// Streams blocked on connection-level flow control or stream window space
     ///
     /// Streams are only added to this list when a write fails.
@@ -411,9 +411,14 @@ impl StreamsState {
             self.events
                 .push_back(StreamEvent::Stopped { id, error_code });
         }
+        // An acknowledgment no longer means the peer will read the data
+        stream.pending.abandon_watches();
         let buffered = stream.pending.buffered();
         let reset = stream.abandon_reliable();
         self.buffered_data -= buffered - stream.pending.buffered();
+        if stream.pending.take_resolved() {
+            self.events.push_back(StreamEvent::Acked { id });
+        }
         reset
     }
 
@@ -733,7 +738,9 @@ impl StreamsState {
     ///
     /// Returns the Reliable Size of a held reset to send now, once the peer holds all the data it
     /// waited on.
-    pub(crate) fn received_ack_of(&mut self, frame: frame::StreamMeta) -> Option<u64> {
+    ///
+    /// `at` is when the ACK was received, less the ACK delay the peer reported.
+    pub(crate) fn received_ack_of(&mut self, frame: frame::StreamMeta, at: Instant) -> Option<u64> {
         let mut entry = match self.send.entry(frame.id) {
             hash_map::Entry::Vacant(_) => return None,
             hash_map::Entry::Occupied(e) => e,
@@ -749,8 +756,11 @@ impl StreamsState {
 
         let id = frame.id;
         let buffered = stream.pending.buffered();
-        let finished = stream.ack(frame);
+        let finished = stream.ack(frame, at);
         self.buffered_data -= buffered - stream.pending.buffered();
+        if stream.pending.take_resolved() {
+            self.events.push_back(StreamEvent::Acked { id });
+        }
         if !finished {
             // The stream is unfinished or may still need retransmits
             return stream.take_held_reset();
@@ -1182,31 +1192,40 @@ mod tests {
         assert_eq!(send.pending.poll_transmit(16).0, 16..23);
         assert_eq!(send.pending.poll_transmit(16).0, 23..24);
 
-        server.received_ack_of(frame::StreamMeta {
-            id,
-            offsets: 16..23,
-            fin: false,
-        });
+        server.received_ack_of(
+            frame::StreamMeta {
+                id,
+                offsets: 16..23,
+                fin: false,
+            },
+            Instant::now(),
+        );
         assert_eq!(
             server.write_limit(),
             0,
             "acknowledged suffix still occupies storage"
         );
-        server.received_ack_of(frame::StreamMeta {
-            id,
-            offsets: 0..16,
-            fin: false,
-        });
+        server.received_ack_of(
+            frame::StreamMeta {
+                id,
+                offsets: 0..16,
+                fin: false,
+            },
+            Instant::now(),
+        );
         assert_eq!(
             server.write_limit(),
             0,
             "partial prefix keeps the original Bytes allocation"
         );
-        server.received_ack_of(frame::StreamMeta {
-            id,
-            offsets: 23..24,
-            fin: false,
-        });
+        server.received_ack_of(
+            frame::StreamMeta {
+                id,
+                offsets: 23..24,
+                fin: false,
+            },
+            Instant::now(),
+        );
         assert_eq!(server.write_limit(), 24);
         SendStream {
             id,
@@ -1247,11 +1266,14 @@ mod tests {
         let send = server.send.get_mut(&id).unwrap().as_mut().unwrap();
         send.pending.poll_transmit(16);
         send.pending.poll_transmit(16);
-        server.received_ack_of(frame::StreamMeta {
-            id,
-            offsets: 16..23,
-            fin: false,
-        });
+        server.received_ack_of(
+            frame::StreamMeta {
+                id,
+                offsets: 16..23,
+                fin: false,
+            },
+            Instant::now(),
+        );
         SendStream {
             id,
             state: &mut server,
@@ -1277,11 +1299,14 @@ mod tests {
             offsets: 0..16,
             fin: false,
         });
-        server.received_ack_of(frame::StreamMeta {
-            id,
-            offsets: 0..16,
-            fin: false,
-        });
+        server.received_ack_of(
+            frame::StreamMeta {
+                id,
+                offsets: 0..16,
+                fin: false,
+            },
+            Instant::now(),
+        );
         assert!(!server.send[&id].as_ref().unwrap().is_pending());
         assert_eq!(server.write_limit(), 24);
     }
@@ -2505,11 +2530,14 @@ mod tests {
         assert_eq!(stream.state.poll(), None);
 
         // Ack the data
-        stream.state.received_ack_of(frame::StreamMeta {
-            id: stream_id,
-            offsets: 0..larger_send_window,
-            fin: false,
-        });
+        stream.state.received_ack_of(
+            frame::StreamMeta {
+                id: stream_id,
+                offsets: 0..larger_send_window,
+                fin: false,
+            },
+            Instant::now(),
+        );
 
         assert_eq!(
             stream.state.poll(),
@@ -2577,20 +2605,26 @@ mod tests {
         assert_eq!(stream.write(&data), Err(WriteError::Blocked));
 
         // Ack some data, assert that writes are still not accepted due to outstanding sends
-        stream.state.received_ack_of(frame::StreamMeta {
-            id: stream_id,
-            offsets: 0..smaller_send_window,
-            fin: false,
-        });
+        stream.state.received_ack_of(
+            frame::StreamMeta {
+                id: stream_id,
+                offsets: 0..smaller_send_window,
+                fin: false,
+            },
+            Instant::now(),
+        );
 
         assert_eq!(stream.write(&data), Err(WriteError::Blocked));
 
         // Ack the rest of the data
-        stream.state.received_ack_of(frame::StreamMeta {
-            id: stream_id,
-            offsets: smaller_send_window..initial_send_window,
-            fin: false,
-        });
+        stream.state.received_ack_of(
+            frame::StreamMeta {
+                id: stream_id,
+                offsets: smaller_send_window..initial_send_window,
+                fin: false,
+            },
+            Instant::now(),
+        );
 
         // This should generate a `Writable` event
         assert_eq!(
@@ -2897,7 +2931,10 @@ mod tests {
         buf.clear();
         let resent = server.write_stream_frames(&mut buf, 100, true);
         assert_eq!(resent[0].offsets, 0..4);
-        assert_eq!(server.received_ack_of(resent[0].clone()), Some(4));
+        assert_eq!(
+            server.received_ack_of(resent[0].clone(), Instant::now()),
+            Some(4)
+        );
         assert_eq!(server.buffered_data, 0);
 
         // The plain RESET_STREAM still names the full final size
@@ -2965,7 +3002,10 @@ mod tests {
 
         server.reset_acked(id, 4);
         assert_eq!(server.received_stop_sending(id, 9u32.into()), Some(0));
-        assert_eq!(server.received_ack_of(sent[0].clone()), None);
+        assert_eq!(
+            server.received_ack_of(sent[0].clone(), Instant::now()),
+            None
+        );
         assert_eq!(server.send_streams, 1);
         server.reset_acked(id, 0);
         assert_eq!(server.send_streams, 0);
@@ -3053,7 +3093,7 @@ mod tests {
         // The stream lingers until both the reset and the prefix are acknowledged
         server.reset_acked(id, 4);
         assert_eq!(server.send_streams, 1);
-        server.received_ack_of(resent[0].clone());
+        server.received_ack_of(resent[0].clone(), Instant::now());
         assert_eq!(server.send_streams, 0);
         assert_eq!(server.buffered_data, 0);
         assert_eq!(server.poll(), None);

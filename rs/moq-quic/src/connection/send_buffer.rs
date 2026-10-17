@@ -1,8 +1,17 @@
-use std::{collections::VecDeque, ops::Range};
+use std::{
+    collections::VecDeque,
+    mem,
+    ops::Range,
+    sync::{Arc, OnceLock, Weak},
+};
 
 use bytes::{Buf, Bytes};
 
-use crate::{VarInt, range_set::RangeSet};
+use super::streams::ClosedStream;
+use crate::{Instant, VarInt, range_set::RangeSet};
+
+/// Where a [`Checkpoint`](super::Checkpoint) learns when the data before it was acknowledged
+pub(super) type AckSlot = OnceLock<Result<Instant, ClosedStream>>;
 
 /// Buffer of outgoing retransmittable stream data
 #[derive(Default, Debug)]
@@ -25,6 +34,10 @@ pub(super) struct SendBuffer {
     acks: RangeSet,
     /// Previously transmitted ranges deemed lost
     retransmits: RangeSet,
+    /// Checkpoints waiting for the acknowledged prefix to reach them
+    watches: Watches,
+    /// When the ACK that last advanced the acknowledged prefix was received, less its ACK delay
+    acked_at: Option<Instant>,
 }
 
 impl SendBuffer {
@@ -40,18 +53,23 @@ impl SendBuffer {
         self.unacked_segments.push_back(data);
     }
 
-    /// Discard a range of acknowledged stream data
-    pub(super) fn ack(&mut self, mut range: Range<u64>) {
+    /// Discard a range of acknowledged stream data, acknowledged at `at`
+    ///
+    /// `at` is when the ACK was received, less the ACK delay the peer reported.
+    pub(super) fn ack(&mut self, mut range: Range<u64>, at: Instant) {
         // Clamp the range to data which is still tracked, which `truncate` may have cut short
         let base_offset = self.offset - self.unacked_len as u64;
         range.start = base_offset.max(range.start);
         range.end = base_offset.max(range.end).min(self.offset);
-        if range.is_empty() {
-            return;
+        if !range.is_empty() {
+            self.acks.insert(range);
+            self.advance(at);
         }
+        self.watches.ack(self.acked(), at);
+    }
 
-        self.acks.insert(range);
-
+    /// Discard the acknowledged ranges that extend the acknowledged prefix
+    fn advance(&mut self, at: Instant) {
         while self.acks.min() == Some(self.offset - self.unacked_len as u64) {
             let prefix = self.acks.pop_min().unwrap();
             let mut to_advance = (prefix.end - prefix.start) as usize;
@@ -77,7 +95,36 @@ impl SendBuffer {
                     to_advance = 0;
                 }
             }
+            self.acked_at = Some(at);
         }
+    }
+
+    /// The end of the contiguous acknowledged prefix
+    fn acked(&self) -> u64 {
+        self.offset - self.unacked_len as u64
+    }
+
+    /// Watch for the peer to acknowledge everything written so far
+    pub(super) fn watch(&mut self) -> Arc<AckSlot> {
+        let slot = Arc::new(AckSlot::new());
+        match self.acked_at {
+            // The ACK that last advanced the prefix is the one that reached the end
+            Some(at) if self.acked() == self.offset => {
+                let _ = slot.set(Ok(at));
+            }
+            _ => self.watches.push(self.offset, &slot),
+        }
+        slot
+    }
+
+    /// Fail every checkpoint still waiting, since the peer stopped reading
+    pub(super) fn abandon_watches(&mut self) {
+        self.watches.fail_all();
+    }
+
+    /// Whether a checkpoint somebody still holds resolved since the last call
+    pub(super) fn take_resolved(&mut self) -> bool {
+        mem::take(&mut self.watches.resolved)
     }
 
     /// Compute the next range to transmit on this stream and update state to account for that
@@ -169,6 +216,7 @@ impl SendBuffer {
         if end >= self.offset {
             return;
         }
+        self.watches.fail_past(end);
         let base_offset = self.offset - self.unacked_len as u64;
         let mut keep = end.saturating_sub(base_offset) as usize;
         if keep == 0 {
@@ -176,6 +224,8 @@ impl SendBuffer {
             *self = Self {
                 offset: end,
                 unsent: end,
+                watches: mem::take(&mut self.watches),
+                acked_at: self.acked_at,
                 ..Self::default()
             };
             return;
@@ -237,9 +287,69 @@ impl SendBuffer {
     }
 }
 
+/// Checkpoints waiting for the acknowledged prefix to reach their offset, in offset order
+///
+/// A dropped [`Checkpoint`](super::Checkpoint) leaves its entry behind until the prefix reaches
+/// it, so it lives no longer than the data it waits on. Dropping the stream fails the rest, so no
+/// waiter hangs on a stream that is gone.
+#[derive(Default, Debug)]
+struct Watches {
+    pending: VecDeque<(u64, Weak<AckSlot>)>,
+    /// Whether a checkpoint somebody still holds resolved since the stream last reported it
+    resolved: bool,
+}
+
+impl Watches {
+    fn push(&mut self, offset: u64, slot: &Arc<AckSlot>) {
+        // Checkpoints are taken at the write offset, which only grows
+        debug_assert!(self.pending.back().is_none_or(|(last, _)| *last <= offset));
+        self.pending.push_back((offset, Arc::downgrade(slot)));
+    }
+
+    /// Resolve every checkpoint at or below the acknowledged prefix `acked`
+    fn ack(&mut self, acked: u64, at: Instant) {
+        while let Some((offset, _)) = self.pending.front()
+            && *offset <= acked
+        {
+            let (_, slot) = self.pending.pop_front().unwrap();
+            self.resolve(slot, Ok(at));
+        }
+    }
+
+    /// Fail every checkpoint past `end`, which the peer will never acknowledge
+    fn fail_past(&mut self, end: u64) {
+        while let Some((offset, _)) = self.pending.back()
+            && *offset > end
+        {
+            let (_, slot) = self.pending.pop_back().unwrap();
+            self.resolve(slot, Err(ClosedStream::default()));
+        }
+    }
+
+    fn fail_all(&mut self) {
+        while let Some((_, slot)) = self.pending.pop_front() {
+            self.resolve(slot, Err(ClosedStream::default()));
+        }
+    }
+
+    fn resolve(&mut self, slot: Weak<AckSlot>, result: Result<Instant, ClosedStream>) {
+        if let Some(slot) = slot.upgrade() {
+            let _ = slot.set(result);
+            self.resolved = true;
+        }
+    }
+}
+
+impl Drop for Watches {
+    fn drop(&mut self) {
+        self.fail_all();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Duration;
 
     #[test]
     fn fragment_with_length() {
@@ -375,17 +485,17 @@ mod tests {
         assert_eq!(buf.poll_transmit(42), (MSG_LEN..MSG_LEN, true));
 
         // Now drain the segments
-        buf.ack(0..1);
+        buf.ack(0..1, Instant::now());
         assert_eq!(aggregate_unacked(&buf), &MSG[1..]);
-        buf.ack(0..3);
+        buf.ack(0..3, Instant::now());
         assert_eq!(aggregate_unacked(&buf), &MSG[3..]);
-        buf.ack(3..5);
+        buf.ack(3..5, Instant::now());
         assert_eq!(aggregate_unacked(&buf), &MSG[5..]);
-        buf.ack(7..9);
+        buf.ack(7..9, Instant::now());
         assert_eq!(aggregate_unacked(&buf), &MSG[5..]);
-        buf.ack(4..7);
+        buf.ack(4..7, Instant::now());
         assert_eq!(aggregate_unacked(&buf), &MSG[9..]);
-        buf.ack(0..MSG_LEN);
+        buf.ack(0..MSG_LEN, Instant::now());
         assert_eq!(aggregate_unacked(&buf), &[] as &[u8]);
     }
 
@@ -413,7 +523,7 @@ mod tests {
         const MSG: &[u8] = b"Hello, world!";
         buf.write(MSG.into());
         assert_eq!(buf.poll_transmit(16), (0..8, true));
-        buf.ack(0..8);
+        buf.ack(0..8, Instant::now());
         assert_eq!(aggregate_unacked(&buf), &MSG[8..]);
     }
 
@@ -424,9 +534,9 @@ mod tests {
         buf.write(MSG.into());
         assert_eq!(buf.poll_transmit(16), (0..16, false));
         assert_eq!(buf.poll_transmit(16), (16..23, true));
-        buf.ack(16..23);
+        buf.ack(16..23, Instant::now());
         assert_eq!(aggregate_unacked(&buf), MSG);
-        buf.ack(0..16);
+        buf.ack(0..16, Instant::now());
         assert_eq!(aggregate_unacked(&buf), &MSG[23..]);
         assert!(buf.acks.is_empty());
     }
@@ -437,7 +547,7 @@ mod tests {
         buf.write(Bytes::from_static(b"Hello, "));
         buf.write(Bytes::from_static(b"world!"));
         assert_eq!(buf.poll_transmit(16), (0..8, true));
-        buf.ack(0..2);
+        buf.ack(0..2, Instant::now());
         buf.retransmit(2..8);
 
         buf.truncate(9);
@@ -449,10 +559,10 @@ mod tests {
         assert!(!buf.has_unsent_data());
 
         // Late acks and losses past the truncation are ignored
-        buf.ack(9..13);
+        buf.ack(9..13, Instant::now());
         buf.retransmit(9..13);
         assert!(!buf.has_unsent_data());
-        buf.ack(2..9);
+        buf.ack(2..9, Instant::now());
         assert!(buf.is_fully_acked());
         assert_eq!(buf.buffered(), 0);
     }
@@ -462,11 +572,68 @@ mod tests {
         let mut buf = SendBuffer::new();
         buf.write(Bytes::from_static(b"Hello, world!"));
         assert_eq!(buf.poll_transmit(16), (0..8, true));
-        buf.ack(0..8);
+        buf.ack(0..8, Instant::now());
         buf.truncate(4);
         assert!(buf.is_fully_acked());
         assert!(!buf.has_unsent_data());
         assert_eq!(buf.buffered(), 0);
+    }
+
+    #[test]
+    fn watch_waits_for_prefix() {
+        let mut buf = SendBuffer::new();
+        buf.write(Bytes::from_static(b"Hello, "));
+        let first = buf.watch();
+        buf.write(Bytes::from_static(b"world!"));
+        let second = buf.watch();
+        assert_eq!(buf.poll_transmit(16), (0..8, true));
+        assert_eq!(buf.poll_transmit(16), (8..13, true));
+
+        // Acknowledged past both, but not contiguously
+        let early = Instant::now();
+        buf.ack(8..13, early);
+        assert_eq!(first.get(), None);
+        assert_eq!(second.get(), None);
+        assert!(!buf.take_resolved());
+
+        // Filling the gap in the middle of the first segment resolves both, with that ACK
+        let late = early + Duration::from_millis(1);
+        buf.ack(0..8, late);
+        assert_eq!(first.get(), Some(&Ok(late)));
+        assert_eq!(second.get(), Some(&Ok(late)));
+        assert!(buf.take_resolved());
+        assert!(!buf.take_resolved());
+
+        // Everything written is acknowledged, by the ACK that got there
+        assert_eq!(buf.watch().get(), Some(&Ok(late)));
+    }
+
+    #[test]
+    fn watch_fails_past_truncation() {
+        let mut buf = SendBuffer::new();
+        buf.write(Bytes::from_static(b"Hello, "));
+        let kept = buf.watch();
+        buf.write(Bytes::from_static(b"world!"));
+        let dropped = buf.watch();
+
+        buf.truncate(7);
+        assert_eq!(dropped.get(), Some(&Err(ClosedStream::default())));
+        assert_eq!(kept.get(), None);
+        assert!(buf.take_resolved());
+
+        // A stream that goes away fails what it never acknowledged
+        drop(buf);
+        assert_eq!(kept.get(), Some(&Err(ClosedStream::default())));
+    }
+
+    #[test]
+    fn dropped_watch_is_not_reported() {
+        let mut buf = SendBuffer::new();
+        buf.write(Bytes::from_static(b"Hello"));
+        drop(buf.watch());
+        assert_eq!(buf.poll_transmit(16), (0..5, true));
+        buf.ack(0..5, Instant::now());
+        assert!(!buf.take_resolved());
     }
 
     fn aggregate_unacked(buf: &SendBuffer) -> Vec<u8> {

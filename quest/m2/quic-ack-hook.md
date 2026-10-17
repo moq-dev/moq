@@ -36,7 +36,13 @@ unsupported has to live in the return type rather than the error, and a
 consumer must treat `None` as unknown, never as delivered.
 
 Implement it in the moq-tokio and moq-uring adapters over `moq-quic`'s
-accessor. Leave the browser transport on the default; the browser's `WebTransportSendStream.getStats()` is
+`Checkpoint::acked`, which returns the corrected instant once everything
+before the checkpoint is acknowledged and fails once it never will be;
+`StreamEvent::Acked` wakes its waiters, which moq-uring's `sweep_stream`
+currently ignores. A checkpoint is taken at the current write offset, so the
+adapter checkpoints each offset as it is written rather than naming an
+arbitrary one later; settle whether the trait method takes an offset or
+returns a handle from a `checkpoint()` like the reset one. Leave the browser transport on the default; the browser's `WebTransportSendStream.getStats()` is
 unimplemented in shipping Chrome and its `bytesAcknowledged` is at risk in the
 W3C draft. qmux over a reliable transport may treat serialization as
 acknowledgment only if the qmux quest decides that is honest; until then it
@@ -50,11 +56,6 @@ STOP_SENDING by the receiver, and session close.
 
 Decided in the 2026-09-30 audit: moved to m2 with its only consumer,
 [frame-granularity starvation](/quest/m2/starvation-frames.md).
-
-## Required
-
-- [Per-stream ACK progress](/quest/m2/quic-ack-progress.md) - the
-  `moq-quic` accessor the adapter reads
 
 ## Related
 

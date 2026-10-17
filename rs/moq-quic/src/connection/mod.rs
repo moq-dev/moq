@@ -1592,6 +1592,17 @@ impl Connection {
             return Ok(());
         }
 
+        let ack_delay = if space != SpaceId::Data {
+            Duration::from_micros(0)
+        } else {
+            cmp::min(
+                self.ack_frequency.peer_max_ack_delay,
+                Duration::from_micros(ack.delay << self.peer_params.ack_delay_exponent.0),
+            )
+        };
+        // When the peer received the data, plus the ACK's trip back
+        let acked_at = now.checked_sub(ack_delay).unwrap_or(now);
+
         let mut ack_eliciting_acked = false;
         for packet in newly_acked.elts() {
             if let Some(info) = self.spaces[space].take(packet) {
@@ -1616,7 +1627,7 @@ impl Connection {
                 // Notify ack frequency that a packet was acked, because it might contain an ACK_FREQUENCY frame
                 self.ack_frequency.on_acked(packet);
 
-                self.on_packet_acked(now, info, packet, space);
+                self.on_packet_acked(now, acked_at, info, packet, space);
             }
         }
 
@@ -1629,14 +1640,6 @@ impl Connection {
         );
 
         if new_largest && ack_eliciting_acked {
-            let ack_delay = if space != SpaceId::Data {
-                Duration::from_micros(0)
-            } else {
-                cmp::min(
-                    self.ack_frequency.peer_max_ack_delay,
-                    Duration::from_micros(ack.delay << self.peer_params.ack_delay_exponent.0),
-                )
-            };
             let rtt = now.saturating_duration_since(self.spaces[space].largest_acked_packet_sent);
             self.path.rtt.update(ack_delay, rtt);
             if self.path.first_packet_after_rtt_sample.is_none() {
@@ -1757,7 +1760,16 @@ impl Connection {
 
     // Not timing-aware, so it's safe to call this for inferred acks, such as arise from
     // high-latency handshakes
-    fn on_packet_acked(&mut self, now: Instant, info: SentPacket, pn: u64, space: SpaceId) {
+    //
+    // `acked_at` is when the ACK was received, less the ACK delay the peer reported.
+    fn on_packet_acked(
+        &mut self,
+        now: Instant,
+        acked_at: Instant,
+        info: SentPacket,
+        pn: u64,
+        space: SpaceId,
+    ) {
         self.remove_in_flight(&info);
         if info.ack_eliciting && self.path.challenge.is_none() {
             // Only pass ACKs to the congestion controller if we are not validating the current
@@ -1780,10 +1792,12 @@ impl Connection {
             }
         }
 
+        // An ACK delay the peer overstated cannot place the receipt before the send
+        let acked_at = acked_at.max(info.time_sent);
         for frame in info.stream_frames {
             let id = frame.id;
             // A reset held for a peer without RESET_STREAM_AT goes out once it holds the data
-            if let Some(reliable_size) = self.streams.received_ack_of(frame) {
+            if let Some(reliable_size) = self.streams.received_ack_of(frame, acked_at) {
                 self.spaces[SpaceId::Data]
                     .pending
                     .reset_stream
@@ -2757,7 +2771,7 @@ impl Connection {
 
                 let space = &mut self.spaces[SpaceId::Initial];
                 if let Some(info) = space.take(0) {
-                    self.on_packet_acked(now, info, 0, SpaceId::Initial);
+                    self.on_packet_acked(now, now, info, 0, SpaceId::Initial);
                 };
 
                 self.discard_space(now, SpaceId::Initial); // Make sure we clean up after any retransmitted Initials

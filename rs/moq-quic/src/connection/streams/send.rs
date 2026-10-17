@@ -1,7 +1,7 @@
 use bytes::Bytes;
 use thiserror::Error;
 
-use crate::{StreamId, VarInt, connection::send_buffer::SendBuffer, frame};
+use crate::{Instant, StreamId, VarInt, connection::send_buffer::SendBuffer, frame};
 
 #[derive(Debug)]
 pub(super) struct Send {
@@ -228,8 +228,10 @@ impl Send {
 
     /// Returns whether the stream has been finished or reset, and all data it still owes the peer
     /// has been acknowledged
-    pub(super) fn ack(&mut self, frame: frame::StreamMeta) -> bool {
-        self.pending.ack(frame.offsets);
+    ///
+    /// `at` is when the ACK was received, less the ACK delay the peer reported.
+    pub(super) fn ack(&mut self, frame: frame::StreamMeta, at: Instant) -> bool {
+        self.pending.ack(frame.offsets, at);
         match &mut self.state {
             SendState::DataSent { finish_acked } => {
                 *finish_acked |= frame.fin;
