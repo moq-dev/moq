@@ -1015,7 +1015,8 @@ impl Started {
 	/// Run the cluster until it stops, or until a task it cannot serve without (its
 	/// origin driver, cache governor, or certificate reload) panics.
 	///
-	/// Standalone, this only waits for such a panic.
+	/// Standalone, this only waits for such a panic. Returning, a failure
+	/// included, closes every dial as [`Cluster::close`] does.
 	pub async fn run(self) -> anyhow::Result<()> {
 		// Registered only now, so a start that fails or never runs drops its client
 		// and frees the bind. A closed cluster has nothing left to run.
@@ -1025,16 +1026,21 @@ impl Started {
 			return Ok(());
 		}
 		let critical = self.cluster.critical.clone();
+		let dialers = self.cluster.dialers.clone();
 		let work = async move {
 			match self.work {
 				Some(work) => self.cluster.run_work(work).await,
 				None => std::future::pending().await,
 			}
 		};
-		tokio::select! {
+		let result = tokio::select! {
 			res = work => res,
 			err = critical.failed() => Err(err),
-		}
+		};
+		// The dial tasks went with `work`, and a caller that consumed the cluster
+		// has no handle left to close it, so each peer gets its close here.
+		dialers.close().await;
+		result
 	}
 }
 
@@ -3477,6 +3483,91 @@ mod tests {
 		let _started = cluster.clone().start().await.expect("a corrected start binds the port");
 		let registered = cluster.dialers.lock().open.as_ref().expect("open").clients.len();
 		assert_eq!(registered, 0, "a start registers its client only once it runs");
+	}
+
+	/// A critical failure ends `run`, which closes the dials on the way out: the
+	/// caller consumed the cluster, so nothing else could. The dialing runtime stops
+	/// right after, as a process exit would, and the peer's idle timeout is far past
+	/// the wait, so only the close explains the link ending.
+	#[cfg(feature = "quic")]
+	#[tokio::test]
+	async fn a_critical_failure_closes_the_dials() {
+		use moq_tokio::quic::driver;
+		const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+		const IDLE: std::time::Duration = std::time::Duration::from_secs(300);
+		let _ = moq_tokio::crypto::install_default();
+
+		let mut connect = moq_tokio::connect::Config::default();
+		connect.tls.insecure = Some(true);
+		let key = rcgen::KeyPair::generate().expect("keypair");
+		let cert = rcgen::CertificateParams::new(vec!["localhost".to_string()])
+			.expect("cert params")
+			.self_signed(&key)
+			.expect("self-signed cert");
+		let mut tls = rustls::ServerConfig::builder()
+			.with_no_client_auth()
+			.with_single_cert(
+				vec![cert.der().clone()],
+				rustls::pki_types::PrivateKeyDer::Pkcs8(key.serialize_der().into()),
+			)
+			.expect("server tls");
+		tls.alpn_protocols = connect
+			.versions()
+			.alpns()
+			.iter()
+			.map(|alpn| alpn.as_bytes().to_vec())
+			.collect();
+		let crypto = driver::crypto::rustls::QuicServerConfig::try_from(tls).expect("quic crypto");
+		let mut transport = driver::TransportConfig::default();
+		transport.max_idle_timeout(Some(IDLE.try_into().expect("idle timeout")));
+		let mut server_config = driver::ServerConfig::with_crypto(Arc::new(crypto));
+		server_config.transport_config(Arc::new(transport));
+		let server = driver::Endpoint::server(server_config, "127.0.0.1:0".parse().unwrap()).expect("server");
+		let port = server.local_addr().expect("server addr").port();
+
+		let config = Config {
+			connect: vec![Peer::new(format!("moql://127.0.0.1:{port}/"))],
+			..Default::default()
+		};
+		let mut quic = moq_tokio::quic::Config::default();
+		quic.idle_timeout = Some(IDLE);
+		let runtime = tokio::runtime::Builder::new_multi_thread()
+			.worker_threads(1)
+			.enable_all()
+			.build()
+			.expect("dialer runtime");
+		let (cluster, running) = runtime
+			.spawn(async move {
+				let cluster = new_cluster(config).expect("cluster").with_connect(connect, quic);
+				let started = cluster.clone().start().await.expect("start");
+				(cluster, tokio::spawn(started.run()))
+			})
+			.await
+			.expect("dialer task");
+
+		let conn = tokio::time::timeout(TIMEOUT, server.accept())
+			.await
+			.expect("dial timeout")
+			.expect("incoming")
+			.await
+			.expect("handshake");
+		cluster
+			.critical
+			.spawn("injected", async { panic!("injected critical failure") });
+		let result = tokio::time::timeout(TIMEOUT, running)
+			.await
+			.expect("run returns on a critical failure")
+			.expect("run task");
+		assert!(result.is_err(), "a critical failure fails run");
+		runtime.shutdown_background();
+
+		let err = tokio::time::timeout(TIMEOUT, conn.closed())
+			.await
+			.expect("the peer heard no close before its idle timeout");
+		match err {
+			driver::ConnectionError::ApplicationClosed(close) => assert_eq!(&close.reason[..], b"client shutdown"),
+			other => panic!("the link ended with {other:?}, not the shutdown close"),
+		}
 	}
 
 	/// A second close awaits the shutdown the first started, and still finishes it
