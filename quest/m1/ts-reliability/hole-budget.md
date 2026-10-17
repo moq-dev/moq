@@ -18,9 +18,25 @@ max(wall, pts) so it fires on a paused track.
 
 Today a marker carries no timestamp, so a hole before it on an open, paused
 track waits indefinitely. A buffered higher sequence alone proves nothing,
-since a late group is not a lost one; the budget is what decides. Reusing the
-subscription's max delay, which already drives latency skips, is the likely
-budget; say which in the PR.
+since a late group is not a lost one; the budget is what decides.
+
+The two anchors, matching the timers the TS line already uses:
+
+- PTS: the existing age measure, how far the newest content
+  (`max_timestamp`) runs past where the next stamped group begins
+  (`next_start`), in `rs/moq-mux/src/container/consumer.rs`, and its
+  counterpart in `js/hang/src/container/consumer.ts`. A bare marker has no
+  timestamp, so this side never fires behind one.
+- Wall: the `moq_clock` instant the reader first found itself blocked on
+  the hole, the way the TS export anchors a frame's arrival at the instant
+  its source was last found empty (`Track::empty` in
+  `rs/moq-mux/src/container/ts/export.rs`, judged by `jitter::Buffer` in
+  `rs/moq-mux/src/jitter.rs`). A timer wakes the reader at the anchor plus
+  the budget, with no new group needed.
+
+The hole is lost once either side reaches the budget. Open for the
+maintainer: the threshold. Recommendation: the subscription's max delay,
+which already drives latency skips, so both sides share one number.
 
 Test with mocked time in both languages: read group N, lose N+1, receive a
 closed marker as N+2 on a paused track; after the budget the reader reports a

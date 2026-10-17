@@ -9,9 +9,12 @@ group.
 
 Today a reader that has taken every frame the group holds treats expiry as
 losing nothing and ends the group cleanly: `expired_truncates` in
-`rs/moq-net/src/model/group.rs` and `#expire` in `js/net/src/group.ts`. A
-publisher serving that group then sends a FIN, and the next hop stores the
-truncated group as finished.
+`rs/moq-net/src/model/group.rs` and `#expire` in `js/net/src/group.ts`. The
+lite publisher already resets with `Old` when a group expires before its
+stream opens or while a write is blocked, but when it is parked at the tail
+waiting for the next frame, `poll_next_frame` returns `Ok(None)` and
+`GroupServe::poll_serve` (`rs/moq-net/src/lite/publisher.rs`) finishes the
+stream. The next hop then stores the truncated group as finished.
 
 ## Plan
 
