@@ -277,6 +277,7 @@ it("shares the parent's resolution, so a new epoch checks the held handle", asyn
 			contributions: {
 				sibling: { broadcast: "./extra.hang", epoch },
 				self: { broadcast: "./main.hang", epoch },
+				empty: { broadcast: "", epoch },
 			},
 		});
 	const catalog = new Signal(entries());
@@ -294,8 +295,13 @@ it("shares the parent's resolution, so a new epoch checks the held handle", asyn
 		await settle();
 		const held = sibling.out.active.peek();
 		expect(held?.epoch).toBe(served);
-		// A self-reference is the parent's own handle, not a request of its own.
+		// A self-reference is the parent's own handle, not a request of its own. An empty one is
+		// too, and is named like the parent, so its own references resolve against the same base.
 		expect(self.out.active.peek()).toBe(parent.out.active.peek());
+		const empty = parent.contribution(owner, "empty");
+		await settle();
+		expect(empty.in.name.peek()).toBe(Path.from("room/main.hang"));
+		expect(empty.in.enabled.peek()).toBe(true);
 
 		let withdrawals = 0;
 		owner.cleanup(

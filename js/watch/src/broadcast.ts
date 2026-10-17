@@ -473,8 +473,9 @@ export class Broadcast {
 			return contributions && Object.hasOwn(contributions, id) ? contributions[id] : undefined;
 		});
 		const name = effect.computed((run) => {
-			const broadcast = run.get(entry)?.broadcast;
-			return broadcast && Path.tryResolve(run.get(this.in.name), broadcast);
+			// An empty reference is present: it names the catalog's own broadcast.
+			const selected = run.get(entry);
+			return selected && Path.tryResolve(run.get(this.in.name), selected.broadcast);
 		});
 		const enabled = effect.computed((run) => run.get(entry) !== undefined);
 		const child = new Broadcast({
