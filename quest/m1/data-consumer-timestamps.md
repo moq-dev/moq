@@ -37,9 +37,9 @@ playhead needs the newest state at or before it.
 - Same names in the moq-mux wrappers, moq-ffi, and every binding.
 
 Existing moq-ffi consumers return the timestamp too, and the py, swift,
-kt, go, and dart wrappers and `doc/lib/*` follow. Flate FFI consumers do not
-yet exist: [Flate bindings](/quest/m2/flate.md) creates them directly with
-this contract, so this quest neither duplicates that work nor waits on m2. `@moq/json` and `@moq/flate`
+kt, go, and dart wrappers and `doc/lib/*` follow. Flate FFI consumers are not
+added: [Compressed tracks](/quest/m1/compress/README.md) replaces moq-flate's
+track modes with a `compress` flag on any track. `@moq/json` and `@moq/flate`
 already return `Timed<T>` with the same `next()` and `latest()`.
 
 Public API: breaking. Wire: none.
