@@ -85,8 +85,8 @@ pub struct Catalog<E = ()> {
 
 	/// Application-defined root sections, flattened alongside the base catalog sections.
 	///
-	/// The root `version` is reserved: serializing computes it from the base sections, so an
-	/// extension must not name a member `version`.
+	/// The root `version` is reserved: serializing computes it from the base sections, and fails if
+	/// the extension names a member `version`.
 	pub ext: E,
 }
 
@@ -143,8 +143,24 @@ struct Wire<E> {
 	#[serde(default)]
 	m2ts: Option<crate::catalog::M2ts>,
 
-	#[serde(flatten)]
+	#[serde(flatten, serialize_with = "serialize_ext")]
 	ext: E,
+}
+
+/// Refuse an extension member named `version`: flattened beside the computed one, it would emit a
+/// duplicate key that a reader resolves to whichever comes last.
+fn serialize_ext<E: Serialize, S: serde::Serializer>(ext: &E, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+	use serde::ser::Error;
+
+	// Inspected as a `Value` but written from `ext` itself, which keeps its member order.
+	if serde_json::to_value(ext)
+		.map_err(S::Error::custom)?
+		.get("version")
+		.is_some()
+	{
+		return Err(S::Error::custom("catalog extension must not name a member `version`"));
+	}
+	ext.serialize(serializer)
 }
 
 impl<E> From<Wire<E>> for Catalog<E> {
@@ -1275,6 +1291,34 @@ mod test {
 		let catalog = Catalog::<Passthrough>::from_str(r#"{"version":4,"scte35":{}}"#).unwrap();
 		assert!(catalog.ext.contains_key("scte35"));
 		assert!(!catalog.ext.contains_key("version"));
+	}
+
+	/// An extension's own `version` would sit beside the computed one as a duplicate key, letting it
+	/// override what the catalog actually needs.
+	#[test]
+	fn an_extension_version_is_refused() {
+		#[derive(Serialize, Default)]
+		struct Ext {
+			version: u64,
+		}
+
+		let catalog = Catalog {
+			ext: Ext { version: 3 },
+			..Default::default()
+		};
+		let err = catalog.to_json().unwrap_err();
+		assert!(err.to_string().contains("must not name a member `version`"), "{err}");
+
+		let mut passthrough = Catalog::<serde_json::Map<String, serde_json::Value>>::default();
+		passthrough.ext.insert("version".into(), 3.into());
+		assert!(passthrough.to_json().is_err());
+
+		// Any other member still flattens beside the base sections.
+		let ok = Catalog {
+			ext: serde_json::json!({ "scte35": {} }),
+			..Default::default()
+		};
+		assert_eq!(ok.to_json().unwrap(), r#"{"scte35":{}}"#);
 	}
 
 	/// Only a field an older reader would misread raises the version; one it would merely ignore
