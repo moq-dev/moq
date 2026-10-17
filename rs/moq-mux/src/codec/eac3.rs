@@ -44,6 +44,13 @@ pub(crate) fn parse_header(data: &[u8]) -> legacy::Result<legacy::Header> {
 	Ok(header)
 }
 
+/// Whether the sync frame at the start of `data` (needs >= 3 bytes) begins an access unit:
+/// independent substream 0, which every substream after it until the next one extends
+/// (ETSI TS 102 366 E.1.3.1.2).
+pub(crate) fn begins_unit(data: &[u8]) -> bool {
+	data[2] >> 6 != 1 && (data[2] >> 3) & 0x07 == 0
+}
+
 /// Parse a sync frame's bounds and duration without assigning its substream to an audio track.
 pub(crate) fn sync_header(data: &[u8]) -> legacy::Result<legacy::Header> {
 	if data.len() < 6 {

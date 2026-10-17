@@ -1684,6 +1684,71 @@ async fn export_drops_dvb_eac3_partial_frames() {
 	assert_eq!(pes[0].1, frame);
 }
 
+/// A source that leaves `data_alignment_indicator` clear splits E-AC-3 sync frames across PES,
+/// as it does AC-3's, and each still goes out whole, a frame after the last.
+#[tokio::test(start_paused = true)]
+async fn export_reassembles_dvb_eac3_frames_split_across_pes() {
+	let frame = eac3_frame(false);
+	let stream = frame.repeat(6);
+	// Cut mid-frame into frames 0-1, 1-3 and 3-5, timed by frames 0, 2 and 4.
+	let pes = exported_dolby_pes(
+		vec![
+			Ac3Write::Pes(0, stream[..800].to_vec()),
+			Ac3Write::Pes(64, stream[800..2000].to_vec()),
+			Ac3Write::Pes(128, stream[2000..].to_vec()),
+		],
+		0x7a,
+	)
+	.await;
+	assert_eq!(pes.len(), 6, "every sync frame");
+	for (k, (pts, payload)) in pes.iter().enumerate() {
+		assert_eq!(*payload, frame, "frame {k} whole");
+		assert_eq!(*pts, pes[0].0 + k as u64 * 2_880, "frame {k} 32 ms after the last");
+	}
+}
+
+/// A dependent substream the next PES carries, whole or completing, goes out after its access
+/// unit's independent substream at that unit's time, not the next unit's.
+#[tokio::test(start_paused = true)]
+async fn export_times_a_dvb_eac3_substream_by_its_access_unit_across_pes() {
+	let (independent, dependent) = (eac3_frame(false), eac3_frame(true));
+	let unit = [independent.clone(), dependent.clone()].concat();
+	let stream = unit.repeat(3);
+	// Cut between unit 0's substreams, then inside its dependent substream.
+	for cut in [512, 800] {
+		let pes = exported_dolby_pes(
+			vec![
+				Ac3Write::Pes(0, stream[..cut].to_vec()),
+				Ac3Write::Pes(32, stream[cut..].to_vec()),
+			],
+			0x7a,
+		)
+		.await;
+		let start = pes[0].0;
+		assert_eq!(
+			pes,
+			[
+				(start, independent.clone()),
+				(start, dependent.clone()),
+				(start + 2_880, unit.clone()),
+				(start + 5_760, unit.clone()),
+			],
+			"cut at {cut}"
+		);
+	}
+}
+
+/// A dependent substream ahead of the first independent one belongs to an access unit that
+/// began before the join, so it goes nowhere.
+#[tokio::test(start_paused = true)]
+async fn export_drops_dvb_eac3_substreams_before_the_join() {
+	let unit = [eac3_frame(false), eac3_frame(true)].concat();
+	let payload = [eac3_frame(true), unit.clone()].concat();
+	let pes = exported_dolby_pes(vec![Ac3Write::Pes(0, payload)], 0x7a).await;
+	assert_eq!(pes.len(), 1);
+	assert_eq!(pes[0].1, unit);
+}
+
 /// A 32 kb/s 48 kHz 2/0 AC-3 sync frame: 128 bytes, 1,536 samples (32 ms).
 fn ac3_sync() -> Vec<u8> {
 	let mut sync = vec![0x0b, 0x77, 0x00, 0x00, 0x00, 0x40, 0x40];
