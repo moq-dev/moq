@@ -33,7 +33,8 @@ that attempt completed. Rerunning only Kotlin on an old tag therefore cannot
 re-cut the Go wrapper from old sources after a newer tag published, while a
 rerun publisher still releases its wrapper. Missing publisher names or an API
 error fail loudly. No publication is polled.
-The legacy per-language workflow names remain accepted for in-flight runs.
+The legacy per-language workflow names remain accepted: a tag cut from a
+`release` that predates the coordinator still runs the per-language workflows.
 
 `sh/size/release.py` reads shared native libraries under the existing Go size
 history keys and excludes Android/iOS libraries already counted inside their
@@ -62,5 +63,17 @@ consumer. Sharing preserves the same native code and library files.
 `just gh test` runs local fixtures for artifact subsets, stable size keys,
 build-free binding generation, independent language outcomes, failed API
 queries and workflow guards. `just gh check` validates workflow syntax and
-alert coverage. The first Nightly after landing measures actual elapsed time;
-the sampled five duplicate native builds cost about seventy runner-minutes.
+alert coverage.
+
+[The first Nightly after landing](https://github.com/moq-dev/moq/actions/runs/38897397428)
+measured the saving against the sample:
+
+| Jobs | Sampled | Shared |
+| --- | --- | --- |
+| Default-feature native builds | 14 jobs, 186 runner-minutes | 9 jobs, 116 runner-minutes |
+| Binding generation | 3 jobs, 40 runner-minutes | 3 jobs, 19 runner-minutes |
+
+That is about 90 runner-minutes saved per run. Binding generation now waits for
+every native build, since it reads the Linux library; Go's binding job spends
+most of its 12 minutes compiling `uniffi-bindgen-go`. The Go, Kotlin and Swift
+packagers each selected their own targets from the shared artifacts and passed.
