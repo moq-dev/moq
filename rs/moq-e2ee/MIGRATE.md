@@ -4,7 +4,7 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### Tracks are named semantically through `broadcast` wrappers
+### Tracks are named semantically through `broadcast` wrappers (#5876)
 
 `generation::Producer::produce` and `generation::Consumer::consume` are private.
 Wrap the broadcast in a `broadcast::Producer` or `broadcast::Consumer` and name tracks by their semantic names; the wrapper derives the physical name.
