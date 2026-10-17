@@ -29,7 +29,7 @@ moq-net = { workspace = true }
 mp4-atom = { version = "0.16.2", features = ["tokio", "bytes", "serde"] }
 mpeg2ts = "0.6.0"
 num_enum = { workspace = true }
-quick-xml = "0.42.0"
+roxmltree = "0.21.1"
 scuffle-av1 = { version = "0.1.4" }
 scuffle-h265 = { version = "0.2.2" }
 serde = { workspace = true }

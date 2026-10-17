@@ -1,13 +1,10 @@
 //! TTML documents moved from a source's media timeline onto the catalog clock.
 //!
-//! Only the timing profile IMSC1 admits is supported: a `tt` root in the TTML namespace,
-//! `ttp:timeBase="media"`, `par` time containers, and clock or offset time expressions without
-//! sub-frames. Anything else is refused rather than relabelled.
+//! Only well-formed XML in the timing profile IMSC1 admits is supported: a `tt` root in the TTML
+//! namespace, no DTD, `ttp:timeBase="media"`, `par` time containers, and clock or offset time
+//! expressions without sub-frames. Anything else is refused rather than relabelled.
 
 use moq_net::Timestamp;
-use quick_xml::events::{BytesStart, Event};
-use quick_xml::name::{Namespace, ResolveResult};
-use std::borrow::Cow;
 use std::ops::Range;
 
 /// The TTML namespace, which a sample entry must list and a document's root must use.
@@ -23,88 +20,51 @@ const NANOS: u128 = 1_000_000_000;
 /// presents within it, so every time is also clipped to it: the payload then renders on its own.
 pub(super) fn rewrite(document: &[u8], source: Timestamp, sample: Range<Timestamp>) -> Result<String, &'static str> {
 	let document = std::str::from_utf8(document).map_err(|_| "invalid TTML UTF-8")?;
+	// A strict parse: the output keeps every source byte it does not retime, so it is only as
+	// well-formed as the input. DTDs stay refused, since their entities and defaults could change
+	// what the attributes say.
+	let tree = roxmltree::Document::parse(document).map_err(|_| "malformed TTML document")?;
+	// The text was decoded as UTF-8, whatever the (already validated) declaration says.
+	let declaration = document
+		.trim_start_matches('\u{feff}')
+		.strip_prefix("<?xml")
+		.and_then(|rest| rest.split_once("?>"))
+		.map_or("", |(declaration, _)| declaration);
+	if let Some((_, encoding)) = declaration.split_once("encoding") {
+		let encoding = encoding.trim_start().trim_start_matches('=').trim_start();
+		let quote = encoding.chars().next().unwrap_or('"');
+		let name = encoding[quote.len_utf8()..].split(quote).next().unwrap_or_default();
+		if !name.eq_ignore_ascii_case("UTF-8") {
+			return Err("TTML document is not UTF-8");
+		}
+	}
+	let root = tree.root_element();
+	if root.tag_name().namespace() != Some(NAMESPACE) || root.tag_name().name() != "tt" {
+		return Err("TTML root is not a tt element in the TTML namespace");
+	}
+	let rates = Rates::from_root(root)?;
 	let clock = Clock {
 		offset: sample.start.as_nanos() as i128 - source.as_nanos() as i128,
 		start: sample.start.as_nanos(),
 		end: sample.end.as_nanos(),
 	};
-	let mut reader = quick_xml::NsReader::from_str(document);
-	let mut rates = None;
-	// The enclosing elements' begins; the root's is zero on both clocks.
-	let mut scopes = vec![Scope::default()];
 	let mut edit = Edit {
 		document,
 		edits: Vec::new(),
 	};
-	loop {
-		let (namespace, event) = reader.read_resolved_event().map_err(|_| "malformed TTML document")?;
-		let ttml = matches!(namespace, ResolveResult::Bound(Namespace(NAMESPACE)));
-		let (element, open) = match event {
-			Event::Start(element) => (element, true),
-			Event::Empty(element) => (element, false),
-			Event::End(_) => {
-				scopes.pop();
-				continue;
-			}
-			Event::Decl(decl) => {
-				if let Some(encoding) = decl.encoding() {
-					let encoding = encoding.map_err(|_| "malformed TTML declaration")?;
-					if !encoding.eq_ignore_ascii_case("UTF-8") {
-						return Err("TTML document is not UTF-8");
-					}
-				}
-				continue;
-			}
-			// A DTD can declare entities and defaults that change what the attributes say.
-			Event::DocType(_) => return Err("TTML document type declarations are unsupported"),
-			Event::Text(text) if scopes.len() == 1 && !text.trim().is_empty() => {
-				return Err("text outside the TTML root element");
-			}
-			// Without a DTD, only character references and XML's predefined entities resolve.
-			Event::GeneralRef(reference) => {
-				let resolved = match reference.resolve_char_ref() {
-					Ok(found) => found.is_some(),
-					Err(_) => false,
-				} || quick_xml::escape::resolve_predefined_entity(&reference.xml10_content()).is_some();
-				if !resolved {
-					return Err("unresolved TTML entity reference");
-				}
-				continue;
-			}
-			Event::Eof => break,
-			_ => continue,
-		};
-		for attribute in element.attributes() {
-			let attribute = attribute.map_err(|_| "malformed TTML attribute")?;
-			attribute
-				.normalized_value(quick_xml::XmlVersion::Implicit1_0)
-				.map_err(|_| "unresolved TTML entity reference")?;
-		}
-		if rates.is_some() && scopes.len() == 1 {
-			return Err("multiple TTML root elements");
-		}
-		let parent = *scopes.last().ok_or("malformed TTML document")?;
-		let rates = match &mut rates {
-			Some(rates) => rates,
-			slot => {
-				if !ttml || element.local_name().as_ref() != "tt" {
-					return Err("TTML root is not a tt element in the TTML namespace");
-				}
-				slot.insert(Rates::from_root(&reader, &element)?)
-			}
-		};
-		let scope = if ttml {
-			timing(&reader, &element, rates, &clock, parent, &mut edit)?
+	// Each element's scope, by node id, so a child finds its parent's; the root's parent begins at
+	// zero on both clocks.
+	let mut scopes = vec![Scope::default(); tree.descendants().count()];
+	for element in root.descendants().filter(|node| node.is_element()) {
+		let parent = element
+			.parent_element()
+			.map_or(Scope::default(), |parent| scopes[parent.id().get_usize()]);
+		scopes[element.id().get_usize()] = if element.tag_name().namespace() == Some(NAMESPACE) {
+			timing(element, &rates, &clock, parent, &mut edit)?
 		} else {
 			// Foreign elements are not timed; their content inherits the enclosing begin.
 			parent
 		};
-		if open {
-			scopes.push(scope);
-		}
-	}
-	if rates.is_none() {
-		return Err("missing TTML root element");
 	}
 	Ok(edit.apply())
 }
@@ -116,20 +76,18 @@ struct Edit<'a> {
 }
 
 impl Edit<'_> {
-	/// The byte range of `part`, which borrows from the document.
-	fn span(&self, part: &str) -> Range<usize> {
-		let start = part.as_ptr() as usize - self.document.as_ptr() as usize;
-		debug_assert!(start + part.len() <= self.document.len());
-		start..start + part.len()
+	fn replace(&mut self, value: Range<usize>, nanos: u128) {
+		self.edits.push((value, clock_time(nanos)));
 	}
 
-	fn replace(&mut self, part: &str, nanos: u128) {
-		let range = self.span(part);
-		self.edits.push((range, clock_time(nanos)));
-	}
-
-	fn insert(&mut self, element: &BytesStart, name: &str, nanos: u128) {
-		let at = self.span(element.name().0).end;
+	/// Add an attribute right after the element's name.
+	fn insert(&mut self, element: roxmltree::Node, name: &str, nanos: u128) {
+		let start = element.range().start;
+		let tag = &self.document[start..];
+		let at = start
+			+ tag
+				.find(|c: char| c.is_ascii_whitespace() || c == '/' || c == '>')
+				.unwrap_or(tag.len());
 		self.edits.push((at..at, format!(" {name}=\"{}\"", clock_time(nanos))));
 	}
 
@@ -181,9 +139,8 @@ impl Clock {
 /// reference: `begin` and `end` to the parent's begin, `dur` to the element's begin. The body always
 /// begins at the frame timestamp and gains an end, so even untimed content stays inside the sample;
 /// a later source begin moves onto its children instead.
-fn timing<R>(
-	reader: &quick_xml::NsReader<R>,
-	element: &BytesStart<'_>,
+fn timing(
+	element: roxmltree::Node,
 	rates: &Rates,
 	clock: &Clock,
 	parent: Scope,
@@ -192,20 +149,11 @@ fn timing<R>(
 	let mut begin = None;
 	let mut end = None;
 	let mut dur = None;
-	for attribute in element.attributes() {
-		let attribute = attribute.map_err(|_| "malformed TTML attribute")?;
-		let (ResolveResult::Unbound, name) = reader.resolver().resolve_attribute(attribute.key) else {
-			continue;
-		};
-		// The raw value borrows from the document, so it can be spliced in place; the normalized one,
-		// which may differ by character references, is what gets parsed.
-		let Cow::Borrowed(raw) = attribute.value else {
-			return Err("malformed TTML attribute");
-		};
-		let value = attribute
-			.normalized_value(quick_xml::XmlVersion::Implicit1_0)
-			.map_err(|_| "malformed TTML attribute")?;
-		match name.as_ref() {
+	for attribute in element.attributes().filter(|attribute| attribute.namespace().is_none()) {
+		// The raw range is spliced in place; the value, which may differ by character references, is
+		// what gets parsed.
+		let (raw, value) = (attribute.range_value(), attribute.value());
+		match attribute.name() {
 			"begin" => begin = Some((raw, value)),
 			"end" => end = Some((raw, value)),
 			"dur" => dur = Some((raw, value)),
@@ -215,10 +163,10 @@ fn timing<R>(
 		}
 	}
 	// Timing on the root is not TTML, and would give the body a parent begin past its frame.
-	if element.local_name().as_ref() == "tt" && (begin.is_some() || end.is_some() || dur.is_some()) {
+	if element.tag_name().name() == "tt" && (begin.is_some() || end.is_some() || dur.is_some()) {
 		return Err("timing on the TTML root element");
 	}
-	let body = element.local_name().as_ref() == "body";
+	let body = element.tag_name().name() == "body";
 
 	let offset = begin.as_ref().map(|(_, value)| rates.time(value)).transpose()?;
 	let source = parent
@@ -244,7 +192,7 @@ fn timing<R>(
 	// below underflows, even when an element ends before it begins.
 	let ends = end.is_some() || dur.is_some();
 	if let Some((raw, value)) = end {
-		let offset = rates.time(&value)?;
+		let offset = rates.time(value)?;
 		let at = parent.source.checked_add(offset).ok_or("TTML time overflow")?;
 		let relative = clock.map(at) - parent.mapped;
 		if relative != offset {
@@ -252,7 +200,7 @@ fn timing<R>(
 		}
 	}
 	if let Some((raw, value)) = dur {
-		let offset = rates.time(&value)?;
+		let offset = rates.time(value)?;
 		let at = source.checked_add(offset).ok_or("TTML time overflow")?;
 		let relative = clock.map(at) - mapped;
 		if relative != offset {
@@ -279,22 +227,18 @@ struct Rates {
 }
 
 impl Rates {
-	fn from_root<R>(reader: &quick_xml::NsReader<R>, root: &BytesStart<'_>) -> Result<Self, &'static str> {
+	fn from_root(root: roxmltree::Node) -> Result<Self, &'static str> {
 		let mut frame = None;
 		let mut multiplier = None;
 		let mut tick = None;
-		for attribute in root.attributes() {
-			let attribute = attribute.map_err(|_| "malformed TTML attribute")?;
-			let (ResolveResult::Bound(Namespace(PARAMETER)), name) = reader.resolver().resolve_attribute(attribute.key)
-			else {
-				continue;
-			};
-			let value = attribute
-				.normalized_value(quick_xml::XmlVersion::Implicit1_0)
-				.map_err(|_| "malformed TTML attribute")?;
-			match name.as_ref() {
+		for attribute in root
+			.attributes()
+			.filter(|attribute| attribute.namespace() == Some(PARAMETER))
+		{
+			let value = attribute.value();
+			match attribute.name() {
 				"timeBase" if value != "media" => return Err("unsupported TTML time base"),
-				"frameRate" => frame = Some(positive(&value)?),
+				"frameRate" => frame = Some(positive(value)?),
 				"frameRateMultiplier" => {
 					let mut parts = value.split_whitespace();
 					let (Some(num), Some(den), None) = (parts.next(), parts.next(), parts.next()) else {
@@ -302,7 +246,7 @@ impl Rates {
 					};
 					multiplier = Some((positive(num)?, positive(den)?));
 				}
-				"tickRate" => tick = Some(positive(&value)?),
+				"tickRate" => tick = Some(positive(value)?),
 				_ => {}
 			}
 		}
@@ -511,9 +455,20 @@ mod tests {
 				.unwrap()
 				.contains(r#"<p begin="00:00:02"/>"#)
 		);
+		let declared = format!(r#"<?xml version="1.0" encoding='utf-8'?>{entities}"#);
+		assert_eq!(
+			rewrite(declared.as_bytes(), secs(1), secs(1)..secs(3)).unwrap(),
+			declared
+		);
 		// A byte order mark is not text outside the root.
 		let marked = format!("\u{feff}{document}");
-		assert!(rewrite(marked.as_bytes(), secs(1), secs(1)..secs(3)).is_ok());
+		assert_eq!(
+			rewrite(marked.as_bytes(), secs(1), secs(1)..secs(3)).unwrap(),
+			format!(
+				"\u{feff}{}",
+				rewrite(document.as_bytes(), secs(1), secs(1)..secs(3)).unwrap()
+			)
+		);
 		// An empty document clears the captions.
 		let empty = format!("{ROOT}/>");
 		assert_eq!(rewrite(empty.as_bytes(), secs(1), secs(1)..secs(3)).unwrap(), empty);
@@ -628,7 +583,12 @@ mod tests {
 			format!("<!DOCTYPE tt>{ROOT}/>"),
 			format!(r#"{ROOT}><body><p>a&nbsp;b</p></body></tt>"#),
 			format!(r#"{ROOT}><body><p xml:id="&nbsp;"/></body></tt>"#),
+			format!(r#"{ROOT}><body><bad:p/></body></tt>"#),
+			format!(r#"{ROOT}><body><p bad:begin="1s"/></body></tt>"#),
+			format!(r#"<![CDATA[x]]>{ROOT}/>"#),
+			format!(r#"{ROOT}><!-- a--b --></tt>"#),
 			format!(r#"<?xml version="1.0" encoding="UTF-16"?>{ROOT}/>"#),
+			format!(r#"<?xml version="1.0" encoding = 'latin1' ?>{ROOT}/>"#),
 		] {
 			assert!(
 				rewrite(document.as_bytes(), secs(1), secs(1)..secs(2)).is_err(),

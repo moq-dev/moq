@@ -4642,7 +4642,7 @@ dependencies = [
  "mp4-atom",
  "mpeg2ts",
  "num_enum",
- "quick-xml 0.42.0",
+ "roxmltree",
  "scuffle-av1",
  "scuffle-h265",
  "serde",
@@ -7568,6 +7568,15 @@ dependencies = [
  "crossbeam-utils",
  "portable-atomic",
  "portable-atomic-util",
+]
+
+[[package]]
+name = "roxmltree"
+version = "0.21.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f1964b10c76125c36f8afe190065a4bf9a87bf324842c05701330bba9f1cacbb"
+dependencies = [
+ "memchr",
 ]
 
 [[package]]
