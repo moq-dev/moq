@@ -7,9 +7,10 @@
 //! [`Subscriber`]: nothing is copied, and with one route it is a passthrough.
 //!
 //! When the front switches, each reader subscribes to the new copy from the newest group
-//! it handed out. It keeps replaced copies for unread groups they already had and groups
-//! still being read, bounds their subscriptions after their newest group at replacement,
-//! and drops them once neither needs them. A group carries on across the switch through
+//! it handed out. A replaced copy keeps delivering until the new copy delivers its first
+//! group, then is bounded just below it (or at the newest group handed out, if later), so a
+//! group only the old route got after the switch is not lost. It is kept for unread groups it
+//! had and groups still being read, and dropped once neither needs it. A group carries on across the switch through
 //! its [`Recover`]: once its copy fails with its route, or stalls while a newer route
 //! serves, it continues from the serving route's copy of the same group at the same frame
 //! (and byte), found in that copy's cache or fetched from it.
@@ -153,6 +154,7 @@ impl Consumer {
 				newest: None,
 				datagram: None,
 				groups: (0, Cap::from(..)),
+				groups_read: false,
 			})
 		});
 		// Subscribed to the serving copy at once, so groups it has now are the reader's
@@ -240,8 +242,10 @@ struct Copy {
 	sub: Sub,
 	/// Where the subscription was asked to start, so demand updates never ask for less.
 	floor: Option<Position>,
-	/// Replaced by a newer route: nothing past this group, the newest it had then, is
-	/// taken from it.
+	/// Replaced by a newer route: its datagrams are the newer copy's to deliver.
+	replaced: bool,
+	/// Bounded once the newer copy delivered its first group: nothing past this group is
+	/// taken from it. Unset while it may still feed a group the newer copy never has.
 	until: Option<Option<u64>>,
 	/// The group channel ran out.
 	done: Option<Result<()>>,
@@ -271,7 +275,7 @@ impl Copy {
 		if let Some(end) = self.end().map(Position::group) {
 			wire.end = Some(wire.end.map_or(end, |requested| requested.min(end)));
 		}
-		// A replaced copy only finishes what it had, so a new group from it never arrives.
+		// A bounded copy only finishes what it had, so a new group from it never arrives.
 		if self.until.is_some() {
 			wire.new_group = None;
 		}
@@ -463,10 +467,12 @@ struct Reader {
 	datagram: Option<(u64, u64)>,
 	/// The local group filter; see [`track::Subscriber::set_groups`].
 	groups: (u64, Cap),
+	/// Whether groups were read, so a datagram read keeps the copies they still need.
+	groups_read: bool,
 }
 
 impl Reader {
-	/// Follow the route: subscribe to a new copy, bound the ones it replaced, and mirror
+	/// Follow the route: subscribe to a new copy, mark the ones it replaced, and mirror
 	/// the reader's preferences into each.
 	fn sync(&mut self, waiter: &kio::Waiter) {
 		// Snapshot and re-arm together, including when a change was observed: another
@@ -497,12 +503,10 @@ impl Reader {
 		if self.copies.last().is_some_and(|copy| copy.generation == generation) {
 			return;
 		}
-		// The replaced copies finish the groups they had when replaced, and nothing newer.
+		// The replaced copies keep delivering until the new one delivers its first group: a
+		// group they get meanwhile may be one the new route never has. See `observe`.
 		for copy in &mut self.copies {
-			if copy.until.is_none() {
-				copy.until = Some(self.newest.max(copy.track.latest()));
-				copy.update(&self.mirrored);
-			}
+			copy.replaced = true;
 		}
 		let floor = self.newest.map(Position::group);
 		// The wire request carries the floor from the first message: some sessions read
@@ -516,6 +520,7 @@ impl Reader {
 			sub: Sub::Pending(track.subscribe(wire)),
 			track,
 			floor,
+			replaced: false,
 			until: None,
 			done: None,
 			datagrams_done: None,
@@ -528,8 +533,15 @@ impl Reader {
 	fn let_go(&mut self, delivered: &Delivered) {
 		let serving = self.generation;
 		let groups = self.groups;
+		let groups_read = self.groups_read;
 		self.copies.retain_mut(|copy| {
-			if copy.needed(Some(copy.generation) == serving) {
+			// The serving copy, or one between routes with nothing replacing it yet.
+			if !copy.replaced || copy.needed(Some(copy.generation) == serving) {
+				return true;
+			}
+			// Not yet bounded, it may still feed a group the new copy never has, unless
+			// nobody reads groups at all.
+			if copy.until.is_none() && groups_read {
 				return true;
 			}
 			if copy.done.is_some() {
@@ -548,6 +560,23 @@ impl Reader {
 				delivered,
 			})
 		});
+	}
+
+	/// The copy at `index` delivered `sequence`. The serving copy's first group bounds the
+	/// copies it replaced just below it: what they hold under it may be groups the new route
+	/// never has, and what is at or above it the new route delivers. Never below a group
+	/// already handed out.
+	fn observe(&mut self, index: usize, sequence: u64) {
+		if Some(self.copies[index].generation) != self.generation {
+			return;
+		}
+		let bound = self.newest.max(sequence.checked_sub(1));
+		for copy in &mut self.copies[..index] {
+			if copy.replaced && copy.until.is_none() {
+				copy.until = Some(bound);
+				copy.update(&self.mirrored);
+			}
+		}
 	}
 
 	fn deliverable(copy: &Copy, sequence: u64, delivered: &Delivered) -> bool {
@@ -595,6 +624,7 @@ impl Reader {
 		waiter: &kio::Waiter,
 	) -> Option<Poll<Result<Option<group::Consumer>>>> {
 		self.sync(waiter);
+		self.groups_read = true;
 		let groups = self.groups;
 		// The serving copy first: it is the one that keeps delivering.
 		for index in (0..self.copies.len()).rev() {
@@ -619,6 +649,7 @@ impl Reader {
 				match res {
 					Poll::Pending => break,
 					Poll::Ready(Ok(Some(group))) => {
+						self.observe(index, group.sequence);
 						if !Self::deliverable(&self.copies[index], group.sequence, delivered) {
 							continue;
 						}
@@ -707,7 +738,7 @@ impl Reader {
 		for index in (0..self.copies.len()).rev() {
 			loop {
 				let copy = &mut self.copies[index];
-				if copy.datagrams_done.is_some() || copy.until.is_some() {
+				if copy.datagrams_done.is_some() || copy.replaced {
 					break;
 				}
 				let sub = match copy.poll_ready(groups, waiter) {
@@ -1376,6 +1407,34 @@ mod test {
 		}
 	}
 
+	/// A replaced copy is bounded only once the new copy delivers its first group: a group
+	/// the old route gets after the swap, which the new route never has, still arrives.
+	#[test]
+	fn a_group_the_old_route_gets_after_the_swap_is_delivered() {
+		for ordered in [false, true] {
+			let routes = Producer::new();
+			let logical = logical(&routes);
+			let a = copy();
+			routes.serve(a.consume());
+			let mut sub = subscribe(&logical, Duration::ZERO);
+			write(&a, 0);
+			assert_eq!(drain(&mut sub, ordered), [0]);
+
+			let b = copy();
+			routes.serve(b.consume());
+			// Group 1 reaches the old route after the swap; the new route joins at group 2.
+			write(&a, 1);
+			assert_eq!(drain(&mut sub, ordered), [1]);
+			write(&b, 2);
+			assert_eq!(drain(&mut sub, ordered), [2]);
+			// Bounded below the new copy's first group: later groups come from the new route.
+			write(&a, 3);
+			assert_eq!(drain(&mut sub, ordered), Vec::<u64>::new());
+			write(&b, 3);
+			assert_eq!(drain(&mut sub, ordered), [3]);
+		}
+	}
+
 	/// A copy delivering a group long after the reader moved past it does not hand it out
 	/// again, however many groups came between; one never handed out is still delivered.
 	#[test]
@@ -1613,7 +1672,7 @@ mod test {
 
 	#[test]
 	#[cfg(feature = "async")]
-	fn a_replaced_route_finishes_only_the_groups_it_had() {
+	fn a_replaced_route_yields_to_the_serving_copy() {
 		let routes = Producer::new();
 		let logical = logical(&routes);
 		let a = copy();

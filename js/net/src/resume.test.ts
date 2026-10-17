@@ -632,3 +632,34 @@ test("a refused route is not served again by a later compatible source", async (
 	b.close();
 	c.close();
 });
+
+// A replaced copy is bounded only once the new copy delivers its first group: one the old route
+// gets after the swap, which the new route never has, still arrives.
+test("a group the old route gets after the swap, which the new route never has, is delivered", async () => {
+	const front = new Front();
+	const a = new BroadcastProducer();
+	const b = new BroadcastProducer();
+	const ta = copy(a);
+	const tb = copy(b);
+	front.serve(a.consume());
+	const sub = front.consumer.track("seq").subscribe();
+	ta.write(0);
+	expect(drain(sub)).toEqual([0]);
+	front.serve(b.consume());
+	await settle();
+	// Group 1 reaches the old route after the swap; the new route joins at group 2.
+	ta.write(1);
+	expect(drain(sub)).toEqual([1]);
+	tb.write(2);
+	expect(drain(sub)).toEqual([2]);
+	// Bounded at the group before the new copy's first: later groups come from the new route.
+	ta.write(3);
+	expect(drain(sub)).toEqual([]);
+	tb.write(3);
+	expect(drain(sub)).toEqual([3]);
+
+	sub.close();
+	front.consumer.close();
+	a.close();
+	b.close();
+});

@@ -9,9 +9,10 @@
  * route it is a passthrough.
  *
  * When the front switches, each reader subscribes to the new copy from the newest group it
- * handed out. It keeps replaced copies for unread groups they already had and groups still being
- * read, bounds their subscriptions after their newest group at replacement, and drops them once
- * neither needs them. A group carries on across the switch through its {@link Recover}: once its
+ * handed out. A replaced copy keeps delivering until the new copy delivers its first group, then
+ * is bounded just below it (or at the newest group handed out, if later), so a group only the old
+ * route got after the switch is not lost. It is kept for unread groups it had and groups still
+ * being read, and dropped once neither needs it. A group carries on across the switch through its {@link Recover}: once its
  * copy fails with its route, or stalls while a newer route serves, it continues from the serving
  * route's copy of the same group at the same frame, found in that copy's cache or fetched from it.
  *
@@ -181,9 +182,12 @@ interface Copy {
 	sub: track.Subscriber;
 	/** Where the subscription was asked to start, so demand updates never ask for less. */
 	floor?: number;
+	/** Replaced by a newer route: its datagrams are the newer copy's to deliver. */
+	replaced: boolean;
 	/**
-	 * Replaced by a newer route: nothing past this group, the newest it had then, is taken from
-	 * it. `null` when it had none.
+	 * Bounded once the newer copy delivered its first group: nothing past this group is taken
+	 * from it. `null` when that leaves nothing. Unset while it is the only copy still feeding
+	 * groups the newer one may never have.
 	 */
 	until?: number | null;
 	/** The group channel ran out: cleanly (`null`) or failed. */
@@ -252,7 +256,7 @@ class Reader implements ResumeSource {
 		this.sync();
 	}
 
-	/** Follow the route: subscribe to a new copy and bound the ones it replaced. */
+	/** Follow the route: subscribe to a new copy and mark the ones it replaced. */
 	sync(): void {
 		if (this.#closed) return;
 		const route = this.route;
@@ -260,15 +264,9 @@ class Reader implements ResumeSource {
 		this.#generation = route.generation;
 		const source = route.source;
 		if (!source) return;
-		// The replaced copies finish the groups they had when replaced, and nothing newer.
-		for (const copy of this.#copies) {
-			if (copy.until !== undefined) continue;
-			const latest = copy.sub.latest();
-			const newest = this.#newest === undefined ? latest : Math.max(this.#newest, latest ?? 0);
-			copy.until = newest ?? null;
-			this.#update(copy);
-			this.#bound(copy);
-		}
+		// The replaced copies keep delivering until the new one delivers its first group: a
+		// group they get meanwhile may be one the new route never has. See #observe.
+		for (const copy of this.#copies) copy.replaced = true;
 		const floor = this.#newest;
 		const copy: Copy = {
 			generation: route.generation,
@@ -278,6 +276,7 @@ class Reader implements ResumeSource {
 			sub: subscribe(source.wire, route.name, this.#wire({ floor })),
 			floor,
 			datagramsSeen: this.#datagram,
+			replaced: false,
 			lease: 0,
 		};
 		source.retain();
@@ -335,6 +334,22 @@ class Reader implements ResumeSource {
 		return this.#copies.find((copy) => copy.generation === generation);
 	}
 
+	/**
+	 * `copy` delivered `sequence`. The serving copy's first group bounds the copies it replaced
+	 * just below it: what they hold under it may be groups the new route never has, and what
+	 * is at or above it the new route delivers. Never below a group already handed out.
+	 */
+	#observe(copy: Copy, sequence: number): void {
+		if (copy.generation !== this.#generation) return;
+		const bound = Math.max(this.#newest ?? -1, sequence - 1);
+		for (const replaced of this.#copies) {
+			if (replaced === copy || !replaced.replaced || replaced.until !== undefined) continue;
+			replaced.until = bound < 0 ? null : bound;
+			this.#update(replaced);
+			this.#bound(replaced);
+		}
+	}
+
 	#deliverable(copy: Copy, sequence: number, delivered: Delivered): boolean {
 		const end = copyEnd(copy);
 		return (end === undefined || sequence < end) && !delivered.has(sequence);
@@ -348,7 +363,10 @@ class Reader implements ResumeSource {
 			const next = this.#lowest(delivered);
 			if (next) {
 				const recv = hooks.tryNextGroup(next.sub);
-				if (recv.kind === "group") return { kind: "group", group: this.#handOut(next, recv.group) };
+				if (recv.kind === "group") {
+					this.#observe(next, recv.group.sequence);
+					return { kind: "group", group: this.#handOut(next, recv.group) };
+				}
 			}
 		}
 		// The serving copy first: it is the one that keeps delivering.
@@ -358,6 +376,7 @@ class Reader implements ResumeSource {
 			for (;;) {
 				const recv = ordered ? hooks.tryNextGroup(copy.sub) : hooks.tryRecvGroup(copy.sub, false);
 				if (recv.kind === "group") {
+					this.#observe(copy, recv.group.sequence);
 					if (!this.#deliverable(copy, recv.group.sequence, delivered)) {
 						recv.group.close();
 						continue;
@@ -390,6 +409,7 @@ class Reader implements ResumeSource {
 				}
 				const recv = hooks.tryNextGroup(copy.sub);
 				if (recv.kind !== "group") break;
+				this.#observe(copy, recv.group.sequence);
 				recv.group.close();
 			}
 		}
@@ -401,7 +421,7 @@ class Reader implements ResumeSource {
 		for (let index = this.#copies.length - 1; index >= 0; index--) {
 			const copy = this.#copies[index];
 			// A replaced copy's datagrams are the serving one's to deliver.
-			if (copy.datagramsDone !== undefined || copy.until !== undefined) continue;
+			if (copy.datagramsDone !== undefined || copy.replaced) continue;
 			for (;;) {
 				const recv = hooks.tryRecvDatagram(copy.sub);
 				if (recv.kind === "datagram") {
@@ -470,7 +490,11 @@ class Reader implements ResumeSource {
 	#letGo(delivered?: Delivered): void {
 		const cursor = this.#shell.cursor.peek();
 		this.#copies = this.#copies.filter((copy) => {
-			if (copy.until === undefined || copy.lease > 0) return true;
+			// The serving copy, or one between routes with nothing replacing it yet.
+			if (!copy.replaced || copy.lease > 0) return true;
+			// Not yet bounded, it may still feed a group the new copy never has, unless nobody
+			// reads groups at all.
+			if (copy.until === undefined && delivered) return true;
 			if (
 				copy.done === undefined &&
 				delivered &&
