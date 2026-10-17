@@ -364,6 +364,8 @@ impl Mergeable for Presence {
 		self.requests < prev.requests
 			|| self.sessions_started < prev.sessions_started
 			|| self.sessions_ended < prev.sessions_ended
+			|| self.sent_bytes < prev.sent_bytes
+			|| self.received_bytes < prev.received_bytes
 			|| self.announces_peak < prev.announces_peak
 			|| self.subscriptions_peak < prev.subscriptions_peak
 	}
@@ -1885,6 +1887,21 @@ mod tests {
 			request(8),
 			"request-only regression begins another segment"
 		);
+	}
+
+	#[test]
+	fn byte_only_regression_begins_another_segment() {
+		let (mut merged, key) = hand_merged::<Presence>();
+		let bytes = |sent, received| {
+			let mut presence = Presence::default();
+			presence.sent_bytes = sent;
+			presence.received_bytes = received;
+			presence
+		};
+		let node = merged.nodes.get_mut(&key).unwrap();
+		node.observe(BTreeMap::from([(String::new(), bytes(6, 4))]));
+		node.observe(BTreeMap::from([(String::new(), bytes(2, 1))]));
+		assert_eq!(merged.merged()[""], bytes(8, 5));
 	}
 
 	#[test]
