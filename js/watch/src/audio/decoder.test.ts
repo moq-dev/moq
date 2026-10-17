@@ -720,6 +720,7 @@ async function livePlayback(burst: number) {
 	const ring = () => insert.mock.contexts.at(-1) as SharedRingBuffer | undefined;
 	return {
 		sync,
+		error: decoder.out.error,
 		counts,
 		ring,
 		get burst() {
@@ -729,11 +730,11 @@ async function livePlayback(burst: number) {
 			burst = value;
 		},
 		// Rename the rendition, publishing the rest of the timeline on the new track.
-		rename(name: string) {
+		rename(name: string, patch: Record<string, unknown> = {}) {
 			track.close();
 			track = producer.createTrack(name, { timescale: Moq.Time.Timescale.MILLI });
 			sequence = 0;
-			catalog.set({ audio: { renditions: { [name]: audio } } });
+			catalog.set({ audio: { renditions: { [name]: Catalog.AudioConfigSchema.parse({ ...audio, ...patch }) } } });
 		},
 		// Serve the same rendition from another path, as a `broadcast` override does.
 		move(path: string) {
@@ -833,6 +834,25 @@ describe("Decoder across a rename", () => {
 			playback.burst = 1;
 			await playback.run(22_000);
 
+			expect(playback.sync.out.delay.peek()).toBeLessThan(warm);
+		} finally {
+			await playback.close();
+		}
+	});
+
+	// The probe accepts a CMAF init segment it cannot parse for Opus, so setup throws before the
+	// replacement's consumer exists. Nothing replaces the outgoing estimate, so it must not linger.
+	it("reports a replacement that fails to set up and stops holding the delay", async () => {
+		const playback = await livePlayback(12);
+		try {
+			await playback.run(20_000);
+			const warm = playback.sync.out.delay.peek();
+			expect(warm).toBeGreaterThan(Milli(200));
+
+			playback.rename("audio/1", { container: { kind: "cmaf", init: "AAAA" } });
+			await microtasks();
+
+			expect(playback.error.peek()).toBeInstanceOf(Error);
 			expect(playback.sync.out.delay.peek()).toBeLessThan(warm);
 		} finally {
 			await playback.close();

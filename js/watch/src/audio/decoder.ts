@@ -412,11 +412,17 @@ export class Decoder {
 				return;
 			}
 
+			// A config the probe accepted can still fail to parse (a malformed init segment or Opus
+			// header). Report it like a decode failure, which also retires the outgoing estimate.
 			const props = { config, failure, path: active.path };
-			if (config.container.kind === "cmaf") {
-				this.#runCmafDecoder(run, sub, props);
-			} else {
-				this.#runLegacyDecoder(run, sub, props);
+			try {
+				if (config.container.kind === "cmaf") {
+					this.#runCmafDecoder(run, sub, props);
+				} else {
+					this.#runLegacyDecoder(run, sub, props);
+				}
+			} catch (error) {
+				failure.set(error instanceof Error ? error : new Error(String(error)));
 			}
 		});
 	}
