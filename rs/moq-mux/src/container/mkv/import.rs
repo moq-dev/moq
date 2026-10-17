@@ -837,18 +837,7 @@ fn build_h265_config(codec_private: Option<&Bytes>) -> Result<VideoConfig> {
 		constraint_flags: hvcc.general_constraint_indicator_flags,
 	});
 	config.description = Some(description.freeze());
-	if let Some(sps) = hvcc
-		.arrays
-		.iter()
-		.filter(|array| array.nal_unit_type == scuffle_h265::NALUnitType::SpsNut.0)
-		.flat_map(|array| &array.nalus)
-		.next()
-	{
-		let metadata = crate::codec::h265::config_from_sps(sps, false)?;
-		config.framerate = metadata.framerate;
-		config.display_aspect_width = metadata.display_aspect_width;
-		config.display_aspect_height = metadata.display_aspect_height;
-	}
+	crate::codec::h265::apply_hvcc_sps(&hvcc, &mut config)?;
 	Ok(config)
 }
 

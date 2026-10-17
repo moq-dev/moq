@@ -204,6 +204,26 @@ pub(crate) fn config_from_hvcc(hvcc: &[u8]) -> Result<hang::catalog::VideoConfig
 	Ok(config)
 }
 
+/// Copy the frame rate and display aspect from a decoded hvcC's first SPS.
+///
+/// An hev1 record may list no SPS, leaving both unset.
+pub(crate) fn apply_hvcc_sps(hvcc: &mp4_atom::Hvcc, config: &mut hang::catalog::VideoConfig) -> Result<()> {
+	let Some(sps) = hvcc
+		.arrays
+		.iter()
+		.filter(|array| array.nal_unit_type == NALUnitType::SpsNut.0)
+		.flat_map(|array| &array.nalus)
+		.next()
+	else {
+		return Ok(());
+	};
+	let metadata = config_from_sps(sps, false)?;
+	config.framerate = metadata.framerate;
+	config.display_aspect_width = metadata.display_aspect_width;
+	config.display_aspect_height = metadata.display_aspect_height;
+	Ok(())
+}
+
 /// Resolve either sample framing from the same SPS dimensions and VUI metadata.
 pub(crate) fn config_from_sps(sps_nal: &[u8], in_band: bool) -> Result<hang::catalog::VideoConfig> {
 	let Sps { head, full } = Sps::parse(sps_nal)?;

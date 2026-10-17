@@ -90,7 +90,6 @@ ranked just below deterministic TS legs, which it requires.
 - [Mobile completion](/quest/m2/mobile-completion.md) - verify the Swift and Kotlin bindings over Rust-owned capture before closing #700
 - [#709](/quest/m2/709-automatic-letsencrypt-support.md) - the relay provisions and renews its own ACME certificate through rustls-acme over TLS-ALPN-01, persisted on disk
 - [Catalog colour](/quest/m2/color-catalog.md) - the catalog describes a rendition's colour and HDR properties, which the WebGPU HDR renderer reads
-- [Display aspect](/quest/m2/display-aspect.md) - H.264 and H.265 (Annex-B and hvcC) importers report a non-square sample aspect as the catalog display aspect, and AV1 too if it carries one
 - [WebGPU HDR](/quest/m2/webgpu-hdr.md) - HDR renditions play as HDR where the browser and display can show it, and tone-map to SDR elsewhere
 - [Grant stats label](/quest/m2/grant-label.md) - an auth grant's optional `label` names what its session's presence and live bytes count under in stats, apart from the path scope it may access
 - [RTSP import](/quest/m2/rtsp-import.md) - `moq import rtsp` publishes an IP camera from its own network, through a `moq-rtsp` crate whose one-session ingest a caller can supervise itself
