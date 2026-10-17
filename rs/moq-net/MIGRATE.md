@@ -4,6 +4,18 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `broadcast::Producer::finish` is back, and lingers (#5795)
+
+`finish()` ends the broadcast cleanly and returns a `Finish` that keeps its finished tracks servable until their media is stale.
+Dropping the `Finish` closes the broadcast, so `close()` still ends it now.
+
+```rust
+// Close now
+producer.close();
+// Serve late subscribers until the media is stale
+producer.finish().wait().await;
+```
+
 ### `auth::Token` is `auth::Auth` (#5695)
 
 `auth::Handle::add` returns an `auth::Auth`, which is `Clone` and compares by identity, so a route can name it with `origin::Route::with_auth`.
