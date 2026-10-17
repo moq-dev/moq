@@ -335,3 +335,31 @@ test("a replacement spliced before the first copy answers is still checked again
 	a.close();
 	b.close();
 });
+
+test("an ordered reader takes a replaced copy's buffered group before the new copy's later one", async () => {
+	const front = new Front();
+	const a = new BroadcastProducer();
+	const b = new BroadcastProducer();
+	const ta = copy(a);
+	const tb = copy(b);
+	front.serve(a.consume());
+	const ordered = front.consumer
+		.track("seq")
+		.subscribe({ maxDelay: 10_000 as track.Subscription["maxDelay"] })
+		.ordered();
+	ta.write(0);
+	expect((await ordered.nextGroup())?.sequence).toBe(0);
+
+	// The old copy holds group 1 unread; the new one only has group 2.
+	ta.write(1);
+	tb.write(2);
+	front.serve(b.consume());
+	await settle();
+	expect((await ordered.nextGroup())?.sequence).toBe(1);
+	expect((await ordered.nextGroup())?.sequence).toBe(2);
+
+	ordered.close();
+	front.consumer.close();
+	a.close();
+	b.close();
+});

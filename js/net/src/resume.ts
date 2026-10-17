@@ -320,6 +320,15 @@ class Reader implements ResumeSource {
 
 	tryGroup(ordered: boolean, delivered: Delivered): Recv {
 		this.sync();
+		// In sequence order, the lowest group any copy holds next, so a replaced copy's buffered
+		// group is not skipped for a later one the serving copy already has.
+		if (ordered) {
+			const next = this.#lowest(delivered);
+			if (next) {
+				const recv = hooks.tryNextGroup(next.sub);
+				if (recv.kind === "group") return { kind: "group", group: this.#handOut(next, recv.group) };
+			}
+		}
 		// The serving copy first: it is the one that keeps delivering.
 		for (let index = this.#copies.length - 1; index >= 0; index--) {
 			const copy = this.#copies[index];
@@ -342,6 +351,27 @@ class Reader implements ResumeSource {
 		}
 		this.#letGo(delivered);
 		return this.#end((copy) => copy.done);
+	}
+
+	// The copy whose next group in sequence order is the lowest deliverable one, dropping any it
+	// holds next that are not.
+	#lowest(delivered: Delivered): Copy | undefined {
+		let lowest: { copy: Copy; sequence: number } | undefined;
+		for (const copy of this.#copies) {
+			if (copy.done !== undefined) continue;
+			for (;;) {
+				const sequence = hooks.peekNextGroup(copy.sub);
+				if (sequence === undefined) break;
+				if (this.#deliverable(copy, sequence, delivered)) {
+					if (!lowest || sequence < lowest.sequence) lowest = { copy, sequence };
+					break;
+				}
+				const recv = hooks.tryNextGroup(copy.sub);
+				if (recv.kind !== "group") break;
+				recv.group.close();
+			}
+		}
+		return lowest?.copy;
 	}
 
 	tryDatagram(): RecvDatagram {

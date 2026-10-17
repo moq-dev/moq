@@ -557,9 +557,8 @@ function websocketVersions(protocols?: string[]): Record<string, QmuxVersion | Q
 	};
 	const versions: Record<string, QmuxVersion | QmuxVersion[] | null> = {};
 	for (const protocol of protocols) {
-		const version = supported[protocol];
-		if (version === undefined) throw new Error(`unsupported WebSocket protocol: ${protocol}`);
-		versions[protocol] = version;
+		if (!Object.hasOwn(supported, protocol)) throw new Error(`unsupported WebSocket protocol: ${protocol}`);
+		versions[protocol] = supported[protocol];
 	}
 	return versions;
 }

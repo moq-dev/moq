@@ -1390,6 +1390,7 @@ export class Subscriber {
 		makeSubscriber = (name, state) => new Subscriber(name, state);
 		hooks.tryRecvGroup = (subscriber) => subscriber.#tryRecvGroup();
 		hooks.tryNextGroup = (subscriber) => subscriber.#tryNextGroup();
+		hooks.peekNextGroup = (subscriber) => subscriber.#peekNextGroup();
 		hooks.forgetPastBudget = (subscriber, delivered) => subscriber.#forgetPastBudget(delivered);
 		hooks.tryRecvDatagram = (subscriber) => subscriber.#tryDatagram();
 		hooks.deliveredRuns = (subscriber) => subscriber.#delivered.runs;
@@ -1827,6 +1828,19 @@ export class Subscriber {
 			}
 			await this.#wait();
 		}
+	}
+
+	// The sequence #tryNextGroup would take next: the first buffered group in range the budget spares.
+	#peekNextGroup(): number | undefined {
+		const cursor = this.#cursor.peek();
+		const start = Math.max(cursor.start, this.#nextSequence);
+		const drift = this.#drift();
+		for (const group of this.#state.groups.peek()) {
+			if (group.sequence < start) continue;
+			if (cursor.end !== undefined && group.sequence >= cursor.end) return undefined;
+			if (!this.#isStale(group, drift)) return group.sequence;
+		}
+		return undefined;
 	}
 
 	// The synchronous half of #nextGroup.

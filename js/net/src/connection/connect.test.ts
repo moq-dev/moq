@@ -336,9 +336,11 @@ test("the WebSocket fallback refuses an unsupported protocol", async () => {
 	const original = globalThis.WebTransport;
 	globalThis.WebTransport = undefined as unknown as typeof WebTransport;
 	try {
-		await expect(connect(url, { websocket: { protocols: ["moq-lite-99"] } })).rejects.toThrow(
-			"unsupported WebSocket protocol",
-		);
+		for (const protocol of ["moq-lite-99", "toString"]) {
+			await expect(connect(url, { websocket: { protocols: [protocol] } })).rejects.toThrow(
+				"unsupported WebSocket protocol",
+			);
+		}
 	} finally {
 		globalThis.WebTransport = original;
 	}

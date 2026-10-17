@@ -284,6 +284,8 @@ export const hooks: {
 	 * {@link groupChanged} when it reports `idle` or `boundary`.
 	 */
 	tryRecvGroup: (subscriber: Subscriber) => Recv;
+	/** The sequence {@link tryNextGroup} would take next, without taking it. */
+	peekNextGroup: (subscriber: Subscriber) => number | undefined;
 	/** Take the next group in sequence order without waiting, as {@link tryRecvGroup} does in arrival order. */
 	tryNextGroup: (subscriber: Subscriber) => Recv;
 	/** Wake once a subscriber's datagram cursor may read differently; fires at most once. */
@@ -374,6 +376,9 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	tryNextGroup: () => {
+		throw new Error("track.ts not loaded");
+	},
+	peekNextGroup: () => {
 		throw new Error("track.ts not loaded");
 	},
 	forgetPastBudget: () => {
