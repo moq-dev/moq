@@ -39,6 +39,12 @@ a GitHub App:
   own alert disabled. The `moq-uring` socket
   benches run only here, and skip loudly when the runner's kernel is too old. Add the workflow's name to
   `alert.yml` if it isn't `Nightly`.
+- Decided 2026-10-16: moq-quic's Criterion targets (#5812) join the
+  selection. They time thread CPU rather than wall time, which already cut
+  most host noise; on a shared hybrid-core host, identical builds still
+  swing about 5% on small cases and 20-130% on large-working-set ones, so
+  the noise floor must come from A/A runs on the CI runner itself, never
+  from a laptop.
 - Validate with an A/A run (the same commit twice) and a deliberately slowed
   bench before trusting either signal.
 - Document the comment, the trend, and local reproduction in

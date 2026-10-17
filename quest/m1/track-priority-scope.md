@@ -119,11 +119,6 @@ Public API impact: `u8` priority fields become `i8` in every language, and
 in format, but the default byte moves from 127 to 128 on moq-lite and from 128
 to 127 on IETF. Report both with the draft change.
 
-## Required
-
-- [Hierarchical stream scheduling](/quest/m1/quic/scheduler.md) - the fair
-  tier the broadcast domains and subscription send groups ride on
-
 ## Related
 
 - [Subscribe ranges](/quest/m1/subscribe-ranges/README.md) - owns the group
