@@ -32,6 +32,10 @@ ignored; its guide says what replaces it.
 
 These land with the next breaking release.
 
+- **Data-track breaks are an object with no bytes** (#5815). A hang data
+  track (TS verbatim PES, sections, `m2ts`, text) marks a discontinuity with a
+  group of one empty object instead of a skipped group. Older consumers fail
+  to decode it, so upgrade exporters and players before publishers.
 - **Auth requests name `webtransport`** (#5293). Relays report a WebTransport
   session as `webtransport` instead of `quic`, and older auth servers reject the
   new value, so upgrade auth servers before relays.

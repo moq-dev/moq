@@ -4,6 +4,17 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `fmp4::Wire::new` refuses a track that isn't audio or video (#5815)
+
+`container::fmp4::Wire::new` returns `Result<Wire>`, as `Wire::from_init` already did, and refuses any other handler instead of treating it as data.
+
+```rust
+// Before
+let wire = Wire::new(trak);
+// After
+let wire = Wire::new(trak)?;
+```
+
 ### `ts::Programs::finish` returns each program's `Finish` (#5795)
 
 `Programs::finish` returns `anyhow::Result<Vec<moq_net::broadcast::Finish>>` instead of `anyhow::Result<()>`.

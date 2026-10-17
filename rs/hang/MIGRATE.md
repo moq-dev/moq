@@ -4,6 +4,20 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### The catalog root carries a reader `version` (#5806)
+
+`version` is reserved at the catalog root: decoding refuses a catalog newer than this crate reads with `Error::UnsupportedVersion`, and serializing fails if the extension `E` has its own `version` member.
+Rename that member.
+
+```rust
+// Before
+#[derive(Serialize, Deserialize)]
+struct Extra { version: u32 }
+// After
+#[derive(Serialize, Deserialize)]
+struct Extra { app_version: u32 }
+```
+
 ### Archive timelines declare a per-track duration (#5715)
 
 Each `Archive::timelines` value is a `Timeline` (the timeline `track` plus its nominal `duration` in the archive timescale, `None` when untimed) instead of the timeline track's name, and `Archive::duration_max` is removed.
