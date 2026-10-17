@@ -48,6 +48,7 @@ from .subscribe import (
     TrackConsumer,
 )
 from .types import (
+    Anchor,
     AudioCodec,
     AudioEncoderInput,
     AudioSampleFormat,
@@ -58,8 +59,10 @@ from .types import (
     ErrorScope,
     FetchGroupOptions,
     Frame,
+    Order,
     ProtocolError,
     ProtocolKind,
+    Range,
     Route,
     Subscription,
     TrackInfo,
@@ -72,6 +75,7 @@ from .types import (
 )
 
 __all__ = [
+    "Anchor",
     "Announce",
     "AnnounceConsumer",
     "AnnouncedBroadcast",
@@ -107,6 +111,8 @@ __all__ = [
     "OriginConsumer",
     "OriginDynamic",
     "OriginProducer",
+    "Order",
+    "Range",
     "Request",
     "Reservation",
     "Route",

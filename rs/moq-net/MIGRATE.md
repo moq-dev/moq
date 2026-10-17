@@ -4,6 +4,11 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Subscriptions carry group ranges (#5732)
+
+`track::Subscription::start` and `end` are replaced by `ranges: Vec<Range>`, and `with_start` and `with_end` are gone.
+Use `with_groups(start..end)` for one span of groups, or `with_ranges` with `Range::live()`, `Range::oldest()` (the default), or `Range::groups(..)`.
+
 ### Receive estimates come from `Session::recv_bandwidth` (#5777)
 
 The connection stats no longer carry a receive estimate.

@@ -554,16 +554,75 @@ class FfiConverterMoqFetchGroupOptions {
   }
 }
 
+class MoqRange {
+  final MoqAnchor start;
+  final MoqAnchor? end;
+  MoqRange({required this.start, this.end = null});
+}
+
+class FfiConverterMoqRange {
+  static MoqRange lift(RustBuffer buf) {
+    return FfiConverterMoqRange.read(buf.asUint8List()).value;
+  }
+
+  static LiftRetVal<MoqRange> read(Uint8List buf) {
+    int new_offset = buf.offsetInBytes;
+    final start_lifted = FfiConverterMoqAnchor.read(
+      Uint8List.view(buf.buffer, new_offset),
+    );
+    final start = start_lifted.value;
+    new_offset += start_lifted.bytesRead;
+    final end_lifted = FfiConverterOptionalMoqAnchor.read(
+      Uint8List.view(buf.buffer, new_offset),
+    );
+    final end = end_lifted.value;
+    new_offset += end_lifted.bytesRead;
+    return LiftRetVal(
+      MoqRange(start: start, end: end),
+      new_offset - buf.offsetInBytes,
+    );
+  }
+
+  static RustBuffer lower(MoqRange value) {
+    final total_length =
+        FfiConverterMoqAnchor.allocationSize(value.start) +
+        FfiConverterOptionalMoqAnchor.allocationSize(value.end) +
+        0;
+    final buf = Uint8List(total_length);
+    write(value, buf);
+    return toRustBuffer(buf);
+  }
+
+  static int write(MoqRange value, Uint8List buf) {
+    int new_offset = buf.offsetInBytes;
+    new_offset += FfiConverterMoqAnchor.write(
+      value.start,
+      Uint8List.view(buf.buffer, new_offset),
+    );
+    new_offset += FfiConverterOptionalMoqAnchor.write(
+      value.end,
+      Uint8List.view(buf.buffer, new_offset),
+    );
+    return new_offset - buf.offsetInBytes;
+  }
+
+  static int allocationSize(MoqRange value) {
+    return FfiConverterMoqAnchor.allocationSize(value.start) +
+        FfiConverterOptionalMoqAnchor.allocationSize(value.end) +
+        0;
+  }
+}
+
 class MoqSubscription {
   final int priority;
   final int maxDelayUs;
-  final int? groupStart;
-  final int? groupEnd;
+  final List<MoqRange>? ranges;
+  final MoqOrder? order;
   MoqSubscription({
     this.priority = 0,
     this.maxDelayUs = 0,
-    this.groupStart = null,
-    this.groupEnd = null,
+    this.ranges = null,
+    this.order = null,
   });
 }
 
@@ -584,22 +643,22 @@ class FfiConverterMoqSubscription {
     );
     final maxDelayUs = maxDelayUs_lifted.value;
     new_offset += maxDelayUs_lifted.bytesRead;
-    final groupStart_lifted = FfiConverterOptionalUInt64.read(
+    final ranges_lifted = FfiConverterOptionalSequenceMoqRange.read(
       Uint8List.view(buf.buffer, new_offset),
     );
-    final groupStart = groupStart_lifted.value;
-    new_offset += groupStart_lifted.bytesRead;
-    final groupEnd_lifted = FfiConverterOptionalUInt64.read(
+    final ranges = ranges_lifted.value;
+    new_offset += ranges_lifted.bytesRead;
+    final order_lifted = FfiConverterOptionalMoqOrder.read(
       Uint8List.view(buf.buffer, new_offset),
     );
-    final groupEnd = groupEnd_lifted.value;
-    new_offset += groupEnd_lifted.bytesRead;
+    final order = order_lifted.value;
+    new_offset += order_lifted.bytesRead;
     return LiftRetVal(
       MoqSubscription(
         priority: priority,
         maxDelayUs: maxDelayUs,
-        groupStart: groupStart,
-        groupEnd: groupEnd,
+        ranges: ranges,
+        order: order,
       ),
       new_offset - buf.offsetInBytes,
     );
@@ -609,8 +668,8 @@ class FfiConverterMoqSubscription {
     final total_length =
         FfiConverterUInt8.allocationSize(value.priority) +
         FfiConverterUInt64.allocationSize(value.maxDelayUs) +
-        FfiConverterOptionalUInt64.allocationSize(value.groupStart) +
-        FfiConverterOptionalUInt64.allocationSize(value.groupEnd) +
+        FfiConverterOptionalSequenceMoqRange.allocationSize(value.ranges) +
+        FfiConverterOptionalMoqOrder.allocationSize(value.order) +
         0;
     final buf = Uint8List(total_length);
     write(value, buf);
@@ -627,12 +686,12 @@ class FfiConverterMoqSubscription {
       value.maxDelayUs,
       Uint8List.view(buf.buffer, new_offset),
     );
-    new_offset += FfiConverterOptionalUInt64.write(
-      value.groupStart,
+    new_offset += FfiConverterOptionalSequenceMoqRange.write(
+      value.ranges,
       Uint8List.view(buf.buffer, new_offset),
     );
-    new_offset += FfiConverterOptionalUInt64.write(
-      value.groupEnd,
+    new_offset += FfiConverterOptionalMoqOrder.write(
+      value.order,
       Uint8List.view(buf.buffer, new_offset),
     );
     return new_offset - buf.offsetInBytes;
@@ -641,8 +700,8 @@ class FfiConverterMoqSubscription {
   static int allocationSize(MoqSubscription value) {
     return FfiConverterUInt8.allocationSize(value.priority) +
         FfiConverterUInt64.allocationSize(value.maxDelayUs) +
-        FfiConverterOptionalUInt64.allocationSize(value.groupStart) +
-        FfiConverterOptionalUInt64.allocationSize(value.groupEnd) +
+        FfiConverterOptionalSequenceMoqRange.allocationSize(value.ranges) +
+        FfiConverterOptionalMoqOrder.allocationSize(value.order) +
         0;
   }
 }
@@ -4147,6 +4206,178 @@ class FfiConverterMoqAudioSampleFormat {
   }
 
   static int write(MoqAudioSampleFormat value, Uint8List buf) {
+    buf.buffer.asByteData(buf.offsetInBytes).setInt32(0, value.index + 1);
+    return 4;
+  }
+}
+
+abstract class MoqAnchor {
+  RustBuffer lower();
+  int allocationSize();
+  int write(Uint8List buf);
+}
+
+class FfiConverterMoqAnchor {
+  static MoqAnchor lift(RustBuffer buffer) {
+    return FfiConverterMoqAnchor.read(buffer.asUint8List()).value;
+  }
+
+  static LiftRetVal<MoqAnchor> read(Uint8List buf) {
+    final index = buf.buffer.asByteData(buf.offsetInBytes).getInt32(0);
+    final subview = Uint8List.view(buf.buffer, buf.offsetInBytes + 4);
+    switch (index) {
+      case 1:
+        final lifted = AbsoluteMoqAnchor.read(subview);
+        return LiftRetVal<MoqAnchor>(
+          lifted.value,
+          lifted.bytesRead - subview.offsetInBytes + 4,
+        );
+      case 2:
+        final lifted = RelativeMoqAnchor.read(subview);
+        return LiftRetVal<MoqAnchor>(
+          lifted.value,
+          lifted.bytesRead - subview.offsetInBytes + 4,
+        );
+      default:
+        throw UniffiInternalError(
+          UniffiInternalError.unexpectedEnumCase,
+          "Unable to determine enum variant",
+        );
+    }
+  }
+
+  static RustBuffer lower(MoqAnchor value) {
+    return value.lower();
+  }
+
+  static int allocationSize(MoqAnchor value) {
+    return value.allocationSize();
+  }
+
+  static int write(MoqAnchor value, Uint8List buf) {
+    return value.write(buf) - buf.offsetInBytes;
+  }
+}
+
+class AbsoluteMoqAnchor extends MoqAnchor {
+  final int group;
+  final int frame;
+  AbsoluteMoqAnchor({required int this.group, required int this.frame});
+  AbsoluteMoqAnchor._(int this.group, int this.frame);
+  static LiftRetVal<AbsoluteMoqAnchor> read(Uint8List buf) {
+    int new_offset = buf.offsetInBytes;
+    final group_lifted = FfiConverterUInt64.read(
+      Uint8List.view(buf.buffer, new_offset),
+    );
+    final group = group_lifted.value;
+    new_offset += group_lifted.bytesRead;
+    final frame_lifted = FfiConverterUInt64.read(
+      Uint8List.view(buf.buffer, new_offset),
+    );
+    final frame = frame_lifted.value;
+    new_offset += frame_lifted.bytesRead;
+    return LiftRetVal(AbsoluteMoqAnchor._(group, frame), new_offset);
+  }
+
+  @override
+  RustBuffer lower() {
+    final buf = Uint8List(allocationSize());
+    write(buf);
+    return toRustBuffer(buf);
+  }
+
+  @override
+  int allocationSize() {
+    return FfiConverterUInt64.allocationSize(group) +
+        FfiConverterUInt64.allocationSize(frame) +
+        4;
+  }
+
+  @override
+  int write(Uint8List buf) {
+    buf.buffer.asByteData(buf.offsetInBytes).setInt32(0, 1);
+    int new_offset = buf.offsetInBytes + 4;
+    new_offset += FfiConverterUInt64.write(
+      group,
+      Uint8List.view(buf.buffer, new_offset),
+    );
+    new_offset += FfiConverterUInt64.write(
+      frame,
+      Uint8List.view(buf.buffer, new_offset),
+    );
+    return new_offset;
+  }
+}
+
+class RelativeMoqAnchor extends MoqAnchor {
+  final int groups;
+  RelativeMoqAnchor(int this.groups);
+  RelativeMoqAnchor._(int this.groups);
+  static LiftRetVal<RelativeMoqAnchor> read(Uint8List buf) {
+    int new_offset = buf.offsetInBytes;
+    final groups_lifted = FfiConverterUInt64.read(
+      Uint8List.view(buf.buffer, new_offset),
+    );
+    final groups = groups_lifted.value;
+    new_offset += groups_lifted.bytesRead;
+    return LiftRetVal(RelativeMoqAnchor._(groups), new_offset);
+  }
+
+  @override
+  RustBuffer lower() {
+    final buf = Uint8List(allocationSize());
+    write(buf);
+    return toRustBuffer(buf);
+  }
+
+  @override
+  int allocationSize() {
+    return FfiConverterUInt64.allocationSize(groups) + 4;
+  }
+
+  @override
+  int write(Uint8List buf) {
+    buf.buffer.asByteData(buf.offsetInBytes).setInt32(0, 2);
+    int new_offset = buf.offsetInBytes + 4;
+    new_offset += FfiConverterUInt64.write(
+      groups,
+      Uint8List.view(buf.buffer, new_offset),
+    );
+    return new_offset;
+  }
+}
+
+enum MoqOrder { ascending, descending }
+
+class FfiConverterMoqOrder {
+  static LiftRetVal<MoqOrder> read(Uint8List buf) {
+    final index = buf.buffer.asByteData(buf.offsetInBytes).getInt32(0);
+    switch (index) {
+      case 1:
+        return LiftRetVal(MoqOrder.ascending, 4);
+      case 2:
+        return LiftRetVal(MoqOrder.descending, 4);
+      default:
+        throw UniffiInternalError(
+          UniffiInternalError.unexpectedEnumCase,
+          "Unable to determine enum variant",
+        );
+    }
+  }
+
+  static MoqOrder lift(RustBuffer buffer) {
+    return FfiConverterMoqOrder.read(buffer.asUint8List()).value;
+  }
+
+  static RustBuffer lower(MoqOrder input) {
+    return toRustBuffer(createUint8ListFromInt(input.index + 1));
+  }
+
+  static int allocationSize(MoqOrder _value) {
+    return 4;
+  }
+
+  static int write(MoqOrder value, Uint8List buf) {
     buf.buffer.asByteData(buf.offsetInBytes).setInt32(0, value.index + 1);
     return 4;
   }
@@ -12845,6 +13076,51 @@ class FfiConverterOptionalDouble64 {
   }
 }
 
+class FfiConverterOptionalMoqAnchor {
+  static MoqAnchor? lift(RustBuffer buf) {
+    return FfiConverterOptionalMoqAnchor.read(buf.asUint8List()).value;
+  }
+
+  static LiftRetVal<MoqAnchor?> read(Uint8List buf) {
+    if (ByteData.view(buf.buffer, buf.offsetInBytes).getInt8(0) == 0) {
+      return LiftRetVal(null, 1);
+    }
+    final result = FfiConverterMoqAnchor.read(
+      Uint8List.view(buf.buffer, buf.offsetInBytes + 1),
+    );
+    return LiftRetVal<MoqAnchor?>(result.value, result.bytesRead + 1);
+  }
+
+  static int allocationSize([MoqAnchor? value]) {
+    if (value == null) {
+      return 1;
+    }
+    return FfiConverterMoqAnchor.allocationSize(value) + 1;
+  }
+
+  static RustBuffer lower(MoqAnchor? value) {
+    if (value == null) {
+      return toRustBuffer(Uint8List.fromList([0]));
+    }
+    final buf = Uint8List(FfiConverterOptionalMoqAnchor.allocationSize(value));
+    FfiConverterOptionalMoqAnchor.write(value, buf);
+    return toRustBuffer(buf);
+  }
+
+  static int write(MoqAnchor? value, Uint8List buf) {
+    if (value == null) {
+      buf[0] = 0;
+      return 1;
+    }
+    buf[0] = 1;
+    return FfiConverterMoqAnchor.write(
+          value,
+          Uint8List.view(buf.buffer, buf.offsetInBytes + 1),
+        ) +
+        1;
+  }
+}
+
 class FfiConverterOptionalMoqAnnounceEvent {
   static MoqAnnounceEvent? lift(RustBuffer buf) {
     return FfiConverterOptionalMoqAnnounceEvent.read(buf.asUint8List()).value;
@@ -13561,6 +13837,51 @@ class FfiConverterOptionalMoqMediaTimebase {
   }
 }
 
+class FfiConverterOptionalMoqOrder {
+  static MoqOrder? lift(RustBuffer buf) {
+    return FfiConverterOptionalMoqOrder.read(buf.asUint8List()).value;
+  }
+
+  static LiftRetVal<MoqOrder?> read(Uint8List buf) {
+    if (ByteData.view(buf.buffer, buf.offsetInBytes).getInt8(0) == 0) {
+      return LiftRetVal(null, 1);
+    }
+    final result = FfiConverterMoqOrder.read(
+      Uint8List.view(buf.buffer, buf.offsetInBytes + 1),
+    );
+    return LiftRetVal<MoqOrder?>(result.value, result.bytesRead + 1);
+  }
+
+  static int allocationSize([MoqOrder? value]) {
+    if (value == null) {
+      return 1;
+    }
+    return FfiConverterMoqOrder.allocationSize(value) + 1;
+  }
+
+  static RustBuffer lower(MoqOrder? value) {
+    if (value == null) {
+      return toRustBuffer(Uint8List.fromList([0]));
+    }
+    final buf = Uint8List(FfiConverterOptionalMoqOrder.allocationSize(value));
+    FfiConverterOptionalMoqOrder.write(value, buf);
+    return toRustBuffer(buf);
+  }
+
+  static int write(MoqOrder? value, Uint8List buf) {
+    if (value == null) {
+      buf[0] = 0;
+      return 1;
+    }
+    buf[0] = 1;
+    return FfiConverterMoqOrder.write(
+          value,
+          Uint8List.view(buf.buffer, buf.offsetInBytes + 1),
+        ) +
+        1;
+  }
+}
+
 class FfiConverterOptionalMoqOriginProducer {
   static MoqOriginProducer? lift(RustBuffer buf) {
     return FfiConverterOptionalMoqOriginProducer.read(buf.asUint8List()).value;
@@ -13987,6 +14308,53 @@ class FfiConverterOptionalMoqVideoSurface {
   }
 }
 
+class FfiConverterOptionalSequenceMoqRange {
+  static List<MoqRange>? lift(RustBuffer buf) {
+    return FfiConverterOptionalSequenceMoqRange.read(buf.asUint8List()).value;
+  }
+
+  static LiftRetVal<List<MoqRange>?> read(Uint8List buf) {
+    if (ByteData.view(buf.buffer, buf.offsetInBytes).getInt8(0) == 0) {
+      return LiftRetVal(null, 1);
+    }
+    final result = FfiConverterSequenceMoqRange.read(
+      Uint8List.view(buf.buffer, buf.offsetInBytes + 1),
+    );
+    return LiftRetVal<List<MoqRange>?>(result.value, result.bytesRead + 1);
+  }
+
+  static int allocationSize([List<MoqRange>? value]) {
+    if (value == null) {
+      return 1;
+    }
+    return FfiConverterSequenceMoqRange.allocationSize(value) + 1;
+  }
+
+  static RustBuffer lower(List<MoqRange>? value) {
+    if (value == null) {
+      return toRustBuffer(Uint8List.fromList([0]));
+    }
+    final buf = Uint8List(
+      FfiConverterOptionalSequenceMoqRange.allocationSize(value),
+    );
+    FfiConverterOptionalSequenceMoqRange.write(value, buf);
+    return toRustBuffer(buf);
+  }
+
+  static int write(List<MoqRange>? value, Uint8List buf) {
+    if (value == null) {
+      buf[0] = 0;
+      return 1;
+    }
+    buf[0] = 1;
+    return FfiConverterSequenceMoqRange.write(
+          value,
+          Uint8List.view(buf.buffer, buf.offsetInBytes + 1),
+        ) +
+        1;
+  }
+}
+
 class FfiConverterOptionalSequenceString {
   static List<String>? lift(RustBuffer buf) {
     return FfiConverterOptionalSequenceString.read(buf.asUint8List()).value;
@@ -14296,6 +14664,49 @@ class FfiConverterSequenceMoqAudioPacket {
   }
 
   static RustBuffer lower(List<MoqAudioPacket> value) {
+    final buf = Uint8List(allocationSize(value));
+    write(value, buf);
+    return toRustBuffer(buf);
+  }
+}
+
+class FfiConverterSequenceMoqRange {
+  static List<MoqRange> lift(RustBuffer buf) {
+    return FfiConverterSequenceMoqRange.read(buf.asUint8List()).value;
+  }
+
+  static LiftRetVal<List<MoqRange>> read(Uint8List buf) {
+    List<MoqRange> res = [];
+    final length = buf.buffer.asByteData(buf.offsetInBytes).getInt32(0);
+    int offset = buf.offsetInBytes + 4;
+    for (var i = 0; i < length; i++) {
+      final ret = FfiConverterMoqRange.read(Uint8List.view(buf.buffer, offset));
+      offset += ret.bytesRead;
+      res.add(ret.value);
+    }
+    return LiftRetVal(res, offset - buf.offsetInBytes);
+  }
+
+  static int write(List<MoqRange> value, Uint8List buf) {
+    buf.buffer.asByteData(buf.offsetInBytes).setInt32(0, value.length);
+    int offset = buf.offsetInBytes + 4;
+    for (var i = 0; i < value.length; i++) {
+      offset += FfiConverterMoqRange.write(
+        value[i],
+        Uint8List.view(buf.buffer, offset),
+      );
+    }
+    return offset - buf.offsetInBytes;
+  }
+
+  static int allocationSize(List<MoqRange> value) {
+    return value
+            .map((l) => FfiConverterMoqRange.allocationSize(l))
+            .fold(0, (a, b) => a + b) +
+        4;
+  }
+
+  static RustBuffer lower(List<MoqRange> value) {
     final buf = Uint8List(allocationSize(value));
     write(value, buf);
     return toRustBuffer(buf);

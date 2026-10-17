@@ -12,7 +12,7 @@ use crate::support;
 use std::time::Duration;
 
 use moq_net::Version;
-use moq_net::track::{Info, Position, Subscription};
+use moq_net::track::{Info, Subscription};
 use support::harness::{MockConnectOptions, connect_mock};
 
 const TIMEOUT: Duration = Duration::from_secs(10);
@@ -63,9 +63,7 @@ async fn relay(downstream: &str) -> (Option<moq_net::Timescale>, Vec<u64>) {
 		.expect("resolve timeout")
 		.expect("broadcast resolves");
 
-	let subscription = Subscription::default()
-		.with_max_delay(BUDGET)
-		.with_start(Some(Position::group(0)));
+	let subscription = Subscription::default().with_max_delay(BUDGET).with_groups(0..);
 	let reader = moq_clock::sim::spawn(async move {
 		let mut sub = remote
 			.track("data")

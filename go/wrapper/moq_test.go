@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"runtime"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -737,6 +738,58 @@ func TestTrackPublishConsume(t *testing.T) {
 	}
 	if string(frame.Payload) != "group" || frame.Timestamp == nil || *frame.Timestamp != 23_456*time.Microsecond {
 		t.Fatalf("frame = %+v, want payload=group ts=23456", frame)
+	}
+}
+
+func TestAscendingSubscriptionReadsCachedBacklogOldestFirst(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+
+	broadcast, err := moq.NewBroadcastProducer()
+	if err != nil {
+		t.Fatal(err)
+	}
+	track, err := broadcast.PublishTrack("backlog", timedInfo())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range 3 {
+		group, err := track.AppendGroup()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := group.WriteFrame(moq.Frame{Payload: []byte("x"), Timestamp: ts(time.Duration(i) * time.Millisecond)}); err != nil {
+			t.Fatal(err)
+		}
+		if err := group.Finish(); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	order := moq.OrderAscending
+	consumer, err := track.Consume(&moq.Subscription{
+		MaxDelay: 10 * time.Second,
+		Ranges:   []moq.Range{{Start: moq.AnchorRelative{Groups: 2}}},
+		Order:    &order,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer consumer.Cancel()
+
+	var sequences []uint64
+	for range 3 {
+		group, err := consumer.RecvGroup(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if group == nil {
+			t.Fatal("expected a group")
+		}
+		sequences = append(sequences, group.Sequence())
+	}
+	if !slices.Equal(sequences, []uint64{0, 1, 2}) {
+		t.Fatalf("sequences = %v, want [0 1 2]", sequences)
 	}
 }
 

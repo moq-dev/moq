@@ -114,8 +114,17 @@ typedef Datagram = MoqDatagram;
 /// A payload plus the timestamp it should be presented at.
 typedef Frame = MoqFrame;
 
-/// Tunes how a track subscription is delivered: priority, group ordering, and range.
+/// Tunes how a track subscription is delivered: priority, latency budget, ranges, and group ordering.
 typedef Subscription = MoqSubscription;
+
+/// A span of a track to deliver: from `start` up to `end`, or onward when `end` is null.
+typedef Range = MoqRange;
+
+/// Where one end of a [Range] falls: absolute or relative to the latest group.
+typedef Anchor = MoqAnchor;
+
+/// Which pending group the publisher sends first.
+typedef Order = MoqOrder;
 
 /// Options for fetching one past group by sequence.
 typedef FetchGroupOptions = MoqFetchGroupOptions;

@@ -5,6 +5,11 @@ These are the UniFFI names; each language wrapper has its own `MIGRATE.md` in it
 
 ## Unreleased
 
+### Subscriptions carry group ranges (#5732)
+
+`MoqSubscription::group_start` and `group_end` are replaced by `ranges`, a list of `MoqRange { start, end }` whose ends are `MoqAnchor::Absolute { group, frame }` or `MoqAnchor::Relative { groups }`, and an optional `order`.
+A start group `n` is `MoqRange { start: MoqAnchor::Absolute { group: n, frame: 0 }, end: None }`.
+
 ### Receive estimates come from `MoqSession::recv_bandwidth` (#5777)
 
 The connection stats no longer carry a receive estimate.

@@ -5,8 +5,8 @@ use super::session::{MoqClient, MoqClientConfig, MoqClientTls, MoqSession};
 use crate::consumer::MoqBroadcastConsumer;
 use crate::consumer::MoqFetchGroupOptions;
 use crate::consumer::MoqGroupConsumer;
-use crate::consumer::MoqSubscription;
 use crate::consumer::MoqTrackConsumer;
+use crate::consumer::{MoqAnchor, MoqOrder, MoqRange, MoqSubscription};
 use crate::error::{MoqError, MoqProtocolError, MoqProtocolKind};
 use crate::flate::{MoqFlateConfig, MoqFlateSnapshotProducer, MoqFlateStreamProducer};
 use crate::json::{
@@ -914,8 +914,11 @@ async fn raw_track_update_does_not_wait_for_pending_read() {
 	consumer.update(MoqSubscription {
 		priority: 10,
 		max_delay_us: 25_000,
-		group_start: Some(0),
-		group_end: None,
+		ranges: Some(vec![MoqRange {
+			start: MoqAnchor::Absolute { group: 0, frame: 0 },
+			end: None,
+		}]),
+		order: None,
 	});
 
 	let payload = b"updated subscription".to_vec();
@@ -3903,8 +3906,11 @@ async fn raw_track_update_during_pending_group_still_reads_datagram() {
 	consumer.update(MoqSubscription {
 		priority: 10,
 		max_delay_us: 25_000,
-		group_start: Some(0),
-		group_end: None,
+		ranges: Some(vec![MoqRange {
+			start: MoqAnchor::Absolute { group: 0, frame: 0 },
+			end: None,
+		}]),
+		order: None,
 	});
 
 	let sequence = track.append_datagram(datagram_frame(b"after-update")).unwrap();
@@ -6557,4 +6563,53 @@ async fn shutdown_times_out_on_an_unfinished_track() {
 		accepted.cancel(0);
 		server.cancel();
 	}
+}
+
+/// An ascending subscription reaching back over a cached backlog reads it oldest first,
+/// and the order and ranges reach moq-net as asked.
+#[tokio::test]
+async fn ascending_subscription_reads_a_cached_backlog_oldest_first() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let track = broadcast.publish_track("events".into(), Some(timed_info())).unwrap();
+	for timestamp_us in [0, 1_000, 2_000] {
+		let group = track.append_group().unwrap();
+		group
+			.write_frame(MoqFrame {
+				payload: b"x".to_vec(),
+				timestamp_us: Some(timestamp_us),
+			})
+			.unwrap();
+		group.finish().unwrap();
+	}
+
+	let subscription = MoqSubscription {
+		priority: 0,
+		max_delay_us: 10_000_000,
+		ranges: Some(vec![MoqRange {
+			start: MoqAnchor::Relative { groups: 2 },
+			end: None,
+		}]),
+		order: Some(MoqOrder::Ascending),
+	};
+	let converted = moq_net::track::Subscription::from(subscription.clone());
+	assert_eq!(converted.order, moq_net::track::Order::Ascending);
+	assert_eq!(
+		converted.ranges,
+		vec![moq_net::track::Range {
+			start: moq_net::track::Anchor::Relative(2),
+			end: None,
+		}]
+	);
+
+	let consumer = track.consume(Some(subscription)).unwrap();
+	let mut sequences = Vec::new();
+	for _ in 0..3 {
+		let group = tokio::time::timeout(TIMEOUT, consumer.recv_group())
+			.await
+			.expect("timed out waiting for a cached group")
+			.unwrap()
+			.expect("expected a group");
+		sequences.push(group.sequence());
+	}
+	assert_eq!(sequences, vec![0, 1, 2]);
 }

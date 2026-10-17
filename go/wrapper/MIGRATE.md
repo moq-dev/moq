@@ -4,6 +4,11 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Subscriptions carry group ranges (#5732)
+
+`Subscription.GroupStart` and `GroupEnd` are replaced by `Ranges`, a slice of `Range` whose ends are `AnchorAbsolute` or `AnchorRelative` (an absolute group and frame, or a count of groups before the latest), and an optional `Order`.
+To start at group `n`, pass one range starting at the absolute anchor for group `n`, frame 0.
+
 ### Receive estimates come from `Session.RecvBandwidth` (#5777)
 
 The connection stats no longer carry a receive estimate.
