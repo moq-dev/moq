@@ -118,11 +118,6 @@ impl Tail {
 		self.ledger.folds()
 	}
 
-	/// See [`Ledger::gaps`].
-	pub fn gaps(&self, groups: Range<u64>) -> Vec<Range<u64>> {
-		self.ledger.gaps(groups)
-	}
-
 	/// Data streams received, whether they finished or were reset.
 	pub fn streams(&self) -> u64 {
 		self.streams

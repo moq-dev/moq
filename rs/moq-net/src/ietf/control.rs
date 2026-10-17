@@ -249,6 +249,23 @@ impl Control {
 		RequestSend(self.clone())
 	}
 
+	/// Allocate the next request_id once credit and the committed header allow it, without
+	/// giving up: for a caller that waits on credit beside its other work.
+	pub fn poll_next_request_id(&self, waiter: &kio::Waiter) -> Poll<RequestId> {
+		let allowed = self.state.poll(waiter, |state| {
+			let allowed = match state.request_id_max {
+				None => true,
+				Some(max) => state.request_id_next < max,
+			};
+			match allowed && state.request_id_sending == 0 {
+				true => Poll::Ready(()),
+				false => Poll::Pending,
+			}
+		});
+		let mut state = std::task::ready!(allowed);
+		Poll::Ready(state.request_id_next.increment())
+	}
+
 	/// Allocate the next request_id once credit and the committed header allow it.
 	///
 	/// `runtime` arms the give-up timer, so the wait cannot outlive the caller's
@@ -257,20 +274,8 @@ impl Control {
 		let mut timeout = crate::time::Deadline::after(runtime, std::time::Duration::from_secs(10));
 
 		kio::wait(|waiter| {
-			let allowed = self.state.poll(waiter, |state| {
-				let allowed = match state.request_id_max {
-					None => true,
-					Some(max) => state.request_id_next < max,
-				};
-				if allowed && state.request_id_sending == 0 {
-					Poll::Ready(())
-				} else {
-					Poll::Pending
-				}
-			});
-
-			if let Poll::Ready(mut state) = allowed {
-				return Poll::Ready(Ok(state.request_id_next.increment()));
+			if let Poll::Ready(id) = self.poll_next_request_id(waiter) {
+				return Poll::Ready(Ok(id));
 			}
 
 			if timeout.poll(waiter).is_ready() {

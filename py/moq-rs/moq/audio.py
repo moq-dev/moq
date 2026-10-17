@@ -148,10 +148,10 @@ class Consumer:
 
     @classmethod
     async def subscribe(
-        cls, broadcast: BroadcastConsumer, name: str, rendition: Audio, output: DecoderOutput
+        cls, broadcast: BroadcastConsumer, id: str, rendition: Audio, output: DecoderOutput
     ) -> Consumer:
-        """Subscribe to one catalog audio rendition and decode it."""
-        return cls(await MoqAudioConsumer.subscribe(broadcast._inner, name, rendition, output._ffi()))
+        """Subscribe to the catalog audio rendition ``id`` and decode it."""
+        return cls(await MoqAudioConsumer.subscribe(broadcast._inner, id, rendition, output._ffi()))
 
     def __init__(self, inner: MoqAudioConsumer) -> None:
         self._inner = inner

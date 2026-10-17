@@ -4,7 +4,7 @@ import asyncio
 import struct
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
-from typing import cast
+from typing import Any, cast
 
 import moq
 import moq_ffi
@@ -225,7 +225,7 @@ async def test_local_publish_consume_audio():
         assert audio.sample_rate == 48000
         assert audio.channel_count == 2
 
-        media_consumer = await moq.media.TrackConsumer.subscribe(broadcast_consumer, track_name, audio.container)
+        media_consumer = await moq.media.TrackConsumer.subscribe(broadcast_consumer, track_name, audio)
 
         payload = b"opus audio payload data"
         media.write_frame(payload, timedelta(microseconds=1_000_000))
@@ -261,7 +261,7 @@ async def test_video_publish_consume():
         assert video.coded.width == 1280
         assert video.coded.height == 720
 
-        media_consumer = await moq.media.TrackConsumer.subscribe(broadcast_consumer, track_name, video.container)
+        media_consumer = await moq.media.TrackConsumer.subscribe(broadcast_consumer, track_name, video)
 
         keyframe = bytes([0x00, 0x00, 0x00, 0x01, 0x65, 0xAA, 0xBB, 0xCC])
         media.write_frame(keyframe, timedelta(microseconds=0))
@@ -307,7 +307,7 @@ async def test_multiple_frames_ordering():
         catalog = await moq.media.catalog(broadcast_consumer)
         track_name = list(catalog.audio.keys())[0]
         audio = catalog.audio[track_name]
-        media_consumer = await moq.media.TrackConsumer.subscribe(broadcast_consumer, track_name, audio.container)
+        media_consumer = await moq.media.TrackConsumer.subscribe(broadcast_consumer, track_name, audio)
 
         timestamps = [0, 20_000, 40_000, 60_000, 80_000]
         for i, ts in enumerate(timestamps):
@@ -563,6 +563,13 @@ async def test_dynamic_track_request():
         await asyncio.wait_for(demand.used(), timeout=5.0)
 
 
+async def test_media_subscribe_refuses_a_non_rendition():
+    """Passing the old container argument fails loud instead of reading it as audio."""
+    consumer = moq.BroadcastProducer().consume()
+    with pytest.raises(TypeError, match="Video or Audio"):
+        await moq.media.TrackConsumer.subscribe(consumer, "video", cast(Any, _LEGACY))
+
+
 async def test_dynamic_track_request_can_publish_media():
     broadcast = moq.BroadcastProducer()
     dynamic = broadcast.dynamic()
@@ -573,7 +580,16 @@ async def test_dynamic_track_request_can_publish_media():
     # unblocks TrackConsumer.subscribe, so run the subscribe concurrently until then.
     subscribe = asyncio.create_task(
         moq.media.TrackConsumer.subscribe(
-            consumer, "requested-audio", cast(moq.media.Container, moq.media.Container.LEGACY())
+            consumer,
+            "requested-audio",
+            moq.media.Audio(
+                codec="opus",
+                description=None,
+                sample_rate=48_000,
+                channel_count=2,
+                bitrate=None,
+                container=_LEGACY,
+            ),
         )
     )
 
@@ -798,9 +814,7 @@ async def test_container_consumer_default_latency_and_context_manager():
         payload = b"opus audio payload data"
         media.write_frame(payload, timedelta(microseconds=1_000_000))
 
-        async with await moq.media.TrackConsumer.subscribe(
-            broadcast_consumer, track_name, audio.container
-        ) as media_consumer:
+        async with await moq.media.TrackConsumer.subscribe(broadcast_consumer, track_name, audio) as media_consumer:
             async for frame in media_consumer:
                 assert frame.payload == payload
                 break

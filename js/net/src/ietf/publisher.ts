@@ -1,6 +1,6 @@
 import { Instant, Milli, Nano, now, sleep } from "@moq/clock";
 import { type Dispose, type Getter, race, Signal } from "@moq/signals";
-import type { Grant } from "../auth.ts";
+import type { Auth, Grant } from "../auth.ts";
 import { enforceGrant } from "../auth_session.ts";
 import type * as broadcast from "../broadcast.ts";
 import { Withdrawal } from "../connection/withdrawal.ts";
@@ -102,10 +102,15 @@ function change(
 	return { from, to };
 }
 
-/** A held advertisement's cluster parameters, and the ones the peer should hold instead. */
+/**
+ * What changed for a namespace the peer holds: its cluster parameters (from what it holds
+ * to what it should), its token, or both.
+ */
 interface Reprice {
-	from: Cluster.Advert;
-	to: Cluster.Advert;
+	from?: Cluster.Advert;
+	to?: Cluster.Advert;
+	/** The token the request should carry instead, when it changed. */
+	token?: Auth;
 }
 
 /** Whether two hop paths list the same hops in the same order. */
@@ -143,7 +148,7 @@ type Refused = "never" | number;
 type Answer = "held" | "dropped" | Refused;
 
 /** The open PUBLISH_NAMESPACE request per advertised path. */
-type Requests = Map<Path.Valid, { path: Path.Valid; requestId: bigint; stream: Stream }>;
+type Requests = Map<Path.Valid, { path: Path.Valid; requestId: bigint; stream: Stream; auth?: Auth }>;
 
 /** What one announce loop knows about the peer, keyed the way that loop names namespaces. */
 interface Namespaces {
@@ -157,6 +162,13 @@ interface Namespaces {
 	offered: Map<Path.Valid, Advertised>;
 }
 
+/** The bytes a request carries for a token this session issued. */
+interface Carrier {
+	carried(token: Auth | undefined): Uint8Array | undefined;
+	/** Bumps whenever one of the session's tokens ends, so a request carrying it drops it. */
+	readonly ended: Getter<number>;
+}
+
 /** Where one announce loop sends its advertisements. */
 interface Target {
 	/** Advertise a namespace the peer does not hold. */
@@ -167,6 +179,12 @@ interface Target {
 
 	/** Withdraw a namespace the peer holds. */
 	withdraw(key: Path.Valid): Promise<void>;
+
+	/** The token the peer holds a namespace under, or undefined when its advertisement carries none. */
+	held(key: Path.Valid): Auth | undefined;
+
+	/** The token an advertisement naming `auth` carries: only a request can carry one. */
+	carry(auth: Auth | undefined): Auth | undefined;
 }
 
 /** What {@link Publisher.runGroup} needs to serve one group. */
@@ -289,6 +307,9 @@ export class Publisher {
 	// advertised before the grant it would be checked against.
 	#ready: Promise<void>;
 
+	// The bytes a request carries for a route's token, for only the tokens this session issued.
+	#auth?: Carrier;
+
 	/**
 	 * Creates a new Publisher instance.
 	 *
@@ -302,6 +323,7 @@ export class Publisher {
 		hidden = false,
 		cluster,
 		grant = new Signal<Grant | undefined>(undefined),
+		auth,
 		ready = Promise.resolve(),
 		limits = LIMITS,
 	}: {
@@ -319,6 +341,8 @@ export class Publisher {
 		cluster?: Cluster.Hops;
 		/** The union of our tokens' grants (MoQ Auth), which bounds what we publish. */
 		grant?: Getter<Grant | undefined>;
+		/** This session's tokens, which a route names for its request to carry. */
+		auth?: Carrier;
 		/** Resolves once the setup tokens are answered (MoQ Auth). */
 		ready?: Promise<void>;
 		/** How many live requests the peer may hold. */
@@ -328,6 +352,7 @@ export class Publisher {
 		this.#subscriptions = new Slots(limits.subscriptions, { quic, reason: "too many subscriptions" });
 		this.#fetches = new Slots(limits.fetches, { quic, reason: "too many fetches" });
 		this.#grant = grant;
+		this.#auth = auth;
 		this.#ready = ready;
 		this.#session = session;
 		const origin = publish && wireOf(publish);
@@ -1209,14 +1234,17 @@ export class Publisher {
 			};
 			const target: Target = legacy
 				? {
-						advertise: (suffix, snap) =>
-							this.#advertise(Path.join(prefix, suffix), requests, clusterFor(this.#advert, snap.route)),
+						advertise: (suffix, snap) => this.#advertise(Path.join(prefix, suffix), requests, snap.route),
 						update: (suffix, _snap, reprice) => this.#update(Path.join(prefix, suffix), requests, reprice),
 						withdraw: (suffix) => this.#withdraw(Path.join(prefix, suffix), requests),
+						held: (suffix) => requests.get(Path.join(prefix, suffix))?.auth,
+						carry: (auth) => this.#carry(auth),
 					}
 				: {
 						advertise: namespace,
 						update: namespace,
+						held: () => undefined,
+						carry: () => undefined,
 						withdraw: async (suffix) => {
 							await stream.writer.u53(SubscribeNamespaceEntryDone.id);
 							await new SubscribeNamespaceEntryDone({ suffix }).encode(stream.writer, version);
@@ -1238,9 +1266,12 @@ export class Publisher {
 					// A grant change re-diffs the same way, withdrawing what it no longer covers.
 					// The loop top re-reads the table, so an ended origin still stops it there.
 					const grant = this.#grant.changed(() => resolve("changed"));
+					// A token that ended leaves the request carrying it to be made again without.
+					const ended = this.#auth?.ended.changed(() => resolve("changed"));
 					dispose = () => {
 						table();
 						grant();
+						ended?.();
 					};
 				});
 
@@ -1346,9 +1377,11 @@ export class Publisher {
 		// The open PUBLISH_NAMESPACE request per advertised path.
 		const requests: Requests = new Map();
 		const target: Target = {
-			advertise: (path, snap) => this.#advertise(path, requests, clusterFor(this.#advert, snap.route)),
+			advertise: (path, snap) => this.#advertise(path, requests, snap.route),
 			update: (path, _snap, reprice) => this.#update(path, requests, reprice),
 			withdraw: (path) => this.#withdraw(path, requests),
+			held: (path) => requests.get(path)?.auth,
+			carry: (auth) => this.#carry(auth),
 		};
 
 		// The origin outlives the session and its signal never ends, so this loop needs the
@@ -1382,9 +1415,12 @@ export class Publisher {
 					// A grant change re-diffs the same way, withdrawing what it no longer covers.
 					// The loop top re-reads the table, so an ended origin still stops it there.
 					const grant = this.#grant.changed(() => resolve("changed"));
+					// A token that ended leaves the request carrying it to be made again without.
+					const ended = this.#auth?.ended.changed(() => resolve("changed"));
 					dispose = () => {
 						table();
 						grant();
+						ended?.();
 					};
 				});
 
@@ -1459,14 +1495,14 @@ export class Publisher {
 
 		const held = new Map(ns.active);
 		for (const [key, snap] of ns.active) {
-			if (change(this.#advert, snap, updated.get(key)) !== "restart") continue;
+			if (this.#change(key, snap, updated.get(key), target) !== "restart") continue;
 			await target.withdraw(key);
 			held.delete(key);
 		}
 
 		for (const [key, snap] of updated) {
 			const prev = held.get(key);
-			const diff = change(this.#advert, prev, snap);
+			const diff = this.#change(key, prev, snap, target);
 			if (diff === "same") continue;
 
 			let answer: Answer;
@@ -1497,8 +1533,39 @@ export class Publisher {
 		// failure clearing, or the peer starting to answer raises no signal of its own, so
 		// the only way back is to ask again on a timer.
 		return [...updated].some(
-			([key, snap]) => change(this.#advert, held.get(key), snap) !== "same" && this.#pending(key, ns.refused),
+			([key, snap]) =>
+				this.#change(key, held.get(key), snap, target) !== "same" && this.#pending(key, ns.refused),
 		);
+	}
+
+	/**
+	 * What it takes to move the peer from `held` to `next` at `key`: {@link change}, plus
+	 * the token the request carries.
+	 *
+	 * moq-transport renames a request's token with REQUEST_UPDATE, but cannot name one on a
+	 * request that had none, nor drop one, and before draft-17 cannot update a namespace at
+	 * all: those withdraw the request and make it again.
+	 */
+	#change(
+		key: Path.Valid,
+		held: Advertised | undefined,
+		next: Advertised | undefined,
+		target: Target,
+	): "same" | "restart" | Reprice {
+		const diff = change(this.#advert, held, next);
+		if (diff === "restart" || held === undefined || next === undefined) return diff;
+		const from = target.held(key);
+		const to = target.carry(next.route.auth);
+		if (from === to) return diff;
+		const version = this.#session.version;
+		const legacy = version === Version.DRAFT_14 || version === Version.DRAFT_15 || version === Version.DRAFT_16;
+		if (from === undefined || to === undefined || legacy) return "restart";
+		return { ...(diff === "same" ? {} : diff), token: to };
+	}
+
+	/** `auth` when a request of this session can carry it. */
+	#carry(auth: Auth | undefined): Auth | undefined {
+		return this.#auth?.carried(auth) === undefined ? undefined : auth;
 	}
 
 	/**
@@ -1545,11 +1612,9 @@ export class Publisher {
 	 * is logged and skipped: a peer that wants none of this rejects each one and stays
 	 * connected.
 	 */
-	async #advertise(
-		path: Path.Valid,
-		requests: Requests,
-		cluster: Cluster.Advert | undefined = this.#advert,
-	): Promise<Answer> {
+	async #advertise(path: Path.Valid, requests: Requests, route: Route): Promise<Answer> {
+		const cluster = clusterFor(this.#advert, route);
+		const auth = this.#carry(route.auth);
 		const requestId = await this.#session.nextRequestId();
 		if (requestId === undefined) return "dropped";
 
@@ -1569,7 +1634,8 @@ export class Publisher {
 			const answer = await withTimeout(
 				(async (): Promise<Answer> => {
 					await stream.writer.u53(PublishNamespace.id);
-					const msg = new PublishNamespace({ requestId, trackNamespace: path, cluster });
+					const token = this.#auth?.carried(auth);
+					const msg = new PublishNamespace({ requestId, trackNamespace: path, cluster, token });
 					await msg.encode(stream.writer, this.#session.version);
 
 					// Read response (RequestOk and PublishNamespaceOk share 0x07)
@@ -1601,7 +1667,7 @@ export class Publisher {
 				`advertisement timed out after ${ADVERTISE_TIMEOUT_MS}ms waiting for the peer's answer`,
 			);
 
-			if (answer === "held") requests.set(path, { path, requestId, stream });
+			if (answer === "held") requests.set(path, { path, requestId, stream, auth });
 			return answer;
 		} catch (err: unknown) {
 			// The peer never answered the advertisement: a control timeout, not late content.
@@ -1626,14 +1692,15 @@ export class Publisher {
 	 * A different original publisher is an update like any other: the receiver drains what
 	 * it already serves from the old one and never splices the two.
 	 */
-	async #update(path: Path.Valid, requests: Requests, { from, to }: Reprice): Promise<Answer> {
+	async #update(path: Path.Valid, requests: Requests, { from, to, token: auth }: Reprice): Promise<Answer> {
 		const request = requests.get(path);
 		if (!request) return "dropped";
 
 		const update: Cluster.Update = {
-			hops: sameHops(from.hops, to.hops) ? undefined : to.hops,
-			cost: from.cost === to.cost ? undefined : to.cost,
+			hops: from && to && !sameHops(from.hops, to.hops) ? to.hops : undefined,
+			cost: from && to && from.cost !== to.cost ? to.cost : undefined,
 		};
+		const token = auth && this.#auth?.carried(auth);
 		const version = this.#session.version;
 		let answer: Answer;
 		try {
@@ -1644,7 +1711,7 @@ export class Publisher {
 				(async (): Promise<Answer> => {
 					const { writer, reader } = request.stream;
 					await writer.u53(PublishNamespaceUpdate.id);
-					await new PublishNamespaceUpdate({ requestId, update }).encode(writer, version);
+					await new PublishNamespaceUpdate({ requestId, update, token }).encode(writer, version);
 
 					const typeId = await reader.u53();
 					if (typeId === RequestError.id) {
@@ -1670,6 +1737,7 @@ export class Publisher {
 			return "dropped";
 		}
 
+		if (answer === "held" && auth) request.auth = auth;
 		// Before draft-17 the peer already closed out a refused request, and its STOP_SENDING
 		// can reject the wait on our FIN. That is the withdrawal finishing, not a reason to end
 		// the loop.

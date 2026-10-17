@@ -74,16 +74,16 @@ public enum Audio {
             self.ffi = ffi
         }
 
-        /// Subscribe to one catalog audio rendition and decode it.
+        /// Subscribe to the catalog audio rendition `id` and decode it.
         public static func subscribe(
             broadcast: BroadcastConsumer,
-            name: String,
+            id: String,
             rendition: Media.Audio,
             output: DecoderOutput
         ) async throws -> Consumer {
             Consumer(try await MoqAudioConsumer.subscribe(
                 broadcast: broadcast.ffi,
-                name: name,
+                id: id,
                 catalogAudio: rendition,
                 output: output
             ))

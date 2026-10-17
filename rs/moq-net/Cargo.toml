@@ -34,6 +34,7 @@ moq-clock = { version = "0.11.0", path = "../moq-clock", default-features = fals
 moq-pattern = { workspace = true, features = ["serde"] }
 num_enum = { workspace = true }
 rand = { workspace = true }
+rangemap = { workspace = true }
 serde = { workspace = true }
 slab = { workspace = true }
 thiserror = { workspace = true }

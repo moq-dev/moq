@@ -245,6 +245,9 @@ pub enum Error {
 	/// missing or unwritable, or the writer thread could not be started.
 	#[error("qlog error: {0}")]
 	Qlog(String),
+	/// This endpoint closed the connection locally.
+	#[error("locally closed")]
+	Closed,
 }
 
 impl web_transport_trait::Error for Error {
