@@ -18,3 +18,4 @@ Public API: a new error from the e2ee producer. Wire: none.
 ## Required
 
 - [Rust protected publisher seams](/quest/m2/e2ee/rust-publish.md) - the producer that claims names
+- [Dynamic names](/quest/m2/e2ee/dynamic-names.md) - the approved naming design can change the physical-name mapping this fixes
