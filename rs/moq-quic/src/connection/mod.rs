@@ -1601,24 +1601,9 @@ impl Connection {
             return Ok(());
         }
 
-        let ack_delay = if space != SpaceId::Data {
-            Duration::from_micros(0)
-        } else {
-            cmp::min(
-                self.ack_frequency.peer_max_ack_delay,
-                Duration::from_micros(ack.delay << self.peer_params.ack_delay_exponent.0),
-            )
-        };
         let mut ack_eliciting_acked = false;
         for packet in newly_acked.elts() {
             if let Some(info) = self.spaces[space].take(packet) {
-                // When the peer received the data, plus the ACK's trip back. The delay only
-                // describes the largest packet; any other may have arrived at any point within
-                // it, such as one that filled a gap after the largest.
-                let acked_at = match packet == ack.largest {
-                    true => now.checked_sub(ack_delay).unwrap_or(now),
-                    false => now,
-                };
                 if let Some(acked) = info.largest_acked {
                     // Assume ACKs for all packets below the largest acknowledged in `packet` have
                     // been received. This can cause the peer to spuriously retransmit if some of
@@ -1640,6 +1625,16 @@ impl Connection {
                 // Notify ack frequency that a packet was acked, because it might contain an ACK_FREQUENCY frame
                 self.ack_frequency.on_acked(packet);
 
+                // When the peer received the data, plus the ACK's trip back. The delay only
+                // describes the largest packet; any other may have arrived at any point within
+                // it, such as one that filled a gap after the largest. The largest comes last,
+                // so the cap reflects any ACK_FREQUENCY this ACK confirmed.
+                let acked_at = match packet == ack.largest {
+                    true => now
+                        .checked_sub(self.peer_ack_delay(space, ack.delay))
+                        .unwrap_or(now),
+                    false => now,
+                };
                 self.on_packet_acked(now, acked_at, info, packet, space);
             }
         }
@@ -1654,7 +1649,9 @@ impl Connection {
 
         if new_largest && ack_eliciting_acked {
             let rtt = now.saturating_duration_since(self.spaces[space].largest_acked_packet_sent);
-            self.path.rtt.update(ack_delay, rtt);
+            self.path
+                .rtt
+                .update(self.peer_ack_delay(space, ack.delay), rtt);
             if self.path.first_packet_after_rtt_sample.is_none() {
                 self.path.first_packet_after_rtt_sample =
                     Some((space, self.spaces[space].next_packet_number));
@@ -1698,6 +1695,17 @@ impl Connection {
 
         self.set_loss_detection_timer(now);
         Ok(())
+    }
+
+    /// The peer's reported ACK delay, capped at the max_ack_delay it last agreed to.
+    fn peer_ack_delay(&self, space: SpaceId, delay: u64) -> Duration {
+        match space {
+            SpaceId::Data => cmp::min(
+                self.ack_frequency.peer_max_ack_delay,
+                Duration::from_micros(delay << self.peer_params.ack_delay_exponent.0),
+            ),
+            _ => Duration::ZERO,
+        }
     }
 
     fn detect_spurious_loss(&mut self, ack: &frame::Ack, space: SpaceId) -> bool {

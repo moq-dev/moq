@@ -144,6 +144,54 @@ fn gap_acked_with_largest_keeps_its_delay() {
     assert_eq!(at - released, 2 * LATENCY);
 }
 
+/// An ACK that confirms a raised max_ack_delay subtracts its delay up to the new cap, which the
+/// peer already used to hold that ACK.
+#[test]
+fn ack_delay_cap_follows_ack_frequency() {
+    let _guard = subscribe();
+    let (mut pair, client_ch, server_ch) = setup_ack_frequency_test(Duration::from_millis(200));
+    let s = open(&mut pair, client_ch, server_ch);
+    let sent_ack_frequency = |pair: &mut Pair| {
+        pair.client_conn_mut(client_ch)
+            .stats()
+            .frame_tx
+            .ack_frequency
+    };
+    let before = sent_ack_frequency(&mut pair);
+
+    // The RTT jumps, so the client asks for a longer max_ack_delay than the default 25 ms
+    pair.latency *= 100;
+    pair.client_conn_mut(client_ch).ping();
+    while sent_ack_frequency(&mut pair) == before {
+        assert!(pair.step(), "never sent ACK_FREQUENCY");
+    }
+
+    // The peer holds the ACK covering both packets for the new max_ack_delay
+    pair.client_send(client_ch, s).write(b"payload").unwrap();
+    let checkpoint = pair.client_send(client_ch, s).checkpoint();
+    let sent = pair.time;
+    let received = loop {
+        let busy = pair.step();
+        if acked(&mut pair, client_ch, &checkpoint) != Ok(None) {
+            break pair.time;
+        }
+        assert!(busy, "never acknowledged");
+    };
+    let at = acked(&mut pair, client_ch, &checkpoint).unwrap().unwrap();
+
+    assert!(
+        received - at > Duration::from_millis(25),
+        "{:?}",
+        received - at
+    );
+    // Pacing may hold the packet briefly after the write
+    let trip = at - sent;
+    assert!(
+        trip >= 2 * pair.latency && trip < 2 * pair.latency + Duration::from_millis(1),
+        "{trip:?}"
+    );
+}
+
 /// A checkpoint resolves only once every byte before it is acknowledged, by the ACK that fills
 /// the gap, however much of the stream that ACK covers.
 #[test]
