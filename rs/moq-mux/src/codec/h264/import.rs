@@ -192,9 +192,8 @@ impl Import {
 		for frame in frames {
 			if frame.keyframe {
 				// HDR metadata first, so a keyframe that also configures publishes once.
-				let hdr = crate::codec::color::access_unit(&frame.payload, self.length_size, 1, |h| {
-					h & 0x1f == NAL_TYPE_SEI
-				});
+				let hdr =
+					crate::codec::color::access_unit(&frame.payload, self.length_size, 1, |h| h & 0x1f == NAL_TYPE_SEI);
 				self.catalog.hdr(&mut self.track, hdr)?;
 				// avc1 config arrives out-of-band via initialize(); avc3 carries the SPS inline.
 				if self.length_size.is_none()
@@ -329,13 +328,19 @@ mod tests {
 		frames.extend(split.flush(pts).expect("flush keyframe"));
 		import.decode(frames).expect("decode keyframe");
 
-		let color = catalog.snapshot().video.renditions["video"].color.clone().expect("colour");
+		let color = catalog.snapshot().video.renditions["video"]
+			.color
+			.clone()
+			.expect("colour");
 		assert_eq!(
 			(color.primaries, color.transfer, color.matrix, color.full_range),
 			(Some(9), Some(16), Some(9), Some(false))
 		);
 		let hdr = crate::codec::color::test::hdr10();
-		assert_eq!((color.mastering, color.content_light), (hdr.mastering, hdr.content_light));
+		assert_eq!(
+			(color.mastering, color.content_light),
+			(hdr.mastering, hdr.content_light)
+		);
 	}
 
 	/// The stream outranks the caller's hint, which only fills what the stream leaves unsaid.
@@ -346,15 +351,21 @@ mod tests {
 		let mut hinted = hang::catalog::Color::default();
 		hinted.primaries = Some(9);
 		hinted.content_light = crate::codec::color::test::hdr10().content_light;
-		let mut hint = crate::catalog::VideoHint::default();
-		hint.color = Some(hinted);
+		let hint = crate::catalog::VideoHint {
+			color: Some(hinted),
+			..Default::default()
+		};
 
 		let (track, catalog) = setup("video");
 		let mut import = Import::new(track, catalog.reserve(), hint).unwrap();
-		let avcc = crate::codec::h264::build_avcc(&[Bytes::from_static(SPS_BT709)], &[Bytes::from_static(PPS)]).unwrap();
+		let avcc =
+			crate::codec::h264::build_avcc(&[Bytes::from_static(SPS_BT709)], &[Bytes::from_static(PPS)]).unwrap();
 		import.initialize(&avcc).unwrap();
 
-		let color = catalog.snapshot().video.renditions["video"].color.clone().expect("colour");
+		let color = catalog.snapshot().video.renditions["video"]
+			.color
+			.clone()
+			.expect("colour");
 		assert_eq!(color.primaries, Some(1), "the SPS outranks the hint");
 		assert_eq!(color.content_light, crate::codec::color::test::hdr10().content_light);
 	}

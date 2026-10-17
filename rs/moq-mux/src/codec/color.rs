@@ -33,11 +33,22 @@ pub(crate) fn fill(color: &mut Option<Color>, fallback: Option<&Color>, source: 
 		return;
 	};
 	let color = color.get_or_insert_with(Color::default);
-	fn field<T: PartialEq + Clone + std::fmt::Debug>(name: &str, source: &str, slot: &mut Option<T>, other: &Option<T>) {
+	fn field<T: PartialEq + Clone + std::fmt::Debug>(
+		name: &str,
+		source: &str,
+		slot: &mut Option<T>,
+		other: &Option<T>,
+	) {
 		match (&*slot, other) {
 			(None, _) => *slot = other.clone(),
 			(Some(kept), Some(other)) if kept != other => {
-				tracing::warn!(field = name, ?kept, ?other, source, "colour disagrees with the stream; keeping the stream's");
+				tracing::warn!(
+					field = name,
+					?kept,
+					?other,
+					source,
+					"colour disagrees with the stream; keeping the stream's"
+				);
 			}
 			_ => {}
 		}
@@ -47,7 +58,12 @@ pub(crate) fn fill(color: &mut Option<Color>, fallback: Option<&Color>, source: 
 	field("matrix", source, &mut color.matrix, &fallback.matrix);
 	field("full_range", source, &mut color.full_range, &fallback.full_range);
 	field("mastering", source, &mut color.mastering, &fallback.mastering);
-	field("content_light", source, &mut color.content_light, &fallback.content_light);
+	field(
+		"content_light",
+		source,
+		&mut color.content_light,
+		&fallback.content_light,
+	);
 }
 
 /// The static HDR metadata an access unit carries in band.
@@ -323,7 +339,13 @@ pub(crate) mod test {
 		assert!((mastering.min_luminance - 0.005).abs() < 1e-4);
 
 		let cll = [1, 0x03, 0xE8, 0x01, 0x90];
-		assert_eq!(av1_metadata(&cll), Hdr { content_light: hdr10().content_light, ..Default::default() });
+		assert_eq!(
+			av1_metadata(&cll),
+			Hdr {
+				content_light: hdr10().content_light,
+				..Default::default()
+			}
+		);
 		assert_eq!(av1_metadata(&[2, 0, 1]), Hdr::default(), "a short payload is ignored");
 	}
 

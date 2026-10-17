@@ -761,7 +761,7 @@ pub(super) fn matroska_colour(color: &hang::catalog::Color) -> Option<MatroskaSp
 			MatroskaSpec::LuminanceMin(m.min_luminance),
 		])));
 	}
-	(!children.is_empty()).then(|| MatroskaSpec::Colour(Master::Full(children)))
+	(!children.is_empty()).then_some(MatroskaSpec::Colour(Master::Full(children)))
 }
 
 pub(super) fn build_audio_track_entry(track_number: u64, config: &AudioConfig) -> Result<MatroskaSpec> {

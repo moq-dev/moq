@@ -785,7 +785,6 @@ pub(super) fn matroska_color(children: &[MatroskaSpec]) -> Option<hang::catalog:
 	(!color.is_empty()).then_some(color)
 }
 
-
 fn build_audio_config(
 	codec_id: &str,
 	codec_private: Option<&Bytes>,

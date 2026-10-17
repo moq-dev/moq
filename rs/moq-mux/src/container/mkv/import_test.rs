@@ -1119,7 +1119,11 @@ fn sps_color_outranks_colour_which_fills_its_gaps() {
 	container.content_light = hdr.content_light;
 	let colour = super::export::matroska_colour(&container).unwrap();
 
-	let avcc = crate::codec::h264::build_avcc(&[bytes::Bytes::from_static(SPS_BT709)], &[bytes::Bytes::from_static(PPS)]).unwrap();
+	let avcc = crate::codec::h264::build_avcc(
+		&[bytes::Bytes::from_static(SPS_BT709)],
+		&[bytes::Bytes::from_static(PPS)],
+	)
+	.unwrap();
 	let entry = MatroskaSpec::TrackEntry(Master::Full(vec![
 		MatroskaSpec::TrackNumber(1),
 		MatroskaSpec::TrackUID(1),
@@ -1146,7 +1150,10 @@ fn sps_color_outranks_colour_which_fills_its_gaps() {
 		(color.primaries, color.transfer, color.matrix, color.full_range),
 		(Some(1), Some(1), Some(1), Some(false))
 	);
-	assert_eq!((color.mastering, color.content_light), (hdr.mastering, hdr.content_light));
+	assert_eq!(
+		(color.mastering, color.content_light),
+		(hdr.mastering, hdr.content_light)
+	);
 }
 
 /// Every catalog colour field survives a Matroska Colour element.

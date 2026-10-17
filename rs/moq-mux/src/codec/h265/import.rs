@@ -398,13 +398,19 @@ mod tests {
 		frames.extend(split.flush(pts).expect("flush keyframe"));
 		import.decode(frames).expect("decode keyframe");
 
-		let color = catalog.snapshot().video.renditions["video"].color.clone().expect("colour");
+		let color = catalog.snapshot().video.renditions["video"]
+			.color
+			.clone()
+			.expect("colour");
 		assert_eq!(
 			(color.primaries, color.transfer, color.matrix, color.full_range),
 			(Some(9), Some(16), Some(9), Some(false))
 		);
 		let hdr = crate::codec::color::test::hdr10();
-		assert_eq!((color.mastering, color.content_light), (hdr.mastering, hdr.content_light));
+		assert_eq!(
+			(color.mastering, color.content_light),
+			(hdr.mastering, hdr.content_light)
+		);
 	}
 
 	fn setup(name: &str) -> (moq_net::track::Producer, crate::catalog::Producer) {

@@ -2267,7 +2267,10 @@ fn color(primaries: u8, transfer: u8, matrix: u8, full_range: bool) -> hang::cat
 /// A colr box the SPS disagrees with loses to the SPS: the encoder signalled it.
 #[test]
 fn sps_color_outranks_colr() {
-	let catalog = run_fmp4(&avc1_init(crate::codec::h264::fixtures::SPS_BT709, Some(color(9, 16, 9, true))));
+	let catalog = run_fmp4(&avc1_init(
+		crate::codec::h264::fixtures::SPS_BT709,
+		Some(color(9, 16, 9, true)),
+	));
 	let video = catalog.video.renditions.values().next().unwrap();
 	assert_eq!(video.color, Some(color(1, 1, 1, false)));
 }
@@ -2275,7 +2278,10 @@ fn sps_color_outranks_colr() {
 /// A colr box fills what the SPS leaves unspecified.
 #[test]
 fn colr_fills_what_the_sps_leaves_unsaid() {
-	let catalog = run_fmp4(&avc1_init(crate::codec::h264::fixtures::SPS_IPB, Some(color(9, 16, 9, true))));
+	let catalog = run_fmp4(&avc1_init(
+		crate::codec::h264::fixtures::SPS_IPB,
+		Some(color(9, 16, 9, true)),
+	));
 	let video = catalog.video.renditions.values().next().unwrap();
 	assert_eq!(video.color, Some(color(9, 16, 9, true)));
 }

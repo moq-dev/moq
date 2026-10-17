@@ -126,7 +126,10 @@ mod test {
 			matrix: Some(1),
 			..Default::default()
 		};
-		assert_eq!(serde_json::to_value(&color).unwrap(), serde_json::json!({ "matrix": 1 }));
+		assert_eq!(
+			serde_json::to_value(&color).unwrap(),
+			serde_json::json!({ "matrix": 1 })
+		);
 		assert!(!color.is_empty());
 		assert!(Color::default().is_empty());
 	}

@@ -42,6 +42,7 @@ fn rendition_hint(rendition: hang::catalog::VideoConfig) -> moq_mux::catalog::Vi
 	hint.coded_height = rendition.coded_height;
 	hint.display_aspect_width = rendition.display_aspect_width;
 	hint.display_aspect_height = rendition.display_aspect_height;
+	hint.color = rendition.color;
 	hint.framerate = rendition.framerate;
 	hint.bitrate = rendition.bitrate;
 	hint.optimize_for_latency = rendition.optimize_for_latency;
