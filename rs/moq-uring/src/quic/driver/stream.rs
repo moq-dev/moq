@@ -8,7 +8,7 @@
 use std::task::{Context, Poll};
 
 use bytes::{Buf, Bytes, BytesMut};
-use moq_quic::{StreamId, VarInt};
+use moq_quic::{Checkpoint, StreamId, VarInt};
 
 use super::super::Error;
 use super::{End, Shared};
@@ -51,38 +51,26 @@ impl SendStream {
 		self.fin || self.reset
 	}
 
-	/// Queue as much of `buf` as moq-quic will take right now, without parking.
-	/// Best-effort, for the close path where nobody is left to poll.
-	pub(crate) fn try_write(&mut self, buf: &[u8]) -> usize {
-		if self.fin || self.reset {
-			return 0;
-		}
-		let n = self
-			.shared
-			.conn
-			.borrow_mut()
-			.send_stream(self.id)
-			.write(buf)
-			.unwrap_or(0);
-		if n > 0 {
-			self.shared.kick();
-		}
-		n
+	/// Mark the data written so far, for a later [`reset_code`](Self::reset_code) to deliver.
+	pub(crate) fn checkpoint(&self) -> Checkpoint {
+		self.shared.conn.borrow_mut().send_stream(self.id).checkpoint()
 	}
 
 	/// [`reset`](web_transport_trait::poll::SendStream::reset) with a
-	/// full-width code, for the WebTransport HTTP/3 error mapping.
-	pub(crate) fn reset_code(&mut self, code: u64) {
+	/// full-width code, for the WebTransport HTTP/3 error mapping, that still
+	/// delivers the data before `checkpoint`, one this stream took.
+	pub(crate) fn reset_code(&mut self, code: u64, checkpoint: Option<Checkpoint>) {
 		if self.reset {
 			return;
 		}
+		let code = VarInt::from_u64(code).unwrap_or(VarInt::MAX);
+		let mut conn = self.shared.conn.borrow_mut();
 		// Err means the stream is already gone, which is what we wanted.
-		let _ = self
-			.shared
-			.conn
-			.borrow_mut()
-			.send_stream(self.id)
-			.reset(VarInt::from_u64(code).unwrap_or(VarInt::MAX));
+		let _ = match checkpoint {
+			Some(checkpoint) => checkpoint.reset(&mut conn, code),
+			None => conn.send_stream(self.id).reset(code),
+		};
+		drop(conn);
 		self.reset = true;
 		self.shared.kick();
 	}
@@ -146,7 +134,7 @@ impl web_transport_trait::poll::SendStream for SendStream {
 	}
 
 	fn reset(&mut self, code: u32) {
-		self.reset_code(u64::from(code));
+		self.reset_code(u64::from(code), None);
 	}
 
 	fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {

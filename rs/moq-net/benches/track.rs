@@ -517,11 +517,22 @@ fn bench_subscriber_join(c: &mut Criterion) {
 }
 
 /// Preference changes and an extreme holder leaving, over the already held audience.
+///
+/// Each held reader asks for distinct values, so the aggregate's tables grow with the audience.
 fn bench_subscriber_preferences(c: &mut Criterion) {
 	let ordinary = track::Subscription::default()
 		.with_start(track::Position::group(100))
 		.with_end(track::Position::group(200))
 		.with_order(track::Order::Ascending);
+	let held = |i: usize| {
+		let i = i as u64;
+		track::Subscription::default()
+			.with_priority((i % 255) as u8)
+			.with_max_delay(Duration::from_micros(i))
+			.with_start(track::Position::group(100 + i))
+			.with_end(track::Position::group(200 + i))
+			.with_order(track::Order::Ascending)
+	};
 	let extreme = track::Subscription::default()
 		.with_priority(255)
 		.with_max_delay(Duration::from_secs(10));
@@ -531,8 +542,8 @@ fn bench_subscriber_preferences(c: &mut Criterion) {
 			group.throughput(Throughput::Elements(2 * touched as u64));
 			group.bench_function(BenchmarkId::new(format!("update/{steady}"), touched), |b| {
 				let mut setup = Churn::new(steady, 0);
-				for subscriber in &mut setup._steady {
-					subscriber.update(ordinary.clone()).unwrap();
+				for (i, subscriber) in setup._steady.iter_mut().enumerate() {
+					subscriber.update(held(i)).unwrap();
 				}
 				let mut viewer = setup.track.subscribe(ordinary.clone());
 				assert!(setup.track.poll_subscription_changed(&setup.waiter).is_ready());
@@ -549,8 +560,8 @@ fn bench_subscriber_preferences(c: &mut Criterion) {
 		group.throughput(Throughput::Elements(1));
 		group.bench_function(BenchmarkId::new("extreme_leave", steady), |b| {
 			let mut setup = Churn::new(steady, 0);
-			for subscriber in &mut setup._steady {
-				subscriber.update(ordinary.clone()).unwrap();
+			for (i, subscriber) in setup._steady.iter_mut().enumerate() {
+				subscriber.update(held(i)).unwrap();
 			}
 			assert!(setup.track.poll_subscription_changed(&setup.waiter).is_ready());
 			b.iter_custom(|iterations| {
