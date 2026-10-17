@@ -197,7 +197,7 @@ Each subscription carries the knobs that decide behavior under congestion:
 
 | Knob | Effect |
 | --- | --- |
-| **Priority** (0..255) | Higher-priority tracks get bandwidth first. Audio above video, base layer above enhancement. |
+| **Priority** (0..255) | Higher-priority tracks get bandwidth first. Audio above video, base layer above enhancement. From a native Rust publisher over QUIC or WebTransport (iroh excepted), subscriptions at the same priority split stream bandwidth evenly by bytes, however many groups each has queued. Datagrams are not part of that split yet. |
 | **Order** | Which group to send first when several are pending. Newest first for live (the default), oldest first for catch-up. Needs moq-lite 07 or moq-transport; older moq-lite always sends newest first. |
 | **Max delay** | How long a non-latest group stays worth delivering before it is skipped. Zero means "live edge only", and raising it is also what asks for history. |
 

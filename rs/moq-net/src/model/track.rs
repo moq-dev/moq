@@ -17,6 +17,7 @@ use crate::{Error, Result, Timescale, Timestamp, coding};
 use crate::{broadcast, cache, group, stats};
 
 use super::delivered::Delivered;
+use super::ledger::{self, Ledger};
 use super::{Datagram, Requests};
 
 use super::Cap;
@@ -306,6 +307,16 @@ pub(crate) struct TrackState {
 	// QUIC may deliver in any order: readers wait for its tail to settle, or for the
 	// last producer to go, rather than end at the boundary with groups still to arrive.
 	tail_pending: bool,
+
+	// The sequences the live feed delivered, as a group or a datagram: what a pending tail
+	// is judged by. Fetched copies never count, and eviction never touches it. A gap folds
+	// away a subscription's grace after a later arrival opened it, as the session's tail
+	// does, so this holds only the gaps still worth waiting for.
+	arrivals: Ledger,
+
+	// Cached groups a route is still withholding (see `Slot::pending`), so an end check
+	// need not scan the cache for one.
+	withheld: usize,
 
 	// No producer remains (aborted, sealed, or dropped), so nothing protects the live
 	// edge any longer: the pool's idle expiry reclaims it like every other group, and a
@@ -607,6 +618,8 @@ impl TrackState {
 		}
 		let sequence = datagram.sequence;
 		self.datagrams.push_back(datagram);
+		let now = self.cache.pool().now_wall();
+		self.record_arrival(sequence, now);
 		self.shown(sequence);
 	}
 
@@ -1076,7 +1089,7 @@ impl TrackState {
 				// Already aborted: the frames are gone, reclaim the slot so a
 				// later fetch can serve the sequence again.
 				if slot.is_aborted() {
-					self.lookup.remove(&sequence);
+					self.remove_slot(sequence);
 					continue;
 				}
 				if self.protects(sequence) || !slot.is_expired(&scan) {
@@ -1091,7 +1104,7 @@ impl TrackState {
 				// Take the group out of the cache and abort it, so any consumer
 				// still reading surfaces `Error::Old` instead of blocking forever
 				// on a frame that will never arrive.
-				self.lookup.remove(&sequence).unwrap().abort(Error::Old);
+				self.remove_slot(sequence).unwrap().abort(Error::Old);
 			}
 		}
 
@@ -1154,6 +1167,33 @@ impl TrackState {
 	fn drop_open_groups(&mut self) {
 		self.lookup
 			.retain(|_, slot| slot.copies().any(group::Producer::is_finished));
+		self.withheld = self.lookup.values().filter(|slot| slot.pending).count();
+	}
+
+	/// Take `sequence` out of the cache, keeping the withheld count in step.
+	fn remove_slot(&mut self, sequence: u64) -> Option<Slot> {
+		let slot = self.lookup.remove(&sequence)?;
+		self.withheld -= usize::from(slot.pending);
+		Some(slot)
+	}
+
+	/// Record that the live feed delivered `sequence`, then fold the gaps that aged out.
+	fn record_arrival(&mut self, sequence: u64, now: crate::time::Instant) {
+		self.arrivals.account(sequence..sequence.saturating_add(1), now);
+		self.fold_arrivals(now);
+	}
+
+	/// Fold every gap in the arrivals a subscription's grace stopped waiting for: the grace
+	/// the session's tail uses, from the max delay the track's subscribers ask for.
+	fn fold_arrivals(&mut self, now: crate::time::Instant) {
+		// Only a gap folds, so an in-order feed never reads the subscriptions.
+		if !self.arrivals.has_gaps() {
+			return;
+		}
+		let max_delay = snapshot_subscription(&self.subscriptions, self.max_age_bound())
+			.map_or(Duration::ZERO, |subscription| subscription.max_delay);
+		self.arrivals.set_grace(ledger::grace(max_delay));
+		self.arrivals.expire(now);
 	}
 
 	/// Attach the publisher's immutable metadata without replacing it with local cache policy.
@@ -1215,7 +1255,7 @@ impl TrackState {
 		if self.covering_group(sequence, frame_start).is_some() {
 			return Err(Error::Duplicate);
 		}
-		self.lookup.remove(&sequence);
+		self.remove_slot(sequence);
 		Ok(())
 	}
 
@@ -1252,17 +1292,23 @@ impl TrackState {
 		}
 
 		self.advance(sequence);
-		self.lookup.insert(
+		let now = self.cache.pool().now_wall();
+		if visible {
+			self.record_arrival(sequence, now);
+		}
+		self.withheld += usize::from(pending);
+		let replaced = self.lookup.insert(
 			sequence,
 			Slot {
 				group: group.clone(),
 				stamp,
 				visible,
 				pending,
-				arrived: self.cache.pool().now_wall(),
+				arrived: now,
 				head: None,
 			},
 		);
+		self.withheld -= replaced.map_or(0, |slot| usize::from(slot.pending));
 		self.cache.wakes().arrived(sequence..=sequence);
 		if visible && !pending {
 			self.arrival.push_back((sequence, stamp));
@@ -1284,6 +1330,7 @@ impl TrackState {
 			return;
 		}
 		slot.pending = false;
+		self.withheld -= 1;
 		self.arrival.push_back((sequence, slot.stamp));
 		// A group reset before its first frame shows nothing of the route's feed.
 		if slot.group.is_aborted() {
@@ -1417,7 +1464,7 @@ impl TrackState {
 			}
 			if slot.is_aborted() {
 				// Aborted upstream: the frames are already gone, reclaim the slot.
-				self.lookup.remove(&sequence);
+				self.remove_slot(sequence);
 				continue;
 			}
 			if self.protects(sequence) {
@@ -1444,7 +1491,7 @@ impl TrackState {
 
 			self.debt -= size;
 			paid = paid.saturating_add(size);
-			self.lookup.remove(&sequence).unwrap().abort(Error::Evicted);
+			self.remove_slot(sequence).unwrap().abort(Error::Evicted);
 		}
 	}
 
@@ -1535,7 +1582,7 @@ impl TrackState {
 		let reached = self.sealed
 			|| self
 				.final_sequence()
-				.is_some_and(|fin| self.edge() >= fin && !self.withholds(fin) && !self.awaits_tail(fin));
+				.is_some_and(|fin| self.edge() >= fin && !self.withholds() && !self.awaits_tail(fin));
 		reached && (self.abort.is_none() || self.settled)
 	}
 
@@ -1544,44 +1591,48 @@ impl TrackState {
 		self.max_sequence.map_or(0, |max| max.saturating_add(1))
 	}
 
-	/// Whether a group below `fin` is still withheld from readers until its first frame
-	/// lands (see [`Producer::receive_group`]): the end is not reached before it shows, or
-	/// readers would end without it.
-	fn withholds(&self, fin: u64) -> bool {
-		self.lookup.range(..fin).any(|(_, slot)| slot.pending)
+	/// Whether a cached group is still withheld from readers until its first frame lands
+	/// (see [`Producer::receive_group`]): the end is not reached before it shows, or
+	/// readers would end without it. Every cached group sits below a declared end.
+	fn withholds(&self) -> bool {
+		debug_assert_eq!(self.withheld, self.lookup.values().filter(|slot| slot.pending).count());
+		self.withheld > 0
 	}
 
-	/// Whether a group below `fin` the wire subscription still owes has yet to arrive:
-	/// a sequence from where the feed starts up to the end with nothing cached. Only
-	/// such a hole holds readers, so a tail with nothing missing ends them at once.
-	///
-	/// Judged by the cache, so an evicted group or a datagram also reads as a hole until
-	/// the session settles the tail. That only delays the end: an abort stops the wait.
+	/// Whether a group below `fin` the wire subscription still owes has yet to arrive.
+	/// Only such a hole holds readers, so a tail with nothing missing ends them at once.
 	fn awaits_tail(&self, fin: u64) -> bool {
 		// Nothing arrives after an abort, so a hole left then is final.
-		if !self.tail_pending || self.abort.is_some() {
+		self.abort.is_none() && self.owes(fin)
+	}
+
+	/// Whether the pending tail misses a sequence from where the feed starts up to `fin`:
+	/// one no live group or datagram delivered, in a gap younger than the grace.
+	///
+	/// Judged by the arrivals, not the cache, so an evicted group or a datagram counts
+	/// as delivered, and the check costs the same however much is cached.
+	fn owes(&self, fin: u64) -> bool {
+		if !self.tail_pending {
 			return false;
 		}
 		// Fetched backfill never reaches a reader in arrival order, so only the live feed's
-		// groups count. Without a declared start, the lowest one stands in for it.
+		// arrivals count. Without a declared start, the first one stands in for it.
 		let floor = match self.start_sequence {
 			Some(start) => start,
 			None if self.start_pending => return true,
-			None => match self.lookup.iter().find(|(_, slot)| slot.visible) {
-				Some((&first, _)) => first,
+			None => match self.arrivals.first() {
+				Some(first) => first,
 				None => return fin > 0,
 			},
-		}
-		.min(fin);
-		let arrived = self.lookup.range(floor..fin).filter(|(_, slot)| slot.visible).count();
-		(arrived as u64) < fin - floor
+		};
+		!self.arrivals.covers(floor.min(fin)..fin)
 	}
 
-	/// Whether the declared end is reached and every cached group below it finished,
-	/// so nothing the end promised is still in flight.
+	/// Whether the declared end is reached, the pending tail owes nothing below it, and
+	/// every cached group below it finished, so nothing the end promised is still in flight.
 	///
-	/// Decided as an abort lands, which ends any wait for the tail: a hole the cache
-	/// cannot tell from an evicted group does not turn a delivered track into a failure.
+	/// Decided as an abort lands, which ends any wait for the tail: a group the tail still
+	/// owed was cut off by the abort, so readers get the error rather than a clean end.
 	fn is_settled(&self) -> bool {
 		let Some(fin) = self.final_sequence() else {
 			return false;
@@ -1589,6 +1640,7 @@ impl TrackState {
 		let reached = self.sealed || self.edge() >= fin;
 		reached
 			&& (self.abort.is_none() || self.settled)
+			&& !self.owes(fin)
 			&& self.lookup.range(..fin).all(|(_, slot)| slot.group.is_finished())
 	}
 
@@ -1795,7 +1847,10 @@ fn commit_abort(mut state: kio::Mut<'_, TrackState>, err: Error) {
 	// Snapshot the frame boundary before the open group it may sit in goes away: an
 	// abort is exactly when a replacement route asks where to resume.
 	state.resume = state.resume_position();
-	// Decided before the open groups go: the groups below the end are the evidence.
+	// Decided before the open groups go: the groups below the end are the evidence. A gap
+	// past the grace was lost before the abort rather than cut off by it.
+	let now = state.cache.pool().now_wall();
+	state.fold_arrivals(now);
 	state.settled = state.is_settled();
 	state.abort = Some(err);
 	// Keep what finished for consumers still draining: they get it, then the abort (or
@@ -8787,11 +8842,11 @@ mod test {
 		);
 	}
 
-	/// An abort ends the wait for a pending tail. Whatever reached the end finished, so
-	/// readers end cleanly: the cache cannot tell a hole from a group it already evicted.
+	/// An abort ends the wait for a pending tail. A group the tail still owed was cut off,
+	/// so readers get the abort rather than a clean end without it.
 	#[moq_net_sim::test]
 	#[cfg(feature = "async")]
-	async fn an_abort_ends_a_pending_tail_cleanly() {
+	async fn an_abort_errors_a_pending_tail_short_of_a_group() {
 		let mut producer = track_producer("test", None);
 		let mut arrival = producer.subscribe(None);
 		producer.start_at(0).unwrap();
@@ -8802,6 +8857,104 @@ mod test {
 		assert!(arrival.recv_group().now_or_never().is_none(), "held at the hole");
 
 		producer.abort(Error::Dropped).unwrap();
+		assert!(matches!(
+			arrival.recv_group().now_or_never().unwrap(),
+			Err(Error::Dropped)
+		));
+	}
+
+	/// A reader that got every group ends cleanly, even when the track aborts before the
+	/// reader polls past the last one.
+	#[moq_net_sim::test]
+	#[cfg(feature = "async")]
+	async fn an_abort_after_a_full_tail_ends_cleanly() {
+		let mut producer = track_producer("test", None);
+		let mut arrival = producer.subscribe(replay());
+		producer.start_at(0).unwrap();
+		producer.finish_at_pending(Position::group(2)).unwrap();
+		for sequence in [1, 0] {
+			producer
+				.create_group(group::Info { sequence })
+				.unwrap()
+				.finish()
+				.unwrap();
+		}
+		producer.clone().abort(Error::Dropped).unwrap();
+		assert_eq!(arrival.assert_group().sequence, 1);
+		assert_eq!(arrival.assert_group().sequence, 0);
+		assert!(arrival.recv_group().now_or_never().unwrap().unwrap().is_none());
+	}
+
+	/// A gap the grace already gave up on was lost before the abort, not cut off by it, so
+	/// readers end cleanly. Within the grace, the same abort errors them.
+	#[moq_net_sim::test]
+	#[cfg(feature = "async")]
+	async fn an_abort_past_the_grace_ends_a_pending_tail_cleanly() {
+		for (waited, ended) in [(ledger::GRACE / 2, false), (ledger::GRACE, true)] {
+			let mut producer = track_producer("test", None);
+			let mut arrival = producer.subscribe(None);
+			producer.start_at(0).unwrap();
+			producer.finish_at_pending(Position::group(3)).unwrap();
+			for sequence in [0, 2] {
+				producer
+					.create_group(group::Info { sequence })
+					.unwrap()
+					.finish()
+					.unwrap();
+				assert_eq!(arrival.assert_group().sequence, sequence);
+			}
+			assert!(arrival.recv_group().now_or_never().is_none(), "held at the hole");
+
+			elapse(&producer, waited);
+			producer.abort(Error::Dropped).unwrap();
+			let res = arrival.recv_group().now_or_never().unwrap();
+			assert_eq!(matches!(res, Ok(None)), ended, "waited {waited:?}");
+		}
+	}
+
+	/// An evicted group still arrived, so the pending tail counts it: readers end at the
+	/// declared end rather than wait for the session to settle the tail.
+	#[test]
+	#[cfg(feature = "async")]
+	fn an_evicted_group_still_fills_a_pending_tail() {
+		let mut producer = track_producer("test", None);
+		let mut arrival = producer.subscribe(replay());
+		producer.start_at(0).unwrap();
+		producer.finish_at_pending(Position::group(3)).unwrap();
+		for sequence in [0, 1] {
+			producer
+				.create_group(group::Info { sequence })
+				.unwrap()
+				.finish()
+				.unwrap();
+			assert_eq!(arrival.assert_group().sequence, sequence);
+		}
+		elapse(&producer, cache::DEFAULT_EXPIRY + Duration::from_secs(1));
+		producer
+			.create_group(group::Info { sequence: 2 })
+			.unwrap()
+			.finish()
+			.unwrap();
+		assert!(!producer.state.read().lookup.contains_key(&0), "group 0 was evicted");
+		assert_eq!(arrival.assert_group().sequence, 2);
+		assert!(arrival.recv_group().now_or_never().unwrap().unwrap().is_none());
+	}
+
+	/// A datagram is a live arrival too, so it fills its sequence in a pending tail.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_datagram_fills_a_pending_tail() {
+		let mut producer = track_producer("test", None);
+		let mut arrival = producer.subscribe(replay());
+		producer.start_at(0).unwrap();
+		producer.finish_at_pending(Position::group(2)).unwrap();
+		producer.insert_datagram(0, None, b"x".as_slice()).unwrap();
+		producer
+			.create_group(group::Info { sequence: 1 })
+			.unwrap()
+			.finish()
+			.unwrap();
+		assert_eq!(arrival.assert_group().sequence, 1);
 		assert!(arrival.recv_group().now_or_never().unwrap().unwrap().is_none());
 	}
 

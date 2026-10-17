@@ -67,9 +67,6 @@ cache limits remain separate; bitrate pacing composes with this memory cap.
 - [A reset group keeps its header](/quest/m1/quic/group-reset.md) - a lite
   publisher resets a group with `RESET_STREAM_AT`, so its subscriber drops the
   tail grace
-- [Hierarchical stream scheduling](/quest/m1/quic/scheduler.md) - strict
-  subscription priority, fair buckets, and newest-first group order replace
-  the lossy scalar; retransmits follow the same order
 - [Schedule datagrams by subscription priority](/quest/m1/quic/datagram-priority.md) -
   datagrams join their subscription's send group instead of preempting every stream
 - [Relay peers get wider limits](/quest/m1/quic/peer-limits.md) - MAX_STREAMS
