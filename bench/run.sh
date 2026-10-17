@@ -17,6 +17,15 @@ if [[ ! $ROUNDS =~ ^[0-9]+$ ]] || ((10#$ROUNDS < 1)); then
     exit 1
 fi
 ROUNDS=$((10#$ROUNDS))
+
+# One case measures far apart on performance and efficiency cores, so on a
+# hybrid CPU pin this shell, and with it every build and benchmark process, to
+# the performance cores. The kernel only lists them on Intel hybrid parts.
+PINNED=
+if [[ -r /sys/devices/cpu_core/cpus ]]; then
+    PINNED=$(</sys/devices/cpu_core/cpus)
+    taskset -pc "$PINNED" $$ >/dev/null
+fi
 case $MODE in
     --audio)
         BASE=
@@ -43,7 +52,7 @@ case $MODE in
         BASE=
         RUNTIME_WORKERS=${MOQ_BENCH_RUNTIME_WORKERS:-}
         if [[ -z $RUNTIME_WORKERS ]]; then
-            RUNTIME_WORKERS=$(getconf _NPROCESSORS_ONLN)
+            RUNTIME_WORKERS=$(nproc)
             if ((RUNTIME_WORKERS > 256)); then
                 RUNTIME_WORKERS=256
             fi
@@ -115,6 +124,9 @@ cleanup() {
         exec 3>&- 4>&-
     fi
     printf 'Benchmark evidence retained: %s\n' "$RUN"
+    if [[ -n $PINNED ]]; then
+        printf 'Pinned to performance cores: %s\n' "$PINNED"
+    fi
 }
 trap cleanup EXIT
 trap 'exit 130' INT
@@ -522,7 +534,7 @@ run_shard_sweep() {
     HOST_BIN=$CURRENT_TARGET/release/moq-bench-host
 
     local cpus workload connections shards label
-    cpus=$(getconf _NPROCESSORS_ONLN)
+    cpus=$(nproc)
     for workload in video fanout; do
         for connections in $SHARD_CONNECTIONS; do
             for shards in $SHARD_COUNTS; do

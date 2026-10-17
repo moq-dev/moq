@@ -252,13 +252,17 @@
 
         # Developer workflow tooling not needed for builds: jq reads
         # `cargo metadata` in `just rs check-changed`.
-        devTools = with pkgs; [
-          jq
-          # Runs the moq.sh installer tests under a strict POSIX shell.
-          dash
-          # Proves the temporary bench relay owns its TCP and UDP sockets.
-          lsof
-        ];
+        devTools =
+          with pkgs;
+          [
+            jq
+            # Runs the moq.sh installer tests under a strict POSIX shell.
+            dash
+            # Proves the temporary bench relay owns its TCP and UDP sockets.
+            lsof
+          ]
+          # taskset pins bench runs to the performance cores of a hybrid CPU.
+          ++ lib.optionals (!stdenv.hostPlatform.isDarwin) [ util-linux ];
 
         # Linters / formatters used by `just check` and `just fix`, which
         # skip a module whose tools aren't on $PATH. CI sets MOQ_STRICT=1,
