@@ -163,6 +163,7 @@ fn serialize_ext<E: Serialize, S: serde::Serializer>(ext: &E, serializer: S) -> 
 	ext.serialize(serializer)
 }
 
+// Exhaustive on both sides, so a `Catalog` field missing from `Wire` fails to compile.
 impl<E> From<Wire<E>> for Catalog<E> {
 	fn from(wire: Wire<E>) -> Self {
 		let Wire {
@@ -208,11 +209,9 @@ impl<'de, E: DeserializeOwned + Default> Deserialize<'de> for Catalog<E> {
 fn deserialize_version<'de, D: serde::Deserializer<'de>>(
 	deserializer: D,
 ) -> std::result::Result<Option<u64>, D::Error> {
-	let version = u64::deserialize(deserializer)?;
-	if version > VERSION {
-		return Err(serde::de::Error::custom(crate::Error::UnsupportedVersion(version)));
-	}
-	Ok(Some(version))
+	let version = Some(u64::deserialize(deserializer)?);
+	check_version(version).map_err(serde::de::Error::custom)?;
+	Ok(version)
 }
 
 impl Catalog<()> {
@@ -315,19 +314,33 @@ impl<E: DeserializeOwned + Default> Catalog<E> {
 	}
 
 	/// Parse a catalog from a string.
+	///
+	/// Fails with [`Error::UnsupportedVersion`](crate::Error::UnsupportedVersion) if the catalog
+	/// needs a newer moq-hang draft than this crate reads.
 	#[allow(clippy::should_implement_trait)]
 	pub fn from_str(s: &str) -> Result<Self> {
-		Self::from_value(serde_json::from_str(s)?)
+		Self::from_slice(s.as_bytes())
 	}
 
 	/// Parse a catalog from a slice of bytes.
+	///
+	/// Fails with [`Error::UnsupportedVersion`](crate::Error::UnsupportedVersion) if the catalog
+	/// needs a newer moq-hang draft than this crate reads.
 	pub fn from_slice(v: &[u8]) -> Result<Self> {
-		Self::from_value(serde_json::from_slice(v)?)
+		// Decoded straight from the bytes rather than via a `Value`, which would keep only the
+		// last of two `version` members instead of refusing them.
+		check_version(serde_json::from_slice::<Probe>(v)?.version)?;
+		Ok(serde_json::from_slice(v)?)
 	}
 
 	/// Parse a catalog from a reader.
-	pub fn from_reader(reader: impl std::io::Read) -> Result<Self> {
-		Self::from_value(serde_json::from_reader(reader)?)
+	///
+	/// Fails with [`Error::UnsupportedVersion`](crate::Error::UnsupportedVersion) if the catalog
+	/// needs a newer moq-hang draft than this crate reads.
+	pub fn from_reader(mut reader: impl std::io::Read) -> Result<Self> {
+		let mut buf = Vec::new();
+		reader.read_to_end(&mut buf).map_err(serde_json::Error::io)?;
+		Self::from_slice(&buf)
 	}
 
 	/// Parse a catalog from a JSON value.
@@ -335,13 +348,22 @@ impl<E: DeserializeOwned + Default> Catalog<E> {
 	/// Fails with [`Error::UnsupportedVersion`](crate::Error::UnsupportedVersion) if the catalog
 	/// needs a newer moq-hang draft than this crate reads.
 	pub fn from_value(value: serde_json::Value) -> Result<Self> {
-		// Checked before any section, since the newer draft may have reshaped one.
-		if let Some(version) = value.get("version").and_then(serde_json::Value::as_u64)
-			&& version > VERSION
-		{
-			return Err(crate::Error::UnsupportedVersion(version));
-		}
+		check_version(value.get("version").and_then(serde_json::Value::as_u64))?;
 		Ok(serde_json::from_value(value)?)
+	}
+}
+
+/// Just the root `version`, read before any section since the newer draft may have reshaped one.
+#[derive(Deserialize)]
+struct Probe {
+	#[serde(default)]
+	version: Option<u64>,
+}
+
+fn check_version(version: Option<u64>) -> Result<()> {
+	match version {
+		Some(version) if version > VERSION => Err(crate::Error::UnsupportedVersion(version)),
+		_ => Ok(()),
 	}
 }
 
@@ -1268,6 +1290,17 @@ mod test {
 		// Plain serde refuses too, without the typed error.
 		let err = serde_json::from_str::<Catalog>(r#"{"version":5}"#).unwrap_err();
 		assert!(err.to_string().contains("unsupported catalog version 5"), "{err}");
+	}
+
+	/// A repeated `version` is refused rather than resolved to either copy, so a newer catalog can't
+	/// slip past the check by also claiming an old version.
+	#[test]
+	fn a_duplicate_version_is_refused() {
+		for json in [r#"{"version":5,"version":3}"#, r#"{"version":3,"version":3}"#] {
+			let err = Catalog::<()>::from_str(json).unwrap_err();
+			assert!(err.to_string().contains("duplicate field `version`"), "{json}: {err}");
+			assert!(Catalog::<()>::from_reader(json.as_bytes()).is_err(), "{json}");
+		}
 	}
 
 	#[test]
