@@ -9,9 +9,9 @@ benchmark and fails when one regresses past a loose threshold against the
 previous nightly's commit measured on the same runner, so the existing Alert
 workflow posts it to Discord.
 
-Rust Criterion targets only. Browser and JS benchmarks stay with
-[Browser benchmarks](/quest/m2/browser-benchmarks.md), and relay load stays
-local under `just bench BASE`.
+Rust Criterion targets only. Browser benchmarks stay under
+`just bench-browser` (see `bench/README.md`), and relay load stays local under
+`just bench BASE`.
 
 ## Plan
 
