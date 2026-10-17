@@ -75,6 +75,7 @@
 
 #[cfg(feature = "capture")]
 pub mod capture;
+pub mod color;
 pub mod convert;
 pub mod decode;
 pub mod encode;
@@ -82,7 +83,6 @@ pub mod encode;
 pub mod render;
 pub mod resize;
 
-mod color;
 mod error;
 pub mod frame;
 mod output;

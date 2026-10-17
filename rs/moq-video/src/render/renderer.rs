@@ -757,13 +757,13 @@ mod tests {
 			// threshold. The samples stay BT.601 while the size now implies
 			// BT.709, so rendering by size alone skews this back.
 			let sd = solid(Size::new(640, 480), rgba);
-			assert_eq!(sd.surface.color(), Some(crate::Color::Bt601Limited));
+			assert_eq!(sd.surface.color(), Some(crate::Color::BT601));
 			let scaled = sd
 				.resize(size, &crate::resize::Config::default())
 				.expect("scale past 576 lines");
 			assert_eq!(
 				scaled.surface.color(),
-				Some(crate::Color::Bt601Limited),
+				Some(crate::Color::BT601),
 				"resize carries the space across rather than re-guessing"
 			);
 			assert_ne!(scaled.surface.color(), Some(crate::Color::infer(size)));
@@ -874,9 +874,10 @@ mod tests {
 	/// they assert the space is limited before building a pattern.
 	#[cfg(all(target_os = "linux", feature = "vaapi"))]
 	fn to_yuv(color: Color, rgb: [u8; 3]) -> [u8; 3] {
-		let (kr, kb) = match color {
-			Color::Bt601Limited | Color::Bt601Full => (0.299f32, 0.114f32),
-			Color::Bt709Limited | Color::Bt709Full => (0.2126, 0.0722),
+		let (kr, kb) = match color.matrix {
+			crate::color::Matrix::Bt601 => (0.299f32, 0.114f32),
+			crate::color::Matrix::Bt709 => (0.2126, 0.0722),
+			crate::color::Matrix::Bt2020 => (0.2627, 0.0593),
 		};
 		let kg = 1.0 - kr - kb;
 		let [r, g, b] = rgb.map(|c| c as f32 / 255.0);
@@ -992,7 +993,7 @@ mod tests {
 		// Below the 576 lines the crate infers BT.709 above, so both paths land
 		// on BT.601 limited and the pattern is built for that.
 		let color = Color::infer(size);
-		assert_eq!(color, Color::Bt601Limited);
+		assert_eq!(color, Color::BT601);
 
 		let Some(buffer) = crate::render::dmabuf::fixture::surface(format, size, &pattern(format, size, color)) else {
 			return false;
