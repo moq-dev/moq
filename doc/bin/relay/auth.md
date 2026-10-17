@@ -195,9 +195,8 @@ the grant before forwarding media.
 Caps describe a per-connection limit, so N connections can spend N times the
 rate. Pair them with a short expiry and a per-token session limit for a budget,
 remembering that the auth server's session counts are approximate across
-restarts. Accepted token unions choose the highest cap per direction; an
-uncapped token lifts that direction's cap. Account for keyframe bursts and
-leave headroom above the encoder bitrate when choosing a limit.
+restarts. Account for keyframe bursts and leave headroom above the encoder
+bitrate when choosing a limit.
 
 ### Path matching
 
