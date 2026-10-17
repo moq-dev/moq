@@ -200,6 +200,10 @@ Audio and video convenience decoders reject a catalog configuration with `enable
 
 Obtain a dynamic track request’s `demand()` before accepting it to watch subscribers through the handoff to its producer. The watch does not keep the track alive and ends when the track closes or the request is rejected.
 
+## Stats
+
+`session->stats()` reports the transport counters, each a `std::optional` that is empty when the transport does not report it, plus the negotiated protocol in `version`. While a client session reconnects, `session->failure()` returns why as a `moq::Error`.
+
 ## Shutdown
 
 `session->shutdown().get()` drains for up to one second and reports any error.

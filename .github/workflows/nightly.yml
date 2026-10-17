@@ -67,6 +67,14 @@ jobs:
             recipe: bench-ffi
             artifact: bench-ffi
             artifact-path: target/bench/ffi
+          # Keeps the BoltFFI and UniFFI slice building and running for the
+          # browser generator comparison, which reuses it. It skips the size
+          # step, whose moq-ffi and moq-wasm builds double the time and are
+          # already built elsewhere.
+          - name: Generator comparison
+            recipe: bench-ffi-gen build bench
+            artifact: bench-ffi-gen
+            artifact-path: target/ffi-gen/results
           - name: Audio grouping relay benchmark
             recipe: bench-audio
           - name: Relay shard sweep
