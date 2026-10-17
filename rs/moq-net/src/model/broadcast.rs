@@ -260,6 +260,13 @@ impl Producer {
 		announcer.announce(route)
 	}
 
+	/// [`Self::announce`] once `admit` agrees, decided under the origin's table lock.
+	pub(crate) fn announce_if(&self, route: Route, admit: impl FnOnce() -> bool) -> Result<bool, Error> {
+		let mut announcer = self.alive.announcer.lock();
+		let announcer = announcer.as_mut().ok_or(Error::Closed)?;
+		announcer.announce_if(route, admit)
+	}
+
 	/// Retract this broadcast's advertisement, if any, from local consumers and
 	/// peers alike. New requests for the path fail with [`Error::Unroutable`] and
 	/// the broadcast the origin served from it ends, while tracks already in

@@ -2206,11 +2206,18 @@ pub(crate) struct Announcer {
 impl Announcer {
 	/// Advertise the broadcast's path with `route`, or re-price it in place.
 	pub(crate) fn announce(&mut self, route: Route) -> Result<(), Error> {
-		self.entry.update(route)?;
+		self.announce_if(route, || true).map(|_| ())
+	}
+
+	/// [`Self::announce`] once `admit` agrees; see [`AnnounceProducer::update_if`].
+	pub(crate) fn announce_if(&mut self, route: Route, admit: impl FnOnce() -> bool) -> Result<bool, Error> {
+		if !self.entry.update_if(route, admit)? {
+			return Ok(false);
+		}
 		if self.entry.guard.is_none() {
 			self.entry.guard = Some(self.ingress.announce());
 		}
-		Ok(())
+		Ok(true)
 	}
 
 	/// Withdraw the advertisement from local and remote consumers alike.
@@ -2248,9 +2255,26 @@ impl AnnounceProducer {
 	/// move an advertisement, drop this and announce again. Fails with
 	/// [`Error::Closed`] once the origin's [`Driver`] has been dropped.
 	pub(crate) fn update(&self, route: Route) -> Result<(), Error> {
+		self.update_if(route, || true).map(|_| ())
+	}
+
+	/// [`Self::update`] once `admit` agrees, returning whether it did. `admit` runs
+	/// under the table lock, so nothing ordered after that lock (a release, a
+	/// retraction, the teardown) can change its answer before the route lands.
+	pub(crate) fn update_if(&self, route: Route, admit: impl FnOnce() -> bool) -> Result<bool, Error> {
 		let mut shared = self.shared.lock();
 		if shared.closed {
 			return Err(Error::Closed);
+		}
+		if !self
+			.entries
+			.iter()
+			.all(|(prefix, id)| shared.routes.entry(prefix, *id).is_some())
+		{
+			return Err(Error::Closed);
+		}
+		if !admit() {
+			return Ok(false);
 		}
 		// The requests an epoch change released, refused once the table lock is gone: the
 		// refusal wakes their fronts, which read the table.
@@ -2294,7 +2318,7 @@ impl AnnounceProducer {
 				request.resolved.get_or_insert(Err(Error::Unroutable));
 			}
 		}
-		Ok(())
+		Ok(true)
 	}
 
 	/// The route as last given, while advertised: every entry carries the same one.
@@ -4464,14 +4488,31 @@ impl ServeState {
 		result: Result<broadcast::Consumer, Error>,
 	) -> bool {
 		let mut state = shared.lock();
-		if state.closed {
+		let Some(resolved) = state.answer(path, producer, result) else {
 			return false;
+		};
+		if let Ok(mut pending) = producer.write() {
+			pending.resolved.get_or_insert(resolved);
+			drop(state);
+		}
+		true
+	}
+
+	/// Take the request off the queue and cache an accepted broadcast, returning what
+	/// its requesters resolve with, or `None` once it is no longer ours to answer.
+	fn answer(
+		&mut self,
+		path: &PathOwned,
+		producer: &kio::Producer<PendingBroadcast>,
+		result: Result<broadcast::Consumer, Error>,
+	) -> Option<Result<broadcast::Consumer, Error>> {
+		if self.closed {
+			return None;
 		}
 		// Released already (the route changed instance): the answer was for the old one,
 		// so nothing resolves or caches it.
-		if state.requests.remove_if(path, |p| p.same_channel(producer)).is_none() {
-			return false;
-		}
+		self.requests.remove_if(path, |p| p.same_channel(producer))?;
+		let state = self;
 		let resolved = match result {
 			Ok(broadcast) => {
 				// If a live broadcast was already served for this path while we were
@@ -4493,20 +4534,7 @@ impl ServeState {
 			}
 			Err(err) => Err(err),
 		};
-		if let Ok(mut pending) = producer.write() {
-			pending.resolved.get_or_insert(resolved);
-			drop(state);
-		}
-		true
-	}
-
-	fn pending(shared: &kio::Shared<Self>, path: &PathOwned, producer: &kio::Producer<PendingBroadcast>) -> bool {
-		let state = shared.lock();
-		!state.closed
-			&& state
-				.requests
-				.get(path)
-				.is_some_and(|current| current.same_channel(producer))
+		Some(resolved)
 	}
 
 	/// Release every request, queued or handed to a handler, and forget the answers served,
@@ -4606,21 +4634,26 @@ impl Prepared {
 	}
 
 	/// Announce the filled broadcast and resolve every requester waiting for it.
+	///
+	/// Fails with [`Error::Unroutable`], announcing nothing, once the request was
+	/// released or its claim retracted.
 	pub fn publish(self) -> Result<broadcast::Producer, Error> {
-		if !ServeState::pending(&self.request.home, &self.request.path, &self.request.producer) {
-			return Err(Error::Unroutable);
-		}
 		let route = Route::default().with_epoch(self.epoch);
-		self.broadcast.announce(route)?;
-		let broadcast = self.broadcast.clone();
-		if !ServeState::resolve(
-			&self.request.home,
-			&self.request.path,
-			&self.request.producer,
-			Ok(broadcast.consume()),
-		) {
-			self.broadcast.unannounce();
+		let request = &self.request;
+		let answer = self.broadcast.consume();
+		let mut resolved = None;
+		// Answered under the table lock that every release takes first, so the route
+		// lands only for a request still pending and no release can slip in between.
+		let admitted = self.broadcast.announce_if(route, || {
+			resolved = request.home.lock().answer(&request.path, &request.producer, Ok(answer));
+			resolved.is_some()
+		})?;
+		let Some(resolved) = resolved.filter(|_| admitted) else {
 			return Err(Error::Unroutable);
+		};
+		// Woken outside every lock: a front re-entering the table must not find it held.
+		if let Ok(mut pending) = request.producer.write() {
+			pending.resolved.get_or_insert(resolved);
 		}
 		Ok(self.broadcast)
 	}
