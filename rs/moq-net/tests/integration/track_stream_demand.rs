@@ -168,6 +168,109 @@ async fn through_a_relay() {
 	}
 }
 
+/// A bare track handle is no demand, through `relays` relays: holding one asks the
+/// publisher for nothing, a query on it does until it is dropped, and once a subscription
+/// made from it ends, the publisher and the reader's own broadcast both read unused while
+/// the handle is still held.
+async fn bare_handle_is_lazy(version: &str, relays: usize) {
+	let version: Version = version.parse().unwrap();
+	let label = format!("{version} over {relays} relays");
+
+	let nodes: Vec<_> = (1..=relays as u64 + 2).map(produce_origin).collect();
+	let mut links = Vec::new();
+	for pair in nodes.windows(2) {
+		links.push(link(version, &pair[0], &pair[1]).await);
+	}
+
+	let broadcast = nodes[0].create_broadcast("room").unwrap();
+	let mut dynamic = broadcast.dynamic();
+	broadcast.announce(Default::default()).unwrap();
+	let broadcast_edges = record!(broadcast.demand());
+
+	let requests = Rc::new(RefCell::new(Vec::new()));
+	let served = requests.clone();
+	let publisher = moq_net_sim::spawn(async move {
+		while let Ok(request) = dynamic.requested_track().await {
+			let track = request.accept(timed());
+			let mut group = track.append_group().unwrap();
+			group.write_frame(Timestamp::ZERO, b"key".as_ref()).unwrap();
+			served.borrow_mut().push((track, group));
+		}
+	});
+
+	let consumer = nodes.last().unwrap().consume();
+	moq_net_sim::timeout(TIMEOUT, consumer.routed("room"))
+		.await
+		.unwrap_or_else(|_| panic!("{label}: never announced"))
+		.unwrap();
+	let remote = consumer.request_broadcast("room", None).await.unwrap();
+
+	let handle = remote.track("video").unwrap();
+	moq_net_sim::sleep(Duration::from_secs(1)).await;
+	assert!(
+		requests.borrow().is_empty(),
+		"{label}: a bare handle asked for the track"
+	);
+	assert!(broadcast_edges.borrow().is_empty(), "{label}: a bare handle is demand");
+
+	// A held query reaches the publisher, and holds the track there until dropped.
+	let mut query = handle.query();
+	moq_net_sim::timeout(TIMEOUT, &mut query)
+		.await
+		.unwrap_or_else(|_| panic!("{label}: query stalled"))
+		.unwrap_or_else(|err| panic!("{label}: query failed: {err}"));
+	moq_net_sim::sleep(Duration::from_secs(1)).await;
+	assert_eq!(
+		requests.borrow().len(),
+		1,
+		"{label}: the query never reached the publisher"
+	);
+	let track = requests.borrow()[0].0.clone();
+	assert!(track.demand().is_used(), "{label}: a held query let go");
+	drop(query);
+	moq_net_sim::timeout(TIMEOUT, track.demand().unused())
+		.await
+		.unwrap_or_else(|_| panic!("{label}: a dropped query is still demand"))
+		.unwrap();
+
+	// A subscription ending leaves the held handle unread at both ends.
+	let mut subscriber = moq_net_sim::timeout(TIMEOUT, handle.subscribe(None))
+		.await
+		.unwrap_or_else(|_| panic!("{label}: subscribe stalled"))
+		.unwrap_or_else(|err| panic!("{label}: subscribe failed: {err}"));
+	moq_net_sim::timeout(TIMEOUT, subscriber.recv_group())
+		.await
+		.unwrap_or_else(|_| panic!("{label}: no group arrived"))
+		.unwrap()
+		.expect("the track is live");
+	assert!(track.demand().is_used(), "{label}: the subscription is not demand");
+	drop(subscriber);
+	moq_net_sim::timeout(TIMEOUT, track.demand().unused())
+		.await
+		.unwrap_or_else(|_| panic!("{label}: the publisher still reads the track as used"))
+		.unwrap();
+	assert!(
+		!remote.demand().is_used(),
+		"{label}: the reader's broadcast is still used"
+	);
+	drop(handle);
+	publisher.abort();
+}
+
+#[moq_net_sim::test]
+async fn bare_handle_is_lazy_direct() {
+	for version in VERSIONS {
+		bare_handle_is_lazy(version, 0).await;
+	}
+}
+
+#[moq_net_sim::test]
+async fn bare_handle_is_lazy_through_a_relay() {
+	for version in VERSIONS {
+		bare_handle_is_lazy(version, 1).await;
+	}
+}
+
 /// Held TRACK streams count against the server's subscription cap, and each SUBSCRIBE
 /// takes over its TRACK's place: a client at the cap still subscribes to every track it
 /// holds without a demand gap, and one more TRACK closes the session.
@@ -205,15 +308,16 @@ async fn held_tracks_share_the_cap_with_their_subscriptions() {
 			.expect("announce timeout")
 			.unwrap();
 
-		// A held handle keeps each track wanted, and so its TRACK stream open.
+		// A held query keeps each track wanted, and so its TRACK stream open.
 		let mut held = Vec::new();
 		for i in 0..CAP {
 			let track = remote.track(&format!("t{i}")).unwrap();
-			moq_net_sim::timeout(TIMEOUT, track.query())
+			let mut query = track.query();
+			moq_net_sim::timeout(TIMEOUT, &mut query)
 				.await
 				.unwrap_or_else(|_| panic!("{version}: t{i} info stalled"))
 				.unwrap_or_else(|err| panic!("{version}: t{i} info refused: {err}"));
-			held.push(track);
+			held.push((track, query));
 		}
 		moq_net_sim::sleep(Duration::from_secs(1)).await;
 		for (i, (.., edges)) in tracks.iter().enumerate().take(CAP) {
@@ -221,7 +325,7 @@ async fn held_tracks_share_the_cap_with_their_subscriptions() {
 		}
 
 		let mut subscribers = Vec::new();
-		for (i, track) in held.iter().enumerate() {
+		for (i, (track, _)) in held.iter().enumerate() {
 			let mut subscriber = moq_net_sim::timeout(TIMEOUT, track.subscribe(None))
 				.await
 				.unwrap_or_else(|_| panic!("{version}: t{i} subscribe stalled"))

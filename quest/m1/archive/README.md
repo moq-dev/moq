@@ -33,8 +33,8 @@ Every track has its own timeline (`rs/moq-mux/src/timeline.rs`):
 - A `Segmenter` builds one track's `{ sequence, pts, duration, start, end }`
   records (`rs/hang/src/timeline.rs`) from its frame reports: a record ends at
   the first group start past a minimum, a sparse track (zero minimum) records
-  each group as it finishes, a group open past `durationMax` splits between
-  frames, and `cut(pts)` adds application boundaries.
+  each group as it finishes, a group open past its internal safety ceiling
+  splits between frames, and `cut(pts)` adds application boundaries.
 - A `Producer` publishes records onto a timeline track, a
   `moq_json::window::Producer` whose `pop` trims the oldest and `flush` closes
   the open group. `Timelines` pairs them for live publishing and names each
@@ -87,12 +87,10 @@ work landed in #4034 and its children are this line's own):
   every broadcast; an unsubscribed track costs nothing.
 - The catalog's root `archive` entry maps each track to its timeline, including
   the catalog track itself. `replay`, `store`, and `version` stay beside it.
-- Each track cuts on its own by one rule: at a group boundary between a
-  minimum and maximum duration (a 2s minimum today; 4s and a multiple of the
-  declared duration once
-  [declared duration](/quest/m1/archive/declared-duration.md) lands; a zero
-  minimum only for sparse data such as the catalog), splitting a long-lived
-  group by frame at the maximum. Manual cuts stay as an optimization, such as
+- Each track cuts on its own by one rule: at the first group boundary past a
+  4s minimum (zero only for sparse data such as the catalog), splitting a
+  long-lived group by frame at an internal multiple of its declared duration.
+  Manual cuts stay as an optimization, such as
   a video keyframe cutting audio so derived segments need fewer objects.
 - A stored object may hold a frame range of a group, not only whole groups.
 - HLS and DASH segments are derived at the edge from group timestamps, not
@@ -108,8 +106,7 @@ work landed in #4034 and its children are this line's own):
   listing gaps.
 - HLS `EXT-X-TARGETDURATION` is fixed for the run, not the observed maximum
   #4280 shipped. This reverses that PR's decision 4 (09-28 merged-PR audit).
-  The target comes from each timeline's declared duration, which replaces the
-  broadcast-wide `durationMax` (09-29 planning).
+  The target comes from each timeline's declared duration (09-29 planning).
 
 This README owns one small fix (triaged 2026-10-08): `moq-mux`'s
 `timeline::Consumer` passes a record whose `sequence` differs from its window
@@ -163,7 +160,6 @@ owned by that prerequisite, not duplicated in archive storage.
 
 ## Required
 
-- [Timelines declare their segment duration](/quest/m1/archive/declared-duration.md) - each timeline entry declares its segment duration (reported or estimated by the publisher), replacing the root `durationMax`
 - [Fixed HLS target duration](/quest/m1/archive/hls-target.md) - one `EXT-X-TARGETDURATION` for the run, from the reference timeline's declared duration; an overrun is listed with a warning
 - [Replay catalog](/quest/m1/archive/replay-catalog.md) - `moq_archive::Reader` republishes the recorded catalog live with `store` set, so stock `moq export hls` serves the whole replay of `moq import archive`
 - [Idle flush](/quest/m1/archive/flush.md) - idle tracks are recorded within a bounded wall-clock delay, and `flush()` forces a track's pending record out

@@ -55,11 +55,8 @@ Decided 2026-10-15: keep this proof in m1 with the existing playback and
 A/V clock work. The estimator defaults on; deferring watch-worker does not
 defer validation of the current player.
 
-## Required
-
-- [Opus isolated-ring target](/quest/m1/audio-jitter-target/opus-isolated-target.md) - the isolated ring holds the target at near-zero jitter
-
 ## Related
 
 - [A/V clock](/quest/m1/av-clock.md) - reshapes `SyncInput` around the per-track target this line produces
 - [AAC bursty budgets](/quest/m1/audio-jitter-target/aac-bursty-budgets.md) - confirms the AAC reorder fix on the nightlies, no gate on this proof
+- [Opus near-zero budgets](/quest/m1/audio-jitter-target/opus-near-zero-budgets.md) - confirms the build-flush fix on the nightlies, no gate on this proof

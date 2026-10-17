@@ -20,8 +20,8 @@ use crate::catalog::CatalogFormat;
 pub struct Consumer<E: CatalogExt = ()> {
 	inner: moq_json::snapshot::Consumer<Catalog<E>>,
 	format: CatalogFormat,
-	/// Path of the broadcast serving this catalog, which every rendition's `broadcast`
-	/// reference resolves against.
+	/// Path of the broadcast serving this catalog, which rendition references and the
+	/// echo prefix resolve against.
 	base: PathOwned,
 }
 
@@ -55,7 +55,7 @@ impl<E: CatalogExt> Consumer<E> {
 	/// Poll for the next catalog update.
 	///
 	/// Fails with [`Error::EscapingBroadcast`](crate::Error::EscapingBroadcast) if any rendition's
-	/// `broadcast` reference walks above the root. Such a reference names no broadcast, and the
+	/// `broadcast` reference or echo prefix walks above the root. Such a reference names no broadcast, and the
 	/// root is the consumer's authorized subtree, so it is an attempt to reference content the
 	/// consumer cannot name. The whole catalog is rejected rather than the one rendition: a
 	/// publisher that emits one has a bug (or is hostile), and silently serving the rest hides
@@ -88,10 +88,10 @@ impl<E: CatalogExt> From<moq_net::track::Subscriber> for Consumer<E> {
 	}
 }
 
-/// Reject the catalog if any track's `broadcast` reference walks above the root.
+/// Reject the catalog if a track reference or echo prefix walks above the root.
 ///
-/// Every section carrying a `broadcast` reference must be chained here; a section left out
-/// silently exempts its tracks from the containment check.
+/// Every section carrying a relative broadcast path must be included here; a section left out
+/// silently exempts its paths from the containment check.
 fn check_resolvable<E: CatalogExt>(base: &PathOwned, catalog: &Catalog<E>) -> Result<()> {
 	let video = catalog.video.renditions.iter();
 	let audio = catalog.audio.renditions.iter();
@@ -116,6 +116,11 @@ fn check_resolvable<E: CatalogExt>(base: &PathOwned, catalog: &Catalog<E>) -> Re
 		}
 	}
 
+	if let Some(echo) = &catalog.echo
+		&& base.try_resolve(&echo.path).is_none()
+	{
+		return Err(crate::Error::EscapingBroadcast(echo.path.to_string()));
+	}
 	Ok(())
 }
 
@@ -254,6 +259,42 @@ mod test {
 			.renditions
 			.insert("sibling".to_string(), referencing(reference));
 		publish_catalog_served(published).await
+	}
+
+	fn soliciting(reference: &str) -> Catalog {
+		let (mut catalog, _) = catalog_payload("here");
+		catalog.echo = Some(hang::catalog::Echo::new(
+			moq_net::path::Relative::new(reference).into_owned(),
+		));
+		catalog
+	}
+
+	#[tokio::test]
+	async fn echo_prefix_is_checked_before_the_native_reader_yields() {
+		for reference in ["viewers", "../viewers", ""] {
+			assert!(publish_catalog(soliciting(reference)).unwrap().unwrap().echo.is_some());
+		}
+		for reference in ["../../viewers", "../../../elsewhere"] {
+			let result = publish_catalog(soliciting(reference));
+			assert!(
+				matches!(result, Err(crate::Error::EscapingBroadcast(_))),
+				"{reference}: {result:?}"
+			);
+		}
+	}
+
+	#[tokio::test]
+	async fn echo_prefix_is_checked_against_the_dynamic_served_path() {
+		assert!(
+			publish_catalog_served(soliciting("../viewers"))
+				.await
+				.unwrap()
+				.unwrap()
+				.echo
+				.is_some()
+		);
+		let result = publish_catalog_served(soliciting("../../../elsewhere")).await;
+		assert!(matches!(result, Err(crate::Error::EscapingBroadcast(_))), "{result:?}");
 	}
 
 	#[test]

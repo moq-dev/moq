@@ -4,6 +4,7 @@ set working-directory := '..'
 check:
     actionlint
     sh/gh/alert.sh check-coverage
+    bun test sh/gh/alert.test.ts
     bun sh/gh/check-runs.ts
 
 # Tests of repository tooling; nightly, not on every pull request.
@@ -40,7 +41,7 @@ test:
 release *args:
     sh/gh/release.sh "$@"
 
-# Post a failed run to Discord, or check that alert.yml covers every workflow.
+# Post a failed run to Discord, or check cron and publishing alert coverage.
 [positional-arguments]
 alert *args:
     sh/gh/alert.sh "$@"

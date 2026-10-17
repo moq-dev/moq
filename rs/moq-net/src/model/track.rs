@@ -2423,7 +2423,7 @@ impl Producer {
 	/// Unlike a wire subscription, the info is already known, so a subscription
 	/// opened from this handle resolves immediately.
 	pub fn consume(&self) -> Consumer {
-		Consumer::new(self.name.clone(), self.state.consume())
+		Consumer::new(self.name.clone(), self.state.weak().consume_weak())
 	}
 
 	/// Subscribing to this in-process track, resolving synchronously.
@@ -2811,14 +2811,19 @@ pub(crate) struct TrackWeak {
 }
 
 impl TrackWeak {
-	/// A [`Consumer`] for the cached track, or `None` once it has closed.
+	/// Join the cached track's demand, or `None` once it has closed.
 	///
 	/// The count moves under the same lock the close takes, which is the other half
-	/// of [`Producer::abort_unused`]: a lookup either gets a consumer in time to
-	/// decline the teardown, or gets nothing and re-requests the track. It is never
-	/// handed a track that is already on its way out.
-	pub fn try_consume(&self) -> Option<Consumer> {
-		Some(Consumer::new(self.name.clone(), self.state.try_consume()?))
+	/// of [`Producer::abort_unused`]: a request either joins in time to decline the
+	/// teardown, or gets nothing and re-requests the track. It is never handed a track
+	/// that is already on its way out.
+	pub(crate) fn try_consume(&self) -> Option<kio::Consumer<TrackState>> {
+		self.state.try_consume()
+	}
+
+	/// Read the cached track without joining its demand.
+	pub(crate) fn peek(&self) -> kio::ConsumerWeak<TrackState> {
+		self.state.consume_weak()
 	}
 
 	/// The shared name handle, for use as a broadcast lookup key (clone is a
@@ -2909,9 +2914,9 @@ impl super::WeakEntry for TrackWeak {
 /// A cloneable, watch-only handle to a track's subscriber demand.
 ///
 /// Obtained from [`Producer::demand`], [`Request::demand`], or [`Dynamic::demand`].
-/// A publisher uses it to react to
-/// whether anyone is subscribed (on-demand capture / encoding) without being able
-/// to publish frames or close the track. It's a weak handle, so it neither keeps
+/// A publisher uses it to react to whether anyone is subscribed, querying, or fetching
+/// (on-demand capture / encoding) without being able to publish frames or close the
+/// track. A bare [`Consumer`] is not demand. It's a weak handle, so it neither keeps
 /// the track alive nor pins its cached groups; once the owning [`Producer`]
 /// goes away, [`poll_used`](Self::poll_used) / [`poll_unused`](Self::poll_unused) report the track's
 /// closure.
@@ -3020,13 +3025,13 @@ pub(crate) enum DemandState {
 	Closed,
 }
 
-/// A handle to a single track within a broadcast.
+/// A lazy handle to a single track within a broadcast.
 ///
-/// Obtained from [`broadcast::Consumer::track`]. Holding it counts toward the
-/// track's [`Demand`], but starts no live delivery until you [`subscribe`](Self::subscribe)
-/// to it (a live, ongoing stream of groups); [`fetch_group`](Self::fetch_group) takes one
-/// group without that. The same handle can be subscribed to multiple times, and clones
-/// are cheap.
+/// Obtained from [`broadcast::Consumer::track`]. Holding it sends nothing and is not
+/// [`Demand`]: the track is requested, and counts as demanded, only while a
+/// [`query`](Self::query), [`subscribe`](Self::subscribe) (a live, ongoing stream of
+/// groups), or [`fetch_group`](Self::fetch_group) (one group) made from it is held. The
+/// same handle can be used any number of times, and clones are cheap.
 #[derive(Clone)]
 pub struct Consumer {
 	name: Arc<str>,
@@ -3034,20 +3039,77 @@ pub struct Consumer {
 	// relative references resolve against. Rebound by `broadcast::Consumer::track` to
 	// that handle's view, which may name the broadcast differently than its producer did.
 	broadcast: Arc<broadcast::Info>,
-	state: kio::Consumer<TrackState>,
+	source: Source,
 	// Egress stats scope, set by a tagged [`broadcast::Consumer`] via
 	// [`Self::with_stats`]. Empty (no-op) for an untagged track.
 	stats: stats::Scope,
 }
 
+/// Where a [`Consumer`] finds its track. Neither joins the track's consumer count, which
+/// is its demand: only the requests made from the handle do.
+#[derive(Clone)]
+enum Source {
+	/// One track instance, from its producer or request.
+	Track(kio::ConsumerWeak<TrackState>),
+	/// Whatever the broadcast serves under the name when a request is made, asking for
+	/// the track only then. Once the broadcast has ended, the track it served when the
+	/// handle was made, if any: a handle already handed out keeps reading it. Boxed so the
+	/// handle stays small.
+	Broadcast(Box<broadcast::Consumer>, Option<kio::ConsumerWeak<TrackState>>),
+}
+
 impl Consumer {
-	fn new(name: Arc<str>, state: kio::Consumer<TrackState>) -> Self {
+	fn new(name: Arc<str>, state: kio::ConsumerWeak<TrackState>) -> Self {
 		let broadcast = state.read().broadcast.clone();
 		Self {
 			name,
 			broadcast,
-			state,
+			source: Source::Track(state),
 			stats: stats::Scope::default(),
+		}
+	}
+
+	/// A handle resolving `name` through `broadcast` on each request. Called by
+	/// [`broadcast::Consumer::track`] with that handle's view of the broadcast, and the
+	/// track it serves under the name now, if any.
+	pub(crate) fn lookup(
+		name: Arc<str>,
+		info: Arc<broadcast::Info>,
+		broadcast: broadcast::Consumer,
+		current: Option<kio::ConsumerWeak<TrackState>>,
+	) -> Self {
+		Self {
+			name,
+			broadcast: info,
+			source: Source::Broadcast(Box::new(broadcast), current),
+			stats: stats::Scope::default(),
+		}
+	}
+
+	/// The track a request made now reads, joined to its consumer count. A broadcast
+	/// that cannot serve the name answers with a track closed with its error.
+	fn resolve(&self) -> kio::Consumer<TrackState> {
+		match &self.source {
+			Source::Track(state) => state.consume(),
+			Source::Broadcast(broadcast, current) => match broadcast.resolve_track(&self.name) {
+				Ok(state) => state,
+				Err(Error::Unroutable) if let Some(current) = current => current.consume(),
+				Err(err) => {
+					let request = Request::new(self.broadcast.clone(), self.name.clone());
+					let state = request.state.consume();
+					request.reject(err);
+					state
+				}
+			},
+		}
+	}
+
+	/// Run `f` on the track instance this handle reads now, without joining its consumer
+	/// count: `None` when an open broadcast serves nothing under the name now.
+	fn with_state<R>(&self, f: impl FnOnce(Option<&kio::ConsumerWeak<TrackState>>) -> R) -> R {
+		match &self.source {
+			Source::Track(state) => f(Some(state)),
+			Source::Broadcast(broadcast, current) => f(broadcast.peek_track(&self.name, current.as_ref()).as_ref()),
 		}
 	}
 
@@ -3055,14 +3117,6 @@ impl Consumer {
 	/// groups derived from this handle. Called by a tagged [`broadcast::Consumer`].
 	pub(crate) fn with_stats(mut self, scope: stats::Scope) -> Self {
 		self.stats = scope;
-		self
-	}
-
-	/// Rebind the track to the broadcast handle it was reached through, so
-	/// [`broadcast`](Self::broadcast) reports the path that handle was handed out at (see
-	/// [`broadcast::Info::path`]). Called by [`broadcast::Consumer::track`].
-	pub(crate) fn with_broadcast(mut self, broadcast: Arc<broadcast::Info>) -> Self {
-		self.broadcast = broadcast;
 		self
 	}
 
@@ -3089,12 +3143,13 @@ impl Consumer {
 	/// the floor that the budget convicts, so the default budget of zero delivers only
 	/// the latest group and a larger one reaches back over what it can still use.
 	pub fn subscribe(&self, subscription: impl Into<Option<Subscription>>) -> kio::Pending<Subscribing> {
-		let subscription = Preferences::register(self.state.read(), subscription.into().unwrap_or_default());
+		let state = self.resolve();
+		let subscription = Preferences::register(state.read(), subscription.into().unwrap_or_default());
 
 		kio::Pending::new(Subscribing {
 			name: self.name.clone(),
 			broadcast: self.broadcast.clone(),
-			state: self.state.clone(),
+			state,
 			subscription,
 			stats: self.stats.clone(),
 		})
@@ -3125,7 +3180,7 @@ impl Consumer {
 		if let Some(serving) = self.serving() {
 			return serving.peek_latest();
 		}
-		let sequence = self.state.read().max_sequence?;
+		let sequence = self.with_state(|state| state?.read().max_sequence)?;
 		self.peek_group(sequence)
 	}
 
@@ -3137,14 +3192,16 @@ impl Consumer {
 		if let Some(serving) = self.serving() {
 			return serving.peek_before(sequence);
 		}
-		let state = self.state.read();
-		state
-			.lookup
-			.range(..sequence)
-			.rev()
-			.map(|(_, slot)| slot.serving())
-			.find(|group| !group.is_aborted())
-			.map(|group| group.consume())
+		self.with_state(|state| {
+			state?
+				.read()
+				.lookup
+				.range(..sequence)
+				.rev()
+				.map(|(_, slot)| slot.serving())
+				.find(|group| !group.is_aborted())
+				.map(|group| group.consume())
+		})
 	}
 
 	/// A cached group by sequence, under the same terms as [`Self::peek_latest`]. Unlike a
@@ -3156,27 +3213,34 @@ impl Consumer {
 		if let Some(serving) = self.serving() {
 			return serving.peek_group(sequence);
 		}
-		let state = self.state.read();
-		let group = state.lookup.get(&sequence)?.serving();
-		if group.is_aborted() {
-			return None;
-		}
-		Some(group.consume())
+		self.with_state(|state| {
+			let state = state?.read();
+			let group = state.lookup.get(&sequence)?.serving();
+			if group.is_aborted() {
+				return None;
+			}
+			Some(group.consume())
+		})
 	}
 
 	/// Poll for group `sequence` the way the live feed delivers it: `Some` once it is
 	/// cached, `None` once the feed will not deliver it (it went past it, starts past it,
 	/// or ended), and pending while it still may.
 	pub(crate) fn poll_group(&self, sequence: u64, waiter: &kio::Waiter) -> Poll<Option<group::Consumer>> {
-		let res = self.state.poll(waiter, |state| match state.landing(sequence) {
-			Poll::Pending if state.max_sequence.is_some_and(|newest| newest > sequence) => Poll::Ready(None),
-			landed => landed,
-		});
-		match res {
-			Poll::Ready(Ok(group)) => Poll::Ready(group),
-			Poll::Ready(Err(_)) => Poll::Ready(None),
-			Poll::Pending => Poll::Pending,
-		}
+		self.with_state(|state| {
+			let Some(state) = state else {
+				return Poll::Ready(None);
+			};
+			let res = state.poll(waiter, |state| match state.landing(sequence) {
+				Poll::Pending if state.max_sequence.is_some_and(|newest| newest > sequence) => Poll::Ready(None),
+				landed => landed,
+			});
+			match res {
+				Poll::Ready(Ok(group)) => Poll::Ready(group),
+				Poll::Ready(Err(_)) => Poll::Ready(None),
+				Poll::Pending => Poll::Pending,
+			}
+		})
 	}
 
 	/// [`Self::poll_group`], except a newer group is no verdict: QUIC does not order
@@ -3184,18 +3248,23 @@ impl Consumer {
 	/// feed starts past it or ends before it.
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub(crate) fn poll_landed(&self, sequence: u64, waiter: &kio::Waiter) -> Poll<Option<group::Consumer>> {
-		let state = self.state.read();
-		if let Poll::Ready(group) = state.landing(sequence) {
-			return Poll::Ready(group);
-		}
-		// Register under the track lock, so an insert cannot slip between the lookup
-		// and its exact-group registration. Closure has a separate channel waiter.
-		state.cache.wakes().watch_arrival(sequence, waiter);
-		drop(state);
-		match self.state.poll_closed(waiter) {
-			Poll::Ready(()) => Poll::Ready(None),
-			Poll::Pending => Poll::Pending,
-		}
+		self.with_state(|weak| {
+			let Some(weak) = weak else {
+				return Poll::Ready(None);
+			};
+			let state = weak.read();
+			if let Poll::Ready(group) = state.landing(sequence) {
+				return Poll::Ready(group);
+			}
+			// Register under the track lock, so an insert cannot slip between the lookup
+			// and its exact-group registration. Closure has a separate channel waiter.
+			state.cache.wakes().watch_arrival(sequence, waiter);
+			drop(state);
+			match weak.poll_closed(waiter) {
+				Poll::Ready(()) => Poll::Ready(None),
+				Poll::Pending => Poll::Pending,
+			}
+		})
 	}
 
 	/// Poll for group `sequence` falling a full `budget`, clamped to this track's retention,
@@ -3203,18 +3272,23 @@ impl Consumer {
 	/// see `TrackState::drifted`. Parks in this track's expiry index, so only a change that
 	/// can make the group stale, or land it here, wakes it. Pending for good once the track closes.
 	pub(crate) fn poll_stale(&self, sequence: u64, budget: Duration, waiter: &kio::Waiter) -> Poll<()> {
-		let state = self.state.read();
-		let budget = clamp_max_delay(budget, state.max_age_bound());
-		state.cache.wakes().watch_held(sequence, waiter);
-		match state.poll_drifted(sequence, None, budget, waiter) {
-			true => Poll::Ready(()),
-			false => Poll::Pending,
-		}
+		self.with_state(|state| {
+			let Some(state) = state else {
+				return Poll::Pending;
+			};
+			let state = state.read();
+			let budget = clamp_max_delay(budget, state.max_age_bound());
+			state.cache.wakes().watch_held(sequence, waiter);
+			match state.poll_drifted(sequence, None, budget, waiter) {
+				true => Poll::Ready(()),
+				false => Poll::Pending,
+			}
+		})
 	}
 
 	/// The serving route's copy, for a front's logical track; see [`super::resume`].
 	fn serving(&self) -> Option<Consumer> {
-		let routes = self.state.read().routes.clone()?;
+		let routes = self.with_state(|state| state?.read().routes.clone())?;
 		routes.serving()
 	}
 
@@ -3222,12 +3296,16 @@ impl Consumer {
 	/// Fetch-only, closed, and parked copies are not, even once they learn the end.
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub(crate) fn is_live(&self) -> bool {
-		let state = self.state.read();
-		let Some(routes) = state.routes.clone() else {
-			return state.published && !state.closed && state.feed == Feed::Live;
-		};
-		drop(state);
-		routes.serving().is_some_and(|serving| serving.is_live())
+		if let Some(serving) = self.serving() {
+			return serving.is_live();
+		}
+		// A front's track with no copy spliced is not fed at all.
+		self.with_state(|state| {
+			state.is_some_and(|state| {
+				let state = state.read();
+				state.routes.is_none() && state.published && !state.closed && state.feed == Feed::Live
+			})
+		})
 	}
 
 	/// Fetching a single past group, without holding a live subscription.
@@ -3245,14 +3323,13 @@ impl Consumer {
 	/// handler request.
 	pub fn fetch_group(&self, sequence: u64, options: impl Into<Option<group::Fetch>>) -> kio::Pending<Fetching> {
 		let options = options.into().unwrap_or_default();
-		let resume = self.state.read().routes.clone();
+		let state = self.resolve();
+		let resume = state.read().routes.clone();
 
 		// One fetch per calling context, counted here (coalesced upstream work is
 		// still one request served). Independent of `subscriptions` and the viewer
 		// refcount.
 		self.stats.fetch();
-
-		let state = &self.state;
 
 		let mut result = None;
 
@@ -3295,7 +3372,7 @@ impl Consumer {
 		}
 
 		kio::Pending::new(Fetching {
-			state: state.clone(),
+			state,
 			fetch,
 			sequence,
 			frame_start: options.frame_start,
@@ -3316,7 +3393,10 @@ impl Consumer {
 	/// [`Subscriber::info`] is the already-resolved counterpart.
 	pub fn query(&self) -> kio::Pending<Querying> {
 		kio::Pending::new(Querying {
-			state: self.state.clone(),
+			name: self.name.clone(),
+			broadcast: self.broadcast.clone(),
+			state: self.resolve(),
+			stats: self.stats.clone(),
 		})
 	}
 
@@ -3325,7 +3405,7 @@ impl Consumer {
 		if let Some(serving) = self.serving() {
 			return serving.latest();
 		}
-		self.state.read().max_sequence
+		self.with_state(|state| state?.read().max_sequence)
 	}
 
 	/// The first group the declared end excludes whole, or `None` while the track is open ended.
@@ -3334,7 +3414,7 @@ impl Consumer {
 		if let Some(serving) = self.serving() {
 			return serving.final_sequence();
 		}
-		self.state.read().final_sequence()
+		self.with_state(|state| state?.read().final_sequence())
 	}
 
 	/// The frame-precise point a replacement route should resume from: one past the
@@ -3343,13 +3423,13 @@ impl Consumer {
 	/// Survives the track aborting, which is when a route change asks.
 	#[cfg(test)]
 	pub(crate) fn resume_position(&self) -> Option<Position> {
-		self.state.read().resume_position()
+		self.with_state(|state| state?.read().resume_position())
 	}
 
 	/// Poll for the track closing: no producer is left to write it, so nothing more
-	/// will ever arrive.
+	/// will ever arrive. A name the broadcast serves nothing under reads as closed.
 	pub(crate) fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<()> {
-		self.state.poll_closed(waiter)
+		self.with_state(|state| state.map_or(Poll::Ready(()), |state| state.poll_closed(waiter)))
 	}
 
 	/// Poll for the track reaching a terminal state: `Ok(())` once it is complete
@@ -3357,23 +3437,28 @@ impl Consumer {
 	/// completing. This tells a track that truly ended from one whose serving route
 	/// died mid-stream. A session closed locally, on purpose, is [`Error::Closed`].
 	pub(crate) fn poll_complete(&self, waiter: &kio::Waiter) -> Poll<Result<()>> {
-		match ready!(self.state.poll(waiter, |state| {
-			// A local close without a declared end is a dead route, not finished content.
-			if state.end.is_some() && state.is_complete() {
-				Poll::Ready(())
-			} else {
-				Poll::Pending
+		self.with_state(|state| {
+			let Some(state) = state else {
+				return Poll::Ready(Err(Error::Dropped));
+			};
+			match ready!(state.poll(waiter, |state| {
+				// A local close without a declared end is a dead route, not finished content.
+				if state.end.is_some() && state.is_complete() {
+					Poll::Ready(())
+				} else {
+					Poll::Pending
+				}
+			})) {
+				Ok(_) => Poll::Ready(Ok(())),
+				// Closed before completing. Read through the returned guard: it holds
+				// the lock, so re-locking the channel here would deadlock.
+				Err(closed) => Poll::Ready(Err(match (&closed.abort, closed.sealed) {
+					(Some(err), _) => err.clone(),
+					(None, true) => Error::Closed,
+					(None, false) => Error::Dropped,
+				})),
 			}
-		})) {
-			Ok(_) => Poll::Ready(Ok(())),
-			// Closed before completing. Read through the returned guard: it holds
-			// the lock, so re-locking the channel here would deadlock.
-			Err(closed) => Poll::Ready(Err(match (&closed.abort, closed.sealed) {
-				(Some(err), _) => err.clone(),
-				(None, true) => Error::Closed,
-				(None, false) => Error::Dropped,
-			})),
-		}
+		})
 	}
 }
 
@@ -3433,11 +3518,26 @@ impl kio::Task for Subscribing {
 
 /// The pollable state of a [`Consumer::query`]; awaited via the
 /// [`kio::Pending`] wrapper.
+///
+/// Counts as the track's [`Demand`] while held, answered or not.
 pub struct Querying {
+	name: Arc<str>,
+	broadcast: Arc<broadcast::Info>,
 	state: kio::Consumer<TrackState>,
+	stats: stats::Scope,
 }
 
 impl Querying {
+	/// A handle on the track instance this query asked, whatever its broadcast serves later.
+	pub(crate) fn track(&self) -> Consumer {
+		Consumer {
+			name: self.name.clone(),
+			broadcast: self.broadcast.clone(),
+			source: Source::Track(self.state.weak()),
+			stats: self.stats.clone(),
+		}
+	}
+
 	/// Poll until the track's [`Info`] is known, without subscribing to its groups.
 	pub fn poll_ok(&self, waiter: &kio::Waiter) -> Poll<Result<Info>> {
 		// Wait until the track info is available
@@ -3886,8 +3986,10 @@ struct FetchExpiry {
 
 impl group::Expiry for FetchExpiry {
 	fn for_track(&self, track: &Consumer) -> Arc<dyn group::Expiry> {
+		// A replacement copy is always one track instance; the fallback is never read.
+		let state = track.with_state(|state| state.cloned());
 		Arc::new(Self {
-			state: track.state.weak(),
+			state: state.unwrap_or_else(|| self.state.clone()),
 			sequence: self.sequence,
 			max_delay: self.max_delay,
 		})
@@ -3909,8 +4011,10 @@ impl group::Expiry for FetchExpiry {
 
 impl group::Expiry for GroupExpiry {
 	fn for_track(&self, track: &Consumer) -> Arc<dyn group::Expiry> {
+		// A replacement copy is always one track instance; the fallback is never read.
+		let state = track.with_state(|state| state.cloned());
 		Arc::new(Self {
-			state: track.state.weak(),
+			state: state.unwrap_or_else(|| self.state.clone()),
 			subscription: self.subscription.clone(),
 			cap: self.cap.clone(),
 			sequence: self.sequence,
@@ -5025,7 +5129,7 @@ impl Request {
 
 	/// A [`Consumer`] for the eventual track, usable before the request is accepted.
 	pub fn consume(&self) -> Consumer {
-		Consumer::new(self.name.clone(), self.state.consume())
+		Consumer::new(self.name.clone(), self.state.weak().consume_weak())
 	}
 
 	/// Create a [`Dynamic`] handle that serves on-demand fetches of uncached
@@ -5041,6 +5145,16 @@ impl Request {
 			name: self.name.clone(),
 			state: self.state.weak(),
 		}
+	}
+
+	/// Join the eventual track's demand, for a request made through its broadcast.
+	pub(crate) fn join(&self) -> kio::Consumer<TrackState> {
+		self.state.consume()
+	}
+
+	/// Read the eventual track without joining its demand.
+	pub(crate) fn peek(&self) -> kio::ConsumerWeak<TrackState> {
+		self.state.weak().consume_weak()
 	}
 
 	/// Mark this request as taken by a dynamic handler, which alone decides its answer.
@@ -11553,9 +11667,11 @@ mod test {
 		let dynamic = request.dynamic();
 		let demand = request.demand();
 		let consumer = request.consume();
+		assert!(!demand.is_used(), "a bare handle is not demand");
+		let query = consumer.query();
 		assert!(demand.is_used());
 		assert!(dynamic.demand().is_used());
-		drop(consumer);
+		drop(query);
 		assert!(!demand.is_used());
 		let producer = request.accept(Info::timed());
 		assert_eq!(producer.demand().name(), demand.name());

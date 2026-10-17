@@ -9,6 +9,16 @@ missing dependency chains are not presented as independently decodable.
 
 ## Plan
 
+[#5713](https://github.com/moq-dev/moq/pull/5713) settled the cold-join
+start: an export begins on a whole group, and `ts::stats::Export` counts
+`trimmed`, `gaps` and `dropped`. Its paused-clock regressions
+(`a_start_group_cut_short_starts_at_the_next`, `a_join_drops_its_group_whole`)
+already cover a start group cut before output, so this quest does not repeat
+them. Extend the evidence to loss after output began and to decoded output,
+and check each fault schedule against what the export reported: a hole the
+oracle accepts must show in those counters, or for a track that delivers
+nothing, in its stream row's `units` and `quiet`.
+
 Test content loss separately from IP packet loss. QUIC may retransmit IP
 loss; a netem percentage does not establish that any MoQ object was omitted.
 Keep the real network impairment arm for transport and pacing evidence, and
