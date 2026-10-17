@@ -195,6 +195,13 @@ pub struct Export {
 	/// How many measurements found the source's clock further off ours than the 30 ppm an
 	/// MPEG-TS system clock may be (ISO/IEC 13818-1 2.4.2.1), which the output cannot follow.
 	pub out_of_tolerance: u64,
+	/// Groups that `--sync` began behind the end of the group before them on their PID, the
+	/// lane too narrow to absorb that group: a leg missing the earlier group's tail places
+	/// them elsewhere, so the legs differ until the lane catches up.
+	pub overruns: u64,
+	/// Packets that `--sync` dropped for reaching their slot after it went out, leaving
+	/// stuffing there.
+	pub late: u64,
 }
 
 /// An export's rows with every stream-wide counter zero, so one [`Log`] reads either edge.

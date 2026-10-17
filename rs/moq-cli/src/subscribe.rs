@@ -197,6 +197,9 @@ pub struct SubscribeArgs {
 	/// Write the `m2ts` passthrough track back out instead of muxing the media (TS only).
 	pub passthrough: bool,
 
+	/// Render identical packets to every other synced export of the broadcast (TS only).
+	pub sync: bool,
+
 	/// Catalog format for track discovery (default: detect from the broadcast suffix).
 	pub catalog: Option<CatalogFormatArg>,
 
@@ -386,6 +389,9 @@ impl Subscribe {
 		if let Some(mux_rate) = self.args.mux_rate {
 			ts = ts.with_mux_rate(mux_rate);
 		}
+		if self.args.sync {
+			ts = ts.with_sync();
+		}
 
 		// A TS byte stream carries no per-frame timing, so delivery time is the only
 		// carrier of each frame's spacing (#2984). The export lays each slice of the PCR
@@ -399,8 +405,8 @@ impl Subscribe {
 		// the way `publish` reports one that stops arriving.
 		let mut log = moq_mux::container::ts::stats::Log::default();
 		let mut sampled = tokio::time::Instant::now();
-		// The export's drop, gap and out-of-tolerance counts, as last logged.
-		let mut reported = (0, 0, 0, 0);
+		// The export's drop, gap, out-of-tolerance and `--sync` counts, as last logged.
+		let mut reported = (0, 0, 0, 0, 0, 0);
 		let release = |stats: &moq_mux::container::ts::stats::Export| {
 			tracing::info!(
 				dropped = stats.dropped,
@@ -408,6 +414,8 @@ impl Subscribe {
 				gaps = stats.gaps,
 				drift_ppm = ?stats.drift,
 				out_of_tolerance = stats.out_of_tolerance,
+				overruns = stats.overruns,
+				late = stats.late,
 				"TS export release clock"
 			);
 		};
@@ -423,7 +431,14 @@ impl Subscribe {
 			if sampled.elapsed() >= moq_mux::container::ts::stats::Log::INTERVAL {
 				sampled = tokio::time::Instant::now();
 				let stats = ts.export().stats();
-				let counts = (stats.dropped, stats.trimmed, stats.gaps, stats.out_of_tolerance);
+				let counts = (
+					stats.dropped,
+					stats.trimmed,
+					stats.gaps,
+					stats.out_of_tolerance,
+					stats.overruns,
+					stats.late,
+				);
 				if counts != reported {
 					reported = counts;
 					release(&stats);

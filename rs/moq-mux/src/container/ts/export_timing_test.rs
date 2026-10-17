@@ -73,6 +73,10 @@ struct Live {
 	scale: f64,
 	/// The multiplex rate the receivers pad to.
 	rate: u64,
+	/// The receivers render with [`Export::with_sync`].
+	sync: bool,
+	/// The media time of the first frame, in µs.
+	origin: u64,
 	/// How much later than its video the source sends audio of the same media time, in µs;
 	/// negative sends the video later. A TS source sends video well ahead of its decode time
 	/// and audio just in time, so its audio lags.
@@ -138,6 +142,8 @@ impl Live {
 			audio,
 			scale,
 			rate: MUX_RATE,
+			sync: false,
+			origin: 0,
 			audio_lag,
 			start: moq_clock::now(),
 			tick: 0,
@@ -183,11 +189,14 @@ impl Live {
 
 	/// A receiver joining now.
 	async fn join(&self, every: Duration) -> Leg {
-		let export = super::export_test::open_export(self.source.clone())
+		let mut export = super::export_test::open_export(self.source.clone())
 			.await
 			.unwrap()
 			.with_delay(DELAY)
 			.with_mux_rate(self.rate);
+		if self.sync {
+			export = export.with_sync();
+		}
 		Leg {
 			export,
 			every,
@@ -236,7 +245,7 @@ impl Live {
 						.write(
 							group,
 							&[Frame {
-								timestamp: Timestamp::from_micros(video).unwrap(),
+								timestamp: Timestamp::from_micros(self.origin + video).unwrap(),
 								duration: None,
 								payload: length_prefixed(&[&slice]),
 								keyframe,
@@ -257,7 +266,7 @@ impl Live {
 		let index = self.audio_index;
 		self.audio
 			.write(Frame {
-				timestamp: Timestamp::from_micros(index * AUDIO_US).unwrap(),
+				timestamp: Timestamp::from_micros(self.origin + index * AUDIO_US).unwrap(),
 				duration: None,
 				payload: Bytes::from_iter((0..180u16).map(|i| (i ^ index as u16) as u8)),
 				keyframe: index.is_multiple_of(AUDIO_GROUP),
@@ -826,14 +835,241 @@ async fn two_legs_pad_the_same_slots_at_a_fractional_rate() {
 	assert_same_packets(&a, &b, from);
 }
 
-/// A slow group reaches both legs. Both have to skip it the same way.
+/// A slow group reaches both legs, and each skips it when its own reads find the next group
+/// far enough ahead, so each may render a different part of it. What both render is the same,
+/// continuity counters included, and what one lacks is stuffing.
 #[tokio::test(start_paused = true)]
-#[ignore = "1+1 (ST 2022-7) packet identity across a skip is deferred to an m2 follow-up"]
 async fn two_legs_render_a_skip_the_same_way() {
 	for lag in LAGS {
-		let (a, b, from) = pair(1.0, lag, 12 * GOP, |tick| (6 * GOP + 7..7 * GOP).contains(&tick)).await;
-		assert_same_packets(&a, &b, from);
+		let (a, b, from) = synced(lag, JOIN, 12 * GOP, |tick| (6 * GOP + 7..7 * GOP).contains(&tick)).await;
+		assert_same_synced(&a, &b, from);
 	}
+}
+
+// Under `--sync` every byte a leg renders is a function of the objects it holds, their media
+// time, the catalog and the rate, so the continuity counters match too, and content one leg
+// lacks leaves stuffing in its positions rather than moving what follows.
+
+/// Two `--sync` legs of one broadcast on `lag`: one there from the start and reading after
+/// every frame, the other joining at video tick `join` and reading every 100 ms. Returns them
+/// with the slot time 2 s after the second joined, from which they must agree.
+async fn synced(lag: i64, join: u64, ticks: u64, stall: impl Fn(u64) -> bool + Copy) -> (Leg, Leg, u64) {
+	synced_on(1.0, 0, lag, join, ticks, stall).await
+}
+
+async fn synced_on(
+	scale: f64,
+	origin: u64,
+	lag: i64,
+	join: u64,
+	ticks: u64,
+	stall: impl Fn(u64) -> bool + Copy,
+) -> (Leg, Leg, u64) {
+	let mut live = Live::new(scale, lag).await;
+	live.sync = true;
+	live.origin = origin;
+	let mut a = live.join(Duration::ZERO).await;
+	live.run(join, &mut [&mut a], stall).await;
+	let mut b = live.join(Duration::from_millis(100)).await;
+	live.run(ticks, &mut [&mut a, &mut b], stall).await;
+	live.finish(&mut [&mut a, &mut b]).await;
+	let joined = b.out.first().expect("the joiner rendered").1.timestamp.as_micros() as u64;
+	(a, b, joined + 2_000_000)
+}
+
+/// Each slot a leg rendered from media time `from` (µs), keyed by that time.
+fn slots(leg: &Leg, from: u64) -> std::collections::BTreeMap<u64, Bytes> {
+	leg.out
+		.iter()
+		.map(|(_, frame)| (frame.timestamp.as_micros() as u64, frame.payload.clone()))
+		.filter(|(at, _)| *at >= from)
+		.collect()
+}
+
+fn pid(packet: &[u8]) -> u16 {
+	u16::from(packet[1] & 0x1f) << 8 | u16::from(packet[2])
+}
+
+/// Assert two `--sync` legs rendered the same packets, continuity counters included, in every
+/// slot from media time `from` (µs), compared by the slot's media time: a position may hold
+/// stuffing in one leg where the other has content, and nothing else may differ. Returns how
+/// many positions held content in one leg alone.
+fn assert_same_synced(a: &Leg, b: &Leg, from: u64) -> usize {
+	for leg in [a, b] {
+		let stats = leg.export.stats();
+		assert_eq!((stats.overruns, stats.late), (0, 0), "a lane fell behind");
+	}
+	let (a, b) = (slots(a, from), slots(b, from));
+	let common: Vec<u64> = a.keys().filter(|at| b.contains_key(at)).copied().collect();
+	assert!(
+		common.len() > 40,
+		"not enough overlap to be worth comparing: {}",
+		common.len()
+	);
+	assert_eq!(
+		common.len(),
+		a.len().min(b.len()),
+		"a slot one leg rendered is missing from the other"
+	);
+	let mut alone = 0;
+	for at in common {
+		let (x, y) = (&a[&at], &b[&at]);
+		assert_eq!(x.len(), y.len(), "slot at {at} µs rendered to a different size");
+		for (n, (p, q)) in x.chunks(188).zip(y.chunks(188)).enumerate() {
+			if p == q {
+				continue;
+			}
+			let offset = p.iter().zip(q).position(|(x, y)| x != y).unwrap_or(0);
+			assert!(
+				pid(p) == 0x1fff || pid(q) == 0x1fff,
+				"slot at {at} µs differs at packet {n}, byte {offset}: PID {:#x} vs {:#x}, {:#04x} vs {:#04x}",
+				pid(p),
+				pid(q),
+				p[offset],
+				q[offset],
+			);
+			alone += 1;
+		}
+	}
+	alone
+}
+
+/// Whether a leg sent the PAT before any media, wherever its first slot fell on the grid.
+fn leads_with_the_tables(leg: &Leg) -> bool {
+	let mut pids = leg.out.iter().flat_map(|(_, frame)| frame.payload.chunks(188).map(pid));
+	pids.find(|&pid| pid == 0 || pid == VIDEO_PID || pid == AUDIO_PID) == Some(0)
+}
+
+/// Legs that joined mid-group and a group later, read on different cadences with each track
+/// lagging in turn, render the same packets, continuity counters included, and the joiner
+/// starts on the tables.
+#[tokio::test(start_paused = true)]
+async fn synced_legs_render_the_same_packets() {
+	for lag in LAGS {
+		for join in [JOIN, JOIN + GOP, 4 * GOP] {
+			let (a, b, from) = synced(lag, join, 12 * GOP, |_| false).await;
+			let alone = assert_same_synced(&a, &b, from);
+			assert_eq!(
+				alone, 0,
+				"lag {lag}, join {join}: clean legs differ in {alone} positions"
+			);
+			assert!(leads_with_the_tables(&b), "lag {lag}, join {join}");
+		}
+	}
+}
+
+/// Each leg loses groups the other receives. Each renders the other's packets wherever it
+/// holds them, so one leg's stuffing is the other's content, and the two merged are a clean
+/// leg's output.
+#[tokio::test(start_paused = true)]
+async fn complementary_losses_stay_complementary() {
+	let lost_a = |tick: u64| (5 * GOP + 3..6 * GOP).contains(&tick);
+	let lost_b = |tick: u64| (7 * GOP + 5..8 * GOP).contains(&tick);
+	for lag in LAGS {
+		let mut paths = Vec::new();
+		for _ in 0..3 {
+			let mut live = Live::new(1.0, lag).await;
+			live.sync = true;
+			paths.push(live);
+		}
+		let [mut clean, mut path_a, mut path_b] = <[Live; 3]>::try_from(paths).ok().unwrap();
+		assert!(clean.start == path_a.start && clean.start == path_b.start);
+		let mut c = clean.join(Duration::ZERO).await;
+		let mut a = path_a.join(Duration::ZERO).await;
+		let mut b = path_b.join(Duration::from_millis(100)).await;
+		for tick in 1..=12 * GOP {
+			clean.run(tick, &mut [&mut c], |_| false).await;
+			path_a.run(tick, &mut [&mut a], lost_a).await;
+			path_b.run(tick, &mut [&mut b], lost_b).await;
+		}
+		clean.finish(&mut [&mut c]).await;
+		path_a.finish(&mut [&mut a]).await;
+		path_b.finish(&mut [&mut b]).await;
+
+		let from = 2 * GOP * VIDEO_US;
+		assert!(assert_same_synced(&a, &c, from) > 0, "lag {lag}: leg A lost nothing");
+		assert!(assert_same_synced(&b, &c, from) > 0, "lag {lag}: leg B lost nothing");
+		assert!(assert_same_synced(&a, &b, from) > 0);
+		let (a, b, c) = (slots(&a, from), slots(&b, from), slots(&c, from));
+		for (at, clean) in &c {
+			let (Some(a), Some(b)) = (a.get(at), b.get(at)) else {
+				continue;
+			};
+			let merged: Vec<u8> = a
+				.chunks(188)
+				.zip(b.chunks(188))
+				.flat_map(|(a, b)| if pid(a) == 0x1fff { b } else { a })
+				.copied()
+				.collect();
+			assert_eq!(
+				&merged[..],
+				&clean[..],
+				"lag {lag}: the merged legs differ from a clean leg at {at} µs"
+			);
+		}
+	}
+}
+
+/// A broadcast timeline crossing the 33-bit PTS and PCR wrap while both legs run, with the
+/// second joining just after it, renders the same packets.
+#[tokio::test(start_paused = true)]
+async fn synced_legs_render_the_same_packets_across_the_wrap() {
+	// 2^33 ticks of 90 kHz, in µs: the wrap falls 3.7 s in, and the joiner's first group is
+	// the first to start after it.
+	let wrap = (1u64 << 33) * 100 / 9;
+	let origin = (wrap - 3_700_000) / VIDEO_US * VIDEO_US;
+	let join = (wrap - origin).div_ceil(VIDEO_US * GOP) * GOP + 1;
+	let first = |leg: &Leg| leg.units().iter().find(|unit| unit.pid == VIDEO_PID).unwrap().decode;
+	for lag in LAGS {
+		let (a, b, from) = synced_on(1.0, origin, lag, join, join + 12 * GOP, |_| false).await;
+		assert!(
+			first(&a) > (1 << 33) - 10 * 90_000,
+			"the first leg started after the wrap"
+		);
+		assert!(first(&b) < 10 * 90_000, "the joiner started before the wrap");
+		assert_eq!(assert_same_synced(&a, &b, from), 0);
+		assert!(leads_with_the_tables(&a) && leads_with_the_tables(&b));
+	}
+}
+
+/// A source clock 30 ppm off the receivers' moves when slots go out, never what they carry.
+#[tokio::test(start_paused = true)]
+async fn synced_legs_render_a_drifting_source_the_same_way() {
+	for scale in [1.0 - 30e-6, 1.0 + 30e-6] {
+		let (a, b, from) = synced_on(scale, 0, 0, JOIN, 120_000_000 / VIDEO_US, |_| false).await;
+		assert_eq!(assert_same_synced(&a, &b, from), 0, "scale {scale}");
+	}
+}
+
+/// A rate the catalog does not record and no override names is measured, which would give
+/// each leg a grid of its own, so `--sync` refuses it.
+#[tokio::test(start_paused = true)]
+#[should_panic(expected = "--sync needs a constant multiplex rate")]
+async fn sync_refuses_an_output_without_a_constant_rate() {
+	let mut live = Live::new(1.0, 0).await;
+	let export = super::export_test::open_export(live.source.clone())
+		.await
+		.unwrap()
+		.with_delay(DELAY)
+		.with_sync();
+	let mut leg = Leg {
+		export,
+		every: Duration::ZERO,
+		next_poll: Instant::now(),
+		out: Vec::new(),
+	};
+	live.run(2 * GOP, &mut [&mut leg], |_| false).await;
+}
+
+/// A rate too low for the tracks' lanes is refused at the program tables.
+#[tokio::test(start_paused = true)]
+#[should_panic(expected = "cannot carry its lanes")]
+async fn sync_refuses_a_rate_its_lanes_do_not_fit() {
+	let mut live = Live::new(1.0, 0).await;
+	live.sync = true;
+	live.rate = 14 * 188 * 8 * 40;
+	let mut leg = live.join(Duration::ZERO).await;
+	live.run(2 * GOP, &mut [&mut leg], |_| false).await;
 }
 
 /// Whatever follows the source's clock has to follow it identically on both legs, though they
