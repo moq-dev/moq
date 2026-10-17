@@ -2479,6 +2479,23 @@ test("a rewind is refused whichever group lands first", () => {
 	stampGroup(producer, 4, 700);
 });
 
+test("a rewind across large timescales is refused", () => {
+	const m = Number.MAX_SAFE_INTEGER;
+	const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI });
+	producer.writeFrame({ payload: enc.encode("a"), timestamp: new Timestamp(m - 1, Timescale(m)) });
+	// (m - 2) / (m - 1) is earlier than (m - 1) / m, though both cross-products round alike.
+	expect(() =>
+		producer.writeFrame({ payload: enc.encode("b"), timestamp: new Timestamp(m - 2, Timescale(m - 1)) }),
+	).toThrow(TimestampMismatch);
+	// Exact for fractions too: 0.75s is later than 0.5s.
+	const fractions = new TrackProducer("test").accept({ timescale: Timescale.MILLI });
+	fractions.writeFrame({ payload: enc.encode("a"), timestamp: new Timestamp(0.5, Timescale.SECOND) });
+	fractions.writeFrame({ payload: enc.encode("b"), timestamp: new Timestamp(750.5, Timescale.MILLI) });
+	expect(() =>
+		fractions.writeFrame({ payload: enc.encode("c"), timestamp: new Timestamp(1.5, Timescale(4)) }),
+	).toThrow(TimestampMismatch);
+});
+
 test("a group stamped before it is written is checked on write", () => {
 	const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI });
 	stampGroup(producer, 1, 6000);
