@@ -18,7 +18,7 @@ name: Nightly
 # the wheel builds in a manylinux container, the Kotlin/Swift/Go/Dart packages
 # link the FFI on every platform) and nothing notices until the tag is pushed.
 #
-# `audio-quality` is here because of what it measures. It plays twenty-four rows of
+# `audio-quality` is here because of what it measures. It plays thirty-six rows of
 # audio in real time, a minute each, which no merge gate should carry, and every
 # number it grades is a timing one that moves with whatever else the runner is
 # doing. A per-PR arm would fail on unrelated load often enough to be ignored;
@@ -253,14 +253,14 @@ jobs:
   platform:
     uses: ./.github/workflows/platform.yml
 
-  # Plays the matrix in headless Chromium through moq-shaper and grades what the
-  # listener heard against test/audio-quality/budgets.json. ARM64 like wasm.yml,
-  # the only architecture cache.yml warms a Rust store for.
+  # Plays the matrix in headless Chromium and the native player through moq-shaper
+  # and grades what the listener heard against test/audio-quality/budgets.json.
+  # ARM64 like wasm.yml, the only architecture cache.yml warms a Rust store for.
   audio-quality:
     name: Audio quality
     runs-on: ubuntu-24.04-arm
-    # Twenty-four rows at a minute each, plus the relay, CLI, and shaper built from source.
-    timeout-minutes: 60
+    # Thirty-six rows at a minute each, plus the relay, CLI, and shaper built from source.
+    timeout-minutes: 90
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

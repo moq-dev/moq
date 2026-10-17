@@ -143,6 +143,7 @@ error names the `--delay` it needs.
 moq --connect https://relay.example.com/anon --broadcast my-stream.hang play
 moq ... play --delay 500ms          # fix the delay instead of measuring it
 moq ... play --no-video             # audio only, without a window
+moq ... play --no-video --metrics play.ndjson   # log what the speaker played
 ```
 
 Decodes H.264, H.265, and AV1 video with the platform hardware decoder where
@@ -155,7 +156,10 @@ default, `auto`, sizes the buffer to how unevenly audio arrives, with the same
 [algorithm](/concept/audio-jitter) as the browser player. A duration fixes the
 delay and is also how long a stalled group is waited on before it is skipped.
 Each role follows the catalog, switching rendition when the publisher retires
-the one playing.
+the one playing. `--metrics` writes a line every 250 ms with the playhead, the
+delay, and every underrun and stall the speaker hit, in the schema the
+[audio quality harness](https://github.com/moq-dev/moq/tree/main/test/audio-quality)
+grades.
 
 The broadcast's announcement is its online signal, followed until the window
 closes. Playback starts when the name is announced. A

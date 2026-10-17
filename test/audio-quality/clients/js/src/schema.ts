@@ -4,8 +4,8 @@
  * This file is the schema, not a description of one. The page emits {@link Sample}s, `analyze.ts`
  * reduces them to a {@link Summary}, and `grade.ts` reads that against `budgets.json`. {@link METRICS}
  * says for every graded number what it counts, which clock it sits on, and how a series became one
- * value. Another lane (native playout, the latency ledger) that emits the same {@link Summary} is
- * comparable to this one by construction.
+ * value. `moq play --metrics` writes the same {@link Sample}s natively, and any other lane that emits
+ * the same {@link Summary} is comparable to this one by construction.
  *
  * Conventions, stated once for everything below:
  *
