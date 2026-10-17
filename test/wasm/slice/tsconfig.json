@@ -1,0 +1,8 @@
+{
+	"extends": "../../../js/tsconfig.json",
+	"compilerOptions": {
+		"types": ["bun"],
+		"noEmit": true
+	},
+	"include": ["adapter.ts", "bench.ts", "boltffi.ts", "driver.ts", "uniffi.ts"]
+}

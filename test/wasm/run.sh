@@ -36,6 +36,7 @@ PORT="${WASM_PORT:-}"
 # fixture wants; the workload is three connections and a few hundred KiB.
 BASELINE=
 UNIFFI=
+SLICE=
 PROFILE="${WASM_PROFILE:-debug}"
 RELAY="${RELAY_BIN:-}"
 
@@ -49,6 +50,11 @@ while [[ $# -gt 0 ]]; do
         --uniffi)
             # moq-ffi over ubrn's wasm2 player, as a third backend. See README.md.
             UNIFFI=true
+            shift
+            ;;
+        --slice)
+            # bench/ffi-gen's slice bound by UniFFI and BoltFFI, for per-call costs.
+            SLICE=true
             shift
             ;;
         --timeout)
@@ -111,6 +117,11 @@ if [[ -n $UNIFFI ]]; then
     "$WASM_DIR/uniffi/build.sh"
 fi
 
+if [[ -n $SLICE ]]; then
+    echo "building the moq-ffi slice with BoltFFI and UniFFI..."
+    "$WASM_DIR/slice/build.sh"
+fi
+
 echo "building moq-relay ($PROFILE)..."
 flag=()
 [[ "$PROFILE" == "debug" ]] || flag=(--profile "$PROFILE")
@@ -131,6 +142,7 @@ echo "type-checking against js/wasm/dist/moq.d.ts..."
 bunx tsc --noEmit
 # The generated TypeScript opts out with @ts-nocheck, so this checks what callers see.
 [[ -z $UNIFFI ]] || bunx tsc --noEmit -p uniffi/tsconfig.json
+[[ -z $SLICE ]] || bunx tsc --noEmit -p slice/tsconfig.json
 
 echo "bundling the harness page..."
 rm -rf dist
@@ -149,6 +161,12 @@ else
     cp index.html dist/index.html
 fi
 [[ -z $UNIFFI ]] || bun build uniffi/cases.ts --outfile dist/uniffi-cases.js --target browser >/dev/null
+if [[ -n $SLICE ]]; then
+    bun build slice/bench.ts --outfile dist/slice-bench.js --target browser >/dev/null
+    for generator in uniffi boltffi; do
+        bun build "slice/$generator.ts" --outfile "dist/slice-$generator.js" --target browser --minify >/dev/null
+    done
+fi
 
 # ── relays ──────────────────────────────────────────────────────────────────
 # One reservation per flavour rather than a span from a fixed base: a span means
@@ -201,6 +219,10 @@ harness_wait "$HARNESS_PID" || status=$?
 
 if [[ $status -eq 0 && -n $UNIFFI ]]; then
     harness_spawn uniffi - bun uniffi/driver.ts --relays "$HARNESS_RUN/relays.json"
+    harness_wait "$HARNESS_PID" || status=$?
+fi
+if [[ $status -eq 0 && -n $SLICE ]]; then
+    harness_spawn slice - bun slice/driver.ts
     harness_wait "$HARNESS_PID" || status=$?
 fi
 
