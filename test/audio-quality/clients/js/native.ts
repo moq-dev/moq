@@ -93,7 +93,11 @@ const args = [
 if (values.delay !== "auto") args.push("--delay", values.delay);
 console.log(`player: ${args.join(" ")}`);
 // The player logs to stderr and writes nothing to stdout.
-const player = Bun.spawn(args, { stdout: "inherit", stderr: Bun.file(logFile), env: { ...process.env, NO_COLOR: "1" } });
+const player = Bun.spawn(args, {
+	stdout: "inherit",
+	stderr: Bun.file(logFile),
+	env: { ...process.env, NO_COLOR: "1" },
+});
 
 let failed = false;
 try {

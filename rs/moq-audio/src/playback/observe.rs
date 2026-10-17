@@ -482,7 +482,10 @@ mod tests {
 
 		let observation = observer.read().unwrap();
 		assert_eq!(observation.gaps.len(), 1);
-		assert_eq!(observation.gaps[0].quanta, 1, "closed before the next quantum joined it");
+		assert_eq!(
+			observation.gaps[0].quanta, 1,
+			"closed before the next quantum joined it"
+		);
 	}
 
 	#[test]
