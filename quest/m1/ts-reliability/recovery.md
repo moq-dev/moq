@@ -52,5 +52,4 @@ and measured release timing as separate checks.
 ## Related
 
 - [Automated validation](/test/ts/README.md) - shared graders, profiles and known-bad controls
-- [Audio lead](/quest/m1/ts-reliability/audio-lead.md) - audio stays behind the keyframe when the start group is dropped
 - [Gradual recovery](/quest/m2/intra-refresh/README.md) - recovery counts and per-group warmup
