@@ -77,13 +77,7 @@ pub extern "C" fn moq_ffi_test_clock_start() -> bool {
 #[cfg(all(feature = "testing", not(target_arch = "wasm32")))]
 #[unsafe(no_mangle)]
 pub extern "C" fn moq_ffi_test_clock_advance(nanos: u64) -> bool {
-	let Some(clock) = ffi::test_clock() else { return false };
-	let duration = std::time::Duration::from_nanos(nanos);
-	if clock.now().checked_add(duration).is_none() || clock.wall().checked_add(duration).is_none() {
-		return false;
-	}
-	clock.advance(duration);
-	true
+	ffi::test_clock().is_some_and(|clock| clock.advance(std::time::Duration::from_nanos(nanos)).is_some())
 }
 
 /// The test clock's nanoseconds since it started, or `u64::MAX` without one.

@@ -79,11 +79,15 @@ impl Installed {
 	}
 
 	/// Let `duration` pass, moving both the instant and the wall time, and wake every timer due by then.
-	pub fn advance(&self, duration: Duration) {
-		let due = {
+	///
+	/// Returns the new instant, or `None` with the clock unchanged when either would run past
+	/// its range. Checked under the clock's lock, so racing advances never overshoot.
+	pub fn advance(&self, duration: Duration) -> Option<Instant> {
+		let (now, due) = {
 			let mut state = self.0.lock().unwrap();
+			let now = state.clock.now().checked_add(duration)?;
+			state.clock.wall().checked_add(duration)?;
 			state.clock.advance(duration);
-			let now = state.clock.now();
 			let mut due = Vec::new();
 			while let Some(entry) = state.timers.first_entry() {
 				if entry.key().0 > now {
@@ -91,10 +95,11 @@ impl Installed {
 				}
 				due.push(entry.remove());
 			}
-			due
+			(now, due)
 		};
 		// Outside the lock: a woken task may run inline and read the clock.
 		due.into_iter().for_each(Waker::wake);
+		Some(now)
 	}
 
 	/// Set the wall time, forward or back, as a clock correction would. No time passes and no timer fires.
@@ -295,6 +300,21 @@ mod tests {
 		assert!(other.block_on(async { crate::now() }) > host);
 		assert!(crate::now() > host);
 		assert_eq!(installed.block_on(async { crate::now() }), Instant::ZERO);
+	}
+
+	/// An advance past the range is refused whole, leaving the clock where it was.
+	#[test]
+	fn advance_past_the_range_changes_nothing() {
+		let runtime = runtime(false);
+		let clock = Manual::new().install(runtime.handle());
+		assert_eq!(
+			clock.advance(Duration::from_secs(1)),
+			Some(Instant::ZERO + Duration::from_secs(1))
+		);
+		// The wall clock starts in 2025, so it runs out first.
+		assert_eq!(clock.advance(Duration::from_nanos(u64::MAX - 1_000_000_000)), None);
+		assert_eq!(clock.now(), Instant::ZERO + Duration::from_secs(1));
+		assert_eq!(clock.wall(), Manual::WALL_START + Duration::from_secs(1));
 	}
 
 	#[test]
