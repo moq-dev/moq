@@ -1,6 +1,9 @@
 package dev.moq
 
 import dev.moq.media.*
+import dev.moq.audio.Producer as AudioProducer
+import dev.moq.video.Consumer as VideoConsumer
+import dev.moq.video.Producer as VideoProducer
 
 import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.Flow
@@ -25,6 +28,7 @@ import kotlin.test.assertNull
 import kotlin.test.assertTrue
 import kotlin.time.Duration.Companion.microseconds
 import kotlin.time.Duration.Companion.milliseconds
+import kotlin.time.Duration
 import kotlin.time.Instant
 
 @Serializable
@@ -338,8 +342,8 @@ class SmokeTest {
      */
     @Test
     fun `video consumer exposes a frames flow like audio does`() {
-        val video: (VideoConsumer) -> Flow<VideoDecodedFrame> = VideoConsumer::frames
-        val audio: (AudioConsumer) -> Flow<AudioFrame> = AudioConsumer::frames
+        val video: (dev.moq.video.Consumer) -> Flow<VideoDecodedFrame> = dev.moq.video.Consumer::frames
+        val audio: (dev.moq.audio.Consumer) -> Flow<dev.moq.audio.Frame> = dev.moq.audio.Consumer::frames
         assertNotNull(video)
         assertNotNull(audio)
     }
@@ -366,7 +370,7 @@ class SmokeTest {
         assertNull(stats(null).rtt)
         assertEquals(1_500.microseconds, stats(1_500uL).rtt)
         assertEquals(20.milliseconds, Frame(payload = ByteArray(0), timestampUs = 20_000uL).timestamp)
-        assertEquals(20.milliseconds, AudioEncoderOutput(codec = AudioCodec.opus()).frameDuration)
+        assertEquals(Duration.ZERO, AudioEncoderOutput(codec = AudioCodec.opus()).frameDuration)
     }
 
     @Test
@@ -540,20 +544,21 @@ class SmokeTest {
         val input = AudioEncoderInput(format = AudioSampleFormat.F32, sampleRate = 48_000u, channels = 1u)
 
         BroadcastProducer().use { broadcast ->
-            val fine = broadcast.encodeAudio(
-                "fine",
+            val catalog = CatalogProducer(broadcast)
+            val fine = AudioProducer(
+                catalog,
                 input,
-                AudioEncoderOutput(codec = AudioCodec.opus(), frameDurationUs = 2_500u),
+                AudioEncoderOutput(codec = AudioCodec.opus(), track = "fine", frameDurationUs = 2_500u),
             )
             // 2.5 ms of silence at 48 kHz mono f32: exactly one encoded frame.
             fine.write(AudioFrame(timestampUs = 0uL, data = ByteArray(120 * 4)))
             fine.finish()
 
             assertFailsWith<MoqException.Audio> {
-                broadcast.encodeAudio(
-                    "coarse",
+                AudioProducer(
+                    catalog,
                     input,
-                    AudioEncoderOutput(codec = AudioCodec.opus(), frameDurationUs = 2_000u),
+                    AudioEncoderOutput(codec = AudioCodec.opus(), track = "coarse", frameDurationUs = 2_000u),
                 )
             }
         }
@@ -584,7 +589,8 @@ class SmokeTest {
     fun `decoded video frame owns its picture`() = runTest {
         OriginProducer(OriginConfig()).use { origin ->
             origin.createBroadcast("video-decode-frame").use { broadcast ->
-                val video = broadcast.encodeVideo(
+                val video = VideoProducer(
+                    CatalogProducer(broadcast),
                     VideoEncoderInput(format = VideoPixelFormat.RGBA, width = 320u, height = 240u, framerate = 30u),
                     // Software so the encode is deterministic everywhere.
                     VideoEncoderOutput(codec = VideoCodec.H264, track = "camera", kind = softwareEncoder),
@@ -603,7 +609,7 @@ class SmokeTest {
                 val catalog = CatalogConsumer.subscribe(consumer).next()!!
                 val rendition = catalog.video["camera"]!!
 
-                val decoder = consumer.decodeVideo("camera", rendition, VideoDecoderOutput())
+                val decoder = VideoConsumer.subscribe(consumer, "camera", rendition, VideoDecoderOutput())
 
                 // Keep the encoder fed so the decoder sees frames after it joined.
                 for (i in 10 until 40) {
@@ -637,8 +643,8 @@ class SmokeTest {
         for (codecFirst in listOf(true, false)) {
             BroadcastProducer().use { broadcast ->
                 val codec = AudioCodec.opus()
-                val output = AudioEncoderOutput(codec = codec)
-                val producer = broadcast.encodeAudio("mic", input, output)
+                val output = AudioEncoderOutput(codec = codec, track = "mic")
+                val producer = AudioProducer(CatalogProducer(broadcast), input, output)
                 if (codecFirst) {
                     codec.close()
                 } else {
@@ -650,7 +656,7 @@ class SmokeTest {
                 } else {
                     codec.close()
                 }
-                assertEquals("mic", producer.name())
+                assertEquals("mic", producer.demand().name())
                 producer.finish()
             }
         }
