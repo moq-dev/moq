@@ -18,9 +18,11 @@ Decided 2026-10-16 with the maintainer:
 - The `connection` target switches to it, so injected and mutated packets
   decrypt instead of being dropped at the AEAD. Today it runs about 64
   inputs/s, almost all spent in the handshake.
-- A decrypted injected packet can carry a valid STREAM frame, so the
-  target's delivered-bytes-match-written check excludes the streams injected
-  frames touch; no-panic still covers every input.
+- Once packets decrypt, an injected or corrupted packet can carry valid
+  STREAM or DATAGRAM frames, so the target's integrity checks (stream bytes
+  match what was written, `check_datagram` matches what was sent) exclude
+  the streams and datagrams those packets touch; no-panic still covers every
+  input.
 - Not a debug transport: nothing outside the `fuzz` feature can name it.
 
 ## Required
