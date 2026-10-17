@@ -462,18 +462,19 @@ impl Ingest {
 
 		match &mut stream.track {
 			Track::Video(video) => {
-				if loss > 0 && stream.started {
+				// Before any drop, so the next clean keyframe still gets retina's new parameters.
+				stream.fresh |= changed;
+				if loss > 0 {
 					// The pictures after a lost packet reference what it carried, so hold the
 					// video until the next keyframe rather than publish a broken chain. This
 					// access unit is damaged too, even when it is a keyframe, so drop it.
-					if stream.held.is_none() {
+					if stream.started && stream.held.is_none() {
 						tracing::warn!(stream_id, loss, "RTP packets lost, waiting for the next keyframe");
 						stream.held = Some(tokio::time::Instant::now());
 					}
 					video.reset();
 					return Ok(None);
 				}
-				stream.fresh |= changed;
 				let params = match streams.get(stream_id).and_then(|stream| stream.parameters()) {
 					Some(ParametersRef::Video(params)) if stream.fresh => Some(params),
 					_ => None,
@@ -1051,6 +1052,36 @@ mod tests {
 			keyframes,
 			[true, false, true],
 			"the slices after the loss never publish"
+		);
+	}
+
+	/// A first keyframe that lost a packet is damaged, so the track opens on the next one.
+	#[tokio::test]
+	async fn a_lossy_first_keyframe_is_dropped() {
+		let server = Server::bind(vec![Media::H264 { sprop: true }]).await;
+		let (broadcast, catalog) = broadcast();
+		let client = Client::new(server.url()).unwrap();
+		let pull = tokio::spawn({
+			let (broadcast, catalog) = (broadcast.clone(), catalog.clone());
+			async move { client.pull(&broadcast, &catalog).await }
+		});
+
+		let mut session = within("PLAY", server.accept(0)).await;
+		session.video(0, 0, &[fake::H264_SLICE]).await;
+		session.lose(0, 1);
+		session.video(0, 2 * FRAME, &[fake::H264_IDR]).await;
+		session.video(0, 3 * FRAME, &[fake::H264_IDR]).await;
+
+		let snapshot = catalog_with(&catalog, 1, 0).await;
+		let reader = subscribe(&broadcast, video_track(&snapshot)).await;
+		session.close().await;
+		assert_eq!(within("the pull", pull).await.unwrap().unwrap(), End::Closed);
+		let frames = frames(reader).await;
+		assert_eq!(frames.len(), 1, "the lossy keyframe never publishes");
+		assert_eq!(
+			frames[0].timestamp.as_micros(),
+			100_000,
+			"the track opens on the clean keyframe"
 		);
 	}
 
