@@ -66,8 +66,10 @@ pub(crate) enum Item {
 /// [`read`](Self::read) yields [`Read::Gap`] wherever media after an item already read
 /// will never arrive: a latency skip, an evicted current group, or a sequence hole whose
 /// boundary is not contiguous within 1 ms. Whatever is lost before the first item is no
-/// gap, since nothing was read before it. A marker group (no decodable frames, one empty
-/// payload) is the publisher declaring a stop, read as [`Read::End`]; nothing is missing.
+/// gap, since nothing was read before it. A marker group (no decodable frames: one empty
+/// payload, or on a data track one object with no bytes) is the publisher declaring a stop,
+/// read as [`Read::End`]; nothing is missing. A data track's marker carries no timestamp, so
+/// it ends at the furthest point read, and reads as nothing before the first item.
 /// Empty groups (zero objects) mean nothing. A group whose timestamps fall below the live
 /// edge earlier groups reached is malformed and aborts the track.
 pub struct Consumer<F: Container> {
@@ -359,6 +361,20 @@ impl<F: Container> Consumer<F> {
 					}
 					// Cleanly finished group: advance to the next sequence.
 					Poll::Ready(Ok(None)) => {
+						// A data track's marker carries no timestamp, so it ends where this reader
+						// got to. Before the first item there is nothing to end.
+						if group.marker()
+							&& group.max_end.is_none()
+							&& !std::mem::replace(&mut group.ended, true)
+							&& let Some(edge) = self.edge
+						{
+							let end = u64::try_from(edge.as_micros())
+								.ok()
+								.and_then(|micros| Timestamp::from_micros(micros).ok())
+								.ok_or(moq_net::Error::Decode(moq_net::DecodeError::BoundsExceeded))?;
+							self.group = group.group.sequence;
+							return Poll::Ready(Ok(Some(Event::FrameEnd { end, opens: true })));
+						}
 						if let Some(end) = group.max_end {
 							self.presented_end = Some(end);
 						}
@@ -598,6 +614,9 @@ struct GroupBuffer {
 	// Whether a decodable (non-marker) frame was buffered.
 	media: bool,
 
+	// Whether a marker with no timestamp of its own was read as an end.
+	ended: bool,
+
 	// Read frames that haven't been consumed yet.
 	buffered: VecDeque<Frame>,
 	markers: VecDeque<(usize, Timestamp)>,
@@ -622,6 +641,7 @@ impl GroupBuffer {
 			index: 0,
 			empty: true,
 			media: false,
+			ended: false,
 			buffered: VecDeque::new(),
 			markers: VecDeque::new(),
 			delivered: 0,
@@ -1014,6 +1034,38 @@ mod tests {
 				.unwrap()
 		};
 		assert!(matches!(read().await, Some(Read::End { group: 16, end }) if end == ts(1_000_000)));
+	}
+
+	/// A data track's marker carries no timestamp, so it reads as an end at the furthest point
+	/// read rather than as a gap, and as nothing before the first item.
+	#[tokio::test(start_paused = true)]
+	async fn a_data_marker_reads_as_an_end_at_the_edge() {
+		let hour = Duration::from_secs(3600);
+		let info = hang::container::track_info(hang::catalog::PRIORITY.audio).with_max_age(hour);
+		let track = track_producer("data", info);
+		let subscription = moq_net::track::Subscription::default()
+			.with_max_delay(hour)
+			.with_groups(0..);
+		let mut reader = Consumer::new(
+			track.subscribe(subscription),
+			Container::Legacy(crate::container::Kind::Data),
+		);
+		let mut producer = crate::container::Producer::new(track, Container::Legacy(crate::container::Kind::Data));
+		let frame = |micros, payload: &'static [u8]| Frame {
+			timestamp: ts(micros),
+			payload: Bytes::from_static(payload),
+			keyframe: true,
+			duration: None,
+		};
+
+		producer.discontinuity().unwrap();
+		producer.write(frame(0, b"a")).unwrap();
+		producer.write(frame(10_000, b"")).unwrap();
+		producer.discontinuity().unwrap();
+		producer.write(frame(2_405_070_000, b"b")).unwrap();
+		producer.finish().unwrap();
+
+		assert_eq!(items(&mut reader).await, ["0", "10000", "end 10000", "2405070000"]);
 	}
 
 	/// A gap runs from the delivered edge to the resume point, in the resume's scale, and

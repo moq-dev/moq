@@ -6677,8 +6677,8 @@ pub(super) mod test {
 		let (frames, breaks) = read_breaks(&consumer, &name).await;
 		assert_eq!(frames.len(), 3);
 		assert_eq!(
-			breaks, 0,
-			"a data sequence hole whose timestamps do not jump is not a playhead event"
+			breaks, 2,
+			"each break on the data track reads once, as its declared end"
 		);
 	}
 

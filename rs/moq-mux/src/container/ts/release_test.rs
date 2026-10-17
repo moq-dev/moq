@@ -20,7 +20,8 @@ const RECORDING: Duration = Duration::from_secs(30);
 /// How long a drain waits for the next object before taking the release to have stalled.
 const STALL: Duration = RECORDING.saturating_mul(2);
 
-/// One object as published.
+/// One object as published. A break marker, an object with no bytes, has an empty payload and
+/// the time of the object before it.
 #[derive(Clone, Debug, PartialEq)]
 struct Object {
 	group: u64,
@@ -59,6 +60,15 @@ async fn import(data: &[u8]) -> Imported {
 		.unwrap()
 	{
 		while let Some(frame) = group.read_frame().await.unwrap() {
+			if frame.payload.is_empty() {
+				let micros = objects.last().map_or(0, |object: &Object| object.micros);
+				objects.push(Object {
+					group: group.sequence,
+					micros,
+					payload: Bytes::new(),
+				});
+				continue;
+			}
 			let frame = hang::container::Frame::decode(frame.payload).unwrap();
 			objects.push(Object {
 				group: group.sequence,
@@ -105,11 +115,17 @@ fn republish(objects: Vec<Object>, at: impl Fn(usize, &Object) -> Duration + Sen
 				let info = moq_net::group::Info { sequence: object.group };
 				group = Some((object.group, track.create_group(info).unwrap()));
 			}
+			let timestamp = moq_net::Timestamp::from_micros(object.micros).unwrap();
+			let group = &mut group.as_mut().unwrap().1;
+			if object.payload.is_empty() {
+				group.write_frame(timestamp, Bytes::new()).unwrap();
+				continue;
+			}
 			let frame = hang::container::Frame {
-				timestamp: moq_net::Timestamp::from_micros(object.micros).unwrap(),
+				timestamp,
 				payload: object.payload,
 			};
-			frame.write_to(&mut group.as_mut().unwrap().1).unwrap();
+			frame.write_to(group).unwrap();
 		}
 		if let Some((_, group)) = group {
 			group.finish().unwrap();
@@ -219,8 +235,8 @@ async fn a_flagged_jump_crosses_without_holding_the_output() {
 	let input = [KYRION, &second].concat();
 	let objects = import(&input).await.objects;
 	assert!(
-		objects.windows(2).any(|pair| pair[1].group > pair[0].group + 1),
-		"the break skips a sequence"
+		objects.iter().any(|object| object.payload.is_empty()),
+		"a marker declares the break"
 	);
 
 	// The bytes keep coming at the source's pace across the jump: only the PCR leaps.

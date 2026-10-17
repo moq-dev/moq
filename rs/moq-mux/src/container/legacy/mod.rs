@@ -63,6 +63,10 @@ impl Container for Wire {
 		let Some(data) = ready!(group.poll_read_frame(waiter).map_err(hang::Error::from)?) else {
 			return Poll::Ready(Ok(None));
 		};
+		// An object with no bytes is a data track's discontinuity marker, not a frame.
+		if data.payload.is_empty() {
+			return Poll::Ready(Ok(Some(Vec::new())));
+		}
 
 		let hang_frame = hang::container::Frame::decode(data.payload)?;
 		Poll::Ready(Ok(Some(vec![Frame {

@@ -393,6 +393,10 @@ impl Container for Wire {
 		let Some(frame) = ready!(group.poll_read_frame(waiter)?) else {
 			return Poll::Ready(Ok(None));
 		};
+		// An object with no bytes is a data track's discontinuity marker, not a fragment.
+		if frame.payload.is_empty() {
+			return Poll::Ready(Ok(Some(Vec::new())));
+		}
 
 		Poll::Ready(Ok(Some(decode(frame.payload, frame.timestamp, self.track()?)?)))
 	}

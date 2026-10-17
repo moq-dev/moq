@@ -347,16 +347,29 @@ test("Legacy Producer discontinuity writes no end estimated from the cadence", a
 	]);
 });
 
-test("Legacy Producer discontinuity marks nothing on a data track or before any frame", async () => {
-	const data = new Track.Producer("data");
-	const producer = new LegacyProducer(data, new LegacyFormat("data"));
-	producer.encode(new Uint8Array([1]), 0 as Micro, true);
-	producer.discontinuity();
-	expect(data.appendGroup().sequence).toBe(1);
-
+test("Legacy Producer discontinuity marks nothing before any frame", async () => {
 	const empty = new Track.Producer("empty");
 	new LegacyProducer(empty, new LegacyFormat("video")).discontinuity();
 	expect(empty.appendGroup().sequence).toBe(0);
+});
+
+// An empty payload is data on a data track, so its marker is an object with no bytes, which reads
+// as an end where the reader got to rather than as a gap.
+test("Legacy Producer discontinuity on a data track reads as an end at the edge", async () => {
+	const track = new Track.Producer("data");
+	const subscriber = replay(track);
+	const producer = new LegacyProducer(track, new LegacyFormat("data"));
+	producer.encode(new Uint8Array([1]), 0 as Micro, true);
+	producer.encode(new Uint8Array(), 20_000 as Micro, true);
+	producer.discontinuity();
+	producer.encode(new Uint8Array([1]), 5_000_000 as Micro, true);
+	producer.close();
+
+	const consumer = new Consumer(subscriber, { format: new LegacyFormat("data"), maxDelay: 30_000 as Milli });
+	const items: string[] = [];
+	for (let read = await consumer.next(); read; read = await consumer.next()) items.push(describe(read));
+	expect(items).toEqual(["0", "20000", "end 20000", "5000000"]);
+	consumer.close();
 });
 
 // A group's reach runs to its successor's first frame, so without the marker the group before a
@@ -1831,7 +1844,8 @@ test("a group reset does not hide a later container decode failure", async () =>
 		reset.close(new NetError.Stream(StreamCode.Cancel));
 		await settle();
 		const malformed = track.appendGroup();
-		malformed.writeFrame({ payload: new Uint8Array(), timestamp: Time.Timestamp.now() });
+		// A truncated timestamp varint.
+		malformed.writeFrame({ payload: new Uint8Array([0x80]), timestamp: Time.Timestamp.now() });
 		malformed.close();
 		await settle();
 		expect(error).toHaveBeenCalledWith("spawn error", expect.any(Error));

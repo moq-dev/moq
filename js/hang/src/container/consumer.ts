@@ -205,6 +205,8 @@ export class Consumer {
 				const next = await group.consumer.readFrame();
 				if (!next) break;
 				group.empty = false;
+				// An object with no bytes is a data track's discontinuity marker, not a frame.
+				if (next.payload.byteLength === 0) continue;
 				const arrival = Nano.toMilli(Nano(now()));
 
 				const decoded = this.#format.decode(next.payload, next.timestamp);
@@ -566,6 +568,12 @@ export class Consumer {
 					if (group) {
 						if (group.truncated) this.#lost = true;
 						this.#updateBuffered();
+						// A data track's marker carries no timestamp, so it ends where this reader got to.
+						// Before the first item there is nothing to end.
+						const marker = !group.empty && !group.media && group.end === undefined && !group.truncated;
+						if (marker && this.#edge !== undefined) {
+							return this.#emit({ kind: "end", group: group.consumer.sequence, end: this.#edge });
+						}
 						continue;
 					}
 				}
