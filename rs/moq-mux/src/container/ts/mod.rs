@@ -57,7 +57,11 @@ mod export_test;
 #[cfg(test)]
 mod export_timing_test;
 #[cfg(test)]
+mod fixture;
+#[cfg(test)]
 mod import_test;
+#[cfg(test)]
+mod oracle;
 #[cfg(test)]
 mod passthrough_test;
 #[cfg(test)]
