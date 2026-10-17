@@ -11,7 +11,8 @@ those buffers with the ring is
 ## Plan
 
 Decided in the 2026-09-30 plan: commit to the redesign, but start only after
-a `moq-quic` profile shows where ingress and egress spend their time.
+a `moq-quic` profile shows where ingress and egress spend their time
+(`just bench-profile cpu`).
 No current profile is from `moq-quic`, and every other copy is removed without an
 API change by [Remove moq-uring copies](/quest/m2/perf/uring-copies.md).
 
@@ -39,5 +40,4 @@ the same workloads.
 
 ## Required
 
-- [Relay profiling recipe](/quest/m2/perf/lock-profile.md) - the captures that rank the candidates
 - [Remove moq-uring copies](/quest/m2/perf/uring-copies.md) - the cheap wins land first, so the profile shows what is left
