@@ -42,14 +42,18 @@ once this lands.
   fixes it later for the hot reads.
 - **What stays**: handles that drive tokio I/O keep `Task`, because it
   supplies their serialized state, terminal cancel, and shutdown's in-flight
-  counter: client `connect`, server `listen` and `accept`, and request
-  `accept` and `reject`. Demand waits and session `shutdown` stay `detached`.
+  counter: client `connect`, server `listen` and `accept`, request `accept`
+  and `reject`, and session `closed` and `status` (whose per-handle state
+  `Task` serializes). Demand waits and session `shutdown` stay `detached`.
   Re-examine those sites only if `Task` shrinks to them cleanly; that is not
   this quest's goal.
 - **Tests**: a read cancelled but not yet freed does not block the next read
-  on the same handle (drive `rust_future_*` directly, as the spike did), and a
-  read parked across shutdown resolves without a crash.
-- Watch the binding benchmark; the Go runner should move.
+  on the same handle (drive `rust_future_*` directly, as the spike did). A
+  read parked across shutdown resolves without a crash. Two reads parked on
+  one handle each wake, and between them they take every item exactly once.
+- **Benchmark both fan-out axes**: the spike swept subscribers at one
+  publisher. Confirm the gain on the binding benchmark across publishers and
+  subscribers before and after; the Go runner should move.
 
 Public API: none, apart from per-handle FIFO queueing. Wire: none.
 

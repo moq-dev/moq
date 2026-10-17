@@ -42,7 +42,9 @@ Things to carry over and check:
   question.
 - **Concurrent pollers on one handle share one waker.** Pick a semantic and
   test it: either reject a second concurrent read, or wake every poller.
-- Measure Kotlin and Swift too; the spike covered only Go and Python.
+- Measure Kotlin and Swift too; the spike covered only Go and Python. Sweep
+  publishers as well as subscribers, since the generator's callback-handle map
+  is shared process-wide.
 
 Public API: these reads gain a poll protocol in every binding; their async
 signatures stay where a language keeps both. Go's read cancel may change from
