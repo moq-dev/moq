@@ -2479,6 +2479,23 @@ test("a rewind is refused whichever group lands first", () => {
 	stampGroup(producer, 4, 700);
 });
 
+// Subscribers may have seen an aborted group's start, so a replacement at its sequence leaves
+// that start as the watermark, and no later group can start before it.
+test("a replaced aborted group still bounds later ones", () => {
+	const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI });
+	const first = new GroupProducer(0);
+	producer.writeGroup(first);
+	first.writeFrame({ payload: enc.encode("1000"), timestamp: Timestamp.fromMillis(1000) });
+	first.close(new Error("aborted"));
+
+	const replacement = new GroupProducer(0);
+	replacement.writeFrame({ payload: enc.encode("500"), timestamp: Timestamp.fromMillis(500) });
+	producer.writeGroup(replacement);
+	replacement.close();
+	expect(() => stampGroup(producer, 1, 600)).toThrow(TimestampMismatch);
+	stampGroup(producer, 1, 1000);
+});
+
 test("a rewind across large timescales is refused", () => {
 	const m = Number.MAX_SAFE_INTEGER;
 	const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI });

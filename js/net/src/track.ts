@@ -852,10 +852,10 @@ export class Producer {
 	}
 
 	// Take a cached group out of the cache lookups.
-	#uncache(entry: CachedGroup): void {
+	#uncache(entry: CachedGroup, evicted = false): void {
 		this.#cache.splice(this.#cache.indexOf(entry), 1);
 		this.#cached.delete(entry.group.sequence);
-		this.#unbound(entry);
+		this.#unbound(entry, evicted);
 	}
 
 	// The starts a first frame of group `sequence` must fall between: the nearest checked
@@ -1112,18 +1112,19 @@ export class Producer {
 		this.#writable(group.sequence);
 		this.#bind(group);
 		this.#cap(group);
-		// A group written before it joined is checked here, before it is cached or fanned out.
-		const start = this.#remote ? undefined : hooks.groupStart(group);
-		const late = start !== undefined && this.#admit(group.sequence, start);
-
 		const existing = this.#cached.get(group.sequence);
 		if (existing) {
 			if (!(existing.group.closed.peek() instanceof Error)) {
 				throw new Error(`duplicate group: sequence=${group.sequence}`);
 			}
+			// Subscribers may have seen the aborted incarnation's start, so it stays a watermark.
 			this.#evict(existing);
-			this.#uncache(existing);
+			this.#uncache(existing, true);
 		}
+
+		// A group written before it joined is checked here, before it is cached or fanned out.
+		const start = this.#remote ? undefined : hooks.groupStart(group);
+		const late = start !== undefined && this.#admit(group.sequence, start);
 
 		this.#publish(group, start, late);
 	}

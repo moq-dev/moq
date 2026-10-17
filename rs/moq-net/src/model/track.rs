@@ -1380,7 +1380,8 @@ impl TrackState {
 	}
 
 	/// Reject a sequence that is still cached; a dead (aborted or evicted)
-	/// incarnation is removed so a fresh group can serve the sequence again.
+	/// incarnation is removed so a fresh group can serve the sequence again. Subscribers may
+	/// have seen its start, so it stays as the eviction watermark.
 	///
 	/// Best effort: nothing remembers a sequence whose slot is already gone, so a
 	/// publisher re-sending a long-evicted sequence is accepted as new.
@@ -1392,7 +1393,7 @@ impl TrackState {
 		if self.covering_group(sequence, frame_start).is_some() {
 			return Err(Error::Duplicate);
 		}
-		self.remove_slot(sequence);
+		self.uncache(sequence);
 		Ok(())
 	}
 
@@ -12146,6 +12147,24 @@ mod test {
 
 		// Group 2 really started before late group 1 claimed to.
 		start_at_millis(&producer, 2, 2500).unwrap();
+	}
+
+	/// Subscribers may have seen an aborted group's start, so a replacement at its sequence
+	/// leaves that start as the watermark, and no later group can start before it.
+	#[test]
+	fn a_replaced_aborted_group_still_bounds_later_ones() {
+		let producer = track_producer("test", Info::timed());
+		start_at_millis(&producer, 0, 1000)
+			.unwrap()
+			.abort(Error::Cancel)
+			.unwrap();
+		let replacement = start_at_millis(&producer, 0, 500).unwrap();
+		assert_eq!(replacement.bound(), None, "a late replacement bounds nothing");
+		assert!(matches!(
+			start_at_millis(&producer, 1, 600),
+			Err(Error::TimestampMismatch)
+		));
+		start_at_millis(&producer, 1, 1000).unwrap();
 	}
 
 	/// A group received from past its first frame stamps a later frame, which may overlap
