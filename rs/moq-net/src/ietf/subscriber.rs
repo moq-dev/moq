@@ -584,6 +584,14 @@ struct BroadcastState {
 	_slot: crate::auth::Hold,
 }
 
+/// A namespace request and the authorization selected at dispatch.
+struct IncomingNamespace<'a> {
+	msg: ietf::PublishNamespace<'a>,
+	peer: cluster::Peer,
+	declared: Option<bool>,
+	gate: crate::auth::Gate,
+}
+
 /// What authorized one advertisement.
 enum Admit {
 	/// The session, so the limit holds it back while it does not cover the namespace.
@@ -1253,8 +1261,19 @@ where
 					return Err(Error::WrongSize);
 				}
 				tracing::debug!(message = ?msg, "received publish_namespace");
+				let gate = crate::auth::Gate::new(
+					this.auth.clone(),
+					msg.track_namespace.to_owned(),
+					crate::auth::Direction::Subscribe,
+				);
+				let incoming = IncomingNamespace {
+					msg,
+					peer,
+					declared,
+					gate,
+				};
 				async move {
-					if let Err(err) = this.run_publish_namespace_stream(stream, msg, peer, declared).await {
+					if let Err(err) = this.serve_publish_namespace_stream(stream, incoming).await {
 						// An advertisement update is decoded here rather than in the
 						// dispatcher, so nothing else would surface a malformed one. The
 						// cluster draft requires closing the session on those; a stream
@@ -1328,13 +1347,42 @@ where
 	}
 
 	/// Handle an incoming PUBLISH_NAMESPACE on its bidi stream.
+	#[cfg(test)]
 	async fn run_publish_namespace_stream(
 		&mut self,
-		mut stream: Stream<S, Version>,
+		stream: Stream<S, Version>,
 		msg: ietf::PublishNamespace<'_>,
 		peer: cluster::Peer,
 		declared: Option<bool>,
 	) -> Result<(), Error> {
+		let gate = crate::auth::Gate::new(
+			self.auth.clone(),
+			msg.track_namespace.to_owned(),
+			crate::auth::Direction::Subscribe,
+		);
+		self.serve_publish_namespace_stream(
+			stream,
+			IncomingNamespace {
+				msg,
+				peer,
+				declared,
+				gate,
+			},
+		)
+		.await
+	}
+
+	async fn serve_publish_namespace_stream(
+		&mut self,
+		mut stream: Stream<S, Version>,
+		incoming: IncomingNamespace<'_>,
+	) -> Result<(), Error> {
+		let IncomingNamespace {
+			msg,
+			peer,
+			declared,
+			gate,
+		} = incoming;
 		if let Some(error) = super::namespace::refusal(&msg.track_namespace, self.version) {
 			return super::request_stream::reject(stream, error).await;
 		}
@@ -1367,7 +1415,7 @@ where
 		// request-token), even where the limit covers it, and a verified one is exempt from the
 		// limit while it lasts.
 		let token = match &msg.authorization_token {
-			Some(token) if self.auth.token_decides(crate::auth::Direction::Subscribe) => Some(token.0.clone()),
+			Some(token) if gate.token_decides() => Some(token.0.clone()),
 			_ => None,
 		};
 		let (admit, token_grant) = match token {
@@ -1379,7 +1427,7 @@ where
 					true => None,
 					false => Some(std::sync::Arc::new(self.acquire_announce()?)),
 				};
-				let verdict = self.auth.verify_request(token, slot.clone());
+				let verdict = gate.verify(token, slot.clone());
 				// The session closing or the peer withdrawing the announce withdraws the token.
 				let mut session = self.session.clone();
 				let version = self.version;

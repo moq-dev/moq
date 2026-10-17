@@ -269,7 +269,9 @@ impl<S: crate::transport::poll::Session> Publisher<S> {
 		auth: Option<crate::auth::Handle>,
 	) -> Result<(), Error> {
 		let mut run = AnnounceRun::new(crate::PathOwned::default(), self_origin, version);
-		run.auth = auth;
+		run.auth = auth.map(|handle| {
+			crate::auth::Gate::new(handle, crate::Path::empty().to_owned(), crate::auth::Direction::Publish)
+		});
 		kio::wait(|waiter| run.poll(stream, origin, announced, waiter)).await
 	}
 }
@@ -947,7 +949,11 @@ impl<S: crate::transport::poll::Session> AnnounceServe<S> {
 		};
 		let announced = origin.announced();
 		let mut run = AnnounceRun::new(prefix, self.shared.self_origin, self.shared.version);
-		run.auth = Some(self.shared.auth.clone());
+		run.auth = Some(crate::auth::Gate::new(
+			self.shared.auth.clone(),
+			run.prefix.clone(),
+			crate::auth::Direction::Publish,
+		));
 		self.state = AnnounceState::Run { origin, announced, run };
 	}
 }
@@ -971,7 +977,7 @@ struct AnnounceRun {
 	phase: AnnouncePhase,
 	// Our grant and the ceiling on the peer: only what both let us publish is
 	// announced, and a shrink withdraws what they no longer cover.
-	auth: Option<crate::auth::Handle>,
+	auth: Option<crate::auth::Gate>,
 	epoch: u64,
 	// What we may announce right now.
 	permit: crate::auth::Permit,
@@ -1311,8 +1317,7 @@ impl AnnounceRun {
 			// advertises something it would withdraw, or abort over, a moment later.
 			if let Some(auth) = &self.auth {
 				ready!(auth.poll_setup_answered(waiter));
-				if let Poll::Ready(permit) = auth.poll_permit(crate::auth::Direction::Publish, &mut self.epoch, waiter)
-				{
+				if let Poll::Ready(permit) = auth.poll_permit(&mut self.epoch, waiter) {
 					self.permit = permit;
 				}
 			}
@@ -1336,7 +1341,7 @@ impl AnnounceRun {
 			// A grant change applies before the next update, so a route it no longer
 			// covers is withdrawn rather than re-sent.
 			if let Some(auth) = &self.auth
-				&& let Poll::Ready(permit) = auth.poll_permit(crate::auth::Direction::Publish, &mut self.epoch, waiter)
+				&& let Poll::Ready(permit) = auth.poll_permit(&mut self.epoch, waiter)
 				&& self.permit != permit
 			{
 				self.regrant(stream, origin, permit)?;

@@ -1,6 +1,7 @@
 import { Instant, Milli, Nano, now, sleep } from "@moq/clock";
 import { type Dispose, type Getter, race, Signal } from "@moq/signals";
 import type { Auth, Grant } from "../auth.ts";
+import { Gate } from "../auth_gate.ts";
 import { enforceGrant } from "../auth_session.ts";
 import type * as broadcast from "../broadcast.ts";
 import { Withdrawal } from "../connection/withdrawal.ts";
@@ -302,6 +303,8 @@ export class Publisher {
 	// shrink withdraws what it no longer covers. Undefined until the peer answers, which
 	// allows everything.
 	#grant: Getter<Grant | undefined>;
+	// Holds every incoming request to that grant from dispatch to its end.
+	#gate: Gate;
 
 	// Resolves once the tokens this session presented at setup are answered, so nothing is
 	// advertised before the grant it would be checked against.
@@ -352,6 +355,7 @@ export class Publisher {
 		this.#subscriptions = new Slots(limits.subscriptions, { quic, reason: "too many subscriptions" });
 		this.#fetches = new Slots(limits.fetches, { quic, reason: "too many fetches" });
 		this.#grant = grant;
+		this.#gate = new Gate(grant);
 		this.#auth = auth;
 		this.#ready = ready;
 		this.#session = session;
@@ -388,7 +392,7 @@ export class Publisher {
 		}
 		// Only a subscription we would serve holds a slot, as in Rust: a refused one ends at
 		// once. A peer past the cap loses the session.
-		const charged = msg.forward && !msg.rangeFilters && !this.#denied(msg.trackNamespace);
+		const charged = msg.forward && !msg.rangeFilters && this.#gate.allows(msg.trackNamespace);
 		if (charged) this.#subscriptions.acquire();
 		try {
 			await this.#serveSubscribe(msg, stream);
@@ -428,7 +432,7 @@ export class Publisher {
 				),
 				reasonPhrase: unsupported,
 			};
-		} else if (this.#denied(name)) {
+		} else if (!this.#gate.allows(name)) {
 			// Serve only what our grant lets us publish. Checked before resolving, so a denied
 			// request never reaches the origin.
 			refusal = { errorCode: toRequestCode("unauthorized", "subscribe", version), reasonPhrase: "not granted" };
@@ -726,11 +730,9 @@ export class Publisher {
 			const revoked = new Promise<"revoked">((resolve) => {
 				revoke = () => resolve("revoked");
 			});
-			const disposeGrant = this.#grant.subscribe(() => {
-				if (this.#denied(name)) revoke();
-			});
+			const watch = this.#gate.watch(name, revoke);
 			// The grant may have shrunk during setup, before this watcher existed.
-			if (this.#denied(name)) revoke();
+			if (watch.revoked()) revoke();
 
 			let publishError: Error | undefined;
 			let unauthorized = false;
@@ -747,7 +749,7 @@ export class Publisher {
 			} catch (err: unknown) {
 				publishError = error(err);
 			} finally {
-				disposeGrant();
+				watch.dispose();
 			}
 			// An update that broke the protocol, such as one whose AUTHORIZATION TOKEN names an
 			// alias, closes the session: the connection answers a thrown violation with its code.
@@ -1137,12 +1139,6 @@ export class Publisher {
 		}
 	}
 
-	// Whether our grant excludes publishing this broadcast. No grant yet allows it.
-	#denied(broadcast: Path.Valid): boolean {
-		const grant = this.#grant.peek();
-		return grant !== undefined && !grant.publish.matches(broadcast);
-	}
-
 	/**
 	 * Close the session when our origin publishes a broadcast our grant does not cover;
 	 * see {@link enforceGrant}.
@@ -1217,7 +1213,7 @@ export class Publisher {
 			const carries = (covered: Path.Valid) =>
 				visible(covered) &&
 				(legacy ? this.#requiresSolicitation || (this.#hidden && hiddenBelow(Path.empty(), covered)) : true) &&
-				!this.#denied(covered);
+				this.#gate.allows(covered);
 
 			// Nothing is advertised before the grant it would be checked against.
 			await this.#ready;
@@ -1436,7 +1432,7 @@ export class Publisher {
 					// nothing our grant does not cover reaches the peer at all (MoQ Auth).
 					if (
 						(this.#hidden && hiddenBelow(Path.empty(), covered)) ||
-						this.#denied(covered) ||
+						!this.#gate.allows(covered) ||
 						candidates.length === 0
 					)
 						continue;
@@ -1796,7 +1792,7 @@ export class Publisher {
 
 		// Answer only for what our grant lets us publish. Checked before the track resolves,
 		// so a denied request never reaches the origin.
-		if (this.#denied(name)) {
+		if (!this.#gate.allows(name)) {
 			await this.#refuse(stream, msg.requestId, TRACK_STATUS_ERROR_14, denied);
 			return;
 		}
@@ -1810,8 +1806,7 @@ export class Publisher {
 		// A grant that narrows abandons the lookup, and resets an answer the transport has
 		// not taken yet rather than delivering it.
 		let answering = false;
-		const disposeGrant = this.#grant.subscribe(() => {
-			if (!this.#denied(name)) return;
+		const watch = this.#gate.watch(name, () => {
 			hold.abort();
 			if (answering) stream.abort(unauthorized(name));
 		});
@@ -1842,7 +1837,7 @@ export class Publisher {
 					stream.abort(cancel);
 					return;
 				}
-				const refusal = this.#denied(name) ? denied : this.#failed(err, "track_status");
+				const refusal = !this.#gate.allows(name) ? denied : this.#failed(err, "track_status");
 				await this.#refuse(stream, msg.requestId, TRACK_STATUS_ERROR_14, refusal);
 				return;
 			}
@@ -1854,7 +1849,7 @@ export class Publisher {
 			stream.close();
 			await stream.writer.closed.catch(() => undefined);
 		} finally {
-			disposeGrant();
+			watch.dispose();
 			hold.abort();
 		}
 	}
