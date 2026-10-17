@@ -442,7 +442,7 @@ fn audio_config(catalog_audio: crate::media::MoqAudio) -> Result<hang::catalog::
 	// wrapped codec error.
 	if !matches!(
 		&codec,
-		hang::catalog::AudioCodec::Opus | hang::catalog::AudioCodec::AAC(_)
+		hang::catalog::AudioCodec::Opus | hang::catalog::AudioCodec::AAC(_) | hang::catalog::AudioCodec::Pcm
 	) {
 		return Err(MoqError::Unsupported);
 	}
@@ -461,7 +461,7 @@ impl MoqAudioConsumer {
 	/// Subscribe to an audio track. `catalog_audio_config` comes from
 	/// the catalog (see
 	/// [`MoqMediaCatalogConsumer::next`](crate::media::MoqMediaCatalogConsumer::next));
-	/// the codec is inferred from it. Only Opus and AAC-LC are supported.
+	/// the codec is inferred from it. Only Opus, AAC-LC, and PCM are supported.
 	///
 	/// A rendition whose [`broadcast`](crate::media::MoqAudio::broadcast) names another broadcast
 	/// is subscribed there, so `name` is always read from the broadcast the catalog points at.
@@ -534,6 +534,12 @@ mod tests {
 	fn audio_config_accepts_aac() {
 		let config = audio_config(catalog_audio("mp4a.40.2")).unwrap();
 		assert!(matches!(config.codec, hang::catalog::AudioCodec::AAC(_)));
+	}
+
+	#[test]
+	fn audio_config_accepts_pcm() {
+		let config = audio_config(catalog_audio("pcm")).unwrap();
+		assert!(matches!(config.codec, hang::catalog::AudioCodec::Pcm));
 	}
 
 	#[test]
