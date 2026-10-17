@@ -129,6 +129,7 @@ impl Workers {
 						&& listen.tls.generate.is_empty()
 						&& listen.tls.root.is_empty()
 						&& listen.tls.identity.is_none()
+						&& listen.tls.resolver.is_none()
 						&& listen.tls.peers.is_none(),
 					"a shared TLS policy cannot be combined with listen.tls settings"
 				);
@@ -687,6 +688,7 @@ async fn serve_connection(
 	};
 
 	deadline.close = Some(transport.clone());
+	let conn = transport.clone();
 	let server = moq_net::Server::new().with_versions(serve.versions.clone());
 	let binding = match url {
 		Some(_) => moq_net::transport::Binding::Uri,
@@ -694,7 +696,7 @@ async fn serve_connection(
 	};
 	let request = deadline
 		.bound(server.accept_request_lite(
-			std::time::Instant::now(),
+			moq_net::time::now(),
 			moq_uring::transport::Session::new(transport, binding),
 		))
 		.await
@@ -740,6 +742,9 @@ async fn serve_connection(
 	{
 		Ok(admitted) => admitted,
 		Err(err) => {
+			// The status is what separates "your credential is bad" from "the auth
+			// server is down". Collapsing both into Unauthorized tells a client to
+			// stop reconnecting through an outage it could have waited out.
 			request.close(match err.status {
 				axum::http::StatusCode::UNAUTHORIZED | axum::http::StatusCode::FORBIDDEN => {
 					moq_net::Error::Unauthorized
@@ -757,7 +762,17 @@ async fn serve_connection(
 		stats,
 	} = admitted;
 
-	let mut request = request.with_stats(stats).with_limits(serve.cluster.limits(&lease));
+	// A peer's QUIC limits widen before SETUP OK, so its first requests see them.
+	if let Some(limits) = serve.cluster.quic_limits(&lease) {
+		conn.set_limits(moq_uring::quic::Limits {
+			max_streams: limits.max_streams,
+			receive_window: limits.receive_window,
+			send_window: limits.send_window,
+		})?;
+	}
+	let mut request = request
+		.with_stats(stats.clone())
+		.with_limits(serve.cluster.limits(&lease));
 	if let Some(subscriber) = subscriber {
 		request = request.with_publisher(subscriber);
 	}
@@ -765,7 +780,10 @@ async fn serve_connection(
 		request = request.with_subscriber(publisher);
 	}
 	let lease = lease.preparing(request.auth(), request.role())?;
-	let (session, driver) = deadline.bound(request.ok()).await?;
+	let (session, driver) = deadline
+		.bound(request.ok())
+		.await
+		.inspect_err(|err| crate::connection::setup_failed(&stats, err.downcast_ref()))?;
 	let driver_handle = handle.clone();
 	let driver = async move {
 		match driver_handle.run(driver).await {

@@ -166,7 +166,9 @@ export function analyze(input: Input): Summary {
 
 	// ── the render clock, reduced to the viewer's ───────────────────────────
 	// Each sample reads both clocks back to back, so the pairs fit the render clock's rate and offset.
-	const paired = samples.filter((s) => s.render !== undefined);
+	// Fitted from first audio, which is where anything counted on it starts: a native device can sit
+	// unpulled for a second while its stream starts, which says nothing about the run after.
+	const paired = samples.filter((s) => s.render !== undefined && first !== undefined && s.at >= first.at);
 	const renderRate = slope(
 		paired.map((s) => s.at),
 		paired.map((s) => s.render as Ms),

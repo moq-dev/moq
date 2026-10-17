@@ -97,10 +97,27 @@ pub trait Stats {
 pub struct StatsUnavailable;
 impl Stats for StatsUnavailable {}
 
+/// The typed transport condition when no application code was received.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum CloseKind {
+	/// The transport failed without a more specific classification.
+	#[default]
+	Transport,
+	/// The connection reached its idle deadline.
+	IdleTimeout,
+	/// This endpoint closed the connection locally.
+	Closed,
+}
+
 /// A transport failure with optional session and stream application codes.
 ///
 /// Session codes and stream codes belong to separate registries.
 pub trait Error: std::error::Error + MaybeSend + MaybeSync + 'static {
+	/// The typed transport condition, independent of application close codes.
+	fn close_kind(&self) -> CloseKind {
+		CloseKind::Transport
+	}
 	/// Returns the error code and reason if this was an application error.
 	///
 	/// Close reasons are exposed as UTF-8 strings at the transport boundary.

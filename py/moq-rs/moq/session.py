@@ -5,7 +5,7 @@ from __future__ import annotations
 from moq_ffi import MoqBandwidth, MoqReservation, MoqSession
 
 from .origin import OriginConsumer, OriginProducer
-from .publish import TrackProducer
+from .publish import TrackDemand
 from .types import ConnectionStats, ConnectionStatus
 
 
@@ -118,13 +118,14 @@ class Bandwidth:
     def __init__(self, inner: MoqBandwidth) -> None:
         self._inner = inner
 
-    def reserve(self, track: TrackProducer, max_bps: int) -> Reservation:
-        """Reserve up to ``max_bps`` for ``track``.
+    def reserve(self, demand: TrackDemand, max_bps: int) -> Reservation:
+        """Reserve up to ``max_bps`` for the track ``demand`` watches.
 
-        ``max_bps`` is a ceiling, not a measurement: reserve the most the track
-        can ever send. Drop the reservation to hand the room back.
+        Every track producer hands out its ``demand()``. ``max_bps`` is a
+        ceiling, not a measurement: reserve the most the track can ever send.
+        Drop the reservation to hand the room back.
         """
-        return Reservation(self._inner.reserve(track._inner, max_bps))
+        return Reservation(self._inner.reserve(demand._inner, max_bps))
 
 
 class Reservation:

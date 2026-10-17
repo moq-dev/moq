@@ -10,7 +10,7 @@ use tracing::Instrument;
 /// the right code instead of sprinkling close/return at each failure site.
 pub(crate) struct StatusError {
 	pub(crate) status: http::StatusCode,
-	refusal: Refusal,
+	refusal: Option<Refusal>,
 	pub(crate) source: anyhow::Error,
 }
 
@@ -18,7 +18,7 @@ impl From<auth::Error> for StatusError {
 	fn from(err: auth::Error) -> Self {
 		Self {
 			status: (&err).into(),
-			refusal: (&err).into(),
+			refusal: Some((&err).into()),
 			source: err.into(),
 		}
 	}
@@ -108,6 +108,13 @@ impl Connection {
 			stats,
 		} = admitted;
 
+		// A peer's QUIC limits widen before SETUP OK, so its first requests see them.
+		if let Some(limits) = lifecycle.cluster.quic_limits(&lease)
+			&& let Err(err) = request.set_quic_limits(limits)
+		{
+			tracing::debug!(%err, "cluster peer keeps its transport's limits");
+		}
+
 		// Accept the connection.
 		// NOTE: subscribe and publish seem backwards because of how relays work.
 		// We publish the tracks the client is allowed to subscribe to.
@@ -115,7 +122,9 @@ impl Connection {
 		//
 		// moq-net defaults the unset side to a fresh no-op origin, which is fine for a
 		// publish-only or subscribe-only session.
-		let mut request = request.with_stats(stats).with_limits(lifecycle.cluster.limits(&lease));
+		let mut request = request
+			.with_stats(stats.clone())
+			.with_limits(lifecycle.cluster.limits(&lease));
 		if let Some(subscriber) = subscriber {
 			request = request.with_publisher(subscriber);
 		}
@@ -128,7 +137,14 @@ impl Connection {
 			.shutdown
 			.until_deadline(request.ok())
 			.await
-			.ok_or_else(|| anyhow::anyhow!("the SETUP reply was still pending at the drain deadline"))??;
+			.ok_or_else(|| anyhow::anyhow!("the SETUP reply was still pending at the drain deadline"))?
+			.inspect_err(|err| {
+				let cause = match err {
+					moq_tokio::Error::MoqNet(err) => Some(err),
+					_ => None,
+				};
+				setup_failed(&stats, cause);
+			})?;
 
 		let result = lifecycle.supervise(session, lease, registration, transport).await;
 		driver.await??;
@@ -237,8 +253,11 @@ impl Lifecycle {
 	) -> Result<(cluster::Admitted, Option<crate::session::Registration>), StatusError> {
 		self.span.record("session", &request.id);
 		let admitted = self.shutdown.admit(self.authorize(request)).await;
-		if let Err(err) = &admitted {
-			self.cluster.refusals.record(err.refusal);
+		// Cluster admission records its own refusals; LAN and drain refusals are recorded here.
+		if let Err(err) = &admitted
+			&& let Some(refusal) = err.refusal
+		{
+			self.cluster.refusals.record(refusal);
 		}
 		admitted
 	}
@@ -251,7 +270,7 @@ impl Lifecycle {
 			let Some(presented) = cluster::Cluster::lan_credential(&request.path) else {
 				return Err(StatusError {
 					status: http::StatusCode::FORBIDDEN,
-					refusal: Refusal::Lan,
+					refusal: Some(Refusal::Lan),
 					source: anyhow::anyhow!("LAN peer did not present a membership proof"),
 				});
 			};
@@ -264,14 +283,14 @@ impl Lifecycle {
 				Some(false) => {
 					return Err(StatusError {
 						status: http::StatusCode::FORBIDDEN,
-						refusal: Refusal::Lan,
+						refusal: Some(Refusal::Lan),
 						source: anyhow::anyhow!("LAN peer did not present this listener's membership proof"),
 					});
 				}
 				None => {
 					return Err(StatusError {
 						status: http::StatusCode::FORBIDDEN,
-						refusal: Refusal::Lan,
+						refusal: Some(Refusal::Lan),
 						source: anyhow::anyhow!("/.cluster request refused: LAN discovery is not enabled"),
 					});
 				}
@@ -280,7 +299,16 @@ impl Lifecycle {
 		if request.tls.is_some() {
 			tracing::debug!("client certificate verified; reported to the auth server");
 		}
-		let admitted = self.cluster.admit_session(&self.auth, request.clone()).await?;
+		let admitted = self
+			.cluster
+			.admit_session(&self.auth, request.clone())
+			.await
+			.map_err(|err| {
+				// Cluster admission owns this refusal; only local/drain refusals remain here.
+				let mut error = StatusError::from(err);
+				error.refusal = None;
+				error
+			})?;
 		let registration = self.sessions.as_ref().map(|sessions| sessions.register(request));
 		Ok((admitted, registration))
 	}
@@ -331,11 +359,7 @@ pub async fn supervise(
 		};
 		tokio::select! {
 			err = session.closed() => {
-				let reason = match &err {
-					moq_net::Error::Cancel => "closed".to_string(),
-					other => other.to_string(),
-				};
-				lease.close(reason, session_bytes(&session));
+				lease.close_session(&err, session_bytes(&session));
 				return Err(err.into());
 			}
 			why = lease.ended() => {
@@ -368,22 +392,84 @@ pub(crate) fn session_bytes(session: &moq_net::Session) -> moq_auth::Bytes {
 	}
 }
 
+/// Admission already started the stats session, so a failed SETUP reply ends it.
+/// A cause without a MoQ error is the transport's.
+pub(crate) fn setup_failed(stats: &moq_net::stats::Session, cause: Option<&moq_net::Error>) {
+	if let Some(kind) = cause.map_or(Some(moq_net::stats::Failure::Transport), failure) {
+		stats.fail(kind);
+	}
+}
+
+/// Close classification comes only from typed protocol and transport causes.
+pub(crate) fn failure(error: &moq_net::Error) -> Option<moq_net::stats::Failure> {
+	use moq_net::stats::Failure;
+	use moq_net::{Error, SessionError};
+	match error {
+		Error::Cancel
+		| Error::Closed
+		| Error::GoingAway
+		| Error::SessionClosed
+		| Error::Session(SessionError::Cancel) => None,
+		Error::IdleTimeout => Some(Failure::IdleTimeout),
+		Error::Transport(_) => Some(Failure::Transport),
+		_ => Some(Failure::Application),
+	}
+}
+
 #[cfg(all(test, target_os = "linux", feature = "_uring"))]
 #[path = "../tests/integration/logs.rs"]
 mod logs;
 
-#[cfg(all(test, target_os = "linux", feature = "_uring"))]
+#[cfg(test)]
 mod tests {
 	use super::*;
-	use tracing_subscriber::layer::SubscriberExt;
+	use moq_net::{Error, SessionError, stats::Failure};
 
-	use super::logs;
+	#[test]
+	fn a_failed_setup_reply_ends_the_admitted_session_by_its_cause() {
+		let outcome = |cause: Option<&Error>| {
+			let registry = moq_net::stats::Registry::new(Default::default());
+			let stats = registry.tier(moq_net::stats::Tier::default()).session("root");
+			setup_failed(&stats, cause);
+			drop(stats);
+			registry.snapshot().sessions()[0].1.sessions_failed
+		};
+		assert_eq!(outcome(Some(&Error::Cancel)), Default::default());
+		assert_eq!(outcome(None).count(Failure::Transport), 1);
+		assert_eq!(outcome(Some(&Error::IdleTimeout)).count(Failure::IdleTimeout), 1);
+		assert_eq!(outcome(Some(&Error::Timeout)).count(Failure::Application), 1);
+	}
+
+	#[test]
+	fn clean_closes_are_not_failures_and_typed_causes_keep_their_kind() {
+		for error in [
+			Error::Cancel,
+			Error::Closed,
+			Error::GoingAway,
+			Error::SessionClosed,
+			Error::Session(SessionError::Cancel),
+		] {
+			assert_eq!(failure(&error), None);
+		}
+		assert_eq!(failure(&Error::IdleTimeout), Some(Failure::IdleTimeout));
+		assert_eq!(
+			failure(&Error::Transport("idle timeout".into())),
+			Some(Failure::Transport),
+			"messages never choose the kind"
+		);
+		assert_eq!(
+			failure(&Error::Session(SessionError::App(42))),
+			Some(Failure::Application)
+		);
+	}
 
 	/// A panic in the ring's supervision, after the worker handed it to the shared runtime, still
 	/// logs the connection's close.
+	#[cfg(all(target_os = "linux", feature = "_uring"))]
 	#[tokio::test(start_paused = true)]
 	async fn shared_supervision_panic_logs_the_connection_close() {
-		let logs = logs::Logs::default();
+		use tracing_subscriber::layer::SubscriberExt;
+		let logs = super::logs::Logs::default();
 		let subscriber = tracing_subscriber::fmt()
 			.with_ansi(false)
 			.with_writer(logs.clone())
