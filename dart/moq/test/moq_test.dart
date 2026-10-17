@@ -443,7 +443,7 @@ void main() {
     final catalog = await catalogs.next().timeout(timeout);
     final decoder = await moq_video.Consumer.subscribe(
       broadcast: consumer,
-      name: 'camera',
+      id: 'camera',
       catalogVideo: catalog!.video['camera']!,
       output: moq_video.DecoderOutput(),
     ).timeout(timeout);

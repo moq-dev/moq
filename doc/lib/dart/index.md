@@ -99,7 +99,7 @@ final remote = await moq.requestBroadcast('live/camera');
 final renditions = await media.CatalogConsumer.subscribe(broadcast: remote);
 final decoder = await video.Consumer.subscribe(
   broadcast: remote,
-  name: 'camera',
+  id: 'camera',
   catalogVideo: (await renditions.next())!.video['camera']!,
   output: video.DecoderOutput(),
 );
