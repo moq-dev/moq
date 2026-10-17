@@ -191,14 +191,15 @@ impl Import {
 	fn write_frames(&mut self, frames: impl IntoIterator<Item = Frame>) -> Result<()> {
 		for frame in frames {
 			if frame.keyframe {
-				// HDR metadata first, so a keyframe that also configures publishes once.
 				let hdr =
 					crate::codec::color::access_unit(&frame.payload, self.length_size, 1, |h| h & 0x1f == NAL_TYPE_SEI);
-				self.catalog.hdr(&mut self.track, hdr)?;
 				// avc1 config arrives out-of-band via initialize(); avc3 carries the SPS inline.
-				if self.length_size.is_none()
-					&& let Some(sps) = find_sps(&frame.payload)
-				{
+				let sps = self.length_size.is_none().then(|| find_sps(&frame.payload)).flatten();
+				// A new SPS starts a coded sequence whose HDR metadata replaces the last one's. It goes
+				// first, so a keyframe that also configures publishes once.
+				let sequence = sps.as_ref().is_some_and(|sps| self.last_sps.as_ref() != Some(sps));
+				self.catalog.hdr(&mut self.track, hdr, sequence)?;
+				if let Some(sps) = sps {
 					self.configure_from_sps(&sps)?;
 				}
 			}
@@ -341,6 +342,41 @@ mod tests {
 			(color.mastering, color.content_light),
 			(hdr.mastering, hdr.content_light)
 		);
+	}
+
+	/// HDR metadata merges across keyframes of one coded sequence, and a new SPS drops it, so an
+	/// HDR-to-SDR switch never keeps stale HDR10 values.
+	#[tokio::test(start_paused = true)]
+	async fn a_new_sps_drops_stale_hdr_metadata() {
+		use crate::codec::h264::fixtures::{PPS, SEI_CONTENT_LIGHT, SEI_MASTERING, SPS_BT709, SPS_HDR10};
+
+		let idr: &[u8] = &[0x65, 0x88, 0x84, 0x21];
+		let (track, catalog) = setup("video");
+		let mut import = Import::new(track, catalog.reserve(), Default::default()).unwrap();
+		let mut split = Split::new();
+		let mut keyframe = |ms: u64, nals: &[&[u8]]| {
+			let mut annexb = BytesMut::new();
+			for nal in nals {
+				annexb.extend_from_slice(&[0, 0, 0, 1]);
+				annexb.extend_from_slice(nal);
+			}
+			let pts = moq_net::Timestamp::from_millis(ms).unwrap();
+			let mut frames = split.decode(&annexb, pts).expect("split keyframe");
+			frames.extend(split.flush(pts).expect("flush keyframe"));
+			import.decode(frames).expect("decode keyframe");
+			catalog.snapshot().video.renditions["video"]
+				.color
+				.clone()
+				.expect("colour")
+		};
+
+		let color = keyframe(0, &[SPS_HDR10, PPS, SEI_MASTERING, SEI_CONTENT_LIGHT, idr]);
+		assert!(color.mastering.is_some());
+		let color = keyframe(40, &[SPS_HDR10, PPS, idr]);
+		assert!(color.mastering.is_some(), "the same sequence keeps its metadata");
+		let color = keyframe(80, &[SPS_BT709, PPS, idr]);
+		assert_eq!(color.primaries, Some(1));
+		assert_eq!((color.mastering, color.content_light), (None, None));
 	}
 
 	/// The stream outranks the caller's hint, which only fills what the stream leaves unsaid.

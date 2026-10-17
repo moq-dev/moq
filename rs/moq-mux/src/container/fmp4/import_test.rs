@@ -2348,3 +2348,33 @@ fn vp8_color_round_trips_through_vpcc() {
 	let color = catalog.video.renditions.values().next().unwrap().color.clone().unwrap();
 	assert_eq!((color.primaries, color.transfer, color.matrix), (None, None, None));
 }
+
+/// A VP9 codec string holding a container's placeholder BT.709 does not contradict the resolved
+/// colour: export writes the catalog colour into vpcC too, so a reimport keeps it.
+#[test]
+fn vp9_vpcc_carries_the_resolved_color() {
+	use hang::catalog::{VP9, VideoConfig};
+
+	let mut config = VideoConfig::new(VP9 {
+		profile: 0,
+		level: 0,
+		bit_depth: 8,
+		chroma_subsampling: 1,
+		color_primaries: 1,
+		transfer_characteristics: 1,
+		matrix_coefficients: 1,
+		full_range: false,
+	});
+	config.coded_width = Some(64);
+	config.coded_height = Some(64);
+	config.color = Some(color(9, 16, 9, false));
+	let trak = super::synthesize_video_trak(1, 90_000, &config, None).unwrap();
+	let trex = mp4_atom::Trex {
+		track_id: 1,
+		default_sample_description_index: 1,
+		..Default::default()
+	};
+	let catalog = run_fmp4(&super::encode_init(None, vec![trak], vec![trex]).unwrap());
+	let video = catalog.video.renditions.values().next().unwrap();
+	assert_eq!(video.color, Some(color(9, 16, 9, false)));
+}

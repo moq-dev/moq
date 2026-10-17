@@ -1166,6 +1166,18 @@ fn colour_element_round_trips() {
 	let MatroskaSpec::Colour(Master::Full(children)) = super::export::matroska_colour(&color).unwrap() else {
 		panic!("expected a full Colour element");
 	};
-	assert_eq!(super::import::matroska_color(&children), Some(color));
+	assert_eq!(super::import::matroska_color(&children).unwrap(), Some(color));
 	assert_eq!(super::export::matroska_colour(&hang::catalog::Color::default()), None);
+}
+
+/// A Colour value with no catalog representation is refused rather than clamped or dropped.
+#[test]
+fn unrepresentable_colour_is_refused() {
+	for child in [
+		MatroskaSpec::MaxCLL(70_000),
+		MatroskaSpec::MaxFALL(65_536),
+		MatroskaSpec::Primaries(300),
+	] {
+		assert!(super::import::matroska_color(&[child]).is_err());
+	}
 }

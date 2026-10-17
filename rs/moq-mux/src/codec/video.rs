@@ -104,7 +104,20 @@ impl Catalog {
 	}
 
 	/// Overlay the HDR metadata a keyframe carried in band, republishing the last config if it changed.
-	pub(crate) fn hdr(&mut self, track: &mut Track, hdr: crate::codec::color::Hdr) -> crate::Result<()> {
+	///
+	/// `sequence` marks a keyframe that starts a new coded sequence (a new SPS or sequence header):
+	/// its metadata replaces the old rather than merging, so an HDR-to-SDR switch drops stale HDR10
+	/// values, and it is left for the new config's publish.
+	pub(crate) fn hdr(
+		&mut self,
+		track: &mut Track,
+		hdr: crate::codec::color::Hdr,
+		sequence: bool,
+	) -> crate::Result<()> {
+		if sequence {
+			self.hdr = hdr;
+			return Ok(());
+		}
 		let mut next = self.hdr;
 		next.update(hdr);
 		if next == self.hdr {

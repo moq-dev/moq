@@ -527,7 +527,8 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			unsupported => return Err(Error::UnsupportedCodec(Box::new(unsupported.clone())).into()),
 		};
 		// The codec config outranks the colr box a muxer added, which only fills its gaps.
-		crate::codec::color::fill(&mut config.color, colr.and_then(super::colr_color).as_ref(), "colr");
+		let colr = colr.map(super::colr_color).transpose()?.flatten();
+		crate::codec::color::fill(&mut config.color, colr.as_ref(), "colr");
 
 		Ok(config)
 	}

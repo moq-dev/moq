@@ -72,6 +72,10 @@ pub enum Error {
 	#[error("invalid AV1CodecConfigurationRecord")]
 	InvalidAv1c,
 
+	/// A `Colour` element value has no catalog representation.
+	#[error("invalid Colour {0}")]
+	InvalidColour(&'static str),
+
 	#[error("MKV track layout changed after header was emitted: track '{0}' added")]
 	HeaderAddedTrack(String),
 

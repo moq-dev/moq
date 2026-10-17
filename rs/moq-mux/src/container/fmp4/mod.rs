@@ -113,6 +113,10 @@ pub enum Error {
 	#[error("unknown codec: {0:?}")]
 	UnknownCodec(mp4_atom::FourCC),
 
+	/// A `colr` box code point past H.273's 255.
+	#[error("invalid colr code point: {0}")]
+	InvalidColr(u16),
+
 	#[error("unsupported codec: {0:?}")]
 	UnsupportedCodec(Box<mp4_atom::Codec>),
 
@@ -745,8 +749,9 @@ fn trun_duration(duration: Timestamp, timescale: moq_net::Timescale) -> Result<u
 /// from the bitstream still carries them. VP8 carries no out-of-band config, so
 /// `description` is `None` for it.
 /// The colour an ISOBMFF `colr` box signals. Only `nclx` carries H.273 code points and a range;
-/// QuickTime's `nclc` has no range, and an ICC profile has no code points at all.
-pub(crate) fn colr_color(colr: &mp4_atom::Colr) -> Option<hang::catalog::Color> {
+/// QuickTime's `nclc` has no range, and an ICC profile has no code points at all. A code point
+/// past 255 has no H.273 meaning, so it is refused.
+pub(crate) fn colr_color(colr: &mp4_atom::Colr) -> Result<Option<hang::catalog::Color>> {
 	let mp4_atom::Colr::Nclx {
 		colour_primaries,
 		transfer_characteristics,
@@ -754,16 +759,15 @@ pub(crate) fn colr_color(colr: &mp4_atom::Colr) -> Option<hang::catalog::Color> 
 		full_range_flag,
 	} = *colr
 	else {
-		return None;
+		return Ok(None);
 	};
-	// A code point past 255 is reserved in H.273, so it reads as unspecified.
-	let code = |value: u16| u8::try_from(value).unwrap_or(2);
-	crate::codec::color::cicp(
-		code(colour_primaries),
-		code(transfer_characteristics),
-		code(matrix_coefficients),
+	let code = |value: u16| u8::try_from(value).map_err(|_| Error::InvalidColr(value));
+	Ok(crate::codec::color::cicp(
+		code(colour_primaries)?,
+		code(transfer_characteristics)?,
+		code(matrix_coefficients)?,
 		Some(full_range_flag),
-	)
+	))
 }
 
 /// The `nclx` box for a catalog colour, or `None` when it has no code point or range to carry.
@@ -779,6 +783,19 @@ fn color_colr(color: Option<&hang::catalog::Color>) -> Option<mp4_atom::Colr> {
 		matrix_coefficients: color.matrix.unwrap_or(2).into(),
 		full_range_flag: color.full_range.unwrap_or(false),
 	})
+}
+
+/// Overlay the catalog colour on a `vpcC`, so it never contradicts the `colr` box written beside
+/// it; a VP9 codec string may still carry a container's placeholder BT.709.
+fn vpcc_color(mut vpcc: mp4_atom::VpcC, color: Option<&hang::catalog::Color>) -> mp4_atom::VpcC {
+	let Some(color) = color else {
+		return vpcc;
+	};
+	vpcc.color_primaries = color.primaries.unwrap_or(vpcc.color_primaries);
+	vpcc.transfer_characteristics = color.transfer.unwrap_or(vpcc.transfer_characteristics);
+	vpcc.matrix_coefficients = color.matrix.unwrap_or(vpcc.matrix_coefficients);
+	vpcc.video_full_range_flag = color.full_range.unwrap_or(vpcc.video_full_range_flag);
+	vpcc
 }
 
 pub(crate) fn synthesize_video_trak(
@@ -870,13 +887,13 @@ pub(crate) fn synthesize_video_trak(
 		}),
 		VideoCodec::VP8 => mp4_atom::Codec::from(mp4_atom::Vp08 {
 			visual,
-			vpcc: crate::codec::vp8::vpcc(config.color.as_ref()),
+			vpcc: vpcc_color(crate::codec::vp8::vpcc(), config.color.as_ref()),
 			colr,
 			..Default::default()
 		}),
 		VideoCodec::VP9(vp9) => mp4_atom::Codec::from(mp4_atom::Vp09 {
 			visual,
-			vpcc: crate::codec::vp9::vpcc(vp9),
+			vpcc: vpcc_color(crate::codec::vp9::vpcc(vp9), config.color.as_ref()),
 			colr,
 			..Default::default()
 		}),

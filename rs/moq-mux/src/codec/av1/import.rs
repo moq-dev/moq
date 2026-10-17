@@ -243,9 +243,12 @@ impl Import {
 	fn write_frames(&mut self, frames: impl IntoIterator<Item = Frame>) -> Result<()> {
 		for frame in frames {
 			if frame.keyframe {
-				// HDR metadata first, so a keyframe that also configures publishes once.
-				self.catalog.hdr(&mut self.track, find_hdr(&frame.payload))?;
-				if let Some(seq) = find_sequence_header(&frame.payload) {
+				let seq = find_sequence_header(&frame.payload);
+				// A new sequence header starts a coded sequence whose HDR metadata replaces the last
+				// one's. It goes first, so a keyframe that also configures publishes once.
+				let sequence = seq.as_ref().is_some_and(|seq| self.last_seq.as_ref() != Some(seq));
+				self.catalog.hdr(&mut self.track, find_hdr(&frame.payload), sequence)?;
+				if let Some(seq) = seq {
 					self.configure_from_seq(&seq)?;
 				}
 			}

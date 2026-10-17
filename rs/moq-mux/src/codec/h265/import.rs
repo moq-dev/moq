@@ -194,17 +194,18 @@ impl Import {
 	fn write_frames(&mut self, frames: impl IntoIterator<Item = Frame>) -> Result<()> {
 		for frame in frames {
 			if frame.keyframe {
-				// HDR metadata first, so a keyframe that also configures publishes once.
 				let hdr = crate::codec::color::access_unit(&frame.payload, self.length_size, 2, |h| {
 					nal_unit_type(h) == scuffle_h265::NALUnitType::PrefixSeiNut
 				});
-				self.catalog.hdr(&mut self.track, hdr)?;
 				// hvc1 config arrives out-of-band via initialize(); hev1 carries the SPS inline.
 				// Scanning an hvc1 payload as Annex-B would misread a length prefix as a start
 				// code (a 322-byte NAL prefixes as `00 00 01 42`, an SPS NAL header).
-				if self.length_size.is_none()
-					&& let Some(sps) = find_sps(&frame.payload)
-				{
+				let sps = self.length_size.is_none().then(|| find_sps(&frame.payload)).flatten();
+				// A new SPS starts a coded sequence whose HDR metadata replaces the last one's. It goes
+				// first, so a keyframe that also configures publishes once.
+				let sequence = sps.as_ref().is_some_and(|sps| self.last_sps.as_ref() != Some(sps));
+				self.catalog.hdr(&mut self.track, hdr, sequence)?;
+				if let Some(sps) = sps {
 					self.configure_from_sps(&sps)?;
 				}
 			}
