@@ -117,16 +117,27 @@ pub struct Catalog<E = ()> {
 }
 
 /// A whole broadcast whose catalog describes its own renditions.
+///
+/// Marked `#[non_exhaustive]` so optional fields can be added later. External callers build one
+/// with [`Contribution::new`].
 #[serde_with::serde_as]
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct Contribution {
 	/// Reference resolved relative to the catalog broadcast.
 	pub broadcast: moq_net::path::RelativeOwned,
 
-	/// The publisher instance the contribution must resolve to, when known.
+	/// The publisher instance the contribution names, with a rendition `epoch`'s meaning.
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	#[serde_as(as = "Option<serde_with::DisplayFromStr>")]
 	pub epoch: Option<moq_net::Epoch>,
+}
+
+impl Contribution {
+	/// A contribution at `broadcast`, accepting whichever instance resolves.
+	pub fn new(broadcast: moq_net::path::RelativeOwned) -> Self {
+		Self { broadcast, epoch: None }
+	}
 }
 
 impl Catalog<()> {

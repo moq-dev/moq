@@ -154,9 +154,7 @@ Each entry MUST contain a string `broadcast`, resolved relative to this catalog'
 A malformed entry or a reference escaping the root MUST cause the catalog to be rejected.
 
 Listing an entry MUST NOT subscribe to the contribution; a consumer opens its catalog only upon explicit selection.
-A selected contribution stays on the first publisher instance it resolves for the referring catalog instance.
-When `epoch` is present, a route proving another instance MUST fail the selection; without it, a route carrying no Epoch cannot authorize stitching onto a replacement.
-A later catalog update MUST NOT retarget a resolved selection, while a new referring catalog instance resolves it afresh.
+A selected contribution resolves like a rendition's reference, under the same rules for `epoch` and restarts ({{field-epoch}}).
 A contribution's rendition identifiers belong to that contribution and MUST NOT replace identifiers in the referring catalog.
 An unavailable contribution does not invalidate the referring catalog.
 References are not recursively expanded: each further contribution requires an explicit selection.

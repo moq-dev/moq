@@ -99,7 +99,21 @@ it("refuses malformed and escaping contribution entries", () => {
 	expect(() => Catalog.checkResolvable(catalog, Path.from("room/main.hang"))).toThrow(Catalog.EscapingBroadcast);
 });
 
-it("pins the first resolved contribution through catalog retargeting and removal", async () => {
+const settle = async (): Promise<void> => {
+	for (let i = 0; i < 5; i++) await new Promise((resolve) => setTimeout(resolve, 0));
+};
+
+async function quietly<T>(fn: () => Promise<T>): Promise<T> {
+	const warn = console.warn;
+	console.warn = () => {};
+	try {
+		return await fn();
+	} finally {
+		console.warn = warn;
+	}
+}
+
+it("tracks the contribution entry without reopening it on unrelated catalog updates", async () => {
 	const origin = new Origin.Producer();
 	const main = origin.createBroadcast(Path.from("room/main.hang"));
 	main.announce();
@@ -117,43 +131,40 @@ it("pins the first resolved contribution through catalog retargeting and removal
 		catalog,
 		announced: false,
 	});
-	const selected = new Signal<Broadcast | undefined>(undefined);
-	let selections = 0;
-	const owner = new Effect((effect) => {
-		selections += 1;
-		effect.set(selected, parent.contribution(effect, "extra"));
-	});
+	const owner = new Effect();
 	try {
-		const child = await selected.changed();
-		if (!child) throw new Error("selection did not create a child");
+		const child = parent.contribution(owner, "extra");
 		await child.out.catalog.changed();
 		const active = child.out.active.peek();
+		expect(active?.path).toBe(Path.from("room/first.hang"));
+
+		// An update that leaves the entry alone keeps the same request.
 		let withdrawals = 0;
-		const dispose = first.demand().used.subscribe((used) => {
-			if (!used) withdrawals += 1;
-		});
-		owner.cleanup(dispose);
+		owner.cleanup(
+			first.demand().used.subscribe((used) => {
+				if (!used) withdrawals += 1;
+			}),
+		);
 		catalog.set(
 			Catalog.RootSchema.parse({
 				contributions: { extra: { broadcast: "./first.hang" }, other: { broadcast: "./other.hang" } },
 				metadata: "changed",
 			}),
 		);
-		await parent.out.catalog.changed();
-		// Once resolved, neither a changed path nor removing the entry retargets this selection.
-		catalog.set(Catalog.RootSchema.parse({ contributions: { extra: { broadcast: "./second.hang" } } }));
-		await parent.out.catalog.changed();
-		expect(selections).toBe(1);
-		expect(selected.peek()).toBe(child);
-		expect(active?.path).toBe(Path.from("room/first.hang"));
-		expect(child.out.active.peek()?.path).toBe(Path.from("room/first.hang"));
-		expect(second.demand().used.peek()).toBe(false);
+		await settle();
+		expect(child.out.active.peek()).toBe(active);
 		expect(withdrawals).toBe(0);
+
+		// A changed path is a different reference, so the child follows it.
+		catalog.set(Catalog.RootSchema.parse({ contributions: { extra: { broadcast: "./second.hang" } } }));
+		await settle();
+		expect(child.out.active.peek()?.path).toBe(Path.from("room/second.hang"));
+
+		// Removing the entry disables the child.
 		catalog.set(Catalog.RootSchema.parse({}));
-		await parent.out.catalog.changed();
-		expect(child.in.enabled.peek()).toBe(true);
-		expect(child.out.active.peek()?.path).toBe(Path.from("room/first.hang"));
-		expect(selections).toBe(1);
+		await settle();
+		expect(child.in.enabled.peek()).toBe(false);
+		expect(child.out.active.peek()).toBeUndefined();
 	} finally {
 		owner.close();
 		parent.close();
@@ -161,18 +172,69 @@ it("pins the first resolved contribution through catalog retargeting and removal
 	}
 });
 
-it("pins and validates a contribution epoch before reading its catalog", async () => {
+it("follows a restarted contribution only for an entry that names no epoch", async () => {
 	const origin = new Origin.Producer();
 	const main = origin.createBroadcast(Path.from("room/main.hang"));
 	main.announce();
-	const contribution = origin.createBroadcast(Path.from("room/extra.hang"));
-	const epoch = Epoch.mint();
-	contribution.announce({ epoch });
-	contribution.createTrack(Catalog.TRACK).writeFrame({ payload: new TextEncoder().encode("{}") });
-	const other = Epoch.mint();
-	const catalog = new Signal(
-		Catalog.RootSchema.parse({ contributions: { extra: { broadcast: "./extra.hang", epoch } } }),
-	);
+	const [oldEpoch, newEpoch] = [Epoch.mint(), Epoch.mint()];
+	const old = origin.createBroadcast(Path.from("room/extra.hang"));
+	old.announce({ epoch: oldEpoch });
+	const parent = new Broadcast({
+		origin,
+		name: Path.from("room/main.hang"),
+		catalogFormat: "manual",
+		catalog: Catalog.RootSchema.parse({
+			contributions: {
+				following: { broadcast: "./extra.hang" },
+				pinned: { broadcast: "./extra.hang", epoch: oldEpoch },
+			},
+		}),
+	});
+	const owner = new Effect();
+	try {
+		const following = parent.contribution(owner, "following");
+		const pinned = parent.contribution(owner, "pinned");
+		await settle();
+		expect(following.out.active.peek()?.epoch).toBe(oldEpoch);
+		expect(pinned.out.active.peek()?.epoch).toBe(oldEpoch);
+
+		// The announcement is the online signal: the plain entry follows the restart, while the
+		// one naming the old instance goes offline rather than reading the new one.
+		const replacement = origin.createBroadcast(Path.from("room/extra.hang"));
+		replacement.announce({ epoch: newEpoch });
+		await quietly(settle);
+		expect(following.out.active.peek()?.epoch).toBe(newEpoch);
+		expect(pinned.out.active.peek()).toBeUndefined();
+		expect(pinned.out.status.peek()).toBe("offline");
+		replacement.close();
+	} finally {
+		owner.close();
+		parent.close();
+		old.close();
+		origin.close();
+	}
+});
+
+it("never reads a contribution proven to be another epoch, but reads an epochless route", async () => {
+	const origin = new Origin.Producer();
+	const main = origin.createBroadcast(Path.from("room/main.hang"));
+	main.announce();
+	const served = Epoch.mint();
+	const proven = origin.createBroadcast(Path.from("room/proven.hang"));
+	proven.announce({ epoch: served });
+	const track = proven.createTrack(Catalog.TRACK);
+	const plain = origin.createBroadcast(Path.from("room/plain.hang"));
+	plain.announce();
+	plain.createTrack(Catalog.TRACK).writeFrame({ payload: new TextEncoder().encode("{}") });
+	const named = Epoch.mint();
+	const contributions = (epoch: Epoch.Valid) =>
+		Catalog.RootSchema.parse({
+			contributions: {
+				proven: { broadcast: "./proven.hang", epoch },
+				plain: { broadcast: "./plain.hang", epoch: named },
+			},
+		});
+	const catalog = new Signal(contributions(named));
 	const parent = new Broadcast({
 		origin,
 		name: Path.from("room/main.hang"),
@@ -182,47 +244,19 @@ it("pins and validates a contribution epoch before reading its catalog", async (
 	});
 	const owner = new Effect();
 	try {
-		const child = parent.contribution(owner, "extra");
-		await child.out.catalog.changed();
-		expect(child.out.active.peek()?.epoch).toBe(epoch);
-		expect(child.in.epoch.peek()).toBe(epoch);
-
-		catalog.set(
-			Catalog.RootSchema.parse({ contributions: { extra: { broadcast: "./extra.hang", epoch: other } } }),
-		);
-		await parent.out.catalog.changed();
-		expect(child.in.epoch.peek()).toBe(epoch);
-		expect(child.out.active.peek()?.epoch).toBe(epoch);
-	} finally {
-		owner.close();
-		parent.close();
-		origin.close();
-	}
-});
-
-it("refuses a contribution served by another known epoch", async () => {
-	const origin = new Origin.Producer();
-	const main = origin.createBroadcast(Path.from("room/main.hang"));
-	main.announce();
-	const contribution = origin.createBroadcast(Path.from("room/extra.hang"));
-	contribution.announce({ epoch: Epoch.mint() });
-	const track = contribution.createTrack(Catalog.TRACK);
-	const parent = new Broadcast({
-		origin,
-		name: Path.from("room/main.hang"),
-		catalogFormat: "manual",
-		catalog: Catalog.RootSchema.parse({
-			contributions: { extra: { broadcast: "./extra.hang", epoch: Epoch.mint() } },
-		}),
-		announced: false,
-	});
-	const owner = new Effect();
-	try {
-		const child = parent.contribution(owner, "extra");
-		await child.out.error.changed();
-		expect(child.out.active.peek()).toBeUndefined();
-		expect(contribution.demand().used.peek()).toBe(false);
+		const refused = parent.contribution(owner, "proven");
+		const accepted = parent.contribution(owner, "plain");
+		await quietly(settle);
+		expect(refused.out.active.peek()).toBeUndefined();
+		expect(refused.out.error.peek()).toBeUndefined();
 		expect(track.demand().used.peek()).toBe(false);
+		// An epochless route cannot prove its instance, so the epoch cannot refuse it.
+		expect(accepted.out.active.peek()?.path).toBe(Path.from("room/plain.hang"));
+
+		// A catalog update naming the served epoch admits the instance the request already holds.
+		catalog.set(contributions(served));
+		await settle();
+		expect(refused.out.active.peek()?.epoch).toBe(served);
 	} finally {
 		owner.close();
 		parent.close();

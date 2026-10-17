@@ -89,7 +89,8 @@ export type BroadcastInput = {
 	// The broadcast name.
 	name: Getter<Moq.Path.Valid>;
 
-	// The publisher instance to request. Omitted for an unpinned broadcast.
+	// The publisher instance to read: a broadcast proven to be another one reads as offline.
+	// A route without an epoch cannot prove one, so there it is best effort. Omitted to accept any.
 	epoch: Getter<Moq.Epoch.Valid | undefined>;
 
 	// Whether to wait for the broadcast to be announced before subscribing.
@@ -252,12 +253,13 @@ export class Broadcast {
 		if (!origin) return;
 
 		const name = effect.get(this.in.name);
-		const epoch = effect.get(this.in.epoch);
 		const announced = effect.get(this.in.announced);
 
+		// The epoch is checked against the stamped one rather than passed to the origin, which
+		// would refuse every epochless route and so break best effort on older sessions.
 		let request: Moq.Origin.Requesting;
 		try {
-			request = origin.request(name, { announced, epoch });
+			request = origin.request(name, { announced });
 		} catch (err) {
 			effect.set(this.#out.error, err instanceof Error ? err : new Error(String(err)), undefined);
 			return;
@@ -267,14 +269,13 @@ export class Broadcast {
 		effect.run((nested) => {
 			const active = nested.get(request.active);
 			if (active) resolved = true;
+			const epoch = nested.get(this.in.epoch);
+			if (active && epoch !== undefined && active.epoch !== undefined && active.epoch !== epoch) {
+				console.warn("ignoring broadcast: it serves another epoch", name, active.epoch, epoch);
+				return;
+			}
 			nested.set(this.#out.active, active, undefined);
 		});
-		if (epoch !== undefined) {
-			effect.run((nested) => {
-				if (!nested.get(request.unroutable)) return;
-				nested.set(this.#out.error, new Error(`broadcast ${name} does not serve epoch ${epoch}`), undefined);
-			});
-		}
 		effect.run((nested) => {
 			const closed = nested.get(request.closed);
 			if (!closed) return;
@@ -311,15 +312,7 @@ export class Broadcast {
 			const catalog = effect.get(this.in.catalog);
 			let accepted: Catalog.Root | undefined;
 			try {
-				accepted =
-					catalog &&
-					Catalog.checkResolvable(
-						Catalog.checkRenditions({
-							...catalog,
-							contributions: Catalog.RootSchema.shape.contributions.parse(catalog.contributions),
-						}),
-						name,
-					);
+				accepted = catalog && Catalog.checkResolvable(Catalog.checkRenditions(catalog), name);
 			} catch (err) {
 				console.error("rejecting catalog", name, err);
 			}
@@ -457,7 +450,9 @@ export class Broadcast {
 
 	/**
 	 * Select a whole contribution, opening its catalog only while the caller owns this effect.
-	 * An absent entry leaves the child disabled; adding or replacing it updates the child.
+	 * The child tracks the catalog entry and resolves like a rendition's reference (see
+	 * `relativeBroadcast`): without an `epoch` it follows restarts, and with one it is offline
+	 * while its broadcast proves another instance. An absent entry leaves the child disabled.
 	 * Wire the returned broadcast into a media source inside a nested effect. Its rendition
 	 * IDs stay local to that broadcast, so they never replace the parent catalog's IDs.
 	 *
@@ -473,37 +468,20 @@ export class Broadcast {
 	 * ```
 	 */
 	contribution(effect: Effect, id: string): Broadcast {
-		type Selection = { parent: Moq.Broadcast.Consumer | undefined; name: Moq.Path.Valid; epoch?: Moq.Epoch.Valid };
-		const pinned = new Signal<Selection | undefined>(undefined);
-		const selected = effect.computed((run): Selection | undefined => {
-			const parent = run.get(this.out.active);
-			const existing = run.get(pinned);
-			if (existing && existing.parent === parent) return existing;
-			const catalog = run.get(this.out.catalog);
-			const entry = catalog?.contributions?.[id];
-			if (!entry || !Object.hasOwn(catalog?.contributions ?? {}, id)) return undefined;
-			const name = Path.tryResolve(run.get(this.in.name), entry.broadcast);
-			if (name === undefined) throw new Catalog.EscapingBroadcast(entry.broadcast);
-			return { parent, name, epoch: entry.epoch };
+		// Deduplicated, so a catalog update that leaves this entry alone keeps the child's request.
+		const target = effect.computed((run): { name: Moq.Path.Valid; epoch?: Moq.Epoch.Valid } | undefined => {
+			const contributions = run.get(this.out.catalog)?.contributions;
+			if (!contributions || !Object.hasOwn(contributions, id)) return undefined;
+			const { broadcast, epoch } = contributions[id];
+			const name = Path.tryResolve(run.get(this.in.name), broadcast);
+			return name === undefined ? undefined : { name, epoch };
 		});
 		const child = new Broadcast({
 			origin: this.in.origin,
-			name: new Derived([selected], (selection) => selection?.name ?? Path.empty()),
-			epoch: new Derived([selected], (selection) => selection?.epoch),
-			enabled: new Derived(
-				[selected, this.in.enabled],
-				(selection, enabled) => selection !== undefined && enabled,
-			),
-			// A contribution follows no replacement. With an explicit epoch the request enforces it;
-			// without one, a blind request retains the first resolved publisher handle.
-			announced: false,
-		});
-		effect.run((run) => {
-			const active = run.get(child.out.active);
-			const selection = run.get(selected);
-			const existing = run.get(pinned);
-			if (!active || !selection || existing?.parent === selection.parent) return;
-			pinned.set({ ...selection, epoch: selection.epoch ?? active.epoch });
+			name: new Derived([target], (target) => target?.name ?? Path.empty()),
+			epoch: new Derived([target], (target) => target?.epoch),
+			enabled: new Derived([target, this.in.enabled], (target, enabled) => target !== undefined && enabled),
+			announced: this.in.announced,
 		});
 		effect.cleanup(() => child.close());
 		return child;
