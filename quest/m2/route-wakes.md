@@ -83,5 +83,4 @@ Public API: none. Wire: none.
 ## Related
 
 - [Routes and announces](/quest/m1/cluster-routing/routes.md) - the identity and selection views the index serves
-- [Front deadlines](/quest/m2/front-deadline-index.md) - each spurious wake also pays that per-track poll and deadline scan
 - [Front parking](/quest/m2/origin-front-parks.md) - replaces the `routed_broadcast` watch loop this wakes

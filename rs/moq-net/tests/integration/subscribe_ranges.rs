@@ -35,7 +35,7 @@ fn write_group(track: &moq_net::track::Producer, sequence: u64) {
 
 /// The next group's sequence, or `None` once the track ends or nothing arrives in time.
 async fn next(sub: &mut moq_net::track::Subscriber) -> Option<u64> {
-	let group = moq_net_sim::timeout(TIMEOUT, sub.recv_group()).await.ok()?;
+	let group = moq_clock::timeout(TIMEOUT, sub.recv_group()).await.ok()?;
 	group.expect("recv_group").map(|group| group.sequence)
 }
 
@@ -94,11 +94,11 @@ async fn ahead_then_live(version: Option<&str>, relay: bool) -> (Vec<u64>, Vec<u
 			sessions.push(connect_mock(options).await);
 
 			let consumer = subscriber.consume();
-			moq_net_sim::timeout(TIMEOUT, consumer.routed("bcast"))
+			moq_clock::timeout(TIMEOUT, consumer.routed("bcast"))
 				.await
 				.expect("announce timeout")
 				.expect("routed");
-			moq_net_sim::timeout(TIMEOUT, consumer.request_broadcast("bcast", None))
+			moq_clock::timeout(TIMEOUT, consumer.request_broadcast("bcast", None))
 				.await
 				.expect("resolve timeout")
 				.expect("broadcast resolves")
@@ -106,11 +106,11 @@ async fn ahead_then_live(version: Option<&str>, relay: bool) -> (Vec<u64>, Vec<u
 	};
 
 	let mut ahead = subscribe(&remote, Subscription::default().with_groups(4..)).await;
-	moq_net_sim::timeout(TIMEOUT, track.demand().used())
+	moq_clock::timeout(TIMEOUT, track.demand().used())
 		.await
 		.expect("no subscriber appeared")
 		.unwrap();
-	moq_net_sim::sleep(Duration::from_millis(10)).await;
+	moq_clock::sleep(Duration::from_millis(10)).await;
 	let mut live = subscribe(&remote, Subscription::default().with_ranges([Range::live()])).await;
 
 	// The live subscriber reads group 3 before group 4 supersedes it.
@@ -126,7 +126,7 @@ async fn ahead_then_live(version: Option<&str>, relay: bool) -> (Vec<u64>, Vec<u
 
 /// A subscriber from group 4 merged with a live one doesn't floor the shared subscription
 /// at 4: the live one still gets group 3.
-#[moq_net_sim::test]
+#[moq_clock::test]
 async fn a_live_subscriber_merged_with_one_ahead_still_gets_the_newest_group() {
 	let want = (vec![4], vec![3, 4]);
 	let mut failures = Vec::new();

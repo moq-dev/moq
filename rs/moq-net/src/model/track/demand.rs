@@ -2,7 +2,7 @@
 use std::{collections::BTreeMap, sync::Arc, task::Poll, time::Duration};
 
 use super::super::subscription::union;
-use super::{Order, Range, Subscription, TrackState, clamp_combined};
+use super::{NewGroup, Order, Range, Subscription, TrackState, clamp_combined};
 
 #[derive(Default)]
 pub(super) struct Subscriptions {
@@ -14,6 +14,8 @@ pub(super) struct Subscriptions {
 	/// so readers sharing a range never pay for it.
 	union: Vec<Range>,
 	descending: usize,
+	/// Only the subscribers holding a request.
+	new_group: BTreeMap<NewGroup, usize>,
 	waiters: kio::WaiterList,
 }
 
@@ -28,16 +30,19 @@ impl Subscriptions {
 			} else {
 				Order::Descending
 			},
+			new_group: self.new_group.last_key_value().map(|(new_group, _)| *new_group),
 		})
 	}
 
-	pub(super) fn poll_changed(
+	/// Poll for the aggregate, as `view` sees it, to differ from `prev`.
+	pub(super) fn poll_changed<T: Clone + PartialEq>(
 		&mut self,
 		bound: Option<Duration>,
-		prev: &mut Option<Subscription>,
+		prev: &mut T,
+		view: impl Fn(Option<Subscription>) -> T,
 		waiter: &kio::Waiter,
-	) -> Poll<Option<Subscription>> {
-		let next = clamp_combined(self.combined(), bound);
+	) -> Poll<T> {
+		let next = view(clamp_combined(self.combined(), bound));
 		if next != *prev {
 			*prev = next.clone();
 			Poll::Ready(next)
@@ -58,6 +63,9 @@ impl Subscriptions {
 				reshaped |= remove(&mut self.ranges, *range);
 			}
 			self.descending -= usize::from(old.order == Order::Descending);
+			if let Some(new_group) = old.new_group {
+				remove(&mut self.new_group, new_group);
+			}
 			self.count -= 1;
 		}
 		if let Some(new) = new {
@@ -67,6 +75,9 @@ impl Subscriptions {
 				reshaped |= add(&mut self.ranges, *range);
 			}
 			self.descending += usize::from(new.order == Order::Descending);
+			if let Some(new_group) = new.new_group {
+				add(&mut self.new_group, new_group);
+			}
 			self.count += 1;
 		}
 		if reshaped {
@@ -131,7 +142,29 @@ impl Preferences {
 	}
 
 	pub(super) fn update(&self, next: Subscription) -> crate::Result<()> {
+		self.update_with(|_| next)
+	}
+
+	/// Drop a NEW_GROUP_REQUEST that `sequence` answers.
+	pub(super) fn answer_new_group(&self, sequence: u64) {
+		// Checked before taking the write, which wakes this channel's readers.
+		if !self
+			.read()
+			.new_group
+			.is_some_and(|new_group| sequence >= new_group.first)
+		{
+			return;
+		}
+		let _ = self.update_with(|value| Subscription {
+			new_group: value.new_group.filter(|new_group| sequence < new_group.first),
+			..value.clone()
+		});
+	}
+
+	/// Replace the preference with what `next` makes of it, under one write.
+	fn update_with(&self, next: impl FnOnce(&Subscription) -> Subscription) -> crate::Result<()> {
 		let mut value = self.0.value.write().map_err(|_| crate::Error::Closed)?;
+		let next = next(&value);
 		if *value == next {
 			return Ok(());
 		}
@@ -226,6 +259,10 @@ mod tests {
 				} else {
 					Order::Descending
 				},
+				new_group: rng
+					.random_bool(0.5)
+					.then(|| NewGroup::new(rng.random_range(0..8), Some(rng.random_range(0..8))))
+					.flatten(),
 			};
 			match (&mut slots[index], rng.random_range(0..3)) {
 				(slot @ None, _) => *slot = Some((producer.subscribe(next.clone()), next)),
@@ -243,7 +280,17 @@ mod tests {
 			for (_, value) in slots.iter().flatten() {
 				expected.add(value);
 			}
-			assert_eq!(producer.subscription(), expected.finish(), "operation {step}");
+			let expected = expected.finish();
+			assert_eq!(
+				producer.subscription(),
+				super::super::public(expected.clone()),
+				"operation {step}"
+			);
+			assert_eq!(
+				producer.new_group(),
+				super::super::new_group(expected),
+				"operation {step}"
+			);
 		}
 		drop(slots);
 		assert_eq!(producer.subscription(), None);

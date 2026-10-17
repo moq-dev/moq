@@ -216,6 +216,7 @@ fn route_failed(err: &Error) -> bool {
 	matches!(
 		err,
 		Error::Transport(_)
+			| Error::IdleTimeout
 			| Error::Session(_)
 			| Error::SessionClosed
 			| Error::GoingAway
@@ -263,7 +264,12 @@ impl Copy {
 	/// What this copy is asked for: the reader's own preferences, from no earlier than
 	/// where it was asked to start, and through no later than where it was replaced.
 	fn wire(&self, reader: &Subscription) -> Subscription {
-		reader.clamped(self.floor, self.end().map(Position::group))
+		let mut wire = reader.clamped(self.floor, self.end().map(Position::group));
+		// A replaced copy only finishes what it had, so a new group from it never arrives.
+		if self.until.is_some() {
+			wire.new_group = None;
+		}
+		wire
 	}
 
 	/// The first group past where this copy was replaced, if any: one replaced before
@@ -365,6 +371,17 @@ impl Subscriber {
 		match sub {
 			Some(sub) => sub.poll_start(waiter),
 			None => Poll::Ready(None),
+		}
+	}
+
+	/// Poll for sequences the serving copy gave up; see [`track::Subscriber::poll_drop`].
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	pub(crate) fn poll_drop(&mut self, waiter: &kio::Waiter) -> Poll<std::ops::Range<u64>> {
+		let mut reader = self.reader();
+		let sub = ready!(reader.poll_serving(waiter));
+		match sub {
+			Some(sub) => sub.poll_drop(waiter),
+			None => Poll::Pending,
 		}
 	}
 
@@ -642,8 +659,8 @@ impl Reader {
 				None | Some(Some(_)) => return Some(Poll::Ready(Ok(None))),
 				Some(None) => {}
 			},
-			// No front is left to replace the copy: the track ends as it does. A copy whose
-			// session closed locally ends it cleanly.
+			// No front is left to replace the copy: the track ends as it does. A locally
+			// closed copy ends it cleanly; a connection ending retains its session error.
 			Some(None) => match serving.map(&done) {
 				None => return Some(Poll::Ready(Err(Error::Dropped))),
 				Some(Some(Ok(()) | Err(Error::Closed))) => return Some(Poll::Ready(Ok(None))),
@@ -1641,9 +1658,9 @@ mod test {
 	/// arrives, so only the deadline wake can release the reader: against a cold route, and
 	/// against one whose copy already caches groups past the held one, so a cursor that
 	/// skips ahead cannot hide the stall.
-	#[test]
+	#[moq_clock::test]
 	#[cfg(feature = "async")]
-	fn an_untimed_group_no_route_continues_is_given_up_by_wall_clock() {
+	async fn an_untimed_group_no_route_continues_is_given_up_by_wall_clock() {
 		let untimed = || {
 			track::Producer::new(
 				Arc::new(broadcast::Info::default()),

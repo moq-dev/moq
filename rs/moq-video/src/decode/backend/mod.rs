@@ -197,7 +197,7 @@ const NAMED_ONLY: &[Candidate] = &[
 	},
 	Candidate {
 		name: probe::BUFFERED_NAME,
-		supports: |c| matches!(c, Codec::H264 | Codec::H265),
+		supports: |c| matches!(c, Codec::H264 | Codec::H265 | Codec::Vp9),
 		open: probe::Buffered::open,
 	},
 	Candidate {

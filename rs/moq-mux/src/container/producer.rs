@@ -239,7 +239,7 @@ where
 
 	/// Record when a locally encoded frame reached the transport. Imported media must leave
 	/// this clock observation out and rely on its container batch and reorder measurements.
-	pub fn flush(&mut self, timestamp: moq_net::Timestamp, now: std::time::Instant) -> crate::Result<()> {
+	pub fn flush(&mut self, timestamp: moq_net::Timestamp, now: moq_clock::Instant) -> crate::Result<()> {
 		self.estimator.flush(timestamp, now);
 		self.publish_estimate()
 	}
@@ -850,7 +850,7 @@ mod tests {
 			tracks.push(track);
 		}
 
-		let anchor = std::time::Instant::now();
+		let anchor = moq_clock::Instant::now();
 		let ms = std::time::Duration::from_millis;
 		let pts = |millis: u64| Timestamp::from_micros(millis * 1_000).unwrap();
 		tracks[0].flush(pts(0), anchor).unwrap();
@@ -872,7 +872,7 @@ mod tests {
 	#[tokio::test]
 	async fn a_passthrough_producer_ratchets_its_bandwidth_claim() {
 		let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
-		let _sub = track.consume();
+		let _sub = track.subscribe(None);
 		let mut producer = Producer::new(track, Container::Legacy(crate::container::Kind::Data))
 			.with_bandwidth(moq_net::bandwidth::Allocator::unlimited());
 
@@ -921,7 +921,7 @@ mod tests {
 		}
 
 		let (_encoder_broadcast, encoder_track) = video_track();
-		let _encoder_sub = encoder_track.consume();
+		let _encoder_sub = encoder_track.subscribe(None);
 		let encoder = allocator.reserve(&encoder_track.demand(), moq_net::bandwidth::Rate::from_bps(8_000_000));
 		assert_eq!(
 			encoder.peek(),
@@ -930,7 +930,7 @@ mod tests {
 		);
 
 		let (_passthrough_broadcast, passthrough) = video_track();
-		let _passthrough_sub = passthrough.consume();
+		let _passthrough_sub = passthrough.subscribe(None);
 		let mut producer =
 			Producer::new(passthrough, Container::Legacy(crate::container::Kind::Data)).with_bandwidth(allocator);
 

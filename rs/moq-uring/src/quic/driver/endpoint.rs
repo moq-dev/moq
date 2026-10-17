@@ -242,7 +242,7 @@ impl Inner {
 				return Poll::Ready(());
 			}
 			match self.socket.poll_recv(waiter) {
-				Poll::Ready(Ok(mut packet)) => self.demux(&mut packet),
+				Poll::Ready(Ok(packet)) => self.demux(&packet),
 				Poll::Ready(Err(err)) => {
 					self.fail(Error::Io(err.to_string()));
 					return Poll::Ready(());
@@ -253,7 +253,7 @@ impl Inner {
 	}
 
 	/// Route every datagram in one receive, then kick the connections fed.
-	fn demux(self: &Rc<Self>, packet: &mut udp::Packet) {
+	fn demux(self: &Rc<Self>, packet: &udp::Packet) {
 		let from = packet.from();
 		let ecn = packet.ecn().map(super::ecn_to_quic);
 		// Where the endpoint writes its own answers (version negotiation,
@@ -264,19 +264,25 @@ impl Inner {
 		// coalesce is a single source, and ids rarely change mid-burst).
 		let mut fed: Vec<ConnectionHandle> = Vec::new();
 
-		for segment in packet.segments() {
+		// moq-quic takes each datagram as an owned `BytesMut`: copy the whole
+		// completion out of the receive pool once and split it per datagram.
+		// The last one is taken whole, since a split makes the allocation
+		// shared, which a lone datagram has no use for.
+		let mut payload = BytesMut::from(packet.payload());
+		let stride = packet.stride();
+		while !payload.is_empty() {
+			let segment = match payload.len() > stride {
+				true => payload.split_to(stride),
+				false => std::mem::take(&mut payload),
+			};
 			buf.clear();
 			// The socket does not report which local address a datagram
 			// arrived on, so the four-tuple stays half known, exactly as it
 			// does on a platform without `IP_PKTINFO`.
-			let event = self.endpoint.borrow_mut().handle(
-				moq_clock::Instant::now(),
-				from,
-				None,
-				ecn,
-				BytesMut::from(&segment[..]),
-				&mut buf,
-			);
+			let event =
+				self.endpoint
+					.borrow_mut()
+					.handle(moq_clock::Instant::now(), from, None, ecn, segment, &mut buf);
 			match event {
 				Some(DatagramEvent::ConnectionEvent(key, event)) => {
 					let conn = self.conns.borrow().get(&key).cloned();
@@ -408,14 +414,13 @@ impl Inner {
 		let Poll::Ready(Ok(mut tx)) = self.socket.poll_acquire(&kio::Waiter::noop()) else {
 			return;
 		};
-		if transmit.size > tx.len() {
+		if transmit.size > tx.capacity() {
 			tracing::debug!(size = transmit.size, "dropping an oversized endpoint response");
 			return;
 		}
-		tx[..transmit.size].copy_from_slice(&buf[..transmit.size]);
+		tx.extend_from_slice(&buf[..transmit.size]);
 		let transmit = udp::Transmit {
 			to: transmit.destination,
-			len: transmit.size,
 			segment: transmit.segment_size.unwrap_or(transmit.size),
 			ecn: transmit.ecn.map(super::ecn_from_quic),
 		};

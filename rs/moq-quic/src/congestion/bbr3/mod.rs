@@ -616,7 +616,7 @@ impl Bbr3 {
         if let Some(probe_seed) = config.probe_rng_seed {
             probe_rng = Pcg32::from_seed(probe_seed);
         } else {
-            probe_rng = Pcg32::from_rng(&mut rand::rng());
+            probe_rng = Pcg32::from_rng(&mut crate::entropy::rng());
         }
         let smss = Ord::min(
             Ord::max(MIN_MAX_DATAGRAM_SIZE, current_mtu) as u64,

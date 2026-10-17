@@ -18,7 +18,7 @@ ignored = ["getrandom"]
 [features]
 default = ["async"]
 # Runtime-backed helpers and Lite/IETF sessions; explicit-time model drivers stay available.
-async = ["dep:futures", "dep:web-async"]
+async = ["dep:futures", "moq-clock/runtime"]
 
 # Exposes the wire codecs to the `fuzz/` harness and the announce, codec, varint, and frame benches,
 # and session views of an origin to the viewers bench, through the hidden `fuzz` module. Off by
@@ -30,25 +30,22 @@ arrayvec = "0.7"
 bytes = { workspace = true }
 futures = { workspace = true, optional = true }
 kio = { workspace = true }
+moq-clock = { version = "0.11.0", path = "../moq-clock", default-features = false }
 moq-pattern = { workspace = true, features = ["serde"] }
 num_enum = { workspace = true }
 rand = { workspace = true }
+rangemap = { workspace = true }
 serde = { workspace = true }
 slab = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true, features = ["js"] }
-web-async = { workspace = true, optional = true }
-
-# The browser instant shim is needed even by explicit-time drivers.
-[target.'cfg(target_family = "wasm")'.dependencies]
-web-async = { workspace = true }
 
 [dev-dependencies]
 criterion = { workspace = true }
 futures = { workspace = true }
 # The tests' executor, with simulated time.
-moq-net-sim = { path = "sim" }
+moq-clock = { path = "../moq-clock", features = ["sim"] }
 serde_json = { workspace = true }
 # The benches run on tokio. test-util (tokio::time::pause/advance) is test-only and
 # is NOT supported on wasm, so it must not leak into the normal dependency feature set.
@@ -160,6 +157,12 @@ required-features = ["async"]
 
 [[bench]]
 name = "request-ids"
+harness = false
+required-features = ["fuzz"]
+
+# Uses the hidden fuzz module to reach the crate-private NEW_GROUP_REQUEST.
+[[bench]]
+name = "new-group"
 harness = false
 required-features = ["fuzz"]
 

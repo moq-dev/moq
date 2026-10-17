@@ -1,13 +1,13 @@
 import { wall } from "@moq/clock";
 import { type Dispose, type Getter, Once, Signal } from "@moq/signals";
 import {
-	type Auth as AuthApi,
+	type Auth,
 	type Grant,
 	grantsEqual,
+	type Handle,
 	type Issued,
 	type Request,
 	type Requests,
-	type Token,
 	Unsupported,
 } from "./auth.ts";
 import { closeReason, error, ProtocolViolation, SessionCode, SessionError, StreamCode, StreamError } from "./error.ts";
@@ -64,7 +64,7 @@ function cancel(): StreamError {
 }
 
 /** One token this side presented. */
-class Presented implements Token {
+class Presented implements Auth {
 	readonly grant = new Signal<Grant | undefined>(undefined);
 	readonly closed: Promise<Error | null>;
 	readonly answered: Promise<void>;
@@ -115,7 +115,9 @@ class Presented implements Token {
 		if (this.withdrawn) return;
 		this.withdrawn = true;
 		// The stream's loop notices and ends the token; one still opening checks on arrival.
-		this.stream?.abort(cancel());
+		// One without a stream to come (carried only by requests) ends here.
+		if (this.stream) this.stream.abort(cancel());
+		else if (this.isAnswered) this.end(null);
 	}
 }
 
@@ -258,6 +260,11 @@ class RequestQueue implements Requests {
 export interface AuthSessionProps {
 	/** How this session's wire carries the exchange, or undefined when it carries none. */
 	wire?: AuthWire;
+	/**
+	 * Whether a request can carry a token (moq-transport), so {@link AuthSession.add} keeps one
+	 * the wire cannot present, for the announcements that name it.
+	 */
+	requests?: boolean;
 	/** What the default acceptor grants the peer's connection credential. */
 	peerGrant: Grant;
 }
@@ -268,11 +275,15 @@ export interface AuthSessionProps {
  *
  * @internal
  */
-export class AuthSession implements AuthApi {
+export class AuthSession implements Handle {
 	/** The peer sent a malformed AUTH message; the owning connection closes the session. */
 	readonly violated = new Once<ProtocolViolation>();
 	#wire?: AuthWire;
+	#requests: boolean;
 	#peerGrant: Grant;
+	// Every token this session issued, so a request carries only its own.
+	#issued = new WeakSet<Presented>();
+	#ended = new Signal(0);
 
 	#union = new Signal<Grant | undefined>(undefined);
 	// The peer replied to some token, so the union is known even when empty.
@@ -287,8 +298,9 @@ export class AuthSession implements AuthApi {
 	// wins, however quickly the peer's first token arrives.
 	#decided = nextTask();
 
-	constructor({ wire, peerGrant }: AuthSessionProps) {
+	constructor({ wire, requests, peerGrant }: AuthSessionProps) {
 		this.#wire = wire;
+		this.#requests = requests ?? false;
 		this.#peerGrant = peerGrant;
 
 		// Present the connection's own credential right away, so both sides learn their
@@ -305,12 +317,35 @@ export class AuthSession implements AuthApi {
 		return this.#wire !== undefined;
 	}
 
-	async add(token: string | Uint8Array): Promise<Token> {
-		if (!this.#wire || this.#closed) throw new Unsupported();
-		const bytes = typeof token === "string" ? new TextEncoder().encode(token) : token;
+	async add(token: string | Uint8Array): Promise<Auth> {
+		if (this.#closed || (!this.#wire && !this.#requests)) throw new Unsupported();
+		// A copy, so the caller reusing its buffer never changes what a request carries.
+		const bytes = typeof token === "string" ? new TextEncoder().encode(token) : token.slice();
+		if (!this.#wire) {
+			// Only a request carries it, and the peer judges it there: no grant to wait for.
+			const presented = new Presented(bytes, false);
+			presented.answer();
+			this.#track(presented);
+			return presented;
+		}
 		const presented = this.#present(this.#wire, bytes, false);
 		await presented.answered;
 		return presented;
+	}
+
+	/**
+	 * The bytes a request carries for `token`: undefined for none, for one another session
+	 * issued, or for one that ended.
+	 */
+	carried(token: Auth | undefined): Uint8Array | undefined {
+		if (!this.#requests || !(token instanceof Presented) || !this.#issued.has(token) || token.ended)
+			return undefined;
+		return token.token;
+	}
+
+	/** Bumps whenever one of this session's tokens ends, so a request carrying it drops it. */
+	get ended(): Getter<number> {
+		return this.#ended;
 	}
 
 	requests(): Requests {
@@ -377,10 +412,20 @@ export class AuthSession implements AuthApi {
 
 	#present(wire: AuthWire, token: Uint8Array, setup: boolean): Presented {
 		const presented = new Presented(token, setup);
-		this.#tokens.add(presented);
+		this.#track(presented);
 		if (setup) this.#setupPending.update((n) => n + 1);
 		void this.#run(wire, presented);
 		return presented;
+	}
+
+	/** Hold `token` until it ends, so the session's close ends it too. */
+	#track(token: Presented) {
+		this.#tokens.add(token);
+		this.#issued.add(token);
+		void token.closed.then(() => {
+			this.#tokens.delete(token);
+			this.#ended.update((n) => n + 1);
+		});
 	}
 
 	async #run(wire: AuthWire, token: Presented) {

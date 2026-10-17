@@ -16,7 +16,7 @@ public typealias AudioFrame = MoqFFI.MoqAudioFrame
 /// The PCM layout (format, sample rate, channels) written to an `Audio.Producer`.
 public typealias AudioEncoderInput = MoqFFI.MoqAudioEncoderInput
 /// The encoder-side config for a published audio track: codec, rate, channels,
-/// bitrate, and frame duration.
+/// bitrate, frame duration, and preset.
 public typealias AudioEncoderOutput = MoqFFI.MoqAudioEncoderOutput
 /// What a `VideoConsumer` decodes to: an optional resize, a max delay, and
 /// whether frames keep the decoder's native surface.

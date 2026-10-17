@@ -8,9 +8,6 @@
 //! `moq-boy`, which pauses its emulator on `track::Producer::used()` /
 //! `unused()`.
 
-#[cfg(feature = "capture")]
-use std::time::Instant;
-
 use moq_mux::catalog::hang::CatalogExt;
 #[cfg(feature = "capture")]
 use moq_mux::rate;
@@ -51,6 +48,7 @@ fn rendition_hint(rendition: hang::catalog::VideoConfig) -> moq_mux::catalog::Vi
 	// Authoritative for both the catalog entry and the wire, so dropping it would silently
 	// downgrade a caller's selection to the default.
 	hint.container = rendition.container;
+	hint.preference = rendition.preference;
 	hint
 }
 
@@ -167,13 +165,13 @@ impl<E: CatalogExt> Producer<E> {
 					let mut frames = split.decode(&frame.payload, timestamp)?;
 					frames.extend(split.flush(timestamp)?);
 					import.decode(frames)?;
-					import.flush(frame.timestamp, std::time::Instant::now())?;
+					import.flush(frame.timestamp, moq_net::time::now())?;
 				}
 				Codecs::H265 { split, import } => {
 					let mut frames = split.decode(&frame.payload, timestamp)?;
 					frames.extend(split.flush(timestamp)?);
 					import.decode(frames)?;
-					import.flush(frame.timestamp, std::time::Instant::now())?;
+					import.flush(frame.timestamp, moq_net::time::now())?;
 				}
 			}
 		}
@@ -565,7 +563,7 @@ async fn apply_estimate(
 		return;
 	};
 
-	let Some(bitrate) = control.update(estimate, Instant::now()) else {
+	let Some(bitrate) = control.update(estimate, moq_net::time::now()) else {
 		return;
 	};
 
@@ -949,14 +947,15 @@ mod tests {
 		assert_eq!(rendition.coded_height, Some(360));
 	}
 
-	/// Regression: a caller's container selection has to survive the config -> hint conversion.
+	/// Regression: a caller's container and preference have to survive the config -> hint conversion.
 	///
 	/// [`VideoHint::container`](moq_mux::catalog::VideoHint::container) is authoritative for both the
 	/// track writer and the published rendition, so a conversion that drops it silently downgrades
-	/// the caller's selection to Legacy while the catalog still claims whatever it defaulted to.
+	/// the caller's selection to Legacy while the catalog still claims whatever it defaulted to. A
+	/// dropped preference would turn a compatibility transcode into a peer of its source.
 	#[tokio::test]
 	#[cfg(feature = "openh264")]
-	async fn a_selected_container_survives_the_rendition_hint() {
+	async fn a_selected_container_and_preference_survive_the_rendition_hint() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
 
@@ -965,11 +964,13 @@ mod tests {
 		config.kind = encoder::Kind::Software;
 		let mut selected = config.probe().await.unwrap();
 		selected.container = hang::catalog::Container::Loc;
+		selected.preference = -1;
 
 		let _producer = Producer::new(broadcast, catalog.reserve(), selected).unwrap();
 
 		let (_, published) = rendition(&catalog).expect("the rendition publishes before any frame");
 		assert_eq!(published.container, hang::catalog::Container::Loc);
+		assert_eq!(published.preference, -1);
 	}
 
 	/// Regression: the rendition has to reach the wire before anything is encoded.
@@ -1125,10 +1126,15 @@ mod tests {
 		impl Fixture {
 			/// Start the capture loop on a broadcast whose clock began `behind` ago, at `wall`.
 			async fn start(behind: Duration, wall: SystemTime) -> Self {
+				// The capture stream counts on the host clock and the broadcast on moq-clock; the
+				// loop correlates the two, so each epoch is the same moment on its own clock.
 				let epoch = Instant::now()
 					.checked_sub(behind)
 					.expect("a monotonic clock that far back");
-				let clock = moq_mux::Clock::at(epoch, wall).unwrap();
+				let start = moq_net::time::now()
+					.checked_sub(behind)
+					.expect("a monotonic clock that far back");
+				let clock = moq_mux::Clock::at(start, wall).unwrap();
 				let mut broadcast = moq_net::broadcast::Info::new().produce();
 				let consumer = broadcast.consume();
 				let config = moq_mux::catalog::Config::default()

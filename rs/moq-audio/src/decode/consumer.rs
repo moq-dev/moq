@@ -2,7 +2,7 @@
 
 use std::collections::VecDeque;
 
-use moq_mux::container::Read;
+use moq_mux::container::Read as Encoded;
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
@@ -11,6 +11,30 @@ use super::decoder::{Config, Decoder};
 use crate::jitter::{self, Target};
 use crate::resample::{Remix, Resampler};
 use crate::{Activity, Error, Format, Frame, Layout};
+
+/// Decoded PCM and encoder ends in delivery order.
+///
+/// `discontinuity` goes up wherever the decoded timeline breaks: at the fresh
+/// encoder after an [`End`](Self::End), or at a loss. A bump with no `End`
+/// before it is a loss, and the hole runs from the previous frame's end to the
+/// new frame's timestamp.
+#[derive(Clone, Debug)]
+pub enum Read {
+	/// Decoded PCM, including the drained tail before a discontinuity.
+	Frame {
+		/// The decoded timeline these samples belong to; only changes matter.
+		discontinuity: u64,
+		/// The decoded samples and their presentation time.
+		frame: Frame,
+	},
+	/// The publisher stopped this encoder; its final PCM may still follow.
+	End {
+		/// The decoded timeline holding the stopped encoder's final samples.
+		discontinuity: u64,
+		/// Samples at or past this point are padding and are trimmed.
+		end: moq_net::Timestamp,
+	},
+}
 
 /// Where a consumer starts on a track that already holds groups.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -68,8 +92,7 @@ impl Options {
 ///
 /// The mirror of [`encode::Producer`](crate::encode::Producer): output format /
 /// sample rate / layout are fixed at construction, and
-/// [`read`](Self::read) returns [`Frame`]s carrying the codec activity they
-/// were decoded from.
+/// [`read`](Self::read) returns [`Read`] events carrying decoded samples and track boundaries.
 pub struct Consumer {
 	decoder: Decoder,
 	track: moq_mux::container::Consumer<moq_mux::catalog::hang::Container>,
@@ -92,7 +115,9 @@ pub struct Consumer {
 	next_start: Option<moq_net::Timestamp>,
 	/// Frames decoded and not yet handed back, so a gap's tail can be returned
 	/// ahead of the packet that exposed it.
-	ready: VecDeque<Frame>,
+	ready: VecDeque<Read>,
+	/// Stable across all groups and the resampler tail of one decoded timeline.
+	discontinuity: u64,
 	/// Codec activity spans the resampler's buffered output still covers.
 	spans: VecDeque<ActivitySpan>,
 	/// Activity of the last span the output ran past, for the rounding samples the
@@ -209,6 +234,7 @@ impl Consumer {
 			resolved_layout: layout,
 			next_start: None,
 			ready: VecDeque::new(),
+			discontinuity: 0,
 			spans: VecDeque::new(),
 			trailing: Activity::Active,
 			epoch: None,
@@ -258,7 +284,7 @@ impl Consumer {
 		self.resolved_layout
 	}
 
-	/// Read the next decoded PCM frame, or `None` when the track ends.
+	/// Read decoded PCM or a track boundary, or `None` when the track ends.
 	///
 	/// [`Frame::activity`] reports whether the packet these samples came from
 	/// coded audio. It describes where the frame begins, so a resampled
@@ -270,34 +296,43 @@ impl Consumer {
 	/// side stay anchored to their own packet timeline, so the hole is there to
 	/// see. "Doesn't continue" allows for the quantization the stamps carry, which
 	/// on a millisecond-stamped ingest is most of a millisecond.
-	pub async fn read(&mut self) -> Result<Option<Frame>, Error> {
+	pub async fn read(&mut self) -> Result<Option<Read>, Error> {
 		loop {
 			if let Some(frame) = self.ready.pop_front() {
 				return Ok(Some(frame));
 			}
 
 			let mux_frame = match self.track.read().await? {
-				Some(Read::Frame { group, frame }) => {
+				Some(Encoded::Frame { group, frame }) => {
 					// A later group after a declared end comes from a fresh encoder; the end's
 					// own group carries the stopped encoder's final packets, trimmed below.
 					if self.end.is_some() && group != self.end_group {
 						self.restart()?;
+						self.discontinuity += 1;
 					}
 					frame
 				}
-				Some(Read::Gap { .. }) => {
+				// The loss shows as the next frame's discontinuity, with no end before it.
+				Some(Encoded::Gap { .. }) => {
 					self.restart()?;
+					self.discontinuity += 1;
 					self.warmup_pending = !self.warmup.is_zero();
 					continue;
 				}
-				Some(Read::End { group, end }) => {
+				Some(Encoded::End { group, end }) => {
 					self.end = Some(end);
 					self.end_group = group;
 					self.frames_decoded = 0;
 					self.terminal_start = None;
-					continue;
+					return Ok(Some(Read::End {
+						discontinuity: self.discontinuity,
+						end,
+					}));
 				}
-				None => return self.flush(),
+				None => {
+					let discontinuity = self.discontinuity;
+					return Ok(self.flush()?.map(|frame| Read::Frame { discontinuity, frame }));
+				}
 			};
 
 			// Every packet the container hands over is an arrival, including one the
@@ -323,9 +358,14 @@ impl Consumer {
 				&& self
 					.next_start
 					.is_some_and(|next| discontinuous(next, mux_frame.timestamp))
-				&& let Some(frame) = self.gap()?
 			{
-				self.ready.push_back(frame);
+				if let Some(frame) = self.gap()? {
+					self.ready.push_back(Read::Frame {
+						discontinuity: self.discontinuity,
+						frame,
+					});
+				}
+				self.discontinuity += 1;
 			}
 
 			let rate = self.decoder.sample_rate();
@@ -427,7 +467,10 @@ impl Consumer {
 			// Queued rather than returned, so a tail drained at a gap earlier in this
 			// same iteration still comes out first. The next turn of the loop pops it.
 			if let Some(frame) = self.frame(pcm, timestamp, activity)? {
-				self.ready.push_back(frame);
+				self.ready.push_back(Read::Frame {
+					discontinuity: self.discontinuity,
+					frame,
+				});
 			}
 		}
 	}
@@ -439,7 +482,10 @@ impl Consumer {
 	/// as their own frame first rather than filtered together with what follows it.
 	fn restart(&mut self) -> Result<(), Error> {
 		if let Some(frame) = self.drain()? {
-			self.ready.push_back(frame);
+			self.ready.push_back(Read::Frame {
+				discontinuity: self.discontinuity,
+				frame,
+			});
 		}
 		self.next_start = None;
 		self.spans.clear();
@@ -648,6 +694,16 @@ fn rewind(timestamp: moq_net::Timestamp, frames: usize, sample_rate: u32) -> Res
 
 #[cfg(test)]
 mod tests {
+	async fn next_frame(consumer: &mut Consumer) -> Result<Option<Frame>, Error> {
+		loop {
+			match consumer.read().await? {
+				Some(Read::Frame { frame, .. }) => return Ok(Some(frame)),
+				Some(Read::End { .. }) => {}
+				None => return Ok(None),
+			}
+		}
+	}
+
 	use moq_net::Timestamp;
 
 	use super::*;
@@ -696,7 +752,7 @@ mod tests {
 		.unwrap();
 		let mut stamps = Vec::new();
 		let mut frames = 0;
-		while let Some(frame) = consumer.read().await.unwrap() {
+		while let Some(frame) = next_frame(&mut consumer).await.unwrap() {
 			stamps.push(frame.timestamp.as_micros());
 			frames += frame.data.len() / size_of::<f32>();
 		}
@@ -765,7 +821,7 @@ mod tests {
 		)
 		.await
 		.unwrap();
-		let frame = consumer.read().await.unwrap().unwrap();
+		let frame = next_frame(&mut consumer).await.unwrap().unwrap();
 		assert!(frame.timestamp.as_micros() >= 1_080_000);
 		let first = f32::from_le_bytes(frame.data[..4].try_into().unwrap());
 		assert!(
@@ -814,9 +870,9 @@ mod tests {
 		)
 		.await
 		.unwrap();
-		assert!(consumer.read().await.is_err());
+		assert!(next_frame(&mut consumer).await.is_err());
 		let mut stamps = Vec::new();
-		while let Some(frame) = consumer.read().await.unwrap() {
+		while let Some(frame) = next_frame(&mut consumer).await.unwrap() {
 			stamps.push(frame.timestamp.as_micros());
 		}
 		assert_eq!(stamps, [100_000, 120_000]);
@@ -866,7 +922,7 @@ mod tests {
 		}
 		producer.finish().unwrap();
 		let mut stamps = Vec::new();
-		while let Some(frame) = consumer.read().await.unwrap() {
+		while let Some(frame) = next_frame(&mut consumer).await.unwrap() {
 			stamps.push(frame.timestamp.as_micros());
 		}
 		assert_eq!(stamps.len(), 4, "each span's body and tail: {stamps:?}");
@@ -920,7 +976,7 @@ mod tests {
 		}
 		producer.write(&Frame::new(data.into(), Timestamp::ZERO)).unwrap();
 
-		let frame = consumer.read().await.unwrap().expect("decoded frame");
+		let frame = next_frame(&mut consumer).await.unwrap().expect("decoded frame");
 		let samples = Format::F32.as_interleaved_f32(&frame.data, 2).unwrap();
 		assert_eq!(samples.len(), (960 - 312) * 2);
 		for pair in samples.as_chunks::<2>().0.iter() {
@@ -964,10 +1020,112 @@ mod tests {
 
 		// 312 samples at 48 kHz is 6.5 ms.
 		for (micros, frames) in [(0, 960 - 312), (13_500, 960), (33_500, 960)] {
-			let frame = consumer.read().await.unwrap().expect("decoded frame");
+			let frame = next_frame(&mut consumer).await.unwrap().expect("decoded frame");
 			assert_eq!(frame.timestamp.as_micros(), micros);
 			assert_eq!(frame.data.len() / size_of::<f32>(), frames);
 		}
+	}
+
+	#[tokio::test]
+	async fn an_undeclared_timestamp_hole_is_a_discontinuity() {
+		tokio::time::pause();
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let track = broadcast
+			.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
+			.unwrap();
+		let mut producer = moq_mux::container::Producer::new(
+			track,
+			moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Audio),
+		);
+		let catalog = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Pcm, 48_000, 1);
+		let options = Options {
+			max_delay: Duration::from_secs(1),
+			..Options::new()
+		};
+		let mut consumer = Consumer::new(&broadcast.consume(), &catalog, "audio", options)
+			.await
+			.unwrap();
+		// Contiguous groups, so the container sees no gap: only the stamps jump.
+		for micros in [0, 20_000, 500_000] {
+			producer
+				.write(moq_mux::container::Frame {
+					timestamp: Timestamp::from_micros(micros).unwrap(),
+					duration: Some(Timestamp::from_micros(20_000).unwrap()),
+					keyframe: true,
+					payload: (0..960).flat_map(|_| 0.25f32.to_le_bytes()).collect::<Vec<_>>().into(),
+				})
+				.unwrap();
+		}
+		producer.finish().unwrap();
+		let mut timelines = Vec::new();
+		while let Some(event) = consumer.read().await.unwrap() {
+			if let Read::Frame { discontinuity, frame } = event {
+				timelines.push((frame.timestamp.as_micros(), discontinuity));
+			}
+		}
+		assert_eq!(timelines, [(0, 0), (20_000, 0), (500_000, 1)]);
+	}
+
+	#[tokio::test]
+	async fn decoded_segments_keep_resampler_tails_before_fresh_encoder_frames() {
+		tokio::time::pause();
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let track = broadcast
+			.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
+			.unwrap();
+		let mut producer = moq_mux::container::Producer::new(
+			track,
+			moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Audio),
+		);
+		let catalog = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Pcm, 44_100, 1);
+		let mut consumer = Consumer::new(
+			&broadcast.consume(),
+			&catalog,
+			"audio",
+			Options {
+				output: Output {
+					sample_rate: Some(48_000),
+					..Output::default()
+				},
+				max_delay: Duration::from_secs(1),
+				..Options::new()
+			},
+		)
+		.await
+		.unwrap();
+		for (micros, sample) in [(0, 0.25f32), (30_000, 0.5)] {
+			producer
+				.write(moq_mux::container::Frame {
+					timestamp: Timestamp::from_micros(micros).unwrap(),
+					duration: Some(Timestamp::from_scale(1024, 44_100).unwrap()),
+					keyframe: true,
+					payload: (0..1024).flat_map(|_| sample.to_le_bytes()).collect::<Vec<_>>().into(),
+				})
+				.unwrap();
+			if micros == 0 {
+				producer.discontinuity().unwrap();
+			}
+		}
+		producer.finish().unwrap();
+		let mut ended = None;
+		let mut tail = false;
+		let mut resumed = false;
+		while let Some(event) = consumer.read().await.unwrap() {
+			match event {
+				Read::End { discontinuity, .. } if ended.is_none() => ended = Some(discontinuity),
+				Read::Frame { discontinuity, .. } if ended == Some(discontinuity) => {
+					assert!(!resumed);
+					tail = true;
+				}
+				Read::Frame { discontinuity, .. } if ended.is_some_and(|old| old != discontinuity) => resumed = true,
+				_ => {}
+			}
+		}
+		assert!(
+			tail,
+			"the old resampler tail must follow its End without looking like a new encoder"
+		);
+		assert!(resumed, "a later group opens a fresh decoded timeline");
 	}
 
 	/// A packet whose sample count isn't a multiple of the resampler's chunk leaves
@@ -1020,7 +1178,7 @@ mod tests {
 				.unwrap();
 		}
 
-		let first = consumer.read().await.unwrap().expect("decoded frame");
+		let first = next_frame(&mut consumer).await.unwrap().expect("decoded frame");
 		assert_eq!(first.timestamp.as_micros(), 0);
 
 		// Continuity, not a fixed number: the second frame starts where the first
@@ -1028,7 +1186,7 @@ mod tests {
 		// exactly, because the resampler emits whole frames and its count per chunk
 		// wobbles around the nominal ratio; a real hole (the samples it held back, or
 		// the startup silence it dropped) is twenty times this tolerance.
-		let second = consumer.read().await.unwrap().expect("decoded frame");
+		let second = next_frame(&mut consumer).await.unwrap().expect("decoded frame");
 		let first_frames = (first.data.len() / size_of::<f32>()) as u128;
 		let ends_at = first_frames * 1_000_000 / 48_000;
 		let gap = second.timestamp.as_micros().abs_diff(ends_at);
@@ -1080,10 +1238,10 @@ mod tests {
 			.unwrap();
 		producer.finish().unwrap();
 
-		let first = consumer.read().await.unwrap().expect("decoded frame");
+		let first = next_frame(&mut consumer).await.unwrap().expect("decoded frame");
 		let first_frames = first.data.len() / size_of::<f32>();
 
-		let tail = consumer.read().await.unwrap().expect("flushed tail");
+		let tail = next_frame(&mut consumer).await.unwrap().expect("flushed tail");
 		let tail_frames = tail.data.len() / size_of::<f32>();
 
 		// The 142 held-back frames at 44.1 kHz are ~155 at 48 kHz, plus the 69 the
@@ -1101,7 +1259,7 @@ mod tests {
 		// what the drain adds here is what the start dropped off the front.
 		let total = first_frames + tail_frames;
 		assert!((1105..=1120).contains(&total), "unexpected total: {total}");
-		assert!(consumer.read().await.unwrap().is_none());
+		assert!(next_frame(&mut consumer).await.unwrap().is_none());
 	}
 
 	#[tokio::test]
@@ -1163,7 +1321,7 @@ mod tests {
 
 		let expected = first_dtx.expect("silence should enter Opus DTX");
 		let mut actual = None;
-		while let Some(frame) = consumer.read().await.unwrap() {
+		while let Some(frame) = next_frame(&mut consumer).await.unwrap() {
 			// 10 ms packets do not fill the 20 ms chunk, so the resampler hands back
 			// nothing every other packet. Those must not surface as frames: a frame
 			// with no samples reads as audio arriving, and carries an activity
@@ -1237,7 +1395,7 @@ mod tests {
 		producer.finish().unwrap();
 
 		let mut read = Vec::new();
-		while let Some(frame) = consumer.read().await.unwrap() {
+		while let Some(frame) = next_frame(&mut consumer).await.unwrap() {
 			read.push((frame.timestamp.as_micros(), frame.data.len() / size_of::<f32>()));
 		}
 		read
@@ -1387,7 +1545,7 @@ mod tests {
 		write(&mut producer, 48_000, dtx.payload, false);
 		producer.finish().unwrap();
 
-		let frame = consumer.read().await.unwrap().expect("decoded frame");
+		let frame = next_frame(&mut consumer).await.unwrap().expect("decoded frame");
 		// The output begins with the first packet's samples, so it is stamped and
 		// labelled from that packet. Rewinding from the terminal one instead drops it
 		// most of a second into the future, carrying the DTX label with it.
@@ -1492,17 +1650,20 @@ mod tests {
 		// The pre-skip is trimmed off the first packet, so it decodes short. That
 		// shortfall is codec delay, not a hole: without counting it the packet after
 		// every stream start would read as a gap.
-		let first = consumer.read().await.unwrap().expect("decoded frame");
+		let first = next_frame(&mut consumer).await.unwrap().expect("decoded frame");
 		let frames = first.data.len() / size_of::<f32>();
 		assert!(frames < 960, "the pre-skip should be trimmed, got {frames} frames");
 
 		// The hole is real, so codec prediction starts over but stream-level pre-skip
 		// does not. The audio is stamped where the packet says rather than 2.5 ms early.
-		let second = consumer.read().await.unwrap().expect("decoded frame");
+		let second = next_frame(&mut consumer).await.unwrap().expect("decoded frame");
 		assert_eq!(second.timestamp.as_micros(), 22_500);
 		assert_eq!(second.data.len() / size_of::<f32>(), 960, "pre-skip was reapplied");
 
-		let third = consumer.read().await.unwrap().expect("decoded frame after gap");
+		let third = next_frame(&mut consumer)
+			.await
+			.unwrap()
+			.expect("decoded frame after gap");
 		let second_frames = second.data.len() / size_of::<f32>();
 		assert_eq!(
 			third.timestamp,
@@ -1569,7 +1730,10 @@ mod tests {
 				.unwrap();
 			producer.cut(None).unwrap();
 
-			consumer.read().await.unwrap().expect("one decoded frame per packet");
+			next_frame(&mut consumer)
+				.await
+				.unwrap()
+				.expect("one decoded frame per packet");
 			series.push(crate::jitter::millis(consumer.delay()));
 		}
 		CLOCK.set(None);
@@ -1640,7 +1804,7 @@ mod tests {
 			.unwrap();
 		producer.cut(None).unwrap();
 
-		let frame = consumer.read().await.unwrap().expect("decoded frame");
+		let frame = next_frame(&mut consumer).await.unwrap().expect("decoded frame");
 		assert!(
 			frame.data.len() / size_of::<f32>() < encoder.frame_size(),
 			"pre-skip is trimmed"
@@ -1747,8 +1911,8 @@ mod tests {
 			producer.cut(None).unwrap();
 		}
 
-		let first = consumer.read().await.unwrap().expect("first decoded frame");
-		let second = consumer.read().await.unwrap().expect("second decoded frame");
+		let first = next_frame(&mut consumer).await.unwrap().expect("first decoded frame");
+		let second = next_frame(&mut consumer).await.unwrap().expect("second decoded frame");
 		let first_frames = first.data.len() / size_of::<f32>();
 		let expected = advance(first.timestamp, first_frames, 48_000).unwrap();
 		assert_eq!(second.timestamp, expected);
@@ -1806,9 +1970,9 @@ mod tests {
 		write(&mut producer, 2, encoder.encode(&pcm).unwrap().payload);
 		producer.finish().unwrap();
 
-		let first = consumer.read().await.unwrap().expect("first decoded frame");
-		let _second = consumer.read().await.unwrap().expect("second decoded frame");
-		let resumed = consumer.read().await.unwrap().expect("resumed decoded frame");
+		let first = next_frame(&mut consumer).await.unwrap().expect("first decoded frame");
+		let _second = next_frame(&mut consumer).await.unwrap().expect("second decoded frame");
+		let resumed = next_frame(&mut consumer).await.unwrap().expect("resumed decoded frame");
 		let first_frames = first.data.len() / size_of::<f32>();
 		let resumed_frames = resumed.data.len() / size_of::<f32>();
 		assert!(first_frames < frame_size, "the first epoch trims pre-skip");
@@ -1859,7 +2023,7 @@ mod tests {
 			})
 			.unwrap();
 
-		let frame = consumer.read().await.unwrap().expect("decoded frame");
+		let frame = next_frame(&mut consumer).await.unwrap().expect("decoded frame");
 		assert_eq!(
 			Format::F32.as_interleaved_f32(&frame.data, 1).unwrap().as_ref(),
 			samples
@@ -1916,7 +2080,7 @@ mod tests {
 		// The whole packet decodes: one 20 ms Opus frame at 48 kHz, less the pre-skip
 		// trimmed off the first packet. Reading the fragment as legacy hands the codec
 		// a slice of the moof instead, which still decodes, just to a shorter buffer.
-		let frame = consumer.read().await.unwrap().expect("decoded frame");
+		let frame = next_frame(&mut consumer).await.unwrap().expect("decoded frame");
 		// `as_micros`, not `==`: the CMAF path carries the fmp4 timescale and
 		// `Timestamp`'s equality is structural, so the scales would have to match too.
 		assert_eq!(frame.timestamp.as_micros(), 0);

@@ -753,6 +753,21 @@ mod tests {
 		assert_eq!(format!("{actual:?}"), format!("{expected:?}"));
 	}
 
+	/// The expiry index and next deadline agree with a full scan of the tracks.
+	#[track_caller]
+	fn assert_index_matches_scan(front: &Front) {
+		let scanned: BTreeSet<_> = front
+			.tracks
+			.iter()
+			.filter_map(|(name, track)| match track.state {
+				TrackState::Parked { since } => Some((since + front.linger, name.clone())),
+				_ => None,
+			})
+			.collect();
+		assert_eq!(front.parked, scanned);
+		assert_eq!(front.next_deadline(), scanned.first().map(|(at, _)| *at));
+	}
+
 	/// A front serving `source` through `candidate`, with `video` spliced and read.
 	fn serving(candidate: Candidate, source: u64) -> Front {
 		let mut front = Front::new(LINGER);
@@ -1543,6 +1558,42 @@ mod tests {
 		assert_actions(front.step(Event::Closed), &[Action::End { err: Error::Dropped }]);
 	}
 
+	#[test]
+	fn deadline_index_matches_scan_across_track_transitions() {
+		use rand::{RngExt, SeedableRng};
+
+		let mut rng = rand::rngs::StdRng::seed_from_u64(0x66726f6e74);
+		let mut front = serving(remote(1), 100);
+		let mut now = Instant::now();
+		for _ in 0..4096 {
+			let track = name(&format!("track-{}", rng.random_range(0..32)));
+			let event = if !front.tracks.contains_key(&track) {
+				Event::TrackAssigned { track, now }
+			} else {
+				match rng.random_range(0..4) {
+					0 => Event::Used { track },
+					1 => Event::Unused { track, now },
+					2 => {
+						now += LINGER / 4;
+						Event::Deadline { now }
+					}
+					_ => Event::TrackInfo {
+						track,
+						source: 100,
+						closing: false,
+						result: Ok(info()),
+					},
+				}
+			};
+			for action in front.step(event) {
+				if let Action::Forget { track } = action {
+					front.step(Event::Forgotten { track });
+				}
+			}
+			assert_index_matches_scan(&front);
+		}
+	}
+
 	/// Every sequence of events up to a small depth, over a small alphabet,
 	/// checked against the invariants the driver relies on.
 	#[test]
@@ -1624,6 +1675,9 @@ mod tests {
 				let before = format!("{next:?}");
 				let actions = next.step(event.clone());
 				*sequences += 1;
+
+				// Route-wide events skip the index update, so they must leave parked tracks alone.
+				assert_index_matches_scan(&next);
 
 				// An event that changes nothing produces nothing, except letting
 				// go of a source the front never took.
