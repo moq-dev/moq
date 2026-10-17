@@ -557,7 +557,7 @@ impl poll::Session for MockSession {
 	) -> Poll<Result<(Self::SendStream, Self::RecvStream), Self::Error>> {
 		let link = &self.side.out;
 		let mut lines = link.bi.lock().unwrap();
-		let (send, recv) = ready!(self.inner.poll_open_bi(cx, options))?;
+		let (send, recv) = ready!(self.inner.poll_open_bi(cx, Default::default()))?;
 		let held = link.held_bi.lock().unwrap().is_some();
 		let forward = Arc::new(Line {
 			held,
@@ -571,6 +571,7 @@ impl poll::Session for MockSession {
 		drop(lines);
 
 		let mut send = self.send(send, forward);
+		poll::SendStream::set_priority(&mut send, options.priority);
 		send.withhold_fin = Some(self.side.withhold_bidi_fins.clone());
 		send.first_byte = Some(self.side.bidi_types.clone());
 		Poll::Ready(Ok((send, self.recv(recv, back))))
@@ -587,7 +588,7 @@ impl poll::Session for MockSession {
 
 		let link = &self.side.out;
 		let mut lines = link.uni.lock().unwrap();
-		let send = ready!(self.inner.poll_open_uni(cx, options))?;
+		let send = ready!(self.inner.poll_open_uni(cx, Default::default()))?;
 		let line = Arc::new(Line {
 			held: link.held_uni.lock().unwrap().is_some(),
 			split: link.split.lock().unwrap().clone(),
@@ -597,6 +598,7 @@ impl poll::Session for MockSession {
 		drop(lines);
 
 		let mut send = self.send(send, line);
+		poll::SendStream::set_priority(&mut send, options.priority);
 		send.ack = send.line.held;
 		Poll::Ready(Ok(send))
 	}

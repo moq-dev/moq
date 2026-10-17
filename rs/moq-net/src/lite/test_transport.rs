@@ -43,7 +43,7 @@ pub type Rank = (Option<usize>, i64);
 #[derive(Clone, Default)]
 pub struct Log {
 	pub datagrams: Arc<Mutex<Vec<bytes::Bytes>>>,
-	/// The send group and order each datagram was sent with, beside [`Self::datagrams`].
+	/// The send group and priority each datagram was sent with, beside [`Self::datagrams`].
 	datagram_ranks: Arc<Mutex<Vec<Rank>>>,
 	pub writes: Arc<Mutex<Vec<u8>>>,
 	pub resets: Arc<Mutex<Vec<u32>>>,
@@ -130,7 +130,7 @@ impl Log {
 		self.orders.lock().unwrap().clone()
 	}
 
-	/// The send group and order of every datagram, as (group, order) in call order.
+	/// The send group and priority of every datagram, as (group, priority) in call order.
 	pub fn datagram_ranks(&self) -> Vec<Rank> {
 		self.datagram_ranks.lock().unwrap().clone()
 	}

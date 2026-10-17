@@ -13,7 +13,7 @@
 //! with a code and drops what it queued. Closing the session keeps queued messages
 //! readable, and leaves streams as they were, so the peer reads them, then the close.
 //!
-//! Datagrams ignore their send group and order, and are dropped when oversized or when the
+//! Datagrams ignore their send options, and are dropped when oversized or when the
 //! peer's queue is full, as a network would.
 
 use std::{

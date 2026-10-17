@@ -79,6 +79,11 @@ Direction to settle in the draft first, then the code:
   presents send order as unrelated.
 - A per-session cap on distinct ranks is a scheduling detail; whatever replaces
   the 255-entry sort must stay O(log n) per group under chat-shaped churn.
+- moq-quic already has the fair tier: send domains sharing bytes by deficit
+  round robin, with groups inside them. They are crate-private (exercised only
+  by its tests) until this quest gives them a consumer. Exposing them also
+  gives moq-net's `poll::Session::send_group(priority)` a domain, so land that
+  in the same trait break and implementers break once.
 
 Signed priority, decided with the maintainer:
 

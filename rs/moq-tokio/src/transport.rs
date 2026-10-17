@@ -63,8 +63,12 @@ impl std::fmt::Display for Transport {
 /// plain boxed flavor suffices.
 type OpBox<T> = futures::future::BoxFuture<'static, T>;
 
-/// Adapts a transport that only implements the async interface
-/// ([`web_transport_trait::Session`]) to the poll interface this crate requires.
+/// Adapts one of this crate's async backends (qmux, iroh, quic) to the poll interface
+/// moq-net requires.
+///
+/// Only those backends fit: the bound goes through a sealed trait, so another
+/// [`web_transport_trait::Session`] cannot be wrapped. A custom transport implements
+/// moq-net's `transport::poll` traits instead.
 ///
 /// Each pending session operation is stored as a boxed future built from a clone
 /// of the underlying session; stream operations temporarily move the stream into
