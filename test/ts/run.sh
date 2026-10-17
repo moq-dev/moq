@@ -619,6 +619,11 @@ stop_shaper() {
         sed 's/^/  shaper: /' "$HARNESS_RUN/shaper.log" >&2 || true
         return 1
     }
+    # The shaper accepts a silent profile while silence is still likely; a lossy run needs loss.
+    if ! python3 -c 'import json, sys; sys.exit(json.load(open(sys.argv[1]))["down"]["lost"] == 0)' "$HARNESS_RUN/shaper.json"; then
+        echo "error: moq-shaper dropped none of the relay's datagrams at ${LOSS}% loss; raise --loss or --duration" >&2
+        return 1
+    fi
     # What the path dropped beside what that cost the output: QUIC retransmits the former,
     # and the exporter counts the units that still missed their deadline or never came.
     echo
