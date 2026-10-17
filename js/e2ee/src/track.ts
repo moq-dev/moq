@@ -30,6 +30,8 @@ export class Producer {
 	#writer: Writer;
 	#datagramKey: TrackKey;
 	#next = 0;
+	// Datagrams waiting in the pump for admission; later ones queue behind them.
+	#pending = 0;
 
 	private constructor(inner: NetTrack.Producer, groupKey: TrackKey, datagramKey: TrackKey) {
 		this.#inner = inner;
@@ -86,7 +88,7 @@ export class Producer {
 	 * buffer. A predictable failure, including a mismatched timestamp, is refused before the
 	 * sequence is allocated; once admitted, the identity is spent even if the net write fails.
 	 * Until this producer has observed the track's committed timescale, admission waits for it
-	 * in the serial pump, so the sequence is allocated there. Rejects with {@link Failure}
+	 * in the serial pump, so the sequence is allocated there, and later datagrams queue behind it. Rejects with {@link Failure}
 	 * `reuse`, `identity`, `exhausted`, or `oversize`, or a net error.
 	 */
 	async insertDatagram(
@@ -106,7 +108,7 @@ export class Producer {
 		this.#writable();
 		const owned = plaintext.slice();
 		const writer = this.#writer;
-		if (writer.timed !== undefined) {
+		if (writer.timed !== undefined && this.#pending === 0) {
 			const admitted = sequence ?? this.#next;
 			const write = this.#admit(admitted, timestamp, owned);
 			return writer.pump.run(async () => {
@@ -115,12 +117,20 @@ export class Producer {
 			});
 		}
 		// Admitting in the pump keeps this ahead of a close or write submitted after it.
+		this.#pending++;
 		return writer.pump.run(async () => {
-			const info = await this.#inner.info();
-			writer.timed = info.timescale != null;
-			if (writer.aborted) throw writer.aborted;
-			const admitted = sequence ?? this.#next;
-			await this.#admit(admitted, timestamp, owned)();
+			let write: () => Promise<void>;
+			let admitted: number;
+			try {
+				const info = await this.#inner.info();
+				writer.timed = info.timescale != null;
+				if (writer.aborted) throw writer.aborted;
+				admitted = sequence ?? this.#next;
+				write = this.#admit(admitted, timestamp, owned);
+			} finally {
+				this.#pending--;
+			}
+			await write();
 			return admitted;
 		});
 	}

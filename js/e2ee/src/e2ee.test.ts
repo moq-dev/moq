@@ -1,13 +1,13 @@
 import { expect, test } from "bun:test";
 import { Milli } from "@moq/clock";
-import { Broadcast, Group as NetGroup, type Track as NetTrack, Time } from "@moq/net";
+import { Broadcast, Group as NetGroup, Track as NetTrack, Time } from "@moq/net";
 import { Credential } from "./credential.ts";
 import type * as Datagram from "./datagram.ts";
 import { DATAGRAM, GROUP, parse } from "./derive.ts";
 import { Failure } from "./failure.ts";
 import type * as Generation from "./generation.ts";
 import * as Group from "./group.ts";
-import { TrackKey, trackKey } from "./key.ts";
+import { type Nonce, TrackKey, trackKey } from "./key.ts";
 import {
 	DATAGRAM_WINDOW,
 	MAX_DATAGRAM_PAYLOAD,
@@ -88,9 +88,12 @@ function thrown(fn: () => unknown): string {
 	throw new Error("expected a failure");
 }
 
-// Hold the first open until released, counting every open that starts.
-function holdFirstOpen() {
-	const decrypt = TrackKey.prototype.decrypt;
+// Hold the first seal or open until released, counting every one that starts.
+type Aead = (this: TrackKey, iv: Nonce, data: Uint8Array<ArrayBuffer>) => Promise<Uint8Array<ArrayBuffer>>;
+
+function holdFirst(method: "encrypt" | "decrypt") {
+	const proto = TrackKey.prototype as unknown as Record<typeof method, Aead>;
+	const original = proto[method];
 	let release!: () => void;
 	const gate = new Promise<void>((resolve) => {
 		release = resolve;
@@ -104,16 +107,16 @@ function holdFirstOpen() {
 		opening,
 		release,
 		restore: () => {
-			TrackKey.prototype.decrypt = decrypt;
+			proto[method] = original;
 			release();
 		},
 	};
-	TrackKey.prototype.decrypt = async function (this: TrackKey, ...args: Parameters<TrackKey["decrypt"]>) {
+	proto[method] = async function (this: TrackKey, iv: Nonce, data: Uint8Array<ArrayBuffer>) {
 		if (hold.calls++ === 0) {
 			entered();
 			await gate;
 		}
-		return decrypt.apply(this, args);
+		return original.call(this, iv, data);
 	};
 	return hold;
 }
@@ -369,7 +372,7 @@ test("a grouped failure ahead of a datagram open rejects the datagram", async ()
 	p.net.insertDatagram(0, ms(2), await sealed(p, DATAGRAM, 0, 0, "late"));
 	const forged = await recvGroup(p.consumer);
 
-	const hold = holdFirstOpen();
+	const hold = holdFirst("decrypt");
 	const admit = admitted(2);
 	try {
 		const read = forged.readFrame();
@@ -394,7 +397,7 @@ test("opens across a track's groups run one at a time", async () => {
 	const a = await recvGroup(p.consumer);
 	const b = await recvGroup(p.consumer);
 
-	const hold = holdFirstOpen();
+	const hold = holdFirst("decrypt");
 	const admit = admitted(2);
 	try {
 		const readA = readText(a);
@@ -603,6 +606,31 @@ test("a close in the same turn drains a datagram waiting for the timescale", asy
 	producer.close();
 	expect(await sent).toBe(0);
 	expect(datagramText(await consumer.recvDatagram())).toBe("last");
+});
+
+test("datagrams admitted after the timescale resolves stay in submit order", async () => {
+	const generation = credential().produce();
+	const net = new NetTrack.Producer(await generation.name("audio"));
+	const consumer = generation.credential.consume(generation.epoch).consume(subscribe(net));
+	const producer = generation.produce(net);
+
+	const hold = holdFirst("encrypt");
+	try {
+		// Both wait in the pump for the timescale.
+		const first = producer.appendDatagram(ms(1), text("first"));
+		const second = producer.appendDatagram(ms(2), text("second"));
+		net.accept({ timescale: Time.Timescale.MILLI });
+		// The first is admitted and sealing, so the timescale is known while the second still waits.
+		await hold.opening;
+		const third = producer.appendDatagram(ms(3), text("third"));
+		hold.release();
+		expect(await Promise.all([first, second, third])).toEqual([0, 1, 2]);
+	} finally {
+		hold.restore();
+	}
+	for (const expected of ["first", "second", "third"]) {
+		expect(datagramText(await consumer.recvDatagram())).toBe(expected);
+	}
 });
 
 test("a failed net write after encryption aborts the group", async () => {
