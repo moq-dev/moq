@@ -2956,7 +2956,7 @@ pub(super) struct TrackWeak {
 }
 
 /// Keeps a finished track servable after its producers drop; see [`TrackWeak::hold_finished`].
-pub(crate) struct Hold {
+pub(in crate::model) struct Hold {
 	_alive: Arc<Alive>,
 	/// The track's [`Info::max_age`], clamped to the broadcast's `cache_duration`.
 	pub max_age: Option<Duration>,
@@ -2969,7 +2969,7 @@ impl TrackWeak {
 	///
 	/// Seals a held track: a lower group a surviving producer creates afterward would
 	/// outlive the linger fixed here, so it is refused instead.
-	pub(crate) fn hold_finished(&self) -> Option<Hold> {
+	pub(in crate::model) fn hold_finished(&self) -> Option<Hold> {
 		let alive = self.alive.upgrade()?;
 		if !alive.published.load(Ordering::Relaxed) {
 			return None;
