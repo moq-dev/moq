@@ -474,11 +474,11 @@ final class SmokeTests: XCTestCase {
         let rendition = try XCTUnwrap(catalog.audio["mic"])
 
         let fixed = try await Audio.Consumer.subscribe(
-            broadcast: consumer, name: "mic", rendition: rendition,
+            broadcast: consumer, id: "mic", rendition: rendition,
             output: AudioDecoderOutput(format: .f32, delayUs: 80_000)
         )
         let estimated = try await Audio.Consumer.subscribe(
-            broadcast: consumer, name: "mic", rendition: rendition,
+            broadcast: consumer, id: "mic", rendition: rendition,
             output: AudioDecoderOutput(format: .f32)
         )
         XCTAssertEqual(fixed.delayUs, 80_000)
