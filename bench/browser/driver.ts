@@ -147,7 +147,12 @@ const report = {
 	comparisons: [] as unknown[],
 };
 const output = join(out, "report.json");
-const save = () => Bun.write(output, JSON.stringify(report, null, 2));
+// Writes queue behind each other and serialize when they run, so the newest snapshot always lands last.
+let saving: Promise<unknown> = Promise.resolve();
+const save = () => {
+	saving = saving.then(() => Bun.write(output, JSON.stringify(report, null, 2)));
+	return saving;
+};
 
 const browser: Browser = await chromium.launch({
 	channel: process.env.BROWSER_BIN ? undefined : "chromium",
