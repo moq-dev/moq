@@ -74,6 +74,7 @@ moq ... play --delay 100ms
 
 A redundant pair shares an epoch, a UUIDv7 such as `uuidgen -7` prints, instead of a Hop ID.
 `--hop` is an unknown flag and `MOQ_HOP` is silently ignored, so remove it: a pair still keyed on `MOQ_HOP` mints an epoch per process and each restart replaces the other's broadcast.
+A node that pinned its cluster id with `--hop` passes `--cluster-id` instead.
 
 ```bash
 # Before

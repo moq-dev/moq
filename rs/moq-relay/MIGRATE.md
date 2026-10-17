@@ -79,9 +79,8 @@ moq-relay --cluster-mesh --cluster-linger 10s --cluster-connect https://root.exa
 moq-relay --cluster-connect https://root.example/,https://b.example/ ...
 ```
 
-### `--cluster-id` no longer falls back to `--hop` (#4969)
+### A route without a publisher keeps hop 0 (#4969)
 
-A node that pinned its id with `--hop` passes `--cluster-id`.
 A route that names no publisher keeps its 0 instead of gaining a random hop.
 
 ### Embedding: auth takes the client-CA answer (#4912)
