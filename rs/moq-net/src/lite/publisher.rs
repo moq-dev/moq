@@ -3486,6 +3486,16 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 		if let Poll::Ready(res) = poll_recv_next(&mut self.track, self.datagrams, emit_boundary, waiter) {
 			match res? {
 				Recv::Group(mut group) => {
+					// Never a second stream for a sequence this subscription already accounted
+					// for (served, sent as a datagram, or dropped): a group re-created after its
+					// DROP stays dropped, since the subscriber may settle before it arrives.
+					if self
+						.served
+						.as_ref()
+						.is_some_and(|served| served.contains(&group.sequence))
+					{
+						return Poll::Ready(Ok(ControlFlow::Continue(())));
+					}
 					if !position_group(&mut group, self.start_frame, self.end_frame) {
 						// Its head is gone, and this subscriber didn't ask for a
 						// partial group. Skip it rather than open a stream that can
@@ -5060,8 +5070,18 @@ mod serve_group_test {
 		headless
 			.write_frame(Timestamp::from_millis(1).unwrap(), b"x".as_slice())
 			.unwrap();
-		headless.finish().unwrap();
 		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+		assert_eq!(drops(&mut writer, &log, version).await, [(1, 1)]);
+
+		// Given up and re-created whole after its DROP, it stays dropped.
+		headless.abort(Error::App(1)).unwrap();
+		write_group(&mut track, 1, 1);
+		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+		assert_eq!(
+			run.ctx.opens.opened.load(Ordering::Relaxed),
+			1,
+			"only group 0 is served"
+		);
 		assert_eq!(drops(&mut writer, &log, version).await, [(1, 1)]);
 	}
 
