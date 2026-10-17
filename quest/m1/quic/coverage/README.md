@@ -47,8 +47,8 @@ and the harness defaults to Cubic while production runs BBR3.
 - [Seeded simulation](/quest/m1/quic/coverage/sim.md) - a deterministic, impaired network in `Pair`, BBR3 as the harness default, and property tests over random workloads
 - [Plaintext fuzz crypto](/quest/m1/quic/coverage/fuzz-crypto.md) - a fuzz-only plaintext session so the connection target skips TLS and its injected packets decrypt
 - [Richer simulation workloads](/quest/m1/quic/coverage/sim-workloads.md) - resets, bidi streams, datagrams, and migration in the random workloads, each with its own invariant
+- [Pin benchmark cores](/quest/m1/quic/coverage/bench-pin.md) - local base/head comparisons run on one core type on hybrid CPUs
 
 ## Related
 
 - [Receive memory coverage](https://github.com/moq-dev/moq/pull/5752) - the end-to-end moq-tokio receive-window benchmark; the crate benchmarks here sit below it
-- [Delete NewReno](/quest/m1/quic/new-reno.md) - the dead controller the survey found at 0%
