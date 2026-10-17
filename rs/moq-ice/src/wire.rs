@@ -15,6 +15,18 @@ pub type Packet = (Vec<u8>, SocketAddr);
 /// and a stalled session must not grow memory without limit.
 pub const INBOX: usize = 256;
 
+/// The UDP socket an [`crate::Agent`] runs on: where it sends, what it receives,
+/// and the host candidates it is reachable at.
+pub struct Socket {
+	/// Sends datagrams, possibly shared by several agents (a demuxed server socket).
+	pub udp: Arc<UdpSocket>,
+	/// The host candidates advertised to the peer, not the socket's bind address.
+	/// Must not be empty.
+	pub locals: Vec<SocketAddr>,
+	/// The datagrams routed to this agent.
+	pub inbound: Inbound,
+}
+
 /// The datagrams routed to one [`crate::Agent`], and the counters they are tallied in.
 pub struct Inbound {
 	/// Ends once every sender is dropped, which ends the agent.
@@ -64,7 +76,7 @@ impl Wire {
 }
 
 /// Pump every datagram from a socket the caller owns 1:1 into a queue for
-/// [`crate::Agent::new`], until the queue's receiver is dropped.
+/// [`Socket::inbound`], until the queue's receiver is dropped.
 pub fn reader(socket: Arc<UdpSocket>) -> Inbound {
 	let (tx, rx) = mpsc::channel(INBOX);
 	let wire = Wire::default();

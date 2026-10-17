@@ -267,8 +267,8 @@ impl Offerer {
 		if protocol.is_empty() || protocol.contains(char::is_whitespace) {
 			return Err(Error::Protocol(protocol.to_string()));
 		}
-		let (socket, locals) = bind(&hosts)?;
-		let mut rtc = rtc(&locals)?;
+		let socket = bind(&hosts)?;
+		let mut rtc = rtc(&socket.locals)?;
 
 		let mut api = rtc.sdp_api();
 		let id = api.add_channel_with_config(ChannelConfig {
@@ -284,7 +284,7 @@ impl Offerer {
 			channel: id,
 			pending: Some(pending),
 		};
-		let peer = Peer::spawn(config, rtc, socket, locals, role, None).await?;
+		let peer = Peer::spawn(config, rtc, socket, role, None).await?;
 		let offerer = Self {
 			peer,
 			protocol: protocol.to_string(),
@@ -351,14 +351,14 @@ impl Answerer {
 		let max_message = max_message_size(offer.as_str())?;
 		let parsed = SdpOffer::from_sdp_string(&sdp).map_err(|err| Error::Sdp(err.to_string()))?;
 
-		let (socket, locals) = bind(&hosts)?;
-		let mut rtc = rtc(&locals)?;
+		let socket = bind(&hosts)?;
+		let mut rtc = rtc(&socket.locals)?;
 		let answer = rtc
 			.sdp_api()
 			.accept_offer(parsed)
 			.map_err(|err| Error::Sdp(err.to_string()))?;
 
-		let peer = Peer::spawn(config, rtc, socket, locals, Role::Answerer, Some(max_message)).await?;
+		let peer = Peer::spawn(config, rtc, socket, Role::Answerer, Some(max_message)).await?;
 		peer.resolve(mdns);
 		Ok((Self { peer }, Answer(answer.to_sdp_string())))
 	}
@@ -395,14 +395,12 @@ impl Peer {
 	async fn spawn(
 		config: &Config,
 		rtc: Rtc,
-		socket: Arc<UdpSocket>,
-		locals: Vec<SocketAddr>,
+		socket: moq_ice::Socket,
 		role: Role,
 		max_message: Option<u64>,
 	) -> Result<Self, Error> {
 		let stun = resolve_stun(&config.stun).await;
-		let inbound = moq_ice::reader(socket.clone());
-		let mut agent = moq_ice::Agent::new(rtc, socket, locals, inbound)?.with_stun(&stun);
+		let mut agent = moq_ice::Agent::new(rtc, socket)?.with_stun(&stun);
 		if let Role::Offerer { .. } = role {
 			// The answer applies through `rtc_mut`, which starts the deadline.
 			agent = agent.awaiting_answer();
@@ -812,8 +810,9 @@ fn hosts() -> Result<Vec<IpAddr>, Error> {
 	Ok(hosts)
 }
 
-/// Bind a dual-stack socket on an ephemeral port, pairing it with each host address.
-fn bind(hosts: &[IpAddr]) -> Result<(Arc<UdpSocket>, Vec<SocketAddr>), Error> {
+/// Bind a dual-stack socket on an ephemeral port, pairing it with each host
+/// address, and start reading it.
+fn bind(hosts: &[IpAddr]) -> Result<moq_ice::Socket, Error> {
 	let socket = crate::bind::udp(crate::bind::Udp::new("[::]:0".parse().unwrap()))
 		.or_else(|_| crate::bind::udp(crate::bind::Udp::new("0.0.0.0:0".parse().unwrap())))?;
 	socket.set_nonblocking(true)?;
@@ -828,7 +827,12 @@ fn bind(hosts: &[IpAddr]) -> Result<(Arc<UdpSocket>, Vec<SocketAddr>), Error> {
 	if locals.is_empty() {
 		return Err(Error::NoHost);
 	}
-	Ok((Arc::new(socket), locals))
+	let udp = Arc::new(socket);
+	Ok(moq_ice::Socket {
+		inbound: moq_ice::reader(udp.clone()),
+		udp,
+		locals,
+	})
 }
 
 /// Look up each STUN server. One that does not resolve is skipped, since a missing

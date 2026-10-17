@@ -1,6 +1,6 @@
 //! str0m session driver shared by every HTTP role / media direction.
 //!
-//! [`moq_tokio::webrtc::moq_ice::Agent`] drives the sans-IO [`str0m::Rtc`] over UDP;
+//! [`moq_ice::Agent`] drives the sans-IO [`str0m::Rtc`] over UDP;
 //! [`Session::run`] feeds it egress writes and handles the media events it surfaces.
 //!
 //! The session itself doesn't care whether the [`Rtc`] was populated by
@@ -96,18 +96,11 @@ pub struct Session {
 }
 
 impl Session {
-	/// Convenience for the ingest case (WHIP server, WHEP client). `locals` are the
-	/// advertised ICE candidates, not the socket bind (see [`moq_ice::Agent::new`]).
+	/// Convenience for the ingest case (WHIP server, WHEP client). The socket's
 	/// `inbound` comes from the server mux, or [`moq_ice::reader`] for a 1:1 client socket.
-	pub fn ingest(
-		rtc: Rtc,
-		socket: Arc<UdpSocket>,
-		locals: Vec<SocketAddr>,
-		inbound: moq_ice::Inbound,
-		sink: Box<dyn MediaSink>,
-	) -> Result<Self> {
+	pub fn ingest(rtc: Rtc, socket: moq_ice::Socket, sink: Box<dyn MediaSink>) -> Result<Self> {
 		Ok(Self {
-			agent: moq_ice::Agent::new(rtc, socket, locals, inbound)?,
+			agent: moq_ice::Agent::new(rtc, socket)?,
 			role: MediaRole::Ingest(sink),
 			opened_media: HashSet::new(),
 			writes_rx: None,
@@ -116,19 +109,12 @@ impl Session {
 		})
 	}
 
-	/// Convenience for the egress case (WHEP server, WHIP client). `locals` are the
-	/// advertised ICE candidates, not the socket bind (see [`moq_ice::Agent::new`]).
+	/// Convenience for the egress case (WHEP server, WHIP client). The socket's
 	/// `inbound` comes from the server mux, or [`moq_ice::reader`] for a 1:1 client socket.
-	pub fn egress(
-		rtc: Rtc,
-		socket: Arc<UdpSocket>,
-		locals: Vec<SocketAddr>,
-		inbound: moq_ice::Inbound,
-		mut source: EgressSource,
-	) -> Result<Self> {
+	pub fn egress(rtc: Rtc, socket: moq_ice::Socket, mut source: EgressSource) -> Result<Self> {
 		let writes_rx = source.take_writes();
 		Ok(Self {
-			agent: moq_ice::Agent::new(rtc, socket, locals, inbound)?,
+			agent: moq_ice::Agent::new(rtc, socket)?,
 			role: MediaRole::Egress(Box::new(source)),
 			opened_media: HashSet::new(),
 			writes_rx: Some(writes_rx),
@@ -514,19 +500,21 @@ pub fn rtc_with_codecs(codecs: &[str0m::format::Codec]) -> Rtc {
 	rtc_config_with_codecs(codecs).build(std::time::Instant::now())
 }
 
-/// Bind an ephemeral UDP socket for a single client session and return it
-/// (to share with its [`moq_ice::reader`]) plus the ICE candidates
-/// to advertise.
+/// Bind an ephemeral UDP socket for a single client session, read by its own
+/// [`moq_ice::reader`], with the ICE candidates to advertise.
 ///
 /// The client paths are 1:1 (one socket per dialed session, no demux); the
 /// server paths share one socket via `crate::server::mux` instead. `advertise`
 /// IPs are used verbatim (reusing the bound port); empty falls back to the
 /// bound address, substituting loopback when that address is unspecified.
-pub async fn bind_udp(advertise: &[SocketAddr]) -> Result<(Arc<UdpSocket>, Vec<SocketAddr>)> {
-	let socket = UdpSocket::bind(("0.0.0.0", 0)).await?;
-	let local = socket.local_addr()?;
-	let candidates = advertised_candidates(advertise, local)?;
-	Ok((Arc::new(socket), candidates))
+pub async fn bind_udp(advertise: &[SocketAddr]) -> Result<moq_ice::Socket> {
+	let udp = Arc::new(UdpSocket::bind(("0.0.0.0", 0)).await?);
+	let locals = advertised_candidates(advertise, udp.local_addr()?)?;
+	Ok(moq_ice::Socket {
+		inbound: moq_ice::reader(udp.clone()),
+		udp,
+		locals,
+	})
 }
 
 /// Pair configured ICE candidates with the bound UDP port and validate them.

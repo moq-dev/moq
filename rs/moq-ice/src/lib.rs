@@ -24,4 +24,4 @@ mod agent;
 mod wire;
 
 pub use agent::{Agent, Error, Event, RtcMut, canonical};
-pub use wire::{INBOX, Inbound, Packet, Stats, Wire, reader};
+pub use wire::{INBOX, Inbound, Packet, Socket, Stats, Wire, reader};

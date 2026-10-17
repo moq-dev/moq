@@ -11,7 +11,7 @@ use stun_types::message::{BINDING, Message, MessageClass, MessageWriteVec, Trans
 use stun_types::prelude::*;
 use tokio::net::UdpSocket;
 
-use crate::{Inbound, Wire};
+use crate::{Inbound, Socket, Wire};
 
 /// Backstop deadline for reaching a connected ICE state, covering the one case
 /// str0m's agent deliberately never times out: a peer that provides no remote
@@ -108,11 +108,13 @@ pub struct Agent {
 }
 
 impl Agent {
-	/// Drive `rtc`, sending from `socket` and receiving from `inbound`.
-	///
-	/// `locals` are the host candidates advertised to the peer, not the socket's
-	/// bind address, and must not be empty.
-	pub fn new(rtc: Rtc, socket: Arc<UdpSocket>, locals: Vec<SocketAddr>, inbound: Inbound) -> std::io::Result<Self> {
+	/// Drive `rtc` over `socket`, which must have a host candidate.
+	pub fn new(rtc: Rtc, socket: Socket) -> std::io::Result<Self> {
+		let Socket {
+			udp: socket,
+			locals,
+			inbound,
+		} = socket;
 		if locals.is_empty() {
 			return Err(std::io::Error::new(
 				std::io::ErrorKind::InvalidInput,
@@ -462,7 +464,12 @@ mod tests {
 		let local = socket.local_addr().unwrap();
 		let inbound = crate::reader(socket.clone());
 		let wire = inbound.wire.clone();
-		let mut agent = Agent::new(Rtc::builder().build(Instant::now()), socket, vec![local], inbound).unwrap();
+		let socket = Socket {
+			udp: socket,
+			locals: vec![local],
+			inbound,
+		};
+		let mut agent = Agent::new(Rtc::builder().build(Instant::now()), socket).unwrap();
 
 		// Until tokio has seen the socket writable, a send waits in the outbox.
 		agent.socket.writable().await.unwrap();
@@ -485,8 +492,12 @@ mod tests {
 		socket.set_nonblocking(true).unwrap();
 		let socket = Arc::new(UdpSocket::from_std(socket).unwrap());
 		let local = socket.local_addr().unwrap();
-		let inbound = crate::reader(socket.clone());
-		Agent::new(Rtc::builder().build(Instant::now()), socket, vec![local], inbound).unwrap()
+		let socket = Socket {
+			inbound: crate::reader(socket.clone()),
+			udp: socket,
+			locals: vec![local],
+		};
+		Agent::new(Rtc::builder().build(Instant::now()), socket).unwrap()
 	}
 
 	#[tokio::test]
