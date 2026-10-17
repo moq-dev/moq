@@ -4,6 +4,22 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Custom transports declare send groups (#5711)
+
+A `transport::poll::SendStream` declares `type Group` (`Ungrouped` when the transport has none) and implements `set_group`, and `set_priority` takes an `i64`.
+A `transport::poll::Session` implements `send_group`, returning `None` without groups.
+
+```rust
+// Before
+fn set_priority(&mut self, order: i32) { ... }
+// After
+type Group = Ungrouped;
+fn set_priority(&mut self, priority: i64) { ... }
+fn set_group(&mut self, group: &Ungrouped) { match *group {} }
+// and on the Session
+fn send_group(&mut self, _priority: i64) -> Option<Ungrouped> { None }
+```
+
 ### Superseded groups age by wall clock too (#5548)
 
 A superseded group is stale once its successor arrived a full `max_delay` ago, as well as by media time.
