@@ -268,7 +268,7 @@ pub fn excluding(origin: crate::origin::Consumer, peer: crate::Hop) -> crate::or
 	origin.excluding(peer)
 }
 
-/// A session's snapshot of its peer's initial announcements, for the caught-up bench.
+/// A session's snapshot of its peer's initial announcements, for the synced bench.
 /// Drop it to land the snapshot.
 pub struct Snapshot(#[allow(dead_code)] crate::model::Snapshot);
 

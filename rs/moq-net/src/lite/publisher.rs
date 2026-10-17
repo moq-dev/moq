@@ -2593,7 +2593,7 @@ mod announce_test {
 	}
 
 	/// A relay answers with what it holds now: an upstream still delivering its own
-	/// initial set never delays the ANNOUNCE_OK, so a peer catches up with this relay.
+	/// initial set never delays the ANNOUNCE_OK, so a peer syncs with this relay.
 	#[moq_clock::test]
 	async fn a_silent_upstream_never_delays_the_answer() {
 		let origin = Hop::new(1).unwrap().produce();
@@ -2604,10 +2604,7 @@ mod announce_test {
 		let log = Log::default();
 		let writes = log.writes.clone();
 		let consumer = origin.consume();
-		assert!(
-			!consumer.announced().is_caught_up(),
-			"the relay itself is still catching up"
-		);
+		assert!(!consumer.announced().is_synced(), "the relay itself is still syncing");
 		let mut stream = Stream::<SinkSession, Version> {
 			writer: Writer::new(SinkSend::new(log), VERSION),
 			reader: Reader::new(PendingRecv, VERSION),

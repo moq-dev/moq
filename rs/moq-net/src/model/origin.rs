@@ -816,21 +816,21 @@ struct OriginConsumerState {
 	/// the end instead of parking forever on a table that can never fire again.
 	ended: bool,
 	/// Snapshots in flight that can present on this consumer's cursors, counted
-	/// once per cursor they touch. See [`AnnounceConsumer::poll_caught_up`].
+	/// once per cursor they touch. See [`AnnounceConsumer::poll_synced`].
 	///
 	/// Changed through a read guard, so a session joining wakes none of the cursors it
-	/// holds back (nothing waits on losing caught up), except the last landing, which
+	/// holds back (nothing waits on losing sync), except the last landing, which
 	/// takes the write guard to owe the queue too. Only the table lock changes it.
 	waiting: AtomicUsize,
 	/// The pending prefixes the consumer still owes reading from before the last
-	/// snapshot landed. Caught up once empty and nothing is `waiting`.
+	/// snapshot landed. Synced once empty and nothing is `waiting`.
 	owed: BTreeSet<PathOwned>,
 }
 
 impl OriginConsumerState {
 	/// Whether the consumer has read everything its sources announced before they
-	/// caught up. A torn-down origin has no sources left to wait on.
-	fn caught_up(&self) -> bool {
+	/// synced. A torn-down origin has no sources left to wait on.
+	fn synced(&self) -> bool {
 		(self.waiting.load(Ordering::Relaxed) == 0 || self.ended) && self.owed.is_empty()
 	}
 
@@ -2007,8 +2007,8 @@ impl Producer {
 	}
 
 	/// Start a [`Snapshot`] under `prefix`: the announce consumers it overlaps are not
-	/// caught up until the returned guard drops. Taken before the request goes out, so
-	/// nothing reads as caught up in between.
+	/// synced until the returned guard drops. Taken before the request goes out, so
+	/// nothing reads as synced in between.
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	pub(crate) fn snapshot(&self, prefix: impl AsPath) -> Snapshot {
 		let prefix = self.root.join(prefix.as_path()).to_owned();
@@ -3747,8 +3747,8 @@ struct SnapshotEntry {
 
 /// A session still delivering its peer's initial announcements under a prefix.
 ///
-/// Every announce consumer whose scope the prefix overlaps is short of caught up
-/// (see [`AnnounceConsumer::poll_caught_up`]) until this drops: once the session
+/// Every announce consumer whose scope the prefix overlaps is unsynced
+/// (see [`AnnounceConsumer::poll_synced`]) until this drops: once the session
 /// has inserted the announcements its peer counted, or it gave up on them.
 pub(crate) struct Snapshot {
 	shared: Option<SendCell<kio::Shared<OriginState>>>,
@@ -4392,7 +4392,7 @@ impl OriginState {
 		self.cursors.insert(id, cursor);
 	}
 
-	/// Hold every cursor `snapshot` can present on short of caught up until it lands.
+	/// Hold every cursor `snapshot` can present on unsynced until it lands.
 	fn add_snapshot(&mut self, prefix: &Path, snapshot: SnapshotEntry) {
 		for id in self.routes.cursors_touching(prefix) {
 			if let Some(cursor) = self.cursors.get(&id)
@@ -4421,7 +4421,7 @@ impl OriginState {
 			let Some(cursor) = self.cursors.get(&id).filter(|cursor| cursor.awaits(&snapshot)) else {
 				continue;
 			};
-			// Only the last landing changes what a caught-up waiter sees, so only it takes the
+			// Only the last landing changes what a synced waiter sees, so only it takes the
 			// write guard and wakes. It zeroes the count and owes the queue in one critical
 			// section, so no poll sees nothing waiting before the owed set is in. The table
 			// lock keeps the count from moving between the two guards.
@@ -5988,40 +5988,40 @@ impl AnnounceConsumer {
 		state.is_closed() || state.ended
 	}
 
-	/// Whether this consumer has caught up; see [`Self::poll_caught_up`].
-	pub fn is_caught_up(&self) -> bool {
+	/// Whether this consumer has synced; see [`Self::poll_synced`].
+	pub fn is_synced(&self) -> bool {
 		let state = self.state.read();
-		state.is_closed() || state.caught_up()
+		state.is_closed() || state.synced()
 	}
 
-	/// Wait until this consumer has caught up with what its sources announced.
+	/// Wait until this consumer has synced with what its sources announced.
 	///
-	/// Caught up means every session feeding this scope has delivered its peer's
+	/// Synced means every session feeding this scope has delivered its peer's
 	/// announcements as of when it answered, and this consumer has read every event
 	/// queued before then. A prefix not announced by then is not announced, rather
 	/// than not heard yet. A session joining the scope later, such as a reconnect,
-	/// takes this back until it catches up too; routes published on this origin
+	/// takes this back until it syncs too; routes published on this origin
 	/// itself never wait.
 	///
-	/// Caught up is relative to the session's peer, never global: a relay answers with
+	/// Synced is relative to the session's peer, never global: a relay answers with
 	/// what it holds without waiting on its own upstreams. Versions that cannot mark
 	/// the boundary (moq-lite-03/04, and moq-transport without MoQ Active Count) catch
 	/// up once the peer accepts the request, or once it is sent when nothing answers.
 	///
-	/// Level-triggered: ready whenever caught up, and once the cursor is closed.
-	pub fn poll_caught_up(&self, waiter: &kio::Waiter) -> Poll<()> {
+	/// Level-triggered: ready whenever synced, and once the cursor is closed.
+	pub fn poll_synced(&self, waiter: &kio::Waiter) -> Poll<()> {
 		self.state
-			.poll(waiter, |state| match state.caught_up() {
+			.poll(waiter, |state| match state.synced() {
 				true => Poll::Ready(()),
 				false => Poll::Pending,
 			})
 			.map(|_| ())
 	}
 
-	/// Wait until this consumer has caught up; see [`Self::poll_caught_up`].
+	/// Wait until this consumer has synced; see [`Self::poll_synced`].
 	#[cfg(feature = "async")]
-	pub async fn caught_up(&self) {
-		kio::wait(|waiter| self.poll_caught_up(waiter)).await
+	pub async fn synced(&self) {
+		kio::wait(|waiter| self.poll_synced(waiter)).await
 	}
 
 	/// Returns the root that is automatically stripped from emitted prefixes.
@@ -6323,39 +6323,39 @@ mod tests {
 		announced.assert_next_wait();
 	}
 
-	/// A consumer is caught up once a snapshot lands and it has read what came before.
+	/// A consumer is synced once a snapshot lands and it has read what came before.
 	#[test]
-	fn caught_up_after_the_snapshot_and_its_events() {
+	fn synced_after_the_snapshot_and_its_events() {
 		let producer = origin(1).produce();
 		let snapshot = producer.snapshot("room");
 		let mut announced = producer.consume().announced();
-		assert!(!announced.is_caught_up(), "a snapshot in flight holds it");
+		assert!(!announced.is_synced(), "a snapshot in flight holds it");
 
 		let _alice = producer.announce("room/alice", Route::default()).unwrap();
 		drop(snapshot);
-		assert!(!announced.is_caught_up(), "never before an earlier event is read");
+		assert!(!announced.is_synced(), "never before an earlier event is read");
 
 		announced.assert_next_active("room/alice");
-		assert!(announced.is_caught_up());
+		assert!(announced.is_synced());
 
-		// A later announcement is news, not part of what it caught up with.
+		// A later announcement is news, not part of what it synced with.
 		let _bob = producer.announce("room/bob", Route::default()).unwrap();
-		assert!(announced.is_caught_up());
+		assert!(announced.is_synced());
 	}
 
-	/// Without any session feeding it, a consumer catches up on its own replay.
+	/// Without any session feeding it, a consumer syncs on its own replay.
 	#[test]
 	fn a_local_origin_catches_up_on_its_replay() {
 		let producer = origin(1).produce();
 		let mut empty = producer.consume().announced();
-		assert!(empty.is_caught_up(), "nothing to wait on");
+		assert!(empty.is_synced(), "nothing to wait on");
 		empty.assert_next_wait();
 
 		let _alice = producer.announce("room/alice", Route::default()).unwrap();
 		let mut announced = producer.consume().announced();
-		assert!(!announced.is_caught_up(), "the replay is owed");
+		assert!(!announced.is_synced(), "the replay is owed");
 		announced.assert_next_active("room/alice");
-		assert!(announced.is_caught_up());
+		assert!(announced.is_synced());
 	}
 
 	/// A start and end that cancel before being read are owed nothing.
@@ -6367,9 +6367,9 @@ mod tests {
 
 		let alice = producer.announce("room/alice", Route::default()).unwrap();
 		drop(snapshot);
-		assert!(!announced.is_caught_up());
+		assert!(!announced.is_synced());
 		drop(alice);
-		assert!(announced.is_caught_up(), "the pair cancelled");
+		assert!(announced.is_synced(), "the pair cancelled");
 		announced.assert_next_wait();
 	}
 
@@ -6384,23 +6384,23 @@ mod tests {
 		let snapshot = producer.snapshot("");
 		alice.update(Route::default().with_cost(5)).unwrap();
 		drop(snapshot);
-		assert!(announced.is_caught_up());
+		assert!(announced.is_synced());
 	}
 
-	/// A snapshot taken after catching up (a reconnect) holds it again until it lands.
+	/// A snapshot taken after syncing (a reconnect) holds it again until it lands.
 	#[test]
-	fn a_new_snapshot_takes_caught_up_back() {
+	fn a_new_snapshot_takes_sync_back() {
 		let producer = origin(1).produce();
 		let announced = producer.consume().announced();
-		assert!(announced.is_caught_up());
+		assert!(announced.is_synced());
 
 		let snapshot = producer.snapshot("room/alice");
-		assert!(!announced.is_caught_up(), "a snapshot beneath the scope holds it");
+		assert!(!announced.is_synced(), "a snapshot beneath the scope holds it");
 		let second = producer.snapshot("");
 		drop(snapshot);
-		assert!(!announced.is_caught_up(), "every current snapshot must land");
+		assert!(!announced.is_synced(), "every current snapshot must land");
 		drop(second);
-		assert!(announced.is_caught_up());
+		assert!(announced.is_synced());
 	}
 
 	/// Only snapshots that could present on a consumer hold it.
@@ -6413,20 +6413,20 @@ mod tests {
 			.unwrap();
 
 		let other = producer.snapshot("other");
-		assert!(room.announced().is_caught_up(), "a disjoint prefix");
+		assert!(room.announced().is_synced(), "a disjoint prefix");
 
 		let above = producer.snapshot("");
 		let announced = room.announced();
-		assert!(!announced.is_caught_up(), "a snapshot above the root covers it");
+		assert!(!announced.is_synced(), "a snapshot above the root covers it");
 		drop(above);
-		assert!(announced.is_caught_up());
+		assert!(announced.is_synced());
 
 		drop(other);
 
 		// A local view never waits on a peer's routes.
 		let _peer = producer.clone().peer().snapshot("room");
-		assert!(producer.consume().local().announced().is_caught_up());
-		assert!(!producer.consume().announced().is_caught_up());
+		assert!(producer.consume().local().announced().is_synced());
+		assert!(!producer.consume().announced().is_synced());
 	}
 
 	/// A source shadowed by a mount can present nothing on the handle, so it never holds it.
@@ -6435,15 +6435,15 @@ mod tests {
 		let producer = origin(1).produce();
 		let project = mounted(&producer, "p1", &["**"]).with_hidden(true);
 		let announced = project.announced();
-		assert!(announced.is_caught_up());
+		assert!(announced.is_synced());
 
 		let shadowed = producer.snapshot("p1/.svc");
-		assert!(announced.is_caught_up(), "a snapshot in flight under the hole");
-		assert!(project.announced().is_caught_up(), "a reader registering past one");
+		assert!(announced.is_synced(), "a snapshot in flight under the hole");
+		assert!(project.announced().is_synced(), "a reader registering past one");
 		drop(shadowed);
 
 		let _target = producer.snapshot(".svc/p1");
-		assert!(!announced.is_caught_up(), "the mount's target does hold it");
+		assert!(!announced.is_synced(), "the mount's target does hold it");
 	}
 
 	/// A source under a hidden segment holds only the readers that opt into hidden routes.
@@ -6452,15 +6452,15 @@ mod tests {
 		let producer = origin(1).produce();
 		let announced = producer.consume().announced();
 		let _stats = producer.snapshot(".stats");
-		assert!(announced.is_caught_up(), "a snapshot in flight under a hidden segment");
+		assert!(announced.is_synced(), "a snapshot in flight under a hidden segment");
 		assert!(
-			producer.consume().announced().is_caught_up(),
+			producer.consume().announced().is_synced(),
 			"a reader registering past one"
 		);
-		assert!(!producer.consume().with_hidden(true).announced().is_caught_up());
+		assert!(!producer.consume().with_hidden(true).announced().is_synced());
 	}
 
-	/// A waiter parked on catching up is woken when it does.
+	/// A waiter parked on syncing is woken when it does.
 	#[test]
 	fn catching_up_wakes_the_waiter() {
 		struct Woken(AtomicBool);
@@ -6475,10 +6475,10 @@ mod tests {
 		let announced = producer.consume().announced();
 		let woken = Arc::new(Woken(AtomicBool::new(false)));
 		let waiter = kio::Waiter::new(std::task::Waker::from(woken.clone()));
-		assert!(announced.poll_caught_up(&waiter).is_pending());
+		assert!(announced.poll_synced(&waiter).is_pending());
 		drop(snapshot);
 		assert!(woken.0.load(Ordering::SeqCst), "not woken");
-		assert!(announced.poll_caught_up(&waiter).is_ready());
+		assert!(announced.poll_synced(&waiter).is_ready());
 	}
 
 	/// A session joining or landing short of the last one wakes no parked cursor, so a
@@ -6497,7 +6497,7 @@ mod tests {
 		let woken = Arc::new(Woken(AtomicBool::new(false)));
 		let waiter = kio::Waiter::new(std::task::Waker::from(woken.clone()));
 		assert!(announced.poll_next(&waiter).is_pending());
-		assert!(announced.poll_caught_up(&waiter).is_ready());
+		assert!(announced.poll_synced(&waiter).is_ready());
 
 		let first = producer.snapshot("");
 		let second = producer.snapshot("room");
@@ -9702,9 +9702,9 @@ mod tests {
 		let _alice = producer.announce("room/alice", Route::default()).unwrap();
 
 		drop(driver);
-		assert!(!announced.is_caught_up(), "the queue is still owed");
+		assert!(!announced.is_synced(), "the queue is still owed");
 		announced.assert_next_active("room/alice");
-		assert!(announced.is_caught_up());
+		assert!(announced.is_synced());
 		drop(snapshot);
 	}
 

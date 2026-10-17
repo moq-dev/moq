@@ -42,8 +42,8 @@ class FakeSession {
 	 */
 	readonly consumed = new Map<Path.Valid, BroadcastProducer[]>();
 
-	/** Whether each request is caught up as it opens, as one with no initial set to wait for is. */
-	caughtUpAtOnce = false;
+	/** Whether each request is synced as it opens, as one with no initial set to wait for is. */
+	syncedAtOnce = false;
 
 	closed: Promise<Error | null>;
 	#die!: (reason: Error | null) => void;
@@ -58,7 +58,7 @@ class FakeSession {
 	announced(scope: Path.Pattern = Path.Pattern.all(), options?: Announce.Options): Announce.Consumer {
 		const stream = new Announce.Producer();
 		this.requests.push({ scope: scope.text, hidden: options?.hidden, stream });
-		if (this.caughtUpAtOnce) stream.caughtUp();
+		if (this.syncedAtOnce) stream.synced();
 		return stream.consume();
 	}
 
@@ -615,7 +615,7 @@ test("one failed request leaves the other routes live until the session ends", a
 	origin.close();
 });
 
-test("an origin watcher catches up with the session's initial set, not before", async () => {
+test("an origin watcher syncs with the session's initial set, not before", async () => {
 	const origin = new OriginProducer();
 	const session = new FakeSession();
 	forwardAnnounced(session.session, origin);
@@ -623,18 +623,18 @@ test("an origin watcher catches up with the session's initial set, not before", 
 	const watch = origin.announced(Path.Pattern.subtree(Path.from("room")));
 	const events = record(watch);
 	await settle();
-	expect(watch.caughtUp.peek()).toBe(false);
+	expect(watch.synced.peek()).toBe(false);
 
 	const stream = session.stream("room/**");
 	start(stream, "room/cam");
 	await settle();
 	// The route is in, but the peer has not said the set is complete.
 	expect(events).toEqual(["start room/cam"]);
-	expect(watch.caughtUp.peek()).toBe(false);
+	expect(watch.synced.peek()).toBe(false);
 
-	stream.caughtUp();
+	stream.synced();
 	await settle();
-	expect(watch.caughtUp.peek()).toBe(true);
+	expect(watch.synced.peek()).toBe(true);
 
 	watch.close();
 	session.die();
@@ -649,27 +649,27 @@ test("a session ending before its initial set lands stops holding the watcher", 
 	const watch = origin.announced();
 	record(watch);
 	await settle();
-	expect(watch.caughtUp.peek()).toBe(false);
+	expect(watch.synced.peek()).toBe(false);
 
 	session.die();
 	await settle();
-	expect(watch.caughtUp.peek()).toBe(true);
+	expect(watch.synced.peek()).toBe(true);
 
 	watch.close();
 	origin.close();
 });
 
-test("a request caught up as it opens releases the watcher", async () => {
+test("a request synced as it opens releases the watcher", async () => {
 	const origin = new OriginProducer();
 	const session = new FakeSession();
-	session.caughtUpAtOnce = true;
+	session.syncedAtOnce = true;
 	forwardAnnounced(session.session, origin);
 
 	const watch = origin.announced();
 	record(watch);
 	await settle();
 	expect(session.requests).toHaveLength(1);
-	expect(watch.caughtUp.peek()).toBe(true);
+	expect(watch.synced.peek()).toBe(true);
 
 	watch.close();
 	session.die();

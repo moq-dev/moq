@@ -554,7 +554,7 @@ export class Parameters {
 		else this.vars.delete(MSG_PARAM_HIDDEN);
 	}
 
-	/** How many NAMESPACE messages follow a REQUEST_OK before the subscription is caught up (MoQ Active Count). */
+	/** How many NAMESPACE messages follow a REQUEST_OK before the subscription is synced (MoQ Active Count). */
 	get activeCount(): number | undefined {
 		const v = this.vars.get(MSG_PARAM_ACTIVE_COUNT);
 		if (v === undefined) return undefined;

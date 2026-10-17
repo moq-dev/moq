@@ -87,7 +87,7 @@ impl Message for RequestsBlocked {
 pub struct RequestOk {
 	pub request_id: Option<RequestId>,
 	/// MoQ Active Count: how many NAMESPACE messages follow before the subscription is
-	/// caught up. Only on the answer to a SUBSCRIBE_NAMESPACE, when negotiated.
+	/// synced. Only on the answer to a SUBSCRIBE_NAMESPACE, when negotiated.
 	pub active: Option<u64>,
 }
 

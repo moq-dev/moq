@@ -33,7 +33,7 @@ covering-set changes a watch causes, so a change costs the prefixes it covers
 or uncovers and stays flat over unrelated held watches
 (`js/net/bench/forward.ts`); an announce request stays open while anything at
 or beneath its prefix is watched, so a narrower watch rides it and never takes
-its routes over (nothing tells when a fresh request has caught up); a narrower
+its routes over (nothing tells when a fresh request has synced); a narrower
 request already open when a broader watch arrives stays open until the broader
 request goes; a route reported by overlapping requests is inserted once,
 driven by the first reporter, and if it changes hands anyway (a request

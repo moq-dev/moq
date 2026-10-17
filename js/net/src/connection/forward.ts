@@ -54,7 +54,7 @@ interface Reported {
  * already covers, and closes {@link LINGER} after nothing at or beneath its prefix is watched.
  * A narrower watch rides an open broader request, and a narrower request already open stays
  * open until the broader one covering it goes, so neither takes the other's routes over
- * before it has caught up, which not every version can tell. A route both report is inserted once and
+ * before it has synced, which not every version can tell. A route both report is inserted once and
  * driven by its first reporter; if it changes hands anyway (a request failing), it restarts
  * unless one epoch proves both requests saw one instance.
  *
@@ -165,14 +165,14 @@ export function forwardAnnounced(conn: Established, origin: OriginProducer): voi
 		interests.set(prefix, interest);
 
 		// The origin's readers under the prefix wait on this request's initial set. Released
-		// once the session stream has caught up, which it reports only after the last of those
+		// once the session stream has synced, which it reports only after the last of those
 		// events is reported here.
 		const snapshot = originWire.snapshot(prefix);
-		const caughtUp = interest.announced.caughtUp.subscribe((caughtUp) => {
-			if (caughtUp) snapshot();
+		const synced = interest.announced.synced.subscribe((synced) => {
+			if (synced) snapshot();
 		});
-		// A request with no initial set to wait for is caught up before the listener exists.
-		if (interest.announced.caughtUp.peek()) snapshot();
+		// A request with no initial set to wait for is synced before the listener exists.
+		if (interest.announced.synced.peek()) snapshot();
 
 		void (async () => {
 			let failure: unknown;
@@ -186,7 +186,7 @@ export function forwardAnnounced(conn: Established, origin: OriginProducer): voi
 				// The session died mid-stream, or the peer refused or reset the request.
 				failure = err;
 			} finally {
-				caughtUp();
+				synced();
 				snapshot();
 				for (const reported of [...interest.reported]) unreport(interest, reported);
 
@@ -211,7 +211,7 @@ export function forwardAnnounced(conn: Established, origin: OriginProducer): voi
 	/**
 	 * Settle a request nothing beneath it watches any more. A broader open request that is
 	 * still needed holds it until that one goes, so the broader never takes its routes over
-	 * before it has caught up; otherwise it lingers out.
+	 * before it has synced; otherwise it lingers out.
 	 */
 	const release = (prefix: Path.Valid, interest: Interest) => {
 		for (const above of coveringPrefixes(prefix)) {

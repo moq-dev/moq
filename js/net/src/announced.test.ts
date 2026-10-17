@@ -137,60 +137,60 @@ const start = (prefix: string): Announce.Event => ({
 	route: Route.default,
 });
 
-test("a stream catches up once the reader is past what was queued at the boundary", async () => {
+test("a stream syncs once the reader is past what was queued at the boundary", async () => {
 	const producer = new Announce.Producer();
 	const consumer = producer.consume();
 	producer.append(start("a"));
 	producer.append(start("b"));
-	expect(consumer.caughtUp.peek()).toBe(false);
+	expect(consumer.synced.peek()).toBe(false);
 
-	producer.caughtUp();
+	producer.synced();
 	// Appended after the boundary, so not owed.
 	producer.append(start("c"));
-	expect(consumer.caughtUp.peek()).toBe(false);
+	expect(consumer.synced.peek()).toBe(false);
 
 	await consumer.next();
 	await consumer.next();
 	// Still handling b.
-	expect(consumer.caughtUp.peek()).toBe(false);
+	expect(consumer.synced.peek()).toBe(false);
 	expect(await consumer.next()).toMatchObject({ prefix: p("c") });
-	expect(consumer.caughtUp.peek()).toBe(true);
+	expect(consumer.synced.peek()).toBe(true);
 });
 
-test("an event taken before the boundary is handled before catching up", async () => {
+test("an event taken before the boundary is handled before syncing", async () => {
 	const producer = new Announce.Producer();
 	const consumer = producer.consume();
 	producer.append(start("a"));
 	await consumer.next();
-	producer.caughtUp();
-	expect(consumer.caughtUp.peek()).toBe(false);
+	producer.synced();
+	expect(consumer.synced.peek()).toBe(false);
 
 	void consumer.next();
-	expect(consumer.caughtUp.peek()).toBe(true);
+	expect(consumer.synced.peek()).toBe(true);
 	producer.close();
 });
 
-test("behind takes caught up back, and closing hands it back for good", () => {
+test("behind takes sync back, and closing hands it back for good", () => {
 	const producer = new Announce.Producer();
 	const consumer = producer.consume();
-	producer.caughtUp();
-	expect(consumer.caughtUp.peek()).toBe(true);
+	producer.synced();
+	expect(consumer.synced.peek()).toBe(true);
 	producer.behind();
-	expect(consumer.caughtUp.peek()).toBe(false);
+	expect(consumer.synced.peek()).toBe(false);
 	producer.close();
-	expect(consumer.caughtUp.peek()).toBe(true);
+	expect(consumer.synced.peek()).toBe(true);
 	producer.behind();
-	expect(consumer.caughtUp.peek()).toBe(true);
+	expect(consumer.synced.peek()).toBe(true);
 });
 
-test("an origin with no session delivering catches up on its own replay", async () => {
+test("an origin with no session delivering syncs on its own replay", async () => {
 	const origin = new OriginProducer();
 	const room = publish(origin, p("room"));
 	const announced = origin.consume().announced();
 	expect(await announced.next()).toMatchObject({ prefix: p("room"), kind: "start" });
 	void announced.next();
 	await tick();
-	expect(announced.caughtUp.peek()).toBe(true);
+	expect(announced.synced.peek()).toBe(true);
 	room.close();
 	announced.close();
 });
@@ -204,14 +204,14 @@ test("an origin stream waits on every overlapping initial set in flight", async 
 	const scoped = origin.consume().announced(Path.Pattern.subtree(p("room")));
 	const all = origin.consume().announced();
 	await tick();
-	expect(scoped.caughtUp.peek()).toBe(false);
-	expect(all.caughtUp.peek()).toBe(false);
+	expect(scoped.synced.peek()).toBe(false);
+	expect(all.synced.peek()).toBe(false);
 
 	other();
 	await tick();
 	// Still held by the room snapshot; the other one never held the scoped stream.
-	expect(scoped.caughtUp.peek()).toBe(false);
-	expect(all.caughtUp.peek()).toBe(false);
+	expect(scoped.synced.peek()).toBe(false);
+	expect(all.synced.peek()).toBe(false);
 
 	// The initial set lands, and so does its snapshot.
 	const route = wire.receive(p("room/cam"));
@@ -219,15 +219,15 @@ test("an origin stream waits on every overlapping initial set in flight", async 
 	expect(await scoped.next()).toMatchObject({ prefix: p("room/cam"), kind: "start" });
 	void scoped.next();
 	await tick();
-	expect(scoped.caughtUp.peek()).toBe(true);
+	expect(scoped.synced.peek()).toBe(true);
 
 	// A new session, as a reconnect makes, takes it back until its own set lands.
 	const second = wire.snapshot(p(""));
 	await tick();
-	expect(scoped.caughtUp.peek()).toBe(false);
+	expect(scoped.synced.peek()).toBe(false);
 	second();
 	await tick();
-	expect(scoped.caughtUp.peek()).toBe(true);
+	expect(scoped.synced.peek()).toBe(true);
 
 	route.close();
 	scoped.close();
@@ -239,7 +239,7 @@ test("a snapshot elsewhere never holds a scoped stream", async () => {
 	const other = wireOf(origin).snapshot(p("other"));
 	const scoped = origin.consume().announced(Path.Pattern.subtree(p("room")));
 	await tick();
-	expect(scoped.caughtUp.peek()).toBe(true);
+	expect(scoped.synced.peek()).toBe(true);
 	other();
 	scoped.close();
 });
@@ -250,8 +250,8 @@ test("a snapshot under a hidden segment holds only a reader that opts in", async
 	const all = origin.consume().announced();
 	const hidden = origin.consume().announced(Path.Pattern.all(), { hidden: true });
 	await tick();
-	expect(all.caughtUp.peek()).toBe(true);
-	expect(hidden.caughtUp.peek()).toBe(false);
+	expect(all.synced.peek()).toBe(true);
+	expect(hidden.synced.peek()).toBe(false);
 	stats();
 	all.close();
 	hidden.close();

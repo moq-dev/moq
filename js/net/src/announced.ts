@@ -61,18 +61,18 @@ export interface Options {
 class AnnounceState {
 	queue = new Signal<Event[]>([]);
 	closed = new Once<Error | null>();
-	caughtUp = new Signal(false);
-	// The queued events still to read before the stream counts as caught up, or undefined
+	synced = new Signal(false);
+	// The queued events still to read before the stream counts as synced, or undefined
 	// while the initial set is still arriving.
 	owed: number | undefined;
-	// A reader holds the last event it took before catching up until it asks for the next
-	// one, so whatever it does with that event lands before caught up flips.
+	// A reader holds the last event it took before syncing until it asks for the next
+	// one, so whatever it does with that event lands before synced flips.
 	reading = false;
 }
 
-// Caught up once nothing is owed and the reader has come back for more.
+// Synced once nothing is owed and the reader has come back for more.
 function settle(state: AnnounceState) {
-	if (state.owed === 0 && !state.reading) state.caughtUp.set(true);
+	if (state.owed === 0 && !state.reading) state.synced.set(true);
 }
 
 // Once.set throws on a second settle, and both ends of a stream can close independently.
@@ -85,7 +85,7 @@ function closeState(state: AnnounceState, abort?: Error) {
 	// Nothing more is coming, so nothing waiting on the boundary should hang.
 	state.owed = 0;
 	state.reading = false;
-	state.caughtUp.set(true);
+	state.synced.set(true);
 }
 
 /**
@@ -118,12 +118,12 @@ export class Producer {
 	}
 
 	/**
-	 * Marks the initial set as delivered: the stream catches up once the reader has taken
+	 * Marks the initial set as delivered: the stream syncs once the reader has taken
 	 * everything queued so far. A no-op until {@link behind} once marked.
 	 *
 	 * @internal
 	 */
-	caughtUp() {
+	synced() {
 		const state = this.#state;
 		if (state.owed !== undefined) return;
 		state.owed = state.queue.peek().length;
@@ -131,7 +131,7 @@ export class Producer {
 	}
 
 	/**
-	 * Takes caught up back until the next {@link caughtUp}, as when another initial set starts.
+	 * Takes sync back until the next {@link synced}, as when another initial set starts.
 	 *
 	 * @internal
 	 */
@@ -139,7 +139,7 @@ export class Producer {
 		const state = this.#state;
 		if (state.closed.peek() !== undefined) return;
 		state.owed = undefined;
-		state.caughtUp.set(false);
+		state.synced.set(false);
 	}
 
 	/** Closes the writer. Idempotent. */
@@ -185,8 +185,8 @@ export class Consumer {
 	 * on versions that count it, best-effort on the rest. Reading an origin, it is every
 	 * attached session's initial set, so a reconnect takes it back until the new one lands.
 	 */
-	get caughtUp(): Getter<boolean> {
-		return this.#state.caughtUp;
+	get synced(): Getter<boolean> {
+		return this.#state.synced;
 	}
 
 	/** The events as they arrive, until the stream closes. */
@@ -207,7 +207,7 @@ export class Consumer {
 			const announce = state.queue.peek().shift();
 			if (announce) {
 				if (state.owed) state.owed -= 1;
-				if (!state.caughtUp.peek()) state.reading = true;
+				if (!state.synced.peek()) state.reading = true;
 				return announce;
 			}
 

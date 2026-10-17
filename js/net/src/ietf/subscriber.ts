@@ -426,7 +426,7 @@ export class Subscriber {
 		const legacy = version === Version.DRAFT_14 || version === Version.DRAFT_15;
 		if (legacy && prefix.length === 0 && this.#solicit === undefined) {
 			// Nothing marks where what it tells unasked starts or ends, so there is nothing to wait for.
-			announced.caughtUp();
+			announced.synced();
 			// No request stream ends this wait, so the session's end has to.
 			const ends: PromiseLike<unknown>[] = [announced.closed];
 			if (this.#quic) ends.push(this.#quic.closed.catch(() => undefined));
@@ -538,7 +538,7 @@ export class Subscriber {
 				// Loop reading Namespace/NamespaceDone entries
 				const readLoop = (async () => {
 					for (;;) {
-						if (initial === 0) announced.caughtUp();
+						if (initial === 0) announced.synced();
 
 						const done = await stream.reader.done();
 						if (done) {

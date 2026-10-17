@@ -290,7 +290,7 @@ export class Connection {
 			if (!origin) {
 				// Like a reconnecting loop's origin: behind while enabled with nothing to deliver.
 				if (effect.get(this.enabled)) producer.behind();
-				else producer.caughtUp();
+				else producer.synced();
 				return;
 			}
 			// A URL switch retracts what the old origin announced.

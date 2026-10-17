@@ -1833,7 +1833,7 @@ test("closing a broadcast while TRACK_INFO is pending leaves no unhandled reject
 const announceStart = (suffix: string) => (w: Writer) =>
 	encodeAnnounceBroadcast(w, { status: "active", suffix: Path.from(suffix), hops: [PUBLISHER_A] }, Version.DRAFT_06);
 
-test("a counted initial set catches up once the reader is past its last announce", async () => {
+test("a counted initial set syncs once the reader is past its last announce", async () => {
 	const { subscriber, send, settle } = announceHarness(Version.DRAFT_06);
 	const announced = subscriber.announced();
 	await settle();
@@ -1841,31 +1841,31 @@ test("a counted initial set catches up once the reader is past its last announce
 	await send((w) => new AnnounceOk(PEER, 2).encode(w, Version.DRAFT_06));
 	await send(announceStart("a"));
 	expect(await announced.next()).toMatchObject({ prefix: Path.from("a"), kind: "start" });
-	expect(announced.caughtUp.peek()).toBe(false);
+	expect(announced.synced.peek()).toBe(false);
 
 	await send(announceStart("b"));
 	expect(await announced.next()).toMatchObject({ prefix: Path.from("b"), kind: "start" });
 	await settle();
 	// Still handling the last of them.
-	expect(announced.caughtUp.peek()).toBe(false);
+	expect(announced.synced.peek()).toBe(false);
 
 	void announced.next();
 	await settle();
-	expect(announced.caughtUp.peek()).toBe(true);
+	expect(announced.synced.peek()).toBe(true);
 
 	announced.close();
 	subscriber.close();
 });
 
-test("an empty initial set catches up on the answer", async () => {
+test("an empty initial set syncs on the answer", async () => {
 	const { subscriber, send, settle } = announceHarness(Version.DRAFT_06);
 	const announced = subscriber.announced();
 	await settle();
-	expect(announced.caughtUp.peek()).toBe(false);
+	expect(announced.synced.peek()).toBe(false);
 
 	await send((w) => new AnnounceOk(PEER, 0).encode(w, Version.DRAFT_06));
 	await settle();
-	expect(announced.caughtUp.peek()).toBe(true);
+	expect(announced.synced.peek()).toBe(true);
 
 	announced.close();
 	subscriber.close();
@@ -1892,11 +1892,11 @@ test("a counted initial set cut short is a protocol violation", async () => {
 	}
 });
 
-test("a version without a boundary catches up once the request is out", async () => {
+test("a version without a boundary syncs once the request is out", async () => {
 	const { subscriber, settle } = announceHarness(Version.DRAFT_03);
 	const announced = subscriber.announced();
 	await settle();
-	expect(announced.caughtUp.peek()).toBe(true);
+	expect(announced.synced.peek()).toBe(true);
 
 	announced.close();
 	subscriber.close();
@@ -1911,7 +1911,7 @@ test("announce init is the initial set", async () => {
 	expect(await announced.next()).toMatchObject({ prefix: Path.from("room"), kind: "start" });
 	void announced.next();
 	await settle();
-	expect(announced.caughtUp.peek()).toBe(true);
+	expect(announced.synced.peek()).toBe(true);
 
 	announced.close();
 	subscriber.close();

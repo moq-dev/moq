@@ -317,7 +317,7 @@ export class Subscriber {
 			// keep the reflected-announce loop check seeing the full chain.
 			let responderOrigin: Hop | undefined;
 			// The ANNOUNCEs still owed of the peer's initial set (lite-05+). Older versions
-			// mark no boundary, so they catch up once the request is out, as a best effort.
+			// mark no boundary, so they sync once the request is out, as a best effort.
 			let initial = 0;
 			if (hasAnnounceOk(this.version)) {
 				const ok = await race([AnnounceOk.decode(stream.reader, this.version), announced.closed]);
@@ -394,7 +394,7 @@ export class Subscriber {
 
 			// Receive announce updates (for Draft03+, this includes initial state)
 			for (;;) {
-				if (initial === 0) announced.caughtUp();
+				if (initial === 0) announced.synced();
 
 				const announce = await race([
 					decodeAnnounceBroadcastMaybe(stream.reader, this.version),

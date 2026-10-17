@@ -2121,8 +2121,8 @@ async function violationClosed(pair: ReturnType<typeof createMockTransportPair>)
 
 const yieldTask = () => new Promise((resolve) => setTimeout(resolve, 0));
 
-/** MoQ Active Count: the consumer catches up once the counted NAMESPACEs are read. */
-test("counted NAMESPACEs catch up", async () => {
+/** MoQ Active Count: the consumer syncs once the counted NAMESPACEs are read. */
+test("counted NAMESPACEs sync", async () => {
 	const pair = createMockTransportPair(ALPN.DRAFT_19);
 	const session = new NativeSession(pair.server, VERSION, true);
 	const subscriber = new Subscriber({ session, activeCount: true });
@@ -2133,31 +2133,31 @@ test("counted NAMESPACEs catch up", async () => {
 	expect(await announced.next()).toMatchObject({ prefix: Path.from("a"), kind: "start" });
 	const b = announced.next();
 	await yieldTask();
-	expect(announced.caughtUp.peek()).toBe(false);
+	expect(announced.synced.peek()).toBe(false);
 
 	await inlineNamespace(subscription, Path.from("b"));
 	expect(await b).toMatchObject({ prefix: Path.from("b"), kind: "start" });
 	await yieldTask();
 	// Still handling the last of them.
-	expect(announced.caughtUp.peek()).toBe(false);
+	expect(announced.synced.peek()).toBe(false);
 	void announced.next();
 	await yieldTask();
-	expect(announced.caughtUp.peek()).toBe(true);
+	expect(announced.synced.peek()).toBe(true);
 	announced.close();
 });
 
 /** Without MoQ Active Count, REQUEST_OK is the best boundary there is. */
-test("an uncounted answer catches up on the OK", async () => {
+test("an uncounted answer syncs on the OK", async () => {
 	const pair = createMockTransportPair(ALPN.DRAFT_19);
 	const session = new NativeSession(pair.server, VERSION, true);
 	const subscriber = new Subscriber({ session });
 
 	const announced = subscriber.announced();
 	await yieldTask();
-	expect(announced.caughtUp.peek()).toBe(false);
+	expect(announced.synced.peek()).toBe(false);
 	await acceptSubscribeNamespace(pair.client);
 	await yieldTask();
-	expect(announced.caughtUp.peek()).toBe(true);
+	expect(announced.synced.peek()).toBe(true);
 	announced.close();
 });
 

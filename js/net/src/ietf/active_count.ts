@@ -8,7 +8,7 @@ import { type IetfVersion, Version } from "./version.ts";
  * advertises, then reports changes on the same stream. Nothing in moq-transport says where
  * the first part ends, so when both endpoints declare the ACTIVE_COUNT option, the
  * publisher puts on its REQUEST_OK how many NAMESPACE messages come before the
- * subscription is caught up.
+ * subscription is synced.
  *
  * @module
  * @internal

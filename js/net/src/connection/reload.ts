@@ -245,11 +245,11 @@ export class Reload {
 		if (this.consume) {
 			const consume = wireOf(this.consume);
 			this.#signals.cleanup(consume.expect());
-			// Likewise, its announcement streams are not caught up while no session is there to
+			// Likewise, its announcement streams are not synced while no session is there to
 			// deliver an initial set, so an empty table before the first connect, or during a
 			// reconnect, never reads as nothing being announced. The next session takes its own
 			// hold before this one is released. Taken now rather than in the effect, which runs
-			// a microtask later, after a watcher created alongside would already have caught up.
+			// a microtask later, after a watcher created alongside would already have synced.
 			let hold = this.enabled.peek() ? consume.snapshot(Path.empty()) : undefined;
 			this.#signals.run((effect) => {
 				if (effect.get(this.enabled) && !effect.get(this.established)) {
@@ -601,7 +601,7 @@ export class Reload {
 			if (!conn) {
 				// The same hold as a consume origin's: behind while enabled with no session.
 				if (effect.get(this.enabled)) producer.behind();
-				else producer.caughtUp();
+				else producer.synced();
 				return;
 			}
 
@@ -635,7 +635,7 @@ export class Reload {
 /**
  * Pump `upstream` into `producer` for the rest of `effect`'s run: its events, then an `end`
  * for each route still active once it closes or the run ends, so nothing clings to a source
- * that went away. Caught up follows the upstream's, and owes those retractions too.
+ * that went away. Synced follows the upstream's, and owes those retractions too.
  *
  * @internal
  */
@@ -653,14 +653,14 @@ export function pumpAnnounced(effect: Effect, upstream: Announce.Consumer, produ
 	};
 
 	// Torn down in reverse: the mirror stops, the retractions land, then the upstream closes,
-	// so its closing never reads as caught up.
+	// so its closing never reads as synced.
 	effect.cleanup(() => upstream.close());
 	effect.cleanup(retract);
 	// A new upstream owes its own initial set, and the retractions of the one before.
 	producer.behind();
-	effect.subscribe(upstream.caughtUp, (caughtUp) => {
-		if (!caughtUp) producer.behind();
-		else if (upstream.closed.peek() === undefined) producer.caughtUp();
+	effect.subscribe(upstream.synced, (synced) => {
+		if (!synced) producer.behind();
+		else if (upstream.closed.peek() === undefined) producer.synced();
 	});
 
 	effect.spawn(async () => {
@@ -680,7 +680,7 @@ export function pumpAnnounced(effect: Effect, upstream: Announce.Consumer, produ
 				// retractions are read there is nothing left to wait for.
 				retract();
 				producer.behind();
-				producer.caughtUp();
+				producer.synced();
 			}
 		}
 	});

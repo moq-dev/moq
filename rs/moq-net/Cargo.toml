@@ -97,7 +97,7 @@ required-features = ["fuzz"]
 
 # Reaches the crate-private session snapshot through the hidden `fuzz` module.
 [[bench]]
-name = "caught_up"
+name = "synced"
 harness = false
 required-features = ["fuzz"]
 

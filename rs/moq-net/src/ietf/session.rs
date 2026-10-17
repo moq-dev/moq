@@ -156,7 +156,7 @@ where
 	// One SUBSCRIBE_NAMESPACE per permitted prefix, like `lite::Subscriber`: the
 	// scope is what we may ask for, and it is not the origin's root.
 	// Each holds a snapshot from now, so the origin's announce consumers never read as
-	// caught up before the request goes out.
+	// synced before the request goes out.
 	let namespaces: Vec<_> = subscribe
 		.as_ref()
 		.map(|origin| {

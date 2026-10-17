@@ -1016,7 +1016,7 @@ where
 	/// stream of ours that simply died (survivable).
 	///
 	/// `snapshot` holds the origin's announce consumers under the prefix short of
-	/// caught up. It drops once the NAMESPACE messages MoQ Active Count promised are
+	/// synced. It drops once the NAMESPACE messages MoQ Active Count promised are
 	/// in, on REQUEST_OK without the extension, or when no request goes out at all.
 	pub async fn run_subscribe_namespace<T: crate::transport::poll::Session>(
 		&mut self,
@@ -5931,11 +5931,11 @@ mod tests {
 		(subscriber, consumer, snapshot)
 	}
 
-	/// With MoQ Active Count, the origin catches up once the counted NAMESPACEs are in.
+	/// With MoQ Active Count, the origin syncs once the counted NAMESPACEs are in.
 	#[moq_clock::test]
 	async fn counted_namespaces_catch_up() {
 		const VERSION: Version = Version::Draft18;
-		for (entries, caught_up) in [(&["a"][..], false), (&["a", "b"][..], true)] {
+		for (entries, synced) in [(&["a"][..], false), (&["a", "b"][..], true)] {
 			let session =
 				crate::lite::test_transport::ScriptedSession::new(counted_response(VERSION, Some(2), entries).await);
 			let (mut subscriber, consumer, snapshot) = counted_subscriber(VERSION, true, session.clone());
@@ -5950,7 +5950,7 @@ mod tests {
 			for entry in entries {
 				cursor.assert_next_active(*entry);
 			}
-			assert_eq!(cursor.is_caught_up(), caught_up, "{entries:?}");
+			assert_eq!(cursor.is_synced(), synced, "{entries:?}");
 		}
 	}
 
@@ -5961,7 +5961,7 @@ mod tests {
 		let session = crate::lite::test_transport::ScriptedSession::new(counted_response(VERSION, None, &[]).await);
 		let (mut subscriber, consumer, snapshot) = counted_subscriber(VERSION, false, session.clone());
 		let cursor = consumer.announced();
-		assert!(!cursor.is_caught_up());
+		assert!(!cursor.is_synced());
 		let stream = Stream::open(&mut session.clone(), VERSION).await.unwrap();
 		let mut run =
 			std::pin::pin!(subscriber.run_subscribe_namespace(stream, crate::Path::new("").to_owned(), snapshot));
@@ -5969,7 +5969,7 @@ mod tests {
 			assert!(futures::poll!(run.as_mut()).is_pending());
 			settle().await;
 		}
-		assert!(cursor.is_caught_up());
+		assert!(cursor.is_synced());
 	}
 
 	/// A counted set cut short, by a NAMESPACE_DONE or the stream ending, is the peer's fault.

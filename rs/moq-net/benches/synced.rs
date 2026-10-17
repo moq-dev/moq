@@ -1,4 +1,4 @@
-//! What it costs an origin to track whether its announce consumers have caught up.
+//! What it costs an origin to track whether its announce consumers have synced.
 //!
 //! Every session requesting announcements holds a snapshot on the origin until its
 //! peer's initial set is in, and the announce consumers its prefix overlaps wait on
@@ -11,7 +11,7 @@
 //!
 //! The snapshot is crate-private, so this reaches it through the hidden `fuzz` module.
 //!
-//! Run with `cargo bench -p moq-net --features fuzz --bench caught_up`.
+//! Run with `cargo bench -p moq-net --features fuzz --bench synced`.
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use moq_net::{Hop, Pattern, Patterns, announce, fuzz, origin};
@@ -52,7 +52,7 @@ fn scoped(producer: &origin::Producer, prefix: &str) -> origin::Consumer {
 }
 
 fn bench_land(c: &mut Criterion) {
-	let mut group = c.benchmark_group("caught_up/land");
+	let mut group = c.benchmark_group("synced/land");
 	for (streams, consumers) in SHAPES {
 		let id = BenchmarkId::from_parameter(format!("{streams}st_{consumers}c"));
 		group.bench_function(id, |b| {
@@ -60,9 +60,9 @@ fn bench_land(c: &mut Criterion) {
 			let watcher = scoped(&table.producer, "room/incoming").announced();
 			b.iter(|| {
 				let snapshot = fuzz::snapshot(&table.producer, "room/incoming");
-				assert!(!watcher.is_caught_up());
+				assert!(!watcher.is_synced());
 				drop(snapshot);
-				assert!(watcher.is_caught_up());
+				assert!(watcher.is_synced());
 			});
 		});
 	}
@@ -70,7 +70,7 @@ fn bench_land(c: &mut Criterion) {
 }
 
 fn bench_register(c: &mut Criterion) {
-	let mut group = c.benchmark_group("caught_up/register");
+	let mut group = c.benchmark_group("synced/register");
 	for (streams, consumers) in SHAPES {
 		let id = BenchmarkId::from_parameter(format!("{streams}st_{consumers}c"));
 		group.bench_function(id, |b| {
@@ -79,7 +79,7 @@ fn bench_register(c: &mut Criterion) {
 			let _held = fuzz::snapshot(&table.producer, "room/incoming");
 			b.iter(|| {
 				let watcher = incoming.announced();
-				assert!(!watcher.is_caught_up());
+				assert!(!watcher.is_synced());
 			});
 		});
 	}

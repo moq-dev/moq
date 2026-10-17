@@ -604,11 +604,11 @@ test("announced accepts a non-prefix scope before any session exists", () => {
 });
 
 /**
- * A watcher on the consume origin catches up only once the session has delivered the
+ * A watcher on the consume origin syncs only once the session has delivered the
  * server's initial set, exactly on versions that count it (lite-05+, MoQ Active Count), and
  * a reconnect takes it back until the next session's set lands.
  */
-test("a watcher catches up with the server's initial set, and again after a reconnect", async () => {
+test("a watcher syncs with the server's initial set, and again after a reconnect", async () => {
 	// Through the consume origin, and through the handle's own stream without one.
 	for (const [alpn, viaOrigin] of [
 		[Lite.ALPN_06, true],
@@ -650,13 +650,13 @@ test("a watcher catches up with the server's initial set, and again after a reco
 
 		try {
 			// Nothing is connected yet, which is not the same as nothing being announced.
-			expect(watching.caughtUp.peek()).toBe(false);
-			await waitUntil(() => watching.caughtUp.peek());
+			expect(watching.synced.peek()).toBe(false);
+			await waitUntil(() => watching.synced.peek());
 			expect([...seen].sort()).toEqual(["a", "b"]);
 
 			sessions[0]?.abort();
-			await waitUntil(() => !watching.caughtUp.peek());
-			await waitUntil(() => sessions.length > 1 && watching.caughtUp.peek());
+			await waitUntil(() => !watching.synced.peek());
+			await waitUntil(() => sessions.length > 1 && watching.synced.peek());
 			expect([...seen].sort()).toEqual(["a", "b"]);
 		} finally {
 			watching.close();
@@ -670,7 +670,7 @@ test("a watcher catches up with the server's initial set, and again after a reco
 	}
 });
 
-/** Replacing a caught-up upstream with one already caught up still owes the old routes' ends. */
+/** Replacing a synced upstream with one already synced still owes the old routes' ends. */
 test("a pump owes the retractions of the upstream it replaces", async () => {
 	const tick = async () => {
 		for (let i = 0; i < 16; i++) await Promise.resolve();
@@ -680,24 +680,24 @@ test("a pump owes the retractions of the upstream it replaces", async () => {
 
 	const first = new Announce.Producer();
 	first.append({ prefix: Path.from("a"), captures: undefined, kind: "start", route: Route.default });
-	first.caughtUp();
+	first.synced();
 	const upstream = new Signal(first);
 	const pump = new Effect((effect) => pumpAnnounced(effect, effect.get(upstream).consume(), producer));
 
 	expect(await consumer.next()).toMatchObject({ prefix: Path.from("a"), kind: "start" });
 	const parked = consumer.next();
 	await tick();
-	expect(consumer.caughtUp.peek()).toBe(true);
+	expect(consumer.synced.peek()).toBe(true);
 
 	const second = new Announce.Producer();
-	second.caughtUp();
+	second.synced();
 	upstream.set(second);
 	expect(await parked).toMatchObject({ prefix: Path.from("a"), kind: "end" });
 	await tick();
-	expect(consumer.caughtUp.peek()).toBe(false);
+	expect(consumer.synced.peek()).toBe(false);
 	void consumer.next();
 	await tick();
-	expect(consumer.caughtUp.peek()).toBe(true);
+	expect(consumer.synced.peek()).toBe(true);
 
 	pump.close();
 	producer.close();

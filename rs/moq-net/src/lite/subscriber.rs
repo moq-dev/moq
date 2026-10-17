@@ -1285,7 +1285,7 @@ struct AnnouncePrefix<S: crate::transport::poll::Session> {
 	subscriber: Subscriber<S>,
 	prefix: PathOwned,
 	state: PrefixState<S>,
-	/// Holds the origin's announce consumers under the prefix short of caught up
+	/// Holds the origin's announce consumers under the prefix unsynced
 	/// until the peer's initial set is in. Dropped at the boundary the version
 	/// marks, or with the stream.
 	snapshot: Option<crate::model::Snapshot>,
@@ -1334,7 +1334,7 @@ struct PrefixRun {
 impl<S: crate::transport::poll::Session> AnnouncePrefix<S> {
 	fn new(subscriber: Subscriber<S>, prefix: PathOwned) -> Self {
 		// Taken now, while the session is being set up, so a consumer of the origin never
-		// reads as caught up before the request even goes out.
+		// reads as synced before the request even goes out.
 		let snapshot = Some(subscriber.origin.snapshot(&prefix));
 		Self {
 			subscriber,
@@ -4276,7 +4276,7 @@ mod tests {
 		(AnnouncePrefix::new(subscriber, Path::new("").to_owned()), consumer)
 	}
 
-	/// The origin's consumers catch up once the counted starts are in and read, never before.
+	/// The origin's consumers sync once the counted starts are in and read, never before.
 	#[moq_clock::test]
 	async fn a_counted_initial_set_catches_up() {
 		const VERSION: Version = Version::Lite06;
@@ -4290,23 +4290,23 @@ mod tests {
 		);
 		let (mut prefix, consumer) = root_prefix(VERSION, crate::lite::test_transport::ScriptedSession::new(script));
 		let mut cursor = consumer.announced();
-		assert!(!cursor.is_caught_up(), "held from the request on");
+		assert!(!cursor.is_synced(), "held from the request on");
 
 		let mut run = std::pin::pin!(kio::wait(|waiter| prefix.poll(waiter)));
 		assert!(futures::poll!(run.as_mut()).is_pending());
 
 		cursor.assert_next_active("a");
-		assert!(!cursor.is_caught_up(), "never before an earlier event is read");
+		assert!(!cursor.is_synced(), "never before an earlier event is read");
 		cursor.assert_next_active("b");
-		assert!(cursor.is_caught_up());
-		// A consumer created after the boundary catches up on its replay.
+		assert!(cursor.is_synced());
+		// A consumer created after the boundary syncs on its replay.
 		let mut late = consumer.announced();
 		late.assert_next_active("a");
 		late.assert_next_active("b");
-		assert!(late.is_caught_up());
+		assert!(late.is_synced());
 	}
 
-	/// Part of a counted set is not caught up, however much of it was read.
+	/// Part of a counted set is not synced, however much of it was read.
 	#[moq_clock::test]
 	async fn a_partial_initial_set_holds() {
 		const VERSION: Version = Version::Lite06;
@@ -4317,10 +4317,10 @@ mod tests {
 		assert!(futures::poll!(run.as_mut()).is_pending());
 
 		cursor.assert_next_active("a");
-		assert!(!cursor.is_caught_up());
+		assert!(!cursor.is_synced());
 	}
 
-	/// A count of zero is caught up on the ANNOUNCE_OK.
+	/// A count of zero is synced on the ANNOUNCE_OK.
 	#[moq_clock::test]
 	async fn an_empty_initial_set_catches_up_at_once() {
 		const VERSION: Version = Version::Lite07;
@@ -4329,7 +4329,7 @@ mod tests {
 		let cursor = consumer.announced();
 		let mut run = std::pin::pin!(kio::wait(|waiter| prefix.poll(waiter)));
 		assert!(futures::poll!(run.as_mut()).is_pending());
-		assert!(cursor.is_caught_up());
+		assert!(cursor.is_synced());
 	}
 
 	/// Anything but a start inside the counted set cuts it short: a protocol violation.
@@ -4359,17 +4359,17 @@ mod tests {
 		assert!(matches!(err, Error::ProtocolViolation), "{err}");
 	}
 
-	/// Lite03/04 mark no initial set: caught up, best effort, once the request is sent.
+	/// Lite03/04 mark no initial set: synced, best effort, once the request is sent.
 	#[moq_clock::test]
 	async fn an_unmarked_version_catches_up_on_the_request() {
 		const VERSION: Version = Version::Lite04;
 		let (mut prefix, consumer) =
 			root_prefix(VERSION, crate::lite::test_transport::ScriptedSession::new(Vec::new()));
 		let cursor = consumer.announced();
-		assert!(!cursor.is_caught_up());
+		assert!(!cursor.is_synced());
 		let mut run = std::pin::pin!(kio::wait(|waiter| prefix.poll(waiter)));
 		assert!(futures::poll!(run.as_mut()).is_pending());
-		assert!(cursor.is_caught_up());
+		assert!(cursor.is_synced());
 	}
 
 	/// Lite01/02 mark the initial set with ANNOUNCE_INIT.
@@ -4390,9 +4390,9 @@ mod tests {
 		let mut cursor = consumer.announced();
 		let mut run = std::pin::pin!(kio::wait(|waiter| prefix.poll(waiter)));
 		assert!(futures::poll!(run.as_mut()).is_pending());
-		assert!(!cursor.is_caught_up());
+		assert!(!cursor.is_synced());
 		cursor.assert_next_active("a");
-		assert!(cursor.is_caught_up());
+		assert!(cursor.is_synced());
 	}
 
 	/// An announce past the session's cap fails the session with TOO_MANY_REQUESTS, and

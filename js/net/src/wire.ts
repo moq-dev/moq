@@ -54,7 +54,7 @@ export interface OriginProducer {
 	attach(discovery: boolean): Dispose;
 	expect(): Dispose;
 	/**
-	 * Hold the origin's announcement streams overlapping `prefix` short of caught up until
+	 * Hold the origin's announcement streams overlapping `prefix` unsynced until
 	 * the returned dispose: a session holds one while its peer's initial set is in flight.
 	 */
 	snapshot(prefix: Path.Valid): Dispose;

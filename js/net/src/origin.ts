@@ -610,7 +610,7 @@ class OriginState {
 	sessions = new Signal({ total: 0, discovery: 0 });
 
 	// The prefixes whose initial announcements a session is still delivering, counted. An
-	// announcement stream overlapping one has not caught up yet.
+	// announcement stream overlapping one has not synced yet.
 	snapshots = new Signal(new Map<Path.Valid, number>());
 
 	/** Hold an initial set in flight under the absolute `prefix` until the returned dispose. */
@@ -2053,7 +2053,7 @@ export class Consumer {
 				}
 				active = next;
 
-				// Caught up once no session is still delivering an initial set this stream could
+				// Synced once no session is still delivering an initial set this stream could
 				// list: one under a hidden segment holds only a reader that opts in.
 				let behind = false;
 				for (const prefix of this.#state.snapshots.peek().keys()) {
@@ -2063,7 +2063,7 @@ export class Consumer {
 					}
 				}
 				if (behind) producer.behind();
-				else producer.caughtUp();
+				else producer.synced();
 
 				await Signal.race(
 					this.#state.local,
