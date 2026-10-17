@@ -786,134 +786,6 @@ test("a declined advertisement is retried on the next change", async () => {
 	origin.close();
 });
 
-/**
- * A peer out of stream credit rejects the open. That has to cost the namespace a turn,
- * not the session its discovery: the announce loop is never restarted, so unwinding it
- * would lose every future publish too.
- */
-test("a failed stream open does not kill the announce loop", async () => {
-	const pair = createMockTransportPair(ALPN.DRAFT_19);
-	const inner = new NativeSession(pair.server, VERSION, true);
-
-	let failures = 1;
-	const session: Session = {
-		version: inner.version,
-		client: inner.client,
-		acceptBi: () => inner.acceptBi(),
-		nextRequestId: () => inner.nextRequestId(),
-		spendRequest: (id) => inner.spendRequest(id),
-		close: () => inner.close(),
-		openBi: () => {
-			if (failures-- > 0) throw new Error("no stream credit");
-			return inner.openBi();
-		},
-	};
-
-	const { pub, origin } = publisher(pair.server, { session });
-	publish(origin, Path.from("first"));
-
-	void pub.runPublishNamespaces();
-	await new Promise((resolve) => setTimeout(resolve, SETTLE));
-
-	// The refused open cost "first" its turn; the next change has to bring it back along
-	// with the newcomer.
-	publish(origin, Path.from("second"));
-
-	const seen = new Set<Path.Valid>();
-	for (let i = 0; i < 2; i++) {
-		const stream = await nextStream(pair.client);
-		if (!stream) break;
-		seen.add(await readPublishNamespace(stream));
-		await acceptPublishNamespace(stream);
-	}
-
-	expect(seen).toContain(Path.from("first"));
-	expect(seen).toContain(Path.from("second"));
-
-	origin.close();
-});
-
-/**
- * Capacity coming back raises no signal of its own: no broadcast is published, closed, or
- * changed. The loop has to come back and ask again on its own, or a namespace refused
- * once stays undiscoverable for the session.
- */
-test("a namespace refused once is retried without anything else changing", async () => {
-	const pair = createMockTransportPair(ALPN.DRAFT_19);
-	const inner = new NativeSession(pair.server, VERSION, true);
-
-	let failures = 1;
-	const session: Session = {
-		version: inner.version,
-		client: inner.client,
-		acceptBi: () => inner.acceptBi(),
-		nextRequestId: () => inner.nextRequestId(),
-		spendRequest: (id) => inner.spendRequest(id),
-		close: () => inner.close(),
-		openBi: () => {
-			if (failures-- > 0) throw new Error("no stream credit");
-			return inner.openBi();
-		},
-	};
-
-	const { pub, origin } = publisher(pair.server, { session });
-	publish(origin, Path.from("lonely"));
-
-	void pub.runPublishNamespaces();
-
-	// Nothing else happens: no second publish, no close. Only the retry can save it.
-	const stream = await nextStream(pair.client);
-	if (!stream) throw new Error("the refused namespace was never retried");
-	expect(await readPublishNamespace(stream)).toBe(Path.from("lonely"));
-	await acceptPublishNamespace(stream);
-
-	origin.close();
-});
-
-/**
- * The solicited legacy path advertises with PUBLISH_NAMESPACE requests too, so a declined
- * one needs the same retry the unsolicited loop has. Without it, a namespace refused once
- * stays undiscoverable for the life of the subscription, since the peer starting to
- * answer raises no signal the loop is watching.
- */
-test("a solicited legacy advertisement refused once is retried", async () => {
-	const pair = createMockTransportPair(ALPN.DRAFT_19);
-	const inner = new NativeSession(pair.server, Version.DRAFT_15, true);
-
-	let failures = 1;
-	const session: Session = {
-		version: inner.version,
-		client: inner.client,
-		acceptBi: () => inner.acceptBi(),
-		nextRequestId: () => inner.nextRequestId(),
-		spendRequest: (id) => inner.spendRequest(id),
-		close: () => inner.close(),
-		openBi: () => {
-			if (failures-- > 0) throw new Error("no stream credit");
-			return inner.openBi();
-		},
-	};
-
-	// The peer declared that advertisements to it must be solicited, so this is the loop
-	// that answers its SUBSCRIBE_NAMESPACE.
-	const { pub, origin } = publisher(pair.server, { requiresSolicitation: true, session });
-	publish(origin, Path.from("lonely"));
-
-	const subscription = await Stream.open(pair.client, { version: Version.DRAFT_15 });
-	const accepted = await Stream.accept(pair.server, Version.DRAFT_15);
-	if (!accepted) throw new Error("the subscription stream was never accepted");
-	void pub.runSubscribeNamespace(new SubscribeNamespace({ requestId: 0n, namespace: Path.empty() }), accepted);
-
-	// Nothing else happens: no second publish, no close. Only the retry can save it.
-	const stream = await nextStream(pair.client);
-	if (!stream) throw new Error("the refused namespace was never retried");
-	expect(await readPublishNamespace(stream)).toBe(Path.from("lonely"));
-	await acceptPublishNamespace(stream);
-
-	subscription.close();
-	origin.close();
-});
-
 /** The solicited legacy path carries a route's token too, so closing it remakes the request. */
 test("closing a solicited legacy advertisement's token makes it again without it", async () => {
 	// No retry timer can stand in for the wake.
@@ -1864,7 +1736,7 @@ test("an unanswered update drops the request and re-offers the namespace fresh",
 		await readUpdate(stream);
 		const reset = watch(stream.reader.u53());
 
-		await advance(4_900);
+		await advance(9_900);
 		expect(reset.state).toBe("pending");
 		expect(streams).toHaveLength(0);
 

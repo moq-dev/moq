@@ -5628,10 +5628,9 @@ async fn tune_in_does_not_wait_on_dropped_audio() {
 	assert!(!out.is_empty(), "the tune-in waited on audio it had dropped");
 }
 
-/// A join whose first group the publisher cuts short, as a zero-budget live-edge subscribe
-/// is cut when the next group lands before the raised budget reaches it (moq-dev/moq#5565),
-/// starts at the next group: nothing of the cut-off start goes out, the next keyframe leads
-/// the audio, and the rest is intact.
+/// A join whose first group the publisher cuts short (moq-dev/moq#5565) starts at the next
+/// group: nothing of the cut-off start goes out, the next keyframe leads the audio, and the
+/// rest is intact.
 #[tokio::test(start_paused = true)]
 async fn a_start_group_cut_short_starts_at_the_next() {
 	use crate::container::Container as _;

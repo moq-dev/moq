@@ -302,7 +302,16 @@ From a pipe, `pcr-rate` also grades the PCR clock's rate against the arrival
 clock, as the least-squares slope over each time base after the start-up third:
 within 30 ppm (`--rate-ppm`), the tolerance ISO 13818-1 2.4.2.1 gives a system
 clock. `release` cannot see a clock running at a steady wrong rate, which keeps
-its intervals and only adds to the drift.
+its intervals and only adds to the drift. At 30 ppm a 77 s window moves only
+2.3 ms, so the fit excludes two arrival effects that are not the clock. Reads only
+ever land late, so it fits the least-delayed PCR in each second, the floor that
+scheduling and pipe delay sit on; a live control's mean read delay wandered by
+2.4 ms while that floor held within 0.7 ms. And it breaks wherever that floor
+steps by more than the `release` tolerance from one second to the next, pooling
+the runs either side: a stall the sender caught up from leaves a standing lag,
+which a single line reads as a rate (70 ms mid-sample is over 1,000 ppm), though
+it is the bounded lag `release` already grades. A clock off rate moves the floor
+by microseconds a second, so it never steps and stays measured.
 
 ```bash
 # live: every domain, reading the exporter directly
@@ -330,6 +339,7 @@ are laid over the PCRs.
 | `continuity` | hard | no discontinuities, and a payload-less packet must not advance the counter (ISO 13818-1 2.4.3.3) (`--live` only) |
 | `pcr-value-interval` | hard | no interval above `--repetition-ms` (default 100, TR 101 290 V1.4.1), within one time base |
 | `pcr-release-timing` | hard | no more than `--release-pct-max` of intervals arrive further than `--release-ms` from the interval their own values assert, and accumulated drift stays within `--drift-ms`, being the standing lag the sender is allowed to hold; a sample below `--live-min-pcr` PCRs or `--live-cover-pct` of the window is a failure, not a pass (`--live` only) |
+| `pcr-rate` | hard | the PCR rate fitted against each second's least-delayed read stays within `--rate-ppm` (default 30), after excluding the first third, separating declared time bases and breaking where that floor steps by more than `--release-ms` (`--live` only) |
 | `pcr-position` | shape | share of PCR packets within `--adjacent-packets` of the previous one |
 | `pcr-schedule` | shape | share of PCR intervals whose bytes are within `--schedule-tolerance-pct` (default 1) or one packet of what `--mux-rate` implies (estimated from the capture if not given); hard, at that share, when `--schedule-pct-min` is given |
 
@@ -339,6 +349,16 @@ since two correct grids offset from one another pool into one that neither keeps
 grades both through TSDuck's `tsanalyze`, which also catches a payload-less
 packet advancing the counter. A pipe cannot go through TSDuck first without
 rebuffering the arrivals `release` stamps.
+
+Live runs write `pcr-timing.json` beside `timing.out`. Failures retain their run;
+set `MOQ_TEST_KEEP=1` to retain passing controls too. The JSON report keeps the
+graded PID's raw `[packet_index, unwrapped_pcr_ticks, arrival_seconds, pid]` samples,
+the indices that begin new time bases, wrap count, and grading parameters. PCR ticks
+are at 27 MHz; arrivals use the reader's `time.monotonic()` clock and are upper
+bounds on when the exporter released those bytes. These preserve the inputs to
+the rate, release and byte-position checks so their verdicts can be replayed.
+Arrival delays alone do not establish whether a source clock, exporter, pipe or
+reader caused the discrepancy.
 
 Accumulated drift has two shapes and only one is a defect, so the check bounds
 the total and reports the rate over the tail of the sample beside it. A sender
