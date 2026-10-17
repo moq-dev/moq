@@ -34,8 +34,8 @@ Every interview prompt and the selected answer (✅) are in the planning PR.
   per frame with the `00 00 ff ff` marker dropped, a fresh window per group.
 - **Uncompressed size on the wire.** Each compressed frame declares its
   inflated size, so `frame::Info.size` stays the size applications see and a
-  relay can write an IETF payload length before inflating. Inflating past the
-  declared size is an error. A zip bomb then costs no more than a plain frame
+  relay can write an IETF payload length before inflating. Inflated output
+  that differs from the declared size is an error. A zip bomb then costs no more than a plain frame
   of the declared size, so there is no separate inflate cap constant.
 - **One stored form.** The model stores what arrived, or what the local
   producer compressed. A plain reader (an in-process consumer, or egress to a
@@ -56,7 +56,12 @@ Every interview prompt and the selected answer (✅) are in the planning PR.
   extension; draft-lcurley-moq-lite specifies the lite-07 field and size and
   references it for the codec.
 - **moq-flate and @moq/flate fold into moq-net and js/net.** The snapshot and
-  stream track modes go away: a compressed track replaces them.
+  stream track modes go away: a compressed track replaces them. moq-json and
+  `@moq/json` drop `Config::compression` (the track flag replaces it), and
+  `moq-mux::binary` is deleted: opaque bytes are a plain track. Decided on
+  review of the planning PR.
+- **Datagrams** compress alone with a fresh window, never against another
+  datagram; lite allows one datagram per group for this reason.
 - Compression gates the lite-07 cut, so lite-07 ships with it.
 
 This README owns the end-to-end proof and the guide once every child lands:

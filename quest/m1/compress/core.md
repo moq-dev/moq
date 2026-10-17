@@ -24,14 +24,18 @@ See the [epic](/quest/m1/compress/README.md) for the decisions.
 - Storage: the model stores the compressed slices. Ingress from a session
   stores what arrived, never recompressing. The shared inflated copy hangs
   off the group, is built on first plain read, is billed to `cache::Pool`,
-  and drops with the group. Inflating past a frame's declared size fails the
-  group.
+  and drops with the group. A frame whose inflated output differs from its
+  declared size, larger or smaller, fails the group, since IETF egress has
+  already written that size as the payload length.
 - Egress: a lite-07 session writes the compressed slices with the flag in
   TrackInfo and the declared size in the frame header. Any other session
   writes the inflated copy without the flag. A compressed track never
   reaches a peer as compressed bytes it was not told about.
 - Wire (lite-07-wip): TrackInfo gains the flag. The frame header gains an
-  uncompressed-size varint, present only on compressed tracks. Update
+  uncompressed-size varint, present only on compressed tracks. A datagram
+  is its own one-frame group (lite allows one datagram per group), so it
+  compresses with a fresh window and no delta, and carries the same size
+  varint. Update
   `drafts/draft-lcurley-moq-lite.md` and reference
   `draft-lcurley-moq-flate` for the codec; drop that draft's ".z suffix" and
   "no transport signal" text.
@@ -47,7 +51,8 @@ See the [epic](/quest/m1/compress/README.md) for the decisions.
 
 Tests: a compressed track round-trips through a relay to a lite-07 and a
 lite-06 subscriber; N plain readers of one group inflate once; a frame that
-inflates past its declared size fails; a range from frame N decodes against
+inflates to more or less than its declared size fails; a compressed
+datagram round-trips; a range from frame N decodes against
 a cached prefix. Run `just test interop --all`. Add a bench swept over plain
 readers and compressed groups so the inflate cost stays per group, not per
 reader.

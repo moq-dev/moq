@@ -6,7 +6,8 @@ Every first-party compressed track is one name with `compress: true`:
 `catalog.json` in moq-mux and js/publish, each moq-stats `.json` track, and
 the hang timeline. `catalog.json.z`, the stats `.z` siblings,
 `<track>.timeline.z`, hang's catalog `compression` field, the "hangz"
-consumer options, the moq-flate crate, `@moq/flate`, and the bindings' `flate`
+consumer options, the moq-flate crate, `@moq/flate`, `moq-mux::binary`,
+moq-json's and `@moq/json`'s `Config::compression`, and the bindings' `flate`
 namespace are deleted.
 
 ## Plan
@@ -25,6 +26,10 @@ See the [epic](/quest/m1/compress/README.md) for the decisions.
   and without them on a compressed track shows the saving is small; then
   drop them, since all they save is some decode CPU. Report the numbers in
   the PR.
+- moq-json and `@moq/json` encoders and decoders drop `Config::compression`
+  and their direct codec calls (`snapshot`, `window`, `stream`); a caller
+  sets `compress` on the track. Delete `rs/moq-mux/src/binary.rs` and its
+  users; opaque bytes are a plain track.
 - Delete `rs/moq-flate`, `js/flate`, `rs/hang/src/catalog/compression.rs`,
   and the moq-ffi flate tracks with every wrapper's `flate` namespace and
   `doc/lib/*` entry, per the cross-package sync table.
