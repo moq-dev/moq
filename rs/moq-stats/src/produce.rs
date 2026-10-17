@@ -855,7 +855,7 @@ struct GroupPublisher {
 	/// Track names per tier, built once so a drain never formats a name.
 	names: HashMap<Tier, TierNames>,
 	totals: TotalsTrack,
-	/// Held presence tracks, keyed by auth root.
+	/// Held presence tracks, keyed by stats label.
 	presence: HashMap<PathOwned, PresenceTrack>,
 	/// This drain's entries for the group, as indices into the report.
 	traffic_rows: Vec<usize>,
@@ -938,7 +938,7 @@ struct TotalsTrack {
 	sums: Cumulative<Totals>,
 }
 
-/// One auth root's requested `presence.json` pair and its per-tier sums,
+/// One stats label's requested `presence.json` pair and its per-tier sums,
 /// cumulative from when it was first held. Reclaimed once nobody reads it.
 struct PresenceTrack {
 	/// The plain track name, for logs.

@@ -1628,7 +1628,7 @@ mod tests {
 
 	#[tokio::test(start_paused = true)]
 	async fn merges_sessions_across_nodes() {
-		// Session presence sums per auth root across nodes.
+		// Session presence sums per stats label across nodes.
 		let origin = produce_origin();
 		let node_a = node_producer(&origin, "a");
 		let node_b = node_producer(&origin, "b");

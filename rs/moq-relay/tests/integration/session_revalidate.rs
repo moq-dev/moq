@@ -21,6 +21,7 @@ use moq_tokio::moq_net;
 const TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Clone)]
+#[allow(clippy::large_enum_variant)]
 enum Answer {
 	Grant(Grant),
 	Status(u16),

@@ -208,7 +208,7 @@ mod tests {
 
 	#[test]
 	fn validate_refuses_an_invalid_stats_label() {
-		let mut grant = Grant::new(patterns(&["**"]), Patterns::new());
+		let mut grant = Grant::new(patterns(&["**"]), Access::default());
 		grant.label = Some("project/*".into());
 		assert!(matches!(grant.validate(), Err(crate::Error::InvalidLabel(_))));
 	}

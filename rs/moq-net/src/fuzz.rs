@@ -281,10 +281,10 @@ pub fn bump_publisher_bytes(
 	registry.bump_publisher_bytes(path, tier, n);
 }
 
-/// One session's payload-byte meter for the stats write-path benchmark.
-pub struct SessionMeter(crate::stats::Meter);
+/// A payload-byte meter for the stats write-path benchmark.
+pub struct Meter(crate::stats::Meter);
 
-impl SessionMeter {
+impl Meter {
 	/// Add publisher-side payload bytes.
 	pub fn bytes(&self, n: u64) {
 		self.0.bytes(n);
@@ -292,20 +292,14 @@ impl SessionMeter {
 }
 
 /// Build a session-local payload meter without exposing the model's private stats carriers.
-pub fn session_meter(
-	registry: &crate::stats::Registry,
-	tier: crate::stats::Tier,
-	label: &str,
-	path: &str,
-) -> SessionMeter {
+pub fn session_meter(registry: &crate::stats::Registry, tier: crate::stats::Tier, label: &str, path: &str) -> Meter {
 	let session = registry.tier(tier).session(label);
-	SessionMeter(session.egress(path).meter())
+	Meter(session.egress(path).meter())
 }
 
 /// Build the original per-path-only payload meter as the benchmark baseline.
-#[cfg(feature = "fuzz")]
-pub fn path_meter(registry: &crate::stats::Registry, tier: &crate::stats::Tier, path: &str) -> SessionMeter {
-	SessionMeter(registry.publisher_meter(path, tier))
+pub fn path_meter(registry: &crate::stats::Registry, tier: &crate::stats::Tier, path: &str) -> Meter {
+	Meter(registry.publisher_meter(path, tier))
 }
 
 /// Encode `announced` as a fresh [`AnnounceWriter`] stream.

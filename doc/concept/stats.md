@@ -51,7 +51,7 @@ generate more stats.
 - `<node>` tells relays sharing a cluster apart. It may span several segments
   (`sjc/1`), and is omitted along with its slash when unset: `<prefix>/node`.
 - `<group>` is the first `depth` segments of each broadcast path (for traffic)
-  or auth root (for sessions), so a consumer can scope an announce to one
+  or stats label (for sessions), so a consumer can scope an announce to one
   tenant. A path shorter than `depth` groups under all of its segments.
 - The literal `node` segment leaves room for sibling categories under the same
   prefix, so a consumer skips any path without `node` where it expects one. A
@@ -107,7 +107,7 @@ A presence track exists only while subscribed. Ask for `<label>/presence.json`
 for any stats label in the group (`presence.json` for the empty label). The relay
 answers with the label's current sessions and counts from there, holding a label
 with no sessions open at `{}`, and stops producing it once the last subscriber
-leaves. A root outside the group, or any other name, is refused.
+leaves. A label outside the group, or any other name, is refused.
 
 ## Frames
 
@@ -131,7 +131,7 @@ return later as a new broadcast.
 
 Each tier that recorded anything in the group's epoch, with its egress
 (`publisher`) and ingress (`subscriber`) [Traffic](#traffic) and its
-[Sessions](#sessions), summed over every broadcast and auth root in the group.
+[Sessions](#sessions), summed over every broadcast and stats label in the group.
 Unlike the per-path tracks, an entry that ends stays counted, so the next
 frame always carries everything since the epoch began: a reader that misses
 frames loses nothing while the group stays announced. Billing reads this
@@ -203,13 +203,14 @@ or not any data flows: under a stats label on the tier for `sessions.json`,
 under the label on each tier for `presence.json`, and under every label in the
 group on the tier for `totals.json`. `sessions` and `sessions_closed` are their
 legacy spellings. A session moved to a new tier ends on the old one and starts
-on the new. `sent_bytes` and `received_bytes` count payload for the session,
-including HTTP requests. A changed label moves later presence and bytes; bytes
+on the new. `sent_bytes` and `received_bytes` count the payload this node sent
+to and received from those sessions and HTTP requests, the same bytes the
+per-path tracks count. A changed label moves later presence and bytes; bytes
 before the change remain under the old label. If the grant omits `label`, its
 authorization root is used. Older readers ignore these fields and newer readers
 default missing fields to zero.
 
-`requests` counts admitted request/response exchanges under the token's root and
+`requests` counts admitted request/response exchanges under the grant's label and
 tier, including HTTP `/fetch` and `/announced`. They never start or end a session.
 A fetch's delivered group bytes count against the broadcast path on that tier;
 `/announced` delivers no media bytes. The auth decider can give HTTP its own tier
@@ -221,9 +222,9 @@ it was admitted; later traffic follows the new tier.
 the relay, and subscriptions held on it, by any one session. Compare them with
 the relay's [client or peer session limits](/bin/relay/config#session-and-peer):
 a session that goes past one is closed with `TOO_MANY_REQUESTS`. On
-`sessions.json` a peak never goes down while the root has a session; on the
+`sessions.json` a peak never goes down while the label has a session; on the
 totals and presence tracks it never goes down while the track lives. Summing
-nodes or roots takes the largest.
+nodes or labels takes the largest.
 
 ### Counters
 
