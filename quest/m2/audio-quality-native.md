@@ -43,7 +43,7 @@ only end-to-end budgets, with the backend-dependent stages isolated: this
 lane deliberately accepts real device callback noise, so a difference in
 totals alone proves nothing about the estimator.
 
-Standalone in m1 rather than a child of the m0 audio quality harness line
+Standalone in m2 rather than a child of the m0 audio quality harness line
 (decided in the 2026-09-28 quest audit): nothing in m0 waits on it. The native jitter target
 it grades is done on the jitter target line.
 
