@@ -20,8 +20,8 @@ software profiles below; it does not certify a hardware IRD or every TS layout.
 - `open-gop.py` checks the coded access units and leading pictures of open GOPs.
 - `overhead.py` counts the packets a capture spends on clocks and audio framing
   against its source.
-- `holes.py` finds media missing from a generated clip's capture, from its own
-  timestamps.
+- `holes.py` finds media missing from a generated clip's capture, from its
+  timestamps against the source's.
 
 ## Running
 
@@ -554,15 +554,17 @@ QUIC retransmits what the path drops, so a lossy path is not by itself an
 omission of MoQ content, and every compliance check grades only the access units
 that arrived: a capture missing most of its video still passes them. The generated
 clips the decoded-content comparison does not cover (`--hrd`, `--headroom`,
-`--leak`, `--full`) go through `holes.py` instead, which reads the capture's own
-decode timestamps, independently of what the exporter reports. Each stream of a
-generated clip keeps one frame step, so a step past one and a half frames is a
-hole, and a stream must present until within its own frame plus the longest
-stream frame of the latest. Omitting MoQ content on purpose belongs to the
-[recovery tests](/quest/m1/ts-reliability/recovery.md).
+`--leak`, `--full`) go through `holes.py` instead, which reads the capture's
+timestamps against the source's, independently of what the exporter reports. Each
+stream of a generated clip keeps one frame step, so a step past one and a half
+frames is a hole. The export keeps the source's timestamps, so every source stream
+must also be in the capture and end within half a frame of the source's. It may
+start up to 3 s late: the subscriber joins at the relay's latest group once the
+catalog is out, which skips the first 1-2 s on a clean path. Omitting MoQ content
+on purpose belongs to the [recovery tests](/quest/m1/ts-reliability/recovery.md).
 
 ```bash
-./holes.py capture.ts
+./holes.py capture.ts source.ts
 ```
 
 Measured on 2026-10-16 with about 30 other test runs sharing a 24-core host, so

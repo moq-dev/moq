@@ -730,7 +730,7 @@ fi
 # grade only the access units that arrived.
 if [[ -n "$HRD$HEADROOM$LEAK$FULL" ]]; then
     echo
-    if ! python3 "$DIR/holes.py" "$SUB_TS"; then
+    if ! python3 "$DIR/holes.py" "$SUB_TS" "$SRC_TS"; then
         echo >&2
         echo "error: the capture is missing media; the exporter reported:" >&2
         sed 's/\x1b\[[0-9;]*m//g' "$HARNESS_RUN/sub.log" |

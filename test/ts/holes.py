@@ -1,21 +1,22 @@
 #!/usr/bin/env python3
-"""Find the media a capture is missing, from its own decode timestamps.
+"""Find the media a capture is missing, from its timestamps against its generated source.
 
-    ./holes.py capture.ts
+    ./holes.py capture.ts source.ts
 
 Every audio and video stream of a generated clip has a constant frame duration, so the step
 between consecutive decode timestamps is the same throughout. A step past one and a half
 frames is a hole: media the round-trip lost, whether the path dropped it, the relay evicted
-it, or the exporter missed its deadline. A stream that stops for good leaves no step behind,
-so each must also present as late as the others: the clip's streams are cut together, so
-each one's last frame ends within its own frame plus the longest stream frame of the
-latest. The compliance checks grade only the access units that arrived, so a capture
-missing most of its video still passes them.
+it, or the exporter missed its deadline. A lost prefix or tail leaves no step behind, so each
+source stream must also be in the capture, on its PID, ending where the source's does: the
+export keeps the source's timestamps. It may start later, by up to JOIN: the subscriber joins
+at the relay's latest group once the catalog is out, which skips the first second or two of
+a generated clip on a clean path. The compliance checks grade only the access units that
+arrived, so a capture missing most of its video still passes them.
 
-This reads the capture alone, independently of what the exporter reports, and needs only
+This reads the captures alone, independently of what the exporter reports, and needs only
 ffprobe. A real capture's streams need not keep a constant step, so it grades generated clips.
 
-Exit status is 0 when no stream has a hole or ends early, 1 otherwise.
+Exit status is 0 when every source stream is in the capture without a hole or a cut, 1 otherwise.
 """
 
 import json
@@ -23,6 +24,9 @@ import subprocess
 import sys
 from collections import Counter
 from fractions import Fraction
+
+# How much later than its source a stream may start, in seconds: the clean-path join plus a group.
+JOIN = Fraction(3)
 
 
 def holes(dts: list[int]) -> tuple[int, list[tuple[int, int]]]:
@@ -34,52 +38,71 @@ def holes(dts: list[int]) -> tuple[int, list[tuple[int, int]]]:
     return frame, [(a, b - a) for a, b in zip(dts, dts[1:]) if 2 * (b - a) > 3 * frame]
 
 
-def main() -> None:
-    if len(sys.argv) != 2:
-        sys.exit(__doc__)
-    probe = subprocess.run(
-        ["ffprobe", "-v", "error", "-show_entries", "stream=index,codec_type,codec_name,time_base:packet=stream_index,dts,pts",
-         "-of", "json", sys.argv[1]],
+def cuts(source: tuple[Fraction, Fraction], capture: tuple[Fraction, Fraction], frame: Fraction) -> list[str]:
+    """How a capture's (first, last) presentation times, in seconds, fall short of its source's."""
+    late, short = capture[0] - source[0], source[1] - capture[1]
+    found = []
+    if late > JOIN:
+        found.append(f"starts {float(late):.3f}s after its source, past the {float(JOIN)}s join")
+    if 2 * short > frame:
+        found.append(f"ends {float(short):.3f}s before its source")
+    return found
+
+
+def probe(path: str) -> dict[str, tuple[dict, list[int], tuple[Fraction, Fraction]]]:
+    """Each audio and video stream by PID: the stream, its decode timestamps, and its first and last PTS in seconds."""
+    report = json.loads(subprocess.run(
+        ["ffprobe", "-v", "error", "-show_entries", "stream=index,id,codec_type,codec_name,time_base:packet=stream_index,dts,pts",
+         "-of", "json", path],
         check=True, capture_output=True, text=True,
-    )
-    report = json.loads(probe.stdout)
+    ).stdout)
     streams = {s["index"]: s for s in report["streams"] if s.get("codec_type") in ("audio", "video")}
-    if not streams:
-        sys.exit(f"error: {sys.argv[1]} has no audio or video stream")
     dts: dict[int, list[int]] = {index: [] for index in streams}
-    end: dict[int, Fraction] = {}
+    pts: dict[int, list[int]] = {index: [] for index in streams}
     for packet in report.get("packets", []):
         index = packet["stream_index"]
         if index in dts and "dts" in packet:
             dts[index].append(int(packet["dts"]))
-            pts = Fraction(int(packet.get("pts", packet["dts"]))) * Fraction(streams[index]["time_base"])
-            end[index] = max(end.get(index, pts), pts)
-    frames = {index: holes(dts[index])[0] * Fraction(streams[index]["time_base"]) for index in streams}
-    for index in end:
-        end[index] += frames[index]
-    latest = max(end.values(), default=Fraction(0))
-    longest = max(frames.values())
+            pts[index].append(int(packet.get("pts", packet["dts"])))
+    return {
+        s["id"]: (s, dts[index], (min(pts[index]) * Fraction(s["time_base"]), max(pts[index]) * Fraction(s["time_base"])))
+        for index, s in streams.items() if pts[index]
+    }
 
-    print("### media holes (capture decode timestamps)")
+
+def main() -> None:
+    if len(sys.argv) != 3:
+        sys.exit(__doc__)
+    capture, source = probe(sys.argv[1]), probe(sys.argv[2])
+    if not source:
+        sys.exit(f"error: {sys.argv[2]} has no audio or video stream")
+
+    print("### media holes (capture timestamps against the source)")
     failed = False
-    for index, stream in sorted(streams.items()):
+    for pid, (stream, _, span) in sorted(source.items()):
+        label = f"PID {pid} {stream['codec_name']}"
+        if pid not in capture:
+            print(f"  FAIL  {label}: not in the capture")
+            failed = True
+            continue
+        stream, dts, captured = capture[pid]
         base = Fraction(stream["time_base"])
-        frame, found = holes(dts[index])
-        ms = lambda ticks: float(ticks * base * 1000)  # noqa: E731
-        label = f"stream {index} {stream['codec_name']}"
+        frame, found = holes(dts)
         if frame == 0:
             print(f"  FAIL  {label}: fewer than two frames")
             failed = True
             continue
-        missing = sum(step - frame for _, step in found)
-        short = latest - end[index]
-        early = short > frames[index] + longest
-        verdict = "FAIL" if found or early else "PASS"
-        failed |= bool(found) or early
-        print(f"  {verdict}  {label}: {len(dts[index])} frames of {ms(frame):.2f} ms, "
-              f"{len(found)} holes, {ms(missing):.0f} ms missing, ends {float(short) * 1000:.0f} ms before the latest")
+        cut = cuts(span, captured, frame * base)
+        missing = sum(step - frame for _, step in found) * base
+        verdict = "FAIL" if found or cut else "PASS"
+        failed |= bool(found or cut)
+        print(f"  {verdict}  {label}: {len(dts)} frames of {float(frame * base) * 1000:.2f} ms, "
+              f"{len(found)} holes, {float(missing) * 1000:.0f} ms missing, "
+              f"from {float(captured[0]):.3f}s to {float(captured[1]):.3f}s of {float(span[0]):.3f}s to {float(span[1]):.3f}s")
         for at, step in found[:5]:
-            print(f"        at {ms(at) / 1000:.3f}s: {ms(step):.0f} ms step")
+            print(f"        at {float(at * base):.3f}s: {float(step * base) * 1000:.0f} ms step")
+        for reason in cut:
+            print(f"        {reason}")
     sys.exit(1 if failed else 0)
 
 
