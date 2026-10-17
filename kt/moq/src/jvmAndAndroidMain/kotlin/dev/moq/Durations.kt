@@ -41,6 +41,14 @@ val TrackInfo.maxAge: Duration?
 val AudioDecoderOutput.maxDelay: Duration?
     get() = maxDelayUs?.toLong()?.microseconds
 
+/** Fixed playout delay to hold ahead of the playhead, or null to estimate it from arrival timing. */
+val AudioDecoderOutput.delay: Duration?
+    get() = delayUs?.toLong()?.microseconds
+
+/** Playout delay to hold ahead of the playhead: the fixed one, or the estimate from every frame read so far. */
+val dev.moq.audio.Consumer.delay: Duration
+    get() = delayUs().toLong().microseconds
+
 /** Upper bound on buffering before a stalled group is skipped, or null for the default. */
 val VideoDecoderOutput.maxDelay: Duration?
     get() = maxDelayUs?.toLong()?.microseconds

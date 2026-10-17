@@ -213,6 +213,86 @@ func TestEncodeAudioWithOpusObject(t *testing.T) {
 	}
 }
 
+// A fixed playout delay is reported back as is, and an estimated one moves as frames are read.
+func TestAudioConsumerDelay(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+
+	origin := newOrigin(t)
+	broadcast, err := origin.CreateBroadcast("audio-delay")
+	if err != nil {
+		t.Fatal(err)
+	}
+	track := "mic"
+	catalogProducer, err := moqmedia.NewCatalogProducer(broadcast)
+	if err != nil {
+		t.Fatal(err)
+	}
+	audio, err := moqaudio.NewProducer(catalogProducer,
+		moqaudio.EncoderInput{Format: moq.AudioSampleFormatF32, SampleRate: 48000, Channels: 1},
+		moqaudio.EncoderOutput{Codec: moq.OpusAudioCodec(), Track: &track},
+		nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := broadcast.Announce(moq.Route{}); err != nil {
+		t.Fatal(err)
+	}
+
+	bc, err := origin.Consume().RequestBroadcast(ctx, "audio-delay")
+	if err != nil {
+		t.Fatal(err)
+	}
+	catalog, err := moqmedia.CatalogSnapshot(ctx, bc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rendition, ok := catalog.Audio[track]
+	if !ok {
+		t.Fatalf("catalog has no %q rendition: %v", track, catalog.Audio)
+	}
+
+	fixedDelay := 80 * time.Millisecond
+	fixed, err := moqaudio.Subscribe(ctx, bc, track, rendition, moqaudio.DecoderOutput{Format: moq.AudioSampleFormatF32, Delay: &fixedDelay})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fixed.Cancel()
+	estimated, err := moqaudio.Subscribe(ctx, bc, track, rendition, moqaudio.DecoderOutput{Format: moq.AudioSampleFormatF32})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer estimated.Cancel()
+	if got := fixed.Delay(); got != fixedDelay {
+		t.Fatalf("fixed delay = %v, want %v", got, fixedDelay)
+	}
+	initial := estimated.Delay()
+
+	// Two 20 ms Opus frames of silence at 48 kHz mono.
+	for i := range 2 {
+		if err := audio.Write(moqaudio.Frame{Timestamp: time.Duration(i) * 20 * time.Millisecond, Data: make([]byte, 960*4)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, consumer := range []*moqaudio.Consumer{fixed, estimated} {
+		if frame, err := consumer.Next(ctx); err != nil || frame == nil {
+			t.Fatalf("next = %v, %v", frame, err)
+		}
+	}
+
+	if got := fixed.Delay(); got != fixedDelay {
+		t.Fatalf("fixed delay after a read = %v, want %v", got, fixedDelay)
+	}
+	if got := estimated.Delay(); got == initial {
+		t.Fatalf("estimated delay stayed at %v after a read", got)
+	}
+
+	if err := audio.Finish(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // FrameDurationUs is microseconds so Opus' 2.5 ms frame is expressible at all,
 // and a duration outside the Opus set is refused rather than silently rounded.
 func TestEncodeAudioFrameDurations(t *testing.T) {

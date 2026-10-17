@@ -12,6 +12,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `MoqAudioEncoderOutput::preset` takes a `MoqAudioPreset` (low latency, balanced, quality).
 - `MoqAudioEncoder::track_init` returns the init that publishes its packets, and
   `MoqAudioEncoder::set_bitrate` retunes it live.
+- `MoqAudioDecoderOutput::delay_us` fixes the audio playout delay, and
+  `MoqAudioConsumer::delay_us()` reports it, fixed or estimated from arrivals.
 
 ### Changed
 

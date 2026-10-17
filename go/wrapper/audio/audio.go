@@ -61,17 +61,24 @@ func (o EncoderOutput) ffi() (ffi.MoqAudioEncoderOutput, error) {
 	return ffi.MoqAudioEncoderOutput{Codec: o.Codec, Track: o.Track, SampleRate: o.SampleRate, Channels: o.Channels, Bitrate: o.Bitrate, FrameDurationUs: uint32(frame), Preset: o.Preset}, err
 }
 
-// DecoderOutput configures the PCM a Consumer delivers and how stale a group may get before it is skipped.
+// DecoderOutput configures the PCM a Consumer delivers, how stale a group may get before it is skipped, and the playout delay.
 type DecoderOutput struct {
 	Format     SampleFormat
 	SampleRate *uint32
 	Channels   *uint32
-	MaxDelay   *time.Duration
+	// MaxDelay bounds how stale a group may get before it is skipped; it adds no buffering.
+	MaxDelay *time.Duration
+	// Delay fixes the jitter buffer to hold ahead of the playhead; nil estimates it from arrival timing.
+	Delay *time.Duration
 }
 
 func (o DecoderOutput) ffi() (ffi.MoqAudioDecoderOutput, error) {
-	delay, err := bridge.OptionalDuration(o.MaxDelay, "audio max delay")
-	return ffi.MoqAudioDecoderOutput{Format: o.Format, SampleRate: o.SampleRate, Channels: o.Channels, MaxDelayUs: delay}, err
+	maxDelay, err := bridge.OptionalDuration(o.MaxDelay, "audio max delay")
+	if err != nil {
+		return ffi.MoqAudioDecoderOutput{}, err
+	}
+	delay, err := bridge.OptionalDuration(o.Delay, "audio delay")
+	return ffi.MoqAudioDecoderOutput{Format: o.Format, SampleRate: o.SampleRate, Channels: o.Channels, MaxDelayUs: maxDelay, DelayUs: delay}, err
 }
 
 // Frame is interleaved PCM with its presentation timestamp.
@@ -202,6 +209,12 @@ func (d *Consumer) Next(ctx context.Context) (*Frame, error) {
 
 // All ranges over decoded frames until the track ends or the loop breaks.
 func (d *Consumer) All(ctx context.Context) iter.Seq2[*Frame, error] { return bridge.Seq(ctx, d.Next) }
+
+// Delay is the playout delay to hold ahead of the playhead: the fixed one, or the estimate from every frame read so far.
+// The estimate measures when Next returns, so call it again as soon as the previous frame is handled.
+func (d *Consumer) Delay() time.Duration {
+	return time.Duration(d.inner.DelayUs()) * time.Microsecond
+}
 
 // Cancel stops the stream.
 func (d *Consumer) Cancel() { d.inner.Cancel() }
