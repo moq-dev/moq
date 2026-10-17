@@ -106,26 +106,20 @@ struct AudioLayout {
 };
 
 // One subscribed track: what it is, the consumer once subscribed, and the pending
-// call that resolves, subscribes, or reads its next frame. Dropping it cancels that call.
+// call that subscribes or reads its next frame. Dropping it cancels that call.
 struct Track {
-	Track(const char *kind, std::string name, moq::Container container)
-		: kind(kind),
-		  name(std::move(name)),
-		  container(std::move(container))
-	{
-	}
+	Track(const char *kind, std::string id) : kind(kind), id(std::move(id)) {}
 
 	// "Video" or "Audio", for the log.
 	const char *kind;
-	// The track's name in its broadcast, which can differ from the rendition's catalog ID.
-	std::string name;
+	// The rendition's catalog ID.
+	std::string id;
 	// The rendition the decoder was built from.
 	std::optional<moq::Video> video_config;
 	std::optional<moq::Audio> audio_config;
 	std::unique_ptr<VideoDecoder> video_decoder;
 	AudioLayout audio_layout;
 	uint64_t audio_frames = 0;
-	moq::Container container;
 
 	// Video reads encoded frames to decode here; audio reads PCM moq-audio decoded.
 	std::shared_ptr<moq::MediaTrackConsumer> consumer;
@@ -499,13 +493,6 @@ moq_source_first_rendition(const std::unordered_map<std::string, Rendition> &ren
 	return first;
 }
 
-// The track a rendition names in its broadcast: its `track` when set, else its catalog ID.
-template<typename Rendition>
-static std::string moq_source_track_name(const std::pair<const std::string, Rendition> &rendition)
-{
-	return rendition.second.track.value_or(rendition.first);
-}
-
 static void moq_source_on_subscribed(struct moq_source *ctx, const std::shared_ptr<Connection> &conn,
 				     const std::shared_ptr<Track> &track,
 				     moq::expected<std::shared_ptr<moq::MediaTrackConsumer>> result);
@@ -549,21 +536,6 @@ static void moq_source_discard_candidate(const std::shared_ptr<Connection> &conn
 		conn->pending_video.reset();
 	if (track == conn->pending_audio)
 		conn->pending_audio.reset();
-}
-
-static void moq_source_on_resolved(struct moq_source *ctx, const std::shared_ptr<Connection> &conn,
-				   const std::shared_ptr<Track> &track,
-				   moq::expected<std::shared_ptr<moq::BroadcastConsumer>> result)
-{
-	if (!result) {
-		LOG_ERROR("Failed to resolve %s track broadcast: %s", track->kind, result.error().to_string().c_str());
-		moq_source_discard_candidate(conn, track);
-		return;
-	}
-	track->call = moq::MediaTrackConsumer::subscribe(*result, {track->name, track->container})
-			      .then(ctx->worker.Executor(),
-				    moq_source_track_current<moq::expected<std::shared_ptr<moq::MediaTrackConsumer>>>(
-					    ctx, conn, track, moq_source_on_subscribed));
 }
 
 static void moq_source_on_subscribed(struct moq_source *ctx, const std::shared_ptr<Connection> &conn,
@@ -752,11 +724,14 @@ static bool moq_source_same_container(const moq::Container &a, const moq::Contai
 
 // Whether `track` already plays this rendition. Metadata such as the label or bitrate may
 // change; the track, its broadcast and everything its decoder was built from may not.
-static bool moq_source_same_video(const Track *track, const std::string &name, const moq::Video &config)
+static bool moq_source_same_video(const Track *track, const std::string &id, const moq::Video &config)
 {
-	if (!track || track->name != name)
+	if (!track)
 		return false;
 	const auto &old = *track->video_config;
+	// The same track under a new catalog ID is the same rendition.
+	if (old.track.value_or(track->id) != config.track.value_or(id))
+		return false;
 	const bool same_coded =
 		old.coded.has_value() == config.coded.has_value() &&
 		(!old.coded || (old.coded->width == config.coded->width && old.coded->height == config.coded->height));
@@ -765,26 +740,28 @@ static bool moq_source_same_video(const Track *track, const std::string &name, c
 	       moq_source_same_container(old.container, config.container);
 }
 
-static bool moq_source_same_audio(const Track *track, const std::string &name, const moq::Audio &config)
+static bool moq_source_same_audio(const Track *track, const std::string &id, const moq::Audio &config)
 {
-	if (!track || track->name != name)
+	if (!track)
 		return false;
 	const auto &old = *track->audio_config;
+	// The same track under a new catalog ID is the same rendition.
+	if (old.track.value_or(track->id) != config.track.value_or(id))
+		return false;
 	return old.broadcast == config.broadcast && old.codec == config.codec &&
 	       old.description == config.description && old.sample_rate == config.sample_rate &&
 	       old.channel_count == config.channel_count && moq_source_same_container(old.container, config.container);
 }
 
-// Resolves the rendition's broadcast (it may live in a sibling), subscribes to the
-// track, then reads it, each as a call `track` owns, so replacing or dropping the
-// track cancels whichever one is pending.
+// Subscribes to the rendition (following its broadcast and track), then reads it, each
+// as a call `track` owns, so replacing or dropping the track cancels whichever one is pending.
 static void moq_source_subscribe_track(struct moq_source *ctx, const std::shared_ptr<Connection> &conn,
-				       const std::shared_ptr<Track> &track, const std::optional<std::string> &broadcast)
+				       const std::shared_ptr<Track> &track, moq::Rendition rendition)
 {
-	track->call = conn->consumer->resolve(broadcast).then(
-		ctx->worker.Executor(),
-		moq_source_track_current<moq::expected<std::shared_ptr<moq::BroadcastConsumer>>>(
-			ctx, conn, track, moq_source_on_resolved));
+	track->call = moq::MediaTrackConsumer::subscribe(conn->consumer, {std::move(rendition)})
+			      .then(ctx->worker.Executor(),
+				    moq_source_track_current<moq::expected<std::shared_ptr<moq::MediaTrackConsumer>>>(
+					    ctx, conn, track, moq_source_on_subscribed));
 }
 
 static void moq_source_subscribe_video(struct moq_source *ctx, const std::shared_ptr<Connection> &conn,
@@ -798,12 +775,12 @@ static void moq_source_subscribe_video(struct moq_source *ctx, const std::shared
 		return;
 	}
 
-	const auto name = moq_source_track_name(*rendition);
-	if (moq_source_same_video(conn->video.get(), name, rendition->second)) {
+	const auto &id = rendition->first;
+	if (moq_source_same_video(conn->video.get(), id, rendition->second)) {
 		conn->pending_video.reset();
 		return;
 	}
-	if (moq_source_same_video(conn->pending_video.get(), name, rendition->second))
+	if (moq_source_same_video(conn->pending_video.get(), id, rendition->second))
 		return;
 	conn->pending_video.reset();
 
@@ -814,11 +791,11 @@ static void moq_source_subscribe_video(struct moq_source *ctx, const std::shared
 		return;
 	}
 
-	auto track = std::make_shared<Track>("Video", name, rendition->second.container);
+	auto track = std::make_shared<Track>("Video", id);
 	track->video_config = rendition->second;
 	track->video_decoder = std::move(decoder);
 	conn->pending_video = track;
-	moq_source_subscribe_track(ctx, conn, track, rendition->second.broadcast);
+	moq_source_subscribe_track(ctx, conn, track, moq::Rendition::kVideo{id, rendition->second});
 }
 
 // Subscribe to the first audio rendition, decoded by moq-audio to OBS's rate. A
@@ -832,12 +809,12 @@ static void moq_source_subscribe_audio(struct moq_source *ctx, const std::shared
 		moq_source_clear_audio_locked(ctx);
 		return;
 	}
-	const auto name = moq_source_track_name(*rendition);
-	if (moq_source_same_audio(conn->audio.get(), name, rendition->second)) {
+	const auto &id = rendition->first;
+	if (moq_source_same_audio(conn->audio.get(), id, rendition->second)) {
 		conn->pending_audio.reset();
 		return;
 	}
-	if (moq_source_same_audio(conn->pending_audio.get(), name, rendition->second))
+	if (moq_source_same_audio(conn->pending_audio.get(), id, rendition->second))
 		return;
 	conn->pending_audio.reset();
 
@@ -856,7 +833,7 @@ static void moq_source_subscribe_audio(struct moq_source *ctx, const std::shared
 
 	LOG_INFO("Subscribing to audio track (%s, %u Hz, %u ch)", config.codec.c_str(), config.sample_rate,
 		 config.channel_count);
-	auto track = std::make_shared<Track>("Audio", name, config.container);
+	auto track = std::make_shared<Track>("Audio", id);
 	track->audio_config = config;
 	track->audio_layout = *layout;
 	conn->pending_audio = track;
@@ -865,8 +842,8 @@ static void moq_source_subscribe_audio(struct moq_source *ctx, const std::shared
 	output.format = moq::AudioSampleFormat::kF32Planar;
 	output.sample_rate = layout->sample_rate;
 	output.channels = layout->channels;
-	// Resolves the rendition's broadcast itself, like moq_source_subscribe_track.
-	track->call = moq::AudioConsumer::subscribe(conn->consumer, name, config, output)
+	// Follows the rendition's broadcast and track itself, like moq_source_subscribe_track.
+	track->call = moq::AudioConsumer::subscribe(conn->consumer, id, config, output)
 			      .then(ctx->worker.Executor(),
 				    moq_source_track_current<moq::expected<std::shared_ptr<moq::AudioConsumer>>>(
 					    ctx, conn, track, moq_source_on_audio_subscribed));

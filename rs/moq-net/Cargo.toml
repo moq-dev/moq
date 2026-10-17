@@ -33,6 +33,7 @@ kio = { workspace = true }
 moq-pattern = { workspace = true, features = ["serde"] }
 num_enum = { workspace = true }
 rand = { workspace = true }
+rangemap = { workspace = true }
 serde = { workspace = true }
 slab = { workspace = true }
 thiserror = { workspace = true }

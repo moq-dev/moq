@@ -361,7 +361,9 @@ impl Mergeable for Presence {
 	}
 
 	fn regressed(&self, prev: &Self) -> bool {
-		self.requests < prev.requests
+		self.sessions_refused.regressed(&prev.sessions_refused)
+			|| self.sessions_failed.regressed(&prev.sessions_failed)
+			|| self.requests < prev.requests
 			|| self.sessions_started < prev.sessions_started
 			|| self.sessions_ended < prev.sessions_ended
 			|| self.announces_peak < prev.announces_peak
@@ -1823,6 +1825,65 @@ mod tests {
 			true,
 		);
 		(merged, (path, None))
+	}
+
+	#[test]
+	fn outcomes_survive_node_departure_resume_and_counter_only_reset() {
+		let (mut merged, key) = hand_merged::<Presence>();
+		let sample = |refused, failed| {
+			let mut value = Presence::default();
+			value.sessions_refused.forbidden = refused;
+			value.sessions_failed.transport = failed;
+			value
+		};
+		let path = PathOwned::from(".stats/acme/node/b");
+		merged.apply_announce(
+			moq_net::announce::Announce {
+				prefix: path.clone(),
+				captures: None,
+				route: origin::Route::default(),
+			},
+			true,
+		);
+		let second = (path, None);
+		merged
+			.nodes
+			.get_mut(&second)
+			.unwrap()
+			.observe(BTreeMap::from([(String::new(), sample(2, 1))]));
+
+		merged
+			.nodes
+			.get_mut(&key)
+			.unwrap()
+			.observe(BTreeMap::from([(String::new(), sample(5, 3))]));
+		merged.nodes.get_mut(&key).unwrap().depart();
+		assert_eq!(merged.merged()[""], sample(7, 4));
+		merged
+			.nodes
+			.get_mut(&key)
+			.unwrap()
+			.observe(BTreeMap::from([(String::new(), sample(5, 3))]));
+		assert_eq!(
+			merged.merged()[""],
+			sample(7, 4),
+			"same epoch does not count old errors again"
+		);
+		merged
+			.nodes
+			.get_mut(&key)
+			.unwrap()
+			.observe(BTreeMap::from([(String::new(), sample(6, 4))]));
+		merged
+			.nodes
+			.get_mut(&key)
+			.unwrap()
+			.observe(BTreeMap::from([(String::new(), sample(2, 1))]));
+		assert_eq!(
+			merged.merged()[""],
+			sample(10, 6),
+			"outcome-only reset starts a fresh segment"
+		);
 	}
 
 	#[test]

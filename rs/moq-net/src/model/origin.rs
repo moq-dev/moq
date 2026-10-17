@@ -460,6 +460,19 @@ pub struct Route {
 	/// most recently announced route. See [`Cost`].
 	pub cost: Cost,
 
+	/// The credential the request advertising this route carries, from
+	/// [`auth::Handle`](crate::auth::Handle)'s `add`, or `None` for the session's scope.
+	///
+	/// Only a session the auth was presented on carries it, as the token on its
+	/// moq-transport PUBLISH_NAMESPACE: any other session, the inline NAMESPACE answering a
+	/// solicited SUBSCRIBE_NAMESPACE from draft 16 on (drafts 14 and 15 answer with a
+	/// PUBLISH_NAMESPACE, which carries it), and moq-lite (which rides the session's scope)
+	/// advertise the route unnamed. Swapping it is an update that renews the request with
+	/// REQUEST_UPDATE from draft 17, or ends and makes it again before. After a
+	/// reconnect, add the token on the new session and name that. Local, like
+	/// [`Self::source`]: a relay never forwards it.
+	pub auth: Option<crate::auth::Auth>,
+
 	/// The announcing session's declared or assigned identity.
 	///
 	/// Local selection state: split-horizon matches this as well as the chain, so a
@@ -477,6 +490,7 @@ impl Default for Route {
 			epoch: None,
 			hops: Hops::new(),
 			cost: Cost::default(),
+			auth: None,
 			via: Hop::UNKNOWN,
 			source: Source::Local,
 		}
@@ -514,6 +528,12 @@ impl Route {
 	/// Set the cost: lower wins among routes covering the same prefix and anonymity.
 	pub fn with_cost(mut self, cost: impl Into<Cost>) -> Self {
 		self.cost = cost.into();
+		self
+	}
+
+	/// Set the credential the advertising request carries; see [`Self::auth`].
+	pub fn with_auth(mut self, auth: crate::auth::Auth) -> Self {
+		self.auth = Some(auth);
 		self
 	}
 
@@ -623,8 +643,9 @@ fn route_order<'a>(
 	)
 }
 
-/// The `(hops, cost, source, epoch)` metadata an announce cursor delivers alongside a prefix.
-type RouteMeta = (Hops, Cost, Source, Option<crate::Epoch>);
+/// The `(hops, cost, source, epoch, auth)` metadata an announce cursor delivers alongside a
+/// prefix.
+type RouteMeta = (Hops, Cost, Source, Option<crate::Epoch>, Option<crate::auth::Auth>);
 
 /// The earlier of two optional deadlines.
 fn earliest(a: Option<Instant>, b: Option<Instant>) -> Option<Instant> {
@@ -958,6 +979,7 @@ impl OriginConsumerState {
 				via: Hop::UNKNOWN,
 				source: meta.2,
 				epoch: meta.3,
+				auth: meta.4,
 			},
 		})
 	}
@@ -997,6 +1019,8 @@ struct RouteEntry {
 	scope: Patterns,
 	hops: Hops,
 	cost: Cost,
+	/// The auth the request advertising the route carries; see [`Route::auth`].
+	auth: Option<crate::auth::Auth>,
 	/// The rank of the link the entry arrived on; see [`Producer::with_preference`].
 	preference: Preference,
 	/// The announcing session's declared or assigned identity. Split-horizon
@@ -1295,7 +1319,13 @@ impl TableCursor {
 	fn update(&mut self, presented: &PathOwned, best: Option<&RouteEntry>, now: u64, hold: &Hold) {
 		match best {
 			Some(entry) => {
-				let meta = (entry.hops.clone(), entry.cost, entry.entered(), entry.epoch.clone());
+				let meta = (
+					entry.hops.clone(),
+					entry.cost,
+					entry.entered(),
+					entry.epoch.clone(),
+					entry.auth.clone(),
+				);
 				let served = entry.server.is_some();
 				let captures = self.captures(&entry.prefix);
 				let instance = entry.instance();
@@ -2137,6 +2167,7 @@ impl Announcing {
 				scope: self.scope.clone(),
 				hops: route.hops.clone(),
 				cost: route.cost,
+				auth: route.auth.clone(),
 				preference: self.preference,
 				via,
 				local: self.local,
@@ -2264,6 +2295,7 @@ impl AnnounceProducer {
 			entry.epoch = route.epoch.clone();
 			entry.stale = stale;
 			entry.cost = route.cost;
+			entry.auth = route.auth.clone();
 			entry.via = route.via;
 			entry.advertised = true;
 			let claim = entry.claim.clone();
@@ -2291,6 +2323,7 @@ impl AnnounceProducer {
 			epoch: entry.epoch.clone(),
 			hops: entry.hops.clone(),
 			cost: entry.cost,
+			auth: entry.auth.clone(),
 			via: entry.via,
 			source: entry.entered(),
 		})
@@ -6561,6 +6594,28 @@ mod tests {
 		route.update(Route::default().with_cost(5)).unwrap();
 		match announced.next().now_or_never().expect("next blocked").expect("no next") {
 			AnnounceEvent::Update(update) => assert_eq!(update.route.cost, Cost::new(5)),
+			other => panic!("should be an update: got {other:?}"),
+		}
+	}
+
+	/// Swapping a route's auth is an update in place carrying the new auth, so the session
+	/// advertising it can renew its request.
+	#[test]
+	#[cfg(feature = "async")]
+	fn an_auth_swap_is_an_update() {
+		let handle = crate::auth::Handle::ietf(false);
+		let first = handle.present(bytes::Bytes::from_static(b"first"), false).unwrap();
+		let second = handle.present(bytes::Bytes::from_static(b"second"), false).unwrap();
+		let producer = origin(1).produce();
+		let mut announced = producer.consume().announced();
+		let route = producer
+			.dynamic("room", Route::default().with_auth(first.clone()))
+			.unwrap();
+		assert_eq!(announced.assert_next_active("room").auth, Some(first));
+
+		route.update(Route::default().with_auth(second.clone())).unwrap();
+		match announced.next().now_or_never().expect("next blocked").expect("no next") {
+			AnnounceEvent::Update(update) => assert_eq!(update.route.auth, Some(second)),
 			other => panic!("should be an update: got {other:?}"),
 		}
 	}

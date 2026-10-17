@@ -290,7 +290,7 @@ impl Client {
 				// We advertise the request path in our SETUP for URL-less transports.
 				// The peer's SETUP decides whether AUTH is negotiated. A handle that does not
 				// offer it keeps the option out of our SETUP and presents no credential.
-				let auth = crate::auth::Handle::new(self.extensions.auth);
+				let auth = crate::auth::Handle::ietf(self.extensions.auth);
 				let (protocol, goaway) = ietf::start(ietf::Config {
 					runtime: runtime.clone(),
 					limits: self.limits,
@@ -461,7 +461,7 @@ impl Client {
 
 				let stream = stream.with_version(v);
 				// Draft 14-16 carry no AUTH, but the session is still limited through this handle.
-				let auth = crate::auth::Handle::new(false);
+				let auth = crate::auth::Handle::ietf(false);
 				// Draft 14-16: the path rode in the bidi SETUP above, not the uni one.
 				let (protocol, goaway) = ietf::start(ietf::Config {
 					runtime: runtime.clone(),

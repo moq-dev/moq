@@ -9,7 +9,7 @@ use crate::support;
 
 use std::time::Duration;
 
-use moq_net::{Error, Hop, Version, origin, setup::Extensions};
+use moq_net::{Hop, Version, origin, setup::Extensions};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
 /// Long enough, in virtual time, for anything in flight to reach the far side.
@@ -106,7 +106,8 @@ async fn a_side_that_declines_solicit_takes_unsolicited_announces() {
 }
 
 /// A side that declines MoQ Auth leaves it un-negotiated whichever side declines:
-/// neither side holds a grant, and a token is unsupported rather than presented.
+/// neither side holds a grant, and a token is kept for the requests that name it
+/// rather than presented on an AUTH stream.
 #[moq_net_sim::test]
 async fn a_declined_auth_extension_is_not_negotiated() {
 	for name in AUTH {
@@ -136,12 +137,14 @@ async fn a_declined_auth_extension_is_not_negotiated() {
 
 			for session in [&pair.client, &pair.server] {
 				assert_eq!(session.auth().grant().peek(), None, "{context}");
-				let added = moq_net_sim::timeout(SETTLE, session.auth().add("token")).await;
-				assert!(
-					matches!(added, Ok(Err(Error::Unsupported))),
-					"{context}: {:?}",
-					added.map(|res| res.map(|_| ()))
-				);
+				// Only a request that names it can carry the token, so it resolves at once with
+				// a grant that stays unknown.
+				let added = moq_net_sim::timeout(SETTLE, session.auth().add("token"))
+					.await
+					.unwrap_or_else(|_| panic!("{context}: add never resolved"))
+					.unwrap_or_else(|err| panic!("{context}: {err:?}"));
+				assert_eq!(added.grant().peek(), None, "{context}");
+				assert_eq!(session.auth().grant().peek(), None, "{context}");
 			}
 			assert_open(&pair, &context);
 		}

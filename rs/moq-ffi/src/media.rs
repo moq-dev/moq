@@ -99,8 +99,8 @@ pub struct MoqVideo {
 	/// (e.g. `./source`). Absent or empty means the catalog's broadcast.
 	#[uniffi(default = None)]
 	pub broadcast: Option<String>,
-	/// The track's name in its broadcast, when it differs from the rendition's key. Absent means
-	/// the key is the track name.
+	/// The track's name in its broadcast, when it differs from the rendition's ID. Absent means
+	/// the ID is the track name.
 	#[uniffi(default = None)]
 	pub track: Option<String>,
 	pub codec: String,
@@ -124,8 +124,8 @@ pub struct MoqAudio {
 	/// (e.g. `./source`). Absent or empty means the catalog's broadcast.
 	#[uniffi(default = None)]
 	pub broadcast: Option<String>,
-	/// The track's name in its broadcast, when it differs from the rendition's key. Absent means
-	/// the key is the track name.
+	/// The track's name in its broadcast, when it differs from the rendition's ID. Absent means
+	/// the ID is the track name.
 	#[uniffi(default = None)]
 	pub track: Option<String>,
 	pub codec: String,
@@ -1166,27 +1166,46 @@ fn reserve_track(
 	})
 }
 
-/// A media track's name, container, and live delivery options.
+/// A catalog rendition: its ID (its key in the catalog) and its config.
+///
+/// The consumers that take one resolve the rendition's broadcast reference and track name
+/// themselves, so pass the ID exactly as the catalog lists it.
+#[derive(Clone, uniffi::Enum)]
+pub enum MoqRendition {
+	/// A video rendition.
+	Video { id: String, config: MoqVideo },
+	/// An audio rendition.
+	Audio { id: String, config: MoqAudio },
+}
+
+impl MoqRendition {
+	/// Split into the broadcast reference, the track name, and the container.
+	fn into_parts(self) -> (Option<String>, String, MoqContainer) {
+		let (id, broadcast, track, container) = match self {
+			Self::Video { id, config } => (id, config.broadcast, config.track, config.container),
+			Self::Audio { id, config } => (id, config.broadcast, config.track, config.container),
+		};
+		(broadcast, track.unwrap_or(id), container)
+	}
+}
+
+/// A media rendition to subscribe to, and its live delivery options.
 #[derive(Clone, uniffi::Record)]
 pub struct MoqMediaTrackConfig {
-	/// The track name.
-	pub name: String,
-	/// How to decode the track's frames.
-	pub container: MoqContainer,
+	/// The catalog rendition to subscribe to.
+	pub rendition: MoqRendition,
 	/// Live delivery options, or defaults when absent.
 	#[uniffi(default = None)]
 	pub subscription: Option<MoqSubscription>,
 }
 
-/// A fetched media group's name, sequence, container, and delivery options.
+/// A media rendition's group to fetch, and its delivery options.
 #[derive(Clone, uniffi::Record)]
 pub struct MoqMediaGroupConfig {
-	/// The track name.
-	pub name: String,
+	/// The catalog rendition to fetch from.
+	pub rendition: MoqRendition,
 	/// The group sequence.
 	pub sequence: u64,
-	/// How to decode the group's frames.
-	pub container: MoqContainer,
 	/// Fetch delivery options, or defaults when absent.
 	#[uniffi(default = None)]
 	pub options: Option<MoqFetchGroupOptions>,
@@ -1365,24 +1384,28 @@ impl MoqMediaCatalogConsumer {
 
 #[uniffi::export]
 impl MoqMediaTrackConsumer {
-	/// Subscribe to a media track and decode its container.
+	/// Subscribe to a catalog rendition and decode its container.
+	///
+	/// Follows the rendition's broadcast reference and track name, so a rendition served by a
+	/// sibling broadcast or under another track name subscribes to the right track.
 	#[uniffi::constructor]
 	pub async fn subscribe(
 		broadcast: &MoqBroadcastConsumer,
 		config: MoqMediaTrackConfig,
 	) -> Result<Arc<MoqMediaTrackConsumer>, MoqError> {
 		let MoqMediaTrackConfig {
-			name,
-			container,
+			rendition,
 			subscription,
 		} = config;
-		// Parse the container before subscribing so we don't leave a dangling
+		let (reference, name, container) = rendition.into_parts();
+		// Parse the container before resolving or subscribing so we don't leave a dangling
 		// subscription if init parsing fails.
 		let media = media_container(container)?;
+		let resolved = broadcast.resolve_inner(reference.as_deref()).await?;
 		let subscription = subscription.map(moq_net::track::Subscription::from).unwrap_or_default();
 		let track = broadcast
 			.driver
-			.watch(async { Ok(broadcast.inner.track(&name)?.subscribe(subscription).await?) })
+			.watch(async { Ok(resolved.track(&name)?.subscribe(subscription).await?) })
 			.await?;
 		let consumer = moq_mux::container::Consumer::new(track, media);
 		Ok(Arc::new(MoqMediaTrackConsumer {
@@ -1408,26 +1431,30 @@ impl MoqMediaGroupConsumer {
 		Ok(Arc::new(Self::from_inner(group, media, driver)))
 	}
 
-	/// Fetch and decode exactly one media group.
+	/// Fetch and decode exactly one group of a catalog rendition.
+	///
+	/// Follows the rendition's broadcast reference and track name, like
+	/// [`MoqMediaTrackConsumer::subscribe`].
 	#[uniffi::constructor]
 	pub async fn fetch(
 		broadcast: &MoqBroadcastConsumer,
 		config: MoqMediaGroupConfig,
 	) -> Result<Arc<MoqMediaGroupConsumer>, MoqError> {
 		let MoqMediaGroupConfig {
-			name,
+			rendition,
 			sequence,
-			container,
 			options,
 		} = config;
+		let (reference, name, container) = rendition.into_parts();
 		// Parse the container before fetching so invalid CMAF init data does not leave a
 		// dynamic group request waiting for a consumer that can never read it.
 		let media = media_container(container)?;
+		let resolved = broadcast.resolve_inner(reference.as_deref()).await?;
 		let options = options.map(moq_net::group::Fetch::from);
 		let group = broadcast
 			.driver
 			.watch(async {
-				let track = broadcast.inner.track(&name).map_err(map_fetch_error)?;
+				let track = resolved.track(&name).map_err(map_fetch_error)?;
 				track.fetch_group(sequence, options).await.map_err(map_fetch_error)
 			})
 			.await?;

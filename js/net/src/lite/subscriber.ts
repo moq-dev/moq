@@ -20,7 +20,7 @@ import {
 } from "../error.ts";
 import * as netGroup from "../group.ts";
 import { Cost, type Hop, MAX_HOPS, type Route, routesEqual, UNKNOWN_HOP } from "../hop.ts";
-import { groupBounds, hiddenBelow, scopeCaptures, scopeHead, scopeOverlaps } from "../internal.ts";
+import { groupBounds, hiddenBelow, hooks, scopeCaptures, scopeHead, scopeOverlaps } from "../internal.ts";
 import * as Path from "../path.ts";
 import { sendOrder } from "../priority.ts";
 import { type OpenOptions, type Reader, Stream, Writer } from "../stream.ts";
@@ -1202,6 +1202,7 @@ export class Subscriber {
 				}
 			} else if ("drop" in resp) {
 				entry.tail.account(resp.drop.start, resp.drop.end + 1);
+				hooks.dropTrackGroups(entry.track, resp.drop.start, resp.drop.end + 1);
 			}
 		}
 	}

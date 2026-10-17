@@ -455,8 +455,12 @@ impl Server {
 			origin: None,
 			token,
 			assigned_hop: crate::Hop::random(),
-			// Lite 01/02 and moq-transport 14-16 carry no AUTH.
-			auth: crate::auth::Handle::new(false),
+			// Lite 01/02 and moq-transport 14-16 carry no AUTH, though a moq-transport request
+			// still carries a token.
+			auth: match version {
+				Version::Ietf(_) => crate::auth::Handle::ietf(false),
+				Version::Lite(_) => crate::auth::Handle::new(false),
+			},
 			inner: Some(RequestInner {
 				server: self.clone(),
 				runtime,
@@ -495,7 +499,7 @@ impl Server {
 			assigned_hop: crate::Hop::random(),
 			// The client's SETUP already settled whether it offered MoQ Auth, so it is
 			// negotiated exactly when we offer it too.
-			auth: crate::auth::Handle::new(peer_setup.declared.auth && self.extensions.auth),
+			auth: crate::auth::Handle::ietf(peer_setup.declared.auth && self.extensions.auth),
 			inner: Some(RequestInner {
 				server: self.clone(),
 				runtime,
@@ -1495,7 +1499,7 @@ mod tests {
 			origin: None,
 			token: None,
 			assigned_hop: Hop::random(),
-			auth: crate::auth::Handle::new(false),
+			auth: crate::auth::Handle::ietf(false),
 			inner: Some(RequestInner {
 				server: Server::new().with_publisher(&origin),
 				runtime: Clock::new(moq_net_sim::now()),

@@ -551,7 +551,7 @@ func TestLocalPublishConsumeAudio(t *testing.T) {
 		t.Fatalf("audio = %+v, want opus/48000/2", audio)
 	}
 
-	mediaConsumer, err := moqmedia.NewTrackConsumer(ctx, bc, moqmedia.TrackConfig{Name: trackName, Container: audio.Container, Subscription: nil})
+	mediaConsumer, err := moqmedia.NewTrackConsumer(ctx, bc, moqmedia.TrackConfig{Rendition: moqmedia.AudioRendition(trackName, audio)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -838,7 +838,7 @@ func TestDynamicTrackRequestCanPublishAudio(t *testing.T) {
 	}
 	subscribe := make(chan subscribeResult, 1)
 	go func() {
-		media, err := moqmedia.NewTrackConsumer(ctx, consumer, moqmedia.TrackConfig{Name: "requested-audio", Container: moqmedia.LegacyContainer(), Subscription: nil})
+		media, err := moqmedia.NewTrackConsumer(ctx, consumer, moqmedia.TrackConfig{Rendition: moqmedia.AudioRendition("requested-audio", moqmedia.Audio{Codec: "opus", SampleRate: 48000, ChannelCount: 2, Enabled: true, Container: moqmedia.LegacyContainer()})})
 		subscribe <- subscribeResult{media: media, err: err}
 	}()
 

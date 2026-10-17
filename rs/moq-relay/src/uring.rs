@@ -771,8 +771,11 @@ async fn serve_connection(
 			.spawn(async move {
 				// Abandoned at the drain deadline: worker teardown only detaches this task.
 				let admitted = shutdown
-					.admit(cluster.admit_session(&auth, auth_request.clone()))
-					.await?;
+					.admit(async {
+						Ok::<_, crate::auth::Error>(cluster.admit_session(&auth, auth_request.clone()).await)
+					})
+					.await
+					.inspect_err(|err| cluster.refusals.record(err.into()))??;
 				Ok::<_, crate::auth::Error>((admitted, sessions.register(auth_request)))
 			})
 			.await
@@ -783,7 +786,6 @@ async fn serve_connection(
 				admitted
 			}
 			Err(err) => {
-				serve.cluster.refusals.record((&err).into());
 				// The status is what separates "your credential is bad" from "the
 				// auth server is down". Collapsing both into Unauthorized tells a
 				// client to stop reconnecting through an outage it could have
@@ -815,7 +817,9 @@ async fn serve_connection(
 			send_window: limits.send_window,
 		})?;
 	}
-	let mut request = request.with_stats(stats).with_limits(serve.cluster.limits(&lease));
+	let mut request = request
+		.with_stats(stats.clone())
+		.with_limits(serve.cluster.limits(&lease));
 	if let Some(subscriber) = subscriber {
 		request = request.with_publisher(subscriber);
 	}
@@ -823,7 +827,10 @@ async fn serve_connection(
 		request = request.with_subscriber(publisher);
 	}
 	let lease = lease.preparing(request.auth(), request.role())?;
-	let (session, driver) = deadline.bound(request.ok()).await?;
+	let (session, driver) = deadline
+		.bound(request.ok())
+		.await
+		.inspect_err(|err| crate::connection::setup_failed(&stats, err.downcast_ref()))?;
 	let driver_handle = handle.clone();
 	let driver = async move {
 		match driver_handle.run(driver).await {

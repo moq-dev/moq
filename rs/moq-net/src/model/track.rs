@@ -23,14 +23,15 @@ use super::{Datagram, Requests};
 use super::Cap;
 use super::subscription::NewGroup;
 pub use super::subscription::{Order, Position, Subscription};
+use rangemap::RangeSet;
 
 mod demand;
 pub(super) use demand::Preferences;
 use demand::Subscriptions;
 
 use std::{
-	collections::{BTreeMap, VecDeque},
-	ops::{Bound, RangeBounds},
+	collections::{BTreeMap, BTreeSet, VecDeque},
+	ops::{Bound, Range, RangeBounds},
 	sync::Arc,
 	sync::OnceLock,
 	sync::atomic::{AtomicBool, AtomicU64, Ordering},
@@ -343,6 +344,13 @@ pub(crate) struct TrackState {
 	// [`Subscriber::poll_start`]) wait on it; everything else treats the floor as usual.
 	start_pending: bool,
 
+	// Sequences the upstream publisher gave up: an incoming SUBSCRIBE_DROP or a producer
+	// cut. Kept apart from the cache so reclaiming a slot cannot erase a disposition a
+	// relay must forward, and as ranges so a wide DROP costs one entry.
+	drops: RangeSet<u64>,
+	// Bumped on every insert into `drops`, so a cursor rescans it only after a change.
+	drops_revision: u64,
+
 	// Whether the cache reflects the live feed: readers get nothing from it while it does
 	// not, since how stale it is cannot be told; fetches still do. A track is live from
 	// creation, and only a session's copy goes idle: when its upstream subscription ends
@@ -539,6 +547,35 @@ pub(crate) struct FetchOutcome {
 }
 
 impl TrackState {
+	/// Record sequences the upstream publisher gave up.
+	fn drop_groups(&mut self, groups: Range<u64>) {
+		if groups.is_empty() {
+			return;
+		}
+		self.drops.insert(groups);
+		self.drops_revision += 1;
+	}
+
+	/// Remove an aborted slot, keeping a cut as a drop: reclaiming it must not erase a
+	/// disposition a relay still has to forward.
+	fn reclaim_aborted(&mut self, sequence: u64) {
+		if let Some(slot) = self.remove_slot(sequence)
+			&& slot.visible
+			&& slot.group.is_cut()
+			&& let Some(end) = sequence.checked_add(1)
+		{
+			self.drop_groups(sequence..end);
+		}
+	}
+
+	/// Whether the cached group at `sequence` is one readers saw and the publisher cut.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	fn is_cut(&self, sequence: u64) -> bool {
+		self.lookup
+			.get(&sequence)
+			.is_some_and(|slot| slot.visible && slot.group.is_cut())
+	}
+
 	fn accept(&mut self, info: Info) {
 		self.published = true;
 		self.install(info);
@@ -1098,7 +1135,7 @@ impl TrackState {
 				// Already aborted: the frames are gone, reclaim the slot so a
 				// later fetch can serve the sequence again.
 				if slot.is_aborted() {
-					self.remove_slot(sequence);
+					self.reclaim_aborted(sequence);
 					continue;
 				}
 				if self.protects(sequence) || !slot.is_expired(&scan) {
@@ -1174,6 +1211,15 @@ impl TrackState {
 	/// keep the finished ones for readers still draining. A consumer that already
 	/// pulled an open group keeps its own handle and ends with it.
 	fn drop_open_groups(&mut self) {
+		let open: Vec<_> = self
+			.lookup
+			.iter()
+			.filter(|(_, slot)| slot.visible && !slot.copies().any(group::Producer::is_finished))
+			.filter_map(|(&sequence, _)| Some(sequence..sequence.checked_add(1)?))
+			.collect();
+		for groups in open {
+			self.drop_groups(groups);
+		}
 		self.lookup
 			.retain(|_, slot| slot.copies().any(group::Producer::is_finished));
 		self.withheld = self.lookup.values().filter(|slot| slot.pending).count();
@@ -1301,6 +1347,14 @@ impl TrackState {
 		}
 
 		self.advance(sequence);
+		// A publisher may re-create a group it cut; the sequence is no longer given up.
+		if visible
+			&& self.drops.contains(&sequence)
+			&& let Some(end) = sequence.checked_add(1)
+		{
+			self.drops.remove(sequence..end);
+			self.drops_revision += 1;
+		}
 		let now = self.cache.pool().now_wall();
 		if visible {
 			self.record_arrival(sequence, now);
@@ -1473,7 +1527,7 @@ impl TrackState {
 			}
 			if slot.is_aborted() {
 				// Aborted upstream: the frames are already gone, reclaim the slot.
-				self.remove_slot(sequence);
+				self.reclaim_aborted(sequence);
 				continue;
 			}
 			if self.protects(sequence) {
@@ -2262,6 +2316,17 @@ impl Producer {
 	pub fn start_at(&mut self, sequence: impl Into<Option<u64>>) -> Result<()> {
 		self.modify()?.set_start(sequence.into(), false);
 		Ok(())
+	}
+
+	/// Record sequences the upstream publisher explicitly gave up.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	pub(crate) fn drop_groups(&self, groups: Range<u64>) {
+		if groups.is_empty() {
+			return;
+		}
+		if let Ok(mut state) = self.modify() {
+			state.drop_groups(groups);
+		}
 	}
 
 	/// Readers get nothing from the cache until [`Self::set_live`]: the upstream
@@ -4172,6 +4237,82 @@ struct Cursor {
 	/// Groups the seek path has convicted but whose sequences no caller has committed
 	/// past yet, keyed by sequence; see [`Self::commit_seek_stale`].
 	seek_pending: BTreeMap<u64, stats::Content>,
+	/// The drops a wire publisher forwards, once it first polls for one.
+	drops: Option<Box<DropCursor>>,
+}
+
+/// What a wire publisher's cursor gave up, found as it changes rather than by rescanning
+/// the cache on every poll.
+struct DropCursor {
+	/// Every group the publisher cuts.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	cuts: super::aborts::Watch,
+	/// Sequences given up and not reported yet: stale skips, cuts, and upstream drops.
+	pending: RangeSet<u64>,
+	/// The [`TrackState::drops_revision`] and window last folded into `pending`.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	scanned: Option<(u64, Range<u64>)>,
+	/// Every sequence this cursor already reported.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	reported: RangeSet<u64>,
+}
+
+#[cfg_attr(not(feature = "async"), allow(dead_code))]
+impl DropCursor {
+	fn new(state: &TrackState) -> Self {
+		// Watch before the first scan, so a cut landing between the two is still seen.
+		Self {
+			cuts: state.cache.watch_cuts(),
+			pending: RangeSet::new(),
+			scanned: None,
+			reported: RangeSet::new(),
+		}
+	}
+
+	/// The lowest unreported run of `within` given up, now marked reported.
+	fn next(&mut self, state: &TrackState, cut: BTreeSet<u64>, within: &Range<u64>) -> Option<Range<u64>> {
+		for sequence in cut {
+			// A cut already reclaimed from the cache is in the track's drops instead.
+			if state.is_cut(sequence)
+				&& let Some(end) = sequence.checked_add(1)
+			{
+				self.pending.insert(sequence..end);
+			}
+		}
+		// Rescan only after the drops change or the window moves; out-of-window runs were
+		// skipped and may be owed now.
+		let scan = (state.drops_revision, within.clone());
+		if self.scanned.as_ref() != Some(&scan) {
+			self.scanned = Some(scan);
+			for dropped in state.drops.overlapping(within) {
+				self.pending
+					.insert(dropped.start.max(within.start)..dropped.end.min(within.end));
+			}
+			for (&sequence, slot) in state.lookup.range(within.clone()) {
+				if slot.visible
+					&& slot.group.is_cut()
+					&& let Some(end) = sequence.checked_add(1)
+				{
+					self.pending.insert(sequence..end);
+				}
+			}
+		}
+		while let Some(range) = self.pending.iter().next().cloned() {
+			self.pending.remove(range.clone());
+			let clipped = range.start.max(within.start)..range.end.min(within.end);
+			if clipped.is_empty() {
+				continue;
+			}
+			if let Some(gap) = self.reported.gaps(&clipped).next() {
+				if gap.end < range.end {
+					self.pending.insert(gap.end..range.end);
+				}
+				self.reported.insert(gap.clone());
+				return Some(gap);
+			}
+		}
+		None
+	}
 }
 
 impl Cursor {
@@ -4212,6 +4353,28 @@ impl Cursor {
 			drift_cap: kio::Producer::new(None),
 			stale: stats::Content::default(),
 			seek_pending: BTreeMap::new(),
+			drops: None,
+		}
+	}
+
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	fn poll_drop(&mut self, waiter: &kio::Waiter) -> Poll<Range<u64>> {
+		let within = self.min_sequence..self.end_sequence.unwrap_or(u64::MAX);
+		let drops = match &mut self.drops {
+			Some(drops) => drops,
+			None => self.drops.insert(Box::new(DropCursor::new(&self.state.read()))),
+		};
+		// A cut closes its group without modifying the track state, so its own watch wakes
+		// this. Taken before reading the track, so a cut after the read still wakes.
+		let cut = drops.cuts.poll(waiter);
+		match self.state.poll(waiter, |state| {
+			drops.next(state, cut, &within).map_or(Poll::Pending, Poll::Ready)
+		}) {
+			Poll::Ready(Ok(range)) => Poll::Ready(range),
+			Poll::Ready(Err(state)) => drops
+				.next(&state, BTreeSet::new(), &within)
+				.map_or(Poll::Pending, Poll::Ready),
+			Poll::Pending => Poll::Pending,
 		}
 	}
 
@@ -4414,6 +4577,11 @@ impl Cursor {
 			// poll walks a whole backlog off rather than handing it out group by group.
 			if ready!(self.poll_stale(&consumer, drift, waiter))? {
 				self.stale.add(consumer.content());
+				if let Some(drops) = &mut self.drops
+					&& let Some(end) = consumer.sequence.checked_add(1)
+				{
+					drops.pending.insert(consumer.sequence..end);
+				}
 				continue;
 			}
 			return Poll::Ready(Ok(Some(self.with_expiry(consumer))));
@@ -4828,6 +4996,18 @@ impl Subscriber {
 		};
 		let start = ready!(Consumer::poll_state_start(&cursor.state, waiter));
 		Poll::Ready(start.map(|start| start.max(cursor.min_sequence)))
+	}
+
+	/// Poll for sequences this subscription gave up without serving.
+	///
+	/// Stale skips are recorded only once this has been polled, so a cursor no wire
+	/// publisher forwards drops for keeps none.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	pub(crate) fn poll_drop(&mut self, waiter: &kio::Waiter) -> Poll<Range<u64>> {
+		match &mut self.inner {
+			Inner::Plain(cursor) => cursor.poll_drop(waiter),
+			Inner::Resume(resume, _) => resume.poll_drop(waiter),
+		}
 	}
 
 	/// Poll for the track's cache reflecting its live feed (or the track ending), with the

@@ -1816,6 +1816,7 @@ async fn export_scte35_roundtrip() {
 			pid: 0x102,
 			descriptors: Vec::new(),
 			verbatim: Some(tscat::Verbatim::new(0x86, tscat::Framing::Section)),
+			pes_packet: None,
 		};
 		catalog
 			.modify()
@@ -2062,6 +2063,7 @@ async fn scte35_without_video_export_is_rejected() {
 			pid: 0x102,
 			descriptors: Vec::new(),
 			verbatim: Some(tscat::Verbatim::new(0x86, tscat::Framing::Section)),
+			pes_packet: None,
 		};
 		catalog.modify().unwrap().ext.mpegts.tracks.insert(scte_name, track);
 	}
@@ -9708,4 +9710,440 @@ async fn a_backlog_stays_in_the_source_until_due() {
 		assert_eq!(frames, 50);
 		assert_eq!(export.dropped(), 0, "the sink's stall does not make arrived media late");
 	}
+}
+
+/// The PID of the whole-PES private data track in the tests below.
+const PLACED_PID: u16 = 0x104;
+
+/// A program carrying a `pesPacket` track, for [`export_placed`].
+struct Placed {
+	/// The PTS in ms of each video frame, the first a keyframe; none leaves AAC to clock it.
+	video: Vec<u64>,
+	/// The private data track's `mpegts.tracks` entry.
+	entry: tscat::Track,
+	/// Each frame's placement in ms, and its bytes: one PES packet.
+	pes: Vec<(u64, Vec<u8>)>,
+	/// Also describe the private data track as an AAC rendition.
+	rendition: bool,
+	mux_rate: Option<u64>,
+}
+
+impl Placed {
+	fn new(pes: Vec<(u64, Vec<u8>)>) -> Self {
+		let mut entry = tscat::Track::new(PLACED_PID);
+		entry.pes_packet = Some(tscat::PesPacket::new(0x06));
+		Self {
+			video: Vec::new(),
+			entry,
+			pes,
+			rendition: false,
+			mux_rate: None,
+		}
+	}
+}
+
+/// Export `placed` beside an AAC rendition running past its last PES, returning every slice.
+async fn export_placed(placed: Placed) -> crate::Result<Vec<Frame>> {
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let mut catalog = crate::catalog::Producer::new(
+		&mut broadcast,
+		crate::catalog::Config::default().with_catalog(crate::catalog::hang::Catalog::<tscat::Ext>::default()),
+	)
+	.unwrap();
+
+	let mut video = None;
+	if !placed.video.is_empty() {
+		let track = broadcast
+			.create_track(
+				broadcast.unique_name(".avc1"),
+				hang::container::track_info(hang::catalog::PRIORITY.video),
+			)
+			.unwrap();
+		let mut cfg = VideoConfig::new(H264 {
+			profile: 0x42,
+			constraints: 0xc0,
+			level: 0x1f,
+			inline: false,
+		});
+		cfg.container = Container::Legacy;
+		cfg.description =
+			Some(crate::codec::h264::build_avcc(&[Bytes::from_static(SPS)], &[Bytes::from_static(PPS)]).unwrap());
+		catalog
+			.modify()
+			.unwrap()
+			.video
+			.renditions
+			.insert(track.name().to_string(), cfg);
+		video = Some(Producer::new(
+			track,
+			HangContainer::Legacy(crate::container::Kind::Video),
+		));
+	}
+
+	let mut aac = AudioConfig::new(AAC { profile: 2 }, 48_000, 2);
+	aac.container = Container::Legacy;
+	let track = broadcast
+		.create_track(
+			broadcast.unique_name(".aac"),
+			hang::container::track_info(hang::catalog::PRIORITY.audio),
+		)
+		.unwrap();
+	catalog
+		.modify()
+		.unwrap()
+		.audio
+		.renditions
+		.insert(track.name().to_string(), aac.clone());
+	let mut audio = Producer::new(track, HangContainer::Legacy(crate::container::Kind::Audio));
+
+	let track = broadcast
+		.create_track(
+			broadcast.unique_name(".ts"),
+			hang::container::track_info(hang::catalog::PRIORITY.video),
+		)
+		.unwrap();
+	{
+		let mut guard = catalog.modify().unwrap();
+		guard.ext.mpegts.tracks.insert(track.name().to_string(), placed.entry);
+		if placed.rendition {
+			guard.audio.renditions.insert(track.name().to_string(), aac);
+		}
+	}
+	let mut data = Producer::new(track, HangContainer::Legacy(crate::container::Kind::Data));
+
+	for (k, &pts) in placed.video.iter().enumerate() {
+		let slice = vec![if k == 0 { 0x65u8 } else { 0x41 }; 400];
+		video
+			.as_mut()
+			.unwrap()
+			.write(Frame {
+				timestamp: Timestamp::from_millis(pts).unwrap(),
+				duration: None,
+				payload: length_prefixed(&[&slice]),
+				keyframe: k == 0,
+			})
+			.unwrap();
+	}
+	let end = placed
+		.pes
+		.iter()
+		.map(|&(ms, _)| ms)
+		.chain(placed.video.iter().copied())
+		.max();
+	let end = (end.unwrap_or(0) + 500) * 1_000;
+	let mut index = 0;
+	while index * AUDIO_US < end {
+		audio
+			.write(Frame {
+				timestamp: Timestamp::from_micros(index * AUDIO_US).unwrap(),
+				duration: None,
+				payload: Bytes::from(vec![index as u8; 180]),
+				keyframe: index.is_multiple_of(AUDIO_GROUP),
+			})
+			.unwrap();
+		index += 1;
+	}
+	for (ms, pes) in placed.pes {
+		data.write(Frame {
+			timestamp: Timestamp::from_millis(ms).unwrap(),
+			duration: None,
+			payload: Bytes::from(pes),
+			keyframe: true,
+		})
+		.unwrap();
+	}
+	if let Some(video) = video.as_mut() {
+		video.finish().unwrap();
+	}
+	audio.finish().unwrap();
+	data.finish().unwrap();
+
+	let mut exporter = open_ts(
+		crate::source::announced(&consumer).await,
+		crate::catalog::CatalogFormat::Hang,
+	)
+	.await?
+	.with_delay(RECORDING_MAX_AGE)
+	.with_replay();
+	if let Some(rate) = placed.mux_rate {
+		exporter = exporter.with_mux_rate(rate);
+	}
+	let mut out = Vec::new();
+	while let Ok(next) = tokio::time::timeout(DRAIN, exporter.next()).await {
+		match next? {
+			Some(frame) => out.push(frame),
+			None => break,
+		}
+	}
+	Ok(out)
+}
+
+/// Where a PES went out: the slice it began in, its first byte's offset into the slice, and
+/// the bytes in its packets' payloads.
+#[derive(Debug)]
+struct PlacedOut {
+	slice: usize,
+	offset: usize,
+	bytes: Vec<u8>,
+}
+
+/// Every PES on [`PLACED_PID`], reassembled from its packets' payloads.
+fn placed_out(slices: &[Frame]) -> Vec<PlacedOut> {
+	let mut out: Vec<PlacedOut> = Vec::new();
+	for (slice, frame) in slices.iter().enumerate() {
+		for (position, packet) in frame.payload.as_chunks::<188>().0.iter().enumerate() {
+			let pid = (u16::from(packet[1] & 0x1f) << 8) | u16::from(packet[2]);
+			if pid != PLACED_PID {
+				continue;
+			}
+			let start = 4 + if packet[3] & 0x20 != 0 {
+				usize::from(packet[4]) + 1
+			} else {
+				0
+			};
+			if packet[1] & 0x40 != 0 {
+				out.push(PlacedOut {
+					slice,
+					offset: position * 188 + start,
+					bytes: Vec::new(),
+				});
+			}
+			out.last_mut()
+				.expect("a continuation before any PES start")
+				.bytes
+				.extend_from_slice(&packet[start..]);
+		}
+	}
+	out
+}
+
+/// A 33-bit PTS or DTS field behind its 4-bit `prefix`, as ISO 13818-1 2.4.3.7 lays it out.
+fn pes_clock(prefix: u8, ticks: u64) -> [u8; 5] {
+	[
+		prefix << 4 | ((ticks >> 29) & 0x0e) as u8 | 1,
+		(ticks >> 22) as u8,
+		((ticks >> 14) & 0xfe) as u8 | 1,
+		(ticks >> 7) as u8,
+		((ticks << 1) & 0xfe) as u8 | 1,
+	]
+}
+
+/// A PES with an optional header: `marker` is its first flags byte ('10' then scrambling,
+/// priority, alignment, copyright, original), `flags` its second, `fields` the optional
+/// fields those flags name, then `stuffing` bytes of 0xFF.
+fn pes_with(stream_id: u8, marker: u8, flags: u8, fields: &[u8], stuffing: usize, payload: &[u8]) -> Vec<u8> {
+	let header = fields.len() + stuffing;
+	let mut pes = vec![0, 0, 1, stream_id];
+	pes.extend_from_slice(&((3 + header + payload.len()) as u16).to_be_bytes());
+	pes.extend_from_slice(&[marker, flags, header as u8]);
+	pes.extend_from_slice(fields);
+	pes.resize(pes.len() + stuffing, 0xff);
+	pes.extend_from_slice(payload);
+	pes
+}
+
+/// A PES of a `stream_id` with no optional header (private_stream_2, padding, ...).
+fn pes_bare(stream_id: u8, payload: &[u8]) -> Vec<u8> {
+	let mut pes = vec![0, 0, 1, stream_id];
+	pes.extend_from_slice(&(payload.len() as u16).to_be_bytes());
+	pes.extend_from_slice(payload);
+	pes
+}
+
+/// Each whole PES goes out exactly as written, whatever its header holds: PTS 0 or none, a
+/// DTS apart from its PTS, every optional field, `data_alignment_indicator` clear, the
+/// stream IDs without an optional header, and sizes on either side of a packet's payload.
+#[tokio::test(start_paused = true)]
+async fn placed_pes_goes_out_byte_for_byte() {
+	let mut extension = vec![0x80 | 0x10 | 0x01];
+	extension.extend_from_slice(&[0x5a; 16]);
+	extension.extend_from_slice(&[0x60, 0x20]);
+	extension.extend_from_slice(&[0x80 | 3, 1, 2, 3]);
+	let mut optional = pes_clock(0b0010, 90_000).to_vec();
+	optional.extend_from_slice(&[0x80, 0x01, 0x01]);
+	optional.push(0x1f);
+	optional.push(0xa5);
+	optional.extend_from_slice(&[0x12, 0x34]);
+	optional.extend_from_slice(&extension);
+	let mut both = pes_clock(0b0011, 180_000).to_vec();
+	both.extend_from_slice(&pes_clock(0b0001, 171_000));
+
+	let packets = vec![
+		pes_with(0xbd, 0x84, 0x80, &pes_clock(0b0010, 0), 0, b"pts zero"),
+		pes_with(0xbd, 0x84, 0x00, &[], 0, b"no pts"),
+		pes_with(0xbd, 0x84, 0xc0, &both, 0, b"pts and dts"),
+		pes_with(0xbd, 0x84, 0x80 | 0x1f, &optional, 4, b"every optional field"),
+		pes_with(0xbd, 0x80, 0x80, &pes_clock(0b0010, 1), 0, b"unaligned"),
+		pes_bare(0xbf, b"private_stream_2"),
+		pes_bare(0xbe, &[0xff; 40]),
+		pes_with(0xbd, 0x84, 0x00, &[], 0, &[0x33; 500]),
+		// Exactly one packet's payload, and one byte short of it.
+		pes_with(0xbd, 0x84, 0x00, &[], 0, &[0x44; 184 - 9]),
+		pes_with(0xbd, 0x84, 0x00, &[], 0, &[0x55; 183 - 9]),
+	];
+	let pes = packets
+		.iter()
+		.enumerate()
+		.map(|(k, pes)| (1_000 + 100 * k as u64, pes.clone()))
+		.collect();
+	let out = placed_out(&export_placed(Placed::new(pes)).await.unwrap());
+	let bytes: Vec<&Vec<u8>> = out.iter().map(|pes| &pes.bytes).collect();
+	assert_eq!(bytes, packets.iter().collect::<Vec<_>>());
+}
+
+/// The PCR, in nanoseconds, that opens a slice: in its first packet's adaptation field.
+fn slice_pcr(frame: &Frame) -> u128 {
+	let packet = &frame.payload[..188];
+	assert!(
+		packet[3] & 0x20 != 0 && packet[5] & 0x10 != 0,
+		"the slice opens with its PCR"
+	);
+	let b = &packet[6..12];
+	let base = u64::from(b[0]) << 25
+		| u64::from(b[1]) << 17
+		| u64::from(b[2]) << 9
+		| u64::from(b[3]) << 1
+		| u64::from(b[4] >> 7);
+	let extension = u64::from(b[4] & 1) << 8 | u64::from(b[5]);
+	u128::from(base * 300 + extension) * 1_000 / 27
+}
+
+/// A PES goes out at its placement, never earlier: at a multiplex rate, whose byte
+/// positions keep time, its first byte lands at the first position past it, with the TS
+/// header just ahead; unpadded, in the first slot that opens at or after it.
+#[tokio::test(start_paused = true)]
+async fn placed_pes_goes_out_at_its_placement() {
+	const RATE: u64 = 2_000_000;
+	let pes = pes_with(0xbd, 0x84, 0x00, &[], 0, b"placed");
+	// Off the 25 ms grid, so neither slot edge lines up with it.
+	let placements = [1_010, 1_533, 2_017];
+	let written = || placements.iter().map(|&ms| (ms, pes.clone())).collect();
+
+	let slices = export_placed(Placed {
+		mux_rate: Some(RATE),
+		..Placed::new(written())
+	})
+	.await
+	.unwrap();
+	let out = placed_out(&slices);
+	assert_eq!(out.len(), placements.len());
+	let packet = 188 * 8 * 1_000_000_000 / u128::from(RATE);
+	for (pes, &ms) in out.iter().zip(&placements) {
+		let first = slice_pcr(&slices[pes.slice]) + pes.offset as u128 * 8 * 1_000_000_000 / u128::from(RATE);
+		let place = u128::from(ms) * 1_000_000;
+		assert!(
+			first >= place,
+			"{ms} ms: first byte at {first} ns, ahead of its placement"
+		);
+		assert!(
+			first < place + packet,
+			"{ms} ms: first byte at {first} ns, a packet past its placement"
+		);
+	}
+
+	let slices = export_placed(Placed::new(written())).await.unwrap();
+	let out = placed_out(&slices);
+	assert_eq!(out.len(), placements.len());
+	for (pes, &ms) in out.iter().zip(&placements) {
+		let opens = slice_pcr(&slices[pes.slice]);
+		let place = u128::from(ms) * 1_000_000;
+		assert!(opens >= place, "{ms} ms: the slot opening at {opens} ns is ahead of it");
+		assert!(
+			opens < place + PCR_INTERVAL.as_nanos(),
+			"{ms} ms: the slot opening at {opens} ns is a slot late"
+		);
+	}
+}
+
+/// Tune-in drops a PES placed before the keyframe departs, and keeps one placed beside it,
+/// after it departs but before its PTS, as well as one placed after it among the media,
+/// each in the slot of its placement. Comparing placement with the keyframe's PTS would drop
+/// the one beside it.
+#[tokio::test(start_paused = true)]
+async fn placed_pes_survives_tune_in_beside_the_keyframe() {
+	// Level 3.1 without an HRD reaches a second ahead, so the keyframe at 2 s departs at 1 s.
+	let video: Vec<u64> = (0..25).map(|k| 2_000 + 40 * k).collect();
+	let before = pes_with(0xbd, 0x84, 0x00, &[], 0, b"before");
+	let beside = pes_with(0xbd, 0x84, 0x00, &[], 0, b"beside");
+	let after = pes_with(0xbd, 0x84, 0x00, &[], 0, b"after");
+	let slices = export_placed(Placed {
+		video,
+		..Placed::new(vec![(500, before), (1_500, beside.clone()), (2_500, after.clone())])
+	})
+	.await
+	.unwrap();
+	let out = placed_out(&slices);
+	let bytes: Vec<&Vec<u8>> = out.iter().map(|pes| &pes.bytes).collect();
+	assert_eq!(
+		bytes,
+		vec![&beside, &after],
+		"only the PES before the keyframe departs is dropped"
+	);
+	for (pes, ms) in out.iter().zip([1_500u128, 2_500]) {
+		assert_eq!(
+			slices[pes.slice].timestamp.as_micros(),
+			(ms * 1_000).div_ceil(PCR_INTERVAL.as_micros()) * PCR_INTERVAL.as_micros() + PCR_INTERVAL.as_micros(),
+			"{ms} ms: rides the first slot opening after its placement"
+		);
+	}
+	// The keyframe is the first video PES out.
+	let keyframe = slices
+		.iter()
+		.position(|slice| {
+			slice.payload.as_chunks::<188>().0.iter().any(|packet| {
+				let start = 4 + if packet[3] & 0x20 != 0 {
+					usize::from(packet[4]) + 1
+				} else {
+					0
+				};
+				packet[1] & 0x40 != 0 && packet[start..].starts_with(&[0, 0, 1, 0xe0])
+			})
+		})
+		.expect("the keyframe went out");
+	assert!(keyframe < out[0].slice, "the keyframe leads the PES beside it");
+}
+
+/// A frame that is not exactly one well-formed PES packet fails the export.
+#[tokio::test(start_paused = true)]
+async fn placed_pes_refuses_a_malformed_frame() {
+	let mut short = pes_with(0xbd, 0x84, 0x00, &[], 0, b"payload");
+	short.pop();
+	let err = export_placed(Placed::new(vec![(1_000, short)])).await.unwrap_err();
+	assert!(err.to_string().contains("malformed PES packet"), "{err}");
+}
+
+/// An entry naming both carriages, or carrying a track that is also a media rendition, has
+/// two ways to write one PID, so the export refuses it.
+#[tokio::test(start_paused = true)]
+async fn placed_pes_refuses_an_ambiguous_entry() {
+	let pes = || vec![(1_000, pes_with(0xbd, 0x84, 0x00, &[], 0, b"payload"))];
+	let mut both = Placed::new(pes());
+	both.entry.verbatim = Some(tscat::Verbatim::new(0x06, tscat::Framing::Pes));
+	let err = export_placed(both).await.unwrap_err();
+	assert!(err.to_string().contains("names both"), "{err}");
+
+	let err = export_placed(Placed {
+		rendition: true,
+		..Placed::new(pes())
+	})
+	.await
+	.unwrap_err();
+	assert!(err.to_string().contains("media rendition"), "{err}");
+}
+
+/// DVB AC-3 carried whole keeps every sync frame of a PES in it, unsplit, where the legacy
+/// `pes` framing cuts the PES into its frames.
+#[tokio::test(start_paused = true)]
+async fn placed_ac3_pes_keeps_its_sync_frames_together() {
+	let payload: Vec<u8> = (0..3).flat_map(ac3_frame).collect();
+	let pes = pes_with(0xbd, 0x84, 0x80, &pes_clock(0b0010, 90 * 1_100), 0, &payload);
+	let mut placed = Placed::new(vec![(1_000, pes.clone())]);
+	placed.entry.descriptors = vec![tscat::Descriptor {
+		tag: 0x6a,
+		data: Bytes::from_static(&[0x00]),
+	}];
+	let out = placed_out(&export_placed(placed).await.unwrap());
+	assert_eq!(out.len(), 1);
+	assert_eq!(out[0].bytes, pes);
 }

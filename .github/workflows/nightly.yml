@@ -52,13 +52,13 @@ jobs:
   # nextest's ignored benchmark tests and cargo's bench targets share few builds.
   nightly:
     name: Nightly (${{ matrix.name }})
-    runs-on: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner || 'ubuntu-24.04-arm' }}
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
-        # Unset keys default to the plain dev shell, the Rust cache, no perf
-        # sampling, no Chromium, and nextest's default profile.
+        # Unset keys default to the ARM runner, the plain dev shell, the Rust
+        # cache, no perf sampling, no Chromium, and nextest's default profile.
         include:
           - name: Features
             recipe: rs features
@@ -72,9 +72,12 @@ jobs:
           - name: Relay shard sweep
             recipe: bench-shard
           # Smoke-tests the capture path: exact off-CPU waits, resolved worker stacks and CPU.
+          # x86: on the SVE-capable ARM runner, perf's DWARF unwinding asks for the SVE VG
+          # register, which the kernel refuses for the software context-switches event.
           - name: Relay lock-wait profile
             recipe: bench-lock fanout-heavy 4
             perf: true
+            runner: ubuntu-24.04
           - name: Rust benchmark tests
             recipe: gh nightly rust-test
           - name: Rust bench targets
@@ -228,6 +231,10 @@ jobs:
         run: nix develop --command just test media --media-engines ${{ matrix.engine }}
         env:
           MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
+          # Playwright checks a browser's libraries with the `ldd` on PATH, which in the
+          # dev shell is Nix glibc's and can't see the ones `--with-deps` installed, so
+          # it refuses a Firefox or WebKit that launches fine.
+          PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS: 1
       - name: Preserve measurements and traces
         if: ${{ failure() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7

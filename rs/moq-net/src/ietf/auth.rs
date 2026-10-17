@@ -288,7 +288,7 @@ where
 			}
 
 			match &err {
-				Error::Cancel | Error::Unsupported | Error::Transport(_) | Error::Session(_) => {
+				Error::Cancel | Error::Unsupported | Error::Transport(_) | Error::IdleTimeout | Error::Session(_) => {
 					tracing::debug!(%err, "auth token ended")
 				}
 				err => tracing::warn!(%err, "auth token ended"),
@@ -467,7 +467,12 @@ impl Serve {
 			Ok(()) => Error::Cancel,
 			Err(err) => {
 				match &err {
-					Error::Cancel | Error::Unsupported | Error::Stream(_) | Error::Session(_) | Error::Transport(_) => {
+					Error::Cancel
+					| Error::Unsupported
+					| Error::Stream(_)
+					| Error::Session(_)
+					| Error::Transport(_)
+					| Error::IdleTimeout => {
 						tracing::debug!(%err, "auth request ended")
 					}
 					err => tracing::warn!(%err, "auth request error"),

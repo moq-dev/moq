@@ -23,7 +23,6 @@ Decided in the 2026-09-30 audit: the Windows and Linux GPU decode paths and the 
 - [Video source replacement](/quest/m2/obs-moq-video/source.md) - remove the FFmpeg video decode and attempt macOS GPU delivery immediately, with a working CPU fallback on other platforms
 - [Linux bundle](/quest/m2/obs-moq-video/linux-bundle.md) - attach a portable Linux x86_64 tarball to every obs-moq release once FFmpeg is gone
 - [Video publishing](/quest/m2/obs-moq-video/adapter.md) - back an internal OBS video encoder with moq-video and expose the combined opt-in mode
-- [Rate control](/quest/m2/obs-moq-video/rate-control.md) - the plugin reserves its bitrate and retunes the OBS encoder to the grant
 - [VP8/VP9 in OBS](/quest/m2/obs-moq-video/vpx-obs.md) - play VP8 and VP9 through moq-video's libvpx backend on every OBS platform
 
 ## Related

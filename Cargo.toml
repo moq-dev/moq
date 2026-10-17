@@ -214,6 +214,7 @@ pollster = "1.0"
 proptest = { version = "1.12.0", default-features = false, features = ["std"] }
 qmux = { version = "0.6.3", default-features = false }
 rand = "0.10.1"
+rangemap = "1.8"
 # default-features off so each consumer picks its crypto provider.
 rcgen = { version = "0.14", default-features = false }
 # default-features off so each consumer picks its own TLS backend and body

@@ -9,6 +9,9 @@ use web_transport_trait::{self as wt, poll as backend};
 pub struct Error<E>(E);
 
 impl<E: wt::Error> moq::Error for Error<E> {
+	fn close_kind(&self) -> moq::CloseKind {
+		close_kind(&self.0)
+	}
 	fn session_error(&self) -> Option<(u32, String)> {
 		self.0.session_error()
 	}
@@ -211,6 +214,18 @@ impl<S: backend::RecvStream + 'static> poll::RecvStream for RecvStream<S> {
 	}
 }
 
+fn close_kind(error: &(dyn std::error::Error + 'static)) -> moq::CloseKind {
+	#[cfg(all(target_os = "linux", feature = "quic"))]
+	if let Some(error) = error.downcast_ref::<crate::quic::Error>() {
+		return match error {
+			crate::quic::Error::TimedOut => moq::CloseKind::IdleTimeout,
+			crate::quic::Error::Closed => moq::CloseKind::Closed,
+			_ => moq::CloseKind::Transport,
+		};
+	}
+	error.source().map(close_kind).unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -377,5 +392,24 @@ mod tests {
 		));
 		poll::Session::close(&mut session, 21, "done");
 		assert_eq!(state.get(), 21);
+	}
+}
+
+#[cfg(all(test, target_os = "linux", feature = "quic"))]
+mod outcome_tests {
+	use super::*;
+
+	#[test]
+	fn typed_ring_close_kinds_survive_the_adapter() {
+		let idle = Error(crate::quic::Error::TimedOut);
+		assert!(matches!(
+			moq_net::Error::from_transport(idle),
+			moq_net::Error::IdleTimeout
+		));
+		let local = Error(crate::quic::Error::Closed);
+		assert!(matches!(
+			moq_net::Error::from_transport(local),
+			moq_net::Error::Session(moq_net::SessionError::Cancel)
+		));
 	}
 }
