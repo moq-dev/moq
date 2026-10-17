@@ -174,14 +174,18 @@ fn timing<R>(
 		let (ResolveResult::Unbound, name) = reader.resolver().resolve_attribute(attribute.key) else {
 			continue;
 		};
-		// Attribute values borrow from the document, so they can be spliced in place.
-		let Cow::Borrowed(value) = attribute.value else {
+		// The raw value borrows from the document, so it can be spliced in place; the normalized one,
+		// which may differ by character references, is what gets parsed.
+		let Cow::Borrowed(raw) = attribute.value else {
 			return Err("malformed TTML attribute");
 		};
+		let value = attribute
+			.normalized_value(quick_xml::XmlVersion::Implicit1_0)
+			.map_err(|_| "malformed TTML attribute")?;
 		match name.as_ref() {
-			"begin" => begin = Some(value),
-			"end" => end = Some(value),
-			"dur" => dur = Some(value),
+			"begin" => begin = Some((raw, value)),
+			"end" => end = Some((raw, value)),
+			"dur" => dur = Some((raw, value)),
 			// `seq` would make each child's begin relative to its previous sibling's end.
 			"timeContainer" if value != "par" => return Err("unsupported TTML time container"),
 			_ => {}
@@ -189,7 +193,7 @@ fn timing<R>(
 	}
 	let body = element.local_name().as_ref() == "body";
 
-	let offset = begin.map(|value| rates.time(value)).transpose()?;
+	let offset = begin.as_ref().map(|(_, value)| rates.time(value)).transpose()?;
 	let source = parent
 		.source
 		.checked_add(offset.unwrap_or_default())
@@ -200,28 +204,31 @@ fn timing<R>(
 	};
 	let relative = mapped - parent.mapped;
 	match (begin, offset) {
-		(Some(value), Some(offset)) if offset != relative => edit.replace(value, relative),
+		(Some((raw, _)), Some(offset)) if offset != relative => edit.replace(raw, relative),
 		(None, _) if body => edit.insert(element, "begin", relative),
 		_ => {}
 	}
 
-	if let Some(value) = end {
-		let offset = rates.time(value)?;
+	// A scope's mapped begin never exceeds the mapping of its source begin, so neither subtraction
+	// below underflows, even when an element ends before it begins.
+	let ends = end.is_some() || dur.is_some();
+	if let Some((raw, value)) = end {
+		let offset = rates.time(&value)?;
 		let at = parent.source.checked_add(offset).ok_or("TTML time overflow")?;
 		let relative = clock.map(at) - parent.mapped;
 		if relative != offset {
-			edit.replace(value, relative);
+			edit.replace(raw, relative);
 		}
 	}
-	if let Some(value) = dur {
-		let offset = rates.time(value)?;
+	if let Some((raw, value)) = dur {
+		let offset = rates.time(&value)?;
 		let at = source.checked_add(offset).ok_or("TTML time overflow")?;
 		let relative = clock.map(at) - mapped;
 		if relative != offset {
-			edit.replace(value, relative);
+			edit.replace(raw, relative);
 		}
 	}
-	if body && end.is_none() && dur.is_none() {
+	if body && !ends {
 		edit.insert(element, "end", clock.end - parent.mapped);
 	}
 
@@ -247,7 +254,9 @@ impl Rates {
 			else {
 				continue;
 			};
-			let value = attribute.value;
+			let value = attribute
+				.normalized_value(quick_xml::XmlVersion::Implicit1_0)
+				.map_err(|_| "malformed TTML attribute")?;
 			match name.as_ref() {
 				"timeBase" if value != "media" => return Err("unsupported TTML time base"),
 				"frameRate" => frame = Some(positive(&value)?),
@@ -309,10 +318,13 @@ impl Rates {
 					}
 					let (rate, den) = self.frame.ok_or("TTML frame time without ttp:frameRate")?;
 					let frames = integer(frames)?;
-					if frames * den >= rate {
+					let (Some(scaled), Some(unit)) = (frames.checked_mul(den), NANOS.checked_mul(den)) else {
+						return Err("TTML time overflow");
+					};
+					if scaled >= rate {
 						return Err(INVALID);
 					}
-					decimal_ratio(frames, 0, NANOS * den, rate)?
+					decimal_ratio(frames, 0, unit, rate)?
 				}
 				_ => 0,
 			};
@@ -427,6 +439,14 @@ mod tests {
 			output,
 			format!(r#"{ROOT}><body begin="1.5s" dur="00:00:01.5"><p>Hi</p></body></tt>"#)
 		);
+		// Character references are parsed by value, and an element may end before it begins.
+		let document = format!(r#"{ROOT}><body begin="1&#x73;"><p begin="5s" end="4s">Hi</p></body></tt>"#);
+		assert_eq!(
+			rewrite(document.as_bytes(), secs(1), secs(1)..secs(3)).unwrap(),
+			format!(
+				r#"{ROOT}><body end="00:00:03" begin="1&#x73;"><p begin="00:00:02" end="00:00:02">Hi</p></body></tt>"#
+			)
+		);
 		// A byte order mark is not text outside the root.
 		let marked = format!("\u{feff}{document}");
 		assert!(rewrite(marked.as_bytes(), secs(1), secs(1)..secs(3)).is_ok());
@@ -475,6 +495,11 @@ mod tests {
 		] {
 			assert!(rates.time(value).is_err(), "{value}");
 		}
+		let huge = Rates {
+			frame: Some((u128::MAX, u128::MAX)),
+			tick: None,
+		};
+		assert!(huge.time("00:00:00:99").is_err());
 		let unset = Rates {
 			frame: None,
 			tick: None,
