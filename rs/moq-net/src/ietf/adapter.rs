@@ -1177,10 +1177,15 @@ impl<S: crate::transport::poll::Session> crate::transport::poll::Session for Con
 		self.inner.send_group(priority)
 	}
 
-	fn poll_send_datagram(&mut self, cx: &mut Context<'_>, payload: &[u8]) -> Poll<Result<(), Self::Error>> {
+	fn send_datagram(
+		&mut self,
+		payload: Bytes,
+		group: Option<&<Self::SendStream as crate::transport::poll::SendStream>::Group>,
+		order: i64,
+	) -> Result<(), Self::Error> {
 		self.inner
-			.poll_send_datagram(cx, payload)
-			.map(|r| r.map_err(|_| crate::Error::Closed))
+			.send_datagram(payload, group, order)
+			.map_err(|_| crate::Error::Closed)
 	}
 
 	fn poll_recv_datagram(&mut self, cx: &mut Context<'_>) -> Poll<Result<Bytes, Self::Error>> {
@@ -1362,6 +1367,7 @@ mod tests {
 
 		for version in [Version::Draft14, Version::Draft15, Version::Draft16] {
 			let update = ietf::SubscribeUpdate {
+				new_group: None,
 				request_id: update_id,
 				subscription_request_id: Some(target_id),
 				start_location: ietf::Location { group: 1, object: 2 },
@@ -1898,6 +1904,7 @@ mod tests {
 	async fn an_update_past_the_window_closes_the_session() {
 		const VERSION: Version = Version::Draft14;
 		let update = ietf::SubscribeUpdate {
+			new_group: None,
 			request_id: RequestId(4),
 			subscription_request_id: Some(RequestId(0)),
 			start_location: ietf::Location { group: 0, object: 0 },

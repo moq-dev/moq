@@ -18,7 +18,7 @@ class NightlyTest(unittest.TestCase):
             for command in ("just", "cargo"):
                 stub = scratch / command
                 stub.write_text(
-                    '#!/bin/bash\n'
+                    '#!/usr/bin/env bash\n'
                     'printf "%s %s\n" "${0##*/}" "$*" >> "$NIGHTLY_CALLS"\n'
                     '[[ "$*" != "$NIGHTLY_FAIL" ]]\n'
                 )
@@ -36,8 +36,8 @@ class NightlyTest(unittest.TestCase):
         self.assertEqual(calls[-1], "just js signals-bench")
         self.assertIn("failed: just js bench reader", result.stderr)
 
-    def test_release_benchmarks_share_one_invocation(self):
-        result, calls = self.run_group("rust")
+    def test_bench_targets_share_one_invocation(self):
+        result, calls = self.run_group("rust-bench")
         self.assertEqual(result.returncode, 0, result.stderr)
         release = [call for call in calls if call.startswith("cargo bench")]
         self.assertEqual(len(release), 4)  # moq-net, its CPU clock, kio, then the shared build.
@@ -53,16 +53,25 @@ class NightlyTest(unittest.TestCase):
         self.assertIn("--bench containers", shared[0])
         self.assertIn("-p moq-quic", shared[0])
         self.assertIn("--bench wire", shared[0])
-        self.assertIn("just rs bench-gst-catalog -- --quick", calls)
+        self.assertEqual(calls[-1], "just rs bench-gst-catalog -- --quick")
+
+    def test_benchmark_tests_stay_out_of_cargo_bench(self):
+        result, calls = self.run_group("rust-test")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(any(call.startswith("cargo bench") for call in calls))
+        # Release builds run before the test-profile ones.
+        profiles = ["--release" in call or " bench-" in call for call in calls]
+        self.assertEqual(profiles, sorted(profiles, reverse=True))
+        self.assertIn("just rs bench-feed-fetch", calls)
         self.assertTrue(calls[-1].startswith("just rs test -p moq-cli"))
 
     def test_failed_release_build_does_not_hide_later_work(self):
-        _, calls = self.run_group("rust")
+        _, calls = self.run_group("rust-bench")
         build = next(call.removeprefix("cargo ") for call in calls
                      if call.startswith("cargo bench") and "-p moq-relay" in call)
-        result, calls = self.run_group("rust", build)
+        result, calls = self.run_group("rust-bench", build)
         self.assertEqual(result.returncode, 1)
-        self.assertTrue(calls[-1].startswith("just rs test -p moq-cli"))
+        self.assertEqual(calls[-1], "just rs bench-gst-catalog -- --quick")
 
     def test_unknown_group_fails_before_running_anything(self):
         result, calls = self.run_group("unknown")

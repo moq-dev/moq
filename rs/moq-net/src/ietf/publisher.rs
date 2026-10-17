@@ -18,6 +18,7 @@ use crate::{
 	AsPath, DecodeError, Error, Timescale, Timestamp,
 	coding::{Decode as _, Encode as _, Encoder, Stream, Writer},
 	ietf::{self, Control, EndLocation, FetchHeader, FetchType, Filter, GroupOrder, Location, RequestId},
+	model::NewGroup,
 	priority::{Priority, PriorityHandle, PriorityQueue},
 	track::{Order, Subscription},
 	util::{MaybeBoxedExt, MaybeSendBox},
@@ -56,6 +57,9 @@ fn track_properties(info: &track::Info, wanted: bool) -> ietf::Properties {
 		timescale: info.timescale,
 		priority: Some(super::priority::to_wire(info.priority)),
 		group_order: Some(GroupOrder::Descending),
+		// Advertised only where an upstream session carries the request back to the
+		// original publisher; a local track has nothing to answer it.
+		dynamic_groups: info.dynamic_groups,
 	}
 }
 
@@ -1137,6 +1141,9 @@ where
 
 					let order = msg.group_order.to_order();
 					let mut subscription = serving_subscription(msg.subscriber_priority).with_order(order);
+					// Set before subscribing, so a relay that has no upstream subscription yet
+					// carries it on the SUBSCRIBE it opens, as the draft requires.
+					subscription.new_group = msg.new_group.and_then(|value| NewGroup::new(value, None));
 
 					// Subscribe before resolving the filter: on a routed broadcast the live edge only
 					// becomes readable once the subscription's demand attaches a route, so the edge
@@ -1170,6 +1177,8 @@ where
 						Some(object) => track::Position::after(end.group, object),
 						None => track::Position::after_group(end.group),
 					});
+					// The live edge is only known once subscribed.
+					subscription.new_group = msg.new_group.and_then(|value| NewGroup::new(value, edge.latest));
 					let _ = track.update(subscription);
 					// A Timestamp goes out wherever the draft can declare its units and the track
 					// has them. A subscriber that opted out of this SUBSCRIBE_OK's properties learns
@@ -1595,6 +1604,11 @@ where
 					Error::Unsupported,
 				))
 			}
+			// The draft forbids it on a track that did not advertise DYNAMIC_GROUPS.
+			None if update.new_group.is_some() && !serve.track.info().dynamic_groups => Some((
+				"NEW_GROUP_REQUEST on a track without DYNAMIC_GROUPS",
+				Error::Unsupported,
+			)),
 			None => None,
 		};
 		if let Some((reason, err)) = refused {
@@ -1610,6 +1624,9 @@ where
 			serve
 				.set_priority(super::priority::from_wire(priority))
 				.map_err(failed)?;
+		}
+		if let Some(value) = update.new_group {
+			serve.request_new_group(value).map_err(failed)?;
 		}
 		if let (Some(token), Some(grant)) = (update.authorization_token, request_grant) {
 			renewal.verify(grant.verify_renewal(&self.auth, token.0), update.request_id);
@@ -3977,6 +3994,19 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 		Ok(())
 	}
 
+	/// Hold the subscriber's NEW_GROUP_REQUEST until a group answers it; the upstream
+	/// session decides whether it goes further. One a held group answers asks nothing.
+	fn request_new_group(&mut self, value: u64) -> Result<(), Error> {
+		let Some(request) = NewGroup::new(value, self.track.latest()) else {
+			return Ok(());
+		};
+		let mut subscription = self.track.subscription();
+		// Merged like requests from different subscribers, so a later, weaker request does
+		// not drop a stronger one still held.
+		subscription.new_group = subscription.new_group.max(Some(request));
+		self.track.update(subscription)
+	}
+
 	/// Group streams opened so far.
 	fn opened(&self) -> u64 {
 		self.opened.load(Ordering::Relaxed)
@@ -4237,7 +4267,10 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 				);
 				continue;
 			}
-			let _ = self.session.send_datagram(&body);
+			// Ranked like a stream carrying the group from its start, so it merges into the
+			// subscription's group order and wins a tie with that group's stream.
+			let order = crate::priority::in_group(sequence, 0, self.ranking.order);
+			let _ = self.session.send_datagram(body, self.ranking.group.as_ref(), order);
 		}
 		Ok(())
 	}
@@ -5432,6 +5465,49 @@ mod group_priority_test {
 		assert_eq!(log.orders().len(), 2, "the streams keep their place in the group");
 	}
 
+	/// An OBJECT_DATAGRAM goes in its subscription's send group, ranked like the stream
+	/// carrying its group from the start, so the transport merges it into the group order.
+	#[test]
+	fn datagrams_rank_within_their_subscription() {
+		let log = crate::lite::test_transport::Log::default();
+		let session = SinkSession::new(log.clone())
+			.with_groups()
+			.with_datagrams(1200)
+			.with_unacked_fin();
+		let mut track = track::Producer::new(
+			std::sync::Arc::new(crate::broadcast::Info::default()),
+			"test",
+			crate::track::Info::timed(),
+		);
+		let subscriber = track.subscribe(
+			track::Subscription::default()
+				.with_priority(3)
+				.with_max_delay(std::time::Duration::from_secs(3600)),
+		);
+		let mut serve = TrackServe::new(
+			session,
+			subscriber,
+			RequestId(0),
+			Version::Draft14,
+			ServeRange::default(),
+			None,
+		);
+		let mut group = track.create_group(group::Info { sequence: 0 }).unwrap();
+		group
+			.write_frame(crate::Timestamp::from_millis(0).unwrap(), b"x".as_slice())
+			.unwrap();
+		group.finish().unwrap();
+		let sequence = track
+			.append_datagram(crate::Timestamp::from_millis(1).unwrap(), b"d".as_slice())
+			.unwrap();
+
+		let waiter = kio::Waiter::noop();
+		assert!(serve.poll(&waiter).is_pending());
+		let order = crate::priority::in_group(sequence, 0, Order::Descending);
+		assert_eq!(log.datagram_ranks(), [(Some(0), order)]);
+		assert_eq!(log.orders(), [(0, 1)], "the stream for group 0 ranks below");
+	}
+
 	/// A group with more objects ready than one poll's budget drains over several polls.
 	#[test]
 	fn a_long_group_drains_within_the_budget() {
@@ -5852,9 +5928,14 @@ mod serve_tests {
 	}
 
 	fn serve(version: Version) -> Serve {
+		serve_track(version, crate::track::Info::timed())
+	}
+
+	/// The same, with the track described by `info`.
+	fn serve_track(version: Version, info: crate::track::Info) -> Serve {
 		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 		let broadcast = origin.publish("room", crate::origin::Route::default()).unwrap();
-		let track = broadcast.create_track("video", crate::track::Info::timed()).unwrap();
+		let track = broadcast.create_track("video", info).unwrap();
 
 		let session = ScriptedSession::per_stream(vec![Vec::new()]);
 		let log = session.log.clone();
@@ -6437,6 +6518,7 @@ mod serve_tests {
 			Version::Draft14 => {
 				let mut body = Vec::new();
 				ietf::SubscribeUpdate {
+					new_group: None,
 					request_id: RequestId(UPDATE_ID.into()),
 					subscription_request_id: Some(RequestId(0)),
 					start_location: Location { group: 0, object: 0 },
@@ -6541,6 +6623,188 @@ mod serve_tests {
 		}
 	}
 
+	/// A REQUEST_UPDATE with Request ID `id` carrying only a NEW_GROUP_REQUEST for `value`,
+	/// framed for the subscription's stream.
+	fn new_group_update(version: Version, id: u64, value: u64) -> Vec<u8> {
+		let mut body = Vec::new();
+		ietf::SubscribeUpdate {
+			new_group: Some(value),
+			request_id: RequestId(id),
+			subscription_request_id: matches!(version, Version::Draft15 | Version::Draft16).then_some(RequestId(0)),
+			start_location: Location { group: 0, object: 0 },
+			end_group: 0,
+			subscriber_priority: None,
+			forward: None,
+			filter: None,
+			authorization_token: None,
+		}
+		.encode_msg(&mut Encoder::new(&mut body, version.into()), version)
+		.unwrap();
+		let mut frame = vec![ietf::SubscribeUpdate::ID as u8, 0, body.len() as u8];
+		frame.extend(body);
+		frame
+	}
+
+	/// The SUBSCRIBE_OK written on the request stream.
+	fn subscribe_ok(log: &Log, version: Version) -> ietf::SubscribeOk {
+		let trail = log.trail();
+		let request = request_stream(&trail);
+		let mut bytes = Vec::new();
+		for (stream, sent) in &trail {
+			if let (true, Sent::Write(buf)) = (*stream == request, sent) {
+				bytes.extend_from_slice(buf);
+			}
+		}
+		let mut rest = bytes.as_slice();
+		let id = crate::coding::decode_varint(&mut rest, version).unwrap();
+		assert_eq!(id, ietf::SubscribeOk::ID, "not a SUBSCRIBE_OK");
+		let size = usize::from(u16::from_be_bytes([rest[0], rest[1]]));
+		ietf::SubscribeOk::decode_msg(&mut Decoder::new(&rest[2..2 + size], version.into()), version).unwrap()
+	}
+
+	/// A SUBSCRIBE's NEW_GROUP_REQUEST for 0 reaches the track still 0, so a relay behind
+	/// the original publisher forwards what was asked, but answered only by a group past
+	/// the latest. SUBSCRIBE_OK advertises DYNAMIC_GROUPS only for a track that supports it.
+	#[moq_net_sim::test]
+	async fn a_subscribe_new_group_request_reaches_the_track() {
+		for (version, dynamic_groups) in [
+			(Version::Draft15, true),
+			(Version::Draft15, false),
+			(Version::Draft16, true),
+			(Version::Draft16, false),
+			(Version::Draft22, true),
+			(Version::Draft22, false),
+		] {
+			let h = serve_track(
+				version,
+				crate::track::Info {
+					dynamic_groups,
+					..crate::track::Info::timed()
+				},
+			);
+			let _group = h.track.create_group(group::Info { sequence: 4 }).unwrap();
+			let stream = Stream::open(&mut h.session.clone(), version).await.unwrap();
+			let msg = ietf::Subscribe {
+				new_group: Some(0),
+				..subscribe(Filter::NextObject, None)
+			};
+			let mut serve = std::pin::pin!(h.publisher.clone().run_subscribe_stream(stream, msg));
+			serve_until(serve.as_mut(), "the request reached the track past group 4", || {
+				h.track.new_group() == Some(NewGroup { value: 0, first: 5 })
+			})
+			.await;
+			assert_eq!(
+				subscribe_ok(&h.log, version).properties.dynamic_groups,
+				dynamic_groups,
+				"{version}"
+			);
+		}
+	}
+
+	/// An update's NEW_GROUP_REQUEST is recorded on a track with DYNAMIC_GROUPS and
+	/// answered with REQUEST_OK.
+	#[moq_net_sim::test]
+	async fn a_new_group_update_reaches_a_dynamic_track() {
+		for version in [Version::Draft15, Version::Draft16, Version::Draft22] {
+			let h = serve_track(
+				version,
+				crate::track::Info {
+					dynamic_groups: true,
+					..crate::track::Info::timed()
+				},
+			);
+			let mut session = ScriptedSession::new(new_group_update(version, 10, 9));
+			let mut stream = Stream::open(&mut session, version).await.unwrap();
+			let mut serving = TrackServe::new(
+				h.session.clone(),
+				h.track.subscribe(None),
+				RequestId(0),
+				version,
+				ServeRange::default(),
+				None,
+			);
+			let mut finished = false;
+			let mut run =
+				std::pin::pin!(
+					h.publisher
+						.run_subscription(&mut stream, &mut serving, &mut finished, async {}, None)
+				);
+			assert!(futures::poll!(run.as_mut()).is_pending(), "{version}: update ended it");
+			assert_eq!(h.track.new_group(), Some(NewGroup { value: 9, first: 0 }), "{version}");
+			// Draft 16 names the update it answers; later drafts answer on its own stream.
+			let written = session.log.writes.lock().unwrap().clone();
+			assert_eq!(written[0], ietf::RequestOk::ID as u8, "{version}: {written:?}");
+			if version == Version::Draft16 {
+				assert_eq!(written[3], 10, "{version}: {written:?}");
+			}
+		}
+	}
+
+	/// A weaker request on the same subscription keeps the stronger one it still holds.
+	#[moq_net_sim::test]
+	async fn a_later_update_keeps_the_stronger_request() {
+		for version in [Version::Draft15, Version::Draft16, Version::Draft22] {
+			let h = serve_track(
+				version,
+				crate::track::Info {
+					dynamic_groups: true,
+					..crate::track::Info::timed()
+				},
+			);
+			let mut session =
+				ScriptedSession::new([new_group_update(version, 10, 9), new_group_update(version, 12, 0)].concat());
+			let mut stream = Stream::open(&mut session, version).await.unwrap();
+			let mut serving = TrackServe::new(
+				h.session.clone(),
+				h.track.subscribe(None),
+				RequestId(0),
+				version,
+				ServeRange::default(),
+				None,
+			);
+			let mut finished = false;
+			let mut run =
+				std::pin::pin!(
+					h.publisher
+						.run_subscription(&mut stream, &mut serving, &mut finished, async {}, None)
+				);
+			assert!(
+				futures::poll!(run.as_mut()).is_pending(),
+				"{version}: an update ended it"
+			);
+			assert_eq!(h.track.new_group(), Some(NewGroup { value: 9, first: 0 }), "{version}");
+		}
+	}
+
+	/// A track without DYNAMIC_GROUPS cannot honor a NEW_GROUP_REQUEST update, which fails
+	/// the subscription like any update it cannot apply.
+	#[moq_net_sim::test]
+	async fn a_new_group_update_without_dynamic_groups_fails() {
+		for version in [Version::Draft15, Version::Draft16, Version::Draft22] {
+			let h = serve(version);
+			let mut session = ScriptedSession::new(new_group_update(version, 10, 9));
+			let mut stream = Stream::open(&mut session, version).await.unwrap();
+			let mut serving = TrackServe::new(
+				h.session.clone(),
+				h.track.subscribe(None),
+				RequestId(0),
+				version,
+				ServeRange::default(),
+				None,
+			);
+			let mut finished = false;
+			let served = h
+				.publisher
+				.run_subscription(&mut stream, &mut serving, &mut finished, async {}, None)
+				.await;
+			assert!(
+				matches!(served, Some(Served::UpdateFailed(Error::Unsupported))),
+				"{version}: {served:?}"
+			);
+			assert_eq!(h.track.new_group(), None, "{version}");
+		}
+	}
+
 	/// An update whose only parameters are AUTHORIZATION TOKENs holding `tokens`, framed for
 	/// the subscription's stream.
 	fn update_with_tokens(version: Version, tokens: &[&[u8]]) -> Vec<u8> {
@@ -6548,6 +6812,7 @@ mod serve_tests {
 			Version::Draft14 => {
 				let mut body = Vec::new();
 				ietf::SubscribeUpdate {
+					new_group: None,
 					request_id: RequestId(2),
 					subscription_request_id: Some(RequestId(0)),
 					start_location: Location { group: 0, object: 0 },
@@ -6952,6 +7217,7 @@ mod serve_tests {
 
 	fn subscribe(filter: Filter, fill: Option<ietf::Fill>) -> ietf::Subscribe<'static> {
 		ietf::Subscribe {
+			new_group: None,
 			request_id: RequestId(REQUEST_ID),
 			track_namespace: crate::Path::new("room"),
 			track_name: "video".into(),
@@ -10080,6 +10346,7 @@ mod serve_tests {
 			_ => None,
 		};
 		let msg = ietf::SubscribeUpdate {
+			new_group: None,
 			request_id: RequestId(0x40),
 			subscription_request_id,
 			start_location: Location { group: 0, object: 0 },
@@ -10391,6 +10658,7 @@ mod serve_tests {
 			_ => None,
 		};
 		let msg = ietf::SubscribeUpdate {
+			new_group: None,
 			request_id: RequestId(rid),
 			subscription_request_id,
 			start_location: Location { group: 0, object: 0 },
@@ -10416,6 +10684,7 @@ mod serve_tests {
 			_ => None,
 		};
 		let msg = ietf::SubscribeUpdate {
+			new_group: None,
 			request_id: RequestId(rid),
 			subscription_request_id,
 			start_location: Location { group: 0, object: 0 },
@@ -13687,6 +13956,7 @@ mod tests {
 			.run_subscribe_stream(
 				stream,
 				ietf::Subscribe {
+					new_group: None,
 					request_id: RequestId(1),
 					track_namespace: crate::Path::new("nothing/here"),
 					track_name: "video".into(),
@@ -14041,6 +14311,7 @@ mod range_tests {
 
 	fn subscribe(filter: Filter) -> ietf::Subscribe<'static> {
 		ietf::Subscribe {
+			new_group: None,
 			request_id: RequestId(1),
 			track_namespace: crate::Path::new("broadcast"),
 			track_name: "video".into(),

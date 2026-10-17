@@ -326,11 +326,18 @@ impl Session {
 		Ok(datagram)
 	}
 
-	/// Sends an application datagram to the remote peer.
+	/// Sends an application datagram to the remote peer in `group` at `order`.
 	///
 	/// Datagrams are unreliable and may be dropped or delivered out of order.
 	/// The data must be smaller than [`max_datagram_size`](Self::max_datagram_size).
-	pub fn send_datagram(&self, data: Bytes) -> Result<(), SessionError> {
+	/// See [`Connection::send_datagram`](crate::quic::driver::Connection::send_datagram) for how
+	/// `group` and `order` schedule it.
+	pub fn send_datagram(
+		&self,
+		data: Bytes,
+		group: Option<&crate::quic::driver::SendGroup>,
+		order: i64,
+	) -> Result<(), SessionError> {
 		let result = if !self.header_datagram.is_empty() {
 			// Unfortunately, we need to allocate/copy each datagram because of the driver API.
 			// Pls go +1 if you care: https://github.com/quinn-rs/quinn/issues/1724
@@ -340,32 +347,9 @@ impl Session {
 			buf.extend_from_slice(&self.header_datagram);
 			buf.extend_from_slice(&data);
 
-			self.conn.send_datagram(buf.into())
+			self.conn.send_datagram(buf.into(), group, order)
 		} else {
-			self.conn.send_datagram(data)
-		};
-
-		result.map_err(|e| self.map_error(e))?;
-		Ok(())
-	}
-
-	/// Sends an application datagram to the remote peer, waiting for buffer space if needed.
-	///
-	/// Datagrams are unreliable and may be dropped or delivered out of order.
-	/// The data must be smaller than [`max_datagram_size`](Self::max_datagram_size).
-	pub async fn send_datagram_wait(&self, data: Bytes) -> Result<(), SessionError> {
-		let result = if !self.header_datagram.is_empty() {
-			// Unfortunately, we need to allocate/copy each datagram because of the driver API.
-			// Pls go +1 if you care: https://github.com/quinn-rs/quinn/issues/1724
-			let mut buf = BytesMut::with_capacity(self.header_datagram.len() + data.len());
-
-			// Prepend the datagram with the header indicating the session ID.
-			buf.extend_from_slice(&self.header_datagram);
-			buf.extend_from_slice(&data);
-
-			self.conn.send_datagram_wait(buf.into()).await
-		} else {
-			self.conn.send_datagram_wait(data).await
+			self.conn.send_datagram(data, group, order)
 		};
 
 		result.map_err(|e| self.map_error(e))?;
@@ -1023,7 +1007,7 @@ impl web_transport_trait::Session for Session {
 	}
 
 	fn send_datagram(&self, data: Bytes) -> Result<(), Self::Error> {
-		Self::send_datagram(self, data)
+		Self::send_datagram(self, data, None, 0)
 	}
 
 	async fn recv_datagram(&self) -> Result<Bytes, Self::Error> {

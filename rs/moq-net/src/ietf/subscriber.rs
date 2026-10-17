@@ -1,12 +1,13 @@
 use std::{
 	collections::{HashMap, hash_map::Entry},
+	sync::atomic::{AtomicU64, Ordering},
 	task::{Poll, ready},
 	time::Duration,
 };
 
 use crate::{
 	Error, Path, PathOwned, SessionError, Timescale, broadcast,
-	coding::{Decode, DecodeError, Decoder, Reader, Stream},
+	coding::{Decode, DecodeError, Decoder, Reader, Stream, Writer},
 	frame, group,
 	ietf::{self, Control, FetchType, Filter, GroupOrder, RequestId},
 	origin, track,
@@ -401,14 +402,11 @@ enum JoiningFetch {
 
 /// What a SUBSCRIBE_OK told us about the track it accepted.
 struct Accepted {
-	max_age: Option<std::time::Duration>,
 	/// The Track Alias the publisher bound to this subscription.
 	alias: u64,
 
-	/// The units its object timestamps are in, when it declared any.
-	timescale: Option<Timescale>,
-	/// The publisher's track default in wire order, if declared.
-	priority: Option<u8>,
+	/// The Track Properties it declared.
+	properties: ietf::Properties,
 
 	/// The largest Location in the track, absent when it has no content yet. That absence
 	/// is what says a fill we asked for is owed nothing.
@@ -429,6 +427,15 @@ impl Target {
 			Self::Request(request) => request.subscription(),
 			Self::Resume(idle) => idle.track.subscription(),
 		}
+	}
+
+	/// The NEW_GROUP_REQUEST the subscribers hold, which a new SUBSCRIBE carries.
+	fn new_group(&self) -> Option<u64> {
+		let request = match self {
+			Self::Request(request) => request.new_group(),
+			Self::Resume(idle) => idle.track.new_group(),
+		};
+		request.map(|request| request.value)
 	}
 
 	fn producer(&self) -> Option<&track::Producer> {
@@ -453,17 +460,21 @@ impl Target {
 ///
 /// The copy keeps microsecond timestamps whatever units the publisher declared: each
 /// object converts on receipt.
-fn accepted_info(
-	timescale: Option<Timescale>,
-	max_age: Option<std::time::Duration>,
-	priority: Option<u8>,
-) -> track::Info {
+fn accepted_info(properties: &ietf::Properties) -> track::Info {
 	// Normalized to microseconds, but only for a track that declared a timescale: an
 	// untimed one must not gain a timeline downstream.
-	track::Info::default()
-		.with_timescale(timescale.map(|_| Timescale::MICRO))
-		.with_max_age(max_age)
-		.with_priority(super::priority::from_wire(priority.unwrap_or(128)))
+	let mut info = track::Info::default()
+		.with_timescale(properties.timescale.map(|_| Timescale::MICRO))
+		.with_max_age(properties.max_cache_duration)
+		.with_priority(super::priority::from_wire(properties.priority.unwrap_or(128)));
+	// This session carries NEW_GROUP_REQUEST back to the original publisher.
+	info.dynamic_groups = properties.dynamic_groups;
+	info
+}
+
+/// The Largest Group a subscription knows: its SUBSCRIBE_OK's, or a newer one since.
+fn largest_group(track: &track::Producer, answer: Option<ietf::Location>) -> Option<u64> {
+	answer.map(|largest| largest.group).max(track.latest())
 }
 
 /// A copy with no subscription upstream, kept for fetches and a returning subscriber.
@@ -2548,11 +2559,16 @@ where
 		let aggregate = target.subscription();
 		let priority = aggregate.as_ref().map(|s| s.priority).unwrap_or(0);
 		let order = aggregate.map(|s| s.order).unwrap_or_default();
+		// Without an Established subscription, a relay includes the request it holds.
+		let new_group = target
+			.new_group()
+			.filter(|_| super::subscribe::has_new_group_request(self.version));
 		let written = async {
 			stream.writer.varint(ietf::Subscribe::ID).await?;
 			stream
 				.writer
 				.encode(&ietf::Subscribe {
+					new_group,
 					request_id,
 					track_namespace: broadcast_path.to_owned(),
 					track_name: track_name.into(),
@@ -2722,16 +2738,19 @@ where
 			}
 		};
 		let Accepted {
-			max_age,
 			alias,
-			timescale,
-			priority,
+			properties,
 			largest,
 		} = accepted;
 		// A resumed copy opts out of the properties from draft-20, so it keeps the units it
 		// learned. Before that the answer declares them again.
-		let timescale = timescale.or(resumed.as_ref().and_then(|idle| idle.timescale));
-		let info = accepted_info(timescale, max_age, priority);
+		let timescale = properties
+			.timescale
+			.or(resumed.as_ref().and_then(|idle| idle.timescale));
+		let info = accepted_info(&ietf::Properties {
+			timescale,
+			..properties
+		});
 		// The copy already holds the track: it is current again up to the answer's Largest
 		// Location once the join's head lands or a newer group does, since leaving cut the
 		// group it was in.
@@ -2818,7 +2837,22 @@ where
 			Revoked,
 			Done(Result<u64, Error>),
 			Fetch(group::Request),
+			NewGroup(u64),
 		}
+
+		// The SUBSCRIBE's request is outstanding from the Largest Group its answer named.
+		let mut new_groups = super::new_group::Outstanding::default();
+		if let Some(value) = new_group {
+			new_groups.subscribed(value, largest_group(&track, largest));
+		}
+		let dynamic_groups = track.info().dynamic_groups && super::subscribe::has_new_group_request(self.version);
+		// The aggregate request last read, so only a change is considered.
+		let mut asked = None;
+		// REQUEST_UPDATEs sent and not yet answered. Drafts 14-16 answer on the control
+		// stream by the update's own Request ID, which reaches no subscription, so only
+		// later drafts count them.
+		let unanswered = AtomicU64::new(0);
+		let answered_here = !matches!(self.version, Version::Draft14 | Version::Draft15 | Version::Draft16);
 
 		let mut fetch_done = fetching.is_none();
 		// Our grant stopped covering the track, which is aborted rather than kept lingering.
@@ -2827,7 +2861,7 @@ where
 		// Nobody subscribing at all (only fetches asked) needs no subscription.
 		let mut subscribed = track.subscription().is_some();
 		let idle = {
-			let mut done = std::pin::pin!(Self::read_publish_done(&mut stream.reader, self.version));
+			let mut done = std::pin::pin!(Self::read_publish_done(&mut stream.reader, self.version, &unanswered));
 			loop {
 				let end = kio::wait(|waiter| {
 					if gate.poll_denied(waiter).is_ready() {
@@ -2861,11 +2895,34 @@ where
 					if !subscribed || demand.poll_unused(waiter).is_ready() {
 						return Poll::Ready(End::Idle);
 					}
-					waiter.poll_future(done.as_mut()).map(End::Done)
+					if let Poll::Ready(res) = waiter.poll_future(done.as_mut()) {
+						return Poll::Ready(End::Done(res));
+					}
+					// One REQUEST_UPDATE in flight at a time, which any MAX_REQUEST_UPDATES
+					// allows. Requests arriving meanwhile coalesce into the aggregate, read
+					// once its answer lands. Polled after the answers are read for that reason.
+					if dynamic_groups
+						&& unanswered.load(Ordering::Relaxed) == 0
+						&& let Poll::Ready(Ok(Some(request))) = track.poll_new_group(&mut asked, waiter)
+						&& new_groups.forward(request.value, largest_group(&track, largest))
+					{
+						return Poll::Ready(End::NewGroup(request.value));
+					}
+					Poll::Pending
 				})
 				.await;
 
 				match end {
+					End::NewGroup(value) => {
+						if let Err(err) = self.write_new_group(&mut stream.writer, request_id, value).await {
+							tracing::debug!(%err, "failed to request a new group");
+							let _ = track.clone().abort(err);
+							break false;
+						}
+						if answered_here {
+							unanswered.fetch_add(1, Ordering::Relaxed);
+						}
+					}
 					End::Revoked => {
 						tracing::info!(broadcast = %self.origin.absolute(broadcast_path), track = %track_name, "subscription no longer authorized");
 						let _ = track.clone().abort(Error::Unauthorized);
@@ -3069,16 +3126,73 @@ where
 	///
 	/// The publisher must send it before its FIN (draft-19 section 3.3.2), so a FIN
 	/// without one is a failed request, not a clean end.
-	async fn read_publish_done(reader: &mut Reader<S::RecvStream, Version>, version: Version) -> Result<u64, Error> {
-		match reader.varint_maybe().await? {
-			Some(ietf::PublishDone::ID) => {}
-			Some(_) => return Err(Error::UnexpectedMessage),
-			None => return Err(Error::ProtocolViolation),
+	/// Read the subscription's PUBLISH_DONE, and on the way the answers to the
+	/// REQUEST_UPDATEs counted in `unanswered`. Any other message is unexpected.
+	async fn read_publish_done(
+		reader: &mut Reader<S::RecvStream, Version>,
+		version: Version,
+		unanswered: &AtomicU64,
+	) -> Result<u64, Error> {
+		// A refused update is followed by PUBLISH_DONE, which ends the subscription. Its
+		// count stays, so no further update goes out meanwhile, and no answer is owed.
+		let mut refused = false;
+		loop {
+			let type_id = match reader.varint_maybe().await? {
+				Some(type_id) => type_id,
+				None => return Err(Error::ProtocolViolation),
+			};
+			if type_id == ietf::PublishDone::ID {
+				let msg: ietf::PublishDone = reader.decode().await?;
+				tracing::debug!(message = ?msg, "received publish done");
+				msg.end(version)?;
+				return Ok(msg.stream_count);
+			}
+			let answer = matches!(type_id, ietf::RequestOk::ID | ietf::RequestError::ID)
+				&& !refused && unanswered.load(Ordering::Relaxed) > 0;
+			if !answer {
+				return Err(Error::UnexpectedMessage);
+			}
+			let body: ietf::Body = reader.decode().await?;
+			let mut data = body.decoder(version);
+			match type_id {
+				ietf::RequestOk::ID => {
+					let msg = ietf::RequestOk::decode_msg(&mut data, version)?;
+					tracing::debug!(message = ?msg, "new group request ok");
+					unanswered.fetch_sub(1, Ordering::Relaxed);
+				}
+				_ => {
+					let msg = ietf::RequestError::decode_msg(&mut data, version)?;
+					tracing::debug!(message = ?msg, "new group request refused");
+					refused = true;
+				}
+			}
 		}
-		let msg: ietf::PublishDone = reader.decode().await?;
-		tracing::debug!(message = ?msg, "received publish done");
-		msg.end(version)?;
-		Ok(msg.stream_count)
+	}
+
+	/// Ask the publisher for a new group on an Established subscription: REQUEST_UPDATE
+	/// (SUBSCRIBE_UPDATE on draft-16) carrying NEW_GROUP_REQUEST and nothing else.
+	async fn write_new_group(
+		&self,
+		writer: &mut Writer<S::SendStream, Version>,
+		subscription: RequestId,
+		value: u64,
+	) -> Result<(), Error> {
+		let request_id = self.control.next_request_id(&self.runtime).await?;
+		writer.varint(ietf::SubscribeUpdate::ID).await?;
+		writer
+			.encode(&ietf::SubscribeUpdate {
+				request_id,
+				subscription_request_id: matches!(self.version, Version::Draft15 | Version::Draft16)
+					.then_some(subscription),
+				start_location: ietf::Location { group: 0, object: 0 },
+				end_group: 0,
+				subscriber_priority: None,
+				forward: None,
+				filter: None,
+				authorization_token: None,
+				new_group: Some(value),
+			})
+			.await
 	}
 
 	/// Tell the publisher to stop serving a subscription we are walking away from.
@@ -3312,10 +3426,8 @@ where
 				let msg = ietf::SubscribeOk::decode_msg(&mut data, self.version)?;
 				tracing::debug!(message = ?msg, "received subscribe ok");
 				Ok(Some(Accepted {
-					max_age: msg.properties.max_cache_duration,
 					alias: msg.track_alias,
-					timescale: msg.properties.timescale,
-					priority: msg.properties.priority,
+					properties: msg.properties,
 					largest: msg.largest,
 				}))
 			}
@@ -3444,11 +3556,7 @@ where
 
 		tracing::debug!(broadcast = %self.origin.absolute(broadcast_path), track = %track_name, "track status known");
 		let dynamic = request.dynamic();
-		let mut track = request.accept(accepted_info(
-			ok.properties.timescale,
-			ok.properties.max_cache_duration,
-			ok.properties.priority,
-		));
+		let mut track = request.accept(accepted_info(&ok.properties));
 		// Nothing feeds this copy live: what it caches is fetched, never the live edge.
 		track.set_idle();
 		Some(Target::Resume(Idle {
@@ -5289,7 +5397,8 @@ mod tests {
 		let mut session = ScriptedSession::eof(responses);
 		let (_, recv) = session.open_bi().await.unwrap();
 		let mut reader = Reader::new(recv, Version::Draft19);
-		let result = Subscriber::<ScriptedSession>::read_publish_done(&mut reader, Version::Draft19).await;
+		let result =
+			Subscriber::<ScriptedSession>::read_publish_done(&mut reader, Version::Draft19, &AtomicU64::new(0)).await;
 		if clean {
 			assert_eq!(result.unwrap(), 0);
 		} else {
@@ -10984,7 +11093,13 @@ mod stitch_tests {
 		let origin = crate::origin::Config::new(crate::Hop::new(2).unwrap()).produce();
 		let broadcast = origin.publish("room", crate::origin::Route::default()).unwrap();
 		let track = broadcast
-			.create_track("video", accepted_info(timescale, None, None))
+			.create_track(
+				"video",
+				accepted_info(&ietf::Properties {
+					timescale,
+					..Default::default()
+				}),
+			)
 			.unwrap();
 		let mut h = Harness::with_timescale(Fill::Done, vec![script], timescale);
 		h.subscriber.version = ingress;
@@ -11050,6 +11165,7 @@ mod stitch_tests {
 			ietf::Fetch::ID
 		} else {
 			ietf::Subscribe {
+				new_group: None,
 				request_id: RequestId(3),
 				track_namespace: Path::new("room"),
 				track_name: "video".into(),
@@ -11587,6 +11703,7 @@ mod stitch_tests {
 					version,
 				);
 				let subscribe = ietf::Subscribe {
+					new_group: None,
 					request_id: RequestId(3),
 					track_namespace: Path::new("room"),
 					track_name: "video".into(),
@@ -14189,5 +14306,381 @@ mod joining_fetch_tests {
 			}
 			other => panic!("{version}: unexpected group fetch: {other:?}"),
 		}
+	}
+}
+
+/// NEW_GROUP_REQUEST on the upstream subscription, with the original publisher's end of
+/// the session played by hand and the downstream subscribers' requests set on the model.
+#[cfg(test)]
+mod new_group_tests {
+	use super::*;
+	use crate::{model::ProduceTest, transport::memory};
+
+	async fn settle() {
+		moq_net_sim::sleep(Duration::from_millis(1)).await;
+	}
+
+	const VERSION: Version = Version::Draft22;
+
+	type PeerStream = Stream<memory::Session, Version>;
+
+	struct Relay {
+		track: track::Consumer,
+		probe: Subscriber<memory::Session>,
+		peer: memory::Session,
+		serving: moq_net_sim::JoinHandle<()>,
+		_broadcast: crate::broadcast::Producer,
+		_tasks: TaskSet,
+	}
+
+	/// A downstream subscriber holding `new_group`, as the downstream session sets it.
+	fn subscribe(track: &track::Consumer, new_group: Option<u64>) -> kio::Pending<track::Subscribing> {
+		track.subscribe(track::Subscription {
+			new_group: new_group.and_then(|value| crate::model::NewGroup::new(value, None)),
+			..Default::default()
+		})
+	}
+
+	/// Serve one track upstream, for a first subscriber holding `new_group`.
+	async fn relay(new_group: Option<u64>) -> (Relay, kio::Pending<track::Subscribing>) {
+		let (session, peer) = memory::pair(memory::Config::default());
+		let (tasks, task_set) = TaskSet::new();
+		let mut subscriber = Subscriber::new(
+			crate::time::Clock::sim(),
+			session,
+			crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+			Control::new(None, false),
+			None,
+			peer::PeerSetup::default(),
+			crate::Hop::new(1).unwrap(),
+			None,
+			VERSION,
+			tasks,
+			Default::default(),
+		);
+		let broadcast = crate::broadcast::Info::default().produce();
+		let mut dynamic = broadcast.dynamic();
+		let track = broadcast.consume().track("video").unwrap();
+		let first = subscribe(&track, new_group);
+		let request = dynamic.requested_track().await.expect("no track requested");
+		let probe = subscriber.clone();
+		let serving = moq_net_sim::spawn(async move {
+			subscriber
+				.run_subscribe(Path::new("broadcast"), dynamic, None, request)
+				.await;
+		});
+		let relay = Relay {
+			track,
+			probe,
+			peer,
+			serving,
+			_broadcast: broadcast,
+			_tasks: task_set,
+		};
+		(relay, first)
+	}
+
+	async fn read(stream: &mut PeerStream) -> (u64, ietf::Body) {
+		let read = async {
+			let id = stream.reader.varint().await.unwrap();
+			(id, stream.reader.decode::<ietf::Body>().await.unwrap())
+		};
+		moq_net_sim::timeout(Duration::from_secs(1), read)
+			.await
+			.expect("the relay sent nothing")
+	}
+
+	impl Relay {
+		/// Accept the SUBSCRIBE the relay sends upstream, returning its NEW_GROUP_REQUEST.
+		async fn accept(&mut self) -> (PeerStream, Option<u64>) {
+			let mut stream = Stream::accept(&mut self.peer, VERSION).await.unwrap();
+			let (id, body) = read(&mut stream).await;
+			assert_eq!(id, ietf::Subscribe::ID);
+			let msg = ietf::Subscribe::decode_msg(&mut body.decoder(VERSION), VERSION).unwrap();
+			(stream, msg.new_group)
+		}
+
+		/// The Largest Group the copy holds grows to `sequence`.
+		fn land(&self, sequence: u64) {
+			let state = self.probe.state.lock();
+			let copy = state.subscribes.values().next().unwrap().producer.clone().unwrap();
+			drop(state);
+			copy.create_group(group::Info { sequence }).unwrap();
+		}
+	}
+
+	/// Accept the subscription at Largest Group `largest`, with or without DYNAMIC_GROUPS.
+	async fn accept(stream: &mut PeerStream, dynamic_groups: bool, largest: u64) {
+		stream.writer.varint(ietf::SubscribeOk::ID).await.unwrap();
+		stream
+			.writer
+			.encode(&ietf::SubscribeOk {
+				request_id: None,
+				track_alias: 7,
+				largest: Some(ietf::Location {
+					group: largest,
+					object: 0,
+				}),
+				properties: ietf::Properties {
+					dynamic_groups,
+					..Default::default()
+				},
+			})
+			.await
+			.unwrap();
+		settle().await;
+	}
+
+	/// The NEW_GROUP_REQUEST of the next REQUEST_UPDATE, which carries nothing else.
+	async fn update(stream: &mut PeerStream) -> Option<u64> {
+		let (id, body) = read(stream).await;
+		assert_eq!(id, ietf::SubscribeUpdate::ID);
+		let msg = ietf::SubscribeUpdate::decode_msg(&mut body.decoder(VERSION), VERSION).unwrap();
+		assert_eq!((msg.subscriber_priority, msg.forward), (None, None));
+		msg.new_group
+	}
+
+	async fn answer(stream: &mut PeerStream) {
+		stream.writer.varint(ietf::RequestOk::ID).await.unwrap();
+		stream
+			.writer
+			.encode(&ietf::RequestOk {
+				request_id: None,
+				active: None,
+			})
+			.await
+			.unwrap();
+		settle().await;
+	}
+
+	/// Nothing more reached the publisher.
+	async fn quiet(stream: &mut PeerStream) {
+		settle().await;
+		assert!(
+			futures::poll!(std::pin::pin!(stream.reader.varint_maybe())).is_pending(),
+			"the relay sent another message"
+		);
+	}
+
+	/// Without an Established subscription, the request rides on the SUBSCRIBE.
+	#[moq_net_sim::test]
+	async fn a_request_rides_the_subscribe() {
+		for new_group in [None, Some(0), Some(4)] {
+			let (mut relay, _first) = relay(new_group).await;
+			let (_stream, sent) = relay.accept().await;
+			assert_eq!(sent, new_group);
+			relay.serving.abort();
+		}
+	}
+
+	/// Once the request the SUBSCRIBE carried is answered by SUBSCRIBE_OK, it stays
+	/// outstanding: the same request from another subscriber goes no further.
+	#[moq_net_sim::test]
+	async fn the_subscribe_request_is_outstanding() {
+		let (mut relay, _first) = relay(Some(0)).await;
+		let (mut stream, _) = relay.accept().await;
+		accept(&mut stream, true, 5).await;
+		let _second = subscribe(&relay.track, Some(0));
+		quiet(&mut stream).await;
+		// The group after the Largest Group is what the 0 asked for.
+		let _third = subscribe(&relay.track, Some(6));
+		quiet(&mut stream).await;
+		relay.serving.abort();
+	}
+
+	/// On an Established subscription, a request past the Largest Group goes upstream in a
+	/// REQUEST_UPDATE, a repeat of it does not, and a higher one does.
+	#[moq_net_sim::test]
+	async fn an_established_subscription_forwards_new_requests() {
+		let (mut relay, _first) = relay(None).await;
+		let (mut stream, _) = relay.accept().await;
+		accept(&mut stream, true, 5).await;
+		quiet(&mut stream).await;
+
+		let _a = subscribe(&relay.track, Some(6));
+		assert_eq!(update(&mut stream).await, Some(6));
+		answer(&mut stream).await;
+		let _b = subscribe(&relay.track, Some(6));
+		quiet(&mut stream).await;
+
+		let _c = subscribe(&relay.track, Some(7));
+		assert_eq!(update(&mut stream).await, Some(7));
+		answer(&mut stream).await;
+		quiet(&mut stream).await;
+		relay.serving.abort();
+	}
+
+	/// One REQUEST_UPDATE is in flight at a time; requests arriving meanwhile go up as the
+	/// highest of them once it is answered.
+	#[moq_net_sim::test]
+	async fn requests_behind_an_unanswered_update_coalesce() {
+		let (mut relay, _first) = relay(None).await;
+		let (mut stream, _) = relay.accept().await;
+		accept(&mut stream, true, 5).await;
+
+		let _a = subscribe(&relay.track, Some(6));
+		assert_eq!(update(&mut stream).await, Some(6));
+		let _b = subscribe(&relay.track, Some(7));
+		let _c = subscribe(&relay.track, Some(8));
+		quiet(&mut stream).await;
+
+		answer(&mut stream).await;
+		assert_eq!(update(&mut stream).await, Some(8));
+		answer(&mut stream).await;
+		quiet(&mut stream).await;
+		relay.serving.abort();
+	}
+
+	/// A refused update ends the subscription, so nothing more goes up while PUBLISH_DONE
+	/// is on its way, even for a request that coalesced behind it.
+	#[moq_net_sim::test]
+	async fn a_refused_update_sends_no_more() {
+		let (mut relay, _first) = relay(None).await;
+		let (mut stream, _) = relay.accept().await;
+		accept(&mut stream, true, 5).await;
+
+		let _a = subscribe(&relay.track, Some(6));
+		assert_eq!(update(&mut stream).await, Some(6));
+		let _b = subscribe(&relay.track, Some(8));
+		stream.writer.varint(ietf::RequestError::ID).await.unwrap();
+		stream
+			.writer
+			.encode(&ietf::RequestError {
+				request_id: None,
+				error_code: 0,
+				reason_phrase: "refused".into(),
+				retry_interval: 0,
+			})
+			.await
+			.unwrap();
+		quiet(&mut stream).await;
+		relay.serving.abort();
+	}
+
+	/// A nonzero request at or below the Largest Group names a group that already exists.
+	#[moq_net_sim::test]
+	async fn a_stale_request_stays_put() {
+		let (mut relay, _first) = relay(None).await;
+		let (mut stream, _) = relay.accept().await;
+		accept(&mut stream, true, 5).await;
+
+		let a = subscribe(&relay.track, Some(5));
+		quiet(&mut stream).await;
+		drop(a);
+		relay.land(6);
+		let _b = subscribe(&relay.track, Some(6));
+		quiet(&mut stream).await;
+		relay.serving.abort();
+	}
+
+	/// An outstanding 0 covers only the group after the Largest Group, so a higher request
+	/// arriving meanwhile still goes upstream.
+	#[moq_net_sim::test]
+	async fn a_higher_request_passes_an_outstanding_zero() {
+		let (mut relay, _first) = relay(None).await;
+		let (mut stream, _) = relay.accept().await;
+		accept(&mut stream, true, 5).await;
+
+		let _a = subscribe(&relay.track, Some(0));
+		assert_eq!(update(&mut stream).await, Some(0));
+		answer(&mut stream).await;
+		let _b = subscribe(&relay.track, Some(9));
+		assert_eq!(update(&mut stream).await, Some(9));
+		relay.serving.abort();
+	}
+
+	/// A request for 0 goes up once, and stays outstanding until the Largest Group grows.
+	#[moq_net_sim::test]
+	async fn zero_is_rearmed_by_a_new_group() {
+		let (mut relay, _first) = relay(None).await;
+		let (mut stream, _) = relay.accept().await;
+		accept(&mut stream, true, 5).await;
+
+		let a = subscribe(&relay.track, Some(0));
+		assert_eq!(update(&mut stream).await, Some(0));
+		answer(&mut stream).await;
+		drop(a);
+		settle().await;
+
+		// Acknowledged is not answered: no group came yet.
+		let b = subscribe(&relay.track, Some(0));
+		quiet(&mut stream).await;
+		drop(b);
+		settle().await;
+
+		relay.land(6);
+		let _c = subscribe(&relay.track, Some(0));
+		assert_eq!(update(&mut stream).await, Some(0));
+		relay.serving.abort();
+	}
+
+	/// A request goes upstream once and the next group answers it, even one naming a group
+	/// far past it: new groups never send it again, so no value can make the publisher
+	/// start group after group.
+	#[moq_net_sim::test]
+	async fn new_groups_never_resend_a_request() {
+		for value in [0, 9, 1 << 40] {
+			let (mut relay, _first) = relay(None).await;
+			let (mut stream, _) = relay.accept().await;
+			accept(&mut stream, true, 5).await;
+
+			let a = relay.track.subscribe(track::Subscription {
+				new_group: crate::model::NewGroup::new(value, Some(5)),
+				..Default::default()
+			});
+			assert_eq!(update(&mut stream).await, Some(value));
+			answer(&mut stream).await;
+
+			for sequence in 6..9 {
+				relay.land(sequence);
+				quiet(&mut stream).await;
+			}
+
+			// Group 6 answered it, so the subscriber holds nothing once it reads past it.
+			let mut a = a.await.unwrap();
+			while a.recv_group().await.unwrap().is_some_and(|group| group.sequence < 8) {}
+			let state = relay.probe.state.lock();
+			let copy = state.subscribes.values().next().unwrap().producer.clone().unwrap();
+			drop(state);
+			assert_eq!(copy.new_group(), None, "{value}");
+			relay.serving.abort();
+		}
+	}
+
+	/// A publisher that did not advertise DYNAMIC_GROUPS still sees a SUBSCRIBE's request,
+	/// which it ignores, and never a REQUEST_UPDATE carrying one.
+	#[moq_net_sim::test]
+	async fn a_publisher_without_dynamic_groups_hears_no_updates() {
+		let (mut relay, _first) = relay(Some(0)).await;
+		let (mut stream, sent) = relay.accept().await;
+		assert_eq!(sent, Some(0));
+		accept(&mut stream, false, 5).await;
+
+		let _a = subscribe(&relay.track, Some(6));
+		quiet(&mut stream).await;
+		relay.serving.abort();
+	}
+
+	/// What was outstanding goes with its subscription: subscribing again starts afresh.
+	#[moq_net_sim::test]
+	async fn a_new_subscription_inherits_nothing() {
+		let (mut relay, first) = relay(None).await;
+		let (mut stream, _) = relay.accept().await;
+		accept(&mut stream, true, 5).await;
+		let a = subscribe(&relay.track, Some(6));
+		assert_eq!(update(&mut stream).await, Some(6));
+		answer(&mut stream).await;
+
+		// The last subscriber leaves, which cancels the upstream subscription.
+		drop((first, a));
+		settle().await;
+
+		let _b = subscribe(&relay.track, None);
+		let (mut stream, sent) = relay.accept().await;
+		assert_eq!(sent, None);
+		accept(&mut stream, true, 5).await;
+		let _c = subscribe(&relay.track, Some(6));
+		assert_eq!(update(&mut stream).await, Some(6));
+		relay.serving.abort();
 	}
 }

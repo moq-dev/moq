@@ -9,6 +9,15 @@ impl Grouped for quic::web::Session {
 	fn send_group(&mut self, priority: i64) -> Option<quic::SendGroup> {
 		Some(quic::web::Session::send_group(self, priority))
 	}
+
+	fn send_datagram(
+		&mut self,
+		payload: bytes::Bytes,
+		group: Option<&quic::SendGroup>,
+		order: i64,
+	) -> Result<(), Self::Error> {
+		quic::web::Session::send_datagram(self, payload, group, order)
+	}
 }
 
 impl GroupedSend for quic::web::SendStream {

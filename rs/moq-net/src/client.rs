@@ -624,8 +624,13 @@ mod tests {
 			None
 		}
 
-		fn poll_send_datagram(&mut self, _cx: &mut Context<'_>, _payload: &[u8]) -> Poll<Result<(), Self::Error>> {
-			Poll::Ready(Ok(()))
+		fn send_datagram(
+			&mut self,
+			_: Bytes,
+			_: Option<&crate::transport::poll::Ungrouped>,
+			_: i64,
+		) -> Result<(), Self::Error> {
+			Ok(())
 		}
 
 		fn poll_recv_datagram(&mut self, _cx: &mut Context<'_>) -> Poll<Result<Bytes, Self::Error>> {
@@ -1019,8 +1024,13 @@ mod tests {
 			None
 		}
 
-		fn poll_send_datagram(&mut self, cx: &mut Context<'_>, payload: &[u8]) -> Poll<Result<(), Self::Error>> {
-			self.inner.poll_send_datagram(cx, payload)
+		fn send_datagram(
+			&mut self,
+			payload: Bytes,
+			group: Option<&crate::transport::poll::Ungrouped>,
+			order: i64,
+		) -> Result<(), Self::Error> {
+			self.inner.send_datagram(payload, group, order)
 		}
 
 		fn poll_recv_datagram(&mut self, cx: &mut Context<'_>) -> Poll<Result<Bytes, Self::Error>> {
