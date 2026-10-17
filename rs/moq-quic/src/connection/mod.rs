@@ -69,10 +69,7 @@ mod send_buffer;
 
 mod sent_packets;
 mod spaces;
-#[cfg(fuzzing)]
-pub use spaces::Retransmits;
-#[cfg(not(fuzzing))]
-use spaces::Retransmits;
+pub(crate) use spaces::Retransmits;
 use spaces::{PacketNumberFilter, PacketSpace, SendableFrames, SentPacket, ThinRetransmits};
 
 mod stats;
@@ -94,10 +91,7 @@ impl ConnectionTag {
 pub use stats::{ConnectionStats, CreditStats, FrameStats, PathStats, UdpStats};
 
 mod streams;
-#[cfg(fuzzing)]
-pub use streams::StreamsState;
-#[cfg(not(fuzzing))]
-use streams::StreamsState;
+pub(crate) use streams::StreamsState;
 pub use streams::{
     Checkpoint, Chunks, ClosedStream, Credit, FinishError, ReadError, ReadableError, RecvStream,
     SendStream, ShouldTransmit, StreamEvent, Streams, WriteError, Written,
@@ -4270,9 +4264,8 @@ impl From<ConnectionError> for io::Error {
     }
 }
 
-#[allow(unreachable_pub)] // fuzzing only
 #[derive(Clone)]
-pub enum State {
+pub(crate) enum State {
     Handshake(state::Handshake),
     Established,
     Closed(state::Closed),
@@ -4308,9 +4301,8 @@ impl State {
 mod state {
     use super::*;
 
-    #[allow(unnameable_types, unreachable_pub)] // fuzzing only
     #[derive(Clone)]
-    pub struct Handshake {
+    pub(crate) struct Handshake {
         /// Whether the remote CID has been set by the peer yet
         ///
         /// Always set for servers
@@ -4325,9 +4317,8 @@ mod state {
         pub(super) client_hello: Option<Bytes>,
     }
 
-    #[allow(unnameable_types, unreachable_pub)] // fuzzing only
     #[derive(Clone)]
-    pub struct Closed {
+    pub(crate) struct Closed {
         pub(super) reason: Close,
     }
 }

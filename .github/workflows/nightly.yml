@@ -90,6 +90,12 @@ jobs:
           - name: Audit
             recipe: rs audit
             uncached: true
+          # Uncached: the instrumented build bypasses mbx, so the cache can't serve it.
+          - name: moq-quic coverage
+            recipe: rs coverage moq-quic
+            uncached: true
+            artifact: moq-quic-coverage
+            artifact-path: target/coverage/moq-quic
           # OBS (over moq-ffi) and moq-c's C fixtures link a Rust staticlib from
           # outside cargo, so a stale `rs/moq-c/native-libs/*.txt` breaks them and
           # no cargo build. obs.yml's path filter can't list every such input;
@@ -412,7 +418,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [lite, announce, ietf, varint, path, pattern]
+        target: [lite, announce, ietf, varint, path, pattern, packet, params, streamid, streams, frame, connection]
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -439,5 +445,5 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: fuzz-${{ matrix.target }}
-          path: rs/moq-net/fuzz/artifacts/
+          path: rs/*/fuzz/artifacts/
           if-no-files-found: ignore

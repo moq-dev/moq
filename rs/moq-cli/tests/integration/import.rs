@@ -11,7 +11,7 @@ const TIMEOUT: Duration = Duration::from_secs(10);
 /// How long a finished import stays up: long enough for a subscriber to request its media
 /// after reading the final catalog, short enough that the process exits within `TIMEOUT`.
 const MAX_AGE: &str = "5s";
-const BBB: &[u8] = include_bytes!("../../moq-mux/src/container/ts/test_data/scte35/bbb5s.ts");
+const BBB: &[u8] = include_bytes!("../../../moq-mux/src/container/ts/test_data/scte35/bbb5s.ts");
 
 /// Await `step` while `moq` still holds stdin open, failing as soon as the process exits.
 ///
@@ -124,7 +124,7 @@ async fn import_delivers_the_catalog_finish_at_eof() {
 
 /// About one second of CBR HEVC and Opus: shorter than the two-second mux-rate window, so
 /// the catalog is only released at EOF.
-const SHORT: &[u8] = include_bytes!("../../moq-mux/src/container/ts/test_data/bbb_cbr.ts")
+const SHORT: &[u8] = include_bytes!("../../../moq-mux/src/container/ts/test_data/bbb_cbr.ts")
 	.split_at(256 * 188)
 	.0;
 

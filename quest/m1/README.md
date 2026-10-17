@@ -42,6 +42,10 @@ Keep one owner per shared code area and order prerequisites before consumers.
 The moq-transport passthrough fields remain crate-private, the existing
 explicit exception to the public model audit.
 
+Added 2026-10-16: refresh, ranked after moq-transport passthrough, whose
+dynamic-groups path it promotes. It is a breaking `Demand` change, so it
+lands before the cut.
+
 ## Required
 
 - [Epoch correctness](/quest/m0/broadcast-epoch/README.md) - publisher identity, duplicate suppression, and catalog pinning gate the breaking cut
@@ -57,8 +61,8 @@ explicit exception to the public model audit.
 - [Own the QUIC stack](/quest/m1/quic/README.md) - quinn hard-forked in-tree as `moq-quic`, carrying BBR, reliable reset, hierarchical scheduling, peer limits, and endpoint sharding
 - [Finalize moq-lite-07](/quest/m1/lite07-finalize.md) - when the maintainer cuts it, lite-07 negotiates as `moq-lite-07` and the next release ships it
 - [moq-transport passthrough](/quest/m1/ietf-extension/README.md) - object IDs, properties, end status, datagram objects, and unknown track properties survive moq-transport -> moq-relay (and a relay cluster) -> moq-transport; moxygen's moq-test sections 1-7 pass nightly, except cases that use a subgroup other than 0
+- [Refresh](/quest/m1/refresh/README.md) - a join asks for a fresh group once the current group's deltas exceed a publisher-advertised byte ratio, at every hop; replaces `Demand::used`/`unused` and moq-json's `delta_ratio`
 - [Moxygen minimal interop](/quest/m1/smoke-moxygen.md) - waiting on Moxygen to send a registered filter type, then the smoke lane stops hiding its failure
-- [FETCH max-delay](/quest/m1/fetch-max-delay.md) - historical readers obey publisher max-age and an optional tighter reader budget, including while holding a group
 - [Claim answer epochs](/quest/m1/claim-answer-epochs.md) - a claim answers each output by publishing it at its exact path under its own epoch, so a restarted output never reaches a returning reader as the old one's cache
 - [FFI shape](/quest/m1/ffi-shape/README.md) - the bindings mirror Rust's layers: net at the root, then media, json, flate, audio, and video namespaces built from the handle below
 - [Early drops](/quest/m1/subscribe-drop-early.md) - Rust and JS publishers drop a sequence the moment they give it up, and forward an upstream drop
@@ -118,6 +122,8 @@ explicit exception to the public model audit.
 - [Malformed moq-transport input](/quest/m1/ietf-malformed-close.md) - malformed draft-18 and draft-21 control input closes the session with the draft's code, or PROTOCOL_VIOLATION where a code is a real burden and the fallback is recorded in `doc/concept/standard.md`, in moq-net and js/net
 - [Binding track resolver](/quest/m1/binding-track-helper.md) - binding apps subscribe to a rendition without inlining `track` or the key
 - [Exporters follow a rendition to a new track](/quest/m1/export-rendition-rebind.md) - the fMP4, TS, MKV and FLV exporters rebuild a rendition whose resolved `track` or `broadcast` changes under the same ID
+
+- [Stats fail loud](/quest/m1/stats-frame-too-large.md) - a stats track whose frame outgrows the cache ends with FrameTooLarge instead of serving a stale snapshot
 
 - [C++ and OBS package proof](/quest/m1/cpp-package-check.md) - the installed artifacts pass before their first release
 
