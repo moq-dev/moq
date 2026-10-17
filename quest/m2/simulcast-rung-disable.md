@@ -41,10 +41,8 @@ grant.
   settles how that number also orders sends.
 - OBS: each OBS video encoder is its own rendition
   (`video_tracks` in `cpp/obs/src/moq-output.cpp`), so apply the rule per
-  encoder through the generated C++ package. It builds on the plugin
-  following its grant ([Rate control](/quest/m2/obs-moq-video/rate-control.md));
-  if that has not landed, split the OBS slice into its own quest instead of
-  blocking the rest.
+  encoder through the generated C++ package, on top of the per-encoder
+  grant following (`MoQRate` in `cpp/obs/src/moq-rate.h`).
 
 Tests with mocked time: a shrinking grant disables the top rung first and
 keeps the lower ones at their share; a recovering grant re-enables it only

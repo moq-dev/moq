@@ -8,7 +8,9 @@ import "dart:ffi";
 import "dart:io" show Platform, File, Directory;
 import "dart:isolate";
 import "dart:typed_data";
+
 import "package:ffi/ffi.dart";
+
 import "uniffi_runtime.dart";
 export "uniffi_runtime.dart";
 
@@ -5174,10 +5176,7 @@ class FfiConverterMoqConnectionStatus {
 }
 
 abstract class MoqBandwidthInterface {
-  MoqReservation reserve({
-    required MoqTrackProducer track,
-    required int maxBps,
-  });
+  MoqReservation reserve({required MoqTrackDemand demand, required int maxBps});
 }
 
 final _MoqBandwidthFinalizer = Finalizer<Pointer<Void>>((ptr) {
@@ -5212,18 +5211,18 @@ class MoqBandwidth implements MoqBandwidthInterface {
   }
 
   MoqReservation reserve({
-    required MoqTrackProducer track,
+    required MoqTrackDemand demand,
     required int maxBps,
   }) {
     return rustCallWithLifter(
       (status) => uniffi_moq_ffi_fn_method_moqbandwidth_reserve(
         uniffiClonePointer(),
-        FfiConverterMoqTrackProducer.lower(track),
+        FfiConverterMoqTrackDemand.lower(demand),
         FfiConverterUInt64.lower(maxBps),
         status,
       ),
       FfiConverterMoqReservation.lift,
-      moqExceptionErrorHandler,
+      null,
     );
   }
 }
@@ -11036,7 +11035,7 @@ external void uniffi_moq_ffi_fn_free_moqbandwidth(
 >(assetId: _uniffiAssetId)
 external Pointer<Void> uniffi_moq_ffi_fn_method_moqbandwidth_reserve(
   Pointer<Void> ptr,
-  Pointer<Void> track,
+  Pointer<Void> demand,
   int max_bps,
   Pointer<RustCallStatus> uniffiStatus,
 );
@@ -13849,7 +13848,7 @@ void _checkApiChecksums() {
   if (uniffi_moq_ffi_checksum_func_moq_mint_epoch() != 34550) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
-  if (uniffi_moq_ffi_checksum_method_moqbandwidth_reserve() != 60458) {
+  if (uniffi_moq_ffi_checksum_method_moqbandwidth_reserve() != 27807) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqreservation_grant() != 59401) {

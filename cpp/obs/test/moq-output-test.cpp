@@ -54,6 +54,10 @@ std::atomic<bool> g_destroyed{false};
 
 std::string g_url;
 std::string g_rate_control = "CBR";
+uint32_t g_encoder_caps = OBS_ENCODER_CAP_DYN_BITRATE;
+// Every obs_encoder_update, as the encoder and the bitrate it was told in kbps.
+std::mutex g_updates_mutex;
+std::vector<std::pair<obs_encoder_t *, long long>> g_updates;
 std::atomic<bool> g_settings_ok{true};
 // Lets a test run something inside obs_output_signal_stop, standing in for a
 // frontend that stops the output straight from the signal handler.
@@ -183,6 +187,53 @@ long long obs_data_get_int(obs_data_t *, const char *)
 	return 8000;
 }
 
+// The settings a retune builds carry only the bitrate, so the stub is that bitrate.
+struct obs_data {
+	long long bitrate = 0;
+};
+
+obs_data_t *obs_data_create()
+{
+	return new obs_data;
+}
+
+void obs_data_set_int(obs_data_t *data, const char *, long long value)
+{
+	data->bitrate = value;
+}
+
+uint32_t obs_encoder_get_caps(const obs_encoder_t *)
+{
+	return g_encoder_caps;
+}
+
+void obs_encoder_update(obs_encoder_t *encoder, obs_data_t *settings)
+{
+	std::lock_guard<std::mutex> lock(g_updates_mutex);
+	g_updates.emplace_back(encoder, settings->bitrate);
+	delete settings;
+}
+
+// Encoders outlive every test, so a weak ref is the encoder itself.
+obs_weak_encoder_t *obs_encoder_get_weak_encoder(obs_encoder_t *encoder)
+{
+	return reinterpret_cast<obs_weak_encoder_t *>(encoder);
+}
+
+obs_encoder_t *obs_weak_encoder_get_encoder(obs_weak_encoder_t *weak)
+{
+	return reinterpret_cast<obs_encoder_t *>(weak);
+}
+
+obs_encoder_t *obs_encoder_get_ref(obs_encoder_t *encoder)
+{
+	return encoder;
+}
+
+void obs_weak_encoder_addref(obs_weak_encoder_t *) {}
+void obs_weak_encoder_release(obs_weak_encoder_t *) {}
+void obs_encoder_release(obs_encoder_t *) {}
+
 } // extern "C"
 
 // Stands in for the advanced settings: reconnect fast, so a dropped session is
@@ -242,6 +293,11 @@ void reset(std::string url)
 	g_begin_capture = 0;
 	g_settings_ok = true;
 	g_rate_control = "CBR";
+	g_encoder_caps = OBS_ENCODER_CAP_DYN_BITRATE;
+	{
+		std::lock_guard<std::mutex> lock(g_updates_mutex);
+		g_updates.clear();
+	}
 	g_stall_last_error = false;
 	g_in_report_window = false;
 	g_destroyed = false;
@@ -342,7 +398,36 @@ struct MoQOutputStatsTest {
 		std::lock_guard<std::mutex> lock(output.mutex);
 		output.live = false;
 	}
+	// Whether every audio and video track holds a reservation.
+	static bool Reserved(MoQOutput &output)
+	{
+		std::lock_guard<std::mutex> lock(output.media_mutex);
+		for (const auto *tracks : {&output.video_tracks, &output.audio_tracks}) {
+			if (tracks->empty())
+				return false;
+			for (const auto &[encoder, track] : *tracks) {
+				if (!track.reservation)
+					return false;
+			}
+		}
+		return true;
+	}
+	// Drive every following video track to its floor, as a collapsed uplink would.
+	static void Collapse(MoQOutput &output)
+	{
+		std::lock_guard<std::mutex> lock(output.media_mutex);
+		for (auto &[encoder, track] : output.video_tracks) {
+			if (track.rate)
+				track.rate->Update(1, MoQRate::Clock::now());
+		}
+	}
 };
+
+std::vector<std::pair<obs_encoder_t *, long long>> updates()
+{
+	std::lock_guard<std::mutex> lock(g_updates_mutex);
+	return g_updates;
+}
 
 int main()
 {
@@ -451,6 +536,64 @@ int main()
 		CHECK(signalCount() == 2);
 	}
 	printf("publishes, and only CBR hints its bitrate: ok\n");
+
+	// Video follows the grant only when the encoder retunes live and the bitrate
+	// drives it; every track reserves either way once the session connects.
+	struct FollowCase {
+		const char *rate_control;
+		uint32_t caps;
+		bool follows;
+	};
+	for (const auto &c : {FollowCase{"CBR", OBS_ENCODER_CAP_DYN_BITRATE, true},
+			      FollowCase{"vbr", OBS_ENCODER_CAP_DYN_BITRATE, true},
+			      FollowCase{"CQP", OBS_ENCODER_CAP_DYN_BITRATE, false}, FollowCase{"CBR", 0, false}}) {
+		TestRelay relay;
+		reset(relay.Url());
+		g_rate_control = c.rate_control;
+		g_encoder_caps = c.caps;
+		MoQOutput o(nullptr, OUTPUT);
+		CHECK(o.Start());
+		CHECK(WaitFor([&] { return o.IsLiveSession(); }));
+
+		auto keyframe = TestH264Keyframe();
+		std::vector<uint8_t> opus = {0xfc, 0xff, 0xfe};
+		auto video = videoPacket(keyframe, 0);
+		o.Data(&video);
+		auto audio = audioPacket(opus, 0);
+		o.Data(&audio);
+		CHECK(MoQOutputStatsTest::Reserved(o));
+
+		MoQOutput::VideoRate rate;
+		CHECK(o.TryGetVideoRate(&rate) == c.follows);
+		if (c.follows) {
+			CHECK(rate.configured_bps == 8'000'000);
+			CHECK(rate.target_bps <= rate.configured_bps);
+		}
+		o.Stop();
+	}
+	printf("video follows only a live-retunable, bitrate-driven encoder: ok\n");
+
+	// Stopping hands the configured bitrate back to an encoder the grant lowered,
+	// so the next Start() reads the user's rate rather than the last grant.
+	{
+		TestRelay relay;
+		reset(relay.Url());
+		MoQOutput o(nullptr, OUTPUT);
+		CHECK(o.Start());
+		CHECK(WaitFor([&] { return o.IsLiveSession(); }));
+		auto keyframe = TestH264Keyframe();
+		auto video = videoPacket(keyframe, 0);
+		o.Data(&video);
+		MoQOutputStatsTest::Collapse(o);
+		MoQOutput::VideoRate rate;
+		CHECK(o.TryGetVideoRate(&rate));
+		CHECK(rate.target_bps == 800'000);
+		o.Stop();
+		const auto applied = updates();
+		CHECK(!applied.empty());
+		CHECK(!applied.empty() && applied.back() == std::make_pair(VIDEO_ENCODER, 8000LL));
+	}
+	printf("stop restores the configured bitrate: ok\n");
 
 	// Stop drains the session, even when the output is destroyed straight after: a
 	// large frame written just before it still reaches the relay, and the track then

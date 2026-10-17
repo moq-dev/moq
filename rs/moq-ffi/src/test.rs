@@ -478,6 +478,32 @@ fn publish_media_lifecycle() {
 	broadcast.close().unwrap();
 }
 
+/// A media track reserves through its demand, so an app that publishes
+/// pre-encoded frames (OBS) can follow the grant like a raw track can.
+#[tokio::test]
+async fn media_track_reserves_through_its_demand() {
+	let estimate = moq_net::bandwidth::Producer::new();
+	estimate
+		.set(Some(moq_net::bandwidth::Rate::from_bps(3_000_000)))
+		.unwrap();
+	let bandwidth = crate::bandwidth::MoqBandwidth::new(moq_net::bandwidth::Allocator::new(estimate.consume()));
+
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let media = MoqMediaTrackProducer::audio(
+		&broadcast,
+		MoqMediaTarget::Named { name: None },
+		audio_init(MoqAudioFormat::Opus, opus_head()),
+	)
+	.unwrap();
+	let demand = media.demand().unwrap();
+	let reservation = bandwidth.reserve(&demand, 4_000_000);
+	// No subscriber yet: no demand, so hold the current rate.
+	assert_eq!(reservation.grant(), None);
+
+	let _sub = subscribe(&broadcast, &demand.name()).await;
+	assert_eq!(reservation.grant(), Some(3_000_000));
+}
+
 #[tokio::test]
 async fn raw_track_activity() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
