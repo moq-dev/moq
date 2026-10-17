@@ -2584,10 +2584,14 @@ impl DriverState {
 		}
 
 		// End the announce cursors: each drains its pending updates, then reports
-		// the end. Registrations stay (the cursors remove themselves on drop).
+		// the end. Registrations stay (the cursors remove themselves on drop). A
+		// snapshot still in flight is released like a landing, owing what is queued.
 		for state in cursors {
 			if let Ok(mut state) = state.write() {
 				state.ended = true;
+				if state.waiting.swap(0, Ordering::Relaxed) > 0 {
+					state.owe();
+				}
 			}
 		}
 	}
@@ -9559,6 +9563,22 @@ mod tests {
 		// A cursor born after the teardown is born ended.
 		let mut late = consumer.announced();
 		assert!(late.next().now_or_never().expect("ended").is_none());
+	}
+
+	/// A teardown with a snapshot in flight still owes what the cursor has not read.
+	#[test]
+	#[cfg(feature = "async")]
+	fn teardown_owes_what_a_snapshot_held() {
+		let (producer, driver) = Producer::new(Config::new(origin(1)));
+		let snapshot = producer.snapshot("room");
+		let mut announced = producer.consume().announced();
+		let _alice = producer.announce("room/alice", Route::default()).unwrap();
+
+		drop(driver);
+		assert!(!announced.is_caught_up(), "the queue is still owed");
+		announced.assert_next_active("room/alice");
+		assert!(announced.is_caught_up());
+		drop(snapshot);
 	}
 
 	#[test]
