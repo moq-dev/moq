@@ -3246,24 +3246,58 @@ fn consume_announced(origin: u32, path: &[u8], cb: &Callback) -> u32 {
 	})
 }
 
+/// Forwards each code through `tx`, holding the caller inside its first delivery until `hold`
+/// fires.
+struct Gate {
+	tx: mpsc::Sender<i32>,
+	hold: std::sync::Mutex<Option<mpsc::Receiver<()>>>,
+}
+
+extern "C" fn gated_callback(user_data: *mut c_void, code: i32) {
+	let gate = unsafe { &*(user_data as *const Gate) };
+	let _ = gate.tx.send(code);
+	let hold = gate.hold.lock().unwrap().take();
+	if let Some(hold) = hold {
+		let _ = hold.recv();
+	}
+}
+
 /// An end is a gap that ended every request on the old route, even when a route above the path
 /// with the same epoch carries the instance on. So the instance serving the path afterwards is
 /// delivered again, though the caller still holds its handle.
 #[test]
 fn consume_announced_delivers_the_instance_again_after_an_end() {
 	let origin = id(moq_origin_create());
-	let cb = Callback::new();
-	let task = consume_announced(origin, b"live", &cb);
+	let (tx, rx) = mpsc::channel();
+	let (release, hold) = mpsc::channel();
+	let gate = Box::new(Gate {
+		tx,
+		hold: std::sync::Mutex::new(Some(hold)),
+	});
+	let path = b"live";
+	let task = id(unsafe {
+		moq_origin_announced_broadcast(
+			origin,
+			path.as_ptr() as *const c_char,
+			path.len(),
+			Some(gated_callback),
+			&*gate as *const Gate as *mut c_void,
+		)
+	});
+	let recv = || rx.recv_timeout(TIMEOUT).expect("callback timed out");
 
 	let route = moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint());
 	let run = publish(origin, "live", route.clone());
-	let first = id(cb.recv());
+	let first = id(recv());
 
+	// Hold the wait inside that delivery so both changes are on hand when it next looks. Seeing
+	// the route above stand before the path's own route left would prove no gap: an update.
 	let dynamic = serve_dynamic(origin, "", route);
 	{
 		let _runtime = crate::ffi::RUNTIME.enter();
 		run.unannounce();
 	}
+	release.send(()).unwrap();
 	let request = crate::ffi::RUNTIME.block_on(dynamic.requested_broadcast()).unwrap();
 	let served = {
 		let _runtime = crate::ffi::RUNTIME.enter();
@@ -3271,13 +3305,13 @@ fn consume_announced_delivers_the_instance_again_after_an_end() {
 		request.accept(served.consume());
 		served
 	};
-	let again = id(cb.recv());
+	let again = id(recv());
 
 	assert_eq!(moq_consume_close(first), 0);
 	assert_eq!(moq_consume_close(again), 0);
 	assert_eq!(moq_origin_announced_broadcast_cancel(task), 0);
-	assert_eq!(cb.recv_terminal(), 0, "cancel delivers terminal 0");
-	drop((run, dynamic, served));
+	assert_eq!(recv(), 0, "cancel delivers terminal 0");
+	drop((run, dynamic, served, gate));
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
