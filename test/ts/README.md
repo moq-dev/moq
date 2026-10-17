@@ -267,7 +267,12 @@ From a pipe, `pcr-rate` also grades the PCR clock's rate against the arrival
 clock, as the least-squares slope over each time base after the start-up third:
 within 30 ppm (`--rate-ppm`), the tolerance ISO 13818-1 2.4.2.1 gives a system
 clock. `release` cannot see a clock running at a steady wrong rate, which keeps
-its intervals and only adds to the drift.
+its intervals and only adds to the drift. The fit breaks at every interval
+`release` grades outside its tolerance and pools the runs between them: a stall
+the sender caught up from leaves a step in the arrivals, which a single line reads
+as a rate (a 70 ms standing lag mid-sample is over 1,000 ppm), though it is the
+bounded lag `release` already grades. A clock off rate moves every interval by
+microseconds, so it never reaches the tolerance and stays measured.
 
 ```bash
 # live: every domain, reading the exporter directly
@@ -295,7 +300,7 @@ are laid over the PCRs.
 | `continuity` | hard | no discontinuities, and a payload-less packet must not advance the counter (ISO 13818-1 2.4.3.3) (`--live` only) |
 | `pcr-value-interval` | hard | no interval above `--repetition-ms` (default 100, TR 101 290 V1.4.1), within one time base |
 | `pcr-release-timing` | hard | no more than `--release-pct-max` of intervals arrive further than `--release-ms` from the interval their own values assert, and accumulated drift stays within `--drift-ms`, being the standing lag the sender is allowed to hold; a sample below `--live-min-pcr` PCRs or `--live-cover-pct` of the window is a failure, not a pass (`--live` only) |
-| `pcr-rate` | hard | the fitted PCR rate against read arrivals stays within `--rate-ppm` (default 30), after excluding the first third and separating declared time bases (`--live` only) |
+| `pcr-rate` | hard | the fitted PCR rate against read arrivals stays within `--rate-ppm` (default 30), after excluding the first third, separating declared time bases and breaking at `pcr-release-timing` faults (`--live` only) |
 | `pcr-position` | shape | share of PCR packets within `--adjacent-packets` of the previous one |
 | `pcr-schedule` | shape | share of PCR intervals whose bytes are within `--schedule-tolerance-pct` (default 1) or one packet of what `--mux-rate` implies (estimated from the capture if not given); hard, at that share, when `--schedule-pct-min` is given |
 

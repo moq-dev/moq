@@ -26,6 +26,36 @@ class Schedule(unittest.TestCase):
         self.assertEqual(result[4]["count"], 5)
 
 
+class Rate(unittest.TestCase):
+    ARGS = types.SimpleNamespace(
+        live=True, seconds=120, live_cover_pct=50, live_min_pcr=20,
+        release_ms=10, release_pct_max=1, drift_ms=1000, rate_ppm=30,
+    )
+
+    def stalled(self, scale):
+        """116 s of 25 ms PCRs, one released 737 ms late at 75 s and the next 28 each 23.8 ms
+        early, leaving a ~70 ms standing lag: the shape of the 2026-10-11 local failure."""
+        lag, pcr = 0.0, []
+        for i in range(4648):
+            lag += 0.737 if i == 3000 else -0.0238 if 3000 < i <= 3028 else 0.0
+            pcr.append((i * 166, round(i * 0.025 * 27_000_000), 1000.0 + i * 0.025 * scale + lag, 256))
+        return types.SimpleNamespace(pcr=pcr, new_base=set())
+
+    def test_caught_up_stall_is_bounded_lag_not_rate(self):
+        scan = self.stalled(1.0)
+        release = timing.check_release(scan, self.ARGS)
+        self.assertTrue(release[2], release)
+        self.assertLess(abs(release[4]["tail_drift_rate_ms_per_s"]), 0.01)
+        rate = timing.check_rate(scan, self.ARGS)
+        self.assertTrue(rate[2], rate)
+        self.assertEqual(rate[4]["release_faults"], 29)
+
+    def test_off_rate_clock_fails_through_a_stall(self):
+        rate = timing.check_rate(self.stalled(1.001), self.ARGS)
+        self.assertFalse(rate[2], rate)
+        self.assertAlmostEqual(rate[4]["ppm"][0], -999.0, delta=1.0)
+
+
 class Evidence(unittest.TestCase):
     def test_live_report_replays_both_clock_rate_verdicts(self):
         for scale in [1.0, 1.001]:
