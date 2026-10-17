@@ -7,11 +7,11 @@ use std::time::Duration;
 
 use std::task::Poll;
 
+use moq_clock::Instant;
 use moq_net::stats::{Presence, Registry, Report, Role, Tier, Traffic};
 use moq_net::{Epoch, Path, PathOwned, broadcast, kio, origin, track};
 use serde::Serialize;
 use web_async::spawn;
-use web_async::time::Instant;
 
 use crate::{
 	COMPRESSED_SUFFIX, Totals, parse_presence_track, presence_track, sessions_track, totals_track, traffic_track,
@@ -250,8 +250,8 @@ impl Task {
 			return;
 		};
 
-		let mut ticker = web_async::time::interval(interval);
-		ticker.set_missed_tick_behavior(web_async::time::MissedTickBehavior::Delay);
+		let mut ticker = moq_clock::interval(interval);
+		ticker.set_missed_tick_behavior(moq_clock::MissedTickBehavior::Delay);
 
 		loop {
 			ticker.tick().await;
@@ -262,7 +262,7 @@ impl Task {
 			}
 
 			drain.collect();
-			drain.publish(Instant::now());
+			drain.publish(moq_clock::now());
 		}
 	}
 	fn node(&self) -> Option<&str> {
@@ -2278,7 +2278,7 @@ mod tests {
 		.expect("drain");
 		let mut tick = || {
 			drain.collect();
-			drain.publish(Instant::now());
+			drain.publish(moq_clock::now());
 			drain.groups[""].presence.len()
 		};
 		let broadcast = origin
@@ -2746,13 +2746,13 @@ mod tests {
 				// Warm up: create the groups and tracks and grow every buffer.
 				for _ in 0..3 {
 					drain.collect();
-					drain.publish(Instant::now());
+					drain.publish(moq_clock::now());
 				}
 
 				let before = counting::allocs();
 				drain.collect();
 				let allocs = counting::allocs() - before;
-				drain.publish(Instant::now());
+				drain.publish(moq_clock::now());
 
 				let pending: usize = drain
 					.groups

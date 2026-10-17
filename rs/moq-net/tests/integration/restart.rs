@@ -39,12 +39,12 @@ async fn link(version: Version, from: &origin::Producer, to: &origin::Producer) 
 /// Let every task settle, past the update hold. Time is paused, so this returns once
 /// the runtime is idle.
 async fn settle() {
-	moq_net_sim::sleep(Duration::from_millis(500)).await;
+	moq_clock::sleep(Duration::from_millis(500)).await;
 }
 
 /// The next announce event, failing on a hang.
 async fn next_event(announced: &mut announce::Consumer) -> announce::Event {
-	moq_net_sim::timeout(Duration::from_secs(10), announced.next())
+	moq_clock::timeout(Duration::from_secs(10), announced.next())
 		.await
 		.expect("announce hung")
 		.expect("announce ended")
@@ -69,7 +69,7 @@ async fn expect_restart(version: Version, announced: &mut announce::Consumer, pr
 
 /// Nothing more arrives, past the update hold.
 async fn quiet(version: Version, announced: &mut announce::Consumer) {
-	if let Ok(event) = moq_net_sim::timeout(Duration::from_secs(1), announced.next()).await {
+	if let Ok(event) = moq_clock::timeout(Duration::from_secs(1), announced.next()).await {
 		panic!("{version}: expected nothing more, got {event:?}");
 	}
 }
@@ -83,7 +83,7 @@ fn write(track: &track::Producer, tag: &str) {
 
 /// The next frame a subscription delivers, as text.
 async fn read(subscription: &mut track::Subscriber) -> String {
-	let mut group = moq_net_sim::timeout(Duration::from_secs(10), subscription.recv_group())
+	let mut group = moq_clock::timeout(Duration::from_secs(10), subscription.recv_group())
 		.await
 		.expect("subscription hung")
 		.unwrap()
@@ -142,9 +142,9 @@ async fn relay_chain(version: &str) {
 macro_rules! relay_chain_tests {
 	($($name:ident: $version:literal,)*) => {
 		$(
-			#[moq_net_sim::test]
+			#[moq_clock::test]
 			async fn $name() {
-				moq_net_sim::timeout(TEST_TIMEOUT, relay_chain($version))
+				moq_clock::timeout(TEST_TIMEOUT, relay_chain($version))
 					.await
 					.expect("timed out");
 			}
@@ -173,7 +173,7 @@ impl Worker {
 		let claim = Rc::new(origin.dynamic("pool", origin::Route::default()).unwrap());
 		let outputs = Rc::new(RefCell::new(Vec::new()));
 		let (handler, served) = (claim.clone(), outputs.clone());
-		drop(moq_net_sim::spawn(async move {
+		drop(moq_clock::sim::spawn(async move {
 			while let Ok(request) = handler.requested_broadcast().await {
 				let output = broadcast::Info::new().produce();
 				let track = output.create_track("video", timed()).unwrap();
@@ -228,16 +228,16 @@ async fn prefix_pool(version: &str) {
 	}
 }
 
-#[moq_net_sim::test]
+#[moq_clock::test]
 async fn prefix_pool_lite06() {
-	moq_net_sim::timeout(TEST_TIMEOUT, prefix_pool("moq-lite-06"))
+	moq_clock::timeout(TEST_TIMEOUT, prefix_pool("moq-lite-06"))
 		.await
 		.expect("timed out");
 }
 
-#[moq_net_sim::test]
+#[moq_clock::test]
 async fn prefix_pool_lite07() {
-	moq_net_sim::timeout(TEST_TIMEOUT, prefix_pool("moq-lite-07-wip"))
+	moq_clock::timeout(TEST_TIMEOUT, prefix_pool("moq-lite-07-wip"))
 		.await
 		.expect("timed out");
 }
@@ -256,7 +256,7 @@ impl Claim {
 		let dynamic = Rc::new(origin.dynamic("live", route).unwrap());
 		let outputs = Rc::new(RefCell::new(Vec::new()));
 		let (handler, served) = (dynamic.clone(), outputs.clone());
-		drop(moq_net_sim::spawn(async move {
+		drop(moq_clock::sim::spawn(async move {
 			while let Ok(request) = handler.requested_broadcast().await {
 				let output = broadcast::Info::new().produce();
 				let track = output.create_track("video", timed()).unwrap();
@@ -309,7 +309,7 @@ async fn dynamic_epoch(version: &str, from: Option<Epoch>, to: Option<Epoch>) {
 
 	// A re-price at the same epoch is an update at most: every handle survives.
 	claim.dynamic.update(claim.dynamic.route().with_cost(5)).unwrap();
-	while let Ok(event) = moq_net_sim::timeout(Duration::from_secs(1), announced.next()).await {
+	while let Ok(event) = moq_clock::timeout(Duration::from_secs(1), announced.next()).await {
 		assert!(
 			matches!(event, Some(announce::Event::Update(_))),
 			"{version}: a re-price delivered {event:?}"
@@ -355,11 +355,11 @@ fn epochs() -> (Epoch, Epoch) {
 macro_rules! dynamic_epoch_tests {
 	($($name:ident: $version:literal,)*) => {
 		$(
-			#[moq_net_sim::test]
+			#[moq_clock::test]
 			async fn $name() {
 				let (a, b) = epochs();
 				for (from, to) in [(Some(a.clone()), Some(b.clone())), (Some(a), None), (None, Some(b))] {
-					moq_net_sim::timeout(TEST_TIMEOUT, dynamic_epoch($version, from, to))
+					moq_clock::timeout(TEST_TIMEOUT, dynamic_epoch($version, from, to))
 						.await
 						.expect("timed out");
 				}
@@ -378,7 +378,7 @@ dynamic_epoch_tests! {
 /// An update does not override route selection: with a second claim still at the
 /// epoch, a claim dropping it hands re-requests to the second, which outranks any
 /// route without one.
-#[moq_net_sim::test]
+#[moq_clock::test]
 async fn dynamic_epoch_second_route_keeps_winning() {
 	let (a, _) = epochs();
 	let origin = produce_origin(1);
@@ -400,7 +400,7 @@ async fn dynamic_epoch_second_route_keeps_winning() {
 	// The epoch still stands through the second claim, so this is no restart, and the
 	// instance's subscriptions resume through it.
 	first.update_epoch(None);
-	while let Ok(event) = moq_net_sim::timeout(Duration::from_secs(1), announced.next()).await {
+	while let Ok(event) = moq_clock::timeout(Duration::from_secs(1), announced.next()).await {
 		assert!(
 			matches!(event, Some(announce::Event::Update(_))),
 			"dropping a shared epoch delivered {event:?}"
@@ -484,9 +484,9 @@ async fn retired_fetch(version: &str, explicit: bool) {
 
 macro_rules! retired_fetch_tests {
 	($($name:ident: $version:literal,)*) => { $(
-		#[moq_net_sim::test]
+		#[moq_clock::test]
 		async fn $name() {
-			moq_net_sim::timeout(TEST_TIMEOUT, retired_fetch($version, false)).await.expect("timed out");
+			moq_clock::timeout(TEST_TIMEOUT, retired_fetch($version, false)).await.expect("timed out");
 		}
 	)* };
 }
@@ -506,14 +506,14 @@ retired_fetch_tests! {
 	retired_fetch_ietf22: "moq-transport-22",
 }
 
-#[moq_net_sim::test]
+#[moq_clock::test]
 async fn retired_fetch_explicit_epoch_control() {
-	moq_net_sim::timeout(TEST_TIMEOUT, retired_fetch("moq-lite-07-wip", true))
+	moq_clock::timeout(TEST_TIMEOUT, retired_fetch("moq-lite-07-wip", true))
 		.await
 		.expect("timed out");
 }
 
-#[moq_net_sim::test]
+#[moq_clock::test]
 async fn withdrawal_refuses_new_fetches_but_keeps_open_reads() {
 	for version in [
 		"moq-lite-05",
@@ -542,7 +542,7 @@ async fn withdrawal_refuses_new_fetches_but_keeps_open_reads() {
 	}
 }
 
-#[moq_net_sim::test]
+#[moq_clock::test]
 async fn a_more_specific_source_cannot_fill_a_held_covering_track() {
 	for name in [
 		"moq-lite-05",

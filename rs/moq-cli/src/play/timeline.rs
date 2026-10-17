@@ -1,7 +1,8 @@
 //! Media time: the playout clock, and the audio track's own timeline.
 
 use anyhow::Context;
-use std::time::{Duration, Instant};
+use moq_clock::Instant;
+use std::time::Duration;
 
 use super::playback::Kind;
 use hang::moq_net::Timestamp;
@@ -43,6 +44,11 @@ pub(super) struct Presentation {
 	declared: [Transition; 2],
 	next: Transition,
 	reference: Option<Timestamp>,
+	/// The last speaker write: the media time it ends at, when that sounds, and
+	/// the playhead it may not fall back behind on the same timeline.
+	written: Option<(Duration, Instant, Option<Duration>)>,
+	/// The playout target the speaker holds, once audio is playing.
+	target: Option<Duration>,
 	/// Wakes every pending resume when a boundary, a transition or the anchor
 	/// changes. Kept apart from the window's and the decoders' wakeups, so a
 	/// resume can never take a wakeup meant for them.
@@ -88,6 +94,8 @@ impl Presentation {
 			declared: Default::default(),
 			next: Transition(1),
 			reference: None,
+			written: None,
+			target: None,
 			timeline: Default::default(),
 		}
 	}
@@ -165,6 +173,11 @@ impl Presentation {
 	/// A move makes every queued video frame due earlier, so the window has to
 	/// recompute the deadline it is already asleep on.
 	pub(super) fn audio(&mut self, end: Duration, buffered: Duration, now: Instant) -> bool {
+		// Silence padded ahead of the frame to refill the speaker is not media: the
+		// playhead holds where it was until the padding has played, rather than
+		// projecting back over media already heard. A new timeline starts afresh.
+		let floor = (self.speaker && !self.restart).then(|| self.playhead(now)).flatten();
+		self.written = now.checked_add(buffered).map(|sounds| (end, sounds, floor));
 		let timestamp = media(end);
 		self.reference = Some(timestamp);
 		let edge = now
@@ -209,6 +222,29 @@ impl Presentation {
 	pub(super) fn stopped(&mut self) {
 		self.speaker = false;
 		self.restart = false;
+		self.written = None;
+		self.target = None;
+	}
+
+	/// Record the playout target the speaker is being held on.
+	pub(super) fn hold(&mut self, target: Duration) {
+		self.target = Some(target);
+	}
+
+	/// The media time sounding at `now`, or `None` with no speaker.
+	///
+	/// Projected from the last write at the wall rate, held at its end (a speaker
+	/// with nothing left plays nothing further), and never behind where it stood
+	/// at that write (refill padding plays no media).
+	pub(super) fn playhead(&self, now: Instant) -> Option<Duration> {
+		let (end, sounds, floor) = self.written?;
+		let projected = end.saturating_sub(sounds.saturating_duration_since(now));
+		Some(floor.map_or(projected, |floor| projected.max(floor)).min(end))
+	}
+
+	/// The playout target the speaker is held on, or `None` with no speaker.
+	pub(super) fn target(&self) -> Option<Duration> {
+		self.target
 	}
 
 	/// When `timestamp` should be presented, or `None` before any frame has
@@ -268,7 +304,7 @@ impl Role {
 	/// Stop while a tail still plays until `drained`, holding a declared end until
 	/// then. Dropping instead discards the tail with the end.
 	pub(super) fn retire(self, drained: Option<Instant>) {
-		let now = tokio::time::Instant::now().into_std();
+		let now = moq_clock::now();
 		let mut presentation = self.presentation.lock().unwrap();
 		presentation.tails.retain(|tail| *tail > now);
 		if presentation.ends[self.role as usize].take().is_some()
@@ -289,7 +325,7 @@ impl Role {
 	/// long as its replacement has not started playing; otherwise this one opens
 	/// a transition of its own.
 	pub(super) fn declare(&self) -> Transition {
-		let now = tokio::time::Instant::now().into_std();
+		let now = moq_clock::now();
 		let own = self.role as usize;
 		let mut presentation = self.presentation.lock().unwrap();
 		presentation.prune(now);
@@ -366,7 +402,7 @@ impl Role {
 			pending.members[own] = false;
 			pending.plans[own] = None;
 		}
-		presentation.prune(tokio::time::Instant::now().into_std());
+		presentation.prune(moq_clock::now());
 		drop(presentation);
 		self.timeline.notify_waiters();
 	}
@@ -377,7 +413,7 @@ impl Role {
 		if let Some(pending) = presentation.transition(transition) {
 			pending.resumed[self.role as usize] = true;
 		}
-		presentation.prune(tokio::time::Instant::now().into_std());
+		presentation.prune(moq_clock::now());
 		drop(presentation);
 		self.timeline.notify_waiters();
 	}
@@ -396,7 +432,7 @@ impl Role {
 			let changed = self.timeline.notified();
 			let mut changed = std::pin::pin!(changed);
 			changed.as_mut().enable();
-			let now = tokio::time::Instant::now().into_std();
+			let now = moq_clock::now();
 			let end = {
 				let mut presentation = self.presentation.lock().unwrap();
 				// The peer already resumed this transition after draining every end
@@ -415,7 +451,7 @@ impl Role {
 			};
 			if let Some(end) = end.filter(|end| *end > now) {
 				tokio::select! {
-					_ = tokio::time::sleep_until(end.into()) => {},
+					_ = moq_clock::sleep_until(end) => {},
 					_ = changed => {},
 				}
 				continue;
@@ -469,7 +505,7 @@ impl Drop for Role {
 				pending.plans[own] = None;
 			}
 			presentation.declared[own] = Transition::default();
-			presentation.prune(tokio::time::Instant::now().into_std());
+			presentation.prune(moq_clock::now());
 		}
 		self.timeline.notify_waiters();
 	}
@@ -590,14 +626,59 @@ mod tests {
 		Timestamp::from_millis(millis).unwrap()
 	}
 
+	/// The playhead runs at the wall rate from the last write and stops at its
+	/// end, which is what a speaker that ran dry is still sounding.
+	#[test]
+	fn the_playhead_projects_the_last_write_and_holds_at_its_end() {
+		let now = Instant::now();
+		let mut presentation = Presentation::new(DELAY);
+		assert_eq!(presentation.playhead(now), None);
+
+		presentation.audio(Duration::from_secs(10), Duration::from_millis(200), now);
+		presentation.hold(DELAY);
+		assert_eq!(presentation.playhead(now), Some(Duration::from_millis(9_800)));
+		let later = now + Duration::from_millis(150);
+		assert_eq!(presentation.playhead(later), Some(Duration::from_millis(9_950)));
+		let dry = now + Duration::from_secs(1);
+		assert_eq!(presentation.playhead(dry), Some(Duration::from_secs(10)));
+		assert_eq!(presentation.target(), Some(DELAY));
+
+		presentation.stopped();
+		assert_eq!((presentation.playhead(dry), presentation.target()), (None, None));
+	}
+
+	/// Silence padded ahead of a frame after the speaker ran dry plays no media,
+	/// so the playhead holds instead of replaying media already heard.
+	#[test]
+	fn the_playhead_holds_through_refill_padding() {
+		let now = Instant::now();
+		let mut presentation = Presentation::new(DELAY);
+		presentation.audio(Duration::from_secs(10), Duration::from_millis(200), now);
+		let dry = now + Duration::from_secs(1);
+		assert_eq!(presentation.playhead(dry), Some(Duration::from_secs(10)));
+
+		// 100 ms of padding, then a 20 ms frame continuing from 10 s.
+		presentation.audio(Duration::from_millis(10_020), Duration::from_millis(120), dry);
+		assert_eq!(presentation.playhead(dry), Some(Duration::from_secs(10)));
+		let padded = dry + Duration::from_millis(100);
+		assert_eq!(presentation.playhead(padded), Some(Duration::from_secs(10)));
+		let played = dry + Duration::from_millis(110);
+		assert_eq!(presentation.playhead(played), Some(Duration::from_millis(10_010)));
+
+		// A new timeline may start anywhere.
+		presentation.restarted();
+		presentation.audio(Duration::from_secs(2), Duration::from_millis(100), played);
+		assert_eq!(presentation.playhead(played), Some(Duration::from_millis(1_900)));
+	}
+
 	#[tokio::test]
 	async fn one_ended_role_maps_to_the_continuous_peers_clock() {
 		tokio::time::pause();
-		let start = tokio::time::Instant::now();
+		let start = moq_clock::now();
 		let presentation = std::sync::Arc::new(std::sync::Mutex::new(Presentation::new(DELAY)));
 		let audio = Role::new(presentation.clone(), Kind::Audio);
 		let video = Role::new(presentation.clone(), Kind::Video);
-		presentation.lock().unwrap().video(ms(10_000), start.into_std());
+		presentation.lock().unwrap().video(ms(10_000), start);
 		let transition = audio.declare();
 		audio.end(ms(10_020)).unwrap();
 		tokio::time::advance(DELAY + Duration::from_millis(20)).await;
@@ -611,12 +692,9 @@ mod tests {
 	#[tokio::test]
 	async fn a_late_paired_replacement_keeps_its_media_offset() {
 		tokio::time::pause();
-		let now = tokio::time::Instant::now();
+		let now = moq_clock::now();
 		let presentation = std::sync::Arc::new(std::sync::Mutex::new(Presentation::new(DELAY)));
-		presentation
-			.lock()
-			.unwrap()
-			.audio(Duration::from_secs(10), DELAY, now.into_std());
+		presentation.lock().unwrap().audio(Duration::from_secs(10), DELAY, now);
 		let audio = Role::new(presentation.clone(), Kind::Audio);
 		let video = Role::new(presentation.clone(), Kind::Video);
 		let transition = audio.declare();
@@ -639,12 +717,9 @@ mod tests {
 	#[tokio::test]
 	async fn a_late_replacement_pairs_with_its_own_transition() {
 		tokio::time::pause();
-		let now = tokio::time::Instant::now();
+		let now = moq_clock::now();
 		let presentation = std::sync::Arc::new(std::sync::Mutex::new(Presentation::new(DELAY)));
-		presentation
-			.lock()
-			.unwrap()
-			.audio(Duration::from_secs(10), DELAY, now.into_std());
+		presentation.lock().unwrap().audio(Duration::from_secs(10), DELAY, now);
 		let audio = Role::new(presentation.clone(), Kind::Audio);
 		let video = Role::new(presentation.clone(), Kind::Video);
 		let transition = audio.declare();
@@ -670,12 +745,9 @@ mod tests {
 	#[tokio::test]
 	async fn a_peer_two_restarts_ahead_pairs_with_the_first() {
 		tokio::time::pause();
-		let now = tokio::time::Instant::now();
+		let now = moq_clock::now();
 		let presentation = std::sync::Arc::new(std::sync::Mutex::new(Presentation::new(DELAY)));
-		presentation
-			.lock()
-			.unwrap()
-			.audio(Duration::from_secs(10), DELAY, now.into_std());
+		presentation.lock().unwrap().audio(Duration::from_secs(10), DELAY, now);
 		let audio = Role::new(presentation.clone(), Kind::Audio);
 		let video = Role::new(presentation.clone(), Kind::Video);
 		let transition = audio.declare();
@@ -702,12 +774,9 @@ mod tests {
 	#[tokio::test]
 	async fn an_abandoned_replacement_leaves_the_next_transition_alone() {
 		tokio::time::pause();
-		let now = tokio::time::Instant::now();
+		let now = moq_clock::now();
 		let presentation = std::sync::Arc::new(std::sync::Mutex::new(Presentation::new(DELAY)));
-		presentation
-			.lock()
-			.unwrap()
-			.audio(Duration::from_secs(10), DELAY, now.into_std());
+		presentation.lock().unwrap().audio(Duration::from_secs(10), DELAY, now);
 		let audio = Role::new(presentation.clone(), Kind::Audio);
 		let video = Role::new(presentation.clone(), Kind::Video);
 		let transition = audio.declare();
@@ -724,22 +793,19 @@ mod tests {
 		audio.apply(transition, audio.resume(transition, ms(0), Some(DELAY)).await.unwrap());
 		video.apply(next, video.resume(next, ms(5_000), None).await.unwrap());
 		// The later replacement maps onto the running clock, not the audio restart's.
-		let resumed = tokio::time::Instant::now() + DELAY;
+		let resumed = moq_clock::now() + DELAY;
 		assert_eq!(
 			presentation.lock().unwrap().due(video.map(ms(5_000)).unwrap()),
-			Some(resumed.into_std())
+			Some(resumed)
 		);
 	}
 
 	#[tokio::test]
 	async fn an_abandoned_peer_plan_is_not_paired() {
 		tokio::time::pause();
-		let now = tokio::time::Instant::now();
+		let now = moq_clock::now();
 		let presentation = std::sync::Arc::new(std::sync::Mutex::new(Presentation::new(DELAY)));
-		presentation
-			.lock()
-			.unwrap()
-			.audio(Duration::from_secs(10), DELAY, now.into_std());
+		presentation.lock().unwrap().audio(Duration::from_secs(10), DELAY, now);
 		let audio = Role::new(presentation.clone(), Kind::Audio);
 		let video = Role::new(presentation.clone(), Kind::Video);
 		let transition = audio.declare();
@@ -751,22 +817,19 @@ mod tests {
 		video.plan(transition, ms(40), None);
 		tokio::time::advance(DELAY + Duration::from_millis(20)).await;
 		video.apply(transition, video.resume(transition, ms(40), None).await.unwrap());
-		let resumed = tokio::time::Instant::now() + DELAY;
+		let resumed = moq_clock::now() + DELAY;
 		assert_eq!(
 			presentation.lock().unwrap().due(video.map(ms(40)).unwrap()),
-			Some(resumed.into_std())
+			Some(resumed)
 		);
 	}
 
 	#[tokio::test]
 	async fn a_resumed_transition_ignores_the_peers_later_end() {
 		tokio::time::pause();
-		let now = tokio::time::Instant::now();
+		let now = moq_clock::now();
 		let presentation = std::sync::Arc::new(std::sync::Mutex::new(Presentation::new(DELAY)));
-		presentation
-			.lock()
-			.unwrap()
-			.audio(Duration::from_secs(10), DELAY, now.into_std());
+		presentation.lock().unwrap().audio(Duration::from_secs(10), DELAY, now);
 		let audio = Role::new(presentation.clone(), Kind::Audio);
 		let video = Role::new(presentation.clone(), Kind::Video);
 		let transition = audio.declare();
@@ -790,12 +853,9 @@ mod tests {
 	#[tokio::test]
 	async fn a_cancelled_role_releases_its_declared_end() {
 		tokio::time::pause();
-		let now = tokio::time::Instant::now();
+		let now = moq_clock::now();
 		let presentation = std::sync::Arc::new(std::sync::Mutex::new(Presentation::new(DELAY)));
-		presentation
-			.lock()
-			.unwrap()
-			.audio(Duration::from_secs(10), DELAY, now.into_std());
+		presentation.lock().unwrap().audio(Duration::from_secs(10), DELAY, now);
 		let audio = Role::new(presentation.clone(), Kind::Audio);
 		let video = Role::new(presentation.clone(), Kind::Video);
 		audio.declare();
@@ -816,18 +876,15 @@ mod tests {
 	#[tokio::test]
 	async fn a_closed_role_still_holds_its_declared_end() {
 		tokio::time::pause();
-		let now = tokio::time::Instant::now();
+		let now = moq_clock::now();
 		let presentation = std::sync::Arc::new(std::sync::Mutex::new(Presentation::new(DELAY)));
-		presentation
-			.lock()
-			.unwrap()
-			.audio(Duration::from_secs(10), DELAY, now.into_std());
+		presentation.lock().unwrap().audio(Duration::from_secs(10), DELAY, now);
 		let audio = Role::new(presentation.clone(), Kind::Audio);
 		let video = Role::new(presentation.clone(), Kind::Video);
 		audio.declare();
 		audio.end(ms(10_200)).unwrap();
 		// The track closed, but its returned sink still plays the tail up to the end.
-		audio.retire(Some((now + Duration::from_millis(300)).into_std()));
+		audio.retire(Some(now + Duration::from_millis(300)));
 		let transition = video.declare();
 		video.end(ms(10_000)).unwrap();
 		video.plan(transition, ms(0), None);
@@ -842,22 +899,19 @@ mod tests {
 	#[tokio::test]
 	async fn a_retired_end_ignores_a_later_re_pin() {
 		tokio::time::pause();
-		let now = tokio::time::Instant::now();
+		let now = moq_clock::now();
 		let presentation = std::sync::Arc::new(std::sync::Mutex::new(Presentation::new(DELAY)));
-		presentation
-			.lock()
-			.unwrap()
-			.audio(Duration::from_secs(10), DELAY, now.into_std());
+		presentation.lock().unwrap().audio(Duration::from_secs(10), DELAY, now);
 		let audio = Role::new(presentation.clone(), Kind::Audio);
 		let video = Role::new(presentation.clone(), Kind::Video);
 		audio.declare();
 		audio.end(ms(10_200)).unwrap();
-		audio.retire(Some((now + Duration::from_millis(300)).into_std()));
+		audio.retire(Some(now + Duration::from_millis(300)));
 		// A replacement rendition starts over at zero and re-pins the anchor.
 		{
 			let mut presentation = presentation.lock().unwrap();
 			presentation.restarted();
-			presentation.audio(Duration::from_millis(50), DELAY, now.into_std());
+			presentation.audio(Duration::from_millis(50), DELAY, now);
 		}
 		let transition = video.declare();
 		video.plan(transition, ms(0), None);
@@ -868,17 +922,14 @@ mod tests {
 	#[tokio::test]
 	async fn a_cancelled_successor_keeps_a_retired_tail() {
 		tokio::time::pause();
-		let now = tokio::time::Instant::now();
+		let now = moq_clock::now();
 		let presentation = std::sync::Arc::new(std::sync::Mutex::new(Presentation::new(DELAY)));
-		presentation
-			.lock()
-			.unwrap()
-			.audio(Duration::from_secs(10), DELAY, now.into_std());
+		presentation.lock().unwrap().audio(Duration::from_secs(10), DELAY, now);
 		let audio = Role::new(presentation.clone(), Kind::Audio);
 		let video = Role::new(presentation.clone(), Kind::Video);
 		audio.declare();
 		audio.end(ms(10_200)).unwrap();
-		audio.retire(Some((now + Duration::from_millis(300)).into_std()));
+		audio.retire(Some(now + Duration::from_millis(300)));
 		// The next rendition fails while the retired sink still plays.
 		let successor = Role::new(presentation.clone(), Kind::Audio);
 		successor.declare();
@@ -892,12 +943,9 @@ mod tests {
 	#[tokio::test]
 	async fn paired_plans_keep_media_offsets_and_follow_the_speakers_delay() {
 		tokio::time::pause();
-		let now = tokio::time::Instant::now();
+		let now = moq_clock::now();
 		let presentation = std::sync::Arc::new(std::sync::Mutex::new(Presentation::new(DELAY)));
-		presentation
-			.lock()
-			.unwrap()
-			.audio(Duration::from_secs(10), DELAY, now.into_std());
+		presentation.lock().unwrap().audio(Duration::from_secs(10), DELAY, now);
 		let audio = Role::new(presentation.clone(), Kind::Audio);
 		let video = Role::new(presentation.clone(), Kind::Video);
 		let transition = audio.declare();
@@ -921,7 +969,7 @@ mod tests {
 		);
 		assert_eq!(
 			presentation.lock().unwrap().due(audio.map(ms(0)).unwrap()),
-			Some((now + Duration::from_millis(200)).into_std())
+			Some(now + Duration::from_millis(200))
 		);
 	}
 

@@ -10,9 +10,8 @@ out of scope.
 
 ## Plan
 
-Decided 2026-10-07 with [JS requests](/quest/m1/js-request-deadline.md): a
-request without credit is refused, which sheds load rather than parking work
-the caller can't see. Accepted: a relay asking a peer that grants few streams
+Decided 2026-10-07: a request without credit is refused, which sheds load
+rather than parking work the caller can't see. Accepted: a relay asking a peer that grants few streams
 gets hard failures in bursts where it used to wait, and nothing retries them.
 Rust gets no answer timer: a request lives until it is answered, its demand
 leaves, or the session closes, and a relay shouldn't kill a subscribe on a

@@ -8,7 +8,8 @@ import { install } from "@moq/web-transport";
 install();
 const GROUPS = 4;
 const BYTES = 256 * 1024;
-const [role, url, path] = process.argv.slice(2);
+const [role, url, path, version, mode] = process.argv.slice(2);
+const drop = mode === "drop";
 if (!url || !path || !["publish", "subscribe"].includes(role)) {
 	throw new Error("usage: tail.ts publish|subscribe URL BROADCAST");
 }
@@ -17,6 +18,7 @@ const origin = new Moq.Origin.Producer();
 const connection = await Moq.Connection.connect({
 	url: new URL(url),
 	websocket: { enabled: false },
+	...(version ? { webtransport: { protocols: [version] } } : {}),
 	...(role === "publish" ? { publish: origin.consume() } : { consume: origin }),
 });
 try {
@@ -30,6 +32,10 @@ try {
 		track.finishAt({ group: GROUPS, frame: 0 });
 		for (let sequence = 0; sequence < GROUPS; sequence++) {
 			const group = track.appendGroup();
+			if (drop && sequence === 1) {
+				group.close(new Error("cut"));
+				continue;
+			}
 			group.writeFrame({ payload: new Uint8Array(BYTES).fill(sequence) });
 			group.close();
 		}
@@ -53,7 +59,7 @@ try {
 			}
 			const track = broadcast
 				.track("tail")
-				.subscribe({ maxDelay: Milli(5000), groups: { start: { included: 0 } } });
+				.subscribe({ maxDelay: Milli(drop ? 60_000 : 5000), groups: { start: { included: 0 } } });
 			const seen: number[] = [];
 			try {
 				for (;;) {
@@ -76,10 +82,14 @@ try {
 				}
 				assert.deepEqual(
 					seen.sort((a, b) => a - b),
-					[0, 1, 2, 3],
+					drop ? [0, 2, 3] : [0, 1, 2, 3],
 				);
 				assert.deepEqual(await track.finished(), { group: GROUPS, frame: 0 });
-				console.error("tail clean end=4 groups=0,1,2,3 bytes=1048576");
+				console.error(
+					drop
+						? "tail drop clean end=4 groups=0,2,3 bytes=786432"
+						: "tail clean end=4 groups=0,1,2,3 bytes=1048576",
+				);
 			} finally {
 				track.close();
 			}

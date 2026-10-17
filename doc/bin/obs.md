@@ -19,6 +19,8 @@ epoch, which peers using an epoch-capable protocol see as a new publisher run.
 
 MoQ Source follows catalog changes while keeping the current audio and video playing until a replacement produces decoded output. A failed replacement leaves the current rendition playing; removing a media kind from the catalog clears it.
 
+The source plays Opus, AAC-LC (mono or stereo), and PCM audio. A channel count names its speakers by the WAVE convention: 1, 2, 3 (2.1), 6 (5.1), and 8 (7.1) play on the matching OBS layout, while quad and 5.0 are upmixed to 5.1 and 6.1 to 7.1, which OBS lacks. Other counts are refused.
+
 Enter a relay URL explicitly. On the shared anonymous relay, use a unique path
 such as `https://cdn.moq.dev/anon/your-stream`. A URL with `?jwt=` fills the
 token field.
@@ -27,6 +29,15 @@ By default the dock tunes the encoder for low latency on this stream only:
 no B-frames or lookahead on the encoders that support turning them off. This
 trades compression for less buffering; it does not guarantee an end-to-end
 delay. Pick **Keep encoder settings** to leave the encoder alone.
+
+The video bitrate follows the connection's bandwidth estimate, with the
+configured bitrate as the ceiling: it drops as soon as the uplink narrows and
+climbs back over a few seconds. Audio holds its configured bitrate, and video
+gets what is left. Only encoders that can retune while live, with CBR, VBR, or
+ABR rate control, follow; CQP and CRF keep their setting. The dock's Stats tab
+shows the current video target beside the configured rate. An encoder shared
+with a recording follows too, so record with a separate encoder to keep the
+recording at the full rate.
 
 ## Source quality and moq-transcode
 

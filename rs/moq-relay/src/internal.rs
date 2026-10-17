@@ -539,6 +539,23 @@ fn render_metrics(
 		);
 	}
 
+	let _ = writeln!(
+		out,
+		"# HELP moq_relay_sessions_failed_total Admitted sessions ending abnormally, by kind."
+	);
+	let _ = writeln!(out, "# TYPE moq_relay_sessions_failed_total counter");
+	for (tier, presence) in snap.sessions() {
+		for &kind in moq_net::stats::Failure::ALL {
+			let _ = writeln!(
+				out,
+				"moq_relay_sessions_failed_total{{tier=\"{}\",kind=\"{}\"}} {}",
+				tier.as_str(),
+				kind.as_str(),
+				presence.sessions_failed.count(kind)
+			);
+		}
+	}
+
 	render_accepts(&mut out, listeners);
 	render_uring(&mut out, uring);
 
@@ -572,12 +589,13 @@ fn render_refusals(out: &mut String, refusals: &crate::refusals::Refusals) {
 		"# HELP moq_relay_sessions_refused_total Sessions admission refused, by reason."
 	);
 	let _ = writeln!(out, "# TYPE moq_relay_sessions_refused_total counter");
+	let counts = refusals.snapshot();
 	for &refusal in Refusal::ALL {
 		let _ = writeln!(
 			out,
 			"moq_relay_sessions_refused_total{{reason=\"{}\"}} {}",
 			refusal.as_str(),
-			refusals.count(refusal)
+			counts.count(refusal)
 		);
 	}
 }

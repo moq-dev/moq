@@ -21,15 +21,17 @@ use super::ledger::{self, Ledger};
 use super::{Datagram, Requests};
 
 use super::Cap;
+use super::subscription::NewGroup;
 pub use super::subscription::{Order, Position, Subscription};
+use rangemap::RangeSet;
 
 mod demand;
 pub(super) use demand::Preferences;
 use demand::Subscriptions;
 
 use std::{
-	collections::{BTreeMap, VecDeque},
-	ops::{Bound, RangeBounds},
+	collections::{BTreeMap, BTreeSet, VecDeque},
+	ops::{Bound, Range, RangeBounds},
 	sync::Arc,
 	sync::OnceLock,
 	sync::atomic::{AtomicBool, AtomicU64, Ordering},
@@ -133,6 +135,13 @@ pub struct Info {
 	/// subscriptions of equal subscriber priority. Reported in TRACK_INFO (Lite05+).
 	/// Higher is more urgent. Defaults to 127, the midpoint.
 	pub priority: u8,
+	/// Whether the original publisher starts a group on a moq-transport NEW_GROUP_REQUEST
+	/// (DYNAMIC_GROUPS), as learned from an upstream moq-transport session.
+	///
+	/// Relay-only: a local publisher has no way to answer the request, and moq-lite does
+	/// not carry the capability, so both leave it unset.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	pub(crate) dynamic_groups: bool,
 }
 
 impl Default for Info {
@@ -141,6 +150,7 @@ impl Default for Info {
 			timescale: None,
 			max_age: None,
 			priority: DEFAULT_PRIORITY,
+			dynamic_groups: false,
 		}
 	}
 }
@@ -333,6 +343,13 @@ pub(crate) struct TrackState {
 	// lite-06+ SUBSCRIBE_START). Readers that must know the resolved start (see
 	// [`Subscriber::poll_start`]) wait on it; everything else treats the floor as usual.
 	start_pending: bool,
+
+	// Sequences the upstream publisher gave up: an incoming SUBSCRIBE_DROP or a producer
+	// cut. Kept apart from the cache so reclaiming a slot cannot erase a disposition a
+	// relay must forward, and as ranges so a wide DROP costs one entry.
+	drops: RangeSet<u64>,
+	// Bumped on every insert into `drops`, so a cursor rescans it only after a change.
+	drops_revision: u64,
 
 	// Whether the cache reflects the live feed: readers get nothing from it while it does
 	// not, since how stale it is cannot be told; fetches still do. A track is live from
@@ -530,6 +547,35 @@ pub(crate) struct FetchOutcome {
 }
 
 impl TrackState {
+	/// Record sequences the upstream publisher gave up.
+	fn drop_groups(&mut self, groups: Range<u64>) {
+		if groups.is_empty() {
+			return;
+		}
+		self.drops.insert(groups);
+		self.drops_revision += 1;
+	}
+
+	/// Remove an aborted slot, keeping a cut as a drop: reclaiming it must not erase a
+	/// disposition a relay still has to forward.
+	fn reclaim_aborted(&mut self, sequence: u64) {
+		if let Some(slot) = self.remove_slot(sequence)
+			&& slot.visible
+			&& slot.group.is_cut()
+			&& let Some(end) = sequence.checked_add(1)
+		{
+			self.drop_groups(sequence..end);
+		}
+	}
+
+	/// Whether the cached group at `sequence` is one readers saw and the publisher cut.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	fn is_cut(&self, sequence: u64) -> bool {
+		self.lookup
+			.get(&sequence)
+			.is_some_and(|slot| slot.visible && slot.group.is_cut())
+	}
+
 	fn accept(&mut self, info: Info) {
 		self.published = true;
 		self.install(info);
@@ -1089,7 +1135,7 @@ impl TrackState {
 				// Already aborted: the frames are gone, reclaim the slot so a
 				// later fetch can serve the sequence again.
 				if slot.is_aborted() {
-					self.remove_slot(sequence);
+					self.reclaim_aborted(sequence);
 					continue;
 				}
 				if self.protects(sequence) || !slot.is_expired(&scan) {
@@ -1165,6 +1211,15 @@ impl TrackState {
 	/// keep the finished ones for readers still draining. A consumer that already
 	/// pulled an open group keeps its own handle and ends with it.
 	fn drop_open_groups(&mut self) {
+		let open: Vec<_> = self
+			.lookup
+			.iter()
+			.filter(|(_, slot)| slot.visible && !slot.copies().any(group::Producer::is_finished))
+			.filter_map(|(&sequence, _)| Some(sequence..sequence.checked_add(1)?))
+			.collect();
+		for groups in open {
+			self.drop_groups(groups);
+		}
 		self.lookup
 			.retain(|_, slot| slot.copies().any(group::Producer::is_finished));
 		self.withheld = self.lookup.values().filter(|slot| slot.pending).count();
@@ -1292,6 +1347,14 @@ impl TrackState {
 		}
 
 		self.advance(sequence);
+		// A publisher may re-create a group it cut; the sequence is no longer given up.
+		if visible
+			&& self.drops.contains(&sequence)
+			&& let Some(end) = sequence.checked_add(1)
+		{
+			self.drops.remove(sequence..end);
+			self.drops_revision += 1;
+		}
 		let now = self.cache.pool().now_wall();
 		if visible {
 			self.record_arrival(sequence, now);
@@ -1464,7 +1527,7 @@ impl TrackState {
 			}
 			if slot.is_aborted() {
 				// Aborted upstream: the frames are already gone, reclaim the slot.
-				self.remove_slot(sequence);
+				self.reclaim_aborted(sequence);
 				continue;
 			}
 			if self.protects(sequence) {
@@ -2255,6 +2318,17 @@ impl Producer {
 		Ok(())
 	}
 
+	/// Record sequences the upstream publisher explicitly gave up.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	pub(crate) fn drop_groups(&self, groups: Range<u64>) {
+		if groups.is_empty() {
+			return;
+		}
+		if let Ok(mut state) = self.modify() {
+			state.drop_groups(groups);
+		}
+	}
+
 	/// Readers get nothing from the cache until [`Self::set_live`]: the upstream
 	/// subscription ended with this copy still held, so what it cached may go stale.
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
@@ -2478,10 +2552,42 @@ impl Producer {
 	/// [`Info::max_age`]: no subscriber can wait for a late group longer than the
 	/// publisher keeps it.
 	pub fn subscription(&self) -> Option<Subscription> {
+		public(self.aggregate())
+	}
+
+	/// The aggregate with the relay-only requests the public view leaves out.
+	fn aggregate(&self) -> Option<Subscription> {
 		let state = self.state.read();
 		let (subs, bound) = (state.subscriptions.clone(), state.max_age_bound());
 		drop(state);
 		snapshot_subscription(&subs, bound)
+	}
+
+	/// The NEW_GROUP_REQUEST the subscribers hold now, if any; see
+	/// [`Subscription::new_group`].
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	pub(crate) fn new_group(&self) -> Option<NewGroup> {
+		new_group(self.aggregate())
+	}
+
+	/// Poll for the NEW_GROUP_REQUEST the subscribers hold to differ from `prev`: the
+	/// highest one whenever it changes, `None` once none does. Errors once the track is
+	/// aborted.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	pub(crate) fn poll_new_group(
+		&self,
+		prev: &mut Option<NewGroup>,
+		waiter: &kio::Waiter,
+	) -> Poll<Result<Option<NewGroup>>> {
+		if self.state.poll_closed(waiter).is_ready() {
+			let abort = self.state.read().abort.clone();
+			return Poll::Ready(Err(abort.unwrap_or(Error::Dropped)));
+		}
+		let state = self.state.read();
+		let (subs, bound) = (state.subscriptions.clone(), state.max_age_bound());
+		drop(state);
+
+		poll_combined_changed(&subs, bound, prev, new_group, waiter).map(Ok)
 	}
 
 	/// Poll for a changed subscription: the
@@ -2500,7 +2606,7 @@ impl Producer {
 		let (subs, bound) = (state.subscriptions.clone(), state.max_age_bound());
 		drop(state);
 
-		poll_combined_changed(&subs, bound, &mut self.prev_subscription, waiter).map(Ok)
+		poll_combined_changed(&subs, bound, &mut self.prev_subscription, public, waiter).map(Ok)
 	}
 
 	/// Create a [`Dynamic`] handle that serves on-demand fetches of uncached
@@ -2753,14 +2859,25 @@ impl Drop for Alive {
 	}
 }
 
-/// Poll the counted aggregate without registering on individual readers.
-fn poll_combined_changed(
+/// Poll the counted aggregate, as `view` sees it, without registering on individual readers.
+fn poll_combined_changed<T: Clone + PartialEq>(
 	subs: &kio::Lock<Subscriptions>,
 	bound: Option<Duration>,
-	prev: &mut Option<Subscription>,
+	prev: &mut T,
+	view: impl Fn(Option<Subscription>) -> T,
 	waiter: &kio::Waiter,
-) -> Poll<Option<Subscription>> {
-	subs.lock().poll_changed(bound, prev, waiter)
+) -> Poll<T> {
+	subs.lock().poll_changed(bound, prev, view, waiter)
+}
+
+/// The aggregate as the public API reports it: without the relay-only requests.
+fn public(combined: Option<Subscription>) -> Option<Subscription> {
+	combined.map(|sub| Subscription { new_group: None, ..sub })
+}
+
+/// The aggregate's NEW_GROUP_REQUEST, if any subscriber holds one.
+fn new_group(combined: Option<Subscription>) -> Option<NewGroup> {
+	combined.and_then(|sub| sub.new_group)
 }
 
 /// Read the counted aggregate without walking the audience.
@@ -4120,6 +4237,82 @@ struct Cursor {
 	/// Groups the seek path has convicted but whose sequences no caller has committed
 	/// past yet, keyed by sequence; see [`Self::commit_seek_stale`].
 	seek_pending: BTreeMap<u64, stats::Content>,
+	/// The drops a wire publisher forwards, once it first polls for one.
+	drops: Option<Box<DropCursor>>,
+}
+
+/// What a wire publisher's cursor gave up, found as it changes rather than by rescanning
+/// the cache on every poll.
+struct DropCursor {
+	/// Every group the publisher cuts.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	cuts: super::aborts::Watch,
+	/// Sequences given up and not reported yet: stale skips, cuts, and upstream drops.
+	pending: RangeSet<u64>,
+	/// The [`TrackState::drops_revision`] and window last folded into `pending`.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	scanned: Option<(u64, Range<u64>)>,
+	/// Every sequence this cursor already reported.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	reported: RangeSet<u64>,
+}
+
+#[cfg_attr(not(feature = "async"), allow(dead_code))]
+impl DropCursor {
+	fn new(state: &TrackState) -> Self {
+		// Watch before the first scan, so a cut landing between the two is still seen.
+		Self {
+			cuts: state.cache.watch_cuts(),
+			pending: RangeSet::new(),
+			scanned: None,
+			reported: RangeSet::new(),
+		}
+	}
+
+	/// The lowest unreported run of `within` given up, now marked reported.
+	fn next(&mut self, state: &TrackState, cut: BTreeSet<u64>, within: &Range<u64>) -> Option<Range<u64>> {
+		for sequence in cut {
+			// A cut already reclaimed from the cache is in the track's drops instead.
+			if state.is_cut(sequence)
+				&& let Some(end) = sequence.checked_add(1)
+			{
+				self.pending.insert(sequence..end);
+			}
+		}
+		// Rescan only after the drops change or the window moves; out-of-window runs were
+		// skipped and may be owed now.
+		let scan = (state.drops_revision, within.clone());
+		if self.scanned.as_ref() != Some(&scan) {
+			self.scanned = Some(scan);
+			for dropped in state.drops.overlapping(within) {
+				self.pending
+					.insert(dropped.start.max(within.start)..dropped.end.min(within.end));
+			}
+			for (&sequence, slot) in state.lookup.range(within.clone()) {
+				if slot.visible
+					&& slot.group.is_cut()
+					&& let Some(end) = sequence.checked_add(1)
+				{
+					self.pending.insert(sequence..end);
+				}
+			}
+		}
+		while let Some(range) = self.pending.iter().next().cloned() {
+			self.pending.remove(range.clone());
+			let clipped = range.start.max(within.start)..range.end.min(within.end);
+			if clipped.is_empty() {
+				continue;
+			}
+			if let Some(gap) = self.reported.gaps(&clipped).next() {
+				if gap.end < range.end {
+					self.pending.insert(gap.end..range.end);
+				}
+				self.reported.insert(gap.clone());
+				return Some(gap);
+			}
+		}
+		None
+	}
 }
 
 impl Cursor {
@@ -4160,6 +4353,28 @@ impl Cursor {
 			drift_cap: kio::Producer::new(None),
 			stale: stats::Content::default(),
 			seek_pending: BTreeMap::new(),
+			drops: None,
+		}
+	}
+
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	fn poll_drop(&mut self, waiter: &kio::Waiter) -> Poll<Range<u64>> {
+		let within = self.min_sequence..self.end_sequence.unwrap_or(u64::MAX);
+		let drops = match &mut self.drops {
+			Some(drops) => drops,
+			None => self.drops.insert(Box::new(DropCursor::new(&self.state.read()))),
+		};
+		// A cut closes its group without modifying the track state, so its own watch wakes
+		// this. Taken before reading the track, so a cut after the read still wakes.
+		let cut = drops.cuts.poll(waiter);
+		match self.state.poll(waiter, |state| {
+			drops.next(state, cut, &within).map_or(Poll::Pending, Poll::Ready)
+		}) {
+			Poll::Ready(Ok(range)) => Poll::Ready(range),
+			Poll::Ready(Err(state)) => drops
+				.next(&state, BTreeSet::new(), &within)
+				.map_or(Poll::Pending, Poll::Ready),
+			Poll::Pending => Poll::Pending,
 		}
 	}
 
@@ -4362,6 +4577,11 @@ impl Cursor {
 			// poll walks a whole backlog off rather than handing it out group by group.
 			if ready!(self.poll_stale(&consumer, drift, waiter))? {
 				self.stale.add(consumer.content());
+				if let Some(drops) = &mut self.drops
+					&& let Some(end) = consumer.sequence.checked_add(1)
+				{
+					drops.pending.insert(consumer.sequence..end);
+				}
 				continue;
 			}
 			return Poll::Ready(Ok(Some(self.with_expiry(consumer))));
@@ -4605,6 +4825,23 @@ impl Subscriber {
 		let mut delivered = std::mem::take(&mut self.delivered);
 		self.forget_past_budget(&mut delivered);
 		self.delivered = delivered;
+		self.answer_new_group(sequence);
+	}
+
+	/// Drop a NEW_GROUP_REQUEST that `sequence` answers, so it never reaches a later
+	/// upstream subscription (a reconnect, or another route) as a request for a group
+	/// that already came.
+	fn answer_new_group(&self, sequence: u64) {
+		// Only a DYNAMIC_GROUPS track forwards a request, so every other track (moq-lite's
+		// included) skips the lock on each group handed out.
+		if !self.info.dynamic_groups {
+			return;
+		}
+		let channel = match &self.inner {
+			Inner::Plain(cursor) => &cursor.subscription,
+			Inner::Resume(resume, _) => resume.subscription(),
+		};
+		channel.answer_new_group(sequence);
 	}
 
 	/// Forget the gaps in `delivered` below each group past this subscriber's budget now:
@@ -4705,6 +4942,7 @@ impl Subscriber {
 		// delivered whole here, so count it as the single-frame group it stands in for.
 		if let Poll::Ready(Ok(Some(datagram))) = &res {
 			meter.datagram(datagram.payload.len() as u64);
+			self.answer_new_group(datagram.sequence);
 		}
 		res
 	}
@@ -4758,6 +4996,18 @@ impl Subscriber {
 		};
 		let start = ready!(Consumer::poll_state_start(&cursor.state, waiter));
 		Poll::Ready(start.map(|start| start.max(cursor.min_sequence)))
+	}
+
+	/// Poll for sequences this subscription gave up without serving.
+	///
+	/// Stale skips are recorded only once this has been polled, so a cursor no wire
+	/// publisher forwards drops for keeps none.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	pub(crate) fn poll_drop(&mut self, waiter: &kio::Waiter) -> Poll<Range<u64>> {
+		match &mut self.inner {
+			Inner::Plain(cursor) => cursor.poll_drop(waiter),
+			Inner::Resume(resume, _) => resume.poll_drop(waiter),
+		}
 	}
 
 	/// Poll for the track's cache reflecting its live feed (or the track ending), with the
@@ -5219,10 +5469,22 @@ impl Request {
 	/// The delivery preferences aggregated across everyone waiting on this request,
 	/// or `None` if nobody is waiting. Useful for sizing the track before accepting.
 	pub fn subscription(&self) -> Option<Subscription> {
+		public(self.aggregate())
+	}
+
+	/// The aggregate with the relay-only requests the public view leaves out.
+	fn aggregate(&self) -> Option<Subscription> {
 		let state = self.state.read();
 		let (subs, bound) = (state.subscriptions.clone(), state.max_age_bound());
 		drop(state);
 		snapshot_subscription(&subs, bound)
+	}
+
+	/// The NEW_GROUP_REQUEST the waiting subscribers hold now, if any; see
+	/// [`Subscription::new_group`].
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	pub(crate) fn new_group(&self) -> Option<NewGroup> {
+		new_group(self.aggregate())
 	}
 
 	/// Block until the aggregate [`subscription`](Self::subscription) changes,
@@ -5238,7 +5500,7 @@ impl Request {
 		let (subs, bound) = (state.subscriptions.clone(), state.max_age_bound());
 		drop(state);
 
-		poll_combined_changed(&subs, bound, &mut self.prev_subscription, waiter)
+		poll_combined_changed(&subs, bound, &mut self.prev_subscription, public, waiter)
 	}
 
 	pub(super) fn weak(&self) -> TrackWeak {
@@ -5380,6 +5642,29 @@ mod test {
 		assert_eq!(got.sequence, seq);
 		assert_eq!(got.timestamp, Some(ts));
 		assert_eq!(&got.payload[..], b"hello");
+	}
+
+	/// A datagram answers a NEW_GROUP_REQUEST the way a group does, so the request never
+	/// outlives its answer.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_datagram_answers_a_new_group_request() {
+		let info = Info {
+			dynamic_groups: true,
+			..Info::timed()
+		};
+		let mut producer = track_producer("test", info);
+		producer.append_datagram(Timestamp::ZERO, &b"a"[..]).unwrap();
+		let mut dg = producer.subscribe(Subscription {
+			new_group: NewGroup::new(0, Some(0)),
+			..Default::default()
+		});
+		assert_eq!(recv_datagram(&mut dg).sequence, 0);
+		assert!(producer.new_group().is_some(), "the datagram it joined on asks still");
+
+		producer.append_datagram(Timestamp::ZERO, &b"b"[..]).unwrap();
+		assert_eq!(recv_datagram(&mut dg).sequence, 1);
+		assert_eq!(producer.new_group(), None);
 	}
 
 	#[test]
@@ -5910,7 +6195,7 @@ mod test {
 	/// A group whose frames outlive `max_age` is aged out when the next group starts, but
 	/// a subscriber that already drained it must still see the clean end of group. Otherwise a
 	/// track with long groups (a per-minute rollup, say) fails its readers at every boundary.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	#[cfg(feature = "async")]
 	async fn aging_out_a_finished_group_keeps_the_clean_end() {
 		let producer = track_producer("test", Info::timed());
@@ -5933,7 +6218,7 @@ mod test {
 	/// An actively-read group is not expired out from under its reader: every frame
 	/// read restarts the retention clock. A group nobody reads still ages out on
 	/// schedule, so reclamation stays intact.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	#[cfg(feature = "async")]
 	async fn active_reader_survives_expiry() {
 		let producer = track_producer("test", Info::timed());
@@ -5971,7 +6256,7 @@ mod test {
 	/// alive: the batch is filled (and stamped) once per `Prefetch::CAP` frames,
 	/// which bounds frames, not elapsed time, so a slow `read_frame` reader has to
 	/// re-stamp on a time bound between refills.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	#[cfg(feature = "async")]
 	async fn slow_prefetch_reader_survives_expiry() {
 		let producer = track_producer("test", Info::timed());
@@ -6000,7 +6285,7 @@ mod test {
 	/// Receiving a group is itself a cache access: a subscriber that takes
 	/// delivery just before the group would age out still gets to read it a full
 	/// window later.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	#[cfg(feature = "async")]
 	async fn delivery_restarts_the_expiry_clock() {
 		let producer = track_producer("test", Info::timed());
@@ -6099,7 +6384,7 @@ mod test {
 
 	/// Re-offering a parked group (once the cap rises) is a delivery: it restarts
 	/// the expiry clock so the subscriber gets to read what it was just handed.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	#[cfg(feature = "async")]
 	async fn parked_reoffer_restarts_the_expiry_clock() {
 		let producer = track_producer("test", Info::timed());
@@ -6447,9 +6732,9 @@ mod test {
 	/// A read parked on a superseded group is released by the wall clock alone: nothing is
 	/// written after its successor arrives, so no write could wake it. That holds whether a
 	/// driver collected the pool before the read parked or only after.
-	#[test]
+	#[moq_clock::test]
 	#[cfg(feature = "async")]
-	fn a_parked_read_wakes_at_its_wall_deadline() {
+	async fn a_parked_read_wakes_at_its_wall_deadline() {
 		for (info, primed) in [Info::default(), Info::timed()]
 			.into_iter()
 			.flat_map(|info| [(info.clone(), true), (info, false)])
@@ -6496,9 +6781,9 @@ mod test {
 
 	/// A route's successor whose header landed but whose first frame never does still
 	/// starts the wall clock, so a relay ages the group before it as the origin does.
-	#[test]
+	#[moq_clock::test]
 	#[cfg(feature = "async")]
-	fn a_withheld_successor_ages_its_predecessor() {
+	async fn a_withheld_successor_ages_its_predecessor() {
 		for info in [Info::default(), Info::timed()] {
 			let producer = track_producer("test", info.clone());
 			let at = info.timescale.map(|_| Timestamp::ZERO);
@@ -7008,7 +7293,7 @@ mod test {
 		assert_eq!(drain(&mut subscriber), vec![1]);
 	}
 
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	#[cfg(feature = "async")]
 	async fn a_handed_out_group_expires_while_its_first_frame_is_stalled() {
 		let mut producer = track_producer("test", Info::timed());
@@ -7016,8 +7301,8 @@ mod test {
 		producer.append_group().unwrap();
 
 		let mut stalled = subscriber.recv_group().await.unwrap().expect("stalled group");
-		let pending = moq_net_sim::spawn(async move { stalled.read_frame().await });
-		moq_net_sim::yield_now().await;
+		let pending = moq_clock::sim::spawn(async move { stalled.read_frame().await });
+		moq_clock::sim::yield_now().await;
 		assert!(
 			!pending.is_finished(),
 			"the empty live edge still waits for its first frame"
@@ -7036,7 +7321,7 @@ mod test {
 
 	/// A rewound successor can keep a drained group within budget until its abort
 	/// moves the reach to the next cached group, without changing the track itself.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	#[cfg(feature = "async")]
 	async fn aborted_stamped_successor_wakes_a_parked_read() {
 		let mut producer = track_producer("test", Info::timed());
@@ -7071,7 +7356,7 @@ mod test {
 	/// to be woken by it. The conviction needs a group beyond the held one's successor:
 	/// a group is bounded by where its successor begins, so the successor itself never
 	/// proves it stale.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	#[cfg(feature = "async")]
 	async fn a_handed_out_group_wakes_when_a_newer_group_gets_its_first_timestamp() {
 		let mut producer = track_producer("test", Info::timed());
@@ -7087,8 +7372,8 @@ mod test {
 		assert!(held.read_frame().await.unwrap().is_some());
 
 		let mut live = producer.append_group().unwrap();
-		let pending = moq_net_sim::spawn(async move { held.read_frame().await });
-		moq_net_sim::yield_now().await;
+		let pending = moq_clock::sim::spawn(async move { held.read_frame().await });
+		moq_clock::sim::yield_now().await;
 		assert!(!pending.is_finished(), "the newer group has no timestamp yet");
 
 		// 2s edge against group 0's 1s reach: a full second past the budget.
@@ -7097,7 +7382,7 @@ mod test {
 			bytes::Bytes::from_static(b"live"),
 		)
 		.unwrap();
-		moq_net_sim::yield_now().await;
+		moq_clock::sim::yield_now().await;
 
 		assert!(pending.is_finished(), "the new presentation edge wakes the held reader");
 		// Drained, so the budget ends the group rather than truncating it.
@@ -7454,7 +7739,7 @@ mod test {
 
 	/// A withheld group whose stream ends with no frame, cleanly or reset, shows when it
 	/// ends, which wakes a reader parked on the end.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	#[cfg(feature = "async")]
 	async fn a_withheld_group_that_ends_empty_releases_the_end() {
 		for abort in [false, true] {
@@ -7475,7 +7760,7 @@ mod test {
 					false => group.finish().unwrap(),
 				}
 				producer.reveal_group(&handle);
-				moq_net_sim::timeout(Duration::from_secs(1), next)
+				moq_clock::timeout(Duration::from_secs(1), next)
 					.await
 					.expect("the reveal wakes the reader")
 					.unwrap()
@@ -7502,7 +7787,7 @@ mod test {
 	/// since a live reader is always a little behind the edge. And the reader is parked
 	/// at its group's end when that happens, because the FIN and the next group's first
 	/// frame are separate events and the wire does not order them.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	#[cfg(feature = "async")]
 	async fn real_time_reads_a_live_stream_without_truncating_it() {
 		let producer = track_producer("test", Info::timed());
@@ -7577,7 +7862,7 @@ mod test {
 	///
 	/// Measuring from the group's first frame instead makes the drift 2000ms, so a
 	/// budget shorter than one GOP would drop the tail of every GOP.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	#[cfg(feature = "async")]
 	async fn a_budget_is_measured_from_the_readers_position() {
 		let producer = track_producer("test", Info::timed());
@@ -7624,7 +7909,7 @@ mod test {
 	/// A group the budget ends rather than fails stays ended. `expired` alone would
 	/// turn the clean answer into [`Error::Old`] on the next poll, and a caller is
 	/// allowed to probe again past the end of a group.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	#[cfg(feature = "async")]
 	async fn an_ended_group_stays_ended_when_probed_again() {
 		let mut producer = track_producer("test", Info::timed());
@@ -7636,13 +7921,13 @@ mod test {
 		let mut group = subscriber.recv_group().await.unwrap().expect("group");
 		assert!(group.read_frame().await.unwrap().is_some());
 
-		let probes = moq_net_sim::spawn(async move {
+		let probes = moq_clock::sim::spawn(async move {
 			let first = group.read_frame().await;
 			let second = group.read_frame().await;
 			let finished = group.finished().await;
 			(first, second, finished)
 		});
-		moq_net_sim::yield_now().await;
+		moq_clock::sim::yield_now().await;
 
 		append_at(&mut producer, 1000);
 
@@ -7652,7 +7937,7 @@ mod test {
 		assert!(matches!(finished, Ok(1)), "reporting what it delivered: {finished:?}");
 	}
 
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	#[cfg(feature = "async")]
 	async fn a_drained_group_finishes_cleanly_after_the_live_edge_advances() {
 		let mut producer = track_producer("test", Info::timed());
@@ -7668,7 +7953,7 @@ mod test {
 		assert!(!group.latency_expired());
 	}
 
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	#[cfg(feature = "async")]
 	async fn a_handed_out_partial_frame_expires_while_its_payload_is_stalled() {
 		let mut producer = track_producer("test", Info::timed());
@@ -7688,8 +7973,8 @@ mod test {
 			frame.read_chunk().await.unwrap(),
 			Some(bytes::Bytes::from_static(b"old"))
 		);
-		let pending = moq_net_sim::spawn(async move { frame.read_chunk().await });
-		moq_net_sim::yield_now().await;
+		let pending = moq_clock::sim::spawn(async move { frame.read_chunk().await });
+		moq_clock::sim::yield_now().await;
 		assert!(!pending.is_finished(), "the partial payload is still stalled");
 
 		elapse(&producer, Duration::from_secs(1));
@@ -8134,7 +8419,7 @@ mod test {
 		));
 	}
 
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	#[cfg(feature = "async")]
 	async fn fetched_group_keeps_its_budget_while_reading() {
 		let mut producer = track_producer("test", Info::timed());
@@ -8147,11 +8432,11 @@ mod test {
 		let mut fetched = consumer.fetch_group(0, options).await.unwrap();
 		assert!(fetched.read_frame().await.unwrap().is_some());
 
-		let pending = moq_net_sim::spawn(async move {
+		let pending = moq_clock::sim::spawn(async move {
 			let result = fetched.read_frame().await;
 			(result, fetched.latency_expired())
 		});
-		moq_net_sim::yield_now().await;
+		moq_clock::sim::yield_now().await;
 		elapse(&producer, Duration::from_secs(1));
 		append_at(&mut producer, 1000);
 		append_at(&mut producer, 2000);
@@ -8203,7 +8488,7 @@ mod test {
 
 	/// A one-shot fetch populates the shared cache but never the live arrival cursor,
 	/// so it cannot make content available to a subscription look stale.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	#[cfg(feature = "async")]
 	async fn fetched_group_is_not_a_live_drift_edge() {
 		let mut producer = track_producer("test", Info::timed());
@@ -8438,6 +8723,56 @@ mod test {
 			Poll::Ready(Ok(Some(sub))) => assert_eq!(sub.end, Position::after_group(5)),
 			other => panic!("expected the narrowed aggregate, got {other:?}"),
 		}
+	}
+
+	/// A NEW_GROUP_REQUEST aggregates as the one answered latest, stays out of the public
+	/// subscription, and leaves a subscriber once it is handed a group at or past it.
+	#[test]
+	fn new_group_requests_aggregate_out_of_sight() {
+		let info = Info {
+			dynamic_groups: true,
+			..Info::timed()
+		};
+		let mut producer = track_producer("test", info);
+		let wants = |value, latest| Subscription {
+			new_group: NewGroup::new(value, Some(latest)),
+			..Default::default()
+		};
+		// Answered by group 5 and group 3.
+		let mut a = producer.subscribe(wants(5, 4));
+		let _b = producer.subscribe(wants(0, 2));
+
+		let mut prev = None;
+		let mut poll = |producer: &Producer| {
+			kio::wait(|waiter| producer.poll_new_group(&mut prev, waiter))
+				.now_or_never()
+				.map(|polled| polled.unwrap().map(|new_group| new_group.value))
+		};
+		assert_eq!(poll(&producer), Some(Some(5)));
+		assert_eq!(poll(&producer), None, "unchanged");
+		assert_eq!(producer.subscription().unwrap().new_group, None);
+		let waiter = kio::Waiter::noop();
+		assert!(producer.poll_subscription_changed(&waiter).is_ready());
+
+		producer.create_group(group::Info { sequence: 4 }).unwrap();
+		kio::wait(|waiter| a.poll_recv_group(waiter))
+			.now_or_never()
+			.unwrap()
+			.unwrap()
+			.unwrap();
+		assert_eq!(poll(&producer), None, "group 4 answers neither");
+
+		producer.create_group(group::Info { sequence: 5 }).unwrap();
+		kio::wait(|waiter| a.poll_recv_group(waiter))
+			.now_or_never()
+			.unwrap()
+			.unwrap()
+			.unwrap();
+		assert_eq!(poll(&producer), Some(Some(0)), "the other request remains");
+		assert!(
+			producer.poll_subscription_changed(&waiter).is_pending(),
+			"the public view never saw a request"
+		);
 	}
 
 	/// An [`ArcWake`] that just records that it was woken.
@@ -8860,7 +9195,7 @@ mod test {
 		assert!(done.is_none(), "track completes once the boundary is reached");
 	}
 
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	#[cfg(feature = "async")]
 	async fn readers_end_at_the_boundary_with_missing_lower_groups() {
 		let mut producer = track_producer("test", Info::timed());
@@ -8891,7 +9226,7 @@ mod test {
 	/// A wire subscription's pending tail holds readers at a hole below the end, since a
 	/// lower group's stream may arrive after a higher one, until the hole fills or the tail
 	/// settles. The last producer going ends them regardless.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	#[cfg(feature = "async")]
 	async fn a_pending_tail_holds_readers_at_a_hole() {
 		let mut producer = track_producer("test", None);
@@ -8935,7 +9270,7 @@ mod test {
 
 	/// A fetched copy of a group the live feed still owes never reaches an arrival-order
 	/// reader, so it does not fill the hole: the reader waits for the live group.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	#[cfg(feature = "async")]
 	async fn a_fetched_group_does_not_fill_a_pending_tail() {
 		let mut producer = track_producer("test", None);
@@ -8958,7 +9293,7 @@ mod test {
 
 	/// An abort ends the wait for a pending tail. A group the tail still owed was cut off,
 	/// so readers get the abort rather than a clean end without it.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	#[cfg(feature = "async")]
 	async fn an_abort_errors_a_pending_tail_short_of_a_group() {
 		let mut producer = track_producer("test", None);
@@ -8979,7 +9314,7 @@ mod test {
 
 	/// A reader that got every group ends cleanly, even when the track aborts before the
 	/// reader polls past the last one.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	#[cfg(feature = "async")]
 	async fn an_abort_after_a_full_tail_ends_cleanly() {
 		let mut producer = track_producer("test", None);
@@ -9001,7 +9336,7 @@ mod test {
 
 	/// A gap the grace already gave up on was lost before the abort, not cut off by it, so
 	/// readers end cleanly. Within the grace, the same abort errors them.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	#[cfg(feature = "async")]
 	async fn an_abort_past_the_grace_ends_a_pending_tail_cleanly() {
 		for (waited, ended) in [(ledger::GRACE / 2, false), (ledger::GRACE, true)] {
@@ -9075,7 +9410,7 @@ mod test {
 	/// The wire's end can land after the highest group, with lower groups still owed. A
 	/// reader already past that group stays held at the hole: the end never shows without
 	/// its pending tail.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	#[cfg(feature = "async")]
 	async fn an_end_after_the_highest_group_holds_the_reader() {
 		let mut producer = track_producer("test", None);
@@ -9122,7 +9457,7 @@ mod test {
 		assert!(matches!(res, Err(Error::Timeout)));
 	}
 
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	#[cfg(feature = "async")]
 	async fn local_close_keeps_finished_groups_without_declaring_an_end() {
 		let producer = track_producer("local", Info::timed());
@@ -9135,7 +9470,7 @@ mod test {
 		assert!(consumer.recv_group().await.unwrap().is_none());
 	}
 
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	#[cfg(feature = "async")]
 	async fn local_close_cannot_mask_an_abort_before_declared_end_settles() {
 		let mut producer = track_producer("local", Info::timed());
@@ -9707,7 +10042,7 @@ mod test {
 		);
 	}
 
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	#[cfg(feature = "async")]
 	async fn group_ranges_preserve_the_floor_when_the_cap_changes() {
 		let producer = track_producer("test", Info::timed());
@@ -9978,7 +10313,7 @@ mod test {
 		assert!(matches!(producer.append_group(), Err(Error::BoundsExceeded(_))));
 	}
 
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	#[cfg(feature = "async")]
 	async fn fetch_cache_hit() {
 		let producer = track_producer("test", Info::timed());
@@ -10003,7 +10338,7 @@ mod test {
 		assert!(dynamic.poll_requested_group(&kio::Waiter::noop()).is_pending());
 	}
 
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	#[cfg(feature = "async")]
 	async fn fetch_miss_signals_dynamic() {
 		let producer = track_producer("test", Info::timed());
@@ -10037,7 +10372,7 @@ mod test {
 		assert_eq!(&g.read_frame().await.unwrap().unwrap().payload[..], b"hi");
 	}
 
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	#[cfg(feature = "async")]
 	async fn fetch_miss_rejects() {
 		let producer = track_producer("test", Info::timed());
@@ -10057,7 +10392,7 @@ mod test {
 		assert!(fetch.read().is_empty());
 	}
 
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	#[cfg(feature = "async")]
 	async fn fetch_miss_drop_rejects() {
 		let producer = track_producer("test", Info::timed());
@@ -10077,7 +10412,7 @@ mod test {
 
 	/// A request stays wanted while any joined fetch waits, and once the last leaves it
 	/// is withdrawn: a later fetch starts a fresh request instead of joining it.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	#[cfg(feature = "async")]
 	async fn fetch_request_unused_once_every_fetch_leaves() {
 		let producer = track_producer("test", Info::timed());
@@ -10111,7 +10446,7 @@ mod test {
 
 	/// A fetch abandoned before any handler took it is withdrawn from the queue too, so
 	/// no handler serves it.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	#[cfg(feature = "async")]
 	async fn fetch_abandoned_while_queued_never_reaches_the_handler() {
 		let producer = track_producer("test", Info::timed());
@@ -10126,7 +10461,7 @@ mod test {
 
 	/// The withdrawal happens as the last caller leaves, not when the handler notices: a
 	/// fetch arriving before the handler drops the abandoned request is not failed with it.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	#[cfg(feature = "async")]
 	async fn fetch_after_the_last_caller_left_is_not_dropped() {
 		let producer = track_producer("test", Info::timed());
@@ -10156,7 +10491,7 @@ mod test {
 
 	/// A handler that accepts after every caller left still caches the group, so a fetch
 	/// that queued a fresh request meanwhile resolves from it and that request is moot.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	#[cfg(feature = "async")]
 	async fn fetch_accept_after_withdrawal_caches_the_group() {
 		let producer = track_producer("test", Info::timed());
@@ -10201,7 +10536,7 @@ mod test {
 
 	/// A fetch that hits the cache holds the group until polled, so a handler that aborts
 	/// the group once nobody wants it (an abandoned upstream fetch) leaves it alone.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	#[cfg(feature = "async")]
 	async fn fetch_hit_keeps_the_group_wanted() {
 		let producer = track_producer("test", Info::timed());
@@ -10229,7 +10564,7 @@ mod test {
 	/// An accepted group starts where its request did before anyone can see it, so a
 	/// wider fetch arriving before the handler writes misses instead of being handed a
 	/// reader that would skip the head it asked for.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	#[cfg(feature = "async")]
 	async fn accepted_group_starts_at_the_request() {
 		let producer = track_producer("test", Info::timed());
@@ -10256,7 +10591,7 @@ mod test {
 
 	/// Once a group nobody wanted is aborted, a later fetch misses rather than reading
 	/// the abort, and queues a fresh request.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	#[cfg(feature = "async")]
 	async fn fetch_misses_an_abandoned_group() {
 		let producer = track_producer("test", Info::timed());
@@ -10283,7 +10618,7 @@ mod test {
 		assert!(retry.await.unwrap().read_frame().await.unwrap().is_none());
 	}
 
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	#[cfg(feature = "async")]
 	async fn fetch_reject_does_not_poison_retry() {
 		let producer = track_producer("test", Info::timed());
@@ -10318,7 +10653,7 @@ mod test {
 	/// A group cached from a frame-bounded subscription starts partway in. Serving it to
 	/// someone who asked for the whole group would silently hand back a tail, so it is a
 	/// miss and the fetch goes upstream instead.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	#[cfg(feature = "async")]
 	async fn fetch_ignores_a_group_that_starts_too_late() {
 		let producer = track_producer("test", Info::timed());
@@ -10367,7 +10702,7 @@ mod test {
 	/// A fetch for the head of a live group the feed started partway into keeps that group
 	/// in arrival order: subscribers get the fetched copy while it lasts, and the live
 	/// group again once the fetch is gone.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	#[cfg(feature = "async")]
 	async fn fetch_fills_the_head_of_a_live_group() {
 		let producer = track_producer("test", Info::timed());
@@ -10412,7 +10747,7 @@ mod test {
 	}
 
 	/// A refused mid-group end caps none of its group's copies, even one that fit under it.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	#[cfg(feature = "async")]
 	async fn a_refused_end_leaves_every_copy_uncapped() {
 		let mut producer = track_producer("test", Info::timed());
@@ -10461,7 +10796,7 @@ mod test {
 		(live, head)
 	}
 
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	#[cfg(feature = "async")]
 	async fn a_live_abort_does_not_remove_a_parked_fetched_head() {
 		let producer = track_producer("test", Info::timed());
@@ -10522,7 +10857,7 @@ mod test {
 
 	/// The live copy ending early (its subscription went away) leaves a fetched head
 	/// that still holds the whole group servable, instead of reclaiming the slot.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	#[cfg(feature = "async")]
 	async fn aborted_live_group_keeps_its_fetched_head() {
 		let producer = track_producer("test", Info::timed());
@@ -10541,7 +10876,7 @@ mod test {
 
 	/// Reads land on the fetched head, so they keep the slot from expiring even though
 	/// the live copy beside it sits idle.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	#[cfg(feature = "async")]
 	async fn reading_the_head_keeps_the_slot_from_expiring() {
 		let producer = track_producer("test", Info::timed());
@@ -10591,7 +10926,7 @@ mod test {
 
 	/// A head left alone in its slot still joins the pool's access average when the
 	/// slot is demoted, so memory pressure can evict it.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	#[cfg(feature = "async")]
 	async fn a_head_only_slot_yields_to_memory_pressure() {
 		assert!(pressure_evicts_a_headed_slot(true).await);
@@ -10599,7 +10934,7 @@ mod test {
 
 	/// A slot weighs its copies the way the pool's average samples them, so two copies
 	/// with different access stamps can't keep it above the average on their own.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	#[cfg(feature = "async")]
 	async fn a_two_copy_slot_yields_to_memory_pressure() {
 		assert!(pressure_evicts_a_headed_slot(false).await);
@@ -10607,7 +10942,7 @@ mod test {
 
 	/// Joining a queued fetch widens its range, and a caller that arrives once the range
 	/// is already on the wire fails cleanly rather than being handed the narrower group.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	#[cfg(feature = "async")]
 	async fn fetch_widens_or_fails_cleanly() {
 		let producer = track_producer("test", Info::timed());
@@ -10653,7 +10988,7 @@ mod test {
 		group.finish().unwrap();
 	}
 
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	#[cfg(feature = "async")]
 	async fn fetch_coalesces_concurrent() {
 		let producer = track_producer("test", Info::timed());
@@ -10706,7 +11041,7 @@ mod test {
 
 	/// A looser caller that joined after a tighter budget went on the wire is not failed by
 	/// that budget's `Old`: it asks again with its own.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	#[cfg(feature = "async")]
 	async fn a_late_looser_fetch_asks_again_after_old() {
 		let producer = track_producer("test", Info::timed());
@@ -10733,7 +11068,7 @@ mod test {
 		assert_eq!(loose.await.unwrap().sequence, 5);
 	}
 
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	#[cfg(feature = "async")]
 	async fn fetch_coalesced_reject_fails_all() {
 		let producer = track_producer("test", Info::timed());
@@ -10763,7 +11098,7 @@ mod test {
 		assert_eq!(req.sequence(), 5);
 	}
 
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	#[cfg(feature = "async")]
 	async fn fetch_queued_fails_when_handlers_leave() {
 		let producer = track_producer("test", Info::timed());
@@ -10781,7 +11116,7 @@ mod test {
 		assert!(fetch.read().is_empty());
 	}
 
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	#[cfg(feature = "async")]
 	async fn fetch_miss_no_dynamic_not_found() {
 		// A track with no `Dynamic` can't serve old content, so a cache miss
@@ -10792,7 +11127,7 @@ mod test {
 		assert!(matches!(consumer.fetch_group(5, None).await, Err(Error::NotFound)));
 	}
 
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	#[cfg(feature = "async")]
 	async fn fetch_past_final_not_found() {
 		let producer = track_producer("test", Info::timed());
@@ -10860,7 +11195,7 @@ mod test {
 	}
 
 	/// The latest group is never in the eviction order, so it survives any budget.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	#[cfg(feature = "async")]
 	async fn latest_group_never_evicted() {
 		// Far too small for even one group: the latest survives anyway.
@@ -10881,7 +11216,7 @@ mod test {
 	/// A FETCH cache hit refreshes the group's access time: anything accessed more
 	/// recently than the pool-wide average is protected, so the eviction walk skips
 	/// it and evicts a never-read group instead, even one that arrived later.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	#[cfg(feature = "async")]
 	async fn fetch_refresh_survives_eviction() {
 		let (mut producer, _pool) = pooled_producer(10_000);
@@ -10911,7 +11246,7 @@ mod test {
 
 	/// A consumer holding an evicted group surfaces the eviction, not a hang or a
 	/// truncated clean end.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	#[cfg(feature = "async")]
 	async fn eviction_aborts_readers() {
 		let (mut producer, _pool) = pooled_producer(10_000);
@@ -10987,7 +11322,7 @@ mod test {
 	/// Accepting a track after pre-accept backfill must keep the same write
 	/// counter: the counter is owned by the track state, so replacing the info
 	/// can't strand the bytes already-created groups keep charging.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	#[cfg(feature = "async")]
 	async fn accept_preserves_write_accounting() {
 		let config = cache::Config::default()
@@ -11181,7 +11516,7 @@ mod test {
 	/// A backfill served before the track was accepted settles its own debt: the
 	/// account exists from the moment the state does, so acceptance replacing the
 	/// `Info` can't leave already-created groups writing for free.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	#[cfg(feature = "async")]
 	async fn pre_accept_backfill_settles_late_writes() {
 		let config = cache::Config::default()
@@ -11250,7 +11585,7 @@ mod test {
 
 	/// Continuously refreshed entries at the front of the eviction order must not
 	/// starve expiry of entries behind them: the scan cursor rotates.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	#[cfg(feature = "async")]
 	async fn refreshed_front_does_not_starve_expiry() {
 		let (producer, _pool) = pooled_producer(1 << 40);
@@ -11385,7 +11720,7 @@ mod test {
 
 	/// A stale arrival entry whose sequence was later re-served by fetched backfill
 	/// must not leak the replacement into arrival-order subscriptions.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	#[cfg(feature = "async")]
 	async fn refilled_sequence_stays_out_of_subscriptions() {
 		let (producer, _pool) = pooled_producer(1 << 40);
@@ -11422,7 +11757,7 @@ mod test {
 
 	/// An expired backfill can't hide behind a refreshed one: the eviction-order
 	/// expiry scans a bounded prefix instead of stopping at the first fresh entry.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	#[cfg(feature = "async")]
 	async fn expired_backfill_behind_refreshed_reclaimed() {
 		let (producer, _pool) = pooled_producer(1 << 40);
@@ -11458,7 +11793,7 @@ mod test {
 
 	/// A FETCH hit within the same coarse clock tick still protects the group: the
 	/// refresh stamps one tick ahead, so it reads strictly newer than the mean.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	#[cfg(feature = "async")]
 	async fn same_tick_fetch_protects() {
 		// No time advances at all: every timestamp lands in the same tick.
@@ -11481,7 +11816,7 @@ mod test {
 	/// A refetched group that reclaims max_sequence is the live edge again: it must
 	/// not re-enter the eviction order, or memory pressure could evict the newest
 	/// content.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	#[cfg(feature = "async")]
 	async fn refetched_latest_stays_protected() {
 		let (producer, _pool) = pooled_producer(10_000);
@@ -11523,7 +11858,7 @@ mod test {
 
 	/// An evicted group is a cache miss, so a fetch re-fetches it and the accepted
 	/// replacement serves the sequence again (not `Error::Duplicate`).
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	#[cfg(feature = "async")]
 	async fn eviction_allows_refetch() {
 		let (mut producer, _pool) = pooled_producer(10_000);
@@ -11592,7 +11927,7 @@ mod test {
 
 	/// A fetched (backfill) group is served by sequence but never replayed to
 	/// arrival-order subscribers.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	#[cfg(feature = "async")]
 	async fn fetched_backfill_not_subscribed() {
 		let (producer, _pool) = pooled_producer(1 << 40);
@@ -11628,7 +11963,7 @@ mod test {
 
 	/// Fetched backfill isn't in arrival order, so it ages out through the eviction
 	/// order instead of lingering until the track closes.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	#[cfg(feature = "async")]
 	async fn expired_backfill_reclaimed() {
 		let (producer, pool) = pooled_producer(1 << 40);
@@ -11769,7 +12104,7 @@ mod test {
 		));
 	}
 
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	#[cfg(feature = "async")]
 	async fn fetch_aborts_with_track() {
 		let producer = track_producer("test", Info::timed());
