@@ -4171,8 +4171,8 @@ fn session_connect_and_close() {
 /// place its reason shows while the loop retries.
 #[test]
 fn session_failure_names_a_failing_dial() {
-	// Hang up on every connection, so the certificate fetch an `http://` dial starts with
-	// fails. Holding the listener keeps a parallel test from taking the port.
+	// Hang up on every connection, so a WebSocket dial fails fast. Holding the listener
+	// keeps a parallel test from taking the port.
 	let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
 	let port = listener.local_addr().expect("local addr").port();
 	std::thread::spawn(move || {
@@ -4180,7 +4180,7 @@ fn session_failure_names_a_failing_dial() {
 			drop(stream);
 		}
 	});
-	let url = format!("http://127.0.0.1:{port}/");
+	let url = format!("ws://127.0.0.1:{port}/");
 	let cb = Callback::new();
 	let session = id(unsafe {
 		moq_session_connect(

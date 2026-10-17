@@ -573,10 +573,12 @@ impl Shared {
 		}
 	}
 
-	/// Record the error the loop gave up with, for [`Connection::closed`].
+	/// Record the error the loop gave up with, for [`Connection::closed`]. Nothing is
+	/// retrying anymore, so [`Monitor::failure`] stops reporting.
 	fn failed(&self, err: Error) {
 		if let Ok(mut state) = self.state.write() {
 			state.error = Some(err);
+			state.failure = None;
 		}
 	}
 }
@@ -866,8 +868,13 @@ impl Connection {
 					// persistent producers meanwhile so consumers track the live stats across the
 					// connection, and draining any predecessor left over from a migration.
 					let ended = run_session(shared, &session, &mut draining).await;
-					// Before any status moves, so a watcher woken by `Disconnected` finds why.
-					if let Ended::Closed(Err(err)) = &ended {
+					// Before any status moves, so a watcher woken by `Disconnected` finds why. Only
+					// a retry has a reason to report; a session that ends the loop reports through
+					// `closed` instead.
+					if let Ended::Closed(Err(err)) = &ended
+						&& client.reconnect
+						&& !err.is_terminal()
+					{
 						shared.retrying(err);
 					}
 
@@ -2226,6 +2233,29 @@ mod tests {
 		assert_eq!(status, Status::Connected);
 		assert!(monitor.failure().is_none(), "the connect must clear the failure");
 		let _session = tokio::time::timeout(WAIT, accepted.recv()).await.unwrap().unwrap();
+	}
+
+	/// A session that ends the loop reports through `closed`, not as a retry reason.
+	#[cfg(feature = "tcp")]
+	#[tokio::test]
+	async fn a_session_that_ends_the_loop_reports_no_failure() {
+		const WAIT: Duration = Duration::from_secs(10);
+
+		let (addr, mut accepted, _task) = serve(crate::origin::spawn()).await;
+		let client = crate::connect::Config::default()
+			.init(Default::default())
+			.unwrap()
+			.with_reconnect(false);
+		let connection = client.connect(url(&format!("tcp://{addr}/")));
+		let monitor = connection.monitor();
+
+		let session = tokio::time::timeout(WAIT, accepted.recv()).await.unwrap().unwrap();
+		session.abort(moq_net::Error::App(7));
+		let closed = tokio::time::timeout(WAIT, connection.closed())
+			.await
+			.expect("the connection did not close");
+		assert!(closed.is_err(), "the abort ends the loop with an error");
+		assert!(monitor.failure().is_none(), "nothing is retrying");
 	}
 
 	/// A settled answer from one candidate ends the walk instead of being buried.
