@@ -12,7 +12,6 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::time::Instant;
 
 use tokio::sync::oneshot;
 
@@ -700,7 +699,7 @@ async fn follow_reservation(
 			max = next;
 			control = Control::new(Policy::new(max));
 		}
-		let Some(bitrate) = control.update(estimate, Instant::now()) else {
+		let Some(bitrate) = control.update(estimate, moq_clock::now()) else {
 			continue;
 		};
 
@@ -921,12 +920,13 @@ impl MoqVideoConsumer {
 	/// frame. Also fails with [`MoqError::Unsupported`] when
 	/// [`surface`](MoqVideoDecoderOutput::surface) is set on a platform with no surface to expose.
 	///
-	/// A rendition whose [`broadcast`](crate::media::MoqVideo::broadcast) names another broadcast
-	/// is subscribed there, so `name` is always read from the broadcast the catalog points at.
+	/// `id` is the rendition's catalog key. Its [`track`](crate::media::MoqVideo::track), or `id`
+	/// when unset, is subscribed in the broadcast its
+	/// [`broadcast`](crate::media::MoqVideo::broadcast) reference names.
 	#[uniffi::constructor]
 	pub async fn subscribe(
 		broadcast: &MoqBroadcastConsumer,
-		name: String,
+		id: String,
 		catalog_video: crate::media::MoqVideo,
 		output: MoqVideoDecoderOutput,
 	) -> Result<Arc<MoqVideoConsumer>, MoqError> {
@@ -946,7 +946,7 @@ impl MoqVideoConsumer {
 
 		let consumer = broadcast
 			.driver
-			.watch(async { Ok(moq_video::decode::Consumer::new(&resolved, &cfg, name, options).await?) })
+			.watch(async { Ok(moq_video::decode::Consumer::new(&resolved, &cfg, id, options).await?) })
 			.await?;
 
 		Ok(Arc::new(MoqVideoConsumer {

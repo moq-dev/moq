@@ -35,10 +35,6 @@ workspace-wide lint ratchet follow in m2.
 Public API: breaking wherever a crate exposes an instant or a time source.
 Wire: none.
 
-## Required
-
-- [moq-net on moq-clock](/quest/m1/time/net.md) - these crates consume moq-net's instant
-
 ## Related
 
 - [Time test sweep](/quest/m2/time-test-sweep.md) - unrelated test-only/private clock cleanup and global lint are deferred; migrate production/public APIs and their required regression tests here

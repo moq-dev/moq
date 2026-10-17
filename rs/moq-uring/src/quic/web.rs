@@ -429,8 +429,10 @@ struct State {
 ///
 /// [`Request::respond`] builds the web
 /// flavor; [`Session::raw`] wraps a raw-QUIC [`Connection`] with the layering
-/// disabled. Clones share the session.
+/// disabled. Clones share the session; dropping the last closes the connection.
 pub struct Session {
+	// Capsule tasks retain Web/Connection, but only public session handles own this.
+	handles: Rc<()>,
 	conn: Connection,
 	web: Option<Rc<Web>>,
 	/// What [`protocol`](web_transport_trait::poll::Session::protocol)
@@ -470,12 +472,19 @@ impl Session {
 	pub fn raw(conn: Connection) -> Self {
 		let protocol = web_transport_trait::poll::Session::protocol(&conn).map(str::to_owned);
 		Self {
+			handles: Rc::new(()),
 			conn,
 			web: None,
 			protocol,
 			opening_uni: None,
 			opening_bi: None,
 		}
+	}
+
+	/// Change the underlying connection's flow-control limits; see
+	/// [`Connection::set_limits`].
+	pub fn set_limits(&self, limits: super::Limits) -> Result<(), crate::Error> {
+		self.conn.set_limits(limits)
 	}
 
 	/// Assemble the web flavor and spawn its capsule reader.
@@ -537,6 +546,7 @@ impl Session {
 			.spawn(async move { read_capsules(capsules, capsule_conn, recv).await });
 
 		Self {
+			handles: Rc::new(()),
 			conn,
 			web: Some(web),
 			protocol,
@@ -557,11 +567,20 @@ impl Session {
 impl Clone for Session {
 	fn clone(&self) -> Self {
 		Self {
+			handles: self.handles.clone(),
 			conn: self.conn.clone(),
 			web: self.web.clone(),
 			protocol: self.protocol.clone(),
 			opening_uni: None,
 			opening_bi: None,
+		}
+	}
+}
+
+impl Drop for Session {
+	fn drop(&mut self) {
+		if Rc::strong_count(&self.handles) == 1 {
+			web_transport_trait::poll::Session::close(self, 0, "dropped");
 		}
 	}
 }
@@ -953,6 +972,13 @@ impl web_transport_trait::poll::RecvStream for RecvStream {
 
 	fn poll_read(&mut self, cx: &mut Context<'_>, dst: &mut [u8]) -> Poll<Result<Option<usize>, Self::Error>> {
 		match web_transport_trait::poll::RecvStream::poll_read(&mut self.inner, cx, dst) {
+			Poll::Ready(Err(err)) => Poll::Ready(Err(self.map(err))),
+			other => other,
+		}
+	}
+
+	fn poll_read_chunk(&mut self, cx: &mut Context<'_>, max: usize) -> Poll<Result<Option<Bytes>, Self::Error>> {
+		match web_transport_trait::poll::RecvStream::poll_read_chunk(&mut self.inner, cx, max) {
 			Poll::Ready(Err(err)) => Poll::Ready(Err(self.map(err))),
 			other => other,
 		}

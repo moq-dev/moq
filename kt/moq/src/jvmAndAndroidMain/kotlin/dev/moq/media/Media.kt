@@ -66,9 +66,15 @@ typealias Target = uniffi.moq.MoqMediaTarget
 typealias Named = uniffi.moq.MoqMediaTarget.Named
 /** A subscriber-requested track. */
 typealias Requested = uniffi.moq.MoqMediaTarget.Requested
-/** A track name, container, and live delivery options. */
+/** A catalog rendition: its ID (catalog key) and its video or audio config. */
+typealias Rendition = uniffi.moq.MoqRendition
+/** A catalog video rendition. */
+typealias VideoRendition = uniffi.moq.MoqRendition.Video
+/** A catalog audio rendition. */
+typealias AudioRendition = uniffi.moq.MoqRendition.Audio
+/** A catalog rendition and live delivery options. */
 typealias TrackConfig = uniffi.moq.MoqMediaTrackConfig
-/** A fetched group name, sequence, container, and delivery options. */
+/** A catalog rendition's group sequence and fetch delivery options. */
 typealias GroupConfig = uniffi.moq.MoqMediaGroupConfig
 /** The packaging advertised for a media track. */
 typealias Container = uniffi.moq.MoqContainer

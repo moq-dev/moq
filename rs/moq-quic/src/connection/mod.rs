@@ -3918,6 +3918,27 @@ impl Connection {
         Some(packet.payload.to_vec())
     }
 
+    /// Encrypts `payload` as this connection's next packet in `space`, untracked, so tests can
+    /// send frames a correct peer never would
+    #[cfg(test)]
+    pub(crate) fn forge_packet(&mut self, now: Instant, space: SpaceId, payload: &[u8]) -> Vec<u8> {
+        let mut buf = Vec::new();
+        let builder = PacketBuilder::new(
+            now,
+            space,
+            self.rem_cids.active(),
+            &mut buf,
+            usize::MAX,
+            0,
+            true,
+            self,
+        )
+        .expect("connection can still send");
+        buf.extend_from_slice(payload);
+        builder.finish(self, now, &mut buf);
+        buf
+    }
+
     /// The number of bytes of packets containing retransmittable frames that have not been
     /// acknowledged or declared lost.
     #[cfg(test)]

@@ -1,4 +1,4 @@
-import { Milli, Nano } from "@moq/clock";
+import { Milli } from "@moq/clock";
 import { type Dispose, type GetPromise, type Getter, race, Signal } from "@moq/signals";
 import * as announce from "../announced.ts";
 import type { Grant } from "../auth.ts";
@@ -8,7 +8,6 @@ import { BroadcastCache } from "../consume.ts";
 import * as DatagramStream from "../datagram_stream.ts";
 import {
 	closeError,
-	controlTimeout,
 	error,
 	ProtocolViolation,
 	reason,
@@ -26,8 +25,8 @@ import { Tail } from "../tail.ts";
 import type { Timescale, Timestamp } from "../time.ts";
 import type * as track from "../track.ts";
 import { untilAborted } from "../util/abort.ts";
+import { Deadline, requestOptions } from "../util/deadline.ts";
 import { LIMITS, type Limits, SlotMap, Slots } from "../util/limits.ts";
-import { TimeoutError, withTimeout } from "../util/timeout.ts";
 import { overrideBroadcastWire, wireOf } from "../wire.ts";
 import type { Session } from "./adapter.ts";
 import { DuplicateTrackAlias, RetiredTrackAlias, TrackAliases } from "./aliases.ts";
@@ -67,11 +66,6 @@ import {
 } from "./subscribe_namespace.ts";
 import { MalformedAuthToken } from "./token.ts";
 import { Version } from "./version.ts";
-
-// Bound on how long stream-open plus SUBSCRIBE_OK may take. Browsers cap
-// concurrent QUIC streams (Chrome ~100); past the cap openBi() silently
-// blocks. The timeout turns that into a clear error.
-const SUBSCRIBE_OK_TIMEOUT_MS = 10_000;
 
 // Wire ceiling (2^62-1). A draining session stamps it on every live route so any other
 // candidate outranks it, while the route stays selectable as the last path. Matches Rust
@@ -443,10 +437,14 @@ export class Subscriber {
 
 		try {
 			// v16: use a real bidi stream (not virtual control stream)
-			const stream =
-				version === Version.DRAFT_16 && this.#session.openNativeBi
-					? await this.#session.openNativeBi()
-					: await this.#session.openBi();
+			const deadline = new Deadline();
+			const stream = await deadline.wait(
+				deadline.open(
+					version === Version.DRAFT_16 && this.#session.openNativeBi
+						? this.#session.openNativeBi(requestOptions)
+						: this.#session.openBi(requestOptions),
+				),
+			);
 
 			try {
 				// Draft-18+ uses SUBSCRIBE_NAMESPACE (0x50); earlier drafts use the
@@ -671,7 +669,8 @@ export class Subscriber {
 		// flows back via `state` so the timeout path can clean up the stream
 		// and any registration if setup eventually finishes.
 		const state: SubscribeSetupState = {};
-		const setup = this.#openSubscribe(state, broadcast, request, subscription, requestId);
+		const deadline = new Deadline();
+		const setup = this.#openSubscribe(state, broadcast, request, subscription, requestId, deadline);
 
 		// The publisher can be serving before it answers, so waiting only on the response
 		// would miss the local side going away and leave it serving a track nobody reads.
@@ -694,11 +693,7 @@ export class Subscriber {
 		const abandoned = new Error("subscribe abandoned before it was accepted");
 		try {
 			// Returning demand keeps the same setup and its original deadline.
-			const accepted = withTimeout(
-				setup,
-				Nano.fromMilli(Milli(SUBSCRIBE_OK_TIMEOUT_MS)),
-				`subscribe timed out after ${SUBSCRIBE_OK_TIMEOUT_MS}ms waiting for SUBSCRIBE_OK (browser stream limit reached?)`,
-			);
+			const accepted = deadline.wait(setup);
 			for (;;) {
 				const result = await untilAborted(race([accepted, waitAbandoned()]), valid);
 				if (result !== null) {
@@ -713,12 +708,7 @@ export class Subscriber {
 		} catch (err) {
 			// A control request that timed out is not late content, so it carries its own code.
 			// Local abandonment must commit without yielding after the demand check.
-			const e =
-				err === abandoned
-					? abandoned
-					: err instanceof TimeoutError
-						? controlTimeout(err)
-						: await sessionCause(this.#quic, err);
+			const e = err === abandoned ? abandoned : await sessionCause(this.#quic, err);
 			request.reject(e);
 			console.warn(
 				`subscribe error: id=${requestId} broadcast=${broadcast} track=${request.name} error=${reason(e)}`,
@@ -895,10 +885,16 @@ export class Subscriber {
 		request: track.Request,
 		subscription: Subscription,
 		requestId: bigint,
+		deadline: Deadline,
 	): Promise<{ stream: Stream; alias: bigint }> {
 		const version = this.#session.version;
 
-		state.stream = await this.#session.openBi();
+		const legacy = version === Version.DRAFT_14 || version === Version.DRAFT_15 || version === Version.DRAFT_16;
+		// Virtual streams use no transport credit. Their owner must send UNSUBSCRIBE before
+		// resetting them, including on a deadline, so they stay out of the real-stream guard.
+		state.stream = legacy
+			? await this.#session.openBi()
+			: await deadline.open(this.#session.openBi(requestOptions));
 
 		// The timeout can fire while the open is still in flight, in which case cleanup ran
 		// with nothing to release. Bail now that the stream is recorded, so settling this
@@ -906,7 +902,6 @@ export class Subscriber {
 		// A legacy ID is already spent and cannot be skipped. Its virtual open is local,
 		// so finish this request and let cleanup send UNSUBSCRIBE, even if retirement
 		// won the await above. No response data is released from the canceled setup.
-		const legacy = version === Version.DRAFT_14 || version === Version.DRAFT_15 || version === Version.DRAFT_16;
 		if (state.cancelled && !legacy) throw new Error("subscribe cancelled before it was sent");
 
 		await state.stream.writer.u53(Subscribe.id);

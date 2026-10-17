@@ -2,6 +2,7 @@
 //! Sender identity comes from the broadcast, not the payload.
 
 use crate::Error;
+use moq_clock::Instant;
 use moq_net::{broadcast, track};
 use std::{
 	collections::VecDeque,
@@ -9,7 +10,6 @@ use std::{
 	task::{Poll, ready},
 	time::Duration,
 };
-use web_async::time::Instant;
 
 /// Name of the track carrying the chat window.
 pub const TRACK: &str = "chat";
@@ -24,7 +24,7 @@ pub type Event = moq_json::window::Event<String>;
 /// module left kio. Built on web-async so tokio::time::pause advances it in tests.
 struct Deadline {
 	at: Option<Instant>,
-	sleep: Option<Pin<Box<web_async::time::Sleep>>>,
+	sleep: Option<Pin<Box<moq_clock::Sleep>>>,
 }
 
 impl Deadline {
@@ -44,10 +44,8 @@ impl Deadline {
 
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
 		let Some(at) = self.at else { return Poll::Pending };
-		let sleep = self
-			.sleep
-			.get_or_insert_with(|| Box::pin(web_async::time::sleep_until(at)));
-		if sleep.is_elapsed() {
+		let sleep = self.sleep.get_or_insert_with(|| Box::pin(moq_clock::sleep_until(at)));
+		if at <= moq_clock::now() {
 			return Poll::Ready(());
 		}
 		waiter.poll_future(sleep.as_mut())
@@ -94,12 +92,12 @@ impl Publisher {
 		self.prune()?;
 		self.producer
 			.push(moq_net::Timed::from(&text.to_owned()).at(moq_net::Timestamp::now()))?;
-		self.expires.push_back(Instant::now() + HISTORY);
+		self.expires.push_back(moq_clock::now() + HISTORY);
 		Ok(())
 	}
 
 	fn prune(&mut self) -> Result<(), Error> {
-		let now = Instant::now();
+		let now = moq_clock::now();
 		let count = self.expires.iter().take_while(|expires| **expires <= now).count();
 		if count == 0 {
 			return Ok(());

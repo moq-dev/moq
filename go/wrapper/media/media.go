@@ -45,6 +45,12 @@ type (
 	ContainerCmaf = ffi.MoqContainerCmaf
 	// ContainerLoc is the low-overhead container variant of Container; build one with LocContainer.
 	ContainerLoc = ffi.MoqContainerLoc
+	// Rendition is a catalog rendition: its ID (catalog key) and config. Build one with VideoRendition or AudioRendition.
+	Rendition = ffi.MoqRendition
+	// RenditionVideo is the video variant of Rendition; build one with VideoRendition.
+	RenditionVideo = ffi.MoqRenditionVideo
+	// RenditionAudio is the audio variant of Rendition; build one with AudioRendition.
+	RenditionAudio = ffi.MoqRenditionAudio
 
 	// AudioInit describes an audio codec and its initialization bytes.
 	AudioInit = ffi.MoqAudioInit
@@ -234,37 +240,35 @@ func NewCatalogConsumer(ctx context.Context, broadcast *moq.BroadcastConsumer) (
 	return &CatalogConsumer{inner: inner}, nil
 }
 
-// TrackConfig names a media track, its container, and live delivery options.
+// TrackConfig names a catalog rendition and live delivery options.
 type TrackConfig struct {
-	Name         string
-	Container    Container
+	Rendition    Rendition
 	Subscription *moq.Subscription
 }
 
-// NewTrackConsumer subscribes to and decodes a media track.
+// NewTrackConsumer subscribes to and decodes a catalog rendition, following its broadcast and track.
 func NewTrackConsumer(ctx context.Context, broadcast *moq.BroadcastConsumer, config TrackConfig) (*TrackConsumer, error) {
 	sub, err := bridge.Subscription(config.Subscription)
 	if err != nil {
 		return nil, err
 	}
-	inner, err := ffi.MoqMediaTrackConsumerSubscribe(ctx, bridge.BroadcastConsumer(broadcast), ffi.MoqMediaTrackConfig{Name: config.Name, Container: config.Container, Subscription: sub})
+	inner, err := ffi.MoqMediaTrackConsumerSubscribe(ctx, bridge.BroadcastConsumer(broadcast), ffi.MoqMediaTrackConfig{Rendition: config.Rendition, Subscription: sub})
 	if err != nil {
 		return nil, err
 	}
 	return &TrackConsumer{inner: inner}, nil
 }
 
-// GroupConfig names a group, its container, and fetch delivery options.
+// GroupConfig names a catalog rendition's group and fetch delivery options.
 type GroupConfig struct {
-	Name      string
+	Rendition Rendition
 	Sequence  uint64
-	Container Container
 	Options   *moq.FetchGroupOptions
 }
 
-// FetchGroup fetches and decodes exactly one media group.
+// FetchGroup fetches and decodes exactly one group of a catalog rendition, following its broadcast and track.
 func FetchGroup(ctx context.Context, broadcast *moq.BroadcastConsumer, config GroupConfig) (*GroupConsumer, error) {
-	inner, err := ffi.MoqMediaGroupConsumerFetch(ctx, bridge.BroadcastConsumer(broadcast), ffi.MoqMediaGroupConfig{Name: config.Name, Sequence: config.Sequence, Container: config.Container, Options: config.Options})
+	inner, err := ffi.MoqMediaGroupConsumerFetch(ctx, bridge.BroadcastConsumer(broadcast), ffi.MoqMediaGroupConfig{Rendition: config.Rendition, Sequence: config.Sequence, Options: config.Options})
 	if err != nil {
 		return nil, err
 	}
@@ -283,6 +287,16 @@ func NewGroupConsumer(group *moq.GroupConsumer, container Container) (*GroupCons
 		return nil, err
 	}
 	return &GroupConsumer{inner: inner}, nil
+}
+
+// VideoRendition selects the video rendition the catalog lists under id.
+func VideoRendition(id string, config Video) Rendition {
+	return RenditionVideo{Id: id, Config: config}
+}
+
+// AudioRendition selects the audio rendition the catalog lists under id.
+func AudioRendition(id string, config Audio) Rendition {
+	return RenditionAudio{Id: id, Config: config}
 }
 
 // LegacyContainer selects the legacy hang container for a media subscription.

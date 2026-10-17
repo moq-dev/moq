@@ -25,6 +25,7 @@ use objc2_core_video::{
 use objc2_metal::{MTLPixelFormat, MTLTextureType};
 
 use super::source::{Layout, Source};
+use crate::color::Range;
 use crate::frame::apple::PixelBuffer;
 use crate::{Color, Error, Size};
 
@@ -111,13 +112,13 @@ impl Import {
 
 		// The pixel format names the layout and the range (video swing vs full
 		// swing).
-		let (layout, range_is_full) = match format {
-			f if f == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange => (Layout::Nv12, false),
-			f if f == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange => (Layout::Nv12, true),
+		let (layout, range) = match format {
+			f if f == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange => (Layout::Nv12, Range::Limited),
+			f if f == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange => (Layout::Nv12, Range::Full),
 			// Rare: a pool configured for planar output rather than the NV12
 			// every hardware decoder produces. Cheap to support and it keeps the
 			// import from being NV12-only by construction.
-			f if f == kCVPixelFormatType_420YpCbCr8Planar => (Layout::I420, false),
+			f if f == kCVPixelFormatType_420YpCbCr8Planar => (Layout::I420, Range::Limited),
 			f => return Err(err(format!("cannot import pixel format {f:#x}"))),
 		};
 
@@ -125,9 +126,7 @@ impl Import {
 		// copies out of the stream's VUI, so an imported frame and the same frame
 		// downloaded to the CPU are read the same way. The planar format carries no
 		// such attachment, so it falls back to the size guess.
-		let color = buffer
-			.color()
-			.unwrap_or_else(|| Color::infer(size).with_range(!range_is_full));
+		let color = buffer.color().unwrap_or_else(|| Color::infer(size).with_range(range));
 
 		let (plane0, plane1, plane2) = match layout {
 			Layout::Nv12 => {

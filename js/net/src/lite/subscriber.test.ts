@@ -1,5 +1,5 @@
 import { expect, jest, spyOn, test } from "bun:test";
-import { Milli } from "@moq/clock";
+import { Manual, Milli, Nano } from "@moq/clock";
 import { Signal } from "@moq/signals";
 import type { Grant } from "../auth.ts";
 import type { Probe as ProbeStats } from "../connection/stats.ts";
@@ -12,6 +12,7 @@ import { type AnnounceBroadcast, AnnounceInit, AnnounceOk, encodeAnnounceBroadca
 import { Group } from "./group.ts";
 import { Probe } from "./probe.ts";
 import { StreamId } from "./stream.ts";
+import { encodeSubscribeResponse, SubscribeEnd } from "./subscribe.ts";
 import { SUBSCRIBE_SETUP_TIMEOUT_MS, Subscriber } from "./subscriber.ts";
 import { Track, TrackInfo } from "./track.ts";
 import { Version } from "./version.ts";
@@ -862,6 +863,8 @@ interface FakeStream {
 	written: Uint8Array[];
 	// Hands the stream to the subscriber, for an open the session was told to park.
 	release: () => void;
+	// Fails every later write with `reason`, as a peer's STOP_SENDING does. Resolves on the first.
+	stop: (reason: unknown) => Promise<void>;
 }
 
 // A session whose streams the test answers by hand and that never fails them on its own, so
@@ -884,6 +887,7 @@ function fakeSession(park: number[] = [], stall: number[] = []) {
 			let onFinish!: () => void;
 			let onWrite!: () => void;
 			let release!: () => void;
+			let stopped: { reason: unknown; refused: () => void } | undefined;
 			const reading = new Promise<void>((resolve) => (onRead = resolve));
 			const aborted = new Promise<unknown>((resolve) => (onAbort = resolve));
 			const finished = new Promise<void>((resolve) => (onFinish = resolve));
@@ -902,6 +906,10 @@ function fakeSession(park: number[] = [], stall: number[] = []) {
 			const written: Uint8Array[] = [];
 			const writable = new WritableStream<Uint8Array>({
 				write: (chunk) => {
+					if (stopped) {
+						stopped.refused();
+						return Promise.reject(stopped.reason);
+					}
 					written.push(new Uint8Array(chunk));
 					onWrite();
 					return new Promise<void>((resolve) => {
@@ -921,7 +929,11 @@ function fakeSession(park: number[] = [], stall: number[] = []) {
 			});
 			const opened = new Promise((resolve) => (release = () => resolve({ readable, writable })));
 			if (!park.includes(streams.length)) release();
-			streams.push({ inbound, reading, aborted, finished, writing, written, release });
+			const stop = (reason: unknown) =>
+				new Promise<void>((refused) => {
+					stopped = { reason, refused };
+				});
+			streams.push({ inbound, reading, aborted, finished, writing, written, release, stop });
 			count.set(streams.length);
 			return opened;
 		},
@@ -1076,7 +1088,7 @@ test("a lite subscribe whose SUBSCRIBE write stalls past the deadline closes its
 
 		jest.advanceTimersByTime(SUBSCRIBE_SETUP_TIMEOUT_MS);
 		await track.closed;
-		await streams[0].finished;
+		await streams[0].aborted;
 	} finally {
 		subscriber.close();
 		warn.mockRestore();
@@ -1699,6 +1711,79 @@ test("a publisher FIN without SUBSCRIBE_END still violates an open subscription"
 	}
 });
 
+// A publisher that finishes the track stops reading its subscribe stream, so a SUBSCRIBE_UPDATE
+// written then fails. The track still ends with the publisher's finish; a reset still fails it.
+test.each([
+	["lite-05 finish", Version.DRAFT_05, "finish"],
+	["lite-06 finish", Version.DRAFT_06, "finish"],
+	["lite-07 finish", Version.DRAFT_07, "finish"],
+	["lite-07 reset", Version.DRAFT_07, "reset"],
+] as const)("an update the publisher stopped reading defers to its %s", async (_, version, end) => {
+	const { quic, streams, opened } = fakeSession();
+	const subscriber = new Subscriber(quic, version, HopSchema.parse(1n));
+	const broadcast = subscriber.consume(Path.from("room"));
+	const track = broadcast.track("video").subscribe();
+	try {
+		await opened(0);
+		await answerTrackInfo(streams[0], version);
+		const stream = await opened(1);
+		await stream.reading;
+
+		const stopped = Object.assign(new Error("The stream was aborted by the remote server"), {
+			source: "stream",
+			streamErrorCode: StreamCode.Cancel,
+		});
+		const refused = stream.stop(stopped);
+		track.update({ priority: 1 });
+		await refused;
+		await drainReactions();
+		expect(track.closed.peek()).toBeUndefined();
+
+		if (end === "finish") {
+			const chunks: Uint8Array[] = [];
+			const writer = new Writer(
+				new WritableStream<Uint8Array>({ write: (chunk) => void chunks.push(new Uint8Array(chunk)) }),
+				version,
+			);
+			await encodeSubscribeResponse(writer, { end: new SubscribeEnd(0) }, version);
+			for (const chunk of chunks) stream.inbound.enqueue(chunk);
+			stream.inbound.close();
+			expect(await track.closed).toBeNull();
+		} else {
+			stream.inbound.error(
+				Object.assign(new Error("reset"), { source: "stream", streamErrorCode: StreamCode.NotFound }),
+			);
+			const err = await track.closed;
+			expect(err).toBeInstanceOf(StreamError);
+			expect((err as StreamError).code).toBe(StreamCode.NotFound);
+		}
+	} finally {
+		track.close();
+		broadcast.close();
+		subscriber.close();
+	}
+});
+
+// Only a failed write defers to the responses: an update the wire can't carry still fails the
+// track. Lite-05 sends the start group plus one, past the largest u53 here.
+test("an update whose bound the wire can't carry fails the track", async () => {
+	const { quic, streams, opened } = fakeSession();
+	const subscriber = new Subscriber(quic, Version.DRAFT_05, HopSchema.parse(1n));
+	const broadcast = subscriber.consume(Path.from("room"));
+	const track = broadcast.track("video").subscribe();
+	try {
+		await opened(0);
+		await answerTrackInfo(streams[0], Version.DRAFT_05);
+		await (await opened(1)).reading;
+		track.update({ groups: { start: { included: Number.MAX_SAFE_INTEGER } } });
+		expect(await track.closed).toBeInstanceOf(RangeError);
+	} finally {
+		track.close();
+		broadcast.close();
+		subscriber.close();
+	}
+});
+
 test("a retired subscribe response type closes the session", async () => {
 	const { quic, streams, opened, closes } = fakeSession();
 	const subscriber = new Subscriber(quic, Version.DRAFT_07, HopSchema.parse(1n));
@@ -1740,5 +1825,38 @@ test("closing a broadcast while TRACK_INFO is pending leaves no unhandled reject
 	} finally {
 		process.off("unhandledRejection", onUnhandled);
 		subscriber.close();
+	}
+});
+
+test.each(["answer", "credit"] as const)("FETCH shares the TRACK deadline while waiting for %s", async (stage) => {
+	const clock = new Manual();
+	const restore = clock.install();
+	const { quic, streams, opened } = fakeSession(stage === "credit" ? [1] : []);
+	const subscriber = new Subscriber(quic, Version.DRAFT_07, HopSchema.parse(1n));
+	let failure: unknown;
+	const fetch = subscriber.fetchGroup(Path.from("room"), "video", 0).catch((err: unknown) => {
+		failure = err;
+	});
+	try {
+		await opened(0);
+		await streams[0].reading;
+		await clock.advanceAsync(Nano.fromMilli(Milli(5_000)));
+		await answerTrackInfo(streams[0], Version.DRAFT_07);
+		await opened(1);
+		if (stage === "answer") await streams[1].reading;
+		await clock.advanceAsync(Nano.fromMilli(Milli(4_999)));
+		expect(failure).toBeUndefined();
+		await clock.advanceAsync(Nano.fromMilli(Milli(1)));
+		await fetch;
+		if (stage === "answer") expect((failure as StreamError).code).toBe(StreamCode.ControlTimeout);
+		else {
+			expect((failure as Error).name).toBe("NoStreamCredit");
+			streams[1].release();
+			await streams[1].aborted;
+			expect(streams[1].written).toEqual([]);
+		}
+	} finally {
+		subscriber.close();
+		restore();
 	}
 });
