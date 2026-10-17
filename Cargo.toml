@@ -155,6 +155,7 @@ moq-audio = { version = "0.1.10", path = "rs/moq-audio", default-features = fals
 moq-auth = { version = "0.2.1", path = "rs/moq-auth" }
 moq-clock = { version = "0.11.0", path = "rs/moq-clock" }
 moq-clock-macros = { version = "0.1.0", path = "rs/moq-clock/macros" }
+moq-e2ee = { version = "0.0.11", path = "rs/moq-e2ee" }
 moq-flate = { version = "0.2.0", path = "rs/moq-flate" }
 moq-hls = { version = "0.5.11", path = "rs/moq-hls", default-features = false }
 moq-ice = { version = "0.1.0", path = "rs/moq-ice" }

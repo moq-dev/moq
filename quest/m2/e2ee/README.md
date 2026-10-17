@@ -45,9 +45,6 @@ The Rust and TypeScript cores expose the same surface, and nothing else:
 
 ## Required
 
-- [Rust protected publisher seams](/quest/m2/e2ee/rust-publish.md) - Rust media
-  and catalog publishers accept opaque physical names and emit no plaintext
-  semantic catalog in E2EE mode
 - [Encrypted browser components](/quest/m2/e2ee/browser.md) - browser publish
   and watch components handle encrypted audio and video without leaking
   credentials into browser-owned surfaces
@@ -57,6 +54,8 @@ The Rust and TypeScript cores expose the same surface, and nothing else:
 - [Cross-language encrypted proof](/quest/m2/e2ee/interop.md) - browser
   TypeScript and native Rust exchange encrypted media both ways, with relays
   forwarding and metering blind
+- [Encrypted viewer feedback](/quest/m2/e2ee/echo.md) - a protected broadcast
+  solicits `.echo` reports that relays cannot read
 
 ## Closes
 

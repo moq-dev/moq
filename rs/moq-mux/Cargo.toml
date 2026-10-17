@@ -42,6 +42,10 @@ tracing = { workspace = true }
 url = { workspace = true }
 webm-iterable = "0.7"
 
+# aws-lc does not build for wasm32-unknown-unknown; browsers encrypt with @moq/e2ee.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+moq-e2ee = { workspace = true }
+
 [dev-dependencies]
 criterion = { workspace = true }
 futures = { workspace = true }
@@ -51,6 +55,10 @@ tracing-test = { workspace = true, features = ["no-env-filter"] }
 
 [[bench]]
 name = "catalog"
+harness = false
+
+[[bench]]
+name = "e2ee"
 harness = false
 
 [[bench]]

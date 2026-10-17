@@ -458,6 +458,23 @@ fn track_produced_once_per_generation() {
 }
 
 #[test]
+fn refused_track_is_aborted() {
+	let generation = test_generation();
+	let name = generation.name("video").unwrap();
+	drop(generation.produce(net_track(&name)).unwrap());
+	// The same physical name on another output, as a clone of the generation would claim it.
+	let net = net_track(&name);
+	assert_eq!(
+		generation.produce(net.clone()).map(|_| ()).unwrap_err().to_string(),
+		"reuse"
+	);
+	assert!(matches!(
+		net.poll_closed(&kio::Waiter::noop()),
+		Poll::Ready(moq_net::Error::Cancel)
+	));
+}
+
+#[test]
 fn wrong_track_name_is_identity() {
 	let generation = test_generation();
 	let net = moq_net::broadcast::Info::new()

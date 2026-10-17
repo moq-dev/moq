@@ -162,14 +162,25 @@ impl Producer {
 	/// # Errors
 	///
 	/// [`Error::Identity`] if the track name is not a physical name, [`Error::Reuse`] if
-	/// this generation already produced it.
+	/// this generation already produced it. Either way `track` is aborted.
 	pub fn produce(&self, track: moq_net::track::Producer) -> Result<track::Producer> {
-		let name: Name = track.name().parse()?;
+		match self.claim(track.name()) {
+			Ok((group, datagram)) => Ok(track::Producer::new(track, group, datagram)),
+			// Its subscribers should see the refusal, not the track vanish.
+			Err(err) => {
+				let _ = track.abort(moq_net::Error::Cancel);
+				Err(err)
+			}
+		}
+	}
+
+	/// Claim a physical name, returning its grouped-frame and datagram keys.
+	fn claim(&self, name: &str) -> Result<(TrackKey, TrackKey)> {
+		let name: Name = name.parse()?;
 		if !self.claims.lock().expect("claims").insert(name) {
 			return Err(Error::Reuse);
 		}
-		Ok(track::Producer::new(
-			track,
+		Ok((
 			self.consumer.key(&name, Domain::Group)?,
 			self.consumer.key(&name, Domain::Datagram)?,
 		))

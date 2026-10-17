@@ -27,12 +27,16 @@
 //!   record per aligned segment, mapping a span of content time to the group
 //!   ranges that carry it on each track, so consumers can seek or build
 //!   HLS/DASH playlists without downloading media.
+//! - [`e2ee`] encrypts a whole broadcast with `moq-e2ee`, hiding its catalog
+//!   and track names from relays.
 
 pub mod binary;
 pub mod catalog;
 mod clock;
 pub mod codec;
 pub mod container;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod e2ee;
 mod error;
 pub mod import;
 mod jitter;

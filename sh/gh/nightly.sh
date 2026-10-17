@@ -47,7 +47,7 @@ case "${1:-}" in
         run cargo bench --locked --no-fail-fast -p moq-relay -p moq-stats -p moq-mux -p moq-rtmp -p moq-uring -p moq-pattern \
             -p moq-quic --features moq-stats/bench \
             --bench http_idle --bench auth --bench producer_tick --bench decode --bench aggregate \
-            --bench catalog --bench ts_schedule --bench export --bench containers --bench matching \
+            --bench catalog --bench e2ee --bench ts_schedule --bench export --bench containers --bench matching \
             --bench chunk_interleaving --bench worker_turns \
             --bench streams --bench receive --bench endpoint --bench wire -- --test
         # moq-gst's catalog bench shares a target name with moq-mux's, so it runs on its own.

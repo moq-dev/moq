@@ -4866,6 +4866,7 @@ dependencies = [
  "kio 0.6.2",
  "memchr",
  "moq-clock",
+ "moq-e2ee",
  "moq-flate",
  "moq-json",
  "moq-loc",

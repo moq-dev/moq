@@ -233,8 +233,10 @@ under one credential, whether for a replica or a later run: two instances on
 one epoch derive the same keys from the same group sequences and repeat
 AES-GCM nonces. The broadcast path is an opaque name
 derived from the credential and a semantic name such as `foo.hang`; it carries
-no format marker. `moq-e2ee` is the Rust implementation. Relays need no
-configuration to carry it.
+no format marker. `moq-e2ee` is the Rust implementation. In Rust, publish a
+hang broadcast locally as usual and let `moq-mux`'s `e2ee::Producer` carry it:
+the catalog and every track it lists go out under physical names, and the MSF
+catalog is not published. Relays need no configuration to carry it.
 
 ## Your own format
 

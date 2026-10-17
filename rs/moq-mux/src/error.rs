@@ -52,6 +52,15 @@ pub enum Error {
 	#[error("a locally published track can't reference another broadcast")]
 	ForeignBroadcast,
 
+	/// Encryption failed.
+	#[cfg(not(target_arch = "wasm32"))]
+	#[error("e2ee: {0}")]
+	E2ee(#[from] moq_e2ee::Error),
+
+	/// An encrypted broadcast cannot carry this part of the catalog.
+	#[error("an encrypted broadcast cannot carry {0}")]
+	Unencryptable(&'static str),
+
 	/// Error parsing or building CMAF moof+mdat fragments.
 	#[error("cmaf: {0}")]
 	Cmaf(#[from] crate::container::fmp4::Error),
