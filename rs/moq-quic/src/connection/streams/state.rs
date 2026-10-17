@@ -2,6 +2,7 @@ use std::{
     collections::{VecDeque, hash_map},
     convert::TryFrom,
     mem,
+    ops::Range,
 };
 
 use bytes::BufMut;
@@ -670,6 +671,7 @@ impl StreamsState {
 
     /// Write STREAM and DATAGRAM frames in schedule order until the packet is full.
     ///
+    /// `payload` is the packet's frame space in `buf`, which may already hold control frames.
     /// A datagram cannot be split, so one too large for the room left ends the packet and
     /// leads the next one. Only when it would leave the packet empty, which a packet clamped
     /// below the path MTU can, does it step aside for what fits behind it, since
@@ -677,9 +679,10 @@ impl StreamsState {
     pub(crate) fn write_frames(
         &mut self,
         buf: &mut Vec<u8>,
-        max_buf_size: usize,
+        payload: Range<usize>,
         fair: bool,
     ) -> WrittenFrames {
+        let max_buf_size = payload.end;
         let mut written = WrittenFrames::default();
         while buf.len() + frame::Stream::SIZE_BOUND < max_buf_size {
             // Pop the next frame to send. A stream leaves the schedule once it has nothing
@@ -690,7 +693,7 @@ impl StreamsState {
                 Some(Next::Datagram(group)) => {
                     let (_, frame) = self.pending.datagram(group);
                     if buf.len() + frame > max_buf_size {
-                        if written.datagrams > 0 || !written.streams.is_empty() {
+                        if buf.len() > payload.start {
                             break;
                         }
                         self.pending.defer_datagram(group);
@@ -1707,7 +1710,7 @@ mod tests {
         high.write(b"high").unwrap();
 
         let mut buf = Vec::with_capacity(40);
-        let meta = server.write_frames(&mut buf, 40, true).streams;
+        let meta = server.write_frames(&mut buf, 0..40, true).streams;
         assert_eq!(meta[0].id, id_high);
         assert_eq!(meta[1].id, id_mid);
         assert_eq!(meta[2].id, id_low);
@@ -1745,7 +1748,7 @@ mod tests {
             assert_eq!(low.write(b"low").unwrap(), 3);
 
             let mut buf = Vec::with_capacity(40);
-            let mut sent = server.write_frames(&mut buf, 40, fair).streams;
+            let mut sent = server.write_frames(&mut buf, 0..40, fair).streams;
             assert_eq!(sent.len(), 1);
             let lost = sent.pop().unwrap();
             assert_eq!(lost.id, id_low);
@@ -1767,7 +1770,7 @@ mod tests {
             assert_eq!(high.write(b"high").unwrap(), 4);
 
             buf.clear();
-            let sent = server.write_frames(&mut buf, 40, fair).streams;
+            let sent = server.write_frames(&mut buf, 0..40, fair).streams;
             assert_eq!(sent.len(), 2);
             assert_eq!(sent[0].id, id_high);
             assert_eq!(sent[0].offsets, 0..4);
@@ -1828,7 +1831,7 @@ mod tests {
         high.set_priority(-1).unwrap();
 
         let mut buf = Vec::with_capacity(1000);
-        let meta = server.write_frames(&mut buf, 40, true).streams;
+        let meta = server.write_frames(&mut buf, 0..40, true).streams;
         assert_eq!(meta.len(), 1);
         assert_eq!(meta[0].id, id_high);
 
@@ -1836,7 +1839,7 @@ mod tests {
         assert_eq!(server.pending.len(), 2);
 
         // Send the remaining data. The initial mid priority one should go first now
-        let meta = server.write_frames(&mut buf, 1000, true).streams;
+        let meta = server.write_frames(&mut buf, 0..1000, true).streams;
         assert_eq!(meta.len(), 2);
         assert_eq!(meta[0].id, id_mid);
         assert_eq!(meta[1].id, id_high);
@@ -1897,7 +1900,9 @@ mod tests {
             // loop until all the streams are written
             loop {
                 let buf_len = buf.len();
-                let meta = server.write_frames(&mut buf, buf_len + 40, fair).streams;
+                let meta = server
+                    .write_frames(&mut buf, buf_len..buf_len + 40, fair)
+                    .streams;
                 if meta.is_empty() {
                     break;
                 }
@@ -1968,7 +1973,9 @@ mod tests {
 
         // Write the first chunk of stream_a
         let buf_len = buf.len();
-        let meta = server.write_frames(&mut buf, buf_len + 40, false).streams;
+        let meta = server
+            .write_frames(&mut buf, buf_len..buf_len + 40, false)
+            .streams;
         assert!(!meta.is_empty());
         metas.extend(meta);
 
@@ -1985,7 +1992,9 @@ mod tests {
         // loop until all the streams are written
         loop {
             let buf_len = buf.len();
-            let meta = server.write_frames(&mut buf, buf_len + 40, false).streams;
+            let meta = server
+                .write_frames(&mut buf, buf_len..buf_len + 40, false)
+                .streams;
             if meta.is_empty() {
                 break;
             }
@@ -2908,7 +2917,7 @@ mod tests {
         };
         stream.write(b"hello world").unwrap();
         let mut buf = Vec::new();
-        let sent = stream.state.write_frames(&mut buf, 100, true).streams;
+        let sent = stream.state.write_frames(&mut buf, 0..100, true).streams;
         stream.reset_to(7u32.into(), 4).unwrap();
         assert!(pending.reset_stream.is_empty());
         assert_eq!(server.buffered_data, 4);
@@ -2916,7 +2925,7 @@ mod tests {
         // The prefix is lost and resent, without what followed it
         server.retransmit(sent[0].clone());
         buf.clear();
-        let resent = server.write_frames(&mut buf, 100, true).streams;
+        let resent = server.write_frames(&mut buf, 0..100, true).streams;
         assert_eq!(resent[0].offsets, 0..4);
         assert_eq!(server.received_ack_of(resent[0].clone()), Some(4));
         assert_eq!(server.buffered_data, 0);
@@ -2981,7 +2990,7 @@ mod tests {
         };
         stream.write(b"hello world").unwrap();
         let mut buf = Vec::new();
-        let sent = stream.state.write_frames(&mut buf, 100, true).streams;
+        let sent = stream.state.write_frames(&mut buf, 0..100, true).streams;
         stream.reset_to(7u32.into(), 4).unwrap();
 
         server.reset_acked(id, 4);
@@ -3057,7 +3066,7 @@ mod tests {
         };
         stream.write(b"hello world").unwrap();
         let mut buf = Vec::new();
-        let sent = stream.state.write_frames(&mut buf, 100, true).streams;
+        let sent = stream.state.write_frames(&mut buf, 0..100, true).streams;
         assert_eq!(sent[0].offsets, 0..11);
         stream.reset_to(7u32.into(), 4).unwrap();
         assert_eq!(server.buffered_data, 4);
@@ -3065,7 +3074,7 @@ mod tests {
         // Only the lost prefix is retransmitted, without the FIN of a stream that was never finished
         server.retransmit(sent[0].clone());
         buf.clear();
-        let resent = server.write_frames(&mut buf, 100, true).streams;
+        let resent = server.write_frames(&mut buf, 0..100, true).streams;
         assert_eq!(resent.len(), 1);
         assert_eq!(resent[0].offsets, 0..4);
         assert!(!resent[0].fin);

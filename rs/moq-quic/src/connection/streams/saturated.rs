@@ -29,6 +29,9 @@ const PACKET: usize = 1200;
 /// overdraw by a frame, at both the group and the domain tier.
 const SLACK: u64 = 2 * PACKET as u64;
 
+/// A PING frame's one byte, standing in for the control frames ahead of the streams.
+const PING: u8 = 0x01;
+
 /// A sender with more queued than the path takes, drained a packet at a time.
 struct Sender {
     state: StreamsState,
@@ -142,8 +145,15 @@ impl Sender {
 
     /// Send one packet of `size` bytes, returning its stream frames.
     fn packet_of(&mut self, size: usize) -> Vec<StreamMeta> {
+        self.packet_after(&[], size)
+    }
+
+    /// Send one packet of `size` bytes that already holds the control frames `prefix`,
+    /// returning its stream frames.
+    fn packet_after(&mut self, prefix: &[u8], size: usize) -> Vec<StreamMeta> {
         let mut buf = Vec::with_capacity(size);
-        let written = self.state.write_frames(&mut buf, size, true);
+        buf.extend_from_slice(prefix);
+        let written = self.state.write_frames(&mut buf, 0..size, true);
         let frames = written.streams;
 
         // The packet's frames in order, and the wire bytes its datagrams took.
@@ -162,10 +172,11 @@ impl Sender {
                     datagram_bytes += wire;
                     self.order.push(Sent::Datagram(tag));
                 }
+                Frame::Ping => {}
                 frame => panic!("unexpected {frame:?}"),
             }
         }
-        let stream_bytes = buf.len() as u64 - datagram_bytes;
+        let stream_bytes = (buf.len() - prefix.len()) as u64 - datagram_bytes;
 
         // Every frame carries its length but perhaps the last, which can run to the
         // end of the packet instead.
@@ -722,6 +733,22 @@ fn a_clamped_packet_sends_what_fits() {
 
     sender.packet_of(500);
     assert_eq!(sender.order, [Sent::Stream(stream)]);
+    assert_eq!(sender.drain_frames(1)[0], Sent::Datagram(large));
+}
+
+/// A packet already holding a control frame is not empty, so a datagram that no longer
+/// fits ends it rather than letting lower-ranked data ahead.
+#[test]
+fn a_datagram_behind_control_frames_ends_the_packet() {
+    let mut sender = Sender::new();
+    let group = sender.group(0);
+    let large = sender.datagram(Some(&group), 1, 1_000);
+    sender.open(Some(&group), 0, 2_000);
+
+    // The DATAGRAM frame (type, two-byte length, payload) would fill the packet alone,
+    // but a PING is already in it.
+    sender.packet_after(&[PING], 1 + 2 + 1_000);
+    assert_eq!(sender.order, []);
     assert_eq!(sender.drain_frames(1)[0], Sent::Datagram(large));
 }
 

@@ -3667,9 +3667,11 @@ impl Connection {
 
         // STREAM and DATAGRAM, interleaved in schedule order
         if space_id == SpaceId::Data {
-            let written = self
-                .streams
-                .write_frames(buf, max_size, self.config.send_fairness);
+            let written = self.streams.write_frames(
+                buf,
+                pre_payload_len..max_size,
+                self.config.send_fairness,
+            );
             sent.stream_frames = written.streams;
             sent.non_retransmits |= written.datagrams > 0;
             self.stats.frame_tx.stream += sent.stream_frames.len() as u64;
