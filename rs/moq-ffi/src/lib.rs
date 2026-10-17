@@ -1,3 +1,5 @@
+#![cfg_attr(test, allow(clippy::disallowed_methods))]
+
 //! UniFFI bindings for [`moq_net`].
 //!
 //! Provides a Kotlin/Swift-compatible API for real-time pub/sub over QUIC.

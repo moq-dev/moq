@@ -51,7 +51,7 @@ macro_rules! record {
 		let edges = Rc::new(RefCell::new(Vec::new()));
 		let log = edges.clone();
 		let demand = $demand;
-		drop(moq_net_sim::spawn(async move {
+		drop(moq_clock::sim::spawn(async move {
 			while demand.used().await.is_ok() {
 				log.borrow_mut().push(true);
 				if demand.unused().await.is_err() {
@@ -91,10 +91,10 @@ async fn one_used_edge(version: &str, relays: usize, reorder: bool) {
 	let requests = Rc::new(RefCell::new(Vec::new()));
 	let track_edges = Rc::new(RefCell::new(None));
 	let served = (requests.clone(), track_edges.clone());
-	let publisher = moq_net_sim::spawn(async move {
+	let publisher = moq_clock::sim::spawn(async move {
 		while let Ok(request) = dynamic.requested_track().await {
 			served.1.borrow_mut().get_or_insert_with(|| record!(request.demand()));
-			moq_net_sim::sleep(STARTUP).await;
+			moq_clock::sleep(STARTUP).await;
 			let track = request.accept(timed());
 			let mut group = track.append_group().unwrap();
 			group.write_frame(Timestamp::ZERO, b"key".as_ref()).unwrap();
@@ -103,7 +103,7 @@ async fn one_used_edge(version: &str, relays: usize, reorder: bool) {
 	});
 
 	let consumer = nodes.last().unwrap().consume();
-	moq_net_sim::timeout(TIMEOUT, consumer.routed("room"))
+	moq_clock::timeout(TIMEOUT, consumer.routed("room"))
 		.await
 		.unwrap_or_else(|_| panic!("{label}: never announced"))
 		.unwrap();
@@ -112,19 +112,19 @@ async fn one_used_edge(version: &str, relays: usize, reorder: bool) {
 	let subscribing = remote.track("video").unwrap().subscribe(None);
 	if reorder {
 		// The TRACK stream opens at once; the SUBSCRIBE only once TRACK_INFO is back.
-		moq_net_sim::sleep(Duration::from_millis(1)).await;
+		moq_clock::sleep(Duration::from_millis(1)).await;
 		reader.hold_bidis();
 	}
-	let mut subscriber = moq_net_sim::timeout(TIMEOUT, subscribing)
+	let mut subscriber = moq_clock::timeout(TIMEOUT, subscribing)
 		.await
 		.unwrap_or_else(|_| panic!("{label}: subscribe stalled"))
 		.unwrap_or_else(|err| panic!("{label}: subscribe failed: {err}"));
 	if reorder {
-		moq_net_sim::sleep(LATENCY * 20).await;
+		moq_clock::sleep(LATENCY * 20).await;
 		reader.release_bidis();
 	}
 
-	let mut received = moq_net_sim::timeout(TIMEOUT, subscriber.recv_group())
+	let mut received = moq_clock::timeout(TIMEOUT, subscriber.recv_group())
 		.await
 		.unwrap_or_else(|_| panic!("{label}: no group arrived"))
 		.unwrap()
@@ -132,7 +132,7 @@ async fn one_used_edge(version: &str, relays: usize, reorder: bool) {
 	received.read_frame().await.unwrap().expect("the group has a frame");
 
 	// Stay subscribed while every hop settles.
-	moq_net_sim::sleep(Duration::from_secs(2)).await;
+	moq_clock::sleep(Duration::from_secs(2)).await;
 	assert_eq!(requests.borrow().len(), 1, "{label}: asked for the track again");
 	let track_edges = track_edges.borrow().clone().expect("the track was requested");
 	assert_eq!(*broadcast_edges.borrow(), [true], "{label}: broadcast demand");
@@ -142,17 +142,17 @@ async fn one_used_edge(version: &str, relays: usize, reorder: bool) {
 	drop(received);
 	drop(subscriber);
 	let track = requests.borrow()[0].0.clone();
-	moq_net_sim::timeout(TIMEOUT, track.demand().unused())
+	moq_clock::timeout(TIMEOUT, track.demand().unused())
 		.await
 		.unwrap_or_else(|_| panic!("{label}: demand outlived the reader"))
 		.unwrap();
-	moq_net_sim::sleep(Duration::from_millis(100)).await;
+	moq_clock::sleep(Duration::from_millis(100)).await;
 	assert_eq!(*broadcast_edges.borrow(), [true, false], "{label}: broadcast demand");
 	assert_eq!(*track_edges.borrow(), [true, false], "{label}: track demand");
 	publisher.abort();
 }
 
-#[moq_net_sim::test]
+#[moq_clock::test]
 async fn direct() {
 	for version in VERSIONS {
 		one_used_edge(version, 0, false).await;
@@ -160,7 +160,7 @@ async fn direct() {
 	}
 }
 
-#[moq_net_sim::test]
+#[moq_clock::test]
 async fn through_a_relay() {
 	for version in VERSIONS {
 		one_used_edge(version, 1, false).await;
@@ -189,7 +189,7 @@ async fn bare_handle_is_lazy(version: &str, relays: usize) {
 
 	let requests = Rc::new(RefCell::new(Vec::new()));
 	let served = requests.clone();
-	let publisher = moq_net_sim::spawn(async move {
+	let publisher = moq_clock::sim::spawn(async move {
 		while let Ok(request) = dynamic.requested_track().await {
 			let track = request.accept(timed());
 			let mut group = track.append_group().unwrap();
@@ -199,14 +199,14 @@ async fn bare_handle_is_lazy(version: &str, relays: usize) {
 	});
 
 	let consumer = nodes.last().unwrap().consume();
-	moq_net_sim::timeout(TIMEOUT, consumer.routed("room"))
+	moq_clock::timeout(TIMEOUT, consumer.routed("room"))
 		.await
 		.unwrap_or_else(|_| panic!("{label}: never announced"))
 		.unwrap();
 	let remote = consumer.request_broadcast("room", None).await.unwrap();
 
 	let handle = remote.track("video").unwrap();
-	moq_net_sim::sleep(Duration::from_secs(1)).await;
+	moq_clock::sleep(Duration::from_secs(1)).await;
 	assert!(
 		requests.borrow().is_empty(),
 		"{label}: a bare handle asked for the track"
@@ -215,11 +215,11 @@ async fn bare_handle_is_lazy(version: &str, relays: usize) {
 
 	// A held query reaches the publisher, and holds the track there until dropped.
 	let mut query = handle.query();
-	moq_net_sim::timeout(TIMEOUT, &mut query)
+	moq_clock::timeout(TIMEOUT, &mut query)
 		.await
 		.unwrap_or_else(|_| panic!("{label}: query stalled"))
 		.unwrap_or_else(|err| panic!("{label}: query failed: {err}"));
-	moq_net_sim::sleep(Duration::from_secs(1)).await;
+	moq_clock::sleep(Duration::from_secs(1)).await;
 	assert_eq!(
 		requests.borrow().len(),
 		1,
@@ -228,24 +228,24 @@ async fn bare_handle_is_lazy(version: &str, relays: usize) {
 	let track = requests.borrow()[0].0.clone();
 	assert!(track.demand().is_used(), "{label}: a held query let go");
 	drop(query);
-	moq_net_sim::timeout(TIMEOUT, track.demand().unused())
+	moq_clock::timeout(TIMEOUT, track.demand().unused())
 		.await
 		.unwrap_or_else(|_| panic!("{label}: a dropped query is still demand"))
 		.unwrap();
 
 	// A subscription ending leaves the held handle unread at both ends.
-	let mut subscriber = moq_net_sim::timeout(TIMEOUT, handle.subscribe(None))
+	let mut subscriber = moq_clock::timeout(TIMEOUT, handle.subscribe(None))
 		.await
 		.unwrap_or_else(|_| panic!("{label}: subscribe stalled"))
 		.unwrap_or_else(|err| panic!("{label}: subscribe failed: {err}"));
-	moq_net_sim::timeout(TIMEOUT, subscriber.recv_group())
+	moq_clock::timeout(TIMEOUT, subscriber.recv_group())
 		.await
 		.unwrap_or_else(|_| panic!("{label}: no group arrived"))
 		.unwrap()
 		.expect("the track is live");
 	assert!(track.demand().is_used(), "{label}: the subscription is not demand");
 	drop(subscriber);
-	moq_net_sim::timeout(TIMEOUT, track.demand().unused())
+	moq_clock::timeout(TIMEOUT, track.demand().unused())
 		.await
 		.unwrap_or_else(|_| panic!("{label}: the publisher still reads the track as used"))
 		.unwrap();
@@ -257,14 +257,14 @@ async fn bare_handle_is_lazy(version: &str, relays: usize) {
 	publisher.abort();
 }
 
-#[moq_net_sim::test]
+#[moq_clock::test]
 async fn bare_handle_is_lazy_direct() {
 	for version in VERSIONS {
 		bare_handle_is_lazy(version, 0).await;
 	}
 }
 
-#[moq_net_sim::test]
+#[moq_clock::test]
 async fn bare_handle_is_lazy_through_a_relay() {
 	for version in VERSIONS {
 		bare_handle_is_lazy(version, 1).await;
@@ -274,7 +274,7 @@ async fn bare_handle_is_lazy_through_a_relay() {
 /// Held TRACK streams count against the server's subscription cap, and each SUBSCRIBE
 /// takes over its TRACK's place: a client at the cap still subscribes to every track it
 /// holds without a demand gap, and one more TRACK closes the session.
-#[moq_net_sim::test]
+#[moq_clock::test]
 async fn held_tracks_share_the_cap_with_their_subscriptions() {
 	const CAP: usize = 3;
 
@@ -303,7 +303,7 @@ async fn held_tracks_share_the_cap_with_their_subscriptions() {
 		options.server_limits = Some(limits);
 		let pair = connect_mock(options).await;
 
-		let remote = moq_net_sim::timeout(TIMEOUT, client.consume().routed_broadcast("room"))
+		let remote = moq_clock::timeout(TIMEOUT, client.consume().routed_broadcast("room"))
 			.await
 			.expect("announce timeout")
 			.unwrap();
@@ -313,41 +313,41 @@ async fn held_tracks_share_the_cap_with_their_subscriptions() {
 		for i in 0..CAP {
 			let track = remote.track(&format!("t{i}")).unwrap();
 			let mut query = track.query();
-			moq_net_sim::timeout(TIMEOUT, &mut query)
+			moq_clock::timeout(TIMEOUT, &mut query)
 				.await
 				.unwrap_or_else(|_| panic!("{version}: t{i} info stalled"))
 				.unwrap_or_else(|err| panic!("{version}: t{i} info refused: {err}"));
 			held.push((track, query));
 		}
-		moq_net_sim::sleep(Duration::from_secs(1)).await;
+		moq_clock::sleep(Duration::from_secs(1)).await;
 		for (i, (.., edges)) in tracks.iter().enumerate().take(CAP) {
 			assert_eq!(*edges.borrow(), [true], "{version}: t{i} is not held");
 		}
 
 		let mut subscribers = Vec::new();
 		for (i, (track, _)) in held.iter().enumerate() {
-			let mut subscriber = moq_net_sim::timeout(TIMEOUT, track.subscribe(None))
+			let mut subscriber = moq_clock::timeout(TIMEOUT, track.subscribe(None))
 				.await
 				.unwrap_or_else(|_| panic!("{version}: t{i} subscribe stalled"))
 				.unwrap_or_else(|err| panic!("{version}: t{i} refused at the cap: {err}"));
-			moq_net_sim::timeout(TIMEOUT, subscriber.recv_group())
+			moq_clock::timeout(TIMEOUT, subscriber.recv_group())
 				.await
 				.unwrap_or_else(|_| panic!("{version}: t{i} delivered nothing"))
 				.unwrap()
 				.expect("the track is live");
 			subscribers.push(subscriber);
 		}
-		moq_net_sim::sleep(Duration::from_secs(1)).await;
+		moq_clock::sleep(Duration::from_secs(1)).await;
 		for (i, (.., edges)) in tracks.iter().enumerate().take(CAP) {
 			assert_eq!(*edges.borrow(), [true], "{version}: t{i} demand");
 		}
 
 		// The subscriptions alone fill the cap now.
-		let refused = moq_net_sim::timeout(TIMEOUT, remote.track(&format!("t{CAP}")).unwrap().query())
+		let refused = moq_clock::timeout(TIMEOUT, remote.track(&format!("t{CAP}")).unwrap().query())
 			.await
 			.expect("info timeout");
 		assert!(refused.is_err(), "{version}: one more TRACK was admitted");
-		let err = moq_net_sim::timeout(TIMEOUT, pair.client.closed())
+		let err = moq_clock::timeout(TIMEOUT, pair.client.closed())
 			.await
 			.unwrap_or_else(|_| panic!("{version}: the session stayed open"));
 		assert!(

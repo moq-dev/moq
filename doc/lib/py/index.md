@@ -50,10 +50,8 @@ async def main():
             print(announcement.captures)  # what * matched, or None for a partial overlap
             broadcast = await client.request_broadcast(announcement.prefix)
             catalog = await moq.media.catalog(broadcast)
-            name, audio = next(iter(catalog.audio.items()))
-            # The track is the rendition's `track` when set, otherwise its catalog key.
-            track = audio.track if audio.track is not None else name
-            async for frame in await moq.media.TrackConsumer.subscribe(broadcast, track, audio.container):
+            id, audio = next(iter(catalog.audio.items()))
+            async for frame in await moq.media.TrackConsumer.subscribe(broadcast, id, audio):
                 print(frame.timestamp, len(frame.payload))
 
 asyncio.run(main())
@@ -104,7 +102,8 @@ asyncio.run(main())
 ## Things to know
 
 The rest of the [shared feature list](/lib/#what-every-binding-can-do) maps
-one to one; the API reference has the names.
+one to one; the API reference has the names, and [Layers](/lib/layers)
+shows which module holds each.
 
 - **Context managers.** `async with` on a client or session awaits a graceful shutdown when the body exits cleanly, and cancels at once when it raises, so your exception survives.
 - **Audio needs cuts.** Video groups at its keyframes, but audio forms a group only where you call `cut()`: after every frame, or at a segment cadence to align with video.

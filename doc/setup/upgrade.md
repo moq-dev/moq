@@ -196,6 +196,16 @@ These land with the next breaking release, not the 2026-09-23 train.
   Kotlin, `package:moq/media.dart` in Dart, and `Media` in Swift. Go fetches a
   group with `media.FetchGroup`; its `NewGroupConsumer` decodes
   a raw group instead.
+- **Media subscribe and fetch take a catalog rendition.** `MoqMediaTrackConfig`
+  and `MoqMediaGroupConfig` replace `name` and `container` with a `rendition`
+  (`MoqRendition::Video` or `Audio`: the rendition's catalog `id` and its
+  config), and follow the rendition's `broadcast` and `track` themselves, so drop
+  the `resolve` call and the `track`-or-ID fallback before them. Python passes
+  the ID and config (`TrackConsumer.subscribe(broadcast, id, rendition)`,
+  `GroupConsumer.fetch(broadcast, id, rendition, sequence)`); Go builds one with
+  `media.VideoRendition` or `media.AudioRendition`. The audio and video decode
+  consumers' `name` argument is `id` too, matching hang and `@moq/hang`: Swift's
+  `subscribe(broadcast:name:rendition:)` is `subscribe(broadcast:id:rendition:)`.
 - **moq-ffi error payloads are named.** `MoqError` cases that carried a
   positional string (`Transport`, `Internal`, `Connect`, ...) name it
   `reason` (`Reason` in Go, the `reason:` label in Swift). The Display text is

@@ -90,7 +90,7 @@ const ESTIMATE_WINDOW: std::time::Duration = std::time::Duration::from_secs(1);
 #[derive(Default)]
 struct Throttle {
 	/// When the last publish carrying an estimate went out.
-	last: Option<web_async::time::Instant>,
+	last: Option<moq_clock::Instant>,
 	/// An estimate is in the catalog but not yet on the wire.
 	pending: bool,
 }
@@ -99,7 +99,7 @@ impl Throttle {
 	/// A publish is going out: any held estimate rides it and opens a new window.
 	fn fold(&mut self) {
 		if std::mem::take(&mut self.pending) {
-			self.last = Some(web_async::time::Instant::now());
+			self.last = Some(moq_clock::now());
 		}
 	}
 }
@@ -1134,7 +1134,7 @@ impl<E: CatalogExt> Guard<'_, E> {
 		if !estimates.pending {
 			return Ok(());
 		}
-		let now = web_async::time::Instant::now();
+		let now = moq_clock::now();
 		if throttle && estimates.last.is_some_and(|last| now < last + ESTIMATE_WINDOW) {
 			return Ok(());
 		}
@@ -2014,9 +2014,9 @@ mod test {
 
 	#[test]
 	fn sibling_broadcasts_share_a_clock_and_capture_time() {
-		use std::time::{Duration, Instant, SystemTime};
+		use std::time::{Duration, SystemTime};
 
-		let captured = Instant::now();
+		let captured = moq_clock::now();
 		let wall = SystemTime::UNIX_EPOCH + Duration::from_millis(hang::catalog::MOQ_EPOCH_UNIX_MILLIS + 60_000);
 		let clock = crate::Clock::at(captured, wall).unwrap();
 		let (origin, _driver) = moq_net::origin::Producer::new(Default::default());
@@ -2070,13 +2070,14 @@ mod test {
 
 	/// A `with_clock` catalog is fixed from the start: even the first importer shifts onto it,
 	/// landing at the clock's reading on arrival, and the advertised mapping never moves.
-	#[test]
-	fn with_clock_shifts_the_first_importer() {
+	#[moq_clock::test]
+	async fn with_clock_shifts_the_first_importer() {
 		use std::time::{Duration, SystemTime};
 
+		moq_clock::sleep(Duration::from_secs(5)).await;
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let wall = SystemTime::UNIX_EPOCH + Duration::from_millis(hang::catalog::MOQ_EPOCH_UNIX_MILLIS + 60_000);
-		let start = std::time::Instant::now() - Duration::from_secs(5);
+		let start = moq_clock::now() - Duration::from_secs(5);
 		let config = Config::default().with_clock(crate::Clock::at(start, wall).expect("a representable wall"));
 		let catalog = Producer::new(&mut broadcast, config).unwrap();
 
@@ -2262,7 +2263,7 @@ mod test {
 	/// never replaced by a fresh clock; one that disagrees with `with_clock` is refused.
 	#[test]
 	fn a_seeded_root_clock_is_adopted() {
-		use std::time::{Duration, Instant, SystemTime};
+		use std::time::{Duration, SystemTime};
 
 		let input = an_hour_ago(moq_net::Timescale::MICRO);
 		let mut seed = Catalog::<()>::default();
@@ -2277,7 +2278,7 @@ mod test {
 		let zero = SystemTime::UNIX_EPOCH
 			+ Duration::from_millis(hang::catalog::MOQ_EPOCH_UNIX_MILLIS)
 			+ Duration::from_micros(input.wall.as_micros() as u64);
-		let fixed = crate::Clock::at(Instant::now(), zero).unwrap();
+		let fixed = crate::Clock::at(moq_clock::now(), zero).unwrap();
 		seed.clock = Some(an_hour_ago(moq_net::Timescale::MILLI));
 		crate::clock::fake_host_wall(SystemTime::UNIX_EPOCH + Duration::from_secs(86_400));
 		let config = Config::default().with_catalog(seed.clone()).with_clock(fixed);
@@ -2288,7 +2289,7 @@ mod test {
 		assert_eq!(catalog.snapshot().clock, Some(input));
 
 		// A different one is refused before any catalog track exists.
-		let other = crate::Clock::at(Instant::now(), zero + Duration::from_secs(1)).unwrap();
+		let other = crate::Clock::at(moq_clock::now(), zero + Duration::from_secs(1)).unwrap();
 		let config = Config::default().with_catalog(seed).with_clock(other);
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		assert!(matches!(

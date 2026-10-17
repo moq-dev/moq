@@ -1,23 +1,25 @@
 # Audio quality
 
-Plays a tone in headless Chromium over a seeded, impaired UDP path and grades what the listener
-would have heard: how often the ring ran dry, how much audio a re-anchor threw away, how much of the
-run was silent, and where the playout delay settled. A regression in any of them fails a row
-against [`budgets.json`](budgets.json) instead of arriving as a bug report.
+Plays a tone in headless Chromium and in the native `moq play` over a seeded, impaired UDP path and
+grades what the listener would have heard: how often the ring ran dry, how much audio a re-anchor
+threw away, how much of the run was silent, and where the playout delay settled. A regression in
+any of them fails a row against [`budgets.json`](budgets.json) instead of arriving as a bug report,
+and a divergence between the two players shows up as one failing where the other passes.
 
 ```bash
 just test audio-quality                                        # the whole matrix, 60s a row
 just test audio-quality --list                                 # what it would run
 just test audio-quality --profiles mild --codecs opus --duration 20
-just test audio-quality --rings plain                          # the production path only
+just test audio-quality --rings plain                          # the browser's production path only
+just test audio-quality --rings pulse                          # the native player only
 just test audio-quality --out ~/runs/after                     # keep the run directory
 just test audio-quality --enforce                              # fail on the budgets
 just test audio-quality --profiles bursty --capture --out ~/runs/burst # keep arrival evidence
 just test audio-quality --replays                              # the replays only, in seconds
 ```
 
-The matrix is codec x profile x ring: 24 browser rows, about 30 minutes, plus 8 [replay
-rows](#traces) of recorded arrivals. `--profiles`, `--rings`, and `--codecs` take comma-separated
+The matrix is codec x profile x ring: 24 browser rows and 12 [native rows](#native-rows), about 45
+minutes, plus 8 [replay rows](#traces) of recorded arrivals. `--profiles`, `--rings`, and `--codecs` take comma-separated
 lists; `--seed` replays a given impairment. The table prints either way, and only `--enforce` (which
 the nightly job passes) turns a breach into a failed run.
 
@@ -27,7 +29,7 @@ the nightly job passes) turns a breach into a failed run.
 | --- | --- |
 | codec | `opus` at 48 kHz over fMP4, `aac` at 44.1 kHz over MPEG-TS |
 | profile | see below |
-| ring | `isolated` (SharedArrayBuffer, cross-origin isolated page) and `plain` (postMessage) |
+| ring | `isolated` (SharedArrayBuffer, cross-origin isolated page) and `plain` (postMessage) in Chromium; `pulse` for `moq play` |
 
 `plain` is the production path: most pages are not cross-origin isolated. One build is served under
 `/isolated/` with COOP and COEP and under `/plain/` without, and the page's `crossOriginIsolated`
@@ -57,8 +59,8 @@ quiet quantum at the output is always a gap or a stall and never the soundtrack.
 ## The path
 
 ```text
-  page  ──UDP──▶  moq-shaper  ──▶  moq-relay     WebTransport, the impaired path
-  moq (opus, aac)  ─────────────▶  moq-relay     the publishers, on the clean path
+  page or moq play  ──UDP──▶  moq-shaper  ──▶  moq-relay     WebTransport, the impaired path
+  moq (opus, aac)  ─────────────────────────▶  moq-relay     the publishers, on the clean path
 ```
 
 Every port is reserved for the run ([the harness contract](../README.md)), and the shaper is the
@@ -70,6 +72,30 @@ The shaper carries UDP and nothing else. The page fetches `/certificate.sha256` 
 dials, so the driver answers that fetch with the relay's own hash (the certificate is pinned by
 hash, so a different port needs nothing more). With nothing listening on TCP there, the WebSocket
 fallback cannot connect: the session is WebTransport through the shaper, or the row is void.
+
+## Native rows
+
+The `pulse` ring is the shipped binary, `moq play --no-video`, through the same shaper on the same
+profiles, writing [`--metrics`](../../doc/bin/cli.md#play) samples in the `Sample` shape below, which
+the same analyzer reduces and the same budget file grades. It plays through the production
+ALSA/cpal output into a private PulseAudio null sink ([`../lib/pulse.py`](../lib/pulse.py)), one per
+row, as [`native-play`](../native-play/README.md) does, so a real device callback is part of what is
+measured. The driver dials the shaper with the relay's certificate pinned by hash and voids the row
+unless the player's log names WebTransport.
+
+The counters come from the player's output callback rather than a tap on its output: it folds every
+buffer it plays into 128-frame quanta at the device rate and classifies each by what the ring
+supplied (`moq_audio::playback::Observer`). The meanings are the browser's, with three differences
+in what the native player does:
+
+- Its ring never stalls to refill. A dry ring underruns until the player pads it back to the target
+  with silence, which `silence` counts, so native `stalled` is only a sink with nothing written yet.
+- The playhead is projected from the player's last write at the wall rate and held at its end.
+- `device` is the host's reported output latency, with no `baseLatency`, and `render_load` is
+  unmeasured.
+
+These rows grade end-to-end budgets with real device noise in them. They do not compare the two
+players' target series, so a difference in totals alone says nothing about the estimator.
 
 ## Diagnosing live rows
 
@@ -144,8 +170,8 @@ capture converted by the recipe [above](#diagnosing-live-rows).
 
 [`clients/js/src/schema.ts`](clients/js/src/schema.ts) is the contract. The page emits `Sample`s,
 [`src/analyze.ts`](clients/js/src/analyze.ts) reduces a row to a `Summary`, and `grade.ts` reads that
-against the budgets. A native lane or the latency ledger that emits the same `Summary` is comparable
-by construction.
+against the budgets. `moq play --metrics` emits the same `Sample`s, so a native row is comparable by
+construction, as is any other lane that emits the same `Summary`.
 
 **Units.** Every duration is milliseconds as a float, every count an integer, every share a fraction
 of 1. Samples missing at the device rate are converted to ms before they reach a summary.
@@ -209,12 +235,12 @@ replay row crosses no shaper, so the `shaper` void does not apply to it.
 
 | Void | Why |
 | --- | --- |
-| `shaper` | It exited nonzero (a configured impairment never acted), left no report, or forwarded nothing to the page. |
+| `shaper` | It exited nonzero (a configured impairment never acted), left no report, or forwarded nothing to the player. |
 | `transport` | The session negotiated something other than WebTransport. |
-| `ring` | `crossOriginIsolated` does not match the row's ring, so the other ring ran. |
-| `clock` | The AudioContext clock was unreadable or ran more than 1% off the viewer's. |
+| `ring` | `crossOriginIsolated` does not match the row's ring, so the other ring ran. Browser only. |
+| `clock` | The render clock (the AudioContext's, or the native device's) was unreadable or ran more than 1% off the viewer's from first audio on. |
 | `window` | No audio after the warmup. |
-| `driver` | The page never reached a session and first audio within 20 s, or the driver threw. |
+| `driver` | The player never reached a session and first audio within 20 s, failed mid-row, did not exit cleanly on Ctrl-C (which includes `--metrics` falling behind its device), or the driver threw. |
 
 ## Budgets
 
@@ -222,10 +248,12 @@ replay row crosses no shaper, so the `shaper` void does not apply to it.
 profile, and ring. Under `--enforce` a run fails on a breach, a budgeted key the run left
 unmeasured, a void row, or a row with no budget. Tightening a ceiling is a visible diff; loosening
 one needs a reason in review. The file's `note` says how the current ceilings were measured: the
-browser rows come from several nightly runs, not a developer machine.
+browser rows come from several nightly runs, not a developer machine; the native rows are provisional,
+from a developer machine, until the nightly runner has measured them.
 
-The nightly `Audio quality` job runs the matrix under `--enforce` and keeps every run directory for a
-week as the `audio-quality-run` artifact: each process's log, the shaper's counters, every row's raw
+The nightly `Audio quality` job runs the browser rows under `--enforce` and the native rows reporting
+only, until an intermittent two-second device stall that voids about one AAC native row in seven is
+fixed. It keeps every run directory for a week as the `audio-quality-run` artifact: each process's log, the shaper's counters, every row's raw
 samples and summary. The
 replays also run under `--enforce` on every PR that touches the player's packages (`js/watch`,
 `js/hang`, `js/net`, `js/signals`) or the harness (`.github/workflows/audio-quality.yml`), so a
@@ -235,6 +263,7 @@ change that moves them updates `budgets.json` in the same PR.
 
 ```text
 run.sh                 builds, starts the relay and publishers, runs each row behind the shaper
+../lib/pulse.py        the native rows' private PulseAudio null sink
 record.sh              records traces/, by hand
 relay.toml             anonymous relay, self-signed cert
 budgets.json           a ceiling per metric per row
@@ -246,6 +275,7 @@ clients/js/
   src/schema.ts            the metric contract
   src/analyze.ts           samples to a summary, unit tested
   driver.ts                one row in headless Chromium, and its void checks
+  native.ts                one row of `moq play --metrics`, and its void checks
   recorder.html mic.html   the recorder and the microphone publisher (src/recorder.ts, src/mic.ts)
   record.ts                one trace in headless Chromium
   replay.ts                the replay rows, written as a page's samples
@@ -263,6 +293,6 @@ the profiles now include the fork's batch, step, and order-preserving jitter tre
 
 ## Not covered
 
-Safari and Firefox, video, and perceptual scoring: the grade is glitches and latency, not an opinion
-about how it sounds. The `relay-mic` trace captures Chromium's fake device rather than a real
+Safari and Firefox, native playback on macOS and Windows, video, and perceptual scoring: the grade
+is glitches and latency, not an opinion about how it sounds. The `relay-mic` trace captures Chromium's fake device rather than a real
 microphone, so it carries a browser publisher's encode and send cadence but not a sound card's.

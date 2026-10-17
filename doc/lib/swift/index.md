@@ -87,7 +87,8 @@ try await session.shutdown()
 ## Things to know
 
 The rest of the [shared feature list](/lib/#what-every-binding-can-do) maps
-one to one; the API reference has the names.
+one to one; the API reference has the names, and [Layers](/lib/layers)
+shows which module holds each.
 
 - **Audio needs cuts.** Video groups at its keyframes, but audio forms a group only where you call `cut()`: after every frame, or at a segment cadence to align with video.
 - **Live encoder timing.** After writing a frame you encoded yourself, call `flush(timestampUs:)` with the same timestamp so the catalog advertises your jitter. Skip it for file and network imports. On a seek or pause, call `discontinuity()`, then keep timestamps moving forward and resume video on a keyframe.

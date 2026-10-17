@@ -478,6 +478,12 @@ impl Session {
 		}
 	}
 
+	/// Change the underlying connection's flow-control limits; see
+	/// [`Connection::set_limits`].
+	pub fn set_limits(&self, limits: super::Limits) -> Result<(), crate::Error> {
+		self.conn.set_limits(limits)
+	}
+
 	/// Assemble the web flavor and spawn its capsule reader.
 	fn establish(request: Request, protocol: Option<String>) -> Self {
 		let Request {
@@ -953,6 +959,13 @@ impl web_transport_trait::poll::RecvStream for RecvStream {
 
 	fn poll_read(&mut self, cx: &mut Context<'_>, dst: &mut [u8]) -> Poll<Result<Option<usize>, Self::Error>> {
 		match web_transport_trait::poll::RecvStream::poll_read(&mut self.inner, cx, dst) {
+			Poll::Ready(Err(err)) => Poll::Ready(Err(self.map(err))),
+			other => other,
+		}
+	}
+
+	fn poll_read_chunk(&mut self, cx: &mut Context<'_>, max: usize) -> Poll<Result<Option<Bytes>, Self::Error>> {
+		match web_transport_trait::poll::RecvStream::poll_read_chunk(&mut self.inner, cx, max) {
 			Poll::Ready(Err(err)) => Poll::Ready(Err(self.map(err))),
 			other => other,
 		}

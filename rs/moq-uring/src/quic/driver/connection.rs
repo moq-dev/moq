@@ -372,6 +372,29 @@ impl Connection {
 		&self.handshake
 	}
 
+	/// Change the connection's flow-control limits; a raise reaches the peer
+	/// on the next packet.
+	///
+	/// Errors, changing nothing, on a stream limit past 2^60 or a receive window
+	/// past a QUIC varint, which a peer would refuse.
+	pub fn set_limits(&self, limits: crate::quic::Limits) -> Result<(), crate::Error> {
+		// A stream ID is a varint whose low two bits are its type (RFC 9000).
+		if limits.max_streams.get() > 1 << 60 {
+			return Err(crate::Error::StreamsRange);
+		}
+		let streams = VarInt::from_u64(limits.max_streams.get()).expect("checked above");
+		let window =
+			VarInt::from_u64(limits.receive_window.get()).map_err(|_| crate::Error::WindowRange("receive_window"))?;
+		let mut conn = self.shared.conn.borrow_mut();
+		conn.set_max_concurrent_streams(Dir::Bi, streams);
+		conn.set_max_concurrent_streams(Dir::Uni, streams);
+		conn.set_receive_window(window);
+		conn.set_send_window(limits.send_window.get());
+		drop(conn);
+		self.shared.kick();
+		Ok(())
+	}
+
 	/// Returns connection statistics.
 	pub fn stats(&self) -> moq_quic::ConnectionStats {
 		self.shared.conn.borrow().stats()
@@ -416,7 +439,6 @@ pub(crate) fn launch(
 		endpoint,
 		key,
 		deadline: owner.timer(),
-		scratch: Vec::with_capacity(TRAIN_SEGMENTS * SEGMENT),
 		close_staged: false,
 	};
 	let future = async move { kio::wait(|waiter| driver.poll(waiter)).await };
@@ -714,9 +736,6 @@ struct Driver {
 	endpoint: Weak<endpoint::Inner>,
 	key: ConnectionHandle,
 	deadline: crate::Timer,
-	/// Egress staging: moq-quic writes into a `Vec`, so a train is built
-	/// here and copied into the socket's registered buffer.
-	scratch: Vec<u8>,
 	/// A CONNECTION_CLOSE has been handed to the socket. Not implied by a
 	/// flush that came back empty: moq-quic paces the close like any other packet,
 	/// so it can sit behind a pacing timer after the application asked for it.
@@ -864,31 +883,30 @@ impl Driver {
 			Poll::Pending => return Poll::Pending,
 		};
 
-		let segments = (tx.len() / SEGMENT).min(TRAIN_SEGMENTS);
+		let segments = (tx.capacity() / SEGMENT).min(TRAIN_SEGMENTS);
 		if segments == 0 {
 			return Poll::Ready(Err(Error::Io(format!(
 				"transmit buffer of {} bytes holds no {SEGMENT} byte segment",
-				tx.len()
+				tx.capacity()
 			))));
 		}
 
-		self.scratch.clear();
 		let (transmit, closing) = {
 			let mut conn = self.shared.conn.borrow_mut();
+			// moq-quic encrypts the train straight into the socket's buffer.
 			// Nothing to send, or paced; the buffer returns to the pool on drop.
-			let Some(transmit) = conn.poll_transmit(moq_clock::Instant::now(), segments, &mut self.scratch) else {
+			let Some(transmit) = conn.poll_transmit(moq_clock::Instant::now(), segments, &mut tx) else {
 				return Poll::Pending;
 			};
 			// Once closed, moq-quic transmits nothing but the CONNECTION_CLOSE.
 			(transmit, conn.is_closed())
 		};
+		debug_assert_eq!(transmit.size, tx.len());
 
-		tx[..transmit.size].copy_from_slice(&self.scratch[..transmit.size]);
 		// A lone datagram is its own segment size, and the socket's GSO
 		// stride has to match what moq-quic actually packed.
 		let transmit = udp::Transmit {
 			to: transmit.destination,
-			len: transmit.size,
 			segment: transmit.segment_size.unwrap_or(transmit.size),
 			ecn: transmit.ecn.map(super::ecn_from_quic),
 		};
