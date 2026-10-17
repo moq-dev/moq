@@ -481,6 +481,14 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			),
 			mp4_atom::Codec::Vp08(vp08) => {
 				let mut config = VideoConfig::new(VideoCodec::VP8);
+				// vpcC carries VP8's colour too; its range is always explicit.
+				let vpcc = &vp08.vpcc;
+				config.color = crate::codec::color::cicp(
+					vpcc.color_primaries,
+					vpcc.transfer_characteristics,
+					vpcc.matrix_coefficients,
+					Some(vpcc.video_full_range_flag),
+				);
 				config.coded_width = Some(vp08.visual.width as _);
 				config.coded_height = Some(vp08.visual.height as _);
 				config.container = container;

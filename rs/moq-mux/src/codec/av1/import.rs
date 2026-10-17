@@ -94,7 +94,7 @@ impl Import {
 		let twelve_bit = ((data[2] >> 5) & 0x01) == 1;
 
 		// Resolution is unknown from av1C; it's filled when the first sequence header arrives.
-		let config = hang::catalog::VideoConfig::new(hang::catalog::AV1 {
+		let mut config = hang::catalog::VideoConfig::new(hang::catalog::AV1 {
 			profile: seq_profile,
 			level: seq_level_idx,
 			tier: if tier { 'H' } else { 'M' },
@@ -108,6 +108,8 @@ impl Import {
 			matrix_coefficients: 1,
 			full_range: false,
 		});
+		// configOBUs follow the four header bytes; samples need not repeat what they carry.
+		config.color = color(&data[4..]);
 		self.apply_config(config)?;
 		Ok(())
 	}
@@ -291,10 +293,14 @@ fn sequence_color(seq_header: &SequenceHeaderObu) -> Option<hang::catalog::Color
 	)
 }
 
-/// The colour of the first parseable sequence header in a run of OBUs, such as av1C's `configOBUs`.
+/// The colour a run of OBUs signals, such as av1C's `configOBUs`: the first parseable sequence
+/// header's, plus the static HDR metadata OBUs that the AV1 ISOBMFF binding places after it.
 pub(crate) fn color(obus: &[u8]) -> Option<hang::catalog::Color> {
-	let sequence = parse_sequence_header(&find_sequence_header(obus)?).ok()??;
-	sequence_color(&sequence)
+	let mut color = find_sequence_header(obus)
+		.and_then(|seq| parse_sequence_header(&seq).ok().flatten())
+		.and_then(|seq| sequence_color(&seq));
+	find_hdr(&Bytes::copy_from_slice(obus)).apply(&mut color);
+	color
 }
 
 /// Read encoded dimensions from the first parseable sequence header in a frame.
@@ -343,4 +349,61 @@ fn find_sequence_header(payload: &[u8]) -> Option<Bytes> {
 		}
 	}
 	obus.flush().ok().flatten().filter(|obu| is_sequence_header(obu))
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	/// A metadata OBU (type 5, with a size field) carrying `payload`.
+	fn metadata_obu(payload: &[u8]) -> Vec<u8> {
+		let mut obu = vec![(5 << 3) | 0x02, payload.len() as u8];
+		obu.extend_from_slice(payload);
+		obu
+	}
+
+	/// HDR10 metadata OBUs: a 1000-nit BT.2020 mastering display, then MaxCLL 1000 and MaxFALL 400.
+	fn hdr10_obus() -> Vec<u8> {
+		let mut mdcv = vec![2];
+		for v in [46_399u16, 19_136, 11_141, 52_232, 8_585, 3_014, 20_493, 21_561] {
+			mdcv.extend_from_slice(&v.to_be_bytes());
+		}
+		mdcv.extend_from_slice(&(1000u32 << 8).to_be_bytes());
+		mdcv.extend_from_slice(&82u32.to_be_bytes());
+		let mut obus = metadata_obu(&mdcv);
+		obus.extend(metadata_obu(&[1, 0x03, 0xE8, 0x01, 0x90]));
+		obus
+	}
+
+	/// An av1C's configOBUs may carry the static HDR metadata alone; it is not dropped.
+	#[test]
+	fn config_obus_carry_hdr_metadata() {
+		let color = color(&hdr10_obus()).expect("HDR metadata");
+		assert_eq!(color.mastering.map(|m| m.max_luminance), Some(1000.0));
+		assert_eq!(color.content_light, crate::codec::color::test::hdr10().content_light);
+		assert_eq!(color.primaries, None);
+	}
+
+	/// A track initialized from an av1C publishes the colour its configOBUs carry, since the
+	/// samples need not repeat it.
+	#[tokio::test(start_paused = true)]
+	async fn av1c_initialize_publishes_config_obu_color() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+		let track = broadcast
+			.create_track("video", hang::container::track_info(hang::catalog::PRIORITY.video))
+			.unwrap();
+		let mut import = Import::new(track, catalog.reserve(), Default::default()).unwrap();
+
+		let mut av1c = vec![0x81, 0x08, 0x0c, 0x00];
+		av1c.extend(hdr10_obus());
+		import.initialize(&av1c).unwrap();
+
+		let color = catalog.snapshot().video.renditions["video"]
+			.color
+			.clone()
+			.expect("colour");
+		assert_eq!(color.content_light, crate::codec::color::test::hdr10().content_light);
+		assert!(color.mastering.is_some());
+	}
 }

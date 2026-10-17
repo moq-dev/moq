@@ -2318,3 +2318,33 @@ fn sdr_color_round_trips_byte_identical() {
 	};
 	assert_eq!(super::encode_init(None, vec![trak], vec![trex]).unwrap(), init);
 }
+
+/// VP8's vpcC carries its colour as VP9's does: export writes the catalog's, unspecified when
+/// unknown rather than mp4-atom's BT.709 default, and import reads it back.
+#[test]
+fn vp8_color_round_trips_through_vpcc() {
+	use hang::catalog::{VideoCodec, VideoConfig};
+
+	let init = |color: Option<hang::catalog::Color>| {
+		let mut config = VideoConfig::new(VideoCodec::VP8);
+		config.coded_width = Some(64);
+		config.coded_height = Some(64);
+		config.color = color;
+		let trak = super::synthesize_video_trak(1, 90_000, &config, None).unwrap();
+		let trex = mp4_atom::Trex {
+			track_id: 1,
+			default_sample_description_index: 1,
+			..Default::default()
+		};
+		super::encode_init(None, vec![trak], vec![trex]).unwrap()
+	};
+
+	let catalog = run_fmp4(&init(Some(color(9, 18, 9, true))));
+	let video = catalog.video.renditions.values().next().unwrap();
+	assert_eq!(video.color, Some(color(9, 18, 9, true)));
+
+	// Without a catalog colour, only vpcC's always-explicit range survives, never a made-up BT.709.
+	let catalog = run_fmp4(&init(None));
+	let color = catalog.video.renditions.values().next().unwrap().color.clone().unwrap();
+	assert_eq!((color.primaries, color.transfer, color.matrix), (None, None, None));
+}

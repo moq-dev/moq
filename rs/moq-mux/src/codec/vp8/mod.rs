@@ -85,12 +85,17 @@ impl FrameHeader {
 ///
 /// VP8 is always 8-bit 4:2:0 with no out-of-band parameters, so the box carries
 /// fixed placeholders. Profile 0 / level 0 are the standard "unspecified"
-/// values. See https://www.webmproject.org/vp9/mp4/.
-pub(crate) fn vpcc() -> mp4_atom::VpcC {
+/// values. See https://www.webmproject.org/vp9/mp4/. The colour fields carry the
+/// catalog's, unspecified (2) when unknown rather than mp4-atom's BT.709 default.
+pub(crate) fn vpcc(color: Option<&hang::catalog::Color>) -> mp4_atom::VpcC {
 	mp4_atom::VpcC {
 		profile: 0,
 		level: 0,
 		bit_depth: 8,
+		color_primaries: color.and_then(|c| c.primaries).unwrap_or(2),
+		transfer_characteristics: color.and_then(|c| c.transfer).unwrap_or(2),
+		matrix_coefficients: color.and_then(|c| c.matrix).unwrap_or(2),
+		video_full_range_flag: color.and_then(|c| c.full_range).unwrap_or(false),
 		..Default::default()
 	}
 }

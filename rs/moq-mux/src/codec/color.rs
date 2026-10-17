@@ -80,12 +80,12 @@ impl Hdr {
 		self.content_light = other.content_light.or(self.content_light);
 	}
 
-	/// Set these fields on `config`'s colour; they come from the bitstream, so they replace a hint.
-	pub(crate) fn apply(&self, config: &mut hang::catalog::VideoConfig) {
+	/// Set these fields on `color`; they come from the bitstream, so they replace a hint.
+	pub(crate) fn apply(&self, color: &mut Option<Color>) {
 		if *self == Self::default() {
 			return;
 		}
-		let color = config.color.get_or_insert_with(Color::default);
+		let color = color.get_or_insert_with(Color::default);
 		color.mastering = self.mastering.or(color.mastering);
 		color.content_light = self.content_light.or(color.content_light);
 	}

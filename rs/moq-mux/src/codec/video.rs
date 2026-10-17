@@ -92,7 +92,7 @@ impl Catalog {
 	/// reject a reconfiguration.
 	pub(crate) fn publish(&mut self, track: &mut Track, mut config: hang::catalog::VideoConfig) -> crate::Result<()> {
 		self.resolved = Some(config.clone());
-		self.hdr.apply(&mut config);
+		self.hdr.apply(&mut config.color);
 		self.hint.apply(&mut config);
 		if self.last.as_ref() == Some(&config) {
 			return Ok(());

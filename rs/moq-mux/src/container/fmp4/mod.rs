@@ -870,7 +870,7 @@ pub(crate) fn synthesize_video_trak(
 		}),
 		VideoCodec::VP8 => mp4_atom::Codec::from(mp4_atom::Vp08 {
 			visual,
-			vpcc: crate::codec::vp8::vpcc(),
+			vpcc: crate::codec::vp8::vpcc(config.color.as_ref()),
 			colr,
 			..Default::default()
 		}),
