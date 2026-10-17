@@ -1,0 +1,65 @@
+diff --git a/Cargo.toml b/Cargo.toml
+index 5ede5997b..181a2fa6f 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -237,7 +237,7 @@ tracing-subscriber = "0.3"
+ tracing-test = "0.2"
+ # Runtime used by the published moq-ffi crate. The unpublished bindgen CLI
+ # carries generator-only patches against this release in its own manifest.
+-uniffi = "0.32"
++uniffi = "=0.31"
+ url = "2"
+ usage = { package = "usage-rs", version = "6.11.1" }
+ uuid = { version = "1.26", features = ["v7"] }
+diff --git a/rs/moq-ffi/Cargo.toml b/rs/moq-ffi/Cargo.toml
+index 40254d1d2..34acfca78 100644
+--- a/rs/moq-ffi/Cargo.toml
++++ b/rs/moq-ffi/Cargo.toml
+@@ -74,6 +74,7 @@ getrandom = { workspace = true }
+ # `UniffiCompatibleFuture` and `FfiConverterArc`, which moq-net's wasm futures
+ # (LocalBoxFuture) and Rc-backed handles cannot satisfy.
+ uniffi = { workspace = true, features = ["wasm-unstable-single-threaded"] }
++uniffi-runtime-wasm = "=0.31.0-6"
+ web-async = { workspace = true }
+ web-transport-trait = { workspace = true }
+ web-transport-wasm = { workspace = true }
+diff --git a/rs/moq-ffi/src/lib.rs b/rs/moq-ffi/src/lib.rs
+index 090bd368e..fd7013830 100644
+--- a/rs/moq-ffi/src/lib.rs
++++ b/rs/moq-ffi/src/lib.rs
+@@ -36,6 +36,10 @@ mod transport;
+ #[cfg(all(feature = "video", not(target_arch = "wasm32")))]
+ pub mod video;
+ 
++// ubrn's wasm2 player calls its allocator and panic hook, which nothing in Rust names.
++#[cfg(target_arch = "wasm32")]
++extern crate uniffi_runtime_wasm as _;
++
+ uniffi::setup_scaffolding!("moq");
+ 
+ /// Stop the runtime workers before the host runtime goes away.
+diff --git a/rs/moq-mux/src/clock.rs b/rs/moq-mux/src/clock.rs
+index dd54a9265..0fac18ea3 100644
+--- a/rs/moq-mux/src/clock.rs
++++ b/rs/moq-mux/src/clock.rs
+@@ -43,6 +43,7 @@ fn moq_micros(wall: SystemTime) -> i128 {
+ }
+ 
+ /// The host's wall clock, or `None` while it reads before the moq epoch (2020): unset.
++#[cfg(any(test, not(target_arch = "wasm32"), target_os = "wasi"))]
+ fn host_wall() -> Option<SystemTime> {
+ 	#[cfg(test)]
+ 	let now = HOST_WALL.get().unwrap_or_else(SystemTime::now);
+@@ -51,6 +52,12 @@ fn host_wall() -> Option<SystemTime> {
+ 	(moq_micros(now) >= 0).then_some(now)
+ }
+ 
++/// Spike only: std has no wall clock in the browser and panics, so leave it unset.
++#[cfg(all(not(test), target_arch = "wasm32", not(target_os = "wasi")))]
++fn host_wall() -> Option<SystemTime> {
++	None
++}
++
+ #[cfg(test)]
+ thread_local! {
+ 	/// What [`host_wall`] reads on this thread instead of the system clock.
