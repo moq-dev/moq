@@ -606,3 +606,29 @@ test("aborting a fetch stops it while its route's properties are still being che
 	a.close();
 	b.close();
 });
+
+test("a refused route is not served again by a later compatible source", async () => {
+	const front = new Front();
+	const a = new BroadcastProducer();
+	const b = new BroadcastProducer();
+	const c = new BroadcastProducer();
+	const ta = copy(a);
+	b.createTrack("seq", { priority: 2 });
+	const tc = copy(c);
+	front.serve(a.consume());
+	const sub = front.consumer.track("seq").subscribe();
+	ta.write(0);
+	expect(drain(sub)).toEqual([0]);
+	front.serve(b.consume());
+	await settle();
+	front.serve(c.consume());
+	await settle();
+	tc.write(1);
+	expect(drain(sub)).toEqual([]);
+
+	sub.close();
+	front.consumer.close();
+	a.close();
+	b.close();
+	c.close();
+});

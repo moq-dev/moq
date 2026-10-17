@@ -135,7 +135,8 @@ class Route {
 
 	/** Serve the track from `source` from now on, subscribing every reader to it. */
 	serve(source: Source): void {
-		if (this.concluded || this.source === source) return;
+		// A refusal ends the track: no later source continues it, compatible or not.
+		if (this.concluded || this.refusal || this.source === source) return;
 		this.generation++;
 		this.source = source;
 		this.served = source;

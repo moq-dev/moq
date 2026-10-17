@@ -333,6 +333,8 @@ class CombinedClosed implements GetPromise<Error | null> {
 	#final: (value: Error | null) => boolean;
 	#value = new Once<Error | null>();
 	#watched?: Once<Error | null>;
+	// The watcher on `#watched`, replaced when a recovery moves to another copy's state.
+	#unwatch?: Dispose;
 	#dispose: Dispose[] = [];
 
 	constructor(
@@ -356,8 +358,9 @@ class CombinedClosed implements GetPromise<Error | null> {
 			preferred !== undefined ? preferred : current !== undefined && this.#final(current) ? current : undefined;
 		if (value === undefined) {
 			if (this.#watched !== source) {
+				this.#unwatch?.();
 				this.#watched = source;
-				this.#dispose.push(source.changed(() => this.#sync()));
+				this.#unwatch = source.changed(() => this.#sync());
 			}
 			return false;
 		}
@@ -365,6 +368,9 @@ class CombinedClosed implements GetPromise<Error | null> {
 		this.#value.set(value);
 		for (const dispose of this.#dispose) dispose();
 		this.#dispose = [];
+		this.#unwatch?.();
+		this.#unwatch = undefined;
+		this.#watched = undefined;
 		return true;
 	}
 

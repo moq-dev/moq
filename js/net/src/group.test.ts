@@ -290,3 +290,35 @@ test("a group that ends as its replacement arrives ends rather than adopting it"
 	expect(await read).toBeUndefined();
 	expect(adopted).toBe(false);
 });
+
+test("a group recovered twice reads on and settles", async () => {
+	const producer = new Producer(0);
+	const consumer = producer.mirror();
+	const route = new Signal(0);
+	const replacements = [new Producer(0), new Producer(0)];
+	let next = 0;
+	hooks.recoverGroup(consumer, {
+		changed: route,
+		wants: (failed) => failed !== undefined,
+		replace: async () => ({
+			group: replacements[next++].mirror(),
+			expiry: { expired: () => false, changed: [] },
+			adopt: () => {},
+		}),
+	});
+	void consumer.closed;
+	producer.writeFrame({ payload: new Uint8Array([0]) });
+	await consumer.readFrame();
+
+	// Two failures in a row: each moves the group to the next copy.
+	producer.close(new Error("route failed"));
+	replacements[0].writeFrame({ payload: new Uint8Array([0]) });
+	replacements[0].writeFrame({ payload: new Uint8Array([1]) });
+	expect((await consumer.readFrame())?.payload[0]).toBe(1);
+	replacements[0].close(new Error("route failed"));
+	for (const payload of [0, 1, 2]) replacements[1].writeFrame({ payload: new Uint8Array([payload]) });
+	replacements[1].close();
+	expect((await consumer.readFrame())?.payload[0]).toBe(2);
+	expect(await consumer.readFrame()).toBeUndefined();
+	expect(await consumer.closed).toBeNull();
+});
