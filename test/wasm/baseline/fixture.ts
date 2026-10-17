@@ -11,7 +11,7 @@ export interface Workload {
 }
 
 export interface Sample extends Workload {
-	backend: "js" | "wasm" | "uniffi" | "slice-uniffi" | "slice-boltffi";
+	backend: "js" | "wasm" | "uniffi";
 	transport: "webtransport" | "websocket";
 	module: string;
 	grow: boolean;

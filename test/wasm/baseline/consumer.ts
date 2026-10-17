@@ -1,7 +1,6 @@
 import { Milli } from "@moq/clock";
 import type * as Moq from "@moq/net";
 import type * as Wasm from "@moq/wasm";
-import type { Open } from "../slice/adapter.ts";
 import { type Sample, verify } from "./fixture.ts";
 import type { Uniffi } from "./uniffi.ts";
 
@@ -142,41 +141,6 @@ async function run(config: Sample) {
 						} finally {
 							group.free();
 						}
-					}),
-				);
-			};
-		} else if (config.backend === "slice-uniffi" || config.backend === "slice-boltffi") {
-			if (config.transport !== "webtransport")
-				throw new Error("the slice's browser client has no WebSocket fallback");
-			const generator = config.backend.slice("slice-".length);
-			const memoryOf = captureMemory();
-			const { open } = (await import(config.module)) as { open: Open };
-			const slice = await open(new URL(`slice/${generator}.wasm`, config.module));
-			memory = memoryOf();
-			startup = performance.now() - start;
-			const { url, hex } = await pin(config.url);
-			read = async () => {
-				const session = await slice.connect(url.toString(), hex, config.version);
-				disposers.push(() => session.cancel());
-				await Promise.all(
-					Array.from({ length: config.publishers }, async (_, publisher) => {
-						const broadcast = await session.broadcast(`${config.id}/${publisher}`);
-						const track = await broadcast.subscribe("data");
-						const group = await track.recvGroup();
-						if (group.sequence() !== BigInt(config.sequence))
-							throw new Error("incorrect slice group sequence");
-						for (let frame = 0; frame < config.frames; frame++) {
-							const got = await group.read();
-							if (
-								!got ||
-								(config.version === "moq-lite-02"
-									? got.timestampUs !== undefined
-									: got.timestampUs !== BigInt(frame * 1000))
-							)
-								throw new Error(`incorrect slice frame timestamp ${frame}`);
-							check(got.payload, frame);
-						}
-						if (await group.read()) throw new Error("unexpected extra slice frame");
 					}),
 				);
 			};

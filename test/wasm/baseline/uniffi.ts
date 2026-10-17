@@ -1,5 +1,5 @@
 /**
- * The slice of the ubrn-generated moq-ffi bindings the baseline consumer reads through.
+ * The part of the ubrn-generated moq-ffi bindings the baseline consumer reads through.
  *
  * Declared here rather than imported, because the generated module only exists after
  * `uniffi/build.sh`. `uniffi/check.ts` proves the generated module satisfies it.

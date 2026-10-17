@@ -22,12 +22,6 @@ const smoke = process.env.MOQ_WASM_BASELINE_SMOKE === "1";
 // moq-ffi over ubrn's wasm2 player, built by uniffi/build.sh; see README.md.
 const uniffi = process.env.MOQ_WASM_UNIFFI === "1";
 const generated = join(root, "test/wasm/uniffi/dist");
-// The bench/ffi-gen slice with browser.patch, under each generator; built by slice/build.sh.
-const slice = process.env.MOQ_WASM_SLICE === "1";
-const sliceModules: Record<string, string> = {
-	"/slice/uniffi.wasm": join(root, "test/wasm/slice/dist/uniffi/moq_ffi_gen.wasm"),
-	"/slice/boltffi.wasm": join(root, "test/wasm/slice/dist/boltffi/moq_ffi_gen_bg.wasm"),
-};
 const relays = (await Bun.file(values.relays).json()) as RelayFixture[];
 if (!relays.length) throw new Error("no relay fixtures");
 const server = Bun.serve({
@@ -43,7 +37,7 @@ const server = Bun.serve({
 			? Bun.file(join(wasm, path.slice(6)))
 			: path.startsWith("/uniffi/")
 				? Bun.file(join(generated, path.slice(8)))
-				: Bun.file(sliceModules[path] ?? join(dist, path));
+				: Bun.file(join(dist, path));
 		return (await file.exists())
 			? new Response(file, { headers: { "cache-control": "no-store" } })
 			: new Response("not found", { status: 404 });
@@ -84,9 +78,6 @@ const report = {
 		uniffi: uniffi
 			? "moq-ffi defaults pinned to UniFFI 0.31 (uniffi/pin.patch); wasm-release; ubrn 0.31.0-6 wasm2; bundled with bun --minify"
 			: "not run",
-		slice: slice
-			? "bench/ffi-gen at 09ff0b861 plus slice/browser.patch; UniFFI 0.31 over ubrn wasm2 and BoltFFI 0.31.1; wasm-release; bundled with bun --minify"
-			: "not run",
 	},
 	tools: {
 		rust: command("rustc", "--version"),
@@ -107,13 +98,6 @@ const report = {
 		wasm: await Promise.all((await wasmAssets(wasm)).map(asset)),
 		// The bundled bindings, @ubjs runtime and wasm-bindgen glue, plus the staged module.
 		uniffi: uniffi ? [await asset(join(dist, "uniffi.js")), await asset(join(generated, "moq_ffi.wasm"))] : [],
-		// Each adapter bundle holds its generated bindings and runtime; the adapter is a few hundred bytes.
-		"slice-uniffi": slice
-			? [await asset(join(dist, "slice-uniffi.js")), await asset(sliceModules["/slice/uniffi.wasm"])]
-			: [],
-		"slice-boltffi": slice
-			? [await asset(join(dist, "slice-boltffi.js")), await asset(sliceModules["/slice/boltffi.wasm"])]
-			: [],
 		harness: [await asset(join(dist, "consumer.js")), await asset(join(dist, "publisher.js"))],
 	},
 	limits: [
@@ -134,12 +118,7 @@ const browser = await chromium.launch({ channel: "chromium", headless: true });
 report.tools.browser = browser.version();
 // Alternating and consecutive A/A rounds, so drift on a shared host hits every backend:
 // three rounds each, in an order that puts every backend first, last, and twice in a row.
-const backendsEnabled: Sample["backend"][] = [
-	"js",
-	"wasm",
-	...(uniffi ? (["uniffi"] as const) : []),
-	...(slice ? (["slice-uniffi", "slice-boltffi"] as const) : []),
-];
+const backendsEnabled: Sample["backend"][] = ["js", "wasm", ...(uniffi ? (["uniffi"] as const) : [])];
 const order: Sample["backend"][] =
 	backendsEnabled.length === 2
 		? ["js", "js", "wasm", "wasm", "js", "wasm"]
@@ -181,15 +160,7 @@ try {
 					version: relay.version,
 					backend,
 					transport: "webtransport",
-					module: `${endpoint}/${
-						{
-							js: "net.js",
-							wasm: "wasm/moq.js",
-							uniffi: "uniffi.js",
-							"slice-uniffi": "slice-uniffi.js",
-							"slice-boltffi": "slice-boltffi.js",
-						}[backend]
-					}`,
+					module: `${endpoint}/${{ js: "net.js", wasm: "wasm/moq.js", uniffi: "uniffi.js" }[backend]}`,
 				};
 				await sample(config, round);
 			}

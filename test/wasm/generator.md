@@ -2,34 +2,37 @@
 
 Which Rust binding `@moq/net` wraps in the browser: moq-ffi through UniFFI (ubrn's
 `wasm2` player), moq-ffi through BoltFFI, or the hand-written wasm-bindgen `rs/moq-wasm`.
-This compares them on the [baseline harness](README.md#backend-baseline). It adopts
-nothing.
+This compares them on the [baseline harness](README.md#backend-baseline).
 
 BoltFFI cannot bind moq-ffi as written (see [What blocks BoltFFI](#what-blocks-boltffi)),
 so its network numbers come from the bench/ffi-gen slice with a browser client added. The
 same slice also runs through UniFFI, so the two generators compare on identical Rust.
 
-Decision: open, see the PR that added this file.
+**Decision** (maintainer, 2026-10-17, [#5838](https://github.com/moq-dev/moq/pull/5838)):
+moq-ffi through UniFFI over ubrn. It keeps one binding surface for every language with no
+API break, and passes every parity case. Its two measured costs have follow-ups:
+[size](/quest/m2/rs2ts/net-only.md) and [payload copies](/quest/m2/ffi-bytes.md).
+[Complete WASM bindings](/quest/m2/rs2ts/wasm-bindings.md) builds on this harness.
 
 ## Reproduce
 
 ```bash
-just test wasm-baseline --uniffi --slice   # every backend in the baseline sweep, plus parity cases and per-call timings
-just test wasm --uniffi --slice            # the parity cases and per-call timings alone
+just test wasm-baseline --uniffi   # JS, moq-wasm, and moq-ffi in the baseline sweep, plus parity cases and per-call timings
+just test wasm --uniffi            # the parity cases and per-call timings alone
 bun test/wasm/uniffi/size.ts <module.wasm>...   # sections and per-crate code share
 ```
 
 ubrn 0.31.0-6 reads UniFFI 0.31 metadata and moq-ffi is on 0.32, so
 [`uniffi/build.sh`](uniffi/build.sh) applies [`uniffi/pin.patch`](uniffi/pin.patch) to a
-scratch checkout. The pin is measurement-only and does not land. The patch also carries a
-browser fix moq-ffi needs (see [Bugs found](#bugs-found)). moq-ffi built on 0.31 with
-no other source change.
+scratch checkout. The pin is measurement-only and does not land; moq-ffi built on 0.31 with
+no source change beyond linking ubrn's runtime.
 
-[`slice/build.sh`](slice/build.sh) copies `bench/ffi-gen` (from
-[#5736](https://github.com/moq-dev/moq/pull/5736)), applies
-[`slice/browser.patch`](slice/browser.patch), and binds it with both generators. The
-patch adds a `browser` feature: a WebTransport session that consumes and publishes, like
-moq-ffi's wasm client, plus `create_group` for high sequences.
+The slice columns came from a harness removed once UniFFI was chosen. It is preserved at
+[`9f557ac2b`](https://github.com/moq-dev/moq/tree/9f557ac2ba274508b3ad3b9f6910cc0861632b6f/test/wasm/slice)
+(`just test wasm-baseline --uniffi --slice` there). It copied `bench/ffi-gen` from
+[#5736](https://github.com/moq-dev/moq/pull/5736) and applied `slice/browser.patch`, a
+`browser` feature with a WebTransport session that consumes and publishes like moq-ffi's
+wasm client. Then it bound the result with both generators.
 
 ## Setup
 
@@ -166,8 +169,8 @@ the strict CSP below):
 
 ## Parity
 
-[`uniffi/cases.ts`](uniffi/cases.ts) and [`slice/cases.ts`](slice/cases.ts) run against
-all three relays, normally and under a strict CSP. Every case passes in both modes for all
+[`uniffi/cases.ts`](uniffi/cases.ts) and the removed `slice/cases.ts` ran against
+all three relays, normally and under a strict CSP. Every case passed in both modes for all
 three bindings. moq-wasm's column is the existing suite in [`src/main.ts`](src/main.ts).
 
 | case | moq-wasm | moq-ffi, UniFFI | slice, UniFFI and BoltFFI |
@@ -241,10 +244,12 @@ targets, over one dual-annotated crate.
 
 ## Bugs found
 
-- **moq-ffi panics creating any broadcast in the browser.** `moq_mux`'s catalog clock
-  calls `std::time::SystemTime::now`, which wasm32-unknown-unknown does not implement.
-  The pin patch leaves the wall clock unset in the browser, as moq-net already does for
-  its own; the real fix belongs to the bindings parity work.
+- **moq-ffi panicked creating any broadcast in the browser.** `moq_mux`'s catalog clock
+  called `std::time::SystemTime::now`, which wasm32-unknown-unknown does not implement.
+  The measurements above used a workaround in the pin patch. Since
+  [#5681](https://github.com/moq-dev/moq/pull/5681), moq-mux reads moq-clock's browser
+  wall clock instead, and the cases pass without the workaround.
 - **On moq-lite-06, group sequence 2^62-1 never arrives.** lite-02 and transport-19
   carry it, and 2^53+1 crosses all three. Nothing errors: the subscriber waits forever.
-  Both moq-ffi and the slice hit it under both generators.
+  Both moq-ffi and the slice hit it under both generators. Tracked in
+  [lite-06 max sequence](/quest/m1/lite06-max-sequence.md).
