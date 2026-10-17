@@ -33,8 +33,9 @@ once this lands.
   state. Driver supervision (`Background`) is kio already, so poll it in the
   same closure.
 - **Concurrency**: two concurrent reads on one handle no longer queue FIFO;
-  both park, and each poll takes the next item atomically. Check wrapper docs
-  that promise serialization.
+  both park, and each poll takes the next item atomically. Iteration order
+  (sequence or arrival) is unchanged; only which concurrent call gets which
+  item is. Check wrapper docs that promise serialization.
 - **Still lost on cancel**: when a RustFuture finishes and the foreign side
   then drops it as cancelled (Python asyncio cancel, Go ctx), the result is
   gone. The spike measured this in both `Task` and Shape A. Keep the Go
@@ -55,7 +56,8 @@ once this lands.
   publisher. Confirm the gain on the binding benchmark across publishers and
   subscribers before and after; the Go runner should move.
 
-Public API: none, apart from per-handle FIFO queueing. Wire: none.
+Public API: no signature changes. Concurrent reads on one handle no longer
+get items in call order; sequence and arrival order are unchanged. Wire: none.
 
 ## Related
 
