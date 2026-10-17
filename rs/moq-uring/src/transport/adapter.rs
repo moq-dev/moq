@@ -9,6 +9,9 @@ use web_transport_trait::{self as wt, poll as backend};
 pub struct Error<E>(E);
 
 impl<E: wt::Error> moq::Error for Error<E> {
+	fn close_kind(&self) -> moq::CloseKind {
+		close_kind(&self.0)
+	}
 	fn session_error(&self) -> Option<(u32, String)> {
 		self.0.session_error()
 	}
@@ -58,6 +61,22 @@ pub trait Grouped: backend::Session<SendStream: GroupedSend> {
 	fn send_group(&mut self, priority: i64) -> Option<<Self::SendStream as GroupedSend>::Group> {
 		let _ = priority;
 		None
+	}
+
+	/// Send a datagram in `group` at `order`; a backend without groups ignores both and
+	/// drops the datagram when it has no room.
+	fn send_datagram(
+		&mut self,
+		payload: Bytes,
+		group: Option<&<Self::SendStream as GroupedSend>::Group>,
+		order: i64,
+	) -> Result<(), Self::Error> {
+		let _ = (group, order);
+		let mut cx = Context::from_waker(std::task::Waker::noop());
+		match backend::Session::poll_send_datagram(self, &mut cx, &payload) {
+			Poll::Ready(res) => res,
+			Poll::Pending => Ok(()),
+		}
 	}
 }
 
@@ -113,8 +132,13 @@ impl<S: Grouped<SendStream: 'static, RecvStream: 'static> + Clone + 'static> pol
 	fn send_group(&mut self, priority: i64) -> Option<<S::SendStream as GroupedSend>::Group> {
 		Grouped::send_group(&mut self.0, priority)
 	}
-	fn poll_send_datagram(&mut self, cx: &mut Context<'_>, payload: &[u8]) -> Poll<Result<(), Self::Error>> {
-		backend::Session::poll_send_datagram(&mut self.0, cx, payload).map_err(Error)
+	fn send_datagram(
+		&mut self,
+		payload: Bytes,
+		group: Option<&<S::SendStream as GroupedSend>::Group>,
+		order: i64,
+	) -> Result<(), Self::Error> {
+		Grouped::send_datagram(&mut self.0, payload, group, order).map_err(Error)
 	}
 	fn poll_recv_datagram(&mut self, cx: &mut Context<'_>) -> Poll<Result<Bytes, Self::Error>> {
 		backend::Session::poll_recv_datagram(&mut self.0, cx).map_err(Error)
@@ -188,6 +212,18 @@ impl<S: backend::RecvStream + 'static> poll::RecvStream for RecvStream<S> {
 	fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
 		backend::RecvStream::poll_closed(&mut self.0, cx).map_err(Error)
 	}
+}
+
+fn close_kind(error: &(dyn std::error::Error + 'static)) -> moq::CloseKind {
+	#[cfg(all(target_os = "linux", feature = "quic"))]
+	if let Some(error) = error.downcast_ref::<crate::quic::Error>() {
+		return match error {
+			crate::quic::Error::TimedOut => moq::CloseKind::IdleTimeout,
+			crate::quic::Error::Closed => moq::CloseKind::Closed,
+			_ => moq::CloseKind::Transport,
+		};
+	}
+	error.source().map(close_kind).unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -356,5 +392,24 @@ mod tests {
 		));
 		poll::Session::close(&mut session, 21, "done");
 		assert_eq!(state.get(), 21);
+	}
+}
+
+#[cfg(all(test, target_os = "linux", feature = "quic"))]
+mod outcome_tests {
+	use super::*;
+
+	#[test]
+	fn typed_ring_close_kinds_survive_the_adapter() {
+		let idle = Error(crate::quic::Error::TimedOut);
+		assert!(matches!(
+			moq_net::Error::from_transport(idle),
+			moq_net::Error::IdleTimeout
+		));
+		let local = Error(crate::quic::Error::Closed);
+		assert!(matches!(
+			moq_net::Error::from_transport(local),
+			moq_net::Error::Session(moq_net::SessionError::Cancel)
+		));
 	}
 }

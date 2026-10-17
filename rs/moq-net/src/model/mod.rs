@@ -39,6 +39,8 @@ pub(crate) use weak_cache::{WeakCache, WeakEntry};
 
 pub use bytes::*;
 pub(crate) use subscription::Cap;
+#[cfg_attr(not(feature = "async"), allow(unused_imports))]
+pub(crate) use subscription::NewGroup;
 // Datagram stays flat at the crate root (a small track-adjacent wire type),
 // not under a role module.
 pub use datagram::*;

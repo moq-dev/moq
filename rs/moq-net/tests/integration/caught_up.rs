@@ -25,7 +25,7 @@ fn produce_origin(hop: u64) -> origin::Producer {
 async fn read_until_caught_up(announced: &mut announce::Consumer) -> BTreeSet<String> {
 	let mut seen = BTreeSet::new();
 	while !announced.is_caught_up() {
-		let event = moq_net_sim::timeout(SETTLE, announced.next())
+		let event = moq_clock::timeout(SETTLE, announced.next())
 			.await
 			.expect("caught up in time")
 			.expect("the cursor stays open");
@@ -66,7 +66,7 @@ fn both() -> BTreeSet<String> {
 }
 
 /// Every version that marks the boundary catches up with the whole initial set.
-#[moq_net_sim::test]
+#[moq_clock::test]
 async fn an_exact_boundary_catches_up_with_the_initial_set() {
 	for version in [
 		"moq-lite-05",
@@ -85,7 +85,7 @@ async fn an_exact_boundary_catches_up_with_the_initial_set() {
 }
 
 /// Versions without a boundary still catch up, so nothing waiting on it hangs.
-#[moq_net_sim::test]
+#[moq_clock::test]
 async fn a_best_effort_boundary_still_catches_up() {
 	for version in ["moq-lite-03", "moq-lite-04", "moq-transport-14", "moq-transport-15"] {
 		caught_up(version).await;
@@ -94,7 +94,7 @@ async fn a_best_effort_boundary_still_catches_up() {
 
 /// A second session into the same origin, as a reconnect makes, catches up too: the
 /// consumer waits on every current session.
-#[moq_net_sim::test]
+#[moq_clock::test]
 async fn a_second_session_catches_up() {
 	let publisher = produce_origin(1);
 	let a = publisher.create_broadcast("a").unwrap();
@@ -116,7 +116,7 @@ async fn a_second_session_catches_up() {
 
 	let second = connect().await;
 	drop(first);
-	moq_net_sim::sleep(SETTLE).await;
+	moq_clock::sleep(SETTLE).await;
 	read_until_caught_up(&mut announced).await;
 	drop(second);
 }

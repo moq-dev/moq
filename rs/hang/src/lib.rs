@@ -15,6 +15,13 @@
 //!
 //! See the [moq-mux](https://crates.io/crates/moq-mux) crate for importing existing media formats into hang broadcasts.
 mod error;
+mod snapshot;
+
+/// Publisher media and transport snapshots.
+pub mod stats;
+
+/// Solicited viewer feedback and echo broadcast names.
+pub mod echo;
 
 /// The catalog is used to describe the available media tracks and codecs.
 pub mod catalog;

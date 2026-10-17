@@ -4,7 +4,7 @@
 //! rate a sender should produce, so audio, video, and transcode back off the
 //! same way.
 
-use std::time::Instant;
+use moq_clock::Instant;
 
 use moq_net::bandwidth;
 
@@ -71,11 +71,11 @@ impl Policy {
 /// ```
 /// # use moq_mux::rate::{Control, Policy};
 /// # use moq_net::bandwidth;
-/// # use std::time::Instant;
+/// # use moq_clock::Instant;
 /// let mut control = Control::new(Policy::new(bandwidth::Rate::from_mbps(4)));
 /// // A 2 Mbps estimate takes the 4 Mbps target down to what the link will carry.
 /// assert_eq!(
-///     control.update(Some(bandwidth::Rate::from_mbps(2)), Instant::now()),
+///     control.update(Some(bandwidth::Rate::from_mbps(2)), moq_clock::now()),
 ///     Some(bandwidth::Rate::from_mbps(2))
 /// );
 /// ```
@@ -195,7 +195,7 @@ mod tests {
 		let mut control = control();
 		// A 2 Mbps pipe: take the target down to it at once, no ramp, no waiting.
 		assert_eq!(
-			control.update(Some(bps(2_000_000)), Instant::now()),
+			control.update(Some(bps(2_000_000)), moq_clock::now()),
 			Some(bps(2_000_000))
 		);
 		assert_eq!(control.target(), bps(2_000_000));
@@ -204,7 +204,7 @@ mod tests {
 	#[test]
 	fn missing_estimate_holds_the_target() {
 		let mut control = control();
-		let now = Instant::now();
+		let now = moq_clock::now();
 		control.update(Some(bps(2_000_000)), now).unwrap();
 
 		// Losing the estimate (disconnected) is not evidence the uplink is
@@ -217,7 +217,7 @@ mod tests {
 	fn estimate_never_raises_above_max() {
 		let mut control = control();
 		// A wildly optimistic estimate is not licence to exceed what was configured.
-		assert_eq!(control.update(Some(bps(100_000_000)), Instant::now()), None);
+		assert_eq!(control.update(Some(bps(100_000_000)), moq_clock::now()), None);
 		assert_eq!(control.target(), bps(4_000_000));
 	}
 
@@ -225,14 +225,14 @@ mod tests {
 	fn target_never_falls_below_min() {
 		let mut control = control();
 		// A near-dead uplink floors at min (max/10) rather than chasing to zero.
-		assert_eq!(control.update(Some(bps(1)), Instant::now()), Some(bps(400_000)));
+		assert_eq!(control.update(Some(bps(1)), moq_clock::now()), Some(bps(400_000)));
 		assert_eq!(control.target(), bps(400_000));
 	}
 
 	#[test]
 	fn raise_is_ramp_limited() {
 		let mut control = control();
-		let start = Instant::now();
+		let start = moq_clock::now();
 		control.update(Some(bps(1_000_000)), start).unwrap(); // target 1M
 
 		// The pipe reopens to 4 Mbps. One second later the default 25%/s ramp
@@ -246,7 +246,7 @@ mod tests {
 	#[test]
 	fn raise_eventually_reaches_the_estimate() {
 		let mut control = control();
-		let start = Instant::now();
+		let start = moq_clock::now();
 		control.update(Some(bps(1_000_000)), start).unwrap(); // target 1M
 
 		// Feed a steady healthy estimate every 100ms; the ramp should walk the
@@ -265,7 +265,7 @@ mod tests {
 	#[test]
 	fn suppressed_raises_do_not_starve_the_ramp() {
 		let mut control = control();
-		let start = Instant::now();
+		let start = moq_clock::now();
 		control.update(Some(bps(1_000_000)), start).unwrap(); // target 1M
 
 		// Tick at 100ms: each tick alone is under the 5% threshold.
@@ -291,7 +291,7 @@ mod tests {
 	#[test]
 	fn a_raise_reaching_the_ceiling_beats_hysteresis() {
 		let mut control = control();
-		let start = Instant::now();
+		let start = moq_clock::now();
 		control.update(Some(bps(1_000_000)), start).unwrap();
 
 		// Walk up until it settles, then confirm where it settled.
@@ -317,7 +317,7 @@ mod tests {
 	#[test]
 	fn upward_jitter_stays_inside_the_deadband() {
 		let mut control = control();
-		let start = Instant::now();
+		let start = moq_clock::now();
 		control.update(Some(bps(2_000_000)), start).unwrap(); // target 2M, well under the 4M ceiling
 
 		// A 0.5% rise: inside the 5% deadband, and nowhere near the ceiling.
@@ -349,7 +349,7 @@ mod tests {
 	#[test]
 	fn small_moves_are_suppressed() {
 		let mut control = control();
-		let now = Instant::now();
+		let now = moq_clock::now();
 		control.update(Some(bps(2_000_000)), now).unwrap(); // target 2M
 
 		// 2% under the current target: inside the 5% deadband, so no reconfigure.
@@ -371,7 +371,7 @@ mod tests {
 		let mut control = Control::new(policy);
 
 		assert_eq!(control.target(), bps(1_000_000));
-		assert_eq!(control.update(Some(bps(2_000_000)), Instant::now()), None);
+		assert_eq!(control.update(Some(bps(2_000_000)), moq_clock::now()), None);
 		assert_eq!(control.target(), bps(1_000_000));
 	}
 }
