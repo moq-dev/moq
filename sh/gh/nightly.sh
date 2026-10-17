@@ -24,6 +24,7 @@ case "${1:-}" in
             --run-ignored only --success-output immediate
         run just rs bench-feed-fetch
         run just rs test -p moq-relay -E 'test(benchmark_stun_sources)' --run-ignored only --success-output immediate
+        run just rs test -p moq-quic --release -E 'test(benchmark_receive_credit)' --run-ignored only --success-output immediate
         # Fuzz exposes moq-net's codec benches; it is not a feature of the other crates.
         run cargo bench --locked --no-fail-fast -p moq-net --features fuzz --bench '*' -- --test
         # Exercise the optional thread-CPU clock as well as the normal elapsed-time smoke.

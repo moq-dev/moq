@@ -41,6 +41,7 @@ pub const MOQ_ERROR_JSON: i32 = -37;
 pub const MOQ_ERROR_JSON_TRACK: i32 = -38;
 pub const MOQ_ERROR_INVALID_CONFIG: i32 = -40;
 pub const MOQ_ERROR_UNRESOLVABLE_BROADCAST: i32 = -41;
+pub const MOQ_ERROR_EXPIRED: i32 = -42;
 
 /// Whether a protocol code is from the session or stream registry.
 #[repr(C)]
@@ -106,6 +107,8 @@ pub enum moq_protocol_kind {
 	MOQ_PROTOCOL_KIND_UNKNOWN = 24,
 	/// The session exceeded its announcement or subscription cap.
 	MOQ_PROTOCOL_KIND_TOO_MANY_REQUESTS = 25,
+	/// The authorization token expired and can be refreshed.
+	MOQ_PROTOCOL_KIND_EXPIRED = 26,
 }
 
 /// A protocol failure a peer sent: scope, verbatim wire code, and recognized kind.
@@ -374,6 +377,7 @@ fn session_kind(err: &moq_net::SessionError) -> moq_protocol_kind {
 		moq_net::SessionError::Cancel => MOQ_PROTOCOL_KIND_CANCEL,
 		moq_net::SessionError::Internal => MOQ_PROTOCOL_KIND_INTERNAL,
 		moq_net::SessionError::Unauthorized => MOQ_PROTOCOL_KIND_UNAUTHORIZED,
+		moq_net::SessionError::Expired => MOQ_PROTOCOL_KIND_EXPIRED,
 		moq_net::SessionError::ProtocolViolation => MOQ_PROTOCOL_KIND_PROTOCOL_VIOLATION,
 		moq_net::SessionError::KeyValueFormatting => MOQ_PROTOCOL_KIND_KEY_VALUE_FORMATTING,
 		moq_net::SessionError::GoawayTimeout => MOQ_PROTOCOL_KIND_GOAWAY_TIMEOUT,
@@ -418,6 +422,8 @@ impl ffi::ReturnCode for Error {
 
 	fn code(&self) -> i32 {
 		match self {
+			// A refused request's expiry has no session or stream code, so it gets its own status.
+			Error::Moq(moq_net::Error::Expired) => MOQ_ERROR_EXPIRED,
 			Error::Moq(_) => MOQ_ERROR_MOQ,
 			Error::Url(_) => MOQ_ERROR_URL,
 			Error::Utf8(_) => MOQ_ERROR_UTF8,

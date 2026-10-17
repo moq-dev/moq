@@ -34,6 +34,8 @@ export const SessionCode = Object.freeze(
 		Internal: 0x1 as SessionCode,
 		/** The credentials don't grant the requested path or operation. Retrying will fail again. */
 		Unauthorized: 0x2 as SessionCode,
+		/** The authorization token expired. Retrying with refreshed credentials may succeed. */
+		Expired: 0x18 as SessionCode,
 		/** A protocol rule was broken; the session is unusable. */
 		ProtocolViolation: 0x3 as SessionCode,
 		/** A request ID was reused or violated the negotiated draft’s order or parity rules. */
