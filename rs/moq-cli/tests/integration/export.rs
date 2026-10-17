@@ -591,10 +591,10 @@ fn latest_pts(ts: &[u8]) -> u64 {
 	latest.expect("the capture carries PES timestamps")
 }
 
-/// A standby joining a live partner's epoch before its input has declared a track (for TS, a
-/// PMT) is never asked for the tracks the partner's exports hold, since it announces only once
-/// it can serve them (#4352), and the exports keep running. Input that ends before declaring any
-/// track fails rather than announcing an empty broadcast.
+/// A standby joining a live partner's epoch before its catalog names a servable track is never
+/// asked for the tracks the partner's exports hold, since it announces only once it can serve
+/// them (#4352), and the exports keep running. Input that ends before declaring any track fails
+/// rather than announcing an empty broadcast.
 async fn a_standby_before_its_tracks(global: &[&str], format: Format) {
 	let relay = relay().await;
 	let epoch = hang::moq_net::Epoch::mint().to_string();

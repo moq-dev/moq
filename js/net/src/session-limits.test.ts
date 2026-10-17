@@ -223,6 +223,7 @@ test.each(["lite", "ietf"] as const)("%s closes on the first advertisement beyon
 					quic: pair.server,
 					session: {
 						version: IetfVersion.DRAFT_22,
+						client: false,
 						nextRequestId: async () => 0n,
 						spendRequest: () => {},
 						openBi: async () => new Stream({ version, readable, writable }),

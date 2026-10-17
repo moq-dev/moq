@@ -795,6 +795,7 @@ test("a failed stream open does not kill the announce loop", async () => {
 	let failures = 1;
 	const session: Session = {
 		version: inner.version,
+		client: inner.client,
 		acceptBi: () => inner.acceptBi(),
 		nextRequestId: () => inner.nextRequestId(),
 		spendRequest: (id) => inner.spendRequest(id),
@@ -841,6 +842,7 @@ test("a namespace refused once is retried without anything else changing", async
 	let failures = 1;
 	const session: Session = {
 		version: inner.version,
+		client: inner.client,
 		acceptBi: () => inner.acceptBi(),
 		nextRequestId: () => inner.nextRequestId(),
 		spendRequest: (id) => inner.spendRequest(id),
@@ -878,6 +880,7 @@ test("a solicited legacy advertisement refused once is retried", async () => {
 	let failures = 1;
 	const session: Session = {
 		version: inner.version,
+		client: inner.client,
 		acceptBi: () => inner.acceptBi(),
 		nextRequestId: () => inner.nextRequestId(),
 		spendRequest: (id) => inner.spendRequest(id),

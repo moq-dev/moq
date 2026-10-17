@@ -476,7 +476,12 @@ async fn subscribe(
 	section: &hang::catalog::Archive,
 	track: &str,
 ) -> crate::timeline::Consumer {
-	crate::timeline::Consumer::<()>::subscribe(consumer, section, track)
+	let mut section = section.clone();
+	section
+		.timelines
+		.entry(track.to_string())
+		.or_insert_with(|| hang::catalog::Timeline::new(hang::timeline::default_name(track), 0));
+	crate::timeline::Consumer::<()>::subscribe(consumer, &section, track)
 		.await
 		.unwrap()
 }
@@ -517,12 +522,11 @@ async fn import_populates_the_broadcast_timeline() {
 	let video_name = snapshot.video.renditions.keys().next().unwrap().clone();
 	let audio_name = snapshot.audio.renditions.keys().next().unwrap().clone();
 
-	// Each rendition's timeline is advertised at the catalog root.
+	// This short fixture ends before the four-second estimation record closes, so finishing the
+	// import flushes it and declares the minimum while the catalog stays live.
 	let section = snapshot.archive.clone().expect("the import advertises its timelines");
-	assert_eq!(
-		section.timelines[&video_name],
-		hang::timeline::default_name(&video_name)
-	);
+	assert_eq!(section.timelines[&video_name].duration, Some(4_000));
+	assert_eq!(section.timelines[&audio_name].duration, Some(4_000));
 
 	// Subscribe while the producer is alive, then finish so the timeline groups close and the
 	// readers terminate rather than blocking.
@@ -1586,20 +1590,25 @@ fn a_second_moov_is_refused() {
 }
 
 /// A moov with every track deselected releases its reservation at once, since no fragment will
-/// ever anchor: the catalog's next change publishes without one.
+/// ever anchor. It declares no track, so the catalog stays unpublished until one is listed.
 #[tokio::test]
-async fn a_moov_with_nothing_selected_publishes() {
+async fn a_moov_with_nothing_selected_releases_its_reservation() {
 	let (init, _, _) = bbb_init();
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
-	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+	let mut catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
 	let mut clocks = crate::container::test_util::Clocks::subscribe(&consumer).await;
 	let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog.reserve())
 		.with_select(crate::select::Broadcast::default());
 
 	fmp4.decode(&init).unwrap();
 	catalog.timebase().anchor(moq_net::Timestamp::ZERO).unwrap();
-	assert_eq!(clocks.drain().len(), 1, "the catalog publishes without a fragment");
+	assert!(clocks.drain().is_empty(), "nothing servable is published");
+
+	catalog
+		.mutate(|catalog| catalog.m2ts = Some(hang::catalog::M2ts::new("input.m2ts")))
+		.unwrap();
+	assert_eq!(clocks.drain().len(), 1, "no reservation still gates the catalog");
 }
 
 /// A moov after `finish()` is refused: its tracks would be declared but never finished.

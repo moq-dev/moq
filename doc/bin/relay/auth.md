@@ -180,6 +180,24 @@ everything. Put application data somewhere other than the token.
 Tokens and key scopes from the older `moq-token` format still work: each `put`
 and `get` prefix `p` reads as the subtree `p/**`.
 
+`publish` and `subscribe` can also carry an optional bitrate cap in bits per
+second, for example `{"path":"alice/**","rate":8000000}`. Omit `rate` for
+uncapped access; zero, fractional, and inexact JSON integers are refused.
+Key scopes bound paths and refuse a bitrate cap. Capped tokens and auth-server
+grants always use the object form so older readers refuse them in full.
+
+The relay currently refuses every capped grant because its transports cannot
+enforce it yet, including a cap introduced at revalidation or in-band renewal.
+HTTP `/fetch` and `/announced` always refuse caps: a request has no connection
+to meter. An embedder running its own gateway must enforce the cap or refuse
+the grant before forwarding media.
+
+Caps describe a per-connection limit, so N connections can spend N times the
+rate. Pair them with a short expiry and a per-token session limit for a budget,
+remembering that the auth server's session counts are approximate across
+restarts. Account for keyframe bursts and leave headroom above the encoder
+bitrate when choosing a limit.
+
 ### Path matching
 
 Grants are [patterns](https://docs.rs/moq-pattern) relative to `root`: `foo`
