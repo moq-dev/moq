@@ -42,7 +42,11 @@ export class Consumer {
 		return encode(await expand(this.credential, nameInfo(context, this.epoch, kid, semantic)));
 	}
 
-	/** Open a net subscription whose track name is a physical name; throws {@link Failure} `identity` if it is not one. */
+	/**
+	 * Open a net subscription whose track name is a physical name; throws {@link Failure} `identity` if it is not one.
+	 *
+	 * @internal Applications subscribe through `Broadcast.Consumer`.
+	 */
 	consume(track: NetTrack.Subscriber): Track.Consumer {
 		return Track.Consumer.make(track, keys(this.credential, this.epoch, parse(track.name)));
 	}
@@ -84,10 +88,20 @@ export class Producer {
 	 * write is checked against its timescale before an identity is spent. Rejects with
 	 * {@link Failure} `identity` if the track name is not a physical name, `reuse` if this
 	 * generation already produced it, or the net error if the track closes before accepting.
+	 * A refused track is closed with the failure, so its subscribers see why.
+	 *
+	 * @internal Applications create tracks through `Broadcast.Producer`.
 	 */
 	async produce(track: NetTrack.Producer): Promise<Track.Producer> {
-		const name = parse(track.name);
-		if (this.#claims.has(name)) throw new Failure("reuse");
+		let name: Name;
+		try {
+			name = parse(track.name);
+			if (this.#claims.has(name)) throw new Failure("reuse");
+		} catch (err) {
+			// Both refusals are Failures.
+			track.close(err as Failure);
+			throw err;
+		}
 		this.#claims.add(name);
 		let info: NetTrack.Info;
 		try {

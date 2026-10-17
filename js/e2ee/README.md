@@ -16,19 +16,23 @@ Relays forward ciphertext. Content keys never enter `@moq/net`.
 The application distributes a `Credential { context, kid, secret }` over its own
 authenticated channel. `credential.produce()` mints a fresh epoch and returns a
 `Generation.Producer`, which derives opaque track names and keys for that instance alone.
-It accepts no explicit epoch, and claims each track it produces for good. `produce(track)`
-resolves once the net track has committed its timescale, so every write is checked against it.
+It accepts no explicit epoch, and claims each track it produces for good.
+
+The application names tracks by their semantic names. `Broadcast.Producer` wraps the
+`@moq/net` broadcast and creates each track under its physical name, so only physical names
+reach the relays. `createTrack` resolves once the net track has committed its timescale, so
+every write is checked against it.
 
 ```ts
-import { Credential } from "@moq/e2ee";
+import { Broadcast, Credential } from "@moq/e2ee";
 import { Time } from "@moq/net";
 
 const credential = new Credential({ context, kid, secret });
 const generation = credential.produce();
 const broadcast = origin.createBroadcast(await credential.path("meeting.hang"));
-const video = await generation.produce(
-	broadcast.createTrack(await generation.name("video"), { timescale: Time.Timescale.MILLI }),
-);
+const video = await new Broadcast.Producer(broadcast, generation).createTrack("video", {
+	timescale: Time.Timescale.MILLI,
+});
 broadcast.announce({ epoch: generation.epoch });
 
 const group = video.appendGroup();
@@ -37,10 +41,10 @@ group.close();
 ```
 
 A subscriber resolves `credential.path(semantic)`, takes the epoch from the announced
-route (or from the application's channel on a wire without route epochs), and calls
-`credential.consume(epoch)` to bind a `Generation.Consumer`. Its `consume(subscriber)`
-opens a track whose name it derived or read from the decrypted catalog. A consuming
-generation cannot produce. Nothing survives a publisher instance: a restart mints a new epoch.
+route (or from the application's channel on a wire without route epochs), binds it with
+`credential.consume(epoch)`, and wraps the broadcast in a `Broadcast.Consumer`. Its
+`subscribe(semantic)` opens the track a decrypted catalog names. A consuming generation
+cannot produce. Nothing survives a publisher instance: a restart mints a new epoch.
 
 ## Processing
 

@@ -458,6 +458,111 @@ fn track_produced_once_per_generation() {
 }
 
 #[test]
+fn refused_track_is_aborted() {
+	let generation = test_generation();
+	let name = generation.name("video").unwrap();
+	drop(generation.produce(net_track(&name)).unwrap());
+	// The same physical name on another output, as a clone of the generation would claim it.
+	let net = net_track(&name);
+	assert_eq!(
+		generation.produce(net.clone()).map(|_| ()).unwrap_err().to_string(),
+		"reuse"
+	);
+	assert!(matches!(
+		net.poll_closed(&kio::Waiter::noop()),
+		Poll::Ready(moq_net::Error::Cancel)
+	));
+}
+
+/// One broadcast seen through the wrappers and, raw, the way a relay sees it.
+struct Protected {
+	producer: crate::broadcast::Producer,
+	consumer: crate::broadcast::Consumer,
+	raw: moq_net::broadcast::Consumer,
+}
+
+fn protected() -> Protected {
+	let generation = test_generation();
+	let net = moq_net::broadcast::Info::new().produce();
+	Protected {
+		consumer: crate::broadcast::Consumer::new(net.consume(), consume(&generation)),
+		raw: net.consume(),
+		producer: crate::broadcast::Producer::new(net, generation),
+	}
+}
+
+fn resolve(subscribing: &kio::Pending<track::Subscribing>) -> Result<track::Consumer, Error> {
+	match subscribing.poll_ok(&kio::Waiter::noop()) {
+		Poll::Ready(res) => res,
+		Poll::Pending => panic!("subscription still pending"),
+	}
+}
+
+#[test]
+fn broadcast_speaks_semantic_names() {
+	let protected = protected();
+	let mut video = protected.producer.create_track("video", timed()).unwrap();
+	let physical = protected.producer.generation().name("video").unwrap();
+	assert_eq!(video.name(), physical.as_str());
+
+	let mut reader = resolve(&protected.consumer.subscribe("video", subscribe_all()).unwrap()).unwrap();
+	let mut group = video.append_group().unwrap();
+	group.write_frame(ms(1), b"frame").unwrap();
+	group.finish().unwrap();
+	assert_eq!(read_frame(&mut recv_group(&mut reader)).plaintext, &b"frame"[..]);
+
+	// The relay's view holds only the physical name.
+	assert!(protected.raw.track(physical.as_str()).is_ok());
+	assert!(matches!(protected.raw.track("video"), Err(moq_net::Error::NotFound)));
+	// A track nobody created fails like any missing track.
+	assert!(matches!(
+		protected.consumer.subscribe("audio", subscribe_all()),
+		Err(Error::Net(moq_net::Error::NotFound))
+	));
+}
+
+#[test]
+fn reserved_track_serves_on_demand() {
+	let protected = protected();
+	let request = protected.producer.reserve_track("audio").unwrap();
+	assert_eq!(
+		request.name(),
+		protected.producer.generation().name("audio").unwrap().as_str()
+	);
+	let demand = request.demand();
+	assert!(!demand.is_used());
+
+	let subscribing = protected.consumer.subscribe("audio", subscribe_all()).unwrap();
+	assert!(subscribing.poll_ok(&kio::Waiter::noop()).is_pending());
+	assert!(demand.is_used());
+
+	let mut audio = request.accept(timed());
+	let mut reader = resolve(&subscribing).unwrap();
+	audio.append_datagram(ms(1), b"opus").unwrap();
+	match recv_datagram(&mut reader) {
+		Event::Datagram(d) => assert_eq!(&d.plaintext[..], b"opus"),
+		other => panic!("{other:?}"),
+	}
+}
+
+#[test]
+fn broadcast_claims_span_outputs() {
+	let generation = test_generation();
+	let first = crate::broadcast::Producer::new(moq_net::broadcast::Info::new().produce(), generation.clone());
+	let _video = first.create_track("video", timed()).unwrap();
+	let _audio = first.reserve_track("audio").unwrap();
+
+	// A clone of the generation on another output cannot reopen either name.
+	let second = crate::broadcast::Producer::new(moq_net::broadcast::Info::new().produce(), generation);
+	for semantic in ["video", "audio"] {
+		let created = second.create_track(semantic, timed()).map(|_| ()).unwrap_err();
+		assert_eq!(created.to_string(), "reuse");
+		let reserved = second.reserve_track(semantic).map(|_| ()).unwrap_err();
+		assert_eq!(reserved.to_string(), "reuse");
+	}
+}
+
+#[test]
 fn wrong_track_name_is_identity() {
 	let generation = test_generation();
 	let net = moq_net::broadcast::Info::new()
