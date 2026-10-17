@@ -1609,17 +1609,16 @@ impl Connection {
                 Duration::from_micros(ack.delay << self.peer_params.ack_delay_exponent.0),
             )
         };
-        // When the peer received the data, plus the ACK's trip back. The delay is for the
-        // largest packet acknowledged, so an ACK that repeats it only newly covers packets that
-        // arrived since, at an unknown point within that delay.
-        let acked_at = match new_largest {
-            true => now.checked_sub(ack_delay).unwrap_or(now),
-            false => now,
-        };
-
         let mut ack_eliciting_acked = false;
         for packet in newly_acked.elts() {
             if let Some(info) = self.spaces[space].take(packet) {
+                // When the peer received the data, plus the ACK's trip back. The delay only
+                // describes the largest packet; any other may have arrived at any point within
+                // it, such as one that filled a gap after the largest.
+                let acked_at = match packet == ack.largest {
+                    true => now.checked_sub(ack_delay).unwrap_or(now),
+                    false => now,
+                };
                 if let Some(acked) = info.largest_acked {
                     // Assume ACKs for all packets below the largest acknowledged in `packet` have
                     // been received. This can cause the peer to spuriously retransmit if some of

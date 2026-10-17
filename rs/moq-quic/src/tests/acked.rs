@@ -110,6 +110,40 @@ fn reordered_ack_keeps_its_delay() {
     assert_eq!(at - released, 2 * LATENCY);
 }
 
+/// A gap filled after a later packet keeps its receive instant, even when the first ACK of the
+/// later packet was lost and the gap's ACK is the first to raise the largest.
+#[test]
+fn gap_acked_with_largest_keeps_its_delay() {
+    const HOLD: Duration = Duration::from_millis(1);
+    let _guard = subscribe();
+    let mut pair = pair(true);
+    let (client_ch, server_ch) = pair.connect();
+    let s = open(&mut pair, client_ch, server_ch);
+
+    // The first packet is held back, so it arrives after the second
+    pair.client_send(client_ch, s).write(b"held").unwrap();
+    let held = pair.client_send(client_ch, s).checkpoint();
+    pair.client.drive(pair.time, pair.server.addr);
+    pair.client.delay_outbound();
+    pair.client_send(client_ch, s).write(b"ahead").unwrap();
+    pair.drive_client();
+
+    // The peer's ACK of the second packet alone is lost
+    pair.time += LATENCY;
+    pair.server.drive(pair.time, pair.client.addr);
+    assert!(!pair.server.outbound.is_empty());
+    pair.server.outbound.clear();
+
+    pair.time += HOLD;
+    let released = pair.time;
+    pair.client.finish_delay();
+    pair.drive_client();
+    pair.drive();
+
+    let at = acked(&mut pair, client_ch, &held).unwrap().unwrap();
+    assert_eq!(at - released, 2 * LATENCY);
+}
+
 /// A checkpoint resolves only once every byte before it is acknowledged, by the ACK that fills
 /// the gap, however much of the stream that ACK covers.
 #[test]

@@ -488,9 +488,9 @@ impl Checkpoint {
     /// The instant is when the ACK that brought the stream's contiguous acknowledged prefix to the
     /// checkpoint was received, less the ACK delay the peer reported, capped at its
     /// `max_ack_delay`. That leaves out the peer's delayed-ACK timer, but still includes the ACK's
-    /// one-way trip back. The delay is only subtracted from an ACK that raises the largest
-    /// acknowledged packet, since it describes that packet, not reordered ones the ACK repeats it
-    /// for. The instant is never earlier than the data's packet was sent. A checkpoint taken once
+    /// one-way trip back. The delay describes only the largest packet the ACK names, so data in
+    /// any other packet, which may have arrived later, gets the ACK's receive time with nothing
+    /// subtracted. The instant is never earlier than the data's packet was sent. A checkpoint taken once
     /// everything written was already acknowledged gets the ACK that got it there, and one taken
     /// before anything was written gets the stream's next ACK, or fails if a reset comes first.
     ///
