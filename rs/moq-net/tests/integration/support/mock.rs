@@ -349,8 +349,8 @@ impl MockRecvStream {
 			if self.landing != Some(arrival) {
 				self.landing = Some(arrival);
 				let waker = cx.waker().clone();
-				drop(moq_net_sim::spawn(async move {
-					moq_net_sim::sleep_until(arrival).await;
+				drop(moq_clock::sim::spawn(async move {
+					moq_clock::sleep_until(arrival).await;
 					waker.wake();
 				}));
 			}
@@ -374,8 +374,8 @@ impl MockRecvStream {
 			poll::RecvStream::stop(&mut inner, code);
 			return;
 		}
-		drop(moq_net_sim::spawn(async move {
-			moq_net_sim::sleep(latency).await;
+		drop(moq_clock::sim::spawn(async move {
+			moq_clock::sleep(latency).await;
 			poll::RecvStream::stop(&mut inner, code);
 		}));
 	}

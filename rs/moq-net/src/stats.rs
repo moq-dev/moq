@@ -133,6 +133,10 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::{AsPath, PathOwned, Pattern, Patterns};
 
+mod outcomes;
+pub use outcomes::{Failure, Failures, Refusal, Refusals};
+use outcomes::{FailureCounters, RefusalCounters};
+
 /// Cumulative atomic counters for a single `(tier, role)` on a broadcast.
 ///
 /// Started counters bump when a model handle records activity; their `_ended`
@@ -274,6 +278,8 @@ impl Content {
 /// bumps on connect, `sessions_ended` on disconnect.
 #[derive(Default, Debug)]
 struct SessionCounters {
+	sessions_refused: RefusalCounters,
+	sessions_failed: FailureCounters,
 	requests: AtomicU64,
 	sessions_started: AtomicU64,
 	sessions_ended: AtomicU64,
@@ -295,9 +301,12 @@ impl SessionCounters {
 	/// before started with `Relaxed`, the same pairing as [`Counters::snapshot`],
 	/// so the readout never shows `ended > started`.
 	fn snapshot(&self) -> Presence {
+		let sessions_failed = self.sessions_failed.snapshot();
 		let sessions_ended = self.sessions_ended.load(Ordering::Acquire);
 		let sessions_started = self.sessions_started.load(Ordering::Relaxed);
 		Presence {
+			sessions_refused: self.sessions_refused.snapshot(),
+			sessions_failed,
 			requests: self.requests.load(Ordering::Relaxed),
 			wire_tx: self.wire_tx.load(Ordering::Relaxed),
 			wire_rx: self.wire_rx.load(Ordering::Relaxed),
@@ -546,6 +555,10 @@ impl Traffic {
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Presence {
+	/// Cumulative sessions refused before admission, by reason.
+	pub sessions_refused: Refusals,
+	/// Cumulative admitted sessions ending abnormally, by kind.
+	pub sessions_failed: Failures,
 	/// Cumulative request/response exchanges admitted.
 	pub requests: u64,
 	/// Cumulative sessions connected.
@@ -565,6 +578,8 @@ pub struct Presence {
 
 #[derive(Serialize)]
 struct PresenceSer {
+	sessions_refused: Refusals,
+	sessions_failed: Failures,
 	requests: u64,
 	sessions_started: u64,
 	sessions: u64,
@@ -579,6 +594,8 @@ struct PresenceSer {
 impl From<Presence> for PresenceSer {
 	fn from(p: Presence) -> Self {
 		Self {
+			sessions_refused: p.sessions_refused,
+			sessions_failed: p.sessions_failed,
 			requests: p.requests,
 			wire_tx: p.wire_tx,
 			wire_rx: p.wire_rx,
@@ -595,6 +612,8 @@ impl From<Presence> for PresenceSer {
 #[derive(Default, Deserialize)]
 #[serde(default)]
 struct PresenceDe {
+	sessions_refused: Refusals,
+	sessions_failed: Failures,
 	requests: u64,
 	sessions_started: Edge,
 	sessions: Edge,
@@ -611,6 +630,8 @@ struct PresenceDe {
 impl From<PresenceDe> for Presence {
 	fn from(d: PresenceDe) -> Self {
 		Self {
+			sessions_refused: d.sessions_refused,
+			sessions_failed: d.sessions_failed,
 			requests: d.requests,
 			wire_tx: d.wire_tx,
 			wire_rx: d.wire_rx,
@@ -637,6 +658,8 @@ impl<'de> Deserialize<'de> for Presence {
 impl Presence {
 	/// Fold another readout into this one. The peaks are per session, so they take the larger.
 	pub fn add(&mut self, other: Presence) {
+		self.sessions_refused.add(other.sessions_refused);
+		self.sessions_failed.add(other.sessions_failed);
 		self.requests += other.requests;
 		self.wire_tx += other.wire_tx;
 		self.wire_rx += other.wire_rx;
@@ -939,6 +962,11 @@ impl Registry {
 		}
 	}
 
+	/// Whether this registry collects counters.
+	pub fn is_enabled(&self) -> bool {
+		self.shared.is_some()
+	}
+
 	/// The excluded patterns. See [`Config::exclude`].
 	pub fn exclude(&self) -> &Patterns {
 		&self.exclude
@@ -1138,6 +1166,16 @@ pub struct Handle {
 }
 
 impl Handle {
+	/// Count a session refused outside relay admission under its resolved root and tier.
+	pub fn refuse(&self, root: impl AsPath, reason: Refusal) {
+		if let Some(presence) = self.stats.session_counters(&self.tier, root) {
+			presence
+				.sessions_refused
+				.counter(reason)
+				.fetch_add(1, Ordering::Relaxed);
+		}
+	}
+
 	/// The registry this handle is tied to.
 	pub fn parent(&self) -> &Registry {
 		&self.stats
@@ -1188,6 +1226,7 @@ impl Handle {
 				root,
 				connected: matches!(context, Context::Session),
 				current: Mutex::new(Current {
+					failure: None,
 					tier: self.tier.clone(),
 					presence,
 				}),
@@ -1345,6 +1384,7 @@ struct SessionInner {
 
 /// The tier a [`Session`] records under right now.
 struct Current {
+	failure: Option<Failure>,
 	tier: Tier,
 	/// The presence gauge for `(tier, root)`, or `None` for a disabled registry.
 	presence: Option<Arc<SessionCounters>>,
@@ -1383,6 +1423,18 @@ impl Session {
 		}
 		shared.wire.lock().push(Arc::downgrade(&source));
 		Wire { inner: Some(source) }
+	}
+
+	/// Record the first abnormal end on this connected session, shared across clones.
+	pub fn fail(&self, kind: Failure) {
+		let Some(inner) = &self.inner else { return };
+		if !inner.connected {
+			return;
+		}
+		let mut current = inner.current.lock().unwrap_or_else(PoisonError::into_inner);
+		if current.failure.is_none() {
+			current.failure = Some(kind);
+		}
 	}
 
 	/// Record later traffic and session presence under `tier`; a request stays counted where admitted.
@@ -1531,6 +1583,10 @@ impl Drop for SessionInner {
 			// Release pairs with the readout's Acquire load of `sessions_ended`
 			// (see the module-level "Snapshot atomicity" note).
 			presence.sessions_ended.fetch_add(1, Ordering::Release);
+			if let Some(kind) = current.failure {
+				// Read failures before ended; this release also publishes its matching end.
+				presence.sessions_failed.counter(kind).fetch_add(1, Ordering::Release);
+			}
 		}
 	}
 }
@@ -1890,6 +1946,64 @@ mod tests {
 		let output = serde_json::to_value(value).unwrap();
 		assert_eq!(output["wire_tx"], 71);
 		assert_eq!(output["wire_rx"], 29);
+	}
+
+	#[test]
+	fn outcomes_survive_clones_tier_changes_and_pruning() {
+		let stats = test_stats();
+		let handle = stats.tier(Tier::new("gateway"));
+		handle.refuse("root", Refusal::Forbidden);
+		let session = handle.session("root");
+		let clone = session.clone();
+		session.set_tier(Tier::new("next"));
+		clone.fail(Failure::IdleTimeout);
+		session.fail(Failure::Application);
+		drop(clone);
+		drop(session);
+		let before = stats.snapshot();
+		let gateway = before
+			.sessions()
+			.into_iter()
+			.find(|(tier, _)| tier.as_str() == "gateway")
+			.unwrap()
+			.1;
+		assert_eq!(gateway.sessions_refused.forbidden, 1);
+		assert_eq!(gateway.sessions_failed, Failures::default());
+		let next = before
+			.sessions()
+			.into_iter()
+			.find(|(tier, _)| tier.as_str() == "next")
+			.unwrap()
+			.1;
+		assert_eq!(next.sessions_failed.idle_timeout, 1);
+		assert_eq!(next.sessions_failed.application, 0);
+		assert_eq!(next.active(), 0);
+		drain(&stats);
+		let after = stats.snapshot();
+		assert_eq!(before.sessions(), after.sessions(), "retirement keeps outcomes once");
+		let disabled = Registry::disabled();
+		disabled.tier(Tier::default()).refuse("root", Refusal::Refused);
+		disabled.tier(Tier::default()).session("root").fail(Failure::Expired);
+		assert!(disabled.snapshot().sessions().is_empty());
+	}
+
+	#[test]
+	fn outcome_wire_fields_default_and_roundtrip_without_changing_live_count() {
+		let old: Presence = serde_json::from_str(r#"{"sessions":4,"sessions_closed":2}"#).unwrap();
+		assert_eq!(old.sessions_refused, Refusals::default());
+		assert_eq!(old.sessions_failed, Failures::default());
+		let mut current = old;
+		current.sessions_refused.request = 3;
+		current.sessions_failed.expired = 1;
+		assert_eq!(current.active(), 2);
+		assert_eq!(
+			serde_json::from_str::<Presence>(&serde_json::to_string(&current).unwrap()).unwrap(),
+			current
+		);
+		let mut sum = current;
+		sum.add(current);
+		assert_eq!(sum.sessions_refused.request, 6);
+		assert_eq!(sum.sessions_failed.expired, 2);
 	}
 
 	#[test]

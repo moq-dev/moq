@@ -13,7 +13,11 @@ import {
 	finalSequence,
 	groupBounds,
 	hooks,
+	insertRun,
 	type Recv,
+	type Run,
+	removeRun,
+	runGaps,
 	type TrackRequestOptions,
 	type TrackSequence,
 	type TrackSequences,
@@ -401,6 +405,11 @@ class TrackState {
 	/** The producer fanning into this sink, so a subscriber can mint a sibling of itself. */
 	producer?: Producer;
 	groups = new Signal<GroupConsumer[]>([]);
+	// Sequences the upstream publisher gave up: an incoming SUBSCRIBE_DROP or a producer
+	// cut. Kept apart from the cache so reclaim cannot erase a disposition a downstream
+	// publisher still has to forward, and as runs so a wide DROP costs one entry. Replaced
+	// rather than mutated, so a cursor can tell it changed by identity.
+	drops = new Signal<readonly Run[]>([]);
 	// Every group still in the producer's replay cache, including groups this
 	// subscriber already consumed, sorted by sequence. Drift anchors have the same
 	// lifetime as content. Sorted so the latency guard, evaluated per group and per
@@ -605,6 +614,28 @@ export class Producer {
 		};
 		hooks.bindSequence = bindProducerSequence;
 		hooks.cachedLargest = (producer) => producer.#largest();
+		hooks.dropTrackGroups = (producer, start, end) => producer.#drop(start, end);
+	}
+
+	#drop(start: number, end: number): void {
+		if (start >= end) return;
+		for (const state of [this.#state, ...this.#sinks]) {
+			state.drops.update((drops) => {
+				const next = [...drops];
+				insertRun(next, start, end);
+				return next;
+			});
+		}
+	}
+
+	// A publisher may re-create a group it cut; the sequence is no longer given up.
+	#undrop(sequence: number): void {
+		for (const state of [this.#state, ...this.#sinks]) {
+			const drops = state.drops.peek();
+			if (runGaps(drops, sequence, sequence + 1).length === 0) {
+				state.drops.set(removeRun(drops, sequence, sequence + 1));
+			}
+		}
 	}
 
 	/**
@@ -736,6 +767,7 @@ export class Producer {
 
 		this.#prune();
 		for (const entry of this.#cache) this.#mirror(entry, sink);
+		sink.drops.set(this.#state.drops.peek());
 
 		sink.received.set(this.#received);
 		sink.end.set(this.#state.end.peek());
@@ -902,6 +934,14 @@ export class Producer {
 	// Retain a source group and fan it out to every live sink.
 	#publish(group: GroupProducer): void {
 		const entry: CachedGroup = { group, mirrors: new Map<TrackState, GroupConsumer>(), arrived: now() };
+		this.#undrop(group.sequence);
+		group.closed.then((closed) => {
+			if (!(closed instanceof Error) || closed instanceof TooFarBehind) return;
+			// A re-created group already replaced this one.
+			const current = this.#cached.get(group.sequence);
+			if (current && current.group !== group) return;
+			this.#drop(group.sequence, group.sequence + 1);
+		});
 		this.#cache.push(entry);
 		this.#cached.set(group.sequence, entry);
 		this.#advance(group.sequence);
@@ -1188,6 +1228,12 @@ export class Subscriber {
 	// it to sequence order; whichever wins is the only one allowed from here on.
 	// Datagrams are a separate cursor and never commit.
 	#mode?: "arrival" | "ordered";
+	// What the lite publisher forwards as drops: sequences given up and not reported yet,
+	// the track's drops last folded in, and every sequence already reported. Drops are
+	// persistent track state, so they are tracked here rather than removed for everyone.
+	#pending: Run[] = [];
+	#dropsSeen?: { drops: readonly Run[]; start: number; end?: number };
+	#reported: Run[] = [];
 	// The group the frame-level helpers are currently draining, acquired through the
 	// sequence cursor so frame reads and {@link Ordered.nextGroup} share one floor.
 	#frameGroup?: GroupConsumer;
@@ -1345,7 +1391,7 @@ export class Subscriber {
 
 	static {
 		makeSubscriber = (name, state) => new Subscriber(name, state);
-		hooks.tryRecvGroup = (subscriber) => subscriber.#tryRecvGroup();
+		hooks.tryRecvGroup = (subscriber, started) => subscriber.#tryRecvGroup(started);
 		hooks.groupChanged = (subscriber, fn) => subscriber.#groupChanged(fn);
 		hooks.fetchBudget = (subscriber, maxDelay) => {
 			subscriber.#fetchBudget = maxDelay ?? Number.POSITIVE_INFINITY;
@@ -1537,6 +1583,8 @@ export class Subscriber {
 			switch (recv.kind) {
 				case "group":
 					return recv.group;
+				case "drop":
+					continue;
 				case "done":
 					return undefined;
 				case "error":
@@ -1556,10 +1604,41 @@ export class Subscriber {
 
 	// Package-internal synchronous half of recvGroup. The lite publisher uses this so applying
 	// control state, popping the group, and positioning its frames are one JavaScript turn.
-	#tryRecvGroup(): Recv {
+	#tryRecvGroup(dispositions = false): Recv {
 		const groups = this.#state.groups.peek();
 		const { start, end } = this.#cursor.peek();
-		while (groups.length > 0 && groups[0].sequence < start) groups.shift()?.close();
+		// The first part of `[from, to)` this cursor has not reported yet, now reported.
+		const report = (from: number, to: number): Recv | undefined => {
+			if (!dispositions) return undefined;
+			const [gap] = runGaps(this.#reported, Math.max(from, start), Math.min(to, end ?? to));
+			if (!gap) return undefined;
+			insertRun(this.#reported, gap.start, gap.end);
+			return { kind: "drop", ...gap };
+		};
+
+		while (groups.length > 0 && groups[0].sequence < start) {
+			const skipped = groups.shift();
+			if (!skipped) break;
+			skipped.close();
+			const dropped = report(skipped.sequence, skipped.sequence + 1);
+			if (dropped) return dropped;
+		}
+		if (dispositions) {
+			// Rescanned only after it changed, so an idle poll costs nothing per drop held.
+			// Out-of-window runs were skipped, so a moved window rescans too.
+			const drops = this.#state.drops.peek();
+			const seen = this.#dropsSeen;
+			if (!seen || seen.drops !== drops || seen.start !== start || seen.end !== end) {
+				this.#dropsSeen = { drops, start, end };
+				for (const run of drops) insertRun(this.#pending, run.start, run.end);
+			}
+			for (let run = this.#pending.shift(); run; run = this.#pending.shift()) {
+				const dropped = report(run.start, run.end);
+				if (!dropped || dropped.kind !== "drop") continue;
+				if (dropped.end < run.end) this.#pending.unshift({ start: dropped.end, end: run.end });
+				return dropped;
+			}
+		}
 		const drift = this.#drift();
 
 		for (;;) {
@@ -1568,8 +1647,21 @@ export class Subscriber {
 			const group = groups[0];
 			if (!group || (end !== undefined && group.sequence >= end)) break;
 			groups.shift();
+			// A sequence this cursor already reported dropped stays dropped: the subscriber
+			// accounted for it, so a group re-created under it is not served.
+			if (dispositions && runGaps(this.#reported, group.sequence, group.sequence + 1).length === 0) {
+				group.close();
+				continue;
+			}
+			if (dispositions && group.closed.peek() instanceof Error) {
+				const dropped = report(group.sequence, group.sequence + 1);
+				if (dropped) return dropped;
+				continue;
+			}
 			if (this.#isStale(group, drift)) {
 				group.close();
+				const dropped = report(group.sequence, group.sequence + 1);
+				if (dropped) return dropped;
 				continue;
 			}
 			return { kind: "group", group: this.#guard(group) };
@@ -1597,6 +1689,7 @@ export class Subscriber {
 	#groupChanged(fn: () => void): Dispose {
 		const dispose = [
 			this.#state.groups.changed(fn),
+			this.#state.drops.changed(fn),
 			this.#cursor.changed(fn),
 			this.#state.closed.changed(fn),
 			this.#state.end.changed(fn),

@@ -1,7 +1,7 @@
 import { expect, jest, spyOn, test } from "bun:test";
 import { Milli } from "@moq/clock";
 import { Signal } from "@moq/signals";
-import type { Grant } from "../auth.ts";
+import type { Auth, Grant } from "../auth.ts";
 import { Producer as BroadcastProducer } from "../broadcast.ts";
 import * as Epoch from "../epoch.ts";
 import { error, ProtocolViolation, StreamCode } from "../error.ts";
@@ -120,11 +120,13 @@ function publisher(
 		session,
 		cluster,
 		grant,
+		auth,
 	}: {
 		requiresSolicitation?: boolean;
 		session?: Session;
 		cluster?: Cluster.Hops;
 		grant?: Signal<Grant | undefined>;
+		auth?: Tokens;
 	} = {},
 ): { pub: Publisher; origin: OriginProducer } {
 	const origin = new OriginProducer();
@@ -137,6 +139,7 @@ function publisher(
 			requiresSolicitation,
 			cluster,
 			grant,
+			auth,
 		}),
 		origin,
 	};
@@ -783,132 +786,41 @@ test("a declined advertisement is retried on the next change", async () => {
 	origin.close();
 });
 
-/**
- * A peer out of stream credit rejects the open. That has to cost the namespace a turn,
- * not the session its discovery: the announce loop is never restarted, so unwinding it
- * would lose every future publish too.
- */
-test("a failed stream open does not kill the announce loop", async () => {
+/** The solicited legacy path carries a route's token too, so closing it remakes the request. */
+test("closing a solicited legacy advertisement's token makes it again without it", async () => {
+	// No retry timer can stand in for the wake.
+	jest.useFakeTimers();
 	const pair = createMockTransportPair(ALPN.DRAFT_19);
-	const inner = new NativeSession(pair.server, VERSION, true);
+	const session = new NativeSession(pair.server, Version.DRAFT_15, true);
+	const tokens = new Tokens();
+	const { pub, origin } = publisher(pair.server, { requiresSolicitation: true, session, auth: tokens });
+	const { sent, restore } = carriedTokens();
+	try {
+		const token = tokens.issue("first");
+		origin.createBroadcast(Path.from("mine")).announce({ auth: token });
 
-	let failures = 1;
-	const session: Session = {
-		version: inner.version,
-		client: inner.client,
-		acceptBi: () => inner.acceptBi(),
-		nextRequestId: () => inner.nextRequestId(),
-		spendRequest: (id) => inner.spendRequest(id),
-		close: () => inner.close(),
-		openBi: () => {
-			if (failures-- > 0) throw new Error("no stream credit");
-			return inner.openBi();
-		},
-	};
+		const subscription = await Stream.open(pair.client, { version: Version.DRAFT_15 });
+		const accepted = await Stream.accept(pair.server, Version.DRAFT_15);
+		if (!accepted) throw new Error("the subscription stream was never accepted");
+		void pub.runSubscribeNamespace(new SubscribeNamespace({ requestId: 0n, namespace: Path.empty() }), accepted);
 
-	const { pub, origin } = publisher(pair.server, { session });
-	publish(origin, Path.from("first"));
+		const old = await nextStream(pair.client);
+		if (!old) throw new Error("never advertised");
+		expect(await readPublishNamespace(old)).toBe(Path.from("mine"));
+		await acceptPublishNamespace(old);
+		await flush();
+		token.close();
 
-	void pub.runPublishNamespaces();
-	await new Promise((resolve) => setTimeout(resolve, SETTLE));
-
-	// The refused open cost "first" its turn; the next change has to bring it back along
-	// with the newcomer.
-	publish(origin, Path.from("second"));
-
-	const seen = new Set<Path.Valid>();
-	for (let i = 0; i < 2; i++) {
-		const stream = await nextStream(pair.client);
-		if (!stream) break;
-		seen.add(await readPublishNamespace(stream));
-		await acceptPublishNamespace(stream);
+		const again = await nextStream(pair.client);
+		if (!again) throw new Error("never advertised again");
+		expect(await readPublishNamespace(again)).toBe(Path.from("mine"));
+		expect(sent).toEqual(["first", undefined]);
+		subscription.close();
+	} finally {
+		restore();
+		origin.close();
+		jest.useRealTimers();
 	}
-
-	expect(seen).toContain(Path.from("first"));
-	expect(seen).toContain(Path.from("second"));
-
-	origin.close();
-});
-
-/**
- * Capacity coming back raises no signal of its own: no broadcast is published, closed, or
- * changed. The loop has to come back and ask again on its own, or a namespace refused
- * once stays undiscoverable for the session.
- */
-test("a namespace refused once is retried without anything else changing", async () => {
-	const pair = createMockTransportPair(ALPN.DRAFT_19);
-	const inner = new NativeSession(pair.server, VERSION, true);
-
-	let failures = 1;
-	const session: Session = {
-		version: inner.version,
-		client: inner.client,
-		acceptBi: () => inner.acceptBi(),
-		nextRequestId: () => inner.nextRequestId(),
-		spendRequest: (id) => inner.spendRequest(id),
-		close: () => inner.close(),
-		openBi: () => {
-			if (failures-- > 0) throw new Error("no stream credit");
-			return inner.openBi();
-		},
-	};
-
-	const { pub, origin } = publisher(pair.server, { session });
-	publish(origin, Path.from("lonely"));
-
-	void pub.runPublishNamespaces();
-
-	// Nothing else happens: no second publish, no close. Only the retry can save it.
-	const stream = await nextStream(pair.client);
-	if (!stream) throw new Error("the refused namespace was never retried");
-	expect(await readPublishNamespace(stream)).toBe(Path.from("lonely"));
-	await acceptPublishNamespace(stream);
-
-	origin.close();
-});
-
-/**
- * The solicited legacy path advertises with PUBLISH_NAMESPACE requests too, so a declined
- * one needs the same retry the unsolicited loop has. Without it, a namespace refused once
- * stays undiscoverable for the life of the subscription, since the peer starting to
- * answer raises no signal the loop is watching.
- */
-test("a solicited legacy advertisement refused once is retried", async () => {
-	const pair = createMockTransportPair(ALPN.DRAFT_19);
-	const inner = new NativeSession(pair.server, Version.DRAFT_15, true);
-
-	let failures = 1;
-	const session: Session = {
-		version: inner.version,
-		client: inner.client,
-		acceptBi: () => inner.acceptBi(),
-		nextRequestId: () => inner.nextRequestId(),
-		spendRequest: (id) => inner.spendRequest(id),
-		close: () => inner.close(),
-		openBi: () => {
-			if (failures-- > 0) throw new Error("no stream credit");
-			return inner.openBi();
-		},
-	};
-
-	// The peer declared that advertisements to it must be solicited, so this is the loop
-	// that answers its SUBSCRIBE_NAMESPACE.
-	const { pub, origin } = publisher(pair.server, { requiresSolicitation: true, session });
-	publish(origin, Path.from("lonely"));
-
-	const subscription = await Stream.open(pair.client, { version: Version.DRAFT_15 });
-	const accepted = await Stream.accept(pair.server, Version.DRAFT_15);
-	if (!accepted) throw new Error("the subscription stream was never accepted");
-	void pub.runSubscribeNamespace(new SubscribeNamespace({ requestId: 0n, namespace: Path.empty() }), accepted);
-
-	// Nothing else happens: no second publish, no close. Only the retry can save it.
-	const stream = await nextStream(pair.client);
-	if (!stream) throw new Error("the refused namespace was never retried");
-	expect(await readPublishNamespace(stream)).toBe(Path.from("lonely"));
-	await acceptPublishNamespace(stream);
-
-	subscription.close();
-	origin.close();
 });
 
 /**
@@ -1346,12 +1258,12 @@ async function readUpdate(stream: Stream): Promise<Cluster.Update> {
 }
 
 /** A clustered publisher on fake time, with every stream it opens collected. */
-function clustered(requiresSolicitation = false) {
+function clustered(requiresSolicitation = false, auth?: Tokens) {
 	jest.useFakeTimers();
 	const self: Hop = HopSchema.parse(7n);
 	const peer: Hop = HopSchema.parse(9n);
 	const pair = createMockTransportPair(ALPN.DRAFT_19);
-	const { pub, origin } = publisher(pair.server, { cluster: { self, peer }, requiresSolicitation });
+	const { pub, origin } = publisher(pair.server, { cluster: { self, peer }, requiresSolicitation, auth });
 	const streams = accepted(pair.client);
 	const close = () => {
 		origin.close();
@@ -1492,6 +1404,155 @@ function republish(origin: OriginProducer, old: BroadcastProducer) {
 	next.announce({ hops: [VIA], cost: 4n });
 	old.close();
 }
+
+/** The tokens one session issued, each carried as its own bytes. */
+class Tokens {
+	readonly ended = new Signal(0);
+	#issued = new Map<Auth, Uint8Array>();
+
+	issue(value: string): Auth {
+		const token: Auth = {
+			grant: new Signal<Grant | undefined>(undefined),
+			closed: new Promise(() => {}),
+			close: () => {
+				this.#issued.delete(token);
+				this.ended.update((n) => n + 1);
+			},
+		};
+		this.#issued.set(token, new TextEncoder().encode(value));
+		return token;
+	}
+
+	carried(token: Auth | undefined): Uint8Array | undefined {
+		return token && this.#issued.get(token);
+	}
+}
+
+/** Record the token each PUBLISH_NAMESPACE and REQUEST_UPDATE carries, as text. */
+function carriedTokens() {
+	const sent: (string | undefined)[] = [];
+	const text = (token?: Uint8Array) => (token ? new TextDecoder().decode(token) : undefined);
+	const advertise = PublishNamespace.prototype.encode;
+	const update = PublishNamespaceUpdate.prototype.encode;
+	const spies = [
+		spyOn(PublishNamespace.prototype, "encode").mockImplementation(function (this: PublishNamespace, w, v) {
+			sent.push(text(this.token));
+			return advertise.call(this, w, v);
+		}),
+		spyOn(PublishNamespaceUpdate.prototype, "encode").mockImplementation(function (
+			this: PublishNamespaceUpdate,
+			w,
+			v,
+		) {
+			sent.push(text(this.token));
+			return update.call(this, w, v);
+		}),
+	];
+	return {
+		sent,
+		restore: () => {
+			for (const spy of spies) spy.mockRestore();
+		},
+	};
+}
+
+/**
+ * A route's token rides its PUBLISH_NAMESPACE, and swapping it renews the request in
+ * place: one REQUEST_UPDATE carrying only the new token. Mirrors the Rust publisher.
+ */
+test("swapping a route's token is one REQUEST_UPDATE carrying it", async () => {
+	const tokens = new Tokens();
+	const { pub, origin, streams, close } = clustered(false, tokens);
+	const { sent, restore } = carriedTokens();
+	try {
+		const broadcast = origin.createBroadcast(Path.from("mine"));
+		broadcast.announce({ hops: [VIA], cost: 4n, auth: tokens.issue("first") });
+		void pub.runPublishNamespaces();
+
+		const stream = await take(streams);
+		await acceptClustered(stream);
+		expect(sent).toEqual(["first"]);
+
+		broadcast.announce({ hops: [VIA], cost: 4n, auth: tokens.issue("second") });
+		expect(await readUpdate(stream)).toEqual({ hops: undefined, cost: undefined });
+		await acceptPublishNamespace(stream);
+		expect(sent).toEqual(["first", "second"]);
+		expect(streams).toHaveLength(0);
+	} finally {
+		restore();
+		close();
+	}
+});
+
+/** A token another session issued is never carried, so swapping between two sends nothing. */
+test("a foreign route token is not carried", async () => {
+	const foreign = new Tokens();
+	const { pub, origin, streams, close } = clustered(false, new Tokens());
+	const { sent, restore } = carriedTokens();
+	try {
+		const broadcast = origin.createBroadcast(Path.from("mine"));
+		broadcast.announce({ hops: [VIA], cost: 4n, auth: foreign.issue("first") });
+		void pub.runPublishNamespaces();
+
+		const stream = await take(streams);
+		await acceptClustered(stream);
+		broadcast.announce({ hops: [VIA], cost: 4n, auth: foreign.issue("second") });
+		const more = watch(stream.reader.u53());
+		await flush();
+		expect(more.state).toBe("pending");
+		expect(sent).toEqual([undefined]);
+	} finally {
+		restore();
+		close();
+	}
+});
+
+/** REQUEST_UPDATE cannot name a token on a request that had none, so the request restarts. */
+test("naming a token on an unnamed request makes it again", async () => {
+	const tokens = new Tokens();
+	const { pub, origin, streams, close } = clustered(false, tokens);
+	const { sent, restore } = carriedTokens();
+	try {
+		const broadcast = origin.createBroadcast(Path.from("mine"));
+		broadcast.announce({ hops: [VIA], cost: 4n });
+		void pub.runPublishNamespaces();
+
+		const old = await take(streams);
+		await acceptClustered(old);
+		broadcast.announce({ hops: [VIA], cost: 4n, auth: tokens.issue("first") });
+
+		expect(await old.reader.done().catch(error)).toMatchObject({ code: StreamCode.Cancel });
+		await acceptClustered(await take(streams));
+		expect(sent).toEqual([undefined, "first"]);
+	} finally {
+		restore();
+		close();
+	}
+});
+
+/** Closing a route's token drops it from the request, which REQUEST_UPDATE cannot do. */
+test("closing a route's token makes its request again without it", async () => {
+	const tokens = new Tokens();
+	const { pub, origin, streams, close } = clustered(false, tokens);
+	const { sent, restore } = carriedTokens();
+	try {
+		const broadcast = origin.createBroadcast(Path.from("mine"));
+		const token = tokens.issue("first");
+		broadcast.announce({ hops: [VIA], cost: 4n, auth: token });
+		void pub.runPublishNamespaces();
+
+		const old = await take(streams);
+		await acceptClustered(old);
+		token.close();
+
+		expect(await old.reader.done().catch(error)).toMatchObject({ code: StreamCode.Cancel });
+		await acceptClustered(await take(streams));
+		expect(sent).toEqual(["first", undefined]);
+	} finally {
+		restore();
+		close();
+	}
+});
 
 test("a republish withdraws the PUBLISH_NAMESPACE and advertises again", async () => {
 	const { pub, origin, streams, close } = clustered();
@@ -1675,7 +1736,7 @@ test("an unanswered update drops the request and re-offers the namespace fresh",
 		await readUpdate(stream);
 		const reset = watch(stream.reader.u53());
 
-		await advance(4_900);
+		await advance(9_900);
 		expect(reset.state).toBe("pending");
 		expect(streams).toHaveLength(0);
 

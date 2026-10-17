@@ -71,12 +71,12 @@ async fn acquisition(version: &str) {
 	}
 }
 
-#[moq_net_sim::test]
+#[moq_clock::test]
 async fn epochless_replacement_refuses_pending_catalog() {
 	acquisition("moq-lite-06").await;
 }
 
-#[moq_net_sim::test]
+#[moq_clock::test]
 async fn same_epoch_replacement_acquires_pending_catalog() {
 	acquisition("moq-lite-07-wip").await;
 }

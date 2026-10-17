@@ -204,7 +204,16 @@ should prefer the canonical name and fall back to the legacy one.
 ### Sessions
 
 ```json
-{ "acme": { "requests": 3, "sessions_started": 12, "sessions_ended": 10, "sessions": 12, "sessions_closed": 10, "announces_peak": 40, "subscriptions_peak": 900, "wire_tx": 2048, "wire_rx": 1024 } }
+{
+  "acme": {
+    "requests": 3, "sessions_started": 12, "sessions_ended": 10,
+    "sessions": 12, "sessions_closed": 10,
+    "sessions_refused": { "refused": 0, "unavailable": 0, "request": 0, "forbidden": 0, "lan": 0 },
+    "sessions_failed": { "idle_timeout": 1, "transport": 0, "application": 0, "expired": 0 },
+    "announces_peak": 40, "subscriptions_peak": 900,
+    "wire_tx": 2048, "wire_rx": 1024
+  }
+}
 ```
 
 `sessions_started` and `sessions_ended` count connects and disconnects, whether
@@ -216,17 +225,30 @@ on the new.
 
 `wire_tx` and `wire_rx` count transport bytes sent and received, separately
 from `Traffic.bytes`, which counts media payload. QUIC and WebTransport count
-UDP bytes, including retransmissions and transport overhead. A stats tick
-reads each available owned source directly, without activating the session's
-periodic sampler. Tier changes flush the old tier first; closing a source
-records its final nonnegative delta. Embedders register a cumulative `(tx, rx)`
-closure with `stats::Handle::wire` or `stats::Session::wire` and hold its guard.
-Dropping the guard records the final reading and unregisters the source.
+UDP bytes, including retransmissions and transport overhead. The transport
+updates a connection's counters as it sends and receives, and a stats tick reads
+them without polling the session or activating its periodic sampler. Tier
+changes flush the old tier first; closing a session records its final delta.
+An embedder creates a `transport::Wire`, registers it with `stats::Handle::wire`
+or `stats::Session::wire`, records its connection's cumulative totals on it, and
+holds the returned guard. Dropping the guard records the final reading.
 
 Unsupported transports, including browsers and the current WebSocket/qmux
 adapter, contribute zero. WebSocket wire accounting requires the separate
 qmux counter source; unavailable counters are never estimated from payload.
 Readers default missing wire fields to zero for older relays.
+
+`sessions_refused` counts sessions turned away before admission, by reason.
+They never start a session. The relay's own refusals have no resolved root, so
+they count under the empty root on the default tier; an embedder can count one
+it refuses itself with `stats::Handle::refuse`, under the root and tier it
+resolved.
+
+`sessions_failed` counts admitted sessions that ended abnormally, by kind: a
+subset of `sessions_ended`, so the live count is unchanged. A clean close by
+either side, a drain, or a shutdown is not a failure. A grant that expires
+mid-session counts as `expired`; one revoked or narrowed out from under it
+counts as `application`. A reader treats a missing object as zeros.
 
 `requests` counts admitted request/response exchanges under the token's root and
 tier, including HTTP `/fetch` and `/announced`. They never start or end a session.

@@ -20,7 +20,7 @@ export { Connection } from "./connection/index.ts";
 /** Publisher instance identities, carried in broadcast paths as UUIDv7 epochs. */
 export * as Epoch from "./epoch.ts";
 export { SessionCode, StreamCode } from "./error.ts";
-/** Session and stream errors, each carrying a code from its own registry. */
+/** Session, stream, and local request errors. */
 export * as Error from "./errors.ts";
 /** Group role handles and frame helpers. */
 export * as Group from "./group.ts";

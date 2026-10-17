@@ -16,19 +16,16 @@ use moq_net::{Client, Server, Session, Version, origin};
 
 use super::mock::{MockSession, MockStats, create_mock_session_pair};
 
-/// The current instant: simulated under `moq_net_sim`, tokio's in the benches.
+/// The current ambient instant.
 pub fn now() -> moq_net::time::Instant {
-	match moq_net_sim::is_running() {
-		true => moq_net_sim::now(),
-		false => tokio::time::Instant::now().into_std(),
-	}
+	moq_clock::now()
 }
 
-/// Run a protocol driver in the background: on `moq_net_sim` in tests, on tokio in
+/// Run a protocol driver in the background: on `moq-clock`'s sim in tests, on tokio in
 /// the benches.
 pub fn spawn<D: moq_net::time::Driver + Send + Unpin + 'static>(mut driver: D) {
-	match moq_net_sim::is_running() {
-		true => drop(moq_net_sim::spawn(moq_net_sim::drive(move |now, waiter| {
+	match moq_clock::sim::is_running() {
+		true => drop(moq_clock::sim::spawn(moq_clock::drive(move |now, waiter| {
 			moq_net::time::Driver::poll(&mut driver, now, waiter)
 		}))),
 		false => drop(tokio::spawn(moq_net::time::run(driver))),

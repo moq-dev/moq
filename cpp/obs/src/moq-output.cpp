@@ -75,6 +75,24 @@ MoQError::Code FailureCode(const moq::Error &error)
 	return MoQError::Code::Other;
 }
 
+// Retune `encoder` to `bitrate_bps`, the way OBS's own RTMP dynamic bitrate does.
+void SetBitrate(obs_encoder_t *encoder, uint64_t bitrate_bps)
+{
+	OBSDataAutoRelease settings = obs_data_create();
+	obs_data_set_int(settings, "bitrate", (long long)(bitrate_bps / 1000));
+	obs_encoder_update(encoder, settings);
+}
+
+// Whether `rate_control` lets the "bitrate" setting drive the encoder's output.
+// Encoders without the setting are bitrate-driven by construction.
+bool BitrateDriven(const std::string &rate_control)
+{
+	std::string mode = rate_control;
+	for (char &c : mode)
+		c = static_cast<char>(c >= 'a' && c <= 'z' ? c - 'a' + 'A' : c);
+	return mode.empty() || mode == "CBR" || mode == "VBR" || mode == "ABR";
+}
+
 } // namespace
 
 MoQOutput::MoQOutput(obs_data_t *, obs_output_t *output) : output(output), path(), total_bytes_sent(0) {}
@@ -251,6 +269,11 @@ void MoQOutput::OnConnect(const std::shared_ptr<Attempt> &current, moq::expected
 	current->session = *result;
 	current->connected = true;
 	current->live = true;
+	// Before the session reads as live, so the first frame after can reserve.
+	{
+		std::lock_guard<std::mutex> lock(media_mutex);
+		bandwidth = current->session->bandwidth();
+	}
 	{
 		std::lock_guard<std::mutex> lock(mutex);
 		session = current->session;
@@ -377,18 +400,28 @@ void MoQOutput::Reset()
 	}
 	connect_time_ms = 0;
 
-	std::lock_guard<std::mutex> lock(media_mutex);
+	// Following the grant rewrote the encoder's bitrate, which the next Start()
+	// reads back as the configured rate. Restored after media_mutex is released:
+	// an idle encoder applies the update inline.
+	std::vector<std::pair<OBSEncoder, uint64_t>> restore;
+
+	std::unique_lock<std::mutex> lock(media_mutex);
 	for (auto &[encoder, track] : video_tracks) {
-		if (track)
-			track->finish();
+		if (track.producer)
+			track.producer->finish();
+		if (track.rate && track.rate->Target() != track.rate->Max()) {
+			if (OBSEncoder strong = OBSGetStrongRef(track.encoder))
+				restore.emplace_back(std::move(strong), track.rate->Max());
+		}
 	}
 	video_tracks.clear();
 
 	for (auto &[encoder, track] : audio_tracks) {
-		if (track)
-			track->finish();
+		if (track.producer)
+			track.producer->finish();
 	}
 	audio_tracks.clear();
+	bandwidth.reset();
 
 	// Close the broadcast so the origin retracts it immediately; Start()
 	// creates a fresh one on restart.
@@ -409,6 +442,10 @@ void MoQOutput::Reset()
 			       draining.end());
 		draining.push_back(retired->shutdown());
 	}
+	lock.unlock();
+
+	for (auto &[encoder, bitrate] : restore)
+		SetBitrate(encoder, bitrate);
 }
 
 std::string MoQOutput::GetEpoch()
@@ -505,6 +542,25 @@ void MoQOutput::CopyLastFailure(int *code, std::string *reason)
 		*reason = last_failure_reason;
 }
 
+bool MoQOutput::TryGetVideoRate(VideoRate *out)
+{
+	VideoRate rate;
+	bool following = false;
+	{
+		std::lock_guard<std::mutex> lock(media_mutex);
+		for (const auto &[encoder, track] : video_tracks) {
+			if (!track.rate || !track.reservation)
+				continue;
+			following = true;
+			rate.target_bps += track.rate->Target();
+			rate.configured_bps += track.rate->Max();
+		}
+	}
+	if (following && out)
+		*out = rate;
+	return following;
+}
+
 void MoQOutput::Data(struct encoder_packet *packet)
 {
 	if (!packet) {
@@ -550,11 +606,12 @@ void MoQOutput::AudioData(struct encoder_packet *packet)
 		AudioInit(encoder);
 		it = audio_tracks.find(encoder);
 	}
-	if (it == audio_tracks.end() || !it->second) {
-		// We failed to initialize the audio track, so we can't write any data.
+	if (it == audio_tracks.end())
 		return;
-	}
-	const auto &track = it->second;
+	auto &track = it->second;
+	if (!track.producer)
+		return;
+	Reserve(track);
 
 	auto timestamp = PacketTimestamp(packet);
 	if (!timestamp) {
@@ -562,7 +619,7 @@ void MoQOutput::AudioData(struct encoder_packet *packet)
 		return;
 	}
 
-	if (auto result = track->write_frame(PacketFrame(packet, *timestamp)); !result) {
+	if (auto result = track.producer->write_frame(PacketFrame(packet, *timestamp)); !result) {
 		LOG_ERROR("Failed to write audio frame: %s", result.error().to_string().c_str());
 		return;
 	}
@@ -571,12 +628,12 @@ void MoQOutput::AudioData(struct encoder_packet *packet)
 	// stream is one group. Cut per frame, which is one QUIC stream per packet forwarded without
 	// waiting for the next, the right trade for live. Video groups at its own keyframes.
 	// Cut before observing the flush so a failed observation never leaves the group open.
-	if (auto result = track->cut(); !result) {
+	if (auto result = track.producer->cut(); !result) {
 		LOG_ERROR("Failed to cut audio group: %s", result.error().to_string().c_str());
 		return;
 	}
 
-	if (auto result = track->flush(*timestamp); !result) {
+	if (auto result = track.producer->flush(*timestamp); !result) {
 		LOG_ERROR("Failed to observe audio encoder flush: %s", result.error().to_string().c_str());
 		return;
 	}
@@ -594,9 +651,17 @@ void MoQOutput::VideoData(struct encoder_packet *packet)
 		VideoInit(encoder);
 		it = video_tracks.find(encoder);
 	}
-	if (it == video_tracks.end() || !it->second)
+	if (it == video_tracks.end() || !it->second.producer)
 		return;
-	const auto &track = it->second;
+	auto &track = it->second;
+	Reserve(track);
+
+	// Read before the frame is written, so a retune lands on the encoder's next
+	// frame. obs_encoder_update only flags an active encoder for its own thread.
+	if (track.rate && track.reservation) {
+		if (auto next = track.rate->Update(track.reservation->grant(), MoQRate::Clock::now()))
+			SetBitrate(encoder, *next);
+	}
 
 	auto timestamp = PacketTimestamp(packet);
 	if (!timestamp) {
@@ -604,17 +669,31 @@ void MoQOutput::VideoData(struct encoder_packet *packet)
 		return;
 	}
 
-	if (auto result = track->write_frame(PacketFrame(packet, *timestamp)); !result) {
+	if (auto result = track.producer->write_frame(PacketFrame(packet, *timestamp)); !result) {
 		LOG_ERROR("Failed to write video frame: %s", result.error().to_string().c_str());
 		return;
 	}
 
-	if (auto result = track->flush(*timestamp); !result) {
+	if (auto result = track.producer->flush(*timestamp); !result) {
 		LOG_ERROR("Failed to observe video encoder flush: %s", result.error().to_string().c_str());
 		return;
 	}
 
 	total_bytes_sent += packet->size;
+}
+
+// NOTE: Caller must hold media_mutex.
+void MoQOutput::Reserve(Track &track)
+{
+	if (track.reservation || !bandwidth || track.bitrate_bps == 0)
+		return;
+	auto demand = track.producer->demand();
+	if (!demand) {
+		LOG_ERROR("Failed to reserve bandwidth: %s", demand.error().to_string().c_str());
+		track.bitrate_bps = 0;
+		return;
+	}
+	track.reservation = bandwidth->reserve(*demand, track.bitrate_bps);
 }
 
 // NOTE: Caller must hold media_mutex.
@@ -655,7 +734,7 @@ void MoQOutput::VideoInit(obs_encoder_t *encoder)
 		config.format = moq::VideoFormat::kAv01;
 	} else {
 		LOG_ERROR("Unsupported video codec: %s", codec);
-		video_tracks[encoder] = nullptr;
+		video_tracks[encoder] = Track{};
 		return;
 	}
 
@@ -677,10 +756,26 @@ void MoQOutput::VideoInit(obs_encoder_t *encoder)
 	auto track = moq::MediaTrackProducer::video(broadcast, moq::MediaTarget::kNamed{}, config);
 	if (!track) {
 		LOG_ERROR("Failed to initialize video track: %s", track.error().to_string().c_str());
-		video_tracks[encoder] = nullptr;
+		video_tracks[encoder] = Track{};
 		return;
 	}
-	video_tracks[encoder] = *track;
+
+	Track entry;
+	entry.producer = *track;
+	if (video_bitrate_kbps > 0) {
+		entry.bitrate_bps = (uint64_t)video_bitrate_kbps * 1000ULL;
+		// Following needs an encoder that retunes live and a rate control the
+		// bitrate drives; a quality target (CQP, CRF) only reserves.
+		const bool dynamic = obs_encoder_get_caps(encoder) & OBS_ENCODER_CAP_DYN_BITRATE;
+		if (dynamic && BitrateDriven(rate_control)) {
+			entry.rate.emplace(entry.bitrate_bps);
+			entry.encoder = OBSGetWeakRef(encoder);
+		} else {
+			LOG_INFO("Video bitrate stays at %d kbps: the encoder cannot follow the bandwidth grant (%s)",
+				 video_bitrate_kbps, rate_control.empty() ? "no rate control" : rate_control.c_str());
+		}
+	}
+	video_tracks[encoder] = std::move(entry);
 
 	LOG_INFO("Video track initialized (%ux%u, %d kbps)", video_width, video_height, video_bitrate_kbps);
 }
@@ -695,16 +790,8 @@ void MoQOutput::AudioInit(obs_encoder_t *encoder)
 	if (!broadcast)
 		return;
 
-	// TODO Pass these along to the audio catalog somehow.
-	/*
 	OBSDataAutoRelease settings = obs_encoder_get_settings(encoder);
-	if (!settings) {
-		LOG_ERROR("Failed to get audio encoder settings");
-		return;
-	}
-
-	auto audio_bitrate = (int)obs_data_get_int(settings, "bitrate");
-	*/
+	const int audio_bitrate_kbps = settings ? (int)obs_data_get_int(settings, "bitrate") : 0;
 
 	uint8_t *extra_data = nullptr;
 	size_t extra_size = 0;
@@ -728,7 +815,7 @@ void MoQOutput::AudioInit(obs_encoder_t *encoder)
 		config.format = moq::AudioFormat::kFlac;
 	} else {
 		LOG_ERROR("Unsupported audio codec: %s", codec);
-		audio_tracks[encoder] = nullptr;
+		audio_tracks[encoder] = Track{};
 		return;
 	}
 
@@ -738,10 +825,15 @@ void MoQOutput::AudioInit(obs_encoder_t *encoder)
 	auto track = moq::MediaTrackProducer::audio(broadcast, moq::MediaTarget::kNamed{}, config);
 	if (!track) {
 		LOG_ERROR("Failed to initialize audio track: %s", track.error().to_string().c_str());
-		audio_tracks[encoder] = nullptr;
+		audio_tracks[encoder] = Track{};
 		return;
 	}
-	audio_tracks[encoder] = *track;
+	// Audio reserves so video's grant leaves room for it, and never follows.
+	Track entry;
+	entry.producer = *track;
+	if (audio_bitrate_kbps > 0)
+		entry.bitrate_bps = (uint64_t)audio_bitrate_kbps * 1000ULL;
+	audio_tracks[encoder] = std::move(entry);
 
 	LOG_INFO("Audio track initialized successfully");
 }

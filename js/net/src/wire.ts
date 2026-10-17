@@ -49,7 +49,7 @@ export interface OriginProducer {
 	accepts(prefix: Path.Valid): boolean;
 	receive(
 		prefix: Path.Valid,
-		route?: Route | { epoch?: Route["epoch"]; hops?: Route["hops"]; cost?: Route["cost"] },
+		route?: Route | { epoch?: Route["epoch"]; hops?: Route["hops"]; cost?: Route["cost"]; auth?: Route["auth"] },
 	): origin.Dynamic;
 	attach(discovery: boolean): Dispose;
 	expect(): Dispose;

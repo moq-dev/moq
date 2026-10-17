@@ -9,9 +9,9 @@ use anyhow::Context;
 use hang::moq_net;
 use moq_mux::catalog::{self, Stream};
 use moq_net::announce::Event as AnnounceEvent;
-// tokio's clock, which is the wall clock unless a test pauses it to drive the
+// The ambient clock, which follows tokio's paused clock when a test drives the
 // playout clock itself.
-use tokio::time::Instant;
+use moq_clock::Instant;
 
 use super::args::Args;
 use super::output::{Output, Sink, Speaker};
@@ -581,7 +581,7 @@ async fn play_audio<O: Output>(
 								.due(role.map(frame.timestamp)?)
 								.and_then(|at| at.checked_sub(first));
 							if let Some(at) = at {
-								tokio::time::sleep_until(at.into()).await;
+								moq_clock::sleep_until(at).await;
 							}
 							if let Some((ended, end)) = deferred.take()
 								&& ended == discontinuity
@@ -648,7 +648,7 @@ async fn play_audio<O: Output>(
 					.due(mapped)
 					.and_then(|at| at.checked_sub(lead(delay, &frame)));
 				if let Some(at) = at {
-					tokio::time::sleep_until(at.into()).await;
+					moq_clock::sleep_until(at).await;
 				}
 			}
 
@@ -663,7 +663,8 @@ async fn play_audio<O: Output>(
 			// so a deeper target could never fill. The advertised floor needs the cap,
 			// being a number the publisher declared about itself, unbounded. The budget
 			// is also what the sink's ring was sized to hold.
-			let target = samples(delay.min(max_delay).max(AUDIO_BUFFER_MIN));
+			let held = delay.min(max_delay).max(AUDIO_BUFFER_MIN);
+			let target = samples(held);
 			let fit = fit(dry, buffered, target, slack, timing.silence + length as u64);
 			dry = false;
 
@@ -682,10 +683,11 @@ async fn play_audio<O: Output>(
 			// is the only half of the pipeline that cannot skip ahead. A move has to
 			// wake the window: it is asleep on a deadline computed from the old anchor,
 			// and every queued frame is due earlier now.
-			let moved = presentation
-				.lock()
-				.unwrap()
-				.audio(timing.end, sink.buffered(), Instant::now().into_std());
+			let moved = {
+				let mut presentation = presentation.lock().unwrap();
+				presentation.hold(held);
+				presentation.audio(timing.end, sink.buffered(), Instant::now())
+			};
 			if moved {
 				changed.notify_one();
 				output.send(Event::Wake);
@@ -695,7 +697,7 @@ async fn play_audio<O: Output>(
 		Ok::<_, anyhow::Error>(sink)
 	};
 	let (_, sink) = tokio::try_join!(receive, play)?;
-	role.retire(Instant::now().into_std().checked_add(sink.buffered()));
+	role.retire(Instant::now().checked_add(sink.buffered()));
 	Ok(sink)
 }
 
@@ -1270,6 +1272,7 @@ mod tests {
 			broadcast: "room".to_string(),
 			args: Args {
 				catalog_format: None,
+				metrics: None,
 				delay: Delay::Fixed(delay),
 				select: Default::default(),
 			},
@@ -1347,7 +1350,7 @@ mod tests {
 		while index < 50 {
 			old.write(packet(index, OLD)).unwrap();
 			index += 1;
-			tokio::time::sleep_until(start + PACKET_DURATION * index as u32).await;
+			moq_clock::sleep_until(start + PACKET_DURATION * index as u32).await;
 		}
 
 		// The replacement joins the catalog, then the old track finishes.
@@ -1358,7 +1361,7 @@ mod tests {
 		drop(old);
 
 		while index < 100 {
-			tokio::time::sleep_until(start + PACKET_DURATION * index as u32).await;
+			moq_clock::sleep_until(start + PACKET_DURATION * index as u32).await;
 			new.write(packet(index, NEW)).unwrap();
 			index += 1;
 		}
@@ -1794,7 +1797,7 @@ mod tests {
 		loop {
 			tokio::task::yield_now().await;
 			if media.video.lock().unwrap().len() == 30
-				|| media.presentation.lock().unwrap().due(last) == Some((now + delay).into_std())
+				|| media.presentation.lock().unwrap().due(last) == Some(now + delay)
 			{
 				break;
 			}
@@ -1802,11 +1805,7 @@ mod tests {
 		let due = media.presentation.lock().unwrap().due(last);
 		task.abort();
 		let _ = task.await;
-		assert_eq!(
-			due,
-			Some((now + delay).into_std()),
-			"the decoder did not observe the live edge"
-		);
+		assert_eq!(due, Some(now + delay), "the decoder did not observe the live edge");
 		assert!(recorder.present(&media).is_none(), "nothing is due before its delay");
 	}
 }
