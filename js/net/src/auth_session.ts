@@ -319,7 +319,8 @@ export class AuthSession implements Handle {
 
 	async add(token: string | Uint8Array): Promise<Auth> {
 		if (this.#closed || (!this.#wire && !this.#requests)) throw new Unsupported();
-		const bytes = typeof token === "string" ? new TextEncoder().encode(token) : token;
+		// A copy, so the caller reusing its buffer never changes what a request carries.
+		const bytes = typeof token === "string" ? new TextEncoder().encode(token) : token.slice();
 		if (!this.#wire) {
 			// Only a request carries it, and the peer judges it there: no grant to wait for.
 			const presented = new Presented(bytes, false);

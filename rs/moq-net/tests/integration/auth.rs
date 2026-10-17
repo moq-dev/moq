@@ -231,6 +231,46 @@ async fn moqt_22_dropping_the_old_grant_with_its_renewal_keeps_the_announce() {
 	.expect("timed out");
 }
 
+/// A route auth the peer revokes on its AUTH stream is no longer carried, so its request is
+/// made again without it, even while another token keeps the session's grant unchanged.
+#[moq_net_sim::test]
+async fn moqt_22_a_revoked_route_auth_remakes_its_announce() {
+	within(async {
+		let client_origin = produce_origin(2);
+		let server_origin = produce_origin(1);
+		let mut extensions = moq_net::setup::Extensions::default();
+		extensions.solicit = false;
+		let mut pair = connect(Options {
+			version: Some(MOQT_22),
+			client_publish: Some(client_origin.clone()),
+			server_subscribe: Some(server_origin.clone()),
+			server_requests: true,
+			server_extensions: Some(extensions),
+			..Default::default()
+		})
+		.await;
+		let mut tokens = serve(pair.requests.take().unwrap(), |_| Some(Grant::all()));
+		let (token, _setup) = tokens.next().await.expect("the setup token");
+		assert!(token.is_empty());
+
+		let first = pair.client.auth().add("first").await.expect("granted");
+		let (token, presented) = tokens.next().await.expect("the AUTH stream's token");
+		assert_eq!(token, b"first");
+		let broadcast = client_origin.create_broadcast("room/x").unwrap();
+		broadcast.announce(origin::Route::default().with_auth(first)).unwrap();
+		let (token, carried) = tokens.next().await.expect("the announce's token");
+		assert_eq!(token, b"first");
+		wait_announced(&server_origin.consume(), "room/x", true).await;
+
+		presented.revoke(SessionError::Unauthorized, "revoked");
+		carried.closed().await;
+		wait_announced(&server_origin.consume(), "room/x", true).await;
+		assert_eq!(pair.client_transport.close_reason(), None);
+	})
+	.await
+	.expect("timed out");
+}
+
 /// A pair where the client declines MoQ Auth, so every token the server sees rode a
 /// request, and the server declines MoQ Solicit, so the client announces with
 /// PUBLISH_NAMESPACE rather than answering a SUBSCRIBE_NAMESPACE.

@@ -2,6 +2,7 @@ import { describe, expect, spyOn, test } from "bun:test";
 import { Milli, Nano } from "@moq/clock";
 import type { Getter } from "@moq/signals";
 import { type Grant, type Issued, Unsupported } from "./auth.ts";
+import type { AuthSession } from "./auth_session.ts";
 import { accept as acceptSession, connect as connectSession, type Established } from "./connection/index.ts";
 import { SessionCode, SessionError, StreamCode, StreamError, toStreamCode } from "./error.ts";
 import { AuthMessage as IetfAuthMessage, IetfAuthWire } from "./ietf/auth.ts";
@@ -379,6 +380,11 @@ test.each([
 		const token = await client.auth.add("token");
 		expect(token.grant.peek()).toBeUndefined();
 		expect(client.auth.grant.peek()).toBeUndefined();
+		// A request carries the bytes as added, whatever the caller does with its buffer after.
+		const bytes = new TextEncoder().encode("bytes");
+		const copied = await client.auth.add(bytes);
+		bytes.fill(0);
+		expect((client.auth as AuthSession).carried(copied)).toEqual(new TextEncoder().encode("bytes"));
 		// The token ends with its session, like any other.
 		client.abort();
 		expect(await token.closed).toBeInstanceOf(Error);

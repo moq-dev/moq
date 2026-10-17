@@ -583,6 +583,8 @@ impl Handle {
 		if slot.withdrawn {
 			state.tokens.remove(&id);
 		}
+		// Even with the union unchanged, a request carrying this token must drop it.
+		state.epoch += 1;
 		state.recompute();
 	}
 
