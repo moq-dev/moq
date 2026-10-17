@@ -20,7 +20,8 @@ JS: nothing compiles reach, so this follows the import edges instead. A non-test
 under `js/net/src/{ietf,lite,connection}/` reaching a model module's name the package
 entrypoint does not publish (an import, a namespace member, a `hooks.<name>` read, or
 an `@internal` member call) needs a marker on that declaration, as does every member
-of the `wire.ts` views. Run from `just rs lint` and `just js check`.
+of the `wire.ts` views. An import or read form it cannot follow, like a default import or
+a destructured namespace, fails instead. Run from `just rs lint` and `just js check`.
 """
 
 from pathlib import Path
@@ -117,6 +118,8 @@ DECLARATION = r"^export\s+(?:declare\s+)?(?:abstract\s+)?(?:async\s+)?(?:functio
 VALUE = r"^export\s+(?:declare\s+)?(?:abstract\s+)?(?:async\s+)?(?:function\*?|class|const|let|var|enum|namespace)\s+{}\b"
 REEXPORT = re.compile(r"export\s+(type\s+)?(\*(?:\s+as\s+\w+)?|\{[^}]*\})\s+from\s+\"(\.[^\"]+)\"", re.S)
 IMPORT = re.compile(r"import\s+(type\s+)?(\{[^}]*\}|\*\s+as\s+\w+)\s+from\s+\"(\.[^\"]+)\"", re.S)
+# Every relative import, so a form IMPORT does not parse (like a default import) fails instead of slipping by.
+ANY_IMPORT = re.compile(r"\bimport\s+[^\"';]*?\s+from\s+\"(\.[^\"]+)\"", re.S)
 
 
 def module(source, specifier):
@@ -214,11 +217,18 @@ def js():
 		if found:
 			hooks[found.group(1)] = i
 
+	def code(text):
+		"""Session source without its comments and imports."""
+		return IMPORT.sub("", re.sub(r"//[^\n]*|/\*.*?\*/", "", text, flags=re.S))
+
 	def reads(text, binding):
 		"""The members session code reads off `binding`, a local name or a dotted path."""
-		return sorted(set(re.findall(rf"(?<![\w$.]){re.escape(binding)}\.(\w+)", IMPORT.sub("", text))))
+		return sorted(set(re.findall(rf"(?<![\w$.]){re.escape(binding)}\.(\w+)", code(text))))
 
 	def reach_hooks(text, binding, user):
+		# Only `binding.<name>` reads are followed, so refuse any other use, like destructuring.
+		if re.search(rf"(?<![\w$.]){re.escape(binding)}(?![\w$])(?!\s*\.\s*\w)", code(text)):
+			fail(user, 0, f"read `{binding}` only as `{binding}.<name>`, so the lint can follow each hook")
 		for hook in reads(text, binding):
 			if hook not in hooks:
 				fail(user, 0, f"`hooks.{hook}` is not declared in internal.ts")
@@ -230,12 +240,17 @@ def js():
 			if ".test" in user.name or "test-util" in user.name:
 				continue
 			text = user.read_text()
+			for statement in ANY_IMPORT.finditer(text):
+				if module(user, statement.group(1)) in models and not IMPORT.fullmatch(statement.group(0)):
+					fail(user, 0, f"import a model module by name or namespace only: {' '.join(statement.group(0).split())}")
 			for type_only, spec, specifier in IMPORT.findall(text):
 				target = module(user, specifier)
 				if target not in models:
 					continue
 				if spec.startswith("*"):
 					alias = spec.split()[-1]
+					if re.search(rf"\}}\s*=\s*{alias}\s*(?:;|$)", code(text), re.M):
+						fail(user, 0, f"read `{alias}` only as `{alias}.<name>`, so the lint can follow each member")
 					# A local variable may shadow the alias, so only the module's own declarations count.
 					for name in reads(text, alias):
 						if declaration(files[target], name) is not None and not public(target, name, bool(type_only)):

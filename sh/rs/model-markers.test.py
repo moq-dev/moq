@@ -125,6 +125,18 @@ class TestModelMarkers(unittest.TestCase):
 		error = run(**{"js/net/src/lite/session.ts": (HOOKS, namespaced)})
 		self.assertIn("internal.ts:5: `hooks.unused`", error)
 
+	def test_destructured_hooks_fail(self):
+		error = run(**{"js/net/src/lite/session.ts": ("hooks.used();", "const { unused } = hooks;")})
+		self.assertIn("session.ts:1: read `hooks` only as `hooks.<name>`", error)
+
+	def test_destructured_namespace_fails(self):
+		error = run(**{"js/net/src/lite/session.ts": ("let shape: Box.Shape;", "const { Box: Made } = Box;")})
+		self.assertIn("session.ts:1: read `Box` only as `Box.<name>`", error)
+
+	def test_default_import_of_a_model_module_fails(self):
+		error = run(**{"js/net/src/lite/session.ts": ('import * as Box from "../box.ts";', 'import Box, { Shape } from "../box.ts";')})
+		self.assertIn("import a model module by name or namespace only", error)
+
 	def test_namespace_value_reach_of_a_type_export_fails(self):
 		error = run(**{"js/net/src/lite/session.ts": ("let shape: Box.Shape;", "new Box.Box();")})
 		self.assertIn("box.ts:1: `Box`", error)
