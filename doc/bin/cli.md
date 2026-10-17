@@ -62,7 +62,8 @@ each session can publish or subscribe to, including stats; see the relay's
 [statistics configuration](/bin/relay/config#stats).
 
 `moq import --help` lists the sources and `moq import rtmp --help` a specific
-one; every flag is documented there.
+one; every flag is documented there. Flags renamed between releases are listed in
+[MIGRATE.md](https://github.com/moq-dev/moq/blob/main/rs/moq-cli/MIGRATE.md).
 
 ```bash
 # Publish a file (remux to MPEG-TS without re-encoding)

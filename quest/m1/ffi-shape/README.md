@@ -82,7 +82,7 @@ Settled shape:
 
 Each child reshapes one group end to end: moq-ffi, all five wrappers, the
 C++ package and `cpp/obs`, the `doc/lib` samples per the cross-package table,
-and its entries in the Unreleased section of `doc/setup/upgrade.md`. Each
+and its entries under `## Unreleased` in each affected package's `MIGRATE.md`. Each
 runs `just test interop --all`.
 
 ## Required
