@@ -556,8 +556,8 @@ that arrived: a capture missing most of its video still passes them. The generat
 clips the decoded-content comparison does not cover (`--hrd`, `--headroom`,
 `--leak`, `--full`) go through `holes.py` instead, which reads the capture's
 timestamps against the source's, independently of what the exporter reports. Each
-stream of a generated clip keeps one frame step, so a step past one and a half
-frames is a hole. The export keeps the source's timestamps, so every source stream
+stream of a generated clip keeps one frame step, so a capture's step past one and
+a half of its source's is a hole. The export keeps the source's timestamps, so every source stream
 must also be in the capture and end within half a frame of the source's. It may
 start up to 3 s late: the subscriber joins at the relay's latest group once the
 catalog is out, which skips the first 1-2 s on a clean path. Omitting MoQ content

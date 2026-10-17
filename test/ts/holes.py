@@ -4,8 +4,8 @@
     ./holes.py capture.ts source.ts
 
 Every audio and video stream of a generated clip has a constant frame duration, so the step
-between consecutive decode timestamps is the same throughout. A step past one and a half
-frames is a hole: media the round-trip lost, whether the path dropped it, the relay evicted
+between consecutive decode timestamps is the same throughout. A capture's step past one and a
+half of its source's is a hole: media the round-trip lost, whether the path dropped it, the relay evicted
 it, or the exporter missed its deadline. A lost prefix or tail leaves no step behind, so each
 source stream must also be in the capture, on its PID, ending where the source's does: the
 export keeps the source's timestamps. It may start later, by up to JOIN: the subscriber joins
@@ -29,13 +29,15 @@ from fractions import Fraction
 JOIN = Fraction(3)
 
 
-def holes(dts: list[int]) -> tuple[int, list[tuple[int, int]]]:
-    """The stream's frame step, and the (dts, step) of each step past one and a half of it."""
+def step(dts: list[int]) -> int:
+    """A stream's frame step: its most common decode-timestamp step, or 0 with fewer than two frames."""
     steps = [b - a for a, b in zip(dts, dts[1:])]
-    if not steps:
-        return 0, []
-    frame = Counter(steps).most_common(1)[0][0]
-    return frame, [(a, b - a) for a, b in zip(dts, dts[1:]) if 2 * (b - a) > 3 * frame]
+    return Counter(steps).most_common(1)[0][0] if steps else 0
+
+
+def holes(dts: list[int], frame: int) -> list[tuple[int, int]]:
+    """The (dts, step) of each step past one and a half frames."""
+    return [(a, b - a) for a, b in zip(dts, dts[1:]) if 2 * (b - a) > 3 * frame]
 
 
 def cuts(source: tuple[Fraction, Fraction], capture: tuple[Fraction, Fraction], frame: Fraction) -> list[str]:
@@ -79,28 +81,28 @@ def main() -> None:
 
     print("### media holes (capture timestamps against the source)")
     failed = False
-    for pid, (stream, _, span) in sorted(source.items()):
+    for pid, (stream, source_dts, span) in sorted(source.items()):
         label = f"PID {pid} {stream['codec_name']}"
+        # The source's step, not the capture's: a capture that kept every other frame has a step of its own.
+        frame = step(source_dts)
+        if frame == 0:
+            sys.exit(f"error: {label} has fewer than two frames in {sys.argv[2]}")
         if pid not in capture:
             print(f"  FAIL  {label}: not in the capture")
             failed = True
             continue
         stream, dts, captured = capture[pid]
         base = Fraction(stream["time_base"])
-        frame, found = holes(dts)
-        if frame == 0:
-            print(f"  FAIL  {label}: fewer than two frames")
-            failed = True
-            continue
+        found = holes(dts, frame)
         cut = cuts(span, captured, frame * base)
-        missing = sum(step - frame for _, step in found) * base
+        missing = sum(gap - frame for _, gap in found) * base
         verdict = "FAIL" if found or cut else "PASS"
         failed |= bool(found or cut)
         print(f"  {verdict}  {label}: {len(dts)} frames of {float(frame * base) * 1000:.2f} ms, "
               f"{len(found)} holes, {float(missing) * 1000:.0f} ms missing, "
               f"from {float(captured[0]):.3f}s to {float(captured[1]):.3f}s of {float(span[0]):.3f}s to {float(span[1]):.3f}s")
-        for at, step in found[:5]:
-            print(f"        at {float(at * base):.3f}s: {float(step * base) * 1000:.0f} ms step")
+        for at, gap in found[:5]:
+            print(f"        at {float(at * base):.3f}s: {float(gap * base) * 1000:.0f} ms step")
         for reason in cut:
             print(f"        {reason}")
     sys.exit(1 if failed else 0)
