@@ -9392,6 +9392,41 @@ async fn a_midstream_stitch_catalog_expires_at_the_linger() {
 	}
 }
 
+/// Re-pricing a replacement while a stitch resolves it is the same instance: it neither
+/// restarts the resolve nor extends the linger bound.
+#[tokio::test(start_paused = true)]
+async fn a_midstream_stitch_bound_survives_route_updates() {
+	let origin = crate::source::produce_origin();
+	let _first = publish_bare(&origin, Some(&moq_net::Epoch::mint()));
+	let linger = Duration::from_secs(10);
+	let mut follower = follower(&origin).await.with_stitch(true).with_linger(linger);
+	let start = tokio::time::Instant::now();
+	let second = origin
+		.publish(
+			"live",
+			moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint()),
+		)
+		.unwrap();
+	let _unanswered = second.dynamic();
+	let reprice = async {
+		for cost in 1u64.. {
+			tokio::time::sleep(Duration::from_secs(1)).await;
+			second.announce(second.route().unwrap().with_cost(cost)).unwrap();
+		}
+	};
+	let end = tokio::time::timeout(linger * 3, async {
+		tokio::select! {
+			end = follower.next() => end,
+			() = reprice => unreachable!("re-pricing never stops"),
+		}
+	})
+	.await
+	.expect("updates extended the stitch bound");
+	let err = end.expect_err("the stitch fails at its linger");
+	assert!(err.to_string().contains("catalog"), "{err}");
+	assert_eq!(start.elapsed(), linger);
+}
+
 /// A catalog ready before the bound completes the switch, including zero linger.
 #[tokio::test(start_paused = true)]
 async fn a_midstream_stitch_catalog_within_linger_clears_the_bound() {

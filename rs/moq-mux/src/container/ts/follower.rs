@@ -304,10 +304,19 @@ impl<E: catalog::Catalog + 'static> Follower<E> {
 					fallback,
 				} => {
 					// Whatever the request waits on, the announcements say what serves the path
-					// now: rather than sit out a route that went, ask afresh from there. A stitch
-					// stays on the export it has, still awaiting what it was.
+					// now: rather than sit out a route that went, ask afresh from there.
 					if self.poll_announced(waiter) {
 						tracing::debug!(path = %self.path, "announcement while resolving, asking again");
+						// A stitch still facing a replacement asks that one, within its original bound.
+						if matches!(*fallback, State::Running { .. }) && matches!(self.serving, Serving::Other(_)) {
+							self.state = State::Following {
+								resolving: self.resolve(),
+								awaiting,
+								fallback,
+							};
+							continue;
+						}
+						// Otherwise it stays on the export it has, still awaiting what it was.
 						self.state = *fallback;
 						// The fallback's wait predates this poll, so it gets no same-poll grace.
 						if let Some(expired) = self.expired() {
@@ -363,22 +372,25 @@ impl<E: catalog::Catalog + 'static> Follower<E> {
 		}
 	}
 
-	/// Apply every announcement on hand, returning whether there was any.
+	/// Apply every announcement on hand, returning whether any changed what serves the path.
 	fn poll_announced(&mut self, waiter: &kio::Waiter) -> bool {
 		let mut any = false;
 		while !self.closed {
-			match self.announced.poll_next(waiter) {
+			any |= match self.announced.poll_next(waiter) {
 				Poll::Ready(Some(event)) => self.apply(event),
-				Poll::Ready(None) => self.closed = true,
+				Poll::Ready(None) => {
+					self.closed = true;
+					true
+				}
 				Poll::Pending => break,
-			}
-			any = true;
+			};
 		}
 		self.refused &= !any;
 		any
 	}
 
-	fn apply(&mut self, event: moq_net::announce::Event) {
+	/// Apply an announcement, returning whether it changed what serves the path.
+	fn apply(&mut self, event: moq_net::announce::Event) -> bool {
 		let first = !std::mem::replace(&mut self.started, true);
 		self.serving = match event {
 			moq_net::announce::Event::Start(announce) => {
@@ -405,8 +417,9 @@ impl<E: catalog::Catalog + 'static> Follower<E> {
 			}
 			// The same instance over another route, which subscriptions ride out. A gap that
 			// ended the export's request comes as an end and a start instead.
-			moq_net::announce::Event::Update(_) => return,
+			moq_net::announce::Event::Update(_) => return false,
 		};
+		true
 	}
 
 	/// Begin resolving the instance serving the path now.
