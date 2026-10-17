@@ -199,9 +199,10 @@ results as the `bench-ffi` artifact. Each language also has its own recipe
 Swift uses structured tasks; Dart uses futures on its event loop.
 The payload checks and scheduling costs are included in each measurement.
 
-Linux runs every wrapper except Swift. The macOS platform job runs
-`just bench-ffi swift`, measuring fresh Rust baselines on that same machine,
-and uploads `bench-ffi-swift` separately. Never compare its absolute values
+Linux runs every wrapper except Swift. The nightly macOS platform job, or a
+manual Platform run with `benchmarks` set, runs `just bench-ffi swift`,
+measuring fresh Rust baselines on that same machine, and uploads
+`bench-ffi-swift` separately. Never compare its absolute values
 against the Linux job's baselines. A local run can select runners explicitly,
 for example `just bench-ffi cpp dart`. Each invocation clears its output
 directory and refuses a runner that produces no report. Dart's native asset

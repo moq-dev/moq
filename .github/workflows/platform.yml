@@ -37,6 +37,11 @@ on:
         type: boolean
         default: false
   workflow_dispatch:
+    inputs:
+      benchmarks:
+        description: Measure Swift against Rust baselines on this runner
+        type: boolean
+        default: false
 
 concurrency:
   group: platform-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}

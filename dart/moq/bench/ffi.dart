@@ -10,6 +10,11 @@ import 'package:moq/moq.dart';
 final _clock = DynamicLibrary.process()
     .lookupFunction<Int64 Function(), int Function()>('clock');
 
+// Native memcmp, like the other runners' byte equality, so a scalar Dart loop
+// doesn't outweigh the copy being measured. The process provides it.
+@Native<Int Function(Pointer<Uint8>, Pointer<Uint8>, Size)>(isLeaf: true)
+external int memcmp(Pointer<Uint8> a, Pointer<Uint8> b, int length);
+
 double cpu() {
   final ticks = _clock();
   if (ticks < 0) throw StateError('clock() cannot measure process CPU');
@@ -56,11 +61,10 @@ Future<void> throughput(
         require(
           frame != null &&
               frame.timestampUs == n * c.frames + f &&
-              frame.payload.length == payload.length,
+              frame.payload.length == payload.length &&
+              memcmp(frame.payload.address, payload.address, payload.length) ==
+                  0,
         );
-        for (var i = 0; i < payload.length; i++) {
-          require(frame!.payload[i] == payload[i]);
-        }
       }
     } finally {
       group.dispose();
