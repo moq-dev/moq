@@ -33,6 +33,7 @@ use std::{
 	sync::Arc,
 	sync::OnceLock,
 	sync::atomic::{AtomicBool, AtomicU64, Ordering},
+	sync::{Mutex, PoisonError},
 	task::{Poll, ready},
 	time::Duration,
 };
@@ -178,19 +179,40 @@ impl Info {
 }
 
 /// The sequence namespace a track name keeps within its broadcast, shared by every
-/// producer that serves the name, so a replacement that would append a sequence an earlier
-/// one wrote is refused. Holds one past the highest sequence written.
+/// producer that serves the name, so a replacement continues the same timeline: it can't
+/// append a sequence an earlier one wrote, nor start a group before an earlier one's.
 #[derive(Clone, Default)]
-pub(crate) struct Sequence(Arc<AtomicU64>);
+pub(crate) struct Sequence(Arc<SequenceState>);
+
+#[derive(Default)]
+struct SequenceState {
+	// One past the highest sequence written.
+	next: AtomicU64,
+	// The highest-sequence checked start written, which bounds a replacement's groups the
+	// way the eviction watermark bounds a track's own.
+	bound: Mutex<Option<(u64, Timestamp)>>,
+}
 
 impl Sequence {
 	/// One past the highest sequence any producer of the name wrote.
 	fn next(&self) -> u64 {
-		self.0.load(Ordering::Relaxed)
+		self.0.next.load(Ordering::Relaxed)
 	}
 
 	fn advance(&self, sequence: u64) {
-		self.0.fetch_max(sequence.saturating_add(1), Ordering::Relaxed);
+		self.0.next.fetch_max(sequence.saturating_add(1), Ordering::Relaxed);
+	}
+
+	fn bound(&self) -> Option<(u64, Timestamp)> {
+		*self.0.bound.lock().unwrap_or_else(PoisonError::into_inner)
+	}
+
+	/// Keep group `sequence`'s checked `start` if it is the highest-sequence one yet.
+	fn share_bound(&self, sequence: u64, start: Timestamp) {
+		let mut bound = self.0.bound.lock().unwrap_or_else(PoisonError::into_inner);
+		if bound.is_none_or(|(highest, _)| sequence > highest) {
+			*bound = Some((sequence, start));
+		}
 	}
 
 	/// Whether nothing holds it and nothing was written, so forgetting it changes nothing.
@@ -605,6 +627,11 @@ impl TrackState {
 				late: false,
 			},
 		})
+	}
+
+	/// Share group `sequence`'s just-checked `start` with the name's later producers.
+	pub(crate) fn share_bound(&self, sequence: u64, start: Timestamp) {
+		self.sequence.share_bound(sequence, start);
 	}
 
 	/// Take group `sequence` out of the cache, raising the eviction watermark to its start.
@@ -2758,6 +2785,9 @@ fn set_sequence(state: &kio::Producer<TrackState>, sequence: Sequence) {
 			state.max_sequence.is_none(),
 			"a track joins its namespace before writing"
 		);
+		// What earlier producers of the name wrote is gone from this track's cache, so their
+		// highest checked start is its eviction watermark.
+		state.evicted = sequence.bound();
 		state.sequence = sequence;
 	}
 }

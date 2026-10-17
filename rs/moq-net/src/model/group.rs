@@ -386,6 +386,16 @@ impl GroupState {
 		}
 	}
 
+	/// Settle how the group holds its start, returning it if frame 0 just became a bound.
+	fn settle(&mut self, origin: Origin) -> Option<Timestamp> {
+		let bound = origin == Origin::Bound && self.origin != Origin::Bound;
+		self.origin = origin;
+		match self.timeline {
+			Timeline::Timed { start, .. } if bound => Some(start),
+			_ => None,
+		}
+	}
+
 	/// Record a frame's place in presentation time: the first frame starts the group,
 	/// and each later one extends a timed group's end. Every frame matches its track
 	/// ([`on_track`]), so a group never mixes the two.
@@ -804,8 +814,10 @@ impl Producer {
 		state.frames.push_back(Frame { timestamp, payload });
 		state.next_index = next_index;
 		state.committed = state.next_index;
-		state.origin = origin;
 		state.stamp(timestamp);
+		if let (Some(track), Some(start)) = (&track, state.settle(origin)) {
+			track.share_bound(self.info.sequence, start);
+		}
 		self.alive.checked.store(true, Ordering::Relaxed);
 		drop(state);
 		drop(track);
@@ -886,7 +898,9 @@ impl Producer {
 		}
 		state.next_index = next_index;
 		state.committed = next_index;
-		state.origin = origin;
+		if let (Some(track), Some(start)) = (&track, state.settle(origin)) {
+			track.share_bound(self.info.sequence, start);
+		}
 		if count > 0 {
 			self.alive.checked.store(true, Ordering::Relaxed);
 		}
@@ -999,8 +1013,10 @@ impl Producer {
 		state.next_index = next_index;
 		// Opening the frame is enough: the header carries the timestamp, so the group's
 		// place in time is known before a single payload byte streams in.
-		state.origin = origin;
 		state.stamp(timestamp);
+		if let (Some(track), Some(start)) = (&track, state.settle(origin)) {
+			track.share_bound(self.info.sequence, start);
+		}
 		self.alive.checked.store(true, Ordering::Relaxed);
 		drop(state);
 		drop(track);

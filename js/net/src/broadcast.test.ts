@@ -1,7 +1,7 @@
 import { expect, setSystemTime, test } from "bun:test";
 import { Milli } from "@moq/clock";
 import { Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
-import { GroupTooLarge, NotFound } from "./error.ts";
+import { GroupTooLarge, NotFound, TimestampMismatch } from "./error.ts";
 import { Producer as GroupProducer, MAX_GROUP_FRAMES } from "./group.ts";
 import { TrackSequences } from "./internal.ts";
 import { textFrame } from "./mock.ts";
@@ -53,6 +53,29 @@ test("consumer dedupes repeat subscriptions onto one upstream request", async ()
 	producer.close();
 	consumer.track("video").subscribe();
 	expect((await pendingRequest(consumer))?.name).toBe("video");
+});
+
+// A replacement continues the name's timeline, so its groups can't start before the highest one an
+// earlier producer checked, while a new broadcast starts over.
+test("a replacement producer refuses a rewind past its predecessor", () => {
+	const broadcast = new BroadcastProducer();
+	const first = broadcast.createTrack("media", { timescale: Timescale.MILLI });
+	first.appendGroup().writeFrame(textFrame("a", Timestamp.fromMillis(1000)));
+	first.close();
+
+	const second = broadcast.createTrack("media", { timescale: Timescale.MILLI });
+	const group = new GroupProducer(1);
+	second.writeGroup(group);
+	expect(() => group.writeFrame(textFrame("b", Timestamp.fromMillis(500)))).toThrow(TimestampMismatch);
+	group.writeFrame(textFrame("b", Timestamp.fromMillis(1000)));
+
+	const next = new BroadcastProducer();
+	const track = next.createTrack("media", { timescale: Timescale.MILLI });
+	track.appendGroup().writeFrame(textFrame("c", Timestamp.fromMillis(500)));
+
+	second.close();
+	broadcast.close();
+	next.close();
 });
 
 // A name keeps one sequence namespace across producer replacements. The application owns where a

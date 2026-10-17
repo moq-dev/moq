@@ -643,6 +643,13 @@ export class Producer {
 			const own = producer.#sequence;
 			if (own === sequence) return;
 			sequence.next = Math.max(sequence.next, producer.#received);
+			// What earlier producers of the name wrote is gone from this track's cache, so their
+			// highest checked start is its eviction watermark.
+			const previous = sequence.bound;
+			if (previous && (!producer.#evicted || producer.#evicted.sequence < previous.sequence)) {
+				producer.#evicted = previous;
+			}
+			if (own.bound && (!previous || previous.sequence < own.bound.sequence)) sequence.bound = own.bound;
 			producer.#sequence = sequence;
 			if (producer.#state.closed.peek() !== undefined) return;
 			own.holders--;
@@ -881,6 +888,8 @@ export class Producer {
 		}
 		entry.bound = start;
 		const sequence = entry.group.sequence;
+		const shared = this.#sequence.bound;
+		if (!shared || shared.sequence < sequence) this.#sequence.bound = { sequence, start };
 		const last = this.#bounds.at(-1);
 		if (!last || last.sequence < sequence) this.#bounds.push({ sequence, start });
 		else this.#bounds.splice(timelineIndex(this.#bounds, sequence), 0, { sequence, start });

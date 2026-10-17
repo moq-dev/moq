@@ -120,6 +120,11 @@ export interface TrackSequence {
 	next: number;
 	/** Open producers writing through this namespace. */
 	holders: number;
+	/**
+	 * The highest-sequence checked group start any producer of the name wrote, which bounds a
+	 * replacement's groups the way the eviction watermark bounds a track's own.
+	 */
+	bound?: { sequence: number; start: Timestamp };
 }
 
 /**
