@@ -3,7 +3,7 @@
 //! A [Producer] creates tracks on demand: a [Consumer] subscribes by name, and the
 //! producer either serves a track it already has or is handed a [`track::Request`] to
 //! fill. Both handles are refcounted clones of one broadcast, which ends on
-//! [`Producer::close`], when the last producer drops, or once a [`Producer::finish`]
+//! [`Producer::close`], when the last producer drops, or once a `Producer::finish`
 //! has kept its finished tracks up until their media is stale.
 //!
 //! [Info] is the broadcast's static metadata, fixed for its lifetime.
@@ -186,7 +186,7 @@ impl BroadcastState {
 ///
 /// A broadcast lives until [`Self::close`] or until the last [`Producer`] (or
 /// [`Dynamic`]) drops, whichever comes first; both end it the same way. A publisher
-/// whose input ended cleanly calls [`Self::finish`] instead, so a subscriber still
+/// whose input ended cleanly calls `finish` instead, so a subscriber still
 /// catching up can drain what it published. Children
 /// do *not* keep it alive: cloning a [`Consumer`] or holding a [`track::Producer`]
 /// does nothing for the broadcast's lifetime.
