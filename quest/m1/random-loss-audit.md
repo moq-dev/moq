@@ -31,12 +31,16 @@ changed for random loss; `LOSS_THRESH` is still 2%):
   `--headroom` loses audio at 1% loss, WebSocket fallback disabled under
   `--loss`, a run that fails if the shaper dropped nothing, and
   `passthrough.py --loss-ok`.
-- Quests that plan random loss as an input: `quic-probe.md`, `quic-sim.md`,
+- Decided 2026-10-17 (maintainer): the audit decides whether
+  `quic-bbr-natural-drain.md` and `m3/quic-gcc.md` survive, since their
+  premise rests on random loss.
+- Other quests only list random loss among their measurement inputs:
+  `quic-probe.md` (with noq#811 and noq#476), `quic-sim.md`,
   `quic-deadline.md` and `quic-careful-resume.md` ("the impaired path
-  profile"), `m3/quic-gcc.md`, `m3/cut-through/bench.md`, and
-  `m1/ts-reliability/recovery.md`'s network impairment arm. The audit
-  rewrites or deletes each, decided 2026-10-17, since their premise may not
-  survive.
+  profile"), `m3/cut-through/bench.md`, and
+  `m1/ts-reliability/recovery.md`'s network impairment arm. Their goals
+  stand; the audit only moves any acceptance or performance input among
+  them to bufferbloat.
 
 Record each verdict (decision, origin PR, keep/rework/revert, evidence) in
 the PR description.
