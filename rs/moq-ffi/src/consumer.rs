@@ -153,7 +153,7 @@ impl MoqBroadcastConsumer {
 	/// this broadcast, anything else names a sibling relative to it (e.g. `./source`). Call it on a
 	/// rendition that carries one before [`crate::media::MoqMediaTrackConsumer::subscribe`], [`Self::subscribe_track`],
 	/// [`Self::fetch_group`], or [`crate::media::MoqMediaGroupConsumer::fetch`], which take a track name rather than a
-	/// rendition; `decode_video` and `decode_audio` resolve it themselves.
+	/// rendition; `MoqVideoConsumer::subscribe` and `MoqAudioConsumer::subscribe` resolve it themselves.
 	///
 	/// Errors if this broadcast came from a local producer rather than an origin, since a
 	/// standalone broadcast has no sibling to name, and reports a sibling that exists but is not
