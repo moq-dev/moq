@@ -462,12 +462,16 @@ impl Ingest {
 
 		match &mut stream.track {
 			Track::Video(video) => {
-				if loss > 0 && stream.started && stream.held.is_none() {
+				if loss > 0 && stream.started {
 					// The pictures after a lost packet reference what it carried, so hold the
-					// video until the next keyframe rather than publish a broken chain.
-					tracing::warn!(stream_id, loss, "RTP packets lost, waiting for the next keyframe");
+					// video until the next keyframe rather than publish a broken chain. This
+					// access unit is damaged too, even when it is a keyframe, so drop it.
+					if stream.held.is_none() {
+						tracing::warn!(stream_id, loss, "RTP packets lost, waiting for the next keyframe");
+						stream.held = Some(tokio::time::Instant::now());
+					}
 					video.reset();
-					stream.held = Some(tokio::time::Instant::now());
+					return Ok(None);
 				}
 				stream.fresh |= changed;
 				let params = match streams.get(stream_id).and_then(|stream| stream.parameters()) {
@@ -1034,7 +1038,10 @@ mod tests {
 		session.lose(0, 1);
 		session.video(0, 3 * FRAME, &[fake::H264_SLICE]).await;
 		session.video(0, 4 * FRAME, &[fake::H264_SLICE]).await;
+		// A keyframe that itself lost a packet is damaged too.
+		session.lose(0, 1);
 		session.video(0, 5 * FRAME, &[fake::H264_IDR]).await;
+		session.video(0, 6 * FRAME, &[fake::H264_IDR]).await;
 		session.close().await;
 		assert_eq!(within("the pull", pull).await.unwrap().unwrap(), End::Closed);
 
