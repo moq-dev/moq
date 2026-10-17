@@ -29,7 +29,7 @@ use moq_mux::codec::{annexb, h264, h265};
 use moq_net::Timestamp;
 
 use super::backend::{self, Backend, Codec};
-use crate::{Error, Frame, Output, Size, Surface};
+use crate::{Color, Error, Frame, Output, Size, Surface};
 
 /// Which decoder implementation to use. `#[non_exhaustive]` so new selection
 /// strategies can be added without breaking external `match`es.
@@ -141,9 +141,15 @@ impl Conversion {
 /// ```
 pub struct Decoder {
 	backend: Box<dyn Backend>,
+	codec: Codec,
 	conversion: Conversion,
 	output: Output,
 	got_keyframe: bool,
+	/// The space the stream's pictures are in: what the last keyframe's SPS
+	/// signalled, or the guess for the catalog's coded size. Labels the pictures
+	/// a backend hands back unlabelled, which keeps their space once a decoder
+	/// scale or a resize moves them across 576 lines.
+	color: Option<Color>,
 	/// Keeps direct use bound to the constructing thread, regardless of backend.
 	_thread_bound: PhantomData<Rc<()>>,
 }
@@ -213,11 +219,14 @@ impl Decoder {
 
 		let backend = backend::open(codec, config)?;
 		tracing::debug!(decoder = backend.name(), "opened video decoder");
+		let coded = catalog.coded_width.zip(catalog.coded_height);
 		Ok(Self {
 			backend,
+			codec,
 			conversion,
 			output: config.output,
 			got_keyframe: false,
+			color: coded.map(|(width, height)| Color::infer(Size::new(width, height))),
 			_thread_bound: PhantomData,
 		})
 	}
@@ -243,6 +252,9 @@ impl Decoder {
 		}
 
 		let access_unit = self.conversion.access_unit(payload, keyframe)?;
+		if keyframe && let Some(color) = super::vui::signalled(self.codec, &access_unit) {
+			self.color = color;
+		}
 		let frames = self.backend.decode(access_unit, timestamp, keyframe)?;
 		self.deliver(frames)
 	}
@@ -266,13 +278,19 @@ impl Decoder {
 	/// afterwards (VAAPI). A surface with no CPU path fails here rather than
 	/// arriving GPU-resident at a caller that said it could not take one.
 	fn deliver(&self, frames: Vec<Frame>) -> Result<Vec<Frame>, Error> {
-		match self.output {
-			Output::Native => Ok(frames),
-			Output::Cpu => frames
-				.into_iter()
-				.map(|frame| Ok(Frame::new(Surface::I420(frame.surface.into_i420()?), frame.timestamp)))
-				.collect(),
-		}
+		frames
+			.into_iter()
+			.map(|frame| {
+				let mut surface = match self.output {
+					Output::Native => frame.surface,
+					Output::Cpu => Surface::I420(frame.surface.into_i420()?),
+				};
+				if let Some(color) = self.color {
+					surface.label(color);
+				}
+				Ok(Frame::new(surface, frame.timestamp))
+			})
+			.collect()
 	}
 }
 
