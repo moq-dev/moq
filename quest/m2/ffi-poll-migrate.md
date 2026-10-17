@@ -5,8 +5,8 @@
 Every moq-ffi async export over kio-backed state (track, group, and datagram
 reads, announcements, the JSON and media consumers) is a `kio::wait`
 over the underlying `poll_*`, which UniFFI's `RustFuture` polls directly.
-`ffi::Task`'s tokio `Mutex`, `watch` cancel flag, `select!`, and in-flight
-poll counter are gone from those paths. Export signatures, and so every
+`ffi::Task`'s tokio `Mutex`, `watch` cancel flag, and `select!` are gone
+from those paths. Export signatures, and so every
 binding, are unchanged.
 
 ## Plan
@@ -20,7 +20,6 @@ once this lands.
   `rust_future_cancel` (mozilla/uniffi-rs#2771) is optional in
   [the fork](/quest/m2/uniffi-fork.md). Shape A has no read lane for an
   unfreed future to hold, so this quest must not wait for it.
-
 - **What the spike found**: in Go, Shape A cut a ready `read_frame` from 2.3
   to 1.2 µs, and where every read parks it raised throughput 13 to 32 percent
   and cut CPU per frame 20 to 30 percent across 1 to 64 subscribers. Python
@@ -59,8 +58,8 @@ once this lands.
   shutdown's in-flight counter. Examples: client `connect`, server `listen`
   and `accept`, request `accept` and `reject`, session `closed` and `status`,
   and the video and audio consumers' `next`, which drive codecs (cancelling a
-  queued video decode poisons its sink). Demand waits and session `shutdown` stay `detached`.
-  Inventory every `Task::run` and `detached` site in the PR, each marked
+  queued video decode poisons its sink). Demand waits and session `shutdown`
+  stay `detached`. Inventory every `Task::run` and `detached` site in the PR, each marked
   migrated or kept, with the reason.
 - **Tests**: a read cancelled but not yet freed does not block the next read
   on the same handle (drive `rust_future_*` directly, as the spike did). A
