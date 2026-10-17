@@ -50,7 +50,7 @@ fn queue(pair: &mut Pair, packets: usize, frames: usize) -> usize {
     let mut datagrams = conn.datagrams();
     let empty = datagrams.send_buffer_space();
     for _ in 0..packets * frames {
-        datagrams.send(data.clone(), false).unwrap();
+        datagrams.send(data.clone(), None, 0).unwrap();
     }
     empty
 }

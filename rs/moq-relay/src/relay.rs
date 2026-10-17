@@ -81,6 +81,8 @@ pub struct Relay {
 	stats: moq_stats::Producer,
 	internal: internal::Internal,
 	web: web::Web,
+	/// The ACME client, issuing before [`Self::run`] serves and renewing after.
+	acme: Option<crate::acme::Acme>,
 	stun: Option<crate::stun::Server>,
 	addr: Option<std::net::SocketAddr>,
 	shutdown: shutdown::Observer,
@@ -122,6 +124,11 @@ impl Relay {
 
 	async fn load_inner(mut config: Config) -> anyhow::Result<Self> {
 		config.resolve()?;
+		// Every TLS listener serves the ACME certificate, so install it before any is built.
+		let acme = config.acme.init(&config.listen.tls, &config.web.https)?;
+		if let Some(acme) = &acme {
+			config.listen.tls.resolver = Some(acme.resolver());
+		}
 		let resolved_config = config.clone();
 		let drain_timeout = config.drain_timeout();
 		// The name this relay reports in every auth request: the stats node label,
@@ -301,6 +308,7 @@ impl Relay {
 		let sessions = crate::session::Registry::new();
 		let (ready, _) = tokio::sync::watch::channel(false);
 		let web = web::Web::new(auth.clone(), cluster.clone(), certificates, config.web)
+			.with_acme(acme.as_ref().map(crate::acme::Acme::resolver))
 			.with_shutdown(shutdown.clone())
 			.with_versions(server_versions)
 			.with_extensions(server_extensions)
@@ -355,6 +363,7 @@ impl Relay {
 			stats,
 			internal,
 			web,
+			acme,
 			stun,
 			addr,
 			shutdown,
@@ -530,6 +539,7 @@ impl Relay {
 			cluster,
 			internal,
 			web,
+			acme,
 			stun,
 			shutdown,
 			shutdown_trigger,
@@ -553,6 +563,17 @@ impl Relay {
 			admissions.is_none(),
 			"no --auth-url or --auth-public configured; nobody can authenticate (an embedder decides by taking Relay::admissions)"
 		);
+
+		// Nothing else serves or reports ready until the certificate exists: a
+		// self-signed placeholder would only fail every browser that connects.
+		if let Some(mut acme) = acme {
+			let listener = web.https_listener().context("ACME needs the HTTPS listener")?;
+			tokio::select! {
+				res = acme.issue(listener) => res?,
+				res = drain(shutdown_trigger.clone(), shutdown.clone(), signals) => return res,
+			}
+			cluster.critical.spawn("ACME renewal", acme.run());
+		}
 
 		// Validate the cluster and bind its LAN advertisement before claiming to be
 		// ready: the `cluster.run()` below is first polled after the notify, so a bad

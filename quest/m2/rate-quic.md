@@ -61,6 +61,11 @@ backpressure the peer cannot ignore, rather than metering and closing.
   limits seam [peer limits](/quest/m1/quic/peer-limits.md) adds
   (`set_limits(Limits)` on moq-net's transport trait, implemented by the
   moq-tokio and moq-uring adapters), extended with the two rates.
+- **Unions take the highest cap.** When in-band auth unions several grants
+  on one session, each direction's cap is the highest among them, and an
+  uncapped grant lifts it, matching the union's permissive meaning. Decided
+  in the 2026-10-04 plan; `moq-auth` and `js/auth` carry no union helper
+  until this quest needs one.
 - Lands in `moq-quic`. The relay drops its refusal for QUIC sessions in
   the same PR.
 
@@ -71,7 +76,8 @@ and datagram publisher under the cap loses no datagrams; a peer holding
 unspent pre-auth credit, and one whose cap drops with credit outstanding,
 stay within the stated bound; an uncapped session gets its normal window
 after auth; egress to a capped subscriber never exceeds the cap; raising and
-lowering the cap on a live connection takes effect; the io_uring path does
+lowering the cap on a live connection takes effect; a union
+of capped grants takes the highest cap and an uncapped grant lifts it; the io_uring path does
 the same. Also prove that a frame larger than one rate interval completes
 within the memory cap, an idle sender cannot accumulate a larger burst,
 assembly cancellation does not refund rate charges, and intentional rate
@@ -85,4 +91,3 @@ that a one-second rate window can also be the complete assembly allowance.
 
 - [Peer limits](/quest/m1/quic/peer-limits.md) - adds the runtime `set_limits(Limits)` seam and shrink-as-debt behavior this extends
 - [Bound message assembly](/quest/m1/quic/receive-memory.md) - separate retained memory from paced outstanding credit
-- [Bitrate claim](/quest/m2/rate-claim.md) - the cap this enforces

@@ -316,7 +316,10 @@ mod tests {
 		let rendition = config.probe().await.unwrap();
 		let container = moq_mux::catalog::hang::Container::try_from(&rendition).unwrap();
 		let mut subscriber = moq_mux::container::Consumer::new(subscriber, container);
-		let mut producer = Producer::with_track(track, catalog.clone(), rendition).unwrap();
+		let reserved = catalog
+			.reserve()
+			.with_timeline_hint(config.gop.duration(config.framerate));
+		let mut producer = Producer::with_track(track, reserved, rendition).unwrap();
 		assert!(producer.demand().is_used());
 
 		// Only one captured picture arrives; more than three intervals of paced

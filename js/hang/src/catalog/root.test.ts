@@ -138,17 +138,15 @@ test("clock stays off the wire when absent", () => {
 test("archive round-trips at the root", () => {
 	const parsed = RootSchema.parse({
 		archive: {
-			timelines: { video: "video.timeline.z" },
-			durationMax: 2000,
+			timelines: { video: { track: "video.timeline.z", duration: 2000 } },
 			replay: "./recordings/clip",
 			store: "https://objects.example/rec/",
 			version: ARCHIVE_VERSION,
 		},
 	});
 	expect(parsed.archive).toMatchObject({
-		timelines: { video: "video.timeline.z" },
+		timelines: { video: { track: "video.timeline.z", duration: 2000 } },
 		timescale: 1000,
-		durationMax: 2000,
 		replay: "recordings/clip",
 		store: "https://objects.example/rec/",
 		version: 2,
@@ -196,11 +194,14 @@ test("an incompatible archive does not hide invalid media", () => {
 test("a Rust per-track archive parses", () => {
 	const parsed = RootSchema.parse({
 		archive: {
-			timelines: { "catalog.json": "catalog.json.timeline.z", video0: "video0.timeline.z" },
+			timelines: {
+				"catalog.json": { track: "catalog.json.timeline.z", duration: 0 },
+				video0: { track: "video0.timeline.z", duration: 4000 },
+			},
 			timescale: 1000,
 		},
 	});
-	expect(parsed.archive?.timelines.video0).toBe("video0.timeline.z");
+	expect(parsed.archive?.timelines.video0?.track).toBe("video0.timeline.z");
 });
 
 test("an absent or foreign text section parses to empty", () => {
@@ -256,4 +257,25 @@ test("one track name in two broadcasts keeps both renditions", () => {
 test("an ID used by both video and audio is refused", () => {
 	const parsed = RootSchema.parse({ video: { renditions: { main: avc } }, audio: { renditions: { main: opus } } });
 	expect(() => checkRenditions(parsed)).toThrow(DuplicateRendition);
+});
+
+test("shared stats and echo discovery round trips without changing old catalogs", async () => {
+	const fixture = await Bun.file(
+		new URL("../../../../rs/hang/fixtures/catalog-stats-echo.json", import.meta.url),
+	).json();
+	expect(RootSchema.parse(fixture)).toEqual(fixture);
+	expect(RootSchema.parse({})).toEqual({});
+});
+
+test("a foreign stats or echo value decodes as absent instead of failing the catalog", () => {
+	for (const foreign of [{}, 5, "on", { track: 5 }, { path: ["a"] }, null]) {
+		for (const key of ["stats", "echo"]) {
+			const parsed = RootSchema.parse({ video: { renditions: {} }, [key]: foreign });
+			expect(parsed.stats).toBeUndefined();
+			expect(parsed.echo).toBeUndefined();
+		}
+	}
+	const parsed = RootSchema.parse({ stats: { track: "stats.json" }, echo: { path: "viewers" } });
+	expect(parsed.stats).toEqual({ track: "stats.json" });
+	expect(parsed.echo?.path).toBe("viewers" as RelativeBroadcast);
 });

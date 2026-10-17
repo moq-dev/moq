@@ -46,18 +46,19 @@ jobs:
   x11:
     uses: ./.github/workflows/x11.yml
 
-  # Each independent workload gets its own hour. Rust and JS benchmark groups
-  # keep one build environment each, so splitting the feature compile does not
-  # turn every benchmark into a fresh compile of the same dependencies.
+  # Each independent workload gets its own hour. Each benchmark group keeps one
+  # build environment, so a benchmark reuses the dependencies its group already
+  # compiled. The Rust benchmarks outgrew one hour, so they split by harness:
+  # nextest's ignored benchmark tests and cargo's bench targets share few builds.
   nightly:
     name: Nightly (${{ matrix.name }})
-    runs-on: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner || 'ubuntu-24.04-arm' }}
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
-        # Unset keys default to the plain dev shell, the Rust cache, no perf
-        # sampling, no Chromium, and nextest's default profile.
+        # Unset keys default to the ARM runner, the plain dev shell, the Rust
+        # cache, no perf sampling, no Chromium, and nextest's default profile.
         include:
           - name: Features
             recipe: rs features
@@ -71,11 +72,16 @@ jobs:
           - name: Relay shard sweep
             recipe: bench-shard
           # Smoke-tests the capture path: exact off-CPU waits, resolved worker stacks and CPU.
+          # x86: on the SVE-capable ARM runner, perf's DWARF unwinding asks for the SVE VG
+          # register, which the kernel refuses for the software context-switches event.
           - name: Relay lock-wait profile
             recipe: bench-lock fanout-heavy 4
             perf: true
-          - name: Rust benchmarks
-            recipe: gh nightly rust
+            runner: ubuntu-24.04
+          - name: Rust benchmark tests
+            recipe: gh nightly rust-test
+          - name: Rust bench targets
+            recipe: gh nightly rust-bench
           - name: JS benchmarks
             recipe: gh nightly js
             uncached: true
@@ -87,6 +93,12 @@ jobs:
             chromium: true
             artifact: wasm-backend-baseline
             artifact-path: target/test
+          # Bounded: fails on crashes, missing output, or invalid samples, never on timing.
+          - name: Browser benchmark smoke
+            recipe: bench-browser --smoke
+            chromium: true
+            artifact: bench-browser
+            artifact-path: target/bench/browser
           - name: Audit
             recipe: rs audit
             uncached: true
@@ -165,7 +177,8 @@ jobs:
         # viewer: diff-independent, since a break can arrive through the relay,
         # js/net, or the wire between them.
         # `gh test` exercises workflow and release tooling, which no pull request runs.
-        recipe: ["rs doctest --workspace", "rs loom", "test drill-sensitivity", "rs uring", "test drain", "gh test", "test json-properties"]
+        # `rs quic-sim` sweeps moq-quic's simulated workloads from a fresh seed; PRs run a fixed 64.
+        recipe: ["rs doctest --workspace", "rs loom", "test drill-sensitivity", "rs uring", "test drain", "gh test", "test json-properties", "rs quic-sim"]
         include:
           - recipe: rs send-depth
             nightly: true
@@ -224,6 +237,10 @@ jobs:
         run: nix develop --command just test media --media-engines ${{ matrix.engine }}
         env:
           MOQ_TEST_RUNS: ${{ runner.temp }}/moq-test-runs
+          # Playwright checks a browser's libraries with the `ldd` on PATH, which in the
+          # dev shell is Nix glibc's and can't see the ones `--with-deps` installed, so
+          # it refuses a Firefox or WebKit that launches fine.
+          PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS: 1
       - name: Preserve measurements and traces
         if: ${{ failure() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -338,7 +355,11 @@ jobs:
 
   release-cpp:
     name: Release Cpp
+    needs: [release-shared-ffi]
+    if: ${{ always() && !cancelled() }}
     uses: ./.github/workflows/release-cpp.yml
+    with:
+      reuse-native: true
     permissions:
       contents: write
 

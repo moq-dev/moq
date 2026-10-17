@@ -3,8 +3,7 @@
 
 use std::sync::Arc;
 
-use crate::error::MoqError;
-use crate::producer::MoqTrackProducer;
+use crate::demand::MoqTrackDemand;
 
 /// Divides one connection's send estimate among the tracks sharing it.
 ///
@@ -36,15 +35,16 @@ impl MoqBandwidth {
 
 #[uniffi::export]
 impl MoqBandwidth {
-	/// Reserve up to `max_bps` for `track`, returning the reservation.
+	/// Reserve up to `max_bps` for the track `demand` watches, returning the reservation.
 	///
-	/// `max_bps` is a ceiling, not a measurement: reserve the most the track can
-	/// ever send. The reservation lasts as long as the returned handle; drop it
-	/// to hand the room back. [`MoqReservation::update`] moves the ceiling
-	/// without claiming twice.
-	pub fn reserve(&self, track: &MoqTrackProducer, max_bps: u64) -> Result<Arc<MoqReservation>, MoqError> {
+	/// Every track producer hands out its `demand()`, so raw, media, and JSON
+	/// tracks reserve the same way. `max_bps` is a ceiling, not a measurement:
+	/// reserve the most the track can ever send. The reservation lasts as long as
+	/// the returned handle; drop it to hand the room back.
+	/// [`MoqReservation::update`] moves the ceiling without claiming twice.
+	pub fn reserve(&self, demand: &MoqTrackDemand, max_bps: u64) -> Arc<MoqReservation> {
 		let _guard = crate::ffi::enter();
-		Ok(self.reserve_demand(&track.track_demand()?, max_bps))
+		self.reserve_demand(demand.inner(), max_bps)
 	}
 }
 
@@ -91,7 +91,7 @@ impl MoqReservation {
 mod tests {
 	use super::*;
 
-	use crate::producer::MoqBroadcastProducer;
+	use crate::producer::{MoqBroadcastProducer, MoqTrackProducer};
 
 	fn bandwidth(estimate: &moq_net::bandwidth::Producer) -> Arc<MoqBandwidth> {
 		Arc::new(MoqBandwidth::new(moq_net::bandwidth::Allocator::new(
@@ -112,11 +112,11 @@ mod tests {
 
 		let first = named_track(&broadcast, "a");
 		let _first_sub = first.consume(None).unwrap();
-		let first = bandwidth.reserve(&first, 4_000_000).unwrap();
+		let first = bandwidth.reserve(&first.demand().unwrap(), 4_000_000);
 
 		let second = named_track(&broadcast, "b");
 		let _second_sub = second.consume(None).unwrap();
-		let second = bandwidth.reserve(&second, 2_000_000).unwrap();
+		let second = bandwidth.reserve(&second.demand().unwrap(), 2_000_000);
 
 		estimate
 			.set(Some(moq_net::bandwidth::Rate::from_bps(3_000_000)))
@@ -144,12 +144,12 @@ mod tests {
 
 		let track = named_track(&broadcast, "a");
 		let _sub = track.consume(None).unwrap();
-		let reserved = first.reserve(&track, 4_000_000).unwrap();
+		let reserved = first.reserve(&track.demand().unwrap(), 4_000_000);
 		assert_eq!(reserved.grant(), Some(3_000_000));
 
 		let other = named_track(&broadcast, "b");
 		let _other_sub = other.consume(None).unwrap();
-		let other = second.reserve(&other, 4_000_000).unwrap();
+		let other = second.reserve(&other.demand().unwrap(), 4_000_000);
 		assert_eq!(reserved.grant(), Some(1_500_000));
 		assert_eq!(other.grant(), Some(1_500_000));
 	}
@@ -165,11 +165,11 @@ mod tests {
 
 		let first = named_track(&broadcast, "a");
 		let _first_sub = first.consume(None).unwrap();
-		let first = bandwidth.reserve(&first, 4_000_000).unwrap();
+		let first = bandwidth.reserve(&first.demand().unwrap(), 4_000_000);
 
 		let second = named_track(&broadcast, "b");
 		let _second_sub = second.consume(None).unwrap();
-		let second = bandwidth.reserve(&second, 2_000_000).unwrap();
+		let second = bandwidth.reserve(&second.demand().unwrap(), 2_000_000);
 		assert_eq!(second.grant(), Some(1_500_000));
 
 		drop(first);
@@ -186,7 +186,7 @@ mod tests {
 
 		let track = named_track(&broadcast, "a");
 		let _sub = track.consume(None).unwrap();
-		let reserved = bandwidth.reserve(&track, 4_000_000).unwrap();
+		let reserved = bandwidth.reserve(&track.demand().unwrap(), 4_000_000);
 
 		estimate
 			.set(Some(moq_net::bandwidth::Rate::from_bps(2_000_000)))
@@ -211,7 +211,7 @@ mod tests {
 		let bandwidth = bandwidth(&estimate);
 		let broadcast = MoqBroadcastProducer::new().unwrap();
 		let track = named_track(&broadcast, "a");
-		let reserved = bandwidth.reserve(&track, 4_000_000).unwrap();
+		let reserved = bandwidth.reserve(&track.demand().unwrap(), 4_000_000);
 		let mut consumer = reserved.consumer();
 
 		let parked = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));

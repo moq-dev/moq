@@ -243,6 +243,12 @@ if [[ ${#ROWS[@]} -gt 0 ]]; then
         bunx vite build --outDir "$HARNESS_RUN/page" --emptyOutDir
     )
 
+    # A cold build leaves hundreds of MB dirty, and on the nightly runner each periodic writeback
+    # burst stalls the page's main thread for ~300 ms, so the first row would grade the build's
+    # flush instead of the player. Flush it before any row plays.
+    echo "flushing the build to disk..."
+    sync
+
     # ── relay ───────────────────────────────────────────────────────────────
     harness_port relay
     RELAY_PORT="$HARNESS_PORT"

@@ -356,7 +356,7 @@ class Reader implements ResumeSource {
 			const copy = this.#copies[index];
 			if (copy.done !== undefined) continue;
 			for (;;) {
-				const recv = ordered ? hooks.tryNextGroup(copy.sub) : hooks.tryRecvGroup(copy.sub);
+				const recv = ordered ? hooks.tryNextGroup(copy.sub) : hooks.tryRecvGroup(copy.sub, false);
 				if (recv.kind === "group") {
 					if (!this.#deliverable(copy, recv.group.sequence, delivered)) {
 						recv.group.close();

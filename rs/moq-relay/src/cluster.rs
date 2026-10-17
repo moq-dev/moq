@@ -1075,11 +1075,15 @@ impl Cluster {
 
 	/// Admit a gateway session and scope both origin directions from its grant.
 	pub async fn admit(&self, auth: &auth::Auth, request: moq_auth::Request) -> Result<Admitted, auth::Error> {
-		if !matches!(request.event, moq_auth::Event::Connect) {
-			return Err(auth::Error::Request("admission requires a connect event".into()));
+		let result = async {
+			if !matches!(request.event, moq_auth::Event::Connect) {
+				return Err(auth::Error::Request("admission requires a connect event".into()));
+			}
+			let lease = auth.admit(request.clone()).await?;
+			self.scope(lease, &request)
 		}
-		let lease = auth.admit(request.clone()).await?;
-		self.scope(lease, &request)
+		.await;
+		result.inspect_err(|err| self.refusals.record(err.into()))
 	}
 
 	/// Network sessions enforce changing grants in AUTH, within a fixed root and SETUP role.
@@ -1088,8 +1092,12 @@ impl Cluster {
 		auth: &auth::Auth,
 		request: moq_auth::Request,
 	) -> Result<Admitted, auth::Error> {
-		let lease = auth.admit(request.clone()).await?;
-		self.scope_session(lease, &request)
+		let result = async {
+			let lease = auth.admit(request.clone()).await?;
+			self.scope_session(lease, &request)
+		}
+		.await;
+		result.inspect_err(|err| self.refusals.record(err.into()))
 	}
 
 	pub(crate) fn scope_session(
@@ -1120,6 +1128,7 @@ impl Cluster {
 	/// Resolve origin handles for a lease already admitted by a local relay rule.
 	pub(crate) fn scope(&self, lease: auth::Lease, request: &moq_auth::Request) -> Result<Admitted, auth::Error> {
 		let token = lease.token();
+		token.uncapped()?;
 		let publisher = self.publisher(token);
 		let subscriber = self.subscriber(token);
 		let allowed = match request.role {
@@ -1225,6 +1234,7 @@ impl Cluster {
 	/// its own handle: publishing lasts exactly as long as the cluster does.
 	pub fn with_stats(mut self, stats: moq_stats::Producer) -> Self {
 		self.stats = stats.registry().clone();
+		self.refusals = crate::refusals::Refusals::new(&self.stats);
 		self._stats_publisher = Some(stats);
 		self
 	}
@@ -1241,7 +1251,7 @@ impl Cluster {
 	/// equivalent per-request setter), which derives the read handle. On an
 	/// upstream grant that handle never sees a route learned from another upstream.
 	pub fn subscriber(&self, token: &auth::Token) -> Option<origin::Producer> {
-		self.mounted(token)?.scope(&token.root, &token.subscribe).ok()
+		self.mounted(token)?.scope(&token.root, &token.subscribe.path).ok()
 	}
 
 	/// Returns an [`origin::Producer`] scoped to this session's publish permissions,
@@ -1249,7 +1259,7 @@ impl Cluster {
 	/// [`origin::Producer::upstream`] when that peer is upstream.
 	/// Nothing is published beneath the grant's mounts.
 	pub fn publisher(&self, token: &auth::Token) -> Option<origin::Producer> {
-		self.mounted(token)?.scope(&token.root, &token.publish).ok()
+		self.mounted(token)?.scope(&token.root, &token.publish.path).ok()
 	}
 
 	/// The origin marked with the grant's link and with its mounts applied,
@@ -1321,10 +1331,7 @@ impl Cluster {
 	/// billed under `--cluster-tier`. The proof is a secret this relay minted for
 	/// itself, so no auth server is asked.
 	pub(crate) fn lan_peer_grant(&self) -> moq_auth::Grant {
-		let mut grant = moq_auth::Grant::new(
-			[moq_auth::Pattern::all()].into_iter().collect(),
-			[moq_auth::Pattern::all()].into_iter().collect(),
-		);
+		let mut grant = moq_auth::Grant::new(moq_auth::Pattern::all(), moq_auth::Pattern::all());
 		grant.tier = self.config.tier.clone().filter(|tier| !tier.is_empty());
 		grant.peer = true;
 		grant
@@ -1802,10 +1809,11 @@ impl Cluster {
 			true => self.origin.clone().upstream(),
 			false => self.origin.clone().peer(),
 		};
+		let stats = self.stats.tier(self.cluster_tier()).session("");
 		let mut client = client
 			.with_publisher(origin.consume().with_hidden(true))
 			.with_subscriber(origin)
-			.with_stats(self.stats.tier(self.cluster_tier()).session(""))
+			.with_stats(stats.clone())
 			.with_limits(self.peer_limits);
 		if let Some(cost) = target.cost {
 			client = client.with_cost(cost);
@@ -1824,8 +1832,9 @@ impl Cluster {
 		// old session finally closed instead of migrating to the replacement.
 		let mut reconnect = client.with_reconnect(true).connect(addrs.clone());
 		let mut connection = None;
+		let mut established = false;
 		loop {
-			match reconnect.status().await? {
+			match remote_status(&stats, &mut established, reconnect.status().await)? {
 				moq_tokio::Status::Connected if connection.is_none() => {
 					connection = Some(self.nodes.connect_outbound(id, redacted.to_string()));
 				}
@@ -2040,10 +2049,44 @@ pub(crate) fn canonicalize_peer_key(peer: &str) -> String {
 	}
 }
 
+/// A reconnecting peer keeps one logical presence until its loop actually ends.
+fn remote_status(
+	stats: &moq_net::stats::Session,
+	established: &mut bool,
+	status: moq_tokio::Result<moq_tokio::Status>,
+) -> moq_tokio::Result<moq_tokio::Status> {
+	match &status {
+		Ok(moq_tokio::Status::Connected) => *established = true,
+		Err(moq_tokio::Error::MoqNet(error)) if *established => {
+			if let Some(kind) = crate::connection::failure(error) {
+				stats.fail(kind);
+			}
+		}
+		// The retry window ran out after the link was lost, so the link failed to recover.
+		Err(moq_tokio::Error::Reconnect(_)) if *established => stats.fail(moq_net::stats::Failure::Transport),
+		// The peer sent GOAWAY and is draining; not following its redirect is no failure.
+		Err(moq_tokio::Error::RefusedRedirect(_) | moq_tokio::Error::PinnedRedirect) => {}
+		// Any other terminal error, such as a reconnect the peer refused, ends a live link.
+		Err(_) if *established => stats.fail(moq_net::stats::Failure::Application),
+		_ => {}
+	}
+	status
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
 	use crate::Config as RelayConfig;
+
+	#[tokio::test]
+	async fn fixed_leases_cannot_bypass_cap_refusal() {
+		let cluster = Cluster::new(Options::default()).unwrap();
+		let mut grant = moq_auth::Grant::new(moq_net::Pattern::all(), moq_net::Patterns::new());
+		grant.publish.rate = Some(moq_auth::Rate::from_bps(8000).unwrap());
+		let lease = auth::Lease::new("/room", moq_auth::lease::Consumer::fixed(grant));
+		let request = moq_auth::Request::new("test", moq_auth::Transport::Http, "/room");
+		assert!(matches!(cluster.scope(lease, &request), Err(auth::Error::Forbidden(_))));
+	}
 
 	#[tokio::test]
 	async fn request_limits_follow_the_admitted_grant() {
@@ -2060,7 +2103,7 @@ mod tests {
 			(true, false, (20, 30, 40)),
 			(true, true, (20, 30, 40)),
 		] {
-			let mut grant = moq_auth::Grant::new(Default::default(), Default::default());
+			let mut grant = moq_auth::Grant::new(moq_auth::Patterns::new(), moq_auth::Patterns::new());
 			grant.peer = peer;
 			grant.upstream = upstream;
 			let (_producer, consumer) = moq_auth::lease::Producer::new(grant);
@@ -2197,6 +2240,91 @@ mod tests {
 			 the publish task stopped while the cluster kept serving"
 		);
 		drop(broadcast);
+	}
+
+	#[test]
+	fn remote_logical_outcome_ignores_retries_and_counts_one_terminal_close() {
+		use moq_net::stats::Registry;
+		let registry = Registry::new(Default::default());
+		let stats = registry.tier(Tier::default()).session("");
+		let mut established = false;
+		let _ = remote_status(
+			&stats,
+			&mut established,
+			Err(moq_tokio::Error::MoqNet(moq_net::Error::ProtocolViolation)),
+		);
+		for status in [
+			moq_tokio::Status::Connected,
+			moq_tokio::Status::Disconnected,
+			moq_tokio::Status::Connected,
+			moq_tokio::Status::Migrating,
+		] {
+			remote_status(&stats, &mut established, Ok(status)).unwrap();
+		}
+		assert_eq!(
+			registry.snapshot().sessions()[0].1.sessions_failed,
+			moq_net::stats::Failures::default()
+		);
+		let _ = remote_status(
+			&stats,
+			&mut established,
+			Err(moq_tokio::Error::MoqNet(moq_net::Error::IdleTimeout)),
+		);
+		let _ = remote_status(
+			&stats,
+			&mut established,
+			Err(moq_tokio::Error::MoqNet(moq_net::Error::Session(
+				moq_net::SessionError::App(42),
+			))),
+		);
+		drop(stats);
+		let presence = registry.snapshot().sessions()[0].1;
+		assert_eq!(presence.sessions_started, 1);
+		assert_eq!(presence.sessions_ended, 1);
+		assert_eq!(presence.sessions_failed.idle_timeout, 1);
+		assert_eq!(presence.sessions_failed.application, 0);
+	}
+
+	#[test]
+	fn remote_reconnect_exhaustion_fails_only_an_established_link() {
+		use moq_net::stats::{Failure, Registry};
+		let exhausted = |established: bool| {
+			let registry = Registry::new(Default::default());
+			let stats = registry.tier(Tier::default()).session("");
+			let mut connected = false;
+			if established {
+				remote_status(&stats, &mut connected, Ok(moq_tokio::Status::Connected)).unwrap();
+			}
+			let gave_up = Err(moq_tokio::Error::Reconnect("gave up".into()));
+			let _ = remote_status(&stats, &mut connected, gave_up);
+			drop(stats);
+			registry.snapshot().sessions()[0]
+				.1
+				.sessions_failed
+				.count(Failure::Transport)
+		};
+		assert_eq!(exhausted(false), 0);
+		assert_eq!(exhausted(true), 1);
+	}
+
+	#[test]
+	fn remote_terminal_errors_fail_an_established_link_except_a_refused_redirect() {
+		use moq_net::stats::{Failures, Registry};
+		let ended = |err: moq_tokio::Error| {
+			let registry = Registry::new(Default::default());
+			let stats = registry.tier(Tier::default()).session("");
+			let mut connected = false;
+			remote_status(&stats, &mut connected, Ok(moq_tokio::Status::Connected)).unwrap();
+			let _ = remote_status(&stats, &mut connected, Err(err));
+			drop(stats);
+			registry.snapshot().sessions()[0].1.sessions_failed
+		};
+		assert_eq!(ended(moq_tokio::Error::ConnectFailed).application, 1);
+		assert_eq!(ended(moq_tokio::Error::PinnedRedirect), Failures::default());
+		assert_eq!(
+			ended(moq_tokio::Error::RefusedRedirect("policy".into())),
+			Failures::default()
+		);
 	}
 
 	/// `?cost=` is read and stripped (it rides SETUP, not the URL), other

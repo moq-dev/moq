@@ -9,6 +9,9 @@ use web_transport_trait::{self as wt, poll as backend};
 pub struct Error<E>(E);
 
 impl<E: wt::Error> moq::Error for Error<E> {
+	fn close_kind(&self) -> moq::CloseKind {
+		close_kind(&self.0)
+	}
 	fn session_error(&self) -> Option<(u32, String)> {
 		self.0.session_error()
 	}
@@ -63,8 +66,13 @@ impl<S: super::Grouped<SendStream: 'static, RecvStream: 'static>> poll::Session 
 	fn send_group(&mut self, priority: i64) -> Option<<S::SendStream as super::GroupedSend>::Group> {
 		self.session.send_group(priority)
 	}
-	fn poll_send_datagram(&mut self, cx: &mut Context<'_>, payload: &[u8]) -> Poll<Result<(), Self::Error>> {
-		backend::Session::poll_send_datagram(self, cx, payload).map_err(Error)
+	fn send_datagram(
+		&mut self,
+		payload: Bytes,
+		group: Option<&<S::SendStream as super::GroupedSend>::Group>,
+		order: i64,
+	) -> Result<(), Self::Error> {
+		super::Grouped::send_datagram(&self.session, payload, group, order).map_err(Error)
 	}
 	fn poll_recv_datagram(&mut self, cx: &mut Context<'_>) -> Poll<Result<Bytes, Self::Error>> {
 		backend::Session::poll_recv_datagram(self, cx).map_err(Error)
@@ -133,5 +141,72 @@ impl<S: wt::RecvStream + 'static> poll::RecvStream for super::RecvStream<S> {
 	}
 	fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
 		backend::RecvStream::poll_closed(self, cx).map_err(Error)
+	}
+}
+
+fn close_kind(error: &(dyn std::error::Error + 'static)) -> moq::CloseKind {
+	#[cfg(feature = "quic")]
+	if let Some(error) = error.downcast_ref::<crate::quic::web::SessionError>() {
+		use crate::quic::{driver::ConnectionError, web::SessionError};
+		return match error {
+			SessionError::ConnectionError(ConnectionError::TimedOut) => moq::CloseKind::IdleTimeout,
+			SessionError::ConnectionError(ConnectionError::LocallyClosed) => moq::CloseKind::Closed,
+			_ => moq::CloseKind::Transport,
+		};
+	}
+	#[cfg(feature = "iroh")]
+	if let Some(error) = error.downcast_ref::<web_transport_iroh::iroh::endpoint::ConnectionError>() {
+		use web_transport_iroh::iroh::endpoint::ConnectionError;
+		return match error {
+			ConnectionError::TimedOut => moq::CloseKind::IdleTimeout,
+			ConnectionError::LocallyClosed => moq::CloseKind::Closed,
+			_ => moq::CloseKind::Transport,
+		};
+	}
+	error.source().map(close_kind).unwrap_or_default()
+}
+
+#[cfg(all(test, feature = "quic"))]
+mod outcome_tests {
+	use super::*;
+	use crate::quic::{driver::ConnectionError, web::SessionError};
+	use moq_net::transport::Error as _;
+
+	#[test]
+	fn typed_idle_and_local_closes_survive_session_and_stream_wrappers() {
+		let idle = Error(SessionError::ConnectionError(ConnectionError::TimedOut));
+		assert!(matches!(
+			moq_net::Error::from_transport(idle),
+			moq_net::Error::IdleTimeout
+		));
+		let idle = Error(crate::quic::web::ReadError::SessionError(
+			SessionError::ConnectionError(ConnectionError::TimedOut),
+		));
+		assert_eq!(idle.close_kind(), moq::CloseKind::IdleTimeout);
+		let local = Error(SessionError::ConnectionError(ConnectionError::LocallyClosed));
+		assert!(matches!(
+			moq_net::Error::from_transport(local),
+			moq_net::Error::Session(moq_net::SessionError::Cancel)
+		));
+	}
+}
+
+#[cfg(all(test, feature = "iroh"))]
+mod iroh_outcome_tests {
+	use super::*;
+	use web_transport_iroh::{SessionError, iroh::endpoint::ConnectionError};
+
+	#[test]
+	fn typed_iroh_close_kinds_survive_the_error_source_chain() {
+		let idle = Error(SessionError::ConnectionError(ConnectionError::TimedOut));
+		assert!(matches!(
+			moq_net::Error::from_transport(idle),
+			moq_net::Error::IdleTimeout
+		));
+		let local = Error(SessionError::ConnectionError(ConnectionError::LocallyClosed));
+		assert!(matches!(
+			moq_net::Error::from_transport(local),
+			moq_net::Error::Session(moq_net::SessionError::Cancel)
+		));
 	}
 }

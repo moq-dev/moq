@@ -72,7 +72,7 @@ struct MkvTrack {
 	reorder: Option<(u64, u64)>,
 	source: ExportSource,
 	pending: Option<crate::jitter::Arrival<Frame>>,
-	empty: web_async::time::Instant,
+	empty: moq_clock::Instant,
 	finished: bool,
 	track_number: u64,
 	kind: TrackKind,
@@ -323,7 +323,7 @@ impl<S: Stream> Export<S> {
 	}
 
 	#[cfg(test)]
-	pub(super) fn next_deadline(&self) -> Option<web_async::time::Instant> {
+	pub(super) fn next_deadline(&self) -> Option<moq_clock::Instant> {
 		self.jitter.next_deadline()
 	}
 
@@ -362,7 +362,7 @@ impl<S: Stream> Export<S> {
 							break;
 						}
 						Poll::Pending => {
-							track.empty = web_async::time::Instant::now();
+							track.empty = moq_clock::now();
 							break;
 						}
 					};
@@ -377,7 +377,7 @@ impl<S: Stream> Export<S> {
 					}
 					crate::jitter::Arrival {
 						arrived: track.empty,
-						read: web_async::time::Instant::now(),
+						read: moq_clock::now(),
 						decode: frame.timestamp,
 						restart: track.source.markers(),
 						skip: track.source.skips(),
@@ -469,7 +469,7 @@ impl<S: Stream> Export<S> {
 					reorder: None,
 					source,
 					pending: None,
-					empty: web_async::time::Instant::now(),
+					empty: moq_clock::now(),
 					finished: false,
 					track_number: next_track_number,
 					kind: TrackKind::Video,
@@ -495,7 +495,7 @@ impl<S: Stream> Export<S> {
 					reorder: None,
 					source,
 					pending: None,
-					empty: web_async::time::Instant::now(),
+					empty: moq_clock::now(),
 					finished: false,
 					track_number: next_track_number,
 					kind: TrackKind::Audio,

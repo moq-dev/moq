@@ -28,7 +28,8 @@ imports use one source timeline. `ContainerStreamProducer` takes `ContainerStrea
 omitting its timebase keeps an independent offset. A timebase belongs to its broadcast
 and does not keep it open.
 `media.CatalogConsumer.subscribe`, `media.TrackConsumer.subscribe`, and `media.GroupConsumer.fetch`
-construct the read side from a broadcast. For arrival-order reads, decode each group from
+construct the read side from a broadcast; the last two take a catalog `media.Rendition` and
+follow its broadcast and track themselves. For arrival-order reads, decode each group from
 `TrackConsumer.recvGroup()` with `media.GroupConsumer(group: ..., container: ...)`; frames
 carry container media time as they land.
 
@@ -80,7 +81,8 @@ await moq.close();
 ## Things to know
 
 The rest of the [shared feature list](/lib/#what-every-binding-can-do) maps
-one to one; the API reference has the names.
+one to one; the API reference has the names, and [Layers](/lib/layers)
+shows which module holds each.
 
 - **No codecs.** Unlike the other bindings, the published Dart binaries carry no encoder or decoder. Already-encoded frames flow through `media.TrackProducer` and `media.TrackConsumer`; encoding is up to `package:camera`, platform channels, or another codec package.
 - **Names.** Types drop the `Moq` prefix (`Session`, `BroadcastProducer`) as aliases, so the generated names still work. `Container`, `Route`, and the exceptions keep it, since Flutter owns those names. `dynamic` is reserved, so the origin method is `dynamic_`.
