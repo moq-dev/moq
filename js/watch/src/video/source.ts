@@ -45,7 +45,7 @@ export type SourceInput = {
 
 	// The connection's PROBE estimates, used to auto-select a rendition when the target has no
 	// explicit bitrate. Usually wired from a `Connection`'s `probe`.
-	// Optional: without it auto-selection falls back to the preference order alone.
+	// Optional: without it auto-selection falls back to the rank order alone.
 	probe: Getter<Moq.Connection.Probe | undefined>;
 };
 
