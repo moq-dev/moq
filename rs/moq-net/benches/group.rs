@@ -9,7 +9,8 @@
 //! It also covers the steady-state path after a subscriber has reached the edge.
 //!
 //! `track_stamp_groups` covers stamping a group's first frame, which checks it
-//! against its neighbors' starts, swept over cache depth so a scan shows as a slope.
+//! against its neighbors' starts, swept over cache depth so a scan shows as a slope:
+//! `append` among stamped groups, `sparse` among groups created but not yet stamped.
 //!
 //! Run with `cargo bench -p moq-net`.
 
@@ -381,6 +382,26 @@ fn bench_stamp(c: &mut Criterion) {
 						let mut group = ctx.track.append_group().unwrap();
 						group.write_frame(Timestamp::ZERO, payload.clone()).unwrap();
 						group.finish().unwrap();
+					}
+					total += start.elapsed();
+					left -= batch;
+				}
+				total
+			});
+		});
+		// N groups created before any is stamped, then stamped in order: each one's upper
+		// neighbor is a run of unstamped groups, which a slot scan walks.
+		g.bench_with_input(BenchmarkId::new("sparse", n), &n, |b, &n| {
+			b.iter_custom(|iters| {
+				let mut total = Duration::ZERO;
+				let mut left = iters;
+				while left > 0 {
+					let ctx = filled_track(0, &payload);
+					let mut groups: Vec<_> = (0..n).map(|_| ctx.track.append_group().unwrap()).collect();
+					let batch = left.min(n as u64);
+					let start = Instant::now();
+					for group in groups.iter_mut().take(batch as usize) {
+						group.write_frame(Timestamp::ZERO, payload.clone()).unwrap();
 					}
 					total += start.elapsed();
 					left -= batch;

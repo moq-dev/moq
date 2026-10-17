@@ -307,6 +307,11 @@ pub(crate) struct TrackState {
 	// `max_sequence` when an earlier producer of the name wrote further.
 	sequence: Sequence,
 
+	// The checked starts cached groups hold, by sequence (see [`group::Origin::Bound`]), so a
+	// first frame finds its neighbors without walking groups not yet stamped. Filled through
+	// the read guard a first frame holds, so it needs its own lock, never contended.
+	bounds: Mutex<BTreeMap<u64, Timestamp>>,
+
 	// The sequence and start of the highest-sequence group that left the cache holding a
 	// checked start (see [`group::Origin::Bound`]). Eviction is not a sequence prefix, so a
 	// group above it is checked against it as well as its cached neighbors; one at or below
@@ -605,11 +610,13 @@ impl TrackState {
 		if self.received {
 			return None;
 		}
-		let below = self.lookup.range(..sequence).rev().find_map(|(_, slot)| slot.bound());
-		let above = self
-			.lookup
+		let bounds = self.bounds.lock().unwrap_or_else(PoisonError::into_inner);
+		let below = bounds.range(..sequence).next_back().map(|(_, start)| *start);
+		let above = bounds
 			.range((Bound::Excluded(sequence), Bound::Unbounded))
-			.find_map(|(_, slot)| slot.bound());
+			.next()
+			.map(|(_, start)| *start);
+		drop(bounds);
 		Some(match self.evicted {
 			Some((evicted, start)) if sequence <= evicted => Neighbors {
 				floor: below,
@@ -629,8 +636,16 @@ impl TrackState {
 		})
 	}
 
-	/// Share group `sequence`'s just-checked `start` with the name's later producers.
+	/// Record group `sequence`'s just-checked `start` as a bound for its neighbors and the
+	/// name's later producers. A group stamped after it left the cache bounds nothing.
 	pub(crate) fn share_bound(&self, sequence: u64, start: Timestamp) {
+		if self.lookup.get(&sequence).and_then(Slot::bound) != Some(start) {
+			return;
+		}
+		self.bounds
+			.lock()
+			.unwrap_or_else(PoisonError::into_inner)
+			.insert(sequence, start);
 		self.sequence.share_bound(sequence, start);
 	}
 
@@ -1281,12 +1296,21 @@ impl TrackState {
 		self.lookup
 			.retain(|_, slot| slot.copies().any(group::Producer::is_finished));
 		self.withheld = self.lookup.values().filter(|slot| slot.pending).count();
+		let lookup = &self.lookup;
+		self.bounds
+			.get_mut()
+			.unwrap_or_else(PoisonError::into_inner)
+			.retain(|sequence, _| lookup.contains_key(sequence));
 	}
 
 	/// Take `sequence` out of the cache, keeping the withheld count in step.
 	fn remove_slot(&mut self, sequence: u64) -> Option<Slot> {
 		let slot = self.lookup.remove(&sequence)?;
 		self.withheld -= usize::from(slot.pending);
+		self.bounds
+			.get_mut()
+			.unwrap_or_else(PoisonError::into_inner)
+			.remove(&sequence);
 		Some(slot)
 	}
 
@@ -1421,7 +1445,13 @@ impl TrackState {
 				head: None,
 			},
 		);
-		self.withheld -= replaced.map_or(0, |slot| usize::from(slot.pending));
+		if let Some(replaced) = replaced {
+			self.withheld -= usize::from(replaced.pending);
+			self.bounds
+				.get_mut()
+				.unwrap_or_else(PoisonError::into_inner)
+				.remove(&sequence);
+		}
 		self.cache.wakes().arrived(sequence..=sequence);
 		if visible && !pending {
 			self.arrival.push_back((sequence, stamp));

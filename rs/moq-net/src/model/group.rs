@@ -815,11 +815,13 @@ impl Producer {
 		state.next_index = next_index;
 		state.committed = state.next_index;
 		state.stamp(timestamp);
-		if let (Some(track), Some(start)) = (&track, state.settle(origin)) {
-			track.share_bound(self.info.sequence, start);
-		}
+		let bound = state.settle(origin);
 		self.alive.checked.store(true, Ordering::Relaxed);
 		drop(state);
+		// The group's lock is released first: sharing reads it back through its slot.
+		if let (Some(track), Some(start)) = (&track, bound) {
+			track.share_bound(self.info.sequence, start);
+		}
 		drop(track);
 
 		// With the group lock released (lock order is track then group), settle
@@ -898,13 +900,15 @@ impl Producer {
 		}
 		state.next_index = next_index;
 		state.committed = next_index;
-		if let (Some(track), Some(start)) = (&track, state.settle(origin)) {
-			track.share_bound(self.info.sequence, start);
-		}
+		let bound = state.settle(origin);
 		if count > 0 {
 			self.alive.checked.store(true, Ordering::Relaxed);
 		}
 		drop(state);
+		// The group's lock is released first: sharing reads it back through its slot.
+		if let (Some(track), Some(start)) = (&track, bound) {
+			track.share_bound(self.info.sequence, start);
+		}
 		drop(track);
 
 		self.cache.settle(now);
@@ -1014,11 +1018,13 @@ impl Producer {
 		// Opening the frame is enough: the header carries the timestamp, so the group's
 		// place in time is known before a single payload byte streams in.
 		state.stamp(timestamp);
-		if let (Some(track), Some(start)) = (&track, state.settle(origin)) {
-			track.share_bound(self.info.sequence, start);
-		}
+		let bound = state.settle(origin);
 		self.alive.checked.store(true, Ordering::Relaxed);
 		drop(state);
+		// The group's lock is released first: sharing reads it back through its slot.
+		if let (Some(track), Some(start)) = (&track, bound) {
+			track.share_bound(self.info.sequence, start);
+		}
 		drop(track);
 
 		// With the group lock released (lock order is track then group), settle
