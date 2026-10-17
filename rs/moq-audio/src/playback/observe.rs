@@ -90,14 +90,18 @@ pub(super) struct Shared {
 	quanta: AtomicU64,
 	quiet: AtomicU64,
 	stalled: AtomicBool,
-	/// Whether an [`Observer`] is reading, which is the only time events queue.
-	observed: AtomicBool,
-	/// Set when an event found the queue full.
-	overflowed: AtomicBool,
-	/// Asks the audio thread to close a gap still open.
-	finish: AtomicBool,
-	events: SyncSender<Event>,
-	received: Mutex<Receiver<Event>>,
+	/// The reading [`Observer`]'s generation, or 0 with none: events only queue
+	/// while one reads. Each event carries it, so a send racing one observer's
+	/// teardown never reaches the next.
+	observer: AtomicU64,
+	/// The last generation handed out.
+	generation: AtomicU64,
+	/// The generation whose event found the queue full, or 0.
+	overflowed: AtomicU64,
+	/// The generation that ended its measurement, or 0.
+	finished: AtomicU64,
+	events: SyncSender<(u64, Event)>,
+	received: Mutex<Receiver<(u64, Event)>>,
 }
 
 impl Default for Shared {
@@ -109,9 +113,10 @@ impl Default for Shared {
 			quanta: AtomicU64::new(0),
 			quiet: AtomicU64::new(0),
 			stalled: AtomicBool::new(true),
-			observed: AtomicBool::new(false),
-			overflowed: AtomicBool::new(false),
-			finish: AtomicBool::new(false),
+			observer: AtomicU64::new(0),
+			generation: AtomicU64::new(0),
+			overflowed: AtomicU64::new(0),
+			finished: AtomicU64::new(0),
 			events,
 			received: Mutex::new(received),
 		}
@@ -124,15 +129,20 @@ impl Default for Shared {
 /// one, so no two readers split its events.
 pub struct Observer {
 	shared: Arc<Shared>,
+	generation: u64,
 }
 
 impl Observer {
 	pub(super) fn new(shared: Arc<Shared>) -> Result<Self, Error> {
-		if shared.observed.swap(true, Ordering::AcqRel) {
+		let generation = shared.generation.fetch_add(1, Ordering::Relaxed) + 1;
+		if shared
+			.observer
+			.compare_exchange(0, generation, Ordering::AcqRel, Ordering::Acquire)
+			.is_err()
+		{
 			return Err(Error::Busy("playback engine already has an observer".into()));
 		}
-		shared.overflowed.store(false, Ordering::Relaxed);
-		Ok(Self { shared })
+		Ok(Self { shared, generation })
 	}
 
 	/// The totals so far, and the gaps and stalls since the previous read.
@@ -157,33 +167,34 @@ impl Observer {
 		let received = shared.received.lock().unwrap();
 		loop {
 			match received.try_recv() {
-				Ok(Event::Gap(gap)) => observation.gaps.push(gap),
-				Ok(Event::Stall(stall)) => observation.stalls.push(stall),
+				Ok((generation, _)) if generation != self.generation => {}
+				Ok((_, Event::Gap(gap))) => observation.gaps.push(gap),
+				Ok((_, Event::Stall(stall))) => observation.stalls.push(stall),
 				Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
 			}
 		}
 
 		// Checked after draining, so an overflow that raced the drain is not missed.
-		if shared.overflowed.load(Ordering::Acquire) {
+		if shared.overflowed.load(Ordering::Acquire) == self.generation {
 			return Err(Error::Playback("observer fell behind and lost events".into()));
 		}
 		Ok(observation)
 	}
 
-	/// Close a gap still open on the next callback, so the read after it
-	/// reports the gap rather than leaving it open forever. Call it when the
-	/// measurement ends.
+	/// End the measurement: on the next callback, close a gap still open and
+	/// stop counting, so the read after it is final. Only the clock moves on.
 	pub fn finish(&self) {
-		self.shared.finish.store(true, Ordering::Release);
+		self.shared.finished.store(self.generation, Ordering::Release);
 	}
 }
 
 impl Drop for Observer {
 	fn drop(&mut self) {
-		// Anything left belongs to nobody, and the next observer starts clean.
+		self.shared.observer.store(0, Ordering::Release);
+		// Free the queue's slots; anything a racing send adds later carries this
+		// generation, which the next observer skips.
 		let received = self.shared.received.lock().unwrap();
 		while received.try_recv().is_ok() {}
-		self.shared.observed.store(false, Ordering::Release);
 	}
 }
 
@@ -253,8 +264,14 @@ impl Ledger {
 	/// the sinks filled, the rest being zeros they could not; `playing` is
 	/// whether any sink was readable at all.
 	pub(super) fn add(&mut self, mix: &[f32], channels: usize, supplied: usize, playing: bool) {
-		if self.shared.finish.swap(false, Ordering::AcqRel) {
+		let frames = mix.len() / channels;
+		if self.finished() {
+			// The measurement is over: report what was open, count nothing after it.
 			self.close();
+			(self.filled, self.missing, self.first, self.power) = (0, 0, None, 0.0);
+			self.frames += frames as u64;
+			self.shared.clock.store(self.nanos(self.frames), Ordering::Relaxed);
+			return;
 		}
 
 		if playing != self.playing {
@@ -265,7 +282,6 @@ impl Ledger {
 		}
 
 		let supplied = if playing { supplied } else { 0 };
-		let frames = mix.len() / channels;
 		let mut done = 0;
 		while done < frames {
 			let take = (QUANTUM - self.filled).min(frames - done);
@@ -340,6 +356,12 @@ impl Ledger {
 		self.send(Event::Gap(gap));
 	}
 
+	/// Whether the reading observer has ended its measurement.
+	fn finished(&self) -> bool {
+		let observer = self.shared.observer.load(Ordering::Acquire);
+		observer != 0 && self.shared.finished.load(Ordering::Acquire) == observer
+	}
+
 	fn nanos(&self, frames: u64) -> u64 {
 		self.base + (frames as f64 * 1e9 / self.rate).round() as u64
 	}
@@ -349,11 +371,12 @@ impl Ledger {
 	}
 
 	fn send(&self, event: Event) {
-		if !self.shared.observed.load(Ordering::Acquire) {
+		let observer = self.shared.observer.load(Ordering::Acquire);
+		if observer == 0 {
 			return;
 		}
-		if self.shared.events.try_send(event).is_err() {
-			self.shared.overflowed.store(true, Ordering::Release);
+		if self.shared.events.try_send((observer, event)).is_err() {
+			self.shared.overflowed.store(observer, Ordering::Release);
 		}
 	}
 }
@@ -363,7 +386,7 @@ impl Drop for Ledger {
 	/// next stream does. Runs on the driver thread, which drops the stream.
 	fn drop(&mut self) {
 		self.close();
-		if self.playing {
+		if self.playing && !self.finished() {
 			self.shared.stalled.store(true, Ordering::Relaxed);
 			let at = self.clock(self.frames);
 			self.send(Event::Stall(Stall { at, stalled: true }));
@@ -481,19 +504,51 @@ mod tests {
 	}
 
 	#[test]
-	fn finish_closes_an_open_gap() {
+	fn finish_closes_an_open_gap_and_stops_counting() {
 		let (mut ledger, mut observer) = observed();
 		add(&mut ledger, 128, 128);
 		add(&mut ledger, 128, 0);
 		observer.finish();
 		add(&mut ledger, 128, 0);
+		add(&mut ledger, 128, 128);
+		add(&mut ledger, 128, 0);
+		ledger.add(&buffer(128, 0), 2, 0, false);
+		drop(ledger);
 
 		let observation = observer.read().unwrap();
-		assert_eq!(observation.gaps.len(), 1);
+		assert_eq!(observation.gaps.len(), 1, "{observation:?}");
 		assert_eq!(
 			observation.gaps[0].quanta, 1,
 			"closed before the next quantum joined it"
 		);
+		assert_eq!(observation.quanta, 2, "nothing after the finish counts");
+		assert_eq!(
+			observation.stalls.len(),
+			1,
+			"the stall after the finish is not reported"
+		);
+		assert_eq!(observation.clock, ms(128 * 6), "the clock still runs");
+	}
+
+	#[test]
+	fn a_new_observer_inherits_nothing_from_the_last() {
+		let shared = Arc::new(Shared::default());
+		let first = Observer::new(shared.clone()).unwrap();
+		let stale = first.generation;
+		drop(first);
+		// A send that raced the first observer's teardown, and the overflow it hit.
+		let gap = Gap {
+			at: Duration::ZERO,
+			missing: Duration::ZERO,
+			quanta: 1,
+			short: 0,
+		};
+		shared.events.try_send((stale, Event::Gap(gap))).unwrap();
+		shared.overflowed.store(stale, Ordering::Release);
+
+		let mut second = Observer::new(shared).unwrap();
+		let observation = second.read().unwrap();
+		assert!(observation.gaps.is_empty());
 	}
 
 	#[test]
