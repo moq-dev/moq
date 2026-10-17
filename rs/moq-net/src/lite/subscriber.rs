@@ -2883,6 +2883,79 @@ mod tests {
 		));
 	}
 
+	/// A publisher that finishes the track stops reading its subscribe stream, so a
+	/// SUBSCRIBE_UPDATE written then fails. The track still ends with the publisher's
+	/// finish; a reset still hands it back with the reset's error.
+	#[moq_net_sim::test]
+	async fn an_update_the_publisher_stopped_reading_defers_to_its_end() {
+		use crate::transport::poll::{RecvStream as _, SendStream as _, Session as _};
+		for reset in [false, true] {
+			let version = Version::Lite06;
+			let (session, mut peer) = crate::transport::memory::pair(Default::default());
+			let subscriber = Subscriber::new(SubscriberConfig {
+				runtime: crate::time::Clock::sim(),
+				session,
+				origin: origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+				recv_bandwidth: None,
+				version,
+				peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Binding::InBand),
+				peer_hop: None,
+				cost: None,
+				going_away: Default::default(),
+				auth: crate::auth::Handle::new(false),
+			});
+			let serve = TrackServe {
+				validity: Default::default(),
+				subscriber,
+				path: Path::new("room").to_owned(),
+				epoch: None,
+				name: "video".into(),
+			};
+			let broadcast = crate::broadcast::Info::new().produce();
+			let mut serving = ServeLoop::new(
+				&serve,
+				broadcast.reserve_track("video").unwrap(),
+				Default::default(),
+				None,
+			);
+			let mut reader = serving.serving.subscribe(None);
+			assert!(serving.poll(&serve, &kio::Waiter::noop()).is_pending());
+			assert!(matches!(serving.sub, Sub::Active(_)), "the SUBSCRIBE is on the wire");
+
+			// The publisher ends the subscription and stops reading the stream.
+			let (mut send, mut recv) = std::future::poll_fn(|cx| peer.poll_accept_bi(cx)).await.unwrap();
+			recv.stop(crate::StreamError::Cancel.to_code());
+			if reset {
+				send.reset(crate::StreamError::NotFound.to_code());
+			} else {
+				let mut end = Vec::new();
+				lite::SubscribeResponse::End(lite::SubscribeEnd { group: 0, streams: 0 })
+					.encode(&mut crate::coding::Encoder::new(&mut end, version.into()), version)
+					.unwrap();
+				std::future::poll_fn(|cx| send.poll_write(cx, &end)).await.unwrap();
+				send.finish().unwrap();
+			}
+
+			// The update races it, and its write fails.
+			reader.update(Subscription::default().with_priority(1)).unwrap();
+			let gate = serve.gate();
+			let mut running = TrackServeRun {
+				serve,
+				state: TrackRunState::Serve(serving),
+				gate,
+			};
+			assert!(kio::Task::poll(&mut running, &kio::Waiter::noop()).is_ready());
+			let end = reader.recv_group().now_or_never().expect("the track ended").map(|_| ());
+			match reset {
+				false => assert!(matches!(end, Ok(())), "{end:?}"),
+				true => assert!(
+					matches!(end, Err(Error::Stream(crate::StreamError::NotFound))),
+					"{end:?}"
+				),
+			}
+		}
+	}
+
 	/// Mid-group demand: a subscriber resuming at frame 3 of group 5, capped by a later
 	/// bound in the same group.
 	fn mid_group_demand() -> Subscription {
@@ -5530,12 +5603,11 @@ impl<S: crate::transport::poll::Session> ServeLoop<S> {
 					if let Sub::Active(active) = &mut self.sub {
 						match active.stream.writer.poll_flush(&mut cx) {
 							Poll::Ready(Ok(())) => {}
+							// The publisher stopped reading, as it does once it finishes the
+							// track. The update is dropped, and the responses decide how the
+							// subscription ends: cleanly at the FIN, or with a reset's error.
 							Poll::Ready(Err(err)) => {
-								// The stream is broken; drop it (the writer resets) and
-								// hand the track back.
-								serve.subscriber.remove_subscribe(active.id);
-								self.sub = Sub::None;
-								return Poll::Ready(ServeEnd::GiveBack(err));
+								tracing::debug!(track = %serve.name, %err, "subscribe update dropped")
 							}
 							Poll::Pending => return Poll::Pending,
 						}
