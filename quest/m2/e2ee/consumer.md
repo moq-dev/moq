@@ -13,8 +13,12 @@ producer in `moq-mux`", but nothing gives it a shape the browser and FFI
 can mirror. Mock up the Rust shape first, then mirror the names in JS and
 the bindings. Kept in m2 (decided 2026-10-17).
 
-Public API: a new e2ee consumer in `moq-mux`, `@moq/e2ee`, and moq-ffi.
-Wire: none.
+The moq-ffi consumer follows the `rs/moq-ffi` row of the root `AGENTS.md`
+cross-package table: wrappers, C and C++, OBS where it plays, and the
+language docs land with it, or the FFI part waits for a quest that does.
+
+Public API: a new e2ee consumer in `moq-mux`, `@moq/e2ee`, and moq-ffi with
+its wrappers. Wire: none.
 
 ## Required
 
