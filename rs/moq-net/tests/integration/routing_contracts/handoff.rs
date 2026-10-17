@@ -11,7 +11,9 @@
 use std::collections::BTreeSet;
 
 use super::XorShift;
-use super::model::{Config, Event, Freshness, Grant, Id, Kind, Link, Net, Requests, VARINT_MAX, overlaps, qualified};
+use super::model::{
+	Config, Event, Freshness, Grant, Id, Kind, Link, Net, Requests, VARINT_MAX, overlaps, qualified, within,
+};
 
 const NEXT_HOP: Freshness = Freshness::NextHop;
 const BARRIER: Freshness = Freshness::Barrier;
@@ -558,6 +560,24 @@ fn a_disjoint_interest_is_answered_with_nothing() {
 		.map(|event| event.kind)
 		.collect();
 	assert_eq!(life, [Kind::Start, Kind::Offline]);
+	net.check().unwrap();
+}
+
+/// An interest matches whole path segments: watching `live/a` sees what lies
+/// below it, never a sibling `live/ab` that merely shares its bytes.
+#[test]
+fn an_interest_matches_whole_segments() {
+	let (origin, client) = (0, 1);
+	let mut net = Net::new(config(FLOORS, Requests::Off), 2);
+	net.leaf(origin);
+	net.join(origin, client, 1);
+	net.originate(origin, 7, 0);
+	net.announce(origin, "live/a/x", 0, None);
+	net.announce(origin, "live/ab", 0, None);
+	net.watch(client, "live/a");
+	assert!(net.run());
+	assert_eq!(net.shows(client, 7, "live/a/x"), Some(true));
+	assert_eq!(net.shows(client, 7, "live/ab"), None);
 	net.check().unwrap();
 }
 
@@ -1217,8 +1237,8 @@ fn sweep_scoped_handoff() {
 			.filter(|claim| {
 				SCOPES.iter().any(|scope| {
 					let region = match () {
-						_ if scope.starts_with(watch) => *scope,
-						_ if watch.starts_with(scope) => watch,
+						_ if within(scope, watch) => *scope,
+						_ if within(watch, scope) => watch,
 						_ => return false,
 					};
 					overlaps(claim, region)

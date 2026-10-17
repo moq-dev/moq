@@ -308,10 +308,16 @@ fn covers(prefix: &str, path: &str) -> bool {
 	path == prefix || (prefix.ends_with('/') && path.starts_with(prefix))
 }
 
+/// Whether `path` is `prefix` or lies below it, matching whole path segments.
+pub fn within(path: &str, prefix: &str) -> bool {
+	path.strip_prefix(prefix)
+		.is_some_and(|rest| prefix.is_empty() || prefix.ends_with('/') || rest.is_empty() || rest.starts_with('/'))
+}
+
 /// Whether `claim` can concern a path under `interest`: anything inside it, or
 /// a wildcard above it.
 pub fn overlaps(claim: &str, interest: &str) -> bool {
-	claim.starts_with(interest) || covers(claim, interest)
+	within(claim, interest) || covers(claim, interest)
 }
 
 impl View {
@@ -342,7 +348,7 @@ impl View {
 		let mut floors = BTreeMap::new();
 		for (&region, &floor) in &self.floors {
 			// Two interest regions meet when either contains the other.
-			if region.starts_with(prefix) || prefix.starts_with(region) {
+			if within(region, prefix) || within(prefix, region) {
 				let region = if region.len() > prefix.len() { region } else { prefix };
 				let entry = floors.entry(region).or_insert(floor);
 				*entry = (*entry).max(floor);
@@ -387,7 +393,7 @@ impl View {
 		self.floors.retain(|region, floor| {
 			!floors
 				.iter()
-				.any(|(wider, newer)| wider != region && region.starts_with(wider) && newer >= floor)
+				.any(|(wider, newer)| wider != region && within(region, wider) && newer >= floor)
 		});
 	}
 
@@ -399,7 +405,13 @@ impl View {
 		let old = old.unwrap_or(&empty);
 		// Every path overlaps the interest, so one not under it covers it and
 		// goes out as an empty suffix.
-		let suffix = |path: &str| path.strip_prefix(interest).map_or(0, str::len);
+		let suffix = |path: &str| {
+			if within(path, interest) {
+				path.len() - interest.len()
+			} else {
+				0
+			}
+		};
 		// One ANNOUNCE_FLOOR lists every region, changed or not: a count, then a
 		// suffix and a revision per region.
 		let floors = 1 + self.floors.keys().map(|region| suffix(region) + 4).sum::<usize>();
@@ -925,7 +937,7 @@ impl Net {
 	/// snapshot, which retires what the node knew outside the new interest.
 	pub fn watch(&mut self, node: Node, prefix: &'static str) {
 		let state = &mut self.nodes[node];
-		if !prefix.starts_with(state.watch) {
+		if !within(prefix, state.watch) {
 			let old = state.watch;
 			for id in state.views.keys().filter(|id| !state.origins.contains_key(id)) {
 				state.current.entry(*id).or_insert_with(|| vec![old]);
@@ -933,7 +945,7 @@ impl Net {
 		}
 		state
 			.current
-			.retain(|_, regions| !regions.iter().any(|region| prefix.starts_with(region)));
+			.retain(|_, regions| !regions.iter().any(|region| within(prefix, region)));
 		state.watch = prefix;
 		state.interest += 1;
 		let peers: Vec<Node> = self.peers(node).collect();
@@ -1216,8 +1228,8 @@ impl Net {
 					};
 					if region == watch {
 						state.current.remove(&id);
-					} else if !regions.iter().any(|known| region.starts_with(known)) {
-						regions.retain(|known| !known.starts_with(region));
+					} else if !regions.iter().any(|known| within(region, known)) {
+						regions.retain(|known| !within(known, region));
 						regions.push(region);
 					}
 				}
@@ -1486,7 +1498,7 @@ impl Net {
 		let lost = merged
 			.floors
 			.iter()
-			.filter(|(floor, _)| !regions.iter().any(|region| floor.starts_with(region)))
+			.filter(|(floor, _)| !regions.iter().any(|region| within(floor, region)))
 			.map(|(_, &rev)| rev)
 			.max();
 		let Some(lost) = lost else {
@@ -1965,7 +1977,7 @@ impl Net {
 				continue;
 			}
 			// A claim counts under its bare identity, and under a qualified key only inside that grant's scope.
-			let inside = grants.iter().filter(|(_, scope)| claim.prefix.starts_with(*scope));
+			let inside = grants.iter().filter(|(_, scope)| within(claim.prefix, scope));
 			for id in iter::once(claim.id).chain(inside.map(|(subject, _)| qualified(subject, claim.id))) {
 				let Some(route) = self.route_from(node, id, from) else {
 					continue;
