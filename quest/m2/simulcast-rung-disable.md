@@ -53,6 +53,10 @@ browser and one through moq-ffi.
 Public API: the shared rule in `moq_mux::rate` and whatever knobs the
 publishers expose for it. Wire: none; `enabled` already exists.
 
+## Required
+
+- [Padding probe](/quest/m2/padding-probe.md) - a stopped rendition can find room to resume; the estimators stop learning while app-limited
+
 ## Related
 
 - [Ladder controller](/quest/m3/ladder/controller.md) - the same rung disable for generated transcode ladders
