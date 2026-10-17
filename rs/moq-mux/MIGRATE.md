@@ -7,57 +7,23 @@ How to update your code for each breaking change, newest first.
 ### `fmp4::Wire::new` refuses a track that isn't audio or video (#5815)
 
 `container::fmp4::Wire::new` returns `Result<Wire>`, as `Wire::from_init` already did, and refuses any other handler instead of treating it as data.
-
-```rust
-// Before
-let wire = Wire::new(trak);
-// After
-let wire = Wire::new(trak)?;
-```
+Handle the error from `Wire::new`.
 
 ### `ts::Programs::finish` returns each program's `Finish` (#5795)
 
 `Programs::finish` returns `anyhow::Result<Vec<moq_net::broadcast::Finish>>` instead of `anyhow::Result<()>`.
 Each handle keeps its program's broadcast servable until its media is stale, and dropping it closes that program.
-Await `Finish::wait` to linger, or drop the handles to close every program now.
-
-```rust
-// Before
-programs.finish()?;
-
-// After: serve the finished programs until their media is stale
-let finished = programs.finish()?;
-futures::future::join_all(finished.into_iter().map(moq_net::broadcast::Finish::wait)).await;
-
-// After: close every program now
-drop(programs.finish()?);
-```
+Await `Finish::wait` on each handle to linger, or drop the handles to close every program now.
 
 ### Timeline durations are hints (#5715)
 
 `timeline::Config::duration_max`, `with_duration_max`, and `DEFAULT_DURATION_MAX` are gone; set `duration_hint` with `with_duration_hint`, the expected record duration such as the GOP, and the split ceiling follows from it.
 `DEFAULT_DURATION_MIN` is 4 s instead of 2 s, so set `with_duration_min` to keep the shorter records.
 
-```rust
-// Before
-let config = timeline::Config::default().with_duration_max(Duration::from_secs(10));
-// After
-let config = timeline::Config::default()
-	.with_duration_hint(gop)
-	.with_duration_min(Duration::from_secs(2));
-```
-
 ### The catalog consumer is opaque (#5630)
 
 Construct `catalog::Consumer` with `Consumer::new(broadcast, format).await`, or convert a `catalog::hang::Consumer` with `.into()`, then read it through `catalog::Stream`.
 Its `Hang`, `Msf`, and `Closed` variants and `catalog::msf::Consumer::track` are private.
-
-```rust
-// Before
-let catalog = catalog::Consumer::Hang(hang_consumer);
-// After
-let catalog = catalog::Consumer::new(&broadcast, format).await?;
-```
 
 ### Timelines record untimed tracks (#5720)
 
@@ -66,29 +32,14 @@ A segmenter fed the wrong timedness for its track fails with `Error::TimelineTim
 
 ### An unset host clock publishes no wall mapping (#5429)
 
-`Clock::wall()` returns `Option<hang::catalog::Clock>` instead of panicking.
+`Clock::wall()` returns `Option<hang::catalog::Clock>` instead of panicking, so handle `None`.
 `Clock::wall_clock` and `Timebase::place` refuse a clock without one.
-
-```rust
-// Before
-let wall = clock.wall();
-// After
-let Some(wall) = clock.wall() else { return Ok(()) };
-```
 
 ### TS export lingers within one publisher instance (#5147)
 
 `ts::Export::resume` is `ts::Export::follow`, `Source::returned` is gone, and `ts::Follower` follows a path's announcements the way `moq export ts` does.
 `ts::Export::new(source, catalog)` takes a catalog stream like the other exporters: subscribe with `source.catalog::<ts::Ext>(format).await?` to keep MPEG-TS metadata, or `()` for media only, and select renditions on the stream before passing it in.
 `follow(broadcast, catalog)` takes the replacement stream too, both methods are synchronous, and `with_ts` and `with_catalog_format` are removed.
-
-```rust
-// Before
-let export = ts::Export::new(source).await?.with_catalog_format(format);
-// After
-let catalog = source.catalog::<ts::Ext>(format).await?;
-let export = ts::Export::new(source, catalog);
-```
 
 ### `Source` is built from the resolved broadcast (#5252)
 
@@ -97,9 +48,6 @@ let export = ts::Export::new(source, catalog);
 Every later request for a path, siblings included, stays on the broadcast first held there and fails once it ends, so build a new `Source` to follow a new instance.
 
 ```rust
-// Before
-let source = Source::new(origin, path);
-// After
 let broadcast = origin.request_broadcast(path, None).await?;
 let source = Source::new(origin, broadcast);
 ```
@@ -110,13 +58,6 @@ let source = Source::new(origin, broadcast);
 `ts::Export` defaults to 1 s, and the send-ahead comes out of the same budget, so the output trails a TS source by the delay instead of twice it.
 `ts::stats::Export` gains a dropped-frame count, measured drift, and an out-of-tolerance count, and is no longer `Eq`.
 
-```rust
-// Before
-let export = ts::Export::new(source, catalog).with_max_age(delay);
-// After
-let export = ts::Export::new(source, catalog).with_delay(delay);
-```
-
 ### Subscriber staleness is `max_delay`
 
 | Before | After |
@@ -126,17 +67,10 @@ let export = ts::Export::new(source, catalog).with_delay(delay);
 
 ### Importers keep the source's timestamps
 
-`clock::Anchor`, `clock::Lane`, `SourceMap`, `Clock::source`, and the importers' `live()` are gone.
+`clock::Anchor`, `clock::Lane`, `SourceMap`, `Clock::source`, and the importers' `live()` are gone; delete the `live()` calls.
 Importers publish the source's own timestamps and anchor the catalog clock on their first frame.
 An importer whose first frame arrives once the clock is in use (taken with `catalog.clock()`, published, or pinned with `Config::with_clock`) shifts its timestamps onto it, so its first frame lands at now.
 Importers sharing a timestamp base reserve through one `catalog.timebase()`.
-
-```rust
-// Before
-let import = fmp4::Import::new(broadcast, reserved).live();
-// After
-let import = fmp4::Import::new(broadcast, reserved);
-```
 
 ### Importers refuse a timestamp rewind
 
@@ -155,14 +89,6 @@ A `moov` or `Tracks` decoded after `finish()` is refused with `fmp4::Error::Moov
 The H.264, H.265, AV1, VP8, and VP9 `Import`s no longer take liveness hints; a stalled rendition is marked by the catalog's `enabled` flag instead.
 Delete the calls.
 
-```rust
-// Before
-import.tick()?;
-import.observe_lag(lag)?;
-import.idle()?;
-// After: delete the calls
-```
-
 ### fMP4 export fixes its track set at the init segment
 
 `fmp4::Error` drops `MissingVideoTrack`, `MissingAudioTrack`, and `NoCatalogSnapshot`, and adds `TrackAdded`, `TrackChanged`, `TrackRewound`, and `TrackUndescribed`.
@@ -177,12 +103,9 @@ A keyframe whose parameter sets never appeared ends the export instead of waitin
 ### CMAF timescales must match the init
 
 CMAF `Wire::write` refuses a track whose timescale is not the init's `mdhd` timescale with `fmp4::Error::TimescaleMismatch`.
-A track you create yourself declares it with `track::Info::with_timescale`.
+A track you create yourself declares it with `track::Info::with_timescale`, passed to `create_track`.
 
 ```rust
-// Before
-let track = broadcast.create_track(name, None)?;
-// After
 let info = track::Info::default().with_timescale(Timescale::new(mdhd_timescale)?);
 let track = broadcast.create_track(name, info)?;
 ```
@@ -193,9 +116,6 @@ JSON and flate producers publish `at: None` untimed, so their track must be unti
 Convert a capture `Instant` through the catalog clock.
 
 ```rust
-// Before
-producer.update(&value)?;
-// After
 producer.update(Timed::from(&value).at(catalog.clock().capture(instant)?))?;
 ```
 
@@ -203,36 +123,15 @@ producer.update(Timed::from(&value).at(catalog.clock().capture(instant)?))?;
 
 `Error::Binary` is `Error::Flate`, carrying a `moq_flate::Error`.
 
-```rust
-// Before
-Err(moq_mux::Error::Binary(err)) => {} // err: moq_binary::Error
-// After
-Err(moq_mux::Error::Flate(err)) => {} // err: moq_flate::Error
-```
-
 ### AAC refuses channel counts it cannot name (#4973)
 
 `aac::Config::encode` returns a `Result` and fails with `UnsupportedChannelCount` for a count no `channelConfiguration` names, instead of writing stereo.
-`From<aac::Config> for hang::catalog::AudioConfig` is `TryFrom`.
-
-```rust
-// Before
-let audio: AudioConfig = aac.into();
-// After
-let audio: AudioConfig = aac.try_into()?;
-```
+`From<aac::Config> for hang::catalog::AudioConfig` is `TryFrom`, so convert with `try_into()?`.
 
 ### The Opus mapping family lives only on `mapping` (#4851)
 
-`codec::opus::Config::mapping_family` is gone.
+`codec::opus::Config::mapping_family` is gone; drop the field.
 Family 0 is `mapping: None`; any other family is `mapping.family()`.
-
-```rust
-// Before
-let config = opus::Config { mapping_family: 1, mapping: Some(mapping), ..config };
-// After
-let config = opus::Config { mapping: Some(mapping), ..config };
-```
 
 ### TS stats live in `ts::stats` (#4909)
 
@@ -240,27 +139,10 @@ let config = opus::Config { mapping: Some(mapping), ..config };
 `ts::Export::stats` returns `ts::stats::Export`; feed it to `stats::Log` with `.into()`.
 `ts::MultipleProgramsError` is `#[non_exhaustive]`: recover it by downcast and read `programs`.
 
-```rust
-// Before
-let stats: ts::Stats = import.stats();
-log.sample(export.stats());
-// After
-let stats: ts::stats::Snapshot = import.stats();
-log.sample(export.stats().into());
-```
-
 ### FLV export takes a catalog stream (#4987)
 
 `flv::Export::new` is synchronous and takes `(source, catalog)`, like `fmp4::Export` and `mkv::Export`.
-`with_catalog_format` and `with_select` are gone: open the catalog yourself and narrow it with `catalog::Stream::select`.
-
-```rust
-// Before
-let export = flv::Export::new(source).await?.with_catalog_format(format).with_select(select);
-// After
-let catalog = source.catalog(format).await?.select(select);
-let export = flv::Export::new(source, catalog);
-```
+`with_catalog_format` and `with_select` are gone: open the catalog yourself with `source.catalog(format).await?` and narrow it with `catalog::Stream::select`.
 
 ## 0.9 -> 0.10
 
@@ -269,21 +151,7 @@ let export = flv::Export::new(source, catalog);
 `lock()` is `modify()?`, and a guard that fails to publish on drop aborts the track.
 `timeline::Config::wall` is the broadcast `Clock`.
 
-```rust
-// Before
-let mut catalog = producer.lock();
-// After
-let mut catalog = producer.modify()?;
-```
-
 ### Imports are typed
 
 `import::Init` splits into `AudioInit`, `VideoInit`, and `ContainerInit`, with typed formats instead of strings.
 `Track::new` is `Track::audio` or `Track::video`.
-
-```rust
-// Before
-let track = import::Track::new(request, reserved, import::Init { format: "opus".into(), .. })?;
-// After
-let track = import::Track::audio(request, reserved, import::AudioInit { format: AudioFormat::Opus, .. })?;
-```
