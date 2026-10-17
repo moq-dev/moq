@@ -224,6 +224,7 @@ In addition to the WebCodecs fields, each rendition MAY carry the common renditi
 type VideoDecoderConfigExtensions = {
   "displayAspectWidth": number | undefined,
   "displayAspectHeight": number | undefined,
+  "preference": number | undefined,
 }
 ~~~
 
@@ -231,6 +232,12 @@ type VideoDecoderConfigExtensions = {
 They are not the sample (pixel) aspect ratio: a publisher with square samples omits them, and one with non-square samples sends the picture's aspect, such as 16:9 for a 1440x1080 picture with 4:3 samples.
 A consumer that understands neither field MUST display the decoded picture at its own shape.
 Both MUST be present together; a consumer that sees only one MUST ignore it.
+
+`preference` is a signed 32-bit integer; higher is preferred.
+If absent, it defaults to 0; a publisher SHOULD only write it when nonzero.
+A consumer selecting a rendition automatically MUST choose among the enabled ({{field-enabled}}) renditions it can decode with the highest `preference`, then by its own criteria, such as size and bitrate, within them.
+A consumer MAY select another rendition at the viewer's explicit request.
+A consumer that carries every rendition, rather than selecting one, ignores the field.
 
 For example:
 
@@ -264,6 +271,30 @@ For example:
   },
   "rotation": 0,
   "flip": false,
+}
+~~~
+
+A publisher with an H.265 source that also publishes its own H.264 transcode marks the transcode `-1`, so only a consumer that cannot decode H.265 selects it:
+
+~~~
+{
+  "renditions": {
+    "source": {
+      "codec": "hvc1.1.6.L93.B0",
+      "container": { "kind": "legacy" },
+      "codedWidth": 1280,
+      "codedHeight": 720,
+      "bitrate": 2000000
+    },
+    "compat": {
+      "codec": "avc1.64001f",
+      "container": { "kind": "legacy" },
+      "codedWidth": 1280,
+      "codedHeight": 720,
+      "bitrate": 4000000,
+      "preference": -1
+    }
+  }
 }
 ~~~
 
@@ -345,7 +376,7 @@ The `renditions` field maps rendition IDs to text configurations, typically one 
 The `format` field selects the cue serialization, and tells a consumer how to parse each frame's payload:
 
 - `vtt`: WebVTT ([W3C WebVTT](https://www.w3.org/TR/webvtt1/)). Each payload is a self-contained `WEBVTT` segment whose cues carry absolute timing. A cue's embedded start time MUST match its enclosing frame timestamp.
-- `ttml`: TTML / IMSC1 ([W3C IMSC](https://www.w3.org/TR/ttml-imsc1.1/)) fragment (XML) with absolute timing. A cue's embedded start time MUST match its enclosing frame timestamp.
+- `ttml`: TTML / IMSC1 ([W3C IMSC](https://www.w3.org/TR/ttml-imsc1.1/)). Each payload is one complete TTML document in the `media` time base with absolute timing, clipped to the frame. Its `body` begin MUST match the enclosing frame timestamp, and its `body` end bounds everything the document presents.
 - `utf8`: raw UTF-8 text with no embedded timing or styling. The cue is shown from its frame timestamp until the next cue; an empty payload clears it.
 
 A consumer MUST ignore a rendition whose `format` it does not recognize.
@@ -1235,6 +1266,7 @@ This document has no IANA actions.
 
 - Added the root `version` ({{catalog-version}}): the oldest draft that reads the catalog, which a consumer refuses when above its own. A `track` other than the entry's ID or a video `warmup` needs 4. Consumers MUST ignore unknown fields.
 - Each archive timeline declares its own fixed nominal record duration, omitted for an untimed track; removed the broadcast-wide duration bound.
+- Added the optional video `preference` field: a consumer selects automatically among the highest preference it can decode.
 - Derived HLS and DASH exports hand disabled references to enabled renditions at the first record numbered past the advertised ones, keeping the record `sequence` as the HLS media sequence and starting a DASH period.
 - Added optional `stats` and `echo` catalog sections, publisher/viewer snapshots keyed by rendition ID, and the `.echo` feedback broadcast convention.
 

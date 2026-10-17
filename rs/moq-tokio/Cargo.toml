@@ -60,6 +60,8 @@ tcp = ["_transport", "dep:qmux", "dep:dns-lookup"]
 # Unix-domain-socket qmux transport (`unix://`), unix-only. Adds peer-credential
 # inspection on accept. Pulls in `tcp` (shares qmux's stream transport).
 uds = ["tcp", "qmux/uds"]
+# Native WebRTC data channels over str0m, with a full ICE agent (the `webrtc` module).
+webrtc = ["_transport", "dep:qmux", "dep:moq-ice", "dep:str0m", "dep:if-addrs", "dep:mdns-sd"]
 ring = ["_certs", "rustls/ring", "rcgen/ring", "moq-quic?/rustls-ring"]
 
 [dependencies]
@@ -72,10 +74,13 @@ hex = { workspace = true }
 hmac = { workspace = true, optional = true }
 http = { version = "1", optional = true }
 humantime = "2.3"
+if-addrs = { workspace = true, optional = true }
 kio = { workspace = true, optional = true }
 mdns-sd = { workspace = true, optional = true }
 
 moq-clock = { workspace = true, optional = true }
+# The ICE agent behind the `webrtc` module. Private, like str0m: neither appears in this crate's API.
+moq-ice = { workspace = true, optional = true }
 moq-net = { workspace = true }
 # The QUIC state machine the `quic` module drives; the crypto-provider features pick its provider.
 moq-quic = { workspace = true, features = ["bloom"], optional = true }
@@ -101,11 +106,12 @@ serde = { version = "1", features = ["derive"] }
 serde_with = { version = "3", features = ["hex"] }
 sha2 = { workspace = true, optional = true }
 socket2 = { workspace = true, optional = true }
+str0m = { workspace = true, optional = true }
 subtle = { workspace = true, optional = true }
 thiserror = "2"
 tikv-jemalloc-ctl = { version = "0.6", optional = true }
 tikv-jemallocator = { version = "0.6", features = ["profiling", "unprefixed_malloc_on_supported_platforms"], optional = true }
-time = "0.3"
+time = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 toml = { workspace = true }
 tracing = "0.1"
@@ -115,7 +121,7 @@ usage = { workspace = true, features = ["config"] }
 web-transport-iroh = { workspace = true, optional = true }
 web-transport-proto = { workspace = true, optional = true }
 web-transport-trait = { workspace = true }
-x509-parser = "0.18"
+x509-parser = { workspace = true }
 
 [target.'cfg(target_os = "android")'.dependencies]
 # Android's platform verifier needs a JNI handle to the app Context (see
@@ -138,6 +144,8 @@ chrono = "0.4"
 # be driven with synthetic daemon events.
 flume = "0.12"
 rcgen = { workspace = true, features = ["pem", "aws_lc_rs"] }
+# A fake STUN server for the WebRTC server-reflexive candidate test.
+stun-types = { workspace = true }
 tempfile = "3"
 # test-util adds tokio::time::pause/auto-advance for the time-dependent tests.
 tokio = { workspace = true, features = ["test-util"] }

@@ -47,6 +47,19 @@ func (s *Session) Connects() uint64 {
 	return s.inner.Connects()
 }
 
+// Failure reports why a client session is reconnecting: the error that ended
+// the last connection or failed the latest redial, or nil once a connection
+// lands. A redial that keeps failing never changes Status, so poll this while it
+// reports ConnectionStatusDisconnected to show the reason. Giving up for good
+// returns from Closed instead. A server-accepted session always returns nil.
+func (s *Session) Failure() error {
+	failure := s.inner.Failure()
+	if failure == nil || *failure == nil {
+		return nil
+	}
+	return *failure
+}
+
 // Stats snapshots the current connection statistics.
 func (s *Session) Stats() ConnectionStats {
 	return connectionStatsFromFFI(s.inner.Stats())
@@ -65,15 +78,12 @@ type Bandwidth struct {
 	inner *ffi.MoqBandwidth
 }
 
-// Reserve claims up to maxBps for track. maxBps is a ceiling, not a
-// measurement: reserve the most the track can ever send. Drop the reservation
-// to hand the room back.
-func (b *Bandwidth) Reserve(track *TrackProducer, maxBps uint64) (*Reservation, error) {
-	inner, err := b.inner.Reserve(track.inner, maxBps)
-	if err != nil {
-		return nil, err
-	}
-	return &Reservation{inner: inner}, nil
+// Reserve claims up to maxBps for the track demand watches; every track
+// producer hands out its Demand. maxBps is a ceiling, not a measurement:
+// reserve the most the track can ever send. Drop the reservation to hand the
+// room back.
+func (b *Bandwidth) Reserve(demand *TrackDemand, maxBps uint64) *Reservation {
+	return &Reservation{inner: b.inner.Reserve(demand.inner, maxBps)}
 }
 
 // Reservation is one track's standing claim on a Bandwidth.

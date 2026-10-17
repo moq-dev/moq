@@ -592,6 +592,7 @@ pub(crate) struct Owner {
 	/// Held directly: a timer on a dropped worker still has to exist, since
 	/// the driver that owns it is torn down by the same drop that would need
 	/// it.
+	#[cfg_attr(not(feature = "quic"), allow(dead_code))]
 	timers: Rc<RefCell<timer::Heap>>,
 }
 
@@ -615,6 +616,7 @@ impl Owner {
 	}
 
 	/// Run a `!Send` future on the worker, or drop it if the worker is gone.
+	#[cfg_attr(not(feature = "quic"), allow(dead_code))]
 	pub fn spawn(&self, future: impl Future<Output = ()> + 'static) {
 		if let Some(handle) = self.handle() {
 			handle.spawn(future);
@@ -622,11 +624,13 @@ impl Owner {
 	}
 
 	/// A disarmed timer on the worker.
+	#[cfg_attr(not(feature = "quic"), allow(dead_code))]
 	pub fn timer(&self) -> crate::Timer {
 		crate::Timer::from_heap(self.timers.clone())
 	}
 
 	/// A timer that expires after `duration`.
+	#[cfg_attr(not(feature = "quic"), allow(dead_code))]
 	pub fn after(&self, duration: Duration) -> crate::Timer {
 		let mut timer = self.timer();
 		timer.set(Instant::now().checked_add(duration));
@@ -652,8 +656,10 @@ impl Handle {
 		let mut timer = self.timer();
 		kio::wait(|waiter| {
 			loop {
-				match driver.poll(Instant::now(), waiter) {
-					Ok(at) => timer.set(at),
+				// Sampled together, so time the poll spends is not added to its deadline.
+				let (now, host) = (moq_net::time::now(), Instant::now());
+				match driver.poll(now, waiter) {
+					Ok(at) => timer.set(at.map(|at| host + at.saturating_duration_since(now))),
 					Err(err) => return Poll::Ready(err),
 				}
 				if timer.poll(waiter).is_pending() {
@@ -931,9 +937,10 @@ mod tests {
 		let sock = handle.udp(bind(), udp::Config::default()).expect("socket");
 		let shared = sock.downgrade();
 		let to = sock.local_addr().expect("addr");
-		let Poll::Ready(Ok(tx)) = sock.poll_acquire(&kio::Waiter::noop()) else {
+		let Poll::Ready(Ok(mut tx)) = sock.poll_acquire(&kio::Waiter::noop()) else {
 			panic!("no tx buffer");
 		};
+		tx.resize(1200, 0);
 		drop(worker);
 
 		// Every path a retained handle can reach fails instead of pending on
@@ -944,7 +951,6 @@ mod tests {
 		assert!(
 			tx.send(udp::Transmit {
 				to,
-				len: 1200,
 				segment: 1200,
 				ecn: None,
 			})
@@ -1089,10 +1095,10 @@ mod tests {
 			held.push(tx);
 		}
 		assert_eq!(held.len(), usize::from(ceiling));
-		for tx in held.drain(..) {
+		for mut tx in held.drain(..) {
+			tx.resize(1200, 0);
 			tx.send(udp::Transmit {
 				to,
-				len: 1200,
 				segment: 1200,
 				ecn: None,
 			})
@@ -1206,12 +1212,12 @@ mod tests {
 			.udp(std::net::UdpSocket::bind("127.0.0.1:0").expect("bind"), config)
 			.expect("socket");
 		let to = sock.local_addr().expect("addr");
-		let Poll::Ready(Ok(tx)) = sock.poll_acquire(&kio::Waiter::noop()) else {
+		let Poll::Ready(Ok(mut tx)) = sock.poll_acquire(&kio::Waiter::noop()) else {
 			panic!("no tx buffer");
 		};
+		tx.resize(64 * 1024, 0);
 		tx.send(udp::Transmit {
 			to,
-			len: 64 * 1024,
 			segment: 1000,
 			ecn: None,
 		})
@@ -1234,17 +1240,77 @@ mod tests {
 			.udp(std::net::UdpSocket::bind("127.0.0.1:0").expect("bind"), config)
 			.expect("socket");
 		let to = sock.local_addr().expect("addr");
-		let Poll::Ready(Ok(tx)) = sock.poll_acquire(&kio::Waiter::noop()) else {
+		let Poll::Ready(Ok(mut tx)) = sock.poll_acquire(&kio::Waiter::noop()) else {
 			panic!("no tx buffer");
 		};
+		tx.resize(64 * 1024, 0);
 		let err = tx
 			.send(udp::Transmit {
 				to,
-				len: 64 * 1024,
 				segment: 1,
 				ecn: None,
 			})
 			.expect_err("65536 datagrams from one buffer");
+		assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+		drop(worker);
+	}
+
+	#[test]
+	fn a_resized_checkout_comes_back_pool_sized() {
+		let Some(worker) = worker() else { return };
+		let handle = worker.handle();
+		let config = udp::Config {
+			tx_buffers_max: 1,
+			tx_buffer_len: 2048,
+			..Default::default()
+		};
+		let sock = handle
+			.udp(std::net::UdpSocket::bind("127.0.0.1:0").expect("bind"), config)
+			.expect("socket");
+		let acquire = || {
+			let Poll::Ready(Ok(tx)) = sock.poll_acquire(&kio::Waiter::noop()) else {
+				panic!("no tx buffer");
+			};
+			tx
+		};
+
+		let mut tx = acquire();
+		assert_eq!(tx.capacity(), 2048);
+		tx.shrink_to_fit();
+		drop(tx);
+		let mut tx = acquire();
+		assert_eq!((tx.len(), tx.capacity()), (0, 2048));
+		tx.resize(8192, 7);
+		drop(tx);
+		let tx = acquire();
+		assert_eq!((tx.len(), tx.capacity()), (0, 2048));
+		drop(tx);
+		drop(worker);
+	}
+
+	#[test]
+	fn buffer_grown_past_the_pool_is_rejected() {
+		let Some(worker) = worker() else { return };
+		let handle = worker.handle();
+		let config = udp::Config {
+			tx_buffer_len: 2048,
+			..Default::default()
+		};
+		let sock = handle
+			.udp(std::net::UdpSocket::bind("127.0.0.1:0").expect("bind"), config)
+			.expect("socket");
+		let to = sock.local_addr().expect("addr");
+		let Poll::Ready(Ok(mut tx)) = sock.poll_acquire(&kio::Waiter::noop()) else {
+			panic!("no tx buffer");
+		};
+		tx.resize(4096, 0);
+		let err = tx
+			.send(udp::Transmit {
+				to,
+				segment: 1024,
+				ecn: None,
+			})
+			.expect_err("4096 bytes from a 2048 byte buffer");
 		assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
 		drop(worker);
 	}
@@ -1260,15 +1326,15 @@ mod tests {
 			)
 			.expect("socket");
 		let to = sock.local_addr().expect("addr");
-		let Poll::Ready(Ok(tx)) = sock.poll_acquire(&kio::Waiter::noop()) else {
+		let Poll::Ready(Ok(mut tx)) = sock.poll_acquire(&kio::Waiter::noop()) else {
 			panic!("no tx buffer");
 		};
+		tx.resize(60_000, 0);
 		// `UDP_SEGMENT` is a u16: without validation this would truncate to a
 		// one-byte stride instead of one segment.
 		let err = tx
 			.send(udp::Transmit {
 				to,
-				len: 60_000,
 				segment: usize::from(u16::MAX) + 2,
 				ecn: None,
 			})
@@ -1309,10 +1375,9 @@ mod tests {
 			let Poll::Ready(Ok(mut tx)) = sock.poll_acquire(&kio::Waiter::noop()) else {
 				panic!("the socket failed after a rejected train");
 			};
-			tx[..2 * 1200].fill(7);
+			tx.resize(2 * 1200, 7);
 			tx.send(udp::Transmit {
 				to,
-				len: 2 * 1200,
 				segment: 1200,
 				ecn: None,
 			})
@@ -1359,10 +1424,9 @@ mod tests {
 		let Poll::Ready(Ok(mut tx)) = sock.poll_acquire(&kio::Waiter::noop()) else {
 			panic!("no tx buffer");
 		};
-		tx[..4 * 1200].fill(7);
+		tx.resize(4 * 1200, 7);
 		tx.send(udp::Transmit {
 			to,
-			len: 4 * 1200,
 			segment: 1200,
 			ecn: None,
 		})
@@ -1436,16 +1500,16 @@ mod tests {
 			.expect("socket");
 		let to = sock.local_addr().expect("addr");
 
-		let Poll::Ready(Ok(tx)) = sock.poll_acquire(&kio::Waiter::noop()) else {
+		let Poll::Ready(Ok(mut tx)) = sock.poll_acquire(&kio::Waiter::noop()) else {
 			panic!("no tx buffer");
 		};
+		tx.resize(1200, 0);
 		// The pool is one buffer deep and that one is checked out.
 		assert!(sock.poll_acquire(&kio::Waiter::noop()).is_pending());
 		assert!(sock.poll_acquire(&kio::Waiter::noop()).is_pending());
 		assert_eq!(metrics.snapshot().tx_stalls, 1);
 		tx.send(udp::Transmit {
 			to,
-			len: 1200,
 			segment: 1200,
 			ecn: None,
 		})

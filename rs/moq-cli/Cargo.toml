@@ -26,9 +26,9 @@ path = "src/main.rs"
 doc = false
 
 [features]
-default = ["cluster-lan", "quic", "websocket", "nvidia", "s3", "gcs", "azure"]
+default = ["cluster-lan", "quic", "websocket", "webrtc", "nvidia", "s3", "gcs", "azure"]
 # Experimental transport with a heavy dependency tree, enabled only on request.
-iroh = ["moq-tokio/iroh"]
+iroh = ["moq-relay/iroh", "moq-tokio/iroh"]
 # LAN discovery and meshing (`--cluster-lan`).
 cluster-lan = ["moq-relay/cluster-lan"]
 jemalloc = ["moq-tokio/jemalloc"]
@@ -38,6 +38,8 @@ quic = ["moq-tokio/quic"]
 # congestion-control testing.
 qlog = ["moq-tokio/qlog"]
 websocket = ["moq-tokio/websocket"]
+# Native WebRTC data channels, for holding sessions with browser peers.
+webrtc = ["moq-tokio/webrtc"]
 # The cloud object stores `export archive` and `import archive` reach (`s3://`,
 # `gs://`, `az://`). Local `file://` URLs need none of them.
 s3 = ["object_store/aws"]
@@ -106,6 +108,7 @@ humantime = { workspace = true }
 moq-archive = { workspace = true }
 moq-audio = { workspace = true, optional = true, features = ["aac"] }
 moq-auth = { workspace = true, features = ["serve"] }
+moq-clock = { workspace = true }
 # `server` enables the HTTP egress server for `moq export hls`; the importer is always available.
 moq-hls = { workspace = true, features = ["server"] }
 # Names the MSF catalog track `export archive` records.

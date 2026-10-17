@@ -3,9 +3,10 @@
 //! Sibling to [`media::MoqMediaTrackProducer`](crate::media::MoqMediaTrackProducer)
 //! and [`media::MoqMediaTrackConsumer`](crate::media::MoqMediaTrackConsumer):
 //! those deal in already-encoded frames, these deal in PCM and run
-//! Opus encode/decode inside the FFI boundary.
+//! Opus and AAC encode/decode inside the FFI boundary.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use crate::bandwidth::{MoqBandwidth, MoqReservation};
@@ -80,6 +81,28 @@ impl MoqAudioCodec {
 	}
 }
 
+/// How an audio encoder trades latency for compression, mirroring
+/// `moq_audio::encode::Preset`. A preset sets packetization only; bitrate stays separate.
+#[derive(Clone, Copy, uniffi::Enum)]
+pub enum MoqAudioPreset {
+	/// 10 ms Opus packets, at twice the packet rate.
+	LowLatency,
+	/// 20 ms Opus packets, the default.
+	Balanced,
+	/// Favor compression; 20 ms Opus packets today, the same as `Balanced`.
+	Quality,
+}
+
+impl From<MoqAudioPreset> for moq_audio::encode::Preset {
+	fn from(preset: MoqAudioPreset) -> Self {
+		match preset {
+			MoqAudioPreset::LowLatency => Self::LowLatency,
+			MoqAudioPreset::Balanced => Self::Balanced,
+			MoqAudioPreset::Quality => Self::Quality,
+		}
+	}
+}
+
 /// PCM layout the caller will pass to [`MoqAudioProducer::write`].
 #[derive(uniffi::Record)]
 pub struct MoqAudioEncoderInput {
@@ -107,10 +130,32 @@ pub struct MoqAudioEncoderOutput {
 	#[uniffi(default = None)]
 	pub bitrate: Option<u32>,
 	/// Encoded frame duration in microseconds. Opus accepts exactly
-	/// 2500/5000/10000/20000/40000/60000 us. 0 takes the codec's own frame:
-	/// 20 ms for Opus and 1024 samples for AAC.
+	/// 2500/5000/10000/20000/40000/60000 us. 0 takes the preset's frame, or the
+	/// codec's own: 20 ms for Opus and 1024 samples for AAC.
 	#[uniffi(default = 0)]
 	pub frame_duration_us: u32,
+	/// Packetization preset. `None` is `Balanced`. Refused alongside a nonzero
+	/// `frame_duration_us`; AAC keeps its 1024-sample frames either way.
+	#[uniffi(default = None)]
+	pub preset: Option<MoqAudioPreset>,
+}
+
+impl MoqAudioEncoderOutput {
+	/// Apply the preset or explicit frame duration to `settings`.
+	fn packetize(&self, settings: moq_audio::encode::Settings) -> Result<moq_audio::encode::Settings, MoqError> {
+		match (self.preset, self.frame_duration_us) {
+			(None, 0) => Ok(settings),
+			(Some(preset), 0) => Ok(settings.with_preset(preset.into())),
+			(None, us) => {
+				let mut settings = settings;
+				settings.frame_duration = Duration::from_micros(us.into());
+				Ok(settings)
+			}
+			(Some(_), _) => {
+				Err(moq_audio::Error::Unsupported("set preset or frame_duration_us, not both".into()).into())
+			}
+		}
+	}
 }
 
 /// PCM layout the caller wants out of [`MoqAudioConsumer::next`].
@@ -130,12 +175,16 @@ pub struct MoqAudioDecoderOutput {
 	/// [`MoqSubscription::max_delay_us`](crate::consumer::MoqSubscription::max_delay_us):
 	/// when a group stalls and a newer group is more than this far ahead,
 	/// the consumer skips. `None` keeps the moq-mux default of zero (skip
-	/// aggressively). Named `_max` to leave room for a future
-	/// `min_buffer_us` (jitter-buffer floor), which is a distinct knob: this
-	/// one bounds how stale a group may be, that one how much to hold before
-	/// presenting.
+	/// aggressively). Distinct from [`delay_us`](Self::delay_us): this one
+	/// bounds how stale a group may be and adds no buffering.
 	#[uniffi(default = None)]
 	pub max_delay_us: Option<u64>,
+	/// A fixed playout delay in microseconds, or `None` to estimate it from
+	/// arrival timing. This is the jitter buffer to hold ahead of the playhead,
+	/// reported by [`MoqAudioConsumer::delay_us`]. A fixed delay beyond the
+	/// track's retention is refused.
+	#[uniffi(default = None)]
+	pub delay_us: Option<u64>,
 }
 
 /// One audio frame: payload bytes plus a presentation timestamp.
@@ -180,10 +229,7 @@ fn audio_settings(output: &MoqAudioEncoderOutput) -> Result<moq_audio::encode::S
 	let input = moq_audio::encode::Input::new(sample_rate, layout);
 	let mut settings = moq_audio::encode::Settings::from_input(output.codec.codec(), &input);
 	settings.bitrate = output.bitrate.map(|bps| moq_net::bandwidth::Rate::from_bps(bps.into()));
-	if output.frame_duration_us != 0 {
-		settings.frame_duration = Duration::from_micros(output.frame_duration_us.into());
-	}
-	Ok(settings)
+	output.packetize(settings)
 }
 
 fn audio_packets(packets: impl IntoIterator<Item = moq_audio::encode::Encoded>) -> Vec<MoqAudioPacket> {
@@ -215,6 +261,35 @@ impl MoqAudioEncoder {
 			.as_ref()
 			.ok_or(MoqError::Closed)?
 			.frame_size() as u64)
+	}
+
+	/// The init that publishes this encoder's packets through
+	/// [`MoqMediaTrackProducer::audio`](crate::media::MoqMediaTrackProducer::audio):
+	/// an OpusHead or an AudioSpecificConfig.
+	pub fn track_init(&self) -> Result<crate::media::MoqAudioInit, MoqError> {
+		let guard = self.inner.lock().unwrap();
+		let encoder = guard.as_ref().ok_or(MoqError::Closed)?;
+		let format = match encoder.codec() {
+			moq_audio::encode::Codec::Opus => crate::media::MoqAudioFormat::Opus,
+			moq_audio::encode::Codec::Aac => crate::media::MoqAudioFormat::Aac,
+			codec => return Err(moq_audio::Error::Unsupported(format!("no audio init for {codec}")).into()),
+		};
+		let data = encoder.catalog().description.ok_or(MoqError::Unsupported)?;
+		Ok(crate::media::MoqAudioInit {
+			format,
+			data: data.to_vec(),
+			label: None,
+		})
+	}
+
+	/// Retune the live encoder in bits per second.
+	pub fn set_bitrate(&self, bitrate: u64) -> Result<(), MoqError> {
+		let mut guard = self.inner.lock().unwrap();
+		guard
+			.as_mut()
+			.ok_or(MoqError::Closed)?
+			.set_bitrate(moq_net::bandwidth::Rate::from_bps(bitrate))?;
+		Ok(())
 	}
 
 	/// Encode one codec-sized interleaved f32 PCM frame.
@@ -365,9 +440,8 @@ impl MoqAudioProducer {
 			options.settings.layout = moq_audio::Layout::from_channels(channels)?;
 		}
 		options.settings.bitrate = output.bitrate.map(|bps| moq_net::bandwidth::Rate::from_bps(bps.into()));
-		if output.frame_duration_us != 0 {
-			options.settings.frame_duration = Duration::from_micros(output.frame_duration_us.into());
-		} else if output.codec.codec() == moq_audio::encode::Codec::Aac {
+		options.settings = output.packetize(options.settings)?;
+		if output.frame_duration_us == 0 && output.codec.codec() == moq_audio::encode::Codec::Aac {
 			// from_input sized this at the input rate. The codec rate may be the
 			// override above, and AAC's own frame is 1024 samples of that rate.
 			let mut rated = input.clone();
@@ -403,18 +477,34 @@ impl MoqAudioProducer {
 
 struct ConsumerInner {
 	consumer: moq_audio::decode::Consumer,
+	delay: Arc<AtomicU64>,
 }
 
 impl ConsumerInner {
 	async fn next(&mut self) -> Result<Option<MoqAudioFrame>, MoqError> {
-		Ok(self.consumer.read().await?.map(Into::into))
+		loop {
+			let read = self.consumer.read().await;
+			self.delay.store(micros(self.consumer.delay()), Ordering::Relaxed);
+			match read? {
+				Some(moq_audio::decode::Read::Frame { frame, .. }) => return Ok(Some(frame.into())),
+				Some(moq_audio::decode::Read::End { .. }) => {}
+				None => return Ok(None),
+			}
+		}
 	}
+}
+
+fn micros(duration: Duration) -> u64 {
+	duration.as_micros().try_into().unwrap_or(u64::MAX)
 }
 
 /// Consumer for a raw-audio track.
 #[derive(uniffi::Object)]
 pub struct MoqAudioConsumer {
 	task: Task<ConsumerInner>,
+	/// Mirrors the decoder's delay after each read, so it stays readable while
+	/// [`Self::next`] holds the decoder.
+	delay: Arc<AtomicU64>,
 }
 
 #[uniffi::export]
@@ -422,6 +512,17 @@ impl MoqAudioConsumer {
 	/// The next decoded frame, or `None` once the track ends.
 	pub async fn next(&self) -> Result<Option<MoqAudioFrame>, MoqError> {
 		self.task.run(|mut state| async move { state.next().await }).await
+	}
+
+	/// The playout delay to hold ahead of the playhead, in microseconds: the
+	/// fixed [`MoqAudioDecoderOutput::delay_us`], or the estimate from every
+	/// frame read so far.
+	///
+	/// The estimate measures when [`Self::next`] returns each frame, so call it
+	/// again as soon as the previous frame is handled rather than pacing reads
+	/// to the speaker.
+	pub fn delay_us(&self) -> u64 {
+		self.delay.load(Ordering::Relaxed)
 	}
 
 	/// Make current and future reads return `Cancelled`.
@@ -442,7 +543,7 @@ fn audio_config(catalog_audio: crate::media::MoqAudio) -> Result<hang::catalog::
 	// wrapped codec error.
 	if !matches!(
 		&codec,
-		hang::catalog::AudioCodec::Opus | hang::catalog::AudioCodec::AAC(_)
+		hang::catalog::AudioCodec::Opus | hang::catalog::AudioCodec::AAC(_) | hang::catalog::AudioCodec::Pcm
 	) {
 		return Err(MoqError::Unsupported);
 	}
@@ -453,6 +554,7 @@ fn audio_config(catalog_audio: crate::media::MoqAudio) -> Result<hang::catalog::
 	config.bitrate = catalog_audio.bitrate;
 	config.description = catalog_audio.description.map(Into::into);
 	config.container = catalog_audio.container.into();
+	config.jitter = catalog_audio.jitter_us.map(Duration::from_micros);
 	Ok(config)
 }
 
@@ -461,14 +563,15 @@ impl MoqAudioConsumer {
 	/// Subscribe to an audio track. `catalog_audio_config` comes from
 	/// the catalog (see
 	/// [`MoqMediaCatalogConsumer::next`](crate::media::MoqMediaCatalogConsumer::next));
-	/// the codec is inferred from it. Only Opus and AAC-LC are supported.
+	/// the codec is inferred from it. Only Opus, AAC-LC, and PCM are supported.
 	///
-	/// A rendition whose [`broadcast`](crate::media::MoqAudio::broadcast) names another broadcast
-	/// is subscribed there, so `name` is always read from the broadcast the catalog points at.
+	/// `id` is the rendition's catalog key. Its [`track`](crate::media::MoqAudio::track), or `id`
+	/// when unset, is subscribed in the broadcast its
+	/// [`broadcast`](crate::media::MoqAudio::broadcast) reference names.
 	#[uniffi::constructor]
 	pub async fn subscribe(
 		broadcast: &MoqBroadcastConsumer,
-		name: String,
+		id: String,
 		catalog_audio: crate::media::MoqAudio,
 		output: MoqAudioDecoderOutput,
 	) -> Result<Arc<MoqAudioConsumer>, MoqError> {
@@ -483,14 +586,21 @@ impl MoqAudioConsumer {
 		config.output.sample_rate = output.sample_rate;
 		config.output.layout = output.channels.map(moq_audio::Layout::from_channels).transpose()?;
 		config.max_delay = output.max_delay_us.map(Duration::from_micros).unwrap_or_default();
+		config.delay = output.delay_us.map(Duration::from_micros);
 
 		let consumer = broadcast
 			.driver
-			.watch(async { Ok(moq_audio::decode::Consumer::new(&resolved, &cfg, name, config).await?) })
+			.watch(async { Ok(moq_audio::decode::Consumer::new(&resolved, &cfg, id, config).await?) })
 			.await?;
 
+		let delay = Arc::new(AtomicU64::new(micros(consumer.delay())));
 		Ok(Arc::new(MoqAudioConsumer {
-			task: Task::new(ConsumerInner { consumer }).supervised(broadcast.driver.clone()),
+			task: Task::new(ConsumerInner {
+				consumer,
+				delay: delay.clone(),
+			})
+			.supervised(broadcast.driver.clone()),
+			delay,
 		}))
 	}
 }
@@ -512,6 +622,7 @@ mod tests {
 			bitrate: None,
 			enabled: true,
 			container: MoqContainer::Legacy,
+			jitter_us: None,
 		}
 	}
 
@@ -537,10 +648,26 @@ mod tests {
 	}
 
 	#[test]
+	fn audio_config_accepts_pcm() {
+		let config = audio_config(catalog_audio("pcm")).unwrap();
+		assert!(matches!(config.codec, hang::catalog::AudioCodec::Pcm));
+	}
+
+	#[test]
 	fn audio_config_rejects_a_codec_the_decoder_lacks() {
 		// In the catalog, and decodable in a browser, but not by moq-audio.
 		let error = audio_config(catalog_audio("flac")).unwrap_err();
 		assert!(matches!(error, MoqError::Unsupported));
+	}
+
+	/// The advertised jitter floors the estimated playout delay, so it must survive the trip
+	/// through the FFI record.
+	#[test]
+	fn audio_config_keeps_the_advertised_jitter() {
+		let mut audio = catalog_audio("opus");
+		audio.jitter_us = Some(60_000);
+		let config = audio_config(audio).unwrap();
+		assert_eq!(config.jitter, Some(Duration::from_millis(60)));
 	}
 
 	#[test]
@@ -558,11 +685,72 @@ mod tests {
 			channels: None,
 			bitrate: None,
 			frame_duration_us: 0,
+			preset: None,
 		};
 		let encoder = MoqAudioEncoder::new(output).unwrap();
 		let samples = encoder.frame_size().unwrap() as usize * 2;
 		assert!(!encoder.encode(vec![0.0; samples]).unwrap().data.is_empty());
 		encoder.finish(Vec::new()).unwrap();
 		assert!(matches!(encoder.frame_size(), Err(MoqError::Closed)));
+	}
+
+	fn opus_output(preset: Option<MoqAudioPreset>, frame_duration_us: u32) -> MoqAudioEncoderOutput {
+		MoqAudioEncoderOutput {
+			codec: MoqAudioCodec::opus(),
+			track: None,
+			sample_rate: Some(48_000),
+			channels: Some(2),
+			bitrate: None,
+			frame_duration_us,
+			preset,
+		}
+	}
+
+	#[test]
+	fn codec_only_encoder_packetizes_by_preset() {
+		for (preset, frame_size) in [
+			(None, 960),
+			(Some(MoqAudioPreset::LowLatency), 480),
+			(Some(MoqAudioPreset::Balanced), 960),
+			(Some(MoqAudioPreset::Quality), 960),
+		] {
+			let encoder = MoqAudioEncoder::new(opus_output(preset, 0)).unwrap();
+			assert_eq!(encoder.frame_size().unwrap(), frame_size);
+		}
+		assert_eq!(
+			MoqAudioEncoder::new(opus_output(None, 10_000))
+				.unwrap()
+				.frame_size()
+				.unwrap(),
+			480
+		);
+	}
+
+	#[test]
+	fn codec_only_encoder_refuses_a_preset_with_a_frame_duration() {
+		let result = MoqAudioEncoder::new(opus_output(Some(MoqAudioPreset::LowLatency), 20_000));
+		assert!(matches!(result, Err(MoqError::Audio { .. })));
+	}
+
+	#[test]
+	fn codec_only_encoder_reports_its_opus_head() {
+		let encoder = MoqAudioEncoder::new(opus_output(None, 0)).unwrap();
+		let init = encoder.track_init().unwrap();
+		assert!(matches!(init.format, crate::media::MoqAudioFormat::Opus));
+		assert_eq!(&init.data[..8], b"OpusHead");
+		// Channel count, then a nonzero pre-skip for the codec lookahead.
+		assert_eq!(init.data[9], 2);
+		assert_ne!(u16::from_le_bytes([init.data[10], init.data[11]]), 0);
+	}
+
+	#[test]
+	fn codec_only_encoder_retunes_its_bitrate() {
+		let encoder = MoqAudioEncoder::new(opus_output(None, 0)).unwrap();
+		encoder.set_bitrate(32_000).unwrap();
+		let samples = encoder.frame_size().unwrap() as usize * 2;
+		assert!(!encoder.encode(vec![0.0; samples]).unwrap().data.is_empty());
+		encoder.finish(Vec::new()).unwrap();
+		assert!(matches!(encoder.set_bitrate(64_000), Err(MoqError::Closed)));
+		assert!(matches!(encoder.track_init(), Err(MoqError::Closed)));
 	}
 }

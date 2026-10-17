@@ -50,6 +50,10 @@ bench $BASE="":
 bench-ffi:
     bench/ffi.sh
 
+# Compare BoltFFI with UniFFI on one moq-ffi slice. STEPS: build, bench, size, or all.
+bench-ffi-gen *STEPS:
+    bench/ffi-gen/run.sh {{ STEPS }}
+
 # Measure audio group sizes across relay publisher/subscriber and fanout shapes.
 bench-audio:
     bench/run.sh --audio
@@ -68,6 +72,12 @@ bench-shard $SHARDS="0 1 4 16" $CONNECTIONS="16 64 256":
 # Attribute relay worker std mutex waits by stack, for each worker count.
 bench-lock $WORKLOAD="fanout" $WORKERS="1 4 16":
     MOQ_BENCH_LOCK_WORKLOAD="$WORKLOAD" MOQ_BENCH_LOCK_WORKERS="$WORKERS" bench/run.sh --lock
+
+# Real-browser transport, CMAF, and publish/watch costs, optionally against a base:
+# `just bench-browser origin/main`. `--smoke` is the bounded correctness lane.
+[positional-arguments]
+bench-browser *args:
+    bench/browser/run.sh "$@"
 
 # Install repo-wide tooling. Per-language deps install on first check.
 install:

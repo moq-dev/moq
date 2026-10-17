@@ -71,6 +71,12 @@ records, with no datagrams. The application supplies signaling and ICE and
 keeps ownership of the peer connection; closing the transport closes only its
 channel. SCTP ordering means one lost packet can hold back every stream.
 
+Native peers use `moq-tokio`'s `webrtc` feature, which runs its own ICE agent:
+host candidates on every interface, server-reflexive candidates from the STUN
+servers it is given, and mDNS resolution of a browser's `.local` candidates.
+The application still carries the offer, answer, and candidates; the offering
+peer connects as the MoQ client and the answering peer accepts.
+
 ## iroh (peer-to-peer, experimental)
 
 [iroh](https://www.iroh.computer/) swaps "dial a hostname" for "dial a public

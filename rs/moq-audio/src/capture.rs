@@ -18,9 +18,10 @@
 //! in that same callback so the buffers leaving here are already clean.
 
 use std::task::Poll;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use moq_net::time::Instant;
 use ringbuf::traits::Producer;
 
 use crate::Error;

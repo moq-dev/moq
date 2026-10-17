@@ -50,16 +50,16 @@ async fn round(finish_broadcast: bool) -> (Vec<Vec<u8>>, Option<moq_net::Error>)
 	let pair: MockPair = connect_mock(options).await;
 
 	let consumer = subscriber.consume();
-	moq_net_sim::timeout(TIMEOUT, consumer.routed("bcast"))
+	moq_clock::timeout(TIMEOUT, consumer.routed("bcast"))
 		.await
 		.expect("announce timeout")
 		.expect("routed");
-	let remote = moq_net_sim::timeout(TIMEOUT, consumer.request_broadcast("bcast", None))
+	let remote = moq_clock::timeout(TIMEOUT, consumer.request_broadcast("bcast", None))
 		.await
 		.expect("resolve timeout")
 		.expect("broadcast resolves");
 
-	let reader = moq_net_sim::spawn(async move {
+	let reader = moq_clock::sim::spawn(async move {
 		let subscription = moq_net::track::Subscription::default().with_start(moq_net::track::Position::group(0));
 		let mut sub = remote
 			.track("video")
@@ -84,7 +84,7 @@ async fn round(finish_broadcast: bool) -> (Vec<Vec<u8>>, Option<moq_net::Error>)
 		}
 	});
 
-	moq_net_sim::timeout(TIMEOUT, support::harness::subscribed(&track))
+	moq_clock::timeout(TIMEOUT, support::harness::subscribed(&track))
 		.await
 		.expect("no subscriber appeared");
 
@@ -100,7 +100,7 @@ async fn round(finish_broadcast: bool) -> (Vec<Vec<u8>>, Option<moq_net::Error>)
 	}
 
 	// The session and both origins stay up until the reader is done.
-	let result = moq_net_sim::timeout(TIMEOUT, reader)
+	let result = moq_clock::timeout(TIMEOUT, reader)
 		.await
 		.expect("the subscription never ended")
 		.expect("reader panicked");
@@ -117,13 +117,13 @@ fn assert_complete((got, err): (Vec<Vec<u8>>, Option<moq_net::Error>)) {
 }
 
 /// The bug: finishing the broadcast after its track loses the track.
-#[moq_net_sim::test]
+#[moq_clock::test]
 async fn a_finished_broadcast_delivers_its_finished_track() {
 	assert_complete(round(true).await);
 }
 
 /// Control: the same track with the broadcast left alive arrives whole.
-#[moq_net_sim::test]
+#[moq_clock::test]
 async fn a_finished_track_is_delivered_while_its_broadcast_lives() {
 	assert_complete(round(false).await);
 }

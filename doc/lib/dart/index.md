@@ -28,9 +28,13 @@ imports use one source timeline. `ContainerStreamProducer` takes `ContainerStrea
 omitting its timebase keeps an independent offset. A timebase belongs to its broadcast
 and does not keep it open.
 `media.CatalogConsumer.subscribe`, `media.TrackConsumer.subscribe`, and `media.GroupConsumer.fetch`
-construct the read side from a broadcast. For arrival-order reads, decode each group from
+construct the read side from a broadcast; the last two take a catalog `media.Rendition` and
+follow its broadcast and track themselves. For arrival-order reads, decode each group from
 `TrackConsumer.recvGroup()` with `media.GroupConsumer(group: ..., container: ...)`; frames
 carry container media time as they land.
+`package:moq/video.dart` and `package:moq/audio.dart` encode raw pixels and PCM inside the
+binding: `video.Producer` / `audio.Producer` take a `CatalogProducer`, and
+`video.Consumer.subscribe` / `audio.Consumer.subscribe` decode a catalog rendition.
 
 ```bash
 dart pub add moq        # or: flutter pub add moq
@@ -64,7 +68,48 @@ print(await catalog.next());
 ```
 
 ```dart
-// Publish. bytes comes from your encoder or application source.
+// Publish raw pixels; the binding encodes them. rgba and pts come from your capture source.
+import 'package:moq/video.dart' as video;
+
+final camera = moq.createBroadcast('live/camera');
+final encoder = video.Producer(
+  catalog: media.CatalogProducer(broadcast: camera),
+  input: video.EncoderInput(
+    format: video.PixelFormat.rgba,
+    width: 1280,
+    height: 720,
+    framerate: 30,
+  ),
+  output: video.EncoderOutput(
+    codec: video.Codec.h264,
+    track: 'camera',
+    kind: video.AutoEncoder(),
+  ),
+);
+encoder.write(frame: video.Frame(timestampUs: pts, data: rgba));
+camera.announce(route: MoqRoute(epoch: mintEpoch()));
+encoder.finish();
+```
+
+```dart
+// Decode a subscribed rendition. Dispose each frame promptly.
+import 'package:moq/video.dart' as video;
+
+final remote = await moq.requestBroadcast('live/camera');
+final renditions = await media.CatalogConsumer.subscribe(broadcast: remote);
+final decoder = await video.Consumer.subscribe(
+  broadcast: remote,
+  id: 'camera',
+  catalogVideo: (await renditions.next())!.video['camera']!,
+  output: video.DecoderOutput(),
+);
+final frame = (await decoder.next())!;
+print(frame.pixels(format: video.PixelFormat.rgba).length);
+frame.dispose();
+```
+
+```dart
+// Publish already-encoded frames. bytes comes from your encoder or application source.
 final mine = moq.createBroadcast('live/camera');
 final track = mine.publishTrack(name: 'video', info: null);
 final group = track.appendGroup();
@@ -80,14 +125,15 @@ await moq.close();
 ## Things to know
 
 The rest of the [shared feature list](/lib/#what-every-binding-can-do) maps
-one to one; the API reference has the names.
+one to one; the API reference has the names, and [Layers](/lib/layers)
+shows which module holds each.
 
-- **No codecs.** Unlike the other bindings, the published Dart binaries carry no encoder or decoder. Already-encoded frames flow through `media.TrackProducer` and `media.TrackConsumer`; encoding is up to `package:camera`, platform channels, or another codec package.
 - **Names.** Types drop the `Moq` prefix (`Session`, `BroadcastProducer`) as aliases, so the generated names still work. `Container`, `Route`, and the exceptions keep it, since Flutter owns those names. `dynamic` is reserved, so the origin method is `dynamic_`.
 - **Audio needs cuts.** Video groups at its keyframes, but audio forms a group only where you call `cut()`: after every frame, or at a segment cadence to align with video.
 - **Live encoder timing.** After writing a frame you encoded yourself, call `flush(timestampUs: ...)` with the same timestamp so the catalog advertises your jitter. Skip it for file and network imports. On a seek or pause, call `discontinuity()`, then keep timestamps moving forward and resume video on a keyframe.
+- **Decoded frames hold decoder buffers.** `dispose()` each frame from a `video.Consumer` promptly rather than waiting for the garbage collector, or the decoder stalls. `resize` is best effort, so read each frame's `width()` and `height()`.
 - **Closing.** `await moq.close()` or `session.shutdown()` drains for up to one second and reports any error. `session.cancel(code: 0)` closes at once. Finish or abort live tracks first. Cancelling a stream subscription releases its native cursor. Application delivery requires explicitly selecting `moq-lite-07-wip` on both peers; older Lite versions (including default lite-06) and IETF wait only for transport ACKs.
-- **Stats.** `session.stats()` reports `rttUs`, `estimatedSendRateBps`, `estimatedRecvRateBps`, and the byte and packet counters (`bytesSent`, `bytesReceived`, `bytesLost`, `packetsSent`, `packetsReceived`, `packetsLost`). A field is `null` when the transport does not report it, which is not the same as zero.
+- **Stats.** `session.stats()` reports `rttUs`, `estimatedSendRateBps`, `estimatedRecvRateBps`, and the byte and packet counters (`bytesSent`, `bytesReceived`, `bytesLost`, `packetsSent`, `packetsReceived`, `packetsLost`). A field is `null` when the transport does not report it, which is not the same as zero. `version` names the negotiated protocol, and while a client session reconnects `session.failure()` says why.
 - **Errors.** Read diagnostic payloads from `reason` and structured protocol failures from `details`.
 - **Disabled renditions.** Audio and video convenience decoders reject a catalog configuration with `enabled: false`. Select an enabled rendition from the latest catalog before opening a decoder.
 - **Track demand.** Obtain a dynamic track request’s `demand()` before accepting it to watch subscribers through the handoff to its producer. The watch does not keep the track alive and ends when the track closes or the request is rejected.

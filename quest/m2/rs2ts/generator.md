@@ -40,9 +40,12 @@ Decided with the maintainer on 2026-10-13:
   (decided in [#5498](https://github.com/moq-dev/moq/pull/5498), whose
   BoltFFI spike covers the native half). Neither quest blocks the other.
   BoltFFI has its own macros, so it cannot bind `moq-ffi` as-is. Reuse
-  that spike's slice crate, which binds both generators via `cfg_attr`,
+  that spike's slice crate, [`bench/ffi-gen`](/bench/ffi-gen/README.md),
   and measure UniFFI on the same slice so the per-call numbers compare
-  like for like. Full `moq-ffi` through UniFFI still provides the size and
+  like for like. It carries BoltFFI's markers literally, with a shim crate
+  mapping them to UniFFI's, because BoltFFI's scanner does not see
+  `cfg_attr`. Its `run.sh build` already produces both `.wasm` files and
+  BoltFFI's web package; ubrn has no 0.32 support, so no UniFFI JS. Full `moq-ffi` through UniFFI still provides the size and
   coverage numbers. The slice is a feasibility filter for BoltFFI, not
   selection evidence: if BoltFFI passes and is favored, port the harness
   workload to it and rerun the parity, size, startup, and memory cases
@@ -50,11 +53,10 @@ Decided with the maintainer on 2026-10-13:
   `.d.ts` files for web, node, and bundlers. Async uses poll plus a
   continuation, like UniFFI. Crates using `web-sys` trapped at runtime
   until [boltffi#943](https://github.com/boltffi/boltffi/pull/943)
-  (2026-09-28, released in v0.31.0). Async constructors and static async
-  methods are dropped
-  ([boltffi#95](https://github.com/boltffi/boltffi/issues/95), open).
-  `MoqClient::connect` takes `&self` and works, but async constructors
-  such as the media catalog consumer's `subscribe` hit it. TypeScript streams are experimental
+  (2026-09-28, released in v0.31.0). Async constructors bind in v0.31.1,
+  though [boltffi#95](https://github.com/boltffi/boltffi/issues/95) is
+  still open; TS types the slice's `MoqSession.dial` as
+  `Promise<MoqSession | null>`. TypeScript streams are experimental
   ([boltffi#40](https://github.com/boltffi/boltffi/issues/40)). Roughly
   one maintainer.
 
