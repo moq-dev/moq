@@ -232,7 +232,8 @@ the bundled `tl::expected` has nothing to throw.
 
 Everything else maps one to one onto the
 [shared feature list](/lib/#what-every-binding-can-do): each generated
-`moq::MoqFoo` is also `moq::Foo`, and each Rust method keeps its name. The
+`moq::MoqFoo` is also `moq::Foo`, and each Rust method keeps its name.
+[Layers](/lib/layers) maps each Rust crate to its `moq::` types. The
 header is the reference; every method carries its doc comment.
 
 - Source: [`cpp/moq`](https://github.com/moq-dev/moq/tree/main/cpp/moq); `just cpp check` builds, installs, and tests it locally
