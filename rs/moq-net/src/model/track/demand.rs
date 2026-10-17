@@ -1,36 +1,50 @@
 //! Incremental demand, separate from the track's cached content.
 use std::{collections::BTreeMap, sync::Arc, task::Poll, time::Duration};
 
-use super::super::subscription::union;
-use super::{NewGroup, Order, Range, Subscription, TrackState, clamp_combined};
+use super::{NewGroup, Order, Subscription, TrackState, clamp_combined};
+
+mod ranges;
+use ranges::Ranges;
 
 #[derive(Default)]
 pub(super) struct Subscriptions {
 	count: usize,
 	priority: BTreeMap<u8, usize>,
 	max_delay: BTreeMap<Duration, usize>,
-	ranges: BTreeMap<Range, usize>,
-	/// The union of `ranges`' keys, redone only when a range first appears or last leaves,
-	/// so readers sharing a range never pay for it.
-	union: Vec<Range>,
+	ranges: Ranges,
 	descending: usize,
 	/// Only the subscribers holding a request.
 	new_group: BTreeMap<NewGroup, usize>,
 	waiters: kio::WaiterList,
 }
 
+/// Everything the aggregate holds besides its ranges.
+type Scalars = (u8, Duration, Order, Option<NewGroup>);
+
 impl Subscriptions {
 	pub(super) fn combined(&self) -> Option<Subscription> {
-		(self.count != 0).then(|| Subscription {
-			priority: *self.priority.last_key_value().unwrap().0,
-			max_delay: *self.max_delay.last_key_value().unwrap().0,
-			ranges: self.union.clone(),
-			order: if self.descending == 0 {
-				Order::Ascending
-			} else {
-				Order::Descending
-			},
-			new_group: self.new_group.last_key_value().map(|(new_group, _)| *new_group),
+		let (priority, max_delay, order, new_group) = self.scalars()?;
+		Some(Subscription {
+			priority,
+			max_delay,
+			ranges: self.ranges.union(),
+			order,
+			new_group,
+		})
+	}
+
+	fn scalars(&self) -> Option<Scalars> {
+		(self.count != 0).then(|| {
+			(
+				*self.priority.last_key_value().unwrap().0,
+				*self.max_delay.last_key_value().unwrap().0,
+				if self.descending == 0 {
+					Order::Ascending
+				} else {
+					Order::Descending
+				},
+				self.new_group.last_key_value().map(|(new_group, _)| *new_group),
+			)
 		})
 	}
 
@@ -52,27 +66,19 @@ impl Subscriptions {
 		}
 	}
 
-	/// Mutate counts under one lock, taking wakes only when an extreme changes.
+	/// Mutate counts under one lock, taking wakes only when the aggregate changes.
 	fn replace(&mut self, old: Option<&Subscription>, new: Option<&Subscription>) -> kio::WaiterList {
-		let prev = self.combined();
+		let prev = self.scalars();
+		// New ranges count before old ones leave, so a range both hold never reads as gone.
 		let mut reshaped = false;
-		if let Some(old) = old {
-			remove(&mut self.priority, old.priority);
-			remove(&mut self.max_delay, old.max_delay);
-			for range in &old.ranges {
-				reshaped |= remove(&mut self.ranges, *range);
-			}
-			self.descending -= usize::from(old.order == Order::Descending);
-			if let Some(new_group) = old.new_group {
-				remove(&mut self.new_group, new_group);
-			}
-			self.count -= 1;
-		}
+		let moved = old.map(|old| &old.ranges) != new.map(|new| &new.ranges);
 		if let Some(new) = new {
 			add(&mut self.priority, new.priority);
 			add(&mut self.max_delay, new.max_delay);
-			for range in &new.ranges {
-				reshaped |= add(&mut self.ranges, *range);
+			if moved {
+				for range in &new.ranges {
+					reshaped |= self.ranges.add(*range);
+				}
 			}
 			self.descending += usize::from(new.order == Order::Descending);
 			if let Some(new_group) = new.new_group {
@@ -80,14 +86,21 @@ impl Subscriptions {
 			}
 			self.count += 1;
 		}
-		if reshaped {
-			// The default range covers every other, so an audience holding it skips the walk.
-			self.union = match self.ranges.contains_key(&Range::oldest()) {
-				true => vec![Range::oldest()],
-				false => union(self.ranges.keys().copied()),
-			};
+		if let Some(old) = old {
+			remove(&mut self.priority, old.priority);
+			remove(&mut self.max_delay, old.max_delay);
+			if moved {
+				for range in &old.ranges {
+					reshaped |= self.ranges.remove(*range);
+				}
+			}
+			self.descending -= usize::from(old.order == Order::Descending);
+			if let Some(new_group) = old.new_group {
+				remove(&mut self.new_group, new_group);
+			}
+			self.count -= 1;
 		}
-		if self.combined() != prev {
+		if reshaped || self.scalars() != prev {
 			self.waiters.take()
 		} else {
 			Default::default()
@@ -222,7 +235,7 @@ impl From<kio::Producer<Subscription>> for Preferences {
 #[cfg(test)]
 mod tests {
 	use super::super::super::subscription::Combined;
-	use super::super::{Anchor, Position};
+	use super::super::{Anchor, Position, Range};
 	use super::*;
 	use rand::{RngExt, SeedableRng};
 	use std::sync::atomic::{AtomicUsize, Ordering};

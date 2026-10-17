@@ -44,10 +44,13 @@
 //! `track_fetch_expiry` polls budgeted fetched readers over independent fanout and
 //! retained-history axes, so expiry work that scans either table appears as a slope.
 //!
-//! `track_subscription_ranges` aggregates subscribers that each ask for a disjoint range,
-//! swept over how many ranges and how many groups each spans: the union must cost the
-//! same per range whatever it spans, and fold every subscriber's ranges at once rather
-//! than re-merging the aggregate per subscriber, which would show up as a slope over them.
+//! `track_range_demand` moves one reader between ranges nobody else holds, over readers
+//! holding a given number of distinct overlapping ranges: both axes must stay flat, since
+//! a change touches only the moved range, never the rest of the audience's.
+//!
+//! `track_subscription_ranges` reads the aggregate of subscribers that each ask for a
+//! disjoint range, swept over how many ranges and how many groups each spans: reading the
+//! union must cost the same per range whatever it spans.
 //!
 //! Run with `cargo bench -p moq-net --bench track`.
 
@@ -90,6 +93,9 @@ const CHURN: [usize; 3] = [1, 8, 64];
 
 /// Viewers that joined and left before the churn, leaving the list room for that many.
 const PEAK: [usize; 3] = [0, 1024, 16384];
+
+/// Distinct ranges the steady readers hold between them, capped at the readers.
+const DISTINCT: [usize; 4] = [1, 100, 1000, 10_000];
 
 /// Disjoint ranges in one aggregate, one per subscriber.
 const RANGES: [u64; 4] = [1, 16, 256, 4096];
@@ -671,6 +677,40 @@ fn bench_subscriber_preferences(c: &mut Criterion) {
 	group.finish();
 }
 
+/// One reader moving between ranges of its own, over readers holding `distinct` ranges.
+fn bench_range_demand(c: &mut Criterion) {
+	// Far past every held range, so each move adds one run and removes another.
+	let away = |offset: u64| {
+		let group = (1 << 40) + offset;
+		track::Subscription::default().with_groups(group..=group)
+	};
+	let mut group = c.benchmark_group("track_range_demand");
+	for steady in STEADY {
+		for distinct in DISTINCT.into_iter().filter(|&distinct| distinct <= steady) {
+			group.throughput(Throughput::Elements(2));
+			group.bench_function(BenchmarkId::new(format!("{steady}r"), distinct), |b| {
+				let mut setup = Churn::new(steady, 0);
+				for (i, subscriber) in setup._steady.iter_mut().enumerate() {
+					// Overlapping, so the held ranges union into one run.
+					let start = (i % distinct) as u64 * 10;
+					subscriber
+						.update(track::Subscription::default().with_groups(start..start + 1000))
+						.unwrap();
+				}
+				let mut viewer = setup.track.subscribe(away(0));
+				assert!(setup.track.poll_subscription_changed(&setup.waiter).is_ready());
+				b.iter(|| {
+					viewer.update(away(2)).unwrap();
+					assert!(black_box(setup.track.poll_subscription_changed(&setup.waiter)).is_ready());
+					viewer.update(away(0)).unwrap();
+					assert!(black_box(setup.track.poll_subscription_changed(&setup.waiter)).is_ready());
+				});
+			});
+		}
+	}
+	group.finish();
+}
+
 fn bench_subscription_ranges(c: &mut Criterion) {
 	let mut group = c.benchmark_group("track_subscription_ranges");
 	for span in SPAN {
@@ -1095,6 +1135,7 @@ criterion_group!(
 	bench_subscriber_churn,
 	bench_subscriber_churn_after_peak,
 	bench_subscriber_join,
+	bench_range_demand,
 	bench_subscription_ranges,
 	bench_subscriber_preferences,
 	bench_datagram_subscriber_join,

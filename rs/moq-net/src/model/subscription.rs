@@ -217,7 +217,7 @@ impl Range {
 	}
 
 	/// Whether this range certainly delivers nothing, wherever the latest group lands.
-	fn is_empty(&self) -> bool {
+	pub(super) fn is_empty(&self) -> bool {
 		match (self.start, self.end) {
 			(Anchor::Absolute(start), Some(Anchor::Absolute(end))) => end <= start,
 			_ => false,
@@ -225,63 +225,66 @@ impl Range {
 	}
 }
 
-/// The union of `ranges` in a canonical order, without empty or redundant ranges.
+/// The union of `ranges` in a canonical order, without empty or redundant ranges: the
+/// reference for the track's incremental union.
 ///
-/// Exact only where the latest group cannot matter, which is enough for an aggregate to
-/// compare equal across subscribers asking for the same thing in different words.
+/// Absolute spans merge where they overlap or touch. The rest can't be placed without the
+/// latest group, so only an open range drops what it certainly covers: the open absolute
+/// span drops ranges starting inside it, and the farthest open relative range drops
+/// relative ranges starting no farther back. [`Range::oldest`] covers everything.
+#[cfg(test)]
 pub(super) fn union(ranges: impl IntoIterator<Item = Range>) -> Vec<Range> {
-	let mut ranges: Vec<Range> = ranges.into_iter().filter(|range| !range.is_empty()).collect();
+	let ranges: Vec<Range> = ranges.into_iter().filter(|range| !range.is_empty()).collect();
 	if ranges.contains(&Range::oldest()) {
 		return vec![Range::oldest()];
 	}
 
-	// An open range covers every range starting at or after it, whatever its end.
-	let open_absolute = ranges
+	let mut spans: Vec<(Position, Option<Position>)> = ranges
 		.iter()
 		.filter_map(|range| match (range.start, range.end) {
-			(Anchor::Absolute(start), None) => Some(start),
+			(Anchor::Absolute(start), None) => Some((start, None)),
+			(Anchor::Absolute(start), Some(Anchor::Absolute(end))) => Some((start, Some(end))),
 			_ => None,
 		})
-		.min();
-	let open_relative = ranges
+		.collect();
+	spans.sort_unstable();
+	let mut runs: Vec<(Position, Option<Position>)> = Vec::new();
+	for (start, end) in spans {
+		match runs.last_mut() {
+			Some(last) if last.1.is_none_or(|last| start <= last) => {
+				last.1 = last.1.zip(end).map(|(last, end)| last.max(end));
+			}
+			_ => runs.push((start, end)),
+		}
+	}
+	let tail = runs.last().filter(|run| run.1.is_none()).map(|run| run.0);
+	let farthest = ranges
 		.iter()
 		.filter_map(|range| match (range.start, range.end) {
 			(Anchor::Relative(back), None) => Some(back),
 			_ => None,
 		})
 		.max();
-	ranges.retain(|range| match range.start {
-		Anchor::Absolute(start) => {
-			open_absolute.is_none_or(|open| start < open || (start == open && range.end.is_none()))
-		}
-		Anchor::Relative(back) => open_relative.is_none_or(|open| back > open || (back == open && range.end.is_none())),
-	});
-	ranges.sort_unstable();
-	ranges.dedup();
 
-	// Merge overlapping or adjacent absolute ranges. Sorted by start, so one pass suffices.
-	let mut merged: Vec<Range> = Vec::with_capacity(ranges.len());
-	for range in ranges {
-		if let Some(last) = merged.last_mut()
-			&& let Anchor::Absolute(start) = range.start
-			&& let Some(Anchor::Absolute(end)) = last.end
-			&& start <= end
-		{
-			match range.end {
-				Some(Anchor::Absolute(next)) => {
-					last.end = Some(Anchor::Absolute(end.max(next)));
-					continue;
-				}
-				None => {
-					last.end = None;
-					continue;
-				}
-				Some(Anchor::Relative(_)) => {}
-			}
-		}
-		merged.push(range);
-	}
-	merged
+	let mut union: Vec<Range> = runs
+		.into_iter()
+		.map(|(start, end)| Range {
+			start: Anchor::Absolute(start),
+			end: end.map(Anchor::Absolute),
+		})
+		.collect();
+	union.extend(ranges.into_iter().filter(|range| match (range.start, range.end) {
+		(Anchor::Absolute(_), None | Some(Anchor::Absolute(_))) | (Anchor::Relative(_), None) => false,
+		(Anchor::Absolute(start), _) => tail.is_none_or(|tail| start < tail),
+		(Anchor::Relative(back), _) => farthest.is_none_or(|farthest| back > farthest),
+	}));
+	union.extend(farthest.map(|back| Range {
+		start: Anchor::Relative(back),
+		end: None,
+	}));
+	union.sort_unstable();
+	union.dedup();
+	union
 }
 
 impl Default for Subscription {
