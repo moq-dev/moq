@@ -199,11 +199,11 @@ pub enum Error {
 	#[error("{0}")]
 	Reconnect(String),
 
-	/// The connection was stopped locally, by closing it or dropping the last handle.
+	/// The connection or listener was stopped locally, by closing it or dropping the last handle.
 	///
 	/// Not a failure: it is what a caller asked for. Distinct from [`Self::Reconnect`]
 	/// so a status watcher can tell an expected teardown from a connection that gave up.
-	#[error("connection stopped")]
+	#[error("stopped locally")]
 	Stopped,
 
 	/// A task serving this connection panicked. The panic itself is logged.
@@ -238,6 +238,11 @@ pub enum Error {
 	#[cfg(all(feature = "uds", unix))]
 	#[error(transparent)]
 	Unix(Arc<crate::unix::Error>),
+
+	/// The WebRTC data channel transport failed.
+	#[cfg(feature = "webrtc")]
+	#[error(transparent)]
+	WebRtc(Arc<crate::webrtc::Error>),
 }
 
 impl Error {
@@ -401,6 +406,13 @@ impl From<crate::tcp::Error> for Error {
 impl From<crate::unix::Error> for Error {
 	fn from(err: crate::unix::Error) -> Self {
 		Self::Unix(Arc::new(err))
+	}
+}
+
+#[cfg(feature = "webrtc")]
+impl From<crate::webrtc::Error> for Error {
+	fn from(err: crate::webrtc::Error) -> Self {
+		Self::WebRtc(Arc::new(err))
 	}
 }
 

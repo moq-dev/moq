@@ -76,7 +76,7 @@ rustls-acme = { version = "0.15.4", default-features = false, features = ["aws-l
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_with = { workspace = true, features = ["json", "base64"] }
-stun-types = "2.0.3"
+stun-types = { workspace = true }
 sysinfo = { version = "0.39", default-features = false, features = ["system"] }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
