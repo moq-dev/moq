@@ -3363,19 +3363,20 @@ impl Dolby {
 		})
 	}
 
-	/// Bytes needed to attempt a header parse.
+	/// Bytes needed to attempt a header parse: an E-AC-3 stream's AC-3 core has the longer one.
 	fn min_header_len(self) -> usize {
+		let ac3 = crate::codec::ac3::DESCRIPTOR.min_header_len;
 		match self {
-			Self::Ac3 => crate::codec::ac3::DESCRIPTOR.min_header_len,
-			Self::Eac3 => crate::codec::eac3::DESCRIPTOR.min_header_len,
+			Self::Ac3 => ac3,
+			Self::Eac3 => ac3.max(crate::codec::eac3::DESCRIPTOR.min_header_len),
 		}
 	}
 
 	/// Parse the header of the sync frame at the start of `data`, of any substream.
 	fn parse(self, data: &[u8]) -> crate::codec::legacy::Result<crate::codec::legacy::Header> {
 		match self {
-			Self::Ac3 => crate::codec::ac3::parse_header(data),
-			Self::Eac3 => crate::codec::eac3::sync_header(data),
+			Self::Eac3 if !ac3_core(data) => crate::codec::eac3::sync_header(data),
+			_ => crate::codec::ac3::parse_header(data),
 		}
 	}
 
@@ -3383,10 +3384,16 @@ impl Dolby {
 	/// unit rather than adding a substream to the one before it.
 	fn begins_unit(self, frame: &[u8]) -> bool {
 		match self {
-			Self::Ac3 => true,
-			Self::Eac3 => crate::codec::eac3::begins_unit(frame),
+			Self::Eac3 if !ac3_core(frame) => crate::codec::eac3::begins_unit(frame),
+			_ => true,
 		}
 	}
+}
+
+/// Whether the sync frame at the start of `data` is AC-3 (bsid 10 or less), which an E-AC-3
+/// stream may carry as its independent substream 0 (ETSI TS 102 366 E.1.3.1.2).
+fn ac3_core(data: &[u8]) -> bool {
+	data.get(5).is_some_and(|byte| byte >> 3 <= 10)
 }
 
 /// What a passed-through Dolby PES leaves for the next one.
@@ -3956,6 +3963,25 @@ mod tests {
 		for (k, (at, _)) in units.iter().enumerate() {
 			assert_eq!(at.as_micros(), k as u128 * 1_536 * 1_000_000 / 44_100, "unit {k}");
 		}
+	}
+
+	/// An E-AC-3 stream may carry AC-3 as its independent substream 0, which begins each access
+	/// unit that the E-AC-3 substreams after it extend.
+	#[test]
+	fn dolby_units_begin_at_an_ac3_core() {
+		// 32 kb/s 48 kHz AC-3: 128 bytes, 1,536 samples, as six E-AC-3 blocks are.
+		let mut core = vec![0x0b, 0x77, 0x00, 0x00, 0x00, 0x40, 0x40];
+		core.resize(128, 0);
+		let unit = [core, eac3(0x40, 0x3f)].concat();
+		let payload = bytes::Bytes::from(unit.repeat(2));
+		let units = super::dolby_units(Dolby::Eac3, &mut None, 0, Timestamp::from_micros(0).unwrap(), &payload)
+			.unwrap()
+			.unwrap();
+		let at: Vec<_> = units
+			.iter()
+			.map(|(at, bytes)| (at.as_micros(), bytes.to_vec()))
+			.collect();
+		assert_eq!(at, [(0, unit.clone()), (32_000, unit)]);
 	}
 
 	/// Substreams of one access unit share its blocks and rate (ETSI TS 102 366 E.1.3.1.2), so

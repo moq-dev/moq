@@ -766,7 +766,8 @@ def mpeg_audio_frame(es: bytes, pos: int) -> tuple[int, float]:
 
 
 def ac3_frame(es: bytes, pos: int) -> tuple[int, float]:
-    """(length, duration) of the AC-3 or E-AC-3 frame at `pos`; 0 duration for a dependent substream."""
+    """(length, duration) of the AC-3 or E-AC-3 frame at `pos`; 0 duration for any substream after
+    independent substream 0, which shares its access unit's interval (ETSI TS 102 366 E.1.3.1.2)."""
     h = es[pos : pos + 6]
     if len(h) < 6 or h[0] != 0x0B or h[1] != 0x77:
         raise Refused(f"no AC-3 sync at ES offset {pos}")
@@ -774,8 +775,8 @@ def ac3_frame(es: bytes, pos: int) -> tuple[int, float]:
         blocks = (1, 2, 3, 6)[(h[4] >> 4) & 0x03] if h[4] >> 6 != 3 else 6
         fscod = h[4] >> 6
         rate = (48000, 44100, 32000)[fscod] if fscod != 3 else (24000, 22050, 16000)[(h[4] >> 4) & 0x03]
-        dependent = h[2] >> 6 == 1
-        return ((((h[2] & 0x07) << 8) | h[3]) + 1) * 2, 0.0 if dependent else 256 * blocks / rate
+        extends = h[2] >> 6 == 1 or (h[2] >> 3) & 0x07 != 0
+        return ((((h[2] & 0x07) << 8) | h[3]) + 1) * 2, 0.0 if extends else 256 * blocks / rate
     fscod, code = h[4] >> 6, h[4] & 0x3F
     if fscod == 3 or code >> 1 >= len(AC3_KBPS):
         raise Refused(f"AC-3 fscod/frmsizecod reserved at ES offset {pos}")
