@@ -26,6 +26,11 @@ const DEFAULT_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 /// How long a validation connection may take to finish its handshake.
 const CHALLENGE_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Challenge handshakes in flight at once; connections past this are closed unanswered,
+/// so a flood cannot exhaust descriptors. Far above the handful of vantage points a
+/// directory validates from, so idle scanners do not crowd the validator out.
+const CHALLENGE_CONCURRENCY: usize = 1024;
+
 /// Failed validations the first issuance tolerates within [`FAILURE_WINDOW`] before
 /// refusing to start, leaving headroom under Let's Encrypt's limit of 5 per hostname per hour.
 const FAILURE_LIMIT: usize = 3;
@@ -194,7 +199,17 @@ impl Acme {
 		// original and takes over the queue once this returns.
 		let listener = tokio::net::TcpListener::from_std(listener.try_clone()?)?;
 		let challenge = tokio_rustls::TlsAcceptor::from(self.state.challenge_rustls_config());
+		let mut handshakes = tokio::task::JoinSet::new();
 		let health = moq_tokio::accept::Health::new("acme");
+		// Readiness waits on issuance, so stretch systemd's start timeout over the
+		// budget instead of letting a shorter unit default kill the relay first.
+		#[cfg(unix)]
+		{
+			let usec = (self.timeout + Duration::from_secs(30)).as_micros();
+			let _ = sd_notify::notify(&[sd_notify::NotifyState::ExtendTimeoutUsec(
+				u32::try_from(usec).unwrap_or(u32::MAX),
+			)]);
+		}
 		let deadline = tokio::time::sleep(self.timeout);
 		tokio::pin!(deadline);
 		let mut last = None;
@@ -228,11 +243,13 @@ impl Acme {
 				accepted = listener.accept() => match accepted {
 					Ok((stream, _)) => {
 						health.accepted();
-						let handshake = challenge.accept(stream);
-						// The validator only needs the handshake, then closes.
-						tokio::spawn(async move {
-							let _ = tokio::time::timeout(CHALLENGE_TIMEOUT, handshake).await;
-						});
+						if handshakes.len() < CHALLENGE_CONCURRENCY {
+							let handshake = challenge.accept(stream);
+							// The validator only needs the handshake, then closes.
+							handshakes.spawn(async move {
+								let _ = tokio::time::timeout(CHALLENGE_TIMEOUT, handshake).await;
+							});
+						}
 					}
 					Err(err) => {
 						if let Some(pause) = health.failed(&err) {
@@ -240,6 +257,7 @@ impl Acme {
 						}
 					}
 				},
+				Some(_) = handshakes.join_next() => {}
 				_ = &mut deadline => {
 					let last = last.as_deref().unwrap_or("no response from the directory");
 					anyhow::bail!(

@@ -111,6 +111,7 @@ rust-version = "1.91"
 [workspace.dependencies]
 anyhow = "1"
 ash = "0.38"
+async-trait = "0.1"
 aws-lc-rs = "1"
 axum = { version = "0.8", features = ["tokio"] }
 axum-server = { version = "0.8", features = ["tls-rustls"] }
@@ -231,6 +232,7 @@ socket2 = "0.6"
 subtle = "2.6"
 tempfile = "3"
 thiserror = "2"
+time = "0.3"
 tokio = "1.48"
 tokio-rustls = { version = "0.26", default-features = false }
 toml = "1.1"
@@ -250,6 +252,7 @@ web-transport-proto = "0.6"
 web-transport-trait = "0.5"
 web-transport-wasm = "0.8"
 x11rb = { version = "0.14.0", features = ["randr", "xfixes"] }
+x509-parser = "0.18"
 zeroize = { version = "1", features = ["derive"] }
 
 [patch.crates-io]

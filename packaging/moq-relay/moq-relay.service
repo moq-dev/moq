@@ -16,9 +16,6 @@ Restart=on-failure
 RestartSec=5s
 RestartSteps=5
 RestartMaxDelaySec=1min
-# An [acme] relay with no cached certificate becomes ready only once one is issued, within its
-# own acme.timeout (5 minutes by default); systemd's 90s default would kill it first.
-TimeoutStartSec=6min
 LimitNOFILE=1048576
 # io_uring workers charge their rings to RLIMIT_MEMLOCK (~56 KiB each), and hosts still on the old
 # 64 KiB default fit one worker at most.

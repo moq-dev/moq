@@ -52,7 +52,7 @@ _uring = ["dep:moq-sock", "dep:moq-uring"]
 
 [dependencies]
 anyhow = { workspace = true, features = ["backtrace"] }
-async-trait = "0.1"
+async-trait = { workspace = true }
 aws-lc-rs = { workspace = true }
 axum = { workspace = true }
 axum-server = { workspace = true }
@@ -87,7 +87,7 @@ tracing = { workspace = true }
 url = { workspace = true, features = ["serde"] }
 usage = { workspace = true, features = ["completions", "config"] }
 web-transport-trait = { workspace = true }
-x509-parser = "0.18"
+x509-parser = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 moq-sock = { workspace = true, optional = true }
@@ -104,7 +104,7 @@ qmux = { workspace = true, features = ["tcp"] }
 rand = { workspace = true }
 rcgen = { workspace = true, features = ["pem", "ring", "x509-parser"] }
 tempfile = { workspace = true }
-time = "0.3"
+time = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
 tracing-subscriber = { workspace = true }
 
