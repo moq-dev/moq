@@ -6649,9 +6649,9 @@ mod tests {
 
 	/// Swapping a route's auth is an update in place carrying the new auth, so the session
 	/// advertising it can renew its request.
-	#[test]
+	#[moq_clock::test]
 	#[cfg(feature = "async")]
-	fn an_auth_swap_is_an_update() {
+	async fn an_auth_swap_is_an_update() {
 		let handle = crate::auth::Handle::ietf(false);
 		let first = handle.present(bytes::Bytes::from_static(b"first"), false).unwrap();
 		let second = handle.present(bytes::Bytes::from_static(b"second"), false).unwrap();
@@ -6660,10 +6660,10 @@ mod tests {
 		let route = producer
 			.dynamic("room", Route::default().with_auth(first.clone()))
 			.unwrap();
-		assert_eq!(announced.assert_next_active("room").auth, Some(first));
+		assert_eq!(announced.expect_next_active("room").await.auth, Some(first));
 
 		route.update(Route::default().with_auth(second.clone())).unwrap();
-		match announced.next().now_or_never().expect("next blocked").expect("no next") {
+		match announced.next().await.expect("no next") {
 			AnnounceEvent::Update(update) => assert_eq!(update.route.auth, Some(second)),
 			other => panic!("should be an update: got {other:?}"),
 		}
