@@ -1817,7 +1817,10 @@ impl TrackState {
 			return false;
 		}
 		let from = self.cache.largest_group().unwrap_or(0);
-		self.lookup.range(from..).all(|(_, slot)| slot.group.is_done())
+		// A fetched head writes the same group on its own, so it counts too.
+		self.lookup
+			.range(from..)
+			.all(|(_, slot)| slot.copies().all(group::Producer::is_done))
 	}
 
 	/// One past the highest sequence produced: where the live edge stands against the end.
@@ -11271,6 +11274,48 @@ mod test {
 		head.finish().unwrap();
 		assert_eq!(fetch.await.unwrap().index(), 0);
 		(live, head)
+	}
+
+	/// A fetched head still writing holds the largest stream open after the live group
+	/// and the track end, so a later head frame is reported rather than lost.
+	#[moq_clock::test]
+	#[cfg(feature = "async")]
+	async fn a_fetched_head_holds_the_largest_open() {
+		let mut producer = track_producer("test", Info::timed());
+		let dynamic = producer.dynamic();
+		let consumer = producer.consume();
+		let noop = kio::Waiter::noop();
+
+		let mut live = producer.create_group(group::Info { sequence: 0 }).unwrap();
+		live.start_at(1).unwrap();
+		live.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"delta"))
+			.unwrap();
+		assert_eq!(
+			producer.poll_largest(&noop),
+			Poll::Ready(Some(Position { group: 0, frame: 1 }))
+		);
+
+		let _fetch = consumer.fetch_group(0, None);
+		let request = dynamic.requested_group().await.unwrap();
+		let mut head = request.accept(Info::timed()).unwrap();
+		for payload in [&b"snapshot"[..], b"delta"] {
+			head.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(payload))
+				.unwrap();
+		}
+
+		live.finish().unwrap();
+		producer.finish().unwrap();
+		assert!(producer.poll_largest(&noop).is_pending(), "the head still writes");
+
+		head.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"more"))
+			.unwrap();
+		assert_eq!(
+			producer.poll_largest(&noop),
+			Poll::Ready(Some(Position { group: 0, frame: 2 }))
+		);
+
+		head.finish().unwrap();
+		assert_eq!(producer.poll_largest(&noop), Poll::Ready(None));
 	}
 
 	#[moq_clock::test]
