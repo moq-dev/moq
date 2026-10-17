@@ -1311,6 +1311,28 @@ pub unsafe extern "C" fn moq_session_snapshot(session: u32, dst: *mut moq_connec
 	})
 }
 
+/// Why a dialed session is reconnecting.
+///
+/// Returns zero while nothing has failed since the last connect, including for a
+/// server-accepted session, which never reconnects. Otherwise returns the negative code
+/// of the error that ended the last connection or failed the latest dial, recorded like
+/// any failed call so [moq_error] and [moq_error_protocol] describe it. Also negative
+/// when the handle is unknown.
+///
+/// A dial that keeps failing never fires `on_status`, so poll this while
+/// [moq_session_snapshot] reports the session offline. Giving up for good arrives
+/// through `on_status` instead.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_session_failure(session: u32) -> i32 {
+	ffi::enter(move || {
+		let session = ffi::parse_id(session)?;
+		match State::lock().session.failure(session)? {
+			Some(err) => Err(err),
+			None => Ok(()),
+		}
+	})
+}
+
 /// Settings for [moq_server_listen].
 ///
 /// Zero it and set only what you need; new settings are appended, and a zeroed

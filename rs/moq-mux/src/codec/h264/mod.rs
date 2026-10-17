@@ -161,22 +161,10 @@ pub(crate) fn sps_hrd(nal: &[u8]) -> Option<crate::codec::video::Hrd> {
 	sps_vui(nal)?.hrd
 }
 
-/// The frame rate an SPS NAL unit fixes with `fixed_frame_rate_flag`.
-///
-/// Without the flag the VUI tick only bounds the rate from above, so it is left to measurement.
-/// A field-capable SPS is left out too: `pic_struct` in the slice header then decides whether a
-/// tick counts a field or a frame (ITU-T H.264 E.2.1, Table E-6), and only measurement settles it.
-pub(crate) fn sps_framerate(nal: &[u8]) -> Option<f64> {
-	let vui = sps_vui(nal)?;
-	if !vui.frame_only {
-		return None;
-	}
-	let (units, scale) = vui.period?;
-	Some(scale as f64 / units as f64)
-}
-
-/// What an SPS VUI declares about picture timing.
+/// What an SPS VUI declares about picture timing and sample shape.
 struct Vui {
+	/// The sample aspect, when the VUI specifies one.
+	sample_aspect: Option<(u32, u32)>,
 	/// `frame_mbs_only_flag`: every picture is a frame, so two ticks are one frame.
 	frame_only: bool,
 	/// One frame's duration as `(units, scale)` when `fixed_frame_rate_flag` is set.
@@ -185,6 +173,28 @@ struct Vui {
 	depth: Option<u32>,
 	/// The NAL HRD, when present.
 	hrd: Option<crate::codec::video::Hrd>,
+}
+
+impl Vui {
+	/// Only a fixed frame rate on a frame-only SPS fixes the picture period; field pictures
+	/// need their slice header's `pic_struct` (ITU-T H.264 E.2.1, Table E-6).
+	fn framerate(&self) -> Option<f64> {
+		if !self.frame_only {
+			return None;
+		}
+		let (units, scale) = self.period?;
+		Some(scale as f64 / units as f64)
+	}
+
+	fn apply(&self, config: &mut hang::catalog::VideoConfig) {
+		config.framerate = self.framerate();
+		let display_aspect = match (config.coded_width, config.coded_height, self.sample_aspect) {
+			(Some(width), Some(height), Some(sample)) => crate::codec::video::display_aspect(width, height, sample),
+			_ => None,
+		};
+		config.display_aspect_width = display_aspect.map(|(width, _)| width);
+		config.display_aspect_height = display_aspect.map(|(_, height)| height);
+	}
 }
 
 /// `None` when the SPS carries no VUI or fails to parse.
@@ -274,9 +284,13 @@ fn vui(rbsp: &[u8]) -> h264_parser::Result<Option<Vui>> {
 	}
 
 	// vui_parameters()
-	if r.read_flag()? && r.read_u8()? == 255 {
-		r.skip_bits(32)?; // sar_width, sar_height
-	}
+	let sample_aspect = match r.read_flag()? {
+		true => match r.read_u8()? {
+			255 => Some((u32::from(r.read_u16()?), u32::from(r.read_u16()?))),
+			idc => crate::codec::video::sample_aspect(idc),
+		},
+		false => None,
+	};
 	if r.read_flag()? {
 		r.skip_bits(1)?; // overscan_appropriate_flag
 	}
@@ -314,6 +328,7 @@ fn vui(rbsp: &[u8]) -> h264_parser::Result<Option<Vui>> {
 	r.skip_bits(1)?; // pic_struct_present_flag
 	if !r.read_flag()? {
 		return Ok(Some(Vui {
+			sample_aspect,
 			frame_only,
 			period,
 			depth: None,
@@ -326,6 +341,7 @@ fn vui(rbsp: &[u8]) -> h264_parser::Result<Option<Vui>> {
 	}
 	let depth = read_ue(&mut r)?; // max_num_reorder_frames
 	Ok(Some(Vui {
+		sample_aspect,
 		frame_only,
 		period,
 		depth: Some(depth),
@@ -724,6 +740,16 @@ fn process_nal(
 /// tests that need a VUI with a bitstream restriction.
 #[cfg(test)]
 pub(crate) mod fixtures {
+	/// A 1440x1080 x264 encode with `setsar=4/3` and `force-cfr=1`, shown 16:9.
+	pub(crate) const SPS_ANAMORPHIC: &[u8] = &[
+		0x67, 0x64, 0x00, 0x28, 0xac, 0xd9, 0x40, 0x5a, 0x02, 0x27, 0xe5, 0xc3, 0x84, 0x00, 0x00, 0x03, 0x00, 0x04,
+		0x00, 0x00, 0x03, 0x00, 0xca, 0x3c, 0x60, 0xc6, 0x58,
+	];
+	/// A 64x48 x264 encode with extended 7:5 SAR, shown 28:15.
+	pub(crate) const SPS_EXTENDED_SAR: &[u8] = &[
+		0x67, 0x64, 0x00, 0x0a, 0xac, 0xd9, 0x44, 0x7b, 0xff, 0x00, 0x07, 0x00, 0x05, 0x10, 0x00, 0x00, 0x03, 0x00,
+		0x10, 0x00, 0x00, 0x03, 0x03, 0x28, 0xf1, 0x22, 0x59, 0x60,
+	];
 	/// `bframes=1:force-cfr=1`: one B-frame per reference (`max_num_reorder_frames` 1) with
 	/// `fixed_frame_rate_flag` set.
 	pub(crate) const SPS_IPB: &[u8] = &[
@@ -802,12 +828,12 @@ mod tests {
 
 	#[test]
 	fn sps_framerate_needs_a_fixed_rate() {
-		assert_eq!(sps_framerate(fixtures::SPS_IPB), Some(25.0));
+		assert_eq!(sps_vui(fixtures::SPS_IPB).unwrap().framerate(), Some(25.0));
 		// The same 50 Hz tick without `fixed_frame_rate_flag` is only a ceiling.
-		assert_eq!(sps_framerate(fixtures::SPS_IPB_VARIABLE), None);
+		assert_eq!(sps_vui(fixtures::SPS_IPB_VARIABLE).unwrap().framerate(), None);
 		// A field-capable SPS makes the tick a field or a frame depending on `pic_struct`.
-		assert_eq!(sps_framerate(fixtures::SPS_FIELD), None);
-		assert_eq!(sps_framerate(&[0x67, 0x42, 0xc0, 0x1f, 0xde]), None);
+		assert_eq!(sps_vui(fixtures::SPS_FIELD).unwrap().framerate(), None);
+		assert!(sps_vui(&[0x67, 0x42, 0xc0, 0x1f, 0xde]).is_none());
 	}
 
 	#[test]

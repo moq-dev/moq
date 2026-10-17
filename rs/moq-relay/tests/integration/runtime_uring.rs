@@ -13,6 +13,8 @@ use std::time::Duration;
 use moq_relay::{Config, Relay};
 use moq_tokio::moq_net;
 
+use crate::logs::Logs;
+
 const TIMEOUT: Duration = Duration::from_secs(10);
 const WORKERS: u16 = 2;
 
@@ -190,6 +192,103 @@ async fn uring_workers_serve_webtransport_and_raw_quic() {
 	let _ = running.await;
 }
 
+/// The workers serve every version the listener lists, not only moq-lite on
+/// its own ALPN: moq-transport, both on its own ALPN and over the bidi SETUP
+/// exchange, and the SETUP-negotiated moq-lite versions. A moq-transport
+/// publisher feeds a subscriber per version over raw QUIC and WebTransport,
+/// each of which must negotiate exactly the version it was pinned to.
+#[tokio::test]
+async fn uring_workers_serve_every_configured_version() {
+	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	if !supported() {
+		return;
+	}
+
+	let pinned = |version: &str| {
+		let version: moq_net::Version = version.parse().expect("known version");
+		let mut config = moq_tokio::connect::Config::default();
+		config.tls.insecure = Some(true);
+		config.once = Some(true);
+		config.bind = Some("127.0.0.1:0".parse().expect("parse bind"));
+		config.version = vec![version];
+		(version, config.init(Default::default()).expect("client init"))
+	};
+
+	let dir = tempfile::tempdir().expect("tempdir");
+	let (cert, key) = certificate(dir.path());
+	let relay = Relay::load(uring_config(&cert, &key)).await.expect("load relay");
+	let port = relay.addr().expect("workers bound an address").port();
+	let running = tokio::spawn(relay.run());
+
+	let origin = moq_tokio::origin::spawn();
+	let broadcast = origin.create_broadcast("test").expect("create broadcast");
+	broadcast.announce(Default::default()).expect("announce broadcast");
+	let track = broadcast.create_track("video", timed()).expect("create track");
+	let mut group = track.append_group().expect("append group");
+	group
+		.write_frame(moq_net::Timestamp::ZERO, b"hello".as_ref())
+		.expect("write frame");
+	group.finish().expect("finish group");
+
+	let raw = format!("moql://127.0.0.1:{port}/versions");
+	let (version, client) = pinned("moq-transport-22");
+	let publisher = connect(client.with_publisher(&origin), raw.parse().unwrap()).await;
+	assert_eq!(publisher.version(), Some(version), "publisher version");
+
+	// moq-transport-14 and moq-lite-02 negotiate in the SETUP; 16 has its own
+	// ALPN but still a bidi SETUP; 22 reads its SETUP off a uni stream.
+	for name in [
+		"moq-transport-22",
+		"moq-transport-16",
+		"moq-transport-14",
+		"moq-lite-02",
+	] {
+		for scheme in ["moql", "https"] {
+			let url: url::Url = format!("{scheme}://127.0.0.1:{port}/versions").parse().unwrap();
+			let (version, client) = pinned(name);
+			let origin = moq_tokio::origin::spawn();
+			let consumer = origin.consume();
+			let mut announced = consumer.announced();
+			let connection = connect(client.with_subscriber(origin), url).await;
+			assert_eq!(connection.version(), Some(version), "{scheme} {name}");
+
+			let (update, active) = tokio::time::timeout(TIMEOUT, next_update(&mut announced))
+				.await
+				.unwrap_or_else(|_| panic!("{scheme} {name}: announcement timeout"))
+				.expect("origin closed");
+			// moq-lite-02 has no in-band path, so a raw QUIC session sits at the root.
+			let path = update.prefix.as_str().to_owned();
+			assert!(active && path.ends_with("test"), "{scheme} {name}: announced {path}");
+			let broadcast = tokio::time::timeout(TIMEOUT, consumer.request_broadcast(&path, None))
+				.await
+				.unwrap_or_else(|_| panic!("{scheme} {name}: request timeout"))
+				.expect("announced broadcast resolves");
+			let mut subscription = broadcast
+				.track("video")
+				.unwrap()
+				.subscribe(None)
+				.await
+				.expect("subscribe");
+			let mut group = tokio::time::timeout(TIMEOUT, subscription.recv_group())
+				.await
+				.unwrap_or_else(|_| panic!("{scheme} {name}: recv_group timeout"))
+				.expect("recv_group failed")
+				.expect("track closed prematurely");
+			let frame = tokio::time::timeout(TIMEOUT, group.read_frame())
+				.await
+				.unwrap_or_else(|_| panic!("{scheme} {name}: read_frame timeout"))
+				.expect("read_frame failed")
+				.expect("group closed prematurely");
+			assert_eq!(&frame.payload[..], b"hello", "{scheme} {name}");
+		}
+	}
+
+	assert!(!running.is_finished(), "the relay stopped while serving");
+	drop(publisher);
+	running.abort();
+	let _ = running.await;
+}
+
 /// A session the workers accept reports its peer address, the listener's
 /// address, and the name the client dialed, as the tokio listener does: the
 /// SNI on raw QUIC and WebTransport alike.
@@ -243,7 +342,7 @@ async fn uring_workers_report_link_facts() {
 /// threads joined and the port free.
 ///
 /// What an arrival is told is left of the window only reaches the wire on
-/// moq-transport-17+, which the workers do not speak; `shutdown_signal.rs`
+/// moq-transport-17+, which this test does not dial; `shutdown_signal.rs`
 /// reads it through the shared runtime, whose supervision this path shares.
 #[tokio::test]
 async fn uring_workers_drain_on_the_trigger() {
@@ -868,4 +967,65 @@ async fn stall_after_hello(server: SocketAddr) -> SocketAddr {
 		}
 	});
 	addr
+}
+
+/// The harness keeps only the connection target, including its span on worker and shared tasks.
+#[tokio::test]
+async fn uring_sessions_log_their_close_under_a_connection_span() {
+	use tracing_subscriber::layer::SubscriberExt;
+	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	if !supported() {
+		return;
+	}
+	let logs = Logs::default();
+	let subscriber = tracing_subscriber::fmt()
+		.with_ansi(false)
+		.with_writer(logs.clone())
+		.finish()
+		.with(tracing_subscriber::filter::Targets::new().with_target("moq_relay::connection", tracing::Level::INFO));
+	// Worker threads need the same dispatcher as the shared runtime. Global is
+	// safe because nextest runs each test in its own process.
+	tracing::subscriber::set_global_default(subscriber).expect("test owns the global subscriber");
+	let dir = tempfile::tempdir().unwrap();
+	let (cert, key) = certificate(dir.path());
+	let relay = Relay::load(uring_config(&cert, &key))
+		.await
+		.unwrap()
+		.with_signals(false);
+	let port = relay.addr().unwrap().port();
+	let trigger = relay.shutdown_trigger().clone();
+	let running = tokio::spawn(relay.run());
+	let mut connections = Vec::new();
+	for (id, scheme) in ["moql", "https"].into_iter().enumerate() {
+		let url = format!("{scheme}://127.0.0.1:{port}/logs").parse().unwrap();
+		connections.push(connect(client(), url).await);
+		tokio::time::timeout(TIMEOUT, logs.wait_for(&format!("conn{{id={id} ")))
+			.await
+			.expect("negotiated log missing");
+	}
+	// Both sessions are still open when the drain starts, so the workers stop
+	// right after they leave: their closes must not depend on a stopped worker.
+	trigger.start();
+	for connection in connections {
+		let _ = connection.close().await;
+	}
+	tokio::time::timeout(TIMEOUT, running).await.unwrap().unwrap().unwrap();
+	for id in 0..2 {
+		tokio::time::timeout(TIMEOUT, logs.wait_for(&format!("connection closed id={id}")))
+			.await
+			.unwrap_or_else(|_| panic!("conn {id} never logged its close: {}", logs.text()));
+	}
+	let text = logs.text();
+	let negotiated: Vec<_> = text.lines().filter(|line| line.contains("negotiated")).collect();
+	let closed: Vec<_> = text.lines().filter(|line| line.contains("connection closed")).collect();
+	assert_eq!(negotiated.len(), 2, "{text}");
+	assert_eq!(closed.len(), 2, "{text}");
+	for id in 0..2 {
+		for lines in [&negotiated, &closed] {
+			assert!(
+				lines.iter().any(|line| line.contains(&format!("conn{{id={id} "))),
+				"missing conn {id}: {text}"
+			);
+		}
+	}
 }

@@ -106,6 +106,14 @@ async fn drain_with<S: crate::catalog::Stream>(exporter: Export<S>) -> BytesMut
 where
 	S::Ext: tscat::Catalog,
 {
+	drain_stats(exporter).await.0
+}
+
+/// `drain_with`, also returning the exporter's stats once drained.
+async fn drain_stats<S: crate::catalog::Stream>(exporter: Export<S>) -> (BytesMut, super::stats::Export)
+where
+	S::Ext: tscat::Catalog,
+{
 	let mut exporter = exporter.with_delay(RECORDING_MAX_AGE).with_replay();
 	let mut out = BytesMut::new();
 	// `while let Ok` stops on the first timeout (`Pending`: no more output).
@@ -115,7 +123,7 @@ where
 		};
 		out.extend_from_slice(&frame.payload);
 	}
-	out
+	(out, exporter.stats())
 }
 
 /// An adaptation-field-only single-packet frame: the exporter's PCR carriage.
@@ -1606,20 +1614,22 @@ async fn export_skips_an_unconfirmed_ac3_sync_word_at_a_join() {
 }
 
 /// A declared marker breaks the timeline even where the timestamps run on, so a frame left
-/// unfinished before it is dropped rather than completed with the first bytes after it. A
-/// data track declares the break by skipping a sequence after its group ended, so nothing it
-/// held before the break is trimmed.
+/// unfinished before it is dropped rather than completed with the first bytes after it. The
+/// marker follows a group that ended, so nothing held before the break is trimmed, and it is
+/// declared, so it is no gap.
 #[tokio::test(start_paused = true)]
 async fn export_drops_an_ac3_frame_cut_by_a_marker() {
 	let stream: Vec<u8> = (0..4).flat_map(ac3_frame).collect();
-	let timed = exported_ac3_frames(vec![
+	let (pes, stats) = exported_ac3_pes(vec![
 		Ac3Write::Pes(0, stream[..200].to_vec()),
 		Ac3Write::Marker,
 		Ac3Write::Pes(64, stream[256..].to_vec()),
 	])
 	.await;
+	let timed = ac3_frames(pes);
 	let frames: Vec<&Vec<u8>> = timed.iter().map(|(_, bytes)| bytes).collect();
 	assert_eq!(frames, [&ac3_frame(0), &ac3_frame(2), &ac3_frame(3)]);
+	assert_eq!(stats.gaps, 0, "the declared break is not media lost upstream");
 }
 
 /// AC-3 sync frames that run on share a PES, as many as DVB's 5,696-byte B holds with the
@@ -1627,7 +1637,7 @@ async fn export_drops_an_ac3_frame_cut_by_a_marker() {
 #[tokio::test(start_paused = true)]
 async fn export_packs_ac3_frames_up_to_their_buffer() {
 	let stream: Vec<u8> = (0..100).flat_map(ac3_frame).collect();
-	let pes = exported_ac3_pes(vec![Ac3Write::Pes(0, stream.clone())]).await;
+	let (pes, _) = exported_ac3_pes(vec![Ac3Write::Pes(0, stream.clone())]).await;
 	// 44 of the 128-byte frames to a PES, and the first frame alone, sent as it starts.
 	assert!(
 		pes.len() <= 100usize.div_ceil(44) + 1,
@@ -1656,7 +1666,7 @@ fn eac3_frame(dependent: bool) -> Vec<u8> {
 #[tokio::test(start_paused = true)]
 async fn export_splits_dvb_eac3_access_units() {
 	let frame = eac3_frame(false);
-	let pes = exported_dolby_pes(vec![Ac3Write::Pes(0, frame.repeat(3))], 0x7a).await;
+	let (pes, _) = exported_dolby_pes(vec![Ac3Write::Pes(0, frame.repeat(3))], 0x7a).await;
 	assert_eq!(pes.len(), 3);
 	for (i, (pts, payload)) in pes.iter().enumerate() {
 		assert_eq!(*pts, pes[0].0 + i as u64 * 2_880);
@@ -1667,7 +1677,7 @@ async fn export_splits_dvb_eac3_access_units() {
 #[tokio::test(start_paused = true)]
 async fn export_keeps_dvb_eac3_dependent_substreams_on_one_interval() {
 	let unit = [eac3_frame(false), eac3_frame(true)].concat();
-	let pes = exported_dolby_pes(vec![Ac3Write::Pes(0, unit.repeat(3))], 0x7a).await;
+	let (pes, _) = exported_dolby_pes(vec![Ac3Write::Pes(0, unit.repeat(3))], 0x7a).await;
 	assert_eq!(pes.len(), 3);
 	for (i, (pts, payload)) in pes.iter().enumerate() {
 		assert_eq!(*pts, pes[0].0 + i as u64 * 2_880, "one 32 ms interval per access unit");
@@ -1679,7 +1689,7 @@ async fn export_keeps_dvb_eac3_dependent_substreams_on_one_interval() {
 async fn export_drops_dvb_eac3_partial_frames() {
 	let frame = eac3_frame(false);
 	let payload = [frame.clone(), frame[..60].to_vec()].concat();
-	let pes = exported_dolby_pes(vec![Ac3Write::Pes(0, payload)], 0x7a).await;
+	let (pes, _) = exported_dolby_pes(vec![Ac3Write::Pes(0, payload)], 0x7a).await;
 	assert_eq!(pes.len(), 1);
 	assert_eq!(pes[0].1, frame);
 }
@@ -1691,7 +1701,7 @@ async fn export_reassembles_dvb_eac3_frames_split_across_pes() {
 	let frame = eac3_frame(false);
 	let stream = frame.repeat(6);
 	// Cut mid-frame into frames 0-1, 1-3 and 3-5, timed by frames 0, 2 and 4.
-	let pes = exported_dolby_pes(
+	let (pes, _) = exported_dolby_pes(
 		vec![
 			Ac3Write::Pes(0, stream[..800].to_vec()),
 			Ac3Write::Pes(64, stream[800..2000].to_vec()),
@@ -1716,7 +1726,7 @@ async fn export_times_a_dvb_eac3_substream_by_its_access_unit_across_pes() {
 	let stream = unit.repeat(3);
 	// Cut between unit 0's substreams, then inside its dependent substream.
 	for cut in [512, 800] {
-		let pes = exported_dolby_pes(
+		let (pes, _) = exported_dolby_pes(
 			vec![
 				Ac3Write::Pes(0, stream[..cut].to_vec()),
 				Ac3Write::Pes(32, stream[cut..].to_vec()),
@@ -1743,7 +1753,7 @@ async fn export_times_a_dvb_eac3_substream_by_its_access_unit_across_pes() {
 #[tokio::test(start_paused = true)]
 async fn export_drops_a_dvb_eac3_pes_with_no_sync_frame() {
 	let frame = eac3_frame(false);
-	let pes = exported_dolby_pes(
+	let (pes, _) = exported_dolby_pes(
 		vec![
 			Ac3Write::Pes(0, frame.clone()),
 			Ac3Write::Pes(32, vec![0xee; 300]),
@@ -1762,7 +1772,7 @@ async fn export_drops_a_dvb_eac3_pes_with_no_sync_frame() {
 async fn export_drops_dvb_eac3_substreams_before_the_join() {
 	let unit = [eac3_frame(false), eac3_frame(true)].concat();
 	let payload = [eac3_frame(true), unit.clone()].concat();
-	let pes = exported_dolby_pes(vec![Ac3Write::Pes(0, payload)], 0x7a).await;
+	let (pes, _) = exported_dolby_pes(vec![Ac3Write::Pes(0, payload)], 0x7a).await;
 	assert_eq!(pes.len(), 1);
 	assert_eq!(pes[0].1, unit);
 }
@@ -1800,12 +1810,13 @@ enum Ac3Write {
 }
 
 /// Export `input` on an AC-3 passthrough PID beside bbb's media, and return the PTS and
-/// payload of every PES on that PID.
-async fn exported_ac3_pes(input: Vec<Ac3Write>) -> Vec<(u64, Vec<u8>)> {
+/// payload of every PES on that PID, and the export's stats.
+async fn exported_ac3_pes(input: Vec<Ac3Write>) -> (Vec<(u64, Vec<u8>)>, super::stats::Export) {
 	exported_dolby_pes(input, 0x6a).await
 }
 
-async fn exported_dolby_pes(input: Vec<Ac3Write>, descriptor: u8) -> Vec<(u64, Vec<u8>)> {
+/// [`exported_ac3_pes`] for the Dolby audio `descriptor` tags.
+async fn exported_dolby_pes(input: Vec<Ac3Write>, descriptor: u8) -> (Vec<(u64, Vec<u8>)>, super::stats::Export) {
 	const AC3_PID: u16 = 0x104;
 	let data = include_bytes!("test_data/bbb.ts");
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
@@ -1857,7 +1868,7 @@ async fn exported_dolby_pes(input: Vec<Ac3Write>, descriptor: u8) -> Vec<(u64, V
 	let mut import = crate::container::ts::Import::new(broadcast, reserved);
 	import.decode(&BytesMut::from(&data[..])).unwrap();
 	import.finish().unwrap();
-	let ts = drain_with(
+	let (ts, stats) = drain_stats(
 		open_ts(
 			crate::source::announced(&consumer).await,
 			crate::catalog::CatalogFormat::Hang,
@@ -1892,14 +1903,19 @@ async fn exported_dolby_pes(input: Vec<Ac3Write>, descriptor: u8) -> Vec<(u64, V
 			last.1.extend_from_slice(body);
 		}
 	}
-	pes
+	(pes, stats)
 }
 
 /// Export `input` as [`exported_ac3_pes`] does, and return each sync frame on the AC-3 PID,
 /// timed by its PES's PTS and the frames ahead of it there.
 async fn exported_ac3_frames(input: Vec<Ac3Write>) -> Vec<(u64, Vec<u8>)> {
+	ac3_frames(exported_ac3_pes(input).await.0)
+}
+
+/// Each sync frame of `pes`, timed by its PES's PTS and the frames ahead of it there.
+fn ac3_frames(pes: Vec<(u64, Vec<u8>)>) -> Vec<(u64, Vec<u8>)> {
 	let mut frames = Vec::new();
-	for (mut pts, mut payload) in exported_ac3_pes(input).await {
+	for (mut pts, mut payload) in pes {
 		while !payload.is_empty() {
 			let header = crate::codec::ac3::parse_header(&payload).expect("the PES carries whole sync frames");
 			let rest = payload.split_off(header.len);
@@ -2044,6 +2060,98 @@ async fn export_scte35_roundtrip() {
 		frame.payload.as_ref(),
 		CUE,
 		"SCTE-35 section did not round-trip byte-for-byte"
+	);
+}
+
+/// An opaque PMT byte is signalling, not a codec the exporter must recognize.
+#[tokio::test(start_paused = true)]
+async fn export_unknown_pes_stream_type() {
+	assert_unknown_stream_type(tscat::Framing::Pes).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn export_unknown_section_stream_type() {
+	assert_unknown_stream_type(tscat::Framing::Section).await;
+}
+
+async fn assert_unknown_stream_type(framing: tscat::Framing) {
+	const PID: u16 = 0x104;
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let mut catalog = crate::catalog::Producer::new(
+		&mut broadcast,
+		crate::catalog::Config::default().with_catalog(crate::catalog::hang::Catalog::<tscat::Ext>::default()),
+	)
+	.unwrap();
+	let reserved = catalog.reserve();
+	let track = broadcast
+		.unique_track(".opaque", hang::container::track_info(hang::catalog::PRIORITY.video))
+		.unwrap();
+	let mut entry = tscat::Track::new(PID);
+	entry.verbatim = Some(tscat::Verbatim::new(0x99, framing));
+	catalog
+		.modify()
+		.unwrap()
+		.ext
+		.mpegts
+		.tracks
+		.insert(track.name().into(), entry);
+	let mut producer = Producer::new(track, HangContainer::Legacy(crate::container::Kind::Data));
+	producer
+		.write(Frame {
+			timestamp: Timestamp::from_millis(1410).unwrap(),
+			duration: None,
+			payload: Bytes::from_static(CUE),
+			keyframe: true,
+		})
+		.unwrap();
+	producer.finish().unwrap();
+
+	// Import real media to supply the program clock without interpreting the opaque track.
+	let mut import = crate::container::ts::Import::new(broadcast, reserved);
+	import
+		.decode(&BytesMut::from(&include_bytes!("test_data/bbb.ts")[..]))
+		.unwrap();
+	import.finish().unwrap();
+	let ts = drain_with(
+		open_ts(
+			crate::source::announced(&consumer).await,
+			crate::catalog::CatalogFormat::Hang,
+		)
+		.await
+		.unwrap(),
+	)
+	.await;
+	assert_packet_aligned(&ts);
+	let packet = ts
+		.as_chunks::<188>()
+		.0
+		.iter()
+		.find(|packet| packet[1] & 0x40 != 0 && packet[1] & 0x1f == 0x10 && packet[2] == 0)
+		.expect("PMT on PID 0x1000");
+	let payload = 4 + if packet[3] & 0x20 != 0 {
+		1 + usize::from(packet[4])
+	} else {
+		0
+	};
+	let start = payload + 1 + usize::from(packet[payload]);
+	let length = 3 + (usize::from(packet[start + 1] & 0x0f) << 8 | usize::from(packet[start + 2]));
+	let section = &packet[start..start + length];
+	assert!(super::psi::crc_ok(section));
+	let pmt = super::psi::Pmt::parse(section).unwrap();
+	assert_eq!(
+		pmt.streams
+			.iter()
+			.find(|stream| stream.pid.as_u16() == PID)
+			.unwrap()
+			.stream_type,
+		0x99
+	);
+	assert!(
+		ts.as_chunks::<188>().0.iter().any(|packet| {
+			(u16::from(packet[1] & 0x1f) << 8 | u16::from(packet[2])) == PID && packet[3] & 0x10 != 0
+		}),
+		"opaque payload must also be emitted"
 	);
 }
 

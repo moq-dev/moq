@@ -183,7 +183,6 @@ cover the behavior.
 
 ## Required
 
-- [Narrow the model before it goes public](/quest/m1/public-model/narrow.md) - its visibility rewrite and marker lint guard every model API this child edits
 - [Rust lazy discovery](/quest/m1/lazy-discovery/rust.md) - settles the interest and discovery items before they become public
 
 ## Related

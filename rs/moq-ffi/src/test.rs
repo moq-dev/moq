@@ -14,7 +14,10 @@ use crate::json::{
 	MoqJsonStreamConsumer, MoqJsonStreamProducer,
 };
 use crate::media::*;
-use crate::session::{MoqBackoff, MoqConnectionStatus};
+use crate::session::{
+	MoqBackoff, MoqCongestionControl, MoqConnectionStatus, MoqQuicConfig, MoqWebSocketConfig, moq_client_defaults,
+	moq_qlog_supported, moq_versions,
+};
 
 use std::future::Future;
 use std::sync::Arc;
@@ -4604,6 +4607,156 @@ async fn server_new_validates_the_config() {
 		..Default::default()
 	});
 	assert!(matches!(version, Err(MoqError::Config { .. })));
+
+	// A build that cannot write qlog refuses the directory here, not later as a bind error.
+	let qlog = MoqServer::new(MoqServerConfig {
+		quic: MoqQuicConfig {
+			qlog: Some(std::env::temp_dir().display().to_string()),
+			..Default::default()
+		},
+		..Default::default()
+	});
+	if moq_qlog_supported() {
+		assert!(qlog.is_ok());
+	} else {
+		assert!(matches!(qlog, Err(MoqError::Config { .. })));
+	}
+}
+
+/// A settings UI shows these, so each must be what an unset knob actually dials with.
+#[tokio::test]
+async fn client_defaults_are_what_an_unset_config_dials_with() {
+	let defaults = moq_client_defaults();
+	let micros = |duration: Duration| Some(duration.as_micros() as u64);
+
+	let connect = moq_tokio::connect::Config::default().resolve();
+	assert_eq!(defaults.timeout_us, micros(connect.timeout));
+	assert_eq!(defaults.race_us, micros(connect.race));
+	assert_eq!(defaults.resolution_delay_us, micros(connect.resolution_delay));
+
+	// Reading the defaults back through the conversion `new` uses lands on the same values.
+	let quic = moq_tokio::quic::Config::from(defaults.quic.clone()).resolve();
+	let unset = moq_tokio::quic::Config::default().resolve();
+	assert_eq!(quic.max_streams, unset.max_streams);
+	assert_eq!(quic.idle_timeout, unset.idle_timeout);
+	assert_eq!(quic.keep_alive, unset.keep_alive);
+	assert_eq!(defaults.websocket.enabled, Some(true));
+	assert!(defaults.backoff.initial_us.is_some() && defaults.backoff.max_us.is_some());
+
+	// The backend picks these, so there is no single value to report.
+	assert_eq!(defaults.tls.system_roots, None);
+	assert_eq!(defaults.quic.gso, None);
+	assert_eq!(defaults.quic.mtu_discovery, None);
+	assert_eq!(defaults.quic.congestion_control, None);
+	assert_eq!(defaults.quic.qlog, None);
+
+	assert!(MoqClient::new(defaults).is_ok());
+}
+
+/// Every listed version is one `versions` accepts.
+#[tokio::test]
+async fn versions_are_accepted_by_the_client() {
+	let versions = moq_versions();
+	assert!(!versions.is_empty());
+	let client = MoqClient::new(MoqClientConfig {
+		versions,
+		..Default::default()
+	});
+	assert!(client.is_ok());
+}
+
+#[tokio::test]
+async fn client_new_validates_the_connection_knobs() {
+	let client = |tls: MoqClientTls, quic: MoqQuicConfig| {
+		MoqClient::new(MoqClientConfig {
+			tls,
+			quic,
+			..Default::default()
+		})
+	};
+
+	let host_name = MoqClientTls {
+		host_name: Some("not a host".into()),
+		..Default::default()
+	};
+	assert!(matches!(
+		client(host_name, MoqQuicConfig::default()),
+		Err(MoqError::Config { .. })
+	));
+
+	// A build that cannot write qlog refuses the directory rather than dropping it.
+	let qlog = MoqQuicConfig {
+		qlog: Some(std::env::temp_dir().display().to_string()),
+		..Default::default()
+	};
+	assert_eq!(client(MoqClientTls::default(), qlog).is_ok(), moq_qlog_supported());
+}
+
+/// Every connection knob set at once still dials, so none of them is refused or misapplied.
+#[tokio::test]
+async fn client_connects_with_every_knob_set() {
+	let server = MoqServer::new(MoqServerConfig {
+		bind: Some("127.0.0.1:0".into()),
+		tls: localhost_tls(),
+		..Default::default()
+	})
+	.unwrap();
+	let addr = tokio::time::timeout(TIMEOUT, server.listen())
+		.await
+		.expect("listen timed out")
+		.expect("listen failed");
+	// Pinned by fingerprint, with the SNI override naming the certificate's host.
+	let url = format!("https://{addr}");
+
+	let accept_server = server.clone();
+	let accept = tokio::spawn(async move {
+		let request = accept_server
+			.accept()
+			.await
+			.expect("accept errored")
+			.expect("accept returned None");
+		request.accept(None, None).await.expect("handshake failed")
+	});
+
+	let client = MoqClient::new(MoqClientConfig {
+		bind: Some("127.0.0.1:0".into()),
+		timeout_us: Some(5_000_000),
+		race_us: Some(0),
+		resolution_delay_us: Some(0),
+		tls: MoqClientTls {
+			host_name: Some("localhost".into()),
+			fingerprints: server.cert_fingerprints().unwrap(),
+			..Default::default()
+		},
+		quic: MoqQuicConfig {
+			max_streams: Some(64),
+			idle_timeout_us: Some(5_000_000),
+			keep_alive_us: Some(0),
+			gso: Some(false),
+			mtu_discovery: Some(true),
+			congestion_control: Some(MoqCongestionControl::Loss),
+			qlog: None,
+		},
+		websocket: MoqWebSocketConfig {
+			enabled: Some(false),
+			delay_us: None,
+		},
+		..Default::default()
+	})
+	.unwrap();
+	let session = tokio::time::timeout(TIMEOUT, client.connect(url))
+		.await
+		.expect("connect timed out")
+		.expect("connect failed");
+	let server_session = tokio::time::timeout(TIMEOUT, accept)
+		.await
+		.expect("server accept timed out")
+		.expect("server accept task panicked");
+
+	session.cancel(0);
+	server_session.cancel(0);
+	client.cancel();
+	server.cancel();
 }
 
 #[tokio::test]
@@ -4980,6 +5133,9 @@ async fn client_reconnects_and_resumes_announcements() {
 		.expect("status errored");
 	assert_eq!(status, MoqConnectionStatus::Connected);
 	assert_eq!(cs.connects(), 1);
+	assert!(cs.failure().is_none(), "nothing has failed yet");
+	let version = cs.stats().version.expect("a live connection reports its version");
+	crate::session::parse_versions(&[version]).expect("the version is spelled like the config's");
 
 	// Kill the transport under the client, simulating a relay restart.
 	// Nothing accepts the redial until the gate opens.
@@ -4994,6 +5150,9 @@ async fn client_reconnects_and_resumes_announcements() {
 		.expect("disconnect status timed out")
 		.expect("disconnect status errored");
 	assert_eq!(status, MoqConnectionStatus::Disconnected);
+	// Recorded before the status moved, so the watcher woken by the drop finds why.
+	assert!(cs.failure().is_some(), "the drop must report its reason");
+	assert!(cs.stats().version.is_none(), "nothing is live to report a version");
 
 	// Open the gate; the redial completes.
 	regate_tx.send(()).expect("accept task gone");
@@ -5002,6 +5161,8 @@ async fn client_reconnects_and_resumes_announcements() {
 		.expect("reconnect status timed out")
 		.expect("reconnect status errored");
 	assert_eq!(status, MoqConnectionStatus::Connected);
+	assert!(cs.failure().is_none(), "the reconnect must clear the failure");
+	assert!(cs.stats().version.is_some(), "the reconnect reports its version");
 
 	// The reconnect advances the count. The watcher may land just after the status
 	// edge it watched, so poll rather than assume ordering.
