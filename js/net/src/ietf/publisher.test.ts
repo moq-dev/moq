@@ -3188,26 +3188,29 @@ test("a counted answer names the NAMESPACEs that follow it", async () => {
 });
 
 /** ACTIVE_COUNT only answers SUBSCRIBE_NAMESPACE, so one on any other REQUEST_OK is a violation. */
-test("an ACTIVE_COUNT answering a PUBLISH_NAMESPACE closes the session", async () => {
-	const pair = createMockTransportPair(ALPN.DRAFT_19);
-	const { pub, origin } = publisher(pair.server, { activeCount: true });
-	const warn = spyOn(console, "warn").mockImplementation(() => void 0);
-	onTestFinished(() => warn.mockRestore());
-	void pub.runPublishNamespaces();
-	publish(origin, Path.from("a"));
+test.each([0, Number.MAX_SAFE_INTEGER + 2])(
+	"an ACTIVE_COUNT of %p answering a PUBLISH_NAMESPACE closes the session",
+	async (count) => {
+		const pair = createMockTransportPair(ALPN.DRAFT_19);
+		const { pub, origin } = publisher(pair.server, { activeCount: true });
+		const warn = spyOn(console, "warn").mockImplementation(() => void 0);
+		onTestFinished(() => warn.mockRestore());
+		void pub.runPublishNamespaces();
+		publish(origin, Path.from("a"));
 
-	const stream = await nextStream(pair.client);
-	if (!stream) throw new Error("no PUBLISH_NAMESPACE was sent");
-	expect(await readPublishNamespace(stream)).toBe(Path.from("a"));
-	const parameters = new Parameters();
-	parameters.activeCount = 0;
-	await stream.writer.u53(RequestOk.id);
-	await new RequestOk({ requestId: undefined, parameters }).encode(stream.writer, VERSION);
+		const stream = await nextStream(pair.client);
+		if (!stream) throw new Error("no PUBLISH_NAMESPACE was sent");
+		expect(await readPublishNamespace(stream)).toBe(Path.from("a"));
+		const parameters = new Parameters();
+		parameters.activeCount = count;
+		await stream.writer.u53(RequestOk.id);
+		await new RequestOk({ requestId: undefined, parameters }).encode(stream.writer, VERSION);
 
-	const closed = await Promise.race([
-		pair.server.closed,
-		new Promise<never>((_resolve, reject) => setTimeout(() => reject(new Error("session stayed up")), 500)),
-	]);
-	expect(closed.closeCode).toBe(new ProtocolViolation("").code);
-	origin.close();
-});
+		const closed = await Promise.race([
+			pair.server.closed,
+			new Promise<never>((_resolve, reject) => setTimeout(() => reject(new Error("session stayed up")), 500)),
+		]);
+		expect(closed.closeCode).toBe(new ProtocolViolation("").code);
+		origin.close();
+	},
+);

@@ -1634,11 +1634,17 @@ export class Publisher {
 	 * violation's code, since the caller only drops the advertisement.
 	 */
 	#answered(ok: RequestOk) {
-		if (ok.parameters.activeCount === undefined) return;
-		const violation = new ProtocolViolation("ACTIVE_COUNT on a PUBLISH_NAMESPACE answer");
-		this.#quic.close({ closeCode: violation.code, reason: violation.message });
-		this.#session.close();
-		throw violation;
+		try {
+			// Reading it throws on a count too large to hold, a violation all the same.
+			if (ok.parameters.activeCount === undefined) return;
+			throw new ProtocolViolation("ACTIVE_COUNT on a PUBLISH_NAMESPACE answer");
+		} catch (err) {
+			if (err instanceof ProtocolViolation) {
+				this.#quic.close({ closeCode: err.code, reason: err.message });
+				this.#session.close();
+			}
+			throw err;
+		}
 	}
 
 	/**
