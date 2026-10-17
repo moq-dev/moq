@@ -131,8 +131,8 @@ BoltFFI's JS glue is its generated web module plus `@boltffi/runtime`, unminifie
   `.github/workflows/platform.yml` (`macos-latest`, beside `just swift check`). The
   harness has no Swift runner yet.
 - **UniFFI's JS glue.** ubrn, UniFFI's JS generator, does not support 0.32 yet, so only
-  its `.wasm` is sized. Browser per-call cost is
-  [#5478](https://github.com/moq-dev/moq/pull/5478)'s job.
+  its `.wasm` is sized. The browser comparison, including its per-call cost, is
+  [`test/wasm/generator.md`](/test/wasm/generator.md).
 - **The full moq-ffi through BoltFFI.** BoltFFI cannot bind moq-ffi without the API
   changes listed below, so its numbers come from the slice alone.
 - Go, Dart, C++, and C, which BoltFFI lacks or has only in part. Startup and memory.
@@ -233,4 +233,5 @@ bulk copies), not from its core. A UniFFI fork can adopt each one backend at a t
 using these numbers as targets, while keeping all eight targets working throughout.
 
 Pick BoltFFI instead if call overhead outweighs everything else and writing the Go and
-C++ backends is acceptable. The browser half is decided separately in #5478.
+C++ backends is acceptable. The browser half was decided separately: UniFFI over ubrn
+([#5838](https://github.com/moq-dev/moq/pull/5838), [`test/wasm/generator.md`](/test/wasm/generator.md)).
