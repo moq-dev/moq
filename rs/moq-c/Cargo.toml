@@ -45,3 +45,4 @@ cbindgen = "0.29"
 
 [dev-dependencies]
 moq-loc = { path = "../moq-loc" }
+tokio = { workspace = true, features = ["test-util"] }

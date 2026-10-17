@@ -43,7 +43,9 @@ ignores unknown parameters: [cluster](/draft/moq-cluster) routing hop lists,
 [auth](/draft/moq-auth) to tell each peer what it may publish and subscribe to,
 [active-count](/draft/moq-active-count) to count the `NAMESPACE` messages
 before a `SUBSCRIBE_NAMESPACE` is synced, and
-[probe](/draft/moq-probe) for bandwidth estimation.
+[probe](/draft/moq-probe) for bandwidth estimation. Rust sessions request PROBE
+only while an owned `recv_bandwidth()` consumer is held. Read estimates through
+its `peek()` or `changed()` methods; session statistics do not request PROBE.
 Both libraries offer solicit and auth (draft 17 and later) unless a side's
 `extensions` setting declines one, which connects it as a peer that does not
 speak that extension. The pooled JavaScript `Connection` has no such setting yet.

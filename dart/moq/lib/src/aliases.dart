@@ -126,6 +126,9 @@ typedef TrackInfo = MoqTrackInfo;
 /// Divides one connection's send estimate among the tracks sharing it.
 typedef Bandwidth = MoqBandwidth;
 
+/// An owned bandwidth estimate; release it to stop receive PROBE demand.
+typedef BandwidthConsumer = MoqBandwidthConsumer;
+
 /// One track's standing claim on a [Bandwidth].
 typedef Reservation = MoqReservation;
 

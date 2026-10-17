@@ -176,7 +176,6 @@ class ConnectionStats:
 
     rtt: timedelta | None
     estimated_send_rate_bps: int | None
-    estimated_recv_rate_bps: int | None
     bytes_sent: int | None
     bytes_received: int | None
     bytes_lost: int | None
@@ -191,7 +190,6 @@ class ConnectionStats:
         return ConnectionStats(
             rtt=None if stats.rtt_us is None else _from_us(stats.rtt_us),
             estimated_send_rate_bps=stats.estimated_send_rate_bps,
-            estimated_recv_rate_bps=stats.estimated_recv_rate_bps,
             bytes_sent=stats.bytes_sent,
             bytes_received=stats.bytes_received,
             bytes_lost=stats.bytes_lost,

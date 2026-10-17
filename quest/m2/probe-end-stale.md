@@ -16,10 +16,10 @@ exit.
 Decided with the maintainer on 2026-10-17: the goal as drafted, from the
 review of [#5777](https://github.com/moq-dev/moq/pull/5777).
 
-#5777, open at planning, reworks the same machine around consumer demand and
-clears the estimate when the last consumer leaves. Build on it and clear on
-the stream's end the same way, including moq-tokio's forwarder across
-reconnects.
+#5777 has since merged: `RecvBandwidth::poll` now clears the estimate when
+the last consumer leaves, but still returns without clearing when the stream
+ends. Clear on the stream's end the same way, including moq-tokio's
+forwarder across reconnects.
 
 Test: the peer finishes its PROBE stream after one report, and a held
 consumer then reads no estimate; it fails without the fix. Wire: none.

@@ -772,10 +772,6 @@ pub struct moq_connection_stats {
 	pub estimated_send_rate_bps: u64,
 	pub estimated_send_rate_valid: bool,
 
-	/// Estimated receive bandwidth from MoQ PROBE, in bits per second.
-	pub estimated_recv_rate_bps: u64,
-	pub estimated_recv_rate_valid: bool,
-
 	/// Total bytes sent, including retransmissions and overhead.
 	pub bytes_sent: u64,
 	pub bytes_sent_valid: bool,
@@ -811,8 +807,6 @@ impl From<&moq_net::session::Stats> for moq_connection_stats {
 		let (rtt_us, rtt_valid) = split(stats.rtt.map(|d| d.as_micros() as u64));
 		let (estimated_send_rate_bps, estimated_send_rate_valid) =
 			split(stats.estimated_send_rate.map(moq_net::bandwidth::Rate::as_bps));
-		let (estimated_recv_rate_bps, estimated_recv_rate_valid) =
-			split(stats.estimated_recv_rate.map(moq_net::bandwidth::Rate::as_bps));
 		let (bytes_sent, bytes_sent_valid) = split(stats.bytes_sent);
 		let (bytes_received, bytes_received_valid) = split(stats.bytes_received);
 		let (bytes_lost, bytes_lost_valid) = split(stats.bytes_lost);
@@ -825,8 +819,6 @@ impl From<&moq_net::session::Stats> for moq_connection_stats {
 			rtt_valid,
 			estimated_send_rate_bps,
 			estimated_send_rate_valid,
-			estimated_recv_rate_bps,
-			estimated_recv_rate_valid,
 			bytes_sent,
 			bytes_sent_valid,
 			bytes_received,
