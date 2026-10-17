@@ -69,6 +69,8 @@ if (role === "publish") {
 		},
 		disableVideo: () => fixture?.setVideo(false),
 		enableVideo: () => fixture?.setVideo(true),
+		changeVideoCodec: () => fixture?.changeVideoCodec(),
+		resizeVideo: () => fixture?.resizeVideo(),
 	});
 } else if (role === "subscribe") {
 	await customElements.whenDefined("moq-watch");

@@ -53,11 +53,18 @@ pub struct MoqFetchGroupOptions {
 	/// Delivery priority for the fetch stream; higher values preempt lower ones.
 	#[uniffi(default = 0)]
 	pub priority: u8,
+	/// Maximum age behind the live edge in microseconds; null uses publisher retention alone.
+	#[uniffi(default = None)]
+	pub max_delay_us: Option<u64>,
 }
 
 impl From<MoqFetchGroupOptions> for moq_net::group::Fetch {
 	fn from(options: MoqFetchGroupOptions) -> Self {
-		moq_net::group::Fetch::default().with_priority(options.priority)
+		let fetch = moq_net::group::Fetch::default().with_priority(options.priority);
+		match options.max_delay_us {
+			Some(max_delay) => fetch.with_max_delay(std::time::Duration::from_micros(max_delay)),
+			None => fetch,
+		}
 	}
 }
 

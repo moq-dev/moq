@@ -4310,8 +4310,9 @@ dependencies = [
  "base64 0.23.1",
  "jsonwebtoken",
  "kio 0.6.2",
- "moq-auth",
- "moq-pattern",
+ "moq-auth 0.2.1",
+ "moq-auth 0.2.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "moq-pattern 0.1.2",
  "moq-token",
  "p256",
  "p384",
@@ -4328,6 +4329,27 @@ dependencies = [
  "tracing",
  "url",
  "wiremock",
+]
+
+[[package]]
+name = "moq-auth"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "eee68e814b2a98cf61d528e26c5555eeb13fd99f32e5bdbfeecc37db49c06719"
+dependencies = [
+ "aws-lc-rs",
+ "base64 0.23.1",
+ "jsonwebtoken",
+ "kio 0.6.2",
+ "moq-pattern 0.1.2 (registry+https://github.com/rust-lang/crates.io-index)",
+ "p256",
+ "p384",
+ "rsa",
+ "serde",
+ "serde_json",
+ "serde_with",
+ "thiserror 2.0.21",
+ "url",
 ]
 
 [[package]]
@@ -4407,7 +4429,7 @@ dependencies = [
  "libc",
  "moq-archive",
  "moq-audio",
- "moq-auth",
+ "moq-auth 0.2.1",
  "moq-hls",
  "moq-json",
  "moq-msf",
@@ -4651,7 +4673,7 @@ dependencies = [
  "libc",
  "loom",
  "moq-net-sim",
- "moq-pattern",
+ "moq-pattern 0.1.2",
  "num_enum",
  "rand 0.10.3",
  "serde",
@@ -4700,9 +4722,18 @@ name = "moq-pattern"
 version = "0.1.2"
 dependencies = [
  "criterion",
- "moq-pattern",
+ "moq-pattern 0.1.2",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "moq-pattern"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5fc361de827f05fa2a1dfb6489cb73575a16ed5c56f3b1d218be9925176c7521"
+dependencies = [
+ "serde",
 ]
 
 [[package]]
@@ -4714,6 +4745,7 @@ dependencies = [
  "aws-lc-rs",
  "bytes",
  "cpu-time",
+ "criterion",
  "fastbloom",
  "getrandom 0.4.3",
  "hex-literal",
@@ -4762,7 +4794,7 @@ dependencies = [
  "humantime",
  "hyper-util",
  "libc",
- "moq-auth",
+ "moq-auth 0.2.1",
  "moq-net",
  "moq-shaper",
  "moq-sock",
@@ -4800,7 +4832,7 @@ name = "moq-room"
 version = "0.2.11"
 dependencies = [
  "kio 0.6.2",
- "moq-auth",
+ "moq-auth 0.2.1",
  "moq-json",
  "moq-net",
  "moq-tokio",
@@ -9585,7 +9617,6 @@ dependencies = [
  "anyhow",
  "cargo_metadata",
  "uniffi_bindgen 0.32.2 (registry+https://github.com/rust-lang/crates.io-index)",
- "uniffi_build",
  "uniffi_core 0.32.2 (registry+https://github.com/rust-lang/crates.io-index)",
  "uniffi_macros 0.32.2 (registry+https://github.com/rust-lang/crates.io-index)",
  "uniffi_pipeline 0.32.2 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -9662,17 +9693,6 @@ dependencies = [
  "uniffi_meta 0.32.2 (git+https://github.com/kixelated/uniffi-rs?rev=88d835d)",
  "uniffi_pipeline 0.32.2 (git+https://github.com/kixelated/uniffi-rs?rev=88d835d)",
  "uniffi_udl 0.32.2 (git+https://github.com/kixelated/uniffi-rs?rev=88d835d)",
-]
-
-[[package]]
-name = "uniffi_build"
-version = "0.32.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "925be5c36297fff0d416fa2f03585ace718b6e6c635466754128d00f0862d5f1"
-dependencies = [
- "anyhow",
- "camino",
- "uniffi_bindgen 0.32.2 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 
 [[package]]

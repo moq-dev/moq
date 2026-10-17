@@ -3776,6 +3776,16 @@ struct FirstObject {
 #[derive(Debug)]
 struct PeekFirst<const EXTENSIONS: bool>(FirstObject);
 
+/// The first Object ID alone, which names a compact stream's subgroup.
+#[derive(Debug)]
+struct PeekId(u64);
+
+impl Decode<Version> for PeekId {
+	fn decode(buf: &mut Decoder<'_>, _: Version) -> Result<Self, DecodeError> {
+		Ok(Self(buf.varint()?))
+	}
+}
+
 impl<const EXTENSIONS: bool> Decode<Version> for PeekFirst<EXTENSIONS> {
 	fn decode(buf: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
 		let id = buf.varint()?;
@@ -3819,6 +3829,17 @@ where
 		// Stats (groups/frames/bytes) are counted in the model as the group is written,
 		// through the tagged `track::Producer`.
 		let create = |track: &mut track::Producer| track.create_group(group::Info { sequence });
+
+		// The compact form names the subgroup by its first Object ID, so check it before the
+		// rest of the object can fail and open the group as subgroup 0. A stream with no
+		// objects names none, and a failed read fails again in the full peek below.
+		if header.flags.has_subgroup_object
+			&& let Ok(Some(PeekId(id))) = stream.decode_peek_maybe::<PeekId>().await
+			&& id != 0
+		{
+			tracing::warn!(sub_group_id = id, "subgroup ID is not supported, dropping stream");
+			return Err(Error::Unsupported);
+		}
 
 		let peeked = match header.flags.has_extensions {
 			true => stream
@@ -11793,6 +11814,68 @@ mod stitch_tests {
 		assert_eq!(frames.len(), 1);
 		assert_eq!(frames[0].1, b"ok");
 		assert!(h.session.log.closes().is_empty());
+	}
+
+	/// A compact header names its subgroup by the first Object ID, so one starting at object
+	/// 2 is subgroup 2: refused like an explicit one, never taken as subgroup 0, even when the
+	/// rest of that object is cut off. A compact stream with no objects names no subgroup and
+	/// is subgroup 0.
+	#[moq_net_sim::test]
+	async fn a_compact_non_zero_subgroup_is_refused() {
+		for version in [Version::Draft14, Version::Draft22] {
+			let compact = |sequence: u64, first: Option<u64>| {
+				let mut bytes = Vec::new();
+				ietf::GroupHeader {
+					track_alias: ALIAS,
+					group_id: sequence,
+					sub_group_id: 0,
+					publisher_priority: 0,
+					flags: ietf::GroupFlags {
+						has_subgroup_object: true,
+						..Default::default()
+					},
+				}
+				.encode(&mut Encoder::new(&mut bytes, version.into()), version)
+				.unwrap();
+				if let Some(first) = first {
+					let mut encoder = Encoder::new(&mut bytes, version.into());
+					encoder.varint(first).unwrap();
+					encoder.varint(1u64).unwrap();
+					bytes.push(42);
+				}
+				bytes
+			};
+			let mut truncated = compact(SEQUENCE + 3, None);
+			Encoder::new(&mut truncated, version.into()).varint(2u64).unwrap();
+			let scripts = vec![
+				compact(SEQUENCE, Some(2)),
+				truncated,
+				compact(SEQUENCE + 1, Some(0)),
+				compact(SEQUENCE + 2, None),
+			];
+			let mut h = Harness::with_timescale(Fill::Done, scripts, None);
+			h.subscriber.version = version;
+			let mut consumer = h.track.subscribe(None);
+
+			let mut stream = h.stream().await.with_version(version);
+			let result = h.subscriber.clone().recv_group(&mut stream).await;
+			assert!(matches!(result, Err(Error::Unsupported)), "{version}: {result:?}");
+			assert_eq!(h.track.latest(), None, "{version}: the refused subgroup opened a group");
+
+			let mut stream = h.stream().await.with_version(version);
+			let result = h.subscriber.clone().recv_group(&mut stream).await;
+			assert!(matches!(result, Err(Error::Unsupported)), "{version}: {result:?}");
+			assert_eq!(h.track.latest(), None, "{version}: a truncated subgroup opened a group");
+
+			let mut stream = h.stream().await.with_version(version);
+			h.subscriber.clone().recv_group(&mut stream).await.unwrap();
+			assert_eq!(read_group(&mut consumer).await, (SEQUENCE + 1, vec![(None, vec![42])]));
+
+			let mut stream = h.stream().await.with_version(version);
+			h.subscriber.clone().recv_group(&mut stream).await.unwrap();
+			assert_eq!(read_group(&mut consumer).await, (SEQUENCE + 2, vec![]));
+			assert!(h.session.log.closes().is_empty(), "{version}");
+		}
 	}
 
 	/// A subgroup stream for `sequence` without extension headers, starting at object 0: the
