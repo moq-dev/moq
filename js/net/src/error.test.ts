@@ -341,6 +341,10 @@ test("toStreamCode: a local condition maps to the code the peer can act on", () 
 	expect(toStreamCode(new SessionError(SessionCode.GoawayTimeout))).toBe(StreamCode.Unroutable);
 	// An application code means the same in both registries, so the source's own error survives.
 	expect(toStreamCode(new SessionError(SessionCode(70)))).toBe(StreamCode(70));
+	// So is a session that failed at the transport, with no close code: its route is gone.
+	expect(toStreamCode(Object.assign(new Error("connection lost"), { source: "session" }))).toBe(
+		StreamCode.Unroutable,
+	);
 });
 
 // A control request that outlived its deadline is not late content. It carries its own code so a

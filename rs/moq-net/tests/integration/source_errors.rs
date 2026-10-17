@@ -90,8 +90,12 @@ async fn read_to_end(broadcast: moq_net::broadcast::Consumer, name: &'static str
 #[track_caller]
 fn assert_ended(result: Result<(), Error>, expected: StreamError, version: &str) {
 	match result {
+		// A session or transport failure converts to Unroutable too, so it must not pass as one.
 		Err(err) => assert!(
-			err.stream() == Some(&expected) || (err.stream().is_none() && StreamError::from(&err) == expected),
+			err.stream() == Some(&expected)
+				|| (!matches!(err, Error::Session(_) | Error::Transport(_) | Error::IdleTimeout)
+					&& err.stream().is_none()
+					&& StreamError::from(&err) == expected),
 			"{version}: ended with {err:?}, expected {expected:?}"
 		),
 		Ok(()) => panic!("{version}: ended cleanly, expected {expected:?}"),

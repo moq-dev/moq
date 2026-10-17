@@ -357,7 +357,8 @@ interface TransportErrorOptions {
  * rather than inventing one. A {@link Session} is {@link StreamCode.Unroutable}: a stream that
  * can still be reset outlived the session that failed, so that was the route it was served
  * through, and forwarding the session's code would mistranslate it across disjoint registries.
- * An application code is the exception, since both registries share the 64+ range.
+ * An application code is the exception, since both registries share the 64+ range. A session
+ * that failed at the transport, with no code at all, is {@link StreamCode.Unroutable} too.
  *
  * On an IETF stream the code has to be one the negotiated draft assigns the same meaning to,
  * so a condition it does not register degrades to INTERNAL_ERROR as well. See
@@ -379,6 +380,9 @@ function localStreamCode(err: unknown): StreamCode {
 	if (err instanceof ProtocolViolation) return StreamCode.SessionClosed;
 	// App codes share the 64+ range in both registries.
 	if (err instanceof Session) return err.code >= 64 ? StreamCode(err.code) : StreamCode.Unroutable;
+	// A session that failed underneath without a close code, as on a network or idle failure.
+	const source = typeof err === "object" && err !== null ? (err as { source?: unknown }).source : undefined;
+	if (source === "session") return StreamCode.Unroutable;
 	return StreamCode.Internal;
 }
 
