@@ -295,7 +295,9 @@ class TrackStreamProducer:
 def _rendition(id: str, rendition: Video | Audio) -> MoqRendition:
     if isinstance(rendition, Video):
         return cast(MoqRendition, MoqRendition.VIDEO(id=id, config=rendition))
-    return cast(MoqRendition, MoqRendition.AUDIO(id=id, config=rendition))
+    if isinstance(rendition, Audio):
+        return cast(MoqRendition, MoqRendition.AUDIO(id=id, config=rendition))
+    raise TypeError(f"expected a catalog Video or Audio rendition, got {type(rendition).__name__}")
 
 
 class TrackConsumer:

@@ -4,7 +4,7 @@ import asyncio
 import struct
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
-from typing import cast
+from typing import Any, cast
 
 import moq
 import moq_ffi
@@ -561,6 +561,13 @@ async def test_dynamic_track_request():
     del track
     with pytest.raises(moq.Error.Closed):  # type: ignore[attr-defined]
         await asyncio.wait_for(demand.used(), timeout=5.0)
+
+
+async def test_media_subscribe_refuses_a_non_rendition():
+    """Passing the old container argument fails loud instead of reading it as audio."""
+    consumer = moq.BroadcastProducer().consume()
+    with pytest.raises(TypeError, match="Video or Audio"):
+        await moq.media.TrackConsumer.subscribe(consumer, "video", cast(Any, _LEGACY))
 
 
 async def test_dynamic_track_request_can_publish_media():
