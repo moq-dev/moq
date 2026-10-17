@@ -648,8 +648,8 @@ pub(super) struct Track {
 	largest: kio::Shared<Largest>,
 }
 
-/// The greatest frame a track has written or its source reported, followed by the track
-/// handles' `largest`.
+/// The greatest location a track has written or its source reported, followed by the track
+/// handles' `largest`: each new group or datagram at its head, then each frame written to it.
 #[derive(Default)]
 struct Largest {
 	position: Option<Position>,
@@ -661,7 +661,7 @@ struct Largest {
 }
 
 impl Track {
-	/// Raise the track's largest frame to `position`, waking only its own waiters.
+	/// Raise the track's largest location to `position`, waking only its own waiters.
 	pub(super) fn advance_largest(&self, position: Position) {
 		let mut largest = self.largest.lock();
 		if largest.position.is_none_or(|current| position > current) {
@@ -669,7 +669,7 @@ impl Track {
 		}
 	}
 
-	/// The group of the track's largest frame, if any.
+	/// The group of the track's largest location, if any.
 	pub(super) fn largest_group(&self) -> Option<u64> {
 		self.largest.read().position.map(|position| position.group)
 	}
@@ -688,7 +688,7 @@ impl Track {
 		}
 	}
 
-	/// Poll for a largest frame newer than `seen`, recording it there. `None` once the
+	/// Poll for a largest location newer than `seen`, recording it there. `None` once the
 	/// track ended with nothing newer.
 	pub(super) fn poll_largest(&self, seen: &mut Option<Position>, waiter: &kio::Waiter) -> Poll<Option<Position>> {
 		let newer = |largest: &Largest| {

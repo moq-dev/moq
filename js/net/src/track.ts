@@ -1006,7 +1006,7 @@ export class Producer {
 		for (const sink of this.#sinks) sink.largest.set(largest);
 	}
 
-	/** The track's largest frame, as {@link Subscriber.largest} follows it. */
+	/** The track's largest location, as {@link Subscriber.largest} follows it. */
 	async largest(): Promise<Location | undefined> {
 		return nextLargest(this.#state, this.#largestSeen, (largest) => (this.#largestSeen = largest));
 	}
@@ -1110,7 +1110,7 @@ export class Producer {
 		this.#advance(group.sequence);
 		this.#state.latest = Math.max(this.#state.latest ?? 0, group.sequence);
 		for (const sink of this.#sinks) this.#mirror(entry, sink);
-		// Follow the group's frames as they land: the largest names the newest real frame.
+		// Follow the group's frames as they land, past the head `#advance` already named.
 		const stop = hooks.groupProgress(group, (total) => {
 			if (total > 0) this.#advanceLargest({ group: group.sequence, frame: total - 1 });
 		});
@@ -1123,10 +1123,12 @@ export class Producer {
 		this.#prune();
 	}
 
-	// Record a written sequence, here and in the name's namespace.
+	// Record a written sequence, here and in the name's namespace. It raises the largest too,
+	// at the head of an empty group, so a later group below it never changes it.
 	#advance(sequence: number): void {
 		this.#received = Math.max(this.#received, sequence + 1);
 		this.#sequence.next = Math.max(this.#sequence.next, sequence + 1);
+		this.#advanceLargest({ group: sequence, frame: 0 });
 		this.#endLargest();
 	}
 
@@ -1660,9 +1662,10 @@ export class Subscriber {
 	}
 
 	/**
-	 * The track's largest frame: the current one at first, then each newer one (skipping any
-	 * in between), and `undefined` once the track ends. Seeded by the publisher's report, so it
-	 * can name a frame before its group arrives.
+	 * The track's largest location, its newest group or datagram at the newest frame (0 while
+	 * empty): the current one at first, then each newer one (skipping any in between), and
+	 * `undefined` once the track ends. Seeded by the publisher's report, so it can name a frame
+	 * before its group arrives.
 	 */
 	async largest(): Promise<Location | undefined> {
 		return nextLargest(this.#state, this.#largestSeen, (largest) => (this.#largestSeen = largest));
@@ -2142,7 +2145,7 @@ export class Ordered {
 		return this.#subscriber.subscription;
 	}
 
-	/** The track's largest frame; see {@link Subscriber.largest}. */
+	/** The track's largest location; see {@link Subscriber.largest}. */
 	largest(): Promise<Location | undefined> {
 		return this.#subscriber.largest();
 	}

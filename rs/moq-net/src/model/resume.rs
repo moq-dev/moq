@@ -139,7 +139,7 @@ impl Consumer {
 		self.state.read().copy.clone()
 	}
 
-	/// Poll for a largest frame newer than `seen` on the serving copy, recording it there.
+	/// Poll for a largest location newer than `seen` on the serving copy, recording it there.
 	/// A copy ending is its route failing, so the logical track ends only with the route:
 	/// at once when the front ends it, or with the last copy once the front concluded.
 	pub(super) fn poll_largest(&self, seen: &mut Option<Position>, waiter: &kio::Waiter) -> Poll<Option<Position>> {
@@ -439,7 +439,7 @@ impl Subscriber {
 		self.reader().latest()
 	}
 
-	/// Poll for a largest frame newer than `seen`; see [`Consumer::poll_largest`].
+	/// Poll for a largest location newer than `seen`; see [`Consumer::poll_largest`].
 	pub(super) fn poll_largest(&mut self, seen: &mut Option<Position>, waiter: &kio::Waiter) -> Poll<Option<Position>> {
 		let route = self.reader().route.clone();
 		route.poll_largest(seen, waiter)
@@ -1373,7 +1373,7 @@ mod test {
 		assert!(sub.recv_group().now_or_never().is_none());
 	}
 
-	/// The largest frame follows the serving copy across a failover without moving back,
+	/// The largest follows the serving copy across a failover without moving back,
 	/// and ends only with the route.
 	#[test]
 	#[cfg(feature = "async")]
@@ -1441,7 +1441,7 @@ mod test {
 		let a = copy();
 		routes.serve(a.consume());
 		assert!(flag.0.load(Ordering::SeqCst), "the serving copy woke the reader");
-		assert!(consumer.poll_largest(&waiter).is_pending(), "it has no frame yet");
+		assert!(consumer.poll_largest(&waiter).is_pending(), "it has no group yet");
 		write(&a, 5);
 		assert_eq!(
 			consumer.poll_largest(&kio::Waiter::noop()),

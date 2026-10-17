@@ -1,5 +1,3 @@
-use std::task::Poll;
-
 /// Fetch one group of `track`: the one at `sequence`, or the newest when `None`.
 ///
 /// The newest needs a live subscription to learn its sequence, since a fetch can
@@ -16,23 +14,11 @@ pub async fn fetch_group(
 		return track.fetch_group(sequence, None).await;
 	}
 
+	// The largest names the newest group, even an empty one, possibly before it arrives.
 	let mut subscriber = track.subscribe(None).await?;
-	// The subscription hands over a newest group already cached, even an empty one, which
-	// has no largest frame. Otherwise the largest names it, possibly before it arrives.
-	// Ok is the cached group; Err is the sequence to fetch, or none once the track ends.
-	let newest = moq_net::kio::wait(|waiter| {
-		if let Poll::Ready(group) = subscriber.poll_recv_group(waiter) {
-			return Poll::Ready(group.map(|group| group.ok_or(None)));
-		}
-		subscriber
-			.poll_largest(waiter)
-			.map(|largest| Ok(Err(largest.map(|position| position.group))))
-	})
-	.await?;
-	match newest {
-		Ok(group) => Ok(group),
-		Err(Some(sequence)) => track.fetch_group(sequence, None).await,
-		Err(None) => Err(moq_net::Error::NotFound),
+	match subscriber.largest().await {
+		Some(largest) => track.fetch_group(largest.group, None).await,
+		None => Err(moq_net::Error::NotFound),
 	}
 }
 
@@ -41,7 +27,7 @@ mod test {
 	use super::*;
 	use futures::FutureExt;
 
-	/// An empty newest group has no largest frame, but it is still the newest group.
+	/// An empty newest group is still the newest group.
 	#[test]
 	fn the_newest_group_can_be_empty() {
 		let broadcast = moq_net::broadcast::Info::default().produce();

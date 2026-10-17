@@ -8,7 +8,7 @@ How to update your code for each breaking change, newest first.
 
 `latest()` on `track::{Producer, Consumer, Subscriber, Ordered}` is gone.
 `largest()` streams the newest frame's location: the current one at once, then each newer one, and `None` once the track ends.
-It can name a frame the publisher reported before its group arrives, and an empty group is not reported.
+It can name a frame the publisher reported before its group arrives, and a new group or datagram raises it at frame 0 before any frame lands, so a late group below it never changes it.
 Poll it once with a no-op waiter where you read the edge without waiting.
 
 ```rust

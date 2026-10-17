@@ -337,9 +337,8 @@ where
 		self.group.is_none()
 	}
 
-	/// One past the group of the track's largest frame: where a group continues after what
-	/// the track holds. A newer group with no frame yet is not counted, so a seek onto it is
-	/// [`moq_net::Error::Duplicate`].
+	/// One past the track's largest group, even an empty one: where a group continues after
+	/// what the track holds.
 	pub(crate) fn next_sequence(&self) -> u64 {
 		match self.inner.clone().poll_largest(&moq_net::kio::Waiter::noop()) {
 			std::task::Poll::Ready(Some(largest)) => largest.group + 1,

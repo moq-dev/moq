@@ -40,8 +40,10 @@ Rust items (`rs/moq-net/src/model/`), as they stood at b4eab0db1:
     gated, the whole moq-net suite passes except the two tests that assert
     the old design. Consequences:
     - The cache's internal largest stops reporting a frameless newest group
-      as (N, 0) and reports the last frame that exists, as the public
-      `largest()` stream (#5725) already does.
+      as (N, 0) and reports the last frame that exists. The public
+      `largest()` stream (#5725) deliberately does not: the maintainer
+      decided on 2026-10-17 that it counts every sequence seen, an empty
+      group at its head, so a late group below it never moves it.
     - Regression guard: `rejoin_waits_for_the_answers_first_frame`
       (`rs/moq-net/tests/integration/rejoin.rs`, fails when the judgments count a
       frameless group) and

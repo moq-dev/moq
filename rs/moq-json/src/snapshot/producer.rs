@@ -283,8 +283,8 @@ impl<T> Inner<T> {
 		}
 
 		// The same test `append_group` applies: a boundary declared ahead of the live edge still
-		// admits the groups below it. The next group follows the largest frame, unless a newer
-		// group holds none yet; `append_group` then refuses the publish instead.
+		// admits the groups below it. The largest counts every group, even an empty one, so the
+		// next group is the one after it.
 		let track = &self.track.inner;
 		let next = match track.clone().poll_largest(&moq_net::kio::Waiter::noop()) {
 			std::task::Poll::Ready(Some(largest)) => largest.group.saturating_add(1),
