@@ -214,6 +214,17 @@ impl SendStream {
         Ok(())
     }
 
+    /// Mark the data written so far, so a later [`Checkpoint::reset()`] still delivers it.
+    pub fn checkpoint(&self) -> Checkpoint {
+        let mut conn = self.conn.state.lock("SendStream::checkpoint");
+        let inner = conn.inner.send_stream(self.stream).checkpoint();
+        Checkpoint {
+            conn: self.conn.clone(),
+            inner,
+            is_0rtt: self.is_0rtt,
+        }
+    }
+
     /// Set the priority of the send stream
     ///
     /// Every send stream has an initial priority of 0. Locally buffered data from streams with
@@ -330,6 +341,34 @@ impl tokio::io::AsyncWrite for SendStream {
 
     fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         Poll::Ready(self.get_mut().finish().map_err(Into::into))
+    }
+}
+
+/// The data written to a [`SendStream`] up to some point, which a reset can still deliver
+///
+/// Taken with [`SendStream::checkpoint()`]. It keeps the connection open, like the stream does.
+#[derive(Debug)]
+pub struct Checkpoint {
+    conn: ConnectionRef,
+    inner: moq_quic::Checkpoint,
+    is_0rtt: bool,
+}
+
+impl Checkpoint {
+    /// Close the send stream immediately, but still deliver everything written before the checkpoint.
+    ///
+    /// Like [`SendStream::reset()`], except the data before the checkpoint still reaches the peer.
+    /// A peer that accepts RESET_STREAM_AT reads it before the error. Otherwise the reset waits a
+    /// round trip until the peer acknowledges the data, and the peer's application may never read
+    /// it: see [`moq_quic::Checkpoint::reset`].
+    pub fn reset(self, error_code: VarInt) -> Result<(), ClosedStream> {
+        let mut conn = self.conn.state.lock("Checkpoint::reset");
+        if self.is_0rtt && conn.check_0rtt().is_err() {
+            return Ok(());
+        }
+        self.inner.reset(&mut conn.inner, error_code)?;
+        conn.wake();
+        Ok(())
     }
 }
 

@@ -12,16 +12,18 @@ pub struct Info {
 	pub version: u64,
 	/// Publisher tie-break priority, 0 through 255.
 	pub priority: u8,
-	/// Units per second for this track's timestamps, 1 through 2^53 - 1.
-	pub timescale: u64,
+	/// Units per second for this track's timestamps, 1 through 2^53 - 1, or `None` when the track
+	/// is untimed and its frames store no timestamps.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub timescale: Option<u64>,
 	/// The source's publisher epoch, when its route had one. A resume from another refuses.
 	#[serde(default, skip_serializing_if = "Option::is_none", with = "epoch")]
 	pub epoch: Option<moq_net::Epoch>,
 }
 
 impl Info {
-	/// The current format version with `priority` and `timescale`.
-	pub fn new(priority: u8, timescale: u64) -> Result<Self> {
+	/// The current format version with `priority` and `timescale`, `None` for an untimed track.
+	pub fn new(priority: u8, timescale: Option<u64>) -> Result<Self> {
 		let info = Self {
 			version: VERSION,
 			priority,
@@ -55,10 +57,12 @@ impl Info {
 		if self.version != VERSION {
 			return Err(Error::Version(self.version));
 		}
-		if self.timescale == 0 {
-			return Err(Error::Timescale(self.timescale));
+		if let Some(timescale) = self.timescale {
+			if timescale == 0 {
+				return Err(Error::Timescale(timescale));
+			}
+			check_id(timescale).map_err(|_| Error::Timescale(timescale))?;
 		}
-		check_id(self.timescale).map_err(|_| Error::Timescale(self.timescale))?;
 		Ok(())
 	}
 }
@@ -89,9 +93,17 @@ mod tests {
 
 	#[test]
 	fn roundtrip() {
-		let info = Info::new(0, 1_000_000).unwrap();
+		let info = Info::new(0, Some(1_000_000)).unwrap();
 		let bytes = info.encode().unwrap();
 		assert_eq!(bytes.as_ref(), br#"{"version":2,"priority":0,"timescale":1000000}"#);
+		assert_eq!(Info::decode(&bytes).unwrap(), info);
+	}
+
+	#[test]
+	fn an_untimed_track_omits_its_timescale() {
+		let info = Info::new(3, None).unwrap();
+		let bytes = info.encode().unwrap();
+		assert_eq!(bytes.as_ref(), br#"{"version":2,"priority":3}"#);
 		assert_eq!(Info::decode(&bytes).unwrap(), info);
 	}
 
@@ -103,7 +115,7 @@ mod tests {
 			Info::decode(br#"{ "version": 2, "priority": 7, "timescale": 1000 }"#).unwrap()
 		);
 		assert_eq!(info.priority, 7);
-		assert_eq!(info.timescale, 1000);
+		assert_eq!(info.timescale, Some(1000));
 	}
 
 	#[test]
@@ -117,7 +129,7 @@ mod tests {
 	#[test]
 	fn epoch_roundtrip() {
 		let epoch: moq_net::Epoch = "01900000-0000-7000-8000-000000000001".parse().unwrap();
-		let info = Info::new(0, 1000).unwrap().with_epoch(Some(epoch));
+		let info = Info::new(0, Some(1000)).unwrap().with_epoch(Some(epoch));
 		let bytes = info.encode().unwrap();
 		assert_eq!(
 			bytes.as_ref(),
@@ -132,10 +144,10 @@ mod tests {
 
 	#[test]
 	fn timescale_bounds() {
-		assert!(Info::new(0, 1).is_ok());
-		assert!(Info::new(0, ID_MAX).is_ok());
-		assert!(matches!(Info::new(0, 0), Err(Error::Timescale(0))));
-		assert!(matches!(Info::new(0, ID_MAX + 1), Err(Error::Timescale(_))));
+		assert!(Info::new(0, Some(1)).is_ok());
+		assert!(Info::new(0, Some(ID_MAX)).is_ok());
+		assert!(matches!(Info::new(0, Some(0)), Err(Error::Timescale(0))));
+		assert!(matches!(Info::new(0, Some(ID_MAX + 1)), Err(Error::Timescale(_))));
 	}
 
 	#[test]
@@ -145,7 +157,7 @@ mod tests {
 			Err(Error::Json(_))
 		));
 		assert!(matches!(
-			Info::decode(br#"{"version":2,"priority":0}"#),
+			Info::decode(br#"{"version":2,"timescale":1}"#),
 			Err(Error::Json(_))
 		));
 	}
