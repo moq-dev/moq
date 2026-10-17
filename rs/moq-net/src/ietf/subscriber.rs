@@ -3148,8 +3148,7 @@ where
 				return Ok(msg.stream_count);
 			}
 			let answer = matches!(type_id, ietf::RequestOk::ID | ietf::RequestError::ID)
-				&& !refused
-				&& unanswered.load(Ordering::Relaxed) > 0;
+				&& !refused && unanswered.load(Ordering::Relaxed) > 0;
 			if !answer {
 				return Err(Error::UnexpectedMessage);
 			}
