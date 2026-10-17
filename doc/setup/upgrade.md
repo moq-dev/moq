@@ -30,6 +30,11 @@ ignored; its guide says what replaces it.
 
 These land with the next breaking release.
 
+- **Archive timelines declare a duration** (#5715). Each catalog
+  `archive.timelines` entry is an object instead of a track name. Neither side
+  reads the other's shape, and a catalog it can't read keeps its live media but
+  drops the archive, so seeking, recording, and HLS history need publishers and
+  their readers upgraded together.
 - **Announce restarts.** moq-lite 07 adds `ANNOUNCE_RESTART` (0x3): another
   publisher instance now serves the prefix. lite-06's `ANNOUNCE_RESTART` is
   named `ANNOUNCE_UPDATE`, as it always meant. On moq-lite 06 and older and

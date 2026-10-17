@@ -4,6 +4,20 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Archive timelines declare a per-track duration (#5715)
+
+Each `Archive::timelines` value is a `Timeline` (the timeline `track` plus its nominal `duration` in the archive timescale, `None` when untimed) instead of the timeline track's name, and `Archive::duration_max` is removed.
+A catalog on the other side of this change decodes with no archive; see the [upgrade guide](https://github.com/moq-dev/moq/blob/main/doc/setup/upgrade.md).
+
+```rust
+// Before
+archive.timelines.insert("video".to_string(), "video.timeline.z".to_string());
+let track: &String = &archive.timelines["video"];
+// After
+archive.timelines.insert("video".to_string(), Timeline::new("video.timeline.z", 4_000));
+let track: &String = &archive.timelines["video"].track;
+```
+
 ### Timeline records are optionally timed (#5720)
 
 `timeline::Record::pts` and `duration` are `Option<u64>`, absent on an untimed track.

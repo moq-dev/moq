@@ -4,6 +4,17 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `encode::Producer` takes a catalog reservation (#5715)
+
+`encode::Producer::new` and `with_track` take a `moq_mux::catalog::Reserved` instead of the `catalog::Producer`, so the caller declares the encoder's GOP as the timeline hint.
+
+```rust
+// Before
+let producer = encode::Producer::new(broadcast, catalog, rendition)?;
+// After
+let producer = encode::Producer::new(broadcast, catalog.reserve().with_timeline_hint(gop), rendition)?;
+```
+
 ### Capture takes one `encode::Capture`, and `Control::new` returns the driver
 
 `publish_capture(broadcast, catalog, capture, encode, clock)` is `publish_capture(broadcast, catalog, encode::Capture)`.

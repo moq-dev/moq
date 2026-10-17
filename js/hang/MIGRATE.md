@@ -4,6 +4,21 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Archive timelines declare a per-track duration (#5715)
+
+Each `archive.timelines` value is `{ track, duration }` instead of the timeline track's name, and `archive.durationMax` is removed.
+`duration` is the nominal record duration in the archive timescale, absent for an untimed track.
+A catalog on the other side of this change parses with no `archive`; see the [upgrade guide](https://github.com/moq-dev/moq/blob/main/doc/setup/upgrade.md).
+
+```ts
+// Before
+const track = catalog.archive?.timelines.video;
+const bound = catalog.archive?.durationMax;
+// After
+const track = catalog.archive?.timelines.video?.track;
+const duration = catalog.archive?.timelines.video?.duration;
+```
+
 ### Timeline records are optionally timed (#5720)
 
 `Timeline.Record.pts` and `.duration` are optional, absent on an untimed track.
