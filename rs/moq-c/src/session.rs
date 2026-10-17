@@ -364,6 +364,10 @@ mod tests {
 		assert_eq!(Error::Unauthorized.code(), -34);
 		assert_eq!(Error::Forbidden.code(), -35);
 		assert_eq!(map_connect_error(moq_net::Error::Unauthorized.into()).code(), -34);
+		// A refused request's expiry is not a session close, so it has its own status.
+		let expired = map_connect_error(moq_net::Error::Expired.into());
+		assert_eq!(expired.code(), -42);
+		assert!(expired.protocol().is_none());
 		assert_eq!(
 			map_connect_error(moq_net::Error::from(moq_net::SessionError::Unauthorized).into()).code(),
 			-2

@@ -2,21 +2,21 @@
 
 ## Goal
 
-Catalog, media, and data requests use the same pinned broadcast instance
-in players and exporters. Each sibling stays on its first resolved
-instance for the catalog instance's lifetime. Optional catalog epochs let
-a reference name its intended sibling before that first resolution.
+Catalog, media, and data requests use the same broadcast identity in players
+and exporters. Announcement-following readers follow a referenced sibling's
+Start, End, and Restart; readers without announcement following pin their
+first resolution for the catalog's lifetime. Optional reference epochs
+constrain the intended identity in either case.
 
 ## Plan
 
 Decided in the 2026-10-10 resume audit:
 
-- Apply the same pinning policy to players and exporters. This replaces
-  the earlier rule that a named sibling follows the newest epoch, including
-  `@moq/watch`'s test that follows a republished rendition independently of
-  its catalog. A sibling replacement does not silently retarget the old
-  catalog's reference. A new catalog instance or explicit export stitch
-  starts fresh pins; same-epoch recovery preserves identity.
+- Apply the same identity policy to players and exporters. Per the
+  2026-10-14 decision below, announcement-following readers handle a sibling
+  replacement as Restart, never as seamless same-epoch resume. Readers that
+  follow no announcements keep their first pin until a new catalog instance
+  or explicit export stitch. Same-epoch recovery preserves identity.
 - Add optional `epoch` beside every catalog broadcast reference: video,
   audio, text, JSON, and binary configs, plus the archive replay reference.
   Reuse the canonical UUIDv7 representation and validation from MoQ epochs.
@@ -31,11 +31,13 @@ Decided in the 2026-10-10 resume audit:
 - Lazy work has no anticipated epoch: leave it out of unresolved contribution
   references. Once a worker accepts a job it advertises a concrete path with
   a unique epoch. A proven Takeover preserves the same pinned instance; a
-  replacement requires a new catalog instance. An epoch-bound request on an
+  replacement follows Restart for announcement-following readers and requires
+  a new catalog instance for other readers. An epoch-bound request on an
   epoch-capable link requires a matching advertised epoch, not merely an
   epoch returned from an epochless claim.
-- Omission remains compatible with existing catalogs: pin the first
-  resolved instance, with no promise about an unresolved sibling's past.
+- Omission remains compatible with existing catalogs: bind the first
+  resolved instance, then follow announcements only where the reader opts
+  into that lifecycle. Make no promise about an unresolved sibling's past.
 - On epochless transports, explicit catalog epochs are best effort
   (maintainer choice). Keep the requested identity in the reference, use
   whatever identity the route can verify, and pin the resolved handle.
@@ -46,8 +48,9 @@ Decided in the 2026-10-10 resume audit:
 
 Decided by the maintainer, 2026-10-14 (from #5500's Codex review): readers
 follow a referenced broadcast's announcements, since announcement is the
-online/offline signal and `@moq/watch` already behaves this way. The "no
-retarget" rule above applies only to readers that follow no announcement.
+online/offline signal. The "no retarget" rule applies only to readers that
+follow no announcement. An explicit epoch still constrains every resolution;
+following does not authorize substituting a different requested epoch.
 
 - `moqsrc`: Start binds the rendition, End idles its pad, and Restart
   restarts its pump.

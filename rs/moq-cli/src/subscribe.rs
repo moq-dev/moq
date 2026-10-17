@@ -414,11 +414,13 @@ impl Subscribe {
 		// the way `publish` reports one that stops arriving.
 		let mut log = moq_mux::container::ts::stats::Log::default();
 		let mut sampled = tokio::time::Instant::now();
-		// The jitter buffer's late drops and out-of-tolerance count, as last logged.
-		let mut reported = (0, 0);
+		// The export's drop, gap and out-of-tolerance counts, as last logged.
+		let mut reported = (0, 0, 0, 0);
 		let release = |stats: &moq_mux::container::ts::stats::Export| {
 			tracing::info!(
 				dropped = stats.dropped,
+				trimmed = stats.trimmed,
+				gaps = stats.gaps,
 				drift_ppm = ?stats.drift,
 				out_of_tolerance = stats.out_of_tolerance,
 				"TS export release clock"
@@ -436,8 +438,9 @@ impl Subscribe {
 			if sampled.elapsed() >= moq_mux::container::ts::stats::Log::INTERVAL {
 				sampled = tokio::time::Instant::now();
 				let stats = ts.export().stats();
-				if (stats.dropped, stats.out_of_tolerance) != reported {
-					reported = (stats.dropped, stats.out_of_tolerance);
+				let counts = (stats.dropped, stats.trimmed, stats.gaps, stats.out_of_tolerance);
+				if counts != reported {
+					reported = counts;
 					release(&stats);
 				}
 				log.sample(stats.into());

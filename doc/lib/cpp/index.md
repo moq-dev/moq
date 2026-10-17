@@ -127,7 +127,8 @@ auto audio = ok(moq::MediaTrackProducer::audio(broadcast, moq::MediaTarget::kNam
 ok(audio->write_frame({packet, 20'000}));
 
 moq::VideoEncoderOutput output{moq::VideoCodec::kH264, "camera", std::nullopt, std::nullopt, moq::VideoEncoderKind::kAuto{}};
-auto video = ok(broadcast->encode_video({moq::VideoPixelFormat::kRgba, 1280, 720, 30}, output, nullptr));
+auto catalog = ok(moq::MediaCatalogProducer::init(broadcast));
+auto video = ok(moq::VideoProducer::init(catalog, {moq::VideoPixelFormat::kRgba, 1280, 720, 30}, output, nullptr));
 ok(video->write({0, rgba}));
 moq::Route route;
 route.epoch = moq::mint_epoch(); // a fresh epoch per run
@@ -227,6 +228,7 @@ kind `ProtocolKind::kTooManyRequests`. Reduce
 the simultaneous announcements or subscriptions, or ask the relay operator
 to adjust the [session limits](/bin/relay/config#session-and-peer), before
 reconnecting with the same workload.
+A session closed because its credential expired reports `ProtocolKind::kExpired`, and a request refused for an expired token is `moq::Error::kExpired`; refresh the token before retrying.
 
 Check a result before reading it. With exceptions off below C++23, reading the
 value of an error is undefined, through `*result` and `value()` alike, since

@@ -41,4 +41,4 @@ missing fields.
 
 ## Related
 
-- [QoS](/quest/m1/qos/README.md) - the per-broadcast ingress conventions this follows
+- [QoS](/quest/m2/qos/README.md) - the per-broadcast ingress conventions this follows

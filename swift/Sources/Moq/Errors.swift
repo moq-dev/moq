@@ -11,13 +11,13 @@ extension MoqError {
         }
     }
 
-    /// True for HTTP 401/403 and a protocol Unauthorized session close. Unlike a
+    /// True for HTTP 401/403, an expired token, and a protocol Unauthorized or Expired session close. Unlike a
     /// transport failure, retrying without new credentials won't help, so callers
     /// should surface these rather than reconnect.
     public var isAuth: Bool {
         switch self {
-        case .Unauthorized, .Forbidden: return true
-        case .Protocol(let details) where details.kind == .unauthorized: return true
+        case .Unauthorized, .Forbidden, .Expired: return true
+        case .Protocol(let details) where details.kind == .unauthorized || details.kind == .expired: return true
         default: return false
         }
     }

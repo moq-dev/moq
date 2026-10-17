@@ -155,14 +155,21 @@ export class Renderer {
 			});
 		});
 
+		// Not raced against teardown, which would drop a frame whose read had already resolved.
 		effect.spawn(async () => {
 			for (;;) {
-				const next = await effect.race(reader.read());
-				if (!next?.value) break;
+				const { value: frame } = await reader.read();
+				if (!frame) break;
+
+				// The cleanup above already released the latest frame, so keep nothing past it.
+				if (effect.abort.aborted) {
+					frame.close();
+					break;
+				}
 
 				this.#latest.update((prev) => {
 					prev?.close();
-					return next.value;
+					return frame;
 				});
 			}
 		});
@@ -265,14 +272,15 @@ export class Transcode {
 				reader.cancel().catch(() => {});
 			});
 
+			// Not raced against teardown, which would drop a frame whose read had already resolved.
 			inner.spawn(async () => {
 				for (;;) {
-					const next = await inner.race(reader.read());
-					if (!next?.value) break;
+					const { value: frame } = await reader.read();
+					if (!frame) break;
 
 					// Ours now, so close it once the encoder has taken what it needs.
-					const frame = next.value;
 					try {
+						if (inner.abort.aborted) break;
 						if (encoder.state !== "configured") continue;
 
 						// Mirror Encoder.serve: default to a 2s GOP unless the rendition overrides it.
