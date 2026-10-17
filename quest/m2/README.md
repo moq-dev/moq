@@ -127,7 +127,6 @@ ranked just below deterministic TS legs, which it requires.
 - [Browser media report](/quest/m2/rs2ts-browser-report.md) - compare Rust-backed and handwritten @moq/net through full media workloads, supplementing the pre-adoption comparisons
 - [mTLS on tls://](/quest/m2/tls-listener-mtls.md) - a `tls://` listener can identify a cluster peer by its client certificate
 - [Link quality](/quest/m2/link-quality.md) - a radio link's cost follows its measured quality without flapping routes
-- [One transport adapter](/quest/m2/transport-adapter-dedup.md) - the poll transport adapter exists once, and the 64 KiB cap in moq-net's default `poll_read_buf` (not in the adapter) has a test
 - [Archive S3 wire proof](/quest/m2/archive-s3.md) - the archive proof also runs through the S3 client against an in-process S3-compatible server
 - [Archive recovery listing](/quest/m2/archive-recovery-listing.md) - a resumed DVR lists what changed since its checkpoint, not every stored group
 - [IETF on the ring](/quest/m2/uring-ietf.md) - the io_uring workers serve moq-transport sessions too, so a uring relay drops no client protocol
