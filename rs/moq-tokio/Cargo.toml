@@ -88,7 +88,7 @@ notify = { version = "8", optional = true }
 pin-project-lite = { version = "0.2", optional = true }
 qmux = { workspace = true, features = ["wss", "tls", "tcp"], optional = true }
 rand = "0.10.1"
-rcgen = { version = "0.14", default-features = false, optional = true }
+rcgen = { workspace = true, optional = true }
 reqwest = { version = "0.13", default-features = false, optional = true }
 rustc-hash = { workspace = true, optional = true }
 rustls = "0.23"
@@ -137,7 +137,7 @@ chrono = "0.4"
 # Use the channel type behind `mdns_sd::Receiver` so the mDNS readiness gate can
 # be driven with synthetic daemon events.
 flume = "0.12"
-rcgen = { version = "0.14", default-features = false, features = ["pem", "aws_lc_rs"] }
+rcgen = { workspace = true, features = ["pem", "aws_lc_rs"] }
 tempfile = "3"
 # test-util adds tokio::time::pause/auto-advance for the time-dependent tests.
 tokio = { workspace = true, features = ["test-util"] }
