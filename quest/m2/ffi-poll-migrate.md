@@ -29,9 +29,10 @@ once this lands.
   blocks the next read, so this needs no UniFFI change.
 - **Keep shutdown's contract**: `moq_ffi_shutdown` documents that every
   parked and later call resolves `Cancelled`. The spike's prototype broke
-  that: its kio reads delivered frames after shutdown. Each poll checks the
-  stopped flag first. kio reads need no in-flight counter, since nothing they
-  poll touches the stopped runtime.
+  that: its kio reads delivered frames after shutdown. Each poll runs inside
+  shutdown's in-flight accounting (today's `Polling` guard, or something as
+  strong), so shutdown cannot return while a poll that missed it still
+  delivers an item.
 - **Handle state**: a std `Mutex` held only across one poll, never across a
   wait. Cancel closes a kio channel that every poll checks, then drops the
   state. Driver supervision (`Background`) is kio already, so poll it in the
