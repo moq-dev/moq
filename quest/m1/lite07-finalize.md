@@ -37,7 +37,8 @@ stability. Both are additive and, per the freeze policy, target whichever lite
 wip is current when they land.
 
 Decided 2026-10-08: Restart and AUTH join Required, since both change the
-lite-07 wire. SUBSCRIBE_OK carrying live media time was dropped: no reader
+lite-07 wire. Decided 2026-10-17: compressed tracks join too, so lite-07
+ships with them. SUBSCRIBE_OK carrying live media time was dropped: no reader
 was named, and `set_live` covers it.
 
 The cut:
@@ -81,6 +82,7 @@ is published; older versions are unchanged.
 - [Subscribe ranges](/quest/m1/subscribe-ranges/README.md) - SUBSCRIBE carries ranges and an order and lite FETCH is gone, in Rust and JS
 - [Announcement takeover](/quest/m1/announce-takeover.md) - ANNOUNCE_TAKEOVER preserves a proven instance under a new independent route
 - [Refresh on the lite wire](/quest/m1/refresh/lite.md) - TRACK_INFO carries the refresh ratio and SUBSCRIBE_UPDATE the wanted group
+- [Compressed tracks in Rust](/quest/m1/compress/core.md) - TRACK_INFO carries the compress flag and the frame header each compressed frame's inflated size
 
 ## Related
 
