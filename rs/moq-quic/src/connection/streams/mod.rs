@@ -49,6 +49,7 @@ impl<'a> Streams<'a> {
     /// # Panics
     /// - when `options.group` was opened on another connection
     pub fn open(&mut self, dir: Dir, options: SendOptions<'_>) -> Option<StreamId> {
+        let group = options.group.map(|g| g.index(self.state.tag));
         if self.conn_state.is_closed() {
             return None;
         }
@@ -65,7 +66,7 @@ impl<'a> Streams<'a> {
         self.state.send_streams += 1;
 
         // Send state is allocated on first use, so the default schedule needs none.
-        if options.group.is_some() || options.priority != 0 {
+        if group.is_some() || options.priority != 0 {
             let max_send_data = self.state.max_send_data(id);
             let stream = self
                 .state
@@ -74,7 +75,6 @@ impl<'a> Streams<'a> {
                 .unwrap()
                 .insert(Send::new(max_send_data));
             stream.priority = options.priority;
-            let group = options.group.map(|g| g.index(self.state.tag));
             self.state
                 .pending
                 .join(id, &mut stream.slot, group, stream.priority);
@@ -539,8 +539,8 @@ impl Checkpoint {
 ///
 /// A higher priority group preempts every lower one, and groups of equal priority get an
 /// equal share of bytes no matter how many streams each has queued. Streams outside any group
-/// go before all of it. A group's datagrams,
-/// from [`Datagrams::send`](crate::Datagrams::send), share its bytes in the same order.
+/// go before all of it. A group's datagrams, from [`Datagrams::send`](crate::Datagrams::send),
+/// share its bytes in the same order.
 pub struct SendGroups<'a> {
     pub(super) state: &'a mut StreamsState,
 }
