@@ -60,9 +60,26 @@ pub(super) fn rewrite(document: &[u8], source: Timestamp, sample: Range<Timestam
 			Event::Text(text) if scopes.len() == 1 && !text.trim().is_empty() => {
 				return Err("text outside the TTML root element");
 			}
+			// Without a DTD, only character references and XML's predefined entities resolve.
+			Event::GeneralRef(reference) => {
+				let resolved = match reference.resolve_char_ref() {
+					Ok(found) => found.is_some(),
+					Err(_) => false,
+				} || quick_xml::escape::resolve_predefined_entity(&reference.xml10_content()).is_some();
+				if !resolved {
+					return Err("unresolved TTML entity reference");
+				}
+				continue;
+			}
 			Event::Eof => break,
 			_ => continue,
 		};
+		for attribute in element.attributes() {
+			let attribute = attribute.map_err(|_| "malformed TTML attribute")?;
+			attribute
+				.normalized_value(quick_xml::XmlVersion::Implicit1_0)
+				.map_err(|_| "unresolved TTML entity reference")?;
+		}
 		if rates.is_some() && scopes.len() == 1 {
 			return Err("multiple TTML root elements");
 		}
@@ -150,7 +167,9 @@ struct Clock {
 impl Clock {
 	/// Monotonic, so every relative time it rewrites stays non-negative.
 	fn map(&self, source: u128) -> u128 {
-		(source as i128)
+		// A time past i128 is far past the sample, so saturating keeps the map monotonic.
+		i128::try_from(source)
+			.unwrap_or(i128::MAX)
 			.saturating_add(self.offset)
 			.clamp(self.start as i128, self.end as i128) as u128
 	}
@@ -476,6 +495,22 @@ mod tests {
 				r#"{ROOT}><body end="00:00:03" begin="1&#x73;"><p begin="00:00:02" end="00:00:02">Hi</p></body></tt>"#
 			)
 		);
+		// Predefined entities and character references resolve without a DTD.
+		let entities = format!(r#"{ROOT}><body begin="00:00:01" end="00:00:03"><p>&lt;&#160;&amp;</p></body></tt>"#);
+		assert_eq!(
+			rewrite(entities.as_bytes(), secs(1), secs(1)..secs(3)).unwrap(),
+			entities
+		);
+		// A time past i128 clips to the sample's end rather than wrapping before its start.
+		let far = format!(
+			r#"{ROOT}><body begin="00:00:01" end="00:00:03"><p begin="{}s"/></body></tt>"#,
+			i128::MAX as u128 / NANOS + 1
+		);
+		assert!(
+			rewrite(far.as_bytes(), secs(1), secs(1)..secs(3))
+				.unwrap()
+				.contains(r#"<p begin="00:00:02"/>"#)
+		);
 		// A byte order mark is not text outside the root.
 		let marked = format!("\u{feff}{document}");
 		assert!(rewrite(marked.as_bytes(), secs(1), secs(1)..secs(3)).is_ok());
@@ -591,6 +626,8 @@ mod tests {
 			format!(r#"{ROOT}/>{ROOT}/>"#),
 			format!(r#"{ROOT}/>trailing"#),
 			format!("<!DOCTYPE tt>{ROOT}/>"),
+			format!(r#"{ROOT}><body><p>a&nbsp;b</p></body></tt>"#),
+			format!(r#"{ROOT}><body><p xml:id="&nbsp;"/></body></tt>"#),
 			format!(r#"<?xml version="1.0" encoding="UTF-16"?>{ROOT}/>"#),
 		] {
 			assert!(
