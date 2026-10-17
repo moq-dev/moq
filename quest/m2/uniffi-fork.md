@@ -20,7 +20,7 @@ UniFFI:
   crate names, porting the Go, Dart, and C++/C generators to BoltFFI) along
   with the quests that name UniFFI internals:
   [Payload bytes](/quest/m2/ffi-bytes.md),
-  [Poll-native async](/quest/m2/ffi-poll.md),
+  [Poll-native async](/quest/m2/ffi-poll-migrate.md),
   [Zero-copy byte returns](/quest/m2/ffi-bytes-return.md),
   [Kotlin calls](/quest/m2/kt-ffi-calls.md), and
   [Namespaced external types](/quest/m2/uniffi-namespaces.md).
