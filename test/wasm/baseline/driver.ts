@@ -97,9 +97,7 @@ const report = {
 		js: [await asset(join(dist, "net.js"))],
 		wasm: await Promise.all((await wasmAssets(wasm)).map(asset)),
 		// The bundled bindings, @ubjs runtime and wasm-bindgen glue, plus the staged module.
-		uniffi: uniffi
-			? [await asset(join(dist, "uniffi.js")), await asset(join(generated, "moq_ffi.wasm"))]
-			: [],
+		uniffi: uniffi ? [await asset(join(dist, "uniffi.js")), await asset(join(generated, "moq_ffi.wasm"))] : [],
 		harness: [await asset(join(dist, "consumer.js")), await asset(join(dist, "publisher.js"))],
 	},
 	limits: [
@@ -148,7 +146,9 @@ try {
 			})),
 		];
 		for (const shape of smoke ? [shapes[0], shapes[13]] : shapes) {
-			const backends: Sample["backend"][] = smoke ? ["js", "wasm", ...(uniffi ? (["uniffi"] as const) : [])] : order;
+			const backends: Sample["backend"][] = smoke
+				? ["js", "wasm", ...(uniffi ? (["uniffi"] as const) : [])]
+				: order;
 			for (const [round, backend] of backends.entries()) {
 				const config: Sample = {
 					...shape,

@@ -73,7 +73,9 @@ const median = (values: number[]) => {
 	return sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2;
 };
 const cell = (values: number[] = []) =>
-	values.length ? `${median(values).toFixed(2)} (${Math.min(...values).toFixed(2)}-${Math.max(...values).toFixed(2)})` : "-";
+	values.length
+		? `${median(values).toFixed(2)} (${Math.min(...values).toFixed(2)}-${Math.max(...values).toFixed(2)})`
+		: "-";
 console.log("| case | UniFFI us | BoltFFI us |\n|---|---|---|");
 for (const [name, byGenerator] of cases)
 	console.log(`| ${name} | ${cell(byGenerator.get("uniffi"))} | ${cell(byGenerator.get("boltffi"))} |`);

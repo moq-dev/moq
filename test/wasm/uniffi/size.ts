@@ -28,7 +28,21 @@ function name(bytes: Uint8Array, at: { pos: number }): string {
 	return text;
 }
 
-const SECTIONS = ["custom", "type", "import", "function", "table", "memory", "global", "export", "start", "element", "code", "data", "datacount"];
+const SECTIONS = [
+	"custom",
+	"type",
+	"import",
+	"function",
+	"table",
+	"memory",
+	"global",
+	"export",
+	"start",
+	"element",
+	"code",
+	"data",
+	"datacount",
+];
 
 /** The crate a demangled function path belongs to, or a bucket for what has none. */
 function crate(fn: string): string {
@@ -40,7 +54,7 @@ function crate(fn: string): string {
 	return "(other)";
 }
 
-function analyze(file: string, bytes: Uint8Array) {
+function analyze(file: string, bytes: Uint8Array<ArrayBuffer>) {
 	const at = { pos: 8 };
 	const sections: Record<string, number> = {};
 	const bodies: number[] = [];
@@ -126,7 +140,8 @@ function analyze(file: string, bytes: Uint8Array) {
 }
 
 const reports = [];
-for (const file of process.argv.slice(2)) reports.push(analyze(file, new Uint8Array(await Bun.file(file).arrayBuffer())));
+for (const file of process.argv.slice(2))
+	reports.push(analyze(file, new Uint8Array(await Bun.file(file).arrayBuffer())));
 if (process.env.SIZE_JSON) {
 	console.log(JSON.stringify(reports, null, 2));
 } else {

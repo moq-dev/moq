@@ -12,11 +12,11 @@ import {
 	MoqClientConfig,
 	MoqClientTls,
 	type MoqGroupConsumer,
-	MoqRoute,
-	MoqTrackInfo,
 	type MoqGroupConsumerLike,
+	MoqRoute,
 	type MoqSessionLike,
 	type MoqTrackConsumer,
+	MoqTrackInfo,
 	uniffiInitAsync,
 } from "./dist/index.ts";
 
@@ -222,11 +222,7 @@ const remote: Record<string, (relay: Relay) => Promise<string | undefined>> = {
 			const broadcast = publisher.publish().createBroadcast(path);
 			const track = broadcast.publishTrack("data", TIMED);
 			broadcast.announce(MoqRoute.create({}));
-			const consumer = await within(
-				subscriber.consume().announcedBroadcast(path).available(),
-				5000,
-				"announce",
-			);
+			const consumer = await within(subscriber.consume().announcedBroadcast(path).available(), 5000, "announce");
 			const sub = await consumer.subscribeTrack("data", undefined);
 			const seen: string[] = [];
 			for (const sequence of [5n, 2n ** 32n, 2n ** 53n - 1n, ...HIGH]) {
@@ -240,7 +236,8 @@ const remote: Record<string, (relay: Relay) => Promise<string | undefined>> = {
 						(group) => `arrived as ${group?.sequence()}`,
 						(err: unknown) => (err as Error).message,
 					);
-					if (outcome === `arrived as ${sequence}`) throw new Error("known lite-06 gap now passes; update the case");
+					if (outcome === `arrived as ${sequence}`)
+						throw new Error("known lite-06 gap now passes; update the case");
 					return `known gap: 2^62-1 ${outcome}`;
 				}
 				const got = (await next) as MoqGroupConsumerLike | undefined;
@@ -266,11 +263,7 @@ const remote: Record<string, (relay: Relay) => Promise<string | undefined>> = {
 			const broadcast = publisher.publish().createBroadcast(path);
 			broadcast.publishTrack("data", TIMED);
 			broadcast.announce(MoqRoute.create({}));
-			const consumer = await within(
-				subscriber.consume().announcedBroadcast(path).available(),
-				5000,
-				"announce",
-			);
+			const consumer = await within(subscriber.consume().announcedBroadcast(path).available(), 5000, "announce");
 			const outcome = await within(
 				consumer.subscribeTrack("missing", undefined).then((track) => track.recvGroup()),
 				5000,
@@ -295,11 +288,7 @@ const remote: Record<string, (relay: Relay) => Promise<string | undefined>> = {
 			const broadcast = publisher.publish().createBroadcast(path);
 			const track = broadcast.publishTrack("data", TIMED);
 			broadcast.announce(MoqRoute.create({}));
-			const consumer = await within(
-				subscriber.consume().announcedBroadcast(path).available(),
-				5000,
-				"announce",
-			);
+			const consumer = await within(subscriber.consume().announcedBroadcast(path).available(), 5000, "announce");
 			const sub = await consumer.subscribeTrack("data", undefined);
 			const group = track.appendGroup();
 			group.writeFrame({ payload: payload(4), timestampUs: 0n });

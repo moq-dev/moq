@@ -97,7 +97,7 @@ jobs:
             recipe: pub check-bbb
             uncached: true
           - name: Browser backend baseline
-            recipe: test wasm-baseline
+            recipe: test wasm-baseline --uniffi
             chromium: true
             artifact: wasm-backend-baseline
             artifact-path: target/test

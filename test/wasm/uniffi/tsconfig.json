@@ -4,5 +4,5 @@
 		"types": ["bun"],
 		"noEmit": true
 	},
-	"include": ["cases.ts", "check.ts", "driver.ts"]
+	"include": ["cases.ts", "check.ts", "driver.ts", "size.ts"]
 }
