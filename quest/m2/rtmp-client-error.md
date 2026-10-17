@@ -4,10 +4,12 @@
 
 `moq_rtmp::Client` returns a server's `_error` on publish or play with its
 code and description, as it already does on connect. Today the `_error` has
-no outstanding transaction, so it is dropped and the client ends with "rtmp
-server closed before publish was accepted".
+no outstanding transaction, so the session raises
+`UnknownTransactionResultReceived`, `dial.rs` ignores it, and the client ends
+with "rtmp server closed before publish was accepted" once the server closes.
 
 ## Plan
 
 Match the publish and play `_error` in `rs/moq-rtmp`'s client and surface it
-through `dial.rs`. Test against a server that refuses a publish.
+through `dial.rs`. Test against a server that refuses a publish and one that
+refuses a play, asserting the code and description in both.

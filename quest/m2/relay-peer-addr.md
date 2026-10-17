@@ -10,5 +10,7 @@ address, while native QUIC already offers `remote_addr()`.
 ## Plan
 
 Open question for the maintainer: the API shape (a request extension, a
-field on the session, or a getter beside `remote_addr()`). Keep it to one
-accessor that every transport fills.
+field on the session, or a getter beside `remote_addr()`). Recommendation: a
+public request extension, mirroring `MtlsPeer`, which embedded routes already
+extract for the client certificate; it needs no change to the session types.
+Keep it to one accessor that every transport fills.
