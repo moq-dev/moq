@@ -70,12 +70,19 @@ pub extern "C" fn moq_ffi_test_clock_start() -> bool {
 	ffi::start_test_clock()
 }
 
-/// Let `nanos` pass on the test clock, waking every timer due by then; false without one.
+/// Let `nanos` pass on the test clock, waking every timer due by then.
+///
+/// False without a test clock, or when the advance would run past the clock's range, which
+/// would otherwise panic across this boundary and abort the host.
 #[cfg(all(feature = "testing", not(target_arch = "wasm32")))]
 #[unsafe(no_mangle)]
 pub extern "C" fn moq_ffi_test_clock_advance(nanos: u64) -> bool {
 	let Some(clock) = ffi::test_clock() else { return false };
-	clock.advance(std::time::Duration::from_nanos(nanos));
+	let duration = std::time::Duration::from_nanos(nanos);
+	if clock.now().checked_add(duration).is_none() || clock.wall().checked_add(duration).is_none() {
+		return false;
+	}
+	clock.advance(duration);
 	true
 }
 

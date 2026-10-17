@@ -41,9 +41,8 @@ class Clock:
         if not math.isfinite(seconds) or seconds < 0:
             raise ValueError("clock advance must be finite and non-negative")
         nanos = round(seconds * 1_000_000_000)
-        if nanos >= 2**64:
-            raise OverflowError("clock advance is too large")
-        self._advance(nanos)
+        if nanos >= 2**64 or not self._advance(nanos):
+            raise OverflowError("clock advance runs past the clock's range")
 
     def time(self) -> float:
         """Seconds elapsed since the clock started."""
