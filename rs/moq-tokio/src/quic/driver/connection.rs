@@ -521,47 +521,40 @@ impl Connection {
         }
     }
 
-    /// Transmit `data` as an unreliable, unordered application datagram
+    /// Transmit `data` as an unreliable, unordered application datagram in `group` at `order`
     ///
     /// Application datagrams are a low-level primitive. They may be lost or delivered out of order,
     /// and `data` must both fit inside a single QUIC packet and be smaller than the maximum
     /// dictated by the peer.
     ///
-    /// Previously queued datagrams which are still unsent may be discarded to make space for this
-    /// datagram, in order of oldest to newest.
-    pub fn send_datagram(&self, data: Bytes) -> Result<(), SendDatagramError> {
+    /// The datagram is scheduled like one of the group's streams at priority `order`, or among
+    /// the ungrouped streams without a group. Sending never blocks: a full buffer drops the
+    /// oldest datagram of the lowest-priority group, see [`moq_quic::Datagrams::send`].
+    pub fn send_datagram(
+        &self,
+        data: Bytes,
+        group: Option<&SendGroup>,
+        order: i64,
+    ) -> Result<(), SendDatagramError> {
         let conn = &mut *self.0.state.lock("send_datagram");
         if let Some(x) = &conn.error {
             return Err(SendDatagramError::ConnectionLost(x.clone()));
         }
         use moq_quic::SendDatagramError::*;
-        match conn.inner.datagrams().send(data, true) {
+        match conn
+            .inner
+            .datagrams()
+            .send(data, group.map(SendGroup::id), order)
+        {
             Ok(()) => {
                 conn.wake();
                 Ok(())
             }
             Err(e) => Err(match e {
-                Blocked(..) => unreachable!(),
                 UnsupportedByPeer => SendDatagramError::UnsupportedByPeer,
                 Disabled => SendDatagramError::Disabled,
                 TooLarge => SendDatagramError::TooLarge,
             }),
-        }
-    }
-
-    /// Transmit `data` as an unreliable, unordered application datagram
-    ///
-    /// Unlike [`send_datagram()`], this method will wait for buffer space during congestion
-    /// conditions, which effectively prioritizes old datagrams over new datagrams.
-    ///
-    /// See [`send_datagram()`] for details.
-    ///
-    /// [`send_datagram()`]: Connection::send_datagram
-    pub fn send_datagram_wait(&self, data: Bytes) -> SendDatagram<'_> {
-        SendDatagram {
-            conn: &self.0,
-            data: Some(data),
-            notify: self.0.shared.datagrams_unblocked.notified(),
         }
     }
 
@@ -971,55 +964,6 @@ impl Future for ReadDatagram<'_> {
     }
 }
 
-pin_project! {
-    /// Future produced by [`Connection::send_datagram_wait`]
-    pub struct SendDatagram<'a> {
-        conn: &'a ConnectionRef,
-        data: Option<Bytes>,
-        #[pin]
-        notify: Notified<'a>,
-    }
-}
-
-impl Future for SendDatagram<'_> {
-    type Output = Result<(), SendDatagramError>;
-    fn poll(self: Pin<&mut Self>, ctx: &mut Context<'_>) -> Poll<Self::Output> {
-        let mut this = self.project();
-        let mut state = this.conn.state.lock("SendDatagram::poll");
-        if let Some(e) = &state.error {
-            return Poll::Ready(Err(SendDatagramError::ConnectionLost(e.clone())));
-        }
-        use moq_quic::SendDatagramError::*;
-        match state
-            .inner
-            .datagrams()
-            .send(this.data.take().unwrap(), false)
-        {
-            Ok(()) => {
-                state.wake();
-                Poll::Ready(Ok(()))
-            }
-            Err(e) => Poll::Ready(Err(match e {
-                Blocked(data) => {
-                    this.data.replace(data);
-                    loop {
-                        match this.notify.as_mut().poll(ctx) {
-                            Poll::Pending => return Poll::Pending,
-                            // Spurious wakeup, get a new future
-                            Poll::Ready(()) => this
-                                .notify
-                                .set(this.conn.shared.datagrams_unblocked.notified()),
-                        }
-                    }
-                }
-                UnsupportedByPeer => SendDatagramError::UnsupportedByPeer,
-                Disabled => SendDatagramError::Disabled,
-                TooLarge => SendDatagramError::TooLarge,
-            })),
-        }
-    }
-}
-
 /// Watcher produced by [`Connection::watch_remote_address`]
 pub struct RemoteAddressWatcher {
     receiver: watch::Receiver<SocketAddr>,
@@ -1095,7 +1039,6 @@ pub(crate) struct Shared {
     /// Notified when the peer has initiated a new stream
     stream_incoming: [Notify; 2],
     datagram_received: Notify,
-    datagrams_unblocked: Notify,
     closed: Notify,
     connected: Arc<Notify>,
     /// Number of live handles that can used to initiate or handle I/O; excludes the driver
@@ -1299,9 +1242,6 @@ impl State {
                 DatagramReceived => {
                     shared.datagram_received.notify_waiters();
                 }
-                DatagramsUnblocked => {
-                    shared.datagrams_unblocked.notify_waiters();
-                }
                 Stream(StreamEvent::Readable { id }) => wake_stream(id, &mut self.blocked_readers),
                 Stream(StreamEvent::Available { dir }) => {
                     // Might mean any number of streams are ready, so we wake up everyone
@@ -1383,7 +1323,6 @@ impl State {
         shared.stream_incoming[Dir::Uni as usize].notify_waiters();
         shared.stream_incoming[Dir::Bi as usize].notify_waiters();
         shared.datagram_received.notify_waiters();
-        shared.datagrams_unblocked.notify_waiters();
         shared.handshake_confirmed.notify_waiters();
         wake_all_notify(&mut self.stopped);
         shared.closed.notify_waiters();

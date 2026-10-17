@@ -25,6 +25,13 @@ listen = "[::]:443"
 cert = "cert.pem"
 key = "key.pem"
 
+# Or let the relay fetch and renew a Let's Encrypt certificate for both
+# endpoints: remove both cert/key pairs and uncomment this. Let's Encrypt
+# validates over web.https, which must be reachable on TCP port 443.
+# [acme]
+# domains = ["relay.example.com"]
+# dir = "/var/lib/moq-relay/acme"
+
 # See docs/auth.md for more information.
 [auth]
 # The auth server asked once per session event. The policy lives there:

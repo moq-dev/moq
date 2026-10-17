@@ -80,6 +80,11 @@ pub struct Config {
 	#[serde(default)]
 	pub web: web::Config,
 
+	/// Automatic certificates from an ACME directory. Disabled unless `acme.domains` is set.
+	#[usage(flatten)]
+	#[serde(default)]
+	pub acme: crate::acme::Config,
+
 	/// Optional public STUN Binding listener for application-selected ICE servers.
 	#[usage(flatten)]
 	#[serde(default)]
@@ -153,6 +158,7 @@ impl Default for Config {
 			cluster: Default::default(),
 			auth: Default::default(),
 			web: Default::default(),
+			acme: Default::default(),
 			stun: Default::default(),
 			stats: Default::default(),
 			cache: Default::default(),

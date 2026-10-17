@@ -65,4 +65,3 @@ Public API: none.
 ## Related
 
 - [Same-epoch importers](/quest/m2/hop-aligned-import.md) - group sequences and the end-to-end pair
-- [TS passthrough export](/quest/m2/ts-passthrough-export.md) - identical objects export as identical packets

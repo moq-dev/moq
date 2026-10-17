@@ -70,6 +70,12 @@ bench-shard $SHARDS="0 1 4 16" $CONNECTIONS="16 64 256":
 bench-profile $MODES $WORKLOAD="fanout" $WORKERS="1 4 16":
     MOQ_BENCH_PROFILE="$MODES" MOQ_BENCH_PROFILE_WORKLOAD="$WORKLOAD" MOQ_BENCH_PROFILE_WORKERS="$WORKERS" bench/run.sh --profile
 
+# Real-browser transport, CMAF, and publish/watch costs, optionally against a base:
+# `just bench-browser origin/main`. `--smoke` is the bounded correctness lane.
+[positional-arguments]
+bench-browser *args:
+    bench/browser/run.sh "$@"
+
 # Install repo-wide tooling. Per-language deps install on first check.
 install:
     bun install

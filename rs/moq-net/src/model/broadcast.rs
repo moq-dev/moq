@@ -1224,7 +1224,7 @@ mod test {
 	/// hanging it (time is paused, so the timeout fires instantly when idle).
 	#[cfg(feature = "async")]
 	async fn expect<T>(fut: impl Future<Output = T>) -> T {
-		moq_net_sim::timeout(Duration::from_secs(1), fut)
+		moq_clock::timeout(Duration::from_secs(1), fut)
 			.await
 			.expect("timed out waiting for a demand edge")
 	}
@@ -1232,7 +1232,7 @@ mod test {
 	/// Demand on an ordinary broadcast tracks subscriber interest, not
 	/// production: a live track producer alone is unused, and so is a bare track
 	/// handle, a subscribed track is used, and both edges wake parked waiters.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	#[cfg(feature = "async")]
 	async fn demand_ordinary() {
 		let producer = Info::new().produce();
@@ -1270,7 +1270,7 @@ mod test {
 
 	/// One read track keeps the broadcast in demand however many others are unread, and
 	/// its last reader leaving wakes a parked `unused`.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	#[cfg(feature = "async")]
 	async fn demand_unused_waits_for_every_track() {
 		let producer = Info::new().produce();
@@ -1290,7 +1290,7 @@ mod test {
 	}
 
 	/// A consumer demand handle distinguishes lost demand from a dropped producer.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	#[cfg(feature = "async")]
 	async fn consumer_demand_reports_dropped_producer() {
 		let producer = Info::new().produce();
@@ -1322,7 +1322,7 @@ mod test {
 		}};
 	}
 
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	#[cfg(feature = "async")]
 	async fn insert() {
 		let mut producer = Info::new().produce();
@@ -1348,7 +1348,7 @@ mod test {
 		track2_consumer.assert_group();
 	}
 
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	#[cfg(feature = "async")]
 	async fn closed() {
 		let mut producer = Info::new().produce();
@@ -1377,7 +1377,7 @@ mod test {
 	}
 
 	/// `close()` ends the broadcast for every clone at once, and a second close is a no-op.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	#[cfg(feature = "async")]
 	async fn close_ends_every_clone() {
 		let producer = Info::new().produce();
@@ -1394,7 +1394,7 @@ mod test {
 	}
 
 	/// Dropping the last producer ends the broadcast exactly like `close()`.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	#[cfg(feature = "async")]
 	async fn drop_ends_like_close() {
 		let producer = Info::new().produce();
@@ -1404,7 +1404,7 @@ mod test {
 		assert!(matches!(consumer.track("video"), Err(Error::Unroutable)));
 	}
 
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	#[cfg(feature = "async")]
 	async fn requests() {
 		let mut producer = Info::new().produce().dynamic();
@@ -1445,7 +1445,7 @@ mod test {
 		assert!(track5.is_err(), "should have errored");
 	}
 
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	#[cfg(feature = "async")]
 	async fn stale_producer() {
 		let mut broadcast = Info::new().produce().dynamic();
@@ -1545,7 +1545,7 @@ mod test {
 		assert!(producer.state.lock().sequences.len() < 16);
 	}
 
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	#[cfg(feature = "async")]
 	async fn requested_unused() {
 		let mut broadcast = Info::new().produce().dynamic();
@@ -1605,7 +1605,7 @@ mod test {
 	/// ever sees the (now-taken) name. Without this the requester is stranded:
 	/// the name exists the moment the track does, so the queue entry could
 	/// never be served under it.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	#[cfg(feature = "async")]
 	async fn create_track_fulfills_queued_request() {
 		let producer = Info::new().produce();
@@ -1679,7 +1679,7 @@ mod test {
 	/// end. Ending the broadcast is where it does: `Consumer::track` answers
 	/// `Unroutable` for a name asked about after this point, so whoever asked earlier gets
 	/// the same answer instead of waiting on info that can never arrive.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	#[cfg(feature = "async")]
 	async fn close_resolves_a_reserved_name() {
 		let producer = Info::new().produce();
@@ -1694,7 +1694,7 @@ mod test {
 
 	/// A request still queued for a handler is the same parking case reached from the
 	/// consumer side, so it ends the same way.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	#[cfg(feature = "async")]
 	async fn close_resolves_a_queued_request() {
 		let producer = Info::new().produce();
@@ -1710,7 +1710,7 @@ mod test {
 
 	/// A queued request answers the same when the broadcast ends by its last handle
 	/// dropping, even when that handle is the `Dynamic` that would have served it.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	#[cfg(feature = "async")]
 	async fn dropping_the_last_handle_resolves_a_queued_request() {
 		let dynamic = Info::new().produce().dynamic();
@@ -1724,7 +1724,7 @@ mod test {
 
 	/// With a producer still alive, losing the last handler is not the broadcast ending:
 	/// the queued request fails as `Dropped`.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	#[cfg(feature = "async")]
 	async fn dropping_the_last_handler_resolves_a_queued_request_dropped() {
 		let producer = Info::new().produce();
@@ -1741,7 +1741,7 @@ mod test {
 	/// A request a handler already took is the handler's to answer: it may be in flight
 	/// to a peer, and a retraction does not disturb subscriptions already in flight.
 	/// Whatever the handler decides still reaches the consumer.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	#[cfg(feature = "async")]
 	async fn close_leaves_a_claimed_request_to_its_handler() {
 		let producer = Info::new().produce();
@@ -1774,7 +1774,7 @@ mod test {
 	/// accepted, but it does not create a live publisher. Closing the broadcast
 	/// must still reject that name so an arrival-order subscriber does not park on
 	/// backfill that is deliberately absent from its queue.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	#[cfg(feature = "async")]
 	async fn close_resolves_an_unaccepted_track_with_fetched_info() {
 		let producer = Info::new().produce();
@@ -1799,7 +1799,7 @@ mod test {
 
 	/// Ending the broadcast doesn't cascade into a track someone is publishing: it keeps
 	/// its cache and its publisher decides when it ends. Only a new lookup is refused.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	#[cfg(feature = "async")]
 	async fn close_spares_a_served_track() {
 		let producer = Info::new().produce();
@@ -1819,7 +1819,7 @@ mod test {
 	/// The publisher may still be holding the `track::Request` for a name the broadcast
 	/// just gave up on. Accepting it afterwards must not resurrect the track, or a
 	/// subscriber that was told `Unroutable` could be contradicted by a later one.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	#[cfg(feature = "async")]
 	async fn close_leaves_a_stale_reservation_inert() {
 		let producer = Info::new().produce();
@@ -1841,7 +1841,7 @@ mod test {
 	/// Dropping a `track::Request` is not a verdict about the name, so it resolves as
 	/// `Dropped` (a handler lost to a crashed publisher or a dead transport), never as
 	/// `NotFound`. Only an explicit rejection may claim the track is absent.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	#[cfg(feature = "async")]
 	async fn dropping_a_reserved_request_resolves_dropped() {
 		let producer = Info::new().produce();
@@ -1857,7 +1857,7 @@ mod test {
 
 	/// `track::Request::reject` carries its reason the same way, which is what lets a
 	/// subscriber tell "no such track" from "the publisher went away".
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	#[cfg(feature = "async")]
 	async fn rejecting_a_reserved_request_carries_the_reason() {
 		let producer = Info::new().produce();
@@ -1876,7 +1876,7 @@ mod test {
 	/// teardown commits. The returning viewer keeps the track alive, and once it
 	/// really does commit the cached handle is reclaimed rather than handed out
 	/// cancelled.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	#[cfg(feature = "async")]
 	async fn an_idle_teardown_yields_to_a_returning_viewer() {
 		let producer = Info::new().produce();

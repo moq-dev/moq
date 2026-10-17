@@ -24,6 +24,7 @@
 	},
 	"type": "module",
 	"workspaces": [
+		"bench/browser",
 		"doc",
 		"js/net",
 		"js/p2p",
