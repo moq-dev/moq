@@ -233,6 +233,25 @@ impl<'a> SendStream<'a> {
         self.write_source(&mut BytesArray::from_chunks(data))
     }
 
+    /// How many bytes a write would accept right now
+    ///
+    /// Zero when a write would block or fail. Lets a caller size a chunk before taking it from a
+    /// buffer it cannot put bytes back into.
+    pub fn write_limit(&self) -> usize {
+        if self.conn_state.is_closed() {
+            return 0;
+        }
+        let budget = match self.state.send.get(&self.id) {
+            None => return 0,
+            Some(None) => self.state.max_send_data(self.id).into_inner(),
+            Some(Some(stream)) if !stream.is_writable() || stream.stop_reason.is_some() => {
+                return 0;
+            }
+            Some(Some(stream)) => stream.max_data - stream.offset(),
+        };
+        usize::try_from(budget.min(self.state.write_limit())).unwrap_or(usize::MAX)
+    }
+
     fn write_source<B: BytesSource>(&mut self, source: &mut B) -> Result<Written, WriteError> {
         if self.conn_state.is_closed() {
             trace!(%self.id, "write blocked; connection draining");

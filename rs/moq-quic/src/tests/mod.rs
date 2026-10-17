@@ -2339,7 +2339,9 @@ fn test_flow_control(config: TransportConfig, window_size: usize) {
     // Stream reset before read
     let s = pair.client_streams(client_ch).open(Dir::Uni).unwrap();
     info!("writing");
+    assert_eq!(pair.client_send(client_ch, s).write_limit(), window_size);
     assert_eq!(pair.client_send(client_ch, s).write(&msg), Ok(window_size));
+    assert_eq!(pair.client_send(client_ch, s).write_limit(), 0);
     assert_eq!(
         pair.client_send(client_ch, s).write(&msg[window_size..]),
         Err(WriteError::Blocked)
@@ -2347,6 +2349,7 @@ fn test_flow_control(config: TransportConfig, window_size: usize) {
     pair.drive();
     info!("resetting");
     pair.client_send(client_ch, s).reset(VarInt(42)).unwrap();
+    assert_eq!(pair.client_send(client_ch, s).write_limit(), 0);
     pair.drive();
 
     let mut recv = pair.server_recv(server_ch, s);
@@ -2360,7 +2363,9 @@ fn test_flow_control(config: TransportConfig, window_size: usize) {
     // Happy path
     info!("writing");
     let s = pair.client_streams(client_ch).open(Dir::Uni).unwrap();
+    assert_eq!(pair.client_send(client_ch, s).write_limit(), window_size);
     assert_eq!(pair.client_send(client_ch, s).write(&msg), Ok(window_size));
+    assert_eq!(pair.client_send(client_ch, s).write_limit(), 0);
     assert_eq!(
         pair.client_send(client_ch, s).write(&msg[window_size..]),
         Err(WriteError::Blocked)
@@ -2392,7 +2397,9 @@ fn test_flow_control(config: TransportConfig, window_size: usize) {
     assert_eq!(cursor, window_size);
     pair.drive();
     info!("writing");
+    assert_eq!(pair.client_send(client_ch, s).write_limit(), window_size);
     assert_eq!(pair.client_send(client_ch, s).write(&msg), Ok(window_size));
+    assert_eq!(pair.client_send(client_ch, s).write_limit(), 0);
     assert_eq!(
         pair.client_send(client_ch, s).write(&msg[window_size..]),
         Err(WriteError::Blocked)
