@@ -27,7 +27,8 @@ one source timeline. `ContainerStreamProducer` takes `ContainerStreamInit`; omit
 its timebase keeps an independent offset. A timebase belongs to its broadcast and
 does not keep it open.
 Construct readers with `CatalogConsumer.subscribe`, `TrackConsumer.subscribe`, or
-`GroupConsumer.fetch`. For arrival-order reads, decode each group from
+`GroupConsumer.fetch`; the last two take a catalog `Rendition` and follow its broadcast and
+track themselves. For arrival-order reads, decode each group from
 `dev.moq.TrackConsumer.recvGroup()` with `dev.moq.media.GroupConsumer(group, container)`; frames
 carry container media time as they land. Like `TrackProducer`, these names also exist at the
 root for moq-net handles, so qualify them when both packages are star-imported.

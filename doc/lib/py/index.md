@@ -51,9 +51,7 @@ async def main():
             broadcast = await client.request_broadcast(announcement.prefix)
             catalog = await moq.media.catalog(broadcast)
             name, audio = next(iter(catalog.audio.items()))
-            # The track is the rendition's `track` when set, otherwise its catalog key.
-            track = audio.track if audio.track is not None else name
-            async for frame in await moq.media.TrackConsumer.subscribe(broadcast, track, audio.container):
+            async for frame in await moq.media.TrackConsumer.subscribe(broadcast, name, audio):
                 print(frame.timestamp, len(frame.payload))
 
 asyncio.run(main())

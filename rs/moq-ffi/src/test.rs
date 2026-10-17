@@ -250,6 +250,26 @@ async fn next_announced(announced: &MoqAnnounceConsumer) -> MoqAnnounce {
 	}
 }
 
+/// A rendition keyed by its track name, for a track with no catalog of its own.
+fn rendition(name: &str, container: MoqContainer) -> MoqRendition {
+	MoqRendition::Video {
+		name: name.into(),
+		config: MoqVideo {
+			label: None,
+			broadcast: None,
+			track: None,
+			codec: "avc1.64001f".into(),
+			description: None,
+			coded: None,
+			display_aspect: None,
+			bitrate: None,
+			enabled: true,
+			framerate: None,
+			container,
+		},
+	}
+}
+
 /// An Opus rendition whose catalog `broadcast` field names `reference`.
 #[cfg(feature = "audio")]
 fn sibling_audio(reference: &str) -> crate::media::MoqAudio {
@@ -539,12 +559,14 @@ async fn raw_audio_activity() {
 		.expect("timed out waiting for raw audio catalog")
 		.unwrap()
 		.expect("expected a raw audio catalog");
-	let container = catalog.audio.get("microphone").unwrap().container.clone();
+	let rendition = MoqRendition::Audio {
+		name: "microphone".into(),
+		config: catalog.audio["microphone"].clone(),
+	};
 	let subscription = MoqMediaTrackConsumer::subscribe(
 		&consumer,
 		MoqMediaTrackConfig {
-			name: "microphone".into(),
-			container: container.clone(),
+			rendition: rendition.clone(),
 			subscription: None,
 		},
 	)
@@ -576,8 +598,7 @@ async fn raw_audio_activity() {
 	let subscription = MoqMediaTrackConsumer::subscribe(
 		&consumer,
 		MoqMediaTrackConfig {
-			name: "microphone".into(),
-			container,
+			rendition,
 			subscription: None,
 		},
 	)
@@ -1528,9 +1549,8 @@ async fn fetches_cached_media_group_and_decodes_container() {
 	let fetched = MoqMediaGroupConsumer::fetch(
 		&consumer,
 		MoqMediaGroupConfig {
-			name: "media".into(),
+			rendition: rendition("media", crate::media::MoqContainer::Legacy),
 			sequence: 0,
-			container: crate::media::MoqContainer::Legacy,
 			options: Some(MoqFetchGroupOptions {
 				priority: 7,
 				max_delay_us: None,
@@ -1561,9 +1581,8 @@ async fn fetch_media_group_rejects_invalid_container_before_fetching() {
 	let result = MoqMediaGroupConsumer::fetch(
 		&consumer,
 		MoqMediaGroupConfig {
-			name: "media".into(),
+			rendition: rendition("media", crate::media::MoqContainer::Cmaf { init: Vec::new() }),
 			sequence: 0,
-			container: crate::media::MoqContainer::Cmaf { init: Vec::new() },
 			options: None,
 		},
 	)
@@ -1610,9 +1629,8 @@ async fn fetch_media_group_decodes_multiple_cmaf_samples() {
 		MoqMediaGroupConsumer::fetch(
 			&consumer,
 			MoqMediaGroupConfig {
-				name: "video".into(),
+				rendition: rendition("video", crate::media::MoqContainer::Cmaf { init: init.to_vec() }),
 				sequence: 0,
-				container: crate::media::MoqContainer::Cmaf { init: init.to_vec() },
 				options: None,
 			},
 		),
@@ -2036,8 +2054,7 @@ async fn requested_track_keeps_its_name() {
 		MoqMediaTrackConsumer::subscribe(
 			&consumer,
 			MoqMediaTrackConfig {
-				name: "requested".into(),
-				container: crate::media::MoqContainer::Legacy,
+				rendition: rendition("requested", crate::media::MoqContainer::Legacy),
 				subscription: None,
 			},
 		)
@@ -2076,8 +2093,7 @@ async fn dynamic_track_request_can_publish_media() {
 			MoqMediaTrackConsumer::subscribe(
 				&consumer,
 				MoqMediaTrackConfig {
-					name: "requested-audio".into(),
-					container: crate::media::MoqContainer::Legacy,
+					rendition: rendition("requested-audio", crate::media::MoqContainer::Legacy),
 					subscription: None,
 				},
 			)
@@ -2338,6 +2354,99 @@ async fn audio_consumer_follows_a_sibling_broadcast_reference() {
 		missing.is_err(),
 		"the catalog broadcast does not serve the track itself"
 	);
+
+	catalog.close().unwrap();
+	source.close().unwrap();
+}
+
+/// A container subscription and a group fetch take the rendition, not a track name, and follow
+/// both its broadcast reference and its `track`. Every other pairing of broadcast and name serves
+/// a decoy, so dropping either half of the rendition reads the wrong content.
+#[tokio::test]
+async fn media_consumers_follow_a_rendition_track_in_a_sibling_broadcast() {
+	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
+	let consumer = origin.consume();
+	let catalog = create_announced(&origin, "a/pub");
+	let source = create_announced(&origin, "a/source");
+
+	let publish = |broadcast: &MoqBroadcastProducer, name: &str, payload: &'static [u8]| {
+		let track = broadcast
+			.with_state(|state| Ok(state.broadcast.create_track(name, timed()).unwrap()))
+			.unwrap();
+		let mut media = moq_mux::container::Producer::new(
+			track,
+			moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Data),
+		);
+		media
+			.write(moq_mux::container::Frame {
+				timestamp: moq_net::Timestamp::from_micros(0).unwrap(),
+				payload: bytes::Bytes::from_static(payload),
+				keyframe: true,
+				duration: None,
+			})
+			.unwrap();
+		media
+	};
+	let _right = publish(&source, "camera", b"right");
+	let _decoys = [
+		publish(&source, "hd", b"wrong"),
+		publish(&catalog, "hd", b"wrong"),
+		publish(&catalog, "camera", b"wrong"),
+	];
+
+	let broadcast = await_announced(&consumer, "a/pub").await;
+	await_announced(&consumer, "a/source").await;
+
+	let MoqRendition::Video { mut config, .. } = rendition("hd", MoqContainer::Legacy) else {
+		unreachable!()
+	};
+	config.broadcast = Some("./source".into());
+	config.track = Some("camera".into());
+	let rendition = MoqRendition::Video {
+		name: "hd".into(),
+		config,
+	};
+
+	let live = tokio::time::timeout(
+		TIMEOUT,
+		MoqMediaTrackConsumer::subscribe(
+			&broadcast,
+			MoqMediaTrackConfig {
+				rendition: rendition.clone(),
+				subscription: None,
+			},
+		),
+	)
+	.await
+	.expect("timed out subscribing to the rendition")
+	.unwrap();
+	let frame = tokio::time::timeout(TIMEOUT, live.next())
+		.await
+		.expect("timed out reading the rendition")
+		.unwrap()
+		.expect("expected a frame");
+	assert_eq!(frame.payload, b"right");
+
+	let fetched = tokio::time::timeout(
+		TIMEOUT,
+		MoqMediaGroupConsumer::fetch(
+			&broadcast,
+			MoqMediaGroupConfig {
+				rendition,
+				sequence: 0,
+				options: None,
+			},
+		),
+	)
+	.await
+	.expect("timed out fetching the rendition")
+	.unwrap();
+	let frame = tokio::time::timeout(TIMEOUT, fetched.next())
+		.await
+		.expect("timed out reading the fetched group")
+		.unwrap()
+		.expect("expected a frame");
+	assert_eq!(frame.payload, b"right");
 
 	catalog.close().unwrap();
 	source.close().unwrap();
@@ -2613,8 +2722,10 @@ async fn local_publish_consume_audio() {
 	let media_consumer = MoqMediaTrackConsumer::subscribe(
 		&broadcast_consumer,
 		MoqMediaTrackConfig {
-			name: track_name.clone(),
-			container: audio.container.clone(),
+			rendition: MoqRendition::Audio {
+				name: track_name.clone(),
+				config: audio.clone(),
+			},
 			subscription: None,
 		},
 	)
@@ -2682,8 +2793,10 @@ async fn video_publish_consume() {
 	let media_consumer = MoqMediaTrackConsumer::subscribe(
 		&broadcast_consumer,
 		MoqMediaTrackConfig {
-			name: track_name.clone(),
-			container: video.container.clone(),
+			rendition: MoqRendition::Video {
+				name: track_name.clone(),
+				config: video.clone(),
+			},
 			subscription: None,
 		},
 	)
@@ -2795,8 +2908,10 @@ async fn video_raw_publish_consume() {
 	let media_consumer = MoqMediaTrackConsumer::subscribe(
 		&broadcast_consumer,
 		MoqMediaTrackConfig {
-			name: track_name.clone(),
-			container: rendition.container.clone(),
+			rendition: MoqRendition::Video {
+				name: track_name.clone(),
+				config: rendition.clone(),
+			},
 			subscription: None,
 		},
 	)
@@ -3149,8 +3264,10 @@ async fn multiple_frames_ordering() {
 	let media_consumer = MoqMediaTrackConsumer::subscribe(
 		&broadcast_consumer,
 		MoqMediaTrackConfig {
-			name: track_name.clone(),
-			container: audio.container.clone(),
+			rendition: MoqRendition::Audio {
+				name: track_name.clone(),
+				config: audio.clone(),
+			},
 			subscription: None,
 		},
 	)
@@ -4235,8 +4352,10 @@ async fn server_client_roundtrip() {
 	let media_consumer = MoqMediaTrackConsumer::subscribe(
 		&bc,
 		MoqMediaTrackConfig {
-			name: track_name.clone(),
-			container: audio.container.clone(),
+			rendition: MoqRendition::Audio {
+				name: track_name.clone(),
+				config: audio.clone(),
+			},
 			subscription: None,
 		},
 	)

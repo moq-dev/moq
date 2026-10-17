@@ -28,7 +28,8 @@ imports use one source timeline. `ContainerStreamProducer` takes `ContainerStrea
 omitting its timebase keeps an independent offset. A timebase belongs to its broadcast
 and does not keep it open.
 `media.CatalogConsumer.subscribe`, `media.TrackConsumer.subscribe`, and `media.GroupConsumer.fetch`
-construct the read side from a broadcast. For arrival-order reads, decode each group from
+construct the read side from a broadcast; the last two take a catalog `media.Rendition` and
+follow its broadcast and track themselves. For arrival-order reads, decode each group from
 `TrackConsumer.recvGroup()` with `media.GroupConsumer(group: ..., container: ...)`; frames
 carry container media time as they land.
 
