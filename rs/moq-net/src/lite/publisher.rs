@@ -3429,14 +3429,7 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 			return Poll::Ready(Err(err));
 		}
 
-		// Lite-05/06 name a sequence as soon as this cursor gives it up. Before
-		// SUBSCRIBE_START there is no owed range yet, so the eventual start accounts
-		// for it instead.
-		if self.start.is_some()
-			&& self.served.is_some()
-			&& let Poll::Ready(range) = self.track.poll_drop(waiter)
-		{
-			self.drop_range(range, writer)?;
+		if self.poll_forward_drop(writer, waiter)? {
 			return Poll::Ready(Ok(ControlFlow::Continue(())));
 		}
 
@@ -3496,6 +3489,11 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 						tracing::debug!(subscribe = self.ctx.id, track = %self.ctx.track_name, sequence = group.sequence, "skipping group with a missing head");
 						if self.emit_range && self.start.is_none() {
 							self.skipped.insert(group.sequence);
+						} else if self.start.is_some()
+							&& let Some(end) = group.sequence.checked_add(1)
+						{
+							// Lite-05/06 name it now; a no-op on other versions.
+							self.drop_range(group.sequence..end, writer)?;
 						}
 						return Poll::Ready(Ok(ControlFlow::Continue(())));
 					}
@@ -3533,7 +3531,29 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 			return Poll::Ready(Ok(ControlFlow::Continue(())));
 		}
 
+		// Receiving can queue a stale skip after the poll above found nothing, without a wake.
+		if self.poll_forward_drop(writer, waiter)? {
+			return Poll::Ready(Ok(ControlFlow::Continue(())));
+		}
 		Poll::Pending
+	}
+
+	/// Lite-05/06 name a sequence as soon as this cursor gives it up; whether one went out.
+	/// Before SUBSCRIBE_START there is no owed range yet, so the eventual start accounts
+	/// for it instead.
+	fn poll_forward_drop(
+		&mut self,
+		writer: &mut Writer<S::SendStream, Version>,
+		waiter: &kio::Waiter,
+	) -> Result<bool, Error> {
+		if self.start.is_none() || self.served.is_none() {
+			return Ok(false);
+		}
+		let Poll::Ready(range) = self.track.poll_drop(waiter) else {
+			return Ok(false);
+		};
+		self.drop_range(range, writer)?;
+		Ok(true)
 	}
 
 	/// Send a datagram, recording its sequence once it went out.
@@ -4909,6 +4929,58 @@ mod serve_group_test {
 		kio::wait(|waiter| run.poll(&mut writer, waiter)).await.unwrap();
 		assert_eq!(drops(&mut writer, &log, version).await, [(1, 1)]);
 		assert_eq!(run.ctx.opens.opened.load(Ordering::Relaxed), 2, "groups 0 and 2 only");
+	}
+
+	/// A late group the cursor skips as stale is dropped at once, even when it is the only
+	/// unread group and nothing else wakes the run.
+	#[moq_net_sim::test]
+	async fn a_late_stale_group_is_dropped_early() {
+		let version = Version::Lite06;
+		let mut track = track::Producer::new(
+			Arc::new(broadcast::Info::default()),
+			"test",
+			crate::track::Info::timed(),
+		);
+		let subscriber = track.subscribe(track::Subscription::default().with_max_delay(Duration::from_secs(1)));
+		let (mut run, mut writer, log) = lite_run(version, SinkSession::new(Log::default()), subscriber);
+		write_group(&mut track, 0, 0);
+		write_group(&mut track, 2, 2);
+		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+		assert!(run.start.is_some());
+		assert_eq!(drops(&mut writer, &log, version).await, []);
+
+		// Its successor arrived a full budget ago, so group 1 is stale on the wall clock.
+		moq_net_sim::advance(Duration::from_secs(2)).await;
+		write_group(&mut track, 1, 1);
+		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+		assert_eq!(run.ctx.opens.opened.load(Ordering::Relaxed), 2, "group 1 is not served");
+		assert_eq!(drops(&mut writer, &log, version).await, [(1, 1)]);
+	}
+
+	/// A group skipped for a missing head after SUBSCRIBE_START is dropped at once, not
+	/// left for the end sweep.
+	#[moq_net_sim::test]
+	async fn a_missing_head_is_dropped_early() {
+		let version = Version::Lite06;
+		let mut track = track::Producer::new(
+			Arc::new(broadcast::Info::default()),
+			"test",
+			crate::track::Info::timed(),
+		);
+		let subscriber = track.subscribe(track::Subscription::default().with_max_delay(Duration::from_secs(60)));
+		let (mut run, mut writer, log) = lite_run(version, SinkSession::new(Log::default()), subscriber);
+		write_group(&mut track, 0, 0);
+		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+		assert!(run.start.is_some());
+
+		let mut headless = track.create_group(group::Info { sequence: 1 }).unwrap();
+		headless.start_at(1).unwrap();
+		headless
+			.write_frame(Timestamp::from_millis(1).unwrap(), b"x".as_slice())
+			.unwrap();
+		headless.finish().unwrap();
+		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
+		assert_eq!(drops(&mut writer, &log, version).await, [(1, 1)]);
 	}
 
 	/// A SUBSCRIBE_UPDATE that lowers the start below SUBSCRIBE_START asks for those groups
