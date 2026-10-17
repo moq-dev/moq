@@ -26,6 +26,7 @@ import {
 	supportCacheKey,
 } from "./config";
 import { caughtUp, renditionJitter, switchJitter } from "./playhead";
+import { Recovery } from "./recovery";
 import type { Source } from "./source";
 
 // The amount of time to wait before considering the video to be buffering.
@@ -227,6 +228,11 @@ export class Decoder {
 		this.#instance = { path: active.path, closed: active.closed };
 		if (republished) this.sync.reset();
 
+		// Only a rendition read from the same path continues the outgoing arrival estimate: another
+		// path's arrivals have nothing to do with what this one learned.
+		const outgoing = this.#active.peek();
+		const predecessor = outgoing?.broadcast.path === active.path ? outgoing.consumer : undefined;
+
 		// Start a new pending effect.
 		let pending: DecoderTrack | undefined = new DecoderTrack({
 			sync: this.sync,
@@ -237,6 +243,7 @@ export class Decoder {
 			identity: key,
 			stats: this.#out.stats,
 			catalog: broadcast.out.catalog,
+			predecessor,
 		});
 		this.#selected = pending;
 		effect.run((inner) => {
@@ -398,6 +405,9 @@ interface DecoderTrackProps {
 	// The broadcast catalog this subscription started from. Updates on that broadcast still apply;
 	// a later source does not.
 	catalog: Getter<Catalog.Root | undefined>;
+	// The consumer of the rendition on screen when this one was selected from the same path, whose
+	// arrival estimate it continues.
+	predecessor?: Container.Consumer;
 
 	stats: Signal<Stats | undefined>;
 }
@@ -433,6 +443,11 @@ class DecoderTrack {
 	// The playhead moved and the next decoded frame decides whether the decoder resets.
 	#resetPending = false;
 
+	// The newest consumer reading this track, whose estimate a replacement continues. The predecessor
+	// is only held until the first one opens.
+	consumer?: Container.Consumer;
+	#predecessor?: Container.Consumer;
+
 	#signals = new Effect();
 
 	constructor(props: DecoderTrackProps) {
@@ -444,8 +459,23 @@ class DecoderTrack {
 		this.identity = props.identity;
 		this.catalog = props.catalog;
 		this.stats = props.stats;
+		this.#predecessor = props.predecessor;
 
 		this.#signals.run(this.#run.bind(this));
+	}
+
+	// Reorders groups and frames up to the shared max delay. A rendition switch is not a cold start:
+	// the path's arrivals are what they were, so the estimate continues from whatever read before.
+	#consume(effect: Effect, sub: Moq.Track.Subscriber, format: Container.Format): Container.Consumer {
+		const consumer = new Container.Consumer(sub, {
+			format,
+			maxDelay: this.sync.out.maxDelay,
+			predecessor: this.consumer ?? this.#predecessor,
+		});
+		effect.cleanup(() => consumer.close());
+		this.consumer = consumer;
+		this.#predecessor = undefined;
+		return consumer;
 	}
 
 	#run(effect: Effect): void {
@@ -532,12 +562,7 @@ class DecoderTrack {
 			this.config.container.kind === "loc"
 				? new Container.Loc.Format("video")
 				: new Container.Legacy.Format(this.config);
-		// Create consumer that reorders groups/frames up to the provided latency.
-		const consumer = new Container.Consumer(sub, {
-			format,
-			maxDelay: this.sync.out.maxDelay,
-		});
-		effect.cleanup(() => consumer.close());
+		const consumer = this.#consume(effect, sub, format);
 
 		// Combine network jitter buffer with decode buffer
 		effect.run((inner) => {
@@ -554,6 +579,7 @@ class DecoderTrack {
 
 		let previous: Micro | undefined;
 		let latest: number | undefined;
+		const recovery = new Recovery();
 
 		effect.spawn(async () => {
 			for (;;) {
@@ -563,7 +589,10 @@ class DecoderTrack {
 				// A gap or a declared end breaks the timeline: re-anchor before decoding further, and
 				// never bridge the buffer across it.
 				if (next.kind !== "frame") {
-					if (next.kind === "gap") this.arrivals?.write(gap(next));
+					if (next.kind === "gap") {
+						recovery.gap();
+						this.arrivals?.write(gap(next));
+					}
 					if (latest !== undefined) this.#onBreak();
 					previous = undefined;
 					continue;
@@ -574,11 +603,12 @@ class DecoderTrack {
 				// sequences only grow within a subscription, so a break (which a stale marker can
 				// raise) never resets this guard. Rejected payloads still count as received bytes.
 				const stale = latest !== undefined && next.group < latest;
+				const accepted = !stale && recovery.accept(frame);
 				this.stats.update((current) => ({
-					frameCount: (current?.frameCount ?? 0) + (stale ? 0 : 1),
+					frameCount: (current?.frameCount ?? 0) + (accepted ? 1 : 0),
 					bytesReceived: (current?.bytesReceived ?? 0) + frame.payload.byteLength,
 				}));
-				if (stale) continue;
+				if (!accepted) continue;
 
 				// Classify ingress before decoder backpressure changes the delivery clock.
 				const timestamp = Milli.fromMicro(frame.timestamp as Micro);
@@ -617,11 +647,7 @@ class DecoderTrack {
 		const init = Container.Cmaf.decodeInitSegment(initSegment);
 		const description = this.config.description ? Util.Hex.toBytes(this.config.description) : init.description;
 
-		const consumer = new Container.Consumer(sub, {
-			format: new Container.Cmaf.Format(init),
-			maxDelay: this.sync.out.maxDelay,
-		});
-		effect.cleanup(() => consumer.close());
+		const consumer = this.#consume(effect, sub, new Container.Cmaf.Format(init));
 
 		// Combine network jitter buffer with decode buffer
 		effect.run((inner) => {
@@ -639,6 +665,7 @@ class DecoderTrack {
 
 		let previous: Micro | undefined;
 		let latest: number | undefined;
+		const recovery = new Recovery();
 
 		effect.spawn(async () => {
 			for (;;) {
@@ -647,7 +674,10 @@ class DecoderTrack {
 
 				// A gap or a declared end breaks the timeline (see #runLegacy).
 				if (next.kind !== "frame") {
-					if (next.kind === "gap") this.arrivals?.write(gap(next));
+					if (next.kind === "gap") {
+						recovery.gap();
+						this.arrivals?.write(gap(next));
+					}
 					if (latest !== undefined) this.#onBreak();
 					previous = undefined;
 					continue;
@@ -658,11 +688,12 @@ class DecoderTrack {
 				// sequences only grow within a subscription, so a break (which a stale marker can
 				// raise) never resets this guard. Rejected payloads still count as received bytes.
 				const stale = latest !== undefined && next.group < latest;
+				const accepted = !stale && recovery.accept(frame);
 				this.stats.update((current) => ({
-					frameCount: (current?.frameCount ?? 0) + (stale ? 0 : 1),
+					frameCount: (current?.frameCount ?? 0) + (accepted ? 1 : 0),
 					bytesReceived: (current?.bytesReceived ?? 0) + frame.payload.byteLength,
 				}));
-				if (stale) continue;
+				if (!accepted) continue;
 
 				// Classify ingress before decoder backpressure changes the delivery clock.
 				const timestamp = Milli.fromMicro(frame.timestamp);

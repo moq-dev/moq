@@ -92,14 +92,14 @@ endpoint on the accept side and per dial on the connect side.
 
 ## Validation
 
-`tests/echo.rs` runs an echo against a tokio QUIC peer over the worker:
+`tests/integration/echo.rs` runs an echo against a tokio QUIC peer over the worker:
 handshake, half a megabyte each way, and timers driven by moq-quic's timeout.
-`tests/session.rs` runs full moq-lite sessions through
+`tests/integration/session.rs` runs full moq-lite sessions through
 `quic::Endpoint` (including two clients demuxed on one server socket), and
-`tests/endpoint.rs` covers the endpoint mechanics (dial+accept on one socket,
-version negotiation, the dial-only refusal), `tests/workers.rs` runs a
+`tests/integration/endpoint.rs` covers the endpoint mechanics (dial+accept on one socket,
+version negotiation, the dial-only refusal), `tests/integration/workers.rs` runs a
 steered two-worker reuseport group serving one port across threads, and
-`tests/web.rs` is WebTransport interop against moq-tokio's: stream and
+`tests/integration/web.rs` is WebTransport interop against moq-tokio's: stream and
 datagram echo through the H3 framing,
 close codes through the capsule, and a full moq-lite session over
 WebTransport. All of them skip (loudly) below the kernel floor, which

@@ -292,8 +292,6 @@ impl Default for Config {
 	}
 }
 
-#[cfg(feature = "quic")]
-pub(crate) use moq_sock::shard::Shard;
 /// One server's socket in a complete `SO_REUSEPORT` group.
 ///
 /// Crate-private on purpose: [`crate::worker::Workers`] is the only thing that

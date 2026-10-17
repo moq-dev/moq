@@ -3,9 +3,9 @@
 ## Goal
 
 A measured, written verdict on the QUIC receive-timestamps extension
-(draft-smith-quic-receive-ts) between native `moq-quic` peers: how much more
-accurate its per-packet one-way delay is than the half-RTT estimate the
-[deadline quest](/quest/m2/quic-deadline.md) starts with, and what its ACK
+(draft-ietf-quic-receive-ts) between native `moq-quic` peers: whether its
+receive-time differences improve the forward-delay estimate used by the
+[deadline quest](/quest/m2/quic-deadline.md), and what its ACK
 overhead costs on relay egress. A written abandonment is a successful
 outcome.
 
@@ -22,10 +22,12 @@ as its own quest only if this spike says they are cheap and accurate.
   frame variant with timestamp ranges, and a way for `congestion::Controller`
   (or a test hook) to see each acknowledged packet's receive instant. Both
   ends are ours.
-- Compare the forward delay it measures against the half-RTT estimate on the
-  impaired path profile with asymmetric delay. Report how often the half-RTT
-  estimate would have kept a hopeless retransmission or reset a deliverable
-  one.
+- Receive timestamps alone measure delay variation, not absolute one-way
+  delay: the receiver's clock origin is not communicated (the draft's
+  section 6.1). State clock offset and drift assumptions. Compare an explicit
+  estimator against known simulator/netem delay and the half-RTT baseline on
+  asymmetric paths; do not label raw receive timestamps absolute delay.
+  Report mistaken retransmit/reset decisions and estimator uncertainty.
 - Measure the ACK overhead the timestamps add on a fanout-shaped relay egress,
   with and without the ACK-frequency extension reducing ACK rate.
 

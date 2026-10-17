@@ -5932,6 +5932,10 @@ impl<S: crate::transport::poll::Session> kio::Task for FetchServeRun<S> {
 						broadcast: self.serve.path.as_path(),
 						track: self.serve.name.as_str().into(),
 						priority: request.priority(),
+						// Older wires cannot carry it; the local cache judges it instead.
+						max_delay: request
+							.max_delay()
+							.filter(|_| self.serve.subscriber.version.has_fetch_max_delay()),
 						group: self.group,
 						start_frame: frame_start,
 						// Always through the end of the group: a fetch that stopped short
