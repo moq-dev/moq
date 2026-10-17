@@ -9,6 +9,7 @@ use std::{
 };
 
 use anyhow::Context;
+use futures::FutureExt as _;
 use moq_net::origin;
 use moq_net::{Hop, stats::Tier};
 use reqwest_middleware::ClientWithMiddleware;
@@ -560,7 +561,7 @@ impl DialMap {
 /// keeps the link and its routes until its idle timeout.
 #[derive(Clone)]
 struct Dialers {
-	state: Arc<Mutex<Option<DialersState>>>,
+	state: Arc<Mutex<DialersPhase>>,
 	/// Set on close. Each dial task holds a receiver, so [`watch::Sender::closed`]
 	/// waits for every one of them to end.
 	///
@@ -568,7 +569,14 @@ struct Dialers {
 	stop: Arc<tokio::sync::watch::Sender<bool>>,
 }
 
-/// `None` in [`Dialers`] once closed, which refuses any further dial.
+struct DialersPhase {
+	/// `None` once closed, which refuses any further dial.
+	open: Option<DialersState>,
+	/// The shutdown the first close started, which every close awaits, so none
+	/// returns before it is done.
+	closing: Option<futures::future::Shared<futures::future::BoxFuture<'static, ()>>>,
+}
+
 struct DialersState {
 	clients: HashMap<u64, moq_tokio::Client>,
 	next: u64,
@@ -581,24 +589,27 @@ impl Dialers {
 	fn new() -> Self {
 		let (closing, finished) = tokio::sync::mpsc::channel(1);
 		Self {
-			state: Arc::new(Mutex::new(Some(DialersState {
-				clients: HashMap::new(),
-				next: 0,
-				closing,
-				finished,
-			}))),
+			state: Arc::new(Mutex::new(DialersPhase {
+				open: Some(DialersState {
+					clients: HashMap::new(),
+					next: 0,
+					closing,
+					finished,
+				}),
+				closing: None,
+			})),
 			stop: Arc::new(tokio::sync::watch::Sender::new(false)),
 		}
 	}
 
-	fn lock(&self) -> std::sync::MutexGuard<'_, Option<DialersState>> {
+	fn lock(&self) -> std::sync::MutexGuard<'_, DialersPhase> {
 		self.state.lock().unwrap_or_else(PoisonError::into_inner)
 	}
 
 	/// Keep `client` until [`Self::close`].
 	fn insert(&self, client: &moq_tokio::Client) -> anyhow::Result<u64> {
-		let mut state = self.lock();
-		let state = state.as_mut().context("cluster closed")?;
+		let mut phase = self.lock();
+		let state = phase.open.as_mut().context("cluster closed")?;
 		let id = state.next;
 		state.next += 1;
 		state.clients.insert(id, client.clone());
@@ -628,10 +639,22 @@ impl Dialers {
 	/// Stop every dial task and close every client, including those a dropped
 	/// guard is still closing, and refuse further dials.
 	async fn close(&self) {
-		let Some(state) = self.lock().take() else {
-			return;
+		let closing = {
+			let mut phase = self.lock();
+			let phase = &mut *phase;
+			phase
+				.closing
+				.get_or_insert_with(|| {
+					let state = phase.open.take().expect("open until the first close");
+					Self::shutdown(state, self.stop.clone()).boxed().shared()
+				})
+				.clone()
 		};
-		self.stop.send_replace(true);
+		closing.await;
+	}
+
+	async fn shutdown(state: DialersState, stop: Arc<tokio::sync::watch::Sender<bool>>) {
+		stop.send_replace(true);
 		let DialersState {
 			clients,
 			closing,
@@ -643,7 +666,7 @@ impl Dialers {
 		// Nothing is ever sent: this returns `None` once every sender has dropped.
 		let _ = finished.recv().await;
 		// Each stopped task dropped its link, which ends a non-QUIC one.
-		self.stop.closed().await;
+		stop.closed().await;
 	}
 }
 
@@ -655,9 +678,9 @@ struct Held {
 
 impl Drop for Held {
 	fn drop(&mut self) {
-		let mut state = self.dialers.lock();
+		let mut phase = self.dialers.lock();
 		// Already taken by `Dialers::close`, which closes the client itself.
-		let Some(state) = state.as_mut() else {
+		let Some(state) = phase.open.as_mut() else {
 			return;
 		};
 		let Some(client) = state.clients.remove(&self.id) else {
@@ -1488,9 +1511,10 @@ impl Cluster {
 	}
 
 	/// Close every peer link this cluster dialed, on any transport, and wait until
-	/// each peer has been sent its close. Call it before the runtime stops: a dropped link only queues
-	/// its close, so the peer would keep the link and its routes until its idle
-	/// timeout. Dialing stops for good, on every clone. [`Relay::run`](crate::Relay::run)
+	/// each peer has been sent its close. Call it before the runtime stops: a
+	/// dropped link only queues its close, so the peer would keep the link and its
+	/// routes until its idle timeout. Dialing stops for good, on every clone, and
+	/// every caller waits for the same shutdown. [`Relay::run`](crate::Relay::run)
 	/// calls it on the way out.
 	pub async fn close(&self) {
 		self.dialers.close().await;
@@ -3403,6 +3427,34 @@ mod tests {
 			try_next_announced(&mut local).is_none(),
 			"a peer's broadcast is not local"
 		);
+	}
+
+	/// A second close awaits the shutdown the first started, and still finishes it
+	/// when the first caller gives up, so no caller returns while links are open.
+	#[tokio::test]
+	async fn concurrent_closes_share_one_shutdown() {
+		let dialers = Dialers::new();
+		// Stands in for a dropped guard's background close, which holds the shutdown open.
+		let background = dialers.lock().open.as_ref().expect("open").closing.clone();
+		let first = tokio::spawn({
+			let dialers = dialers.clone();
+			async move { dialers.close().await }
+		});
+		while dialers.lock().open.is_some() {
+			tokio::task::yield_now().await;
+		}
+
+		let mut second = std::pin::pin!(dialers.close());
+		assert!(
+			futures::poll!(second.as_mut()).is_pending(),
+			"a second close returned before the shutdown finished"
+		);
+		first.abort();
+		let _ = first.await;
+		drop(background);
+		tokio::time::timeout(std::time::Duration::from_secs(5), second)
+			.await
+			.expect("the second close finishes the shutdown");
 	}
 
 	/// A LAN dial owns its client, so closing the cluster closes that too: the peer
