@@ -123,7 +123,8 @@ auto audio = ok(moq::MediaTrackProducer::audio(broadcast, moq::MediaTarget::kNam
 ok(audio->write_frame({packet, 20'000}));
 
 moq::VideoEncoderOutput output{moq::VideoCodec::kH264, "camera", std::nullopt, std::nullopt, moq::VideoEncoderKind::kAuto{}};
-auto video = ok(broadcast->encode_video({moq::VideoPixelFormat::kRgba, 1280, 720, 30}, output, nullptr));
+auto catalog = ok(moq::MediaCatalogProducer::init(broadcast));
+auto video = ok(moq::VideoProducer::init(catalog, {moq::VideoPixelFormat::kRgba, 1280, 720, 30}, output, nullptr));
 ok(video->write({0, rgba}));
 moq::Route route;
 route.epoch = moq::mint_epoch(); // a fresh epoch per run

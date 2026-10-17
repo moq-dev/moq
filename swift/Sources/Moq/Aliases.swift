@@ -13,7 +13,7 @@ public typealias Frame = MoqFFI.MoqFrame
 /// One raw-audio frame: PCM samples in the configured layout plus a
 /// presentation timestamp.
 public typealias AudioFrame = MoqFFI.MoqAudioFrame
-/// The PCM layout (format, sample rate, channels) written to an `AudioProducer`.
+/// The PCM layout (format, sample rate, channels) written to an `Audio.Producer`.
 public typealias AudioEncoderInput = MoqFFI.MoqAudioEncoderInput
 /// The encoder-side config for a published audio track: codec, rate, channels,
 /// bitrate, and frame duration.
@@ -33,13 +33,13 @@ public typealias AudioCodec = MoqFFI.MoqAudioCodec
 /// One raw video frame: pixels in the configured layout plus a presentation
 /// timestamp.
 public typealias VideoFrame = MoqFFI.MoqVideoFrame
-/// The pixel layout, resolution, and framerate written to a `VideoProducer`.
+/// The pixel layout, resolution, and framerate written to a `Video.Producer`.
 public typealias VideoEncoderInput = MoqFFI.MoqVideoEncoderInput
 /// The encoder-side config for a published video track: name, codec, bitrate,
 /// keyframe interval, and backend preference.
 public typealias VideoEncoderOutput = MoqFFI.MoqVideoEncoderOutput
-/// A CPU pixel layout (I420 or RGBA): fed to a `VideoProducer`, or delivered
-/// by `decodeVideo`.
+/// A CPU pixel layout (I420 or RGBA): fed to a `Video.Producer`, or delivered
+/// by a `Video.Consumer`.
 public typealias VideoPixelFormat = MoqFFI.MoqVideoPixelFormat
 /// A video codec identifier (H.264 or H.265).
 public typealias VideoCodec = MoqFFI.MoqVideoCodec

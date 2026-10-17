@@ -319,9 +319,8 @@ pub(super) struct LostPacket {
 }
 
 /// Retransmittable data queue
-#[allow(unreachable_pub)] // fuzzing only
 #[derive(Debug, Default, Clone)]
-pub struct Retransmits {
+pub(crate) struct Retransmits {
     pub(super) max_data: bool,
     pub(super) data_blocked: bool,
     pub(super) max_stream_id: [bool; 2],

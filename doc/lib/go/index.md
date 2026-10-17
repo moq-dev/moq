@@ -83,7 +83,10 @@ for event, err := range announced.All(ctx) {
 ```
 
 ```go
-import "time"
+import (
+    "time"
+    moqvideo "moq.dev/moq/video"
+)
 
 // Publish encoded frames, or raw pixels with the codec inside the binding.
 // opusInit, packet, pts, and rgba come from your encoder or capture source.
@@ -94,12 +97,13 @@ _ = audio.WriteFrame(moq.Frame{Payload: packet, Timestamp: &timestamp})
 _ = audio.Cut() // audio has no keyframes, so this is what gives it groups
 
 track := "camera"
-video, _ := broadcast.EncodeVideo(
-    moq.VideoEncoderInput{Format: moq.VideoPixelFormatRgba, Width: 1280, Height: 720, Framerate: 30},
-    moq.VideoEncoderOutput{Codec: moq.VideoCodecH264, Track: &track, Kind: moq.AutoEncoder()},
+catalogProducer, _ := moqmedia.NewCatalogProducer(broadcast)
+video, _ := moqvideo.NewProducer(catalogProducer,
+    moqvideo.EncoderInput{Format: moq.VideoPixelFormatRgba, Width: 1280, Height: 720, Framerate: 30},
+    moqvideo.EncoderOutput{Codec: moq.VideoCodecH264, Track: &track, Kind: moq.AutoEncoder()},
     nil,
 )
-_ = video.Write(moq.VideoFrame{TimestampUs: pts, Data: rgba})
+_ = video.Write(moqvideo.Frame{Timestamp: time.Duration(pts) * time.Microsecond, Data: rgba})
 epoch := moq.MintEpoch() // a fresh epoch per run
 _ = broadcast.Announce(moq.Route{Epoch: &epoch})
 _ = audio.Finish()
