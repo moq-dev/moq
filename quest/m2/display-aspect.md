@@ -38,7 +38,3 @@ reader crops with checked math.
 
 Public API: doc only. Wire: the catalog's existing display aspect fields are
 populated in more cases.
-
-## Related
-
-- [Catalog colour](/quest/m2/color-catalog.md) - parses the same H.264/H.265 VUI for colour
