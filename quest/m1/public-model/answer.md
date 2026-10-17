@@ -83,10 +83,6 @@ Rust items (`rs/moq-net/src/model/`), as they stood at b4eab0db1:
 - `origin::Producer::stats`, `origin::Consumer::stats` (sessions): remove
   the need; the caller keeps the `stats::Session` it passed to the public
   `with_stats`.
-- `bandwidth::Producer::weak`, `bandwidth::Weak`, `Weak::consume` (session
-  handle): already public for moq-tokio. Keep them public: sessions and
-  reconnecting connections mint receive-estimate consumers without the
-  handle itself counting as demand.
 - Test-only: `origin::Producer::announce`, `AnnounceProducer`,
   `ProduceTest`, `origin::Consumer::get_broadcast`.
 
@@ -182,7 +178,6 @@ cover the behavior.
 
 ## Required
 
-- [Narrow the model before it goes public](/quest/m1/public-model/narrow.md) - its visibility rewrite and marker lint guard every model API this child edits
 - [Rust lazy discovery](/quest/m1/lazy-discovery/rust.md) - settles the interest and discovery items before they become public
 
 ## Related

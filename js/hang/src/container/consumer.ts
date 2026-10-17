@@ -53,6 +53,7 @@ interface Group {
 	frames: ReceivedFrame[]; // decode order
 	empty: boolean; // no wire frame was published; empty groups mean nothing
 	media: boolean; // a decodable (non-marker) frame was buffered
+	bare?: boolean; // a data track's marker group: one object with no bytes
 	start?: Micro; // First decoded timestamp
 	minMedia?: Micro; // Lowest decodable timestamp
 	latest?: Micro; // The timestamp of the latest known frame
@@ -218,6 +219,13 @@ export class Consumer {
 				const arrival = Nano.toMilli(Nano(now()));
 
 				const decoded = this.#format.decode(next.payload, next.timestamp);
+				if (this.#format.kind === "data") {
+					// A data track's marker is one object with no bytes, alone in its group.
+					if (group.bare || (decoded.length === 0 && group.media)) {
+						throw new Error("a data track's discontinuity marker shares its group");
+					}
+					group.bare = decoded.length === 0;
+				}
 
 				for (const sample of decoded) {
 					const marker = this.#format.end?.(sample) !== undefined;
@@ -576,6 +584,11 @@ export class Consumer {
 					if (group) {
 						if (group.truncated) this.#lost = true;
 						this.#updateBuffered();
+						// A data track's marker carries no timestamp, so it ends where this reader got to.
+						// Before the first item there is nothing to end.
+						if (group.bare && !group.truncated && this.#edge !== undefined) {
+							return this.#emit({ kind: "end", group: group.consumer.sequence, end: this.#edge });
+						}
 						continue;
 					}
 				}
