@@ -29,7 +29,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::time::Duration;
 
-use web_async::time::Instant;
+use moq_clock::Instant;
 
 use bytes::Bytes;
 use moq_net::Timestamp;
@@ -469,7 +469,7 @@ impl<E: catalog::Catalog> Capture<E> {
 	/// the host clock ([`DEBOUNCE`]), and a first snapshot is never delayed. `force`
 	/// overrides the debounce, for end of stream.
 	pub fn flush(&mut self, pts: Timestamp, force: bool) -> anyhow::Result<()> {
-		let now = Instant::now();
+		let now = moq_clock::now();
 		for (key, entry) in self.entries.iter_mut() {
 			if !entry.dirty {
 				continue;

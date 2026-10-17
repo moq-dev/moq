@@ -78,9 +78,9 @@ Public API: a new optional `Grant::label` in `moq-auth` and `@moq/auth`, and
 `stats::Session::set_tier` becomes a `(tier, label)` retag. Wire: the auth
 HTTP grant body and the stats track's per-label byte fields, not MoQ.
 
+The per-root session outcome counters follow the same label.
+
 ## Related
 
-- [Session outcomes](/quest/m1/session-outcomes.md) - its per-root counters
-  follow the same label
 - [Typed refusal reason](/quest/m1/refusal-reason.md) - a refusal body names
   a root too; decide there whether it may name a label

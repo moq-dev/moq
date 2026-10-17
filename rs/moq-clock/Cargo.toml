@@ -21,23 +21,30 @@ features = ["sim"]
 ignored = ["moq-clock"]
 
 [features]
+default = ["runtime"]
 # The deterministic single-threaded executor and `#[moq_clock::test]`. Meant for
 # dev-dependencies, so production builds never compile it.
 sim = ["dep:futures", "dep:moq-clock-macros"]
+runtime = ["dep:tokio", "dep:web-async"]
 
 [dependencies]
 futures = { workspace = true, optional = true }
 kio = { workspace = true }
 moq-clock-macros = { workspace = true, optional = true }
+web-async = { workspace = true, optional = true }
+
+# The browser's only clocks, read with or without the runtime's timers.
+[target.'cfg(all(target_arch = "wasm32", not(target_os = "wasi")))'.dependencies]
 web-async = { workspace = true }
 
 # The runtime handle, to keep a paused runtime's clock on its own origin.
 [target.'cfg(any(not(target_arch = "wasm32"), target_os = "wasi"))'.dependencies]
-tokio = { workspace = true, features = ["rt", "time"] }
+tokio = { workspace = true, features = ["rt", "time"], optional = true }
 
 [dev-dependencies]
-# Enable the simulator so its tests run in the merge gate.
-moq-clock = { path = ".", features = ["sim"] }
+# Enable the simulator so its tests run in the merge gate. Without default features,
+# so `--no-default-features` still tests the build without the runtime.
+moq-clock = { path = ".", default-features = false, features = ["sim"] }
 
 [target.'cfg(all(target_arch = "wasm32", not(target_os = "wasi")))'.dev-dependencies]
 # Match the wasm-bindgen CLI schema used by the browser runner.

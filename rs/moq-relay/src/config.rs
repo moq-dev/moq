@@ -1,3 +1,4 @@
+use anyhow::Context;
 use serde::{Deserialize, Serialize};
 
 use crate::{auth, cache, cluster, internal, stats, web};
@@ -80,6 +81,11 @@ pub struct Config {
 	#[serde(default)]
 	pub web: web::Config,
 
+	/// Automatic certificates from an ACME directory. Disabled unless `acme.domains` is set.
+	#[usage(flatten)]
+	#[serde(default)]
+	pub acme: crate::acme::Config,
+
 	/// Optional public STUN Binding listener for application-selected ICE servers.
 	#[usage(flatten)]
 	#[serde(default)]
@@ -153,6 +159,7 @@ impl Default for Config {
 			cluster: Default::default(),
 			auth: Default::default(),
 			web: Default::default(),
+			acme: Default::default(),
 			stun: Default::default(),
 			stats: Default::default(),
 			cache: Default::default(),
@@ -361,6 +368,10 @@ impl Config {
 	pub(crate) fn resolve(&mut self) -> anyhow::Result<()> {
 		let deprecated = self.deprecated();
 		anyhow::ensure!(deprecated.is_empty(), "{deprecated}");
+		// Here rather than at an endpoint, since io_uring workers and lazily built
+		// dial clients would otherwise check `[quic]` late or never. `[peer.quic]`
+		// is checked by `Cluster::new`, which embedders call directly.
+		self.quic.validate().context("invalid [quic]")?;
 
 		self.quic
 			.max_streams
@@ -439,6 +450,62 @@ mod tests {
 		assert_eq!(config.peer.resolve().subscriptions, 1000);
 		assert_eq!(config.session.resolve().fetches, 0);
 		assert_eq!(config.peer.resolve().fetches, 2000);
+	}
+
+	/// `[peer.quic]` mirrors `[quic]`'s keys without touching `[quic]` itself.
+	#[test]
+	fn peer_quic_table_merges_with_flags() {
+		let _env = EnvGuard::clear(&[
+			"MOQ_QUIC_MAX_STREAMS",
+			"MOQ_PEER_QUIC_MAX_STREAMS",
+			"MOQ_PEER_QUIC_RECEIVE_WINDOW",
+			"MOQ_PEER_QUIC_SEND_WINDOW",
+		]);
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("peer-quic.toml");
+		std::fs::write(
+			&path,
+			"[quic]\nmax_streams = 4\n[peer.quic]\nmax_streams = 64\nsend_window = 1000\n",
+		)
+		.unwrap();
+		let config = Config::parse_and_merge([
+			std::ffi::OsString::from("moq-relay"),
+			path.into(),
+			"--peer-quic-receive-window=2000".into(),
+		])
+		.unwrap();
+		assert_eq!(config.quic.max_streams, Some(4));
+		assert_eq!(config.peer.quic.max_streams.get(), 64);
+		assert_eq!(config.peer.quic.receive_window.get(), 2000);
+		assert_eq!(config.peer.quic.send_window.get(), 1000);
+
+		assert!(toml::from_str::<Config>("[peer]\nmax_streams = 64\n").is_err());
+	}
+
+	/// A zero peer stream limit or window would wedge the connection, so it never parses.
+	#[test]
+	fn zero_peer_quic_limits_are_refused() {
+		let _env = EnvGuard::clear(&[
+			"MOQ_PEER_QUIC_MAX_STREAMS",
+			"MOQ_PEER_QUIC_RECEIVE_WINDOW",
+			"MOQ_PEER_QUIC_SEND_WINDOW",
+		]);
+		for key in ["max_streams", "receive_window", "send_window"] {
+			assert!(
+				toml::from_str::<Config>(&format!("[peer.quic]\n{key} = 0\n")).is_err(),
+				"{key}"
+			);
+		}
+		for flag in [
+			"--peer-quic-max-streams=0",
+			"--peer-quic-receive-window=0",
+			"--peer-quic-send-window=0",
+		] {
+			assert!(
+				Config::parse_and_merge([std::ffi::OsString::from("moq-relay"), flag.into()]).is_err(),
+				"{flag} must be refused"
+			);
+		}
 	}
 
 	#[cfg(not(feature = "iroh"))]

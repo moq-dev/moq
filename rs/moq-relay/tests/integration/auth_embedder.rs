@@ -147,3 +147,31 @@ async fn a_moved_gateway_tier_retags_its_stats() {
 	assert_eq!(active("gateway"), 0);
 	work.abort();
 }
+
+#[tokio::test(start_paused = true)]
+async fn gateway_admission_refuses_once_in_the_shared_stats_registry() {
+	let cluster = cluster::Cluster::new(cluster::Options::default()).unwrap();
+	let publisher = moq_stats::Producer::new(moq_stats::produce::Config::new().with_origin(cluster.origin.clone()));
+	let registry = publisher.registry().clone();
+	let cluster = cluster.with_stats(publisher);
+	let (auth, mut admissions) = auth::Auth::embedded("edge");
+	let (result, ()) = tokio::join!(
+		cluster.admit(&auth, auth.request(Transport::Srt, "/unattributed")),
+		async {
+			admissions.next().await.unwrap().refuse(auth::Error::Refused);
+		}
+	);
+	assert!(matches!(result, Err(auth::Error::Refused)));
+	let values = registry.snapshot().sessions();
+	assert_eq!(values.len(), 1);
+	assert_eq!(values[0].0, moq_net::stats::Tier::default());
+	assert_eq!(values[0].1.sessions_refused.refused, 1);
+	assert_eq!(values[0].1.sessions_started, 0);
+	let mut report = moq_net::stats::Report::default();
+	registry.report(&mut report);
+	assert_eq!(
+		report.sessions[0].root.as_str(),
+		"",
+		"refused admission cannot claim the dialed root"
+	);
+}

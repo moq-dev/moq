@@ -27,4 +27,3 @@ Public API: possibly a feature-gated module. Wire: none.
 - [poll_acked on moq-net's send stream](/quest/m2/quic-ack-hook.md) - a backend-specific method the moq-tokio and moq-uring adapters keep
 - [Per-stream deadlines](/quest/m2/quic-deadline.md) - adds `set_deadline`, also kept out of the shared adapter
 - [QUIC caps](/quest/m2/rate-quic.md) - extends `set_limits` with the bitrate caps
-- [Peer limits](/quest/m1/quic/peer-limits.md) - adds the `set_limits` seam

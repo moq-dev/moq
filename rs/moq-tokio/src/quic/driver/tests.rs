@@ -1570,9 +1570,9 @@ async fn two_datagram_readers() {
             x
         },
         async {
-            server.send_datagram(b"one"[..].into()).unwrap();
+            server.send_datagram(b"one"[..].into(), None, 0).unwrap();
             done.notified().await;
-            server.send_datagram_wait(b"two"[..].into()).await.unwrap();
+            server.send_datagram(b"two"[..].into(), None, 0).unwrap();
         }
     );
     assert!(*a == *b"one" || *b == *b"one");
