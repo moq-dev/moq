@@ -919,15 +919,7 @@ test("closing a solicited legacy advertisement's token makes it again without it
 	// No retry timer can stand in for the wake.
 	jest.useFakeTimers();
 	const pair = createMockTransportPair(ALPN.DRAFT_19);
-	const inner = new NativeSession(pair.server, Version.DRAFT_15, true);
-	const session: Session = {
-		version: inner.version,
-		acceptBi: () => inner.acceptBi(),
-		nextRequestId: () => inner.nextRequestId(),
-		spendRequest: (id) => inner.spendRequest(id),
-		close: () => inner.close(),
-		openBi: () => inner.openBi(),
-	};
+	const session = new NativeSession(pair.server, Version.DRAFT_15, true);
 	const tokens = new Tokens();
 	const { pub, origin } = publisher(pair.server, { requiresSolicitation: true, session, auth: tokens });
 	const { sent, restore } = carriedTokens();
