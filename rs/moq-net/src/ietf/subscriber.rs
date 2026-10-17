@@ -2772,10 +2772,12 @@ where
 			true => track.start_at(largest.map_or(0, |largest| largest.group)),
 			false => track.start_at(start.map(|start| start.group)),
 		};
+		// Object IDs can start past zero or skip, while readers see frame ordinals, so only
+		// the group carries over: its first frame is the edge a reader can count on.
 		if let Some(largest) = largest {
 			track.report_largest(track::Position {
 				group: largest.group,
-				frame: largest.object,
+				frame: 0,
 			});
 		}
 		let mut fetching: Option<JoiningTask> = None;
@@ -6677,8 +6679,9 @@ mod tests {
 				reported,
 				largest.map(|largest| track::Position {
 					group: largest.group,
-					frame: largest.object,
-				})
+					frame: 0,
+				}),
+				"only the group carries over, since Object IDs are not frame ordinals"
 			);
 			let fill = track.fill.read();
 			fill.outstanding()

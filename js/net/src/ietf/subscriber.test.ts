@@ -1179,7 +1179,8 @@ test("SUBSCRIBE_OK's largest is known before any group arrives", async () => {
 		trackAlias: ALIAS,
 		largest: { groupId: 7n, objectId: 3n },
 	}).encode(peer.writer, VERSION);
-	expect(await track.largest()).toEqual({ group: 7, frame: 3 });
+	// Only the group carries over, since Object IDs are not frame ordinals.
+	expect(await track.largest()).toEqual({ group: 7, frame: 0 });
 	track.close();
 });
 

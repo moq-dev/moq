@@ -966,16 +966,12 @@ export class Subscriber {
 			maxAge: maxCacheDuration === undefined ? undefined : Milli(Number(maxCacheDuration)),
 		});
 		if (ok.largest) {
-			if (
-				ok.largest.groupId > BigInt(Number.MAX_SAFE_INTEGER) ||
-				ok.largest.objectId > BigInt(Number.MAX_SAFE_INTEGER)
-			) {
-				throw new RangeError("largest location exceeds safe integers");
+			if (ok.largest.groupId > BigInt(Number.MAX_SAFE_INTEGER)) {
+				throw new RangeError("largest group exceeds safe integers");
 			}
-			hooks.reportedLargest(subscription.track, {
-				group: Number(ok.largest.groupId),
-				frame: Number(ok.largest.objectId),
-			});
+			// Object IDs can start past zero or skip, while readers see frame ordinals, so only
+			// the group carries over: its first frame is the edge a reader can count on.
+			hooks.reportedLargest(subscription.track, { group: Number(ok.largest.groupId), frame: 0 });
 		}
 
 		try {
