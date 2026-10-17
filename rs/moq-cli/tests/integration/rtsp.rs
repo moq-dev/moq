@@ -59,7 +59,10 @@ async fn next_broadcast(
 	announced: &mut moq_net::announce::Consumer,
 ) -> hang::catalog::Consumer {
 	loop {
-		match running(child, "the announce", announced.next()).await.expect("origin closed") {
+		match running(child, "the announce", announced.next())
+			.await
+			.expect("origin closed")
+		{
 			moq_net::announce::Event::Start(_) | moq_net::announce::Event::Restart(_) => break,
 			moq_net::announce::Event::End(_) | moq_net::announce::Event::Update(_) => {}
 		}
@@ -67,15 +70,27 @@ async fn next_broadcast(
 	let broadcast = running(child, "the broadcast", consumer.request_broadcast("camera", None))
 		.await
 		.expect("announced broadcast resolves");
-	let mut catalogs = running(child, "the catalog", hang::catalog::Catalog::<()>::subscribe(&broadcast))
-		.await
-		.expect("subscribe to the catalog");
+	let mut catalogs = running(
+		child,
+		"the catalog",
+		hang::catalog::Catalog::<()>::subscribe(&broadcast),
+	)
+	.await
+	.expect("subscribe to the catalog");
 	let catalog = running(child, "the first catalog", catalogs.next())
 		.await
 		.expect("catalog read")
 		.expect("a catalog");
-	assert_eq!(catalog.video.renditions.len(), 1, "a fresh catalog with the session's video");
-	assert_eq!(catalog.audio.renditions.len(), 1, "a fresh catalog with the session's audio");
+	assert_eq!(
+		catalog.video.renditions.len(),
+		1,
+		"a fresh catalog with the session's video"
+	);
+	assert_eq!(
+		catalog.audio.renditions.len(),
+		1,
+		"a fresh catalog with the session's audio"
+	);
 
 	let name = catalog.video.renditions.keys().next().unwrap();
 	let mut track = running(child, "the video", broadcast.track(name).unwrap().subscribe(None))
