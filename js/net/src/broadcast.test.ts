@@ -853,3 +853,86 @@ test("removeTrack stops counting the removed track's demand at once", async () =
 	video.close();
 	broadcast.close();
 });
+
+test("tracks lists existing names, then new ones, until the broadcast closes", async () => {
+	const broadcast = new BroadcastProducer();
+	broadcast.createTrack("a");
+	broadcast.createTrack("b");
+
+	const tracks = broadcast.tracks();
+	expect([await tracks.next(), await tracks.next()].sort()).toEqual(["a", "b"]);
+
+	const next = tracks.next();
+	broadcast.createTrack("c");
+	expect(await next).toBe("c");
+	expect(() => broadcast.createTrack("c")).toThrow("duplicate track");
+
+	broadcast.close();
+	expect(await tracks.next()).toBeUndefined();
+	expect(await broadcast.tracks().next()).toBeUndefined();
+});
+
+test("tracks lists a request once a handler takes it", async () => {
+	const broadcast = new BroadcastProducer();
+	const tracks = broadcast.tracks();
+	const pulled = wireOf(broadcast).requested();
+	broadcast.track("video").subscribe();
+
+	// A watcher made while the request is queued does not list it.
+	const queued = broadcast.tracks();
+	const request = await pulled;
+	if (!request) throw new Error("expected request");
+	expect(await tracks.next()).toBe("video");
+	expect(await queued.next()).toBe("video");
+
+	// A later watcher sees it in its snapshot, and a queued request answered by createTrack is listed too.
+	const later = broadcast.tracks();
+	expect(await later.next()).toBe("video");
+	broadcast.track("audio").subscribe();
+	broadcast.createTrack("audio");
+	expect(await tracks.next()).toBe("audio");
+	expect(await later.next()).toBe("audio");
+
+	// Names already handed over still drain after the close.
+	request.reject();
+	broadcast.close();
+	expect(await queued.next()).toBe("audio");
+	expect(await tracks.next()).toBeUndefined();
+	expect(await queued.next()).toBeUndefined();
+	expect(await later.next()).toBeUndefined();
+});
+
+test("tracks relists a name taken by a new track", async () => {
+	const broadcast = new BroadcastProducer();
+	broadcast.createTrack("a");
+	const tracks = broadcast.tracks();
+	expect(await tracks.next()).toBe("a");
+
+	broadcast.removeTrack("a");
+	const empty = broadcast.tracks();
+	broadcast.createTrack("a");
+	expect(await tracks.next()).toBe("a");
+	expect(await empty.next()).toBe("a");
+
+	// A closed watcher reads nothing more, and the broadcast carries on without it.
+	tracks.close();
+	broadcast.createTrack("b");
+	expect(await tracks.next()).toBeUndefined();
+	expect(await empty.next()).toBe("b");
+	broadcast.close();
+	expect(await empty.next()).toBeUndefined();
+});
+
+test("leaving a tracks loop early closes the watcher", async () => {
+	const broadcast = new BroadcastProducer();
+	broadcast.createTrack("a");
+	const tracks = broadcast.tracks();
+	for await (const name of tracks) {
+		expect(name).toBe("a");
+		break;
+	}
+	expect(tracks.closed.peek()).toBeNull();
+	broadcast.createTrack("b");
+	expect(await tracks.next()).toBeUndefined();
+	broadcast.close();
+});

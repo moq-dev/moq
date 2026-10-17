@@ -120,6 +120,10 @@ harness = false
 required-features = ["fuzz"]
 
 [[bench]]
+name = "broadcast"
+harness = false
+
+[[bench]]
 name = "group"
 harness = false
 required-features = ["async"]

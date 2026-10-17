@@ -66,6 +66,27 @@ class BroadcastState {
 	active = 0;
 	// The demand watcher of each open track, disposed when it closes or leaves the broadcast.
 	demands = new Map<track.Producer, Dispose>();
+	// Each open {@link Tracks} watcher, fed every name as a track is inserted or a request served.
+	watchers = new Set<TracksState>();
+}
+
+/** Backing state of one {@link Tracks} watcher. */
+class TracksState {
+	queue = new Signal<string[]>([]);
+	closed = new Once<null>();
+}
+
+function closeTracks(watcher: TracksState): void {
+	if (watcher.closed.peek() === undefined) watcher.closed.set(null);
+}
+
+// Hand `name` to every open watcher.
+function listTrack(state: BroadcastState, name: string): void {
+	for (const watcher of state.watchers) {
+		watcher.queue.mutate((queue) => {
+			queue.push(name);
+		});
+	}
 }
 
 // Each track updates the aggregate on an edge, so a demand change touches only its track.
@@ -123,7 +144,10 @@ async function requested(state: BroadcastState): Promise<track.Request | undefin
 	state.served = true;
 	for (;;) {
 		const request = dequeueRequest(state);
-		if (request) return request;
+		if (request) {
+			listTrack(state, request.name);
+			return request;
+		}
 
 		if (state.closed.peek() !== undefined) return undefined;
 
@@ -141,6 +165,8 @@ function closeState(state: BroadcastState) {
 	if (state.closed.peek() !== undefined) return;
 	state.closed.set(null);
 	for (const cleanup of state.demands.values()) cleanup();
+	for (const watcher of state.watchers) closeTracks(watcher);
+	state.watchers.clear();
 	for (const request of state.pending) request.reject();
 	state.requested.mutate((requests) => {
 		requests.length = 0;
@@ -302,6 +328,7 @@ function adopt(state: BroadcastState, producer: track.Producer): void {
 	state.lookups.set(producer, lookups);
 	watchDemand(state, producer, lookups);
 	state.tracks.set(producer.name, producer);
+	listTrack(state, producer.name);
 
 	// A finished track keeps serving its cache, so only an abort evicts it.
 	void producer.closed.then((closed) => {
@@ -309,6 +336,83 @@ function adopt(state: BroadcastState, producer: track.Producer): void {
 			state.tracks.delete(producer.name);
 		}
 	});
+}
+
+let makeTracks: (state: BroadcastState) => Tracks;
+
+/**
+ * An add-only watcher of a broadcast's track names, from {@link Producer.tracks}.
+ *
+ * Yields every live track name once, those present when it was created first, then each name
+ * as a track is created or a request is served. A name comes again only after its track
+ * left and another took the name. Nothing reports a removal. Ends once the broadcast closes.
+ *
+ * It reports what this broadcast holds now and never waits on a peer: a broadcast serving
+ * a remote one lists only the tracks it has served so far.
+ *
+ * @public
+ */
+export class Tracks {
+	#state: BroadcastState;
+	#watcher = new TracksState();
+
+	private constructor(state: BroadcastState) {
+		this.#state = state;
+		if (state.closed.peek() !== undefined) {
+			closeTracks(this.#watcher);
+			return;
+		}
+		// What `lookup` serves: an inserted track until aborted, and a request a handler took until closed.
+		const names = new Set<string>();
+		for (const [name, producer] of state.tracks) {
+			if (!(producer.closed.peek() instanceof Error)) names.add(name);
+		}
+		const queued = new Set(state.requested.peek().map((request) => request.name));
+		for (const [name, producer] of state.requests) {
+			if (!queued.has(name) && producer.closed.peek() === undefined) names.add(name);
+		}
+		this.#watcher.queue.set([...names]);
+		state.watchers.add(this.#watcher);
+	}
+
+	static {
+		makeTracks = (state) => new Tracks(state);
+	}
+
+	/** Settles with `null` once the watcher ends, by the broadcast closing or {@link close}. */
+	get closed(): GetPromise<null> {
+		return this.#watcher.closed;
+	}
+
+	/** The track names as they arrive, until the broadcast closes; leaving the loop early closes the watcher. */
+	async *[Symbol.asyncIterator](): AsyncGenerator<string, void, undefined> {
+		try {
+			for (;;) {
+				const name = await this.next();
+				if (name === undefined) return;
+				yield name;
+			}
+		} finally {
+			this.close();
+		}
+	}
+
+	/** Returns the next track name, or undefined once the broadcast closes. */
+	async next(): Promise<string | undefined> {
+		for (;;) {
+			const name = this.#watcher.queue.peek().shift();
+			if (name !== undefined) return name;
+			if (this.#watcher.closed.peek() !== undefined) return undefined;
+			await Signal.race(this.#watcher.queue, this.#watcher.closed);
+		}
+	}
+
+	/** Stop watching and drop any names not yet read. Idempotent. */
+	close(): void {
+		this.#state.watchers.delete(this.#watcher);
+		this.#watcher.queue.peek().length = 0;
+		closeTracks(this.#watcher);
+	}
 }
 
 let makeDemand: (state: BroadcastState) => Demand;
@@ -383,6 +487,11 @@ export class Producer {
 	/** Watch demand for the broadcast's tracks. */
 	demand(): Demand {
 		return this.#demand;
+	}
+
+	/** Watch the names of this broadcast's live tracks. See {@link Tracks}. */
+	tracks(): Tracks {
+		return makeTracks(this.#state);
 	}
 
 	/** A read handle for this broadcast, named by the path the origin created it at. */

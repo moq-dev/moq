@@ -1,4 +1,4 @@
-/** Sweep observers against routes for one route update, and against tracks for one demand edge. */
+/** Sweep observers against routes for one route update, against tracks for one demand edge, and watchers against tracks for one created name. */
 
 import { Signal } from "@moq/signals";
 import type { Grant } from "../src/auth.ts";
@@ -95,6 +95,32 @@ for (const trackCount of [8, 32, 128]) {
 		);
 		for (const dispose of disposes) dispose();
 		for (const track of tracks) track.close();
+		broadcast.close();
+	}
+}
+
+// One created track reaches every name watcher, whatever the broadcast already holds.
+const created = 256;
+console.log("tracks,watchers,create_and_read_us");
+for (const trackCount of [8, 128, 1024]) {
+	for (const watcherCount of [1, 8, 32]) {
+		const broadcast = new BroadcastProducer();
+		for (let index = 0; index < trackCount; index++) broadcast.createTrack(`held-${index}`);
+		const watchers = Array.from({ length: watcherCount }, () => broadcast.tracks());
+		for (const watcher of watchers) {
+			for (let index = 0; index < trackCount; index++) await watcher.next();
+		}
+		const start = performance.now();
+		for (let index = 0; index < created; index++) {
+			const track = broadcast.createTrack(`new-${index}`);
+			for (const watcher of watchers) {
+				if ((await watcher.next()) !== `new-${index}`) throw new Error("watcher missed a track");
+				checksum++;
+			}
+			// Keep the live track count at `trackCount` for the whole measurement.
+			track.close();
+		}
+		console.log(`${trackCount},${watcherCount},${(((performance.now() - start) * 1000) / created).toFixed(1)}`);
 		broadcast.close();
 	}
 }
