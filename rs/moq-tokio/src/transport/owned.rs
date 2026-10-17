@@ -57,11 +57,29 @@ impl<S: super::Grouped<SendStream: 'static, RecvStream: 'static>> poll::Session 
 	fn poll_accept_bi(&mut self, cx: &mut Context<'_>) -> Poll<Result<poll::BiStreams<Self>, Self::Error>> {
 		backend::Session::poll_accept_bi(self, cx).map_err(Error)
 	}
-	fn poll_open_uni(&mut self, cx: &mut Context<'_>) -> Poll<Result<Self::SendStream, Self::Error>> {
-		backend::Session::poll_open_uni(self, cx).map_err(Error)
+	fn poll_open_uni(
+		&mut self,
+		cx: &mut Context<'_>,
+		options: poll::SendOptions<'_, <S::SendStream as super::GroupedSend>::Group>,
+	) -> Poll<Result<Self::SendStream, Self::Error>> {
+		backend::Session::poll_open_uni(self, cx)
+			.map_ok(|mut send| {
+				send.schedule(options);
+				send
+			})
+			.map_err(Error)
 	}
-	fn poll_open_bi(&mut self, cx: &mut Context<'_>) -> Poll<Result<poll::BiStreams<Self>, Self::Error>> {
-		backend::Session::poll_open_bi(self, cx).map_err(Error)
+	fn poll_open_bi(
+		&mut self,
+		cx: &mut Context<'_>,
+		options: poll::SendOptions<'_, <S::SendStream as super::GroupedSend>::Group>,
+	) -> Poll<Result<poll::BiStreams<Self>, Self::Error>> {
+		backend::Session::poll_open_bi(self, cx)
+			.map_ok(|(mut send, recv)| {
+				send.schedule(options);
+				(send, recv)
+			})
+			.map_err(Error)
 	}
 	fn send_group(&mut self, priority: i64) -> Option<<S::SendStream as super::GroupedSend>::Group> {
 		self.session.send_group(priority)
@@ -69,10 +87,9 @@ impl<S: super::Grouped<SendStream: 'static, RecvStream: 'static>> poll::Session 
 	fn send_datagram(
 		&mut self,
 		payload: Bytes,
-		group: Option<&<S::SendStream as super::GroupedSend>::Group>,
-		order: i64,
+		options: poll::SendOptions<'_, <S::SendStream as super::GroupedSend>::Group>,
 	) -> Result<(), Self::Error> {
-		super::Grouped::send_datagram(&self.session, payload, group, order).map_err(Error)
+		super::Grouped::send_datagram(&self.session, payload, options).map_err(Error)
 	}
 	fn poll_recv_datagram(&mut self, cx: &mut Context<'_>) -> Poll<Result<Bytes, Self::Error>> {
 		backend::Session::poll_recv_datagram(self, cx).map_err(Error)

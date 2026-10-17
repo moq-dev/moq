@@ -2245,7 +2245,7 @@ mod tests {
 				},
 			);
 
-			let (_, recv) = session.open_bi().await.unwrap();
+			let (_, recv) = session.open_bi(Default::default()).await.unwrap();
 			let mut group = GroupRecv::new(subscriber, Reader::new(recv, version));
 			let res = kio::wait(|waiter| group.poll_serve(waiter)).await;
 			match version {
@@ -2315,7 +2315,7 @@ mod tests {
 			},
 		);
 
-		let (_, recv) = session.open_bi().await.unwrap();
+		let (_, recv) = session.open_bi(Default::default()).await.unwrap();
 		let mut group = GroupRecv::new(subscriber, Reader::new(recv, version));
 		let res = kio::wait(|waiter| group.poll_serve(waiter)).await;
 		(res, track)
@@ -2382,7 +2382,7 @@ mod tests {
 			},
 		);
 
-		let (_, recv) = session.open_bi().await.unwrap();
+		let (_, recv) = session.open_bi(Default::default()).await.unwrap();
 		let mut group = GroupRecv::new(subscriber, Reader::new(recv, version));
 		let res = kio::wait(|waiter| group.poll_serve(waiter)).await;
 		assert!(matches!(res, Err(Error::Duplicate)), "{res:?}");

@@ -66,8 +66,12 @@ impl std::fmt::Display for Transport {
 /// plain boxed flavor suffices.
 type OpBox<T> = futures::future::BoxFuture<'static, T>;
 
-/// Adapts a transport that only implements the async interface
-/// ([`web_transport_trait::Session`]) to the poll interface this crate requires.
+/// Adapts one of this crate's async backends (qmux, iroh, quic) to the poll interface
+/// moq-net requires.
+///
+/// Only those backends fit: the bound goes through a sealed trait, so another
+/// [`web_transport_trait::Session`] cannot be wrapped. A custom transport implements
+/// moq-net's `transport::poll` traits instead.
 ///
 /// Each pending session operation is stored as a boxed future built from a clone
 /// of the underlying session; stream operations temporarily move the stream into
@@ -337,6 +341,14 @@ impl<S: GroupedSend + 'static> SendStream<S> {
 				self.reclaim();
 			}
 			_ => self.priority = Some(priority),
+		}
+	}
+
+	/// Schedule a newly opened stream by its options.
+	fn schedule(&mut self, options: moq_net::transport::poll::SendOptions<'_, S::Group>) {
+		self.prioritize(options.priority);
+		if let Some(group) = options.group {
+			self.join(group);
 		}
 	}
 
@@ -873,10 +885,13 @@ impl Grouped for crate::quic::web::Session {
 	fn send_datagram(
 		&self,
 		payload: Bytes,
-		group: Option<&crate::quic::driver::SendGroup>,
-		order: i64,
+		options: moq_net::transport::poll::SendOptions<'_, crate::quic::driver::SendGroup>,
 	) -> Result<(), Self::Error> {
-		Self::send_datagram(self, payload, group, order)
+		let options = crate::quic::driver::SendOptions {
+			group: options.group,
+			priority: options.priority,
+		};
+		Self::send_datagram(self, payload, options)
 	}
 }
 

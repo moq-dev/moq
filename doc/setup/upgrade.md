@@ -467,6 +467,33 @@ These land with the next breaking release, not the 2026-09-23 train.
   decode time (RTMP, a browser) trails by the delay plus the video's
   send-ahead: 2 s at the new default, where `--delay 500ms` keeps the 1 s it
   had. moq-srt egress runs at its SRT latency or 1 s, whichever is longer.
+- **Custom transports schedule streams and datagrams by send options.** A
+  transport handed straight to moq-net implements the
+  [`transport::poll`](https://docs.rs/moq-net/latest/moq_net/transport/poll/index.html)
+  traits, which now add send groups. Opening a stream takes a
+  `poll::SendOptions { group, priority }` it starts with, and a datagram is
+  sent with `send_datagram(payload, options)`, which never blocks.
+  `SendOptions::default()` is ungrouped at priority 0, and priorities are an
+  `i64` instead of a `u8`, higher first. moq-tokio and moq-uring sessions
+  implement all of it already.
+- **moq-relay builds its cluster dials from a template.** `Relay::client()` and
+  `Cluster::with_client` are removed. Give the cluster
+  `with_connect(connect, quic)`, plus `with_iroh(endpoint)` for `iroh://`
+  peers, and build your own `moq_tokio::Client` for other outbound dials.
+- **moq-sock binds a shard group in one call.** `shard::Group` (`acquire`,
+  `member`, `complete`), `shard::Member`, `shard::Claim`, and
+  `shard::cid_prefix` are gone: `shard::bind(addr, count)` returns the
+  `Bound` group, and moq-quic's `RandomConnectionIdGenerator::set_shard`
+  names the shard in each connection id. moq-uring's
+  `quic::endpoint::CID_LEN` is removed too.
+- **`moq` refuses a fixed `--connect-bind` for both `--connect` and a WAN
+  cluster.** They used to share one client; now `--connect` and
+  `--cluster-connect` or `--cluster-connect-api` each bind it, so a fixed port
+  stops startup. Use port 0, or drop `--connect`.
+- **`--runtime-pin` defaults to off.** moq-relay's per-core workers no longer
+  pin to cores unless `--runtime-pin`, `MOQ_RUNTIME_PIN`, or `runtime.pin` is
+  true, since every process pinned to the same first cores. Set it to keep
+  pinning a relay that has the machine to itself.
 - **`moq_origin_announced_broadcast` delivers every publisher instance.** Its
   callback gets a new broadcast handle each time another instance takes over
   the path or the broadcast returns, and its terminal `0` only on cancel. Free
