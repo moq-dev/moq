@@ -4,7 +4,7 @@ use moq_pattern::{InvalidPattern, Pattern, Patterns, Segment};
 use serde_json::Value;
 
 fn vectors() -> Value {
-	serde_json::from_str(include_str!("pattern.json")).expect("pattern.json parses")
+	serde_json::from_str(include_str!("../pattern.json")).expect("pattern.json parses")
 }
 
 fn pattern(text: &str) -> Pattern {

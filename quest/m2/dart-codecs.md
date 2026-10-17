@@ -35,7 +35,3 @@ same change. Do not finish with codecs enabled but the consumer unexposed.
 
 Decided in the 2026-09-30 audit: wait for the codec namespaces, so the Dart
 wrapper exposes encoders and decoders in their final shape once.
-
-## Required
-
-- [Codec](/quest/m1/ffi-shape/codec.md) - audio and video codecs get their own namespaces in moq-ffi

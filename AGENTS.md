@@ -70,6 +70,7 @@ A bad shape costs a breaking change in every language, and the surface is huge.
 - Short names under a module namespace (`encode::Config`, not `EncoderConfig`). Mirror names across Rust, JS, and the bindings.
 - Document every exported symbol in one plain line, the way you'd say it out loud.
 - Prefer refactoring and simplification; many APIs have not been published yet.
+- The `moq-net` API and moq-lite take priority over moq-transport. Map moq-transport onto them, not the reverse, and skip any of its features or MUSTs that add cost without a real behavioral benefit.
 
 MoQ is split into many layers as part of the public API.
 The boundary between packages is extremely important to keep things modular and reusable.

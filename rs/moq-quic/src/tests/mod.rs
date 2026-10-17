@@ -1403,6 +1403,33 @@ fn alpn_mismatch() {
     );
 }
 
+/// A server accepted before the rest of a multi-packet ClientHello arrives learns the client's
+/// stream limits later, and must announce them to a 0.5-RTT opener that found none.
+#[test]
+fn late_peer_params_make_streams_available() {
+    let _guard = subscribe();
+    // Long ALPN names push the ClientHello into a second Initial, as a post-quantum key share does.
+    let alpn: Vec<Vec<u8>> = (0..4).map(|i| vec![b'a' + i; 255]).collect();
+    let server_config = ServerConfig::with_crypto(Arc::new(server_crypto_with_alpn(alpn.clone())));
+    let mut pair = Pair::new(Default::default(), server_config);
+    pair.server.handle_incoming = Box::new(|_| IncomingConnectionBehavior::Wait);
+    pair.begin_connect(ClientConfig::new(Arc::new(client_crypto_with_alpn(alpn))));
+    pair.drive_client();
+    pair.server.drive_incoming(pair.time, pair.client.addr);
+    let incoming = pair.server.pop_waiting_incoming();
+    let server_ch = pair.server.try_accept(incoming, pair.time).unwrap();
+    assert_eq!(pair.server_streams(server_ch).open(Dir::Uni), None);
+
+    pair.drive();
+    assert!(
+        iter::from_fn(|| pair.server_conn_mut(server_ch).poll()).any(|event| matches!(
+            event,
+            Event::Stream(StreamEvent::Available { dir: Dir::Uni })
+        ))
+    );
+    assert!(pair.server_streams(server_ch).open(Dir::Uni).is_some());
+}
+
 #[test]
 fn stream_id_limit() {
     let _guard = subscribe();

@@ -160,8 +160,8 @@ client = moq.Client(
 
 - **`BroadcastProducer()`**. Create a broadcast to publish tracks into.
   - `.dynamic() → BroadcastDynamic`
-  - `.encode_video(input, output, *, bandwidth=None) → VideoProducer`. Encode raw `VideoFrame`s inside the binding; `.write(frame)` each one.
-  - `.encode_audio(name, input, output, *, bandwidth=None) → AudioProducer`. Encode raw PCM `AudioFrame`s; the codec is `output.codec`, e.g. `AudioCodec.opus()` or `AudioCodec.aac()`, with `output.frame_duration_us` setting the Opus frame length (0 takes the codec's own frame, which AAC needs).
+  - `moq.video.Producer(media.CatalogProducer(broadcast), input, output, *, bandwidth=None)`. Encode raw video frames inside the binding.
+  - `moq.audio.Producer(media.CatalogProducer(broadcast), input, output, *, bandwidth=None)`. Encode raw PCM frames. A zero frame duration uses the codec's own frame.
   - `.close()` ends the broadcast for good; a second call is a no-op.
 - **`BroadcastDynamic`**. Async source of tracks requested by subscribers.
   - `await .requested_track() → TrackRequest`. Call `.accept()` on it for a `TrackProducer`, or `.abort(code)` to reject.
@@ -228,7 +228,7 @@ Omitting time leaves data untimed; choose the track's `timescale` to match.
 - **`GroupConsumer`**. Async iterator of raw `Frame`s.
   - `.read_frame() -> Frame | None` returns a raw frame with optional capture time.
 
-Every handle whose cleanup is `cancel()` is an async context manager, so exiting `async with` releases it: the consumers (`media.CatalogConsumer`, `media.TrackConsumer`, `media.GroupConsumer`, `TrackConsumer`, `AudioConsumer`, `GroupConsumer`, `json.SnapshotConsumer`, `json.StreamConsumer`, `AnnounceConsumer`, `AnnouncedBroadcast`) and the dynamic sources (`OriginDynamic`, `BroadcastDynamic`, `TrackDynamic`).
+Every handle whose cleanup is `cancel()` is an async context manager, so exiting `async with` releases it: the consumers (`media.CatalogConsumer`, `media.TrackConsumer`, `media.GroupConsumer`, `TrackConsumer`, `audio.Consumer`, `video.Consumer`, `GroupConsumer`, `json.SnapshotConsumer`, `json.StreamConsumer`, `AnnounceConsumer`, `AnnouncedBroadcast`) and the dynamic sources (`OriginDynamic`, `BroadcastDynamic`, `TrackDynamic`).
 
 ### Origin (advanced)
 
