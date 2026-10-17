@@ -232,11 +232,13 @@ impl AnnouncedBroadcast {
 						moq_net::announce::Event::Update(_) => {}
 					}
 				}
-				self.unseen = false;
 				// `routed_broadcast` rides out the churn between something covering the path
 				// and the path actually resolving (failover, an advertise-only announce
-				// racing its handler).
-				Ok(self.origin.routed_broadcast(&self.path).await?)
+				// racing its handler). The instance stays unseen until it resolves: a foreign
+				// cancel only drops this future, and the caller may call again.
+				let broadcast = self.origin.routed_broadcast(&self.path).await?;
+				self.unseen = false;
+				Ok(broadcast)
 			})
 			.await?;
 		Ok(Arc::new(MoqBroadcastConsumer::routed(

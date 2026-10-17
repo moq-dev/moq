@@ -4383,6 +4383,35 @@ async fn announced_broadcast_follows_an_epochless_replacement() {
 	drop(accept.await.unwrap());
 }
 
+/// A foreign cancel only drops the `available()` future, so a caller retrying after a timeout
+/// keeps the same handle. Dropped while the instance is covered but not yet served, the retry
+/// must still hand that instance out rather than wait for another.
+#[tokio::test]
+async fn announced_broadcast_retries_a_dropped_wait() {
+	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
+	let dynamic = serve(&origin, "");
+	let followed = origin.consume().announced_broadcast("live".into()).unwrap();
+
+	let waiting = followed.clone();
+	let dropped = tokio::spawn(async move { waiting.available().await });
+	let request = tokio::time::timeout(TIMEOUT, dynamic.requested_broadcast())
+		.await
+		.expect("the wait never asked for the broadcast")
+		.unwrap();
+	dropped.abort();
+	assert!(matches!(dropped.await, Err(err) if err.is_cancelled()));
+
+	let retry = tokio::spawn(async move { followed.available().await });
+	let served = MoqBroadcastProducer::new().unwrap();
+	request.accept(&served).unwrap();
+	tokio::time::timeout(TIMEOUT, retry)
+		.await
+		.expect("the retry waited for another instance")
+		.unwrap()
+		.unwrap();
+	served.close().unwrap();
+}
+
 #[tokio::test]
 async fn server_client_roundtrip_auto_origin() {
 	// Same shape as `server_client_roundtrip` but the client config omits
