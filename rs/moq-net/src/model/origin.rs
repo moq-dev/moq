@@ -5,7 +5,7 @@ use std::{
 	collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
 	fmt,
 	sync::Arc,
-	sync::atomic::{AtomicBool, AtomicU64, Ordering},
+	sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
 	task::{Context, Poll, Wake, Waker, ready},
 	time::Duration,
 };
@@ -821,9 +821,43 @@ struct OriginConsumerState {
 	/// Set by the origin's teardown: the cursor drains `pending`, then reports
 	/// the end instead of parking forever on a table that can never fire again.
 	ended: bool,
+	/// Snapshots in flight that can present on this consumer's cursors, counted
+	/// once per cursor they touch. See [`AnnounceConsumer::poll_synced`].
+	///
+	/// Changed through a read guard, so a session joining wakes none of the cursors it
+	/// holds back (nothing waits on losing sync), except the last landing, which
+	/// takes the write guard to owe the queue too. Only the table lock changes it.
+	waiting: AtomicUsize,
+	/// The pending prefixes the consumer still owes reading from before the last
+	/// snapshot landed. Synced once empty and nothing is `waiting`.
+	owed: BTreeSet<PathOwned>,
 }
 
 impl OriginConsumerState {
+	/// Whether the consumer has read everything its sources announced before they
+	/// synced. A torn-down origin has no sources left to wait on.
+	fn synced(&self) -> bool {
+		(self.waiting.load(Ordering::Relaxed) == 0 || self.ended) && self.owed.is_empty()
+	}
+
+	/// Owe every pending update that changes which prefixes are announced: a start
+	/// the consumer has not seen, or an end. A re-price or restart of a delivered
+	/// route leaves the set as it is, and may be held, so it is not owed.
+	fn owe(&mut self) {
+		self.owed = self
+			.pending
+			.iter()
+			.filter(|(prefix, update)| {
+				!self.delivered.contains(*prefix)
+					|| matches!(
+						update,
+						PendingUpdate::Unannounce(_) | PendingUpdate::UnannounceAnnounce { .. }
+					)
+			})
+			.map(|(prefix, _)| prefix.clone())
+			.collect();
+	}
+
 	fn apply_announce(&mut self, prefix: PathOwned, meta: RouteMeta, captures: Option<Vec<Pattern>>) {
 		let meta = (meta, captures);
 		let new = match self.pending.remove(&prefix) {
@@ -868,8 +902,10 @@ impl OriginConsumerState {
 		let last = (last, captures);
 		match self.pending.remove(&prefix) {
 			// The pending announce was never delivered and neither was any earlier
-			// one, so the pair cancels entirely.
-			Some(PendingUpdate::Announce(_)) if !self.delivered.contains(&prefix) => {}
+			// one, so the pair cancels entirely, and nothing is owed for it.
+			Some(PendingUpdate::Announce(_)) if !self.delivered.contains(&prefix) => {
+				self.owed.remove(&prefix);
+			}
 			// Either nothing is pending or the pending announce was a metadata
 			// update on a delivered route; the consumer still owes a retraction.
 			None | Some(PendingUpdate::Announce(_) | PendingUpdate::Restart(..) | PendingUpdate::Unannounce(_)) => {
@@ -950,6 +986,19 @@ impl OriginConsumerState {
 
 	/// Take the pending update at `prefix` for delivery.
 	fn take_prefix(&mut self, prefix: PathOwned) -> AnnounceEvent {
+		let event = self.take_update(prefix);
+		let (AnnounceEvent::Start(announce)
+		| AnnounceEvent::Update(announce)
+		| AnnounceEvent::Restart(announce)
+		| AnnounceEvent::End(announce)) = &event;
+		// A trailing announce left pending is still owed.
+		if !self.pending.contains_key(&announce.prefix) {
+			self.owed.remove(&announce.prefix);
+		}
+		event
+	}
+
+	fn take_update(&mut self, prefix: PathOwned) -> AnnounceEvent {
 		let ((meta, captures), kind): (_, fn(Announce) -> AnnounceEvent) = match self.pending.remove(&prefix).unwrap() {
 			PendingUpdate::Announce(meta) => {
 				// The consumer has seen this prefix before, so it is a metadata update.
@@ -1176,9 +1225,12 @@ struct Horizon {
 impl Horizon {
 	/// Whether `entry` may be observed or served through this horizon.
 	fn admits(&self, entry: &RouteEntry) -> bool {
-		!(self.local && entry.link != Link::Local)
-			&& !(self.upstream && entry.link == Link::Upstream)
-			&& entry.visible_to(self.exclude)
+		self.admits_link(entry.link) && entry.visible_to(self.exclude)
+	}
+
+	/// Whether routes arriving on `link` may be observed through this horizon.
+	fn admits_link(&self, link: Link) -> bool {
+		!(self.local && link != Link::Local) && !(self.upstream && link == Link::Upstream)
 	}
 
 	/// This horizon as it applies to the routes covering `path`: an excluded peer
@@ -1305,6 +1357,17 @@ impl TableCursor {
 			})
 			.max_by_key(|(specificity, _)| *specificity)
 			.map(|(_, captures)| captures)
+	}
+
+	/// Whether this cursor waits on `snapshot`: what it delivers could present here,
+	/// as [`Self::visible`] judges a route at or beneath its prefix.
+	fn awaits(&self, snapshot: &SnapshotEntry) -> bool {
+		self.horizon.admits_link(snapshot.link)
+			&& self.allowed.overlaps(&snapshot.claim)
+			&& self.hidden.reaches(&self.heads, &snapshot.prefix)
+			&& !self.holes.iter().any(|hole| snapshot.prefix.has_prefix(hole))
+			// Too deep for the mount to name means everything beneath is too.
+			&& self.named.as_ref().is_none_or(|(mount, _)| mount.names(&snapshot.prefix))
 	}
 
 	/// Whether this cursor may observe `entry` at all: advertised, not behind
@@ -1565,8 +1628,14 @@ pub(super) struct Hidden {
 impl Hidden {
 	/// Whether a cursor hanging at `heads` reports a route at `prefix`.
 	fn discovers(&self, heads: &[PathOwned], prefix: &Path) -> bool {
-		(self.include || !hides(self.from.as_ref().map(std::slice::from_ref).unwrap_or(heads), prefix))
-			&& self.beyond.as_ref().is_none_or(|outer| hides(outer, prefix))
+		self.reaches(heads, prefix) && self.beyond.as_ref().is_none_or(|outer| hides(outer, prefix))
+	}
+
+	/// Whether a cursor hanging at `heads` could report a route at or beneath `prefix`.
+	/// A hidden segment hides everything beneath it, while a top-up feed's rule turns
+	/// on the rest of the path, so only the first can rule a prefix out.
+	fn reaches(&self, heads: &[PathOwned], prefix: &Path) -> bool {
+		self.include || !hides(self.from.as_ref().map(std::slice::from_ref).unwrap_or(heads), prefix)
 	}
 
 	/// This rule for a cursor reading through `mount`, whose heads sit on the
@@ -1946,6 +2015,39 @@ impl Producer {
 				advertised: true,
 			},
 		)
+	}
+
+	/// Start a [`Snapshot`] under `prefix`: the announce consumers it overlaps are not
+	/// synced until the returned guard drops. Taken before the request goes out, so
+	/// nothing reads as synced in between.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	// pending: /quest/m1/public-model/answer.md
+	pub(crate) fn snapshot(&self, prefix: impl AsPath) -> Snapshot {
+		let prefix = self.root.join(prefix.as_path()).to_owned();
+		// A prefix past the depth limit can carry no route, so nothing waits on it.
+		let Ok(claim) = prefix_claim(&prefix) else {
+			return Snapshot::landed();
+		};
+		let mut state = self.shared.lock();
+		if state.closed {
+			return Snapshot::landed();
+		}
+		let id = state.next_snapshot;
+		state.next_snapshot += 1;
+		state.add_snapshot(
+			&prefix,
+			SnapshotEntry {
+				id,
+				link: self.link,
+				claim,
+				prefix: prefix.clone(),
+			},
+		);
+		Snapshot {
+			shared: Some(self.shared.clone()),
+			prefix,
+			id,
+		}
 	}
 
 	/// Advertise a route over `prefix` and serve the requests beneath it.
@@ -2527,10 +2629,14 @@ impl DriverState {
 		}
 
 		// End the announce cursors: each drains its pending updates, then reports
-		// the end. Registrations stay (the cursors remove themselves on drop).
+		// the end. Registrations stay (the cursors remove themselves on drop). A
+		// snapshot still in flight is released like a landing, owing what is queued.
 		for state in cursors {
 			if let Ok(mut state) = state.write() {
 				state.ended = true;
+				if state.waiting.swap(0, Ordering::Relaxed) > 0 {
+					state.owe();
+				}
 			}
 		}
 	}
@@ -3481,6 +3587,11 @@ struct RouteNode {
 	/// Watches at this node or below, so a route change walks only the subtrees
 	/// holding one.
 	watches_below: usize,
+	/// Snapshots in flight at exactly this prefix; see [`Snapshot`].
+	snapshots: Vec<SnapshotEntry>,
+	/// Snapshots at this node or below, so a cursor registering walks only the
+	/// subtrees holding one.
+	snapshots_below: usize,
 	children: HashMap<String, RouteNode>,
 }
 
@@ -3637,23 +3748,89 @@ impl Drop for Watch {
 	}
 }
 
+/// A snapshot in flight, as the route table holds it.
+struct SnapshotEntry {
+	id: u64,
+	/// The link its routes arrive on, so a horizon hiding them never waits on it.
+	link: Link,
+	/// The prefix's [`prefix_claim`], so a cursor whose patterns miss it never waits on it.
+	claim: Pattern,
+	/// The absolute prefix, so a cursor that could see nothing beneath it never waits on it.
+	prefix: PathOwned,
+}
+
+/// A session still delivering its peer's initial announcements under a prefix.
+///
+/// Every announce consumer whose scope the prefix overlaps is unsynced
+/// (see [`AnnounceConsumer::poll_synced`]) until this drops: once the session
+/// has inserted the announcements its peer counted, or it gave up on them.
+// pending: /quest/m1/public-model/answer.md
+pub(crate) struct Snapshot {
+	shared: Option<SendCell<kio::Shared<OriginState>>>,
+	prefix: PathOwned,
+	id: u64,
+}
+
+impl Snapshot {
+	/// A snapshot nothing waits on.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	// pending: /quest/m1/public-model/answer.md
+	pub(crate) fn landed() -> Self {
+		Self {
+			shared: None,
+			prefix: PathOwned::default(),
+			id: 0,
+		}
+	}
+}
+
+impl Drop for Snapshot {
+	fn drop(&mut self) {
+		if let Some(shared) = self.shared.take() {
+			shared.lock().remove_snapshot(&self.prefix, self.id);
+		}
+	}
+}
+
 /// What a registration adds to the subtree counts on its walk.
 #[derive(Clone, Copy)]
 struct Below {
 	cursors: usize,
 	watches: usize,
+	snapshots: usize,
 }
 
 impl Below {
-	const NONE: Self = Self { cursors: 0, watches: 0 };
-	const CURSOR: Self = Self { cursors: 1, watches: 0 };
-	const WATCH: Self = Self { cursors: 0, watches: 1 };
+	const NONE: Self = Self {
+		cursors: 0,
+		watches: 0,
+		snapshots: 0,
+	};
+	const CURSOR: Self = Self {
+		cursors: 1,
+		watches: 0,
+		snapshots: 0,
+	};
+	const WATCH: Self = Self {
+		cursors: 0,
+		watches: 1,
+		snapshots: 0,
+	};
+	const SNAPSHOT: Self = Self {
+		cursors: 0,
+		watches: 0,
+		snapshots: 1,
+	};
 }
 
 impl RouteNode {
 	/// Nothing here and nothing below: the node can be pruned.
 	fn is_empty(&self) -> bool {
-		self.entries.is_empty() && self.cursors.is_empty() && self.watches.is_empty() && self.children.is_empty()
+		self.entries.is_empty()
+			&& self.cursors.is_empty()
+			&& self.watches.is_empty()
+			&& self.snapshots.is_empty()
+			&& self.children.is_empty()
 	}
 
 	/// The node `parts` below this one, if the table has it.
@@ -3669,6 +3846,7 @@ impl RouteNode {
 	fn reach<'a>(&mut self, mut parts: impl Iterator<Item = &'a str>, below: Below) -> &mut Self {
 		self.cursors_below += below.cursors;
 		self.watches_below += below.watches;
+		self.snapshots_below += below.snapshots;
 		match parts.next() {
 			None => self,
 			Some(part) => self.children.entry(part.to_string()).or_default().reach(parts, below),
@@ -3697,6 +3875,7 @@ impl RouteNode {
 		};
 		self.cursors_below -= below.cursors;
 		self.watches_below -= below.watches;
+		self.snapshots_below -= below.snapshots;
 		Some(result)
 	}
 
@@ -3753,6 +3932,17 @@ impl RouteNode {
 		visit(self);
 		for child in self.children.values() {
 			child.walk(visit);
+		}
+	}
+
+	/// Collect the snapshots at this node and below, skipping subtrees with none.
+	fn collect_snapshots<'a>(&'a self, out: &mut Vec<&'a SnapshotEntry>) {
+		if self.snapshots_below == 0 {
+			return;
+		}
+		out.extend(&self.snapshots);
+		for child in self.children.values() {
+			child.collect_snapshots(out);
 		}
 	}
 
@@ -3964,6 +4154,7 @@ struct OriginState {
 	// read. A join takes a value of its own, so a start before it reads older.
 	next_route: u64,
 	next_watch: u64,
+	next_snapshot: u64,
 
 	// The registered announce cursors, each with its own coalescing buffer. Each
 	// also hangs in the route table at its heads, which is how an announcement
@@ -3993,6 +4184,7 @@ impl OriginState {
 			routes: RouteTable::default(),
 			next_route: 0,
 			next_watch: 0,
+			next_snapshot: 0,
 			cursors: HashMap::new(),
 			fronts: WeakCache::default(),
 			withdrawn: HashMap::new(),
@@ -4192,7 +4384,78 @@ impl OriginState {
 		for head in &cursor.heads {
 			self.routes.add_cursor(head, id);
 		}
+
+		// The snapshots in flight it can see sit where its routes would, each counted once.
+		let mut snapshots = Vec::new();
+		for head in &cursor.heads {
+			let (above, at) = self.routes.split(head);
+			snapshots.extend(above.into_iter().flat_map(|node| node.snapshots.iter()));
+			if let Some(node) = at {
+				node.collect_snapshots(&mut snapshots);
+			}
+		}
+		snapshots.retain(|snapshot| cursor.awaits(snapshot));
+		snapshots.sort_unstable_by_key(|snapshot| snapshot.id);
+		snapshots.dedup_by_key(|snapshot| snapshot.id);
+		if !snapshots.is_empty() {
+			cursor
+				.state
+				.read()
+				.waiting
+				.fetch_add(snapshots.len(), Ordering::Relaxed);
+		}
+
 		self.cursors.insert(id, cursor);
+	}
+
+	/// Hold every cursor `snapshot` can present on unsynced until it lands.
+	fn add_snapshot(&mut self, prefix: &Path, snapshot: SnapshotEntry) {
+		for id in self.routes.cursors_touching(prefix) {
+			if let Some(cursor) = self.cursors.get(&id)
+				&& cursor.awaits(&snapshot)
+			{
+				cursor.state.read().waiting.fetch_add(1, Ordering::Relaxed);
+			}
+		}
+		self.routes
+			.root
+			.reach(prefix.parts(), Below::SNAPSHOT)
+			.snapshots
+			.push(snapshot);
+	}
+
+	/// The snapshot `id` at `prefix` landed: release the cursors it held.
+	fn remove_snapshot(&mut self, prefix: &Path, id: u64) {
+		let removed = self.routes.root.edit(prefix.parts(), Below::SNAPSHOT, |node| {
+			let index = node.snapshots.iter().position(|snapshot| snapshot.id == id)?;
+			Some(node.snapshots.swap_remove(index))
+		});
+		let Some(Some(snapshot)) = removed else {
+			return;
+		};
+		for id in self.routes.cursors_touching(prefix) {
+			let Some(cursor) = self.cursors.get(&id).filter(|cursor| cursor.awaits(&snapshot)) else {
+				continue;
+			};
+			// Only the last landing changes what a synced waiter sees, so only it takes the
+			// write guard and wakes. It zeroes the count and owes the queue in one critical
+			// section, so no poll sees nothing waiting before the owed set is in. The table
+			// lock keeps the count from moving between the two guards.
+			{
+				let state = cursor.state.read();
+				if state.waiting.load(Ordering::Relaxed) > 1 {
+					state.waiting.fetch_sub(1, Ordering::Relaxed);
+					continue;
+				}
+			}
+			match cursor.state.write() {
+				Ok(mut state) => {
+					state.waiting.store(0, Ordering::Relaxed);
+					state.owe();
+				}
+				Err(state) => state.waiting.store(0, Ordering::Relaxed),
+			}
+		}
 	}
 
 	/// The best served route covering `path` (absolute) for a requester seeing
@@ -5537,6 +5800,12 @@ impl AnnounceConsumer {
 					ids.push(id);
 				}
 			}
+			// Under the table lock, so no snapshot lands between the count and this.
+			if let Ok(mut state) = state.write()
+				&& state.waiting.load(Ordering::Relaxed) == 0
+			{
+				state.owe();
+			}
 		}
 
 		Self {
@@ -5745,6 +6014,42 @@ impl AnnounceConsumer {
 	pub fn is_closed(&self) -> bool {
 		let state = self.state.read();
 		state.is_closed() || state.ended
+	}
+
+	/// Whether this consumer has synced; see [`Self::poll_synced`].
+	pub fn is_synced(&self) -> bool {
+		let state = self.state.read();
+		state.is_closed() || state.synced()
+	}
+
+	/// Wait until this consumer has synced with what its sources announced.
+	///
+	/// Synced means every session feeding this scope has delivered its peer's
+	/// announcements as of when it answered, and this consumer has read every event
+	/// queued before then. A prefix not announced by then is not announced, rather
+	/// than not heard yet. A session joining the scope later, such as a reconnect,
+	/// takes this back until it syncs too; routes published on this origin
+	/// itself never wait.
+	///
+	/// Synced is relative to the session's peer, never global: a relay answers with
+	/// what it holds without waiting on its own upstreams. Versions that cannot mark
+	/// the boundary (moq-lite-03/04, and moq-transport without MoQ Active Count) catch
+	/// up once the peer accepts the request, or once it is sent when nothing answers.
+	///
+	/// Level-triggered: ready whenever synced, and once the cursor is closed.
+	pub fn poll_synced(&self, waiter: &kio::Waiter) -> Poll<()> {
+		self.state
+			.poll(waiter, |state| match state.synced() {
+				true => Poll::Ready(()),
+				false => Poll::Pending,
+			})
+			.map(|_| ())
+	}
+
+	/// Wait until this consumer has synced; see [`Self::poll_synced`].
+	#[cfg(feature = "async")]
+	pub async fn synced(&self) {
+		kio::wait(|waiter| self.poll_synced(waiter)).await
 	}
 
 	/// Returns the root that is automatically stripped from emitted prefixes.
@@ -6045,6 +6350,190 @@ mod tests {
 		drop(announcement);
 		announced.expect_next_ended("room/alice").await;
 		announced.assert_next_wait();
+	}
+
+	/// A consumer is synced once a snapshot lands and it has read what came before.
+	#[test]
+	fn synced_after_the_snapshot_and_its_events() {
+		let producer = origin(1).produce();
+		let snapshot = producer.snapshot("room");
+		let mut announced = producer.consume().announced();
+		assert!(!announced.is_synced(), "a snapshot in flight holds it");
+
+		let _alice = producer.announce("room/alice", Route::default()).unwrap();
+		drop(snapshot);
+		assert!(!announced.is_synced(), "never before an earlier event is read");
+
+		announced.assert_next_active("room/alice");
+		assert!(announced.is_synced());
+
+		// A later announcement is news, not part of what it synced with.
+		let _bob = producer.announce("room/bob", Route::default()).unwrap();
+		assert!(announced.is_synced());
+	}
+
+	/// Without any session feeding it, a consumer syncs on its own replay.
+	#[test]
+	fn a_local_origin_catches_up_on_its_replay() {
+		let producer = origin(1).produce();
+		let mut empty = producer.consume().announced();
+		assert!(empty.is_synced(), "nothing to wait on");
+		empty.assert_next_wait();
+
+		let _alice = producer.announce("room/alice", Route::default()).unwrap();
+		let mut announced = producer.consume().announced();
+		assert!(!announced.is_synced(), "the replay is owed");
+		announced.assert_next_active("room/alice");
+		assert!(announced.is_synced());
+	}
+
+	/// A start and end that cancel before being read are owed nothing.
+	#[test]
+	fn a_cancelled_start_still_catches_up() {
+		let producer = origin(1).produce();
+		let snapshot = producer.snapshot("");
+		let mut announced = producer.consume().announced();
+
+		let alice = producer.announce("room/alice", Route::default()).unwrap();
+		drop(snapshot);
+		assert!(!announced.is_synced());
+		drop(alice);
+		assert!(announced.is_synced(), "the pair cancelled");
+		announced.assert_next_wait();
+	}
+
+	/// A re-price of a route already read is not owed: the set of prefixes is unchanged.
+	#[test]
+	fn an_update_is_not_owed() {
+		let producer = origin(1).produce();
+		let mut announced = producer.consume().announced();
+		let alice = producer.announce("room/alice", Route::default()).unwrap();
+		announced.assert_next_active("room/alice");
+
+		let snapshot = producer.snapshot("");
+		alice.update(Route::default().with_cost(5)).unwrap();
+		drop(snapshot);
+		assert!(announced.is_synced());
+	}
+
+	/// A snapshot taken after syncing (a reconnect) holds it again until it lands.
+	#[test]
+	fn a_new_snapshot_takes_sync_back() {
+		let producer = origin(1).produce();
+		let announced = producer.consume().announced();
+		assert!(announced.is_synced());
+
+		let snapshot = producer.snapshot("room/alice");
+		assert!(!announced.is_synced(), "a snapshot beneath the scope holds it");
+		let second = producer.snapshot("");
+		drop(snapshot);
+		assert!(!announced.is_synced(), "every current snapshot must land");
+		drop(second);
+		assert!(announced.is_synced());
+	}
+
+	/// Only snapshots that could present on a consumer hold it.
+	#[test]
+	fn only_overlapping_snapshots_hold() {
+		let producer = origin(1).produce();
+		let room = producer
+			.consume()
+			.scope("room", &Patterns::from(Pattern::all()))
+			.unwrap();
+
+		let other = producer.snapshot("other");
+		assert!(room.announced().is_synced(), "a disjoint prefix");
+
+		let above = producer.snapshot("");
+		let announced = room.announced();
+		assert!(!announced.is_synced(), "a snapshot above the root covers it");
+		drop(above);
+		assert!(announced.is_synced());
+
+		drop(other);
+
+		// A local view never waits on a peer's routes.
+		let _peer = producer.clone().peer().snapshot("room");
+		assert!(producer.consume().local().announced().is_synced());
+		assert!(!producer.consume().announced().is_synced());
+	}
+
+	/// A source shadowed by a mount can present nothing on the handle, so it never holds it.
+	#[test]
+	fn a_shadowed_snapshot_never_holds() {
+		let producer = origin(1).produce();
+		let project = mounted(&producer, "p1", &["**"]).with_hidden(true);
+		let announced = project.announced();
+		assert!(announced.is_synced());
+
+		let shadowed = producer.snapshot("p1/.svc");
+		assert!(announced.is_synced(), "a snapshot in flight under the hole");
+		assert!(project.announced().is_synced(), "a reader registering past one");
+		drop(shadowed);
+
+		let _target = producer.snapshot(".svc/p1");
+		assert!(!announced.is_synced(), "the mount's target does hold it");
+	}
+
+	/// A source under a hidden segment holds only the readers that opt into hidden routes.
+	#[test]
+	fn a_hidden_snapshot_holds_only_hidden_readers() {
+		let producer = origin(1).produce();
+		let announced = producer.consume().announced();
+		let _stats = producer.snapshot(".stats");
+		assert!(announced.is_synced(), "a snapshot in flight under a hidden segment");
+		assert!(
+			producer.consume().announced().is_synced(),
+			"a reader registering past one"
+		);
+		assert!(!producer.consume().with_hidden(true).announced().is_synced());
+	}
+
+	/// A waiter parked on syncing is woken when it does.
+	#[test]
+	fn catching_up_wakes_the_waiter() {
+		struct Woken(AtomicBool);
+		impl Wake for Woken {
+			fn wake(self: Arc<Self>) {
+				self.0.store(true, Ordering::SeqCst);
+			}
+		}
+
+		let producer = origin(1).produce();
+		let snapshot = producer.snapshot("");
+		let announced = producer.consume().announced();
+		let woken = Arc::new(Woken(AtomicBool::new(false)));
+		let waiter = kio::Waiter::new(std::task::Waker::from(woken.clone()));
+		assert!(announced.poll_synced(&waiter).is_pending());
+		drop(snapshot);
+		assert!(woken.0.load(Ordering::SeqCst), "not woken");
+		assert!(announced.poll_synced(&waiter).is_ready());
+	}
+
+	/// A session joining or landing short of the last one wakes no parked cursor, so a
+	/// relay's announce feeds stay idle while peers connect.
+	#[test]
+	fn holding_back_wakes_nobody() {
+		struct Woken(AtomicBool);
+		impl Wake for Woken {
+			fn wake(self: Arc<Self>) {
+				self.0.store(true, Ordering::SeqCst);
+			}
+		}
+
+		let producer = origin(1).produce();
+		let mut announced = producer.consume().announced();
+		let woken = Arc::new(Woken(AtomicBool::new(false)));
+		let waiter = kio::Waiter::new(std::task::Waker::from(woken.clone()));
+		assert!(announced.poll_next(&waiter).is_pending());
+		assert!(announced.poll_synced(&waiter).is_ready());
+
+		let first = producer.snapshot("");
+		let second = producer.snapshot("room");
+		drop(first);
+		assert!(!woken.0.load(Ordering::SeqCst), "woken while still held back");
+		drop(second);
+		assert!(woken.0.load(Ordering::SeqCst), "the last landing wakes");
 	}
 
 	/// A `.`-prefixed segment below the requested prefix hides a route from
@@ -9230,6 +9719,22 @@ mod tests {
 		// A cursor born after the teardown is born ended.
 		let mut late = consumer.announced();
 		assert!(late.next().now_or_never().expect("ended").is_none());
+	}
+
+	/// A teardown with a snapshot in flight still owes what the cursor has not read.
+	#[test]
+	#[cfg(feature = "async")]
+	fn teardown_owes_what_a_snapshot_held() {
+		let (producer, driver) = Producer::new(Config::new(origin(1)));
+		let snapshot = producer.snapshot("room");
+		let mut announced = producer.consume().announced();
+		let _alice = producer.announce("room/alice", Route::default()).unwrap();
+
+		drop(driver);
+		assert!(!announced.is_synced(), "the queue is still owed");
+		announced.assert_next_active("room/alice");
+		assert!(announced.is_synced());
+		drop(snapshot);
 	}
 
 	#[test]

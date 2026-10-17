@@ -75,6 +75,8 @@ pub(crate) fn config_from_av1c(av1c: &[u8]) -> Result<hang::catalog::VideoConfig
 		chroma_sample_position: av1c[2] & 0x03,
 		..Default::default()
 	});
+	// configOBUs follow the four header bytes, usually with the sequence header.
+	config.color = color(&av1c[4..]);
 	config.description = Some(bytes::Bytes::copy_from_slice(av1c));
 	Ok(config)
 }

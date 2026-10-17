@@ -47,6 +47,47 @@ pub enum Binding {
 	InBand,
 }
 
+/// One connection's cumulative wire counters, which its transport updates as it sends and receives.
+///
+/// Clones share the counters, so stats read them without polling the session or keeping the
+/// connection alive, and the final totals stay readable after it closes. Each counter is
+/// independent: a transport records the ones it tracks, and the rest stay zero.
+#[derive(Clone, Debug, Default)]
+pub struct Wire(std::sync::Arc<WireCounters>);
+
+#[derive(Debug, Default)]
+struct WireCounters {
+	sent_bytes: std::sync::atomic::AtomicU64,
+	received_bytes: std::sync::atomic::AtomicU64,
+}
+
+impl Wire {
+	/// Create counters that start at zero.
+	pub fn new() -> Self {
+		Self::default()
+	}
+
+	/// The bytes sent so far, including transport framing and retransmissions.
+	pub fn sent_bytes(&self) -> u64 {
+		self.0.sent_bytes.load(std::sync::atomic::Ordering::Relaxed)
+	}
+
+	/// The bytes received so far, including transport framing.
+	pub fn received_bytes(&self) -> u64 {
+		self.0.received_bytes.load(std::sync::atomic::Ordering::Relaxed)
+	}
+
+	/// Record the cumulative bytes sent so far.
+	pub fn set_sent_bytes(&self, total: u64) {
+		self.0.sent_bytes.store(total, std::sync::atomic::Ordering::Relaxed);
+	}
+
+	/// Record the cumulative bytes received so far.
+	pub fn set_received_bytes(&self, total: u64) {
+		self.0.received_bytes.store(total, std::sync::atomic::Ordering::Relaxed);
+	}
+}
+
 /// Connection-level statistics.
 ///
 /// Methods return `Option`: `None` means the implementation doesn't track
@@ -236,6 +277,11 @@ pub mod poll {
 		/// Return [`super::StatsUnavailable`] if the transport does not track them. Required
 		/// rather than defaulted for the same reason as [`protocol`](Self::protocol).
 		fn stats(&self) -> impl Stats;
+
+		/// Return the wire counters this transport updates, or `None` when it tracks none.
+		fn wire(&self) -> Option<super::Wire> {
+			None
+		}
 
 		/// Accept the next unidirectional stream opened by the peer.
 		fn accept_uni(&mut self) -> AcceptUni<'_, Self> {

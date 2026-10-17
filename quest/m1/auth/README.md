@@ -133,8 +133,6 @@ because `main` assigned 0x3A to NOT_FETCHABLE first.
 - [Live requests follow their auth](/quest/m1/auth/request-update.md) - a route swaps its auth and the session sends the update, keeping the request up
 - [Auth outlives its session](/quest/m1/auth/issuer.md) - one `auth::Handle` spans a connection's sessions, so a route's auth survives a reconnect
 - [Requests name their auth](/quest/m1/auth/request-auth-id.md) - lite-07 AUTH carries an ID and each request names the auth that admits it
-- [Request gate](/quest/m1/auth/request-gate.md) - every incoming request is
-  refused up front and held to the grant through a gate its dispatcher owns
 - [Bindings](/quest/m1/auth/bindings.md) - grants and tokens reach every
   binding through moq-ffi
 - [Token in band](/quest/m1/auth/token-in-band.md) - the credential can leave

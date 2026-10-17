@@ -980,6 +980,22 @@ struct PresenceTrack {
 	name: String,
 	pair: TrackPair<Presence>,
 	sums: Cumulative<Presence>,
+	/// Wire collection starts at the current reading on every hold. Other presence
+	/// fields keep their existing live-session seeding behavior.
+	wire_start: HashMap<PathOwned, (u64, u64)>,
+}
+
+impl PresenceTrack {
+	fn publish(&mut self) {
+		self.sums.fill(&mut self.pair.frame);
+		for (tier, presence) in &mut self.pair.frame.entries {
+			if let Some(&(tx, rx)) = self.wire_start.get(tier) {
+				presence.wire_tx = presence.wire_tx.saturating_sub(tx);
+				presence.wire_rx = presence.wire_rx.saturating_sub(rx);
+			}
+		}
+		self.pair.publish(&self.name);
+	}
 }
 
 /// One broadcast prefix's requested `traffic.json` pair and its per-tier sums,
@@ -1270,8 +1286,7 @@ impl GroupPublisher {
 		self.totals.sums.fill(&mut self.totals.pair.frame);
 		self.totals.pair.publish(crate::TOTALS);
 		for track in self.presence.values_mut() {
-			track.sums.fill(&mut track.pair.frame);
-			track.pair.publish(&track.name);
+			track.publish();
 		}
 		for track in self.prefixes.values_mut() {
 			track.publish(tick);
@@ -1391,15 +1406,18 @@ impl GroupPublisher {
 			name,
 			pair,
 			sums: Cumulative::new(),
+			wire_start: HashMap::new(),
 		};
 		for &i in &self.session_rows {
 			let entry = &report.sessions[i];
 			if entry.root == root {
 				track.sums.add(&entry.tier, entry.closed, |sum| sum.add(entry.presence));
+				let start = track.wire_start.entry(entry.tier.label().clone()).or_default();
+				start.0 += entry.presence.wire_tx;
+				start.1 += entry.presence.wire_rx;
 			}
 		}
-		track.sums.fill(&mut track.pair.frame);
-		track.pair.publish(&track.name);
+		track.publish();
 		self.presence.insert(root, track);
 	}
 
@@ -1606,6 +1624,177 @@ mod tests {
 				.unwrap()
 				.unwrap();
 			assert!(group.sequence >= floor);
+		}
+	}
+
+	/// Real protocol relays keep their idle track cache while upstream presence
+	/// is reclaimed. A re-hold must refresh that cache before exposing any frame.
+	#[tokio::test(start_paused = true)]
+	async fn reheld_wire_presence_refreshes_two_relay_caches() {
+		fn relay() -> (origin::Producer, moq_net::cache::Pool) {
+			let config = origin::Config::default();
+			let pool = config.pool.clone();
+			let (origin, driver) = origin::Producer::new(config);
+			tokio::spawn(moq_net::time::run(driver));
+			(origin, pool)
+		}
+		async fn pumping<T>(drain: &mut Drain, future: impl std::future::Future<Output = T>) -> T {
+			let mut future = std::pin::pin!(future);
+			for _ in 0..1000 {
+				drain.collect();
+				drain.publish(Instant::now());
+				if let Some(result) = futures::FutureExt::now_or_never(future.as_mut()) {
+					return result;
+				}
+				tokio::task::yield_now().await;
+			}
+			panic!("protocol request did not settle while pumping the stats producer");
+		}
+		async fn link(
+			upstream: &origin::Producer,
+			downstream: &origin::Producer,
+			version: moq_net::Version,
+		) -> [moq_net::Session; 2] {
+			let mut config = moq_net::transport::memory::Config::default();
+			config.protocol = Some(version.to_string());
+			let (client_transport, server_transport) = moq_net::transport::memory::pair(config);
+			let client = moq_net::Client::new()
+				.with_versions(version.into())
+				.with_subscriber(downstream.clone().peer());
+			let server = moq_net::Server::new()
+				.with_versions(version.into())
+				.with_publisher(upstream.consume().with_hidden(true));
+			let client = async {
+				let (session, driver) = client.connect(moq_clock::now(), client_transport).await.unwrap();
+				tokio::spawn(moq_net::time::run(driver));
+				session
+			};
+			let server = async {
+				let (session, driver) = server.accept(moq_clock::now(), server_transport).await.unwrap();
+				tokio::spawn(moq_net::time::run(driver));
+				session
+			};
+			let (a, b) = tokio::join!(client, server);
+			[a, b]
+		}
+		for version in ["moq-lite-06", "moq-lite-07-wip"].map(|value| value.parse().unwrap()) {
+			for compressed in [false, true] {
+				let registry = Registry::new(moq_net::stats::Config::new());
+				let origin = produce_origin();
+				let mut drain = Drain::new(Task {
+					registry: registry.clone(),
+					origin: origin.clone(),
+					prefix: ".stats".into(),
+					node: None,
+					depth: 0,
+					linger: DEFAULT_LINGER,
+					interval: Duration::from_secs(1),
+				})
+				.unwrap();
+				let (middle, middle_cache) = relay();
+				let (edge, edge_cache) = relay();
+				let _links = [
+					link(&origin, &middle, version).await,
+					link(&middle, &edge, version).await,
+				];
+				let session = registry.tier(Tier::default()).session("room");
+				let counters = moq_net::transport::Wire::new();
+				let _wire = session.wire(counters.clone());
+				let store = |n: u64| {
+					counters.set_sent_bytes(n);
+					counters.set_received_bytes(n * 2);
+				};
+				store(40);
+				drain.collect();
+				drain.publish(Instant::now());
+				let consumer = edge.consume().with_hidden(true);
+				let mut events = consumer.announced();
+				let (route, active) = next_update(&mut events).await.unwrap();
+				assert!(active);
+				assert_eq!(route.prefix.as_str(), ".stats/node");
+				let broadcast = consumer.request_broadcast(".stats/node", None).await.unwrap();
+				let name = presence_track("room", compressed);
+				let mut config = moq_json::snapshot::consumer::Config::default();
+				if compressed {
+					config.compression = moq_json::Compression::Deflate;
+				}
+				let mut previous = None;
+				for (reading, delta) in [(40, 11), (1_000, 7)] {
+					store(reading);
+					let subscriber = pumping(&mut drain, broadcast.track(&name).unwrap().subscribe(None))
+						.await
+						.unwrap();
+					let mut cursor = pumping(&mut drain, broadcast.track(&name).unwrap().subscribe(None))
+						.await
+						.unwrap();
+					let group = pumping(&mut drain, cursor.recv_group()).await.unwrap().unwrap();
+					if let Some(old) = previous {
+						assert!(group.sequence > old, "re-hold must have a fresh group identity");
+					}
+					drop(group);
+					drop(cursor);
+					let mut reader = moq_json::snapshot::Consumer::<PresenceFrame>::new(subscriber, config.clone());
+					let initial = pumping(&mut drain, reader.next()).await.unwrap().unwrap();
+					assert_eq!(
+						(initial[""].wire_tx, initial[""].wire_rx),
+						(0, 0),
+						"a cache exposed an earlier hold's bytes"
+					);
+					store(reading + delta);
+					drain.collect();
+					drain.publish(Instant::now());
+					let next = pumping(&mut drain, reader.next()).await.unwrap().unwrap();
+					assert_eq!((next[""].wire_tx, next[""].wire_rx), (delta, delta * 2));
+					if compressed {
+						// Cross the codec's group budget naturally, leaving a completed
+						// group cached when unsubscribe aborts the still-open last group.
+						for extra in 1..=300 {
+							store(reading + delta + extra);
+							let next = pumping(&mut drain, reader.next()).await.unwrap().unwrap();
+							assert_eq!(
+								(next[""].wire_tx, next[""].wire_rx),
+								(delta + extra, (delta + extra) * 2)
+							);
+						}
+					}
+					let mut cursor = pumping(&mut drain, broadcast.track(&name).unwrap().subscribe(None))
+						.await
+						.unwrap();
+					previous = Some(
+						pumping(&mut drain, cursor.recv_group())
+							.await
+							.unwrap()
+							.unwrap()
+							.sequence,
+					);
+					drop(cursor);
+					drop(reader);
+					for _ in 0..100 {
+						tokio::task::yield_now().await;
+						drain.collect();
+						drain.publish(Instant::now());
+						if drain.groups[""].presence.is_empty() {
+							break;
+						}
+					}
+					assert!(
+						drain.groups[""].presence.is_empty(),
+						"relays must release upstream demand while retaining their idle cache"
+					);
+					assert!(
+						middle_cache.used() > 0 && edge_cache.used() > 0,
+						"idle cache: middle={} edge={}",
+						middle_cache.used(),
+						edge_cache.used()
+					);
+				}
+				let total = drain.groups[""].totals.sums.tiers[&Tier::default()].current.sessions;
+				assert_eq!(
+					(total.wire_tx, total.wire_rx),
+					if compressed { (1_307, 2_614) } else { (1_007, 2_014) },
+					"epoch totals never reset on re-hold"
+				);
+			}
 		}
 	}
 
@@ -2179,6 +2368,46 @@ mod tests {
 
 	const ACME: &str = ".stats/acme/node/sjc";
 	const FEED: &str = ".stats/feed/node/sjc";
+
+	#[tokio::test(start_paused = true)]
+	async fn wire_totals_restart_after_a_group_epoch_ends() {
+		let (producer, origin, mut events) = grouped_producer(Duration::ZERO);
+		let registry = producer.registry();
+		let session = registry.tier(Tier::default()).session("acme/live");
+		let counters = moq_net::transport::Wire::new();
+		counters.set_sent_bytes(71);
+		counters.set_received_bytes(29);
+		let wire = session.wire(counters);
+		drive_tick().await;
+		let [(path, true, old_epoch)] = &take_epochs(&mut events)[..] else {
+			panic!("expected the wire root's group");
+		};
+		let broadcast = origin.consume().request_broadcast(path, None).await.expect("resolve");
+		let totals = default_totals(&broadcast).await.sessions;
+		assert_eq!((totals.wire_tx, totals.wire_rx), (71, 29));
+		drop(wire);
+		drop(session);
+		for _ in 0..3 {
+			drive_tick().await;
+		}
+		assert_eq!(take_epochs(&mut events), [(path.clone(), false, old_epoch.clone())]);
+
+		let session = registry.tier(Tier::default()).session("acme/live");
+		let _wire = session.wire(moq_net::transport::Wire::new());
+		drive_tick().await;
+		let [(new_path, true, new_epoch)] = &take_epochs(&mut events)[..] else {
+			panic!("expected a new wire group epoch");
+		};
+		assert_eq!(new_path, path);
+		assert!(new_epoch > old_epoch);
+		let broadcast = origin
+			.consume()
+			.request_broadcast(new_path, None)
+			.await
+			.expect("resolve");
+		let totals = default_totals(&broadcast).await.sessions;
+		assert_eq!((totals.wire_tx, totals.wire_rx), (0, 0));
+	}
 
 	#[tokio::test(start_paused = true)]
 	async fn empty_group_lingers_then_unannounces() {

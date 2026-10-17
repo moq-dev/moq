@@ -168,6 +168,9 @@ export class Subscriber {
 	// Whether the peer understands the HIDDEN parameter (MoQ Hidden).
 	#hidden: boolean;
 
+	// Whether a SUBSCRIBE_NAMESPACE's REQUEST_OK counts the NAMESPACEs that follow it (MoQ Active Count).
+	#activeCount: boolean;
+
 	// What the peer's SETUP declared about being solicited (MoQ Solicit), `undefined`
 	// when it declared nothing.
 	#solicit?: boolean;
@@ -193,6 +196,7 @@ export class Subscriber {
 		quic,
 		cluster,
 		hidden = false,
+		activeCount = false,
 		solicit,
 		goaway,
 		grant,
@@ -206,6 +210,8 @@ export class Subscriber {
 		cluster?: Cluster.Hops;
 		/** Whether the peer understands the HIDDEN parameter (MoQ Hidden). */
 		hidden?: boolean;
+		/** Whether both SETUPs declared MoQ Active Count. */
+		activeCount?: boolean;
 		/** What the peer's SETUP declared about being solicited (MoQ Solicit). */
 		solicit?: boolean;
 		/** Settles when the peer sends GOAWAY. */
@@ -220,6 +226,7 @@ export class Subscriber {
 		this.#announced = new SlotMap(new Slots(limits.announces, { quic, reason: "too many announcements" }));
 		this.#cluster = cluster;
 		this.#hidden = hidden;
+		this.#activeCount = activeCount;
 		this.#solicit = solicit;
 		this.#goaway = goaway;
 		this.#grant = grant;
@@ -391,6 +398,17 @@ export class Subscriber {
 		}
 	}
 
+	// The peer broke the protocol: close with the violation's code before the session's own
+	// close, which would send a clean one, as the connection does for its own violations.
+	#violated(err: ProtocolViolation) {
+		try {
+			this.#quic?.close({ closeCode: err.code, reason: err.message });
+		} catch {
+			// Already closed.
+		}
+		this.#session.close();
+	}
+
 	async #runAnnounced(announced: announce.Producer, prefix: Path.Valid, hidden: boolean) {
 		const version = this.#session.version;
 
@@ -401,6 +419,8 @@ export class Subscriber {
 		// could land. A peer that declared Solicit only tells when asked, so it still is.
 		const legacy = version === Version.DRAFT_14 || version === Version.DRAFT_15;
 		if (legacy && prefix.length === 0 && this.#solicit === undefined) {
+			// Nothing marks where what it tells unasked starts or ends, so there is nothing to wait for.
+			announced.synced();
 			// No request stream ends this wait, so the session's end has to.
 			const ends: PromiseLike<unknown>[] = [announced.closed];
 			if (this.#quic) ends.push(this.#quic.closed.catch(() => undefined));
@@ -483,39 +503,63 @@ export class Subscriber {
 					stream.close();
 				};
 
+				// Resolves to how many NAMESPACEs make up the initial set (MoQ Active Count).
 				const response = (async () => {
 					const respTypeId = await stream.reader.u53();
 					if (respTypeId === RequestOk.id) {
-						await RequestOk.decode(stream.reader, version);
-					} else if (respTypeId === SubscribeNamespaceOk.id) {
+						const ok = await RequestOk.decode(stream.reader, version);
+						// A count the negotiation did not promise, or a missing one it did, is
+						// the peer breaking the extension. Without it, the answer is the best
+						// boundary there is.
+						const count = ok.parameters.activeCount;
+						if (this.#activeCount !== (count !== undefined)) {
+							throw new ProtocolViolation("ACTIVE_COUNT does not match the negotiation");
+						}
+						return count ?? 0;
+					}
+					if (respTypeId === SubscribeNamespaceOk.id) {
 						// v14: SubscribeNamespaceOk
 						const size = await stream.reader.u16();
 						await stream.reader.read(size);
-					} else {
-						throw new Error(`SubscribeNamespace rejected: typeId=0x${respTypeId.toString(16)}`);
+						return 0;
 					}
-					return true;
+					throw new Error(`SubscribeNamespace rejected: typeId=0x${respTypeId.toString(16)}`);
 				})();
 				// A consumer that leaves before the peer answers ends the request now, not on the answer.
-				if (!(await race([response, announced.closed.then(() => false)]))) {
+				const answered = await race([response, announced.closed.then(() => undefined)]);
+				if (answered === undefined) {
 					await end();
 					return;
 				}
+				let initial = answered;
 
 				// Loop reading Namespace/NamespaceDone entries
 				const readLoop = (async () => {
 					for (;;) {
+						if (initial === 0) announced.synced();
+
 						const done = await stream.reader.done();
-						if (done) break;
+						if (done) {
+							if (initial > 0)
+								throw new ProtocolViolation("namespace stream ended inside the initial set");
+							break;
+						}
 
 						const msgType = await stream.reader.u53();
+						// The counted initial set is NAMESPACEs only, so anything else cuts it short.
+						if (initial > 0 && msgType !== SubscribeNamespaceEntry.id) {
+							throw new ProtocolViolation(`message 0x${msgType.toString(16)} inside the initial set`);
+						}
 						if (msgType === SubscribeNamespaceEntry.id) {
 							const entry = await SubscribeNamespaceEntry.decode(
 								stream.reader,
 								version,
 								Cluster.negotiated(this.#cluster),
 							);
+							// Counted even when discarded below.
+							if (initial > 0) initial -= 1;
 							if (released) break;
+
 							const path = Path.join(prefix, entry.suffix);
 
 							// A repeat updates the advertisement in place, so one that now
@@ -561,7 +605,7 @@ export class Subscriber {
 				// rejection would go unhandled. Idempotent with the catch below, which is
 				// what runs when the loop is the one that ends the race.
 				readLoop.catch((err: unknown) => {
-					if (err instanceof ProtocolViolation) this.#session.close();
+					if (err instanceof ProtocolViolation) this.#violated(err);
 				});
 
 				// Wait for either the read loop or the announced to close
@@ -579,7 +623,7 @@ export class Subscriber {
 			// is the only place a malformed one surfaces. The cluster draft requires closing
 			// the session over those, and the stream alone is not enough: the peer would
 			// just repeat it on the next SUBSCRIBE_NAMESPACE.
-			if (e instanceof ProtocolViolation) this.#session.close();
+			if (e instanceof ProtocolViolation) this.#violated(e);
 
 			// Abort the stream rather than letting the caller's `finally` close it cleanly.
 			// A rejected namespace subscription is a failure, and a consumer that can't tell

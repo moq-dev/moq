@@ -449,6 +449,8 @@ struct Namespaces<S: crate::transport::poll::Session> {
 	woken: Arc<Woken>,
 	/// What we may advertise: our grant (MoQ Auth) and the ceiling on the peer.
 	permit: crate::auth::Permit,
+	/// The dispatcher-owned gate for a solicited namespace request.
+	gate: Option<crate::auth::Gate>,
 	/// The auth epoch last applied to `permit`.
 	epoch: u64,
 	/// Whether this discovery cursor includes hidden namespaces.
@@ -466,6 +468,7 @@ impl<S: crate::transport::poll::Session> Namespaces<S> {
 			inflight: VecDeque::new(),
 			woken: Default::default(),
 			permit: Default::default(),
+			gate: None,
 			epoch: 0,
 			hidden: false,
 		}
@@ -616,6 +619,12 @@ pub(super) struct Publisher<S: crate::transport::poll::Session> {
 	pub(super) fetches: crate::session::Slots,
 	// Ranks every subscription's group streams against each other for the transport.
 	priority: PriorityQueue,
+}
+
+/// Authorization selected by dispatch: a standalone path or a live parent subscription.
+enum FetchGate {
+	Standalone(crate::auth::Gate),
+	Joining { id: RequestId, auth: crate::auth::Handle },
 }
 
 struct Serve(Arc<AtomicUsize>);
@@ -801,7 +810,12 @@ where
 					return Err(Error::WrongSize);
 				}
 				tracing::debug!(message = ?msg, "received subscribe");
-				let task = this.run_subscribe_stream(stream, msg);
+				let gate = crate::auth::Gate::new(
+					this.auth.clone(),
+					msg.track_namespace.to_owned(),
+					crate::auth::Direction::Publish,
+				);
+				let task = this.serve_subscribe_stream(stream, msg, gate);
 				async move {
 					let _serve = serve;
 					if let Err(err) = task.await {
@@ -825,9 +839,10 @@ where
 					return Err(Error::WrongSize);
 				}
 				tracing::debug!(message = ?msg, "received fetch");
+				let gate = this.fetch_gate(&msg);
 				async move {
 					let _serve = serve;
-					if let Err(err) = this.run_fetch_stream(stream, msg).await {
+					if let Err(err) = this.serve_fetch_stream(stream, msg, gate).await {
 						tracing::debug!(%err, "fetch stream error");
 					}
 				}
@@ -875,9 +890,14 @@ where
 					.maybe_boxed());
 				}
 				tracing::debug!(message = ?msg, "received subscribe_namespace");
+				let gate = crate::auth::Gate::new(
+					this.auth.clone(),
+					msg.namespace.to_owned(),
+					crate::auth::Direction::Publish,
+				);
 				async move {
 					let mut session = this.session.clone();
-					match this.run_subscribe_namespace_stream(stream, msg).await {
+					match this.serve_subscribe_namespace_stream(stream, msg, gate).await {
 						// Such as a malformed answer to an advertisement this request solicited.
 						Err(err) if super::subscriber::is_protocol_violation(&err) => session.close(
 							super::error::to_session_code(&crate::SessionError::from(&err)),
@@ -931,8 +951,13 @@ where
 					return Err(Error::WrongSize);
 				}
 				tracing::debug!(message = ?msg, "received track_status");
+				let gate = crate::auth::Gate::new(
+					this.auth.clone(),
+					msg.track_namespace.to_owned(),
+					crate::auth::Direction::Publish,
+				);
 				async move {
-					if let Err(err) = this.run_track_status_stream(stream, msg).await {
+					if let Err(err) = this.serve_track_status_stream(stream, msg, gate).await {
 						tracing::debug!(%err, "track_status stream error");
 					}
 				}
@@ -967,10 +992,25 @@ where
 	}
 
 	/// Handle a SUBSCRIBE on its bidi stream.
+	#[cfg(test)]
 	fn run_subscribe_stream(
+		self,
+		stream: Stream<S, Version>,
+		msg: ietf::Subscribe<'_>,
+	) -> impl std::future::Future<Output = Result<(), Error>> {
+		let gate = crate::auth::Gate::new(
+			self.auth.clone(),
+			msg.track_namespace.to_owned(),
+			crate::auth::Direction::Publish,
+		);
+		self.serve_subscribe_stream(stream, msg, gate)
+	}
+
+	fn serve_subscribe_stream(
 		self,
 		mut stream: Stream<S, Version>,
 		msg: ietf::Subscribe<'_>,
+		gate: crate::auth::Gate,
 	) -> impl std::future::Future<Output = Result<(), Error>> {
 		// Register during dispatch, before either request task can be polled.
 		let join = (!Filter::is_draft20(self.version)).then(|| self.register_join(msg.request_id));
@@ -992,17 +1032,18 @@ where
 			// this request alone (MoQ request-token), even where the limit covers it. What the
 			// peer granted us bounds what we send either way, and never stands in for our
 			// authorization of it.
-			let path = msg.track_namespace.as_str();
 			let token = match &msg.authorization_token {
 				Some(token)
-					if self.auth.within_grant(crate::auth::Direction::Publish, path)
-						&& self.auth.token_decides(crate::auth::Direction::Publish) =>
+					if self
+						.auth
+						.within_grant(crate::auth::Direction::Publish, msg.track_namespace.as_str())
+						&& gate.token_decides() =>
 				{
 					Some(token.0.clone())
 				}
 				_ => None,
 			};
-			if token.is_none() && !self.auth.allows(crate::auth::Direction::Publish, path) {
+			if token.is_none() && !gate.allows() {
 				let err = Error::Unauthorized;
 				return self.reject_subscribe(stream, request_id, &err, "not granted").await;
 			}
@@ -1047,7 +1088,7 @@ where
 			// once the limit does too.
 			let (mut gate, request_grant) = match token {
 				Some(token) => {
-					let verdict = self.auth.verify_request(token, Some(slot.clone()));
+					let verdict = gate.verify(token, Some(slot.clone()));
 					// The subscriber cancelling or the session closing withdraws the token.
 					let mut session = self.session.clone();
 					let verified = kio::wait(|waiter| {
@@ -1072,14 +1113,7 @@ where
 						Some(slot.clone()),
 					);
 					match admitted {
-						Ok(grant) => (
-							crate::auth::Gate::granted(
-								self.auth.clone(),
-								msg.track_namespace.to_owned(),
-								crate::auth::Direction::Publish,
-							),
-							Some(grant),
-						),
+						Ok(grant) => (gate.named(), Some(grant)),
 						Err(refusal) => {
 							return self
 								.reject_subscribe(stream, request_id, &refusal.error, &refusal.reason)
@@ -1087,14 +1121,7 @@ where
 						}
 					}
 				}
-				None => (
-					crate::auth::Gate::new(
-						self.auth.clone(),
-						msg.track_namespace.to_owned(),
-						crate::auth::Direction::Publish,
-					),
-					None,
-				),
+				None => (gate, None),
 			};
 			let _slot = slot;
 
@@ -2072,7 +2099,35 @@ where
 	/// The answer is buffered before replying: FETCH_OK names where the response ends,
 	/// which a range running past the track only learns by reading it, and a refusal can
 	/// still replace it until then.
-	async fn run_fetch_stream(mut self, mut stream: Stream<S, Version>, msg: ietf::Fetch<'_>) -> Result<(), Error> {
+	fn fetch_gate(&self, msg: &ietf::Fetch<'_>) -> FetchGate {
+		match &msg.fetch_type {
+			FetchType::Standalone { namespace, .. } | FetchType::Filtered { namespace, .. } => FetchGate::Standalone(
+				crate::auth::Gate::new(self.auth.clone(), namespace.to_owned(), crate::auth::Direction::Publish),
+			),
+			FetchType::RelativeJoining {
+				subscriber_request_id, ..
+			}
+			| FetchType::AbsoluteJoining {
+				subscriber_request_id, ..
+			} => FetchGate::Joining {
+				id: *subscriber_request_id,
+				auth: self.auth.clone(),
+			},
+		}
+	}
+
+	#[cfg(test)]
+	async fn run_fetch_stream(self, stream: Stream<S, Version>, msg: ietf::Fetch<'_>) -> Result<(), Error> {
+		let gate = self.fetch_gate(&msg);
+		self.serve_fetch_stream(stream, msg, gate).await
+	}
+
+	async fn serve_fetch_stream(
+		mut self,
+		mut stream: Stream<S, Version>,
+		msg: ietf::Fetch<'_>,
+		admission: FetchGate,
+	) -> Result<(), Error> {
 		let _slot = match self.fetches.acquire() {
 			Ok(slot) => slot,
 			Err(err) => {
@@ -2173,13 +2228,14 @@ where
 				start,
 				end,
 			} => {
-				if !self.auth.allows(crate::auth::Direction::Publish, namespace.as_str()) {
+				let FetchGate::Standalone(mut gate) = admission else {
+					return Err(Error::Unauthorized);
+				};
+				if !gate.allows() {
 					return self
 						.reject_fetch(stream, msg.request_id, &Error::Unauthorized, "not granted")
 						.await;
 				}
-				let gate =
-					crate::auth::Gate::new(self.auth.clone(), namespace.to_owned(), crate::auth::Direction::Publish);
 
 				// An End Object of 0 asks for the whole End Group.
 				let end = match end.object {
@@ -2194,7 +2250,10 @@ where
 
 				// The peer must have seen the announcement to name this namespace, so this
 				// resolves like a SUBSCRIBE does.
-				let broadcast = match self.serving_origin().await.request_broadcast(&namespace, None).await {
+				let broadcast = match gate
+					.guard(async { self.serving_origin().await.request_broadcast(&namespace, None).await })
+					.await
+				{
 					Ok(broadcast) => broadcast,
 					Err(err) => return self.reject_fetch(stream, msg.request_id, &err, &err.to_string()).await,
 				};
@@ -2221,19 +2280,21 @@ where
 			| FetchType::AbsoluteJoining {
 				subscriber_request_id, ..
 			} => {
+				let FetchGate::Joining { id, auth } = admission else {
+					return Err(Error::Unauthorized);
+				};
+				debug_assert_eq!(id, subscriber_request_id);
 				let (end, cache, namespace, ranking, token) =
 					match self.joined(&mut stream, subscriber_request_id).await? {
 						Ok(joined) => joined,
 						Err((err, reason)) => return self.reject_fetch(stream, msg.request_id, &err, reason).await,
 					};
-				// The cache outlives the subscription, so the fetch holds its own gate rather
-				// than trusting the subscription's to stop it. One the subscription's request
-				// token authorized is held to the peer's grant alone, as the subscription is.
-				let gate = match token {
-					true => crate::auth::Gate::granted(self.auth.clone(), namespace, crate::auth::Direction::Publish),
-					false => crate::auth::Gate::new(self.auth.clone(), namespace, crate::auth::Direction::Publish),
-				};
-				lapses_with = token.then_some(subscriber_request_id);
+				// The cache outlives the subscription, so the fetch holds its own gate and ends
+				// with the subscription rather than trusting the cache. One the subscription's
+				// request token authorized is held to the peer's grant alone, as the subscription is.
+				let gate = crate::auth::Gate::new(auth, namespace, crate::auth::Direction::Publish);
+				let gate = if token { gate.named() } else { gate };
+				lapses_with = Some(subscriber_request_id);
 				let start = match fetch_type {
 					FetchType::RelativeJoining { group_offset, .. } => end.group.saturating_sub(group_offset),
 					FetchType::AbsoluteJoining { group_id, .. } if group_id <= end.group => group_id,
@@ -2598,39 +2659,47 @@ where
 	/// The track resolves as it would for a SUBSCRIBE, so a relay asks its upstream for a
 	/// track it does not hold yet and the answer waits on that. The Largest Location is
 	/// whatever the cache holds now: nothing waits for a fresher one.
-	async fn run_track_status_stream(
+	#[cfg(test)]
+	fn run_track_status_stream(
+		self,
+		stream: Stream<S, Version>,
+		msg: ietf::TrackStatus<'_>,
+	) -> impl std::future::Future<Output = Result<(), Error>> {
+		let gate = crate::auth::Gate::new(
+			self.auth.clone(),
+			msg.track_namespace.to_owned(),
+			crate::auth::Direction::Publish,
+		);
+		self.serve_track_status_stream(stream, msg, gate)
+	}
+
+	async fn serve_track_status_stream(
 		self,
 		mut stream: Stream<S, Version>,
 		msg: ietf::TrackStatus<'_>,
+		mut gate: crate::auth::Gate,
 	) -> Result<(), Error> {
 		if let Some(error) = super::namespace::refusal(&msg.track_namespace, self.version) {
 			return super::request_stream::reject(stream, error).await;
 		}
 		let request_id = msg.request_id;
 
-		// Answer only for what our grant lets us publish (MoQ Auth): checked before the
-		// track resolves, and held until the answer.
-		if !self
-			.auth
-			.allows(crate::auth::Direction::Publish, msg.track_namespace.as_str())
-		{
+		if !gate.allows() {
 			return self.reject_track_status(stream, request_id, &Error::Unauthorized).await;
 		}
-		let mut gate = crate::auth::Gate::new(
-			self.auth.clone(),
-			msg.track_namespace.to_owned(),
-			crate::auth::Direction::Publish,
-		);
-
-		let broadcast = match self
-			.serving_origin()
-			.await
-			.request_broadcast(&msg.track_namespace, None)
+		let broadcast = match gate
+			.guard(async {
+				self.serving_origin()
+					.await
+					.request_broadcast(&msg.track_namespace, None)
+					.await
+			})
 			.await
 		{
 			Ok(broadcast) => broadcast,
 			Err(err) => return self.reject_track_status(stream, request_id, &err).await,
 		};
+
 		let track = match broadcast.track(&msg.track_name) {
 			Ok(track) => track,
 			Err(err) => return self.reject_track_status(stream, request_id, &err).await,
@@ -3432,7 +3501,7 @@ where
 	/// peer that would rather ask says so with the MoQ Solicit extension
 	/// ([`solicit`](super::solicit)),
 	/// and then this loop does nothing.
-	/// On draft-16 and later [`Self::run_subscribe_namespace_stream`] also carries every
+	/// On draft-16 and later [`Self::serve_subscribe_namespace_stream`] also carries every
 	/// match, so a peer that did not ask hears each namespace both ways. A NAMESPACE is
 	/// discovery only, not a second route.
 	pub async fn run_publish_namespaces(self) -> Result<(), Error> {
@@ -3463,10 +3532,25 @@ where
 	/// this stream, whatever the peer's SETUP said. Draft-14 and 15 predate that
 	/// message and still answer with PUBLISH_NAMESPACE only for what
 	/// [`Self::run_publish_namespaces`] does not already say.
+	#[cfg(test)]
 	async fn run_subscribe_namespace_stream(
+		self,
+		stream: Stream<S, Version>,
+		msg: ietf::SubscribeNamespace<'_>,
+	) -> Result<(), Error> {
+		let gate = crate::auth::Gate::new(
+			self.auth.clone(),
+			msg.namespace.to_owned(),
+			crate::auth::Direction::Publish,
+		);
+		self.serve_subscribe_namespace_stream(stream, msg, gate).await
+	}
+
+	async fn serve_subscribe_namespace_stream(
 		self,
 		mut stream: Stream<S, Version>,
 		msg: ietf::SubscribeNamespace<'_>,
+		gate: crate::auth::Gate,
 	) -> Result<(), Error> {
 		if let Some(error) = super::namespace::refusal(&msg.namespace, self.version) {
 			return super::request_stream::reject(stream, error).await;
@@ -3528,9 +3612,9 @@ where
 		let (initial, active) = match declared.active_count {
 			true => {
 				if declared.auth {
-					kio::wait(|waiter| self.auth.poll_setup_answered(waiter)).await;
+					kio::wait(|waiter| gate.poll_setup_answered(waiter)).await;
 				}
-				let (permit, _) = self.permit_now();
+				let (permit, _) = self.permit_now(Some(&gate));
 				let initial = Self::snapshot(&mut announced);
 				let count = initial
 					.iter()
@@ -3583,17 +3667,21 @@ where
 		};
 
 		let mut ns = Namespaces::new(peer, target);
+		ns.gate = Some(gate);
 		ns.hidden = !declared.hidden || msg.hidden || self.origin.includes_hidden();
 		self.run_namespaces(announced, prefix, ns, initial).await
 	}
 
 	/// Our publish permit as it stands now, with the auth epoch it was read at.
-	fn permit_now(&self) -> (crate::auth::Permit, u64) {
+	fn permit_now(&self, gate: Option<&crate::auth::Gate>) -> (crate::auth::Permit, u64) {
 		let mut epoch = 0;
-		match self
-			.auth
-			.poll_permit(crate::auth::Direction::Publish, &mut epoch, &kio::Waiter::noop())
-		{
+		let permit = match gate {
+			Some(gate) => gate.poll_permit(&mut epoch, &kio::Waiter::noop()),
+			None => self
+				.auth
+				.poll_permit(crate::auth::Direction::Publish, &mut epoch, &kio::Waiter::noop()),
+		};
+		match permit {
 			Poll::Ready(permit) => (permit, epoch),
 			Poll::Pending => (Default::default(), 0),
 		}
@@ -3644,7 +3732,7 @@ where
 		if self.peer_setup.get().await.auth {
 			kio::wait(|waiter| self.auth.poll_setup_answered(waiter)).await;
 		}
-		(ns.permit, ns.epoch) = self.permit_now();
+		(ns.permit, ns.epoch) = self.permit_now(ns.gate.as_ref());
 		for update in initial {
 			self.apply_update(&mut ns, &prefix, update, true).await?;
 		}
@@ -3681,6 +3769,7 @@ where
 					inflight,
 					woken,
 					updates,
+					gate,
 					..
 				} = &mut ns;
 				kio::wait(|waiter| {
@@ -3689,7 +3778,11 @@ where
 					}
 					// A grant change applies before the next update, so a namespace it no
 					// longer covers is withdrawn rather than re-sent.
-					if let Poll::Ready(permit) = self.auth.poll_permit(crate::auth::Direction::Publish, epoch, waiter) {
+					let permit = match gate {
+						Some(gate) => gate.poll_permit(epoch, waiter),
+						None => self.auth.poll_permit(crate::auth::Direction::Publish, epoch, waiter),
+					};
+					if let Poll::Ready(permit) = permit {
 						return Poll::Ready(NamespaceEvent::Regrant(permit));
 					}
 					let mut cx = waiter.context();
@@ -9685,12 +9778,14 @@ mod serve_tests {
 		}
 	}
 
-	/// A joining FETCH on a subscription its own request token authorized holds no authority
-	/// of its own: revoking the token ends the subscription, and the fetch with it, even one
-	/// parked on stream credit after FETCH_OK.
+	/// A joining FETCH holds no authority of its own: revocation or dropping its parent
+	/// ends it even while stream credit blocks the response after FETCH_OK.
 	#[moq_clock::test]
-	async fn a_joining_fetch_ends_with_its_token_subscription() {
-		for version in JOINING_DRAFTS {
+	async fn a_joining_fetch_ends_with_its_subscription() {
+		for (version, token) in JOINING_DRAFTS
+			.into_iter()
+			.flat_map(|version| [false, true].map(|token| (version, token)))
+		{
 			let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 			let broadcast = origin.publish("room", crate::origin::Route::default()).unwrap();
 			let track = broadcast.create_track("video", crate::track::Info::timed()).unwrap();
@@ -9706,7 +9801,10 @@ mod serve_tests {
 			let auth = crate::auth::Handle::new(false);
 			let mut requests = auth.requests().unwrap();
 			// A limit of nothing, so only the token admits the subscription.
-			auth.authorize(&crate::auth::Grant::default());
+			auth.authorize(&match token {
+				true => crate::auth::Grant::default(),
+				false => crate::auth::Grant::all(),
+			});
 			let publisher = Publisher::new(
 				crate::time::sim(),
 				session.clone(),
@@ -9719,13 +9817,22 @@ mod serve_tests {
 			.with_auth(auth.clone());
 
 			let stream = Stream::open(&mut session.clone(), version).await.unwrap();
-			let mut subscription = std::pin::pin!(publisher.clone().run_subscribe_stream(stream, token_subscribe()));
-			let accepted = async { requests.next().await.expect("a request") };
-			let request = match futures::future::select(std::pin::pin!(accepted), subscription.as_mut()).await {
-				futures::future::Either::Left((request, _)) => request,
-				futures::future::Either::Right((res, _)) => panic!("{version}: subscription ended: {res:?}"),
+			let mut msg = token_subscribe();
+			if !token {
+				msg.authorization_token = None;
+			}
+			let mut subscription = Box::pin(publisher.clone().run_subscribe_stream(stream, msg));
+			let enforced = if token {
+				let accepted = async { requests.next().await.expect("a request") };
+				let request = match futures::future::select(std::pin::pin!(accepted), subscription.as_mut()).await {
+					futures::future::Either::Left((request, _)) => request,
+					futures::future::Either::Right((res, _)) => panic!("{version}: subscription ended: {res:?}"),
+				};
+				Some(request.accept(crate::auth::Grant::all()))
+			} else {
+				None
 			};
-			let enforced = request.accept(crate::auth::Grant::all());
+
 			let joined = publisher.joins.wait(|joins| match joins.get(&RequestId(REQUEST_ID)) {
 				Some(Some(_)) => Poll::Ready(()),
 				_ => Poll::Pending,
@@ -9767,10 +9874,16 @@ mod serve_tests {
 				"{version}: FETCH_OK never went out"
 			);
 
-			enforced.revoke(crate::SessionError::Unauthorized, "revoked");
-			let _ = moq_clock::timeout(std::time::Duration::from_secs(1), subscription.as_mut())
-				.await
-				.unwrap_or_else(|_| panic!("{version}: the revoked subscription kept serving"));
+			if let Some(enforced) = enforced {
+				enforced.revoke(crate::SessionError::Unauthorized, "revoked");
+				let _ = moq_clock::timeout(std::time::Duration::from_secs(1), subscription.as_mut())
+					.await
+					.unwrap_or_else(|_| panic!("{version}: the revoked subscription kept serving"));
+			} else {
+				// Session authorization stays valid, and the cache stays alive.
+				drop(subscription);
+			}
+
 			let res = moq_clock::timeout(std::time::Duration::from_secs(1), fetch)
 				.await
 				.unwrap_or_else(|_| panic!("{version}: the fetch outlived its subscription"));

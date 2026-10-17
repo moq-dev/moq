@@ -386,7 +386,9 @@ impl Mergeable for Presence {
 	}
 
 	fn regressed(&self, prev: &Self) -> bool {
-		self.sessions_refused.regressed(&prev.sessions_refused)
+		self.wire_tx < prev.wire_tx
+			|| self.wire_rx < prev.wire_rx
+			|| self.sessions_refused.regressed(&prev.sessions_refused)
 			|| self.sessions_failed.regressed(&prev.sessions_failed)
 			|| self.requests < prev.requests
 			|| self.sessions_started < prev.sessions_started
@@ -1264,6 +1266,29 @@ mod tests {
 			}
 		}
 		assert_eq!(traffic.inner.nodes.len(), 3, "one entry per epoch");
+	}
+
+	#[test]
+	fn a_wire_only_drop_starts_a_new_presence_segment() {
+		for received in [false, true] {
+			let (mut merged, key) = hand_merged::<Presence>();
+			let value = |wire| {
+				let mut presence = Presence::default();
+				presence.sessions_started = 1;
+				if received {
+					presence.wire_rx = wire;
+				} else {
+					presence.wire_tx = wire;
+				}
+				presence
+			};
+			let node = merged.nodes.get_mut(&key).unwrap();
+			node.observe(BTreeMap::from([(String::new(), value(10))]));
+			node.observe(BTreeMap::from([(String::new(), value(3))]));
+			let combined = &merged.merged()[""];
+			assert_eq!(if received { combined.wire_rx } else { combined.wire_tx }, 13);
+			assert_eq!(combined.active(), 1, "retiring closes the earlier segment");
+		}
 	}
 
 	#[test]

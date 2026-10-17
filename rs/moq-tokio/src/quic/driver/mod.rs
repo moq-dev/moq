@@ -76,6 +76,7 @@ pub use crate::quic::driver::incoming::{Incoming, IncomingFuture, RetryError};
 pub use crate::quic::driver::recv_stream::{
     Credit, ReadError, ReadExactError, ReadToEndError, RecvStream, ResetError,
 };
+pub(crate) use crate::quic::driver::runtime::send_failed;
 #[cfg(test)]
 pub(crate) use crate::quic::driver::runtime::wrap_udp_socket;
 pub use crate::quic::driver::runtime::{AsyncUdpSocket, UdpSender};

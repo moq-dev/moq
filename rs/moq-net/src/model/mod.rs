@@ -75,6 +75,11 @@ pub use origin_impl::{Consume, Hop, Hops, InvalidHop};
 // pending: /quest/m1/public-model/answer.md
 pub(crate) use origin_impl::interest_prefixes;
 
+// Held by a session while its peer's initial announcements arrive.
+#[cfg(feature = "async")]
+// pending: /quest/m1/public-model/answer.md
+pub(crate) use origin_impl::Snapshot;
+
 // The advertise-only route guard, for tests shaping the route table.
 #[cfg(all(test, feature = "async"))]
 // private: test
