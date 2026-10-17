@@ -10,6 +10,14 @@ Rolling a cluster across a release also follows the [upgrade guide](https://moq.
 A `[quic]` `max_streams` of 0 stops startup, as `[peer.quic]` already did, since zero streams wedge the connection.
 Remove it to keep the default.
 
+```toml
+# Before
+[quic]
+max_streams = 0
+# After: omit max_streams for the default
+[quic]
+```
+
 ### Auth roles carry `moq_auth::Access` (#5697)
 
 `auth::Token::publish` and `subscribe` are `moq_auth::Access`, so an embedder reads the patterns from `.path`.
