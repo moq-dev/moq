@@ -52,6 +52,8 @@ Decided with the maintainer on 2026-10-17: physical names are a one-way hash, so
 - [Rust protected publisher seams](/quest/m2/e2ee/rust-publish.md) - Rust media
   and catalog publishers accept opaque physical names and emit no plaintext
   semantic catalog in E2EE mode
+- [Refuse a re-created track](/quest/m2/e2ee/reopen.md) - a name the producer already carried fails loudly
+- [Encrypted consumer shape](/quest/m2/e2ee/consumer.md) - one consumer shape, the producer's mirror, shared by browser, CLI, and FFI
 - [Encrypted browser components](/quest/m2/e2ee/browser.md) - browser publish
   and watch components handle encrypted audio and video without leaking
   credentials into browser-owned surfaces
