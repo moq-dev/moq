@@ -141,7 +141,9 @@ fn webtransport_echo_end_to_end() {
 			assert_eq!(read_all(&mut recv).await, PAYLOAD, "uni echo");
 
 			// Datagram echo.
-			session.send_datagram(PAYLOAD.to_vec().into()).expect("send datagram");
+			session
+				.send_datagram(PAYLOAD.to_vec().into(), None, 0)
+				.expect("send datagram");
 			let echoed = session.read_datagram().await.expect("read datagram");
 			assert_eq!(&echoed[..], PAYLOAD, "datagram echo");
 
@@ -247,7 +249,7 @@ fn lite_session_over_webtransport() {
 			let (moq, session_driver) = moq_net::Client::new()
 				.with_subscriber(sub_origin.clone())
 				.connect_lite(
-					std::time::Instant::now(),
+					moq_net::time::now(),
 					moq_tokio::transport::Session::new(session, moq_net::transport::Binding::Uri),
 				)
 				.await
@@ -298,7 +300,7 @@ fn lite_session_over_webtransport() {
 			let (session, driver) = moq_net::Server::new()
 				.with_publisher(&serve_origin)
 				.accept_lite(
-					std::time::Instant::now(),
+					moq_net::time::now(),
 					moq_uring::transport::Session::new(session, moq_net::transport::Binding::Uri),
 				)
 				.await

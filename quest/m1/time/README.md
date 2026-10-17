@@ -63,7 +63,7 @@ reasons, so later sessions don't reopen them:
   dev-dependency only, so production builds never compile it). It is one
   backend of the ambient clock, starts at zero, keeps deadlock detection, and
   seeds the later runtime trait. `#[moq_clock::test]` replaces
-  `#[moq_net_sim::test]`.
+  `#[moq_clock::test]`.
 - **Tests for migrated contracts use the sim wherever possible.** A test with no real I/O
   that cannot run on the sim yet uses paused tokio, whose clock `moq-clock`
   reads. A real-I/O test never uses paused tokio, which auto-advances to the
@@ -95,7 +95,6 @@ cleanup and the global lint ratchet belong to
 
 ## Required
 
-- [moq-net on moq-clock](/quest/m1/time/net.md) - moq-net, moq-mux, moq-stats, moq-room, and moq-ffi run on moq-clock and moq-net-sim is gone
 - [Every crate on moq-clock](/quest/m1/time/crates.md) - every remaining crate reads time only through moq-clock, with controlled tests for the production/public API migrations
 - [moq-uring on moq-clock](/quest/m1/time/uring.md) - one clock read per worker turn and moq-clock's deadline queue replace the private timer heap
 - [The relay seam](/quest/m1/time/relay-seam.md) - one in-memory session and a generic `moq_relay::Connection`, so relay tests run on the sim

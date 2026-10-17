@@ -1177,10 +1177,15 @@ impl<S: crate::transport::poll::Session> crate::transport::poll::Session for Con
 		self.inner.send_group(priority)
 	}
 
-	fn poll_send_datagram(&mut self, cx: &mut Context<'_>, payload: &[u8]) -> Poll<Result<(), Self::Error>> {
+	fn send_datagram(
+		&mut self,
+		payload: Bytes,
+		group: Option<&<Self::SendStream as crate::transport::poll::SendStream>::Group>,
+		order: i64,
+	) -> Result<(), Self::Error> {
 		self.inner
-			.poll_send_datagram(cx, payload)
-			.map(|r| r.map_err(|_| crate::Error::Closed))
+			.send_datagram(payload, group, order)
+			.map_err(|_| crate::Error::Closed)
 	}
 
 	fn poll_recv_datagram(&mut self, cx: &mut Context<'_>) -> Poll<Result<Bytes, Self::Error>> {
@@ -1355,13 +1360,14 @@ mod tests {
 	/// Drafts 14 and 15 name the subscription in the second field; draft 16 names
 	/// the existing request there. The first field is the update's own Request ID,
 	/// so a body that carries only that ID cannot tell the two apart.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn test_subscribe_update_reaches_its_target() {
 		let update_id = RequestId(10);
 		let target_id = RequestId(4);
 
 		for version in [Version::Draft14, Version::Draft15, Version::Draft16] {
 			let update = ietf::SubscribeUpdate {
+				new_group: None,
 				request_id: update_id,
 				subscription_request_id: Some(target_id),
 				start_location: ietf::Location { group: 1, object: 2 },
@@ -1448,7 +1454,7 @@ mod tests {
 		assert_eq!(r.rest(), b"hello");
 	}
 
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn test_virtual_recv_stream_reads_initial_then_followup() {
 		let initial = Bytes::from_static(b"initial");
 		let follow = Queue::new();
@@ -1471,7 +1477,7 @@ mod tests {
 		assert_eq!(result, None);
 	}
 
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn test_virtual_recv_stream_partial_reads() {
 		let initial = Bytes::from_static(b"hello world");
 		let mut stream = detached_recv(initial, Queue::new());
@@ -1489,7 +1495,7 @@ mod tests {
 		assert_eq!(&buf[..n], b"d");
 	}
 
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn test_virtual_send_stream_errors_once_control_closes() {
 		// The adapter closes the control queue when its run() exits; writes must
 		// fail fast instead of buffering into a queue nobody drains.
@@ -1509,7 +1515,7 @@ mod tests {
 		assert!(!follow.push(Bytes::from_static(b"late")));
 	}
 
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn test_virtual_send_stream_writes_to_channel() {
 		let control = Queue::new();
 		let mut stream = VirtualSendStream::new(control.clone());
@@ -1643,7 +1649,7 @@ mod tests {
 		assert!(matches!(route, Route::CloseStream(RequestId(42))));
 	}
 
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn test_publish_namespace_done_closes_only_inbound() {
 		// The peer withdraws the advertisement it made, so its own stream closes and
 		// ours keeps running.
@@ -1669,7 +1675,7 @@ mod tests {
 		assert!(ours.read_chunk(usize::MAX).now_or_never().is_none());
 	}
 
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn test_publish_namespace_cancel_closes_only_outbound() {
 		// The peer rejects the advertisement we made, so ours closes and the one it
 		// sent us keeps running.
@@ -1729,7 +1735,7 @@ mod tests {
 		.unwrap()
 	}
 
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn test_duplicate_publish_namespace_keeps_the_first() {
 		// The peer advertises the same namespace twice. The session refuses the second, so
 		// the first still owns the name and its withdrawal must reach the first's stream.
@@ -1755,7 +1761,7 @@ mod tests {
 		assert!(matches!(done(&shared, "cluster/ns", version), Route::Ignore));
 	}
 
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn test_withdrawal_releases_the_namespace() {
 		// A namespace the peer withdraws must be advertisable again on a new request.
 		let version = Version::Draft14;
@@ -1777,7 +1783,7 @@ mod tests {
 		));
 	}
 
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn test_local_withdrawal_releases_the_namespace() {
 		// We withdraw our own advertisement by dropping the request that carried it, so a
 		// later CANCEL must name the re-advertisement rather than the request that is gone.
@@ -1795,7 +1801,7 @@ mod tests {
 		));
 	}
 
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn surviving_duplicate_remains_reachable_after_owner_closes() {
 		for version in [Version::Draft14, Version::Draft15] {
 			let shared = Arc::new(Shared::default());
@@ -1882,7 +1888,7 @@ mod tests {
 
 	/// A request ID at the MAX_REQUEST_ID we advertised closes the session with the
 	/// draft's TOO_MANY_REQUESTS, before the request is queued.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn a_request_past_the_window_closes_the_session() {
 		let (adapter, reader, writer, _) = windowed(1, &[0, 2], &[]).await;
 		let (_, goaway) = crate::goaway::Handle::new(true);
@@ -1894,10 +1900,11 @@ mod tests {
 	}
 
 	/// An update's own request ID counts against the window, not the subscription it targets.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn an_update_past_the_window_closes_the_session() {
 		const VERSION: Version = Version::Draft14;
 		let update = ietf::SubscribeUpdate {
+			new_group: None,
 			request_id: RequestId(4),
 			subscription_request_id: Some(RequestId(0)),
 			start_location: ietf::Location { group: 0, object: 0 },
@@ -1919,7 +1926,7 @@ mod tests {
 	}
 
 	/// Requests that end are granted back with MAX_REQUEST_ID, once half the window has.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn retired_requests_are_granted_back() {
 		use crate::transport::poll::Session as _;
 
@@ -1958,7 +1965,7 @@ mod tests {
 		assert!(weak.upgrade().is_none());
 	}
 
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn receive_drop_before_registration_releases_namespace() {
 		for version in [Version::Draft14, Version::Draft15] {
 			let shared = Arc::new(Shared::default());

@@ -21,6 +21,7 @@ can proceed independently; cutting the tag cannot.
 
 - Confirm trusted publishing is configured for `moq` (repository
   `moq-dev/moq`, tag pattern `moq-dart-v{{version}}`).
+- Raise `dart/moq/pubspec.yaml`'s `moq_ffi` floor to the release the wrapper now needs (the media namespace and codec types), since `^0.4.3` resolves bindings without them.
 - Cut the next `moq-dart-v*` release with the binding breaks and confirm the workflow publishes it.
 - Verify the published `moq_ffi` resolves its native asset from a clean
   machine with no monorepo checkout, since that download path is the one CI

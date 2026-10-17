@@ -969,18 +969,53 @@ run_round() {
 # Raw-track clients have no codecs: every byte, group, and the declared end is checked.
 # shellcheck disable=SC2329  # invoked indirectly via harness_spawn
 run_tail_client() {
-    local lang="$1" role="$2" broadcast="$3" url="$4" limit="$TIMEOUT"
+    local lang="$1" role="$2" broadcast="$3" url="$4" version="${5:-}" mode="${6:-}" limit="$TIMEOUT"
     # The publisher outlives the subscriber's whole deadline, waiting for its acknowledgement.
     [[ "$role" == publish ]] && limit=$(awk -v t="$TIMEOUT" 'BEGIN { print t * 2 }')
     case "$lang" in
-        rust) timeout -k 3 "$limit" "$TARGET_BASE/$PROFILE/examples/interop-tail" "$role" "$url" "$broadcast" ;;
-        js-native-node) (cd "$CLIENTS/js-native" && timeout -k 3 "$limit" node --import tsx tail.ts "$role" "$url" "$broadcast") ;;
-        js-native-bun) (cd "$CLIENTS/js-native" && timeout -k 3 "$limit" bun tail.ts "$role" "$url" "$broadcast") ;;
+        rust) timeout -k 3 "$limit" "$TARGET_BASE/$PROFILE/examples/interop-tail" "$role" "$url" "$broadcast" ${version:+"$version" "$mode"} ;;
+        js-native-node) (cd "$CLIENTS/js-native" && timeout -k 3 "$limit" node --import tsx tail.ts "$role" "$url" "$broadcast" ${version:+"$version" "$mode"}) ;;
+        js-native-bun) (cd "$CLIENTS/js-native" && timeout -k 3 "$limit" bun tail.ts "$role" "$url" "$broadcast" ${version:+"$version" "$mode"}) ;;
         *)
             echo "unknown tail client: $lang" >&2
             return 1
             ;;
     esac
+}
+
+run_drop_pair() {
+    local pub="$1" sub="$2" version="$3" pid subscriber_pid
+    local name="drop-${version}-${pub}-${sub}"
+    local fifo="$HARNESS_RUN/tail-ack" broadcast="$name-$$-$RANDOM"
+    if is_broken "$pub" || is_broken "$sub"; then
+        echo "  FAIL  drop $version $pub -> $sub (client unavailable)"
+        overall=1
+        return
+    fi
+    mkfifo "$fifo"
+    exec 9<>"$fifo"
+    harness_spawn "$name-pub" "$HARNESS_RUN/$name-pub.log" run_tail_publisher "$fifo" "$pub" publish "$broadcast" "$(token_url --publish "$broadcast")" "$version" drop
+    pid="$HARNESS_PID"
+    harness_spawn "$name-sub" "$HARNESS_RUN/$name-sub.log" run_tail_client "$sub" subscribe "$broadcast" "$(token_url --subscribe "**/$broadcast")" "$version" drop
+    subscriber_pid="$HARNESS_PID"
+    harness_wait "$subscriber_pid" || true
+    if grep -qx 'tail drop clean end=4 groups=0,2,3 bytes=786432' "$HARNESS_RUN/$name-sub.log"; then
+        printf 'clean end\n' >&9
+        harness_wait "$pid" || true
+        if grep -qx 'tail acknowledged' "$HARNESS_RUN/$name-pub.log"; then
+            echo "  PASS  drop $version $pub -> $sub (group 1 cut; clean end 4)"
+        else
+            echo "  FAIL  drop $version $pub -> $sub (publisher did not acknowledge)"
+            overall=1
+        fi
+    else
+        echo "  FAIL  drop $version $pub -> $sub (drop did not settle before timeout)"
+        overall=1
+        cat "$HARNESS_RUN/$name-pub.log" "$HARNESS_RUN/$name-sub.log"
+        harness_reap "$pid"
+    fi
+    exec 9>&-
+    rm "$fifo"
 }
 
 # shellcheck disable=SC2329  # invoked indirectly via harness_spawn
@@ -1207,6 +1242,12 @@ if [[ "$NEGATIVE" -eq 0 && "$MEDIA" -eq 0 && "$IN_TREE" -eq 1 ]]; then
             run_tail_pair "$runtime" rust
         fi
     done
+    if needs js-native-node; then
+        for version in moq-lite-05 moq-lite-06; do
+            run_drop_pair rust js-native-node "$version"
+            run_drop_pair js-native-node rust "$version"
+        done
+    fi
 fi
 
 if [[ "$overall" -eq 0 ]]; then

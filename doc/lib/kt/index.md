@@ -27,7 +27,8 @@ one source timeline. `ContainerStreamProducer` takes `ContainerStreamInit`; omit
 its timebase keeps an independent offset. A timebase belongs to its broadcast and
 does not keep it open.
 Construct readers with `CatalogConsumer.subscribe`, `TrackConsumer.subscribe`, or
-`GroupConsumer.fetch`. For arrival-order reads, decode each group from
+`GroupConsumer.fetch`; the last two take a catalog `Rendition` and follow its broadcast and
+track themselves. For arrival-order reads, decode each group from
 `dev.moq.TrackConsumer.recvGroup()` with `dev.moq.media.GroupConsumer(group, container)`; frames
 carry container media time as they land. Like `TrackProducer`, these names also exist at the
 root for moq-net handles, so qualify them when both packages are star-imported.
@@ -86,7 +87,8 @@ Moq.connect("https://relay.example.com").use { moq ->
 ## Things to know
 
 The rest of the [shared feature list](/lib/#what-every-binding-can-do) maps
-one to one; the API reference has the names.
+one to one; the API reference has the names, and [Layers](/lib/layers)
+shows which module holds each.
 
 - **`end`, not `close`.** `broadcast.end()` ends a broadcast for good. `close()`, or leaving `use { }`, releases the handle, which ends the broadcast only once no `dynamic()` handle remains.
 - **Audio needs cuts.** Video groups at its keyframes, but audio forms a group only where you call `cut()`: after every frame, or at a segment cadence to align with video.

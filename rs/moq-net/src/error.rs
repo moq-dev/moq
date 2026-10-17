@@ -542,6 +542,9 @@ pub enum Error {
 	/// Session and stream unknowns are [`Self::Session`] / [`Self::Stream`], not this.
 	#[error("remote error: code={0}")]
 	Remote(u32),
+	/// The underlying connection reached its transport idle deadline.
+	#[error("transport idle timeout")]
+	IdleTimeout,
 }
 
 impl Error {
@@ -569,6 +572,10 @@ impl Error {
 	/// [`StreamError::from_code`]. Reading a stream reset with the session table (or the
 	/// reverse) silently mistranslates, since e.g. 0 is "no error" for a session but an
 	/// internal error for a stream.
+	///
+	/// Without either code, the transport's [`close_kind`](crate::transport::Error::close_kind)
+	/// decides: an idle timeout is [`Error::IdleTimeout`], a local close is
+	/// `Error::Session(SessionError::Cancel)`, and anything else is [`Error::Transport`].
 	pub fn from_transport(err: impl crate::transport::Error) -> Self {
 		if let Some((code, _reason)) = err.session_error() {
 			return SessionError::from_code(code).into();
@@ -578,7 +585,12 @@ impl Error {
 			return StreamError::from_code(code).into();
 		}
 
-		Self::Transport(err.to_string())
+		match err.close_kind() {
+			crate::transport::CloseKind::IdleTimeout => Self::IdleTimeout,
+			// A connection ending must not become the model's clean end-of-content.
+			crate::transport::CloseKind::Closed => SessionError::Cancel.into(),
+			_ => Self::Transport(err.to_string()),
+		}
 	}
 }
 
@@ -692,6 +704,13 @@ impl From<&Error> for StreamError {
 }
 
 impl crate::transport::Error for Error {
+	fn close_kind(&self) -> crate::transport::CloseKind {
+		match self {
+			Self::IdleTimeout => crate::transport::CloseKind::IdleTimeout,
+			// Closed also ends model handles and virtual streams, not just connections.
+			_ => crate::transport::CloseKind::Transport,
+		}
+	}
 	fn session_error(&self) -> Option<(u32, String)> {
 		None
 	}

@@ -165,13 +165,13 @@ func (e *Encoder) Finish() ([]Packet, error) { raw, err := e.inner.Finish(); ret
 // Consumer subscribes to a video rendition and yields decoded frames.
 type Consumer struct{ inner *ffi.MoqVideoConsumer }
 
-// Subscribe subscribes to the named catalog rendition, following its broadcast reference.
-func Subscribe(ctx context.Context, broadcast *moq.BroadcastConsumer, name string, rendition media.Video, output DecoderOutput) (*Consumer, error) {
+// Subscribe subscribes to the catalog rendition id, following its broadcast and track.
+func Subscribe(ctx context.Context, broadcast *moq.BroadcastConsumer, id string, rendition media.Video, output DecoderOutput) (*Consumer, error) {
 	out, err := output.ffi()
 	if err != nil {
 		return nil, err
 	}
-	inner, err := ffi.MoqVideoConsumerSubscribe(ctx, bridge.BroadcastConsumer(broadcast), name, rendition, out)
+	inner, err := ffi.MoqVideoConsumerSubscribe(ctx, bridge.BroadcastConsumer(broadcast), id, rendition, out)
 	if err != nil {
 		return nil, err
 	}

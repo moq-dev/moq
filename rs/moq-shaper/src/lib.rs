@@ -701,7 +701,7 @@ async fn run(
 
 	loop {
 		let (size, from) = tokio::select! {
-			res = listen.recv_from(&mut buf) => res.context("receive from a client")?,
+			res = recv(&listen, &mut buf) => res.context("receive from a client")?,
 			Some(res) = tasks.join_next() => {
 				res.context("flow task panicked")??;
 				continue;
@@ -817,7 +817,7 @@ async fn reply(
 ) -> anyhow::Result<()> {
 	let mut buf = vec![0u8; u16::MAX as usize];
 	loop {
-		let (size, from) = socket.recv_from(&mut buf).await.context("receive from the target")?;
+		let (size, from) = recv(&socket, &mut buf).await.context("receive from the target")?;
 		// Anything else reaching this ephemeral port is not part of the path.
 		if from != *target.lock().expect("target poisoned") || is_cut(&cuts) {
 			continue;
@@ -825,6 +825,19 @@ async fn reply(
 		let datagram = buf[..size].to_vec();
 		let mut down = link.lock().expect("link poisoned");
 		down.push(Instant::now(), datagram, &listen, client, &tally[DOWN]);
+	}
+}
+
+/// Receive the next datagram, skipping the port unreachable an earlier send
+/// drew. Windows reports one as `ConnectionReset` even on an unconnected
+/// socket, but a peer that went away (a killed relay, a closed client) is the
+/// path losing datagrams, not the shaper failing.
+async fn recv(socket: &UdpSocket, buf: &mut [u8]) -> std::io::Result<(usize, SocketAddr)> {
+	loop {
+		match socket.recv_from(buf).await {
+			Err(err) if err.kind() == std::io::ErrorKind::ConnectionReset => continue,
+			res => return res,
+		}
 	}
 }
 
@@ -1386,6 +1399,67 @@ mod tests {
 
 		let ipv6 = SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 1);
 		assert!(shaper.retarget(ipv6).is_err(), "retargeted where no flow can reach");
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn a_closed_target_loses_datagrams_until_a_retarget() {
+		let dead = UdpSocket::bind(LOCALHOST).await.unwrap();
+		let next = UdpSocket::bind(LOCALHOST).await.unwrap();
+		let shaper = Shaper::bind(Config {
+			bind: LOCALHOST,
+			target: dead.local_addr().unwrap(),
+			seed: 1,
+			up: Profile::default(),
+			down: Profile::default(),
+		})
+		.await
+		.unwrap();
+		let client = UdpSocket::bind(LOCALHOST).await.unwrap();
+		client.connect(shaper.addr()).await.unwrap();
+		let mut buf = [0u8; 8];
+
+		client.send(b"before").await.unwrap();
+		dead.recv_from(&mut buf).await.unwrap();
+
+		// The flow sends to the closed port, drawing an error on its next receive.
+		drop(dead);
+		client.send(b"lost").await.unwrap();
+		while shaper.stats().up.packets < 2 {
+			tokio::time::sleep(Duration::from_millis(1)).await;
+		}
+
+		shaper.retarget(next.local_addr().unwrap()).unwrap();
+		client.send(b"after").await.unwrap();
+		let (size, flow) = tokio::time::timeout(Duration::from_secs(1), next.recv_from(&mut buf))
+			.await
+			.expect("the retarget never forwarded")
+			.unwrap();
+		assert_eq!(&buf[..size], b"after");
+		next.send_to(b"reply", flow).await.unwrap();
+		let size = tokio::time::timeout(Duration::from_secs(1), client.recv(&mut buf))
+			.await
+			.expect("the reply never arrived")
+			.unwrap();
+		assert_eq!(&buf[..size], b"reply");
+		shaper.verify().unwrap();
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn a_closed_client_leaves_the_others_forwarding() {
+		let (shaper, client) = setup(1, Profile::default(), Profile::default()).await;
+
+		// The echo returns to the closed port, drawing an error on the listening socket.
+		let gone = UdpSocket::bind(LOCALHOST).await.unwrap();
+		gone.connect(shaper.addr()).await.unwrap();
+		gone.send(b"gone").await.unwrap();
+		drop(gone);
+		while shaper.stats().down.packets < 1 {
+			tokio::time::sleep(Duration::from_millis(1)).await;
+		}
+
+		let got = round_trip(&client, 10).await;
+		assert_eq!(got, (0..10).collect::<Vec<_>>());
+		shaper.verify().unwrap();
 	}
 
 	#[tokio::test(start_paused = true)]
