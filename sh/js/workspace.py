@@ -180,7 +180,7 @@ def run(action, plan):
         finally:
             Path(name).unlink()
     # The fallback also covers unowned inputs, including demo/pub's Worker.
-    command("bun", "biome", "check", *(["js", "test", "doc", "demo"] if plan["all"] else
+    command("bun", "biome", "check", *(["js", "bench/browser", "test", "doc", "demo"] if plan["all"] else
                                        [p["directory"] for p in packages.values()] + ["js/common"]))
     scripts("build")
     for name in ("@moq/watch", "@moq/publish"):

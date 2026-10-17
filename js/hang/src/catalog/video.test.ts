@@ -35,6 +35,24 @@ test("ranked orders by picture, then bitrate, then name", () => {
 	expect(ranked(renditions).map(([name]) => name)).toEqual(["f", "d", "e", "c", "b", "a"]);
 });
 
+test("ranked puts a higher preference before a larger picture", () => {
+	const renditions = {
+		fallback: { ...rendition({ codedWidth: 1920, codedHeight: 1080 }, 6_000_000), preference: -1 },
+		source: rendition({ codedWidth: 640, codedHeight: 360 }, 1_000_000),
+		disabled: { ...rendition({ codedWidth: 16, codedHeight: 16 }, 1), preference: 1, enabled: false },
+	};
+
+	expect(ranked(renditions).map(([name]) => name)).toEqual(["source", "fallback", "disabled"]);
+});
+
+test("video config accepts a signed 32-bit preference", () => {
+	const parse = (preference: number) =>
+		VideoConfigSchema.safeParse({ codec: "vp8", container: { kind: "legacy" }, preference });
+	expect(parse(-1).data?.preference).toBe(-1);
+	expect(parse(1.5).success).toBe(false);
+	expect(parse(2 ** 31).success).toBe(false);
+});
+
 test("ranked puts a known zero bitrate above an unknown one", () => {
 	const renditions = {
 		unknown: rendition({ codedWidth: 1280, codedHeight: 720 }),

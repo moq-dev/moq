@@ -17,7 +17,8 @@
 //!
 //! let mut sink = engine.sink(input)?;
 //!
-//! while let Some(frame) = audio.read().await? {
+//! while let Some(event) = audio.read().await? {
+//!     let moq_audio::decode::Read::Frame { frame, .. } = event else { continue };
 //!     let write = sink.write(&frame.data)?;
 //!     if write.dropped_sample_frames > 0 {
 //!         eprintln!("dropped {} live audio frames", write.dropped_sample_frames);
@@ -41,11 +42,13 @@
 mod device;
 mod driver;
 mod mixer;
+mod observe;
 mod sink;
 
 use std::sync::Arc;
 
 pub use device::{Device, devices};
+pub use observe::{Gap, Observation, Observer, Stall};
 pub use sink::{Control, Drain, Input, Sink, Write};
 
 #[cfg(feature = "aec")]
@@ -151,6 +154,14 @@ impl Engine {
 		// so a sink is never left silently unmixed.
 		self.handle.wake();
 		Ok(sink)
+	}
+
+	/// Watch what this engine plays: every buffer the device pulls, counted in
+	/// 128-frame quanta on the audio thread without blocking it.
+	///
+	/// Returns [`Error::Busy`] while another observer from this engine is alive.
+	pub fn observe(&self) -> Result<Observer, Error> {
+		Observer::new(self.shared.observe.clone())
 	}
 
 	/// Build echo-cancellation controls for this engine and one microphone.

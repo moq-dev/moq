@@ -35,11 +35,16 @@ impl crate::transport::Error for SinkError {
 	}
 }
 
+/// A datagram's send group id and in-group order.
+pub type Rank = (Option<usize>, i64);
+
 /// What the session's send streams recorded. Resets are a list, not a last-value, so a
 /// stray second reset (a drop fallback firing behind an abort) is visible.
 #[derive(Clone, Default)]
 pub struct Log {
 	pub datagrams: Arc<Mutex<Vec<bytes::Bytes>>>,
+	/// The send group and order each datagram was sent with, beside [`Self::datagrams`].
+	datagram_ranks: Arc<Mutex<Vec<Rank>>>,
 	pub writes: Arc<Mutex<Vec<u8>>>,
 	pub resets: Arc<Mutex<Vec<u32>>>,
 	/// Every write, FIN and reset on every send stream, in call order. See [`Self::trail`].
@@ -48,6 +53,8 @@ pub struct Log {
 	streams: Arc<AtomicUsize>,
 	stops: Arc<Mutex<Vec<u32>>>,
 	closes: Arc<Mutex<Vec<(u32, String)>>>,
+	/// How long the trail and the stops were at the first session close.
+	closed_at: Arc<Mutex<Option<(usize, usize)>>>,
 	bi_opens: Arc<AtomicUsize>,
 	priorities: Arc<Mutex<Vec<u8>>>,
 	/// Hands each send group its id.
@@ -63,6 +70,13 @@ pub enum Sent {
 	Write(Vec<u8>),
 	Finish,
 	Reset(u32),
+}
+
+/// What the streams sent ahead of the first session close. See [`Log::before_close`].
+#[derive(Debug)]
+pub struct BeforeClose {
+	pub trail: Vec<(usize, Sent)>,
+	pub stops: Vec<u32>,
 }
 
 impl Log {
@@ -116,10 +130,42 @@ impl Log {
 		self.orders.lock().unwrap().clone()
 	}
 
+	/// The send group and order of every datagram, as (group, order) in call order.
+	pub fn datagram_ranks(&self) -> Vec<Rank> {
+		self.datagram_ranks.lock().unwrap().clone()
+	}
+
+	fn record_datagram(&self, payload: bytes::Bytes, group: Option<&SinkGroup>, order: i64) {
+		self.datagrams.lock().unwrap().push(payload);
+		self.datagram_ranks
+			.lock()
+			.unwrap()
+			.push((group.map(|group| group.id), order));
+	}
+
 	/// The session-level closes, as (code, reason). A list rather than a last-value so
 	/// a second close racing the first is visible.
 	pub fn closes(&self) -> Vec<(u32, String)> {
 		self.closes.lock().unwrap().clone()
+	}
+
+	/// The [`Self::trail`] and [`Self::stops`] up to the first session close, or `None`
+	/// before one. Nothing a stream sends after the close reaches the peer, so this is
+	/// what a peer sees ahead of the close.
+	pub fn before_close(&self) -> Option<BeforeClose> {
+		let (trail, stops) = (*self.closed_at.lock().unwrap())?;
+		Some(BeforeClose {
+			trail: self.trail()[..trail].to_vec(),
+			stops: self.stops()[..stops].to_vec(),
+		})
+	}
+
+	fn close(&self, code: u32, reason: &str) {
+		self.closed_at
+			.lock()
+			.unwrap()
+			.get_or_insert_with(|| (self.trail.lock().unwrap().len(), self.stops.lock().unwrap().len()));
+		self.closes.lock().unwrap().push((code, reason.to_owned()));
 	}
 
 	/// How many bidi streams the session has opened, so a test can pin down how many
@@ -412,8 +458,14 @@ impl poll::Session for DeadStreamSession {
 		None
 	}
 
-	fn poll_send_datagram(&mut self, _cx: &mut Context<'_>, _payload: &[u8]) -> Poll<Result<(), Self::Error>> {
-		Poll::Ready(Ok(()))
+	fn send_datagram(
+		&mut self,
+		payload: bytes::Bytes,
+		group: Option<&SinkGroup>,
+		order: i64,
+	) -> Result<(), Self::Error> {
+		self.log.record_datagram(payload, group, order);
+		Ok(())
 	}
 
 	fn poll_recv_datagram(&mut self, _cx: &mut Context<'_>) -> Poll<Result<bytes::Bytes, Self::Error>> {
@@ -432,7 +484,7 @@ impl poll::Session for DeadStreamSession {
 	}
 
 	fn close(&mut self, code: u32, reason: &str) {
-		self.log.closes.lock().unwrap().push((code, reason.to_owned()));
+		self.log.close(code, reason);
 	}
 
 	fn poll_closed(&mut self, _cx: &mut Context<'_>) -> Poll<Self::Error> {
@@ -464,6 +516,8 @@ pub struct SinkSession {
 	unacked_fin: bool,
 	/// Set by [`Self::with_groups`].
 	groups: bool,
+	/// Set by [`Self::with_datagrams`]; zero disables datagrams.
+	datagram_size: usize,
 	/// The ALPN to report, for a test that needs a specific negotiated version rather
 	/// than the SETUP-negotiated fallback an absent one selects.
 	protocol: Option<&'static str>,
@@ -491,6 +545,12 @@ impl SinkSession {
 	/// Open send groups, as native QUIC does, recording them in the log.
 	pub fn with_groups(mut self) -> Self {
 		self.groups = true;
+		self
+	}
+
+	/// Accept datagrams up to `max_size` bytes, recording them in the log.
+	pub fn with_datagrams(mut self, max_size: usize) -> Self {
+		self.datagram_size = max_size;
 		self
 	}
 
@@ -612,8 +672,14 @@ impl poll::Session for SinkSession {
 		self.groups.then(|| SinkGroup::open(self.log.clone(), priority))
 	}
 
-	fn poll_send_datagram(&mut self, _cx: &mut Context<'_>, _payload: &[u8]) -> Poll<Result<(), Self::Error>> {
-		Poll::Ready(Ok(()))
+	fn send_datagram(
+		&mut self,
+		payload: bytes::Bytes,
+		group: Option<&SinkGroup>,
+		order: i64,
+	) -> Result<(), Self::Error> {
+		self.log.record_datagram(payload, group, order);
+		Ok(())
 	}
 
 	fn poll_recv_datagram(&mut self, _cx: &mut Context<'_>) -> Poll<Result<bytes::Bytes, Self::Error>> {
@@ -621,7 +687,7 @@ impl poll::Session for SinkSession {
 	}
 
 	fn max_datagram_size(&self) -> usize {
-		0
+		self.datagram_size
 	}
 
 	fn binding(&self) -> crate::transport::Binding {
@@ -632,7 +698,7 @@ impl poll::Session for SinkSession {
 	}
 
 	fn close(&mut self, code: u32, reason: &str) {
-		self.log.closes.lock().unwrap().push((code, reason.to_owned()));
+		self.log.close(code, reason);
 	}
 
 	fn poll_closed(&mut self, _cx: &mut Context<'_>) -> Poll<Self::Error> {
@@ -937,13 +1003,14 @@ impl poll::Session for ScriptedSession {
 		None
 	}
 
-	fn poll_send_datagram(&mut self, _cx: &mut Context<'_>, payload: &[u8]) -> Poll<Result<(), Self::Error>> {
-		self.log
-			.datagrams
-			.lock()
-			.unwrap()
-			.push(bytes::Bytes::copy_from_slice(payload));
-		Poll::Ready(Ok(()))
+	fn send_datagram(
+		&mut self,
+		payload: bytes::Bytes,
+		group: Option<&SinkGroup>,
+		order: i64,
+	) -> Result<(), Self::Error> {
+		self.log.record_datagram(payload, group, order);
+		Ok(())
 	}
 
 	fn poll_recv_datagram(&mut self, _cx: &mut Context<'_>) -> Poll<Result<bytes::Bytes, Self::Error>> {
@@ -962,7 +1029,7 @@ impl poll::Session for ScriptedSession {
 	}
 
 	fn close(&mut self, code: u32, reason: &str) {
-		self.log.closes.lock().unwrap().push((code, reason.to_owned()));
+		self.log.close(code, reason);
 	}
 
 	fn poll_closed(&mut self, _cx: &mut Context<'_>) -> Poll<Self::Error> {

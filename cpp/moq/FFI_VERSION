@@ -1,0 +1,2 @@
+# Set one moq-ffi release version after all four default-feature assets publish
+# and their SHA-256 hashes are pinned in FFI_SHA256.json. Until then, build source.

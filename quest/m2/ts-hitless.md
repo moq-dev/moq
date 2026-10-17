@@ -83,12 +83,7 @@ agreement alone.
 
 Public API: `moq export ts --sync`.
 
-## Required
-
-- [T-STD TS export](/quest/m1/tstd/README.md) - the export, clock recovery, and schedule these legs share
-
 ## Related
 
 - [TS over RTP legs](/quest/m2/ts-rtp-egress.md) - packetizes these slots with matching RTP headers for ST 2022-7
 - [Same-epoch importers](/quest/m2/hop-aligned-import.md) - extends the coordinate to legs fed by different importers
-- [TS passthrough export](/quest/m2/ts-passthrough-export.md) - identical packets for common objects by construction, in its own lane

@@ -25,6 +25,7 @@ mod conformance;
 mod consumer;
 mod decoder;
 mod sink;
+mod vui;
 
 pub use backend::{Codec, NAMES};
 pub use consumer::{Consumer, Options, Start};

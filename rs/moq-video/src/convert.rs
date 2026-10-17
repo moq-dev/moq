@@ -220,8 +220,8 @@ mod tests {
 		let red = [255u8, 0, 0, 255].repeat(source_size.pixels() as usize);
 		let source = I420::from_rgba(&red, source_size.width * 4, source_size).unwrap();
 		let source = source.resize(Size::new(1280, 720)).unwrap();
-		assert_eq!(source.color(), Some(Color::Bt601Limited));
-		assert_eq!(Color::infer(Size::new(1280, 720)), Color::Bt709Limited);
+		assert_eq!(source.color(), Some(Color::BT601));
+		assert_eq!(Color::infer(Size::new(1280, 720)), Color::BT709);
 
 		let image = rgba(&Surface::I420(source), &Config::default()).unwrap();
 		let center = (image.height() as usize / 2 * image.stride) + image.width() as usize / 2 * 4;
