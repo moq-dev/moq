@@ -128,8 +128,11 @@ impl Refresh {
 		role: Option<Role>,
 	) -> Result<Self, moq_net::Error> {
 		let mut initial = Credential::new(lease.consumer.clone());
-		// Admission and protocol setup can observe different live grant versions.
-		if super::check_rates(&initial.grant.publish, &initial.grant.subscribe).is_err() {
+		// Admission and protocol setup can observe different live grant versions, so
+		// hold this one to the admission's checks too.
+		if super::still_valid(&initial.grant).is_err()
+			|| super::check_rates(&initial.grant.publish, &initial.grant.subscribe).is_err()
+		{
 			return Err(moq_net::Error::Unauthorized);
 		}
 		initial.initial = true;
@@ -279,7 +282,7 @@ impl Refresh {
 				// Withdrawing the stream cannot cancel the decider's work. Keep its slot
 				// until the decider answers so churn cannot bypass the bound.
 				let (result, settling) = match tokio::time::timeout_at(deadline, &mut answer).await {
-					Ok(answered) => (super::answered_with(answered), None),
+					Ok(answered) => (super::answered_with(answered).map(|(consumer, _)| consumer), None),
 					Err(_) => {
 						let settling: Settling = Box::pin(async move {
 							let _ = answer.await;
@@ -586,6 +589,17 @@ mod tests {
 
 	#[tokio::test(start_paused = true)]
 	async fn a_cap_added_before_protocol_setup_is_refused() {
+		refused_before_setup(|grant| grant.publish.rate = Some(moq_auth::Rate::from_bps(8000).unwrap())).await;
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn an_invalid_label_added_before_protocol_setup_is_refused() {
+		refused_before_setup(|grant| grant.label = Some("project/*".into())).await;
+	}
+
+	/// Admit a session, apply `change` to its grant before protocol setup, and check
+	/// that setup refuses it as a failure.
+	async fn refused_before_setup(change: fn(&mut moq_auth::Grant)) {
 		let (producer, consumer) = lease::Producer::new(grant("a/**", 3000));
 		let registry = moq_net::stats::Registry::new(Default::default());
 		let stats = registry.tier(moq_net::stats::Tier::default()).session("room", None);
@@ -616,9 +630,9 @@ mod tests {
 				)
 				.await
 				.unwrap();
-			let mut capped = grant("a/**", 3000);
-			capped.publish.rate = Some(moq_auth::Rate::from_bps(8000).unwrap());
-			producer.update(capped);
+			let mut changed = grant("a/**", 3000);
+			change(&mut changed);
+			producer.update(changed);
 			let handle = request.auth();
 			assert!(matches!(
 				lease.preparing(handle.clone(), request.role()),

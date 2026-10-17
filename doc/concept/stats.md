@@ -220,6 +220,8 @@ session moved to a new tier ends on the old one and starts on the new.
 
 `labels.json` attributes usage to the grant's `label`, independent of the root
 it authorizes: one label can span roots, and one root can carry several labels.
+A session groups by its root, so at depth 1 or more a label spanning groups
+appears on each group's track with that group's share.
 A grant without a `label` counts on every other track but not on `labels.json`;
 there is no fallback to the root. A grant whose `label` changes at revalidation
 moves the session's later counts to the new label, the same as a tier change.

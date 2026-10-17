@@ -510,10 +510,16 @@ impl Lease {
 	/// what the origin scopes by.
 	pub fn new(path: &str, consumer: lease::Consumer) -> Self {
 		let grant = consumer.grant();
+		Self::granted(path, &grant, consumer)
+	}
+
+	/// Hold `consumer` with its token built from `grant`, a snapshot of it. A later
+	/// update still reaches [`Self::ended`] as a change, which re-checks it.
+	fn granted(path: &str, grant: &Grant, consumer: lease::Consumer) -> Self {
 		Self {
 			refresh: None,
 			source: None,
-			token: Token::new(path, &grant),
+			token: Token::new(path, grant),
 			expires: grant.deadline(),
 			consumer,
 			session: None,
@@ -878,8 +884,10 @@ impl Auth {
 
 	/// Admit a session: the lease it holds, carrying the scope the origin applies.
 	pub async fn admit(&self, request: Request) -> Result<Lease, Error> {
-		let consumer = self.decide(request.clone()).await?;
-		let mut lease = Lease::new(&request.path, consumer);
+		// Build the token from the grant the admission checked: re-reading it could
+		// pick up an update that skipped the check.
+		let (consumer, grant) = self.decide(request.clone()).await?;
+		let mut lease = Lease::granted(&request.path, &grant, consumer);
 		lease.token.uncapped()?;
 		lease.source = Some(Source {
 			auth: self.clone(),
@@ -888,7 +896,7 @@ impl Auth {
 		Ok(lease)
 	}
 
-	async fn decide(&self, request: Request) -> Result<lease::Consumer, Error> {
+	async fn decide(&self, request: Request) -> Result<(lease::Consumer, Grant), Error> {
 		let answer = self.submit(request, None)?;
 		let answered = tokio::time::timeout(ADMIT_TIMEOUT, answer)
 			.await
@@ -925,15 +933,15 @@ fn timed_out() -> Error {
 
 /// Check a decider's answer against the contract every decider is held to: a
 /// grant that admits nothing or asks for a re-check without a bound is a bug, not
-/// a refusal.
+/// a refusal. Returns the grant snapshot it checked.
 fn answered_with(
 	answered: Result<Result<lease::Consumer, Error>, oneshot::error::RecvError>,
-) -> Result<lease::Consumer, Error> {
+) -> Result<(lease::Consumer, Grant), Error> {
 	let consumer = answered.map_err(|_| Error::Unavailable("the admission went unanswered".into()))??;
 	let grant = consumer.grant();
 	grant.validate()?;
 	check_rates(&grant.publish, &grant.subscribe)?;
-	Ok(consumer)
+	Ok((consumer, grant))
 }
 
 /// Hold a changed grant to the contract its first answer met: one that admits nothing
