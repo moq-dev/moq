@@ -30,4 +30,4 @@ candidates, so C++ was left out.
 ## Related
 
 - [C++ and OBS package proof](/quest/m1/cpp-package-check.md) - the installed-consumer checks this reuses
-- [Nightly after FFI reuse](/quest/m0/ci/nightly-ffi-reuse.md) - confirms the shared build in production first
+- [First shared FFI release](/quest/m0/ci/nightly-ffi-reuse.md) - confirms the shared build in production first

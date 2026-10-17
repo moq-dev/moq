@@ -1881,10 +1881,11 @@ where
 
 	/// Whether a frame released at `timestamp` presents ahead of the video keyframe the stream
 	/// begins on ([`Self::video_start`]), and so is dropped. A video track whose start group
-	/// was cut before it went out starts at its next keyframe instead ([`jitter::Buffer`]), so
-	/// until video goes out the start is the earliest frame a video track holds. Video goes out
-	/// further ahead of its decode time than the other tracks, so what they release before it
-	/// presents ahead of it too.
+	/// was cut or went stale before it went out starts at its next keyframe instead
+	/// ([`jitter::Buffer`]), so until video goes out the start is the earliest frame a video
+	/// track holds, and with none held, everything leads the keyframe yet to arrive. Video goes
+	/// out further ahead of its decode time than the other tracks, so what they release before
+	/// it presents ahead of it too.
 	fn leads_video(&mut self, is_video: bool, timestamp: Timestamp) -> bool {
 		let Some(start) = self.video_start else {
 			return false;
@@ -1906,7 +1907,7 @@ where
 			.filter_map(|track| self.jitter.peek(&track.pid))
 			.map(|queued| queued.frame.timestamp)
 			.min();
-		timestamp < next.map_or(start, |next| next.max(start))
+		next.is_none_or(|next| timestamp < next.max(start))
 	}
 
 	/// Discard what has not gone out and restart the program clock. Every rendition

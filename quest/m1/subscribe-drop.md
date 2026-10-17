@@ -102,5 +102,4 @@ tail interop could land first.
 
 ## Related
 
-- [Tail arrivals](/quest/m1/tail-arrivals.md) - per-track live dispositions survive cache eviction
 - [Resume reorder](/quest/m1/resume-reorder.md) - late stream headers are not proof that a group was dropped
