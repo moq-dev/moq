@@ -6,7 +6,6 @@ use std::collections::VecDeque;
 use std::time::Duration;
 
 /// Encoded access units stay in decode order, even when their PTS reorders.
-#[derive(Default)]
 pub(super) struct Buffer {
 	pub frames: VecDeque<Frame>,
 	pub bytes: usize,
@@ -14,9 +13,27 @@ pub(super) struct Buffer {
 	// Monotone minimum: PTS can reorder behind the front of decode order.
 	oldest: VecDeque<moq_net::Timestamp>,
 	pub generation: u64,
+	/// The keyframe the buffer last resumed at. A picture presenting before it references
+	/// media the buffer never had, so it is neither decoded nor shown.
 	pub floor: Option<moq_net::Timestamp>,
 	waiting_keyframe: bool,
 	pub ended: bool,
+}
+
+impl Default for Buffer {
+	fn default() -> Self {
+		Self {
+			frames: VecDeque::new(),
+			bytes: 0,
+			edge: None,
+			oldest: VecDeque::new(),
+			generation: 0,
+			floor: None,
+			// A join resumes at its first keyframe, like any other break.
+			waiting_keyframe: true,
+			ended: false,
+		}
+	}
 }
 
 impl Buffer {
@@ -53,15 +70,10 @@ impl Buffer {
 			}
 			self.waiting_keyframe = false;
 		}
-		if self.waiting_keyframe {
+		if self.waiting_keyframe || self.below_floor(&frame) {
 			return;
 		}
-		while self.oldest.back().is_some_and(|at| *at > frame.timestamp) {
-			self.oldest.pop_back();
-		}
-		self.oldest.push_back(frame.timestamp);
-		self.bytes += frame.payload.len();
-		self.frames.push_back(frame);
+		self.index(frame);
 		let edge = self.edge.unwrap();
 		let stale =
 			|oldest: &moq_net::Timestamp| edge.as_micros().saturating_sub(oldest.as_micros()) > max_delay.as_micros();
@@ -75,7 +87,29 @@ impl Buffer {
 			self.generation += 1;
 			self.waiting_keyframe = self.frames.is_empty();
 			self.floor = self.frames.front().map(|frame| frame.timestamp);
+			// The retained keyframe's leading pictures referenced what was just dropped.
+			let mut frames = std::mem::take(&mut self.frames);
+			frames.retain(|frame| !self.below_floor(frame));
+			self.bytes = 0;
+			self.oldest.clear();
+			for frame in frames {
+				self.index(frame);
+			}
 		}
+	}
+
+	/// Append a frame, tracking its bytes and the earliest presentation time.
+	fn index(&mut self, frame: Frame) {
+		while self.oldest.back().is_some_and(|at| *at > frame.timestamp) {
+			self.oldest.pop_back();
+		}
+		self.oldest.push_back(frame.timestamp);
+		self.bytes += frame.payload.len();
+		self.frames.push_back(frame);
+	}
+
+	fn below_floor(&self, frame: &Frame) -> bool {
+		self.floor.is_some_and(|floor| frame.timestamp < floor)
 	}
 }
 
@@ -111,6 +145,30 @@ mod tests {
 		assert!(buffer.frames.is_empty(), "cannot resume on a dependent picture");
 		buffer.push(frame(300, true), age);
 		assert_eq!(buffer.bytes, 7);
+	}
+
+	#[test]
+	fn eviction_drops_the_retained_keyframes_leading_pictures() {
+		let mut buffer = Buffer::default();
+		let age = Duration::from_millis(100);
+		for (ms, keyframe) in [
+			(0, true),
+			(50, false),
+			(100, true),
+			(80, false),
+			(90, false),
+			(110, false),
+		] {
+			buffer.push(frame(ms, keyframe), age);
+		}
+		buffer.push(frame(95, false), age);
+		let kept: Vec<_> = buffer.frames.iter().map(|f| f.timestamp.as_millis()).collect();
+		assert_eq!(kept, [100, 110], "80, 90 and 95 reference the evicted group");
+		assert_eq!(buffer.bytes, 14);
+		assert_eq!(buffer.oldest().unwrap().as_millis(), 100);
+		buffer.push(frame(200, true), age);
+		buffer.push(frame(180, false), age);
+		assert_eq!(buffer.frames.len(), 4, "a continuous group keeps its leading pictures");
 	}
 
 	#[test]

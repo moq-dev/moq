@@ -1,4 +1,4 @@
-# T-STD compliant TS export
+# [L] T-STD compliant TS export
 
 ## Goal
 
@@ -6,8 +6,9 @@
 checks for explicitly supported profiles, with admitted decodable access
 units complete by their decode time and no modelled buffer overflow. Under
 loss, validate the surviving content, declared discontinuities and recovery;
-missing source units cannot all be decoded. Packet passthrough also needs
-timing and recovery evidence before making a distribution-readiness claim.
+missing source units cannot all be decoded. The deferred packet-passthrough
+export owns its timing and recovery proof before claiming readiness; it does
+not gate the semantic export proof here.
 
 ## Plan
 
@@ -41,17 +42,12 @@ content-loss coverage through the TS reliability line. Run TSDuck, FFmpeg
 software decode, and the custom model as automated assertions with known-bad
 controls. A model pass is not independent proof of decoded content.
 
-The current model does not cover every codec/layout or the PSI system buffer.
-Name those exclusions and assumptions in the profile report; the PSI quest
-owns its system-buffer proof, and the existing controls quest owns the missing
-MB/AAC controls. Do not relabel the current subset a full standards check.
-
-## Required
-
-- [PSI pacing](/quest/m1/tstd/psi-runs.md) - padded output paces the PAT and PMT so TBsys and Bsys never overflow
+The current model does not cover every codec/layout. Name those exclusions and
+assumptions in the profile report. Do not relabel the current subset a full
+standards check.
 
 ## Related
 
-- [TS passthrough export](/quest/m2/ts-passthrough-export.md) - the passthrough lane named in the Goal
+- [TS passthrough export](/quest/m2/ts-passthrough-export.md) - the later passthrough lane owns its own output proof
 - [Automated validation](/test/ts/README.md) - independent decode, profile coverage and CI ownership
 - [Loss and recovery](/quest/m1/ts-reliability/recovery.md) - actual object/group omissions and recovery

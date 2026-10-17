@@ -6,6 +6,7 @@
  *
  * @module
  */
+import { Nano, Second } from "@moq/clock";
 import * as Json from "@moq/json";
 import * as Moq from "@moq/net";
 import * as Watch from "@moq/watch";
@@ -35,7 +36,7 @@ interface Command {
 }
 
 // Stop publishing feedback after 60s of no input.
-const FEEDBACK_IDLE_MS = 60_000;
+const FEEDBACK_IDLE = Nano.fromSecond(Second(60));
 
 // Game Boy native resolution.
 const GB_WIDTH = 160;
@@ -103,7 +104,6 @@ export class Game {
 	// Internal command publishing state.
 	#command = new Moq.Signals.Signal<Command | undefined>(undefined);
 	#feedbackActive = new Moq.Signals.Signal(false);
-	#feedbackTimeout: ReturnType<typeof setTimeout> | undefined;
 
 	constructor(config: GameConfig) {
 		const { sessionId, connection, expanded, gamePrefix, viewerPrefix } = config;
@@ -191,6 +191,7 @@ export class Game {
 
 		// Command publishing.
 		this.#signals.run(this.#runCommands.bind(this, connection, config.origin));
+		this.#signals.run(this.#runFeedbackIdle.bind(this));
 	}
 
 	/** Send a button state update. */
@@ -202,8 +203,6 @@ export class Game {
 	sendCommand(cmd: Record<string, unknown>) {
 		// Activate feedback broadcasting on input, with idle timeout.
 		this.#feedbackActive.set(true);
-		clearTimeout(this.#feedbackTimeout);
-		this.#feedbackTimeout = setTimeout(() => this.#feedbackActive.set(false), FEEDBACK_IDLE_MS);
 
 		this.#command.set({ cmd, timestamps: this.#timestamps() }, true);
 	}
@@ -221,7 +220,6 @@ export class Game {
 	}
 
 	close() {
-		clearTimeout(this.#feedbackTimeout);
 		this.#signals.close();
 	}
 
@@ -280,6 +278,13 @@ export class Game {
 		});
 	}
 
+	#runFeedbackIdle(effect: Moq.Signals.Effect) {
+		if (!effect.get(this.#feedbackActive)) return;
+		// Every command restarts the idle timer.
+		effect.get(this.#command);
+		effect.timer(() => this.#feedbackActive.set(false), FEEDBACK_IDLE);
+	}
+
 	#runCommands(connection: Moq.Connection, origin: Moq.Origin.Producer, effect: Moq.Signals.Effect) {
 		// Publishing goes through the origin, but gate on a live connection anyway: a command
 		// broadcast for a game nobody is connected to is feedback into the void.
@@ -288,7 +293,6 @@ export class Game {
 		if (!effect.get(this.active)) {
 			// Clear feedback state when deactivating.
 			this.#feedbackActive.set(false);
-			clearTimeout(this.#feedbackTimeout);
 			this.#command.set(undefined);
 			return;
 		}

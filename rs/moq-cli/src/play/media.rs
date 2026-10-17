@@ -15,7 +15,7 @@ use tokio::time::Instant;
 
 use super::args::Args;
 use super::output::{Output, Sink, Speaker};
-use super::playback::{Kind, Playback, joined};
+use super::playback::{Kind, Playback, Track, joined};
 use super::timeline::{AudioTimeline, Presentation, fit, timestamp};
 use super::video::Video;
 use super::window::Event;
@@ -151,7 +151,7 @@ impl<O: Output> Media<O> {
 			if playback.pending().is_none() {
 				tokio::select! {
 					result = tasks.join_next(), if !tasks.is_empty() => {
-						let ended = joined(result.expect("guarded by is_empty"))?.map(|(kind, sink)| {
+						let ended = joined(result.expect("guarded by is_empty"))?.map(|(kind, (finished, sink))| {
 							if kind == Kind::Audio {
 								// The tail still sounds, so the speaker keeps the anchor, but a
 								// replacement is a track boundary whose timestamps need not
@@ -165,9 +165,11 @@ impl<O: Output> Media<O> {
 							if let Some(sink) = sink {
 								tails.spawn(drain(sink));
 							}
-							kind
+							(kind, finished)
 						});
-						playback.ended(ended);
+						if let Some((kind, finished)) = ended {
+							playback.ended(kind, finished);
+						}
 					}
 					_ = tails.join_next(), if !tails.is_empty() => {}
 					// Followed for as long as it lasts, not just until something is
@@ -219,6 +221,11 @@ impl<O: Output> Media<O> {
 			if playback.wants(Kind::Video) {
 				playback.read(Kind::Video);
 				for (name, config) in snapshot.video.enabled() {
+					let reference = Track::of(&source, config, name);
+					// A finished track has only its newest group left, which already played.
+					if playback.finished(&reference) {
+						continue;
+					}
 					// A rendition pointing at a broadcast we can't reach is that
 					// rendition's problem, not the catalog's: fall through to the
 					// next one like an unsupported codec does.
@@ -265,15 +272,10 @@ impl<O: Output> Media<O> {
 							let (stop, stopped) = tokio::sync::oneshot::channel();
 							video_demand = Some((name.clone(), stop));
 							tasks.spawn(async move {
-								(
-									Kind::Video,
-									tokio::select! {
-									result = video.run(track, decoder) => result.map(|()| None),
-									_ = stopped => Ok(None),
-									},
-								)
+								let result = until_stopped(video.run(track, decoder), stopped).await;
+								(Kind::Video, result.map(|(finished, _)| (finished, None)))
 							});
-							playback.started(Kind::Video);
+							playback.started(Kind::Video, reference);
 							break;
 						}
 						Err(err) => {
@@ -287,6 +289,11 @@ impl<O: Output> Media<O> {
 			if playback.wants(Kind::Audio) {
 				playback.read(Kind::Audio);
 				for (name, config) in snapshot.audio.enabled() {
+					let reference = Track::of(&source, config, name);
+					// A finished track has only its newest group left, which already played.
+					if playback.finished(&reference) {
+						continue;
+					}
 					let rendition = match source.resolve(config.broadcast.as_ref()).await {
 						Ok(rendition) => rendition,
 						Err(err) => {
@@ -322,15 +329,9 @@ impl<O: Output> Media<O> {
 							let (stop, stopped) = tokio::sync::oneshot::channel();
 							audio_demand = Some((name.clone(), stop));
 							tasks.spawn(async move {
-								(
-									Kind::Audio,
-									tokio::select! {
-									result = play_audio(consumer, audio) => result.map(Some),
-									_ = stopped => Ok(None),
-									},
-								)
+								(Kind::Audio, until_stopped(play_audio(consumer, audio), stopped).await)
 							});
-							playback.started(Kind::Audio);
+							playback.started(Kind::Audio, reference);
 							break;
 						}
 						Err(err) => {
@@ -349,6 +350,19 @@ impl<O: Output> Media<O> {
 				);
 			}
 		}
+	}
+}
+
+/// Drive `play` until it ends or `stopped` fires, reporting whether it ended on its
+/// own. Decided by whichever branch won, not by who holds the stop handle: a
+/// rendition can be disabled after its track ended but before the end is joined.
+async fn until_stopped<T>(
+	play: impl Future<Output = anyhow::Result<T>>,
+	stopped: tokio::sync::oneshot::Receiver<()>,
+) -> anyhow::Result<(bool, Option<T>)> {
+	tokio::select! {
+		result = play => result.map(|left| (true, Some(left))),
+		_ = stopped => Ok((false, None)),
 	}
 }
 
@@ -841,6 +855,62 @@ mod tests {
 			PACKET_DURATION * 10,
 			"the new broadcast did not play in full"
 		);
+	}
+
+	/// A catalog update lands while a track plays, then the track ends. The
+	/// player reads the newer snapshot, which still names the finished track, and
+	/// must not resubscribe to it and replay its newest group.
+	#[tokio::test]
+	async fn a_finished_track_is_not_replayed_after_a_catalog_update() {
+		tokio::time::pause();
+
+		let origin = moq_tokio::origin::spawn();
+		let (_broadcast, mut catalog, mut audio) = publish(&origin, Default::default());
+		let recorder = Recorder::default();
+		let player = tokio::spawn(media(&origin, Duration::from_millis(50), recorder.clone()).run());
+		write(&mut audio, 10, 0.25).await;
+		catalog
+			.mutate(|catalog| {
+				catalog.audio.renditions.get_mut("audio").unwrap().bitrate = Some(u64::from(SAMPLE_RATE) * 32);
+			})
+			.unwrap();
+		audio.finish().unwrap();
+
+		// The catalog stays open, so the player keeps following it.
+		settle(player, &recorder).await;
+		assert_eq!(
+			played(&recorder, 0.25).0,
+			PACKET_DURATION * 10,
+			"the finished track replayed"
+		);
+	}
+
+	/// A catalog can disable a rendition after its track ended but before the
+	/// player joins that end. The stop then lands on nothing, and the end still
+	/// counts as finished, so re-enabling the rendition does not replay it.
+	#[tokio::test]
+	async fn a_stop_after_the_track_ended_still_reports_it_finished() {
+		let (stop, stopped) = tokio::sync::oneshot::channel();
+		let task = tokio::spawn(until_stopped(async { anyhow::Ok(()) }, stopped));
+		while !task.is_finished() {
+			tokio::task::yield_now().await;
+		}
+		assert!(stop.send(()).is_err(), "the stop raced a running task");
+		let (finished, _) = task.await.unwrap().unwrap();
+		assert!(finished, "a track that ended was reported as stopped");
+	}
+
+	/// Equivalent `broadcast` references name one track, so a snapshot that only
+	/// respells the reference does not make a finished track look new.
+	#[tokio::test]
+	async fn equivalent_references_name_one_track() {
+		let origin = moq_tokio::origin::spawn();
+		let (broadcast, _catalog, _audio) = publish(&origin, Default::default());
+		let source = moq_mux::Source::new(origin.consume(), broadcast.consume());
+		let mut config = AudioConfig::new(AudioCodec::Pcm, SAMPLE_RATE, 1);
+		let absent = Track::of(&source, &config, "audio");
+		config.broadcast = Some(moq_net::path::RelativeOwned::new(""));
+		assert_eq!(Track::of(&source, &config, "audio"), absent);
 	}
 
 	/// A covering route of the same epoch that arrives as the exact route goes, both

@@ -1,7 +1,9 @@
 /** Sweep tracks x viewers for 1000 estimate rises inside one second. */
+
+import { Milli } from "@moq/clock";
 import * as Catalog from "@moq/hang/catalog";
 import * as Json from "@moq/json";
-import { Time, Track } from "@moq/net";
+import { Track } from "@moq/net";
 import { Effect } from "@moq/signals";
 import { CatalogProducer } from "../src/catalog";
 
@@ -60,7 +62,7 @@ async function measure(tracks: number, viewers: number) {
 			for (let index = 0; index < media.length; index++) {
 				// Model the player's changed latency floor with real subscription handles.
 				viewer.media[index].update({
-					maxDelay: Time.Milli(root?.video?.renditions[media[index].name].jitter ?? 0),
+					maxDelay: Milli(root?.video?.renditions[media[index].name].jitter ?? 0),
 				});
 				updates++;
 			}

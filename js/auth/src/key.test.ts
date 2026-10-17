@@ -21,7 +21,7 @@ const testKey = {
 	kid: "test-key-1",
 } as const;
 
-const testClaims: Claims = {
+const testClaims = {
 	root: "test-path",
 	publish: ["test-pub/**"],
 	subscribe: ["test-sub/**"],
@@ -198,8 +198,8 @@ test("verify - successful verification", async () => {
 	const claims = await Key.verify(key, token);
 
 	expect(claims.root).toBe(testClaims.root);
-	expect(claims.publish).toEqual(testClaims.publish);
-	expect(claims.subscribe).toEqual(testClaims.subscribe);
+	expect(claims.publish?.toJSON()).toEqual(testClaims.publish);
+	expect(claims.subscribe?.toJSON()).toEqual(testClaims.subscribe);
 });
 
 test("verify - key doesn't support verification", async () => {
@@ -227,7 +227,7 @@ test("verify - invalid token format", async () => {
 });
 
 test("verify - expired token", async () => {
-	const expiredClaims: Claims = {
+	const expiredClaims = {
 		...testClaims,
 		exp: Math.floor((Date.now() - 60 * 1000) / 1000), // 1 minute ago in seconds
 	};
@@ -243,7 +243,7 @@ test("verify - expired token", async () => {
 });
 
 test("verify - token without exp field", async () => {
-	const claimsWithoutExp: Claims = {
+	const claimsWithoutExp = {
 		root: "test-path",
 		publish: ["test-pub/**"],
 	};
@@ -253,7 +253,7 @@ test("verify - token without exp field", async () => {
 	const claims = await Key.verify(key, token);
 
 	expect(claims.root).toBe("test-path");
-	expect(claims.publish).toEqual(["test-pub/**"]);
+	expect(claims.publish?.toJSON()).toEqual(["test-pub/**"]);
 	expect(claims.exp).toBe(undefined);
 });
 
@@ -274,7 +274,7 @@ test("claims validation - must have pub or sub", async () => {
 
 test("round-trip - sign and verify", async () => {
 	const key = Key.parse(encodeJwk(testKey));
-	const originalClaims: Claims = {
+	const originalClaims = {
 		root: "test-path",
 		publish: ["test-pub/**"],
 		subscribe: ["test-sub/**"],
@@ -286,8 +286,8 @@ test("round-trip - sign and verify", async () => {
 	const verifiedClaims = await Key.verify(key, token);
 
 	expect(verifiedClaims.root).toBe(originalClaims.root);
-	expect(verifiedClaims.publish).toEqual(originalClaims.publish);
-	expect(verifiedClaims.subscribe).toEqual(originalClaims.subscribe);
+	expect(verifiedClaims.publish?.toJSON()).toEqual(originalClaims.publish);
+	expect(verifiedClaims.subscribe?.toJSON()).toEqual(originalClaims.subscribe);
 	expect(verifiedClaims.exp).toBe(originalClaims.exp);
 	expect(verifiedClaims.iat).toBe(originalClaims.iat);
 });
@@ -319,7 +319,7 @@ test("sign - invalid claims without pub or sub", async () => {
 
 test("sign - claims validation path not prefix absolute sub", async () => {
 	const key = Key.parse(encodeJwk(testKey));
-	const validClaims: Claims = {
+	const validClaims = {
 		root: "test-path",
 		subscribe: ["absolute-sub/**"],
 	};
@@ -331,7 +331,7 @@ test("sign - claims validation path not prefix absolute sub", async () => {
 
 test("sign - claims validation path is prefix with relative paths", async () => {
 	const key = Key.parse(encodeJwk(testKey));
-	const validClaims: Claims = {
+	const validClaims = {
 		root: "test-path",
 		publish: ["relative-pub/**"],
 		subscribe: ["relative-sub/**"],
@@ -344,7 +344,7 @@ test("sign - claims validation path is prefix with relative paths", async () => 
 
 test("sign - claims validation empty root", async () => {
 	const key = Key.parse(encodeJwk(testKey));
-	const validClaims: Claims = {
+	const validClaims = {
 		root: "",
 		publish: ["test-pub/**"],
 	};
@@ -368,7 +368,7 @@ test("different algorithms - HS384", async () => {
 	const verifiedClaims = await Key.verify(key, token);
 
 	expect(verifiedClaims.root).toBe(testClaims.root);
-	expect(verifiedClaims.publish).toEqual(testClaims.publish);
+	expect(verifiedClaims.publish?.toJSON()).toEqual(testClaims.publish);
 });
 
 test("different algorithms - HS512", async () => {
@@ -385,7 +385,7 @@ test("different algorithms - HS512", async () => {
 	const verifiedClaims = await Key.verify(key, token);
 
 	expect(verifiedClaims.root).toBe(testClaims.root);
-	expect(verifiedClaims.publish).toEqual(testClaims.publish);
+	expect(verifiedClaims.publish?.toJSON()).toEqual(testClaims.publish);
 });
 
 test("verify - private to public key", async () => {
@@ -727,8 +727,8 @@ test("verify - a legacy put/get prefix token reads as subtrees", async () => {
 		.setProtectedHeader({ alg: "HS256", kid: testKey.kid })
 		.sign(secret);
 	const claims = await Key.verify(key, legacy);
-	expect(claims.publish).toEqual(["alice/**"]);
-	expect(claims.subscribe).toEqual(["**"]);
+	expect(claims.publish?.toJSON()).toEqual(["alice/**"]);
+	expect(claims.subscribe?.toJSON()).toEqual(["**"]);
 });
 
 test("sign - subtree grants are written as legacy put/get", async () => {
@@ -753,8 +753,8 @@ test("key scope is enforced when signing and verifying", async () => {
 		...unrestricted,
 		scope: { root: "project", publish: ["live/**"] },
 	};
-	const allowed: Claims = { root: "project", publish: ["live/room/**"] };
-	const denied: Claims = { root: "project", publish: ["other/**"] };
+	const allowed = { root: "project", publish: ["live/room/**"] };
+	const denied = { root: "project", publish: ["other/**"] };
 
 	await expect(Key.sign(scoped, allowed)).resolves.toBeString();
 	await expect(Key.sign(scoped, denied)).rejects.toThrow("exceed the key scope");

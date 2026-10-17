@@ -5,9 +5,6 @@ use thiserror::Error;
 
 use crate::coding::{self, Codec, UnexpectedEnd};
 
-#[cfg(feature = "arbitrary")]
-use arbitrary::Arbitrary;
-
 /// An integer less than 2^62
 ///
 /// Values of this type are suitable for encoding as QUIC variable-length integer.
@@ -124,13 +121,6 @@ impl fmt::Debug for VarInt {
 impl fmt::Display for VarInt {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.0.fmt(f)
-    }
-}
-
-#[cfg(feature = "arbitrary")]
-impl<'arbitrary> Arbitrary<'arbitrary> for VarInt {
-    fn arbitrary(u: &mut arbitrary::Unstructured<'arbitrary>) -> arbitrary::Result<Self> {
-        Ok(Self(u.int_in_range(0..=Self::MAX.0)?))
     }
 }
 

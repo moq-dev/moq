@@ -68,7 +68,11 @@ struct AliasTable {
 type TrackAliases = kio::Producer<AliasTable>;
 
 fn insert_track_alias(aliases: &TrackAliases, alias: u64, request_id: RequestId) -> Result<(), Error> {
-	let mut aliases = aliases.write().map_err(|_| Error::Dropped)?;
+	let mut aliases = aliases.write().map_err(|_| {
+		// The table is never explicitly closed, and this call holds a producer.
+		debug_assert!(false, "alias table closed while binding a live subscription");
+		Error::Cancel
+	})?;
 	let table = &mut *aliases;
 
 	match table.map.entry(alias) {
@@ -722,7 +726,7 @@ async fn resolve_track_alias(
 			None => Poll::Pending,
 		});
 		if let Poll::Ready(result) = resolved {
-			return Poll::Ready(result.unwrap_or(Err(Error::Dropped)));
+			return Poll::Ready(result.unwrap_or(Err(Error::Cancel)));
 		}
 		if timeout.poll(waiter).is_ready() {
 			return Poll::Ready(Err(Error::NotFound));
@@ -3531,7 +3535,14 @@ where
 		let passthrough = !fill.read().outstanding() && resume.is_none();
 		let opened = {
 			let mut opening = track.clone();
-			let mut open = std::pin::pin!(self.open_group(stream, &mut opening, &fill, resume, &group, &mut reading));
+			let mut open = std::pin::pin!(crate::util::sendable(self.open_group(
+				stream,
+				&mut opening,
+				&fill,
+				resume,
+				&group,
+				&mut reading
+			)));
 			kio::wait(|waiter| {
 				if let Poll::Ready(err) = track.poll_closed(waiter) {
 					return Poll::Ready(Err(err));
@@ -3554,13 +3565,14 @@ where
 		let (producer, start) = match opened {
 			Opened::Group(producer, start) => (producer, start),
 			// A standalone terminal carries a Location, not a payload group.
-			Opened::EndOfTrack(object) => {
+			Opened::EndOfTrack { object, properties } => {
 				return end_track(
 					&mut track,
 					track::Position {
 						group: group.group_id,
 						frame: object,
 					},
+					properties,
 				);
 			}
 		};
@@ -3631,7 +3643,7 @@ where
 				let _ = producer.finish();
 			}
 			// No object past this group's last one exists, so the track ends after it.
-			Ok(Ended::Track(object)) => {
+			Ok(Ended::Track { object, properties }) => {
 				let _ = producer.finish();
 				return end_track(
 					&mut track,
@@ -3639,6 +3651,7 @@ where
 						group: group.group_id,
 						frame: object,
 					},
+					properties,
 				);
 			}
 		}
@@ -3708,8 +3721,14 @@ where
 /// learn the end before the live edge reaches it. A boundary at or below a group already
 /// received is the publisher breaking its own end, which no later group can repair. A
 /// marker that lands after the subscription already ended (its grace expired) changes
-/// nothing.
-fn end_track(track: &mut track::Producer, end: track::Position) -> Result<(), Error> {
+/// nothing. Draft-14 lets the marker carry properties, but the end is track-level with
+/// nowhere to keep them, so the track is refused rather than lose them.
+fn end_track(track: &mut track::Producer, end: track::Position, properties: bool) -> Result<(), Error> {
+	if properties {
+		tracing::warn!(?end, "END_OF_TRACK properties are unsupported");
+		let _ = track.clone().abort(Error::Unsupported);
+		return Err(Error::Unsupported);
+	}
 	// Lower groups may still be on the wire, behind the one that carried the end.
 	if let Err(err) = track.finish_at_pending(end) {
 		tracing::warn!(%err, ?end, "invalid END_OF_TRACK");
@@ -3723,8 +3742,9 @@ fn end_track(track: &mut track::Producer, end: track::Position) -> Result<(), Er
 enum Opened {
 	/// The group producer the stream writes into, and the Object ID it starts at.
 	Group(group::Producer, u64),
-	/// A standalone terminal marker, which creates no payload group.
-	EndOfTrack(u64),
+	/// A standalone terminal marker, which creates no payload group, and whether it
+	/// carried properties.
+	EndOfTrack { object: u64, properties: bool },
 }
 
 /// How a subgroup stream ended cleanly.
@@ -3732,8 +3752,9 @@ enum Opened {
 enum Ended {
 	/// The stream finished, or carried an explicit end of group.
 	Group,
-	/// It carried an END_OF_TRACK after the group's last object.
-	Track(u64),
+	/// It carried an END_OF_TRACK after the group's last object, and whether that
+	/// marker carried properties.
+	Track { object: u64, properties: bool },
 }
 
 /// Object status: no object at or past this location in the group exists (draft-14, 15).
@@ -3748,22 +3769,40 @@ struct FirstObject {
 	/// The Object ID, which the first object's delta is.
 	id: u64,
 	end_of_track: bool,
+	has_properties: bool,
 }
 
 /// [`FirstObject`] for a stream whose objects carry extensions, or don't.
 #[derive(Debug)]
 struct PeekFirst<const EXTENSIONS: bool>(FirstObject);
 
+/// The first Object ID alone, which names a compact stream's subgroup.
+#[derive(Debug)]
+struct PeekId(u64);
+
+impl Decode<Version> for PeekId {
+	fn decode(buf: &mut Decoder<'_>, _: Version) -> Result<Self, DecodeError> {
+		Ok(Self(buf.varint()?))
+	}
+}
+
 impl<const EXTENSIONS: bool> Decode<Version> for PeekFirst<EXTENSIONS> {
 	fn decode(buf: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
 		let id = buf.varint()?;
-		if EXTENSIONS {
+		let has_properties = if EXTENSIONS {
 			let ObjectExtensionsLength(size) = ObjectExtensionsLength::decode(buf, version)?;
 			buf.slice(size)?;
-		}
+			size != 0
+		} else {
+			false
+		};
 		let size = buf.varint()?;
 		let end_of_track = size == 0 && buf.varint()? == END_OF_TRACK;
-		Ok(Self(FirstObject { id, end_of_track }))
+		Ok(Self(FirstObject {
+			id,
+			end_of_track,
+			has_properties,
+		}))
 	}
 }
 
@@ -3791,6 +3830,17 @@ where
 		// through the tagged `track::Producer`.
 		let create = |track: &mut track::Producer| track.create_group(group::Info { sequence });
 
+		// The compact form names the subgroup by its first Object ID, so check it before the
+		// rest of the object can fail and open the group as subgroup 0. A stream with no
+		// objects names none, and a failed read fails again in the full peek below.
+		if header.flags.has_subgroup_object
+			&& let Ok(Some(PeekId(id))) = stream.decode_peek_maybe::<PeekId>().await
+			&& id != 0
+		{
+			tracing::warn!(sub_group_id = id, "subgroup ID is not supported, dropping stream");
+			return Err(Error::Unsupported);
+		}
+
 		let peeked = match header.flags.has_extensions {
 			true => stream
 				.decode_peek_maybe::<PeekFirst<true>>()
@@ -3814,7 +3864,10 @@ where
 			}
 		};
 		if let Some(first) = first.filter(|first| first.end_of_track) {
-			return Ok(Opened::EndOfTrack(first.id));
+			return Ok(Opened::EndOfTrack {
+				object: first.id,
+				properties: first.has_properties,
+			});
 		}
 
 		// Without a fill or resume, a relay preserves the subgroup's first Object ID
@@ -3907,8 +3960,11 @@ where
 
 			match settled {
 				Poll::Ready(Ok(_)) => Poll::Ready(Ok(())),
-				// The subscription went away underneath us.
-				Poll::Ready(Err(_)) => Poll::Ready(Err(Error::Dropped)),
+				// Fill is never explicitly closed, and this task holds a producer.
+				Poll::Ready(Err(_)) => {
+					debug_assert!(false, "fill closed while a receive task owns it");
+					Poll::Ready(Err(Error::Cancel))
+				}
 				Poll::Pending => Poll::Pending,
 			}
 		})
@@ -3917,7 +3973,12 @@ where
 		// stream is the only thing saying the group is still being read.
 		reading.resume();
 		settled?;
-		fill.write().map_err(|_| Error::Dropped)?.claim(sequence, start)
+		fill.write()
+			.map_err(|_| {
+				debug_assert!(false, "fill closed while claiming its head");
+				Error::Cancel
+			})?
+			.claim(sequence, start)
 	}
 }
 
@@ -4042,8 +4103,11 @@ where
 					// did. Either way its objects would duplicate a group already in flight.
 					_ => Err(Error::Unsupported),
 				}),
-				// The subscription went away underneath us.
-				Poll::Ready(Err(_)) => Poll::Ready(Err(Error::Dropped)),
+				// Fill is never explicitly closed, and this task holds a producer.
+				Poll::Ready(Err(_)) => {
+					debug_assert!(false, "fill closed while a receive task owns it");
+					Poll::Ready(Err(Error::Cancel))
+				}
 				Poll::Pending => Poll::Pending,
 			}
 		})
@@ -4065,7 +4129,14 @@ where
 		// track does not close a group producer, since those lifecycles are independent.
 		let res = {
 			let mut serving = track.clone();
-			let mut serve = std::pin::pin!(self.run_fill(stream, &mut serving, timescale, joining, largest, resume));
+			let mut serve = std::pin::pin!(crate::util::sendable(self.run_fill(
+				stream,
+				&mut serving,
+				timescale,
+				joining,
+				largest,
+				resume
+			)));
 			kio::wait(|waiter| {
 				if let Poll::Ready(err) = track.poll_closed(waiter) {
 					return Poll::Ready(Err(err));
@@ -4093,11 +4164,12 @@ where
 		// reach a producer this task still owns. So the handoff is where that is settled.
 		match fill.write() {
 			Ok(mut state) => state.install(head),
-			// The subscription is gone entirely, so nothing is left to hand it to.
+			// Fill is never explicitly closed, and this task holds a producer.
 			Err(_) => {
+				debug_assert!(false, "fill closed while installing its head");
 				let mut head = head;
 				head.cancel();
-				return Err(Error::Dropped);
+				return Err(Error::Cancel);
 			}
 		}
 
@@ -4318,6 +4390,8 @@ where
 					}
 					return Ok(Fetched::EndOfGroup);
 				}
+				// END_OF_TRACK is track-level, so there is nowhere to keep its properties.
+				END_OF_TRACK if !decoded.properties.is_empty() => return Err(Error::Unsupported),
 				END_OF_TRACK => return Ok(Fetched::EndOfTrack),
 				_ => return Err(Error::Unsupported),
 			}
@@ -4675,7 +4749,7 @@ where
 						}
 					})
 				}
-				Poll::Ready(Err(_)) => Poll::Ready(Err(Error::Dropped)),
+				Poll::Ready(Err(_)) => Poll::Ready(Err(Error::Cancel)),
 				Poll::Pending => Poll::Pending,
 			}
 		})
@@ -4694,8 +4768,13 @@ where
 		let closed = producer.clone();
 		let mut producer = crate::recv::Group::new(producer);
 		let res = {
-			let mut receive =
-				std::pin::pin!(self.recv_group_fetch_objects(stream, &mut producer, start, end, timescale));
+			let mut receive = std::pin::pin!(crate::util::sendable(self.recv_group_fetch_objects(
+				stream,
+				&mut producer,
+				start,
+				end,
+				timescale
+			)));
 			kio::wait(|waiter| {
 				if let Poll::Ready(res) = waiter.poll_future(receive.as_mut()) {
 					return Poll::Ready(res);
@@ -5149,8 +5228,10 @@ impl GroupIngest {
 					} else if status == END_OF_TRACK {
 						// Defined on every implemented draft, whether or not the header marks
 						// the group's end.
-						self.phase =
-							IngestPhase::Finished(Ended::Track(self.prior_object.expect("status follows object ID")));
+						self.phase = IngestPhase::Finished(Ended::Track {
+							object: self.prior_object.expect("status follows object ID"),
+							properties: !self.properties.is_empty(),
+						});
 					} else {
 						return Poll::Ready(Err(Error::Unsupported));
 					}
@@ -5190,6 +5271,17 @@ mod tests {
 	use futures::poll;
 
 	use super::*;
+
+	#[moq_net_sim::test]
+	async fn internal_alias_resolution_ends_with_its_session() {
+		let aliases = TrackAliases::default();
+		let consumer = aliases.consume();
+		drop(aliases);
+		assert!(matches!(
+			resolve_track_alias(&crate::time::Clock::sim(), consumer, 7).await,
+			Err(Error::Cancel)
+		));
+	}
 
 	async fn check_publish_fin(responses: Vec<u8>, clean: bool) {
 		use crate::lite::test_transport::ScriptedSession;
@@ -11242,6 +11334,26 @@ mod stitch_tests {
 			}
 		}
 
+		// Draft-14 allows them, but END_OF_TRACK has nowhere to keep them: a standalone one
+		// is peeked before any group, and one after an object is ingested with the group.
+		let standalone: &[(u64, &[u8], Option<u64>)] = &[(0, &[0x20, 7], Some(END_OF_TRACK))];
+		let trailing: &[(u64, &[u8], Option<u64>)] = &[(0, &[], None), (1, &[0x20, 7], Some(END_OF_TRACK))];
+		for objects in [standalone, trailing] {
+			let script = object_stream(Version::Draft14, true, objects);
+			let mut h = Harness::with_timescale(Fill::Done, vec![script], None);
+			h.subscriber.version = Version::Draft14;
+			let mut stream = h.stream().await.with_version(Version::Draft14);
+			let result = h.subscriber.clone().recv_group(&mut stream).await;
+			assert!(matches!(result, Err(Error::Unsupported)), "{objects:?}: {result:?}");
+			assert!(
+				matches!(
+					futures::FutureExt::now_or_never(h.track.closed()),
+					Some(Error::Unsupported)
+				),
+				"{objects:?}: the subscription must end with the refusal"
+			);
+		}
+
 		let script = object_stream(
 			Version::Draft14,
 			true,
@@ -11702,6 +11814,68 @@ mod stitch_tests {
 		assert_eq!(frames.len(), 1);
 		assert_eq!(frames[0].1, b"ok");
 		assert!(h.session.log.closes().is_empty());
+	}
+
+	/// A compact header names its subgroup by the first Object ID, so one starting at object
+	/// 2 is subgroup 2: refused like an explicit one, never taken as subgroup 0, even when the
+	/// rest of that object is cut off. A compact stream with no objects names no subgroup and
+	/// is subgroup 0.
+	#[moq_net_sim::test]
+	async fn a_compact_non_zero_subgroup_is_refused() {
+		for version in [Version::Draft14, Version::Draft22] {
+			let compact = |sequence: u64, first: Option<u64>| {
+				let mut bytes = Vec::new();
+				ietf::GroupHeader {
+					track_alias: ALIAS,
+					group_id: sequence,
+					sub_group_id: 0,
+					publisher_priority: 0,
+					flags: ietf::GroupFlags {
+						has_subgroup_object: true,
+						..Default::default()
+					},
+				}
+				.encode(&mut Encoder::new(&mut bytes, version.into()), version)
+				.unwrap();
+				if let Some(first) = first {
+					let mut encoder = Encoder::new(&mut bytes, version.into());
+					encoder.varint(first).unwrap();
+					encoder.varint(1u64).unwrap();
+					bytes.push(42);
+				}
+				bytes
+			};
+			let mut truncated = compact(SEQUENCE + 3, None);
+			Encoder::new(&mut truncated, version.into()).varint(2u64).unwrap();
+			let scripts = vec![
+				compact(SEQUENCE, Some(2)),
+				truncated,
+				compact(SEQUENCE + 1, Some(0)),
+				compact(SEQUENCE + 2, None),
+			];
+			let mut h = Harness::with_timescale(Fill::Done, scripts, None);
+			h.subscriber.version = version;
+			let mut consumer = h.track.subscribe(None);
+
+			let mut stream = h.stream().await.with_version(version);
+			let result = h.subscriber.clone().recv_group(&mut stream).await;
+			assert!(matches!(result, Err(Error::Unsupported)), "{version}: {result:?}");
+			assert_eq!(h.track.latest(), None, "{version}: the refused subgroup opened a group");
+
+			let mut stream = h.stream().await.with_version(version);
+			let result = h.subscriber.clone().recv_group(&mut stream).await;
+			assert!(matches!(result, Err(Error::Unsupported)), "{version}: {result:?}");
+			assert_eq!(h.track.latest(), None, "{version}: a truncated subgroup opened a group");
+
+			let mut stream = h.stream().await.with_version(version);
+			h.subscriber.clone().recv_group(&mut stream).await.unwrap();
+			assert_eq!(read_group(&mut consumer).await, (SEQUENCE + 1, vec![(None, vec![42])]));
+
+			let mut stream = h.stream().await.with_version(version);
+			h.subscriber.clone().recv_group(&mut stream).await.unwrap();
+			assert_eq!(read_group(&mut consumer).await, (SEQUENCE + 2, vec![]));
+			assert!(h.session.log.closes().is_empty(), "{version}");
+		}
 	}
 
 	/// A subgroup stream for `sequence` without extension headers, starting at object 0: the
@@ -12881,6 +13055,18 @@ mod stitch_tests {
 			buf.extend_from_slice(payload);
 		}
 		buf.to_vec()
+	}
+
+	#[moq_net_sim::test]
+	async fn internal_group_fetch_setup_cancellation_is_cancel() {
+		let mut run = GroupFetchRun::new(VERSION, Vec::new()).await;
+		let slot = kio::Producer::new(GroupFetch::Pending);
+		let entry = GroupFetchEntry::new(&run.subscriber.state, RequestId(23), slot.clone());
+		let mut receiving = run.subscriber.clone();
+		let mut receive = std::pin::pin!(receiving.recv_group_fetch(&mut run.stream, slot));
+		assert!(futures::poll!(&mut receive).is_pending());
+		drop(entry);
+		assert!(matches!(receive.await, Err(Error::Cancel)));
 	}
 
 	/// A subscriber reading one scripted group fetch stream, already past its header.

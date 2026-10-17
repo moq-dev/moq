@@ -891,12 +891,11 @@ test("GoAway v17: with timeout", async () => {
 	expect(decoded.timeout).toBe(5000n);
 });
 
-test("GoAway v18: appends the required Request ID", async () => {
-	const msg = new GoAway.GoAway({ newSessionUri: "moqt://relay.example/", timeout: 5000n });
+test("GoAway v18: carries the Request ID", async () => {
+	const msg = new GoAway.GoAway({ newSessionUri: "moqt://relay.example/", timeout: 5000n, requestId: 1n });
 
 	// Draft-18 (#1559) requires a trailing Request ID on the control stream, so
-	// the v18 body must be exactly one varint longer than the v17 body. This
-	// locks byte-level parity with the Rust encoder.
+	// the v18 body is exactly one varint longer than the v17 body, as in Rust.
 	const encoded17 = await encodeVersioned(msg, Version.DRAFT_17);
 	const encoded18 = await encodeVersioned(msg, Version.DRAFT_18);
 	expect(encoded18.byteLength).toBe(encoded17.byteLength + 1);
@@ -904,6 +903,7 @@ test("GoAway v18: appends the required Request ID", async () => {
 	const decoded = await decodeVersioned(encoded18, GoAway.GoAway.decode, Version.DRAFT_18);
 	expect(decoded.newSessionUri).toBe("moqt://relay.example/");
 	expect(decoded.timeout).toBe(5000n);
+	expect(decoded.requestId).toBe(1n);
 });
 
 test("GoAway v19: round trip without the Request ID", async () => {
@@ -1802,6 +1802,29 @@ test("Frame: END_OF_GROUP is accepted whether or not the header marks the end", 
 	);
 	expect(empty.payload).toEqual(new Uint8Array(0));
 	expect(empty.endOfTrack).toBe(false);
+});
+
+test("Frame flags draft-14 END_OF_TRACK properties", async () => {
+	const flags: GroupFlags = {
+		hasExtensions: true,
+		hasSubgroup: false,
+		hasSubgroupObject: false,
+		hasEnd: false,
+		hasPriority: true,
+		firstObject: true,
+	};
+	// Object ID delta 0, one unknown integer property, zero payload length, END_OF_TRACK.
+	const wire = new Uint8Array([0, 2, 0x20, 7, 0, 4]);
+	const reader = new Reader(undefined, wire, Version.DRAFT_14);
+	const frame = await reader.decode((c) => Frame.decode(c, flags, undefined));
+	expect(frame.endOfTrack).toBe(true);
+	expect(frame.hasProperties).toBe(true);
+
+	// From draft 15, no status object may carry properties at all.
+	for (const status of [3, 4]) {
+		const later = new Reader(undefined, new Uint8Array([0, 2, 0x20, 7, 0, status]), Version.DRAFT_15);
+		await expect(later.decode((c) => Frame.decode(c, flags, undefined))).rejects.toThrow(ProtocolViolation);
+	}
 });
 
 test("Frame decodes objects split at every byte", async () => {

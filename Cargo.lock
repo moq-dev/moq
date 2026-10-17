@@ -232,9 +232,9 @@ checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
 name = "arbitrary"
-version = "1.4.2"
+version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c3d036a3c4ab069c7b410a2ce876bd74808d2d0888a82667669f8e783a898bf1"
+checksum = "3bc62ac97cc33321f50863d514c3bc38a453947a8f9e781137e47c7401020aed"
 dependencies = [
  "derive_arbitrary",
 ]
@@ -1883,13 +1883,13 @@ dependencies = [
 
 [[package]]
 name = "derive_arbitrary"
-version = "1.4.2"
+version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1e567bd82dcff979e4b03460c307b3cdc9e96fde3d73bed1496d2bc75d9dd62a"
+checksum = "1b034bd7d5f032402a2479444dcc6f74e36a03f31854d41680fb240ef682a1ac"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.119",
+ "syn 3.0.6",
 ]
 
 [[package]]
@@ -4310,8 +4310,9 @@ dependencies = [
  "base64 0.23.1",
  "jsonwebtoken",
  "kio 0.6.2",
- "moq-auth",
- "moq-pattern",
+ "moq-auth 0.2.1",
+ "moq-auth 0.2.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "moq-pattern 0.1.2",
  "moq-token",
  "p256",
  "p384",
@@ -4328,6 +4329,27 @@ dependencies = [
  "tracing",
  "url",
  "wiremock",
+]
+
+[[package]]
+name = "moq-auth"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "eee68e814b2a98cf61d528e26c5555eeb13fd99f32e5bdbfeecc37db49c06719"
+dependencies = [
+ "aws-lc-rs",
+ "base64 0.23.1",
+ "jsonwebtoken",
+ "kio 0.6.2",
+ "moq-pattern 0.1.2 (registry+https://github.com/rust-lang/crates.io-index)",
+ "p256",
+ "p384",
+ "rsa",
+ "serde",
+ "serde_json",
+ "serde_with",
+ "thiserror 2.0.21",
+ "url",
 ]
 
 [[package]]
@@ -4408,7 +4430,7 @@ dependencies = [
  "libc",
  "moq-archive",
  "moq-audio",
- "moq-auth",
+ "moq-auth 0.2.1",
  "moq-hls",
  "moq-json",
  "moq-msf",
@@ -4494,7 +4516,7 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "tracing",
- "uniffi",
+ "uniffi 0.32.2 (registry+https://github.com/rust-lang/crates.io-index)",
  "url",
  "web-async",
  "web-transport-trait",
@@ -4651,9 +4673,10 @@ dependencies = [
  "futures",
  "getrandom 0.4.3",
  "kio 0.6.2",
+ "libc",
  "loom",
  "moq-net-sim",
- "moq-pattern",
+ "moq-pattern 0.1.2",
  "num_enum",
  "rand 0.10.3",
  "serde",
@@ -4689,72 +4712,6 @@ name = "moq-net-sim-macros"
 version = "0.0.0"
 
 [[package]]
-name = "moq-noq"
-version = "2.0.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "20d9d1334f556a15e60f6d406020fc3a40409335ae8a2ad472f6bf074a01acfa"
-dependencies = [
- "bytes",
- "cfg_aliases",
- "derive_more 2.1.1",
- "moq-noq-proto",
- "moq-noq-udp",
- "pin-project-lite",
- "rustc-hash 2.1.3",
- "rustls",
- "socket2 0.6.5",
- "thiserror 2.0.21",
- "tokio",
- "tokio-stream",
- "tracing",
- "web-time",
-]
-
-[[package]]
-name = "moq-noq-proto"
-version = "2.0.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "50ac444c6c1ed18d45536cd939be7f0fd664996e79c0519119b13d6ae9d3d5e2"
-dependencies = [
- "aes-gcm",
- "aws-lc-rs",
- "bytes",
- "derive_more 2.1.1",
- "enum-assoc",
- "fastbloom",
- "getrandom 0.4.3",
- "identity-hash",
- "lru-slab",
- "n0-qlog",
- "rand 0.10.3",
- "rand_pcg",
- "ring",
- "rustc-hash 2.1.3",
- "rustls",
- "rustls-pki-types",
- "rustls-platform-verifier",
- "slab",
- "sorted-index-buffer",
- "thiserror 2.0.21",
- "tinyvec",
- "tracing",
- "web-time",
-]
-
-[[package]]
-name = "moq-noq-udp"
-version = "2.0.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8e978cded333ca8a6d50b96a7a4388ccc8d98db51d89df7dbee598e9b849ee79"
-dependencies = [
- "cfg_aliases",
- "libc",
- "socket2 0.6.5",
- "tracing",
- "windows-sys 0.61.2",
-]
-
-[[package]]
 name = "moq-nvenc"
 version = "0.1.2"
 dependencies = [
@@ -4768,9 +4725,18 @@ name = "moq-pattern"
 version = "0.1.2"
 dependencies = [
  "criterion",
- "moq-pattern",
+ "moq-pattern 0.1.2",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "moq-pattern"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5fc361de827f05fa2a1dfb6489cb73575a16ed5c56f3b1d218be9925176c7521"
+dependencies = [
+ "serde",
 ]
 
 [[package]]
@@ -4782,10 +4748,12 @@ dependencies = [
  "aws-lc-rs",
  "bytes",
  "cpu-time",
+ "criterion",
  "fastbloom",
  "getrandom 0.4.3",
  "hex-literal",
  "lru-slab",
+ "moq-clock",
  "qlog",
  "rand 0.10.3",
  "rand_pcg",
@@ -4806,6 +4774,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "moq-quic-fuzz"
+version = "0.0.0"
+dependencies = [
+ "libfuzzer-sys",
+ "moq-quic",
+]
+
+[[package]]
 name = "moq-relay"
 version = "0.17.2"
 dependencies = [
@@ -4821,7 +4797,7 @@ dependencies = [
  "humantime",
  "hyper-util",
  "libc",
- "moq-auth",
+ "moq-auth 0.2.1",
  "moq-net",
  "moq-shaper",
  "moq-sock",
@@ -4851,7 +4827,6 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "usage-rs",
- "web-transport-moq",
  "web-transport-trait",
 ]
 
@@ -4860,7 +4835,7 @@ name = "moq-room"
 version = "0.2.11"
 dependencies = [
  "kio 0.6.2",
- "moq-auth",
+ "moq-auth 0.2.1",
  "moq-json",
  "moq-net",
  "moq-tokio",
@@ -5008,19 +4983,26 @@ dependencies = [
  "futures",
  "hex",
  "hmac 0.13.0",
+ "http",
  "humantime",
  "jni 0.22.4",
+ "kio 0.6.2",
  "libc",
  "mdns-sd",
+ "moq-clock",
  "moq-net",
+ "moq-quic",
  "moq-sock",
  "noq-proto",
  "notify",
+ "pin-project-lite",
  "qmux",
  "rand 0.10.3",
  "rcgen",
  "reqwest",
+ "rustc-hash 2.1.3",
  "rustls",
+ "rustls-native-certs",
  "rustls-platform-verifier",
  "rustls-webpki",
  "serde",
@@ -5043,7 +5025,6 @@ dependencies = [
  "url",
  "usage-rs",
  "web-transport-iroh",
- "web-transport-moq",
  "web-transport-proto",
  "web-transport-trait",
  "webpki-roots",
@@ -5080,12 +5061,12 @@ dependencies = [
  "io-uring",
  "kio 0.6.2",
  "libc",
+ "moq-clock",
  "moq-net",
- "moq-noq-proto",
+ "moq-quic",
  "moq-sock",
  "moq-tokio",
  "nix",
- "rand 0.10.3",
  "rcgen",
  "rustc-hash 2.1.3",
  "rustls",
@@ -5097,7 +5078,6 @@ dependencies = [
  "tokio",
  "tracing",
  "url",
- "web-transport-moq",
  "web-transport-proto",
  "web-transport-trait",
 ]
@@ -5306,19 +5286,6 @@ dependencies = [
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-time",
-]
-
-[[package]]
-name = "n0-qlog"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bb1c2fc610d1facce51b0bf5d8245b309c91996a933defdf7742c92ac78a58cb"
-dependencies = [
- "humantime",
- "serde",
- "serde_json",
- "serde_with",
- "strum",
 ]
 
 [[package]]
@@ -9651,21 +9618,33 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "76407f5f396a2c949a069eff4a9fca9ce462410eb872bffef4c2b7b89804a77a"
 dependencies = [
  "anyhow",
+ "cargo_metadata",
+ "uniffi_bindgen 0.32.2 (registry+https://github.com/rust-lang/crates.io-index)",
+ "uniffi_core 0.32.2 (registry+https://github.com/rust-lang/crates.io-index)",
+ "uniffi_macros 0.32.2 (registry+https://github.com/rust-lang/crates.io-index)",
+ "uniffi_pipeline 0.32.2 (registry+https://github.com/rust-lang/crates.io-index)",
+]
+
+[[package]]
+name = "uniffi"
+version = "0.32.2"
+source = "git+https://github.com/kixelated/uniffi-rs?rev=88d835d#88d835d66abc6357b0bcd290b4c2adb35096cd10"
+dependencies = [
+ "anyhow",
  "camino",
  "cargo_metadata",
  "clap",
- "uniffi_bindgen",
- "uniffi_build",
- "uniffi_core",
- "uniffi_macros",
- "uniffi_pipeline",
+ "uniffi_bindgen 0.32.2 (git+https://github.com/kixelated/uniffi-rs?rev=88d835d)",
+ "uniffi_core 0.32.2 (git+https://github.com/kixelated/uniffi-rs?rev=88d835d)",
+ "uniffi_macros 0.32.2 (git+https://github.com/kixelated/uniffi-rs?rev=88d835d)",
+ "uniffi_pipeline 0.32.2 (git+https://github.com/kixelated/uniffi-rs?rev=88d835d)",
 ]
 
 [[package]]
 name = "uniffi-bindgen"
 version = "0.1.0"
 dependencies = [
- "uniffi",
+ "uniffi 0.32.2 (git+https://github.com/kixelated/uniffi-rs?rev=88d835d)",
 ]
 
 [[package]]
@@ -9688,21 +9667,35 @@ dependencies = [
  "tempfile",
  "textwrap",
  "toml 1.1.6+spec-1.1.0",
- "uniffi_internal_macros",
- "uniffi_meta",
- "uniffi_pipeline",
- "uniffi_udl",
+ "uniffi_internal_macros 0.32.2 (registry+https://github.com/rust-lang/crates.io-index)",
+ "uniffi_meta 0.32.2 (registry+https://github.com/rust-lang/crates.io-index)",
+ "uniffi_pipeline 0.32.2 (registry+https://github.com/rust-lang/crates.io-index)",
+ "uniffi_udl 0.32.2 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 
 [[package]]
-name = "uniffi_build"
+name = "uniffi_bindgen"
 version = "0.32.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "925be5c36297fff0d416fa2f03585ace718b6e6c635466754128d00f0862d5f1"
+source = "git+https://github.com/kixelated/uniffi-rs?rev=88d835d#88d835d66abc6357b0bcd290b4c2adb35096cd10"
 dependencies = [
  "anyhow",
+ "askama",
  "camino",
- "uniffi_bindgen",
+ "cargo_metadata",
+ "fs-err",
+ "glob",
+ "goblin",
+ "heck",
+ "indexmap 2.14.2",
+ "once_cell",
+ "serde",
+ "tempfile",
+ "textwrap",
+ "toml 0.9.12+spec-1.1.0",
+ "uniffi_internal_macros 0.32.2 (git+https://github.com/kixelated/uniffi-rs?rev=88d835d)",
+ "uniffi_meta 0.32.2 (git+https://github.com/kixelated/uniffi-rs?rev=88d835d)",
+ "uniffi_pipeline 0.32.2 (git+https://github.com/kixelated/uniffi-rs?rev=88d835d)",
+ "uniffi_udl 0.32.2 (git+https://github.com/kixelated/uniffi-rs?rev=88d835d)",
 ]
 
 [[package]]
@@ -9710,6 +9703,17 @@ name = "uniffi_core"
 version = "0.32.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f7530ae8efeaaa488622865966763fe0294832779fff80508c36d69c6a874a6a"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "once_cell",
+ "static_assertions",
+]
+
+[[package]]
+name = "uniffi_core"
+version = "0.32.2"
+source = "git+https://github.com/kixelated/uniffi-rs?rev=88d835d#88d835d66abc6357b0bcd290b4c2adb35096cd10"
 dependencies = [
  "anyhow",
  "bytes",
@@ -9731,6 +9735,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "uniffi_internal_macros"
+version = "0.32.2"
+source = "git+https://github.com/kixelated/uniffi-rs?rev=88d835d#88d835d66abc6357b0bcd290b4c2adb35096cd10"
+dependencies = [
+ "anyhow",
+ "indexmap 2.14.2",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
 name = "uniffi_macros"
 version = "0.32.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -9743,8 +9759,24 @@ dependencies = [
  "quote",
  "serde",
  "syn 2.0.119",
- "toml 1.1.6+spec-1.1.0",
- "uniffi_meta",
+ "toml 0.9.12+spec-1.1.0",
+ "uniffi_meta 0.32.2 (registry+https://github.com/rust-lang/crates.io-index)",
+]
+
+[[package]]
+name = "uniffi_macros"
+version = "0.32.2"
+source = "git+https://github.com/kixelated/uniffi-rs?rev=88d835d#88d835d66abc6357b0bcd290b4c2adb35096cd10"
+dependencies = [
+ "camino",
+ "fs-err",
+ "once_cell",
+ "proc-macro2",
+ "quote",
+ "serde",
+ "syn 2.0.119",
+ "toml 0.9.12+spec-1.1.0",
+ "uniffi_meta 0.32.2 (git+https://github.com/kixelated/uniffi-rs?rev=88d835d)",
 ]
 
 [[package]]
@@ -9755,8 +9787,19 @@ checksum = "af0c88664a9cb9559856f5a250283c9708923b303170e2e5c7db8f4ad65e9459"
 dependencies = [
  "anyhow",
  "siphasher",
- "uniffi_internal_macros",
- "uniffi_pipeline",
+ "uniffi_internal_macros 0.32.2 (registry+https://github.com/rust-lang/crates.io-index)",
+ "uniffi_pipeline 0.32.2 (registry+https://github.com/rust-lang/crates.io-index)",
+]
+
+[[package]]
+name = "uniffi_meta"
+version = "0.32.2"
+source = "git+https://github.com/kixelated/uniffi-rs?rev=88d835d#88d835d66abc6357b0bcd290b4c2adb35096cd10"
+dependencies = [
+ "anyhow",
+ "siphasher",
+ "uniffi_internal_macros 0.32.2 (git+https://github.com/kixelated/uniffi-rs?rev=88d835d)",
+ "uniffi_pipeline 0.32.2 (git+https://github.com/kixelated/uniffi-rs?rev=88d835d)",
 ]
 
 [[package]]
@@ -9769,7 +9812,19 @@ dependencies = [
  "heck",
  "indexmap 2.14.2",
  "tempfile",
- "uniffi_internal_macros",
+ "uniffi_internal_macros 0.32.2 (registry+https://github.com/rust-lang/crates.io-index)",
+]
+
+[[package]]
+name = "uniffi_pipeline"
+version = "0.32.2"
+source = "git+https://github.com/kixelated/uniffi-rs?rev=88d835d#88d835d66abc6357b0bcd290b4c2adb35096cd10"
+dependencies = [
+ "anyhow",
+ "heck",
+ "indexmap 2.14.2",
+ "tempfile",
+ "uniffi_internal_macros 0.32.2 (git+https://github.com/kixelated/uniffi-rs?rev=88d835d)",
 ]
 
 [[package]]
@@ -9780,8 +9835,19 @@ checksum = "55dfd9c778d6b39cb5acd541d9ff63431974035d2bad83c897b766a6ee3152ac"
 dependencies = [
  "anyhow",
  "textwrap",
- "uniffi_meta",
- "weedle2",
+ "uniffi_meta 0.32.2 (registry+https://github.com/rust-lang/crates.io-index)",
+ "weedle2 5.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+]
+
+[[package]]
+name = "uniffi_udl"
+version = "0.32.2"
+source = "git+https://github.com/kixelated/uniffi-rs?rev=88d835d#88d835d66abc6357b0bcd290b4c2adb35096cd10"
+dependencies = [
+ "anyhow",
+ "textwrap",
+ "uniffi_meta 0.32.2 (git+https://github.com/kixelated/uniffi-rs?rev=88d835d)",
+ "weedle2 5.0.0 (git+https://github.com/kixelated/uniffi-rs?rev=88d835d)",
 ]
 
 [[package]]
@@ -10263,27 +10329,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "web-transport-moq"
-version = "2.0.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5dc946e718371f88a79d849c352b6bdd95e0a36139e9b76818c1a101b45ed97a"
-dependencies = [
- "bytes",
- "futures",
- "http",
- "kio 0.5.9",
- "moq-noq",
- "rustls",
- "rustls-native-certs",
- "thiserror 2.0.21",
- "tokio",
- "tracing",
- "url",
- "web-transport-proto",
- "web-transport-trait",
-]
-
-[[package]]
 name = "web-transport-proto"
 version = "0.6.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -10354,6 +10399,14 @@ name = "weedle2"
 version = "5.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "998d2c24ec099a87daf9467808859f9d82b61f1d9c9701251aea037f514eae0e"
+dependencies = [
+ "nom 7.1.3",
+]
+
+[[package]]
+name = "weedle2"
+version = "5.0.0"
+source = "git+https://github.com/kixelated/uniffi-rs?rev=88d835d#88d835d66abc6357b0bcd290b4c2adb35096cd10"
 dependencies = [
  "nom 7.1.3",
 ]

@@ -140,7 +140,7 @@ impl Consumer {
 	}
 
 	/// Subscribe to the logical track with the reader's own preferences.
-	pub(crate) fn subscribe(&self, subscription: kio::Producer<Subscription>) -> Subscriber {
+	pub(crate) fn subscribe(&self, subscription: track::Preferences) -> Subscriber {
 		let mirrored = subscription.read().clone();
 		let reader = Arc::new_cyclic(|this| {
 			Mutex::new(Reader {
@@ -311,7 +311,7 @@ pub(crate) struct Subscriber {
 	/// Shared with the groups it hands out, so one stuck on a dead route can follow the
 	/// reader onto the next route without the reader polling for groups.
 	reader: Arc<Mutex<Reader>>,
-	subscription: kio::Producer<Subscription>,
+	subscription: track::Preferences,
 }
 
 impl Subscriber {
@@ -320,7 +320,7 @@ impl Subscriber {
 	}
 
 	/// The reader's preferences channel, shared with its [`track::Control`].
-	pub(crate) fn subscription(&self) -> &kio::Producer<Subscription> {
+	pub(crate) fn subscription(&self) -> &track::Preferences {
 		&self.subscription
 	}
 
@@ -455,7 +455,7 @@ struct Reader {
 	this: Weak<Mutex<Reader>>,
 	route: Consumer,
 	/// The reader's own preferences, mirrored into every copy's subscription.
-	subscription: kio::Producer<Subscription>,
+	subscription: track::Preferences,
 	mirrored: Subscription,
 	/// The route generation last read.
 	generation: Option<u64>,
@@ -568,6 +568,7 @@ impl Reader {
 		group.with_recover(Recover {
 			sequence,
 			reader: Some(self.this.clone()),
+			max_delay: None,
 			route: self.route.clone(),
 			generation: copy.generation,
 			copy: copy.track.clone(),
@@ -850,6 +851,9 @@ pub(crate) struct Recover {
 	sequence: u64,
 	/// The reader it was handed out to, followed onto each new route; `None` for a fetch.
 	reader: Option<Weak<Mutex<Reader>>>,
+	/// A fetch's own age budget, asked of each route and judged while waiting on one.
+	/// `None` leaves the publisher's retention alone; unused for a reader.
+	max_delay: Option<std::time::Duration>,
 	route: Consumer,
 	/// The route generation of the copy being read, and that copy.
 	generation: u64,
@@ -871,6 +875,7 @@ impl Clone for Recover {
 		Self {
 			sequence: self.sequence,
 			reader: self.reader.clone(),
+			max_delay: self.max_delay,
 			route: self.route.clone(),
 			generation: self.generation,
 			copy: self.copy.clone(),
@@ -990,7 +995,11 @@ impl Recover {
 
 		// Otherwise ask for the rest. The subscription may still deliver it first.
 		if self.fetch.as_ref().is_none_or(|(asked, _)| *asked != generation) {
-			let options = group::Fetch::default().with_frame_start(index);
+			let options = group::Fetch {
+				max_delay: self.max_delay,
+				frame_start: index,
+				..Default::default()
+			};
 			self.fetch = Some((generation, Fetch::Pending(serving.fetch_group(self.sequence, options))));
 		}
 		let Some((_, fetch)) = &mut self.fetch else {
@@ -1033,10 +1042,13 @@ impl Recover {
 		Poll::Pending
 	}
 
-	/// The reader's budget for a late group; `None` for a fetch, which has no live edge
-	/// to be late against.
+	/// The budget for a late group: the reader's current one, or a fetch's own, which is
+	/// unbounded when it named none so that only the publisher's retention applies.
 	pub(crate) fn poll_budget(&self, waiter: &kio::Waiter) -> Option<std::time::Duration> {
-		let reader = self.reader.as_ref()?.upgrade()?;
+		let Some(reader) = &self.reader else {
+			return Some(self.max_delay.unwrap_or(std::time::Duration::MAX));
+		};
+		let reader = reader.upgrade()?;
 		let mut reader = reader.lock().unwrap_or_else(PoisonError::into_inner);
 		// A held group or frame may be the only thing being polled. Mirror and watch
 		// preferences here too, before judging its budget against the live edge.
@@ -1117,6 +1129,7 @@ impl kio::Task for Fetching {
 				Ok(group) => Poll::Ready(Ok(group.with_recover(Recover {
 					sequence: self.sequence,
 					reader: None,
+					max_delay: self.options.max_delay,
 					route: self.route.clone(),
 					generation,
 					copy: serving.clone(),
@@ -1589,7 +1602,7 @@ mod test {
 			let a = copy();
 			routes.serve(a.consume());
 			let subscription = kio::Producer::new(Subscription::default());
-			let sub = routes.consume().subscribe(subscription);
+			let sub = routes.consume().subscribe(subscription.into());
 			let mut reader = sub.reader.lock().unwrap();
 			let old = &mut reader.copies[0];
 			old.until = Some(last);
@@ -2361,6 +2374,41 @@ mod test {
 		rest.finish().unwrap();
 		assert_eq!(read(&mut fetched), Some(b"b".to_vec()));
 		assert_eq!(read(&mut fetched), None);
+	}
+
+	/// A rerouted fetch keeps its own age budget: the new route is asked with it, and a
+	/// read waiting on that route gives up once the group falls past it there.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_rerouted_fetch_keeps_its_budget() {
+		let routes = Producer::new();
+		let a = copy();
+		routes.serve(a.consume());
+		let mut open = a.create_group(group::Info { sequence: 0 }).unwrap();
+		open.write_frame(ts(0), b"a".as_ref()).unwrap();
+
+		let budget = Duration::from_millis(500);
+		let options = group::Fetch::default().with_max_delay(budget);
+		let mut fetched = kio::Pending::new(routes.consume().fetch_group(0, options))
+			.now_or_never()
+			.unwrap()
+			.unwrap();
+		assert_eq!(read(&mut fetched), Some(b"a".to_vec()));
+
+		let b = copy();
+		let dynamic = b.dynamic();
+		routes.serve(b.consume());
+		assert!(fetched.read_frame().now_or_never().is_none());
+		let request = dynamic.requested_group().now_or_never().unwrap().unwrap();
+		assert_eq!((request.frame_start(), request.max_delay()), (1, Some(budget)));
+
+		// The new route runs a full second past the group's successor while its fetch is unanswered.
+		for (sequence, ms) in [(1, 1000), (2, 2000)] {
+			let mut group = b.create_group(group::Info { sequence }).unwrap();
+			group.write_frame(ts(ms), b"x".as_ref()).unwrap();
+			group.finish().unwrap();
+		}
+		assert!(matches!(fetched.read_frame().now_or_never(), Some(Err(Error::Old))));
 	}
 
 	#[test]

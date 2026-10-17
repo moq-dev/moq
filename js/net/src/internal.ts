@@ -5,6 +5,7 @@
  *
  * @module
  */
+import type { Instant, Milli } from "@moq/clock";
 import type { Dispose, Getter } from "@moq/signals";
 import type { Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
 import type * as Epoch from "./epoch.ts";
@@ -206,12 +207,8 @@ export const hooks: {
 	tryRecvGroup: (subscriber: Subscriber) => Recv;
 	/** Wake once a subscriber's group cursor may read differently; assigned by `track.ts`. */
 	groupChanged: (subscriber: Subscriber, fn: () => void) => Dispose;
-	/**
-	 * Exempt a subscriber from live-delivery policy for a one-shot FETCH scan: it names one
-	 * old group explicitly, so it is neither late against the live edge nor bound by the start
-	 * a live subscription resolves to.
-	 */
-	exemptFetch: (subscriber: Subscriber) => void;
+	/** Apply a FETCH reader budget without inheriting SUBSCRIBE's zero default. */
+	fetchBudget: (subscriber: Subscriber, maxDelay: Milli | undefined) => void;
 	/**
 	 * Replace a serving cursor. An omitted start keeps the current floor; a provided start
 	 * can lower it. Wire publishers apply SUBSCRIBE_UPDATE here rather than through
@@ -231,15 +228,17 @@ export const hooks: {
 	/** Return a group's first timestamp, retained even after its first frame is read. */
 	groupTimestamp: (group: GroupConsumer) => Timestamp | undefined;
 	groupLatest: (group: GroupConsumer) => Timestamp | undefined;
-	/** Return when a group joined its track at this hop, in `performance.now()` milliseconds. */
-	groupArrived: (group: GroupConsumer) => number;
+	/** Return when a group joined its track at this hop, on the installed clock. */
+	groupArrived: (group: GroupConsumer) => Instant;
 	/** Record when a track's mirror of a group joined that track at this hop. */
-	arriveGroup: (group: GroupConsumer, at: number) => void;
+	arriveGroup: (group: GroupConsumer, at: Instant) => void;
 	/** Keep applying a subscription's drift policy after it hands a group out. */
 	expireGroup: (
 		group: GroupConsumer,
 		expiry: { expired: () => boolean; changed: readonly Getter<unknown>[] },
 	) => void;
+	/** Whether a drift budget gave up on a drained group, which reads as a clean end. */
+	groupExpired: (group: GroupConsumer) => boolean;
 	/** Start a group operation unless the handed-out group has expired, and stop it if the group expires mid-flight. */
 	guardGroup: <T>(group: GroupConsumer, operation: () => Promise<T>) => Promise<T>;
 	/** Read a frame the wire publisher completes (or skips) once written. */
@@ -289,7 +288,7 @@ export const hooks: {
 	groupChanged: () => {
 		throw new Error("track.ts not loaded");
 	},
-	exemptFetch: () => {
+	fetchBudget: () => {
 		throw new Error("track.ts not loaded");
 	},
 	replaceGroups: () => {
@@ -314,6 +313,9 @@ export const hooks: {
 		throw new Error("group.ts not loaded");
 	},
 	expireGroup: () => {
+		throw new Error("group.ts not loaded");
+	},
+	groupExpired: () => {
 		throw new Error("group.ts not loaded");
 	},
 	guardGroup: () => {

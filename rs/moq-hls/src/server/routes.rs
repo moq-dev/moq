@@ -264,14 +264,57 @@ async fn manifest(server: &Server, broadcast: &str, query: Option<&str>) -> Resp
 }
 
 async fn media(server: &Server, broadcast: &str, kind: Kind, rendition: &str, query: Option<&str>) -> Response {
+	let (range, child_query) = match playlist_range(query) {
+		Ok(parsed) => parsed,
+		Err(()) => return bad_request(),
+	};
 	let Some(rendition) = rendition_for(server, broadcast, kind, rendition).await else {
 		return not_found();
 	};
-	match tokio::time::timeout(READY_TIMEOUT, rendition.playlist(query)).await {
+	match tokio::time::timeout(READY_TIMEOUT, rendition.playlist(range, child_query.as_deref())).await {
 		Ok(Ok(Some(playlist))) => m3u8(playlist),
 		Ok(Ok(None)) | Err(_) => not_found(),
+		Ok(Err(crate::Error::RangeNotDurable | crate::Error::RangeUnavailable(_))) => range_not_satisfiable(),
 		Ok(Err(err)) => server_error(err),
 	}
+}
+
+/// Parse `start` and `end` as decimal media-time seconds, returning the remaining query for
+/// child resources. Both are required together and may occur only once. Other parameters pass
+/// through byte for byte, so a signed token is never re-encoded.
+fn playlist_range(query: Option<&str>) -> Result<(Option<crate::export::Range>, Option<String>), ()> {
+	let Some(query) = query else {
+		return Ok((None, None));
+	};
+	let mut start = None;
+	let mut end = None;
+	let mut child = Vec::new();
+	for pair in query.split('&') {
+		let Some((key, value)) = url::form_urlencoded::parse(pair.as_bytes()).next() else {
+			continue;
+		};
+		match key.as_ref() {
+			"start" if start.is_none() => start = Some(media_time(&value)?),
+			"end" if end.is_none() => end = Some(media_time(&value)?),
+			"start" | "end" => return Err(()),
+			_ => child.push(pair),
+		}
+	}
+	let range = match (start, end) {
+		(None, None) => None,
+		(Some(start), Some(end)) => Some(crate::export::Range::new(start, end).map_err(|_| ())?),
+		_ => return Err(()),
+	};
+	let child = child.join("&");
+	Ok((range, (!child.is_empty()).then_some(child)))
+}
+
+fn media_time(value: &str) -> Result<Duration, ()> {
+	let seconds = value.parse::<f64>().map_err(|_| ())?;
+	if !seconds.is_finite() || seconds < 0.0 {
+		return Err(());
+	}
+	Duration::try_from_secs_f64(seconds).map_err(|_| ())
 }
 
 async fn init(server: &Server, broadcast: &str, kind: Kind, rendition: &str, hash: &str) -> Response {
@@ -369,6 +412,14 @@ fn not_found() -> Response {
 	(StatusCode::NOT_FOUND, [(header::CACHE_CONTROL, "no-store")]).into_response()
 }
 
+fn bad_request() -> Response {
+	(StatusCode::BAD_REQUEST, [(header::CACHE_CONTROL, "no-store")]).into_response()
+}
+
+fn range_not_satisfiable() -> Response {
+	(StatusCode::RANGE_NOT_SATISFIABLE, [(header::CACHE_CONTROL, "no-store")]).into_response()
+}
+
 fn server_error(err: crate::Error) -> Response {
 	tracing::warn!(%err, "hls request failed");
 	(StatusCode::INTERNAL_SERVER_ERROR, [(header::CACHE_CONTROL, "no-store")]).into_response()
@@ -377,6 +428,31 @@ fn server_error(err: crate::Error) -> Response {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[test]
+	fn parses_playlist_ranges_and_preserves_other_query_parameters() {
+		let (range, query) = playlist_range(Some("jwt=a%2Eb&start=1.25&sig=x~y*&end=4")).unwrap();
+		assert_eq!(
+			range,
+			Some(crate::export::Range::new(Duration::from_millis(1250), Duration::from_secs(4)).unwrap())
+		);
+		assert_eq!(query.as_deref(), Some("jwt=a%2Eb&sig=x~y*"));
+		assert_eq!(
+			playlist_range(Some("jwt=x&flag")).unwrap(),
+			(None, Some("jwt=x&flag".into()))
+		);
+
+		for invalid in [
+			"start=1",
+			"end=2",
+			"start=2&end=1",
+			"start=-1&end=2",
+			"start=wat&end=2",
+			"start=1&start=2&end=3",
+		] {
+			assert!(playlist_range(Some(invalid)).is_err(), "accepted {invalid}");
+		}
+	}
 
 	/// A millisecond track: the frames written here carry timestamps.
 	fn timed() -> moq_net::track::Info {

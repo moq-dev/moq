@@ -17,7 +17,8 @@ one study, since both reuse the same media profiles, harness, and baseline.
 
 ### Natural drains
 
-Use the corrected released fork as baseline. ProbeRTT targets half the
+Use `moq-quic`'s BBR3, which carries the released fork's corrections, as
+baseline. ProbeRTT targets half the
 estimated BDP, floored at the minimum pipe window; entering the mode need
 not withhold useful bytes. First locate actual cwnd stalls and deadline
 misses using steady low-rate traffic, 30-fps frames with keyframes, and gaps
@@ -29,7 +30,8 @@ natural-drain credit. [QUICHE BBR3](https://github.com/google/quiche/blob/535a27
 postpones RTT aging across zero-inflight idle intervals; its
 [tests](https://github.com/google/quiche/blob/535a2730e77d47e0dc03746555cc9c34b17bc9e9/quiche/quic/core/congestion_control/bbr3_simulator_test.cc#L1724)
 cover restart behavior. These source defaults are not deployment evidence.
-Noq's Linux-style idle-restart suppression is narrower.
+In the 2026-09-21 audit, noq's Linux-style idle-restart suppression was
+narrower.
 
 A candidate credits sustained low inflight, a completed sampled round, and
 fresh RTT evidence toward ProbeRTT. Determine the predicate experimentally;
@@ -58,7 +60,9 @@ restart from idle resets the gain to 1.0.
 
 The 2026-09-21 audit compared noq-proto 1.3.0 / upstream `1a26a8b` with
 Google Linux BBRv3 `90210de4` and Google QUICHE `535a2730`. Recheck current
-upstream sources before testing. Use QUICHE's actual `bbr3_sender.cc` with
+upstream sources before testing. The audit describes noq; `moq-quic`'s BBR3
+was ported from it (#4921), so recheck each difference against `moq-quic`.
+Use QUICHE's actual `bbr3_sender.cc` with
 its shared `bbr2_*` model; the older BBR2 sender is not a substitute for its
 BBR3 state machine.
 
@@ -80,10 +84,6 @@ Report throughput, queue delay, loss, convergence time, and fairness with
 pinned code and configurations. Keep transport differences and QUICHE flags
 explicit and compare each algorithm change separately. A simulation result
 is not an end-to-end network measurement.
-
-## Required
-
-- [Hard fork](/quest/m1/quic/fork/README.md) - the change lands in `moq-quic`, not the frozen fork
 
 ## Related
 

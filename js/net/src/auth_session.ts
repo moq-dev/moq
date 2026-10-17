@@ -1,3 +1,4 @@
+import { wall } from "@moq/clock";
 import { type Dispose, type Getter, Once, Signal } from "@moq/signals";
 import {
 	type Auth as AuthApi,
@@ -12,6 +13,7 @@ import {
 import { closeReason, error, ProtocolViolation, SessionCode, SessionError, StreamCode, StreamError } from "./error.ts";
 import * as Path from "./path.ts";
 import type { Stream } from "./stream.ts";
+import { nextTask } from "./util/yield.ts";
 
 /** A grant as the wire carries it: the expiry is milliseconds from now. @internal */
 export interface WireGrant {
@@ -191,7 +193,7 @@ class IssuedGrant implements Issued {
 
 	update(grant: Grant): void {
 		if (this.#done) return;
-		const expires = grant.expires === undefined ? undefined : grant.expires - Date.now();
+		const expires = grant.expires === undefined ? undefined : grant.expires - wall();
 		this.#write(() =>
 			this.#wire.grant(this.#stream, { publish: grant.publish, subscribe: grant.subscribe, expires }),
 		);
@@ -283,7 +285,7 @@ export class AuthSession implements AuthApi {
 	// Whoever answers the peer's tokens is decided once, after the task that established
 	// the session: an app that calls requests() as soon as connect/accept resolves always
 	// wins, however quickly the peer's first token arrives.
-	#decided = new Promise<void>((resolve) => setTimeout(resolve, 0));
+	#decided = nextTask();
 
 	constructor({ wire, peerGrant }: AuthSessionProps) {
 		this.#wire = wire;
@@ -410,7 +412,7 @@ export class AuthSession implements AuthApi {
 					break;
 				}
 				if ("grant" in reply) {
-					const expires = reply.grant.expires === undefined ? undefined : Date.now() + reply.grant.expires;
+					const expires = reply.grant.expires === undefined ? undefined : wall() + reply.grant.expires;
 					token.grant.set({ publish: reply.grant.publish, subscribe: reply.grant.subscribe, expires });
 					this.#replied = true;
 					this.#answered(token);

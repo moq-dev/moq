@@ -362,7 +362,9 @@ impl<S: Stream> Export<S> {
 							decode: frame.timestamp,
 							restart: track.source.markers(),
 							skip: track.source.skips(),
+							cut: track.source.cuts(),
 							sync: kind == 1 || frame.keyframe,
+							leading: false,
 							item: frame,
 						}
 					};
@@ -379,7 +381,9 @@ impl<S: Stream> Export<S> {
 						read,
 						restart,
 						skip,
+						cut,
 						sync,
+						leading,
 						item,
 						..
 					} = arrival;
@@ -391,7 +395,9 @@ impl<S: Stream> Export<S> {
 							decode: moq_net::Timestamp::from_millis(u64::from(timestamp))?,
 							restart,
 							skip,
+							cut,
 							sync,
+							leading,
 							item: (item, timestamp),
 						},
 					)? == crate::jitter::Push::Late
