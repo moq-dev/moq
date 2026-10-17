@@ -148,7 +148,7 @@ fn retransmit_behind_higher_priority() {
     );
 }
 
-/// Datagrams fill each packet before stream data, which takes the rest
+/// Datagrams go before stream data of equal priority, and one that does not fit ends the packet
 #[test]
 fn datagrams_interleaved() {
     let _guard = subscribe();
@@ -156,22 +156,23 @@ fn datagrams_interleaved() {
     queue(&mut pair, ch, 0);
     for _ in 0..3 {
         pair.client_datagrams(ch)
-            .send(vec![0; 500].into(), false)
+            .send(vec![0; 500].into(), None, 0)
             .unwrap();
     }
     queue(&mut pair, ch, 0);
     pair.client_datagrams(ch)
-        .send(vec![0; 1000].into(), false)
+        .send(vec![0; 1000].into(), None, 0)
         .unwrap();
     assert_golden(
         &mut pair,
         "
-        d+500 d+500 s2@0+418
-        d+500 s6@0+921
-        d+1000 s2@418+419
-        s6@921+1422
-        s2@837+1422
-        s6@2343+657! s2@2259+741!
+        d+500 d+500
+        d+500
+        d+1000 s2@0+421
+        s6@0+1424
+        s2@421+1422
+        s6@1424+1422
+        s2@1843+1157! s6@2846+154!
         ",
     );
 }
