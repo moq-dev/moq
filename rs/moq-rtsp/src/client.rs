@@ -166,37 +166,48 @@ impl Client {
 			started: false,
 		};
 		ingest.streams.resize_with(session.streams().len(), || None);
-		for (index, kind) in &tracks {
-			let track = match kind {
-				Kind::H264 => {
-					let track = broadcast.unique_track(".avc3", catalog.track_info(hang::catalog::PRIORITY.video))?;
-					Track::Video(Box::new(Video::H264 {
-						split: h264::Split::new(),
-						import: h264::Import::new(track, reserved.clone(), Default::default())?,
-					}))
-				}
-				Kind::H265 => {
-					let track = broadcast.unique_track(".hev1", catalog.track_info(hang::catalog::PRIORITY.video))?;
-					Track::Video(Box::new(Video::H265 {
-						split: h265::Split::new(),
-						import: h265::Import::new(track, reserved.clone(), Default::default())?,
-					}))
-				}
-				Kind::Aac => {
-					let Some(ParametersRef::Audio(params)) = session.streams()[*index].parameters() else {
-						return Err(Error::Rtsp("AAC stream without an AudioSpecificConfig".to_string()));
-					};
-					let config = aac::config(params.extra_data())?;
-					let track = broadcast.unique_track(".aac", catalog.track_info(hang::catalog::PRIORITY.audio))?;
-					Track::Aac(Box::new(aac::Import::new(track, reserved.clone(), config)?))
-				}
-			};
-			ingest.streams[*index] = Some(Stream {
-				track,
-				last: None,
-				started: false,
-				fresh: true,
-			});
+		// A failure here aborts the tracks already made rather than leaving `Drop` to finish them.
+		let built = (|| -> Result<()> {
+			for (index, kind) in &tracks {
+				let track = match kind {
+					Kind::H264 => {
+						let track =
+							broadcast.unique_track(".avc3", catalog.track_info(hang::catalog::PRIORITY.video))?;
+						Track::Video(Box::new(Video::H264 {
+							split: h264::Split::new(),
+							import: h264::Import::new(track, reserved.clone(), Default::default())?,
+						}))
+					}
+					Kind::H265 => {
+						let track =
+							broadcast.unique_track(".hev1", catalog.track_info(hang::catalog::PRIORITY.video))?;
+						Track::Video(Box::new(Video::H265 {
+							split: h265::Split::new(),
+							import: h265::Import::new(track, reserved.clone(), Default::default())?,
+						}))
+					}
+					Kind::Aac => {
+						let Some(ParametersRef::Audio(params)) = session.streams()[*index].parameters() else {
+							return Err(Error::Rtsp("AAC stream without an AudioSpecificConfig".to_string()));
+						};
+						let config = aac::config(params.extra_data())?;
+						let track =
+							broadcast.unique_track(".aac", catalog.track_info(hang::catalog::PRIORITY.audio))?;
+						Track::Aac(Box::new(aac::Import::new(track, reserved.clone(), config)?))
+					}
+				};
+				ingest.streams[*index] = Some(Stream {
+					track,
+					last: None,
+					started: false,
+					fresh: true,
+				});
+			}
+			Ok(())
+		})();
+		if let Err(err) = built {
+			ingest.abort(moq_net::Error::Transport(err.to_string()));
+			return Err(err);
 		}
 		// The catalog waits for each video rendition's first keyframe, not for this.
 		drop(reserved);
