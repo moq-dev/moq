@@ -11,6 +11,7 @@
 //! client). SDP negotiation lives in the matching modules; this file is
 //! transport-agnostic.
 
+use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
@@ -325,10 +326,10 @@ struct Subscribing {
 /// rendition re-enables. There is no ABR on the peer, so a re-enabled top rendition wins
 /// the line back.
 ///
-/// While a switch is pending, the current rendition runs one frame behind: each of its
-/// frames is held until its next frame arrives or the new rendition reaches the same time.
-/// Simulcast rungs share timestamps, so otherwise a current rung that delivers first would
-/// claim every shared keyframe and the switch would never happen.
+/// While a switch is pending, the current rendition is paced to the new one: each of its
+/// frames is held until the new rendition reaches the same time. Simulcast rungs share
+/// timestamps, so otherwise a current rung that delivers first would claim every shared
+/// keyframe and the switch would never happen. See [`Held`] for how far the pacing goes.
 struct Pump {
 	mid: Mid,
 	/// The negotiated formats, in the peer's order.
@@ -347,8 +348,8 @@ impl Pump {
 		let mut subscribing: Option<Subscribing> = None;
 		// The rendition to switch to at its first keyframe.
 		let mut next: Option<Serving> = None;
-		// The current rendition's latest frame, withheld while a switch is pending.
-		let mut held: Option<(Format, codec::PacketizedFrame)> = None;
+		// The current rendition's frames, paced to `next` while a switch is pending.
+		let mut held = Held::default();
 		let mut following = true;
 		let mut repick = true;
 
@@ -364,7 +365,7 @@ impl Pump {
 						serving = None;
 						next = None;
 						subscribing = None;
-						held = None;
+						held = Held::default();
 					}
 					Some((pick, _)) if serving.as_ref().is_some_and(|s| s.name == pick.name()) => {
 						next = None;
@@ -384,11 +385,11 @@ impl Pump {
 				}
 			}
 
-			if next.is_none()
-				&& let Some(frame) = held.take()
-				&& !self.write(frame).await
-			{
-				return;
+			// Without a pending switch, nothing paces the held frames.
+			while let Some(frame) = held.pop(next.is_none()) {
+				if !self.write(frame).await {
+					return;
+				}
 			}
 
 			// The catalog ended, so nothing new will be picked: serve what is left.
@@ -403,7 +404,10 @@ impl Pump {
 				subscribed = subscribe(&mut subscribing) => {
 					let Subscribing { name, format, .. } = subscribing.take().expect("a subscription resolved");
 					match subscribed {
-						Ok(track) => next = Some(Serving { name, format, track }),
+						Ok(track) => {
+							next = Some(Serving { name, format, track });
+							held.reached = None;
+						}
 						Err(err) => tracing::warn!(mid = ?self.mid, rendition = name, %err, "egress track subscribe failed"),
 					}
 				},
@@ -412,14 +416,9 @@ impl Pump {
 					Err(_) => following = false,
 				},
 				frame = read(self.mid, &mut serving) => match frame {
+					Some(frame) if next.is_some() => held.frames.push_back(frame),
 					Some(frame) => {
-						let frame = match next {
-							Some(_) => held.replace(frame),
-							None => Some(frame),
-						};
-						if let Some(frame) = frame
-							&& !self.write(frame).await
-						{
+						if !self.write(frame).await {
 							return;
 						}
 					}
@@ -427,26 +426,23 @@ impl Pump {
 				},
 				frame = read(self.mid, &mut next) => match frame {
 					Some(frame) if self.joins(&frame) => {
-						// The held frame plays out first unless the new rendition covers its time.
-						if let Some(prev) = held.take_if(|(_, prev)| prev.timestamp_us < frame.1.timestamp_us)
-							&& !self.write(prev).await
+						// Held frames play out first unless the new rendition covers their time.
+						while let Some((_, prev)) = held.frames.front()
+							&& prev.timestamp_us < frame.1.timestamp_us
 						{
-							return;
+							let prev = held.frames.pop_front().expect("a held frame");
+							if !self.write(prev).await {
+								return;
+							}
 						}
-						held = None;
+						held = Held::default();
 						serving = next.take();
 						if !self.write(frame).await {
 							return;
 						}
 					}
-					Some(frame) => {
-						// The new rendition reached the held frame's time without a keyframe.
-						if let Some(prev) = held.take_if(|(_, prev)| prev.timestamp_us <= frame.1.timestamp_us)
-							&& !self.write(prev).await
-						{
-							return;
-						}
-					}
+					// The new rendition progressed without a keyframe the line can join at.
+					Some((_, frame)) => held.reached = held.reached.max(Some(frame.timestamp_us)),
 					None => next = None,
 				},
 			}
@@ -471,6 +467,35 @@ impl Pump {
 			payload: frame.payload,
 		};
 		self.tx.send(request).await.is_ok()
+	}
+}
+
+/// How long a pending switch may hold a frame of the current rendition, in microseconds:
+/// the frame plays once the current rendition delivers one more than this past it.
+///
+/// Frames are only released as frames arrive, so this bounds the latency the line takes on,
+/// and how long it freezes if the new rendition stalls, to within one frame interval. A new
+/// rendition lagging further than this can still be starved of a keyframe past the playhead.
+const MAX_SWITCH_LAG_US: u64 = 500_000;
+
+/// The current rendition's frames, withheld while a switch is pending.
+#[derive(Default)]
+struct Held {
+	frames: VecDeque<(Format, codec::PacketizedFrame)>,
+	/// The latest time the new rendition reached.
+	reached: Option<u64>,
+}
+
+impl Held {
+	/// The oldest held frame if it may play: every frame once `released`, otherwise one the
+	/// new rendition has reached or that is more than [`MAX_SWITCH_LAG_US`] behind.
+	fn pop(&mut self, released: bool) -> Option<(Format, codec::PacketizedFrame)> {
+		let oldest = self.frames.front()?.1.timestamp_us;
+		let latest = self.frames.back()?.1.timestamp_us;
+		let ready = released
+			|| self.reached.is_some_and(|reached| oldest <= reached)
+			|| latest.saturating_sub(oldest) > MAX_SWITCH_LAG_US;
+		ready.then(|| self.frames.pop_front()).flatten()
 	}
 }
 
@@ -903,7 +928,7 @@ mod tests {
 		set_enabled(&mut catalog, true);
 		idle(&mut writes).await;
 
-		// The current rendition plays out one frame behind while the switch is pending.
+		// The current rendition is paced to the new one while the switch is pending.
 		low.write(frame(33, b"low-1", false)).unwrap();
 		idle(&mut writes).await;
 		high.write(frame(33, b"high-1", false)).unwrap();
@@ -917,6 +942,117 @@ mod tests {
 		low.write(frame(100, b"low-3", false)).unwrap();
 		high.write(frame(100, b"high-3", false)).unwrap();
 		assert_eq!(written(&mut writes).await.as_ref(), b"high-3");
+		idle(&mut writes).await;
+	}
+
+	/// A switch to a rendition whose frames arrive several frames behind the current one's
+	/// still takes over at its first keyframe.
+	#[tokio::test(start_paused = true)]
+	async fn a_switch_waits_for_a_lagging_rendition() {
+		let origin = produce_origin();
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
+		let mut high = vp8(&mut broadcast, &mut catalog, "high", 1080);
+		let mut low = vp8(&mut broadcast, &mut catalog, "low", 360);
+		let set_enabled = |catalog: &mut moq_mux::catalog::Producer, enabled: bool| {
+			catalog
+				.modify()
+				.unwrap()
+				.video
+				.renditions
+				.get_mut("high")
+				.unwrap()
+				.enabled = enabled;
+		};
+		set_enabled(&mut catalog, false);
+
+		let mut egress = EgressSource::new(moq_mux::Source::new(origin.consume(), broadcast.consume()))
+			.await
+			.unwrap();
+		let mut writes = egress.take_writes();
+		egress.on_track(Mid::from("0"), vec![format(Codec::Vp8, 96)]).unwrap();
+
+		high.write(frame(0, b"high-0", true)).unwrap();
+		low.write(frame(0, b"low-0", true)).unwrap();
+		assert_eq!(written(&mut writes).await.as_ref(), b"low-0");
+
+		set_enabled(&mut catalog, true);
+		idle(&mut writes).await;
+
+		// The low rendition runs three frames ahead, through the next keyframe.
+		low.write(frame(33, b"low-1", false)).unwrap();
+		low.write(frame(66, b"low-2", false)).unwrap();
+		low.write(frame(100, b"low-3", true)).unwrap();
+		low.write(frame(133, b"low-4", false)).unwrap();
+		idle(&mut writes).await;
+
+		// Each low frame plays once the high rendition reaches its time.
+		high.write(frame(33, b"high-1", false)).unwrap();
+		assert_eq!(written(&mut writes).await.as_ref(), b"low-1");
+		idle(&mut writes).await;
+		high.write(frame(66, b"high-2", false)).unwrap();
+		assert_eq!(written(&mut writes).await.as_ref(), b"low-2");
+		idle(&mut writes).await;
+
+		// The high rendition's keyframe is still past the playhead, so it takes over.
+		high.write(frame(100, b"high-3", true)).unwrap();
+		assert_eq!(written(&mut writes).await.as_ref(), b"high-3");
+		high.write(frame(133, b"high-4", false)).unwrap();
+		assert_eq!(written(&mut writes).await.as_ref(), b"high-4");
+		low.write(frame(166, b"low-5", false)).unwrap();
+		idle(&mut writes).await;
+	}
+
+	/// A switch to a rendition that stalls holds the line back by at most
+	/// [`MAX_SWITCH_LAG_US`] rather than freezing it.
+	#[tokio::test(start_paused = true)]
+	async fn a_stalled_switch_bounds_the_lag() {
+		let origin = produce_origin();
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
+		let mut high = vp8(&mut broadcast, &mut catalog, "high", 1080);
+		let mut low = vp8(&mut broadcast, &mut catalog, "low", 360);
+		let set_enabled = |catalog: &mut moq_mux::catalog::Producer, enabled: bool| {
+			catalog
+				.modify()
+				.unwrap()
+				.video
+				.renditions
+				.get_mut("high")
+				.unwrap()
+				.enabled = enabled;
+		};
+		set_enabled(&mut catalog, false);
+
+		let mut egress = EgressSource::new(moq_mux::Source::new(origin.consume(), broadcast.consume()))
+			.await
+			.unwrap();
+		let mut writes = egress.take_writes();
+		egress.on_track(Mid::from("0"), vec![format(Codec::Vp8, 96)]).unwrap();
+
+		high.write(frame(0, b"high-0", true)).unwrap();
+		low.write(frame(0, b"low-0", true)).unwrap();
+		assert_eq!(written(&mut writes).await.as_ref(), b"low-0");
+
+		// The high rendition never sends again.
+		set_enabled(&mut catalog, true);
+		idle(&mut writes).await;
+		low.write(frame(100, b"low-1", false)).unwrap();
+		low.write(frame(600, b"low-2", false)).unwrap();
+		idle(&mut writes).await;
+
+		// Past the bound, the oldest held frame plays, one per frame the low rendition sends.
+		low.write(frame(700, b"low-3", false)).unwrap();
+		assert_eq!(written(&mut writes).await.as_ref(), b"low-1");
+		idle(&mut writes).await;
+		low.write(frame(1200, b"low-4", false)).unwrap();
+		assert_eq!(written(&mut writes).await.as_ref(), b"low-2");
+		idle(&mut writes).await;
+
+		// Abandoning the switch plays everything held.
+		set_enabled(&mut catalog, false);
+		assert_eq!(written(&mut writes).await.as_ref(), b"low-3");
+		assert_eq!(written(&mut writes).await.as_ref(), b"low-4");
 		idle(&mut writes).await;
 	}
 
