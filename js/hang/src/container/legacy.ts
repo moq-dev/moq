@@ -29,8 +29,9 @@ export class Format implements ContainerFormat {
 		return this.kind !== "data" && frame.payload.byteLength === 0 ? frame.timestamp : undefined;
 	}
 
-	/** Decode one legacy frame, including an empty-payload duration marker. */
+	/** Decode one legacy frame, including an empty-payload duration marker. On a data track an object with no bytes is the discontinuity marker, so it decodes to no frame. */
 	decode(frame: Uint8Array): Frame[] {
+		if (this.kind === "data" && frame.byteLength === 0) return [];
 		const [timestamp, data] = Moq.Varint.decode(frame);
 		return [{ payload: data, timestamp: timestamp as Micro, keyframe: false }];
 	}

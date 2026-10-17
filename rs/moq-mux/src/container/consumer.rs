@@ -363,8 +363,8 @@ impl<F: Container> Consumer<F> {
 					Poll::Ready(Ok(None)) => {
 						// A data track's marker carries no timestamp, so it ends where this reader
 						// got to. Before the first item there is nothing to end.
-						if group.marker()
-							&& group.max_end.is_none()
+						if self.format.kind() == super::Kind::Data
+							&& group.marker() && group.max_end.is_none()
 							&& !std::mem::replace(&mut group.ended, true)
 							&& let Some(edge) = self.edge
 						{
@@ -1066,6 +1066,28 @@ mod tests {
 		producer.finish().unwrap();
 
 		assert_eq!(items(&mut reader).await, ["0", "10000", "end 10000", "2405070000"]);
+	}
+
+	/// An object with no bytes marks a break only on a data track: on a media track it is
+	/// malformed, and fails to decode rather than read as a marker.
+	#[tokio::test]
+	async fn an_empty_object_is_a_marker_only_on_a_data_track() {
+		for kind in [
+			crate::container::Kind::Data,
+			crate::container::Kind::Audio,
+			crate::container::Kind::Video,
+		] {
+			let track = track_producer("empty", hang::container::track_info(hang::catalog::PRIORITY.audio));
+			let mut group = track.create_group(moq_net::group::Info { sequence: 0 }).unwrap();
+			group.write_frame(ts(0), Bytes::new()).unwrap();
+			group.finish().unwrap();
+			let mut group = group.consume();
+			let read = Container::Legacy(kind).read(&mut group).await;
+			match kind {
+				crate::container::Kind::Data => assert!(matches!(read, Ok(Some(frames)) if frames.is_empty())),
+				_ => assert!(read.is_err(), "{kind:?}: {read:?}"),
+			}
+		}
 	}
 
 	/// A gap runs from the delivered edge to the resume point, in the resume's scale, and

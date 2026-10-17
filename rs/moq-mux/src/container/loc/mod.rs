@@ -53,8 +53,9 @@ impl Container for Wire {
 		let Some(frame) = ready!(group.poll_read_frame(waiter)?) else {
 			return Poll::Ready(Ok(None));
 		};
-		// An object with no bytes is a data track's discontinuity marker, not a frame.
-		if frame.payload.is_empty() {
+		// On a data track an object with no bytes is its discontinuity marker, not a frame.
+		// Elsewhere it is malformed, so it fails to decode below.
+		if self.0 == Kind::Data && frame.payload.is_empty() {
 			return Poll::Ready(Ok(Some(Vec::new())));
 		}
 

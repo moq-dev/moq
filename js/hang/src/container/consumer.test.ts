@@ -114,9 +114,9 @@ test("LegacyFormat always returns exactly one frame", () => {
 	expect(result).toHaveLength(1);
 });
 
-test("LegacyFormat throws on empty input", () => {
-	const format = new LegacyFormat("data");
-	expect(() => format.decode(new Uint8Array(0))).toThrow();
+test("LegacyFormat decodes no frame from a data track's empty object and throws on a media track's", () => {
+	expect(new LegacyFormat("data").decode(new Uint8Array(0))).toEqual([]);
+	expect(() => new LegacyFormat("video").decode(new Uint8Array(0))).toThrow();
 });
 
 test("Legacy Producer refuses a group below the previous group start", () => {
