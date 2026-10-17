@@ -23,7 +23,7 @@ import { Cost, type Hop, MAX_HOPS, type Route, routesEqual, UNKNOWN_HOP } from "
 import { groupBounds, hiddenBelow, scopeCaptures, scopeHead, scopeOverlaps } from "../internal.ts";
 import * as Path from "../path.ts";
 import { sendOrder } from "../priority.ts";
-import { type OpenOptions, type Reader, Stream } from "../stream.ts";
+import { type OpenOptions, type Reader, Stream, Writer } from "../stream.ts";
 import { TAIL_GRACE_MS, Tail } from "../tail.ts";
 import * as Time from "../time.ts";
 import type * as track from "../track.ts";
@@ -1293,11 +1293,14 @@ export class Subscriber {
 				startGroup: current.groups?.start === undefined ? undefined : bounds.start,
 				endGroup: inclusiveGroupEnd(bounds.end),
 			});
-			// The subscription was validated when set, so only the write can fail: the publisher
-			// stopped reading, as it does once it finishes the track. The responses decide how the
-			// track ends, cleanly at the FIN or with a reset's error.
+			// Encoded apart from the write, so a bound the wire can't carry still fails the track.
+			const encoded: Uint8Array[] = [];
+			const buffer = new WritableStream<Uint8Array>({ write: (chunk) => void encoded.push(chunk.slice()) });
+			await update.encode(new Writer(buffer, this.version), this.version);
+			// A failed write means the publisher stopped reading, as it does once it finishes the
+			// track. The responses decide how the track ends, cleanly at the FIN or with a reset's error.
 			try {
-				await update.encode(stream.writer, this.version);
+				for (const chunk of encoded) await stream.writer.write(chunk);
 			} catch {
 				return;
 			}

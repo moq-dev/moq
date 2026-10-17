@@ -1764,6 +1764,26 @@ test.each([
 	}
 });
 
+// Only a failed write defers to the responses: an update the wire can't carry still fails the
+// track. Lite-05 sends the start group plus one, past the largest u53 here.
+test("an update whose bound the wire can't carry fails the track", async () => {
+	const { quic, streams, opened } = fakeSession();
+	const subscriber = new Subscriber(quic, Version.DRAFT_05, HopSchema.parse(1n));
+	const broadcast = subscriber.consume(Path.from("room"));
+	const track = broadcast.track("video").subscribe();
+	try {
+		await opened(0);
+		await answerTrackInfo(streams[0], Version.DRAFT_05);
+		await (await opened(1)).reading;
+		track.update({ groups: { start: { included: Number.MAX_SAFE_INTEGER } } });
+		expect(await track.closed).toBeInstanceOf(RangeError);
+	} finally {
+		track.close();
+		broadcast.close();
+		subscriber.close();
+	}
+});
+
 test("a retired subscribe response type closes the session", async () => {
 	const { quic, streams, opened, closes } = fakeSession();
 	const subscriber = new Subscriber(quic, Version.DRAFT_07, HopSchema.parse(1n));
