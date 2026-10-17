@@ -4,6 +4,21 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Roles carry `Access` (#5697)
+
+`publish` and `subscribe` on `Claims`, `Permissions`, and `Grant` are `Access`, which holds the path patterns and an optional per-connection `Rate` cap.
+Read the patterns from `.path`; constructors and `Claims::with_publish` / `with_subscribe` take anything `Into<Access>`, such as a `Pattern`, `Patterns`, or array, so collect a pattern iterator first.
+A capped role serializes as `{"path":"alice/**","rate":8000000}`, and key scopes refuse caps.
+A gateway that embeds this crate must enforce a cap or refuse the grant before admitting media.
+
+```rust
+// Before
+let allowed = permissions.publish.matches(path);
+// After
+let allowed = permissions.publish.path.matches(path);
+let cap = permissions.publish.rate.map(|rate| rate.as_bps()); // enforce, or refuse when Some
+```
+
 ### Gateway transports and key sets are non-exhaustive (#3943)
 
 `Transport` gains `Rtmp`, `Srt`, `WebRtc`, and `WebTransport`, and `serve::Keys` gains `Set`; both are `#[non_exhaustive]`, so add a wildcard arm.

@@ -162,6 +162,17 @@ reason = err[0]
 reason = err.reason
 ```
 
+### `Transport` gains `WEB_TRANSPORT`
+
+A WebTransport session reports `moq.Transport.WEB_TRANSPORT`; `QUIC` now means raw QUIC only, so a server that admits only `QUIC` refuses every browser.
+
+```python
+# Before
+quic = request.transport == moq.Transport.QUIC
+# After
+quic = request.transport in (moq.Transport.QUIC, moq.Transport.WEB_TRANSPORT)
+```
+
 ### `stalled` is `enabled` (#4915)
 
 `moq.media.Video.stalled` is `enabled`, defaulting to `True` with the meaning inverted, and `moq.media.Audio` gains `enabled`.

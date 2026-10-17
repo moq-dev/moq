@@ -30,6 +30,9 @@ ignored; its guide says what replaces it.
 
 These land with the next breaking release.
 
+- **Auth requests name `webtransport`** (#5293). Relays report a WebTransport
+  session as `webtransport` instead of `quic`, and older auth servers reject the
+  new value, so upgrade auth servers before relays.
 - **Archive timelines declare a duration** (#5715). Each catalog
   `archive.timelines` entry is an object instead of a track name. Neither side
   reads the other's shape, and a catalog it can't read keeps its live media but

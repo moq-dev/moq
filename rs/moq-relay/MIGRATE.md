@@ -5,6 +5,19 @@ Rolling a cluster across a release also follows the [upgrade guide](https://moq.
 
 ## Unreleased
 
+### Auth roles carry `moq_auth::Access` (#5697)
+
+`auth::Token::publish` and `subscribe` are `moq_auth::Access`, so an embedder reads the patterns from `.path`.
+The relay refuses every grant with a bitrate cap, including one added in-band or at revalidation, because no transport meters it yet; HTTP `/fetch` and `/announced` always refuse caps.
+An embedder running its own gateway must enforce the cap or refuse the grant before forwarding media.
+
+```rust
+// Before
+let patterns = &token.publish;
+// After
+let patterns = &token.publish.path;
+```
+
 ### Workers default to unpinned (#5688)
 
 `runtime.pin` defaults to off, so two worker groups on one host no longer crowd onto the first cores.

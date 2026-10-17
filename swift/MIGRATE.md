@@ -89,7 +89,7 @@ let state = try Json.SnapshotProducer<State>(broadcast: broadcast, track: try br
 
 ### Media lives in `Media`
 
-`BroadcastProducer.publishAudio`, `publishVideo`, `publishContainer`, their `on:` and stream variants, `setVideoProperties`, `setCatalogSection`, and `finish`, and the consumer's `subscribeCatalog`, `subscribeMedia`, and `fetchMediaGroup`, are gone.
+`BroadcastProducer.publishAudio`, `publishVideo`, `publishContainer`, their `on:` and stream variants, `setVideoProperties`, and `setCatalogSection`, and the consumer's `subscribeCatalog`, `subscribeMedia`, and `fetchMediaGroup`, are gone.
 Use `Media.TrackProducer.audio` / `video`, `Media.ContainerProducer`, `Media.CatalogProducer`, `Media.CatalogConsumer.subscribe`, `Media.TrackConsumer.subscribe`, and `Media.GroupConsumer.fetch`.
 The catalog types (`Catalog`, `Video`, `Audio`, `AudioFormat`, ...) moved under `Media`.
 Producers drop `name`, `used`, and `unused`; read them through `demand()`.
@@ -194,6 +194,17 @@ let route = Route(cost: 10)
 let rgba = frame.data
 // After
 let rgba = try frame.pixels(format: .rgba)
+```
+
+### `BroadcastProducer.finish()` is `close()` (#4152)
+
+Close the broadcast instead; tracks already subscribed carry on to their own end.
+
+```swift
+// Before
+try broadcast.finish()
+// After
+try broadcast.close()
 ```
 
 ## 0.4 -> 0.5

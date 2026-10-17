@@ -138,7 +138,7 @@ err := track.WriteFrame(moq.Frame{Payload: payload, Timestamp: &pts})
 
 ### Subscriber staleness is `MaxDelay`
 
-`Subscription.MaxAgeUs` is `MaxDelay`, and the decoder outputs take `MaxDelayUs`.
+`Subscription.MaxAgeUs` is `MaxDelay`, and `audio.DecoderOutput` / `video.DecoderOutput` take `MaxDelay *time.Duration`.
 `TrackInfo.MaxAge` keeps its name: it is the publisher's retention.
 
 ```go
