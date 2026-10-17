@@ -298,7 +298,7 @@ its intervals and only adds to the drift. At 30 ppm a 77 s window moves only
 2.3 ms, so the fit excludes two arrival effects that are not the clock. Reads only
 ever land late, so it fits the least-delayed PCR in each second, the floor that
 scheduling and pipe delay sit on; a live control's mean read delay wandered by
-~2.4 ms while that floor held within 0.7 ms. And it breaks at every interval
+2.4 ms while that floor held within 0.7 ms. And it breaks at every interval
 `release` grades outside its tolerance, pooling the runs between them: a stall the
 sender caught up from leaves a step in the arrivals, which a single line reads as
 a rate (a 70 ms standing lag mid-sample is over 1,000 ppm), though it is the
