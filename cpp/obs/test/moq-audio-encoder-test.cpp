@@ -240,7 +240,9 @@ void CheckSubscriberDecodes(const char *preset, size_t channels)
 	const int count = 50;
 	const int64_t start = 3 * RATE;
 	// Where input sample `index` lands on the track: MoQOutput's one second offset on top.
-	auto micros = [&](int64_t index) { return static_cast<uint64_t>((start + RATE + index) * 1000000LL / RATE); };
+	auto micros = [&](int64_t index) {
+		return static_cast<uint64_t>((start + RATE + index) * 1000000LL / RATE);
+	};
 	for (int i = 0; i < count; i++) {
 		const int64_t pts = start + i * static_cast<int64_t>(encoder.frame_size);
 		auto pcm = ToneFrame(pts - start, encoder.frame_size, channels);
@@ -319,8 +321,8 @@ int main()
 
 	// OBS converts its mix to what the encoder asks for: 48 kHz interleaved float,
 	// mono kept mono and anything wider downmixed to stereo.
-	for (auto [mix, speakers] : {std::pair<size_t, speaker_layout>{1, SPEAKERS_MONO}, {2, SPEAKERS_STEREO},
-				     {6, SPEAKERS_STEREO}}) {
+	for (auto [mix, speakers] :
+	     {std::pair<size_t, speaker_layout>{1, SPEAKERS_MONO}, {2, SPEAKERS_STEREO}, {6, SPEAKERS_STEREO}}) {
 		Encoder encoder({}, mix);
 		CHECK(encoder.data != nullptr);
 		CHECK(encoder.info.format == AUDIO_FORMAT_FLOAT);
@@ -334,8 +336,8 @@ int main()
 
 	// 20 ms by default and for quality, 10 ms for low latency. A preset changed on a
 	// live encoder waits for the next one, since OBS frames its input by this size.
-	for (auto [preset, frames] : {std::pair<const char *, size_t>{"balanced", 960}, {"quality", 960},
-				      {"low_latency", 480}}) {
+	for (auto [preset, frames] :
+	     {std::pair<const char *, size_t>{"balanced", 960}, {"quality", 960}, {"low_latency", 480}}) {
 		obs_data settings;
 		settings.preset = preset;
 		Encoder encoder(settings);

@@ -80,7 +80,8 @@ void *Create(obs_data_t *settings, obs_encoder_t *encoder)
 		return nullptr;
 	}
 
-	auto enc = new MoQAudioEncoder{*codec, channels, static_cast<size_t>(*frame_size), std::move(init->data), {}, {}};
+	auto enc =
+		new MoQAudioEncoder{*codec, channels, static_cast<size_t>(*frame_size), std::move(init->data), {}, {}};
 	LOG_INFO("MoQ Opus encoder: %u channels, %zu samples per packet", channels, enc->frame_size);
 	return enc;
 }
