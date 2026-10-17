@@ -476,6 +476,93 @@ fn widening_behind_two_grants_waits_for_each_scope() {
 	net.check().unwrap();
 }
 
+/// One key arrives through two grants under one subject. When the session
+/// for one scope closes, nothing certifies that scope any more, so its claims
+/// go offline rather than staying shown through the other grant, which could
+/// never deliver their withdrawal. The other scope stays available.
+#[test]
+fn a_closed_grant_lets_its_scope_go() {
+	let (origin, r1, r2, client) = (0, 1, 2, 3);
+	let mut net = Net::new(config(FLOORS, Requests::Off), 4);
+	net.leaf(origin);
+	net.leaf(client);
+	net.join(origin, r1, 1);
+	net.join(origin, r2, 1);
+	for (relay, scope) in [(r1, "live/a/"), (r2, "live/b/")] {
+		let grant = Grant {
+			subject: "local",
+			scope,
+		};
+		net.link(client, relay, Link::cost(1).grant(grant), Link::cost(1));
+	}
+	net.originate(origin, 7, 0);
+	net.announce(origin, "live/a/x", 0, None);
+	net.announce(origin, "live/b/z", 0, None);
+	assert!(net.run());
+	let id = qualified("local", 7);
+	assert_eq!(net.shows(client, id, "live/a/x"), Some(true));
+
+	net.disconnect(client, r1);
+	assert!(net.run());
+	assert_eq!(net.shows(client, id, "live/a/x"), None);
+	assert_eq!(net.shows(client, id, "live/b/z"), Some(true));
+	net.unannounce(origin, "live/a/x");
+	net.announce(origin, "live/a/y", 0, None);
+	assert!(net.run());
+	net.connect(client, r1);
+	assert!(net.run());
+	assert_eq!(net.shows(client, id, "live/a/x"), None);
+	assert_eq!(net.shows(client, id, "live/a/y"), Some(true));
+	let life: Vec<Kind> = at(&net, client)
+		.iter()
+		.filter(|event| event.claim == "live/a/x")
+		.map(|event| event.kind)
+		.collect();
+	assert_eq!(life, [Kind::Start, Kind::Offline]);
+	assert_eq!(false_ends(&net.events), 0);
+	net.check().unwrap();
+}
+
+/// Two relays each admit an uplink scoped to a different prefix under one
+/// subject and forward the key to a third, whose view then carries one floor
+/// per scope. When one uplink closes, that relay is starved and holds, so the
+/// third shows that scope unavailable while the other stays available; once
+/// a seqno request recovers a route, nothing certifies the lost scope and the
+/// third lets it go. Certifiers are feasible neighbors only, so the starved
+/// relay and the third never keep the scope alive through each other.
+#[test]
+fn a_relay_lets_go_of_a_scope_its_uplinks_lost() {
+	for (requests, lost) in [(Requests::Off, Some(false)), (Requests::HopByHop, None)] {
+		let (origin, local, x, y, z) = (0, 1, 2, 3, 4);
+		let mut net = Net::new(config(FLOORS, requests), 5);
+		net.leaf(origin);
+		net.join(origin, local, 1);
+		for (relay, scope) in [(x, "live/a/"), (y, "live/b/")] {
+			let grant = Grant {
+				subject: "local",
+				scope,
+			};
+			net.link(relay, local, Link::cost(1).grant(grant), Link::cost(1));
+			net.join(relay, z, 1);
+		}
+		net.originate(origin, 7, 0);
+		net.announce(origin, "live/a/x", 0, None);
+		net.announce(origin, "live/b/z", 0, None);
+		assert!(net.run());
+		let id = qualified("local", 7);
+		assert_eq!(net.shows(z, id, "live/a/x"), Some(true));
+		assert_eq!(net.shows(z, id, "live/b/z"), Some(true));
+
+		net.disconnect(x, local);
+		net.unannounce(origin, "live/a/x");
+		assert!(net.run());
+		assert_eq!(net.shows(z, id, "live/a/x"), lost, "{requests:?}");
+		assert_eq!(net.shows(z, id, "live/b/z"), Some(true), "{requests:?}");
+		assert_eq!(false_ends(&net.events), 0, "{requests:?}");
+		net.check().unwrap();
+	}
+}
+
 /// An exact claim covers only its own path, so it is outside an interest
 /// below it, and only a wildcard ancestor is inside.
 #[test]
@@ -950,8 +1037,9 @@ fn announcement_cost_follows_sessions_and_live_claims() {
 /// change in and around both scopes, the client's interest moves, sessions
 /// drop and return, and messages are held and delivered out of step. Every
 /// view stays some revision of the origin's truth after every step, the
-/// widening guard stays bounded, and once churn stops the client shows
-/// exactly the claims its interest and the scopes admit.
+/// widening guard stays bounded, no claim ends while the origin still has it,
+/// and once churn stops the client shows exactly the claims its interest and
+/// the scopes admit.
 #[test]
 fn sweep_scoped_handoff() {
 	const CLAIMS: [&str; 5] = ["live/a/x", "live/a/y/", "live/b/z", "live/c", "live/"];
@@ -1053,6 +1141,9 @@ fn sweep_scoped_handoff() {
 			.map(|((_, claim), _)| *claim)
 			.collect();
 		assert_eq!(shown, expected, "scenario {scenario} watching {watch:?}");
+		// A scope its last session left, or an interest no scope meets, goes
+		// offline rather than ending.
+		assert_eq!(false_ends(&net.events), 0, "scenario {scenario}");
 		live_starts += net
 			.events
 			.iter()

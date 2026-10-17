@@ -319,15 +319,13 @@ impl View {
 	/// outside the interest may certify a wildcard above both at a newer
 	/// revision than any floor inside, so it stays, with what it certifies,
 	/// until a floor inside catches up; dropping it would leave that wildcard
-	/// known only at an older revision than the item it holds.
+	/// known only at an older revision than the item it holds. Once no
+	/// neighbor certifies it, [`Net::prune`] lets it go.
 	fn retire(&self, watch: &'static str) -> View {
 		let mut kept = self.restrict(watch);
-		let Some(&newest) = kept.floors.values().max() else {
-			// Nothing inside the interest certifies anything, so nothing stays.
-			return kept;
-		};
+		let newest = kept.floors.values().max().copied();
 		for (&region, &floor) in &self.floors {
-			if floor > newest && !kept.floors.contains_key(region) {
+			if Some(floor) > newest && !kept.floors.contains_key(region) {
 				kept.floors.insert(region, floor);
 				for (&claim, &item) in &self.items {
 					if overlaps(claim, region) {
@@ -527,6 +525,8 @@ struct State {
 	current: BTreeMap<Id, Vec<&'static str>>,
 	/// The last view each neighbor sent, per identity.
 	heard: BTreeMap<(Node, Id), View>,
+	/// The interest stream each heard view arrived on.
+	heard_on: BTreeMap<(Node, Id), u32>,
 	sent_views: BTreeMap<(Node, Id), View>,
 	shown: BTreeMap<(Id, &'static str), Shown>,
 	/// How many times this node restarted, collected an origin, or retired a region.
@@ -732,6 +732,7 @@ impl Net {
 			state.rx.retain(|_, routes| !routes.is_empty());
 			state.filed.retain(|(from, _), _| *from != x);
 			state.heard.retain(|(from, _), _| *from != x);
+			state.heard_on.retain(|(from, _), _| *from != x);
 			for pending in state.pending.values_mut() {
 				pending.from.remove(&x);
 			}
@@ -940,6 +941,7 @@ impl Net {
 		state.views.remove(&id);
 		state.current.remove(&id);
 		state.heard.retain(|(_, key), _| *key != id);
+		state.heard_on.retain(|(_, key), _| *key != id);
 		state.pending.remove(&id);
 		state.gave_up.remove(&id);
 		state.forgot += 1;
@@ -1184,16 +1186,12 @@ impl Net {
 					// A batch from a stream the node has since replaced.
 					return;
 				}
-				// The batch certifies the interest within the grant's scope.
+				// The batch certifies the regions its floors name.
 				let watch = state.watch;
-				let certified = match scope {
-					Some(scope) if scope.starts_with(watch) => Some(scope),
-					Some(scope) if !watch.starts_with(scope) => None,
-					_ => Some(watch),
-				};
-				if let Some(region) = certified
-					&& let Some(regions) = state.current.get_mut(&id)
-				{
+				for &region in view.floors.keys() {
+					let Some(regions) = state.current.get_mut(&id) else {
+						break;
+					};
 					if region == watch {
 						state.current.remove(&id);
 					} else if !regions.iter().any(|known| region.starts_with(known)) {
@@ -1214,6 +1212,7 @@ impl Net {
 					}
 				}
 				state.heard.insert((from, id), view);
+				state.heard_on.insert((from, id), interest);
 			}
 			Msg::Request { id, seqno } => self.request_received(at, from, id, seqno),
 		}
@@ -1411,6 +1410,73 @@ impl Net {
 		self.route(node, id).is_some() || self.starved(node, id) || self.grounded(node, id)
 	}
 
+	/// The neighbors whose views can certify `id` at `node`: those whose last
+	/// finite advertisement is feasible here, held or not. Feasible edges
+	/// strictly decrease the metric toward the origin, so certification never
+	/// circulates: two nodes cannot keep a region alive through each other.
+	fn certifiers(&self, node: Node, id: Id) -> Vec<Node> {
+		self.nodes[node].rx.get(&id).map_or_else(Vec::new, |routes| {
+			routes
+				.iter()
+				.filter(|(_, entry)| self.feasible(node, id, entry.advert))
+				.map(|(&next, _)| next)
+				.collect()
+		})
+	}
+
+	/// The regions of `id` that `node`'s certifiers certify, or `None` while it
+	/// holds no route or a certifier has not yet answered the current interest:
+	/// its announcements may still trail its route.
+	fn certified(&self, node: Node, id: Id) -> Option<Vec<&'static str>> {
+		let state = &self.nodes[node];
+		state.rx.get(&id)?;
+		let mut regions = Vec::new();
+		for next in self.certifiers(node, id) {
+			if state.heard_on.get(&(next, id)) != Some(&state.interest) {
+				return None;
+			}
+			regions.extend(state.heard[&(next, id)].floors.keys());
+		}
+		Some(regions)
+	}
+
+	/// Let go of every region of `id`'s merged view that no routed neighbor
+	/// certifies any more, once each has answered the current interest: its
+	/// last certifier closed, ended its route, or no longer meets the interest.
+	/// Dropping one floor would leave what it certified known at an older
+	/// floor's revision, so the view is rebuilt from the neighbors' last views,
+	/// a collection of that region; the reader sees it go offline.
+	fn prune(&mut self, node: Node, id: Id) {
+		let Freshness::Floors { scoped } = self.cfg.freshness else {
+			return;
+		};
+		// A starved or held node keeps presence until it recovers or lets go.
+		if self.nodes[node].origins.contains_key(&id) || self.route(node, id).is_none() {
+			return;
+		}
+		let Some(regions) = self.certified(node, id) else {
+			return;
+		};
+		let state = &self.nodes[node];
+		let Some(merged) = state.views.get(&id) else {
+			return;
+		};
+		let lost = merged
+			.floors
+			.keys()
+			.any(|floor| !regions.iter().any(|region| floor.starts_with(region)));
+		if !lost {
+			return;
+		}
+		let mut rebuilt = View::default();
+		for next in self.certifiers(node, id) {
+			rebuilt.merge(&self.nodes[node].heard[&(next, id)], scoped);
+		}
+		let state = &mut self.nodes[node];
+		state.views.insert(id, rebuilt);
+		state.forgot += 1;
+	}
+
 	/// The view `node` shows and forwards for `id`.
 	fn adopted(&self, node: Node, id: Id) -> Option<&View> {
 		let state = &self.nodes[node];
@@ -1445,6 +1511,10 @@ impl Net {
 	/// Recompute every selection at `node`, record feasibility distances for what
 	/// it advertises, and queue any change for each neighbor.
 	fn advertise(&mut self, node: Node) {
+		let ids: Vec<Id> = self.nodes[node].views.keys().copied().collect();
+		for id in ids {
+			self.prune(node, id);
+		}
 		let state = &self.nodes[node];
 		let mut ids: BTreeSet<Id> = state.rx.keys().copied().collect();
 		ids.extend(state.origins.keys());
@@ -1509,11 +1579,8 @@ impl Net {
 					state.sent_views.remove(&(peer, id));
 					continue;
 				}
+				// Each floor names its region: the stream's interest, or a scope below it.
 				let view = view.restrict(self.nodes[peer].watch);
-				assert!(
-					view.floors.len() <= 1,
-					"node {node} forwards {id} with more than its stream's one floor"
-				);
 				let state = &mut self.nodes[node];
 				// A view with no floor certifies nothing yet.
 				let unchanged = match state.sent_views.get(&(peer, id)) {
@@ -1637,10 +1704,26 @@ impl Net {
 			let Some(view) = self.adopted(node, id) else {
 				continue;
 			};
-			let available = self.route(node, id).is_some();
+			let usable = self.route(node, id).is_some();
+			// A claim is available only through a certifier that is not held:
+			// another scope's usable route cannot serve it.
+			let serving: Option<Vec<&str>> = match self.cfg.freshness {
+				Freshness::Floors { .. } if !state.origins.contains_key(&id) => self.certified(node, id).map(|_| {
+					self.certifiers(node, id)
+						.into_iter()
+						.filter(|next| !state.rx[&id][next].held)
+						.flat_map(|next| state.heard[&(next, id)].floors.keys().copied())
+						.collect()
+				}),
+				_ => None,
+			};
 			let current = state.current.get(&id);
 			for (&claim, &item) in &view.items {
 				let certified = current.is_none_or(|regions| regions.iter().any(|region| overlaps(claim, region)));
+				let available = usable
+					&& serving
+						.as_ref()
+						.is_none_or(|regions| regions.iter().any(|region| overlaps(claim, region)));
 				if overlaps(claim, state.watch) && certified {
 					shown.insert((id, claim), Shown { item, available });
 				}
@@ -1670,9 +1753,14 @@ impl Net {
 			if shown.contains_key(&(id, claim)) {
 				continue;
 			}
+			// A claim no routed neighbor's region covers was let go, not ended.
+			let uncertified = matches!(self.cfg.freshness, Freshness::Floors { .. })
+				&& self
+					.certified(node, id)
+					.is_some_and(|regions| !regions.iter().any(|region| overlaps(claim, region)));
 			let kind = if !overlaps(claim, self.nodes[node].watch) {
 				Kind::Unwatched
-			} else if self.live(node, id) {
+			} else if self.live(node, id) && !uncertified {
 				Kind::End
 			} else {
 				Kind::Offline

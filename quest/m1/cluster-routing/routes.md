@@ -47,8 +47,10 @@ The handoff contract below, decided 2026-10-16, settles claim freshness:
   announcements while it recovers. ROUTE_END means the sender let go of the
   origin on this stream; neither is proof that the origin withdrew its
   claims (see the handoff contract). Each batch of ANNOUNCEs for a route
-  closes with a floor, the origin revision as of which the stream's set for
-  that route is complete.
+  closes with one floor per region it certifies: the region, as a suffix of
+  the stream's interest prefix (empty for the whole interest), and the origin
+  revision as of which the stream's set for that route in that region is
+  complete.
   ROUTE_REQUEST (node id, seqno) travels
   the other way on the same stream, toward the neighbour that sent the route,
   and so does the echo of every ROUTE_END: the receiver sends the same
@@ -63,10 +65,11 @@ The handoff contract below, decided 2026-10-16, settles claim freshness:
   ROUTE_START  node=0x7a3f seqno=41 metric=12   -> route 0
   ANNOUNCE_START prefix=transcode/ route=0 cost=10    -> announce 0
   ANNOUNCE_START prefix=transcode/foobar route=0 cost=1 -> announce 1
-  ANNOUNCE_FLOOR route=0 revision=7             # complete as of revision 7
+  ANNOUNCE_FLOOR route=0 region= revision=7     # complete as of revision 7
   ROUTE_UPDATE route=0 seqno=42 metric=15
   ANNOUNCE_END announce=1                       # this origin withdraws a claim
-  ANNOUNCE_FLOOR route=0 revision=8
+  ANNOUNCE_FLOOR route=0 region= revision=8
+  ANNOUNCE_FLOOR route=1 region=live/a/ revision=3  # a scoped key: only live/a/
   ROUTE_UPDATE route=0 seqno=42 metric=inf      # held: unusable, still recovering
   ROUTE_END    route=0                          # let go: forget it on this stream
   ROUTE_END    route=0                          # <- the receiver echoes it back
@@ -301,10 +304,12 @@ loss never reports an END:
   seqno leaves room for the successor a request names. A session proves one
   key once, so rotating closes and reopens every session the origin has up
   (`exhausted_counters_rotate_the_identity`).
-  A session sends an origin's announcements in batches, each closed by a
-  floor: the revision as of which the stream's announcements for that route,
-  within the stream's interest prefix, are complete. A relay watches the
-  root, so one floor per stream always covers its view.
+  A session sends an origin's announcements in batches, each closed by its
+  floors: per region, the revision as of which the stream's announcements
+  for that route within the region are complete. A bare identity's region is
+  the stream's interest. A subject-qualified key certifies only within the
+  grant scopes it arrived through, and one key can arrive through grants
+  whose pattern unions differ, so its view carries one floor per scope.
 - A receiver keeps each session's last view, to apply the next batch, and
   merges every session's view into its own claim by claim: whichever view
   covers the claim with the newer floor decides. A floor certifies only the
@@ -340,11 +345,30 @@ loss never reports an END:
   merged from several grants stays hidden in each scope until that grant
   answers (`widening_behind_two_grants_waits_for_each_scope`). A floor
   outside the interest stays while it is newer than every floor inside,
-  since it may certify a wildcard above both at a later revision; an
-  interest that meets no grant scope keeps nothing (`sweep_scoped_handoff`);
-  and withdrawing one
-  origin's wildcard leaves another origin's copy
+  since it may certify a wildcard above both at a later revision; and
+  withdrawing one origin's wildcard leaves another origin's copy
   (`wildcard_claims_end_per_origin_and_are_certified_below`).
+- A node tracks the regions each neighbour's last view certifies. Only a
+  neighbour whose last finite advertisement is feasible here counts, held or
+  not: feasible edges strictly decrease the metric toward the origin, so two
+  nodes never keep a region alive through each other. While the node has a
+  usable route and every such neighbour has answered the current interest, a
+  region of its view that none of them certifies is let go: its last
+  certifier closed, ended its route, or no longer meets the interest. The
+  reader sees those claims go offline, not end, and the view is rebuilt from
+  the neighbours' last views, a collection of that region, since dropping a
+  floor alone would leave what it certified known at an older floor's
+  revision. A claim is available only through a certifier that is not held;
+  another scope's usable route cannot serve it. Closing one of two grants
+  under a subject takes its scope offline at the client
+  (`a_closed_grant_lets_its_scope_go`), and a relay downstream of two scoped
+  uplinks shows a lost scope unavailable while the starved relay holds, then
+  lets it go once a request recovers a route
+  (`a_relay_lets_go_of_a_scope_its_uplinks_lost`). An interest that meets no
+  grant scope certifies nothing, so its claims go offline
+  (`sweep_scoped_handoff`). Without this, the closed grant's claims stay
+  shown and available indefinitely, since no other grant can deliver their
+  withdrawal.
 - Per identity, a node is usable (a feasible selected route: announcements
   shown available), held, or let go. It is held while starved, or while a
   neighbor's held route has a last finite advertisement feasible here; it
@@ -399,7 +423,7 @@ loss never reports an END:
   and once churn stops every node shows each live origin's current claims and
   holds nothing for a dead one. `sweep_scoped_handoff` churns a client
   behind two scoped grants across interests inside, above, and outside both
-  scopes. Over `sweep_handoff`'s scenarios:
+  scopes, with no false END. Over `sweep_handoff`'s scenarios:
 
   | Rule | Revivals | False ENDs | Re-announcements | Reader events | Claim KiB |
   | --- | --- | --- | --- | --- | --- |
@@ -412,8 +436,9 @@ loss never reports an END:
 
 Decided with the maintainer 2026-10-16, from the handoff proof:
 
-1. Floor encoding: ✅ ANNOUNCE_FLOOR (Route ID, revision) closes each batch,
-   and ANNOUNCEs carry no revision. Rejected: a revision on every ANNOUNCE,
+1. Floor encoding: ✅ ANNOUNCE_FLOOR (Route ID, region, revision) closes
+   each batch, and ANNOUNCEs carry no revision. The region field came with
+   decision 7. Rejected: a revision on every ANNOUNCE,
    which adds bytes and removes no state, since a receiver still needs each
    session's last view to apply a batch from a sender whose own view jumped;
    and the floor on ROUTE_UPDATE, which ties claim churn to route processing.
@@ -460,6 +485,18 @@ Decided with the maintainer 2026-10-16, from the handoff proof:
    which grows with publisher churn times uptime on every relay that saw an
    identity, about 16 bytes each, until a restart; and Babel's source GC
    timer, which assumes stale echoes are gone by then rather than proving it.
+7. Scope coverage under one subject: ✅ per-region floors. ANNOUNCE_FLOOR
+   names the region it certifies, a suffix of the stream's interest prefix
+   (the scope met with the interest), each node tracks which regions each
+   feasible neighbour's last view certifies, and a region none certifies
+   goes offline. One key can arrive through grants whose pattern unions
+   differ, and without this a scope whose last session closed stays shown,
+   available, with no way to learn its withdrawal; a relay forwarding such a
+   key also needs one floor per scope on a stream. Rejected: one pattern
+   union per subject, which refuses or re-files a refresh that changes the
+   union and cannot be checked across relays; and deferring to the
+   implementation, which leaves the proof's freshness claim false for scoped
+   delivery.
 
 Why not a hold-down: #4644 retracted at once and re-announced a replacement
 after 1 s, which ended a downstream front whose only path ran through the
