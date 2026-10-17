@@ -148,8 +148,8 @@ and invalid samples still fail the command.
 On a hybrid CPU the same case measures far apart on performance and efficiency
 cores, so `run.sh` pins itself, and every build and benchmark process it starts,
 to the performance cores wherever the kernel lists them
-(`/sys/devices/cpu_core/cpus` on Intel hybrid parts), within any cpuset the run
-is confined to. The run prints the pinned cores beside its result and records
+(`/sys/devices/cpu_core/cpus` on Intel hybrid parts), within the CPUs it was
+already allowed, so an outer `taskset` or cpuset still narrows it. The run prints the pinned cores beside its result and records
 them as `affinity` in the metadata. A CPU with one core type runs unpinned.
 
 BASE comparisons run paired rounds (default three, `MOQ_BENCH_RUNTIME_ROUNDS`),

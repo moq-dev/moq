@@ -20,14 +20,25 @@ ROUNDS=$((10#$ROUNDS))
 
 # One case measures far apart on performance and efficiency cores, so on a
 # hybrid CPU pin this shell, and with it every build and benchmark process, to
-# the performance cores. The kernel only lists them on Intel hybrid parts, and
-# intersects the request with any cpuset, so report the mask it applied.
+# the performance cores it may already use. The kernel only lists them on Intel
+# hybrid parts.
 PINNED=
 if [[ -r /sys/devices/cpu_core/cpus ]]; then
-    if ! PINNED=$(taskset -pc "$(</sys/devices/cpu_core/cpus)" $$ | sed -n 's/.*new affinity list: //p'); then
-        printf 'cannot pin to the performance cores: none are in the allowed CPU set\n' >&2
-        exit 1
-    fi
+    PINNED=$(
+        python3 - "$$" <<'EOF'
+import os, sys
+pid = int(sys.argv[1])
+cores = set()
+for part in open("/sys/devices/cpu_core/cpus").read().strip().split(","):
+    first, _, last = part.partition("-")
+    cores.update(range(int(first), int(last or first) + 1))
+allowed = cores & os.sched_getaffinity(pid)
+if not allowed:
+    sys.exit("cannot pin to the performance cores: none are in the allowed CPU set")
+os.sched_setaffinity(pid, allowed)
+print(",".join(map(str, sorted(allowed))))
+EOF
+    )
 fi
 
 # nproc counts the allowed CPUs, unless OpenMP variables override it.
