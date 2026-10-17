@@ -4402,6 +4402,7 @@ dependencies = [
  "axum-server",
  "base64 0.23.1",
  "bytes",
+ "futures",
  "hang",
  "humantime",
  "libc",

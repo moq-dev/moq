@@ -2810,12 +2810,10 @@ pub(crate) struct TrackWeak {
 	name: Arc<str>,
 	state: kio::ProducerWeak<TrackState>,
 	// The producers' teardown guard, upgraded by [`Self::hold_finished`].
-	#[cfg_attr(not(feature = "async"), allow(dead_code))]
 	alive: std::sync::Weak<Alive>,
 }
 
 /// Keeps a finished track servable after its producers drop; see [`TrackWeak::hold_finished`].
-#[cfg(feature = "async")]
 pub(crate) struct Hold {
 	_alive: Arc<Alive>,
 	/// The track's [`Info::max_age`].
@@ -2826,7 +2824,6 @@ impl TrackWeak {
 	/// Hold the track open if it finished cleanly, so lookups keep finding it after its
 	/// producers drop. `None` for a track still live (even one with a declared end ahead of
 	/// its live edge), aborted, never published, or gone.
-	#[cfg(feature = "async")]
 	pub(crate) fn hold_finished(&self) -> Option<Hold> {
 		let alive = self.alive.upgrade()?;
 		if !alive.published.load(Ordering::Relaxed) {

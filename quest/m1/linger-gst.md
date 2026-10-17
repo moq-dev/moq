@@ -9,9 +9,10 @@ stale. Stopping the pipeline (a state change to NULL, or Ctrl-C under
 
 ## Plan
 
-Decided (2026-10-16): publishers call `broadcast::Producer::finish()` and
-await it; dropping the future is the interrupt. Tracks without a max-age
-add nothing to the wait.
+Decided (2026-10-16): publishers call `broadcast::Producer::finish()`, which
+returns a `broadcast::Finish` handle, and await `Finish::wait()`; dropping
+the handle is the interrupt and closes the broadcast. Tracks without a
+max-age add nothing to the wait.
 
 Check when the sink posts EOS to the bus. `gst-launch` exits on it, so
 posting it before the wait ends would cut the linger short; posting it after

@@ -184,9 +184,9 @@ impl PublishDecoder {
 	/// The avc3 split holds the final access unit until the next start code, so
 	/// stdin EOF must flush it explicitly.
 	///
-	/// `import ts --program all` owns its broadcasts, so it returns their linger; see
-	/// [`ts::Programs::finish`].
-	fn finish(&mut self) -> anyhow::Result<Option<Linger>> {
+	/// `import ts --program all` owns its broadcasts, so it returns their
+	/// [`Finish`](moq_net::broadcast::Finish) handles; see [`ts::Programs::finish`].
+	fn finish(&mut self) -> anyhow::Result<Vec<moq_net::broadcast::Finish>> {
 		match self {
 			Self::Avc3 { split, import } => {
 				let tail = split.flush(None)?;
@@ -195,11 +195,11 @@ impl PublishDecoder {
 			}
 			Self::Fmp4(d) => d.finish()?,
 			Self::Ts(d) => d.finish()?,
-			Self::TsPrograms(d) => return Ok(Some(Box::pin(d.finish()?))),
+			Self::TsPrograms(d) => return d.finish(),
 			Self::TsPassthrough(d) => d.finish()?,
 			Self::Flv(d) => d.finish()?,
 		}
-		Ok(None)
+		Ok(Vec::new())
 	}
 
 	/// Abort the tracks with `err` instead of finishing, so subscribers see the
@@ -215,10 +215,6 @@ impl PublishDecoder {
 		}
 	}
 }
-
-/// Keeps a finished import servable until its media is stale; see
-/// [`moq_net::broadcast::Producer::finish`].
-type Linger = std::pin::Pin<Box<dyn Future<Output = ()> + Send>>;
 
 /// Point a multi-program refusal at the flag that resolves it.
 fn suggest_program(err: anyhow::Error) -> anyhow::Error {
@@ -601,9 +597,9 @@ async fn decode(
 	let outcome = result.and_then(|()| decoder.finish());
 	// The drain can release the first catalog. Without one the input declared no track, and
 	// announcing would only advertise an empty broadcast.
-	let outcome = outcome.and_then(|linger| match &pending {
+	let outcome = outcome.and_then(|finished| match &pending {
 		Some(announce) if !announce.announce()? => anyhow::bail!("input ended before it declared a track"),
-		_ => Ok(linger),
+		_ => Ok(finished),
 	});
 	// The drain at end of input can publish a frame nothing vouched for, so the
 	// final snapshot is only complete after `finish`.
@@ -611,13 +607,14 @@ async fn decode(
 		log.finish(&stats);
 	}
 	match outcome {
-		Ok(linger) => {
+		Ok(mut finished) => {
 			catalog.finish()?;
-			let linger = linger.or_else(|| Some(Box::pin(broadcast?.finish())));
+			finished.extend(broadcast.map(moq_net::broadcast::Producer::finish));
 			drop((decoder, catalog));
-			if let Some(linger) = linger {
+			if !finished.is_empty() {
 				tracing::info!("input ended; serving the finished broadcast until its media is stale");
-				linger.await;
+				// Polled together, so each broadcast closes at its own expiry.
+				futures::future::join_all(finished.into_iter().map(moq_net::broadcast::Finish::wait)).await;
 			}
 			Ok(())
 		}

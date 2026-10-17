@@ -3,8 +3,9 @@
 //! A [Producer] creates tracks on demand: a [Consumer] subscribes by name, and the
 //! producer either serves a track it already has or is handed a [`track::Request`] to
 //! fill. Both handles are refcounted clones of one broadcast, which ends on
-//! [`Producer::close`], when the last producer drops, or once a `Producer::finish`
-//! has kept its finished tracks up until their media is stale.
+//! [`Producer::close`], when the last producer drops, or when the [`Finish`] that
+//! [`Producer::finish`] returns drops, having kept its finished tracks up until their
+//! media is stale.
 //!
 //! [Info] is the broadcast's static metadata, fixed for its lifetime.
 use crate::{cache, stats, track};
@@ -12,6 +13,7 @@ use std::{
 	collections::HashMap,
 	sync::Arc,
 	task::{Poll, ready},
+	time::Duration,
 };
 
 use crate::Error;
@@ -186,7 +188,7 @@ impl BroadcastState {
 ///
 /// A broadcast lives until [`Self::close`] or until the last [`Producer`] (or
 /// [`Dynamic`]) drops, whichever comes first; both end it the same way. A publisher
-/// whose input ended cleanly calls `finish` instead, so a subscriber still
+/// whose input ended cleanly calls [`Self::finish`] instead, so a subscriber still
 /// catching up can drain what it published. Children
 /// do *not* keep it alive: cloning a [`Consumer`] or holding a [`track::Producer`]
 /// does nothing for the broadcast's lifetime.
@@ -418,17 +420,12 @@ impl Producer {
 	/// End the broadcast cleanly, keeping it servable until its media goes stale.
 	///
 	/// A subscriber still catching up, one that read the final catalog late or is draining a
-	/// backlog, can still request and drain the finished tracks. The broadcast stays announced
-	/// and holds every track finished by now, so their producers can drop, for the longest of
-	/// their [`max_age`](track::Info::max_age)s. Then it [closes](Self::close). Tracks still
-	/// live, including one whose declared end the live edge has yet to reach, and tracks
-	/// without a max-age, add nothing to the wait.
-	///
-	/// The tracks are held, and the wait counts, from this call rather than the first poll.
-	/// Dropping the future closes the broadcast early, which is how an interrupt ends the
-	/// wait; a [`Self::close`] elsewhere ends it too.
-	#[cfg(feature = "async")]
-	pub fn finish(self) -> impl Future<Output = ()> + use<> {
+	/// backlog, can still request and drain the finished tracks. The returned [`Finish`] keeps
+	/// the broadcast announced and holds every track finished by now, so their producers can
+	/// drop. Keep it for its [`linger`](Finish::linger), then drop it to [close](Self::close)
+	/// the broadcast; `Finish::wait` does both on a runtime. Dropping it early is how an
+	/// interrupt ends the linger.
+	pub fn finish(self) -> Finish {
 		let held: Vec<track::Hold> = self
 			.state
 			.lock()
@@ -437,17 +434,10 @@ impl Producer {
 			.filter_map(track::TrackWeak::hold_finished)
 			.collect();
 		let linger = held.iter().filter_map(|hold| hold.max_age).max().unwrap_or_default();
-		let expired = super::clock::sleep(linger);
-		let closing = CloseOnDrop(self);
-		async move {
-			{
-				let expired = std::pin::pin!(expired);
-				let closed = std::pin::pin!(closing.0.alive.token.closed());
-				futures::future::select(expired, closed).await;
-			}
-			// Closed before the tracks are let go, so a late lookup answers `Unroutable`.
-			drop(closing);
-			drop(held);
+		Finish {
+			producer: self,
+			_held: held,
+			linger,
 		}
 	}
 
@@ -479,14 +469,71 @@ impl Producer {
 	}
 }
 
-/// Closes the broadcast when dropped, so abandoning [`Producer::finish`] ends it too.
+/// A cleanly ended broadcast, still announced and serving its finished tracks.
+///
+/// Returned by [`Producer::finish`]. Dropping it closes the broadcast, then lets the held
+/// tracks go, so a late lookup answers [`Error::Unroutable`].
+pub struct Finish {
+	producer: Producer,
+	// Dropped after `Drop::drop` closes the broadcast.
+	_held: Vec<track::Hold>,
+	linger: Duration,
+}
+
+impl Finish {
+	/// How long to keep this handle: the longest [`max_age`](track::Info::max_age) of the
+	/// held tracks. Tracks still live, including one whose declared end the live edge has
+	/// yet to reach, and tracks without a max-age, add nothing.
+	pub fn linger(&self) -> Duration {
+		self.linger
+	}
+
+	/// `Ready` once the broadcast closed elsewhere, so the linger is over early.
+	pub fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<()> {
+		self.producer.alive.token.poll_closed(waiter)
+	}
+
+	/// Keep the broadcast up for [`Self::linger`] on the ambient runtime's clock, or until it
+	/// closes elsewhere, then close it. The linger counts from the first poll.
+	#[cfg(feature = "async")]
+	pub async fn wait(self) {
+		let linger = Linger {
+			finish: self,
+			until: None,
+		};
+		#[cfg(not(test))]
+		crate::time::run(linger).await;
+		#[cfg(test)]
+		crate::time::run_sim(linger).await;
+	}
+}
+
+impl Drop for Finish {
+	fn drop(&mut self) {
+		// Closed before `_held` drops, so no lookup finds a track after the linger.
+		self.producer.close();
+	}
+}
+
+/// Drives [`Finish::wait`] with the time it is polled with.
 #[cfg(feature = "async")]
-struct CloseOnDrop(Producer);
+struct Linger {
+	finish: Finish,
+	// Set on the first poll; `Some(None)` when the linger overflows the clock.
+	until: Option<Option<crate::time::Instant>>,
+}
 
 #[cfg(feature = "async")]
-impl Drop for CloseOnDrop {
-	fn drop(&mut self) {
-		self.0.close();
+impl crate::time::Driver for Linger {
+	fn poll(&mut self, now: crate::time::Instant, waiter: &kio::Waiter) -> Result<Option<crate::time::Instant>, Error> {
+		if self.finish.poll_closed(waiter).is_ready() {
+			return Err(Error::Closed);
+		}
+		let linger = self.finish.linger;
+		match *self.until.get_or_insert_with(|| now.checked_add(linger)) {
+			Some(until) if now >= until => Err(Error::Closed),
+			until => Ok(until),
+		}
 	}
 }
 
@@ -1924,7 +1971,9 @@ mod test {
 		tail.finish_at(crate::track::Position::group(2)).unwrap();
 
 		let start = moq_net_sim::now();
-		let finish = moq_net_sim::spawn(producer.finish());
+		let finish = producer.finish();
+		assert_eq!(finish.linger(), Duration::from_secs(5));
+		let finish = moq_net_sim::spawn(finish.wait());
 		drop((video, audio, catalog));
 
 		moq_net_sim::sleep(Duration::from_secs(4)).await;
@@ -1940,11 +1989,10 @@ mod test {
 		drop(tail);
 	}
 
-	/// Dropping the wait, the library's interrupt, closes the broadcast at once, even
+	/// Dropping the handle, the library's interrupt, closes the broadcast at once, even
 	/// while another producer handle is alive.
-	#[moq_net_sim::test]
-	#[cfg(feature = "async")]
-	async fn dropping_finish_closes_early() {
+	#[test]
+	fn dropping_finish_closes_early() {
 		let producer = Info::new().produce();
 		let consumer = producer.consume();
 		let track = producer
@@ -1959,5 +2007,59 @@ mod test {
 		assert!(!consumer.is_closed());
 		drop(finish);
 		assert!(consumer.is_closed());
+	}
+
+	/// A caller without a runtime keeps the handle until its own clock passes the linger,
+	/// serving the finished track until then, and drops it to close the broadcast.
+	#[test]
+	fn a_runtime_free_caller_drops_finish_on_its_own_clock() {
+		let producer = Info::new().produce();
+		let consumer = producer.consume();
+		let track = producer
+			.create_track(
+				"video",
+				crate::track::Info::timed().with_max_age(Duration::from_secs(3)),
+			)
+			.unwrap();
+		track.append_group().unwrap().finish().unwrap();
+		track.finish().unwrap();
+
+		let start = crate::time::Instant::now();
+		let finish = producer.finish();
+		drop(track);
+		let deadline = start + finish.linger();
+		let mut now = start;
+		while now < deadline {
+			assert!(finish.poll_closed(&kio::Waiter::noop()).is_pending());
+			assert!(consumer.track("video").is_ok(), "served {:?} in", now - start);
+			now += Duration::from_secs(1);
+		}
+		drop(finish);
+		assert!(consumer.is_closed());
+		assert!(matches!(consumer.track("video"), Err(Error::Unroutable)));
+	}
+
+	/// A close elsewhere ends the linger early, for a poller and for [`Finish::wait`].
+	#[moq_net_sim::test]
+	#[cfg(feature = "async")]
+	async fn closing_elsewhere_ends_the_linger() {
+		let producer = Info::new().produce();
+		let track = producer
+			.create_track(
+				"video",
+				crate::track::Info::timed().with_max_age(Duration::from_secs(30)),
+			)
+			.unwrap();
+		track.finish().unwrap();
+		let other = producer.clone();
+		let finish = producer.finish();
+		assert!(finish.poll_closed(&kio::Waiter::noop()).is_pending());
+
+		let start = moq_net_sim::now();
+		let wait = moq_net_sim::spawn(finish.wait());
+		moq_net_sim::sleep(Duration::from_secs(1)).await;
+		other.close();
+		wait.await.unwrap();
+		assert_eq!(moq_net_sim::now() - start, Duration::from_secs(1));
 	}
 }

@@ -15,10 +15,11 @@ announced next to its replacement.
 
 Decided (2026-10-16):
 
-- Publishers call `broadcast::Producer::finish()` and await it; dropping
-  the future is the interrupt. Tracks without a max-age add nothing to the
-  wait. `ts::Programs::finish` already returns the linger for every
-  program; `moq-srt` drops it today, keeping its close-now behavior.
+- Publishers call `broadcast::Producer::finish()`, which returns a
+  `broadcast::Finish` handle, and await `Finish::wait()`; dropping the
+  handle is the interrupt. Tracks without a max-age add nothing to the
+  wait. `ts::Programs::finish` already returns a `Finish` for every
+  program; `moq-srt` drops them today, keeping its close-now behavior.
 - A newer epoch cuts the old linger short. Requests on a replaced instance
   already end with an error, because instances are never stitched, so the
   old instance has nothing left to serve once replaced. Recommended: put the

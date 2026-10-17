@@ -11,18 +11,22 @@ finished tracks until their media is stale. An interrupt ends the wait early.
 
 Decided (2026-10-16), mirroring the Rust library:
 
-- `finish()` is a call next to `close()` that waits for the linger, as
-  `broadcast::Producer::finish` does in Rust. Cancelling the wait is the
-  interrupt and closes at once. Rejected: a linger helper that each app
-  holds and sleeps on, because every publisher would repeat the hold, and an
+- `finish()` consumes the broadcast producer and returns a finish handle,
+  as `broadcast::Producer::finish` returns `broadcast::Finish` in Rust. The
+  handle holds the finished tracks and keeps the broadcast announced; it
+  exposes `linger()` (how long to keep it) and an async `wait()` that
+  closes after the linger. Closing or dropping the handle is the interrupt
+  and closes at once. Rejected: a linger helper that each app holds and
+  sleeps on, because every publisher would repeat the hold, and an
   origin-held linger, because it ties the session to what the origin holds.
 - Tracks without a max-age add nothing to the wait. The alternative,
   `cache_duration`, defaults to `MAX` and would linger forever.
 
-Expose it as an async method on `MoqBroadcastProducer` and map cancellation
-to each language's idiom (a dropped future, a cancelled task or coroutine).
-The C ABI has no futures, so check how `moq-c` already shapes async calls
-and follow it. Report the API shape across languages before landing.
+Expose the handle as a `moq-ffi` object with `linger()`, async `wait()` and
+`close()`, and map cancelling `wait()` to each language's idiom (a dropped
+future, a cancelled task or coroutine). The C ABI has no futures, but it
+needs none: a C caller keeps the handle for `linger()` on its own clock and
+then closes it. Report the API shape across languages before landing.
 
 Follow the Cross-Package Sync row for `rs/moq-ffi`: hand-written wrappers
 in py, swift, kt, go, dart, c and cpp, plus the `doc/lib` pages. Check
