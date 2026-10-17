@@ -27,8 +27,10 @@ See the [epic](/quest/m1/compress/README.md) for the decisions.
   drop them, since all they save is some decode CPU. Report the numbers in
   the PR.
 - moq-json and `@moq/json` encoders and decoders drop `Config::compression`
-  and their direct codec calls (`snapshot`, `window`, `stream`); a caller
-  sets `compress` on the track. Delete `rs/moq-mux/src/binary.rs` and its
+  and their direct codec calls (`snapshot`, `window`, `stream`). JSON tracks
+  compress by default (maintainer, 2026-10-17: "always useful"): wherever
+  moq-json, `@moq/json`, or moq-mux's JSON helpers create a track's `Info`,
+  `compress` is `true` unless the caller turns it off. Delete `rs/moq-mux/src/binary.rs` and its
   users; opaque bytes are a plain track.
 - Delete `rs/moq-flate`, `js/flate`, `rs/hang/src/catalog/compression.rs`,
   and the moq-ffi flate tracks with every wrapper's `flate` namespace and

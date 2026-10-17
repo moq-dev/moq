@@ -57,7 +57,8 @@ Every interview prompt and the selected answer (✅) are in the planning PR.
   references it for the codec.
 - **moq-flate and @moq/flate fold into moq-net and js/net.** The snapshot and
   stream track modes go away: a compressed track replaces them. moq-json and
-  `@moq/json` drop `Config::compression` (the track flag replaces it), and
+  `@moq/json` drop `Config::compression` (the track flag replaces it, on by
+  default for JSON tracks), and
   `moq-mux::binary` is deleted: opaque bytes are a plain track. Decided on
   review of the planning PR.
 - **Datagrams** compress alone with a fresh window, never against another
