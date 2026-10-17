@@ -47,4 +47,5 @@ how it looks in that language:
 - **Connection stats** and **errors** that tell an auth rejection (don't retry) from a shutdown or a transport failure.
 
 Dart is the exception on codecs: its published binaries carry no encoder or
-decoder, so it moves already-encoded frames.
+decoder, so it moves already-encoded frames. C's audio decoder neither takes
+nor reports a playout delay.

@@ -554,6 +554,7 @@ fn audio_config(catalog_audio: crate::media::MoqAudio) -> Result<hang::catalog::
 	config.bitrate = catalog_audio.bitrate;
 	config.description = catalog_audio.description.map(Into::into);
 	config.container = catalog_audio.container.into();
+	config.jitter = catalog_audio.jitter_us.map(Duration::from_micros);
 	Ok(config)
 }
 
@@ -621,6 +622,7 @@ mod tests {
 			bitrate: None,
 			enabled: true,
 			container: MoqContainer::Legacy,
+			jitter_us: None,
 		}
 	}
 
@@ -656,6 +658,16 @@ mod tests {
 		// In the catalog, and decodable in a browser, but not by moq-audio.
 		let error = audio_config(catalog_audio("flac")).unwrap_err();
 		assert!(matches!(error, MoqError::Unsupported));
+	}
+
+	/// The advertised jitter floors the estimated playout delay, so it must survive the trip
+	/// through the FFI record.
+	#[test]
+	fn audio_config_keeps_the_advertised_jitter() {
+		let mut audio = catalog_audio("opus");
+		audio.jitter_us = Some(60_000);
+		let config = audio_config(audio).unwrap();
+		assert_eq!(config.jitter, Some(Duration::from_millis(60)));
 	}
 
 	#[test]

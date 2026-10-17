@@ -137,6 +137,10 @@ pub struct MoqAudio {
 	#[uniffi(default = true)]
 	pub enabled: bool,
 	pub container: MoqContainer,
+	/// The publisher's worst-case delay between a frame being ready and its flush, in
+	/// microseconds, which floors an estimated playout delay. Absent means frames flush at once.
+	#[uniffi(default = None)]
+	pub jitter_us: Option<u64>,
 }
 
 /// A payload and the time it should be presented.
@@ -509,6 +513,9 @@ pub(crate) fn convert_catalog(catalog: &moq_mux::catalog::hang::Catalog<moq_mux:
 					bitrate: config.bitrate,
 					enabled: config.enabled,
 					container: MoqContainer::from_catalog(&config.container)?,
+					jitter_us: config
+						.jitter
+						.map(|jitter| jitter.as_micros().try_into().unwrap_or(u64::MAX)),
 				},
 			))
 		})

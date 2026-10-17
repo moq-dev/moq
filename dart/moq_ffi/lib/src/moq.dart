@@ -432,6 +432,7 @@ class MoqAudio {
   final int? bitrate;
   final bool enabled;
   final MoqContainer container;
+  final int? jitterUs;
   MoqAudio({
     this.label = null,
     this.broadcast = null,
@@ -443,6 +444,7 @@ class MoqAudio {
     this.bitrate,
     this.enabled = true,
     required this.container,
+    this.jitterUs = null,
   });
 }
 
@@ -503,6 +505,11 @@ class FfiConverterMoqAudio {
     );
     final container = container_lifted.value;
     new_offset += container_lifted.bytesRead;
+    final jitterUs_lifted = FfiConverterOptionalUInt64.read(
+      Uint8List.view(buf.buffer, new_offset),
+    );
+    final jitterUs = jitterUs_lifted.value;
+    new_offset += jitterUs_lifted.bytesRead;
     return LiftRetVal(
       MoqAudio(
         label: label,
@@ -515,6 +522,7 @@ class FfiConverterMoqAudio {
         bitrate: bitrate,
         enabled: enabled,
         container: container,
+        jitterUs: jitterUs,
       ),
       new_offset - buf.offsetInBytes,
     );
@@ -532,6 +540,7 @@ class FfiConverterMoqAudio {
         FfiConverterOptionalUInt64.allocationSize(value.bitrate) +
         FfiConverterBool.allocationSize(value.enabled) +
         FfiConverterMoqContainer.allocationSize(value.container) +
+        FfiConverterOptionalUInt64.allocationSize(value.jitterUs) +
         0;
     final buf = Uint8List(total_length);
     write(value, buf);
@@ -580,6 +589,10 @@ class FfiConverterMoqAudio {
       value.container,
       Uint8List.view(buf.buffer, new_offset),
     );
+    new_offset += FfiConverterOptionalUInt64.write(
+      value.jitterUs,
+      Uint8List.view(buf.buffer, new_offset),
+    );
     return new_offset - buf.offsetInBytes;
   }
 
@@ -594,6 +607,7 @@ class FfiConverterMoqAudio {
         FfiConverterOptionalUInt64.allocationSize(value.bitrate) +
         FfiConverterBool.allocationSize(value.enabled) +
         FfiConverterMoqContainer.allocationSize(value.container) +
+        FfiConverterOptionalUInt64.allocationSize(value.jitterUs) +
         0;
   }
 }
