@@ -2,7 +2,7 @@
 import * as Catalog from "@moq/hang/catalog";
 import * as Container from "@moq/hang/container";
 import { check, payload } from "../fixture.ts";
-import { longTasks } from "./observe.ts";
+import { longTasks, nextTask } from "./observe.ts";
 
 /** One CMAF workload: a track kind, its frame sizes, and how often the whole set repeats. */
 export interface Cmaf {
@@ -58,9 +58,11 @@ function duration(): number {
 	return config.kind === "video" ? init.timescale / 30 : init.timescale / 50;
 }
 
-function encode(): Phase {
+async function encode(): Promise<Phase> {
 	if (!config) throw new Error("encode before prepare");
 	const step = duration();
+	// The phase runs alone in its own task, so its long task is neither shared nor missed.
+	await nextTask();
 	const start = performance.now();
 	fragments = [];
 	let bytes = 0;
@@ -81,6 +83,7 @@ function encode(): Phase {
 		}
 	}
 	const end = performance.now();
+	await nextTask();
 	const segment = init;
 	if (!segment) throw new Error("encode before prepare");
 	// Checked after the interval: the encoder must carry every frame byte for byte.
@@ -94,9 +97,10 @@ function encode(): Phase {
 	};
 }
 
-function decode(): Phase {
+async function decode(): Promise<Phase> {
 	const segment = init;
 	if (!config || !segment || fragments.length !== frames.length) throw new Error("decode before encode");
+	await nextTask();
 	const start = performance.now();
 	let decoded: Container.Cmaf.Sample[][] = [];
 	let bytes = 0;
@@ -107,6 +111,7 @@ function decode(): Phase {
 		});
 	}
 	const end = performance.now();
+	await nextTask();
 	return {
 		fragments: config.iterations * fragments.length,
 		bytes,
