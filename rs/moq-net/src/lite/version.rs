@@ -321,14 +321,6 @@ impl Version {
 			_ => timescale,
 		}
 	}
-
-	/// Whether a received timestamp may be a send time rather than media time: Lite05 and
-	/// Lite06 stamp an untimed track's frames with their send time (see
-	/// [`Self::wire_timescale`]), which needn't rise with sequence, so a receiver can't hold
-	/// them to the rewind rule.
-	pub(crate) fn has_send_times(self) -> bool {
-		matches!(self, Self::Lite05 | Self::Lite06)
-	}
 }
 
 impl fmt::Display for Version {

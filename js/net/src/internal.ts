@@ -182,6 +182,11 @@ export const hooks: {
 	 * any other second end. Mirrors the Rust `finish_at_pending`; assigned by `track.ts`.
 	 */
 	endTrack: (producer: Producer, end: Location) => void;
+	/**
+	 * Mark a track as a session's copy of a remote one: its groups are never checked for a
+	 * rewind, since a received timestamp may not be media time.
+	 */
+	receiveTrack: (producer: Producer) => void;
 	/** Mint a track {@link Request}; assigned by `track.ts`. */
 	makeRequest: (options: TrackRequestOptions) => Request;
 	/** Access the existing producer while a request awaits immutable wire metadata. */
@@ -225,11 +230,6 @@ export const hooks: {
 	admitGroupStart: (group: GroupProducer, admit: (start: Timestamp) => () => void) => void;
 	/** Return a group producer's first timestamp, if it already holds a frame. */
 	groupStart: (group: GroupProducer) => Timestamp | undefined;
-	/**
-	 * Accept a group's first frame without checking it against any track it joins, so it
-	 * bounds none of their neighbors either: for a wire whose timestamps may be send times.
-	 */
-	skipRewindCheck: (group: GroupProducer) => void;
 	/** Keep a mirror of a group accepted unverified below its track's eviction watermark out of media-time expiry. */
 	unverifyGroup: (group: GroupConsumer) => void;
 	/** Return a group's first timestamp, retained even after its first frame is read. */
@@ -262,6 +262,9 @@ export const hooks: {
 	/** Name the epoch of the route an origin resolved a broadcast handle through. */
 	stampEpoch: (target: BroadcastConsumer, epoch: Epoch.Valid | undefined) => void;
 } = {
+	receiveTrack: () => {
+		throw new Error("track.ts not loaded");
+	},
 	endTrack: () => {
 		throw new Error("track.ts not loaded");
 	},
@@ -299,9 +302,6 @@ export const hooks: {
 		throw new Error("group.ts not loaded");
 	},
 	groupStart: () => {
-		throw new Error("group.ts not loaded");
-	},
-	skipRewindCheck: () => {
 		throw new Error("group.ts not loaded");
 	},
 	unverifyGroup: () => {

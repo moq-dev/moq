@@ -429,15 +429,6 @@ export function hasLargest(version: Version): boolean {
 }
 
 /**
- * Whether a received timestamp may be a send time rather than media time: lite-05 and lite-06
- * stamp an untimed track's frames with their send time (see {@link wireTimescale}), which
- * needn't rise with sequence, so a receiver can't hold them to the rewind rule.
- */
-export function hasSendTimes(version: Version): boolean {
-	return version === Version.DRAFT_05 || version === Version.DRAFT_06;
-}
-
-/**
  * The timescale the wire carries for a track with `timescale`, or `undefined` when its frames
  * and datagrams carry no timestamp. Lite-05 and lite-06 always carry one, so an untimed track
  * declares milliseconds there and its payloads carry their send times instead.

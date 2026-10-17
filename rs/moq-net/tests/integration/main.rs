@@ -33,6 +33,7 @@ mod mesh_withdraw;
 mod model;
 mod multi_cdn;
 mod quiet_catalog;
+mod received_rewind;
 mod rejoin;
 mod replacement;
 mod request_caps;

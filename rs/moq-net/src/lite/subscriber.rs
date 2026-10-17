@@ -915,9 +915,6 @@ impl<S: crate::transport::poll::Session> GroupRecv<S> {
 						// from where the publisher said they start so a front continuing the
 						// group across routes lines them up.
 						group.start_at(hdr.frame_start)?;
-						if self.subscriber.version.has_send_times() {
-							group.skip_rewind_check();
-						}
 						(group, entry.producer.clone(), entry.timescale, reading)
 					};
 
@@ -986,11 +983,6 @@ impl<S: crate::transport::poll::Session> GroupRecv<S> {
 						Err(err) => {
 							tracing::debug!(%err, group = %group.sequence, "group error");
 							let _ = group.abort(err.clone());
-							// A timestamp that doesn't fit the track (one that rewinds, say)
-							// condemns the track, not just this group.
-							if matches!(err, Error::TimestampMismatch) {
-								let _ = track.clone().abort(err.clone());
-							}
 							Err(err)
 						}
 					};
@@ -2228,8 +2220,8 @@ mod tests {
 		}
 	}
 
-	/// Receive group 5 starting at 500ms over `version`, on a timed track whose group 4
-	/// starts at 1000ms, returning the stream's result and the track.
+	/// Receive group 5 starting at 500ms over `version`, on a received timed track whose
+	/// group 4 starts at 1000ms, returning the stream's result and the track.
 	async fn receive_rewind(version: Version) -> (Result<(), Error>, track::Producer) {
 		use crate::transport::poll::Session as _;
 
@@ -2264,6 +2256,7 @@ mod tests {
 			"video",
 			crate::track::Info::timed(),
 		);
+		track.received();
 		let mut before = track.create_group(4u64.into()).unwrap();
 		before
 			.write_frame(Timestamp::from_millis(1000).unwrap(), &b"before"[..])
@@ -2284,28 +2277,16 @@ mod tests {
 		(res, track)
 	}
 
-	/// A received group whose first frame rewinds past the group before it condemns the
-	/// track, not just its stream, and the session stays up.
+	/// A received timestamp may not be media time (lite-05/06 untimed tracks carry send
+	/// times), so a received group that rewinds is accepted at every version and the track
+	/// stays open. Only a local publisher's writes refuse a rewind.
 	#[moq_net_sim::test]
-	async fn a_rewound_group_aborts_the_track() {
-		let (res, track) = receive_rewind(Version::Lite07).await;
-		assert!(matches!(res, Err(Error::TimestampMismatch)), "{res:?}");
-		assert!(matches!(track.closed().now_or_never(), Some(Error::TimestampMismatch)));
-	}
-
-	/// Lite-06 stamps an untimed track's frames with their send time, and groups served
-	/// concurrently go out in any order, so a later group can carry an earlier stamp. It is
-	/// accepted unchecked and bounds nothing, while a local write still refuses a rewind.
-	#[moq_net_sim::test]
-	async fn a_lite06_group_sent_out_of_order_is_accepted_unchecked() {
-		let (res, track) = receive_rewind(Version::Lite06).await;
-		res.unwrap();
-		assert!(track.closed().now_or_never().is_none());
-
-		// Group 5 lends no 500ms floor, so group 6 is held to group 4's 1000ms.
-		let mut after = track.create_group(6u64.into()).unwrap();
-		let res = after.write_frame(Timestamp::from_millis(600).unwrap(), &b"after"[..]);
-		assert!(matches!(res, Err(Error::TimestampMismatch)), "{res:?}");
+	async fn a_received_rewind_is_accepted_at_every_version() {
+		for version in [Version::Lite05, Version::Lite06, Version::Lite07] {
+			let (res, track) = receive_rewind(version).await;
+			res.unwrap_or_else(|err| panic!("{version}: {err:?}"));
+			assert!(track.closed().now_or_never().is_none(), "{version}");
+		}
 	}
 
 	/// An idle copy that resubscribes gets its newest cached group again. That stream only
@@ -5554,6 +5535,7 @@ impl<S: crate::transport::poll::Session> ServeLoop<S> {
 			false => request,
 		};
 		let serving = request.accept(info);
+		serving.received();
 		Self {
 			demand: serving.demand(),
 			serving,
@@ -6118,9 +6100,6 @@ impl<S: crate::transport::poll::Session> kio::Task for FetchServeRun<S> {
 						stream.writer.abort(&err);
 						let _ = producer.abort(err);
 						return Poll::Ready(());
-					}
-					if self.serve.subscriber.version.has_send_times() {
-						producer.skip_rewind_check();
 					}
 
 					self.state = FetchRunState::Ingest {

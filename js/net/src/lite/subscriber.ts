@@ -16,7 +16,6 @@ import {
 	StreamCode,
 	StreamError,
 	sessionCause,
-	TimestampMismatch,
 	unauthorized,
 } from "../error.ts";
 import * as netGroup from "../group.ts";
@@ -64,7 +63,6 @@ import {
 	hasFetchMaxDelay,
 	hasOrder,
 	hasProbeRtt,
-	hasSendTimes,
 	hasStreamCount,
 	resolvesStart,
 	updateSupported,
@@ -840,6 +838,7 @@ export class Subscriber {
 			timescale.set(0);
 			drainOk = true;
 		}
+		hooks.receiveTrack(producer);
 
 		// Register before opening SUBSCRIBE so a racing GROUP stream finds the entry.
 		const entry: SubscribeEntry = {
@@ -1339,9 +1338,6 @@ export class Subscriber {
 
 		const { track, timescale, tail } = entry;
 		const producer = new netGroup.Producer(group.sequence);
-		// A stream resumed past frame 0 doesn't carry where the group began, and lite-05/06
-		// timestamps may be send times: neither is held to the rewind rule.
-		if (group.frameStart !== 0 || hasSendTimes(this.version)) hooks.skipRewindCheck(producer);
 		const read = tail.open(group.sequence);
 
 		try {
@@ -1378,9 +1374,6 @@ export class Subscriber {
 		} catch (err: unknown) {
 			const e = await sessionCause(this.#quic, err);
 			producer.close(e);
-			// A timestamp that doesn't fit the track (one that rewinds, say) condemns the
-			// track, not just this group.
-			if (e instanceof TimestampMismatch) track.close(e);
 			stream.stop(e);
 		} finally {
 			read();

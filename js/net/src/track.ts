@@ -607,6 +607,9 @@ export class Producer {
 	// group above it is checked against it as well as its cached neighbors; one at or below
 	// it may have lost its lower bound. One entry, so nothing grows with the cache.
 	#evicted?: Start;
+	// A session's copy of a remote track, whose groups are never checked for a rewind: a
+	// received timestamp may not be media time (a lite-05/06 untimed track carries send times).
+	#remote = false;
 	// When the cache was last scanned. See #prune.
 	#pruned = Number.NEGATIVE_INFINITY;
 	// When the track closed, which restarts the former newest group's idle window. See #prune.
@@ -632,6 +635,9 @@ export class Producer {
 
 	static {
 		hooks.endTrack = (producer, end) => producer.#endPending(end);
+		hooks.receiveTrack = (producer) => {
+			producer.#remote = true;
+		};
 		// Anything written before binding still counts, so the namespace never goes backwards.
 		bindProducerSequence = (producer, sequence) => {
 			const own = producer.#sequence;
@@ -995,7 +1001,9 @@ export class Producer {
 	#publish(group: GroupProducer, start?: Timestamp, late = false): void {
 		const entry: CachedGroup = { group, mirrors: new Map<TrackState, GroupConsumer>(), arrived: now() };
 		const sequence = group.sequence;
-		if (start) {
+		if (this.#remote) {
+			// Only a local publisher's writes are checked.
+		} else if (start) {
 			this.#record(entry, start, late);
 		} else {
 			hooks.admitGroupStart(group, (start) => {
@@ -1096,7 +1104,7 @@ export class Producer {
 		this.#bind(group);
 		this.#cap(group);
 		// A group written before it joined is checked here, before it is cached or fanned out.
-		const start = hooks.groupStart(group);
+		const start = this.#remote ? undefined : hooks.groupStart(group);
 		const late = start !== undefined && this.#admit(group.sequence, start);
 
 		const existing = this.#cached.get(group.sequence);

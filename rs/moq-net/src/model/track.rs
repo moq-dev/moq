@@ -340,6 +340,10 @@ pub(crate) struct TrackState {
 	// [`Subscriber::poll_start`]) wait on it; everything else treats the floor as usual.
 	start_pending: bool,
 
+	// A session's copy of a remote track. Its groups skip the rewind check: a received
+	// timestamp may not be media time (a lite-05/06 untimed track carries send times).
+	received: bool,
+
 	// Whether the cache reflects the live feed: readers get nothing from it while it does
 	// not, since how stale it is cannot be told; fetches still do. A track is live from
 	// creation, and only a session's copy goes idle: when its upstream subscription ends
@@ -574,13 +578,17 @@ impl TrackState {
 	/// so the watermark caps it instead.
 	///
 	/// Usually one group lookup each way; only unstarted or partial neighbors are skipped.
-	pub(crate) fn neighbors(&self, sequence: u64) -> Neighbors {
+	/// `None` on a received track, which only a local publisher's writes are checked on.
+	pub(crate) fn neighbors(&self, sequence: u64) -> Option<Neighbors> {
+		if self.received {
+			return None;
+		}
 		let below = self.lookup.range(..sequence).rev().find_map(|(_, slot)| slot.bound());
 		let above = self
 			.lookup
 			.range((Bound::Excluded(sequence), Bound::Unbounded))
 			.find_map(|(_, slot)| slot.bound());
-		match self.evicted {
+		Some(match self.evicted {
 			Some((evicted, start)) if sequence <= evicted => Neighbors {
 				floor: below,
 				ceiling: Some(above.map_or(start, |above| above.min(start))),
@@ -596,7 +604,7 @@ impl TrackState {
 				ceiling: above,
 				late: false,
 			},
-		}
+		})
 	}
 
 	/// Take group `sequence` out of the cache, raising the eviction watermark to its start.
@@ -2335,6 +2343,15 @@ impl Producer {
 	pub fn start_at(&mut self, sequence: impl Into<Option<u64>>) -> Result<()> {
 		self.modify()?.set_start(sequence.into(), false);
 		Ok(())
+	}
+
+	/// Mark this track as a session's copy of a remote one: its groups are never checked
+	/// for a rewind, which only a local publisher's writes refuse.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	pub(crate) fn received(&self) {
+		if let Ok(mut state) = self.modify() {
+			state.received = true;
+		}
 	}
 
 	/// Readers get nothing from the cache until [`Self::set_live`]: the upstream

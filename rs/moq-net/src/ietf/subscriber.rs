@@ -2765,6 +2765,7 @@ where
 				(request.accept(info), dynamic)
 			}
 		};
+		track.received();
 		// A live join starts at the publisher's edge; an absolute one where it asked. With
 		// no Largest the join skips nothing, so every group is owed: a lower one's stream
 		// may still arrive after a higher one's.
@@ -3449,6 +3450,7 @@ where
 			ok.properties.max_cache_duration,
 			ok.properties.priority,
 		));
+		track.received();
 		// Nothing feeds this copy live: what it caches is fetched, never the live edge.
 		track.set_idle();
 		Some(Target::Resume(Idle {
@@ -3627,13 +3629,12 @@ where
 				// Return the refusal to the dispatcher so it sends STOP_SENDING.
 				return Err(err);
 			}
-			// The track is malformed, not just this group, so no later group is trusted. A
-			// timestamp that doesn't fit the track (one that rewinds, say) is the same.
-			Err(err @ (Error::MalformedTrack | Error::TimestampMismatch)) => {
-				tracing::warn!(%err, group = %producer.sequence, "malformed track");
-				let _ = producer.abort(err.clone());
-				let _ = track.abort(err.clone());
-				return Err(err);
+			// The track is malformed, not just this group, so no later group is trusted.
+			Err(Error::MalformedTrack) => {
+				tracing::warn!(group = %producer.sequence, "malformed track");
+				let _ = producer.abort(Error::MalformedTrack);
+				let _ = track.abort(Error::MalformedTrack);
+				return Err(Error::MalformedTrack);
 			}
 			// The peer reset the stream, the transport failed, or the track went away.
 			Err(err) => {
@@ -4133,8 +4134,8 @@ where
 					*state = Fill::Done;
 				}
 				// As for a subgroup object: the track is malformed, not just this fill.
-				if matches!(err, Error::MalformedTrack | Error::TimestampMismatch) {
-					let _ = track.abort(err.clone());
+				if matches!(err, Error::MalformedTrack) {
+					let _ = track.abort(Error::MalformedTrack);
 				}
 				return Err(err);
 			}
@@ -10778,6 +10779,7 @@ mod stitch_tests {
 				"video",
 				track::Info::default().with_timescale(timescale.map(|_| Timescale::MICRO)),
 			);
+			track.received();
 			let fill = kio::Producer::new(fill);
 
 			{
@@ -12407,10 +12409,10 @@ mod stitch_tests {
 		assert!(h.session.log.closes().is_empty());
 	}
 
-	/// A group whose first object rewinds past the group before it condemns the track,
-	/// not just its stream, and the session stays up.
+	/// A received group whose first object rewinds past the group before it is accepted:
+	/// only a local publisher's writes refuse a rewind.
 	#[moq_net_sim::test]
-	async fn a_rewound_group_aborts_the_track() {
+	async fn a_received_rewind_is_accepted() {
 		use futures::FutureExt;
 
 		let mut h = Harness::new(Fill::Done, vec![draft18_subgroup(SEQUENCE, true, 0, &[b"rewound"])]);
@@ -12420,14 +12422,22 @@ mod stitch_tests {
 		before.write_frame(timestamp(4000), b"before".as_slice()).unwrap();
 		before.finish().unwrap();
 
+		let mut consumer = h.track.subscribe(None);
+		assert_eq!(read_group(&mut consumer).await.0, SEQUENCE - 1);
+
 		let mut stream = read_draft18(&h.session).await;
-		let res = h.subscriber.clone().recv_group(&mut stream).await;
-		assert!(matches!(res, Err(Error::TimestampMismatch)), "{res:?}");
-		assert!(matches!(
-			h.track.closed().now_or_never(),
-			Some(Error::TimestampMismatch)
-		));
-		assert!(h.session.log.closes().is_empty());
+		h.subscriber.clone().recv_group(&mut stream).await.unwrap();
+		// The stream was read to its end, so the group is already delivered.
+		let mut group = consumer
+			.recv_group()
+			.now_or_never()
+			.expect("delivered")
+			.unwrap()
+			.unwrap();
+		assert_eq!(group.sequence, SEQUENCE);
+		let frame = group.read_frame().now_or_never().unwrap().unwrap().unwrap();
+		assert_eq!(frame.payload.as_ref(), b"rewound");
+		assert!(h.track.closed().now_or_never().is_none());
 	}
 
 	/// A head that stops short of where the tail starts would leave a hole in the middle of

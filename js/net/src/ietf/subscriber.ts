@@ -15,7 +15,6 @@ import {
 	StreamCode,
 	Stream as StreamError,
 	sessionCause,
-	TimestampMismatch,
 	unauthorized,
 } from "../error.ts";
 import * as netGroup from "../group.ts";
@@ -666,6 +665,7 @@ export class Subscriber {
 		// Keep the request pending until SUBSCRIBE_OK supplies immutable track metadata.
 		// Group streams already wait on the alias, so early data stays behind this response.
 		const producer = hooks.pendingTrackProducer(request);
+		hooks.receiveTrack(producer);
 		const subscription: Subscription = { track: producer, tail: new Tail() };
 
 		// Open the stream and wait for SUBSCRIBE_OK under a timeout. State
@@ -1355,11 +1355,9 @@ export class Subscriber {
 				track.close(e);
 			} else if (
 				e instanceof ProtocolViolation ||
-				e instanceof TimestampMismatch ||
 				(e instanceof StreamError && e.code === StreamCode.MalformedTrack)
 			) {
-				// The publisher broke the track's end or its content (a rewound timestamp, say),
-				// which no later group can repair.
+				// The publisher broke the track's end or its content, which no later group can repair.
 				producer?.close(e);
 				track.close(e);
 			} else {

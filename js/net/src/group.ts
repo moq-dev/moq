@@ -165,8 +165,6 @@ export class Producer {
 	// The tracks this group joined before its first frame, each checking that frame's
 	// timestamp against its neighbors' starts.
 	#admits?: ((start: Timestamp) => () => void)[];
-	// Set for a wire whose timestamps may be send times, so no track checks frame 0.
-	#unchecked = false;
 
 	constructor(sequence: number) {
 		this.#state = new GroupState(sequence);
@@ -184,12 +182,8 @@ export class Producer {
 			state.timed = timed;
 		};
 		hooks.admitGroupStart = (group, admit) => {
-			if (group.#unchecked) return;
 			group.#admits ??= [];
 			group.#admits.push(admit);
-		};
-		hooks.skipRewindCheck = (group) => {
-			group.#unchecked = true;
 		};
 		hooks.groupStart = (group) => (group.#state.total.peek() > 0 ? group.#state.timestamp : undefined);
 		hooks.limitGroup = (group, frames) => {
