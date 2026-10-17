@@ -299,8 +299,8 @@ impl SendBuffer {
 /// Checkpoints waiting for the acknowledged prefix to reach their offset, in offset order
 ///
 /// A dropped [`Checkpoint`](super::Checkpoint) leaves its entry behind until the prefix reaches
-/// it, so it lives no longer than the data it waits on. Dropping the stream fails the rest, so no
-/// waiter hangs on a stream that is gone.
+/// it or the next checkpoint is taken behind it, so dead entries only outnumber the live ones by
+/// one. Dropping the stream fails the rest, so no waiter hangs on a stream that is gone.
 #[derive(Default, Debug)]
 struct Watches {
     pending: VecDeque<(u64, Weak<AckSlot>)>,
@@ -312,6 +312,14 @@ impl Watches {
     fn push(&mut self, offset: u64, slot: &Arc<AckSlot>) {
         // Checkpoints are taken at the write offset, which only grows
         debug_assert!(self.pending.back().is_none_or(|(last, _)| *last <= offset));
+        // Each entry is popped at most once, so this stays amortized O(1)
+        while self
+            .pending
+            .back()
+            .is_some_and(|(_, slot)| slot.strong_count() == 0)
+        {
+            self.pending.pop_back();
+        }
         self.pending.push_back((offset, Arc::downgrade(slot)));
     }
 
@@ -644,6 +652,34 @@ mod tests {
         buf.truncate(0);
         assert_eq!(empty.get(), Some(&Err(ClosedStream::default())));
         assert!(buf.take_resolved());
+    }
+
+    /// Checkpoints taken and dropped on a stream whose prefix never moves do not pile up.
+    #[test]
+    fn dropped_watches_are_pruned() {
+        let mut buf = SendBuffer::new();
+        buf.write(Bytes::from_static(b"Hello"));
+        let held = buf.watch();
+        for _ in 0..1000 {
+            drop(buf.watch());
+        }
+        assert!(
+            buf.watches.pending.len() <= 2,
+            "{}",
+            buf.watches.pending.len()
+        );
+
+        // Nothing was ever written or acknowledged on this one
+        let mut empty = SendBuffer::new();
+        for _ in 0..1000 {
+            drop(empty.watch());
+        }
+        assert!(empty.watches.pending.len() <= 1);
+
+        assert_eq!(buf.poll_transmit(16), (0..5, true));
+        buf.ack(0..5, Instant::now());
+        assert!(held.get().is_some());
+        assert!(buf.watches.pending.is_empty());
     }
 
     #[test]
