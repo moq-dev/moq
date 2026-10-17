@@ -89,7 +89,14 @@ export class Producer {
 		const name = parse(track.name);
 		if (this.#claims.has(name)) throw new Failure("reuse");
 		this.#claims.add(name);
-		const info = await track.info();
-		return Track.Producer.make(track, info.timescale != null, keys(this.credential, this.epoch, name));
+		let info: NetTrack.Info;
+		try {
+			info = await track.info();
+		} catch (err) {
+			// Nothing was produced or spent, so a later track under this name may still claim it.
+			this.#claims.delete(name);
+			throw err;
+		}
+		return Track.Producer.make(track, info.timescale ?? undefined, keys(this.credential, this.epoch, name));
 	}
 }

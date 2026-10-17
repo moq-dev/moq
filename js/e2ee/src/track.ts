@@ -8,7 +8,7 @@ import type { Event } from "./datagram.ts";
 import { checkU53 } from "./derive.ts";
 import { Failure } from "./failure.ts";
 import * as Group from "./group.ts";
-import { checkTimed, type Keys, type Reader, type Writer } from "./internal.ts";
+import { checkTimestamp, type Keys, type Reader, type Writer } from "./internal.ts";
 import type { TrackKey } from "./key.ts";
 import { MAX_DATAGRAM_PAYLOAD } from "./limits.ts";
 import { Pump } from "./pump.ts";
@@ -31,16 +31,16 @@ export class Producer {
 	#datagramKey: TrackKey;
 	#next = 0;
 
-	private constructor(inner: NetTrack.Producer, timed: boolean, keys: Keys) {
+	private constructor(inner: NetTrack.Producer, timescale: Time.Timescale | undefined, keys: Keys) {
 		this.#inner = inner;
 		this.name = inner.name;
-		this.#writer = { pump: new Pump(), key: keys.group, timed, closed: false };
+		this.#writer = { pump: new Pump(), key: keys.group, timescale, closed: false };
 		this.#datagramKey = keys.datagram;
 	}
 
 	/** @internal */
-	static make(inner: NetTrack.Producer, timed: boolean, keys: Keys): Producer {
-		return new Producer(inner, timed, keys);
+	static make(inner: NetTrack.Producer, timescale: Time.Timescale | undefined, keys: Keys): Producer {
+		return new Producer(inner, timescale, keys);
 	}
 
 	/** Allocate the next sequence and start a group there; throws {@link Failure} `identity` past `2^53-1`. */
@@ -85,7 +85,7 @@ export class Producer {
 	): Promise<void> {
 		this.#writable();
 		this.#reserve(sequence);
-		checkTimed(this.#writer, timestamp);
+		checkTimestamp(this.#writer, timestamp);
 		const iv = this.#datagramKey.admitSeal(sequence, 0, plaintext.byteLength, MAX_DATAGRAM_PAYLOAD);
 		this.#next = sequence + 1;
 		const owned = plaintext.slice();
@@ -205,7 +205,10 @@ export class Consumer {
 		const iv = this.#datagramKey.admitOpen(sequence, 0, payload.byteLength, MAX_DATAGRAM_PAYLOAD);
 		let plaintext: Uint8Array;
 		try {
-			plaintext = await this.#reader.pump.run(() => this.#datagramKey.decrypt(iv, payload));
+			plaintext = await this.#reader.pump.run(() => {
+				this.#reader.terminal.check();
+				return this.#datagramKey.decrypt(iv, payload);
+			});
 		} catch (err) {
 			// A grouped failure during the open still ends this read.
 			this.#reader.terminal.check();

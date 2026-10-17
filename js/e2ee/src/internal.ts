@@ -14,8 +14,8 @@ export interface Keys {
 export interface Writer {
 	pump: Pump;
 	key: TrackKey;
-	// Whether the net track is timed, from its committed info.
-	timed: boolean;
+	// The net track's committed timescale, or undefined when untimed.
+	timescale?: Time.Timescale;
 	// Set by any close: no new writes.
 	closed: boolean;
 	aborted?: Error;
@@ -29,9 +29,11 @@ export interface Reader {
 	terminal: Terminal;
 }
 
-/** Refuse a timestamp whose presence disagrees with the track's committed timescale. */
-export function checkTimed(writer: Writer, timestamp: Time.Timestamp | undefined): void {
-	if (writer.timed !== (timestamp !== undefined)) {
+/** Refuse a timestamp the track could not encode: wrong presence, or out of range at its timescale. */
+export function checkTimestamp(writer: Writer, timestamp: Time.Timestamp | undefined): void {
+	if ((writer.timescale !== undefined) !== (timestamp !== undefined)) {
 		throw new NetError.TimestampMismatch();
 	}
+	// Throws a RangeError for a conversion that would only fail at encode, after the identity is spent.
+	if (timestamp && writer.timescale !== undefined) timestamp.as(writer.timescale);
 }

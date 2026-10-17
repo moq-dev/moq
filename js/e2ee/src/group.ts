@@ -5,7 +5,7 @@
  */
 import type { Group as NetGroup, Time } from "@moq/net";
 import { Failure } from "./failure.ts";
-import { checkTimed, type Reader, type Writer } from "./internal.ts";
+import { checkTimestamp, type Reader, type Writer } from "./internal.ts";
 import { MAX_GROUPED_PAYLOAD, TAG_LEN } from "./limits.ts";
 
 /** A decrypted grouped frame. */
@@ -56,7 +56,7 @@ export class Producer {
 		if (this.#closed || this.#writer.closed)
 			throw this.#aborted ?? this.#writer.aborted ?? new Error("group is closed");
 		if (plaintext.byteLength + TAG_LEN > MAX_GROUPED_PAYLOAD) throw new Failure("oversize");
-		checkTimed(this.#writer, timestamp);
+		checkTimestamp(this.#writer, timestamp);
 		const owned = plaintext.slice();
 		return this.#writer.pump.run(() => this.#write(timestamp, owned));
 	}
@@ -161,7 +161,11 @@ export class Consumer {
 		try {
 			const { key, pump } = this.#reader;
 			const iv = key.admitOpen(this.sequence, frame.sequence, frame.payload.byteLength, MAX_GROUPED_PAYLOAD);
-			const plaintext = await pump.run(() => key.decrypt(iv, frame.payload));
+			// A failure queued ahead of this open ends it before any crypto runs.
+			const plaintext = await pump.run(() => {
+				this.#check();
+				return key.decrypt(iv, frame.payload);
+			});
 			this.#check();
 			return { timestamp: frame.timestamp, plaintext };
 		} catch (err) {

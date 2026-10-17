@@ -600,11 +600,59 @@ test("produce waits for an unaccepted track's timescale", async () => {
 	expect(datagramText(await consumer.recvDatagram())).toBe("datagram");
 	expect(await readText(await recvGroup(consumer))).toBe("frame");
 
-	// A track closed before it is accepted never produces.
-	const closed = new NetTrack.Producer(await generation.name("video"));
+	// A track closed before it is accepted never produces, and leaves its name unclaimed.
+	const video = await generation.name("video");
+	const closed = new NetTrack.Producer(video);
 	const refused = generation.produce(closed);
 	closed.close(new Error("gone"));
 	await expect(refused).rejects.toThrow("gone");
+	await generation.produce(netTrack(video));
+	expect(await failure(generation.produce(netTrack(video)))).toBe("reuse");
+});
+
+test("a timestamp out of range at the track's timescale spends nothing", async () => {
+	const generation = credential().produce();
+	const net = new Broadcast.Producer().createTrack(await generation.name("video"), {
+		timescale: Time.Timescale.NANO,
+	});
+	const consumer = generation.credential.consume(generation.epoch).consume(subscribe(net));
+	const producer = await generation.produce(net);
+	const huge = new Time.Timestamp(Number.MAX_SAFE_INTEGER, Time.Timescale.MILLI);
+
+	await expect(producer.insertDatagram(0, huge, text("x"))).rejects.toThrow(RangeError);
+	await producer.insertDatagram(0, ms(1), text("datagram"));
+	const group = producer.createGroup(1);
+	await expect(group.writeFrame(huge, text("x"))).rejects.toThrow(RangeError);
+	await group.writeFrame(ms(2), text("frame"));
+	group.close();
+	expect(datagramText(await consumer.recvDatagram())).toBe("datagram");
+	expect(await readText(await recvGroup(consumer))).toBe("frame");
+});
+
+test("a grouped failure skips opens queued behind it", async () => {
+	const p = await pair("video");
+	const bad = new NetGroup.Producer(0);
+	p.net.writeGroup(bad);
+	bad.writeFrame({ timestamp: ms(1), payload: await sealed(p, GROUP, 0, 0, "nope", true) });
+	const good = new NetGroup.Producer(1);
+	p.net.writeGroup(good);
+	good.writeFrame({ timestamp: ms(2), payload: await sealed(p, GROUP, 1, 0, "ok") });
+	p.net.insertDatagram(0, ms(3), await sealed(p, DATAGRAM, 0, 0, "late"));
+	const forged = await recvGroup(p.consumer);
+	const held = await recvGroup(p.consumer);
+
+	const hold = holdFirstOpen();
+	const admit = admitted(3);
+	try {
+		const reads = [forged.readFrame(), held.readFrame(), p.consumer.recvDatagram()];
+		await admit.done;
+		hold.release();
+		expect(await Promise.all(reads.map(failure))).toEqual(["authentication", "authentication", "authentication"]);
+		expect(hold.calls).toBe(1);
+	} finally {
+		hold.restore();
+		admit.restore();
+	}
 });
 
 test("a failed net write after encryption aborts the group", async () => {
