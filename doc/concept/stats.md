@@ -32,9 +32,12 @@ with unavailable transport measurements absent. Missing rendition counters
 mean zero, and JavaScript preserves omission. A known-zero gauge or transport
 measurement stays explicit, so it remains distinct from unavailable.
 
-These types do not enable automatic reporting in a publisher or player.
-See the [hang draft](/draft/moq-hang#media-stats) for track framing,
-field units, and the feedback convention.
+`moq import --stats` and `moq export --echo` report them from the
+[CLI](/bin/cli#stats-and-feedback). An import counts the frames and payload
+bytes it writes to each rendition, and video keyframes; an export counts what
+it reads and records its newest arrival. See the
+[hang draft](/draft/moq-hang#media-stats) for track framing, field units, and
+the feedback convention.
 
 ## Broadcasts
 

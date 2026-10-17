@@ -41,6 +41,7 @@ mod pace;
 pub mod rate;
 pub mod select;
 mod source;
+mod stats;
 pub mod timeline;
 
 pub use clock::Clock;
