@@ -48,12 +48,14 @@ The Rust and TypeScript cores expose the same surface, and nothing else:
 - [Rust protected publisher seams](/quest/m2/e2ee/rust-publish.md) - Rust media
   and catalog publishers accept opaque physical names and emit no plaintext
   semantic catalog in E2EE mode
+- [Refuse a re-created track](/quest/m2/e2ee/reopen.md) - a name the producer already carried fails loudly
 - [Encrypted browser components](/quest/m2/e2ee/browser.md) - browser publish
   and watch components handle encrypted audio and video without leaking
   credentials into browser-owned surfaces
 - [Encrypted native CLI](/quest/m2/e2ee/cli.md) - the native CLI publishes and
   plays encrypted media without exposing credentials through process metadata
   or logs
+- [Encrypted consumer shape](/quest/m2/e2ee/consumer.md) - one consumer shape, the producer's mirror, shared by browser, CLI, and FFI
 - [Cross-language encrypted proof](/quest/m2/e2ee/interop.md) - browser
   TypeScript and native Rust exchange encrypted media both ways, with relays
   forwarding and metering blind
