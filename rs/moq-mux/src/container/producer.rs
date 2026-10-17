@@ -724,6 +724,9 @@ where
 		self.cut(None)?;
 		self.inner.finish()?;
 		self.publish_estimate()?;
+		// Dropping the recorder flushes the open record, so a track that ends before its catalog
+		// still declares a duration and is advertised.
+		self.recorder = None;
 		Ok(())
 	}
 
@@ -869,7 +872,7 @@ mod tests {
 	#[tokio::test]
 	async fn a_passthrough_producer_ratchets_its_bandwidth_claim() {
 		let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
-		let _sub = track.consume();
+		let _sub = track.subscribe(None);
 		let mut producer = Producer::new(track, Container::Legacy(crate::container::Kind::Data))
 			.with_bandwidth(moq_net::bandwidth::Allocator::unlimited());
 
@@ -918,7 +921,7 @@ mod tests {
 		}
 
 		let (_encoder_broadcast, encoder_track) = video_track();
-		let _encoder_sub = encoder_track.consume();
+		let _encoder_sub = encoder_track.subscribe(None);
 		let encoder = allocator.reserve(&encoder_track.demand(), moq_net::bandwidth::Rate::from_bps(8_000_000));
 		assert_eq!(
 			encoder.peek(),
@@ -927,7 +930,7 @@ mod tests {
 		);
 
 		let (_passthrough_broadcast, passthrough) = video_track();
-		let _passthrough_sub = passthrough.consume();
+		let _passthrough_sub = passthrough.subscribe(None);
 		let mut producer =
 			Producer::new(passthrough, Container::Legacy(crate::container::Kind::Data)).with_bandwidth(allocator);
 
