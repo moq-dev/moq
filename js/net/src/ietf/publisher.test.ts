@@ -3204,9 +3204,10 @@ test("an ACTIVE_COUNT answering a PUBLISH_NAMESPACE closes the session", async (
 	await stream.writer.u53(RequestOk.id);
 	await new RequestOk({ requestId: undefined, parameters }).encode(stream.writer, VERSION);
 
-	await Promise.race([
+	const closed = await Promise.race([
 		pair.server.closed,
-		new Promise((_resolve, reject) => setTimeout(() => reject(new Error("session stayed up")), 500)),
+		new Promise<never>((_resolve, reject) => setTimeout(() => reject(new Error("session stayed up")), 500)),
 	]);
+	expect(closed.closeCode).toBe(new ProtocolViolation("").code);
 	origin.close();
 });

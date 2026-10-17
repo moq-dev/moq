@@ -1630,13 +1630,15 @@ export class Publisher {
 
 	/**
 	 * Check a REQUEST_OK answering a PUBLISH_NAMESPACE. ACTIVE_COUNT only answers
-	 * SUBSCRIBE_NAMESPACE (MoQ Active Count), and the session closes over it here since the
-	 * caller only drops the advertisement.
+	 * SUBSCRIBE_NAMESPACE (MoQ Active Count), and the session closes over it here, with the
+	 * violation's code, since the caller only drops the advertisement.
 	 */
 	#answered(ok: RequestOk) {
 		if (ok.parameters.activeCount === undefined) return;
+		const violation = new ProtocolViolation("ACTIVE_COUNT on a PUBLISH_NAMESPACE answer");
+		this.#quic.close({ closeCode: violation.code, reason: violation.message });
 		this.#session.close();
-		throw new ProtocolViolation("ACTIVE_COUNT on a PUBLISH_NAMESPACE answer");
+		throw violation;
 	}
 
 	/**
