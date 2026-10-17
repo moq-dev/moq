@@ -8,6 +8,7 @@ import * as DatagramStream from "../datagram_stream.ts";
 import {
 	controlTimeout,
 	error,
+	NoStreamCredit,
 	NotFound,
 	ProtocolViolation,
 	reason,
@@ -25,6 +26,7 @@ import { type Stream, Writer } from "../stream.ts";
 import { Timescale } from "../time.ts";
 import type { Location as TrackLocation, Subscriber as TrackSubscriber } from "../track.ts";
 import { untilAborted } from "../util/abort.ts";
+import { Deadline, REQUEST_TIMEOUT_MS, requestOptions } from "../util/deadline.ts";
 import { LIMITS, type Limits, Slots } from "../util/limits.ts";
 import { TimeoutError, withTimeout } from "../util/timeout.ts";
 import * as Varint from "../varint.ts";
@@ -119,11 +121,11 @@ function sameHops(a: Hop[], b: Hop[]): boolean {
 }
 
 /**
- * How long one advertisement may take to be answered. Matches the Rust publisher, and the
- * peer accepting the stream is only half the exchange: one it never answers on holds the
+ * How long one advertisement may take to be answered. Accepting the stream is only half
+ * the exchange: one it never answers on holds the
  * loop just as effectively as one it never grants.
  */
-const ADVERTISE_TIMEOUT_MS = 5000;
+const ADVERTISE_TIMEOUT_MS = REQUEST_TIMEOUT_MS;
 const ADVERTISE_TIMEOUT = Nano.fromMilli(Milli(ADVERTISE_TIMEOUT_MS));
 
 /** Sleep `delay`, jittered, so a relay's namespaces don't all retry on the same tick. */
@@ -132,12 +134,12 @@ function retryAfter(delay: number): Promise<void> {
 }
 
 /**
- * What a refusal said about re-offering the namespace.
+ * What prevents re-offering the namespace.
  *
  * A peer answers a request it declines with a retry interval, and ignoring it is how a
  * permanent refusal (unauthorized, uninterested) turns into a request every few seconds
- * for the life of the session. `"never"` is an interval of 0; a number is the epoch
- * milliseconds before which we must not come back.
+ * for the life of the session. `"never"` is an interval of 0 or a terminal local failure;
+ * a number is the epoch milliseconds before which we must not come back.
  */
 type Refused = "never" | number;
 
@@ -594,43 +596,41 @@ export class Publisher {
 					}
 					if (type !== 0x02)
 						throw new ProtocolViolation(`unexpected message on a subscription: 0x${type.toString(16)}`);
-					// Drafts 15 and 16 name the update's own Request ID; later drafts name none.
+					// Draft 14 answers no update. Drafts 15 and 16 name the update's own Request ID;
+					// later drafts name none.
 					const refuse = async (
 						condition: "not_supported" | "malformed_auth_token",
 						reasonPhrase: string,
-						requestId?: bigint,
+						requestId: bigint | undefined,
 					) => {
+						if (version === Version.DRAFT_14) return new UpdateFailed();
 						await stream.writer.u53(RequestError.id);
 						await new RequestError({
-							requestId,
+							requestId: legacy ? requestId : undefined,
 							errorCode: toRequestCode(condition, "subscribe", version),
 							reasonPhrase,
 						}).encode(stream.writer, version);
 						return new UpdateFailed();
 					};
-					if (legacy) {
-						// Not applied yet, but read anyway: an unread update keeps the adapter's
-						// stream from closing, which is how UNSUBSCRIBE arrives.
-						try {
-							await SubscribeUpdate.decode(stream.reader, version);
-						} catch (err) {
-							if (!(err instanceof MalformedAuthToken)) throw err;
-							// Draft 14 answers no update, so the refusal only ends the subscription.
-							if (version === Version.DRAFT_14) throw new UpdateFailed();
-							throw await refuse("malformed_auth_token", err.message, err.requestId);
-						}
-						continue;
-					}
+					let ownRequestId: bigint | undefined;
 					let params: Parameters;
 					try {
-						params = await Message.decode(stream.reader, async (r) => {
-							this.#session.spendRequest(await r.u62());
-							if (version === Version.DRAFT_17) await r.u62();
-							return Parameters.decode(r, version, "request-update");
-						});
+						if (legacy) {
+							// The adapter already spent the update's own Request ID.
+							const update = await SubscribeUpdate.decode(stream.reader, version);
+							ownRequestId = update.ownRequestId;
+							params = update.parameters;
+						} else {
+							params = await Message.decode(stream.reader, async (r) => {
+								this.#session.spendRequest(await r.u62());
+								if (version === Version.DRAFT_17) await r.u62();
+								return Parameters.decode(r, version, "request-update");
+							});
+						}
 					} catch (err) {
 						// Section 8.9 rejects the update, which says more than that we do not support it.
-						if (err instanceof MalformedAuthToken) throw await refuse("malformed_auth_token", err.message);
+						if (err instanceof MalformedAuthToken)
+							throw await refuse("malformed_auth_token", err.message, err.requestId);
 						throw malformed(err, "REQUEST_UPDATE");
 					}
 					if (params.trackPropertyFilter)
@@ -639,17 +639,20 @@ export class Publisher {
 						);
 					const unsupported =
 						params.forward === false ||
+						params.subscriptionFilter !== undefined ||
 						params.bytes.size > 0 ||
 						params.rangeFilters ||
 						[...params.vars.keys()].some(
 							(key) => key !== 0x02n && key !== 0x06n && key !== 0x10n && key !== 0x20n,
 						);
-					if (unsupported) throw await refuse("not_supported", "REQUEST_UPDATE parameters not supported");
+					if (unsupported)
+						throw await refuse("not_supported", "REQUEST_UPDATE parameters not supported", ownRequestId);
 					// update() replaces every option, so carry the rest over as Rust does.
 					if (params.subscriberPriority !== undefined)
 						track.update({ ...track.subscription.peek(), priority: fromWire(params.subscriberPriority) });
+					if (version === Version.DRAFT_14) continue;
 					await stream.writer.u53(RequestOk.id);
-					await new RequestOk({ requestId: undefined }).encode(stream.writer, version);
+					await new RequestOk({ requestId: ownRequestId }).encode(stream.writer, version);
 				}
 			})();
 			const requestEnded = legacy ? updates : race([updates, stream.writer.closed]);
@@ -778,6 +781,8 @@ export class Publisher {
 
 			// PUBLISH_DONE is required for every supported draft. The peer may have already
 			// closed its side to unsubscribe, in which case there is nowhere to send it.
+			// Draft 14 registers no UPDATE_FAILED, so a failed update ends there as any error does.
+			const updateFailed = publishError instanceof UpdateFailed && version !== Version.DRAFT_14;
 			try {
 				await stream.writer.u53(PublishDone.id);
 				const done = new PublishDone({
@@ -787,7 +792,7 @@ export class Publisher {
 							: undefined,
 					statusCode: unauthorized
 						? PublishDoneStatus.UNAUTHORIZED
-						: publishError instanceof UpdateFailed
+						: updateFailed
 							? PublishDoneStatus.UPDATE_FAILED
 							: publishError
 								? PublishDoneStatus.INTERNAL_ERROR
@@ -795,7 +800,7 @@ export class Publisher {
 					streamCount: BigInt(streams.opened),
 					reasonPhrase: unauthorized
 						? "not granted"
-						: publishError instanceof UpdateFailed
+						: updateFailed
 							? "update failed"
 							: publishError
 								? "internal error"
@@ -1195,7 +1200,8 @@ export class Publisher {
 				(update) => ({ update }),
 				(err) => ({ error: error(err) }),
 			);
-		let updating = version >= Version.DRAFT_18 ? readUpdate() : undefined;
+		// Drafts 14-16 route an update onto the stream too, which stays open behind one left unread.
+		let updating = version !== Version.DRAFT_17 ? readUpdate() : undefined;
 		try {
 			// Send OK response
 			if (version === Version.DRAFT_14) {
@@ -1301,19 +1307,27 @@ export class Publisher {
 					const update = next.update;
 					updating = undefined;
 					if (!update) continue;
-					this.#session.spendRequest(update.requestId);
+					// Drafts 14-16 spend the update's own Request ID in the adapter and name it in
+					// the answer. They define no namespace update, so refusing one leaves the
+					// subscription standing, and draft 14 answers no update at all.
+					const keyed = version <= Version.DRAFT_16;
+					if (!keyed) this.#session.spendRequest(update.requestId);
 					if (update.refused || (update.prefix !== undefined && Namespace.reserved(update.prefix, version))) {
-						await stream.writer.u53(RequestError.id);
-						await new RequestError({
-							requestId: undefined,
-							errorCode: toRequestCode(
-								update.refused ?? "does_not_exist",
-								"subscribe_namespace",
-								version,
-							),
-							reasonPhrase: "namespace update refused",
-						}).encode(stream.writer, version);
-						break;
+						if (version !== Version.DRAFT_14) {
+							await stream.writer.u53(RequestError.id);
+							await new RequestError({
+								requestId: keyed ? update.requestId : undefined,
+								errorCode: toRequestCode(
+									update.refused ?? "does_not_exist",
+									"subscribe_namespace",
+									version,
+								),
+								reasonPhrase: "namespace update refused",
+							}).encode(stream.writer, version);
+						}
+						if (!keyed) break;
+						updating = readUpdate();
+						continue;
 					}
 					if (update.prefix !== undefined && update.prefix !== prefix) {
 						for (const suffix of ns.active.keys()) await target.withdraw(suffix);
@@ -1529,9 +1543,8 @@ export class Publisher {
 
 		ns.active = held;
 
-		// Whatever we wanted up and could not get up. Stream credit freeing, a transient
-		// failure clearing, or the peer starting to answer raises no signal of its own, so
-		// the only way back is to ask again on a timer.
+		// Keep the backoff only for a peer refusal that permits another offer. Local
+		// credit failures and unanswered requests are terminal for this broadcast instance.
 		return [...updated].some(
 			([key, snap]) =>
 				this.#change(key, held.get(key), snap, target) !== "same" && this.#pending(key, ns.refused),
@@ -1586,7 +1599,7 @@ export class Publisher {
 	 * Distinct from {@link offerable}, and the difference is what arms the retry: a
 	 * namespace waiting out a minimum is not offerable yet but is still pending, and
 	 * gating the timer on offerable instead would disarm it for exactly the wait it is
-	 * supposed to be counting. Only a refusal that forbids retrying ends it.
+	 * supposed to be counting. A terminal failure or a refusal that forbids retrying ends it.
 	 */
 	#pending(key: Path.Valid, refused: Map<Path.Valid, Refused>): boolean {
 		return refused.get(key) !== "never";
@@ -1621,18 +1634,14 @@ export class Publisher {
 		// Opening is inside the try because it fails like any other advertisement does:
 		// a peer out of stream credit rejects here, and letting that escape would unwind
 		// the announce loop and take discovery down for the whole session, rather than
-		// costing this one namespace a turn.
+		// leaving this one namespace unadvertised.
 		let request: Stream | undefined;
 		try {
-			request = await this.#session.openBi();
-			const stream = request;
-
-			// Bounded, like the subscriber's own request: the loop is single-threaded over
-			// advertisements, so a peer that takes the stream and answers nothing strands
-			// every publish and withdrawal behind it. Timing out costs this namespace a
-			// turn and leaves it outstanding, which the retry above re-offers.
-			const answer = await withTimeout(
+			const deadline = new Deadline();
+			const answer = await deadline.wait(
 				(async (): Promise<Answer> => {
+					request = await deadline.open(this.#session.openBi(requestOptions));
+					const stream = request;
 					await stream.writer.u53(PublishNamespace.id);
 					const token = this.#auth?.carried(auth);
 					const msg = new PublishNamespace({ requestId, trackNamespace: path, cluster, token });
@@ -1663,18 +1672,18 @@ export class Publisher {
 					}
 					return "held";
 				})(),
-				ADVERTISE_TIMEOUT,
-				`advertisement timed out after ${ADVERTISE_TIMEOUT_MS}ms waiting for the peer's answer`,
 			);
 
-			if (answer === "held") requests.set(path, { path, requestId, stream, auth });
+			if (answer === "held" && request) requests.set(path, { path, requestId, stream: request, auth });
 			return answer;
 		} catch (err: unknown) {
 			// The peer never answered the advertisement: a control timeout, not late content.
 			const e = err instanceof TimeoutError ? controlTimeout(err) : error(err);
 			console.warn(`announce failed: broadcast=${path} error=${reason(e)}`);
 			request?.abort(e);
-			return "dropped";
+			return e instanceof NoStreamCredit || (e instanceof StreamError && e.code === StreamCode.ControlTimeout)
+				? "never"
+				: "dropped";
 		}
 	}
 

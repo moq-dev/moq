@@ -20,7 +20,7 @@ use std::{
 /// [`Self::pop`] hands out only the key: the entry stays pending (still
 /// joinable) until the caller explicitly removes it, on resolution or via
 /// [`Self::drain_queued`] when the last handler leaves.
-pub(crate) struct Requests<K, V> {
+pub(super) struct Requests<K, V> {
 	// Every pending request: queued or already handed to a handler.
 	pending: HashMap<K, Entry<V>>,
 	// The queued (not yet popped) subset, FIFO. Every key here is in `pending`.

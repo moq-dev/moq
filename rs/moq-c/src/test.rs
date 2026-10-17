@@ -4167,6 +4167,58 @@ fn session_connect_and_close() {
 	assert!(cb.recv() <= 0, "session close delivers a terminal code");
 }
 
+/// A dial that keeps failing never fires `on_status`, so `moq_session_failure` is the only
+/// place its reason shows while the loop retries.
+#[test]
+fn session_failure_names_a_failing_dial() {
+	// Hang up on every connection, so a WebSocket dial fails fast. Holding the listener
+	// keeps a parallel test from taking the port.
+	let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+	let port = listener.local_addr().expect("local addr").port();
+	std::thread::spawn(move || {
+		for stream in listener.incoming() {
+			drop(stream);
+		}
+	});
+	let url = format!("ws://127.0.0.1:{port}/");
+	let cb = Callback::new();
+	let session = id(unsafe {
+		moq_session_connect(
+			url.as_ptr() as *const c_char,
+			url.len(),
+			std::ptr::null(),
+			0,
+			0,
+			Some(channel_callback),
+			cb.ptr,
+		)
+	});
+
+	let deadline = std::time::Instant::now() + TIMEOUT;
+	let code = loop {
+		let code = moq_session_failure(session);
+		if code != 0 {
+			break code;
+		}
+		assert!(
+			std::time::Instant::now() < deadline,
+			"the refused dial never reported a failure"
+		);
+		std::thread::sleep(Duration::from_millis(10));
+	};
+	assert_ne!(
+		code,
+		Error::SessionNotFound.code(),
+		"the session ended instead of retrying: {:?}",
+		cb.rx.try_recv()
+	);
+	assert!(!moq_error().is_null(), "the failure is recorded like a failed call");
+	assert!(cb.rx.try_recv().is_err(), "a failed dial fires no status");
+
+	assert_eq!(moq_session_close(session), 0);
+	assert!(cb.recv() <= 0, "session close delivers a terminal code");
+}
+
 /// Borrow a `&str` as the `moq_string` the list setters take.
 fn moq_str(s: &str) -> moq_string {
 	moq_string {

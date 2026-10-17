@@ -64,4 +64,18 @@ impl Driver {
 		group.adopt_presence(&self.drain.report, label.clone(), PendingPair::default());
 		group.presence[&label].pair.plain.track.subscribe(None)
 	}
+
+	/// Hold broadcast prefix `path`'s track as a reader would; see
+	/// [`Self::hold_presence`].
+	pub fn hold_prefix(&mut self, path: &str) -> track::Subscriber {
+		let tick = self.drain.tick;
+		let group = self.drain.groups.get_mut("").expect("the depth 0 broadcast");
+		group.adopt_prefix(
+			&self.drain.report,
+			PathOwned::from(path.to_string()),
+			PendingPair::default(),
+			tick,
+		);
+		group.prefixes[path].pair.plain.track.subscribe(None)
+	}
 }

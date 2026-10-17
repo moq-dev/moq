@@ -109,7 +109,6 @@ cover the behavior.
 
 ## Required
 
-- [Narrow the model before it goes public](/quest/m1/public-model/narrow.md) - its visibility rewrite and marker lint guard every model API this child edits
 - [Live largest location](/quest/m1/largest.md) - its `poll_largest` replaces `poll_live` and the cached-largest reads
 
 ## Related

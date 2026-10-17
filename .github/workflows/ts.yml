@@ -25,6 +25,7 @@ on:
       # Workspace dependencies of moq-net, moq-tokio and moq-mux on the TS path.
       - "rs/kio/**"
       - "rs/moq-flate/**"
+      - "rs/moq-ice/**"
       - "rs/moq-msf/**"
       - "rs/moq-pattern/**"
       - "rs/moq-sock/**"

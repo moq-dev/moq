@@ -45,6 +45,7 @@ check-test *args:
 [positional-arguments]
 lint *args:
     python3 sh/rs/stats-docs.py
+    python3 sh/rs/model-markers.py
     cargo fmt --all --check
     # quinn-udp and quinn keep quinn's formatting; cargo fmt skips them (see moq-sock's lib.rs, moq-tokio's quic.rs).
     rustfmt --edition 2024 --check rs/moq-sock/src/udp/mod.rs rs/moq-tokio/src/quic/driver/mod.rs

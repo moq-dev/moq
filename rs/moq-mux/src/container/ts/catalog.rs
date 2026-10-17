@@ -341,8 +341,7 @@ impl Track {
 #[serde(rename_all = "camelCase")]
 #[non_exhaustive]
 pub struct Verbatim {
-	/// PMT `stream_type` to re-announce (0x86 SCTE-35, 0x06 private PES, 0x05
-	/// private sections, ...).
+	/// Raw PMT `stream_type` to re-announce, including types the muxer does not recognize.
 	pub stream_type: u8,
 
 	/// How the verbatim payload is framed, so export knows how to repacketize it.

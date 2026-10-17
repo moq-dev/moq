@@ -52,5 +52,4 @@ Public API: none expected. Wire: none.
 
 ## Related
 
-- [IETF on the ring](/quest/m2/uring-ietf.md) - also touches the ring's accept path
 - [Relay io_uring packages](/quest/m2/relay-io-uring-package.md) - ships the ring, whose operators read these logs

@@ -286,7 +286,8 @@ impl Kind {
 /// CMAF container: encodes/decodes a single track's moof+mdat fragments.
 ///
 /// Build from a CMAF init segment with [`Wire::from_init`], or wrap a
-/// pre-extracted [`mp4_atom::Trak`] directly with [`Wire::new`].
+/// pre-extracted [`mp4_atom::Trak`] directly with [`Wire::new`]. Either refuses a track
+/// that is neither audio nor video.
 ///
 /// The [`mp4_atom::Trak`] is heap-allocated so that embedding `Wire`
 /// in other enums (e.g. [`catalog::hang::Container`](crate::catalog::hang::Container))
@@ -294,15 +295,17 @@ impl Kind {
 pub struct Wire {
 	trak: Box<mp4_atom::Trak>,
 	defaults: sample::Defaults,
+	kind: Kind,
 }
 
 impl Wire {
 	/// Wrap an already-parsed track, with no `trex` for its samples to fall back to.
-	pub fn new(trak: mp4_atom::Trak) -> Self {
-		Self {
+	pub fn new(trak: mp4_atom::Trak) -> Result<Self> {
+		Ok(Self {
+			kind: Kind::from_handler(trak.mdia.hdlr.handler)?,
 			trak: Box::new(trak),
 			defaults: sample::Defaults::default(),
-		}
+		})
 	}
 
 	/// Parse a CMAF init segment (ftyp+moov), extracting the single track and its `trex` defaults.
@@ -319,6 +322,7 @@ impl Wire {
 				};
 				let defaults = sample::Defaults::from_moov(&moov, trak.tkhd.track_id);
 				return Ok(Self {
+					kind: Kind::from_handler(trak.mdia.hdlr.handler)?,
 					trak: Box::new(trak),
 					defaults,
 				});
@@ -336,16 +340,11 @@ impl Wire {
 		Ok(moq_net::Timescale::new(self.trak.mdia.mdhd.timescale as u64)?)
 	}
 
-	/// The media kind declared by the track handler.
-	fn kind(&self) -> Result<Kind> {
-		Kind::from_handler(self.trak.mdia.hdlr.handler)
-	}
-
 	/// What decoding this track's fragments needs.
 	fn track(&self) -> Result<Track> {
 		Ok(Track {
 			timescale: self.timescale()?,
-			kind: self.kind()?,
+			kind: self.kind,
 			defaults: self.defaults,
 		})
 	}
@@ -353,10 +352,9 @@ impl Wire {
 
 impl Container for Wire {
 	fn kind(&self) -> crate::container::Kind {
-		match self.trak.mdia.hdlr.handler.as_ref() {
-			b"soun" => crate::container::Kind::Audio,
-			b"vide" => crate::container::Kind::Video,
-			_ => crate::container::Kind::Data,
+		match self.kind {
+			Kind::Audio => crate::container::Kind::Audio,
+			Kind::Video => crate::container::Kind::Video,
 		}
 	}
 
@@ -378,7 +376,7 @@ impl Container for Wire {
 				timescale,
 				track_id,
 				sequence_number: group.frame_count() as u32,
-				kind: self.kind()?,
+				kind: self.kind,
 			},
 		)
 	}
@@ -393,7 +391,7 @@ impl Container for Wire {
 		let Some(frame) = ready!(group.poll_read_frame(waiter)?) else {
 			return Poll::Ready(Ok(None));
 		};
-
+		// CMAF carries no data track, so an object with no bytes is no marker and fails to decode.
 		Poll::Ready(Ok(Some(decode(frame.payload, frame.timestamp, self.track()?)?)))
 	}
 }
@@ -1719,14 +1717,23 @@ mod tests {
 	/// The wire container tells audio from video by the handler its init declares.
 	#[test]
 	fn wire_knows_an_audio_track_by_its_handler() {
-		let audio = Wire::new(synthesize_audio_trak(1, 44_100, &aac_config(None)).unwrap());
-		assert_eq!(audio.kind().unwrap(), Kind::Audio);
+		let audio = Wire::new(synthesize_audio_trak(1, 44_100, &aac_config(None)).unwrap()).unwrap();
+		assert_eq!(audio.kind, Kind::Audio);
 
 		let mut config = VideoConfig::new(hang::catalog::VideoCodec::VP8);
 		config.coded_width = Some(320);
 		config.coded_height = Some(240);
-		let video = Wire::new(synthesize_video_trak(1, 90_000, &config, None).unwrap());
-		assert_eq!(video.kind().unwrap(), Kind::Video);
+		let video = Wire::new(synthesize_video_trak(1, 90_000, &config, None).unwrap()).unwrap();
+		assert_eq!(video.kind, Kind::Video);
+	}
+
+	/// A track that is neither audio nor video is refused when the container is built, so
+	/// nothing reads it as a data track.
+	#[test]
+	fn wire_refuses_a_track_that_is_neither_audio_nor_video() {
+		let mut trak = synthesize_audio_trak(1, 44_100, &aac_config(None)).unwrap();
+		trak.mdia.hdlr.handler = (*b"sbtl").into();
+		assert!(matches!(Wire::new(trak), Err(Error::UnsupportedSubtitle)));
 	}
 
 	fn sample(micros: u64) -> Frame {
@@ -1763,7 +1770,7 @@ mod tests {
 		config.coded_width = Some(320);
 		config.coded_height = Some(240);
 		let timescale = moq_net::Timescale::MICRO;
-		let wire = Wire::new(synthesize_video_trak(1, 1_000_000, &config, None).unwrap());
+		let wire = Wire::new(synthesize_video_trak(1, 1_000_000, &config, None).unwrap()).unwrap();
 
 		let broadcast = moq_net::broadcast::Info::new().produce();
 		let info = moq_net::track::Info::default().with_timescale(timescale);
@@ -1794,7 +1801,7 @@ mod tests {
 		config.coded_width = Some(320);
 		config.coded_height = Some(240);
 		let timescale = moq_net::Timescale::MICRO;
-		let wire = Wire::new(synthesize_video_trak(1, 1_000_000, &config, None).unwrap());
+		let wire = Wire::new(synthesize_video_trak(1, 1_000_000, &config, None).unwrap()).unwrap();
 
 		let broadcast = moq_net::broadcast::Info::new().produce();
 		let untimed = moq_net::track::Info::default().with_timescale(None);
@@ -1819,7 +1826,7 @@ mod tests {
 		let mut config = VideoConfig::new(hang::catalog::VideoCodec::VP8);
 		config.coded_width = Some(320);
 		config.coded_height = Some(240);
-		let wire = Wire::new(synthesize_video_trak(1, 90_000, &config, None).unwrap());
+		let wire = Wire::new(synthesize_video_trak(1, 90_000, &config, None).unwrap()).unwrap();
 
 		let broadcast = moq_net::broadcast::Info::new().produce();
 		let info = moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI);
