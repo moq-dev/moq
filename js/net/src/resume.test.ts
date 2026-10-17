@@ -312,3 +312,26 @@ test("a fetched group continues from the next route once its own fails", async (
 	a.close();
 	b.close();
 });
+
+test("a replacement spliced before the first copy answers is still checked against it", async () => {
+	const front = new Front();
+	const a = new BroadcastProducer();
+	const b = new BroadcastProducer();
+	const old = a.createTrack("seq", { priority: 1 });
+	b.createTrack("seq", { priority: 2 });
+	front.serve(a.consume());
+	const sub = front.consumer.track("seq").subscribe();
+	// Swapped in the same turn, before the first copy's info committed anywhere.
+	front.serve(b.consume());
+	await settle();
+	expect((await sub.info()).priority).toBe(1);
+
+	old.close(new StreamError(StreamCode.SessionClosed));
+	await settle();
+	expect(() => sub.tryRecvGroup()).toThrow("changed its properties");
+
+	sub.close();
+	front.consumer.close();
+	a.close();
+	b.close();
+});

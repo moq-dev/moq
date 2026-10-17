@@ -101,6 +101,8 @@ class Route {
 	generation = 0;
 	/** The serving route's broadcast; undefined between routes or once the front let go. */
 	source?: Source;
+	/** The last broadcast served, kept between routes: what a replacement must match. */
+	served?: Source;
 	/** No front is left to replace the copy: readers follow it to its end. */
 	concluded = false;
 	/** The front refused the replacement: the track ends with this once the serving copy runs out. */
@@ -124,6 +126,7 @@ class Route {
 		if (this.concluded || this.source === source) return;
 		this.generation++;
 		this.source = source;
+		this.served = source;
 		this.#bump();
 		for (const reader of [...this.readers]) reader.sync();
 	}
@@ -703,21 +706,35 @@ export class Front {
 
 	// Splice `source`'s copy of a track in, once it claims the same content as the copies before.
 	#splice(route: Route, source: Source): void {
-		const expected = this.#info.get(route.name);
-		if (!expected) {
+		const recorded = this.#info.get(route.name);
+		const previous = route.served;
+		// The first copy of a track has nothing to match.
+		if (!recorded && !previous) {
 			route.serve(source);
 			return;
 		}
-		// The replaced copy keeps feeding the track while the new one answers.
+		// The replaced copy keeps feeding the track while the new one answers. One that has not
+		// answered yet is asked too, so a swap racing its first answer is still checked.
 		source.retain();
-		source.wire
-			.resolveTrackInfo(route.name)
+		previous?.retain();
+		const expected = recorded
+			? Promise.resolve(recorded)
+			: (previous as Source).wire.resolveTrackInfo(route.name).then(
+					(info) => {
+						this.#record(route.name, info);
+						return info;
+					},
+					() => undefined,
+				);
+		Promise.all([expected, source.wire.resolveTrackInfo(route.name)])
 			.then(
-				(info) => {
+				([expected, info]) => {
 					if (this.#source !== source) return;
+					// The copy it replaces never answered, so this one says what the track is.
+					if (!expected) this.#record(route.name, info);
 					// A copy claiming the same content with different metadata is refused rather
 					// than reinterpreted.
-					if (compatible(expected, info)) route.serve(source);
+					if (!expected || compatible(expected, info)) route.serve(source);
 					else route.refuse(new Error(`track ${route.name} changed its properties across routes`));
 				},
 				(err: unknown) => {
@@ -727,7 +744,10 @@ export class Front {
 					if (!routeFailed(error)) route.refuse(error);
 				},
 			)
-			.finally(() => source.release());
+			.finally(() => {
+				source.release();
+				previous?.release();
+			});
 	}
 
 	#route(name: string): Route {
