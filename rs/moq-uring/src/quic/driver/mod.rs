@@ -11,10 +11,12 @@
 
 mod connection;
 mod endpoint;
+mod group;
 mod stream;
 
 pub use connection::Connection;
 pub use endpoint::Endpoint;
+pub use group::SendGroup;
 pub use stream::{Credit, RecvStream, SendStream};
 
 pub(crate) use connection::{End, Shared};

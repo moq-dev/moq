@@ -115,6 +115,17 @@ export type Sample = {
 	painted: boolean;
 	/** The fixture frame counter read out of the canvas, absent when the picture is not the fixture. */
 	frameId?: number;
+	/** Source generation read from the presented pixels. */
+	generation?: number;
+	/** Presented canvas dimensions, independent of the received catalog. */
+	frameWidth?: number;
+	frameHeight?: number;
+	/** Coded dimensions of the decoded frame supplied to the renderer. */
+	videoCodedWidth?: number;
+	videoCodedHeight?: number;
+	/** The catalog's resolved video track and codec. */
+	videoTrack?: string;
+	videoCodec?: string;
 	/** Gap between the fixture's reference blocks, 0-255. Absent when the picture is not the fixture. */
 	contrast?: number;
 	/** Frames the decoder has produced. */
@@ -209,6 +220,10 @@ export type InteropControl = {
 	disableVideo(): void;
 	/** Re-enable the fixture's video rendition. */
 	enableVideo(): void;
+	/** Switch the fixture from AVC to VP8 without replacing its broadcast. */
+	changeVideoCodec(): void;
+	/** Double the fixture's coded dimensions while keeping its VP8 identity. */
+	resizeVideo(): void;
 };
 
 /** The `window` property the commands are published on. */

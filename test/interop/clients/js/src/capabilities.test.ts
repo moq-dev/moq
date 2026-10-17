@@ -7,6 +7,7 @@ const player: Capabilities = {
 	AudioDecoder: true,
 	AudioWorkletNode: true,
 	"decode avc1.42001f": true,
+	"decode vp8": true,
 	"decode opus": true,
 };
 

@@ -14,7 +14,7 @@ use std::{
 	collections::VecDeque,
 	sync::{
 		Arc, Mutex,
-		atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering},
+		atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering},
 	},
 	task::{Context, Poll, ready},
 	time::Duration,
@@ -36,7 +36,7 @@ struct Line {
 	/// When the reset reaches the reader.
 	reset: Mutex<Option<Instant>>,
 	/// The send order last set, for [`MockSession::release_unis_by_priority`].
-	priority: AtomicI32,
+	priority: AtomicI64,
 	/// Opened while its opener held streams back.
 	held: bool,
 	/// Once released, delivers what follows the first write; see [`MockSession::split_unis`].
@@ -212,6 +212,7 @@ impl MockSendStream {
 
 impl poll::SendStream for MockSendStream {
 	type Error = memory::Error;
+	type Group = poll::Ungrouped;
 
 	fn poll_write(&mut self, cx: &mut Context<'_>, buf: &[u8]) -> Poll<Result<usize, Self::Error>> {
 		let written = self.inner.poll_write(cx, buf);
@@ -224,9 +225,13 @@ impl poll::SendStream for MockSendStream {
 		self.wrote(first, written)
 	}
 
-	fn set_priority(&mut self, order: i32) {
+	fn set_priority(&mut self, order: i64) {
 		self.line.priority.store(order, Ordering::Relaxed);
 		self.inner.set_priority(order);
+	}
+
+	fn set_group(&mut self, group: &Self::Group) {
+		match *group {}
 	}
 
 	fn finish(&mut self) -> Result<(), Self::Error> {
@@ -589,6 +594,10 @@ impl poll::Session for MockSession {
 		let mut send = self.send(send, line);
 		send.ack = send.line.held;
 		Poll::Ready(Ok(send))
+	}
+
+	fn send_group(&mut self, _: i64) -> Option<poll::Ungrouped> {
+		None
 	}
 
 	fn poll_send_datagram(&mut self, cx: &mut Context<'_>, payload: &[u8]) -> Poll<Result<(), Self::Error>> {
