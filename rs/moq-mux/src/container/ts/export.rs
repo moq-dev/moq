@@ -3457,7 +3457,6 @@ fn dolby_units(
 			}
 		}
 		Some(mut head) => {
-			open = head.unit;
 			let min = codec.min_header_len();
 			let probe: Vec<u8> = head.bytes.iter().chain(payload.iter()).take(min).copied().collect();
 			if probe.len() < min {
@@ -3475,7 +3474,7 @@ fn dolby_units(
 						*carry = Some(head);
 						return Ok(Some(units));
 					};
-					let at = match (codec.begins_unit(&probe), open) {
+					let at = match (codec.begins_unit(&probe), head.unit) {
 						(false, Some(unit)) => unit.at,
 						_ => head.next,
 					};
@@ -3488,6 +3487,8 @@ fn dolby_units(
 					if next {
 						head.bytes.extend_from_slice(tail);
 						let frame = Bytes::from(head.bytes);
+						// A unit stays open only through a carried frame that completes without a gap.
+						open = head.unit;
 						dolby_place(codec, frame, &header, head.next, &mut open, &mut units)?;
 						offset = Some(need);
 					} else {
