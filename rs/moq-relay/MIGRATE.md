@@ -43,7 +43,7 @@ cargo build -p moq-relay --no-default-features --features quic
 
 `listen.lb_nonce` (`--listen-quic-lb-nonce`, `MOQ_LISTEN_QUIC_LB_NONCE`) without `lb_id` stops startup.
 Setting `lb_id` or `lb_nonce` together with `load_balancer` also stops; `lb_id` used to win.
-Set one of them.
+Choose either `load_balancer` or the `lb_id` and `lb_nonce` pair.
 
 ```bash
 # Before

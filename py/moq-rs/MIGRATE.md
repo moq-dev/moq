@@ -141,7 +141,7 @@ track.write_frame(payload, timestamp=pts)
 
 ### Subscriber staleness is `max_delay`
 
-`Subscription.max_age_us` is `max_delay`, a `timedelta`, and the decoder outputs take `max_delay_us`.
+`Subscription.max_age_us` is `max_delay`, a `timedelta`, and the decoder outputs take `max_delay`, also a `timedelta`.
 `TrackInfo` keeps its `max_age`: it is the publisher's retention.
 
 ```python

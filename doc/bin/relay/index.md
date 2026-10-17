@@ -48,7 +48,9 @@ Every option is also a `--flag` or `MOQ_*` environment variable, and
 `RUST_LOG` controls logging. The
 [configuration reference](/bin/relay/config) covers every section, and
 [`demo/relay/`](https://github.com/moq-dev/moq/tree/main/demo/relay) has
-working configs for development, production, and a cluster.
+working configs for development, production, and a cluster. Options renamed
+between releases are listed in
+[MIGRATE.md](https://github.com/moq-dev/moq/blob/main/rs/moq-relay/MIGRATE.md).
 
 ## Embed
 
@@ -101,8 +103,3 @@ See [docs.rs/moq-relay](https://docs.rs/moq-relay) and
 - **Certificate errors**: the hostname must match the certificate. Local browsers need the fingerprint served over `[web.http]`.
 - **Connection timeout**: UDP isn't reaching the relay, or the client URL names the wrong port.
 - **Unauthorized / forbidden**: the token's paths don't cover the connection path, or the broadcast a session asked for. See [path matching](/bin/relay/auth#path-matching).
-
-## Upgrading
-
-Renamed flags, environment variables, and config keys are listed, newest
-first, in moq-relay's [MIGRATE.md](https://github.com/moq-dev/moq/blob/main/rs/moq-relay/MIGRATE.md).

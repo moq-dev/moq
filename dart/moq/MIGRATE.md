@@ -44,7 +44,7 @@ final n = moq.connects;
 ### The consume origin is `consume`
 
 `ConnectOptions.subscribe` is `consume`.
-A value the native side cannot use fails `Moq.connect` with `MoqException.Config`, including a bad bind address.
+A value the native side cannot use fails `Moq.connect` with `ConfigMoqException`, including a bad bind address.
 A server request takes its origins in `accept(publish: ..., consume: ...)`, where null inherits the server's origin.
 
 ```dart
