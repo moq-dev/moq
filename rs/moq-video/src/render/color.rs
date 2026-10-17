@@ -3,19 +3,13 @@
 use crate::Color;
 
 /// The luma/chroma weights (`kr`, `kb`) a matrix is derived from.
-///
-/// Lives here rather than on [`Color`] because deriving the matrix is the
-/// shader's business; the enum itself only names a space.
 fn weights(color: Color) -> (f32, f32) {
-	match color {
-		Color::Bt601Limited | Color::Bt601Full => (0.299, 0.114),
-		Color::Bt709Limited | Color::Bt709Full => (0.2126, 0.0722),
-	}
+	color.matrix.weights()
 }
 
 /// Whether luma is 16..235 rather than 0..255.
 fn limited(color: Color) -> bool {
-	matches!(color, Color::Bt601Limited | Color::Bt709Limited)
+	color.limited()
 }
 
 /// The uniform the shader multiplies each sample by: a column-major 3x3 matrix
@@ -66,6 +60,7 @@ pub(super) fn uniform(color: Color) -> [f32; 16] {
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use crate::color::Range;
 
 	/// Convert one YUV triple through the same math the shader runs, so the
 	/// expectations below read as pixels rather than matrix entries.
@@ -89,7 +84,7 @@ mod tests {
 	#[test]
 	fn limited_range_black_and_white_reach_the_full_rgb_range() {
 		// The whole point of the range scaling: code 16 is black, 235 is white.
-		for color in [Color::Bt601Limited, Color::Bt709Limited] {
+		for color in [Color::BT601, Color::BT709] {
 			assert_rgb(convert(color, [16.0 / 255.0, 0.5, 0.5]), [0.0, 0.0, 0.0]);
 			assert_rgb(convert(color, [235.0 / 255.0, 0.5, 0.5]), [1.0, 1.0, 1.0]);
 		}
@@ -97,7 +92,10 @@ mod tests {
 
 	#[test]
 	fn full_range_maps_zero_and_one_straight_through() {
-		for color in [Color::Bt601Full, Color::Bt709Full] {
+		for color in [
+			Color::BT601.with_range(Range::Full),
+			Color::BT709.with_range(Range::Full),
+		] {
 			assert_rgb(convert(color, [0.0, 0.5, 0.5]), [0.0, 0.0, 0.0]);
 			assert_rgb(convert(color, [1.0, 0.5, 0.5]), [1.0, 1.0, 1.0]);
 		}
@@ -108,7 +106,11 @@ mod tests {
 		// Encode each primary to YUV with the forward matrix, then check the
 		// shader's inverse brings it back. Catches a transposed or mis-scaled
 		// column, which a grayscale-only test would miss.
-		for color in [Color::Bt601Full, Color::Bt709Full, Color::Bt709Limited] {
+		for color in [
+			Color::BT601.with_range(Range::Full),
+			Color::BT709.with_range(Range::Full),
+			Color::BT709,
+		] {
 			let (kr, kb) = weights(color);
 			let kg = 1.0 - kr - kb;
 			let (scale, offset) = match limited(color) {

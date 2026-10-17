@@ -1512,11 +1512,7 @@ mod tests {
 			moq_net::Timestamp::from_micros(0).unwrap(),
 		);
 		let scaled = frame.resize(small, &crate::resize::Config::default()).unwrap();
-		assert_eq!(
-			scaled.surface.color(),
-			Some(Color::Bt709Limited),
-			"resize keeps the space"
-		);
+		assert_eq!(scaled.surface.color(), Some(Color::BT709), "resize keeps the space");
 
 		// Left to infer, a 480p encoder would write BT.601 over those BT.709
 		// samples, so it refuses them instead.
@@ -1531,8 +1527,8 @@ mod tests {
 			matches!(
 				err,
 				Error::ColorMismatch {
-					frame: Color::Bt709Limited,
-					encoder: Color::Bt601Limited
+					frame: Color::BT709,
+					encoder: Color::BT601
 				}
 			),
 			"{err}"
@@ -1541,7 +1537,7 @@ mod tests {
 		// Declaring the real space fixes the label.
 		let config = Config {
 			kind: Kind::Software,
-			color: Some(Color::Bt709Limited),
+			color: Some(Color::BT709),
 			..Config::new(small.width, small.height, crate::Rate::new(30, 1).unwrap())
 		};
 		let mut encoder = Encoder::new(&config).unwrap();
@@ -1556,30 +1552,46 @@ mod tests {
 	/// The decoder (openh264, which reports none) labels its pictures with the
 	/// signalled space, even where the source's size would guess another: they
 	/// convert back to the red they started as. A rung whose size guesses a
-	/// different space re-signals the source's, or refuses to mislabel it.
+	/// different space re-signals the source's, or refuses to mislabel it,
+	/// BT.2020 PQ and HLG included.
 	#[test]
 	#[cfg(feature = "openh264")]
 	fn transcode_keeps_the_space_the_source_signalled() {
 		use super::backend::test_util::{Described, declared_color};
 		use crate::Color;
+		use crate::color::{Matrix, Primaries, Range, Transfer};
 
+		let hdr = |transfer| Color {
+			matrix: Matrix::Bt2020,
+			range: Range::Limited,
+			primaries: Primaries::Bt2020,
+			transfer,
+		};
 		let rate = crate::Rate::new(30, 1).unwrap();
 		let red = [255u8, 0, 0];
 		for (source, rung, color) in [
 			// The source's own guess, scaled across 576 lines.
-			(Size::new(1280, 720), Size::new(640, 480), Color::Bt709Limited),
+			(Size::new(1280, 720), Size::new(640, 480), Color::BT709),
 			// Spaces neither size would guess.
-			(Size::new(1280, 720), Size::new(1920, 1080), Color::Bt601Limited),
-			(Size::new(640, 480), Size::new(1280, 720), Color::Bt709Full),
+			(Size::new(1280, 720), Size::new(1920, 1080), Color::BT601),
+			(
+				Size::new(640, 480),
+				Size::new(1280, 720),
+				Color::BT709.with_range(Range::Full),
+			),
+			// HDR survives the round trip with its primaries and curve.
+			(Size::new(1280, 720), Size::new(640, 480), hdr(Transfer::Pq)),
+			(
+				Size::new(640, 480),
+				Size::new(1280, 720),
+				hdr(Transfer::Hlg).with_range(Range::Full),
+			),
 		] {
-			let matrix = match color {
-				Color::Bt709Limited | Color::Bt709Full => 1,
-				_ => 6,
-			};
+			let codes = color.code_points();
 			let described = || Described {
-				primaries: matrix,
-				transfer: 1,
-				matrix,
+				primaries: codes.primaries,
+				transfer: codes.transfer,
+				matrix: codes.matrix,
 				full_range: !color.limited(),
 			};
 

@@ -1674,12 +1674,13 @@ pub mod apple {
 			// Compare against the constants rather than the string literals: these
 			// are CFString identities Apple owns, not values we should spell out.
 			if name == unsafe { kCVImageBufferYCbCrMatrix_ITU_R_709_2 } {
-				Color::Bt709Limited
+				Color::BT709
 			} else if name == unsafe { kCVImageBufferYCbCrMatrix_ITU_R_601_4 } {
-				Color::Bt601Limited
+				Color::BT601
 			} else {
-				// BT.2020 and the P3 matrices land here. We have no variant for them,
-				// so the size guess is the least wrong answer available.
+				// BT.2020 and the P3 matrices land here. Labelling them would also
+				// need the primaries and transfer attachments, so the size guess
+				// stands in until this reads those too.
 				inferred
 			}
 		}
@@ -1689,14 +1690,14 @@ pub mod apple {
 		/// format that names neither.
 		pub(crate) fn color(&self) -> Option<Color> {
 			let format = CVPixelBufferGetPixelFormatType(&self.buffer);
-			let limited = if format == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange {
-				true
+			let range = if format == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange {
+				crate::color::Range::Limited
 			} else if format == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange {
-				false
+				crate::color::Range::Full
 			} else {
 				return None;
 			};
-			Some(self.matrix().with_range(limited))
+			Some(self.matrix().with_range(range))
 		}
 
 		/// Download an NV12 surface to packed I420 (the CPU encode path).
@@ -2851,19 +2852,23 @@ mod tests {
 		let converted = I420::from_rgba(&rgba, size.width * 4, size).expect("rgba to i420");
 		assert_eq!(
 			converted.color(),
-			Some(Color::Bt601Limited),
+			Some(Color::BT601),
 			"an RGB conversion knows the matrix it used"
 		);
 
 		// Resampling moves samples around; it does not reinterpret them.
 		let resized = converted.resize(Size::new(32, 32)).expect("resize");
-		assert_eq!(resized.color(), Some(Color::Bt601Limited), "resize preserves the space");
+		assert_eq!(resized.color(), Some(Color::BT601), "resize preserves the space");
 
 		// A passthrough leaves it open for the consumer to infer.
 		let size = Size::new(64, 64);
 		let raw = I420::new(size, vec![0; I420::len(size).unwrap()]).expect("i420");
 		assert_eq!(raw.color(), None);
-		assert_eq!(raw.with_color(Color::Bt709Full).color(), Some(Color::Bt709Full));
+		assert_eq!(
+			raw.with_color(Color::BT709.with_range(crate::color::Range::Full))
+				.color(),
+			Some(Color::BT709.with_range(crate::color::Range::Full))
+		);
 	}
 
 	/// An unlabelled 720p frame means BT.709 to every player. Scaled to 480p it
@@ -2880,15 +2885,18 @@ mod tests {
 
 		let config = crate::resize::Config::default();
 		let scaled = raw.resize(sd, &config).unwrap();
-		assert_eq!(scaled.color(), Some(Color::Bt709Limited));
+		assert_eq!(scaled.color(), Some(Color::BT709));
 
 		// A labelled source keeps its own label, not the size guess.
 		let full = Surface::I420(
 			I420::new(hd, vec![0x80; I420::len(hd).unwrap()])
 				.unwrap()
-				.with_color(Color::Bt601Full),
+				.with_color(Color::BT601.with_range(crate::color::Range::Full)),
 		);
-		assert_eq!(full.resize(sd, &config).unwrap().color(), Some(Color::Bt601Full));
+		assert_eq!(
+			full.resize(sd, &config).unwrap().color(),
+			Some(Color::BT601.with_range(crate::color::Range::Full))
+		);
 	}
 
 	/// V4L2 hands back YUYV already in the camera's color space, so the 4:2:2 ->
@@ -2961,13 +2969,13 @@ mod tests {
 
 		let pixels = I420::new(size, vec![0x80; I420::len(size).unwrap()])
 			.unwrap()
-			.with_color(Color::Bt709Full);
+			.with_color(Color::BT709.with_range(crate::color::Range::Full));
 		let allocation = pixels.data().as_ptr();
 		let pixels = Surface::I420(pixels).into_i420().unwrap();
 
 		assert_eq!(pixels.size(), size);
 		assert_ne!(pixels.size(), transposed);
-		assert_eq!(pixels.color(), Some(Color::Bt709Full));
+		assert_eq!(pixels.color(), Some(Color::BT709.with_range(crate::color::Range::Full)));
 		assert_eq!(pixels.data().as_ptr(), allocation);
 		assert_eq!(pixels.into_data().len(), I420::len(size).unwrap());
 	}
@@ -3076,10 +3084,10 @@ mod tests {
 		};
 
 		for (size, expected) in [
-			(Size::new(720, 480), Color::Bt601Limited),
-			(Size::new(720, 576), Color::Bt601Limited),
-			(Size::new(1280, 720), Color::Bt709Limited),
-			(Size::new(1920, 1080), Color::Bt709Limited),
+			(Size::new(720, 480), Color::BT601),
+			(Size::new(720, 576), Color::BT601),
+			(Size::new(1280, 720), Color::BT709),
+			(Size::new(1920, 1080), Color::BT709),
 		] {
 			let i420 = red(size);
 			assert_eq!(i420.color(), Some(expected), "{size} reported color");
