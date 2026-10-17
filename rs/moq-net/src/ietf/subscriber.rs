@@ -1660,8 +1660,10 @@ where
 			};
 
 			// Drafts 14-15 have no update for an advertisement, so a SUBSCRIBE_UPDATE the adapter
-			// routed here changes nothing. Draft-16's REQUEST_UPDATE renews its token.
+			// routed here is refused and changes nothing. Draft-16's REQUEST_UPDATE renews its token.
 			if type_id == ietf::SubscribeUpdate::ID && matches!(self.version, Version::Draft14 | Version::Draft15) {
+				super::request_stream::refuse_update(&mut stream.writer, &body, self.version)?;
+				std::future::poll_fn(|cx| stream.writer.poll_flush(cx)).await?;
 				continue;
 			}
 			let terminal = self.terminal_publish_namespace(type_id);
@@ -4756,7 +4758,7 @@ where
 				let mut cx = std::task::Context::from_waker(waiter.waker());
 				let closed = match self.version {
 					Version::Draft14 | Version::Draft15 | Version::Draft16 => {
-						super::request_stream::poll_legacy_end(&mut stream, &mut cx)
+						super::request_stream::poll_legacy_end(&mut stream, self.version, &mut cx)
 					}
 					_ => stream.reader.poll_closed(&mut cx),
 				};
@@ -7613,6 +7615,81 @@ mod tests {
 			routed_now(&consumer, "room/host").is_none(),
 			"an explicit withdrawal must close the broadcast",
 		);
+	}
+
+	/// Drafts 14 and 15 have no update for an advertisement, so a SUBSCRIBE_UPDATE the
+	/// adapter routes onto one changes nothing and leaves it standing until the withdrawal.
+	/// Draft 15 still owes the update an answer: a REQUEST_ERROR naming it.
+	#[moq_clock::test]
+	async fn a_legacy_update_on_an_advertisement_is_answered() {
+		for version in [Version::Draft14, Version::Draft15] {
+			let path = crate::Path::new("room/host").to_owned();
+			// Own Request ID 10, aimed at the advertisement (0). Draft 14 carries its fixed
+			// start, end group, priority and forward before the parameters.
+			let body: &[u8] = match version {
+				Version::Draft14 => &[10, 0, 0, 0, 0, 128, 1, 0],
+				_ => &[10, 0, 0],
+			};
+			let mut script = vec![ietf::SubscribeUpdate::ID as u8, 0, body.len() as u8];
+			script.extend_from_slice(body);
+			let log = crate::lite::test_transport::Log::default();
+			let mut writer =
+				crate::coding::Writer::new(crate::lite::test_transport::SinkSend::new(log.clone()), version);
+			writer
+				.encode_message(&ietf::PublishNamespaceDone {
+					track_namespace: path.borrow(),
+					request_id: RequestId(0),
+				})
+				.await
+				.unwrap();
+			script.extend(log.writes.lock().unwrap().iter());
+
+			let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+			let session = crate::lite::test_transport::ScriptedSession::eof(script);
+			let (tasks, task_set) = crate::util::TaskSet::new();
+			std::mem::forget(task_set);
+			let mut subscriber = Subscriber::new(
+				crate::time::sim(),
+				session.clone(),
+				origin,
+				Control::new(None, false),
+				None,
+				peer::PeerSetup::default(),
+				crate::Hop::new(1).unwrap(),
+				None,
+				version,
+				tasks,
+				Default::default(),
+			);
+
+			let stream = Stream::open(&mut session.clone(), version).await.unwrap();
+			let msg = ietf::PublishNamespace {
+				request_id: RequestId(0),
+				track_namespace: path.borrow(),
+				cluster: None,
+				authorization_token: None,
+			};
+			subscriber
+				.run_publish_namespace_stream(stream, msg, cluster::Peer::default(), None)
+				.await
+				.unwrap_or_else(|err| panic!("{version}: {err}"));
+
+			let written = session.log.writes.lock().unwrap().clone();
+			let mut rest = written.as_slice();
+			let mut sent = Vec::new();
+			while !rest.is_empty() {
+				let id = crate::coding::decode_varint(&mut rest, version).unwrap();
+				let len = usize::from(u16::from_be_bytes([rest[0], rest[1]]));
+				sent.push((id, rest.get(2).copied()));
+				rest = &rest[2 + len..];
+			}
+			let expected = match version {
+				Version::Draft14 => vec![(ietf::PublishNamespaceOk::ID, Some(0))],
+				_ => vec![(ietf::RequestOk::ID, Some(0)), (ietf::RequestError::ID, Some(10))],
+			};
+			assert_eq!(sent, expected, "{version}");
+			assert!(session.log.closes().is_empty(), "{version}: the session stays up");
+		}
 	}
 
 	/// A PUBLISH_NAMESPACE stream that dies mid-advertisement detaches it, closing the

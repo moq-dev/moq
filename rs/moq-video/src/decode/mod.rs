@@ -24,6 +24,7 @@ pub(crate) mod backend;
 mod conformance;
 mod consumer;
 mod decoder;
+mod select;
 mod sink;
 mod vui;
 

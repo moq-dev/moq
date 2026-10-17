@@ -30,6 +30,9 @@ Update watch, publish, hang, room, demos, and other affected consumers together.
   in existing API docs and package READMEs, together with regeneration.
 - Retain baseline revisions and shared tests after removing the handwritten
   implementation. Keep the WASM backend while the JS-only stage is evaluated.
+- Delete `rs/moq-wasm` with the handwritten code: on 2026-10-17 (#5838) the
+  maintainer chose UniFFI-generated moq-ffi as the browser binding, so moq-wasm
+  is only the baseline's reference until then.
 
 Public API: `@moq/net` remains the package; enumerate any approved signature,
 initialization, lifetime, or deployment changes. Wire: none.
@@ -37,3 +40,5 @@ initialization, lifetime, or deployment changes. Wire: none.
 ## Required
 
 - [Complete WASM bindings](/quest/m2/rs2ts/wasm-bindings.md) - the complete Rust-backed candidate and parity coverage
+- [ubrn reads UniFFI 0.32](/quest/m2/rs2ts/ubrn-032.md) - the TypeScript generates from the published moq-ffi, without the measurement pin
+- [Net-only moq-ffi](/quest/m2/rs2ts/net-only.md) - the browser `.wasm` drops the media layer, near moq-wasm's size
