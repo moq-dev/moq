@@ -397,7 +397,9 @@ impl View {
 	fn diff_bytes(&self, old: Option<&View>, interest: &str) -> (usize, usize) {
 		let empty = View::default();
 		let old = old.unwrap_or(&empty);
-		let suffix = |path: &str| path.strip_prefix(interest).map_or(path.len(), str::len);
+		// Every path overlaps the interest, so one not under it covers it and
+		// goes out as an empty suffix.
+		let suffix = |path: &str| path.strip_prefix(interest).map_or(0, str::len);
 		// One ANNOUNCE_FLOOR lists every region, changed or not: a count, then a
 		// suffix and a revision per region.
 		let floors = 1 + self.floors.keys().map(|region| suffix(region) + 4).sum::<usize>();
