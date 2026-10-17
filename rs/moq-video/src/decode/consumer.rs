@@ -1,11 +1,15 @@
 //! Subscribe to an encoded H.264, H.265, or AV1 track and emit decoded frames.
 
 use std::collections::VecDeque;
+use std::pin::Pin;
+use std::task::{Context, Poll, ready};
 
 use hang::catalog::VideoConfig;
 use moq_mux::container::Read;
+use tokio::time::Instant;
 
 use super::decoder::Config;
+use super::select::{Lane, Next, Selector};
 use super::sink::Sink;
 use crate::Error;
 use crate::Frame;
@@ -73,7 +77,32 @@ impl Options {
 /// plain [`Frame`]s in the representation
 /// [`Config::output`](super::Config::output) asked for. The direct mirror of
 /// `moq_audio::decode::Consumer`.
+///
+/// A rendition with a catalog `warmup` (intra refresh, so no keyframes) runs
+/// two decoders. One skips at [`Options::max_delay`] and may show refresh
+/// stripes after a join or a skip. The other tolerates `warmup` more and joins
+/// a group earlier, so its pictures stay clean, and they replace the first
+/// decoder's once it catches up. Both subscriptions share one upstream request.
 pub struct Consumer {
+	/// The min-delay and max-delay decoders, indexed by [`Lane`].
+	lanes: [Slot; 2],
+	name: String,
+	selector: Selector,
+}
+
+/// A decoder that is idle, decoding, or gone.
+///
+/// A decode in flight is kept across [`Consumer::read`] calls rather than
+/// cancelled when the other lane wins, because a cancelled [`Sink`] call
+/// poisons the sink.
+enum Slot {
+	Idle(Reader),
+	Busy(Pin<Box<dyn Future<Output = (Reader, Result<Option<Frame>, Error>)> + Send>>),
+	Closed,
+}
+
+/// One subscription and the decoder it feeds.
+struct Reader {
 	/// A [`Sink`] rather than a bare `Decoder`: the read loop below is held
 	/// across `.await` by every caller (moq-c's spawned task, moq-transcode),
 	/// so the codec would otherwise migrate between executor workers and
@@ -100,15 +129,151 @@ impl Consumer {
 		name: impl Into<String>,
 		options: Options,
 	) -> Result<Self, Error> {
+		let name = name.into();
+		let min = Reader::open(broadcast, catalog, &name, &options, options.max_delay, 0).await?;
+
+		let warmup = catalog.warmup.unwrap_or_default();
+		let max = if warmup.is_zero() {
+			None
+		} else {
+			// One more sweep of budget, joining a group earlier, so this decoder
+			// starts at a recovery point a whole sweep before the live edge.
+			let budget = options.max_delay.saturating_add(warmup);
+			match Reader::open(broadcast, catalog, &name, &options, budget, 1).await {
+				Ok(reader) => Some(reader),
+				// The second decoder only cleans up the picture, so a backend out of
+				// hardware instances plays with the first alone rather than not at all.
+				Err(err) => {
+					tracing::warn!(%name, %err, "max-delay decoder failed to open; showing min-delay pictures only");
+					None
+				}
+			}
+		};
+
+		// The catalog's rate when it has one, else whatever the pictures show.
+		let interval = catalog
+			.framerate
+			.filter(|rate| rate.is_finite() && *rate > 0.0)
+			.and_then(|rate| std::time::Duration::try_from_secs_f64(rate.recip()).ok());
+
+		Ok(Self {
+			name: min.decoder.name().to_owned(),
+			selector: Selector::new(max.is_some(), interval),
+			lanes: [Slot::Idle(min), max.map_or(Slot::Closed, Slot::Idle)],
+		})
+	}
+
+	/// The decoder backend name in use, e.g. `"videotoolbox"` or `"openh264"`.
+	pub fn name(&self) -> &str {
+		&self.name
+	}
+
+	/// Read the next decoded frame, or `None` after the track ends and the
+	/// decoder's buffered tail has been drained.
+	///
+	/// Join and delivery-gap recovery trim leading pictures whose previous GOP is absent.
+	/// Returned timestamps strictly increase.
+	///
+	/// Cancel-safe: a decode in flight when the read is dropped is kept and
+	/// finished by the next read. A codec error is returned again by every later
+	/// read mid-stream, or once and then `None` when it struck the tail flush.
+	pub async fn read(&mut self) -> Result<Option<Frame>, Error> {
+		let mut sleep = None;
+		std::future::poll_fn(|cx| self.poll_read(cx, &mut sleep)).await
+	}
+
+	fn poll_read(
+		&mut self,
+		cx: &mut Context<'_>,
+		sleep: &mut Option<Pin<Box<tokio::time::Sleep>>>,
+	) -> Poll<Result<Option<Frame>, Error>> {
+		loop {
+			let deadline = match self.selector.next(Instant::now()) {
+				Next::Frame(frame) => return Poll::Ready(Ok(Some(frame))),
+				Next::End => return Poll::Ready(Ok(None)),
+				Next::Wait(deadline) => deadline,
+			};
+
+			let mut progress = false;
+			for lane in [Lane::Min, Lane::Max] {
+				let slot = &mut self.lanes[lane as usize];
+				if matches!(slot, Slot::Idle(_)) && self.selector.wants(lane) {
+					let Slot::Idle(mut reader) = std::mem::replace(slot, Slot::Closed) else {
+						unreachable!("matched above");
+					};
+					*slot = Slot::Busy(Box::pin(async move {
+						let result = reader.read().await;
+						(reader, result)
+					}));
+				}
+				let Slot::Busy(step) = slot else {
+					continue;
+				};
+				let Poll::Ready((reader, result)) = step.as_mut().poll(cx) else {
+					continue;
+				};
+				progress = true;
+				*slot = Slot::Idle(reader);
+				match result {
+					Ok(Some(frame)) => self.selector.push(lane, frame, Instant::now()),
+					Ok(None) => {
+						*slot = Slot::Closed;
+						self.selector.finish(lane);
+					}
+					// Left idle, so the next read asks it again and gets the same
+					// answer, like a lone decoder.
+					Err(err) if lane == Lane::Min => return Poll::Ready(Err(err)),
+					Err(err) => {
+						tracing::warn!(%err, "max-delay decoder failed; showing min-delay pictures only");
+						*slot = Slot::Closed;
+						self.selector.finish(lane);
+					}
+				}
+			}
+			if progress {
+				continue;
+			}
+
+			let Some(deadline) = deadline else {
+				return Poll::Pending;
+			};
+			let sleep = sleep.get_or_insert_with(|| Box::pin(tokio::time::sleep_until(deadline)));
+			sleep.as_mut().reset(deadline);
+			ready!(sleep.as_mut().poll(cx));
+		}
+	}
+}
+
+#[cfg(test)]
+impl Consumer {
+	/// The lane's decoder between reads; a lane decoding in the background is busy.
+	fn reader(&mut self, lane: Lane) -> &mut Reader {
+		let Slot::Idle(reader) = &mut self.lanes[lane as usize] else {
+			panic!("the {lane:?} decoder is not idle");
+		};
+		reader
+	}
+}
+
+impl Reader {
+	/// Subscribe with `max_delay`, starting `lookback` groups before the live
+	/// edge when the caller asked for [`Start::Latest`].
+	async fn open(
+		broadcast: &moq_net::broadcast::Consumer,
+		catalog: &VideoConfig,
+		name: &str,
+		options: &Options,
+		max_delay: std::time::Duration,
+		lookback: u64,
+	) -> Result<Self, Error> {
 		let decoder = Sink::open(catalog, &options.decoder).await?;
 
-		let name = name.into();
-		let track = broadcast.track(hang::catalog::Reference::track(catalog, &name))?;
+		let track = broadcast.track(hang::catalog::Reference::track(catalog, name))?;
 		let mut subscriber = track
 			.subscribe(
 				moq_net::track::Subscription::default()
 					.with_priority(hang::catalog::PRIORITY.video)
-					.with_max_delay(options.max_delay),
+					.with_max_delay(max_delay),
 			)
 			.await?;
 		// A decoder often opens on a track that is already cached: a replacement
@@ -128,7 +293,7 @@ impl Consumer {
 		if options.start == Start::Latest
 			&& let Some(live_edge) = track.latest()
 		{
-			subscriber.set_groups(live_edge..);
+			subscriber.set_groups(live_edge.saturating_sub(lookback)..);
 		}
 		let track = subscriber;
 		// The catalog says how the track is framed, and it is not always the legacy
@@ -147,22 +312,8 @@ impl Consumer {
 		})
 	}
 
-	/// The decoder backend name in use, e.g. `"videotoolbox"` or `"openh264"`.
-	pub fn name(&self) -> &str {
-		self.decoder.name()
-	}
-
-	/// Read the next decoded frame, or `None` after the track ends and the
-	/// decoder's buffered tail has been drained.
-	///
-	/// Join and delivery-gap recovery trim leading pictures whose previous GOP is absent.
-	///
-	/// This inherits [`Sink`]'s cancellation contract. If a queued codec
-	/// operation is cancelled, the next read returns a codec error: a cancelled
-	/// mid-stream decode poisons the sink so every later read keeps returning
-	/// that error, while a cancelled tail flush reports the error once and then
-	/// `None`. Drop the consumer instead of continuing to read it.
-	pub async fn read(&mut self) -> Result<Option<Frame>, Error> {
+	/// The next frame this decoder alone produces; see [`Consumer::read`].
+	async fn read(&mut self) -> Result<Option<Frame>, Error> {
 		loop {
 			if let Some(frame) = self.pending.pop_front() {
 				return Ok(Some(frame));
@@ -589,7 +740,10 @@ mod tests {
 			[1000, 1100, 2000, 1800, 1900],
 			"join trims, continuous delivery keeps every leading picture"
 		);
-		consumer.track.set_max_delay(std::time::Duration::ZERO);
+		consumer
+			.reader(Lane::Min)
+			.track
+			.set_max_delay(std::time::Duration::ZERO);
 		write(12, &[3000]);
 		write(13, &[4000, 3800, 3900, 4100]);
 		track.finish().unwrap();
@@ -722,12 +876,12 @@ mod tests {
 		assert_eq!(timestamps, vec![100_000, 200_000]);
 	}
 
-	/// Cancellation while a threaded flush is in flight leaves the sink poisoned.
-	/// The next read surfaces that error rather than reporting a clean end and
-	/// silently discarding the tail.
+	/// A read dropped while a threaded flush is in flight loses nothing: the
+	/// next read finishes that same flush rather than issuing another into a
+	/// poisoned sink, and only then reports the end.
 	#[cfg(not(apple))]
 	#[tokio::test]
-	async fn cancelled_track_end_flush_is_not_reported_as_drained() {
+	async fn a_cancelled_read_resumes_the_flush_in_flight() {
 		probe::prepare_blocking_flush();
 		let broadcast = moq_net::broadcast::Info::new().produce();
 		let track = broadcast
@@ -780,12 +934,10 @@ mod tests {
 		drop(read);
 		probe::release_flush();
 
-		let err = match consumer.read().await {
-			Err(err) => err,
-			Ok(_) => panic!("cancelled flush must poison the sink"),
-		};
-		assert!(err.to_string().contains("cancelled call"), "unexpected error: {err}");
-		assert!(matches!(err, crate::Error::CodecGone(_)));
+		assert!(
+			consumer.read().await.unwrap().is_none(),
+			"the cancelled read's flush was not resumed"
+		);
 		assert!(consumer.read().await.unwrap().is_none());
 	}
 
@@ -854,5 +1006,282 @@ mod tests {
 		// The end stays the end: the drain runs once, so a caller that keeps
 		// reading past it does not get the tail a second time.
 		assert!(consumer.read().await.unwrap().is_none());
+	}
+
+	/// One frame per second, so the frame interval the selector holds a picture
+	/// for dwarfs a decode thread's round trip even on a loaded host.
+	const SECOND: u64 = 1_000_000;
+
+	/// A sweep of four frames.
+	const WARMUP: std::time::Duration = std::time::Duration::from_secs(4);
+
+	fn warmup_catalog(warmup: Option<std::time::Duration>) -> VideoConfig {
+		let mut catalog = VideoConfig::new(hang::catalog::H264 {
+			inline: true,
+			profile: 0x42,
+			constraints: 0,
+			level: 30,
+		});
+		catalog.warmup = warmup;
+		catalog
+	}
+
+	fn live_track() -> (moq_net::broadcast::Producer, moq_net::track::Producer) {
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let track = broadcast
+			.create_track("video", hang::container::track_info(hang::catalog::PRIORITY.video))
+			.unwrap();
+		(broadcast, track)
+	}
+
+	/// Append frames at `seconds` to `group`, the first frame of a group being its recovery point.
+	fn write(group: &mut moq_net::group::Producer, seconds: &[u64]) {
+		let wire = moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Video);
+		let frames: Vec<_> = seconds
+			.iter()
+			.map(|second| moq_mux::container::Frame {
+				timestamp: Timestamp::from_micros(second * SECOND).unwrap(),
+				duration: None,
+				payload: Bytes::from_static(b"access unit"),
+				keyframe: *second % 4 == 0,
+			})
+			.collect();
+		wire.write(group, &frames).unwrap();
+	}
+
+	fn group(track: &mut moq_net::track::Producer, sequence: u64, seconds: &[u64]) -> moq_net::group::Producer {
+		let mut group = track.create_group(moq_net::group::Info { sequence }).unwrap();
+		write(&mut group, seconds);
+		group
+	}
+
+	async fn dual(
+		broadcast: &moq_net::broadcast::Producer,
+		start: Start,
+		max_delay: std::time::Duration,
+		kind: &str,
+	) -> Consumer {
+		Consumer::new(
+			&broadcast.consume(),
+			&warmup_catalog(Some(WARMUP)),
+			"video",
+			Options {
+				decoder: Config {
+					kind: Kind::Named(kind.into()),
+					..Config::new()
+				},
+				start,
+				max_delay,
+			},
+		)
+		.await
+		.unwrap()
+	}
+
+	/// Read one frame, as (seconds, the lane it was shown from).
+	async fn read(consumer: &mut Consumer) -> (u64, Lane) {
+		let frame = tokio::time::timeout(std::time::Duration::from_secs(10), consumer.read())
+			.await
+			.expect("a frame within ten seconds")
+			.unwrap()
+			.expect("the track is live");
+		let seconds = u64::try_from(frame.timestamp.as_micros()).unwrap() / SECOND;
+		(seconds, consumer.selector.source())
+	}
+
+	/// Let the decoders run with nothing new to show until the max-delay one
+	/// has caught up, or fail after ten seconds of trying.
+	async fn catch_up(consumer: &mut Consumer) {
+		let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+		while consumer.selector.source() != Lane::Max {
+			assert!(
+				tokio::time::Instant::now() < deadline,
+				"the max-delay decoder never caught up"
+			);
+			if let Ok(frame) = tokio::time::timeout(std::time::Duration::from_millis(20), consumer.read()).await {
+				panic!(
+					"nothing new was published, yet read returned {:?}",
+					frame.map(|f| f.map(|f| f.timestamp))
+				);
+			}
+		}
+	}
+
+	/// A cold join shows the min-delay decoder's pictures at the live edge first,
+	/// then the max-delay decoder's once it has decoded the sweep before them.
+	#[tokio::test]
+	async fn a_cold_join_hands_over_to_the_max_delay_decoder() {
+		let (broadcast, mut track) = live_track();
+		let published = track.clone();
+		group(&mut track, 0, &[0, 1, 2, 3]).finish().unwrap();
+		let mut live = group(&mut track, 1, &[4, 5]);
+
+		let mut consumer = dual(
+			&broadcast,
+			Start::Latest,
+			std::time::Duration::ZERO,
+			probe::IMMEDIATE_NAME,
+		)
+		.await;
+		assert_eq!(
+			published.subscription().map(|sub| sub.max_delay),
+			Some(WARMUP),
+			"the two subscriptions did not share one request at the larger budget"
+		);
+
+		// The max-delay decoder starts at 0, so only the min-delay one can show 4 first.
+		assert_eq!(read(&mut consumer).await.0, 4, "the live edge shows first");
+		assert_eq!(read(&mut consumer).await.0, 5);
+		catch_up(&mut consumer).await;
+		for second in 6..9 {
+			write(&mut live, &[second]);
+			assert_eq!(read(&mut consumer).await, (second, Lane::Max));
+		}
+	}
+
+	/// A stall shorter than a sweep makes the min-delay decoder skip, while the
+	/// max-delay one waits it out, and takes the picture back once it catches up,
+	/// never alternating in between.
+	#[tokio::test]
+	async fn a_short_stall_skips_only_the_min_delay_decoder() {
+		let (broadcast, mut track) = live_track();
+		let mut consumer = dual(
+			&broadcast,
+			Start::Oldest,
+			std::time::Duration::ZERO,
+			probe::IMMEDIATE_NAME,
+		)
+		.await;
+
+		// One frame at a time once both decoders are caught up, so every picture
+		// below has exactly one lane that can show it.
+		let mut first = group(&mut track, 0, &[0]);
+		assert_eq!(read(&mut consumer).await.0, 0);
+		catch_up(&mut consumer).await;
+		let mut shown = Vec::new();
+		for second in 1..4 {
+			write(&mut first, &[second]);
+			shown.push(read(&mut consumer).await);
+		}
+		first.finish().unwrap();
+		let mut stalled = group(&mut track, 1, &[4]);
+		shown.push(read(&mut consumer).await);
+
+		// Group 1 stalls and group 2 starts: the min-delay decoder skips to it,
+		// leading by more than a frame, so it is shown at once.
+		let mut live = group(&mut track, 2, &[8]);
+		shown.push(read(&mut consumer).await);
+		assert!(
+			tokio::time::timeout(std::time::Duration::from_millis(100), consumer.read())
+				.await
+				.is_err()
+		);
+		assert_eq!(
+			consumer.selector.source(),
+			Lane::Min,
+			"the max-delay decoder skipped the stall too"
+		);
+
+		write(&mut stalled, &[5, 6, 7]);
+		stalled.finish().unwrap();
+		catch_up(&mut consumer).await;
+		for second in 9..12 {
+			write(&mut live, &[second]);
+			shown.push(read(&mut consumer).await);
+		}
+
+		assert_eq!(
+			shown,
+			[
+				(1, Lane::Max),
+				(2, Lane::Max),
+				(3, Lane::Max),
+				(4, Lane::Max),
+				(8, Lane::Min),
+				(9, Lane::Max),
+				(10, Lane::Max),
+				(11, Lane::Max),
+			]
+		);
+	}
+
+	/// A stall longer than a sweep skips both decoders, so the stalled group's
+	/// late frames are never shown, and the max-delay decoder still takes over.
+	#[tokio::test]
+	async fn a_long_stall_skips_both_decoders() {
+		let (broadcast, mut track) = live_track();
+		let mut consumer = dual(
+			&broadcast,
+			Start::Oldest,
+			std::time::Duration::ZERO,
+			probe::IMMEDIATE_NAME,
+		)
+		.await;
+
+		// Written as it is read: a zero budget would skip a backlog.
+		group(&mut track, 0, &[0, 1, 2, 3]).finish().unwrap();
+		let mut shown = Vec::new();
+		for _ in 0..4 {
+			shown.push(read(&mut consumer).await.0);
+		}
+		let mut stalled = group(&mut track, 1, &[4]);
+		shown.push(read(&mut consumer).await.0);
+		let mut live = group(&mut track, 2, &[8, 9, 10, 11, 12]);
+		for _ in 0..5 {
+			shown.push(read(&mut consumer).await.0);
+		}
+		catch_up(&mut consumer).await;
+
+		write(&mut stalled, &[5, 6, 7]);
+		stalled.finish().unwrap();
+		write(&mut live, &[13]);
+		shown.push(read(&mut consumer).await.0);
+		assert_eq!(shown, [0, 1, 2, 3, 4, 8, 9, 10, 11, 12, 13]);
+	}
+
+	/// Both decoders hold their last picture until the track ends, and each
+	/// drains it exactly once.
+	#[tokio::test]
+	async fn the_tail_drains_from_both_decoders() {
+		let (broadcast, mut track) = live_track();
+		group(&mut track, 0, &[0, 1, 2, 3]).finish().unwrap();
+		group(&mut track, 1, &[4, 5]).finish().unwrap();
+		track.finish().unwrap();
+
+		// A budget that keeps every cached group, so both decoders read them all.
+		let mut consumer = dual(&broadcast, Start::Oldest, WARMUP, probe::BUFFERED_NAME).await;
+		let mut shown = Vec::new();
+		while let Some(frame) = consumer.read().await.unwrap() {
+			shown.push(u64::try_from(frame.timestamp.as_micros()).unwrap() / SECOND);
+		}
+		assert_eq!(shown, [0, 1, 2, 3, 4, 5]);
+		assert!(consumer.read().await.unwrap().is_none());
+		assert!(consumer.lanes.iter().all(|slot| matches!(slot, Slot::Closed)));
+	}
+
+	/// A rendition without `warmup` opens one subscription and one decoder.
+	#[tokio::test]
+	async fn no_warmup_runs_one_decoder() {
+		for warmup in [None, Some(std::time::Duration::ZERO)] {
+			let (broadcast, track) = live_track();
+			let max_delay = std::time::Duration::from_millis(500);
+			let consumer = Consumer::new(
+				&broadcast.consume(),
+				&warmup_catalog(warmup),
+				"video",
+				Options {
+					decoder: Config {
+						kind: Kind::Named(probe::IMMEDIATE_NAME.into()),
+						..Config::new()
+					},
+					max_delay,
+					..Options::new()
+				},
+			)
+			.await
+			.unwrap();
+			assert!(matches!(consumer.lanes[Lane::Max as usize], Slot::Closed));
+			assert_eq!(track.subscription().map(|sub| sub.max_delay), Some(max_delay));
+		}
 	}
 }

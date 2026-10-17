@@ -24,6 +24,10 @@ pub(crate) const NAME: &str = "probe";
 /// A test decoder that holds one picture until the next call or a flush.
 pub(crate) const BUFFERED_NAME: &str = "probe-buffered";
 
+/// A test decoder that hands each picture straight back and records nothing,
+/// for tests that run more than one decoder at a time.
+pub(crate) const IMMEDIATE_NAME: &str = "probe-immediate";
+
 /// A test decoder whose flush waits until the test releases it.
 #[cfg(not(apple))]
 pub(crate) const BLOCKING_FLUSH_NAME: &str = "probe-blocking-flush";
@@ -118,6 +122,8 @@ pub(crate) struct Probe;
 
 pub(crate) struct Buffered(Option<Frame>);
 
+pub(crate) struct Immediate;
+
 pub(crate) struct Native;
 
 #[cfg(not(apple))]
@@ -133,6 +139,26 @@ impl Probe {
 impl Buffered {
 	pub(crate) fn open(_codec: Codec, _config: &Config) -> Result<Box<dyn Backend>, Error> {
 		Ok(Box::new(Self(None)))
+	}
+}
+
+impl Immediate {
+	pub(crate) fn open(_codec: Codec, _config: &Config) -> Result<Box<dyn Backend>, Error> {
+		Ok(Box::new(Self))
+	}
+}
+
+impl Backend for Immediate {
+	fn decode(&mut self, _access_unit: Bytes, timestamp: Timestamp, _keyframe: bool) -> Result<Vec<Frame>, Error> {
+		Ok(vec![frame(timestamp)?])
+	}
+
+	fn flush(&mut self) -> Result<Vec<Frame>, Error> {
+		Ok(Vec::new())
+	}
+
+	fn name(&self) -> &str {
+		IMMEDIATE_NAME
 	}
 }
 
