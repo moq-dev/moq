@@ -1467,18 +1467,12 @@ mod tests {
 				.with_versions(version.into())
 				.with_publisher(upstream.consume().with_hidden(true));
 			let client = async {
-				let (session, driver) = client
-					.connect(moq_clock::now(), client_transport)
-					.await
-					.unwrap();
+				let (session, driver) = client.connect(moq_clock::now(), client_transport).await.unwrap();
 				tokio::spawn(moq_net::time::run(driver));
 				session
 			};
 			let server = async {
-				let (session, driver) = server
-					.accept(moq_clock::now(), server_transport)
-					.await
-					.unwrap();
+				let (session, driver) = server.accept(moq_clock::now(), server_transport).await.unwrap();
 				tokio::spawn(moq_net::time::run(driver));
 				session
 			};
@@ -1506,12 +1500,13 @@ mod tests {
 					link(&middle, &edge, version).await,
 				];
 				let session = registry.tier(Tier::default()).session("room");
-				let bytes = Arc::new(AtomicU64::new(40));
-				let counters = bytes.clone();
-				let _wire = session.wire(move || {
-					let n = counters.load(Ordering::Relaxed);
-					(n, n * 2)
-				});
+				let counters = moq_net::transport::Wire::new();
+				let _wire = session.wire(counters.clone());
+				let store = |n: u64| {
+					counters.set_sent_bytes(n);
+					counters.set_received_bytes(n * 2);
+				};
+				store(40);
 				drain.collect();
 				drain.publish(Instant::now());
 				let consumer = edge.consume().with_hidden(true);
@@ -1527,7 +1522,7 @@ mod tests {
 				}
 				let mut previous = None;
 				for (reading, delta) in [(40, 11), (1_000, 7)] {
-					bytes.store(reading, Ordering::Relaxed);
+					store(reading);
 					let subscriber = pumping(&mut drain, broadcast.track(&name).unwrap().subscribe(None))
 						.await
 						.unwrap();
@@ -1547,7 +1542,7 @@ mod tests {
 						(0, 0),
 						"a cache exposed an earlier hold's bytes"
 					);
-					bytes.store(reading + delta, Ordering::Relaxed);
+					store(reading + delta);
 					drain.collect();
 					drain.publish(Instant::now());
 					let next = pumping(&mut drain, reader.next()).await.unwrap().unwrap();
@@ -1556,7 +1551,7 @@ mod tests {
 						// Cross the codec's group budget naturally, leaving a completed
 						// group cached when unsubscribe aborts the still-open last group.
 						for extra in 1..=300 {
-							bytes.store(reading + delta + extra, Ordering::Relaxed);
+							store(reading + delta + extra);
 							let next = pumping(&mut drain, reader.next()).await.unwrap().unwrap();
 							assert_eq!(
 								(next[""].wire_tx, next[""].wire_rx),
@@ -2181,7 +2176,10 @@ mod tests {
 		let (producer, origin, mut events) = grouped_producer(Duration::ZERO);
 		let registry = producer.registry();
 		let session = registry.tier(Tier::default()).session("acme/live");
-		let wire = session.wire(|| (71, 29));
+		let counters = moq_net::transport::Wire::new();
+		counters.set_sent_bytes(71);
+		counters.set_received_bytes(29);
+		let wire = session.wire(counters);
 		drive_tick().await;
 		let [(path, true, old_epoch)] = &take_epochs(&mut events)[..] else {
 			panic!("expected the wire root's group");
@@ -2197,7 +2195,7 @@ mod tests {
 		assert_eq!(take_epochs(&mut events), [(path.clone(), false, old_epoch.clone())]);
 
 		let session = registry.tier(Tier::default()).session("acme/live");
-		let _wire = session.wire(|| (0, 0));
+		let _wire = session.wire(moq_net::transport::Wire::new());
 		drive_tick().await;
 		let [(new_path, true, new_epoch)] = &take_epochs(&mut events)[..] else {
 			panic!("expected a new wire group epoch");

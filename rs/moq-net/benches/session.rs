@@ -1028,7 +1028,6 @@ impl IdleRoom {
 			options.server_publish = Some(relay.consume());
 			// A QUIC backend reports both; Lite serves PROBE, IETF samples on demand.
 			options.stats = MockStats {
-				wire: None,
 				estimated_send_rate: Some(1_000_000),
 				rtt: Some(Duration::from_millis(40)),
 			};

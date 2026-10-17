@@ -464,18 +464,18 @@ struct Side {
 	/// Stream resets sent by this side.
 	resets: Resets,
 	/// What [`poll::Session::stats`] reports.
-	stats: Arc<Mutex<MockStats>>,
+	stats: Mutex<MockStats>,
 	/// How many times the stats were read.
 	stats_reads: AtomicUsize,
 	/// Whether reading the stats panics; see [`MockSession::panic_on_stats`].
 	panic_on_stats: AtomicBool,
+	/// The wire counters [`poll::Session::wire`] exposes, which a test updates as a transport would.
+	wire: moq_net::transport::Wire,
 }
 
 /// The connection statistics a [`MockSession`] reports. Unavailable by default.
 #[derive(Clone, Copy, Default)]
 pub struct MockStats {
-	/// Direct cumulative wire counters, when supported.
-	pub wire: Option<(u64, u64)>,
 	/// The congestion controller's send-rate estimate, in bits per second.
 	pub estimated_send_rate: Option<u64>,
 	/// The smoothed round-trip time.
@@ -483,13 +483,6 @@ pub struct MockStats {
 }
 
 impl moq_net::transport::Stats for MockStats {
-	fn bytes_sent(&self) -> Option<u64> {
-		self.wire.map(|wire| wire.0)
-	}
-	fn bytes_received(&self) -> Option<u64> {
-		self.wire.map(|wire| wire.1)
-	}
-
 	fn estimated_send_rate(&self) -> Option<u64> {
 		self.estimated_send_rate
 	}
@@ -653,12 +646,9 @@ impl poll::Session for MockSession {
 		self.side.stats_reads.fetch_add(1, Ordering::Relaxed);
 		*self.side.stats.lock().unwrap()
 	}
+
 	fn wire(&self) -> Option<moq_net::transport::Wire> {
-		self.side.stats.lock().unwrap().wire?;
-		let stats = self.side.stats.clone();
-		Some(moq_net::transport::Wire::new(move || {
-			stats.lock().unwrap().wire.unwrap_or_default()
-		}))
+		Some(self.side.wire.clone())
 	}
 }
 
@@ -697,6 +687,11 @@ impl MockSession {
 	/// How many times the stats were read.
 	pub fn stats_reads(&self) -> usize {
 		self.side.stats_reads.load(Ordering::Relaxed)
+	}
+
+	/// The wire counters this side's transport exposes.
+	pub fn wire(&self) -> &moq_net::transport::Wire {
+		&self.side.wire
 	}
 
 	/// Panic on the driver's next stats sample, which a [`moq_net::Session::stats`]
@@ -879,6 +874,7 @@ pub fn create_mock_session_pair(config: memory::Config) -> (MockSession, MockSes
 			stats: Default::default(),
 			stats_reads: Default::default(),
 			panic_on_stats: Default::default(),
+			wire: Default::default(),
 		}),
 		accept_uni: Default::default(),
 		accept_bi: Default::default(),

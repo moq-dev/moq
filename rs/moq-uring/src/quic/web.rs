@@ -445,8 +445,8 @@ pub struct Session {
 }
 
 impl Session {
-	/// Return wire counters readable from any thread without retaining this session.
-	pub fn wire(&self) -> moq_net::transport::Wire {
+	/// The wire counters the connection updates as it sends and receives.
+	pub(crate) fn wire(&self) -> moq_net::transport::Wire {
 		self.conn.wire()
 	}
 

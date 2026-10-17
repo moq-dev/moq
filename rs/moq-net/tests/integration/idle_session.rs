@@ -26,7 +26,6 @@ const IDLE: Duration = Duration::from_secs(60);
 const PROBE_MAX_AGE: Duration = Duration::from_secs(10);
 
 const STATS: MockStats = MockStats {
-	wire: None,
 	estimated_send_rate: Some(1_000_000),
 	rtt: Some(Duration::from_millis(40)),
 };
@@ -125,14 +124,13 @@ async fn ietf_stats_refresh_costs_one_driver_poll() {
 	}
 }
 
-/// A stats tick reads the connection directly and adds no sampler timer or session wake.
+/// A stats tick reads the transport's wire counters and adds no sampler timer or session wake.
 #[moq_clock::test]
 async fn wire_collection_never_arms_the_idle_sampler() {
 	for version in ["moq-lite-06", "moq-lite-07-wip", "moq-transport-16", "moq-transport-22"] {
 		let registry = moq_net::stats::Registry::new(Default::default());
 		let polls = Arc::new(AtomicUsize::new(0));
 		let mut options = MockConnectOptions::new(version.parse().unwrap());
-		options.stats.wire = Some((0, 0));
 		options.server_stats = registry.tier(Default::default()).session("room");
 		options.server_polls = Some(polls.clone());
 		let pair = connect_mock(options).await;
@@ -140,10 +138,8 @@ async fn wire_collection_never_arms_the_idle_sampler() {
 		let start_polls = polls.load(Ordering::Relaxed);
 		let start_reads = pair.server_transport.stats_reads();
 		for tick in 1..=60 {
-			pair.server_transport.set_stats(MockStats {
-				wire: Some((tick, tick * 2)),
-				..Default::default()
-			});
+			pair.server_transport.wire().set_sent_bytes(tick);
+			pair.server_transport.wire().set_received_bytes(tick * 2);
 			let mut report = moq_net::stats::Report::default();
 			registry.report(&mut report);
 			assert_eq!(
@@ -162,6 +158,5 @@ async fn wire_collection_never_arms_the_idle_sampler() {
 			start_reads,
 			"{version}: a tick armed the sampler"
 		);
-		assert_eq!(pair.server.wire().unwrap().read(), (60, 120));
 	}
 }

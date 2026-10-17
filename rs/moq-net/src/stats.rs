@@ -63,9 +63,10 @@
 //!   [`Session::set_tier`] ends the session on the old tier and starts it on
 //!   the new one.
 //! * `wire_tx` / `wire_rx` ([`Presence`]): cumulative transport bytes, including
-//!   overhead and retransmissions. [`Registry::report`] and [`Registry::snapshot`]
-//!   read each registered [`Wire`] source directly, without requesting a session
-//!   stats sample. A tier move flushes its old tier; dropping the guard flushes
+//!   overhead and retransmissions. The transport updates its
+//!   [`crate::transport::Wire`] counters as it sends and receives, and
+//!   [`Registry::report`] and [`Registry::snapshot`] read each registered [`Wire`]
+//!   without polling the session. A tier move flushes its old tier; dropping the guard flushes
 //!   its final nonnegative delta. Unsupported transports contribute zero.
 //! * `announces_peak` / `subscriptions_peak` ([`Presence`]): the most
 //!   announcements, or subscriptions, any one session under the auth root held
@@ -1201,9 +1202,9 @@ impl Handle {
 		self.context(root, Context::Request)
 	}
 
-	/// Register an external connection's wire bytes under `root` without counting an admission.
-	pub fn wire(&self, root: impl AsPath, source: impl Fn() -> (u64, u64) + Send + Sync + 'static) -> Wire {
-		self.context(root, Context::Wire).wire(source)
+	/// Count an external connection's wire counters under `root` without counting an admission.
+	pub fn wire(&self, root: impl AsPath, counters: crate::transport::Wire) -> Wire {
+		self.context(root, Context::Wire).wire(counters)
 	}
 
 	fn context(&self, root: impl AsPath, context: Context) -> Session {
@@ -1252,7 +1253,7 @@ enum Context {
 	Wire,
 }
 
-/// A registered wire source; dropping it adds its final reading and unregisters it.
+/// Registered wire counters; dropping this adds their final reading and unregisters them.
 #[derive(Default)]
 pub struct Wire {
 	inner: Option<Arc<WireInner>>,
@@ -1260,14 +1261,14 @@ pub struct Wire {
 
 struct WireInner {
 	session: Arc<SessionInner>,
-	source: crate::transport::Wire,
+	counters: crate::transport::Wire,
 	last: Mutex<WireState>,
 }
 
 #[derive(Default)]
 struct WireState {
-	tx: u64,
-	rx: u64,
+	sent_bytes: u64,
+	received_bytes: u64,
 	closed: bool,
 }
 
@@ -1283,16 +1284,21 @@ impl WireInner {
 		if last.closed {
 			return false;
 		};
-		let (tx, rx) = self.source.read();
+		let sent_bytes = self.counters.sent_bytes();
+		let received_bytes = self.counters.received_bytes();
 		if let Some(presence) = &current.presence {
 			presence
 				.wire_tx
-				.fetch_add(tx.saturating_sub(last.tx), Ordering::Relaxed);
+				.fetch_add(sent_bytes.saturating_sub(last.sent_bytes), Ordering::Relaxed);
 			presence
 				.wire_rx
-				.fetch_add(rx.saturating_sub(last.rx), Ordering::Relaxed);
+				.fetch_add(received_bytes.saturating_sub(last.received_bytes), Ordering::Relaxed);
 		}
-		*last = WireState { tx, rx, closed: close };
+		*last = WireState {
+			sent_bytes,
+			received_bytes,
+			closed: close,
+		};
 		!close
 	}
 }
@@ -1398,13 +1404,8 @@ struct Viewer {
 }
 
 impl Session {
-	/// Register a non-blocking cumulative wire source that follows this context's tier.
-	/// The source must read only its transport counters, without re-entering this registry.
-	pub fn wire(&self, source: impl Fn() -> (u64, u64) + Send + Sync + 'static) -> Wire {
-		self.register_wire(crate::transport::Wire::new(source))
-	}
-
-	pub(crate) fn register_wire(&self, source: crate::transport::Wire) -> Wire {
+	/// Count a connection's wire counters under this context's root, following its tier.
+	pub fn wire(&self, counters: crate::transport::Wire) -> Wire {
 		let Some(inner) = &self.inner else {
 			return Wire::default();
 		};
@@ -1413,7 +1414,7 @@ impl Session {
 		};
 		let source = Arc::new(WireInner {
 			session: inner.clone(),
-			source,
+			counters,
 			last: Mutex::new(WireState::default()),
 		});
 		{
@@ -1835,15 +1836,21 @@ mod tests {
 
 	use super::*;
 
+	fn counters(sent: u64, received: u64) -> crate::transport::Wire {
+		let wire = crate::transport::Wire::new();
+		wire.set_sent_bytes(sent);
+		wire.set_received_bytes(received);
+		wire
+	}
+
 	#[test]
 	fn wire_deltas_follow_root_and_tier_changes() {
 		let registry = test_stats();
 		let old = Tier::new("old");
 		let new = Tier::new("new");
 		let session = registry.tier(old.clone()).session("room");
-		let bytes = Arc::new([AtomicU64::new(10), AtomicU64::new(20)]);
-		let counters = bytes.clone();
-		let _wire = session.wire(move || (counters[0].load(Ordering::Relaxed), counters[1].load(Ordering::Relaxed)));
+		let bytes = counters(10, 20);
+		let _wire = session.wire(bytes.clone());
 		let report = drain(&registry);
 		assert_eq!(report.sessions.len(), 1);
 		assert_eq!(report.sessions[0].root.as_str(), "room");
@@ -1852,11 +1859,11 @@ mod tests {
 			(report.sessions[0].presence.wire_tx, report.sessions[0].presence.wire_rx),
 			(10, 20)
 		);
-		bytes[0].store(15, Ordering::Relaxed);
-		bytes[1].store(27, Ordering::Relaxed);
+		bytes.set_sent_bytes(15);
+		bytes.set_received_bytes(27);
 		session.set_tier(new.clone());
-		bytes[0].store(25, Ordering::Relaxed);
-		bytes[1].store(50, Ordering::Relaxed);
+		bytes.set_sent_bytes(25);
+		bytes.set_received_bytes(50);
 		let report = drain(&registry);
 		for (tier, expected) in [(old, (15, 27)), (new, (10, 23))] {
 			let row = report.sessions.iter().find(|row| row.tier == tier).unwrap();
@@ -1865,15 +1872,14 @@ mod tests {
 	}
 
 	#[test]
-	fn a_wire_source_reset_never_lowers_presence() {
+	fn a_wire_counter_reset_never_lowers_presence() {
 		let registry = test_stats();
 		let session = registry.tier(Tier::default()).session("room");
-		let bytes = Arc::new([AtomicU64::new(20), AtomicU64::new(30)]);
-		let counters = bytes.clone();
-		let _wire = session.wire(move || (counters[0].load(Ordering::Relaxed), counters[1].load(Ordering::Relaxed)));
+		let bytes = crate::transport::Wire::new();
+		let _wire = session.wire(bytes.clone());
 		for (reading, expected) in [((20, 30), (20, 30)), ((3, 4), (20, 30)), ((8, 10), (25, 36))] {
-			bytes[0].store(reading.0, Ordering::Relaxed);
-			bytes[1].store(reading.1, Ordering::Relaxed);
+			bytes.set_sent_bytes(reading.0);
+			bytes.set_received_bytes(reading.1);
 			let report = drain(&registry);
 			assert_eq!(
 				(report.sessions[0].presence.wire_tx, report.sessions[0].presence.wire_rx),
@@ -1885,19 +1891,12 @@ mod tests {
 	#[test]
 	fn dropping_a_wire_guard_records_once_and_unregisters_without_an_admission() {
 		let registry = test_stats();
-		let bytes = Arc::new(AtomicU64::new(10));
-		let reads = Arc::new(AtomicUsize::new(0));
-		let (source, called) = (bytes.clone(), reads.clone());
-		let wire = registry.tier(Tier::default()).wire("room", move || {
-			called.fetch_add(1, Ordering::Relaxed);
-			(source.load(Ordering::Relaxed), 3)
-		});
-		assert_eq!(reads.load(Ordering::Relaxed), 0, "registration takes no sample");
+		let bytes = counters(10, 3);
+		let wire = registry.tier(Tier::default()).wire("room", bytes.clone());
 		assert_eq!(drain(&registry).sessions[0].presence.wire_tx, 10);
-		bytes.store(17, Ordering::Relaxed);
+		bytes.set_sent_bytes(17);
 		drop(wire);
 		let final_row = drain(&registry).sessions.pop().unwrap();
-		assert_eq!(reads.load(Ordering::Relaxed), 2);
 		assert!(final_row.closed);
 		assert_eq!((final_row.presence.wire_tx, final_row.presence.wire_rx), (17, 3));
 		assert_eq!(
@@ -1908,26 +1907,29 @@ mod tests {
 			),
 			(0, 0, 0)
 		);
+		bytes.set_sent_bytes(40);
 		assert!(drain(&registry).sessions.is_empty());
-		assert_eq!(registry.snapshot().sessions()[0].1.wire_tx, 17);
-		assert_eq!(reads.load(Ordering::Relaxed), 2, "a dropped guard is never read again");
+		assert_eq!(
+			registry.snapshot().sessions()[0].1.wire_tx,
+			17,
+			"a dropped guard is never read again"
+		);
 	}
 
 	#[test]
-	fn disabled_wire_collection_never_reads_its_source() {
+	fn disabled_wire_collection_reports_nothing() {
 		let registry = Registry::disabled();
-		let wire = registry
-			.tier(Tier::default())
-			.wire("root", || panic!("disabled source read"));
+		let wire = registry.tier(Tier::default()).wire("root", counters(5, 7));
 		assert!(drain(&registry).sessions.is_empty());
 		drop(wire);
+		assert!(drain(&registry).sessions.is_empty());
 	}
 
 	#[test]
 	fn wire_guards_hold_the_session_until_the_final_reading() {
 		let registry = test_stats();
 		let session = registry.tier(Tier::default()).session("room");
-		let wire = session.wire(|| (19, 23));
+		let wire = session.wire(counters(19, 23));
 		drop(session);
 		assert_eq!(drain(&registry).sessions[0].presence.active(), 1);
 		drop(wire);

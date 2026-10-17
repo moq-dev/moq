@@ -1,4 +1,4 @@
-//! Send-group hooks for the async backends.
+//! Send-group and wire-counter hooks for the async backends.
 //!
 //! The traits are `pub` in this private module, so other crates can neither name nor
 //! implement them: `pub(crate)` is refused (E0446) because the public adapter's
@@ -6,10 +6,16 @@
 
 /// A backend session whose send streams may join send groups, as native QUIC's do.
 ///
-/// The async interface has no groups, so moq-net's
-/// [`send_group`](moq_net::transport::poll::Session::send_group) reaches a backend through
-/// this. A backend without groups implements it empty.
+/// The async interface has no groups or wire counters, so moq-net's
+/// [`send_group`](moq_net::transport::poll::Session::send_group) and
+/// [`wire`](moq_net::transport::poll::Session::wire) reach a backend through this. A
+/// backend without either implements it empty.
 pub trait Grouped: web_transport_trait::Session<SendStream: GroupedSend> {
+	/// The wire counters the backend updates as it sends and receives, or `None` when it has none.
+	fn wire(&self) -> Option<moq_net::transport::Wire> {
+		None
+	}
+
 	/// Open a send group at `priority`, or `None` when the backend has none.
 	fn send_group(&self, priority: i64) -> Option<<Self::SendStream as GroupedSend>::Group> {
 		let _ = priority;

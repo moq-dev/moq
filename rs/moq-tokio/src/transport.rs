@@ -99,8 +99,6 @@ type OpBox<T> = futures::future::BoxFuture<'static, T>;
 ///   cancellation while later writes reclaim the stream.
 pub struct Session<S: web_transport_trait::Session> {
 	session: S,
-	// Shared only by transport adapters; a wire reader keeps a Weak to this handle.
-	wire: std::sync::Arc<S>,
 	binding: moq_net::transport::Binding,
 	accept_uni: OpSlot<Result<S::RecvStream, S::Error>>,
 	accept_bi: OpSlot<BiResult<S>>,
@@ -138,14 +136,8 @@ fn poll_op<T>(slot: &mut OpSlot<T>, cx: &mut Context<'_>, start: impl FnOnce() -
 impl<S: web_transport_trait::Session> Session<S> {
 	/// Wrap an async-interface transport session.
 	pub fn new(session: S, binding: moq_net::transport::Binding) -> Self {
-		let wire = std::sync::Arc::new(session.clone());
-		Self::wrap(session, binding, wire)
-	}
-
-	fn wrap(session: S, binding: moq_net::transport::Binding, wire: std::sync::Arc<S>) -> Self {
 		Self {
 			session,
-			wire,
 			binding,
 			accept_uni: OpSlot::default(),
 			accept_bi: OpSlot::default(),
@@ -161,7 +153,7 @@ impl<S: web_transport_trait::Session> Session<S> {
 // owns its own progress under the poll contract.
 impl<S: web_transport_trait::Session> Clone for Session<S> {
 	fn clone(&self) -> Self {
-		Self::wrap(self.session.clone(), self.binding, self.wire.clone())
+		Self::new(self.session.clone(), self.binding)
 	}
 }
 
@@ -867,6 +859,10 @@ impl<S: web_transport_trait::RecvStream + 'static> Drop for RecvStream<S> {
 
 #[cfg(feature = "quic")]
 impl Grouped for crate::quic::web::Session {
+	fn wire(&self) -> Option<moq_net::transport::Wire> {
+		Some(crate::quic::driver::Connection::wire(self))
+	}
+
 	fn send_group(&self, priority: i64) -> Option<crate::quic::driver::SendGroup> {
 		Some(Self::send_group(self, priority))
 	}
@@ -1427,18 +1423,8 @@ mod tests {
 	}
 
 	/// An async-interface session that never accepts, opens, or closes.
-	#[derive(Clone, Default)]
-	struct FakeSession(Option<Arc<std::sync::atomic::AtomicU64>>);
-
-	struct FakeStats(Option<u64>);
-	impl web_transport_trait::Stats for FakeStats {
-		fn bytes_sent(&self) -> Option<u64> {
-			self.0
-		}
-		fn bytes_received(&self) -> Option<u64> {
-			self.0.map(|value| value * 2)
-		}
-	}
+	#[derive(Clone)]
+	struct FakeSession;
 
 	impl Grouped for FakeSession {}
 
@@ -1480,36 +1466,6 @@ mod tests {
 		async fn closed(&self) -> Self::Error {
 			std::future::pending().await
 		}
-
-		fn stats(&self) -> impl web_transport_trait::Stats {
-			FakeStats(self.0.as_ref().map(|value| value.load(Ordering::Relaxed)))
-		}
-	}
-
-	#[test]
-	fn wire_reader_survives_without_retaining_the_transport() {
-		use moq_net::transport::poll::Session as _;
-		let counters = Arc::new(std::sync::atomic::AtomicU64::new(3));
-		let session = Session::new(FakeSession(Some(counters.clone())), moq_net::transport::Binding::Uri);
-		let cloned = session.clone();
-		let wire = session.wire().unwrap();
-		drop(session);
-		counters.store(9, Ordering::Relaxed);
-		let wire = std::thread::spawn(move || {
-			assert_eq!(wire.read(), (9, 18));
-			wire
-		})
-		.join()
-		.unwrap();
-		drop(cloned);
-		assert_eq!(Arc::strong_count(&counters), 1);
-		counters.store(20, Ordering::Relaxed);
-		assert_eq!(wire.read(), (9, 18));
-		assert!(
-			Session::new(FakeSession::default(), moq_net::transport::Binding::Uri)
-				.wire()
-				.is_none()
-		);
 	}
 
 	#[test]
@@ -1528,7 +1484,7 @@ mod tests {
 		assert_eq!(fake.priorities.lock().unwrap().as_slice(), &[7]);
 		assert_eq!(fake.resets.lock().unwrap().as_slice(), &[0x33]);
 		for binding in [moq_net::transport::Binding::Uri, moq_net::transport::Binding::InBand] {
-			let session = Session::new(FakeSession::default(), binding);
+			let session = Session::new(FakeSession, binding);
 			let mut cloned = session.clone();
 			assert_eq!(poll::Session::binding(&session), binding);
 			assert_eq!(poll::Session::binding(&cloned), binding);

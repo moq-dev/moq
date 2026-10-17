@@ -3,10 +3,6 @@
 use std::cell::RefCell;
 use std::net::SocketAddr;
 use std::rc::{Rc, Weak};
-use std::sync::{
-	Arc,
-	atomic::{AtomicU64, Ordering},
-};
 use std::task::{Context, Poll};
 use std::time::Instant;
 
@@ -34,7 +30,7 @@ const TRAIN_SEGMENTS: usize = 63;
 pub(crate) struct Inner {
 	pub(crate) conn: RefCell<moq_quic::Connection>,
 	/// Updated by packet ingress and egress, so readers never wake the worker to sample.
-	pub(crate) wire: Arc<[AtomicU64; 2]>,
+	pub(crate) wire: moq_net::transport::Wire,
 	pub(crate) state: RefCell<State>,
 	/// The worker driving this connection, which anything layered on it
 	/// (the WebTransport handshake, say) runs on too.
@@ -406,10 +402,9 @@ impl Connection {
 		self.shared.conn.borrow().stats()
 	}
 
-	/// Return wire counters readable from any thread without retaining the worker connection.
-	pub fn wire(&self) -> moq_net::transport::Wire {
-		let wire = self.shared.wire.clone();
-		moq_net::transport::Wire::new(move || (wire[0].load(Ordering::Relaxed), wire[1].load(Ordering::Relaxed)))
+	/// The wire counters this connection updates as it sends and receives.
+	pub(crate) fn wire(&self) -> moq_net::transport::Wire {
+		self.shared.wire.clone()
 	}
 }
 
@@ -439,9 +434,13 @@ pub(crate) fn launch(
 	key: ConnectionHandle,
 	conn: moq_quic::Connection,
 ) -> (Shared, impl Future<Output = ()> + use<>) {
+	// The handshake's first datagrams arrived before this driver existed.
 	let stats = conn.stats();
+	let wire = moq_net::transport::Wire::new();
+	wire.set_sent_bytes(stats.udp_tx.bytes);
+	wire.set_received_bytes(stats.udp_rx.bytes);
 	let shared = Rc::new(Inner {
-		wire: Arc::new([AtomicU64::new(stats.udp_tx.bytes), AtomicU64::new(stats.udp_rx.bytes)]),
+		wire,
 		conn: RefCell::new(conn),
 		state: RefCell::new(State::new()),
 		owner: owner.clone(),
@@ -912,7 +911,7 @@ impl Driver {
 			let Some(transmit) = conn.poll_transmit(moq_clock::Instant::now(), segments, &mut tx) else {
 				return Poll::Pending;
 			};
-			self.shared.wire[0].store(conn.stats().udp_tx.bytes, Ordering::Relaxed);
+			self.shared.wire.set_sent_bytes(conn.stats().udp_tx.bytes);
 			// Once closed, moq-quic transmits nothing but the CONNECTION_CLOSE.
 			(transmit, conn.is_closed())
 		};

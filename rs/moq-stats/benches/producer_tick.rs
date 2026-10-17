@@ -270,8 +270,11 @@ impl Presence {
 			.iter()
 			.map(|root| registry.tier(stats::Tier::default()).session(root.as_str()))
 			.collect();
-		// One direct source per connection, independently of held presence tracks.
-		let wire = sessions.iter().map(|session| session.wire(|| (0, 0))).collect();
+		// One set of wire counters per connection, independently of held presence tracks.
+		let wire = sessions
+			.iter()
+			.map(|session| session.wire(moq_net::transport::Wire::new()))
+			.collect();
 		let mut driver = Driver::new(registry.clone(), origin.clone()).expect("stats broadcast");
 		driver.tick();
 		let held = names.iter().take(held).map(|root| driver.hold_presence(root)).collect();

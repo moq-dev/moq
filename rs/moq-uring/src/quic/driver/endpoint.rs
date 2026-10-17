@@ -290,10 +290,7 @@ impl Inner {
 					// we can feed.
 					if let Some(conn) = conn {
 						conn.conn.borrow_mut().handle_event(event);
-						conn.wire[1].store(
-							conn.conn.borrow().stats().udp_rx.bytes,
-							std::sync::atomic::Ordering::Relaxed,
-						);
+						conn.wire.set_received_bytes(conn.conn.borrow().stats().udp_rx.bytes);
 						if !fed.contains(&key) {
 							fed.push(key);
 						}

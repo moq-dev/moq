@@ -112,8 +112,7 @@ impl From<&Stats> for Estimate {
 /// so running it never keeps the session alive, and the `Session`
 /// holds no transport, so the handle is `Send + Sync` whatever transport the
 /// driver uses. Everything transport-shaped (the close, the close reason,
-/// the stats sample) is relayed through the driver, except the owned
-/// [`Wire`](crate::transport::Wire) counters, which are readable directly.
+/// the stats sample) is relayed through the driver.
 #[derive(Clone)]
 pub struct Session {
 	/// Handle side to driver: `Some` once [`abort`](Self::abort) or
@@ -123,7 +122,6 @@ pub struct Session {
 	/// Driver to handle side: how the transport ended.
 	closed: kio::Consumer<Option<Ended>>,
 	stats: kio::Shared<StatsState>,
-	wire: Option<crate::transport::Wire>,
 	version: Version,
 	// Weak, so the sampler runs only while a caller holds a consumer.
 	send_bandwidth: Option<bandwidth::Weak>,
@@ -170,11 +168,6 @@ impl Session {
 		};
 		stats.estimated_recv_rate = self.recv_bandwidth.as_ref().and_then(bandwidth::Consumer::peek);
 		stats
-	}
-
-	/// Return owned direct wire counters without requesting the 100 ms stats sampler.
-	pub fn wire(&self) -> Option<crate::transport::Wire> {
-		self.wire.clone()
 	}
 
 	/// Close the transport with an explicit error, instead of waiting for the last
@@ -322,8 +315,7 @@ impl Session {
 			estimate,
 			stats: context,
 		} = handles;
-		let wire = session.wire();
-		let wire_guard = wire.clone().map(|source| context.register_wire(source));
+		let wire = session.wire().map(|counters| context.wire(counters));
 		let sample = snapshot(&session);
 		if let Some(estimate) = &estimate
 			&& let Ok(mut current) = estimate.write()
@@ -356,8 +348,7 @@ impl Session {
 			close: Some(close.consume()),
 			closed,
 			stats: stats.clone(),
-			wire_source: wire.clone(),
-			wire_guard,
+			wire,
 			send_bandwidth: send_producer,
 			estimate,
 			sampled: None,
@@ -369,7 +360,6 @@ impl Session {
 			close,
 			closed: closed_consumer,
 			stats,
-			wire,
 			version,
 			send_bandwidth,
 			recv_bandwidth,
@@ -419,18 +409,8 @@ pub(crate) struct Supervisor<S> {
 	sampled: Option<crate::time::Instant>,
 	mode: SamplerMode,
 	drain: Drain,
-	wire_source: Option<crate::transport::Wire>,
-	wire_guard: Option<crate::stats::Wire>,
-}
-
-impl<S> Drop for Supervisor<S> {
-	fn drop(&mut self) {
-		// Refresh while the driver still owns its transport; an exported source keeps no connection alive.
-		if let Some(source) = &self.wire_source {
-			source.read();
-		}
-		self.wire_guard.take();
-	}
+	/// The transport's wire counters, registered under the session's root; dropping records the last reading.
+	wire: Option<crate::stats::Wire>,
 }
 
 /// A [`Session::close`] waiting for the protocol to deliver what it queued.
@@ -466,10 +446,7 @@ impl<S: crate::transport::poll::Session> Supervisor<S> {
 			// this cell, so leave it holding the session's final counters
 			// rather than whichever sample the last demand happened to catch.
 			self.stats.lock().sample = snapshot(&self.session);
-			if let Some(source) = &self.wire_source {
-				source.read();
-			}
-			self.wire_guard.take();
+			self.wire.take();
 			let drain = match std::mem::replace(&mut self.drain, Drain::Idle) {
 				Drain::Done(res) => Some(res),
 				_ => None,

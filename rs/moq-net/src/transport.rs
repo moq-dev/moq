@@ -47,22 +47,44 @@ pub enum Binding {
 	InBand,
 }
 
-/// Owned cumulative transport byte counters, readable without polling the session driver.
+/// One connection's cumulative wire counters, which its transport updates as it sends and receives.
 ///
-/// A reader must own only its counter data, never keep the transport alive. After closure,
-/// its final values remain readable. Unsupported transports return no reader.
-#[derive(Clone)]
-pub struct Wire(std::sync::Arc<dyn Fn() -> (u64, u64) + Send + Sync>);
+/// Clones share the counters, so stats read them without polling the session or keeping the
+/// connection alive, and the final totals stay readable after it closes. Each counter is
+/// independent: a transport records the ones it tracks, and the rest stay zero.
+#[derive(Clone, Debug, Default)]
+pub struct Wire(std::sync::Arc<WireCounters>);
+
+#[derive(Debug, Default)]
+struct WireCounters {
+	sent_bytes: std::sync::atomic::AtomicU64,
+	received_bytes: std::sync::atomic::AtomicU64,
+}
 
 impl Wire {
-	/// Read cumulative sent and received bytes from an owned, non-blocking source.
-	pub fn new(source: impl Fn() -> (u64, u64) + Send + Sync + 'static) -> Self {
-		Self(std::sync::Arc::new(source))
+	/// Create counters that start at zero.
+	pub fn new() -> Self {
+		Self::default()
 	}
 
-	/// Return cumulative sent and received bytes without requesting a stats sample.
-	pub fn read(&self) -> (u64, u64) {
-		(self.0)()
+	/// The bytes sent so far, including transport framing and retransmissions.
+	pub fn sent_bytes(&self) -> u64 {
+		self.0.sent_bytes.load(std::sync::atomic::Ordering::Relaxed)
+	}
+
+	/// The bytes received so far, including transport framing.
+	pub fn received_bytes(&self) -> u64 {
+		self.0.received_bytes.load(std::sync::atomic::Ordering::Relaxed)
+	}
+
+	/// Record the cumulative bytes sent so far.
+	pub fn set_sent_bytes(&self, total: u64) {
+		self.0.sent_bytes.store(total, std::sync::atomic::Ordering::Relaxed);
+	}
+
+	/// Record the cumulative bytes received so far.
+	pub fn set_received_bytes(&self, total: u64) {
+		self.0.received_bytes.store(total, std::sync::atomic::Ordering::Relaxed);
 	}
 }
 
@@ -256,7 +278,7 @@ pub mod poll {
 		/// rather than defaulted for the same reason as [`protocol`](Self::protocol).
 		fn stats(&self) -> impl Stats;
 
-		/// Return owned direct wire counters, or `None` when unavailable.
+		/// Return the wire counters this transport updates, or `None` when it tracks none.
 		fn wire(&self) -> Option<super::Wire> {
 			None
 		}

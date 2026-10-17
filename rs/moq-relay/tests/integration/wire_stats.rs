@@ -1,4 +1,4 @@
-//! Owned wire sources across the shared-runtime and io_uring listener boundary.
+//! Transport wire counters across the shared-runtime and io_uring listener boundary.
 #![cfg(feature = "_quic")]
 
 use moq_net::stats::{Presence, Registry, Tier};
