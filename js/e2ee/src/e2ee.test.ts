@@ -575,7 +575,8 @@ test("secrets stay out of serialization", async () => {
 		expect(Bun.inspect(value)).not.toContain(marker);
 		expect(Bun.inspect(value)).not.toContain("6d6f712d");
 	}
-	// The caller's buffer is its own; the credential copied what it needed.
+	// The caller's buffers are its own, and the context it reads back is a copy.
 	secret.fill(0);
+	cred.context.fill(0);
 	expect(await cred.path("meeting.hang")).toBe(await credential().path("meeting.hang"));
 });

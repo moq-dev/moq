@@ -130,7 +130,6 @@ export class Consumer {
 		this.#key = key;
 		this.#terminal = terminal;
 		this.sequence = inner.sequence;
-		terminal.add(inner);
 	}
 
 	/** @internal */
@@ -152,41 +151,46 @@ export class Consumer {
 	}
 
 	async #read(): Promise<Frame | undefined> {
-		this.#terminal.check();
+		this.#check();
 		let frame: Awaited<ReturnType<NetGroup.Consumer["readFrameSequence"]>>;
 		try {
 			frame = await this.#inner.readFrameSequence();
 		} catch (err) {
-			this.#terminal.check();
+			this.#check();
 			throw err;
 		}
-		this.#terminal.check();
-		if (!frame) {
-			this.#terminal.delete(this.#inner);
-			return undefined;
-		}
+		this.#check();
+		if (!frame) return undefined;
 
 		// The frame's transport index is the nonce half, so a group resumed above frame 0 still opens.
-		let iv: Uint8Array<ArrayBuffer>;
 		try {
-			iv = this.#key.admitOpen(this.sequence, frame.sequence, frame.payload.byteLength, MAX_GROUPED_PAYLOAD);
-		} catch (err) {
-			if (err instanceof Failure && err.code === "identity") this.#terminal.fail();
-			throw err;
-		}
-		try {
+			const iv = this.#key.admitOpen(
+				this.sequence,
+				frame.sequence,
+				frame.payload.byteLength,
+				MAX_GROUPED_PAYLOAD,
+			);
 			const plaintext = await this.#key.decrypt(iv, frame.payload);
-			this.#terminal.check();
+			this.#check();
 			return { timestamp: frame.timestamp, plaintext };
 		} catch (err) {
-			if (err instanceof Failure && err.code === "authentication") throw this.#terminal.fail();
+			if (err instanceof Failure && (err.code === "authentication" || err.code === "identity")) {
+				this.#inner.close(this.#terminal.fail());
+			}
 			throw err;
 		}
+	}
+
+	// Once the track has failed, drop this group's net reader too, releasing its demand.
+	#check(): void {
+		const failed = this.#terminal.failed;
+		if (!failed) return;
+		this.#inner.close(failed);
+		throw failed;
 	}
 
 	/** Stop reading this group, releasing its demand. Idempotent. */
 	close(): void {
 		this.#inner.close();
-		this.#terminal.delete(this.#inner);
 	}
 }

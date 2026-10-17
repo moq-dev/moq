@@ -22,10 +22,10 @@ interface ConfigType {
  * `CryptoKey` outside the object, so it never serializes or prints it.
  */
 export class Credential {
-	/** Broadcast context bytes. */
-	readonly context: Uint8Array;
 	/** Key identifier. */
 	readonly kid: number;
+
+	#context: Uint8Array;
 
 	/**
 	 * Check the bounds and take the secret.
@@ -37,9 +37,14 @@ export class Credential {
 	constructor(config: Credential.Config) {
 		checkBytes(config.context.byteLength);
 		checkU53(config.kid);
-		this.context = config.context.slice();
+		this.#context = config.context.slice();
 		this.kid = config.kid;
 		bind(this, config.secret);
+	}
+
+	/** Broadcast context bytes, copied so the credential stays immutable. */
+	get context(): Uint8Array {
+		return this.#context.slice();
 	}
 
 	/** The opaque broadcast path for a semantic broadcast name; each instance announces its epoch on the route. */
