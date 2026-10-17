@@ -2860,6 +2860,7 @@ where
 				(request.accept(info), dynamic)
 			}
 		};
+		track.received();
 		// A live join starts at the publisher's edge; an absolute one where it asked. With
 		// no Largest the join skips nothing, so every group is owed: a lower one's stream
 		// may still arrive after a higher one's.
@@ -3633,6 +3634,7 @@ where
 		tracing::debug!(broadcast = %self.origin.absolute(broadcast_path), track = %track_name, "track status known");
 		let dynamic = request.dynamic();
 		let mut track = request.accept(accepted_info(&ok.properties));
+		track.received();
 		// Nothing feeds this copy live: what it caches is fetched, never the live edge.
 		track.set_idle();
 		Some(Target::Resume(Idle {
@@ -11211,6 +11213,7 @@ mod stitch_tests {
 				"video",
 				track::Info::default().with_timescale(timescale.map(|_| Timescale::MICRO)),
 			);
+			track.received();
 			let fill = kio::Producer::new(fill);
 
 			{
@@ -12908,6 +12911,37 @@ mod stitch_tests {
 		assert_eq!(sequence, SEQUENCE + 1);
 		assert_eq!(frames[0].1, b"next");
 		assert!(h.session.log.closes().is_empty());
+	}
+
+	/// A received group whose first object rewinds past the group before it is accepted:
+	/// only a local publisher's writes refuse a rewind.
+	#[moq_clock::test]
+	async fn a_received_rewind_is_accepted() {
+		use futures::FutureExt;
+
+		let mut h = Harness::new(Fill::Done, vec![draft18_subgroup(SEQUENCE, true, 0, &[b"rewound"])]);
+		h.subscriber.version = Version::Draft18;
+		// Starts past the incoming group's first object, at `timestamp(0)`.
+		let mut before = h.track.create_group((SEQUENCE - 1).into()).unwrap();
+		before.write_frame(timestamp(4000), b"before".as_slice()).unwrap();
+		before.finish().unwrap();
+
+		let mut consumer = h.track.subscribe(None);
+		assert_eq!(read_group(&mut consumer).await.0, SEQUENCE - 1);
+
+		let mut stream = read_draft18(&h.session).await;
+		h.subscriber.clone().recv_group(&mut stream).await.unwrap();
+		// The stream was read to its end, so the group is already delivered.
+		let mut group = consumer
+			.recv_group()
+			.now_or_never()
+			.expect("delivered")
+			.unwrap()
+			.unwrap();
+		assert_eq!(group.sequence, SEQUENCE);
+		let frame = group.read_frame().now_or_never().unwrap().unwrap().unwrap();
+		assert_eq!(frame.payload.as_ref(), b"rewound");
+		assert!(h.track.closed().now_or_never().is_none());
 	}
 
 	/// A head that stops short of where the tail starts would leave a hole in the middle of

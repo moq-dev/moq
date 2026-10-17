@@ -129,7 +129,6 @@ func trackInfoFromFFI(info ffi.MoqTrackInfo) TrackInfo {
 type ConnectionStats struct {
 	RTT                  *time.Duration
 	EstimatedSendRateBps *uint64
-	EstimatedRecvRateBps *uint64
 	BytesSent            *uint64
 	BytesReceived        *uint64
 	BytesLost            *uint64
@@ -144,7 +143,6 @@ func connectionStatsFromFFI(s ffi.MoqConnectionStats) ConnectionStats {
 	return ConnectionStats{
 		RTT:                  optFromMicros(s.RttUs),
 		EstimatedSendRateBps: s.EstimatedSendRateBps,
-		EstimatedRecvRateBps: s.EstimatedRecvRateBps,
 		BytesSent:            s.BytesSent,
 		BytesReceived:        s.BytesReceived,
 		BytesLost:            s.BytesLost,

@@ -98,6 +98,10 @@ if (auto catalog = ok(catalogs->next().get())) {   // std::nullopt once the cata
 }
 ```
 
+Call `available()` again to wait for the next publisher instance at that path, such as a
+restarted publisher, and drop what was read from the previous one then: its tracks end
+when its session does.
+
 `MediaTrackConsumer` reads in decode order. For arrival-order reads, decode each group
 from `TrackConsumer::recv_group` with `moq::MediaGroupConsumer::init(group, container)`;
 frames carry container media time as they land.
@@ -181,6 +185,10 @@ future completed, which is the executor thread.
 ## Disabled renditions
 
 Audio and video convenience decoders reject a catalog configuration with `enabled: false`. Select an enabled rendition from the latest catalog before opening a decoder.
+
+## Bandwidth estimates
+
+Hold the owned `BandwidthConsumer` returned by `session->recv_bandwidth()` to receive bandwidth estimates. `peek()` reads the current estimate in bits per second and `changed()` waits for a new one. Releasing the last consumer stops PROBE; the session and stats snapshots do not request it. Client consumers survive reconnects and report no estimate while disconnected.
 
 ## Track demand
 

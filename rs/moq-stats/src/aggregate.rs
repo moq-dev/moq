@@ -1135,7 +1135,7 @@ mod tests {
 		fn fail_traffic(&mut self) {
 			let mut group = self.track.append_group().expect("append group");
 			group
-				.write_frame(Timestamp::ZERO, b"not json".to_vec())
+				.write_frame(Timestamp::now(), b"not json".to_vec())
 				.expect("write frame");
 			group.finish().expect("finish group");
 		}

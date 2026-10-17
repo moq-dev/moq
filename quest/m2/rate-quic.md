@@ -59,9 +59,9 @@ backpressure the peer cannot ignore, rather than metering and closing.
   rides the CONNECT URL or arrives in band), so it is set on a live
   connection and reset on revalidation or a union change. Extend the
   runtime limits seam the relay widens cluster peers through
-  (`moq_tokio::server::Request::set_quic_limits` and
-  `moq_uring::quic::web::Session::set_limits`, each taking its backend's
-  `quic::Limits`) with the two rates, and reach it from the live session
+  (`set_limits` on `moq_tokio::server::Request::quic` and on
+  `moq_uring::quic::web::Session`, both taking `moq_quic::Limits`) with the
+  two rates, and reach it from the live session
   so revalidation can change it after SETUP.
 - **Unions take the highest cap.** When in-band auth unions several grants
   on one session, each direction's cap is the highest among them, and an

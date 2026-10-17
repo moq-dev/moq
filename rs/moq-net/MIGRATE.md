@@ -4,6 +4,12 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### A timed track refuses a group that rewinds (#5803)
+
+A local write whose first frame starts before a lower-sequence group's, or after a higher one's, fails with `TimestampMismatch`; `@moq/net` throws it the same way.
+Received groups are accepted as is, since their timestamps may be send times.
+A publisher whose timeline restarts, such as an HLS `EXT-X-DISCONTINUITY` that resets decode times, publishes a new broadcast instead.
+
 ### `broadcast::Producer::finish` is back, and lingers (#5795)
 
 `finish()` ends the broadcast cleanly and returns a `Finish` that keeps its finished tracks servable until their media is stale.

@@ -2938,7 +2938,7 @@ fn consume_announced_local() {
 	// Start waiting before the broadcast exists: the announcement arrives afterwards.
 	let cb = Callback::new();
 	let path = b"live";
-	let _task = id(unsafe {
+	let task = id(unsafe {
 		moq_origin_announced_broadcast(
 			origin,
 			path.as_ptr() as *const c_char,
@@ -2953,9 +2953,10 @@ fn consume_announced_local() {
 	let format = moq_audio_format::MOQ_AUDIO_FORMAT_OPUS;
 	let media = id(publish_audio(broadcast, format, &init, None));
 
-	// First the broadcast handle, then a terminal 0 once the wait finishes.
+	// The broadcast handle; the wait carries on for the next instance until cancelled.
 	let consume = id(cb.recv());
-	assert_eq!(cb.recv_terminal(), 0, "wait delivers terminal 0 after the handle");
+	assert_eq!(moq_origin_announced_broadcast_cancel(task), 0);
+	assert_eq!(cb.recv_terminal(), 0, "cancel delivers terminal 0");
 
 	// The delivered handle behaves like one from moq_origin_request.
 	let catalog_cb = Callback::new();
@@ -3116,6 +3117,219 @@ fn consume_announced_close_cancels() {
 		"double-close should fail"
 	);
 
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
+/// Publish `path` on `origin` through `route`, which the C ABI cannot set.
+fn publish(origin: u32, path: &str, route: moq_net::origin::Route) -> moq_net::broadcast::Producer {
+	let _runtime = crate::ffi::RUNTIME.enter();
+	let origin = crate::Id::try_from(origin).unwrap();
+	State::lock().origin.get(origin).unwrap().publish(path, route).unwrap()
+}
+
+/// Publish `path` on `origin` under a fresh epoch, as each run of a publisher does.
+fn publish_run(origin: u32, path: &str) -> moq_net::broadcast::Producer {
+	publish(
+		origin,
+		path,
+		moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint()),
+	)
+}
+
+/// Another publisher instance taking the path delivers a fresh handle on the same wait.
+#[test]
+fn consume_announced_follows_a_restart() {
+	let origin = id(moq_origin_create());
+	let cb = Callback::new();
+	let path = b"live";
+	let task = id(unsafe {
+		moq_origin_announced_broadcast(
+			origin,
+			path.as_ptr() as *const c_char,
+			path.len(),
+			Some(channel_callback),
+			cb.ptr,
+		)
+	});
+
+	let first_run = publish_run(origin, "live");
+	let first = id(cb.recv());
+	let second_run = publish_run(origin, "live");
+	let second = id(cb.recv());
+	assert_ne!(first, second, "the restart delivered the old handle");
+
+	assert_eq!(moq_consume_close(first), 0);
+	assert_eq!(moq_consume_close(second), 0);
+	assert_eq!(moq_origin_announced_broadcast_cancel(task), 0);
+	assert_eq!(cb.recv_terminal(), 0, "cancel delivers terminal 0");
+	drop((first_run, second_run));
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
+/// Another instance taking over while the wait resolves is the one it delivers, so the restart
+/// that announced it must not deliver it again. `dynamic_at` is where the route the wait first
+/// resolves through covers the path: above it, the takeover's restart lands while resolving;
+/// at it, the origin holds that restart for [`moq_net::origin::DEFAULT_UPDATE_HOLD`].
+fn consume_announced_delivers_a_takeover_once(dynamic_at: &str) {
+	let origin = id(moq_origin_create());
+	let dynamic = {
+		let _runtime = crate::ffi::RUNTIME.enter();
+		let origin = crate::Id::try_from(origin).unwrap();
+		let route = moq_net::origin::Route::default();
+		State::lock()
+			.origin
+			.get(origin)
+			.unwrap()
+			.dynamic(dynamic_at, route)
+			.unwrap()
+	};
+	let cb = Callback::new();
+	let path = b"live";
+	let task = id(unsafe {
+		moq_origin_announced_broadcast(
+			origin,
+			path.as_ptr() as *const c_char,
+			path.len(),
+			Some(channel_callback),
+			cb.ptr,
+		)
+	});
+
+	// The wait is on the dynamic route's answer when the exact path takes over without an epoch.
+	let _unanswered = crate::ffi::RUNTIME.block_on(dynamic.requested_broadcast()).unwrap();
+	let takeover = publish(origin, "live", moq_net::origin::Route::default());
+	let delivered = id(cb.recv());
+	assert!(
+		cb.rx.recv_timeout(moq_net::origin::DEFAULT_UPDATE_HOLD * 2).is_err(),
+		"the takeover was delivered twice"
+	);
+
+	assert_eq!(moq_consume_close(delivered), 0);
+	assert_eq!(moq_origin_announced_broadcast_cancel(task), 0);
+	assert_eq!(cb.recv_terminal(), 0, "cancel delivers terminal 0");
+	drop((takeover, dynamic));
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
+#[test]
+fn consume_announced_delivers_a_takeover_once_while_resolving() {
+	consume_announced_delivers_a_takeover_once("");
+}
+
+#[test]
+fn consume_announced_delivers_a_held_takeover_once() {
+	consume_announced_delivers_a_takeover_once("live");
+}
+
+/// Serve `prefix` on `origin` dynamically through `route`.
+fn serve_dynamic(origin: u32, prefix: &str, route: moq_net::origin::Route) -> moq_net::origin::Dynamic {
+	let _runtime = crate::ffi::RUNTIME.enter();
+	let origin = crate::Id::try_from(origin).unwrap();
+	State::lock()
+		.origin
+		.get(origin)
+		.unwrap()
+		.dynamic(prefix, route)
+		.unwrap()
+}
+
+/// Wait for the broadcast at `path` on `origin`, delivering each instance through `cb`.
+fn consume_announced(origin: u32, path: &[u8], cb: &Callback) -> u32 {
+	id(unsafe {
+		moq_origin_announced_broadcast(
+			origin,
+			path.as_ptr() as *const c_char,
+			path.len(),
+			Some(channel_callback),
+			cb.ptr,
+		)
+	})
+}
+
+/// An end is a gap that ended every request on the old route, even when a route above the path
+/// with the same epoch carries the instance on. So the instance serving the path afterwards is
+/// delivered again, though the caller still holds its handle.
+#[test]
+fn consume_announced_delivers_the_instance_again_after_an_end() {
+	let origin = id(moq_origin_create());
+	let cb = Callback::new();
+	let task = consume_announced(origin, b"live", &cb);
+
+	let route = moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint());
+	let run = publish(origin, "live", route.clone());
+	let first = id(cb.recv());
+
+	let dynamic = serve_dynamic(origin, "", route);
+	{
+		let _runtime = crate::ffi::RUNTIME.enter();
+		run.unannounce();
+	}
+	let request = crate::ffi::RUNTIME.block_on(dynamic.requested_broadcast()).unwrap();
+	let served = {
+		let _runtime = crate::ffi::RUNTIME.enter();
+		let served = moq_net::broadcast::Info::new().produce();
+		request.accept(served.consume());
+		served
+	};
+	let again = id(cb.recv());
+
+	assert_eq!(moq_consume_close(first), 0);
+	assert_eq!(moq_consume_close(again), 0);
+	assert_eq!(moq_origin_announced_broadcast_cancel(task), 0);
+	assert_eq!(cb.recv_terminal(), 0, "cancel delivers terminal 0");
+	drop((run, dynamic, served));
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
+/// A handle the caller freed no longer counts as delivered, so the restart that names its
+/// instance delivers it again rather than leaving the caller with nothing.
+#[test]
+fn consume_announced_delivers_a_freed_takeover_again() {
+	let origin = id(moq_origin_create());
+	let dynamic = serve_dynamic(origin, "live", moq_net::origin::Route::default());
+	let cb = Callback::new();
+	let task = consume_announced(origin, b"live", &cb);
+
+	// Without an epoch, the origin holds the takeover's restart past its resolution.
+	let _unanswered = crate::ffi::RUNTIME.block_on(dynamic.requested_broadcast()).unwrap();
+	let takeover = publish(origin, "live", moq_net::origin::Route::default());
+	assert_eq!(moq_consume_close(id(cb.recv())), 0);
+	let again = id(cb.recv());
+
+	assert_eq!(moq_consume_close(again), 0);
+	assert_eq!(moq_origin_announced_broadcast_cancel(task), 0);
+	assert_eq!(cb.recv_terminal(), 0, "cancel delivers terminal 0");
+	drop((takeover, dynamic));
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
+/// The route a wait resolves through leaving, and another instance arriving before it resolves,
+/// reach the follower as an end and a start after the wait delivers the newcomer. That start
+/// must not deliver it again.
+#[test]
+fn consume_announced_delivers_a_gap_while_resolving_once() {
+	let origin = id(moq_origin_create());
+	let dynamic = serve_dynamic(origin, "", moq_net::origin::Route::default());
+	let cb = Callback::new();
+	let task = consume_announced(origin, b"live", &cb);
+
+	let _unanswered = crate::ffi::RUNTIME.block_on(dynamic.requested_broadcast()).unwrap();
+	{
+		let _runtime = crate::ffi::RUNTIME.enter();
+		drop(dynamic);
+	}
+	std::thread::sleep(moq_net::origin::DEFAULT_UPDATE_HOLD * 2);
+	let arrival = publish(origin, "live", moq_net::origin::Route::default());
+	let delivered = id(cb.recv());
+	assert!(
+		cb.rx.recv_timeout(moq_net::origin::DEFAULT_UPDATE_HOLD * 2).is_err(),
+		"the arrival was delivered twice"
+	);
+
+	assert_eq!(moq_consume_close(delivered), 0);
+	assert_eq!(moq_origin_announced_broadcast_cancel(task), 0);
+	assert_eq!(cb.recv_terminal(), 0, "cancel delivers terminal 0");
+	drop(arrival);
 	assert_eq!(moq_origin_close(origin), 0);
 }
 

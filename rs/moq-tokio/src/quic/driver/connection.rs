@@ -786,6 +786,15 @@ impl Connection {
         // May need to send MAX_STREAMS to make progress
         conn.wake();
     }
+
+    /// See [`moq_quic::Connection::set_limits`]
+    pub fn set_limits(&self, limits: moq_quic::Limits) -> Result<(), moq_quic::LimitsError> {
+        let mut conn = self.0.state.lock("set_limits");
+        conn.inner.set_limits(limits)?;
+        // May need to send MAX_DATA or MAX_STREAMS to make progress
+        conn.wake();
+        Ok(())
+    }
 }
 
 pin_project! {

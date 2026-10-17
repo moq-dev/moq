@@ -772,10 +772,6 @@ pub struct moq_connection_stats {
 	pub estimated_send_rate_bps: u64,
 	pub estimated_send_rate_valid: bool,
 
-	/// Estimated receive bandwidth from MoQ PROBE, in bits per second.
-	pub estimated_recv_rate_bps: u64,
-	pub estimated_recv_rate_valid: bool,
-
 	/// Total bytes sent, including retransmissions and overhead.
 	pub bytes_sent: u64,
 	pub bytes_sent_valid: bool,
@@ -811,8 +807,6 @@ impl From<&moq_net::session::Stats> for moq_connection_stats {
 		let (rtt_us, rtt_valid) = split(stats.rtt.map(|d| d.as_micros() as u64));
 		let (estimated_send_rate_bps, estimated_send_rate_valid) =
 			split(stats.estimated_send_rate.map(moq_net::bandwidth::Rate::as_bps));
-		let (estimated_recv_rate_bps, estimated_recv_rate_valid) =
-			split(stats.estimated_recv_rate.map(moq_net::bandwidth::Rate::as_bps));
 		let (bytes_sent, bytes_sent_valid) = split(stats.bytes_sent);
 		let (bytes_received, bytes_received_valid) = split(stats.bytes_received);
 		let (bytes_lost, bytes_lost_valid) = split(stats.bytes_lost);
@@ -825,8 +819,6 @@ impl From<&moq_net::session::Stats> for moq_connection_stats {
 			rtt_valid,
 			estimated_send_rate_bps,
 			estimated_send_rate_valid,
-			estimated_recv_rate_bps,
-			estimated_recv_rate_valid,
 			bytes_sent,
 			bytes_sent_valid,
 			bytes_received,
@@ -1841,7 +1833,7 @@ pub extern "C" fn moq_origin_announced_cancel(announced: u32) -> i32 {
 	})
 }
 
-/// Consume a broadcast from an origin by path, waiting until something can serve it.
+/// Follow a broadcast on an origin by path, delivering each publisher instance that serves it.
 ///
 /// Resolves against future announcements: it waits for the announcement to arrive (e.g. over the
 /// network) and then delivers the broadcast handle via `on_broadcast`. Use it right after
@@ -1849,9 +1841,12 @@ pub extern "C" fn moq_origin_announced_cancel(announced: u32) -> i32 {
 /// reachable now, use [moq_origin_request] instead. A broadcast created on this origin
 /// resolves once it is announced, like a remote one.
 ///
-/// `on_broadcast` is invoked with a positive broadcast handle once announced, then exactly once
-/// more with a terminal code: `0` (the wait finished, including after
-/// [moq_origin_announced_broadcast_cancel]) or a negative error. After the terminal (`<= 0`) callback,
+/// `on_broadcast` is invoked with a positive broadcast handle once announced, and again with a
+/// new handle each time another publisher instance takes over (a restarted publisher, or a
+/// replacement session) or the broadcast returns after it went offline. Drop what was read
+/// from the previous handle then: its tracks end when its session does. The wait ends with
+/// exactly one terminal code: `0` (after [moq_origin_announced_broadcast_cancel], or the origin
+/// closing once a handle was delivered) or a negative error. After the terminal (`<= 0`) callback,
 /// `on_broadcast` is never called again and `user_data` is never touched again, so release
 /// `user_data` there. The broadcast handle is usable with [moq_consume_catalog] / [moq_consume_track]
 /// and must be freed separately with [moq_consume_close].
