@@ -57,11 +57,12 @@ pub async fn connect_import(target: ImportTarget, url: Url) -> anyhow::Result<()
 	}
 }
 
-/// Retrying cannot fix these.
+/// Retrying cannot fix these: refused access, nothing publishable, or a local failure (such as
+/// an invalid broadcast name) rather than one from the RTSP session.
 fn is_fatal(err: &anyhow::Error) -> bool {
-	matches!(
+	!matches!(
 		err.downcast_ref::<moq_rtsp::Error>(),
-		Some(moq_rtsp::Error::Unauthorized(_) | moq_rtsp::Error::NoSupportedStream(_))
+		Some(err) if !matches!(err, moq_rtsp::Error::Unauthorized(_) | moq_rtsp::Error::NoSupportedStream(_))
 	)
 }
 
@@ -108,4 +109,20 @@ async fn run(target: &ImportTarget, client: &moq_rtsp::Client, published: &mut b
 	broadcast.close();
 	finished?;
 	end
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	/// Only a failure of the RTSP session itself is worth redialing.
+	#[test]
+	fn only_session_failures_retry() {
+		let retry = |err: anyhow::Error| !is_fatal(&err);
+		assert!(retry(moq_rtsp::Error::Rtsp("connection reset".into()).into()));
+		assert!(retry(moq_rtsp::Error::Stalled(Duration::from_secs(10)).into()));
+		assert!(!retry(moq_rtsp::Error::Unauthorized("401".into()).into()));
+		assert!(!retry(moq_rtsp::Error::NoSupportedStream("audio/pcmu".into()).into()));
+		assert!(!retry(anyhow::anyhow!("failed to create broadcast")));
+	}
 }

@@ -206,7 +206,7 @@ impl Client {
 					track,
 					last: None,
 					started: false,
-					damaged: false,
+					held: None,
 					fresh: true,
 				});
 			}
@@ -240,7 +240,7 @@ impl Client {
 					tracing::warn!(%url, "RTSP timeline jumped, ending the session");
 					return Ok(End::Jumped);
 				}
-				if ingest.awaiting_keyframe() && playing.elapsed() > self.keyframe_timeout {
+				if ingest.awaiting_keyframe(playing, self.keyframe_timeout) {
 					return Err(Error::Stalled(self.keyframe_timeout));
 				}
 			}
@@ -374,8 +374,8 @@ struct Stream {
 	last: Option<(i64, std::time::Instant)>,
 	/// Whether a keyframe has been published (video) or the session started (audio).
 	started: bool,
-	/// Whether a lost packet broke the video's reference chain, so it waits for a keyframe.
-	damaged: bool,
+	/// When a lost packet broke the video's reference chain, so it waits for a keyframe.
+	held: Option<tokio::time::Instant>,
 	/// Whether retina's parameter sets still need inserting: until the splitter emits a keyframe
 	/// carrying them, after which it re-inserts them ahead of every keyframe itself.
 	fresh: bool,
@@ -462,12 +462,12 @@ impl Ingest {
 
 		match &mut stream.track {
 			Track::Video(video) => {
-				if loss > 0 && stream.started && !stream.damaged {
+				if loss > 0 && stream.started && stream.held.is_none() {
 					// The pictures after a lost packet reference what it carried, so hold the
 					// video until the next keyframe rather than publish a broken chain.
 					tracing::warn!(stream_id, loss, "RTP packets lost, waiting for the next keyframe");
 					video.reset();
-					stream.damaged = true;
+					stream.held = Some(tokio::time::Instant::now());
 				}
 				stream.fresh |= changed;
 				let params = match streams.get(stream_id).and_then(|stream| stream.parameters()) {
@@ -477,14 +477,14 @@ impl Ingest {
 				let frames = video.split(data, params, pts)?;
 				let keyframe = frames.iter().any(|frame| frame.keyframe);
 				stream.fresh &= !keyframe;
-				if !stream.started || stream.damaged {
+				if !stream.started || stream.held.is_some() {
 					// Publish nothing before a keyframe, by the splitter's reckoning (an IDR, an
 					// H.264 recovery point, or any H.265 IRAP picture).
 					if !frames.first().is_some_and(|frame| frame.keyframe) {
 						return Ok(None);
 					}
 					stream.started = true;
-					stream.damaged = false;
+					stream.held = None;
 					self.started = true;
 				}
 				stream.last = Some((elapsed, received));
@@ -507,12 +507,17 @@ impl Ingest {
 		Ok(None)
 	}
 
-	/// Whether a video stream has yet to publish its first keyframe.
-	fn awaiting_keyframe(&self) -> bool {
-		self.streams
-			.iter()
-			.flatten()
-			.any(|stream| matches!(stream.track, Track::Video(_)) && !stream.started)
+	/// Whether a video stream has waited longer than `timeout` for a keyframe: its first since
+	/// `playing`, or its next since a loss held it.
+	fn awaiting_keyframe(&self, playing: tokio::time::Instant, timeout: std::time::Duration) -> bool {
+		self.streams.iter().flatten().any(|stream| {
+			let since = match stream.held {
+				Some(held) => held,
+				None if !stream.started => playing,
+				None => return false,
+			};
+			matches!(stream.track, Track::Video(_)) && since.elapsed() > timeout
+		})
 	}
 
 	/// Flush every track and end it cleanly, reporting the first failure.
@@ -1040,6 +1045,33 @@ mod tests {
 			[true, false, true],
 			"the slices after the loss never publish"
 		);
+	}
+
+	/// Video held after a loss still has to see a keyframe in time, or the pull fails rather
+	/// than leaving the broadcast frozen.
+	#[tokio::test]
+	async fn held_video_without_a_keyframe_stalls() {
+		let server = Server::bind(vec![Media::H264 { sprop: true }]).await;
+		let (broadcast, catalog) = broadcast();
+		let mut client = Client::new(server.url()).unwrap();
+		client.keyframe_timeout = Duration::from_millis(200);
+		let mut pull = tokio::spawn(async move { client.pull(&broadcast, &catalog).await });
+
+		let mut session = within("PLAY", server.accept(0)).await;
+		session.video(0, 0, &[fake::H264_IDR]).await;
+		session.lose(0, 1);
+		let err = within("the pull", async {
+			for frame in 2.. {
+				session.video(0, frame * FRAME, &[fake::H264_SLICE]).await;
+				tokio::select! {
+					result = &mut pull => return result.unwrap().unwrap_err(),
+					_ = tokio::time::sleep(Duration::from_millis(30)) => {}
+				}
+			}
+			unreachable!()
+		})
+		.await;
+		assert!(matches!(err, Error::Stalled(_)), "{err}");
 	}
 
 	/// A server whose `rtptime` lands well after its packets would never publish anything, so
