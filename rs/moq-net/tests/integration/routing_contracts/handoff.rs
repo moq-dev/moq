@@ -108,6 +108,8 @@ fn an_older_complete_snapshot_revives_a_known_withdrawal() {
 		net.unannounce(origin, "live/x");
 		assert!(net.run());
 		assert_eq!(net.shows(node, 7, "live/x"), None, "{freshness:?}");
+		// Forgetting another origin excuses no replay of this one.
+		net.collect(node, 99);
 
 		net.disconnect(node, a);
 		assert!(net.run());
@@ -520,6 +522,90 @@ fn a_closed_grant_lets_its_scope_go() {
 		.collect();
 	assert_eq!(life, [Kind::Start, Kind::Offline]);
 	assert_eq!(false_ends(&net.events), 0);
+	net.check().unwrap();
+}
+
+/// A relay forwards a key whose floors are all grant scopes, and its peer
+/// moves to an interest no scope meets. The relay still answers the new
+/// stream, certifying nothing, so the peer lets go of a wildcard it kept from
+/// the scoped view instead of waiting on an answer that never comes.
+#[test]
+fn a_disjoint_interest_is_answered_with_nothing() {
+	let (origin, local, x, y, z) = (0, 1, 2, 3, 4);
+	let mut net = Net::new(config(FLOORS, Requests::Off), 5);
+	net.leaf(origin);
+	net.join(origin, local, 1);
+	for (relay, scope) in [(x, "live/a/"), (y, "live/b/")] {
+		let grant = Grant {
+			subject: "local",
+			scope,
+		};
+		net.link(relay, local, Link::cost(1).grant(grant), Link::cost(1));
+		net.join(relay, z, 1);
+	}
+	net.originate(origin, 7, 0);
+	net.announce(origin, "live/", 0, None);
+	assert!(net.run());
+	let id = qualified("local", 7);
+	assert_eq!(net.shows(z, id, "live/"), Some(true));
+
+	net.watch(z, "live/c");
+	assert!(net.run());
+	assert_eq!(net.shows(z, id, "live/"), None);
+	let life: Vec<Kind> = at(&net, z)
+		.iter()
+		.filter(|event| event.id == id && event.claim == "live/")
+		.map(|event| event.kind)
+		.collect();
+	assert_eq!(life, [Kind::Start, Kind::Offline]);
+	net.check().unwrap();
+}
+
+/// One key arrives through a wide grant and a narrow one under one subject.
+/// The narrow session lags behind a withdrawal the wide one delivered; when
+/// the wide session closes, only what lies outside the narrow scope goes
+/// offline, and the newer knowledge inside it stays rather than reviving the
+/// withdrawn claim from the lagging session.
+#[test]
+fn a_lost_scope_keeps_newer_knowledge_where_still_certified() {
+	let (origin, r1, r2, client) = (0, 1, 2, 3);
+	let mut net = Net::new(config(FLOORS, Requests::Off), 4);
+	net.leaf(origin);
+	net.leaf(client);
+	net.join(origin, r1, 1);
+	net.join(origin, r2, 1);
+	for (relay, scope) in [(r1, "live/"), (r2, "live/b/")] {
+		let grant = Grant {
+			subject: "local",
+			scope,
+		};
+		net.link(client, relay, Link::cost(1).grant(grant), Link::cost(1));
+	}
+	net.originate(origin, 7, 0);
+	net.announce(origin, "live/a/x", 0, None);
+	net.announce(origin, "live/b/z", 0, None);
+	assert!(net.run());
+	let id = qualified("local", 7);
+	assert_eq!(net.shows(client, id, "live/b/z"), Some(true));
+
+	net.hold(r2, client);
+	net.unannounce(origin, "live/b/z");
+	assert!(net.run());
+	assert_eq!(net.shows(client, id, "live/b/z"), None);
+	net.disconnect(client, r1);
+	assert!(net.run());
+	assert_eq!(net.shows(client, id, "live/a/x"), None, "outside the scope left");
+	assert_eq!(
+		net.shows(client, id, "live/b/z"),
+		None,
+		"the lagging scope revives nothing"
+	);
+	net.check().unwrap();
+
+	net.release(r2, client);
+	assert!(net.run());
+	assert_eq!(net.shows(client, id, "live/b/z"), None);
+	assert_eq!(revivals(&at(&net, client)), 0);
 	net.check().unwrap();
 }
 
@@ -994,6 +1080,11 @@ fn announcement_cost_follows_sessions_and_live_claims() {
 		assert_eq!(retained.items, relays * claims);
 		assert_eq!(retained.floors, relays + 1);
 		assert_eq!(retained.heard, sessions * claims);
+		// Both ends of every session cache the same view.
+		assert_eq!(
+			(retained.sent, retained.sent_floors),
+			(retained.heard, retained.heard_floors)
+		);
 
 		let (stats, events) = (net.stats, net.events.len());
 		net.unannounce(origin, PREFIXES[0]);

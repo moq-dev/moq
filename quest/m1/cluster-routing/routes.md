@@ -355,11 +355,20 @@ loss never reports an END:
   usable route and every such neighbour has answered the current interest, a
   region of its view that none of them certifies is let go: its last
   certifier closed, ended its route, or no longer meets the interest. The
-  reader sees those claims go offline, not end, and the view is rebuilt from
-  the neighbours' last views, a collection of that region, since dropping a
-  floor alone would leave what it certified known at an older floor's
-  revision. A claim is available only through a certifier that is not held;
-  another scope's usable route cannot serve it. Closing one of two grants
+  reader sees those claims go offline, not end. The view keeps what it knows
+  within the regions still certified when no lost floor is newer than every
+  kept one, so a lagging certifier cannot revive a withdrawal the departed one
+  delivered (`a_lost_scope_keeps_newer_knowledge_where_still_certified`).
+  Otherwise a wildcard above both was last learned through the lost floor and
+  is unknown at the kept floors' revision, so the view is rebuilt from the
+  neighbours' last views, a collection of that region. A sender that
+  certifies anything for a route answers every stream, even one whose
+  interest none of its regions meets, so its peer learns it certifies nothing
+  there rather than waiting (`a_disjoint_interest_is_answered_with_nothing`).
+  A claim is available only through a certifier that is not held; another
+  scope's usable route cannot serve it. A certifier that has not answered yet
+  counts as serving, as for a new next hop whose announcements trail its
+  route. Closing one of two grants
   under a subject takes its scope offline at the client
   (`a_closed_grant_lets_its_scope_go`), and a relay downstream of two scoped
   uplinks shows a lost scope unavailable while the starved relay holds, then
@@ -497,6 +506,16 @@ Decided with the maintainer 2026-10-16, from the handoff proof:
    union and cannot be checked across relays; and deferring to the
    implementation, which leaves the proof's freshness claim false for scoped
    delivery.
+
+Open, for the maintainer: how a batch frames its region set. The model
+replaces a session's regions with each batch's, so the wire must let a sender
+stop certifying a region it lost and answer a stream with no region at all.
+Recommended: one ANNOUNCE_FLOOR per batch carrying every region the sender
+certifies for the route, (Route ID, count, region suffix and revision per
+region); the set replaces the last, and a count of zero answers an interest
+it cannot certify. Alternative: one region per ANNOUNCE_FLOOR, where a floor
+at revision 0 (which certifies nothing) drops that region and answers an
+interest with no region; no new field, but revision 0 gains a meaning.
 
 Why not a hold-down: #4644 retracted at once and re-announced a replacement
 after 1 s, which ended a downstream front whose only path ran through the

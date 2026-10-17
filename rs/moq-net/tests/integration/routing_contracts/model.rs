@@ -456,9 +456,9 @@ pub struct Event {
 	pub claim: &'static str,
 	pub kind: Kind,
 	pub since: Rev,
-	/// How many times the node had forgotten an origin, by restarting or
-	/// collecting it, before this event.
-	pub forgot: u32,
+	/// How many times the node had restarted, and then forgotten this origin's
+	/// claims by collecting or retiring them, before this event.
+	pub forgot: (u32, u32),
 	/// Whether the origin had withdrawn or replaced this life of the claim by
 	/// then. An `End` without it is a false END.
 	pub withdrawn: bool,
@@ -485,6 +485,12 @@ pub struct Retained {
 	pub floors: usize,
 	/// Items in the per-session views a receiver keeps to apply the next batch.
 	pub heard: usize,
+	/// Region floors in those per-session views.
+	pub heard_floors: usize,
+	/// Items in the per-session views a sender keeps to diff the next batch.
+	pub sent: usize,
+	/// Region floors in those per-session views.
+	pub sent_floors: usize,
 	pub pending: usize,
 	/// Feasibility distances for identities a node does not serve.
 	pub distances: usize,
@@ -529,8 +535,11 @@ struct State {
 	heard_on: BTreeMap<(Node, Id), u32>,
 	sent_views: BTreeMap<(Node, Id), View>,
 	shown: BTreeMap<(Id, &'static str), Shown>,
-	/// How many times this node restarted, collected an origin, or retired a region.
-	forgot: u32,
+	/// How many times this node restarted.
+	restarts: u32,
+	/// Per origin, how many times this node collected it or retired a region
+	/// of its claims, so a stale replay is excused only for that origin.
+	forgot: BTreeMap<Id, u32>,
 }
 
 /// An identity serving everything under a prefix.
@@ -757,7 +766,7 @@ impl Net {
 			transit: old.transit,
 			watch: old.watch,
 			interest: old.interest,
-			forgot: old.forgot + 1,
+			restarts: old.restarts + 1,
 			..State::default()
 		};
 		self.show(node);
@@ -944,7 +953,7 @@ impl Net {
 		state.heard_on.retain(|(_, key), _| *key != id);
 		state.pending.remove(&id);
 		state.gave_up.remove(&id);
-		state.forgot += 1;
+		*state.forgot.entry(id).or_default() += 1;
 		self.advertise(node);
 	}
 
@@ -1208,7 +1217,7 @@ impl Net {
 					let kept = merged.retire(state.watch);
 					if kept != *merged {
 						*merged = kept;
-						state.forgot += 1;
+						*state.forgot.entry(id).or_default() += 1;
 					}
 				}
 				state.heard.insert((from, id), view);
@@ -1443,9 +1452,7 @@ impl Net {
 	/// Let go of every region of `id`'s merged view that no routed neighbor
 	/// certifies any more, once each has answered the current interest: its
 	/// last certifier closed, ended its route, or no longer meets the interest.
-	/// Dropping one floor would leave what it certified known at an older
-	/// floor's revision, so the view is rebuilt from the neighbors' last views,
-	/// a collection of that region; the reader sees it go offline.
+	/// The reader sees that region go offline.
 	fn prune(&mut self, node: Node, id: Id) {
 		let Freshness::Floors { scoped } = self.cfg.freshness else {
 			return;
@@ -1463,18 +1470,33 @@ impl Net {
 		};
 		let lost = merged
 			.floors
-			.keys()
-			.any(|floor| !regions.iter().any(|region| floor.starts_with(region)));
-		if !lost {
+			.iter()
+			.filter(|(floor, _)| !regions.iter().any(|region| floor.starts_with(region)))
+			.map(|(_, &rev)| rev)
+			.max();
+		let Some(lost) = lost else {
 			return;
+		};
+		// Keep what the view knows within the regions still certified. That is
+		// sound only if no lost floor is newer than every kept one: otherwise a
+		// wildcard above both was last learned through the lost floor, and is
+		// unknown at the revision the kept floors certify.
+		let mut kept = View::default();
+		for &region in &regions {
+			kept.merge(&merged.restrict(region), scoped);
 		}
-		let mut rebuilt = View::default();
-		for next in self.certifiers(node, id) {
-			rebuilt.merge(&self.nodes[node].heard[&(next, id)], scoped);
-		}
+		let rebuilt = if kept.floors.values().all(|&floor| floor >= lost) {
+			kept
+		} else {
+			let mut rebuilt = View::default();
+			for next in self.certifiers(node, id) {
+				rebuilt.merge(&self.nodes[node].heard[&(next, id)], scoped);
+			}
+			rebuilt
+		};
 		let state = &mut self.nodes[node];
 		state.views.insert(id, rebuilt);
-		state.forgot += 1;
+		*state.forgot.entry(id).or_default() += 1;
 	}
 
 	/// The view `node` shows and forwards for `id`.
@@ -1546,6 +1568,10 @@ impl Net {
 			}
 			let live = serves && self.live(node, id);
 			let view = self.adopted(node, id).cloned().unwrap_or_default();
+			// A sender that certifies anything answers every stream, even one
+			// whose interest none of its regions meets, so the receiver knows it
+			// certifies nothing there.
+			let answers = !view.floors.is_empty();
 			for &peer in &peers {
 				let upstream = self.links[&(node, peer)].upstream;
 				let state = &self.nodes[node];
@@ -1582,10 +1608,9 @@ impl Net {
 				// Each floor names its region: the stream's interest, or a scope below it.
 				let view = view.restrict(self.nodes[peer].watch);
 				let state = &mut self.nodes[node];
-				// A view with no floor certifies nothing yet.
 				let unchanged = match state.sent_views.get(&(peer, id)) {
 					Some(sent) => *sent == view,
-					None => view.floors.is_empty(),
+					None => !answers,
 				};
 				if unchanged {
 					continue;
@@ -1778,7 +1803,10 @@ impl Net {
 					claim,
 					kind,
 					since,
-					forgot: self.nodes[node].forgot,
+					forgot: (
+						self.nodes[node].restarts,
+						self.nodes[node].forgot.get(&id).copied().unwrap_or_default(),
+					),
 					withdrawn: self
 						.truth(origin, claim, self.revision(origin))
 						.is_none_or(|item| item.since != since),
@@ -1894,6 +1922,9 @@ impl Net {
 				}
 			}
 			out.heard += state.heard.values().map(|view| view.items.len()).sum::<usize>();
+			out.heard_floors += state.heard.values().map(|view| view.floors.len()).sum::<usize>();
+			out.sent += state.sent_views.values().map(|view| view.items.len()).sum::<usize>();
+			out.sent_floors += state.sent_views.values().map(|view| view.floors.len()).sum::<usize>();
 			out.pending += state.pending.len();
 			out.distances += state.fd.keys().filter(|id| !state.origins.contains_key(id)).count();
 			out.certified += state.current.values().map(Vec::len).sum::<usize>();
