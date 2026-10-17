@@ -40,9 +40,12 @@ once this lands.
   gone. The spike measured this in both `Task` and Shape A. Keep the Go
   wrapper's terminal cancel. [Foreign poll](/quest/m2/ffi-poll-protocol.md)
   fixes it later for the hot reads.
-- **What stays**: exports that need tokio I/O (session connect, server
-  accept, demand) stay `detached`. Keep shutdown's in-flight counter only for
-  those.
+- **What stays**: handles that drive tokio I/O keep `Task`, because it
+  supplies their serialized state, terminal cancel, and shutdown's in-flight
+  counter: client `connect`, server `listen` and `accept`, and request
+  `accept` and `reject`. Demand waits and session `shutdown` stay `detached`.
+  Re-examine those sites only if `Task` shrinks to them cleanly; that is not
+  this quest's goal.
 - **Tests**: a read cancelled but not yet freed does not block the next read
   on the same handle (drive `rust_future_*` directly, as the spike did), and a
   read parked across shutdown resolves without a crash.

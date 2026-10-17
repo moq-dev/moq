@@ -32,14 +32,21 @@ Things to carry over and check:
   group.
 - **Generated, not hand-written.** The per-language future glue (asyncio,
   Go channel and ctx, Kotlin and Swift continuations, Dart, C++, C) belongs
-  in the generators, so moq-ffi exports a poll once. The Go wrapper's
-  terminal cancel and its bridge goroutine can go for these reads.
+  in the generators, so moq-ffi exports a poll once. The Go wrapper's bridge
+  goroutine can go for these reads.
+- **Go's cancel contract.** `go/wrapper/doc.go` promises that cancelling a
+  `RecvGroup` or `ReadFrame` context ends the stream. The protocol makes a
+  per-read cancel safe. Decide with the maintainer whether a cancel now
+  ends only that read or still ends the stream. If it changes, update the
+  doc, the tests, and the PR's API report; the other wrappers face the same
+  question.
 - **Concurrent pollers on one handle share one waker.** Pick a semantic and
   test it: either reject a second concurrent read, or wake every poller.
 - Measure Kotlin and Swift too; the spike covered only Go and Python.
 
 Public API: these reads gain a poll protocol in every binding; their async
-signatures stay where a language keeps both. Wire: none.
+signatures stay where a language keeps both. Go's read cancel may change from
+terminal to per-read. Wire: none.
 
 ## Required
 
