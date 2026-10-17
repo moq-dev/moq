@@ -224,6 +224,17 @@ fn lifecycle() {
 /// the server complete the handshake and read the application close.
 #[test]
 fn close_before_the_client_finished_leaves() {
+    close_before_the_client_finished(false);
+}
+
+/// The same, when the first close flight is lost and the client resends it in answer to the
+/// server's retransmitted handshake.
+#[test]
+fn close_before_the_client_finished_leaves_survives_a_lost_flight() {
+    close_before_the_client_finished(true);
+}
+
+fn close_before_the_client_finished(lose_first: bool) {
     let _guard = subscribe();
     let mut pair = Pair::default();
     let client_ch = pair.begin_connect(client_config());
@@ -250,6 +261,12 @@ fn close_before_the_client_finished_leaves() {
     assert_matches!(client.poll(), Some(Event::HandshakeDataReady));
     assert_matches!(client.poll(), Some(Event::Connected));
     client.close(now, VarInt(42), REASON.into());
+    if lose_first {
+        let server = pair.server.addr;
+        pair.client.drive(now, server);
+        assert!(!pair.client.outbound.is_empty());
+        pair.client.outbound.clear();
+    }
     pair.drive();
 
     let server_ch = pair.server.assert_accept();

@@ -881,15 +881,16 @@ impl Connection {
                 }
 
                 if finish_first && space_id == SpaceId::Handshake {
-                    let pending = &mut self.spaces[space_id].pending.crypto;
-                    while let Some(frame) = pending.front()
-                        && buf.len() + frame::Crypto::SIZE_BOUND + frame.data.len()
-                            <= builder.max_size
-                    {
+                    // Left queued, so the close resent for a lost flight carries it too.
+                    for frame in &self.spaces[space_id].pending.crypto {
+                        if buf.len() + frame::Crypto::SIZE_BOUND + frame.data.len()
+                            > builder.max_size
+                        {
+                            break;
+                        }
                         trace!("CRYPTO: off {} len {}", frame.offset, frame.data.len());
                         frame.encode(buf);
                         self.stats.frame_tx.crypto += 1;
-                        pending.pop_front();
                     }
                 } else if buf.len() + frame::ConnectionClose::SIZE_BOUND <= builder.max_size {
                     let max_frame_size = builder.max_size - buf.len();
