@@ -33,9 +33,9 @@ support, not an application API for requesting or producing keyframes.
 - Clear pending state with its subscription, so a reconnect or publisher
   replacement cannot inherit a stale request. Keep this separate from
   historical group fetches.
-- Plain lite does not advertise dynamic-group support. The
-  [relay extension](/quest/m1/ietf-extension/lite.md) owns carrying capability
-  and requests across lite-07 cluster hops.
+- Plain lite does not advertise dynamic-group support in this quest.
+  [Refresh](/quest/m1/refresh/README.md) (decided 2026-10-16) later makes the
+  path public and carries it on native lite-07 cluster hops.
 - Update the deviations in `doc/concept/standard.md` inline. No new user
   guide is needed for relay-only behavior.
 
@@ -53,5 +53,5 @@ extension quest.
 ## Related
 
 - [Track properties](/quest/m1/ietf-extension/track-properties.md) - advertises DYNAMIC_GROUPS only with a working upstream request path
-- [Relay extension](/quest/m1/ietf-extension/lite.md) - carries the request through the relay cluster
+- [Refresh](/quest/m1/refresh/core.md) - promotes this crate-private path to the public `Demand::wanted` and a byte ratio after this lands; native lite-07 carries it across the cluster
 - [Draft 22 relay rules](https://www.ietf.org/archive/id/draft-ietf-moq-transport-22.html#section-9.20.19) - forwarding, suppression, and outstanding-request lifetime
