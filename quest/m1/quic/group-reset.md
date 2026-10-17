@@ -58,7 +58,5 @@ half did not reach.
 - [SUBSCRIBE_DROP accounts for every group](/quest/m1/subscribe-drop.md) - a
   DROP covers a reset whose header was lost; a reset that keeps its header acts
   as a one-group drop
-- [Per-stream ACK progress](/quest/m2/quic-ack-progress.md) - adds
-  `Checkpoint::acked()` to the same handle
 - [qmux on the QUIC stream state machine](/quest/m2/quic-qmux.md) - qmux reuses
   `moq-quic`'s reset state

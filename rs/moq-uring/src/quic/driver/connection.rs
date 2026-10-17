@@ -943,6 +943,8 @@ fn sweep_stream(state: &mut State, event: moq_quic::StreamEvent) {
 				waiters.wake();
 			}
 		}
+		// Nothing parks on a checkpoint's acknowledgment.
+		moq_quic::StreamEvent::Acked { .. } => {}
 	}
 }
 
