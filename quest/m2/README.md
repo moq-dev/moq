@@ -36,7 +36,6 @@ ranked just below deterministic TS legs, which it requires.
 - [Payload bytes](/quest/m2/ffi-bytes.md) - payloads cross the FFI in one bulk copy, proven on the binding benchmark in every wrapper
 - [Kotlin calls](/quest/m2/kt-ffi-calls.md) - Kotlin calls into moq-ffi cost about what Python's and Go's do, sync and async, once the fork's Kotlin generator drops JNA's per-call overhead
 - [Poll-native async spike](/quest/m2/ffi-poll.md) - measure kio poll-native exports and foreign poll against `ffi::Task`, then pick the shape
-- [Rendition preference](/quest/m2/rendition-preference.md) - automatic selection by `<moq-watch>`, `Video::ranked`, and WHEP keeps the highest `preference` that decodes, so a compatibility transcode is only picked when nothing preferred decodes
 - [Stats prefix tracks](/quest/m2/stats-prefix-tracks.md) - additive tracks required by the breaking lag API; existing maps remain supported
 - [QoS](/quest/m2/qos/README.md) - broadcast health: relay starvation and timeliness histograms
 - [Plan: watch worker](/quest/m2/plan-watch-worker.md) - prototype an invisible page worker against app-spawned workers, and land the jank harness that decides
@@ -83,7 +82,8 @@ ranked just below deterministic TS legs, which it requires.
 - [Bindings size profile](/quest/m2/ffi-size-profile.md) - a benchmark decides whether the moq-ffi builds ship at opt-level "s", which halves the dylib
 - [Zero-copy byte returns](/quest/m2/ffi-bytes-return.md) - returned payloads reach the host without a copy, if the payload numbers justify it
 - [Namespaced external types](/quest/m2/uniffi-namespaces.md) - the UniFFI fork lets two crates export the same type name, reopening the per-layer crate split
-- [Go mirror delivery](/quest/m2/go-mirror-delivery.md) - the Go binding's staticlibs stop growing git history by ~210 MiB per release
+- [Go module proxy](/quest/m2/go-module-proxy.md) - `moq.dev/moq-ffi` ships from a static GOPROXY we host, so its staticlibs stop growing git history by ~61 MiB per release
+- [Go per-platform lib modules](/quest/m2/go-ffi-platform-modules.md) - a Go build downloads only the host's staticlib, and `go mod vendor` works
 - [Dart on iOS](/quest/m2/dart-ios.md) - prove the shipped iOS native asset actually loads on a device, which no CI can
 - [Dart codec parity](/quest/m2/dart-codecs.md) - Dart is the one binding that cannot originate media
 - [Mobile completion](/quest/m2/mobile-completion.md) - verify the Swift and Kotlin bindings over Rust-owned capture before closing #700

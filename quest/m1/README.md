@@ -33,10 +33,9 @@ release, with clustering stability and the in-tree QUIC stack first.
 - Package publication, downstream adoption, and production rollout follow
   the cut under [release execution](/quest/m2/release/README.md).
 
-The route handoff planning quests settle their implementation choices before
-code is written. Existing upgrade and identity guides carry migrations;
-feature docs change inline. Keep generic proofs here and deployments and
-their operational acceptance with the downstream operator.
+Existing upgrade and identity guides carry migrations; feature docs change
+inline. Keep generic proofs here and deployments and their operational
+acceptance with the downstream operator.
 
 Keep one owner per shared code area and order prerequisites before consumers.
 The moq-transport passthrough fields remain crate-private, the existing
