@@ -473,10 +473,6 @@ These land with the next breaking release, not the 2026-09-23 train.
   each handle with `moq_consume_close` once its successor arrives. A binding's
   `AnnouncedBroadcast.available()` works the same way, and its first call is
   unchanged.
-- **`moq export` fMP4, MKV, FLV, H.264, and H.265 exit 1 at a replacement.**
-  Where the export used to end cleanly once a replaced publisher's session
-  closed, it now fails. Restart it, or use `export ts --stitch` to follow the
-  replacement.
 
 ## Wire
 

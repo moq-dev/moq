@@ -405,8 +405,7 @@ Without `--stitch` the export stays on the old publisher while it is
 up. Only lite-07 sessions carry epochs, so on the default version every return
 is a replacement. An export that fails while the broadcast stays up, such as on
 a codec TS cannot carry, exits 1 without lingering. Only `ts` can mark a break,
-so the other formats refuse `--linger`, and exit 1 at a replacement once the old
-publisher ends.
+so the other formats refuse `--linger`.
 
 ## Debugging
 

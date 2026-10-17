@@ -253,9 +253,6 @@ pub struct Subscribe {
 	source: moq_mux::Source,
 	catalog: CatalogFormat,
 	args: SubscribeArgs,
-	/// Watching for a replacement since before the path resolved. TS follows the path
-	/// itself, through `container::ts::Follower`.
-	replacement: Option<Replacement>,
 }
 
 impl Subscribe {
@@ -268,10 +265,6 @@ impl Subscribe {
 		args: SubscribeArgs,
 	) -> anyhow::Result<Self> {
 		let path = moq_net::Path::new(path).to_owned();
-		let replacement = match args.format {
-			SubscribeFormat::Ts => None,
-			_ => Some(Replacement::watch(&origin, &path)?),
-		};
 		let broadcast = origin
 			.request_broadcast(&path, None)
 			.await
@@ -283,7 +276,6 @@ impl Subscribe {
 			source,
 			catalog,
 			args,
-			replacement,
 		})
 	}
 
@@ -295,14 +287,7 @@ impl Subscribe {
 	}
 
 	/// Write the broadcast to stdout until it ends.
-	pub async fn run(mut self) -> anyhow::Result<()> {
-		match self.replacement.take() {
-			Some(replacement) => replacement.guard(self.export()).await,
-			None => self.export().await,
-		}
-	}
-
-	async fn export(self) -> anyhow::Result<()> {
+	pub async fn run(self) -> anyhow::Result<()> {
 		match self.args.format {
 			SubscribeFormat::Fmp4 => self.run_fmp4().await,
 			SubscribeFormat::Mkv => self.run_mkv().await,
@@ -505,166 +490,5 @@ impl Subscribe {
 		}
 
 		Ok(())
-	}
-}
-
-/// Watches a path for another publisher instance taking it from the one resolved there.
-///
-/// Only TS can mark a break in its output, so the other formats end at a replacement.
-struct Replacement {
-	follow: moq_net::announce::Follow,
-	path: moq_net::PathOwned,
-}
-
-impl Replacement {
-	/// Watch `path` from the route serving it now. Build it before resolving the path, so a
-	/// replacement racing the resolution is caught rather than folded into the first start.
-	fn watch(origin: &moq_net::origin::Consumer, path: &moq_net::PathOwned) -> anyhow::Result<Self> {
-		let mut follow = origin.follow(path)?;
-		// The cursor replays the routes on hand at once: take the start naming the one serving
-		// the path now, so the next restart marks another instance.
-		let _ = follow.poll_next(&moq_net::kio::Waiter::noop());
-		Ok(Self {
-			follow,
-			path: path.clone(),
-		})
-	}
-
-	/// Run `export` until it ends, failing it if another instance took the path first.
-	///
-	/// Subscriptions are sticky, so the export rides the old instance out before failing, as
-	/// TS does without `--stitch`.
-	async fn guard(mut self, export: impl Future<Output = anyhow::Result<()>>) -> anyhow::Result<()> {
-		let replaced = async {
-			while let Some(event) = self.follow.next().await {
-				if let moq_net::announce::Event::Restart(_) = event {
-					return;
-				}
-			}
-			// The origin closed, so nothing can replace the broadcast any more.
-			std::future::pending().await
-		};
-
-		tokio::pin!(export);
-		tokio::select! {
-			// A replacement on hand when the old instance ends still fails the export.
-			biased;
-			() = replaced => {}
-			end = &mut export => return end,
-		}
-		let path = &self.path;
-		tracing::info!(%path, "broadcast replaced, exporting the old instance until it ends");
-		let replaced =
-			format!("another publisher instance replaced broadcast `{path}`; only `export ts --stitch` can follow it");
-		match export.await {
-			Ok(()) => Err(anyhow::anyhow!(replaced)),
-			Err(err) => Err(err.context(replaced)),
-		}
-	}
-}
-
-#[cfg(test)]
-mod tests {
-	use super::*;
-
-	/// Announce a broadcast at `room` under `epoch`, returning what keeps it up.
-	fn announce(origin: &moq_net::origin::Producer, epoch: &moq_net::Epoch) -> moq_net::broadcast::Producer {
-		origin
-			.publish("room", moq_net::origin::Route::default().with_epoch(epoch.clone()))
-			.unwrap()
-	}
-
-	/// Follow `room`, once it is announced, for an export that runs until `end` sends.
-	async fn export(
-		origin: &moq_net::origin::Producer,
-	) -> (
-		tokio::sync::oneshot::Sender<()>,
-		tokio::task::JoinHandle<anyhow::Result<()>>,
-	) {
-		let consumer = origin.consume();
-		consumer.routed("room").await.unwrap();
-		let replacement = Replacement::watch(&consumer, &"room".into()).unwrap();
-		let (end, ended) = tokio::sync::oneshot::channel();
-		let task = tokio::spawn(replacement.guard(async move {
-			ended.await.unwrap();
-			Ok(())
-		}));
-		(end, task)
-	}
-
-	/// Another instance taking the path, as every return of an epochless route is, keeps the
-	/// export on the old one until it ends, then fails rather than reading as a finish.
-	#[tokio::test]
-	async fn a_replacement_fails_the_export_once_it_ends() {
-		tokio::time::pause();
-		let origin = moq_tokio::origin::spawn();
-		let _old = announce(&origin, &moq_net::Epoch::mint());
-		let (end, task) = export(&origin).await;
-
-		let _new = announce(&origin, &moq_net::Epoch::mint());
-		tokio::time::sleep(moq_net::origin::DEFAULT_UPDATE_HOLD * 2).await;
-		assert!(!task.is_finished(), "the export left the old instance before it ended");
-
-		end.send(()).unwrap();
-		let err = task.await.unwrap().expect_err("a replaced export ended cleanly");
-		assert!(err.to_string().contains("replaced broadcast `room`"), "{err:#}");
-	}
-
-	/// The same epoch is the same content, so the export carries on.
-	#[tokio::test]
-	async fn the_same_epoch_does_not_fail_the_export() {
-		tokio::time::pause();
-		let origin = moq_tokio::origin::spawn();
-		let epoch = moq_net::Epoch::mint();
-		let _old = announce(&origin, &epoch);
-		let (end, task) = export(&origin).await;
-
-		let _new = announce(&origin, &epoch);
-		tokio::time::sleep(moq_net::origin::DEFAULT_UPDATE_HOLD * 2).await;
-
-		end.send(()).unwrap();
-		task.await.unwrap().unwrap();
-	}
-
-	/// The old instance can end before the guard runs again, leaving the replacement and the
-	/// finished export both on hand. The replacement must still fail it. `select!` picks among
-	/// ready branches at random unless biased, so try enough times to catch either order.
-	#[tokio::test]
-	async fn a_replacement_on_hand_at_the_end_fails_the_export() {
-		tokio::time::pause();
-		for _ in 0..16 {
-			let origin = moq_tokio::origin::spawn();
-			let _old = announce(&origin, &moq_net::Epoch::mint());
-			let consumer = origin.consume();
-			consumer.routed("room").await.unwrap();
-			let replacement = Replacement::watch(&consumer, &"room".into()).unwrap();
-
-			let _new = announce(&origin, &moq_net::Epoch::mint());
-			tokio::time::sleep(moq_net::origin::DEFAULT_UPDATE_HOLD * 2).await;
-
-			let err = replacement
-				.guard(std::future::ready(Ok(())))
-				.await
-				.expect_err("a replaced export ended cleanly");
-			assert!(err.to_string().contains("replaced broadcast `room`"), "{err:#}");
-		}
-	}
-
-	/// A broadcast that goes offline ends the export as it always has, so what returns
-	/// after it is no replacement.
-	#[tokio::test]
-	async fn a_return_after_an_end_is_no_replacement() {
-		tokio::time::pause();
-		let origin = moq_tokio::origin::spawn();
-		let old = announce(&origin, &moq_net::Epoch::mint());
-		let (end, task) = export(&origin).await;
-
-		drop(old);
-		tokio::time::sleep(moq_net::origin::DEFAULT_UPDATE_HOLD * 2).await;
-		let _new = announce(&origin, &moq_net::Epoch::mint());
-		tokio::time::sleep(moq_net::origin::DEFAULT_UPDATE_HOLD * 2).await;
-
-		end.send(()).unwrap();
-		task.await.unwrap().unwrap();
 	}
 }

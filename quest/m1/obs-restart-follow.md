@@ -11,8 +11,8 @@ the new instance takes to deliver a keyframe.
 ## Plan
 
 `cpp/obs/src/moq-source.cpp` calls `available()` once (`moq_source_on_connect`)
-and treats a clean catalog end as final, so a replaced instance leaves the
-source frozen once the old session closes. Since moq-ffi's `available()` now
+and stops when its catalog ends, so a replaced instance leaves the source
+stopped once the old route dies and its tracks end with an error. Since moq-ffi's `available()` now
 resolves each instance in turn, re-arm it after every instance and rebuild the
 `Connection`'s consumer, catalog and tracks on each one, reusing the decoders
 when the codec config is unchanged.

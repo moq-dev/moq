@@ -4,14 +4,16 @@
 
 Every moq-cli sink that resolves a broadcast and keeps serving it handles an
 epochless `Restart` on purpose: it follows the new publisher instance where
-its output can mark the break, and otherwise fails loud rather than ending as
-if the broadcast had finished.
+its output can mark the break. A route change alone is never fatal: a sink
+that cannot follow stays on the old instance while its publisher serves it,
+and fails once that route dies, since its subscriptions then end with an
+error.
 
 ## Plan
 
 The stdout exports already do this: TS follows with `--stitch`, and the other
-formats exit 1 once the replaced instance ends (`Replacement` in
-`rs/moq-cli/src/subscribe.rs`). Audit and fix the rest the same way:
+formats ride the old instance until its route dies and its tracks error. Audit
+and fix the rest the same way:
 
 - `export hls`: `moq-hls`'s server resolves per request; check that a restart
   moves new requests to the new instance and how a playlist marks the break
@@ -26,8 +28,7 @@ formats exit 1 once the replaced instance ends (`Replacement` in
 - `transcode`: its source broadcast; following means restarting the ladder
   on the new instance.
 
-Share one helper (the stdout exports' `Replacement`, or a `moq_mux`
-`Source::follow`-style API per
+Share one helper (a `moq_mux` `Source::follow`-style API per
 [catalog references](/quest/m0/broadcast-epoch/catalog-references.md))
 rather than one rule per sink. Each fix lands with a test that replaces the
 publisher while the sink runs.
