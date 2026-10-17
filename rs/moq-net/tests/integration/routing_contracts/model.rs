@@ -315,6 +315,30 @@ pub fn overlaps(claim: &str, interest: &str) -> bool {
 }
 
 impl View {
+	/// What a node keeps of its view once its interest is `watch`. A floor
+	/// outside the interest may certify a wildcard above both at a newer
+	/// revision than any floor inside, so it stays, with what it certifies,
+	/// until a floor inside catches up; dropping it would leave that wildcard
+	/// known only at an older revision than the item it holds.
+	fn retire(&self, watch: &'static str) -> View {
+		let mut kept = self.restrict(watch);
+		let Some(&newest) = kept.floors.values().max() else {
+			// Nothing inside the interest certifies anything, so nothing stays.
+			return kept;
+		};
+		for (&region, &floor) in &self.floors {
+			if floor > newest && !kept.floors.contains_key(region) {
+				kept.floors.insert(region, floor);
+				for (&claim, &item) in &self.items {
+					if overlaps(claim, region) {
+						kept.items.insert(claim, item);
+					}
+				}
+			}
+		}
+		kept
+	}
+
 	/// The view as a session to a peer interested in `prefix` carries it.
 	fn restrict(&self, prefix: &'static str) -> View {
 		let mut floors = BTreeMap::new();
@@ -1182,9 +1206,8 @@ impl Net {
 				{
 					let merged = state.views.entry(id).or_default();
 					merged.merge(&view, scoped);
-					// The batch certifies the whole interest, wildcards above it
-					// included, so what lies outside can go.
-					let kept = merged.restrict(state.watch);
+					// The batch certifies the interest, so what lies outside can go.
+					let kept = merged.retire(state.watch);
 					if kept != *merged {
 						*merged = kept;
 						state.forgot += 1;

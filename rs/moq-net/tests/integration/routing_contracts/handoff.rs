@@ -945,6 +945,116 @@ fn announcement_cost_follows_sessions_and_live_claims() {
 	}
 }
 
+/// A client reaches one origin through two relays, each session scoped by a
+/// grant under the same subject, so both feed one qualified view. Claims
+/// change in and around both scopes, the client's interest moves, sessions
+/// drop and return, and messages are held and delivered out of step. Every
+/// view stays some revision of the origin's truth after every step, the
+/// widening guard stays bounded, and once churn stops the client shows
+/// exactly the claims its interest and the scopes admit.
+#[test]
+fn sweep_scoped_handoff() {
+	const CLAIMS: [&str; 5] = ["live/a/x", "live/a/y/", "live/b/z", "live/c", "live/"];
+	const WATCHES: [&str; 5] = ["", "live/", "live/a/", "live/b/z", "live/c"];
+	const SCOPES: [&str; 2] = ["live/a/", "live/b/"];
+	let (origin, r1, r2, client) = (0, 1, 2, 3);
+	let mut rng = XorShift(0x5c0b_ed00);
+	for scenario in 0..150 {
+		let mut net = Net::new(config(FLOORS, Requests::HopByHop), 4);
+		net.leaf(origin);
+		net.leaf(client);
+		net.join(origin, r1, 1);
+		net.join(origin, r2, 1);
+		net.join(r1, r2, 1);
+		for (relay, scope) in [(r1, SCOPES[0]), (r2, SCOPES[1])] {
+			let grant = Grant {
+				subject: "local",
+				scope,
+			};
+			net.link(client, relay, Link::cost(1).grant(grant), Link::cost(1));
+		}
+		let links = [(origin, r1), (origin, r2), (r1, r2), (client, r1), (client, r2)];
+		net.originate(origin, 7, 0);
+		assert!(net.run());
+		for _ in 0..40 {
+			match rng.next(8) {
+				0..=2 => {
+					let claim = CLAIMS[rng.next(CLAIMS.len() as u64) as usize];
+					if rng.chance(60) {
+						net.announce(origin, claim, rng.next(3), None);
+					} else {
+						net.unannounce(origin, claim);
+					}
+				}
+				3 => net.watch(client, WATCHES[rng.next(WATCHES.len() as u64) as usize]),
+				4 => {
+					let (a, b) = links[rng.next(links.len() as u64) as usize];
+					if net.connected(a, b) {
+						net.disconnect(a, b);
+					} else {
+						net.connect(a, b);
+					}
+				}
+				5 => {
+					let (a, b) = links[rng.next(links.len() as u64) as usize];
+					let (from, to) = if rng.chance(50) { (a, b) } else { (b, a) };
+					if rng.chance(60) {
+						net.hold(from, to);
+					} else {
+						net.release(from, to);
+					}
+				}
+				_ => {
+					let busy = net.busy();
+					if !busy.is_empty() {
+						let (from, to) = busy[rng.next(busy.len() as u64) as usize];
+						net.deliver(from, to);
+					}
+				}
+			}
+			net.settle(1);
+			net.check().unwrap_or_else(|err| panic!("scenario {scenario}: {err}"));
+			assert!(
+				net.retained().certified <= SCOPES.len() + 1,
+				"scenario {scenario}: the widening guard grows"
+			);
+		}
+		for (a, b) in links {
+			net.release(a, b);
+			net.release(b, a);
+			if !net.connected(a, b) {
+				net.connect(a, b);
+			}
+		}
+		assert!(net.run());
+		net.check().unwrap_or_else(|err| panic!("scenario {scenario}: {err}"));
+		let watch = net.watching(client);
+		let rev = net.revision(7);
+		let expected: BTreeSet<&str> = CLAIMS
+			.into_iter()
+			.filter(|claim| net.truth(7, claim, rev).is_some())
+			.filter(|claim| {
+				SCOPES.iter().any(|scope| {
+					let region = match () {
+						_ if scope.starts_with(watch) => *scope,
+						_ if watch.starts_with(scope) => watch,
+						_ => return false,
+					};
+					overlaps(claim, region)
+				})
+			})
+			.collect();
+		let id = qualified("local", 7);
+		let shown: BTreeSet<&str> = net
+			.shown(client)
+			.iter()
+			.filter(|((shown, _), view)| *shown == id && view.available)
+			.map(|((_, claim), _)| *claim)
+			.collect();
+		assert_eq!(shown, expected, "scenario {scenario} watching {watch:?}");
+	}
+}
+
 /// Random meshes with two origins and a client under random churn: claims
 /// change, sessions drop and return, messages are held and replayed out of
 /// step, the client changes interest, and an origin restarts with a fresh

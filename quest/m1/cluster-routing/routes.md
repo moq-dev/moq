@@ -338,7 +338,11 @@ loss never reports an END:
   (`widening_behind_a_scoped_grant_shows_the_rest_of_the_scope`). A batch
   certifies the interest only within its session's grant scope, so a view
   merged from several grants stays hidden in each scope until that grant
-  answers (`widening_behind_two_grants_waits_for_each_scope`); and withdrawing one
+  answers (`widening_behind_two_grants_waits_for_each_scope`). A floor
+  outside the interest stays while it is newer than every floor inside,
+  since it may certify a wildcard above both at a later revision; an
+  interest that meets no grant scope keeps nothing (`sweep_scoped_handoff`);
+  and withdrawing one
   origin's wildcard leaves another origin's copy
   (`wildcard_claims_end_per_origin_and_are_certified_below`).
 - Per identity, a node is usable (a feasible selected route: announcements
@@ -370,7 +374,8 @@ loss never reports an END:
   sender that has not yet received the withdrawal, and only until it does
   (`stale_replay_after_collection_lasts_only_until_the_withdrawal_behind_it`).
   Retained state is each session's last view, one merged view per held
-  identity with floors only within the current interest, one pending
+  identity with floors only within the current interest (and any newer one
+  certifying a wildcard above it), one pending
   request per origin, and a feasibility distance only while an identity is
   routed, advertised, or draining; neither withdrawal history nor interest
   history leaves anything. One claim change costs one
@@ -392,7 +397,9 @@ loss never reports an END:
   fresh identities, and route-less identities collected. Merged floors keep
   every view equal to some revision of the origin's truth after every step,
   and once churn stops every node shows each live origin's current claims and
-  holds nothing for a dead one. Over the same scenarios:
+  holds nothing for a dead one. `sweep_scoped_handoff` churns a client
+  behind two scoped grants across interests inside, above, and outside both
+  scopes. Over `sweep_handoff`'s scenarios:
 
   | Rule | Revivals | False ENDs | Re-announcements | Reader events | Claim KiB |
   | --- | --- | --- | --- | --- | --- |
