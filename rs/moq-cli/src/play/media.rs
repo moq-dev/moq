@@ -435,6 +435,7 @@ async fn play_audio<O: Output>(
 	let role = Role::new(presentation.clone(), changed.clone(), Kind::Audio);
 	let received = Mutex::new(VecDeque::new());
 	let arrived = tokio::sync::Notify::new();
+	let popped = tokio::sync::Notify::new();
 	let max_delay = consumer.max_delay();
 	let sample_rate = consumer.sample_rate();
 	let layout = consumer.layout();
@@ -485,6 +486,17 @@ async fn play_audio<O: Output>(
 		let mut current = None;
 		let mut ends = VecDeque::new();
 		loop {
+			// Stop reading while play is held behind a resume with more than the age
+			// budget queued, so the subscription evicts the excess instead of this
+			// queue growing without bound.
+			while received
+				.lock()
+				.unwrap()
+				.front()
+				.is_some_and(|(.., queued): &(_, _, _, Instant)| queued.elapsed() > max_delay)
+			{
+				popped.notified().await;
+			}
 			let event = match consumer.read().await {
 				Err(err) if !matches!(err, moq_audio::Error::Decode(_)) => return Err(err.into()),
 				event => event,
@@ -524,7 +536,10 @@ async fn play_audio<O: Output>(
 				}
 				_ => None,
 			};
-			received.lock().unwrap().push_back((event, delay, crossing));
+			received
+				.lock()
+				.unwrap()
+				.push_back((event, delay, crossing, Instant::now()));
 			arrived.notify_one();
 			if ended {
 				return Ok::<_, anyhow::Error>(());
@@ -538,8 +553,9 @@ async fn play_audio<O: Output>(
 		let mut deferred = None;
 		let mut sequential = false;
 		loop {
-			let (event, delay, crossing) = loop {
+			let (event, delay, crossing, _) = loop {
 				if let Some(event) = received.lock().unwrap().pop_front() {
+					popped.notify_one();
 					break event;
 				}
 				arrived.notified().await;
@@ -1080,6 +1096,65 @@ mod tests {
 		assert!(
 			resumed.iter().all(|part| part.sink > 0),
 			"the replacement resumed its declared transition: {played:?}"
+		);
+	}
+
+	#[tokio::test]
+	async fn a_held_audio_resume_leaves_the_excess_to_the_subscription() {
+		tokio::time::pause();
+		let delay = Duration::from_millis(200);
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let track = broadcast
+			.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
+			.unwrap();
+		let mut producer = moq_mux::container::Producer::new(track, Container::Legacy(moq_mux::container::Kind::Audio));
+		let mut options = moq_audio::decode::Options::new();
+		options.delay = Some(delay);
+		options.max_delay = delay;
+		options.output.format = moq_audio::Format::F32;
+		let consumer = moq_audio::decode::Consumer::new(
+			&broadcast.consume(),
+			&AudioConfig::new(AudioCodec::Pcm, SAMPLE_RATE, 1),
+			"audio",
+			options,
+		)
+		.await
+		.unwrap();
+		let recorder = Recorder::default();
+		let presentation = Arc::new(Mutex::new(Presentation::new(delay)));
+		let changed = Arc::new(tokio::sync::Notify::new());
+		let playback = AudioPlayback {
+			changed: changed.clone(),
+			speaker: recorder.clone(),
+			presentation: presentation.clone(),
+			latency: delay,
+			output: recorder.clone(),
+		};
+		let task = tokio::spawn(async move {
+			play_audio(consumer, playback).await.unwrap().finish().await;
+		});
+		for index in 0..5 {
+			producer.write(packet(index, 0.25)).unwrap();
+			tokio::time::sleep(PACKET_DURATION).await;
+		}
+		// Video declares an end two seconds out, holding the audio replacement back.
+		let video = Role::new(presentation.clone(), changed.clone(), Kind::Video);
+		video.declare();
+		video.end(moq_net::Timestamp::from_millis(2_000).unwrap()).unwrap();
+		producer.discontinuity().unwrap();
+		const REPLACEMENT: u64 = 100;
+		for index in 0..REPLACEMENT {
+			producer.write(packet(5 + index, 0.5)).unwrap();
+			tokio::time::sleep(PACKET_DURATION).await;
+		}
+		producer.finish().unwrap();
+		task.await.unwrap();
+		drop(video);
+		let (resumed, _) = played(&recorder, 0.5);
+		assert!(!resumed.is_zero(), "the replacement played");
+		assert!(
+			resumed < PACKET_DURATION * REPLACEMENT as u32 / 2,
+			"media held behind the resume past the age budget was queued, not evicted: {resumed:?}"
 		);
 	}
 

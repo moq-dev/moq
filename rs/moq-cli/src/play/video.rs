@@ -76,6 +76,8 @@ impl Decoder for moq_video::decode::Sink {
 struct Segment {
 	media: Buffer,
 	resumes: Option<Transition>,
+	/// When its first picture arrived.
+	arrived: Option<Instant>,
 }
 
 impl std::ops::Deref for Segment {
@@ -98,6 +100,8 @@ impl<O: Output> Video<O> {
 		let advancing = std::sync::atomic::AtomicBool::new(false);
 		let revision = std::sync::atomic::AtomicU64::new(0);
 		let buffers = Mutex::new(VecDeque::from([Segment::default()]));
+		// Signalled when a segment held behind a resume becomes the front.
+		let advanced = tokio::sync::Notify::new();
 		let role = Role::new(
 			self.presentation.clone(),
 			self.changed.clone(),
@@ -110,6 +114,21 @@ impl<O: Output> Video<O> {
 			let mut end = None;
 
 			loop {
+				// Stop reading while media queued behind a resume arrived more than the age
+				// budget ago, so the subscription evicts the excess instead of the queue
+				// growing a segment per restart without bound.
+				while buffers
+					.lock()
+					.unwrap()
+					.iter()
+					.skip(1)
+					.filter(|segment| segment.oldest().is_some())
+					.filter_map(|segment| segment.arrived)
+					.min()
+					.is_some_and(|arrived| arrived.elapsed() > self.max_delay)
+				{
+					advanced.notified().await;
+				}
 				let read = track.read().await?;
 				let mut buffers = buffers.lock().unwrap();
 				let active = buffers.len() == 1 && !advancing.load(std::sync::atomic::Ordering::Relaxed);
@@ -132,7 +151,9 @@ impl<O: Output> Video<O> {
 						{
 							self.output.send(Event::Wake);
 						}
-						buffers.back_mut().unwrap().push(frame, self.max_delay);
+						let back = buffers.back_mut().unwrap();
+						back.push(frame, self.max_delay);
+						back.arrived.get_or_insert_with(Instant::now);
 						false
 					}
 					// Applied in delivery order, so the restart lands before the frame after it.
@@ -314,6 +335,7 @@ impl<O: Output> Video<O> {
 								Some((start, transition)) => {
 									advancing.store(true, std::sync::atomic::Ordering::Relaxed);
 									buffers.pop_front();
+									advanced.notify_one();
 									Some((start, transition, revision.load(std::sync::atomic::Ordering::Relaxed)))
 								}
 								None => None,
@@ -791,6 +813,71 @@ mod tests {
 		let transition = audio.declare();
 		audio.resume(transition, moq_net::Timestamp::ZERO, None).await.unwrap();
 		assert!(Instant::now().into_std() >= last, "audio resumed over the video tail");
+	}
+
+	#[tokio::test]
+	async fn a_held_video_resume_leaves_the_excess_to_the_subscription() {
+		tokio::time::pause();
+		let delay = Duration::from_millis(200);
+		let media = media(delay);
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let source = broadcast
+			.create_track("video", hang::container::track_info(hang::catalog::PRIORITY.video))
+			.unwrap();
+		let subscriber = source
+			.consume()
+			.subscribe(moq_net::track::Subscription::default().with_max_delay(delay))
+			.await
+			.unwrap();
+		let format = || moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Video);
+		let mut producer = moq_mux::container::Producer::new(source, format());
+		let track = moq_mux::container::Consumer::new(subscriber, format());
+		let task = tokio::spawn(playback(&media, delay).run(track, Buffered::new(0)));
+		let audio = Role::new(
+			media.presentation.clone(),
+			media.drained.clone(),
+			super::super::playback::Kind::Audio,
+		);
+		// Two-picture segments, one per restart, published live for two seconds
+		// while audio's end holds the first replacement back.
+		const SEGMENTS: u64 = 50;
+		let mut shown = 0;
+		// Presents until the track drains, which replaying every queued segment would
+		// take far longer than this bound.
+		for at in 0..60_000u64 {
+			if task.is_finished() {
+				break;
+			}
+			if at < 60 && at % 20 == 0 {
+				producer.write(frame(at, at == 0)).unwrap();
+			} else if at == 60 {
+				audio.declare();
+				audio.end(moq_net::Timestamp::from_millis(2_000).unwrap()).unwrap();
+			}
+			if (60..60 + SEGMENTS * 40).contains(&at) && at % 20 == 0 {
+				if at % 40 == 20 {
+					producer.discontinuity().unwrap();
+				}
+				producer.write(frame(at, at % 40 == 20)).unwrap();
+			} else if at == 60 + SEGMENTS * 40 {
+				producer.finish().unwrap();
+			}
+			tokio::task::yield_now().await;
+			if media
+				.output
+				.present(&media)
+				.is_some_and(|picture| picture.as_millis() >= 60)
+			{
+				shown += 1;
+			}
+			tokio::time::advance(Duration::from_millis(1)).await;
+		}
+		task.await.unwrap().unwrap();
+		assert!(shown > 0, "the replacements played");
+		assert!(
+			shown < SEGMENTS,
+			"pictures held behind the resume past the age budget were queued, not evicted: {shown}"
+		);
 	}
 
 	#[tokio::test]
