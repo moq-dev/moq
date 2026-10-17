@@ -22,7 +22,7 @@ pub(super) fn poll_cancel<S: crate::transport::poll::Session>(
 ) -> Poll<Result<(), Error>> {
 	if !*finished {
 		let closed = match version {
-			Version::Draft14 | Version::Draft15 | Version::Draft16 => poll_legacy_end(stream, cx),
+			Version::Draft14 | Version::Draft15 | Version::Draft16 => poll_legacy_end(stream, version, cx),
 			_ => stream.reader.poll_closed(cx),
 		};
 		match closed {
@@ -69,19 +69,50 @@ pub(super) fn poll_withdrawn<S: crate::transport::poll::Session>(
 
 /// Poll a draft 14-16 virtual request stream until the requester ends the request.
 ///
-/// An update modifies the request rather than ending it, so it is skipped. Any other
-/// message is `Err(Cancel)`, and the stream finishing is `Ok(())`.
+/// An update modifies the request rather than ending it, and the requests watched here
+/// apply none, so each is refused with [`refuse_update`] and the request stays open. Any
+/// other message is `Err(Cancel)`, and the stream finishing is `Ok(())`.
 pub(super) fn poll_legacy_end<S: crate::transport::poll::Session>(
 	stream: &mut Stream<S, Version>,
+	version: Version,
 	cx: &mut Context<'_>,
 ) -> Poll<Result<(), Error>> {
 	loop {
+		// A refusal goes out before the next message is read.
+		ready!(stream.writer.poll_flush(cx))?;
 		match ready!(stream.reader.poll_decode_maybe::<FollowUp>(cx))? {
-			Some(FollowUp::Update(_)) => {}
+			Some(FollowUp::Update(body)) => refuse_update(&mut stream.writer, &body, version)?,
 			Some(FollowUp::End) => return Poll::Ready(Err(Error::Cancel)),
 			None => return Poll::Ready(Ok(())),
 		}
 	}
+}
+
+/// Buffer the answer to a draft 14-16 update aimed at a request that takes none.
+///
+/// Draft 14 answers no update. Drafts 15 and 16 answer each with exactly one REQUEST_OK or
+/// REQUEST_ERROR naming the update's own Request ID, and a refusal leaves any request but a
+/// subscription standing, so NOT_SUPPORTED is the whole answer.
+pub(super) fn refuse_update<S: crate::transport::poll::SendStream>(
+	writer: &mut crate::coding::Writer<S, Version>,
+	body: &super::Body,
+	version: Version,
+) -> Result<(), Error> {
+	if version == Version::Draft14 {
+		return Ok(());
+	}
+	let request_id = super::RequestId::decode(&mut body.decoder(version), version).map_err(DecodeError::complete)?;
+	writer.buffer_varint(super::RequestError::ID)?;
+	writer.buffer(&super::RequestError {
+		request_id: Some(request_id),
+		error_code: super::error::request::to_code(
+			&Error::Unsupported,
+			super::error::request::Kind::Subscribe,
+			version,
+		),
+		reason_phrase: "update not supported".into(),
+		retry_interval: 0,
+	})
 }
 
 /// A message the adapter routed onto a draft 14-16 request after the request itself.
@@ -364,6 +395,60 @@ impl Decode<Version> for NamespaceUpdate {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	/// On drafts 14-16 an update aimed at a request that applies none, such as a FETCH or
+	/// SUBSCRIBE_NAMESPACE, keeps the request open. Drafts 15 and 16 refuse it with a
+	/// REQUEST_ERROR naming the update, and a later cancellation still ends the request.
+	#[moq_clock::test]
+	async fn legacy_update_is_answered_without_ending_the_request() {
+		use crate::lite::test_transport::ScriptedSession;
+
+		for version in [Version::Draft14, Version::Draft15, Version::Draft16] {
+			// Own Request ID 10, target 0, no parameters. Draft 14 carries its fixed start,
+			// end group, priority and forward first.
+			let body: &[u8] = match version {
+				Version::Draft14 => &[10, 0, 0, 0, 0, 128, 1, 0],
+				_ => &[10, 0, 0],
+			};
+			let mut update = vec![super::super::SubscribeUpdate::ID as u8, 0, body.len() as u8];
+			update.extend_from_slice(body);
+			let mut session = ScriptedSession::new(update);
+			let mut stream = Stream::open(&mut session, version).await.unwrap();
+			let mut finished = false;
+
+			let polled = futures::poll!(std::future::poll_fn(|cx| poll_cancel(
+				&mut stream,
+				&mut finished,
+				version,
+				cx
+			)));
+			assert!(polled.is_pending(), "{version}: the update ended the request");
+
+			let written = session.log.writes.lock().unwrap().clone();
+			match version {
+				Version::Draft14 => assert!(written.is_empty(), "{version}: {written:?}"),
+				// [type, length (2), Request ID, NOT_SUPPORTED, ...]
+				_ => assert_eq!(
+					(written[0], written[3], written[4]),
+					(super::super::RequestError::ID as u8, 10, 0x3),
+					"{version}: {written:?}"
+				),
+			}
+
+			// UNSUBSCRIBE, or any message but an update, ends the request.
+			session.push(&[super::super::Unsubscribe::ID as u8, 0, 1, 0]);
+			let polled = futures::poll!(std::future::poll_fn(|cx| poll_cancel(
+				&mut stream,
+				&mut finished,
+				version,
+				cx
+			)));
+			assert!(
+				matches!(polled, Poll::Ready(Err(Error::Cancel))),
+				"{version}: {polled:?}"
+			);
+		}
+	}
 
 	#[test]
 	fn delivery_timeouts_on_subscription_updates_are_accepted() {

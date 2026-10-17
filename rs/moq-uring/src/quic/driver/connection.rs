@@ -168,18 +168,6 @@ impl Inner {
 		state.fail(err);
 	}
 
-	/// Fail the connection because its peer has no route, closing it so the
-	/// driver still drains it out of the endpoint.
-	pub(crate) fn unreachable(&self, err: &std::io::Error) {
-		self.conn
-			.borrow_mut()
-			.close(moq_clock::Instant::now(), 0u32.into(), Bytes::new());
-		self.state.borrow_mut().fail(Error::Transport {
-			code: moq_quic::TransportErrorCode::NO_VIABLE_PATH.into(),
-			reason: err.to_string(),
-		});
-	}
-
 	/// Park `waiter` until stream `id` is writable again.
 	pub(crate) fn park_writable(&self, id: StreamId, waiter: &kio::Waiter) {
 		let mut state = self.state.borrow_mut();
@@ -275,8 +263,8 @@ impl Inner {
 /// concurrent pending operations don't trample each other's wakeups. Dropping
 /// every handle (and every stream) drops the driver's `Rc` peers, but the
 /// driver itself keeps the connection alive until it ends; close explicitly
-/// with [`close`](web_transport_trait::poll::Session::close) (which moq's
-/// session machine does).
+/// with [`close`](web_transport_trait::poll::Session::close), or wrap it in
+/// [`crate::quic::web::Session`], whose last handle closes it.
 ///
 /// That close only records the code: the driver task is what frames the
 /// CONNECTION_CLOSE and hands it to the socket. Drive the worker until

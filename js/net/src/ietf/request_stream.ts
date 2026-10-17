@@ -85,6 +85,12 @@ export async function namespaceUpdate(
 		if (type !== 0x02) throw new ProtocolViolation("expected namespace REQUEST_UPDATE");
 		return await Message.decode(reader, async (body) => {
 			const requestId = await body.u62();
+			// Drafts 14-16 define no namespace update. The update's own Request ID is all its
+			// refusal names; the target is what the adapter routed it by.
+			if (version <= Version.DRAFT_16) {
+				await body.readAll();
+				return { requestId, refused: "not_supported" };
+			}
 			const params = await Parameters.decode(body, version, "namespace-update");
 			return {
 				requestId,
