@@ -32,27 +32,30 @@ export function summarize(rows: Row[]) {
 }
 
 /**
- * Each variant against the reference, paired by round, as percentage deltas.
+ * Each `[variant, reference]` pair, matched by round, as percentage deltas of the variant.
  *
  * Pairs share a round, so slow drift in host load lands on both sides. The median and range
  * are descriptive; a sign that flips between pairs says the change is within the noise.
  */
-export function compare(rows: Row[], reference: string) {
-	const baseline = new Map(
-		rows.filter((row) => row.variant === reference).map((row) => [`${row.key}\0${row.round}`, row]),
-	);
-	const deltas = new Map<string, { key: string; variant: string; metric: string; values: number[] }>();
-	for (const row of rows) {
-		if (row.variant === reference) continue;
-		const base = baseline.get(`${row.key}\0${row.round}`);
-		if (!base) continue;
-		for (const [metric, value] of Object.entries(row.metrics)) {
-			const before = base.metrics[metric];
-			if (before === undefined || before === 0 || !Number.isFinite(value)) continue;
-			const id = `${row.key}\0${row.variant}\0${metric}`;
-			const entry = deltas.get(id) ?? { key: row.key, variant: row.variant, metric, values: [] };
-			entry.values.push(((value - before) / before) * 100);
-			deltas.set(id, entry);
+export function compare(rows: Row[], pairs: [string, string][]) {
+	const byRound = new Map(rows.map((row) => [`${row.key}\0${row.variant}\0${row.round}`, row]));
+	const deltas = new Map<
+		string,
+		{ key: string; variant: string; reference: string; metric: string; values: number[] }
+	>();
+	for (const [variant, reference] of pairs) {
+		for (const row of rows) {
+			if (row.variant !== variant) continue;
+			const base = byRound.get(`${row.key}\0${reference}\0${row.round}`);
+			if (!base) continue;
+			for (const [metric, value] of Object.entries(row.metrics)) {
+				const before = base.metrics[metric];
+				if (before === undefined || before === 0 || !Number.isFinite(value)) continue;
+				const id = `${row.key}\0${variant}\0${reference}\0${metric}`;
+				const entry = deltas.get(id) ?? { key: row.key, variant, reference, metric, values: [] };
+				entry.values.push(((value - before) / before) * 100);
+				deltas.set(id, entry);
+			}
 		}
 	}
 	return [...deltas.values()].map(({ values, ...entry }) => {

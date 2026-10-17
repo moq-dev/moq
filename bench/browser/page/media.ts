@@ -171,7 +171,8 @@ if (Native) {
 
 let player: Watch.Player | undefined;
 let presented = 0;
-const presentedAt = new Map<number, number>();
+// Frame id to [wall-clock ms, page-clock ms] at first presentation.
+const presentedAt = new Map<number, [number, number]>();
 const heap: [number, number][] = [];
 
 async function watch(config: Media): Promise<{ first_frame_ms: number }> {
@@ -193,8 +194,11 @@ async function watch(config: Media): Promise<{ first_frame_ms: number }> {
 		if (memory) heap.push([performance.now(), memory.usedJSHeapSize]);
 	}, 250);
 	const first = new Promise<number>((resolve) => {
+		let last: number | undefined;
 		const stop = player?.renderer.out.frame.subscribe((frame) => {
-			if (!frame) return;
+			// A resize or catalog change repaints the same frame; count each frame once.
+			if (!frame || frame.timestamp === last) return;
+			last = frame.timestamp;
 			presented++;
 			if (presented === 1) resolve(performance.now() - start);
 			if (config.probe) probe(frame);
@@ -216,7 +220,7 @@ async function watch(config: Media): Promise<{ first_frame_ms: number }> {
 
 // Reads the id strip from a clone of the painted frame, so the renderer can close its own copy.
 function probe(frame: VideoFrame): void {
-	const at = now();
+	const at: [number, number] = [now(), performance.now()];
 	const clone = frame.clone();
 	const rect = { x: 0, y: 0, width: clone.codedWidth & ~1, height: STRIP };
 	const buffer = new Uint8Array(clone.allocationSize({ rect }));
@@ -258,9 +262,9 @@ function window_(start: number, end: number) {
 	return { heap: heap.filter(([at]) => at >= start && at < end), long_tasks: longTasks(start, end) };
 }
 
-/** Presentation times by frame id; only populated by the probed pass. */
-function presentations(): [number, number][] {
-	return [...presentedAt];
+/** Wall-clock presentation times by frame id inside a page-clock window; probed pass only. */
+function presentations(start: number, end: number): [number, number][] {
+	return [...presentedAt].filter(([, [, at]]) => at >= start && at < end).map(([id, [wall]]) => [id, wall]);
 }
 
 async function stop(): Promise<void> {

@@ -131,6 +131,7 @@ harness_spawn driver - bun driver.ts --relay "$url" --dist "$HARNESS_RUN/dist" -
     --variants "$names" ${DRIVER[@]+"${DRIVER[@]}"}
 harness_wait "$HARNESS_PID" || status=$?
 if [[ $status -ne 0 ]]; then
-    sed 's/^/  relay: /' "$HARNESS_RUN/relay.log" >&2 || true
+    echo "── relay log tail ($HARNESS_RUN/relay.log) ──" >&2
+    tail -n 20 "$HARNESS_RUN/relay.log" | sed 's/^/  relay: /' >&2 || true
 fi
 exit $status

@@ -40,8 +40,11 @@ const relay = values.relay;
 const dist = values.dist;
 const out = values.out;
 const variants = values.variants.split(",");
-// The first variant is the reference every other one is compared against.
-const reference = variants[0];
+if (!variants.includes("current")) throw new Error("--variants must include current");
+// The change under test is current against base; every control is judged against current.
+const pairs: [string, string][] = variants
+	.filter((variant) => variant !== "current")
+	.map((variant) => (variant === "base" ? ["current", "base"] : [variant, "current"]));
 const smoke = values.smoke;
 const rounds = smoke ? 1 : integer("rounds", values.rounds, 1);
 const warmup = smoke ? 0 : integer("warmup", values.warmup, 0);
@@ -60,6 +63,19 @@ const FLAGS = [
 	"--autoplay-policy=no-user-gesture-required",
 ];
 
+// The costs worth reading at a glance; report.json keeps every metric.
+const HEADLINE = new Set([
+	"consumer_main_ms",
+	"consumer_ms",
+	"network_ms",
+	"main_ms",
+	"watcher_ms_per_s",
+	"publisher_ms_per_s",
+	"presented_fps",
+]);
+// Deterministic or one-off metrics from the traced, counted and probed passes.
+const INSTRUMENTED = /^(copied|allocated|gc_|frame_delay)/;
+
 const TRANSPORT = smoke
 	? [
 			{ size: 160, frames: 200, group: 10 },
@@ -73,8 +89,8 @@ const TRANSPORT = smoke
 			{ size: 1048576, frames: 24, group: 8 },
 		];
 const CMAF: Cmaf[] = [
-	{ kind: "audio", sizes: Array(50).fill(160), iterations: smoke ? 2 : 40 },
-	{ kind: "video", sizes: [65536, ...Array(29).fill(4096)], iterations: smoke ? 2 : 10 },
+	{ kind: "audio", sizes: Array(50).fill(160), iterations: smoke ? 2 : 200 },
+	{ kind: "video", sizes: [65536, ...Array(29).fill(4096)], iterations: smoke ? 2 : 100 },
 ];
 const MEDIA = { width: 1280, height: 720, fps: 30, codec: "avc1", bitrate: 2_500_000, keyframe_ms: 1000 };
 const MEDIA_WARMUP_MS = smoke ? 1000 : 3000;
@@ -105,7 +121,7 @@ const report = {
 	version: 1,
 	smoke,
 	relay,
-	reference,
+	pairs,
 	variants,
 	revisions: JSON.parse(process.env.BENCH_REVISIONS ?? "{}"),
 	rounds,
@@ -169,7 +185,7 @@ try {
 	server.stop(true);
 	const timed = report.samples.filter((row) => row.pass === "timed" && row.round >= warmup);
 	report.summary = summarize(timed);
-	report.comparisons = compare(timed, reference);
+	report.comparisons = compare(timed, pairs);
 	await save();
 }
 console.log(`Retained ${report.samples.length} samples: ${output}`);
@@ -523,12 +539,16 @@ async function media(variant: string, round: number, pass: Pass) {
 		let delay: Record<string, number> | undefined;
 		if (pass === "probed") {
 			const paints = new Map(await publisher.page.evaluate(() => window.media.paints()));
-			const presented = await watcher.page.evaluate(() => window.media.presentations());
+			const presented = await watcher.page.evaluate(
+				([start, end]) => window.media.presentations(start, end),
+				[before.at, after.at],
+			);
 			const delays = presented
 				.filter(([id]) => paints.has(id))
 				.map(([id, at]) => at - (paints.get(id) ?? 0))
-				.filter((value) => value >= 0)
 				.sort((a, b) => a - b);
+			// Presented before it was painted: a misread id or a broken clock, never a fast frame.
+			if (delays[0] < 0) throw new Error(`${key} ${variant}: negative frame delay ${delays[0]}ms`);
 			if (delays.length === 0) throw new Error(`${key} ${variant}: no presented frame id could be read back`);
 			const at = (q: number) => delays[Math.min(delays.length - 1, Math.floor(q * delays.length))];
 			delay = {
@@ -609,18 +629,20 @@ function log(row: Row) {
 }
 
 function printComparisons() {
-	console.log(`\nPaired change against ${reference} (median of per-round deltas; host load varies):`);
-	for (const entry of report.comparisons as {
-		key: string;
-		variant: string;
-		metric: string;
-		pairs: number;
-		median_pct: number;
-		min_pct: number;
-		max_pct: number;
-		consistent: boolean;
-	}[])
+	console.log("\nPaired change, variant against reference (median of per-round deltas [range]; host load varies):");
+	for (const entry of report.comparisons as ReturnType<typeof compare>) {
+		if (!HEADLINE.has(entry.metric)) continue;
+		const sign = (value: number) => `${value >= 0 ? "+" : ""}${value.toFixed(1)}`;
 		console.log(
-			`  ${entry.key} ${entry.variant} ${entry.metric}: ${entry.median_pct >= 0 ? "+" : ""}${entry.median_pct.toFixed(1)}% [${entry.min_pct.toFixed(1)}, ${entry.max_pct.toFixed(1)}] n=${entry.pairs}${entry.consistent ? "" : " (sign varies)"}`,
+			`  ${entry.key} ${entry.variant} vs ${entry.reference} ${entry.metric}: ${sign(entry.median_pct)}% [${sign(entry.min_pct)}, ${sign(entry.max_pct)}] n=${entry.pairs}${entry.consistent ? "" : " (sign varies)"}`,
 		);
+	}
+	console.log("\nInstrumented passes (one sample each):");
+	for (const row of report.samples) {
+		if (row.pass === "timed") continue;
+		const shown = Object.entries(row.metrics)
+			.filter(([name]) => INSTRUMENTED.test(name))
+			.map(([name, value]) => `${name}=${Number.isInteger(value) ? value : value.toFixed(3)}`);
+		console.log(`  ${row.key} ${row.variant} ${row.pass}: ${shown.join(" ")}`);
+	}
 }

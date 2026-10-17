@@ -224,7 +224,9 @@ within each round, with the starting variant rotated, after one warmup round
   2.5 Mb/s, 1 s keyframes) and `@moq/watch` plays it on a 2D canvas. After a
   warmup, a 10 s window reports published, received, decoded and presented frame
   rates, decode backlog, frames decoded but never painted, decoder queue depth,
-  long tasks, and the watcher's heap slope.
+  long tasks, and the watcher's heap slope. Frame counters are read at the
+  window's edges, so decoded-but-unpainted can be off by a frame or two; decoder
+  queue depth comes from a thin `VideoDecoder` wrapper present in every pass.
 
 Costs are split by where they run. Main-thread CPU is CDP `TaskDuration` in
 thread ticks; process CPU is each page's renderer (every thread, including
@@ -242,8 +244,16 @@ software on every host, and with background throttling disabled. A page that is
 not visible fails the run. `report.json` keeps every raw sample with host load,
 the browser version, flags and per-page environment, source revisions, a
 per-variant summary, and paired per-round deltas against `current` with their
-range and whether the sign held. `BROWSER_BIN` runs an identified local browser
-instead of Playwright's Chromium.
+range and whether the sign held. The pairs are `current` against `base`, and each
+control (`aa`, `copy`) against `current`. `BROWSER_BIN` runs an identified local
+browser instead of Playwright's Chromium.
+
+Read process CPU with its granularity in mind: Chromium reports it in 10 ms ticks,
+so a sub-second transport sample carries a few percent of quantization; main-thread
+CPU has microsecond resolution. The renderer's process CPU minus its main thread
+is mostly software decode, compositing, and GC helper threads. On a shared host the
+A/A spread is wide, so a single extra copy shows reliably in the counted pass, not
+in timing; compare timing only across a change larger than the `aa` range.
 
 Every transport frame carries its index and a patterned payload: timed passes
 check sampled bytes, the counted pass checks every byte, and frame counts and an

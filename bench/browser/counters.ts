@@ -43,7 +43,11 @@ export function install(): void {
 					const result = Reflect.construct(target, args, newTarget) as { byteLength: number };
 					const [first] = args as unknown[];
 					if (typeof first === "number" || first === undefined) counts.allocated += result.byteLength;
-					else if (!(first instanceof ArrayBuffer) && !(first instanceof SharedArrayBuffer)) {
+					// SharedArrayBuffer only exists in cross-origin isolated pages.
+					else if (
+						!(first instanceof ArrayBuffer) &&
+						!(typeof SharedArrayBuffer !== "undefined" && first instanceof SharedArrayBuffer)
+					) {
 						counts.copied += result.byteLength;
 						counts.allocated += result.byteLength;
 					}

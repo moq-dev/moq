@@ -18,9 +18,9 @@ test("range takes the middle pair's mean for an even count", () => {
 	expect(range([4, 1, 3, 2])).toEqual({ min: 1, median: 2.5, max: 4 });
 });
 
-test("compare pairs each variant with the reference in the same round", () => {
+test("compare pairs a variant with its reference in the same round", () => {
 	const rows = [row("current", 0, 100), row("copy", 0, 110), row("current", 1, 200), row("copy", 1, 230)];
-	const [entry] = compare(rows, "current");
+	const [entry] = compare(rows, [["copy", "current"]]);
 	expect(entry).toMatchObject({
 		variant: "copy",
 		metric: "cpu",
@@ -34,5 +34,9 @@ test("compare pairs each variant with the reference in the same round", () => {
 
 test("compare flags a sign that varies across pairs", () => {
 	const rows = [row("current", 0, 100), row("aa", 0, 105), row("current", 1, 100), row("aa", 1, 95)];
-	expect(compare(rows, "current")[0].consistent).toBe(false);
+	expect(compare(rows, [["aa", "current"]])[0].consistent).toBe(false);
+});
+
+test("compare skips a reference absent from that round", () => {
+	expect(compare([row("current", 0, 100), row("copy", 1, 110)], [["copy", "current"]])).toEqual([]);
 });
