@@ -31,9 +31,10 @@ The loops #5700 added drain `origin::Consumer::follow`, resolve the path with
 
 Two JS behaviors have no Rust counterpart to mirror. JS falls back to blind
 resolution while a `consume` session lacks discovery; moq-net has no blind
-requests. Open for the maintainer, recommendation: the mode waits on an
-announced route as `routed_broadcast` does, and blind requests stay out of
-scope. JS also watches the path so a `consume` session asks its peer about
+requests. Decided with the maintainer on 2026-10-17: no blind fallback. The
+mode waits on an announced route as `routed_broadcast` does, and blind
+requests stay out of scope, so it differs from JS when discovery is
+unavailable. JS also watches the path so a `consume` session asks its peer about
 it; a moq-net session already asks for its whole granted scope at setup
 (`interest_prefixes` in `rs/moq-net/src/lite/subscriber.rs`), so there is
 nothing to watch.
