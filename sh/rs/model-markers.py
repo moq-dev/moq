@@ -6,7 +6,7 @@ past the public API to a marked set. Each item they reach is either pending, nam
 the quest that makes it public, or deliberately private with its reason:
 
     // pending: /quest/m1/public-model/ingest.md
-    // private: passthrough | tuning | capability gap | test | plumbing
+    // private: passthrough | tuning | capability gap | test | plumbing (JS only)
 
 The marker sits in the comment and attribute lines directly above the item. A marker
 anywhere else is stale and fails too, so a quest that publishes an item must delete
@@ -30,6 +30,8 @@ import sys
 ROOT = Path(__file__).resolve().parents[2]
 
 PRIVATE = {"passthrough", "tuning", "capability gap", "test", "plumbing"}
+# Rust hosts no session plumbing beside the model, so `plumbing` is JS only.
+RUST_PRIVATE = PRIVATE - {"plumbing"}
 MARKER = re.compile(r"^\s*// (private|pending): (.*?)\s*$")
 
 errors = []
@@ -39,14 +41,14 @@ def fail(path, line, message):
 	errors.append(f"{path.relative_to(ROOT)}:{line + 1}: {message}")
 
 
-def marker(path, index, line):
-	"""Validate a marker line, returning whether it is one."""
+def marker(path, index, line, private):
+	"""Validate a marker line against the `private` reasons, returning whether it is one."""
 	found = MARKER.match(line)
 	if not found:
 		return False
 	kind, value = found.groups()
-	if kind == "private" and value not in PRIVATE:
-		fail(path, index, f"unknown private marker {value!r}; use one of: {', '.join(sorted(PRIVATE))}")
+	if kind == "private" and value not in private:
+		fail(path, index, f"unknown private marker {value!r}; use one of: {', '.join(sorted(private))}")
 	if kind == "pending" and not (value.startswith("/quest/") and value.endswith(".md") and (ROOT / value[1:]).is_file()):
 		fail(path, index, f"pending marker names {value!r}, which is not an existing quest file")
 	return True
@@ -61,9 +63,9 @@ def block(lines, index, prefixes):
 	return above
 
 
-def markers(path, lines):
+def markers(path, lines, private):
 	"""Every marker line in a file, validated."""
-	return {i for i, line in enumerate(lines) if marker(path, i, line)}
+	return {i for i, line in enumerate(lines) if marker(path, i, line, private)}
 
 
 def require(path, lines, index, prefixes, what, used):
@@ -100,7 +102,7 @@ def rust():
 				if re.fullmatch(r"in crate::model(::\w+)*", scope):
 					continue
 				require(path, lines, i, RUST_BLOCK, f"`pub({scope})` reaches past the model and", used)
-		stale(path, markers(path, lines), used)
+		stale(path, markers(path, lines, RUST_PRIVATE), used)
 
 
 # JS
@@ -112,6 +114,7 @@ PLUMBING = {"auth_session.ts", "datagram_stream.ts", "error.ts", "index.ts", "mo
 JS_BLOCK = ("//", "/*", "*", "@")
 
 DECLARATION = r"^export\s+(?:declare\s+)?(?:abstract\s+)?(?:async\s+)?(?:function\*?|class|interface|type|const|let|var|enum|namespace)\s+{}\b"
+VALUE = r"^export\s+(?:declare\s+)?(?:abstract\s+)?(?:async\s+)?(?:function\*?|class|const|let|var|enum|namespace)\s+{}\b"
 REEXPORT = re.compile(r"export\s+(type\s+)?(\*(?:\s+as\s+\w+)?|\{[^}]*\})\s+from\s+\"(\.[^\"]+)\"", re.S)
 IMPORT = re.compile(r"import\s+(type\s+)?(\{[^}]*\}|\*\s+as\s+\w+)\s+from\s+\"(\.[^\"]+)\"", re.S)
 
@@ -121,12 +124,13 @@ def module(source, specifier):
 
 
 def names(spec):
-	"""(name, type-only) for each entry of an `{ a, type b as c }` list."""
+	"""(name, local binding, type-only) for each entry of an `{ a, type b as c }` list."""
 	for entry in spec.strip("{}").split(","):
 		entry = " ".join(entry.split())
 		if entry:
 			kind = entry.startswith("type ")
-			yield entry.removeprefix("type ").split(" as ")[0], kind
+			name, _, local = entry.removeprefix("type ").partition(" as ")
+			yield name, local or name, kind
 
 
 def internal(lines, index):
@@ -158,7 +162,7 @@ def published():
 				whole.add(target)
 				pending.append(target)
 				continue
-			for name, kind in names(spec):
+			for name, _, kind in names(spec):
 				key = (target, name)
 				named[key] = named.get(key, True) and bool(type_only or kind)
 	return whole, named
@@ -179,6 +183,8 @@ def js():
 		if path in whole:
 			# A name it re-exports from a package has no declaration here, and is public.
 			return index is None or not internal(lines, index)
+		# A name declared only as an interface or type alias has no value, so any reach of it is a type reach.
+		type_only = type_only or not any(re.match(VALUE.format(re.escape(name)), line) for line in lines)
 		kind = named.get((path, name))
 		return kind is not None and (type_only or not kind)
 
@@ -208,6 +214,17 @@ def js():
 		if found:
 			hooks[found.group(1)] = i
 
+	def reads(text, binding):
+		"""The members session code reads off `binding`, a local name or a dotted path."""
+		return sorted(set(re.findall(rf"(?<![\w$.]){re.escape(binding)}\.(\w+)", IMPORT.sub("", text))))
+
+	def reach_hooks(text, binding, user):
+		for hook in reads(text, binding):
+			if hook not in hooks:
+				fail(user, 0, f"`hooks.{hook}` is not declared in internal.ts")
+				continue
+			needed[hooks_path].setdefault(hooks[hook], f"`hooks.{hook}`, reached by session code,")
+
 	for directory in SESSIONS:
 		for user in sorted((SRC / directory).rglob("*.ts")):
 			if ".test" in user.name or "test-util" in user.name:
@@ -220,19 +237,17 @@ def js():
 				if spec.startswith("*"):
 					alias = spec.split()[-1]
 					# A local variable may shadow the alias, so only the module's own declarations count.
-					for name in sorted(set(re.findall(rf"\b{alias}\.(\w+)", IMPORT.sub("", text)))):
-						if declaration(files[target], name) is not None and not public(target, name, True):
+					for name in reads(text, alias):
+						if declaration(files[target], name) is not None and not public(target, name, bool(type_only)):
 							reach(target, name, user)
+					if target == hooks_path:
+						reach_hooks(text, f"{alias}.hooks", user)
 					continue
-				for name, kind in names(spec):
+				for name, local, kind in names(spec):
 					if not public(target, name, bool(type_only or kind)):
 						reach(target, name, user)
 					if target == hooks_path and name == "hooks":
-						for hook in sorted(set(re.findall(r"\bhooks\.(\w+)", text))):
-							if hook not in hooks:
-								fail(user, 0, f"`hooks.{hook}` is not declared in internal.ts")
-								continue
-							needed[hooks_path].setdefault(hooks[hook], f"`hooks.{hook}`, reached by session code,")
+						reach_hooks(text, local, user)
 			for name, declared in members.items():
 				if re.search(rf"\.{name}\b", text):
 					for path, index in declared:
@@ -254,7 +269,7 @@ def js():
 		used = set()
 		for index, what in sorted(needed[path].items()):
 			require(path, lines, index, JS_BLOCK, what, used)
-		stale(path, markers(path, lines), used)
+		stale(path, markers(path, lines, PRIVATE), used)
 
 
 rust()

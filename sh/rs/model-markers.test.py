@@ -21,7 +21,8 @@ TREE = {
 		"// private: test\n"
 		"pub(crate) struct Open;\n"
 	),
-	"js/net/src/index.ts": 'export * as Track from "./track.ts";\n',
+	"js/net/src/index.ts": 'export * as Track from "./track.ts";\nexport type { Box, Shape } from "./box.ts";\n',
+	"js/net/src/box.ts": "export class Box {}\nexport interface Shape {}\n",
 	"js/net/src/track.ts": (
 		"export class Subscriber {\n"
 		"\t// pending: /quest/m1/open.md\n"
@@ -52,14 +53,18 @@ TREE = {
 		"}\n"
 	),
 	"js/net/src/lite/session.ts": (
-		'import { hooks } from "../internal.ts";\n'
 		'import { wireOf } from "../wire.ts";\n'
+		'import * as Box from "../box.ts";\n'
+		'import { hooks } from "../internal.ts";\n'
 		"hooks.used();\n"
+		"let shape: Box.Shape;\n"
 		"wireOf({}).subscribe();\n"
 		"subscriber.fork();\n"
 	),
 	"js/net/src/lite/session.test.ts": 'import { hooks } from "../internal.ts";\nhooks.unused();\n',
 }
+
+HOOKS = 'import { hooks } from "../internal.ts";\nhooks.used();'
 
 
 def run(**changes):
@@ -110,6 +115,27 @@ class TestModelMarkers(unittest.TestCase):
 	def test_session_reaching_an_unmarked_hook_fails(self):
 		error = run(**{"js/net/src/lite/session.ts": ("hooks.used();", "hooks.used();\nhooks.unused();")})
 		self.assertIn("internal.ts:5: `hooks.unused`", error)
+
+	def test_aliased_hook_read_fails(self):
+		error = run(**{"js/net/src/lite/session.ts": (HOOKS, 'import { hooks as h } from "../internal.ts";\nh.used();\nh.unused();')})
+		self.assertIn("internal.ts:5: `hooks.unused`", error)
+
+	def test_namespaced_hook_read_fails(self):
+		namespaced = 'import * as Internal from "../internal.ts";\nInternal.hooks.used();\nInternal.hooks.unused();'
+		error = run(**{"js/net/src/lite/session.ts": (HOOKS, namespaced)})
+		self.assertIn("internal.ts:5: `hooks.unused`", error)
+
+	def test_namespace_value_reach_of_a_type_export_fails(self):
+		error = run(**{"js/net/src/lite/session.ts": ("let shape: Box.Shape;", "new Box.Box();")})
+		self.assertIn("box.ts:1: `Box`", error)
+
+	def test_type_namespace_reach_of_a_type_export_passes(self):
+		typed = 'import type * as Box from "../box.ts";\nlet box: Box.Box;'
+		self.assertIsNone(run(**{"js/net/src/lite/session.ts": ('import * as Box from "../box.ts";', typed)}))
+
+	def test_plumbing_on_rust_fails(self):
+		error = run(**{"rs/moq-net/src/model/group.rs": ("private: test", "private: plumbing")})
+		self.assertIn("group.rs:5: unknown private marker 'plumbing'", error)
 
 	def test_unmarked_internal_member_fails(self):
 		error = run(**{"js/net/src/track.ts": ("\t// pending: /quest/m1/open.md\n", "")})
