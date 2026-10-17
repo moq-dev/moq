@@ -124,3 +124,58 @@ async fn a_relay_forwards_descending_send_times_without_closing_the_track() {
 	}
 	assert!(failures.is_empty(), "{failures:#?}");
 }
+
+/// Fetch groups 1 then 0 of a finished untimed track over `version`, with no live
+/// subscription. Each answer carries its send time, so group 0 lands after group 1; the
+/// copy the fetches fill is still received, so neither is refused.
+async fn fetch_only(version: &str) -> Vec<Result<u64, moq_net::Error>> {
+	let publisher = produce_origin(1);
+	let broadcast = publisher.create_broadcast("bcast").unwrap();
+	let track = broadcast.create_track("data", Info::default()).unwrap();
+	broadcast.announce(Default::default()).unwrap();
+	write_group(&track, 0);
+	write_group(&track, 1);
+	track.finish().unwrap();
+
+	let subscriber = produce_origin(2);
+	let mut options = MockConnectOptions::new(version.parse::<Version>().unwrap());
+	options.server_publish = Some(publisher.consume());
+	options.client_subscribe = Some(subscriber.clone());
+	let pair = connect_mock(options).await;
+
+	let consumer = subscriber.consume();
+	moq_clock::timeout(TIMEOUT, consumer.routed("bcast"))
+		.await
+		.expect("announce timeout")
+		.expect("routed");
+	let remote = moq_clock::timeout(TIMEOUT, consumer.request_broadcast("bcast", None))
+		.await
+		.expect("resolve timeout")
+		.expect("broadcast resolves");
+
+	let mut got = Vec::new();
+	for sequence in [1, 0] {
+		let read = async {
+			let mut group = remote.track("data").unwrap().fetch_group(sequence, None).await?;
+			while group.read_frame().await?.is_some() {}
+			Ok(group.sequence)
+		};
+		got.push(moq_clock::timeout(TIMEOUT, read).await.expect("fetch timed out"));
+		// Answered later, so group 0's send time lands after group 1's.
+		moq_clock::sleep(Duration::from_millis(10)).await;
+	}
+	drop((pair, remote, broadcast, publisher, subscriber));
+	got
+}
+
+#[moq_clock::test]
+async fn fetches_alone_accept_descending_send_times() {
+	let mut failures = Vec::new();
+	for version in ["moq-lite-05", "moq-lite-06"] {
+		let got = fetch_only(version).await;
+		if got.iter().any(Result::is_err) {
+			failures.push(format!("{version}: {got:?}"));
+		}
+	}
+	assert!(failures.is_empty(), "{failures:#?}");
+}
