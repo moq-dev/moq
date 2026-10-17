@@ -771,6 +771,8 @@ def ac3_frame(es: bytes, pos: int) -> tuple[int, float]:
     h = es[pos : pos + 6]
     if len(h) < 6 or h[0] != 0x0B or h[1] != 0x77:
         raise Refused(f"no AC-3 sync at ES offset {pos}")
+    if h[5] >> 3 > 16:
+        raise Refused(f"reserved bsid {h[5] >> 3} at ES offset {pos}")
     if h[5] >> 3 > 10:  # bsid 11-16: E-AC-3 (A/52 Annex E)
         if h[4] >> 6 == 3 and (h[4] >> 4) & 0x03 == 3:
             raise Refused(f"E-AC-3 fscod2 reserved at ES offset {pos}")
