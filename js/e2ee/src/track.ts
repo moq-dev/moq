@@ -212,16 +212,20 @@ export class Consumer {
 		const { sequence, timestamp, payload } = datagram;
 		if (this.#window.isDuplicate(sequence)) return { kind: "duplicate", sequence };
 		const iv = this.#datagramKey.admitOpen(sequence, 0, payload.byteLength, MAX_DATAGRAM_PAYLOAD);
+		let plaintext: Uint8Array;
 		try {
-			const plaintext = await this.#datagramKey.decrypt(iv, payload);
-			this.#window.mark(sequence);
-			return { kind: "datagram", datagram: { sequence, timestamp, plaintext } };
+			plaintext = await this.#datagramKey.decrypt(iv, payload);
 		} catch (err) {
+			// A grouped failure during the open still ends this read.
+			this.#terminal.check();
 			// A bad datagram is not grouped failure: the track, its demand, and any parked grouped
 			// read stay up. `exhausted` is this key's own limit.
 			if (err instanceof Failure && err.code === "authentication") return { kind: "authentication", sequence };
 			throw err;
 		}
+		this.#terminal.check();
+		this.#window.mark(sequence);
+		return { kind: "datagram", datagram: { sequence, timestamp, plaintext } };
 	}
 
 	/**

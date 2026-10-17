@@ -331,6 +331,43 @@ test("grouped failure wakes pending reads and releases demand", async () => {
 	expect(p.net.closed.peek()).toBeUndefined();
 });
 
+test("grouped failure during a datagram open rejects the datagram", async () => {
+	const p = await pair("audio");
+	const bad = new NetGroup.Producer(0);
+	p.net.writeGroup(bad);
+	bad.writeFrame({ timestamp: ms(1), payload: await sealed(p, GROUP, 0, 0, "nope", true) });
+	p.net.insertDatagram(0, ms(2), await sealed(p, DATAGRAM, 0, 0, "late"));
+	const forged = await recvGroup(p.consumer);
+
+	// Hold the datagram's WebCrypto open until the grouped failure has ended the track.
+	const subtle = crypto.subtle;
+	const decrypt = subtle.decrypt.bind(subtle);
+	let release!: () => void;
+	const gate = new Promise<void>((resolve) => {
+		release = resolve;
+	});
+	let entered!: () => void;
+	const opening = new Promise<void>((resolve) => {
+		entered = resolve;
+	});
+	subtle.decrypt = async (...args: Parameters<SubtleCrypto["decrypt"]>) => {
+		subtle.decrypt = decrypt;
+		entered();
+		await gate;
+		return decrypt(...args);
+	};
+	try {
+		const datagram = p.consumer.recvDatagram();
+		await opening;
+		expect(await failure(forged.readFrame())).toBe("authentication");
+		release();
+		expect(await failure(datagram)).toBe("authentication");
+	} finally {
+		subtle.decrypt = decrypt;
+		release();
+	}
+});
+
 test("closing the track consumer releases demand while a group is held", async () => {
 	const p = await pair("video");
 	const demand = p.net.demand();
