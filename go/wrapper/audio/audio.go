@@ -29,7 +29,20 @@ type Packet = ffi.MoqAudioPacket
 // EncoderFinish holds the packets Encoder.Finish drains and the padded samples to discard.
 type EncoderFinish = ffi.MoqAudioEncoderFinish
 
-// EncoderOutput configures the codec side: codec, track name, rate, channels, bitrate, and frame duration (0 takes the codec's own frame).
+// Preset is how the encoder trades latency for compression; a nil EncoderOutput.Preset is PresetBalanced.
+type Preset = ffi.MoqAudioPreset
+
+const (
+	// PresetLowLatency packs 10 ms Opus packets, at twice the packet rate.
+	PresetLowLatency = ffi.MoqAudioPresetLowLatency
+	// PresetBalanced packs 20 ms Opus packets, the default.
+	PresetBalanced = ffi.MoqAudioPresetBalanced
+	// PresetQuality favors compression; 20 ms Opus packets today, the same as PresetBalanced.
+	PresetQuality = ffi.MoqAudioPresetQuality
+)
+
+// EncoderOutput configures the codec side: codec, track name, rate, channels, bitrate, frame duration (0 takes the preset's or codec's own frame), and preset.
+// Preset is refused alongside a nonzero FrameDuration.
 type EncoderOutput struct {
 	Codec         Codec
 	Track         *string
@@ -37,6 +50,7 @@ type EncoderOutput struct {
 	Channels      *uint32
 	Bitrate       *uint32
 	FrameDuration time.Duration
+	Preset        *Preset
 }
 
 func (o EncoderOutput) ffi() (ffi.MoqAudioEncoderOutput, error) {
@@ -44,7 +58,7 @@ func (o EncoderOutput) ffi() (ffi.MoqAudioEncoderOutput, error) {
 	if err == nil && frame > math.MaxUint32 {
 		err = fmt.Errorf("audio frame duration %v exceeds %d microseconds", o.FrameDuration, uint32(math.MaxUint32))
 	}
-	return ffi.MoqAudioEncoderOutput{Codec: o.Codec, Track: o.Track, SampleRate: o.SampleRate, Channels: o.Channels, Bitrate: o.Bitrate, FrameDurationUs: uint32(frame)}, err
+	return ffi.MoqAudioEncoderOutput{Codec: o.Codec, Track: o.Track, SampleRate: o.SampleRate, Channels: o.Channels, Bitrate: o.Bitrate, FrameDurationUs: uint32(frame), Preset: o.Preset}, err
 }
 
 // DecoderOutput configures the PCM a Consumer delivers and how stale a group may get before it is skipped.
@@ -147,6 +161,12 @@ func NewEncoder(output EncoderOutput) (*Encoder, error) {
 
 // FrameSize is the samples per channel each Encode call takes.
 func (e *Encoder) FrameSize() (uint64, error) { return e.inner.FrameSize() }
+
+// TrackInit is the OpusHead or AudioSpecificConfig that publishes these packets via media.NewAudioTrackProducer.
+func (e *Encoder) TrackInit() (media.AudioInit, error) { return e.inner.TrackInit() }
+
+// SetBitrate retunes the live encoder in bits per second.
+func (e *Encoder) SetBitrate(value uint64) error { return e.inner.SetBitrate(value) }
 
 // Encode encodes one codec-sized interleaved f32 frame.
 func (e *Encoder) Encode(pcm []float32) (Packet, error) { return e.inner.Encode(pcm) }
