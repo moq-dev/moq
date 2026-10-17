@@ -24,7 +24,7 @@ pub(crate) struct Peer {
 	pub auth: bool,
 
 	/// MoQ Active Count: whether the REQUEST_OK answering SUBSCRIBE_NAMESPACE counts the
-	/// NAMESPACE messages before the subscription is caught up, in both directions.
+	/// NAMESPACE messages before the subscription is synced, in both directions.
 	pub active_count: bool,
 }
 

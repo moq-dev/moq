@@ -16,6 +16,7 @@ import type * as Cluster from "./cluster.ts";
 import { Connection } from "./connection.ts";
 import { ObjectDatagram } from "./datagram.ts";
 import { EndOfTrackProperties, encodeObjectExtensions, type GroupFlags, Group as GroupMessage } from "./object.ts";
+import { Parameters } from "./parameters.ts";
 import type { Properties } from "./properties.ts";
 import {
 	PublishNamespace,
@@ -2134,4 +2135,113 @@ test("an announce consumer closed while waiting on request-ID credit takes no ID
 
 	session.close();
 	void running;
+});
+
+/** Answer the next SUBSCRIBE_NAMESPACE with REQUEST_OK, carrying `activeCount` when given. */
+async function answerCounted(transport: WebTransport, activeCount: number | undefined): Promise<Stream> {
+	const stream = await nextStream(transport);
+	if (!stream) throw new Error("no SUBSCRIBE_NAMESPACE was sent");
+	await stream.reader.u53();
+	await SubscribeNamespace.decode(stream.reader, VERSION);
+	const parameters = new Parameters();
+	parameters.activeCount = activeCount;
+	await stream.writer.u53(RequestOk.id);
+	await new RequestOk({ requestId: undefined, parameters }).encode(stream.writer, VERSION);
+	return stream;
+}
+
+const sessionClosed = (pair: ReturnType<typeof createMockTransportPair>) =>
+	Promise.race([
+		pair.server.closed,
+		new Promise<never>((_resolve, reject) => setTimeout(() => reject(new Error("session stayed up")), STREAM_WAIT)),
+	]);
+
+/** The session closes with PROTOCOL_VIOLATION, not a clean code. */
+async function violationClosed(pair: ReturnType<typeof createMockTransportPair>) {
+	expect((await sessionClosed(pair)).closeCode).toBe(new ProtocolViolation("").code);
+}
+
+const yieldTask = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+/** MoQ Active Count: the consumer syncs once the counted NAMESPACEs are read. */
+test("counted NAMESPACEs sync", async () => {
+	const pair = createMockTransportPair(ALPN.DRAFT_19);
+	const session = new NativeSession(pair.server, VERSION, true);
+	const subscriber = new Subscriber({ session, activeCount: true });
+
+	const announced = subscriber.announced();
+	const subscription = await answerCounted(pair.client, 2);
+	await inlineNamespace(subscription, Path.from("a"));
+	expect(await announced.next()).toMatchObject({ prefix: Path.from("a"), kind: "start" });
+	const b = announced.next();
+	await yieldTask();
+	expect(announced.synced.peek()).toBe(false);
+
+	await inlineNamespace(subscription, Path.from("b"));
+	expect(await b).toMatchObject({ prefix: Path.from("b"), kind: "start" });
+	await yieldTask();
+	// Still handling the last of them.
+	expect(announced.synced.peek()).toBe(false);
+	void announced.next();
+	await yieldTask();
+	expect(announced.synced.peek()).toBe(true);
+	announced.close();
+});
+
+/** Without MoQ Active Count, REQUEST_OK is the best boundary there is. */
+test("an uncounted answer syncs on the OK", async () => {
+	const pair = createMockTransportPair(ALPN.DRAFT_19);
+	const session = new NativeSession(pair.server, VERSION, true);
+	const subscriber = new Subscriber({ session });
+
+	const announced = subscriber.announced();
+	await yieldTask();
+	expect(announced.synced.peek()).toBe(false);
+	await acceptSubscribeNamespace(pair.client);
+	await yieldTask();
+	expect(announced.synced.peek()).toBe(true);
+	announced.close();
+});
+
+/** A count the negotiation did not promise, or a missing one it did, breaks the extension. */
+test("an ACTIVE_COUNT that does not match the negotiation closes the session", async () => {
+	for (const [negotiated, count] of [
+		[true, undefined],
+		[false, 0],
+	] as const) {
+		const pair = createMockTransportPair(ALPN.DRAFT_19);
+		const session = new NativeSession(pair.server, VERSION, true);
+		const subscriber = new Subscriber({ session, quic: pair.server, activeCount: negotiated });
+		const warn = spyOn(console, "warn").mockImplementation(() => void 0);
+		onTestFinished(() => warn.mockRestore());
+
+		subscriber.announced();
+		await answerCounted(pair.client, count);
+		await violationClosed(pair);
+	}
+});
+
+/** A counted set cut short, by a NAMESPACE_DONE or the stream ending, is the peer's fault. */
+test.each(["done", "fin"] as const)("a counted set cut short by %s closes the session", async (cut) => {
+	{
+		const pair = createMockTransportPair(ALPN.DRAFT_19);
+		const session = new NativeSession(pair.server, VERSION, true);
+		const subscriber = new Subscriber({ session, quic: pair.server, activeCount: true });
+		const warn = spyOn(console, "warn").mockImplementation(() => void 0);
+		onTestFinished(() => warn.mockRestore());
+
+		subscriber.announced();
+		const subscription = await answerCounted(pair.client, 2);
+		await inlineNamespace(subscription, Path.from("a"));
+		if (cut === "done") {
+			// The type alone is the violation, so the session may close before the rest is written.
+			await subscription.writer.u53(SubscribeNamespaceEntryDone.id);
+			await new SubscribeNamespaceEntryDone({ suffix: Path.from("a") })
+				.encode(subscription.writer, VERSION)
+				.catch(() => undefined);
+		} else {
+			subscription.writer.close();
+		}
+		await violationClosed(pair);
+	}
 });

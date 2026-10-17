@@ -37,6 +37,16 @@ how a conference room learns who joined, how a player learns a stream came
 online without polling, and how [relay clusters](/bin/relay/cluster) discover
 each other.
 
+Once that first reply is read, the reader has **synced**: a broadcast not
+announced by then is absent rather than late, so a player can say "offline"
+instead of waiting. A relay replies from what it holds now and never waits on
+its own upstreams. moq-lite 05 and later, and moq-transport with the
+[active-count](/draft/moq-active-count) extension, mark exactly where the first
+reply ends. Older versions sync on the peer's answer, or as soon as the
+request is sent, as a best effort. Reading an origin fed by sessions, a reader
+has synced once every current session's first reply is in, so a reconnect
+takes it back until the new reply lands.
+
 An announcement is a **route**: a claim that broadcasts at a path prefix, and
 every path beneath it, can be served. By convention a publisher announces each
 broadcast's exact path, so subscribers enumerate broadcasts by listing routes.
@@ -85,8 +95,9 @@ authorization and hidden names work exactly as without one.
   fails ends instead of resuming, so request the path again.
 - **Another instance restarts.** A newer epoch, or, without one, another route
   winning the path, is announced as a restart. Subscriptions already open stay
-  on the old instance until dropped or its route goes, while new requests get
-  the new one, so a player follows the restart by requesting the path again.
+  on the old instance until dropped or none of its routes remain, which ends
+  them with an error, while new requests get the new one, so a player follows
+  the restart by requesting the path again.
   Held handles can still read their old cached content while a subscription
   on the old instance stays open, but cannot open new epochless requests once
   the restart is delivered. Request the path again for

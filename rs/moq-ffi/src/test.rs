@@ -1054,7 +1054,7 @@ async fn whole_media_frames_require_the_callers_timestamp() {
 	broadcast.close().unwrap();
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn catalog_now_fixes_the_clock_for_later_media() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let catalog = MoqMediaCatalogProducer::new(broadcast.clone()).unwrap();

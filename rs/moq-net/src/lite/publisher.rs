@@ -2597,6 +2597,39 @@ mod announce_test {
 		harness_with(version, None).await
 	}
 
+	/// A relay answers with what it holds now: an upstream still delivering its own
+	/// initial set never delays the ANNOUNCE_OK, so a peer syncs with this relay.
+	#[moq_clock::test]
+	async fn a_silent_upstream_never_delays_the_answer() {
+		let origin = Hop::new(1).unwrap().produce();
+		let _route = origin.announce("cam", crate::origin::Route::default()).unwrap();
+		// An upstream that never answers its announce request.
+		let _silent = origin.clone().upstream().snapshot("");
+
+		let log = Log::default();
+		let writes = log.writes.clone();
+		let consumer = origin.consume();
+		assert!(!consumer.announced().is_synced(), "the relay itself is still syncing");
+		let mut stream = Stream::<SinkSession, Version> {
+			writer: Writer::new(SinkSend::new(log), VERSION),
+			reader: Reader::new(PendingRecv, VERSION),
+		};
+		let _task = moq_clock::sim::spawn(async move {
+			let mut announced = consumer.announced();
+			let self_origin = consumer.hop();
+			TestPublisher::run_announce(&mut stream, &consumer, &mut announced, self_origin, VERSION, None).await
+		});
+		settle().await;
+
+		let mut wire = Wire {
+			writes,
+			cursor: 0,
+			version: VERSION,
+		};
+		assert_eq!(wire.take_ok().active, 1, "answered with the current view");
+		assert_eq!(wire.take_announces().len(), 1);
+	}
+
 	/// [`harness_on`], announcing under `auth`'s grant.
 	async fn harness_with(version: Version, auth: Option<crate::auth::Handle>) -> Harness {
 		let origin = Hop::new(1).unwrap().produce();
