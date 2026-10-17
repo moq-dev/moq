@@ -7598,7 +7598,7 @@ mod tests {
 	/// Drafts 14 and 15 have no update for an advertisement, so a SUBSCRIBE_UPDATE the
 	/// adapter routes onto one changes nothing and leaves it standing until the withdrawal.
 	/// Draft 15 still owes the update an answer: a REQUEST_ERROR naming it.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn a_legacy_update_on_an_advertisement_is_answered() {
 		for version in [Version::Draft14, Version::Draft15] {
 			let path = crate::Path::new("room/host").to_owned();
@@ -7627,7 +7627,7 @@ mod tests {
 			let (tasks, task_set) = crate::util::TaskSet::new();
 			std::mem::forget(task_set);
 			let mut subscriber = Subscriber::new(
-				crate::time::Clock::sim(),
+				crate::time::sim(),
 				session.clone(),
 				origin,
 				Control::new(None, false),

@@ -399,7 +399,7 @@ mod tests {
 	/// On drafts 14-16 an update aimed at a request that applies none, such as a FETCH or
 	/// SUBSCRIBE_NAMESPACE, keeps the request open. Drafts 15 and 16 refuse it with a
 	/// REQUEST_ERROR naming the update, and a later cancellation still ends the request.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn legacy_update_is_answered_without_ending_the_request() {
 		use crate::lite::test_transport::ScriptedSession;
 

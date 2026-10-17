@@ -1965,7 +1965,7 @@ mod tests {
 	/// An update aimed at no open request, such as draft 16's SUBSCRIBE_NAMESPACE riding a
 	/// stream of its own, still gets its one answer on drafts 15 and 16: a REQUEST_ERROR
 	/// naming the update. Draft 14 answers no update.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn an_unroutable_update_is_refused() {
 		use crate::lite::test_transport::{Log, ScriptedSession, SinkSend};
 		use crate::transport::poll::Session as _;
