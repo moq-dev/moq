@@ -321,8 +321,9 @@ struct SessionBytes {
 	/// Bytes recorded here by sessions that have since ended or retagged away.
 	sent: u64,
 	received: u64,
-	/// The sessions recording here, each with its counters as of when it arrived.
-	live: Vec<Arrival>,
+	/// The sessions recording here, keyed by identity so a retag leaves in constant time,
+	/// each with its counters as of when it arrived.
+	live: HashMap<usize, Arrival>,
 }
 
 /// A session recording on a row, and its byte counters when it arrived there.
@@ -334,25 +335,32 @@ struct Arrival {
 }
 
 impl SessionBytes {
+	/// The key a session's arrival lives under. The arrival holds the `Arc`, so no other
+	/// session can reuse the address while it is here.
+	fn key(traffic: &Arc<SessionTraffic>) -> usize {
+		Arc::as_ptr(traffic) as usize
+	}
+
 	/// Count `traffic` here from `(sent, received)` on.
 	fn join(&mut self, traffic: Arc<SessionTraffic>, (sent, received): (u64, u64)) {
-		self.live.push(Arrival {
-			traffic,
-			sent,
-			received,
-		});
+		self.live.insert(
+			Self::key(&traffic),
+			Arrival {
+				traffic,
+				sent,
+				received,
+			},
+		);
 	}
 
 	/// Stop counting `traffic` here, keeping what it recorded so far, and return the
 	/// counters at that cut: a concurrent write lands on one side of the single load.
 	fn leave(&mut self, traffic: &Arc<SessionTraffic>) -> (u64, u64) {
 		let (sent, received) = traffic.load();
-		let at = self
+		let arrival = self
 			.live
-			.iter()
-			.position(|arrival| Arc::ptr_eq(&arrival.traffic, traffic))
+			.remove(&Self::key(traffic))
 			.expect("a session is live on its current row");
-		let arrival = self.live.swap_remove(at);
 		self.sent += sent - arrival.sent;
 		self.received += received - arrival.received;
 		(sent, received)
@@ -363,7 +371,7 @@ impl SessionBytes {
 	fn read(&mut self) -> (u64, u64) {
 		let Self { sent, received, live } = self;
 		let (mut live_sent, mut live_received) = (0, 0);
-		live.retain_mut(|arrival| {
+		live.retain(|_, arrival| {
 			// Unique means the session and every meter it handed out have dropped.
 			let ended = Arc::get_mut(&mut arrival.traffic).is_some();
 			let (now_sent, now_received) = arrival.traffic.load();
