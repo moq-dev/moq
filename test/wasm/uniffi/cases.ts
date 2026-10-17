@@ -11,10 +11,12 @@ import {
 	MoqClient,
 	MoqClientConfig,
 	MoqClientTls,
+	type MoqGroupConsumer,
 	MoqRoute,
 	MoqTrackInfo,
 	type MoqGroupConsumerLike,
 	type MoqSessionLike,
+	type MoqTrackConsumer,
 	uniffiInitAsync,
 } from "./dist/index.ts";
 
@@ -154,7 +156,8 @@ const local: Record<string, Case> = {
 		await within(demand.used(), 1000, "demand.used");
 		const abort = new AbortController();
 		const read = consumer.recvGroup({ signal: abort.signal }).catch(() => undefined);
-		consumer.uniffiDestroy();
+		// The generated `*Like` return types omit uniffiDestroy; only the class declares it.
+		(consumer as MoqTrackConsumer).uniffiDestroy();
 		await sleep(20);
 		const heldByFuture = demand.isUsed();
 		abort.abort();
@@ -169,7 +172,7 @@ const local: Record<string, Case> = {
 		// call outlives the handle and cancel() is the explicit way to end it.
 		const { group, consumer } = localGroup();
 		const read = consumer.readFrame();
-		consumer.uniffiDestroy();
+		(consumer as MoqGroupConsumer).uniffiDestroy();
 		if (!(await pending(read))) throw new Error("free settled the pending read");
 		group.writeFrame({ payload: payload(2), timestampUs: 0n });
 		const frame = await within(read, 1000, "read after free");

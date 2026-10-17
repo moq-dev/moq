@@ -13,6 +13,12 @@ out="$target/test/wasm-uniffi"
 src="$out/src"
 ubrn_version=0.31.0-6
 
+# Skip the whole build when neither the commit nor the patch changed since the last one.
+stamp="$(git -C "$root" rev-parse HEAD) $(sha256sum <"$dir/pin.patch") $ubrn_version"
+if [[ -f "$dir/dist/moq_ffi.wasm" && "$(cat "$out/stamp" 2>/dev/null)" == "$stamp" ]]; then
+    exit 0
+fi
+
 ubrn="$out/tools/bin/uniffi-bindgen-react-native"
 [[ -x "$ubrn" ]] ||
     cargo install --locked --quiet --root "$out/tools" --git https://github.com/jhugman/uniffi-bindgen-react-native \
@@ -45,3 +51,4 @@ rm -rf "$dir/dist"
 # dev shell's CLI does as long as the pin leaves it alone.
 (cd "$out" && CARGO_TARGET_DIR="$out/cargo" "$ubrn" build wasm2 --config ubrn.config.yaml --profile wasm-release \
     --no-wasm-build >/dev/null)
+echo "$stamp" >"$out/stamp"

@@ -2,6 +2,31 @@ import { Milli } from "@moq/clock";
 import type * as Moq from "@moq/net";
 import type * as Wasm from "@moq/wasm";
 import { type Sample, verify } from "./fixture.ts";
+import type { Uniffi } from "./uniffi.ts";
+
+/** The relay's self-signed certificate hash, and its URL rewritten for WebTransport. */
+async function pin(relay: string): Promise<{ url: URL; hex: string }> {
+	const url = new URL(relay);
+	const response = await fetch(new URL("/certificate.sha256", url));
+	if (!response.ok) throw new Error(`certificate HTTP ${response.status}`);
+	const hex = (await response.text()).trim();
+	if (!/^[a-fA-F0-9]{64}$/.test(hex)) throw new Error("malformed certificate hash");
+	url.protocol = "https:";
+	return { url, hex };
+}
+
+/** Record the next instantiated module's memory; ubrn's player keeps its instance private. */
+function captureMemory(): () => WebAssembly.Memory | undefined {
+	let memory: WebAssembly.Memory | undefined;
+	const original = WebAssembly.instantiate;
+	WebAssembly.instantiate = (async (...args: Parameters<typeof original>) => {
+		const result = (await original(...args)) as WebAssembly.Instance | WebAssembly.WebAssemblyInstantiatedSource;
+		const instance = result instanceof WebAssembly.Instance ? result : result.instance;
+		memory ??= Object.values(instance.exports).find((value) => value instanceof WebAssembly.Memory);
+		return result;
+	}) as typeof original;
+	return () => memory;
+}
 
 async function run(config: Sample) {
 	const start = performance.now();
@@ -81,7 +106,7 @@ async function run(config: Sample) {
 					}),
 				);
 			};
-		} else {
+		} else if (config.backend === "wasm") {
 			if (config.transport !== "webtransport")
 				throw new Error("current WASM bindings have no WebSocket fallback");
 			const wasm = (await import(config.module)) as typeof Wasm;
@@ -89,13 +114,8 @@ async function run(config: Sample) {
 			memory = exports.memory;
 			wasm.setup();
 			startup = performance.now() - start;
-			const url = new URL(config.url);
-			const response = await fetch(new URL("/certificate.sha256", url));
-			if (!response.ok) throw new Error(`certificate HTTP ${response.status}`);
-			const hex = (await response.text()).trim();
-			if (!/^[a-fA-F0-9]{64}$/.test(hex)) throw new Error("malformed certificate hash");
+			const { url, hex } = await pin(config.url);
 			const hash = Uint8Array.from(hex.match(/../g) ?? [], (byte) => Number.parseInt(byte, 16));
-			url.protocol = "https:";
 			read = async () => {
 				const session = await wasm.Session.connectWithHashes(url.toString(), [hash]);
 				if (session.version() !== config.version)
@@ -124,12 +144,60 @@ async function run(config: Sample) {
 					}),
 				);
 			};
+		} else {
+			if (config.transport !== "webtransport") throw new Error("moq-ffi's wasm client has no WebSocket fallback");
+			const memoryOf = captureMemory();
+			const uniffi = (await import(config.module)) as Uniffi;
+			await uniffi.uniffiInitAsync(new URL("uniffi/moq_ffi.wasm", config.module));
+			memory = memoryOf();
+			startup = performance.now() - start;
+			const { url, hex } = await pin(config.url);
+			read = async () => {
+				const client = new uniffi.MoqClient(
+					uniffi.MoqClientConfig.create({
+						// moq-ffi reports no negotiated version, so offering only the expected one checks it.
+						versions: [config.version],
+						tls: uniffi.MoqClientTls.create({ fingerprints: [hex] }),
+					}),
+				);
+				const session = await client.connect(url.toString());
+				disposers.push(() => session.cancel(0));
+				await Promise.all(
+					Array.from({ length: config.publishers }, async (_, publisher) => {
+						const broadcast = await session
+							.consume()
+							.announcedBroadcast(`${config.id}/${publisher}`)
+							.available();
+						const track = await broadcast.subscribeTrack("data", undefined);
+						disposers.push(() => track.cancel());
+						const group = await track.recvGroup();
+						if (!group || group.sequence() !== BigInt(config.sequence))
+							throw new Error("incorrect UniFFI group sequence");
+						try {
+							for (let frame = 0; frame < config.frames; frame++) {
+								const got = await group.readFrame();
+								if (
+									!got ||
+									(config.version === "moq-lite-02"
+										? got.timestampUs !== undefined
+										: got.timestampUs !== BigInt(frame * 1000))
+								)
+									throw new Error(`incorrect UniFFI frame timestamp ${frame}`);
+								check(new Uint8Array(got.payload), frame);
+							}
+							if (await group.readFrame()) throw new Error("unexpected extra UniFFI frame");
+						} finally {
+							group.cancel();
+						}
+					}),
+				);
+			};
 		}
 		const ready = performance.now();
 		const memoryBefore = memory?.buffer.byteLength;
 		await Promise.all(Array.from({ length: config.subscribers }, (_, subscriber) => read(subscriber)));
 		if (received !== frames) throw new Error(`received ${received} frames, expected ${frames}`);
-		if (config.grow && config.backend === "wasm" && !grew) throw new Error("memory-growth case did not run");
+		if (config.grow && config.backend !== "js" && !grew) throw new Error("memory-growth case did not run");
 		return {
 			backend: config.backend,
 			transport: config.transport,
@@ -145,9 +213,9 @@ async function run(config: Sample) {
 				timestamp:
 					config.version === "moq-lite-02"
 						? "verified absent: this wire version carries none"
-						: config.backend === "js"
-							? "verified"
-							: "unavailable: payload-only binding",
+						: config.backend === "wasm"
+							? "unavailable: payload-only binding"
+							: "verified",
 			},
 		};
 	} finally {

@@ -11,7 +11,7 @@ export interface Workload {
 }
 
 export interface Sample extends Workload {
-	backend: "js" | "wasm";
+	backend: "js" | "wasm" | "uniffi";
 	transport: "webtransport" | "websocket";
 	module: string;
 	grow: boolean;
