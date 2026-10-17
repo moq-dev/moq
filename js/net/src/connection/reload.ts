@@ -598,10 +598,17 @@ export class Reload {
 		const pump = new Effect();
 		pump.run((effect) => {
 			const conn = effect.get(this.established);
-			if (!conn) return;
+			if (!conn) {
+				// The same hold as a consume origin's: behind while enabled with no session.
+				if (effect.get(this.enabled)) producer.behind();
+				else producer.caughtUp();
+				return;
+			}
 
 			const upstream = conn.announced(scope, options);
 			effect.cleanup(() => upstream.close());
+			// Caught up when the session's stream is: the pump has appended everything it owed by then.
+			effect.subscribe(upstream.caughtUp, (caughtUp) => (caughtUp ? producer.caughtUp() : producer.behind()));
 
 			// Track what this connection announced so we can retract it if the connection
 			// drops; the last event rides along for the retraction.

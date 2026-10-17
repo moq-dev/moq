@@ -293,10 +293,17 @@ export class Connection {
 		// until the whole handle closes.
 		const stop = this.#signals.run((effect) => {
 			const origin = effect.get(this.#origin);
-			if (!origin) return;
+			if (!origin) {
+				// Like a reconnecting loop's origin: behind while enabled with nothing to deliver.
+				if (effect.get(this.enabled)) producer.behind();
+				else producer.caughtUp();
+				return;
+			}
 
 			const upstream = origin.announced(scope, options);
 			effect.cleanup(() => upstream.close());
+			// Caught up when the origin is: the pump has appended everything it owed by then.
+			effect.subscribe(upstream.caughtUp, (caughtUp) => (caughtUp ? producer.caughtUp() : producer.behind()));
 
 			// Track what this origin announced so a URL switch retracts it; the last
 			// event rides along for the retraction.

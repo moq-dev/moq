@@ -42,6 +42,9 @@ class FakeSession {
 	 */
 	readonly consumed = new Map<Path.Valid, BroadcastProducer[]>();
 
+	/** Whether each request is caught up as it opens, as one with no initial set to wait for is. */
+	caughtUpAtOnce = false;
+
 	closed: Promise<Error | null>;
 	#die!: (reason: Error | null) => void;
 
@@ -55,6 +58,7 @@ class FakeSession {
 	announced(scope: Path.Pattern = Path.Pattern.all(), options?: Announce.Options): Announce.Consumer {
 		const stream = new Announce.Producer();
 		this.requests.push({ scope: scope.text, hidden: options?.hidden, stream });
+		if (this.caughtUpAtOnce) stream.caughtUp();
 		return stream.consume();
 	}
 
@@ -652,5 +656,22 @@ test("a session ending before its initial set lands stops holding the watcher", 
 	expect(watch.caughtUp.peek()).toBe(true);
 
 	watch.close();
+	origin.close();
+});
+
+test("a request caught up as it opens releases the watcher", async () => {
+	const origin = new OriginProducer();
+	const session = new FakeSession();
+	session.caughtUpAtOnce = true;
+	forwardAnnounced(session.session, origin);
+
+	const watch = origin.announced();
+	record(watch);
+	await settle();
+	expect(session.requests).toHaveLength(1);
+	expect(watch.caughtUp.peek()).toBe(true);
+
+	watch.close();
+	session.die();
 	origin.close();
 });

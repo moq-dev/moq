@@ -608,7 +608,13 @@ test("announced accepts a non-prefix scope before any session exists", () => {
  * a reconnect takes it back until the next session's set lands.
  */
 test("a watcher catches up with the server's initial set, and again after a reconnect", async () => {
-	for (const alpn of [Lite.ALPN_06, IetfALPN.DRAFT_19]) {
+	// Through the consume origin, and through the handle's own stream without one.
+	for (const [alpn, viaOrigin] of [
+		[Lite.ALPN_06, true],
+		[IetfALPN.DRAFT_19, true],
+		[Lite.ALPN_06, false],
+		[IetfALPN.DRAFT_19, false],
+	] as const) {
 		const original = globalThis.WebTransport;
 		const url = new URL("https://example.com/");
 
@@ -630,9 +636,9 @@ test("a watcher catches up with the server's initial set, and again after a reco
 			url,
 			websocket: { enabled: false },
 			delay: { initial: Milli(10), multiplier: 1, max: Milli(10) },
-			consume: clientOrigin,
+			consume: viaOrigin ? clientOrigin : undefined,
 		});
-		const watching = clientOrigin.announced();
+		const watching = viaOrigin ? clientOrigin.announced() : reload.announced();
 		const seen = new Set<string>();
 		void (async () => {
 			for await (const event of watching) {

@@ -171,6 +171,8 @@ export function forwardAnnounced(conn: Established, origin: OriginProducer): voi
 		const caughtUp = interest.announced.caughtUp.subscribe((caughtUp) => {
 			if (caughtUp) snapshot();
 		});
+		// A request with no initial set to wait for is caught up before the listener exists.
+		if (interest.announced.caughtUp.peek()) snapshot();
 
 		void (async () => {
 			let failure: unknown;
