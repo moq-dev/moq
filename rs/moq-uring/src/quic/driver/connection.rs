@@ -168,18 +168,6 @@ impl Inner {
 		state.fail(err);
 	}
 
-	/// Fail the connection because its peer has no route, closing it so the
-	/// driver still drains it out of the endpoint.
-	pub(crate) fn unreachable(&self, err: &std::io::Error) {
-		self.conn
-			.borrow_mut()
-			.close(moq_clock::Instant::now(), 0u32.into(), Bytes::new());
-		self.state.borrow_mut().fail(Error::Transport {
-			code: moq_quic::TransportErrorCode::NO_VIABLE_PATH.into(),
-			reason: err.to_string(),
-		});
-	}
-
 	/// Park `waiter` until stream `id` is writable again.
 	pub(crate) fn park_writable(&self, id: StreamId, waiter: &kio::Waiter) {
 		let mut state = self.state.borrow_mut();
