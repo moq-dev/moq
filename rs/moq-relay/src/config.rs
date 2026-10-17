@@ -1351,12 +1351,12 @@ uid = [1001]
 			},
 			Case {
 				name: "declared-default-true-false-from-file",
-				toml: "[runtime]\npin = false\n",
+				toml: "[web]\nws = false\n",
 				env: &[],
 				cli: &[],
-				key: "runtime.pin",
-				check: |config| assert!(!config.runtime.pin, "file false must beat a declared true default"),
-				source: "pin",
+				key: "web.ws",
+				check: |config| assert!(!config.web.ws, "file false must beat a declared true default"),
+				source: "ws",
 			},
 			Case {
 				name: "optional-with-default-from-file",

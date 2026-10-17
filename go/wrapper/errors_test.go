@@ -88,6 +88,7 @@ func TestErrorSentinels(t *testing.T) {
 		{"Codec", ffi.NewMoqErrorCodec(""), moq.ErrCodec},
 		{"Unauthorized", ffi.NewMoqErrorUnauthorized(), moq.ErrUnauthorized},
 		{"Forbidden", ffi.NewMoqErrorForbidden(), moq.ErrForbidden},
+		{"Expired", ffi.NewMoqErrorExpired(), moq.ErrExpired},
 		{"NotFound", ffi.NewMoqErrorNotFound(), moq.ErrNotFound},
 		{"Unsupported", ffi.NewMoqErrorUnsupported(), moq.ErrUnsupported},
 		{"InvalidRoute", ffi.NewMoqErrorInvalidRoute(""), moq.ErrInvalidRoute},
@@ -115,5 +116,17 @@ func TestSessionLimitProtocolKind(t *testing.T) {
 	details, ok := moq.ProtocolError(err)
 	if !ok || details.Kind != moq.ProtocolKindTooManyRequests || moq.IsAuthError(err) {
 		t.Fatalf("session limit lost its kind: %+v, %v", details, err)
+	}
+}
+
+func TestExpiredIsAuthError(t *testing.T) {
+	err := ffi.NewMoqErrorProtocol(ffi.MoqProtocolError{
+		Scope: moq.ErrorScopeSession, Code: 0x18, Kind: moq.ProtocolKindExpired, Message: "expired",
+	})
+	if !moq.IsAuthError(err) {
+		t.Fatalf("expired credentials are not an auth error: %v", err)
+	}
+	if !moq.IsAuthError(ffi.NewMoqErrorExpired()) {
+		t.Fatal("an expired request token is not an auth error")
 	}
 }

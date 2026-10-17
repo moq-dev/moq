@@ -78,9 +78,6 @@ web-async = { workspace = true }
 web-transport-trait = { workspace = true }
 web-transport-wasm = { workspace = true }
 
-[build-dependencies]
-uniffi = { workspace = true, features = ["build"] }
-
 [dev-dependencies]
 # One non-codec test blocks on a future; the main dep is `video`-only.
 pollster = { workspace = true }
