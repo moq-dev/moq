@@ -72,6 +72,9 @@ class GroupState {
 	// When the group joined the track this mirror belongs to, at this hop: the wall clock a
 	// superseded predecessor ages from. Per track, since one group can join several.
 	arrived = Instant.zero;
+	// Called with the frame count on every write, synchronously: a track's largest must not
+	// trail a write that already returned, as a batched `total` notification would.
+	progress = new Set<(total: number) => void>();
 
 	constructor(sequence: number) {
 		this.sequence = sequence;
@@ -94,6 +97,7 @@ function appendFrame(state: GroupState, frame: Frame) {
 	});
 
 	state.total.update((total) => total + 1);
+	for (const fn of state.progress) fn(state.total.peek());
 }
 
 let makeDemand: (sequence: number, used: Getter<boolean>, state: GroupState) => Demand;
@@ -167,8 +171,10 @@ export class Producer {
 
 	static {
 		hooks.groupProgress = (group, fn) => {
-			fn(group.#state.total.peek());
-			return group.#state.total.subscribe(fn);
+			const state = group.#state;
+			fn(state.total.peek());
+			state.progress.add(fn);
+			return () => state.progress.delete(fn);
 		};
 		hooks.bindGroupTimed = (group, timed) => {
 			const state = group.#state;
