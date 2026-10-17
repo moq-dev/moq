@@ -14,7 +14,7 @@ GitHub's 1 GB guidance within weeks.
 
 ## Plan
 
-Decided by the [Go mirror delivery](https://github.com/moq-dev/moq/pulls?q=head%3Aquest%2Fm2%2Fgo-mirror-delivery)
+Recommended by the [Go mirror delivery](https://github.com/moq-dev/moq/pull/5853)
 evaluation, which rejected the alternatives:
 
 - Orphan or squashed mirror history still stores every tagged release, unless
