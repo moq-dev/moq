@@ -31,6 +31,12 @@ the same outcome. The clean end was chosen for a local reader stalled at a
 group's tail; it goes, along with `expired_truncates`' distinction. Readers
 already treat `Old` like a latency skip.
 
-Add a regression test that fails without the fix: an upstream group stalls
-past the budget after its last frame, and the downstream hop holds no
-finished group for it. Wire: no new codes; lite already resets with `Old`.
+Add regression tests that fail without the fix:
+
+- A Rust model test in `rs/moq-net/src/model/group.rs` and its JS twin for
+  `js/net/src/group.ts`: a local reader that has taken every frame of an
+  unfinished group receives `Old` when the group expires.
+- An upstream group stalls past the budget after its last frame, and the
+  downstream hop holds no finished group for it.
+
+Wire: no new codes; lite already resets with `Old`.

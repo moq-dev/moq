@@ -30,9 +30,16 @@ The two signals mean different things, so each maps on its own:
   other unit requires both fields, so a track missing one fails the import
   as malformed.
 
-When the container and the SPS both signal an aspect and disagree, propose a
-precedence in the PR. Recommendation: the container wins, as FFmpeg's
-`av_guess_sample_aspect_ratio` prefers the stream's ratio over the codec's.
+When the container and the SPS both signal an aspect and disagree, the
+precedence is open for the maintainer. #5846 ordered colour bitstream first:
+`rs/moq-mux/src/codec/color.rs` resolves the codec's colour and fills only
+its gaps from the container, logging a conflict, because a muxer may get the
+box wrong. FFmpeg's `av_guess_sample_aspect_ratio` does the opposite for
+aspect, since a container aspect is often a deliberate remux fix.
+Recommendation: match colour, so the SPS wins and the container fills an
+SPS that signals no aspect. Whichever wins, add a conflicting-signal test
+through an avc1 or hvc1 entry that carries both, including a 1:1 `pasp`
+against a non-square SPS.
 
 Tests, through both importers, including an AV1 track and a headerless avc3
 initializer:
