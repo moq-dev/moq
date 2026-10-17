@@ -760,16 +760,14 @@ impl<E: CatalogExt> Producer<E> {
 		// Snapshot under the lock and emit outside it, since emitting writes to the catalog tracks.
 		let catalog = {
 			let mut state = take(&self.current);
-			let lists_track = state.lists_track();
-			let r = &mut state.reservations;
-			if r.published || r.reservers != 0 {
-				return;
-			}
+			let r = &state.reservations;
 			// Nothing was staged (e.g. every stream was ignored): stay unpublished so a later change
-			// still triggers the first emit, rather than publishing an empty catalog now.
-			if !r.pending || !lists_track {
+			// still triggers the first emit, rather than publishing an empty catalog now. The track
+			// scan runs last, so releasing each of many reservations stays linear.
+			if r.published || r.reservers != 0 || !r.pending || !state.lists_track() {
 				return;
 			}
+			let r = &mut state.reservations;
 			r.pending = false;
 			r.published = true;
 			// A snapshot on the wire is a mapping a reader may have copied.
@@ -1042,12 +1040,13 @@ impl<E: CatalogExt> Guard<'_, E> {
 		}
 
 		{
-			let lists_track = self.state.lists_track();
-			let r = &mut self.state.reservations;
 			// Withhold every emit while still buffering the initial reserved set, or until a reserved
 			// catalog names a track; the mutation stays in `current` and `pending` marks it for the
-			// flush once the gate opens.
-			if !r.published && (r.reservers != 0 || (r.reserved && !lists_track)) {
+			// flush once the gate opens. The track scan runs last, so a published catalog skips it.
+			let r = &self.state.reservations;
+			let withhold = !r.published && (r.reservers != 0 || (r.reserved && !self.state.lists_track()));
+			let r = &mut self.state.reservations;
+			if withhold {
 				r.pending = true;
 				return Ok(());
 			}
