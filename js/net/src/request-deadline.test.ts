@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { Manual, Milli, Nano } from "@moq/clock";
-import { StreamCode, StreamError } from "./error.ts";
+import { SessionCode, SessionError, StreamCode, StreamError } from "./error.ts";
 import { HopSchema } from "./hop.ts";
 import { NativeSession } from "./ietf/adapter.ts";
 import { Publisher } from "./ietf/publisher.ts";
@@ -258,6 +258,33 @@ for (const protocol of ["lite", "ietf-17"] as const) {
 			broadcast.close();
 			subscriber.close();
 			restore();
+		}
+	});
+}
+
+for (const protocol of ["lite", "ietf-17"] as const) {
+	test(`${protocol}: a create the closed session fails reports the session`, async () => {
+		const quic = {
+			closed: Promise.resolve({ closeCode: SessionCode.Unauthorized, reason: "bye" }),
+			createBidirectionalStream: () =>
+				Promise.reject(
+					Object.assign(new Error("session closed"), { source: "session", streamErrorCode: null }),
+				),
+		} as unknown as WebTransport;
+		const subscriber =
+			protocol === "lite"
+				? new LiteSubscriber(quic, Lite.DRAFT_07, HopSchema.parse(1n))
+				: new IetfSubscriber({ quic, session: new NativeSession(quic, Ietf.DRAFT_17, true) });
+		const broadcast = subscriber.consume(Path.from("room"));
+		const track = broadcast.track("video").subscribe();
+		try {
+			const failure = await track.closed;
+			expect(failure).toBeInstanceOf(SessionError);
+			expect((failure as SessionError).code).toBe(SessionCode.Unauthorized);
+		} finally {
+			track.close();
+			broadcast.close();
+			subscriber.close();
 		}
 	});
 }

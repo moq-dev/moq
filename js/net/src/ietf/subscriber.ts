@@ -25,8 +25,8 @@ import { Tail } from "../tail.ts";
 import type { Timescale, Timestamp } from "../time.ts";
 import type * as track from "../track.ts";
 import { untilAborted } from "../util/abort.ts";
+import { Deadline, requestOptions } from "../util/deadline.ts";
 import { LIMITS, type Limits, SlotMap, Slots } from "../util/limits.ts";
-import { Request, requestOptions } from "../util/request.ts";
 import { overrideBroadcastWire, wireOf } from "../wire.ts";
 import type { Session } from "./adapter.ts";
 import { DuplicateTrackAlias, RetiredTrackAlias, TrackAliases } from "./aliases.ts";
@@ -437,7 +437,7 @@ export class Subscriber {
 
 		try {
 			// v16: use a real bidi stream (not virtual control stream)
-			const deadline = new Request();
+			const deadline = new Deadline();
 			const stream = await deadline.wait(
 				deadline.open(
 					version === Version.DRAFT_16 && this.#session.openNativeBi
@@ -669,7 +669,7 @@ export class Subscriber {
 		// flows back via `state` so the timeout path can clean up the stream
 		// and any registration if setup eventually finishes.
 		const state: SubscribeSetupState = {};
-		const deadline = new Request();
+		const deadline = new Deadline();
 		const setup = this.#openSubscribe(state, broadcast, request, subscription, requestId, deadline);
 
 		// The publisher can be serving before it answers, so waiting only on the response
@@ -885,7 +885,7 @@ export class Subscriber {
 		request: track.Request,
 		subscription: Subscription,
 		requestId: bigint,
-		deadline: Request,
+		deadline: Deadline,
 	): Promise<{ stream: Stream; alias: bigint }> {
 		const version = this.#session.version;
 

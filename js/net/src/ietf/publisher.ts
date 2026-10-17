@@ -26,8 +26,8 @@ import { type Stream, Writer } from "../stream.ts";
 import { Timescale } from "../time.ts";
 import type { Location as TrackLocation, Subscriber as TrackSubscriber } from "../track.ts";
 import { untilAborted } from "../util/abort.ts";
+import { Deadline, REQUEST_TIMEOUT_MS, requestOptions } from "../util/deadline.ts";
 import { LIMITS, type Limits, Slots } from "../util/limits.ts";
-import { REQUEST_TIMEOUT_MS, Request, requestOptions } from "../util/request.ts";
 import { TimeoutError, withTimeout } from "../util/timeout.ts";
 import * as Varint from "../varint.ts";
 import { type Advertised, type Advertisements, sameInstance, wireOf } from "../wire.ts";
@@ -1560,7 +1560,7 @@ export class Publisher {
 		// leaving this one namespace unadvertised.
 		let request: Stream | undefined;
 		try {
-			const deadline = new Request();
+			const deadline = new Deadline();
 			const answer = await deadline.wait(
 				(async (): Promise<Answer> => {
 					request = await deadline.open(this.#session.openBi(requestOptions));

@@ -8,8 +8,16 @@ export const requestOptions = { timeout: null, waitUntilAvailable: false } satis
 /** Milliseconds allowed from a request create to its first answer. @internal */
 export const REQUEST_TIMEOUT_MS = 10_000;
 
+// A closed session fails its creates with a session-sourced WebTransportError, or with an
+// InvalidStateError once it has closed. Those report the session's failure, not missing credit.
+function sessionFailure(err: unknown): boolean {
+	if (typeof err !== "object" || err === null) return false;
+	const { source, name } = err as { source?: unknown; name?: unknown };
+	return source === "session" || name === "InvalidStateError";
+}
+
 /** One fatal deadline for a request, including every stream its setup creates. @internal */
-export class Request {
+export class Deadline {
 	#opening = false;
 	#streams: Stream[] = [];
 	#failure?: Error;
@@ -21,6 +29,7 @@ export class Request {
 		try {
 			stream = await opening;
 		} catch (cause) {
+			if (sessionFailure(cause)) throw cause;
 			throw new NoStreamCredit({ cause });
 		} finally {
 			this.#opening = false;
@@ -39,7 +48,7 @@ export class Request {
 			return await withTimeout(
 				answer,
 				Nano.fromMilli(Milli(REQUEST_TIMEOUT_MS)),
-				"request timed out after 10000ms",
+				`request timed out after ${REQUEST_TIMEOUT_MS}ms`,
 			);
 		} catch (cause) {
 			this.#failure =

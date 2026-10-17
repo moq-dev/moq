@@ -19,8 +19,8 @@ import { TAIL_GRACE_MS, Tail } from "../tail.ts";
 import * as Time from "../time.ts";
 import type * as track from "../track.ts";
 import { untilAborted } from "../util/abort.ts";
+import { Deadline, REQUEST_TIMEOUT_MS, requestOptions } from "../util/deadline.ts";
 import { LIMITS, type Limits, SlotMap, Slots } from "../util/limits.ts";
-import { REQUEST_TIMEOUT_MS, Request, requestOptions } from "../util/request.ts";
 import { overrideBroadcastWire, wireOf } from "../wire.ts";
 import {
 	AnnounceHistory,
@@ -267,7 +267,7 @@ export class Subscriber {
 		// to reset the stream, not just close our side of it.
 		let stream: Stream;
 		try {
-			const deadline = new Request();
+			const deadline = new Deadline();
 			stream = await deadline.wait(
 				deadline.open(Stream.open(this.#quic, { version: this.version, ...requestOptions })),
 			);
@@ -693,7 +693,7 @@ export class Subscriber {
 		};
 		valid?.addEventListener("abort", retire);
 		if (valid?.aborted) retire();
-		const deadline = new Request();
+		const deadline = new Deadline();
 		const setup = this.#openSubscribe(state, msg, request, id, timescale, deadline);
 
 		let opened: { stream: Stream; entry: SubscribeEntry };
@@ -804,7 +804,7 @@ export class Subscriber {
 		request: track.Request,
 		id: bigint,
 		timescale: Signal<number | undefined>,
-		deadline: Request,
+		deadline: Deadline,
 	): Promise<{ stream: Stream; entry: SubscribeEntry }> {
 		state.cancel.signal.throwIfAborted();
 		let producer: track.Producer;
@@ -875,8 +875,8 @@ export class Subscriber {
 		broadcast: Path.Valid,
 		epoch: Epoch.Valid | undefined,
 		track: string,
-		signal?: AbortSignal,
-		deadline?: Request,
+		signal: AbortSignal | undefined,
+		deadline: Deadline,
 	): Promise<{ info: TrackInfo; stream: Stream }> {
 		return this.#exchange(
 			{ version: this.version },
@@ -897,13 +897,9 @@ export class Subscriber {
 	async #exchange<T>(
 		options: OpenOptions,
 		run: (stream: Stream) => Promise<T>,
-		signal?: AbortSignal,
-		deadline?: Request,
+		signal: AbortSignal | undefined,
+		deadline: Deadline,
 	): Promise<T> {
-		if (!deadline) {
-			const request = new Request();
-			return request.wait(this.#exchange(options, run, signal, request));
-		}
 		const closed = signal ? AbortSignal.any([this.#closed.signal, signal]) : this.#closed.signal;
 		closed.throwIfAborted();
 		const opening = deadline.open(Stream.open(this.#quic, { ...options, ...requestOptions }));
@@ -956,7 +952,8 @@ export class Subscriber {
 		if (!supportsTrackStream(this.version)) {
 			throw new Error("track info requires moq-lite-05 or newer");
 		}
-		const { info, stream } = await this.#trackInfo(broadcast, epoch, track, hold);
+		const deadline = new Deadline();
+		const { info, stream } = await deadline.wait(this.#trackInfo(broadcast, epoch, track, hold, deadline));
 		if (hold && !hold.aborted) hold.addEventListener("abort", () => stream.close(), { once: true });
 		else stream.close();
 		return this.#toModelInfo(info);
@@ -1047,7 +1044,7 @@ export class Subscriber {
 			// Lite has no FETCH_OK, so a publisher that never answers would hold the setup forever.
 			// Subscriber.close() closing the group releases every caller at any stage, and resets
 			// the streams the setup opened.
-			const deadline = new Request();
+			const deadline = new Deadline();
 			const setup = deadline.wait(
 				this.#fetchSetup(broadcast, consumed, track, sequence, priority, group, deadline, maxDelay),
 			);
@@ -1079,7 +1076,7 @@ export class Subscriber {
 		sequence: number,
 		priority: number,
 		group: netGroup.Producer,
-		deadline: Request,
+		deadline: Deadline,
 		maxDelay?: Milli,
 	): Promise<{ stream: Stream; info: TrackInfo }> {
 		const { epoch, valid } = consumed;
