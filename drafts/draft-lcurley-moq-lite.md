@@ -600,6 +600,7 @@ The subscriber's `Group Order` determines which Group within the Track is transm
 
 A publisher SHOULD attempt to transmit streams based on these rules.
 This depends on the QUIC implementation and it may not be possible to get fine-grained control.
+A publisher SHOULD order a [datagram](#datagrams) among the subscription's streams as if it were its Group's stream, ahead of that stream when both exist.
 
 ### Priority
 The `Subscriber Priority` is scoped to the connection and MAY change over the life of the subscription via SUBSCRIBE_UPDATE.
@@ -729,7 +730,7 @@ A publisher sends a datagram to a subscription only when its Group Sequence is i
 A datagram is never cached or retransmitted, and FETCH never returns one.
 A publisher MAY send a new subscription the datagrams still in a short send buffer, so a subscriber cannot assume a datagram was sent after it subscribed.
 A publisher that knows a FETCH names a group delivered only as a datagram resets the stream with NOT_FETCHABLE; otherwise it answers as for a group that does not exist, with NOT_FOUND.
-A publisher SHOULD only send a datagram if the congestion controller can transmit it immediately.
+A publisher SHOULD drop a datagram rather than block when the transport has no room for it.
 There is no separate subscription for datagram delivery: datagrams are routed to existing subscriptions via the Subscribe ID, and a subscriber receiving the same group via both a stream and a datagram MUST deduplicate by group sequence.
 
 Each datagram body has the following encoding (note: there is no message length prefix; the QUIC datagram boundary delimits the payload):
@@ -1590,6 +1591,7 @@ The `Message Length` describes the payload size on the wire.
 - SUBSCRIBE_OK `Group` names where delivery starts when the subscription resolves, which need not be the first group sent. It is not a new floor. A subscriber does not wait for a group between the requested floor and it, but a publisher still delivers one that arrives later within Subscriber Max Age.
 - Corrected the SUBSCRIBE note that offset `Group Start` by 1. Only `Group End` and `Frame End` are offset so 0 can mean absent. `Group Start` is an absolute sequence, and 0 is group 0.
 - A subscription's range bounds datagrams like groups, and FETCH never returns a datagram.
+- A publisher SHOULD order a datagram among the subscription's streams as if it were its Group's stream, ahead of that stream when both exist. It SHOULD drop a datagram rather than block when the transport has no room for it, where it previously sent one only if the congestion controller could transmit it immediately.
 - Assigned 0x3A NOT_FETCHABLE in the stream error table: a FETCH for a group delivered only as a datagram.
 - The subscriber FINs its Subscribe Stream after settling its tail; graceful session close waits for that FIN or reset.
 - A subscriber MAY cancel by FIN on its Subscribe Stream, and the publisher then FINs without SUBSCRIBE_END.

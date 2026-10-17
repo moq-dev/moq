@@ -75,7 +75,6 @@ lands before the cut.
 - [Lazy discovery](/quest/m1/lazy-discovery/README.md) - a `consume` session requests announcements only for prefixes the origin is watching, in JS then Rust; `follow`, `broadcasts`, and the `discovery` option go away
 - [Announce caught up](/quest/m1/announce-live.md) - Rust and JS announce consumers expose when a session's initial announce snapshot has arrived, from the counts the wire already carries where a version has them
 - [A spinning loop fails a sim test](/quest/m1/spinning-loops.md) - a sim test names any loop that holds a task poll too long, and each one yields through a budget
-- [Importers announce with a track](/quest/m1/import-declared-track.md) - every importer announces once its catalog names a servable track (a rendition or an extension track like `m2ts`), and input that ends with none exits non-zero unannounced
 - [Data consumer timestamps](/quest/m1/data-consumer-timestamps.md) - json and binary consumers return each value's timestamp, in Rust and every binding; snapshots add `latest()` beside an in-order `next()`
 - [JSON window timestamps](/quest/m1/json-window-timestamps.md) - Rust and JS window consumers return each event's frame timestamp like the snapshot and stream consumers
 - [JavaScript FETCH](/quest/m1/js-fetch.md) - browser publishers answer IETF FETCH through the JS ranges request surface

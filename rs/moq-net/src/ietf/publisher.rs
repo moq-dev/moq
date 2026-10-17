@@ -3949,7 +3949,10 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 				);
 				continue;
 			}
-			let _ = self.session.send_datagram(&body);
+			// Ranked like a stream carrying the group from its start, so it merges into the
+			// subscription's group order and wins a tie with that group's stream.
+			let order = crate::priority::in_group(sequence, 0, self.ranking.order);
+			let _ = self.session.send_datagram(body, self.ranking.group.as_ref(), order);
 		}
 		Ok(())
 	}
@@ -5133,6 +5136,49 @@ mod group_priority_test {
 		assert!(serve.poll(&waiter).is_pending());
 		assert_eq!(log.groups(), [(0, 3), (0, 9)], "one move for the subscription");
 		assert_eq!(log.orders().len(), 2, "the streams keep their place in the group");
+	}
+
+	/// An OBJECT_DATAGRAM goes in its subscription's send group, ranked like the stream
+	/// carrying its group from the start, so the transport merges it into the group order.
+	#[test]
+	fn datagrams_rank_within_their_subscription() {
+		let log = crate::lite::test_transport::Log::default();
+		let session = SinkSession::new(log.clone())
+			.with_groups()
+			.with_datagrams(1200)
+			.with_unacked_fin();
+		let mut track = track::Producer::new(
+			std::sync::Arc::new(crate::broadcast::Info::default()),
+			"test",
+			crate::track::Info::timed(),
+		);
+		let subscriber = track.subscribe(
+			track::Subscription::default()
+				.with_priority(3)
+				.with_max_delay(std::time::Duration::from_secs(3600)),
+		);
+		let mut serve = TrackServe::new(
+			session,
+			subscriber,
+			RequestId(0),
+			Version::Draft14,
+			ServeRange::default(),
+			None,
+		);
+		let mut group = track.create_group(group::Info { sequence: 0 }).unwrap();
+		group
+			.write_frame(crate::Timestamp::from_millis(0).unwrap(), b"x".as_slice())
+			.unwrap();
+		group.finish().unwrap();
+		let sequence = track
+			.append_datagram(crate::Timestamp::from_millis(1).unwrap(), b"d".as_slice())
+			.unwrap();
+
+		let waiter = kio::Waiter::noop();
+		assert!(serve.poll(&waiter).is_pending());
+		let order = crate::priority::in_group(sequence, 0, Order::Descending);
+		assert_eq!(log.datagram_ranks(), [(Some(0), order)]);
+		assert_eq!(log.orders(), [(0, 1)], "the stream for group 0 ranks below");
 	}
 
 	/// A group with more objects ready than one poll's budget drains over several polls.

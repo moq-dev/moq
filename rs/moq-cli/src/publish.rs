@@ -307,8 +307,8 @@ pub struct Publish {
 
 /// A broadcast's announcement, held until its catalog first goes out.
 ///
-/// The catalog withholds its first snapshot until the input has declared every track (for TS,
-/// the first PMT). A relay queries a broadcast's tracks the moment it is announced, so a standby
+/// The catalog withholds its first snapshot until the input names at least one servable track. A
+/// relay queries a broadcast's tracks the moment it is announced, so a standby
 /// announced any sooner refuses the tracks its epoch's live partner is serving, and the relay
 /// keeps those refusals.
 struct Pending {
@@ -411,7 +411,7 @@ impl Publish {
 	/// named after `name` (`event.hang` becomes `event/1.hang`, `event/2.hang`, ...).
 	///
 	/// The programs aren't known until the PAT arrives, so each broadcast is created then and
-	/// announced once its PMT has declared its tracks, and [`announce`](Self::announce) has
+	/// announced once its catalog has named a servable track, and [`announce`](Self::announce) has
 	/// nothing to do.
 	pub fn ts_programs(origin: moq_net::origin::Producer, name: String, config: moq_mux::catalog::Config) -> Self {
 		Self {
@@ -1594,29 +1594,35 @@ pub(crate) mod tests {
 	}
 
 	/// Input that ends before declaring any track fails, rather than announcing a broadcast
-	/// with nothing in it.
+	/// with nothing in it. These inputs hold only metadata (a PMT, an FLV header, an AUD)
+	/// that configures no track.
 	#[tokio::test(start_paused = true)]
 	async fn an_import_with_no_track_fails_unannounced() {
-		let origin = moq_tokio::origin::spawn();
-		let mut announced = origin.consume().announced();
-		let broadcast = origin.create_broadcast("demo").unwrap();
-		let publish = Publish::new(
-			broadcast.clone(),
-			&PublishFormat::Ts { program: None },
-			Default::default(),
-		)
-		.unwrap();
-		#[allow(irrefutable_let_patterns)]
-		let Source::Stream { decoder, catalog } = publish.source else {
-			panic!("expected a stream source");
-		};
-		let pending = Pending::new(broadcast, Default::default()).unwrap();
-		let err = decode(decoder, catalog, &[][..], Duration::ZERO, Some(pending))
-			.await
-			.unwrap_err();
-		assert!(err.to_string().contains("declared"), "{err:#}");
-		let event = tokio::time::timeout(Duration::from_secs(1), announced.next()).await;
-		assert!(event.is_err(), "announced an empty broadcast: {event:?}");
+		let tables = two_programs()[..3 * 188].to_vec();
+		let flv_header = b"FLV\x01\x05\x00\x00\x00\x09\x00\x00\x00\x00".to_vec();
+		let aud = vec![0, 0, 0, 1, 9, 0xf0];
+		for (format, input) in [
+			(PublishFormat::Ts { program: None }, Vec::new()),
+			(PublishFormat::Ts { program: Some(1) }, tables),
+			(PublishFormat::Flv, flv_header),
+			(PublishFormat::Avc3, aud),
+		] {
+			let origin = moq_tokio::origin::spawn();
+			let mut announced = origin.consume().announced();
+			let broadcast = origin.create_broadcast("demo").unwrap();
+			let publish = Publish::new(broadcast.clone(), &format, Default::default()).unwrap();
+			#[allow(irrefutable_let_patterns)]
+			let Source::Stream { decoder, catalog } = publish.source else {
+				panic!("expected a stream source");
+			};
+			let pending = Pending::new(broadcast, Default::default()).unwrap();
+			let err = decode(decoder, catalog, &input[..], Duration::ZERO, Some(pending))
+				.await
+				.unwrap_err();
+			assert!(err.to_string().contains("declared"), "{err:#}");
+			let event = tokio::time::timeout(Duration::from_secs(1), announced.next()).await;
+			assert!(event.is_err(), "announced an empty broadcast: {event:?}");
+		}
 	}
 
 	/// A PAT listing two programs, then one MP2 PES of each: program 1 on PID `0x61` at 1 s
