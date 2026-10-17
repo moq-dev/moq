@@ -426,7 +426,8 @@ export class Encoder {
 				if (!fanout) return;
 
 				// Our own stream off the shared capture, so the preview or another rendition reading
-				// slowly can't take frames from this one.
+				// slowly can't take frames from this one. Teardown ends a pending read by cancelling it;
+				// racing the read against teardown would drop a frame that had already resolved, unclosed.
 				const reader = fanout.subscribe(effect).getReader();
 				effect.cleanup(() => {
 					reader.cancel().catch(() => {});
@@ -434,12 +435,12 @@ export class Encoder {
 
 				effect.spawn(async () => {
 					for (;;) {
-						const next = await effect.race(reader.read());
-						if (!next?.value) break;
+						const { value: frame } = await reader.read();
+						if (!frame) break;
 
 						// Ours now: every path below has to close it.
-						const frame = next.value;
 						try {
+							if (effect.abort.aborted) break;
 							if (encoder.state !== "configured") continue;
 
 							// This doesn't need to be reactive.

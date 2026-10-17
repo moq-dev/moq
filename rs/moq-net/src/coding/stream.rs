@@ -67,7 +67,7 @@ impl<S: crate::transport::poll::Session, V: StreamCodes> Stream<S, V> {
 		V: Clone,
 	{
 		let mut writer = Writer::new(send, version.clone());
-		writer.set_priority(CONTROL_SEND_ORDER);
+		writer.set_priority(CONTROL_SEND_ORDER.into());
 		Self {
 			writer,
 			reader: Reader::new(recv, version),
