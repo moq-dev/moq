@@ -54,7 +54,7 @@ export interface Auth {
 	readonly grant: Getter<Grant | undefined>;
 	/** Settles when the token ends: the peer's revocation, or its withdrawal. */
 	readonly closed: PromiseLike<Error | null>;
-	/** Withdraw the token, removing its grant from the union. */
+	/** Withdraw the token, removing its grant from the union and remaking any request that carries it without it. */
 	close(): void;
 }
 

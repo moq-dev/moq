@@ -165,6 +165,8 @@ interface Namespaces {
 /** The bytes a request carries for a token this session issued. */
 interface Carrier {
 	carried(token: Auth | undefined): Uint8Array | undefined;
+	/** Bumps whenever one of the session's tokens ends, so a request carrying it drops it. */
+	readonly ended: Getter<number>;
 }
 
 /** Where one announce loop sends its advertisements. */
@@ -1404,9 +1406,12 @@ export class Publisher {
 					// A grant change re-diffs the same way, withdrawing what it no longer covers.
 					// The loop top re-reads the table, so an ended origin still stops it there.
 					const grant = this.#grant.changed(() => resolve("changed"));
+					// A token that ended leaves the request carrying it to be made again without.
+					const ended = this.#auth?.ended.changed(() => resolve("changed"));
 					dispose = () => {
 						table();
 						grant();
+						ended?.();
 					};
 				});
 

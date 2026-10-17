@@ -1456,14 +1456,17 @@ impl RequestGrant {
 	pub(crate) fn poll_ended(&self, waiter: &kio::Waiter) -> Poll<Refusal> {
 		let mut held = self.held();
 		loop {
+			// The acceptor granted a renewal the serve loop has yet to apply: it takes over rather
+			// than the request ending between the two, whether the old grant lapsed or dropped.
+			let handover = held.renewing.as_ref().is_some_and(granted);
 			if held.deadline.poll(waiter).is_ready() {
+				if handover {
+					return Poll::Pending;
+				}
 				return Poll::Ready(Refusal::new(Error::Expired, "request token expired"));
 			}
 			match held.verdict.poll_reply(waiter) {
-				// The acceptor dropped the grant after accepting its renewal, which the serve loop
-				// has yet to apply: the renewal takes over rather than the request ending between
-				// the two.
-				Poll::Ready(None) if held.renewing.as_ref().is_some_and(granted) => return Poll::Pending,
+				Poll::Ready(None) if handover => return Poll::Pending,
 				Poll::Ready(None) => {
 					return Poll::Ready(Refusal::new(
 						Error::Session(SessionError::Unauthorized),
@@ -2413,6 +2416,42 @@ mod request_token_tests {
 		let err = kio::wait(|waiter| request_grant.poll_ended(waiter)).await.error;
 		assert!(matches!(err, Error::Expired), "{err:?}");
 		assert_eq!(handle.grant().peek(), None, "the session grant is untouched");
+	}
+
+	/// A renewal the acceptor granted before the old deadline lapsed keeps the request, even
+	/// when the serve loop applies it only after the deadline.
+	#[moq_net_sim::test]
+	async fn a_granted_renewal_outlives_the_old_deadline() {
+		let runtime = crate::time::Clock::sim();
+		let handle = Handle::new(true);
+		let mut requests = handle.requests().unwrap();
+		let verdict = handle.verify_request(token(b"jwt", 0), None);
+		let _issued = requests.next().await.unwrap().accept(grant_in(&runtime, 60));
+		let answered = verdict.grant().await.unwrap();
+		let request_grant = RequestGrant::new(
+			&runtime,
+			verdict,
+			Ok(answered),
+			subscribe_path(),
+			RequestKind::Subscribe,
+			None,
+		)
+		.unwrap();
+
+		let renewal = request_grant.verify_renewal(&handle, token(b"jwt2", 0));
+		let second = grant_in(&runtime, 600);
+		let second_expires = second.expires;
+		let _issued2 = requests.next().await.unwrap().accept(second);
+		moq_net_sim::sleep(Duration::from_secs(61)).await;
+
+		let pending = kio::wait(|waiter| Poll::Ready(request_grant.poll_ended(waiter).is_pending())).await;
+		assert!(pending, "the lapsed deadline ended a request whose renewal was granted");
+
+		let renewed = renewal.grant().await;
+		assert!(request_grant.renew(renewal, renewed).is_ok());
+		assert_eq!(request_grant.grant().expires, second_expires);
+		let pending = kio::wait(|waiter| Poll::Ready(request_grant.poll_ended(waiter).is_pending())).await;
+		assert!(pending, "the renewal holds the request");
 	}
 
 	/// A refused renewal verdict is not applied: the request grant it already holds stands

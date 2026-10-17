@@ -3,7 +3,7 @@ import { Milli, Nano } from "@moq/clock";
 import type { Getter } from "@moq/signals";
 import { type Grant, type Issued, Unsupported } from "./auth.ts";
 import { accept as acceptSession, connect as connectSession, type Established } from "./connection/index.ts";
-import { SessionCode, SessionError, StreamCode, toStreamCode } from "./error.ts";
+import { SessionCode, SessionError, StreamCode, StreamError, toStreamCode } from "./error.ts";
 import { AuthMessage as IetfAuthMessage, IetfAuthWire } from "./ietf/auth.ts";
 import * as Ietf from "./ietf/index.ts";
 import * as IetfMessage from "./ietf/message.ts";
@@ -379,11 +379,31 @@ test.each([
 		const token = await client.auth.add("token");
 		expect(token.grant.peek()).toBeUndefined();
 		expect(client.auth.grant.peek()).toBeUndefined();
+		// The token ends with its session, like any other.
+		client.abort();
+		expect(await token.closed).toBeInstanceOf(Error);
 	} else {
 		await expect(client.auth.add("token")).rejects.toBeInstanceOf(Unsupported);
 	}
 	client.abort();
 	server.abort();
+});
+
+// With MoQ Auth negotiated, a reset AUTH stream fails the token rather than keeping it for
+// requests: only a peer whose SETUP omitted the extension leaves tokens to requests.
+test("a reset AUTH stream fails the token on moq-transport", async () => {
+	const { client, server } = await connect({ publish: new OriginProducer(), protocol: Ietf.ALPN.DRAFT_22 });
+	await waitFor(client.auth.grant, (g) => g !== undefined);
+	const read = spyOn(IetfAuthWire.prototype, "read").mockRejectedValue(
+		new StreamError(StreamCode.Cancel, { message: "reset" }),
+	);
+	try {
+		await expect(client.auth.add("token")).rejects.toBeInstanceOf(Unsupported);
+	} finally {
+		read.mockRestore();
+		client.abort();
+		server.abort();
+	}
 });
 
 // lite-07 presents the connection's credential on an Auth Stream right away; lite-06 never

@@ -1495,13 +1495,17 @@ function republish(origin: OriginProducer, old: BroadcastProducer) {
 
 /** The tokens one session issued, each carried as its own bytes. */
 class Tokens {
+	readonly ended = new Signal(0);
 	#issued = new Map<Auth, Uint8Array>();
 
 	issue(value: string): Auth {
 		const token: Auth = {
 			grant: new Signal<Grant | undefined>(undefined),
 			closed: new Promise(() => {}),
-			close() {},
+			close: () => {
+				this.#issued.delete(token);
+				this.ended.update((n) => n + 1);
+			},
 		};
 		this.#issued.set(token, new TextEncoder().encode(value));
 		return token;
@@ -1608,6 +1612,30 @@ test("naming a token on an unnamed request makes it again", async () => {
 		expect(await old.reader.done().catch(error)).toMatchObject({ code: StreamCode.Cancel });
 		await acceptClustered(await take(streams));
 		expect(sent).toEqual([undefined, "first"]);
+	} finally {
+		restore();
+		close();
+	}
+});
+
+/** Closing a route's token drops it from the request, which REQUEST_UPDATE cannot do. */
+test("closing a route's token makes its request again without it", async () => {
+	const tokens = new Tokens();
+	const { pub, origin, streams, close } = clustered(false, tokens);
+	const { sent, restore } = carriedTokens();
+	try {
+		const broadcast = origin.createBroadcast(Path.from("mine"));
+		const token = tokens.issue("first");
+		broadcast.announce({ hops: [VIA], cost: 4n, auth: token });
+		void pub.runPublishNamespaces();
+
+		const old = await take(streams);
+		await acceptClustered(old);
+		token.close();
+
+		expect(await old.reader.done().catch(error)).toMatchObject({ code: StreamCode.Cancel });
+		await acceptClustered(await take(streams));
+		expect(sent).toEqual(["first", undefined]);
 	} finally {
 		restore();
 		close();

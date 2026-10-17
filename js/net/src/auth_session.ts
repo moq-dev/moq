@@ -283,6 +283,7 @@ export class AuthSession implements Handle {
 	#peerGrant: Grant;
 	// Every token this session issued, so a request carries only its own.
 	#issued = new WeakSet<Presented>();
+	#ended = new Signal(0);
 
 	#union = new Signal<Grant | undefined>(undefined);
 	// The peer replied to some token, so the union is known even when empty.
@@ -323,7 +324,7 @@ export class AuthSession implements Handle {
 			// Only a request carries it, and the peer judges it there: no grant to wait for.
 			const presented = new Presented(bytes, false);
 			presented.answer();
-			this.#issued.add(presented);
+			this.#track(presented);
 			return presented;
 		}
 		const presented = this.#present(this.#wire, bytes, false);
@@ -339,6 +340,11 @@ export class AuthSession implements Handle {
 		if (!this.#requests || !(token instanceof Presented) || !this.#issued.has(token) || token.ended)
 			return undefined;
 		return token.token;
+	}
+
+	/** Bumps whenever one of this session's tokens ends, so a request carrying it drops it. */
+	get ended(): Getter<number> {
+		return this.#ended;
 	}
 
 	requests(): Requests {
@@ -405,16 +411,24 @@ export class AuthSession implements Handle {
 
 	#present(wire: AuthWire, token: Uint8Array, setup: boolean): Presented {
 		const presented = new Presented(token, setup);
-		this.#tokens.add(presented);
-		this.#issued.add(presented);
+		this.#track(presented);
 		if (setup) this.#setupPending.update((n) => n + 1);
 		void this.#run(wire, presented);
 		return presented;
 	}
 
+	/** Hold `token` until it ends, so the session's close ends it too. */
+	#track(token: Presented) {
+		this.#tokens.add(token);
+		this.#issued.add(token);
+		void token.closed.then(() => {
+			this.#tokens.delete(token);
+			this.#ended.update((n) => n + 1);
+		});
+	}
+
 	async #run(wire: AuthWire, token: Presented) {
 		let result: Error | null = null;
-		let predates = false;
 		try {
 			const stream = await wire.present(token.token);
 			token.stream = stream;
@@ -463,7 +477,6 @@ export class AuthSession implements Handle {
 			} else if (!token.isAnswered && err instanceof StreamError) {
 				// A peer that predates AUTH resets a stream type it does not know.
 				result = new Unsupported();
-				predates = true;
 			} else {
 				result = error(err);
 				if (result instanceof ProtocolViolation && !this.#closed && this.violated.peek() === undefined) {
@@ -471,14 +484,6 @@ export class AuthSession implements Handle {
 				}
 				if (!this.#closed) console.warn("auth token ended", result);
 			}
-		}
-
-		// A peer that turned out not to speak AUTH leaves a token for requests to carry.
-		if (predates && this.#requests) {
-			token.stream = undefined;
-			this.#answered(token);
-			this.#tokens.delete(token);
-			return;
 		}
 
 		// A token that ends unanswered counts as answered for enforcement: its refusal is
