@@ -1267,7 +1267,6 @@ export class Publisher {
 					// The loop top re-reads the table, so an ended origin still stops it there.
 					const grant = this.#grant.changed(() => resolve("changed"));
 					// A token that ended leaves the request carrying it to be made again without.
-					// A token that ended leaves the request carrying it to be made again without.
 					const ended = this.#auth?.ended.changed(() => resolve("changed"));
 					dispose = () => {
 						table();

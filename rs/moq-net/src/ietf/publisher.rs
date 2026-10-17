@@ -3240,7 +3240,16 @@ where
 		request.pending = None;
 		let absolute = self.origin.absolute(&request.path).to_owned();
 
-		let refused = match answer? {
+		// A reset stream ends only this request, like a FIN; a malformed answer is the peer's
+		// violation and still ends the loop.
+		let answer = match answer {
+			Err(err) if !super::subscriber::is_protocol_violation(&err) => {
+				tracing::debug!(broadcast = %absolute, %err, "update stream ended");
+				Answer::Ended
+			}
+			answer => answer?,
+		};
+		let refused = match answer {
 			Answer::Late => {
 				tracing::debug!(broadcast = %absolute, "no answer to the update");
 				// Abrupt: a peer that never answers is not owed the FIN handshake.
@@ -13590,6 +13599,46 @@ mod tests {
 			1,
 			"a new announcement waited on the renewals"
 		);
+	}
+
+	/// A peer that resets a request's stream while its renewal is in flight ends only that
+	/// request: the loop keeps running and advertises the namespace afresh.
+	#[moq_net_sim::test]
+	async fn a_reset_renewal_ends_only_its_request() {
+		const VERSION: Version = Version::Draft19;
+
+		let origin = unheld_origin();
+		let auth = crate::auth::Handle::ietf(false);
+		let present = |token: &'static [u8]| auth.present(bytes::Bytes::from_static(token), false).unwrap();
+		let cam = origin
+			.announce("cam", crate::origin::Route::default().with_auth(present(b"first")))
+			.unwrap();
+		settle().await;
+
+		let ok = publish_namespace_ok(VERSION).await;
+		let session = crate::lite::test_transport::ScriptedSession::per_stream_reset(vec![ok.clone(), ok]);
+		let log = session.log.clone();
+		let publisher = Publisher::new(
+			crate::time::Clock::sim(),
+			session,
+			origin.consume(),
+			Control::new(None, false),
+			None,
+			declared(Some(false)),
+			VERSION,
+		)
+		.with_auth(auth.clone());
+		let mut run = std::pin::pin!(publisher.run_publish_namespaces());
+		poll_until(&mut run, &log, b"first", 1).await;
+		cam.update(crate::origin::Route::default().with_auth(present(b"second")))
+			.unwrap();
+		poll_until(&mut run, &log, b"second", 2).await;
+		assert_eq!(
+			occurrences(&log, b"second"),
+			2,
+			"the renewal and the advertisement made again after the reset"
+		);
+		assert_eq!(log.bi_opens(), 2, "the reset request was replaced");
 	}
 
 	/// An update the peer never answers drops its request once the timeout passes, and

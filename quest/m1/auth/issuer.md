@@ -2,15 +2,18 @@
 
 ## Goal
 
-A route on a reconnecting connection names its token once. Today a
-`moq_net::auth::Auth` belongs to the session whose `auth::Handle` added it,
-and `Route::auth` carries it only on that session, so after a reconnect the
-application adds the token again on the new session and re-announces.
-`moq_tokio::Connection::auth().add()` keeps a token across sessions, but it
-returns moq-tokio's own `connection::auth::Auth`, which a `Route` cannot name.
+A route on a reconnecting connection names its token once: the same
+`moq_net::auth::Auth` keeps riding its announcements on every session the
+connection makes, with no re-add or re-announce from the application.
 
 ## Plan
 
+- Today a `moq_net::auth::Auth` belongs to the session whose `auth::Handle`
+  added it, and `Route::auth` carries it only on that session, so after a
+  reconnect the application adds the token again on the new session and
+  re-announces. `moq_tokio::Connection::auth().add()` keeps a token across
+  sessions, but it returns moq-tokio's own `connection::auth::Auth`, which a
+  `Route` cannot name.
 - ✅ Decided 2026-10-16 (maintainer, #5695): the long-term shape is a
   session-independent issuer in moq-net. An `auth::Handle` outlives sessions
   and is passed in with something like `Client::with_auth(handle)` (and the
