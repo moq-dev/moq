@@ -41,7 +41,7 @@ struct State {
 	queue: VecDeque<(Frame, Instant)>,
 	/// The newest timestamp this lane has decoded, shown or not.
 	newest: Option<Duration>,
-	/// Ended, failed, or never opened.
+	/// Ended, or never opened.
 	done: bool,
 }
 
@@ -108,7 +108,7 @@ impl Selector {
 		state.queue.push_back((frame, now));
 	}
 
-	/// `lane` ended or failed and will decode nothing more.
+	/// `lane` ended and will decode nothing more.
 	pub(super) fn finish(&mut self, lane: Lane) {
 		self.lanes[lane as usize].done = true;
 	}
@@ -341,7 +341,7 @@ mod tests {
 
 		selector.push(Lane::Min, picture(33), now);
 		assert!(matches!(selector.next(now), Next::Wait(_)));
-		// Ended or failed: the same to the selector.
+		// The max-delay decoder ended, as at the end of the track.
 		selector.finish(Lane::Max);
 		assert_eq!(drain(&mut selector, now), [33]);
 		assert_eq!(selector.source, Lane::Min);

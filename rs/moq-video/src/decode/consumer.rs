@@ -128,7 +128,8 @@ struct Reader {
 
 impl Consumer {
 	/// Subscribe to `name` in `broadcast`, decoding it per the catalog entry.
-	/// Errors if the rendition's codec is not supported by a native backend.
+	/// Errors if the rendition's codec is not supported by a native backend, or
+	/// if a `warmup` rendition's second decoder cannot open.
 	pub async fn new(
 		broadcast: &moq_net::broadcast::Consumer,
 		catalog: &VideoConfig,
@@ -145,15 +146,7 @@ impl Consumer {
 			// One more sweep of budget, joining a group earlier, so this decoder
 			// starts at a recovery point a whole sweep before the live edge.
 			let budget = options.max_delay.saturating_add(warmup);
-			match Reader::open(broadcast, catalog, &name, &options, budget, 1).await {
-				Ok(reader) => Some(reader),
-				// The second decoder only cleans up the picture, so a backend out of
-				// hardware instances plays with the first alone rather than not at all.
-				Err(err) => {
-					tracing::warn!(%name, %err, "max-delay decoder failed to open; showing min-delay pictures only");
-					None
-				}
-			}
+			Some(Reader::open(broadcast, catalog, &name, &options, budget, 1).await?)
 		};
 
 		// The catalog's rate when it has one, else whatever the pictures show.
@@ -184,8 +177,8 @@ impl Consumer {
 	/// Returned timestamps strictly increase.
 	///
 	/// Cancel-safe: a decode in flight when the read is dropped is kept and
-	/// finished by the next read. A codec error is returned again by every later
-	/// read mid-stream, or once and then `None` when it struck the tail flush.
+	/// finished by the next read. A codec error from either decoder fails the
+	/// read.
 	pub async fn read(&mut self) -> Result<Option<Frame>, Error> {
 		let mut sleep = None;
 		std::future::poll_fn(|cx| self.poll_read(cx, &mut sleep)).await
@@ -229,14 +222,9 @@ impl Consumer {
 						*slot = Slot::Closed;
 						self.selector.finish(lane);
 					}
-					// Left idle, so the next read asks it again and gets the same
-					// answer, like a lone decoder.
-					Err(err) if lane == Lane::Min => return Poll::Ready(Err(err)),
-					Err(err) => {
-						tracing::warn!(%err, "max-delay decoder failed; showing min-delay pictures only");
-						*slot = Slot::Closed;
-						self.selector.finish(lane);
-					}
+					// Either decoder failing fails the read. Left idle, so the next
+					// read asks it again and gets the same answer, like a lone decoder.
+					Err(err) => return Poll::Ready(Err(err)),
 				}
 			}
 			if progress {
@@ -1292,5 +1280,74 @@ mod tests {
 			assert!(matches!(consumer.lanes[Lane::Max as usize], Slot::Closed));
 			assert_eq!(track.subscription().map(|sub| sub.max_delay), Some(max_delay));
 		}
+	}
+
+	/// A warmup rendition needs both decoders: one that cannot open fails the
+	/// consumer instead of playing with stripes and no signal.
+	#[tokio::test]
+	async fn a_second_decoder_that_cannot_open_fails_the_consumer() {
+		let (broadcast, _track) = live_track();
+		let result = Consumer::new(
+			&broadcast.consume(),
+			&warmup_catalog(Some(WARMUP)),
+			"video",
+			Options {
+				decoder: Config {
+					kind: Kind::Named(probe::SINGLE_NAME.into()),
+					..Config::new()
+				},
+				..Options::new()
+			},
+		)
+		.await;
+		let Err(err) = result else {
+			panic!("the consumer opened without its max-delay decoder");
+		};
+		assert!(
+			err.to_string().contains("out of decoder sessions"),
+			"unexpected error: {err}"
+		);
+	}
+
+	/// A max-delay decode error reaches the caller, like a min-delay one.
+	#[tokio::test]
+	async fn a_max_delay_decode_error_fails_the_read() {
+		let (broadcast, mut track) = live_track();
+		// Only the max-delay decoder reads group 0, a group before the live edge.
+		let mut earlier = track.create_group(moq_net::group::Info { sequence: 0 }).unwrap();
+		moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Video)
+			.write(
+				&mut earlier,
+				&[moq_mux::container::Frame {
+					timestamp: Timestamp::ZERO,
+					duration: None,
+					payload: Bytes::from_static(probe::CORRUPT),
+					keyframe: true,
+				}],
+			)
+			.unwrap();
+		write(&mut earlier, &[1, 2, 3]);
+		earlier.finish().unwrap();
+		let _live = group(&mut track, 1, &[4, 5]);
+
+		let mut consumer = dual(
+			&broadcast,
+			Start::Latest,
+			std::time::Duration::ZERO,
+			probe::IMMEDIATE_NAME,
+		)
+		.await;
+		for _ in 0..3 {
+			match tokio::time::timeout(std::time::Duration::from_secs(10), consumer.read()).await {
+				Ok(Ok(Some(_))) => continue,
+				Ok(Err(err)) => {
+					assert!(err.to_string().contains("corrupt"), "unexpected error: {err}");
+					return;
+				}
+				Ok(Ok(None)) => panic!("the live track ended"),
+				Err(_) => break,
+			}
+		}
+		panic!("the max-delay decoder's error was swallowed");
 	}
 }
