@@ -187,9 +187,9 @@ class Encoder:
         """Samples per channel required by each encode call."""
         return self._inner.frame_size()
 
-    def init(self) -> AudioInit:
+    def track_init(self) -> AudioInit:
         """The OpusHead or AudioSpecificConfig that publishes these packets via :meth:`TrackProducer.audio`."""
-        return self._inner.init()
+        return self._inner.track_init()
 
     def set_bitrate(self, bitrate: int) -> None:
         """Retune the live encoder in bits per second."""

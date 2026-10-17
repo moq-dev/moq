@@ -120,7 +120,7 @@ public enum Audio {
         }
 
         /// The OpusHead or AudioSpecificConfig that publishes these packets via `Media.TrackProducer.audio`.
-        public func initData() throws -> Media.AudioInit { try ffi.`init`() }
+        public func trackInit() throws -> Media.AudioInit { try ffi.trackInit() }
 
         /// Retune the live encoder in bits per second.
         public func setBitrate(_ bitrate: UInt64) throws { try ffi.setBitrate(bitrate: bitrate) }
