@@ -35,7 +35,6 @@ Public API: none. Wire: none.
 
 ## Required
 
-- [Interop close code](/quest/m1/test-flakes-2/interop-close-code.md) - the browser reliably sees `unauthorized` for a refused session
 - [Auth refresh mocks time](/quest/m1/test-flakes-2/auth-refresh-mock-time.md) - moq-relay's auth refresh and fixed-lease tests measure a grant's life on one mocked clock
 - [uring teardown close](/quest/m1/test-flakes-2/uring-teardown-close.md) - moq-uring's published-close teardown test holds under load, fixed at its cause
 - [WASM IETF read](/quest/m1/test-flakes-2/wasm-ietf-read.md) - the WASM suite's IETF read case reads whole groups on a loaded runner, fixed at the burst or the assertion as the evidence says

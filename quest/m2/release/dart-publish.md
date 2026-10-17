@@ -32,7 +32,6 @@ Public API: none. Wire: none.
 
 - [Breaking release cut](/quest/m2/release/cut.md) - prepared code reaches release before artifact publication and installed proof
 
-- [Codecs](/quest/m1/ffi-shape/codec.md) - settle the audio and video binding API before publishing
 
 ## Related
 

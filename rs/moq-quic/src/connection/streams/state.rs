@@ -66,8 +66,7 @@ impl StreamRecv {
     }
 }
 
-#[allow(unreachable_pub)] // fuzzing only
-pub struct StreamsState {
+pub(crate) struct StreamsState {
     pub(super) side: Side,
     // Set of streams that are currently open, or could be immediately opened by the peer
     pub(super) send: FxHashMap<StreamId, Option<Box<Send>>>,
@@ -159,8 +158,7 @@ pub struct StreamsState {
 }
 
 impl StreamsState {
-    #[allow(unreachable_pub)] // fuzzing only
-    pub fn new(
+    pub(crate) fn new(
         side: Side,
         max_remote_uni: VarInt,
         max_remote_bi: VarInt,
@@ -330,8 +328,7 @@ impl StreamsState {
     /// Process incoming RESET_STREAM frame
     ///
     /// If successful, returns whether a `MAX_DATA` frame needs to be transmitted
-    #[allow(unreachable_pub)] // fuzzing only
-    pub fn received_reset(
+    pub(crate) fn received_reset(
         &mut self,
         frame: frame::ResetStream,
     ) -> Result<ShouldTransmit, TransportError> {
@@ -397,8 +394,11 @@ impl StreamsState {
     ///
     /// Returns the Reliable Size of 0 for a reset to send now, since the peer will not read the
     /// data a reset still delivers.
-    #[allow(unreachable_pub)] // fuzzing only
-    pub fn received_stop_sending(&mut self, id: StreamId, error_code: VarInt) -> Option<u64> {
+    pub(crate) fn received_stop_sending(
+        &mut self,
+        id: StreamId,
+        error_code: VarInt,
+    ) -> Option<u64> {
         self.insert_remote(id);
 
         let max_send_data = self.max_send_data(id);
