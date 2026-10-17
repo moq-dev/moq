@@ -172,6 +172,17 @@ impl KeyFrame {
 	}
 }
 
+/// The neutral colour a VP9 codec string carries, for one read from a key frame or a `vpcC`, whose
+/// every field is explicit. A placeholder codec string must not come through here.
+pub(crate) fn color(vp9: &VP9) -> Option<hang::catalog::Color> {
+	crate::codec::color::cicp(
+		vp9.color_primaries,
+		vp9.transfer_characteristics,
+		vp9.matrix_coefficients,
+		Some(vp9.full_range),
+	)
+}
+
 /// Build a catalog [`VideoConfig`](hang::catalog::VideoConfig) from a VP9 frame,
 /// or `None` if the frame is not a key frame.
 ///
@@ -184,7 +195,9 @@ pub(crate) fn config_from_keyframe(data: &[u8]) -> Result<Option<hang::catalog::
 		return Ok(None);
 	};
 	let (width, height) = (key.width, key.height);
-	let mut config = hang::catalog::VideoConfig::new(key.to_catalog());
+	let vp9 = key.to_catalog();
+	let mut config = hang::catalog::VideoConfig::new(vp9.clone());
+	config.color = color(&vp9);
 	config.coded_width = Some(width as u32);
 	config.coded_height = Some(height as u32);
 	Ok(Some(config))

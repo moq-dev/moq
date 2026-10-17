@@ -21,6 +21,7 @@ pub use split::*;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 
 // H.264 NAL unit types (ISO/IEC 14496-10 §7.4.1).
+const NAL_TYPE_SEI: u8 = 6;
 const NAL_TYPE_SPS: u8 = 7;
 const NAL_TYPE_PPS: u8 = 8;
 
@@ -175,8 +176,15 @@ pub(crate) fn sps_framerate(nal: &[u8]) -> Option<f64> {
 	Some(scale as f64 / units as f64)
 }
 
-/// What an SPS VUI declares about picture timing.
+/// The colour an SPS NAL unit's VUI signals, when it carries a video signal type.
+pub(crate) fn sps_color(nal: &[u8]) -> Option<hang::catalog::Color> {
+	sps_vui(nal)?.color
+}
+
+/// What an SPS VUI declares about picture timing and colour.
 struct Vui {
+	/// The video signal type's range and colour description, unspecified fields absent.
+	color: Option<hang::catalog::Color>,
 	/// `frame_mbs_only_flag`: every picture is a frame, so two ticks are one frame.
 	frame_only: bool,
 	/// One frame's duration as `(units, scale)` when `fixed_frame_rate_flag` is set.
@@ -280,11 +288,15 @@ fn vui(rbsp: &[u8]) -> h264_parser::Result<Option<Vui>> {
 	if r.read_flag()? {
 		r.skip_bits(1)?; // overscan_appropriate_flag
 	}
+	let mut color = None;
 	if r.read_flag()? {
-		r.skip_bits(4)?; // video_format, video_full_range_flag
-		if r.read_flag()? {
-			r.skip_bits(24)?; // colour_primaries, transfer_characteristics, matrix_coefficients
-		}
+		r.skip_bits(3)?; // video_format
+		let full_range = r.read_flag()?;
+		let (primaries, transfer, matrix) = match r.read_flag()? {
+			true => (r.read_u8()?, r.read_u8()?, r.read_u8()?),
+			false => (2, 2, 2),
+		};
+		color = crate::codec::color::cicp(primaries, transfer, matrix, Some(full_range));
 	}
 	if r.read_flag()? {
 		read_ue(&mut r)?; // chroma_sample_loc_type_top_field
@@ -314,6 +326,7 @@ fn vui(rbsp: &[u8]) -> h264_parser::Result<Option<Vui>> {
 	r.skip_bits(1)?; // pic_struct_present_flag
 	if !r.read_flag()? {
 		return Ok(Some(Vui {
+			color,
 			frame_only,
 			period,
 			depth: None,
@@ -326,6 +339,7 @@ fn vui(rbsp: &[u8]) -> h264_parser::Result<Option<Vui>> {
 	}
 	let depth = read_ue(&mut r)?; // max_num_reorder_frames
 	Ok(Some(Vui {
+		color,
 		frame_only,
 		period,
 		depth: Some(depth),

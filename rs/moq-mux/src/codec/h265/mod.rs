@@ -199,7 +199,8 @@ impl Hvcc {
 pub(crate) fn config_from_hvcc(hvcc: &[u8]) -> Result<hang::catalog::VideoConfig> {
 	let params = Hvcc::parse(hvcc)?;
 	let sps_nal = params.sps.first().ok_or(Error::MissingSps)?;
-	let sps = Sps::parse(sps_nal)?.head;
+	let parsed = Sps::parse(sps_nal)?;
+	let sps = parsed.head;
 
 	let mut config = hang::catalog::VideoConfig::new(hang::catalog::H265 {
 		in_band: false,
@@ -212,8 +213,14 @@ pub(crate) fn config_from_hvcc(hvcc: &[u8]) -> Result<hang::catalog::VideoConfig
 	});
 	config.coded_width = Some(sps.width);
 	config.coded_height = Some(sps.height);
+	config.color = parsed.color();
 	config.description = Some(Bytes::copy_from_slice(hvcc));
 	Ok(config)
+}
+
+/// The colour the first SPS in an `HEVCDecoderConfigurationRecord` signals in its VUI.
+pub(crate) fn hvcc_color(hvcc: &[u8]) -> Option<hang::catalog::Color> {
+	Sps::parse(Hvcc::parse(hvcc).ok()?.sps.first()?).ok()?.color()
 }
 
 /// The reordering an SPS NAL unit declares for its highest sub-layer: `sps_max_num_reorder_pics`,

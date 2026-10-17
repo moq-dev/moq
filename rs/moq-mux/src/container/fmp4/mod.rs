@@ -744,6 +744,43 @@ fn trun_duration(duration: Timestamp, timescale: moq_net::Timescale) -> Result<u
 /// the sample entry is avc3 or hev1; the sets stay in the samples. A record built
 /// from the bitstream still carries them. VP8 carries no out-of-band config, so
 /// `description` is `None` for it.
+/// The colour an ISOBMFF `colr` box signals. Only `nclx` carries H.273 code points and a range;
+/// QuickTime's `nclc` has no range, and an ICC profile has no code points at all.
+pub(crate) fn colr_color(colr: &mp4_atom::Colr) -> Option<hang::catalog::Color> {
+	let mp4_atom::Colr::Nclx {
+		colour_primaries,
+		transfer_characteristics,
+		matrix_coefficients,
+		full_range_flag,
+	} = *colr
+	else {
+		return None;
+	};
+	// A code point past 255 is reserved in H.273, so it reads as unspecified.
+	let code = |value: u16| u8::try_from(value).unwrap_or(2);
+	crate::codec::color::cicp(
+		code(colour_primaries),
+		code(transfer_characteristics),
+		code(matrix_coefficients),
+		Some(full_range_flag),
+	)
+}
+
+/// The `nclx` box for a catalog colour, or `None` when it has no code point or range to carry.
+/// An absent code point is written as unspecified (2) and an absent range as limited.
+fn color_colr(color: Option<&hang::catalog::Color>) -> Option<mp4_atom::Colr> {
+	let color = color?;
+	if color.primaries.is_none() && color.transfer.is_none() && color.matrix.is_none() && color.full_range.is_none() {
+		return None;
+	}
+	Some(mp4_atom::Colr::Nclx {
+		colour_primaries: color.primaries.unwrap_or(2).into(),
+		transfer_characteristics: color.transfer.unwrap_or(2).into(),
+		matrix_coefficients: color.matrix.unwrap_or(2).into(),
+		full_range_flag: color.full_range.unwrap_or(false),
+	})
+}
+
 pub(crate) fn synthesize_video_trak(
 	track_id: u32,
 	timescale: u64,
@@ -782,6 +819,7 @@ pub(crate) fn synthesize_video_trak(
 	// Codecs that carry an out-of-band config record require `description`.
 	let require_description = || description.ok_or_else(|| Error::MissingVideoDescription(config.codec.to_string()));
 
+	let colr = color_colr(config.color.as_ref());
 	let sample_entry = match &config.codec {
 		VideoCodec::H264(h264) => {
 			let mut cursor = std::io::Cursor::new(require_description()?);
@@ -792,12 +830,14 @@ pub(crate) fn synthesize_video_trak(
 				mp4_atom::Codec::from(mp4_atom::Avc3 {
 					visual,
 					avcc,
+					colr,
 					..Default::default()
 				})
 			} else {
 				mp4_atom::Codec::from(mp4_atom::Avc1 {
 					visual,
 					avcc,
+					colr,
 					..Default::default()
 				})
 			}
@@ -810,12 +850,14 @@ pub(crate) fn synthesize_video_trak(
 				mp4_atom::Codec::from(mp4_atom::Hev1 {
 					visual,
 					hvcc,
+					colr,
 					..Default::default()
 				})
 			} else {
 				mp4_atom::Codec::from(mp4_atom::Hvc1 {
 					visual,
 					hvcc,
+					colr,
 					..Default::default()
 				})
 			}
@@ -823,16 +865,19 @@ pub(crate) fn synthesize_video_trak(
 		VideoCodec::AV1(av1) => mp4_atom::Codec::from(mp4_atom::Av01 {
 			visual,
 			av1c: crate::codec::av1::av1c_from_av1(av1),
+			colr,
 			..Default::default()
 		}),
 		VideoCodec::VP8 => mp4_atom::Codec::from(mp4_atom::Vp08 {
 			visual,
 			vpcc: crate::codec::vp8::vpcc(),
+			colr,
 			..Default::default()
 		}),
 		VideoCodec::VP9(vp9) => mp4_atom::Codec::from(mp4_atom::Vp09 {
 			visual,
 			vpcc: crate::codec::vp9::vpcc(vp9),
+			colr,
 			..Default::default()
 		}),
 		other => unreachable!("unsupported codecs rejected before geometry synthesis: {other:?}"),

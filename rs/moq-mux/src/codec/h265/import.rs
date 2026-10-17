@@ -31,9 +31,9 @@ use crate::container::Frame;
 /// catalog rendition fills in lazily once the codec config is known (hvcC via
 /// [`initialize`](Self::initialize) for hvc1, the first SPS for hev1).
 pub struct Import {
-	/// True for the hvc1 shape: the codec config is out-of-band (hvcC), so
-	/// frame payloads are length-prefixed rather than Annex-B and are never scanned.
-	hvc1: bool,
+	/// The NALU length size for the hvc1 shape, whose codec config is out-of-band (hvcC), so
+	/// frame payloads are length-prefixed rather than Annex-B. `None` for Annex-B.
+	length_size: Option<usize>,
 	track: crate::container::Producer<crate::catalog::hang::Container, hang::catalog::VideoConfig>,
 	catalog: crate::codec::video::Catalog,
 	last_sps: Option<Bytes>,
@@ -56,7 +56,7 @@ impl Import {
 		let catalog = crate::codec::video::Catalog::new(hint);
 		let track = reserved.video(track, wire, None)?;
 		let mut import = Self {
-			hvc1: false,
+			length_size: None,
 			track,
 			catalog,
 			last_sps: None,
@@ -90,7 +90,7 @@ impl Import {
 		// Only switch to hvc1 mode once the hvcC actually parses, so a parse failure leaves the
 		// importer in hev1 mode where inline-SPS keyframes still self-initialize.
 		let config = super::config_from_hvcc(hvcc_bytes)?;
-		self.hvc1 = true;
+		self.length_size = Some(super::Hvcc::parse(hvcc_bytes)?.length_size);
 		self.apply_config(config)?;
 		Ok(())
 	}
@@ -193,14 +193,20 @@ impl Import {
 	/// keyframe's inline SPS and refining the catalog jitter as it goes.
 	fn write_frames(&mut self, frames: impl IntoIterator<Item = Frame>) -> Result<()> {
 		for frame in frames {
-			// hvc1 config arrives out-of-band via initialize(); hev1 carries SPS inline on
-			// keyframes. Scanning an hvc1 payload would misread a length prefix as a start
-			// code (a 322-byte NAL prefixes as `00 00 01 42`, an SPS NAL header).
-			if !self.hvc1
-				&& frame.keyframe
-				&& let Some(sps) = find_sps(&frame.payload)
-			{
-				self.configure_from_sps(&sps)?;
+			if frame.keyframe {
+				// HDR metadata first, so a keyframe that also configures publishes once.
+				let hdr = crate::codec::color::access_unit(&frame.payload, self.length_size, 2, |h| {
+					nal_unit_type(h) == scuffle_h265::NALUnitType::PrefixSeiNut
+				});
+				self.catalog.hdr(&mut self.track, hdr)?;
+				// hvc1 config arrives out-of-band via initialize(); hev1 carries the SPS inline.
+				// Scanning an hvc1 payload as Annex-B would misread a length prefix as a start
+				// code (a 322-byte NAL prefixes as `00 00 01 42`, an SPS NAL header).
+				if self.length_size.is_none()
+					&& let Some(sps) = find_sps(&frame.payload)
+				{
+					self.configure_from_sps(&sps)?;
+				}
 			}
 
 			// A keyframe we still can't configure (no SPS) is undecodable.
@@ -237,7 +243,9 @@ pub fn config(buf: &[u8]) -> Result<hang::catalog::VideoConfig> {
 /// The config an inline SPS describes (`in_band: true`, the hev1 shape). No `description`: the
 /// parameter sets ride with every keyframe.
 fn config_from_sps(sps_nal: &[u8]) -> Result<hang::catalog::VideoConfig> {
-	let super::Sps { head, full } = super::Sps::parse(sps_nal)?;
+	let sps = super::Sps::parse(sps_nal)?;
+	let color = sps.color();
+	let super::Sps { head, full } = sps;
 	// The VUI (frame rate, aspect ratio) only comes with scuffle_h265's full parse.
 	let vui_data = full
 		.as_ref()
@@ -263,6 +271,7 @@ fn config_from_sps(sps_nal: &[u8]) -> Result<hang::catalog::VideoConfig> {
 	let display_aspect = vui_data.display_aspect(head.width, head.height);
 	config.display_aspect_width = display_aspect.map(|(width, _)| width);
 	config.display_aspect_height = display_aspect.map(|(_, height)| height);
+	config.color = color;
 	Ok(config)
 }
 

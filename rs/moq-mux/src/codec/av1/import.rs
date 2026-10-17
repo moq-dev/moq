@@ -142,6 +142,7 @@ impl Import {
 		});
 		config.coded_width = Some(seq_header.max_frame_width as u32);
 		config.coded_height = Some(seq_header.max_frame_height as u32);
+		config.color = sequence_color(seq_header);
 		self.apply_config(config)?;
 		Ok(())
 	}
@@ -239,10 +240,12 @@ impl Import {
 	/// keyframe's inline sequence header and refining the catalog jitter.
 	fn write_frames(&mut self, frames: impl IntoIterator<Item = Frame>) -> Result<()> {
 		for frame in frames {
-			if frame.keyframe
-				&& let Some(seq) = find_sequence_header(&frame.payload)
-			{
-				self.configure_from_seq(&seq)?;
+			if frame.keyframe {
+				// HDR metadata first, so a keyframe that also configures publishes once.
+				self.catalog.hdr(&mut self.track, find_hdr(&frame.payload))?;
+				if let Some(seq) = find_sequence_header(&frame.payload) {
+					self.configure_from_seq(&seq)?;
+				}
 			}
 
 			// A keyframe we couldn't configure (no sequence header) is undecodable.
@@ -277,6 +280,23 @@ fn parse_sequence_header(obu: &[u8]) -> Result<Option<SequenceHeaderObu>> {
 	Ok(SequenceHeaderObu::parse(header, &mut reader).ok())
 }
 
+/// The colour a sequence header's `color_config` signals; its range is always explicit.
+fn sequence_color(seq_header: &SequenceHeaderObu) -> Option<hang::catalog::Color> {
+	let color = &seq_header.color_config;
+	crate::codec::color::cicp(
+		color.color_primaries,
+		color.transfer_characteristics,
+		color.matrix_coefficients,
+		Some(color.full_color_range),
+	)
+}
+
+/// The colour of the first parseable sequence header in a run of OBUs, such as av1C's `configOBUs`.
+pub(crate) fn color(obus: &[u8]) -> Option<hang::catalog::Color> {
+	let sequence = parse_sequence_header(&find_sequence_header(obus)?).ok()??;
+	sequence_color(&sequence)
+}
+
 /// Read encoded dimensions from the first parseable sequence header in a frame.
 pub(crate) fn dimensions(payload: &[u8]) -> Result<Option<(u32, u32)>> {
 	let Some(sequence) = find_sequence_header(payload) else {
@@ -289,6 +309,28 @@ pub(crate) fn dimensions(payload: &[u8]) -> Result<Option<(u32, u32)>> {
 		sequence.max_frame_width as u32,
 		sequence.max_frame_height as u32,
 	)))
+}
+
+/// The HDR metadata a temporal unit's metadata OBUs carry.
+fn find_hdr(payload: &Bytes) -> crate::codec::color::Hdr {
+	let mut hdr = crate::codec::color::Hdr::default();
+	let mut scan = |obu: &[u8]| {
+		let mut reader = obu;
+		if let Ok(header) = ObuHeader::parse(&mut reader)
+			&& header.obu_type == ObuType::Metadata
+		{
+			hdr.update(crate::codec::color::av1_metadata(reader));
+		}
+	};
+	let mut buf = payload.clone();
+	let mut obus = ObuIterator::new(&mut buf);
+	while let Some(Ok(obu)) = obus.next() {
+		scan(&obu);
+	}
+	if let Ok(Some(obu)) = obus.flush() {
+		scan(&obu);
+	}
+	hdr
 }
 
 /// Find the first sequence-header OBU in a payload, if any.

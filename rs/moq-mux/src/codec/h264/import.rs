@@ -13,7 +13,7 @@
 
 use bytes::Bytes;
 
-use super::{Error, NAL_TYPE_SPS, Sps};
+use super::{Error, NAL_TYPE_SEI, NAL_TYPE_SPS, Sps};
 use crate::Result;
 use crate::catalog::hang::CatalogExt;
 use crate::codec::annexb::NalIterator;
@@ -27,9 +27,9 @@ use crate::container::Frame;
 /// The catalog rendition fills in lazily once the codec config is known (avcC via
 /// [`initialize`](Self::initialize) for avc1, the first SPS for avc3).
 pub struct Import {
-	/// True for the avc1 shape: the codec config is out-of-band (avcC), so
-	/// keyframes are not scanned for an inline SPS.
-	avc1: bool,
+	/// The NALU length size for the avc1 shape, whose codec config is out-of-band (avcC), so
+	/// keyframes are not scanned for an inline SPS. `None` for Annex-B.
+	length_size: Option<usize>,
 	track: crate::container::Producer<crate::catalog::hang::Container, hang::catalog::VideoConfig>,
 	catalog: crate::codec::video::Catalog,
 	last_sps: Option<Bytes>,
@@ -52,7 +52,7 @@ impl Import {
 		let catalog = crate::codec::video::Catalog::new(hint);
 		let track = reserved.video(track, wire, None)?;
 		let mut import = Self {
-			avc1: false,
+			length_size: None,
 			track,
 			catalog,
 			last_sps: None,
@@ -86,7 +86,7 @@ impl Import {
 		// Only switch to avc1 mode once the avcC actually parses, so a parse failure leaves the
 		// importer in avc3 mode where inline-SPS keyframes still self-initialize.
 		let config = config_from_avcc(avcc_bytes)?;
-		self.avc1 = true;
+		self.length_size = Some(super::Avcc::parse(avcc_bytes)?.length_size);
 		self.apply_config(config)?;
 		Ok(())
 	}
@@ -190,13 +190,18 @@ impl Import {
 	/// keyframe's inline SPS and refining the catalog jitter as it goes.
 	fn write_frames(&mut self, frames: impl IntoIterator<Item = Frame>) -> Result<()> {
 		for frame in frames {
-			// avc1 config arrives out-of-band via initialize(); avc3 carries SPS
-			// inline on keyframes.
-			if !self.avc1
-				&& frame.keyframe
-				&& let Some(sps) = find_sps(&frame.payload)
-			{
-				self.configure_from_sps(&sps)?;
+			if frame.keyframe {
+				// HDR metadata first, so a keyframe that also configures publishes once.
+				let hdr = crate::codec::color::access_unit(&frame.payload, self.length_size, 1, |h| {
+					h & 0x1f == NAL_TYPE_SEI
+				});
+				self.catalog.hdr(&mut self.track, hdr)?;
+				// avc1 config arrives out-of-band via initialize(); avc3 carries the SPS inline.
+				if self.length_size.is_none()
+					&& let Some(sps) = find_sps(&frame.payload)
+				{
+					self.configure_from_sps(&sps)?;
+				}
 			}
 
 			if !self.catalog.configured() {
@@ -249,6 +254,7 @@ fn config_from_avcc(avcc_bytes: &[u8]) -> Result<hang::catalog::VideoConfig> {
 	config.coded_width = avcc.coded_width;
 	config.coded_height = avcc.coded_height;
 	config.framerate = avcc.sps.first().and_then(|sps| super::sps_framerate(sps));
+	config.color = avcc.sps.first().and_then(|sps| super::sps_color(sps));
 	config.description = Some(Bytes::copy_from_slice(avcc_bytes));
 	Ok(config)
 }
@@ -267,6 +273,7 @@ fn config_from_sps(sps_nal: &[u8]) -> Result<hang::catalog::VideoConfig> {
 	config.coded_width = Some(sps.coded_width);
 	config.coded_height = Some(sps.coded_height);
 	config.framerate = super::sps_framerate(sps_nal);
+	config.color = super::sps_color(sps_nal);
 	Ok(config)
 }
 

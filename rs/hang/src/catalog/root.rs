@@ -438,6 +438,7 @@ mod test {
 				coded_height: None,
 				display_aspect_width: None,
 				display_aspect_height: None,
+				color: None,
 				bitrate: None,
 				enabled: true,
 				preference: 0,

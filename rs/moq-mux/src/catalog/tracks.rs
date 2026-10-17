@@ -194,6 +194,8 @@ pub struct VideoHint {
 	pub display_aspect_width: Option<u32>,
 	/// The height of the aspect ratio the whole picture is displayed at.
 	pub display_aspect_height: Option<u32>,
+	/// The colour the pixels carry. Each field the stream signals outranks the hint's.
+	pub color: Option<hang::catalog::Color>,
 	/// The maximum bitrate in bits per second.
 	pub bitrate: Option<u64>,
 	/// The frame rate in frames per second.
@@ -238,6 +240,7 @@ impl From<hang::catalog::VideoConfig> for VideoHint {
 			coded_height: config.coded_height,
 			display_aspect_width: config.display_aspect_width,
 			display_aspect_height: config.display_aspect_height,
+			color: config.color,
 			bitrate: config.bitrate,
 			framerate: config.framerate,
 			optimize_for_latency: config.optimize_for_latency,
@@ -263,6 +266,7 @@ impl VideoHint {
 		fill(&mut config.coded_height, self.coded_height);
 		fill(&mut config.display_aspect_width, self.display_aspect_width);
 		fill(&mut config.display_aspect_height, self.display_aspect_height);
+		crate::codec::color::fill(&mut config.color, self.color.as_ref(), "hint");
 		fill(&mut config.bitrate, self.bitrate);
 		fill(&mut config.framerate, self.framerate);
 		fill(&mut config.optimize_for_latency, self.optimize_for_latency);
