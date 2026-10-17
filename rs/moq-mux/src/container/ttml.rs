@@ -135,6 +135,9 @@ impl Edit<'_> {
 struct Scope {
 	source: u128,
 	mapped: u128,
+	/// Where a child without its own begin starts on the catalog clock. Only the body differs from
+	/// `mapped`: it begins at the frame timestamp even when the source started it later.
+	implicit: u128,
 }
 
 /// Maps a source media time onto the catalog clock, clipped to the sample.
@@ -156,8 +159,9 @@ impl Clock {
 /// Rewrite one TTML element's `begin`, `end`, and `dur`, returning the scope for its children.
 ///
 /// Each is resolved to an absolute source time, mapped, and written back relative to its own
-/// reference: `begin` and `end` to the parent's begin, `dur` to the element's begin. The body also
-/// gains a begin and an end, so even untimed content stays inside the sample.
+/// reference: `begin` and `end` to the parent's begin, `dur` to the element's begin. The body always
+/// begins at the frame timestamp and gains an end, so even untimed content stays inside the sample;
+/// a later source begin moves onto its children instead.
 fn timing<R>(
 	reader: &quick_xml::NsReader<R>,
 	element: &BytesStart<'_>,
@@ -198,14 +202,15 @@ fn timing<R>(
 		.source
 		.checked_add(offset.unwrap_or_default())
 		.ok_or("TTML time overflow")?;
-	let mapped = match (offset, body) {
-		(None, false) => parent.mapped,
-		_ => clock.map(source),
+	let (mapped, implicit) = match (offset, body) {
+		(_, true) => (clock.start, clock.map(source)),
+		(None, false) => (parent.implicit, parent.implicit),
+		(Some(_), false) => (clock.map(source), clock.map(source)),
 	};
 	let relative = mapped - parent.mapped;
 	match (begin, offset) {
 		(Some((raw, _)), Some(offset)) if offset != relative => edit.replace(raw, relative),
-		(None, _) if body => edit.insert(element, "begin", relative),
+		(None, _) if body || relative != 0 => edit.insert(element, "begin", relative),
 		_ => {}
 	}
 
@@ -232,7 +237,11 @@ fn timing<R>(
 		edit.insert(element, "end", clock.end - parent.mapped);
 	}
 
-	Ok(Scope { source, mapped })
+	Ok(Scope {
+		source,
+		mapped,
+		implicit,
+	})
 }
 
 /// The root's timing parameters, which give frame and tick expressions their length.
@@ -431,13 +440,14 @@ mod tests {
 		);
 	}
 
+	/// The body begins at the frame timestamp; a later source begin moves onto its untimed children.
 	#[test]
-	fn body_timing_is_clipped_and_kept_when_unchanged() {
+	fn body_begins_at_the_frame_and_clips_to_it() {
 		let document = format!(r#"{ROOT}><body begin="1.5s" dur="10s"><p>Hi</p></body></tt>"#);
 		let output = rewrite(document.as_bytes(), secs(1), secs(1)..secs(3)).unwrap();
 		assert_eq!(
 			output,
-			format!(r#"{ROOT}><body begin="1.5s" dur="00:00:01.5"><p>Hi</p></body></tt>"#)
+			format!(r#"{ROOT}><body begin="00:00:01" dur="00:00:02"><p begin="00:00:00.5">Hi</p></body></tt>"#)
 		);
 		// Character references are parsed by value, and an element may end before it begins.
 		let document = format!(r#"{ROOT}><body begin="1&#x73;"><p begin="5s" end="4s">Hi</p></body></tt>"#);
