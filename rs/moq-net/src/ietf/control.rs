@@ -72,6 +72,8 @@ pub(crate) fn initial_max_request_id(window: u64, peer_client: bool) -> u64 {
 }
 
 struct ControlState {
+	/// Our own role.
+	client: bool,
 	request_id_next: RequestId,
 	/// Legacy request headers that must finish before a later ID can be allocated.
 	/// A count, since two tasks can allocate before either takes its hold.
@@ -122,6 +124,7 @@ impl Control {
 	pub fn new(request_id_max: Option<RequestId>, client: bool) -> Self {
 		Self {
 			state: kio::Shared::new(ControlState {
+				client,
 				request_id_next: if client { RequestId(0) } else { RequestId(1) },
 				request_id_sending: 0,
 				request_id_max,
@@ -131,6 +134,11 @@ impl Control {
 				history: crate::session::Limits::default().requests(),
 			}),
 		}
+	}
+
+	/// Whether we opened the session.
+	pub fn client(&self) -> bool {
+		self.state.lock().client
 	}
 
 	/// Flow control the peer's requests (drafts 14 to 16), admitting `window` at once.

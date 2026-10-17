@@ -664,7 +664,7 @@ impl<E: CatalogExt> Producer<E> {
 		crate::Error: From<C::Error>,
 	{
 		let rendition = self.rendition(track.name())?;
-		self.media(track, container, rendition, config.into())
+		self.media(track, container, rendition, config.into(), None)
 	}
 
 	/// Whether a live producer or published config already claims `name` in `R`'s section.
@@ -744,6 +744,7 @@ impl<E: CatalogExt> Producer<E> {
 		container: C,
 		rendition: super::Rendition<E, R>,
 		config: Option<R>,
+		timeline_hint: Option<std::time::Duration>,
 	) -> crate::Result<crate::container::Producer<C, R>>
 	where
 		C: crate::container::Container,
@@ -751,7 +752,7 @@ impl<E: CatalogExt> Producer<E> {
 		crate::Error: From<C::Error>,
 	{
 		let mut catalog = self.clone();
-		let recorder = catalog.enroll(track.name())?;
+		let recorder = catalog.enroll(track.name(), timeline_hint)?;
 		let mut producer = crate::container::Producer::with_rendition(track, container, rendition)
 			.with_recorder(recorder)
 			.with_bandwidth(self.bandwidth.clone());
@@ -772,7 +773,7 @@ impl<E: CatalogExt> Producer<E> {
 		crate::Error: From<C::Error>,
 	{
 		let mut catalog = self.clone();
-		let recorder = catalog.enroll(track.name())?;
+		let recorder = catalog.enroll(track.name(), None)?;
 		Ok(crate::container::Producer::new(track, container)
 			.with_recorder(recorder)
 			.with_bandwidth(self.bandwidth.clone()))
@@ -794,13 +795,26 @@ impl<E: CatalogExt> Producer<E> {
 	///
 	/// The role-specific track constructors call this for you. fMP4 passthrough calls it directly
 	/// because it writes groups by hand instead of using a [`container::Producer`](crate::container::Producer).
-	pub(crate) fn enroll(&mut self, track: &str) -> crate::Result<crate::timeline::Recorder> {
-		let recorder = self.timeline.track(track, self.cutting.clone())?;
+	pub(crate) fn enroll(
+		&mut self,
+		track: &str,
+		duration_hint: Option<std::time::Duration>,
+	) -> crate::Result<crate::timeline::Recorder> {
+		let mut cutting = self.cutting.clone();
+		if duration_hint.is_some() {
+			cutting = cutting.with_duration_hint(duration_hint);
+		}
+		let mut recorder = self.timeline.track(track, cutting)?;
 		{
 			let mut catalog = self.outputs.catalog_timeline.lock().unwrap();
 			if catalog.recorder.is_none() {
-				// Sparse data: a catalog may not change again, so each group is its own record.
-				let cutting = self.cutting.clone().with_duration_min(std::time::Duration::ZERO);
+				// Sparse data: a catalog may not change again, so each group is its own record, and a
+				// media hint says nothing about its cadence.
+				let cutting = self
+					.cutting
+					.clone()
+					.with_duration_min(std::time::Duration::ZERO)
+					.with_duration_hint(None);
 				catalog.recorder = Some(self.timeline.track(hang::Catalog::DEFAULT_NAME, cutting)?);
 			}
 		}
@@ -815,6 +829,45 @@ impl<E: CatalogExt> Producer<E> {
 		match &mut state.catalog.archive {
 			Some(archive) => archive.timelines = section.timelines,
 			None => state.catalog.archive = Some(section),
+		}
+
+		if !state
+			.catalog
+			.archive
+			.as_ref()
+			.is_some_and(|archive| archive.timelines.contains_key(track))
+		{
+			let name = track.to_string();
+			let timeline = hang::timeline::default_name(track);
+			let current = self.current.clone();
+			let mut outputs = self.outputs.clone();
+			recorder.on_declare(move |duration| {
+				let mut state = take(&current);
+				if state.closed.is_some() {
+					return;
+				}
+				state
+					.catalog
+					.archive
+					.get_or_insert_with(hang::catalog::Archive::new)
+					.timelines
+					.insert(name, hang::catalog::Timeline::new(timeline, duration));
+				let reservations = &mut state.reservations;
+				if !reservations.published && reservations.reservers != 0 {
+					reservations.pending = true;
+					return;
+				}
+				reservations.pending = false;
+				reservations.published = true;
+				state.anchored = true;
+				if let Err(err) = outputs.emit(&state.catalog) {
+					tracing::error!(%err, "failed to publish a timeline declaration, aborting catalog tracks");
+					outputs.abort(&err);
+					state.closed = Some(err);
+				} else {
+					state.estimates.fold();
+				}
+			});
 		}
 
 		Ok(recorder)
@@ -929,6 +982,9 @@ impl<E: CatalogExt> Producer<E> {
 	///
 	/// An estimate rise still held by the once-a-second limit is not published: media has ended.
 	pub fn finish(&mut self) -> crate::Result<()> {
+		// A track that ends before its first record closes declares its timeline now, while the
+		// catalog can still advertise it.
+		self.timeline.flush();
 		{
 			let mut state = take(&self.current);
 			if let Some(err) = &state.closed {
@@ -1328,6 +1384,17 @@ mod test {
 		}
 	}
 
+	#[test]
+	fn msf_omits_media_report_discovery() {
+		let catalog =
+			hang::Catalog::<()>::from_str(include_str!("../../../hang/fixtures/catalog-stats-echo.json")).unwrap();
+		let msf = to_msf::<()>(&catalog, &moq_net::Path::empty());
+		let value = serde_json::to_value(msf).unwrap();
+		assert!(value.get("stats").is_none());
+		assert!(value.get("echo").is_none());
+		assert!(!value["tracks"].as_array().unwrap().is_empty());
+	}
+
 	#[tokio::test(start_paused = true)]
 	async fn abort_preserves_the_cause_on_every_catalog_format_and_clone() {
 		let mut broadcast = moq_net::broadcast::Info::default().produce();
@@ -1651,7 +1718,7 @@ mod test {
 			Err(crate::Error::Moq(moq_net::Error::Closed))
 		));
 		assert!(matches!(
-			catalog.enroll("audio0"),
+			catalog.enroll("audio0", None),
 			Err(crate::Error::Moq(moq_net::Error::Closed))
 		));
 	}
@@ -1761,7 +1828,7 @@ mod test {
 
 		// Something else already took the name the timeline track wants.
 		let _taken = broadcast.create_track("video0.timeline.z", None).unwrap();
-		assert!(catalog.enroll("video0").is_err());
+		assert!(catalog.enroll("video0", None).is_err());
 	}
 
 	#[test]
@@ -1771,7 +1838,9 @@ mod test {
 
 		// A broadcast that never segments never advertises an archive.
 		assert_eq!(catalog.snapshot().archive, None);
-		let _recorder = catalog.enroll("video0").unwrap();
+		let _recorder = catalog
+			.enroll("video0", Some(std::time::Duration::from_secs(4)))
+			.unwrap();
 		let archive = catalog
 			.snapshot()
 			.archive
@@ -1782,6 +1851,92 @@ mod test {
 			vec!["catalog.json", "video0"],
 			"the catalog indexes itself alongside its first media track"
 		);
+	}
+
+	#[test]
+	fn an_estimated_timeline_is_advertised_after_its_first_record() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let mut catalog = Producer::new(&mut broadcast, Config::default()).unwrap();
+		let mut recorder = catalog.enroll("video0", None).unwrap();
+
+		let initial = catalog.snapshot().archive.expect("the catalog timeline is advertised");
+		assert!(!initial.timelines.contains_key("video0"));
+
+		recorder.frame(
+			hang::timeline::Position::group(0),
+			moq_net::Timestamp::from_millis(0).unwrap(),
+			true,
+		);
+		recorder.finish_group(0);
+		recorder.frame(
+			hang::timeline::Position::group(1),
+			moq_net::Timestamp::from_millis(4_000).unwrap(),
+			true,
+		);
+
+		let archive = catalog.snapshot().archive.expect("the estimate publishes the timeline");
+		assert_eq!(archive.timelines["video0"].duration, Some(4_000));
+	}
+
+	#[test]
+	fn a_track_shorter_than_one_record_is_advertised_on_finish() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let mut catalog = Producer::new(&mut broadcast, Config::default()).unwrap();
+		let mut recorder = catalog.enroll("audio0", None).unwrap();
+		recorder.frame(
+			hang::timeline::Position::group(0),
+			moq_net::Timestamp::from_millis(0).unwrap(),
+			true,
+		);
+
+		catalog.finish().unwrap();
+		let archive = catalog.snapshot().archive.expect("the catalog timeline is advertised");
+		assert_eq!(archive.timelines["audio0"].duration, Some(4_000));
+	}
+
+	#[test]
+	fn a_track_finished_before_its_catalog_is_advertised() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = Producer::new(&mut broadcast, Config::default()).unwrap();
+		let net = broadcast
+			.create_track("video0", catalog.track_info(hang::catalog::PRIORITY.video))
+			.unwrap();
+		let mut video = catalog
+			.video(
+				net,
+				crate::catalog::hang::Container::Legacy(crate::container::Kind::Video),
+				VideoConfig::new(hang::catalog::VideoCodec::VP8),
+			)
+			.unwrap();
+		video
+			.write(crate::container::Frame {
+				timestamp: catalog.timestamp(None).unwrap(),
+				duration: None,
+				payload: Bytes::from_static(b"keyframe"),
+				keyframe: true,
+			})
+			.unwrap();
+
+		video.finish().unwrap();
+		let archive = catalog.snapshot().archive.expect("the catalog timeline is advertised");
+		assert_eq!(archive.timelines["video0"].duration, Some(4_000));
+	}
+
+	#[test]
+	fn a_configured_hint_applies_to_media_but_not_the_catalog() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let config = Config::default()
+			.with_timeline(crate::timeline::Config::default().with_duration_hint(std::time::Duration::from_secs(6)));
+		let mut catalog = Producer::new(&mut broadcast, config).unwrap();
+		let _video = catalog.enroll("video0", None).unwrap();
+		let _audio = catalog
+			.enroll("audio0", Some(std::time::Duration::from_secs(5)))
+			.unwrap();
+
+		let archive = catalog.snapshot().archive.expect("the timelines are advertised");
+		assert_eq!(archive.timelines["video0"].duration, Some(6_000));
+		assert_eq!(archive.timelines["audio0"].duration, Some(5_000));
+		assert_eq!(archive.timelines[hang::Catalog::DEFAULT_NAME].duration, Some(0));
 	}
 
 	#[test]

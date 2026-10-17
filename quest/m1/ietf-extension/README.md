@@ -83,7 +83,6 @@ Work owned by this README, after the children land:
 
 ## Required
 
-- [Compact subgroup refusal](/quest/m1/ietf-extension/compact-subgroup.md) - a compact-form subgroup other than 0 is refused, not relabelled as subgroup 0
 - [Dynamic groups](/quest/m1/ietf-extension/dynamic-groups.md) - NEW_GROUP_REQUEST reaches the original publisher, coalesced across downstream subscribers
 - [Track properties](/quest/m1/ietf-extension/track-properties.md) - unknown track properties are forwarded unchanged in SUBSCRIBE_OK, FETCH_OK, and TRACK_STATUS_OK
 - [Relay hops](/quest/m1/ietf-extension/lite.md) - the `ietf` SETUP extension carries every crate-private field across a lite-07 hop between relays

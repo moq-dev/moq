@@ -1121,10 +1121,10 @@ mod tests {
 		}
 	}
 
-	/// A SETUP that ends before its body decodes leaves nothing to wait on, since the
-	/// Setup Stream is already claimed.
+	/// A SETUP that fails to decode leaves nothing to wait on, since the Setup Stream is
+	/// already claimed.
 	#[moq_net_sim::test]
-	async fn truncated_setup_closes_the_session() {
+	async fn malformed_setup_closes_the_session() {
 		for version in [Version::Lite05, Version::Lite06, Version::Lite07] {
 			let mut truncated = Vec::new();
 			DataType::Setup
@@ -1133,31 +1133,45 @@ mod tests {
 					version,
 				)
 				.unwrap();
-			let session =
-				crate::lite::test_transport::ScriptedSession::eof(Vec::new()).with_incoming_unis(vec![truncated]);
-			let log = session.log.clone();
-			let mut started = start(Config {
-				runtime: crate::time::Clock::sim(),
-				session,
-				setup_stream: None,
-				publish: None,
-				subscribe: None,
-				peer_hop: None,
-				version,
-				our_setup: Setup::default(),
-				peer_setup: None,
-				client: false,
-				auth: crate::auth::Handle::new(version.has_auth()),
-				limits: Default::default(),
-			})
-			.unwrap();
-			let _ = started.driver.poll(&kio::Waiter::noop());
-			assert!(
-				log.closes()
-					.iter()
-					.any(|(code, _)| *code == SessionError::ProtocolViolation.to_code()),
-				"{version:?}: a truncated SETUP must close the session"
-			);
+
+			// Two empty parameters with the same ID.
+			let mut repeated = truncated.clone();
+			let mut w = crate::coding::Encoder::new(&mut repeated, version.into());
+			let prefix = w.prefix_varint();
+			w.varint(2).unwrap();
+			for _ in 0..2 {
+				w.varint(0).unwrap();
+				w.bytes(&[]).unwrap();
+			}
+			w.fill(prefix).unwrap();
+
+			for (case, setup) in [("truncated", truncated), ("repeated parameter", repeated)] {
+				let session =
+					crate::lite::test_transport::ScriptedSession::eof(Vec::new()).with_incoming_unis(vec![setup]);
+				let log = session.log.clone();
+				let mut started = start(Config {
+					runtime: crate::time::Clock::sim(),
+					session,
+					setup_stream: None,
+					publish: None,
+					subscribe: None,
+					peer_hop: None,
+					version,
+					our_setup: Setup::default(),
+					peer_setup: None,
+					client: false,
+					auth: crate::auth::Handle::new(version.has_auth()),
+					limits: Default::default(),
+				})
+				.unwrap();
+				let _ = started.driver.poll(&kio::Waiter::noop());
+				assert!(
+					log.closes()
+						.iter()
+						.any(|(code, _)| *code == SessionError::ProtocolViolation.to_code()),
+					"{version:?}, {case}: SETUP must close the session"
+				);
+			}
 		}
 	}
 
