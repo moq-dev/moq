@@ -591,10 +591,8 @@ impl Lease {
 	/// `expired` for an expired grant, nothing for a shutdown, `application` for any other.
 	pub async fn ended(&mut self) -> lease::Reason {
 		let reason = self.uncovered().await;
-		// Any other reason here, the decider's own included, still ends a live session.
-		if reason != lease::Reason::Shutdown {
-			self.stats
-				.fail(revoked(&reason).unwrap_or(moq_net::stats::Failure::Application));
+		if let Some(kind) = uncovered(&reason) {
+			self.stats.fail(kind);
 		}
 		reason
 	}
@@ -685,6 +683,9 @@ impl Lease {
 			}
 			Some(refresh) => {
 				if let Some(ended) = refresh.ended().now_or_never() {
+					if let Some(kind) = uncovered(&ended) {
+						self.stats.fail(kind);
+					}
 					reason = ended;
 				}
 				self.consumer.close(reason.clone(), bytes);
@@ -695,6 +696,15 @@ impl Lease {
 			self.stats.fail(kind);
 		}
 		reason
+	}
+}
+
+/// The failure a lease records when it stops covering a live session. Any reason but a
+/// shutdown, the relay's or the decider's own words included, ends that session.
+fn uncovered(reason: &lease::Reason) -> Option<moq_net::stats::Failure> {
+	match reason {
+		lease::Reason::Shutdown => None,
+		_ => Some(revoked(reason).unwrap_or(moq_net::stats::Failure::Application)),
 	}
 }
 

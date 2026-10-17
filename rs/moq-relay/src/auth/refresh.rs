@@ -698,6 +698,30 @@ mod tests {
 		client.abort(moq_net::Error::Cancel);
 	}
 
+	/// The relay's own reason for ending an unobserved union fails a racing clean close too.
+	#[tokio::test(start_paused = true)]
+	async fn an_unobserved_cap_fails_a_racing_clean_close() {
+		let (auth, mut admissions) = super::super::Auth::embedded("test");
+		let (producer, consumer) = lease::Producer::new(grant("a/**", 3000));
+		let request = auth.request(moq_auth::Transport::Quic, "/room");
+		let (lease, ()) = tokio::join!(auth.admit(request), async {
+			admissions.next().await.unwrap().grant(consumer);
+		});
+		let registry = moq_net::stats::Registry::new(Default::default());
+		let stats = registry.tier(moq_net::stats::Tier::default()).session("room");
+		let (client, session, lease) = connect(lease.unwrap().with_stats(stats.clone())).await;
+
+		let mut capped = grant("a/**", 3000);
+		capped.publish.rate = Some(moq_auth::Rate::from_bps(8000).unwrap());
+		producer.update(capped);
+		lease.close_session(&moq_net::Error::Cancel, Default::default());
+		drop((session, stats));
+		let presence = registry.snapshot().sessions()[0].1;
+		assert_eq!(presence.sessions_ended, 1);
+		assert_eq!(presence.sessions_failed.application, 1);
+		client.abort(moq_net::Error::Cancel);
+	}
+
 	/// A replacement keeps the session alive past the first credential's expiry, so a
 	/// later clean close is not an expired session.
 	#[tokio::test(start_paused = true)]
