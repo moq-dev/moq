@@ -264,7 +264,7 @@ async function fetchGroup(
 ): Promise<GroupConsumer> {
 	options.signal?.throwIfAborted();
 	const subscriber = subscribe(state, name, { priority: options.priority });
-	hooks.exemptFetch(subscriber);
+	hooks.fetchBudget(subscriber, options.maxDelay);
 	try {
 		for (;;) {
 			const group = await untilAborted(subscriber.recvGroup(), options.signal);

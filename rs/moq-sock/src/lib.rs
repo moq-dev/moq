@@ -2,7 +2,7 @@
 //! runtimes.
 //!
 //! [`bind`] opens dual-stack UDP/TCP sockets with sane buffers;
-//! [`shard::Group`] forms and steers an `SO_REUSEPORT` group by QUIC connection
+//! [`shard::bind`] forms and steers an `SO_REUSEPORT` group by QUIC connection
 //! id, so a worker-per-core listener keeps each connection on the socket that
 //! owns it; [`cpu`] pins those workers; [`udp`] (forked from quinn-udp) sends
 //! and receives with GSO, GRO, and ECN. Both `moq-tokio` and `moq-uring` build

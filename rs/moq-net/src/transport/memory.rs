@@ -294,6 +294,10 @@ impl poll::Session for Session {
 		Poll::Ready(opened.map(|()| (send, recv)))
 	}
 
+	fn send_group(&mut self, _: i64) -> Option<crate::transport::poll::Ungrouped> {
+		None
+	}
+
 	fn poll_send_datagram(&mut self, _cx: &mut Context<'_>, payload: &[u8]) -> Poll<Result<(), Error>> {
 		if let Some(err) = closed(&self.conn().close) {
 			return Poll::Ready(Err(err));
@@ -390,6 +394,7 @@ pub struct SendStream {
 
 impl poll::SendStream for SendStream {
 	type Error = Error;
+	type Group = crate::transport::poll::Ungrouped;
 
 	fn poll_write(&mut self, cx: &mut Context<'_>, buf: &[u8]) -> Poll<Result<usize, Error>> {
 		let mut buf = buf;
@@ -430,7 +435,11 @@ impl poll::SendStream for SendStream {
 	}
 
 	/// Ignored: with no link to share, there is nothing to schedule.
-	fn set_priority(&mut self, _order: i32) {}
+	fn set_priority(&mut self, _order: i64) {}
+
+	fn set_group(&mut self, group: &Self::Group) {
+		match *group {}
+	}
 
 	fn finish(&mut self) -> Result<(), Error> {
 		if self.done {

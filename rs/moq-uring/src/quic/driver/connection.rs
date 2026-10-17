@@ -171,6 +171,18 @@ impl Inner {
 		state.fail(err);
 	}
 
+	/// Fail the connection because its peer has no route, closing it so the
+	/// driver still drains it out of the endpoint.
+	pub(crate) fn unreachable(&self, err: &std::io::Error) {
+		self.conn
+			.borrow_mut()
+			.close(moq_clock::Instant::now(), 0u32.into(), Bytes::new());
+		self.state.borrow_mut().fail(Error::Transport {
+			code: moq_quic::TransportErrorCode::NO_VIABLE_PATH.into(),
+			reason: err.to_string(),
+		});
+	}
+
 	/// Park `waiter` until stream `id` is writable again.
 	pub(crate) fn park_writable(&self, id: StreamId, waiter: &kio::Waiter) {
 		let mut state = self.state.borrow_mut();
@@ -301,6 +313,12 @@ impl Connection {
 	/// The worker driving this connection.
 	pub(crate) fn owner(&self) -> &Owner {
 		&self.shared.owner
+	}
+
+	/// Open a send group at `priority`, for streams to join with
+	/// [`SendStream::set_group`](super::SendStream::set_group).
+	pub fn send_group(&self, priority: i64) -> super::SendGroup {
+		super::SendGroup::new(self.shared.clone(), priority)
 	}
 
 	/// The peer's certificate chain in DER, leaf first, or `None` if it

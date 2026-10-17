@@ -9,7 +9,7 @@
 //! the others carry no auth for those routes, so their cost is waking on a change that
 //! sends nothing.
 
-#[path = "../tests/support/mod.rs"]
+#[path = "../tests/integration/support/mod.rs"]
 mod support;
 
 use bytes::Bytes;
