@@ -33,6 +33,11 @@ const MAX_FORWARD: std::time::Duration = std::time::Duration::from_secs(10);
 /// stuck. retina's keepalives only prove the server answers, not that the camera sends media.
 const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
+/// How long every video stream may go without a keyframe after PLAY. One that never sends any
+/// would withhold the catalog while the session's other streams keep [`TIMEOUT`] from firing.
+/// Generous, since a camera's "smart" codec can stretch the keyframe interval well past 10s.
+const KEYFRAME_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// Why [`Client::pull`] returned without an error.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -57,6 +62,8 @@ pub struct Client {
 	creds: Option<Credentials>,
 	/// [`TIMEOUT`], shortened by tests.
 	timeout: std::time::Duration,
+	/// [`KEYFRAME_TIMEOUT`], shortened by tests.
+	keyframe_timeout: std::time::Duration,
 }
 
 impl Client {
@@ -95,6 +102,7 @@ impl Client {
 			url,
 			creds,
 			timeout: TIMEOUT,
+			keyframe_timeout: KEYFRAME_TIMEOUT,
 		})
 	}
 
@@ -199,10 +207,14 @@ impl Client {
 		let result: Result<End> = async {
 			let mut session = self.within(session.play(play)).await??.demuxed()?;
 			tracing::info!(%url, streams = tracks.len(), "RTSP session playing");
+			let playing = tokio::time::Instant::now();
 			while let Some(item) = self.within(session.next()).await? {
 				if ingest.push(item?, session.streams())?.is_some() {
 					tracing::warn!(%url, "RTSP timeline jumped, ending the session");
 					return Ok(End::Jumped);
+				}
+				if ingest.awaiting_keyframe() && playing.elapsed() > self.keyframe_timeout {
+					return Err(Error::Stalled(self.keyframe_timeout));
 				}
 			}
 			Ok(End::Closed)
@@ -434,6 +446,14 @@ impl Ingest {
 			}
 		}
 		Ok(None)
+	}
+
+	/// Whether a video stream has yet to publish its first keyframe.
+	fn awaiting_keyframe(&self) -> bool {
+		self.streams
+			.iter()
+			.flatten()
+			.any(|stream| matches!(stream.track, Track::Video(_)) && !stream.started)
 	}
 
 	/// Flush every track and end it cleanly, reporting the first failure.
@@ -853,6 +873,32 @@ mod tests {
 		let err = within("the pull", pull).await.unwrap().unwrap_err();
 		assert!(matches!(err, Error::Stalled(_)), "{err}");
 		assert!(started.elapsed() >= Duration::from_millis(200));
+	}
+
+	/// A video stream that never sends a keyframe would withhold the catalog while its audio
+	/// keeps the session alive, so the pull fails rather than idling.
+	#[tokio::test]
+	async fn a_stream_without_keyframes_stalls() {
+		let server = Server::bind(vec![Media::H264 { sprop: true }, Media::Aac]).await;
+		let (broadcast, catalog) = broadcast();
+		let mut client = Client::new(server.url()).unwrap();
+		client.keyframe_timeout = Duration::from_millis(200);
+		let mut pull = tokio::spawn(async move { client.pull(&broadcast, &catalog).await });
+
+		let mut session = within("PLAY", server.accept(0)).await;
+		let err = within("the pull", async {
+			for frame in 0.. {
+				session.video(0, frame * FRAME, &[fake::H264_SLICE]).await;
+				session.aac(1, frame * 1600, b"audio").await;
+				tokio::select! {
+					result = &mut pull => return result.unwrap().unwrap_err(),
+					_ = tokio::time::sleep(Duration::from_millis(30)) => {}
+				}
+			}
+			unreachable!()
+		})
+		.await;
+		assert!(matches!(err, Error::Stalled(_)), "{err}");
 	}
 
 	/// A server whose `rtptime` lands well after its packets would never publish anything, so

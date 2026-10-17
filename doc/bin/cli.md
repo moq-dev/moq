@@ -107,8 +107,8 @@ and the camera needs no inbound port. Credentials go in the URL
 (`rtsp://user:pass@camera/stream`), which other local users can read from the
 process list. Audio nothing in the stack plays, such as G.711, is skipped with
 a warning, and the broadcast goes on video-only. It reconnects with backoff,
-including when the camera sends no media for 10 seconds, until a fatal error
-(refused credentials, or no stream it can publish), and
+including when the camera sends no media for 10 seconds or no keyframe for 30,
+until a fatal error (refused credentials, or no stream it can publish), and
 each RTSP session is a new broadcast with its own catalog, since the session's
 RTP time restarts; a camera whose clock jumps mid-session is restarted the same
 way. Embed [`moq-rtsp`](https://docs.rs/moq-rtsp) for your own supervision,
