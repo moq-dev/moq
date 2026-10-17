@@ -38,7 +38,6 @@ Public API: none. Wire: none.
 - [Auth refresh mocks time](/quest/m1/test-flakes-2/auth-refresh-mock-time.md) - moq-relay's auth refresh and fixed-lease tests measure a grant's life on one mocked clock
 - [uring teardown close](/quest/m1/test-flakes-2/uring-teardown-close.md) - moq-uring's published-close teardown test holds under load, fixed at its cause
 - [Relay burst drill](/quest/m1/test-flakes-2/relay-burst-impaired.md) - the impaired transport-peer burst drill never aborts its subscription while the link is up
-- [WASM IETF read](/quest/m1/test-flakes-2/wasm-ietf-read.md) - the WASM suite's IETF read case reads whole groups on a loaded runner, fixed at the burst or the assertion as the evidence says
 - [BBR marking seed](/quest/m1/test-flakes-2/bbr-marking-seed.md) - the BBR marking test seeds its probe schedule, replays a failing seed, and its rare drop is fixed at the cause
 
 ## Related

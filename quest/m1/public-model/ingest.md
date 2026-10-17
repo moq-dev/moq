@@ -182,10 +182,6 @@ Tests: each public call gets a mock-time test in its language, and the
 built-in subscribers move onto the public calls, so their existing suites
 cover the behavior.
 
-## Required
-
-- [Narrow the model before it goes public](/quest/m1/public-model/narrow.md) - its visibility rewrite and marker lint guard every model API this child edits
-
 ## Related
 
 - [Public model after ranges, handover, and the JS tail](/quest/m1/public-model/deferred.md) - the fetch ingest, `mirror`, and `endTrack` items split out of this quest

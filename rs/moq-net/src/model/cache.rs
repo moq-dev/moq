@@ -62,7 +62,7 @@ use super::{aborts, expiry, group};
 ///
 /// Also bounds the live group count (`used / ENTRY_OVERHEAD`), which keeps the
 /// access-time sum below u64 (see [`TICK_MS`]).
-pub(crate) const ENTRY_OVERHEAD: u64 = group::CACHE_OVERHEAD + track::CACHE_OVERHEAD;
+pub(super) const ENTRY_OVERHEAD: u64 = group::CACHE_OVERHEAD + track::CACHE_OVERHEAD;
 
 /// Sub-tick boosts applied to the last-access stamp, breaking ties within one
 /// coarse tick: a frame write outranks merely-inserted content, and a read (a
@@ -258,7 +258,7 @@ impl Pool {
 	}
 
 	/// The LRU window in coarse ticks; effectively infinite when disabled.
-	pub(crate) fn expiry_ticks(&self) -> u64 {
+	pub(super) fn expiry_ticks(&self) -> u64 {
 		match self.inner.expiry {
 			u64::MAX => u64::MAX,
 			ms => ms / TICK_MS,
@@ -269,14 +269,14 @@ impl Pool {
 	///
 	/// Expiry is approximate: activity is dated on the following cleanup pass,
 	/// and passes run at half the idle window.
-	pub(crate) fn sweep_interval(&self) -> Option<Duration> {
+	pub(super) fn sweep_interval(&self) -> Option<Duration> {
 		self.expiry()
 			.or_else(|| self.capacity().map(|_| DEFAULT_EXPIRY))
 			.map(|window| window / 2)
 	}
 
 	/// Expire idle groups across the registered tracks.
-	pub(crate) fn sweep(&self) {
+	pub(super) fn sweep(&self) {
 		// Upgrade outside each track's lock: dropping its last account unregisters it.
 		let tracks: Vec<_> = self
 			.inner
@@ -390,7 +390,7 @@ impl Pool {
 	/// Both, because the clock alone runs behind a driver that is supplied time some other
 	/// way (a paused test runtime), which would leave a read woken at a deadline judging
 	/// it not yet reached and parking on it again.
-	pub(crate) fn now_wall(&self) -> crate::time::Instant {
+	pub(super) fn now_wall(&self) -> crate::time::Instant {
 		let wall = super::clock::wall();
 		match self.inner.wall_epoch.get() {
 			Some(epoch) => {
@@ -433,7 +433,7 @@ impl Pool {
 	/// Move the pool's sampled clock forward by `duration`, dating accesses on either
 	/// side without collecting, as if that much time passed between two passes.
 	#[cfg(test)]
-	pub(crate) fn step(&self, duration: Duration) {
+	pub(super) fn step(&self, duration: Duration) {
 		let now = self
 			.inner
 			.clock
@@ -477,7 +477,7 @@ impl Pool {
 
 	/// Returns true if both handles share the same underlying pool.
 	#[cfg(test)]
-	pub(crate) fn same_pool(&self, other: &Self) -> bool {
+	pub(super) fn same_pool(&self, other: &Self) -> bool {
 		Arc::ptr_eq(&self.inner, &other.inner)
 	}
 
@@ -489,17 +489,17 @@ impl Pool {
 	}
 
 	/// Charge `n` more cached bytes.
-	pub(crate) fn add(&self, n: u64) {
+	pub(super) fn add(&self, n: u64) {
 		self.inner.used.fetch_add(n, Ordering::Relaxed);
 	}
 
 	/// Release `n` cached bytes.
-	pub(crate) fn sub(&self, n: u64) {
+	pub(super) fn sub(&self, n: u64) {
 		self.inner.used.fetch_sub(n, Ordering::Relaxed);
 	}
 
 	/// Coarse ticks since the first cleanup call.
-	pub(crate) fn now(&self) -> u64 {
+	pub(super) fn now(&self) -> u64 {
 		self.inner.tick.load(Ordering::Relaxed)
 	}
 
@@ -511,7 +511,7 @@ impl Pool {
 	/// Mean last-access tick across the evictable population, or `None` when it is
 	/// empty. The sum and count are read separately, so the mean is approximate
 	/// under concurrent updates; eviction only needs a rough frontier.
-	pub(crate) fn average(&self) -> Option<u64> {
+	pub(super) fn average(&self) -> Option<u64> {
 		let count = self.inner.access_count.load(Ordering::Relaxed);
 		if count == 0 {
 			return None;
@@ -520,19 +520,19 @@ impl Pool {
 	}
 
 	/// A group with last-access tick `ts` joined the evictable population.
-	pub(crate) fn access_insert(&self, ts: u64) {
+	pub(super) fn access_insert(&self, ts: u64) {
 		self.inner.access_sum.fetch_add(ts, Ordering::Relaxed);
 		self.inner.access_count.fetch_add(1, Ordering::Relaxed);
 	}
 
 	/// A group with last-access tick `ts` left the evictable population.
-	pub(crate) fn access_remove(&self, ts: u64) {
+	pub(super) fn access_remove(&self, ts: u64) {
 		self.inner.access_sum.fetch_sub(ts, Ordering::Relaxed);
 		self.inner.access_count.fetch_sub(1, Ordering::Relaxed);
 	}
 
 	/// An evictable group's last-access tick moved from `old` to `new` (a FETCH hit).
-	pub(crate) fn access_refresh(&self, old: u64, new: u64) {
+	pub(super) fn access_refresh(&self, old: u64, new: u64) {
 		// A single wrapping add keeps the sum exact even under racing refreshes.
 		self.inner
 			.access_sum
@@ -546,7 +546,7 @@ impl Pool {
 	/// than was written and the overshoot decays toward the capacity. Tracks double
 	/// it when their oldest content is staler than [`Self::average`]. Saturates: a
 	/// tiny capacity must not wrap a huge debt into a small one.
-	pub(crate) fn accrue(&self, written: u64) -> Option<u64> {
+	pub(super) fn accrue(&self, written: u64) -> Option<u64> {
 		let used = self.inner.used.load(Ordering::Relaxed);
 		let capacity = self.inner.capacity.load(Ordering::Relaxed);
 		if used <= capacity {
@@ -617,7 +617,7 @@ const EXPIRY_SCAN_TICKS: u64 = 1000 / TICK_MS;
 /// The default account is detached: an unbounded pool and no track, so every operation
 /// is a no-op.
 #[derive(Default)]
-pub(crate) struct Track {
+pub(super) struct Track {
 	pool: Pool,
 
 	// Gross bytes charged by this track's groups (payload plus overhead), never
@@ -662,7 +662,7 @@ struct Largest {
 
 impl Track {
 	/// Raise the track's largest frame to `position`, waking only its own waiters.
-	pub(crate) fn advance_largest(&self, position: Position) {
+	pub(super) fn advance_largest(&self, position: Position) {
 		let mut largest = self.largest.lock();
 		if largest.position.is_none_or(|current| position > current) {
 			largest.position = Some(position);
@@ -675,7 +675,7 @@ impl Track {
 	}
 
 	/// Wake the largest's readers to check whether it can still advance.
-	pub(crate) fn touch_largest(&self) {
+	pub(super) fn touch_largest(&self) {
 		let mut largest = self.largest.lock();
 		largest.settled = largest.settled.wrapping_add(1);
 	}
@@ -724,7 +724,7 @@ impl Track {
 	}
 
 	/// Open an account against `pool` for the track behind `state`.
-	pub(crate) fn new(pool: Pool, state: kio::Weak<TrackState>) -> Arc<Self> {
+	pub(super) fn new(pool: Pool, state: kio::Weak<TrackState>) -> Arc<Self> {
 		let track = Arc::new(Self {
 			pool,
 			written: AtomicU64::new(0),
@@ -743,12 +743,12 @@ impl Track {
 	}
 
 	/// The pool this track caches into.
-	pub(crate) fn pool(&self) -> &Pool {
+	pub(super) fn pool(&self) -> &Pool {
 		&self.pool
 	}
 
 	/// The track's reads parked on their drift budget.
-	pub(crate) fn wakes(&self) -> &expiry::Wakes {
+	pub(super) fn wakes(&self) -> &expiry::Wakes {
 		&self.wakes
 	}
 
@@ -771,7 +771,7 @@ impl Track {
 
 	/// Park `waiter` until the pool's wall clock reaches `at`. While no driver collects the
 	/// pool, nothing would release it, so `waiter` parks on the first collection instead.
-	pub(crate) fn watch_wall(self: &Arc<Self>, at: crate::time::Instant, waiter: &kio::Waiter) {
+	pub(super) fn watch_wall(self: &Arc<Self>, at: crate::time::Instant, waiter: &kio::Waiter) {
 		if !self.pool.watch_driven(waiter) {
 			return;
 		}
@@ -781,7 +781,7 @@ impl Track {
 	}
 
 	/// Charge a new group's fixed overhead, returning its [`Charge`].
-	pub(crate) fn charge(self: &Arc<Self>) -> Charge {
+	pub(super) fn charge(self: &Arc<Self>) -> Charge {
 		self.pool.add(ENTRY_OVERHEAD);
 		self.written.fetch_add(ENTRY_OVERHEAD, Ordering::Relaxed);
 		let access = Arc::new(Access::new(self.pool.stamp(0)));
@@ -794,7 +794,7 @@ impl Track {
 	}
 
 	/// Take everything written since the last call, to be turned into eviction debt.
-	pub(crate) fn take_written(&self) -> u64 {
+	pub(super) fn take_written(&self) -> u64 {
 		self.written.swap(0, Ordering::Relaxed)
 	}
 
@@ -809,12 +809,12 @@ impl Track {
 	/// `now` is the coarse tick a cache access on this path just sampled (see
 	/// [`Charge::add`]), reused so a frame write reads the clock once instead of
 	/// twice. `None` leaves the gate to sample it, and only if it needs it.
-	pub(crate) fn settle(&self, now: Option<u64>) {
+	pub(super) fn settle(&self, now: Option<u64>) {
 		self.settle_inner(now, false);
 	}
 
 	/// Settle from [`Pool::sweep`], dating activity and expiring every idle candidate.
-	pub(crate) fn sweep(&self) {
+	pub(super) fn sweep(&self) {
 		self.settle_inner(None, true);
 	}
 
@@ -863,7 +863,7 @@ impl Track {
 	}
 
 	/// Claim the next rotating window in the track's eviction order.
-	pub(crate) fn next_expiry_scan(&self, width: usize) -> usize {
+	pub(super) fn next_expiry_scan(&self, width: usize) -> usize {
 		self.expiry_cursor.fetch_add(width, Ordering::Relaxed)
 	}
 
@@ -913,7 +913,7 @@ impl Drop for Track {
 /// no matter who does it or when. The default charge is detached: it belongs to no
 /// account and every operation is a no-op.
 #[derive(Default)]
-pub(crate) struct Charge {
+pub(super) struct Charge {
 	track: Option<Arc<Track>>,
 	// Bytes currently charged, including ENTRY_OVERHEAD, released on drop.
 	bytes: u64,
@@ -939,7 +939,7 @@ pub(crate) struct Charge {
 /// every parked consumer, and a mere cache access must not wake anyone, so [`Charge`]
 /// stamps this through a shared guard.
 #[derive(Default)]
-pub(crate) struct Access {
+pub(super) struct Access {
 	stamp: AtomicU64,
 	expires: AtomicU64,
 }
@@ -953,17 +953,17 @@ impl Access {
 	}
 
 	/// The stamp, tie-breaking bits included.
-	pub(crate) fn get(&self) -> u64 {
+	pub(super) fn get(&self) -> u64 {
 		self.stamp.load(Ordering::Relaxed)
 	}
 
 	/// Clear the expiration timestamp until a cleanup pass observes this access.
-	pub(crate) fn touch(&self) {
+	pub(super) fn touch(&self) {
 		self.expires.store(u64::MAX, Ordering::Relaxed);
 	}
 
 	/// The last access tick, assigning undated activity only during cleanup.
-	pub(crate) fn tick(&self, now: Option<u64>) -> Option<u64> {
+	pub(super) fn tick(&self, now: Option<u64>) -> Option<u64> {
 		let tick = match now {
 			Some(now) => match self
 				.expires
@@ -996,7 +996,7 @@ impl Charge {
 	/// Returns the coarse tick it stamped, which the caller hands to
 	/// [`Track::settle`] so the write path reads the clock once rather than twice.
 	/// `None` when the charge is detached and stamped nothing.
-	pub(crate) fn add(&mut self, n: u64) -> Option<u64> {
+	pub(super) fn add(&mut self, n: u64) -> Option<u64> {
 		if let Some(track) = &self.track {
 			track.pool.add(n);
 			track.written.fetch_add(n, Ordering::Relaxed);
@@ -1006,25 +1006,25 @@ impl Charge {
 	}
 
 	/// The group's full cached footprint: payload bytes plus overhead.
-	pub(crate) fn size(&self) -> u64 {
+	pub(super) fn size(&self) -> u64 {
 		self.bytes
 	}
 
 	/// The shared handle to this group's last-access stamp, so the group can read it
 	/// without taking the state lock this charge lives behind.
-	pub(crate) fn access(&self) -> Arc<Access> {
+	pub(super) fn access(&self) -> Arc<Access> {
 		self.access.clone()
 	}
 
 	/// Tick of the group's last cache access.
-	pub(crate) fn accessed(&self) -> u64 {
+	pub(super) fn accessed(&self) -> u64 {
 		self.access.get()
 	}
 
 	/// Enter the group into the evictable population (demoted from the live edge,
 	/// or inserted behind it), sampling its access time into the pool's mean.
 	/// Idempotent.
-	pub(crate) fn demote(&mut self) {
+	pub(super) fn demote(&mut self) {
 		if let Some(track) = &self.track
 			&& !self.counted
 		{
@@ -1036,7 +1036,7 @@ impl Charge {
 	/// Record a cache read: a delivered or fetched group, a frame read, or a
 	/// fetched backfill's birth. `&self` so the read paths can stamp through a
 	/// shared guard without waking parked consumers.
-	pub(crate) fn refresh(&self) {
+	pub(super) fn refresh(&self) {
 		self.touch(READ_BOOST);
 	}
 
@@ -1045,7 +1045,7 @@ impl Charge {
 	/// other write. `&mut self` deliberately: reaching it through a kio write
 	/// guard marks the guard modified, so its release wakes parked readers. Returns
 	/// the stamped tick like [`Self::add`].
-	pub(crate) fn record_write(&mut self) -> Option<u64> {
+	pub(super) fn record_write(&mut self) -> Option<u64> {
 		self.touch(WRITE_BOOST)
 	}
 
@@ -1071,7 +1071,7 @@ impl Charge {
 
 	/// Release everything this charge holds: bytes, overhead, and the access
 	/// sample. Idempotent; used when the group aborts and clears its frames.
-	pub(crate) fn clear(&mut self) {
+	pub(super) fn clear(&mut self) {
 		if let Some(track) = &self.track {
 			track.pool.sub(self.bytes);
 			self.bytes = 0;

@@ -1565,6 +1565,7 @@ export class Subscriber {
 		return undefined;
 	}
 
+	// pending: /quest/m1/public-model/deferred.md
 	/**
 	 * An independent subscriber to the same track, with its own cursor and its own replay of
 	 * the retained window.

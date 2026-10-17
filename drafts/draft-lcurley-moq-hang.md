@@ -730,6 +730,8 @@ If the codec does not support delta frames (e.g. audio), a group MAY consist of 
 Otherwise, a group MUST consist of its random access picture followed by zero or more delta frames.
 
 A group with no decodable frames is a walk-now discontinuity: one empty codec payload and no media.
+An empty payload is data on a data track, so in every container a data track's marker is one object with no bytes, which is no frame; it ends at the furthest point the consumer has read.
+On an audio or video track an object with no bytes is malformed, and so is one sharing its group with any other object.
 A consumer MUST NOT submit the marker to a decoder.
 Empty groups (zero objects) are permitted and mean nothing.
 After a discontinuity the timeline continues forward.
@@ -1247,6 +1249,7 @@ This document has no IANA actions.
 ## moq-hang-04
 {:numbered="false"}
 
+- A data track marks a discontinuity with a group of one object with no bytes, since its empty payload is data. An object with no bytes on an audio or video track, or sharing its group, is malformed.
 - Each archive timeline declares its own fixed nominal record duration, omitted for an untimed track; removed the broadcast-wide duration bound.
 - Added the optional video `preference` field: a consumer selects automatically among the highest preference it can decode.
 - Derived HLS and DASH exports hand disabled references to enabled renditions at the first record numbered past the advertised ones, keeping the record `sequence` as the HLS media sequence and starting a DASH period.

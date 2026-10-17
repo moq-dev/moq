@@ -33,7 +33,7 @@ fn timestamp_lt(left: moq_net::Timestamp, right: moq_net::Timestamp) -> bool {
 /// [`cut`](Self::cut) closes the current group early, ideally saying where its content
 /// ends; the next write must be a keyframe. Reach for it when the following keyframe won't
 /// supply that boundary in time, or to bound each group of an accumulating audio track.
-/// [`discontinuity`](Self::discontinuity) publishes a marker group of one empty frame, for
+/// [`discontinuity`](Self::discontinuity) publishes a marker group with no media, for
 /// when the timeline is about to jump rather than merely continue. Timestamps never fall
 /// below the live edge earlier groups reached.
 ///
@@ -57,9 +57,6 @@ pub struct Producer<C: Container, R = ()> {
 	/// Sequence to use for the next group opened by [`Self::write`].
 	/// Set by [`Self::seek`] and consumed on the next group creation.
 	pending_sequence: Option<u64>,
-	/// One past the newest group, which a discontinuity skips. Seeded from the track's largest
-	/// frame, so it continues after what the track already holds.
-	next_sequence: u64,
 
 	/// Reports each written frame and finished group into this rendition's timeline, when the
 	/// producer was built with one.
@@ -141,14 +138,6 @@ where
 	}
 }
 
-/// One past the track's largest frame's group, so a wrapper continues after what it already holds.
-fn next_sequence(track: &moq_net::track::Producer) -> u64 {
-	match track.clone().poll_largest(&moq_net::kio::Waiter::noop()) {
-		std::task::Poll::Ready(Some(largest)) => largest.group + 1,
-		_ => 0,
-	}
-}
-
 impl<C: Container> Producer<C> {
 	/// Create a Producer wrapping the given moq-lite producer, muxing into `container`.
 	///
@@ -156,7 +145,6 @@ impl<C: Container> Producer<C> {
 	/// [`with_buffer`](Self::with_buffer); the timeline recorder is wired by the catalog (see
 	/// [`catalog::Producer::video`](crate::catalog::Producer::video) and its sibling APIs.
 	pub fn new(track: moq_net::track::Producer, container: C) -> Self {
-		let next_sequence = next_sequence(&track);
 		Self {
 			inner: track,
 			container,
@@ -164,7 +152,6 @@ impl<C: Container> Producer<C> {
 			buffer: Vec::new(),
 			buffer_duration: std::time::Duration::ZERO,
 			pending_sequence: None,
-			next_sequence,
 			recorder: None,
 			end: None,
 			live_edge: None,
@@ -194,7 +181,6 @@ where
 		E: crate::catalog::hang::CatalogExt,
 		R: crate::catalog::RenditionConfig<E>,
 	{
-		let next_sequence = next_sequence(&track);
 		Self {
 			inner: track,
 			container,
@@ -202,7 +188,6 @@ where
 			buffer: Vec::new(),
 			buffer_duration: std::time::Duration::ZERO,
 			pending_sequence: None,
-			next_sequence,
 			recorder: None,
 			end: None,
 			live_edge: None,
@@ -352,9 +337,14 @@ where
 		self.group.is_none()
 	}
 
-	/// One past the newest group this producer opened, where the next one goes by default.
+	/// One past the group of the track's largest frame: where a group continues after what
+	/// the track holds. A newer group with no frame yet is not counted, so a seek onto it is
+	/// [`moq_net::Error::Duplicate`].
 	pub(crate) fn next_sequence(&self) -> u64 {
-		self.next_sequence
+		match self.inner.clone().poll_largest(&moq_net::kio::Waiter::noop()) {
+			std::task::Poll::Ready(Some(largest)) => largest.group + 1,
+			_ => 0,
+		}
 	}
 
 	/// Buffer up to `duration` of frames into each container frame.
@@ -464,7 +454,6 @@ where
 				Some(sequence) => self.inner.create_group(moq_net::group::Info { sequence })?,
 				None => self.inner.append_group()?,
 			};
-			self.next_sequence = group.sequence + 1;
 
 			self.floor = self.start;
 			self.start = Some(frame.timestamp);
@@ -642,9 +631,10 @@ where
 	///
 	/// Audio and video write one empty frame at the exclusive end of the previous epoch.
 	/// That object exists on moq-transport, so the live edge moves immediately; a consumer
-	/// MUST NOT submit it to a decoder. Data tracks skip a sequence with no object, because
-	/// an empty payload is data. The next [`write`](Self::write) opens the group after the
-	/// marker and may not start below the last media group's start.
+	/// MUST NOT submit it to a decoder. An empty payload is data on a data track, so its
+	/// marker is one object with no bytes at all, not even the container's timestamp. The
+	/// next [`write`](Self::write) opens the group after the marker and may not start below
+	/// the last media group's start.
 	///
 	/// To bound the closing group's final frame, [`cut(end)`](Self::cut) before calling this.
 	/// Otherwise the open group closes without a duration marker: what resumes may land sooner
@@ -656,34 +646,27 @@ where
 		// the gap to the far side is not a frame duration.
 		self.estimator.discontinuity();
 		self.cadence = None;
-		if self.container.kind() == Kind::Data {
-			// Empty is payload on a data track, so skip this sequence with no object.
-			let skipped = match self.pending_sequence.take() {
-				Some(sequence) => sequence,
-				None => self.next_sequence,
-			};
-			self.pending_sequence = Some(skipped + 1);
-			return Ok(());
-		}
 		let mut group = match self.pending_sequence.take() {
 			Some(sequence) => self.inner.create_group(moq_net::group::Info { sequence })?,
 			None => self.inner.append_group()?,
 		};
-		self.next_sequence = group.sequence + 1;
 		let timestamp = self.live_edge.unwrap_or(moq_net::Timestamp::ZERO);
 		if let Some(recorder) = self.recorder.as_mut() {
 			recorder.frame(hang::timeline::Position::group(group.sequence), timestamp, false);
 			recorder.end(timestamp);
 		}
-		self.container.write(
-			&mut group,
-			&[Frame {
-				timestamp,
-				payload: Bytes::new(),
-				keyframe: false,
-				duration: None,
-			}],
-		)?;
+		match self.container.kind() {
+			Kind::Data => group.write_frame(timestamp, Bytes::new())?,
+			Kind::Audio | Kind::Video => self.container.write(
+				&mut group,
+				&[Frame {
+					timestamp,
+					payload: Bytes::new(),
+					keyframe: false,
+					duration: None,
+				}],
+			)?,
+		}
 		group.finish()?;
 		if let Some(recorder) = self.recorder.as_mut() {
 			recorder.finish_group(group.sequence);
@@ -1120,14 +1103,15 @@ mod tests {
 		let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.audio));
 		let mut producer = Producer::new(track, Container::Legacy(crate::container::Kind::Audio));
 
+		let mut edge = producer.track().clone();
+
 		producer.write(frame(0, true)).unwrap();
-		let stale = producer.next_sequence() - 1;
+		let stale = edge.largest().await.map(|largest| largest.group);
 
 		producer.discontinuity().unwrap();
-		let edge = producer.next_sequence() - 1;
+		let fresh = edge.largest().await.map(|largest| largest.group);
 
-		assert_ne!(edge, stale, "the marker group is the live edge now");
-		assert_eq!(edge, stale + 1);
+		assert_eq!(fresh, stale.map(|s| s + 1), "the marker group is the live edge now");
 	}
 
 	/// The marker sits at the duration marker a cut wrote, not at the last frame below it,
@@ -1156,32 +1140,6 @@ mod tests {
 			);
 			assert_eq!(groups[1], vec![(marker, 0)], "cut({end:?}) then discontinuity");
 		}
-	}
-
-	/// A producer wrapping a track that already holds groups skips past them on a discontinuity,
-	/// rather than numbering its next group below what the track holds.
-	#[tokio::test]
-	async fn discontinuity_continues_after_the_tracks_groups() {
-		let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
-		let mut consumer = track.subscribe(replay());
-		let mut earlier = Producer::new(track.clone(), Container::Legacy(crate::container::Kind::Data));
-		earlier.write(frame(0, true)).unwrap();
-		earlier.cut(None).unwrap();
-
-		let mut producer = Producer::new(track, Container::Legacy(crate::container::Kind::Data));
-		producer.discontinuity().unwrap();
-		producer.write(frame(10_000, true)).unwrap();
-		producer.finish().unwrap();
-
-		let mut sequences = Vec::new();
-		while let Some(group) = consumer.recv_group().await.unwrap() {
-			sequences.push(group.sequence);
-		}
-		assert_eq!(
-			sequences,
-			vec![0, 2],
-			"the discontinuity skips the sequence after group 0"
-		);
 	}
 
 	/// Explicit keyframe closes the current group and starts a new one.

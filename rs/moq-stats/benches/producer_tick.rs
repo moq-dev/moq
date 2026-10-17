@@ -13,6 +13,10 @@
 //! `stats/presence` sweeps the same tick over connected auth roots and the
 //! presence tracks held for them.
 //!
+//! `stats/prefix` sweeps it over held paths, path depth, and held prefix
+//! tracks: each row walks its ancestors once a prefix is held, so the cost
+//! grows with rows times depth, plus each held track's encode.
+//!
 //! Run `cargo bench -p moq-stats --features bench --bench producer_tick`.
 
 use std::alloc::{GlobalAlloc, Layout, System};
@@ -83,15 +87,18 @@ struct Relay {
 	_publishers: Vec<broadcast::Producer>,
 	_cursors: Vec<announce::Consumer>,
 	_sessions: Vec<stats::Session>,
+	_held: Vec<moq_net::track::Subscriber>,
 }
 
 impl Relay {
-	fn build(paths: usize, tiers: usize, changed_percent: usize) -> Self {
+	/// `depth` is each path's segment count, at least 2.
+	fn build(paths: usize, tiers: usize, changed_percent: usize, depth: usize) -> Self {
 		let registry = stats::Registry::new(
 			stats::Config::new().with_exclude(moq_net::Pattern::subtree(".stats").expect("literal prefix")),
 		);
 		let (origin, origin_driver) = origin::Producer::new(origin::Config::default());
-		let path_names: Vec<String> = (0..paths).map(|index| format!("room/{index:06}")).collect();
+		let nested = "/s".repeat(depth - 2);
+		let path_names: Vec<String> = (0..paths).map(|index| format!("room/{index:06}{nested}")).collect();
 		let publishers: Vec<_> = path_names
 			.iter()
 			.map(|path| {
@@ -130,6 +137,15 @@ impl Relay {
 			_publishers: publishers,
 			_cursors: cursors,
 			_sessions: sessions,
+			_held: Vec::new(),
+		}
+	}
+
+	/// Hold the first `held` paths' `room/<index>` prefix tracks.
+	fn hold(&mut self, held: usize) {
+		for index in 0..held {
+			let sub = self.driver.hold_prefix(&format!("room/{index:06}"));
+			self._held.push(sub);
 		}
 	}
 
@@ -213,7 +229,7 @@ fn bench(c: &mut Criterion) {
 				let mut relay = None;
 				group.bench_function(id, |b| {
 					let relay = relay.get_or_insert_with(|| {
-						let mut relay = Relay::build(paths, tiers, changed);
+						let mut relay = Relay::build(paths, tiers, changed, 2);
 						let row = sample(&mut relay);
 						let micros = row.elapsed.as_secs_f64() * 1e6;
 						println!(
@@ -327,5 +343,57 @@ fn presence(c: &mut Criterion) {
 	group.finish();
 }
 
-criterion_group!(benches, bench, presence);
+const PREFIX_PATHS: [usize; 2] = [1_000, 10_000];
+
+/// Segments per path.
+const PREFIX_DEPTH: [usize; 2] = [2, 8];
+
+/// Prefix tracks a reader holds.
+const PREFIX_HELD: [usize; 3] = [0, 10, 100];
+
+/// What holding prefix tracks costs a tick, with a tenth of the paths moving.
+fn prefix(c: &mut Criterion) {
+	println!("paths depth held allocs/tick us/tick");
+
+	let mut group = c.benchmark_group("stats/prefix");
+	group.sample_size(10);
+	group.warm_up_time(Duration::from_millis(200));
+	group.measurement_time(Duration::from_secs(1));
+	for &paths in &PREFIX_PATHS {
+		for &depth in &PREFIX_DEPTH {
+			for &held in &PREFIX_HELD {
+				let id = BenchmarkId::from_parameter(format!("{paths}p_{depth}d_{held}h"));
+				group.throughput(Throughput::Elements(paths as u64));
+				let mut relay = None;
+				group.bench_function(id, |b| {
+					let relay = relay.get_or_insert_with(|| {
+						let mut relay = Relay::build(paths, 1, 10, depth);
+						black_box(relay.driver.tick());
+						relay.hold(held);
+						let row = sample(&mut relay);
+						let micros = row.elapsed.as_secs_f64() * 1e6;
+						println!(
+							"{paths:>5} {depth:>5} {held:>4} {allocs:>11} {micros:>8.1}",
+							allocs = row.allocs
+						);
+						relay
+					});
+					b.iter_custom(|iters| {
+						let mut total = Duration::ZERO;
+						for _ in 0..iters {
+							relay.touch();
+							let start = Instant::now();
+							black_box(relay.driver.tick());
+							total += start.elapsed();
+						}
+						total
+					});
+				});
+			}
+		}
+	}
+	group.finish();
+}
+
+criterion_group!(benches, bench, presence, prefix);
 criterion_main!(benches);

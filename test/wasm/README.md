@@ -87,7 +87,9 @@ uncovered here.
   over SETUP) and `ietf` (nothing left to negotiate).
 - **reads a published broadcast** -- announce, subscribe, and read two
   consecutive groups, checking every frame byte for byte. One frame is 128 KiB,
-  which is what exercises the chunked read path in the transport adapter.
+  which is what exercises the chunked read path in the transport adapter. The
+  reader asks for each next group, so the real-time subscription never drops one
+  superseded mid-read, which a timer-paced publisher on a loaded runner did.
 - **refuses a track the publisher does not serve** -- the refusal has to
   surface, as a rejected `subscribe` (lite-06, which looks a track's info up
   first) or as a track that yields no group (IETF, lite-02). A hang fails on the

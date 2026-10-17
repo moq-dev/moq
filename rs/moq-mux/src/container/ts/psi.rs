@@ -36,22 +36,22 @@ pub(super) fn encode_pat(pat: &mpeg2ts::ts::payload::Pat) -> anyhow::Result<byte
 	finish_section(section)
 }
 
-/// Encode a PMT, rejecting descriptor or table lengths that MPEG-TS cannot represent.
-pub(super) fn encode_pmt(pmt: &mpeg2ts::ts::payload::Pmt) -> anyhow::Result<bytes::Bytes> {
+/// Encode a PMT at `version`, rejecting descriptor or table lengths that MPEG-TS cannot represent.
+pub(super) fn encode_pmt(pmt: &Pmt, version: mpeg2ts::ts::VersionNumber) -> anyhow::Result<bytes::Bytes> {
 	let mut section = vec![PMT_TABLE_ID, 0xb0, 0];
-	section.extend_from_slice(&pmt.program_num.to_be_bytes());
-	section.extend_from_slice(&[0xc1 | (pmt.version_number.as_u8() << 1), 0, 0]);
+	section.extend_from_slice(&pmt.program_number.to_be_bytes());
+	section.extend_from_slice(&[0xc1 | (version.as_u8() << 1), 0, 0]);
 	section.extend_from_slice(&(0xe000 | pmt.pcr_pid.map_or(0x1fff, |pid| pid.as_u16())).to_be_bytes());
 	encode_descriptors(&mut section, &pmt.program_info)?;
-	for stream in &pmt.es_info {
-		section.push(stream.stream_type as u8);
-		section.extend_from_slice(&(0xe000 | stream.elementary_pid.as_u16()).to_be_bytes());
+	for stream in &pmt.streams {
+		section.push(stream.stream_type);
+		section.extend_from_slice(&(0xe000 | stream.pid.as_u16()).to_be_bytes());
 		encode_descriptors(&mut section, &stream.descriptors)?;
 	}
 	finish_section(section)
 }
 
-fn encode_descriptors(out: &mut Vec<u8>, descriptors: &[mpeg2ts::ts::Descriptor]) -> anyhow::Result<()> {
+fn encode_descriptors(out: &mut Vec<u8>, descriptors: &[Descriptor]) -> anyhow::Result<()> {
 	let length = descriptors
 		.iter()
 		.map(|descriptor| 2 + descriptor.data.len())
@@ -397,34 +397,49 @@ mod test {
 
 	#[test]
 	fn pmt_encoding_rejects_unrepresentable_lengths() {
-		use mpeg2ts::ts::payload::Pmt;
-		use mpeg2ts::ts::{Descriptor, VersionNumber};
-		let mut pmt = Pmt {
-			program_num: 1,
-			pcr_pid: None,
-			version_number: VersionNumber::default(),
-			program_info: vec![Descriptor {
-				tag: 0x80,
-				data: vec![0; 256],
-			}],
-			es_info: Vec::new(),
+		let descriptor = |tag, len| Descriptor {
+			tag,
+			data: bytes::Bytes::from(vec![0; len]),
 		};
-		assert!(encode_pmt(&pmt).unwrap_err().to_string().contains("255 bytes"));
-		pmt.program_info = vec![
-			Descriptor {
-				tag: 0x80,
-				data: vec![0; 250]
-			};
-			4
-		];
-		let section = encode_pmt(&pmt).unwrap();
+		let mut pmt = Pmt {
+			program_number: 1,
+			pcr_pid: None,
+			program_info: vec![descriptor(0x80, 256)],
+			streams: Vec::new(),
+		};
+		let version = mpeg2ts::ts::VersionNumber::default();
+		assert!(encode_pmt(&pmt, version).unwrap_err().to_string().contains("255 bytes"));
+		pmt.program_info = vec![descriptor(0x80, 250); 4];
+		let section = encode_pmt(&pmt, version).unwrap();
 		assert!(crc_ok(&section));
 		assert_eq!(section.len(), 1024);
-		pmt.program_info.push(Descriptor {
-			tag: 0x81,
-			data: Vec::new(),
-		});
-		assert!(encode_pmt(&pmt).unwrap_err().to_string().contains("1021 bytes"));
+		pmt.program_info.push(descriptor(0x81, 0));
+		assert!(
+			encode_pmt(&pmt, version)
+				.unwrap_err()
+				.to_string()
+				.contains("1021 bytes")
+		);
+	}
+
+	/// The encoder writes the raw stream_type, so a byte no codec claims survives a round trip.
+	#[test]
+	fn pmt_encoding_round_trips_unnamed_stream_types() {
+		let pmt = Pmt {
+			program_number: 9,
+			pcr_pid: Some(Pid::new(0x100).unwrap()),
+			program_info: Vec::new(),
+			streams: vec![Es {
+				stream_type: 0x99,
+				pid: Pid::new(0x104).unwrap(),
+				descriptors: vec![Descriptor {
+					tag: 0x05,
+					data: bytes::Bytes::from_static(b"TEST"),
+				}],
+			}],
+		};
+		let section = encode_pmt(&pmt, mpeg2ts::ts::VersionNumber::default()).unwrap();
+		assert_eq!(Pmt::parse(&section), Some(pmt));
 	}
 
 	#[test]
