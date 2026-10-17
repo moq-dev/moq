@@ -2960,14 +2960,27 @@ impl PesPacket {
 			"PES optional fields need {at} bytes where PES_header_data_length gives {}",
 			fields.len()
 		);
-		let pts = (pts_dts & 0b10 != 0).then(|| {
-			let b = &fields[..5];
-			u64::from((b[0] >> 1) & 7) << 30
-				| u64::from(b[1]) << 22
-				| u64::from(b[2] >> 1) << 15
-				| u64::from(b[3]) << 7
-				| u64::from(b[4] >> 1)
-		});
+		// Each clock field opens with its 4-bit prefix, PTS '0010' alone or '0011' beside a DTS
+		// '0001', and sets the marker bit after each of its three parts.
+		let clock = |field: &[u8], prefix: u8| {
+			anyhow::ensure!(
+				field[0] >> 4 == prefix && field[0] & field[2] & field[4] & 1 == 1,
+				"PES clock field without its '{prefix:04b}' prefix or marker bits"
+			);
+			Ok(u64::from((field[0] >> 1) & 7) << 30
+				| u64::from(field[1]) << 22
+				| u64::from(field[2] >> 1) << 15
+				| u64::from(field[3]) << 7
+				| u64::from(field[4] >> 1))
+		};
+		let pts = match pts_dts {
+			0b10 => Some(clock(&fields[..5], 0b0010)?),
+			0b11 => {
+				clock(&fields[5..10], 0b0001)?;
+				Some(clock(&fields[..5], 0b0011)?)
+			}
+			_ => None,
+		};
 		Ok(Self { pts, payload })
 	}
 }
@@ -4138,6 +4151,19 @@ mod tests {
 		assert!(PesPacket::parse(&pes(0xbd, 0x40, &pts, b""), 0x06).is_err());
 		assert!(PesPacket::parse(&pes(0xbd, 0xc0, &pts, b""), 0x06).is_err());
 		assert!(PesPacket::parse(&pes(0xbd, 0x01, &[0x80, 0, 0], b""), 0x06).is_err());
+		// A clock field with the wrong prefix, or a marker bit cleared, PTS and DTS alike.
+		let mut prefix = pts;
+		prefix[0] = 0x39;
+		assert!(PesPacket::parse(&pes(0xbd, 0x80, &prefix, b""), 0x06).is_err());
+		let mut marker = pts;
+		marker[2] &= !1;
+		assert!(PesPacket::parse(&pes(0xbd, 0x80, &marker, b""), 0x06).is_err());
+		let mut both = [pts, pts].concat();
+		both[0] = 0x39;
+		both[5] = 0x19;
+		assert!(PesPacket::parse(&pes(0xbd, 0xc0, &both, b""), 0x06).is_ok());
+		both[9] &= !1;
+		assert!(PesPacket::parse(&pes(0xbd, 0xc0, &both, b""), 0x06).is_err());
 
 		// Only video may leave the length unbounded: its stream IDs, or 0xFD under a video type.
 		let unbounded = |stream_id: u8| {
