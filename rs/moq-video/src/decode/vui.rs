@@ -90,28 +90,9 @@ fn h265(nal: &[u8]) -> Option<Option<Color>> {
 		return Some(None);
 	};
 	let sps = sps.rbsp;
-	// `cropped_width` subtracts unchecked, so a window wider than the picture
-	// would overflow; crop here instead.
-	let window = &sps.conformance_window;
-	let crop = |size: u64, sub: u8, start: u64, end: u64| {
-		let offset = start.checked_add(end)?.checked_mul(sub.into())?;
-		u32::try_from(size.checked_sub(offset)?).ok()
-	};
-	let Some(size) = crop(
-		sps.pic_width_in_luma_samples.get(),
-		sps.sub_width_c(),
-		window.conf_win_left_offset,
-		window.conf_win_right_offset,
-	)
-	.zip(crop(
-		sps.pic_height_in_luma_samples.get(),
-		sps.sub_height_c(),
-		window.conf_win_top_offset,
-		window.conf_win_bottom_offset,
-	)) else {
+	let Some(size) = h265_size(&sps) else {
 		return Some(None);
 	};
-	let size = Size::new(size.0, size.1);
 	// Absent, the range flag is 0 (limited) and the description unspecified
 	// (E.3.1); scuffle_h265 fills an absent description with 2 itself.
 	let Some(vui) = &sps.vui_parameters else {
@@ -128,6 +109,32 @@ fn h265(nal: &[u8]) -> Option<Option<Color>> {
 		range(signal.video_full_range_flag),
 		size,
 	))
+}
+
+/// The picture size inside the conformance window, or `None` for a window
+/// that crops past the picture.
+///
+/// `cropped_width` and `cropped_height` subtract unchecked, so they would
+/// overflow on such a window.
+fn h265_size(sps: &scuffle_h265::SpsRbsp) -> Option<Size> {
+	let window = &sps.conformance_window;
+	let crop = |size: u64, sub: u8, start: u64, end: u64| {
+		let offset = start.checked_add(end)?.checked_mul(sub.into())?;
+		u32::try_from(size.checked_sub(offset)?).ok()
+	};
+	let width = crop(
+		sps.pic_width_in_luma_samples.get(),
+		sps.sub_width_c(),
+		window.conf_win_left_offset,
+		window.conf_win_right_offset,
+	)?;
+	let height = crop(
+		sps.pic_height_in_luma_samples.get(),
+		sps.sub_height_c(),
+		window.conf_win_top_offset,
+		window.conf_win_bottom_offset,
+	)?;
+	Some(Size::new(width, height))
 }
 
 fn range(full: bool) -> Range {
@@ -163,5 +170,28 @@ mod tests {
 			0x00, 0x20, 0x05, 0x26, 0x5c, 0x00, 0x33, 0x7f, 0x98, 0x01,
 		]);
 		assert_eq!(signalled(Codec::H265, &Bytes::from(unit)), Some(None));
+	}
+
+	/// A conformance window past the picture is refused rather than wrapping
+	/// (moq-mux's `SPS_NVENC`, a 1280x720 hevc_nvenc SPS, with its window
+	/// widened).
+	#[test]
+	fn a_window_past_the_picture_is_refused() {
+		let nal: &[u8] = &[
+			0x42, 0x01, 0x01, 0x01, 0x60, 0x00, 0x00, 0x03, 0x00, 0x90, 0x00, 0x00, 0x03, 0x00, 0x00, 0x03, 0x00, 0x78,
+			0xa0, 0x02, 0x80, 0x80, 0x2e, 0x1f, 0x13, 0x96, 0x5d, 0x29, 0x08, 0x46, 0x45, 0xd5, 0x0c, 0x04, 0x04, 0x00,
+			0x00, 0x03, 0x00, 0x04, 0x00, 0x00, 0x03, 0x00, 0xf1, 0x80, 0x17, 0x79, 0x44, 0x00, 0x02, 0xdc, 0x6c, 0x00,
+			0x00, 0x2d, 0xc6, 0xc0, 0x40,
+		];
+		let sps = scuffle_h265::SpsNALUnit::parse(&mut &nal[..]).unwrap().rbsp;
+		assert_eq!(h265_size(&sps), Some(Size::new(1280, 720)));
+
+		let width = sps.pic_width_in_luma_samples.get() / u64::from(sps.sub_width_c());
+		for (right, bottom) in [(width + 1, 0), (0, u64::MAX)] {
+			let mut sps = sps.clone();
+			sps.conformance_window.conf_win_right_offset = right;
+			sps.conformance_window.conf_win_bottom_offset = bottom;
+			assert_eq!(h265_size(&sps), None);
+		}
 	}
 }
