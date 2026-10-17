@@ -173,19 +173,47 @@ impl Lifecycle {
 		self
 	}
 
+	/// Run `task` in this connection's span, then log its close; a panic closes it as an error.
 	pub(crate) async fn run(&self, task: impl std::future::Future<Output = anyhow::Result<()>>) {
-		async {
-			// Boxing keeps large protocol futures off nested debug-build stack frames.
-			let result = moq_tokio::panic::isolate(Box::pin(task))
-				.await
-				.unwrap_or_else(|| Err(anyhow::anyhow!("connection panicked")));
-			match result {
-				Ok(()) => tracing::info!(id = self.id, "connection closed"),
-				Err(err) => tracing::warn!(id = self.id, %err, "connection closed"),
+		let result = self.isolate(task).await;
+		self.closed(result);
+	}
+
+	/// Run the ring worker's half, then supervise the started session on `runtime`, which logs
+	/// the close there: a worker stopped at shutdown drops its tasks, and the line with them.
+	#[cfg(all(target_os = "linux", feature = "_uring"))]
+	pub(crate) async fn start<S>(
+		&self,
+		runtime: &tokio::runtime::Handle,
+		start: impl std::future::Future<Output = anyhow::Result<S>>,
+	) where
+		S: std::future::Future<Output = anyhow::Result<()>> + Send + 'static,
+	{
+		match self.isolate(start).await {
+			Ok(supervise) => {
+				let lifecycle = self.clone();
+				runtime.spawn(async move { lifecycle.run(supervise).await });
 			}
+			Err(err) => self.closed(Err(err)),
 		}
-		.instrument(self.span.clone())
-		.await
+	}
+
+	async fn isolate<T>(&self, task: impl std::future::Future<Output = anyhow::Result<T>>) -> anyhow::Result<T> {
+		// Boxing keeps large protocol futures off nested debug-build stack frames.
+		moq_tokio::panic::isolate(Box::pin(task))
+			.instrument(self.span.clone())
+			.await
+			.unwrap_or_else(|| Err(anyhow::anyhow!("connection panicked")))
+	}
+
+	/// Logged here, under the span's own target, so every transport pairs its `conn{id=N}`
+	/// with its close under one log filter.
+	fn closed(&self, result: anyhow::Result<()>) {
+		let _span = self.span.enter();
+		match result {
+			Ok(()) => tracing::info!(id = self.id, "connection closed"),
+			Err(err) => tracing::warn!(id = self.id, %err, "connection closed"),
+		}
 	}
 
 	/// Keep the connection span across a worker-to-shared-runtime handoff and return panics to its owner.
@@ -351,7 +379,8 @@ mod tests {
 
 	use super::logs;
 
-	/// A panic in the same shared-runtime handoff used for ring supervision reaches the close owner.
+	/// A panic in the ring's supervision, after the worker handed it to the shared runtime, still
+	/// logs the connection's close.
 	#[tokio::test(start_paused = true)]
 	async fn shared_supervision_panic_logs_the_connection_close() {
 		let logs = logs::Logs::default();
@@ -367,21 +396,19 @@ mod tests {
 		let (auth, _admissions) = auth::Auth::embedded("test");
 		let lifecycle = Lifecycle::new(cluster, auth, 42, None);
 		lifecycle
-			.run(async {
-				lifecycle
-					.shared(&tokio::runtime::Handle::current(), async {
-						panic!("injected supervision panic");
-						#[allow(unreachable_code)]
-						Ok::<_, anyhow::Error>(())
-					})
-					.await?
+			.start(&tokio::runtime::Handle::current(), async {
+				Ok::<_, anyhow::Error>(async {
+					panic!("injected supervision panic");
+					#[allow(unreachable_code)]
+					Ok::<_, anyhow::Error>(())
+				})
 			})
 			.await;
 		logs.wait_for("connection closed").await;
 		let text = logs.text();
 		assert!(text.contains("conn{id=42}"), "{text}");
 		assert!(
-			text.contains("connection closed id=42 err=connection task panicked"),
+			text.contains("connection closed id=42 err=connection panicked"),
 			"{text}"
 		);
 		assert_eq!(text.matches("connection closed").count(), 1, "{text}");

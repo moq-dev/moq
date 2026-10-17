@@ -562,8 +562,9 @@ fn serve_worker(spawn: Spawn) -> bool {
 							.with_shutdown(serve.shutdown.clone())
 							.with_sessions(serve.sessions.clone());
 					accept_handle.spawn(async move {
+						let shared = serve.tokio.clone();
 						lifecycle
-							.run(serve_connection(conn_handle, conn, serve, &lifecycle))
+							.start(&shared, serve_connection(conn_handle, conn, serve, &lifecycle))
 							.await;
 					});
 				}
@@ -622,14 +623,15 @@ impl Deadline {
 	}
 }
 
-/// Serve one accepted connection on its worker: handshake and session start
-/// here; authentication and supervision on the shared runtime.
+/// Start one accepted connection on its worker: handshake and session start
+/// here, authentication on the shared runtime. Returns the session's
+/// supervision, which runs on the shared runtime too.
 async fn serve_connection(
 	handle: moq_uring::Handle,
 	conn: moq_uring::quic::Connection,
 	serve: Serve,
 	lifecycle: &Lifecycle,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<impl Future<Output = anyhow::Result<()>> + Send + 'static> {
 	use web_transport_trait::poll::Session as _;
 
 	// The endpoint started this deadline at the connection's first packet and
@@ -773,14 +775,11 @@ async fn serve_connection(
 	};
 	handle.spawn(moq_tokio::panic::isolate(driver).in_current_span().map(drop));
 
-	// The driver stays on this worker; admission and supervision share the same
-	// lifecycle owner on the runtime that owns auth's HTTP client and timers.
-	let supervisor = lifecycle.clone();
-	lifecycle
-		.shared(&serve.tokio, async move {
-			supervisor.supervise(session, lease, registration, transport).await
-		})
-		.await?
+	// The driver stays on this worker. The session handle is Send + Sync, so its
+	// supervision (credential expiry, GOAWAY drain) runs with the timers and the
+	// shutdown broadcast on the shared runtime.
+	let lifecycle = lifecycle.clone();
+	Ok(async move { lifecycle.supervise(session, lease, registration, transport).await })
 }
 
 #[cfg(test)]
