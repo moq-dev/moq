@@ -504,9 +504,11 @@ impl Served {
 			// PUBLISH_DONE is the only place the subscriber learns why its renewal failed.
 			Self::UpdateFailed(err) if version == Version::Draft14 => Self::Track(Err(err.clone())).status(version),
 			Self::Track(Ok(())) => (ietf::PublishDoneStatus::TrackEnded, "track ended"),
-			Self::Track(Err(Error::Unauthorized | Error::Session(crate::SessionError::Unauthorized))) => {
-				(ietf::PublishDoneStatus::Unauthorized, "not granted")
-			}
+			Self::Track(Err(
+				Error::Unauthorized
+				| Error::Session(crate::SessionError::Unauthorized)
+				| Error::Stream(crate::StreamError::Unauthorized),
+			)) => (ietf::PublishDoneStatus::Unauthorized, "not granted"),
 			// PUBLISH_DONE registers no token expiry, and its EXPIRED means the subscription's
 			// own lifetime ran out, so an expired token is reported as no longer granted.
 			Self::Track(Err(Error::Expired | Error::Session(crate::SessionError::Expired))) => {
@@ -6442,6 +6444,17 @@ mod serve_tests {
 			Served::UpdateFailed(Error::Unauthorized).status(Version::Draft14).0,
 			ietf::PublishDoneStatus::Unauthorized
 		);
+		// A revocation bridged from upstream, however it was received, is still one.
+		for err in [
+			Error::Unauthorized,
+			Error::Session(crate::SessionError::Unauthorized),
+			Error::Stream(crate::StreamError::Unauthorized),
+		] {
+			assert_eq!(
+				Served::Track(Err(err)).status(Version::Draft16).0,
+				ietf::PublishDoneStatus::Unauthorized
+			);
+		}
 	}
 
 	/// Draft-21 §9.5: a failed REQUEST_UPDATE is answered with REQUEST_ERROR, then the

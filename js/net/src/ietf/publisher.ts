@@ -12,6 +12,8 @@ import {
 	NotFound,
 	ProtocolViolation,
 	reason,
+	SessionCode,
+	SessionError,
 	StreamCode,
 	StreamError,
 	unauthorized,
@@ -776,6 +778,17 @@ export class Publisher {
 			console.debug(`publish done: broadcast=${name} track=${track.name}`);
 			if (publishError) {
 				console.warn(`publish error: broadcast=${name} track=${track.name} error=${reason(publishError)}`);
+			}
+
+			// A revocation bridged from upstream, such as a moq-lite UNAUTHORIZED reset, is one here too.
+			// PUBLISH_DONE's EXPIRED means the subscription's own lifetime ran out, so an expired
+			// token is reported as no longer granted.
+			if (
+				(publishError instanceof StreamError && publishError.code === StreamCode.Unauthorized) ||
+				(publishError instanceof SessionError &&
+					(publishError.code === SessionCode.Unauthorized || publishError.code === SessionCode.Expired))
+			) {
+				unauthorized = true;
 			}
 
 			// PUBLISH_DONE is required for every supported draft. The peer may have already

@@ -83,6 +83,9 @@ enum State<E: catalog::Catalog> {
 /// replaced publisher that stays up keeps the export until it ends. An export that fails
 /// while its broadcast stays announced fails here too, without lingering.
 ///
+/// Announcements alone decide whether the broadcast returned: a return that fails to resolve
+/// waits for the next one, and the linger running out reports that failure.
+///
 /// An epochless route has no instance to match, so any return of one is a replacement.
 pub struct Follower<E: catalog::Catalog = ()> {
 	export: Export<crate::catalog::Consumer<E>>,
@@ -98,6 +101,10 @@ pub struct Follower<E: catalog::Catalog = ()> {
 	started: bool,
 	/// The origin closed, so nothing more is announced.
 	closed: bool,
+	/// Why the last return failed to resolve, reported instead of the end if the linger runs out.
+	failed: Option<crate::Error>,
+	/// A return failed to resolve: nothing is followed until the next announcement.
+	refused: bool,
 	linger: Duration,
 	stitch: bool,
 	timer: Option<Pin<Box<moq_clock::Sleep>>>,
@@ -122,6 +129,8 @@ impl<E: catalog::Catalog + 'static> Follower<E> {
 			ended: false,
 			started: false,
 			closed: false,
+			failed: None,
+			refused: false,
 			linger: Duration::ZERO,
 			stitch: false,
 			timer: None,
@@ -262,6 +271,7 @@ impl<E: catalog::Catalog + 'static> Follower<E> {
 					}
 
 					let follow = match &self.serving {
+						_ if self.refused => false,
 						Serving::Ours => self.ended,
 						Serving::Other(_) if self.stitch => true,
 						Serving::Other(_) => return Poll::Ready(Err(crate::Error::Replaced(self.path.to_string()))),
@@ -283,8 +293,7 @@ impl<E: catalog::Catalog + 'static> Follower<E> {
 						continue;
 					}
 					if self.closed || self.elapsed(waiter, deadline) {
-						tracing::info!(path = %self.path, linger = ?self.linger, "broadcast did not return");
-						return Poll::Ready(end.map(|()| None));
+						return Poll::Ready(self.gone(end));
 					}
 					self.state = State::Settling { end, grace, deadline };
 					return Poll::Pending;
@@ -294,26 +303,40 @@ impl<E: catalog::Catalog + 'static> Follower<E> {
 					awaiting,
 					fallback,
 				} => {
-					// Announcements wait until the export is on the instance they describe.
+					// Whatever the request waits on, the announcements say what serves the path
+					// now: rather than sit out a route that went, ask afresh from there.
+					if self.poll_announced(waiter) {
+						tracing::debug!(path = %self.path, "announcement while resolving, asking again");
+						// A stitch still facing a replacement asks that one, within its original bound.
+						if matches!(*fallback, State::Running { .. }) && matches!(self.serving, Serving::Other(_)) {
+							self.state = State::Following {
+								resolving: self.resolve(),
+								awaiting,
+								fallback,
+							};
+							continue;
+						}
+						// Otherwise it stays on the export it has, still awaiting what it was.
+						self.state = *fallback;
+						// The fallback's wait predates this poll, so it gets no same-poll grace.
+						if let Some(expired) = self.expired() {
+							return Poll::Ready(expired);
+						}
+						continue;
+					}
 					if let Poll::Ready(resolved) = waiter.poll_future(resolving.as_mut()) {
 						let (broadcast, catalog) = match resolved {
 							Ok(resolved) => resolved,
-							// An instance that went before it resolved is no return or switch yet.
-							// Until the next announcement says otherwise, nothing serves the path:
-							// a stitch stays on the export it has, still awaiting what it was, and a
-							// return keeps lingering. A refusal from an instance still up fails loud
-							// instead.
+							// A stitch from a live export fails loud: the replacement would not serve.
+							Err(err) if matches!(*fallback, State::Running { .. }) => return Poll::Ready(Err(err)),
+							// While lingering, a return that fails to resolve is no return yet: nothing
+							// serves the path until the next announcement says otherwise. The error is
+							// reported only if the linger runs out.
 							Err(err) => {
-								if !matches!(
-									err,
-									crate::Error::Moq(moq_net::Error::Unroutable | moq_net::Error::Dropped)
-								) {
-									return Poll::Ready(Err(err));
-								}
-								tracing::warn!(path = %self.path, %err, "broadcast went before it resolved, still waiting");
-								self.serving = Serving::Gone;
+								tracing::warn!(path = %self.path, %err, "broadcast failed to resolve, still waiting");
+								self.failed = Some(err);
+								self.refused = true;
 								self.state = *fallback;
-								// The fallback's wait predates this poll, so it gets no same-poll grace.
 								if let Some(expired) = self.expired() {
 									return Poll::Ready(expired);
 								}
@@ -321,6 +344,7 @@ impl<E: catalog::Catalog + 'static> Follower<E> {
 							}
 						};
 						self.export.followed(&broadcast, catalog)?;
+						self.failed = None;
 						self.epoch = self.export.instance().cloned();
 						self.serving = Serving::Ours;
 						self.ended = false;
@@ -348,18 +372,25 @@ impl<E: catalog::Catalog + 'static> Follower<E> {
 		}
 	}
 
-	/// Apply every announcement on hand.
-	fn poll_announced(&mut self, waiter: &kio::Waiter) {
+	/// Apply every announcement on hand, returning whether any changed what serves the path.
+	fn poll_announced(&mut self, waiter: &kio::Waiter) -> bool {
+		let mut any = false;
 		while !self.closed {
-			match self.announced.poll_next(waiter) {
+			any |= match self.announced.poll_next(waiter) {
 				Poll::Ready(Some(event)) => self.apply(event),
-				Poll::Ready(None) => self.closed = true,
-				Poll::Pending => return,
-			}
+				Poll::Ready(None) => {
+					self.closed = true;
+					true
+				}
+				Poll::Pending => break,
+			};
 		}
+		self.refused &= !any;
+		any
 	}
 
-	fn apply(&mut self, event: moq_net::announce::Event) {
+	/// Apply an announcement, returning whether it changed what serves the path.
+	fn apply(&mut self, event: moq_net::announce::Event) -> bool {
 		let first = !std::mem::replace(&mut self.started, true);
 		self.serving = match event {
 			moq_net::announce::Event::Start(announce) => {
@@ -386,8 +417,9 @@ impl<E: catalog::Catalog + 'static> Follower<E> {
 			}
 			// The same instance over another route, which subscriptions ride out. A gap that
 			// ended the export's request comes as an end and a start instead.
-			moq_net::announce::Event::Update(_) => return,
+			moq_net::announce::Event::Update(_) => return false,
 		};
+		true
 	}
 
 	/// Begin resolving the instance serving the path now.
@@ -443,13 +475,20 @@ impl<E: catalog::Catalog + 'static> Follower<E> {
 	}
 
 	/// How a wait for the catalog's first snapshot ends once the linger runs out.
-	fn expire(&self, awaiting: Awaiting) -> crate::Result<Option<Frame>> {
+	fn expire(&mut self, awaiting: Awaiting) -> crate::Result<Option<Frame>> {
 		match awaiting.missing {
-			Missing::Return(end) => {
-				tracing::info!(path = %self.path, linger = ?self.linger, "broadcast did not return");
-				end.map(|()| None)
-			}
+			Missing::Return(end) => self.gone(end),
 			Missing::Switch => Err(self.missing_catalog()),
+		}
+	}
+
+	/// How the export ends once the linger runs out with nothing back: with why the last
+	/// return failed to resolve, if one did, else as the broadcast ended.
+	fn gone(&mut self, end: crate::Result<()>) -> crate::Result<Option<Frame>> {
+		tracing::info!(path = %self.path, linger = ?self.linger, "broadcast did not return");
+		match self.failed.take() {
+			Some(err) => Err(err),
+			None => end.map(|()| None),
 		}
 	}
 

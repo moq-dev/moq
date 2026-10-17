@@ -199,8 +199,6 @@ pub(super) struct Front {
 	upstream: Option<Candidate>,
 	/// Routes excluded from selection: their source ended while still advertised.
 	excluded: HashSet<u64>,
-	/// Why the last candidate fell through, reported if the front ends unresolved.
-	last_err: Option<Error>,
 	/// Whether the parked requesters were resolved (the first source attached).
 	resolved: bool,
 	tracks: BTreeMap<Arc<str>, Track>,
@@ -229,7 +227,6 @@ impl Front {
 			serving_closing: false,
 			upstream: None,
 			excluded: HashSet::new(),
-			last_err: None,
 			resolved: false,
 			tracks: BTreeMap::new(),
 			parked: BTreeSet::new(),
@@ -331,8 +328,9 @@ impl Front {
 				self.retiring = false;
 			}
 			Event::Unheld => self.held = false,
-			Event::Retired => self.end(Error::Dropped, &mut actions),
-			Event::Closed => self.end(Error::Dropped, &mut actions),
+			// Ended here, not by a source: nothing failed.
+			Event::Retired => self.end(Error::Cancel, &mut actions),
+			Event::Closed => self.end(Error::Closed, &mut actions),
 		}
 		if let Some(name) = touched {
 			let after = self.parked_at(&name);
@@ -387,11 +385,7 @@ impl Front {
 			// a later announcement gets a fresh front.
 			None => {
 				self.upstream = None;
-				let err = match self.resolved {
-					true => Error::Dropped,
-					false => self.last_err.take().unwrap_or(Error::Unroutable),
-				};
-				self.end(err, actions);
+				self.end(Error::Unroutable, actions);
 			}
 		}
 	}
@@ -414,7 +408,6 @@ impl Front {
 			// is moot, so a front left with nothing reports the path unroutable.
 			Err(Refusal { standing: false, .. }) => {
 				self.upstream = None;
-				self.last_err = Some(Error::Unroutable);
 				actions.push(Action::Reselect);
 			}
 			// The winning route's answer is final, even while another source serves:
@@ -467,7 +460,6 @@ impl Front {
 		self.serving_closing = false;
 		actions.push(Action::Detach { source });
 		self.drain_copies();
-		self.last_err = Some(Error::Dropped);
 		actions.push(Action::Reselect);
 	}
 
@@ -937,7 +929,7 @@ mod tests {
 				best: None,
 				serving_closing: false,
 			}),
-			&[Action::End { err: Error::Dropped }],
+			&[Action::End { err: Error::Unroutable }],
 		);
 	}
 
@@ -950,7 +942,7 @@ mod tests {
 				best: None,
 				serving_closing: false,
 			}),
-			&[Action::End { err: Error::Dropped }],
+			&[Action::End { err: Error::Unroutable }],
 		);
 	}
 
@@ -1117,12 +1109,12 @@ mod tests {
 					track: name("video"),
 					source: 100,
 					closing,
-					result: Err(Error::Dropped),
+					result: Err(Error::App(7)),
 					delivered: true,
 				}),
 				&[Action::Abort {
 					track: name("video"),
-					err: Error::Dropped,
+					err: Error::App(7),
 				}],
 			);
 			// A returning reader is not re-spliced either.
@@ -1273,7 +1265,7 @@ mod tests {
 			&[Action::Forget { track: name("video") }],
 		);
 		assert_actions(front.step(Event::Forgotten { track: name("video") }), &[Action::Retire]);
-		assert_actions(front.step(Event::Retired), &[Action::End { err: Error::Dropped }]);
+		assert_actions(front.step(Event::Retired), &[Action::End { err: Error::Cancel }]);
 		assert!(front.ended());
 	}
 
@@ -1351,7 +1343,7 @@ mod tests {
 		assert_actions(front.step(Event::Held), &[]);
 		assert!(!front.ended());
 		assert_actions(front.step(Event::Unheld), &[Action::Retire]);
-		assert_actions(front.step(Event::Retired), &[Action::End { err: Error::Dropped }]);
+		assert_actions(front.step(Event::Retired), &[Action::End { err: Error::Cancel }]);
 	}
 
 	/// A finished track stays for readers still draining it and for the linger
@@ -1555,7 +1547,7 @@ mod tests {
 	#[test]
 	fn teardown_ends_everything() {
 		let mut front = serving(remote(1), 100);
-		assert_actions(front.step(Event::Closed), &[Action::End { err: Error::Dropped }]);
+		assert_actions(front.step(Event::Closed), &[Action::End { err: Error::Closed }]);
 	}
 
 	#[test]
@@ -1841,10 +1833,10 @@ mod tests {
 		);
 	}
 
-	/// A front that served ends `Dropped` when its route leaves, not with the retraction
-	/// of a challenger that never took over.
+	/// A front that served ends `Unroutable` when its route leaves, after a challenger
+	/// that never took over was refused.
 	#[test]
-	fn a_front_that_served_ends_dropped() {
+	fn a_front_that_served_ends_unroutable() {
 		let mut front = serving(remote(1), 100);
 		front.step(Event::Selected {
 			best: Some(remote(2)),
@@ -1866,7 +1858,7 @@ mod tests {
 				best: None,
 				serving_closing: false,
 			}),
-			&[Action::End { err: Error::Dropped }],
+			&[Action::End { err: Error::Unroutable }],
 		);
 	}
 

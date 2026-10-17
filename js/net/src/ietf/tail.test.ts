@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { Milli } from "@moq/clock";
-import { ProtocolViolation } from "../error.ts";
+import { ProtocolViolation, StreamCode, StreamError } from "../error.ts";
 import type { Consumer as GroupConsumer } from "../group.ts";
 import { createMockTransportPair } from "../mock.ts";
 import * as Path from "../path.ts";
@@ -17,6 +17,7 @@ const VERSION = Version.DRAFT_19;
 const ALIAS = 9n;
 const TRACK_ENDED = 0x2;
 const INTERNAL_ERROR = 0x0;
+const UNAUTHORIZED = 0x1;
 
 // A plain subgroup stream: no extensions, no subgroup id, end of group on FIN.
 const FLAGS: GroupFlags = {
@@ -145,6 +146,14 @@ test("a PUBLISH_DONE with an error status aborts the track", async () => {
 	const { reader, done } = await subscribed();
 	await done(INTERNAL_ERROR, 0n);
 	expect(await reader.closed).toBeInstanceOf(Error);
+});
+
+test("an UNAUTHORIZED PUBLISH_DONE reads as the revocation a moq-lite peer sends", async () => {
+	const { reader, done } = await subscribed();
+	await done(UNAUTHORIZED, 0n);
+	const closed = await reader.closed;
+	expect(closed).toBeInstanceOf(StreamError);
+	expect((closed as StreamError).code).toBe(StreamCode.Unauthorized);
 });
 
 test("END_OF_TRACK after a group's last object ends the track after that group", async () => {
