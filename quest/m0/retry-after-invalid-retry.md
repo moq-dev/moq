@@ -30,5 +30,4 @@ Negotiation.
 
 Land the fix on `main` first. The `release` backport follows CONTRIBUTING.md
 as separate PRs: a moq-dev/noq 1.3.x patch to moq-noq-proto, then a moq-noq
-bump onto `release`. The PR that lands the main fix adds that backport quest,
-modeled on [the noq 1.3.x close fix](/quest/m0/refusal-close-backport-upstream.md).
+bump onto `release`. The PR that lands the main fix adds that backport quest.
