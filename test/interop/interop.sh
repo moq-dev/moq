@@ -60,6 +60,8 @@ URL=""
 KEY="" # the HMAC key every cell's token is signed with (set once the relay's auth server starts)
 NEGATIVE=0
 MEDIA=0
+MEDIA_CASES=""
+MEDIA_ENGINES="chromium"
 TAIL_ONLY=0
 
 # Cargo profile for the relay/cli/moq-c builds. Debug compiles faster, which is
@@ -109,6 +111,17 @@ while [[ $# -gt 0 ]]; do
             MEDIA=1
             shift
             ;;
+        --media-cases)
+            require_value "$@"
+            MEDIA_CASES="$2"
+            shift 2
+            ;;
+        --media-engines)
+            require_value "$@"
+            MEDIA_ENGINES="$2"
+            MEDIA=1
+            shift 2
+            ;;
         # The full matrix. --timeout 30 gives headless Chromium cold-start
         # headroom; flags after it still override.
         --all)
@@ -123,6 +136,11 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+if [[ -n "$MEDIA_CASES" && "$MEDIA" -ne 1 ]]; then
+    echo "error: --media-cases requires --media" >&2
+    exit 2
+fi
 
 # Numeric guards so a fat-fingered --timeout / INTEROP_PORT fails clearly here
 # instead of surfacing later as a cryptic `timeout` or relay-bind error.
@@ -158,6 +176,12 @@ if [[ "$MEDIA" -eq 1 ]]; then
     PUBLISHERS="js"
     SUBSCRIBERS="js"
 fi
+
+if [[ ! "$MEDIA_ENGINES" =~ ^(chromium|firefox|webkit)(,(chromium|firefox|webkit))*$ ]]; then
+    echo "error: media engines must be a comma-separated list of chromium,firefox,webkit" >&2
+    exit 2
+fi
+IFS=',' read -r -a MEDIA_ENGINE_LIST <<<"$MEDIA_ENGINES"
 
 IFS=',' read -r -a PUB_LIST <<<"$PUBLISHERS"
 IFS=',' read -r -a SUB_LIST <<<"$SUBSCRIBERS"
@@ -303,8 +327,8 @@ prepare_js() {
     fi
     if needs js; then
         # Nix provides Chromium via PLAYWRIGHT_BROWSERS_PATH; otherwise fetch it.
-        if [[ -z "${PLAYWRIGHT_BROWSERS_PATH:-}" ]] && ! (cd "$CLIENTS/js" && bunx playwright install chromium) >"$HARNESS_RUN/js-chromium.log" 2>&1; then
-            mark_broken js "playwright chromium install failed"
+        if [[ -z "${PLAYWRIGHT_BROWSERS_PATH:-}" ]] && ! (cd "$CLIENTS/js" && bunx playwright install chromium "${MEDIA_ENGINE_LIST[@]}") >"$HARNESS_RUN/js-chromium.log" 2>&1; then
+            mark_broken js "requested Playwright engine install failed"
             sed 's/^/        /' "$HARNESS_RUN/js-chromium.log" >&2 || true
         elif ! (cd "$CLIENTS/js" && bun run check) >"$HARNESS_RUN/js-check.log" 2>&1; then
             mark_broken js "type check failed"
@@ -1087,12 +1111,18 @@ if [[ "$MEDIA" -eq 1 ]]; then
         overall=1
     else
         echo "=== media output and lifecycle ==="
-        run_media "media output + lifecycle"
-        run_media "control: frozen video" --fault frozen-video --cases none --expect-fail "video progress"
-        run_media "control: silent audio" --fault silent-audio --cases none --expect-fail "audio tone"
-        run_media "control: offset audio" --fault audio-offset --cases none --expect-fail "audio/video sync"
-        run_media "control: leaked session" --leak --cases detach --expect-fail "resource baseline"
-        run_media "control: lagging latecomer" --lag --cases late-join --expect-fail "late join reaches live"
+        for engine in "${MEDIA_ENGINE_LIST[@]}"; do
+            if [[ -n "$MEDIA_CASES" ]]; then
+                run_media "$engine: media cases: $MEDIA_CASES" --player-engine "$engine" --cases "$MEDIA_CASES" --focused
+                continue
+            fi
+            run_media "$engine: media output + lifecycle" --player-engine "$engine"
+            run_media "$engine: control: frozen video" --player-engine "$engine" --fault frozen-video --cases none --expect-fail "video progress"
+            run_media "$engine: control: silent audio" --player-engine "$engine" --fault silent-audio --cases none --expect-fail "audio tone"
+            run_media "$engine: control: offset audio" --player-engine "$engine" --fault audio-offset --cases none --expect-fail "audio/video sync"
+            run_media "$engine: control: leaked session" --player-engine "$engine" --leak --cases detach --expect-fail "resource baseline"
+            run_media "$engine: control: lagging latecomer" --player-engine "$engine" --lag --cases late-join --expect-fail "late join reaches live"
+        done
     fi
 elif [[ "$NEGATIVE" -eq 1 ]]; then
     # Negative control: no publisher. Every subscriber must FAIL (time out with

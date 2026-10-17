@@ -620,6 +620,10 @@ mod tests {
 			Poll::Pending
 		}
 
+		fn send_group(&mut self, _: i64) -> Option<crate::transport::poll::Ungrouped> {
+			None
+		}
+
 		fn poll_send_datagram(&mut self, _cx: &mut Context<'_>, _payload: &[u8]) -> Poll<Result<(), Self::Error>> {
 			Poll::Ready(Ok(()))
 		}
@@ -678,13 +682,18 @@ mod tests {
 
 	impl crate::transport::poll::SendStream for FakeSendStream {
 		type Error = FakeError;
+		type Group = crate::transport::poll::Ungrouped;
 
 		fn poll_write(&mut self, _cx: &mut Context<'_>, buf: &[u8]) -> Poll<Result<usize, Self::Error>> {
 			self.writes.lock().unwrap().put_slice(buf);
 			Poll::Ready(Ok(buf.len()))
 		}
 
-		fn set_priority(&mut self, _order: i32) {}
+		fn set_priority(&mut self, _order: i64) {}
+
+		fn set_group(&mut self, group: &Self::Group) {
+			match *group {}
+		}
 
 		fn finish(&mut self) -> Result<(), Self::Error> {
 			Ok(())
@@ -1006,6 +1015,10 @@ mod tests {
 			})
 		}
 
+		fn send_group(&mut self, _: i64) -> Option<crate::transport::poll::Ungrouped> {
+			None
+		}
+
 		fn poll_send_datagram(&mut self, cx: &mut Context<'_>, payload: &[u8]) -> Poll<Result<(), Self::Error>> {
 			self.inner.poll_send_datagram(cx, payload)
 		}
@@ -1040,13 +1053,18 @@ mod tests {
 
 	impl crate::transport::poll::SendStream for LocalSend {
 		type Error = FakeError;
+		type Group = crate::transport::poll::Ungrouped;
 
 		fn poll_write(&mut self, cx: &mut Context<'_>, buf: &[u8]) -> Poll<Result<usize, Self::Error>> {
 			self.inner.poll_write(cx, buf)
 		}
 
-		fn set_priority(&mut self, order: i32) {
+		fn set_priority(&mut self, order: i64) {
 			self.inner.set_priority(order);
+		}
+
+		fn set_group(&mut self, group: &Self::Group) {
+			match *group {}
 		}
 
 		fn finish(&mut self) -> Result<(), Self::Error> {

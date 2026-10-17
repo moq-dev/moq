@@ -63,6 +63,6 @@ Public API: new health types in `hang` and `@moq/hang`. Wire: none.
 
 ## Related
 
-- [QoS](/quest/m1/qos/README.md) - the relay's delivery counters, which a combined downstream verdict also reads
+- [QoS](/quest/m2/qos/README.md) - the relay's delivery counters, which a combined downstream verdict also reads
 - [Broadcast epochs](/quest/m0/broadcast-epoch/README.md) - a new epoch is one way a counter reset shows
 - [TS health counters](/quest/m2/ts-health-stats.md) - container counters kept out of the verdict

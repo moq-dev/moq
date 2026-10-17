@@ -30,6 +30,16 @@ plumbing; it does not implement this quest's `mpegts` payloads.
   57 s video hole passed every TR 101 290 P1 check in the reporter's lab,
   and only per-PID access-unit counts caught it. There is no export
   `--stats` flag.
+- **Re-timing gets its own section beside `mpegts`** (decided 2026-10-16,
+  on [#5643](https://github.com/moq-dev/moq/pull/5643)). An export that
+  re-times onto an output clock reports what `ts::stats::Snapshot` cannot
+  hold: `ts::stats::Export`'s stream-wide `dropped`, `trimmed`, `gaps`,
+  `drift`, and `out_of_tolerance`, which its conversion to `Snapshot`
+  discards, plus the release margin and the output clock's offset from the
+  source. They describe the export's own output
+  clock rather than viewer playout, so they sit flat beside `transport` and
+  `renditions` now instead of waiting for the
+  [latency ledger](/quest/m2/latency-ledger.md)'s `.echo` shape.
 - **Counters sum, gauges do not.** Every check is a cumulative counter, which
   keeps `.z` deltas small and lets an aggregate sum; the PID's `quiet` is a gauge and
   merges newest-wins.

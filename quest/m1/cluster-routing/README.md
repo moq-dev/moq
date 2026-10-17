@@ -76,8 +76,10 @@ Decided with the maintainer, 2026-10-13:
   explicitly select P2P connections; discovery does not dial everyone.
 - Each CDN broadcast enters a local network once by configuration: local
   peers outrank a backup uplink, and origin aggregation joins the rest.
-- Retain the CDN session and discovery during P2P use. Release unused CDN
-  media demand, except for bounded overlap during a same-epoch handoff.
+- The deferred P2P consumer owns proving that its CDN session and discovery
+  stay connected and unused CDN media demand is released after a handoff.
+  m1 provides and tests the shared routing primitives without requiring an
+  actual P2P integration.
 
 The implementation is gated on [handoff proofs](/quest/m1/cluster-routing/handoff.md):
 a complete neighbor snapshot does not prove its claims are current. The
@@ -125,8 +127,8 @@ setup after the capabilities land.
 ## Related
 
 - [Route health](/quest/m2/route-health/README.md) - epoch-only active/passive delivery monitoring and automatic recovery
-- [P2P](/quest/m1/p2p/README.md) - application-selected peer sessions feed the shared routing model
-- [Routing guide](/quest/m1/routing-guide.md) - concept page and practical federation/P2P setup
+- [P2P](/quest/m2/p2p/README.md) - application-selected peer sessions feed the shared routing model
+- [Routing guide](/quest/m1/routing-guide.md) - concept page and federation setup; P2P extends it in m2
 - [Route wakes](/quest/m2/route-wakes.md) - local work follows affected fronts rather than the whole covered table
 - [Link quality](/quest/m2/link-quality.md) - optional measured link cost, distinct from delivery-health failover
-- [Same-epoch importers](/quest/m1/hop-aligned-import.md) - independent origins serving the same explicit epoch
+- [Same-epoch importers](/quest/m2/hop-aligned-import.md) - independent origins serving the same explicit epoch

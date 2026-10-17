@@ -11,7 +11,7 @@ cooperation.
 ## Plan
 
 This is the ingress mirror of the egress `lag` histogram ([viewer lag
-histogram](/quest/m1/qos/lag-histogram.md), which lands first so this reuses
+histogram](/quest/m2/qos/lag-histogram.md), which lands first so this reuses
 its histogram type, decided 2026-10-08) and needs no acknowledgments: the relay is the receiver, and a frame is measured
 when its last byte arrives, because a partial frame is not useful.
 
@@ -29,7 +29,7 @@ Document the window length beside the bucket edges.
 
 Aggregate as a byte-weighted cumulative histogram of drift on the ingress
 (`Role::Subscriber`) side of the stats totals and [prefix
-tracks](/quest/m1/stats-prefix-tracks.md), which land first,
+tracks](/quest/m2/stats-prefix-tracks.md), which land first,
 rather than the per-path rows (decided in the 2026-10-06 audit), with the same
 bucket edges and the same monotonic contract as the egress `lag` histogram. Beside it keep two cumulative
 counters: `timestamp_regressions`, frames whose timestamp is below the
@@ -55,5 +55,5 @@ excluded.
 
 ## Required
 
-- [Viewer lag histogram](/quest/m1/qos/lag-histogram.md) - the egress histogram whose type and edges this reuses
-- [Stats prefix tracks](/quest/m1/stats-prefix-tracks.md) - the prefix tracks the drift histogram lands on, beside the totals
+- [Viewer lag histogram](/quest/m2/qos/lag-histogram.md) - the egress histogram whose type and edges this reuses
+- [Stats prefix tracks](/quest/m2/stats-prefix-tracks.md) - the prefix tracks the drift histogram lands on, beside the totals

@@ -35,4 +35,4 @@ probes, which was the right trade to get it running. This quest promotes them.
 
 ## Related
 
-- [QoS](/quest/m1/qos/README.md) - relay-side health, the same idea from the other end
+- [QoS](/quest/m2/qos/README.md) - relay-side health, the same idea from the other end
