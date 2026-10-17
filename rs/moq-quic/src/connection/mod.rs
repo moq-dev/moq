@@ -94,7 +94,8 @@ mod streams;
 pub(crate) use streams::StreamsState;
 pub use streams::{
     Checkpoint, Chunks, ClosedStream, Credit, FinishError, ReadError, ReadableError, RecvStream,
-    SendStream, ShouldTransmit, StreamEvent, Streams, WriteError, Written,
+    SendDomain, SendGroup, SendGroups, SendStream, ShouldTransmit, StreamEvent, Streams,
+    WriteError, Written,
 };
 
 mod timer;
@@ -439,6 +440,14 @@ impl Connection {
         Streams {
             state: &mut self.streams,
             conn_state: &self.state,
+        }
+    }
+
+    /// Provide control over the send groups that schedule outgoing streams
+    #[must_use]
+    pub fn send_groups(&mut self) -> SendGroups<'_> {
+        SendGroups {
+            state: &mut self.streams,
         }
     }
 

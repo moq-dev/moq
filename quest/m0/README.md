@@ -77,8 +77,6 @@ have fixes on `main`: macOS tests (#5335), drill-sensitivity (#5338), loom
 
 ## Required
 
-- [Stitcher public relay smoke](/quest/m0/smoke-stitcher.md) - the first-party deployment is tested under an anonymous namespace and only on transports it serves
-
 - [qmux 0.5 upstream](/quest/m0/qmux-credit-backport-upstream.md) - old-release publication, independent of the main fix
 
 - [qmux release backport](/quest/m0/qmux-credit-backport.md) - adopt the 0.5 fix independently of the next breaking cut

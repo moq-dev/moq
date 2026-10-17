@@ -10,7 +10,7 @@ use moq_quic::{ClosedStream, ConnectionError, FinishError, StreamId, Written};
 use thiserror::Error;
 
 use crate::quic::driver::{
-    VarInt,
+    SendGroup, VarInt,
     connection::{ConnectionRef, State},
 };
 
@@ -225,23 +225,34 @@ impl SendStream {
         }
     }
 
-    /// Set the priority of the send stream
+    /// Set the priority within the stream's send group, or session-wide when ungrouped
     ///
     /// Every send stream has an initial priority of 0. Locally buffered data from streams with
     /// higher priority will be transmitted before data from streams with lower priority. Changing
     /// the priority of a stream with pending data may only take effect after that data has been
     /// transmitted. Using many different priority levels per connection may have a negative
     /// impact on performance.
-    pub fn set_priority(&self, priority: i32) -> Result<(), ClosedStream> {
+    pub fn set_priority(&self, priority: i64) -> Result<(), ClosedStream> {
         let mut conn = self.conn.state.lock("SendStream::set_priority");
         conn.inner.send_stream(self.stream).set_priority(priority)?;
         Ok(())
     }
 
     /// Get the priority of the send stream
-    pub fn priority(&self) -> Result<i32, ClosedStream> {
+    pub fn priority(&self) -> Result<i64, ClosedStream> {
         let mut conn = self.conn.state.lock("SendStream::priority");
         conn.inner.send_stream(self.stream).priority()
+    }
+
+    /// Move the stream into a send group, or with `None` back to the ungrouped streams, which
+    /// go before every group
+    ///
+    /// # Panics
+    /// - when `group` belongs to another connection
+    pub fn set_group(&self, group: Option<&SendGroup>) -> Result<(), ClosedStream> {
+        let mut conn = self.conn.state.lock("SendStream::set_group");
+        let group = group.map(SendGroup::id);
+        conn.inner.send_stream(self.stream).set_group(group)
     }
 
     /// Completes when the peer stops the stream or reads the stream to completion

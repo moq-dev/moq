@@ -966,7 +966,7 @@ async fn accept_request<S>(
 	deadline: Option<tokio::time::Instant>,
 ) -> crate::Result<(PendingRequest<crate::transport::Session<S>>, Option<Deadline>)>
 where
-	S: web_transport_trait::Session,
+	S: crate::transport::Grouped,
 	crate::transport::Session<S>: moq_net::transport::poll::Boxable,
 	<crate::transport::Session<S> as moq_net::transport::poll::Session>::SendStream: moq_net::transport::MaybeSync,
 	<crate::transport::Session<S> as moq_net::transport::poll::Session>::RecvStream: moq_net::transport::MaybeSync,
@@ -2177,6 +2177,18 @@ mod tests {
 			std::future::pending().await
 		}
 	}
+
+	#[cfg(feature = "websocket")]
+	impl crate::transport::GroupedSend for ScriptedSend {
+		type Group = moq_net::transport::poll::Ungrouped;
+
+		fn set_group(&mut self, group: &Self::Group) {
+			match *group {}
+		}
+	}
+
+	#[cfg(feature = "websocket")]
+	impl crate::transport::Grouped for Scripted {}
 
 	/// Delivers `data` once, then nothing more.
 	#[cfg(feature = "websocket")]

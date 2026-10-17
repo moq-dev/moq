@@ -60,7 +60,7 @@ import * as Pattern from "./src/pattern";
 import { resumeSkew } from "./src/resume";
 
 /** Cases beyond the mandatory capability probe, publisher readiness, and cold start. */
-const CASES = ["capture-denial", "pause", "disable", "rejoin", "detach", "republish", "late-join"] as const;
+const CASES = ["capture-denial", "pause", "disable", "rejoin", "detach", "republish", "late-join", "rename"] as const;
 type Case = (typeof CASES)[number];
 
 const { values } = parseArgs({
@@ -70,6 +70,7 @@ const { values } = parseArgs({
 		timeout: { type: "string", default: "30" },
 		fault: { type: "string", default: "none" },
 		cases: { type: "string" },
+		focused: { type: "boolean", default: false },
 		leak: { type: "boolean", default: false },
 		lag: { type: "boolean", default: false },
 		"expect-fail": { type: "string" },
@@ -91,10 +92,11 @@ if (
 	timeoutMs <= 0 ||
 	!FAULTS.some((f) => f === fault) ||
 	unknown.length > 0 ||
-	!ENGINES.some((engine) => engine === requestedEngine)
+	!ENGINES.some((engine) => engine === requestedEngine) ||
+	(values.focused && (values.cases === undefined || selected.size === 0))
 ) {
 	console.error(
-		`usage: media.ts --url U [--player-engine ${ENGINES.join("|")}] [--timeout S>0] [--fault ${FAULTS.join("|")}] [--cases none|${CASES.join(",")}] [--leak] [--lag] [--expect-fail TEXT]`,
+		`usage: media.ts --url U [--player-engine ${ENGINES.join("|")}] [--timeout S>0] [--fault ${FAULTS.join("|")}] [--cases none|${CASES.join(",")}] [--focused] [--leak] [--lag] [--expect-fail TEXT]`,
 	);
 	process.exit(2);
 }
@@ -305,6 +307,7 @@ function traceLine(sample: Sample, start: number): string {
 		`    +${((sample.at - start) / 1000).toFixed(2)}s frame=${sample.frameId ?? "-"} ` +
 		`step=${sample.toneStep ?? "-"}/${step} tone=${margin.toFixed(0)}dB ${sample.toneHz?.toFixed(0) ?? "-"}Hz ` +
 		`rms=${sample.rms?.toFixed(3) ?? "-"} ats=${sample.audioTimestamp?.toFixed(0) ?? "-"} vts=${sample.videoTimestamp?.toFixed(0) ?? "-"} ` +
+		`generation=${sample.generation ?? "-"} track=${sample.videoTrack ?? "-"} codec=${sample.videoCodec ?? "-"} ` +
 		`paused=${sample.paused} delay=${sample.delay}ms audio=${sample.audioBytes}B${sample.audioStalled ? " stalled" : ""}`
 	);
 }
@@ -647,7 +650,65 @@ try {
 		predicate: (state) => state.audioContext === "running",
 	});
 
-	await measurePlayback(player, playerErrors, "cold start");
+	if (values.focused) {
+		console.error("  focused case run: cold-start grading and unrelated cases are not selected");
+		await waitForState(player, playerErrors, {
+			deadline: Date.now() + SETTLE_MS,
+			assertion: "playback starts",
+			description: "the audio buffer to fill before the selected lifecycle case",
+			predicate: (state) => state.audioContext === "running" && !state.audioStalled,
+		});
+	} else {
+		await measurePlayback(player, playerErrors, "cold start");
+	}
+
+	// A codec changes decoder identity; a VP8 resize does not. Measure through each
+	// transition, then keep checking pixels after its first new-generation picture.
+	if (wants("rename")) {
+		console.error("=== codec identity and coded-size changes ===");
+		const before = await readPlayerState(player);
+		await command(publisher, "changeVideoCodec");
+		const changed = await collect(player, playerErrors, WINDOW_MS);
+		const first = changed.findIndex(
+			(sample) =>
+				sample.generation === 1 &&
+				sample.videoCodec?.startsWith("vp8") &&
+				sample.videoTrack !== before.videoTrack,
+		);
+		check(first >= 0, "codec rename", () => `no renamed VP8 picture: ${JSON.stringify(changed.at(-1))}`);
+		check(
+			changed.slice(first).every((sample) => sample.frameId === undefined || sample.generation === 1),
+			"old track picture",
+			() => "a pre-switch picture appeared after the new codec's first picture",
+		);
+		assertMedia(changed, "codec rename");
+		const renamed = changed[first].videoTrack;
+		await measurePlayback(player, playerErrors, "after codec rename");
+
+		await command(publisher, "resizeVideo");
+		const resized = await collect(player, playerErrors, WINDOW_MS);
+		const grown = resized.findIndex(
+			(sample) =>
+				sample.generation === 2 &&
+				sample.frameWidth === Pattern.WIDTH * 2 &&
+				sample.frameHeight === Pattern.HEIGHT * 2 &&
+				sample.videoCodedWidth === Pattern.WIDTH * 2 &&
+				sample.videoCodedHeight === Pattern.HEIGHT * 2,
+		);
+		check(grown >= 0, "coded-size growth", () => `no larger presented picture: ${JSON.stringify(resized.at(-1))}`);
+		check(
+			resized.every((sample) => sample.videoTrack === renamed && sample.videoCodec?.startsWith("vp8")),
+			"resize keeps identity",
+			() => `VP8 resize changed track: ${JSON.stringify(resized.at(-1))}`,
+		);
+		check(
+			resized.slice(grown).every((sample) => sample.frameId === undefined || sample.generation === 2),
+			"old track picture",
+			() => "a pre-resize picture appeared after the first larger picture",
+		);
+		assertMedia(resized, "coded-size growth");
+		await measurePlayback(player, playerErrors, "after coded-size growth");
+	}
 
 	// ── pause and resume ─────────────────────────────────────────────────────
 	if (wants("pause")) {

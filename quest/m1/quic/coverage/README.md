@@ -49,4 +49,3 @@ and the harness defaults to Cubic while production runs BBR3.
 ## Related
 
 - [Receive memory coverage](https://github.com/moq-dev/moq/pull/5752) - the end-to-end moq-tokio receive-window benchmark; the crate benchmarks here sit below it
-- [Delete NewReno](/quest/m1/quic/new-reno.md) - the dead controller the survey found at 0%

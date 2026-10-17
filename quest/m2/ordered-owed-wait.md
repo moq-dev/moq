@@ -22,8 +22,8 @@ sequence until the budget elapsed. The model cannot tell "not yet" from
 ✅ Decided 2026-10-14 (maintainer):
 
 - Wait only on sequences the track still owes, read from the dispositions
-  that [SUBSCRIBE_DROP](/quest/m1/subscribe-drop.md) and
-  [Tail arrivals](/quest/m1/tail-arrivals.md) record. Not chosen: an opt-in
+  that [SUBSCRIBE_DROP](/quest/m1/subscribe-drop.md) and the track's
+  arrival record (`TrackState::arrivals`) keep. Not chosen: an opt-in
   waiting reader (new public API no consumer needs, and opted-in readers hit
   the same holes); fixing #5475 forward (discontinuity markers still stall,
   and unlimited-budget readers still hang on a never-produced group).
@@ -71,7 +71,6 @@ Public API: behavior only. Wire: none.
 ## Required
 
 - [SUBSCRIBE_DROP](/quest/m1/subscribe-drop.md) - every stream group in a subscription arrives or is named dropped, including publisher skips
-- [Tail arrivals](/quest/m1/tail-arrivals.md) - per-track live dispositions survive cache eviction
 
 ## Related
 
