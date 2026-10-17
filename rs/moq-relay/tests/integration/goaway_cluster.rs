@@ -150,13 +150,12 @@ async fn cluster_continues_a_group_split_by_goaway_inner() {
 	let mut client_config = moq_tokio::connect::Config::default();
 	client_config.tls.insecure = Some(true);
 	client_config.goaway.handover = Some(Duration::from_secs(2));
-	let client = client_config.init(Default::default()).expect("client init");
 
 	let mut cluster_config = cluster::Config::default();
 	cluster_config.connect = vec![Peer::new(format!("tcp://127.0.0.1:{port_a}/"))];
 	let cluster = cluster::Cluster::new(cluster::Options::new(cluster_config))
 		.expect("cluster init")
-		.with_client(client);
+		.with_connect(client_config, Default::default());
 	let started = cluster.clone().start().await.expect("cluster start");
 	let cluster_run = tokio::spawn(started.run());
 
@@ -295,13 +294,12 @@ async fn cluster_migrates_on_upstream_goaway_inner() {
 		client_config.tls.insecure = Some(true);
 		// Short handover so the test observes the old session close quickly.
 		client_config.goaway.handover = Some(Duration::from_secs(2));
-		let client = client_config.init(Default::default()).expect("client init");
 
 		let mut cluster_config = cluster::Config::default();
 		cluster_config.connect = vec![Peer::new(format!("tcp://127.0.0.1:{port_a}/"))];
 		let cluster = cluster::Cluster::new(cluster::Options::new(cluster_config))
 			.expect("cluster init")
-			.with_client(client);
+			.with_connect(client_config, Default::default());
 
 		let started = cluster.clone().start().await.expect("cluster start");
 		let cluster_run = tokio::spawn(started.run());
@@ -422,11 +420,10 @@ async fn spawn_relay_with_upstream(
 	client_config.goaway.handover = Some(Duration::from_secs(2));
 	// Only lite-07 carries the epoch that lets a failover resume the subscription.
 	client_config.version = vec![LITE_07.parse().unwrap()];
-	let client = client_config.init(Default::default()).expect("client init");
 
 	let cluster = cluster::Cluster::new(cluster::Options::new(cluster_config))
 		.expect("cluster init")
-		.with_client(client);
+		.with_connect(client_config, Default::default());
 
 	let started = cluster.clone().start().await.expect("cluster start");
 	let handle = tokio::spawn(async move {
@@ -771,13 +768,12 @@ async fn cluster_reconnects_on_empty_uri_goaway_inner() {
 	client_config.goaway.handover = Some(Duration::from_secs(2));
 	// Only lite-07 carries the epoch that lets the redial resume the subscription.
 	client_config.version = vec![LITE_07.parse().unwrap()];
-	let client = client_config.init(Default::default()).expect("client init");
 
 	let mut cluster_config = cluster::Config::default();
 	cluster_config.connect = vec![Peer::new(format!("tcp://127.0.0.1:{port}/"))];
 	let cluster = cluster::Cluster::new(cluster::Options::new(cluster_config))
 		.expect("cluster init")
-		.with_client(client);
+		.with_connect(client_config, Default::default());
 	let started = cluster.clone().start().await.expect("cluster start");
 	let cluster_run = tokio::spawn(started.run());
 

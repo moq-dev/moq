@@ -19,7 +19,7 @@ use str0m::{Candidate, Event, IceConnectionState, Input, Output, Rtc, net::Recei
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 
-use crate::egress::{EgressClock, EgressSource, WriteRequest};
+use crate::egress::{EgressClock, EgressSource, Format, WriteRequest};
 use crate::{Error, Result, codec};
 
 /// One inbound UDP datagram plus its source address, the unit fed to a session.
@@ -354,8 +354,8 @@ impl Session {
 			return Ok(());
 		}
 
-		// str0m's CodecConfig is the negotiated set; pick the first
-		// codec advertised for this `mid`.
+		// str0m's CodecConfig is the negotiated set; `remote_pts` lists this
+		// `mid`'s share of it in the peer's order.
 		let Some(media) = self.rtc.media(mid) else {
 			tracing::warn!(?mid, "negotiated media is missing; ignoring");
 			return Ok(());
@@ -368,21 +368,21 @@ impl Session {
 		if !flow.accepts(media.direction()) {
 			return Ok(());
 		}
-		let pt = media.remote_pts().first().copied();
-		let params = pt.and_then(|pt| self.rtc.codec_config().params().iter().find(|p| p.pt() == pt).copied());
-		let params = match params {
-			Some(p) => p,
-			None => {
-				tracing::warn!(?mid, "no codec params for media; ignoring");
-				return Ok(());
-			}
+		let negotiated: Vec<_> = media
+			.remote_pts()
+			.iter()
+			.filter_map(|pt| self.rtc.codec_config().params().iter().find(|p| p.pt() == *pt).copied())
+			.collect();
+		let Some(first) = negotiated.first() else {
+			tracing::warn!(?mid, "no codec params for media; ignoring");
+			return Ok(());
 		};
-		let spec = params.spec();
-		let codec = spec.codec;
+		let spec = first.spec();
 		self.opened_media.insert(mid);
 
 		match &mut self.role {
 			MediaRole::Ingest(sink) => {
+				let codec = spec.codec;
 				let audio_params = if codec.is_audio() {
 					Some((spec.clock_rate.get(), spec.channels.unwrap_or(1) as u32))
 				} else {
@@ -390,8 +390,17 @@ impl Session {
 				};
 				sink.on_track(mid, kind, codec, audio_params)?;
 			}
+			// Any negotiated codec may be sent, so the catalog picks among all of them.
 			MediaRole::Egress(source) => {
-				source.on_track(mid, codec, params.pt(), spec.clock_rate)?;
+				let formats = negotiated
+					.iter()
+					.map(|params| Format {
+						codec: params.spec().codec,
+						pt: params.pt(),
+						clock_rate: params.spec().clock_rate,
+					})
+					.collect();
+				source.on_track(mid, formats)?;
 			}
 		}
 		Ok(())

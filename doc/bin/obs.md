@@ -30,6 +30,15 @@ no B-frames or lookahead on the encoders that support turning them off. This
 trades compression for less buffering; it does not guarantee an end-to-end
 delay. Pick **Keep encoder settings** to leave the encoder alone.
 
+The video bitrate follows the connection's bandwidth estimate, with the
+configured bitrate as the ceiling: it drops as soon as the uplink narrows and
+climbs back over a few seconds. Audio holds its configured bitrate, and video
+gets what is left. Only encoders that can retune while live, with CBR, VBR, or
+ABR rate control, follow; CQP and CRF keep their setting. The dock's Stats tab
+shows the current video target beside the configured rate. An encoder shared
+with a recording follows too, so record with a separate encoder to keep the
+recording at the full rate.
+
 ## Source quality and moq-transcode
 
 OBS publishes **one** rendition and does not encode a viewer ladder. When a

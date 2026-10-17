@@ -122,6 +122,7 @@ using JsonSnapshotConfig = MoqJsonSnapshotConfig;
 using JsonStreamConfig = MoqJsonStreamConfig;
 using MediaTrackConfig = MoqMediaTrackConfig;
 using MediaGroupConfig = MoqMediaGroupConfig;
+using Rendition = MoqRendition;
 using MediaFrame = MoqMediaFrame;
 using OriginConfig = MoqOriginConfig;
 using ProtocolError = MoqProtocolError;

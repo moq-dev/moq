@@ -98,14 +98,13 @@ async fn node(id: u64, connect: Vec<Peer>) -> Node {
 
 	let mut client = moq_tokio::connect::Config::default();
 	client.tls.insecure = Some(true);
-	let client = client.init(Default::default()).expect("client init");
 
 	let mut config = cluster::Config::default();
 	config.id = Some(id);
 	config.connect = connect;
 	let cluster = cluster::Cluster::new(cluster::Options::new(config))
 		.expect("cluster init")
-		.with_client(client);
+		.with_connect(client, Default::default());
 
 	let (auth, mut admissions) = auth::Auth::embedded(format!("node-{id}"));
 	tasks.spawn(async move {
