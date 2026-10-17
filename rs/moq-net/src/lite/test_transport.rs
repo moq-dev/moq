@@ -48,6 +48,8 @@ pub struct Log {
 	streams: Arc<AtomicUsize>,
 	stops: Arc<Mutex<Vec<u32>>>,
 	closes: Arc<Mutex<Vec<(u32, String)>>>,
+	/// How long the trail and the stops were at the first session close.
+	closed_at: Arc<Mutex<Option<(usize, usize)>>>,
 	bi_opens: Arc<AtomicUsize>,
 	priorities: Arc<Mutex<Vec<u8>>>,
 	/// Hands each send group its id.
@@ -63,6 +65,13 @@ pub enum Sent {
 	Write(Vec<u8>),
 	Finish,
 	Reset(u32),
+}
+
+/// What the streams sent ahead of the first session close. See [`Log::before_close`].
+#[derive(Debug)]
+pub struct BeforeClose {
+	pub trail: Vec<(usize, Sent)>,
+	pub stops: Vec<u32>,
 }
 
 impl Log {
@@ -120,6 +129,25 @@ impl Log {
 	/// a second close racing the first is visible.
 	pub fn closes(&self) -> Vec<(u32, String)> {
 		self.closes.lock().unwrap().clone()
+	}
+
+	/// The [`Self::trail`] and [`Self::stops`] up to the first session close, or `None`
+	/// before one. Nothing a stream sends after the close reaches the peer, so this is
+	/// what a peer sees ahead of the close.
+	pub fn before_close(&self) -> Option<BeforeClose> {
+		let (trail, stops) = (*self.closed_at.lock().unwrap())?;
+		Some(BeforeClose {
+			trail: self.trail()[..trail].to_vec(),
+			stops: self.stops()[..stops].to_vec(),
+		})
+	}
+
+	fn close(&self, code: u32, reason: &str) {
+		self.closed_at
+			.lock()
+			.unwrap()
+			.get_or_insert_with(|| (self.trail.lock().unwrap().len(), self.stops.lock().unwrap().len()));
+		self.closes.lock().unwrap().push((code, reason.to_owned()));
 	}
 
 	/// How many bidi streams the session has opened, so a test can pin down how many
@@ -432,7 +460,7 @@ impl poll::Session for DeadStreamSession {
 	}
 
 	fn close(&mut self, code: u32, reason: &str) {
-		self.log.closes.lock().unwrap().push((code, reason.to_owned()));
+		self.log.close(code, reason);
 	}
 
 	fn poll_closed(&mut self, _cx: &mut Context<'_>) -> Poll<Self::Error> {
@@ -632,7 +660,7 @@ impl poll::Session for SinkSession {
 	}
 
 	fn close(&mut self, code: u32, reason: &str) {
-		self.log.closes.lock().unwrap().push((code, reason.to_owned()));
+		self.log.close(code, reason);
 	}
 
 	fn poll_closed(&mut self, _cx: &mut Context<'_>) -> Poll<Self::Error> {
@@ -962,7 +990,7 @@ impl poll::Session for ScriptedSession {
 	}
 
 	fn close(&mut self, code: u32, reason: &str) {
-		self.log.closes.lock().unwrap().push((code, reason.to_owned()));
+		self.log.close(code, reason);
 	}
 
 	fn poll_closed(&mut self, _cx: &mut Context<'_>) -> Poll<Self::Error> {

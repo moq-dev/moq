@@ -1,6 +1,6 @@
 import { Milli, Nano, sleep } from "@moq/clock";
 import Session, { type Version as QmuxVersion } from "@moq/qmux";
-import { error, fromClose, sessionCause } from "../error.ts";
+import { error, fromClose, ProtocolViolation, sessionCause } from "../error.ts";
 import * as Ietf from "../ietf/index.ts";
 import * as Lite from "../lite/index.ts";
 import type { Consumer as OriginConsumer, Producer as OriginProducer } from "../origin.ts";
@@ -237,6 +237,8 @@ async function connectTransport(url: URL, session: WebTransport, wiring: Session
 	try {
 		return await Promise.race([terminal, negotiate(url, session, wiring)]);
 	} catch (cause) {
+		// We refused the peer's SETUP and already closed with the code that says why.
+		if (cause instanceof ProtocolViolation) throw cause;
 		// A session failure already guarantees a terminal close; its authoritative code
 		// must not be overwritten by the reset-only fallback while the browser delivers it.
 		cause = await sessionCause(session, cause);
@@ -370,7 +372,7 @@ async function handshakeAlpn(
 		session,
 		version,
 		"moq-lite-js",
-		wiring.extensions,
+		wiring,
 	);
 
 	return new Ietf.Connection({
