@@ -1124,7 +1124,7 @@ mod test {
 
 	#[test]
 	fn a_skipped_run_ends_at_the_previous_frontier() {
-		// A data track paused for 40 minutes, skipping a sequence as its discontinuity marker.
+		// A track paused for 40 minutes, resuming past a skipped sequence.
 		let mut data = Segmenter::new(Config::default());
 		groups(&mut data, 0..2, 1_000);
 		data.end(ms(2_000));

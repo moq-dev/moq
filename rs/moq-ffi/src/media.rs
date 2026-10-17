@@ -105,7 +105,9 @@ pub struct MoqVideo {
 	pub track: Option<String>,
 	pub codec: String,
 	pub description: Option<Vec<u8>>,
+	/// The encoded pixel dimensions.
 	pub coded: Option<MoqDimensions>,
+	/// The aspect ratio the whole picture is displayed at; absent means the decoded shape.
 	pub display_aspect: Option<MoqDimensions>,
 	pub bitrate: Option<u64>,
 	/// Whether this rendition may be selected; when false, no frames are coming.

@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 import importlib.util
 import json
+import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -48,6 +50,25 @@ class FfiTest(unittest.TestCase):
             self.runners(directory)
             (Path(directory) / 'report.json').write_text('[]')
             self.assertNotIn('report', ffi.load(directory))
+
+    def test_a_skipped_runner_cannot_silently_disappear(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            # Some platform checks return success when their toolchain is absent.
+            # The orchestrator must refuse that success without benchmark output.
+            stub = root / 'just'
+            stub.write_text(
+                '#!/bin/sh\nmkdir -p "$MOQ_BENCH_DIR"\n'
+                'printf "[]" > "$MOQ_BENCH_DIR/rust-ffi.json"\n'
+            )
+            stub.chmod(0o755)
+            env = {**os.environ, 'PATH': f'{root}:{os.environ["PATH"]}', 'MOQ_BENCH_DIR': str(root / 'results')}
+            result = subprocess.run(
+                ['bash', str(Path(__file__).with_name('ffi.sh')), 'cpp'],
+                env=env, capture_output=True, text=True,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn('did not produce cpp.json', result.stderr)
 
 
 if __name__ == '__main__':

@@ -199,20 +199,62 @@ impl Hvcc {
 pub(crate) fn config_from_hvcc(hvcc: &[u8]) -> Result<hang::catalog::VideoConfig> {
 	let params = Hvcc::parse(hvcc)?;
 	let sps_nal = params.sps.first().ok_or(Error::MissingSps)?;
-	let sps = Sps::parse(sps_nal)?.head;
-
-	let mut config = hang::catalog::VideoConfig::new(hang::catalog::H265 {
-		in_band: false,
-		profile_space: sps.profile_space,
-		profile_idc: sps.profile_idc,
-		profile_compatibility_flags: sps.profile_compatibility_flags,
-		tier_flag: sps.tier_flag,
-		level_idc: sps.level_idc,
-		constraint_flags: sps.constraint_flags,
-	});
-	config.coded_width = Some(sps.width);
-	config.coded_height = Some(sps.height);
+	let mut config = config_from_sps(sps_nal, false)?;
 	config.description = Some(Bytes::copy_from_slice(hvcc));
+	Ok(config)
+}
+
+/// Copy the frame rate and display aspect from a decoded hvcC's first SPS.
+///
+/// An hev1 record may list no SPS, leaving both unset.
+pub(crate) fn apply_hvcc_sps(hvcc: &mp4_atom::Hvcc, config: &mut hang::catalog::VideoConfig) -> Result<()> {
+	let Some(sps) = hvcc
+		.arrays
+		.iter()
+		.filter(|array| array.nal_unit_type == NALUnitType::SpsNut.0)
+		.flat_map(|array| &array.nalus)
+		.next()
+	else {
+		return Ok(());
+	};
+	let metadata = config_from_sps(sps, false)?;
+	config.framerate = metadata.framerate;
+	config.display_aspect_width = metadata.display_aspect_width;
+	config.display_aspect_height = metadata.display_aspect_height;
+	Ok(())
+}
+
+/// Resolve either sample framing from the same SPS dimensions and VUI metadata.
+pub(crate) fn config_from_sps(sps_nal: &[u8], in_band: bool) -> Result<hang::catalog::VideoConfig> {
+	let Sps { head, full } = Sps::parse(sps_nal)?;
+	let mut config = hang::catalog::VideoConfig::new(hang::catalog::H265 {
+		in_band,
+		profile_space: head.profile_space,
+		profile_idc: head.profile_idc,
+		profile_compatibility_flags: head.profile_compatibility_flags,
+		tier_flag: head.tier_flag,
+		level_idc: head.level_idc,
+		constraint_flags: head.constraint_flags,
+	});
+	config.coded_width = Some(head.width);
+	config.coded_height = Some(head.height);
+	config.framerate = full
+		.as_ref()
+		.and_then(sps_period)
+		.map(|(units, scale)| scale as f64 / units as f64);
+	let sample_aspect = full
+		.as_ref()
+		.and_then(|sps| sps.vui_parameters.as_ref())
+		.and_then(|vui| match vui.aspect_ratio_info {
+			scuffle_h265::AspectRatioInfo::ExtendedSar { sar_width, sar_height } => {
+				Some((u32::from(sar_width), u32::from(sar_height)))
+			}
+			scuffle_h265::AspectRatioInfo::Predefined(idc) => crate::codec::video::sample_aspect(idc.0),
+		});
+	let display_aspect =
+		sample_aspect.and_then(|sample| crate::codec::video::display_aspect(head.width, head.height, sample));
+	config.display_aspect_width = display_aspect.map(|(width, _)| width);
+	config.display_aspect_height = display_aspect.map(|(_, height)| height);
 	Ok(config)
 }
 

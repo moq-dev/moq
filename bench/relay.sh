@@ -3,8 +3,8 @@
 # Sourced by run.sh, which owns these process and output paths.
 # shellcheck disable=SC2153,SC2154
 
-# Set to record the relay's worker off-CPU stacks during each workload's steady window.
-PROFILE_LOCK=
+# Set to a profile.py mode (lock, cpu, heap) to profile each workload's relay over its steady window.
+PROFILE=
 
 relay_config() {
     local path=$1
@@ -63,6 +63,10 @@ relay_config() {
         '[auth]' \
         'public = "**"' \
         "${runtime_config[@]}" >"$path"
+    if [[ $PROFILE == heap ]]; then
+        # Its /sessions list shows when the relay has dropped every session after the load.
+        printf '%s\n' '' '[internal]' "listen = \"127.0.0.1:$((port + 1))\"" >>"$path"
+    fi
 }
 
 # A connect can succeed against somebody else's listener while our child is alive.
@@ -78,19 +82,24 @@ start_relay() {
     local directory=$2
     local runtime=${3:-}
     local workers=${4:-1}
-    local attempt port config log tokio_threads
+    local attempt port config log
+    local -a environment=(RUST_LOG=warn)
 
     case $runtime in
         tokio-shared)
-            tokio_threads=$workers
+            environment+=("TOKIO_WORKER_THREADS=$workers")
             ;;
         tokio-workers | io-uring-workers)
-            tokio_threads=1
-            ;;
-        '')
-            tokio_threads=
+            environment+=(TOKIO_WORKER_THREADS=1)
             ;;
     esac
+    if [[ $PROFILE == heap ]]; then
+        # Sample from startup, so the first snapshot holds the idle heap, and accumulate
+        # allocations so two snapshots bound the churn between them. One sample per 64 KiB
+        # allocated, not jemalloc's 512 KiB default, gives a 5 s window enough stacks.
+        mkdir -p "$directory/heap"
+        environment+=("MALLOC_CONF=prof:true,prof_active:true,prof_accum:true,lg_prof_sample:16,prof_prefix:$directory/heap/jeprof")
+    fi
 
     if ! command -v lsof >/dev/null; then
         printf 'relay socket ownership requires lsof; run through nix develop\n' >&2
@@ -103,12 +112,7 @@ start_relay() {
         log=$directory/relay-$attempt.log
         relay_config "$config" "$port" "$runtime" "$workers"
 
-        if [[ -n $tokio_threads ]]; then
-            env TOKIO_WORKER_THREADS="$tokio_threads" RUST_LOG=warn \
-                "$relay" "$config" >"$log" 2>&1 &
-        else
-            RUST_LOG=warn "$relay" "$config" >"$log" 2>&1 &
-        fi
+        env "${environment[@]}" "$relay" "$config" >"$log" 2>&1 &
         RELAY_PID=$!
 
         for _ in {1..100}; do
@@ -230,11 +234,15 @@ run_workload() {
     start_relay "$relay" "$directory" "$runtime" "$workers"
 
     local relay_pid=$RELAY_PID generator_pid='' finished
+    local profile=$directory/$PROFILE
     local -a load=("$LOAD_BIN" --file "$config"
         --connect "https://localhost:$RELAY_PORT" --connect-tls-insecure
         --name "bench-$label-$workload" --startup 2s --report 500ms
         --output "$stats" "${overrides[@]}")
 
+    if [[ $PROFILE == heap ]]; then
+        python3 "$ROOT/bench/profile.py" snapshot "$relay_pid" "$profile" before
+    fi
     if [[ $(uname -s) == Linux ]]; then
         # The sampler owns the measurement lifetime. The generator runs until
         # interrupted after sampling, so its normal exit cannot race /proc reads.
@@ -245,13 +253,20 @@ run_workload() {
             --interval 500ms --duration 10s --output "$host" \
             >"$directory/host.log" 2>&1 &
         HOST_PID=$!
-        if [[ -n $PROFILE_LOCK ]]; then
-            # The second half of the host window, matching the summary's throughput window.
-            # Its own process group, so cleanup also stops perf and its workload.
-            setsid python3 "$ROOT/bench/profile.py" record "$relay_pid" "$directory/lock" --delay 5 --duration 5 \
-                >"$directory/lock.log" 2>&1 &
-            PROFILE_PID=$!
-        fi
+        # The second half of the host window, matching the summary's throughput window.
+        # Its own process group, so cleanup also stops perf and its workload.
+        case $PROFILE in
+            lock | cpu)
+                setsid python3 "$ROOT/bench/profile.py" "$PROFILE" "$relay_pid" "$profile" --delay 5 --duration 5 \
+                    >"$directory/profile.log" 2>&1 &
+                PROFILE_PID=$!
+                ;;
+            heap)
+                setsid python3 "$ROOT/bench/profile.py" snapshot "$relay_pid" "$profile" steady-start steady-end \
+                    --delay 5 --interval 5 >"$directory/profile.log" 2>&1 &
+                PROFILE_PID=$!
+                ;;
+        esac
         if ! wait -n -p finished "$HOST_PID" "$LOAD_PID"; then
             cat "$directory/host.log" "$directory/load.log" >&2
             return 1
@@ -261,9 +276,9 @@ run_workload() {
             return 1
         fi
         HOST_PID=
-        if [[ -n $PROFILE_LOCK ]]; then
+        if [[ -n $PROFILE ]]; then
             if ! wait "$PROFILE_PID"; then
-                cat "$directory/lock.log" >&2
+                cat "$directory/profile.log" >&2
                 return 1
             fi
             PROFILE_PID=
@@ -278,7 +293,14 @@ run_workload() {
         cat "$directory/load.log" >&2
         return 1
     fi
+    if [[ $PROFILE == heap ]]; then
+        python3 "$ROOT/bench/profile.py" snapshot "$relay_pid" "$profile" teardown \
+            --settled "http://127.0.0.1:$((RELAY_PORT + 1))/sessions"
+    fi
     stop_relay
+    if [[ $PROFILE == heap ]]; then
+        python3 "$ROOT/bench/profile.py" heap "$relay" "$profile"
+    fi
 
     if [[ -s $host ]]; then
         python3 "$ROOT/bench/summary.py" align "$host" "$stats" "$directory/load-window.jsonl"

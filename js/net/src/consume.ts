@@ -31,6 +31,7 @@ class Blind implements Selection {
 	readonly validity = new Validity();
 }
 
+// private: plumbing
 /** Consumed broadcasts shared only within the selected serving instance. @internal */
 export class BroadcastCache {
 	#cache = new Map<Path.Valid, Map<Epoch.Valid | object, { consumer: broadcast.Consumer; selection: Selection }>>();
