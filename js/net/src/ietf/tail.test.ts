@@ -189,8 +189,12 @@ test("a standalone END_OF_TRACK at object 5 preserves its terminal group", async
 	expect(await reader.recvGroup()).toBeUndefined();
 });
 
-test("a compact END_OF_TRACK at object 5 is subgroup 5, refused without ending the track", async () => {
+test("a compact stream starting at object 5 is subgroup 5, refused without a group or a track end", async () => {
 	const { subscriber, reader } = await subscribed();
+	const payload = groupStream(subscriber, 4, { ...FLAGS, hasSubgroupObject: true });
+	payload.write(new Uint8Array([5, 1, 42]));
+	payload.finish();
+	await payload.handled;
 	const end = groupStream(subscriber, 5, { ...FLAGS, hasSubgroupObject: true });
 	end.write(new Uint8Array([5, 0, 0x4]));
 	end.finish();
