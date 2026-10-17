@@ -85,7 +85,7 @@ and behind an edge relay of ours, on lite-05, 06, 07 and moq-transport 14,
 16, 22: the returning reader gets the new output from group 0, never the old
 group, and sibling paths keep their readers. On the wires without an epoch
 that rests on our relays retiring a copy on End then Start, as
-`tests/restart.rs` shows; arbitrary older caching relays are out of scope, as
+`tests/integration/restart.rs` shows; arbitrary older caching relays are out of scope, as
 in [IETF epochs](/quest/m1/ietf-epochs.md), since base IETF object identity
 survives a withdrawal. A same-epoch lagging replica still resumes, checked on
 lite-07 only, the one wire here that carries the epoch. JS mirrors the tests.

@@ -60,8 +60,3 @@ auth HTTP contract only, not MoQ.
 
 - [Session outcomes](/quest/m1/session-outcomes.md) - the refusal counters
   this attributes and extends with `expired`
-
-## Related
-
-- [Expired token error](/quest/m1/auth/expired-error.md) - the MoQ wire
-  half: a session whose token expired reports `Error::Expired`

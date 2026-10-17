@@ -18,6 +18,8 @@ pub(super) struct Buffer {
 	pub floor: Option<moq_net::Timestamp>,
 	waiting_keyframe: bool,
 	pub ended: bool,
+	/// Exclusive endpoint declared for this encoder segment.
+	pub end: Option<moq_net::Timestamp>,
 }
 
 impl Default for Buffer {
@@ -32,6 +34,7 @@ impl Default for Buffer {
 			// A join resumes at its first keyframe, like any other break.
 			waiting_keyframe: true,
 			ended: false,
+			end: None,
 		}
 	}
 }

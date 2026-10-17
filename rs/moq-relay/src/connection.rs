@@ -58,12 +58,7 @@ impl Connection {
 	/// Set the identifier this connection logs under. Defaults to 0.
 	pub fn with_id(mut self, id: u64) -> Self {
 		self.lifecycle.id = id;
-		self.lifecycle.span = tracing::info_span!(
-			"conn",
-			id,
-			remote = self.request.remote_addr().map(tracing::field::display),
-			session = tracing::field::Empty
-		);
+		self.lifecycle.span = span(id, self.request.remote_addr());
 		self
 	}
 
@@ -141,6 +136,16 @@ impl Connection {
 	}
 }
 
+/// The span every line about one connection logs under, on whichever runtime emits it.
+fn span(id: u64, remote: Option<std::net::SocketAddr>) -> tracing::Span {
+	tracing::info_span!(
+		"conn",
+		id,
+		remote = remote.map(tracing::field::display),
+		session = tracing::field::Empty
+	)
+}
+
 impl Lifecycle {
 	pub(crate) fn new(
 		cluster: cluster::Cluster,
@@ -150,12 +155,7 @@ impl Lifecycle {
 	) -> Self {
 		Self {
 			id,
-			span: tracing::info_span!(
-				"conn",
-				id,
-				remote = remote.map(tracing::field::display),
-				session = tracing::field::Empty
-			),
+			span: span(id, remote),
 			cluster,
 			auth,
 			shutdown: crate::shutdown::Observer::disabled(),
@@ -312,7 +312,7 @@ pub async fn supervise(
 			}
 			why = lease.ended() => {
 				tracing::info!(%why, "lease ended, closing session");
-				session.abort(moq_net::Error::Unauthorized);
+				session.abort(crate::auth::error(&why));
 				lease.close(why, session_bytes(&session));
 				return Ok(());
 			}
@@ -341,7 +341,7 @@ pub(crate) fn session_bytes(session: &moq_net::Session) -> moq_auth::Bytes {
 }
 
 #[cfg(all(test, target_os = "linux", feature = "_uring"))]
-#[path = "../tests/support/logs.rs"]
+#[path = "../tests/integration/logs.rs"]
 mod logs;
 
 #[cfg(all(test, target_os = "linux", feature = "_uring"))]

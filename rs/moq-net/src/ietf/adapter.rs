@@ -364,6 +364,7 @@ impl VirtualSendStream {
 
 impl crate::transport::poll::SendStream for VirtualSendStream {
 	type Error = crate::Error;
+	type Group = crate::transport::poll::Ungrouped;
 
 	fn poll_write(&mut self, _cx: &mut Context<'_>, buf: &[u8]) -> Poll<Result<usize, Self::Error>> {
 		let len = buf.len();
@@ -378,7 +379,11 @@ impl crate::transport::poll::SendStream for VirtualSendStream {
 		Poll::Ready(self.push(chunk).map(|()| len))
 	}
 
-	fn set_priority(&mut self, _order: i32) {}
+	fn set_priority(&mut self, _order: i64) {}
+
+	fn set_group(&mut self, group: &Self::Group) {
+		match *group {}
+	}
 
 	fn finish(&mut self) -> Result<(), Self::Error> {
 		// Flush any remaining buffered data (e.g. if registration never completed).
@@ -406,6 +411,7 @@ pub enum AdapterSend<S: crate::transport::poll::Session> {
 
 impl<S: crate::transport::poll::Session> crate::transport::poll::SendStream for AdapterSend<S> {
 	type Error = crate::Error;
+	type Group = <S::SendStream as crate::transport::poll::SendStream>::Group;
 
 	fn poll_write(&mut self, cx: &mut Context<'_>, buf: &[u8]) -> Poll<Result<usize, Self::Error>> {
 		match self {
@@ -421,10 +427,18 @@ impl<S: crate::transport::poll::Session> crate::transport::poll::SendStream for 
 		}
 	}
 
-	fn set_priority(&mut self, order: i32) {
+	fn set_priority(&mut self, order: i64) {
 		match self {
 			Self::Real(s) => s.set_priority(order),
 			Self::Virtual(s) => s.set_priority(order),
+		}
+	}
+
+	fn set_group(&mut self, group: &Self::Group) {
+		match self {
+			Self::Real(s) => s.set_group(group),
+			// Rides the control stream, which no group schedules.
+			Self::Virtual(_) => {}
 		}
 	}
 
@@ -791,6 +805,7 @@ impl<S: crate::transport::poll::Session> ControlStreamAdapter<S> {
 		let msg = crate::ietf::GoAway {
 			new_session_uri: std::borrow::Cow::Borrowed(uri),
 			timeout: timeout_ms,
+			request_id: None,
 		};
 
 		// The size prefix is a u16 on a stream shared with every other request, so the
@@ -1158,10 +1173,19 @@ impl<S: crate::transport::poll::Session> crate::transport::poll::Session for Con
 			.map(|r| r.map(AdapterRecv::Real).map_err(|_| crate::Error::Closed))
 	}
 
-	fn poll_send_datagram(&mut self, cx: &mut Context<'_>, payload: &[u8]) -> Poll<Result<(), Self::Error>> {
+	fn send_group(&mut self, priority: i64) -> Option<<Self::SendStream as crate::transport::poll::SendStream>::Group> {
+		self.inner.send_group(priority)
+	}
+
+	fn send_datagram(
+		&mut self,
+		payload: Bytes,
+		group: Option<&<Self::SendStream as crate::transport::poll::SendStream>::Group>,
+		order: i64,
+	) -> Result<(), Self::Error> {
 		self.inner
-			.poll_send_datagram(cx, payload)
-			.map(|r| r.map_err(|_| crate::Error::Closed))
+			.send_datagram(payload, group, order)
+			.map_err(|_| crate::Error::Closed)
 	}
 
 	fn poll_recv_datagram(&mut self, cx: &mut Context<'_>) -> Poll<Result<Bytes, Self::Error>> {

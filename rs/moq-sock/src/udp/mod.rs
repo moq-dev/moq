@@ -247,6 +247,26 @@ pub fn is_msg_size_err(err: &io::Error) -> bool {
     }
 }
 
+/// Returns true if the given send error means the local stack has no way to reach the destination
+///
+/// Most send errors are transient, so higher layers treat them as packet loss. These are not:
+/// there is no route to the address (ENETUNREACH, EHOSTUNREACH) or the interface is down
+/// (ENETDOWN), and the Windows `WSAE*` equivalents. Retransmitting cannot fix them, so a
+/// connection attempt can give up on that address at once, for example to dial the other address
+/// family.
+///
+/// They are only local for an unconnected socket with transport errors left disabled, as
+/// `UdpSocketState` sockets are by default. A `connect`ed socket, or one with `IP_RECVERR`, can
+/// report a received ICMP error here instead, which an off-path attacker can forge.
+pub fn is_unreachable_err(err: &io::Error) -> bool {
+    matches!(
+        err.kind(),
+        io::ErrorKind::NetworkUnreachable
+            | io::ErrorKind::HostUnreachable
+            | io::ErrorKind::NetworkDown
+    )
+}
+
 /// Log at most 1 IO error per minute
 #[cfg(not(wasm_browser))]
 const IO_ERROR_LOG_INTERVAL: Duration = Duration::from_secs(60);
@@ -356,6 +376,27 @@ mod tests {
     use std::net::Ipv4Addr;
 
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn unreachable_errors_are_only_the_routing_failures() {
+        for code in [libc::ENETUNREACH, libc::EHOSTUNREACH, libc::ENETDOWN] {
+            let err = io::Error::from_raw_os_error(code);
+            assert!(is_unreachable_err(&err), "{err}");
+        }
+        // Loss, readiness, MTU probes, the GSO fallback, and ICMP noise all stay retryable.
+        for code in [
+            libc::ENOBUFS,
+            libc::EAGAIN,
+            libc::EMSGSIZE,
+            libc::EINVAL,
+            libc::EIO,
+            libc::ECONNREFUSED,
+        ] {
+            let err = io::Error::from_raw_os_error(code);
+            assert!(!is_unreachable_err(&err), "{err}");
+        }
+    }
 
     #[test]
     fn effective_segment_size() {

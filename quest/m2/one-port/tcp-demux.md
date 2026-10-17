@@ -54,6 +54,6 @@ right arm.
 
 ## Related
 
-- [UDP demux](/quest/m1/p2p/udp-demux.md) - the UDP half
+- [UDP demux](/quest/m2/p2p/udp-demux.md) - the UDP half
 - [mTLS on tls://](/quest/m2/tls-listener-mtls.md) - client-certificate verification on the `tls://` arm this acceptor carries
 - [WebSocket bitrate caps](/quest/m2/rate-websocket.md) - sizes the kernel buffers of the socket this acceptor boxes
