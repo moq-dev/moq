@@ -38,8 +38,7 @@ Rules every child follows:
   growing a public shape it deletes: fetch and per-group requests
   ([Model ranges](/quest/m1/subscribe-ranges/model.md)), largest and
   liveness ([Live largest location](/quest/m1/largest.md)), announce
-  interest ([Rust lazy discovery](/quest/m1/lazy-discovery/rust.md)), and
-  the received tail ([Tail arrivals](/quest/m1/tail-arrivals.md)).
+  interest ([Rust lazy discovery](/quest/m1/lazy-discovery/rust.md)).
 
 Inventory method, to rerun before each child starts (counts drift). Rust:
 replace every `pub(crate)` under `rs/moq-net/src/model/` with
