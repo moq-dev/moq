@@ -434,16 +434,27 @@ impl DialSources {
 	}
 }
 
+/// A dial task that ends once its [`DialEntry`] is replaced or the [`DialMap`]
+/// drops, so a cancelled `run` takes the dynamic dials, spawned outside its
+/// `JoinSet`, down with it.
+struct DialTask(AbortHandle);
+
+impl Drop for DialTask {
+	fn drop(&mut self) {
+		self.0.abort();
+	}
+}
+
 /// One entry in [`DialMap`].
 struct DialEntry {
-	handle: AbortHandle,
+	task: DialTask,
 	sources: DialSources,
 	active: DialSource,
 }
 
-/// Map of in-flight cluster dials, keyed by canonical peer identity. Cloneable: the inner
-/// map is shared via `Arc<Mutex<_>>` so the discovery tasks and the static-seed
-/// phase write to the same set of entries.
+/// Map of in-flight cluster dials, keyed by canonical peer identity, owning each
+/// dial's task. Cloneable: the inner map is shared via `Arc<Mutex<_>>` so the
+/// discovery tasks and the static-seed phase write to the same set of entries.
 #[derive(Clone, Default)]
 struct DialMap {
 	inner: Arc<Mutex<HashMap<String, DialEntry>>>,
@@ -480,20 +491,19 @@ impl DialMap {
 			let replace = entry.active == source && entry.sources.get(source) != Some(&target);
 			entry.sources.set(source, target.clone());
 			if replace {
-				entry.handle.abort();
-				entry.handle = spawn(target);
+				entry.task = DialTask(spawn(target));
 			}
 			return;
 		}
 
 		let key = target.key.clone();
-		let handle = spawn(target.clone());
+		let task = DialTask(spawn(target.clone()));
 		let mut sources = DialSources::default();
 		sources.set(source, target);
 		map.insert(
 			key,
 			DialEntry {
-				handle,
+				task,
 				sources,
 				active: source,
 			},
@@ -521,14 +531,12 @@ impl DialMap {
 			let next_target = next_target.clone();
 			entry.active = next_source;
 			if active_target.as_ref() != Some(&next_target) {
-				entry.handle.abort();
-				entry.handle = spawn(next_target);
+				entry.task = DialTask(spawn(next_target));
 			}
 			return;
 		}
 
-		let entry = map.remove(peer).expect("entry exists");
-		entry.handle.abort();
+		map.remove(peer);
 	}
 
 	/// Reconcile the API source against `desired`, including changes to a peer's
@@ -3607,20 +3615,14 @@ mod tests {
 		assert_eq!(registered, 0, "a start registers its client only once it runs");
 	}
 
-	/// A critical failure ends `run`, which closes the dials on the way out: the
-	/// caller consumed the cluster, so nothing else could. The dialing runtime stops
-	/// right after, as a process exit would, and the peer's idle timeout is far past
-	/// the wait, so only the close explains the link ending.
+	/// A QUIC endpoint that accepts the ALPNs of `connect` and speaks no MoQ, so a
+	/// test sees the transport close of the dial itself. `idle` outlasts any wait.
 	#[cfg(feature = "quic")]
-	#[tokio::test]
-	async fn a_critical_failure_closes_the_dials() {
+	fn bare_quic_server(
+		connect: &moq_tokio::connect::Config,
+		idle: std::time::Duration,
+	) -> moq_tokio::quic::driver::Endpoint {
 		use moq_tokio::quic::driver;
-		const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
-		const IDLE: std::time::Duration = std::time::Duration::from_secs(300);
-		let _ = moq_tokio::crypto::install_default();
-
-		let mut connect = moq_tokio::connect::Config::default();
-		connect.tls.insecure = Some(true);
 		let key = rcgen::KeyPair::generate().expect("keypair");
 		let cert = rcgen::CertificateParams::new(vec!["localhost".to_string()])
 			.expect("cert params")
@@ -3641,10 +3643,68 @@ mod tests {
 			.collect();
 		let crypto = driver::crypto::rustls::QuicServerConfig::try_from(tls).expect("quic crypto");
 		let mut transport = driver::TransportConfig::default();
-		transport.max_idle_timeout(Some(IDLE.try_into().expect("idle timeout")));
+		transport.max_idle_timeout(Some(idle.try_into().expect("idle timeout")));
 		let mut server_config = driver::ServerConfig::with_crypto(Arc::new(crypto));
 		server_config.transport_config(Arc::new(transport));
-		let server = driver::Endpoint::server(server_config, "127.0.0.1:0".parse().unwrap()).expect("server");
+		driver::Endpoint::server(server_config, "127.0.0.1:0".parse().unwrap()).expect("server")
+	}
+
+	/// Cancelling `run` aborts the dials a peer list started, which run outside
+	/// the tasks of `run` itself, so none keeps redialing with nothing left to close it.
+	#[cfg(feature = "quic")]
+	#[tokio::test]
+	async fn cancelling_run_stops_its_dynamic_dials() {
+		const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+		const IDLE: std::time::Duration = std::time::Duration::from_secs(300);
+		let _ = moq_tokio::crypto::install_default();
+
+		let mut connect = moq_tokio::connect::Config::default();
+		connect.tls.insecure = Some(true);
+		let server = bare_quic_server(&connect, IDLE);
+		let port = server.local_addr().expect("server addr").port();
+		let dir = tempfile::tempdir().expect("tempdir");
+		let peers = dir.path().join("peers.json");
+		std::fs::write(&peers, format!(r#"["moql://127.0.0.1:{port}/"]"#)).expect("write peers");
+
+		let config = Config {
+			connect_api: Some(peers.display().to_string()),
+			..Default::default()
+		};
+		let mut quic = moq_tokio::quic::Config::default();
+		quic.idle_timeout = Some(IDLE);
+		let cluster = new_cluster(config).expect("cluster").with_connect(connect, quic);
+		let started = cluster.clone().start().await.expect("start");
+		let running = tokio::spawn(started.run());
+
+		let _conn = tokio::time::timeout(TIMEOUT, server.accept())
+			.await
+			.expect("dial timeout")
+			.expect("incoming")
+			.await
+			.expect("handshake");
+		running.abort();
+		let _ = running.await;
+		// Each dial holds a stop receiver until its task ends.
+		tokio::time::timeout(TIMEOUT, cluster.dialers.stop.closed())
+			.await
+			.expect("a peer-list dial outlived its cancelled run");
+	}
+
+	/// A critical failure ends `run`, which closes the dials on the way out: the
+	/// caller consumed the cluster, so nothing else could. The dialing runtime stops
+	/// right after, as a process exit would, and the peer's idle timeout is far past
+	/// the wait, so only the close explains the link ending.
+	#[cfg(feature = "quic")]
+	#[tokio::test]
+	async fn a_critical_failure_closes_the_dials() {
+		use moq_tokio::quic::driver;
+		const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+		const IDLE: std::time::Duration = std::time::Duration::from_secs(300);
+		let _ = moq_tokio::crypto::install_default();
+
+		let mut connect = moq_tokio::connect::Config::default();
+		connect.tls.insecure = Some(true);
+		let server = bare_quic_server(&connect, IDLE);
 		let port = server.local_addr().expect("server addr").port();
 
 		let config = Config {
