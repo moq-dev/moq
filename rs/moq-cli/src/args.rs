@@ -444,7 +444,9 @@ pub struct MoqSide {
 	/// agree on it and on every timestamp wherever each started: PTS zero is the epoch's
 	/// time, and for `ts` one 33-bit wrap (about 26.5 hours) before it. The wall mapping is
 	/// then off by the source clock's reading at the epoch's time, which for a TS program
-	/// clock is anywhere within half a wrap.
+	/// clock is anywhere within half a wrap. Near either end of that range, processes whose
+	/// clocks or delivery differ can place one timestamp a wrap apart, and redundant `flv`
+	/// imports stop matching at FLV's 49.7-day millisecond wrap.
 	#[usage(long, env = "MOQ_EPOCH", help_heading = "MoQ")]
 	pub epoch: Option<hang::moq_net::Epoch>,
 

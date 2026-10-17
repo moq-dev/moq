@@ -29,6 +29,12 @@ impl<E: CatalogExt> Timebase<E> {
 		}
 	}
 
+	/// Whether this timebase was minted from `catalog` or a clone of it, which is where an importer
+	/// reserving through it writes.
+	pub fn is_on(&self, catalog: &Producer<E>) -> bool {
+		self.catalog.same(catalog)
+	}
+
 	/// Begin reserving an importer's tracks, sharing this timebase's offset.
 	///
 	/// See [`Producer::reserve`] for how the reservation gates the catalog.
