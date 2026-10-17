@@ -151,17 +151,17 @@ impl Client {
 			let track = match kind {
 				Kind::H264 => {
 					let track = broadcast.unique_track(".avc3", catalog.track_info(hang::catalog::PRIORITY.video))?;
-					Track::Video(Video::H264 {
+					Track::Video(Box::new(Video::H264 {
 						split: h264::Split::new(),
 						import: h264::Import::new(track, reserved.clone(), Default::default())?,
-					})
+					}))
 				}
 				Kind::H265 => {
 					let track = broadcast.unique_track(".hev1", catalog.track_info(hang::catalog::PRIORITY.video))?;
-					Track::Video(Video::H265 {
+					Track::Video(Box::new(Video::H265 {
 						split: h265::Split::new(),
 						import: h265::Import::new(track, reserved.clone(), Default::default())?,
-					})
+					}))
 				}
 				Kind::Aac => {
 					let Some(ParametersRef::Audio(params)) = session.streams()[*index].parameters() else {
@@ -169,7 +169,7 @@ impl Client {
 					};
 					let config = aac::config(params.extra_data())?;
 					let track = broadcast.unique_track(".aac", catalog.track_info(hang::catalog::PRIORITY.audio))?;
-					Track::Aac(aac::Import::new(track, reserved.clone(), config)?)
+					Track::Aac(Box::new(aac::Import::new(track, reserved.clone(), config)?))
 				}
 			};
 			ingest.streams[*index] = Some(Stream {
@@ -227,23 +227,27 @@ enum Kind {
 }
 
 enum Track {
-	Video(Video),
-	Aac(aac::Import),
+	Video(Box<Video>),
+	Aac(Box<aac::Import>),
 }
 
 impl Track {
 	fn finish(&mut self) -> moq_mux::Result<()> {
 		match self {
-			Self::Video(Video::H264 { import, .. }) => import.finish(),
-			Self::Video(Video::H265 { import, .. }) => import.finish(),
+			Self::Video(video) => match &mut **video {
+				Video::H264 { import, .. } => import.finish(),
+				Video::H265 { import, .. } => import.finish(),
+			},
 			Self::Aac(import) => import.finish(),
 		}
 	}
 
 	fn abort(self, err: moq_net::Error) {
 		match self {
-			Self::Video(Video::H264 { import, .. }) => import.abort(err),
-			Self::Video(Video::H265 { import, .. }) => import.abort(err),
+			Self::Video(video) => match *video {
+				Video::H264 { import, .. } => import.abort(err),
+				Video::H265 { import, .. } => import.abort(err),
+			},
 			Self::Aac(import) => import.abort(err),
 		}
 	}
