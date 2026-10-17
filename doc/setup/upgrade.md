@@ -35,6 +35,12 @@ These land with the next breaking release, not the 2026-09-23 train.
   `catalog::hang::Consumer` with `.into()`, then read it through `catalog::Stream`.
   Its `Hang`, `Msf`, and `Closed` variants and `catalog::msf::Consumer::track`
   are private.
+- **Rust audio reads carry encoder ends.** `moq_audio::decode::Consumer::read()`
+  returns `decode::Read` events: `Frame { discontinuity, frame }` and
+  `End { discontinuity, end }`; `None` still means the track is finished. An
+  `End` can be followed by final PCM with the same `discontinuity` before a fresh
+  encoder bumps it. A bump with no `End` before it is a loss.
+  Binding audio frame APIs keep their existing shape.
 - **JS catalog ranking names its media kind.** Replace `Catalog.ranked(renditions)`
   with `Catalog.Video.ranked(renditions)`. `Catalog.Audio.ranked(renditions)`
   orders audio by enabled state, bitrate, sample rate, channel count, and name.

@@ -133,6 +133,7 @@ ts *args:
     python3 ./ts/fragment_pes.test.py
     python3 ./ts/pcr-timing.test.py
     python3 ./ts/open-gop.test.py
+    python3 ./ts/holes.test.py
     ./ts/run.sh "$@"
 
 # Table-placement grader: acquisition, interleave, phase, drift and missing-table controls.

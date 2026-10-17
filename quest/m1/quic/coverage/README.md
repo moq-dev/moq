@@ -43,7 +43,6 @@ and the harness defaults to Cubic while production runs BBR3.
 ## Required
 
 - [Characterization tests](/quest/m1/quic/coverage/characterize.md) - golden scheduling order, and every uncovered frame, reset, limit, and endpoint path, on today's harness
-- [Seeded simulation](/quest/m1/quic/coverage/sim.md) - a deterministic, impaired network in `Pair`, BBR3 as the harness default, and property tests over random workloads
 - [Pin benchmark cores](/quest/m1/quic/coverage/bench-pin.md) - local base/head comparisons run on one core type on hybrid CPUs
 
 ## Related

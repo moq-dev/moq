@@ -2521,7 +2521,11 @@ struct FrontTask {
 /// resolved, and a subscription with what the readers want.
 struct Asked {
 	source: u64,
+	/// The track instance the query reached, whatever its source serves under the name later.
 	copy: track::Consumer,
+	/// The front's own demand on the copy, held for as long as the front holds the copy: a
+	/// bare handle is no demand, so this stands in for the readers' queries and fetches.
+	query: track::Querying,
 	info: Option<track::Info>,
 	/// Some sessions only learn a track's info by subscribing (moq-transport's
 	/// SUBSCRIBE_OK), and read the demand only then, so the readers' demand rides the
@@ -2564,11 +2568,12 @@ struct TrackIo {
 	/// Which copy serves the track, and how it ends; see [`super::resume`].
 	routes: super::resume::Producer,
 	/// A copy whose info is still in flight.
-	query: Option<(Asked, track::Querying)>,
+	query: Option<Asked>,
 	/// The copy whose info resolved, waiting for the machine to splice it.
 	staged: Option<Asked>,
-	/// The source whose copy serves the track, and the subscription its query made.
-	copy: Option<(u64, track::Consumer)>,
+	/// The source whose copy serves the track, the copy, and the query holding it; plus the
+	/// subscription that query made.
+	copy: Option<(u64, track::Consumer, track::Querying)>,
 	held: Option<kio::Pending<track::Subscribing>>,
 	/// The last copy ended because its session closed locally: a close, not an
 	/// error, so the track ends cleanly if nothing takes over.
@@ -2586,7 +2591,7 @@ impl TrackIo {
 			self.accepted = Some(request.routes(self.routes.consume()).accept(info));
 		}
 		self.routes.serve(asked.copy.clone());
-		self.copy = Some((asked.source, asked.copy));
+		self.copy = Some((asked.source, asked.copy, asked.query));
 		self.held = asked.sub;
 	}
 
@@ -2621,9 +2626,10 @@ impl TrackIo {
 struct InFlight {
 	weak: track::TrackWeak,
 	routes: super::resume::Producer,
-	// Kept for its readers: the logical track, its copy, and the copy's subscription.
+	// Kept for its readers: the logical track, the query holding its copy, and the copy's
+	// subscription.
 	_accepted: Option<track::Producer>,
-	_copy: Option<track::Consumer>,
+	_copy: Option<track::Querying>,
 	_held: Option<kio::Pending<track::Subscribing>>,
 }
 
@@ -2936,7 +2942,7 @@ async fn serve_front(task: FrontTask) -> Vec<InFlight> {
 						sources.remove(&source);
 						instances.remove(&source);
 						for io in tracks.values_mut() {
-							if io.query.as_ref().is_some_and(|(asked, _)| asked.source == source) {
+							if io.query.as_ref().is_some_and(|asked| asked.source == source) {
 								io.query = None;
 							}
 							if io.staged.as_ref().is_some_and(|asked| asked.source == source) {
@@ -2976,20 +2982,19 @@ async fn serve_front(task: FrontTask) -> Vec<InFlight> {
 						io.ready.wake_by_ref();
 						let closing = sources.get(&source).is_some_and(|s| s.is_closing());
 						match sources.get(&source).map(|s| s.track(&name)) {
-							Some(Ok(copy)) => {
-								let sub = io.weak.subscription().map(|demand| copy.subscribe(demand));
+							Some(Ok(lookup)) => {
 								// `into_inner` sheds the `Pending` future wrapper so only
 								// the pollable (which is `Sync`) is held across the wait.
-								let info = copy.query().into_inner();
-								io.query = Some((
-									Asked {
-										source,
-										copy,
-										info: None,
-										sub,
-									},
-									info,
-								));
+								let query = lookup.query().into_inner();
+								let copy = query.track();
+								let sub = io.weak.subscription().map(|demand| copy.subscribe(demand));
+								io.query = Some(Asked {
+									source,
+									copy,
+									query,
+									info: None,
+									sub,
+								});
 							}
 							Some(Err(err)) => events.push_back(Event::TrackInfo {
 								track: name,
@@ -3087,7 +3092,7 @@ async fn serve_front(task: FrontTask) -> Vec<InFlight> {
 							let used = io.weak.is_used();
 							// A reader still waiting on its source's answer is in flight
 							// too: serve it the copy it asked, so it ends as that copy does.
-							let waiting = io.staged.take().or_else(|| io.query.take().map(|(asked, _)| asked));
+							let waiting = io.staged.take().or_else(|| io.query.take());
 							if io.copy.is_none()
 								&& used && let Some(asked) = waiting
 							{
@@ -3120,7 +3125,7 @@ async fn serve_front(task: FrontTask) -> Vec<InFlight> {
 								weak,
 								routes,
 								_accepted: accepted,
-								_copy: copy.map(|(_, copy)| copy),
+								_copy: copy.map(|(_, _, query)| query),
 								_held: held,
 							});
 						}
@@ -3166,8 +3171,8 @@ async fn serve_front(task: FrontTask) -> Vec<InFlight> {
 				let waker = Waker::from(io.ready.clone());
 				let waiter = io.park.hold(&Context::from_waker(&waker));
 				let step = (|| {
-					if let Some((asked, query)) = &mut io.query
-						&& let Poll::Ready(result) = query.poll(waiter)
+					if let Some(asked) = &mut io.query
+						&& let Poll::Ready(result) = asked.query.poll(waiter)
 					{
 						return Some(Step::Info(name.clone(), asked.source, result));
 					}
@@ -3182,7 +3187,7 @@ async fn serve_front(task: FrontTask) -> Vec<InFlight> {
 					}
 					// Settled once the copy closes: a group still open below a declared end is
 					// owed until then, and a session closing first means it never came.
-					if let Some((source, copy)) = &io.copy
+					if let Some((source, copy, _)) = &io.copy
 						&& copy.poll_closed(waiter).is_ready()
 					{
 						let result = match copy.poll_complete(&kio::Waiter::noop()) {
@@ -3319,7 +3324,7 @@ async fn serve_front(task: FrontTask) -> Vec<InFlight> {
 			Step::Info(name, source, result) => {
 				let closing = sources.get(&source).is_some_and(|s| s.is_closing());
 				let Some(io) = tracks.get_mut(&name) else { continue };
-				let Some((asked, _)) = io.query.take() else { continue };
+				let Some(asked) = io.query.take() else { continue };
 				// A copy that is already aborted cannot be spliced; its error is
 				// the source's answer for the track.
 				let result = match result {
@@ -7487,7 +7492,7 @@ mod tests {
 		let pending = consumer.request_broadcast("room/alice", None);
 		queued(&server).await.accept(&upstream);
 		let resolved = pending.await.expect("resolves");
-		let reader = resolved.track("video").unwrap();
+		let reader = resolved.track("video").unwrap().subscribe(None);
 		settle(|| source.demand().is_used()).await;
 
 		// The source refuses the track before delivering, which ends it for the reader.
