@@ -45,8 +45,8 @@ none does:
 | Hard session limit | absent unless NVML proves the consumer cap | absent, none known | absent, none known |
 | Memory headroom for this process | `VK_EXT_memory_budget` | `VK_EXT_memory_budget` | `VK_EXT_memory_budget` |
 | Memory used and total, device-wide | NVML | sysfs `mem_info_vram_*` | absent until a source is proven |
-| Video engine utilization | NVML encoder and decoder utilization | `gpu_metrics` VCN activity, where the ASIC reports it | PMU video engine busyness: i915 busy ticks, xe `engine-active-ticks` |
-| Health | NVML errors, `VK_ERROR_DEVICE_LOST` | DRM wedged uevent, `VK_ERROR_DEVICE_LOST` | DRM wedged uevent, `VK_ERROR_DEVICE_LOST` |
+| Video engine utilization | NVML encoder and decoder utilization | `gpu_metrics` VCN activity, where the ASIC reports it | PMU video engine busyness: i915 `vcs*-busy`, xe `engine-active-ticks` |
+| Health | NVML errors, `VK_ERROR_DEVICE_LOST` | DRM wedged uevent, `VK_ERROR_DEVICE_LOST` | DRM wedged uevent, i915 `RESET` uevent, `VK_ERROR_DEVICE_LOST` |
 | Model | Vulkan `deviceName` | Vulkan `deviceName` | Vulkan `deviceName` |
 
 Sources:
@@ -70,13 +70,18 @@ Notes on scope:
   (`CAP_PERFMON` or a relaxed `perf_event_paranoid`). xe's engine activity
   events are recent (GuC-backed) and listed under
   `/sys/bus/event_source/devices/xe_*/events`; where the event or the access
-  is missing, the field is absent. Utilization is the delta between two reads.
-- amdgpu, i915, and xe send the DRM wedged uevent on resets. Its `WEDGED=`
-  recovery method decides health: `none` reports a reset the driver already
-  recovered from (amdgpu sends it after a successful ring reset), so the
-  device is usable but its work was lost; any other method means the device
-  is unusable until that recovery runs. It is a one-shot event, so seeing it
-  needs a listener that outlives a single poll.
+  is missing, the field is absent. i915's busy counter is nanoseconds, so
+  utilization is its delta over the elapsed time between reads. xe's
+  `engine-active-ticks` must be read in one perf group with
+  `engine-total-ticks`, and utilization is the ratio of their deltas.
+- amdgpu, i915, and xe send the DRM wedged uevent when a device is unusable;
+  its `WEDGED=` method names the recovery it needs. A reset the driver
+  recovered from (usable, but its work was lost) arrives differently per
+  driver: amdgpu sends the wedged uevent with `WEDGED=none` after a
+  successful ring reset, i915 sends its own `RESET=1` then `ERROR=0`
+  uevents, and xe sends nothing, so a recovered reset caused by another
+  process is absent on xe. Uevents are one-shot, so seeing them needs a
+  listener that outlives a single poll.
 - NVML may not report the consumer-card encoder session cap at all; verify on
   hardware rather than assume it.
 
