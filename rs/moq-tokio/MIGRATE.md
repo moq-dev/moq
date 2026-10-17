@@ -130,14 +130,27 @@ match transport {
 
 ### Custom sessions declare their request binding
 
-`transport::Session` wraps a session implementing moq-net's own `transport::poll` traits instead of `web_transport_trait`.
-The adapter constructors take the session's `moq_net::transport::Binding` explicitly: `Uri` when the transport handshake carries the request URI, `InBand` when SETUP does.
+`transport::Session::new` takes the session's `moq_net::transport::Binding`: `Uri` when the transport handshake carries the request URI, `InBand` when SETUP does.
 `Client` and `Server` are unchanged.
+
+```rust
+// Before
+let session = moq_tokio::transport::Session::new(session);
+// After
+let session = moq_tokio::transport::Session::new(session, moq_net::transport::Binding::Uri);
+```
 
 ### `Redirect::resolve` is removed (#4854)
 
 `Redirect` and `Goaway` stay, but the lenient `resolve(uri, current)` is gone.
 Follow a GOAWAY through the connection, which validates the target itself.
+
+```rust
+// Before
+let next = Redirect::SameHost.resolve(uri, &current);
+// After
+config.goaway.redirect = Redirect::SameHost; // the connection follows and validates the GOAWAY
+```
 
 ### The `android-logcat` feature is removed (#4608)
 

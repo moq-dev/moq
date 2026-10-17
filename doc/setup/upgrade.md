@@ -7,10 +7,12 @@ description: The order to roll out a release across relays, auth servers, and cl
 
 Every hand-written published package keeps a `MIGRATE.md` with a before/after
 snippet for each breaking change, newest first. Read your package's file from
-the top down to the version you run. The generated UniFFI packages (such as
-`moq-ffi` on PyPI or Maven) follow
-[moq-ffi's](https://github.com/moq-dev/moq/blob/main/rs/moq-ffi/MIGRATE.md). This page covers what spans packages: the wire changes
-that decide the order to upgrade a deployment.
+the top down to the version you run. Most binding users install a wrapper,
+such as `moq-rs` on PyPI or `dev.moq:moq` on Maven, whose guide is in the index
+below. The raw UniFFI packages published as `moq-ffi` have no guide of their
+own: [moq-ffi's](https://github.com/moq-dev/moq/blob/main/rs/moq-ffi/MIGRATE.md)
+covers that layer, in UniFFI names. This page covers what spans packages: the
+wire changes that decide the order to upgrade a deployment.
 
 A released flag, environment variable, or config key that was renamed is
 refused at startup with its replacement named, rather than ignored. Fix what the

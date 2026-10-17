@@ -107,6 +107,13 @@ audio = moq.media.TrackProducer.audio(broadcast, moq.media.AudioInit(format=moq.
 `moq.media.ContainerStreamProducer` takes a `ContainerStreamInit` holding the format instead of a bare format.
 Its optional `timebase`, also on `ContainerInit`, shares one source's offset across container imports.
 
+```python
+# Before
+producer = moq.media.ContainerStreamProducer(broadcast, moq.media.ContainerFormat.FMP4)
+# After
+producer = moq.media.ContainerStreamProducer(broadcast, moq.media.ContainerStreamInit(moq.media.ContainerFormat.FMP4))
+```
+
 ### Durations are `timedelta`
 
 `Frame`, `Datagram`, `Subscription`, `TrackInfo`, and `ConnectionStats` carry `timedelta` instead of microsecond integers: `timestamp_us` is `timestamp`, and `rtt_us` is `rtt`.
@@ -125,22 +132,57 @@ A frame read from an untimed track has `timestamp` set to `None`.
 Raw writes no longer default to zero, so a write to a timed track without a timestamp raises `TimestampMismatch`; whole-frame media writes require one.
 `moq.media.CatalogProducer.now()` samples the broadcast clock for local-event stamps.
 
+```python
+# Before
+track.write_frame(payload)
+# After
+track.write_frame(payload, timestamp=pts)
+```
+
 ### Subscriber staleness is `max_delay`
 
 `Subscription.max_age_us` is `max_delay`, a `timedelta`, and the decoder outputs take `max_delay_us`.
 `TrackInfo` keeps its `max_age`: it is the publisher's retention.
 
+```python
+# Before
+sub = moq.Subscription(max_age_us=500_000)
+# After
+sub = moq.Subscription(max_delay=timedelta(milliseconds=500))
+```
+
 ### Error payloads are named `reason`
 
 Errors that carried a positional string (`Transport`, `Internal`, `Connect`, ...) name it `reason`.
+
+```python
+# Before
+reason = err[0]
+# After
+reason = err.reason
+```
 
 ### `stalled` is `enabled` (#4915)
 
 `moq.media.Video.stalled` is `enabled`, defaulting to `True` with the meaning inverted, and `moq.media.Audio` gains `enabled`.
 
+```python
+# Before
+live = not video.stalled
+# After
+live = video.enabled
+```
+
 ### Routes have one cost (#4661)
 
 `Route.cold` is removed.
+
+```python
+# Before
+route = moq.Route(cost=10, cold=20)
+# After
+route = moq.Route(cost=10)
+```
 
 ### Decoded video frames are objects
 
@@ -172,6 +214,13 @@ broadcast.close()
 `publish_media*` is `publish_audio`, `publish_video`, or `publish_container`, each taking its own init.
 The raw encoder paths that used to be `publish_audio` / `publish_video` are `encode_audio` / `encode_video`.
 
+```python
+# Before
+media = broadcast.publish_media("opus", opus_head)
+# After
+media = broadcast.publish_audio(moq.AudioFormat.OPUS, opus_head)
+```
+
 ### Renames
 
 | Before | After |
@@ -188,3 +237,12 @@ The raw encoder paths that used to be `publish_audio` / `publish_video` are `enc
 `Error.Protocol` carries a `ProtocolError` (scope, wire code, kind) instead of a flattened message.
 Setters raise (`Busy` during connect or listen) instead of dropping the value.
 Track and group `finish()` keep the handle open, so a later `abort()` can still run.
+
+```python
+# Before
+except moq.Error.Protocol as e:
+    message = str(e)
+# After
+except moq.Error.Protocol as e:
+    kind = e.details.kind
+```

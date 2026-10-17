@@ -101,3 +101,8 @@ See [docs.rs/moq-relay](https://docs.rs/moq-relay) and
 - **Certificate errors**: the hostname must match the certificate. Local browsers need the fingerprint served over `[web.http]`.
 - **Connection timeout**: UDP isn't reaching the relay, or the client URL names the wrong port.
 - **Unauthorized / forbidden**: the token's paths don't cover the connection path, or the broadcast a session asked for. See [path matching](/bin/relay/auth#path-matching).
+
+## Upgrading
+
+Renamed flags, environment variables, and config keys are listed, newest
+first, in moq-relay's [MIGRATE.md](https://github.com/moq-dev/moq/blob/main/rs/moq-relay/MIGRATE.md).

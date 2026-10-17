@@ -46,3 +46,10 @@ config.history = true;
 
 `Broadcaster::new` no longer awaits or fails.
 A rendition whose sibling broadcast ends now ends its playlist instead of rebinding to a replacement.
+
+```rust
+// Before
+let broadcaster = Broadcaster::new(source, config).await?;
+// After
+let broadcaster = Broadcaster::new(source, config);
+```

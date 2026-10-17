@@ -104,13 +104,21 @@ Every importer, MPEG-TS included, now ends with `TimestampRewind` on a loop wrap
 ### Importers publish the catalog at their first frame
 
 The fMP4, MKV, and MPEG-TS importers hold the catalog until the first frame of a selected track, as FLV already did, so the first snapshot carries the final root `clock`.
-A track `with_select` deselects does not release it.
+A track deselected by `with_select` does not release it.
 A `moov` or `Tracks` decoded after `finish()` is refused with `fmp4::Error::MoovAfterFinish` or `mkv::Error::TracksAfterFinish`.
 
 ### Video importers drop `tick`, `idle`, and `observe_lag` (#4915)
 
 The H.264, H.265, AV1, VP8, and VP9 `Import`s no longer take liveness hints; a stalled rendition is marked by the catalog's `enabled` flag instead.
 Delete the calls.
+
+```rust
+// Before
+import.tick()?;
+import.observe_lag(lag)?;
+import.idle()?;
+// After: delete the calls
+```
 
 ### fMP4 export fixes its track set at the init segment
 
@@ -128,6 +136,14 @@ A keyframe whose parameter sets never appeared ends the export instead of waitin
 CMAF `Wire::write` refuses a track whose timescale is not the init's `mdhd` timescale with `fmp4::Error::TimescaleMismatch`.
 A track you create yourself declares it with `track::Info::with_timescale`.
 
+```rust
+// Before
+let track = broadcast.create_track(name, None)?;
+// After
+let info = track::Info::default().with_timescale(Timescale::new(mdhd_timescale)?);
+let track = broadcast.create_track(name, info)?;
+```
+
 ### Data timestamps use the broadcast clock (#4821)
 
 JSON and flate producers publish `at: None` untimed, so their track must be untimed too; pass a timestamp on a timed track.
@@ -143,6 +159,13 @@ producer.update(Timed::from(&value).at(catalog.clock().capture(instant)?))?;
 ### moq-binary is moq-flate
 
 `Error::Binary` is `Error::Flate`, carrying a `moq_flate::Error`.
+
+```rust
+// Before
+Err(moq_mux::Error::Binary(err)) => {} // err: moq_binary::Error
+// After
+Err(moq_mux::Error::Flate(err)) => {} // err: moq_flate::Error
+```
 
 ### AAC refuses channel counts it cannot name (#4973)
 
@@ -173,6 +196,15 @@ let config = opus::Config { mapping: Some(mapping), ..config };
 `ts::Stats` is `ts::stats::Snapshot`, and `ts::StreamStats` is `ts::stats::Stream`, whose `track` is an owned `String`.
 `ts::Export::stats` returns `ts::stats::Export`; feed it to `stats::Log` with `.into()`.
 `ts::MultipleProgramsError` is `#[non_exhaustive]`: recover it by downcast and read `programs`.
+
+```rust
+// Before
+let stats: ts::Stats = import.stats();
+log.sample(export.stats());
+// After
+let stats: ts::stats::Snapshot = import.stats();
+log.sample(export.stats().into());
+```
 
 ### FLV export takes a catalog stream (#4987)
 

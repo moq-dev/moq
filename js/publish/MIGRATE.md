@@ -9,6 +9,13 @@ How to update your code for each breaking change, newest first.
 `enabled: false` keeps the rendition in the catalog with `enabled: false` instead of removing it, and viewers skip it.
 Check any code that read a missing rendition as disabled.
 
+```ts
+// Before
+const disabled = !catalog.video?.renditions[name];
+// After
+const disabled = catalog.video?.renditions[name]?.enabled === false;
+```
+
 ### Tracks persist for the broadcast's life (#5068)
 
 `Rendition.close()` no longer closes the network track.

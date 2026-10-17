@@ -4,7 +4,7 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### Capture takes one `encode::Capture` and returns a `Control`
+### Capture takes one `encode::Capture`, and `Control::new` returns the driver
 
 `publish_capture(broadcast, catalog, capture, encode, clock)` is `publish_capture(broadcast, catalog, encode::Capture)`.
 `Capture` has no clock: the driver stamps on `catalog.clock()`.
@@ -29,7 +29,7 @@ It counts cadence keyframes too, so a request may be served without forcing one.
 // Before
 control.cut();
 // After
-if let Err(Error::CutUnsupported) = control.cut() {
+if let Err(Error::CutUnsupported(_)) = control.cut() {
 	// wait for the next cadence keyframe
 }
 ```
@@ -49,6 +49,14 @@ let encoded = Encoded::new(payload, timestamp, keyframe);
 
 `encode::Producer` no longer takes liveness hints; disable a rendition through the catalog's `enabled` flag instead.
 
+```rust
+// Before
+producer.tick()?;
+producer.observe_lag(lag)?;
+producer.idle()?;
+// After: delete the calls
+```
+
 ### External Vulkan and DMA-BUF inputs (#4975)
 
 On Linux, `Surface::Vulkan` no longer requires the `nvidia` feature.
@@ -56,6 +64,14 @@ On Linux, `Surface::Vulkan` no longer requires the `nvidia` feature.
 `vulkan::Importer`, `vulkan::ImportError`, `cuda::Converter`, and `cuda::Slot` leave the public API; `Surface::Cuda` stays for NVDEC output.
 `DmaBuf::new` takes an owned FD, a `DmaBufLayout`, and a release guard, and an external DMA-BUF refuses CPU readback.
 Bind eager open to an external device with `encode::Config::input`; an unsupported device is refused instead of falling back to software.
+
+```rust
+// Before
+let importer = frame::vulkan::Importer::new(ordinal, capacity)?;
+let slot = importer.import(frame::vulkan::Handles::new(memory, timeline), image, owner)?;
+// After
+let slot = frame::vulkan::Slot::new(frame::vulkan::Handles { memory, timeline }, image, owner)?;
+```
 
 ### Decoder staleness is `max_delay`
 

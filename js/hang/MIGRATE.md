@@ -79,3 +79,12 @@ producer.discontinuity(end);
 ### The catalog's `timeline` entry is `archive`
 
 @moq/hang reads the root catalog's `archive` entry instead of `timeline`, and wall time from the root `clock`.
+
+```ts
+// Before
+const index = catalog.timeline;
+const wall = catalog.timeline?.wall;
+// After
+const index = catalog.archive;
+const wall = catalog.clock?.wall;
+```

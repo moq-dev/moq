@@ -6,7 +6,7 @@ How to update your code for each breaking change, newest first.
 
 ### Background panics are reported (#5562)
 
-A panic in a background task throws `MoqException.Task` with the panic message as `reason`, and other objects keep running.
+A panic in a background task throws `TaskMoqException` with the panic message as `reason`, and other objects keep running.
 
 ### Announcements are events with a restart
 
@@ -34,11 +34,25 @@ moq.announced().updates().listen((event) {
 
 `Moq.epoch` is `connects`.
 
+```dart
+// Before
+final n = moq.epoch;
+// After
+final n = moq.connects;
+```
+
 ### The consume origin is `consume`
 
 `ConnectOptions.subscribe` is `consume`.
 A value the native side cannot use fails `Moq.connect` with `MoqException.Config`, including a bad bind address.
 A server request takes its origins in `accept(publish: ..., consume: ...)`, where null inherits the server's origin.
+
+```dart
+// Before
+final moq = await Moq.connect(url, options: ConnectOptions(subscribe: origin));
+// After
+final moq = await Moq.connect(url, options: ConnectOptions(consume: origin));
+```
 
 ### Data tracks wrap a track
 
@@ -74,32 +88,83 @@ final audio = media.TrackProducer.audio(broadcast: broadcast, target: media.Name
 `media.ContainerStreamProducer` takes a `ContainerStreamInit` holding the format instead of a bare format.
 Its optional `timebase`, also on `ContainerInit`, shares one source's offset across container imports.
 
+```dart
+// Before
+final producer = media.ContainerStreamProducer(broadcast: broadcast, format: media.ContainerFormat.fmp4);
+// After
+final producer = media.ContainerStreamProducer(broadcast: broadcast, init: media.ContainerStreamInit(format: media.ContainerFormat.fmp4));
+```
+
 ### Timestamps are optional
 
 `Frame.timestampUs` and `Datagram.timestampUs` are nullable, null on a frame read from an untimed track, and so are their `timestamp` getters.
 A raw write to a timed track without a timestamp throws `TimestampMismatch` instead of going out at 0, and whole-frame media writes require one.
 `media.CatalogProducer.now()` samples the broadcast clock for local-event stamps.
 
+```dart
+// Before
+track.writeFrame(frame: Frame(payload: payload));
+final Duration ts = frame.timestamp;
+// After
+track.writeFrame(frame: Frame(payload: payload, timestampUs: pts));
+final Duration? ts = frame.timestamp;
+```
+
 ### Subscriber staleness is `maxDelay`
 
 `Subscription.maxAgeUs` / `maxAge` is `maxDelayUs` / `maxDelay`.
 `TrackInfo.maxAge` keeps its name: it is the publisher's retention.
 
+```dart
+// Before
+final sub = Subscription(maxAgeUs: 500000);
+// After
+final sub = Subscription(maxDelayUs: 500000);
+```
+
 ### Error payloads are named `reason`
 
 Exceptions that carried a positional string (`Transport`, `Internal`, `Connect`, ...) name it `reason`.
+
+```dart
+// Before
+final reason = (error as TransportMoqException).v0;
+// After
+final reason = (error as TransportMoqException).reason;
+```
 
 ### `Transport` gains `webTransport`
 
 A WebTransport session reports `MoqTransport.webTransport`; `quic` now means raw QUIC only, so an exhaustive `switch` needs one more case.
 
+```dart
+// Before
+case MoqTransport.quic:
+// After
+case MoqTransport.quic || MoqTransport.webTransport:
+```
+
 ### `stalled` is `enabled` (#4915)
 
 `media.Video.stalled` is `enabled`, defaulting to true with the meaning inverted, and `media.Audio` gains `enabled`.
 
+```dart
+// Before
+final live = !video.stalled;
+// After
+final live = video.enabled;
+```
+
 ### Routes have one cost (#4661)
 
 `MoqRoute.cold` is removed.
+
+```dart
+// Before
+final route = MoqRoute(cost: 10, cold: 20);
+// After
+final route = MoqRoute(cost: 10);
+```
 
 ### `BroadcastProducer.finish()` is removed (#4152)
 

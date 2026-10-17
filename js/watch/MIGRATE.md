@@ -31,6 +31,13 @@ With no video rendition selectable, the picture clears to black.
 With `announced` off, the player no longer moves to a later publisher at the same path.
 Turn `announced` on to follow restarts.
 
+```ts
+// Before
+new Watch.Player({ origin: connection.origin, name, announced: false });
+// After
+new Watch.Player({ origin: connection.origin, name, announced: true });
+```
+
 ## 0.5 -> 0.6
 
 ### Delay attributes need a unit (#3396, #3817)

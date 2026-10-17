@@ -104,6 +104,13 @@ audio, err := media.NewAudioTrackProducer(broadcast, media.Named{}, media.AudioI
 `media.NewContainerStreamProducer` takes a `ContainerStreamInit` holding the format instead of a bare format.
 Its optional `Timebase`, also on `ContainerInit`, shares one source's offset across container imports.
 
+```go
+// Before
+producer, err := media.NewContainerStreamProducer(broadcast, media.ContainerFormatFmp4)
+// After
+producer, err := media.NewContainerStreamProducer(broadcast, media.ContainerStreamInit{Format: media.ContainerFormatFmp4})
+```
+
 ### Durations are `time.Duration`
 
 `Frame`, `Datagram`, `Subscription`, `TrackInfo`, and `ConnectionStats` carry `time.Duration` instead of microsecond integers: `TimestampUs` is `Timestamp`, and `RttUs` is `RTT`.
@@ -122,26 +129,68 @@ err := track.WriteFrame(moq.Frame{Payload: payload, Timestamp: &ts})
 A raw write to a timed track without a timestamp fails with `TimestampMismatch` instead of going out at 0, and whole-frame media writes require one.
 `media.CatalogProducer.Now()` samples the broadcast clock for local-event stamps.
 
+```go
+// Before
+err := track.WriteFrame(moq.Frame{Payload: payload})
+// After
+err := track.WriteFrame(moq.Frame{Payload: payload, Timestamp: &pts})
+```
+
 ### Subscriber staleness is `MaxDelay`
 
 `Subscription.MaxAgeUs` is `MaxDelay`, and the decoder outputs take `MaxDelayUs`.
 `TrackInfo.MaxAge` keeps its name: it is the publisher's retention.
 
+```go
+// Before
+sub := moq.Subscription{MaxAgeUs: 500_000}
+// After
+sub := moq.Subscription{MaxDelay: 500 * time.Millisecond}
+```
+
 ### Error payloads are named `Reason`
 
 Errors that carried a positional string (`Transport`, `Internal`, `Connect`, ...) name it `Reason`.
 
+```go
+// Before
+reason := transport.Field0 // *ffi.MoqErrorTransport from errors.As
+// After
+reason := transport.Reason
+```
+
 ### `Transport` gains `WebTransport`
 
-A WebTransport session reports `TransportWebTransport`; `TransportQuic` now means raw QUIC only.
+A WebTransport session reports `TransportWebTransport`; `TransportQUIC` now means raw QUIC only.
+
+```go
+// Before
+quic := request.Transport() == moq.TransportQUIC
+// After
+quic := request.Transport() == moq.TransportQUIC || request.Transport() == moq.TransportWebTransport
+```
 
 ### `Stalled` is `Enabled` (#4915)
 
 `media.Video.Stalled` is `Enabled`, defaulting to true with the meaning inverted, and `media.Audio` gains `Enabled`.
 
+```go
+// Before
+live := !video.Stalled
+// After
+live := video.Enabled
+```
+
 ### Routes have one cost (#4661)
 
 `Route.Cold` is removed.
+
+```go
+// Before
+route := moq.Route{Cost: 10, Cold: &cold}
+// After
+route := moq.Route{Cost: 10}
+```
 
 ### Decoded video frames are objects
 
@@ -181,6 +230,13 @@ import "moq.dev/moq"
 `PublishMedia*` is `PublishAudio`, `PublishVideo`, or `PublishContainer`, each taking its own init.
 The raw encoder paths that used to be `PublishAudio` / `PublishVideo` are `EncodeAudio` / `EncodeVideo`.
 
+```go
+// Before
+media, err := broadcast.PublishMedia("opus", opusHead)
+// After
+media, err := broadcast.PublishAudio(moq.AudioFormatOpus, opusHead)
+```
+
 ### Renames
 
 | Before | After |
@@ -197,3 +253,10 @@ The raw encoder paths that used to be `PublishAudio` / `PublishVideo` are `Encod
 Protocol errors carry a `ProtocolError` (scope, wire code, kind) instead of a flattened message.
 Setters return an error (`Busy` during connect or listen) instead of dropping the value.
 Track and group `Finish()` keep the handle open, so a later `Abort()` can still run.
+
+```go
+// Before
+if errors.Is(err, moq.ErrProtocol) { log.Print(err.Error()) }
+// After
+if p, ok := moq.ProtocolError(err); ok { log.Print(p.Kind, p.Code) }
+```

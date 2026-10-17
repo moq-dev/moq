@@ -50,6 +50,15 @@ match announced.next().await? {
 
 `MoqSession::epoch()` is `connects()`, and `MoqAudioProducer::reset_epoch()` is `reanchor()`.
 
+```rust
+// Before
+let n = session.epoch();
+audio.reset_epoch()?;
+// After
+let n = session.connects();
+audio.reanchor()?;
+```
+
 ### Clients and servers take a config record (#4519)
 
 `MoqClient::new()` and `MoqServer::new()` plus their setters are `MoqClient::new(MoqClientConfig)` and `MoqServer::new(MoqServerConfig)`, with nested `tls`, `quic`, `websocket`, and `backoff` records and a `versions` list.
@@ -103,10 +112,24 @@ let audio = MoqMediaTrackProducer::audio(&broadcast, MoqMediaTarget::Named { nam
 `MoqMediaContainerStreamProducer` takes a `MoqContainerStreamInit` holding the format instead of a bare format.
 Its optional `timebase`, also on `MoqContainerInit`, shares one source's offset across container imports; leave it unset for independent offsets.
 
+```rust
+// Before
+let importer = MoqMediaContainerStreamProducer::new(&broadcast, MoqContainerFormat::Fmp4)?;
+// After
+let importer = MoqMediaContainerStreamProducer::new(&broadcast, MoqContainerStreamInit { format: MoqContainerFormat::Fmp4, timebase: None })?;
+```
+
 ### Error payloads are named
 
 `MoqError` cases that carried a positional string (`Transport`, `Internal`, `Connect`, ...) name it `reason`.
 The Display text is unchanged.
+
+```rust
+// Before
+Err(MoqError::Transport(reason)) => log(reason),
+// After
+Err(MoqError::Transport { reason }) => log(reason),
+```
 
 ### Timestamps are optional
 
@@ -128,18 +151,46 @@ track.write_frame(MoqFrame { payload, timestamp_us: Some(now_us) })?;
 `MoqSubscription`, `MoqAudioDecoderOutput`, and `MoqVideoDecoderOutput` take `max_delay_us` instead of `max_age_us`.
 `MoqTrackInfo.max_age_us` keeps its name: it is the publisher's retention.
 
+```rust
+// Before
+subscription.max_age_us = 500_000;
+// After
+subscription.max_delay_us = 500_000;
+```
+
 ### `MoqTransport` gains `WebTransport`
 
 A WebTransport session reports `MoqTransport::WebTransport`; `Quic` now means raw QUIC only.
 An exhaustive match needs one more arm.
 
+```rust
+// Before
+let quic = matches!(request.transport(), MoqTransport::Quic);
+// After
+let quic = matches!(request.transport(), MoqTransport::Quic | MoqTransport::WebTransport);
+```
+
 ### `stalled` is `enabled` (#4915)
 
 `MoqVideo.stalled` is `enabled`, defaulting to true with the meaning inverted, and `MoqAudio` gains `enabled`.
 
+```rust
+// Before
+if !video.stalled { select(video) }
+// After
+if video.enabled { select(video) }
+```
+
 ### Routes have one cost (#4661)
 
 `MoqRoute.cold` is removed.
+
+```rust
+// Before
+let route = MoqRoute { cost: 10, cold: Some(50), ..Default::default() };
+// After
+let route = MoqRoute { cost: 10, ..Default::default() };
+```
 
 ### Decoded video frames own their surface
 
@@ -157,9 +208,23 @@ let rgba = frame.pixels(MoqVideoPixelFormat::Rgba)?;
 
 `MoqBroadcastProducer::finish()` is gone; close the broadcast instead.
 
+```rust
+// Before
+broadcast.finish()?;
+// After
+broadcast.close()?;
+```
+
 ### The `android-logcat` feature is removed (#4608)
 
 Android builds always log to logcat; drop the feature.
+
+```sh
+# Before
+cargo ndk -t arm64-v8a build -p moq-ffi --features android-logcat
+# After
+cargo ndk -t arm64-v8a build -p moq-ffi
+```
 
 ## 0.3 -> 0.4
 
@@ -167,6 +232,13 @@ Android builds always log to logcat; drop the feature.
 
 `publish_media*` is `publish_audio`, `publish_video`, or `publish_container`, each taking its own init.
 The raw encoder paths that used to be `publish_audio` / `publish_video` are `encode_audio` / `encode_video`.
+
+```rust
+// Before
+let media = broadcast.publish_media(MoqInit { format: "opus".into(), data, label: None, video: None })?;
+// After
+let media = broadcast.publish_audio(MoqAudioInit { format: MoqAudioFormat::Opus, data, label: None })?;
+```
 
 ### Renames
 
@@ -185,9 +257,23 @@ The raw encoder paths that used to be `publish_audio` / `publish_video` are `enc
 
 Client and server setters return an error (`Busy` during connect or listen) instead of dropping the value.
 
+```rust
+// Before
+client.set_publish(Some(origin));
+// After
+client.set_publish(Some(origin))?;
+```
+
 ### Protocol errors are structured
 
 `MoqError::Protocol` carries a `MoqProtocolError` (scope, wire code, kind) instead of a flattened message.
+
+```rust
+// Before
+Err(MoqError::Protocol(err)) => log(err.to_string()),
+// After
+Err(MoqError::Protocol { details }) => log(details.kind, details.code),
+```
 
 ### Track and group `finish()` keep the handle
 

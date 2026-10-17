@@ -39,7 +39,7 @@ Read `active` reactively and close the request when done, or pass `epoch` to kee
 for (const broadcast of origin.broadcasts(scope)) { ... }
 // After
 for await (const event of origin.announced(scope)) {
-	if (event.kind === "start") { ... }
+	if (event.kind === "start" || event.kind === "restart") { ... }
 }
 ```
 
@@ -149,6 +149,14 @@ await producer.demand().unused();
 `BroadcastProducer.insertTrack` is removed.
 `Track.Producer.appendGroup` and `appendDatagram` throw `duplicate sequence` instead of continuing past an earlier producer of the same name; `createTrack` now answers a queued request instead of throwing `duplicate track`.
 `Request.accept` closes the request's producer with the error whenever it throws.
+
+```ts
+// Before
+const track = new Track.Producer("chat").accept(info);
+broadcast.insertTrack(track);
+// After
+const track = broadcast.createTrack("chat", info);
+```
 
 ### Route cost is a `bigint` (#4661)
 

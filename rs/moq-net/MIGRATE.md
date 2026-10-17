@@ -30,6 +30,13 @@ let next = pool.gc(now, &waiter);
 `append_group` and `append_datagram` on a track that replaces an earlier producer of the same name return `Error::Duplicate` instead of continuing past the earlier producer's sequence.
 Pick the start sequence yourself with `create_group`, or publish a new broadcast.
 
+```rust
+// Before
+let group = track.append_group()?; // continued past the earlier producer
+// After
+let group = track.create_group(group::Info { sequence })?;
+```
+
 ### Announcements are `Start`, `Update`, `End`, and `Restart` events
 
 `announce::Consumer` yields `announce::Event`, carrying an `announce::Announce { prefix, captures, route }`.

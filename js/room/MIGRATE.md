@@ -18,3 +18,10 @@ const ms = Milli.fromNano(HISTORY);
 ### Chat tracks are timed (#4968)
 
 `Chat.info()` includes a `timescale`, so a chat track you create yourself must declare one before writing timestamps.
+
+```ts
+// Before
+const track = broadcast.createTrack(Chat.TRACK, { priority });
+// After
+const track = broadcast.createTrack(Chat.TRACK, Chat.info());
+```

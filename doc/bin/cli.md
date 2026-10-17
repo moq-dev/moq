@@ -404,3 +404,8 @@ so the other formats refuse `--linger`.
 relay is reachable and shows what it holds; see [Inspect a relay](/bin/inspect). Connection refused means UDP isn't getting through; certificate
 errors on a dev relay want `--connect-tls-insecure` or the `http://`
 fingerprint flow.
+
+## Upgrading
+
+Renamed flags, environment variables, and config keys are listed, newest
+first, in moq-cli's [MIGRATE.md](https://github.com/moq-dev/moq/blob/main/rs/moq-cli/MIGRATE.md).

@@ -7,7 +7,7 @@ How to update your invocation and config for each breaking change, newest first.
 ### `moq export ts --delay` defaults to 1 s and includes the send-ahead (#5553)
 
 The output trails a TS source by the delay instead of twice it.
-With a multiplex rate, video whose HRD declares a longer buffer delay than `--delay` stops the export with the delay it needs named.
+With a multiplex rate, video whose HRD declares a longer buffer delay than `--delay` stops the export, naming the delay it needs.
 
 ```bash
 # Before
@@ -31,6 +31,13 @@ moq export fmp4 --max-delay 2s ...
 ### `moq export ts`, `flv`, and `mkv` take `--delay` (#4645)
 
 Each frame is written that long after its decode time; the older staleness spellings are refused with `--delay` named.
+
+```bash
+# Before
+moq export ts --max-age 500ms ...
+# After
+moq export ts --delay 500ms ...
+```
 
 ### `moq export ts --linger` follows only the same publisher instance
 
@@ -56,6 +63,13 @@ Annex-B H.264 and H.265 sources get an `avc3` or `hev1` init from the catalog wh
 `auto` is measured from how late frames arrive instead of derived from RTT.
 Pass `--delay 100ms` to keep the old fixed delay.
 
+```bash
+# Before
+moq ... play
+# After
+moq ... play --delay 100ms
+```
+
 ### `--hop` is removed; `--epoch` replaces it (#4969)
 
 A redundant pair shares an epoch, a UUIDv7 such as `uuidgen -7` prints, instead of a Hop ID.
@@ -75,6 +89,13 @@ A stream-only listener (TCP or Unix, no `--listen`) refuses the QUIC-only flags,
 `--listen-quic-lb-nonce` needs `--listen-quic-lb-id`.
 Each used to be ignored: drop it, or add the listener it configures.
 
+```bash
+# Before
+moq --connect https://relay.example.com/anon --auth-public 'anon/**' import ...
+# After
+moq --connect https://relay.example.com/anon import ...
+```
+
 ### `moq --listen` with an invalid auth config stops at startup (#4912)
 
 It used to start and refuse every session.
@@ -83,11 +104,25 @@ It used to start and refuse every session.
 
 Rename it in `--features` when building from source.
 
+```bash
+# Before
+cargo install moq-cli --no-default-features --features "noq,websocket,play"
+# After
+cargo install moq-cli --no-default-features --features "quic,websocket,play"
+```
+
 ## 0.13 -> 0.14
 
 ### Gossip discovery is removed (#4601)
 
 `--cluster-mesh` and TOML `mesh` are refused: list every peer with `--cluster-connect`.
+
+```bash
+# Before
+moq --cluster-mesh --cluster-connect https://root.example/ import ...
+# After
+moq --cluster-connect https://root.example/,https://b.example/ import ...
+```
 
 ## 0.12 -> 0.13
 
@@ -96,6 +131,13 @@ Rename it in `--features` when building from source.
 `moq auth serve` never re-checks or expires a session by default; `--revalidate` needs `--expires`, and `--limit-*` needs `--revalidate`.
 It refuses a session presenting both a JWT and a certificate.
 `--key` takes a file, not an https or JWKS URL.
+
+```bash
+# Before
+moq auth serve --key-dir keys/ ...
+# After
+moq auth serve --key-dir keys/ --revalidate 1m --expires 1d ...
+```
 
 ## 0.11 -> 0.12
 
@@ -118,3 +160,10 @@ A renamed flag or environment variable is refused with its replacement named.
 ### `moq --listen` needs auth
 
 A listener refuses to start without `--auth-url` or `--auth-public` instead of accepting everyone.
+
+```bash
+# Before
+moq --listen '[::]:4443' ... import ts
+# After
+moq --listen '[::]:4443' --auth-public '**' ... import ts
+```

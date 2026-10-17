@@ -71,6 +71,13 @@ if (frame.timestamp_present) use(frame.timestamp_us);
 
 `moq_subscription`, `moq_audio_decoder_output`, `moq_video_decoder_output`, `moq_consume_video`, and `moq_consume_audio` take `max_delay_us` instead of `max_age_us`.
 
+```c
+// Before
+moq_subscription sub = { .max_age_us = 500000 };
+// After
+moq_subscription sub = { .max_delay_us = 500000 };
+```
+
 ### `stalled` is `enabled` (#4915)
 
 `moq_consume_video_stalled` is `moq_consume_video_enabled`, with the meaning inverted.
@@ -87,6 +94,13 @@ moq_consume_video_enabled(catalog, index, &enabled);
 ### Routes have one cost (#4661)
 
 `moq_route.cold` and `has_cold` are removed.
+
+```c
+// Before
+moq_route route = { .cost = 10, .cold = 20, .has_cold = true };
+// After
+moq_route route = { .cost = 10 };
+```
 
 ### `moq_publish_finish` is removed (#4152)
 
@@ -109,10 +123,28 @@ moq_publish_close(broadcast);
 
 The 41 `moq_client_*` setters are one zero-initializable `moq_client_config`, whose durations are `_us`.
 
+```c
+// Before
+int client = moq_client_create();
+moq_client_set_tls_disable_verify(client, true);
+moq_client_connect(url, url_len, client, origin, 0, on_status, user_data);
+// After
+moq_client_config config = { .tls_disable_verify = true };
+moq_session_connect(url, url_len, &config, origin, 0, on_status, user_data);
+```
+
 ### Publish split by kind
 
 `moq_publish_media` is `moq_publish_audio`, `moq_publish_video`, or `moq_publish_container`, and the raw encoders are `moq_encode_audio*` / `moq_encode_video*`.
 Formats are enums instead of strings.
+
+```c
+// Before
+int track = moq_publish_media(broadcast, "opus", 4, opus_head, opus_head_len);
+// After
+moq_audio_init init = { .format = MOQ_AUDIO_FORMAT_OPUS, .init = opus_head, .init_len = opus_head_len };
+int track = moq_publish_audio(broadcast, &init);
+```
 
 ### Announcement renames
 

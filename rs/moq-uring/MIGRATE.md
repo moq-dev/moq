@@ -20,6 +20,13 @@ moq-uring = { version = "...", features = ["quic"] }
 
 `quic::endpoint::CID_LEN` is removed; endpoints still issue 8-byte connection IDs, sharded or not.
 
+```rust
+// Before
+let len = moq_uring::quic::endpoint::CID_LEN;
+// After
+let len = 8; // endpoints still issue 8-byte connection IDs
+```
+
 ### The server config takes a rustls config (#5312)
 
 `quic::server::Config` drops `identity`, `alpn`, and `client_auth` for one `tls: Arc<rustls::ServerConfig>`, and `Config::new` takes it.

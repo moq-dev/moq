@@ -49,6 +49,15 @@ for try await event in try session.consume.announced(prefix: "live/") {
 
 `Session.epoch()` is `connects()`, and `AudioProducer.resetEpoch()` is `reanchor()`.
 
+```swift
+// Before
+let n = session.epoch()
+try audio.resetEpoch()
+// After
+let n = session.connects()
+try audio.reanchor()
+```
+
 ### `Client` takes its config at init
 
 The `Client` setters are `Client(...)` arguments, with `tls`, `quic`, `websocket`, and `backoff` records.
@@ -97,32 +106,83 @@ let audio = try Media.TrackProducer.audio(broadcast: broadcast, initData: Media.
 `Media.ContainerStreamProducer` takes a `Media.ContainerStreamInit` holding the format instead of a bare format.
 Its optional `timebase`, also on `Media.ContainerInit`, shares one source's offset across container imports.
 
+```swift
+// Before
+let importer = try Media.ContainerStreamProducer(broadcast: broadcast, format: .fmp4)
+// After
+let importer = try Media.ContainerStreamProducer(broadcast: broadcast, initData: Media.ContainerStreamInit(format: .fmp4))
+```
+
 ### Timestamps are optional
 
 Raw `writeFrame(_:timestampUs:)` takes a `UInt64?` defaulting to `nil`, and a frame read from an untimed track has a `nil` `timestampUs`.
 A write to a timed track without a timestamp throws `TimestampMismatch` instead of going out at 0, and whole-frame media writes require one.
 `Media.CatalogProducer.now()` samples the broadcast clock for local-event stamps.
 
+```swift
+// Before
+try track.writeFrame(payload)
+let ts: UInt64 = frame.timestampUs
+// After
+try track.writeFrame(payload, timestampUs: nowUs)
+let ts: UInt64? = frame.timestampUs
+```
+
 ### Subscriber staleness is `maxDelayUs`
 
 `Subscription`, `AudioDecoderOutput`, and `VideoDecoderOutput` take `maxDelayUs` instead of `maxAgeUs`.
 `TrackInfo.maxAgeUs` keeps its name: it is the publisher's retention.
 
+```swift
+// Before
+let subscription = Subscription(maxAgeUs: 500_000)
+// After
+let subscription = Subscription(maxDelayUs: 500_000)
+```
+
 ### Error payloads are named `reason`
 
 Cases that carried a positional string (`Transport`, `Internal`, `Connect`, ...) take a `reason:` label.
+
+```swift
+// Before
+throw MoqError.Transport("reset")
+// After
+throw MoqError.Transport(reason: "reset")
+```
 
 ### `Transport` gains `.webTransport`
 
 A WebTransport session reports `.webTransport`; `.quic` now means raw QUIC only, so an exhaustive `switch` needs one more case.
 
+```swift
+// Before
+let quic = request.transport == .quic
+// After
+let quic = request.transport == .quic || request.transport == .webTransport
+```
+
 ### `stalled` is `enabled` (#4915)
 
 `Media.Video.stalled` is `enabled`, defaulting to true with the meaning inverted, and `Media.Audio` gains `enabled`.
 
+```swift
+// Before
+if !video.stalled { select(video) }
+// After
+if video.enabled { select(video) }
+```
+
 ### Routes have one cost (#4661)
 
 `Route.cold` is removed.
+
+```swift
+// Before
+let route = Route(cost: 10, cold: 50)
+// After
+let route = Route(cost: 10)
+```
 
 ### Decoded video frames are objects
 
@@ -143,6 +203,13 @@ let rgba = try frame.pixels(format: .rgba)
 `publishMedia` is `publishAudio`, `publishVideo`, or `publishContainer`, each taking its own init.
 The raw encoder paths that used to be `publishAudio` / `publishVideo` are `encodeAudio` / `encodeVideo`.
 
+```swift
+// Before
+let media = try broadcast.publishMedia(format: "opus", initData: opusHead)
+// After
+let media = try broadcast.publishAudio(format: .opus, initData: opusHead)
+```
+
 ### Renames
 
 | Before | After |
@@ -159,3 +226,12 @@ The raw encoder paths that used to be `publishAudio` / `publishVideo` are `encod
 `MoqError.Protocol` carries `details` (scope, wire code, kind) instead of a flattened message.
 Setters throw (`.Busy` during connect or listen) instead of dropping the value.
 Track and group `finish()` keep the handle open, so a later `abort()` can still run.
+
+```swift
+// Before
+catch MoqError.Protocol(let message) { print(message) }
+client.setPublish(origin)
+// After
+catch MoqError.Protocol(let details) { print(details.kind, details.code) }
+try client.setPublish(origin)
+```

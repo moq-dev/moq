@@ -50,6 +50,15 @@ moq.announced().updates().collect { event ->
 
 `Moq.epoch()` is `connects()`, and `AudioProducer.resetEpoch()` is `reanchor()`.
 
+```kotlin
+// Before
+val n = moq.epoch()
+audio.resetEpoch()
+// After
+val n = moq.connects()
+audio.reanchor()
+```
+
 ### `connect` takes a `ClientConfig`
 
 The keyword arguments moved into a `ClientConfig` with nested `tls`, `quic`, `websocket`, and `backoff` records.
@@ -94,32 +103,85 @@ val audio = dev.moq.media.TrackProducer.audio(broadcast, Named(null), AudioInit(
 `ContainerStreamProducer` takes a `ContainerStreamInit` holding the format instead of a bare format.
 Its optional `timebase`, also on `ContainerInit`, shares one source's offset across container imports.
 
+```kotlin
+// Before
+val importer = ContainerStreamProducer(broadcast, ContainerFormat.FMP4)
+// After
+val importer = ContainerStreamProducer(broadcast, ContainerStreamInit(ContainerFormat.FMP4))
+```
+
 ### Timestamps are optional
 
 `Frame.timestamp` and `Datagram.timestamp` are `Duration?`, null on a frame read from an untimed track.
 A raw write to a timed track without a timestamp throws `TimestampMismatch` instead of going out at 0, and whole-frame media writes require one.
 `CatalogProducer.now()` samples the broadcast clock for local-event stamps.
 
+```kotlin
+// Before
+track.writeFrame(Frame(payload = bytes))
+val ts: Duration = frame.timestamp
+// After
+track.writeFrame(Frame(payload = bytes, timestampUs = nowUs))
+val ts: Duration? = frame.timestamp
+```
+
 ### Subscriber staleness is `maxDelay`
 
 `Subscription.maxAge`, `AudioDecoderOutput.maxAge`, and `VideoDecoderOutput.maxAge` are `maxDelay`.
 `TrackInfo.maxAge` keeps its name: it is the publisher's retention.
 
+```kotlin
+// Before
+val subscription = Subscription(maxAgeUs = 500_000u)
+val budget = subscription.maxAge
+// After
+val subscription = Subscription(maxDelayUs = 500_000u)
+val budget = subscription.maxDelay
+```
+
 ### Error payloads are named `reason`
 
 Exceptions that carried a positional string (`Transport`, `Internal`, `Connect`, ...) name it `reason`.
+
+```kotlin
+// Before
+catch (e: MoqException.Transport) { log(e.v1) }
+// After
+catch (e: MoqException.Transport) { log(e.reason) }
+```
 
 ### `Transport` gains `WEB_TRANSPORT`
 
 A WebTransport session reports `Transport.WEB_TRANSPORT`; `QUIC` now means raw QUIC only, so an exhaustive `when` needs one more branch.
 
+```kotlin
+// Before
+val quic = request.transport() == Transport.QUIC
+// After
+val quic = request.transport() == Transport.QUIC || request.transport() == Transport.WEB_TRANSPORT
+```
+
 ### `stalled` is `enabled` (#4915)
 
 `Video.stalled` is `enabled`, defaulting to true with the meaning inverted, and `Audio` gains `enabled`.
 
+```kotlin
+// Before
+if (!video.stalled) select(video)
+// After
+if (video.enabled) select(video)
+```
+
 ### Routes have one cost (#4661)
 
 `Route.cold` is removed.
+
+```kotlin
+// Before
+val route = Route(cost = 10u, cold = 50u)
+// After
+val route = Route(cost = 10u)
+```
 
 ### Decoded video frames are objects
 
@@ -137,20 +199,48 @@ val rgba = frame.use { it.pixels(VideoPixelFormat.RGBA) }
 
 Call `end()` to finish the broadcast and keep the handle, or `close()` to release it.
 
+```kotlin
+// Before
+broadcast.finish()
+// After
+broadcast.end()
+```
+
 ## 0.4 -> 0.5
 
 ### Durations are `kotlin.time.Duration`
 
 Extension properties expose every microsecond field as a `Duration`: `Frame.timestamp`, `Subscription.maxAge`, `ConnectionStats.rtt`, `Backoff.initial`, and the rest.
 
+```kotlin
+// Before
+val delayMs = backoff.initialMs
+// After
+val delay = backoff.initial
+```
+
 ### `connect` grows options
 
 `Moq.connect` gains `reconnect`, `backoff`, `maxStreams`, and the WebSocket fallback settings as named arguments.
+
+```kotlin
+// Before
+val moq = Moq.connect(url, ..., origin)
+// After
+val moq = Moq.connect(url, publish = origin)
+```
 
 ### Publish split by kind
 
 `publishMedia*` is `publishAudio`, `publishVideo`, or `publishContainer`, each taking its own init.
 The raw encoder paths that used to be `publishAudio` / `publishVideo` are `encodeAudio` / `encodeVideo`.
+
+```kotlin
+// Before
+val media = broadcast.publishMedia(Init(format = "opus", data = opusHead, video = null))
+// After
+val media = broadcast.publishAudio(AudioInit(format = AudioFormat.OPUS, data = opusHead))
+```
 
 ### Renames
 
@@ -166,3 +256,10 @@ The raw encoder paths that used to be `publishAudio` / `publishVideo` are `encod
 `MoqException.Protocol` carries a `ProtocolError` (scope, wire code, kind) instead of a flattened message.
 Setters throw (`Busy` during connect or listen) instead of dropping the value.
 Track and group `finish()` keep the handle open, so a later `abort()` can still run.
+
+```kotlin
+// Before
+catch (e: MoqException.Protocol) { log(e.message) }
+// After
+catch (e: MoqException.Protocol) { log("${e.details.kind} ${e.details.code}") }
+```
