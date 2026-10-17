@@ -26,7 +26,7 @@ import type { Established as EstablishedType } from "./established.ts";
 import type { Extensions as ExtensionsType } from "./extensions.ts";
 import { DISCOVERY_REMOVED } from "./forward.ts";
 import type { GoawayProps, Redirect as RedirectType } from "./goaway.ts";
-import { Reload, type ReloadDelay, type ReloadStatus } from "./reload.ts";
+import { pumpAnnounced, Reload, type ReloadDelay, type ReloadStatus } from "./reload.ts";
 import type { Probe as ProbeType, Stats as StatsType } from "./stats.ts";
 import type { Transport as TransportType } from "./transport.ts";
 
@@ -281,12 +281,6 @@ export class Connection {
 		const producer = new Announce.Producer();
 		const consumer = producer.consume();
 
-		// Closing the consumer closes the shared state, so stop appending after that.
-		let closed = false;
-		void consumer.closed.then(() => {
-			closed = true;
-		});
-
 		// A child of this handle's scope rather than a standalone Effect it merely cleans up
 		// after: the disposer run() hands back also drops itself from the parent, so opening
 		// and closing announcement streams repeatedly does not pile up dead pumps that live
@@ -299,33 +293,8 @@ export class Connection {
 				else producer.caughtUp();
 				return;
 			}
-
-			const upstream = origin.announced(scope, options);
-			effect.cleanup(() => upstream.close());
-			// Caught up when the origin is: the pump has appended everything it owed by then.
-			effect.subscribe(upstream.caughtUp, (caughtUp) => (caughtUp ? producer.caughtUp() : producer.behind()));
-
-			// Track what this origin announced so a URL switch retracts it; the last
-			// event rides along for the retraction.
-			const active = new Map<Path.Valid, Announce.Announce>();
-
-			effect.spawn(async () => {
-				try {
-					for (;;) {
-						const entry = await effect.race(upstream.next());
-						if (!entry) break;
-						if (entry.kind === "end") active.delete(entry.prefix);
-						else active.set(entry.prefix, entry);
-						producer.append(entry);
-					}
-				} finally {
-					if (!closed) {
-						for (const entry of active.values()) {
-							producer.append({ ...entry, kind: "end" });
-						}
-					}
-				}
-			});
+			// A URL switch retracts what the old origin announced.
+			pumpAnnounced(effect, origin.announced(scope, options), producer);
 		});
 
 		void consumer.closed.then(stop);

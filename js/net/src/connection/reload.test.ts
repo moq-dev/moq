@@ -1,6 +1,7 @@
 import { expect, spyOn, test } from "bun:test";
 import { Milli } from "@moq/clock";
 import { Effect, Signal } from "@moq/signals";
+import * as Announce from "../announced.ts";
 import type { Producer as BroadcastProducer } from "../broadcast.ts";
 import { SessionCode, SessionError, StreamCode, toTransport } from "../error.ts";
 import { Route } from "../hop.ts";
@@ -11,7 +12,7 @@ import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { wireOf } from "../wire.ts";
 import { type AcceptProps, accept as acceptSession } from "./index.ts";
-import { Reload, type ReloadProps } from "./reload.ts";
+import { pumpAnnounced, Reload, type ReloadProps } from "./reload.ts";
 
 function accept(transport: WebTransport, url: URL, props: Omit<AcceptProps, "transport" | "url"> = {}) {
 	return acceptSession({ transport, url, ...props });
@@ -667,4 +668,37 @@ test("a watcher catches up with the server's initial set, and again after a reco
 			globalThis.WebTransport = original;
 		}
 	}
+});
+
+/** Replacing a caught-up upstream with one already caught up still owes the old routes' ends. */
+test("a pump owes the retractions of the upstream it replaces", async () => {
+	const tick = async () => {
+		for (let i = 0; i < 16; i++) await Promise.resolve();
+	};
+	const producer = new Announce.Producer();
+	const consumer = producer.consume();
+
+	const first = new Announce.Producer();
+	first.append({ prefix: Path.from("a"), captures: undefined, kind: "start", route: Route.default });
+	first.caughtUp();
+	const upstream = new Signal(first);
+	const pump = new Effect((effect) => pumpAnnounced(effect, effect.get(upstream).consume(), producer));
+
+	expect(await consumer.next()).toMatchObject({ prefix: Path.from("a"), kind: "start" });
+	const parked = consumer.next();
+	await tick();
+	expect(consumer.caughtUp.peek()).toBe(true);
+
+	const second = new Announce.Producer();
+	second.caughtUp();
+	upstream.set(second);
+	expect(await parked).toMatchObject({ prefix: Path.from("a"), kind: "end" });
+	await tick();
+	expect(consumer.caughtUp.peek()).toBe(false);
+	void consumer.next();
+	await tick();
+	expect(consumer.caughtUp.peek()).toBe(true);
+
+	pump.close();
+	producer.close();
 });

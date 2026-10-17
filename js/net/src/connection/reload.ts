@@ -605,36 +605,9 @@ export class Reload {
 				return;
 			}
 
-			const upstream = conn.announced(scope, options);
-			effect.cleanup(() => upstream.close());
-			// Caught up when the session's stream is: the pump has appended everything it owed by then.
-			effect.subscribe(upstream.caughtUp, (caughtUp) => (caughtUp ? producer.caughtUp() : producer.behind()));
-
-			// Track what this connection announced so we can retract it if the connection
-			// drops; the last event rides along for the retraction.
-			const active = new Map<Path.Valid, Announce.Announce>();
-
-			effect.spawn(async () => {
-				try {
-					for (;;) {
-						const entry = await effect.race(upstream.next());
-						if (!entry) break;
-						if (entry.kind === "end") active.delete(entry.prefix);
-						else active.set(entry.prefix, entry);
-						producer.append(entry);
-					}
-				} catch {
-					// A dropped connection resets the announce stream; the retractions below cover it.
-				} finally {
-					// Retract everything from the connection that just went away, so a per-broadcast
-					// watcher tears down instead of clinging to the dead route.
-					if (consumer.closed.peek() === undefined) {
-						for (const entry of active.values()) {
-							producer.append({ ...entry, kind: "end" });
-						}
-					}
-				}
-			});
+			// A dropped connection retracts what it announced, so a per-broadcast watcher tears
+			// down instead of clinging to the dead route.
+			pumpAnnounced(effect, conn.announced(scope, options), producer);
 		});
 
 		this.#signals.cleanup(() => pump.close());
@@ -657,6 +630,60 @@ export class Reload {
 		this.#draining?.retire();
 		if (this.#closed.peek() === undefined) this.#closed.set(abort ?? null);
 	}
+}
+
+/**
+ * Pump `upstream` into `producer` for the rest of `effect`'s run: its events, then an `end`
+ * for each route still active once it closes or the run ends, so nothing clings to a source
+ * that went away. Caught up follows the upstream's, and owes those retractions too.
+ *
+ * @internal
+ */
+export function pumpAnnounced(effect: Effect, upstream: Announce.Consumer, producer: Announce.Producer) {
+	// The last event per active route rides along for its retraction.
+	const active = new Map<Path.Valid, Announce.Announce>();
+	let live = true;
+	const retract = () => {
+		live = false;
+		if (producer.closed.peek() !== undefined || active.size === 0) return;
+		// Behind first, so a reader parked on the stream takes these as owed, not as news.
+		producer.behind();
+		for (const entry of active.values()) producer.append({ ...entry, kind: "end" });
+		active.clear();
+	};
+
+	// Torn down in reverse: the mirror stops, the retractions land, then the upstream closes,
+	// so its closing never reads as caught up.
+	effect.cleanup(() => upstream.close());
+	effect.cleanup(retract);
+	// A new upstream owes its own initial set, and the retractions of the one before.
+	producer.behind();
+	effect.subscribe(upstream.caughtUp, (caughtUp) => {
+		if (!caughtUp) producer.behind();
+		else if (upstream.closed.peek() === undefined) producer.caughtUp();
+	});
+
+	effect.spawn(async () => {
+		try {
+			for (;;) {
+				const entry = await effect.race(upstream.next());
+				if (!entry || !live || producer.closed.peek() !== undefined) break;
+				if (entry.kind === "end") active.delete(entry.prefix);
+				else active.set(entry.prefix, entry);
+				producer.append(entry);
+			}
+		} catch {
+			// A dropped connection resets the announce stream; the retractions below cover it.
+		} finally {
+			if (live) {
+				// The upstream ended on its own: nothing more comes from it, so once its
+				// retractions are read there is nothing left to wait for.
+				retract();
+				producer.behind();
+				producer.caughtUp();
+			}
+		}
+	});
 }
 
 /**
