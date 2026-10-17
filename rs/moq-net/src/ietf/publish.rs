@@ -111,7 +111,7 @@ use crate::{
 	coding::{Decode, DecodeError, Decoder, Encode, EncodeError, Encoder},
 	ietf::{
 		Filter, GroupOrder, Location, Parameters, Properties, RequestId,
-		namespace::{decode_namespace, encode_namespace},
+		namespace::{decode_track, encode_namespace},
 	},
 };
 
@@ -300,8 +300,8 @@ impl Message for Publish<'_> {
 		if version == Version::Draft17 {
 			let _required_request_id_delta = r.varint()?;
 		}
-		let track_namespace = decode_namespace(r)?;
-		let track_name = Cow::Owned(r.string()?);
+		let (track_namespace, track_name) = decode_track(r)?;
+		let track_name = Cow::Owned(track_name);
 		let track_alias = r.varint()?;
 
 		match version {

@@ -4,7 +4,7 @@ import MoqFFI
 public enum Audio {
     /// The PCM layout (format, sample rate, channels) written to a `Producer`.
     public typealias EncoderInput = AudioEncoderInput
-    /// The codec side: codec, track name, rate, channels, bitrate, and frame duration.
+    /// The codec side: codec, track name, rate, channels, bitrate, frame duration, and preset.
     public typealias EncoderOutput = AudioEncoderOutput
     /// The PCM layout a `Consumer` delivers and how stale a group may get.
     public typealias DecoderOutput = AudioDecoderOutput
@@ -16,6 +16,8 @@ public enum Audio {
     public typealias EncoderFinish = MoqAudioEncoderFinish
     /// Selects the audio encoder codec. Build one with `Codec.opus()` or `Codec.aac()`.
     public typealias Codec = AudioCodec
+    /// How the encoder trades latency for compression; `nil` is `.balanced`.
+    public typealias Preset = MoqAudioPreset
     /// The PCM sample layout written to a `Producer` or delivered by a `Consumer`.
     public typealias SampleFormat = AudioSampleFormat
 
@@ -116,6 +118,12 @@ public enum Audio {
         public var frameSize: UInt64 {
             get throws { try ffi.frameSize() }
         }
+
+        /// The OpusHead or AudioSpecificConfig that publishes these packets via `Media.TrackProducer.audio`.
+        public func trackInit() throws -> Media.AudioInit { try ffi.trackInit() }
+
+        /// Retune the live encoder in bits per second.
+        public func setBitrate(_ bitrate: UInt64) throws { try ffi.setBitrate(bitrate: bitrate) }
 
         /// Encode one codec-sized interleaved f32 frame.
         public func encode(_ pcm: [Float]) throws -> Packet { try ffi.encode(pcm: pcm) }

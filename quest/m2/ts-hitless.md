@@ -83,10 +83,6 @@ agreement alone.
 
 Public API: `moq export ts --sync`.
 
-## Required
-
-- [T-STD TS export](/quest/m1/tstd/README.md) - the export, clock recovery, and schedule these legs share
-
 ## Related
 
 - [TS over RTP legs](/quest/m2/ts-rtp-egress.md) - packetizes these slots with matching RTP headers for ST 2022-7

@@ -3,6 +3,7 @@ import { ProtocolViolation, StreamError } from "../error.ts";
 import type * as Path from "../path.ts";
 import type { Reader, Stream } from "../stream.ts";
 import { type RequestCondition, toRequestCode } from "./error.ts";
+import { GoAway } from "./goaway.ts";
 import * as Message from "./message.ts";
 import { Parameters } from "./parameters.ts";
 import { RequestError } from "./request.ts";
@@ -41,17 +42,47 @@ export async function refuseReserved(stream: Stream, version: IetfVersion): Prom
 }
 
 /**
+ * The GOAWAYs the peer sent on one request stream. `client` is our own role: only a server
+ * may name a new session.
+ * @internal
+ */
+export type GoAways = { client: boolean; seen: boolean };
+
+/**
+ * Read the type of a request stream's next message, or undefined once the peer finishes.
+ * From draft 18 on, the peer may send one GOAWAY on a request stream, consumed here; a second,
+ * or a client's naming a new session, is a protocol violation.
+ * @internal
+ */
+export async function nextMessage(reader: Reader, version: IetfVersion, goaway: GoAways): Promise<number | undefined> {
+	for (;;) {
+		if (await reader.done()) return undefined;
+		const type = await reader.u53();
+		if (type !== GoAway.id || version < Version.DRAFT_18) return type;
+		if (goaway.seen) throw new ProtocolViolation("second GOAWAY on a request stream");
+		goaway.seen = true;
+		// Draft-18's Request ID belongs on the control stream only.
+		const msg = await GoAway.decode(reader, version);
+		if (msg.requestId !== undefined) throw new ProtocolViolation("request stream GOAWAY carries a Request ID");
+		if (!goaway.client && msg.newSessionUri !== "")
+			throw new ProtocolViolation("client GOAWAY names a new session");
+	}
+}
+
+/**
  * Read one whole namespace update without abandoning a partial frame.
  * @internal
  */
 export async function namespaceUpdate(
 	reader: Reader,
 	version: IetfVersion,
+	goaway: GoAways,
 ): Promise<{ requestId: bigint; prefix?: Path.Valid; refused?: RequestCondition } | undefined> {
-	if (await reader.done()) return undefined;
 	try {
 		// Inside the normalization, so an oversized or truncated type is malformed too.
-		if ((await reader.u53()) !== 0x02) throw new ProtocolViolation("expected namespace REQUEST_UPDATE");
+		const type = await nextMessage(reader, version, goaway);
+		if (type === undefined) return undefined;
+		if (type !== 0x02) throw new ProtocolViolation("expected namespace REQUEST_UPDATE");
 		return await Message.decode(reader, async (body) => {
 			const requestId = await body.u62();
 			const params = await Parameters.decode(body, version, "namespace-update");
@@ -64,7 +95,16 @@ export async function namespaceUpdate(
 	} catch (err) {
 		if (err instanceof MalformedAuthToken && err.requestId !== undefined)
 			return { requestId: err.requestId, refused: "malformed_auth_token" };
-		if (err instanceof ProtocolViolation || err instanceof StreamError) throw err;
-		throw new ProtocolViolation("malformed namespace REQUEST_UPDATE", { cause: err });
+		throw malformed(err, "namespace REQUEST_UPDATE");
 	}
+}
+
+/**
+ * A request message the peer sent that does not decode, including one cut short by FIN,
+ * breaks the protocol. A reset stream does not.
+ * @internal
+ */
+export function malformed(err: unknown, what: string): unknown {
+	if (err instanceof ProtocolViolation || err instanceof StreamError) return err;
+	return new ProtocolViolation(`malformed ${what}`, { cause: err });
 }

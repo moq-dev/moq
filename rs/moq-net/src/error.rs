@@ -85,6 +85,14 @@ pub enum SessionError {
 	/// A request ID was reused or violated the negotiated draft’s order or parity rules.
 	#[error("invalid request id")]
 	InvalidRequestId,
+
+	/// The peer sent a PATH it may not send, such as a server sending one at all.
+	#[error("invalid path")]
+	InvalidPath,
+
+	/// The peer sent an AUTHORITY it may not send, such as a server sending one at all.
+	#[error("invalid authority")]
+	InvalidAuthority,
 }
 
 impl SessionError {
@@ -99,11 +107,13 @@ impl SessionError {
 			Self::InvalidRequestId => 0x4,
 			Self::KeyValueFormatting => 0x6,
 			Self::TooManyRequests => 0x7,
+			Self::InvalidPath => 0x8,
 			Self::GoawayTimeout => 0x10,
 			Self::Timeout => 0x11,
 			Self::AuthTokenCacheOverflow => 0x13,
 			Self::Version => 0x15,
 			Self::UnknownAuthTokenAlias => 0x17,
+			Self::InvalidAuthority => 0x19,
 			Self::Unsupported => 0x1,
 			Self::TooManyRequestUpdates => 0x1B,
 			Self::App(app) => *app as u32 + 64,
@@ -126,11 +136,13 @@ impl SessionError {
 			0x4 => Self::InvalidRequestId,
 			0x6 => Self::KeyValueFormatting,
 			0x7 => Self::TooManyRequests,
+			0x8 => Self::InvalidPath,
 			0x10 => Self::GoawayTimeout,
 			0x11 => Self::Timeout,
 			0x13 => Self::AuthTokenCacheOverflow,
 			0x15 => Self::Version,
 			0x17 => Self::UnknownAuthTokenAlias,
+			0x19 => Self::InvalidAuthority,
 			0x1B => Self::TooManyRequestUpdates,
 			code @ 64.. => match u16::try_from(code - 64) {
 				Ok(app) => Self::App(app),
@@ -712,11 +724,13 @@ mod tests {
 			SessionError::InvalidRequestId,
 			SessionError::KeyValueFormatting,
 			SessionError::TooManyRequests,
+			SessionError::InvalidPath,
 			SessionError::GoawayTimeout,
 			SessionError::Timeout,
 			SessionError::AuthTokenCacheOverflow,
 			SessionError::Version,
 			SessionError::UnknownAuthTokenAlias,
+			SessionError::InvalidAuthority,
 			SessionError::TooManyRequestUpdates,
 			SessionError::App(0),
 			SessionError::App(404),
@@ -734,10 +748,12 @@ mod tests {
 		assert_eq!(SessionError::Expired.to_code(), 0x18);
 		assert_eq!(SessionError::InvalidRequestId.to_code(), 0x4);
 		assert_eq!(SessionError::TooManyRequests.to_code(), 0x7);
+		assert_eq!(SessionError::InvalidPath.to_code(), 0x8);
 		assert_eq!(SessionError::GoawayTimeout.to_code(), 0x10);
 		assert_eq!(SessionError::AuthTokenCacheOverflow.to_code(), 0x13);
 		assert_eq!(SessionError::Version.to_code(), 0x15);
 		assert_eq!(SessionError::UnknownAuthTokenAlias.to_code(), 0x17);
+		assert_eq!(SessionError::InvalidAuthority.to_code(), 0x19);
 		assert_eq!(SessionError::TooManyRequestUpdates.to_code(), 0x1B);
 
 		// The reserved 32-47 range, and anything else unregistered, keeps its value instead

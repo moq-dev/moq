@@ -385,12 +385,16 @@ impl<S: crate::transport::poll::Session> Target<S> {
 		}
 	}
 
+	/// `goaways` checks each GOAWAY the requester sends on this stream.
 	fn poll_event(
 		&mut self,
 		finished: &mut bool,
+		goaways: &mut super::request_stream::GoAways,
 		version: Version,
 		cx: &mut std::task::Context<'_>,
 	) -> Poll<NamespaceEvent> {
+		use super::request_stream::{NamespaceUpdate, Next};
+
 		if matches!(
 			version,
 			Version::Draft14 | Version::Draft15 | Version::Draft16 | Version::Draft17
@@ -400,16 +404,18 @@ impl<S: crate::transport::poll::Session> Target<S> {
 		let Some(stream) = self.stream() else {
 			return Poll::Pending;
 		};
-		if !*finished {
-			match stream
-				.reader
-				.poll_decode_maybe::<super::request_stream::NamespaceUpdate>(cx)
-			{
-				Poll::Ready(Ok(Some(update))) => return Poll::Ready(NamespaceEvent::Request(update)),
+		while !*finished {
+			match stream.reader.poll_decode_maybe::<Next<NamespaceUpdate>>(cx) {
+				Poll::Ready(Ok(Some(Next::Message(update)))) => return Poll::Ready(NamespaceEvent::Request(update)),
+				Poll::Ready(Ok(Some(Next::GoAway { redirect }))) => {
+					if let Err(err) = goaways.receive(redirect) {
+						return Poll::Ready(NamespaceEvent::Closed(Err(err)));
+					}
+				}
 				Poll::Ready(Ok(None)) if !super::request_stream::fin_cancels(version) => *finished = true,
 				Poll::Ready(Ok(None)) => return Poll::Ready(NamespaceEvent::Closed(Ok(()))),
 				Poll::Ready(Err(err)) => return Poll::Ready(NamespaceEvent::Closed(Err(err))),
-				Poll::Pending => {}
+				Poll::Pending => break,
 			}
 		}
 		stream.writer.poll_closed(cx).map(NamespaceEvent::Closed)
@@ -802,8 +808,15 @@ where
 				}
 				tracing::debug!(message = ?msg, "received subscribe_namespace");
 				async move {
-					if let Err(err) = this.run_subscribe_namespace_stream(stream, msg).await {
-						tracing::debug!(%err, "subscribe_namespace stream error");
+					let mut session = this.session.clone();
+					match this.run_subscribe_namespace_stream(stream, msg).await {
+						// Such as a malformed answer to an advertisement this request solicited.
+						Err(err) if super::subscriber::is_protocol_violation(&err) => session.close(
+							super::error::to_session_code(&crate::SessionError::from(&err)),
+							&err.to_string(),
+						),
+						Err(err) => tracing::debug!(%err, "subscribe_namespace stream error"),
+						Ok(()) => {}
 					}
 				}
 				.maybe_boxed()
@@ -1311,6 +1324,7 @@ where
 		// carry no Request ID, so they must go out in the order the updates arrived. The stash is
 		// a FIFO bounded by MAX_REQUEST_UPDATES (counting the one being verified).
 		let mut renewal = request_update::Renewal::<super::request_stream::Update>::default();
+		let mut goaways = super::request_stream::GoAways::new(self.control.client());
 
 		// What one turn of the loop resolved to.
 		enum Turn {
@@ -1367,26 +1381,31 @@ where
 							Poll::Pending => {}
 						}
 					} else {
-						match stream
-							.reader
-							.poll_decode_maybe::<super::request_stream::Update>(&mut cx)
-						{
-							Poll::Ready(Ok(Some(update))) => {
-								if let Err(err) = self.control.accept(update.request_id) {
-									session.clone().close(
-										super::error::to_session_code(&crate::SessionError::from(&err)),
-										"invalid request ID",
-									);
-									return Poll::Ready(Turn::Served(Err(err)));
+						use super::request_stream::{Next, Update};
+						while !*finished {
+							match stream.reader.poll_decode_maybe::<Next<Update>>(&mut cx) {
+								Poll::Ready(Ok(Some(Next::Message(update)))) => {
+									if let Err(err) = self.control.accept(update.request_id) {
+										session.clone().close(
+											super::error::to_session_code(&crate::SessionError::from(&err)),
+											"invalid request ID",
+										);
+										return Poll::Ready(Turn::Served(Err(err)));
+									}
+									return Poll::Ready(Turn::Update(update));
 								}
-								return Poll::Ready(Turn::Update(update));
+								Poll::Ready(Ok(Some(Next::GoAway { redirect }))) => {
+									if let Err(err) = goaways.receive(redirect) {
+										return Poll::Ready(Turn::Malformed(err));
+									}
+								}
+								Poll::Ready(Ok(None)) if !super::request_stream::fin_cancels(self.version) => {
+									*finished = true
+								}
+								Poll::Ready(Ok(None)) => return Poll::Ready(Turn::Cancelled),
+								Poll::Ready(Err(err)) => return Poll::Ready(Turn::Malformed(err)),
+								Poll::Pending => break,
 							}
-							Poll::Ready(Ok(None)) if !super::request_stream::fin_cancels(self.version) => {
-								*finished = true
-							}
-							Poll::Ready(Ok(None)) => return Poll::Ready(Turn::Cancelled),
-							Poll::Ready(Err(err)) => return Poll::Ready(Turn::Malformed(err)),
-							Poll::Pending => {}
 						}
 					}
 				}
@@ -1416,7 +1435,7 @@ where
 				// token on the request itself would. A source track's decode failure is not
 				// this requester's fault, so it reaches Served and ends only this subscription.
 				Turn::Malformed(err) => {
-					if let Error::Decode(_) = err {
+					if super::subscriber::is_protocol_violation(&err) {
 						self.session.clone().close(
 							super::error::to_session_code(&crate::SessionError::from(&err)),
 							&err.to_string(),
@@ -2880,21 +2899,20 @@ where
 			tracing::debug!(broadcast = %self.origin.absolute(path), "no answer to the advertisement");
 			return Ok(Refused::No);
 		};
-		let mut data = body.decoder(self.version);
 
 		match (self.version, type_id) {
 			(Version::Draft14, ietf::PublishNamespaceOk::ID) => {
-				let msg = ietf::PublishNamespaceOk::decode_msg(&mut data, self.version)?;
+				let msg: ietf::PublishNamespaceOk = body.message(self.version)?;
 				tracing::debug!(message = ?msg, "publish namespace ok");
 			}
 			(Version::Draft14, ietf::PublishNamespaceError::ID) => {
-				let msg = ietf::PublishNamespaceError::decode_msg(&mut data, self.version)?;
+				let msg: ietf::PublishNamespaceError = body.message(self.version)?;
 				tracing::warn!(message = ?msg, "publish namespace error");
 				// Draft-14's error carries no retry interval, so our own backoff stands.
 				return Ok(Refused::No);
 			}
 			(_, ietf::RequestOk::ID) => {
-				let msg = ietf::RequestOk::decode_msg(&mut data, self.version)?;
+				let msg: ietf::RequestOk = body.message(self.version)?;
 				// ACTIVE_COUNT only answers SUBSCRIBE_NAMESPACE (MoQ Active Count). Closed
 				// here because the solicited path runs this inside a request task, whose
 				// errors end only that stream.
@@ -2908,7 +2926,7 @@ where
 				tracing::debug!(message = ?msg, "publish namespace ok");
 			}
 			(_, ietf::RequestError::ID) => {
-				let msg = ietf::RequestError::decode_msg(&mut data, self.version)?;
+				let msg: ietf::RequestError = body.message(self.version)?;
 				tracing::warn!(message = ?msg, "publish namespace error");
 				return Ok(self.refusal(msg.retry_interval));
 			}
@@ -2970,11 +2988,10 @@ where
 			requests.remove(suffix);
 			return Ok(Refused::No);
 		};
-		let mut data = body.decoder(self.version);
 
 		match type_id {
 			ietf::RequestOk::ID => {
-				let msg = ietf::RequestOk::decode_msg(&mut data, self.version)?;
+				let msg: ietf::RequestOk = body.message(self.version)?;
 				// ACTIVE_COUNT only answers SUBSCRIBE_NAMESPACE (MoQ Active Count); closed
 				// here for the same reason as in `advertise_namespace`.
 				if msg.active.is_some() {
@@ -2988,7 +3005,7 @@ where
 				Ok(Refused::No)
 			}
 			ietf::RequestError::ID => {
-				let msg = ietf::RequestError::decode_msg(&mut data, self.version)?;
+				let msg: ietf::RequestError = body.message(self.version)?;
 				tracing::warn!(message = ?msg, "publish_namespace update error");
 				// The peer closed its side; closing ours completes the withdrawal.
 				self.withdraw_namespace(target, requests, suffix.clone()).await?;
@@ -3330,6 +3347,7 @@ where
 		initial: Vec<crate::announce::Announce>,
 	) -> Result<(), Error> {
 		let mut finished = false;
+		let mut goaways = super::request_stream::GoAways::new(self.control.client());
 		let _withdrawing = self.withdrawal.register();
 		if self.withdrawal.poll(&kio::Waiter::noop()).is_ready() {
 			return Ok(());
@@ -3378,7 +3396,7 @@ where
 						return Poll::Ready(NamespaceEvent::Regrant(permit));
 					}
 					let mut cx = waiter.context();
-					if let Poll::Ready(event) = target.poll_event(&mut finished, self.version, &mut cx) {
+					if let Poll::Ready(event) = target.poll_event(&mut finished, &mut goaways, self.version, &mut cx) {
 						return Poll::Ready(event);
 					}
 					if let Poll::Ready(next) = announced.poll_next(waiter) {
@@ -3399,15 +3417,9 @@ where
 			};
 
 			match event {
-				NamespaceEvent::Closed(res) => {
-					if let Err(err @ Error::Decode(_)) = &res {
-						self.session.clone().close(
-							super::error::to_session_code(&crate::SessionError::from(err)),
-							&err.to_string(),
-						);
-					}
-					break res;
-				}
+				// Only a solicited loop has a stream to close, and its request task closes the
+				// session over a protocol violation.
+				NamespaceEvent::Closed(res) => break res,
 				NamespaceEvent::Request(update) => {
 					if let Err(err) = self.control.accept(update.request_id) {
 						self.session.clone().close(
@@ -3937,7 +3949,10 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 				);
 				continue;
 			}
-			let _ = self.session.send_datagram(&body);
+			// Ranked like a stream carrying the group from its start, so it merges into the
+			// subscription's group order and wins a tie with that group's stream.
+			let order = crate::priority::in_group(sequence, 0, self.ranking.order);
+			let _ = self.session.send_datagram(body, self.ranking.group.as_ref(), order);
 		}
 		Ok(())
 	}
@@ -5121,6 +5136,49 @@ mod group_priority_test {
 		assert!(serve.poll(&waiter).is_pending());
 		assert_eq!(log.groups(), [(0, 3), (0, 9)], "one move for the subscription");
 		assert_eq!(log.orders().len(), 2, "the streams keep their place in the group");
+	}
+
+	/// An OBJECT_DATAGRAM goes in its subscription's send group, ranked like the stream
+	/// carrying its group from the start, so the transport merges it into the group order.
+	#[test]
+	fn datagrams_rank_within_their_subscription() {
+		let log = crate::lite::test_transport::Log::default();
+		let session = SinkSession::new(log.clone())
+			.with_groups()
+			.with_datagrams(1200)
+			.with_unacked_fin();
+		let mut track = track::Producer::new(
+			std::sync::Arc::new(crate::broadcast::Info::default()),
+			"test",
+			crate::track::Info::timed(),
+		);
+		let subscriber = track.subscribe(
+			track::Subscription::default()
+				.with_priority(3)
+				.with_max_delay(std::time::Duration::from_secs(3600)),
+		);
+		let mut serve = TrackServe::new(
+			session,
+			subscriber,
+			RequestId(0),
+			Version::Draft14,
+			ServeRange::default(),
+			None,
+		);
+		let mut group = track.create_group(group::Info { sequence: 0 }).unwrap();
+		group
+			.write_frame(crate::Timestamp::from_millis(0).unwrap(), b"x".as_slice())
+			.unwrap();
+		group.finish().unwrap();
+		let sequence = track
+			.append_datagram(crate::Timestamp::from_millis(1).unwrap(), b"d".as_slice())
+			.unwrap();
+
+		let waiter = kio::Waiter::noop();
+		assert!(serve.poll(&waiter).is_pending());
+		let order = crate::priority::in_group(sequence, 0, Order::Descending);
+		assert_eq!(log.datagram_ranks(), [(Some(0), order)]);
+		assert_eq!(log.orders(), [(0, 1)], "the stream for group 0 ranks below");
 	}
 
 	/// A group with more objects ready than one poll's budget drains over several polls.

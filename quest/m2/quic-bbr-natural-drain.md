@@ -8,7 +8,8 @@ ProbeRTT, recognizing bandwidth growth within a round, and precautionary
 bandwidth probing. Reduce demonstrated frame deadline interference without
 stale minimum RTT, persistent queues, or unfairness. Application limitation
 alone is not evidence that the path drained, and Google parity is not
-assumed to be an improvement.
+assumed to be an improvement. Grade them, and BBR's response to random
+loss, on a 10 % random-loss media profile as well.
 
 ## Plan
 
@@ -85,6 +86,30 @@ pinned code and configurations. Keep transport differences and QUICHE flags
 explicit and compare each algorithm change separately. A simulation result
 is not an end-to-end network measurement.
 
+### Random loss
+
+Moved from the finished T-STD export epic (2026-10-16), whose nightly
+stays at 1 %.
+`just test ts --hrd --loss <percent>` drops that share of the relay's
+datagrams to the subscriber at random through `moq-shaper`, 25 ms each way,
+and grades the export with T-STD, PCR accuracy and `holes.py`. Measured on a
+loaded host (rerun before deciding):
+
+| Clip | Loss | Result |
+|---|---:|---|
+| default (low media rate) | 10 % | passes |
+| `--hrd` (9 Mb/s video, 10 Mb/s mux) | 1 %, 3 % | passes, no holes |
+| `--hrd` | 5 %, 7 %, 10 % | groups evicted `Old`, export fails |
+| `--hrd`, `LOSS_THRESH` 20 % (experiment) | 10 % | T-STD and PCR pass; 1.56 s of video misses the 1 s delay |
+| `--hrd`, CUBIC | 10 % | no output |
+
+BBRv3 takes a round with more than 2 % loss (`LOSS_THRESH`) as congestion
+and cuts its inflight bound, so random loss above it holds the leg below the
+media rate. Decide whether and how BBR should tell random loss from
+congestion without giving up fairness against loss-based flows, and how that
+interacts with the precautionary probe stop under Google differences.
+
 ## Related
 
+- [TS validation](/test/ts/README.md) - the `--loss` rig, `holes.py` and the full measurements
 - [Discover media headroom](/quest/m2/quic-probe.md) - preserving an estimate and discovering spare capacity are separate problems

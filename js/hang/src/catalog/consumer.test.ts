@@ -127,3 +127,29 @@ test("watch subscribes and yields typed catalog updates", async () => {
 	producer.finish();
 	broadcast.close();
 });
+
+test("echo feedback prefix refuses root escape with the same URL resolution as renditions", () => {
+	for (const [base, reference, expected] of [
+		["room/live", "viewers", "room/viewers"],
+		["room/live", "live/viewers", "room/live/viewers"],
+		["room/live", "../viewers", "viewers"],
+		["room/live", "../../viewers", undefined],
+		["live", "../viewers", undefined],
+	] as const) {
+		const root = { echo: { path: Moq.Path.normalizeRelative(reference) } };
+		const path = Moq.Path.from(base);
+		if (expected === undefined) expect(() => checkResolvable(root, path)).toThrow(EscapingBroadcast);
+		else {
+			expect(checkResolvable(root, path)).toEqual(root);
+			expect(Moq.Path.tryResolve(path, root.echo.path)).toBe(Moq.Path.from(expected));
+		}
+	}
+});
+
+test("watch refuses an echo prefix escaping the requested broadcast root", async () => {
+	await expect(
+		watchRequested({ echo: { path: Moq.Path.normalizeRelative("../../viewers") } }),
+	).rejects.toBeInstanceOf(EscapingBroadcast);
+	const root = { echo: { path: Moq.Path.normalizeRelative("viewers") } };
+	expect(await watchRequested(root)).toMatchObject({ value: root });
+});

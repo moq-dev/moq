@@ -1069,12 +1069,13 @@ mod tests {
 			None
 		}
 
-		fn poll_send_datagram(
+		fn send_datagram(
 			&mut self,
-			_cx: &mut std::task::Context<'_>,
-			_payload: &[u8],
-		) -> std::task::Poll<Result<(), Self::Error>> {
-			std::task::Poll::Ready(Ok(()))
+			_: Bytes,
+			_: Option<&crate::transport::poll::Ungrouped>,
+			_: i64,
+		) -> Result<(), Self::Error> {
+			Ok(())
 		}
 		fn poll_recv_datagram(
 			&mut self,

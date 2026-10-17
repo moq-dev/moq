@@ -143,8 +143,8 @@ mod tests {
 	fn create_test_claims() -> Claims {
 		Claims {
 			root: "test-path".to_string(),
-			publish: patterns(&["test-pub/**"]),
-			subscribe: patterns(&["test-sub/**"]),
+			publish: patterns(&["test-pub/**"]).into(),
+			subscribe: patterns(&["test-sub/**"]).into(),
 			expires: Some(SystemTime::now() + Duration::from_secs(3600)),
 			issued: Some(SystemTime::now()),
 			not_before: None,

@@ -174,8 +174,7 @@ export class Subscribe {
 		if (version === Version.DRAFT_17) {
 			await r.u62(); // required_request_id_delta (read and ignore)
 		}
-		const trackNamespace = await Namespace.decode(r);
-		const trackName = await r.string();
+		const { namespace: trackNamespace, name: trackName } = await Namespace.decodeTrack(r);
 
 		if (version === Version.DRAFT_14) {
 			const subscriberPriority = await r.u8();

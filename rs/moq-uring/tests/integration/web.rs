@@ -141,7 +141,9 @@ fn webtransport_echo_end_to_end() {
 			assert_eq!(read_all(&mut recv).await, PAYLOAD, "uni echo");
 
 			// Datagram echo.
-			session.send_datagram(PAYLOAD.to_vec().into()).expect("send datagram");
+			session
+				.send_datagram(PAYLOAD.to_vec().into(), None, 0)
+				.expect("send datagram");
 			let echoed = session.read_datagram().await.expect("read datagram");
 			assert_eq!(&echoed[..], PAYLOAD, "datagram echo");
 

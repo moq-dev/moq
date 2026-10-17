@@ -72,7 +72,6 @@ pub(crate) struct State {
 	sends: FxHashMap<StreamId, Option<End>>,
 
 	datagram_recv_waiters: kio::WaiterList,
-	datagram_send_waiters: kio::WaiterList,
 
 	/// The terminal error, set exactly once; everything fails with it after.
 	closed: Option<Error>,
@@ -103,7 +102,6 @@ impl State {
 			finishing: FxHashMap::default(),
 			sends: FxHashMap::default(),
 			datagram_recv_waiters: kio::WaiterList::new(),
-			datagram_send_waiters: kio::WaiterList::new(),
 			closed: None,
 			closed_waiters: kio::WaiterList::new(),
 			dead: false,
@@ -139,7 +137,6 @@ impl State {
 		self.accept_uni_waiters.wake();
 		self.open_waiters.wake();
 		self.datagram_recv_waiters.wake();
-		self.datagram_send_waiters.wake();
 		for waiters in self.readable.values_mut() {
 			waiters.wake();
 		}
@@ -319,6 +316,25 @@ impl Connection {
 	/// [`SendStream::set_group`](super::SendStream::set_group).
 	pub fn send_group(&self, priority: i64) -> super::SendGroup {
 		super::SendGroup::new(self.shared.clone(), priority)
+	}
+
+	/// Send a datagram in `group` at `order`, scheduled like one of the group's streams at
+	/// priority `order`, or among the ungrouped streams without a group.
+	///
+	/// Never blocks: a full buffer drops the oldest datagram of the lowest-priority group,
+	/// see [`moq_quic::Datagrams::send`].
+	pub fn send_datagram(&self, payload: Bytes, group: Option<&super::SendGroup>, order: i64) -> Result<(), Error> {
+		if let Some(err) = self.shared.closed() {
+			return Err(err);
+		}
+		self.shared
+			.conn
+			.borrow_mut()
+			.datagrams()
+			.send(payload, group.map(super::SendGroup::id), order)
+			.map_err(|err| Error::Quic(err.to_string()))?;
+		self.shared.kick();
+		Ok(())
 	}
 
 	/// The peer's certificate chain in DER, leaf first, or `None` if it
@@ -570,25 +586,8 @@ impl web_transport_trait::poll::Session for Connection {
 		}
 	}
 
-	fn poll_send_datagram(&mut self, cx: &mut Context<'_>, payload: &[u8]) -> Poll<Result<(), Self::Error>> {
-		let waiter = self.park.hold(cx);
-		if let Some(err) = self.shared.closed() {
-			return Poll::Ready(Err(err));
-		}
-		let payload = Bytes::copy_from_slice(payload);
-		match self.shared.conn.borrow_mut().datagrams().send(payload, false) {
-			Ok(()) => {
-				self.shared.kick();
-				Poll::Ready(Ok(()))
-			}
-			// The send queue is full; a flush frees space.
-			Err(moq_quic::SendDatagramError::Blocked(_)) => {
-				let mut state = self.shared.state.borrow_mut();
-				waiter.register(&mut state.datagram_send_waiters);
-				Poll::Pending
-			}
-			Err(err) => Poll::Ready(Err(Error::Quic(err.to_string()))),
-		}
+	fn poll_send_datagram(&mut self, _: &mut Context<'_>, payload: &[u8]) -> Poll<Result<(), Self::Error>> {
+		Poll::Ready(Self::send_datagram(self, Bytes::copy_from_slice(payload), None, 0))
 	}
 
 	fn poll_recv_datagram(&mut self, cx: &mut Context<'_>) -> Poll<Result<Bytes, Self::Error>> {
@@ -813,7 +812,6 @@ impl Driver {
 				}
 				moq_quic::Event::ConnectionLost { reason } => state.fail(reason.into()),
 				moq_quic::Event::DatagramReceived => state.datagram_recv_waiters.wake(),
-				moq_quic::Event::DatagramsUnblocked => state.datagram_send_waiters.wake(),
 				moq_quic::Event::HandshakeDataReady => {}
 				moq_quic::Event::Stream(event) => sweep_stream(&mut state, event),
 				// Non-exhaustive upstream; nothing else needs a wakeup.
@@ -898,8 +896,6 @@ impl Driver {
 			return Poll::Ready(Err(Error::Io(err.to_string())));
 		}
 		self.close_staged |= closing;
-		// A flush frees datagram-send queue space.
-		self.shared.state.borrow_mut().datagram_send_waiters.wake();
 		Poll::Ready(Ok(()))
 	}
 }

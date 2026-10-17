@@ -11,7 +11,7 @@ use crate::{
 use super::token::RequestToken;
 
 use super::Message;
-use super::namespace::{decode_namespace, encode_namespace};
+use super::namespace::{decode_track, encode_namespace};
 
 use super::Version;
 
@@ -65,8 +65,8 @@ impl Message for Subscribe<'_> {
 		if version == Version::Draft17 {
 			let _required_request_id_delta = r.varint()?;
 		}
-		let track_namespace = decode_namespace(r)?;
-		let track_name = Cow::Owned(r.string()?);
+		let (track_namespace, track_name) = decode_track(r)?;
+		let track_name = Cow::Owned(track_name);
 
 		match version {
 			Version::Draft14 => {
@@ -666,8 +666,7 @@ mod tests {
 		if version == Version::Draft17 {
 			r.varint().unwrap();
 		}
-		decode_namespace(r).unwrap();
-		r.string().unwrap();
+		decode_track(r).unwrap();
 
 		// draft-14/15 write absolute keys, draft-16+ deltas, but the first is absolute either way.
 		let count = r.varint().unwrap();
