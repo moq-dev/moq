@@ -13,8 +13,8 @@ keywords = ["rtsp", "moq", "media", "live", "camera"]
 categories = ["multimedia", "network-programming", "web-programming"]
 
 [features]
-# Internal (PRIVATE!): the scripted RTSP server `moq-cli`'s tests drive. Don't rely on it.
-__fake = ["dep:base64", "dep:tokio"]
+# A scripted RTSP server for downstream integration tests, such as `moq-cli`'s.
+test-support = ["dep:base64", "dep:tokio"]
 
 # Pure library: pulls one RTSP session into a caller's broadcast. The CLI lives in
 # `moq-cli` (`moq import rtsp`), which owns reconnect and epochs.

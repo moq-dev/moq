@@ -20,6 +20,10 @@ pub enum Error {
 	#[error("invalid RTSP URL: {0}")]
 	InvalidUrl(String),
 
+	/// The server refused the credentials, or asked for some and the URL had none.
+	#[error("RTSP server refused the credentials: {0}")]
+	Unauthorized(String),
+
 	/// The session offers no stream the stack can publish.
 	#[error("no H.264, H.265, or AAC stream in the session (found {0})")]
 	NoSupportedStream(String),
@@ -27,7 +31,10 @@ pub enum Error {
 
 impl From<retina::Error> for Error {
 	fn from(err: retina::Error) -> Self {
-		Self::Rtsp(err.to_string())
+		match err.status_code() {
+			Some(401) => Self::Unauthorized(err.to_string()),
+			_ => Self::Rtsp(err.to_string()),
+		}
 	}
 }
 

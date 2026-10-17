@@ -563,7 +563,8 @@ mod tests {
 	/// the tracks cleanly with only the frames before the jump.
 	#[tokio::test]
 	async fn a_timestamp_jump_ends_the_session() {
-		let server = Server::bind(vec![Media::H264 { sprop: true }]).await;
+		// Parameter sets in band only, as many cameras send them.
+		let server = Server::bind(vec![Media::H264 { sprop: false }]).await;
 		let (broadcast, catalog) = broadcast();
 		let client = Client::new(server.url()).unwrap();
 		let pull = tokio::spawn({
@@ -572,7 +573,9 @@ mod tests {
 		});
 
 		let mut session = within("PLAY", server.accept(1000)).await;
-		session.video(0, 1000, &[fake::H264_IDR]).await;
+		session
+			.video(0, 1000, &[fake::H264_SPS, fake::H264_PPS, fake::H264_IDR])
+			.await;
 		let snapshot = catalog_with(&catalog, 1, 0).await;
 		let video = subscribe(&broadcast, video_track(&snapshot)).await;
 		session.video(0, 1000 + FRAME, &[fake::H264_SLICE]).await;
@@ -672,6 +675,23 @@ mod tests {
 		let session = within("PLAY", server.accept(0)).await;
 		session.close().await;
 		assert_eq!(within("the pull", pull).await.unwrap().unwrap(), End::Closed);
+	}
+
+	#[tokio::test]
+	async fn wrong_credentials_are_unauthorized() {
+		let server = Server::bind(vec![Media::H264 { sprop: true }])
+			.await
+			.with_basic_auth("admin", "secret");
+		let mut url = server.url();
+		url.set_username("admin").unwrap();
+		url.set_password(Some("wrong")).unwrap();
+
+		let client = Client::new(url).unwrap();
+		let (broadcast, catalog) = broadcast();
+		let pull = tokio::spawn(async move { client.pull(&broadcast, &catalog).await });
+		let _accept = tokio::spawn(async move { server.accept(0).await });
+		let err = within("the pull", pull).await.unwrap().unwrap_err();
+		assert!(matches!(err, Error::Unauthorized(_)), "{err}");
 	}
 
 	#[test]

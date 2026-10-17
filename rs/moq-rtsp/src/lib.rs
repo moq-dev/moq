@@ -20,8 +20,7 @@
 
 mod client;
 mod error;
-#[cfg(any(test, feature = "__fake"))]
-#[doc(hidden)]
+#[cfg(any(test, feature = "test-support"))]
 pub mod fake;
 
 pub use client::{Client, End};

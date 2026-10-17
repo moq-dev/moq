@@ -1,7 +1,7 @@
 //! A scripted RTSP server for tests: answers DESCRIBE, SETUP, and PLAY, then sends the RTP a
 //! test writes over the TCP-interleaved channels.
 //!
-//! Not part of the API: the `__fake` feature exists so `moq-cli`'s tests can drive it too.
+//! Behind the `test-support` feature, so downstream tests such as `moq-cli`'s can drive it.
 
 use std::sync::Arc;
 
@@ -45,8 +45,11 @@ pub const AAC_CONFIG: &[u8] = &[0x11, 0x90];
 /// One stream the server describes.
 #[derive(Clone, Copy, Debug)]
 pub enum Media {
-	/// H.264 at 90 kHz; `sprop` advertises the parameter sets in the SDP.
-	H264 { sprop: bool },
+	/// H.264 at 90 kHz.
+	H264 {
+		/// Whether the SDP advertises the parameter sets.
+		sprop: bool,
+	},
 	/// H.265 at 90 kHz, parameter sets in the SDP.
 	H265,
 	/// AAC-LC at 48 kHz in RFC 3640 AAC-hbr mode.

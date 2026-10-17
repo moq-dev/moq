@@ -4486,6 +4486,7 @@ dependencies = [
  "moq-relay",
  "moq-rtc",
  "moq-rtmp",
+ "moq-rtsp",
  "moq-srt",
  "moq-tokio",
  "moq-transcode",
