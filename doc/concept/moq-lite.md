@@ -87,8 +87,9 @@ authorization and hidden names work exactly as without one.
   winning the path, is announced as a restart. Subscriptions already open stay
   on the old instance until dropped or its route goes, while new requests get
   the new one, so a player follows the restart by requesting the path again.
-  Held handles can still read their old cached content, but cannot open new
-  epochless requests once the restart is delivered. Request the path again for
+  Held handles can still read their old cached content while a subscription
+  on the old instance stays open, but cannot open new epochless requests once
+  the restart is delivered. Request the path again for
   new content.
   That is how a restarted encoder, whose group numbers start over, takes the
   name instead of stalling viewers on the old sequence. A relay drops its copy
@@ -197,7 +198,7 @@ Each subscription carries the knobs that decide behavior under congestion:
 
 | Knob | Effect |
 | --- | --- |
-| **Priority** (0..255) | Higher-priority tracks get bandwidth first. Audio above video, base layer above enhancement. |
+| **Priority** (0..255) | Higher-priority tracks get bandwidth first. Audio above video, base layer above enhancement. From a native Rust publisher over QUIC or WebTransport (iroh excepted), subscriptions at the same priority split bandwidth evenly by bytes, streams and datagrams alike, however many groups each has queued. A browser publisher and other transports without send groups are not covered. |
 | **Order** | Which group to send first when several are pending. Newest first for live (the default), oldest first for catch-up. Needs moq-lite 07 or moq-transport; older moq-lite always sends newest first. |
 | **Max delay** | How long a non-latest group stays worth delivering before it is skipped. Zero means "live edge only", and raising it is also what asks for history. |
 
@@ -235,6 +236,7 @@ zero keeps only the live edge. Relays preserve that declaration, and may still
 evict sooner under their own cache ceiling. Media tracks explicitly use 30
 seconds so a segmented egress can still find its segments. Retention ages a
 group by the same two clocks as max delay and always keeps the newest group.
+A fetch obeys the same window, and may name a tighter max delay of its own.
 IETF carries the same idea as `MAX_CACHE_DURATION`, measured in wall time alone.
 
 Put together, a conference might use:
@@ -253,6 +255,12 @@ Since moq-lite 05, a publisher can send a tiny single-frame group as a QUIC
 datagram: unreliable, unordered, under about 1200 bytes, and never
 retransmitted. It suits real-time audio and sensor data. There is no stream
 fallback, so a datagram that doesn't fit isn't delivered that way.
+
+A datagram shares its subscription's priority and group order with streams,
+so a low-priority datagram waits behind higher-priority groups instead of
+jumping the queue. From a native Rust publisher over QUIC or WebTransport
+(iroh excepted), a full send buffer drops the lowest-priority subscription's
+oldest datagram.
 
 Nothing caches a datagram. A subscription gets the ones inside its group
 range, and a new one may get the few still in the publisher's short send

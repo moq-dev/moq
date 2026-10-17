@@ -57,8 +57,3 @@ excluded.
 
 - [Viewer lag histogram](/quest/m2/qos/lag-histogram.md) - the egress histogram whose type and edges this reuses
 - [Stats prefix tracks](/quest/m2/stats-prefix-tracks.md) - the prefix tracks the drift histogram lands on, beside the totals
-
-## Related
-
-- [Media stats](/quest/m2/stats/schema.md) - the publisher's own view
-  of the same uplink, in the transport section of its stats track

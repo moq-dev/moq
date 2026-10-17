@@ -20,6 +20,7 @@ use crate::{
 	lite,
 	priority::{Priority, PriorityHandle, PriorityQueue},
 	track::Order,
+	transport::poll::{GroupOf, SendGroup as _},
 };
 
 use super::Version;
@@ -2003,11 +2004,14 @@ impl<S: crate::transport::poll::Session> Request<S> for SubscribeServe<S> {
 					};
 					let steer_tx = kio::Producer::new(steer);
 
+					let mut session = shared.session.clone();
+					let group = session.send_group(msg.priority.into());
 					let sub = Subscription {
-						session: shared.session.clone(),
+						session,
 						id: msg.id,
 						track_name: Arc::from(track.name()),
 						priority: shared.priority.clone(),
+						group,
 						steer: steer_tx.consume(),
 						steer_seen: steer,
 						version: shared.version,
@@ -2104,8 +2108,8 @@ impl<S: crate::transport::poll::Session> Request<S> for FetchServe {
 				msg.group,
 				group::Fetch {
 					priority: msg.priority,
+					max_delay: msg.max_delay,
 					frame_start: msg.start_frame,
-					..Default::default()
 				},
 			)
 			.into_inner();
@@ -2196,7 +2200,7 @@ impl<S: crate::transport::poll::Session> Request<S> for FetchServe {
 									*batch_pos = 0;
 									return Poll::Ready(Ok(ControlFlow::Continue(())));
 								}
-								Poll::Ready(Ok(_)) => return Poll::Ready(Ok(ControlFlow::Break(()))),
+								Poll::Ready(Ok(_)) => return Poll::Ready(fetch_end(group)),
 								Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
 								Poll::Pending => {}
 							}
@@ -2213,13 +2217,23 @@ impl<S: crate::transport::poll::Session> Request<S> for FetchServe {
 									*frame = Some(next);
 									return Poll::Ready(Ok(ControlFlow::Continue(())));
 								}
-								None => return Poll::Ready(Ok(ControlFlow::Break(()))),
+								None => return Poll::Ready(fetch_end(group)),
 							}
 						}
 					}
 				}
 			}
 		}
+	}
+}
+
+/// End a FETCH response once its group's read ends. A budget giving up on a drained
+/// group ends that read cleanly, but a FIN would tell the requester the group is whole,
+/// so it resets as too old instead.
+fn fetch_end(group: &group::Consumer) -> Result<ControlFlow<()>, Error> {
+	match group.latency_expired() {
+		true => Err(Error::Old),
+		false => Ok(ControlFlow::Break(())),
 	}
 }
 
@@ -3141,6 +3155,9 @@ struct Subscription<S: crate::transport::poll::Session> {
 	id: u64,
 	track_name: Arc<str>,
 	priority: PriorityQueue,
+	/// The subscription's send group, ranking it against the session's others, or `None`
+	/// on a transport without groups, where `priority` ranks every group stream instead.
+	group: Option<GroupOf<S>>,
 	steer: kio::Consumer<Steer>,
 	/// Last steer observed by this clone, so a change only fires once.
 	steer_seen: Steer,
@@ -3172,6 +3189,8 @@ struct Opens {
 impl<S: crate::transport::poll::Session> Subscription<S> {
 	/// Send one datagram best-effort over a QUIC datagram (lite-05 §6.4).
 	///
+	/// It goes in the subscription's send group, ranked like a stream carrying its group, so
+	/// it merges into the subscription's group order and wins a tie with that group's stream.
 	/// The datagram is dropped (there is no group fallback) if the encoded body doesn't fit the
 	/// transport's datagram limit or the send fails (congestion / no capacity right now).
 	/// Returns whether it was handed to the transport.
@@ -3206,7 +3225,9 @@ impl<S: crate::transport::poll::Session> Subscription<S> {
 			return false;
 		}
 
-		let _ = self.session.send_datagram(&body);
+		// The run loop may not have served a group since the last SUBSCRIBE_UPDATE.
+		let order = crate::priority::in_group(datagram.sequence, 0, self.steer_current().order);
+		let _ = self.session.send_datagram(body, self.group.as_ref(), order);
 		true
 	}
 
@@ -3241,7 +3262,13 @@ impl<S: crate::transport::poll::Session> Subscription<S> {
 		priority: PriorityHandle,
 		group: group::Consumer,
 	) -> Result<(), Error> {
-		let mut serve = Box::new(GroupServe::new(self, sequence, frame_start, priority, group));
+		let mut serve = Box::new(GroupServe::new(
+			self,
+			sequence,
+			frame_start,
+			Rank::Queue(priority),
+			group,
+		));
 		kio::wait(move |waiter| serve.poll_serve(waiter)).await
 	}
 }
@@ -3328,6 +3355,10 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 				priority: upd.priority,
 				order: upd.order,
 			};
+		}
+		// One move for the whole subscription; its streams keep their order within it.
+		if let Some(group) = &mut self.ctx.group {
+			group.set_priority(upd.priority.into());
 		}
 		// Feed the full update into the model subscriber so the producer's
 		// aggregate reflects it (and a relay re-forwards it upstream).
@@ -3610,23 +3641,35 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 
 		// Use the latest steer for new groups so SUBSCRIBE_UPDATE applies to them too.
 		let steer = self.ctx.steer_current();
-		// The subscribe id scopes the group tie-break: one queue serves every
-		// subscription on the session, and only groups of the same one may be
-		// ranked against each other by sequence, in that subscription's order.
-		let handle = self
-			.ctx
-			.priority
-			.insert(Priority::new(steer.priority, self.ctx.id, sequence).with_order(steer.order));
+		let rank = match &self.ctx.group {
+			Some(group) => Rank::Group(group.clone()),
+			// The subscribe id scopes the group tie-break: one queue serves every
+			// subscription on the session, and only groups of the same one may be
+			// ranked against each other by sequence, in that subscription's order.
+			None => Rank::Queue(
+				self.ctx
+					.priority
+					.insert(Priority::new(steer.priority, self.ctx.id, sequence).with_order(steer.order)),
+			),
+		};
 		self.children
-			.push(GroupServe::new(self.ctx.clone(), sequence, frame_start, handle, group));
+			.push(GroupServe::new(self.ctx.clone(), sequence, frame_start, rank, group));
 	}
+}
+
+/// Where a group stream is ranked.
+enum Rank<G> {
+	/// In the subscription's send group, by its sequence in the subscription's order.
+	Group(G),
+	/// In the session-wide queue, on a transport without send groups.
+	Queue(PriorityHandle),
 }
 
 /// Serves one group on its own unidirectional stream: the header, then every
 /// frame, applying queue and SUBSCRIBE_UPDATE priority changes as they land.
 struct GroupServe<S: crate::transport::poll::Session> {
 	ctx: Subscription<S>,
-	priority: PriorityHandle,
+	rank: Rank<GroupOf<S>>,
 	group: group::Consumer,
 	sequence: u64,
 	frame_start: u64,
@@ -3667,13 +3710,13 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 		ctx: Subscription<S>,
 		sequence: u64,
 		frame_start: u64,
-		priority: PriorityHandle,
+		rank: Rank<GroupOf<S>>,
 		group: group::Consumer,
 	) -> Self {
 		ctx.opens.pending.fetch_add(1, Ordering::Relaxed);
 		Self {
 			ctx,
-			priority,
+			rank,
 			group,
 			sequence,
 			frame_start,
@@ -3702,8 +3745,10 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 			// (the transport still schedules its retransmissions). The rank is re-read
 			// as a send order when handled, since the two conventions are inverted.
 			if let GroupState::Serve { writer, .. } | GroupState::Closed { writer } = &mut self.state {
-				while let Poll::Ready(rank) = self.priority.poll_next(waiter) {
-					writer.set_priority(PriorityHandle::send_order_of(rank));
+				if let Rank::Queue(handle) = &mut self.rank {
+					while let Poll::Ready(rank) = handle.poll_next(waiter) {
+						writer.set_priority(PriorityHandle::send_order_of(rank).into());
+					}
 				}
 				let seen = self.ctx.steer_seen;
 				// A dropped producer just disables this arm, like the queue arm above.
@@ -3715,8 +3760,14 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 					}
 				}) {
 					self.ctx.steer_seen = value;
-					let rank = self.priority.steer(value.priority, value.order);
-					writer.set_priority(PriorityHandle::send_order_of(rank));
+					// The run loop moves the send group itself; a stream only follows the order.
+					let order = match &mut self.rank {
+						Rank::Group(_) => crate::priority::in_group(self.sequence, self.frame_start, value.order),
+						Rank::Queue(handle) => {
+							PriorityHandle::send_order_of(handle.steer(value.priority, value.order)).into()
+						}
+					};
+					writer.set_priority(order);
 				}
 			}
 
@@ -3738,7 +3789,14 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 					};
 					self.settle_open(true);
 					let mut writer = Writer::new(stream, self.ctx.version);
-					writer.set_priority(self.priority.send_order());
+					match &mut self.rank {
+						Rank::Group(group) => {
+							writer.set_group(group);
+							let order = self.ctx.steer_seen.order;
+							writer.set_priority(crate::priority::in_group(self.sequence, self.frame_start, order));
+						}
+						Rank::Queue(handle) => writer.set_priority(handle.send_order().into()),
+					}
 
 					let msg = lite::Group {
 						subscribe: self.ctx.id,
@@ -4070,6 +4128,7 @@ mod serve_group_test {
 			id: 0,
 			track_name: "test".into(),
 			priority: PriorityQueue::default(),
+			group: None,
 			steer: steer.consume(),
 			steer_seen: Steer::default(),
 			version: Version::Lite06,
@@ -4114,6 +4173,7 @@ mod serve_group_test {
 			id: 0,
 			track_name: "test".into(),
 			priority: PriorityQueue::default(),
+			group: None,
 			steer: steer.consume(),
 			steer_seen: Steer::default(),
 			version: Version::Lite06,
@@ -4162,6 +4222,7 @@ mod serve_group_test {
 			id: 0,
 			track_name: "test".into(),
 			priority: PriorityQueue::default(),
+			group: None,
 			steer: steer.consume(),
 			steer_seen: Steer::default(),
 			version: Version::Lite06,
@@ -4228,6 +4289,7 @@ mod serve_group_test {
 			id: 0,
 			track_name: "test".into(),
 			priority: PriorityQueue::default(),
+			group: None,
 			steer: steer.consume(),
 			steer_seen: Steer::default(),
 			version: Version::Lite06,
@@ -4303,6 +4365,7 @@ mod serve_group_test {
 			id: 0,
 			track_name: "test".into(),
 			priority: PriorityQueue::default(),
+			group: None,
 			steer: steer.consume(),
 			steer_seen: Steer::default(),
 			version: Version::Lite06,
@@ -4350,6 +4413,7 @@ mod serve_group_test {
 			id: 0,
 			track_name: "test".into(),
 			priority: PriorityQueue::default(),
+			group: None,
 			steer: steer.consume(),
 			steer_seen: Steer::default(),
 			version: Version::Lite06,
@@ -4396,6 +4460,7 @@ mod serve_group_test {
 			id: 0,
 			track_name: "test".into(),
 			priority: PriorityQueue::default(),
+			group: None,
 			steer: steer.consume(),
 			steer_seen: Steer::default(),
 			version: Version::Lite06,
@@ -4454,6 +4519,7 @@ mod serve_group_test {
 			id: 0,
 			track_name: "test".into(),
 			priority: PriorityQueue::default(),
+			group: None,
 			steer: steer.consume(),
 			steer_seen: Steer::default(),
 			version,
@@ -4476,6 +4542,136 @@ mod serve_group_test {
 			.write_frame(Timestamp::from_millis(millis).unwrap(), b"x".as_slice())
 			.unwrap();
 		group.finish().unwrap();
+	}
+
+	/// On a transport with send groups, a subscription opens one at its priority and its
+	/// group streams join it, ranked newest first by sequence alone: the session-wide queue
+	/// takes no part. A SUBSCRIBE_UPDATE moves the group once, and an order flip re-stamps
+	/// the open streams.
+	#[moq_net_sim::test]
+	async fn grouped_streams_rank_within_their_subscription() {
+		let mut track = track::Producer::new(
+			Arc::new(broadcast::Info::default()),
+			"test",
+			crate::track::Info::timed(),
+		);
+		// Old groups stay worth sending, so both are in flight at once.
+		let subscriber = track.subscribe(track::Subscription::default().with_max_delay(Duration::from_secs(3600)));
+		let mut session = SinkSession::new(Log::default()).with_groups().with_unacked_fin();
+		let log = session.log.clone();
+		let (mut run, mut writer, _) = lite_run(Version::Lite06, session.clone(), subscriber);
+		run.ctx.group = crate::transport::poll::Session::send_group(&mut session, 3);
+
+		write_group(&mut track, 0, 0);
+		write_group(&mut track, 1, 1);
+		{
+			let mut poll = std::pin::pin!(kio::wait(|waiter| run.poll(&mut writer, waiter)));
+			assert!(futures::poll!(poll.as_mut()).is_pending());
+		}
+		assert_eq!(log.groups(), [(0, 3)]);
+		assert_eq!(
+			log.joins(),
+			[(0, 0), (1, 0)],
+			"each stream joins the subscription's group"
+		);
+		assert_eq!(log.orders(), [(0, 1), (1, 3)], "newer groups first");
+		assert!(log.priorities().is_empty(), "the session queue ranks no stream");
+
+		run.update(lite::SubscribeUpdate {
+			order: Order::Ascending,
+			priority: 7,
+			max_delay: Duration::ZERO,
+			start_group: None,
+			end_group: None,
+			start_frame: 0,
+			end_frame: None,
+		});
+		{
+			let mut poll = std::pin::pin!(kio::wait(|waiter| run.poll(&mut writer, waiter)));
+			assert!(futures::poll!(poll.as_mut()).is_pending());
+		}
+		assert_eq!(log.groups(), [(0, 3), (0, 7)], "one move for the subscription");
+		let mut flipped = log.orders()[2..].to_vec();
+		flipped.sort();
+		assert_eq!(flipped, [(0, 1), (1, -1)], "older groups first");
+	}
+
+	/// A datagram goes in its subscription's send group, ranked like the stream carrying
+	/// its group from the start, so the transport merges it into the group order.
+	#[moq_net_sim::test]
+	async fn datagrams_rank_within_their_subscription() {
+		let mut track = track::Producer::new(
+			Arc::new(broadcast::Info::default()),
+			"test",
+			crate::track::Info::timed(),
+		);
+		let subscriber = track.subscribe(track::Subscription::default().with_max_delay(Duration::from_secs(3600)));
+		let mut session = SinkSession::new(Log::default())
+			.with_groups()
+			.with_datagrams(1200)
+			.with_unacked_fin();
+		let log = session.log.clone();
+		let (mut run, mut writer, _) = lite_run(Version::Lite06, session.clone(), subscriber);
+		run.ctx.group = crate::transport::poll::Session::send_group(&mut session, 3);
+
+		write_group(&mut track, 0, 0);
+		let sequence = track
+			.append_datagram(Timestamp::from_millis(1).unwrap(), b"d".as_slice())
+			.unwrap();
+		{
+			let mut poll = std::pin::pin!(kio::wait(|waiter| run.poll(&mut writer, waiter)));
+			assert!(futures::poll!(poll.as_mut()).is_pending());
+		}
+		let order = crate::priority::in_group(sequence, 0, Order::Descending);
+		assert_eq!(log.datagram_ranks(), [(Some(0), order)]);
+		assert_eq!(log.orders(), [(0, 1)], "the stream for group 0 ranks below");
+		assert!(order > 1);
+	}
+
+	/// A SUBSCRIBE_UPDATE that flips the group order reranks the next datagram, even with no
+	/// group served in between.
+	#[moq_net_sim::test]
+	async fn datagrams_follow_an_updated_group_order() {
+		let mut track = track::Producer::new(
+			Arc::new(broadcast::Info::default()),
+			"test",
+			crate::track::Info::timed(),
+		);
+		let subscriber = track.subscribe(track::Subscription::default().with_max_delay(Duration::from_secs(3600)));
+		let mut session = SinkSession::new(Log::default()).with_groups().with_datagrams(1200);
+		let log = session.log.clone();
+		let (mut run, mut writer, _) = lite_run(Version::Lite06, session.clone(), subscriber);
+		run.ctx.group = crate::transport::poll::Session::send_group(&mut session, 3);
+
+		let first = track
+			.append_datagram(Timestamp::from_millis(1).unwrap(), b"a".as_slice())
+			.unwrap();
+		{
+			let mut poll = std::pin::pin!(kio::wait(|waiter| run.poll(&mut writer, waiter)));
+			assert!(futures::poll!(poll.as_mut()).is_pending());
+		}
+
+		run.update(lite::SubscribeUpdate {
+			order: Order::Ascending,
+			priority: 3,
+			max_delay: Duration::from_secs(3600),
+			start_group: None,
+			end_group: None,
+			start_frame: 0,
+			end_frame: None,
+		});
+		let second = track
+			.append_datagram(Timestamp::from_millis(2).unwrap(), b"b".as_slice())
+			.unwrap();
+		{
+			let mut poll = std::pin::pin!(kio::wait(|waiter| run.poll(&mut writer, waiter)));
+			assert!(futures::poll!(poll.as_mut()).is_pending());
+		}
+
+		let descending = crate::priority::in_group(first, 0, Order::Descending);
+		let ascending = crate::priority::in_group(second, 0, Order::Ascending);
+		assert_ne!(ascending, crate::priority::in_group(second, 0, Order::Descending));
+		assert_eq!(log.datagram_ranks(), [(Some(0), descending), (Some(0), ascending)]);
 	}
 
 	/// A group with more frames ready than one poll's budget drains over several polls,
@@ -4870,6 +5066,7 @@ mod serve_group_test {
 				id: 0,
 				track_name: "test".into(),
 				priority: PriorityQueue::default(),
+				group: None,
 				steer: steer.consume(),
 				steer_seen: Steer::default(),
 				version: Version::Lite07,
@@ -5731,6 +5928,7 @@ mod tests {
 						broadcast: broadcast.clone(),
 						track: "video".into(),
 						priority: 0,
+						max_delay: None,
 						group: 0,
 						start_frame: 0,
 						end_frame: None,
@@ -6114,6 +6312,74 @@ mod tests {
 		}
 	}
 
+	/// A FETCH whose own budget gives up on its group partway resets as too old: a FIN
+	/// would tell the requester the prefix it got is the whole group.
+	#[moq_net_sim::test]
+	async fn an_expired_fetch_resets_rather_than_finishing() {
+		const VERSION: Version = Version::Lite07;
+		let origin = crate::origin::Config::new(Hop::new(1).unwrap()).produce();
+		let broadcast = origin.create_broadcast("room").unwrap();
+		let track = broadcast.create_track("video", track::Info::timed()).unwrap();
+		broadcast.announce(Default::default()).unwrap();
+		let mut open = track.append_group().unwrap();
+		open.write_frame(crate::Timestamp::ZERO, b"a".to_vec()).unwrap();
+
+		let peer_setup = crate::lite::PeerSetup::new(false, crate::transport::Binding::InBand);
+		peer_setup.set(crate::lite::Setup::default());
+		let (_, goaway) = crate::goaway::Handle::new(true);
+		let publisher = Publisher::new(PublisherConfig {
+			runtime: crate::time::Clock::sim(),
+			session: ScriptedSession::new(Vec::new()),
+			origin: origin.consume(),
+			version: VERSION,
+			peer_setup,
+			goaway,
+			peer_hop: None,
+			auth: crate::auth::Handle::new(false),
+			peer_grant: Default::default(),
+			client: false,
+			subscriptions: Default::default(),
+			fetches: Default::default(),
+			estimate: kio::Producer::default().weak(),
+		});
+		let mut script = Vec::new();
+		lite::Fetch {
+			epoch: None,
+			broadcast: crate::Path::new("room"),
+			track: "video".into(),
+			priority: 0,
+			max_delay: Some(Duration::from_millis(500)),
+			group: 0,
+			start_frame: 0,
+			end_frame: None,
+		}
+		.encode(&mut crate::coding::Encoder::new(&mut script, VERSION.into()), VERSION)
+		.unwrap();
+		let mut session = ScriptedSession::new(script);
+		let (send, recv) = futures::future::poll_fn(|cx| {
+			<ScriptedSession as crate::transport::poll::Session>::poll_open_bi(&mut session, cx)
+		})
+		.await
+		.unwrap();
+		let stream = Stream::<ScriptedSession, Version> {
+			writer: Writer::new(send, VERSION),
+			reader: crate::coding::Reader::new(recv, VERSION),
+		};
+		let mut serve = RequestServe::<_, FetchServe>::new(publisher.shared.clone(), stream);
+		assert!(!drive(&mut serve).await, "the open group holds the response");
+
+		// The track runs a full second past the group's successor.
+		for ms in [1000, 2000] {
+			let mut group = track.append_group().unwrap();
+			group
+				.write_frame(crate::Timestamp::from_millis(ms).unwrap(), b"x".to_vec())
+				.unwrap();
+			group.finish().unwrap();
+		}
+		assert!(drive(&mut serve).await, "the budget ends the response");
+		assert_eq!(session.log.resets(), vec![crate::StreamError::Old.to_code()]);
+	}
+
 	/// Shared model demand never shares admission slots between wire FETCH streams.
 	#[moq_net_sim::test]
 	async fn coalesced_fetches_each_hold_their_own_slot() {
@@ -6149,6 +6415,7 @@ mod tests {
 			broadcast: crate::Path::new("room"),
 			track: "video".into(),
 			priority: 0,
+			max_delay: None,
 			group: 7,
 			start_frame: 0,
 			end_frame: None,

@@ -8,7 +8,7 @@
  */
 
 import * as z from "@zod/mini";
-import { PatternListSchema } from "./claims.ts";
+import { AccessSchema } from "./access.ts";
 
 /** How a session reached the relay; `http` is a one-shot request on the relay's web listener. */
 export const TransportSchema = z.pipe(
@@ -139,10 +139,10 @@ export type Request = z.infer<typeof RequestSchema>;
  */
 export const GrantSchema = z
 	.object({
-		/** Patterns the session may publish, relative to the root. */
-		publish: z.optional(PatternListSchema),
-		/** Patterns the session may subscribe to, relative to the root. */
-		subscribe: z.optional(PatternListSchema),
+		/** Publish paths and an optional upload cap, relative to the root. */
+		publish: z.optional(AccessSchema),
+		/** Subscribe paths and an optional download cap, relative to the root. */
+		subscribe: z.optional(AccessSchema),
 		/** The path the patterns are relative to, replacing the dialed one. Absent means the dialed path. */
 		root: z.optional(z.string()),
 		/** Subtrees read from elsewhere: each path, relative to the root, resolves at the absolute path it maps to. Read-only. */
@@ -159,7 +159,7 @@ export const GrantSchema = z
 		upstream: z.optional(z.boolean()),
 	})
 	.check(
-		z.refine((grant) => (grant.publish?.length ?? 0) > 0 || (grant.subscribe?.length ?? 0) > 0, {
+		z.refine((grant) => (grant.publish?.path.size ?? 0) > 0 || (grant.subscribe?.path.size ?? 0) > 0, {
 			message: "a grant must name something",
 		}),
 		z.refine((grant) => grant.revalidate === undefined || grant.expires !== undefined, {

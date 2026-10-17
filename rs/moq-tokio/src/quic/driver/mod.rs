@@ -47,6 +47,7 @@ mod incoming;
 mod mutex;
 mod recv_stream;
 mod runtime;
+mod send_group;
 mod send_stream;
 mod work_limiter;
 
@@ -68,7 +69,7 @@ pub use moq_quic::{QlogConfig, QlogStream};
 
 pub use crate::quic::driver::connection::{
     AcceptBi, AcceptUni, Connecting, Connection, OpenBi, OpenUni, ReadDatagram,
-    RemoteAddressWatcher, SendDatagram, SendDatagramError,
+    RemoteAddressWatcher, SendDatagramError,
 };
 pub use crate::quic::driver::endpoint::{Accept, Endpoint, EndpointStats};
 pub use crate::quic::driver::incoming::{Incoming, IncomingFuture, RetryError};
@@ -78,6 +79,7 @@ pub use crate::quic::driver::recv_stream::{
 #[cfg(test)]
 pub(crate) use crate::quic::driver::runtime::wrap_udp_socket;
 pub use crate::quic::driver::runtime::{AsyncUdpSocket, UdpSender};
+pub use crate::quic::driver::send_group::SendGroup;
 pub use crate::quic::driver::send_stream::{Checkpoint, SendStream, StoppedError, WriteError};
 
 #[cfg(test)]

@@ -19,11 +19,28 @@ error lists and rerun.
 
 These land with the next breaking release, not the 2026-09-23 train.
 
+- **Native codecs have `audio` and `video` namespaces.** Construct an
+  `audio.Producer` or `video.Producer` from the broadcast's
+  `media.CatalogProducer` instead of `BroadcastProducer.encode_audio` or
+  `encode_video`; construct codec-only `Encoder` types from settings alone.
+  Subscribe with `audio.Consumer.subscribe` or `video.Consumer.subscribe`
+  instead of `BroadcastConsumer.decode_audio` or `decode_video`. Producers
+  expose subscriber state only through `demand()`.
+  Audio output now carries the optional track name and defaults frame duration
+  to zero, which selects the codec's own frame. Video GOP configuration is a
+  `Keyframe { interval }` variant rather than a bare integer. Python and Go
+  expose the duration fields as `timedelta` and `time.Duration`.
 - **moq-mux's catalog consumer is opaque.** Construct `catalog::Consumer` with
   `Consumer::new(broadcast, format).await` or convert an existing
   `catalog::hang::Consumer` with `.into()`, then read it through `catalog::Stream`.
   Its `Hang`, `Msf`, and `Closed` variants and `catalog::msf::Consumer::track`
   are private.
+- **Rust audio reads carry encoder ends.** `moq_audio::decode::Consumer::read()`
+  returns `decode::Read` events: `Frame { discontinuity, frame }` and
+  `End { discontinuity, end }`; `None` still means the track is finished. An
+  `End` can be followed by final PCM with the same `discontinuity` before a fresh
+  encoder bumps it. A bump with no `End` before it is a loss.
+  Binding audio frame APIs keep their existing shape.
 - **JS catalog ranking names its media kind.** Replace `Catalog.ranked(renditions)`
   with `Catalog.Video.ranked(renditions)`. `Catalog.Audio.ranked(renditions)`
   orders audio by enabled state, bitrate, sample rate, channel count, and name.

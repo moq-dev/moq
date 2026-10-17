@@ -13,6 +13,10 @@ import (
 	"moq.dev/moq/internal/bridge"
 )
 
+func init() {
+	bridge.CatalogProducer = func(v any) *ffi.MoqMediaCatalogProducer { return v.(*CatalogProducer).inner }
+}
+
 type (
 	// Audio describes one audio rendition in a broadcast catalog: codec, sample rate, channel count, and container.
 	Audio = ffi.MoqAudio

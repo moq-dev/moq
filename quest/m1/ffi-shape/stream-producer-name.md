@@ -5,7 +5,7 @@
 The maintainer decides whether the import-side
 `MoqMediaContainerStreamProducer` (`media.ContainerStreamProducer` in the
 wrappers) is named by role, and any rename lands before the binding release
-that [Codecs](/quest/m1/ffi-shape/codec.md) gates, so the bindings break once.
+that the codec namespace reshape gates, so the bindings break once.
 
 ## Plan
 

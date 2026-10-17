@@ -232,9 +232,9 @@ checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
 name = "arbitrary"
-version = "1.4.2"
+version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c3d036a3c4ab069c7b410a2ce876bd74808d2d0888a82667669f8e783a898bf1"
+checksum = "3bc62ac97cc33321f50863d514c3bc38a453947a8f9e781137e47c7401020aed"
 dependencies = [
  "derive_arbitrary",
 ]
@@ -1883,13 +1883,13 @@ dependencies = [
 
 [[package]]
 name = "derive_arbitrary"
-version = "1.4.2"
+version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1e567bd82dcff979e4b03460c307b3cdc9e96fde3d73bed1496d2bc75d9dd62a"
+checksum = "1b034bd7d5f032402a2479444dcc6f74e36a03f31854d41680fb240ef682a1ac"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.119",
+ "syn 3.0.6",
 ]
 
 [[package]]
@@ -4310,8 +4310,9 @@ dependencies = [
  "base64 0.23.1",
  "jsonwebtoken",
  "kio 0.6.2",
- "moq-auth",
- "moq-pattern",
+ "moq-auth 0.2.1",
+ "moq-auth 0.2.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "moq-pattern 0.1.2",
  "moq-token",
  "p256",
  "p384",
@@ -4328,6 +4329,27 @@ dependencies = [
  "tracing",
  "url",
  "wiremock",
+]
+
+[[package]]
+name = "moq-auth"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "eee68e814b2a98cf61d528e26c5555eeb13fd99f32e5bdbfeecc37db49c06719"
+dependencies = [
+ "aws-lc-rs",
+ "base64 0.23.1",
+ "jsonwebtoken",
+ "kio 0.6.2",
+ "moq-pattern 0.1.2 (registry+https://github.com/rust-lang/crates.io-index)",
+ "p256",
+ "p384",
+ "rsa",
+ "serde",
+ "serde_json",
+ "serde_with",
+ "thiserror 2.0.21",
+ "url",
 ]
 
 [[package]]
@@ -4407,7 +4429,7 @@ dependencies = [
  "libc",
  "moq-archive",
  "moq-audio",
- "moq-auth",
+ "moq-auth 0.2.1",
  "moq-hls",
  "moq-json",
  "moq-msf",
@@ -4651,7 +4673,7 @@ dependencies = [
  "libc",
  "loom",
  "moq-net-sim",
- "moq-pattern",
+ "moq-pattern 0.1.2",
  "num_enum",
  "rand 0.10.3",
  "serde",
@@ -4700,9 +4722,18 @@ name = "moq-pattern"
 version = "0.1.2"
 dependencies = [
  "criterion",
- "moq-pattern",
+ "moq-pattern 0.1.2",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "moq-pattern"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5fc361de827f05fa2a1dfb6489cb73575a16ed5c56f3b1d218be9925176c7521"
+dependencies = [
+ "serde",
 ]
 
 [[package]]
@@ -4714,11 +4745,13 @@ dependencies = [
  "aws-lc-rs",
  "bytes",
  "cpu-time",
+ "criterion",
  "fastbloom",
  "getrandom 0.4.3",
  "hex-literal",
  "lru-slab",
  "moq-clock",
+ "proptest",
  "qlog",
  "rand 0.10.3",
  "rand_pcg",
@@ -4739,6 +4772,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "moq-quic-fuzz"
+version = "0.0.0"
+dependencies = [
+ "libfuzzer-sys",
+ "moq-quic",
+]
+
+[[package]]
 name = "moq-relay"
 version = "0.17.2"
 dependencies = [
@@ -4754,7 +4795,7 @@ dependencies = [
  "humantime",
  "hyper-util",
  "libc",
- "moq-auth",
+ "moq-auth 0.2.1",
  "moq-net",
  "moq-shaper",
  "moq-sock",
@@ -4792,7 +4833,7 @@ name = "moq-room"
 version = "0.2.11"
 dependencies = [
  "kio 0.6.2",
- "moq-auth",
+ "moq-auth 0.2.1",
  "moq-json",
  "moq-net",
  "moq-tokio",
@@ -9577,7 +9618,6 @@ dependencies = [
  "anyhow",
  "cargo_metadata",
  "uniffi_bindgen 0.32.2 (registry+https://github.com/rust-lang/crates.io-index)",
- "uniffi_build",
  "uniffi_core 0.32.2 (registry+https://github.com/rust-lang/crates.io-index)",
  "uniffi_macros 0.32.2 (registry+https://github.com/rust-lang/crates.io-index)",
  "uniffi_pipeline 0.32.2 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -9657,17 +9697,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "uniffi_build"
-version = "0.32.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "925be5c36297fff0d416fa2f03585ace718b6e6c635466754128d00f0862d5f1"
-dependencies = [
- "anyhow",
- "camino",
- "uniffi_bindgen 0.32.2 (registry+https://github.com/rust-lang/crates.io-index)",
-]
-
-[[package]]
 name = "uniffi_core"
 version = "0.32.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -9728,7 +9757,7 @@ dependencies = [
  "quote",
  "serde",
  "syn 2.0.119",
- "toml 1.1.6+spec-1.1.0",
+ "toml 0.9.12+spec-1.1.0",
  "uniffi_meta 0.32.2 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 

@@ -13,8 +13,8 @@
 //! with a code and drops what it queued. Closing the session keeps queued messages
 //! readable, and leaves streams as they were, so the peer reads them, then the close.
 //!
-//! Datagrams are copied, since [`poll::Session::poll_send_datagram`] borrows them, and
-//! dropped when oversized or when the peer's queue is full, as a network would.
+//! Datagrams ignore their send group and order, and are dropped when oversized or when the
+//! peer's queue is full, as a network would.
 
 use std::{
 	collections::VecDeque,
@@ -294,15 +294,19 @@ impl poll::Session for Session {
 		Poll::Ready(opened.map(|()| (send, recv)))
 	}
 
-	fn poll_send_datagram(&mut self, _cx: &mut Context<'_>, payload: &[u8]) -> Poll<Result<(), Error>> {
+	fn send_group(&mut self, _: i64) -> Option<crate::transport::poll::Ungrouped> {
+		None
+	}
+
+	fn send_datagram(&mut self, payload: Bytes, _: Option<&poll::Ungrouped>, _: i64) -> Result<(), Error> {
 		if let Some(err) = closed(&self.conn().close) {
-			return Poll::Ready(Err(err));
+			return Err(err);
 		}
 		// An oversized datagram, or one the peer has no room for, is lost as on a network.
 		if payload.len() <= MAX_DATAGRAM_SIZE {
-			let _ = self.side.outgoing().datagrams.try_push(Bytes::copy_from_slice(payload));
+			let _ = self.side.outgoing().datagrams.try_push(payload);
 		}
-		Poll::Ready(Ok(()))
+		Ok(())
 	}
 
 	fn poll_recv_datagram(&mut self, cx: &mut Context<'_>) -> Poll<Result<Bytes, Error>> {
@@ -390,6 +394,7 @@ pub struct SendStream {
 
 impl poll::SendStream for SendStream {
 	type Error = Error;
+	type Group = crate::transport::poll::Ungrouped;
 
 	fn poll_write(&mut self, cx: &mut Context<'_>, buf: &[u8]) -> Poll<Result<usize, Error>> {
 		let mut buf = buf;
@@ -430,7 +435,11 @@ impl poll::SendStream for SendStream {
 	}
 
 	/// Ignored: with no link to share, there is nothing to schedule.
-	fn set_priority(&mut self, _order: i32) {}
+	fn set_priority(&mut self, _order: i64) {}
+
+	fn set_group(&mut self, group: &Self::Group) {
+		match *group {}
+	}
 
 	fn finish(&mut self) -> Result<(), Error> {
 		if self.done {
@@ -868,12 +877,12 @@ mod tests {
 	#[test]
 	fn datagrams() {
 		let (mut a, mut b) = pair(Config::default());
-		ready(a.poll_send_datagram(&mut noop(), &[0; MAX_DATAGRAM_SIZE + 1])).unwrap();
+		a.send_datagram(vec![0; MAX_DATAGRAM_SIZE + 1].into(), None, 0).unwrap();
 		for _ in 0..DATAGRAM_QUEUE {
-			ready(a.poll_send_datagram(&mut noop(), b"one")).unwrap();
+			a.send_datagram("one".into(), None, 0).unwrap();
 		}
 		// The peer's queue is full, so this one is lost, like the oversized one.
-		ready(a.poll_send_datagram(&mut noop(), b"two")).unwrap();
+		a.send_datagram("two".into(), None, 0).unwrap();
 		for _ in 0..DATAGRAM_QUEUE {
 			assert_eq!(ready(b.poll_recv_datagram(&mut noop())).unwrap(), "one");
 		}
