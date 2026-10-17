@@ -87,8 +87,11 @@ web-time = "1"
 [dev-dependencies]
 arbitrary = { version = "1.5", features = ["derive"] }
 assert_matches = "1.1"
+criterion = { workspace = true }
 hex-literal = "1"
 rcgen = { workspace = true, features = ["pem", "ring"] }
+# The benches build their own TLS configs, which the crate only re-exports behind `rustls`.
+rustls = { version = "0.23.5", default-features = false, features = ["std", "ring"] }
 stats_alloc = "0.1.10"
 tracing-subscriber = { version = "0.3.0", default-features = false, features = ["env-filter", "fmt", "ansi", "time", "local-time"] }
 wasm-bindgen-test = "0.3.45"
@@ -102,6 +105,22 @@ cpu-time = "1.0.0"
 name = "fuzz-seeds"
 path = "examples/fuzz-seeds.rs"
 required-features = ["fuzz"]
+
+[[bench]]
+name = "streams"
+harness = false
+
+[[bench]]
+name = "receive"
+harness = false
+
+[[bench]]
+name = "endpoint"
+harness = false
+
+[[bench]]
+name = "wire"
+harness = false
 
 # quinn's workspace lints, kept so upstream code stays clean against them.
 [lints.rust]
