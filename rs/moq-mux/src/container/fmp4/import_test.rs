@@ -2090,10 +2090,11 @@ fn malformed_webvtt_origins_and_comments_are_refused() {
 
 /// An `stpp` init segment. mp4-atom cannot encode an `stpp` entry, so encode a `metx` entry, whose
 /// strings line up with `stpp`'s namespace, schema location and auxiliary MIME types, and rename it.
-fn ttml_init(namespace: &str, mime: &str) -> Vec<u8> {
+fn ttml_init(namespace: &str, mime: &str, timescale: u32) -> Vec<u8> {
 	let (_, moov) = decode_init(&webvtt_init("WEBVTT"));
 	let mut trak = moov.trak[0].clone();
 	trak.mdia.hdlr.handler = b"subt".into();
+	trak.mdia.mdhd.timescale = timescale;
 	trak.mdia.minf.stbl.stsd.codecs = vec![mp4_atom::Codec::Metx(mp4_atom::Metx {
 		metadata: mp4_atom::MetaData {
 			data_reference_index: 1,
@@ -2118,7 +2119,7 @@ async fn imported_ttml(
 	catalog: &crate::catalog::Producer,
 	consumer: &moq_net::broadcast::Consumer,
 ) -> (hang::catalog::TextConfig, crate::container::Frame) {
-	let mut input = ttml_init("http://www.w3.org/ns/ttml", "");
+	let mut input = ttml_init("http://www.w3.org/ns/ttml", "", 1000);
 	input.extend(webvtt_fragment(100_000, &[TTML.as_bytes().to_vec()], 4000));
 	let mut importer = super::Import::new(broadcast, timebase.reserve());
 	importer.decode(&input).unwrap();
@@ -2176,7 +2177,7 @@ async fn ttml_follows_a_shifted_source_clock() {
 #[test]
 fn unsupported_stpp_tracks_are_skipped() {
 	for (namespace, mime) in [("urn:example:not-ttml", ""), ("http://www.w3.org/ns/ttml", "image/png")] {
-		let mut input = ttml_init(namespace, mime);
+		let mut input = ttml_init(namespace, mime, 1000);
 		input.extend(webvtt_fragment(0, &[TTML.as_bytes().to_vec()], 1000));
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
@@ -2194,11 +2195,40 @@ fn ttml_documents_outside_the_profile_are_refused() {
 		r#"<tt xmlns="urn:example:not-ttml"/>"#,
 		r#"<tt xmlns="http://www.w3.org/ns/ttml" xmlns:ttp="http://www.w3.org/ns/ttml#parameter" ttp:timeBase="smpte"/>"#,
 	] {
-		let mut input = ttml_init("http://www.w3.org/ns/ttml", "");
+		let mut input = ttml_init("http://www.w3.org/ns/ttml", "", 1000);
 		input.extend(webvtt_fragment(0, &[document.as_bytes().to_vec()], 1000));
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
 		let mut importer = super::Import::new(broadcast, catalog.reserve());
 		assert!(importer.decode(&input).is_err(), "{document}");
 	}
+}
+
+/// A 90 kHz sample start is not a whole microsecond; the body still begins at the serialized
+/// frame timestamp.
+#[tokio::test(start_paused = true)]
+async fn ttml_body_begins_at_the_serialized_frame_timestamp() {
+	let mut input = ttml_init("http://www.w3.org/ns/ttml", "", 90_000);
+	input.extend(webvtt_fragment(9_000_001, &[TTML.as_bytes().to_vec()], 360_000));
+
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+	let mut importer = super::Import::new(broadcast, catalog.reserve());
+	importer.decode(&input).unwrap();
+	importer.finish().unwrap();
+	let snapshot = catalog.snapshot();
+	let name = snapshot.text.renditions.keys().next().unwrap();
+	let track = consumer.track(name).unwrap().subscribe(None).await.unwrap();
+	let mut reader = crate::container::Consumer::new(
+		track,
+		crate::catalog::hang::Container::Legacy(crate::container::Kind::Data),
+	);
+	let frame = reader.read_frame().await.unwrap().unwrap();
+	assert_eq!(frame.timestamp.as_micros(), 100_000_011);
+	let payload = std::str::from_utf8(&frame.payload).unwrap();
+	assert!(
+		payload.contains(r#"<body begin="00:01:40.000011" end="00:01:44.000011">"#),
+		"{payload}"
+	);
 }

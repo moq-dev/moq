@@ -99,9 +99,14 @@ impl Track {
 				let data = input.data.get(offset..next).ok_or(Error::InvalidDataOffset)?;
 				let payload = match &self.format {
 					Format::Vtt { header } => vtt(header, data, timestamp, end)?,
-					Format::Ttml => ttml::rewrite(data, source, timestamp..end)
-						.map_err(Error::InvalidSubtitle)?
-						.into(),
+					// The frame timestamp is serialized in hang's scale, which the body's begin must match.
+					Format::Ttml => ttml::rewrite(
+						data,
+						source,
+						timestamp.convert(hang::container::TIMESCALE)?..end.convert(hang::container::TIMESCALE)?,
+					)
+					.map_err(Error::InvalidSubtitle)?
+					.into(),
 				};
 				self.producer.write(crate::container::Frame {
 					timestamp,
