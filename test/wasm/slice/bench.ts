@@ -5,7 +5,7 @@
  *
  * @module
  */
-import type { Slice } from "./adapter.ts";
+import type { Open } from "./adapter.ts";
 
 export interface Bench {
 	name: string;
@@ -25,7 +25,7 @@ const BATCH = 1000;
 async function run(generator: string): Promise<Report> {
 	const start = performance.now();
 	// Runtime URLs keep each generator's bundle out of the other's page.
-	const { open } = (await import(`/slice-${generator}.js`)) as { open(wasm: URL): Promise<Slice> };
+	const { open } = (await import(`/slice-${generator}.js`)) as { open: Open };
 	const slice = await open(new URL(`/slice/${generator}.wasm`, location.href));
 	const init_ms = performance.now() - start;
 
@@ -74,7 +74,8 @@ async function run(generator: string): Promise<Report> {
 			const group = slice.group();
 			for (let i = 0; i < per; i++) group.write(bytes);
 			const start = performance.now();
-			for (let i = 0; i < per; i++) if ((await group.read()) !== size) throw new Error("wrong frame size");
+			for (let i = 0; i < per; i++)
+				if ((await group.read())?.payload.byteLength !== size) throw new Error("wrong frame size");
 			const elapsed = performance.now() - start;
 			group.close();
 			return elapsed;

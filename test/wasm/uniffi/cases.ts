@@ -78,6 +78,17 @@ async function within<T>(promise: Promise<T>, ms: number, what: string): Promise
 }
 
 /** True when `promise` is still pending after the event loop turns over a few times. */
+/** Map how `promise` settles; a timeout still throws rather than reading as a rejection. */
+function settle<T, R>(
+	promise: Promise<T>,
+	ms: number,
+	what: string,
+	resolved: (value: T) => R,
+	rejected: (err: unknown) => R,
+): Promise<R> {
+	return within(promise.then(resolved, rejected), ms, what);
+}
+
 async function pending(promise: Promise<unknown>): Promise<boolean> {
 	let settled = false;
 	promise.then(
@@ -133,7 +144,10 @@ const local: Record<string, () => Promise<string | undefined>> = {
 		const first = consumer.readFrame({ signal: abort.signal });
 		if (!(await pending(first))) throw new Error("read settled with nothing written");
 		abort.abort();
-		const error = await within(first, 1000, "aborted read").then(
+		const error = await settle(
+			first,
+			1000,
+			"aborted read",
 			() => undefined,
 			(err: unknown) => err,
 		);
@@ -182,12 +196,18 @@ const local: Record<string, () => Promise<string | undefined>> = {
 		const read = consumer.readFrame();
 		if (!(await pending(read))) throw new Error("read settled with nothing written");
 		consumer.cancel();
-		const first = await within(read, 1000, "cancelled read").then(
+		const first = await settle(
+			read,
+			1000,
+			"cancelled read",
 			() => undefined,
 			(err: unknown) => err as Error,
 		);
 		if (!first) throw new Error("cancelled read resolved");
-		const later = await within(consumer.readFrame(), 1000, "read after cancel").then(
+		const later = await settle(
+			consumer.readFrame(),
+			1000,
+			"read after cancel",
 			() => undefined,
 			(err: unknown) => err as Error,
 		);
@@ -262,11 +282,10 @@ const remote: Record<string, (relay: Relay) => Promise<string | undefined>> = {
 			broadcast.publishTrack("data", TIMED);
 			broadcast.announce(MoqRoute.create({}));
 			const consumer = await within(subscriber.consume().announcedBroadcast(path).available(), 5000, "announce");
-			const outcome = await within(
+			const outcome = await settle(
 				consumer.subscribeTrack("missing", undefined).then((track) => track.recvGroup()),
 				5000,
 				"refused subscribe",
-			).then(
 				(group) => (group ? "a group" : "no group"),
 				(err: unknown) => `rejected: ${(err as Error).message}`,
 			);
@@ -296,7 +315,10 @@ const remote: Record<string, (relay: Relay) => Promise<string | undefined>> = {
 			const read = got.readFrame();
 			if (!(await pending(read))) throw new Error("read settled early");
 			subscriber.cancel(1);
-			const outcome = await within(read, 5000, "read after session cancel").then(
+			const outcome = await settle(
+				read,
+				5000,
+				"read after session cancel",
 				(frame) => (frame ? "a frame" : "end of group"),
 				(err: unknown) => `rejected: ${(err as Error).message}`,
 			);

@@ -1,17 +1,21 @@
 # Browser binding generator report
 
 Which Rust binding `@moq/net` wraps in the browser: moq-ffi through UniFFI (ubrn's
-`wasm2` player), the moq-ffi slice through BoltFFI, or the hand-written wasm-bindgen
-`rs/moq-wasm`. This compares them on the [baseline harness](README.md#backend-baseline).
-It adopts nothing.
+`wasm2` player), moq-ffi through BoltFFI, or the hand-written wasm-bindgen `rs/moq-wasm`.
+This compares them on the [baseline harness](README.md#backend-baseline). It adopts
+nothing.
+
+BoltFFI cannot bind moq-ffi as written (see [What blocks BoltFFI](#what-blocks-boltffi)),
+so its network numbers come from the bench/ffi-gen slice with a browser client added. The
+same slice also runs through UniFFI, so the two generators compare on identical Rust.
 
 Decision: open, see the PR that added this file.
 
 ## Reproduce
 
 ```bash
-just test wasm-baseline --uniffi   # moq-ffi over ubrn: parity cases, then the baseline sweep with a third backend
-just test wasm --slice             # the slice's per-call costs under UniFFI and BoltFFI (needs bench/ffi-gen, #5736)
+just test wasm-baseline --uniffi --slice   # every backend in the baseline sweep, plus parity cases and per-call timings
+just test wasm --uniffi --slice            # the parity cases and per-call timings alone
 bun test/wasm/uniffi/size.ts <module.wasm>...   # sections and per-crate code share
 ```
 
@@ -19,16 +23,22 @@ ubrn 0.31.0-6 reads UniFFI 0.31 metadata and moq-ffi is on 0.32, so
 [`uniffi/build.sh`](uniffi/build.sh) applies [`uniffi/pin.patch`](uniffi/pin.patch) to a
 scratch checkout. The pin is measurement-only and does not land. The patch also carries a
 browser fix moq-ffi needs (see [Bugs found](#bugs-found)). moq-ffi built on 0.31 with
-no other source change. [`slice/build.sh`](slice/build.sh) does the same to the slice.
+no other source change.
+
+[`slice/build.sh`](slice/build.sh) copies `bench/ffi-gen` (from
+[#5736](https://github.com/moq-dev/moq/pull/5736)), applies
+[`slice/browser.patch`](slice/browser.patch), and binds it with both generators. The
+patch adds a `browser` feature: a WebTransport session that consumes and publishes, like
+moq-ffi's wasm client, plus `create_group` for high sequences.
 
 ## Setup
 
-Measured 2026-10-16 at `3789ee2ef` on an AMD Ryzen 9 5900XT (32 threads), Linux,
-headless Chromium 153.0.8010.12. The host was shared with other agents (load average
-13 to 25 during the sweep), so treat absolute numbers as noisy. Every comparison
-interleaves its candidates: the sweep runs js, js, wasm, wasm, uniffi, uniffi, js, wasm,
-uniffi, uniffi, wasm, js per shape, and the slice runs ABBA rounds on fresh pages. Cells
-are medians with the min to max range.
+Measured 2026-10-16 at `3789ee2ef` on an AMD Ryzen 9 5900XT (32 threads), Linux, headless
+Chromium 153.0.8010.12. The host was shared with other agents (load average 12 to 32), so
+treat absolute numbers as noisy and compare within a table. Every comparison interleaves
+its candidates. The sweep runs each shape three times per backend in the order js, wasm,
+uniffi, slice-uniffi, slice-boltffi, then reversed, then forward again. The per-call bench
+runs ABBA rounds on fresh pages. Cells are medians with the min to max range.
 
 All builds use `wasm-release` (opt-level z, fat LTO) and no wasm-opt, as moq-wasm ships.
 
@@ -36,21 +46,23 @@ All builds use `wasm-release` (opt-level z, fat LTO) and no wasm-opt, as moq-was
 
 Shipped assets, as each backend's page loads them. gzip is Bun's default level.
 
-| backend | `.wasm` | `.wasm` gzip | JS | JS gzip | total gzip |
-|---|---|---|---|---|---|
-| `@moq/net` (JS) | - | - | 386,552 | 109,486 | 109,486 |
-| moq-wasm, wasm-bindgen | 2,194,698 | 730,348 | 39,052 | 7,782 | 738,130 |
-| moq-ffi, UniFFI | 6,408,963 | 1,903,175 | 239,899 | 34,751 | 1,937,926 |
-| moq-ffi, UniFFI, no custom sections | 4,533,099 | 1,667,925 | 239,899 | 34,751 | 1,702,676 |
-| slice, UniFFI | 1,278,308 | 257,617 | 65,628 | 15,853 | 273,470 |
-| slice, BoltFFI | 1,175,797 | 231,257 | 53,761 | 11,987 | 243,244 |
+| backend | `.wasm` | `.wasm` gzip | JS | JS gzip | total gzip | total gzip, no custom sections |
+|---|---|---|---|---|---|---|
+| `@moq/net` (JS) | - | - | 386,552 | 109,486 | 109,486 | 109,486 |
+| moq-wasm, wasm-bindgen | 2,194,698 | 730,348 | 39,052 | 7,782 | 738,130 | 737,871 |
+| moq-ffi, UniFFI | 6,408,963 | 1,903,175 | 239,899 | 34,751 | 1,937,926 | 1,702,676 |
+| slice, UniFFI | 4,527,125 | 953,899 | 78,671 | 18,675 | 972,574 | 747,969 |
+| slice, BoltFFI | 4,426,230 | 924,626 | 65,177 | 14,705 | 939,331 | 721,303 |
 
-UniFFI's JS is the generated bindings, `@ubjs/core` and `@ubjs/wasm`, and wasm-bindgen's
-glue, minified. ubrn stages the module with its `name` section; wasm-bindgen drops it for
-moq-wasm, which is worth 235 KB gzip.
+The JS is the generated bindings plus each generator's runtime, minified: `@ubjs/core`,
+`@ubjs/wasm`, and wasm-bindgen's glue for UniFFI, `@boltffi/runtime` for BoltFFI. ubrn
+and BoltFFI both stage the module with its `name` section, which wasm-bindgen drops for
+moq-wasm; stripping it is worth about 230 KB gzip.
 
-moq-ffi binds the whole surface, so the `.wasm` is 2.3 times moq-wasm even stripped. Its
-code section (3.79 MB) by crate, attributing a generic to the crate its path starts with:
+The slice, which consumes and publishes over WebTransport, lands within 3% of moq-wasm
+stripped under either generator. Stripped, BoltFFI is 27 KB gzip smaller than UniFFI on
+the same Rust. moq-ffi's size is its surface, not its generator. Its code section (3.79 MB) by
+crate, attributing a generic to the crate its path starts with:
 
 | crate | share | crate | share |
 |---|---|---|---|
@@ -69,139 +81,163 @@ drop most of them. Toggling `default-features` changes nothing on wasm32.
 The baseline sweep: the JS publisher page serves N broadcasts, and the measured page
 consumes them with each backend. CPU is the consumer renderer's CDP thread time, including
 connection setup, protocol, boundary copies, and byte checks, per frame received.
-32 frames per subscriber.
+32 frames per subscriber. This sweep ran at load average 29 to 32.
 
-| | JS | moq-wasm | UniFFI |
-|---|---|---|---|
-| module import and init | 29 ms (26-33) | 21 ms (18-24) | 61 ms (58-69) |
-| first frame | 74 ms (60-79) | 79 ms (68-87) | 118 ms (104-130) |
-| wasm memory before reads | - | 1.31 MiB | 1.81 MiB |
-| JS heap after reads | 3.33 MiB | 2.06 MiB | 3.62 MiB |
+| | JS | moq-wasm | moq-ffi, UniFFI | slice, UniFFI | slice, BoltFFI |
+|---|---|---|---|---|---|
+| module import and init, ms | 48 (28-94) | 39 (20-74) | 92 (64-178) | 50 (35-79) | 35 (27-106) |
+| first frame, ms | 120 (82-215) | 134 (70-234) | 180 (116-332) | 126 (91-223) | 92 (72-267) |
+| wasm memory before reads, MiB | - | 1.31 | 1.81 | 1.38 | 1.25 |
+| JS heap after reads, MiB | 3.43 | 2.06 | 3.65 | 2.48 | 2.15 |
 
 Startup rows are the 160 B 1x1 shape on all three relays.
 
 CPU per frame, ms, publishers x subscribers:
 
-| protocol, shape | JS | moq-wasm | UniFFI |
-|---|---|---|---|
-| lite-06, 160 B, 1x1 | 1.56 (1.47-1.70) | 2.33 (2.17-2.44) | 3.13 (3.06-3.37) |
-| lite-06, 160 B, 4x4 | 0.21 (0.21-0.22) | 0.26 (0.25-0.26) | 0.31 (0.29-0.31) |
-| lite-06, 4 KiB, 1x4 | 0.57 (0.54-0.61) | 0.73 (0.72-0.76) | 0.97 (0.95-0.98) |
-| lite-06, 128 KiB, 1x1 | 2.09 (2.03-2.14) | 3.32 (3.15-3.54) | 4.67 (4.63-4.74) |
-| lite-06, 128 KiB, 1x4 | 0.97 (0.93-0.97) | 1.28 (1.23-1.31) | 2.03 (1.96-2.07) |
-| lite-06, 128 KiB, 4x4 | 1.44 (0.87-1.65) | 1.69 (1.18-2.17) | 2.23 (1.84-2.77) |
-| transport-19, 128 KiB, 1x4 | 1.24 (1.07-1.67) | 1.48 (1.41-1.68) | 2.20 (2.06-2.26) |
-| lite-02, 128 KiB, 1x4 | 1.03 (0.91-1.16) | 1.29 (1.27-1.35) | 2.11 (2.06-2.22) |
+| protocol, shape | JS | moq-wasm | moq-ffi, UniFFI | slice, UniFFI | slice, BoltFFI |
+|---|---|---|---|---|---|
+| lite-06, 160 B, 1x1 | 2.84 (2.58-2.90) | 3.96 (3.90-4.39) | 5.79 (5.56-5.98) | 4.28 (3.91-5.22) | 3.75 (3.75-4.32) |
+| lite-06, 160 B, 4x4 | 0.39 (0.36-0.41) | 0.47 (0.43-0.53) | 0.58 (0.44-0.60) | 0.52 (0.38-0.54) | 0.43 (0.37-0.48) |
+| lite-06, 4 KiB, 1x4 | 1.22 (1.13-1.23) | 1.53 (1.39-1.54) | 2.01 (1.83-2.06) | 1.97 (1.81-2.09) | 1.73 (1.38-1.85) |
+| lite-06, 128 KiB, 1x1 | 2.03 (1.98-2.11) | 3.07 (2.95-3.23) | 4.45 (4.36-4.71) | 4.17 (3.73-4.19) | 3.26 (3.20-3.29) |
+| lite-06, 128 KiB, 1x4 | 0.98 (0.97-1.08) | 1.35 (1.28-1.42) | 2.31 (2.24-2.33) | 2.34 (2.12-2.37) | 1.45 (1.41-1.57) |
+| lite-06, 128 KiB, 4x4 | 1.26 (0.82-1.29) | 1.48 (1.06-1.58) | 2.17 (1.54-2.50) | 1.70 (1.61-2.08) | 1.11 (1.02-1.81) |
+| transport-19, 160 B, 1x1 | 2.21 (1.67-2.43) | 2.92 (2.53-3.65) | 4.69 (3.28-4.79) | 3.28 (2.99-3.92) | 2.58 (2.45-3.92) |
+| transport-19, 128 KiB, 1x4 | 1.77 (1.52-1.96) | 2.44 (2.33-2.69) | 4.19 (3.58-4.26) | 4.13 (2.94-4.66) | 2.47 (2.19-3.39) |
+| lite-02, 160 B, 4x1 | 0.51 (0.49-0.52) | 0.64 (0.62-0.68) | 0.90 (0.87-0.91) | 0.75 (0.67-1.04) | 0.61 (0.58-0.65) |
+| lite-02, 128 KiB, 1x4 | 1.25 (1.22-1.26) | 1.99 (1.61-2.03) | 3.44 (2.37-3.71) | 3.66 (2.46-3.91) | 2.15 (1.48-3.02) |
+| lite-02, 128 KiB, 4x4 | 0.87 (0.85-1.12) | 1.11 (1.05-1.63) | 1.54 (1.53-1.62) | 1.53 (1.46-1.74) | 1.08 (1.00-1.08) |
 
-The raw samples for every shape, including the u32 and near-2^53 sequences, are in the
-run's `backend.json`. UniFFI costs 1.2 to 1.6 times moq-wasm's CPU per frame here, more
-as frames grow, since every payload crosses as a record copied byte by byte.
+Geometric means of the per-shape median ratios, over all 45 WebTransport shapes:
+
+| ratio | all | 160 B and 4 KiB | 128 KiB |
+|---|---|---|---|
+| slice: BoltFFI / UniFFI | 0.86 | 0.90 | 0.75 |
+| slice, BoltFFI / moq-wasm | 1.01 | 0.99 | 1.05 |
+| slice, UniFFI / moq-wasm | 1.18 | 1.10 | 1.41 |
+| moq-ffi, UniFFI / moq-wasm | 1.34 | 1.28 | 1.48 |
+| moq-ffi, UniFFI / slice, UniFFI | 1.13 | 1.17 | 1.05 |
+
+On identical Rust, BoltFFI costs 10% less CPU per frame than UniFFI for small frames and
+25% less for 128 KiB ones, where UniFFI copies each payload byte by byte. Through BoltFFI,
+the slice matches moq-wasm. The last row is moq-ffi's own bookkeeping over the slice's, not
+the generator's. The raw samples for every shape, including the u32 and near-2^53
+sequences, are in the run's `backend.json`.
 
 ## Per-call cost
 
 Local calls, no network, so only the binding and moq-net's model count. Microseconds per
-call.
+call, from one session at load average 12 to 20.
 
 The slice, six ABBA rounds:
 
 | call | UniFFI | BoltFFI |
 |---|---|---|
-| sync `noop()` | 0.65 (0.33-0.74) | 0.03 (0.02-0.04) |
-| sync getter `sequence()` | 0.33 (0.27-0.38) | 0.04 (0.01-0.06) |
-| async `noop_async()` | 2.33 (2.28-2.62) | 1.50 (1.00-1.74) |
-| async `yield_once()`: one wakeup | 3.11 (3.00-3.62) | 1.79 (1.64-2.04) |
-| `write_frame` 160 B | 1.64 (1.58-1.73) | 0.76 (0.72-0.85) |
-| `write_frame` 4 KiB | 13.6 (13.3-13.8) | 2.26 (2.04-2.35) |
-| `write_frame` 128 KiB | 401 (395-420) | 58.5 (51.8-63.2) |
-| `read_frame`, buffered, 160 B | 5.47 (5.29-5.69) | 2.57 (2.34-3.28) |
-| `read_frame`, buffered, 4 KiB | 38.5 (37.5-39.0) | 8.08 (7.07-8.62) |
-| `read_frame`, buffered, 128 KiB | 1,052 (1,039-1,079) | 141 (124-146) |
-| `read_frame`, parked then woken, 160 B | 7.19 (6.70-7.82) | 3.75 (3.40-4.00) |
+| sync `noop()` | 0.57 (0.38-0.68) | 0.03 (0.02-0.05) |
+| sync getter `sequence()` | 0.40 (0.35-0.55) | 0.04 (0.01-0.07) |
+| async `noop_async()` | 3.07 (2.82-4.18) | 1.44 (1.10-1.98) |
+| async `yield_once()`: one wakeup | 3.71 (3.16-5.28) | 2.60 (2.16-2.80) |
+| `write_frame` 160 B | 2.40 (2.23-3.07) | 0.85 (0.79-0.89) |
+| `write_frame` 4 KiB | 29.2 (27.9-30.9) | 2.58 (2.45-2.93) |
+| `write_frame` 128 KiB | 894 (854-936) | 65.3 (62.5-70.5) |
+| `read_frame`, buffered, 160 B | 6.27 (5.81-7.20) | 2.87 (2.51-4.00) |
+| `read_frame`, buffered, 4 KiB | 39.6 (37.5-40.8) | 9.56 (9.05-10.6) |
+| `read_frame`, buffered, 128 KiB | 1,079 (1,010-1,173) | 175 (160-203) |
+| `read_frame`, parked then woken, 160 B | 9.04 (7.74-10.9) | 5.16 (3.76-6.42) |
 
-UniFFI resolves one JS Promise per `rust_future_poll` wakeup, as BoltFFI does; the
-async gap is about 2 times. Its bytes cost about 3 ns per byte written and 8 ns per byte
-read, from UniFFI's per-element `Vec<u8>` lift and lower in Rust plus a JS-side copy,
-against BoltFFI's bulk copies. That is [Payload bytes](/quest/m2/ffi-bytes.md)'s target.
-`@ubjs/core` also arms and clears a `setTimeout` on every async call, a Node.js
-keep-alive that runs in the browser too.
+Both generators resolve one JS Promise per `rust_future_poll` wakeup; BoltFFI's async
+path is 1.4 to 2.1 times cheaper. UniFFI's bytes cost about 7 ns per byte written and 8 ns
+per byte read, from its per-element `Vec<u8>` lift and lower in Rust, against BoltFFI's
+bulk copies at 0.5 and 1.3. That is [Payload bytes](/quest/m2/ffi-bytes.md)'s target.
+`@ubjs/core` also arms and clears a `setTimeout` on every async call, a Node.js keep-alive
+that runs in the browser too.
 
-moq-ffi itself through UniFFI, one run per mode (the strict CSP below):
+moq-ffi itself through UniFFI, in the same session, in each of ubrn's dispatch modes (see
+the strict CSP below):
 
 | call | `new Function` dispatch | interpreted (strict CSP) |
 |---|---|---|
-| module init | 52.7 ms | 46.4 ms |
-| sync getter `sequence()` | 0.34 | 0.89 |
-| `write_frame` 160 B | 2.39 | 3.58 |
-| `write_frame` 128 KiB | 883 | 933 |
-| `read_frame`, buffered, 160 B | 6.41 | 8.54 |
-| `read_frame`, parked then woken, 160 B | 9.70 | 9.00 |
-
-The slice's `sequence()` matches moq-ffi's. Compare the frame rows across these two tables
-only roughly: they ran at different times on the shared host, and moq-ffi's frames carry
-more bookkeeping than the slice's.
+| module init | 53.7 ms | 51.7 ms |
+| sync getter `sequence()` | 0.37 | 1.03 |
+| `write_frame` 160 B | 2.76 | 3.39 |
+| `write_frame` 128 KiB | 922 | 951 |
+| `read_frame`, buffered, 160 B | 7.10 | 8.18 |
+| `read_frame`, parked then woken, 160 B | 10.5 | 11.2 |
 
 ## Parity
 
-[`uniffi/cases.ts`](uniffi/cases.ts) runs against all three relays, in both dispatch modes.
-moq-wasm's column is the existing suite in [`src/main.ts`](src/main.ts).
+[`uniffi/cases.ts`](uniffi/cases.ts) and [`slice/cases.ts`](slice/cases.ts) run against
+all three relays, normally and under a strict CSP. Every case passes in both modes for all
+three bindings. moq-wasm's column is the existing suite in [`src/main.ts`](src/main.ts).
 
-| case | moq-wasm | moq-ffi, UniFFI |
-|---|---|---|
-| negotiates each relay's version | yes, via `version()` | yes, by offering only that version: moq-ffi exposes no negotiated version |
-| reads a published broadcast, every byte, 128 KiB frames | yes | yes |
-| refuses a missing track | yes | yes: rejects with `NotFound` (transport-19) or `Protocol` (lite) |
-| publishes | no: consume only | yes |
-| frame timestamps | no: payload only | yes, exact, as `bigint` microseconds |
-| u64 sequence above 2^53, end to end | not testable: no publisher can send it | yes, 2^53+1 on all three; 2^62-1 on lite-02 and transport-19 (see bugs) |
-| cancellation | `free()` rejects pending calls | every async method takes `{ signal }`; abort rejects with `AbortError` and the next call still gets the next frame |
-| aborting releases the call's state | n/a | yes: a track's demand drops only once the aborted future is freed |
-| freeing a handle mid-call | rejects the call | the call keeps running: each call clones the `Arc`; `cancel()` is the terminal |
-| close and error propagation | yes | session `cancel()` rejects a pending remote read with `Transport` |
-| forced wasm memory growth mid-read | yes | yes |
-| WebSocket fallback | no | no: moq-ffi's wasm client has none either |
+| case | moq-wasm | moq-ffi, UniFFI | slice, UniFFI and BoltFFI |
+|---|---|---|---|
+| negotiates each relay's version | yes, via `version()` | yes, by offering only that version: no negotiated-version accessor | same as moq-ffi |
+| reads a published broadcast, every byte, 128 KiB frames | yes | yes | yes |
+| refuses a missing track | yes | yes: rejects with `NotFound` (transport-19) or `Protocol` (lite) | yes: rejects with the slice's `Net { reason: "not found" }` |
+| publishes | no: consume only | yes | yes |
+| frame timestamps | no: payload only | yes, exact, as `bigint` microseconds | yes |
+| u64 sequence above 2^53, end to end | not testable: no publisher can send it | yes, 2^53+1 on all three; 2^62-1 on lite-02 and transport-19 (see bugs) | same as moq-ffi |
+| cancellation through `AbortSignal` | no: `free()` rejects pending calls | rejects with `AbortError`; the next call still gets the next frame | UniFFI: `AbortError`; BoltFFI: `BoltFFICancelledError`; neither steals the next frame |
+| aborting releases the call's state | n/a | yes: a track's demand drops only once the aborted future is freed | not testable: the slice has no demand |
+| freeing a handle mid-call | rejects the call | the call keeps running (each call clones the `Arc`); `cancel()` is the terminal | the call keeps running under both (BoltFFI's `dispose()`) |
+| close and error propagation | yes | session `cancel()` rejects a pending remote read with `Transport` | yes, with the browser's `WebTransportError` in the reason |
+| forced wasm memory growth mid-read | yes | yes | yes |
+| WebSocket fallback | no | no: moq-ffi's wasm client has none | no |
 
-Things the binding cannot do: a `JsValue` cannot cross, so Rust constructs the
-WebTransport, as moq-ffi already does on wasm. There are no streams; reads are
-one Promise per call. The generated `*Like` return types omit `uniffiDestroy`, so a
-caller casts to the class to free a handle early, and a `FinalizationRegistry` frees the
-rest.
+Things neither generator can do: a `JsValue` cannot cross, so Rust constructs the
+WebTransport, as moq-ffi already does on wasm. There are no streams; reads are one Promise
+per call. UniFFI's generated `*Like` return types omit `uniffiDestroy`, so a caller casts
+to the class to free a handle early; BoltFFI's classes expose `dispose()` directly. Both
+fall back to a `FinalizationRegistry`. BoltFFI types an async constructor's result as
+nullable (`Promise<MoqBrowserSession | null>`, [boltffi#95](https://github.com/boltffi/boltffi/issues/95)).
 
 ## Deployment
 
 - **Strict CSP.** ubrn compiles a dispatcher per export with `new Function`. Under
   `script-src 'self' 'wasm-unsafe-eval'` it falls back to an interpreter; the harness
-  checks `new Function` really is refused there. Every case passes in both modes. Sync
-  calls cost up to 2.6 times as much interpreted; frame calls barely move.
-- **Bundlers.** `uniffiInitAsync` takes the `.wasm` URL from the host. The `.wasm` and
-  its wasm-bindgen `_bg.js` are a matched pair. The generated `index.ts` imports
-  `@ubjs/wasm`, which resolves its browser build through package `exports`.
-- **Types.** The generated TypeScript carries `@ts-nocheck`, so
+  checks `new Function` really is refused there. Sync calls cost up to 2.8 times as much
+  interpreted; frame calls barely move. BoltFFI's cases pass under the same CSP.
+- **Bundlers.** ubrn's `uniffiInitAsync` and BoltFFI's `init` both take the `.wasm` from
+  the host. ubrn's `.wasm` and its wasm-bindgen `_bg.js` are a matched pair. Both generated
+  entrypoints import an npm runtime (`@ubjs/wasm`, `@boltffi/runtime`).
+- **Types.** ubrn's generated TypeScript carries `@ts-nocheck`, so
   [ubrn#472](https://github.com/jhugman/uniffi-bindgen-react-native/issues/472) does not
-  surface. The harness type-checks its callers against it under the repo's strict config.
+  surface. BoltFFI emits `.d.ts` files. The harness type-checks its callers against both
+  under the repo's strict config.
 - **Version.** ubrn pins UniFFI 0.31. Adoption waits on
   [ubrn#468](https://github.com/jhugman/uniffi-bindgen-react-native/pull/468) (0.32), or
-  on carrying ubrn's TypeScript generator in [the fork](/quest/m2/uniffi-fork.md).
-- **JS only.** The player cannot drive wasm2js output as is: it compiles small wasm
+  on carrying ubrn's TypeScript generator in [the fork](/quest/m2/uniffi-fork.md). BoltFFI
+  0.31.1 is current but breaks across minor releases.
+- **JS only.** ubrn's player cannot drive wasm2js output as is: it compiles small wasm
   trampolines for callbacks and the panic log, and grows `__indirect_function_table`. Its
   module class accepts any instance-shaped object, so plain calls might run through a shim.
-  Not attempted; an input to the [WASM-to-JS evaluation](/quest/m2/rs2ts-wasm2js.md).
+  Not attempted for either generator; an input to the
+  [WASM-to-JS evaluation](/quest/m2/rs2ts-wasm2js.md).
 
-## BoltFFI
+## What blocks BoltFFI
 
-The slice binds and runs in Chromium under BoltFFI 0.31.1, and is the fastest on every
-call. That passes the feasibility filter, but it is not selection evidence:
+BoltFFI cannot bind moq-ffi without a rewrite of its public API. Adding the slice's browser
+client hit two new walls, and a probe crate confirmed which moq-ffi shapes fail. Together
+with [#5736](https://github.com/moq-dev/moq/pull/5736)'s list:
 
-- BoltFFI cannot bind moq-ffi as written. [#5736](https://github.com/moq-dev/moq/pull/5736)
-  lists eleven gaps, including `Arc` returns, ignored target `cfg`, and `Send + Sync`
-  on wasm.
-- The slice has no client on wasm, because BoltFFI's scanner ignores target `cfg` and
-  web-transport-wasm is gated on it. So no network parity, size, startup, or memory
-  numbers exist for it.
-- \#5736 recommends forking UniFFI for the native targets. Picking BoltFFI for the browser
-  alone would carry two generators.
+| blocker | moq-ffi's exposure | what the slice did | to bind moq-ffi |
+|---|---|---|---|
+| Any `Arc<T>`, returned or in a record, fails the whole crate's lowering ("opaque Rust pointer container cannot be represented in binding IR yet") | 56 exports return `Arc<T>` | classes by value | every object becomes a cheap-clone wrapper around its own `Arc`, M |
+| Objects inside records fail too ("unsupported expansion: codec node") | `MoqClientConfig` and `MoqServerConfig` carry origins; two media records carry a timebase: 6 fields | origins live in the session | **public API break** in every language: move those objects to constructor arguments or setters, M |
+| Async exports must return `Send` futures, on wasm32 too (`boltffi_core::rust_future_new`); no single-threaded mode | every browser-touching async export; WebTransport handles are `Rc` | wrapped each future in an asserted-`Send` adapter | the same wrapper on every async export, S; or a `Send`-free path in a fork, S |
+| Classes must be `Send + Sync` on wasm | 47 objects | `unsafe impl` per class (from #5736) | the same, S |
+| The scanner ignores target `cfg`, and binding metadata comes from a host build, so wasm-only code must compile natively | 82 `target_arch` lines | a `browser` feature, with a host stub that errors | convert the wasm gating to features with host stubs, M |
+| Markers cannot sit in `cfg_attr`, and `#[error]` collides with thiserror | `MoqError` derives thiserror; all 63 export blocks, 45 records, 16 enums | shim crate (from #5736) | dual annotations through a shim, or BoltFFI only, M to L |
+| No Go or C++, partial Dart and C (#5736) | 4 of moq-ffi's 8 targets | n/a | keep UniFFI for those targets and carry both generators, or write the backends, XL |
 
-If BoltFFI is favored anyway, the quest's next step stands: port the harness workload to it
-and rerun parity, size, startup, and memory before picking it.
+Shapes that do bind, from the probe: field defaults (`#[boltffi::default]`, moq-ffi has
+97\), `HashMap` as `Map`, `Option<Object>` returns, sync and async, and error enums that
+carry records.
+
+So binding moq-ffi through BoltFFI is an L to XL project with a breaking API change. The
+cheapest form is browser-only: BoltFFI for TypeScript and UniFFI for the other seven
+targets, over one dual-annotated crate.
 
 ## Bugs found
 
@@ -211,3 +247,4 @@ and rerun parity, size, startup, and memory before picking it.
   its own; the real fix belongs to the bindings parity work.
 - **On moq-lite-06, group sequence 2^62-1 never arrives.** lite-02 and transport-19
   carry it, and 2^53+1 crosses all three. Nothing errors: the subscriber waits forever.
+  Both moq-ffi and the slice hit it under both generators.

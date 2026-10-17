@@ -176,13 +176,14 @@ API parity remain explicit gaps too.
 ## Generated bindings
 
 ```bash
-just test wasm-baseline --uniffi
-just test wasm --slice
+just test wasm-baseline --uniffi --slice
+just test wasm --uniffi --slice
 ```
 
-`--uniffi` adds moq-ffi, bound by UniFFI over ubrn's `wasm2` player, as a third
-baseline backend. It also runs parity cases and per-call timings in `uniffi/` against
-every relay, once normally and once under a strict CSP. `--slice` times the
-`bench/ffi-gen` slice under UniFFI and BoltFFI. Both build from scratch copies, since
-ubrn needs a UniFFI pin that does not land. [generator.md](generator.md) is the
-resulting report.
+`--uniffi` adds moq-ffi, bound by UniFFI over ubrn's `wasm2` player, as a baseline
+backend. It also runs parity cases and per-call timings in `uniffi/` against every relay,
+once normally and once under a strict CSP. `--slice` does the same for the
+`bench/ffi-gen` slice (from #5736) bound by UniFFI and by BoltFFI, with
+`slice/browser.patch` adding the WebTransport client the slice lacks. Both build from
+scratch copies, since ubrn needs a UniFFI pin that does not land.
+[generator.md](generator.md) is the resulting report.
