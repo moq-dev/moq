@@ -4642,6 +4642,7 @@ dependencies = [
  "mp4-atom",
  "mpeg2ts",
  "num_enum",
+ "quick-xml 0.42.0",
  "scuffle-av1",
  "scuffle-h265",
  "serde",
