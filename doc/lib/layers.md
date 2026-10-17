@@ -1,13 +1,14 @@
 ---
 title: Layers
-description: Where each Rust layer lives in every binding
+description: Where each layer the bindings wrap lives in every language
 ---
 
 # Layers
 
 The bindings keep Rust's layers. moq-net sits at the root of each package, and
 each layer above it has its own namespace: `media`, `json`, `flate`, `audio`,
-and `video`. A type keeps its short name in every language, so Python's
+and `video`. Rust's other crates, such as moq-auth and moq-room, have no
+binding. A type keeps its short name in every language, so Python's
 `moq.json.SnapshotProducer` is `Json.SnapshotProducer` in Swift. Find the layer
 below, then look up its methods in that language's API reference.
 
