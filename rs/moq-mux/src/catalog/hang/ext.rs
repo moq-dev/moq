@@ -65,8 +65,9 @@ fn reserved(name: &str) -> bool {
 			| "video" | "audio"
 			| "text" | "archive"
 			| "clock" | "json"
-			| "binary" | "stats"
-			| "echo" | "timeline"
+			| "binary"
+			| "stats" | "echo"
+			| "timeline"
 	) || moq_msf::reserved_root(name)
 }
 
