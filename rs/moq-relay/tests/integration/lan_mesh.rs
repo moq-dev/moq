@@ -41,7 +41,6 @@ async fn moq_import_cluster_lan_beside_a_relay() {
 
 	let mut connect = moq_tokio::connect::Config::default();
 	connect.tls.fingerprint = vec![fingerprint.clone()];
-	let client = connect.clone().init(Default::default()).expect("client");
 
 	let mut lan = cluster::LanConfig::default();
 	lan.enabled = true;
@@ -51,7 +50,6 @@ async fn moq_import_cluster_lan_beside_a_relay() {
 
 	let cluster = cluster::Cluster::new(cluster::Options::new(config))
 		.expect("cluster")
-		.with_client(client)
 		.with_connect(connect, Default::default())
 		.with_advertise(cluster::LanAdvertise::new(port).with_fingerprint(fingerprint));
 

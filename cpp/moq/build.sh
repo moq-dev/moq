@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Build the moq C++ package for the host and archive it for release.
-# Usage: ./build.sh [--target TARGET] [--output DIR]
+# Usage: ./build.sh [--target TARGET] [--output DIR] [--ffi-dir DIR]
 #
 # The archive holds what `cmake --install` lays out: the moq-ffi staticlib, the wrapper and
 # generated headers, the generated source, the CMake package, and moq-cpp.pc. Needs cargo, cmake,
@@ -12,6 +12,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 TARGET=""
 OUTPUT_DIR="dist"
+FFI_DIR=""
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -19,12 +20,16 @@ while [[ $# -gt 0 ]]; do
             TARGET="$2"
             shift 2
             ;;
+        --ffi-dir)
+            FFI_DIR="$(cd "$2" && pwd)"
+            shift 2
+            ;;
         --output)
             OUTPUT_DIR="$2"
             shift 2
             ;;
         -h | --help)
-            echo "Usage: $0 [--target TARGET] [--output DIR]"
+            echo "Usage: $0 [--target TARGET] [--output DIR] [--ffi-dir DIR]"
             exit 0
             ;;
         *)
@@ -50,10 +55,16 @@ OUTPUT_DIR="$(cd "$OUTPUT_DIR" && pwd)"
 PACKAGE_DIR="$OUTPUT_DIR/$NAME"
 BUILD_DIR="$SCRIPT_DIR/build/release"
 
+if [[ -z "$FFI_DIR" ]] && sed '/^[[:space:]]*#/d; /^[[:space:]]*$/d' "$SCRIPT_DIR/FFI_VERSION" | grep -q .; then
+    FFI_DIR="$BUILD_DIR/ffi"
+    rm -rf "$FFI_DIR"
+    python3 "$SCRIPT_DIR/../../sh/cpp/ffi.py" fetch --target "$TARGET" --output "$FFI_DIR"
+fi
+
 echo "Packaging $NAME..."
 rm -rf "$PACKAGE_DIR"
 # lib/, not the lib64/ GNUInstallDirs picks on some hosts, so every archive has one layout.
-cmake -S "$SCRIPT_DIR" -B "$BUILD_DIR" -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_LIBDIR=lib
+cmake -S "$SCRIPT_DIR" -B "$BUILD_DIR" -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_LIBDIR=lib -DMOQ_FFI_DIR="$FFI_DIR"
 cmake --build "$BUILD_DIR" --config Release
 cmake --install "$BUILD_DIR" --config Release --prefix "$PACKAGE_DIR"
 

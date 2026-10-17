@@ -207,6 +207,7 @@ In addition to the WebCodecs fields, each rendition MAY carry the common renditi
 type VideoDecoderConfigExtensions = {
   "displayAspectWidth": number | undefined,
   "displayAspectHeight": number | undefined,
+  "preference": number | undefined,
 }
 ~~~
 
@@ -214,6 +215,12 @@ type VideoDecoderConfigExtensions = {
 They are not the sample (pixel) aspect ratio: a publisher with square samples omits them, and one with non-square samples sends the picture's aspect, such as 16:9 for a 1440x1080 picture with 4:3 samples.
 A consumer that understands neither field MUST display the decoded picture at its own shape.
 Both MUST be present together; a consumer that sees only one MUST ignore it.
+
+`preference` is a signed 32-bit integer; higher is preferred.
+If absent, it defaults to 0; a publisher SHOULD only write it when nonzero.
+A consumer selecting a rendition automatically MUST choose among the enabled ({{field-enabled}}) renditions it can decode with the highest `preference`, then by its own criteria, such as size and bitrate, within them.
+A consumer MAY select another rendition at the viewer's explicit request.
+A consumer that carries every rendition, rather than selecting one, ignores the field.
 
 For example:
 
@@ -247,6 +254,30 @@ For example:
   },
   "rotation": 0,
   "flip": false,
+}
+~~~
+
+A publisher with an H.265 source that also publishes its own H.264 transcode marks the transcode `-1`, so only a consumer that cannot decode H.265 selects it:
+
+~~~
+{
+  "renditions": {
+    "source": {
+      "codec": "hvc1.1.6.L93.B0",
+      "container": { "kind": "legacy" },
+      "codedWidth": 1280,
+      "codedHeight": 720,
+      "bitrate": 2000000
+    },
+    "compat": {
+      "codec": "avc1.64001f",
+      "container": { "kind": "legacy" },
+      "codedWidth": 1280,
+      "codedHeight": 720,
+      "bitrate": 4000000,
+      "preference": -1
+    }
+  }
 }
 ~~~
 
@@ -328,7 +359,7 @@ The `renditions` field maps rendition IDs to text configurations, typically one 
 The `format` field selects the cue serialization, and tells a consumer how to parse each frame's payload:
 
 - `vtt`: WebVTT ([W3C WebVTT](https://www.w3.org/TR/webvtt1/)). Each payload is a self-contained `WEBVTT` segment whose cues carry absolute timing. A cue's embedded start time MUST match its enclosing frame timestamp.
-- `ttml`: TTML / IMSC1 ([W3C IMSC](https://www.w3.org/TR/ttml-imsc1.1/)) fragment (XML) with absolute timing. A cue's embedded start time MUST match its enclosing frame timestamp.
+- `ttml`: TTML / IMSC1 ([W3C IMSC](https://www.w3.org/TR/ttml-imsc1.1/)). Each payload is one complete TTML document in the `media` time base with absolute timing, clipped to the frame. Its `body` begin MUST match the enclosing frame timestamp, and its `body` end bounds everything the document presents.
 - `utf8`: raw UTF-8 text with no embedded timing or styling. The cue is shown from its frame timestamp until the next cue; an empty payload clears it.
 
 A consumer MUST ignore a rendition whose `format` it does not recognize.
@@ -780,9 +811,11 @@ The catalog's root `archive` field names every timeline, and any durable recordi
 
 ~~~
 type ArchiveSchema = {
-  "timelines": Map<TrackName, TrackName>,
+  "timelines": Map<TrackName, {
+    "track": TrackName,
+    "duration": number | undefined,
+  }>,
   "timescale": number | undefined,
-  "durationMax": number | undefined,
   "replay": string | undefined,
   "store": string | undefined,
   "version": number | undefined,
@@ -791,20 +824,22 @@ type ArchiveSchema = {
 
 A consumer that cannot decode the `archive` entry MUST ignore that entry without rejecting the catalog.
 
-The `timelines` field maps each indexed track to the MoQ track carrying its records.
+The `timelines` field maps each indexed track to the MoQ track carrying its records and that timeline's fixed nominal record `duration`.
+The duration is in `timescale` units and is zero for sparse timelines without a segment cadence.
+An untimed track ({{moql}}) has no duration to declare, so its timeline MUST omit `duration`; every timed timeline MUST carry it.
 Any track may be indexed, including the catalog track itself and data tracks ({{data}}).
 Naming a timeline after its track with a `.timeline.z` suffix is RECOMMENDED; a consumer MUST use the advertised names rather than assuming them.
-A live publisher without a store advertises `archive` with the timeline fields (`timelines`, `timescale`, `durationMax`) alone.
+A live publisher without a store advertises `archive` with the timeline fields (`timelines`, `timescale`) alone.
 Every span a timeline advertises is FETCHable; with a store it is also durable.
 There is no generation: a client that must tell recordings apart compares `replay` and `store`.
 
-The `timescale` field is the units per second for the records' `pts` and `duration` values, and for `durationMax`.
+The `timescale` field is the units per second for the records' `pts` and `duration` values and timeline declarations.
 If absent, it defaults to 1000 (milliseconds).
 A zero `timescale` is invalid and MUST be refused.
 
-The `durationMax` field, if present, is the declared upper bound on a record's `duration`, in `timescale` units.
-A publisher MUST NOT emit a record whose `duration` exceeds it; splitting a group between frames ({{timeline-cutting}}) makes the bound achievable for any content, and a record whose frames are farther apart than the bound ends at the bound, leaving the rest of the gap uncovered.
-The value MUST NOT change for the life of the broadcast.
+Each declared timeline duration is a nominal target, not a bound: a publisher MAY overrun it to end at a group boundary.
+The value MUST NOT change for the life of that timeline track.
+A publisher that does not know the target MUST omit that timeline until its first record closes, then declare that record's duration, or its minimum ({{timeline-cutting}}) when a gap or the end of the content closed the record before a boundary.
 
 Wall-clock mapping is the catalog root `clock` ({{clock}}), not this section: a consumer derives the wall-clock time of any record as `clock.wall + pts` after converting `pts` into the clock's timescale.
 
@@ -895,10 +930,11 @@ The newest record is therefore the live edge of its track.
 The RECOMMENDED policy is one rule for every track:
 
 - A record ends at the first group boundary at least a minimum duration past its own start, so short groups (audio) pack into one record and long ones (video) get one each.
-- A group still open a maximum duration past the record's start is split between frames, so a group that never closes (an append-log such as a `moq-json` stream) is indexed as it grows; `durationMax` advertises this maximum.
+- A group still open several declared durations past the record's start is split between frames, so a group that never closes (an append-log such as a `moq-json` stream) is indexed as it grows.
 - A skipped group sequence ends the record at its newest known content, not where the next group starts, so a pause is not counted as content.
 
-A minimum of 2 seconds and a maximum of 10 seconds are RECOMMENDED.
+A minimum of 4 seconds is RECOMMENDED.
+Before an unhinted track declares, a safety ceiling of 10 seconds, or the minimum if longer, is RECOMMENDED.
 Sparse data that publishes on its own schedule, such as a catalog, SHOULD use a minimum of zero: each group is then its own record, ended as soon as the group finishes, so its newest group is indexed without waiting for another that may never come.
 An untimed track has no duration to measure: each group is its own record, ended as soon as the group finishes or the next group starts, and no group is split between frames.
 
@@ -1211,6 +1247,8 @@ This document has no IANA actions.
 ## moq-hang-04
 {:numbered="false"}
 
+- Each archive timeline declares its own fixed nominal record duration, omitted for an untimed track; removed the broadcast-wide duration bound.
+- Added the optional video `preference` field: a consumer selects automatically among the highest preference it can decode.
 - Derived HLS and DASH exports hand disabled references to enabled renditions at the first record numbered past the advertised ones, keeping the record `sequence` as the HLS media sequence and starting a DASH period.
 - Added optional `stats` and `echo` catalog sections, publisher/viewer snapshots keyed by rendition ID, and the `.echo` feedback broadcast convention.
 
@@ -1231,7 +1269,7 @@ This document has no IANA actions.
 - Replaced the broadcast's one aligned timeline with one timeline per track: the catalog `archive` entry's `track` became a `timelines` map from each indexed track, the catalog included, to its timeline track.
 - Required consumers to ignore an undecodable `archive` entry without rejecting the catalog.
 - Replaced the segment record with a per-track record: `sequence`, `pts`, `duration`, and a `start`/`end` range of group and frame positions, dropping cross-track pacing and completeness.
-- One cutting rule for every track: a record ends at the first group boundary past a minimum (2 seconds RECOMMENDED, zero for sparse data such as a catalog) and splits a group between frames at a maximum (10 seconds RECOMMENDED), so a group that never closes is indexed as it grows and `durationMax` bounds every record.
+- One cutting rule for every track: a record ends at the first group boundary past a minimum (4 seconds RECOMMENDED, zero for sparse data such as a catalog) and splits a group between frames once it stays open several declared durations, so a group that never closes is indexed as it grows.
 - Recording format version 2: each track stores record N at `segments/N`, beside its timeline's `segments/N`, with a `Frame Start` field in the segment object. Tracks commit and expire independently, and a DVR keeps each track's newest record.
 - Described deriving HLS and DASH at the edge from a reference rendition's records.
 - An edge keeps its derived-format video reference rendition while that rendition stays in the catalog; an audio reference yields once video has a timeline.

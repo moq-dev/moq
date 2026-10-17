@@ -71,12 +71,19 @@ impl<S: crate::transport::poll::SendStream, V: StreamCodes> Writer<S, V> {
 	}
 
 	/// Poll until the write buffer has fully hit the stream.
+	///
+	/// A failed stream never takes another byte, so a write error drops the buffer too.
 	pub fn poll_flush(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
 		while self.flushed < self.buffer.len() {
 			let stream = self.stream.as_mut().unwrap();
-			let n = ready!(stream.poll_write(cx, &self.buffer[self.flushed..]))
-				.map_err(|err| self.version.transport_error(err))?;
-			self.flushed += n;
+			match ready!(stream.poll_write(cx, &self.buffer[self.flushed..])) {
+				Ok(n) => self.flushed += n,
+				Err(err) => {
+					self.buffer.clear();
+					self.flushed = 0;
+					return Poll::Ready(Err(self.version.transport_error(err)));
+				}
+			}
 		}
 		self.buffer.clear();
 		self.flushed = 0;
@@ -294,7 +301,7 @@ mod tests {
 		}
 	}
 
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn raw_payload_stop_uses_the_negotiated_registry() {
 		for (version, expected) in [
 			(

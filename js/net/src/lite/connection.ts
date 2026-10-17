@@ -182,7 +182,7 @@ export class Connection implements Established {
 	}
 
 	/** Our tokens and grants; see {@link Established.auth}. */
-	get auth(): Auth.Auth {
+	get auth(): Auth.Handle {
 		return this.#auth;
 	}
 

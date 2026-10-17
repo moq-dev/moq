@@ -138,17 +138,15 @@ test("clock stays off the wire when absent", () => {
 test("archive round-trips at the root", () => {
 	const parsed = RootSchema.parse({
 		archive: {
-			timelines: { video: "video.timeline.z" },
-			durationMax: 2000,
+			timelines: { video: { track: "video.timeline.z", duration: 2000 } },
 			replay: "./recordings/clip",
 			store: "https://objects.example/rec/",
 			version: ARCHIVE_VERSION,
 		},
 	});
 	expect(parsed.archive).toMatchObject({
-		timelines: { video: "video.timeline.z" },
+		timelines: { video: { track: "video.timeline.z", duration: 2000 } },
 		timescale: 1000,
-		durationMax: 2000,
 		replay: "recordings/clip",
 		store: "https://objects.example/rec/",
 		version: 2,
@@ -196,11 +194,14 @@ test("an incompatible archive does not hide invalid media", () => {
 test("a Rust per-track archive parses", () => {
 	const parsed = RootSchema.parse({
 		archive: {
-			timelines: { "catalog.json": "catalog.json.timeline.z", video0: "video0.timeline.z" },
+			timelines: {
+				"catalog.json": { track: "catalog.json.timeline.z", duration: 0 },
+				video0: { track: "video0.timeline.z", duration: 4000 },
+			},
 			timescale: 1000,
 		},
 	});
-	expect(parsed.archive?.timelines.video0).toBe("video0.timeline.z");
+	expect(parsed.archive?.timelines.video0?.track).toBe("video0.timeline.z");
 });
 
 test("an absent or foreign text section parses to empty", () => {

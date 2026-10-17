@@ -3,8 +3,8 @@
 
 use std::time::Duration;
 
+use moq_clock::Instant;
 use moq_net::{PathOwned, origin, stats::Registry, track};
-use web_async::time::Instant;
 
 use super::{Drain, PendingPair, Task};
 
@@ -51,7 +51,7 @@ impl Driver {
 	/// Drain the registry and encode every track once.
 	pub fn tick(&mut self) -> FrameBytes {
 		self.drain.collect();
-		self.drain.publish(Instant::now());
+		self.drain.publish(moq_clock::now());
 		self.drain.publisher_frame_bytes()
 	}
 

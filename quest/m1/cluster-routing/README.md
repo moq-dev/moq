@@ -81,9 +81,9 @@ Decided with the maintainer, 2026-10-13:
   m1 provides and tests the shared routing primitives without requiring an
   actual P2P integration.
 
-The implementation is gated on [handoff proofs](/quest/m1/cluster-routing/handoff.md):
-a complete neighbor snapshot does not prove its claims are current. The
-routing contract is recorded in [Routes and announces](/quest/m1/cluster-routing/routes.md)
+The handoff proof showed a complete neighbor snapshot does not prove its
+claims are current; receivers merge origin-versioned views by floor instead.
+The routing contract is recorded in [Routes and announces](/quest/m1/cluster-routing/routes.md)
 with deterministic counterexamples: path-only subscriptions that reselect
 origins at every hop loop and deadlock, so forwarded requests name their
 identity; feasibility makes transit priorities depend on arrival order;
@@ -103,7 +103,7 @@ coverage for announcement churn, idle work, active continuity, and retained
 state separately; fewer control bytes does not prove cheaper runtime work.
 
 The earlier simulator estimates remain in [Routes and announces](/quest/m1/cluster-routing/routes.md).
-They do not prove the proposed handoff correct. Preserve public synthetic
+They do not prove the handoff correct; its fixtures do. Preserve public synthetic
 fixtures and controlled-time regressions, including residual stale revival,
 not only results from deployment tooling. Do not claim per-origin aggregation
 reduces origin count when every application publishes one broadcast.
@@ -120,7 +120,6 @@ setup after the capabilities land.
 ## Required
 
 - [Identity proof](/quest/m1/cluster-routing/identity.md) - a routing identity is the hash of a per-process key that every session proves
-- [Next-hop handoff](/quest/m1/cluster-routing/handoff.md) - complete and fresh claims survive rerouting without resurrection or false END
 - [Routes and announces](/quest/m1/cluster-routing/routes.md) - implement the proven route layer with Rust/JS parity and tiered-cluster acceptance
 - [Outbound federation](/quest/m1/cluster-routing/federation.md) - an outbound-only local relay exchanges authorized broadcasts with the CDN and survives partition/healing
 

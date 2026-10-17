@@ -63,3 +63,14 @@ pub fn wall() -> Wall {
 	}
 	runtime::wall()
 }
+
+/// The first monotonic and wall readings observed on the ambient clock.
+///
+/// Unlike [`wall`], the wall half does not change after a clock correction.
+pub fn anchor() -> (Instant, Wall) {
+	#[cfg(feature = "sim")]
+	if let Some(anchor) = sim::anchor() {
+		return anchor;
+	}
+	runtime::anchor()
+}

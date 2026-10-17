@@ -440,6 +440,7 @@ mod test {
 				display_aspect_height: None,
 				bitrate: None,
 				enabled: true,
+				preference: 0,
 				framerate: None,
 				optimize_for_latency: None,
 				container: Container::Legacy,
@@ -844,7 +845,7 @@ mod test {
 		assert_eq!(clock.wall.scale().as_u64(), 1_000_000);
 
 		let archive = catalog.archive.expect("the fixture carries an archive");
-		assert_eq!(archive.timelines["video"], "video.timeline.z");
+		assert_eq!(archive.timelines["video"].track, "video.timeline.z");
 		assert_eq!(archive.timescale, 1000);
 
 		// Archive PTS 2000 (ms) lands 2s after the wall epoch, whatever the track timescale.
@@ -861,10 +862,10 @@ mod test {
 	#[test]
 	fn archive_roundtrips_at_the_root() {
 		let mut archive = crate::catalog::Archive::new();
-		archive
-			.timelines
-			.insert("video".to_string(), "video.timeline.z".to_string());
-		archive.duration_max = Some(2000);
+		archive.timelines.insert(
+			"video".to_string(),
+			crate::catalog::Timeline::new("video.timeline.z", 2_000),
+		);
 		archive.replay = Some(moq_net::path::RelativeOwned::new("recordings/clip"));
 		archive.version = Some(crate::catalog::Archive::VERSION);
 
@@ -875,7 +876,7 @@ mod test {
 
 		let json = catalog.to_json().expect("failed to encode");
 		assert!(
-			json.contains(r#""archive":{"timelines":{"video":"video.timeline.z"}"#),
+			json.contains(r#""archive":{"timelines":{"video":{"track":"video.timeline.z","duration":2000}"#),
 			"{json}"
 		);
 		assert!(

@@ -7,11 +7,11 @@ use std::time::Duration;
 
 use std::task::Poll;
 
+use moq_clock::Instant;
 use moq_net::stats::{Presence, Registry, Report, Role, Tier, Traffic, TrafficEntry};
 use moq_net::{Epoch, Path, PathOwned, broadcast, kio, origin, track};
 use serde::Serialize;
 use web_async::spawn;
-use web_async::time::Instant;
 
 use crate::{
 	COMPRESSED_SUFFIX, Prefix, Totals, Usage, parse_prefix_track, parse_presence_track, prefix_track, presence_track,
@@ -251,8 +251,8 @@ impl Task {
 			return;
 		};
 
-		let mut ticker = web_async::time::interval(interval);
-		ticker.set_missed_tick_behavior(web_async::time::MissedTickBehavior::Delay);
+		let mut ticker = moq_clock::interval(interval);
+		ticker.set_missed_tick_behavior(moq_clock::MissedTickBehavior::Delay);
 
 		loop {
 			ticker.tick().await;
@@ -263,7 +263,7 @@ impl Task {
 			}
 
 			drain.collect();
-			drain.publish(Instant::now());
+			drain.publish(moq_clock::now());
 		}
 	}
 	fn node(&self) -> Option<&str> {
@@ -475,14 +475,26 @@ impl<V: Serialize> Snapshot<V> {
 	}
 
 	/// Write one frame. `Some(len)` is the payload written; `None` means the
-	/// value was unchanged and the encoder emitted nothing.
+	/// value was unchanged, or the track already ended, and nothing was written.
+	///
+	/// A frame over the cache limit aborts the track with
+	/// [`moq_net::Error::FrameTooLarge`]: skipping it would leave readers on the
+	/// previous snapshot with no sign it stopped tracking.
 	fn update(&mut self, value: &Frame<V>) -> moq_json::Result<Option<usize>> {
+		if self.track.is_closed() {
+			return Ok(None);
+		}
 		let Some(frame) = self.encoder.update(value)? else {
 			return Ok(None);
 		};
 		let len = frame.payload.len();
 		if len as u64 > moq_net::group::MAX_CACHE_BYTES {
-			return Err(moq_net::Error::FrameTooLarge.into());
+			let err = moq_net::Error::FrameTooLarge;
+			if let Some(group) = self.group.take() {
+				let _ = group.abort(err.clone());
+			}
+			let _ = self.track.clone().abort(err.clone());
+			return Err(err.into());
 		}
 		if frame.keyframe {
 			if let Some(group) = self.group.take() {
@@ -504,27 +516,6 @@ impl<V: Serialize> Snapshot<V> {
 		Ok(Some(len))
 	}
 
-	/// [`Self::update`], logging a failure. With `abort_oversized`, a frame
-	/// over the cache limit ends the track with `FrameTooLarge` instead, so its
-	/// readers learn it stopped rather than sit on a stale snapshot.
-	fn publish(&mut self, value: &Frame<V>, name: &str, abort_oversized: bool) -> Option<usize> {
-		if self.track.is_closed() {
-			return None;
-		}
-		match self.update(value) {
-			Ok(len) => len,
-			Err(moq_json::Error::Net(moq_net::Error::FrameTooLarge)) if abort_oversized => {
-				tracing::warn!(name, "stats: frame too large, ending the track");
-				let _ = self.track.clone().abort(moq_net::Error::FrameTooLarge);
-				None
-			}
-			Err(err) => {
-				tracing::debug!(?err, name, "stats: failed to write frame");
-				None
-			}
-		}
-	}
-
 	fn finish(&mut self) -> moq_json::Result<()> {
 		if let Some(group) = self.group.take() {
 			group.finish()?;
@@ -542,8 +533,6 @@ struct TrackPair<V> {
 	compressed: Snapshot<V>,
 	/// This drain's entries, published and cleared by [`Self::publish`].
 	frame: Frame<V>,
-	/// End a flavor whose frame outgrows the cache instead of logging it.
-	abort_oversized: bool,
 	/// Last plain payload written, kept so a later unchanged tick can still
 	/// report the snapshot size. Bench builds only.
 	#[cfg(feature = "bench")]
@@ -577,7 +566,6 @@ impl<V: Serialize> TrackPair<V> {
 			plain: Snapshot::new(plain_track, plain_config, sequence.clone()),
 			compressed: Snapshot::new(compressed_track, compressed_config, sequence),
 			frame: Frame::default(),
-			abort_oversized: false,
 			#[cfg(feature = "bench")]
 			held: 0,
 			#[cfg(feature = "bench")]
@@ -593,13 +581,25 @@ impl<V: Serialize> TrackPair<V> {
 	}
 
 	/// Publish this drain's entries on both flavors (`{}` when there are none)
-	/// and clear them for the next drain; moq-json skips unchanged values.
+	/// and clear them for the next drain; moq-json skips unchanged values. A
+	/// flavor that fails ends alone: DEFLATE can shrink a frame too large for
+	/// the plain track, or grow one that just fits.
 	fn publish(&mut self, name: &str) {
 		self.frame.entries.sort_unstable_by(|a, b| a.0.cmp(&b.0));
-		// Each flavor fails alone: DEFLATE can shrink a plain frame that
-		// overflows, or slightly grow one that fits.
-		let plain = self.plain.publish(&self.frame, name, self.abort_oversized);
-		let compressed = self.compressed.publish(&self.frame, name, self.abort_oversized);
+		let plain = match self.plain.update(&self.frame) {
+			Ok(len) => len,
+			Err(err) => {
+				tracing::warn!(?err, name, "stats: failed to write frame");
+				None
+			}
+		};
+		let compressed = match self.compressed.update(&self.frame) {
+			Ok(len) => len,
+			Err(err) => {
+				tracing::warn!(?err, name, "stats: failed to write compressed frame");
+				None
+			}
+		};
 		self.record_bench(plain, compressed);
 		self.frame.entries.clear();
 	}
@@ -823,10 +823,10 @@ impl<V: Serialize> TrackFamily<V> {
 		plain: String,
 		pending: PendingPair,
 	) {
-		// Defensive only: a request racing the pair's creation is fulfilled by
-		// `create_track` (queued) or adopted by [`Self::flush`] (parked), so it
-		// never reaches this with the pair already live. Rejecting is still
-		// safe there - the requester's retry resolves against the live track.
+		// A request racing the pair's creation is fulfilled by `create_track`
+		// (queued) or adopted by [`Self::push`] (parked), so a live pair here
+		// means the requested flavor ended, such as on a frame too large to
+		// cache. It cannot update again, so refuse it.
 		if self.tracks.contains_key(&plain) {
 			pending.reject(moq_net::Error::NotFound);
 			return;
@@ -1373,8 +1373,8 @@ impl GroupPublisher {
 	/// Hold a requested root's presence track, publishing its current counters
 	/// so the subscription resolves at once. Cumulative from here on.
 	fn adopt_presence(&mut self, report: &Report, root: PathOwned, pending: PendingPair) {
-		// Defensive only: a request for a live track is served by the broadcast
-		// itself. Rejecting is still safe; the retry finds the live track.
+		// A request for a live track is served by the broadcast itself, so a
+		// live pair here means the requested flavor ended and cannot update.
 		if self.presence.contains_key(&root) {
 			pending.reject(moq_net::Error::NotFound);
 			return;
@@ -1412,14 +1412,13 @@ impl GroupPublisher {
 			return;
 		}
 		let name = prefix_track(&path, false);
-		let mut pair = match pending.adopt(&self.broadcast, &name, self.traffic.sequence.clone()) {
+		let pair = match pending.adopt(&self.broadcast, &name, self.traffic.sequence.clone()) {
 			Ok(pair) => pair,
 			Err(err) => {
 				tracing::warn!(?err, name, "stats: failed to adopt prefix track");
 				return;
 			}
 		};
-		pair.abort_oversized = true;
 		let mut track = PrefixTrack {
 			name,
 			pair,
@@ -1608,6 +1607,57 @@ mod tests {
 				.unwrap();
 			assert!(group.sequence >= floor);
 		}
+	}
+
+	/// A flavor whose frame outgrows the cache ends with `FrameTooLarge` instead
+	/// of leaving readers on its last snapshot, while its sibling, which DEFLATE
+	/// shrinks under the limit, keeps updating.
+	#[tokio::test]
+	async fn oversized_frame_aborts_only_its_flavor() {
+		use futures::FutureExt;
+		type Value = BTreeMap<String, u64>;
+
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let consumer = broadcast.consume();
+		let mut pair = TrackPair::<u64>::create(&broadcast, "t.json", Arc::new(AtomicU64::new(0))).unwrap();
+		let mut publish = |key: &str, value: u64| {
+			pair.frame.entries.push((PathOwned::from(key.to_string()), value));
+			pair.publish("t.json");
+		};
+		publish("small", 1);
+
+		let read = |name: &str, compression| {
+			let track = consumer
+				.track(name)
+				.unwrap()
+				.subscribe(None)
+				.now_or_never()
+				.unwrap()
+				.unwrap();
+			let mut config = moq_json::snapshot::consumer::Config::default();
+			config.compression = compression;
+			moq_json::snapshot::Consumer::<Value>::new(track, config)
+		};
+		let mut plain = read("t.json", moq_json::Compression::None);
+		let mut compressed = read("t.json.z", moq_json::Compression::Deflate);
+		let next = |reader: &mut moq_json::snapshot::Consumer<Value>| reader.next().now_or_never().unwrap();
+		let small = Value::from([("small".to_string(), 1)]);
+		assert_eq!(next(&mut plain).unwrap(), Some(small.clone()));
+		assert_eq!(next(&mut compressed).unwrap(), Some(small));
+
+		let huge = "a".repeat(moq_net::group::MAX_CACHE_BYTES as usize);
+		publish(&huge, 2);
+		assert!(matches!(
+			next(&mut plain),
+			Err(moq_json::Error::Net(moq_net::Error::FrameTooLarge))
+		));
+		assert_eq!(next(&mut compressed).unwrap(), Some(Value::from([(huge, 2)])));
+
+		publish("small", 3);
+		assert_eq!(
+			next(&mut compressed).unwrap(),
+			Some(Value::from([("small".to_string(), 3)]))
+		);
 	}
 
 	/// Build an origin producer, spawning its driver on the ambient runtime.
@@ -2426,7 +2476,7 @@ mod tests {
 		.expect("drain");
 		let mut tick = || {
 			drain.collect();
-			drain.publish(Instant::now());
+			drain.publish(moq_clock::now());
 			drain.groups[""].presence.len()
 		};
 		let broadcast = origin
@@ -2696,7 +2746,7 @@ mod tests {
 		.expect("drain");
 		let mut tick = || {
 			drain.collect();
-			drain.publish(Instant::now());
+			drain.publish(moq_clock::now());
 			drain.groups[""].prefixes.len()
 		};
 		let broadcast = origin
@@ -2730,53 +2780,6 @@ mod tests {
 			tokio::task::yield_now().await;
 		}
 		assert_eq!(tick(), 0, "reclaimed");
-	}
-
-	/// A prefix frame past the cache limit ends that flavor with
-	/// `FrameTooLarge` instead of leaving its readers on a stale snapshot,
-	/// while the sibling that still fits keeps publishing.
-	#[tokio::test(start_paused = true)]
-	async fn oversized_prefix_frame_ends_the_flavor() {
-		let broadcast = broadcast::Info::new().produce();
-		let consumer = broadcast.consume();
-		let mut pair = TrackPair::<Prefix>::create(&broadcast, "traffic.json", Arc::new(AtomicU64::new(0))).unwrap();
-		pair.abort_oversized = true;
-		let mut plain = subscribe(&consumer, "traffic.json").await;
-		let mut compressed = consumer
-			.track("traffic.json.z")
-			.unwrap()
-			.subscribe(None)
-			.await
-			.unwrap()
-			.ordered();
-
-		// One child whose name alone outgrows the cache: DEFLATE shrinks it to
-		// almost nothing, so only the plain flavor overflows.
-		let huge = "a".repeat(moq_net::group::MAX_CACHE_BYTES as usize + 1);
-		let mut prefix = Prefix::default();
-		prefix.children.insert(huge, Usage::default());
-		pair.frame.entries.push((PathOwned::from(""), prefix.clone()));
-		pair.publish("traffic.json");
-
-		let err = loop {
-			match plain.next_group().await {
-				Ok(Some(_)) => continue,
-				Ok(None) => panic!("ended cleanly"),
-				Err(err) => break err,
-			}
-		};
-		assert!(matches!(err, moq_net::Error::FrameTooLarge), "{err:?}");
-		let mut group = compressed.next_group().await.expect("ok").expect("group");
-		group
-			.read_frame()
-			.await
-			.expect("ok")
-			.expect("the compressed flavor fits");
-
-		prefix.publisher.bytes = 1;
-		pair.frame.entries.push((PathOwned::from(""), prefix));
-		pair.publish("traffic.json");
-		group.read_frame().await.expect("ok").expect("and keeps updating");
 	}
 
 	#[tokio::test(start_paused = true)]
@@ -3169,7 +3172,7 @@ mod tests {
 				// Warm up: create the groups and tracks and grow every buffer.
 				for _ in 0..3 {
 					drain.collect();
-					drain.publish(Instant::now());
+					drain.publish(moq_clock::now());
 				}
 				// Hold a prefix with a child per tier, as a reader would.
 				let _held = hold.then(|| {
@@ -3179,12 +3182,12 @@ mod tests {
 					group.prefixes["room0"].pair.plain.track.subscribe(None)
 				});
 				drain.collect();
-				drain.publish(Instant::now());
+				drain.publish(moq_clock::now());
 
 				let before = counting::allocs();
 				drain.collect();
 				let allocs = counting::allocs() - before;
-				drain.publish(Instant::now());
+				drain.publish(moq_clock::now());
 
 				let pending: usize = drain
 					.groups
