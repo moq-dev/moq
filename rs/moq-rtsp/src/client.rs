@@ -4,17 +4,20 @@ use futures::StreamExt;
 use moq_mux::codec::{aac, h264, h265};
 use moq_tokio::RedactedUrl;
 use retina::client::{Credentials, PlayOptions, Session, SessionOptions, SetupOptions, Transport};
-use retina::codec::{CodecItem, FrameFormat, ParameterSetInsertion, ParametersRef};
+use retina::codec::{
+	CodecItem, FrameFormat, ParameterSetInsertion, ParametersRef, VideoParameters, VideoParametersCodec,
+};
 use url::Url;
 
 use crate::{Error, Result};
 
-/// Annex-B with the parameter sets on every keyframe, so a camera that sends them only
-/// in the SDP still produces self-describing keyframes, and raw AAC with its
-/// AudioSpecificConfig out of band.
+/// Annex-B video and raw AAC with its AudioSpecificConfig out of band.
+///
+/// retina strips in-band parameter sets and would re-insert them only ahead of an IDR, missing
+/// an H.265 CRA, so [`Video::split`] inserts them ahead of every keyframe instead.
 const FRAME_FORMAT: FrameFormat = FrameFormat {
 	h26x_framing: retina::codec::h26x::Framing::AnnexB,
-	parameter_set_insertion: ParameterSetInsertion::EachKeyFrame,
+	parameter_set_insertion: ParameterSetInsertion::Never,
 	aac_framing: retina::codec::aac::Framing::Raw,
 };
 
@@ -148,17 +151,17 @@ impl Client {
 			let track = match kind {
 				Kind::H264 => {
 					let track = broadcast.unique_track(".avc3", catalog.track_info(hang::catalog::PRIORITY.video))?;
-					Track::H264 {
+					Track::Video(Video::H264 {
 						split: h264::Split::new(),
 						import: h264::Import::new(track, reserved.clone(), Default::default())?,
-					}
+					})
 				}
 				Kind::H265 => {
 					let track = broadcast.unique_track(".hev1", catalog.track_info(hang::catalog::PRIORITY.video))?;
-					Track::H265 {
+					Track::Video(Video::H265 {
 						split: h265::Split::new(),
 						import: h265::Import::new(track, reserved.clone(), Default::default())?,
-					}
+					})
 				}
 				Kind::Aac => {
 					let Some(ParametersRef::Audio(params)) = session.streams()[*index].parameters() else {
@@ -185,7 +188,7 @@ impl Client {
 			let mut session = session.play(play).await?.demuxed()?;
 			tracing::info!(%url, streams = tracks.len(), "RTSP session playing");
 			while let Some(item) = session.next().await {
-				if ingest.push(item?)?.is_some() {
+				if ingest.push(item?, session.streams())?.is_some() {
 					tracing::warn!(%url, "RTSP timeline jumped, ending the session");
 					return Ok(End::Jumped);
 				}
@@ -224,9 +227,82 @@ enum Kind {
 }
 
 enum Track {
+	Video(Video),
+	Aac(aac::Import),
+}
+
+impl Track {
+	fn finish(&mut self) -> moq_mux::Result<()> {
+		match self {
+			Self::Video(Video::H264 { import, .. }) => import.finish(),
+			Self::Video(Video::H265 { import, .. }) => import.finish(),
+			Self::Aac(import) => import.finish(),
+		}
+	}
+
+	fn abort(self, err: moq_net::Error) {
+		match self {
+			Self::Video(Video::H264 { import, .. }) => import.abort(err),
+			Self::Video(Video::H265 { import, .. }) => import.abort(err),
+			Self::Aac(import) => import.abort(err),
+		}
+	}
+}
+
+enum Video {
 	H264 { split: h264::Split, import: h264::Import },
 	H265 { split: h265::Split, import: h265::Import },
-	Aac(aac::Import),
+}
+
+impl Video {
+	/// Split one whole access unit into frames, inserting `params` ahead of a keyframe.
+	///
+	/// Flushes, since retina hands over no partial access units.
+	fn split(
+		&mut self,
+		data: &[u8],
+		params: Option<&VideoParameters>,
+		pts: moq_net::Timestamp,
+	) -> moq_mux::Result<Vec<moq_mux::container::Frame>> {
+		let mut prefix = Vec::new();
+		if let Some(params) = params.filter(|_| self.is_keyframe(data)) {
+			let sets: &[&[u8]] = match params.codec_params() {
+				VideoParametersCodec::H264 { sps, pps } => &[sps, pps],
+				VideoParametersCodec::H265 { vps, sps, pps } => &[vps, sps, pps],
+				_ => &[],
+			};
+			for set in sets {
+				prefix.extend_from_slice(&[0, 0, 0, 1]);
+				prefix.extend_from_slice(set);
+			}
+		}
+
+		// The splitter parses a stream, so the parameter sets and the access unit can arrive apart.
+		let (mut frames, more, flushed) = match self {
+			Self::H264 { split, .. } => (split.decode(&prefix, pts)?, split.decode(data, pts)?, split.flush(pts)?),
+			Self::H265 { split, .. } => (split.decode(&prefix, pts)?, split.decode(data, pts)?, split.flush(pts)?),
+		};
+		frames.extend(more);
+		frames.extend(flushed);
+		Ok(frames)
+	}
+
+	/// Whether the access unit holds an IDR (H.264) or any IRAP picture (H.265).
+	fn is_keyframe(&self, data: &[u8]) -> bool {
+		// retina's Annex-B has no start code inside a NAL, so each `00 00 01` opens one.
+		let mut headers = data.windows(4).filter(|w| w[..3] == [0, 0, 1]).map(|w| w[3]);
+		match self {
+			Self::H264 { .. } => headers.any(|header| header & 0x1f == 5),
+			Self::H265 { .. } => headers.any(|header| (16..=23).contains(&((header >> 1) & 0x3f))),
+		}
+	}
+
+	fn decode(&mut self, frames: Vec<moq_mux::container::Frame>) -> moq_mux::Result<()> {
+		match self {
+			Self::H264 { import, .. } => import.decode(frames),
+			Self::H265 { import, .. } => import.decode(frames),
+		}
+	}
 }
 
 struct Stream {
@@ -261,63 +337,61 @@ struct Jump;
 
 impl Ingest {
 	/// Publish one depacketized item, or report that the timeline jumped.
-	fn push(&mut self, item: CodecItem) -> Result<Option<Jump>> {
-		let (stream_id, timestamp, keyframe, data) = match &item {
-			CodecItem::VideoFrame(frame) => (
-				frame.stream_id(),
-				frame.timestamp(),
-				frame.is_random_access_point(),
-				frame.data(),
-			),
-			CodecItem::AudioFrame(frame) => (frame.stream_id(), frame.timestamp(), true, frame.data()),
+	fn push(&mut self, item: CodecItem, streams: &[retina::client::Stream]) -> Result<Option<Jump>> {
+		let (stream_id, timestamp, data) = match &item {
+			CodecItem::VideoFrame(frame) => (frame.stream_id(), frame.timestamp(), frame.data()),
+			CodecItem::AudioFrame(frame) => (frame.stream_id(), frame.timestamp(), frame.data()),
 			_ => return Ok(None),
 		};
 		let Some(stream) = self.streams.get_mut(stream_id).and_then(Option::as_mut) else {
 			return Ok(None);
 		};
 
-		let video = !matches!(stream.track, Track::Aac(_));
-		if !stream.started {
-			// Publish nothing before the first keyframe, audio included.
-			let ready = if video { keyframe } else { self.started || !self.video };
-			if !ready {
-				return Ok(None);
-			}
-			stream.started = true;
-			self.started |= video;
-		}
-
 		let elapsed = timestamp.elapsed();
-		let rate = i128::from(timestamp.clock_rate().get());
+		let rate = timestamp.clock_rate().get();
 		if let Some(last) = stream.last {
 			let delta = i128::from(elapsed) - i128::from(last);
-			let backward = MAX_BACKWARD.as_micros() as i128 * rate / 1_000_000;
-			let forward = MAX_FORWARD.as_micros() as i128 * rate / 1_000_000;
+			let backward = MAX_BACKWARD.as_micros() as i128 * i128::from(rate) / 1_000_000;
+			let forward = MAX_FORWARD.as_micros() as i128 * i128::from(rate) / 1_000_000;
 			if delta < -backward || delta > forward {
 				return Ok(Some(Jump));
 			}
 		}
-		// Before the session's start is a jump too: nothing on the broadcast's clock is.
 		let Ok(units) = u64::try_from(elapsed) else {
-			return Ok(Some(Jump));
+			// A reordered picture can land before the session's start, such as the leading
+			// pictures of the keyframe it opened on. Undecodable from here, so drop it.
+			return Ok(None);
 		};
-		stream.last = Some(elapsed);
-		let pts = moq_net::Timestamp::from_scale(units, u64::from(timestamp.clock_rate().get()))
-			.map_err(moq_mux::Error::from)?;
+		let pts = moq_net::Timestamp::from_scale(units, u64::from(rate)).map_err(moq_mux::Error::from)?;
 
 		match &mut stream.track {
-			Track::H264 { split, import } => {
-				// retina hands over one whole access unit, so flush to emit it.
-				let mut frames = split.decode(data, pts)?;
-				frames.extend(split.flush(pts)?);
-				import.decode(frames)?;
-			}
-			Track::H265 { split, import } => {
-				let mut frames = split.decode(data, pts)?;
-				frames.extend(split.flush(pts)?);
-				import.decode(frames)?;
+			Track::Video(video) => {
+				let params = match streams.get(stream_id).and_then(|stream| stream.parameters()) {
+					Some(ParametersRef::Video(params)) => Some(params),
+					_ => None,
+				};
+				let frames = video.split(data, params, pts)?;
+				if !stream.started {
+					// Publish nothing before the first keyframe. retina's own flag misses an
+					// H.265 CRA, so gate on the splitter's, which drives grouping anyway.
+					if !frames.first().is_some_and(|frame| frame.keyframe) {
+						return Ok(None);
+					}
+					stream.started = true;
+					self.started = true;
+				}
+				stream.last = Some(elapsed);
+				video.decode(frames)?;
 			}
 			Track::Aac(import) => {
+				if !stream.started {
+					// Audio waits for the first keyframe too.
+					if self.video && !self.started {
+						return Ok(None);
+					}
+					stream.started = true;
+				}
+				stream.last = Some(elapsed);
 				import.decode(data, Some(pts))?;
 				// Each packet its own group (one QUIC stream), so relays forward it at once.
 				import.cut(None)?;
@@ -329,13 +403,8 @@ impl Ingest {
 	/// Flush every track and end it cleanly, reporting the first failure.
 	fn finish(&mut self) -> Result<()> {
 		let mut result = Ok(());
-		for stream in self.streams.drain(..).flatten() {
-			let finished = match stream.track {
-				Track::H264 { mut import, .. } => import.finish(),
-				Track::H265 { mut import, .. } => import.finish(),
-				Track::Aac(mut import) => import.finish(),
-			};
-			result = result.and(finished.map_err(Error::from));
+		for mut stream in self.streams.drain(..).flatten() {
+			result = result.and(stream.track.finish().map_err(Error::from));
 		}
 		result
 	}
@@ -343,11 +412,7 @@ impl Ingest {
 	/// End every track with `err`, so subscribers see the cause.
 	fn abort(&mut self, err: moq_net::Error) {
 		for stream in self.streams.drain(..).flatten() {
-			match stream.track {
-				Track::H264 { import, .. } => import.abort(err.clone()),
-				Track::H265 { import, .. } => import.abort(err.clone()),
-				Track::Aac(import) => import.abort(err.clone()),
-			}
+			stream.track.abort(err.clone());
 		}
 	}
 }
@@ -499,8 +564,11 @@ mod tests {
 		);
 	}
 
+	/// An open-GOP CRA starts the broadcast, though retina flags only an IDR as a keyframe and
+	/// strips the parameter sets it carries. Its leading pictures, displayed before the session
+	/// started, are dropped rather than taken for a jump.
 	#[tokio::test]
-	async fn h265_publishes() {
+	async fn h265_starts_on_a_cra() {
 		let server = Server::bind(vec![Media::H265]).await;
 		let (broadcast, catalog) = broadcast();
 		let client = Client::new(server.url()).unwrap();
@@ -509,8 +577,14 @@ mod tests {
 			async move { client.pull(&broadcast, &catalog).await }
 		});
 
-		let mut session = within("PLAY", server.accept(0)).await;
-		session.video(0, 0, &[fake::H265_IDR]).await;
+		let mut session = within("PLAY", server.accept(FRAME)).await;
+		session
+			.video(
+				0,
+				FRAME,
+				&[fake::H265_VPS, fake::H265_SPS, fake::H265_PPS, fake::H265_CRA],
+			)
+			.await;
 
 		let snapshot = catalog_with(&catalog, 1, 0).await;
 		let video = snapshot.video.renditions.values().next().unwrap();
@@ -521,8 +595,20 @@ mod tests {
 		);
 		assert_eq!((video.coded_width, video.coded_height), (Some(320), Some(240)));
 
+		let reader = subscribe(&broadcast, video_track(&snapshot)).await;
+		session.video(0, 0, &[fake::H265_RASL]).await;
+		session.video(0, 2 * FRAME, &[fake::H265_TRAIL]).await;
 		session.close().await;
 		assert_eq!(within("the pull", pull).await.unwrap().unwrap(), End::Closed);
+
+		let frames = frames(reader).await;
+		assert_eq!(frames.len(), 2, "the leading picture never publishes");
+		assert!(frames[0].keyframe && !frames[1].keyframe);
+		let sps = [&[0, 0, 0, 1], fake::H265_SPS].concat();
+		assert!(
+			frames[0].payload.windows(sps.len()).any(|window| window == sps),
+			"the CRA carries its parameter sets"
+		);
 	}
 
 	/// G.711, common on cameras, is skipped with one warning and the broadcast goes on

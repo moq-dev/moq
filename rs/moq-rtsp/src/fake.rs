@@ -39,6 +39,14 @@ pub const H265_PPS: &[u8] = &[0x44, 0x01, 0xc1, 0x72, 0x86, 0x0c, 0x46, 0x24];
 /// An IDR_W_RADL slice; its contents are never decoded.
 pub const H265_IDR: &[u8] = &[0x26, 0x01, 0xaf, 0x0c, 0x80];
 
+/// A CRA slice, the open-GOP keyframe x265 emits by default; its contents are never decoded.
+pub const H265_CRA: &[u8] = &[0x2a, 0x01, 0xaf, 0x0c, 0x80];
+
+/// A RASL slice, a leading picture of a CRA, displayed before it.
+pub const H265_RASL: &[u8] = &[0x10, 0x01, 0xaf, 0x0c, 0x80];
+/// A TRAIL_R slice.
+pub const H265_TRAIL: &[u8] = &[0x02, 0x01, 0xaf, 0x0c, 0x80];
+
 /// AAC-LC, 48 kHz, stereo.
 pub const AAC_CONFIG: &[u8] = &[0x11, 0x90];
 
