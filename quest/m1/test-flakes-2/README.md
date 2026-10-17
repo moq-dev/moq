@@ -35,6 +35,7 @@ Public API: none. Wire: none.
 
 ## Required
 
+- [TS MP2 join hole](/quest/m1/test-flakes-2/ts-mp2-join-hole.md) - the TS export skips no MPEG-1 audio group right after its live join, fixed at the cause
 - [Auth refresh mocks time](/quest/m1/test-flakes-2/auth-refresh-mock-time.md) - moq-relay's auth refresh and fixed-lease tests measure a grant's life on one mocked clock
 - [uring teardown close](/quest/m1/test-flakes-2/uring-teardown-close.md) - moq-uring's published-close teardown test holds under load, fixed at its cause
 - [Relay burst drill](/quest/m1/test-flakes-2/relay-burst-impaired.md) - the impaired transport-peer burst drill never aborts its subscription while the link is up
