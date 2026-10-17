@@ -105,6 +105,7 @@ pub struct Subscription {
 	/// Relay-only, so it stays out of the public API: the aggregate the public getters
 	/// report leaves it out. Cleared once this subscriber is handed a group that answers
 	/// it, so a request never outlives what it asked for.
+	// private: passthrough
 	pub(crate) new_group: Option<NewGroup>,
 }
 
@@ -114,6 +115,7 @@ pub struct Subscription {
 /// answers both. Between requests answered alike, the higher value says the most upstream,
 /// and any value says more than a 0.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+// private: passthrough
 pub(crate) struct NewGroup {
 	/// The first group sequence that answers it here: the one after the newest this hop
 	/// held when it arrived, not the one the subscriber is about to join.
@@ -317,6 +319,7 @@ impl Position {
 	}
 
 	/// The first group this exclusive end excludes whole, `None` past the last group.
+	// pending: /quest/m1/public-model/serve.md
 	pub(crate) fn final_sequence(self) -> Option<u64> {
 		self.group.checked_add(u64::from(self.frame != 0))
 	}
@@ -328,13 +331,14 @@ impl Position {
 /// before 5, `..=5` reads through it, and `..` removes the cap. A [`Bound`] converts
 /// too, for callers holding one (a decoded wire field, or [`Position::group_end`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+// pending: /quest/m1/public-model/serve.md
 pub(crate) struct Cap(Option<u64>);
 
 impl Cap {
 	/// The first index withheld, or `None` for no cap. Cursors store this form and
 	/// compare with [`before_end`]. An inclusive bound at `u64::MAX` has nothing above
 	/// it, so it is no cap at all.
-	pub(crate) fn exclusive(self) -> Option<u64> {
+	pub(super) fn exclusive(self) -> Option<u64> {
 		self.0
 	}
 }

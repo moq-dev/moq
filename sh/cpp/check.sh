@@ -2,7 +2,8 @@
 # Build and install cpp/moq, then build the probe against the installed package
 # at C++17, at C++23, and at C++23 over bindings at C++17 through CMake, and run
 # each. Outside Windows, also builds and runs it through pkg-config at C++17
-# and compiles the doc samples. CXX picks the compiler on Unix; Windows uses MSVC.
+# and compiles the doc samples and benchmark runner. CXX picks the compiler on
+# Unix; Windows uses MSVC.
 set -euo pipefail
 
 ffi_dir=""
@@ -51,6 +52,9 @@ fi
 bash ../doc/lib/samples.sh cpp ../doc/lib/cpp/index.md >"$build/doc-samples.cpp"
 "${CXX:-c++}" -std=c++17 -fsyntax-only -Wall -Werror -include moq/test/doc-samples.hpp \
     -I"$prefix/include" "$build/doc-samples.cpp"
+
+# The nightly runs the binding benchmark; compiling it here catches wrapper drift per PR.
+"${CXX:-c++}" -std=c++20 -fsyntax-only -Wall -Werror -I"$prefix/include" moq/bench/main.cpp
 
 if command -v pkg-config >/dev/null 2>&1; then
     export PKG_CONFIG_PATH="$prefix/lib/pkgconfig"
