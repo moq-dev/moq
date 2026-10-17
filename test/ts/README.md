@@ -20,6 +20,8 @@ software profiles below; it does not certify a hardware IRD or every TS layout.
 - `open-gop.py` checks the coded access units and leading pictures of open GOPs.
 - `overhead.py` counts the packets a capture spends on clocks and audio framing
   against its source.
+- `holes.py` finds media missing from a generated clip's capture, from its
+  timestamps against the source's.
 
 ## Running
 
@@ -40,6 +42,7 @@ just test ts --leak             # 1080p video with no HRD, filling its level's 2
 just test ts --full             # the same with two audio PIDs, filling its multiplex with no nulls
 just test ts --fragment-pes    # legal headers split across packets, with FFmpeg/TSDuck grading
 just test ts --delay 2s         # pass the exporter's --delay
+just test ts --hrd --loss 1     # drop 1% of the relay's datagrams to the subscriber
 ```
 
 `--fragment-pes` shifts generated audio/video PES bursts into their following
@@ -536,6 +539,54 @@ It counts the packets on each audio PID and the PCR-only packets on each PID,
 scaling the capture's counts by how much of the source's elementary stream on the
 PID it carries, and fails when their total exceeds the source's.
 
+## Lossy path (`--loss`)
+
+`--loss <percent>` puts [`moq-shaper`](../../rs/moq-shaper/README.md) between the
+relay and the subscriber: it drops that share of the relay's datagrams at random
+and delays each direction 25 ms, the path moq-dev/moq#4613 built with `netem` in
+two network namespaces. The shaper needs no privileges and leaves the host's
+network alone. `TSC_SEED` (default 1) fixes which datagrams are dropped, not when
+the rest arrive. The run prints the shaper's counters beside the exporter's
+`dropped` (missed their deadline), `trimmed` (before the output began) and `gaps`
+(skipped upstream), and fails if the shaper never dropped anything.
+
+QUIC retransmits what the path drops, so a lossy path is not by itself an
+omission of MoQ content, and every compliance check grades only the access units
+that arrived: a capture missing most of its video still passes them. The generated
+clips the decoded-content comparison does not cover (`--hrd`, `--headroom`,
+`--leak`, `--full`) go through `holes.py` instead, which reads the capture's
+timestamps against the source's, independently of what the exporter reports. Each
+stream of a generated clip keeps one frame step, so a capture's step past one and
+a half of its source's is a hole. The export keeps the source's timestamps, so every source stream
+must also be in the capture and end within half a frame of the source's. It may
+start up to 3 s late: the subscriber joins at the relay's latest group once the
+catalog is out, which skips the first 1-2 s on a clean path. Omitting MoQ content
+on purpose belongs to the [recovery tests](/quest/m1/ts-reliability/recovery.md).
+
+```bash
+./holes.py capture.ts source.ts
+```
+
+Measured on 2026-10-16 with about 30 other test runs sharing a 24-core host, so
+timing is perturbed; nightly is the reference:
+
+| Clip | Loss | Duration | Result |
+|---|---:|---:|---|
+| default (H.264/AAC, low media rate) | 10 % | 40 s | passes, decoded content intact |
+| `--hrd` (9 Mb/s video, 10 Mb/s mux) | 1 %, 3 % | 40 s, and 120 s at 3 % | passes, no holes |
+| `--headroom` (12.5 Mb/s, four audio PIDs) | 1 % | 120 s, two seeds | T-STD passes; 0.2-0.4 s of MP2 holes in the first half second after the join |
+| `--headroom` | 3 % | 120 s | T-STD passes; video stops 27 s in, AC-3 19 s in |
+| `--hrd` | 5 %, 7 %, 10 % | 40-60 s | export fails: groups evicted `Old`, then a false clock-drift refusal |
+
+The ceiling is the congestion controller, not the export. The default `delay`
+family is BBRv3, which takes a round with more than 2 % loss
+(`LOSS_THRESH`) as congestion and cuts its inflight bound, so random loss above
+that holds the subscriber's leg below the media rate, and the relay ages groups
+out while they wait. CUBIC (`loss`) fared worse at 10 %: no output at all. With
+`LOSS_THRESH` raised to 20 % as an experiment only, `--hrd --loss 10` passed T-STD
+and PCR accuracy, though 1.56 s of video still missed the 1 s delay. The 10 %
+case belongs to the [BBR media study](/quest/m2/quic-bbr-natural-drain.md).
+
 ## EIT fixtures
 
 No capture in this repository carries EIT (PID 0x0012), so nothing exercises the
@@ -684,9 +735,11 @@ browser interop. Relevant mux, Hang, CLI, transport, harness and toolchain PRs r
 open-GOP, EIT, and T-STD controls. Each step runs even after another test fails.
 All recipes use the same pinned Nix FFmpeg and TSDuck locally and in CI.
 
-Nightly and manual runs also invoke `just test ts --pair` and
-`just test ts --live --duration 120`. The pair exercises late-joining subscribers;
-the live window distinguishes ongoing clock drift from initial buffer filling.
+Nightly and manual runs also invoke `just test ts --pair`,
+`just test ts --live --duration 120` and `just test ts --hrd --loss 1 --duration 120`.
+The pair exercises late-joining subscribers; the live window distinguishes ongoing
+clock drift from initial buffer filling; the lossy path proves T-STD and media
+continuity through QUIC retransmission.
 These are actual test invocations, not optional tools installed on a runner.
 
 Failed runs retain source/capture files, process logs and statuses, tool versions,

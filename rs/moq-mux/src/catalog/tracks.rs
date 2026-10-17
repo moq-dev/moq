@@ -599,6 +599,7 @@ impl<E: CatalogExt, C: RenditionConfig<E>> Rendition<E, C> {
 			serde_json::to_writer(std::io::sink(), &next).map_err(moq_json::Error::from)?;
 			self.present = true;
 			*guard = next;
+			guard.list::<C>(&self.name);
 			guard.commit()?;
 		}
 		self.supplied = supplied;

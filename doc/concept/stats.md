@@ -118,7 +118,9 @@ The producer drains its counters every interval (one second by default) and
 writes only when a track's frame changed, so silence means nothing moved, not
 that the producer is gone. The track ends when the producer does, or at
 depth 1 or more when its group's broadcast is unannounced; the group may
-return later as a new broadcast.
+return later as a new broadcast. A frame too large to cache (32 MB) ends its
+track with a `FrameTooLarge` error, while the `.z` flavor, which compresses
+under the limit, keeps updating.
 
 ### Totals
 

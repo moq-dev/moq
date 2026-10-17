@@ -117,7 +117,7 @@ typealias VideoDecoderOutput = uniffi.moq.MoqVideoDecoderOutput
 typealias VideoDecodedFrame = uniffi.moq.MoqVideoDecodedFrame
 /** The PCM layout the caller feeds an audio producer. */
 typealias AudioEncoderInput = uniffi.moq.MoqAudioEncoderInput
-/** The codec-side encoder configuration: codec, output rate/channels, bitrate, and frame duration. */
+/** The codec-side encoder configuration: codec, output rate/channels, bitrate, frame duration, and preset. */
 typealias AudioEncoderOutput = uniffi.moq.MoqAudioEncoderOutput
 /** One video frame: pixels in the configured layout plus a presentation timestamp. */
 typealias VideoFrame = uniffi.moq.MoqVideoFrame
