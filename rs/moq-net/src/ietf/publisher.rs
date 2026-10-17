@@ -11,8 +11,8 @@ use std::{
 	time::Duration,
 };
 
-use crate::transport::poll::{GroupOf, SendOptions};
 use crate::transport::poll::SendGroup as _;
+use crate::transport::poll::{GroupOf, SendOptions};
 
 use crate::{
 	AsPath, DecodeError, Error, Timescale, Timestamp,

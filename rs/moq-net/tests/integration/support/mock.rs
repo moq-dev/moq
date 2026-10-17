@@ -576,7 +576,11 @@ impl poll::Session for MockSession {
 		Poll::Ready(Ok((send, self.recv(recv, back))))
 	}
 
-	fn poll_open_uni(&mut self, cx: &mut Context<'_>, options: poll::SendOptions<'_, poll::Ungrouped>) -> Poll<Result<Self::SendStream, Self::Error>> {
+	fn poll_open_uni(
+		&mut self,
+		cx: &mut Context<'_>,
+		options: poll::SendOptions<'_, poll::Ungrouped>,
+	) -> Poll<Result<Self::SendStream, Self::Error>> {
 		if self.side.withheld.load(Ordering::Relaxed) {
 			return Poll::Ready(Err(ready!(self.closer.poll_closed(cx))));
 		}
@@ -601,7 +605,11 @@ impl poll::Session for MockSession {
 		None
 	}
 
-	fn send_datagram(&mut self, payload: Bytes, options: poll::SendOptions<'_, poll::Ungrouped>) -> Result<(), Self::Error> {
+	fn send_datagram(
+		&mut self,
+		payload: Bytes,
+		options: poll::SendOptions<'_, poll::Ungrouped>,
+	) -> Result<(), Self::Error> {
 		if self.side.lossy.load(Ordering::Relaxed) {
 			return Ok(());
 		}

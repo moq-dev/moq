@@ -593,7 +593,10 @@ fn finish_stream_simple() {
     let mut pair = Pair::default();
     let (client_ch, server_ch) = pair.connect();
 
-    let s = pair.client_streams(client_ch).open(Dir::Uni, Default::default()).unwrap();
+    let s = pair
+        .client_streams(client_ch)
+        .open(Dir::Uni, Default::default())
+        .unwrap();
 
     const MSG: &[u8] = b"hello";
     pair.client_send(client_ch, s).write(MSG).unwrap();
@@ -637,7 +640,10 @@ fn reset_stream() {
     let mut pair = Pair::default();
     let (client_ch, server_ch) = pair.connect();
 
-    let s = pair.client_streams(client_ch).open(Dir::Uni, Default::default()).unwrap();
+    let s = pair
+        .client_streams(client_ch)
+        .open(Dir::Uni, Default::default())
+        .unwrap();
 
     const MSG: &[u8] = b"hello";
     pair.client_send(client_ch, s).write(MSG).unwrap();
@@ -666,7 +672,10 @@ fn stop_stream() {
     let mut pair = Pair::default();
     let (client_ch, server_ch) = pair.connect();
 
-    let s = pair.client_streams(client_ch).open(Dir::Uni, Default::default()).unwrap();
+    let s = pair
+        .client_streams(client_ch)
+        .open(Dir::Uni, Default::default())
+        .unwrap();
     const MSG: &[u8] = b"hello";
     pair.client_send(client_ch, s).write(MSG).unwrap();
     pair.drive();
@@ -786,7 +795,10 @@ fn congestion() {
 
     const TARGET: u64 = 2048;
     assert!(pair.client_conn_mut(client_ch).congestion_window() > TARGET);
-    let s = pair.client_streams(client_ch).open(Dir::Uni, Default::default()).unwrap();
+    let s = pair
+        .client_streams(client_ch)
+        .open(Dir::Uni, Default::default())
+        .unwrap();
     // Send data without receiving ACKs until the congestion state falls below target
     while pair.client_conn_mut(client_ch).congestion_window() > TARGET {
         let n = pair.client_send(client_ch, s).write(&[42; 1024]).unwrap();
@@ -822,7 +834,10 @@ fn full_initial_window() {
     let mtu = u64::from(INITIAL_MTU);
     assert_eq!(window % mtu, 0, "window must be exactly fillable");
 
-    let s = pair.client_streams(client_ch).open(Dir::Uni, Default::default()).unwrap();
+    let s = pair
+        .client_streams(client_ch)
+        .open(Dir::Uni, Default::default())
+        .unwrap();
     let data = vec![42; 2 * window as usize];
     assert_eq!(
         pair.client_send(client_ch, s).write(&data),
@@ -871,7 +886,10 @@ fn zero_rtt_happypath() {
     info!("resuming session");
     let client_ch = pair.begin_connect(config);
     assert!(pair.client_conn_mut(client_ch).has_0rtt());
-    let s = pair.client_streams(client_ch).open(Dir::Uni, Default::default()).unwrap();
+    let s = pair
+        .client_streams(client_ch)
+        .open(Dir::Uni, Default::default())
+        .unwrap();
     const MSG: &[u8] = b"Hello, 0-RTT!";
     pair.client_send(client_ch, s).write(MSG).unwrap();
     pair.drive();
@@ -970,7 +988,10 @@ fn zero_rtt_rejection() {
     info!("resuming session");
     let client_ch = pair.begin_connect(client_config);
     assert!(pair.client_conn_mut(client_ch).has_0rtt());
-    let s = pair.client_streams(client_ch).open(Dir::Uni, Default::default()).unwrap();
+    let s = pair
+        .client_streams(client_ch)
+        .open(Dir::Uni, Default::default())
+        .unwrap();
     const MSG: &[u8] = b"Hello, 0-RTT!";
     pair.client_conn_mut(client_ch)
         .set_send_window(MSG.len() as u64);
@@ -991,7 +1012,10 @@ fn zero_rtt_rejection() {
         Some(Event::Connected)
     );
     assert_matches!(pair.server_conn_mut(server_ch).poll(), None);
-    let s2 = pair.client_streams(client_ch).open(Dir::Uni, Default::default()).unwrap();
+    let s2 = pair
+        .client_streams(client_ch)
+        .open(Dir::Uni, Default::default())
+        .unwrap();
     assert_eq!(s, s2);
 
     // The server discarded its 0-RTT keys, so it never decrypted the STREAM frame and has no
@@ -1053,7 +1077,10 @@ fn test_zero_rtt_incoming_limit<F: FnOnce(&mut ServerConfig)>(configure_server: 
     pair.server.handle_incoming = Box::new(|_| IncomingConnectionBehavior::Wait);
     let client_ch = pair.begin_connect(config);
     assert!(pair.client_conn_mut(client_ch).has_0rtt());
-    let s = pair.client_streams(client_ch).open(Dir::Uni, Default::default()).unwrap();
+    let s = pair
+        .client_streams(client_ch)
+        .open(Dir::Uni, Default::default())
+        .unwrap();
     pair.client_send(client_ch, s)
         .write(&vec![0; CLIENT_WRITES])
         .unwrap();
@@ -1419,7 +1446,11 @@ fn late_peer_params_make_streams_available() {
     pair.server.drive_incoming(pair.time, pair.client.addr);
     let incoming = pair.server.pop_waiting_incoming();
     let server_ch = pair.server.try_accept(incoming, pair.time).unwrap();
-    assert_eq!(pair.server_streams(server_ch).open(Dir::Uni, Default::default()), None);
+    assert_eq!(
+        pair.server_streams(server_ch)
+            .open(Dir::Uni, Default::default()),
+        None
+    );
 
     pair.drive();
     assert!(
@@ -1428,7 +1459,11 @@ fn late_peer_params_make_streams_available() {
             Event::Stream(StreamEvent::Available { dir: Dir::Uni })
         ))
     );
-    assert!(pair.server_streams(server_ch).open(Dir::Uni, Default::default()).is_some());
+    assert!(
+        pair.server_streams(server_ch)
+            .open(Dir::Uni, Default::default())
+            .is_some()
+    );
 }
 
 #[test]
@@ -1453,7 +1488,8 @@ fn stream_id_limit() {
         .open(Dir::Uni, Default::default())
         .expect("couldn't open first stream");
     assert_eq!(
-        pair.client_streams(client_ch).open(Dir::Uni, Default::default()),
+        pair.client_streams(client_ch)
+            .open(Dir::Uni, Default::default()),
         None,
         "only one stream is permitted at a time"
     );
@@ -1467,7 +1503,8 @@ fn stream_id_limit() {
         Some(Event::Stream(StreamEvent::Finished { id })) if id == s
     );
     assert_eq!(
-        pair.client_streams(client_ch).open(Dir::Uni, Default::default()),
+        pair.client_streams(client_ch)
+            .open(Dir::Uni, Default::default()),
         None,
         "server does not immediately grant additional credit"
     );
@@ -1545,7 +1582,11 @@ fn streams_blocked() {
         .client_streams(client_ch)
         .open(Dir::Uni, Default::default())
         .expect("first uni stream");
-    assert_eq!(pair.client_streams(client_ch).open(Dir::Uni, Default::default()), None);
+    assert_eq!(
+        pair.client_streams(client_ch)
+            .open(Dir::Uni, Default::default()),
+        None
+    );
 
     // Send data so the STREAMS_BLOCKED piggybacks on an outgoing packet
     pair.client_send(client_ch, s).write(b"hi").unwrap();
@@ -1604,7 +1645,10 @@ fn data_blocked() {
     let (client_ch, server_ch) = pair.connect();
 
     // Fill the connection-level window, then run into the limit
-    let s = pair.client_streams(client_ch).open(Dir::Uni, Default::default()).unwrap();
+    let s = pair
+        .client_streams(client_ch)
+        .open(Dir::Uni, Default::default())
+        .unwrap();
     assert_eq!(
         pair.client_send(client_ch, s)
             .write(b"0123456789ab")
@@ -1682,7 +1726,10 @@ fn stream_data_blocked() {
     let (client_ch, server_ch) = pair.connect();
 
     // Fill the stream-level window, then run into the limit
-    let s = pair.client_streams(client_ch).open(Dir::Uni, Default::default()).unwrap();
+    let s = pair
+        .client_streams(client_ch)
+        .open(Dir::Uni, Default::default())
+        .unwrap();
     assert_eq!(
         pair.client_send(client_ch, s)
             .write(b"0123456789ab")
@@ -1753,7 +1800,10 @@ fn data_blocked_not_sent_under_limit() {
     let (client_ch, _server_ch) = pair.connect();
 
     // Default windows are far larger than this write, so nothing is blocked
-    let s = pair.client_streams(client_ch).open(Dir::Uni, Default::default()).unwrap();
+    let s = pair
+        .client_streams(client_ch)
+        .open(Dir::Uni, Default::default())
+        .unwrap();
     pair.client_send(client_ch, s).write(b"hi").unwrap();
     pair.drive();
 
@@ -1770,7 +1820,10 @@ fn data_blocked_not_sent_for_local_send_window() {
 
     // Running out of our own send window is not the peer's flow control limit
     pair.client_conn_mut(client_ch).set_send_window(5);
-    let s = pair.client_streams(client_ch).open(Dir::Uni, Default::default()).unwrap();
+    let s = pair
+        .client_streams(client_ch)
+        .open(Dir::Uni, Default::default())
+        .unwrap();
     assert_eq!(
         pair.client_send(client_ch, s).write(b"0123456789").unwrap(),
         5
@@ -1803,7 +1856,10 @@ fn data_blocked_dropped_when_limit_raised() {
     let mut pair = Pair::new(Default::default(), server);
     let (client_ch, server_ch) = pair.connect();
 
-    let s = pair.client_streams(client_ch).open(Dir::Uni, Default::default()).unwrap();
+    let s = pair
+        .client_streams(client_ch)
+        .open(Dir::Uni, Default::default())
+        .unwrap();
     assert_eq!(
         pair.client_send(client_ch, s)
             .write(b"0123456789ab")
@@ -1843,7 +1899,10 @@ fn stream_data_blocked_not_sent_after_reset() {
     let mut pair = Pair::new(Default::default(), server);
     let (client_ch, _server_ch) = pair.connect();
 
-    let s = pair.client_streams(client_ch).open(Dir::Uni, Default::default()).unwrap();
+    let s = pair
+        .client_streams(client_ch)
+        .open(Dir::Uni, Default::default())
+        .unwrap();
     assert_eq!(
         pair.client_send(client_ch, s)
             .write(b"0123456789ab")
@@ -1877,7 +1936,10 @@ fn data_blocked_retransmit() {
     let mut pair = Pair::new(Default::default(), server);
     let (client_ch, server_ch) = pair.connect();
 
-    let s = pair.client_streams(client_ch).open(Dir::Uni, Default::default()).unwrap();
+    let s = pair
+        .client_streams(client_ch)
+        .open(Dir::Uni, Default::default())
+        .unwrap();
     assert_eq!(
         pair.client_send(client_ch, s)
             .write(b"0123456789ab")
@@ -2225,7 +2287,10 @@ fn connection_close_while_congestion_blocked() {
     // Saturate the congestion window with unacknowledged stream data by transmitting from the
     // client without driving the server, so no ACKs come back and in-flight bytes stay pinned at
     // the window
-    let s = pair.client_streams(client_ch).open(Dir::Uni, Default::default()).unwrap();
+    let s = pair
+        .client_streams(client_ch)
+        .open(Dir::Uni, Default::default())
+        .unwrap();
     pair.client_send(client_ch, s)
         .write(&[42; 1024 * 1024])
         .unwrap();
@@ -2335,7 +2400,10 @@ fn test_flow_control(config: TransportConfig, window_size: usize) {
     let msg = vec![0xAB; window_size + 10];
 
     // Stream reset before read
-    let s = pair.client_streams(client_ch).open(Dir::Uni, Default::default()).unwrap();
+    let s = pair
+        .client_streams(client_ch)
+        .open(Dir::Uni, Default::default())
+        .unwrap();
     info!("writing");
     assert_eq!(pair.client_send(client_ch, s).write_limit(), window_size);
     assert_eq!(pair.client_send(client_ch, s).write(&msg), Ok(window_size));
@@ -2360,7 +2428,10 @@ fn test_flow_control(config: TransportConfig, window_size: usize) {
 
     // Happy path
     info!("writing");
-    let s = pair.client_streams(client_ch).open(Dir::Uni, Default::default()).unwrap();
+    let s = pair
+        .client_streams(client_ch)
+        .open(Dir::Uni, Default::default())
+        .unwrap();
     assert_eq!(pair.client_send(client_ch, s).write_limit(), window_size);
     assert_eq!(pair.client_send(client_ch, s).write(&msg), Ok(window_size));
     assert_eq!(pair.client_send(client_ch, s).write_limit(), 0);
@@ -2456,7 +2527,10 @@ fn stop_opens_bidi() {
     let mut pair = Pair::default();
     let (client_ch, server_ch) = pair.connect();
     assert_eq!(pair.client_streams(client_ch).send_streams(), 0);
-    let s = pair.client_streams(client_ch).open(Dir::Bi, Default::default()).unwrap();
+    let s = pair
+        .client_streams(client_ch)
+        .open(Dir::Bi, Default::default())
+        .unwrap();
     assert_eq!(pair.client_streams(client_ch).send_streams(), 1);
     const ERROR: VarInt = VarInt(42);
     pair.client
@@ -2500,8 +2574,14 @@ fn implicit_open() {
     let _guard = subscribe();
     let mut pair = Pair::default();
     let (client_ch, server_ch) = pair.connect();
-    let s1 = pair.client_streams(client_ch).open(Dir::Uni, Default::default()).unwrap();
-    let s2 = pair.client_streams(client_ch).open(Dir::Uni, Default::default()).unwrap();
+    let s1 = pair
+        .client_streams(client_ch)
+        .open(Dir::Uni, Default::default())
+        .unwrap();
+    let s2 = pair
+        .client_streams(client_ch)
+        .open(Dir::Uni, Default::default())
+        .unwrap();
     pair.client_send(client_ch, s2).write(b"hello").unwrap();
     pair.drive();
     assert_matches!(
@@ -2669,7 +2749,10 @@ fn finish_stream_flow_control_reordered() {
     let mut pair = Pair::default();
     let (client_ch, server_ch) = pair.connect();
 
-    let s = pair.client_streams(client_ch).open(Dir::Uni, Default::default()).unwrap();
+    let s = pair
+        .client_streams(client_ch)
+        .open(Dir::Uni, Default::default())
+        .unwrap();
 
     const MSG: &[u8] = b"hello";
     pair.client_send(client_ch, s).write(MSG).unwrap();
@@ -2725,7 +2808,10 @@ fn handshake_1rtt_handling() {
     pair.client.delay_outbound();
 
     // Send some 1-RTT data which will be received first.
-    let s = pair.client_streams(client_ch).open(Dir::Uni, Default::default()).unwrap();
+    let s = pair
+        .client_streams(client_ch)
+        .open(Dir::Uni, Default::default())
+        .unwrap();
     const MSG: &[u8] = b"hello";
     pair.client_send(client_ch, s).write(MSG).unwrap();
     pair.client_send(client_ch, s).finish().unwrap();
@@ -2765,7 +2851,10 @@ fn stop_before_finish() {
     let mut pair = Pair::default();
     let (client_ch, server_ch) = pair.connect();
 
-    let s = pair.client_streams(client_ch).open(Dir::Uni, Default::default()).unwrap();
+    let s = pair
+        .client_streams(client_ch)
+        .open(Dir::Uni, Default::default())
+        .unwrap();
     const MSG: &[u8] = b"hello";
     pair.client_send(client_ch, s).write(MSG).unwrap();
     pair.drive();
@@ -2787,7 +2876,10 @@ fn stop_during_finish() {
     let mut pair = Pair::default();
     let (client_ch, server_ch) = pair.connect();
 
-    let s = pair.client_streams(client_ch).open(Dir::Uni, Default::default()).unwrap();
+    let s = pair
+        .client_streams(client_ch)
+        .open(Dir::Uni, Default::default())
+        .unwrap();
     const MSG: &[u8] = b"hello";
     pair.client_send(client_ch, s).write(MSG).unwrap();
     pair.drive();
@@ -2814,7 +2906,10 @@ fn congested_tail_loss() {
 
     const TARGET: u64 = 2048;
     assert!(pair.client_conn_mut(client_ch).congestion_window() > TARGET);
-    let s = pair.client_streams(client_ch).open(Dir::Uni, Default::default()).unwrap();
+    let s = pair
+        .client_streams(client_ch)
+        .open(Dir::Uni, Default::default())
+        .unwrap();
     // Send data without receiving ACKs until the congestion state falls below target
     while pair.client_conn_mut(client_ch).congestion_window() > TARGET {
         let n = pair.client_send(client_ch, s).write(&[42; 1024]).unwrap();
@@ -3028,9 +3123,7 @@ fn first_flight_datagrams(stream: i64, datagram: i64) -> usize {
             group: Some(&datagrams),
             priority: 0,
         };
-        conn.datagrams()
-            .send(vec![1; 100].into(), options)
-            .unwrap();
+        conn.datagrams().send(vec![1; 100].into(), options).unwrap();
     }
 
     // One congestion-limited flight.
@@ -3150,7 +3243,10 @@ fn datagram_unsupported() {
     assert_matches!(pair.server_conn_mut(server_ch).poll(), None);
     assert_matches!(pair.client_datagrams(client_ch).max_size(), None);
 
-    match pair.client_datagrams(client_ch).send(Bytes::new(), Default::default()) {
+    match pair
+        .client_datagrams(client_ch)
+        .send(Bytes::new(), Default::default())
+    {
         Err(SendDatagramError::UnsupportedByPeer) => {}
         Err(e) => panic!("unexpected error: {e}"),
         Ok(_) => panic!("unexpected success"),
@@ -3200,7 +3296,10 @@ fn finish_acked() {
     let mut pair = Pair::default();
     let (client_ch, server_ch) = pair.connect();
 
-    let s = pair.client_streams(client_ch).open(Dir::Uni, Default::default()).unwrap();
+    let s = pair
+        .client_streams(client_ch)
+        .open(Dir::Uni, Default::default())
+        .unwrap();
 
     const MSG: &[u8] = b"hello";
     pair.client_send(client_ch, s).write(MSG).unwrap();
@@ -3259,7 +3358,10 @@ fn finish_retransmit() {
     let mut pair = Pair::default();
     let (client_ch, server_ch) = pair.connect();
 
-    let s = pair.client_streams(client_ch).open(Dir::Uni, Default::default()).unwrap();
+    let s = pair
+        .client_streams(client_ch)
+        .open(Dir::Uni, Default::default())
+        .unwrap();
 
     const MSG: &[u8] = b"hello";
     pair.client_send(client_ch, s).write(MSG).unwrap();
@@ -3316,7 +3418,10 @@ fn repeated_request_response() {
     const REQUEST: &[u8] = b"hello";
     const RESPONSE: &[u8] = b"world";
     for _ in 0..3 {
-        let s = pair.client_streams(client_ch).open(Dir::Bi, Default::default()).unwrap();
+        let s = pair
+            .client_streams(client_ch)
+            .open(Dir::Bi, Default::default())
+            .unwrap();
 
         pair.client_send(client_ch, s).write(REQUEST).unwrap();
         pair.client_send(client_ch, s).finish().unwrap();
@@ -3830,7 +3935,10 @@ fn blackhole_after_mtu_change_repairs_itself() {
     // The payload will be sent in a single packet, because the detected MTU was 1444, but it will
     // be dropped because the link no longer supports that packet size!
     let payload = vec![42; 1300];
-    let s = pair.client_streams(client_ch).open(Dir::Uni, Default::default()).unwrap();
+    let s = pair
+        .client_streams(client_ch)
+        .open(Dir::Uni, Default::default())
+        .unwrap();
     pair.client_send(client_ch, s).write(&payload).unwrap();
     let out_of_bounds = pair.drive_bounded();
 
@@ -3878,7 +3986,10 @@ fn packet_splitting_with_default_mtu() {
     let (client_ch, _) = pair.connect();
     pair.drive();
 
-    let s = pair.client_streams(client_ch).open(Dir::Uni, Default::default()).unwrap();
+    let s = pair
+        .client_streams(client_ch)
+        .open(Dir::Uni, Default::default())
+        .unwrap();
 
     pair.client_send(client_ch, s).write(&payload).unwrap();
     pair.client.drive(pair.time, pair.server.addr);
@@ -3899,7 +4010,10 @@ fn packet_splitting_not_necessary_after_higher_mtu_discovered() {
     let (client_ch, _) = pair.connect();
     pair.drive();
 
-    let s = pair.client_streams(client_ch).open(Dir::Uni, Default::default()).unwrap();
+    let s = pair
+        .client_streams(client_ch)
+        .open(Dir::Uni, Default::default())
+        .unwrap();
 
     pair.client_send(client_ch, s).write(&payload).unwrap();
     pair.client.drive(pair.time, pair.server.addr);
@@ -4549,7 +4663,10 @@ fn stream_gso() {
     config.transport = Arc::new(cubic_transport());
     let (client_ch, _) = pair.connect_with(config);
 
-    let s = pair.client_streams(client_ch).open(Dir::Uni, Default::default()).unwrap();
+    let s = pair
+        .client_streams(client_ch)
+        .open(Dir::Uni, Default::default())
+        .unwrap();
 
     let initial_ios = pair.client_conn_mut(client_ch).stats().udp_tx.ios;
 
@@ -4717,7 +4834,10 @@ fn min_mtu_does_not_pad_zero_rtt_batch_tail() {
 
         let client_ch = pair.begin_connect(config);
         assert!(pair.client_conn_mut(client_ch).has_0rtt());
-        let stream = pair.client_streams(client_ch).open(Dir::Uni, Default::default()).unwrap();
+        let stream = pair
+            .client_streams(client_ch)
+            .open(Dir::Uni, Default::default())
+            .unwrap();
         let data = vec![42; 3_000];
         assert_eq!(
             pair.client_send(client_ch, stream).write(&data),
@@ -5525,7 +5645,10 @@ fn cwnd_limited_is_not_reported_when_only_pacing_blocks() {
     let mut pair = Pair::default();
     let (client_ch, _) = pair.connect_with(client_cfg);
 
-    let s = pair.client_streams(client_ch).open(Dir::Uni, Default::default()).unwrap();
+    let s = pair
+        .client_streams(client_ch)
+        .open(Dir::Uni, Default::default())
+        .unwrap();
     pair.client_send(client_ch, s)
         .write(&[42; 64 * 1024])
         .unwrap();
@@ -5615,7 +5738,10 @@ fn send_quantum_bounds_the_gso_batch() {
     let mut pair = Pair::default();
     let (client_ch, _) = pair.connect_with(client_cfg);
 
-    let s = pair.client_streams(client_ch).open(Dir::Uni, Default::default()).unwrap();
+    let s = pair
+        .client_streams(client_ch)
+        .open(Dir::Uni, Default::default())
+        .unwrap();
     pair.client_send(client_ch, s)
         .write(&[42; 64 * 1024])
         .unwrap();
@@ -5860,7 +5986,10 @@ fn congestion_callbacks_identify_packets_across_spaces() {
     pair.drive();
     assert!(!pair.client_conn_mut(client_ch).is_handshaking());
 
-    let s = pair.client_streams(client_ch).open(Dir::Uni, Default::default()).unwrap();
+    let s = pair
+        .client_streams(client_ch)
+        .open(Dir::Uni, Default::default())
+        .unwrap();
     pair.client_send(client_ch, s)
         .write(&[42; 16 * 1024])
         .unwrap();
@@ -5951,7 +6080,10 @@ fn ce_events(log: &PacketLog) -> usize {
 fn old_ce_marks_report_no_new_congestion() {
     let _guard = subscribe();
     let (mut pair, client_ch, log) = recorded_pair(Default::default());
-    let s = pair.client_streams(client_ch).open(Dir::Uni, Default::default()).unwrap();
+    let s = pair
+        .client_streams(client_ch)
+        .open(Dir::Uni, Default::default())
+        .unwrap();
     pair.client_send(client_ch, s)
         .write(&[42; 8 * 1024])
         .unwrap();
@@ -5982,7 +6114,10 @@ fn invalid_ecn_feedback_reports_no_congestion() {
         assert!(pair.client_conn_mut(client_ch).using_ecn());
         pair.congestion_experienced = true;
         pair.rewrite_ecn = Some(rewrite);
-        let s = pair.client_streams(client_ch).open(Dir::Uni, Default::default()).unwrap();
+        let s = pair
+            .client_streams(client_ch)
+            .open(Dir::Uni, Default::default())
+            .unwrap();
         pair.client_send(client_ch, s)
             .write(&[42; 16 * 1024])
             .unwrap();
@@ -6025,7 +6160,10 @@ fn check_starvation_reported_before_resumed_send(send: impl Fn(&mut Pair, Connec
 #[test]
 fn stream_starvation_reported_before_resumed_send() {
     check_starvation_reported_before_resumed_send(|pair, ch| {
-        let s = pair.client_streams(ch).open(Dir::Uni, Default::default()).unwrap();
+        let s = pair
+            .client_streams(ch)
+            .open(Dir::Uni, Default::default())
+            .unwrap();
         pair.client_send(ch, s).write(&[42; 1000]).unwrap();
     });
 }
@@ -6050,7 +6188,10 @@ fn check_blocked_backlog_is_not_app_limited(factory: PacketRecorderFactory) {
     pair.drive();
     let before = log.lock().unwrap().len();
 
-    let s = pair.client_streams(client_ch).open(Dir::Uni, Default::default()).unwrap();
+    let s = pair
+        .client_streams(client_ch)
+        .open(Dir::Uni, Default::default())
+        .unwrap();
     pair.client_send(client_ch, s)
         .write(&[42; 64 * 1024])
         .unwrap();
@@ -6088,7 +6229,10 @@ fn pacing_blocked_backlog_is_not_app_limited() {
 fn partial_poll_reports_starvation() {
     let _guard = subscribe();
     let (mut pair, ch, log) = recorded_pair(Default::default());
-    let stream = pair.client_streams(ch).open(Dir::Uni, Default::default()).unwrap();
+    let stream = pair
+        .client_streams(ch)
+        .open(Dir::Uni, Default::default())
+        .unwrap();
     pair.client_send(ch, stream).write(&[42; 1000]).unwrap();
     log.lock().unwrap().clear();
     let now = pair.time;
@@ -6164,7 +6308,10 @@ fn held_credit_spends_connection_window_only() {
     );
     let chs = pair.connect();
     let (client_ch, server_ch) = chs;
-    let s = pair.client_streams(client_ch).open(Dir::Uni, Default::default()).unwrap();
+    let s = pair
+        .client_streams(client_ch)
+        .open(Dir::Uni, Default::default())
+        .unwrap();
     let msg = vec![0xAB; 3 * WINDOW];
     let (mut sent, mut held) = (0, Credit::default());
 
@@ -6225,7 +6372,10 @@ fn sender_window_is_not_starvation() {
     let _guard = subscribe();
     let (mut pair, ch, log) = recorded_pair(Default::default());
     pair.client_conn_mut(ch).set_send_window(1000);
-    let stream = pair.client_streams(ch).open(Dir::Uni, Default::default()).unwrap();
+    let stream = pair
+        .client_streams(ch)
+        .open(Dir::Uni, Default::default())
+        .unwrap();
     assert_eq!(pair.client_send(ch, stream).write(&[42; 2000]), Ok(1000));
     log.lock().unwrap().clear();
     pair.drive_client();
@@ -6258,7 +6408,10 @@ fn receiver_credit_is_starvation() {
     client_cfg.transport = Arc::new(client_transport);
     let (ch, _) = pair.connect_with(client_cfg);
     let log = factory.logs.lock().unwrap()[0].clone();
-    let stream = pair.client_streams(ch).open(Dir::Uni, Default::default()).unwrap();
+    let stream = pair
+        .client_streams(ch)
+        .open(Dir::Uni, Default::default())
+        .unwrap();
     assert_eq!(pair.client_send(ch, stream).write(&[42; 2000]), Ok(1000));
     log.lock().unwrap().clear();
     pair.drive_client();
@@ -6432,7 +6585,10 @@ fn upload(
     const CHUNK: [u8; 10_000] = [0; 10_000];
 
     let start = pair.time;
-    let s = pair.client_streams(client_ch).open(Dir::Uni, Default::default()).unwrap();
+    let s = pair
+        .client_streams(client_ch)
+        .open(Dir::Uni, Default::default())
+        .unwrap();
     let mut unsent = total;
     let mut received = 0;
     let mut server_stream = None;

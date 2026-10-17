@@ -44,11 +44,7 @@ impl Datagrams<'_> {
         if datagram.data.len() > max || datagram.size(true) > budget {
             return Err(SendDatagramError::TooLarge);
         }
-        if !self
-            .conn
-            .streams
-            .queue_datagram(datagram, options, budget)
-        {
+        if !self.conn.streams.queue_datagram(datagram, options, budget) {
             trace!("dropping outgoing datagram");
         }
         Ok(())

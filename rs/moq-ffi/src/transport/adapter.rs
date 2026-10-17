@@ -67,12 +67,20 @@ impl<S: backend::Session<SendStream: 'static, RecvStream: 'static> + Clone + 'st
 			.map_err(Error)
 			.map(|res| res.map(|(send, recv)| (SendStream(send), RecvStream(recv))))
 	}
-	fn poll_open_uni(&mut self, cx: &mut Context<'_>, options: poll::SendOptions<'_, poll::Ungrouped>) -> Poll<Result<Self::SendStream, Self::Error>> {
+	fn poll_open_uni(
+		&mut self,
+		cx: &mut Context<'_>,
+		options: poll::SendOptions<'_, poll::Ungrouped>,
+	) -> Poll<Result<Self::SendStream, Self::Error>> {
 		backend::Session::poll_open_uni(&mut self.0, cx)
 			.map_err(Error)
 			.map(|res| res.map(|send| SendStream(send).scheduled(options)))
 	}
-	fn poll_open_bi(&mut self, cx: &mut Context<'_>, options: poll::SendOptions<'_, poll::Ungrouped>) -> Poll<Result<poll::BiStreams<Self>, Self::Error>> {
+	fn poll_open_bi(
+		&mut self,
+		cx: &mut Context<'_>,
+		options: poll::SendOptions<'_, poll::Ungrouped>,
+	) -> Poll<Result<poll::BiStreams<Self>, Self::Error>> {
 		backend::Session::poll_open_bi(&mut self.0, cx)
 			.map_err(Error)
 			.map(|res| res.map(|(send, recv)| (SendStream(send).scheduled(options), RecvStream(recv))))
@@ -300,7 +308,9 @@ mod tests {
 			poll::Session::stats(&session).rtt(),
 			Some(std::time::Duration::from_millis(7))
 		);
-		let Poll::Ready(Ok((mut send, mut recv))) = poll::Session::poll_open_bi(&mut session, &mut cx, Default::default()) else {
+		let Poll::Ready(Ok((mut send, mut recv))) =
+			poll::Session::poll_open_bi(&mut session, &mut cx, Default::default())
+		else {
 			panic!("open failed")
 		};
 		let mut buf = Bytes::from_static(b"abcd");

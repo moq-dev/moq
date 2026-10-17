@@ -43,7 +43,10 @@ fn assert_golden(pair: &mut Pair, golden: &str) {
 
 /// Opens a client uni stream at `priority` and queues `LEN` bytes and a FIN on it
 fn queue(pair: &mut Pair, ch: ConnectionHandle, priority: i64) -> StreamId {
-    let s = pair.client_streams(ch).open(Dir::Uni, Default::default()).unwrap();
+    let s = pair
+        .client_streams(ch)
+        .open(Dir::Uni, Default::default())
+        .unwrap();
     pair.client_send(ch, s).set_priority(priority).unwrap();
     assert_eq!(pair.client_send(ch, s).write(&[0; LEN]).unwrap(), LEN);
     pair.client_send(ch, s).finish().unwrap();
@@ -183,7 +186,10 @@ fn datagrams_interleaved() {
 fn retransmit_within_stream() {
     let _guard = subscribe();
     let (mut pair, ch) = idle(true);
-    let s = pair.client_streams(ch).open(Dir::Uni, Default::default()).unwrap();
+    let s = pair
+        .client_streams(ch)
+        .open(Dir::Uni, Default::default())
+        .unwrap();
     assert_eq!(pair.client_send(ch, s).write(&[0; 16_000]).unwrap(), 16_000);
 
     // Lose the second packet of the first flight

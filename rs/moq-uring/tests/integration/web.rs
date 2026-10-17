@@ -605,7 +605,12 @@ fn a_reset_stream_keeps_its_header() {
 			let err = recv.read_chunk(usize::MAX).await.expect_err("the server reset it");
 			assert!(matches!(err, moq_tokio::quic::web::ReadError::Reset(7)), "got {err:?}");
 
-			session.open_uni(Default::default()).await.expect("open_uni").reset(8).expect("reset");
+			session
+				.open_uni(Default::default())
+				.await
+				.expect("open_uni")
+				.reset(8)
+				.expect("reset");
 			session.closed().await;
 		})
 	});

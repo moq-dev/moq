@@ -282,7 +282,11 @@ impl poll::Session for Session {
 		Self::poll_accept(&self.side.incoming().bi, &self.side.conn.close, waiter)
 	}
 
-	fn poll_open_uni(&mut self, _cx: &mut Context<'_>, _: poll::SendOptions<'_, poll::Ungrouped>) -> Poll<Result<SendStream, Error>> {
+	fn poll_open_uni(
+		&mut self,
+		_cx: &mut Context<'_>,
+		_: poll::SendOptions<'_, poll::Ungrouped>,
+	) -> Poll<Result<SendStream, Error>> {
 		let (send, recv) = self.conn().stream();
 		Poll::Ready(self.open(&self.side.outgoing().uni, recv).map(|()| send))
 	}
@@ -846,7 +850,9 @@ mod tests {
 		a.close(4, "bye");
 		let closed = |err: Error| matches!(err, Error::Session { code: 4, ref reason } if reason == "bye");
 		assert!(closed(ready(b.poll_closed(&mut noop()))));
-		assert!(closed(ready(a.poll_open_uni(&mut noop(), Default::default())).err().unwrap()));
+		assert!(closed(
+			ready(a.poll_open_uni(&mut noop(), Default::default())).err().unwrap()
+		));
 		assert!(closed(
 			ready(write(&mut unfinished, &Bytes::from_static(b"x"))).unwrap_err()
 		));
@@ -881,7 +887,8 @@ mod tests {
 	#[test]
 	fn datagrams() {
 		let (mut a, mut b) = pair(Config::default());
-		a.send_datagram(vec![0; MAX_DATAGRAM_SIZE + 1].into(), Default::default()).unwrap();
+		a.send_datagram(vec![0; MAX_DATAGRAM_SIZE + 1].into(), Default::default())
+			.unwrap();
 		for _ in 0..DATAGRAM_QUEUE {
 			a.send_datagram("one".into(), Default::default()).unwrap();
 		}

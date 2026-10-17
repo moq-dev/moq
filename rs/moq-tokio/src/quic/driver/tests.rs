@@ -709,12 +709,18 @@ async fn zero_rtt() {
                 }
             });
             info!("sending 0.5-RTT");
-            let mut s = connection.open_uni(Default::default()).await.expect("open_uni");
+            let mut s = connection
+                .open_uni(Default::default())
+                .await
+                .expect("open_uni");
             s.write_all(MSG0).await.expect("write");
             s.finish().unwrap();
             connection.authenticated().await.expect("connected");
             info!("sending 1-RTT");
-            let mut s = connection.open_uni(Default::default()).await.expect("open_uni");
+            let mut s = connection
+                .open_uni(Default::default())
+                .await
+                .expect("open_uni");
             s.write_all(MSG1).await.expect("write");
             // The peer might close the connection before ACKing
             let _ = s.finish();
@@ -752,7 +758,10 @@ async fn zero_rtt() {
         .unwrap_or_else(|_| panic!("missing 0-RTT keys"));
 
     // Send something before the handshake can make progress, thereby forcing 0-RTT
-    let mut stream_0rtt = connection.open_uni(Default::default()).await.expect("0-RTT open uni");
+    let mut stream_0rtt = connection
+        .open_uni(Default::default())
+        .await
+        .expect("0-RTT open uni");
     info!("sending 0-RTT");
     stream_0rtt.write_all(MSG0).await.expect("0-RTT write");
     stream_0rtt.finish().unwrap();
@@ -958,7 +967,10 @@ fn run_echo(args: EchoArgs) {
 
                 for i in 0..args.nr_streams {
                     println!("Opening stream {i}");
-                    let (mut send, mut recv) = new_conn.open_bi(Default::default()).await.expect("stream open");
+                    let (mut send, mut recv) = new_conn
+                        .open_bi(Default::default())
+                        .await
+                        .expect("stream open");
                     let msg = gen_data(args.stream_size, SEED);
 
                     let send_task = async {
@@ -1570,9 +1582,13 @@ async fn two_datagram_readers() {
             x
         },
         async {
-            server.send_datagram(b"one"[..].into(), Default::default()).unwrap();
+            server
+                .send_datagram(b"one"[..].into(), Default::default())
+                .unwrap();
             done.notified().await;
-            server.send_datagram(b"two"[..].into(), Default::default()).unwrap();
+            server
+                .send_datagram(b"two"[..].into(), Default::default())
+                .unwrap();
         }
     );
     assert!(*a == *b"one" || *b == *b"one");

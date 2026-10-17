@@ -443,7 +443,10 @@ impl Pair {
             Op::Open { who, uni } => {
                 let peer = self.peer(who);
                 let dir = dir(uni);
-                let Some(id) = peer.conn().and_then(|conn| conn.streams().open(dir, Default::default())) else {
+                let Some(id) = peer
+                    .conn()
+                    .and_then(|conn| conn.streams().open(dir, Default::default()))
+                else {
                     return;
                 };
                 peer.send.push(id);
@@ -574,7 +577,9 @@ impl Pair {
                             group: None,
                             priority: priority.into(),
                         },
-                    ).is_ok() {
+                    )
+                    .is_ok()
+                {
                     peer.datagrams_sent.push(size);
                 }
             }

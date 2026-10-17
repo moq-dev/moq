@@ -67,7 +67,12 @@ impl<'a> Streams<'a> {
         // Send state is allocated on first use, so the default schedule needs none.
         if options.group.is_some() || options.priority != 0 {
             let max_send_data = self.state.max_send_data(id);
-            let stream = self.state.send.get_mut(&id).unwrap().insert(Send::new(max_send_data));
+            let stream = self
+                .state
+                .send
+                .get_mut(&id)
+                .unwrap()
+                .insert(Send::new(max_send_data));
             stream.priority = options.priority;
             let group = options.group.map(|g| g.index(self.state.tag));
             self.state

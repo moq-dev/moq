@@ -751,7 +751,8 @@ impl<S: crate::transport::poll::Session> ControlStreamAdapter<S> {
 	/// Open a real (non-virtual) bidi stream, bypassing control stream multiplexing.
 	/// Used for v16 SubscribeNamespace which moved to its own bidi stream.
 	pub async fn open_native_bi(&mut self) -> Result<(AdapterSend<S>, AdapterRecv<S>), crate::Error> {
-		let (send, recv) = self.inner
+		let (send, recv) = self
+			.inner
 			.open_bi(Default::default())
 			.await
 			.map_err(|_| crate::Error::Closed)?;
@@ -1166,7 +1167,14 @@ impl<S: crate::transport::poll::Session> crate::transport::poll::Session for Con
 		Poll::Ready(Ok((AdapterSend::Virtual(send), AdapterRecv::Virtual(recv))))
 	}
 
-	fn poll_open_uni(&mut self, cx: &mut Context<'_>, options: crate::transport::poll::SendOptions<'_, <Self::SendStream as crate::transport::poll::SendStream>::Group>) -> Poll<Result<Self::SendStream, Self::Error>> {
+	fn poll_open_uni(
+		&mut self,
+		cx: &mut Context<'_>,
+		options: crate::transport::poll::SendOptions<
+			'_,
+			<Self::SendStream as crate::transport::poll::SendStream>::Group,
+		>,
+	) -> Poll<Result<Self::SendStream, Self::Error>> {
 		self.inner
 			.poll_open_uni(cx, options)
 			.map(|r| r.map(AdapterSend::Real).map_err(|_| crate::Error::Closed))
@@ -1182,7 +1190,14 @@ impl<S: crate::transport::poll::Session> crate::transport::poll::Session for Con
 		self.inner.send_group(priority)
 	}
 
-	fn send_datagram(&mut self, payload: Bytes, options: crate::transport::poll::SendOptions<'_, <Self::SendStream as crate::transport::poll::SendStream>::Group>) -> Result<(), Self::Error> {
+	fn send_datagram(
+		&mut self,
+		payload: Bytes,
+		options: crate::transport::poll::SendOptions<
+			'_,
+			<Self::SendStream as crate::transport::poll::SendStream>::Group,
+		>,
+	) -> Result<(), Self::Error> {
 		self.inner
 			.send_datagram(payload, options)
 			.map_err(|_| crate::Error::Closed)

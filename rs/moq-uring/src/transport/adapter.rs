@@ -118,12 +118,20 @@ impl<S: Grouped<SendStream: 'static, RecvStream: 'static> + Clone + 'static> pol
 			.map_err(Error)
 			.map(|res| res.map(|(send, recv)| (SendStream(send), RecvStream(recv))))
 	}
-	fn poll_open_uni(&mut self, cx: &mut Context<'_>, options: poll::SendOptions<'_, <S::SendStream as GroupedSend>::Group>) -> Poll<Result<Self::SendStream, Self::Error>> {
+	fn poll_open_uni(
+		&mut self,
+		cx: &mut Context<'_>,
+		options: poll::SendOptions<'_, <S::SendStream as GroupedSend>::Group>,
+	) -> Poll<Result<Self::SendStream, Self::Error>> {
 		backend::Session::poll_open_uni(&mut self.0, cx)
 			.map_err(Error)
 			.map(|res| res.map(|send| SendStream(send).scheduled(options)))
 	}
-	fn poll_open_bi(&mut self, cx: &mut Context<'_>, options: poll::SendOptions<'_, <S::SendStream as GroupedSend>::Group>) -> Poll<Result<poll::BiStreams<Self>, Self::Error>> {
+	fn poll_open_bi(
+		&mut self,
+		cx: &mut Context<'_>,
+		options: poll::SendOptions<'_, <S::SendStream as GroupedSend>::Group>,
+	) -> Poll<Result<poll::BiStreams<Self>, Self::Error>> {
 		backend::Session::poll_open_bi(&mut self.0, cx)
 			.map_err(Error)
 			.map(|res| res.map(|(send, recv)| (SendStream(send).scheduled(options), RecvStream(recv))))
@@ -131,7 +139,11 @@ impl<S: Grouped<SendStream: 'static, RecvStream: 'static> + Clone + 'static> pol
 	fn send_group(&mut self, priority: i64) -> Option<<S::SendStream as GroupedSend>::Group> {
 		Grouped::send_group(&mut self.0, priority)
 	}
-	fn send_datagram(&mut self, payload: Bytes, options: poll::SendOptions<'_, <S::SendStream as GroupedSend>::Group>) -> Result<(), Self::Error> {
+	fn send_datagram(
+		&mut self,
+		payload: Bytes,
+		options: poll::SendOptions<'_, <S::SendStream as GroupedSend>::Group>,
+	) -> Result<(), Self::Error> {
 		Grouped::send_datagram(&mut self.0, payload, options).map_err(Error)
 	}
 	fn poll_recv_datagram(&mut self, cx: &mut Context<'_>) -> Poll<Result<Bytes, Self::Error>> {
@@ -366,7 +378,9 @@ mod tests {
 			poll::Session::stats(&session).rtt(),
 			Some(std::time::Duration::from_millis(7))
 		);
-		let Poll::Ready(Ok((mut send, mut recv))) = poll::Session::poll_open_bi(&mut session, &mut cx, Default::default()) else {
+		let Poll::Ready(Ok((mut send, mut recv))) =
+			poll::Session::poll_open_bi(&mut session, &mut cx, Default::default())
+		else {
 			panic!("open failed")
 		};
 		let mut buf = Bytes::from_static(b"abcd");

@@ -579,7 +579,12 @@ impl web_transport_trait::poll::Session for Connection {
 		}
 		// The peer's MAX_STREAMS credit is what gates us: `open` hands back
 		// nothing while it is spent.
-		let opened = self.shared.conn.borrow_mut().streams().open(Dir::Uni, Default::default());
+		let opened = self
+			.shared
+			.conn
+			.borrow_mut()
+			.streams()
+			.open(Dir::Uni, Default::default());
 		match opened {
 			Some(id) => Poll::Ready(Ok(super::SendStream::new(self.shared.clone(), id))),
 			None => {
@@ -598,7 +603,12 @@ impl web_transport_trait::poll::Session for Connection {
 		if let Some(err) = self.shared.closed() {
 			return Poll::Ready(Err(err));
 		}
-		let opened = self.shared.conn.borrow_mut().streams().open(Dir::Bi, Default::default());
+		let opened = self
+			.shared
+			.conn
+			.borrow_mut()
+			.streams()
+			.open(Dir::Bi, Default::default());
 		match opened {
 			Some(id) => Poll::Ready(Ok((
 				super::SendStream::new(self.shared.clone(), id),
@@ -613,7 +623,11 @@ impl web_transport_trait::poll::Session for Connection {
 	}
 
 	fn poll_send_datagram(&mut self, _: &mut Context<'_>, payload: &[u8]) -> Poll<Result<(), Self::Error>> {
-		Poll::Ready(Self::send_datagram(self, Bytes::copy_from_slice(payload), Default::default()))
+		Poll::Ready(Self::send_datagram(
+			self,
+			Bytes::copy_from_slice(payload),
+			Default::default(),
+		))
 	}
 
 	fn poll_recv_datagram(&mut self, cx: &mut Context<'_>) -> Poll<Result<Bytes, Self::Error>> {

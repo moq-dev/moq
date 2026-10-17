@@ -3839,7 +3839,11 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 					let options = match &mut self.rank {
 						Rank::Group(group) => SendOptions {
 							group: Some(&*group),
-							priority: crate::priority::in_group(self.sequence, self.frame_start, self.ctx.steer_seen.order),
+							priority: crate::priority::in_group(
+								self.sequence,
+								self.frame_start,
+								self.ctx.steer_seen.order,
+							),
 						},
 						Rank::Queue(handle) => SendOptions {
 							group: None,
@@ -6325,7 +6329,11 @@ mod tests {
 					.unwrap();
 					let mut session = ScriptedSession::new(script);
 					let (_, recv) = futures::future::poll_fn(|cx| {
-						<ScriptedSession as crate::transport::poll::Session>::poll_open_bi(&mut session, cx, Default::default())
+						<ScriptedSession as crate::transport::poll::Session>::poll_open_bi(
+							&mut session,
+							cx,
+							Default::default(),
+						)
 					})
 					.await
 					.unwrap();

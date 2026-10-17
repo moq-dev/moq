@@ -24,10 +24,13 @@ use tokio::sync::{
 use tracing::{Instrument, Span, debug_span};
 
 use crate::quic::driver::{
-    ConnectionEvent, Duration, Instant, VarInt, mutex::Mutex, recv_stream::RecvStream,
+    ConnectionEvent, Duration, Instant, VarInt,
+    mutex::Mutex,
+    recv_stream::RecvStream,
     runtime::UdpSender,
     send_group::{self, SendGroup, SendOptions},
-    send_stream::SendStream, udp_transmit,
+    send_stream::SendStream,
+    udp_transmit,
 };
 use moq_quic::{
     ConnectionError, ConnectionHandle, ConnectionStats, Dir, EndpointEvent, Side, StreamEvent,
@@ -544,7 +547,11 @@ impl Connection {
     ///
     /// # Panics
     /// - when `options.group` belongs to another connection
-    pub fn send_datagram(&self, data: Bytes, options: SendOptions<'_>) -> Result<(), SendDatagramError> {
+    pub fn send_datagram(
+        &self,
+        data: Bytes,
+        options: SendOptions<'_>,
+    ) -> Result<(), SendDatagramError> {
         let conn = &mut *self.0.state.lock("send_datagram");
         if let Some(x) = &conn.error {
             return Err(SendDatagramError::ConnectionLost(x.clone()));
@@ -820,7 +827,13 @@ impl Future for OpenUni<'_> {
     type Output = Result<SendStream, ConnectionError>;
     fn poll(self: Pin<&mut Self>, ctx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.project();
-        let (conn, id, is_0rtt) = ready!(poll_open(ctx, this.conn, *this.options, this.notify, Dir::Uni))?;
+        let (conn, id, is_0rtt) = ready!(poll_open(
+            ctx,
+            this.conn,
+            *this.options,
+            this.notify,
+            Dir::Uni
+        ))?;
         Poll::Ready(Ok(SendStream::new(conn, id, is_0rtt)))
     }
 }
@@ -839,7 +852,13 @@ impl Future for OpenBi<'_> {
     type Output = Result<(SendStream, RecvStream), ConnectionError>;
     fn poll(self: Pin<&mut Self>, ctx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.project();
-        let (conn, id, is_0rtt) = ready!(poll_open(ctx, this.conn, *this.options, this.notify, Dir::Bi))?;
+        let (conn, id, is_0rtt) = ready!(poll_open(
+            ctx,
+            this.conn,
+            *this.options,
+            this.notify,
+            Dir::Bi
+        ))?;
 
         Poll::Ready(Ok((
             SendStream::new(conn.clone(), id, is_0rtt),

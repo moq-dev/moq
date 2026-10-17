@@ -1075,7 +1075,11 @@ mod tests {
 			None
 		}
 
-		fn send_datagram(&mut self, _: Bytes, _: crate::transport::poll::SendOptions<'_, crate::transport::poll::Ungrouped>) -> Result<(), Self::Error> {
+		fn send_datagram(
+			&mut self,
+			_: Bytes,
+			_: crate::transport::poll::SendOptions<'_, crate::transport::poll::Ungrouped>,
+		) -> Result<(), Self::Error> {
 			Ok(())
 		}
 		fn poll_recv_datagram(

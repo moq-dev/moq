@@ -458,12 +458,23 @@ impl poll::Session for DeadStreamSession {
 		}
 	}
 
-	fn poll_open_bi(&mut self, _cx: &mut Context<'_>, options: poll::SendOptions<'_, SinkGroup>) -> Poll<Result<poll::BiStreams<Self>, Self::Error>> {
+	fn poll_open_bi(
+		&mut self,
+		_cx: &mut Context<'_>,
+		options: poll::SendOptions<'_, SinkGroup>,
+	) -> Poll<Result<poll::BiStreams<Self>, Self::Error>> {
 		self.log.bi_opens.fetch_add(1, Ordering::Relaxed);
-		Poll::Ready(Ok((SinkSend::new(self.log.clone()).opened(options), DeadRecv(self.reset))))
+		Poll::Ready(Ok((
+			SinkSend::new(self.log.clone()).opened(options),
+			DeadRecv(self.reset),
+		)))
 	}
 
-	fn poll_open_uni(&mut self, _cx: &mut Context<'_>, options: poll::SendOptions<'_, SinkGroup>) -> Poll<Result<Self::SendStream, Self::Error>> {
+	fn poll_open_uni(
+		&mut self,
+		_cx: &mut Context<'_>,
+		options: poll::SendOptions<'_, SinkGroup>,
+	) -> Poll<Result<Self::SendStream, Self::Error>> {
 		Poll::Ready(Ok(SinkSend::new(self.log.clone()).opened(options)))
 	}
 
@@ -471,7 +482,11 @@ impl poll::Session for DeadStreamSession {
 		None
 	}
 
-	fn send_datagram(&mut self, payload: bytes::Bytes, options: poll::SendOptions<'_, SinkGroup>) -> Result<(), Self::Error> {
+	fn send_datagram(
+		&mut self,
+		payload: bytes::Bytes,
+		options: poll::SendOptions<'_, SinkGroup>,
+	) -> Result<(), Self::Error> {
 		self.log.record_datagram(payload, options);
 		Ok(())
 	}
@@ -649,7 +664,11 @@ impl poll::Session for SinkSession {
 		Poll::Ready(Ok((send, PendingRecv)))
 	}
 
-	fn poll_open_bi(&mut self, _cx: &mut Context<'_>, options: poll::SendOptions<'_, SinkGroup>) -> Poll<Result<poll::BiStreams<Self>, Self::Error>> {
+	fn poll_open_bi(
+		&mut self,
+		_cx: &mut Context<'_>,
+		options: poll::SendOptions<'_, SinkGroup>,
+	) -> Poll<Result<poll::BiStreams<Self>, Self::Error>> {
 		let Some(gate) = self.bi_gate.clone() else {
 			return Poll::Pending;
 		};
@@ -660,7 +679,11 @@ impl poll::Session for SinkSession {
 		Poll::Ready(Ok((send, PendingRecv)))
 	}
 
-	fn poll_open_uni(&mut self, cx: &mut Context<'_>, options: poll::SendOptions<'_, SinkGroup>) -> Poll<Result<Self::SendStream, Self::Error>> {
+	fn poll_open_uni(
+		&mut self,
+		cx: &mut Context<'_>,
+		options: poll::SendOptions<'_, SinkGroup>,
+	) -> Poll<Result<Self::SendStream, Self::Error>> {
 		if let Some(gate) = &self.uni_open_gate {
 			let waiter = self.uni_open_park.hold(cx);
 			match gate.poll(waiter, |open| (**open).then_some(()).map_or(Poll::Pending, Poll::Ready)) {
@@ -680,7 +703,11 @@ impl poll::Session for SinkSession {
 		self.groups.then(|| SinkGroup::open(self.log.clone(), priority))
 	}
 
-	fn send_datagram(&mut self, payload: bytes::Bytes, options: poll::SendOptions<'_, SinkGroup>) -> Result<(), Self::Error> {
+	fn send_datagram(
+		&mut self,
+		payload: bytes::Bytes,
+		options: poll::SendOptions<'_, SinkGroup>,
+	) -> Result<(), Self::Error> {
 		self.log.record_datagram(payload, options);
 		Ok(())
 	}
@@ -968,7 +995,11 @@ impl poll::Session for ScriptedSession {
 		)))
 	}
 
-	fn poll_open_bi(&mut self, cx: &mut Context<'_>, options: poll::SendOptions<'_, SinkGroup>) -> Poll<Result<poll::BiStreams<Self>, Self::Error>> {
+	fn poll_open_bi(
+		&mut self,
+		cx: &mut Context<'_>,
+		options: poll::SendOptions<'_, SinkGroup>,
+	) -> Poll<Result<poll::BiStreams<Self>, Self::Error>> {
 		if let Some(gate) = self.open_gate.clone() {
 			let waiter = self.park.hold(cx);
 			// A closed gate reads as open: the test dropped the producer, so nothing is
@@ -998,7 +1029,11 @@ impl poll::Session for ScriptedSession {
 		)))
 	}
 
-	fn poll_open_uni(&mut self, _cx: &mut Context<'_>, options: poll::SendOptions<'_, SinkGroup>) -> Poll<Result<Self::SendStream, Self::Error>> {
+	fn poll_open_uni(
+		&mut self,
+		_cx: &mut Context<'_>,
+		options: poll::SendOptions<'_, SinkGroup>,
+	) -> Poll<Result<Self::SendStream, Self::Error>> {
 		Poll::Ready(Ok(SinkSend::new(self.log.clone()).opened(options)))
 	}
 
@@ -1006,7 +1041,11 @@ impl poll::Session for ScriptedSession {
 		None
 	}
 
-	fn send_datagram(&mut self, payload: bytes::Bytes, options: poll::SendOptions<'_, SinkGroup>) -> Result<(), Self::Error> {
+	fn send_datagram(
+		&mut self,
+		payload: bytes::Bytes,
+		options: poll::SendOptions<'_, SinkGroup>,
+	) -> Result<(), Self::Error> {
 		self.log.record_datagram(payload, options);
 		Ok(())
 	}
