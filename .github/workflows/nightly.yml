@@ -98,7 +98,7 @@ jobs:
             recipe: pub check-bbb
             uncached: true
           - name: Browser backend baseline
-            recipe: test wasm-baseline
+            recipe: test wasm-baseline --uniffi
             chromium: true
             artifact: wasm-backend-baseline
             artifact-path: target/test
@@ -261,6 +261,8 @@ jobs:
   # Full platform coverage without rebuilding after every main queue merge.
   platform:
     uses: ./.github/workflows/platform.yml
+    with:
+      benchmarks: true
 
   # Plays the matrix in headless Chromium and the native player through moq-shaper
   # and grades what the listener heard against test/audio-quality/budgets.json.

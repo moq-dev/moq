@@ -230,7 +230,7 @@ Measure what each binding adds over Rust:
 nix develop --command just bench-ffi
 ```
 
-Every runner (Rust, Go, Python, Kotlin) runs the same in-process rounds with no
+Every runner (Rust, Go, Python, Kotlin, C++, Dart, Swift) runs the same in-process rounds with no
 network: each publisher writes one group from the driving thread while every
 subscriber reads it on its own task, and a round waits for every subscriber. It
 sweeps frame sizes from 100 B to 1 MiB at one publisher and subscriber, then
@@ -246,7 +246,21 @@ boundary and wrapper cost. `rust-net` runs the same rounds on moq-net, so its
 ratio is what moq-ffi's handles and runtime cost. Ratios hold only within one
 machine. The nightly runs it, prints the table in the job summary, and keeps the
 results as the `bench-ffi` artifact. Each language also has its own recipe
-(`just go bench`, `just py bench`, `just kt bench`).
+(`just go bench`, `just py bench`, `just kt bench`, `just cpp bench`,
+`just dart bench`, `just swift bench`). C++ uses C++20 reader coroutines;
+Swift uses structured tasks; Dart uses futures on its event loop.
+The payload checks and scheduling costs are included in each measurement.
+
+Linux runs every wrapper except Swift. The nightly macOS platform job, or a
+manual Platform run with `benchmarks` set, runs `just bench-ffi swift`,
+measuring fresh Rust baselines on that same machine, and uploads
+`bench-ffi-swift` separately. Never compare its absolute values
+against the Linux job's baselines. A local run can select runners explicitly,
+for example `just bench-ffi cpp dart`. Each invocation clears its output
+directory and refuses a runner that produces no report. Dart's native asset
+hook builds its usual minimal-feature release library; C++ and Swift use
+their default-feature release libraries. No codec work is timed here.
+C++ and Dart process CPU measurement supports Linux and macOS.
 
 ## Browser
 

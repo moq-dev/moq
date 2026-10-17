@@ -4,8 +4,10 @@
 //! per worker, each with its own ring, its own `SO_REUSEPORT` socket steered
 //! by connection id ([`moq_sock::shard`]), and its own
 //! [`moq_uring::quic::Endpoint`] serving browsers (WebTransport over `h3`)
-//! and native peers (raw QUIC, moq-lite ALPNs) alike. Sessions are moq-lite
-//! only.
+//! and native peers (raw QUIC) alike, on every version the listener is
+//! configured for. moq-lite on its own ALPN runs unboxed on the worker;
+//! moq-transport and the SETUP-negotiated versions run through
+//! [`moq_uring::transport::Local`], since their drivers need `Send`.
 //!
 //! The split of work mirrors the relay's topology: a worker owns everything
 //! transport-shaped (the handshake, the session's protocol machine), while
@@ -64,8 +66,8 @@ struct Serve {
 	/// The shared runtime, which owns authentication (the auth API's HTTP
 	/// client needs its reactor) and session supervision.
 	tokio: tokio::runtime::Handle,
-	/// The moq-lite ALPNs this listener speaks, for the WebTransport
-	/// subprotocol pick.
+	/// The moq ALPNs this listener speaks, for the WebTransport subprotocol
+	/// pick.
 	alpns: Arc<Vec<String>>,
 	/// The negotiated-version restriction, when the operator set one.
 	versions: moq_net::Versions,
@@ -181,39 +183,14 @@ impl Workers {
 		// The requested address, with an ephemeral port resolved.
 		let addr = group.addr();
 
-		// The moq-lite ALPNs this listener speaks: the operator's version
-		// restriction when one is set, minus anything that is not lite (the
-		// io_uring path runs unboxed lite machines only). `h3` rides along
-		// for browsers, which negotiate the moq version as a WebTransport
-		// subprotocol instead.
+		// Every configured version's ALPN, as the tokio listener advertises.
+		// `h3` rides along for browsers, which negotiate the moq version as a
+		// WebTransport subprotocol instead.
 		let versions: moq_net::Versions = match listen.version.is_empty() {
 			true => Default::default(),
 			false => listen.version.clone().into(),
 		};
-		let alpns: Vec<String> = versions
-			.iter()
-			.filter(|version| version.is_lite())
-			.map(|version| version.alpn().to_string())
-			.collect();
-		if alpns.is_empty() {
-			anyhow::bail!("io_uring workers speak moq-lite only, and the version restriction leaves none");
-		}
-		// lite 01/02 have no ALPN of their own: they negotiate over the shared
-		// `moql` one through the bidi SETUP exchange, which
-		// `accept_request_lite` does not implement. The default set carries
-		// them and simply does not advertise them, like the moq-transport
-		// versions below; asking for one *by name* is the case that would
-		// start cleanly and then fail every handshake.
-		if !listen.version.is_empty()
-			&& let Some(version) = versions.iter().find(|version| version.uses_setup_negotiation())
-		{
-			anyhow::bail!("io_uring workers cannot serve {version:?}, which negotiates its version in the SETUP");
-		}
-		if versions.iter().any(|version| !version.is_lite()) {
-			tracing::warn!(
-				"io_uring workers speak moq-lite only; the configured moq-transport versions are not served"
-			);
-		}
+		let alpns: Vec<String> = versions.alpns().into_iter().map(str::to_owned).collect();
 
 		let alpn = alpns
 			.iter()
@@ -648,11 +625,6 @@ async fn serve_connection(
 
 	// Browsers speak WebTransport; everyone else raw QUIC. The moq version
 	// rides the ALPN for raw QUIC and the WebTransport subprotocol for `h3`.
-	// A browser offering no subprotocol we speak is refused with
-	// `Error::Version` rather than falling back to the pre-lite-05 bidi SETUP
-	// the tokio listener still accepts: that path is moq-transport-shaped, and
-	// reaching it would drag the thread-affinity bounds `accept_request_lite`
-	// exists to avoid back onto this transport.
 	// The negotiated moq protocol: the WebTransport sub-protocol for `h3`, else the ALPN.
 	let mut alpn = conn.protocol().map(str::to_owned);
 	let (transport, url) = match conn.protocol() {
@@ -688,13 +660,80 @@ async fn serve_connection(
 		Some(_) => moq_net::transport::Binding::Uri,
 		None => moq_net::transport::Binding::InBand,
 	};
-	let request = deadline
-		.bound(server.accept_request_lite(
-			moq_net::time::now(),
-			moq_uring::transport::Session::new(transport, binding),
-		))
-		.await
-		.context("moq handshake failed")?;
+	let session = moq_uring::transport::Session::new(transport, binding);
+	let now = moq_net::time::now();
+	// moq-lite on its own ALPN runs unboxed on this worker. Everything else
+	// (moq-transport, and the versions that negotiate in a bidi SETUP, which a
+	// browser offering no subprotocol falls back to) boxes its futures with a
+	// native `Send` bound, which only a `Local` session meets.
+	let unboxed = alpn
+		.as_deref()
+		.and_then(moq_net::Version::from_alpn)
+		.is_some_and(|version| version.is_lite());
+	let mut accepted = Accepted {
+		handle,
+		conn,
+		deadline,
+		serve,
+		id,
+		remote,
+		sni,
+		identity,
+		alpn,
+		url,
+	};
+	match unboxed {
+		true => {
+			let request = accepted
+				.deadline
+				.bound(server.accept_request_lite(now, session))
+				.await
+				.context("moq handshake failed")?;
+			serve_request(accepted, request).await
+		}
+		false => {
+			let request = accepted
+				.deadline
+				.bound(server.accept_request(now, moq_uring::transport::Local::new(session)))
+				.await
+				.context("moq handshake failed")?;
+			serve_request(accepted, request).await
+		}
+	}
+}
+
+/// A connection past its transport handshake, with the facts read off it
+/// before the moq handshake consumed it.
+struct Accepted {
+	handle: moq_uring::Handle,
+	conn: moq_uring::quic::web::Session,
+	deadline: Deadline,
+	serve: Serve,
+	id: u64,
+	remote: SocketAddr,
+	sni: Option<String>,
+	identity: Option<moq_tokio::tls::PeerIdentity>,
+	alpn: Option<String>,
+	url: Option<moq_uring::url::Url>,
+}
+
+/// Authenticate on the shared runtime, then start the session on the worker.
+async fn serve_request<S: moq_net::transport::poll::Session>(
+	accepted: Accepted,
+	request: moq_net::server::Handshake<S>,
+) -> anyhow::Result<()> {
+	let Accepted {
+		handle,
+		conn,
+		mut deadline,
+		serve,
+		id,
+		remote,
+		sni,
+		identity,
+		alpn,
+		url,
+	} = accepted;
 
 	// The path + `?jwt=` ride the URL for WebTransport and the SETUP for raw
 	// QUIC; either way the grant comes from the shared runtime, which owns the

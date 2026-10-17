@@ -54,7 +54,7 @@ import {
 } from "./publish_namespace.ts";
 import { RequestError, RequestOk } from "./request.ts";
 import { finCancels, refuseReserved } from "./request_stream.ts";
-import { joinFilter, Subscribe, SubscribeError, SubscribeOk, Unsubscribe } from "./subscribe.ts";
+import { joinFilter, Subscribe, SubscribeError, SubscribeOk, SubscribeUpdate, Unsubscribe } from "./subscribe.ts";
 import {
 	PublishBlocked,
 	SubscribeNamespace,
@@ -1087,6 +1087,21 @@ export class Subscriber {
 				}
 
 				const typeId = await stream.reader.u53();
+				// Drafts 14-15 have no update for an advertisement, so a SUBSCRIBE_UPDATE the
+				// adapter routed here is refused and changes nothing. Draft 14 answers no update;
+				// draft 15 names the update's own Request ID, which the adapter already spent.
+				if (legacy && typeId === SubscribeUpdate.id) {
+					const body = await stream.reader.read(await stream.reader.u16());
+					if (version === Version.DRAFT_15) {
+						await stream.writer.u53(RequestError.id);
+						await new RequestError({
+							requestId: await new Reader(undefined, body, version).u62(),
+							errorCode: toRequestCode("not_supported", "publish_namespace", version),
+							reasonPhrase: "update not supported",
+						}).encode(stream.writer, version);
+					}
+					continue;
+				}
 				if (done && typeId === PublishNamespaceDone.id) {
 					await PublishNamespaceDone.decode(stream.reader, version);
 					break;

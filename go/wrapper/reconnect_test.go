@@ -287,3 +287,41 @@ func TestDialWebSocketOptions(t *testing.T) {
 		t.Fatal("negative websocket delay dialed")
 	}
 }
+
+// Every connection knob reaches the native client and the dial still connects,
+// and a negative duration fails Dial instead of wrapping into an enormous one.
+func TestDialConnectionOptions(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), reconnectTimeout)
+	defer cancel()
+
+	r := startRelay(t, ctx, "127.0.0.1:0")
+	defer r.server.Close()
+
+	if len(moq.Versions()) == 0 {
+		t.Fatal("no versions offered")
+	}
+
+	url := "https://" + r.addr
+	client, err := moq.Dial(ctx, url,
+		moq.WithTLSVerify(false),
+		moq.WithTLSHostName("localhost"),
+		moq.WithVersions(moq.Versions()...),
+		moq.WithConnectTimeout(5*time.Second),
+		moq.WithRace(0),
+		moq.WithResolutionDelay(0),
+		moq.WithQUICIdleTimeout(5*time.Second),
+		moq.WithQUICKeepAlive(0),
+		moq.WithQUICGSO(false),
+		moq.WithQUICMTUDiscovery(true),
+		moq.WithQUICCongestionControl(moq.CongestionControlLoss),
+		moq.WithWebSocketEnabled(false),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = client.Close()
+
+	if _, err := moq.Dial(ctx, url, moq.WithQUICIdleTimeout(-time.Millisecond)); err == nil {
+		t.Fatal("negative idle timeout dialed")
+	}
+}

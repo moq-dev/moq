@@ -46,9 +46,10 @@ dev:
 bench $BASE="":
     bench/run.sh "$BASE"
 
-# Benchmark the Rust, Go, Python, and Kotlin bindings against two Rust baselines.
-bench-ffi:
-    bench/ffi.sh
+# Benchmark selected wrappers against two Rust baselines on this machine.
+[positional-arguments]
+bench-ffi *runners:
+    bench/ffi.sh "$@"
 
 # Compare BoltFFI with UniFFI on one moq-ffi slice. STEPS: build, bench, size, or all.
 bench-ffi-gen *STEPS:
