@@ -621,6 +621,10 @@ export class Connection implements Established {
 					throw new ProtocolViolation("client GOAWAY must not name a redirect");
 				}
 				// Draft-18's Request ID names our IDs: even when we are the client, odd for a server.
+				// It is required here, on the control stream.
+				if (version === Version.DRAFT_18 && msg.requestId === undefined) {
+					throw new ProtocolViolation("draft-18 GOAWAY on the control stream lacks a Request ID");
+				}
 				if (msg.requestId !== undefined && msg.requestId % 2n !== (this.#client ? 0n : 1n)) {
 					throw new ProtocolViolation("GOAWAY Request ID has the wrong parity", {
 						code: SessionCode.InvalidRequestId,

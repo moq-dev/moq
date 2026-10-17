@@ -57,7 +57,9 @@ export async function nextMessage(reader: Reader, version: IetfVersion, goaway: 
 		if (type !== GoAway.id || version < Version.DRAFT_18) return type;
 		if (goaway.seen) throw new ProtocolViolation("second GOAWAY on a request stream");
 		goaway.seen = true;
-		await GoAway.decode(reader, version);
+		// Draft-18's Request ID belongs on the control stream only.
+		const msg = await GoAway.decode(reader, version);
+		if (msg.requestId !== undefined) throw new ProtocolViolation("request stream GOAWAY carries a Request ID");
 	}
 }
 

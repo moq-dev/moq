@@ -267,14 +267,17 @@ for (const [version, alpn] of DRAFTS) {
 	}
 }
 
-// Draft-18's GOAWAY Request ID names the receiver's IDs: even for a client.
+// Draft-18's GOAWAY Request ID names the receiver's IDs: even for a client. It is required on
+// the control stream.
 for (const [requestId, code] of [
 	[0, undefined],
 	[4, undefined],
 	[1, SessionCode.InvalidRequestId],
 	[5, SessionCode.InvalidRequestId],
+	[undefined, SessionCode.ProtocolViolation],
 ] as const) {
-	test(`a draft-18 GOAWAY Request ID ${requestId} ${code === undefined ? "keeps" : "closes"} a client`, async () => {
+	const name = requestId === undefined ? "without a Request ID" : `Request ID ${requestId}`;
+	test(`a draft-18 GOAWAY ${name} ${code === undefined ? "keeps" : "closes"} a client`, async () => {
 		const logged = spyOn(console, "error").mockImplementation(() => undefined);
 		const { pair, peer, connection } = await client(Version.DRAFT_18, ALPN.DRAFT_18);
 		try {
@@ -286,3 +289,22 @@ for (const [requestId, code] of [
 		}
 	});
 }
+
+// Draft-18's GOAWAY Request ID belongs on the control stream only.
+test("a draft-18 request stream GOAWAY with a Request ID closes", async () => {
+	const logged = spyOn(console, "error").mockImplementation(() => undefined);
+	const { pair, stream, close } = await serving(Version.DRAFT_18, ALPN.DRAFT_18);
+	try {
+		await stream.writer.u53(SubscribeNamespace.id);
+		await new SubscribeNamespace({ requestId: 0n, namespace: Path.empty() }).encode(
+			stream.writer,
+			Version.DRAFT_18,
+		);
+		expect(await stream.reader.u53()).toBe(RequestOk.id);
+		await stream.writer.write(goaways(1, Version.DRAFT_18, 0));
+		expect(await closeCode(pair.client)).toBe(SessionCode.ProtocolViolation);
+	} finally {
+		logged.mockRestore();
+		close();
+	}
+});

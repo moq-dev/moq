@@ -1395,11 +1395,13 @@ async fn read_goaways<R: crate::transport::poll::RecvStream>(
 		tracing::info!(message = ?msg, "received GOAWAY");
 
 		// Draft-18 names the first of our own Request IDs it did not process: even for a
-		// client, odd for a server.
-		if let Some(request_id) = msg.request_id
-			&& request_id.0 % 2 != u64::from(!client)
-		{
-			return Err(DecodeError::Session(SessionError::InvalidRequestId).into());
+		// client, odd for a server. The field is required here, on the control stream.
+		match msg.request_id {
+			None if version == Version::Draft18 => return Err(Error::ProtocolViolation),
+			Some(request_id) if request_id.0 % 2 != u64::from(!client) => {
+				return Err(DecodeError::Session(SessionError::InvalidRequestId).into());
+			}
+			_ => {}
 		}
 
 		// Nothing may follow a GOAWAY on this stream, so bytes already here are a violation.
@@ -3281,20 +3283,23 @@ mod tests {
 	}
 
 	/// A draft-18 GOAWAY names one of the receiver's own Request IDs, so one with the sender's
-	/// parity closes the session with INVALID_REQUEST_ID rather than redirecting it.
+	/// parity closes the session with INVALID_REQUEST_ID rather than redirecting it, and one
+	/// without a Request ID closes it as a PROTOCOL_VIOLATION.
 	#[moq_net_sim::test]
 	async fn a_draft18_goaway_request_id_has_the_receivers_parity() {
 		const VERSION: Version = Version::Draft18;
 		// The loop runs as a client, whose Request IDs are even.
 		for (request_id, expected) in [
-			(0, None),
-			(4, None),
-			(1, Some(SessionError::InvalidRequestId)),
-			(5, Some(SessionError::InvalidRequestId)),
+			(Some(0), None),
+			(Some(4), None),
+			(Some(1), Some(SessionError::InvalidRequestId)),
+			(Some(5), Some(SessionError::InvalidRequestId)),
+			// Required on the control stream.
+			(None, Some(SessionError::ProtocolViolation)),
 		] {
-			let stream = setup_stream(VERSION, ietf::Parameters::default(), &goaway(VERSION, Some(request_id)));
+			let stream = setup_stream(VERSION, ietf::Parameters::default(), &goaway(VERSION, request_id));
 			let closed = client_reads_setup_stream(VERSION, stream).await;
-			assert_eq!(closed, expected, "Request ID {request_id}");
+			assert_eq!(closed, expected, "Request ID {request_id:?}");
 		}
 	}
 
@@ -3455,7 +3460,12 @@ mod tests {
 				"{version:?}: a GOAWAY on each of two streams"
 			);
 
-			for (after, why) in [(two, "two GOAWAYs"), (frame(version, 0x7e, &[]), "an unknown message")] {
+			let mut malformed = vec![(two, "two GOAWAYs"), (frame(version, 0x7e, &[]), "an unknown message")];
+			// Draft-18's Request ID belongs on the control stream only.
+			if version == Version::Draft18 {
+				malformed.push((goaway(version, Some(0)), "a GOAWAY with a Request ID"));
+			}
+			for (after, why) in malformed {
 				let closed = serve_bidis(version, vec![subscribe_namespace_then(version, 1, &after)]).await;
 				assert_eq!(closed, Some(SessionError::ProtocolViolation), "{version:?}: {why}");
 			}

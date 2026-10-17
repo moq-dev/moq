@@ -46,8 +46,8 @@ impl Message for GoAway<'_> {
 		}
 		let (timeout, request_id) = match version {
 			Version::Draft14 | Version::Draft15 | Version::Draft16 => (0, None),
-			// The Request ID is absent on a request stream, and tolerated absent from a
-			// lenient peer on the control stream.
+			// The Request ID is present only on the control stream; each caller checks it
+			// against the stream it read from.
 			Version::Draft18 => {
 				let timeout = r.varint()?;
 				let request_id = match r.is_empty() {

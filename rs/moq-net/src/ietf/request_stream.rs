@@ -136,7 +136,10 @@ impl<T: Decode<Version>> Decode<Version> for Next<T> {
 			let mut peek = r.clone();
 			if peek.varint()? == super::GoAway::ID {
 				*r = peek;
-				super::GoAway::decode(r, version)?;
+				// Draft-18's Request ID belongs on the control stream only.
+				if super::GoAway::decode(r, version)?.request_id.is_some() {
+					return Err(DecodeError::InvalidValue);
+				}
 				return Ok(Self::GoAway);
 			}
 		}
