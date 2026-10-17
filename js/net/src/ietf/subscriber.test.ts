@@ -2093,8 +2093,13 @@ async function answerCounted(transport: WebTransport, activeCount: number | unde
 const sessionClosed = (pair: ReturnType<typeof createMockTransportPair>) =>
 	Promise.race([
 		pair.server.closed,
-		new Promise((_resolve, reject) => setTimeout(() => reject(new Error("session stayed up")), STREAM_WAIT)),
+		new Promise<never>((_resolve, reject) => setTimeout(() => reject(new Error("session stayed up")), STREAM_WAIT)),
 	]);
+
+/** The session closes with PROTOCOL_VIOLATION, not a clean code. */
+async function violationClosed(pair: ReturnType<typeof createMockTransportPair>) {
+	expect((await sessionClosed(pair)).closeCode).toBe(new ProtocolViolation("").code);
+}
 
 const yieldTask = () => new Promise((resolve) => setTimeout(resolve, 0));
 
@@ -2146,13 +2151,13 @@ test("an ACTIVE_COUNT that does not match the negotiation closes the session", a
 	] as const) {
 		const pair = createMockTransportPair(ALPN.DRAFT_19);
 		const session = new NativeSession(pair.server, VERSION, true);
-		const subscriber = new Subscriber({ session, activeCount: negotiated });
+		const subscriber = new Subscriber({ session, quic: pair.server, activeCount: negotiated });
 		const warn = spyOn(console, "warn").mockImplementation(() => void 0);
 		onTestFinished(() => warn.mockRestore());
 
 		subscriber.announced();
 		await answerCounted(pair.client, count);
-		await sessionClosed(pair);
+		await violationClosed(pair);
 	}
 });
 
@@ -2161,7 +2166,7 @@ test.each(["done", "fin"] as const)("a counted set cut short by %s closes the se
 	{
 		const pair = createMockTransportPair(ALPN.DRAFT_19);
 		const session = new NativeSession(pair.server, VERSION, true);
-		const subscriber = new Subscriber({ session, activeCount: true });
+		const subscriber = new Subscriber({ session, quic: pair.server, activeCount: true });
 		const warn = spyOn(console, "warn").mockImplementation(() => void 0);
 		onTestFinished(() => warn.mockRestore());
 
@@ -2177,6 +2182,6 @@ test.each(["done", "fin"] as const)("a counted set cut short by %s closes the se
 		} else {
 			subscription.writer.close();
 		}
-		await sessionClosed(pair);
+		await violationClosed(pair);
 	}
 });

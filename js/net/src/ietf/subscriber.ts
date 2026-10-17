@@ -404,6 +404,17 @@ export class Subscriber {
 		}
 	}
 
+	// The peer broke the protocol: close with the violation's code before the session's own
+	// close, which would send a clean one, as the connection does for its own violations.
+	#violated(err: ProtocolViolation) {
+		try {
+			this.#quic?.close({ closeCode: err.code, reason: err.message });
+		} catch {
+			// Already closed.
+		}
+		this.#session.close();
+	}
+
 	async #runAnnounced(announced: announce.Producer, prefix: Path.Valid, hidden: boolean) {
 		const version = this.#session.version;
 
@@ -596,7 +607,7 @@ export class Subscriber {
 				// rejection would go unhandled. Idempotent with the catch below, which is
 				// what runs when the loop is the one that ends the race.
 				readLoop.catch((err: unknown) => {
-					if (err instanceof ProtocolViolation) this.#session.close();
+					if (err instanceof ProtocolViolation) this.#violated(err);
 				});
 
 				// Wait for either the read loop or the announced to close
@@ -614,7 +625,7 @@ export class Subscriber {
 			// is the only place a malformed one surfaces. The cluster draft requires closing
 			// the session over those, and the stream alone is not enough: the peer would
 			// just repeat it on the next SUBSCRIBE_NAMESPACE.
-			if (e instanceof ProtocolViolation) this.#session.close();
+			if (e instanceof ProtocolViolation) this.#violated(e);
 
 			// Abort the stream rather than letting the caller's `finally` close it cleanly.
 			// A rejected namespace subscription is a failure, and a consumer that can't tell
