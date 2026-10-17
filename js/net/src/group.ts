@@ -477,6 +477,10 @@ export class Consumer {
 		};
 		hooks.recoverGroup = (group, recover) => {
 			group.#recover = recover;
+			// A track's drift scan may have read `closed` already, latching a failure recovery can
+			// now continue: derive it again with the recovery in view.
+			if (group.#closed?.peek() instanceof Error && group.#verdict.peek() === undefined)
+				group.#closed = undefined;
 		};
 		hooks.groupExpired = (group) => group.#ended;
 		hooks.guardGroup = (group, operation) => group.#guard(operation);
@@ -579,7 +583,7 @@ export class Consumer {
 		if (!attempt) {
 			const abort = new AbortController();
 			const started: Attempt = { abort, result: Promise.resolve(), settled: false };
-			started.result = recover.replace(this.#state.start, failed, abort.signal).then(
+			started.result = recover.replace(this.#index(), failed, abort.signal).then(
 				(replacement) => {
 					started.settled = true;
 					// Abandoned while it was out: nobody reads it.
@@ -602,7 +606,9 @@ export class Consumer {
 		// The copy being read moved first: look again, keeping the attempt out.
 		if (!attempt.settled) return true;
 		if (this.#attempt === attempt) this.#attempt = undefined;
+		// Taken once: a concurrent read awaiting the same attempt looks again instead.
 		const replacement = attempt.replacement;
+		attempt.replacement = undefined;
 		if (!replacement) return true;
 		if (!failed && (this.#state.frames.peek().length > 0 || this.#state.closed.peek() !== undefined)) {
 			// The copy being read delivered or ended meanwhile; keep reading it.
@@ -611,6 +617,11 @@ export class Consumer {
 		}
 		this.#adopt(replacement);
 		return true;
+	}
+
+	// The next frame this consumer reads: past what it read, and what a copy it adopted repeats.
+	#index(): number {
+		return Math.max(this.#state.start, this.#skip);
 	}
 
 	// Give up a replacement still being asked for, or one nobody adopted: the group ended without it.
@@ -625,7 +636,7 @@ export class Consumer {
 	// Read the rest of the group from `replacement`, from the frame this one reached.
 	#adopt(replacement: Replacement): void {
 		const next = replacement.group.#state;
-		const index = this.#state.start;
+		const index = this.#index();
 		if (next.start > index) {
 			replacement.group.close();
 			this.#terminal ??= new Error(`group ${this.sequence} cannot resume at frame ${index}`);

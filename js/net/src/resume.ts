@@ -81,6 +81,22 @@ function compatible(a: track.Info, b: track.Info): boolean {
 	return a.timescale === b.timescale && a.maxAge === b.maxAge && a.priority === b.priority;
 }
 
+/**
+ * Ask `source` what track `name` is, abandoning the question once `retired` aborts. A caller's
+ * `hold` keeps the track wanted until it or `retired` aborts; without one, only until the answer.
+ */
+function ask(source: Source, name: string, retired: AbortSignal, hold?: AbortSignal): Promise<track.Info> {
+	if (hold) return source.wire.resolveTrackInfo(name, AbortSignal.any([hold, retired]));
+	const query = new AbortController();
+	const onRetire = () => query.abort(retired.reason);
+	if (retired.aborted) onRetire();
+	else retired.addEventListener("abort", onRetire, { once: true });
+	return source.wire.resolveTrackInfo(name, query.signal).finally(() => {
+		retired.removeEventListener("abort", onRetire);
+		query.abort();
+	});
+}
+
 /** One route's broadcast, held while the front serves it or a reader still reads a copy of it. */
 class Source {
 	readonly wire: BroadcastWire;
@@ -514,7 +530,9 @@ class Reader implements ResumeSource {
 
 	#handOut(copy: Copy, group: GroupConsumer): GroupConsumer {
 		this.#newest = Math.max(this.#newest ?? 0, group.sequence);
-		hooks.recoverGroup(group, new Recover(this, group, copy));
+		const recover = new Recover(this, group, copy);
+		hooks.recoverGroup(group, recover);
+		recover.watch(group);
 		return group;
 	}
 
@@ -639,6 +657,13 @@ function startFetch(
 	wire.fetchGroup(name, sequence, { signal: controller.signal })
 		.then(
 			(group) => {
+				// A copy that already failed continues nothing: that is the route failing again.
+				const failed = group.closed.peek();
+				if (failed instanceof Error) {
+					group.close();
+					fetch.outcome = { error: failed };
+					return;
+				}
 				fetch.outcome = { group };
 				// Abandoned while it was out: nobody reads it.
 				if (controller.signal.aborted) group.close();
@@ -690,6 +715,13 @@ class Recover implements GroupRecover {
 		this.#sequence = group.sequence;
 		this.#copy = copy;
 		copy.lease++;
+	}
+
+	/**
+	 * Release the copy once the group ends. Called only after the group carries this recovery:
+	 * reading `closed` before then would settle it on a failure recovery could still continue.
+	 */
+	watch(group: GroupConsumer): void {
 		void group.closed.then(() => this.#release());
 	}
 
@@ -808,6 +840,8 @@ export class Front {
 	#info = new Map<string, { info: track.Info; source: Source }>();
 	/** Bumped whenever the source changes, so an answer from a replaced one is dropped. */
 	#changed = new Signal(0);
+	/** Aborted once the current source is replaced, retiring what was asked of it. */
+	#retire = new AbortController();
 	#concluded = false;
 	/** The tracks each source was checked against the recorded properties for; see #verify. */
 	#verified = new WeakMap<Source, Set<string>>();
@@ -827,7 +861,7 @@ export class Front {
 		this.#fromSession ||= source.fromSession;
 		const previous = this.#source;
 		this.#source = source;
-		this.#changed.update((n) => n + 1);
+		this.#retired();
 		for (const route of this.#routes.values()) this.#splice(route, source);
 		previous?.release();
 	}
@@ -837,7 +871,7 @@ export class Front {
 		if (this.#concluded || !this.#source) return;
 		const previous = this.#source;
 		this.#source = undefined;
-		this.#changed.update((n) => n + 1);
+		this.#retired();
 		for (const route of this.#routes.values()) route.park();
 		previous.release();
 	}
@@ -849,7 +883,14 @@ export class Front {
 		for (const route of this.#routes.values()) route.conclude();
 		this.#source?.release();
 		this.#source = undefined;
+		this.#retired();
+	}
+
+	// The source changed: wake what waits on it, and retire what was asked of the old one.
+	#retired(): void {
 		this.#changed.update((n) => n + 1);
+		this.#retire.abort();
+		this.#retire = new AbortController();
 	}
 
 	/**
@@ -874,16 +915,18 @@ export class Front {
 		// answered yet is asked too, so a swap racing its first answer is still checked.
 		source.retain();
 		previous?.retain();
+		// Abandoned once another route supersedes this one, releasing both.
+		const retired = this.#retire.signal;
 		const expected = recorded
 			? Promise.resolve(recorded.info)
-			: (previous as Source).wire.resolveTrackInfo(route.name).then(
+			: ask(previous as Source, route.name, retired).then(
 					(info) => {
 						this.#record(route.name, info, previous as Source);
 						return info;
 					},
 					() => undefined,
 				);
-		Promise.all([expected, source.wire.resolveTrackInfo(route.name)])
+		Promise.all([expected, ask(source, route.name, retired)])
 			.then(
 				([expected, info]) => {
 					if (this.#source !== source) return;
@@ -929,8 +972,14 @@ export class Front {
 		if (recorded?.source === source) return;
 		let verified = this.#verified.get(source);
 		if (verified?.has(name)) return;
-		// A one-shot query: a hold would keep the track wanted for as long as the fetch's signal.
-		const info = await source.wire.resolveTrackInfo(name);
+		const retired = this.#retire.signal;
+		// A copy a reader still reads says what the track is before any fetch does.
+		const served = this.#routes.get(name)?.served;
+		if (!recorded && served && served !== source) {
+			const info = await ask(served, name, retired).catch(() => undefined);
+			if (info) this.#record(name, info, served);
+		}
+		const info = await ask(source, name, retired);
 		// The first answer says what the track is; later sources have to match it.
 		const expected = this.#info.get(name);
 		if (!expected) this.#record(name, info, source);
@@ -968,10 +1017,13 @@ export class Front {
 				continue;
 			}
 			source.retain();
+			const retired = this.#retire.signal;
 			let info: track.Info;
 			try {
-				info = await source.wire.resolveTrackInfo(name, hold);
+				info = await ask(source, name, retired, hold);
 			} catch (err) {
+				// Another route took over before this one answered: ask it instead.
+				if (retired.aborted && !hold?.aborted && !this.#concluded) continue;
 				const error = err instanceof Error ? err : new Error(String(err));
 				// The route failed: ask the next one, unless none will come.
 				if (!routeFailed(error) || this.#concluded || hold?.aborted) throw error;

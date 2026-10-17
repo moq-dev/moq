@@ -663,3 +663,102 @@ test("a group the old route gets after the swap, which the new route never has, 
 	a.close();
 	b.close();
 });
+
+test("a group handed out already failed with its route still continues on the next one", async () => {
+	const front = new Front();
+	const a = new BroadcastProducer();
+	const b = new BroadcastProducer();
+	const ta = copy(a);
+	const tb = copy(b);
+	front.serve(a.consume());
+	const sub = front.consumer.track("seq").subscribe();
+	// The old route fails group 0 before the reader takes it.
+	const failed = ta.write(0, 1, false);
+	failed.close(new StreamError(StreamCode.SessionClosed));
+	const group = sub.tryRecvGroup();
+	if (!group) throw new Error("expected group 0");
+	expect(dec.decode((await group.readFrame())?.payload)).toBe("0.0");
+	const read = group.readFrame();
+
+	tb.write(0, 2);
+	front.serve(b.consume());
+	expect(dec.decode((await read)?.payload)).toBe("0.1");
+
+	sub.close();
+	front.consumer.close();
+	a.close();
+	b.close();
+});
+
+test("track info asks the next route when the current one never answers", async () => {
+	const front = new Front();
+	const a = new BroadcastProducer();
+	const b = new BroadcastProducer();
+	// a serves tracks on demand but never answers.
+	void wireOf(a).requested();
+	b.createTrack("seq", { priority: 2 });
+	front.serve(a.consume());
+	const info = front.consumer.track("seq").info();
+	await settle();
+	front.serve(b.consume());
+	expect((await info).priority).toBe(2);
+
+	front.consumer.close();
+	a.close();
+	b.close();
+});
+
+test("a route superseded while its properties are checked stops being asked", async () => {
+	const front = new Front();
+	const a = new BroadcastProducer();
+	const b = new BroadcastProducer();
+	const c = new BroadcastProducer();
+	copy(a);
+	copy(c);
+	front.serve(a.consume());
+	const sub = front.consumer.track("seq").subscribe();
+	await sub.info();
+	// b never answers what the track is, so its splice waits on it.
+	void wireOf(b).requested();
+	front.serve(b.consume());
+	await settle();
+	expect(b.demand().used.peek()).toBe(true);
+
+	front.serve(c.consume());
+	await settle();
+	expect(b.demand().used.peek()).toBe(false);
+
+	sub.close();
+	front.consumer.close();
+	a.close();
+	b.close();
+	c.close();
+});
+
+test("a fetch waits for the copy being read to say what the track is", async () => {
+	const front = new Front();
+	const a = new BroadcastProducer();
+	const b = new BroadcastProducer();
+	// a answers what the track is only when told to.
+	const requests = wireOf(a).requested();
+	const tb = b.createTrack("seq", { priority: 2 });
+	const group = new GroupProducer(0);
+	tb.writeGroup(group);
+	group.writeFrame({ payload: enc.encode("b") });
+	group.close();
+	front.serve(a.consume());
+	const sub = front.consumer.track("seq").subscribe();
+	front.serve(b.consume());
+	const fetching = front.consumer.track("seq").fetchGroup(0);
+	fetching.catch(() => {});
+	await settle();
+
+	const request = await requests;
+	request?.accept({ priority: 1 });
+	await expect(fetching).rejects.toThrow("changed its properties");
+
+	sub.close();
+	front.consumer.close();
+	a.close();
+	b.close();
+});
