@@ -68,9 +68,25 @@ A few things the catalog can express beyond decoder config:
 - **Jitter.** A rendition can say how far its frames fell behind the media clock before the publisher flushed them, in whole milliseconds rounded up. Encoders report the spread of lateness above each rendition's own recent minimum, so a constant encoder delay is not jitter; container imports estimate batch spans without counting ingest delay. It describes the publisher, never the network, only grows over the life of a stream, and a player sizes its buffer to at least this much. A `0` is read as absent.
 - **Delay.** A rendition can also say how far its frames reach the transport behind the broadcast's earliest rendition, measured the same way from each rendition's minimum lateness, so a video encoder running 200 ms behind audio advertises `delay: 200` on video. It follows the same rules as jitter. A player holds the largest `delay + jitter` among the renditions it subscribes to, and never subtracts one rendition's `delay` from another's.
 - **Disabled renditions.** An audio or video rendition with `enabled: false` has no frames coming, and a player must not select it. Pausing a rendition in `@moq/publish` keeps it in the catalog this way rather than removing it, so a mute is a one-field update; a disabled video rendition encodes one black keyframe first, so a player that predates the field shows black instead of a frozen picture. The field is written only when false. The older video `stalled` field is no longer written, and readers ignore it.
-- **Archive.** A broadcast may advertise an `archive` entry mapping each track, the catalog included, to its own timeline track (a small index of the track's spans: timing plus group and frame positions) and, if recorded, the replay MoQ path, object-store URL, and format version. Every track is cut by one rule, at group boundaries between 2s and 10s (a zero minimum for sparse data such as the catalog), and tracks commit and expire independently. An untimed track has no timing to index, so its timeline holds one record per group: it can be recorded and replayed, but not turned into HLS or kept in a DVR. The timelines are what let the [HLS gateway](/bin/hls) build playlists without subscribing to media. A reader that cannot decode the `archive` entry, such as one from a different version, ignores it and loses the timelines and replay, but live media still plays.
+- **Archive.** A broadcast may advertise an `archive` entry mapping each track, the catalog included, to its own timeline track (a small index of the track's spans: timing plus group and frame positions) and fixed nominal record duration, plus the replay MoQ path, object-store URL, and format version when recorded. Media records end at the first group boundary at or beyond a 4s target; sparse timelines such as the catalog declare zero. Tracks commit and expire independently. An untimed track has no timing to index, so its timeline declares no duration and holds one record per group: it can be recorded and replayed, but not turned into HLS or kept in a DVR. The timelines are what let the [HLS gateway](/bin/hls) build playlists without subscribing to media. A reader that cannot decode the `archive` entry, such as one from a different version, ignores it and loses the timelines and replay, but live media still plays.
 - **Clock.** The optional root `clock` maps PTS zero to wall time so every media track and the archive index share one fixed epoch after timescale conversion. It is independent of `archive`, so a live-only publisher can expose wall-clock timing without creating a timeline. Publish independent sources as sibling broadcasts under one prefix, such as `robot/front.hang` and `robot/rear.hang`; each broadcast's audio and video entries are renditions of that source. In one Rust publisher, pass the same `moq_mux::Clock` to each `catalog::Config::with_clock`; JS publishers on one page already share the page clock. Consumers discover the siblings by prefix and align their timestamps through the advertised wall mapping; `@moq/watch` plays one broadcast at a time.
 - **Extensions.** The root is a loose object. Applications add their own sections (`scte35`, for example) next to the ones hang defines, optionally naming a track that carries the data. Every library exposes a way to write your section without clobbering the built-in ones, and readers ignore what they don't know.
+
+## Media reports
+
+A catalog may name a publisher snapshot track with `stats: { track }` and
+solicit viewer feedback with `echo: { path }`. Applications can use hang's
+shared Rust and JS snapshot schemas to exchange per-rendition delivery and
+playout measurements, alongside transport measurements. The echo path is
+relative to the catalog broadcast; an application assigns one `.echo` name
+per viewer and soliciting catalog, and controls the token rights under that
+prefix. Echo broadcasts carry `feedback.json` without a media catalog, so
+readers can filter them from playable content.
+
+These are schema and discovery primitives. The publishers and players do not
+automatically produce reports. MSF catalogs omit both sections. See
+[media stats](/concept/stats#media-reports) for the roles and the
+[hang draft](/draft/moq-hang#media-stats) for their contract.
 
 ## Text
 

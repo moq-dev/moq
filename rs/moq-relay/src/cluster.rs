@@ -1120,6 +1120,7 @@ impl Cluster {
 	/// Resolve origin handles for a lease already admitted by a local relay rule.
 	pub(crate) fn scope(&self, lease: auth::Lease, request: &moq_auth::Request) -> Result<Admitted, auth::Error> {
 		let token = lease.token();
+		token.uncapped()?;
 		let publisher = self.publisher(token);
 		let subscriber = self.subscriber(token);
 		let allowed = match request.role {
@@ -1241,7 +1242,7 @@ impl Cluster {
 	/// equivalent per-request setter), which derives the read handle. On an
 	/// upstream grant that handle never sees a route learned from another upstream.
 	pub fn subscriber(&self, token: &auth::Token) -> Option<origin::Producer> {
-		self.mounted(token)?.scope(&token.root, &token.subscribe).ok()
+		self.mounted(token)?.scope(&token.root, &token.subscribe.path).ok()
 	}
 
 	/// Returns an [`origin::Producer`] scoped to this session's publish permissions,
@@ -1249,7 +1250,7 @@ impl Cluster {
 	/// [`origin::Producer::upstream`] when that peer is upstream.
 	/// Nothing is published beneath the grant's mounts.
 	pub fn publisher(&self, token: &auth::Token) -> Option<origin::Producer> {
-		self.mounted(token)?.scope(&token.root, &token.publish).ok()
+		self.mounted(token)?.scope(&token.root, &token.publish.path).ok()
 	}
 
 	/// The origin marked with the grant's link and with its mounts applied,
@@ -1321,10 +1322,7 @@ impl Cluster {
 	/// billed under `--cluster-tier`. The proof is a secret this relay minted for
 	/// itself, so no auth server is asked.
 	pub(crate) fn lan_peer_grant(&self) -> moq_auth::Grant {
-		let mut grant = moq_auth::Grant::new(
-			[moq_auth::Pattern::all()].into_iter().collect(),
-			[moq_auth::Pattern::all()].into_iter().collect(),
-		);
+		let mut grant = moq_auth::Grant::new(moq_auth::Pattern::all(), moq_auth::Pattern::all());
 		grant.tier = self.config.tier.clone().filter(|tier| !tier.is_empty());
 		grant.peer = true;
 		grant
@@ -2046,6 +2044,16 @@ mod tests {
 	use crate::Config as RelayConfig;
 
 	#[tokio::test]
+	async fn fixed_leases_cannot_bypass_cap_refusal() {
+		let cluster = Cluster::new(Options::default()).unwrap();
+		let mut grant = moq_auth::Grant::new(moq_net::Pattern::all(), moq_net::Patterns::new());
+		grant.publish.rate = Some(moq_auth::Rate::from_bps(8000).unwrap());
+		let lease = auth::Lease::new("/room", moq_auth::lease::Consumer::fixed(grant));
+		let request = moq_auth::Request::new("test", moq_auth::Transport::Http, "/room");
+		assert!(matches!(cluster.scope(lease, &request), Err(auth::Error::Forbidden(_))));
+	}
+
+	#[tokio::test]
 	async fn request_limits_follow_the_admitted_grant() {
 		let mut options = Options::default();
 		options.session.announces = 2;
@@ -2060,7 +2068,7 @@ mod tests {
 			(true, false, (20, 30, 40)),
 			(true, true, (20, 30, 40)),
 		] {
-			let mut grant = moq_auth::Grant::new(Default::default(), Default::default());
+			let mut grant = moq_auth::Grant::new(moq_auth::Patterns::new(), moq_auth::Patterns::new());
 			grant.peer = peer;
 			grant.upstream = upstream;
 			let (_producer, consumer) = moq_auth::lease::Producer::new(grant);
