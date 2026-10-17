@@ -199,28 +199,67 @@ impl Hvcc {
 pub(crate) fn config_from_hvcc(hvcc: &[u8]) -> Result<hang::catalog::VideoConfig> {
 	let params = Hvcc::parse(hvcc)?;
 	let sps_nal = params.sps.first().ok_or(Error::MissingSps)?;
-	let parsed = Sps::parse(sps_nal)?;
-	let sps = parsed.head;
-
-	let mut config = hang::catalog::VideoConfig::new(hang::catalog::H265 {
-		in_band: false,
-		profile_space: sps.profile_space,
-		profile_idc: sps.profile_idc,
-		profile_compatibility_flags: sps.profile_compatibility_flags,
-		tier_flag: sps.tier_flag,
-		level_idc: sps.level_idc,
-		constraint_flags: sps.constraint_flags,
-	});
-	config.coded_width = Some(sps.width);
-	config.coded_height = Some(sps.height);
-	config.color = parsed.color();
+	let mut config = config_from_sps(sps_nal, false)?;
 	config.description = Some(Bytes::copy_from_slice(hvcc));
 	Ok(config)
 }
 
-/// The colour the first SPS in an `HEVCDecoderConfigurationRecord` signals in its VUI.
-pub(crate) fn hvcc_color(hvcc: &[u8]) -> Option<hang::catalog::Color> {
-	Sps::parse(Hvcc::parse(hvcc).ok()?.sps.first()?).ok()?.color()
+/// Copy the frame rate, display aspect, and colour from a decoded hvcC's first SPS.
+///
+/// An hev1 record may list no SPS, leaving them unset.
+pub(crate) fn apply_hvcc_sps(hvcc: &mp4_atom::Hvcc, config: &mut hang::catalog::VideoConfig) -> Result<()> {
+	let Some(sps) = hvcc
+		.arrays
+		.iter()
+		.filter(|array| array.nal_unit_type == NALUnitType::SpsNut.0)
+		.flat_map(|array| &array.nalus)
+		.next()
+	else {
+		return Ok(());
+	};
+	let metadata = config_from_sps(sps, false)?;
+	config.framerate = metadata.framerate;
+	config.display_aspect_width = metadata.display_aspect_width;
+	config.display_aspect_height = metadata.display_aspect_height;
+	config.color = metadata.color;
+	Ok(())
+}
+
+/// Resolve either sample framing from the same SPS dimensions and VUI metadata.
+pub(crate) fn config_from_sps(sps_nal: &[u8], in_band: bool) -> Result<hang::catalog::VideoConfig> {
+	let sps = Sps::parse(sps_nal)?;
+	let color = sps.color();
+	let Sps { head, full } = sps;
+	let mut config = hang::catalog::VideoConfig::new(hang::catalog::H265 {
+		in_band,
+		profile_space: head.profile_space,
+		profile_idc: head.profile_idc,
+		profile_compatibility_flags: head.profile_compatibility_flags,
+		tier_flag: head.tier_flag,
+		level_idc: head.level_idc,
+		constraint_flags: head.constraint_flags,
+	});
+	config.coded_width = Some(head.width);
+	config.coded_height = Some(head.height);
+	config.framerate = full
+		.as_ref()
+		.and_then(sps_period)
+		.map(|(units, scale)| scale as f64 / units as f64);
+	let sample_aspect = full
+		.as_ref()
+		.and_then(|sps| sps.vui_parameters.as_ref())
+		.and_then(|vui| match vui.aspect_ratio_info {
+			scuffle_h265::AspectRatioInfo::ExtendedSar { sar_width, sar_height } => {
+				Some((u32::from(sar_width), u32::from(sar_height)))
+			}
+			scuffle_h265::AspectRatioInfo::Predefined(idc) => crate::codec::video::sample_aspect(idc.0),
+		});
+	let display_aspect =
+		sample_aspect.and_then(|sample| crate::codec::video::display_aspect(head.width, head.height, sample));
+	config.display_aspect_width = display_aspect.map(|(width, _)| width);
+	config.display_aspect_height = display_aspect.map(|(_, height)| height);
+	config.color = color;
+	Ok(config)
 }
 
 /// The reordering an SPS NAL unit declares for its highest sub-layer: `sps_max_num_reorder_pics`,
@@ -705,7 +744,7 @@ mod tests {
 	/// the parsed SPS and the hvcC itself as the catalog `description`.
 	/// The hvcC's SPS signals the colour; a refused SPS signals none rather than failing.
 	#[test]
-	fn hvcc_color_reads_the_sps_vui() {
+	fn hvcc_config_reads_the_sps_colour() {
 		let hvcc = |sps: &'static [u8]| {
 			build_hvcc(
 				&[Bytes::from_static(fixtures::VPS)],
@@ -719,8 +758,8 @@ mod tests {
 			(color.primaries, color.transfer, color.matrix, color.range),
 			(Some(9), Some(16), Some(9), Some(hang::catalog::Range::Limited))
 		);
-		assert_eq!(hvcc_color(&hvcc(fixtures::SPS)), None);
-		assert_eq!(hvcc_color(&hvcc(fixtures::SPS_ZERO_COLOUR)), None);
+		assert_eq!(config_from_hvcc(&hvcc(fixtures::SPS)).unwrap().color, None);
+		assert_eq!(config_from_hvcc(&hvcc(fixtures::SPS_ZERO_COLOUR)).unwrap().color, None);
 	}
 
 	#[test]

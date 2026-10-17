@@ -2,7 +2,7 @@ import { Once } from "@moq/signals";
 import { Mutex } from "async-mutex";
 import type { Drain } from "../connection/goaway.ts";
 import { error, ProtocolViolation, SessionCode, SessionError } from "../error.ts";
-import { Reader, Stream, type Writer } from "../stream.ts";
+import { type OpenOptions, Reader, Stream, type Writer } from "../stream.ts";
 import { untilAborted } from "../util/abort.ts";
 import * as Varint from "../varint.ts";
 import { GoAway } from "./goaway.ts";
@@ -26,8 +26,8 @@ export class RequestWindowError extends Error {
  * Implemented by both ControlStreamAdapter (v14-v16) and NativeSession (v17).
  */
 export interface Session {
-	openBi(): Stream | Promise<Stream>;
-	openNativeBi?(): Promise<Stream>;
+	openBi(options?: Partial<OpenOptions>): Stream | Promise<Stream>;
+	openNativeBi?(options?: Partial<OpenOptions>): Promise<Stream>;
 	acceptBi(): Promise<Stream | undefined>;
 	nextRequestId(signal?: AbortSignal): Promise<bigint | undefined>;
 	/** Spend a request ID the peer used without holding a request open, closing the session if it cannot. */
@@ -69,8 +69,8 @@ export class NativeSession implements Session {
 		}
 	}
 
-	async openBi(): Promise<Stream> {
-		return Stream.open(this.#quic, { version: this.version });
+	async openBi(options?: Partial<OpenOptions>): Promise<Stream> {
+		return Stream.open(this.#quic, { ...options, version: this.version });
 	}
 
 	async acceptBi(): Promise<Stream | undefined> {
@@ -406,8 +406,8 @@ export class ControlStreamAdapter implements Session {
 	/**
 	 * Open a real WebTransport bidi stream (for v16 SubscribeNamespace).
 	 */
-	async openNativeBi(): Promise<Stream> {
-		return Stream.open(this.#quic, { version: this.version });
+	async openNativeBi(options?: Partial<OpenOptions>): Promise<Stream> {
+		return Stream.open(this.#quic, { ...options, version: this.version });
 	}
 
 	/**

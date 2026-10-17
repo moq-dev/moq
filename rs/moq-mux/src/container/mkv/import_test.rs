@@ -189,6 +189,59 @@ fn run(data: &[u8]) -> crate::catalog::hang::Catalog {
 }
 
 #[test]
+fn codec_private_resolves_display_aspect() {
+	use crate::codec::{h264, h265};
+	use bytes::Bytes;
+	for (avc, hevc, expected) in [
+		(h264::fixtures::SPS_IPB, h265::fixtures::SPS_NVENC, (None, None)),
+		(
+			h264::fixtures::SPS_ANAMORPHIC,
+			h265::fixtures::SPS_ANAMORPHIC,
+			(Some(16), Some(9)),
+		),
+	] {
+		let avcc = h264::build_avcc(&[Bytes::from_static(avc)], &[Bytes::from_static(h264::fixtures::PPS)]).unwrap();
+		let hvcc = h265::build_hvcc(
+			&[Bytes::from_static(h265::fixtures::VPS)],
+			&[Bytes::from_static(hevc)],
+			&[Bytes::from_static(h265::fixtures::PPS)],
+		)
+		.unwrap();
+		for (codec_id, private) in [("V_MPEG4/ISO/AVC", avcc), ("V_MPEGH/ISO/HEVC", hvcc)] {
+			let (width, height) = match expected {
+				(None, None) if codec_id == "V_MPEG4/ISO/AVC" => (64, 64),
+				(None, None) => (1280, 720),
+				_ => (1440, 1080),
+			};
+			let data = MkvBuilder::new()
+				.header("matroska")
+				.segment_start()
+				.info(1_000_000)
+				.tracks(vec![MatroskaSpec::TrackEntry(Master::Full(vec![
+					MatroskaSpec::TrackNumber(1),
+					MatroskaSpec::TrackUID(1),
+					MatroskaSpec::TrackType(1),
+					MatroskaSpec::CodecID(codec_id.into()),
+					MatroskaSpec::CodecPrivate(private.to_vec()),
+					MatroskaSpec::Video(Master::Full(vec![
+						MatroskaSpec::PixelWidth(width),
+						MatroskaSpec::PixelHeight(height),
+					])),
+				]))])
+				.segment_end()
+				.build();
+			let catalog = run(&data);
+			let config = catalog.video.renditions.values().next().unwrap();
+			assert_eq!(
+				(config.display_aspect_width, config.display_aspect_height),
+				expected,
+				"{codec_id}"
+			);
+		}
+	}
+}
+
+#[test]
 fn test_flac_catalog() {
 	let data = MkvBuilder::new()
 		.header("webm")

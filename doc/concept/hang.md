@@ -203,7 +203,8 @@ without waiting for the next frame. Audio has codec-defined durations, and CMAF
 carries sample durations directly, so neither needs per-group duration markers.
 Audio retains its separate terminal marker before codec drain packets, allowing
 consumers to discard encoder padding beyond the source endpoint. Empty payloads
-on data tracks remain data, including empty text cues.
+on data tracks remain data, including empty text cues, so a data track marks a
+discontinuity with a group of one object with no bytes instead.
 
 ## Groups and keyframes
 

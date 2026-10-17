@@ -8,6 +8,47 @@
 
 use crate::catalog::VideoHint;
 
+/// The predefined sample aspects shared by H.264 and H.265 (their VUI Table E-1).
+pub(super) fn sample_aspect(idc: u8) -> Option<(u32, u32)> {
+	Some(match idc {
+		1 => (1, 1),
+		2 => (12, 11),
+		3 => (10, 11),
+		4 => (16, 11),
+		5 => (40, 33),
+		6 => (24, 11),
+		7 => (20, 11),
+		8 => (32, 11),
+		9 => (80, 33),
+		10 => (18, 11),
+		11 => (15, 11),
+		12 => (64, 33),
+		13 => (160, 99),
+		14 => (4, 3),
+		15 => (3, 2),
+		16 => (2, 1),
+		_ => return None,
+	})
+}
+
+/// Resolve non-square samples to the whole picture's reduced display aspect.
+pub(super) fn display_aspect(width: u32, height: u32, sample: (u32, u32)) -> Option<(u32, u32)> {
+	let (sample_width, sample_height) = sample;
+	if width == 0 || height == 0 || sample_width == 0 || sample_height == 0 || sample_width == sample_height {
+		return None;
+	}
+	let shown_width = u64::from(width) * u64::from(sample_width);
+	let shown_height = u64::from(height) * u64::from(sample_height);
+	let (mut divisor, mut remainder) = (shown_width, shown_height);
+	while remainder != 0 {
+		(divisor, remainder) = (remainder, divisor % remainder);
+	}
+	Some((
+		u32::try_from(shown_width / divisor).ok()?,
+		u32::try_from(shown_height / divisor).ok()?,
+	))
+}
+
 type Track = crate::container::Producer<crate::catalog::hang::Container, hang::catalog::VideoConfig>;
 
 /// The reordering a video sequence header declares.

@@ -504,6 +504,7 @@ int main()
 			MoQOutput::ConnectionStats stats;
 			CHECK(o.TryGetConnectionStats(&stats));
 			CHECK(stats.dial == "http");
+			CHECK(!stats.protocol.empty());
 
 			auto keyframe = TestH264Keyframe();
 			std::vector<uint8_t> opus = {0xfc, 0xff, 0xfe};
@@ -712,6 +713,29 @@ int main()
 		o.Stop();
 	}
 	printf("reconnect after a drop: ok\n");
+
+	// While a dropped session redials, the dock names why it dropped instead of a
+	// bare "offline". The relay is gone, so nothing answers the redial.
+	{
+		auto relay = std::make_unique<TestRelay>();
+		reset(relay->Url());
+		MoQOutput o(nullptr, OUTPUT);
+		CHECK(o.Start());
+		CHECK(WaitFor([&] { return o.IsLiveSession(); }));
+		relay.reset();
+		MoQOutput::ConnectionStats stats;
+		CHECK(WaitFor([&] { return !o.TryGetConnectionStats(&stats); }));
+		// Still reconnecting rather than failed, so this is the reconnect path.
+		CHECK(o.IsLiveSession());
+		CHECK(signalCount() == 0);
+		int code = 0;
+		std::string reason;
+		o.CopyLastFailure(&code, &reason);
+		CHECK(!reason.empty());
+		CHECK(reason != "offline");
+		o.Stop();
+	}
+	printf("names the failure while reconnecting: ok\n");
 
 	// Stopping while the connect is still pending cancels it: nothing but the stop
 	// reaches OBS, then or later.

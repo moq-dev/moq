@@ -17,6 +17,7 @@ members = [
     "rs/moq-flate",
     "rs/moq-gst",
     "rs/moq-hls",
+    "rs/moq-ice",
     "rs/moq-json",
     "rs/moq-loc",
     "rs/moq-msf",
@@ -61,6 +62,7 @@ default-members = [
     # "rs/moq-gst",   # requires GStreamer
     "rs/moq-flate",
     "rs/moq-hls",
+    "rs/moq-ice",
     "rs/moq-json",
     "rs/moq-loc",
     "rs/moq-msf",
@@ -133,6 +135,8 @@ hmac = "0.13"
 humantime = "2.3"
 humantime-serde = "1.1.1"
 hyper-util = { version = "0.1.21", features = ["tokio"] }
+# Interface addresses for WebRTC host candidates (moq-tokio's `webrtc` feature).
+if-addrs = "0.15"
 io-uring = "0.7.15"
 jsonwebtoken = "11"
 kio = { version = "0.6.2", path = "rs/kio" }
@@ -153,6 +157,7 @@ moq-clock = { version = "0.11.0", path = "rs/moq-clock" }
 moq-clock-macros = { version = "0.1.0", path = "rs/moq-clock/macros" }
 moq-flate = { version = "0.2.0", path = "rs/moq-flate" }
 moq-hls = { version = "0.5.11", path = "rs/moq-hls", default-features = false }
+moq-ice = { version = "0.1.0", path = "rs/moq-ice" }
 moq-json = { version = "0.5.8", path = "rs/moq-json" }
 moq-loc = { version = "0.2.19", path = "rs/moq-loc" }
 moq-msf = { version = "0.5.1", path = "rs/moq-msf" }
@@ -227,6 +232,10 @@ serde_with = "3"
 sha2 = "0.11"
 slab = "0.4.12"
 socket2 = "0.6"
+# Sans-IO WebRTC. The default `examples` feature pulls in a web server, and aws-lc-rs
+# is the provider rustls already brings.
+str0m = { version = "0.24.1", default-features = false, features = ["aws-lc-rs"] }
+stun-types = "2.0.3"
 subtle = "2.6"
 tempfile = "3"
 thiserror = "2"

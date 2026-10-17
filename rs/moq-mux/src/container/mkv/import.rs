@@ -4,7 +4,7 @@ use std::io::Cursor;
 
 use crate::Result;
 use bytes::{Buf, Bytes, BytesMut};
-use hang::catalog::{AAC, AudioCodec, AudioConfig, H264, H265, VP9, VideoCodec, VideoConfig};
+use hang::catalog::{AAC, AudioCodec, AudioConfig, H265, VP9, VideoCodec, VideoConfig};
 use moq_net::Timestamp;
 use mp4_atom::Atom;
 use webm_iterable::WebmIterator;
@@ -899,19 +899,7 @@ fn build_h264_config(codec_private: Option<&Bytes>) -> Result<VideoConfig> {
 		codec_id: "V_MPEG4/ISO/AVC",
 		purpose: "AVCDecoderConfigurationRecord",
 	})?;
-	let avcc = crate::codec::h264::Avcc::parse(avcc_bytes)?;
-
-	let mut config = VideoConfig::new(H264 {
-		profile: avcc.profile,
-		constraints: avcc.constraints,
-		level: avcc.level,
-		inline: false,
-	});
-	config.description = Some(avcc_bytes.clone());
-	config.coded_width = avcc.coded_width;
-	config.coded_height = avcc.coded_height;
-	config.color = avcc.sps.first().and_then(|sps| crate::codec::h264::sps_color(sps));
-	Ok(config)
+	crate::codec::h264::config(avcc_bytes)
 }
 
 fn build_h265_config(codec_private: Option<&Bytes>) -> Result<VideoConfig> {
@@ -934,8 +922,8 @@ fn build_h265_config(codec_private: Option<&Bytes>) -> Result<VideoConfig> {
 		level_idc: hvcc.general_level_idc,
 		constraint_flags: hvcc.general_constraint_indicator_flags,
 	});
-	config.color = crate::codec::h265::hvcc_color(&description);
 	config.description = Some(description.freeze());
+	crate::codec::h265::apply_hvcc_sps(&hvcc, &mut config)?;
 	Ok(config)
 }
 
