@@ -430,7 +430,8 @@ impl Producer {
 	/// A subscriber still catching up, one that read the final catalog late or is draining a
 	/// backlog, can still request and drain the finished tracks. The returned [`Finish`] keeps
 	/// the broadcast announced and holds every track finished by now, so their producers can
-	/// drop. Keep it for its [`linger`](Finish::linger), then drop it to [close](Self::close)
+	/// drop. A held track takes no more groups, not even one below its end, so nothing lands
+	/// after the linger is fixed. Keep it for its [`linger`](Finish::linger), then drop it to [close](Self::close)
 	/// the broadcast; `Finish::wait` does both on a runtime. Dropping it early is how an
 	/// interrupt ends the linger.
 	pub fn finish(self) -> Finish {
@@ -490,7 +491,7 @@ pub struct Finish {
 
 impl Finish {
 	/// How long to keep this handle: the longest [`max_age`](track::Info::max_age) of the
-	/// held tracks. Tracks still live, including one whose declared end the live edge has
+	/// held tracks, each capped by the broadcast's [`cache_duration`](Info::cache_duration). Tracks still live, including one whose declared end the live edge has
 	/// yet to reach, and tracks without a max-age, add nothing.
 	pub fn linger(&self) -> Duration {
 		self.linger
@@ -509,10 +510,7 @@ impl Finish {
 			finish: self,
 			until: None,
 		};
-		#[cfg(not(test))]
 		crate::time::run(linger).await;
-		#[cfg(test)]
-		crate::time::run_sim(linger).await;
 	}
 }
 
@@ -2022,7 +2020,7 @@ mod test {
 	/// so a late subscriber still gets the media, and closes once the longest max-age passes.
 	/// A live track, a track whose declared end is still ahead of its live edge, and a track
 	/// without a max-age add nothing to the wait.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	#[cfg(feature = "async")]
 	async fn finish_serves_finished_tracks_until_stale() {
 		let producer = Info::new().produce();
@@ -2041,19 +2039,19 @@ mod test {
 		}
 		tail.finish_at(crate::track::Position::group(2)).unwrap();
 
-		let start = moq_net_sim::now();
+		let start = moq_clock::now();
 		let finish = producer.finish();
 		assert_eq!(finish.linger(), Duration::from_secs(5));
-		let finish = moq_net_sim::spawn(finish.wait());
+		let finish = moq_clock::sim::spawn(finish.wait());
 		drop((video, audio, catalog));
 
-		moq_net_sim::sleep(Duration::from_secs(4)).await;
+		moq_clock::sleep(Duration::from_secs(4)).await;
 		let mut late = consumer.track("audio").unwrap().subscribe(None).await.unwrap();
 		late.assert_group();
 		assert!(!consumer.is_closed());
 
 		finish.await.unwrap();
-		assert_eq!(moq_net_sim::now() - start, Duration::from_secs(5));
+		assert_eq!(moq_clock::now() - start, Duration::from_secs(5));
 		assert!(consumer.is_closed());
 		assert!(matches!(consumer.track("audio"), Err(Error::Unroutable)));
 		live.finish().unwrap();
@@ -2078,6 +2076,53 @@ mod test {
 		assert!(!consumer.is_closed());
 		drop(finish);
 		assert!(consumer.is_closed());
+	}
+
+	/// The linger is the local retention window, so an origin's `cache_duration` below a
+	/// track's max-age ends it sooner.
+	#[test]
+	fn finish_clamps_the_linger_to_the_cache_duration() {
+		let producer = Info {
+			cache_duration: Duration::from_secs(5),
+			..Default::default()
+		}
+		.produce();
+		let secs = |secs| crate::track::Info::timed().with_max_age(Duration::from_secs(secs));
+		let tracks = [("video", 30), ("audio", 2)].map(|(name, age)| producer.create_track(name, secs(age)).unwrap());
+		for track in &tracks {
+			track.finish().unwrap();
+		}
+		assert_eq!(producer.finish().linger(), Duration::from_secs(5));
+	}
+
+	/// A held track takes no more groups, even one below its end, so nothing lands after
+	/// the linger was fixed.
+	#[test]
+	fn finish_seals_the_held_tracks() {
+		let producer = Info::new().produce();
+		let track = producer
+			.create_track(
+				"video",
+				crate::track::Info::timed().with_max_age(Duration::from_secs(30)),
+			)
+			.unwrap();
+		track
+			.create_group(crate::group::Info { sequence: 2 })
+			.unwrap()
+			.finish()
+			.unwrap();
+		track.finish().unwrap();
+		track
+			.create_group(crate::group::Info { sequence: 1 })
+			.unwrap()
+			.finish()
+			.unwrap();
+
+		let _finish = producer.finish();
+		assert!(matches!(
+			track.create_group(crate::group::Info { sequence: 0 }),
+			Err(Error::Closed)
+		));
 	}
 
 	/// A caller without a runtime keeps the handle until its own clock passes the linger,
@@ -2111,7 +2156,7 @@ mod test {
 	}
 
 	/// A close elsewhere ends the linger early, for a poller and for [`Finish::wait`].
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	#[cfg(feature = "async")]
 	async fn closing_elsewhere_ends_the_linger() {
 		let producer = Info::new().produce();
@@ -2126,11 +2171,11 @@ mod test {
 		let finish = producer.finish();
 		assert!(finish.poll_closed(&kio::Waiter::noop()).is_pending());
 
-		let start = moq_net_sim::now();
-		let wait = moq_net_sim::spawn(finish.wait());
-		moq_net_sim::sleep(Duration::from_secs(1)).await;
+		let start = moq_clock::now();
+		let wait = moq_clock::sim::spawn(finish.wait());
+		moq_clock::sleep(Duration::from_secs(1)).await;
 		other.close();
 		wait.await.unwrap();
-		assert_eq!(moq_net_sim::now() - start, Duration::from_secs(1));
+		assert_eq!(moq_clock::now() - start, Duration::from_secs(1));
 	}
 }

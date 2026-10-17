@@ -2038,9 +2038,8 @@ impl Producer {
 
 	fn insert(&self, group: group::Info, pending: bool) -> Result<group::Producer> {
 		let mut state = self.modify()?;
-		if let Some(fin) = state.final_sequence()
-			&& group.sequence >= fin
-		{
+		// A sealed track takes no group, not even one below its end.
+		if state.sealed || state.final_sequence().is_some_and(|fin| group.sequence >= fin) {
 			return Err(Error::Closed);
 		}
 		let track = state.info.clone().unwrap();
@@ -2933,7 +2932,7 @@ pub(crate) struct TrackWeak {
 /// Keeps a finished track servable after its producers drop; see [`TrackWeak::hold_finished`].
 pub(crate) struct Hold {
 	_alive: Arc<Alive>,
-	/// The track's [`Info::max_age`].
+	/// The track's [`Info::max_age`], clamped to the broadcast's `cache_duration`.
 	pub max_age: Option<Duration>,
 }
 
@@ -2941,17 +2940,26 @@ impl TrackWeak {
 	/// Hold the track open if it finished cleanly, so lookups keep finding it after its
 	/// producers drop. `None` for a track still live (even one with a declared end ahead of
 	/// its live edge), aborted, never published, or gone.
+	///
+	/// Seals a held track: a lower group a surviving producer creates afterward would
+	/// outlive the linger fixed here, so it is refused instead.
 	pub(crate) fn hold_finished(&self) -> Option<Hold> {
 		let alive = self.alive.upgrade()?;
 		if !alive.published.load(Ordering::Relaxed) {
 			return None;
 		}
-		let state = alive.state.read();
+		let mut state = alive.state.write().ok()?;
 		// A declared end the live edge has yet to reach still has groups to come.
 		if !state.is_complete() || state.abort.is_some() {
 			return None;
 		}
-		let max_age = state.info.as_ref().and_then(|info| info.max_age);
+		state.sealed = true;
+		let ceiling = state.broadcast.cache_duration;
+		let max_age = state
+			.info
+			.as_ref()
+			.and_then(|info| info.max_age)
+			.map(|age| age.min(ceiling));
 		drop(state);
 		Some(Hold { _alive: alive, max_age })
 	}
