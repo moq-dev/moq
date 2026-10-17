@@ -572,6 +572,43 @@ test("aborting a track rejects pending writes on it and its groups", async () =>
 	expect(p.net.closed.peek()).toBe(abort);
 });
 
+test("an abort stops queued datagrams before they seal", async () => {
+	const p = await pair("audio");
+	const encrypt = TrackKey.prototype.encrypt;
+	let seals = 0;
+	TrackKey.prototype.encrypt = function (this: TrackKey, ...args: Parameters<TrackKey["encrypt"]>) {
+		seals++;
+		return encrypt.apply(this, args);
+	};
+	try {
+		const abort = new Error("abort");
+		const write = p.producer.insertDatagram(0, ms(1), text("x"));
+		p.producer.close(abort);
+		await expect(write).rejects.toBe(abort);
+		expect(seals).toBe(0);
+	} finally {
+		TrackKey.prototype.encrypt = encrypt;
+	}
+});
+
+test("an abort after a clean close does not cancel the drain", async () => {
+	const p = await pair("video");
+	const group = p.producer.appendGroup();
+	const frame = group.writeFrame(ms(1), text("frame"));
+	group.close();
+	group.close(new Error("late"));
+	const datagram = p.producer.insertDatagram(1, ms(2), text("datagram"));
+	p.producer.close();
+	p.producer.close(new Error("late"));
+	await Promise.all([frame, datagram]);
+
+	expect(await p.net.closed).toBeNull();
+	const received = await recvGroup(p.consumer);
+	expect(await readText(received)).toBe("frame");
+	expect(await received.readFrame()).toBeUndefined();
+	expect(datagramText(await p.consumer.recvDatagram())).toBe("datagram");
+});
+
 test("a refused timestamp does not burn the frame", async () => {
 	const p = await pair("video");
 	await p.net.info();

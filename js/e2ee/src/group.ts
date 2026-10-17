@@ -88,11 +88,12 @@ export class Producer {
 	 * rejects the pending writes. Idempotent.
 	 */
 	close(abort?: Error): void {
+		// The first close decides the outcome: a later abort cannot cancel a promised drain.
+		if (this.#closed) return;
 		if (abort) {
 			this.#abort(abort);
 			return;
 		}
-		if (this.#closed) return;
 		this.#closed = true;
 		void this.#writer.pump.run(() => {
 			if (!this.#aborted) this.#inner.close();

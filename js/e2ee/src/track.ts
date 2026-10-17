@@ -90,6 +90,7 @@ export class Producer {
 		this.#next = sequence + 1;
 		const owned = plaintext.slice();
 		return this.#writer.pump.run(async () => {
+			if (this.#writer.aborted) throw this.#writer.aborted;
 			const payload = await this.#datagramKey.encrypt(iv, owned);
 			if (this.#writer.aborted) throw this.#writer.aborted;
 			this.#inner.insertDatagram(sequence, timestamp, payload);
@@ -101,14 +102,14 @@ export class Producer {
 	 * `abort`, which rejects the pending writes. Idempotent.
 	 */
 	close(abort?: Error): void {
+		// The first close decides the outcome: a later abort cannot cancel a promised drain.
+		if (this.#writer.closed) return;
+		this.#writer.closed = true;
 		if (abort) {
-			this.#writer.closed = true;
-			this.#writer.aborted ??= abort;
+			this.#writer.aborted = abort;
 			this.#inner.close(abort);
 			return;
 		}
-		if (this.#writer.closed) return;
-		this.#writer.closed = true;
 		void this.#writer.pump.run(() => {
 			if (!this.#writer.aborted) this.#inner.close();
 		});
