@@ -29,13 +29,15 @@ and proxy.golang.org caches it like any other module.
 
 - A Worker in `infra/go` serves `go.moq.dev` read-only out of a `go-moq-dev`
   R2 bucket, like `infra/apt`: `<module>/@v/list`, `<version>.info`, `.mod`,
-  and `.zip`. A 404 lets the go command fall through. Versioned files are
-  immutable, so cache them forever and keep `list` short-lived.
+  and `.zip`. A 404 is final: nothing falls back past this proxy, even with
+  `GOPROXY=direct`. Versioned files are immutable, so cache them forever and
+  keep `list` short-lived.
 - Build module zips with `golang.org/x/mod/zip` from a small in-tree Go tool,
   not a hand-rolled `zip`, since the go command validates the layout.
 - `publish-ffi.sh` uploads with rclone and the existing R2 secrets. It refuses
   to overwrite an existing version, because sum.golang.org pins the first
-  hash it sees. It uploads `list` last.
+  hash it sees. It uploads `list` last, so a version is listed only once its
+  `.info`, `.mod`, and `.zip` are served.
 - Backfill every version in proxy.golang.org's `list` by copying
   `go mod download`'s `cache/download` files, which are already the GOPROXY
   layout. Identical contents keep the h1 hashes. Check each version against
