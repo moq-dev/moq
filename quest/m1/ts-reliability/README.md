@@ -107,7 +107,6 @@ remain with their current quests.
 - [Loss and recovery tests](/quest/m1/ts-reliability/recovery.md) - actual MoQ omissions exercise reacquisition and unaffected tracks
 - [Data-track breaks](/quest/m1/ts-reliability/data-break.md) - a data track's declared break reads as a break, not as media lost upstream
 - [Audio behind the keyframe](/quest/m1/ts-reliability/audio-lead.md) - an export whose video start group is dropped still begins on a keyframe
-- [T-STD TS export](/quest/m1/tstd/README.md) - the semantic mux schedules the content it admits within its supported buffer models
 
 ## Related
 

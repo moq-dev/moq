@@ -582,7 +582,8 @@ family is BBRv3, which takes a round with more than 2 % loss
 that holds the subscriber's leg below the media rate, and the relay ages groups
 out while they wait. CUBIC (`loss`) fared worse at 10 %: no output at all. With
 `LOSS_THRESH` raised to 20 % as an experiment only, `--hrd --loss 10` passed T-STD
-and PCR accuracy, though 1.56 s of video still missed the 1 s delay.
+and PCR accuracy, though 1.56 s of video still missed the 1 s delay. The 10 %
+case belongs to the [BBR media study](/quest/m2/quic-bbr-natural-drain.md).
 
 ## EIT fixtures
 
