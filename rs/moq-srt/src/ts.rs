@@ -658,7 +658,13 @@ mod tests {
 		let expected_cue = cue.payload;
 		assert_eq!(expected_cue[0], 0xFC, "a verbatim splice_info_section (table_id 0xFC)");
 
-		let mut subscriber = Subscriber::new(&origin.consume(), "ingest", Options::default())
+		// The egress joins the clip's last group, read at once and two seconds long. Under the
+		// default delay its keyframe is stale, and the egress waits on the next one.
+		let options = Options {
+			latency: Duration::from_secs(3),
+			..Default::default()
+		};
+		let mut subscriber = Subscriber::new(&origin.consume(), "ingest", options)
 			.await
 			.unwrap()
 			.expect("the ingest broadcast is available for SRT egress");

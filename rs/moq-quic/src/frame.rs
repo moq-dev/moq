@@ -15,9 +15,6 @@ use crate::{
     shared::{ConnectionId, EcnCodepoint},
 };
 
-#[cfg(feature = "arbitrary")]
-use arbitrary::Arbitrary;
-
 /// A QUIC frame type
 #[derive(Copy, Clone, Eq, PartialEq)]
 pub struct FrameType(u64);
@@ -834,10 +831,8 @@ impl Iterator for AckIter<'_> {
     }
 }
 
-#[allow(unreachable_pub)] // fuzzing only
-#[cfg_attr(feature = "arbitrary", derive(Arbitrary))]
 #[derive(Debug, Copy, Clone)]
-pub struct ResetStream {
+pub(crate) struct ResetStream {
     pub(crate) id: StreamId,
     pub(crate) error_code: VarInt,
     pub(crate) final_offset: VarInt,

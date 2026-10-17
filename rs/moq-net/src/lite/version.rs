@@ -189,6 +189,17 @@ impl Version {
 		}
 	}
 
+	/// Whether FETCH carries the subscriber's optional max delay. Added in lite-07; an
+	/// earlier fetch is bounded by the publisher's retention alone.
+	#[allow(clippy::match_like_matches_macro)]
+	pub(crate) fn has_fetch_max_delay(self) -> bool {
+		// Match form so future versions default forward (AGENTS.md convention).
+		match self {
+			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06 => false,
+			_ => true,
+		}
+	}
+
 	/// Whether this version's SUBSCRIBE, SUBSCRIBE_UPDATE, SUBSCRIBE_OK, and TRACK_INFO
 	/// carry the retired `Ordered` byte.
 	///
