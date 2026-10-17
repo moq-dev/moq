@@ -369,6 +369,7 @@ where
 					Poll::Pending
 				})
 				.await;
+				close(&mut session, &res);
 				if closing.load(std::sync::atomic::Ordering::Relaxed) {
 					subscriber.close();
 				} else if let Err(err) = &res {
@@ -583,6 +584,7 @@ where
 					Poll::Pending
 				})
 				.await;
+				close(&mut session, &res);
 				// Before this arm's Auth serve tasks drop, so each settles with the
 				// session's error rather than a bare cancel.
 				auth.close(match &res {
@@ -604,24 +606,6 @@ where
 			Err(err) => err.clone(),
 		});
 
-		match &res {
-			Err(err @ Error::Transport(_)) => {
-				tracing::info!(%err, "session terminated");
-				session.close(super::error::to_session_code(&SessionError::Internal), "");
-			}
-			Err(err) => {
-				tracing::warn!(%err, "session error");
-				session.close(
-					super::error::to_session_code(&SessionError::from(err)),
-					err.to_string().as_ref(),
-				);
-			}
-			_ => {
-				tracing::info!("session closed");
-				session.close(super::error::to_session_code(&SessionError::Cancel), "");
-			}
-		}
-
 		res
 	}
 	.maybe_boxed();
@@ -635,6 +619,30 @@ where
 		},
 		goaway_handle,
 	))
+}
+
+/// Close the session over the driver's result, while its streams are still open.
+///
+/// Dropping them first would reset the control stream ahead of the close, and a strict peer
+/// closes over that reset with its own PROTOCOL_VIOLATION before it reads our code.
+fn close<S: crate::transport::poll::Session>(session: &mut S, res: &Result<(), Error>) {
+	match res {
+		Err(err @ Error::Transport(_)) => {
+			tracing::info!(%err, "session terminated");
+			session.close(super::error::to_session_code(&SessionError::Internal), "");
+		}
+		Err(err) => {
+			tracing::warn!(%err, "session error");
+			session.close(
+				super::error::to_session_code(&SessionError::from(err)),
+				err.to_string().as_ref(),
+			);
+		}
+		Ok(()) => {
+			tracing::info!("session closed");
+			session.close(super::error::to_session_code(&SessionError::Cancel), "");
+		}
+	}
 }
 
 /// What a peer's SETUP told us, beyond the stream it arrived on.
@@ -1392,6 +1400,14 @@ async fn read_goaways<R: crate::transport::poll::RecvStream>(
 			&& request_id.0 % 2 != u64::from(!client)
 		{
 			return Err(DecodeError::Session(SessionError::InvalidRequestId).into());
+		}
+
+		// Nothing may follow a GOAWAY on this stream, so bytes already here are a violation.
+		// Caught before the GOAWAY surfaces: the application acting on it can close the
+		// session first, without our code.
+		let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+		if let std::task::Poll::Ready(Ok(true)) = reader.poll_has_more(&mut cx) {
+			return Err(Error::ProtocolViolation);
 		}
 
 		let timeout = (msg.timeout > 0).then(|| std::time::Duration::from_millis(msg.timeout));
@@ -3190,6 +3206,78 @@ mod tests {
 				assert_eq!(closed, expected, "{version:?}: {why}");
 			}
 		}
+	}
+
+	/// A second GOAWAY arriving with the first closes the session before the first surfaces,
+	/// so an application leaving over it cannot close first, without our code.
+	#[moq_net_sim::test]
+	async fn a_goaway_with_more_behind_it_never_surfaces() {
+		use crate::transport::poll::Session as _;
+
+		for version in [Version::Draft18, Version::Draft21] {
+			let request_id = (version == Version::Draft18).then_some(0);
+			let two = [goaway(version, request_id), goaway(version, request_id)].concat();
+			let mut session =
+				crate::lite::test_transport::ScriptedSession::new(Vec::new()).with_incoming_unis(vec![two]);
+			let stream = std::future::poll_fn(|cx| session.poll_accept_uni(cx)).await.unwrap();
+			let (handle, protocol) = crate::goaway::Handle::new(false);
+
+			let err = read_goaways(Reader::new(stream, version), version, true, protocol)
+				.await
+				.expect_err("a second GOAWAY is fatal");
+			assert_eq!(SessionError::from(&err), SessionError::ProtocolViolation, "{version:?}");
+			assert!(
+				handle.consumer().peek().is_none(),
+				"{version:?}: the first GOAWAY surfaced"
+			);
+		}
+	}
+
+	/// A fatal error closes the session before its streams drop. A reset of our SETUP stream
+	/// reaching a strict peer first has it close over that, and it never sees our code.
+	#[moq_net_sim::test]
+	async fn the_session_closes_before_its_streams_reset() {
+		const VERSION: Version = Version::Draft21;
+		let mut params = ietf::Parameters::default();
+		params.set_bytes(ietf::ParameterBytes::Path, b"a".to_vec());
+		let session = crate::lite::test_transport::ScriptedSession::new(Vec::new())
+			.with_incoming_unis(vec![setup_stream(VERSION, params, &[])]);
+		let log = session.log.clone();
+		let (driver, _goaway) = start(Config {
+			runtime: crate::time::Clock::sim(),
+			session,
+			setup: None,
+			request_id_max: None,
+			limits: Default::default(),
+			client: true,
+			publish: None,
+			subscribe: None,
+			peer_hop: None,
+			cost: None,
+			version: VERSION,
+			path: None,
+			authority: None,
+			peer_setup_stream: None,
+			peer_declared: None,
+			auth: crate::auth::Handle::new(false),
+			early_unis: Vec::new(),
+			extensions: Default::default(),
+		})
+		.unwrap();
+		let _ = moq_net_sim::timeout(std::time::Duration::from_secs(10), driver).await;
+
+		let closes = log.closes();
+		assert_eq!(closes.len(), 1, "{closes:?}");
+		assert_eq!(SessionError::from_code(closes[0].0), SessionError::InvalidPath);
+		let before = log.before_close().unwrap();
+		assert!(
+			!before
+				.trail
+				.iter()
+				.any(|(_, sent)| matches!(sent, crate::lite::test_transport::Sent::Reset(_))),
+			"reset before the close: {before:?}"
+		);
+		assert!(before.stops.is_empty(), "STOP_SENDING before the close: {before:?}");
 	}
 
 	/// A draft-18 GOAWAY names one of the receiver's own Request IDs, so one with the sender's
