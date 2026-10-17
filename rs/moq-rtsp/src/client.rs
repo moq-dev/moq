@@ -25,8 +25,10 @@ const FRAME_FORMAT: FrameFormat = FrameFormat {
 /// restarted. Generous enough for B-frame reordering.
 const MAX_BACKWARD: std::time::Duration = std::time::Duration::from_secs(1);
 
-/// How far a frame may land ahead of its stream's previous one before the session counts as
-/// restarted. A camera resetting its RTP clock lands anywhere in a 32-bit range, hours away.
+/// How far a frame may land ahead of its stream's previous one, beyond the time between their
+/// arrivals, before the session counts as restarted. A stream that pauses (motion-triggered
+/// video beside continuous audio) returns that far ahead, while a camera resetting its RTP clock
+/// lands anywhere in a 32-bit range, hours away.
 const MAX_FORWARD: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// How long a request may go unanswered, or the session without a frame, before it counts as
@@ -64,6 +66,8 @@ pub struct Client {
 	timeout: std::time::Duration,
 	/// [`KEYFRAME_TIMEOUT`], shortened by tests.
 	keyframe_timeout: std::time::Duration,
+	/// [`MAX_FORWARD`], shortened by tests.
+	max_forward: std::time::Duration,
 }
 
 impl Client {
@@ -103,6 +107,7 @@ impl Client {
 			creds,
 			timeout: TIMEOUT,
 			keyframe_timeout: KEYFRAME_TIMEOUT,
+			max_forward: MAX_FORWARD,
 		})
 	}
 
@@ -164,6 +169,7 @@ impl Client {
 			streams: Vec::new(),
 			video: tracks.iter().any(|(_, kind)| *kind != Kind::Aac),
 			started: false,
+			max_forward: self.max_forward,
 		};
 		ingest.streams.resize_with(session.streams().len(), || None);
 		// A failure here aborts the tracks already made rather than leaving `Drop` to finish them.
@@ -354,8 +360,9 @@ impl Video {
 
 struct Stream {
 	track: Track,
-	/// The previous frame's timestamp, in the stream's clock units since the session start.
-	last: Option<i64>,
+	/// The previous frame's timestamp, in the stream's clock units since the session start, and
+	/// when it arrived.
+	last: Option<(i64, std::time::Instant)>,
 	/// Whether a keyframe has been published (video) or the session started (audio).
 	started: bool,
 	/// Whether retina's parameter sets still need inserting: until the splitter emits a keyframe
@@ -370,6 +377,8 @@ struct Ingest {
 	video: bool,
 	/// Whether any video stream published its first keyframe.
 	started: bool,
+	/// [`MAX_FORWARD`], or a test's override.
+	max_forward: std::time::Duration,
 }
 
 /// Dropping the [`Client::pull`] future stops the session: its tracks end cleanly, so a caller
@@ -393,14 +402,21 @@ struct Jump;
 impl Ingest {
 	/// Publish one depacketized item, or report that the timeline jumped.
 	fn push(&mut self, item: CodecItem, streams: &[retina::client::Stream]) -> Result<Option<Jump>> {
-		let (stream_id, timestamp, data, changed) = match &item {
+		let (stream_id, timestamp, data, changed, received) = match &item {
 			CodecItem::VideoFrame(frame) => (
 				frame.stream_id(),
 				frame.timestamp(),
 				frame.data(),
 				frame.has_new_parameters(),
+				frame.end_ctx().received(),
 			),
-			CodecItem::AudioFrame(frame) => (frame.stream_id(), frame.timestamp(), frame.data(), false),
+			CodecItem::AudioFrame(frame) => (
+				frame.stream_id(),
+				frame.timestamp(),
+				frame.data(),
+				false,
+				frame.ctx().received(),
+			),
 			_ => return Ok(None),
 		};
 		let Some(stream) = self.streams.get_mut(stream_id).and_then(Option::as_mut) else {
@@ -409,9 +425,10 @@ impl Ingest {
 
 		let elapsed = timestamp.elapsed();
 		let rate = timestamp.clock_rate().get();
-		if let Some(last) = stream.last {
+		if let Some((last, arrived)) = stream.last {
 			let delta = i128::from(elapsed) - i128::from(last);
-			let forward = MAX_FORWARD.as_micros() as i128 * i128::from(rate) / 1_000_000;
+			let slack = self.max_forward + received.saturating_duration_since(arrived);
+			let forward = slack.as_micros() as i128 * i128::from(rate) / 1_000_000;
 			if delta < -backward(rate) || delta > forward {
 				return Ok(Some(Jump));
 			}
@@ -448,7 +465,7 @@ impl Ingest {
 					stream.started = true;
 					self.started = true;
 				}
-				stream.last = Some(elapsed);
+				stream.last = Some((elapsed, received));
 				video.decode(frames)?;
 			}
 			Track::Aac(import) => {
@@ -459,7 +476,7 @@ impl Ingest {
 					}
 					stream.started = true;
 				}
-				stream.last = Some(elapsed);
+				stream.last = Some((elapsed, received));
 				import.decode(data, Some(pts))?;
 				// Each packet its own group (one QUIC stream), so relays forward it at once.
 				import.cut(None)?;
@@ -943,6 +960,31 @@ mod tests {
 		})
 		.await;
 		assert!(matches!(err, Error::Stalled(_)), "{err}");
+	}
+
+	/// A stream that pauses, such as motion-triggered video beside continuous audio, returns as
+	/// far ahead as it paused, which continues the timeline rather than jumping it.
+	#[tokio::test]
+	async fn a_paused_stream_is_not_a_jump() {
+		let server = Server::bind(vec![Media::H264 { sprop: true }]).await;
+		let (broadcast, catalog) = broadcast();
+		let mut client = Client::new(server.url()).unwrap();
+		client.max_forward = Duration::from_millis(100);
+		let pull = tokio::spawn({
+			let (broadcast, catalog) = (broadcast.clone(), catalog.clone());
+			async move { client.pull(&broadcast, &catalog).await }
+		});
+
+		let mut session = within("PLAY", server.accept(0)).await;
+		session.video(0, 0, &[fake::H264_IDR]).await;
+		let snapshot = catalog_with(&catalog, 1, 0).await;
+		let reader = subscribe(&broadcast, video_track(&snapshot)).await;
+		// Half a second of silence, well past the 100ms allowance, then the matching timestamp.
+		tokio::time::sleep(Duration::from_millis(500)).await;
+		session.video(0, 45_000, &[fake::H264_SLICE]).await;
+		session.close().await;
+		assert_eq!(within("the pull", pull).await.unwrap().unwrap(), End::Closed);
+		assert_eq!(frames(reader).await.len(), 2);
 	}
 
 	/// A server whose `rtptime` lands well after its packets would never publish anything, so
