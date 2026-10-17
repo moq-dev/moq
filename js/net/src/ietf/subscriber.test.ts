@@ -1,4 +1,5 @@
 import { expect, jest, onTestFinished, spyOn, test } from "bun:test";
+import { Milli } from "@moq/clock";
 import { Once } from "@moq/signals";
 import type * as announce from "../announced.ts";
 import { ProtocolViolation, StreamCode, Stream as StreamError } from "../error.ts";
@@ -8,7 +9,7 @@ import { createMockTransportPair } from "../mock.ts";
 import * as Path from "../path.ts";
 import { Reader, Stream } from "../stream.ts";
 import { Tail } from "../tail.ts";
-import { Milli, Timescale, Timestamp } from "../time.ts";
+import { Timescale, Timestamp } from "../time.ts";
 import type * as track from "../track.ts";
 import { ControlStreamAdapter, NativeSession } from "./adapter.ts";
 import type * as Cluster from "./cluster.ts";
@@ -1106,6 +1107,24 @@ test("a draft-14 END_OF_TRACK carrying properties ends the subscription as unsup
 			expect((await group?.readFrame())?.payload).toEqual(new Uint8Array([42]));
 			expect(await group?.closed).toBeNull();
 		}
+		stop.mockRestore();
+	}
+});
+
+test("a compact END_OF_TRACK at object 5 with properties is subgroup 5, refused without ending the track", async () => {
+	// Draft 14 allows the properties and draft 15 refuses them, but the subgroup is refused first.
+	for (const version of [Version.DRAFT_14, Version.DRAFT_19]) {
+		const { subscriber, track } = await subscribeTrack({ version });
+		const header = stampedGroup(0);
+		header.flags.hasSubgroupObject = true;
+		// Object ID 5, one unknown integer property, an empty payload, then END_OF_TRACK.
+		const reader = new Reader(undefined, new Uint8Array([5, 2, 0x20, 7, 0, 4]), version);
+		const stop = spyOn(reader, "stop");
+
+		await subscriber.handleGroup(header, reader);
+
+		expect((stop.mock.calls[0][0] as Error).message).toBe("subgroups are not supported");
+		expect(track.closed.peek()).toBeUndefined();
 		stop.mockRestore();
 	}
 });

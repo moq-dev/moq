@@ -5,8 +5,9 @@
  *
  * @module
  */
+
+import { Milli } from "@moq/clock";
 import type * as Catalog from "@moq/hang/catalog";
-import type { Time } from "@moq/net";
 import * as Moq from "@moq/net";
 import { Effect, Signal } from "@moq/signals";
 import type * as Audio from "./audio";
@@ -90,13 +91,13 @@ function parseDelay(value: string | null): Delay {
 }
 
 // Parse the `buffer` attribute: a duration, or none when absent.
-function parseBuffer(value: string | null): Time.Milli {
+function parseBuffer(value: string | null): Milli {
 	const trimmed = value?.trim();
-	if (!trimmed) return Moq.Time.Milli.zero;
+	if (!trimmed) return Milli.zero;
 	const parsed = parseDuration(trimmed);
 	if (parsed !== undefined) return parsed;
 	console.warn(`moq-watch: invalid buffer="${value}", expected a duration like "30s"`);
-	return Moq.Time.Milli.zero;
+	return Milli.zero;
 }
 
 /** Parse the element's catalog-format attribute. */
@@ -177,7 +178,7 @@ export default class MoqWatch extends HTMLElement {
 		// How far playback trails the live edge.
 		delay: new Signal<Delay>("auto"),
 		// Future-dated media held beyond the live edge before playback skips ahead.
-		buffer: new Signal<Time.Milli>(Moq.Time.Milli.zero),
+		buffer: new Signal<Milli>(Milli.zero),
 		// The desired video rendition (resolution/bitrate cap).
 		target: new Signal<Video.Target | undefined>(undefined),
 		// The selected caption track name, or undefined for off (the default; captions are opt-in).
@@ -534,11 +535,11 @@ export default class MoqWatch extends HTMLElement {
 	 * once they would sit further than `delay + buffer` past the playhead. Call `reset()` at each
 	 * utterance boundary.
 	 */
-	get buffer(): Time.Milli {
+	get buffer(): Milli {
 		return this.controls.buffer.peek();
 	}
 
-	set buffer(value: Time.Milli) {
+	set buffer(value: Milli) {
 		this.controls.buffer.set(value);
 	}
 
@@ -568,7 +569,7 @@ export default class MoqWatch extends HTMLElement {
 	}
 
 	/** The jitter buffer in milliseconds. */
-	get jitter(): Time.Milli {
+	get jitter(): Milli {
 		return this.sync.out.jitter.peek();
 	}
 

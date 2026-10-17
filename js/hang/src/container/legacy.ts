@@ -3,6 +3,7 @@ import { Time } from "@moq/net";
 
 export type { BufferedRange, BufferedRanges, Frame } from "./types";
 
+import type { Micro } from "@moq/clock";
 import type { AudioConfig, VideoConfig } from "../catalog";
 import type { Format as ContainerFormat } from "./format";
 import type { Frame } from "./types";
@@ -18,20 +19,20 @@ export class Format implements ContainerFormat {
 	}
 
 	/** Write the final video frame's end timestamp before the group closes. */
-	finishGroup(group: Moq.Group.Producer, end?: Time.Micro) {
+	finishGroup(group: Moq.Group.Producer, end?: Micro) {
 		if (this.kind !== "video" || end === undefined) return;
 		group.writeFrame({ payload: encodeFrame(new Uint8Array(), end), timestamp: Time.Timestamp.fromMicros(end) });
 	}
 
 	/** Return the video-frame or audio-source endpoint for an empty codec payload. */
-	end(frame: Frame): Time.Micro | undefined {
+	end(frame: Frame): Micro | undefined {
 		return this.kind !== "data" && frame.payload.byteLength === 0 ? frame.timestamp : undefined;
 	}
 
 	/** Decode one legacy frame, including an empty-payload duration marker. */
 	decode(frame: Uint8Array): Frame[] {
 		const [timestamp, data] = Moq.Varint.decode(frame);
-		return [{ payload: data, timestamp: timestamp as Time.Micro, keyframe: false }];
+		return [{ payload: data, timestamp: timestamp as Micro, keyframe: false }];
 	}
 }
 
@@ -44,7 +45,7 @@ export interface Source {
 }
 
 /** Encode a frame as a timestamp varint followed by the payload bytes. */
-export function encodeFrame(source: Uint8Array | Source, timestamp: Time.Micro): Uint8Array {
+export function encodeFrame(source: Uint8Array | Source, timestamp: Micro): Uint8Array {
 	const timestampBytes = Moq.Varint.encode(timestamp);
 	const data = new Uint8Array(timestampBytes.byteLength + source.byteLength);
 	data.set(timestampBytes, 0);
@@ -62,18 +63,18 @@ export function encodeFrame(source: Uint8Array | Source, timestamp: Time.Micro):
 export class Producer {
 	#track: Moq.Track.Producer;
 	#format: Format;
-	#previous?: Time.Micro;
+	#previous?: Micro;
 	#reordered = false;
 	#group?: Moq.Group.Producer;
 	// The newest timestamp written in the current group, which estimates its end.
-	#end?: Time.Micro;
+	#end?: Micro;
 	// Furthest timestamp in finished groups, used only for discontinuity markers.
-	#liveEdge?: Time.Micro;
+	#liveEdge?: Micro;
 	// The current group start and the previous group start, which bounds its frames.
-	#start?: Time.Micro;
-	#floor?: Time.Micro;
+	#start?: Micro;
+	#floor?: Micro;
 	// Gap between consecutive timestamps, used to close the last group when no successor exists.
-	#interval?: Time.Micro;
+	#interval?: Micro;
 	// A discontinuity's marker is the newest group, so another one would say nothing new.
 	#marked = false;
 
@@ -84,7 +85,7 @@ export class Producer {
 	}
 
 	/** Encode and append a frame; a keyframe starts a new group. Throws if the first frame is not a keyframe, a group start goes backwards, or a frame is below the previous group start. */
-	encode(data: Uint8Array | Source, timestamp: Time.Micro, keyframe: boolean) {
+	encode(data: Uint8Array | Source, timestamp: Micro, keyframe: boolean) {
 		const floor = keyframe ? this.#start : this.#floor;
 		if (floor !== undefined && timestamp < floor) {
 			throw new Error("frame timestamp is below the previous group start");
@@ -108,7 +109,7 @@ export class Producer {
 
 		this.#reordered ||= this.#previous !== undefined && timestamp < this.#previous;
 		if (this.#previous !== undefined && timestamp > this.#previous) {
-			const delta = (timestamp - this.#previous) as Time.Micro;
+			const delta = (timestamp - this.#previous) as Micro;
 			this.#interval = delta;
 		}
 		this.#previous = timestamp;
@@ -130,7 +131,7 @@ export class Producer {
 	 * data. No marker is written until a frame follows the last one. Throws if `end` precedes the last
 	 * video frame.
 	 */
-	discontinuity(end?: Time.Micro) {
+	discontinuity(end?: Micro) {
 		// Nothing is measured across the break, so a missing end has no cadence to estimate from.
 		// An explicit end keeps the cadence until #close validates it, in case it throws.
 		if (end === undefined) this.#interval = undefined;
@@ -145,12 +146,12 @@ export class Producer {
 			timestamp: Time.Timestamp.fromMicros(timestamp),
 		});
 		group.close();
-		this.#liveEdge = this.#liveEdge === undefined ? timestamp : (Math.max(this.#liveEdge, timestamp) as Time.Micro);
+		this.#liveEdge = this.#liveEdge === undefined ? timestamp : (Math.max(this.#liveEdge, timestamp) as Micro);
 		this.#marked = true;
 	}
 
 	// Flush and close the current group at the supplied or estimated end timestamp.
-	#close(end?: Time.Micro) {
+	#close(end?: Micro) {
 		if (!this.#group) return;
 		if (
 			this.#format.kind === "video" &&
@@ -163,15 +164,14 @@ export class Producer {
 		}
 		end ??=
 			this.#end !== undefined && this.#interval !== undefined
-				? ((this.#end + this.#interval) as Time.Micro)
+				? ((this.#end + this.#interval) as Micro)
 				: undefined;
 		// A presentation endpoint cannot bound the decode-order tail after reordering.
 		this.#format.finishGroup(this.#group, this.#reordered ? undefined : end);
 		this.#group.close();
 		this.#group = undefined;
 		if (this.#end !== undefined) {
-			this.#liveEdge =
-				this.#liveEdge === undefined ? this.#end : (Math.max(this.#liveEdge, this.#end) as Time.Micro);
+			this.#liveEdge = this.#liveEdge === undefined ? this.#end : (Math.max(this.#liveEdge, this.#end) as Micro);
 		}
 		this.#end = undefined;
 		this.#previous = undefined;

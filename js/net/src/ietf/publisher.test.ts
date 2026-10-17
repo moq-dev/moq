@@ -1,4 +1,5 @@
 import { expect, jest, spyOn, test } from "bun:test";
+import { Milli } from "@moq/clock";
 import { Signal } from "@moq/signals";
 import type { Grant } from "../auth.ts";
 import { Producer as BroadcastProducer } from "../broadcast.ts";
@@ -10,7 +11,7 @@ import { createMockTransportPair } from "../mock.ts";
 import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { Reader, Stream, Writer } from "../stream.ts";
-import { Milli, Timescale, Timestamp } from "../time.ts";
+import { Timescale, Timestamp } from "../time.ts";
 import type { Producer as TrackProducer } from "../track.ts";
 import { wireOf } from "../wire.ts";
 import { ControlStreamAdapter, NativeSession, type Session } from "./adapter.ts";
@@ -794,6 +795,7 @@ test("a failed stream open does not kill the announce loop", async () => {
 	let failures = 1;
 	const session: Session = {
 		version: inner.version,
+		client: inner.client,
 		acceptBi: () => inner.acceptBi(),
 		nextRequestId: () => inner.nextRequestId(),
 		spendRequest: (id) => inner.spendRequest(id),
@@ -840,6 +842,7 @@ test("a namespace refused once is retried without anything else changing", async
 	let failures = 1;
 	const session: Session = {
 		version: inner.version,
+		client: inner.client,
 		acceptBi: () => inner.acceptBi(),
 		nextRequestId: () => inner.nextRequestId(),
 		spendRequest: (id) => inner.spendRequest(id),
@@ -877,6 +880,7 @@ test("a solicited legacy advertisement refused once is retried", async () => {
 	let failures = 1;
 	const session: Session = {
 		version: inner.version,
+		client: inner.client,
 		acceptBi: () => inner.acceptBi(),
 		nextRequestId: () => inner.nextRequestId(),
 		spendRequest: (id) => inner.spendRequest(id),

@@ -724,6 +724,9 @@ where
 		self.cut(None)?;
 		self.inner.finish()?;
 		self.publish_estimate()?;
+		// Dropping the recorder flushes the open record, so a track that ends before its catalog
+		// still declares a duration and is advertised.
+		self.recorder = None;
 		Ok(())
 	}
 

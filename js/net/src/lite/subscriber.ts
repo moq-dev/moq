@@ -1,3 +1,4 @@
+import { Milli, Nano } from "@moq/clock";
 import { type Dispose, Effect, type GetPromise, type Getter, race, Signal } from "@moq/signals";
 import * as announce from "../announced.ts";
 import type { Grant } from "../auth.ts";
@@ -59,6 +60,7 @@ import {
 	hasAnnounceId,
 	hasAnnounceOk,
 	hasDatagrams,
+	hasFetchMaxDelay,
 	hasOrder,
 	hasProbeRtt,
 	hasStreamCount,
@@ -706,7 +708,7 @@ export class Subscriber {
 		try {
 			opened = await withTimeout(
 				untilAborted(setup, valid),
-				SUBSCRIBE_SETUP_TIMEOUT_MS,
+				Nano.fromMilli(Milli(SUBSCRIBE_SETUP_TIMEOUT_MS)),
 				`subscribe timed out after ${SUBSCRIBE_SETUP_TIMEOUT_MS}ms waiting for the first response (browser stream limit reached?)`,
 			);
 			console.debug(`subscribe ok: id=${id} broadcast=${broadcast} track=${request.name}`);
@@ -846,7 +848,7 @@ export class Subscriber {
 			// for a late group anyway. Already the smaller of the subscriber's and the track's.
 			tail: new Tail({
 				grace: () => {
-					const maxDelay = producer.subscription.peek()?.maxDelay ?? Time.Milli.zero;
+					const maxDelay = producer.subscription.peek()?.maxDelay ?? Milli.zero;
 					return maxDelay > 0 ? maxDelay : TAIL_GRACE_MS;
 				},
 			}),
@@ -931,7 +933,7 @@ export class Subscriber {
 			timescale: info.timescale,
 			// Publisher Max Age rides on the wire, so the local media-time budget
 			// matches what the upstream advertises (relays re-serve with the same bound).
-			maxAge: info.maxAge === undefined ? undefined : Time.Milli(info.maxAge),
+			maxAge: info.maxAge === undefined ? undefined : Milli(info.maxAge),
 			priority: info.priority,
 		};
 	}
@@ -975,7 +977,10 @@ export class Subscriber {
 		// demand from the start, and a fast FIN cannot discard frames before these callers
 		// receive their handles. An abort closes only this caller's mirror, so the stream is
 		// cancelled once the last one leaves.
-		const key = JSON.stringify([consumed.id, broadcast, epoch, track, sequence]);
+		// Different freshness budgets use independent streams: once a FETCH is on the
+		// wire its limit cannot be widened for a later, more tolerant caller. Equal
+		// budgets still coalesce and each caller keeps an independent mirror.
+		const key = JSON.stringify([consumed.id, broadcast, epoch, track, sequence, options.maxDelay]);
 		let entry = this.#fetches.get(key);
 		let consumer: netGroup.Consumer;
 		if (entry && !entry.group.isClosed) {
@@ -985,7 +990,15 @@ export class Subscriber {
 			consumer = group.mirror();
 			entry = {
 				group,
-				accepted: this.#runFetch(broadcast, consumed, track, sequence, options.priority ?? 0, group),
+				accepted: this.#runFetch(
+					broadcast,
+					consumed,
+					track,
+					sequence,
+					options.priority ?? 0,
+					group,
+					options.maxDelay,
+				),
 			};
 			this.#fetches.set(key, entry);
 			void group.closed.then(() => {
@@ -1012,6 +1025,7 @@ export class Subscriber {
 		sequence: number,
 		priority: number,
 		group: netGroup.Producer,
+		maxDelay?: Milli,
 	): Promise<void> {
 		const refused = unauthorized(broadcast);
 		// Arm before checking so revocation during setup or response cannot be missed.
@@ -1029,7 +1043,7 @@ export class Subscriber {
 			// Lite has no FETCH_OK, so a publisher that never answers would hold the setup forever.
 			// Subscriber.close() closing the group releases every caller at any stage, and resets
 			// the streams the setup opened.
-			const setup = this.#fetchSetup(broadcast, consumed, track, sequence, priority, group);
+			const setup = this.#fetchSetup(broadcast, consumed, track, sequence, priority, group, maxDelay);
 			let accepted: { stream: Stream; info: TrackInfo };
 			try {
 				accepted = await untilAbandoned(group, setup);
@@ -1058,6 +1072,7 @@ export class Subscriber {
 		sequence: number,
 		priority: number,
 		group: netGroup.Producer,
+		maxDelay?: Milli,
 	): Promise<{ stream: Stream; info: TrackInfo }> {
 		const { epoch, valid } = consumed;
 		const cancel = new AbortController();
@@ -1074,10 +1089,14 @@ export class Subscriber {
 			{ sendOrder: sendOrder({ priority }), version: this.version },
 			async (stream) => {
 				await stream.writer.u53(StreamId.Fetch);
-				await new FetchMessage({ broadcast, epoch, track, priority, group: sequence }).encode(
-					stream.writer,
-					this.version,
-				);
+				await new FetchMessage({
+					broadcast,
+					epoch,
+					track,
+					priority,
+					maxDelay: hasFetchMaxDelay(this.version) ? maxDelay : undefined,
+					group: sequence,
+				}).encode(stream.writer, this.version);
 				// A byte or an empty-group FIN accepts the fetch; a reset rejects it.
 				// done() buffers that byte so the response pump can decode it normally.
 				await untilClosed(group, stream.reader.done());
@@ -1238,7 +1257,7 @@ export class Subscriber {
 		let lastSent: track.Subscription = {
 			priority: msg.priority,
 			order: msg.order,
-			maxDelay: Time.Milli(msg.maxDelay),
+			maxDelay: Milli(msg.maxDelay),
 			groups: {
 				start: msg.startGroup === undefined ? undefined : { included: msg.startGroup },
 				end: msg.endGroup === undefined ? undefined : { excluded: exclusiveGroupEnd(msg.endGroup) ?? 0 },
@@ -1484,7 +1503,7 @@ export class Subscriber {
 				if (!probe) break;
 				// Lite-03 carries no RTT; newer drafts retract it with a zero.
 				const prev = this.#probe.peek();
-				const rtt = probe.rtt !== undefined ? Time.Milli(probe.rtt) : undefined;
+				const rtt = probe.rtt !== undefined ? Milli(probe.rtt) : undefined;
 				this.#probe.set({
 					// `undefined` is the peer reporting "unknown"; a 0 would become a real ABR target.
 					estimatedRecvRate: probe.bitrate,

@@ -110,14 +110,15 @@ window, so very small values can prevent other requests from progressing.
 ## \[runtime]
 
 By default one work-stealing runtime serves every connection off one UDP
-socket. On Linux, QUIC can instead run on pinned single-threaded workers, each
-with its own socket on the listen address (`SO_REUSEPORT`), so a connection is
-handled start to finish by one thread and its packets never cross cores.
+socket. On Linux, QUIC can instead run on single-threaded workers, each with
+its own socket on the listen address (`SO_REUSEPORT`), so a connection is
+handled start to finish by one worker thread and its packets never cross
+threads. `pin = true` also keeps that thread on one core.
 
 ```toml
 [runtime]
 workers = 8                          # Single-threaded QUIC workers. Omit for the shared runtime.
-pin = true                           # Pin each worker to a core. Default.
+pin = false                          # Pin each worker to a core. Off by default.
 io_uring = false                     # Drive them with io_uring instead of tokio.
 ```
 
@@ -125,6 +126,10 @@ Packets are steered by connection ID, so a client that migrates stays with its
 worker. `workers` needs the `quic` feature. Every worker and the TLS stream
 listener serve one shared identity, generated or file-backed, so a certificate
 rotation reaches them together and `/certificate.sha256` stays accurate.
+
+Pinning is off by default because every relay pins its workers to the same
+first cores, so two relays on one host, or one limited to fewer CPUs than the
+host has, would crowd onto them. Turn it on for a host the relay has to itself.
 
 `io_uring` additionally needs Linux 6.12+ and the `io-uring` cargo feature; it
 shares the same reloadable TLS identity, serves moq-lite only, and refuses

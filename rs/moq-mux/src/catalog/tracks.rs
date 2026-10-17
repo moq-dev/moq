@@ -366,12 +366,22 @@ impl<E: CatalogExt> RenditionConfig<E> for hang::catalog::TextConfig {
 /// timestamps by. Clones share that timebase.
 pub struct Reserved<E: CatalogExt = ()> {
 	timebase: super::Timebase<E>,
+	timeline_hint: Option<std::time::Duration>,
 }
 
 impl<E: CatalogExt> Reserved<E> {
 	pub(super) fn new(timebase: super::Timebase<E>) -> Self {
 		timebase.catalog.add_reserver();
-		Self { timebase }
+		Self {
+			timebase,
+			timeline_hint: None,
+		}
+	}
+
+	/// Declare the track's regular group duration to its archive timeline.
+	pub fn with_timeline_hint(mut self, duration: impl Into<Option<std::time::Duration>>) -> Self {
+		self.timeline_hint = duration.into();
+		self
 	}
 
 	/// Track properties for a media track under this catalog, carrying any retention it declares.
@@ -445,7 +455,9 @@ impl<E: CatalogExt> Reserved<E> {
 		crate::Error: From<C::Error>,
 	{
 		let rendition = self.init(track.name())?;
-		self.timebase.catalog.media(track, container, rendition, config.into())
+		self.timebase
+			.catalog
+			.media(track, container, rendition, config.into(), self.timeline_hint)
 	}
 
 	/// Resolve a timestamp on the broadcast's shared clock (see [`Producer::timestamp`]).
@@ -472,7 +484,7 @@ impl<E: CatalogExt> Reserved<E> {
 
 impl<E: CatalogExt> Clone for Reserved<E> {
 	fn clone(&self) -> Self {
-		Self::new(self.timebase.clone())
+		Self::new(self.timebase.clone()).with_timeline_hint(self.timeline_hint)
 	}
 }
 
@@ -1178,11 +1190,15 @@ mod tests {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let mut catalog = super::super::Producer::new(&mut broadcast, super::super::Config::default()).unwrap();
 
-		let _video0 = catalog.enroll("video0").unwrap();
-		let _video1 = catalog.enroll("video1").unwrap();
+		let _video0 = catalog
+			.enroll("video0", Some(std::time::Duration::from_secs(4)))
+			.unwrap();
+		let _video1 = catalog
+			.enroll("video1", Some(std::time::Duration::from_secs(4)))
+			.unwrap();
 		let section = catalog.timeline().section();
-		assert_eq!(section.timelines["video0"], "video0.timeline.z");
-		assert_eq!(section.timelines["video1"], "video1.timeline.z");
+		assert_eq!(section.timelines["video0"].track, "video0.timeline.z");
+		assert_eq!(section.timelines["video1"].track, "video1.timeline.z");
 		assert_eq!(catalog.snapshot().archive, Some(section));
 	}
 

@@ -52,6 +52,25 @@ use segments::Reference;
 type TimelineWatchers =
 	Arc<Mutex<std::collections::BTreeMap<segments::ReferenceKey, (Reference, tokio::task::JoinHandle<()>)>>>;
 
+/// A half-open media-time range for an HLS playlist.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Range {
+	/// The first requested media time.
+	start: Duration,
+	/// The first media time outside the request.
+	end: Duration,
+}
+
+impl Range {
+	/// Build a non-empty media-time range.
+	pub fn new(start: Duration, end: Duration) -> crate::Result<Self> {
+		if start >= end {
+			return Err(crate::Error::RangeUnavailable("start must be before end".into()));
+		}
+		Ok(Self { start, end })
+	}
+}
+
 /// Backoff bounds for the initial catalog subscription.
 ///
 /// The usual failure is a publisher that has announced its broadcast but not yet written its
@@ -673,7 +692,13 @@ mod tests {
 
 	impl CatalogTestExt for moq_mux::catalog::Producer {
 		fn enroll_test(&self, track: &str) -> moq_mux::Result<moq_mux::timeline::Recorder> {
-			let recorder = self.timeline().track(track, moq_mux::timeline::Config::default())?;
+			let duration = Duration::from_secs(2);
+			let recorder = self.timeline().track(
+				track,
+				moq_mux::timeline::Config::default()
+					.with_duration_min(duration)
+					.with_duration_hint(duration),
+			)?;
 			let section = self.timeline().section();
 			let mut producer = self.clone();
 			let mut catalog = producer.modify()?;
@@ -699,9 +724,10 @@ mod tests {
 	fn archive(tracks: &[&str]) -> hang::catalog::Archive {
 		let mut archive = hang::catalog::Archive::new();
 		for track in tracks {
-			archive
-				.timelines
-				.insert(track.to_string(), hang::timeline::default_name(track));
+			archive.timelines.insert(
+				track.to_string(),
+				hang::catalog::Timeline::new(hang::timeline::default_name(track), 4_000),
+			);
 		}
 		archive
 	}
@@ -2388,7 +2414,15 @@ mod tests {
 		// Write the catalog track directly: a moq-mux catalog producer always advertises its clock,
 		// as a publisher on a host whose wall clock is set does.
 		let timelines = moq_mux::timeline::Timelines::new(&broadcast);
-		let recorder = timelines.track("video0", moq_mux::timeline::Config::default()).unwrap();
+		let duration = Duration::from_secs(2);
+		let recorder = timelines
+			.track(
+				"video0",
+				moq_mux::timeline::Config::default()
+					.with_duration_min(duration)
+					.with_duration_hint(duration),
+			)
+			.unwrap();
 		let mut snapshot = moq_mux::catalog::hang::Catalog::<()>::default();
 		snapshot.video.renditions.insert("video0".to_string(), video_config());
 		snapshot.archive = Some(timelines.section());
@@ -2476,7 +2510,7 @@ mod tests {
 			.next()
 			.expect("a video rendition");
 		let rendition = broadcaster.rendition(Kind::Video, &video).expect("video discovered");
-		let playlist = tokio::time::timeout(Duration::from_secs(5), rendition.playlist(None))
+		let playlist = tokio::time::timeout(Duration::from_secs(5), rendition.playlist(None, None))
 			.await
 			.expect("a listed segment")
 			.unwrap()
@@ -2693,9 +2727,8 @@ mod tests {
 		drop((audio, registration, broadcast));
 	}
 
-	// The catalog's durationMax is the record split ceiling, far above a GOP, so the exporter
-	// derives EXT-X-TARGETDURATION from the segments it has: a playlist whose EXTINF exceeds its
-	// target duration is invalid, and one far above them delays every player.
+	// The declared duration is nominal, so the exporter derives EXT-X-TARGETDURATION from the
+	// segments it has. A playlist whose EXTINF exceeds its target duration is invalid.
 	#[tokio::test]
 	async fn target_duration_follows_the_observed_segments() {
 		let origin = produce_origin();
@@ -3852,6 +3885,13 @@ mod tests {
 
 		let reference = test.listed("video0", 6).await;
 		assert!(!reference.finished, "the other renditions go on");
+
+		// A range the failed timeline can never finish is refused, not frozen as a partial clip.
+		let range = Range::new(Duration::ZERO, Duration::from_secs(12)).unwrap();
+		assert!(matches!(
+			test.rendition("video1").snapshot_range(range, None),
+			Err(crate::Error::RangeUnavailable(_))
+		));
 	}
 
 	// A failed reference timeline is not retried. Every playlist ends (`EXT-X-ENDLIST`) instead
@@ -3880,6 +3920,22 @@ mod tests {
 		video1.push(&gop(4)).unwrap();
 		assert_eq!(numbers(&test.finished("video1").await), [0, 1, 2, 3]);
 		test.drain("video0").await;
+	}
+
+	// A range over a recording that ended without media is refused rather than reported missing.
+	#[tokio::test(start_paused = true)]
+	async fn a_range_over_an_empty_ended_recording_is_refused() {
+		let test = Timelines::new();
+		let (track, video0) = test.publish("video0");
+		let (_track, _video1) = test.publish("video1");
+		cut(track, video0);
+		assert!(test.finished("video1").await.segments.is_empty());
+
+		let range = Range::new(Duration::ZERO, Duration::from_secs(2)).unwrap();
+		assert!(matches!(
+			test.rendition("video1").snapshot_range(range, None),
+			Err(crate::Error::RangeUnavailable(_))
+		));
 	}
 
 	// A rendition running far ahead of a stalled reference keeps the records its listed segments
@@ -4060,7 +4116,7 @@ mod tests {
 				let refs = [reference(0), reference(1)];
 				let entry = |sequence, at| {
 					let mut record = gop(sequence);
-					record.pts = at * 2_000;
+					record.pts = Some(at * 2_000);
 					moq_mux::timeline::Entry::decode(record, moq_net::Timescale::MILLI).unwrap()
 				};
 				for at in 0..retained {

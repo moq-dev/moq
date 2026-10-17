@@ -249,6 +249,7 @@ test("announcing and subscribing after GOAWAY still open streams, on the adapter
 		let opened = false;
 		const session: Session = {
 			version,
+			client: true,
 			openBi() {
 				opened = true;
 				throw new Error("openBi");

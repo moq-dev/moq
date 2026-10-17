@@ -83,5 +83,4 @@ every sequence delivered or dropped.
 ## Related
 
 - [Track priority scope](/quest/m1/track-priority-scope.md) - group order within a track now follows the subscription
-- [FETCH max-delay](/quest/m1/fetch-max-delay.md) - the age contract applies to past ranges and held readers too
 - [IETF fill timeout](/quest/m1/ietf-fill-timeout.md) - bounds upstream waiting independently of content age

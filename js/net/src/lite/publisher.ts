@@ -1,3 +1,4 @@
+import { Instant, Milli, Nano, now, sleep } from "@moq/clock";
 import { type Dispose, type Getter, Once, race, Signal } from "@moq/signals";
 import type { Grant } from "../auth.ts";
 import { enforceGrant } from "../auth_session.ts";
@@ -12,10 +13,11 @@ import type { Consumer as OriginConsumer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { Priority, sendOrder } from "../priority.ts";
 import { type Reader, type Stream, Writer } from "../stream.ts";
-import { Milli, type Timescale, Timestamp } from "../time.ts";
+import { type Timescale, Timestamp } from "../time.ts";
 import type * as track from "../track.ts";
 import { untilAborted } from "../util/abort.ts";
 import { Interests, LIMITS, type Limits, Slots } from "../util/limits.ts";
+import { nextTask } from "../util/yield.ts";
 import { type Advertised, type Advertisements, sameInstance, wireOf } from "../wire.ts";
 import { AnnounceInit, AnnounceOk, type AnnounceRequest, encodeAnnounceBroadcast } from "./announce.ts";
 import { Datagram as DatagramMessage } from "./datagram.ts";
@@ -299,12 +301,6 @@ class SubscriptionControls {
 		this.#finish(null);
 	}
 }
-
-// A microtask is too short: decoding one framed update crosses several awaits, each of which
-// can requeue behind the serving continuation. A task boundary lets the decoder finish whatever
-// the transport already delivered before the next group pop. Updates are rare, so groups do not
-// pay this scheduling cost on the normal path.
-const yieldToControls = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
 
 // Register both readiness sources in the same turn after the caller observed neither ready.
 // The winner disposes both registrations, so an idle subscription accumulates nothing no
@@ -940,6 +936,7 @@ export class Publisher {
 				// A group that has not arrived yet holds this FETCH's slot until the requester leaves.
 				group = await wireOf(front).fetchGroup(msg.track, msg.group, {
 					priority: msg.priority,
+					maxDelay: msg.maxDelay,
 					signal: left.signal,
 				});
 				serving(group);
@@ -953,6 +950,10 @@ export class Publisher {
 					start: msg.startFrame,
 					end: msg.endFrame,
 				});
+				// A budget giving up on a drained group ends its read cleanly, but a FIN would
+				// tell the requester the group is whole.
+				if (hooks.groupExpired(group))
+					throw new StreamError(StreamCode.Old, { message: "fetch exceeded its max delay" });
 				console.debug(`fetch done: broadcast=${msg.broadcast} track=${msg.track} group=${msg.group}`);
 				stream.close();
 				group.close();
@@ -1078,7 +1079,12 @@ export class Publisher {
 							bounds.startFrame = update.startFrame;
 							bounds.endGroup = update.endGroup;
 							bounds.endFrame = update.endFrame;
-							await yieldToControls();
+							// A microtask is too short: decoding one framed update crosses several
+							// awaits, each of which can requeue behind the serving continuation. A
+							// task boundary lets the decoder finish whatever the transport already
+							// delivered before the next group pop. Updates are rare, so groups do
+							// not pay this scheduling cost on the normal path.
+							await nextTask();
 							continue;
 						}
 					}
@@ -1529,7 +1535,7 @@ export class Publisher {
 		}
 
 		let lastSent: Probe | undefined;
-		let lastSentTime: number | undefined;
+		let lastSentTime: Instant | undefined;
 
 		// Whether a metric moved enough to be worth another report. Gaining or
 		// losing a value always counts; both unknown never does.
@@ -1554,15 +1560,16 @@ export class Publisher {
 
 		try {
 			for (;;) {
-				let timer: ReturnType<typeof setTimeout> | undefined;
-				const timeout = new Promise<"timeout">((resolve) => {
-					timer = setTimeout(() => resolve("timeout"), PROBE_INTERVAL);
-				});
+				const timer = new AbortController();
+				const timeout = sleep(Nano.fromMilli(Milli(PROBE_INTERVAL)), { signal: timer.signal }).then(
+					() => "timeout" as const,
+					() => "timeout" as const,
+				);
 				let result: "timeout" | Error | null;
 				try {
 					result = await race([timeout, ended]);
 				} finally {
-					clearTimeout(timer);
+					timer.abort();
 				}
 				if (result instanceof Error) throw result;
 				if (result !== "timeout") break;
@@ -1594,7 +1601,7 @@ export class Publisher {
 				if (lastSent === undefined || lastSentTime === undefined) {
 					shouldSend = true;
 				} else {
-					const elapsed = performance.now() - lastSentTime;
+					const elapsed = Nano.toMilli(Instant.durationSince(now(), lastSentTime));
 					// The bitrate threshold decays to zero as the last report ages: a
 					// stale estimate is worth refreshing for a smaller move.
 					const t = Math.max(PROBE_INTERVAL, Math.min(PROBE_MAX_AGE, elapsed));
@@ -1609,7 +1616,7 @@ export class Publisher {
 				if (shouldSend) {
 					await report.encode(stream.writer, this.version);
 					lastSent = report;
-					lastSentTime = performance.now();
+					lastSentTime = now();
 				}
 			}
 		} catch (err: unknown) {

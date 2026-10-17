@@ -1,7 +1,7 @@
 import { install } from "./ambient.ts";
 import type { Backend } from "./backend.ts";
 import { drain } from "./host.ts";
-import { Instant, type Nano, Wall } from "./types.ts";
+import { Instant, Nano, Wall } from "./types.ts";
 
 type Timer = { at: number; order: number; index: number; ready: () => void };
 
@@ -19,6 +19,7 @@ export class Manual {
 	#backend: Backend = {
 		now: () => this.#now,
 		wall: () => this.wall(),
+		origin: () => this.#wallAnchor - Nano.toMilli(Nano(this.#wallAnchorAt)),
 		arm: (at, ready) => {
 			const timer = { at, order: this.#order++, index: this.#timers.length, ready };
 			this.#timers.push(timer);
