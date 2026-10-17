@@ -5245,6 +5245,7 @@ dependencies = [
  "openh264-sys2",
  "pipewire",
  "pollster",
+ "scuffle-h265",
  "thiserror 2.0.21",
  "tokio",
  "tracing",

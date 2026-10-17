@@ -708,10 +708,11 @@ impl Server {
 							let Accepted { session, url, identity, authority, mut link } = within(deadline, crate::quic::accept(_conn, alpns)).await?;
 							link.local = local;
 							let binding = match url { Some(_) => moq_net::transport::Binding::Uri, None => moq_net::transport::Binding::InBand };
+							let quic = Some(session.clone());
 							let (request, deadline) = accept_request(&setup.server, session, binding, deadline).await?;
 							// Only WebTransport carries a request URL; raw QUIC puts the path in the SETUP.
 							let transport = match url { Some(_) => Transport::WebTransport, None => Transport::Quic };
-							Ok(Request { transport, url, identity, authority, link, kind: RequestKind::Quic(Box::new(request)), deadline, active })
+							Ok(Request { transport, url, identity, authority, link, kind: RequestKind::Quic(Box::new(request)), quic, deadline, active })
 						}.boxed());
 					}
 				}
@@ -728,7 +729,18 @@ impl Server {
 							let Accepted { session, url, identity, authority, link } = within(deadline, super::iroh::accept(_conn, alpns)).await?;
 							let binding = match url { Some(_) => moq_net::transport::Binding::Uri, None => moq_net::transport::Binding::InBand };
 							let (request, deadline) = accept_request(&setup.server, session, binding, deadline).await?;
-							Ok(Request { transport: Transport::Iroh, url, identity, authority, link, kind: RequestKind::Iroh(Box::new(request)), deadline, active })
+							Ok(Request {
+								transport: Transport::Iroh,
+								url,
+								identity,
+								authority,
+								link,
+								kind: RequestKind::Iroh(Box::new(request)),
+								#[cfg(feature = "quic")]
+								quic: None,
+								deadline,
+								active,
+							})
 						}.boxed());
 					}
 				}
@@ -994,6 +1006,8 @@ pub(crate) async fn accept_websocket(
 		identity: options.identity,
 		link: options.link,
 		kind: RequestKind::Qmux(Box::new(request)),
+		#[cfg(feature = "quic")]
+		quic: None,
 		deadline,
 		active: options.active,
 	})
@@ -1481,6 +1495,8 @@ async fn stream_request(
 				identity: None,
 				link,
 				kind: RequestKind::Qmux(Box::new(request)),
+				#[cfg(feature = "quic")]
+				quic: None,
 				deadline,
 				active,
 			};
@@ -1560,6 +1576,10 @@ pub struct Request {
 	/// The link facts the transport could see.
 	link: Link,
 	kind: RequestKind,
+	/// The connection under a QUIC or WebTransport request, for
+	/// [`Request::set_quic_limits`].
+	#[cfg(feature = "quic")]
+	quic: Option<crate::quic::web::Session>,
 	/// What remains of the handshake deadline, which also bounds [`Request::ok`].
 	deadline: Option<Deadline>,
 }
@@ -1661,6 +1681,31 @@ impl Request {
 	pub fn with_limits(mut self, limits: moq_net::session::Limits) -> Self {
 		self.kind = request_map!(self.kind, request => request.with_limits(limits));
 		self
+	}
+
+	/// Change this connection's QUIC flow-control limits, such as widening them
+	/// once the peer is known to be another relay.
+	///
+	/// Errors on a transport that is not QUIC (qmux streams, iroh), which keeps
+	/// the limits its own config set, and on limits [`Limits::validate`](crate::quic::Limits::validate)
+	/// refuses, leaving the limits unchanged.
+	pub fn set_quic_limits(&self, limits: crate::quic::Limits) -> crate::Result<()> {
+		#[cfg(feature = "quic")]
+		if let Some(conn) = &self.quic {
+			use crate::quic::driver::VarInt;
+			limits.validate()?;
+			let window = VarInt::from_u64(limits.receive_window.get()).expect("validated");
+			// Windows first: each setter can flush on its own, and the stream credit is
+			// what a peer waits on, so it must not overtake the window.
+			conn.set_receive_window(window);
+			conn.set_send_window(limits.send_window.get());
+			let streams = VarInt::from_u64(limits.max_streams.get()).expect("validated");
+			conn.set_max_concurrent_bi_streams(streams);
+			conn.set_max_concurrent_uni_streams(streams);
+			return Ok(());
+		}
+		let _ = limits;
+		Err(Error::QuicLimits(self.transport))
 	}
 
 	/// Accept the session and return its supervised driver task.

@@ -682,6 +682,7 @@ async fn serve_connection(
 	};
 
 	deadline.close = Some(transport.clone());
+	let conn = transport.clone();
 	let server = moq_net::Server::new().with_versions(serve.versions.clone());
 	let binding = match url {
 		Some(_) => moq_net::transport::Binding::Uri,
@@ -809,6 +810,14 @@ async fn serve_connection(
 		stats,
 	} = admitted;
 
+	// A peer's QUIC limits widen before SETUP OK, so its first requests see them.
+	if let Some(limits) = serve.cluster.quic_limits(&lease) {
+		conn.set_limits(moq_uring::quic::Limits {
+			max_streams: limits.max_streams,
+			receive_window: limits.receive_window,
+			send_window: limits.send_window,
+		})?;
+	}
 	let mut request = request
 		.with_stats(stats.clone())
 		.with_limits(serve.cluster.limits(&lease));

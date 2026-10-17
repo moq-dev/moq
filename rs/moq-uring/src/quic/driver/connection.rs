@@ -275,8 +275,8 @@ impl Inner {
 /// concurrent pending operations don't trample each other's wakeups. Dropping
 /// every handle (and every stream) drops the driver's `Rc` peers, but the
 /// driver itself keeps the connection alive until it ends; close explicitly
-/// with [`close`](web_transport_trait::poll::Session::close) (which moq's
-/// session machine does).
+/// with [`close`](web_transport_trait::poll::Session::close), or wrap it in
+/// [`crate::quic::web::Session`], whose last handle closes it.
 ///
 /// That close only records the code: the driver task is what frames the
 /// CONNECTION_CLOSE and hands it to the socket. Drive the worker until
@@ -370,6 +370,29 @@ impl Connection {
 	/// done.
 	pub fn handshake(&self) -> &crate::quic::handshake::Info {
 		&self.handshake
+	}
+
+	/// Change the connection's flow-control limits; a raise reaches the peer
+	/// on the next packet.
+	///
+	/// Errors, changing nothing, on a stream limit past 2^60 or a receive window
+	/// past a QUIC varint, which a peer would refuse.
+	pub fn set_limits(&self, limits: crate::quic::Limits) -> Result<(), crate::Error> {
+		// A stream ID is a varint whose low two bits are its type (RFC 9000).
+		if limits.max_streams.get() > 1 << 60 {
+			return Err(crate::Error::StreamsRange);
+		}
+		let streams = VarInt::from_u64(limits.max_streams.get()).expect("checked above");
+		let window =
+			VarInt::from_u64(limits.receive_window.get()).map_err(|_| crate::Error::WindowRange("receive_window"))?;
+		let mut conn = self.shared.conn.borrow_mut();
+		conn.set_max_concurrent_streams(Dir::Bi, streams);
+		conn.set_max_concurrent_streams(Dir::Uni, streams);
+		conn.set_receive_window(window);
+		conn.set_send_window(limits.send_window.get());
+		drop(conn);
+		self.shared.kick();
+		Ok(())
 	}
 
 	/// Returns connection statistics.
