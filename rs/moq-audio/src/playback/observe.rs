@@ -201,6 +201,9 @@ impl Drop for Observer {
 
 /// The gap being built, still open until a full quantum ends it.
 struct Open {
+	/// The observer generation it opened under: a gap belongs to the observer
+	/// that saw it start, or to the first one if none did.
+	observer: u64,
 	/// The first missing frame, on the ledger's frame count.
 	at: u64,
 	missing: u64,
@@ -333,7 +336,9 @@ impl Ledger {
 		};
 		// A partly filled quantum inside an open gap is a sink that got a little
 		// and ran out again: still one gap, since only a full quantum ends it.
+		let observer = self.shared.observer.load(Ordering::Acquire);
 		let open = self.open.get_or_insert(Open {
+			observer,
 			at: first,
 			missing: 0,
 			quanta: 0,
@@ -348,6 +353,9 @@ impl Ledger {
 
 	fn close(&mut self) {
 		let Some(open) = self.open.take() else { return };
+		if open.observer != 0 && open.observer != self.shared.observer.load(Ordering::Acquire) {
+			return;
+		}
 		let gap = Gap {
 			at: self.clock(open.at),
 			missing: Duration::from_secs_f64(open.missing as f64 / self.rate),
@@ -529,6 +537,19 @@ mod tests {
 			"the stall after the finish is not reported"
 		);
 		assert_eq!(observation.clock, ms(128 * 6), "the clock still runs");
+	}
+
+	#[test]
+	fn a_gap_open_across_observers_stays_with_the_first() {
+		let shared = Arc::new(Shared::default());
+		let mut ledger = Ledger::new(shared.clone(), RATE);
+		let first = Observer::new(shared.clone()).unwrap();
+		add(&mut ledger, 128, 128);
+		add(&mut ledger, 128, 0);
+		drop(first);
+		let mut second = Observer::new(shared).unwrap();
+		add(&mut ledger, 128, 128);
+		assert!(second.read().unwrap().gaps.is_empty());
 	}
 
 	#[test]
