@@ -8,7 +8,7 @@ import { Producer } from "./origin.ts";
 import * as Path from "./path.ts";
 import { Front } from "./resume.ts";
 import type * as track from "./track.ts";
-import { wireOf } from "./wire.ts";
+import { overrideBroadcastWire, wireOf } from "./wire.ts";
 
 const EPOCH = Epoch.parse("01900000-0000-7000-8000-000000000001");
 const path = Path.from("live");
@@ -421,4 +421,55 @@ test("a recovery fetch a later route supersedes is abandoned", async () => {
 	a.close();
 	b.close();
 	c.close();
+});
+
+test("track info keeps one answer across routes", async () => {
+	const front = new Front();
+	const a = new BroadcastProducer();
+	const b = new BroadcastProducer();
+	a.createTrack("seq", { priority: 1 });
+	b.createTrack("seq", { priority: 2 });
+	front.serve(a.consume());
+	expect((await front.consumer.track("seq").info()).priority).toBe(1);
+	front.serve(b.consume());
+	await expect(front.consumer.track("seq").info()).rejects.toThrow("changed its properties");
+
+	front.consumer.close();
+	a.close();
+	b.close();
+});
+
+test("a datagram reader lets go of the copies a swap replaced", async () => {
+	const front = new Front();
+	const a = new BroadcastProducer();
+	const b = new BroadcastProducer();
+	const ta = copy(a);
+	copy(b);
+	front.serve(a.consume());
+	const sub = front.consumer.track("seq").subscribe();
+	expect(ta.producer.demand().used.peek()).toBe(true);
+	front.serve(b.consume());
+	await settle();
+	// A read with nothing to deliver is the pass that lets go of a's copy.
+	void sub.recvDatagram();
+	await settle();
+	expect(ta.producer.demand().used.peek()).toBe(false);
+
+	sub.close();
+	front.consumer.close();
+	a.close();
+	b.close();
+});
+
+test("a front remembers it served a session's broadcast between routes", () => {
+	const front = new Front();
+	const a = new BroadcastProducer();
+	const session = a.consume();
+	overrideBroadcastWire(session, {});
+	front.serve(session);
+	expect(front.fromSession).toBe(true);
+	front.park();
+	expect(front.fromSession).toBe(true);
+	front.consumer.close();
+	a.close();
 });

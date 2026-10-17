@@ -71,16 +71,23 @@ function compatible(a: track.Info, b: track.Info): boolean {
 	return a.timescale === b.timescale && a.maxAge === b.maxAge && a.priority === b.priority;
 }
 
+function incompatible(name: string): Error {
+	return new Error(`track ${name} changed its properties across routes`);
+}
+
 /** One route's broadcast, held while the front serves it or a reader still reads a copy of it. */
 class Source {
 	readonly wire: BroadcastWire;
 	/** The table's handle this was served from, so serving it again is a no-op. */
 	readonly from: broadcast.Consumer;
+	/** Whether a session delivered it, read from the handle served rather than the clone. */
+	readonly fromSession: boolean;
 	#consumer: broadcast.Consumer;
 	#holds = 0;
 
 	constructor(from: broadcast.Consumer) {
 		this.from = from;
+		this.fromSession = wireOf(from).fromSession === true;
 		this.#consumer = from.clone();
 		this.wire = wireOf(this.#consumer);
 	}
@@ -400,6 +407,7 @@ class Reader implements ResumeSource {
 				break;
 			}
 		}
+		this.#letGo();
 		const end = this.#end((copy) => copy.datagramsDone);
 		if (end.kind === "error" || end.kind === "done") return end;
 		return { kind: "idle" };
@@ -441,11 +449,15 @@ class Reader implements ResumeSource {
 	 * Drop replaced copies only once neither a handed-out nor an unread group needs them. One not
 	 * yet replaced stays, even between routes: it is still the newest copy there is.
 	 */
-	#letGo(delivered: Delivered): void {
+	#letGo(delivered?: Delivered): void {
 		const cursor = this.#shell.cursor.peek();
 		this.#copies = this.#copies.filter((copy) => {
 			if (copy.until === undefined || copy.lease > 0) return true;
-			if (copy.done === undefined && hooks.hasUnreadGroup(copy.sub, cursor.start, copyEnd(copy), delivered)) {
+			if (
+				copy.done === undefined &&
+				delivered &&
+				hooks.hasUnreadGroup(copy.sub, cursor.start, copyEnd(copy), delivered)
+			) {
 				return true;
 			}
 			this.#drop(copy);
@@ -753,6 +765,8 @@ export class Front {
 	/** Bumped whenever the source changes, so an answer from a replaced one is dropped. */
 	#changed = new Signal(0);
 	#concluded = false;
+	/** Whether any source it served came from a session, kept between routes. */
+	#fromSession = false;
 
 	constructor() {
 		this.consumer = makeFrontConsumer(this);
@@ -764,6 +778,7 @@ export class Front {
 		if (this.#concluded || this.#source?.from === from) return;
 		const source = new Source(from);
 		source.retain();
+		this.#fromSession ||= source.fromSession;
 		const previous = this.#source;
 		this.#source = source;
 		this.#changed.update((n) => n + 1);
@@ -791,9 +806,12 @@ export class Front {
 		this.#changed.update((n) => n + 1);
 	}
 
-	/** Whether the serving broadcast came from a session; see {@link BroadcastWire.fromSession}. */
+	/**
+	 * Whether a broadcast it served came from a session; see {@link BroadcastWire.fromSession}.
+	 * Sticky, since the front can move back onto a session's route at any time.
+	 */
 	get fromSession(): boolean {
-		return this.#source?.wire.fromSession ?? false;
+		return this.#fromSession;
 	}
 
 	// Splice `source`'s copy of a track in, once it claims the same content as the copies before.
@@ -828,7 +846,7 @@ export class Front {
 					// A copy claiming the same content with different metadata is refused rather
 					// than reinterpreted.
 					if (!expected || compatible(expected, info)) route.serve(source);
-					else route.refuse(new Error(`track ${route.name} changed its properties across routes`));
+					else route.refuse(incompatible(route.name));
 				},
 				(err: unknown) => {
 					if (this.#source !== source) return;
@@ -886,18 +904,23 @@ export class Front {
 				continue;
 			}
 			source.retain();
+			let info: track.Info;
 			try {
-				const info = await source.wire.resolveTrackInfo(name, hold);
-				this.#record(name, info, source);
-				return info;
+				info = await source.wire.resolveTrackInfo(name, hold);
 			} catch (err) {
 				const error = err instanceof Error ? err : new Error(String(err));
 				// The route failed: ask the next one, unless none will come.
 				if (!routeFailed(error) || this.#concluded || hold?.aborted) throw error;
 				if (this.#source === source) await this.#next(hold);
+				continue;
 			} finally {
 				source.release();
 			}
+			const recorded = this.#info.get(name);
+			// One logical track has one set of properties, whichever route answers.
+			if (recorded && !compatible(recorded.info, info)) throw incompatible(name);
+			this.#record(name, info, source);
+			return recorded?.info ?? info;
 		}
 	}
 
