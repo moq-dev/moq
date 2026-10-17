@@ -47,22 +47,16 @@ pub enum Binding {
 	InBand,
 }
 
-#[cfg(not(target_family = "wasm"))]
-type WireReader = dyn Fn() -> (u64, u64) + Send + Sync;
-#[cfg(target_family = "wasm")]
-type WireReader = dyn Fn() -> (u64, u64);
-
 /// Owned cumulative transport byte counters, readable without polling the session driver.
 ///
 /// A reader must own only its counter data, never keep the transport alive. After closure,
-/// its final values remain readable. Native readers are thread-safe; WASM readers may be
-/// thread-local. Unsupported transports return no reader.
+/// its final values remain readable. Unsupported transports return no reader.
 #[derive(Clone)]
-pub struct Wire(std::sync::Arc<WireReader>);
+pub struct Wire(std::sync::Arc<dyn Fn() -> (u64, u64) + Send + Sync>);
 
 impl Wire {
 	/// Read cumulative sent and received bytes from an owned, non-blocking source.
-	pub fn new(source: impl Fn() -> (u64, u64) + MaybeSend + MaybeSync + 'static) -> Self {
+	pub fn new(source: impl Fn() -> (u64, u64) + Send + Sync + 'static) -> Self {
 		Self(std::sync::Arc::new(source))
 	}
 

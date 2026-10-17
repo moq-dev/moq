@@ -99,7 +99,7 @@ pub struct Producer<C: Container, R = ()> {
 	rendition: Option<Box<dyn Rendition<R>>>,
 }
 
-trait Rendition<R>: kio::MaybeSend {
+trait Rendition<R>: Send {
 	fn name(&self) -> &str;
 	fn timestamp(&self, hint: Option<moq_net::Timestamp>) -> crate::Result<moq_net::Timestamp>;
 	fn set(&mut self, config: R) -> crate::Result<()>;

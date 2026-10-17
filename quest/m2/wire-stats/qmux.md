@@ -3,8 +3,8 @@
 ## Goal
 
 A qmux session over TCP (WebSocket or raw TLS) reports cumulative bytes sent
-and received in its `SessionStats`, so moq-net's `Stats.bytes_sent` /
-`bytes_received` is nonzero on WebSocket. Sent bytes include TLS, WebSocket,
+and received in its `SessionStats`, so a WebSocket session's owned
+`moq_net::transport::Wire` reader, which the stats tick reads, is nonzero. Sent bytes include TLS, WebSocket,
 and qmux framing and TCP retransmits, and exclude TCP/IP headers. Received
 bytes are what TCP delivered (`tcpi_bytes_received` is RFC 4898's
 application-throughput counter), so a peer's duplicate retransmitted payload
@@ -17,8 +17,10 @@ beside the field.
   and delivery rate. Add `tcpi_bytes_sent` and `tcpi_bytes_received` from
   the same read. A platform without them (non-Linux, or Linux before 4.19)
   reports `None`, which moq-net maps to 0.
-- Release qmux on every line moq builds against, then bump it here and map
-  the fields in moq-net's WebSocket `Stats` and in the relay's
-  `SocketStats` wiring (`rs/moq-relay/src/websocket.rs`).
+- Release qmux on every line moq builds against, then bump it here and
+  expose the fields through the WebSocket session's `poll::Session::wire`
+  reader, including the relay's `SocketStats` wiring
+  (`rs/moq-relay/src/websocket.rs`). Upstream source work:
+  moq-dev/web-transport#435 and #436.
 - Test: a loopback WebSocket session's `bytes_sent` covers at least the
   payload it wrote.

@@ -45,7 +45,6 @@ impl Source {
 	/// [`origin.request_broadcast`](moq_net::origin::Consumer::request_broadcast), so it must be
 	/// reachable through `origin` (by exact path, or served by a dynamic handler). A standalone
 	/// broadcast has an empty path, so it is its own root and any `..` reference escapes.
-	#[cfg_attr(target_family = "wasm", allow(clippy::arc_with_non_send_sync))]
 	pub fn new(origin: moq_net::origin::Consumer, broadcast: moq_net::broadcast::Consumer) -> Self {
 		let path = broadcast.info().path.clone();
 		let pins = HashMap::from([(path.clone(), broadcast)]);
@@ -58,7 +57,6 @@ impl Source {
 
 	/// This source holding nothing but `broadcast` at its own path: an export switching to
 	/// another instance starts over from the broadcast it switched to.
-	#[cfg_attr(target_family = "wasm", allow(clippy::arc_with_non_send_sync))]
 	pub(crate) fn switched(&self, broadcast: &moq_net::broadcast::Consumer) -> Self {
 		let pins = HashMap::from([(self.path.clone(), broadcast.clone())]);
 		Self {

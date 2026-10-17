@@ -110,9 +110,10 @@ impl From<&Stats> for Estimate {
 /// [`abort`](Self::abort) closes it explicitly with an error. The handle and the
 /// driver are severed in both directions: the driver holds no `Session` clone,
 /// so running it never keeps the session alive, and the `Session`
-/// holds no transport, so the native handle is `Send + Sync` whatever transport
-/// the driver uses. Close requests, close reasons, and stats samples go through
-/// the driver; optional owned wire counters are readable directly.
+/// holds no transport, so the handle is `Send + Sync` whatever transport the
+/// driver uses. Everything transport-shaped (the close, the close reason,
+/// the stats sample) is relayed through the driver, except the owned
+/// [`Wire`](crate::transport::Wire) counters, which are readable directly.
 #[derive(Clone)]
 pub struct Session {
 	/// Handle side to driver: `Some` once [`abort`](Self::abort) or
@@ -688,7 +689,6 @@ fn snapshot<S: crate::transport::poll::Session>(session: &S) -> Stats {
 // The point of the sever: the handle's auto-traits no longer depend on which
 // transport the runtime drives, so every consumer (moq-ffi needs Send + Sync)
 // works over every transport, pinned `!Send` ones included.
-#[cfg(not(target_family = "wasm"))]
 const _: () = {
 	const fn assert_send_sync<T: Send + Sync>() {}
 	assert_send_sync::<Session>();

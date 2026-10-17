@@ -1514,9 +1514,7 @@ pub struct Consumer {
 ///
 /// Unwind safe so the [`Consumer`] holding it is, and so the published
 /// [`track::Fetching`] that holds a consumer stays unwind safe too.
-pub(crate) trait Expiry:
-	crate::transport::MaybeSend + crate::transport::MaybeSync + std::panic::UnwindSafe + std::panic::RefUnwindSafe
-{
+pub(crate) trait Expiry: Send + Sync + std::panic::UnwindSafe + std::panic::RefUnwindSafe {
 	/// Return whether the group is stale, registering `waiter` for anything that
 	/// could change the answer while the group remains live.
 	/// A logical reader supplies its current budget after the original copy is gone.

@@ -131,10 +131,7 @@ use std::{
 use kio::Lock;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use crate::{
-	AsPath, PathOwned, Pattern, Patterns,
-	transport::{MaybeSend, MaybeSync},
-};
+use crate::{AsPath, PathOwned, Pattern, Patterns};
 
 /// Cumulative atomic counters for a single `(tier, role)` on a broadcast.
 ///
@@ -1167,7 +1164,7 @@ impl Handle {
 	}
 
 	/// Register an external connection's wire bytes under `root` without counting an admission.
-	pub fn wire(&self, root: impl AsPath, source: impl Fn() -> (u64, u64) + MaybeSend + MaybeSync + 'static) -> Wire {
+	pub fn wire(&self, root: impl AsPath, source: impl Fn() -> (u64, u64) + Send + Sync + 'static) -> Wire {
 		self.context(root, Context::Wire).wire(source)
 	}
 
@@ -1363,7 +1360,7 @@ struct Viewer {
 impl Session {
 	/// Register a non-blocking cumulative wire source that follows this context's tier.
 	/// The source must read only its transport counters, without re-entering this registry.
-	pub fn wire(&self, source: impl Fn() -> (u64, u64) + MaybeSend + MaybeSync + 'static) -> Wire {
+	pub fn wire(&self, source: impl Fn() -> (u64, u64) + Send + Sync + 'static) -> Wire {
 		self.register_wire(crate::transport::Wire::new(source))
 	}
 
