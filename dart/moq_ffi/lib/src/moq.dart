@@ -17,11 +17,13 @@ class MoqAudioDecoderOutput {
   final int? sampleRate;
   final int? channels;
   final int? maxDelayUs;
+  final int? delayUs;
   MoqAudioDecoderOutput({
     required this.format,
     this.sampleRate = null,
     this.channels = null,
     this.maxDelayUs = null,
+    this.delayUs = null,
   });
 }
 
@@ -52,12 +54,18 @@ class FfiConverterMoqAudioDecoderOutput {
     );
     final maxDelayUs = maxDelayUs_lifted.value;
     new_offset += maxDelayUs_lifted.bytesRead;
+    final delayUs_lifted = FfiConverterOptionalUInt64.read(
+      Uint8List.view(buf.buffer, new_offset),
+    );
+    final delayUs = delayUs_lifted.value;
+    new_offset += delayUs_lifted.bytesRead;
     return LiftRetVal(
       MoqAudioDecoderOutput(
         format: format,
         sampleRate: sampleRate,
         channels: channels,
         maxDelayUs: maxDelayUs,
+        delayUs: delayUs,
       ),
       new_offset - buf.offsetInBytes,
     );
@@ -69,6 +77,7 @@ class FfiConverterMoqAudioDecoderOutput {
         FfiConverterOptionalUInt32.allocationSize(value.sampleRate) +
         FfiConverterOptionalUInt32.allocationSize(value.channels) +
         FfiConverterOptionalUInt64.allocationSize(value.maxDelayUs) +
+        FfiConverterOptionalUInt64.allocationSize(value.delayUs) +
         0;
     final buf = Uint8List(total_length);
     write(value, buf);
@@ -93,6 +102,10 @@ class FfiConverterMoqAudioDecoderOutput {
       value.maxDelayUs,
       Uint8List.view(buf.buffer, new_offset),
     );
+    new_offset += FfiConverterOptionalUInt64.write(
+      value.delayUs,
+      Uint8List.view(buf.buffer, new_offset),
+    );
     return new_offset - buf.offsetInBytes;
   }
 
@@ -101,6 +114,7 @@ class FfiConverterMoqAudioDecoderOutput {
         FfiConverterOptionalUInt32.allocationSize(value.sampleRate) +
         FfiConverterOptionalUInt32.allocationSize(value.channels) +
         FfiConverterOptionalUInt64.allocationSize(value.maxDelayUs) +
+        FfiConverterOptionalUInt64.allocationSize(value.delayUs) +
         0;
   }
 }
@@ -6856,6 +6870,7 @@ class FfiConverterMoqAudioCodec {
 
 abstract class MoqAudioConsumerInterface {
   void cancel();
+  int delayUs();
   Future<MoqAudioFrame?> next();
 }
 
@@ -6918,6 +6933,17 @@ class MoqAudioConsumer implements MoqAudioConsumerInterface {
         status,
       );
     }, null);
+  }
+
+  int delayUs() {
+    return rustCallWithLifter(
+      (status) => uniffi_moq_ffi_fn_method_moqaudioconsumer_delay_us(
+        uniffiClonePointer(),
+        status,
+      ),
+      FfiConverterUInt64.lift,
+      null,
+    );
   }
 
   Future<MoqAudioFrame?> next() {
@@ -14116,6 +14142,14 @@ external void uniffi_moq_ffi_fn_method_moqaudioconsumer_cancel(
   Pointer<RustCallStatus> uniffiStatus,
 );
 
+@Native<Uint64 Function(Pointer<Void>, Pointer<RustCallStatus>)>(
+  assetId: _uniffiAssetId,
+)
+external int uniffi_moq_ffi_fn_method_moqaudioconsumer_delay_us(
+  Pointer<Void> ptr,
+  Pointer<RustCallStatus> uniffiStatus,
+);
+
 @Native<Pointer<Void> Function(Pointer<Void>)>(assetId: _uniffiAssetId)
 external Pointer<Void> uniffi_moq_ffi_fn_method_moqaudioconsumer_next(
   Pointer<Void> ptr,
@@ -16831,6 +16865,9 @@ external int uniffi_moq_ffi_checksum_func_moq_mint_epoch();
 external int uniffi_moq_ffi_checksum_method_moqaudioconsumer_cancel();
 
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
+external int uniffi_moq_ffi_checksum_method_moqaudioconsumer_delay_us();
+
+@Native<Uint16 Function()>(assetId: _uniffiAssetId)
 external int uniffi_moq_ffi_checksum_method_moqaudioconsumer_next();
 
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
@@ -17462,6 +17499,9 @@ void _checkApiChecksums() {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqaudioconsumer_cancel() != 62285) {
+    throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
+  }
+  if (uniffi_moq_ffi_checksum_method_moqaudioconsumer_delay_us() != 43882) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqaudioconsumer_next() != 5941) {

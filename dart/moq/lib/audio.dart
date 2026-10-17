@@ -25,7 +25,7 @@ typedef EncoderInput = MoqAudioEncoderInput;
 /// The codec side: codec, track name, rate, channels, bitrate, preset, and frame duration (0 takes the codec's own frame).
 typedef EncoderOutput = MoqAudioEncoderOutput;
 
-/// The PCM layout a [Consumer] delivers and how stale a group may get.
+/// The PCM layout a [Consumer] delivers, how stale a group may get, and its playout delay.
 typedef DecoderOutput = MoqAudioDecoderOutput;
 
 /// PCM in the configured [SampleFormat], planar or interleaved, with its presentation timestamp.
@@ -63,4 +63,14 @@ extension AudioDecoderOutputDuration on MoqAudioDecoderOutput {
   /// Upper bound on buffering before a stalled group is skipped, or null for the default.
   Duration? get maxDelay =>
       maxDelayUs == null ? null : Duration(microseconds: maxDelayUs!);
+
+  /// Fixed playout delay to hold ahead of the playhead, or null to estimate it from arrival timing.
+  Duration? get delay =>
+      delayUs == null ? null : Duration(microseconds: delayUs!);
+}
+
+/// Duration view over a consumer's playout delay.
+extension AudioConsumerDuration on MoqAudioConsumer {
+  /// Playout delay to hold ahead of the playhead: the fixed one, or the estimate from every frame read so far.
+  Duration get delay => Duration(microseconds: delayUs());
 }

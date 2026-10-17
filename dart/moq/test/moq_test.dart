@@ -476,6 +476,70 @@ void main() {
     broadcast.close();
   });
 
+  // A fixed playout delay is reported back as is, and an estimated one moves as frames are read.
+  test('audio consumer reports its playout delay', () async {
+    final broadcast = BroadcastProducer();
+    final audio = moq_audio.Producer(
+      catalog: moq_media.CatalogProducer(broadcast: broadcast),
+      input: moq_audio.EncoderInput(
+        format: moq_audio.SampleFormat.f32,
+        sampleRate: 48000,
+        channels: 1,
+      ),
+      output: moq_audio.EncoderOutput(
+        codec: moq_audio.Codec.opus(),
+        track: 'mic',
+      ),
+    );
+
+    final consumer = broadcast.consume();
+    final catalogs = await moq_media.CatalogConsumer.subscribe(
+      broadcast: consumer,
+    ).timeout(timeout);
+    final rendition = (await catalogs.next().timeout(timeout))!.audio['mic']!;
+
+    final fixedOutput = moq_audio.DecoderOutput(
+      format: moq_audio.SampleFormat.f32,
+      delayUs: 80000,
+    );
+    expect(fixedOutput.delay, const Duration(milliseconds: 80));
+    final fixed = await moq_audio.Consumer.subscribe(
+      broadcast: consumer,
+      id: 'mic',
+      catalogAudio: rendition,
+      output: fixedOutput,
+    ).timeout(timeout);
+    final estimated = await moq_audio.Consumer.subscribe(
+      broadcast: consumer,
+      id: 'mic',
+      catalogAudio: rendition,
+      output: moq_audio.DecoderOutput(format: moq_audio.SampleFormat.f32),
+    ).timeout(timeout);
+    expect(fixed.delay, const Duration(milliseconds: 80));
+    final initial = estimated.delay;
+
+    // Two 20 ms Opus frames of silence at 48 kHz mono.
+    for (var i = 0; i < 2; i++) {
+      audio.write(
+        frame: moq_audio.Frame(
+          timestampUs: i * 20000,
+          data: Uint8List(960 * 4),
+        ),
+      );
+    }
+    expect(await fixed.next().timeout(timeout), isNotNull);
+    expect(await estimated.next().timeout(timeout), isNotNull);
+
+    expect(fixed.delay, const Duration(milliseconds: 80));
+    expect(estimated.delay, isNot(initial));
+
+    fixed.cancel();
+    estimated.cancel();
+    audio.finish();
+    catalogs.cancel();
+    broadcast.close();
+  });
+
   test('audio producer encodes opus', () {
     final broadcast = BroadcastProducer();
     final producer = moq_audio.Producer(
