@@ -4,6 +4,25 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### QUIC limits are `moq_quic::Limits`, set through `Request::quic` (#5871)
+
+`server::Request::set_quic_limits` and `Error::QuicLimits` are gone.
+`Request::quic()` returns the `quic::Connection` under a QUIC or WebTransport request, or `None` on other transports, and its `set_limits` takes `quic::Limits`, now `moq_quic::Limits`, where each `None` field keeps that limit.
+`quic::Resolved`'s `receive_window`, `stream_receive_window`, and `send_window` are plain `u64`s with the defaults filled in, and `quic.max_streams = 0` is refused.
+
+```rust
+// Before
+request.set_quic_limits(quic::Limits { max_streams, receive_window, send_window })?;
+// After
+if let Some(quic) = request.quic() {
+	let mut limits = quic::Limits::default();
+	limits.max_streams = Some(max_streams);
+	limits.receive_window = Some(receive_window);
+	limits.send_window = Some(send_window);
+	quic.set_limits(limits)?;
+}
+```
+
 ### Auth handles live in `connection::auth` (#5695)
 
 The root `Auth` re-export is gone.

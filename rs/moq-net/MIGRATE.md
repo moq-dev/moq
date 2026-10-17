@@ -4,6 +4,19 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Receive estimates come from `Session::recv_bandwidth` (#5777)
+
+The connection stats no longer carry a receive estimate.
+Hold the consumer `Session::recv_bandwidth` returns to request PROBE, read it with `peek()` or wait with `changed()`, and drop it to stop.
+
+```rust
+// Before
+let rate = session.stats().estimated_recv_rate;
+// After
+let bandwidth = session.recv_bandwidth();
+let rate = bandwidth.as_ref().and_then(|b| b.peek());
+```
+
 ### A timed track refuses a group that rewinds (#5803)
 
 A local write whose first frame starts before a lower-sequence group's, or after a higher one's, fails with `TimestampMismatch`; `@moq/net` throws it the same way.

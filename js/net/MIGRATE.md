@@ -4,6 +4,11 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### A timed track refuses a group that rewinds (#5803)
+
+A local write whose first frame starts before a lower-sequence group's, or after a higher one's, throws `TimestampMismatch`.
+A publisher whose timeline restarts publishes a new broadcast instead.
+
 ### `Auth.Auth` is `Auth.Handle`, and `Auth.Token` is `Auth.Auth` (#5695)
 
 ```ts

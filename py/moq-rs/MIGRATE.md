@@ -4,6 +4,19 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Receive estimates come from `Session.recv_bandwidth` (#5777)
+
+The connection stats no longer carry a receive estimate.
+Hold the consumer `Session.recv_bandwidth` returns to request PROBE, read it with `peek()` or wait with `changed()`, and drop it to stop.
+
+```python
+# Before
+rate = session.stats().estimated_recv_rate_bps
+# After
+bandwidth = session.recv_bandwidth()
+rate = bandwidth.peek() if bandwidth else None
+```
+
 ### Bandwidth reserves a track's demand (#5845)
 
 `Bandwidth.reserve` takes the track's `demand()` instead of the producer.

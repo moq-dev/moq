@@ -4,6 +4,19 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Receive estimates come from `Session.recvBandwidth` (#5777)
+
+The connection stats no longer carry a receive estimate.
+Hold the consumer `Session.recvBandwidth` returns to request PROBE, read it with `peek()` or wait with `changed()`, and `cancel()` it to stop.
+
+```dart
+// Before
+final rate = session.stats().estimatedRecvRateBps;
+// After
+final bandwidth = session.recvBandwidth();
+final rate = bandwidth?.peek();
+```
+
 ### Bandwidth reserves a track's demand (#5845)
 
 `Bandwidth.reserve` takes the track's `demand()` instead of the producer, and no longer throws.

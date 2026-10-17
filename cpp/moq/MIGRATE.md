@@ -4,6 +4,19 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Receive estimates come from `Session::recv_bandwidth` (#5777)
+
+The connection stats no longer carry a receive estimate.
+Hold the consumer `Session::recv_bandwidth` returns to request PROBE, read it with `peek()` or wait with `changed()`, and `cancel()` it to stop.
+
+```cpp
+// Before
+auto rate = session->stats().estimated_recv_rate_bps;
+// After
+auto bandwidth = session->recv_bandwidth();
+auto rate = bandwidth ? bandwidth->peek() : std::nullopt;
+```
+
 ### Bandwidth reserves a track's demand (#5845)
 
 `Bandwidth::reserve` takes the track's `demand()` instead of the producer, and no longer fails.

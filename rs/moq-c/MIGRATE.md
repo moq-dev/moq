@@ -4,6 +4,31 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Receive estimates come from `moq_session_recv_bandwidth` (#5777)
+
+`moq_connection_stats` drops `estimated_recv_rate_bps` and `estimated_recv_rate_valid`, which changes its ABI.
+Hold the consumer `moq_session_recv_bandwidth` returns to request PROBE, read it with `moq_bandwidth_consumer_peek` or wait with `moq_bandwidth_consumer_changed`, and release it with `moq_bandwidth_consumer_close`.
+
+```c
+// Before
+moq_connection_stats stats;
+moq_session_stats(session, &stats);
+if (stats.estimated_recv_rate_valid) use(stats.estimated_recv_rate_bps);
+// After
+int32_t consumer = moq_session_recv_bandwidth(session); // 0 when the version has no PROBE
+if (consumer > 0) {
+	uint64_t bps;
+	bool present;
+	if (moq_bandwidth_consumer_peek(consumer, &bps, &present) == 0 && present) use(bps);
+	moq_bandwidth_consumer_close(consumer);
+}
+```
+
+### `moq_origin_announced_broadcast` delivers every publisher instance (#5700)
+
+Its callback gets a new broadcast handle each time another instance takes over the path or the broadcast returns, and its terminal `0` only on cancel.
+Free each handle with `moq_consume_close` once its successor arrives.
+
 ### libmoq is moq-c (#4288)
 
 The C bindings ship as the `moq-c` crate, starting at 0.7.0.

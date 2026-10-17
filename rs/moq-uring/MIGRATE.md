@@ -4,6 +4,21 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### QUIC limits are `moq_quic::Limits` (#5871)
+
+`quic::Limits` is `moq_quic::Limits`, where each `None` field keeps that limit, and an invalid one fails `set_limits` with `Error::Limits` instead of `WindowRange` or `StreamsRange`.
+
+```rust
+// Before
+conn.set_limits(quic::Limits { max_streams, receive_window, send_window })?;
+// After
+let mut limits = quic::Limits::default();
+limits.max_streams = Some(max_streams);
+limits.receive_window = Some(receive_window);
+limits.send_window = Some(send_window);
+conn.set_limits(limits)?;
+```
+
 ### The `noq` feature is `quic` (#5664)
 
 The QUIC stack is MoQ's own `moq-quic` instead of `moq-noq-proto`.

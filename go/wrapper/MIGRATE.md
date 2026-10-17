@@ -4,6 +4,20 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Receive estimates come from `Session.RecvBandwidth` (#5777)
+
+The connection stats no longer carry a receive estimate.
+Hold the consumer `Session.RecvBandwidth` returns to request PROBE, read it with `Peek()` or wait with `Changed(ctx)`, and `Close()` it to stop.
+
+```go
+// Before
+rate := session.Stats().EstimatedRecvRateBps
+// After
+bandwidth := session.RecvBandwidth()
+defer bandwidth.Close()
+rate := bandwidth.Peek()
+```
+
 ### Bandwidth reserves a track's demand (#5845)
 
 `Bandwidth.Reserve` takes the track's `Demand()` instead of the producer, and no longer returns an error.

@@ -5,6 +5,24 @@ These are the UniFFI names; each language wrapper has its own `MIGRATE.md` in it
 
 ## Unreleased
 
+### Receive estimates come from `MoqSession::recv_bandwidth` (#5777)
+
+The connection stats no longer carry a receive estimate.
+Hold the consumer `MoqSession::recv_bandwidth` returns to request PROBE, read it with `peek()` or wait with `changed()`, and drop it to stop. `MoqConnectionStats::estimated_recv_rate_bps` is gone.
+
+```rust
+// Before
+let rate = session.stats().estimated_recv_rate_bps;
+// After
+let bandwidth = session.recv_bandwidth();
+let rate = bandwidth.as_ref().and_then(|b| b.peek());
+```
+
+### `available()` waits for the next publisher instance (#5700)
+
+`MoqAnnouncedBroadcast::available` returns the broadcast serving the path on its first call, as before.
+Each later call waits for the next instance to take over the path, instead of returning whatever serves it now.
+
 ### Bandwidth reserves a track's demand (#5845)
 
 `MoqBandwidth::reserve` takes a `MoqTrackDemand` instead of a `MoqTrackProducer`, so raw, media, and JSON tracks reserve the same way, and it no longer fails.
