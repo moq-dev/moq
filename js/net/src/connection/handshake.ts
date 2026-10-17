@@ -1,4 +1,4 @@
-import { StreamError } from "../error.ts";
+import { closeReason, ProtocolViolation, SessionCode, StreamError } from "../error.ts";
 import { type Hop, randomHop } from "../hop.ts";
 import * as Ietf from "../ietf/index.ts";
 import { Reader, Stream, UnexpectedEnd, Writer } from "../stream.ts";
@@ -23,7 +23,7 @@ export async function exchangeSetup(
 	transport: WebTransport,
 	version: Ietf.IetfVersion,
 	implementation: string,
-	extensions: Extensions.Offered,
+	{ client, extensions }: { client: boolean; extensions: Extensions.Offered },
 ): Promise<{
 	control: Stream;
 	early: Reader[];
@@ -45,10 +45,19 @@ export async function exchangeSetup(
 
 	const setupMsg = new Ietf.Setup({ parameters: params });
 
-	const [writer, received] = await Promise.all([
-		sendSetup(transport, version, setupMsg),
-		receiveSetup(transport, version),
-	]);
+	let writer: Writer;
+	let received: Awaited<ReturnType<typeof receiveSetup>>;
+	try {
+		[writer, received] = await Promise.all([
+			sendSetup(transport, version, setupMsg),
+			receiveSetup(transport, version, client),
+		]);
+	} catch (err) {
+		// A SETUP we refuse closes with the code the draft names for it.
+		if (err instanceof ProtocolViolation)
+			transport.close({ closeCode: err.code, reason: closeReason(err.message) });
+		throw err;
+	}
 
 	return {
 		control: new Stream({ writer, reader: received.reader }),
@@ -79,6 +88,7 @@ async function sendSetup(transport: WebTransport, version: Ietf.IetfVersion, set
 async function receiveSetup(
 	transport: WebTransport,
 	version: Ietf.IetfVersion,
+	client: boolean,
 ): Promise<{
 	reader: Reader;
 	early: Reader[];
@@ -120,6 +130,17 @@ async function receiveSetup(
 
 	await reader.u53(); // the SETUP type, peeked above
 	const setup = await Ietf.Setup.decode(reader, version);
+
+	// A server sends neither PATH nor AUTHORITY (draft-21 sections 9.1.1 and 9.1.2).
+	if (client && setup.parameters.getBytes(Ietf.SetupOption.Path) !== undefined) {
+		throw new ProtocolViolation("server SETUP carries PATH", { code: SessionCode.InvalidPath });
+	}
+	if (client && setup.parameters.getBytes(Ietf.SetupOption.Authority) !== undefined) {
+		throw new ProtocolViolation("server SETUP carries AUTHORITY", { code: SessionCode.InvalidAuthority });
+	}
+	// Nothing here uses the peer's token, but one that cannot be decoded still closes the
+	// session (draft-21 section 8.9).
+	Ietf.tokenFromSetup(setup.parameters, version);
 
 	return {
 		reader,

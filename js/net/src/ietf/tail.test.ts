@@ -38,10 +38,10 @@ function object(payload: string): Uint8Array {
 const END_OF_TRACK = new Uint8Array([0, 0, 0x4]);
 
 /** A group stream the test writes by hand, handed to the subscriber as if it arrived. */
-function groupStream(subscriber: Subscriber, groupId: number) {
+function groupStream(subscriber: Subscriber, groupId: number, flags = FLAGS) {
 	let controller!: ReadableStreamDefaultController<Uint8Array>;
 	const readable = new ReadableStream<Uint8Array>({ start: (c) => (controller = c) });
-	const header = new GroupMessage({ trackAlias: ALIAS, groupId, subGroupId: 0, publisherPriority: 0, flags: FLAGS });
+	const header = new GroupMessage({ trackAlias: ALIAS, groupId, subGroupId: 0, publisherPriority: 0, flags });
 	const handled = subscriber.handleGroup(header, new Reader(readable, undefined, VERSION));
 	return {
 		write: (bytes: Uint8Array) => controller.enqueue(bytes),
@@ -187,6 +187,29 @@ test("a standalone END_OF_TRACK at object 5 preserves its terminal group", async
 	expect(reader.end()).toEqual({ group: 5, frame: 5 });
 	await done(TRACK_ENDED, 1n);
 	expect(await reader.recvGroup()).toBeUndefined();
+});
+
+test("a compact stream starting at object 5 is subgroup 5, refused without a group or a track end", async () => {
+	const { subscriber, reader } = await subscribed();
+	const payload = groupStream(subscriber, 4, { ...FLAGS, hasSubgroupObject: true });
+	payload.write(new Uint8Array([5, 1, 42]));
+	payload.finish();
+	await payload.handled;
+	const end = groupStream(subscriber, 5, { ...FLAGS, hasSubgroupObject: true });
+	end.write(new Uint8Array([5, 0, 0x4]));
+	end.finish();
+	await end.handled;
+	// The largest Object ID, past what a number holds exactly, is refused the same way.
+	const huge = groupStream(subscriber, 3, { ...FLAGS, hasSubgroupObject: true });
+	huge.write(new Uint8Array([...new Array(9).fill(0xff), 1, 42]));
+	huge.finish();
+	await huge.handled;
+	expect(reader.end()).toBeUndefined();
+
+	const group = groupStream(subscriber, 6, { ...FLAGS, hasSubgroupObject: true });
+	group.write(object("6.0"));
+	group.finish();
+	expect((await reader.recvGroup())?.sequence).toBe(6);
 });
 
 test("a group at or past the END_OF_TRACK aborts the track", async () => {

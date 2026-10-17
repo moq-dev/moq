@@ -30,7 +30,3 @@ invariant checks from the seeded simulation, under the same PR budget (64
 fixed cases) and nightly sweep (`just rs quic-sim`). If migration needs
 address changes that `Pair`'s `Link`s cannot express, add the smallest
 harness hook for it here; flag it on the PR if that pushes past [M].
-
-## Required
-
-- [Seeded simulation](/quest/m1/quic/coverage/sim.md) - the impaired, deterministic `Pair` and the property tests this extends
