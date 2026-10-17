@@ -1,0 +1,534 @@
+//! [`Observer`]: what the device played, counted on the audio thread.
+//!
+//! The output callback folds every buffer it plays into 128-frame quanta, the
+//! Web Audio render quantum, so a native count reads the same as one taken off
+//! a browser's output. Counters are plain atomics and closed gaps go out over a
+//! bounded queue whose slots are allocated up front, so nothing here blocks,
+//! allocates, or calls back into the caller on the audio thread. A reader that
+//! falls so far behind that the queue fills loses events, and the observer
+//! reports that as an error rather than an undercount.
+
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::mpsc::{Receiver, SyncSender, TryRecvError, sync_channel};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use crate::Error;
+
+/// Frames per quantum, the Web Audio render quantum.
+const QUANTUM: usize = 128;
+
+/// A quantum whose RMS is under this is quiet. About -60 dBFS.
+const QUIET_RMS: f64 = 0.001;
+
+/// Events the queue holds between reads. At most one gap closes every two
+/// quanta, so this is over five seconds of the worst case at 48 kHz.
+const EVENTS: usize = 1024;
+
+/// `latency` before any callback has reported one.
+const UNKNOWN: u64 = u64::MAX;
+
+/// A run of consecutive quanta the mix could not fill.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Gap {
+	/// Where the first missing frame would have played, on [`Observation::clock`].
+	pub at: Duration,
+	/// The audio that was missing, at the device rate.
+	pub missing: Duration,
+	/// Quanta in the gap, partly and entirely empty alike.
+	pub quanta: u64,
+	/// Of those, the quanta that were partly filled.
+	pub short: u64,
+}
+
+/// A change in whether anything was playing, on [`Observation::clock`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Stall {
+	/// When the change was played.
+	pub at: Duration,
+	/// Whether nothing is playing from here on.
+	pub stalled: bool,
+}
+
+/// What an [`Observer`] has seen: running totals, and the events since the last read.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Observation {
+	/// Device time rendered since the engine opened: frames pulled over the
+	/// device rate. The clock every other timestamp here is on.
+	pub clock: Duration,
+	/// How far the last buffer was handed over ahead of the speaker, as the
+	/// host reports it. `None` until a host reports one.
+	pub latency: Option<Duration>,
+	/// Quanta rendered since the first audible one.
+	pub quanta: u64,
+	/// Of those, the quanta under -60 dBFS, whatever the cause.
+	pub quiet: u64,
+	/// Whether nothing is playing: no sink is being written to, or every one
+	/// still waits for its first samples.
+	pub stalled: bool,
+	/// Gaps that closed since the last read. One still open is reported once a
+	/// full quantum ends it, or after [`Observer::finish`].
+	pub gaps: Vec<Gap>,
+	/// Changes in [`stalled`](Self::stalled) since the last read.
+	pub stalls: Vec<Stall>,
+}
+
+enum Event {
+	Gap(Gap),
+	Stall(Stall),
+}
+
+/// State shared between the audio thread and the [`Observer`].
+pub(super) struct Shared {
+	/// [`Observation::clock`] in nanoseconds, carried across stream rebuilds.
+	clock: AtomicU64,
+	/// [`Observation::latency`] in nanoseconds, or [`UNKNOWN`].
+	latency: AtomicU64,
+	quanta: AtomicU64,
+	quiet: AtomicU64,
+	stalled: AtomicBool,
+	/// Whether an [`Observer`] is reading, which is the only time events queue.
+	observed: AtomicBool,
+	/// Set when an event found the queue full.
+	overflowed: AtomicBool,
+	/// Asks the audio thread to close a gap still open.
+	finish: AtomicBool,
+	events: SyncSender<Event>,
+	received: Mutex<Receiver<Event>>,
+}
+
+impl Default for Shared {
+	fn default() -> Self {
+		let (events, received) = sync_channel(EVENTS);
+		Self {
+			clock: AtomicU64::new(0),
+			latency: AtomicU64::new(UNKNOWN),
+			quanta: AtomicU64::new(0),
+			quiet: AtomicU64::new(0),
+			stalled: AtomicBool::new(true),
+			observed: AtomicBool::new(false),
+			overflowed: AtomicBool::new(false),
+			finish: AtomicBool::new(false),
+			events,
+			received: Mutex::new(received),
+		}
+	}
+}
+
+/// Reads what an [`Engine`](super::Engine) played, quantum by quantum.
+///
+/// Built by [`Engine::observe`](super::Engine::observe). An engine has at most
+/// one, so no two readers split its events.
+pub struct Observer {
+	shared: Arc<Shared>,
+}
+
+impl Observer {
+	pub(super) fn new(shared: Arc<Shared>) -> Result<Self, Error> {
+		if shared.observed.swap(true, Ordering::AcqRel) {
+			return Err(Error::Busy("playback engine already has an observer".into()));
+		}
+		shared.overflowed.store(false, Ordering::Relaxed);
+		Ok(Self { shared })
+	}
+
+	/// The totals so far, and the gaps and stalls since the previous read.
+	///
+	/// Fails once the audio thread found the event queue full, since every
+	/// count after that would be missing events. Read at least every few
+	/// seconds to avoid it.
+	pub fn read(&mut self) -> Result<Observation, Error> {
+		let shared = &self.shared;
+		let mut observation = Observation {
+			clock: Duration::from_nanos(shared.clock.load(Ordering::Relaxed)),
+			latency: match shared.latency.load(Ordering::Relaxed) {
+				UNKNOWN => None,
+				nanos => Some(Duration::from_nanos(nanos)),
+			},
+			quanta: shared.quanta.load(Ordering::Relaxed),
+			quiet: shared.quiet.load(Ordering::Relaxed),
+			stalled: shared.stalled.load(Ordering::Relaxed),
+			..Default::default()
+		};
+
+		let received = shared.received.lock().unwrap();
+		loop {
+			match received.try_recv() {
+				Ok(Event::Gap(gap)) => observation.gaps.push(gap),
+				Ok(Event::Stall(stall)) => observation.stalls.push(stall),
+				Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
+			}
+		}
+
+		// Checked after draining, so an overflow that raced the drain is not missed.
+		if shared.overflowed.load(Ordering::Acquire) {
+			return Err(Error::Playback("observer fell behind and lost events".into()));
+		}
+		Ok(observation)
+	}
+
+	/// Close a gap still open on the next callback, so the read after it
+	/// reports the gap rather than leaving it open forever. Call it when the
+	/// measurement ends.
+	pub fn finish(&self) {
+		self.shared.finish.store(true, Ordering::Release);
+	}
+}
+
+impl Drop for Observer {
+	fn drop(&mut self) {
+		// Anything left belongs to nobody, and the next observer starts clean.
+		let received = self.shared.received.lock().unwrap();
+		while received.try_recv().is_ok() {}
+		self.shared.observed.store(false, Ordering::Release);
+	}
+}
+
+/// The gap being built, still open until a full quantum ends it.
+struct Open {
+	/// The first missing frame, on the ledger's frame count.
+	at: u64,
+	missing: u64,
+	quanta: u64,
+	short: u64,
+}
+
+/// The audio thread's half: folds every buffer the mixer plays into quanta.
+///
+/// Owned by one mixer, so one stream: a rebuilt stream starts a new ledger on
+/// the same [`Shared`], continuing its clock.
+pub(super) struct Ledger {
+	shared: Arc<Shared>,
+	rate: f64,
+	/// [`Shared::clock`] when this ledger started, in nanoseconds.
+	base: u64,
+	/// Frames played through this ledger.
+	frames: u64,
+	playing: bool,
+	/// Whether an audible quantum has played yet. Nothing before one counts:
+	/// that is the first fill, not a gap.
+	started: bool,
+	/// Frames into the current quantum.
+	filled: usize,
+	/// Of those, frames no sink supplied.
+	missing: usize,
+	/// The first of those, on the frame count.
+	first: Option<u64>,
+	/// Sum of squares over the current quantum, every channel.
+	power: f64,
+	open: Option<Open>,
+}
+
+impl Ledger {
+	pub(super) fn new(shared: Arc<Shared>, rate: u32) -> Self {
+		let base = shared.clock.load(Ordering::Relaxed);
+		Self {
+			shared,
+			rate: rate as f64,
+			base,
+			frames: 0,
+			playing: false,
+			started: false,
+			filled: 0,
+			missing: 0,
+			first: None,
+			power: 0.0,
+			open: None,
+		}
+	}
+
+	/// The host's latency for the buffer being filled, if it reports one.
+	pub(super) fn latency(&self, latency: Option<Duration>) {
+		let nanos = latency.map_or(UNKNOWN, |l| l.as_nanos().min(UNKNOWN as u128 - 1) as u64);
+		self.shared.latency.store(nanos, Ordering::Relaxed);
+	}
+
+	/// Fold one mixed buffer in. `supplied` is how many of its leading frames
+	/// the sinks filled, the rest being zeros they could not; `playing` is
+	/// whether any sink was readable at all.
+	pub(super) fn add(&mut self, mix: &[f32], channels: usize, supplied: usize, playing: bool) {
+		if self.shared.finish.swap(false, Ordering::AcqRel) {
+			self.close();
+		}
+
+		if playing != self.playing {
+			self.playing = playing;
+			self.shared.stalled.store(!playing, Ordering::Relaxed);
+			let at = self.clock(self.frames);
+			self.send(Event::Stall(Stall { at, stalled: !playing }));
+		}
+
+		let supplied = if playing { supplied } else { 0 };
+		let frames = mix.len() / channels;
+		let mut done = 0;
+		while done < frames {
+			let take = (QUANTUM - self.filled).min(frames - done);
+			let full = supplied.saturating_sub(done).min(take);
+			if full < take {
+				self.first.get_or_insert(self.frames + (done + full) as u64);
+				self.missing += take - full;
+			}
+			self.power += mix[done * channels..(done + take) * channels]
+				.iter()
+				.map(|&s| s as f64 * s as f64)
+				.sum::<f64>();
+			self.filled += take;
+			done += take;
+
+			if self.filled == QUANTUM {
+				self.quantum(channels);
+			}
+		}
+
+		self.frames += frames as u64;
+		self.shared.clock.store(self.nanos(self.frames), Ordering::Relaxed);
+	}
+
+	/// Classify the quantum just completed.
+	fn quantum(&mut self, channels: usize) {
+		let missing = std::mem::take(&mut self.missing);
+		let first = self.first.take();
+		let power = std::mem::take(&mut self.power);
+		self.filled = 0;
+
+		let silent = missing == QUANTUM;
+		if !self.started {
+			if silent {
+				return;
+			}
+			self.started = true;
+		}
+
+		self.shared.quanta.fetch_add(1, Ordering::Relaxed);
+		if (power / (QUANTUM * channels) as f64).sqrt() < QUIET_RMS {
+			self.shared.quiet.fetch_add(1, Ordering::Relaxed);
+		}
+
+		let Some(first) = first else {
+			self.close();
+			return;
+		};
+		// A partly filled quantum inside an open gap is a sink that got a little
+		// and ran out again: still one gap, since only a full quantum ends it.
+		let open = self.open.get_or_insert(Open {
+			at: first,
+			missing: 0,
+			quanta: 0,
+			short: 0,
+		});
+		open.missing += missing as u64;
+		open.quanta += 1;
+		if !silent {
+			open.short += 1;
+		}
+	}
+
+	fn close(&mut self) {
+		let Some(open) = self.open.take() else { return };
+		let gap = Gap {
+			at: self.clock(open.at),
+			missing: Duration::from_secs_f64(open.missing as f64 / self.rate),
+			quanta: open.quanta,
+			short: open.short,
+		};
+		self.send(Event::Gap(gap));
+	}
+
+	fn nanos(&self, frames: u64) -> u64 {
+		self.base + (frames as f64 * 1e9 / self.rate).round() as u64
+	}
+
+	fn clock(&self, frames: u64) -> Duration {
+		Duration::from_nanos(self.nanos(frames))
+	}
+
+	fn send(&self, event: Event) {
+		if !self.shared.observed.load(Ordering::Acquire) {
+			return;
+		}
+		if self.shared.events.try_send(event).is_err() {
+			self.shared.overflowed.store(true, Ordering::Release);
+		}
+	}
+}
+
+impl Drop for Ledger {
+	/// A stream going away mid-gap still reports it. Runs on the driver thread,
+	/// which drops the stream.
+	fn drop(&mut self) {
+		self.close();
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	const RATE: u32 = 48_000;
+
+	fn observed() -> (Ledger, Observer) {
+		let shared = Arc::new(Shared::default());
+		let observer = Observer::new(shared.clone()).unwrap();
+		(Ledger::new(shared, RATE), observer)
+	}
+
+	/// `frames` stereo frames, the leading `supplied` of them a loud tone.
+	fn buffer(frames: usize, supplied: usize) -> Vec<f32> {
+		let mut mix = vec![0.0; frames * 2];
+		mix[..supplied * 2].fill(0.5);
+		mix
+	}
+
+	fn add(ledger: &mut Ledger, frames: usize, supplied: usize) {
+		ledger.add(&buffer(frames, supplied), 2, supplied, true);
+	}
+
+	fn ms(frames: u64) -> Duration {
+		Duration::from_secs_f64(frames as f64 / RATE as f64)
+	}
+
+	#[test]
+	fn nothing_counts_before_the_first_audible_quantum() {
+		let (mut ledger, mut observer) = observed();
+		add(&mut ledger, 1024, 0);
+		let observation = observer.read().unwrap();
+		assert_eq!(observation.quanta, 0);
+		assert!(observation.gaps.is_empty());
+		assert_eq!(observation.clock, ms(1024));
+	}
+
+	#[test]
+	fn a_full_quantum_closes_a_gap_of_short_and_silent_quanta() {
+		let (mut ledger, mut observer) = observed();
+		add(&mut ledger, 256, 256);
+		// Runs dry 32 frames into the third quantum, and stays dry through the fourth.
+		add(&mut ledger, 256, 32);
+		assert!(observer.read().unwrap().gaps.is_empty(), "the gap is still open");
+		add(&mut ledger, 128, 128);
+
+		let observation = observer.read().unwrap();
+		assert_eq!(
+			observation.gaps,
+			vec![Gap {
+				at: ms(256 + 32),
+				missing: ms(96 + 128),
+				quanta: 2,
+				short: 1,
+			}]
+		);
+		assert_eq!(observation.quanta, 5);
+		assert_eq!(observation.quiet, 1, "only the empty quantum is quiet");
+	}
+
+	#[test]
+	fn quanta_span_buffers_of_any_size() {
+		let (mut ledger, mut observer) = observed();
+		// 480-frame buffers, a common device period, never align to the quantum.
+		for _ in 0..4 {
+			add(&mut ledger, 480, 480);
+		}
+		add(&mut ledger, 480, 100);
+		add(&mut ledger, 480, 480);
+
+		let observation = observer.read().unwrap();
+		assert_eq!(observation.quanta, 2880 / 128);
+		let [gap] = observation.gaps[..] else {
+			panic!("one gap, got {:?}", observation.gaps)
+		};
+		assert_eq!(gap.at, ms(1920 + 100));
+		assert_eq!(gap.missing, ms(380));
+	}
+
+	#[test]
+	fn stalls_are_stamped_and_play_as_empty_quanta() {
+		let (mut ledger, mut observer) = observed();
+		add(&mut ledger, 128, 128);
+		ledger.add(&buffer(256, 256), 2, 256, false);
+		add(&mut ledger, 128, 128);
+
+		let observation = observer.read().unwrap();
+		assert_eq!(
+			observation.stalls,
+			vec![
+				Stall {
+					at: Duration::ZERO,
+					stalled: false
+				},
+				Stall {
+					at: ms(128),
+					stalled: true
+				},
+				Stall {
+					at: ms(384),
+					stalled: false
+				},
+			]
+		);
+		assert_eq!(observation.gaps.len(), 1);
+		assert_eq!(observation.gaps[0].quanta, 2);
+		assert!(!observation.stalled);
+	}
+
+	#[test]
+	fn finish_closes_an_open_gap() {
+		let (mut ledger, mut observer) = observed();
+		add(&mut ledger, 128, 128);
+		add(&mut ledger, 128, 0);
+		observer.finish();
+		add(&mut ledger, 128, 0);
+
+		let observation = observer.read().unwrap();
+		assert_eq!(observation.gaps.len(), 1);
+		assert_eq!(observation.gaps[0].quanta, 1, "closed before the next quantum joined it");
+	}
+
+	#[test]
+	fn a_rebuilt_stream_continues_the_clock() {
+		let shared = Arc::new(Shared::default());
+		let mut observer = Observer::new(shared.clone()).unwrap();
+		let mut ledger = Ledger::new(shared.clone(), RATE);
+		add(&mut ledger, 480, 480);
+		drop(ledger);
+		let mut ledger = Ledger::new(shared, 44_100);
+		ledger.add(&buffer(441, 441), 2, 441, true);
+		assert_eq!(observer.read().unwrap().clock, ms(480) + Duration::from_millis(10));
+	}
+
+	#[test]
+	fn an_overflowed_queue_fails_the_read() {
+		let (mut ledger, mut observer) = observed();
+		for _ in 0..=EVENTS {
+			add(&mut ledger, 128, 128);
+			add(&mut ledger, 128, 0);
+		}
+		add(&mut ledger, 128, 128);
+		assert!(matches!(observer.read(), Err(Error::Playback(_))));
+	}
+
+	#[test]
+	fn one_observer_at_a_time() {
+		let shared = Arc::new(Shared::default());
+		let first = Observer::new(shared.clone()).unwrap();
+		assert!(matches!(Observer::new(shared.clone()), Err(Error::Busy(_))));
+		drop(first);
+		Observer::new(shared).unwrap();
+	}
+
+	#[test]
+	fn events_only_queue_while_observed() {
+		let shared = Arc::new(Shared::default());
+		let mut ledger = Ledger::new(shared.clone(), RATE);
+		for _ in 0..=EVENTS {
+			add(&mut ledger, 128, 128);
+			add(&mut ledger, 128, 0);
+		}
+		let mut observer = Observer::new(shared).unwrap();
+		add(&mut ledger, 128, 128);
+		let observation = observer.read().unwrap();
+		assert_eq!(observation.gaps.len(), 1);
+		assert_eq!(observation.quanta as usize, 2 * (EVENTS + 1) + 1);
+	}
+}
