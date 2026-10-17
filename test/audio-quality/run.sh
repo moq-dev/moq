@@ -329,7 +329,9 @@ if [[ ${#ROWS[@]} -gt 0 ]]; then
 
     echo ""
     echo "running ${#ROWS[@]} rows at ${DURATION}s each (seed $SEED)"
+    row=0
     for tag in "${ROWS[@]}"; do
+        row=$((row + 1))
         IFS=- read -r _ codec _ rest <<<"$tag"
         ring="${rest##*-}"
         profile="${rest%-*}"
@@ -352,9 +354,10 @@ if [[ ${#ROWS[@]} -gt 0 ]]; then
 
         status=0
         if [[ "$tag" == native-* ]]; then
-            # A null sink per row, so no row inherits another's device state.
+            # A null sink per row, so no row inherits another's device state. Numbered rather
+            # than tagged: its socket path has to fit a Unix socket's 108 bytes.
             harness_spawn "driver-$tag" "$HARNESS_RUN/driver-$tag.log" \
-                python3 "$AQ_DIR/../lib/pulse.py" --dir "$HARNESS_RUN/pulse-$tag" -- \
+                python3 "$AQ_DIR/../lib/pulse.py" --dir "$HARNESS_RUN/pulse-$row" -- \
                 bun "$CLIENT/native.ts" \
                 --moq "$MOQ" \
                 --url "https://127.0.0.1:$SHAPER_PORT" \

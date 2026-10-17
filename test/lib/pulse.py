@@ -30,9 +30,13 @@ def run():
         parser.error("no command to run")
 
     root = args.dir
-    runtime = root / "pulse"
+    # One-letter names: a Unix socket path must fit sockaddr_un's 108 bytes, and run
+    # directories under a CI runner's temp root already spend most of them.
+    runtime = root / "p"
+    socket = runtime / "s"
+    if len(os.fsencode(socket.absolute())) >= 108:
+        parser.error(f"socket path {socket.absolute()} is too long for a Unix socket; use a shorter --dir")
     runtime.mkdir(mode=0o700, parents=True)
-    socket = runtime / "native"
     config_home = root / "config"
     config_home.mkdir(mode=0o700)
     config = root / "alsa.conf"
