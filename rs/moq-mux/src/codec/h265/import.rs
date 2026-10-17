@@ -31,9 +31,9 @@ use crate::container::Frame;
 /// catalog rendition fills in lazily once the codec config is known (hvcC via
 /// [`initialize`](Self::initialize) for hvc1, the first SPS for hev1).
 pub struct Import {
-	/// True for the hvc1 shape: the codec config is out-of-band (hvcC), so
-	/// frame payloads are length-prefixed rather than Annex-B and are never scanned.
-	hvc1: bool,
+	/// The NALU length size for the hvc1 shape, whose codec config is out-of-band (hvcC), so
+	/// frame payloads are length-prefixed rather than Annex-B. `None` for Annex-B.
+	length_size: Option<usize>,
 	track: crate::container::Producer<crate::catalog::hang::Container, hang::catalog::VideoConfig>,
 	catalog: crate::codec::video::Catalog,
 	last_sps: Option<Bytes>,
@@ -56,7 +56,7 @@ impl Import {
 		let catalog = crate::codec::video::Catalog::new(hint);
 		let track = reserved.video(track, wire, None)?;
 		let mut import = Self {
-			hvc1: false,
+			length_size: None,
 			track,
 			catalog,
 			last_sps: None,
@@ -90,7 +90,9 @@ impl Import {
 		// Only switch to hvc1 mode once the hvcC actually parses, so a parse failure leaves the
 		// importer in hev1 mode where inline-SPS keyframes still self-initialize.
 		let config = super::config_from_hvcc(hvcc_bytes)?;
-		self.hvc1 = true;
+		// A new record starts a new coded sequence, whose HDR metadata the samples will carry.
+		self.catalog.hdr(&mut self.track, Default::default(), true)?;
+		self.length_size = Some(super::Hvcc::parse(hvcc_bytes)?.length_size);
 		self.apply_config(config)?;
 		Ok(())
 	}
@@ -101,14 +103,25 @@ impl Import {
 		let mut nals = NalIterator::new(&mut scan);
 		while let Some(nal) = nals.next().transpose()? {
 			if is_sps(&nal) {
-				self.configure_from_sps(&nal)?;
+				self.seed_sps(&nal)?;
 			}
 		}
 		if let Some(nal) = nals.flush()?
 			&& is_sps(&nal)
 		{
-			self.configure_from_sps(&nal)?;
+			self.seed_sps(&nal)?;
 		}
+		Ok(())
+	}
+
+	/// Configure from an SPS in a seed buffer. A new one starts a coded sequence, so the last one's
+	/// HDR metadata is dropped before the config publishes; the seed's own SEI arrives with its
+	/// keyframe through the splitter.
+	fn seed_sps(&mut self, sps: &Bytes) -> Result<()> {
+		if self.last_sps.as_ref() != Some(sps) {
+			self.catalog.hdr(&mut self.track, Default::default(), true)?;
+		}
+		self.configure_from_sps(sps)?;
 		Ok(())
 	}
 
@@ -193,14 +206,21 @@ impl Import {
 	/// keyframe's inline SPS and refining the catalog jitter as it goes.
 	fn write_frames(&mut self, frames: impl IntoIterator<Item = Frame>) -> Result<()> {
 		for frame in frames {
-			// hvc1 config arrives out-of-band via initialize(); hev1 carries SPS inline on
-			// keyframes. Scanning an hvc1 payload would misread a length prefix as a start
-			// code (a 322-byte NAL prefixes as `00 00 01 42`, an SPS NAL header).
-			if !self.hvc1
-				&& frame.keyframe
-				&& let Some(sps) = find_sps(&frame.payload)
-			{
-				self.configure_from_sps(&sps)?;
+			if frame.keyframe {
+				let hdr = crate::codec::color::access_unit(&frame.payload, self.length_size, 2, |h| {
+					nal_unit_type(h) == scuffle_h265::NALUnitType::PrefixSeiNut
+				});
+				// hvc1 config arrives out-of-band via initialize(); hev1 carries the SPS inline.
+				// Scanning an hvc1 payload as Annex-B would misread a length prefix as a start
+				// code (a 322-byte NAL prefixes as `00 00 01 42`, an SPS NAL header).
+				let sps = self.length_size.is_none().then(|| find_sps(&frame.payload)).flatten();
+				// A new SPS starts a coded sequence whose HDR metadata replaces the last one's. It goes
+				// first, so a keyframe that also configures publishes once.
+				let sequence = sps.as_ref().is_some_and(|sps| self.last_sps.as_ref() != Some(sps));
+				self.catalog.hdr(&mut self.track, hdr, sequence)?;
+				if let Some(sps) = sps {
+					self.configure_from_sps(&sps)?;
+				}
 			}
 
 			// A keyframe we still can't configure (no SPS) is undecodable.
@@ -257,6 +277,84 @@ mod tests {
 
 	use super::*;
 	use crate::codec::h265::{Split, fixtures};
+
+	/// Seeding an Annex-B importer with a new SPS starts a new coded sequence, dropping the last
+	/// one's HDR metadata before the new config publishes.
+	#[tokio::test(start_paused = true)]
+	async fn a_new_seed_sps_drops_stale_hdr_metadata() {
+		let annexb = |nals: &[&[u8]]| {
+			let mut buf = BytesMut::new();
+			for nal in nals {
+				buf.extend_from_slice(&[0, 0, 0, 1]);
+				buf.extend_from_slice(nal);
+			}
+			buf
+		};
+		let (track, catalog) = setup("video");
+		let mut import = Import::new(track, catalog.reserve(), Default::default()).unwrap();
+		let mut split = Split::new();
+		let pts = moq_net::Timestamp::from_micros(0).unwrap();
+		let idr: &[u8] = &[0x26, 0x01, 0x80, 0xaa]; // IdrWRadl (19)
+		let au = annexb(&[
+			fixtures::VPS,
+			fixtures::SPS_HDR10,
+			fixtures::PPS,
+			fixtures::SEI_CONTENT_LIGHT,
+			fixtures::SEI_MASTERING,
+			idr,
+		]);
+		let mut frames = split.decode(&au, pts).unwrap();
+		frames.extend(split.flush(pts).unwrap());
+		import.decode(frames).unwrap();
+		let color = || catalog.snapshot().video.renditions["video"].color.clone();
+		assert!(color().unwrap().mastering.is_some());
+
+		// An SPS that signals no colour: nothing is left once the stale metadata goes.
+		import
+			.initialize(&annexb(&[fixtures::VPS, fixtures::SPS, fixtures::PPS]))
+			.unwrap();
+		assert_eq!(color(), None);
+	}
+
+	/// An HDR10 keyframe publishes its VUI colour and the static HDR metadata its SEI carries.
+	#[tokio::test(start_paused = true)]
+	async fn hev1_keyframe_publishes_hdr10_color() {
+		let idr: &[u8] = &[0x26, 0x01, 0x80, 0xaa]; // IdrWRadl (19)
+		let mut annexb = BytesMut::new();
+		for nal in [
+			fixtures::VPS,
+			fixtures::SPS_HDR10,
+			fixtures::PPS,
+			fixtures::SEI_CONTENT_LIGHT,
+			fixtures::SEI_MASTERING,
+			idr,
+		] {
+			annexb.extend_from_slice(&[0, 0, 0, 1]);
+			annexb.extend_from_slice(nal);
+		}
+
+		let mut split = Split::new();
+		let (track, catalog) = setup("video");
+		let mut import = Import::new(track, catalog.reserve(), Default::default()).unwrap();
+		let pts = moq_net::Timestamp::from_micros(0).unwrap();
+		let mut frames = split.decode(&annexb, pts).expect("split keyframe");
+		frames.extend(split.flush(pts).expect("flush keyframe"));
+		import.decode(frames).expect("decode keyframe");
+
+		let color = catalog.snapshot().video.renditions["video"]
+			.color
+			.clone()
+			.expect("colour");
+		assert_eq!(
+			(color.primaries, color.transfer, color.matrix, color.range),
+			(Some(9), Some(16), Some(9), Some(hang::catalog::Range::Limited))
+		);
+		let hdr = crate::codec::color::test::hdr10();
+		assert_eq!(
+			(color.mastering, color.content_light),
+			(hdr.mastering, hdr.content_light)
+		);
+	}
 
 	fn setup(name: &str) -> (moq_net::track::Producer, crate::catalog::Producer) {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();

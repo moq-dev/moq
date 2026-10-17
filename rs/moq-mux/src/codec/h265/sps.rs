@@ -55,6 +55,23 @@ impl Sps {
 			Err(_) => Err(Error::SpsParse),
 		}
 	}
+
+	/// The colour the VUI's video signal type carries, when scuffle_h265 accepted the SPS.
+	pub(crate) fn color(&self) -> Option<hang::catalog::Color> {
+		let signal = &self.full.as_ref()?.vui_parameters.as_ref()?.video_signal_type;
+		// scuffle_h265 fills an absent video signal type with its default, inferred limited range
+		// included, so only a departure from it was signalled. A stream that signals limited range
+		// and nothing else reads as unsignalled, which a renderer assumes anyway.
+		if *signal == scuffle_h265::VideoSignalType::default() {
+			return None;
+		}
+		crate::codec::color::cicp(
+			signal.colour_primaries,
+			signal.transfer_characteristics,
+			signal.matrix_coeffs,
+			Some(signal.video_full_range_flag),
+		)
+	}
 }
 
 impl SpsHead {

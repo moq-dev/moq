@@ -10,6 +10,7 @@ pub mod aac;
 pub(crate) mod ac3;
 pub mod annexb;
 pub mod av1;
+pub(crate) mod color;
 pub(crate) mod eac3;
 pub mod flac;
 pub mod h264;

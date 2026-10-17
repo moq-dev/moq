@@ -35,6 +35,28 @@ normative:
     date: false
 
 informative:
+  h273:
+    title: "Coding-independent code points for video signal type identification"
+    target: https://www.itu.int/rec/T-REC-H.273
+    author:
+      - org: ITU-T
+    seriesinfo:
+      ITU-T Recommendation: H.273
+    date: false
+  st2086:
+    title: "Mastering Display Color Volume Metadata Supporting High Luminance and Wide Color Gamut Images"
+    author:
+      - org: SMPTE
+    seriesinfo:
+      SMPTE: ST 2086
+    date: false
+  cta861:
+    title: "HDR Static Metadata Extensions"
+    author:
+      - org: CTA
+    seriesinfo:
+      CTA: 861.3
+    date: false
 
 --- abstract
 
@@ -208,6 +230,7 @@ type VideoDecoderConfigExtensions = {
   "displayAspectWidth": number | undefined,
   "displayAspectHeight": number | undefined,
   "preference": number | undefined,
+  "color": Color | undefined,
 }
 ~~~
 
@@ -221,6 +244,37 @@ If absent, it defaults to 0; a publisher SHOULD only write it when nonzero.
 A consumer selecting a rendition automatically MUST choose among the enabled ({{field-enabled}}) renditions it can decode with the highest `preference`, then by its own criteria, such as size and bitrate, within them.
 A consumer MAY select another rendition at the viewer's explicit request.
 A consumer that carries every rendition, rather than selecting one, ignores the field.
+
+`color` describes the decoded pixels so a renderer can configure its pipeline without parsing the bitstream:
+
+~~~
+type Color = {
+  "primaries": number | undefined,
+  "transfer": number | undefined,
+  "matrix": number | undefined,
+  "range": "limited" | "full" | undefined,
+  "mastering": {
+    "red": Chromaticity,
+    "green": Chromaticity,
+    "blue": Chromaticity,
+    "white": Chromaticity,
+    "maxLuminance": number,
+    "minLuminance": number,
+  } | undefined,
+  "contentLight": {
+    "maxCll": number,
+    "maxFall": number,
+  } | undefined,
+}
+
+type Chromaticity = { "x": number, "y": number }
+~~~
+
+`primaries`, `transfer`, and `matrix` are the ColourPrimaries, TransferCharacteristics, and MatrixCoefficients code points of {{h273}}, and `range` is its VideoFullRangeFlag: `full` for 1 and `limited` for 0.
+`mastering` is the {{st2086}} mastering display: CIE 1931 xy chromaticities and luminance in candelas per square metre.
+`contentLight` is the {{cta861}} MaxCLL and MaxFALL in candelas per square metre, where 0 means unknown.
+A publisher MUST omit a field its source leaves unspecified rather than write a default, and SHOULD prefer the value signalled in the elementary stream over a container's when they disagree.
+`color` is not part of the track's identity ({{identity}}).
 
 For example:
 
@@ -1281,6 +1335,7 @@ This document has no IANA actions.
 - Audio `sampleRate` and `numberOfChannels` describe the decoded output, so HE-AAC names its SBR rate and parametric stereo names two channels.
 - Added an optional `track` field to video, audio, text, `json`, and `binary` entries naming the track in its broadcast; the entry's key is its ID and names the track when `track` is absent. A consumer MUST reject a catalog using one ID for both a video and an audio rendition.
 - Defined video `displayAspectWidth` and `displayAspectHeight` as the whole picture's display aspect, not the sample aspect.
+- Added the optional video `color` field: H.273 primaries, transfer, matrix, and range, plus the SMPTE ST 2086 mastering display and CTA-861.3 content light levels.
 
 ## moq-hang-03
 {:numbered="false"}
