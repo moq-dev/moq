@@ -73,55 +73,69 @@ export class Producer {
 	/**
 	 * Encrypt `plaintext` at the next sequence and insert the datagram, resolving to that sequence.
 	 *
-	 * The sequence is allocated once the track's timescale is committed, at once for an accepted
-	 * track. The rules of {@link insertDatagram} apply.
+	 * The rules of {@link insertDatagram} apply.
 	 */
 	async appendDatagram(timestamp: Time.Timestamp | undefined, plaintext: Uint8Array): Promise<number> {
-		const owned = plaintext.slice();
-		if (this.#writer.timed === undefined) await this.#timescale();
-		const sequence = this.#next;
-		await this.#insert(sequence, timestamp, owned);
-		return sequence;
+		return this.#insert(undefined, timestamp, plaintext);
 	}
 
 	/**
 	 * Encrypt `plaintext` at an explicit sequence and insert the datagram.
 	 *
 	 * Plaintext is capped at `MAX_DATAGRAM_PLAINTEXT` and copied, so the caller may reuse its
-	 * buffer. Admission waits for the track's committed timescale, so a predictable failure,
-	 * including a mismatched timestamp, is refused before the sequence is allocated; once
-	 * admitted, the identity is spent even if the net write fails. Rejects with
-	 * {@link Failure} `reuse`, `identity`, `exhausted`, or `oversize`, or a net error.
+	 * buffer. A predictable failure, including a mismatched timestamp, is refused before the
+	 * sequence is allocated; once admitted, the identity is spent even if the net write fails.
+	 * Until this producer has observed the track's committed timescale, admission waits for it
+	 * in the serial pump, so the sequence is allocated there. Rejects with {@link Failure}
+	 * `reuse`, `identity`, `exhausted`, or `oversize`, or a net error.
 	 */
 	async insertDatagram(
 		sequence: number,
 		timestamp: Time.Timestamp | undefined,
 		plaintext: Uint8Array,
 	): Promise<void> {
+		await this.#insert(sequence, timestamp, plaintext);
+	}
+
+	// Admit at `sequence`, or the next one when undefined, then encrypt and write in the pump.
+	#insert(
+		sequence: number | undefined,
+		timestamp: Time.Timestamp | undefined,
+		plaintext: Uint8Array,
+	): Promise<number> {
+		this.#writable();
 		const owned = plaintext.slice();
-		if (this.#writer.timed === undefined) await this.#timescale();
-		return this.#insert(sequence, timestamp, owned);
+		const writer = this.#writer;
+		if (writer.timed !== undefined) {
+			const admitted = sequence ?? this.#next;
+			const write = this.#admit(admitted, timestamp, owned);
+			return writer.pump.run(async () => {
+				await write();
+				return admitted;
+			});
+		}
+		// Admitting in the pump keeps this ahead of a close or write submitted after it.
+		return writer.pump.run(async () => {
+			const info = await this.#inner.info();
+			writer.timed = info.timescale != null;
+			if (writer.aborted) throw writer.aborted;
+			const admitted = sequence ?? this.#next;
+			await this.#admit(admitted, timestamp, owned)();
+			return admitted;
+		});
 	}
 
-	// Learn the committed timescale ahead of the constructor's callback; rejects if the track
-	// closes first.
-	async #timescale(): Promise<void> {
-		this.#writable();
-		const info = await this.#inner.info();
-		this.#writer.timed = info.timescale != null;
-	}
-
-	#insert(sequence: number, timestamp: Time.Timestamp | undefined, owned: Uint8Array<ArrayBuffer>): Promise<void> {
-		this.#writable();
+	// Refuse or spend the datagram's identity now, returning its encrypt-and-write step.
+	#admit(sequence: number, timestamp: Time.Timestamp | undefined, owned: Uint8Array<ArrayBuffer>) {
 		this.#reserve(sequence);
 		checkTimed(this.#writer, timestamp);
 		const iv = this.#datagramKey.admitSeal(sequence, 0, owned.byteLength, MAX_DATAGRAM_PAYLOAD);
 		this.#next = sequence + 1;
-		return this.#writer.pump.run(async () => {
+		return async (): Promise<void> => {
 			const payload = await this.#datagramKey.encrypt(iv, owned);
 			if (this.#writer.aborted) throw this.#writer.aborted;
 			this.#inner.insertDatagram(sequence, timestamp, payload);
-		});
+		};
 	}
 
 	/**

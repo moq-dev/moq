@@ -594,6 +594,17 @@ test("a datagram right after wrapping waits for the timescale before spending", 
 	expect(datagramText(await consumer.recvDatagram())).toBe("ok");
 });
 
+test("a close in the same turn drains a datagram waiting for the timescale", async () => {
+	const generation = credential().produce();
+	const net = netTrack(await generation.name("audio"));
+	const consumer = generation.credential.consume(generation.epoch).consume(subscribe(net));
+	const producer = generation.produce(net);
+	const sent = producer.appendDatagram(ms(1), text("last"));
+	producer.close();
+	expect(await sent).toBe(0);
+	expect(datagramText(await consumer.recvDatagram())).toBe("last");
+});
+
 test("a failed net write after encryption aborts the group", async () => {
 	const p = await pair("video");
 	const group = p.producer.appendGroup();
