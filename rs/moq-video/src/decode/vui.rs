@@ -36,7 +36,11 @@ pub(super) fn signalled(codec: Codec, access_unit: &Bytes) -> Option<Option<Colo
 	sps(codec, &nals.flush().ok()??)
 }
 
-/// The space one NAL unit signals, when it is a parseable SPS.
+/// The space one NAL unit signals, when it is an SPS.
+///
+/// An SPS this cannot read (cameras ship H.265 colour fields the parser
+/// refuses) leaves the pictures unlabelled rather than keeping the previous
+/// space, which would claim one the stream may no longer be in.
 fn sps(codec: Codec, nal: &[u8]) -> Option<Option<Color>> {
 	match codec {
 		Codec::H264 => h264(nal),
@@ -53,8 +57,12 @@ fn h264(nal: &[u8]) -> Option<Option<Color>> {
 	if nal.header().ok()?.nal_unit_type() != UnitType::SeqParameterSet {
 		return None;
 	}
-	let sps = SeqParameterSet::from_bits(nal.rbsp_bits()).ok()?;
-	let (width, height) = sps.pixel_dimensions().ok()?;
+	let Ok(sps) = SeqParameterSet::from_bits(nal.rbsp_bits()) else {
+		return Some(None);
+	};
+	let Ok((width, height)) = sps.pixel_dimensions() else {
+		return Some(None);
+	};
 	// Absent, the range flag is 0 (limited) and the description unspecified (E.2.1).
 	let signal = sps
 		.vui_parameters
@@ -78,11 +86,32 @@ fn h265(nal: &[u8]) -> Option<Option<Color>> {
 	if NALUnitType::from((nal.first()? >> 1) & 0x3f) != NALUnitType::SpsNut {
 		return None;
 	}
-	let sps = SpsNALUnit::parse(&mut &nal[..]).ok()?.rbsp;
-	let size = Size::new(
-		u32::try_from(sps.cropped_width()).ok()?,
-		u32::try_from(sps.cropped_height()).ok()?,
-	);
+	let Ok(sps) = SpsNALUnit::parse(&mut &nal[..]) else {
+		return Some(None);
+	};
+	let sps = sps.rbsp;
+	// `cropped_width` subtracts unchecked, so a window wider than the picture
+	// would overflow; crop here instead.
+	let window = &sps.conformance_window;
+	let crop = |size: u64, sub: u8, start: u64, end: u64| {
+		let offset = start.checked_add(end)?.checked_mul(sub.into())?;
+		u32::try_from(size.checked_sub(offset)?).ok()
+	};
+	let Some(size) = crop(
+		sps.pic_width_in_luma_samples.get(),
+		sps.sub_width_c(),
+		window.conf_win_left_offset,
+		window.conf_win_right_offset,
+	)
+	.zip(crop(
+		sps.pic_height_in_luma_samples.get(),
+		sps.sub_height_c(),
+		window.conf_win_top_offset,
+		window.conf_win_bottom_offset,
+	)) else {
+		return Some(None);
+	};
+	let size = Size::new(size.0, size.1);
 	// Absent, the range flag is 0 (limited) and the description unspecified
 	// (E.3.1); scuffle_h265 fills an absent description with 2 itself.
 	let Some(vui) = &sps.vui_parameters else {
@@ -120,5 +149,19 @@ mod tests {
 		assert_eq!(signalled(Codec::Vp9, &pps), None);
 		// Not Annex-B at all: the start-code scan gives up rather than spinning.
 		assert_eq!(signalled(Codec::H264, &Bytes::from_static(b"not annex b")), None);
+	}
+
+	/// A camera's H.265 SPS with zeroed colour fields, which the parser refuses
+	/// (moq-mux's `SPS_ZERO_COLOUR`), leaves pictures unlabelled rather than
+	/// keeping whatever space came before.
+	#[test]
+	fn an_unreadable_sps_clears_the_label() {
+		let mut unit = vec![0, 0, 0, 1];
+		unit.extend_from_slice(&[
+			0x42, 0x01, 0x01, 0x01, 0x60, 0x00, 0x00, 0x03, 0x00, 0x00, 0x03, 0x00, 0x00, 0x03, 0x00, 0x00, 0x03, 0x00,
+			0x96, 0xa0, 0x03, 0xc0, 0x80, 0x11, 0x07, 0xcb, 0x8a, 0xad, 0x3b, 0xa2, 0x4b, 0xb9, 0x08, 0x00, 0x00, 0x03,
+			0x00, 0x20, 0x05, 0x26, 0x5c, 0x00, 0x33, 0x7f, 0x98, 0x01,
+		]);
+		assert_eq!(signalled(Codec::H265, &Bytes::from(unit)), Some(None));
 	}
 }

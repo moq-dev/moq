@@ -20,6 +20,7 @@
 //! sets could not be decoded anyway, so the lenient reading only ever turns an
 //! error into a picture.
 
+use std::collections::VecDeque;
 use std::marker::PhantomData;
 use std::rc::Rc;
 
@@ -150,6 +151,10 @@ pub struct Decoder {
 	/// a backend hands back unlabelled, which keeps their space once a decoder
 	/// scale or a resize moves them across 576 lines.
 	color: Option<Color>,
+	/// Spaces later keyframes switched to, each from that keyframe's timestamp.
+	/// A reordering backend can still be holding pictures from before the
+	/// switch, which keep the old space until output reaches the keyframe.
+	switches: VecDeque<(Timestamp, Option<Color>)>,
 	/// Keeps direct use bound to the constructing thread, regardless of backend.
 	_thread_bound: PhantomData<Rc<()>>,
 }
@@ -227,6 +232,7 @@ impl Decoder {
 			output: config.output,
 			got_keyframe: false,
 			color: coded.map(|(width, height)| Color::infer(Size::new(width, height))),
+			switches: VecDeque::new(),
 			_thread_bound: PhantomData,
 		})
 	}
@@ -252,8 +258,11 @@ impl Decoder {
 		}
 
 		let access_unit = self.conversion.access_unit(payload, keyframe)?;
-		if keyframe && let Some(color) = super::vui::signalled(self.codec, &access_unit) {
-			self.color = color;
+		if keyframe
+			&& let Some(color) = super::vui::signalled(self.codec, &access_unit)
+			&& self.switches.back().map_or(self.color, |(_, color)| *color) != color
+		{
+			self.switches.push_back((timestamp, color));
 		}
 		let frames = self.backend.decode(access_unit, timestamp, keyframe)?;
 		self.deliver(frames)
@@ -267,7 +276,12 @@ impl Decoder {
 	pub fn flush(&mut self) -> Result<Vec<Frame>, Error> {
 		self.got_keyframe = false;
 		let frames = self.backend.flush()?;
-		self.deliver(frames)
+		let frames = self.deliver(frames)?;
+		// Nothing is held any more, so a switch no picture reached still applies.
+		if let Some((_, color)) = self.switches.drain(..).next_back() {
+			self.color = color;
+		}
+		Ok(frames)
 	}
 
 	/// Put the backend's pictures in the representation [`Config::output`]
@@ -277,10 +291,19 @@ impl Decoder {
 	/// about it when decoding to the CPU directly is cheaper than downloading
 	/// afterwards (VAAPI). A surface with no CPU path fails here rather than
 	/// arriving GPU-resident at a caller that said it could not take one.
-	fn deliver(&self, frames: Vec<Frame>) -> Result<Vec<Frame>, Error> {
+	fn deliver(&mut self, frames: Vec<Frame>) -> Result<Vec<Frame>, Error> {
 		frames
 			.into_iter()
 			.map(|frame| {
+				// Output is in presentation order, and nothing decoded after a
+				// keyframe is shown before it, so a picture's timestamp says which
+				// side of a switch it is on.
+				while let Some(&(at, color)) = self.switches.front()
+					&& frame.timestamp >= at
+				{
+					self.color = color;
+					self.switches.pop_front();
+				}
 				let mut surface = match self.output {
 					Output::Native => frame.surface,
 					Output::Cpu => Surface::I420(frame.surface.into_i420()?),
@@ -642,6 +665,47 @@ mod tests {
 		assert_eq!(types.first(), Some(&32), "{types:?}");
 		assert!(types.contains(&33) && types.contains(&34), "{types:?}");
 		assert_eq!(types.last(), Some(&20), "{types:?}");
+	}
+
+	/// A reordering backend still holds the old sequence's last picture when a
+	/// keyframe switches space, and that picture keeps the space it was coded
+	/// in.
+	#[test]
+	#[cfg(feature = "openh264")]
+	fn a_held_picture_keeps_the_space_it_was_coded_in() {
+		use crate::Color;
+
+		let size = crate::Size::new(64, 64);
+		let keyframe = |color: Color| {
+			let mut encoder = Encoder::new(&EncodeConfig {
+				kind: EncodeKind::Software,
+				color: Some(color),
+				..EncodeConfig::new(size.width, size.height, crate::Rate::new(30, 1).unwrap())
+			})
+			.unwrap();
+			encoder.cut().unwrap();
+			let i420 = I420::new(size, vec![0x80; I420::len(size).unwrap()]).unwrap();
+			let frame = Frame::new(
+				Surface::I420(i420.with_color(color)),
+				Timestamp::from_micros(0).unwrap(),
+			);
+			encoder.encode(&frame).unwrap().remove(0).payload
+		};
+		let (first, second) = (
+			Timestamp::from_micros(0).unwrap(),
+			Timestamp::from_micros(33_333).unwrap(),
+		);
+
+		let kind = super::Kind::Named(probe::BUFFERED_NAME.into());
+		let mut decoder = super::Decoder::new(&probe_catalog(), &decode_config(kind)).unwrap();
+		assert!(decoder.decode(&keyframe(Color::BT709), first, true).unwrap().is_empty());
+		let held = decoder.decode(&keyframe(Color::BT601), second, true).unwrap();
+		assert_eq!(held.len(), 1);
+		assert_eq!(held[0].timestamp, first);
+		assert_eq!(held[0].surface.color(), Some(Color::BT709));
+		let tail = decoder.flush().unwrap();
+		assert_eq!(tail[0].timestamp, second);
+		assert_eq!(tail[0].surface.color(), Some(Color::BT601));
 	}
 
 	/// An inline-H.264 catalog the test probes accept.
