@@ -4,6 +4,7 @@ The wire layer. Generic over the transport and media-agnostic: the relay never i
 
 - Any wire change updates the matching draft in `drafts/` and `js/net` in the same PR: `draft-lcurley-moq-lite.md` for session/SETUP/framing, the per-feature draft otherwise. New capabilities are additive SETUP extensions; receivers ignore unknown parameters.
 - Closes never cascade. Aborting a group must not tear down its track, broadcast, or siblings.
+- A route change is never fatal on its own. A subscription stays on the instance it started on while that instance still has a route, even after a newer route wins the path. Once none is left (e.g. the publisher's session closed), it ends with an error, never a clean end, and the app requests the path again. Never stitch it onto another instance. A clean end means only a deliberate publisher finish or the local session closing. See "Publisher epochs" in `doc/concept/moq-lite.md`.
 - Sessions are caller-driven: `connect`/`accept` return `(Session, Driver)`. The `Driver` holds no `Session` clone, so spawning it never keeps the session alive.
 - Version matching: outside the crate branch on `is_lite()` / `is_ietf()` and `alpn()`; inside it match the draft enums. List old drafts explicitly and let the newest behavior be the fallthrough so future drafts fall forward.
 - Interop rule of thumb: respond to every feature a peer may use, but don't request new ones. Never emit or accept partial groups; a group starts at frame 0. Exception: moq-transport passthrough forwards a mid-group start as the publisher sent it.
