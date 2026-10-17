@@ -753,6 +753,21 @@ mod tests {
 		assert_eq!(format!("{actual:?}"), format!("{expected:?}"));
 	}
 
+	/// The expiry index and next deadline agree with a full scan of the tracks.
+	#[track_caller]
+	fn assert_index_matches_scan(front: &Front) {
+		let scanned: BTreeSet<_> = front
+			.tracks
+			.iter()
+			.filter_map(|(name, track)| match track.state {
+				TrackState::Parked { since } => Some((since + front.linger, name.clone())),
+				_ => None,
+			})
+			.collect();
+		assert_eq!(front.parked, scanned);
+		assert_eq!(front.next_deadline(), scanned.first().map(|(at, _)| *at));
+	}
+
 	/// A front serving `source` through `candidate`, with `video` spliced and read.
 	fn serving(candidate: Candidate, source: u64) -> Front {
 		let mut front = Front::new(LINGER);
@@ -1575,16 +1590,7 @@ mod tests {
 					front.step(Event::Forgotten { track });
 				}
 			}
-			let scanned: BTreeSet<_> = front
-				.tracks
-				.iter()
-				.filter_map(|(name, track)| match track.state {
-					TrackState::Parked { since } => Some((since + LINGER, name.clone())),
-					_ => None,
-				})
-				.collect();
-			assert_eq!(front.parked, scanned);
-			assert_eq!(front.next_deadline(), scanned.first().map(|(at, _)| *at));
+			assert_index_matches_scan(&front);
 		}
 	}
 
@@ -1669,6 +1675,9 @@ mod tests {
 				let before = format!("{next:?}");
 				let actions = next.step(event.clone());
 				*sequences += 1;
+
+				// Route-wide events skip the index update, so they must leave parked tracks alone.
+				assert_index_matches_scan(&next);
 
 				// An event that changes nothing produces nothing, except letting
 				// go of a source the front never took.
