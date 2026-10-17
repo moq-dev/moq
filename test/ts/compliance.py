@@ -771,9 +771,14 @@ def ac3_frame(es: bytes, pos: int) -> tuple[int, float]:
     h = es[pos : pos + 6]
     if len(h) < 6 or h[0] != 0x0B or h[1] != 0x77:
         raise Refused(f"no AC-3 sync at ES offset {pos}")
-    if h[5] >> 3 > 16:
-        raise Refused(f"reserved bsid {h[5] >> 3} at ES offset {pos}")
-    if h[5] >> 3 > 10:  # bsid 11-16: E-AC-3 (A/52 Annex E)
+    # bsid 8 or less is AC-3 and 11-16 E-AC-3 (A/52 Annex E); 9 and 10 are low-rate AC-3
+    # variants the export does not parse, and the rest are reserved.
+    bsid = h[5] >> 3
+    if bsid in (9, 10) or bsid > 16:
+        raise Refused(f"unsupported bsid {bsid} at ES offset {pos}")
+    if bsid > 10:
+        if h[2] >> 6 == 3:
+            raise Refused(f"E-AC-3 strmtyp reserved at ES offset {pos}")
         if h[4] >> 6 == 3 and (h[4] >> 4) & 0x03 == 3:
             raise Refused(f"E-AC-3 fscod2 reserved at ES offset {pos}")
         blocks = (1, 2, 3, 6)[(h[4] >> 4) & 0x03] if h[4] >> 6 != 3 else 6

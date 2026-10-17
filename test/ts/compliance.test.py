@@ -18,11 +18,17 @@ class Eac3Frames(unittest.TestCase):
             with self.subTest(stream=stream):
                 self.assertEqual(compliance.ac3_frame(eac3(stream), 0), (512, duration))
 
-    def test_reserved_bsid_is_refused(self):
-        frame = bytearray(eac3(0x00))
-        frame[5] = 17 << 3
+    def test_unsupported_bsid_is_refused(self):
+        for bsid in (9, 10, 17):
+            with self.subTest(bsid=bsid):
+                frame = bytearray(eac3(0x00))
+                frame[5] = bsid << 3
+                with self.assertRaises(compliance.Refused):
+                    compliance.ac3_frame(bytes(frame), 0)
+
+    def test_reserved_stream_type_is_refused(self):
         with self.assertRaises(compliance.Refused):
-            compliance.ac3_frame(bytes(frame), 0)
+            compliance.ac3_frame(eac3(0xC0), 0)
 
     def test_reserved_reduced_rate_is_refused(self):
         frame = bytearray(eac3(0x00))
