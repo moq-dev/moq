@@ -33,6 +33,15 @@ cache becomes a range request on `Dynamic` rather than a group request.
   budget or lets one expired caller cancel another still-valid reader.
   Reuse FETCH's optional per-reader budget and publisher clamp rather than
   restoring a historical exemption.
+- Move every relative-start resolution into the model, which counts back
+  from produced groups only. Today two consumers re-resolve relative starts
+  on their own. moq-c's `apply_raw_subscription` (`rs/moq-c/src/consume.rs`)
+  counts back from `Ordered::latest()`, the shared group and datagram
+  sequence, so a datagram past the newest group skews the start. It also
+  re-resolves on every update, because the model doesn't. moq-mux's
+  `container::Consumer::new` treats a relative start as an unfloored join
+  and adopts the first arrival, which under newest-first delivery can skip
+  the older groups the range asked for.
 - Benchmark serving and filling over range count and span as separate axes,
   beside `track_subscription_ranges`, which covers aggregation.
 
