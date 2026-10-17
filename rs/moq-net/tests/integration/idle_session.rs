@@ -161,6 +161,7 @@ async fn probe_follows_consumer_lifetime() {
 			"{version}: last drop resets PROBE"
 		);
 		let mut resumed = pair.client.recv_bandwidth().unwrap();
+		assert_eq!(resumed.peek(), None, "{version}: an unused estimate is cleared");
 		assert_eq!(resumed.changed().await.unwrap(), Some(Rate::from_bps(1_000_000)));
 		moq_net_sim::sleep(Duration::from_secs(1)).await;
 		assert_eq!(probe_count(), 2, "{version}: demand can resume");

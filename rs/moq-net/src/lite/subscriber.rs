@@ -1195,8 +1195,10 @@ impl<S: crate::transport::poll::Session> RecvBandwidth<S> {
 					let bandwidth = self.subscriber.recv_bandwidth.as_ref().expect("gated above");
 					match bandwidth.poll_unused(waiter) {
 						// Loop back: a new consumer may arrive later. Dropping the probe
-						// machine resets its stream.
+						// machine resets its stream, and clearing the estimate keeps that
+						// consumer from reading a stale rate before the new stream reports.
 						Poll::Ready(Ok(())) => {
+							let _ = bandwidth.set(None);
 							self.state = BandwidthState::WaitUsed;
 							continue;
 						}
