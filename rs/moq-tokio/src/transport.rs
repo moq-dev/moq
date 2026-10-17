@@ -897,10 +897,10 @@ impl GroupedSend for web_transport_iroh::SendStream {
 	}
 }
 
-#[cfg(any(feature = "websocket", feature = "tcp"))]
+#[cfg(any(feature = "websocket", feature = "tcp", feature = "webrtc"))]
 impl Grouped for qmux::Session {}
 
-#[cfg(any(feature = "websocket", feature = "tcp"))]
+#[cfg(any(feature = "websocket", feature = "tcp", feature = "webrtc"))]
 impl GroupedSend for qmux::SendStream {
 	type Group = moq_net::transport::poll::Ungrouped;
 
