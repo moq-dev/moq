@@ -8,14 +8,7 @@ How to update your code for each breaking change, newest first.
 
 The connection stats no longer carry a receive estimate.
 Hold the consumer `Session.recvBandwidth` returns to request PROBE, read it with `peek()` or wait with `changed()`, and `cancel()` it to stop.
-
-```kotlin
-// Before
-val rate = session.stats().estimatedRecvRateBps
-// After
-val bandwidth = session.recvBandwidth()
-val rate = bandwidth?.peek()
-```
+Replace `stats().estimatedRecvRateBps` with `recvBandwidth()?.peek()`.
 
 ### `AnnouncedBroadcast.available()` waits for the next publisher instance (#5700)
 
@@ -31,21 +24,11 @@ A publisher whose timeline restarts publishes a new broadcast instead.
 
 `Bandwidth.reserve` takes the track's `demand()` instead of the producer, and no longer throws.
 
-```kotlin
-// Before
-val reservation = bandwidth.reserve(track, maxBps)
-// After
-val reservation = bandwidth.reserve(track.demand(), maxBps)
-```
-
 ### Media subscribe and fetch take a catalog rendition (#5834)
 
 `TrackConfig` and `GroupConfig` in `dev.moq.media` replace `name` and `container` with a `rendition` (`VideoRendition` or `AudioRendition`) and follow its broadcast and track themselves.
 
 ```kotlin
-// Before
-val config = TrackConfig(name = id, container = video.container)
-// After
 val config = TrackConfig(rendition = VideoRendition(id, video))
 ```
 
@@ -58,10 +41,6 @@ Producers expose subscriber state only through `demand()`, and a video `gop` is 
 `dev.moq.audio.Encoder` / `dev.moq.video.Encoder` encode without publishing.
 
 ```kotlin
-// Before
-val video = broadcast.encodeVideo(input, output)
-val frames = consumer.decodeVideo(name, rendition, decoder)
-// After
 val video = dev.moq.video.Producer(CatalogProducer(broadcast), input, output)
 val frames = dev.moq.video.Consumer.subscribe(consumer, name, rendition, decoder)
 ```
@@ -77,11 +56,6 @@ A panic in a background task throws `uniffi.moq.MoqException.Task` with the pani
 A restart means another publisher instance now serves the prefix: request the path again.
 
 ```kotlin
-// Before
-moq.announcements().collect { update ->
-    if (update.active()) subscribe(update.prefix())
-}
-// After
 moq.announced().updates().collect { event ->
     when (event) {
         is AnnounceEventStart -> subscribe(event.announce.prefix)
@@ -95,15 +69,6 @@ moq.announced().updates().collect { event ->
 
 `Moq.epoch()` is `connects()`, and `AudioProducer.resetEpoch()` is `reanchor()`.
 
-```kotlin
-// Before
-val n = moq.epoch()
-audio.resetEpoch()
-// After
-val n = moq.connects()
-audio.reanchor()
-```
-
 ### `connect` takes a `ClientConfig`
 
 The keyword arguments moved into a `ClientConfig` with nested `tls`, `quic`, `websocket`, and `backoff` records.
@@ -112,9 +77,6 @@ A value the native side cannot use throws `MoqException.Config`, including a bad
 A server request takes its origins in `accept(publish, consume)`, where `null` inherits the server's origin.
 
 ```kotlin
-// Before
-val moq = Moq.connect(url, tlsVerify = false, subscribe = origin)
-// After
 val moq = Moq.connect(url, ClientConfig(tls = ClientTls(insecure = true), consume = origin))
 ```
 
@@ -124,9 +86,6 @@ val moq = Moq.connect(url, ClientConfig(tls = ClientTls(insecure = true), consum
 Create the track, then wrap it with `dev.moq.json` (or `dev.moq.flate` for opaque bytes).
 
 ```kotlin
-// Before
-val state = broadcast.publishJsonSnapshot("state", config)
-// After
 val state = dev.moq.json.SnapshotProducer(broadcast, broadcast.publishTrack("state", null), config)
 ```
 
@@ -137,9 +96,6 @@ Use `TrackProducer.audio` / `video`, `ContainerProducer`, `CatalogProducer` (wit
 Producers drop `name`, `used`, and `unused`; read them through `demand()`.
 
 ```kotlin
-// Before
-val audio = broadcast.publishAudio(AudioInit(format = AudioFormat.OPUS, data = opusHead))
-// After
 val audio = dev.moq.media.TrackProducer.audio(broadcast, Named(null), AudioInit(format = AudioFormat.OPUS, data = opusHead))
 ```
 
@@ -148,144 +104,64 @@ val audio = dev.moq.media.TrackProducer.audio(broadcast, Named(null), AudioInit(
 `ContainerStreamProducer` takes a `ContainerStreamInit` holding the format instead of a bare format.
 Its optional `timebase`, also on `ContainerInit`, shares one source's offset across container imports.
 
-```kotlin
-// Before
-val importer = ContainerStreamProducer(broadcast, ContainerFormat.FMP4)
-// After
-val importer = ContainerStreamProducer(broadcast, ContainerStreamInit(ContainerFormat.FMP4))
-```
-
 ### Timestamps are optional
 
 `Frame.timestamp` and `Datagram.timestamp` are `Duration?`, null on a frame read from an untimed track.
 A raw write to a timed track without a timestamp throws `TimestampMismatch` instead of going out at 0, and whole-frame media writes require one.
 `CatalogProducer.now()` samples the broadcast clock for local-event stamps.
-
-```kotlin
-// Before
-track.writeFrame(Frame(payload = bytes))
-val ts: Duration = frame.timestamp
-// After
-track.writeFrame(Frame(payload = bytes, timestampUs = nowUs))
-val ts: Duration? = frame.timestamp
-```
+Pass `timestampUs` when writing to a timed track, and handle a null `timestamp` when reading.
 
 ### Subscriber staleness is `maxDelay`
 
-`Subscription.maxAge`, `AudioDecoderOutput.maxAge`, and `VideoDecoderOutput.maxAge` are `maxDelay`.
+`Subscription.maxAge`, `AudioDecoderOutput.maxAge`, and `VideoDecoderOutput.maxAge` are `maxDelay`, and the `maxAgeUs` argument is `maxDelayUs`.
 `TrackInfo.maxAge` keeps its name: it is the publisher's retention.
-
-```kotlin
-// Before
-val subscription = Subscription(maxAgeUs = 500_000u)
-val budget = subscription.maxAge
-// After
-val subscription = Subscription(maxDelayUs = 500_000u)
-val budget = subscription.maxDelay
-```
 
 ### Error payloads are named `reason`
 
 Exceptions that carried a positional string (`Transport`, `Internal`, `Connect`, ...) name it `reason`.
-
-```kotlin
-// Before
-catch (e: MoqException.Transport) { log(e.v1) }
-// After
-catch (e: MoqException.Transport) { log(e.reason) }
-```
+Read `e.reason` instead of `e.v1`.
 
 ### `Transport` gains `WEB_TRANSPORT`
 
 A WebTransport session reports `Transport.WEB_TRANSPORT`; `QUIC` now means raw QUIC only, so an exhaustive `when` needs one more branch.
-
-```kotlin
-// Before
-val quic = request.transport() == Transport.QUIC
-// After
-val quic = request.transport() == Transport.QUIC || request.transport() == Transport.WEB_TRANSPORT
-```
+Check for `WEB_TRANSPORT` wherever you checked for `QUIC`.
 
 ### `stalled` is `enabled` (#4915)
 
 `Video.stalled` is `enabled`, defaulting to true with the meaning inverted, and `Audio` gains `enabled`.
-
-```kotlin
-// Before
-if (!video.stalled) select(video)
-// After
-if (video.enabled) select(video)
-```
+Replace `!video.stalled` with `video.enabled`.
 
 ### Routes have one cost (#4661)
 
-`Route.cold` is removed.
-
-```kotlin
-// Before
-val route = Route(cost = 10u, cold = 50u)
-// After
-val route = Route(cost = 10u)
-```
+`Route.cold` is removed; drop the `cold` argument.
 
 ### Decoded video frames are objects
 
 `VideoDecodedFrame` is a closeable handle with `width()`, `height()`, `pixels(format)`, and `surface()`.
 `VideoDecoderOutput.format` is gone; set `surface = true` to keep the decoder's native surface.
-
-```kotlin
-// Before
-val rgba = frame.data
-// After
-val rgba = frame.use { it.pixels(VideoPixelFormat.RGBA) }
-```
+Replace `frame.data` with `frame.use { it.pixels(VideoPixelFormat.RGBA) }`.
 
 ### `BroadcastProducer.finish()` is removed (#4152)
 
 Call `end()` to finish the broadcast and keep the handle, or `close()` to release it.
-
-```kotlin
-// Before
-broadcast.finish()
-// After
-broadcast.end()
-```
 
 ## 0.4 -> 0.5
 
 ### Durations are `kotlin.time.Duration`
 
 Extension properties expose every microsecond field as a `Duration`: `Frame.timestamp`, `Subscription.maxAge`, `ConnectionStats.rtt`, `Backoff.initial`, and the rest.
-
-```kotlin
-// Before
-val delayMs = backoff.initialMs
-// After
-val delay = backoff.initial
-```
+Replace the millisecond fields, such as `backoff.initialMs`, with these properties.
 
 ### `connect` grows options
 
 `Moq.connect` gains `reconnect`, `backoff`, `maxStreams`, and the WebSocket fallback settings as named arguments.
-
-```kotlin
-// Before
-val moq = Moq.connect(url, ..., origin)
-// After
-val moq = Moq.connect(url, publish = origin)
-```
+Pass the origin by name: `Moq.connect(url, publish = origin)`.
 
 ### Publish split by kind
 
 `publishMedia*` is `publishAudio`, `publishVideo`, or `publishContainer`, each taking its own init.
 The raw encoder paths that used to be `publishAudio` / `publishVideo` are `encodeAudio` / `encodeVideo`.
-
-```kotlin
-// Before
-val media = broadcast.publishMedia(Init(format = "opus", data = opusHead, video = null))
-// After
-val media = broadcast.publishAudio(AudioInit(format = AudioFormat.OPUS, data = opusHead))
-```
+For example, `publishAudio(AudioInit(format = AudioFormat.OPUS, data = opusHead))`.
 
 ### Renames
 
@@ -301,10 +177,4 @@ val media = broadcast.publishAudio(AudioInit(format = AudioFormat.OPUS, data = o
 `MoqException.Protocol` carries a `ProtocolError` (scope, wire code, kind) instead of a flattened message.
 Setters throw (`Busy` during connect or listen) instead of dropping the value.
 Track and group `finish()` keep the handle open, so a later `abort()` can still run.
-
-```kotlin
-// Before
-catch (e: MoqException.Protocol) { log(e.message) }
-// After
-catch (e: MoqException.Protocol) { log("${e.details.kind} ${e.details.code}") }
-```
+Read `e.details.kind` and `e.details.code` instead of `e.message`.
