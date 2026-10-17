@@ -161,11 +161,9 @@ impl Programs {
 			program.catalog.finish()?;
 			lingers.push(program.broadcast.clone().finish());
 		}
-		// Each wait counts from its `finish`, so awaiting them in turn ends with the longest.
+		// Polled together, so each program closes at its own expiry.
 		Ok(async move {
-			for linger in lingers {
-				linger.await;
-			}
+			futures::future::join_all(lingers).await;
 		})
 	}
 
