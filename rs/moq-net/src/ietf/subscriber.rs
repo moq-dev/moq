@@ -14320,7 +14320,7 @@ mod new_group_tests {
 	use crate::{model::ProduceTest, transport::memory};
 
 	async fn settle() {
-		moq_net_sim::sleep(Duration::from_millis(1)).await;
+		moq_clock::sleep(Duration::from_millis(1)).await;
 	}
 
 	const VERSION: Version = Version::Draft22;
@@ -14331,7 +14331,7 @@ mod new_group_tests {
 		track: track::Consumer,
 		probe: Subscriber<memory::Session>,
 		peer: memory::Session,
-		serving: moq_net_sim::JoinHandle<()>,
+		serving: moq_clock::sim::JoinHandle<()>,
 		_broadcast: crate::broadcast::Producer,
 		_tasks: TaskSet,
 	}
@@ -14349,7 +14349,7 @@ mod new_group_tests {
 		let (session, peer) = memory::pair(memory::Config::default());
 		let (tasks, task_set) = TaskSet::new();
 		let mut subscriber = Subscriber::new(
-			crate::time::Clock::sim(),
+			crate::time::sim(),
 			session,
 			crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
 			Control::new(None, false),
@@ -14367,7 +14367,7 @@ mod new_group_tests {
 		let first = subscribe(&track, new_group);
 		let request = dynamic.requested_track().await.expect("no track requested");
 		let probe = subscriber.clone();
-		let serving = moq_net_sim::spawn(async move {
+		let serving = moq_clock::sim::spawn(async move {
 			subscriber
 				.run_subscribe(Path::new("broadcast"), dynamic, None, request)
 				.await;
@@ -14388,7 +14388,7 @@ mod new_group_tests {
 			let id = stream.reader.varint().await.unwrap();
 			(id, stream.reader.decode::<ietf::Body>().await.unwrap())
 		};
-		moq_net_sim::timeout(Duration::from_secs(1), read)
+		moq_clock::timeout(Duration::from_secs(1), read)
 			.await
 			.expect("the relay sent nothing")
 	}
@@ -14466,7 +14466,7 @@ mod new_group_tests {
 	}
 
 	/// Without an Established subscription, the request rides on the SUBSCRIBE.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn a_request_rides_the_subscribe() {
 		for new_group in [None, Some(0), Some(4)] {
 			let (mut relay, _first) = relay(new_group).await;
@@ -14478,7 +14478,7 @@ mod new_group_tests {
 
 	/// Once the request the SUBSCRIBE carried is answered by SUBSCRIBE_OK, it stays
 	/// outstanding: the same request from another subscriber goes no further.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn the_subscribe_request_is_outstanding() {
 		let (mut relay, _first) = relay(Some(0)).await;
 		let (mut stream, _) = relay.accept().await;
@@ -14493,7 +14493,7 @@ mod new_group_tests {
 
 	/// On an Established subscription, a request past the Largest Group goes upstream in a
 	/// REQUEST_UPDATE, a repeat of it does not, and a higher one does.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn an_established_subscription_forwards_new_requests() {
 		let (mut relay, _first) = relay(None).await;
 		let (mut stream, _) = relay.accept().await;
@@ -14515,7 +14515,7 @@ mod new_group_tests {
 
 	/// One REQUEST_UPDATE is in flight at a time; requests arriving meanwhile go up as the
 	/// highest of them once it is answered.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn requests_behind_an_unanswered_update_coalesce() {
 		let (mut relay, _first) = relay(None).await;
 		let (mut stream, _) = relay.accept().await;
@@ -14536,7 +14536,7 @@ mod new_group_tests {
 
 	/// A refused update ends the subscription, so nothing more goes up while PUBLISH_DONE
 	/// is on its way, even for a request that coalesced behind it.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn a_refused_update_sends_no_more() {
 		let (mut relay, _first) = relay(None).await;
 		let (mut stream, _) = relay.accept().await;
@@ -14561,7 +14561,7 @@ mod new_group_tests {
 	}
 
 	/// A nonzero request at or below the Largest Group names a group that already exists.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn a_stale_request_stays_put() {
 		let (mut relay, _first) = relay(None).await;
 		let (mut stream, _) = relay.accept().await;
@@ -14578,7 +14578,7 @@ mod new_group_tests {
 
 	/// An outstanding 0 covers only the group after the Largest Group, so a higher request
 	/// arriving meanwhile still goes upstream.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn a_higher_request_passes_an_outstanding_zero() {
 		let (mut relay, _first) = relay(None).await;
 		let (mut stream, _) = relay.accept().await;
@@ -14593,7 +14593,7 @@ mod new_group_tests {
 	}
 
 	/// A request for 0 goes up once, and stays outstanding until the Largest Group grows.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn zero_is_rearmed_by_a_new_group() {
 		let (mut relay, _first) = relay(None).await;
 		let (mut stream, _) = relay.accept().await;
@@ -14620,7 +14620,7 @@ mod new_group_tests {
 	/// A request goes upstream once and the next group answers it, even one naming a group
 	/// far past it: new groups never send it again, so no value can make the publisher
 	/// start group after group.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn new_groups_never_resend_a_request() {
 		for value in [0, 9, 1 << 40] {
 			let (mut relay, _first) = relay(None).await;
@@ -14652,7 +14652,7 @@ mod new_group_tests {
 
 	/// A publisher that did not advertise DYNAMIC_GROUPS still sees a SUBSCRIBE's request,
 	/// which it ignores, and never a REQUEST_UPDATE carrying one.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn a_publisher_without_dynamic_groups_hears_no_updates() {
 		let (mut relay, _first) = relay(Some(0)).await;
 		let (mut stream, sent) = relay.accept().await;
@@ -14665,7 +14665,7 @@ mod new_group_tests {
 	}
 
 	/// What was outstanding goes with its subscription: subscribing again starts afresh.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn a_new_subscription_inherits_nothing() {
 		let (mut relay, first) = relay(None).await;
 		let (mut stream, _) = relay.accept().await;

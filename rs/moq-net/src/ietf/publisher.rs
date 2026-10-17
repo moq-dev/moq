@@ -6368,7 +6368,7 @@ mod serve_tests {
 	/// A SUBSCRIBE's NEW_GROUP_REQUEST for 0 reaches the track still 0, so a relay behind
 	/// the original publisher forwards what was asked, but answered only by a group past
 	/// the latest. SUBSCRIBE_OK advertises DYNAMIC_GROUPS only for a track that supports it.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn a_subscribe_new_group_request_reaches_the_track() {
 		for (version, dynamic_groups) in [
 			(Version::Draft15, true),
@@ -6406,7 +6406,7 @@ mod serve_tests {
 
 	/// An update's NEW_GROUP_REQUEST is recorded on a track with DYNAMIC_GROUPS and
 	/// answered with REQUEST_OK.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn a_new_group_update_reaches_a_dynamic_track() {
 		for version in [Version::Draft15, Version::Draft16, Version::Draft22] {
 			let h = serve_track(
@@ -6444,7 +6444,7 @@ mod serve_tests {
 	}
 
 	/// A weaker request on the same subscription keeps the stronger one it still holds.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn a_later_update_keeps_the_stronger_request() {
 		for version in [Version::Draft15, Version::Draft16, Version::Draft22] {
 			let h = serve_track(
@@ -6481,7 +6481,7 @@ mod serve_tests {
 
 	/// A track without DYNAMIC_GROUPS cannot honor a NEW_GROUP_REQUEST update, which fails
 	/// the subscription like any update it cannot apply.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn a_new_group_update_without_dynamic_groups_fails() {
 		for version in [Version::Draft15, Version::Draft16, Version::Draft22] {
 			let h = serve(version);

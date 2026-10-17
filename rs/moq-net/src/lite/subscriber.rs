@@ -2887,14 +2887,14 @@ mod tests {
 	/// A publisher that finishes the track stops reading its subscribe stream, so a
 	/// SUBSCRIBE_UPDATE written then fails. The track still ends with the publisher's
 	/// finish; a reset still hands it back with the reset's error.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn an_update_the_publisher_stopped_reading_defers_to_its_end() {
 		use crate::transport::poll::{RecvStream as _, SendStream as _, Session as _};
 		for reset in [false, true] {
 			let version = Version::Lite06;
 			let (session, mut peer) = crate::transport::memory::pair(Default::default());
 			let subscriber = Subscriber::new(SubscriberConfig {
-				runtime: crate::time::Clock::sim(),
+				runtime: crate::time::sim(),
 				session,
 				origin: origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
 				recv_bandwidth: None,
