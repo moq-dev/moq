@@ -588,6 +588,9 @@ impl Lease {
 			tokio::select! {
 				changed = self.consumer.changed() => match changed {
 					Ok(grant) => {
+						if let Err(reason) = still_valid(&grant) {
+							return reason;
+						}
 						let fresh = self.token.recheck(&grant);
 						if let Err(err) = fresh.uncapped() {
 							return err.to_string().into();
@@ -869,6 +872,16 @@ fn answered_with(
 	Ok(consumer)
 }
 
+/// Hold a changed grant to the contract its first answer met: one that admits nothing
+/// narrowed the session away, and one already past its expiry ended it.
+fn still_valid(grant: &Grant) -> Result<(), lease::Reason> {
+	grant.validate().map_err(|err| match err {
+		moq_auth::Error::UselessGrant => lease::Reason::Narrowed,
+		moq_auth::Error::GrantExpired => lease::Reason::Expired,
+		err => err.to_string().into(),
+	})
+}
+
 /// Refuse caps before reducing a grant to the paths its origin can enforce.
 fn check_rates(publish: &moq_auth::Access, subscribe: &moq_auth::Access) -> Result<(), Error> {
 	if publish.rate.is_some() || subscribe.rate.is_some() {
@@ -1058,6 +1071,22 @@ mod tests {
 		capped.subscribe.rate = Some(moq_auth::Rate::from_bps(8000).unwrap());
 		producer.update(capped);
 		assert!(lease.ended().await.to_string().contains("cannot enforce bitrate caps"));
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn an_invalid_label_at_revalidation_ends_the_lease() {
+		let grant = Grant::new(moq_net::Pattern::all(), moq_net::Pattern::all());
+		let (producer, consumer) = lease::Producer::new(grant.clone());
+		let mut lease = Lease::new("/room", consumer);
+		let mut wildcard = grant;
+		wildcard.label = Some("project/*".into());
+		producer.update(wildcard);
+		assert!(lease.ended().await.to_string().contains("invalid stats label"));
+		assert_eq!(
+			lease.token().label,
+			Path::new("room").to_owned(),
+			"the label never applied"
+		);
 	}
 
 	#[test]

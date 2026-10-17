@@ -154,7 +154,8 @@ impl Refresh {
 
 	fn valid(&self, grant: &Grant) -> bool {
 		let fresh = self.admitted.recheck(grant);
-		super::check_rates(&grant.publish, &grant.subscribe).is_ok()
+		super::still_valid(grant).is_ok()
+			&& super::check_rates(&grant.publish, &grant.subscribe).is_ok()
 			&& fresh.root == self.admitted.root
 			&& fresh.mounts == self.admitted.mounts
 			&& fresh.peer == self.admitted.peer
@@ -394,9 +395,12 @@ impl Refresh {
 					let reason = match change {
 						Change::Ended(reason) => reason,
 						Change::Withdrawn => lease::Reason::Dropped,
-						Change::Grant(grant) => match super::check_rates(&grant.publish, &grant.subscribe) {
-							Err(err) => err.to_string().into(),
-							Ok(()) => lease::Reason::Narrowed,
+						Change::Grant(grant) => match super::still_valid(&grant) {
+							Err(reason) => reason,
+							Ok(()) => match super::check_rates(&grant.publish, &grant.subscribe) {
+								Err(err) => err.to_string().into(),
+								Ok(()) => lease::Reason::Narrowed,
+							},
 						},
 					};
 					if !withdrawn && let Some(issued) = credential.issued {
