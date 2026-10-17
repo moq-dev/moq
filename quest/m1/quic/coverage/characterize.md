@@ -39,6 +39,6 @@ reviewed. If #5711 merges first, write the goldens against the baseline
 diff.
 
 The survey's line numbers for each uncovered path come from
-`cargo llvm-cov` on the baseline; [the coverage report](/quest/m1/quic/coverage/report.md)
+`cargo llvm-cov` on the baseline; `just rs coverage moq-quic`
 reproduces them. This quest uses today's `Pair` as is; seeded impairments
 belong to [the simulation](/quest/m1/quic/coverage/sim.md).
