@@ -21,9 +21,14 @@ The two signals mean different things, so each maps on its own:
   already parses `pasp` on visual sample entries.
 - Matroska `DisplayWidth`/`DisplayHeight` are display dimensions after
   cropping, so their ratio is the display aspect itself. Set it whenever it
-  differs from the pixel dimensions' ratio, even when it is 1:1. Mind
-  `DisplayUnit`: pixels and display aspect ratio both give a ratio here, and
-  an absent element defaults to the pixel size, which adds nothing.
+  differs from the coded `PixelWidth`/`PixelHeight` ratio, even when it is
+  1:1. Every `DisplayUnit` gives a ratio, since both fields share the unit:
+  pixels, centimeters, inches, or a bare aspect ratio. With `DisplayUnit` 0,
+  an absent field defaults to the cropped size (`PixelWidth` minus
+  `PixelCropLeft` and `PixelCropRight`, `PixelHeight` minus `PixelCropTop`
+  and `PixelCropBottom`), so an uneven crop alone can change the aspect. Any
+  other unit requires both fields, so a track missing one fails the import
+  as malformed.
 
 When the container and the SPS both signal an aspect and disagree, propose a
 precedence in the PR. Recommendation: the container wins, as FFmpeg's
@@ -36,7 +41,12 @@ initializer:
 - 1440x1080 with `pasp` 1:1 leaves the field unset.
 - Matroska 1440x1080 with a 1920x1080 display imports as 16:9.
 - Matroska 1440x1080 with a 1080x1080 display imports as 1:1.
-- Matroska without display dimensions, or with ones matching the pixel
-  ratio, leaves the field unset.
+- Matroska 1440x1080 with `PixelCropRight` 360 and no display dimensions
+  imports as 1:1.
+- Matroska with a 16x9 display in centimeters or inches imports as 16:9.
+- Matroska with a non-pixel `DisplayUnit` and no display dimensions fails
+  the import.
+- Matroska without crop or display dimensions, or with ones matching the
+  pixel ratio, leaves the field unset.
 
 In-band SPS acquisition for headerless initializers is separate work.

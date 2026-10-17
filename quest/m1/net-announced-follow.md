@@ -29,6 +29,15 @@ The loops #5700 added drain `origin::Consumer::follow`, resolve the path with
   a start for the instance it resolved, resolves afresh; and a resolution
   that runs ahead of its held `Restart` is not handed out twice.
 
+Two JS behaviors have no Rust counterpart to mirror. JS falls back to blind
+resolution while a `consume` session lacks discovery; moq-net has no blind
+requests. Open for the maintainer, recommendation: the mode waits on an
+announced route as `routed_broadcast` does, and blind requests stay out of
+scope. JS also watches the path so a `consume` session asks its peer about
+it; a moq-net session already asks for its whole granted scope at setup
+(`interest_prefixes` in `rs/moq-net/src/lite/subscriber.rs`), so there is
+nothing to watch.
+
 JS returns a handle whose current broadcast changes per instance
 (`Request.active`); Rust's `request_broadcast` takes only an optional epoch
 today. Propose the Rust shape in the PR. Keep #5700's binding tests passing
