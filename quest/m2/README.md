@@ -35,7 +35,7 @@ ranked just below deterministic TS legs, which it requires.
 - [Swift, Dart, and C++ benchmarks](/quest/m2/ffi-bench-wrappers.md) - the other three wrappers join the nightly binding benchmark
 - [Payload bytes](/quest/m2/ffi-bytes.md) - payloads cross the FFI in one bulk copy, proven on the binding benchmark in every wrapper
 - [Kotlin calls](/quest/m2/kt-ffi-calls.md) - Kotlin calls into moq-ffi cost about what Python's and Go's do, sync and async, once the fork's Kotlin generator drops JNA's per-call overhead
-- [Poll-native async](/quest/m2/ffi-poll-migrate.md) - moq-ffi's async exports over kio state poll it directly, replacing `ffi::Task`'s mutex, cancel watch, and poll counter
+- [Poll-native async](/quest/m2/ffi-poll-migrate.md) - moq-ffi's pure-kio async exports poll their state directly instead of going through `ffi::Task`
 - [Foreign poll for hot reads](/quest/m2/ffi-poll-protocol.md) - the fork's generators give each wrapper a sync poll plus a registered waker for track and group reads, so a ready read skips the event-loop round trip and a cancel never loses a frame
 - [Stats prefix tracks](/quest/m2/stats-prefix-tracks.md) - additive tracks required by the breaking lag API; existing maps remain supported
 - [QoS](/quest/m2/qos/README.md) - broadcast health: relay starvation and timeliness histograms
