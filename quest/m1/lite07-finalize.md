@@ -61,6 +61,10 @@ The cut:
   rejection. If SETUP keeps its own rule, the lite-07 changelog still names
   that rejection, not only the cap.
 
+Decided 2026-10-17: SUBSCRIBE_ALL joins Required, so lite-07 ships the
+prefix-scoped request the archive line and IETF SUBSCRIBE_TRACKS mapping need.
+The `Time(pts)` range end rides in Subscribe ranges, already Required.
+
 Rust's lite-07 varints already carry the full 64 bits the draft specifies,
 so no codec work waits on the cut.
 
@@ -81,6 +85,7 @@ is published; older versions are unchanged.
 - [Subscribe ranges](/quest/m1/subscribe-ranges/README.md) - SUBSCRIBE carries ranges and an order and lite FETCH is gone, in Rust and JS
 - [Announcement takeover](/quest/m1/announce-takeover.md) - ANNOUNCE_TAKEOVER preserves a proven instance under a new independent route
 - [Refresh on the lite wire](/quest/m1/refresh/lite.md) - TRACK_INFO carries the refresh ratio and SUBSCRIBE_UPDATE the wanted group
+- [SUBSCRIBE_ALL](/quest/m1/archive/subscribe-all.md) - lite-07 carries the prefix-scoped request for every track of every broadcast under a path
 
 ## Related
 

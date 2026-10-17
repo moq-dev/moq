@@ -9,8 +9,10 @@ lite upstream by subscribing to the missing ranges.
 
 ## Plan
 
-Each range end encodes `Absolute(group, frame)`, `Relative(n)`, or open, and
-a SUBSCRIBE with no ranges is refused. Older wires map at the codec only, with
+Each range end encodes `Absolute(group, frame)`, `Relative(n)`, `Time(pts)`,
+or open, and a SUBSCRIBE with no ranges is refused. A `Time` end has no
+older-wire mapping: the answering hop resolves it before going upstream on
+lite-06 or earlier, or refuses it. Older wires map at the codec only, with
 no change to a published version: lite-06 `Group Start` 0 with `Frame Start`
 0, and pre-06 absent, are `Absolute(0)..` capped by max age (the oldest group
 not yet stale); any other lite-06 pair is an absolute start. When merged
