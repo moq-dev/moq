@@ -44,6 +44,10 @@ pub(super) struct Presentation {
 	declared: [Transition; 2],
 	next: Transition,
 	reference: Option<Timestamp>,
+	/// The last speaker write: the media time it ends at, and when that sounds.
+	written: Option<(Duration, Instant)>,
+	/// The playout target the speaker holds, once audio is playing.
+	target: Option<Duration>,
 	/// Wakes every pending resume when a boundary, a transition or the anchor
 	/// changes. Kept apart from the window's and the decoders' wakeups, so a
 	/// resume can never take a wakeup meant for them.
@@ -89,6 +93,8 @@ impl Presentation {
 			declared: Default::default(),
 			next: Transition(1),
 			reference: None,
+			written: None,
+			target: None,
 			timeline: Default::default(),
 		}
 	}
@@ -166,6 +172,7 @@ impl Presentation {
 	/// A move makes every queued video frame due earlier, so the window has to
 	/// recompute the deadline it is already asleep on.
 	pub(super) fn audio(&mut self, end: Duration, buffered: Duration, now: Instant) -> bool {
+		self.written = now.checked_add(buffered).map(|sounds| (end, sounds));
 		let timestamp = media(end);
 		self.reference = Some(timestamp);
 		let edge = now
@@ -210,6 +217,27 @@ impl Presentation {
 	pub(super) fn stopped(&mut self) {
 		self.speaker = false;
 		self.restart = false;
+		self.written = None;
+		self.target = None;
+	}
+
+	/// Record the playout target the speaker is being held on.
+	pub(super) fn hold(&mut self, target: Duration) {
+		self.target = Some(target);
+	}
+
+	/// The media time sounding at `now`, or `None` with no speaker.
+	///
+	/// Projected from the last write at the wall rate, and held at its end: a
+	/// speaker with nothing left plays nothing further.
+	pub(super) fn playhead(&self, now: Instant) -> Option<Duration> {
+		let (end, sounds) = self.written?;
+		Some(end.saturating_sub(sounds.saturating_duration_since(now)))
+	}
+
+	/// The playout target the speaker is held on, or `None` with no speaker.
+	pub(super) fn target(&self) -> Option<Duration> {
+		self.target
 	}
 
 	/// When `timestamp` should be presented, or `None` before any frame has
@@ -589,6 +617,27 @@ mod tests {
 
 	fn ms(millis: u64) -> Timestamp {
 		Timestamp::from_millis(millis).unwrap()
+	}
+
+	/// The playhead runs at the wall rate from the last write and stops at its
+	/// end, which is what a speaker that ran dry is still sounding.
+	#[test]
+	fn the_playhead_projects_the_last_write_and_holds_at_its_end() {
+		let now = Instant::now();
+		let mut presentation = Presentation::new(DELAY);
+		assert_eq!(presentation.playhead(now), None);
+
+		presentation.audio(Duration::from_secs(10), Duration::from_millis(200), now);
+		presentation.hold(DELAY);
+		assert_eq!(presentation.playhead(now), Some(Duration::from_millis(9_800)));
+		let later = now + Duration::from_millis(150);
+		assert_eq!(presentation.playhead(later), Some(Duration::from_millis(9_950)));
+		let dry = now + Duration::from_secs(1);
+		assert_eq!(presentation.playhead(dry), Some(Duration::from_secs(10)));
+		assert_eq!(presentation.target(), Some(DELAY));
+
+		presentation.stopped();
+		assert_eq!((presentation.playhead(dry), presentation.target()), (None, None));
 	}
 
 	#[tokio::test]
