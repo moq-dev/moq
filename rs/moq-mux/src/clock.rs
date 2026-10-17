@@ -109,7 +109,7 @@ impl Clock {
 	/// Start a clock at an explicit monotonic epoch and wall time: PTS zero at both.
 	///
 	/// The deterministic constructor: synthetic sources and fixtures pin both ends instead of
-	/// sampling. Refuses an unrepresentable wall or a browser target without native instants.
+	/// sampling. Refuses an unrepresentable wall.
 	pub fn at(epoch: Instant, wall: SystemTime) -> crate::Result<Self> {
 		Ok(Self {
 			instant: epoch,
