@@ -3225,7 +3225,8 @@ impl<S: crate::transport::poll::Session> Subscription<S> {
 			return false;
 		}
 
-		let order = crate::priority::in_group(datagram.sequence, 0, self.steer_seen.order);
+		// The run loop may not have served a group since the last SUBSCRIBE_UPDATE.
+		let order = crate::priority::in_group(datagram.sequence, 0, self.steer_current().order);
 		let _ = self.session.send_datagram(body, self.group.as_ref(), order);
 		true
 	}
@@ -4625,6 +4626,52 @@ mod serve_group_test {
 		assert_eq!(log.datagram_ranks(), [(Some(0), order)]);
 		assert_eq!(log.orders(), [(0, 1)], "the stream for group 0 ranks below");
 		assert!(order > 1);
+	}
+
+	/// A SUBSCRIBE_UPDATE that flips the group order reranks the next datagram, even with no
+	/// group served in between.
+	#[moq_net_sim::test]
+	async fn datagrams_follow_an_updated_group_order() {
+		let mut track = track::Producer::new(
+			Arc::new(broadcast::Info::default()),
+			"test",
+			crate::track::Info::timed(),
+		);
+		let subscriber = track.subscribe(track::Subscription::default().with_max_delay(Duration::from_secs(3600)));
+		let mut session = SinkSession::new(Log::default()).with_groups().with_datagrams(1200);
+		let log = session.log.clone();
+		let (mut run, mut writer, _) = lite_run(Version::Lite06, session.clone(), subscriber);
+		run.ctx.group = crate::transport::poll::Session::send_group(&mut session, 3);
+
+		let first = track
+			.append_datagram(Timestamp::from_millis(1).unwrap(), b"a".as_slice())
+			.unwrap();
+		{
+			let mut poll = std::pin::pin!(kio::wait(|waiter| run.poll(&mut writer, waiter)));
+			assert!(futures::poll!(poll.as_mut()).is_pending());
+		}
+
+		run.update(lite::SubscribeUpdate {
+			order: Order::Ascending,
+			priority: 3,
+			max_delay: Duration::from_secs(3600),
+			start_group: None,
+			end_group: None,
+			start_frame: 0,
+			end_frame: None,
+		});
+		let second = track
+			.append_datagram(Timestamp::from_millis(2).unwrap(), b"b".as_slice())
+			.unwrap();
+		{
+			let mut poll = std::pin::pin!(kio::wait(|waiter| run.poll(&mut writer, waiter)));
+			assert!(futures::poll!(poll.as_mut()).is_pending());
+		}
+
+		let descending = crate::priority::in_group(first, 0, Order::Descending);
+		let ascending = crate::priority::in_group(second, 0, Order::Ascending);
+		assert_ne!(ascending, crate::priority::in_group(second, 0, Order::Descending));
+		assert_eq!(log.datagram_ranks(), [(Some(0), descending), (Some(0), ascending)]);
 	}
 
 	/// A group with more frames ready than one poll's budget drains over several polls,
