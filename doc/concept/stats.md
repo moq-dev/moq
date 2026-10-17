@@ -223,8 +223,9 @@ resolved.
 
 `sessions_failed` counts admitted sessions that ended abnormally, by kind: a
 subset of `sessions_ended`, so the live count is unchanged. A clean close by
-either side, a drain, or a shutdown is not a failure. A reader treats a missing
-object as zeros.
+either side, a drain, or a shutdown is not a failure. A grant that expires
+mid-session counts as `expired`; one revoked or narrowed out from under it
+counts as `application`. A reader treats a missing object as zeros.
 
 `requests` counts admitted request/response exchanges under the token's root and
 tier, including HTTP `/fetch` and `/announced`. They never start or end a session.

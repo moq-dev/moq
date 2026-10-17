@@ -585,7 +585,19 @@ impl Lease {
 	///
 	/// Once the relay answers the session's AUTH requests itself, each of
 	/// these ends only that credential's grant; the lease ends when no credential remains.
+	///
+	/// The session's [stats](Self::with_stats) record the end as a failure:
+	/// `expired` for an expired grant, `application` for any other.
 	pub async fn ended(&mut self) -> lease::Reason {
+		let reason = self.uncovered().await;
+		self.stats.fail(match reason {
+			lease::Reason::Expired => moq_net::stats::Failure::Expired,
+			_ => moq_net::stats::Failure::Application,
+		});
+		reason
+	}
+
+	async fn uncovered(&mut self) -> lease::Reason {
 		if let Some(refresh) = &mut self.refresh {
 			return refresh.ended().await;
 		}
@@ -1417,6 +1429,22 @@ mod tests {
 #[cfg(test)]
 mod outcome_tests {
 	use super::*;
+
+	#[tokio::test]
+	async fn a_revoked_lease_fails_its_session_as_application() {
+		let registry = moq_net::stats::Registry::new(Default::default());
+		let stats = registry.tier(Tier::default()).session("tenant");
+		let (producer, consumer) = lease::Producer::new(Grant::default());
+		let mut lease = Lease::new("/tenant", consumer).with_stats(stats.clone());
+		producer.revoke(lease::Reason::Refused);
+		let why = lease.ended().await;
+		lease.close(why, Bytes::default());
+		drop(stats);
+		let presence = registry.snapshot().sessions()[0].1;
+		assert_eq!(presence.sessions_failed.application, 1);
+		assert_eq!(presence.sessions_failed.expired, 0);
+		assert_eq!(presence.sessions_ended, 1);
+	}
 
 	#[test]
 	fn typed_expiry_wins_a_racing_transport_close_without_string_classification() {
