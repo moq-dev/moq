@@ -158,9 +158,10 @@ impl MoqBroadcastConsumer {
 	///
 	/// `reference` is [`MoqVideo::broadcast`] / [`MoqAudio::broadcast`]: absent or empty names
 	/// this broadcast, anything else names a sibling relative to it (e.g. `./source`). Call it on a
-	/// rendition that carries one before [`crate::media::MoqMediaTrackConsumer::subscribe`], [`Self::subscribe_track`],
-	/// [`Self::fetch_group`], or [`crate::media::MoqMediaGroupConsumer::fetch`], which take a track name rather than a
-	/// rendition; `MoqVideoConsumer::subscribe` and `MoqAudioConsumer::subscribe` resolve it themselves.
+	/// rendition that carries one before [`Self::subscribe_track`] or [`Self::fetch_group`], which
+	/// take a track name rather than a rendition. The rendition-based consumers
+	/// (`MoqMediaTrackConsumer::subscribe`, `MoqMediaGroupConsumer::fetch`,
+	/// `MoqVideoConsumer::subscribe`, `MoqAudioConsumer::subscribe`) resolve it themselves.
 	///
 	/// Errors if this broadcast came from a local producer rather than an origin, since a
 	/// standalone broadcast has no sibling to name, and reports a sibling that exists but is not

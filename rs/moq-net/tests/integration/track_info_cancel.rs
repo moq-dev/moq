@@ -33,7 +33,7 @@ async fn abandoned_request_reaches_the_publisher(version: &str, relays: u64) {
 	let broadcast = nodes[0].create_broadcast("room").unwrap();
 	let mut dynamic = broadcast.dynamic();
 	broadcast.announce(Default::default()).unwrap();
-	moq_net_sim::sleep(Duration::from_secs(1)).await;
+	moq_clock::sleep(Duration::from_secs(1)).await;
 
 	let consumer = nodes[relays as usize]
 		.consume()
@@ -48,7 +48,7 @@ async fn abandoned_request_reaches_the_publisher(version: &str, relays: u64) {
 
 	// The publisher never answers; the reader gives up.
 	drop(waiting);
-	moq_net_sim::timeout(
+	moq_clock::timeout(
 		Duration::from_secs(5),
 		kio::wait(|waiter| request.demand().poll_unused(waiter)),
 	)
@@ -57,14 +57,14 @@ async fn abandoned_request_reaches_the_publisher(version: &str, relays: u64) {
 	.expect("the pending request is still open");
 }
 
-#[moq_net_sim::test]
+#[moq_clock::test]
 async fn abandoned_request_reaches_the_publisher_lite05() {
 	for relays in [1, 2] {
 		abandoned_request_reaches_the_publisher("moq-lite-05", relays).await;
 	}
 }
 
-#[moq_net_sim::test]
+#[moq_clock::test]
 async fn abandoned_request_reaches_the_publisher_lite06() {
 	for relays in [1, 2] {
 		abandoned_request_reaches_the_publisher("moq-lite-06", relays).await;

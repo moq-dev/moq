@@ -40,10 +40,9 @@ fn round_trip(bind: &str, config: udp::Config, ecn: Option<udp::Ecn>, datagrams:
 		.block_on(async move {
 			let mut buf = tx.acquire().await.expect("acquire");
 			let len = SEGMENT * datagrams;
-			buf[..len].fill(0xAB);
+			buf.resize(len, 0xAB);
 			buf.send(udp::Transmit {
 				to,
-				len,
 				segment: SEGMENT,
 				ecn,
 			})

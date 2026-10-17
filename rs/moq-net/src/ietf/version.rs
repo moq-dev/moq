@@ -80,6 +80,7 @@ mod tests {
 	#[test]
 	fn draft21_matches_draft20_on_the_wire() {
 		let properties = Properties {
+			dynamic_groups: false,
 			max_cache_duration: None,
 			timescale: Some(Timescale::new(90_000).unwrap()),
 			priority: Some(64),
@@ -87,6 +88,7 @@ mod tests {
 		};
 
 		let subscribe = Subscribe {
+			new_group: None,
 			request_id: RequestId(1),
 			track_namespace: Path::new("broadcast"),
 			track_name: "video".into(),
@@ -163,6 +165,7 @@ mod tests {
 	#[test]
 	fn draft22_changes_only_the_location_filter() {
 		let subscribe = Subscribe {
+			new_group: None,
 			request_id: RequestId(1),
 			track_namespace: Path::new("broadcast"),
 			track_name: "video".into(),

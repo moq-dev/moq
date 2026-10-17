@@ -89,6 +89,49 @@ export function scopeCaptures(scope: Path.Pattern, prefix: Path.Valid): Path.Pat
 	return scope.captures(Path.Pattern.literal(prefix));
 }
 
+/** A half-open run of group sequences, `[start, end)`. */
+export interface Run {
+	start: number;
+	end: number;
+}
+
+/** Add `[start, end)` to sorted, disjoint, non-adjacent `runs`, merging every run it touches. */
+export function insertRun(runs: Run[], start: number, end: number): void {
+	if (start >= end) return;
+	let first = 0;
+	while (first < runs.length && runs[first].end < start) first++;
+	let last = first;
+	while (last < runs.length && runs[last].start <= end) last++;
+	const merged =
+		first === last
+			? { start, end }
+			: { start: Math.min(start, runs[first].start), end: Math.max(end, runs[last - 1].end) };
+	runs.splice(first, last - first, merged);
+}
+
+/** The sorted, disjoint `runs` with `[start, end)` taken out. */
+export function removeRun(runs: readonly Run[], start: number, end: number): Run[] {
+	return runs.flatMap((run) =>
+		[
+			{ start: run.start, end: Math.min(run.end, start) },
+			{ start: Math.max(run.start, end), end: run.end },
+		].filter((part) => part.start < part.end),
+	);
+}
+
+/** The parts of `[start, end)` that sorted, disjoint `runs` do not cover, in order. */
+export function runGaps(runs: readonly Run[], start: number, end: number): Run[] {
+	const gaps: Run[] = [];
+	let next = start;
+	for (const run of runs) {
+		if (next >= end) break;
+		if (run.start > next) gaps.push({ start: next, end: Math.min(run.start, end) });
+		next = Math.max(next, run.end);
+	}
+	if (next < end) gaps.push({ start: next, end });
+	return gaps;
+}
+
 /**
  * What a non-blocking group read found, which is everything the caller needs to decide what
  * to do next: no second look at the track's closed state, and no ordering rule to get wrong.
@@ -96,6 +139,8 @@ export function scopeCaptures(scope: Path.Pattern, prefix: Path.Valid): Path.Pat
 export type Recv =
 	/** A group to serve. It has already left the buffer, so dropping this is dropping the group. */
 	| { kind: "group"; group: GroupConsumer }
+	/** Sequences `[start, end)` this cursor gave up without serving. */
+	| { kind: "drop"; start: number; end: number }
 	/** Nothing readable, but the track is live and may produce more. */
 	| { kind: "idle" }
 	/** The producer finished, yet groups above the cap are still held: raising it releases them. */
@@ -190,13 +235,16 @@ export const hooks: {
 	bindSequence: (producer: Producer, sequence: TrackSequence) => void;
 	/** The newest frame a producer's cache holds, read without subscribing; assigned by `track.ts`. */
 	cachedLargest: (producer: Producer) => Location | undefined;
+	/** Record sequences `[start, end)` an upstream publisher explicitly gave up. */
+	dropTrackGroups: (producer: Producer, start: number, end: number) => void;
 	/**
 	 * Take the next group the subscriber's cursor allows, without waiting; assigned by `track.ts`.
 	 *
 	 * Synchronous so a caller can pop a group and act on it in the same turn. Park on
-	 * {@link groupChanged} when it reports `idle` or `boundary`.
+	 * {@link groupChanged} when it reports `idle` or `boundary`. With `dispositions`, what
+	 * the cursor gives up is reported once as a `drop`.
 	 */
-	tryRecvGroup: (subscriber: Subscriber) => Recv;
+	tryRecvGroup: (subscriber: Subscriber, dispositions: boolean) => Recv;
 	/** Wake once a subscriber's group cursor may read differently; assigned by `track.ts`. */
 	groupChanged: (subscriber: Subscriber, fn: () => void) => Dispose;
 	/** Apply a FETCH reader budget without inheriting SUBSCRIBE's zero default. */
@@ -260,6 +308,9 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	cachedLargest: () => {
+		throw new Error("track.ts not loaded");
+	},
+	dropTrackGroups: () => {
 		throw new Error("track.ts not loaded");
 	},
 	tryRecvGroup: () => {

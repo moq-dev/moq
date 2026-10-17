@@ -55,6 +55,11 @@ export const VideoConfigSchema = z.object({
 	// must not select it. Default: true, so publishers only write it when false.
 	enabled: z.optional(z.boolean()),
 
+	// Higher is preferred: a player selects among the highest preference it can decode, then by
+	// picture and bitrate within it. A compatibility transcode is -1 so only a player that can't
+	// decode the source pulls it. Default: 0, so publishers only write it when nonzero.
+	preference: z.optional(z.int32()),
+
 	// If true, the decoder will optimize for latency.
 	// Default: true
 	optimizeForLatency: z.optional(z.boolean()),
@@ -148,7 +153,7 @@ export type Video = z.infer<typeof VideoSchema>;
 /** Decoder config for a single video rendition. */
 export type VideoConfig = z.infer<typeof VideoConfigSchema>;
 
-/** Rank video best first: enabled, then largest picture, highest bitrate, and name. */
+/** Rank video best first: enabled, then highest preference, largest picture, highest bitrate, and name. */
 export function ranked(renditions: Record<string, VideoConfig>): [string, VideoConfig][] {
 	return Object.entries(renditions).sort(compareRanked);
 }
@@ -161,6 +166,7 @@ function pictureArea(config: VideoConfig): number {
 function compareRanked(left: [string, VideoConfig], right: [string, VideoConfig]): number {
 	return (
 		compareNumber(Number(left[1].enabled !== false), Number(right[1].enabled !== false)) ||
+		compareNumber(left[1].preference ?? 0, right[1].preference ?? 0) ||
 		compareNumber(pictureArea(left[1]), pictureArea(right[1])) ||
 		compareNumber(left[1].bitrate, right[1].bitrate) ||
 		compareName(left[0], right[0])
