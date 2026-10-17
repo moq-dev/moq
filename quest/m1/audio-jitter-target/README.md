@@ -37,6 +37,7 @@ the native decode path too, asserting the same target series the browser's
 ## Required
 
 - [Opus isolated-ring target](/quest/m1/audio-jitter-target/opus-isolated-target.md) - the isolated ring holds the target at near-zero jitter
+- [Audio rename](/quest/m1/audio-jitter-target/audio-rename.md) - a renamed audio track continues the outgoing arrival estimate, so playback neither skips nor stalls
 - [Watch](/quest/m1/audio-jitter-target/watch.md) - the browser's measured target, proven on Chrome and Safari against the public relay
 - [AAC bursty budgets](/quest/m1/audio-jitter-target/aac-bursty-budgets.md) - post-fix nightlies confirm AAC no longer re-stalls, and its budgets are tightened from them
 
