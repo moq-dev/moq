@@ -224,14 +224,13 @@ impl Decoder {
 
 		let backend = backend::open(codec, config)?;
 		tracing::debug!(decoder = backend.name(), "opened video decoder");
-		let coded = catalog.coded_width.zip(catalog.coded_height);
 		Ok(Self {
 			backend,
 			codec,
 			conversion,
 			output: config.output,
 			got_keyframe: false,
-			color: coded.map(|(width, height)| Color::infer(Size::new(width, height))),
+			color: declared(catalog),
 			switches: VecDeque::new(),
 			_thread_bound: PhantomData,
 		})
@@ -315,6 +314,51 @@ impl Decoder {
 			})
 			.collect()
 	}
+}
+
+/// The space the catalog declares for the stream, until a keyframe says.
+///
+/// H.264 and H.265 signal theirs in every keyframe, so this only lasts for
+/// AV1 and VP9 on a backend that reports none. Their codec strings default an
+/// omitted colour to BT.709 limited, so that pairing says nothing and the
+/// coded size's guess stands in; any other was written on purpose.
+fn declared(catalog: &VideoConfig) -> Option<Color> {
+	use crate::color::{CodePoints, Range};
+
+	let coded = catalog
+		.coded_width
+		.zip(catalog.coded_height)
+		.map(|(width, height)| Size::new(width, height));
+	let (primaries, transfer, matrix, full_range) = match &catalog.codec {
+		VideoCodec::VP9(vp9) => (
+			vp9.color_primaries,
+			vp9.transfer_characteristics,
+			vp9.matrix_coefficients,
+			vp9.full_range,
+		),
+		VideoCodec::AV1(av1) => (
+			av1.color_primaries,
+			av1.transfer_characteristics,
+			av1.matrix_coefficients,
+			av1.full_range,
+		),
+		_ => return coded.map(Color::infer),
+	};
+	if (primaries, transfer, matrix, full_range) == (1, 1, 1, false) {
+		return coded.map(Color::infer);
+	}
+	let codes = CodePoints {
+		primaries,
+		transfer,
+		matrix,
+	};
+	let range = match full_range {
+		true => Range::Full,
+		false => Range::Limited,
+	};
+	// An unspecified field among declared ones takes the guess for the coded
+	// size, or for SD when the catalog has none.
+	Color::from_code_points(Some(codes), range, coded.unwrap_or_default())
 }
 
 fn is_supported_av1(av1: &AV1) -> bool {
@@ -706,6 +750,44 @@ mod tests {
 		let tail = decoder.flush().unwrap();
 		assert_eq!(tail[0].timestamp, second);
 		assert_eq!(tail[0].surface.color(), Some(Color::BT601));
+	}
+
+	/// A VP9 catalog that declares BT.2020 PQ labels the pictures a backend
+	/// hands back unlabelled with it, rather than the coded size's guess; one
+	/// with the codec string's defaults keeps the guess.
+	#[test]
+	fn a_declared_vp9_space_labels_the_pictures() {
+		use crate::Color;
+		use crate::color::{Matrix, Primaries, Range, Transfer};
+
+		// SD, so the guess (BT.601) differs from the codec string's default.
+		let color = |vp9: hang::catalog::VP9| {
+			let mut catalog = hang::catalog::VideoConfig::new(hang::catalog::VP9 { bit_depth: 8, ..vp9 });
+			catalog.coded_width = Some(640);
+			catalog.coded_height = Some(480);
+			let kind = super::Kind::Named(probe::BUFFERED_NAME.into());
+			let mut decoder = super::Decoder::new(&catalog, &decode_config(kind)).unwrap();
+			let payload = bytes::Bytes::from_static(&[0]);
+			decoder
+				.decode(&payload, Timestamp::from_micros(0).unwrap(), true)
+				.unwrap();
+			decoder.flush().unwrap().remove(0).surface.color()
+		};
+
+		let pq = hang::catalog::VP9 {
+			color_primaries: 9,
+			transfer_characteristics: 16,
+			matrix_coefficients: 9,
+			..Default::default()
+		};
+		let expected = Color {
+			matrix: Matrix::Bt2020,
+			range: Range::Limited,
+			primaries: Primaries::Bt2020,
+			transfer: Transfer::Pq,
+		};
+		assert_eq!(color(pq), Some(expected));
+		assert_eq!(color(Default::default()), Some(Color::BT601));
 	}
 
 	/// An inline-H.264 catalog the test probes accept.

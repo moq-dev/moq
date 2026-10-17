@@ -18,22 +18,35 @@ use crate::{Color, Size};
 /// `None` when the access unit carries no SPS, so the previous answer stands.
 /// `Some(None)` when the SPS signals a space [`Color`] cannot hold (an RGB or
 /// YCgCo matrix, a gamma curve), which leaves the pictures unlabelled rather
-/// than claiming one they are not in.
+/// than claiming one they are not in. Several SPSs that disagree are
+/// `Some(None)` too: which one the slices use takes the PPS to know.
 pub(super) fn signalled(codec: Codec, access_unit: &Bytes) -> Option<Option<Color>> {
 	if !matches!(codec, Codec::H264 | Codec::H265) {
 		return None;
 	}
 	let mut buf = access_unit.clone();
 	let mut nals = NalIterator::new(&mut buf);
+	let mut signalled = None;
 	for nal in nals.by_ref() {
 		// The iterator repeats an error rather than advancing past it, and a
 		// malformed access unit is the backend's to reject.
-		let Ok(nal) = nal else { return None };
-		if let Some(color) = sps(codec, &nal) {
-			return Some(color);
-		}
+		let Ok(nal) = nal else { return signalled };
+		merge(&mut signalled, sps(codec, &nal));
 	}
-	sps(codec, &nals.flush().ok()??)
+	if let Ok(Some(nal)) = nals.flush() {
+		merge(&mut signalled, sps(codec, &nal));
+	}
+	signalled
+}
+
+/// Fold one NAL unit's answer into the access unit's.
+fn merge(signalled: &mut Option<Option<Color>>, nal: Option<Option<Color>>) {
+	*signalled = match (*signalled, nal) {
+		(previous, None) => previous,
+		(None, Some(color)) => Some(color),
+		(Some(previous), Some(color)) if previous == color => Some(color),
+		(Some(_), Some(_)) => Some(None),
+	};
 }
 
 /// The space one NAL unit signals, when it is an SPS.
@@ -156,6 +169,39 @@ mod tests {
 		assert_eq!(signalled(Codec::Vp9, &pps), None);
 		// Not Annex-B at all: the start-code scan gives up rather than spinning.
 		assert_eq!(signalled(Codec::H264, &Bytes::from_static(b"not annex b")), None);
+	}
+
+	/// Two SPSs that disagree leave the pictures unlabelled, since which one the
+	/// slices use takes the PPS to know; two that agree keep their space.
+	#[test]
+	#[cfg(feature = "openh264")]
+	fn disagreeing_sps_clear_the_label() {
+		use crate::encode::{Config, Encoder, Kind};
+		use crate::{Frame, I420, Surface};
+
+		let size = Size::new(64, 64);
+		let keyframe = |color: Color| {
+			let mut encoder = Encoder::new(&Config {
+				kind: Kind::Software,
+				color: Some(color),
+				..Config::new(size.width, size.height, crate::Rate::new(30, 1).unwrap())
+			})
+			.unwrap();
+			encoder.cut().unwrap();
+			let i420 = I420::new(size, vec![0x80; I420::len(size).unwrap()]).unwrap();
+			let frame = Frame::new(
+				Surface::I420(i420.with_color(color)),
+				moq_net::Timestamp::from_micros(0).unwrap(),
+			);
+			encoder.encode(&frame).unwrap().remove(0).payload
+		};
+		let both = |first: Color, second: Color| {
+			let mut unit = keyframe(first).to_vec();
+			unit.extend_from_slice(&keyframe(second));
+			signalled(Codec::H264, &Bytes::from(unit))
+		};
+		assert_eq!(both(Color::BT709, Color::BT601), Some(None));
+		assert_eq!(both(Color::BT709, Color::BT709), Some(Some(Color::BT709)));
 	}
 
 	/// A camera's H.265 SPS with zeroed colour fields, which the parser refuses
