@@ -70,7 +70,7 @@ async fn opus_round_trip_48k_stereo() {
 
 	let mut total_frames = 0u64;
 	let mut total_energy = 0.0f64;
-	while let Some(frame) = tokio::time::timeout(Duration::from_secs(5), consumer.read())
+	while let Some(frame) = tokio::time::timeout(Duration::from_secs(5), next_frame(&mut consumer))
 		.await
 		.expect("decoded frame timed out")
 		.unwrap()
@@ -146,7 +146,7 @@ async fn opus_round_trip_44100_s16_resampled() {
 	producer.finish().unwrap();
 
 	let mut total_bytes = 0u64;
-	while let Some(frame) = tokio::time::timeout(Duration::from_secs(5), consumer.read())
+	while let Some(frame) = tokio::time::timeout(Duration::from_secs(5), next_frame(&mut consumer))
 		.await
 		.expect("decoded frame timed out")
 		.unwrap()
@@ -191,7 +191,7 @@ async fn pcm_round_trip_is_lossless() {
 		.unwrap();
 	producer.finish().unwrap();
 
-	let frame = consumer.read().await.unwrap().unwrap();
+	let frame = next_frame(&mut consumer).await.unwrap().unwrap();
 	assert_eq!(frame.timestamp, Timestamp::from_micros(123_000).unwrap());
 	let decoded: Vec<f32> = frame
 		.data
@@ -201,7 +201,7 @@ async fn pcm_round_trip_is_lossless() {
 		.map(|sample| f32::from_le_bytes([sample[0], sample[1], sample[2], sample[3]]))
 		.collect();
 	assert_eq!(decoded, samples);
-	assert!(consumer.read().await.unwrap().is_none());
+	assert!(next_frame(&mut consumer).await.unwrap().is_none());
 }
 
 /// A 5.1 broadcast carries only its channel count in the catalog, which reads
@@ -257,7 +257,7 @@ async fn pcm_five_one_reads_back_at_any_layout() {
 
 	for (mut consumer, (_, layout, frame)) in consumers.into_iter().zip(cases) {
 		assert_eq!(consumer.layout(), layout);
-		let decoded = consumer.read().await.unwrap().unwrap();
+		let decoded = next_frame(&mut consumer).await.unwrap().unwrap();
 		let samples: Vec<f32> = decoded
 			.data
 			.as_chunks::<4>()
@@ -268,6 +268,16 @@ async fn pcm_five_one_reads_back_at_any_layout() {
 		assert_eq!(samples.len(), 960 * frame.len(), "{layout:?}");
 		for (got, want) in samples.iter().zip(frame.iter().cycle()) {
 			assert!((got - want).abs() < 1e-6, "{layout:?}: got {got}, want {want}");
+		}
+	}
+}
+
+async fn next_frame(consumer: &mut decode::Consumer) -> Result<Option<moq_audio::Frame>, moq_audio::Error> {
+	loop {
+		match consumer.read().await? {
+			Some(decode::Read::Frame { frame, .. }) => return Ok(Some(frame)),
+			Some(decode::Read::End { .. }) => {}
+			None => return Ok(None),
 		}
 	}
 }

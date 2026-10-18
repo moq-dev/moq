@@ -1,17 +1,17 @@
 use std::{
     cmp,
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{BTreeMap, HashSet, VecDeque},
     env,
     io::{self, Write},
     mem,
     net::{Ipv6Addr, SocketAddr, UdpSocket},
-    ops::RangeFrom,
     str,
     sync::{Arc, LazyLock, Mutex},
 };
 
 use assert_matches::assert_matches;
 use bytes::BytesMut;
+use rand::{RngExt, SeedableRng, rngs::StdRng};
 use rustls::{
     KeyLogFile,
     client::WebPkiServerVerifier,
@@ -21,7 +21,7 @@ use tracing::{info_span, trace};
 
 use super::crypto::rustls::{QuicClientConfig, QuicServerConfig, configured_provider};
 use super::*;
-use crate::{Accepting, Duration, Instant};
+use crate::{Accepting, Duration, Instant, entropy};
 
 pub(super) const DEFAULT_MTU: usize = 1452;
 
@@ -39,19 +39,26 @@ pub(super) struct Pair {
     /// Replaces the ECN codepoint of every delivered datagram after any marking, as a path that
     /// bleaches the field (`Some(None)`) or re-marks it
     pub(super) rewrite_ecn: Option<Option<EcnCodepoint>>,
-    /// Queues client-to-server datagrams at a bottleneck, if set
-    pub(super) bottleneck: Option<Bottleneck>,
+    /// The client-to-server direction of the path
+    pub(super) to_server: Link,
+    /// The server-to-client direction of the path
+    pub(super) to_client: Link,
     // One-way
     pub(super) latency: Duration,
     /// Number of spin bit flips
     pub(super) spins: u64,
     last_spin: bool,
+    /// Draws every [`Link`] impairment from the test thread's seed, as the endpoints draw their
+    /// keys and connection IDs, so `entropy::reseed` before building a pair replays all of them
+    rng: StdRng,
+    /// The next port [`Self::next_port`] hands out
+    port: u16,
 }
 
 impl Pair {
     pub(super) fn default_with_deterministic_pns() -> Self {
         let mut cfg = server_config();
-        let mut transport = cubic_transport();
+        let mut transport = TransportConfig::default();
         transport.deterministic_packet_numbers(true);
         cfg.transport = Arc::new(transport);
         Self::new(Default::default(), cfg)
@@ -65,18 +72,10 @@ impl Pair {
     }
 
     pub(super) fn new_from_endpoint(client: Endpoint, server: Endpoint) -> Self {
-        let server_addr = SocketAddr::new(
-            Ipv6Addr::LOCALHOST.into(),
-            SERVER_PORTS.lock().unwrap().next().unwrap(),
-        );
-        let client_addr = SocketAddr::new(
-            Ipv6Addr::LOCALHOST.into(),
-            CLIENT_PORTS.lock().unwrap().next().unwrap(),
-        );
         let now = Instant::now();
-        Self {
-            server: TestEndpoint::new(server, server_addr),
-            client: TestEndpoint::new(client, client_addr),
+        let mut pair = Self {
+            server: TestEndpoint::new(server, SocketAddr::new(Ipv6Addr::LOCALHOST.into(), 4433)),
+            client: TestEndpoint::new(client, SocketAddr::new(Ipv6Addr::LOCALHOST.into(), 44433)),
             epoch: now,
             time: now,
             mtu: DEFAULT_MTU,
@@ -85,8 +84,20 @@ impl Pair {
             last_spin: false,
             congestion_experienced: false,
             rewrite_ecn: None,
-            bottleneck: None,
-        }
+            to_server: Link::default(),
+            to_client: Link::default(),
+            rng: StdRng::from_rng(&mut entropy::rng()),
+            port: 44434,
+        };
+        pair.server.bind();
+        pair.client.bind();
+        pair
+    }
+
+    /// A client port no address of this pair uses yet, as for a migration
+    pub(super) fn next_port(&mut self) -> u16 {
+        self.port += 1;
+        self.port - 1
     }
 
     /// Returns whether the connection is not idle
@@ -157,19 +168,15 @@ impl Pair {
                 socket.send_to(&buffer, packet.destination).unwrap();
             }
             if self.server.addr == packet.destination {
-                let (sent, marked) = match &mut self.bottleneck {
-                    Some(bottleneck) => match bottleneck.enqueue(self.time, buffer.len()) {
-                        Some(dequeued) => dequeued,
-                        None => continue,
-                    },
-                    None => (self.time, false),
-                };
+                let (marked, arrivals) =
+                    self.to_server
+                        .transmit(&mut self.rng, self.time, self.latency, buffer.len());
                 let ecn = self.rewrite_ecn.unwrap_or_else(|| {
                     set_congestion_experienced(packet.ecn, self.congestion_experienced || marked)
                 });
-                self.server
-                    .inbound
-                    .push_back((sent + self.latency, ecn, buffer.as_ref().into()));
+                for arrival in arrivals {
+                    self.server.receive(arrival, ecn, &buffer);
+                }
             }
         }
     }
@@ -188,14 +195,15 @@ impl Pair {
                 socket.send_to(&buffer, packet.destination).unwrap();
             }
             if self.client.addr == packet.destination {
+                let (marked, arrivals) =
+                    self.to_client
+                        .transmit(&mut self.rng, self.time, self.latency, buffer.len());
                 let ecn = self.rewrite_ecn.unwrap_or_else(|| {
-                    set_congestion_experienced(packet.ecn, self.congestion_experienced)
+                    set_congestion_experienced(packet.ecn, self.congestion_experienced || marked)
                 });
-                self.client.inbound.push_back((
-                    self.time + self.latency,
-                    ecn,
-                    buffer.as_ref().into(),
-                ));
+                for arrival in arrivals {
+                    self.client.receive(arrival, ecn, &buffer);
+                }
             }
         }
     }
@@ -357,6 +365,64 @@ impl Bottleneck {
     }
 }
 
+/// One direction of the path: an optional bottleneck, then seeded loss, duplication, jitter,
+/// and reordering
+#[derive(Debug, Clone, Default)]
+pub(super) struct Link {
+    /// Queues datagrams at a rate-limited bottleneck, if set
+    pub(super) bottleneck: Option<Bottleneck>,
+    /// The probability a datagram leaving the bottleneck is lost
+    pub(super) loss: f64,
+    /// The probability a datagram arrives twice
+    pub(super) duplicate: f64,
+    /// Extra delay drawn uniformly up to this for each arrival, keeping arrivals in order
+    pub(super) jitter: Duration,
+    /// The probability an arrival is held back by up to `reorder_delay` more, so datagrams sent
+    /// after it can overtake it
+    pub(super) reorder: f64,
+    /// The most a reordered arrival is held back
+    pub(super) reorder_delay: Duration,
+    /// The latest in-order arrival, which jitter never moves another before
+    last_arrival: Option<Instant>,
+}
+
+impl Link {
+    /// Sends `bytes` at `now`, returning whether the bottleneck marked them CE and when each copy
+    /// that survives arrives
+    fn transmit(
+        &mut self,
+        rng: &mut StdRng,
+        now: Instant,
+        latency: Duration,
+        bytes: usize,
+    ) -> (bool, Vec<Instant>) {
+        let (sent, marked) = match &mut self.bottleneck {
+            Some(bottleneck) => match bottleneck.enqueue(now, bytes) {
+                Some(dequeued) => dequeued,
+                None => return (false, Vec::new()),
+            },
+            None => (now, false),
+        };
+        if rng.random_bool(self.loss) {
+            return (marked, Vec::new());
+        }
+
+        let copies = 1 + rng.random_bool(self.duplicate) as usize;
+        let arrivals = (0..copies)
+            .map(|_| {
+                let arrival = sent + latency + rng.random_range(Duration::ZERO..=self.jitter);
+                if rng.random_bool(self.reorder) {
+                    return arrival + rng.random_range(Duration::ZERO..=self.reorder_delay);
+                }
+                let arrival = self.last_arrival.map_or(arrival, |last| last.max(arrival));
+                self.last_arrival = Some(arrival);
+                arrival
+            })
+            .collect();
+        (marked, arrivals)
+    }
+}
+
 /// What a [`Bottleneck`] queue has seen
 #[derive(Debug, Default, Clone)]
 pub(super) struct QueueStats {
@@ -386,13 +452,16 @@ pub(super) struct TestEndpoint {
     pub(super) endpoint: Endpoint,
     pub(super) addr: SocketAddr,
     socket: Option<UdpSocket>,
-    timeout: Option<Instant>,
+    /// Each connection's next timer, as of its last poll
+    timeouts: BTreeMap<ConnectionHandle, Instant>,
     pub(super) outbound: VecDeque<(Transmit, Bytes)>,
     delayed: VecDeque<(Transmit, Bytes)>,
+    /// Datagrams in flight to this endpoint, in arrival order
     pub(super) inbound: VecDeque<(Instant, Option<EcnCodepoint>, BytesMut)>,
     accepted: Option<Result<ConnectionHandle, ConnectionError>>,
-    pub(super) connections: HashMap<ConnectionHandle, Connection>,
-    conn_events: HashMap<ConnectionHandle, VecDeque<ConnectionEvent>>,
+    // Ordered, so connections are driven in the same order every run
+    pub(super) connections: BTreeMap<ConnectionHandle, Connection>,
+    conn_events: BTreeMap<ConnectionHandle, VecDeque<ConnectionEvent>>,
     pub(super) captured_packets: Vec<Vec<u8>>,
     pub(super) capture_inbound_packets: bool,
     pub(super) handle_incoming: Box<dyn FnMut(&Incoming) -> IncomingConnectionBehavior>,
@@ -425,32 +494,45 @@ pub(super) fn validate_incoming(incoming: &Incoming) -> IncomingConnectionBehavi
 
 impl TestEndpoint {
     fn new(endpoint: Endpoint, addr: SocketAddr) -> Self {
-        let socket = if env::var_os("SSLKEYLOGFILE").is_some() {
-            let socket = UdpSocket::bind(addr).expect("failed to bind UDP socket");
-            socket
-                .set_read_timeout(Some(Duration::from_millis(10)))
-                .unwrap();
-            Some(socket)
-        } else {
-            None
-        };
         Self {
             endpoint,
             addr,
-            socket,
-            timeout: None,
+            socket: None,
+            timeouts: BTreeMap::new(),
             outbound: VecDeque::new(),
             delayed: VecDeque::new(),
             inbound: VecDeque::new(),
             accepted: None,
-            connections: HashMap::default(),
-            conn_events: HashMap::default(),
+            connections: BTreeMap::new(),
+            conn_events: BTreeMap::new(),
             captured_packets: Vec::new(),
             capture_inbound_packets: false,
             handle_incoming: Box::new(|_| IncomingConnectionBehavior::Accept),
             waiting_incoming: Vec::new(),
             lifecycle: Vec::new(),
         }
+    }
+
+    /// Mirrors the traffic onto a real socket when `SSLKEYLOGFILE` is set, so a capture can be
+    /// decrypted
+    ///
+    /// Every pair uses the same ports, so run one test at a time to capture.
+    fn bind(&mut self) {
+        if env::var_os("SSLKEYLOGFILE").is_none() {
+            return;
+        }
+        let socket = UdpSocket::bind(self.addr)
+            .expect("failed to bind UDP socket; capture with --test-threads=1");
+        socket
+            .set_read_timeout(Some(Duration::from_millis(10)))
+            .unwrap();
+        self.socket = Some(socket);
+    }
+
+    /// Queues a datagram that arrives at `at`, behind any that arrive no later
+    fn receive(&mut self, at: Instant, ecn: Option<EcnCodepoint>, datagram: &[u8]) {
+        let index = self.inbound.partition_point(|(arrival, ..)| *arrival <= at);
+        self.inbound.insert(index, (at, ecn, datagram.into()));
     }
 
     pub(super) fn drive(&mut self, now: Instant, remote: SocketAddr) {
@@ -517,27 +599,27 @@ impl TestEndpoint {
 
         loop {
             let mut endpoint_events: Vec<(ConnectionHandle, EndpointEvent)> = vec![];
-            for (ch, conn) in self.connections.iter_mut() {
-                if self.timeout.is_some_and(|x| x <= now) {
-                    self.timeout = None;
+            for (&ch, conn) in self.connections.iter_mut() {
+                if self.timeouts.get(&ch).is_some_and(|&x| x <= now) {
                     conn.handle_timeout(now);
                 }
 
-                for (_, mut events) in self.conn_events.drain() {
-                    for event in events.drain(..) {
-                        conn.handle_event(event);
-                    }
+                for event in self.conn_events.remove(&ch).into_iter().flatten() {
+                    conn.handle_event(event);
                 }
 
                 while let Some(event) = conn.poll_endpoint_events() {
-                    endpoint_events.push((*ch, event));
+                    endpoint_events.push((ch, event));
                 }
                 while let Some(transmit) = conn.poll_transmit(now, MAX_DATAGRAMS, &mut buf) {
                     let size = transmit.size;
                     self.outbound.extend(split_transmit(transmit, &buf[..size]));
                     buf.clear();
                 }
-                self.timeout = conn.poll_timeout();
+                match conn.poll_timeout() {
+                    Some(timeout) => self.timeouts.insert(ch, timeout),
+                    None => self.timeouts.remove(&ch),
+                };
             }
 
             if endpoint_events.is_empty() {
@@ -561,8 +643,14 @@ impl TestEndpoint {
     }
 
     pub(super) fn next_wakeup(&self) -> Option<Instant> {
+        let next_timeout = self
+            .timeouts
+            .iter()
+            .filter(|(ch, _)| self.connections.contains_key(ch))
+            .map(|(_, &timeout)| timeout)
+            .min();
         let next_inbound = self.inbound.front().map(|x| x.0);
-        min_opt(self.timeout, next_inbound)
+        min_opt(next_timeout, next_inbound)
     }
 
     fn is_idle(&self) -> bool {
@@ -723,7 +811,7 @@ impl Write for SharedBuffer {
 
 pub(super) fn server_config() -> ServerConfig {
     let mut config = ServerConfig::with_crypto(Arc::new(server_crypto()));
-    config.transport = Arc::new(cubic_transport());
+    config.transport = Arc::new(TransportConfig::default());
     if !cfg!(feature = "bloom") {
         config
             .validation_token
@@ -738,7 +826,7 @@ pub(super) fn server_config_with_cert(
     key: PrivateKeyDer<'static>,
 ) -> ServerConfig {
     let mut config = ServerConfig::with_crypto(Arc::new(server_crypto_with_cert(cert, key)));
-    config.transport = Arc::new(cubic_transport());
+    config.transport = Arc::new(TransportConfig::default());
     config
         .validation_token
         .sent(2)
@@ -782,23 +870,22 @@ fn server_crypto_inner(
 
 pub(super) fn client_config() -> ClientConfig {
     let mut cfg = ClientConfig::new(Arc::new(client_crypto()));
-    cfg.transport = Arc::new(cubic_transport());
+    cfg.transport = Arc::new(TransportConfig::default());
     cfg
 }
 
 pub(super) fn client_config_with_deterministic_pns() -> ClientConfig {
     let mut cfg = ClientConfig::new(Arc::new(client_crypto()));
-    let mut transport = cubic_transport();
+    let mut transport = TransportConfig::default();
     transport.deterministic_packet_numbers(true);
     cfg.transport = Arc::new(transport);
     cfg
 }
 
-/// The transport the connection tests run: Cubic, as upstream quinn's do, instead of BBR3
+/// Cubic instead of the production BBR3, for a test that scripts Cubic's packet schedule
 ///
-/// The tests script lockstep packet schedules at zero RTT. The window-derived pacer stops pacing
-/// there, while BBR3 paces from its own rate and releases a burst nanoseconds later, depending on
-/// how much of its budget the randomly sized handshake spent. Tests of BBR3 opt in.
+/// At zero RTT the window-derived pacer stops pacing, so a lockstep script sees whole windows
+/// leave at once, while BBR3 paces from its own rate and releases a burst nanoseconds later.
 pub(super) fn cubic_transport() -> TransportConfig {
     let mut transport = TransportConfig::default();
     transport.congestion_controller_factory(Arc::new(congestion::CubicConfig::default()));
@@ -895,9 +982,6 @@ fn set_congestion_experienced(
     })
 }
 
-static SERVER_PORTS: LazyLock<Mutex<RangeFrom<u16>>> = LazyLock::new(|| Mutex::new(4433..));
-pub(crate) static CLIENT_PORTS: LazyLock<Mutex<RangeFrom<u16>>> =
-    LazyLock::new(|| Mutex::new(44433..));
 pub(crate) static CERTIFIED_KEY: LazyLock<rcgen::CertifiedKey<rcgen::KeyPair>> =
     LazyLock::new(|| rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap());
 

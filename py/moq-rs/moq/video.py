@@ -138,11 +138,11 @@ class Consumer:
 
     @classmethod
     async def subscribe(
-        cls, broadcast: BroadcastConsumer, name: str, rendition: Video, output: DecoderOutput | None = None
+        cls, broadcast: BroadcastConsumer, id: str, rendition: Video, output: DecoderOutput | None = None
     ) -> Consumer:
-        """Subscribe to one catalog video rendition and decode it."""
+        """Subscribe to the catalog video rendition ``id`` and decode it."""
         selected = output or DecoderOutput()
-        return cls(await MoqVideoConsumer.subscribe(broadcast._inner, name, rendition, selected._ffi()))
+        return cls(await MoqVideoConsumer.subscribe(broadcast._inner, id, rendition, selected._ffi()))
 
     def __init__(self, inner: MoqVideoConsumer) -> None:
         self._inner = inner

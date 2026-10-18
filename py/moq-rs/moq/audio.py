@@ -17,12 +17,13 @@ from moq_ffi import (
 )
 
 from ._records import _from_us, _opt_us, _to_us
-from .media import Audio, CatalogProducer
+from .media import Audio, AudioInit, CatalogProducer
 from .publish import TrackDemand
 from .session import Bandwidth, Reservation
 from .subscribe import BroadcastConsumer
 from .types import AudioCodec as Codec
 from .types import AudioEncoderInput as EncoderInput
+from .types import AudioPreset as Preset
 from .types import AudioSampleFormat as SampleFormat
 
 Packet = MoqAudioPacket
@@ -49,7 +50,11 @@ class Frame:
 
 @dataclass(frozen=True)
 class EncoderOutput:
-    """Codec-side settings. A zero ``frame_duration`` takes the codec's own frame."""
+    """Codec-side settings.
+
+    A zero ``frame_duration`` takes the ``preset``'s frame, or the codec's own.
+    ``preset`` defaults to ``Balanced`` and is refused alongside a nonzero ``frame_duration``.
+    """
 
     codec: Codec
     track: str | None = None
@@ -57,6 +62,7 @@ class EncoderOutput:
     channels: int | None = None
     bitrate: int | None = None
     frame_duration: timedelta = timedelta(0)
+    preset: Preset | None = None
 
     def _ffi(self) -> MoqAudioEncoderOutput:
         return MoqAudioEncoderOutput(
@@ -66,17 +72,24 @@ class EncoderOutput:
             channels=self.channels,
             bitrate=self.bitrate,
             frame_duration_us=_to_us(self.frame_duration, "frame_duration"),
+            preset=self.preset,
         )
 
 
 @dataclass(frozen=True)
 class DecoderOutput:
-    """The PCM layout a :class:`Consumer` delivers and how stale a group may get."""
+    """The PCM layout a :class:`Consumer` delivers, how stale a group may get, and its playout delay.
+
+    ``delay`` fixes the jitter buffer to hold ahead of the playhead; ``None``
+    estimates it from arrival timing. ``max_delay`` only bounds how stale a
+    group may get before it is skipped, and adds no buffering.
+    """
 
     format: SampleFormat
     sample_rate: int | None = None
     channels: int | None = None
     max_delay: timedelta | None = None
+    delay: timedelta | None = None
 
     def _ffi(self) -> MoqAudioDecoderOutput:
         return MoqAudioDecoderOutput(
@@ -84,6 +97,7 @@ class DecoderOutput:
             sample_rate=self.sample_rate,
             channels=self.channels,
             max_delay_us=_opt_us(self.max_delay, "max_delay"),
+            delay_us=_opt_us(self.delay, "delay"),
         )
 
 
@@ -141,10 +155,10 @@ class Consumer:
 
     @classmethod
     async def subscribe(
-        cls, broadcast: BroadcastConsumer, name: str, rendition: Audio, output: DecoderOutput
+        cls, broadcast: BroadcastConsumer, id: str, rendition: Audio, output: DecoderOutput
     ) -> Consumer:
-        """Subscribe to one catalog audio rendition and decode it."""
-        return cls(await MoqAudioConsumer.subscribe(broadcast._inner, name, rendition, output._ffi()))
+        """Subscribe to the catalog audio rendition ``id`` and decode it."""
+        return cls(await MoqAudioConsumer.subscribe(broadcast._inner, id, rendition, output._ffi()))
 
     def __init__(self, inner: MoqAudioConsumer) -> None:
         self._inner = inner
@@ -164,6 +178,15 @@ class Consumer:
             raise StopAsyncIteration
         return Frame._from_ffi(value)
 
+    @property
+    def delay(self) -> timedelta:
+        """The playout delay to hold ahead of the playhead: the fixed one, or the estimate so far.
+
+        The estimate measures when each frame is read, so read the next frame as
+        soon as the previous one is handled rather than pacing reads to the speaker.
+        """
+        return _from_us(self._inner.delay_us())
+
     def cancel(self) -> None:
         """Cancel the subscription and stop delivering audio frames."""
         self._inner.cancel()
@@ -179,6 +202,14 @@ class Encoder:
     def frame_size(self) -> int:
         """Samples per channel required by each encode call."""
         return self._inner.frame_size()
+
+    def track_init(self) -> AudioInit:
+        """The OpusHead or AudioSpecificConfig that publishes these packets via :meth:`TrackProducer.audio`."""
+        return self._inner.track_init()
+
+    def set_bitrate(self, bitrate: int) -> None:
+        """Retune the live encoder in bits per second."""
+        self._inner.set_bitrate(bitrate)
 
     def encode(self, pcm: list[float]) -> Packet:
         """Encode one full PCM frame."""
@@ -199,6 +230,7 @@ __all__ = [
     "Frame",
     "Codec",
     "Packet",
+    "Preset",
     "Producer",
     "SampleFormat",
 ]

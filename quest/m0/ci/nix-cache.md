@@ -31,6 +31,10 @@ and push.
   keeps receiving release pushes.
 - The cache warmer's dev shell push and the Cachix release workflow both move
   over.
+- Measured 2026-10-16 (Nightly run 38897397428): every Nightly workload
+  checked spent 12-14 minutes building `uniffi-bindgen-go`,
+  `uniffi-bindgen-cpp` and `quest` before entering the dev shell. Cachix had
+  no copy; the warmer's run for that commit had been cancelled.
 
 ## Related
 

@@ -17,7 +17,7 @@ fn origin(hop: u64) -> moq_net::origin::Producer {
 	origin
 }
 
-#[moq_net_sim::test]
+#[moq_clock::test]
 async fn an_over_cap_peer_cannot_cancel_another_peers_held_fetch() {
 	for version in [
 		"moq-lite-05",
@@ -44,14 +44,14 @@ async fn an_over_cap_peer_cannot_cancel_another_peers_held_fetch() {
 			limits.fetches = 1;
 			options.server_limits = Some(limits);
 			let pair = connect_mock(options).await;
-			let view = moq_net_sim::timeout(TIMEOUT, remote.consume().routed_broadcast("room"))
+			let view = moq_clock::timeout(TIMEOUT, remote.consume().routed_broadcast("room"))
 				.await
 				.unwrap()
 				.unwrap();
 			peers.push((remote, pair, view));
 		}
 		let mut a = Box::pin(peers[0].2.track("video").unwrap().fetch_group(7, None));
-		let request_a = match moq_net_sim::timeout(
+		let request_a = match moq_clock::timeout(
 			TIMEOUT,
 			futures::future::select(std::pin::pin!(groups.requested_group()), &mut a),
 		)
@@ -62,7 +62,7 @@ async fn an_over_cap_peer_cannot_cancel_another_peers_held_fetch() {
 			futures::future::Either::Right(_) => panic!("{version}: fetch answered before the publisher"),
 		};
 		let mut b = Box::pin(peers[1].2.track("video").unwrap().fetch_group(8, None));
-		let request_b = match moq_net_sim::timeout(
+		let request_b = match moq_clock::timeout(
 			TIMEOUT,
 			futures::future::select(std::pin::pin!(groups.requested_group()), &mut b),
 		)
@@ -75,7 +75,7 @@ async fn an_over_cap_peer_cannot_cancel_another_peers_held_fetch() {
 		assert_eq!(request_a.sequence(), 7);
 		assert_eq!(request_b.sequence(), 8);
 		let extra = peers[0].2.track("video").unwrap().fetch_group(9, None);
-		let (err, refused) = moq_net_sim::timeout(TIMEOUT, futures::future::join(peers[0].1.client.closed(), extra))
+		let (err, refused) = moq_clock::timeout(TIMEOUT, futures::future::join(peers[0].1.client.closed(), extra))
 			.await
 			.unwrap();
 		assert!(refused.is_err());
@@ -90,11 +90,11 @@ async fn an_over_cap_peer_cannot_cancel_another_peers_held_fetch() {
 		let mut group = request_b.accept(info).unwrap();
 		group.write_frame(None, &b"other peer"[..]).unwrap();
 		group.finish().unwrap();
-		let mut served = moq_net_sim::timeout(TIMEOUT, b).await.unwrap().unwrap();
+		let mut served = moq_clock::timeout(TIMEOUT, b).await.unwrap().unwrap();
 		assert_eq!(
 			served.read_frame().await.unwrap().unwrap().payload.as_ref(),
 			b"other peer"
 		);
-		assert!(moq_net_sim::timeout(TIMEOUT, a).await.unwrap().is_err());
+		assert!(moq_clock::timeout(TIMEOUT, a).await.unwrap().is_err());
 	}
 }

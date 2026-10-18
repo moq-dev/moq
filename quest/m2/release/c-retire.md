@@ -4,7 +4,7 @@
 
 The hand-written C crate is gone: its final `moq-c` 0.7.x release points
 users at the generated `moq-c` 0.8.0, and the source, workflows, and docs that only served
-it are deleted. `doc/setup/upgrade.md` tells C users how to move.
+it are deleted. The generated `moq-c` package's `MIGRATE.md` tells C users how to move.
 
 ## Plan
 

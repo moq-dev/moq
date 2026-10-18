@@ -11,7 +11,7 @@
 
 use std::collections::HashSet;
 use std::sync::{LazyLock, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use bytes::Bytes;
@@ -728,7 +728,7 @@ impl MoqSink {
 			let outcome = lifecycle.media.place_wall(&buffer, sample).and_then(|()| {
 				lifecycle
 					.media
-					.push_buffer(data, pts, duration, current_running_time, Instant::now())
+					.push_buffer(data, pts, duration, current_running_time, moq_net::time::now())
 					.map_err(anyhow::Error::msg)
 			});
 			let changes = match &outcome {
@@ -1720,7 +1720,7 @@ mod tests {
 		let segment = gst::FormattedSegment::<gst::ClockTime>::new();
 		pad.lifecycle().media.observe_segment(segment.upcast());
 		sink.set_state(gst::State::Playing).unwrap();
-		let anchor = Instant::now();
+		let anchor = moq_net::time::now();
 		for (pts, arrival) in [(0, 0), (20, 120), (40, 6_000), (60, 6_020)] {
 			if pts == 40 {
 				sink.set_state(gst::State::Paused).unwrap();

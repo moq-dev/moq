@@ -138,7 +138,7 @@ enum Op {
     Datagram {
         who: Who,
         len: u16,
-        drop: bool,
+        priority: i8,
     },
     Ping {
         who: Who,
@@ -443,7 +443,10 @@ impl Pair {
             Op::Open { who, uni } => {
                 let peer = self.peer(who);
                 let dir = dir(uni);
-                let Some(id) = peer.conn().and_then(|conn| conn.streams().open(dir)) else {
+                let Some(id) = peer
+                    .conn()
+                    .and_then(|conn| conn.streams().open(dir, Default::default()))
+                else {
                     return;
                 };
                 peer.send.push(id);
@@ -554,7 +557,7 @@ impl Pair {
                     conn.set_send_window(window.into());
                 }
             }
-            Op::Datagram { who, len, drop } => {
+            Op::Datagram { who, len, priority } => {
                 let peer = self.peer(who);
                 let seq = peer.datagrams_sent.len() as u64;
                 let Some(conn) = peer.conn() else {
@@ -566,7 +569,17 @@ impl Pair {
                     .chain((0..len).map(|i| datagram_byte(seq, i.into())))
                     .collect();
                 let size = data.len();
-                if conn.datagrams().send(data, drop).is_ok() {
+                if conn
+                    .datagrams()
+                    .send(
+                        data,
+                        crate::SendOptions {
+                            group: None,
+                            priority: priority.into(),
+                        },
+                    )
+                    .is_ok()
+                {
                     peer.datagrams_sent.push(size);
                 }
             }
@@ -820,7 +833,7 @@ pub(super) fn datagrams() -> Vec<Vec<u8>> {
         Op::Datagram {
             who: Who::Server,
             len: 10,
-            drop: false,
+            priority: 0,
         },
         Op::KeyUpdate { who: Who::Client },
         Op::Ping { who: Who::Client },

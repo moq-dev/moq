@@ -11,14 +11,13 @@ encoder's target bitrate to `publish.rate`.
 
 The public grant today carries publish patterns, subscribe patterns, and an
 expiry; add the two rates in the same nested shape as the
-[claim](/quest/m2/rate-claim.md). The encoder clamp leaves headroom for audio
+[claim](/doc/bin/relay/auth.md#claims). The encoder clamp leaves headroom for audio
 and container overhead under the cap. A grant change (refresh, union)
 re-clamps a live encoder.
 
 Decided in the quest audit: this quest owns net's in-band grants, their lite
-codecs, relay propagation, and publisher clamps. The
-[bitrate claim](/quest/m2/rate-claim.md) owns token and HTTP grant types in
-`moq-auth` and `js/auth`; reuse their admitted caps here.
+codecs, relay propagation, and publisher clamps. Token and HTTP grant types in
+`moq-auth` and `js/auth` already carry [bitrate caps](/doc/bin/relay/auth.md#claims); reuse their admitted caps here.
 
 Update the AUTH grant in `drafts/draft-lcurley-moq-lite.md` and run
 `just drafts check`. Rates target the next unpublished lite version after finalized lite-07,
@@ -37,4 +36,3 @@ rates, on the next unpublished lite version after lite-07 only.
 ## Required
 
 - [In-band auth](/quest/m1/auth/README.md) - the AUTH grant this extends
-- [Bitrate claim](/quest/m2/rate-claim.md) - the shape it reuses

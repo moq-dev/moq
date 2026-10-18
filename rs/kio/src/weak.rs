@@ -119,6 +119,14 @@ impl<T> ProducerWeak<T> {
 		crate::consumer::consume(&self.state, &self.counts)
 	}
 
+	/// Create a [`ConsumerWeak`], which reads the state without joining the consumer count.
+	pub fn consume_weak(&self) -> ConsumerWeak<T> {
+		ConsumerWeak {
+			state: self.state.clone(),
+			counts: self.counts.clone(),
+		}
+	}
+
 	/// Create a consumer only if the channel is open.
 	///
 	/// The closed check and count increment share the lock held by

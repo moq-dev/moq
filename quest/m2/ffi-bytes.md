@@ -11,6 +11,10 @@ wrapper (Python, Go, Kotlin, Swift, Dart, and C++).
 
 Decided with the maintainer on 2026-10-13:
 
+- **The browser too.** Since 2026-10-17 (#5838) the browser binds moq-ffi through
+  UniFFI over ubrn, and pays the same per-byte path: about 7 ns per byte written and
+  8 ns read at 128 KiB in Chromium, against BoltFFI's 0.5 and 1.3. Re-measure with
+  `test/wasm/uniffi/cases.ts`'s per-call timings once the fork's core changes.
 - **Benchmark first.** `just bench-ffi` ([bench/README.md](/bench/README.md))
   measures every wrapper before and after. Add a Rust microbenchmark of
   UniFFI's lift and lower for `Vec<u8>` here, beside the patch it proves.
@@ -42,5 +46,4 @@ type. Wire: none.
 
 ## Required
 
-- [Swift, Dart, and C++ benchmarks](/quest/m2/ffi-bench-wrappers.md) - the other three wrappers' numbers
 - [Hard fork](/quest/m2/uniffi-fork.md) - the repository the core patch lands in

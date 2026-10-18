@@ -7,7 +7,10 @@ import { Consumer, type Record } from "./timeline.ts";
 
 const us = (ms: number): Micro => (ms * 1000) as Micro;
 
-const archive = (timescale: number) => ({ timelines: { video: "video.timeline.z" }, timescale: u53(timescale) });
+const archive = (timescale: number) => ({
+	timelines: { video: { track: "video.timeline.z", duration: u53(4000) } },
+	timescale: u53(timescale),
+});
 
 test("timeline consumer yields converted push and pop events", async () => {
 	const broadcast = new Broadcast.Producer();

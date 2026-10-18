@@ -45,6 +45,11 @@ Rust items (`rs/moq-net/src/model/`), as they stood at b4eab0db1:
   becomes `bounds`, and any group-level frame bounds setter matches).
 - `group::Consumer::start_at`, `end_at` (both publishers): remove the need;
   the public `set_bounds` (today `set_frames`) and `skip_to` cover them.
+- `Subscription::{start, end, set_bounds, with_start, with_end}` (both
+  publishers, IETF subscriber, from #5732): the covering span a wire without
+  ranges carries. Derive it from the public `ranges` instead, or make it
+  public. Either way, rename the crate `set_bounds` so it doesn't clash with
+  the public `with_bounds`.
 - `subscription::Position::final_sequence` (lite publisher): public, the
   one-line wire translation of an exclusive end that both languages
   already duplicate. `track::Consumer::final_sequence` (IETF publisher) goes;
@@ -109,7 +114,6 @@ cover the behavior.
 
 ## Required
 
-- [Narrow the model before it goes public](/quest/m1/public-model/narrow.md) - its visibility rewrite and marker lint guard every model API this child edits
 - [Live largest location](/quest/m1/largest.md) - its `poll_largest` replaces `poll_live` and the cached-largest reads
 
 ## Related

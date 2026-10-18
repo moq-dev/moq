@@ -202,13 +202,13 @@ func subscribe(ctx context.Context, url, broadcast string, timeout time.Duration
 		return err
 	}
 
-	var name string
+	var id string
 	var video moqmedia.Video
-	for name, video = range catalog.Video {
+	for id, video = range catalog.Video {
 		break
 	}
 
-	media, err := moqmedia.NewTrackConsumer(ctx, consumer, moqmedia.TrackConfig{Name: name, Container: video.Container, Subscription: &moq.Subscription{MaxDelay: maxDelay}})
+	media, err := moqmedia.NewTrackConsumer(ctx, consumer, moqmedia.TrackConfig{Rendition: moqmedia.VideoRendition(id, video), Subscription: &moq.Subscription{MaxDelay: maxDelay}})
 	if err != nil {
 		return err
 	}

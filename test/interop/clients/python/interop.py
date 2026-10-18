@@ -113,11 +113,10 @@ async def subscribe(url: str, broadcast: str, timeout: float) -> None:
         consumer = await asyncio.wait_for(client.announced_broadcast(broadcast), timeout)
         catalog = await asyncio.wait_for(_catalog_with_video(consumer), timeout)
 
-        track_name = next(iter(catalog.video))
-        video = catalog.video[track_name]
+        id, video = next(iter(catalog.video.items()))
 
         media = await moq.media.TrackConsumer.subscribe(
-            consumer, track_name, video.container, subscription=moq.Subscription(max_delay=MAX_DELAY)
+            consumer, id, video, subscription=moq.Subscription(max_delay=MAX_DELAY)
         )
 
         total = 0

@@ -1,6 +1,7 @@
 use bytes::Bytes;
 use thiserror::Error;
 
+use super::schedule::Slot;
 use crate::{StreamId, VarInt, connection::send_buffer::SendBuffer, frame};
 
 #[derive(Debug)]
@@ -8,7 +9,8 @@ pub(super) struct Send {
     pub(super) max_data: u64,
     pub(super) state: SendState,
     pub(super) pending: SendBuffer,
-    pub(super) priority: i32,
+    pub(super) priority: i64,
+    pub(super) slot: Slot,
     /// Whether a frame containing a FIN bit must be transmitted, even if we don't have any new data
     pub(super) fin_pending: bool,
     /// Whether this stream is in the `connection_blocked` list of `Streams`
@@ -28,6 +30,7 @@ impl Send {
             state: SendState::Ready,
             pending: SendBuffer::new(),
             priority: 0,
+            slot: Slot::default(),
             fin_pending: false,
             connection_blocked: false,
             data_blocked_limit: None,

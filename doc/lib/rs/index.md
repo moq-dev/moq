@@ -16,6 +16,7 @@ The reference implementation. Every crate is on
 | [moq-pattern](https://docs.rs/moq-pattern) | Path patterns such as `room/**`. Re-exported by moq-net and moq-auth. |
 | [moq-tokio](https://docs.rs/moq-tokio) | Connects and listens over QUIC, WebSocket, or iroh, from config or CLI flags. |
 | [moq-sock](https://docs.rs/moq-sock) | Socket binding and CPU pinning for thread-per-core listeners. |
+| [moq-ice](https://docs.rs/moq-ice) | The ICE agent behind native WebRTC: drives a str0m connection over UDP, with a STUN client. |
 | [moq-uring](https://docs.rs/moq-uring) | Experimental Linux io\_uring server for moq-lite. |
 | [hang](/lib/rs/hang) | The media layer: catalog, containers, ordered frame delivery. |
 | [moq-mux](/lib/rs/moq-mux) | Import and export fMP4/CMAF, MPEG-TS, Matroska, FLV, and Annex-B. |
@@ -32,7 +33,7 @@ The reference implementation. Every crate is on
 | [moq-loc](https://docs.rs/moq-loc), [moq-msf](https://docs.rs/moq-msf) | The IETF LOC container and MSF catalog. |
 | [moq-stats](https://docs.rs/moq-stats) | Publish and consume relay traffic counters as tracks. |
 | [moq-clock](/lib/rs/moq-clock) | One clock for time and timers on tokio, the browser, and a deterministic test simulator. |
-| [moq-hls](https://docs.rs/moq-hls), [moq-rtmp](https://docs.rs/moq-rtmp), [moq-srt](https://docs.rs/moq-srt), [moq-rtc](https://docs.rs/moq-rtc) | The [gateways](/bin/), as libraries you can embed with your own auth. |
+| [moq-hls](https://docs.rs/moq-hls), [moq-rtmp](https://docs.rs/moq-rtmp), [moq-srt](https://docs.rs/moq-srt), [moq-rtsp](https://docs.rs/moq-rtsp), [moq-rtc](https://docs.rs/moq-rtc) | The [gateways](/bin/), as libraries you can embed with your own auth. |
 | [moq-ffi](https://docs.rs/moq-ffi), [moq-c](/lib/c/) | The UniFFI core behind the language bindings, and the C ABI. |
 | [moq-relay](/bin/relay/), [moq-cli](/bin/cli) | The binaries, also usable as crates. |
 | [web-transport](https://github.com/moq-dev/web-transport) | The QUIC/WebTransport/qmux transports, in a sibling repository. |

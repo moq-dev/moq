@@ -39,6 +39,8 @@ fn config(dir: &std::path::Path, ws: bool) -> Config {
 }
 
 struct Running {
+	stats: moq_net::stats::Registry,
+	origin: moq_net::origin::Consumer,
 	quic: SocketAddr,
 	#[cfg_attr(not(feature = "websocket"), allow(dead_code))]
 	http: SocketAddr,
@@ -50,6 +52,8 @@ struct Running {
 async fn start(config: Config) -> Running {
 	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 	let relay = Relay::load(config).await.expect("load relay");
+	let stats = relay.stats().registry().clone();
+	let origin = relay.cluster().origin.consume();
 	let quic = relay.quic_addr().expect("quic listener bound");
 	let http = relay.web_addrs().http.expect("http listener bound");
 	let internal = relay.internal().addr().expect("internal listener bound");
@@ -58,6 +62,8 @@ async fn start(config: Config) -> Running {
 	let running = tokio::spawn(relay.run());
 	ready.wait().await.expect("relay ready");
 	Running {
+		stats,
+		origin,
 		quic,
 		http,
 		metrics: format!("http://{internal}/metrics"),
@@ -214,4 +220,153 @@ async fn unavailable_auth_server_is_counted() {
 	assert_eq!(relay.refused("unavailable").await, 1);
 	assert_eq!(relay.refused("refused").await, 0);
 	relay.stop().await;
+}
+
+/// A refusal creates the root stats group even when no session was ever admitted.
+#[tokio::test]
+async fn refused_only_stats_depth_one_has_root_totals_and_shared_embedder_metrics() {
+	use moq_net::stats::{Refusal, Tier};
+	let dir = tempfile::tempdir().unwrap();
+	let mut config = config(dir.path(), false);
+	config.auth.public = vec!["anon/**".parse().unwrap()];
+	config.stats.enabled = true;
+	config.stats.depth = 1;
+	config.stats.node = Some("test".into());
+	let relay = start(config).await;
+	assert_refused(format!("https://{}/rooms", relay.quic).parse().unwrap(), false).await;
+	assert_eq!(
+		relay.refused("refused").await,
+		1,
+		"native admission counts exactly once"
+	);
+	tokio::time::timeout(TIMEOUT, relay.origin.routed(".stats/node/test"))
+		.await
+		.unwrap()
+		.unwrap();
+	let broadcast = tokio::time::timeout(TIMEOUT, relay.origin.request_broadcast(".stats/node/test", None))
+		.await
+		.unwrap()
+		.unwrap();
+	let consumer = moq_stats::Consumer::new(broadcast, Default::default());
+	let mut totals = consumer.totals().await.unwrap();
+	tokio::time::timeout(TIMEOUT, async {
+		loop {
+			let frame = totals.next().await.unwrap().unwrap();
+			if frame
+				.get("")
+				.is_some_and(|total| total.sessions.sessions_refused.refused == 1)
+			{
+				break;
+			}
+		}
+	})
+	.await
+	.expect("refusal-only root totals");
+	relay
+		.stats
+		.tier(Tier::new("gateway"))
+		.refuse("tenant", Refusal::Forbidden);
+	assert_eq!(
+		relay.refused("forbidden").await,
+		1,
+		"embedder stats and metrics share the counter"
+	);
+	tokio::time::timeout(TIMEOUT, relay.origin.routed(".stats/tenant/node/test"))
+		.await
+		.unwrap()
+		.unwrap();
+	let broadcast = tokio::time::timeout(TIMEOUT, relay.origin.request_broadcast(".stats/tenant/node/test", None))
+		.await
+		.unwrap()
+		.unwrap();
+	let consumer = moq_stats::Consumer::new(broadcast, Default::default());
+	let mut totals = consumer.totals().await.unwrap();
+	tokio::time::timeout(TIMEOUT, async {
+		loop {
+			let frame = totals.next().await.unwrap().unwrap();
+			if frame
+				.get("gateway")
+				.is_some_and(|total| total.sessions.sessions_refused.forbidden == 1)
+			{
+				break;
+			}
+		}
+	})
+	.await
+	.expect("embedder outcome in its own tier and root group");
+	relay.stop().await;
+}
+
+/// Typed peer closes flow through the actual QUIC listener into failure stats.
+#[tokio::test]
+async fn peer_zero_close_is_clean_and_application_close_counts_once() {
+	let dir = tempfile::tempdir().unwrap();
+	let mut config = config(dir.path(), false);
+	config.auth.public = vec![moq_auth::Pattern::all()];
+	config.stats.enabled = true;
+	config.stats.node = Some("test".into());
+	let relay = start(config).await;
+	tokio::time::timeout(TIMEOUT, relay.origin.routed(".stats/node/test"))
+		.await
+		.unwrap()
+		.unwrap();
+	let broadcast = relay.origin.request_broadcast(".stats/node/test", None).await.unwrap();
+	let consumer = moq_stats::Consumer::new(broadcast, Default::default());
+	let mut totals = consumer.totals().await.unwrap();
+	for (index, error) in [moq_net::Error::Cancel, moq_net::Error::App(42)]
+		.into_iter()
+		.enumerate()
+	{
+		let connection = client()
+			.with_reconnect(false)
+			.connect(format!("https://{}/", relay.quic).parse::<url::Url>().unwrap());
+		let session = connection.established().await.unwrap();
+		session.abort(error);
+		tokio::time::timeout(TIMEOUT, async {
+			loop {
+				let frame = totals.next().await.unwrap().unwrap();
+				if let Some(total) = frame.get("")
+					&& total.sessions.sessions_ended > index as u64
+				{
+					assert_eq!(total.sessions.sessions_failed.application, index as u64);
+					assert_eq!(total.sessions.sessions_failed.idle_timeout, 0);
+					assert_eq!(total.sessions.sessions_failed.transport, 0);
+					break;
+				}
+			}
+		})
+		.await
+		.expect("peer close reaches the session stats");
+	}
+	relay.stop().await;
+}
+
+#[tokio::test]
+async fn explicit_auth_server_refusal_counts_once() {
+	let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+	let url = format!("http://{}/", listener.local_addr().unwrap());
+	let app = axum::Router::new().route(
+		"/",
+		axum::routing::post(|| async { axum::http::StatusCode::UNAUTHORIZED }),
+	);
+	let (stop, stopped) = tokio::sync::oneshot::channel();
+	let server = tokio::spawn(async move {
+		axum::serve(listener, app)
+			.with_graceful_shutdown(async {
+				let _ = stopped.await;
+			})
+			.await
+			.unwrap();
+	});
+	let dir = tempfile::tempdir().unwrap();
+	let mut config = config(dir.path(), false);
+	config.auth.url = Some(url.parse().unwrap());
+	config.stats.enabled = true;
+	let relay = start(config).await;
+	assert_refused(format!("https://{}/room", relay.quic).parse().unwrap(), false).await;
+	assert_eq!(relay.refused("refused").await, 1);
+	assert_eq!(relay.stats.snapshot().sessions()[0].1.sessions_refused.refused, 1);
+	relay.stop().await;
+	stop.send(()).unwrap();
+	server.await.unwrap();
 }

@@ -21,7 +21,3 @@ types as the switch to `moq-quic` (#5664) left them. Simulated UDP belongs to
 QUIC on the sim.
 
 Public API: the remaining relay seam. Wire: none.
-
-## Required
-
-- [moq-net on moq-clock](/quest/m1/time/net.md) - the sim and instant the relay tests run on

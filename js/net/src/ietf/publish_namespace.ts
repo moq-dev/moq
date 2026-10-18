@@ -5,7 +5,7 @@ import * as Cluster from "./cluster.ts";
 import * as Message from "./message.ts";
 import * as Namespace from "./namespace.ts";
 import { Parameters } from "./parameters.ts";
-import { MalformedAuthToken } from "./token.ts";
+import { MalformedAuthToken, tokenIntoRequest } from "./token.ts";
 import { type IetfVersion, Version } from "./version.ts";
 
 // In draft-14, ANNOUNCE is renamed to PUBLISH_NAMESPACE
@@ -20,14 +20,19 @@ export class PublishNamespace {
 	 * appear on the wire at all. */
 	cluster?: Cluster.Advert;
 
+	/** The AUTHORIZATION TOKEN to send, a value agreed out of band. Decoding leaves it unset. */
+	token?: Uint8Array;
+
 	constructor({
 		requestId,
 		trackNamespace,
 		cluster,
-	}: { requestId: bigint; trackNamespace: Path.Valid; cluster?: Cluster.Advert }) {
+		token,
+	}: { requestId: bigint; trackNamespace: Path.Valid; cluster?: Cluster.Advert; token?: Uint8Array }) {
 		this.requestId = requestId;
 		this.trackNamespace = trackNamespace;
 		this.cluster = cluster;
+		this.token = token;
 	}
 
 	async #encode(w: Writer, version: IetfVersion): Promise<void> {
@@ -37,6 +42,7 @@ export class PublishNamespace {
 		}
 		await Namespace.encode(w, this.trackNamespace);
 		const params = this.cluster ? Cluster.intoParams(this.cluster) : new Parameters();
+		if (this.token) tokenIntoRequest(params, this.token, version);
 		await params.encode(w, version);
 	}
 
@@ -87,19 +93,24 @@ export class PublishNamespaceUpdate {
 	/** Draft-16 only: the PUBLISH_NAMESPACE this updates, which later drafts name by stream. */
 	namespaceRequestId?: bigint;
 	update: Cluster.Update;
+	/** A new AUTHORIZATION TOKEN, renewing the request's. Decoding leaves it unset. */
+	token?: Uint8Array;
 
 	constructor({
 		requestId,
 		namespaceRequestId,
 		update,
+		token,
 	}: {
 		requestId: bigint;
 		namespaceRequestId?: bigint;
 		update: Cluster.Update;
+		token?: Uint8Array;
 	}) {
 		this.requestId = requestId;
 		this.namespaceRequestId = namespaceRequestId;
 		this.update = update;
+		this.token = token;
 	}
 
 	async #encode(w: Writer, version: IetfVersion): Promise<void> {
@@ -114,7 +125,9 @@ export class PublishNamespaceUpdate {
 		if (version === Version.DRAFT_17) {
 			await w.u62(0n); // required_request_id_delta (draft-17 only, removed in draft-18 per #1615)
 		}
-		await Cluster.updateIntoParams(this.update).encode(w, version);
+		const params = Cluster.updateIntoParams(this.update);
+		if (this.token) tokenIntoRequest(params, this.token, version);
+		await params.encode(w, version);
 	}
 
 	async encode(w: Writer, version: IetfVersion): Promise<void> {

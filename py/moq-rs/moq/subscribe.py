@@ -194,11 +194,10 @@ class BroadcastConsumer:
         ``reference`` is ``catalog.video[name].broadcast`` /
         ``catalog.audio[name].broadcast``: ``None`` or empty names this broadcast,
         anything else names a sibling relative to it (e.g. ``./source``). Call it on
-        a rendition that carries one before :meth:`~moq.media.TrackConsumer.subscribe`,
-        :meth:`subscribe_track`, :meth:`fetch_group`, or :meth:`~moq.media.GroupConsumer.fetch`,
+        a rendition that carries one before :meth:`subscribe_track` or :meth:`fetch_group`,
         which take a track name rather than a rendition: the rendition's ``track``, or its
-        catalog key when unset. The audio and video namespace decoders resolve both
-        themselves.
+        ID when unset. The rendition-based consumers in the media, audio, and video
+        namespaces resolve both themselves.
 
         Raises if this broadcast came from a local producer rather than an origin,
         since a standalone broadcast has no sibling to name.

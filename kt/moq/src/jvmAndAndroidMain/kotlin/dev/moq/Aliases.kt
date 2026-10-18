@@ -21,6 +21,8 @@ typealias ServerConfig = uniffi.moq.MoqServerConfig
 typealias ServerTls = uniffi.moq.MoqServerTls
 /** QUIC transport tuning, such as the peer's inbound stream cap. */
 typealias QuicConfig = uniffi.moq.MoqQuicConfig
+/** The congestion control family for a QUIC connection. */
+typealias CongestionControl = uniffi.moq.MoqCongestionControl
 /** The WebSocket fallback raced against QUIC: whether it runs and QUIC's head start. */
 typealias WebSocketConfig = uniffi.moq.MoqWebSocketConfig
 /** A live pub/sub session with a relay, exposing publish and consume origins. */
@@ -97,8 +99,18 @@ typealias Datagram = uniffi.moq.MoqDatagram
 typealias Frame = uniffi.moq.MoqFrame
 /** A path-prefix route: the publisher epoch it serves (null when unknown), relay hop ids (oldest first), and static production and link cost (lower wins). */
 typealias Route = uniffi.moq.MoqRoute
-/** Tunes how a track subscription is delivered: priority, group ordering, and range. */
+/** Tunes how a track subscription is delivered: priority, latency budget, ranges, and group ordering. */
 typealias Subscription = uniffi.moq.MoqSubscription
+/** A span of a track to deliver: from `start` up to `end`, or onward when `end` is null. */
+typealias Range = uniffi.moq.MoqRange
+/** Where one end of a [Range] falls: [AnchorAbsolute] or [AnchorRelative]. */
+typealias Anchor = uniffi.moq.MoqAnchor
+/** An exact group and frame. */
+typealias AnchorAbsolute = uniffi.moq.MoqAnchor.Absolute
+/** The group `groups` before the latest one, clamped to group 0: 0 is the latest. */
+typealias AnchorRelative = uniffi.moq.MoqAnchor.Relative
+/** Which pending group the publisher sends first: `ASCENDING` or `DESCENDING`. */
+typealias Order = uniffi.moq.MoqOrder
 /** Options for fetching one past group by sequence. */
 typealias FetchGroupOptions = uniffi.moq.MoqFetchGroupOptions
 /** Delivery settings for a raw track: priority, ordering, latency budget, and timescale. */
@@ -117,7 +129,7 @@ typealias VideoDecoderOutput = uniffi.moq.MoqVideoDecoderOutput
 typealias VideoDecodedFrame = uniffi.moq.MoqVideoDecodedFrame
 /** The PCM layout the caller feeds an audio producer. */
 typealias AudioEncoderInput = uniffi.moq.MoqAudioEncoderInput
-/** The codec-side encoder configuration: codec, output rate/channels, bitrate, and frame duration. */
+/** The codec-side encoder configuration: codec, output rate/channels, bitrate, frame duration, and preset. */
 typealias AudioEncoderOutput = uniffi.moq.MoqAudioEncoderOutput
 /** One video frame: pixels in the configured layout plus a presentation timestamp. */
 typealias VideoFrame = uniffi.moq.MoqVideoFrame
@@ -133,6 +145,8 @@ typealias VideoEncoderOutput = uniffi.moq.MoqVideoEncoderOutput
 typealias VideoEncoderKind = uniffi.moq.MoqVideoEncoderKind
 /** Divides one connection's send estimate among the tracks sharing it. */
 typealias Bandwidth = uniffi.moq.MoqBandwidth
+/** An owned bandwidth estimate; release it to stop receive PROBE demand. */
+typealias BandwidthConsumer = uniffi.moq.MoqBandwidthConsumer
 /** One track's standing claim on a [Bandwidth]. */
 typealias Reservation = uniffi.moq.MoqReservation
 /** A snapshot of transport connection statistics. */

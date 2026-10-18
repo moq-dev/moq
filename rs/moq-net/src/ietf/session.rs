@@ -17,7 +17,7 @@ use super::{
 /// Everything one moq-transport session needs to start.
 pub struct Config<S: crate::transport::poll::Session> {
 	/// The runtime that arms the session's timers.
-	pub runtime: crate::time::Clock,
+	pub runtime: crate::time::Deadlines,
 
 	pub session: S,
 
@@ -147,15 +147,25 @@ where
 	// Present the connection's own credential (the empty token) right away, so both
 	// sides learn their grant without waiting on the app. Draft-17+ only; the peer's
 	// SETUP then decides whether it is ever sent.
-	// A handle that already knows the peer declined (a gated server accept) refuses it.
-	let setup_token = match auth::supported(version) {
+	// A handle that already knows the peer declined (a gated server accept) skips it.
+	let setup_token = match auth::supported(version) && auth.supported() {
 		true => auth.present(bytes::Bytes::new(), true).ok(),
 		false => None,
 	};
 
 	// One SUBSCRIBE_NAMESPACE per permitted prefix, like `lite::Subscriber`: the
 	// scope is what we may ask for, and it is not the origin's root.
-	let namespaces = subscribe.as_ref().map(subscribe_prefixes).unwrap_or_default();
+	// Each holds a snapshot from now, so the origin's announce consumers never read as
+	// synced before the request goes out.
+	let namespaces: Vec<_> = subscribe
+		.as_ref()
+		.map(|origin| {
+			subscribe_prefixes(origin)
+				.into_iter()
+				.map(|prefix| (origin.snapshot(&prefix), prefix))
+				.collect()
+		})
+		.unwrap_or_default();
 
 	let withdrawal = crate::session::Withdrawal::default();
 	let withdrawing = withdrawal.clone();
@@ -291,6 +301,7 @@ where
 						peer: None,
 						read: false,
 						early: Vec::new(),
+						client,
 						version,
 						goaway,
 						local_close: closing.clone()
@@ -310,7 +321,7 @@ where
 				let mut pub_ns_run = std::pin::pin!(err_only(publisher.clone().run_publish_namespaces()));
 				let mut sub_ns_run = std::pin::pin!(err_only(async {
 					let mut prefixes = futures::stream::FuturesUnordered::new();
-					for prefix in namespaces {
+					for (snapshot, prefix) in namespaces {
 						let mut sub_ns = sub_ns.clone();
 						let sub_ns_adapter = sub_ns_adapter.clone();
 						prefixes.push(async move {
@@ -325,7 +336,7 @@ where
 								}
 								_ => Stream::open(&mut sub_ns_adapter.clone(), version).await?,
 							};
-							if let Err(err) = sub_ns.run_subscribe_namespace(stream, prefix).await {
+							if let Err(err) = sub_ns.run_subscribe_namespace(stream, prefix, snapshot).await {
 								// The peer breaking the protocol is fatal, and the driver
 								// below turns this into the session close the draft wants.
 								if is_protocol_violation(&err) {
@@ -368,6 +379,7 @@ where
 					Poll::Pending
 				})
 				.await;
+				close(&mut session, &res);
 				if closing.load(std::sync::atomic::Ordering::Relaxed) {
 					subscriber.close();
 				} else if let Err(err) = &res {
@@ -391,6 +403,7 @@ where
 							runtime,
 							session,
 							version,
+							client,
 							path,
 							authority,
 							self_origin,
@@ -482,7 +495,7 @@ where
 					let goaway = goaway.clone();
 					async move {
 						match peer_setup_stream {
-							Some(reader) => run_goaway(reader.with_version(version), version, goaway).await,
+							Some(reader) => run_goaway(reader.with_version(version), version, client, goaway).await,
 							None => std::future::pending().await,
 						}
 					}
@@ -498,6 +511,7 @@ where
 						peer: Some(peer_setup.clone()),
 						read: setup_read,
 						early: early_unis,
+						client,
 						version,
 						goaway,
 						local_close: closing.clone()
@@ -521,13 +535,13 @@ where
 				let mut pub_ns_run = std::pin::pin!(err_only(publisher.clone().run_publish_namespaces()));
 				let mut sub_ns_run = std::pin::pin!(err_only(async {
 					let mut prefixes = futures::stream::FuturesUnordered::new();
-					for prefix in namespaces {
+					for (snapshot, prefix) in namespaces {
 						let mut sub_ns = sub_ns.clone();
 						let sub_ns_session = sub_ns_session.clone();
 						prefixes.push(async move {
 							let mut sub_ns_session = sub_ns_session;
 							let stream = Stream::open(&mut sub_ns_session, version).await?;
-							if let Err(err) = sub_ns.run_subscribe_namespace(stream, prefix).await {
+							if let Err(err) = sub_ns.run_subscribe_namespace(stream, prefix, snapshot).await {
 								// The peer breaking the protocol is fatal, and the driver
 								// below turns this into the session close the draft wants.
 								if is_protocol_violation(&err) {
@@ -580,6 +594,7 @@ where
 					Poll::Pending
 				})
 				.await;
+				close(&mut session, &res);
 				// Before this arm's Auth serve tasks drop, so each settles with the
 				// session's error rather than a bare cancel.
 				auth.close(match &res {
@@ -601,24 +616,6 @@ where
 			Err(err) => err.clone(),
 		});
 
-		match &res {
-			Err(err @ Error::Transport(_)) => {
-				tracing::info!(%err, "session terminated");
-				session.close(super::error::to_session_code(&SessionError::Internal), "");
-			}
-			Err(err) => {
-				tracing::warn!(%err, "session error");
-				session.close(
-					super::error::to_session_code(&SessionError::from(err)),
-					err.to_string().as_ref(),
-				);
-			}
-			_ => {
-				tracing::info!("session closed");
-				session.close(super::error::to_session_code(&SessionError::Cancel), "");
-			}
-		}
-
 		res
 	}
 	.maybe_boxed();
@@ -632,6 +629,30 @@ where
 		},
 		goaway_handle,
 	))
+}
+
+/// Close the session over the driver's result, while its streams are still open.
+///
+/// Dropping them first would reset the control stream ahead of the close, and a strict peer
+/// closes over that reset with its own PROTOCOL_VIOLATION before it reads our code.
+fn close<S: crate::transport::poll::Session>(session: &mut S, res: &Result<(), Error>) {
+	match res {
+		Err(err @ (Error::Transport(_) | Error::IdleTimeout)) => {
+			tracing::info!(%err, "session terminated");
+			session.close(super::error::to_session_code(&SessionError::Internal), "");
+		}
+		Err(err) => {
+			tracing::warn!(%err, "session error");
+			session.close(
+				super::error::to_session_code(&SessionError::from(err)),
+				err.to_string().as_ref(),
+			);
+		}
+		Ok(()) => {
+			tracing::info!("session closed");
+			session.close(super::error::to_session_code(&SessionError::Cancel), "");
+		}
+	}
 }
 
 /// What a peer's SETUP told us, beyond the stream it arrived on.
@@ -721,10 +742,21 @@ pub async fn accept_setup<S: crate::transport::poll::Session>(
 	}
 }
 
-/// Parse the Setup Options we act on out of a raw SETUP parameter block.
-fn decode_peer_setup(parameters: bytes::Bytes, version: Version) -> Result<peer::Peer, crate::DecodeError> {
+/// Parse the Setup Options we act on out of a raw SETUP parameter block, refusing any the
+/// peer's role may not send.
+fn decode_peer_setup(parameters: bytes::Bytes, version: Version, client: bool) -> Result<peer::Peer, Error> {
 	let (params, _) = ietf::Parameters::decode_slice(&parameters, version)?;
-	peer_from_params(&params, version)
+	// A server sends neither PATH nor AUTHORITY (draft-21 sections 9.1.1 and 9.1.2).
+	if client && params.get_bytes(ietf::ParameterBytes::Path).is_some() {
+		return Err(SessionError::InvalidPath.into());
+	}
+	if client && params.get_bytes(ietf::ParameterBytes::Authority).is_some() {
+		return Err(SessionError::InvalidAuthority.into());
+	}
+	// Nothing here uses the peer's token, but one that cannot be decoded still closes the
+	// session (draft-21 section 8.9).
+	super::token::from_setup(&params, version)?;
+	Ok(peer_from_params(&params, version)?)
 }
 
 /// The Setup Options we act on, out of an already-decoded parameter block. One place, so
@@ -748,9 +780,10 @@ fn peer_from_params(params: &ietf::Parameters, version: Version) -> Result<peer:
 /// names the other extensions we offer.
 #[allow(clippy::too_many_arguments)]
 async fn run_setup<S: crate::transport::poll::Session>(
-	runtime: crate::time::Clock,
+	runtime: crate::time::Deadlines,
 	mut session: S,
 	version: Version,
+	client: bool,
 	path: Option<String>,
 	authority: Option<String>,
 	self_origin: Hop,
@@ -760,7 +793,10 @@ async fn run_setup<S: crate::transport::poll::Session>(
 ) -> Result<(), Error> {
 	let outer_version = crate::Version::Ietf(version);
 
-	let send = session.open_uni().await.map_err(Error::from_transport)?;
+	let send = session
+		.open_uni(Default::default())
+		.await
+		.map_err(Error::from_transport)?;
 	let mut writer: Writer<S::SendStream, crate::Version> = Writer::new(send, outer_version);
 
 	let mut parameters = ietf::Parameters::default();
@@ -803,6 +839,9 @@ async fn run_setup<S: crate::transport::poll::Session>(
 		let msg = ietf::GoAway {
 			new_session_uri: std::borrow::Cow::Borrowed(payload.uri.as_ref()),
 			timeout: timeout_ms,
+			// We track no per-request progress, so name the receiver's first Request ID: a
+			// client's are even and a server's odd, so a client sends 1 and a server 0.
+			request_id: Some(ietf::RequestId(u64::from(client))),
 		};
 
 		// Frame as [type_id varint][size u16][body], the same shape as the
@@ -870,6 +909,8 @@ struct UniSetup<S: crate::transport::poll::Session> {
 	read: bool,
 	/// Streams accepted before the session started, handled before accepting more.
 	early: Vec<Reader<S::RecvStream, crate::Version>>,
+	/// Our role, which decides what the peer's SETUP and GOAWAY may carry.
+	client: bool,
 	version: Version,
 	goaway: crate::goaway::Protocol,
 	local_close: std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -892,6 +933,7 @@ where
 		peer: peer_setup,
 		read: setup_read,
 		early,
+		client,
 		version,
 		goaway,
 		local_close,
@@ -899,13 +941,13 @@ where
 	let outer_version = crate::Version::Ietf(version);
 	let mut tasks = TaskSet::owned();
 	let uni = Uni {
-		session: session.clone(),
 		subscriber: subscriber.clone(),
 		peer_setup,
 		// A gated server accept already read the peer's one SETUP off its own uni stream,
 		// so anything arriving here is a second one.
 		seen_setup: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(setup_read)),
 		goaway,
+		client,
 		version,
 	};
 	// The first stream to break the session, recorded by the child that read it.
@@ -962,23 +1004,23 @@ where
 
 /// What serving one incoming uni stream needs from its session.
 struct Uni<S: crate::transport::poll::Session> {
-	session: S,
 	subscriber: Subscriber<S>,
 	peer_setup: Option<peer::PeerSetup>,
 	/// Exactly one SETUP per endpoint.
 	seen_setup: std::sync::Arc<std::sync::atomic::AtomicBool>,
 	goaway: crate::goaway::Protocol,
+	client: bool,
 	version: Version,
 }
 
 impl<S: crate::transport::poll::Session> Clone for Uni<S> {
 	fn clone(&self) -> Self {
 		Self {
-			session: self.session.clone(),
 			subscriber: self.subscriber.clone(),
 			peer_setup: self.peer_setup.clone(),
 			seen_setup: self.seen_setup.clone(),
 			goaway: self.goaway.clone(),
+			client: self.client,
 			version: self.version,
 		}
 	}
@@ -988,11 +1030,11 @@ impl<S: crate::transport::poll::Boxable> Uni<S> {
 	/// Read the stream's type and serve it, failing only when the stream breaks the session.
 	async fn serve(self, mut reader: Reader<S::RecvStream, crate::Version>) -> Result<(), Error> {
 		let Self {
-			mut session,
 			mut subscriber,
 			peer_setup,
 			seen_setup,
 			goaway,
+			client,
 			version,
 		} = self;
 
@@ -1038,37 +1080,13 @@ impl<S: crate::transport::poll::Boxable> Uni<S> {
 				// The negotiation gates the announce and dispatch loops, so a SETUP we
 				// cannot read must end the session rather than leave them parked on a
 				// slot nothing will ever fill.
-				let msg = match reader.decode::<setup::Setup>().await {
-					Ok(msg) => msg,
-					Err(err) => {
-						tracing::warn!(%err, "setup decode error");
-						session.close(
-							super::error::to_session_code(&SessionError::ProtocolViolation),
-							"invalid setup",
-						);
-						return Ok(());
-					}
-				};
-
+				let msg = reader.decode::<setup::Setup>().await?;
 				if let Some(peer_setup) = peer_setup {
-					let peer = match decode_peer_setup(msg.parameters, version) {
-						Ok(peer) => peer,
-						Err(err) => {
-							tracing::warn!(%err, "setup parameter decode error");
-							session.close(
-								super::error::to_session_code(&SessionError::ProtocolViolation),
-								"invalid setup parameters",
-							);
-							return Ok(());
-						}
-					};
-					peer_setup.set(peer);
+					peer_setup.set(decode_peer_setup(msg.parameters, version, client)?);
 				}
 
 				// Monitor for GOAWAY after setup completes.
-				if let Err(err) = run_goaway(reader.with_version(version), version, goaway).await {
-					tracing::warn!(%err, "goaway error");
-				}
+				run_goaway(reader.with_version(version), version, client, goaway).await?;
 			}
 			UniType::Subgroup => {
 				let mut reader = reader.with_version(version);
@@ -1097,7 +1115,12 @@ impl<S: crate::transport::poll::Boxable> Uni<S> {
 fn died_before_header(err: &Error) -> bool {
 	matches!(
 		err,
-		Error::Cancel | Error::Stream(_) | Error::Remote(_) | Error::Transport(_) | Error::Decode(DecodeError::Short)
+		Error::Cancel
+			| Error::Stream(_)
+			| Error::Remote(_)
+			| Error::Transport(_)
+			| Error::IdleTimeout
+			| Error::Decode(DecodeError::Short)
 	)
 }
 
@@ -1266,7 +1289,11 @@ impl<S: crate::transport::poll::Boxable> Bidi<S> {
 		} = self;
 		let header = async {
 			let id = stream.reader.varint().await?;
-			let body = stream.reader.decode::<ietf::Body>().await?;
+			// The type arrived, so a body cut short by FIN is malformed, not the stream dying.
+			let body = match stream.reader.decode::<ietf::Body>().await {
+				Err(Error::Decode(DecodeError::Short)) => return Err(Error::WrongSize),
+				body => body?,
+			};
 			Ok::<_, Error>((id, body))
 		}
 		.await;
@@ -1340,63 +1367,77 @@ impl<S: crate::transport::poll::Boxable> Bidi<S> {
 
 /// Monitor the peer's SETUP stream for a GOAWAY, surfacing it through
 /// [`crate::Session::goaway`], then hold the stream until it FINs.
+///
+/// Fails only when the peer broke the protocol, which closes the session: an unknown or
+/// malformed message, a second GOAWAY, or a draft-18 Request ID of the wrong parity. The
+/// stream failing on its own, such as a reset, leaves the session up.
 async fn run_goaway<R: crate::transport::poll::RecvStream>(
-	mut reader: Reader<R, Version>,
+	reader: Reader<R, Version>,
 	version: Version,
+	client: bool,
 	goaway: crate::goaway::Protocol,
 ) -> Result<(), Error> {
-	let id = match reader.varint_maybe().await? {
-		Some(id) => id,
-		None => return Ok(()),
-	};
-
-	let body: ietf::Body = reader.decode().await?;
-	let mut data = body.decoder(version);
-
-	if id != ietf::GoAway::ID {
-		return Err(Error::UnexpectedMessage);
+	match read_goaways(reader, version, client, goaway).await {
+		Err(err) if is_protocol_violation(&err) => Err(err),
+		Err(err) => {
+			tracing::debug!(%err, "SETUP stream failed");
+			Ok(())
+		}
+		Ok(()) => Ok(()),
 	}
+}
 
-	let msg = ietf::GoAway::decode_msg(&mut data, version)?;
-	tracing::info!(message = ?msg, "received GOAWAY");
-
-	let timeout = (msg.timeout > 0).then(|| std::time::Duration::from_millis(msg.timeout));
-	// A second GOAWAY is a protocol violation the draft requires we close over.
-	goaway.record(crate::goaway::Goaway {
-		uri: msg.new_session_uri.into_owned(),
-		timeout,
-	})?;
-
-	// Keep the reader alive until the peer FINs or the session closes. Dropping
-	// it here would STOP_SENDING the peer's SETUP uni stream, which draft-19
-	// sect 3.3 forbids closing at the transport layer mid-session, so a strict
-	// peer would tear the session down as a PROTOCOL_VIOLATION right in the
-	// middle of the drain we are trying to honor.
-	//
-	// Nothing else is expected on this stream: a peer sends at most one GOAWAY
-	// per session. A second one is the same protocol violation the shared
-	// control stream enforces, so close over it here too rather than logging;
-	// anything else is merely unexpected and discarded.
-	loop {
-		let id = match reader.varint_maybe().await? {
-			Some(id) => id,
-			None => return Ok(()),
+/// Read every message after SETUP on the peer's SETUP stream, which may only be GOAWAY.
+///
+/// Reading continues past the first GOAWAY until the peer FINs or the session closes.
+/// Dropping the reader would STOP_SENDING the peer's SETUP uni stream, which draft-19
+/// section 3.3 forbids closing at the transport layer mid-session, so a strict peer would
+/// tear the session down as a PROTOCOL_VIOLATION in the middle of the drain we are honoring.
+async fn read_goaways<R: crate::transport::poll::RecvStream>(
+	mut reader: Reader<R, Version>,
+	version: Version,
+	client: bool,
+	goaway: crate::goaway::Protocol,
+) -> Result<(), Error> {
+	while let Some(id) = reader.varint_maybe().await? {
+		// The type arrived, so a body cut short by FIN is malformed, not the stream dying.
+		let body = match reader.decode::<ietf::Body>().await {
+			Err(Error::Decode(DecodeError::Short)) => return Err(Error::WrongSize),
+			body => body?,
 		};
-		let body: ietf::Body = reader.decode().await?;
-		let mut data = body.decoder(version);
-
-		if id == ietf::GoAway::ID {
-			let msg = ietf::GoAway::decode_msg(&mut data, version)?;
-			let timeout = (msg.timeout > 0).then(|| std::time::Duration::from_millis(msg.timeout));
-			goaway.record(crate::goaway::Goaway {
-				uri: msg.new_session_uri.into_owned(),
-				timeout,
-			})?;
-			continue;
+		if id != ietf::GoAway::ID {
+			return Err(Error::UnexpectedMessage);
 		}
 
-		tracing::warn!(id, "unexpected message after GOAWAY on the SETUP stream; ignoring");
+		let msg: ietf::GoAway = body.message(version)?;
+		tracing::info!(message = ?msg, "received GOAWAY");
+
+		// Draft-18 names the first of our own Request IDs it did not process: even for a
+		// client, odd for a server. The field is required here, on the control stream.
+		match msg.request_id {
+			None if version == Version::Draft18 => return Err(Error::ProtocolViolation),
+			Some(request_id) if request_id.0 % 2 != u64::from(!client) => {
+				return Err(DecodeError::Session(SessionError::InvalidRequestId).into());
+			}
+			_ => {}
+		}
+
+		// Nothing may follow a GOAWAY on this stream, so bytes already here are a violation.
+		// Caught before the GOAWAY surfaces: the application acting on it can close the
+		// session first, without our code.
+		let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+		if let std::task::Poll::Ready(Ok(true)) = reader.poll_has_more(&mut cx) {
+			return Err(Error::ProtocolViolation);
+		}
+
+		let timeout = (msg.timeout > 0).then(|| std::time::Duration::from_millis(msg.timeout));
+		// A second GOAWAY is a protocol violation the draft requires we close over.
+		goaway.record(crate::goaway::Goaway {
+			uri: msg.new_session_uri.into_owned(),
+			timeout,
+		})?;
 	}
+	Ok(())
 }
 
 /// Closes the auth handle when the session driver ends without finishing, releasing
@@ -1436,7 +1477,7 @@ mod tests {
 	use super::*;
 	use crate::model::ProduceTest;
 
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn auth_ids_share_the_modern_request_history() {
 		for version in [
 			Version::Draft17,
@@ -1490,7 +1531,7 @@ mod tests {
 						crate::lite::test_transport::ScriptedSession::new(Vec::new()).with_incoming_bidis(incoming);
 					let log = session.log.clone();
 					let (driver, _) = start(Config {
-						runtime: crate::time::Clock::sim(),
+						runtime: crate::time::sim(),
 						session,
 						setup: None,
 						request_id_max: None,
@@ -1513,7 +1554,7 @@ mod tests {
 						extensions: Default::default(),
 					})
 					.unwrap();
-					let err = moq_net_sim::timeout(std::time::Duration::from_secs(10), driver)
+					let err = moq_clock::timeout(std::time::Duration::from_secs(10), driver)
 						.await
 						.expect("invalid AUTH ID left the session open")
 						.expect_err("invalid request ID must be fatal");
@@ -1527,7 +1568,7 @@ mod tests {
 		}
 	}
 
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn malformed_auth_replies_close_the_session() {
 		for version in [Version::Draft17, Version::Draft22] {
 			for (id, body) in [
@@ -1545,7 +1586,7 @@ mod tests {
 				let session = crate::lite::test_transport::ScriptedSession::per_stream(vec![script]);
 				let log = session.log.clone();
 				let (driver, _) = start(Config {
-					runtime: crate::time::Clock::sim(),
+					runtime: crate::time::sim(),
 					session,
 					setup: None,
 					request_id_max: None,
@@ -1568,7 +1609,7 @@ mod tests {
 					extensions: Default::default(),
 				})
 				.unwrap();
-				let err = moq_net_sim::timeout(std::time::Duration::from_secs(10), driver)
+				let err = moq_clock::timeout(std::time::Duration::from_secs(10), driver)
 					.await
 					.expect("the session outlived a malformed AUTH reply")
 					.expect_err("malformed AUTH is fatal");
@@ -1578,7 +1619,7 @@ mod tests {
 		}
 	}
 
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn malformed_presenter_auth_closes_the_session() {
 		for version in [Version::Draft17, Version::Draft22] {
 			for body in [vec![0, 2], vec![0, 0, 0]] {
@@ -1591,7 +1632,7 @@ mod tests {
 					crate::lite::test_transport::ScriptedSession::new(Vec::new()).with_incoming_bidis(vec![script]);
 				let log = session.log.clone();
 				let (driver, _) = start(Config {
-					runtime: crate::time::Clock::sim(),
+					runtime: crate::time::sim(),
 					session,
 					setup: None,
 					request_id_max: None,
@@ -1614,7 +1655,7 @@ mod tests {
 					extensions: Default::default(),
 				})
 				.unwrap();
-				let err = moq_net_sim::timeout(std::time::Duration::from_secs(10), driver)
+				let err = moq_clock::timeout(std::time::Duration::from_secs(10), driver)
 					.await
 					.expect("malformed presenter AUTH was ignored")
 					.expect_err("malformed AUTH is fatal");
@@ -1673,7 +1714,7 @@ mod tests {
 	/// Driven through `start` rather than `run_subscribe_namespace` directly: the
 	/// stream surfaces the error either way, so only this loop's handling of it decides
 	/// between a close and a warning, and a test below the loop would pass regardless.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn a_namespace_without_a_hop_path_closes_the_session() {
 		const VERSION: Version = Version::Draft19;
 
@@ -1685,7 +1726,7 @@ mod tests {
 		let log = session.log.clone();
 
 		let (driver, _goaway) = start(Config {
-			runtime: crate::time::Clock::sim(),
+			runtime: crate::time::sim(),
 			session,
 			setup: None,
 			request_id_max: None,
@@ -1714,7 +1755,7 @@ mod tests {
 		})
 		.expect("start the session");
 
-		let err = moq_net_sim::timeout(std::time::Duration::from_secs(10), driver)
+		let err = moq_clock::timeout(std::time::Duration::from_secs(10), driver)
 			.await
 			.expect("the session ended rather than carrying on")
 			.expect_err("a malformed NAMESPACE fails the session");
@@ -1732,7 +1773,7 @@ mod tests {
 	/// `start` so the per-prefix fan-out is exercised, not just one stream in
 	/// isolation: a loop that opened a single stream would still satisfy a test that
 	/// called `run_subscribe_namespace` itself.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn every_permitted_prefix_gets_its_own_subscribe_namespace() {
 		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 		let scope: crate::Patterns = ["cam", "mic"]
@@ -1748,7 +1789,7 @@ mod tests {
 		let log = session.log.clone();
 
 		let (driver, _goaway) = start(Config {
-			runtime: crate::time::Clock::sim(),
+			runtime: crate::time::sim(),
 			session,
 			setup: None,
 			request_id_max: None,
@@ -1769,14 +1810,14 @@ mod tests {
 			extensions: Default::default(),
 		})
 		.expect("start the session");
-		let _driver = moq_net_sim::spawn(driver);
+		let _driver = moq_clock::sim::spawn(driver);
 
 		// Both requests are written before either peer response, which never comes.
 		for _ in 0..100 {
 			if occurrences(&log, b"cam") > 0 && occurrences(&log, b"mic") > 0 {
 				break;
 			}
-			moq_net_sim::sleep(std::time::Duration::from_millis(5)).await;
+			moq_clock::sleep(std::time::Duration::from_millis(5)).await;
 		}
 
 		assert_eq!(occurrences(&log, b"cam"), 1, "one SUBSCRIBE_NAMESPACE for cam");
@@ -1821,7 +1862,7 @@ mod tests {
 			.expect("open the control stream");
 
 		let (driver, _goaway) = start(Config {
-			runtime: crate::time::Clock::sim(),
+			runtime: crate::time::sim(),
 			session,
 			setup: Some(setup),
 			request_id_max: None,
@@ -1844,14 +1885,14 @@ mod tests {
 			extensions: Default::default(),
 		})
 		.expect("start the session");
-		let driver = moq_net_sim::spawn(driver);
+		let driver = moq_clock::sim::spawn(driver);
 
 		let needle = subscribe_namespace_legacy(version, prefix.unwrap_or("")).await;
 		for _ in 0..ANNOUNCE_TURNS {
 			if occurrences(&log, &needle) > 0 {
 				break;
 			}
-			moq_net_sim::sleep(std::time::Duration::from_millis(1)).await;
+			moq_clock::sleep(std::time::Duration::from_millis(1)).await;
 		}
 
 		assert!(!driver.is_finished(), "{version:?} ended the session");
@@ -1863,7 +1904,7 @@ mod tests {
 	/// that declared no MoQ Solicit) is not asked for it, and a real prefix still goes
 	/// out. A peer that declared Solicit is ours: it only tells when asked, so it still
 	/// gets the empty prefix. Draft-16 made the empty prefix legal, so it stays.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn an_empty_namespace_is_not_asked_of_a_foreign_peer_before_draft_16() {
 		for version in [Version::Draft14, Version::Draft15] {
 			assert_eq!(
@@ -1909,7 +1950,7 @@ mod tests {
 		let log = session.log.clone();
 
 		let (driver, _goaway) = start(Config {
-			runtime: crate::time::Clock::sim(),
+			runtime: crate::time::sim(),
 			session,
 			setup: None,
 			request_id_max: None,
@@ -1929,14 +1970,14 @@ mod tests {
 			extensions: Default::default(),
 		})
 		.expect("start the session");
-		let _driver = moq_net_sim::spawn(driver);
+		let _driver = moq_clock::sim::spawn(driver);
 
 		// Drive until the announce lands, rather than betting on one fixed window.
 		for _ in 0..ANNOUNCE_TURNS {
 			if occurrences(&log, b"solo-cam") > 0 {
 				break;
 			}
-			moq_net_sim::sleep(std::time::Duration::from_millis(1)).await;
+			moq_clock::sleep(std::time::Duration::from_millis(1)).await;
 		}
 
 		occurrences(&log, b"solo-cam")
@@ -1944,7 +1985,7 @@ mod tests {
 
 	/// The peer's SETUP decides whether an advertisement may go out unasked, so nothing
 	/// can be sent before it arrives.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn no_announce_before_the_peer_setup() {
 		assert_eq!(
 			announce_occurrences(None).await,
@@ -1955,7 +1996,7 @@ mod tests {
 
 	/// A peer that requires solicitation hears nothing until it asks, which is the
 	/// behavior the IETF draft describes for a relay.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn a_peer_requiring_solicitation_is_not_told_unasked() {
 		let declared = peer::Peer {
 			solicit: Some(true),
@@ -1972,7 +2013,7 @@ mod tests {
 	/// A peer that declared nothing is told without being asked. Every relay that never
 	/// sends SUBSCRIBE_NAMESPACE depends on this, and the session is what wires the
 	/// unsolicited loop up at all.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn a_peer_declaring_nothing_is_told_unasked() {
 		assert_eq!(
 			announce_occurrences(Some(peer::Peer::default())).await,
@@ -1999,7 +2040,7 @@ mod tests {
 		_cam: crate::AnnounceProducer,
 		_gate: kio::Producer<bool>,
 		_goaway: crate::goaway::Handle,
-		_driver: moq_net_sim::JoinHandle<Result<(), Error>>,
+		_driver: moq_clock::sim::JoinHandle<Result<(), Error>>,
 	}
 
 	fn auth_session(auth: bool) -> AuthSession {
@@ -2010,9 +2051,9 @@ mod tests {
 		let session = crate::lite::test_transport::SinkSession::gated_bi(gate.consume());
 		let log = session.log.clone();
 
-		let handle = crate::auth::Handle::new(true);
+		let handle = crate::auth::Handle::ietf(true);
 		let (driver, goaway) = start(Config {
-			runtime: crate::time::Clock::sim(),
+			runtime: crate::time::sim(),
 			session,
 			setup: None,
 			request_id_max: None,
@@ -2042,30 +2083,30 @@ mod tests {
 			_cam: cam,
 			_gate: gate,
 			_goaway: goaway,
-			_driver: moq_net_sim::spawn(driver),
+			_driver: moq_clock::sim::spawn(driver),
 		}
 	}
 
-	/// A peer that never offered MoQ Auth sees no Auth request, the session keeps
-	/// working, and every token fails as unsupported rather than hanging.
-	#[moq_net_sim::test]
+	/// A peer that never offered MoQ Auth sees no Auth request and the session keeps
+	/// working. A token resolves promptly rather than hanging, kept with an unknown grant
+	/// for the requests that name it.
+	#[moq_clock::test]
 	async fn a_peer_without_auth_sees_no_auth_request() {
 		let session = auth_session(false);
 		let (handle, log) = (&session.handle, &session.log);
 
-		let err = moq_net_sim::timeout(std::time::Duration::from_secs(1), handle.add("token"))
+		let auth = moq_clock::timeout(std::time::Duration::from_secs(1), handle.add("token"))
 			.await
-			.expect("unsupported promptly")
-			.err()
-			.expect("no AUTH on this session");
-		assert!(matches!(err, Error::Unsupported), "{err:?}");
+			.expect("resolved promptly")
+			.expect("kept for requests");
+		assert_eq!(auth.grant().peek(), None, "no grant without the extension");
 		assert_eq!(handle.grant().peek(), None, "no grant without the extension");
 
 		for _ in 0..ANNOUNCE_TURNS {
 			if occurrences(log, b"solo-cam") > 0 {
 				break;
 			}
-			moq_net_sim::sleep(std::time::Duration::from_millis(1)).await;
+			moq_clock::sleep(std::time::Duration::from_millis(1)).await;
 		}
 		assert_eq!(occurrences(log, b"solo-cam"), 1, "the session stopped advertising");
 		assert_eq!(
@@ -2076,7 +2117,7 @@ mod tests {
 	}
 
 	/// A peer that offered it gets the connection's own credential right away.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn a_negotiating_peer_gets_the_setup_token() {
 		let session = auth_session(true);
 		let log = &session.log;
@@ -2084,7 +2125,7 @@ mod tests {
 			if occurrences(log, &auth_type()) > 0 {
 				break;
 			}
-			moq_net_sim::sleep(std::time::Duration::from_millis(1)).await;
+			moq_clock::sleep(std::time::Duration::from_millis(1)).await;
 		}
 		assert_eq!(occurrences(log, &auth_type()), 1, "one AUTH for the setup token");
 	}
@@ -2096,7 +2137,7 @@ mod tests {
 		let session = crate::lite::test_transport::ScriptedSession::new(Vec::new());
 		let log = session.log.clone();
 		let (driver, _goaway) = start(Config {
-			runtime: crate::time::Clock::sim(),
+			runtime: crate::time::sim(),
 			session,
 			setup: None,
 			request_id_max: None,
@@ -2118,7 +2159,7 @@ mod tests {
 		.expect("start the session");
 
 		// The driver parks once SETUP is out.
-		moq_net_sim::timeout(std::time::Duration::from_secs(10), driver)
+		moq_clock::timeout(std::time::Duration::from_secs(10), driver)
 			.await
 			.expect_err("the session ended instead of parking after SETUP");
 
@@ -2132,7 +2173,7 @@ mod tests {
 	}
 
 	/// Each extension reaches our SETUP only while this side offers it.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn a_declined_extension_stays_out_of_setup() {
 		let all = crate::setup::Extensions::default();
 		let mut no_auth = all;
@@ -2154,7 +2195,7 @@ mod tests {
 
 	/// A server's handle supports AUTH only when the client offered it too, so a server
 	/// answering a client that did not offer it leaves the option out, whatever it offers.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn a_server_offers_auth_only_to_a_client_that_did() {
 		let all = crate::setup::Extensions::default();
 		assert_eq!(
@@ -2192,7 +2233,7 @@ mod tests {
 			.with_incoming_bidis(vec![auth_request(VERSION).await]);
 		let log = session.log.clone();
 		let (driver, _goaway) = start(Config {
-			runtime: crate::time::Clock::sim(),
+			runtime: crate::time::sim(),
 			session,
 			setup: None,
 			request_id_max: None,
@@ -2217,7 +2258,7 @@ mod tests {
 		})
 		.expect("start the session");
 
-		let res = moq_net_sim::timeout(std::time::Duration::from_secs(10), driver)
+		let res = moq_clock::timeout(std::time::Duration::from_secs(10), driver)
 			.await
 			.ok();
 		(res, log.closes())
@@ -2225,7 +2266,7 @@ mod tests {
 
 	/// The Auth draft negotiates the extension only when both sides offer it, so an Auth
 	/// request reaching a side that declined it is a protocol violation, not a token to grant.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn an_auth_request_to_a_side_that_declined_it_is_refused() {
 		let (res, closes) = serve_auth_request(true).await;
 		assert!(res.is_none(), "both offered: the request is served, {res:?}");
@@ -2281,7 +2322,7 @@ mod tests {
 		let log = session.log.clone();
 
 		let (driver, _goaway) = start(Config {
-			runtime: crate::time::Clock::sim(),
+			runtime: crate::time::sim(),
 			session,
 			setup: None,
 			request_id_max: None,
@@ -2304,7 +2345,7 @@ mod tests {
 		})
 		.expect("start the session");
 
-		moq_net_sim::timeout(std::time::Duration::from_secs(10), driver)
+		moq_clock::timeout(std::time::Duration::from_secs(10), driver)
 			.await
 			.expect_err("the session ended over one dead stream");
 
@@ -2312,7 +2353,7 @@ mod tests {
 	}
 
 	/// A draft-17+ client advertises its AUTHORITY in the SETUP it writes on its uni stream.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn setup_carries_the_authority() {
 		const AUTHORITY: &[u8] = b"relay.example.com:4443";
 
@@ -2324,7 +2365,7 @@ mod tests {
 			let log = session.log.clone();
 
 			let (driver, _goaway) = start(Config {
-				runtime: crate::time::Clock::sim(),
+				runtime: crate::time::sim(),
 				session,
 				setup: None,
 				request_id_max: None,
@@ -2345,7 +2386,7 @@ mod tests {
 			})
 			.expect("start the session");
 
-			moq_net_sim::timeout(std::time::Duration::from_secs(10), driver)
+			moq_clock::timeout(std::time::Duration::from_secs(10), driver)
 				.await
 				.expect_err("the session ended instead of parking after SETUP");
 
@@ -2357,12 +2398,12 @@ mod tests {
 		}
 	}
 
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn a_uni_stream_dead_before_its_type_does_not_end_the_session() {
 		a_dead_incoming_stream_is_not_fatal(crate::lite::test_transport::DeadStreamSession::unis(1)).await;
 	}
 
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn a_bidi_stream_dead_before_its_header_does_not_end_the_session() {
 		a_dead_incoming_stream_is_not_fatal(crate::lite::test_transport::DeadStreamSession::bis(1)).await;
 	}
@@ -2370,12 +2411,12 @@ mod tests {
 	/// moxygen resets a subgroup stream it opened but never wrote with its own CANCELLED
 	/// (0x1). Over raw QUIC our transport reads that code through the WebTransport space
 	/// and cannot map it, which used to end the session.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn a_uni_stream_reset_with_an_unmapped_code_does_not_end_the_session() {
 		a_dead_incoming_stream_is_not_fatal(crate::lite::test_transport::DeadStreamSession::unis(1).unmapped()).await;
 	}
 
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn a_bidi_stream_reset_with_an_unmapped_code_does_not_end_the_session() {
 		a_dead_incoming_stream_is_not_fatal(crate::lite::test_transport::DeadStreamSession::bis(1).unmapped()).await;
 	}
@@ -2432,7 +2473,7 @@ mod tests {
 		let (tasks, _task_set) = TaskSet::new();
 		let peer_setup = peer::PeerSetup::default();
 		let subscriber = Subscriber::new(
-			crate::time::Clock::sim(),
+			crate::time::sim(),
 			session.clone(),
 			origin,
 			Control::new(None, true),
@@ -2461,6 +2502,7 @@ mod tests {
 				peer: Some(peer_setup),
 				read,
 				early,
+				client: true,
 				version,
 				goaway,
 				local_close: Default::default()
@@ -2474,14 +2516,14 @@ mod tests {
 			if !log.stops().is_empty() {
 				break;
 			}
-			moq_net_sim::sleep(std::time::Duration::from_millis(1)).await;
+			moq_clock::sleep(std::time::Duration::from_millis(1)).await;
 		}
 
 		(log, None)
 	}
 
 	/// A late group must reach the dispatch loop and stop with CANCELLED.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn a_group_for_a_retired_alias_is_stopped_with_cancelled() {
 		let (log, result) =
 			dispatch_uni(Version::Draft19, subgroup_header(Version::Draft19, 7, 0).await, Some(7)).await;
@@ -2501,7 +2543,7 @@ mod tests {
 	/// accepted can be one whose bytes the peer has not sent yet, held back by connection
 	/// flow control that the later streams' unread data is using up. Waiting on its type
 	/// before reading them deadlocks the connection.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn a_silent_stream_does_not_hold_up_the_next() {
 		let header = subgroup_header(Version::Draft19, 7, 0).await;
 		let session =
@@ -2517,13 +2559,14 @@ mod tests {
 	}
 
 	/// A stalled bidi header must not block a SUBSCRIBE on the next stream.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn a_silent_bidi_does_not_hold_up_the_next() {
 		const VERSION: Version = Version::Draft19;
 		let mut subscribe = Vec::new();
 		let mut encoder = crate::coding::Encoder::new(&mut subscribe, VERSION.into());
 		encoder.varint(ietf::Subscribe::ID).unwrap();
 		ietf::Subscribe {
+			new_group: None,
 			request_id: RequestId(1),
 			track_namespace: crate::Path::new("room"),
 			track_name: "video".into(),
@@ -2549,7 +2592,7 @@ mod tests {
 				.with_incoming_bidis(vec![stalled, subscribe.clone()]);
 			let driver = bidi_driver(session, Some(origin.consume()));
 			let subscribed = Box::pin(async { while track.subscription_changed().await.unwrap().is_none() {} });
-			let result = moq_net_sim::timeout(
+			let result = moq_clock::timeout(
 				std::time::Duration::from_secs(10),
 				futures::future::select(driver, subscribed),
 			)
@@ -2563,7 +2606,7 @@ mod tests {
 	}
 
 	/// Child tasks must report malformed and unknown requests to the session driver.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn invalid_bidi_requests_still_end_the_session() {
 		for id in [ietf::Subscribe::ID, 0x3f] {
 			let mut header = Vec::new();
@@ -2572,7 +2615,7 @@ mod tests {
 			encoder.slice(&[0, 0]); // Complete, empty body: malformed for SUBSCRIBE.
 			let session =
 				crate::lite::test_transport::ScriptedSession::new(Vec::new()).with_incoming_bidis(vec![header]);
-			let err = moq_net_sim::timeout(std::time::Duration::from_secs(10), bidi_driver(session, None))
+			let err = moq_clock::timeout(std::time::Duration::from_secs(10), bidi_driver(session, None))
 				.await
 				.expect("invalid request did not end the session")
 				.expect_err("invalid request was accepted");
@@ -2587,7 +2630,7 @@ mod tests {
 	/// Start a draft-19 session with SETUP already settled, so bidi requests run immediately.
 	fn bidi_driver(session: crate::lite::test_transport::ScriptedSession, publish: Option<origin::Consumer>) -> Driver {
 		start(Config {
-			runtime: crate::time::Clock::sim(),
+			runtime: crate::time::sim(),
 			session,
 			setup: None,
 			request_id_max: None,
@@ -2611,7 +2654,7 @@ mod tests {
 	}
 
 	/// A non-zero subgroup is refused on its own stream, never by closing the session.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn a_non_zero_subgroup_is_stopped_without_closing_the_session() {
 		let (log, result) = dispatch_uni(Version::Draft19, subgroup_header(Version::Draft19, 7, 1).await, None).await;
 
@@ -2630,7 +2673,7 @@ mod tests {
 	}
 
 	/// Padding is read and dropped: no STOP_SENDING, and the session stays up.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn a_padding_stream_is_discarded() {
 		for version in [
 			Version::Draft18,
@@ -2654,7 +2697,7 @@ mod tests {
 	/// A server waiting on the client's SETUP holds the padding and group streams that beat
 	/// it, then classifies them once the session starts. The drafts say to buffer early
 	/// data; rejecting it reached the wire as INTERNAL_ERROR.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn uni_streams_before_setup_are_held_until_it_lands() {
 		const VERSION: Version = Version::Draft19;
 
@@ -2687,7 +2730,7 @@ mod tests {
 
 	/// An unknown or invalid stream type MUST close the session, so it stops nothing on its own:
 	/// the session close takes the stream with it.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn an_unknown_uni_type_closes_the_session() {
 		for (version, kind) in [
 			(Version::Draft19, 0),
@@ -2711,7 +2754,7 @@ mod tests {
 	}
 
 	/// The bidi dispatcher closes the session for an unknown full-width message type.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn an_unknown_bidi_type_closes_the_session() {
 		for version in [
 			Version::Draft17,
@@ -2730,7 +2773,7 @@ mod tests {
 					crate::lite::test_transport::ScriptedSession::new(Vec::new()).with_incoming_bidis(vec![payload]);
 				let log = session.log.clone();
 				let (driver, _goaway) = start(Config {
-					runtime: crate::time::Clock::sim(),
+					runtime: crate::time::sim(),
 					session,
 					setup: None,
 					request_id_max: None,
@@ -2751,7 +2794,7 @@ mod tests {
 				})
 				.unwrap();
 
-				let err = moq_net_sim::timeout(std::time::Duration::from_secs(10), driver)
+				let err = moq_clock::timeout(std::time::Duration::from_secs(10), driver)
 					.await
 					.expect("unknown bidi type must end the session")
 					.expect_err("unknown bidi type must fail the session");
@@ -2768,7 +2811,7 @@ mod tests {
 		}
 	}
 
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn an_invalid_group_order_closes_the_session() {
 		for version in [Version::Draft18, Version::Draft21, Version::Draft22] {
 			for (value, nested) in [
@@ -2798,7 +2841,7 @@ mod tests {
 					crate::lite::test_transport::ScriptedSession::new(Vec::new()).with_incoming_bidis(vec![payload]);
 				let log = session.log.clone();
 				let (driver, _goaway) = start(Config {
-					runtime: crate::time::Clock::sim(),
+					runtime: crate::time::sim(),
 					session,
 					setup: None,
 					request_id_max: None,
@@ -2818,7 +2861,7 @@ mod tests {
 					limits: Default::default(),
 				})
 				.unwrap();
-				let err = moq_net_sim::timeout(std::time::Duration::from_secs(10), driver)
+				let err = moq_clock::timeout(std::time::Duration::from_secs(10), driver)
 					.await
 					.expect("invalid GROUP_ORDER must close the session")
 					.expect_err("invalid GROUP_ORDER must fail");
@@ -2885,7 +2928,7 @@ mod tests {
 	///
 	/// Driven through `start` because only the full loop shows the consequence, the read
 	/// task propagating the classifier's error.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn a_repeated_publish_namespace_done_does_not_end_the_session() {
 		const VERSION: Version = Version::Draft14;
 
@@ -2900,7 +2943,7 @@ mod tests {
 			.expect("open the control stream");
 
 		let (driver, _goaway) = start(Config {
-			runtime: crate::time::Clock::sim(),
+			runtime: crate::time::sim(),
 			session,
 			setup: Some(setup),
 			request_id_max: None,
@@ -2920,14 +2963,14 @@ mod tests {
 			extensions: Default::default(),
 		})
 		.expect("start the session");
-		let driver = moq_net_sim::spawn(driver);
+		let driver = moq_clock::sim::spawn(driver);
 
 		let accepted = publish_namespace_ok(RequestId(1)).await;
 		for _ in 0..ANNOUNCE_TURNS {
 			if occurrences(&log, &accepted) > 0 && consumer.get_broadcast("room/host").is_none() {
 				break;
 			}
-			moq_net_sim::sleep(std::time::Duration::from_millis(1)).await;
+			moq_clock::sleep(std::time::Duration::from_millis(1)).await;
 		}
 
 		assert_eq!(occurrences(&log, &accepted), 1, "the advertisement was not accepted");
@@ -2943,6 +2986,7 @@ mod tests {
 	/// `token`, framed as a control message.
 	fn subscribe_with_token(version: Version, token: &[u8]) -> Vec<u8> {
 		let msg = ietf::Subscribe {
+			new_group: None,
 			request_id: RequestId(0),
 			track_namespace: crate::Path::new("room"),
 			track_name: "video".into(),
@@ -2983,7 +3027,7 @@ mod tests {
 	/// A request's AUTHORIZATION TOKEN decodes by the SETUP option's rules, so one this
 	/// endpoint cannot use closes the session with the draft's code. Draft-14 carries the
 	/// request on the control stream, a strict draft on its own stream.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn a_request_token_that_cannot_be_used_closes_the_session() {
 		for version in [Version::Draft14, Version::Draft22] {
 			for (token, expected, why) in [
@@ -3019,7 +3063,7 @@ mod tests {
 				};
 				let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 				let (driver, _goaway) = start(Config {
-					runtime: crate::time::Clock::sim(),
+					runtime: crate::time::sim(),
 					session,
 					setup,
 					request_id_max: None,
@@ -3040,7 +3084,7 @@ mod tests {
 				})
 				.unwrap();
 
-				let err = moq_net_sim::timeout(std::time::Duration::from_secs(10), driver)
+				let err = moq_clock::timeout(std::time::Duration::from_secs(10), driver)
 					.await
 					.unwrap_or_else(|_| panic!("{version:?} {why}: the session stayed up"))
 					.expect_err("the token must fail the session");
@@ -3050,6 +3094,427 @@ mod tests {
 					vec![(expected.to_code(), err.to_string())],
 					"{version:?} {why}"
 				);
+			}
+		}
+	}
+
+	/// A framed message: its type, a `u16` length, then `body`.
+	fn frame(version: Version, id: u64, body: &[u8]) -> Vec<u8> {
+		let mut buf = Vec::new();
+		let mut w = crate::coding::Encoder::new(&mut buf, version.into());
+		w.varint(id).unwrap();
+		w.u16(body.len() as u16);
+		w.slice(body);
+		buf
+	}
+
+	/// The peer's SETUP stream: a SETUP with `params`, then `after`.
+	fn setup_stream(version: Version, params: ietf::Parameters, after: &[u8]) -> Vec<u8> {
+		let mut buf = Vec::new();
+		setup::Setup {
+			parameters: params.encode_bytes(version).unwrap(),
+		}
+		.encode(
+			&mut crate::coding::Encoder::new(&mut buf, version.into()),
+			crate::Version::Ietf(version),
+		)
+		.unwrap();
+		buf.extend_from_slice(after);
+		buf
+	}
+
+	/// A GOAWAY with an empty New Session URI, and on draft-18 the control stream's Request ID.
+	fn goaway(version: Version, request_id: Option<u64>) -> Vec<u8> {
+		let msg = ietf::GoAway {
+			new_session_uri: "".into(),
+			timeout: 0,
+			request_id: request_id.map(RequestId),
+		};
+		let mut body = Vec::new();
+		msg.encode_msg(&mut crate::coding::Encoder::new(&mut body, version.into()), version)
+			.unwrap();
+		frame(version, ietf::GoAway::ID, &body)
+	}
+
+	/// The session code a client closes with after reading `stream` as the server's SETUP
+	/// stream, or `None` while the session stays up.
+	async fn client_reads_setup_stream(version: Version, stream: Vec<u8>) -> Option<SessionError> {
+		let session = crate::lite::test_transport::ScriptedSession::new(Vec::new()).with_incoming_unis(vec![stream]);
+		// The peer FINs its stream after the script, so a message it cuts short is malformed.
+		session.close(crate::lite::test_transport::Close::Fin);
+		let (_, result) = drive_unis(version, session, None, None).await;
+		result.map(|result| SessionError::from(&result.expect_err("the loop ended without an error")))
+	}
+
+	/// What a server may not send in its SETUP closes the session with the draft's code.
+	#[moq_clock::test]
+	async fn a_server_setup_with_path_or_authority_closes_the_session() {
+		for version in [Version::Draft18, Version::Draft21] {
+			for (param, expected) in [
+				(ietf::ParameterBytes::Path, SessionError::InvalidPath),
+				(ietf::ParameterBytes::Authority, SessionError::InvalidAuthority),
+			] {
+				let mut params = ietf::Parameters::default();
+				params.set_bytes(param, b"a".to_vec());
+				let closed = client_reads_setup_stream(version, setup_stream(version, params, &[])).await;
+				assert_eq!(closed, Some(expected), "{version:?}");
+			}
+		}
+	}
+
+	/// The server's AUTHORIZATION TOKEN is decoded even though a client has no use for it: a
+	/// malformed one closes the session, and a registration overflowing our cache of 0 is
+	/// read as the value it carries (draft-21 section 9.1.4).
+	#[moq_clock::test]
+	async fn a_server_setup_token_decodes_by_the_setup_rules() {
+		for version in [Version::Draft18, Version::Draft21] {
+			for (token, expected) in [
+				// An Alias Type of 4 does not exist.
+				(&[0x04][..], Some(SessionError::KeyValueFormatting)),
+				// REGISTER alias 7, type 0, empty value.
+				(&[0x01, 0x07, 0x00][..], None),
+			] {
+				let mut params = ietf::Parameters::default();
+				params.set_bytes(ietf::ParameterBytes::AuthorizationToken, token.to_vec());
+				let closed = client_reads_setup_stream(version, setup_stream(version, params, &[])).await;
+				assert_eq!(closed, expected, "{version:?} {token:?}");
+			}
+		}
+	}
+
+	/// The SETUP stream carries one GOAWAY and nothing else: anything more, or a GOAWAY that
+	/// is malformed, closes the session as a PROTOCOL_VIOLATION. One GOAWAY leaves it up.
+	#[moq_clock::test]
+	async fn the_setup_stream_carries_at_most_one_goaway() {
+		for version in [Version::Draft18, Version::Draft21] {
+			let request_id = (version == Version::Draft18).then_some(0);
+			let one = goaway(version, request_id);
+			let two = [one.clone(), one.clone()].concat();
+			let unknown = frame(version, 0x3f, &[]);
+			let after_goaway = [one.clone(), unknown.clone()].concat();
+			let mut oversized = Vec::new();
+			let mut w = crate::coding::Encoder::new(&mut oversized, version.into());
+			w.string(&"x".repeat(8193)).unwrap();
+			w.varint(0u64).unwrap();
+			let oversized = frame(version, ietf::GoAway::ID, &oversized);
+			// The length covers the URI but not the timeout after it.
+			let short = frame(version, ietf::GoAway::ID, &[0]);
+			let mut truncated = one.clone();
+			truncated.pop();
+
+			for (after, expected, why) in [
+				(&one, None, "one GOAWAY"),
+				(&two, Some(SessionError::ProtocolViolation), "two GOAWAYs"),
+				(&unknown, Some(SessionError::ProtocolViolation), "an unknown message"),
+				(
+					&after_goaway,
+					Some(SessionError::ProtocolViolation),
+					"an unknown message after GOAWAY",
+				),
+				(&oversized, Some(SessionError::ProtocolViolation), "an 8193 byte URI"),
+				(
+					&short,
+					Some(SessionError::ProtocolViolation),
+					"a body short of its fields",
+				),
+				(
+					&truncated,
+					Some(SessionError::ProtocolViolation),
+					"a body cut short by FIN",
+				),
+			] {
+				let stream = setup_stream(version, ietf::Parameters::default(), after);
+				let closed = client_reads_setup_stream(version, stream).await;
+				assert_eq!(closed, expected, "{version:?}: {why}");
+			}
+		}
+	}
+
+	/// A second GOAWAY arriving with the first closes the session before the first surfaces,
+	/// so an application leaving over it cannot close first, without our code.
+	#[moq_clock::test]
+	async fn a_goaway_with_more_behind_it_never_surfaces() {
+		use crate::transport::poll::Session as _;
+
+		for version in [Version::Draft18, Version::Draft21] {
+			let request_id = (version == Version::Draft18).then_some(0);
+			let two = [goaway(version, request_id), goaway(version, request_id)].concat();
+			let mut session =
+				crate::lite::test_transport::ScriptedSession::new(Vec::new()).with_incoming_unis(vec![two]);
+			let stream = std::future::poll_fn(|cx| session.poll_accept_uni(cx)).await.unwrap();
+			let (handle, protocol) = crate::goaway::Handle::new(false);
+
+			let err = read_goaways(Reader::new(stream, version), version, true, protocol)
+				.await
+				.expect_err("a second GOAWAY is fatal");
+			assert_eq!(SessionError::from(&err), SessionError::ProtocolViolation, "{version:?}");
+			assert!(
+				handle.consumer().peek().is_none(),
+				"{version:?}: the first GOAWAY surfaced"
+			);
+		}
+	}
+
+	/// A fatal error closes the session before its streams drop. A reset of our SETUP stream
+	/// reaching a strict peer first has it close over that, and it never sees our code.
+	#[moq_clock::test]
+	async fn the_session_closes_before_its_streams_reset() {
+		const VERSION: Version = Version::Draft21;
+		let mut params = ietf::Parameters::default();
+		params.set_bytes(ietf::ParameterBytes::Path, b"a".to_vec());
+		let session = crate::lite::test_transport::ScriptedSession::new(Vec::new())
+			.with_incoming_unis(vec![setup_stream(VERSION, params, &[])]);
+		let log = session.log.clone();
+		let (driver, _goaway) = start(Config {
+			runtime: crate::time::sim(),
+			session,
+			setup: None,
+			request_id_max: None,
+			limits: Default::default(),
+			client: true,
+			publish: None,
+			subscribe: None,
+			peer_hop: None,
+			cost: None,
+			version: VERSION,
+			path: None,
+			authority: None,
+			peer_setup_stream: None,
+			peer_declared: None,
+			auth: crate::auth::Handle::new(false),
+			early_unis: Vec::new(),
+			extensions: Default::default(),
+		})
+		.unwrap();
+		let _ = moq_clock::timeout(std::time::Duration::from_secs(10), driver).await;
+
+		let closes = log.closes();
+		assert_eq!(closes.len(), 1, "{closes:?}");
+		assert_eq!(SessionError::from_code(closes[0].0), SessionError::InvalidPath);
+		let before = log.before_close().unwrap();
+		assert!(
+			!before
+				.trail
+				.iter()
+				.any(|(_, sent)| matches!(sent, crate::lite::test_transport::Sent::Reset(_))),
+			"reset before the close: {before:?}"
+		);
+		assert!(before.stops.is_empty(), "STOP_SENDING before the close: {before:?}");
+	}
+
+	/// A draft-18 GOAWAY names one of the receiver's own Request IDs, so one with the sender's
+	/// parity closes the session with INVALID_REQUEST_ID rather than redirecting it, and one
+	/// without a Request ID closes it as a PROTOCOL_VIOLATION.
+	#[moq_clock::test]
+	async fn a_draft18_goaway_request_id_has_the_receivers_parity() {
+		const VERSION: Version = Version::Draft18;
+		// The loop runs as a client, whose Request IDs are even.
+		for (request_id, expected) in [
+			(Some(0), None),
+			(Some(4), None),
+			(Some(1), Some(SessionError::InvalidRequestId)),
+			(Some(5), Some(SessionError::InvalidRequestId)),
+			// Required on the control stream.
+			(None, Some(SessionError::ProtocolViolation)),
+		] {
+			let stream = setup_stream(VERSION, ietf::Parameters::default(), &goaway(VERSION, request_id));
+			let closed = client_reads_setup_stream(VERSION, stream).await;
+			assert_eq!(closed, expected, "Request ID {request_id:?}");
+		}
+	}
+
+	/// We send a draft-18 GOAWAY naming the receiver's first Request ID: odd from a client,
+	/// even from a server, so a strict peer does not close over its parity.
+	#[moq_clock::test]
+	async fn our_draft18_goaway_names_the_receivers_parity() {
+		const VERSION: Version = Version::Draft18;
+		for client in [false, true] {
+			let session = crate::lite::test_transport::ScriptedSession::new(Vec::new());
+			let log = session.log.clone();
+			let (handle, goaway_protocol) = crate::goaway::Handle::new(!client);
+			let _setup = moq_clock::sim::spawn(run_setup(
+				crate::time::sim(),
+				session,
+				VERSION,
+				client,
+				None,
+				None,
+				Hop::new(1).unwrap(),
+				None,
+				Default::default(),
+				goaway_protocol,
+			));
+			handle.producer().send(crate::goaway::Goaway::new()).unwrap();
+			moq_clock::sleep(std::time::Duration::from_millis(1)).await;
+
+			let sent = goaway(VERSION, Some(u64::from(client)));
+			assert_eq!(occurrences(&log, &sent), 1, "client={client}");
+		}
+	}
+
+	/// Drive a session that reads `payloads` as bidi streams the peer opened, and return the
+	/// code it closed with, or `None` while it stays up.
+	///
+	/// Read off the transport, since a request task closes the session itself and the
+	/// scripted transport does not end the driver for it.
+	async fn serve_bidis(version: Version, client: bool, payloads: Vec<Vec<u8>>) -> Option<SessionError> {
+		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let session = crate::lite::test_transport::ScriptedSession::new(Vec::new()).with_incoming_bidis(payloads);
+		// The peer FINs each stream after its script, so a message it cuts short is malformed.
+		session.close(crate::lite::test_transport::Close::Fin);
+		let log = session.log.clone();
+		let (driver, _goaway) = start(Config {
+			runtime: crate::time::sim(),
+			session,
+			setup: None,
+			request_id_max: None,
+			limits: Default::default(),
+			client,
+			publish: Some(origin.consume()),
+			subscribe: None,
+			peer_hop: None,
+			cost: None,
+			version,
+			path: None,
+			authority: None,
+			peer_setup_stream: None,
+			peer_declared: Some(peer::Peer::default()),
+			auth: crate::auth::Handle::new(false),
+			early_unis: Vec::new(),
+			extensions: Default::default(),
+		})
+		.unwrap();
+		let _ = moq_clock::timeout(std::time::Duration::from_secs(10), driver).await;
+		let closes = log.closes();
+		assert!(closes.len() <= 1, "closed more than once: {closes:?}");
+		closes.first().map(|(code, _)| SessionError::from_code(*code))
+	}
+
+	/// A malformed request closes the session with the draft's code: a Request ID of the
+	/// wrong parity, a namespace or name outside its bounds, or a body that does not fill
+	/// its length.
+	#[moq_clock::test]
+	async fn a_malformed_request_closes_the_session() {
+		for version in [Version::Draft18, Version::Draft21] {
+			let subscribe = |body: &[u8]| frame(version, ietf::Subscribe::ID, body);
+			// Request ID 1, the namespace "n", the name "x", and no parameters.
+			let valid = [1, 1, 1, b'n', 1, b'x', 0];
+
+			let mut oversized_name = vec![1, 1];
+			let mut w = crate::coding::Encoder::new(&mut oversized_name, version.into());
+			w.bytes(&[b'n'; 4096]).unwrap();
+			w.bytes(b"x").unwrap();
+			w.varint(0u64).unwrap();
+
+			let mut oversized_prefix = vec![1, 1];
+			let mut w = crate::coding::Encoder::new(&mut oversized_prefix, version.into());
+			w.bytes(&[b'n'; 4097]).unwrap();
+			w.varint(0u64).unwrap();
+
+			let mut truncated = subscribe(&valid);
+			truncated.pop();
+
+			for (payload, expected, why) in [
+				(
+					frame(version, ietf::SubscribeNamespace::ID, &[0, 0, 0]),
+					SessionError::InvalidRequestId,
+					"a Request ID with our parity",
+				),
+				(
+					subscribe(&[1, 1, 0, 1, b'x', 0]),
+					SessionError::ProtocolViolation,
+					"an empty namespace field",
+				),
+				(
+					subscribe(&oversized_name),
+					SessionError::ProtocolViolation,
+					"a 4097 byte full track name",
+				),
+				(
+					frame(version, ietf::SUBSCRIBE_TRACKS_ID, &oversized_prefix),
+					SessionError::ProtocolViolation,
+					"a 4097 byte SUBSCRIBE_TRACKS prefix",
+				),
+				(
+					subscribe(&[&valid[..], &[0]].concat()),
+					SessionError::ProtocolViolation,
+					"a body longer than its fields",
+				),
+				(truncated, SessionError::ProtocolViolation, "a body cut short by FIN"),
+			] {
+				let closed = serve_bidis(version, true, vec![payload]).await;
+				assert_eq!(closed, Some(expected), "{version:?}: {why}");
+			}
+		}
+	}
+
+	/// A SUBSCRIBE_NAMESPACE for every namespace, then `after` on the same stream.
+	fn subscribe_namespace_then(version: Version, request_id: u64, after: &[u8]) -> Vec<u8> {
+		let mut body = Vec::new();
+		ietf::SubscribeNamespace {
+			request_id: RequestId(request_id),
+			namespace: crate::Path::new(""),
+			hidden: false,
+		}
+		.encode_msg(&mut crate::coding::Encoder::new(&mut body, version.into()), version)
+		.unwrap();
+		[frame(version, ietf::SubscribeNamespace::ID, &body), after.to_vec()].concat()
+	}
+
+	/// A request stream may carry one GOAWAY, migrating that request alone: it leaves the
+	/// session up, even on two streams at once. A second on one stream, or an unknown
+	/// message, closes the session as a PROTOCOL_VIOLATION.
+	#[moq_clock::test]
+	async fn a_request_stream_carries_at_most_one_goaway() {
+		for version in [Version::Draft18, Version::Draft21] {
+			let one = goaway(version, None);
+			let two = [one.clone(), one.clone()].concat();
+
+			let distinct = vec![
+				subscribe_namespace_then(version, 1, &one),
+				subscribe_namespace_then(version, 3, &one),
+			];
+			assert!(
+				serve_bidis(version, true, distinct).await.is_none(),
+				"{version:?}: a GOAWAY on each of two streams"
+			);
+
+			let mut malformed = vec![(two, "two GOAWAYs"), (frame(version, 0x7e, &[]), "an unknown message")];
+			// Draft-18's Request ID belongs on the control stream only.
+			if version == Version::Draft18 {
+				malformed.push((goaway(version, Some(0)), "a GOAWAY with a Request ID"));
+			}
+			for (after, why) in malformed {
+				let closed = serve_bidis(version, true, vec![subscribe_namespace_then(version, 1, &after)]).await;
+				assert_eq!(closed, Some(SessionError::ProtocolViolation), "{version:?}: {why}");
+			}
+		}
+	}
+
+	/// Only a server may name a new session in a request stream GOAWAY: a client that does
+	/// closes the session as a PROTOCOL_VIOLATION.
+	#[moq_clock::test]
+	async fn a_request_stream_goaway_redirects_only_from_a_server() {
+		for version in [Version::Draft18, Version::Draft21] {
+			let mut body = Vec::new();
+			ietf::GoAway {
+				new_session_uri: "https://example.com/moq".into(),
+				timeout: 0,
+				request_id: None,
+			}
+			.encode_msg(&mut crate::coding::Encoder::new(&mut body, version.into()), version)
+			.unwrap();
+			let redirect = frame(version, ietf::GoAway::ID, &body);
+
+			// A server's Request IDs are odd and a client's even.
+			for (client, request_id, expected) in [(true, 1, None), (false, 0, Some(SessionError::ProtocolViolation))] {
+				let closed = serve_bidis(
+					version,
+					client,
+					vec![subscribe_namespace_then(version, request_id, &redirect)],
+				)
+				.await;
+				assert_eq!(closed, expected, "{version:?}: served as client={client}");
 			}
 		}
 	}

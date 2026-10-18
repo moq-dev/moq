@@ -82,7 +82,12 @@ function readCanvas(canvas: HTMLCanvasElement | null) {
 		}
 	}
 
-	return { painted, ...Pattern.decode(pixels, canvas.width, canvas.height) };
+	return {
+		painted,
+		frameWidth: canvas.width,
+		frameHeight: canvas.height,
+		...Pattern.decode(pixels, canvas.width, canvas.height),
+	};
 }
 
 /**
@@ -136,6 +141,10 @@ export function attach(el: MoqWatch): () => void {
 			...readCanvas(el.querySelector("canvas")),
 			videoFrames: el.video.out.stats.peek()?.frameCount ?? 0,
 			videoTimestamp: el.video.out.timestamp.peek() ?? undefined,
+			videoCodedWidth: el.video.out.frame.peek()?.codedWidth,
+			videoCodedHeight: el.video.out.frame.peek()?.codedHeight,
+			videoTrack: el.catalog?.video?.renditions.video?.track ?? "video",
+			videoCodec: el.catalog?.video?.renditions.video?.codec,
 			hasAudio: el.catalog?.audio !== undefined,
 			audioBytes: el.audio.out.stats.peek()?.bytesReceived ?? 0,
 			audioContext: el.audio.out.context.peek()?.state,

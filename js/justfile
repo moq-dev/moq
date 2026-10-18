@@ -37,7 +37,7 @@ workers:
 # Auto-fix lint and formatting issues in workspaces, harnesses, docs and demos.
 fix:
     bun install
-    bun biome check --write . ../test ../doc ../demo
+    bun biome check --write . ../bench/browser ../test ../doc ../demo
 
 # Run all unit tests.
 test:
@@ -111,3 +111,8 @@ audio-warmup-bench:
 p2p-bench:
     bun install --frozen-lockfile
     bun p2p/bench/transport.ts
+
+# Sweep E2EE frame size against writes in flight through the WebCrypto pump.
+e2ee-bench:
+    bun install --frozen-lockfile
+    bun e2ee/bench/pump.ts

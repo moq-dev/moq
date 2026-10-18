@@ -50,7 +50,7 @@ async fn abandoned_fetch_reaches_the_publisher(version: &str, relays: u64, stage
 	let broadcast = nodes[0].create_broadcast("room").unwrap();
 	let mut dynamic = broadcast.dynamic();
 	broadcast.announce(Default::default()).unwrap();
-	moq_net_sim::sleep(Duration::from_secs(1)).await;
+	moq_clock::sleep(Duration::from_secs(1)).await;
 
 	let consumer = nodes[relays as usize]
 		.consume()
@@ -75,7 +75,7 @@ async fn abandoned_fetch_reaches_the_publisher(version: &str, relays: u64, stage
 	match stage {
 		Stage::Unanswered => {
 			drop(waiting);
-			moq_net_sim::timeout(
+			moq_clock::timeout(
 				Duration::from_secs(5),
 				kio::wait(|waiter| request.demand().poll_unused(waiter)),
 			)
@@ -93,7 +93,7 @@ async fn abandoned_fetch_reaches_the_publisher(version: &str, relays: u64, stage
 			drop(fetched);
 
 			// The publisher stops serving the group: nobody reads it any more.
-			moq_net_sim::timeout(Duration::from_secs(5), group.demand().unused())
+			moq_clock::timeout(Duration::from_secs(5), group.demand().unused())
 				.await
 				.unwrap_or_else(|_| panic!("{ctx}: the publisher still serves the fetch"))
 				.unwrap();
@@ -101,7 +101,7 @@ async fn abandoned_fetch_reaches_the_publisher(version: &str, relays: u64, stage
 			// No hop cached the head as the whole group: a fresh fetch reads it all.
 			group.write_frame(Timestamp::ZERO, Bytes::from_static(b"tail")).unwrap();
 			group.finish().unwrap();
-			let mut fetched = moq_net_sim::timeout(Duration::from_secs(5), track.fetch_group(0, None))
+			let mut fetched = moq_clock::timeout(Duration::from_secs(5), track.fetch_group(0, None))
 				.await
 				.unwrap_or_else(|_| panic!("{ctx}: the refetch stalled"))
 				.unwrap();
@@ -127,13 +127,13 @@ async fn abandoned_fetch_reaches_the_publisher(version: &str, relays: u64, stage
 			const LATENCY: Duration = Duration::from_millis(100);
 			_pairs.last().unwrap().client_transport.set_latency(LATENCY);
 			group.finish().unwrap();
-			moq_net_sim::sleep(LATENCY).await;
+			moq_clock::sleep(LATENCY).await;
 			drop(fetched);
-			moq_net_sim::sleep(Duration::from_secs(1)).await;
+			moq_clock::sleep(Duration::from_secs(1)).await;
 
 			// The publisher can no longer serve it, so only a cached copy answers.
 			group.abort(moq_net::Error::Cancel).unwrap();
-			let mut fetched = moq_net_sim::timeout(Duration::from_secs(5), track.fetch_group(0, None))
+			let mut fetched = moq_clock::timeout(Duration::from_secs(5), track.fetch_group(0, None))
 				.await
 				.unwrap_or_else(|_| panic!("{ctx}: the refetch stalled"))
 				.unwrap_or_else(|err| panic!("{ctx}: the whole group was not cached: {err}"));
@@ -154,12 +154,12 @@ async fn abandoned_fetches_reach_the_publisher(version: &str) {
 	}
 }
 
-#[moq_net_sim::test]
+#[moq_clock::test]
 async fn abandoned_fetch_reaches_the_publisher_lite05() {
 	abandoned_fetches_reach_the_publisher("moq-lite-05").await;
 }
 
-#[moq_net_sim::test]
+#[moq_clock::test]
 async fn abandoned_fetch_reaches_the_publisher_lite06() {
 	abandoned_fetches_reach_the_publisher("moq-lite-06").await;
 }
@@ -176,7 +176,7 @@ async fn a_refetch_within_the_linger_stays_on_the_relay(version: &str) {
 	let broadcast = publisher.create_broadcast("room").unwrap();
 	let mut dynamic = broadcast.dynamic();
 	broadcast.announce(Default::default()).unwrap();
-	moq_net_sim::sleep(Duration::from_secs(1)).await;
+	moq_clock::sleep(Duration::from_secs(1)).await;
 
 	let consumer = relay.consume().request_broadcast("room", None).await.unwrap();
 	let mut waiting = Box::pin(consumer.track("video").unwrap().fetch_group(0, None));
@@ -202,7 +202,7 @@ async fn a_refetch_within_the_linger_stays_on_the_relay(version: &str) {
 	group.abort(moq_net::Error::Cancel).unwrap();
 
 	// The track goes unread between segments, well inside the linger.
-	moq_net_sim::sleep(Duration::from_secs(5)).await;
+	moq_clock::sleep(Duration::from_secs(5)).await;
 
 	let mut refetch = Box::pin(consumer.track("video").unwrap().fetch_group(0, None));
 	let track_request = std::pin::pin!(dynamic.requested_track());
@@ -220,17 +220,17 @@ async fn a_refetch_within_the_linger_stays_on_the_relay(version: &str) {
 	assert_eq!(&fetched.read_frame().await.unwrap().unwrap().payload[..], b"segment");
 }
 
-#[moq_net_sim::test]
+#[moq_clock::test]
 async fn a_refetch_within_the_linger_stays_on_the_relay_lite06() {
 	a_refetch_within_the_linger_stays_on_the_relay("moq-lite-06").await;
 }
 
-#[moq_net_sim::test]
+#[moq_clock::test]
 async fn a_refetch_within_the_linger_stays_on_the_relay_lite07() {
 	a_refetch_within_the_linger_stays_on_the_relay("moq-lite-07-wip").await;
 }
 
-#[moq_net_sim::test]
+#[moq_clock::test]
 async fn a_refetch_within_the_linger_stays_on_the_relay_ietf19() {
 	a_refetch_within_the_linger_stays_on_the_relay("moq-transport-19").await;
 }

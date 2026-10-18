@@ -1171,9 +1171,8 @@ mod tests {
 	/// has to run to a clean end: the consumer reads it out and then sees the
 	/// track finish, rather than the group going away under it.
 	///
-	/// A rung consumer is demand on its own, so `live` starts the moment the
-	/// track is taken below and produces group 0 from the still-open source
-	/// group. The fetch below then resolves straight from the track cache. What
+	/// The held query is demand, so `live` starts the moment the track is
+	/// queried below and produces group 0 from the still-open source group. The fetch below then resolves straight from the track cache. What
 	/// that pins down is `live` riding out the group it is part way through after
 	/// retirement, plus `serve` joining its two halves rather than letting either
 	/// cancel the other. [`retirement_waits_for_an_unclaimed_fetch`] covers the
@@ -1212,7 +1211,8 @@ mod tests {
 		// wait until the live path has claimed group 0, so the fetch below can only
 		// resolve from the track cache and retirement finds that live group open.
 		let rung = consumer.track("video/120p").unwrap();
-		rung.query().await.unwrap();
+		let mut query = rung.query();
+		(&mut query).await.unwrap();
 		while rung.latest() != Some(0) {
 			tokio::task::yield_now().await;
 		}
@@ -1242,9 +1242,10 @@ mod tests {
 		transcoder.abort();
 	}
 
-	/// A ladder nobody watches holds nothing of its source. A held track handle is
-	/// interest in the track all the way to its publisher, so a transcoder that
-	/// kept one per idle rung would stop an on-demand source from ever idling.
+	/// A ladder nobody watches holds nothing of its source. A held query or
+	/// subscription is interest in the track all the way to its publisher, so a
+	/// transcoder that kept one per idle rung would stop an on-demand source from
+	/// ever idling.
 	#[tokio::test]
 	async fn an_idle_rung_leaves_its_source_unused() {
 		let source = source_catalog(320, 240);
@@ -1275,17 +1276,18 @@ mod tests {
 		.await;
 		assert!(!demand.is_used(), "the published ladder holds its source");
 
-		// A rung consumer is demand on its own, so the rung starts encoding and
-		// subscribes to the source.
+		// A held query is demand, so the rung starts encoding and subscribes to the
+		// source.
 		let rung = consumer.track("video/120p").unwrap();
-		rung.query().await.unwrap();
+		let mut query = rung.query();
+		(&mut query).await.unwrap();
 		tokio::time::timeout(std::time::Duration::from_secs(5), demand.used())
 			.await
 			.expect("the rung never asked for its source")
 			.unwrap();
 
 		// Its task outlives the viewer, idle until the next one.
-		drop(rung);
+		drop(query);
 		tokio::time::timeout(std::time::Duration::from_secs(5), demand.unused())
 			.await
 			.expect("the idle rung kept its source wanted")
@@ -1301,8 +1303,8 @@ mod tests {
 	/// the handler drained its loop to keep.
 	///
 	/// Reaching the fetch handler takes a group the live path cannot produce.
-	/// Holding the consumer needed to fetch is itself the demand that starts the
-	/// live path, and the live path serves the same sequences from the same
+	/// The query held to resolve the track is demand that starts the live path,
+	/// and the live path serves the same sequences from the same
 	/// source, so the source publishes no group at all and serves this one
 	/// through a [`moq_net::track::Dynamic`] instead. That handle also parks the
 	/// fetch at exactly the point in question: past the rung's handler, before
@@ -1341,7 +1343,8 @@ mod tests {
 		// Resolving the info waits for the transcoder to accept the track, so the
 		// fetch below reaches a rung that is already serving.
 		let rung = consumer.track("video/120p").unwrap();
-		rung.query().await.unwrap();
+		let mut query = rung.query();
+		(&mut query).await.unwrap();
 		assert!(
 			source._track.subscription_changed().await.unwrap().is_some(),
 			"the rung never subscribed to the live source",
@@ -1576,7 +1579,9 @@ mod tests {
 			})
 			.await;
 
+			// A held query keeps the live path encoding across both fetches.
 			let rung = consumer.track("video/120p").unwrap();
+			let _query = rung.query();
 			let mut groups = Vec::new();
 			for sequence in 0..2 {
 				let mut fetched = rung.fetch_group(sequence, None).await.unwrap();

@@ -13,11 +13,11 @@ counter rates and PID quiet times.
 Decided while planning [#1838](https://github.com/moq-dev/moq/issues/1838):
 
 The quest audit confirmed this stays in m2 and owns TS counter serialization
-and integration. Rust reporters in m1 supplies only the generic per-rendition
+and integration. Rust reporters supplies only the generic per-rendition
 plumbing; it does not implement this quest's `mpegts` payloads.
 
 - **Surface through the stats plumbing**, as the issue settled. The
-  [media stats schema](/quest/m2/stats/schema.md) settles the shape: an
+  [media stats schema](/doc/concept/stats.md#media-reports) settles the shape: an
   import flattens `ts::stats::Snapshot` into the publisher's stats snapshot under the
   catalog's `mpegts` key, the counters stay owned by moq-mux beside
   `ts::Ext`, and `hang` stays TS-free.
@@ -25,11 +25,21 @@ plumbing; it does not implement this quest's `mpegts` payloads.
   [#5360](https://github.com/moq-dev/moq/issues/5360)). An export is a viewer,
   so `moq export ts --echo <name>` folds `ts::stats::Snapshot` into its
   solicited `.echo` snapshot under `mpegts`, through the `E` flatten the
-  [media stats schema](/quest/m2/stats/schema.md) gives `echo::Snapshot`.
+  [media stats schema](/doc/concept/stats.md#media-reports) gives `echo::Snapshot`.
   The egress is where an operator otherwise cannot see per-PID outages: a
   57 s video hole passed every TR 101 290 P1 check in the reporter's lab,
   and only per-PID access-unit counts caught it. There is no export
   `--stats` flag.
+- **Re-timing gets its own section beside `mpegts`** (decided 2026-10-16,
+  on [#5643](https://github.com/moq-dev/moq/pull/5643)). An export that
+  re-times onto an output clock reports what `ts::stats::Snapshot` cannot
+  hold: `ts::stats::Export`'s stream-wide `dropped`, `trimmed`, `gaps`,
+  `drift`, and `out_of_tolerance`, which its conversion to `Snapshot`
+  discards, plus the release margin and the output clock's offset from the
+  source. They describe the export's own output
+  clock rather than viewer playout, so they sit flat beside `transport` and
+  `renditions` now instead of waiting for the
+  [latency ledger](/quest/m2/latency-ledger.md)'s `.echo` shape.
 - **Counters sum, gauges do not.** Every check is a cumulative counter, which
   keeps `.z` deltas small and lets an aggregate sum; the PID's `quiet` is a gauge and
   merges newest-wins.
@@ -46,5 +56,4 @@ plumbing; it does not implement this quest's `mpegts` payloads.
 
 ## Required
 
-- [Media stats schema](/quest/m2/stats/schema.md) - the snapshot the counters flatten into
 - [Rust reporters](/quest/m2/stats/rust.md) - `moq import --stats` and the stats interval

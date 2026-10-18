@@ -185,7 +185,7 @@ function parse(jwk: string): Key {
  * `iat` is written only when the claims carry one, so an unset field stays off the
  * wire rather than being stamped with the current time.
  */
-async function sign(key: Key, claims: Claims): Promise<string> {
+async function sign(key: Key, claims: z.input<typeof ClaimsSchema>): Promise<string> {
 	ensureOperationSupported(key, "sign");
 
 	// Scope-check and sign what the schema parsed, never the raw input: an untyped

@@ -63,12 +63,11 @@ async fn old_peer_keeps_hidden_paths(version: moq_net::Version) {
 
 		let mut client_config = moq_tokio::connect::Config::default();
 		client_config.tls.insecure = Some(true);
-		let client = client_config.init(Default::default()).expect("client init");
 		let mut cluster_config = cluster::Config::default();
 		cluster_config.connect = vec![Peer::new(format!("tcp://127.0.0.1:{port}/"))];
 		let cluster = cluster::Cluster::new(cluster::Options::new(cluster_config))
 			.expect("cluster init")
-			.with_client(client);
+			.with_connect(client_config, Default::default());
 		let node = cluster.origin.create_broadcast(".hidden/test").expect("create hidden");
 		node.announce(Default::default()).expect("announce hidden");
 		let cluster_run = tokio::spawn(cluster.clone().start().await.expect("cluster start").run());

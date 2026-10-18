@@ -1,55 +1,8 @@
-//! Sessions admission turned away, counted by reason.
-//!
-//! A refused session never gets a stats context, so without these counts the
-//! only trace of one is a log line. `/metrics` renders them.
-
-use std::sync::{
-	Arc,
-	atomic::{AtomicU64, Ordering},
-};
+//! Relay refusal collection, shared with published stats when enabled.
 
 use crate::auth;
-
-/// Why admission turned a session away.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Refusal {
-	/// The decider said no: the auth server, the public rules, or an embedder.
-	Refused,
-	/// The decider could not answer: the auth server was unreachable or answered
-	/// with neither a grant nor a refusal, a decider sent a grant the relay cannot
-	/// use, or an embedder did not answer (in time, or before the drain deadline).
-	Unavailable,
-	/// An embedder refused the request as one it cannot decide. The relay's own
-	/// deciders never answer this way.
-	Request,
-	/// The grant allows nothing the session asked for, or an embedder refused the
-	/// session as forbidden.
-	Forbidden,
-	/// A LAN peer's membership proof was missing or wrong, or LAN discovery is off.
-	Lan,
-}
-
-impl Refusal {
-	/// Every reason, so `/metrics` can list each one from zero.
-	pub(crate) const ALL: &'static [Refusal] = &[
-		Refusal::Refused,
-		Refusal::Unavailable,
-		Refusal::Request,
-		Refusal::Forbidden,
-		Refusal::Lan,
-	];
-
-	/// The `reason` label value.
-	pub(crate) const fn as_str(self) -> &'static str {
-		match self {
-			Refusal::Refused => "refused",
-			Refusal::Unavailable => "unavailable",
-			Refusal::Request => "request",
-			Refusal::Forbidden => "forbidden",
-			Refusal::Lan => "lan",
-		}
-	}
-}
+pub(crate) use moq_net::stats::Refusal;
+use moq_net::stats::{Registry, Tier};
 
 impl From<&auth::Error> for Refusal {
 	// Exhaustive on purpose: a new `auth::Error` variant must pick its reason here.
@@ -63,54 +16,36 @@ impl From<&auth::Error> for Refusal {
 	}
 }
 
-/// Refused-session counts by [`Refusal`]. Clones share the counts.
-#[derive(Clone, Default)]
-pub(crate) struct Refusals(Arc<Counts>);
+/// Refusal-only collection when publishing is disabled, otherwise the shared registry.
+#[derive(Clone)]
+pub(crate) struct Refusals(Registry);
 
-#[derive(Default)]
-struct Counts {
-	refused: AtomicU64,
-	unavailable: AtomicU64,
-	request: AtomicU64,
-	forbidden: AtomicU64,
-	lan: AtomicU64,
+impl Default for Refusals {
+	fn default() -> Self {
+		Self(Registry::new(Default::default()))
+	}
 }
 
 impl Refusals {
-	/// Count one refused session.
-	pub(crate) fn record(&self, refusal: Refusal) {
-		self.counter(refusal).fetch_add(1, Ordering::Relaxed);
-	}
-
-	/// Sessions refused for `refusal` so far.
-	pub(crate) fn count(&self, refusal: Refusal) -> u64 {
-		self.counter(refusal).load(Ordering::Relaxed)
-	}
-
-	fn counter(&self, refusal: Refusal) -> &AtomicU64 {
-		match refusal {
-			Refusal::Refused => &self.0.refused,
-			Refusal::Unavailable => &self.0.unavailable,
-			Refusal::Request => &self.0.request,
-			Refusal::Forbidden => &self.0.forbidden,
-			Refusal::Lan => &self.0.lan,
+	pub(crate) fn new(registry: &Registry) -> Self {
+		if registry.is_enabled() {
+			Self(registry.clone())
+		} else {
+			Self::default()
 		}
 	}
-}
-
-#[cfg(test)]
-mod tests {
-	use super::*;
-
-	#[test]
-	fn clones_share_counts() {
-		let refusals = Refusals::default();
-		let clone = refusals.clone();
-		clone.record(Refusal::Refused);
-		clone.record(Refusal::Refused);
-		refusals.record(Refusal::Forbidden);
-		assert_eq!(refusals.count(Refusal::Refused), 2);
-		assert_eq!(clone.count(Refusal::Forbidden), 1);
-		assert_eq!(refusals.count(Refusal::Unavailable), 0);
+	pub(crate) fn record(&self, reason: Refusal) {
+		self.0.tier(Tier::default()).refuse("", reason);
+	}
+	pub(crate) fn snapshot(&self) -> moq_net::stats::Refusals {
+		let mut counts = moq_net::stats::Refusals::default();
+		for (_, presence) in self.0.snapshot().sessions() {
+			counts.add(presence.sessions_refused);
+		}
+		counts
+	}
+	#[cfg(test)]
+	pub(crate) fn count(&self, reason: Refusal) -> u64 {
+		self.snapshot().count(reason)
 	}
 }

@@ -23,9 +23,8 @@ The timestamp must match the track: an untimed track has no timescale, and a
 timed track requires a timestamp on every write. Editing guards take the
 same optional capture time when opened, including when they publish on drop.
 
-When upgrading, replace `Timed<P, T>` with `Timed<P>` and pass timestamps
-explicitly. A publisher that wants to stamp an event now samples its own
-clock; the producer never supplies one.
+Upgrading from an older release: see moq-json's
+[MIGRATE.md](https://github.com/moq-dev/moq/blob/main/rs/moq-json/MIGRATE.md).
 
 A stream rides one group, so the whole log shares moq-net's group budget:
 32 MiB of payload and 8192 records. An append that might not fit is refused

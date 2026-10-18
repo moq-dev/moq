@@ -71,6 +71,8 @@ const SCRATCH_FRAMES: usize = 2048;
 #[derive(Default)]
 pub(crate) struct Shared {
 	state: Mutex<State>,
+	/// What every stream on this engine played, read by its observer.
+	pub(super) observe: Arc<super::observe::Shared>,
 }
 
 #[derive(Default)]
@@ -796,7 +798,7 @@ impl Driver {
 		// on the audio thread after all.
 		let (retired_tx, retired_rx) = sync_channel(COMMAND_QUEUE);
 		let layout = Layout::from_channels(channels as u32)?;
-		let mixer = Mixer::new(rx, retired_tx, rate, layout)?;
+		let mixer = Mixer::new(rx, retired_tx, rate, layout, self.shared.observe.clone())?;
 
 		let failures = Arc::new(Failures::default());
 		let reporter = FailureReporter {
@@ -869,6 +871,7 @@ impl Driver {
 					let played_at = timestamp.playback.saturating_duration_since(epoch)
 						+ Duration::from_secs_f64((data.len() / channels) as f64 / sample_rate);
 					mixer.complete(now);
+					mixer.latency(timestamp.playback.checked_duration_since(timestamp.callback));
 					for chunk in data.chunks_mut(scratch.len()) {
 						let scratch = &mut scratch[..chunk.len()];
 						mixer.fill(scratch, played_at);
@@ -1042,7 +1045,7 @@ mod tests {
 		let wired = wired(8);
 		let mut sink = add(&wired.shared, &wired.handle).unwrap();
 		let (retired, _rx) = sync_channel(8);
-		let mut mixer = Mixer::new(wired.mixer, retired, 48_000, Layout::Stereo).unwrap();
+		let mut mixer = Mixer::new(wired.mixer, retired, 48_000, Layout::Stereo, Default::default()).unwrap();
 		let mut out = vec![0.0; 4096 * 2];
 		mixer.fill(&mut out, Duration::ZERO);
 		let samples: Vec<_> = [0.25f32; 123 * 2].iter().flat_map(|s| s.to_le_bytes()).collect();
