@@ -687,6 +687,42 @@ test("a group the new route replays bounds nothing, so the old route's next grou
 	b.close();
 });
 
+test.each([true, false])(
+	"a group every route holds comes from the serving one, so replaced copies go (ordered: %s)",
+	async (ordered) => {
+		const front = new Front();
+		const sources = Array.from({ length: 4 }, () => new BroadcastProducer());
+		const copies = sources.map(copy);
+		front.serve(sources[0].consume());
+		const sub = front.consumer.track("seq").subscribe();
+		const view = ordered ? sub.ordered() : undefined;
+		const next = async () => {
+			const group = await (view ? view.nextGroup() : sub.recvGroup());
+			group?.close();
+			return group?.sequence;
+		};
+		copies[0].write(0);
+		expect(await next()).toBe(0);
+		let pending = next();
+		for (let route = 1; route < sources.length; route++) {
+			front.serve(sources[route].consume());
+			await settle();
+			// Every route so far holds the next group.
+			for (const held of copies.slice(0, route + 1)) held.write(route);
+			expect(await pending).toBe(route);
+			// The serving copy's group bounded the previous route's copy, so the next read lets it go.
+			pending = next();
+			await settle();
+			expect(copies[route - 1].producer.demand().used.peek()).toBe(false);
+		}
+
+		view?.close();
+		sub.close();
+		front.consumer.close();
+		for (const source of sources) source.close();
+	},
+);
+
 test("a fetched group that fails on the route still serving waits for the next route", async () => {
 	const front = new Front();
 	const a = new BroadcastProducer();

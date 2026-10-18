@@ -425,7 +425,9 @@ class Reader implements ResumeSource {
 				const sequence = hooks.peekGroup(copy.sub, ordered);
 				if (sequence === undefined) break;
 				if (this.#deliverable(copy, sequence, delivered)) {
-					if (!lowest || sequence < lowest.sequence) lowest = { copy, sequence };
+					// A tie goes to the newer copy, so the serving one hands out its first group and
+					// bounds the copies it replaced.
+					if (!lowest || sequence <= lowest.sequence) lowest = { copy, sequence };
 					break;
 				}
 				const recv = take(copy, ordered);
