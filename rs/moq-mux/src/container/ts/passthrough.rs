@@ -35,7 +35,9 @@
 //! # The catalog section
 //!
 //! The section is written for each window of a grid every two seconds on the PCR timeline, once
-//! the clock passes it, and only for windows that start at or after the importer's first group:
+//! the clock passes it; a window holds the PCR intervals that start in it, so the packets up to
+//! the first PCR past a line, and any layout change among them, count in the window before the
+//! line. It is written only for windows that start at or after the importer's first group:
 //! the catalog lists the track from the first such window on, or at the end of the input if that
 //! comes first. [`random_access`](hang::catalog::M2ts::random_access) is true when every group
 //! the window started is a random access point and the layout allowed random access throughout it

@@ -374,6 +374,31 @@ async fn random_access_returns_once_a_window_carries_one_program() {
 	assert!(imported.section().random_access, "the window after it");
 }
 
+/// A window holds the PCR intervals that start in it: a second program carried past a line, up to
+/// the first PCR after it, counts in the window before the line, and the window from the line on
+/// carries one program throughout.
+#[tokio::test(start_paused = true)]
+async fn a_layout_change_before_the_first_pcr_past_a_line_counts_before_it() {
+	let mut mux = Mux::default();
+	mux.pat(&[(1, 0x20), (2, 0x30)])
+		.pmt(0x20, 1, 0x100, &[(0x1b, 0x100)], 0)
+		.pmt(0x30, 2, 0x100, &[(0x1b, 0x200)], 0);
+	// The last PCR before the 2 s line is at 1.98 s; most of the interval after it, program 2's
+	// packets included, lies past the line, and the PAT drops program 2 before the 2.02 s PCR.
+	paced(&mut mux, 0x100, 20 * MS, 50, 10, 4);
+	mux.fill(0x200, 20);
+	program(&mut mux, 0x100);
+	paced(&mut mux, 0x100, 2_020 * MS, 60, 10, 4);
+	let data = mux.bytes();
+	let end = pcr_at(&data, 4_020 * MS);
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+	let mut passthrough = Passthrough::new(broadcast.clone(), catalog.reserve()).unwrap();
+	passthrough.decode(&data[..end + 188]).unwrap();
+	let section = catalog.snapshot().m2ts.expect("the window from 2 s has passed");
+	assert!(section.random_access, "the window from the line carried one program");
+}
+
 /// The section waits for the first window that starts at or after the first group, so the catalog
 /// first lists the track with a whole window behind it.
 #[tokio::test(start_paused = true)]
