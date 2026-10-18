@@ -4,6 +4,22 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Session stats are keyed by label, not auth root (#5731)
+
+`stats::Handle::session`, `stats::Handle::request`, and `stats::Handle::refuse` take the stats label where they took the auth root.
+Pass the empty path for a session without one.
+`Session::set_tier` is now `Session::retag`, which also moves the session to a new label.
+`SessionEntry::root` is renamed `SessionEntry::label`.
+
+```rust
+// Before
+let session = handle.session(&root);
+session.set_tier(tier);
+// After
+let session = handle.session(&label);
+session.retag(tier, &label);
+```
+
 ### Subscriptions carry group ranges (#5732)
 
 `track::Subscription::start` and `end` are replaced by `ranges: Vec<Range>`, and `with_start` and `with_end` are gone.
@@ -42,17 +58,24 @@ producer.finish().wait().await;
 Rename `auth::Token` to `auth::Auth`.
 `auth::Handle::add` returns an `auth::Auth`, which is `Clone` and compares by identity, so a route can name it with `origin::Route::with_auth`.
 
-### Custom transports send datagrams without polling (#5770)
+### Custom transports open and send with `SendOptions` (#5770, #5872)
 
 `transport::poll::Session::send_datagram` replaces `poll_send_datagram`.
-It takes the payload as `Bytes`, the send group to schedule it in (`None` for ungrouped), and an order, and never blocks.
+It takes the payload as `Bytes` and a `SendOptions { group, priority }`, and never blocks.
+`poll_open_uni` and `poll_open_bi` take the `SendOptions` the new stream starts with, as do the `open_uni` and `open_bi` helpers.
+`SendOptions::default()` is ungrouped at priority 0.
 
 ```rust
+fn poll_open_uni(
+	&mut self,
+	cx: &mut Context<'_>,
+	options: SendOptions<'_, <Self::SendStream as SendStream>::Group>,
+) -> Poll<Result<Self::SendStream, Self::Error>> { ... }
+
 fn send_datagram(
 	&mut self,
 	payload: Bytes,
-	group: Option<&<Self::SendStream as SendStream>::Group>,
-	order: i64,
+	options: SendOptions<'_, <Self::SendStream as SendStream>::Group>,
 ) -> Result<(), Self::Error> { ... }
 ```
 

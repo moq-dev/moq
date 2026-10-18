@@ -994,7 +994,7 @@ async fn admit_http(
 		state.cluster.refusals.record(crate::refusals::Refusal::Forbidden);
 		return Err(StatusCode::UNAUTHORIZED.into());
 	};
-	let stats = state.cluster.stats.tier(token.tier.clone()).request(&token.root);
+	let stats = state.cluster.stats.tier(token.tier.clone()).request(&token.label);
 	let origin = origin.consume().with_stats(stats.clone());
 	Ok((lease.with_stats(stats), origin))
 }
@@ -1354,7 +1354,11 @@ mod tests {
 			);
 			assert_eq!(traffic.subscriber.bytes, 0);
 			let presence = report.sessions.iter().find(|entry| entry.tier == tier).unwrap();
-			assert_eq!(presence.root.as_str(), "room");
+			assert_eq!(
+				presence.label.as_str(),
+				"",
+				"an unlabeled request counts under the empty label"
+			);
 			assert_eq!(presence.presence.requests, 3);
 			assert_eq!(
 				(presence.presence.sessions_started, presence.presence.sessions_ended),

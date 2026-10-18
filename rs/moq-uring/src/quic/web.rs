@@ -457,19 +457,17 @@ impl Session {
 		self.conn.send_group(priority)
 	}
 
-	/// Send a datagram in `group` at `order`, scheduled like one of the group's streams.
+	/// Send a datagram scheduled by `options`, like one of its group's streams.
 	///
 	/// See [`Connection::send_datagram`].
-	pub fn send_datagram(&self, payload: Bytes, group: Option<&super::SendGroup>, order: i64) -> Result<(), Error> {
+	pub fn send_datagram(&self, payload: Bytes, options: super::SendOptions<'_>) -> Result<(), Error> {
 		let Some(web) = &self.web else {
-			return self.conn.send_datagram(payload, group, order);
+			return self.conn.send_datagram(payload, options);
 		};
 		let mut framed = BytesMut::with_capacity(web.header_datagram.len() + payload.len());
 		framed.extend_from_slice(&web.header_datagram);
 		framed.extend_from_slice(&payload);
-		self.conn
-			.send_datagram(framed.freeze(), group, order)
-			.map_err(unmap_err)
+		self.conn.send_datagram(framed.freeze(), options).map_err(unmap_err)
 	}
 
 	/// Wrap a raw-QUIC connection in a session, with no
@@ -697,7 +695,11 @@ impl web_transport_trait::poll::Session for Session {
 	}
 
 	fn poll_send_datagram(&mut self, _: &mut Context<'_>, payload: &[u8]) -> Poll<Result<(), Self::Error>> {
-		Poll::Ready(Self::send_datagram(self, Bytes::copy_from_slice(payload), None, 0))
+		Poll::Ready(Self::send_datagram(
+			self,
+			Bytes::copy_from_slice(payload),
+			Default::default(),
+		))
 	}
 
 	fn poll_recv_datagram(&mut self, cx: &mut Context<'_>) -> Poll<Result<Bytes, Self::Error>> {

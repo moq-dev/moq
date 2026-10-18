@@ -20,7 +20,10 @@ fn send(pair: &mut Pair, streams: usize, priorities: usize, writes: usize, size:
     let target = pair.server.received.finished + streams as u64;
     let conn = pair.client();
     for index in 0..streams {
-        let id = conn.streams().open(Dir::Uni).expect("stream limit");
+        let id = conn
+            .streams()
+            .open(Dir::Uni, Default::default())
+            .expect("stream limit");
         let mut stream = conn.send_stream(id);
         // `as _` follows the priority type, which a scheduler rewrite widens.
         stream.set_priority((index % priorities) as _).unwrap();

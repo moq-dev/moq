@@ -423,6 +423,8 @@ pub struct Token {
 	pub publish: moq_auth::Access,
 	/// The tier this session's stats record under.
 	pub tier: Tier,
+	/// The path this session's stats record under, empty when the grant names none.
+	pub label: PathOwned,
 	/// Whether the session is a cluster peer, so its routes entered elsewhere.
 	pub peer: bool,
 	/// Whether the peer is upstream, so it is never offered another upstream's routes.
@@ -448,6 +450,7 @@ impl Token {
 			subscribe: grant.subscribe.clone(),
 			publish: grant.publish.clone(),
 			tier: crate::configured_tier(grant.tier.clone()),
+			label: Path::new(grant.label.as_deref().unwrap_or_default()).to_owned(),
 			peer: grant.peer,
 			upstream: grant.upstream,
 		}
@@ -507,10 +510,16 @@ impl Lease {
 	/// what the origin scopes by.
 	pub fn new(path: &str, consumer: lease::Consumer) -> Self {
 		let grant = consumer.grant();
+		Self::granted(path, &grant, consumer)
+	}
+
+	/// Hold `consumer` with its token built from `grant`, a snapshot of it. A later
+	/// update still reaches [`Self::ended`] as a change, which re-checks it.
+	fn granted(path: &str, grant: &Grant, consumer: lease::Consumer) -> Self {
 		Self {
 			refresh: None,
 			source: None,
-			token: Token::new(path, &grant),
+			token: Token::new(path, grant),
 			expires: grant.deadline(),
 			consumer,
 			session: None,
@@ -611,6 +620,9 @@ impl Lease {
 			tokio::select! {
 				changed = self.consumer.changed() => match changed {
 					Ok(grant) => {
+						if let Err(reason) = still_valid(&grant) {
+							return reason;
+						}
 						let fresh = self.token.recheck(&grant);
 						if let Err(err) = fresh.uncapped() {
 							return err.to_string().into();
@@ -649,10 +661,11 @@ impl Lease {
 								None => {}
 							}
 						}
-						if fresh.tier != self.token.tier {
-							tracing::info!(from = %self.token.tier, to = %fresh.tier, "tier changed");
-							self.stats.set_tier(fresh.tier.clone());
+						if fresh.tier != self.token.tier || fresh.label != self.token.label {
+							tracing::info!(tier = %fresh.tier, label = %fresh.label, "stats tier or label changed");
+							self.stats.retag(fresh.tier.clone(), &fresh.label);
 							self.token.tier = fresh.tier;
+							self.token.label = fresh.label;
 						}
 						self.expires = grant.deadline();
 					},
@@ -871,8 +884,10 @@ impl Auth {
 
 	/// Admit a session: the lease it holds, carrying the scope the origin applies.
 	pub async fn admit(&self, request: Request) -> Result<Lease, Error> {
-		let consumer = self.decide(request.clone()).await?;
-		let mut lease = Lease::new(&request.path, consumer);
+		// Build the token from the grant the admission checked: re-reading it could
+		// pick up an update that skipped the check.
+		let (consumer, grant) = self.decide(request.clone()).await?;
+		let mut lease = Lease::granted(&request.path, &grant, consumer);
 		lease.token.uncapped()?;
 		lease.source = Some(Source {
 			auth: self.clone(),
@@ -881,7 +896,7 @@ impl Auth {
 		Ok(lease)
 	}
 
-	async fn decide(&self, request: Request) -> Result<lease::Consumer, Error> {
+	async fn decide(&self, request: Request) -> Result<(lease::Consumer, Grant), Error> {
 		let answer = self.submit(request, None)?;
 		let answered = tokio::time::timeout(ADMIT_TIMEOUT, answer)
 			.await
@@ -918,15 +933,25 @@ fn timed_out() -> Error {
 
 /// Check a decider's answer against the contract every decider is held to: a
 /// grant that admits nothing or asks for a re-check without a bound is a bug, not
-/// a refusal.
+/// a refusal. Returns the grant snapshot it checked.
 fn answered_with(
 	answered: Result<Result<lease::Consumer, Error>, oneshot::error::RecvError>,
-) -> Result<lease::Consumer, Error> {
+) -> Result<(lease::Consumer, Grant), Error> {
 	let consumer = answered.map_err(|_| Error::Unavailable("the admission went unanswered".into()))??;
 	let grant = consumer.grant();
 	grant.validate()?;
 	check_rates(&grant.publish, &grant.subscribe)?;
-	Ok(consumer)
+	Ok((consumer, grant))
+}
+
+/// Hold a changed grant to the contract its first answer met: one that admits nothing
+/// narrowed the session away, and one already past its expiry ended it.
+fn still_valid(grant: &Grant) -> Result<(), lease::Reason> {
+	grant.validate().map_err(|err| match err {
+		moq_auth::Error::UselessGrant => lease::Reason::Narrowed,
+		moq_auth::Error::GrantExpired => lease::Reason::Expired,
+		err => err.to_string().into(),
+	})
 }
 
 /// Refuse caps before reducing a grant to the paths its origin can enforce.
@@ -1124,6 +1149,18 @@ mod tests {
 		capped.subscribe.rate = Some(moq_auth::Rate::from_bps(8000).unwrap());
 		producer.update(capped);
 		assert!(lease.ended().await.to_string().contains("cannot enforce bitrate caps"));
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn an_invalid_label_at_revalidation_ends_the_lease() {
+		let grant = Grant::new(moq_net::Pattern::all(), moq_net::Pattern::all());
+		let (producer, consumer) = lease::Producer::new(grant.clone());
+		let mut lease = Lease::new("/room", consumer);
+		let mut wildcard = grant;
+		wildcard.label = Some("project/*".into());
+		producer.update(wildcard);
+		assert!(lease.ended().await.to_string().contains("invalid stats label"));
+		assert!(lease.token().label.is_empty(), "the label never applied");
 	}
 
 	#[test]
@@ -1407,15 +1444,21 @@ mod tests {
 		let mut grant = Grant::new(patterns(&["alice/**"]), patterns(&["**"]));
 		grant.root = Some("pid/room".into());
 		grant.tier = Some("gold".into());
+		grant.label = Some("project/key/123".into());
 		let token = Token::new("/vanity/room", &grant);
 		assert_eq!(token.root, Path::new("pid/room").to_owned());
 		assert_eq!(token.publish, patterns(&["alice/**"]));
 		assert_eq!(token.subscribe, patterns(&["**"]));
 		assert_eq!(token.tier, Tier::new("gold"));
+		assert_eq!(token.label, Path::new("project/key/123").to_owned());
 
 		let patterns = patterns(&["*/chat", "alice", ""]);
 		let token = Token::new("/", &Grant::new(patterns.clone(), Patterns::new()));
 		assert_eq!(token.publish, patterns);
+		assert!(
+			token.label.is_empty(),
+			"an absent label is the empty label, not the root"
+		);
 	}
 
 	#[test]

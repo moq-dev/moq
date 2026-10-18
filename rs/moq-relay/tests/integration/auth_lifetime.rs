@@ -11,6 +11,7 @@
 //! `Admissions`, and prove the lease it drives reaches the session the same way,
 //! including an outage that keeps it until `expires`, on Tokio's paused clock.
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
@@ -460,12 +461,14 @@ async fn refusals_and_outages_refuse_at_connect() {
 	relay.abort();
 }
 
-/// A re-check that moves the tier keeps the session and retags its stats live:
-/// both sessions' presence leaves the old tier for the new one, and media sent
-/// afterwards records under the new tier in both directions.
+/// A re-check that moves the tier and stats label keeps the session and retags its
+/// stats live: both sessions' presence leaves the old tier and label for the new
+/// ones, and media sent afterwards records there in both directions.
 #[tokio::test]
 async fn a_moved_tier_retags_the_live_session() {
-	let script = Script::new(grant(Duration::from_secs(3600)));
+	let mut labeled = grant(Duration::from_secs(3600));
+	labeled.label = Some("project/key/1".into());
+	let script = Script::new(labeled);
 	let mut cluster = cluster::Cluster::new(cluster::Options::default()).expect("cluster init");
 	cluster.stats = stats::Registry::new(stats::Config::new());
 	let registry = cluster.stats.clone();
@@ -488,6 +491,22 @@ async fn a_moved_tier_retags_the_live_session() {
 			.into_iter()
 			.find(|(t, r, _)| t == tier && *r == role)
 			.map_or(0, |(_, _, traffic)| traffic.bytes)
+	};
+	// Each label's (active sessions, sent bytes, received bytes), from one report.
+	let labels = || {
+		let mut report = stats::Report::default();
+		registry.report(&mut report);
+		report
+			.sessions
+			.into_iter()
+			.map(|entry| {
+				let presence = entry.presence;
+				(
+					(entry.tier, entry.label.to_string()),
+					(presence.active(), presence.sent_bytes, presence.received_bytes),
+				)
+			})
+			.collect::<HashMap<_, _>>()
 	};
 
 	// A publisher whose track stays open across the move, and a subscriber to it.
@@ -555,9 +574,15 @@ async fn a_moved_tier_retags_the_live_session() {
 	round_trip(b"before").await;
 	assert_eq!(active(&stats::Tier::default()), 2);
 	assert_eq!(active(&moved), 0);
+	assert_eq!(
+		labels()[&(stats::Tier::default(), "project/key/1".to_string())],
+		(2, 6, 6),
+		"sessions and bytes count under the grant's label"
+	);
 
 	let mut moved_grant = grant(Duration::from_secs(3600));
 	moved_grant.tier = Some("moved".into());
+	moved_grant.label = Some("project/key/2".into());
 	script.on_revalidate(Answer::Grant(moved_grant));
 
 	let deadline = tokio::time::Instant::now() + TIMEOUT;
@@ -585,6 +610,17 @@ async fn a_moved_tier_retags_the_live_session() {
 	);
 	assert_eq!(bytes(&moved, stats::Role::Subscriber), 5, "ingress from the publisher");
 	assert_eq!(bytes(&moved, stats::Role::Publisher), 5, "egress to the subscriber");
+	let labels = labels();
+	assert_eq!(
+		labels[&(stats::Tier::default(), "project/key/1".to_string())],
+		(0, 6, 6),
+		"earlier bytes stay under the old label"
+	);
+	assert_eq!(
+		labels[&(moved.clone(), "project/key/2".to_string())],
+		(2, 5, 5),
+		"later presence and bytes move to the new label"
+	);
 
 	assert!(
 		tokio::time::timeout(Duration::from_millis(200), pub_session.closed())

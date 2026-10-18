@@ -16,10 +16,11 @@ Call `set_limits` on `request.quic()` instead, starting from `quic::Limits::defa
 The root `Auth` re-export is gone.
 `Connection::auth` returns a `connection::auth::Handle`, and its `add` returns a `connection::auth::Auth` instead of a `Token`.
 
-### Datagrams take a send group and order (#5770)
+### Streams and datagrams take `SendOptions` (#5770, #5872)
 
-`quic::driver::Connection::send_datagram` and `quic::web::Session::send_datagram` take the send group (`None` for ungrouped) and an order, and never block.
-`send_datagram_wait` and `SendDatagram` are gone; call `send_datagram(data, None, 0)` instead.
+`quic::driver::Connection` and `quic::web::Session` take a `quic::driver::SendOptions { group, priority }` in `open_uni`, `open_bi`, and `send_datagram`, which never blocks.
+`send_datagram_wait` and `SendDatagram` are gone; call `send_datagram(data, SendOptions::default())` instead.
+`quic::driver::SendDatagramError` carries moq-quic's refusals in `Refused` instead of its own `UnsupportedByPeer`, `Disabled`, and `TooLarge`.
 
 ### The `noq` feature is `quic` (#5664)
 

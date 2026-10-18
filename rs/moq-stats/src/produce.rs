@@ -325,7 +325,7 @@ impl Drain {
 			}
 		}
 		for (i, entry) in self.report.sessions.iter().enumerate() {
-			let key = group_key(entry.root.as_str(), self.task.depth);
+			let key = group_key(entry.label.as_str(), self.task.depth);
 			if let Some(group) = Self::group(&self.task, &mut self.groups, &mut self.refused, key) {
 				group.session_rows.push(i);
 			}
@@ -380,7 +380,7 @@ impl Drain {
 			group.flush(self.tick);
 
 			// Serve consumer requests for tracks no drain has created yet: a
-			// tier's tracks appear lazily on its first traffic, and a root's
+			// tier's tracks appear lazily on its first traffic, and a label's
 			// presence track only while requested. See `serve_requests`.
 			group.serve_requests(&self.report, depth, self.tick);
 		}
@@ -852,7 +852,7 @@ impl<V: Serialize> TrackFamily<V> {
 
 /// One group stats broadcast and its change-detection state.
 struct GroupPublisher {
-	/// The group's key: the leading segments every member path and root shares.
+	/// The group's key: the leading segments every member path and label shares.
 	key: PathOwned,
 	broadcast: broadcast::Producer,
 	/// Holds the broadcast's request queue open, so a subscriber asking for a
@@ -870,7 +870,7 @@ struct GroupPublisher {
 	/// Track names per tier, built once so a drain never formats a name.
 	names: HashMap<Tier, TierNames>,
 	totals: TotalsTrack,
-	/// Held presence tracks, keyed by auth root.
+	/// Held presence tracks, keyed by stats label.
 	presence: HashMap<PathOwned, PresenceTrack>,
 	/// Held prefix tracks, keyed by broadcast prefix. A `String` key, so a
 	/// drain looks each row's ancestors up by `&str` without allocating.
@@ -973,7 +973,7 @@ struct TotalsTrack {
 	sums: Cumulative<Totals>,
 }
 
-/// One auth root's requested `presence.json` pair and its per-tier sums,
+/// One stats label's requested `presence.json` pair and its per-tier sums,
 /// cumulative from when it was first held. Reclaimed once nobody reads it.
 struct PresenceTrack {
 	/// The plain track name, for logs.
@@ -1235,7 +1235,7 @@ impl GroupPublisher {
 			totals
 				.sums
 				.add(&entry.tier, entry.closed, |sum| sum.sessions.add(entry.presence));
-			if let Some(track) = presence.get_mut(&entry.root) {
+			if let Some(track) = presence.get_mut(&entry.label) {
 				track.sums.add(&entry.tier, entry.closed, |sum| sum.add(entry.presence));
 			}
 		}
@@ -1259,8 +1259,8 @@ impl GroupPublisher {
 			});
 		}
 
-		// The registry reports a root only while a session or request holds its
-		// counters, plus its final readout, so every row is in the frame: a root
+		// The registry reports a label only while a session or request holds its
+		// counters, plus its final readout, so every row is in the frame: a label
 		// held by an idle request must not drop out and return looking reset.
 		for &i in session_rows.iter() {
 			let entry = &report.sessions[i];
@@ -1271,7 +1271,7 @@ impl GroupPublisher {
 				broadcast,
 				requested,
 				&names.sessions,
-				entry.root.clone(),
+				entry.label.clone(),
 				entry.presence,
 			);
 		}
@@ -1309,8 +1309,8 @@ impl GroupPublisher {
 	/// ([`TrackFamily::push`] finds the pair already created). Valid tier names
 	/// over the quota park (bounded) until it frees rather than being rejected.
 	///
-	/// A presence track is held only while requested, for a root in this group,
-	/// and answered at once with the root's current counters from `report`.
+	/// A presence track is held only while requested, for a label in this group,
+	/// and answered at once with the label's current counters from `report`.
 	/// It is reclaimed once its last consumer leaves, so the held set follows
 	/// live readers. A prefix track follows the same rules for a broadcast
 	/// prefix in this group. Any other name is rejected.
@@ -1337,12 +1337,12 @@ impl GroupPublisher {
 		// Pop everything queued, grouping the two flavors of one plain name so
 		// a pair is built from the actual requests where present. Only tier
 		// names past the parked bound are rejected.
-		let mut roots: HashMap<PathOwned, PendingPair> = HashMap::new();
+		let mut labels: HashMap<PathOwned, PendingPair> = HashMap::new();
 		let mut paths: HashMap<PathOwned, PendingPair> = HashMap::new();
 		let noop = kio::Waiter::noop();
 		while let Poll::Ready(Ok(request)) = self.dynamic.poll_requested_track(&noop) {
 			let keyed = match parse_presence_track(request.name()) {
-				Some((root, compressed)) => Some((&mut roots, root, compressed)),
+				Some((label, compressed)) => Some((&mut labels, label, compressed)),
 				None => parse_prefix_track(request.name())
 					// No broadcast path is deeper than `MAX_PARTS`.
 					.filter(|(path, _)| path.parts().count() <= Path::MAX_PARTS)
@@ -1377,24 +1377,24 @@ impl GroupPublisher {
 
 		self.traffic.adopt_parked(&self.broadcast, &mut self.requested);
 		self.sessions.adopt_parked(&self.broadcast, &mut self.requested);
-		for (root, pending) in roots {
-			self.adopt_presence(report, root, pending);
+		for (label, pending) in labels {
+			self.adopt_presence(report, label, pending);
 		}
 		for (path, pending) in paths {
 			self.adopt_prefix(report, path, pending, tick);
 		}
 	}
 
-	/// Hold a requested root's presence track, publishing its current counters
+	/// Hold a requested label's presence track, publishing its current counters
 	/// so the subscription resolves at once. Cumulative from here on.
-	fn adopt_presence(&mut self, report: &Report, root: PathOwned, pending: PendingPair) {
+	fn adopt_presence(&mut self, report: &Report, label: PathOwned, pending: PendingPair) {
 		// A request for a live track is served by the broadcast itself, so a
 		// live pair here means the requested flavor ended and cannot update.
-		if self.presence.contains_key(&root) {
+		if self.presence.contains_key(&label) {
 			pending.reject(moq_net::Error::NotFound);
 			return;
 		}
-		let name = presence_track(&root, false);
+		let name = presence_track(&label, false);
 		let pair = match pending.adopt(&self.broadcast, &name, self.traffic.sequence.clone()) {
 			Ok(pair) => pair,
 			Err(err) => {
@@ -1410,7 +1410,7 @@ impl GroupPublisher {
 		};
 		for &i in &self.session_rows {
 			let entry = &report.sessions[i];
-			if entry.root == root {
+			if entry.label == label {
 				track.sums.add(&entry.tier, entry.closed, |sum| sum.add(entry.presence));
 				let start = track.wire_start.entry(entry.tier.label().clone()).or_default();
 				start.0 += entry.presence.wire_tx;
@@ -1418,7 +1418,7 @@ impl GroupPublisher {
 			}
 		}
 		track.publish();
-		self.presence.insert(root, track);
+		self.presence.insert(label, track);
 	}
 
 	/// Hold a requested prefix track, publishing its current counters so the
@@ -2538,7 +2538,7 @@ mod tests {
 
 		let (_, broadcast) = announced(&origin).await;
 		let frame = read_session_frame(&broadcast, "sessions.json").await;
-		let snap = frame.get("acme").expect("root entry");
+		let snap = frame.get("acme").expect("label entry");
 		assert_eq!(snap.sessions_started, 2);
 		assert_eq!(snap.sessions_ended, 0);
 		assert!(
@@ -2553,7 +2553,7 @@ mod tests {
 		assert_eq!(snap.sessions_started, 1);
 	}
 
-	/// A root held only by requests has no live session, but it stays in every
+	/// A label held only by requests has no live session, but it stays in every
 	/// frame until its last request ends: dropping out would read as a reset, and
 	/// the next admission would then count the earlier ones twice.
 	#[tokio::test(start_paused = true)]
@@ -2598,11 +2598,11 @@ mod tests {
 		drive_tick().await;
 		let (_, broadcast) = announced(&origin).await;
 		let totals = read_totals(&broadcast).await;
-		assert_eq!(totals[""].sessions.sessions_started, 2, "both default-tier roots");
+		assert_eq!(totals[""].sessions.sessions_started, 2, "both default-tier labels");
 		assert_eq!(totals["region/sjc"].sessions.sessions_started, 1);
 		assert_eq!(totals["region/sjc"].publisher, Traffic::default());
 
-		// A root whose last session leaves is pruned from the registry, but the
+		// A label whose last session leaves is pruned from the registry, but the
 		// totals keep it.
 		drop(b);
 		drive_tick().await;
@@ -2632,11 +2632,11 @@ mod tests {
 		assert_eq!(default_totals(&beta).await.publisher.bytes, 7);
 	}
 
-	/// Subscribe to `root`'s presence track on `broadcast`, driving a tick so
+	/// Subscribe to `label`'s presence track on `broadcast`, driving a tick so
 	/// the producer adopts the request.
-	async fn hold_presence(broadcast: &moq_net::broadcast::Consumer, root: &str) -> track::Ordered {
+	async fn hold_presence(broadcast: &moq_net::broadcast::Consumer, label: &str) -> track::Ordered {
 		let subscribing = broadcast
-			.track(&presence_track(root, false))
+			.track(&presence_track(label, false))
 			.expect("track")
 			.subscribe(None);
 		drive_tick().await;
@@ -2644,8 +2644,8 @@ mod tests {
 	}
 
 	/// A held presence track is cumulative from when it was first held: it
-	/// starts at the root's current counters, keeps a session that ended and
-	/// was pruned, and continues across the root's return.
+	/// starts at the label's current counters, keeps a session that ended and
+	/// was pruned, and continues across the label's return.
 	#[tokio::test(start_paused = true)]
 	async fn presence_track_is_cumulative_while_held() {
 		let (producer, origin) = test_producer(Some("sjc"));
@@ -2659,10 +2659,10 @@ mod tests {
 		let mut track = hold_presence(&broadcast, "acme/live").await;
 		let frame = try_presence(&mut track).expect("answered at once");
 		assert_eq!(frame[""].active(), 1);
-		assert_eq!(frame["rtmp"].active(), 1, "every tier the root records on");
-		assert_eq!(frame.len(), 2, "only this root");
+		assert_eq!(frame["rtmp"].active(), 1, "every tier the label records on");
+		assert_eq!(frame.len(), 2, "only this label");
 
-		// The root's default-tier session leaves and its counters are pruned.
+		// The label's default-tier session leaves and its counters are pruned.
 		drop(first);
 		for _ in 0..3 {
 			drive_tick().await;
@@ -2675,7 +2675,7 @@ mod tests {
 		assert_eq!(frame[""].sessions_started, 1, "kept after the prune");
 		assert_eq!(frame[""].active(), 0);
 
-		// A new session under the root continues the count.
+		// A new session under the label continues the count.
 		let _again = registry.tier(Tier::default()).session("acme/live");
 		drive_tick().await;
 		let mut last = None;
@@ -2687,7 +2687,7 @@ mod tests {
 		assert_eq!(frame[""].active(), 1);
 	}
 
-	/// A root with no sessions is held open at zero, and reclaimed once its
+	/// A label with no sessions is held open at zero, and reclaimed once its
 	/// last consumer leaves.
 	#[tokio::test(start_paused = true)]
 	async fn presence_track_for_an_idle_root_is_held_then_reclaimed() {
@@ -2726,7 +2726,7 @@ mod tests {
 		let mut track = subscribing.await.expect("held").ordered();
 		assert_eq!(try_presence(&mut track), Some(PresenceFrame::new()), "held at zero");
 
-		// The root records while held: the same subscription carries it.
+		// The label records while held: the same subscription carries it.
 		let _session = registry.tier(Tier::default()).session("");
 		tick();
 		assert_eq!(try_presence(&mut track).expect("recorded")[""].active(), 1);
@@ -2744,7 +2744,7 @@ mod tests {
 		assert_eq!(tick(), 0, "reclaimed");
 	}
 
-	/// A root outside the group is not found, and every root inside it is held.
+	/// A label outside the group is not found, and every label inside it is held.
 	#[tokio::test(start_paused = true)]
 	async fn presence_requests_are_scoped() {
 		let (producer, origin, _events) = grouped_producer(DEFAULT_LINGER);
@@ -2759,7 +2759,7 @@ mod tests {
 		drive_tick().await;
 		assert!(
 			matches!(subscribing.await, Err(moq_net::Error::NotFound)),
-			"a root in another group"
+			"a label in another group"
 		);
 
 		let pending: Vec<_> = (0..3)
@@ -2775,13 +2775,13 @@ mod tests {
 			held.push(subscribing.await.expect("held"));
 		}
 
-		// A held root's compressed flavor shares the live pair.
+		// A held label's compressed flavor shares the live pair.
 		let subscribing = acme
 			.track(&presence_track("acme/0", true))
 			.expect("track")
 			.subscribe(None);
 		drive_tick().await;
-		subscribing.await.expect("the compressed sibling of a held root");
+		subscribing.await.expect("the compressed sibling of a held label");
 	}
 
 	/// Subscribe to `path`'s prefix track on `broadcast`, driving a tick so the

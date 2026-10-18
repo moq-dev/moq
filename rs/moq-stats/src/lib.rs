@@ -25,8 +25,8 @@
 //! them apart by the announced route's epoch. Every broadcast carries a
 //! `totals.json` track of each [`Tier`]'s [`Totals`] for the epoch, each tier
 //! carries `publisher.json` and `subscriber.json` tracks of per-path
-//! [`Traffic`] and a `sessions.json` track of per-root [`Presence`], and a
-//! reader may request any auth root's `<root>/presence.json` track and any
+//! [`Traffic`] and a `sessions.json` track of per-label [`Presence`], and a
+//! reader may request any stats label's `<label>/presence.json` track and any
 //! broadcast prefix's `<path>/traffic.json` track of [`Prefix`] counters. Every
 //! track has a `.z` sibling encoded with [`moq_json::snapshot`]; compute names
 //! with [`totals_track`], [`traffic_track`], [`sessions_track`],
@@ -52,14 +52,14 @@ use moq_net::{AsPath, Path, PathOwned};
 /// One frame off a traffic track: cumulative counters keyed by broadcast path.
 pub type TrafficFrame = BTreeMap<String, Traffic>;
 
-/// One frame off a sessions track: connect/disconnect gauges keyed by auth root.
+/// One frame off a sessions track: connect/disconnect gauges keyed by stats label.
 pub type SessionsFrame = BTreeMap<String, Presence>;
 
 /// One frame off the totals track: each tier's [`Totals`], keyed by tier label
 /// (`""` for the default tier).
 pub type TotalsFrame = BTreeMap<String, Totals>;
 
-/// One frame off a presence track: one auth root's sessions, keyed by tier label
+/// One frame off a presence track: one stats label's sessions, keyed by tier label
 /// (`""` for the default tier).
 pub type PresenceFrame = BTreeMap<String, Presence>;
 
@@ -78,7 +78,7 @@ pub struct Totals {
 	pub publisher: Traffic,
 	/// Ingress: what this node received.
 	pub subscriber: Traffic,
-	/// Sessions connected under the group's auth roots.
+	/// Sessions connected under the group's stats labels.
 	pub sessions: Presence,
 }
 
@@ -172,11 +172,11 @@ pub fn totals_track(compressed: bool) -> String {
 	name
 }
 
-/// The presence track name for an auth root: `<root>/presence.json`, or
-/// `presence.json` for the empty root, plus [`COMPRESSED_SUFFIX`] when
+/// The presence track name for a stats label: `<label>/presence.json`, or
+/// `presence.json` for the empty label, plus [`COMPRESSED_SUFFIX`] when
 /// `compressed`. Served only while requested.
-pub fn presence_track(root: impl AsPath, compressed: bool) -> String {
-	keyed_track(root.as_path(), PRESENCE, compressed)
+pub fn presence_track(label: impl AsPath, compressed: bool) -> String {
+	keyed_track(label.as_path(), PRESENCE, compressed)
 }
 
 /// The prefix track name for a broadcast prefix: `<path>/traffic.json`, or
@@ -198,7 +198,7 @@ fn keyed_track(key: Path, kind: &str, compressed: bool) -> String {
 	name
 }
 
-/// The auth root a presence track name requests, and whether it is the
+/// The stats label a presence track name requests, and whether it is the
 /// compressed flavor; `None` for any other name. The inverse of
 /// [`presence_track`].
 pub(crate) fn parse_presence_track(name: &str) -> Option<(PathOwned, bool)> {
@@ -368,19 +368,19 @@ mod tests {
 
 	#[test]
 	fn presence_track_names_round_trip() {
-		for root in ["", "acme", "acme/live", "a.json", "x/presence.json", "publisher", "z"] {
+		for label in ["", "acme", "acme/live", "a.json", "x/presence.json", "publisher", "z"] {
 			for compressed in [false, true] {
-				let name = presence_track(root, compressed);
+				let name = presence_track(label, compressed);
 				assert_eq!(
 					parse_presence_track(&name),
-					Some((PathOwned::from(root), compressed)),
+					Some((PathOwned::from(label), compressed)),
 					"{name}"
 				);
 			}
 		}
 
-		// Names no root produces, including unnormalized ones, which would give
-		// one root two names.
+		// Names no label produces, including unnormalized ones, which would give
+		// one label two names.
 		for name in [
 			"publisher.json",
 			"acme/publisher.json",

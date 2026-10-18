@@ -54,7 +54,7 @@ generate more stats.
 - `<node>` tells relays sharing a cluster apart. It may span several segments
   (`sjc/1`), and is omitted along with its slash when unset: `<prefix>/node`.
 - `<group>` is the first `depth` segments of each broadcast path (for traffic)
-  or auth root (for sessions), so a consumer can scope an announce to one
+  or stats label (for sessions), so a consumer can scope an announce to one
   tenant. A path shorter than `depth` groups under all of its segments.
 - The literal `node` segment leaves room for sibling categories under the same
   prefix, so a consumer skips any path without `node` where it expects one. A
@@ -92,8 +92,8 @@ comes in two encodings:
 | `totals.json` | tier | [Totals](#totals) for the whole group |
 | `[<tier>/]publisher.json` | broadcast path | [Traffic](#traffic) this node sent (egress) |
 | `[<tier>/]subscriber.json` | broadcast path | [Traffic](#traffic) this node received (ingress) |
-| `[<tier>/]sessions.json` | auth root | [Sessions](#sessions) connected now |
-| `[<root>/]presence.json` | tier | [Sessions](#sessions) under one auth root |
+| `[<tier>/]sessions.json` | stats label | [Sessions](#sessions) connected now |
+| `[<label>/]presence.json` | tier | [Sessions](#sessions) under one stats label |
 | `[<path>/]traffic.json` | tier | [Prefix](#prefix) traffic under one broadcast prefix |
 
 The default tier's per-tier tracks are unprefixed. A named tier prefixes each
@@ -107,13 +107,13 @@ them earlier: any name of the shape
 `[<tier>/]{publisher,subscriber,sessions}.json[.z]` is accepted and held open
 with `{}` until the tier records.
 
-A presence track exists only while subscribed. Ask for `<root>/presence.json`
-for any auth root in the group (`presence.json` for the empty root). The relay
-answers with the root's current sessions and counts from there, holding a root
+A presence track exists only while subscribed. Ask for `<label>/presence.json`
+for any stats label in the group (`presence.json` for the empty label). The relay
+answers with the label's current sessions and counts from there, holding a label
 with no sessions open at `{}`, and stops producing it once the last subscriber
 leaves. A prefix track works the same way for any broadcast prefix in the
 group: ask for `<path>/traffic.json` (`traffic.json` for the empty prefix). A
-root or prefix outside the group, or any other name, is refused.
+label or prefix outside the group, or any other name, is refused.
 
 ## Frames
 
@@ -139,7 +139,7 @@ under the limit, keeps updating.
 
 Each tier that recorded anything in the group's epoch, with its egress
 (`publisher`) and ingress (`subscriber`) [Traffic](#traffic) and its
-[Sessions](#sessions), summed over every broadcast and auth root in the group.
+[Sessions](#sessions), summed over every broadcast and stats label in the group.
 Unlike the per-path tracks, an entry that ends stays counted, so the next
 frame always carries everything since the epoch began: a reader that misses
 frames loses nothing while the group stays announced. Billing reads this
@@ -244,6 +244,7 @@ should prefer the canonical name and fall back to the legacy one.
   "acme": {
     "requests": 3, "sessions_started": 12, "sessions_ended": 10,
     "sessions": 12, "sessions_closed": 10,
+    "sent_bytes": 1048576, "received_bytes": 524288,
     "sessions_refused": { "refused": 0, "unavailable": 0, "request": 0, "forbidden": 0, "lan": 0 },
     "sessions_failed": { "idle_timeout": 1, "transport": 0, "application": 0, "expired": 0 },
     "announces_peak": 40, "subscriptions_peak": 900,
@@ -253,18 +254,26 @@ should prefer the canonical name and fall back to the legacy one.
 ```
 
 `sessions_started` and `sessions_ended` count connects and disconnects, whether
-or not any data flows: under an auth root on the tier for `sessions.json`,
-under the root on each tier for `presence.json`, and under every root in the
+or not any data flows: under a stats label on the tier for `sessions.json`,
+under the label on each tier for `presence.json`, and under every label in the
 group on the tier for `totals.json`. `sessions` and `sessions_closed` are their
 legacy spellings. A session moved to a new tier ends on the old one and starts
-on the new.
+on the new. `sent_bytes` and `received_bytes` count the payload this node sent
+to and received from those sessions and HTTP requests, the same bytes the
+per-path tracks count. A changed label moves later presence and bytes; bytes
+before the change remain under the old label. Older readers ignore these fields
+and newer readers default missing fields to zero.
+
+The label is the grant's `label`, a path the auth server picks to attribute
+usage, independent of the root that scopes what the session may access. A grant
+without a `label` counts under the empty label, never under its root.
 
 `wire_tx` and `wire_rx` count transport bytes sent and received, separately
 from `Traffic.bytes`, which counts media payload. QUIC and WebTransport count
 UDP bytes, including retransmissions and transport overhead. The transport
 updates a connection's counters as it sends and receives, and a stats tick reads
-them without polling the session or activating its periodic sampler. Tier
-changes flush the old tier first; closing a session records its final delta.
+them without polling the session or activating its periodic sampler. A retag
+flushes the old tier and label first; closing a session records its final delta.
 An embedder creates a `transport::Wire`, registers it with `stats::Handle::wire`
 or `stats::Session::wire`, records its connection's cumulative totals on it, and
 holds the returned guard. Dropping the guard records the final reading.
@@ -275,9 +284,9 @@ qmux counter source; unavailable counters are never estimated from payload.
 Readers default missing wire fields to zero for older relays.
 
 `sessions_refused` counts sessions turned away before admission, by reason.
-They never start a session. The relay's own refusals have no resolved root, so
-they count under the empty root on the default tier; an embedder can count one
-it refuses itself with `stats::Handle::refuse`, under the root and tier it
+They never start a session. The relay's own refusals have no resolved label, so
+they count under the empty label on the default tier; an embedder can count one
+it refuses itself with `stats::Handle::refuse`, under the label and tier it
 resolved.
 
 `sessions_failed` counts admitted sessions that ended abnormally, by kind: a
@@ -286,7 +295,7 @@ either side, a drain, or a shutdown is not a failure. A grant that expires
 mid-session counts as `expired`; one revoked or narrowed out from under it
 counts as `application`. A reader treats a missing object as zeros.
 
-`requests` counts admitted request/response exchanges under the token's root and
+`requests` counts admitted request/response exchanges under the token's label and
 tier, including HTTP `/fetch` and `/announced`. They never start or end a session.
 A fetch's delivered group bytes count against the broadcast path on that tier;
 `/announced` delivers no media bytes. The auth decider can give HTTP its own tier
@@ -298,9 +307,9 @@ it was admitted; later traffic follows the new tier.
 the relay, and subscriptions held on it, by any one session. Compare them with
 the relay's [client or peer session limits](/bin/relay/config#session-and-peer):
 a session that goes past one is closed with `TOO_MANY_REQUESTS`. On
-`sessions.json` a peak never goes down while the root has a session; on the
+`sessions.json` a peak never goes down while the label has a session; on the
 totals and presence tracks it never goes down while the track lives. Summing
-nodes or roots takes the largest.
+nodes or labels takes the largest.
 
 ### Counters
 

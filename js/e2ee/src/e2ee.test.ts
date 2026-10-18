@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { Milli } from "@moq/clock";
 import { Broadcast, Group as NetGroup, Track as NetTrack, Time } from "@moq/net";
+import * as Protected from "./broadcast.ts";
 import { Credential } from "./credential.ts";
 import type * as Datagram from "./datagram.ts";
 import { DATAGRAM, GROUP, parse } from "./derive.ts";
@@ -221,6 +222,58 @@ test("oversize payloads are refused before an identity is spent", async () => {
 	await group.writeFrame(ms(1), text("ok"));
 	group.close();
 	expect(await readText(await recvGroup(p.consumer))).toBe("ok");
+});
+
+test("a broadcast speaks semantic names and puts physical names on the wire", async () => {
+	const generation = credential().produce();
+	const net = new Broadcast.Producer();
+	const producer = new Protected.Producer(net, generation);
+	const video = await producer.createTrack("video", { timescale: Time.Timescale.MILLI });
+	expect(video.name).toBe(await generation.name("video"));
+
+	const consumer = await new Protected.Consumer(
+		net.consume(),
+		generation.credential.consume(generation.epoch),
+	).subscribe("video", { maxDelay: Milli(60_000) });
+	const group = video.appendGroup();
+	await group.writeFrame(ms(1), text("frame"));
+	group.close();
+	expect(await readText(await recvGroup(consumer))).toBe("frame");
+	consumer.close();
+	video.close();
+	net.close();
+});
+
+test("closing a protected consumer releases its broadcast handle", () => {
+	const generation = credential().produce();
+	const net = new Broadcast.Producer();
+	const consumer = new Protected.Consumer(net.consume(), generation.credential.consume(generation.epoch));
+	expect(consumer.closed.peek()).toBeUndefined();
+	consumer.close();
+	consumer.close();
+	expect(consumer.closed.peek()).toBeNull();
+	net.close();
+});
+
+test("closing a protected producer ends its broadcast", () => {
+	const producer = new Protected.Producer(new Broadcast.Producer(), credential().produce());
+	expect(producer.closed.peek()).toBeUndefined();
+	producer.close();
+	producer.close();
+	expect(producer.closed.peek()).toBeNull();
+});
+
+test("a broadcast refuses a name its generation already claimed elsewhere", async () => {
+	const generation = credential().produce();
+	await new Protected.Producer(new Broadcast.Producer(), generation).createTrack("video");
+
+	expect(await failure(new Protected.Producer(new Broadcast.Producer(), generation).createTrack("video"))).toBe(
+		"reuse",
+	);
+	// A refused net track is closed with the failure, so its subscribers see why.
+	const refused = netTrack(await generation.name("video"));
+	expect(await failure(generation.produce(refused))).toBe("reuse");
+	expect(refused.closed.peek()).toBeInstanceOf(Failure);
 });
 
 test("a track is produced once per generation", async () => {

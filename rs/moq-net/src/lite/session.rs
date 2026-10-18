@@ -714,7 +714,8 @@ impl<S: crate::transport::poll::Session> SendSetup<S> {
 		loop {
 			match &mut self.state {
 				SendSetupState::Open { session, setup } => {
-					let stream = ready!(session.poll_open_uni(cx)).map_err(crate::lite::error::from_transport)?;
+					let stream = ready!(session.poll_open_uni(cx, Default::default()))
+						.map_err(crate::lite::error::from_transport)?;
 					let mut writer = Writer::new(stream, self.version);
 					writer.buffer(&super::DataType::Setup)?;
 					writer.buffer(&**setup)?;

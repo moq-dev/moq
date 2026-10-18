@@ -47,5 +47,4 @@ claims that change.
 
 ## Related
 
-- [Browser archive](/quest/m3/archive-browser.md) - supplies memory or OPFS archive data through the same request surface
 - [IETF fill timeout](/quest/m1/ietf-fill-timeout.md) - native timeout budgets and gap dispositions build on this responder

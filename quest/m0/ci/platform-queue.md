@@ -19,19 +19,25 @@ the implementation PR.
   execute them before merging. A release PR runs the workflows merged with
   `release`, so wait until the next cut carries this workflow there; earlier,
   backports would wait forever on contexts the old workflow never reports.
-- Raise the main queue's check timeout from 60 to 90 minutes with the
-  contexts: the full macOS suite took 43 minutes in one serial job, and the
-  jobs allow 90.
+- Raise the main queue's check timeout from 60 to 120 minutes with the
+  contexts. The timeout covers runner wait plus the jobs' own 90-minute
+  limit: of 100 queue macOS jobs (2026-10-14 to 10-16), runner wait was p50
+  0.2, p90 33, max 83 minutes, and wait plus run exceeded 90 minutes for 3
+  and 120 for none.
 - Require `Platform scope` too: a failed selector skips its OS dependents,
   and skipped jobs alone satisfy required checks.
-- Confirm a platform-affecting main merge group runs at most one macOS job
-  and one Windows job, while an unrelated diff skips both. Confirm a
-  release-targeting PR runs the selected platform checks.
+- Verified 2026-10-16: no merge group ran more than one macOS and one Windows
+  job, unrelated diffs skipped both, and main PRs report all three contexts
+  as skipped. Still confirm a release-targeting PR runs the selected platform
+  checks after the cut.
 - Check and Test keep running on every PR and again in the merge queue; only
   the native jobs move off main PRs (maintainer, 2026-10-14). Linux-only
   platform jobs remain on PRs, and release packaging remains nightly.
-- Nightly and releases share the five-job macOS cap. Measure overlap with
-  queue runs before reserving capacity or reducing the queue build limit.
+- Nightly and releases share the five-job macOS cap. Measured 2026-10-14 to
+  10-16, Nightly never overlapped a queue wait: the long waits came from the
+  queue's own five concurrent builds plus release-PR and manually dispatched
+  Platform runs. Reserve no Nightly capacity; revisit the queue build limit
+  if waits recur once the gates are required.
 
 ## Related
 

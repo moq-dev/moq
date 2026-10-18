@@ -72,7 +72,7 @@ async fn probe(port: u16, peer: bool) -> Seen {
 		.expect("handshake");
 
 	// SETUP type, then a one-byte message holding zero parameters.
-	let mut setup = conn.open_uni().await.expect("open");
+	let mut setup = conn.open_uni(Default::default()).await.expect("open");
 	setup.write_all(&[0x01, 0x01, 0x00]).await.expect("write");
 	setup.finish().expect("finish");
 
@@ -85,7 +85,7 @@ async fn probe(port: u16, peer: bool) -> Seen {
 
 	let mut streams = Vec::new();
 	while streams.len() < PROBE {
-		let open = conn.open_uni();
+		let open = conn.open_uni(Default::default());
 		let stream = match peer {
 			true => tokio::time::timeout(TIMEOUT, open)
 				.await
@@ -259,7 +259,7 @@ async fn cluster_dials_widen_a_plain_client() {
 
 	let mut streams = Vec::new();
 	while streams.len() < PROBE {
-		match conn.open_uni().now_or_never() {
+		match conn.open_uni(Default::default()).now_or_never() {
 			Some(stream) => streams.push(stream.expect("open")),
 			None => break,
 		}
