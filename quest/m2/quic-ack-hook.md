@@ -22,11 +22,14 @@ wakeups a latency sample needs.
 Add one method to `SendStream`, in the trait's poll style:
 
 ```rust
-fn poll_acked(&mut self, cx: &mut Context, offset: u64) -> Poll<Result<Option<Acked>, Self::Error>>;
+fn poll_acked(&mut self, cx: &mut Context, offset: u64) -> Poll<Result<Option<()>, Self::Error>>;
 ```
 
 It is ready with `Some` once every byte below `offset` has been acknowledged.
-`Acked` carries the ACK-delay-corrected receive instant from `moq-quic`. It resolves
+It carries no instant: the caller records one when woken, which includes the
+peer's delayed-ACK timer (up to `max_ack_delay`) as well as the return trip.
+Decided 2026-10-17 on #5817, which dropped `moq-quic`'s ACK-delay-corrected
+instant until a consumer shows it matters. It resolves
 with an error once the stream is reset by either side or the session closes,
 so a waiter never hangs on bytes the peer will never acknowledge. The default
 implementation is ready with `Ok(None)` immediately: `None` means the backend
@@ -36,13 +39,17 @@ unsupported has to live in the return type rather than the error, and a
 consumer must treat `None` as unknown, never as delivered.
 
 Implement it in the moq-tokio and moq-uring adapters over `moq-quic`'s
-`Checkpoint::acked`, which returns the corrected instant once everything
-before the checkpoint is acknowledged and fails once it never will be;
-`StreamEvent::Acked` wakes its waiters, which moq-uring's `sweep_stream`
-currently ignores. A checkpoint is taken at the current write offset, so the
-adapter checkpoints each offset as it is written rather than naming an
-arbitrary one later; settle whether the trait method takes an offset or
-returns a handle from a `checkpoint()` like the reset one. Leave the browser transport on the default; the browser's `WebTransportSendStream.getStats()` is
+`Checkpoint::acked`, a plain stream id and offset that returns whether
+everything before it is acknowledged and fails once it never will be. A
+`false` asks `moq-quic` to report `StreamEvent::Acked { id, offset }` when
+the stream's acknowledged prefix reaches it, so the adapter wakes waiters at
+or below that offset; moq-uring's `sweep_stream` currently ignores the event.
+`acked` fails once the stream is freed, after `StreamEvent::Finished`, which
+means everything was acknowledged, so the adapter answers from that. A
+checkpoint is taken at the current write offset, so the adapter checkpoints
+each offset as it is written rather than naming an arbitrary one later;
+settle whether the trait method takes an offset or returns a handle from a
+`checkpoint()` like the reset one. Leave the browser transport on the default; the browser's `WebTransportSendStream.getStats()` is
 unimplemented in shipping Chrome and its `bytesAcknowledged` is at risk in the
 W3C draft. qmux over a reliable transport may treat serialization as
 acknowledgment only if the qmux quest decides that is honest; until then it

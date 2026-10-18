@@ -103,6 +103,10 @@ enum Op {
         checkpoint: u8,
         code: u32,
     },
+    AckedCheckpoint {
+        who: Who,
+        checkpoint: u8,
+    },
     Priority {
         who: Who,
         stream: u8,
@@ -498,6 +502,16 @@ impl Pair {
                 let checkpoint = peer.checkpoints.swap_remove(index);
                 if let Some(conn) = peer.conn() {
                     let _ = checkpoint.reset(conn, code.into());
+                }
+            }
+            Op::AckedCheckpoint { who, checkpoint } => {
+                let peer = self.peer(who);
+                if peer.checkpoints.is_empty() {
+                    return;
+                }
+                let index = checkpoint as usize % peer.checkpoints.len();
+                if let Some((_, conn)) = peer.conn.as_mut() {
+                    let _ = peer.checkpoints[index].acked(conn);
                 }
             }
             Op::Priority {

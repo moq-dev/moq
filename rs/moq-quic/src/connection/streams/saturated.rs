@@ -9,7 +9,7 @@ use bytes::{BufMut, Bytes, BytesMut};
 use super::state::StreamsState;
 use super::{SendDomain, SendGroup, SendGroups, SendStream, Streams};
 use crate::{
-    Dir, Instant, Side, StreamId, VarInt,
+    Dir, Side, StreamId, VarInt,
     connection::{State as ConnState, spaces::Retransmits},
     frame::{self, Frame, StreamMeta},
     transport_parameters::TransportParameters,
@@ -505,14 +505,11 @@ fn reset_frees_a_released_group() {
     assert!(!sender.state.can_send_stream_data());
     assert!(sender.drain(1).is_empty());
 
-    sender.state.received_ack_of(
-        StreamMeta {
-            id: finished,
-            offsets: 0..100,
-            fin: true,
-        },
-        Instant::now(),
-    );
+    sender.state.received_ack_of(StreamMeta {
+        id: finished,
+        offsets: 0..100,
+        fin: true,
+    });
     assert!(!sender.state.pending.is_clean());
     sender.state.reset_acked(reset, 0);
     assert!(sender.state.pending.is_clean());
@@ -536,22 +533,16 @@ fn reliable_reset_sends_its_prefix_then_frees_its_group() {
     assert_eq!(sender.bytes(&[finished]), 10_000);
     assert!(!sender.state.can_send_stream_data());
 
-    sender.state.received_ack_of(
-        StreamMeta {
-            id: finished,
-            offsets: 0..10_000,
-            fin: true,
-        },
-        Instant::now(),
-    );
-    sender.state.received_ack_of(
-        StreamMeta {
-            id: reset,
-            offsets: 0..3_000,
-            fin: false,
-        },
-        Instant::now(),
-    );
+    sender.state.received_ack_of(StreamMeta {
+        id: finished,
+        offsets: 0..10_000,
+        fin: true,
+    });
+    sender.state.received_ack_of(StreamMeta {
+        id: reset,
+        offsets: 0..3_000,
+        fin: false,
+    });
     assert!(
         !sender.state.pending.is_clean(),
         "the reset is unacknowledged"

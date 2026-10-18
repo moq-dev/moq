@@ -1,8 +1,8 @@
 use bytes::Bytes;
 use thiserror::Error;
 
-use super::schedule::Slot;
-use crate::{Instant, StreamId, VarInt, connection::send_buffer::SendBuffer, frame};
+use super::{ClosedStream, schedule::Slot};
+use crate::{StreamId, VarInt, connection::send_buffer::SendBuffer, frame};
 
 #[derive(Debug)]
 pub(super) struct Send {
@@ -21,6 +21,8 @@ pub(super) struct Send {
     pub(super) data_blocked_limit: Option<u64>,
     /// The reason the peer wants us to stop, if `STOP_SENDING` was received
     pub(super) stop_reason: Option<VarInt>,
+    /// The lowest offset a [`Checkpoint::acked`](super::Checkpoint::acked) call is waiting for
+    pub(super) notify: Option<u64>,
 }
 
 impl Send {
@@ -35,6 +37,7 @@ impl Send {
             connection_blocked: false,
             data_blocked_limit: None,
             stop_reason: None,
+            notify: None,
         })
     }
 
@@ -231,10 +234,8 @@ impl Send {
 
     /// Returns whether the stream has been finished or reset, and all data it still owes the peer
     /// has been acknowledged
-    ///
-    /// `at` is when the ACK was received, less the ACK delay the peer reported.
-    pub(super) fn ack(&mut self, frame: frame::StreamMeta, at: Instant) -> bool {
-        self.pending.ack(frame.offsets, at);
+    pub(super) fn ack(&mut self, frame: frame::StreamMeta) -> bool {
+        self.pending.ack(frame.offsets);
         match &mut self.state {
             SendState::DataSent { finish_acked } => {
                 *finish_acked |= frame.fin;
@@ -243,6 +244,30 @@ impl Send {
             SendState::ResetSent { .. } => self.is_reset_acked() && self.pending.is_fully_acked(),
             SendState::Ready => false,
         }
+    }
+
+    /// Whether the peer acknowledged everything before `offset`, noting to report it if not
+    pub(super) fn acked(&mut self, offset: u64) -> Result<bool, ClosedStream> {
+        // An acknowledgment no longer means the peer reads the data, and a reset dropped the rest
+        if self.stop_reason.is_some() || offset > self.pending.offset() {
+            return Err(ClosedStream::default());
+        }
+        if offset <= self.pending.acked() {
+            return Ok(true);
+        }
+        self.notify = Some(self.notify.map_or(offset, |notify| notify.min(offset)));
+        Ok(false)
+    }
+
+    /// The acknowledged prefix to report, once it reaches the offset a waiter is waiting for
+    pub(super) fn take_acked(&mut self) -> Option<u64> {
+        let acked = self.pending.acked();
+        // A stopped stream fails its waiters instead
+        if self.stop_reason.is_some() || self.notify.is_none_or(|notify| acked < notify) {
+            return None;
+        }
+        self.notify = None;
+        Some(acked)
     }
 
     /// Handle increase to stream-level flow control limit

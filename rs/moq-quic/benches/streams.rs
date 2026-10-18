@@ -79,64 +79,9 @@ fn bench_write_size(c: &mut Criterion<ThreadCpu>) {
     group.finish();
 }
 
-/// Checkpoints per stream against stream count, each awaited until acknowledged, on 16 writes of
-/// 1 KiB per stream.
-fn bench_checkpoint(c: &mut Criterion<ThreadCpu>) {
-    const WRITES: usize = 16;
-    const SIZE: usize = 1024;
-    let mut group = c.benchmark_group("send_checkpoint");
-    for streams in [1, 64, 256] {
-        for checkpoints in [0, 1, WRITES] {
-            let mut pair = None;
-            group.throughput(Throughput::Bytes((streams * WRITES * SIZE) as u64));
-            group.bench_function(
-                BenchmarkId::new(
-                    format!("streams_{streams}"),
-                    format!("checkpoints_{checkpoints}"),
-                ),
-                |b| {
-                    let pair = pair.get_or_insert_with(|| Pair::new(Setup::default()));
-                    b.iter(|| checkpoint(pair, streams, checkpoints, WRITES, SIZE))
-                },
-            );
-        }
-    }
-    group.finish();
-}
-
-/// Like [`send`], taking `checkpoints` evenly spaced checkpoints on each stream and checking
-/// each was acknowledged.
-fn checkpoint(pair: &mut Pair, streams: usize, checkpoints: usize, writes: usize, size: usize) {
-    let data = payload(size);
-    let every = writes / checkpoints.max(1);
-    let target = pair.server.received.finished + streams as u64;
-    let mut taken = Vec::with_capacity(streams * checkpoints);
-    let conn = pair.client();
-    for _ in 0..streams {
-        let id = conn.streams().open(Dir::Uni).expect("stream limit");
-        let mut stream = conn.send_stream(id);
-        for write in 1..=writes {
-            assert_eq!(stream.write(&data).unwrap(), size, "write was cut short");
-            if checkpoints > 0 && write % every == 0 {
-                taken.push(stream.checkpoint());
-            }
-        }
-        stream.finish().unwrap();
-    }
-    pair.drive_until(|pair| pair.server.received.finished >= target);
-    pair.settle();
-    let conn = pair.client();
-    for checkpoint in &taken {
-        assert!(
-            checkpoint.acked(conn).unwrap().is_some(),
-            "never acknowledged"
-        );
-    }
-}
-
 criterion_group! {
     name = benches;
     config = common::config();
-    targets = bench_priority, bench_write_size, bench_checkpoint
+    targets = bench_priority, bench_write_size
 }
 criterion_main!(benches);

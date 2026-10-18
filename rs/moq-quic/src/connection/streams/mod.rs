@@ -1,4 +1,4 @@
-use std::{collections::hash_map, io, sync::Arc};
+use std::{collections::hash_map, io};
 
 use bytes::Bytes;
 use thiserror::Error;
@@ -6,8 +6,8 @@ use tracing::trace;
 
 use super::spaces::{Retransmits, ThinRetransmits};
 use crate::{
-    Dir, Instant, StreamId, VarInt,
-    connection::{ConnectionTag, send_buffer::AckSlot, streams::state::get_or_insert_recv},
+    Dir, StreamId, VarInt,
+    connection::{ConnectionTag, streams::state::get_or_insert_recv},
     frame,
 };
 
@@ -358,28 +358,17 @@ impl<'a> SendStream<'a> {
     ///
     /// # Panics
     /// - when applied to a receive stream
-    pub fn checkpoint(&mut self) -> Checkpoint {
-        let max_send_data = self.state.max_send_data(self.id);
-        let closed = || Arc::new(AckSlot::from(Err(ClosedStream::default())));
-        let (offset, acked) = match self.state.send.get_mut(&self.id) {
-            Some(stream) => {
-                let stream = stream.get_or_insert_with(|| Send::new(max_send_data));
-                // A stopped or reset stream fails its checkpoints, so a new one does too
-                let acked = match stream.stop_reason.is_some() || stream.is_reset() {
-                    true => closed(),
-                    false => stream.pending.watch(),
-                };
-                (stream.offset(), acked)
-            }
-            // Already closed, where the reset fails anyway
-            None => (0, closed()),
+    pub fn checkpoint(&self) -> Checkpoint {
+        let offset = match self.state.send.get(&self.id) {
+            Some(Some(stream)) => stream.offset(),
+            // Not written yet, or already closed, where the reset fails anyway
+            _ => 0,
         };
         Checkpoint {
             id: self.id,
             tag: self.state.tag,
             generation: self.state.generation,
             offset,
-            acked,
         }
     }
 
@@ -412,11 +401,6 @@ impl<'a> SendStream<'a> {
         let buffered = stream.pending.buffered();
         let send = stream.reset(error_code, reliable_size, at);
         self.state.buffered_data -= buffered - stream.pending.buffered();
-        if stream.pending.take_resolved() {
-            self.state
-                .events
-                .push_back(StreamEvent::Acked { id: self.id });
-        }
         // Only data below the Reliable Size is left to send
         if !stream.is_pending() {
             self.state.pending.remove(&mut stream.slot);
@@ -498,41 +482,38 @@ pub struct Checkpoint {
     tag: ConnectionTag,
     generation: u64,
     offset: u64,
-    acked: Arc<AckSlot>,
 }
 
 impl Checkpoint {
-    /// When the peer acknowledged everything written before the checkpoint, or `None` until it has
+    /// Whether the peer acknowledged everything written before the checkpoint
     ///
-    /// The instant is when the ACK that brought the stream's contiguous acknowledged prefix to the
-    /// checkpoint was received, less the ACK delay the peer reported, capped at its
-    /// `max_ack_delay`. That leaves out the peer's delayed-ACK timer, but still includes the ACK's
-    /// one-way trip back. The delay describes only the largest packet the ACK names, so data in
-    /// any other packet, which may have arrived later, gets the ACK's receive time with nothing
-    /// subtracted. The instant is never earlier than the data's packet was sent. A checkpoint taken once
-    /// everything written was already acknowledged gets the ACK that got it there, and one taken
-    /// before anything was written gets the stream's next ACK, or fails if a reset comes first.
-    ///
-    /// [`StreamEvent::Acked`] reports when this resolves. Like a [`StreamEvent::Finished`] stream,
-    /// an acknowledgment only means the peer's QUIC stack holds the data, not that its
-    /// application read it.
+    /// A `false` notes to report a [`StreamEvent::Acked`] once the stream's contiguous
+    /// acknowledged prefix reaches the checkpoint, so poll again then. One event answers every
+    /// checkpoint at or below the offset it carries. Like a [`StreamEvent::Finished`] stream, an
+    /// acknowledgment only means the peer's QUIC stack holds the data, not that its application
+    /// read it.
     ///
     /// Fails with [`ClosedStream`] once the peer will never acknowledge it, or no longer reads
-    /// it: the stream was reset before the checkpoint's data was acknowledged, the peer sent
-    /// STOP_SENDING, rejected 0-RTT discarded the stream, or the connection closed. A checkpoint
-    /// taken once the stream was reset or stopped fails at once.
+    /// it: a reset dropped the checkpoint's data, the peer sent STOP_SENDING, rejected 0-RTT
+    /// discarded the stream, or the connection closed. It also fails once the stream is freed,
+    /// after its [`StreamEvent::Finished`], which means every checkpoint on it was acknowledged.
     ///
     /// # Panics
     /// If the checkpoint came from another connection.
-    pub fn acked(&self, conn: &crate::Connection) -> Result<Option<Instant>, ClosedStream> {
+    pub fn acked(&self, conn: &mut crate::Connection) -> Result<bool, ClosedStream> {
         assert!(
             self.tag == conn.streams.tag,
             "checkpoint used on another connection"
         );
-        match self.acked.get() {
-            Some(acked) => acked.clone().map(Some),
-            None if conn.is_closed() => Err(ClosedStream { _private: () }),
-            None => Ok(None),
+        // Rejected 0-RTT discarded the stream, and a new one may have its id
+        if conn.is_closed() || self.generation != conn.streams.generation {
+            return Err(ClosedStream { _private: () });
+        }
+        match conn.streams.send.get_mut(&self.id) {
+            Some(Some(stream)) => stream.acked(self.offset),
+            // Nothing was written yet, so nothing is left to acknowledge
+            Some(None) => Ok(true),
+            None => Err(ClosedStream { _private: () }),
         }
     }
 
@@ -742,12 +723,16 @@ pub enum StreamEvent {
         /// Which stream has been finished
         id: StreamId,
     },
-    /// A [`Checkpoint`] on a send stream was acknowledged, or will never be
+    /// A send stream's contiguous acknowledged prefix reached a [`Checkpoint`] being waited on
     ///
-    /// Not generated when the connection closes or rejected 0-RTT discards the stream.
+    /// Reported before a [`StreamEvent::Finished`] from the same ACK. Not reported after
+    /// STOP_SENDING, a reset that drops the checkpoint's data, or the connection closing, which
+    /// fail [`Checkpoint::acked`] instead.
     Acked {
-        /// Which stream the checkpoint is on
+        /// Which stream was acknowledged
         id: StreamId,
+        /// The end of the stream's contiguous acknowledged prefix
+        offset: u64,
     },
     /// The peer asked us to stop sending on an outgoing stream
     Stopped {
