@@ -13,8 +13,7 @@ and no wire change.
 
 Follow-up to #5725 (live largest), chosen by the maintainer there: its
 decision 10 ordered frame writes against `finish` with the group lock because
-a frame write on one clone could race `finish` on another. Base the work on
-`main` after #5725 lands.
+a frame write on one clone could race `finish` on another.
 
 This is the "drop public `Clone`" half of the owned frame writer decision in
 [Public ingest](/quest/m1/public-model/ingest.md) (settled 2026-10-16,
@@ -117,7 +116,3 @@ pitfall, `FrameOpen`'s removal, and `finish(&mut self)`. moq-ffi's gets one if
 its exported surface changes (it should not). JS has no equivalent: a JS
 `Group.Producer` is a single object and needs no change. Docs: none beyond
 MIGRATE, since `doc/` never documents cloning a group producer.
-
-## Required
-
-- [Live largest location](/quest/m1/largest.md) - #5725, in the merge queue; this quest builds on its group-lock ordering and loom model
