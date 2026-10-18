@@ -469,7 +469,7 @@ async fn main() -> Result<()> {
 	config.check_deprecated()?;
 	// A 160x144 frame is below every hardware encoder's minimum, so OpenH264 is the only one.
 	if !cfg!(feature = "openh264") {
-		anyhow::bail!("moq-boy was built without its `openh264` feature; install with `cargo install moq-boy --features openh264`");
+		anyhow::bail!("built without the `openh264` feature: cargo install moq-boy --features openh264");
 	}
 
 	#[cfg(feature = "jemalloc")]
