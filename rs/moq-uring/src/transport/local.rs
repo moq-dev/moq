@@ -22,6 +22,14 @@ impl<T> Local<T> {
 	}
 }
 
+/// Unwrap the send group of `options`, checking the thread.
+fn unwrap<'a, G>(options: poll::SendOptions<'a, Local<G>>) -> poll::SendOptions<'a, G> {
+	poll::SendOptions {
+		group: options.group.map(|group| &*group.0),
+		priority: options.priority,
+	}
+}
+
 impl<S: poll::Session> poll::Session for Local<S> {
 	type SendStream = Local<S::SendStream>;
 	type RecvStream = Local<S::RecvStream>;
@@ -37,13 +45,21 @@ impl<S: poll::Session> poll::Session for Local<S> {
 			.map_ok(|(send, recv)| (Local::new(send), Local::new(recv)))
 	}
 
-	fn poll_open_uni(&mut self, cx: &mut Context<'_>) -> Poll<Result<Self::SendStream, Self::Error>> {
-		self.0.poll_open_uni(cx).map_ok(Local::new)
+	fn poll_open_uni(
+		&mut self,
+		cx: &mut Context<'_>,
+		options: poll::SendOptions<'_, Local<<S::SendStream as poll::SendStream>::Group>>,
+	) -> Poll<Result<Self::SendStream, Self::Error>> {
+		self.0.poll_open_uni(cx, unwrap(options)).map_ok(Local::new)
 	}
 
-	fn poll_open_bi(&mut self, cx: &mut Context<'_>) -> Poll<Result<poll::BiStreams<Self>, Self::Error>> {
+	fn poll_open_bi(
+		&mut self,
+		cx: &mut Context<'_>,
+		options: poll::SendOptions<'_, Local<<S::SendStream as poll::SendStream>::Group>>,
+	) -> Poll<Result<poll::BiStreams<Self>, Self::Error>> {
 		self.0
-			.poll_open_bi(cx)
+			.poll_open_bi(cx, unwrap(options))
 			.map_ok(|(send, recv)| (Local::new(send), Local::new(recv)))
 	}
 
@@ -54,10 +70,9 @@ impl<S: poll::Session> poll::Session for Local<S> {
 	fn send_datagram(
 		&mut self,
 		payload: Bytes,
-		group: Option<&Local<<S::SendStream as poll::SendStream>::Group>>,
-		order: i64,
+		options: poll::SendOptions<'_, Local<<S::SendStream as poll::SendStream>::Group>>,
 	) -> Result<(), Self::Error> {
-		self.0.send_datagram(payload, group.map(|group| &*group.0), order)
+		self.0.send_datagram(payload, unwrap(options))
 	}
 
 	fn poll_recv_datagram(&mut self, cx: &mut Context<'_>) -> Poll<Result<Bytes, Self::Error>> {

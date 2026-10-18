@@ -5,7 +5,8 @@
 A publisher's `track::Dynamic` receives range requests for misses instead of
 one request per group, and a track serves a subscription's ranges from one
 cursor, in its order, without duplicating a group, naming every sequence in
-range it won't deliver. `requested_group` and `fetch_group` are replaced, not
+range it won't deliver. A range end may be a `Time(pts)`, resolved by
+whoever holds the track. `requested_group` and `fetch_group` are replaced, not
 kept beside it.
 
 ## Plan
@@ -16,8 +17,17 @@ still reads every later group the aggregate brings in. Serving a range locally
 means filtering a subscriber's reads to its own ranges, and a miss below the
 cache becomes a range request on `Dynamic` rather than a group request.
 
+- Add a `Time(pts)` anchor beside `Absolute` and `Relative` (see the
+  [line](/quest/m1/subscribe-ranges/README.md)), carried through moq-ffi and
+  every binding like the other anchors. A track resolves it from its cached
+  groups' timestamps and passes an unresolved one to its `track::Dynamic`
+  handler; an untimed track refuses it. Test a time start and end resolved
+  against the cache, an unresolved one passed through to a handler, and an
+  untimed track refusing one.
 - Replace `requested_group` and `fetch_group` rather than keep both. Update
-  every caller (relay, moq-archive, hls, the ladder) in the same PR, plus the
+  every caller (relay, moq-archive, hls, the ladder) in the same PR,
+  including the archive consumer's time resolution from its key listing if it
+  has landed, plus the
   published surfaces built on them, per the cross-package table: moq-ffi
   (`fetch_group`, `requested_group`), moq-c (`poll_requested_group`), every
   binding wrapper and its `doc/lib` page, and `moq fetch` through

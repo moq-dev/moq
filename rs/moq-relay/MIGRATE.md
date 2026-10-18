@@ -5,6 +5,11 @@ Rolling a cluster across a release also follows the [upgrade guide](https://moq.
 
 ## Unreleased
 
+### Cluster dials build from a template (#5674)
+
+`Relay::client()` and `Cluster::with_client` are removed.
+Give the cluster `with_connect(connect, quic)`, plus `with_iroh(endpoint)` for `iroh://` peers, and build your own `moq_tokio::Client` for other outbound dials.
+
 ### `max_streams = 0` is refused (#5871)
 
 A `[quic]` `max_streams` of 0 stops startup, as `[peer.quic]` already did, since zero streams wedge the connection.
