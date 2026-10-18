@@ -920,6 +920,24 @@ mod test {
     }
 
     #[test]
+    fn read_nonminimal_integer() {
+        // RFC 9000 section 16 lets a VarInt use any length, so a one-byte value in two bytes is
+        // valid, but repeating the parameter is not.
+        let mut buf = Vec::new();
+        buf.write_var(TransportParameterId::InitialMaxData as u64);
+        buf.write_var(2);
+        buf.extend_from_slice(&[0x40, 0x07]);
+        let params = TransportParameters::read(Side::Server, &mut buf.as_slice()).unwrap();
+        assert_eq!(params.initial_max_data, VarInt::from_u32(7));
+
+        let twice = [buf.as_slice(), buf.as_slice()].concat();
+        assert_eq!(
+            TransportParameters::read(Side::Server, &mut twice.as_slice()),
+            Err(Error::Malformed)
+        );
+    }
+
+    #[test]
     fn read_min_ack_delay_length_mismatch() {
         // `min_ack_delay` claims no value at all, so its `VarInt` starts on the parameter that
         // follows it.

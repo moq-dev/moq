@@ -9,6 +9,10 @@ All credit for the code goes to the quinn developers; it stays under quinn's MIT
 Forked from quinn-proto in quinn-rs/quinn `main` at [`7616e6b2`](https://github.com/quinn-rs/quinn/commit/7616e6b2782722f3ce4a1b181ef08817d7f545e4) (2026-10-05).
 That covers every quinn security advisory published through 2026-09-30.
 
+Cherry-picked since the fork point:
+
+- [`48854d48`](https://github.com/quinn-rs/quinn/commit/48854d48635875d259a95973cc0575db8c1792a4): accept non-minimally encoded integer transport parameters, as RFC 9000 section 16 allows.
+
 The fork never merges upstream.
 Upstream fixes are cherry-picked by hand, and the crate keeps quinn's formatting (rustfmt defaults) so the patches apply cleanly.
 Rewrite quinn's crate path and name in the patch before applying it, so its context matches the renamed lines:
