@@ -8,8 +8,8 @@ probes up to its target with a padding stream at the lowest send priority. On
 an ALR schedule, while app-limited below the target, it sends a short probe
 cluster at about twice the estimate, capped at the target, about every five
 seconds, with a follow-up probe when one validates. When the path has room
-the estimate rises; when it doesn't, padding stays within its budget and
-never delays media. Such sessions then advertise PROBE `Increase`.
+the estimate rises; when it doesn't, padding stays within its overhead and
+media frame-delay budgets. Such sessions then advertise PROBE `Increase`.
 
 ## Plan
 
@@ -52,7 +52,11 @@ Tests, with mocked time:
   `Manual`.
 - moq-quic's seeded simulation with a stepped bottleneck and native probing
   off: with padding the estimate rises past the media, without it it stays
-  frozen. Wire it into CI at least nightly.
+  frozen. On a path held below the target, report media frame delay and
+  deadline misses against budgets set before tuning: lowest priority can't
+  preempt padding already in flight or queued at the bottleneck, so a frame
+  ready just after a cluster can still wait behind it. Wire it into CI at
+  least nightly.
 
 ## Required
 

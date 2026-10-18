@@ -70,3 +70,7 @@ the PROBE target sent to the peer; the session probes to the larger of its
 reservations and the peer's target; a session that publishes and watches
 keeps the two directions apart; `Increase` is advertised only with a sender;
 opting out sends no target and probes nothing.
+
+The sums fan out over reservations and viewer handles, so add a benchmark
+sweeping both counts independently, wired into the benchmark CI, so an update
+that rescans every handle shows up as a slope.
