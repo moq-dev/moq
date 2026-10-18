@@ -32,7 +32,8 @@ pub(super) struct SendBuffer {
     /// offset in `unacked`
     // TODO: Recover storage from these by compacting (#700)
     acks: RangeSet,
-    /// When each range in `acks` was acknowledged, keyed by its start; the first ACK of a start wins
+    /// When the bytes from each key up to the next key (or the end of their range in `acks`) were
+    /// first acknowledged
     ack_instants: BTreeMap<u64, Instant>,
     /// Previously transmitted ranges deemed lost
     retransmits: RangeSet,
@@ -69,8 +70,17 @@ impl SendBuffer {
             self.watches.ack(self.acked(), at);
             return;
         }
-        self.acks.insert(range.clone());
-        self.ack_instants.entry(range.start).or_insert(at);
+        // Only the bytes this ACK newly covers take its instant; `replace` yields the rest in order
+        let mut next = range.start;
+        for overlap in self.acks.replace(range.clone()) {
+            if overlap.start > next {
+                self.ack_instants.insert(next, at);
+            }
+            next = overlap.end;
+        }
+        if next < range.end {
+            self.ack_instants.insert(next, at);
+        }
         self.advance();
     }
 
@@ -684,6 +694,23 @@ mod tests {
         assert_eq!(buf.poll_transmit(16), (13..14, true));
         buf.ack(13..14, early);
         assert_eq!(third.get(), Some(&Ok(late)));
+    }
+
+    #[test]
+    fn watch_takes_the_instant_of_an_extension() {
+        let mut buf = SendBuffer::new();
+        buf.write(Bytes::from_static(b"Hello, world!"));
+        let end = buf.watch();
+        assert_eq!(buf.poll_transmit(16), (0..8, true));
+        assert_eq!(buf.poll_transmit(16), (8..13, true));
+
+        // A short retransmission is acknowledged before a longer frame from the same offset
+        let early = Instant::now();
+        let late = early + Duration::from_millis(1);
+        buf.ack(8..10, early);
+        buf.ack(8..13, late);
+        buf.ack(0..8, early);
+        assert_eq!(end.get(), Some(&Ok(late)));
     }
 
     #[test]
