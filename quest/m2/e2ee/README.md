@@ -43,6 +43,10 @@ The Rust and TypeScript cores expose the same surface, and nothing else:
 - A platform that forwards and meters protected bytes must never preview, record, archive, transmux, transcode, transcribe, compose, or inspect them, rejecting those paths before opening a processing session or writing product state. Applications needing those operations terminate E2EE outside the platform. A platform classifies protected broadcasts by its own credential or product state, never by name; the moq.pro (downstream) exclusion classifier and dashboard work stay downstream.
 - The first proof covers browser TypeScript and native Rust publication and playback in both directions, with grouped audio and video over both moq-lite and MoQ Transport. Shared vectors cover groups and moq-lite datagrams. JavaScript carries MoQ Transport datagrams since [#4979](https://github.com/moq-dev/moq/pull/4979), so the proof covers them too.
 
+### Dynamic names
+
+Decided with the maintainer on 2026-10-17: physical names are a one-way hash, so a publisher cannot answer a request for a name it never declared. [Dynamic names](/quest/m2/e2ee/dynamic-names.md) designs that before any implementation, and [#5876](https://github.com/moq-dev/moq/pull/5876) (the broadcast wrappers, whose `reserve_track` covers only names declared in advance) is held until it decides.
+
 ## Required
 
 - [Rust protected publisher seams](/quest/m2/e2ee/rust-publish.md) - Rust media
@@ -57,6 +61,9 @@ The Rust and TypeScript cores expose the same surface, and nothing else:
 - [Cross-language encrypted proof](/quest/m2/e2ee/interop.md) - browser
   TypeScript and native Rust exchange encrypted media both ways, with relays
   forwarding and metering blind
+- [Dynamic names](/quest/m2/e2ee/dynamic-names.md) - a reviewed design for
+  answering requests for undeclared track names, split into implementation
+  quests; #5876 waits on it
 
 ## Closes
 

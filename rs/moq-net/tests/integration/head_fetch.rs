@@ -12,7 +12,7 @@ use crate::support;
 
 use std::time::Duration;
 
-use moq_net::track::{Position, Subscription};
+use moq_net::track::{Anchor, Position, Range, Subscription};
 use moq_net::{Hop, Timestamp, Version};
 use support::harness::{MockConnectOptions, connect_mock};
 
@@ -99,7 +99,10 @@ async fn round(version: &str) {
 	let mut peer_sub = peer_remote
 		.track("catalog.json")
 		.unwrap()
-		.subscribe(Subscription::default().with_start(start))
+		.subscribe(Subscription::default().with_ranges([Range {
+			start: Anchor::Absolute(start),
+			end: None,
+		}]))
 		.await
 		.expect("peer subscribe");
 	let mut peer_group = moq_clock::timeout(TIMEOUT, peer_sub.recv_group())

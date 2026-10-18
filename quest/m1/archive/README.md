@@ -38,8 +38,10 @@ archive (per-track `.timeline.z` records named by the catalog's root
   stall. Anything younger is still in the live cache.
 - **Per-track objects, keyed by position.** Groups coalesce in order into
   objects cut by duration, keyed `<prefix>/<track>/<first group>-<first pts>`
-  (`<first group>` for an untimed track), beside a small per-track `.info`
-  holding its properties. The key listing is the index: no index object,
+  (`<first group>` for an untimed track, `<track>` percent-encoded as one
+  segment), beside a small per-track `.info` holding its timescale and
+  priority. A served track advertises the archive's retention (no limit), not
+  the source's max age, which would expire archived history. The key listing is the index: no index object,
   manifest, or timeline. The application picks each broadcast's key prefix
   (per path and epoch, say), so a resume in one epoch continues from the
   stored keys and another epoch is another prefix. An optional DVR mode prunes

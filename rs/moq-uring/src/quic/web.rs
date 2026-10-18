@@ -488,7 +488,7 @@ impl Session {
 
 	/// Change the underlying connection's flow-control limits; see
 	/// [`Connection::set_limits`].
-	pub fn set_limits(&self, limits: super::Limits) -> Result<(), crate::Error> {
+	pub fn set_limits(&self, limits: super::Limits) -> Result<(), super::Error> {
 		self.conn.set_limits(limits)
 	}
 

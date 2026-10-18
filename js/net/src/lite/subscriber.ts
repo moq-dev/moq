@@ -849,6 +849,7 @@ export class Subscriber {
 			timescale.set(0);
 			drainOk = true;
 		}
+		hooks.receiveTrack(producer);
 
 		// Register before opening SUBSCRIBE so a racing GROUP stream finds the entry.
 		const entry: SubscribeEntry = {

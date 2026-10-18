@@ -42,7 +42,13 @@ Guidance:
   joins the request rather than duplicating it. Overlapping prefixes from
   different downstreams share upstream state where they overlap.
 - Subscription parameters (priority, order, max delay, and later ranges)
-  apply to every track; per-track updates are not needed yet.
+  apply to every track. The one per-track need is a start floor: the
+  [producer](/quest/m1/archive/producer.md) resumes each track at its last
+  stored frame by subscribing to the yielded `track::Consumer` with its own
+  floor, which aggregates like any other subscriber on that cached track.
+  Carry that floor upstream the way an ordinary SUBSCRIBE joining the track
+  would, rather than a per-track field in the request; test a resumed track
+  starting mid-group through a relay.
 - Name how a track's end, a broadcast's end, and a refused track surface, and
   how SUBSCRIBE_DROP applies per track.
 - Wire: the request names the prefix; the reply announces broadcasts and

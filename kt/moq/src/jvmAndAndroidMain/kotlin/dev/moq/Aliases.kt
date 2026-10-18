@@ -99,8 +99,18 @@ typealias Datagram = uniffi.moq.MoqDatagram
 typealias Frame = uniffi.moq.MoqFrame
 /** A path-prefix route: the publisher epoch it serves (null when unknown), relay hop ids (oldest first), and static production and link cost (lower wins). */
 typealias Route = uniffi.moq.MoqRoute
-/** Tunes how a track subscription is delivered: priority, group ordering, and range. */
+/** Tunes how a track subscription is delivered: priority, latency budget, ranges, and group ordering. */
 typealias Subscription = uniffi.moq.MoqSubscription
+/** A span of a track to deliver: from `start` up to `end`, or onward when `end` is null. */
+typealias Range = uniffi.moq.MoqRange
+/** Where one end of a [Range] falls: [AnchorAbsolute] or [AnchorRelative]. */
+typealias Anchor = uniffi.moq.MoqAnchor
+/** An exact group and frame. */
+typealias AnchorAbsolute = uniffi.moq.MoqAnchor.Absolute
+/** The group `groups` before the latest one, clamped to group 0: 0 is the latest. */
+typealias AnchorRelative = uniffi.moq.MoqAnchor.Relative
+/** Which pending group the publisher sends first: `ASCENDING` or `DESCENDING`. */
+typealias Order = uniffi.moq.MoqOrder
 /** Options for fetching one past group by sequence. */
 typealias FetchGroupOptions = uniffi.moq.MoqFetchGroupOptions
 /** Delivery settings for a raw track: priority, ordering, latency budget, and timescale. */
@@ -135,6 +145,8 @@ typealias VideoEncoderOutput = uniffi.moq.MoqVideoEncoderOutput
 typealias VideoEncoderKind = uniffi.moq.MoqVideoEncoderKind
 /** Divides one connection's send estimate among the tracks sharing it. */
 typealias Bandwidth = uniffi.moq.MoqBandwidth
+/** An owned bandwidth estimate; release it to stop receive PROBE demand. */
+typealias BandwidthConsumer = uniffi.moq.MoqBandwidthConsumer
 /** One track's standing claim on a [Bandwidth]. */
 typealias Reservation = uniffi.moq.MoqReservation
 /** A snapshot of transport connection statistics. */

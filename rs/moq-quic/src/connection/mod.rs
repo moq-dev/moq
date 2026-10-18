@@ -15,9 +15,9 @@ use thiserror::Error;
 use tracing::{debug, error, trace, trace_span, warn};
 
 use crate::{
-    Dir, Duration, EndpointConfig, Frame, Instant, MAX_CID_SIZE, MAX_STREAM_COUNT,
-    MIN_INITIAL_SIZE, Side, StreamId, TIMER_GRANULARITY, TokenStore, Transmit, TransportError,
-    TransportErrorCode, VarInt,
+    Dir, Duration, EndpointConfig, Frame, Instant, Limits, LimitsError, MAX_CID_SIZE,
+    MAX_STREAM_COUNT, MIN_INITIAL_SIZE, Side, StreamId, TIMER_GRANULARITY, TokenStore, Transmit,
+    TransportError, TransportErrorCode, VarInt,
     cid_queue::CidQueue,
     coding::BufMutExt,
     config::{ServerConfig, TransportConfig},
@@ -1568,6 +1568,25 @@ impl Connection {
         if self.streams.set_receive_window(receive_window) {
             self.spaces[SpaceId::Data].pending.max_data = true;
         }
+    }
+
+    /// Change every limit `limits` sets, leaving the others as they are
+    ///
+    /// Errors, changing nothing, on limits [`Limits::validate`] refuses.
+    pub fn set_limits(&mut self, limits: Limits) -> Result<(), LimitsError> {
+        limits.validate()?;
+        if let Some(window) = limits.receive_window {
+            self.set_receive_window(VarInt::from_u64(window.get()).expect("validated"));
+        }
+        if let Some(window) = limits.send_window {
+            self.set_send_window(window.get());
+        }
+        if let Some(streams) = limits.max_streams {
+            let streams = VarInt::from_u64(streams.get()).expect("validated");
+            self.set_max_concurrent_streams(Dir::Bi, streams);
+            self.set_max_concurrent_streams(Dir::Uni, streams);
+        }
+        Ok(())
     }
 
     fn on_ack_received(

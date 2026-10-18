@@ -31,6 +31,5 @@ release. The nightly dry-run preparation can proceed independently.
 
 - [Breaking release cut](/quest/m2/release/cut.md) - prepared code reaches release before artifact publication and installed proof
 
-- [Generated C++ shape](/quest/m1/cpp-generated-shape.md) - each type has one name and `moq::expected` one type before the API ships
 
 - [Nightly package proof](/quest/m1/cpp-package-check.md) - the release path is exercised before the tag

@@ -1609,7 +1609,7 @@ mod tests {
 			let subscribing = consumer
 				.track(name)
 				.unwrap()
-				.subscribe(track::Subscription::default().with_start(track::Position::group(floor)));
+				.subscribe(track::Subscription::default().with_groups(floor..));
 			family.adopt_pair(
 				&broadcast,
 				&mut requested,
