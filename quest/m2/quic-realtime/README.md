@@ -48,14 +48,18 @@ Remaining work once the candidates finish (this README's own job):
   competing CUBIC flow. Pick the winner on queuing delay.
 - Ship the winner as `Realtime` in moq-tokio and moq-uring, mapped through
   `MoqCongestionControl` in moq-ffi and every binding in the cross-package
-  sync table. iroh maps `Realtime` to BBR3 (noq has no extension).
+  sync table, and a `congestion-control` property on `moqsink` forwarded
+  into its QUIC config (moq-gst has no CLI or TOML loader). iroh maps
+  `Realtime` to BBR3 (noq has no extension).
 - Delete the losing candidates' code.
 - Wire the winner's moq-shaper run into the nightly so a regression in
   queuing delay shows up.
 
-The winner's target rate already reaches encoders through
-`bandwidth_estimate` → `estimated_send_rate` → `set_bitrate`; no new
-plumbing.
+The winner's target rate already reaches moq-cli and moq-ffi encoders
+through `bandwidth_estimate` → `estimated_send_rate` → `set_bitrate`.
+`moqsink` only exposes a read-only `estimated-send-rate` and never retunes
+the upstream encoder, so a GStreamer pipeline at a fixed bitrate still queues
+when capacity drops; open: whether this epic owns that feedback.
 
 ## Required
 

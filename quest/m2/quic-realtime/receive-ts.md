@@ -22,11 +22,16 @@ from relay egress to native publisher ingest. Both ends are ours.
   maximum never receives it.
 - Receiver: fill spare ACK space with the newest receive times first, as the
   draft's section 7.2 recommends; never send a packet just for timestamps.
-- Receive time: kernel `SO_TIMESTAMPNS` in moq-tokio and moq-uring where the
-  OS has it ([quinn#2634](https://github.com/quinn-rs/quinn/pull/2634) shows
-  the cmsg plumbing), userspace recv instant elsewhere. A GRO batch reports
-  only its first datagram and omits the rest (section 7.1), since one kernel
-  stamp covers the whole batch.
+- Receive time: kernel `SO_TIMESTAMPNS` where the OS has it (moq-sock
+  already sets it and exposes `RecvMeta::timestamp`, used by moq-tokio and
+  moq-uring), userspace recv instant elsewhere. A GRO batch reports only its
+  first datagram and omits the rest (section 7.1), since one kernel stamp
+  covers the whole batch.
+- The kernel stamp is `CLOCK_REALTIME`, which NTP or an admin can step. Map
+  it onto the monotonic clock with the realtime-to-monotonic offset sampled
+  at each recv, and when the offset jumps between batches, drop that batch's
+  kernel stamps for the userspace instant, so a clock step never reads as
+  queue growth or drain. The basis must stay constant (section 6.1).
 - Sender: `congestion::Controller` sees each acknowledged packet's send
   instant and peer receive instant, so every candidate reads the same input.
 - Receive times measure delay variation, not absolute one-way delay: the

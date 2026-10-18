@@ -12,9 +12,10 @@ relay peers, and endpoint sharding.
 Per-stream acknowledgment progress, per-stream deadlines, qmux on the shared
 stream state machine, and the experiments (the egress profile, ECN
 measurement, deadline keep-alive) live in [m2](/quest/m2/README.md); media
-probing is its own [m2 quest](/quest/m2/quic-probe.md); L4S,
-careful resume, and a receive-timestamps spike toward GCC live in
-[m3](/quest/m3/README.md). None of them gate this line.
+probing is its own [m2 quest](/quest/m2/quic-probe.md); receive timestamps
+and a delay-based uplink controller are the
+[m2 realtime epic](/quest/m2/quic-realtime/README.md); L4S and careful resume
+live in [m3](/quest/m3/README.md). None of them gate this line.
 
 ## Plan
 
