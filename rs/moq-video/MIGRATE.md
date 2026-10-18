@@ -4,6 +4,11 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### OpenH264 is opt-in (#5771)
+
+The default features drop `openh264`, so a default build has no software H.264 encoder or decoder and a GPU-less host fails to open one.
+Add `features = ["openh264"]` to keep the fallback.
+
 ### `Color` is a struct of matrix, range, primaries and transfer
 
 The four variants become constants plus a range, and the new `color` module holds `Matrix`, `Range`, `Primaries` and `Transfer`.

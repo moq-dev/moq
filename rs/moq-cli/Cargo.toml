@@ -56,7 +56,8 @@ azure = ["object_store/azure"]
 capture = ["dep:moq-video", "dep:moq-audio", "moq-video/capture", "moq-audio/capture"]
 # Just-in-time transcoding (`moq ... transcode`). Off by default because it pulls
 # in moq-video and its codec dependencies. Enable with
-# `cargo build -p moq-cli --features transcode`.
+# `cargo build -p moq-cli --features transcode`, adding `openh264` for the
+# software fallback a GPU-less host needs.
 transcode = ["dep:moq-transcode", "dep:moq-video"]
 # Native playback (`moq ... play`): decode into a wgpu window and a cpal
 # speaker. Off by default because it pulls both graphics and audio device stacks

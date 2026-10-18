@@ -38,7 +38,7 @@
 //! - [`decode`] subscribes to an H.264, H.265, or AV1 track and decodes it to
 //!   raw frames with a native backend (VideoToolbox on macOS and iOS, Media Foundation /
 //!   DXVA on Windows, NVDEC, VAAPI, or an ARM SoC's V4L2 M2M decoder on Linux,
-//!   with the default `openh264` feature providing software H.264 fallback).
+//!   with the opt-in `openh264` feature providing software H.264 fallback).
 //!   [`decode::Consumer`] is the mirror of `moq_audio::decode::Consumer`. An
 //!   [`decode::Config::output`] picks native surfaces (the default: an NVDEC
 //!   frame stays in CUDA memory and feeds [`encode::Encoder::encode`]
