@@ -608,13 +608,23 @@ impl<E: CatalogExt> Producer<E> {
 			};
 			guard.state.clock = clock;
 			guard.state.anchored = true;
-			guard.clock = clock.wall();
+			match wall {
+				// A placement can precede every track. It stages no publish, so the catalog first
+				// goes out listing them rather than carrying a clock alone.
+				Some(_) => guard.state.catalog.clock = clock.wall(),
+				None => guard.clock = clock.wall(),
+			}
 			super::Offset::default()
 		};
 
 		timebase.set(offset).expect("set under the catalog lock");
 		guard.commit()?;
 		Ok(offset)
+	}
+
+	/// Whether `other` is this catalog or a clone of it.
+	pub(super) fn same(&self, other: &Self) -> bool {
+		Arc::ptr_eq(&self.current, &other.current)
 	}
 
 	/// A timestamp base for one source, shared by every importer reading it.
@@ -2218,6 +2228,32 @@ mod test {
 			timebase.place(pts, wall),
 			Err(crate::Error::UnmappableTimestamp(_))
 		));
+	}
+
+	/// A placement lists no track, so alone it publishes nothing: an importer placed before its
+	/// input declares a track has no catalog to announce until it does, and that catalog carries
+	/// the placed clock.
+	#[test]
+	fn a_placement_alone_publishes_nothing() {
+		use std::time::{Duration, SystemTime};
+
+		let wall = SystemTime::now() - Duration::from_secs(2);
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let mut catalog = Producer::new(&mut broadcast, Config::default()).unwrap();
+		catalog.timebase().place(moq_net::Timestamp::ZERO, wall).unwrap();
+		assert_eq!(sent(&catalog), None, "a clock alone reached the wire");
+
+		catalog
+			.mutate(|catalog| {
+				catalog
+					.audio
+					.renditions
+					.insert("audio0".to_string(), AudioConfig::new(AudioCodec::Opus, 48_000, 2));
+			})
+			.unwrap();
+		assert_eq!(sent(&catalog), Some(0));
+		assert_eq!(catalog.clock().reading(wall).unwrap(), 0);
+		assert_eq!(wire(&catalog).clock, catalog.clock().wall());
 	}
 
 	/// Fake this thread's host now a day past the moq epoch, returning a root `clock` an hour

@@ -253,6 +253,35 @@ impl PublishCatalog {
 	}
 }
 
+/// One wrap of MPEG-TS's 33-bit 90 kHz clock, 2^33 / 90 kHz (about 26.5 hours), to the nearest
+/// microsecond. The 27 MHz PCR wraps with it.
+const TS_WRAP: std::time::Duration = std::time::Duration::from_micros(((1 << 33) * 1_000_000 + 45_000) / 90_000);
+
+/// The timebase a stdin importer publishes on, placed by the epoch redundant publishers share.
+///
+/// Placed rather than anchored on the first frame's arrival, every publisher of one stream under
+/// that epoch derives the same root `clock`, and the TS importers the same era for each
+/// timestamp, wherever each started and with nothing read from the others. PTS zero sits at the
+/// epoch's wall time, `wrap` earlier for a format whose timestamps wrap: then a stream whose clock
+/// reads zero when the epoch is minted maps exactly, and none lands below zero.
+pub(crate) fn timebase<E: moq_mux::catalog::hang::CatalogExt>(
+	catalog: &moq_mux::catalog::Producer<E>,
+	shared: Option<&moq_net::Epoch>,
+	wrap: std::time::Duration,
+) -> anyhow::Result<moq_mux::catalog::Timebase<E>> {
+	let timebase = catalog.timebase();
+	if let Some(epoch) = shared {
+		let zero = epoch
+			.time()
+			.checked_sub(wrap)
+			.context("the epoch's time is unrepresentable")?;
+		timebase
+			.place(moq_net::Timestamp::ZERO, zero)
+			.with_context(|| format!("failed to place the clock on epoch {epoch}"))?;
+	}
+	Ok(timebase)
+}
+
 /// Build the importer and `mpegts` catalog for one TS broadcast.
 ///
 /// TS carries undecoded elementary streams (SCTE-35, teletext, DVB AC-3, ...) verbatim, so it
@@ -262,10 +291,11 @@ fn ts_import(
 	broadcast: &mut moq_net::broadcast::Producer,
 	config: moq_mux::catalog::Config,
 	program: Option<u16>,
+	shared: Option<&moq_net::Epoch>,
 ) -> anyhow::Result<(ts::Import<ts::Ext>, moq_mux::catalog::Producer<ts::Ext>)> {
 	let config = config.with_catalog(moq_mux::catalog::hang::Catalog::<ts::Ext>::default());
 	let catalog = moq_mux::catalog::Producer::new(broadcast, config)?;
-	let mut import = ts::Import::new(broadcast.clone(), catalog.reserve());
+	let mut import = ts::Import::new(broadcast.clone(), timebase(&catalog, shared, TS_WRAP)?.reserve());
 	if let Some(program) = program {
 		import = import.with_program(program);
 	}
@@ -350,14 +380,16 @@ impl Publish {
 	///
 	/// Stdin is a live feed with its own zero: the container importers publish its timestamps
 	/// so the first frame is live on arrival, verbatim unless `config` pins the catalog clock.
+	/// Under a `shared` epoch the clock is placed by the epoch instead (see [`timebase`]).
 	pub fn new(
 		mut broadcast: moq_net::broadcast::Producer,
 		format: &PublishFormat,
 		config: moq_mux::catalog::Config,
+		shared: Option<&moq_net::Epoch>,
 	) -> anyhow::Result<Self> {
 		// TS builds its `Ext` catalog instead of the shared `()` below.
 		if let PublishFormat::Ts { program } = *format {
-			let (ts, catalog) = ts_import(&mut broadcast, config, program)?;
+			let (ts, catalog) = ts_import(&mut broadcast, config, program, shared)?;
 			return Ok(Self {
 				source: Source::Stream {
 					decoder: PublishDecoder::Ts(Box::new(ts)),
@@ -380,21 +412,26 @@ impl Publish {
 				}
 			}
 			PublishFormat::Fmp4 => {
-				let fmp4 = fmp4::Import::new(broadcast.clone(), catalog.reserve());
+				let timebase = timebase(&catalog, shared, std::time::Duration::ZERO)?;
+				let fmp4 = fmp4::Import::new(broadcast.clone(), timebase.reserve());
 				PublishDecoder::Fmp4(Box::new(fmp4))
 			}
 			PublishFormat::Ts { .. } => unreachable!("TS is handled above with the mpegts catalog extension"),
 			// The `m2ts` section is in the base catalog: nothing about the multiplex is described
 			// beyond the track that carries it.
 			PublishFormat::TsPassthrough { pcr_pid } => {
-				let mut passthrough = ts::Passthrough::new(broadcast.clone(), catalog.reserve())?;
+				let timebase = timebase(&catalog, shared, TS_WRAP)?;
+				let mut passthrough = ts::Passthrough::new(broadcast.clone(), timebase.reserve())?;
 				if let Some(pid) = pcr_pid {
 					passthrough = passthrough.with_pcr_pid(*pid);
 				}
 				PublishDecoder::TsPassthrough(Box::new(passthrough))
 			}
+			// FLV's 32-bit milliseconds wrap after 49 days, which its importer does not follow,
+			// so it takes no era.
 			PublishFormat::Flv => {
-				let flv = flv::Import::new(broadcast.clone(), catalog.reserve());
+				let timebase = timebase(&catalog, shared, std::time::Duration::ZERO)?;
+				let flv = flv::Import::new(broadcast.clone(), timebase.reserve());
 				PublishDecoder::Flv(Box::new(flv))
 			}
 		};
@@ -979,7 +1016,13 @@ pub(crate) mod tests {
 		let broadcast = origin.create_broadcast("cli").unwrap();
 		broadcast.announce(Default::default()).unwrap();
 		settle().await;
-		let mut publish = Publish::new(broadcast, &PublishFormat::Ts { program: None }, Default::default()).unwrap();
+		let mut publish = Publish::new(
+			broadcast,
+			&PublishFormat::Ts { program: None },
+			Default::default(),
+			None,
+		)
+		.unwrap();
 		#[allow(irrefutable_let_patterns)]
 		let Source::Stream { decoder, .. } = &mut publish.source else {
 			panic!("expected a stream source");
@@ -1051,6 +1094,42 @@ pub(crate) mod tests {
 		);
 	}
 
+	/// A shared epoch places the root clock before any input: PTS zero at the epoch's time for a
+	/// format whose timestamps never wrap, and one 33-bit wrap before it for TS.
+	#[tokio::test(start_paused = true)]
+	async fn a_shared_epoch_places_the_root_clock() {
+		let epoch = moq_net::Epoch::mint();
+		let clock = |zero: std::time::SystemTime| {
+			let unix = zero.duration_since(std::time::UNIX_EPOCH).unwrap().as_micros() as u64;
+			let micros = unix - hang::catalog::MOQ_EPOCH_UNIX_MILLIS * 1_000;
+			hang::catalog::Clock::new(Timestamp::from_micros(micros).unwrap()).unwrap()
+		};
+		let wrapped = clock(epoch.time() - TS_WRAP);
+		assert_eq!(
+			wrapped.wall.as_micros(),
+			clock(epoch.time()).wall.as_micros() - 95_443_717_689
+		);
+		for (name, format, expected) in [
+			("ts", PublishFormat::Ts { program: None }, wrapped),
+			("passthrough", PublishFormat::TsPassthrough { pcr_pid: None }, wrapped),
+			("fmp4", PublishFormat::Fmp4, clock(epoch.time())),
+			("flv", PublishFormat::Flv, clock(epoch.time())),
+		] {
+			let broadcast = moq_net::broadcast::Info::new().produce();
+			let publish = Publish::new(broadcast, &format, Default::default(), Some(&epoch)).unwrap();
+			#[allow(irrefutable_let_patterns)]
+			let Source::Stream { catalog, .. } = &publish.source else {
+				panic!("expected a stream source");
+			};
+			let placed = match catalog {
+				PublishCatalog::Media(catalog) => catalog.snapshot().clock,
+				PublishCatalog::Ts(catalog) => catalog.snapshot().clock,
+				PublishCatalog::TsPrograms => unreachable!("one program"),
+			};
+			assert_eq!(placed, Some(expected), "{name}");
+		}
+	}
+
 	/// `moq import ts --passthrough` publishes no renditions, only the `m2ts` section naming one
 	/// track, and that track reads back as the input from its first group on.
 	#[tokio::test(start_paused = true)]
@@ -1062,6 +1141,7 @@ pub(crate) mod tests {
 			broadcast,
 			&PublishFormat::TsPassthrough { pcr_pid: None },
 			Default::default(),
+			None,
 		)
 		.unwrap();
 		#[allow(irrefutable_let_patterns)]
@@ -1162,6 +1242,7 @@ pub(crate) mod tests {
 				broadcast,
 				&PublishFormat::TsPassthrough { pcr_pid: None },
 				Default::default(),
+				None,
 			)
 			.unwrap();
 			#[allow(irrefutable_let_patterns)]
@@ -1312,7 +1393,13 @@ pub(crate) mod tests {
 	async fn ts_import_anchors_the_catalog_clock_on_arrival() {
 		let broadcast = moq_net::broadcast::Info::new().produce();
 		let consumer = broadcast.consume();
-		let mut publish = Publish::new(broadcast, &PublishFormat::Ts { program: None }, Default::default()).unwrap();
+		let mut publish = Publish::new(
+			broadcast,
+			&PublishFormat::Ts { program: None },
+			Default::default(),
+			None,
+		)
+		.unwrap();
 		#[allow(irrefutable_let_patterns)]
 		let Source::Stream { decoder, .. } = &mut publish.source else {
 			panic!("expected a stream source");
@@ -1370,7 +1457,13 @@ pub(crate) mod tests {
 		}
 
 		let broadcast = moq_net::broadcast::Info::new().produce();
-		let publish = Publish::new(broadcast, &PublishFormat::Ts { program: None }, Default::default()).unwrap();
+		let publish = Publish::new(
+			broadcast,
+			&PublishFormat::Ts { program: None },
+			Default::default(),
+			None,
+		)
+		.unwrap();
 		#[allow(irrefutable_let_patterns)]
 		let Source::Stream { decoder, catalog } = publish.source else {
 			panic!("expected a stream source");
@@ -1406,7 +1499,13 @@ pub(crate) mod tests {
 			file.flush().unwrap();
 			let input = tokio::fs::File::open(file.path()).await.unwrap();
 			let broadcast = moq_net::broadcast::Info::new().produce();
-			let publish = Publish::new(broadcast, &PublishFormat::Ts { program: None }, Default::default()).unwrap();
+			let publish = Publish::new(
+				broadcast,
+				&PublishFormat::Ts { program: None },
+				Default::default(),
+				None,
+			)
+			.unwrap();
 			#[allow(irrefutable_let_patterns)]
 			let Source::Stream { decoder, catalog } = publish.source else {
 				panic!("expected a stream source");
@@ -1428,7 +1527,13 @@ pub(crate) mod tests {
 	async fn eof_finishes_the_catalog_with_its_renditions() {
 		let broadcast = moq_net::broadcast::Info::new().produce();
 		let consumer = broadcast.consume();
-		let publish = Publish::new(broadcast, &PublishFormat::Ts { program: None }, Default::default()).unwrap();
+		let publish = Publish::new(
+			broadcast,
+			&PublishFormat::Ts { program: None },
+			Default::default(),
+			None,
+		)
+		.unwrap();
 		let mut catalogs = hang::catalog::Catalog::<()>::subscribe(&consumer).await.unwrap();
 
 		#[allow(irrefutable_let_patterns)]
@@ -1460,7 +1565,13 @@ pub(crate) mod tests {
 		const LINGER: Duration = hang::container::MAX_AGE;
 		let broadcast = moq_net::broadcast::Info::new().produce();
 		let consumer = broadcast.consume();
-		let publish = Publish::new(broadcast, &PublishFormat::Ts { program: None }, Default::default()).unwrap();
+		let publish = Publish::new(
+			broadcast,
+			&PublishFormat::Ts { program: None },
+			Default::default(),
+			None,
+		)
+		.unwrap();
 		let mut catalogs = hang::catalog::Catalog::<()>::subscribe(&consumer).await.unwrap();
 
 		#[allow(irrefutable_let_patterns)]
@@ -1514,7 +1625,7 @@ pub(crate) mod tests {
 			let consumer = origin.consume();
 			let mut announced = consumer.announced();
 			let broadcast = origin.create_broadcast("demo").unwrap();
-			let publish = Publish::new(broadcast.clone(), &format, Default::default()).unwrap();
+			let publish = Publish::new(broadcast.clone(), &format, Default::default(), None).unwrap();
 			#[allow(irrefutable_let_patterns)]
 			let Source::Stream { decoder, catalog } = publish.source else {
 				panic!("expected a stream source");
@@ -1573,6 +1684,7 @@ pub(crate) mod tests {
 			broadcast.clone(),
 			&PublishFormat::Ts { program: None },
 			Default::default(),
+			None,
 		)
 		.unwrap();
 		let mut catalog_reader = broadcast
@@ -1610,7 +1722,7 @@ pub(crate) mod tests {
 			let origin = moq_tokio::origin::spawn();
 			let mut announced = origin.consume().announced();
 			let broadcast = origin.create_broadcast("demo").unwrap();
-			let publish = Publish::new(broadcast.clone(), &format, Default::default()).unwrap();
+			let publish = Publish::new(broadcast.clone(), &format, Default::default(), None).unwrap();
 			#[allow(irrefutable_let_patterns)]
 			let Source::Stream { decoder, catalog } = publish.source else {
 				panic!("expected a stream source");
@@ -1723,7 +1835,13 @@ pub(crate) mod tests {
 	#[test]
 	fn a_multiplex_is_refused_with_the_programs_and_the_flag() {
 		let broadcast = moq_net::broadcast::Info::new().produce();
-		let mut publish = Publish::new(broadcast, &PublishFormat::Ts { program: None }, Default::default()).unwrap();
+		let mut publish = Publish::new(
+			broadcast,
+			&PublishFormat::Ts { program: None },
+			Default::default(),
+			None,
+		)
+		.unwrap();
 		#[allow(irrefutable_let_patterns)]
 		let Source::Stream { decoder, .. } = &mut publish.source else {
 			panic!("expected a stream source");

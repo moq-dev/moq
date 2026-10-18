@@ -257,7 +257,11 @@ async fn duplicate_goaway_keeps_first_payload_moq_lite_04() {
 		let mut frame = vec![0x05u8, uri.len() as u8 + 1, uri.len() as u8];
 		frame.extend_from_slice(uri.as_bytes());
 
-		let (mut send, recv) = session.open_bi().await.map_err(|e| e.to_string()).expect("open_bi");
+		let (mut send, recv) = session
+			.open_bi(Default::default())
+			.await
+			.map_err(|e| e.to_string())
+			.expect("open_bi");
 		let n = send.write(&frame).await.map_err(|e| e.to_string()).expect("write");
 		assert_eq!(n, frame.len());
 		send.finish().map_err(|e| e.to_string()).expect("finish");

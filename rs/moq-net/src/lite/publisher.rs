@@ -17,7 +17,7 @@ use crate::{
 	lite,
 	priority::{Priority, PriorityHandle, PriorityQueue},
 	track::Order,
-	transport::poll::{GroupOf, SendGroup as _},
+	transport::poll::{GroupOf, SendGroup as _, SendOptions},
 };
 
 use super::Version;
@@ -3268,8 +3268,12 @@ impl<S: crate::transport::poll::Session> Subscription<S> {
 		}
 
 		// The run loop may not have served a group since the last SUBSCRIBE_UPDATE.
-		let order = crate::priority::in_group(datagram.sequence, 0, self.steer_current().order);
-		let _ = self.session.send_datagram(body, self.group.as_ref(), order);
+		let priority = crate::priority::in_group(datagram.sequence, 0, self.steer_current().order);
+		let options = SendOptions {
+			group: self.group.as_ref(),
+			priority,
+		};
+		let _ = self.session.send_datagram(body, options);
 		true
 	}
 
@@ -3872,7 +3876,21 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 						return Poll::Ready(Err(Error::Old));
 					}
 					let mut cx = waiter.context();
-					let stream = match ready!(self.ctx.session.poll_open_uni(&mut cx)) {
+					let options = match &mut self.rank {
+						Rank::Group(group) => SendOptions {
+							group: Some(&*group),
+							priority: crate::priority::in_group(
+								self.sequence,
+								self.frame_start,
+								self.ctx.steer_seen.order,
+							),
+						},
+						Rank::Queue(handle) => SendOptions {
+							group: None,
+							priority: handle.send_order().into(),
+						},
+					};
+					let stream = match ready!(self.ctx.session.poll_open_uni(&mut cx, options)) {
 						Ok(stream) => stream,
 						Err(err) => {
 							self.settle_open(false);
@@ -3882,14 +3900,6 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 					};
 					self.settle_open(true);
 					let mut writer = Writer::new(stream, self.ctx.version);
-					match &mut self.rank {
-						Rank::Group(group) => {
-							writer.set_group(group);
-							let order = self.ctx.steer_seen.order;
-							writer.set_priority(crate::priority::in_group(self.sequence, self.frame_start, order));
-						}
-						Rank::Queue(handle) => writer.set_priority(handle.send_order().into()),
-					}
 
 					let msg = lite::Group {
 						subscribe: self.ctx.id,
@@ -6220,7 +6230,7 @@ mod tests {
 			.unwrap();
 		let mut session = ScriptedSession::new(script);
 		let (send, recv) = futures::future::poll_fn(|cx| {
-			<ScriptedSession as crate::transport::poll::Session>::poll_open_bi(&mut session, cx)
+			<ScriptedSession as crate::transport::poll::Session>::poll_open_bi(&mut session, cx, Default::default())
 		})
 		.await
 		.unwrap();
@@ -6359,7 +6369,11 @@ mod tests {
 					.unwrap();
 					let mut session = ScriptedSession::new(script);
 					let (_, recv) = futures::future::poll_fn(|cx| {
-						<ScriptedSession as crate::transport::poll::Session>::poll_open_bi(&mut session, cx)
+						<ScriptedSession as crate::transport::poll::Session>::poll_open_bi(
+							&mut session,
+							cx,
+							Default::default(),
+						)
 					})
 					.await
 					.unwrap();
@@ -6448,7 +6462,7 @@ mod tests {
 		.unwrap();
 		let mut session = ScriptedSession::new(script);
 		let (send, recv) = futures::future::poll_fn(|cx| {
-			<ScriptedSession as crate::transport::poll::Session>::poll_open_bi(&mut session, cx)
+			<ScriptedSession as crate::transport::poll::Session>::poll_open_bi(&mut session, cx, Default::default())
 		})
 		.await
 		.unwrap();
@@ -6541,7 +6555,7 @@ mod tests {
 		.unwrap();
 		let mut session = ScriptedSession::new(script);
 		let (send, recv) = futures::future::poll_fn(|cx| {
-			<ScriptedSession as crate::transport::poll::Session>::poll_open_bi(&mut session, cx)
+			<ScriptedSession as crate::transport::poll::Session>::poll_open_bi(&mut session, cx, Default::default())
 		})
 		.await
 		.unwrap();
@@ -6734,7 +6748,7 @@ mod tests {
 		.unwrap();
 		let mut session = ScriptedSession::new(script);
 		let (send, recv) = futures::future::poll_fn(|cx| {
-			<ScriptedSession as crate::transport::poll::Session>::poll_open_bi(&mut session, cx)
+			<ScriptedSession as crate::transport::poll::Session>::poll_open_bi(&mut session, cx, Default::default())
 		})
 		.await
 		.unwrap();
@@ -6804,7 +6818,7 @@ mod tests {
 		for count in 0..3 {
 			let mut session = ScriptedSession::new(script.clone());
 			let (send, recv) = futures::future::poll_fn(|cx| {
-				<ScriptedSession as crate::transport::poll::Session>::poll_open_bi(&mut session, cx)
+				<ScriptedSession as crate::transport::poll::Session>::poll_open_bi(&mut session, cx, Default::default())
 			})
 			.await
 			.unwrap();

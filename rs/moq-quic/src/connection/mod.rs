@@ -94,7 +94,7 @@ mod streams;
 pub(crate) use streams::StreamsState;
 pub use streams::{
     Checkpoint, Chunks, ClosedStream, Credit, FinishError, ReadError, ReadableError, RecvStream,
-    SendDomain, SendGroup, SendGroups, SendStream, ShouldTransmit, StreamEvent, Streams,
+    SendGroup, SendGroups, SendOptions, SendStream, ShouldTransmit, StreamEvent, Streams,
     WriteError, Written,
 };
 

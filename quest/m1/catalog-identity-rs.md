@@ -68,4 +68,4 @@ the contract.
 
 ## Related
 
-- [Archive](/quest/m1/archive/README.md) - storage and replay consume the identity contract
+- [Broadcast archives](/quest/m1/archive/README.md) - an archived catalog describes every stored group by the identity contract

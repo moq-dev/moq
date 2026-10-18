@@ -72,12 +72,16 @@ lands before the cut.
 - [Lazy discovery](/quest/m1/lazy-discovery/README.md) - a `consume` session requests announcements only for prefixes the origin is watching, in JS then Rust; `follow`, `broadcasts`, and the `discovery` option go away
 - [A spinning loop fails a sim test](/quest/m1/spinning-loops.md) - a sim test names any loop that holds a task poll too long, and each one yields through a budget
 - [Data consumer timestamps](/quest/m1/data-consumer-timestamps.md) - json and binary consumers return each value's timestamp, in Rust and every binding; snapshots add `latest()` beside an in-order `next()`
+- [Exact timestamps in every binding](/quest/m1/binding-timestamps.md) - bindings carry `{value, scale}` timestamps instead of lossy microseconds
 - [JSON window timestamps](/quest/m1/json-window-timestamps.md) - Rust and JS window consumers return each event's frame timestamp like the snapshot and stream consumers
 - [JavaScript FETCH](/quest/m1/js-fetch.md) - browser publishers answer IETF FETCH through the JS ranges request surface
 - [IETF fill timeout](/quest/m1/ietf-fill-timeout.md) - native FILL_TIMEOUT bounds upstream waiting on drafts 18-22, alongside local content-age enforcement
 - [Browser follows a renamed track](/quest/m1/browser-rename-check.md) - a real browser keeps playing when `@moq/publish` renames a track after a codec change, while size-only changes keep their identity
 - [Rust identity enforcement](/quest/m1/catalog-identity-rs.md) - `moq-mux` refuses a redefined rendition, and every Rust publisher mints a new rendition name for a decoder identity change and updates everything else in place
-- [Archive](/quest/m1/archive/README.md) - record selected tracks to any object_store and replay them over FETCH or derived HLS; preserve published format boundaries while completing replay and DVR correctness
+- [JSON duplicate keys](/quest/m1/json-duplicate-keys.md) - Rust and JS JSON decoders refuse duplicate keys in every frame kind
+- [Catalog too new](/quest/m1/catalog-unsupported.md) - `@moq/watch` reports a distinct status when its player cannot read the catalog version
+- [One hang catalog consumer](/quest/m1/catalog-consumer-fold.md) - `moq-mux` reads hang catalogs through `hang`'s consumer
+- [Broadcast archives](/quest/m1/archive/README.md) - SUBSCRIBE_ALL records every track under a prefix to any object_store, a host serves a stored broadcast back, and the catalog drops its archive pointer for an opt-in `hls` field
 - [In-band auth](/quest/m1/auth/README.md) - a session tells its peer what it may publish and subscribe to, unions tokens presented in band, and fails loud on an out-of-scope publish
 - [IETF epochs](/quest/m1/ietf-epochs.md) - negotiate explicit broadcast identity on drafts 17-22, retaining unchanged paths and epochless clients on updated relays
 - [Announcement takeover](/quest/m1/announce-takeover.md) - a new independent route explicitly continues instances served through its predecessor, with shared Rust/JS semantics and lite-07 wire
@@ -96,9 +100,14 @@ lands before the cut.
 - [Publish channel count](/quest/m1/publish-audio-channel-count.md) - forcing a channel count on an Audio.Capture stops costing the subscriber gaps of silence, and the media fixture's cold-start audio-tone flake is fixed at its cause
 - [Handshake deadline covers admission](/quest/m1/handshake-admission-deadline.md) - `listen.timeout` bounds a connection through auth admission on both listeners, replacing the hardcoded admission timeout
 - [Drain cleanup](/quest/m1/drain-cleanup.md) - sessions force-closed at the drain deadline record their lease end and bytes before the relay or CLI exits, while unfinished handshakes stay bounded
+- [GOAWAY coverage](/quest/m1/goaway-coverage.md) - every IETF request stream handles GOAWAY, a closed control stream is a violation, and the draft-18 cutoff is honored
 - [Container reads drop backfill](/quest/m1/read-backfill.md) - the JS container consumer drops groups below its read cursor like Rust
+- [Decode errors end the reader](/quest/m1/decode-errors.md) - a container decode error fails the reader in Rust and JS instead of reading as loss
+- [Transcode finishes its group](/quest/m1/transcode-open-group.md) - `moq-transcode` never aborts a group a fetch's live loop opened
 - [Rust request credit](/quest/m1/rs-request-credit.md) - a moq-net request fails at once without stream credit instead of waiting
 - [qmux no-wait opens](/quest/m1/qmux-no-wait.md) - @moq/qmux rejects an over-limit create when waitUntilAvailable is false, like Chrome
+- [Bufferbloat harness](/quest/m1/bufferbloat.md) - acceptance and performance checks impair paths with a rate limit and a deep queue, not random loss
+- [Random-loss audit](/quest/m1/random-loss-audit.md) - every decision random-loss gates drove is kept, reworked, or reverted on shaped paths
 - [Timed-out requests clean up](/quest/m1/legacy-request-timeout-cleanup.md) - on drafts 14-16, Rust and JS send PUBLISH_NAMESPACE_DONE or UNSUBSCRIBE_NAMESPACE for a timed-out request before its local reset
 - [TS fidelity and recovery](/quest/m1/ts-reliability/README.md) - both modes have explicit profiles, automated validation, loss tests, and a dedicated guide
 - [Resume reorder](/quest/m1/resume-reorder.md) - a group whose stream header arrives after its successor's still resumes on failover; only a dropped or long-gone group fails
