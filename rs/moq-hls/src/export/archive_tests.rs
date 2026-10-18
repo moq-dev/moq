@@ -773,7 +773,7 @@ async fn history_after_expiry(finished: bool) {
 		.pool
 		.gc(now + Duration::from_secs(31), &kio::Waiter::noop());
 	let subscription = moq_net::track::Subscription::default()
-		.with_start(moq_net::track::Position::group(0))
+		.with_groups(0..)
 		.with_max_delay(Duration::from_millis((1_u64 << 62) - 1));
 	let mut retained = broadcast
 		.consume()

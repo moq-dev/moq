@@ -24,10 +24,11 @@ media, and request-accept children, and the remaining children PR straight to
   `reanchor()`) already on `main`. Codecs ranks first below for that reason.
   Dart is published (`moq` 0.1.0, `moq_ffi` 0.4.x), so
   its renames get the same upgrade notes as the others.
-- The C++ package (#4079) landed first, so #4519 ported `cpp/moq` (including
-  the hand-kept `moq::` aliases `just cpp check` audits), `cpp/obs`, and the
-  C++ interop client. C++ stays a flat `moq::` namespace with `Media*` type
-  names until [unprefixed names](/quest/m1/cpp-generated-shape.md) lands.
+- The C++ package (#4079) landed first, so #4519 ported `cpp/moq`, `cpp/obs`,
+  and the C++ interop client. C++ is one flat `moq::` namespace of the
+  generated types, with moq-ffi's `Moq` prefix stripped (`moq::MediaTrackConsumer`):
+  uniffi-bindgen-cpp renders one namespace per crate, so a `media::` namespace
+  would need the generator to map a name prefix to a namespace.
 
 Settled shape:
 
@@ -81,7 +82,7 @@ Settled shape:
 
 Each child reshapes one group end to end: moq-ffi, all five wrappers, the
 C++ package and `cpp/obs`, the `doc/lib` samples per the cross-package table,
-and its entries in the Unreleased section of `doc/setup/upgrade.md`. Each
+and its entries under `## Unreleased` in each affected package's `MIGRATE.md`. Each
 runs `just test interop --all`.
 
 ## Required

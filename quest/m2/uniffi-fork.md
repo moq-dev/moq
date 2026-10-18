@@ -63,8 +63,7 @@ UniFFI:
 - **The fork's CI** builds every generator and runs its fixture suite,
   including the unlocked `cargo install` resolve that bit the 0.32 port.
 - Update the quests that name a `kixelated/uniffi-*` fork
-  ([Generated C++ shape](/quest/m1/cpp-generated-shape.md),
-  [Generated C bindings](/quest/m1/c/README.md)) to point at moq-dev/uniffi.
+  ([Generated C bindings](/quest/m1/c/README.md)) to point at moq-dev/uniffi.
 
 Public API: none at the move; moq-ffi's dependency names change. Wire: none.
 

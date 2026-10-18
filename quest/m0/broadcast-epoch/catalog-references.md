@@ -56,7 +56,7 @@ following does not authorize substituting a different requested epoch.
   restarts its pump.
 - Exporters: a late first announcement starts the rendition and End ends
   it. Restart behavior belongs to
-  [restart followers](/quest/m1/restart-followers.md).
+  [sink restart follow](/quest/m1/sink-restart-follow.md).
 - Share this in `moq_mux` (a `Source::follow`-style API; the shape is open)
   rather than per reader. `Source::bind` binds once today, as
   `failed_binding_does_not_retry_a_later_publisher` asserts; that changes.

@@ -697,7 +697,7 @@ pub struct Connection {
 	/// Persistent send-bitrate estimate, fed by the loop from each live session.
 	send_bandwidth: BandwidthConsumer,
 	/// Persistent recv-bitrate estimate, fed by the loop from each live session.
-	recv_bandwidth: BandwidthConsumer,
+	recv_bandwidth: moq_net::bandwidth::Weak,
 	/// The last status returned by [`status`](Self::status), for change detection.
 	/// Per-clone: a clone starts from its parent's cursor and diverges from there.
 	last_reported: Option<Status>,
@@ -731,7 +731,7 @@ impl Connection {
 		let send_bw = BandwidthProducer::new();
 		let recv_bw = BandwidthProducer::new();
 		let send_bandwidth = send_bw.consume();
-		let recv_bandwidth = recv_bw.consume();
+		let recv_bandwidth = recv_bw.weak();
 
 		let closed: CloseGuard = Default::default();
 		let task_closed = closed.clone();
@@ -1238,7 +1238,7 @@ impl Connection {
 	/// [`moq_net::Session::recv_bandwidth`]. Persistent across reconnects like
 	/// [`send_bandwidth`](Self::send_bandwidth); `None` while disconnected or unavailable.
 	pub fn recv_bandwidth(&self) -> BandwidthConsumer {
-		self.recv_bandwidth.clone()
+		self.recv_bandwidth.consume()
 	}
 
 	/// Poll whether the connection loop has stopped.
@@ -1443,14 +1443,14 @@ async fn sleep_draining(delay: Duration, draining: &mut Option<Draining>, shared
 /// polled through the waiter's own waker.
 async fn run_session(shared: &Shared, session: &moq_net::Session, draining: &mut Option<Draining>) -> Ended {
 	let mut send = session.send_bandwidth();
-	let mut recv = session.recv_bandwidth();
+	let mut recv = RecvBandwidth::default();
 	let goaway = session.draining();
 	let closed = session.closed();
 	tokio::pin!(closed);
 
 	kio::wait(|waiter| {
 		poll_forward(&mut send, &shared.send_bw, waiter);
-		poll_forward(&mut recv, &shared.recv_bw, waiter);
+		recv.poll(&shared.recv_bw, waiter, || session.recv_bandwidth());
 
 		// Retire the predecessor once it closes or overstays its handover window.
 		// The replacement is already serving, so the state stays as it is.
@@ -1473,6 +1473,44 @@ async fn run_session(shared: &Shared, session: &moq_net::Session, draining: &mut
 			.map(|err| Ended::Closed(Err(err.into())))
 	})
 	.await
+}
+
+/// Own the live session's receive consumer only while an external consumer needs it.
+#[derive(Default)]
+struct RecvBandwidth {
+	source: Option<BandwidthConsumer>,
+}
+
+impl RecvBandwidth {
+	fn poll(
+		&mut self,
+		out: &BandwidthProducer,
+		waiter: &kio::Waiter,
+		source: impl FnOnce() -> Option<BandwidthConsumer>,
+	) {
+		loop {
+			match out.poll_unused(waiter) {
+				Poll::Pending => break,
+				Poll::Ready(Err(_)) => {
+					self.source = None;
+					return;
+				}
+				Poll::Ready(Ok(())) => {
+					self.source = None;
+					let _ = out.set(None);
+				}
+			}
+			match out.poll_used(waiter) {
+				// Demand can arrive during retirement, before a waiter was armed.
+				Poll::Ready(Ok(())) => continue,
+				Poll::Ready(Err(_)) | Poll::Pending => return,
+			}
+		}
+		if self.source.is_none() {
+			self.source = source();
+		}
+		poll_forward(&mut self.source, out, waiter);
+	}
 }
 
 /// Mirror `bw`'s live estimate into `out` for as long as it changes, dropping the source handle once
@@ -1968,6 +2006,92 @@ mod tests {
 		src.abort(moq_net::Error::Cancel).unwrap();
 		poll_forward(&mut bw, &out, &waiter);
 		assert!(bw.is_none());
+	}
+
+	#[test]
+	fn receive_demand_is_forwarded_across_sessions_without_becoming_demand() {
+		let out = BandwidthProducer::new();
+		let handle = out.weak();
+		let waiter = kio::Waiter::noop();
+		let first = BandwidthProducer::new();
+		first.set(Some(moq_net::bandwidth::Rate::from_bps(123))).unwrap();
+		let mut forward = RecvBandwidth::default();
+		forward.poll(&out, &waiter, || Some(first.consume()));
+		assert!(!first.is_used(), "the connection handle is not demand");
+		let reader = handle.consume();
+		forward.poll(&out, &waiter, || Some(first.consume()));
+		assert!(first.is_used());
+		assert_eq!(reader.peek(), Some(moq_net::bandwidth::Rate::from_bps(123)));
+		let clone = reader.clone();
+		drop(reader);
+		forward.poll(&out, &waiter, || Some(first.consume()));
+		assert!(first.is_used(), "a remaining clone is demand");
+		drop(clone);
+		forward.poll(&out, &waiter, || Some(first.consume()));
+		assert!(!first.is_used(), "the last drop releases the live session's consumer");
+		let reader = handle.consume();
+		assert_eq!(reader.peek(), None, "an unused estimate is cleared");
+		forward.poll(&out, &waiter, || Some(first.consume()));
+		assert!(first.is_used(), "demand can resume on the same session");
+		drop(forward);
+		assert!(!first.is_used());
+		out.set(None).unwrap();
+		assert_eq!(reader.peek(), None, "disconnected");
+		let second = BandwidthProducer::new();
+		second.set(Some(moq_net::bandwidth::Rate::from_bps(456))).unwrap();
+		let mut forward = RecvBandwidth::default();
+		forward.poll(&out, &waiter, || Some(second.consume()));
+		assert!(second.is_used(), "the same reader demands the replacement session");
+		assert_eq!(reader.peek(), Some(moq_net::bandwidth::Rate::from_bps(456)));
+		drop(reader);
+		forward.poll(&out, &waiter, || Some(second.consume()));
+		assert!(!second.is_used());
+	}
+
+	#[test]
+	fn receive_demand_arriving_during_retirement_is_forwarded() {
+		use std::sync::{Arc, Mutex};
+		use std::task::{Wake, Waker};
+
+		struct Demand {
+			handle: moq_net::bandwidth::Weak,
+			consumer: Mutex<Option<BandwidthConsumer>>,
+		}
+		impl Wake for Demand {
+			fn wake(self: Arc<Self>) {
+				self.wake_by_ref();
+			}
+			fn wake_by_ref(self: &Arc<Self>) {
+				*self.consumer.lock().unwrap() = Some(self.handle.consume());
+			}
+		}
+
+		let out = BandwidthProducer::new();
+		out.set(Some(moq_net::bandwidth::Rate::from_bps(123))).unwrap();
+		let demand = Arc::new(Demand {
+			handle: out.weak(),
+			consumer: Mutex::new(None),
+		});
+		let waiter = kio::Waiter::new(Waker::from(demand.clone()));
+		let mut reader = out.consume();
+		assert!(reader.poll_changed(&waiter).is_ready());
+		assert!(reader.poll_changed(&waiter).is_pending());
+		drop(reader);
+		let source = BandwidthProducer::new();
+		let mut forward = RecvBandwidth::default();
+		// Clearing the unused estimate wakes the old reader's waiter. It creates
+		// fresh demand precisely between the unused and used checks.
+		forward.poll(&out, &kio::Waiter::noop(), || Some(source.consume()));
+		assert!(demand.consumer.lock().unwrap().is_some());
+		assert!(
+			source.is_used(),
+			"new demand must be forwarded without unrelated activity"
+		);
+		out.abort(moq_net::Error::Cancel).unwrap();
+		forward.poll(&out, &kio::Waiter::noop(), || {
+			panic!("a closed output must not acquire a source")
+		});
+		assert!(!source.is_used());
 	}
 
 	const WALK_TIMEOUT: Duration = Duration::from_secs(30);

@@ -1,6 +1,7 @@
 //! `moq export ts --linger` and `--stitch` over a real relay: the export rides out the same
 //! publisher instance leaving and coming back, switches to a replacement only when asked, and
-//! exits with the verdict of the broadcast's last end.
+//! exits with the verdict of the broadcast's last end. The other formats fail once the route
+//! they read dies.
 #![cfg(unix)]
 
 use std::io::Cursor;
@@ -246,15 +247,19 @@ fn import_as(relay: &Relay, global: &[&str], format: Format) -> (Child, JoinHand
 		.stdin(Stdio::piped())
 		.spawn()
 		.expect("spawn import");
-	let mut stdin = child.stdin.take().expect("stdin");
-	let feeding = tokio::spawn(async move {
+	let feeding = feed(child.stdin.take().expect("stdin"), format);
+	(child, feeding)
+}
+
+/// Feed `format`'s clip into `stdin` at about real time, handing it back once it is all written.
+fn feed(mut stdin: ChildStdin, format: Format) -> JoinHandle<ChildStdin> {
+	tokio::spawn(async move {
 		for chunk in format.clip.chunks(format.chunk) {
 			stdin.write_all(chunk).await.expect("write stdin");
 			tokio::time::sleep(Duration::from_millis(150)).await;
 		}
 		stdin
-	});
-	(child, feeding)
+	})
 }
 
 /// End the publisher the way an operator does, which drops the broadcast unfinished.
@@ -707,5 +712,60 @@ async fn an_old_publisher_that_stays_up_keeps_the_export() {
 	);
 
 	drop(new_stdin);
+	wait(&mut new).await;
+}
+
+/// [`import_as`] that returns once the publisher has sent its announcement to the relay, which
+/// it does once its input declares a track.
+async fn import_announced(relay: &Relay, format: Format) -> (Child, JoinHandle<ChildStdin>) {
+	let mut child = moq(relay, &[])
+		.args(["import", "--max-age", "1s", format.name])
+		.env("RUST_LOG", "warn,moq_net::lite::publisher=debug")
+		.stdin(Stdio::piped())
+		.stderr(Stdio::piped())
+		.spawn()
+		.expect("spawn import");
+	let feeding = feed(child.stdin.take().expect("stdin"), format);
+
+	let mut stderr = BufReader::new(child.stderr.take().expect("stderr")).lines();
+	let announced = async {
+		while let Some(line) = stderr.next_line().await.expect("read import stderr") {
+			let other = ["unannounce", "reannounce", "no longer", "cancelled", "withholding"];
+			if line.contains("announce") && line.contains("demo") && !other.iter().any(|o| line.contains(o)) {
+				return;
+			}
+		}
+		panic!("the import exited before announcing");
+	};
+	tokio::time::timeout(TIMEOUT, announced)
+		.await
+		.expect("the import never announced");
+	// Keep draining, so a full pipe never blocks the import.
+	tokio::spawn(async move { while let Ok(Some(_)) = stderr.next_line().await {} });
+	(child, feeding)
+}
+
+/// A route change alone never ends a non-TS export, which cannot mark a break, but the old
+/// route dying does: its tracks end with an error rather than cleanly. The old publisher is
+/// interrupted as soon as the replacement has announced, so the relay is usually still
+/// holding the replacement's restart.
+#[tokio::test]
+async fn a_replaced_publisher_dying_fails_an_fmp4_export() {
+	let relay = relay().await;
+	let mut export = export_as(&relay, &[], FMP4, &[]);
+	let (old, feeding) = import_as(&relay, &[], FMP4);
+	export.output_past(0).await;
+	let old_stdin = feeding.await.unwrap();
+
+	let (mut new, replacing) = import_announced(&relay, FMP4).await;
+	interrupt(old, old_stdin).await;
+
+	let (status, errors) = export.wait().await;
+	assert!(
+		!status.success(),
+		"the dead route ended the export cleanly; exporter stderr: {errors}"
+	);
+
+	drop(replacing.await.unwrap());
 	wait(&mut new).await;
 }

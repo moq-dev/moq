@@ -13,12 +13,20 @@
 //!   `performance.now()` and `setTimeout` in the browser, and the simulator inside
 //!   `sim::run`.
 //!
+//! The `manual` feature adds `Manual::install`, which makes a [`Manual`] clock
+//! the ambient clock of one tokio runtime. It moves only when told to, never on
+//! idle, so a test harness outside the runtime decides when native time passes.
+//!
 //! The `sim` feature adds the `sim` module, a deterministic executor whose clock
 //! starts at [`Instant::ZERO`], and the `#[moq_clock::test]` attribute that runs an
 //! `async fn` test on it. Enable it for dev-dependencies only.
 
 mod deadline;
+#[cfg(feature = "manual")]
+mod installed;
 mod instant;
+#[cfg(all(feature = "manual", target_arch = "wasm32", not(target_os = "wasi")))]
+compile_error!("the `manual` feature installs on a tokio runtime, which the browser has none of");
 mod manual;
 mod runtime;
 #[cfg(feature = "sim")]
@@ -27,6 +35,8 @@ mod timer;
 mod wall;
 
 pub use deadline::{Deadline, Deadlines};
+#[cfg(feature = "manual")]
+pub use installed::Installed;
 pub use instant::Instant;
 pub use manual::Manual;
 pub use timer::{Elapsed, Interval, MissedTickBehavior, Sleep, Timeout, drive, interval, sleep, sleep_until, timeout};
@@ -46,6 +56,10 @@ pub fn now() -> Instant {
 	if let Some(now) = sim::now() {
 		return now;
 	}
+	#[cfg(feature = "manual")]
+	if let Some(clock) = installed::current() {
+		return clock.now();
+	}
 	runtime::now()
 }
 
@@ -61,6 +75,10 @@ pub fn wall() -> Wall {
 	if let Some(wall) = sim::wall() {
 		return wall;
 	}
+	#[cfg(feature = "manual")]
+	if let Some(clock) = installed::current() {
+		return clock.wall();
+	}
 	runtime::wall()
 }
 
@@ -71,6 +89,10 @@ pub fn anchor() -> (Instant, Wall) {
 	#[cfg(feature = "sim")]
 	if let Some(anchor) = sim::anchor() {
 		return anchor;
+	}
+	#[cfg(feature = "manual")]
+	if let Some(clock) = installed::current() {
+		return clock.anchor();
 	}
 	runtime::anchor()
 }

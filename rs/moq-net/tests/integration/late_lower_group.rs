@@ -11,7 +11,7 @@ use crate::support;
 
 use std::time::Duration;
 
-use moq_net::track::{Info, Position, Subscription};
+use moq_net::track::{Anchor, Info, Position, Range, Subscription};
 use moq_net::{Timestamp, Version};
 use support::harness::{MockConnectOptions, connect_mock};
 
@@ -27,6 +27,14 @@ const LITE: &[&str] = &["moq-lite-05", "moq-lite-06", "moq-lite-07-wip"];
 
 const TRANSPORT: &[&str] = &["moq-transport-14", "moq-transport-17", "moq-transport-22"];
 
+/// From `start`, or the oldest group still around when there is none.
+fn floored(start: Option<Position>) -> Range {
+	Range {
+		start: start.map_or(Range::oldest().start, Anchor::Absolute),
+		end: None,
+	}
+}
+
 fn produce_origin(hop: u64) -> moq_net::origin::Producer {
 	let (producer, driver) =
 		moq_net::origin::Producer::new(moq_net::origin::Config::new(moq_net::Hop::new(hop).unwrap()));
@@ -34,10 +42,13 @@ fn produce_origin(hop: u64) -> moq_net::origin::Producer {
 	producer
 }
 
+/// Four frames starting at `sequence` seconds, so a group created late still starts
+/// below the one after it.
 fn write_group(track: &moq_net::track::Producer, sequence: u64) {
 	let mut group = track.create_group(moq_net::group::Info { sequence }).unwrap();
-	for _ in 0..4 {
-		group.write_frame(Timestamp::now(), &b"x"[..]).unwrap();
+	for frame in 0..4 {
+		let timestamp = Timestamp::from_millis(sequence * 1000 + frame).unwrap();
+		group.write_frame(timestamp, &b"x"[..]).unwrap();
 	}
 	group.finish().unwrap();
 }
@@ -112,7 +123,9 @@ async fn session(version: &str, relay: bool, start: Option<Position>) -> Vec<(u6
 		.expect("resolve timeout")
 		.expect("broadcast resolves");
 
-	let subscription = Subscription::default().with_max_delay(BUDGET).with_start(start);
+	let subscription = Subscription::default()
+		.with_max_delay(BUDGET)
+		.with_ranges([floored(start)]);
 	let reader = moq_clock::sim::spawn(async move {
 		let mut sub = remote
 			.track("late")
@@ -154,7 +167,9 @@ async fn in_process(start: Option<Position>) -> Vec<(u64, usize)> {
 				.with_max_age(FOREVER),
 		)
 		.unwrap();
-	let subscription = Subscription::default().with_max_delay(BUDGET).with_start(start);
+	let subscription = Subscription::default()
+		.with_max_delay(BUDGET)
+		.with_ranges([floored(start)]);
 	let mut sub = track.subscribe(subscription);
 	let reader = moq_clock::sim::spawn(async move { read_all(&mut sub).await });
 	moq_clock::sleep(Duration::from_millis(10)).await;
