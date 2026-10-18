@@ -1830,7 +1830,11 @@ mod tests {
 		let mut plain = read("t.json", moq_json::Compression::None);
 		let mut compressed = read("t.json.z", moq_json::Compression::Deflate);
 		let next = |reader: &mut moq_json::snapshot::Consumer<Value>| {
-			reader.next().now_or_never().unwrap().map(|value| value.map(|value| value.value))
+			reader
+				.next()
+				.now_or_never()
+				.unwrap()
+				.map(|value| value.map(|value| value.value))
 		};
 		let small = Value::from([("small".to_string(), 1)]);
 		assert_eq!(next(&mut plain).unwrap(), Some(small.clone()));
