@@ -469,6 +469,8 @@ struct Side {
 	stats_reads: AtomicUsize,
 	/// Whether reading the stats panics; see [`MockSession::panic_on_stats`].
 	panic_on_stats: AtomicBool,
+	/// The wire counters [`poll::Session::wire`] exposes, which a test updates as a transport would.
+	wire: moq_net::transport::Wire,
 }
 
 /// The connection statistics a [`MockSession`] reports. Unavailable by default.
@@ -644,6 +646,10 @@ impl poll::Session for MockSession {
 		self.side.stats_reads.fetch_add(1, Ordering::Relaxed);
 		*self.side.stats.lock().unwrap()
 	}
+
+	fn wire(&self) -> Option<moq_net::transport::Wire> {
+		Some(self.side.wire.clone())
+	}
 }
 
 // Only some test binaries steer delivery.
@@ -681,6 +687,11 @@ impl MockSession {
 	/// How many times the stats were read.
 	pub fn stats_reads(&self) -> usize {
 		self.side.stats_reads.load(Ordering::Relaxed)
+	}
+
+	/// The wire counters this side's transport exposes.
+	pub fn wire(&self) -> &moq_net::transport::Wire {
+		&self.side.wire
 	}
 
 	/// Panic on the driver's next stats sample, which a [`moq_net::Session::stats`]
@@ -863,6 +874,7 @@ pub fn create_mock_session_pair(config: memory::Config) -> (MockSession, MockSes
 			stats: Default::default(),
 			stats_reads: Default::default(),
 			panic_on_stats: Default::default(),
+			wire: Default::default(),
 		}),
 		accept_uni: Default::default(),
 		accept_bi: Default::default(),

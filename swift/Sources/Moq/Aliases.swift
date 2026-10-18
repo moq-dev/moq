@@ -59,8 +59,8 @@ public typealias Announce = MoqFFI.MoqAnnounce
 /// What an `AnnounceConsumer` yields: `.start`, `.update`, `.end`, or
 /// `.restart` (request the path again), each carrying an `Announce`.
 public typealias AnnounceEvent = MoqFFI.MoqAnnounceEvent
-/// Per-subscription delivery preferences: priority, group ordering, latency
-/// budget, and group range.
+/// Per-subscription delivery preferences: priority, latency budget, the ranges
+/// of the track to deliver, and group ordering.
 public typealias Subscription = MoqFFI.MoqSubscription
 /// Options for fetching one complete group by sequence.
 public typealias FetchGroupOptions = MoqFFI.MoqFetchGroupOptions
@@ -109,3 +109,15 @@ public typealias ProtocolKind = MoqFFI.MoqProtocolKind
 
 /// A protocol failure: scope, verbatim wire code, kind, and a diagnostic message.
 public typealias ProtocolError = MoqFFI.MoqProtocolError
+
+// Nested rather than top-level: a module-level `Range` would shadow `Swift.Range`
+// in every file that imports Moq.
+extension Subscription {
+    /// A span of a track to deliver: from `start` up to `end`, or onward when `end` is `nil`.
+    public typealias Range = MoqFFI.MoqRange
+    /// Where one end of a `Range` falls: `.absolute(group:frame:)` or
+    /// `.relative(groups:)` back from the latest group.
+    public typealias Anchor = MoqFFI.MoqAnchor
+    /// Which pending group the publisher sends first: `.ascending` or `.descending`.
+    public typealias Order = MoqFFI.MoqOrder
+}

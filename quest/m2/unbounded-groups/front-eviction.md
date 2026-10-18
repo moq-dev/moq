@@ -30,9 +30,10 @@ See the [epic](/quest/m2/unbounded-groups/README.md) for the decisions.
   takes it: hand its first demanded frame to that reader, or backpressure
   the refill on the reader's cursor. Test a `track::Dynamic` handler that
   writes more than the pool synchronously, so the reader still progresses.
-- Refill goes through [Model ranges](/quest/m1/subscribe-ranges/model.md)'
-  range requests. Over moq-transport, a hole that covers whole objects
-  refills; one inside an object is `Evicted`.
+- Refill goes through
+  [Dynamic range requests](/quest/m1/subscribe-ranges/dynamic.md). Over
+  moq-transport, a hole that covers whole objects refills; one inside an
+  object is `Evicted`.
 - Downstream encoders that roll groups by the removed constants (moq-json,
   moq-flate, moq-mux TS, moq-stats) keep their own local roll triggers if
   they still need one.
@@ -46,4 +47,4 @@ groups. A reader that used to see `GroupTooLarge` now refills or sees
 ## Required
 
 - [Segmented frames](/quest/m2/unbounded-groups/segmented-frames.md) - frame storage the cache can account for without whole-frame preallocation
-- [Model ranges](/quest/m1/subscribe-ranges/model.md) - `track::Dynamic` receives frame-precise range requests for misses
+- [Dynamic range requests](/quest/m1/subscribe-ranges/dynamic.md) - `track::Dynamic` receives frame-precise range requests for misses

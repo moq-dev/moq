@@ -29,6 +29,8 @@ const TRAIN_SEGMENTS: usize = 63;
 /// waiter without ever holding both.
 pub(crate) struct Inner {
 	pub(crate) conn: RefCell<moq_quic::Connection>,
+	/// Updated by packet ingress and egress, so readers never wake the worker to sample.
+	pub(crate) wire: moq_net::transport::Wire,
 	pub(crate) state: RefCell<State>,
 	/// The worker driving this connection, which anything layered on it
 	/// (the WebTransport handshake, say) runs on too.
@@ -360,25 +362,13 @@ impl Connection {
 		&self.handshake
 	}
 
-	/// Change the connection's flow-control limits; a raise reaches the peer
+	/// Change the flow-control limits `limits` sets; a raise reaches the peer
 	/// on the next packet.
 	///
-	/// Errors, changing nothing, on a stream limit past 2^60 or a receive window
-	/// past a QUIC varint, which a peer would refuse.
-	pub fn set_limits(&self, limits: crate::quic::Limits) -> Result<(), crate::Error> {
-		// A stream ID is a varint whose low two bits are its type (RFC 9000).
-		if limits.max_streams.get() > 1 << 60 {
-			return Err(crate::Error::StreamsRange);
-		}
-		let streams = VarInt::from_u64(limits.max_streams.get()).expect("checked above");
-		let window =
-			VarInt::from_u64(limits.receive_window.get()).map_err(|_| crate::Error::WindowRange("receive_window"))?;
-		let mut conn = self.shared.conn.borrow_mut();
-		conn.set_max_concurrent_streams(Dir::Bi, streams);
-		conn.set_max_concurrent_streams(Dir::Uni, streams);
-		conn.set_receive_window(window);
-		conn.set_send_window(limits.send_window.get());
-		drop(conn);
+	/// Errors, changing nothing, on limits [`Limits::validate`](crate::quic::Limits::validate)
+	/// refuses.
+	pub fn set_limits(&self, limits: crate::quic::Limits) -> Result<(), Error> {
+		self.shared.conn.borrow_mut().set_limits(limits)?;
 		self.shared.kick();
 		Ok(())
 	}
@@ -386,6 +376,11 @@ impl Connection {
 	/// Returns connection statistics.
 	pub fn stats(&self) -> moq_quic::ConnectionStats {
 		self.shared.conn.borrow().stats()
+	}
+
+	/// The wire counters this connection updates as it sends and receives.
+	pub(crate) fn wire(&self) -> moq_net::transport::Wire {
+		self.shared.wire.clone()
 	}
 }
 
@@ -415,7 +410,13 @@ pub(crate) fn launch(
 	key: ConnectionHandle,
 	conn: moq_quic::Connection,
 ) -> (Shared, impl Future<Output = ()> + use<>) {
+	// The handshake's first datagrams arrived before this driver existed.
+	let stats = conn.stats();
+	let wire = moq_net::transport::Wire::new();
+	wire.set_sent_bytes(stats.udp_tx.bytes);
+	wire.set_received_bytes(stats.udp_rx.bytes);
 	let shared = Rc::new(Inner {
+		wire,
 		conn: RefCell::new(conn),
 		state: RefCell::new(State::new()),
 		owner: owner.clone(),
@@ -886,6 +887,7 @@ impl Driver {
 			let Some(transmit) = conn.poll_transmit(moq_clock::Instant::now(), segments, &mut tx) else {
 				return Poll::Pending;
 			};
+			self.shared.wire.set_sent_bytes(conn.stats().udp_tx.bytes);
 			// Once closed, moq-quic transmits nothing but the CONNECTION_CLOSE.
 			(transmit, conn.is_closed())
 		};

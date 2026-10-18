@@ -145,6 +145,7 @@ The root of the catalog is a JSON document with the following schema:
 
 ~~~
 type Catalog = {
+  "version": number | undefined,
   "audio": AudioSchema | undefined,
   "video": VideoSchema | undefined,
   "archive": ArchiveSchema | undefined,
@@ -166,7 +167,23 @@ For example, a chat entry should name a chat track, not carry individual chat me
 This way catalog updates are rare and a client MAY choose to not subscribe.
 The `json` and `binary` sections ({{data}}) are how a track like that is listed.
 
-This specification defines audio, video, and text media tracks, plus an optional `archive` entry ({{archive-catalog}}) naming the timeline track ({{timeline}}) that indexes each track, an optional root `clock` entry ({{clock}}) mapping content time to wall time, the application data tracks in {{data}}, and optional publisher statistics and solicited viewer feedback ({{media-stats}}).
+This specification defines audio, video, and text media tracks, plus an optional `archive` entry ({{archive-catalog}}) naming the timeline track ({{timeline}}) that indexes each track, an optional root `clock` entry ({{clock}}) mapping content time to wall time, the root `version` ({{catalog-version}}), the application data tracks in {{data}}, and optional publisher statistics and solicited viewer feedback ({{media-stats}}).
+
+## Version {#catalog-version}
+The root `version` field is the oldest draft of this specification that reads the catalog correctly, by draft number: `4` needs a consumer of moq-hang-04 or later.
+If absent, it is 3.
+
+A consumer MUST ignore fields it does not recognize.
+A consumer MUST refuse a catalog whose `version` is above the draft it implements, or is not a non-negative integer, rather than read it; one that refuses SHOULD tell its user to upgrade.
+
+A publisher writes the highest draft whose fields the catalog uses that an older consumer would misread, and omits `version` while that is 3.
+A change raises the version only when a consumer that ignored it would misread the catalog, never for a field it can safely ignore.
+This draft needs `version` 4 for:
+
+- a `track` ({{field-track}}) other than the entry's ID, which an older consumer subscribes to instead;
+- a video `warmup` ({{field-warmup}}) above zero, since an older consumer starts decoding a group at a picture that is not a keyframe.
+
+Every other catalog change in this draft is safe to ignore: `enabled` ({{field-enabled}}) leaves an older consumer selecting a disabled rendition, which plays nothing; `archive` ({{archive-catalog}}) is ignored when undecodable; `stats` and `echo` ({{media-stats}}) only offer optional tracks; `jitter`, `delay`, audio `warmup`, and the data track estimates are hints.
 
 ## Clock {#clock}
 The catalog's root `clock` field is the broadcast's one continuous clock:
@@ -1303,6 +1320,7 @@ This document has no IANA actions.
 ## moq-hang-04
 {:numbered="false"}
 
+- Added the root `version` ({{catalog-version}}): the oldest draft that reads the catalog, which a consumer refuses when above its own. A `track` other than the entry's ID or a video `warmup` needs 4. Consumers MUST ignore unknown fields.
 - A data track marks a discontinuity with a group of one object with no bytes, since its empty payload is data. An object with no bytes on an audio or video track, or sharing its group, is malformed.
 - Each archive timeline declares its own fixed nominal record duration, omitted for an untimed track; removed the broadcast-wide duration bound.
 - Added the optional video `preference` field: a consumer selects automatically among the highest preference it can decode.

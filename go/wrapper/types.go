@@ -54,6 +54,18 @@ type (
 	// AnnounceEventRestart reports another publisher instance now serving a prefix:
 	// drop what was resolved under it and request afresh.
 	AnnounceEventRestart = ffi.MoqAnnounceEventRestart
+	// Range is a span of a track to deliver: from Start up to End, or onward when End is nil.
+	// A relative start is the first frame of its group, a relative end includes its whole
+	// group, and an absolute end is exclusive.
+	Range = ffi.MoqRange
+	// Anchor is where one end of a Range falls: AnchorAbsolute or AnchorRelative.
+	Anchor = ffi.MoqAnchor
+	// AnchorAbsolute is an exact group and frame.
+	AnchorAbsolute = ffi.MoqAnchorAbsolute
+	// AnchorRelative is the group Groups before the latest one, clamped to group 0: 0 is the latest.
+	AnchorRelative = ffi.MoqAnchorRelative
+	// Order is which of a subscription's pending groups the publisher sends first.
+	Order = ffi.MoqOrder
 	// VideoDecoderOutput configures what a video.Consumer delivers: an optional resize, a max delay, and whether frames keep the decoder's surface (macOS only; refused elsewhere).
 	VideoDecoderOutput = ffi.MoqVideoDecoderOutput
 	// VideoSurface is a decoded frame's platform surface, from VideoDecodedFrame.Surface: VideoSurfacePixelBuffer on macOS and iOS.
@@ -134,6 +146,14 @@ func SoftwareEncoder() VideoEncoderKind {
 func NamedEncoder(name string) VideoEncoderKind {
 	return VideoEncoderKindNamed{Name: name}
 }
+
+// Order values: which pending group the publisher sends first.
+const (
+	// OrderAscending sends the oldest first, draining a backlog in sequence order.
+	OrderAscending = ffi.MoqOrderAscending
+	// OrderDescending sends the newest first, so congestion sheds the backlog rather than the live edge.
+	OrderDescending = ffi.MoqOrderDescending
+)
 
 // ConnectionStatus values: the lifecycle of a client session's connection.
 const (

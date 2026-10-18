@@ -1123,7 +1123,8 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	}
 
 	/// The source signalled a new timeline (an HLS `EXT-X-DISCONTINUITY`), so the next
-	/// fragment's decode time is not compared with the last one on each track.
+	/// fragment's decode time is not compared with the last one on each track. A timeline that
+	/// restarts below where it was still fails: a track refuses a group that rewinds.
 	pub fn discontinuity(&mut self) {
 		for track in self.text.values_mut() {
 			track.end_decode_time = None;

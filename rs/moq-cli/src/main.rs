@@ -713,7 +713,7 @@ fn spawn_import(
 		let config = moq_mux::catalog::Config::default()
 			.with_max_age(max_age)
 			.with_bandwidth(bandwidth.clone());
-		let publish = if let ImportSource::Ts(TsImport {
+		let mut publish = if let ImportSource::Ts(TsImport {
 			program: Some(TsProgram::All),
 			..
 		}) = &import.source
@@ -724,8 +724,6 @@ fn spawn_import(
 			let broadcast = origin.create_broadcast(&name).context("failed to create broadcast")?;
 			Publish::new(broadcast, &format, config)?
 		};
-		// Media stays servable at EOF until it goes stale, the same max-age relays retain it for.
-		let mut publish = publish.linger(max_age.unwrap_or(hang::container::MAX_AGE));
 		publish.announce(epoch)?;
 		local = Some(publish);
 	} else {
