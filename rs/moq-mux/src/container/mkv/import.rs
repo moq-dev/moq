@@ -339,7 +339,10 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			if let MatroskaSpec::TrackEntry(Master::Full(children)) = entry
 				&& let Err(e) = self.add_track(reserved, children)
 			{
-				if matches!(e, crate::Error::Mkv(Error::InvalidSubtitle(_))) {
+				if matches!(
+					e,
+					crate::Error::Mkv(Error::InvalidSubtitle(_) | Error::InvalidAspect(_))
+				) {
 					return Err(e);
 				}
 				tracing::warn!(error = ?e, "skipping MKV track");
@@ -659,54 +662,39 @@ fn build_video_config(
 	codec_private: Option<&Bytes>,
 	video_children: Option<&[MatroskaSpec]>,
 ) -> Result<VideoConfig> {
-	let (width, height) = video_children
-		.map(|cs| {
-			let mut w = None;
-			let mut h = None;
-			for c in cs {
-				match c {
-					MatroskaSpec::PixelWidth(v) => w = Some(*v as u32),
-					MatroskaSpec::PixelHeight(v) => h = Some(*v as u32),
-					_ => {}
-				}
-			}
-			(w, h)
-		})
-		.unwrap_or((None, None));
-
 	let mut config = match codec_id {
-		"V_VP8" => {
-			let mut config = VideoConfig::new(VideoCodec::VP8);
-			config.coded_width = width;
-			config.coded_height = height;
-			config
-		}
-		"V_VP9" => {
-			let mut config = VideoConfig::new(VP9 {
-				profile: 0,
-				level: 0,
-				bit_depth: 8,
-				color_primaries: 1,
-				chroma_subsampling: 1,
-				transfer_characteristics: 1,
-				matrix_coefficients: 1,
-				full_range: false,
-			});
-			config.coded_width = width;
-			config.coded_height = height;
-			config
-		}
+		"V_VP8" => VideoConfig::new(VideoCodec::VP8),
+		"V_VP9" => VideoConfig::new(VP9 {
+			profile: 0,
+			level: 0,
+			bit_depth: 8,
+			color_primaries: 1,
+			chroma_subsampling: 1,
+			transfer_characteristics: 1,
+			matrix_coefficients: 1,
+			full_range: false,
+		}),
 		"V_MPEG4/ISO/AVC" => build_h264_config(codec_private)?,
 		"V_MPEGH/ISO/HEVC" => build_h265_config(codec_private)?,
 		"V_AV1" => build_av1_config(codec_private)?,
 		other => return Err(Error::UnsupportedVideoCodec(other.to_string()).into()),
 	};
 
+	let mut width = None;
+	let mut height = None;
+	for child in video_children.unwrap_or_default() {
+		match child {
+			MatroskaSpec::PixelWidth(v) => width = Some(*v),
+			MatroskaSpec::PixelHeight(v) => height = Some(*v),
+			_ => {}
+		}
+	}
+
 	if config.coded_width.is_none() {
-		config.coded_width = width;
+		config.coded_width = width.map(|v| v as u32);
 	}
 	if config.coded_height.is_none() {
-		config.coded_height = height;
+		config.coded_height = height.map(|v| v as u32);
 	}
 	// The codec config outranks the Colour element a muxer added, which only fills its gaps.
 	let colour = video_children
@@ -720,8 +708,65 @@ fn build_video_config(
 		.transpose()?
 		.flatten();
 	crate::codec::color::fill(&mut config.color, colour.as_ref(), "Colour");
+	if let Some(children) = video_children
+		&& let Some(aspect) = matroska_aspect(children, (width, height))?
+	{
+		let coded = width
+			.zip(height)
+			.and_then(|(w, h)| crate::codec::video::reduce_aspect(w, h));
+		if Some(aspect) != coded || config.display_aspect_width.is_some() {
+			crate::codec::video::fill_display_aspect(&mut config, aspect, "Matroska");
+		}
+	}
 
 	Ok(config)
+}
+
+// Display dimensions are already post-crop; only the pixel-unit defaults subtract the crop.
+fn matroska_aspect(children: &[MatroskaSpec], pixels: (Option<u64>, Option<u64>)) -> Result<Option<(u32, u32)>> {
+	let (mut width, mut height, mut unit) = (None, None, 0);
+	let (mut left, mut right, mut top, mut bottom) = (0, 0, 0, 0);
+	for child in children {
+		match child {
+			MatroskaSpec::DisplayWidth(v) => width = Some(*v),
+			MatroskaSpec::DisplayHeight(v) => height = Some(*v),
+			MatroskaSpec::DisplayUnit(v) => unit = *v,
+			MatroskaSpec::PixelCropLeft(v) => left = *v,
+			MatroskaSpec::PixelCropRight(v) => right = *v,
+			MatroskaSpec::PixelCropTop(v) => top = *v,
+			MatroskaSpec::PixelCropBottom(v) => bottom = *v,
+			_ => {}
+		}
+	}
+	// Without display metadata or cropping, preserve the existing coded-size handling.
+	if unit == 0 && width.is_none() && height.is_none() && (left, right, top, bottom) == (0, 0, 0, 0) {
+		return Ok(None);
+	}
+	let crop = |size: Option<u64>, first: u64, second: u64| {
+		size.and_then(|size| size.checked_sub(first))
+			.and_then(|size| size.checked_sub(second))
+			.ok_or(Error::InvalidAspect("missing or underflowing pixel-unit default"))
+	};
+	let (width, height) = if unit == 0 {
+		(
+			match width {
+				Some(width) => width,
+				None => crop(pixels.0, left, right)?,
+			},
+			match height {
+				Some(height) => height,
+				None => crop(pixels.1, top, bottom)?,
+			},
+		)
+	} else {
+		(
+			width.ok_or(Error::InvalidAspect("missing DisplayWidth for non-pixel unit"))?,
+			height.ok_or(Error::InvalidAspect("missing DisplayHeight for non-pixel unit"))?,
+		)
+	};
+	let aspect = crate::codec::video::reduce_aspect(width, height)
+		.ok_or(Error::InvalidAspect("invalid or unrepresentable display dimensions"))?;
+	Ok(Some(aspect))
 }
 
 /// The colour a Matroska `Colour` element signals. Its code points are H.273's, `Range` counts 0
