@@ -37,7 +37,8 @@ Settled shape:
   binding never sees that split (catalog, import producers, container
   consumers); `json`, `flate`, `audio`, and `video` own their producers and
   consumers. `flate` holds the opaque snapshot and stream tracks, named after
-  the `moq-flate` crate.
+  the `moq-flate` crate, until
+  [One compressed track per name](/quest/m1/compress/migrate.md) deletes it.
 - A layer reuses the net noun it decodes, and its namespace tells them apart:
   `media.TrackConsumer` and `media.GroupConsumer` read what
   `media.TrackProducer` writes, a level above the raw `TrackConsumer` and
@@ -82,7 +83,7 @@ Settled shape:
 
 Each child reshapes one group end to end: moq-ffi, all five wrappers, the
 C++ package and `cpp/obs`, the `doc/lib` samples per the cross-package table,
-and its entries in the Unreleased section of `doc/setup/upgrade.md`. Each
+and its entries under `## Unreleased` in each affected package's `MIGRATE.md`. Each
 runs `just test interop --all`.
 
 ## Required

@@ -13747,6 +13747,13 @@ mod tests {
 		poll_until(&mut run, &log, b"first", 1).await;
 		cam.update(crate::origin::Route::default().with_auth(present(b"second")))
 			.unwrap();
+		poll_until(&mut run, &log, b"second", 1).await;
+		assert!(futures::poll!(run.as_mut()).is_pending());
+		assert_eq!(log.resets().len(), 1, "the reset request was not withdrawn");
+
+		// The advertisement comes back on the retry, jittered up to RETRY_BASE, which
+		// outlasts poll_until.
+		moq_clock::sleep(RETRY_BASE).await;
 		poll_until(&mut run, &log, b"second", 2).await;
 		assert_eq!(
 			occurrences(&log, b"second"),
