@@ -38,7 +38,16 @@ Options:
    moq-tokio unchanged, and moq-tokio depends on it and re-exports
    `quic::driver`. Clean layering: sans-IO core, then the tokio runtime, then
    the MoQ backends. Reverses the 2026-10-06 crate decision for the async
-   layer only; quinn-udp stays a moq-sock module.
+   layer only; quinn-udp stays a moq-sock module. A trial extraction moved
+   the module as-is: once `Wire` became driver-owned counters, the driver's
+   tests passed unchanged. What the move has to settle:
+   - The crate depends on moq-quic, `moq_sock::udp`, and moq-clock with its
+     `runtime` feature, since the connection's timer is `moq_clock::Sleep`.
+   - `runtime::send_failed` and `wrap_udp_socket` are `pub(crate)` helpers
+     that `quic::backend` and `quic::web`'s tests call, so they become
+     public API or move.
+   - Shorter paths let rustfmt re-wrap about 50 lines of `tests.rs`. Keep
+     that churn out of the move commit, so quinn cherry-picks still apply.
 2. **A `tokio` feature on moq-quic.** No new crate. But the gate would cover
    the driver's logic, not just a dependency, so its tests leave the default
    merge gate, against `rs/AGENTS.md`.
