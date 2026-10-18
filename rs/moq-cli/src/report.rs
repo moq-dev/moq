@@ -211,8 +211,11 @@ impl std::str::FromStr for EchoName {
 
 /// Where an `export --echo` publishes its feedback, under what name, and over which connection.
 pub struct EchoTarget {
+	/// The origin the feedback broadcast is published into.
 	pub origin: moq_net::origin::Producer,
+	/// The path segment the feedback is published at, before `.echo`.
 	pub name: EchoName,
+	/// The connection whose transport the feedback reports, when one was dialed.
 	pub connection: Option<Monitor>,
 }
 

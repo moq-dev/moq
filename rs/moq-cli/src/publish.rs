@@ -508,7 +508,15 @@ impl Publish {
 					(Some(broadcast), Some(route)) => Some(Pending::new(broadcast.clone(), route)?),
 					_ => None,
 				};
-				decode(decoder, catalog, tokio::io::stdin(), self.broadcast, pending, self.stats).await
+				decode(
+					decoder,
+					catalog,
+					tokio::io::stdin(),
+					self.broadcast,
+					pending,
+					self.stats,
+				)
+				.await
 			}
 			#[cfg(feature = "capture")]
 			Source::Capture {

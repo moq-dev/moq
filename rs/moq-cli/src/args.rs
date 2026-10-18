@@ -1007,7 +1007,7 @@ pub struct Export {
 	/// Publish feedback where the broadcast's catalog solicits it: a `<NAME>.echo` broadcast
 	/// under the catalog's `echo` path, reporting what each rendition this export reads has
 	/// received. One path segment, not starting with `.`. The stdout container exports only.
-	#[usage(long)]
+	#[usage(long, value_name = "NAME")]
 	pub echo: Option<crate::report::EchoName>,
 
 	/// The single sink draining the Origin.
