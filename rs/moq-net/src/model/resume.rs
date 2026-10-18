@@ -10,10 +10,10 @@
 //! it handed out. A replaced copy keeps delivering until the new copy delivers its first
 //! group, then is bounded just below it (or at the newest group handed out, if later), so a
 //! group only the old route got after the switch is not lost. It is kept for unread groups it
-//! had and groups still being read, and dropped once neither needs it. A group carries on across the switch through
-//! its [`Recover`]: once its copy fails with its route, or stalls while a newer route
-//! serves, it continues from the serving route's copy of the same group at the same frame
-//! (and byte), found in that copy's cache or fetched from it.
+//! had and groups still being read, and dropped once neither needs it. A group carries on
+//! across the switch through its [`Recover`]: once its copy fails with its route, or stalls
+//! while a newer route serves, it continues from the serving route's copy of the same group
+//! at the same frame (and byte), found in that copy's cache or fetched from it.
 //!
 //! A group is handed out once however many copies deliver it: the reader skips any
 //! sequence its [`track::Subscriber`] already handed out, the same record that keeps a
