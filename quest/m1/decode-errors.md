@@ -32,4 +32,3 @@ truncate. Wire: none.
 ## Related
 
 - [Container reads drop backfill](/quest/m1/read-backfill.md) - the other Rust/JS container-consumer parity gap
-- [Dropped sources](/quest/m1/dropped-sources.md) - consumers see the producer's real error on every end
