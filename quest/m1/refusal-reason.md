@@ -15,7 +15,7 @@ refusal to that root and tier.
 Decided 2026-10-08: moved out of the auth line to m1, since it extends
 session outcomes and the HTTP auth contract, not in-band AUTH.
 
-Decided 2026-10-08 (split from [Session outcomes](/quest/m1/session-outcomes.md)):
+Decided 2026-10-08:
 
 - **Why.** `TokenExpired` is raised only in moq-auth's key check
   (`rs/moq-auth/src/key.rs`), on the auth server. `serve.rs` sends every
@@ -40,8 +40,7 @@ Decided 2026-10-08 (split from [Session outcomes](/quest/m1/session-outcomes.md)
   path and `Admission::refuse` one refusal shape (reason, optional root and
   tier), under the same bound, and update `From<moq_auth::Error>`, which sends
   anything but `Refused` to `Unavailable` today. A refusal an embedder
-  records on its stats handle ([Session outcomes](/quest/m1/session-outcomes.md))
-  takes `expired` too.
+  records through `stats::Handle::refuse` takes `expired` too.
 - **Relay.** Map the typed error to a `Refusal` reason (adding `expired`) in
   `/metrics`, and count it in the root's `Presence` on that tier, or the
   default tier when the body names none. A refusal without a root stays
@@ -55,8 +54,3 @@ Decided 2026-10-08 (split from [Session outcomes](/quest/m1/session-outcomes.md)
 
 Public API: moq-auth's refusal error and the HTTP refusal body. Wire: the
 auth HTTP contract only, not MoQ.
-
-## Required
-
-- [Session outcomes](/quest/m1/session-outcomes.md) - the refusal counters
-  this attributes and extends with `expired`

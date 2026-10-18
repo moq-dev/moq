@@ -3,7 +3,7 @@
 use std::task::Poll;
 
 use crate::Error;
-use crate::time::{Clock, Instant};
+use crate::time::{Deadlines, Instant};
 
 /// Drives a session with caller-supplied time.
 ///
@@ -20,7 +20,7 @@ use crate::time::{Clock, Instant};
 #[must_use = "the session makes no progress unless its driver is polled"]
 pub struct Driver<S: crate::transport::poll::Session> {
 	state: State<S>,
-	clock: Clock,
+	clock: Deadlines,
 }
 
 /// The protocol half of a machine, one variant per negotiated wire protocol.
@@ -53,7 +53,7 @@ pub(crate) struct State<S: crate::transport::poll::Session> {
 }
 
 impl<S: crate::transport::poll::Session> Driver<S> {
-	pub(crate) fn new(clock: Clock, state: State<S>) -> Self {
+	pub(crate) fn new(clock: Deadlines, state: State<S>) -> Self {
 		Self { state, clock }
 	}
 

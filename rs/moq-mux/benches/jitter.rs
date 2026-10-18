@@ -4,7 +4,6 @@ use std::time::Duration;
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use moq_net::Timestamp;
-use web_async::time::Instant;
 
 #[path = "../src/jitter.rs"]
 #[allow(dead_code)]
@@ -13,13 +12,13 @@ mod jitter;
 /// Every track sends a frame a second as it decodes, for as many two-second steering steps as
 /// fill the rate window with `floors`, each step measuring every track heard.
 async fn steer(tracks: u16, floors: u64) -> u64 {
-	let start = Instant::now();
+	let start = moq_clock::now();
 	let mut buffer = jitter::Buffer::new(Duration::from_millis(500));
 	buffer.expect(1..=tracks);
 	let waiter = kio::Waiter::noop();
 	for second in 0..floors * 2 {
 		let at = start + Duration::from_secs(second);
-		tokio::time::advance(at.saturating_duration_since(Instant::now())).await;
+		tokio::time::advance(at.saturating_duration_since(moq_clock::now())).await;
 		for track in 1..=tracks {
 			let arrival = jitter::Arrival {
 				arrived: at,

@@ -9,6 +9,9 @@ use web_transport_trait::{self as wt, poll as backend};
 pub struct Error<E>(E);
 
 impl<E: wt::Error> moq::Error for Error<E> {
+	fn close_kind(&self) -> moq::CloseKind {
+		close_kind(&self.0)
+	}
 	fn session_error(&self) -> Option<(u32, String)> {
 		self.0.session_error()
 	}
@@ -44,6 +47,60 @@ impl<S: wt::Stats> moq::Stats for Stats<S> {
 		self.0.estimated_send_rate()
 	}
 }
+/// A backend session whose send streams may join send groups, as native QUIC's do.
+///
+/// `pub` only because `pub(crate)` is refused (E0446): the adapter's `type Group` projects
+/// through [`GroupedSend`]. The module is private and the trait is not re-exported, so
+/// other crates can neither name nor implement it.
+///
+/// The backend interface has no groups or wire counters, so moq-net's
+/// [`send_group`](poll::Session::send_group) and [`wire`](poll::Session::wire) reach a
+/// backend through this. A backend without either implements it empty.
+pub trait Grouped: backend::Session<SendStream: GroupedSend> {
+	/// The wire counters the backend updates as it sends and receives, or `None` when it has none.
+	fn wire(&self) -> Option<moq::Wire> {
+		None
+	}
+
+	/// Open a send group at `priority`, or `None` when the backend has none.
+	fn send_group(&mut self, priority: i64) -> Option<<Self::SendStream as GroupedSend>::Group> {
+		let _ = priority;
+		None
+	}
+
+	/// Send a datagram in `group` at `order`; a backend without groups ignores both and
+	/// drops the datagram when it has no room.
+	fn send_datagram(
+		&mut self,
+		payload: Bytes,
+		group: Option<&<Self::SendStream as GroupedSend>::Group>,
+		order: i64,
+	) -> Result<(), Self::Error> {
+		let _ = (group, order);
+		let mut cx = Context::from_waker(std::task::Waker::noop());
+		match backend::Session::poll_send_datagram(self, &mut cx, &payload) {
+			Poll::Ready(res) => res,
+			Poll::Pending => Ok(()),
+		}
+	}
+}
+
+/// A backend send stream that may join its [`Grouped`] session's send groups.
+pub trait GroupedSend: backend::SendStream {
+	/// The backend's send group, [`Ungrouped`](poll::Ungrouped) when it has none.
+	type Group: poll::SendGroup;
+
+	/// Move the stream into `group`.
+	fn set_group(&mut self, group: &Self::Group);
+
+	/// Set the priority within the stream's send group, or session-wide when ungrouped.
+	///
+	/// Saturated into the backend's narrower priority by default.
+	fn set_priority(&mut self, priority: i64) {
+		backend::SendStream::set_priority(self, priority.clamp(i32::MIN.into(), i32::MAX.into()) as i32);
+	}
+}
+
 /// A WebTransport session adapted to moq-net.
 #[derive(Clone)]
 pub struct Session<S>(S, moq::Binding);
@@ -53,7 +110,7 @@ impl<S> Session<S> {
 		Self(session, binding)
 	}
 }
-impl<S: backend::Session<SendStream: 'static, RecvStream: 'static> + Clone + 'static> poll::Session for Session<S> {
+impl<S: Grouped<SendStream: 'static, RecvStream: 'static> + Clone + 'static> poll::Session for Session<S> {
 	type SendStream = SendStream<S::SendStream>;
 	type RecvStream = RecvStream<S::RecvStream>;
 	type Error = Error<S::Error>;
@@ -77,8 +134,16 @@ impl<S: backend::Session<SendStream: 'static, RecvStream: 'static> + Clone + 'st
 			.map_err(Error)
 			.map(|res| res.map(|(send, recv)| (SendStream(send), RecvStream(recv))))
 	}
-	fn poll_send_datagram(&mut self, cx: &mut Context<'_>, payload: &[u8]) -> Poll<Result<(), Self::Error>> {
-		backend::Session::poll_send_datagram(&mut self.0, cx, payload).map_err(Error)
+	fn send_group(&mut self, priority: i64) -> Option<<S::SendStream as GroupedSend>::Group> {
+		Grouped::send_group(&mut self.0, priority)
+	}
+	fn send_datagram(
+		&mut self,
+		payload: Bytes,
+		group: Option<&<S::SendStream as GroupedSend>::Group>,
+		order: i64,
+	) -> Result<(), Self::Error> {
+		Grouped::send_datagram(&mut self.0, payload, group, order).map_err(Error)
 	}
 	fn poll_recv_datagram(&mut self, cx: &mut Context<'_>) -> Poll<Result<Bytes, Self::Error>> {
 		backend::Session::poll_recv_datagram(&mut self.0, cx).map_err(Error)
@@ -101,19 +166,26 @@ impl<S: backend::Session<SendStream: 'static, RecvStream: 'static> + Clone + 'st
 	fn stats(&self) -> impl moq::Stats {
 		Stats(backend::Session::stats(&self.0))
 	}
+	fn wire(&self) -> Option<moq::Wire> {
+		Grouped::wire(&self.0)
+	}
 }
 /// An outgoing WebTransport stream adapted to moq-net.
 pub struct SendStream<S>(S);
-impl<S: backend::SendStream + 'static> poll::SendStream for SendStream<S> {
+impl<S: GroupedSend + 'static> poll::SendStream for SendStream<S> {
 	type Error = Error<S::Error>;
+	type Group = S::Group;
 	fn poll_write(&mut self, cx: &mut Context<'_>, buf: &[u8]) -> Poll<Result<usize, Self::Error>> {
 		backend::SendStream::poll_write(&mut self.0, cx, buf).map_err(Error)
 	}
 	fn poll_write_buf<B: Buf>(&mut self, cx: &mut Context<'_>, buf: &mut B) -> Poll<Result<usize, Self::Error>> {
 		backend::SendStream::poll_write_buf(&mut self.0, cx, buf).map_err(Error)
 	}
-	fn set_priority(&mut self, order: i32) {
-		backend::SendStream::set_priority(&mut self.0, order)
+	fn set_priority(&mut self, priority: i64) {
+		GroupedSend::set_priority(&mut self.0, priority)
+	}
+	fn set_group(&mut self, group: &Self::Group) {
+		GroupedSend::set_group(&mut self.0, group)
 	}
 	fn finish(&mut self) -> Result<(), Self::Error> {
 		backend::SendStream::finish(&mut self.0).map_err(Error)
@@ -148,6 +220,18 @@ impl<S: backend::RecvStream + 'static> poll::RecvStream for RecvStream<S> {
 	fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
 		backend::RecvStream::poll_closed(&mut self.0, cx).map_err(Error)
 	}
+}
+
+fn close_kind(error: &(dyn std::error::Error + 'static)) -> moq::CloseKind {
+	#[cfg(all(target_os = "linux", feature = "quic"))]
+	if let Some(error) = error.downcast_ref::<crate::quic::Error>() {
+		return match error {
+			crate::quic::Error::TimedOut => moq::CloseKind::IdleTimeout,
+			crate::quic::Error::Closed => moq::CloseKind::Closed,
+			_ => moq::CloseKind::Transport,
+		};
+	}
+	error.source().map(close_kind).unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -203,6 +287,13 @@ mod tests {
 			Poll::Ready(Err(Failure))
 		}
 	}
+	impl GroupedSend for Stream {
+		type Group = poll::Ungrouped;
+		fn set_group(&mut self, group: &Self::Group) {
+			match *group {}
+		}
+	}
+	impl Grouped for Backend {}
 	struct Sample;
 	impl wt::Stats for Sample {
 		fn rtt(&self) -> Option<std::time::Duration> {
@@ -309,5 +400,24 @@ mod tests {
 		));
 		poll::Session::close(&mut session, 21, "done");
 		assert_eq!(state.get(), 21);
+	}
+}
+
+#[cfg(all(test, target_os = "linux", feature = "quic"))]
+mod outcome_tests {
+	use super::*;
+
+	#[test]
+	fn typed_ring_close_kinds_survive_the_adapter() {
+		let idle = Error(crate::quic::Error::TimedOut);
+		assert!(matches!(
+			moq_net::Error::from_transport(idle),
+			moq_net::Error::IdleTimeout
+		));
+		let local = Error(crate::quic::Error::Closed);
+		assert!(matches!(
+			moq_net::Error::from_transport(local),
+			moq_net::Error::Session(moq_net::SessionError::Cancel)
+		));
 	}
 }

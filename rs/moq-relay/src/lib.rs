@@ -10,6 +10,7 @@
 //! which keeps the listeners, workers, and shutdown joins. `main.rs` is a thin
 //! wrapper over the two.
 
+pub mod acme;
 pub mod auth;
 pub mod cache;
 pub mod cluster;

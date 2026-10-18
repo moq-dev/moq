@@ -75,22 +75,28 @@ func datagramFromFFI(d *ffi.MoqDatagram) *Datagram {
 }
 
 // Subscription holds subscriber-side delivery preferences: priority, the max delay
-// a non-latest group may fall behind before it is skipped (zero skips at once), and
-// an optional group range (GroupStart a floor, GroupEnd exclusive).
+// a non-latest group may fall behind before it is skipped (zero skips at once, and it
+// caps every range), the ranges of the track to deliver (nil for everything MaxDelay
+// still allows, while an empty non-nil slice asks for nothing), and the order the
+// publisher sends pending groups in (nil for newest first).
 type Subscription struct {
-	Priority   uint8
-	MaxDelay   time.Duration
-	GroupStart *uint64
-	GroupEnd   *uint64
+	Priority uint8
+	MaxDelay time.Duration
+	Ranges   []Range
+	Order    *Order
 }
 
 func (s Subscription) ffi() (ffi.MoqSubscription, error) {
 	maxDelay, err := micros("max delay", s.MaxDelay)
+	var ranges *[]ffi.MoqRange
+	if s.Ranges != nil {
+		ranges = &s.Ranges
+	}
 	return ffi.MoqSubscription{
 		Priority:   s.Priority,
 		MaxDelayUs: maxDelay,
-		GroupStart: s.GroupStart,
-		GroupEnd:   s.GroupEnd,
+		Ranges:     ranges,
+		Order:      s.Order,
 	}, err
 }
 
@@ -129,25 +135,26 @@ func trackInfoFromFFI(info ffi.MoqTrackInfo) TrackInfo {
 type ConnectionStats struct {
 	RTT                  *time.Duration
 	EstimatedSendRateBps *uint64
-	EstimatedRecvRateBps *uint64
 	BytesSent            *uint64
 	BytesReceived        *uint64
 	BytesLost            *uint64
 	PacketsSent          *uint64
 	PacketsReceived      *uint64
 	PacketsLost          *uint64
+	// Version is the negotiated protocol version, spelled like WithVersions.
+	Version *string
 }
 
 func connectionStatsFromFFI(s ffi.MoqConnectionStats) ConnectionStats {
 	return ConnectionStats{
 		RTT:                  optFromMicros(s.RttUs),
 		EstimatedSendRateBps: s.EstimatedSendRateBps,
-		EstimatedRecvRateBps: s.EstimatedRecvRateBps,
 		BytesSent:            s.BytesSent,
 		BytesReceived:        s.BytesReceived,
 		BytesLost:            s.BytesLost,
 		PacketsSent:          s.PacketsSent,
 		PacketsReceived:      s.PacketsReceived,
 		PacketsLost:          s.PacketsLost,
+		Version:              s.Version,
 	}
 }

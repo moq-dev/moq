@@ -35,6 +35,24 @@ test("ranked orders by picture, then bitrate, then name", () => {
 	expect(ranked(renditions).map(([name]) => name)).toEqual(["f", "d", "e", "c", "b", "a"]);
 });
 
+test("ranked puts a higher preference before a larger picture", () => {
+	const renditions = {
+		fallback: { ...rendition({ codedWidth: 1920, codedHeight: 1080 }, 6_000_000), preference: -1 },
+		source: rendition({ codedWidth: 640, codedHeight: 360 }, 1_000_000),
+		disabled: { ...rendition({ codedWidth: 16, codedHeight: 16 }, 1), preference: 1, enabled: false },
+	};
+
+	expect(ranked(renditions).map(([name]) => name)).toEqual(["source", "fallback", "disabled"]);
+});
+
+test("video config accepts a signed 32-bit preference", () => {
+	const parse = (preference: number) =>
+		VideoConfigSchema.safeParse({ codec: "vp8", container: { kind: "legacy" }, preference });
+	expect(parse(-1).data?.preference).toBe(-1);
+	expect(parse(1.5).success).toBe(false);
+	expect(parse(2 ** 31).success).toBe(false);
+});
+
 test("ranked puts a known zero bitrate above an unknown one", () => {
 	const renditions = {
 		unknown: rendition({ codedWidth: 1280, codedHeight: 720 }),
@@ -147,4 +165,36 @@ test("video warmup round trips as optional integer milliseconds", () => {
 	for (const warmup of [-1, 0.5, Number.MAX_SAFE_INTEGER + 1]) {
 		expect(() => VideoConfigSchema.parse({ ...base, warmup })).toThrow();
 	}
+});
+
+test("color parses the H.273 code points and HDR10 metadata a Rust publisher writes", () => {
+	const color = {
+		primaries: 9,
+		transfer: 16,
+		matrix: 9,
+		range: "limited",
+		mastering: {
+			red: { x: 0.708, y: 0.292 },
+			green: { x: 0.17, y: 0.797 },
+			blue: { x: 0.131, y: 0.046 },
+			white: { x: 0.3127, y: 0.329 },
+			maxLuminance: 1000,
+			minLuminance: 0.005,
+		},
+		contentLight: { maxCll: 1000, maxFall: 400 },
+	};
+	const config = VideoConfigSchema.parse({ codec: "hvc1.2.4.L93.B0", container: { kind: "legacy" }, color });
+	expect(config.color).toEqual(color as typeof config.color);
+	expect(Catalog.ColorSchema.parse(color)).toEqual(config.color as Catalog.Color);
+	expect(VideoConfigSchema.parse({ codec: "vp8", container: { kind: "legacy" } }).color).toBeUndefined();
+});
+
+test("color refuses out-of-range code points and light levels", () => {
+	const parse = (color: unknown) =>
+		VideoConfigSchema.safeParse({ codec: "vp8", container: { kind: "legacy" }, color }).success;
+	expect(parse({ primaries: 256 })).toBe(false);
+	expect(parse({ contentLight: { maxCll: 65536, maxFall: 0 } })).toBe(false);
+	expect(parse({ matrix: 0 })).toBe(true);
+	expect(parse({ range: "full" })).toBe(true);
+	expect(parse({ range: true })).toBe(false);
 });

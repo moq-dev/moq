@@ -158,17 +158,8 @@ that stop detecting their recovery failures fail CI. `just check` also runs
 `--apply-only` whenever Rust or this directory changes, so a patch that no longer
 applies fails the PR that moved its code rather than the next nightly.
 
-The Check workflow's advisory `Drill sensitivity` job also runs on pull requests
-and merge groups. It selects mutations whose `+++ b/` target paths or patch files
-changed. Changing the drill tests, sensitivity harness, or selector runs them all.
-An unrelated change still reports a successful job without installing Nix or
-building snapshots. PR scope uses the PR base; merge-group scope uses its base SHA.
-
-The job pins `MOQ_SHAPER_SEED=1`, but sockets still run on the host clock, so
-load can change the outcome. Its job-level `continue-on-error` keeps the workflow
-advisory. Once the drills use controlled time, remove that flag and ask the
-maintainer to require `Drill sensitivity`; no repository setting changes here.
-The full nightly run remains independent of PR selection.
+Pull requests do not run the mutations: the drills' sockets still run on the host
+clock, so load can change the outcome.
 
 `sensitivity.sh` removes one recovery behavior at a time and requires the drill
 covering it to fail. Each mutation is a patch under `mutations/`, applied to a

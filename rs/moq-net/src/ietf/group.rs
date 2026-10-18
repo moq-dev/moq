@@ -158,9 +158,8 @@ pub struct GroupFlags {
 	// There's an explicit subgroup on the wire.
 	pub has_subgroup: bool,
 
-	// Use the first object ID as the subgroup ID
-	// Since we don't support subgroups or object ID > 0, this is trivial to support.
-	// Not compatibile with has_subgroup
+	// Use the first object ID as the subgroup ID, so only a first object ID of 0 is
+	// subgroup 0. Not compatible with has_subgroup.
 	pub has_subgroup_object: bool,
 
 	// There's an implicit end marker when the stream is closed.

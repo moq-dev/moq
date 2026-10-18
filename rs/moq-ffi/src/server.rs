@@ -164,12 +164,17 @@ impl ServerState {
 		listen.tls.key = config.tls.key.into_iter().map(PathBuf::from).collect();
 		listen.tls.generate = config.tls.generate;
 
-		let mut quic = moq_tokio::quic::Config::default();
-		quic.max_streams = config.quic.max_streams;
+		// moq-tokio only checks this when `listen` binds, which would report it as `Bind`.
+		// The other QUIC checks can't trip: a u64 of microseconds is under QUIC's idle cap.
+		if config.quic.qlog.is_some() && !crate::session::moq_qlog_supported() {
+			return Err(MoqError::Config {
+				reason: "qlog capture requires the 'qlog' feature".into(),
+			});
+		}
 
 		Ok(Self {
 			config: listen,
-			quic,
+			quic: config.quic.into(),
 			publish: config.publish,
 			consume: config.consume,
 			requests: None,

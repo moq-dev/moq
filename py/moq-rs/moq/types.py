@@ -4,19 +4,16 @@ Records with duration fields are owned in `_records` instead, so they read as `t
 """
 
 from moq_ffi import (
-    MoqAudioCodec as AudioCodec,
+    MoqAnchor as Anchor,
 )
 from moq_ffi import (
-    MoqAudioDecoderOutput as AudioDecoderOutput,
+    MoqAudioCodec as AudioCodec,
 )
 from moq_ffi import (
     MoqAudioEncoderInput as AudioEncoderInput,
 )
 from moq_ffi import (
-    MoqAudioEncoderOutput as AudioEncoderOutput,
-)
-from moq_ffi import (
-    MoqAudioFrame as AudioFrame,
+    MoqAudioPreset as AudioPreset,
 )
 from moq_ffi import (
     MoqAudioSampleFormat as AudioSampleFormat,
@@ -31,10 +28,16 @@ from moq_ffi import (
     MoqFetchGroupOptions as FetchGroupOptions,
 )
 from moq_ffi import (
+    MoqOrder as Order,
+)
+from moq_ffi import (
     MoqProtocolError as ProtocolError,
 )
 from moq_ffi import (
     MoqProtocolKind as ProtocolKind,
+)
+from moq_ffi import (
+    MoqRange as Range,
 )
 from moq_ffi import (
     MoqRoute as Route,
@@ -46,9 +49,6 @@ from moq_ffi import (
     MoqVideoDecodedFrame as VideoDecodedFrame,
 )
 from moq_ffi import (
-    MoqVideoDecoderOutput as VideoDecoderOutput,
-)
-from moq_ffi import (
     MoqVideoEncoderInput as VideoEncoderInput,
 )
 from moq_ffi import (
@@ -58,7 +58,7 @@ from moq_ffi import (
     MoqVideoEncoderOutput as VideoEncoderOutput,
 )
 from moq_ffi import (
-    MoqVideoFrame as VideoFrame,
+    MoqVideoGop as VideoGop,
 )
 from moq_ffi import (
     MoqVideoPixelFormat as VideoPixelFormat,
@@ -67,12 +67,11 @@ from moq_ffi import (
 from ._records import Backoff, ConnectionStats, Datagram, Frame, Subscription, TrackInfo
 
 __all__ = [
+    "Anchor",
     "AudioCodec",
-    "AudioDecoderOutput",
     "AudioEncoderInput",
-    "AudioEncoderOutput",
+    "AudioPreset",
     "AudioSampleFormat",
-    "AudioFrame",
     "Backoff",
     "ConnectionStats",
     "ConnectionStatus",
@@ -80,17 +79,18 @@ __all__ = [
     "ErrorScope",
     "Frame",
     "FetchGroupOptions",
+    "Order",
     "ProtocolError",
     "ProtocolKind",
+    "Range",
     "Route",
     "Subscription",
     "TrackInfo",
     "VideoCodec",
     "VideoEncoderInput",
     "VideoEncoderKind",
+    "VideoGop",
     "VideoEncoderOutput",
-    "VideoFrame",
     "VideoDecodedFrame",
-    "VideoDecoderOutput",
     "VideoPixelFormat",
 ]

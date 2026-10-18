@@ -5,18 +5,34 @@ import MoqFFI
 /// Minted by `Session.bandwidth`. Handles from the same session share one
 /// reservation registry.
 public final class Bandwidth: Sendable {
+    /// An owned bandwidth estimate, in bits per second.
+    public final class Consumer: Sendable {
+        let ffi: MoqBandwidthConsumer
+
+        init(_ ffi: MoqBandwidthConsumer) { self.ffi = ffi }
+
+        /// Read the current estimate, or nil while unavailable.
+        public func peek() -> UInt64? { ffi.peek() }
+
+        /// Wait for the estimate to change, throwing when its producer closes.
+        public func changed() async throws -> UInt64? { try await ffi.changed() }
+
+        /// Release this consumer's demand, including a pending wait.
+        public func cancel() { ffi.cancel() }
+    }
+
     let ffi: MoqBandwidth
 
     init(_ ffi: MoqBandwidth) {
         self.ffi = ffi
     }
 
-    /// Reserve up to `maxBps` for `track`.
+    /// Reserve up to `maxBps` for the track `demand` watches.
     ///
-    /// `maxBps` is a ceiling, not a measurement: reserve the most the track can
+    /// Every track producer hands out its `demand()`. `maxBps` is a ceiling, not a measurement: reserve the most the track can
     /// ever send. Drop the reservation to hand the room back.
-    public func reserve(track: TrackProducer, maxBps: UInt64) throws -> Reservation {
-        Reservation(try ffi.reserve(track: track.ffi, maxBps: maxBps))
+    public func reserve(demand: TrackDemand, maxBps: UInt64) -> Reservation {
+        Reservation(ffi.reserve(demand: demand.ffi, maxBps: maxBps))
     }
 }
 

@@ -10,7 +10,7 @@ load, because they read one mocked clock instead of the host's wall clock:
   (`rs/moq-relay/src/auth/refresh.rs`)
 - `a_fixed_lease_still_expires` and
   `an_outage_keeps_the_session_until_expires`
-  (`rs/moq-relay/tests/auth_lifetime.rs`)
+  (`rs/moq-relay/tests/integration/auth_lifetime.rs`)
 
 ## Plan
 

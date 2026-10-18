@@ -6,6 +6,7 @@
 export {
 	FrameTooLarge,
 	GroupTooLarge,
+	NoStreamCredit,
 	NotFound,
 	ProtocolViolation,
 	RefusedRedirect,

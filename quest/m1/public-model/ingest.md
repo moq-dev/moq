@@ -43,7 +43,7 @@ Rust items (`rs/moq-net/src/model/`), as they stood at b4eab0db1:
       reports the last frame that exists. This touches
       [Live largest location](/quest/m1/largest.md); align with it there.
     - Regression guard: `rejoin_waits_for_the_answers_first_frame`
-      (`rs/moq-net/tests/rejoin.rs`, fails when the judgments count a
+      (`rs/moq-net/tests/integration/rejoin.rs`, fails when the judgments count a
       frameless group) and
       `revealing_a_presented_group_wakes_a_read_it_expires` stay;
       `a_withheld_group_holds_the_end` and
@@ -108,13 +108,17 @@ Rust items (`rs/moq-net/src/model/`), as they stood at b4eab0db1:
 - **Received end** (`track::Producer::finish_at_pending`, `set_tail_pending`;
   both subscribers). Without it, a custom subscriber over unordered streams
   ends readers at a hole. **Decision**:
-  - Public after [Tail arrivals](/quest/m1/tail-arrivals.md), as one call
-    that returns a handle the session settles when its tail is in.
+  - Public after Tail arrivals, as one call that returns a handle the
+    session settles when its tail is in.
   - Keep it private.
   - ✅ Public after Tail arrivals, with the shape left to that quest. Once
     the model records arrivals per track bounded by the subscription's
     grace, it may own the grace timer itself, so a plain `finish_at` on a
     received track could be enough and no settle handle is needed.
+  - Tail arrivals landed the record (`TrackState::arrivals`) without a
+    timer: the model folds a gap only on a write, so the session still
+    settles the tail with `set_tail_pending(false)`. The shape is this
+    quest's to settle.
 - **Session end** (`track::Producer::close`, `abort_session`; both
   subscribers): public. Fold `abort_session` into the public `abort` (abort
   open groups too) unless the implementer finds a reader-visible difference,
@@ -148,6 +152,11 @@ Rust items (`rs/moq-net/src/model/`), as they stood at b4eab0db1:
   `track::TrackState`, `track::FetchOutcome`, `finish_track_at`,
   `poll_landed`): moved to [the deferred quest](/quest/m1/public-model/deferred.md),
   which waits on Model ranges.
+- `track::Producer::received` (lite and IETF subscribers; JS
+  `hooks.receiveTrack`) marks a session's copy so the local-write rewind
+  check skips it (#5803). It goes public with the other ingest calls, unless
+  [time provenance](/quest/m1/lite-time-provenance.md) makes received
+  timestamps checkable first.
 - Passthrough, stay private and marked: `group::Producer::wire`,
   `set_wire`, `mark_gap`, `set_end_object`, `group::Wire`, the `object` and
   `datagram` modules, `track::Producer::insert_wire_datagram`,
@@ -177,11 +186,6 @@ JS items (`js/net/src/`): mirror each Rust decision under the same name.
 Tests: each public call gets a mock-time test in its language, and the
 built-in subscribers move onto the public calls, so their existing suites
 cover the behavior.
-
-## Required
-
-- [Narrow the model before it goes public](/quest/m1/public-model/narrow.md) - its visibility rewrite and marker lint guard every model API this child edits
-- [Tail arrivals](/quest/m1/tail-arrivals.md) - settles the received-end semantics before they become public
 
 ## Related
 

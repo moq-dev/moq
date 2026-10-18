@@ -18,6 +18,13 @@ export interface ConsumerProps {
 	 */
 	// Read-only: a Getter (e.g. another component's output) is accepted directly.
 	maxDelay?: GetterInit<Milli>;
+	/**
+	 * The consumer this one replaces on the same path, such as the previous rendition.
+	 *
+	 * Its arrival estimate carries over instead of restarting from the cold-start prior, so a
+	 * switch neither lowers nor raises {@link Consumer.spread} on its own.
+	 */
+	predecessor?: Consumer;
 }
 
 /** One item of a {@link Consumer.next} read, in delivery order. Mirrors Rust's `container::Read`. */
@@ -46,6 +53,7 @@ interface Group {
 	frames: ReceivedFrame[]; // decode order
 	empty: boolean; // no wire frame was published; empty groups mean nothing
 	media: boolean; // a decodable (non-marker) frame was buffered
+	bare?: boolean; // a data track's marker group: one object with no bytes
 	start?: Micro; // First decoded timestamp
 	minMedia?: Micro; // Lowest decodable timestamp
 	latest?: Micro; // The timestamp of the latest known frame
@@ -122,15 +130,15 @@ export class Consumer {
 	/** The time ranges currently buffered and ready to play. */
 	readonly buffered: Getter<BufferedRanges> = this.#buffered;
 
-	#jitter = new Jitter();
-	#spread = new Signal<Milli>(this.#jitter.measured);
+	#jitter: Jitter;
+	#spread: Signal<Milli>;
 	/**
 	 * How much buffer late arrivals need, measured as frames come off the transport.
 	 *
 	 * The measured term of doc/concept/audio-jitter.md, excluding the codec frame and any advertised
-	 * floor. Starts at the cold-start estimate before any frame arrives.
+	 * floor. Starts at the predecessor's estimate, or the cold-start estimate without one.
 	 */
-	readonly spread: Getter<Milli> = this.#spread;
+	readonly spread: Getter<Milli>;
 
 	#signals = new Effect();
 	#closed = new Once<Error | null>();
@@ -141,6 +149,9 @@ export class Consumer {
 		this.#track = track;
 		this.#format = props.format;
 		this.#maxDelay = getter(props.maxDelay ?? Milli.zero);
+		this.#jitter = props.predecessor ? props.predecessor.#jitter.fork() : new Jitter();
+		this.#spread = new Signal(this.#jitter.measured);
+		this.spread = this.#spread;
 
 		this.#signals.spawn(this.#run.bind(this));
 		this.#signals.cleanup(() => {
@@ -208,6 +219,13 @@ export class Consumer {
 				const arrival = Nano.toMilli(Nano(now()));
 
 				const decoded = this.#format.decode(next.payload, next.timestamp);
+				if (this.#format.kind === "data") {
+					// A data track's marker is one object with no bytes, alone in its group.
+					if (group.bare || (decoded.length === 0 && group.media)) {
+						throw new Error("a data track's discontinuity marker shares its group");
+					}
+					group.bare = decoded.length === 0;
+				}
 
 				for (const sample of decoded) {
 					const marker = this.#format.end?.(sample) !== undefined;
@@ -566,6 +584,11 @@ export class Consumer {
 					if (group) {
 						if (group.truncated) this.#lost = true;
 						this.#updateBuffered();
+						// A data track's marker carries no timestamp, so it ends where this reader got to.
+						// Before the first item there is nothing to end.
+						if (group.bare && !group.truncated && this.#edge !== undefined) {
+							return this.#emit({ kind: "end", group: group.consumer.sequence, end: this.#edge });
+						}
 						continue;
 					}
 				}

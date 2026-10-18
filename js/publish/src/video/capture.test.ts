@@ -8,6 +8,7 @@ import type { StreamTrack } from "./types";
 mock.module("./capture-worker.ts?worklet", () => ({ default: async () => "blob:fake-worker" }));
 const { Capture } = await import("./capture");
 const { Encoder } = await import("./encoder");
+const { Renderer } = await import("../preview");
 
 class Frame {
 	// Every frame built, so a test can assert none is left open.
@@ -185,8 +186,9 @@ function frameSource() {
 	};
 }
 
-// Let the capture pump drain everything pushed so far.
-const flush = () => new Promise((resolve) => setTimeout(resolve, 10));
+// Let the capture pump drain everything pushed so far. The pipeline runs on promises alone, so one
+// macrotask turn settles every microtask queued before it, with no wall-clock wait.
+const flush = () => new Promise((resolve) => setImmediate(resolve));
 
 const open = () => Frame.all.filter((frame) => !frame.closed);
 
@@ -461,4 +463,102 @@ test("an encoder resuming on a still source encodes a keyframe of the current pi
 		if (original) Object.defineProperty(globalThis, "VideoEncoder", original);
 		else Reflect.deleteProperty(globalThis, "VideoEncoder");
 	}
+});
+
+// Detaches a reader at every microtask offset after a push, since a demand gap or a hidden preview can
+// land anywhere while a frame crosses the capture. A frame already read is the reader's to close, even
+// when the teardown wins, so only the capture's held picture stays open between readers.
+async function sweep(input: ReturnType<typeof frameSource>, attach: (attached: boolean) => void): Promise<void> {
+	let timestamp = 2_000_000;
+	for (let yields = 0; yields < 40; yields++) {
+		attach(true);
+		await flush();
+
+		timestamp += 100_000;
+		input.push(timestamp);
+		for (let i = 0; i < yields; i++) await Promise.resolve();
+		attach(false);
+		await flush();
+
+		expect({ yields, open: open().length }).toEqual({ yields, open: 1 });
+	}
+}
+
+test("a preview hidden while a frame is in flight closes that frame", async () => {
+	using input = frameSource();
+	const capture = new Capture({ source: input.source });
+	const enabled = new Signal(false);
+	const preview = new Renderer({ frames: capture.out.frames, enabled });
+
+	try {
+		input.push(1_000_000);
+		await flush();
+		await sweep(input, (attached) => enabled.set(attached));
+	} finally {
+		preview.close();
+		capture.close();
+	}
+	expect(open()).toEqual([]);
+});
+
+test("an encoder torn down while a frame is in flight closes that frame", async () => {
+	using input = frameSource();
+
+	class NullVideoEncoder {
+		state: CodecState = "unconfigured";
+		#output: VideoEncoderInit["output"];
+		#codec?: string;
+
+		constructor(init: VideoEncoderInit) {
+			this.#output = init.output;
+		}
+
+		static async isConfigSupported(config: VideoEncoderConfig): Promise<{ supported: boolean }> {
+			return { supported: config.codec.startsWith("avc1") };
+		}
+
+		configure(config: VideoEncoderConfig): void {
+			this.state = "configured";
+			this.#codec = config.codec;
+		}
+
+		encode(): void {}
+
+		// Only the probe flushes; report the configured codec, as Chrome does.
+		async flush(): Promise<void> {
+			const chunk = { type: "key", timestamp: 0, byteLength: 1, copyTo: () => {} };
+			this.#output(chunk as never, { decoderConfig: { codec: this.#codec } } as never);
+		}
+
+		close(): void {
+			this.state = "closed";
+		}
+	}
+	const original = Object.getOwnPropertyDescriptor(globalThis, "VideoEncoder");
+	Object.defineProperty(globalThis, "VideoEncoder", { configurable: true, value: NullVideoEncoder, writable: true });
+
+	const capture = new Capture({ source: input.source });
+	const track = new Moq.Track.Producer("video").accept({ timescale: Moq.Time.Timescale.MILLI });
+	const live = new Signal<Moq.Track.Producer | undefined>(undefined);
+	const rendition = { config: new Signal(undefined), track: live, close: () => {} };
+	const encoder = new Encoder("video", {
+		enabled: true,
+		broadcast: { video: () => rendition, baseline: new Baseline() } as never,
+		capture,
+	});
+
+	try {
+		input.push(1_000_000);
+		for (let i = 0; i < 50 && !encoder.out.resolved.peek(); i++) await flush();
+		expect(encoder.out.resolved.peek()).toBeDefined();
+
+		await sweep(input, (attached) => live.set(attached ? track : undefined));
+	} finally {
+		encoder.close();
+		capture.close();
+		track.close();
+		if (original) Object.defineProperty(globalThis, "VideoEncoder", original);
+		else Reflect.deleteProperty(globalThis, "VideoEncoder");
+	}
+	expect(open()).toEqual([]);
 });

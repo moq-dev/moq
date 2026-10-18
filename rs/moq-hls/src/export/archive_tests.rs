@@ -251,7 +251,9 @@ fn legacy(track: &str, micros: u64, keyframe: bool) -> Frame {
 fn live() -> hang::catalog::Archive {
 	let mut archive = hang::catalog::Archive::new();
 	for track in ["360p", "1080p", "audio"] {
-		archive.timelines.insert(track.to_string(), timeline(track));
+		archive
+			.timelines
+			.insert(track.to_string(), hang::catalog::Timeline::new(timeline(track), 4_000));
 	}
 	archive
 }
@@ -771,7 +773,7 @@ async fn history_after_expiry(finished: bool) {
 		.pool
 		.gc(now + Duration::from_secs(31), &kio::Waiter::noop());
 	let subscription = moq_net::track::Subscription::default()
-		.with_start(moq_net::track::Position::group(0))
+		.with_groups(0..)
 		.with_max_delay(Duration::from_millis((1_u64 << 62) - 1));
 	let mut retained = broadcast
 		.consume()

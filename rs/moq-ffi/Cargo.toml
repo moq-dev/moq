@@ -28,12 +28,19 @@ default = ["audio", "video"]
 
 audio = ["dep:moq-audio"]
 video = ["dep:moq-video", "dep:pollster"]
+# qlog trace capture (`MoqQuicConfig::qlog`). Off by default: it compiles the qlog
+# machinery in and is only wanted for debugging; `moq_qlog_supported` reports it.
+qlog = ["moq-tokio/qlog"]
+# Test-only control of the runtime clock, for the Python suite (`just py test`). Released
+# builds leave it off, so they never carry the `moq_ffi_test_clock_*` symbols.
+testing = ["moq-clock/manual"]
 
 [dependencies]
 bytes = { workspace = true }
 hang = { workspace = true }
 # `kio::MaybeSend` is the `Send` bound that vanishes on wasm; see `ffi::Task`.
 kio = { workspace = true }
+moq-clock = { workspace = true }
 moq-json = { workspace = true }
 moq-mux = { workspace = true }
 moq-net = { workspace = true }
@@ -77,9 +84,6 @@ uniffi = { workspace = true, features = ["wasm-unstable-single-threaded"] }
 web-async = { workspace = true }
 web-transport-trait = { workspace = true }
 web-transport-wasm = { workspace = true }
-
-[build-dependencies]
-uniffi = { workspace = true, features = ["build"] }
 
 [dev-dependencies]
 # One non-codec test blocks on a future; the main dep is `video`-only.

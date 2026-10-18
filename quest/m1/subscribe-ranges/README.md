@@ -73,7 +73,7 @@ every sequence delivered or dropped.
 
 ## Required
 
-- [Model ranges](/quest/m1/subscribe-ranges/model.md) - `Subscription` carries ranges, and `Dynamic` fills misses by range
+- [Dynamic range requests](/quest/m1/subscribe-ranges/dynamic.md) - `Dynamic` fills misses by range, and a subscriber reads only its own ranges
 - [SUBSCRIBE_DROP](/quest/m1/subscribe-drop.md) - publishers name every group they won't deliver
 - [Lite-07 ranges](/quest/m1/subscribe-ranges/lite.md) - the lite-07 wire, Rust publisher and subscriber, and the draft
 - [moq-transport upstream updates](/quest/m1/subscribe-ranges/ietf-update.md) - the upstream request follows the aggregate priority; its order stays fixed, as every draft requires
@@ -83,5 +83,4 @@ every sequence delivered or dropped.
 ## Related
 
 - [Track priority scope](/quest/m1/track-priority-scope.md) - group order within a track now follows the subscription
-- [FETCH max-delay](/quest/m1/fetch-max-delay.md) - the age contract applies to past ranges and held readers too
 - [IETF fill timeout](/quest/m1/ietf-fill-timeout.md) - bounds upstream waiting independently of content age

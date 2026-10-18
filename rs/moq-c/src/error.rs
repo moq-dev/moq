@@ -42,6 +42,7 @@ pub const MOQ_ERROR_JSON_TRACK: i32 = -38;
 pub const MOQ_ERROR_INVALID_CONFIG: i32 = -40;
 pub const MOQ_ERROR_UNRESOLVABLE_BROADCAST: i32 = -41;
 pub const MOQ_ERROR_EXPIRED: i32 = -42;
+pub const MOQ_ERROR_UNSUPPORTED_CATALOG: i32 = -43;
 
 /// Whether a protocol code is from the session or stream registry.
 #[repr(C)]
@@ -438,6 +439,9 @@ impl ffi::ReturnCode for Error {
 			Error::InvalidCode => MOQ_ERROR_INVALID_CODE,
 			Error::Panic => MOQ_ERROR_PANIC,
 			Error::Offline => MOQ_ERROR_OFFLINE,
+			// A catalog needing a newer reader is an upgrade, not a broken publisher.
+			Error::Hang(hang::Error::UnsupportedVersion(_))
+			| Error::Mux(moq_mux::Error::Hang(hang::Error::UnsupportedVersion(_))) => MOQ_ERROR_UNSUPPORTED_CATALOG,
 			Error::Hang(_) => MOQ_ERROR_HANG,
 			Error::NoIndex => MOQ_ERROR_NO_INDEX,
 			Error::NulError(_) => MOQ_ERROR_NUL,
@@ -468,6 +472,21 @@ impl ffi::ReturnCode for Error {
 
 #[cfg(test)]
 mod tests {
+	#[test]
+	fn unsupported_catalog_has_its_own_code() {
+		use crate::ffi::ReturnCode;
+
+		let hang = hang::Error::UnsupportedVersion(5);
+		assert_eq!(
+			super::Error::Hang(hang.clone()).code(),
+			super::MOQ_ERROR_UNSUPPORTED_CATALOG
+		);
+		assert_eq!(
+			super::Error::Mux(moq_mux::Error::Hang(hang)).code(),
+			super::MOQ_ERROR_UNSUPPORTED_CATALOG
+		);
+	}
+
 	#[test]
 	fn session_limit_has_a_known_kind() {
 		let error = super::from_session(&moq_net::SessionError::TooManyRequests);

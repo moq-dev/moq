@@ -32,12 +32,13 @@ moq-clock = { workspace = true, optional = true }
 moq-net = { workspace = true }
 moq-quic = { workspace = true, features = ["bloom", "rustls-aws-lc-rs"], optional = true }
 moq-sock = { workspace = true }
-rand = "0.10"
 rustc-hash = { workspace = true }
 rustls = { version = "0.23", optional = true }
 # OS-native server-cert verifier for the rustls backends. Version matched to
 # the copy moq-tokio pulls in, to avoid duplication.
 rustls-platform-verifier = { version = "0.7", optional = true }
+# Runtime thread checks for the session moq-transport's `Send` drivers capture.
+send_wrapper = { workspace = true }
 slab = "0.4"
 thiserror = "2"
 tracing = "0.1"
@@ -59,7 +60,7 @@ io-uring = { workspace = true }
 libc = { workspace = true }
 moq-tokio = { path = "../moq-tokio", default-features = false, features = ["quic", "aws-lc-rs"] }
 nix = { workspace = true }
-rcgen = { version = "0.14", default-features = false, features = ["pem", "aws_lc_rs"] }
+rcgen = { workspace = true, features = ["pem", "aws_lc_rs"] }
 rustls = "0.23"
 # The qlog test parses every record of a trace, which is what catches a
 # truncated or interleaved write.

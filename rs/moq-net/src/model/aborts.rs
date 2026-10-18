@@ -1,9 +1,11 @@
-//! Abort notifications for the groups each capped subscriber parks.
+//! Abort notifications for the groups each capped subscriber parks, and for every
+//! producer cut a wire publisher forwards as a drop.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-/// One registration per subscriber, with pending sequences bounded by its parked set.
+/// One registration per subscriber, with pending sequences bounded by its parked set,
+/// or by the cuts between two polls.
 #[derive(Default)]
 pub(super) struct Aborts {
 	// Visit only active cursors, even after a larger fanout has disconnected.
@@ -12,6 +14,8 @@ pub(super) struct Aborts {
 
 #[derive(Default)]
 struct State {
+	// Notified of every cut, whatever `watched` holds.
+	cuts: bool,
 	watched: BTreeSet<u64>,
 	pending: BTreeSet<u64>,
 	waiters: kio::WaiterList,
@@ -19,7 +23,18 @@ struct State {
 
 impl Aborts {
 	pub(super) fn watch(self: &Arc<Self>) -> Watch {
-		let state = kio::Lock::default();
+		self.register(State::default())
+	}
+
+	pub(super) fn watch_cuts(self: &Arc<Self>) -> Watch {
+		self.register(State {
+			cuts: true,
+			..State::default()
+		})
+	}
+
+	fn register(self: &Arc<Self>, state: State) -> Watch {
+		let state = kio::Lock::new(state);
 		let mut readers = self.readers.lock();
 		let key = readers
 			.last_key_value()
@@ -32,13 +47,13 @@ impl Aborts {
 		}
 	}
 
-	pub(super) fn notify(&self, sequence: u64) {
+	pub(super) fn notify(&self, sequence: u64, cut: bool) {
 		let mut wakes = Vec::new();
 		{
 			let readers = self.readers.lock();
 			for reader in readers.values() {
 				let mut state = reader.lock();
-				if state.watched.contains(&sequence) && state.pending.insert(sequence) {
+				if ((cut && state.cuts) || state.watched.contains(&sequence)) && state.pending.insert(sequence) {
 					wakes.push(state.waiters.take());
 				}
 			}
@@ -109,7 +124,7 @@ mod tests {
 		let registry = Arc::new(Aborts::default());
 		let watch = registry.watch();
 		watch.insert(7);
-		registry.notify(7);
+		registry.notify(7, false);
 		let counter = Arc::new(Counter::default());
 		let waiter = kio::Waiter::new(Waker::from(counter.clone()));
 		watch.register(&waiter);
@@ -118,15 +133,24 @@ mod tests {
 	}
 
 	#[test]
+	fn a_cuts_watch_sees_every_cut_and_nothing_else() {
+		let registry = Arc::new(Aborts::default());
+		let watch = registry.watch_cuts();
+		registry.notify(1, false);
+		registry.notify(2, true);
+		assert_eq!(watch.poll(&kio::Waiter::noop()), BTreeSet::from([2]));
+	}
+
+	#[test]
 	fn notifications_remain_bounded_by_watched_groups() {
 		let registry = Arc::new(Aborts::default());
 		let watch = registry.watch();
 		watch.insert(3);
 		for sequence in 0..1024 {
-			registry.notify(sequence);
+			registry.notify(sequence, false);
 		}
 		assert_eq!(watch.poll(&kio::Waiter::noop()), BTreeSet::from([3]));
-		registry.notify(3);
+		registry.notify(3, false);
 		watch.remove(3);
 		assert!(watch.poll(&kio::Waiter::noop()).is_empty());
 		drop(watch);

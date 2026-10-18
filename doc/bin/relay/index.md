@@ -48,7 +48,9 @@ Every option is also a `--flag` or `MOQ_*` environment variable, and
 `RUST_LOG` controls logging. The
 [configuration reference](/bin/relay/config) covers every section, and
 [`demo/relay/`](https://github.com/moq-dev/moq/tree/main/demo/relay) has
-working configs for development, production, and a cluster.
+working configs for development, production, and a cluster. Options renamed
+between releases are listed in
+[MIGRATE.md](https://github.com/moq-dev/moq/blob/main/rs/moq-relay/MIGRATE.md).
 
 ## Embed
 

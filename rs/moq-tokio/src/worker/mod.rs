@@ -2,9 +2,9 @@
 //!
 //! A `Server` on a work-stealing runtime serves every connection off one UDP
 //! socket: every packet can cross threads, and every wakeup is a candidate
-//! context switch. `Workers` is the opposite shape. Each
-//! member is a thread of its own, pinned to a core, running a `current_thread`
-//! runtime and owning one socket in a `SO_REUSEPORT` group. A connection lands
+//! context switch. `Workers` is the opposite shape. Each member is a thread of
+//! its own, optionally pinned to a core, running a `current_thread` runtime and
+//! owning one socket in a `SO_REUSEPORT` group. A connection lands
 //! on one worker and stays there, so the locks its driver and its session take
 //! are uncontended and nothing is stolen.
 //!
@@ -33,22 +33,22 @@ pub struct Config {
 	/// How many workers to run, each with a thread and a socket of its own.
 	pub count: u16,
 
-	/// Pin each worker to a CPU core.
+	/// Pin each worker to a CPU core, defaulting to off.
 	///
 	/// The mode's measured win comes from each worker owning a socket and a
 	/// runtime, not from pinning: on a single-socket machine, pinned and unpinned
 	/// benchmark inside run-to-run noise of each other. Pinning stops the
-	/// scheduler migrating a busy worker, which should matter on a multi-socket
-	/// or NUMA machine, and costs nothing elsewhere, so it defaults on. Turn it
-	/// off when sharing the machine with something that manages CPU placement
-	/// itself.
+	/// scheduler migrating a busy worker, which may matter on a multi-socket or
+	/// NUMA machine with the cores to itself. Every group pins worker *i* to the
+	/// *i*th core, so two groups on a host, or one limited to fewer CPUs than the
+	/// host has, would crowd onto the first cores.
 	pub pin: bool,
 }
 
 impl Config {
-	/// `count` workers, pinned.
+	/// `count` workers, unpinned.
 	pub fn new(count: u16) -> Self {
-		Self { count, pin: true }
+		Self { count, pin: false }
 	}
 
 	/// Whether to pin each worker to a core.

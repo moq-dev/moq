@@ -1,4 +1,4 @@
-import { StreamError } from "../error.ts";
+import { closeReason, ProtocolViolation, SessionCode, StreamError } from "../error.ts";
 import { type Hop, randomHop } from "../hop.ts";
 import * as Ietf from "../ietf/index.ts";
 import { Reader, Stream, UnexpectedEnd, Writer } from "../stream.ts";
@@ -23,12 +23,13 @@ export async function exchangeSetup(
 	transport: WebTransport,
 	version: Ietf.IetfVersion,
 	implementation: string,
-	extensions: Extensions.Offered,
+	{ client, extensions }: { client: boolean; extensions: Extensions.Offered },
 ): Promise<{
 	control: Stream;
 	early: Reader[];
 	solicit: boolean | undefined;
 	hidden: boolean;
+	activeCount: boolean;
 	cluster: Ietf.Cluster.Hops;
 	auth: boolean;
 }> {
@@ -37,6 +38,7 @@ export async function exchangeSetup(
 	params.setBytes(Ietf.SetupOption.Implementation, encoder.encode(implementation));
 	Extensions.intoSetup(params, extensions, version);
 	Ietf.hiddenIntoSetup(params);
+	Ietf.activeCountIntoSetup(params, version);
 
 	// One id per session, like the moq-lite connection: nothing in this process forwards
 	// between sessions, so there is nothing for a shared id to detect.
@@ -45,16 +47,26 @@ export async function exchangeSetup(
 
 	const setupMsg = new Ietf.Setup({ parameters: params });
 
-	const [writer, received] = await Promise.all([
-		sendSetup(transport, version, setupMsg),
-		receiveSetup(transport, version),
-	]);
+	let writer: Writer;
+	let received: Awaited<ReturnType<typeof receiveSetup>>;
+	try {
+		[writer, received] = await Promise.all([
+			sendSetup(transport, version, setupMsg),
+			receiveSetup(transport, version, client),
+		]);
+	} catch (err) {
+		// A SETUP we refuse closes with the code the draft names for it.
+		if (err instanceof ProtocolViolation)
+			transport.close({ closeCode: err.code, reason: closeReason(err.message) });
+		throw err;
+	}
 
 	return {
 		control: new Stream({ writer, reader: received.reader }),
 		early: received.early,
 		solicit: received.solicit,
 		hidden: received.hidden,
+		activeCount: received.activeCount,
 		cluster: { self, peer: received.cluster },
 		// Negotiated only when both sides offer it.
 		auth: received.auth && extensions.auth,
@@ -79,11 +91,13 @@ async function sendSetup(transport: WebTransport, version: Ietf.IetfVersion, set
 async function receiveSetup(
 	transport: WebTransport,
 	version: Ietf.IetfVersion,
+	client: boolean,
 ): Promise<{
 	reader: Reader;
 	early: Reader[];
 	solicit: boolean | undefined;
 	hidden: boolean;
+	activeCount: boolean;
 	cluster: Hop | undefined;
 	auth: boolean;
 }> {
@@ -121,11 +135,23 @@ async function receiveSetup(
 	await reader.u53(); // the SETUP type, peeked above
 	const setup = await Ietf.Setup.decode(reader, version);
 
+	// A server sends neither PATH nor AUTHORITY (draft-21 sections 9.1.1 and 9.1.2).
+	if (client && setup.parameters.getBytes(Ietf.SetupOption.Path) !== undefined) {
+		throw new ProtocolViolation("server SETUP carries PATH", { code: SessionCode.InvalidPath });
+	}
+	if (client && setup.parameters.getBytes(Ietf.SetupOption.Authority) !== undefined) {
+		throw new ProtocolViolation("server SETUP carries AUTHORITY", { code: SessionCode.InvalidAuthority });
+	}
+	// Nothing here uses the peer's token, but one that cannot be decoded still closes the
+	// session (draft-21 section 8.9).
+	Ietf.tokenFromSetup(setup.parameters, version);
+
 	return {
 		reader,
 		early,
 		solicit: Ietf.solicitFromSetup(setup.parameters),
 		hidden: Ietf.hiddenFromSetup(setup.parameters),
+		activeCount: Ietf.activeCountFromSetup(setup.parameters, version),
 		cluster: Ietf.Cluster.fromSetup(setup.parameters, version),
 		auth: Ietf.Auth.fromSetup(setup.parameters, version) === true,
 	};

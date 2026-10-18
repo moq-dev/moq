@@ -5,7 +5,7 @@ use std::pin::Pin;
 use std::task::Poll;
 use std::time::Duration;
 
-use web_async::time::Instant;
+use moq_clock::Instant;
 
 use super::{Export, catalog};
 use crate::container::Frame;
@@ -100,7 +100,7 @@ pub struct Follower<E: catalog::Catalog = ()> {
 	closed: bool,
 	linger: Duration,
 	stitch: bool,
-	timer: Option<Pin<Box<web_async::time::Sleep>>>,
+	timer: Option<Pin<Box<moq_clock::Sleep>>>,
 }
 
 impl<E: catalog::Catalog + 'static> Follower<E> {
@@ -192,7 +192,7 @@ impl<E: catalog::Catalog + 'static> Follower<E> {
 						self.state = State::Following {
 							resolving: self.resolve(),
 							awaiting: Awaiting {
-								deadline: Instant::now() + self.linger,
+								deadline: moq_clock::now() + self.linger,
 								missing: Missing::Switch,
 							},
 							fallback: Box::new(State::Running { awaiting }),
@@ -226,7 +226,7 @@ impl<E: catalog::Catalog + 'static> Follower<E> {
 							return Poll::Pending;
 						}
 					};
-					let now = Instant::now();
+					let now = moq_clock::now();
 					// A failure ends the broadcast only if the broadcast goes too.
 					let grace = (end.is_err() && !self.ended && self.serving == Serving::Ours)
 						.then(|| now + CLOSE_GRACE.min(self.linger));
@@ -429,7 +429,7 @@ impl<E: catalog::Catalog + 'static> Follower<E> {
 			State::Following { awaiting, .. } => Some(awaiting),
 			State::Settling { .. } | State::Done => None,
 		};
-		if !awaiting.is_some_and(|awaiting| Instant::now() >= awaiting.deadline) {
+		if !awaiting.is_some_and(|awaiting| moq_clock::now() >= awaiting.deadline) {
 			return None;
 		}
 		let (State::Running {
@@ -464,12 +464,10 @@ impl<E: catalog::Catalog + 'static> Follower<E> {
 
 	/// Whether `at` has come, registering `waiter` to wake then if not.
 	fn elapsed(&mut self, waiter: &kio::Waiter, at: Instant) -> bool {
-		if Instant::now() >= at {
+		if moq_clock::now() >= at {
 			return true;
 		}
-		let timer = self
-			.timer
-			.get_or_insert_with(|| Box::pin(web_async::time::sleep_until(at)));
+		let timer = self.timer.get_or_insert_with(|| Box::pin(moq_clock::sleep_until(at)));
 		if timer.deadline() != at {
 			timer.as_mut().reset(at);
 		}

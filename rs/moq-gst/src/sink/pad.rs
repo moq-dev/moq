@@ -4,7 +4,8 @@
 //! that pad's own streaming thread, so this type is touched from one thread and needs no generation
 //! tagging or cross-thread failure map.
 
-use std::time::{Duration, Instant};
+use moq_net::time::Instant;
+use std::time::Duration;
 
 use anyhow::{Context, Result, ensure};
 use bytes::Bytes;
@@ -29,12 +30,12 @@ enum PadState {
 
 /// Where a pad's buffers land: a codec importer, a subtitle track, or opaque data.
 ///
-/// Both payloads are large (a codec importer, a container producer), so each is boxed to keep the
-/// enum small.
+/// Every payload is large (a codec importer, a container producer, a track producer), so each is
+/// boxed to keep the enum small.
 enum Sink {
 	Media(Box<Media>),
 	Text(Box<Text>),
-	Opaque(moq_net::track::Producer),
+	Opaque(Box<moq_net::track::Producer>),
 }
 
 /// Keep finished rendition owners until a whole run's catalog has closed.
@@ -385,7 +386,7 @@ impl Pad {
 			let info = moq_net::track::Info::default()
 				.with_timescale(moq_net::Timescale::MICRO)
 				.with_max_age(std::time::Duration::from_secs(5));
-			self.track = Some(Sink::Opaque(request.accept(info)));
+			self.track = Some(Sink::Opaque(Box::new(request.accept(info))));
 			self.caps = Some(caps.clone());
 			return Ok(name);
 		}
@@ -1190,7 +1191,7 @@ mod tests {
 			Some(gst::ClockTime::ZERO),
 			None,
 			None,
-			Instant::now(),
+			moq_net::time::now(),
 		)
 		.unwrap();
 
@@ -1328,7 +1329,7 @@ mod tests {
 			.subscribe(moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(1)))
 			.await
 			.unwrap();
-		let anchor = Instant::now();
+		let anchor = moq_net::time::now();
 		for index in 0..17 {
 			assert_eq!(
 				pad.push_buffer(
@@ -1546,7 +1547,7 @@ mod tests {
 					Some(gst::ClockTime::from_mseconds(20 * index as u64)),
 					None,
 					None,
-					Instant::now(),
+					moq_net::time::now(),
 				)
 				.unwrap(),
 				PushOutcome::Published
@@ -1579,7 +1580,7 @@ mod tests {
 				Some(gst::ClockTime::ZERO),
 				None,
 				None,
-				Instant::now()
+				moq_net::time::now()
 			)
 			.unwrap(),
 			PushOutcome::NoSegment,
@@ -1591,7 +1592,7 @@ mod tests {
 				Some(gst::ClockTime::ZERO),
 				None,
 				None,
-				Instant::now()
+				moq_net::time::now()
 			)
 			.unwrap(),
 			PushOutcome::Dropped,
@@ -1653,7 +1654,7 @@ mod tests {
 				Some(gst::ClockTime::ZERO),
 				None,
 				None,
-				Instant::now(),
+				moq_net::time::now(),
 			)
 			.unwrap();
 
@@ -1687,7 +1688,7 @@ mod tests {
 			Some(gst::ClockTime::from_mseconds(40)),
 			None,
 			None,
-			Instant::now(),
+			moq_net::time::now(),
 		)
 		.unwrap();
 		pad.push_buffer(
@@ -1695,7 +1696,7 @@ mod tests {
 			Some(gst::ClockTime::from_mseconds(80)),
 			None,
 			None,
-			Instant::now(),
+			moq_net::time::now(),
 		)
 		.unwrap();
 
@@ -1755,7 +1756,7 @@ mod tests {
 			Some(gst::ClockTime::ZERO),
 			None,
 			None,
-			Instant::now(),
+			moq_net::time::now(),
 		)
 		.unwrap();
 
@@ -1825,7 +1826,7 @@ mod tests {
 			None,
 			None,
 			Some(gst::ClockTime::from_mseconds(25)),
-			Instant::now(),
+			moq_net::time::now(),
 		)
 		.unwrap();
 		assert!(!pad.is_failed(), "a missing PTS uses the supplied running time");
@@ -1860,8 +1861,14 @@ mod tests {
 		pad.observe_segment(time_segment());
 
 		assert!(
-			pad.push_buffer(Bytes::from_static(b"no timestamp"), None, None, None, Instant::now())
-				.is_err(),
+			pad.push_buffer(
+				Bytes::from_static(b"no timestamp"),
+				None,
+				None,
+				None,
+				moq_net::time::now()
+			)
+			.is_err(),
 			"the caller gets a hard error instead of a silent drop"
 		);
 	}
@@ -1884,7 +1891,7 @@ mod tests {
 			Some(gst::ClockTime::ZERO),
 			None,
 			None,
-			Instant::now(),
+			moq_net::time::now(),
 		)
 		.unwrap();
 	}
@@ -1920,7 +1927,13 @@ mod tests {
 			au.extend_from_slice(nal);
 		}
 		let outcome = pad
-			.push_buffer(Bytes::from(au), Some(gst::ClockTime::ZERO), None, None, Instant::now())
+			.push_buffer(
+				Bytes::from(au),
+				Some(gst::ClockTime::ZERO),
+				None,
+				None,
+				moq_net::time::now(),
+			)
 			.unwrap();
 		assert_eq!(outcome, PushOutcome::Published);
 		assert!(!pad.is_failed());
@@ -1941,7 +1954,7 @@ mod tests {
 			Some(gst::ClockTime::ZERO),
 			None,
 			None,
-			Instant::now(),
+			moq_net::time::now(),
 		)
 		.unwrap();
 
@@ -2144,7 +2157,7 @@ mod tests {
 			Some(gst::ClockTime::ZERO),
 			Some(gst::ClockTime::from_seconds(1)),
 			None,
-			Instant::now(),
+			moq_net::time::now(),
 		)
 		.unwrap();
 		assert!(pad.is_failed());
@@ -2171,7 +2184,7 @@ mod tests {
 				Some(gst::ClockTime::from_mseconds(start_ms)),
 				Some(gst::ClockTime::from_mseconds(dur_ms)),
 				None,
-				Instant::now(),
+				moq_net::time::now(),
 			)
 			.unwrap();
 		}
@@ -2195,7 +2208,7 @@ mod tests {
 			Some(gst::ClockTime::ZERO),
 			None,
 			None,
-			Instant::now(),
+			moq_net::time::now(),
 		)
 		.unwrap();
 		assert!(!pad.is_failed(), "a durationless cue drops the buffer, not the pad");
@@ -2253,7 +2266,7 @@ mod tests {
 		import.observe_caps(&broadcast, &catalog, producer_options(&h264_caps(), Some("import")));
 
 		// The third frame reaches the sink 100ms later than its running time says it should.
-		let anchor = Instant::now();
+		let anchor = moq_net::time::now();
 		for (pts, arrival) in [(0, 0), (33, 33), (66, 166)] {
 			for pad in [&mut encoder, &mut import] {
 				pad.observe_segment(time_segment());
@@ -2287,7 +2300,7 @@ mod tests {
 				&catalog,
 				producer_options(&h264_caps(), Some("encoder")).with_encoder(true),
 			);
-			let anchor = Instant::now();
+			let anchor = moq_net::time::now();
 			for (pts, arrival) in [(0, 0), (33, 33), (66, 166)] {
 				pad.observe_segment(time_segment());
 				assert_eq!(
@@ -2346,7 +2359,7 @@ mod tests {
 		pad.observe_caps(&broadcast, &catalog, producer_options(&h264_caps(), Some("video")));
 		pad.observe_segment(time_segment());
 		let delta = Bytes::from_static(&[0, 0, 0, 1, 0x61, 0xe0, 0x12, 0x34]);
-		let now = Instant::now();
+		let now = moq_net::time::now();
 		let push = |pad: &mut Pad, data: Bytes, pts: u64| {
 			pad.push_buffer(data, Some(gst::ClockTime::from_mseconds(pts)), None, None, now)
 				.unwrap()
@@ -2367,7 +2380,7 @@ mod tests {
 			let mut pad = Pad::new();
 			pad.observe_caps(&broadcast, &catalog, producer_options(&h264_caps(), Some("video")));
 			pad.observe_segment(time_segment());
-			let now = Instant::now();
+			let now = moq_net::time::now();
 			let push = |pad: &mut Pad, data: Bytes, pts: u64| {
 				pad.push_buffer(data, Some(gst::ClockTime::from_mseconds(pts)), None, None, now)
 					.unwrap()
@@ -2396,7 +2409,7 @@ mod tests {
 		pad.observe_caps(&broadcast, &catalog, producer_options(&h264_caps(), Some("video")));
 		pad.observe_segment(time_segment());
 		let delta = Bytes::from_static(&[0, 0, 0, 1, 0x61, 0xe0, 0x12, 0x34]);
-		let now = Instant::now();
+		let now = moq_net::time::now();
 		let push = |pad: &mut Pad, data: Bytes, pts: u64| {
 			pad.push_buffer(data, Some(gst::ClockTime::from_mseconds(pts)), None, None, now)
 				.unwrap()
@@ -2423,7 +2436,7 @@ mod tests {
 		let keyframe = h264_keyframe_au();
 		let headers = keyframe.slice(..keyframe.len() - 9);
 		let delta = Bytes::from_static(&[0, 0, 0, 1, 0x61, 0xe0, 0x12, 0x34]);
-		let now = Instant::now();
+		let now = moq_net::time::now();
 		let push = |pad: &mut Pad, data: Bytes, pts: u64| {
 			pad.push_buffer(data, Some(gst::ClockTime::from_mseconds(pts)), None, None, now)
 				.unwrap()

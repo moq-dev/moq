@@ -77,14 +77,11 @@ have fixes on `main`: macOS tests (#5335), drill-sensitivity (#5338), loom
 
 ## Required
 
-- [Stitcher public relay smoke](/quest/m0/smoke-stitcher.md) - the first-party deployment is tested under an anonymous namespace and only on transports it serves
-
 - [qmux 0.5 upstream](/quest/m0/qmux-credit-backport-upstream.md) - old-release publication, independent of the main fix
 
 - [qmux release backport](/quest/m0/qmux-credit-backport.md) - adopt the 0.5 fix independently of the next breaking cut
 
-- [Lite SETUP backport](/quest/m0/lite-setup-backport.md) - `release` closes a moq-lite session on a repeated SETUP parameter or a second Setup Stream, in a later 0.14.x patch (#5521)
-- [Kotlin wrapper POM release](/quest/m0/kt-ffi-pom.md) - `dev.moq:moq` 0.5.2 ships from `release`, its POMs naming moq-ffi at `[0.4.3,0.5)`
+- [A discarded Retry no longer blocks the genuine one](/quest/m0/retry-after-invalid-retry.md) - one injected or corrupted Retry no longer kills a handshake, on `main` and then `release`
 
 - [CI cost and latency](/quest/m0/ci/README.md) - PRs stop queueing behind hosted runner caps: macOS and Windows move to the merge queue, caches move to R2, and setup is skipped when no work is selected
 - [Draft-22 media on 0.17](/quest/m0/release-22/README.md) - a 0.17.x with the LOCATION_FILTER and FIRST_OBJECT fixes and moq-noq 1.3.5, then a patch with draft-20+ FETCH and the unset-clock and quiet-edge fixes

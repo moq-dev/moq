@@ -4,8 +4,10 @@
 //! per worker, each with its own ring, its own `SO_REUSEPORT` socket steered
 //! by connection id ([`moq_sock::shard`]), and its own
 //! [`moq_uring::quic::Endpoint`] serving browsers (WebTransport over `h3`)
-//! and native peers (raw QUIC, moq-lite ALPNs) alike. Sessions are moq-lite
-//! only.
+//! and native peers (raw QUIC) alike, on every version the listener is
+//! configured for. moq-lite on its own ALPN runs unboxed on the worker;
+//! moq-transport and the SETUP-negotiated versions run through
+//! [`moq_uring::transport::Local`], since their drivers need `Send`.
 //!
 //! The split of work mirrors the relay's topology: a worker owns everything
 //! transport-shaped (the handshake, the session's protocol machine), while
@@ -21,8 +23,9 @@ use std::task::Poll;
 
 use anyhow::Context as _;
 use futures::FutureExt as _;
+use tracing::Instrument;
 
-use crate::{auth, cluster, refusals::Refusal, shutdown};
+use crate::{auth, cluster, connection::Lifecycle, shutdown};
 
 /// A stop signal a worker parks on, wakeable from the shared runtime.
 #[derive(Default)]
@@ -64,8 +67,8 @@ struct Serve {
 	/// The shared runtime, which owns authentication (the auth API's HTTP
 	/// client needs its reactor) and session supervision.
 	tokio: tokio::runtime::Handle,
-	/// The moq-lite ALPNs this listener speaks, for the WebTransport
-	/// subprotocol pick.
+	/// The moq ALPNs this listener speaks, for the WebTransport subprotocol
+	/// pick.
 	alpns: Arc<Vec<String>>,
 	/// The negotiated-version restriction, when the operator set one.
 	versions: moq_net::Versions,
@@ -128,6 +131,7 @@ impl Workers {
 						&& listen.tls.generate.is_empty()
 						&& listen.tls.root.is_empty()
 						&& listen.tls.identity.is_none()
+						&& listen.tls.resolver.is_none()
 						&& listen.tls.peers.is_none(),
 					"a shared TLS policy cannot be combined with listen.tls settings"
 				);
@@ -169,23 +173,10 @@ impl Workers {
 		// The group owns the reuseport invariants: it locks the port against a
 		// concurrently-constructing same-UID group (the bind probe covers one
 		// that already holds it), refuses a size the steering filter could not
-		// address, and hands out members in the order the kernel numbers them
-		// by.
-		let mut forming = moq_sock::shard::Group::acquire(requested, config.count)
-			.with_context(|| format!("failed to take the reuseport group on {requested}"))?;
-		let count = forming.count();
-
-		let mut claims = Vec::with_capacity(count as usize);
-		while let Some(member) = forming.member() {
-			let shard = member.shard();
-			let claim = member
-				.bind()
-				.with_context(|| format!("failed to bind worker {} on {}", shard.index(), forming.addr()))?;
-			claims.push(claim);
-		}
-		let mut group = forming
-			.complete(claims)
-			.context("failed to complete the reuseport group")?;
+		// address, and binds members in the order the kernel numbers them by.
+		let mut group = moq_sock::shard::bind(requested, config.count)
+			.with_context(|| format!("failed to bind the reuseport group on {requested}"))?;
+		let count = group.count();
 		let mut members = Vec::with_capacity(count as usize);
 		while let Some(member) = group.member().context("failed to clone a reuseport member")? {
 			members.push(member);
@@ -193,39 +184,14 @@ impl Workers {
 		// The requested address, with an ephemeral port resolved.
 		let addr = group.addr();
 
-		// The moq-lite ALPNs this listener speaks: the operator's version
-		// restriction when one is set, minus anything that is not lite (the
-		// io_uring path runs unboxed lite machines only). `h3` rides along
-		// for browsers, which negotiate the moq version as a WebTransport
-		// subprotocol instead.
+		// Every configured version's ALPN, as the tokio listener advertises.
+		// `h3` rides along for browsers, which negotiate the moq version as a
+		// WebTransport subprotocol instead.
 		let versions: moq_net::Versions = match listen.version.is_empty() {
 			true => Default::default(),
 			false => listen.version.clone().into(),
 		};
-		let alpns: Vec<String> = versions
-			.iter()
-			.filter(|version| version.is_lite())
-			.map(|version| version.alpn().to_string())
-			.collect();
-		if alpns.is_empty() {
-			anyhow::bail!("io_uring workers speak moq-lite only, and the version restriction leaves none");
-		}
-		// lite 01/02 have no ALPN of their own: they negotiate over the shared
-		// `moql` one through the bidi SETUP exchange, which
-		// `accept_request_lite` does not implement. The default set carries
-		// them and simply does not advertise them, like the moq-transport
-		// versions below; asking for one *by name* is the case that would
-		// start cleanly and then fail every handshake.
-		if !listen.version.is_empty()
-			&& let Some(version) = versions.iter().find(|version| version.uses_setup_negotiation())
-		{
-			anyhow::bail!("io_uring workers cannot serve {version:?}, which negotiates its version in the SETUP");
-		}
-		if versions.iter().any(|version| !version.is_lite()) {
-			tracing::warn!(
-				"io_uring workers speak moq-lite only; the configured moq-transport versions are not served"
-			);
-		}
+		let alpns: Vec<String> = versions.alpns().into_iter().map(str::to_owned).collect();
 
 		let alpn = alpns
 			.iter()
@@ -435,12 +401,11 @@ fn transport(quic: &moq_tokio::quic::Resolved) -> anyhow::Result<moq_uring::quic
 	transport.idle_timeout = quic.idle_timeout;
 	transport.max_streams = quic.max_streams;
 	transport.keep_alive = quic.keep_alive;
-	// Unset stays `None`, so the worker keeps its own credits. A set window
-	// has to land here: dropping it would leave the operator believing a
-	// limit that the workers are not running.
-	transport.receive_window = quic.receive_window;
-	transport.stream_receive_window = quic.stream_receive_window;
-	transport.send_window = quic.send_window;
+	// `[quic]` resolves every window, defaults included, so both runtimes run
+	// the same ones rather than each backend's own.
+	transport.receive_window = Some(quic.receive_window);
+	transport.stream_receive_window = Some(quic.stream_receive_window);
+	transport.send_window = Some(quic.send_window);
 	transport.congestion = match quic.congestion_control {
 		Some(moq_tokio::quic::CongestionControl::Loss) => moq_uring::quic::Congestion::Loss,
 		// Unset means the backend's own default, and live media wants a steady
@@ -569,12 +534,16 @@ fn serve_worker(spawn: Spawn) -> bool {
 					let id = serve.cluster.next_connection_id();
 					let conn_handle = accept_handle.clone();
 					let serve = serve.clone();
-					let connection = async move {
-						if let Err(err) = serve_connection(conn_handle, conn, id, serve).await {
-							tracing::warn!(id, %err, "connection closed");
-						}
-					};
-					accept_handle.spawn(moq_tokio::panic::isolate(connection).map(drop));
+					let lifecycle =
+						Lifecycle::new(serve.cluster.clone(), serve.auth.clone(), id, Some(conn.remote_addr()))
+							.with_shutdown(serve.shutdown.clone())
+							.with_sessions(serve.sessions.clone());
+					accept_handle.spawn(async move {
+						let shared = serve.tokio.clone();
+						lifecycle
+							.start(&shared, serve_connection(conn_handle, conn, serve, &lifecycle))
+							.await;
+					});
 				}
 				Err(err) => {
 					let _ = accept_failures
@@ -631,14 +600,14 @@ impl Deadline {
 	}
 }
 
-/// Serve one accepted connection on its worker: handshake and session start
-/// here; authentication and supervision on the shared runtime.
+/// Start one accepted connection on its worker: the handshakes here, then
+/// [`serve_request`].
 async fn serve_connection(
 	handle: moq_uring::Handle,
 	conn: moq_uring::quic::Connection,
-	id: u64,
 	serve: Serve,
-) -> anyhow::Result<()> {
+	lifecycle: &Lifecycle,
+) -> anyhow::Result<Supervision> {
 	use web_transport_trait::poll::Session as _;
 
 	// The endpoint started this deadline at the connection's first packet and
@@ -660,11 +629,6 @@ async fn serve_connection(
 
 	// Browsers speak WebTransport; everyone else raw QUIC. The moq version
 	// rides the ALPN for raw QUIC and the WebTransport subprotocol for `h3`.
-	// A browser offering no subprotocol we speak is refused with
-	// `Error::Version` rather than falling back to the pre-lite-05 bidi SETUP
-	// the tokio listener still accepts: that path is moq-transport-shaped, and
-	// reaching it would drag the thread-affinity bounds `accept_request_lite`
-	// exists to avoid back onto this transport.
 	// The negotiated moq protocol: the WebTransport sub-protocol for `h3`, else the ALPN.
 	let mut alpn = conn.protocol().map(str::to_owned);
 	let (transport, url) = match conn.protocol() {
@@ -694,18 +658,88 @@ async fn serve_connection(
 	};
 
 	deadline.close = Some(transport.clone());
+	let conn = transport.clone();
 	let server = moq_net::Server::new().with_versions(serve.versions.clone());
 	let binding = match url {
 		Some(_) => moq_net::transport::Binding::Uri,
 		None => moq_net::transport::Binding::InBand,
 	};
-	let request = deadline
-		.bound(server.accept_request_lite(
-			std::time::Instant::now(),
-			moq_uring::transport::Session::new(transport, binding),
-		))
-		.await
-		.context("moq handshake failed")?;
+	let session = moq_uring::transport::Session::new(transport, binding);
+	let now = moq_net::time::now();
+	// moq-lite on its own ALPN runs unboxed on this worker. Everything else
+	// (moq-transport, and the versions that negotiate in a bidi SETUP, which a
+	// browser offering no subprotocol falls back to) boxes its futures with a
+	// native `Send` bound, which only a `Local` session meets.
+	let unboxed = alpn
+		.as_deref()
+		.and_then(moq_net::Version::from_alpn)
+		.is_some_and(|version| version.is_lite());
+	let mut accepted = Accepted {
+		handle,
+		conn,
+		deadline,
+		serve,
+		remote,
+		sni,
+		identity,
+		alpn,
+		url,
+	};
+	match unboxed {
+		true => {
+			let request = accepted
+				.deadline
+				.bound(server.accept_request_lite(now, session))
+				.await
+				.context("moq handshake failed")?;
+			serve_request(accepted, request, lifecycle).await
+		}
+		false => {
+			let request = accepted
+				.deadline
+				.bound(server.accept_request(now, moq_uring::transport::Local::new(session)))
+				.await
+				.context("moq handshake failed")?;
+			serve_request(accepted, request, lifecycle).await
+		}
+	}
+}
+
+/// A connection past its transport handshake, with the facts read off it
+/// before the moq handshake consumed it.
+struct Accepted {
+	handle: moq_uring::Handle,
+	conn: moq_uring::quic::web::Session,
+	deadline: Deadline,
+	serve: Serve,
+	remote: SocketAddr,
+	sni: Option<String>,
+	identity: Option<moq_tokio::tls::PeerIdentity>,
+	alpn: Option<String>,
+	url: Option<moq_uring::url::Url>,
+}
+
+/// A started session's supervision, boxed so both handshake paths return one type.
+type Supervision = futures::future::BoxFuture<'static, anyhow::Result<()>>;
+
+/// Authenticate on the shared runtime, then start the session on the worker.
+/// Returns the session's supervision, which runs on the shared runtime too.
+async fn serve_request<S: moq_net::transport::poll::Session>(
+	accepted: Accepted,
+	request: moq_net::server::Handshake<S>,
+	lifecycle: &Lifecycle,
+) -> anyhow::Result<Supervision> {
+	let Accepted {
+		handle,
+		conn,
+		mut deadline,
+		serve,
+		remote,
+		sni,
+		identity,
+		alpn,
+		url,
+	} = accepted;
 
 	// The path + `?jwt=` ride the URL for WebTransport and the SETUP for raw
 	// QUIC; either way the grant comes from the shared runtime, which owns the
@@ -740,75 +774,23 @@ async fn serve_connection(
 	auth_request.alpn = alpn.clone();
 	auth_request.role = request.role().and_then(crate::auth::role);
 	auth_request.tls = identity.as_ref().and_then(crate::auth::peer);
-	let mut registration = None;
-	let admitted = if cluster::Cluster::is_lan_path(&path) {
-		let lease = match cluster::Cluster::lan_credential(&path) {
-			Some(presented) => match serve.cluster.verify_lan_credential(presented) {
-				Some(true) => serve.auth.admit_fixed("/", serve.cluster.lan_peer_grant()),
-				Some(false) => {
-					serve.cluster.refusals.record(Refusal::Lan);
-					request.close(moq_net::Error::Unauthorized);
-					anyhow::bail!("LAN peer did not present this listener's membership proof");
+	let admission = lifecycle.clone();
+	let (admitted, registration) = match lifecycle
+		.shared(&serve.tokio, async move { admission.admit(auth_request).await })
+		.await?
+	{
+		Ok(admitted) => admitted,
+		Err(err) => {
+			// The status is what separates "your credential is bad" from "the auth
+			// server is down". Collapsing both into Unauthorized tells a client to
+			// stop reconnecting through an outage it could have waited out.
+			request.close(match err.status {
+				axum::http::StatusCode::UNAUTHORIZED | axum::http::StatusCode::FORBIDDEN => {
+					moq_net::Error::Unauthorized
 				}
-				None => {
-					serve.cluster.refusals.record(Refusal::Lan);
-					request.close(moq_net::Error::Unauthorized);
-					anyhow::bail!("/.cluster request refused: LAN discovery is not enabled");
-				}
-			},
-			None => {
-				serve.cluster.refusals.record(Refusal::Lan);
-				request.close(moq_net::Error::Unauthorized);
-				anyhow::bail!("LAN peer did not present a membership proof");
-			}
-		};
-		match serve.cluster.scope(lease, &auth_request) {
-			Ok(admitted) => admitted,
-			Err(err) => {
-				serve.cluster.refusals.record((&err).into());
-				request.close(moq_net::Error::Unauthorized);
-				return Err(err.into());
-			}
-		}
-	} else {
-		if identity.is_some() {
-			tracing::debug!(id, "client certificate verified; reported to the auth server");
-		}
-		let auth = serve.auth.clone();
-		let cluster = serve.cluster.clone();
-		let sessions = serve.sessions.clone();
-		let shutdown = serve.shutdown.clone();
-		match serve
-			.tokio
-			.spawn(async move {
-				// Abandoned at the drain deadline: worker teardown only detaches this task.
-				let admitted = shutdown
-					.admit(cluster.admit_session(&auth, auth_request.clone()))
-					.await?;
-				Ok::<_, crate::auth::Error>((admitted, sessions.register(auth_request)))
-			})
-			.await
-			.context("auth task failed")?
-		{
-			Ok((admitted, registered)) => {
-				registration = Some(registered);
-				admitted
-			}
-			Err(err) => {
-				serve.cluster.refusals.record((&err).into());
-				// The status is what separates "your credential is bad" from "the
-				// auth server is down". Collapsing both into Unauthorized tells a
-				// client to stop reconnecting through an outage it could have
-				// waited out.
-				let status = axum::http::StatusCode::from(&err);
-				request.close(match status {
-					axum::http::StatusCode::UNAUTHORIZED | axum::http::StatusCode::FORBIDDEN => {
-						moq_net::Error::Unauthorized
-					}
-					other => moq_net::Error::App(other.as_u16()),
-				});
-				return Err(anyhow::Error::new(err).context("authentication failed"));
-			}
+				other => moq_net::Error::App(other.as_u16()),
+			});
+			return Err(err.source);
 		}
 	};
 
@@ -819,7 +801,13 @@ async fn serve_connection(
 		stats,
 	} = admitted;
 
-	let mut request = request.with_stats(stats).with_limits(serve.cluster.limits(&lease));
+	// A peer's QUIC limits widen before SETUP OK, so its first requests see them.
+	if let Some(limits) = serve.cluster.quic_limits(&lease) {
+		conn.set_limits(limits)?;
+	}
+	let mut request = request
+		.with_stats(stats.clone())
+		.with_limits(serve.cluster.limits(&lease));
 	if let Some(subscriber) = subscriber {
 		request = request.with_publisher(subscriber);
 	}
@@ -827,7 +815,10 @@ async fn serve_connection(
 		request = request.with_subscriber(publisher);
 	}
 	let lease = lease.preparing(request.auth(), request.role())?;
-	let (session, driver) = deadline.bound(request.ok()).await?;
+	let (session, driver) = deadline
+		.bound(request.ok())
+		.await
+		.inspect_err(|err| crate::connection::setup_failed(&stats, err.downcast_ref()))?;
 	let driver_handle = handle.clone();
 	let driver = async move {
 		match driver_handle.run(driver).await {
@@ -835,24 +826,13 @@ async fn serve_connection(
 			err => tracing::debug!(%err, "session driver ended"),
 		}
 	};
-	handle.spawn(moq_tokio::panic::isolate(driver).map(drop));
+	handle.spawn(moq_tokio::panic::isolate(driver).in_current_span().map(drop));
 
-	tracing::info!(id, version = %session.version(), %transport, "negotiated");
-
-	// The session handle is Send + Sync however its transport is driven, so
-	// its lifecycle (credential expiry, GOAWAY drain) lives with the timers
-	// and the shutdown broadcast on the shared runtime.
-	let shutdown = serve.shutdown.clone();
-	serve.tokio.spawn(moq_tokio::panic::isolate(async move {
-		match crate::connection::supervise(session, lease, shutdown, registration).await {
-			// A lease or shutdown ending the session closes it too: logged, so every
-			// accepted connection pairs with its end.
-			Ok(()) => tracing::info!(id, "connection closed"),
-			Err(err) => tracing::warn!(id, %err, "connection closed"),
-		}
-	}));
-
-	Ok(())
+	// The driver stays on this worker. The session handle is Send + Sync, so its
+	// supervision (credential expiry, GOAWAY drain) runs with the timers and the
+	// shutdown broadcast on the shared runtime.
+	let lifecycle = lifecycle.clone();
+	Ok(async move { lifecycle.supervise(session, lease, registration, transport).await }.boxed())
 }
 
 #[cfg(test)]
@@ -878,14 +858,37 @@ mod tests {
 		assert_eq!(transport.send_window, Some(32 << 20));
 	}
 
-	/// Leaving the windows unset is the ordinary case. The worker then keeps
-	/// its own credits rather than inheriting another backend's default.
+	/// The same `[quic]` section runs the same windows on both runtimes, set or
+	/// left at the documented defaults: the tokio backends apply `Resolved`'s
+	/// windows as they are, and the workers must get exactly those.
 	#[test]
-	fn defaults_are_accepted() {
-		let transport = transport(&moq_tokio::quic::Config::default().resolve()).expect("defaults must build");
-		assert_eq!(transport.receive_window, None);
-		assert_eq!(transport.stream_receive_window, None);
-		assert_eq!(transport.send_window, None);
+	#[allow(clippy::field_reassign_with_default)]
+	fn windows_match_the_tokio_runtime() {
+		let mut set = moq_tokio::quic::Config::default();
+		set.receive_window = Some(128 << 20);
+		set.stream_receive_window = Some(8 << 20);
+		set.send_window = Some(32 << 20);
+
+		for (quic, expected) in [
+			(moq_tokio::quic::Config::default(), (64 << 20, 4 << 20, 16 << 20)),
+			(set, (128 << 20, 8 << 20, 32 << 20)),
+		] {
+			let resolved = quic.resolve();
+			let tokio = (
+				resolved.receive_window,
+				resolved.stream_receive_window,
+				resolved.send_window,
+			);
+			assert_eq!(tokio, expected);
+
+			let transport = transport(&resolved).expect("windows must be accepted");
+			let uring = (
+				transport.receive_window,
+				transport.stream_receive_window,
+				transport.send_window,
+			);
+			assert_eq!(uring, (Some(tokio.0), Some(tokio.1), Some(tokio.2)));
+		}
 	}
 
 	/// An auth decision still pending at the drain deadline is abandoned then,
