@@ -22,9 +22,8 @@ Where it stands:
 - Its only moq-net type is `moq_net::transport::Wire`, a pair of byte
   counters (`quic/driver/connection.rs`). `quic/backend.rs` also takes
   `moq_net::Versions` for ALPN lists, but sits above the driver.
-- moq-net is a required dependency of moq-tokio, and
-  `--no-default-features` does not compile (#2979), so a consumer cannot
-  take the driver alone.
+- moq-net is a required dependency of moq-tokio, even without the `quic`
+  feature that gates the driver, so a consumer cannot take the driver alone.
 - [Drop web-transport-trait](/quest/m2/drop-web-transport-trait.md) moves
   `quic::web` onto moq-net's `transport::poll` traits and asks whether
   `driver` and `web` should become private.
@@ -44,8 +43,9 @@ Options:
    the driver's logic, not just a dependency, so its tests leave the default
    merge gate, against `rs/AGENTS.md`.
 3. **Keep it in moq-tokio, with moq-net behind a default feature.** The
-   smallest move, but it needs #2979 fixed and keeps every moq-tokio
-   dependency in a driver-only build.
+   smallest move, but every moq-net use in moq-tokio needs a gate, and a
+   driver-only build keeps the `quic` feature's other dependencies, such as
+   reqwest and notify.
 
 In every option:
 
