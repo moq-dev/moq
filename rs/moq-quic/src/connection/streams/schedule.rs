@@ -291,11 +291,13 @@ impl<K: Copy, D> Schedule<K, D> {
     }
 
     /// Create a domain, sharing bytes equally with every other domain.
+    #[cfg(test)]
     pub(super) fn open_domain(&mut self) -> usize {
         self.domains.insert(Domain::new())
     }
 
     /// Release a domain; it is freed once its last group is.
+    #[cfg(test)]
     pub(super) fn close_domain(&mut self, domain: usize) {
         assert_ne!(domain, DEFAULT_DOMAIN, "the default domain is never closed");
         self.domains[domain].closed = true;

@@ -51,7 +51,6 @@ lands before the cut.
 - [Release builds](/quest/m0/release-link.md) - package artifacts can be built
 - [qmux credit](/quest/m0/qmux-credit.md) - dropped/stopped streams return credit and close is delivered
 
-- [Per-package MIGRATE.md](/quest/m1/migrate.md) - every published package documents how to migrate each breaking change, and breaking PRs add their entry
 - [moq-net follows announced instances](/quest/m1/net-announced-follow.md) - the Rust equivalent of JS `request(path, { announced: true })`, replacing the follow loops in moq-ffi and moq-c
 - [Sink restart follow](/quest/m1/sink-restart-follow.md) - moq-cli's server and push sinks follow an epochless `Restart` where their output can mark it, and fail loud otherwise
 - [OBS restart follow](/quest/m1/obs-restart-follow.md) - the OBS source keeps playing across a GOAWAY drain or a publisher replacement
@@ -62,6 +61,7 @@ lands before the cut.
 - [Finalize moq-lite-07](/quest/m1/lite07-finalize.md) - when the maintainer cuts it, lite-07 negotiates as `moq-lite-07` and the next release ships it
 - [moq-transport passthrough](/quest/m1/ietf-extension/README.md) - object IDs, properties, end status, datagram objects, and unknown track properties survive moq-transport -> moq-relay (and a relay cluster) -> moq-transport; moxygen's moq-test sections 1-7 pass nightly, except cases that use a subgroup other than 0
 - [Refresh](/quest/m1/refresh/README.md) - a join asks for a fresh group once the current group's deltas exceed a publisher-advertised byte ratio, at every hop; replaces `Demand::used`/`unused` and moq-json's `delta_ratio`
+- [Compressed tracks](/quest/m1/compress/README.md) - a track flagged `compress` is DEFLATEd per group by moq-net, forwarded compressed, and inflated once on the relay for peers that cannot signal it; `catalog.json.z` and moq-flate go away
 - [Moxygen minimal interop](/quest/m1/smoke-moxygen.md) - waiting on Moxygen to send a registered filter type, then the smoke lane stops hiding its failure
 - [Claim answer epochs](/quest/m1/claim-answer-epochs.md) - a claim answers each output by publishing it at its exact path under its own epoch, so a restarted output never reaches a returning reader as the old one's cache
 - [FFI shape](/quest/m1/ffi-shape/README.md) - the bindings mirror Rust's layers: net at the root, then media, json, flate, audio, and video namespaces built from the handle below
@@ -73,6 +73,7 @@ lands before the cut.
 - [Lazy discovery](/quest/m1/lazy-discovery/README.md) - a `consume` session requests announcements only for prefixes the origin is watching, in JS then Rust; `follow`, `broadcasts`, and the `discovery` option go away
 - [A spinning loop fails a sim test](/quest/m1/spinning-loops.md) - a sim test names any loop that holds a task poll too long, and each one yields through a budget
 - [Data consumer timestamps](/quest/m1/data-consumer-timestamps.md) - json and binary consumers return each value's timestamp, in Rust and every binding; snapshots add `latest()` beside an in-order `next()`
+- [Exact timestamps in every binding](/quest/m1/binding-timestamps.md) - bindings carry `{value, scale}` timestamps instead of lossy microseconds
 - [JSON window timestamps](/quest/m1/json-window-timestamps.md) - Rust and JS window consumers return each event's frame timestamp like the snapshot and stream consumers
 - [JavaScript FETCH](/quest/m1/js-fetch.md) - browser publishers answer IETF FETCH through the JS ranges request surface
 - [IETF fill timeout](/quest/m1/ietf-fill-timeout.md) - native FILL_TIMEOUT bounds upstream waiting on drafts 18-22, alongside local content-age enforcement
@@ -81,7 +82,7 @@ lands before the cut.
 - [JSON duplicate keys](/quest/m1/json-duplicate-keys.md) - Rust and JS JSON decoders refuse duplicate keys in every frame kind
 - [Catalog too new](/quest/m1/catalog-unsupported.md) - `@moq/watch` reports a distinct status when its player cannot read the catalog version
 - [One hang catalog consumer](/quest/m1/catalog-consumer-fold.md) - `moq-mux` reads hang catalogs through `hang`'s consumer
-- [Archive](/quest/m1/archive/README.md) - record selected tracks to any object_store and replay them over FETCH or derived HLS; preserve published format boundaries while completing replay and DVR correctness
+- [Broadcast archives](/quest/m1/archive/README.md) - SUBSCRIBE_ALL records every track under a prefix to any object_store, a host serves a stored broadcast back, and the catalog drops its archive pointer for an opt-in `hls` field
 - [In-band auth](/quest/m1/auth/README.md) - a session tells its peer what it may publish and subscribe to, unions tokens presented in band, and fails loud on an out-of-scope publish
 - [IETF epochs](/quest/m1/ietf-epochs.md) - negotiate explicit broadcast identity on drafts 17-22, retaining unchanged paths and epochless clients on updated relays
 - [Announcement takeover](/quest/m1/announce-takeover.md) - a new independent route explicitly continues instances served through its predecessor, with shared Rust/JS semantics and lite-07 wire

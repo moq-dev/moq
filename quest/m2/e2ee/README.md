@@ -76,3 +76,4 @@ Decided with the maintainer on 2026-10-17: physical names are a one-way hash, so
 
 - [archive](/quest/m1/archive/README.md) - protected broadcasts are deliberately outside recording and replay formats
 - [Same-epoch importers](/quest/m2/hop-aligned-import.md) - the shared-epoch redundancy an encrypting publisher refuses
+- [Wrapper seam over moq-net](/quest/m2/net-wrap-trait.md) - whether a moq-net trait replaces the bridge the e2ee mux path uses

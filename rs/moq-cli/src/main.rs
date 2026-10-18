@@ -19,6 +19,7 @@ mod play;
 mod publish;
 mod rtc;
 mod rtmp;
+mod rtsp;
 mod srt;
 mod subscribe;
 #[cfg(test)]
@@ -749,6 +750,9 @@ fn spawn_import(
 				} else if let Some(url) = srt.connect {
 					tasks.spawn(srt::connect_import(target(name), url, srt.latency.into_std(), program));
 				}
+			}
+			ImportSource::Rtsp(rtsp) => {
+				tasks.spawn(rtsp::connect_import(target(name), rtsp.connect));
 			}
 			ImportSource::Rtc(rtc) => {
 				if let Some(addr) = rtc.listen {
