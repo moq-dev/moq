@@ -5473,7 +5473,7 @@ mod tests {
 		use crate::lite::test_transport::ScriptedSession;
 		use crate::transport::poll::Session as _;
 		let mut session = ScriptedSession::eof(responses);
-		let (_, recv) = session.open_bi().await.unwrap();
+		let (_, recv) = session.open_bi(Default::default()).await.unwrap();
 		let mut reader = Reader::new(recv, Version::Draft19);
 		let result =
 			Subscriber::<ScriptedSession>::read_publish_done(&mut reader, Version::Draft19, &AtomicU64::new(0)).await;
@@ -5505,7 +5505,7 @@ mod tests {
 			.unwrap();
 
 		let mut session = ScriptedSession::new(wire);
-		let (_, recv) = session.open_bi().await.unwrap();
+		let (_, recv) = session.open_bi(Default::default()).await.unwrap();
 		let mut reader = Reader::new(recv, VERSION);
 		let result = decode_fetch_object(&mut reader, VERSION, true)
 			.now_or_never()
@@ -11167,7 +11167,7 @@ mod stitch_tests {
 		session: &ScriptedSession,
 	) -> Reader<<ScriptedSession as crate::transport::poll::Session>::RecvStream, Version> {
 		let mut session = session.clone();
-		let (_, recv) = session.open_bi().await.unwrap();
+		let (_, recv) = session.open_bi(Default::default()).await.unwrap();
 		Reader::new(recv, Version::Draft18)
 	}
 
@@ -11280,7 +11280,7 @@ mod stitch_tests {
 		/// A reader over the next scripted stream, standing in for one the peer opened.
 		async fn stream(&self) -> Reader<<ScriptedSession as crate::transport::poll::Session>::RecvStream, Version> {
 			let mut session = self.session.clone();
-			let (_, recv) = session.open_bi().await.unwrap();
+			let (_, recv) = session.open_bi(Default::default()).await.unwrap();
 			Reader::new(recv, VERSION)
 		}
 	}
@@ -13545,7 +13545,7 @@ mod stitch_tests {
 				tasks.0.clone(),
 				Default::default(),
 			);
-			let (_, recv) = session.open_bi().await.unwrap();
+			let (_, recv) = session.open_bi(Default::default()).await.unwrap();
 			let track = track::Producer::new(
 				std::sync::Arc::new(crate::broadcast::Info::default()),
 				"video",
@@ -14094,7 +14094,7 @@ mod joining_fetch_tests {
 			}
 			w.bytes(b"x").unwrap();
 			let data = ScriptedSession::new(objects);
-			let (_, recv) = data.clone().open_bi().await.unwrap();
+			let (_, recv) = data.clone().open_bi(Default::default()).await.unwrap();
 			let mut reader = Reader::new(recv, version);
 			let mut receiving = run.subscriber.clone();
 			let mut fill = Box::pin(receiving.recv_fill(&mut reader));
@@ -14248,7 +14248,7 @@ mod joining_fetch_tests {
 					.unwrap();
 				objects.push(b'x');
 				let data = ScriptedSession::new(objects);
-				let (_, recv) = data.clone().open_bi().await.unwrap();
+				let (_, recv) = data.clone().open_bi(Default::default()).await.unwrap();
 				let mut reader = Reader::new(recv, version);
 				let mut receiving = subscriber.clone();
 				let mut fill = Box::pin(receiving.recv_group_fetch(&mut reader, slot.clone()));
@@ -14596,7 +14596,7 @@ mod joining_fetch_tests {
 		settle().await;
 
 		// The fetch stream, as the peer would open it.
-		let (_, recv) = session.clone().open_bi().await.unwrap();
+		let (_, recv) = session.clone().open_bi(Default::default()).await.unwrap();
 		let mut stream = Reader::new(recv, version);
 		subscriber.clone().recv_fill(&mut stream).await.expect("group fetch");
 		serving.await.expect("run_group_fetch");

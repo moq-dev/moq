@@ -43,7 +43,7 @@ pub type Rank = (Option<usize>, i64);
 #[derive(Clone, Default)]
 pub struct Log {
 	pub datagrams: Arc<Mutex<Vec<bytes::Bytes>>>,
-	/// The send group and order each datagram was sent with, beside [`Self::datagrams`].
+	/// The send group and priority each datagram was sent with, beside [`Self::datagrams`].
 	datagram_ranks: Arc<Mutex<Vec<Rank>>>,
 	pub writes: Arc<Mutex<Vec<u8>>>,
 	pub resets: Arc<Mutex<Vec<u32>>>,
@@ -130,17 +130,17 @@ impl Log {
 		self.orders.lock().unwrap().clone()
 	}
 
-	/// The send group and order of every datagram, as (group, order) in call order.
+	/// The send group and priority of every datagram, as (group, priority) in call order.
 	pub fn datagram_ranks(&self) -> Vec<Rank> {
 		self.datagram_ranks.lock().unwrap().clone()
 	}
 
-	fn record_datagram(&self, payload: bytes::Bytes, group: Option<&SinkGroup>, order: i64) {
+	fn record_datagram(&self, payload: bytes::Bytes, options: poll::SendOptions<'_, SinkGroup>) {
 		self.datagrams.lock().unwrap().push(payload);
 		self.datagram_ranks
 			.lock()
 			.unwrap()
-			.push((group.map(|group| group.id), order));
+			.push((options.group.map(|group| group.id), options.priority));
 	}
 
 	/// The session-level closes, as (code, reason). A list rather than a last-value so
@@ -217,6 +217,19 @@ impl poll::SendGroup for SinkGroup {
 }
 
 impl SinkSend {
+	/// Schedule a stream as it opens, logging only what differs from a fresh stream's
+	/// ungrouped priority 0, as the setters would.
+	fn opened(mut self, options: poll::SendOptions<'_, SinkGroup>) -> Self {
+		use poll::SendStream as _;
+		if let Some(group) = options.group {
+			self.set_group(group);
+		}
+		if options.group.is_some() || options.priority != 0 {
+			self.set_priority(options.priority);
+		}
+		self
+	}
+
 	pub fn new(log: Log) -> Self {
 		Self {
 			prefix: 0,
@@ -445,13 +458,24 @@ impl poll::Session for DeadStreamSession {
 		}
 	}
 
-	fn poll_open_bi(&mut self, _cx: &mut Context<'_>) -> Poll<Result<poll::BiStreams<Self>, Self::Error>> {
+	fn poll_open_bi(
+		&mut self,
+		_cx: &mut Context<'_>,
+		options: poll::SendOptions<'_, SinkGroup>,
+	) -> Poll<Result<poll::BiStreams<Self>, Self::Error>> {
 		self.log.bi_opens.fetch_add(1, Ordering::Relaxed);
-		Poll::Ready(Ok((SinkSend::new(self.log.clone()), DeadRecv(self.reset))))
+		Poll::Ready(Ok((
+			SinkSend::new(self.log.clone()).opened(options),
+			DeadRecv(self.reset),
+		)))
 	}
 
-	fn poll_open_uni(&mut self, _cx: &mut Context<'_>) -> Poll<Result<Self::SendStream, Self::Error>> {
-		Poll::Ready(Ok(SinkSend::new(self.log.clone())))
+	fn poll_open_uni(
+		&mut self,
+		_cx: &mut Context<'_>,
+		options: poll::SendOptions<'_, SinkGroup>,
+	) -> Poll<Result<Self::SendStream, Self::Error>> {
+		Poll::Ready(Ok(SinkSend::new(self.log.clone()).opened(options)))
 	}
 
 	fn send_group(&mut self, _: i64) -> Option<SinkGroup> {
@@ -461,10 +485,9 @@ impl poll::Session for DeadStreamSession {
 	fn send_datagram(
 		&mut self,
 		payload: bytes::Bytes,
-		group: Option<&SinkGroup>,
-		order: i64,
+		options: poll::SendOptions<'_, SinkGroup>,
 	) -> Result<(), Self::Error> {
-		self.log.record_datagram(payload, group, order);
+		self.log.record_datagram(payload, options);
 		Ok(())
 	}
 
@@ -641,18 +664,26 @@ impl poll::Session for SinkSession {
 		Poll::Ready(Ok((send, PendingRecv)))
 	}
 
-	fn poll_open_bi(&mut self, _cx: &mut Context<'_>) -> Poll<Result<poll::BiStreams<Self>, Self::Error>> {
+	fn poll_open_bi(
+		&mut self,
+		_cx: &mut Context<'_>,
+		options: poll::SendOptions<'_, SinkGroup>,
+	) -> Poll<Result<poll::BiStreams<Self>, Self::Error>> {
 		let Some(gate) = self.bi_gate.clone() else {
 			return Poll::Pending;
 		};
 		self.log.bi_opens.fetch_add(1, Ordering::Relaxed);
 
-		let mut send = SinkSend::gated(self.log.clone(), gate);
+		let mut send = SinkSend::gated(self.log.clone(), gate).opened(options);
 		send.prefix = self.bi_prefix;
 		Poll::Ready(Ok((send, PendingRecv)))
 	}
 
-	fn poll_open_uni(&mut self, cx: &mut Context<'_>) -> Poll<Result<Self::SendStream, Self::Error>> {
+	fn poll_open_uni(
+		&mut self,
+		cx: &mut Context<'_>,
+		options: poll::SendOptions<'_, SinkGroup>,
+	) -> Poll<Result<Self::SendStream, Self::Error>> {
 		if let Some(gate) = &self.uni_open_gate {
 			let waiter = self.uni_open_park.hold(cx);
 			match gate.poll(waiter, |open| (**open).then_some(()).map_or(Poll::Pending, Poll::Ready)) {
@@ -665,7 +696,7 @@ impl poll::Session for SinkSession {
 			None => SinkSend::new(self.log.clone()),
 		};
 		send.unacked_fin = self.unacked_fin;
-		Poll::Ready(Ok(send))
+		Poll::Ready(Ok(send.opened(options)))
 	}
 
 	fn send_group(&mut self, priority: i64) -> Option<SinkGroup> {
@@ -675,10 +706,9 @@ impl poll::Session for SinkSession {
 	fn send_datagram(
 		&mut self,
 		payload: bytes::Bytes,
-		group: Option<&SinkGroup>,
-		order: i64,
+		options: poll::SendOptions<'_, SinkGroup>,
 	) -> Result<(), Self::Error> {
-		self.log.record_datagram(payload, group, order);
+		self.log.record_datagram(payload, options);
 		Ok(())
 	}
 
@@ -965,7 +995,11 @@ impl poll::Session for ScriptedSession {
 		)))
 	}
 
-	fn poll_open_bi(&mut self, cx: &mut Context<'_>) -> Poll<Result<poll::BiStreams<Self>, Self::Error>> {
+	fn poll_open_bi(
+		&mut self,
+		cx: &mut Context<'_>,
+		options: poll::SendOptions<'_, SinkGroup>,
+	) -> Poll<Result<poll::BiStreams<Self>, Self::Error>> {
 		if let Some(gate) = self.open_gate.clone() {
 			let waiter = self.park.hold(cx);
 			// A closed gate reads as open: the test dropped the producer, so nothing is
@@ -983,7 +1017,7 @@ impl poll::Session for ScriptedSession {
 			Some(queue) => Arc::new(Mutex::new(queue.lock().unwrap().pop_front().unwrap_or_default())),
 			None => self.script.clone(),
 		};
-		let mut send = SinkSend::new(self.log.clone());
+		let mut send = SinkSend::new(self.log.clone()).opened(options);
 		send.unacked_fin = self.unacked_fin;
 		Poll::Ready(Ok((
 			send,
@@ -995,8 +1029,12 @@ impl poll::Session for ScriptedSession {
 		)))
 	}
 
-	fn poll_open_uni(&mut self, _cx: &mut Context<'_>) -> Poll<Result<Self::SendStream, Self::Error>> {
-		Poll::Ready(Ok(SinkSend::new(self.log.clone())))
+	fn poll_open_uni(
+		&mut self,
+		_cx: &mut Context<'_>,
+		options: poll::SendOptions<'_, SinkGroup>,
+	) -> Poll<Result<Self::SendStream, Self::Error>> {
+		Poll::Ready(Ok(SinkSend::new(self.log.clone()).opened(options)))
 	}
 
 	fn send_group(&mut self, _: i64) -> Option<SinkGroup> {
@@ -1006,10 +1044,9 @@ impl poll::Session for ScriptedSession {
 	fn send_datagram(
 		&mut self,
 		payload: bytes::Bytes,
-		group: Option<&SinkGroup>,
-		order: i64,
+		options: poll::SendOptions<'_, SinkGroup>,
 	) -> Result<(), Self::Error> {
-		self.log.record_datagram(payload, group, order);
+		self.log.record_datagram(payload, options);
 		Ok(())
 	}
 

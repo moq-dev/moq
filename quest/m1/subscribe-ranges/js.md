@@ -9,7 +9,7 @@ publisher serves requested ranges that are no longer in its live cache.
 
 ## Plan
 
-Mirror the Rust names.
+Mirror the Rust names, including `Time(pts)` ends and their refusal on an untimed track.
 
 Decided in the 2026-10-05 audit: the producer half of
 [JavaScript FETCH](/quest/m1/js-fetch.md) folds in here, so `@moq/net`'s

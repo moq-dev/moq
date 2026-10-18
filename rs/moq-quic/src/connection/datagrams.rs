@@ -4,7 +4,7 @@ use bytes::Bytes;
 use thiserror::Error;
 use tracing::{debug, trace};
 
-use super::{Connection, SendGroup};
+use super::{Connection, SendOptions};
 use crate::{
     TransportError,
     frame::{Datagram, FrameStruct},
@@ -16,28 +16,23 @@ pub struct Datagrams<'a> {
 }
 
 impl Datagrams<'_> {
-    /// Queue an unreliable, unordered datagram in `group` at `order`
+    /// Queue an unreliable datagram, scheduled by `options`
     ///
-    /// The datagram is scheduled like one of the group's streams at priority `order`: it waits
-    /// behind higher orders, goes ahead of a stream of equal order, and spends the group's
-    /// share of bytes. Without a group, it is ordered among the ungrouped streams, which go
-    /// before every group.
+    /// The datagram is scheduled like one of its group's streams at its priority: it waits
+    /// behind higher priorities, goes ahead of a stream of equal priority, and spends the
+    /// group's share of bytes. Without a group, it is ranked among the ungrouped streams, which
+    /// go before every group.
     ///
     /// Sending never blocks. While queued datagrams overflow
     /// [`TransportConfig::datagram_send_buffer_size`](crate::TransportConfig::datagram_send_buffer_size),
-    /// the domain holding the most datagram bytes drops the oldest datagram of its
-    /// lowest-priority group, and this datagram is dropped instead once it is the one to go.
+    /// the oldest datagram of the lowest-priority group is dropped, and this datagram is dropped
+    /// instead once it is the one to go.
     ///
-    /// Returns `Err` iff a `len`-byte datagram cannot currently be sent.
+    /// Returns `Err` iff `data` cannot currently be sent.
     ///
     /// # Panics
-    /// - when `group` was opened on another connection
-    pub fn send(
-        &mut self,
-        data: Bytes,
-        group: Option<&SendGroup>,
-        order: i64,
-    ) -> Result<(), SendDatagramError> {
+    /// - when `options.group` was opened on another connection
+    pub fn send(&mut self, data: Bytes, options: SendOptions<'_>) -> Result<(), SendDatagramError> {
         if self.conn.config.datagram_receive_buffer_size.is_none() {
             return Err(SendDatagramError::Disabled);
         }
@@ -49,11 +44,7 @@ impl Datagrams<'_> {
         if datagram.data.len() > max || datagram.size(true) > budget {
             return Err(SendDatagramError::TooLarge);
         }
-        if !self
-            .conn
-            .streams
-            .queue_datagram(datagram, group, order, budget)
-        {
+        if !self.conn.streams.queue_datagram(datagram, options, budget) {
             trace!("dropping outgoing datagram");
         }
         Ok(())
@@ -69,7 +60,7 @@ impl Datagrams<'_> {
             .drop_oversized_datagrams(max_datagram_size);
     }
 
-    /// Compute the maximum size of datagrams that may passed to `send_datagram`
+    /// Compute the maximum size of datagrams that may be passed to [`send`](Self::send)
     ///
     /// Returns `None` if datagrams are unsupported by the peer or disabled locally.
     ///
@@ -206,6 +197,7 @@ mod tests {
 
 /// Errors that can arise when sending a datagram
 #[derive(Debug, Error, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
+#[non_exhaustive]
 pub enum SendDatagramError {
     /// The peer does not support receiving datagrams
     #[error("datagrams not supported by peer")]

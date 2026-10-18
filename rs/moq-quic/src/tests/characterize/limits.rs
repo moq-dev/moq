@@ -6,7 +6,7 @@ use super::*;
 
 /// How many more uni streams the client can open right now, opening them all
 fn openable(pair: &mut Pair, ch: ConnectionHandle) -> Vec<StreamId> {
-    iter::from_fn(|| pair.client_streams(ch).open(Dir::Uni)).collect()
+    iter::from_fn(|| pair.client_streams(ch).open(Dir::Uni, Default::default())).collect()
 }
 
 /// Finishes each client stream and has the server read it to the end
@@ -77,7 +77,10 @@ fn max_concurrent_streams_lowered() {
 
 /// How many bytes a fresh client stream can write, up to `limit`
 fn writable(pair: &mut Pair, ch: ConnectionHandle, limit: usize) -> usize {
-    let s = pair.client_streams(ch).open(Dir::Uni).unwrap();
+    let s = pair
+        .client_streams(ch)
+        .open(Dir::Uni, Default::default())
+        .unwrap();
     pair.client_send(ch, s).write(&vec![0; limit]).unwrap_or(0)
 }
 
@@ -200,7 +203,10 @@ fn zero_rtt_window_raise(dir: Dir) {
     pair.server.set_server_config(Some(Arc::new(server(NEW))));
     let client_ch = pair.begin_connect(config);
     assert!(pair.client_conn_mut(client_ch).has_0rtt());
-    let s = pair.client_streams(client_ch).open(dir).unwrap();
+    let s = pair
+        .client_streams(client_ch)
+        .open(dir, Default::default())
+        .unwrap();
     let mut written = pair.client_send(client_ch, s).write(&[0; LEN]).unwrap();
     assert_eq!(written, OLD as usize);
 

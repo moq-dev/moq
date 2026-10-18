@@ -9,6 +9,11 @@ How to update your invocation and config for each breaking change, newest first.
 Those features pull in moq-video without its software H.264 fallback, so a host without a hardware codec cannot encode or decode H.264.
 Add the `openh264` feature, such as `cargo install moq-cli --features transcode,openh264`.
 
+### A fixed `--connect-bind` refuses a WAN cluster (#5674)
+
+`--connect` and `--cluster-connect` or `--cluster-connect-api` used to share one client; now each binds its own, so a fixed `--connect-bind` port with both stops startup.
+Use port 0, or drop `--connect`.
+
 ### `moq export ts --delay` defaults to 1 s and includes the send-ahead (#5553)
 
 The output trails a TS source by the delay instead of twice it.
