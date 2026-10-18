@@ -49,7 +49,8 @@ successful small burst is not proof of full path capacity.
 
 On a no-go, keep the baseline, record why, and leave padding as moq-quic's
 sender; the [viewer up-switch](/quest/m2/probe/viewer-upswitch.md) then
-requires padding instead of this.
+requires padding instead of this. Padding can't reach moq-transport drafts 14
+to 17, so sessions on those drafts would keep `Report`.
 
 ## Required
 
