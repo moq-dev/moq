@@ -84,6 +84,7 @@ Wire changes should be backwards compatible for any *published* drafts/versions.
 
 Before starting, `git fetch origin` and set the upstream to the base branch.
 Pass PR bodies to `gh` on stdin (`--body-file -`); never write to a directory other agents share.
+Keep scratch files in your worktree's `.scratch/`, not `target/`: build output may live outside the checkout and gets wiped.
 
 Use the Nix dev shell so tooling matches CI.
 direnv loads it automatically, but if not: `nix develop --command ...`.

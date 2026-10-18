@@ -17,7 +17,10 @@ fn pair(reset_stream_at: bool) -> Pair {
 
 /// Open a client stream that the server has accepted, with nothing acknowledged yet
 fn open(pair: &mut Pair, client_ch: ConnectionHandle, server_ch: ConnectionHandle) -> StreamId {
-    let s = pair.client_streams(client_ch).open(Dir::Uni).unwrap();
+    let s = pair
+        .client_streams(client_ch)
+        .open(Dir::Uni, Default::default())
+        .unwrap();
     pair.client_send(client_ch, s).write(b"header").unwrap();
     pair.drive();
     assert_eq!(pair.server_streams(server_ch).accept(Dir::Uni), Some(s));
@@ -110,7 +113,10 @@ fn already_acked() {
     let _guard = subscribe();
     let mut pair = pair(true);
     let (client_ch, _) = pair.connect();
-    let s = pair.client_streams(client_ch).open(Dir::Uni).unwrap();
+    let s = pair
+        .client_streams(client_ch)
+        .open(Dir::Uni, Default::default())
+        .unwrap();
     let empty = pair.client_send(client_ch, s).offset();
     assert_eq!(acked(&mut pair, client_ch, s, empty), Ok(true));
 

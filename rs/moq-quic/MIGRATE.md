@@ -4,7 +4,9 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### `StreamEvent::Acked`
+Each entry is a change from `quinn-proto`.
+
+### `StreamEvent::Acked` (#5817)
 
 `StreamEvent` gained `Acked { id, offset }`, reported when a send stream's acknowledged prefix reaches an offset that `SendStream::acked` was polled on.
 An exhaustive `match` needs an arm for it.
@@ -14,10 +16,38 @@ An exhaustive `match` needs an arm for it.
 StreamEvent::Acked { id, offset } => wake_ack_waiters(id, offset),
 ```
 
-### `Datagrams::send` takes a send group and order (#5770)
+### Streams and datagrams take `SendOptions` (#5770, #5872)
 
-`Datagrams::send(data, group, order)` replaces `send(data, drop)`; pass `None` for an ungrouped datagram.
-A full buffer drops the oldest datagram of the lowest-priority group, so `SendDatagramError::Blocked` and `Event::DatagramsUnblocked` are gone.
+`Streams::open` and `Datagrams::send` take a `SendOptions { group, priority }`,
+the send group from `Connection::send_groups` and the priority within it.
+`SendOptions::default()` is ungrouped at priority 0, where `open` used to start a stream.
+A datagram is scheduled with the streams instead of ahead of them, so `send` loses its
+`drop` flag: it never blocks, and a full `datagram_send_buffer_size` drops the oldest
+datagram of the lowest-priority group.
+
+```rust
+// Before
+let id = conn.streams().open(Dir::Uni).unwrap();
+conn.datagrams().send(data, true)?;
+
+// After
+let id = conn.streams().open(Dir::Uni, SendOptions::default()).unwrap();
+conn.datagrams().send(data, SendOptions { group: Some(&group), priority: 0 })?;
+```
+
+`SendDatagramError::Blocked` and `Event::DatagramsUnblocked` are gone, since sending
+never blocks, and `SendDatagramError` is `#[non_exhaustive]`.
+
+### `SendStream::set_priority` takes an `i64`
+
+`set_priority` and `priority` use `i64` instead of `i32`, the range of a send group's
+priority. Higher still goes first.
+
+### `fuzzing` module and `arbitrary` feature removed
+
+The `cfg(fuzzing)` `fuzzing` module and the `arbitrary` feature are gone. The fuzz
+targets run through the hidden `fuzz` module behind the `fuzz` feature; see
+[`fuzz/`](fuzz/README.md).
 
 ### `congestion::NewReno` removed
 

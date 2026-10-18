@@ -24,8 +24,13 @@ use tokio::sync::{
 use tracing::{Instrument, Span, debug_span};
 
 use crate::quic::driver::{
-    ConnectionEvent, Duration, Instant, VarInt, mutex::Mutex, recv_stream::RecvStream,
-    runtime::UdpSender, send_group::SendGroup, send_stream::SendStream, udp_transmit,
+    ConnectionEvent, Duration, Instant, VarInt,
+    mutex::Mutex,
+    recv_stream::RecvStream,
+    runtime::UdpSender,
+    send_group::{self, SendGroup, SendOptions},
+    send_stream::SendStream,
+    udp_transmit,
 };
 use moq_quic::{
     ConnectionError, ConnectionHandle, ConnectionStats, Dir, EndpointEvent, Side, StreamEvent,
@@ -321,26 +326,31 @@ impl Future for ConnectionDriver {
 pub struct Connection(ConnectionRef);
 
 impl Connection {
-    /// Initiate a new outgoing unidirectional stream.
+    /// Initiate a new outgoing unidirectional stream, scheduled by `options`.
     ///
     /// Streams are cheap and instantaneous to open unless blocked by flow control. As a
     /// consequence, the peer won't be notified that a stream has been opened until the stream is
     /// actually used.
-    pub fn open_uni(&self) -> OpenUni<'_> {
+    ///
+    /// # Panics
+    /// - when `options.group` belongs to another connection
+    pub fn open_uni<'a>(&'a self, options: SendOptions<'a>) -> OpenUni<'a> {
         OpenUni {
             conn: &self.0,
+            options,
             notify: self.0.shared.stream_budget_available[Dir::Uni as usize].notified(),
         }
     }
 
-    /// Open a send group at `priority`, for streams to join with [`SendStream::set_group`].
+    /// Open a send group at `priority`, for streams and datagrams to join with [`SendOptions`]
+    /// or [`SendStream::set_group`].
     ///
     /// [`SendStream::set_group`]: crate::quic::driver::SendStream::set_group
     pub fn send_group(&self, priority: i64) -> SendGroup {
         SendGroup::new(self.0.0.clone(), priority)
     }
 
-    /// Initiate a new outgoing bidirectional stream.
+    /// Initiate a new outgoing bidirectional stream, its sending half scheduled by `options`.
     ///
     /// Streams are cheap and instantaneous to open unless blocked by flow control. As a
     /// consequence, the peer won't be notified that a stream has been opened until the stream is
@@ -350,9 +360,13 @@ impl Connection {
     /// [`open_bi()`]: crate::quic::driver::Connection::open_bi
     /// [`SendStream`]: crate::quic::driver::SendStream
     /// [`RecvStream`]: crate::quic::driver::RecvStream
-    pub fn open_bi(&self) -> OpenBi<'_> {
+    ///
+    /// # Panics
+    /// - when `options.group` belongs to another connection
+    pub fn open_bi<'a>(&'a self, options: SendOptions<'a>) -> OpenBi<'a> {
         OpenBi {
             conn: &self.0,
+            options,
             notify: self.0.shared.stream_budget_available[Dir::Bi as usize].notified(),
         }
     }
@@ -508,41 +522,32 @@ impl Connection {
         }
     }
 
-    /// Transmit `data` as an unreliable, unordered application datagram in `group` at `order`
+    /// Transmit `data` as an unreliable application datagram, scheduled by `options`
     ///
     /// Application datagrams are a low-level primitive. They may be lost or delivered out of order,
     /// and `data` must both fit inside a single QUIC packet and be smaller than the maximum
     /// dictated by the peer.
     ///
-    /// The datagram is scheduled like one of the group's streams at priority `order`, or among
-    /// the ungrouped streams without a group. Sending never blocks: a full buffer drops the
-    /// oldest datagram of the lowest-priority group, see [`moq_quic::Datagrams::send`].
+    /// The datagram is scheduled like one of its group's streams at its priority, or among the
+    /// ungrouped streams without a group. Sending never blocks: a full buffer drops the oldest
+    /// datagram of the lowest-priority group, see [`moq_quic::Datagrams::send`].
+    ///
+    /// # Panics
+    /// - when `options.group` belongs to another connection
     pub fn send_datagram(
         &self,
         data: Bytes,
-        group: Option<&SendGroup>,
-        order: i64,
+        options: SendOptions<'_>,
     ) -> Result<(), SendDatagramError> {
         let conn = &mut *self.0.state.lock("send_datagram");
         if let Some(x) = &conn.error {
             return Err(SendDatagramError::ConnectionLost(x.clone()));
         }
-        use moq_quic::SendDatagramError::*;
-        match conn
-            .inner
+        conn.inner
             .datagrams()
-            .send(data, group.map(SendGroup::id), order)
-        {
-            Ok(()) => {
-                conn.wake();
-                Ok(())
-            }
-            Err(e) => Err(match e {
-                UnsupportedByPeer => SendDatagramError::UnsupportedByPeer,
-                Disabled => SendDatagramError::Disabled,
-                TooLarge => SendDatagramError::TooLarge,
-            }),
-        }
+            .send(data, send_group::to_quic(options))?;
+        conn.wake();
+        Ok(())
     }
 
     /// Compute the maximum size of datagrams that may be passed to [`send_datagram()`].
@@ -801,6 +806,7 @@ pin_project! {
     /// Future produced by [`Connection::open_uni`]
     pub struct OpenUni<'a> {
         conn: &'a ConnectionRef,
+        options: SendOptions<'a>,
         #[pin]
         notify: Notified<'a>,
     }
@@ -810,7 +816,13 @@ impl Future for OpenUni<'_> {
     type Output = Result<SendStream, ConnectionError>;
     fn poll(self: Pin<&mut Self>, ctx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.project();
-        let (conn, id, is_0rtt) = ready!(poll_open(ctx, this.conn, this.notify, Dir::Uni))?;
+        let (conn, id, is_0rtt) = ready!(poll_open(
+            ctx,
+            this.conn,
+            *this.options,
+            this.notify,
+            Dir::Uni
+        ))?;
         Poll::Ready(Ok(SendStream::new(conn, id, is_0rtt)))
     }
 }
@@ -819,6 +831,7 @@ pin_project! {
     /// Future produced by [`Connection::open_bi`]
     pub struct OpenBi<'a> {
         conn: &'a ConnectionRef,
+        options: SendOptions<'a>,
         #[pin]
         notify: Notified<'a>,
     }
@@ -828,7 +841,13 @@ impl Future for OpenBi<'_> {
     type Output = Result<(SendStream, RecvStream), ConnectionError>;
     fn poll(self: Pin<&mut Self>, ctx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.project();
-        let (conn, id, is_0rtt) = ready!(poll_open(ctx, this.conn, this.notify, Dir::Bi))?;
+        let (conn, id, is_0rtt) = ready!(poll_open(
+            ctx,
+            this.conn,
+            *this.options,
+            this.notify,
+            Dir::Bi
+        ))?;
 
         Poll::Ready(Ok((
             SendStream::new(conn.clone(), id, is_0rtt),
@@ -840,13 +859,18 @@ impl Future for OpenBi<'_> {
 fn poll_open<'a>(
     ctx: &mut Context<'_>,
     conn: &'a ConnectionRef,
+    options: SendOptions<'_>,
     mut notify: Pin<&mut Notified<'a>>,
     dir: Dir,
 ) -> Poll<Result<(ConnectionRef, StreamId, bool), ConnectionError>> {
     let mut state = conn.state.lock("poll_open");
     if let Some(e) = &state.error {
         return Poll::Ready(Err(e.clone()));
-    } else if let Some(id) = state.inner.streams().open(dir) {
+    } else if let Some(id) = state
+        .inner
+        .streams()
+        .open(dir, send_group::to_quic(options))
+    {
         let is_0rtt = state.inner.side().is_client() && state.inner.is_handshaking();
         drop(state); // Release the lock so clone can take it
         return Poll::Ready(Ok((conn.clone(), id, is_0rtt)));
@@ -1396,18 +1420,9 @@ fn wake_all_notify(wakers: &mut FxHashMap<StreamId, Arc<Notify>>) {
 #[derive(Debug, Error, Clone, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum SendDatagramError {
-    /// The peer does not support receiving datagram frames
-    #[error("datagrams not supported by peer")]
-    UnsupportedByPeer,
-    /// Datagram support is disabled locally
-    #[error("datagram support disabled")]
-    Disabled,
-    /// The datagram is larger than the connection can currently accommodate
-    ///
-    /// Indicates that the path MTU minus overhead or the limit advertised by the peer has been
-    /// exceeded.
-    #[error("datagram too large")]
-    TooLarge,
+    /// The connection refused the datagram.
+    #[error(transparent)]
+    Refused(#[from] moq_quic::SendDatagramError),
     /// The connection was lost
     #[error("connection lost")]
     ConnectionLost(#[from] ConnectionError),

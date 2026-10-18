@@ -42,10 +42,14 @@ impl<'a> Streams<'a> {
         Self { state, conn_state }
     }
 
-    /// Open a single stream if possible
+    /// Open a single stream if possible, its sending half scheduled by `options`
     ///
     /// Returns `None` if the streams in the given direction are currently exhausted.
-    pub fn open(&mut self, dir: Dir) -> Option<StreamId> {
+    ///
+    /// # Panics
+    /// - when `options.group` was opened on another connection
+    pub fn open(&mut self, dir: Dir, options: SendOptions<'_>) -> Option<StreamId> {
+        let group = options.group.map(|g| g.index(self.state.tag));
         if self.conn_state.is_closed() {
             return None;
         }
@@ -60,6 +64,21 @@ impl<'a> Streams<'a> {
         let id = StreamId::new(self.state.side, dir, self.state.next[dir as usize] - 1);
         self.state.insert_local(id);
         self.state.send_streams += 1;
+
+        // Send state is allocated on first use, so the default schedule needs none.
+        if group.is_some() || options.priority != 0 {
+            let max_send_data = self.state.max_send_data(id);
+            let stream = self
+                .state
+                .send
+                .get_mut(&id)
+                .unwrap()
+                .insert(Send::new(max_send_data));
+            stream.priority = options.priority;
+            self.state
+                .pending
+                .join(id, &mut stream.slot, group, stream.priority);
+        }
         Some(id)
     }
 
@@ -511,25 +530,35 @@ impl<'a> SendStream<'a> {
 
 /// Scheduling of outgoing streams between send groups
 ///
-/// A send group shares bytes with the other groups of its domain: a higher priority group
-/// preempts every lower one, and groups of equal priority get an equal share of bytes no
-/// matter how many streams each has queued. Domains share bytes equally whatever their
-/// groups' priorities. Streams outside any group go before all of it. A group's datagrams,
-/// from [`Datagrams::send`](crate::Datagrams::send), share its bytes in the same order.
+/// A higher priority group preempts every lower one, and groups of equal priority get an
+/// equal share of bytes no matter how many streams each has queued. Streams outside any group
+/// go before all of it. A group's datagrams, from [`Datagrams::send`](crate::Datagrams::send),
+/// share its bytes in the same order.
 pub struct SendGroups<'a> {
     pub(super) state: &'a mut StreamsState,
 }
 
 impl SendGroups<'_> {
-    /// Open a send group at `priority` in `domain`, or in the default domain
+    /// Open a send group at `priority`
+    pub fn open(&mut self, priority: i64) -> SendGroup {
+        SendGroup {
+            index: self.state.pending.open_group(priority, None),
+            tag: self.state.tag,
+        }
+    }
+
+    /// Open a send group at `priority` in `domain`
     ///
     /// # Panics
     /// - when `domain` was opened on another connection
-    pub fn open(&mut self, priority: i64, domain: Option<&SendDomain>) -> SendGroup {
+    #[cfg(test)]
+    pub(crate) fn open_in(&mut self, priority: i64, domain: &SendDomain) -> SendGroup {
         let tag = self.state.tag;
-        let domain = domain.map(|d| d.index(tag));
         SendGroup {
-            index: self.state.pending.open_group(priority, domain),
+            index: self
+                .state
+                .pending
+                .open_group(priority, Some(domain.index(tag))),
             tag,
         }
     }
@@ -563,7 +592,8 @@ impl SendGroups<'_> {
     }
 
     /// Open a domain, which gets an equal share of bytes with every other domain
-    pub fn open_domain(&mut self) -> SendDomain {
+    #[cfg(test)]
+    pub(crate) fn open_domain(&mut self) -> SendDomain {
         SendDomain {
             index: self.state.pending.open_domain(),
             tag: self.state.tag,
@@ -574,30 +604,30 @@ impl SendGroups<'_> {
     ///
     /// # Panics
     /// - when `domain` was opened on another connection
-    pub fn close_domain(&mut self, domain: SendDomain) {
+    #[cfg(test)]
+    pub(crate) fn close_domain(&mut self, domain: SendDomain) {
         let index = domain.index(self.state.tag);
         self.state.pending.close_domain(index);
     }
 }
 
 impl StreamsState {
-    /// Queue a datagram in `group` at `order`, within `budget` bytes of queued datagrams.
+    /// Queue a datagram scheduled by `options`, within `budget` bytes of queued datagrams.
     ///
     /// Returns whether it stayed queued rather than being evicted itself.
     ///
     /// # Panics
-    /// - when `group` was opened on another connection
+    /// - when `options.group` was opened on another connection
     pub(crate) fn queue_datagram(
         &mut self,
         datagram: frame::Datagram,
-        group: Option<&SendGroup>,
-        order: i64,
+        options: SendOptions<'_>,
         budget: usize,
     ) -> bool {
-        let group = group.map(|g| g.index(self.tag));
+        let group = options.group.map(|g| g.index(self.tag));
         let frame = datagram.size(true);
         self.pending
-            .push_datagram(group, order, datagram, frame, budget)
+            .push_datagram(group, options.priority, datagram, frame, budget)
     }
 
     /// Drop queued datagrams with a payload over `max_payload` bytes, returning whether any was.
@@ -621,6 +651,36 @@ impl StreamsState {
     }
 }
 
+/// How an outgoing stream or datagram is scheduled, like W3C WebTransport's send options
+///
+/// The default is ungrouped at priority 0. Generic so the drivers can carry their own group
+/// handle in the same shape.
+#[derive(Debug)]
+pub struct SendOptions<'a, G = SendGroup> {
+    /// The send group to join, or `None` for the ungrouped streams that go before every group
+    pub group: Option<&'a G>,
+    /// The priority within the group: higher goes first, and a datagram goes ahead of a
+    /// stream of equal priority
+    pub priority: i64,
+}
+
+impl<G> Default for SendOptions<'_, G> {
+    fn default() -> Self {
+        Self {
+            group: None,
+            priority: 0,
+        }
+    }
+}
+
+impl<G> Clone for SendOptions<'_, G> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<G> Copy for SendOptions<'_, G> {}
+
 /// A send group, from [`SendGroups::open`]
 ///
 /// Release it with [`SendGroups::close`] on the connection that opened it.
@@ -641,13 +701,15 @@ impl SendGroup {
 /// A domain of send groups, from [`SendGroups::open_domain`]
 ///
 /// Release it with [`SendGroups::close_domain`] on the connection that opened it.
+#[cfg(test)]
 #[derive(Debug, PartialEq, Eq)]
 #[must_use = "a domain lives until it is closed"]
-pub struct SendDomain {
+pub(crate) struct SendDomain {
     index: usize,
     tag: ConnectionTag,
 }
 
+#[cfg(test)]
 impl SendDomain {
     fn index(&self, tag: ConnectionTag) -> usize {
         assert_eq!(self.tag, tag, "send domain used on another connection");

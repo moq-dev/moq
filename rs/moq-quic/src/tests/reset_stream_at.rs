@@ -92,7 +92,10 @@ fn stop_sending_abandons_prefix(reset_stream_at: bool) {
     let (client_ch, server_ch) = pair.connect();
 
     // The server learns of the stream from its first byte
-    let s = pair.client_streams(client_ch).open(Dir::Uni).unwrap();
+    let s = pair
+        .client_streams(client_ch)
+        .open(Dir::Uni, Default::default())
+        .unwrap();
     pair.client_send(client_ch, s).write(&MSG[..1]).unwrap();
     pair.drive();
     assert_eq!(accept(&mut pair, server_ch), s);
@@ -141,7 +144,10 @@ fn delivers_prefix_before_error() {
     let mut pair = pair(true);
     let (client_ch, server_ch) = pair.connect();
 
-    let s = pair.client_streams(client_ch).open(Dir::Uni).unwrap();
+    let s = pair
+        .client_streams(client_ch)
+        .open(Dir::Uni, Default::default())
+        .unwrap();
     let offset = write(&mut pair, client_ch, s);
     pair.client_send(client_ch, s)
         .reset_at(offset, ERROR)
@@ -169,7 +175,10 @@ fn delivers_unsent_prefix() {
     let mut pair = pair(true);
     let (client_ch, server_ch) = pair.connect();
 
-    let s = pair.client_streams(client_ch).open(Dir::Uni).unwrap();
+    let s = pair
+        .client_streams(client_ch)
+        .open(Dir::Uni, Default::default())
+        .unwrap();
     pair.client_send(client_ch, s)
         .write(&MSG[..RELIABLE])
         .unwrap();
@@ -192,7 +201,10 @@ fn retransmits_lost_prefix() {
     let mut pair = pair(true);
     let (client_ch, server_ch) = pair.connect();
 
-    let s = pair.client_streams(client_ch).open(Dir::Uni).unwrap();
+    let s = pair
+        .client_streams(client_ch)
+        .open(Dir::Uni, Default::default())
+        .unwrap();
     let offset = write(&mut pair, client_ch, s);
     lose_client_packets(&mut pair);
     pair.client_send(client_ch, s)
@@ -228,7 +240,10 @@ fn retransmits_lost_reset() {
     let mut pair = pair(true);
     let (client_ch, server_ch) = pair.connect();
 
-    let s = pair.client_streams(client_ch).open(Dir::Uni).unwrap();
+    let s = pair
+        .client_streams(client_ch)
+        .open(Dir::Uni, Default::default())
+        .unwrap();
     let offset = write(&mut pair, client_ch, s);
     pair.drive();
     pair.client_send(client_ch, s)
@@ -252,7 +267,10 @@ fn received_reset_after_prefix() {
     let mut pair = pair(true);
     let (client_ch, server_ch) = pair.connect();
 
-    let s = pair.client_streams(client_ch).open(Dir::Uni).unwrap();
+    let s = pair
+        .client_streams(client_ch)
+        .open(Dir::Uni, Default::default())
+        .unwrap();
     let offset = write(&mut pair, client_ch, s);
     pair.client_send(client_ch, s)
         .reset_at(offset, ERROR)
@@ -285,7 +303,10 @@ fn after_finish() {
     let (client_ch, server_ch) = pair.connect();
 
     for reliable in [RELIABLE, MSG.len()] {
-        let s = pair.client_streams(client_ch).open(Dir::Uni).unwrap();
+        let s = pair
+            .client_streams(client_ch)
+            .open(Dir::Uni, Default::default())
+            .unwrap();
         let mut offset = write(&mut pair, client_ch, s);
         if reliable == MSG.len() {
             offset = pair.client_send(client_ch, s).offset();
@@ -316,7 +337,10 @@ fn flow_control_blocked() {
     let mut pair = Pair::new(Default::default(), config);
     let (client_ch, server_ch) = pair.connect();
 
-    let s = pair.client_streams(client_ch).open(Dir::Uni).unwrap();
+    let s = pair
+        .client_streams(client_ch)
+        .open(Dir::Uni, Default::default())
+        .unwrap();
     pair.client_send(client_ch, s)
         .write(&MSG[..RELIABLE])
         .unwrap();
@@ -350,7 +374,10 @@ fn unsupported_holds_reset_until_acked() {
     let mut pair = pair(false);
     let (client_ch, server_ch) = pair.connect();
 
-    let s = pair.client_streams(client_ch).open(Dir::Uni).unwrap();
+    let s = pair
+        .client_streams(client_ch)
+        .open(Dir::Uni, Default::default())
+        .unwrap();
     let offset = write(&mut pair, client_ch, s);
     pair.client_send(client_ch, s)
         .reset_at(offset, ERROR)
@@ -374,7 +401,10 @@ fn unsupported_retransmits_lost_prefix() {
     let mut pair = pair(false);
     let (client_ch, server_ch) = pair.connect();
 
-    let s = pair.client_streams(client_ch).open(Dir::Uni).unwrap();
+    let s = pair
+        .client_streams(client_ch)
+        .open(Dir::Uni, Default::default())
+        .unwrap();
     let offset = write(&mut pair, client_ch, s);
     lose_client_packets(&mut pair);
     pair.client_send(client_ch, s)
@@ -397,7 +427,10 @@ fn unsupported_resets_at_once_when_acked() {
     let mut pair = pair(false);
     let (client_ch, server_ch) = pair.connect();
 
-    let s = pair.client_streams(client_ch).open(Dir::Uni).unwrap();
+    let s = pair
+        .client_streams(client_ch)
+        .open(Dir::Uni, Default::default())
+        .unwrap();
     let offset = write(&mut pair, client_ch, s);
     pair.drive();
     assert_eq!(accept(&mut pair, server_ch), s);
@@ -425,7 +458,10 @@ fn unsupported_after_finish() {
     let mut pair = pair(false);
     let (client_ch, server_ch) = pair.connect();
 
-    let s = pair.client_streams(client_ch).open(Dir::Uni).unwrap();
+    let s = pair
+        .client_streams(client_ch)
+        .open(Dir::Uni, Default::default())
+        .unwrap();
     let offset = write(&mut pair, client_ch, s);
     pair.client_send(client_ch, s).finish().unwrap();
     pair.client_send(client_ch, s)
@@ -460,7 +496,10 @@ fn unsupported_repeated_reset_is_closed() {
     let mut pair = pair(false);
     let (client_ch, _) = pair.connect();
 
-    let s = pair.client_streams(client_ch).open(Dir::Uni).unwrap();
+    let s = pair
+        .client_streams(client_ch)
+        .open(Dir::Uni, Default::default())
+        .unwrap();
     let offset = write(&mut pair, client_ch, s);
     let again = pair.client_send(client_ch, s).offset();
     lose_client_packets(&mut pair);
@@ -481,7 +520,10 @@ fn unsupported_close_while_held() {
     let mut pair = pair(false);
     let (client_ch, server_ch) = pair.connect();
 
-    let s = pair.client_streams(client_ch).open(Dir::Uni).unwrap();
+    let s = pair
+        .client_streams(client_ch)
+        .open(Dir::Uni, Default::default())
+        .unwrap();
     let offset = write(&mut pair, client_ch, s);
     lose_client_packets(&mut pair);
     pair.client_send(client_ch, s)
@@ -510,12 +552,18 @@ fn unsupported_returns_flow_control() {
     let mut pair = Pair::new(Default::default(), config);
     let (client_ch, server_ch) = pair.connect();
 
-    let s = pair.client_streams(client_ch).open(Dir::Uni).unwrap();
+    let s = pair
+        .client_streams(client_ch)
+        .open(Dir::Uni, Default::default())
+        .unwrap();
     let offset = write(&mut pair, client_ch, s);
     pair.client_send(client_ch, s)
         .reset_at(offset, ERROR)
         .unwrap();
-    let next = pair.client_streams(client_ch).open(Dir::Uni).unwrap();
+    let next = pair
+        .client_streams(client_ch)
+        .open(Dir::Uni, Default::default())
+        .unwrap();
     assert_eq!(
         pair.client_send(client_ch, next).write(MSG),
         Err(WriteError::Blocked)
@@ -536,7 +584,10 @@ fn unsupported_allows_zero() {
     let mut pair = pair(false);
     let (client_ch, server_ch) = pair.connect();
 
-    let s = pair.client_streams(client_ch).open(Dir::Uni).unwrap();
+    let s = pair
+        .client_streams(client_ch)
+        .open(Dir::Uni, Default::default())
+        .unwrap();
     let offset = pair.client_send(client_ch, s).offset();
     pair.client_send(client_ch, s).write(MSG).unwrap();
     pair.client_send(client_ch, s)
@@ -557,7 +608,10 @@ fn repeated_reset_is_closed() {
     let mut pair = pair(true);
     let (client_ch, _) = pair.connect();
 
-    let s = pair.client_streams(client_ch).open(Dir::Uni).unwrap();
+    let s = pair
+        .client_streams(client_ch)
+        .open(Dir::Uni, Default::default())
+        .unwrap();
     let offset = write(&mut pair, client_ch, s);
     let again = pair.client_send(client_ch, s).offset();
     pair.client_send(client_ch, s)
@@ -591,7 +645,10 @@ fn zero_rtt() {
     pair.client.addr = SocketAddr::new(Ipv6Addr::LOCALHOST.into(), pair.next_port());
     let client_ch = pair.begin_connect(config);
     assert!(pair.client_conn_mut(client_ch).has_0rtt());
-    let s = pair.client_streams(client_ch).open(Dir::Uni).unwrap();
+    let s = pair
+        .client_streams(client_ch)
+        .open(Dir::Uni, Default::default())
+        .unwrap();
     let offset = write(&mut pair, client_ch, s);
     pair.client_send(client_ch, s)
         .reset_at(offset, ERROR)

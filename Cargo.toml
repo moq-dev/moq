@@ -33,6 +33,7 @@ members = [
     "rs/moq-room",
     "rs/moq-rtc",
     "rs/moq-rtmp",
+    "rs/moq-rtsp",
     "rs/moq-shaper",
     "rs/moq-sock",
     "rs/moq-srt",
@@ -76,6 +77,7 @@ default-members = [
     "rs/moq-room",
     "rs/moq-rtc",
     "rs/moq-rtmp",
+    "rs/moq-rtsp",
     "rs/moq-shaper",
     "rs/moq-sock",
     "rs/moq-srt",
@@ -173,6 +175,7 @@ moq-quic = { version = "0.1.0", path = "rs/moq-quic", default-features = false }
 moq-relay = { version = "0.17.2", path = "rs/moq-relay", default-features = false }
 moq-rtc = { version = "0.3.12", path = "rs/moq-rtc" }
 moq-rtmp = { version = "0.3.11", path = "rs/moq-rtmp" }
+moq-rtsp = { version = "0.1.0", path = "rs/moq-rtsp" }
 moq-sock = { version = "0.2.0", path = "rs/moq-sock" }
 moq-srt = { version = "0.3.11", path = "rs/moq-srt" }
 moq-stats = { version = "0.2.12", path = "rs/moq-stats" }
