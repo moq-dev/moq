@@ -36,6 +36,11 @@ grant.
 - Recovery must not depend on demand. Once viewers deselect a disabled rung
   its demand, and so its grant, goes away; evaluate a hypothetical share
   against the current estimate, as the ladder controller plans to.
+- Decided with the maintainer on 2026-10-17 (the
+  [probe epic](/quest/m2/probe/README.md)): a disabled rung keeps its
+  reservation at its ceiling. The session's probe target sums every live
+  reservation, so it keeps probing for the stopped rung and the estimate can
+  rise to fund it. No padding handle or burst schedule is driven from `Rung`.
 - Assign descending track priority down the renditions so the allocator
   fills lower rungs first; [Scope track priority](/quest/m1/track-priority-scope.md)
   settles how that number also orders sends.
@@ -55,10 +60,11 @@ publishers expose for it. Wire: none; `enabled` already exists.
 
 ## Required
 
-- [Padding probe](/quest/m2/padding-probe.md) - the padding handle and burst schedule a stopped rendition probes with, since the estimators stop learning while app-limited; this quest drives them from `Rung`
+- [Session probe target](/quest/m2/probe/target.md) - a disabled rung's reservation keeps the session probing for it, since the estimators stop learning while app-limited
+- [Padding probes](/quest/m2/probe/padding.md) - the sender a browser publisher probes with, and any transport without native probing
 
 ## Related
 
 - [Ladder controller](/quest/m3/ladder/controller.md) - the same rung disable for generated transcode ladders
 - [OBS multitrack](/quest/m2/obs-multitrack.md) - OBS's native multitrack encoders as the renditions this disables
-- [Viewer up-switch](/quest/m2/viewer-upswitch.md) - the viewer side of moving between renditions as capacity changes
+- [Viewer up-switch](/quest/m2/probe/viewer-upswitch.md) - the viewer side of moving between renditions as capacity changes
