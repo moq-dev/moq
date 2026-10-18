@@ -78,6 +78,5 @@ Public API: none. Wire: none.
 
 ## Related
 
-- [Publisher linger](/quest/m1/publisher-linger.md) - keeps a finished broadcast servable so subscribers can drain it, a layer above this
 - [SUBSCRIBE_DROP](/quest/m1/subscribe-drop.md) - groups cut short by a session close
 - [QUIC ack hook](/quest/m2/quic-ack-hook.md) - a FIN/ack hook in the QUIC layer

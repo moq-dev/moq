@@ -32,8 +32,8 @@ an untimed track has no timescale, and a timed track requires a timestamp on
 every write. A publisher that wants to stamp now samples its own clock.
 Writes return the encoded frame size.
 
-When upgrading, replace `Timed<P, T>` with `Timed<P>` and pass capture times
-explicitly instead of relying on a write-time default.
+Upgrading from an older release: see moq-flate's
+[MIGRATE.md](https://github.com/moq-dev/moq/blob/main/rs/moq-flate/MIGRATE.md).
 
 A stream rides one group, so the whole log shares moq-net's group budget:
 32 MiB of payload and 8192 payloads. An `append` that might not fit returns

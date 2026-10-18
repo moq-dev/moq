@@ -25,5 +25,6 @@ publish_tone() {
         "$WORKSPACE/target/debug/moq" --connect "$URL" --broadcast tone.hang import fmp4
 }
 harness_spawn publisher "$HARNESS_RUN/publisher.log" publish_tone
-harness_spawn player - python3 "$DIR/play.py" --url "$URL" --moq "$WORKSPACE/target/debug/moq"
+harness_spawn player - python3 "$DIR/../lib/pulse.py" --dir "$HARNESS_RUN" -- \
+    python3 "$DIR/play.py" --url "$URL" --moq "$WORKSPACE/target/debug/moq"
 harness_wait "$HARNESS_PID"

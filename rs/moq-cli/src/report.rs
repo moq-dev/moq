@@ -112,7 +112,8 @@ fn transport(connection: Option<&Monitor>, direction: Direction) -> hang::stats:
 	if let Some(stats) = connection.and_then(Monitor::stats) {
 		let rate = match direction {
 			Direction::Send => stats.estimated_send_rate,
-			Direction::Receive => stats.estimated_recv_rate,
+			// A receive estimate costs PROBE traffic, which an export does not request just to report.
+			Direction::Receive => None,
 		};
 		transport.rtt = stats.rtt;
 		transport.rate = rate.map(moq_net::bandwidth::Rate::as_bps);

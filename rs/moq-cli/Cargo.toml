@@ -26,9 +26,9 @@ path = "src/main.rs"
 doc = false
 
 [features]
-default = ["cluster-lan", "quic", "websocket", "nvidia", "s3", "gcs", "azure"]
+default = ["cluster-lan", "quic", "websocket", "webrtc", "nvidia", "s3", "gcs", "azure"]
 # Experimental transport with a heavy dependency tree, enabled only on request.
-iroh = ["moq-tokio/iroh"]
+iroh = ["moq-relay/iroh", "moq-tokio/iroh"]
 # LAN discovery and meshing (`--cluster-lan`).
 cluster-lan = ["moq-relay/cluster-lan"]
 jemalloc = ["moq-tokio/jemalloc"]
@@ -38,6 +38,8 @@ quic = ["moq-tokio/quic"]
 # congestion-control testing.
 qlog = ["moq-tokio/qlog"]
 websocket = ["moq-tokio/websocket"]
+# Native WebRTC data channels, for holding sessions with browser peers.
+webrtc = ["moq-tokio/webrtc"]
 # The cloud object stores `export archive` and `import archive` reach (`s3://`,
 # `gs://`, `az://`). Local `file://` URLs need none of them.
 s3 = ["object_store/aws"]
@@ -101,6 +103,7 @@ axum = { workspace = true }
 axum-server = { workspace = true }
 base64 = { workspace = true }
 bytes = { workspace = true }
+futures = { workspace = true }
 hang = { workspace = true }
 humantime = { workspace = true }
 moq-archive = { workspace = true }
@@ -119,6 +122,7 @@ moq-mux = { workspace = true }
 moq-relay = { workspace = true }
 moq-rtc = { workspace = true }
 moq-rtmp = { workspace = true }
+moq-rtsp = { workspace = true }
 moq-srt = { workspace = true }
 # Raw qmux listeners are part of the CLI surface. `uds` compiles only on Unix.
 moq-tokio = { workspace = true, default-features = false, features = ["aws-lc-rs", "tcp", "uds"] }
@@ -144,6 +148,8 @@ sd-notify = { workspace = true }
 [dev-dependencies]
 # `test_relay` stands up a real relay for the `fetch` and `announced` tests to read through.
 moq-relay = { path = "../moq-relay", default-features = false, features = ["test-support"] }
+# The scripted RTSP server `import rtsp` pulls from.
+moq-rtsp = { path = "../moq-rtsp", features = ["test-support"] }
 # Writes the PAT and PMTs, CRCs included, of the two-program input `import ts --program all` splits.
 mpeg2ts = "0.6.0"
 tempfile = { workspace = true }

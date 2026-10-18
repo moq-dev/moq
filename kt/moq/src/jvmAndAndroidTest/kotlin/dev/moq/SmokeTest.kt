@@ -142,6 +142,21 @@ class SmokeTest {
         }
     }
 
+    /** A settings UI reads its defaults and menus from the library rather than repeating them. */
+    @Test
+    fun `client defaults and versions come from the library`() {
+        val defaults = clientDefaults()
+        assertNotNull(defaults.quic.maxStreams)
+        assertNotNull(defaults.quic.idleTimeout)
+        assertNotNull(defaults.timeout)
+        assertNull(defaults.quic.congestionControl)
+        assertTrue(versions().isNotEmpty())
+        val congestion: CongestionControl = CongestionControl.DELAY
+        assertEquals(congestion, QuicConfig(congestionControl = congestion).congestionControl)
+        // Dialing with the reported defaults is the same as dialing with none.
+        Client(defaults).close()
+    }
+
     /**
      * The `dev.moq` typealiases resolve to the FFI objects, and the wrapper
      * extensions apply to them. Constructing through an alias is enough to
@@ -238,6 +253,27 @@ class SmokeTest {
             assertEquals(0uL, fetched.sequence())
             assertEquals("cached", fetched.readFrame()?.payload?.decodeToString())
             assertNull(fetched.readFrame())
+        }
+    }
+
+    @Test
+    fun `an ascending subscription reads a cached backlog oldest first`() = runTest {
+        BroadcastProducer().use { broadcast ->
+            val track = broadcast.publishTrack("backlog", TrackInfo(timescale = 1_000_000uL))
+            for (ms in 0uL until 3uL) {
+                val group = track.appendGroup()
+                group.writeFrame(Frame(payload = "x".encodeToByteArray(), timestampUs = ms * 1_000uL))
+                group.finish()
+            }
+            val consumer = track.consume(
+                Subscription(
+                    maxDelayUs = 10_000_000uL,
+                    ranges = listOf(Range(start = AnchorRelative(groups = 2uL))),
+                    order = Order.ASCENDING,
+                ),
+            )
+            val sequences = List(3) { checkNotNull(consumer.recvGroup()).sequence() }
+            assertEquals(listOf(0uL, 1uL, 2uL), sequences)
         }
     }
 
@@ -360,7 +396,6 @@ class SmokeTest {
         fun stats(rttUs: ULong?) = ConnectionStats(
             rttUs = rttUs,
             estimatedSendRateBps = null,
-            estimatedRecvRateBps = null,
             bytesSent = null,
             bytesReceived = null,
             bytesLost = null,

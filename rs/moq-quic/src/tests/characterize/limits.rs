@@ -1,5 +1,7 @@
 //! Stream and flow control limits changed while a connection is up
 
+use std::num::NonZeroU64;
+
 use super::*;
 
 /// How many more uni streams the client can open right now, opening them all
@@ -238,4 +240,55 @@ fn zero_rtt_bidi_window_raise() {
 #[ignore = "bug: /quest/m1/quic/zero-rtt-window-raise.md"]
 fn zero_rtt_uni_window_raise() {
     zero_rtt_window_raise(Dir::Uni);
+}
+
+/// `set_limits` raises every limit it sets in one call
+#[test]
+fn set_limits_raises_what_it_sets() {
+    let _guard = subscribe();
+    let (mut pair, client_ch, server_ch) = connected_with(
+        |t| {
+            t.max_concurrent_uni_streams(VarInt(1));
+            t.receive_window(VarInt::from_u32(WINDOW));
+        },
+        |_| {},
+    );
+
+    let limits = Limits {
+        max_streams: NonZeroU64::new(3),
+        receive_window: NonZeroU64::new(2 * WINDOW as u64),
+        ..Default::default()
+    };
+    pair.server_conn_mut(server_ch).set_limits(limits).unwrap();
+    pair.drive();
+
+    // One stream to fill the wider window, then the two the raised limit leaves
+    assert_eq!(
+        writable(&mut pair, client_ch, 4 * WINDOW as usize),
+        2 * WINDOW as usize
+    );
+    assert_eq!(openable(&mut pair, client_ch).len(), 2);
+}
+
+/// Limits a peer would reject change nothing, rather than applying the ones that fit
+#[test]
+fn set_limits_refuses_without_changing_anything() {
+    let _guard = subscribe();
+    let (mut pair, _, server_ch) =
+        connected_with(|t| _ = t.max_concurrent_uni_streams(VarInt(1)), |_| {});
+
+    let limits = Limits {
+        max_streams: NonZeroU64::new(3),
+        receive_window: NonZeroU64::new(1 << 62),
+        ..Default::default()
+    };
+    assert_eq!(
+        pair.server_conn_mut(server_ch).set_limits(limits),
+        Err(LimitsError::ReceiveWindow)
+    );
+    assert_eq!(
+        pair.server_conn_mut(server_ch)
+            .max_concurrent_streams(Dir::Uni),
+        1
+    );
 }

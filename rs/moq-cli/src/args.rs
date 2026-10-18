@@ -590,6 +590,15 @@ impl MoqSide {
 			self.client.url.is_some() || self.serves() || self.cluster_dials(),
 			"a MoQ side is required: pass --connect <url> to dial a relay, a --listen option to self-host, --cluster-lan to mesh over the LAN, or --cluster-connect to join a cluster"
 		);
+		// The `--connect` client and the cluster's WAN dials each bind
+		// `--connect-bind` for QUIC, so a fixed port would collide halfway through startup.
+		#[cfg(feature = "quic")]
+		anyhow::ensure!(
+			!(self.client.url.is_some()
+				&& self.cluster_dials()
+				&& self.client.bind.is_some_and(|bind| bind.port() != 0)),
+			"--connect-bind with a fixed port cannot serve both --connect and --cluster-connect / --cluster-connect-api, which each bind it: use port 0, or drop --connect (unset MOQ_CONNECT if it supplies the URL)"
+		);
 		#[cfg(feature = "cluster-lan")]
 		{
 			self.cluster.lan.validate()?;
@@ -827,6 +836,8 @@ pub enum ImportSource {
 	Rtmp(crate::rtmp::Args),
 	/// SRT: pull a remote stream (`--connect`) or accept incoming publishes (`--listen`).
 	Srt(crate::srt::ImportArgs),
+	/// RTSP: pull an IP camera's stream (`--connect`), reconnecting on failure.
+	Rtsp(crate::rtsp::ImportArgs),
 	/// WebRTC: WHEP client pulling a remote (`--connect`) or WHIP server accepting publishes (`--listen`).
 	Rtc(crate::rtc::Args),
 	/// Replay a recording from an object store, serving its groups on demand.
@@ -862,6 +873,7 @@ impl ImportSource {
 				Some("`import ts --program all` mints an epoch per program")
 			}
 			Self::Rtmp(_) | Self::Srt(_) => Some("the RTMP and SRT imports mint an epoch per connection"),
+			Self::Rtsp(_) => Some("`import rtsp` mints an epoch per RTSP session, since each restarts its RTP time"),
 			Self::Rtc(rtc) if rtc.listen.is_some() => Some("the WHIP listener mints an epoch per connection"),
 			Self::Rtc(_) => Some("`import rtc --connect` timestamps frames from its own RTP session"),
 			Self::Avc3 => Some("`import avc3` timestamps frames from their arrival on stdin"),
@@ -881,12 +893,12 @@ impl ImportSource {
 			Self::Ts(args) if args.program == Some(TsProgram::All) => {
 				Some("`import ts --program all` builds a catalog per program")
 			}
-			Self::Hls(_) | Self::Rtmp(_) | Self::Srt(_) | Self::Rtc(_) | Self::Archive(_) => {
+			Self::Hls(_) | Self::Rtmp(_) | Self::Srt(_) | Self::Rtsp(_) | Self::Rtc(_) | Self::Archive(_) => {
 				Some("the gateway and archive imports build their own catalogs")
 			}
 			#[cfg(feature = "capture")]
 			Self::Capture(_) => Some("`import capture` encodes, and its encoders do not count yet"),
-			_ => None,
+			Self::Avc3 | Self::Fmp4 | Self::Ts(_) | Self::Flv => None,
 		}
 	}
 }
@@ -1506,6 +1518,7 @@ mod tests {
 			["ts", "--program", "all"].as_slice(),
 			&["hls", "http://origin/master.m3u8"],
 			&["rtmp", "--listen", "127.0.0.1:1935"],
+			&["rtsp", "--connect", "rtsp://camera/stream"],
 		] {
 			let err = import(source).validate().unwrap_err().to_string();
 			assert!(err.contains("--stats"), "{source:?}: {err}");
@@ -1731,6 +1744,7 @@ mod tests {
 			&["import", "rtmp", "--listen", "[::]:1935"][..],
 			&["import", "rtmp", "--connect", "rtmp://example.com/live/key"],
 			&["import", "srt", "--connect", "srt://example.com:9000"],
+			&["import", "rtsp", "--connect", "rtsp://example.com/stream"],
 			&["import", "rtc", "--listen", "[::]:8080"],
 			&["import", "rtc", "--connect", "https://example.com/whep"],
 			&["import", "ts", "--program", "all"],
@@ -2476,6 +2490,51 @@ mod tests {
 			.unserved()
 			.expect("a listener reads it");
 		parse(&[]).unserved().expect("nothing to refuse");
+	}
+
+	/// `--connect` and a WAN cluster peer each bind `--connect-bind` for QUIC, so a
+	/// fixed port is refused before anything binds; port 0 or either side alone is
+	/// fine, and a build without QUIC binds nothing to collide.
+	#[test]
+	fn a_fixed_connect_bind_serves_one_dialer() {
+		let parse = |flags: &[&str]| {
+			let args = ["moq"].iter().chain(flags).chain(&["import", "ts"]).copied();
+			Invocation::try_parse_from(args).expect("parse")
+		};
+		for peer in [
+			["--cluster-connect", "https://relay.example"],
+			["--cluster-connect-api", "https://api.example/peers"],
+		] {
+			let both = [
+				&["--connect", "https://relay.example", "--connect-bind", "127.0.0.1:4443"][..],
+				&peer,
+			]
+			.concat();
+			let result = parse(&both).moq.validate();
+			if cfg!(feature = "quic") {
+				let err = result.unwrap_err().to_string();
+				assert!(err.contains("--connect-bind") && err.contains(peer[0]), "{err}");
+			} else {
+				result.expect("without QUIC nothing binds the fixed port");
+			}
+
+			let ephemeral = [
+				&["--connect", "https://relay.example", "--connect-bind", "127.0.0.1:0"][..],
+				&peer,
+			]
+			.concat();
+			parse(&ephemeral).moq.validate().expect("an ephemeral bind serves both");
+
+			let cluster_only = [&["--connect-bind", "127.0.0.1:4443"][..], &peer].concat();
+			parse(&cluster_only)
+				.moq
+				.validate()
+				.expect("the cluster alone owns a fixed bind");
+		}
+		parse(&["--connect", "https://relay.example", "--connect-bind", "127.0.0.1:4443"])
+			.moq
+			.validate()
+			.expect("--connect alone owns a fixed bind");
 	}
 
 	/// `--cluster-connect` / `--cluster-connect-api` attach the process as a

@@ -31,8 +31,8 @@ remains separately scoped in m2.
 
 What the line still owes once Watch lands: its recorded trace replayed through
 the native decode path too, asserting the same target series the browser's
-`playout.test.ts` does. Grading native playback against the harness budgets is
-[Audio quality native](/quest/m2/audio-quality-native.md).
+`playout.test.ts` does. The audio quality harness's `pulse` rows already grade
+native playback against its budgets.
 
 ## Required
 

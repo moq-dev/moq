@@ -1,7 +1,7 @@
 //! The assembled relay: every startup step, in one place, in the right order.
 //!
-//! [`Relay::load`] turns a [`Config`] into the running pieces (server, client,
-//! auth, cluster, stats, internal + web listeners), and [`Relay::run`] drives
+//! [`Relay::load`] turns a [`Config`] into the running pieces (server, auth,
+//! cluster, stats, internal + web listeners), and [`Relay::run`] drives
 //! them. `main.rs` is a thin wrapper over the two.
 //!
 //! # Why this is a type and not just `main`
@@ -50,7 +50,7 @@ impl Ready {
 /// shutdown join.
 ///
 /// The accessors borrow, and [`Self::run`] consumes the relay, so clone the
-/// application handles ([`Self::cluster`], [`Self::auth`], [`Self::client`],
+/// application handles ([`Self::cluster`], [`Self::auth`],
 /// [`Self::stats`], [`Self::shutdown`], [`Self::shutdown_trigger`]) first,
 /// then mount extra routes with [`Self::with_web`] / [`Self::with_internal`].
 /// An application that decides admissions itself leaves `[auth]` empty and
@@ -72,7 +72,6 @@ pub struct Relay {
 	ready: tokio::sync::watch::Sender<bool>,
 	config: Config,
 	server: moq_tokio::Listener,
-	client: moq_tokio::Client,
 	auth: auth::Auth,
 	/// The sessions the embedder decides, until it takes them. `None` when the
 	/// config named a source; `run` refuses to start while this is still held.
@@ -252,7 +251,6 @@ impl Relay {
 			true => server_config.init_streams()?,
 			false => server_config.init()?,
 		};
-		let client = config.connect.clone().init(config.quic.clone())?;
 
 		// `None` for a stream-only server (no QUIC); any other error is real.
 		#[cfg(all(target_os = "linux", feature = "_uring"))]
@@ -267,12 +265,6 @@ impl Relay {
 				Err(moq_tokio::Error::NoBackend(_)) => None,
 				Err(err) => return Err(err).context("failed to resolve the QUIC bind address"),
 			},
-		};
-
-		#[cfg(feature = "iroh")]
-		let client = match iroh {
-			Some(iroh) => client.with_iroh(iroh),
-			None => client,
 		};
 
 		let cache = config.cache.init()?;
@@ -296,10 +288,14 @@ impl Relay {
 		cluster_options.session = config.session;
 		cluster_options.peer = config.peer;
 		let cluster = cluster::Cluster::new(cluster_options)?
-			.with_client(client.clone())
 			.with_client_tls(config.connect.tls.build()?)
 			.with_connect(config.connect.clone(), config.quic.clone())
 			.with_advertise(advertise);
+		#[cfg(feature = "iroh")]
+		let cluster = match iroh {
+			Some(iroh) => cluster.with_iroh(iroh),
+			None => cluster,
+		};
 		let stats = config.stats.build(cluster.origin.clone());
 		// The cluster takes over keeping the publish task alive, so an embedder that
 		// drops the producer keeps publishing for as long as it serves.
@@ -356,7 +352,6 @@ impl Relay {
 			ready,
 			config: resolved_config,
 			server,
-			client,
 			auth,
 			admissions,
 			cluster,
@@ -409,12 +404,6 @@ impl Relay {
 	/// The bound plain TCP (qmux) address, or `None` when `listen.tcp.bind` is unset.
 	pub fn tcp_addr(&self) -> Option<std::net::SocketAddr> {
 		self.server.tcp_local_addr()
-	}
-
-	/// The client used to dial cluster peers. Already handed to [`Self::cluster`];
-	/// clone it for your own outbound dials so they share the connection config.
-	pub fn client(&self) -> &moq_tokio::Client {
-		&self.client
 	}
 
 	/// Where every session's grant comes from: the auth server, the static public
@@ -717,6 +706,9 @@ impl Relay {
 			res = drain(shutdown_trigger, shutdown.clone(), signals) => res,
 			else => Ok(()),
 		};
+
+		// Before the runtime goes, so each dialed peer drops our routes at once.
+		cluster.close().await;
 
 		// Dropping the listener would leave its QUIC socket open until the
 		// endpoint's closing connections finish in the background, past `run`.

@@ -81,10 +81,11 @@ class AnnounceConsumer:
 
 
 class AnnouncedBroadcast:
-    """Awaitable that resolves once a route covers a specific path.
+    """Follows a specific path across the publisher instances that serve it.
 
     ``await`` it (or call :meth:`available`) to get the :class:`BroadcastConsumer`
-    once the broadcast becomes available. Usable as an async context manager.
+    once the broadcast becomes available, and again for each instance that takes over.
+    Usable as an async context manager.
     """
 
     def __init__(self, inner: MoqAnnouncedBroadcast) -> None:
@@ -97,7 +98,13 @@ class AnnouncedBroadcast:
         self.cancel()
 
     async def available(self) -> BroadcastConsumer:
-        """Await a covering route and return the resolved broadcast consumer."""
+        """Await the next publisher instance serving the path and return its consumer.
+
+        The first call resolves the instance serving the path once one is announced. Each
+        later call waits for another to take over (a restarted publisher, or a replacement
+        session) or for the broadcast to return after it went offline. Drop what was read
+        from the previous instance then: its tracks end when its session does.
+        """
         return BroadcastConsumer(await self._inner.available())
 
     def __await__(self):
@@ -181,7 +188,7 @@ class OriginConsumer:
         return AnnounceConsumer(self._inner.announced(MoqAnnounceConfig(prefix=prefix, filter=filter, hidden=hidden)))
 
     def announced_broadcast(self, path: str) -> AnnouncedBroadcast:
-        """Await the broadcast at ``path``, resolving once something can serve it.
+        """Follow the broadcast at ``path``, resolving each publisher instance that serves it.
 
         A broadcast created on this origin resolves once it is announced, like a
         remote one.

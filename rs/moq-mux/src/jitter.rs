@@ -77,9 +77,9 @@ pub(crate) enum Push {
 ///
 /// A track starts on a whole group. Until a frame of it has gone out, a loss (a frame
 /// dropped here, or the rest of a group its source cut short) takes everything the track
-/// holds with it, and the track starts at its next sync frame. Whole groups missing after one
-/// that ended take nothing: a joiner whose zero-budget live-edge pick has the
-/// publisher cut its group short starts at the next group rather than on the cut-off start.
+/// holds with it, and the track starts at its next sync frame, so a joiner whose start group
+/// was cut short starts at the next group rather than on the cut-off start. Whole groups
+/// missing after one that ended take nothing.
 /// What goes before a track's first frame out is [`Buffer::trimmed`], not lost; what drops
 /// after it is [`Buffer::dropped`].
 ///

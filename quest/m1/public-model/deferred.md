@@ -45,7 +45,7 @@ built-in sessions moved onto the public calls.
 
 ## Required
 
-- [Model ranges](/quest/m1/subscribe-ranges/model.md) - replaces per-group fetch requests, the peeks, and `fork`
+- [Dynamic range requests](/quest/m1/subscribe-ranges/dynamic.md) - replaces per-group fetch requests, the peeks, and `fork`
 - [Live largest location](/quest/m1/largest.md) - the public largest-location stream that replaces `peek_latest` and `is_live` on the IETF Largest Object path
 - [JS track handover](/quest/m1/js-group-handover.md) - owns the JS fan-out copy behind `Group.Producer.mirror`
 - [JS pending tail](/quest/m1/js-pending-tail.md) - the JS received-end hold behind `hooks.endTrack`

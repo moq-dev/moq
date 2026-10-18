@@ -94,6 +94,7 @@ comes in two encodings:
 | `[<tier>/]subscriber.json` | broadcast path | [Traffic](#traffic) this node received (ingress) |
 | `[<tier>/]sessions.json` | auth root | [Sessions](#sessions) connected now |
 | `[<root>/]presence.json` | tier | [Sessions](#sessions) under one auth root |
+| `[<path>/]traffic.json` | tier | [Prefix](#prefix) traffic under one broadcast prefix |
 
 The default tier's per-tier tracks are unprefixed. A named tier prefixes each
 name with its label and a slash: tier `region/sjc` publishes
@@ -110,7 +111,9 @@ A presence track exists only while subscribed. Ask for `<root>/presence.json`
 for any auth root in the group (`presence.json` for the empty root). The relay
 answers with the root's current sessions and counts from there, holding a root
 with no sessions open at `{}`, and stops producing it once the last subscriber
-leaves. A root outside the group, or any other name, is refused.
+leaves. A prefix track works the same way for any broadcast prefix in the
+group: ask for `<path>/traffic.json` (`traffic.json` for the empty prefix). A
+root or prefix outside the group, or any other name, is refused.
 
 ## Frames
 
@@ -162,6 +165,43 @@ A presence track's entries are cumulative from when it was first held: a
 session that ends stays counted, and so does every one after it, while
 anyone holds the track. A track held again starts over.
 
+Wire bytes start at zero on every hold, including the first. Other presence
+fields seed from the root's current live-session counters; they do not recover
+closed roots from before the hold. Node totals keep the full group epoch's
+history. Each recreated track starts a fresh snapshot group using the
+broadcast's shared, increasing group sequence, so relay caches can distinguish
+it from an earlier hold. Plain and compressed tracks share that allocator.
+
+### Prefix
+
+```json
+{
+  "": {
+    "publisher": { ... }, "subscriber": { ... },
+    "self": { "publisher": { ... }, "subscriber": { ... } },
+    "children": { "live": { "publisher": { ... }, "subscriber": { ... } } }
+  }
+}
+```
+
+Each tier the prefix recorded on, with three views of its [Traffic](#traffic):
+the top-level `publisher` and `subscriber` roll up every broadcast at or under
+the prefix, so a [totals](#totals) reader parses them unchanged; `self` is the
+broadcast at exactly the prefix, apart from any nested under it; and
+`children` rolls up each direct child, keyed by its next path segment.
+
+Like presence, the rollup and `self` are cumulative from when the track was
+first held: each frame sums the live broadcasts' counters plus the final
+counters of those that ended since. A broadcast that was live before the hold
+carries its history from before it, so absolute values are not authoritative:
+take differences within one subscription, and read the [totals](#totals) for
+real sums. Started minus ended stays exact. A child appears while a broadcast
+under it has counters, and leaves after the frame carrying its last one; its
+tail stays in the rollup, and a child that returns starts over. Children are
+never capped, so roughly ten thousand across four tiers outgrow the 32 MB frame
+limit: that encoding's track then ends with `FRAME_TOO_LARGE` instead of going
+stale.
+
 ## Entries
 
 ### Traffic
@@ -206,7 +246,8 @@ should prefer the canonical name and fall back to the legacy one.
     "sessions": 12, "sessions_closed": 10,
     "sessions_refused": { "refused": 0, "unavailable": 0, "request": 0, "forbidden": 0, "lan": 0 },
     "sessions_failed": { "idle_timeout": 1, "transport": 0, "application": 0, "expired": 0 },
-    "announces_peak": 40, "subscriptions_peak": 900
+    "announces_peak": 40, "subscriptions_peak": 900,
+    "wire_tx": 2048, "wire_rx": 1024
   }
 }
 ```
@@ -217,6 +258,21 @@ under the root on each tier for `presence.json`, and under every root in the
 group on the tier for `totals.json`. `sessions` and `sessions_closed` are their
 legacy spellings. A session moved to a new tier ends on the old one and starts
 on the new.
+
+`wire_tx` and `wire_rx` count transport bytes sent and received, separately
+from `Traffic.bytes`, which counts media payload. QUIC and WebTransport count
+UDP bytes, including retransmissions and transport overhead. The transport
+updates a connection's counters as it sends and receives, and a stats tick reads
+them without polling the session or activating its periodic sampler. Tier
+changes flush the old tier first; closing a session records its final delta.
+An embedder creates a `transport::Wire`, registers it with `stats::Handle::wire`
+or `stats::Session::wire`, records its connection's cumulative totals on it, and
+holds the returned guard. Dropping the guard records the final reading.
+
+Unsupported transports, including browsers and the current WebSocket/qmux
+adapter, contribute zero. WebSocket wire accounting requires the separate
+qmux counter source; unavailable counters are never estimated from payload.
+Readers default missing wire fields to zero for older relays.
 
 `sessions_refused` counts sessions turned away before admission, by reason.
 They never start a session. The relay's own refusals have no resolved root, so
@@ -255,9 +311,9 @@ count is started minus ended. A frame never shows ended above started.
 A new epoch starts every counter from zero, so a reader summing a node over
 time adds each epoch's counters rather than diffing across them. Within one
 epoch the totals never go down. A per-tier counter going **down** means the
-entry was dropped and re-created, and a presence counter going down means the
-track was held again. Treat it as the start of a fresh segment rather than a
-negative rate. On a route without an epoch (an older relay, or a session older
+entry was dropped and re-created, and a presence or prefix counter going down
+means the track was held again. Treat it as the start of a fresh segment
+rather than a negative rate. On a route without an epoch (an older relay, or a session older
 than moq-lite 07), a counter going down also means the node restarted.
 
 A reader ignores unknown fields, so a newer relay can add counters, and

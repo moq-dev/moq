@@ -81,6 +81,8 @@ pub struct MockConnectOptions {
 	pub cost: Option<u64>,
 	/// What both transports report as their connection statistics.
 	pub stats: MockStats,
+	/// The context the server records under.
+	pub server_stats: moq_net::stats::Session,
 	/// Count server driver polls into this counter when supplied.
 	pub server_polls: Option<Arc<AtomicUsize>>,
 }
@@ -101,6 +103,7 @@ impl MockConnectOptions {
 			server_extensions: Default::default(),
 			cost: None,
 			stats: MockStats::default(),
+			server_stats: Default::default(),
 			server_polls: None,
 		}
 	}
@@ -150,6 +153,7 @@ pub async fn connect_mock(opts: MockConnectOptions) -> MockPair {
 	}
 
 	let mut server = Server::new()
+		.with_stats(opts.server_stats)
 		.with_versions(opts.version.into())
 		.with_extensions(opts.server_extensions);
 	if let Some(publish) = &opts.server_publish {
