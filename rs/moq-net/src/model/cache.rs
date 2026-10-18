@@ -653,11 +653,11 @@ pub(super) struct Track {
 #[derive(Default)]
 struct Largest {
 	position: Option<Position>,
+	// The largest group's content may still grow: no copy of it finished, and it is not a
+	// datagram. An aborted one stays open, since it can be recreated or fetched.
+	open: bool,
 	// The track ended, so no newer position can follow.
 	ended: bool,
-	// Bumped when a group stops taking frames, waking the readers that check whether the
-	// track's largest can still advance.
-	settled: u64,
 }
 
 impl Track {
@@ -666,18 +666,22 @@ impl Track {
 		let mut largest = self.largest.lock();
 		if largest.position.is_none_or(|current| position > current) {
 			largest.position = Some(position);
+			largest.open = true;
 		}
 	}
 
-	/// The group of the track's largest location, if any.
-	pub(super) fn largest_group(&self) -> Option<u64> {
-		self.largest.read().position.map(|position| position.group)
+	/// Group `sequence` holds every frame it will have: a copy finished, or it is a datagram.
+	/// A group name fixes its content, so no legal write raises the largest past it.
+	pub(super) fn finish_largest(&self, sequence: u64) {
+		let mut largest = self.largest.lock();
+		if largest.position.is_some_and(|position| position.group == sequence) {
+			largest.open = false;
+		}
 	}
 
-	/// Wake the largest's readers to check whether it can still advance.
-	pub(super) fn touch_largest(&self) {
-		let mut largest = self.largest.lock();
-		largest.settled = largest.settled.wrapping_add(1);
+	/// Whether the largest group's content may still grow; see [`Self::finish_largest`].
+	pub(super) fn largest_open(&self) -> bool {
+		self.largest.read().open
 	}
 
 	/// End the largest stream once the track ends: no newer frame can follow.
@@ -771,7 +775,6 @@ impl Track {
 		if let Some(aborts) = self.aborts.get() {
 			aborts.notify(sequence, cut);
 		}
-		self.touch_largest();
 	}
 
 	/// Park `waiter` until the pool's wall clock reaches `at`. While no driver collects the

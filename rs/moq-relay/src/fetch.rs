@@ -5,7 +5,9 @@
 /// read off the subscription, so an evicted group is retrieved from upstream
 /// instead of waited on forever. Fails before returning when the group can never
 /// be served: [`moq_net::Error::NotFound`] locally, including a track that ends
-/// before any group, or [`moq_net::StreamError::NotFound`] from upstream.
+/// before any group, or [`moq_net::StreamError::NotFound`] from upstream. A newest
+/// sequence sent as a datagram is [`moq_net::Error::NotFetchable`] rather than an older
+/// group passed off as the newest.
 pub async fn fetch_group(
 	track: &moq_net::track::Consumer,
 	sequence: Option<u64>,
@@ -43,5 +45,22 @@ mod test {
 			.expect("the newest group is cached")
 			.unwrap();
 		assert_eq!(group.sequence, 1);
+	}
+
+	/// A newest sequence sent as a datagram is refused, not served as an older group.
+	#[test]
+	fn a_newest_datagram_is_not_fetchable() {
+		let broadcast = moq_net::broadcast::Info::default().produce();
+		let mut track = broadcast.create_track("t", moq_net::track::Info::default()).unwrap();
+		let mut first = track.append_group().unwrap();
+		first.write_frame(None, &b"a"[..]).unwrap();
+		first.finish().unwrap();
+		assert_eq!(track.append_datagram(None, &b"d"[..]).unwrap(), 1);
+
+		let handle = broadcast.consume().track("t").unwrap();
+		let fetched = fetch_group(&handle, None)
+			.now_or_never()
+			.expect("the datagram is cached");
+		assert!(matches!(fetched, Err(moq_net::Error::NotFetchable)));
 	}
 }

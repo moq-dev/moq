@@ -660,6 +660,9 @@ export class Producer {
 	#used = new Signal<boolean>(false);
 	#demand: Demand;
 	#largestSeen?: Location;
+	// The largest group's content may still grow: it has not closed cleanly, and it is not a
+	// datagram. An aborted one stays open, since it can be recreated.
+	#largestOpen = false;
 
 	constructor(name: string) {
 		this.name = name;
@@ -1002,6 +1005,7 @@ export class Producer {
 		) {
 			return;
 		}
+		this.#largestOpen = true;
 		this.#state.largest.set(largest);
 		for (const sink of this.#sinks) sink.largest.set(largest);
 	}
@@ -1114,9 +1118,9 @@ export class Producer {
 		const stop = hooks.groupProgress(group, (total) => {
 			if (total > 0) this.#advanceLargest({ group: group.sequence, frame: total - 1 });
 		});
-		void group.closed.then(() => {
+		void group.closed.then((closed) => {
 			stop();
-			this.#endLargest();
+			if (closed === null) this.#finishLargest(group.sequence);
 		});
 		// Give held mirrors the new live edge before pruning their timeline entry,
 		// so their latency guard can preserve a terminal expiry verdict.
@@ -1229,6 +1233,7 @@ export class Producer {
 	// Late subscribers do NOT replay old datagrams (best-effort, unlike the group cache).
 	#publishDatagram(datagram: Datagram): void {
 		this.#advance(datagram.sequence);
+		this.#finishLargest(datagram.sequence);
 		for (const sink of this.#sinks) {
 			sink.received.set(this.#received);
 			sink.datagrams.mutate((list) => {
@@ -1328,14 +1333,21 @@ export class Producer {
 		this.#endLargest();
 	}
 
+	// Group `sequence` holds every frame it will have: it closed cleanly, or it is a datagram.
+	// A group name fixes its content, so no legal write raises the largest past it.
+	#finishLargest(sequence: number): void {
+		if (this.#state.largest.peek()?.group === sequence) this.#largestOpen = false;
+		this.#endLargest();
+	}
+
 	// End the largest stream while the track stays open, once it can no longer advance: the
-	// declared end is reached, and every group at or above the largest takes no more frames.
+	// declared end is reached, and the largest group's content is final. Every sequence below
+	// the end raised it already, so neither a late group below it nor a recreated copy of it
+	// moves it after this.
 	#endLargest(): void {
-		if (this.#state.largestEnded.peek()) return;
+		if (this.#state.largestEnded.peek() || this.#largestOpen) return;
 		const end = this.#state.end.peek();
 		if (end === undefined || this.#received < finalSequence(end)) return;
-		const from = this.#state.largest.peek()?.group ?? 0;
-		if (!this.#cache.every(({ group }) => group.sequence < from || group.closed.peek() !== undefined)) return;
 		for (const state of [this.#state, ...this.#sinks]) state.largestEnded.set(true);
 	}
 

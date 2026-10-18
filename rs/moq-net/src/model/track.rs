@@ -1812,17 +1812,11 @@ impl TrackState {
 	}
 
 	/// Whether the largest can no longer advance while a producer is still held: the track
-	/// reached its declared end, and every group at or above the largest takes no more frames.
-	/// Every sequence below the end raised it already, so a late group below it changes nothing.
+	/// reached its declared end, and the largest group's content is final. Every sequence below
+	/// the end raised it already, and a group name fixes its content, so no legal write moves
+	/// it after this: not a late group below it, nor a recreated or fetched copy of it.
 	fn largest_settled(&self) -> bool {
-		if !self.is_complete() {
-			return false;
-		}
-		let from = self.cache.largest_group().unwrap_or(0);
-		// A fetched head writes the same group on its own, so it counts too.
-		self.lookup
-			.range(from..)
-			.all(|(_, slot)| slot.copies().all(group::Producer::is_done))
+		self.is_complete() && !self.cache.largest_open()
 	}
 
 	/// One past the highest sequence produced: where the live edge stands against the end.
@@ -2322,6 +2316,7 @@ impl Producer {
 			return Err(Error::Closed);
 		}
 		state.advance(sequence);
+		state.cache.finish_largest(sequence);
 		meter.datagram(payload.len() as u64);
 		state.push_datagram(
 			Datagram {
@@ -2377,6 +2372,7 @@ impl Producer {
 			return Err(Error::Closed);
 		}
 		state.advance(datagram.sequence);
+		state.cache.finish_largest(datagram.sequence);
 		meter.datagram(datagram.payload.len() as u64);
 		state.push_datagram(datagram);
 		let cache = state.cache.clone();
@@ -6113,6 +6109,36 @@ mod test {
 		assert_eq!(fresh.poll_largest(&noop), Poll::Ready(Some(Position::group(5))));
 	}
 
+	/// An aborted largest group can still be recreated, so the stream stays open past the
+	/// end until a copy of it finishes, and the recreated frames are reported before it ends.
+	#[test]
+	fn a_recreated_largest_group_is_reported_before_the_end() {
+		let mut producer = track_producer("test", Info::default());
+		let noop = kio::Waiter::noop();
+		let mut first = producer.create_group(group::Info { sequence: 0 }).unwrap();
+		first.write_frame(None, &b"a"[..]).unwrap();
+		first.abort(Error::Cancel).unwrap();
+		producer.finish_at(Position::group(1)).unwrap();
+
+		let mut reader = producer.consume();
+		assert_eq!(reader.poll_largest(&noop), Poll::Ready(Some(Position::group(0))));
+		assert!(
+			reader.poll_largest(&noop).is_pending(),
+			"the aborted group can be recreated"
+		);
+
+		let mut again = producer.create_group(group::Info { sequence: 0 }).unwrap();
+		for payload in [&b"a"[..], b"b"] {
+			again.write_frame(None, payload).unwrap();
+		}
+		assert_eq!(
+			reader.poll_largest(&noop),
+			Poll::Ready(Some(Position { group: 0, frame: 1 }))
+		);
+		again.finish().unwrap();
+		assert_eq!(reader.poll_largest(&noop), Poll::Ready(None));
+	}
+
 	/// A datagram raises the largest like a group, at its only object.
 	#[test]
 	fn a_datagram_raises_the_largest() {
@@ -6158,7 +6184,7 @@ mod test {
 	}
 
 	/// A finished track ends the stream while its producer is still held, once the last
-	/// group takes no more frames, and finishing that group wakes a parked reader.
+	/// group finishes, and finishing it wakes a parked reader.
 	#[test]
 	fn largest_ends_at_the_declared_end() {
 		use std::sync::atomic::{AtomicBool, Ordering};
@@ -11359,8 +11385,8 @@ mod test {
 		(live, head)
 	}
 
-	/// A fetched head still writing holds the largest stream open after the live group
-	/// and the track end, so a later head frame is reported rather than lost.
+	/// A fetched head still writing holds the largest stream open after the live copy
+	/// aborted and the track ended, so a later head frame is reported rather than lost.
 	#[moq_clock::test]
 	#[cfg(feature = "async")]
 	async fn a_fetched_head_holds_the_largest_open() {
@@ -11386,7 +11412,7 @@ mod test {
 				.unwrap();
 		}
 
-		live.finish().unwrap();
+		live.abort(Error::Cancel).unwrap();
 		producer.finish().unwrap();
 		assert!(producer.poll_largest(&noop).is_pending(), "the head still writes");
 

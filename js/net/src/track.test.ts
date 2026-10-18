@@ -1871,6 +1871,37 @@ test("a late group below the largest changes nothing", async () => {
 	producer.close();
 });
 
+// An aborted largest group can still be recreated, so the stream stays open past the end
+// until a copy of it closes cleanly, and the recreated frames are reported before it ends.
+test("a recreated largest group is reported before the end", async () => {
+	const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI });
+	const subscriber = producer.subscribe();
+	// The recreated group carries the same content, timestamps included.
+	const timestamp = Timestamp.now();
+	const first = new GroupProducer(0);
+	producer.writeGroup(first);
+	first.writeFrame({ payload: enc.encode("a"), timestamp });
+	first.close(new Error("cut"));
+	producer.finishAt({ group: 1, frame: 0 });
+
+	expect(await subscriber.largest()).toEqual({ group: 0, frame: 0 });
+	let advanced = false;
+	const next = subscriber.largest().then((largest) => {
+		advanced = true;
+		return largest;
+	});
+	await settle();
+	expect(advanced).toBe(false);
+
+	const again = new GroupProducer(0);
+	producer.writeGroup(again);
+	for (const payload of ["a", "b"]) again.writeFrame({ payload: enc.encode(payload), timestamp });
+	expect(await next).toEqual({ group: 0, frame: 1 });
+	again.close();
+	expect(await subscriber.largest()).toBeUndefined();
+	producer.close();
+});
+
 test("a datagram raises the largest", async () => {
 	const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI });
 	const subscriber = producer.subscribe();
