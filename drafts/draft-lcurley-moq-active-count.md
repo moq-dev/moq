@@ -24,7 +24,7 @@ informative:
 --- abstract
 
 This document defines an extension for MoQ Transport {{moqt}} that tells a subscriber how many NAMESPACE messages answering its SUBSCRIBE_NAMESPACE come before the first change.
-The subscriber then knows when it has caught up, instead of guessing from a quiet stream.
+The subscriber then knows when it has synced, instead of guessing from a quiet stream.
 
 --- note_Note_to_Readers
 
@@ -37,7 +37,7 @@ Submit an [issue](https://github.com/moq-dev/moq/issues) or [PR](https://github.
 {::boilerplate bcp14-tagged}
 
 A suffix is **active** on a SUBSCRIBE_NAMESPACE stream from a NAMESPACE message carrying it until a NAMESPACE_DONE message carrying it.
-A subscriber is **caught up** on a SUBSCRIBE_NAMESPACE once it has read Count ({{count}}) NAMESPACE messages after REQUEST_OK, immediately on a Count of 0.
+A subscriber is **synced** on a SUBSCRIBE_NAMESPACE once it has read Count ({{count}}) NAMESPACE messages after REQUEST_OK, immediately on a Count of 0.
 
 
 # Introduction
@@ -87,7 +87,7 @@ An endpoint MUST close the session with a PROTOCOL_VIOLATION if a REQUEST_OK ans
 # Security Considerations
 
 The count reveals no more than the NAMESPACE messages that follow it.
-A publisher that promises more than it sends can only delay the subscriber's notion of having caught up, which it could equally do by withholding NAMESPACE messages.
+A publisher that promises more than it sends can only delay the subscriber's notion of having synced, which it could equally do by withholding NAMESPACE messages.
 
 
 # IANA Considerations

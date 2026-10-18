@@ -1646,13 +1646,11 @@ impl Gate {
 		}
 	}
 
-	/// A gate on the peer's grant alone, for a peer's request its own token authorized.
+	/// Hold the request to the peer's grant alone, once its own token authorized it.
 	#[cfg_attr(not(feature = "async"), allow(dead_code))]
-	pub(crate) fn granted(handle: Handle, path: crate::PathOwned, direction: Direction) -> Self {
-		Self {
-			part: Part::Granted,
-			..Self::new(handle, path, direction)
-		}
+	pub(crate) fn named(mut self) -> Self {
+		self.part = Part::Granted;
+		self
 	}
 
 	/// A gate for a request under a namespace the peer announced, while `live` stays open:
@@ -1680,6 +1678,43 @@ impl Gate {
 				Part::Granted => true,
 				Part::Announced(live) => self.within_limit || !live.is_closed(),
 			}
+	}
+
+	/// Whether the peer's request token must be verified separately from session scope.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	pub(crate) fn token_decides(&self) -> bool {
+		self.handle.token_decides(self.direction)
+	}
+
+	/// Verify an incoming request's token against the local acceptor.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	pub(crate) fn verify(&self, token: crate::setup::Token, hold: Option<Hold>) -> RequestVerdict {
+		self.handle.verify_request(token, hold)
+	}
+
+	/// What the session allows in this gate's direction, once it may have changed since `epoch`.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	pub(crate) fn poll_permit(&self, epoch: &mut u64, waiter: &kio::Waiter) -> Poll<Permit> {
+		self.handle.poll_permit(self.direction, epoch, waiter)
+	}
+
+	/// Preserve setup ordering before the first discovery snapshot.
+	#[cfg_attr(not(feature = "async"), allow(dead_code))]
+	pub(crate) fn poll_setup_answered(&self, waiter: &kio::Waiter) -> Poll<()> {
+		self.handle.poll_setup_answered(waiter)
+	}
+
+	/// Resolve one operation under this gate without dropping the handler's refusal path.
+	#[cfg(feature = "async")]
+	pub(crate) async fn guard<T>(&mut self, operation: impl std::future::Future<Output = Result<T>>) -> Result<T> {
+		let mut operation = std::pin::pin!(operation);
+		kio::wait(|waiter| {
+			if self.poll_denied(waiter).is_ready() {
+				return Poll::Ready(Err(Error::Unauthorized));
+			}
+			waiter.poll_future(operation.as_mut())
+		})
+		.await
 	}
 
 	/// Resolve once the session no longer allows the path. A union that is still

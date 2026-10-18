@@ -80,6 +80,8 @@ private:
 	friend struct MoQOutputStatsTest;
 	bool CommitConnectionStats(const std::shared_ptr<moq::Session> &current, ConnectionStats snapshot,
 				   ConnectionStats *out);
+	// Between reconnects: name why the session is down, for CopyLastFailure.
+	void RecordReconnectFailure(const std::shared_ptr<moq::Session> &current);
 
 	// One Start()'s connection: the client dialing, the session once it connects,
 	// and the pending call whose continuation reports on it. Replaced wholesale by
@@ -159,6 +161,7 @@ private:
 	// Guards the group below, which the dock reads from the UI thread.
 	std::mutex mutex;
 	std::shared_ptr<moq::Session> session;
+	std::shared_ptr<moq::BandwidthConsumer> recv_bandwidth;
 	bool connected = false;
 	bool live = false;
 	std::string url;

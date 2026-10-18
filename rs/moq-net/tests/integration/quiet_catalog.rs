@@ -174,7 +174,7 @@ async fn resume_then_fresh(version: Version, in_process: bool) -> Result<(), Str
 		let _sub = resume_remote
 			.track("catalog.json")
 			.unwrap()
-			.subscribe(track::Subscription::default().with_start(track::Position::group(1)))
+			.subscribe(track::Subscription::default().with_groups(1..))
 			.await
 			.expect("resume subscribe");
 		moq_clock::sleep(Duration::from_secs(60)).await;
@@ -182,9 +182,9 @@ async fn resume_then_fresh(version: Version, in_process: bool) -> Result<(), Str
 
 	// Wait for the resume to reach the publisher, so the fresh reader widens it
 	// rather than opening its own floorless subscription.
-	let resumed = Some(track::Position::group(1));
+	let resumed = vec![track::Range::groups(1..)];
 	moq_clock::timeout(TIMEOUT, async {
-		while track.subscription().map(|sub| sub.start) != Some(resumed) {
+		while track.subscription().map(|sub| sub.ranges).as_ref() != Some(&resumed) {
 			track.subscription_changed().await.unwrap();
 		}
 	})

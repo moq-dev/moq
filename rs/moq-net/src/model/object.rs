@@ -5,6 +5,7 @@ use crate::Timescale;
 
 /// How the publisher serialized the keys inside immutable properties.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+// private: passthrough
 pub(crate) enum Encoding {
 	Absolute,
 	DeltaQuic,
@@ -12,12 +13,14 @@ pub(crate) enum Encoding {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+// private: passthrough
 pub(crate) enum Value {
 	Int(u64),
 	Bytes(Bytes),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+// private: passthrough
 pub(crate) struct Property {
 	pub id: u64,
 	pub value: Value,
@@ -25,6 +28,7 @@ pub(crate) struct Property {
 
 /// The common timestamp needs no vector allocation; all other properties stay opaque.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+// private: passthrough
 pub(crate) struct Properties {
 	pub timestamp: Option<u64>,
 	pub values: Vec<Property>,
@@ -64,6 +68,7 @@ impl Properties {
 
 /// Object numbering is separate from the public frame's ordinal in its group.
 #[derive(Clone, Debug)]
+// private: passthrough
 pub(crate) struct Fields {
 	pub id: u64,
 	pub properties: Properties,

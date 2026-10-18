@@ -18,7 +18,9 @@ use crate::catalog::CatalogFormat;
 /// catalog, taken from the track's [`broadcast::Info::path`](moq_net::broadcast::Info::path).
 /// A catalog that misuses that reference is rejected outright (see [`Self::poll_next`]).
 pub struct Consumer<E: CatalogExt = ()> {
-	inner: moq_json::snapshot::Consumer<Catalog<E>>,
+	// Decoded in two steps, so a catalog needing a newer reader fails with a typed error.
+	inner: moq_json::snapshot::Consumer<serde_json::Value>,
+	_ext: std::marker::PhantomData<E>,
 	format: CatalogFormat,
 	/// Path of the broadcast serving this catalog, which rendition references and the
 	/// echo prefix resolve against.
@@ -32,6 +34,7 @@ impl<E: CatalogExt> Consumer<E> {
 			format: CatalogFormat::Hang,
 			base: track.broadcast().path.clone(),
 			inner: moq_json::snapshot::Consumer::new(track, moq_json::snapshot::consumer::Config::default()),
+			_ext: std::marker::PhantomData,
 		}
 	}
 
@@ -45,6 +48,7 @@ impl<E: CatalogExt> Consumer<E> {
 			format: CatalogFormat::HangZ,
 			base: track.broadcast().path.clone(),
 			inner: moq_json::snapshot::Consumer::new(track, config),
+			_ext: std::marker::PhantomData,
 		}
 	}
 
@@ -62,7 +66,8 @@ impl<E: CatalogExt> Consumer<E> {
 	/// that from the operator while the missing rendition surfaces much later as a track that
 	/// never fills.
 	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<Catalog<E>>>> {
-		let catalog = ready!(self.inner.poll_next(waiter))?;
+		let value = ready!(self.inner.poll_next(waiter))?;
+		let catalog = value.map(Catalog::from_value).transpose()?;
 		if let Some(catalog) = catalog.as_ref() {
 			catalog.check_renditions()?;
 			check_resolvable(&self.base, catalog)?;
@@ -447,6 +452,22 @@ mod test {
 		group.finish().expect("catalog group should finish");
 
 		assert_eq!(expect_catalog(consumer.poll_next(&waiter)), catalog);
+	}
+
+	#[test]
+	fn a_newer_version_is_a_typed_refusal() {
+		let track = track_producer(hang::Catalog::DEFAULT_NAME, hang::Catalog::default_track_info());
+		let mut consumer: Consumer = Consumer::new(track.subscribe(None));
+		let mut group = track.append_group().expect("catalog group should append");
+		group
+			.write_frame(moq_net::Timestamp::ZERO, r#"{"version":5}"#)
+			.expect("catalog frame should write");
+		group.finish().expect("catalog group should finish");
+
+		assert!(matches!(
+			consumer.poll_next(&kio::Waiter::noop()),
+			Poll::Ready(Err(crate::Error::Hang(hang::Error::UnsupportedVersion(5))))
+		));
 	}
 
 	#[test]

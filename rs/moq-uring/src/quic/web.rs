@@ -429,8 +429,10 @@ struct State {
 ///
 /// [`Request::respond`] builds the web
 /// flavor; [`Session::raw`] wraps a raw-QUIC [`Connection`] with the layering
-/// disabled. Clones share the session.
+/// disabled. Clones share the session; dropping the last closes the connection.
 pub struct Session {
+	// Capsule tasks retain Web/Connection, but only public session handles own this.
+	handles: Rc<()>,
 	conn: Connection,
 	web: Option<Rc<Web>>,
 	/// What [`protocol`](web_transport_trait::poll::Session::protocol)
@@ -443,6 +445,11 @@ pub struct Session {
 }
 
 impl Session {
+	/// The wire counters the connection updates as it sends and receives.
+	pub(crate) fn wire(&self) -> moq_net::transport::Wire {
+		self.conn.wire()
+	}
+
 	/// Open a send group at `priority`, for streams to join with
 	/// [`SendStream::set_group`]. The HTTP/3 streams stay outside every
 	/// group, so they go first.
@@ -450,19 +457,17 @@ impl Session {
 		self.conn.send_group(priority)
 	}
 
-	/// Send a datagram in `group` at `order`, scheduled like one of the group's streams.
+	/// Send a datagram scheduled by `options`, like one of its group's streams.
 	///
 	/// See [`Connection::send_datagram`].
-	pub fn send_datagram(&self, payload: Bytes, group: Option<&super::SendGroup>, order: i64) -> Result<(), Error> {
+	pub fn send_datagram(&self, payload: Bytes, options: super::SendOptions<'_>) -> Result<(), Error> {
 		let Some(web) = &self.web else {
-			return self.conn.send_datagram(payload, group, order);
+			return self.conn.send_datagram(payload, options);
 		};
 		let mut framed = BytesMut::with_capacity(web.header_datagram.len() + payload.len());
 		framed.extend_from_slice(&web.header_datagram);
 		framed.extend_from_slice(&payload);
-		self.conn
-			.send_datagram(framed.freeze(), group, order)
-			.map_err(unmap_err)
+		self.conn.send_datagram(framed.freeze(), options).map_err(unmap_err)
 	}
 
 	/// Wrap a raw-QUIC connection in a session, with no
@@ -470,6 +475,7 @@ impl Session {
 	pub fn raw(conn: Connection) -> Self {
 		let protocol = web_transport_trait::poll::Session::protocol(&conn).map(str::to_owned);
 		Self {
+			handles: Rc::new(()),
 			conn,
 			web: None,
 			protocol,
@@ -480,7 +486,7 @@ impl Session {
 
 	/// Change the underlying connection's flow-control limits; see
 	/// [`Connection::set_limits`].
-	pub fn set_limits(&self, limits: super::Limits) -> Result<(), crate::Error> {
+	pub fn set_limits(&self, limits: super::Limits) -> Result<(), super::Error> {
 		self.conn.set_limits(limits)
 	}
 
@@ -543,6 +549,7 @@ impl Session {
 			.spawn(async move { read_capsules(capsules, capsule_conn, recv).await });
 
 		Self {
+			handles: Rc::new(()),
 			conn,
 			web: Some(web),
 			protocol,
@@ -563,11 +570,20 @@ impl Session {
 impl Clone for Session {
 	fn clone(&self) -> Self {
 		Self {
+			handles: self.handles.clone(),
 			conn: self.conn.clone(),
 			web: self.web.clone(),
 			protocol: self.protocol.clone(),
 			opening_uni: None,
 			opening_bi: None,
+		}
+	}
+}
+
+impl Drop for Session {
+	fn drop(&mut self) {
+		if Rc::strong_count(&self.handles) == 1 {
+			web_transport_trait::poll::Session::close(self, 0, "dropped");
 		}
 	}
 }
@@ -679,7 +695,11 @@ impl web_transport_trait::poll::Session for Session {
 	}
 
 	fn poll_send_datagram(&mut self, _: &mut Context<'_>, payload: &[u8]) -> Poll<Result<(), Self::Error>> {
-		Poll::Ready(Self::send_datagram(self, Bytes::copy_from_slice(payload), None, 0))
+		Poll::Ready(Self::send_datagram(
+			self,
+			Bytes::copy_from_slice(payload),
+			Default::default(),
+		))
 	}
 
 	fn poll_recv_datagram(&mut self, cx: &mut Context<'_>) -> Poll<Result<Bytes, Self::Error>> {

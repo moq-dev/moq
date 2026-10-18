@@ -55,7 +55,7 @@ mod connection;
 pub use crate::connection::{
     Checkpoint, Chunk, Chunks, ClosedStream, Connection, ConnectionError, ConnectionStats, Credit,
     CreditStats, Datagrams, Event, FinishError, FrameStats, PathStats, ReadError, ReadableError,
-    RecvStream, RttEstimator, SendDatagramError, SendDomain, SendGroup, SendGroups, SendStream,
+    RecvStream, RttEstimator, SendDatagramError, SendGroup, SendGroups, SendOptions, SendStream,
     ShouldTransmit, StreamEvent, Streams, UdpStats, WriteError, Written,
 };
 #[cfg(feature = "qlog")]
@@ -65,12 +65,14 @@ pub use connection::qlog::QlogStream;
 pub use rustls;
 
 mod config;
+mod limits;
 #[cfg(feature = "qlog")]
 pub use config::QlogConfig;
 pub use config::{
     AckFrequencyConfig, ClientConfig, ConfigError, EndpointConfig, IdleTimeout, MtuDiscoveryConfig,
     ServerConfig, StdSystemTime, TimeSource, TransportConfig, ValidationTokenConfig,
 };
+pub use limits::{Limits, LimitsError};
 
 pub mod crypto;
 

@@ -53,25 +53,29 @@ impl<S: wt::Stats> moq::Stats for Stats<S> {
 /// through [`GroupedSend`]. The module is private and the trait is not re-exported, so
 /// other crates can neither name nor implement it.
 ///
-/// The backend interface has no groups, so moq-net's
-/// [`send_group`](poll::Session::send_group) reaches a backend through this. A backend
-/// without groups implements it empty.
+/// The backend interface has no groups or wire counters, so moq-net's
+/// [`send_group`](poll::Session::send_group) and [`wire`](poll::Session::wire) reach a
+/// backend through this. A backend without either implements it empty.
 pub trait Grouped: backend::Session<SendStream: GroupedSend> {
+	/// The wire counters the backend updates as it sends and receives, or `None` when it has none.
+	fn wire(&self) -> Option<moq::Wire> {
+		None
+	}
+
 	/// Open a send group at `priority`, or `None` when the backend has none.
 	fn send_group(&mut self, priority: i64) -> Option<<Self::SendStream as GroupedSend>::Group> {
 		let _ = priority;
 		None
 	}
 
-	/// Send a datagram in `group` at `order`; a backend without groups ignores both and
+	/// Send a datagram scheduled by `options`; a backend without groups ignores them and
 	/// drops the datagram when it has no room.
 	fn send_datagram(
 		&mut self,
 		payload: Bytes,
-		group: Option<&<Self::SendStream as GroupedSend>::Group>,
-		order: i64,
+		options: poll::SendOptions<'_, <Self::SendStream as GroupedSend>::Group>,
 	) -> Result<(), Self::Error> {
-		let _ = (group, order);
+		let _ = options;
 		let mut cx = Context::from_waker(std::task::Waker::noop());
 		match backend::Session::poll_send_datagram(self, &mut cx, &payload) {
 			Poll::Ready(res) => res,
@@ -119,15 +123,23 @@ impl<S: Grouped<SendStream: 'static, RecvStream: 'static> + Clone + 'static> pol
 			.map_err(Error)
 			.map(|res| res.map(|(send, recv)| (SendStream(send), RecvStream(recv))))
 	}
-	fn poll_open_uni(&mut self, cx: &mut Context<'_>) -> Poll<Result<Self::SendStream, Self::Error>> {
+	fn poll_open_uni(
+		&mut self,
+		cx: &mut Context<'_>,
+		options: poll::SendOptions<'_, <S::SendStream as GroupedSend>::Group>,
+	) -> Poll<Result<Self::SendStream, Self::Error>> {
 		backend::Session::poll_open_uni(&mut self.0, cx)
 			.map_err(Error)
-			.map(|res| res.map(SendStream))
+			.map(|res| res.map(|send| SendStream(send).scheduled(options)))
 	}
-	fn poll_open_bi(&mut self, cx: &mut Context<'_>) -> Poll<Result<poll::BiStreams<Self>, Self::Error>> {
+	fn poll_open_bi(
+		&mut self,
+		cx: &mut Context<'_>,
+		options: poll::SendOptions<'_, <S::SendStream as GroupedSend>::Group>,
+	) -> Poll<Result<poll::BiStreams<Self>, Self::Error>> {
 		backend::Session::poll_open_bi(&mut self.0, cx)
 			.map_err(Error)
-			.map(|res| res.map(|(send, recv)| (SendStream(send), RecvStream(recv))))
+			.map(|res| res.map(|(send, recv)| (SendStream(send).scheduled(options), RecvStream(recv))))
 	}
 	fn send_group(&mut self, priority: i64) -> Option<<S::SendStream as GroupedSend>::Group> {
 		Grouped::send_group(&mut self.0, priority)
@@ -135,10 +147,9 @@ impl<S: Grouped<SendStream: 'static, RecvStream: 'static> + Clone + 'static> pol
 	fn send_datagram(
 		&mut self,
 		payload: Bytes,
-		group: Option<&<S::SendStream as GroupedSend>::Group>,
-		order: i64,
+		options: poll::SendOptions<'_, <S::SendStream as GroupedSend>::Group>,
 	) -> Result<(), Self::Error> {
-		Grouped::send_datagram(&mut self.0, payload, group, order).map_err(Error)
+		Grouped::send_datagram(&mut self.0, payload, options).map_err(Error)
 	}
 	fn poll_recv_datagram(&mut self, cx: &mut Context<'_>) -> Poll<Result<Bytes, Self::Error>> {
 		backend::Session::poll_recv_datagram(&mut self.0, cx).map_err(Error)
@@ -161,9 +172,22 @@ impl<S: Grouped<SendStream: 'static, RecvStream: 'static> + Clone + 'static> pol
 	fn stats(&self) -> impl moq::Stats {
 		Stats(backend::Session::stats(&self.0))
 	}
+	fn wire(&self) -> Option<moq::Wire> {
+		Grouped::wire(&self.0)
+	}
 }
 /// An outgoing WebTransport stream adapted to moq-net.
 pub struct SendStream<S>(S);
+impl<S: GroupedSend + 'static> SendStream<S> {
+	/// Schedule a newly opened stream by its options.
+	fn scheduled(mut self, options: poll::SendOptions<'_, S::Group>) -> Self {
+		GroupedSend::set_priority(&mut self.0, options.priority);
+		if let Some(group) = options.group {
+			GroupedSend::set_group(&mut self.0, group);
+		}
+		self
+	}
+}
 impl<S: GroupedSend + 'static> poll::SendStream for SendStream<S> {
 	type Error = Error<S::Error>;
 	type Group = S::Group;
@@ -362,7 +386,9 @@ mod tests {
 			poll::Session::stats(&session).rtt(),
 			Some(std::time::Duration::from_millis(7))
 		);
-		let Poll::Ready(Ok((mut send, mut recv))) = poll::Session::poll_open_bi(&mut session, &mut cx) else {
+		let Poll::Ready(Ok((mut send, mut recv))) =
+			poll::Session::poll_open_bi(&mut session, &mut cx, Default::default())
+		else {
 			panic!("open failed")
 		};
 		let mut buf = Bytes::from_static(b"abcd");

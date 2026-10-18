@@ -72,7 +72,7 @@ async fn probe(port: u16, peer: bool) -> Seen {
 		.expect("handshake");
 
 	// SETUP type, then a one-byte message holding zero parameters.
-	let mut setup = conn.open_uni().await.expect("open");
+	let mut setup = conn.open_uni(Default::default()).await.expect("open");
 	setup.write_all(&[0x01, 0x01, 0x00]).await.expect("write");
 	setup.finish().expect("finish");
 
@@ -85,7 +85,7 @@ async fn probe(port: u16, peer: bool) -> Seen {
 
 	let mut streams = Vec::new();
 	while streams.len() < PROBE {
-		let open = conn.open_uni();
+		let open = conn.open_uni(Default::default());
 		let stream = match peer {
 			true => tokio::time::timeout(TIMEOUT, open)
 				.await
@@ -165,8 +165,8 @@ async fn refused_at_load(set: impl FnOnce(&mut Config)) -> String {
 	}
 }
 
-/// A limit QUIC cannot advertise is refused at load, in `[peer.quic]` and
-/// `[quic]` alike, rather than wedging the peer or the handshake later.
+/// A limit QUIC cannot advertise or honor is refused at load, in `[peer.quic]`
+/// and `[quic]` alike, rather than wedging the peer or the handshake later.
 #[tokio::test]
 async fn unadvertisable_quic_limits_are_refused_at_load() {
 	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
@@ -182,8 +182,14 @@ async fn unadvertisable_quic_limits_are_refused_at_load() {
 	.await;
 	assert!(err.contains("[peer.quic]") && err.contains("max_streams"), "{err}");
 
-	let err = refused_at_load(|config| config.quic.max_streams = Some((1 << 60) + 1)).await;
-	assert!(err.contains("[quic]") && err.contains("max_streams"), "{err}");
+	// Zero lets the peer open nothing, so it is refused too rather than wedging the connection.
+	for max_streams in [0, (1 << 60) + 1] {
+		let err = refused_at_load(|config| config.quic.max_streams = Some(max_streams)).await;
+		assert!(
+			err.contains("[quic]") && err.contains("max_streams"),
+			"{max_streams}: {err}"
+		);
+	}
 }
 
 /// A bare QUIC server speaking the dial template's ALPNs: the dialer's stream
@@ -253,7 +259,7 @@ async fn cluster_dials_widen_a_plain_client() {
 
 	let mut streams = Vec::new();
 	while streams.len() < PROBE {
-		match conn.open_uni().now_or_never() {
+		match conn.open_uni(Default::default()).now_or_never() {
 			Some(stream) => streams.push(stream.expect("open")),
 			None => break,
 		}

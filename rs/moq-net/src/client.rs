@@ -227,6 +227,7 @@ impl Client {
 			start.recv_bandwidth,
 			crate::driver::Protocol::Lite(Box::new(start.driver)),
 			crate::session::Handles {
+				stats: self.stats.clone(),
 				goaway: start.goaway,
 				auth: start.auth,
 				estimate: Some(start.estimate),
@@ -320,6 +321,7 @@ impl Client {
 					None,
 					crate::driver::Protocol::Ietf(protocol),
 					crate::session::Handles {
+						stats: self.stats.clone(),
 						goaway,
 						auth,
 						estimate: None,
@@ -493,7 +495,12 @@ impl Client {
 			version,
 			recv_bw,
 			protocol,
-			crate::session::Handles { goaway, auth, estimate },
+			crate::session::Handles {
+				stats: self.stats.clone(),
+				goaway,
+				auth,
+				estimate,
+			},
 		))
 	}
 }
@@ -612,11 +619,16 @@ mod tests {
 		fn poll_open_bi(
 			&mut self,
 			_cx: &mut Context<'_>,
+			_: crate::transport::poll::SendOptions<'_, crate::transport::poll::Ungrouped>,
 		) -> Poll<Result<(Self::SendStream, Self::RecvStream), Self::Error>> {
 			Poll::Ready(self.state.control_stream.lock().unwrap().take().ok_or(FakeError))
 		}
 
-		fn poll_open_uni(&mut self, _cx: &mut Context<'_>) -> Poll<Result<Self::SendStream, Self::Error>> {
+		fn poll_open_uni(
+			&mut self,
+			_cx: &mut Context<'_>,
+			_: crate::transport::poll::SendOptions<'_, crate::transport::poll::Ungrouped>,
+		) -> Poll<Result<Self::SendStream, Self::Error>> {
 			Poll::Pending
 		}
 
@@ -627,8 +639,7 @@ mod tests {
 		fn send_datagram(
 			&mut self,
 			_: Bytes,
-			_: Option<&crate::transport::poll::Ungrouped>,
-			_: i64,
+			_: crate::transport::poll::SendOptions<'_, crate::transport::poll::Ungrouped>,
 		) -> Result<(), Self::Error> {
 			Ok(())
 		}
@@ -998,8 +1009,9 @@ mod tests {
 		fn poll_open_bi(
 			&mut self,
 			cx: &mut Context<'_>,
+			options: crate::transport::poll::SendOptions<'_, crate::transport::poll::Ungrouped>,
 		) -> Poll<Result<(Self::SendStream, Self::RecvStream), Self::Error>> {
-			self.inner.poll_open_bi(cx).map_ok(|(send, recv)| {
+			self.inner.poll_open_bi(cx, options).map_ok(|(send, recv)| {
 				(
 					LocalSend {
 						inner: send,
@@ -1013,8 +1025,12 @@ mod tests {
 			})
 		}
 
-		fn poll_open_uni(&mut self, cx: &mut Context<'_>) -> Poll<Result<Self::SendStream, Self::Error>> {
-			self.inner.poll_open_uni(cx).map_ok(|stream| LocalSend {
+		fn poll_open_uni(
+			&mut self,
+			cx: &mut Context<'_>,
+			options: crate::transport::poll::SendOptions<'_, crate::transport::poll::Ungrouped>,
+		) -> Poll<Result<Self::SendStream, Self::Error>> {
+			self.inner.poll_open_uni(cx, options).map_ok(|stream| LocalSend {
 				inner: stream,
 				_local: self._local.clone(),
 			})
@@ -1027,10 +1043,9 @@ mod tests {
 		fn send_datagram(
 			&mut self,
 			payload: Bytes,
-			group: Option<&crate::transport::poll::Ungrouped>,
-			order: i64,
+			options: crate::transport::poll::SendOptions<'_, crate::transport::poll::Ungrouped>,
 		) -> Result<(), Self::Error> {
-			self.inner.send_datagram(payload, group, order)
+			self.inner.send_datagram(payload, options)
 		}
 
 		fn poll_recv_datagram(&mut self, cx: &mut Context<'_>) -> Poll<Result<Bytes, Self::Error>> {

@@ -20,6 +20,7 @@ Exit status is 0 when every source stream is in the capture without a hole or a 
 """
 
 import json
+import os
 import subprocess
 import sys
 from collections import Counter
@@ -57,8 +58,12 @@ def cuts(source: Span, capture: Span, frame: Fraction) -> list[str]:
 
 def probe(path: str) -> dict[str, tuple[dict, list[int], Span]]:
     """Each audio and video stream by PID: the stream, its decode timestamps, and its span."""
+    # Probe the whole file, not FFmpeg's first 5 MB: a stream whose first frame comes after that
+    # is never described, so the second frame of its first PES repeats the first's timestamp
+    # and every later one in that PES runs a frame behind, which reads as a hole.
     report = json.loads(subprocess.run(
-        ["ffprobe", "-v", "error", "-show_entries", "stream=index,id,codec_type,codec_name,time_base:packet=stream_index,dts,pts",
+        ["ffprobe", "-v", "error", "-probesize", str(os.path.getsize(path)), "-analyzeduration", str(2**62),
+         "-show_entries", "stream=index,id,codec_type,codec_name,time_base:packet=stream_index,dts,pts",
          "-of", "json", path],
         check=True, capture_output=True, text=True,
     ).stdout)

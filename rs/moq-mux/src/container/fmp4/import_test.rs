@@ -1,6 +1,6 @@
 use futures::FutureExt;
 use hang::catalog::Container;
-use mp4_atom::{Decode, Encode};
+use mp4_atom::{Atom, Decode, Encode};
 
 /// A drift budget no test timeline comes close to, so every group is read.
 ///
@@ -64,6 +64,128 @@ fn decode_init(init: &[u8]) -> (mp4_atom::Ftyp, mp4_atom::Moov) {
 	let ftyp = mp4_atom::Ftyp::decode(&mut cursor).expect("invalid ftyp");
 	let moov = mp4_atom::Moov::decode(&mut cursor).expect("invalid moov");
 	(ftyp, moov)
+}
+
+fn video_config(codec: mp4_atom::Codec) -> hang::catalog::VideoConfig {
+	let (ftyp, mut moov) = decode_init(include_bytes!("test_data/bbb.mp4"));
+	let trak = moov
+		.trak
+		.iter_mut()
+		.find(|trak| matches!(trak.mdia.minf.stbl.stsd.codecs.first(), Some(mp4_atom::Codec::Avc1(_))))
+		.unwrap();
+	trak.mdia.minf.stbl.stsd.codecs = vec![codec];
+	let mut init = Vec::new();
+	ftyp.encode(&mut init).unwrap();
+	moov.encode(&mut init).unwrap();
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+	let mut import = super::Import::new(broadcast, catalog.reserve());
+	import.decode(&init).unwrap();
+	import.finish().unwrap();
+	catalog.snapshot().video.renditions.values().next().unwrap().clone()
+}
+
+#[test]
+fn sample_entries_resolve_display_aspect() {
+	use crate::codec::{h264, h265};
+	for (avc, hevc, expected) in [
+		(h264::fixtures::SPS_IPB, h265::fixtures::SPS_NVENC, (None, None)),
+		(
+			h264::fixtures::SPS_ANAMORPHIC,
+			h265::fixtures::SPS_ANAMORPHIC,
+			(Some(16), Some(9)),
+		),
+	] {
+		let avcc = mp4_atom::Avcc::new(avc, h264::fixtures::PPS).unwrap();
+		let mut bytes = h265::build_hvcc(
+			&[bytes::Bytes::from_static(h265::fixtures::VPS)],
+			&[bytes::Bytes::from_static(hevc)],
+			&[bytes::Bytes::from_static(h265::fixtures::PPS)],
+		)
+		.unwrap();
+		let hvcc = mp4_atom::Hvcc::decode_body(&mut bytes).unwrap();
+		let mut avc_visual = mp4_atom::Visual {
+			width: 1440,
+			height: 1080,
+			..Default::default()
+		};
+		let mut hevc_visual = avc_visual.clone();
+		if expected == (None, None) {
+			avc_visual.width = 64;
+			avc_visual.height = 64;
+			hevc_visual.width = 1280;
+			hevc_visual.height = 720;
+		}
+		for codec in [
+			mp4_atom::Codec::Avc1(mp4_atom::Avc1 {
+				avcc: avcc.clone(),
+				visual: avc_visual.clone(),
+				..Default::default()
+			}),
+			mp4_atom::Codec::Avc3(mp4_atom::Avc3 {
+				avcc: avcc.clone(),
+				visual: avc_visual.clone(),
+				..Default::default()
+			}),
+			mp4_atom::Codec::Hvc1(mp4_atom::Hvc1 {
+				hvcc: hvcc.clone(),
+				visual: hevc_visual.clone(),
+				..Default::default()
+			}),
+			mp4_atom::Codec::Hev1(mp4_atom::Hev1 {
+				hvcc: hvcc.clone(),
+				visual: hevc_visual.clone(),
+				..Default::default()
+			}),
+		] {
+			let config = video_config(codec);
+			assert_eq!(
+				(config.display_aspect_width, config.display_aspect_height),
+				expected,
+				"{}",
+				config.codec
+			);
+		}
+	}
+}
+
+#[test]
+fn in_band_entries_without_parameter_sets_keep_visual_dimensions() {
+	let mut avcc =
+		mp4_atom::Avcc::new(crate::codec::h264::fixtures::SPS_IPB, crate::codec::h264::fixtures::PPS).unwrap();
+	avcc.sequence_parameter_sets.clear();
+	avcc.picture_parameter_sets.clear();
+	let mut bytes = crate::codec::h265::fixtures::hvcc();
+	let mut hvcc = mp4_atom::Hvcc::decode_body(&mut bytes).unwrap();
+	hvcc.arrays.clear();
+	let visual = mp4_atom::Visual {
+		width: 720,
+		height: 576,
+		..Default::default()
+	};
+	for codec in [
+		mp4_atom::Codec::Avc3(mp4_atom::Avc3 {
+			avcc,
+			visual: visual.clone(),
+			..Default::default()
+		}),
+		mp4_atom::Codec::Hev1(mp4_atom::Hev1 {
+			hvcc,
+			visual,
+			..Default::default()
+		}),
+	] {
+		let config = video_config(codec);
+		assert_eq!((config.coded_width, config.coded_height), (Some(720), Some(576)));
+		assert_eq!(
+			(config.display_aspect_width, config.display_aspect_height),
+			(None, None)
+		);
+		assert!(
+			matches!(&config.codec, hang::catalog::VideoCodec::H264(h264) if h264.inline)
+				|| matches!(&config.codec, hang::catalog::VideoCodec::H265(h265) if h265.in_band)
+		);
+	}
 }
 
 #[test]
@@ -269,6 +391,12 @@ fn test_av1_catalog() {
 
 	let video = catalog.video.renditions.values().next().unwrap();
 	assert!(video.codec.to_string().starts_with("av01."), "codec: {}", video.codec);
+	// The av1C's sequence header leaves the code points unspecified, but AV1 always states the range.
+	let color = video.color.as_ref().expect("the range");
+	assert_eq!(
+		(color.primaries, color.range),
+		(None, Some(hang::catalog::Range::Limited))
+	);
 	assert!(matches!(video.container, Container::Cmaf { .. }));
 
 	let Container::Cmaf { init, .. } = &video.container else {
@@ -1521,7 +1649,8 @@ async fn import_refuses_a_restart() {
 }
 
 /// Skipping sequences (an HLS media-sequence gap) is not a new timeline: a rewound decode time
-/// after a seek is still refused. Only a signalled discontinuity starts the comparison afresh.
+/// after a seek is still refused. A signalled discontinuity skips the import's own comparison,
+/// but the track still refuses a group that starts before the one before it.
 #[tokio::test]
 async fn seek_keeps_the_decode_time_until_a_discontinuity() {
 	let (init, _, _) = bbb_init();
@@ -1543,8 +1672,11 @@ async fn seek_keeps_the_decode_time_until_a_discontinuity() {
 
 	fmp4.discontinuity();
 	fmp4.seek(200).unwrap();
-	fmp4.decode(&live_session(0, 5))
-		.expect("a signalled discontinuity starts a new timeline");
+	let err = fmp4.decode(&live_session(0, 5)).unwrap_err();
+	assert!(
+		matches!(err, crate::Error::Moq(moq_net::Error::TimestampMismatch)),
+		"{err:?}"
+	);
 }
 
 /// The catalog is first published at the first fragment, carrying the clock that fragment
@@ -2231,4 +2363,175 @@ async fn ttml_body_begins_at_the_serialized_frame_timestamp() {
 		payload.contains(r#"<body begin="00:01:40.000011" end="00:01:44.000011">"#),
 		"{payload}"
 	);
+}
+
+/// An avc1 init whose avcC carries `sps` and whose sample entry carries the `colr` box for `color`.
+fn avc1_init(sps: &'static [u8], color: Option<hang::catalog::Color>) -> bytes::Bytes {
+	use crate::codec::h264::fixtures::PPS;
+	use bytes::Bytes;
+	use hang::catalog::{H264, VideoConfig};
+
+	let avcc = crate::codec::h264::build_avcc(&[Bytes::from_static(sps)], &[Bytes::from_static(PPS)]).unwrap();
+	let mut config = VideoConfig::new(H264 {
+		profile: 0x42,
+		constraints: 0xc0,
+		level: 0x0a,
+		inline: false,
+	});
+	config.coded_width = Some(64);
+	config.coded_height = Some(64);
+	config.color = color;
+	let trak = super::synthesize_video_trak(1, 90_000, &config, Some(&avcc)).unwrap();
+	let trex = mp4_atom::Trex {
+		track_id: 1,
+		default_sample_description_index: 1,
+		..Default::default()
+	};
+	super::encode_init(None, vec![trak], vec![trex]).unwrap()
+}
+
+fn color(primaries: u8, transfer: u8, matrix: u8, full_range: bool) -> hang::catalog::Color {
+	crate::codec::color::cicp(primaries, transfer, matrix, Some(full_range)).unwrap()
+}
+
+/// A colr box the SPS disagrees with loses to the SPS: the encoder signalled it.
+#[test]
+fn sps_color_outranks_colr() {
+	let catalog = run_fmp4(&avc1_init(
+		crate::codec::h264::fixtures::SPS_BT709,
+		Some(color(9, 16, 9, true)),
+	));
+	let video = catalog.video.renditions.values().next().unwrap();
+	assert_eq!(video.color, Some(color(1, 1, 1, false)));
+}
+
+/// A colr box fills what the SPS leaves unspecified.
+#[test]
+fn colr_fills_what_the_sps_leaves_unsaid() {
+	let catalog = run_fmp4(&avc1_init(
+		crate::codec::h264::fixtures::SPS_IPB,
+		Some(color(9, 16, 9, true)),
+	));
+	let video = catalog.video.renditions.values().next().unwrap();
+	assert_eq!(video.color, Some(color(9, 16, 9, true)));
+}
+
+/// A source that signals no colour adds no catalog field and no colr box.
+#[test]
+fn unsignalled_color_stays_absent() {
+	let init = avc1_init(crate::codec::h264::fixtures::SPS_IPB, None);
+	let (_, moov) = decode_init(&init);
+	let mp4_atom::Codec::Avc1(avc1) = &moov.trak[0].mdia.minf.stbl.stsd.codecs[0] else {
+		panic!("expected avc1");
+	};
+	assert_eq!(avc1.colr, None);
+
+	let catalog = run_fmp4(&init);
+	let video = catalog.video.renditions.values().next().unwrap();
+	assert_eq!(video.color, None);
+	assert!(serde_json::to_value(video).unwrap().get("color").is_none());
+}
+
+/// An SDR init imported to the catalog and exported again is byte-identical.
+#[test]
+fn sdr_color_round_trips_byte_identical() {
+	let init = avc1_init(crate::codec::h264::fixtures::SPS_BT709, Some(color(1, 1, 1, false)));
+	let catalog = run_fmp4(&init);
+	let video = catalog.video.renditions.values().next().unwrap();
+	assert_eq!(video.color, Some(color(1, 1, 1, false)));
+
+	let trak = super::synthesize_video_trak(1, 90_000, video, video.description.as_deref()).unwrap();
+	let trex = mp4_atom::Trex {
+		track_id: 1,
+		default_sample_description_index: 1,
+		..Default::default()
+	};
+	assert_eq!(super::encode_init(None, vec![trak], vec![trex]).unwrap(), init);
+}
+
+/// VP8's vpcC carries its colour as VP9's does: export writes the catalog's, unspecified when
+/// unknown rather than mp4-atom's BT.709 default, and import reads it back.
+#[test]
+fn vp8_color_round_trips_through_vpcc() {
+	use hang::catalog::{VideoCodec, VideoConfig};
+
+	let init = |color: Option<hang::catalog::Color>| {
+		let mut config = VideoConfig::new(VideoCodec::VP8);
+		config.coded_width = Some(64);
+		config.coded_height = Some(64);
+		config.color = color;
+		let trak = super::synthesize_video_trak(1, 90_000, &config, None).unwrap();
+		let trex = mp4_atom::Trex {
+			track_id: 1,
+			default_sample_description_index: 1,
+			..Default::default()
+		};
+		super::encode_init(None, vec![trak], vec![trex]).unwrap()
+	};
+
+	let catalog = run_fmp4(&init(Some(color(9, 18, 9, true))));
+	let video = catalog.video.renditions.values().next().unwrap();
+	assert_eq!(video.color, Some(color(9, 18, 9, true)));
+
+	// Without a catalog colour, only vpcC's always-explicit range survives, never a made-up BT.709.
+	let catalog = run_fmp4(&init(None));
+	let color = catalog.video.renditions.values().next().unwrap().color.clone().unwrap();
+	assert_eq!((color.primaries, color.transfer, color.matrix), (None, None, None));
+}
+
+/// A VP9 codec string holding a container's placeholder BT.709 does not contradict the resolved
+/// colour: export writes the catalog colour into vpcC too, so a reimport keeps it.
+#[test]
+fn vp9_vpcc_carries_the_resolved_color() {
+	use hang::catalog::{VP9, VideoConfig};
+
+	let mut config = VideoConfig::new(VP9 {
+		profile: 0,
+		level: 0,
+		bit_depth: 8,
+		chroma_subsampling: 1,
+		color_primaries: 1,
+		transfer_characteristics: 1,
+		matrix_coefficients: 1,
+		full_range: false,
+	});
+	config.coded_width = Some(64);
+	config.coded_height = Some(64);
+	let reimport = |resolved: hang::catalog::Color| {
+		let mut config = config.clone();
+		config.color = Some(resolved);
+		let trak = super::synthesize_video_trak(1, 90_000, &config, None).unwrap();
+		let trex = mp4_atom::Trex {
+			track_id: 1,
+			default_sample_description_index: 1,
+			..Default::default()
+		};
+		let catalog = run_fmp4(&super::encode_init(None, vec![trak], vec![trex]).unwrap());
+		catalog.video.renditions.values().next().unwrap().color.clone()
+	};
+
+	assert_eq!(reimport(color(9, 16, 9, false)), Some(color(9, 16, 9, false)));
+
+	// A partial colour leaves the rest unspecified, never the placeholder's BT.709.
+	let mut primaries = hang::catalog::Color::default();
+	primaries.primaries = Some(9);
+	let back = reimport(primaries).unwrap();
+	assert_eq!((back.primaries, back.transfer, back.matrix), (Some(9), None, None));
+}
+
+/// QuickTime's `nclc` carries the code points without a range, and keeps them; a code point past
+/// 255 is refused.
+#[test]
+fn colr_nclc_keeps_its_code_points() {
+	let nclc = mp4_atom::Colr::Nclc {
+		colour_primaries: 9,
+		transfer_characteristics: 16,
+		matrix_coefficients: 9,
+	};
+	let color = super::colr_color(&nclc).unwrap().unwrap();
+	assert_eq!(
+		(color.primaries, color.transfer, color.matrix, color.range),
+		(Some(9), Some(16), Some(9), None)
+	);
+	assert!(super::colr_color(&mp4_atom::Colr::new(300, 1, 1, false).unwrap()).is_err());
 }

@@ -16,6 +16,8 @@ from moq_ffi import (
     MoqConnectionStats,
     MoqDatagram,
     MoqFrame,
+    MoqOrder,
+    MoqRange,
     MoqSubscription,
     MoqTrackInfo,
 )
@@ -91,21 +93,22 @@ class Subscription:
     """Subscriber-side delivery preferences, mirroring moq-net's ``track::Subscription``.
 
     ``max_delay`` is how far a non-latest group may fall behind before it is skipped;
-    zero skips at once. ``group_start`` is a floor and ``group_end`` an exclusive end, ``None`` for
-    no bound.
+    zero skips at once, and it caps every range. ``ranges`` are the spans of the track to
+    deliver, ``None`` for everything ``max_delay`` still allows. ``order`` is which pending
+    group the publisher sends first, ``None`` for newest first.
     """
 
     priority: int = 0
     max_delay: timedelta = timedelta(0)
-    group_start: int | None = None
-    group_end: int | None = None
+    ranges: Sequence[MoqRange] | None = None
+    order: MoqOrder | None = None
 
     def _ffi(self) -> MoqSubscription:
         return MoqSubscription(
             priority=self.priority,
             max_delay_us=_to_us(self.max_delay, "max_delay"),
-            group_start=self.group_start,
-            group_end=self.group_end,
+            ranges=None if self.ranges is None else list(self.ranges),
+            order=self.order,
         )
 
 
@@ -176,24 +179,25 @@ class ConnectionStats:
 
     rtt: timedelta | None
     estimated_send_rate_bps: int | None
-    estimated_recv_rate_bps: int | None
     bytes_sent: int | None
     bytes_received: int | None
     bytes_lost: int | None
     packets_sent: int | None
     packets_received: int | None
     packets_lost: int | None
+    version: str | None = None
+    """The negotiated protocol version, spelled like ``Client(versions=...)``."""
 
     @staticmethod
     def _from_ffi(stats: MoqConnectionStats) -> ConnectionStats:
         return ConnectionStats(
             rtt=None if stats.rtt_us is None else _from_us(stats.rtt_us),
             estimated_send_rate_bps=stats.estimated_send_rate_bps,
-            estimated_recv_rate_bps=stats.estimated_recv_rate_bps,
             bytes_sent=stats.bytes_sent,
             bytes_received=stats.bytes_received,
             bytes_lost=stats.bytes_lost,
             packets_sent=stats.packets_sent,
             packets_received=stats.packets_received,
             packets_lost=stats.packets_lost,
+            version=stats.version,
         )

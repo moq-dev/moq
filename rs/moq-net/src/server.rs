@@ -194,6 +194,7 @@ impl Server {
 			start.recv_bandwidth,
 			crate::driver::Protocol::Lite(Box::new(start.driver)),
 			crate::session::Handles {
+				stats: self.stats.clone(),
 				goaway: start.goaway,
 				auth: start.auth,
 				estimate: Some(start.estimate),
@@ -649,6 +650,7 @@ where
 				None,
 				crate::driver::Protocol::Ietf(protocol),
 				crate::session::Handles {
+					stats: server.stats.clone(),
 					goaway,
 					auth,
 					estimate: None,
@@ -784,7 +786,12 @@ where
 				version,
 				recv_bw,
 				protocol,
-				crate::session::Handles { goaway, auth, estimate },
+				crate::session::Handles {
+					stats: server.stats.clone(),
+					goaway,
+					auth,
+					estimate,
+				},
 			))
 		}
 		.maybe_boxed()
@@ -1060,12 +1067,14 @@ mod tests {
 		fn poll_open_bi(
 			&mut self,
 			_cx: &mut std::task::Context<'_>,
+			_: crate::transport::poll::SendOptions<'_, crate::transport::poll::Ungrouped>,
 		) -> std::task::Poll<Result<(Self::SendStream, Self::RecvStream), Self::Error>> {
 			std::task::Poll::Pending
 		}
 		fn poll_open_uni(
 			&mut self,
 			_cx: &mut std::task::Context<'_>,
+			_: crate::transport::poll::SendOptions<'_, crate::transport::poll::Ungrouped>,
 		) -> std::task::Poll<Result<Self::SendStream, Self::Error>> {
 			std::task::Poll::Pending
 		}
@@ -1076,8 +1085,7 @@ mod tests {
 		fn send_datagram(
 			&mut self,
 			_: Bytes,
-			_: Option<&crate::transport::poll::Ungrouped>,
-			_: i64,
+			_: crate::transport::poll::SendOptions<'_, crate::transport::poll::Ungrouped>,
 		) -> Result<(), Self::Error> {
 			Ok(())
 		}

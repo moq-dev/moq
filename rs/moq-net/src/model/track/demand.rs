@@ -1,39 +1,50 @@
 //! Incremental demand, separate from the track's cached content.
 use std::{collections::BTreeMap, sync::Arc, task::Poll, time::Duration};
 
-use super::{NewGroup, Order, Position, Subscription, TrackState, clamp_combined};
+use super::{NewGroup, Order, Subscription, TrackState, clamp_combined};
+
+mod ranges;
+use ranges::Ranges;
 
 #[derive(Default)]
 pub(super) struct Subscriptions {
 	count: usize,
 	priority: BTreeMap<u8, usize>,
 	max_delay: BTreeMap<Duration, usize>,
-	start: BTreeMap<Option<Position>, usize>,
-	end: BTreeMap<Option<Position>, usize>,
+	ranges: Ranges,
 	descending: usize,
 	/// Only the subscribers holding a request.
 	new_group: BTreeMap<NewGroup, usize>,
 	waiters: kio::WaiterList,
 }
 
+/// Everything the aggregate holds besides its ranges.
+type Scalars = (u8, Duration, Order, Option<NewGroup>);
+
 impl Subscriptions {
 	pub(super) fn combined(&self) -> Option<Subscription> {
-		(self.count != 0).then(|| Subscription {
-			priority: *self.priority.last_key_value().unwrap().0,
-			max_delay: *self.max_delay.last_key_value().unwrap().0,
-			start: *self.start.first_key_value().unwrap().0,
-			// None absorbs a bounded end, regardless of its map ordering.
-			end: if self.end.contains_key(&None) {
-				None
-			} else {
-				*self.end.last_key_value().unwrap().0
-			},
-			order: if self.descending == 0 {
-				Order::Ascending
-			} else {
-				Order::Descending
-			},
-			new_group: self.new_group.last_key_value().map(|(new_group, _)| *new_group),
+		let (priority, max_delay, order, new_group) = self.scalars()?;
+		Some(Subscription {
+			priority,
+			max_delay,
+			ranges: self.ranges.union(),
+			order,
+			new_group,
+		})
+	}
+
+	fn scalars(&self) -> Option<Scalars> {
+		(self.count != 0).then(|| {
+			(
+				*self.priority.last_key_value().unwrap().0,
+				*self.max_delay.last_key_value().unwrap().0,
+				if self.descending == 0 {
+					Order::Ascending
+				} else {
+					Order::Descending
+				},
+				self.new_group.last_key_value().map(|(new_group, _)| *new_group),
+			)
 		})
 	}
 
@@ -55,32 +66,41 @@ impl Subscriptions {
 		}
 	}
 
-	/// Mutate counts under one lock, taking wakes only when an extreme changes.
+	/// Mutate counts under one lock, taking wakes only when the aggregate changes.
 	fn replace(&mut self, old: Option<&Subscription>, new: Option<&Subscription>) -> kio::WaiterList {
-		let prev = self.combined();
-		if let Some(old) = old {
-			remove(&mut self.priority, old.priority);
-			remove(&mut self.max_delay, old.max_delay);
-			remove(&mut self.start, old.start);
-			remove(&mut self.end, old.end);
-			self.descending -= usize::from(old.order == Order::Descending);
-			if let Some(new_group) = old.new_group {
-				remove(&mut self.new_group, new_group);
-			}
-			self.count -= 1;
-		}
+		let prev = self.scalars();
+		// New ranges count before old ones leave, so a range both hold never reads as gone.
+		let mut reshaped = false;
+		let moved = old.map(|old| &old.ranges) != new.map(|new| &new.ranges);
 		if let Some(new) = new {
 			add(&mut self.priority, new.priority);
 			add(&mut self.max_delay, new.max_delay);
-			add(&mut self.start, new.start);
-			add(&mut self.end, new.end);
+			if moved {
+				for range in &new.ranges {
+					reshaped |= self.ranges.add(*range);
+				}
+			}
 			self.descending += usize::from(new.order == Order::Descending);
 			if let Some(new_group) = new.new_group {
 				add(&mut self.new_group, new_group);
 			}
 			self.count += 1;
 		}
-		if self.combined() != prev {
+		if let Some(old) = old {
+			remove(&mut self.priority, old.priority);
+			remove(&mut self.max_delay, old.max_delay);
+			if moved {
+				for range in &old.ranges {
+					reshaped |= self.ranges.remove(*range);
+				}
+			}
+			self.descending -= usize::from(old.order == Order::Descending);
+			if let Some(new_group) = old.new_group {
+				remove(&mut self.new_group, new_group);
+			}
+			self.count -= 1;
+		}
+		if reshaped || self.scalars() != prev {
 			self.waiters.take()
 		} else {
 			Default::default()
@@ -93,21 +113,27 @@ impl Subscriptions {
 	}
 }
 
-fn add<T: Ord>(counts: &mut BTreeMap<T, usize>, value: T) {
-	*counts.entry(value).or_default() += 1;
+/// Count `value`, returning whether it is new.
+fn add<T: Ord>(counts: &mut BTreeMap<T, usize>, value: T) -> bool {
+	let count = counts.entry(value).or_default();
+	*count += 1;
+	*count == 1
 }
 
-fn remove<T: Ord>(counts: &mut BTreeMap<T, usize>, value: T) {
+/// Uncount `value`, returning whether that was its last.
+fn remove<T: Ord>(counts: &mut BTreeMap<T, usize>, value: T) -> bool {
 	let count = counts.get_mut(&value).expect("registered contribution");
 	*count -= 1;
-	if *count == 0 {
+	let last = *count == 0;
+	if last {
 		counts.remove(&value);
 	}
+	last
 }
 
 /// Clones share one contribution, including controls and pending subscriptions.
 #[derive(Clone)]
-pub(crate) struct Preferences(Arc<Preference>);
+pub(in crate::model) struct Preferences(Arc<Preference>);
 
 struct Preference {
 	value: kio::Producer<Subscription>,
@@ -170,16 +196,20 @@ impl Preferences {
 }
 
 impl Preferences {
-	pub(crate) fn same_channel(&self, other: &Self) -> bool {
+	pub(in crate::model) fn same_channel(&self, other: &Self) -> bool {
 		self.0.value.same_channel(&other.0.value)
 	}
-	pub(crate) fn read(&self) -> kio::Ref<'_, Subscription> {
+	pub(in crate::model) fn read(&self) -> kio::Ref<'_, Subscription> {
 		self.0.value.read()
 	}
-	pub(crate) fn consume(&self) -> kio::Consumer<Subscription> {
+	pub(in crate::model) fn consume(&self) -> kio::Consumer<Subscription> {
 		self.0.value.consume()
 	}
-	pub(crate) fn poll_ref<F, R>(&self, waiter: &kio::Waiter, f: F) -> Poll<Result<R, kio::Ref<'_, Subscription>>>
+	pub(in crate::model) fn poll_ref<F, R>(
+		&self,
+		waiter: &kio::Waiter,
+		f: F,
+	) -> Poll<Result<R, kio::Ref<'_, Subscription>>>
 	where
 		F: FnOnce(&kio::Ref<'_, Subscription>) -> Poll<R>,
 	{
@@ -208,6 +238,8 @@ impl From<kio::Producer<Subscription>> for Preferences {
 
 #[cfg(test)]
 mod tests {
+	use super::super::super::subscription::Combined;
+	use super::super::{Anchor, Position, Range};
 	use super::*;
 	use rand::{RngExt, SeedableRng};
 	use std::sync::atomic::{AtomicUsize, Ordering};
@@ -221,17 +253,24 @@ mod tests {
 		let mut slots: Vec<Option<(super::super::Subscriber, Subscription)>> = (0..64).map(|_| None).collect();
 		for step in 0..10_000 {
 			let index = rng.random_range(0..slots.len());
-			let position = |rng: &mut rand::rngs::StdRng| {
-				rng.random_bool(0.75).then(|| Position {
+			let anchor = |rng: &mut rand::rngs::StdRng| match rng.random_range(0..4) {
+				0 => Anchor::Relative(rng.random_range(0..3)),
+				1 => Anchor::Relative(u64::MAX),
+				_ => Anchor::Absolute(Position {
 					group: rng.random_range(0..8),
 					frame: rng.random_range(0..4),
-				})
+				}),
 			};
+			let ranges: Vec<Range> = (0..rng.random_range(0..3))
+				.map(|_| Range {
+					start: anchor(&mut rng),
+					end: rng.random_bool(0.75).then(|| anchor(&mut rng)),
+				})
+				.collect();
 			let next = Subscription {
 				priority: rng.random_range(0..8),
 				max_delay: Duration::from_millis(rng.random_range(0..8)),
-				start: position(&mut rng),
-				end: position(&mut rng),
+				ranges,
 				order: if rng.random_bool(0.5) {
 					Order::Ascending
 				} else {
@@ -254,12 +293,11 @@ mod tests {
 				}
 				(slot, _) => *slot = None,
 			}
-			let mut expected = None;
+			let mut expected = Combined::default();
 			for (_, value) in slots.iter().flatten() {
-				if let Poll::Ready(next) = value.poll_combined(&expected) {
-					expected = Some(next);
-				}
+				expected.add(value);
 			}
+			let expected = expected.finish();
 			assert_eq!(
 				producer.subscription(),
 				super::super::public(expected.clone()),

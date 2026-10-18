@@ -469,6 +469,8 @@ struct Side {
 	stats_reads: AtomicUsize,
 	/// Whether reading the stats panics; see [`MockSession::panic_on_stats`].
 	panic_on_stats: AtomicBool,
+	/// The wire counters [`poll::Session::wire`] exposes, which a test updates as a transport would.
+	wire: moq_net::transport::Wire,
 }
 
 /// The connection statistics a [`MockSession`] reports. Unavailable by default.
@@ -553,10 +555,11 @@ impl poll::Session for MockSession {
 	fn poll_open_bi(
 		&mut self,
 		cx: &mut Context<'_>,
+		options: poll::SendOptions<'_, poll::Ungrouped>,
 	) -> Poll<Result<(Self::SendStream, Self::RecvStream), Self::Error>> {
 		let link = &self.side.out;
 		let mut lines = link.bi.lock().unwrap();
-		let (send, recv) = ready!(self.inner.poll_open_bi(cx))?;
+		let (send, recv) = ready!(self.inner.poll_open_bi(cx, Default::default()))?;
 		let held = link.held_bi.lock().unwrap().is_some();
 		let forward = Arc::new(Line {
 			held,
@@ -570,19 +573,24 @@ impl poll::Session for MockSession {
 		drop(lines);
 
 		let mut send = self.send(send, forward);
+		poll::SendStream::set_priority(&mut send, options.priority);
 		send.withhold_fin = Some(self.side.withhold_bidi_fins.clone());
 		send.first_byte = Some(self.side.bidi_types.clone());
 		Poll::Ready(Ok((send, self.recv(recv, back))))
 	}
 
-	fn poll_open_uni(&mut self, cx: &mut Context<'_>) -> Poll<Result<Self::SendStream, Self::Error>> {
+	fn poll_open_uni(
+		&mut self,
+		cx: &mut Context<'_>,
+		options: poll::SendOptions<'_, poll::Ungrouped>,
+	) -> Poll<Result<Self::SendStream, Self::Error>> {
 		if self.side.withheld.load(Ordering::Relaxed) {
 			return Poll::Ready(Err(ready!(self.closer.poll_closed(cx))));
 		}
 
 		let link = &self.side.out;
 		let mut lines = link.uni.lock().unwrap();
-		let send = ready!(self.inner.poll_open_uni(cx))?;
+		let send = ready!(self.inner.poll_open_uni(cx, Default::default()))?;
 		let line = Arc::new(Line {
 			held: link.held_uni.lock().unwrap().is_some(),
 			split: link.split.lock().unwrap().clone(),
@@ -592,6 +600,7 @@ impl poll::Session for MockSession {
 		drop(lines);
 
 		let mut send = self.send(send, line);
+		poll::SendStream::set_priority(&mut send, options.priority);
 		send.ack = send.line.held;
 		Poll::Ready(Ok(send))
 	}
@@ -603,13 +612,12 @@ impl poll::Session for MockSession {
 	fn send_datagram(
 		&mut self,
 		payload: Bytes,
-		group: Option<&poll::Ungrouped>,
-		order: i64,
+		options: poll::SendOptions<'_, poll::Ungrouped>,
 	) -> Result<(), Self::Error> {
 		if self.side.lossy.load(Ordering::Relaxed) {
 			return Ok(());
 		}
-		self.inner.send_datagram(payload, group, order)
+		self.inner.send_datagram(payload, options)
 	}
 
 	fn poll_recv_datagram(&mut self, cx: &mut Context<'_>) -> Poll<Result<Bytes, Self::Error>> {
@@ -643,6 +651,10 @@ impl poll::Session for MockSession {
 		);
 		self.side.stats_reads.fetch_add(1, Ordering::Relaxed);
 		*self.side.stats.lock().unwrap()
+	}
+
+	fn wire(&self) -> Option<moq_net::transport::Wire> {
+		Some(self.side.wire.clone())
 	}
 }
 
@@ -681,6 +693,11 @@ impl MockSession {
 	/// How many times the stats were read.
 	pub fn stats_reads(&self) -> usize {
 		self.side.stats_reads.load(Ordering::Relaxed)
+	}
+
+	/// The wire counters this side's transport exposes.
+	pub fn wire(&self) -> &moq_net::transport::Wire {
+		&self.side.wire
 	}
 
 	/// Panic on the driver's next stats sample, which a [`moq_net::Session::stats`]
@@ -863,6 +880,7 @@ pub fn create_mock_session_pair(config: memory::Config) -> (MockSession, MockSes
 			stats: Default::default(),
 			stats_reads: Default::default(),
 			panic_on_stats: Default::default(),
+			wire: Default::default(),
 		}),
 		accept_uni: Default::default(),
 		accept_bi: Default::default(),
