@@ -828,6 +828,7 @@ impl Producer {
 		state.stamp(timestamp);
 		let bound = state.settle(origin);
 		self.alive.checked.store(true, Ordering::Relaxed);
+		self.advance_largest(&state);
 		drop(state);
 		// The group's lock is released first: sharing reads it back through its slot.
 		if let (Some(track), Some(start)) = (&track, bound) {
@@ -838,10 +839,6 @@ impl Producer {
 		// With the group lock released (lock order is track then group), settle
 		// eviction debt if enough has been written since the track last paid.
 		self.cache.settle(now);
-		self.cache.advance_largest(track::Position {
-			group: self.info.sequence,
-			frame: (next_index - 1) as u64,
-		});
 		// An untimed frame presents nothing, so it can expire no read.
 		if let Some(timestamp) = timestamp {
 			self.cache.wakes().presented(timestamp);
@@ -918,6 +915,7 @@ impl Producer {
 		let bound = state.settle(origin);
 		if count > 0 {
 			self.alive.checked.store(true, Ordering::Relaxed);
+			self.advance_largest(&state);
 		}
 		drop(state);
 		// The group's lock is released first: sharing reads it back through its slot.
@@ -927,12 +925,6 @@ impl Producer {
 		drop(track);
 
 		self.cache.settle(now);
-		if count > 0 {
-			self.cache.advance_largest(track::Position {
-				group: self.info.sequence,
-				frame: (next_index - 1) as u64,
-			});
-		}
 		if let Some(latest) = latest {
 			self.cache.wakes().presented(latest);
 		}
@@ -1099,17 +1091,23 @@ impl Producer {
 		}
 		state.frames.push_back(frame);
 		state.committed = state.next_index;
-		let frame = (state.next_index - 1) as u64;
+		self.advance_largest(&state);
 		drop(state);
 
 		// With the group lock released (lock order is track then group), settle
 		// eviction debt and age idle content out, reusing the tick above.
 		self.cache.settle(now);
+		Ok(())
+	}
+
+	/// Raise the track's largest to the last frame committed. Called under the group lock,
+	/// as [`Self::finish`] marks it final, so a write on another handle cannot land after a
+	/// finish and reopen a final largest group.
+	fn advance_largest(&self, state: &GroupState) {
 		self.cache.advance_largest(track::Position {
 			group: self.info.sequence,
-			frame,
+			frame: (state.committed - 1) as u64,
 		});
-		Ok(())
 	}
 
 	/// Fail the group because an in-flight frame couldn't complete (called by
