@@ -76,6 +76,13 @@ Rust items (`rs/moq-net/src/model/`), as they stood at b4eab0db1:
     crate-internal duplicates. `track::Producer` keeps `Clone`: several
     writers creating groups is legitimate, and `claim_sequence` already
     refuses a duplicate sequence.
+    - Dropping `Clone` and the crate-private non-writing handle moved to
+      [One group writer](/quest/m1/public-model/group-writer.md), which
+      settles the handle and the fate of `FrameOpen`. This item keeps the
+      public owned chunked writer. Its callers that hold a
+      `&mut group::Producer` (hang's `Frame::write_to`, moq-mux's LOC and
+      fMP4 encoders) cannot call a consuming `create_frame(self)`; weigh
+      that before landing it.
     - Compile probe at dd95d5804: 26 `group::Producer` clone sites, 16
       model-internal and 7 in the sessions (kept by the crate-private
       duplicate), and 3 outside the crate (2 in
@@ -188,6 +195,10 @@ JS items (`js/net/src/`): mirror each Rust decision under the same name.
 Tests: each public call gets a mock-time test in its language, and the
 built-in subscribers move onto the public calls, so their existing suites
 cover the behavior.
+
+## Required
+
+- [One group writer](/quest/m1/public-model/group-writer.md) - the non-Clone writer the owned chunked writer builds on
 
 ## Related
 
