@@ -3479,7 +3479,7 @@ fn datagram_recv_buffer_overflow() {
     assert_matches!(pair.server_conn_mut(server_ch).poll(), None);
     assert_eq!(
         pair.client_conn_mut(client_ch).datagrams().max_size(),
-        Some(WINDOW - Datagram::SIZE_BOUND)
+        Some(Datagram::max_payload(WINDOW as u64) as usize)
     );
 
     const DATA1: &[u8] = &[0xAB; (PAYLOAD_WINDOW / 3) + 1];
@@ -3551,6 +3551,30 @@ fn datagram_of_max_size_keeps_connection() {
         Some(Event::DatagramReceived)
     );
     assert_eq!(pair.server_datagrams(server_ch).recv().unwrap(), DATA);
+}
+
+/// RFC 9221's `max_datagram_frame_size` counts the frame type and length, so a 1200-byte limit
+/// (quicly's) carries a 1197-byte payload behind a 2-byte length
+#[test]
+fn datagram_max_size_fills_peer_frame_limit() {
+    let _guard = subscribe();
+    let server = ServerConfig {
+        transport: Arc::new(TransportConfig {
+            datagram_receive_buffer_size: Some(1200),
+            ..TransportConfig::default()
+        }),
+        ..server_config()
+    };
+    let mut transport = TransportConfig::default();
+    transport.initial_mtu(1452).mtu_discovery_config(None);
+    let mut client = client_config();
+    client.transport_config(Arc::new(transport));
+    let mut pair = Pair::new(Default::default(), server);
+    let (client_ch, _) = pair.connect_with(client);
+    assert_eq!(
+        pair.client_conn_mut(client_ch).datagrams().max_size(),
+        Some(1197)
+    );
 }
 
 #[test]

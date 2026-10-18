@@ -945,6 +945,20 @@ impl Datagram {
             0
         } + self.data.len()
     }
+
+    /// The largest payload whose length-prefixed frame fits in `budget` bytes
+    ///
+    /// Exact, rather than reserving [`SIZE_BOUND`](FrameStruct::SIZE_BOUND)'s 8-byte length: a
+    /// 1200-byte `max_datagram_frame_size` carries 1197 bytes.
+    pub(crate) fn max_payload(budget: u64) -> u64 {
+        let mut payload = budget.saturating_sub(2);
+        while payload > 0
+            && 1 + VarInt::from_u64(payload).map_or(8, VarInt::size) as u64 + payload > budget
+        {
+            payload -= 1;
+        }
+        payload
+    }
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -1129,4 +1143,25 @@ mod test {
         1 << 30,
         VarInt::MAX.into_inner(),
     ];
+
+    #[test]
+    fn datagram_max_payload_is_exact() {
+        for budget in [0u64, 1, 2, 3, 64, 65, 66, 1200, 16385, 16386, 1 << 20] {
+            let payload = Datagram::max_payload(budget);
+            let frame = |n: u64| {
+                Datagram {
+                    data: Bytes::from(vec![0; n as usize]),
+                }
+                .size(true) as u64
+            };
+            if payload > 0 {
+                assert!(frame(payload) <= budget, "{budget}: {payload} overflows");
+            }
+            assert!(
+                frame(payload + 1) > budget,
+                "{budget}: {payload} isn't the largest"
+            );
+        }
+        assert_eq!(Datagram::max_payload(1200), 1197);
+    }
 }
