@@ -59,7 +59,8 @@ The winner's target rate already reaches moq-cli and moq-ffi encoders
 through `bandwidth_estimate` → `estimated_send_rate` → `set_bitrate`.
 `moqsink` only exposes a read-only `estimated-send-rate` and never retunes
 the upstream encoder, so a GStreamer pipeline at a fixed bitrate still queues
-when capacity drops; open: whether this epic owns that feedback.
+when capacity drops; [its own quest](/quest/m2/quic-realtime/moqsink-feedback.md)
+owns that feedback.
 
 ## Required
 
@@ -67,6 +68,7 @@ when capacity drops; open: whether this epic owns that feedback.
 - [GCC candidate](/quest/m2/quic-realtime/gcc.md) - libwebrtc's GoogCC vendored into `moq-quic` and refreshed to current WebRTC
 - [BBR3 delay bound](/quest/m2/quic-realtime/bbr-delay-bound.md) - BBR3 with inflight capped when the forward delay gradient shows queue growth
 - [SCReAMv2 candidate](/quest/m2/quic-realtime/scream.md) - the RFC 8298bis delay path ported to `moq-quic`
+- [moqsink encoder feedback](/quest/m2/quic-realtime/moqsink-feedback.md) - GStreamer publishers retune their encoder to the target rate
 
 ## Related
 
