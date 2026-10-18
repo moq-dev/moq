@@ -11,8 +11,8 @@ use std::{
 	time::Duration,
 };
 
-use crate::transport::poll::GroupOf;
 use crate::transport::poll::SendGroup as _;
+use crate::transport::poll::{GroupOf, SendOptions};
 
 use crate::{
 	AsPath, DecodeError, Error, Timescale, Timestamp,
@@ -507,9 +507,11 @@ impl Served {
 			// PUBLISH_DONE is the only place the subscriber learns why its renewal failed.
 			Self::UpdateFailed(err) if version == Version::Draft14 => Self::Track(Err(err.clone())).status(version),
 			Self::Track(Ok(())) => (ietf::PublishDoneStatus::TrackEnded, "track ended"),
-			Self::Track(Err(Error::Unauthorized | Error::Session(crate::SessionError::Unauthorized))) => {
-				(ietf::PublishDoneStatus::Unauthorized, "not granted")
-			}
+			Self::Track(Err(
+				Error::Unauthorized
+				| Error::Session(crate::SessionError::Unauthorized)
+				| Error::Stream(crate::StreamError::Unauthorized),
+			)) => (ietf::PublishDoneStatus::Unauthorized, "not granted"),
 			// PUBLISH_DONE registers no token expiry, and its EXPIRED means the subscription's
 			// own lifetime ran out, so an expired token is reported as no longer granted.
 			Self::Track(Err(Error::Expired | Error::Session(crate::SessionError::Expired))) => {
@@ -1785,8 +1787,10 @@ where
 			FillServe::Unsupported => None,
 		};
 
+		let mut rank = rank;
+		let options = rank.as_mut().map(Rank::options).unwrap_or_default();
 		let mut session = self.session.clone();
-		let stream = match session.open_uni().await {
+		let stream = match session.open_uni(options).await {
 			Ok(stream) => stream,
 			Err(err) => {
 				tracing::debug!(err = %Error::from_transport(err), fill = %request_id, "fill stream failed to open");
@@ -2502,8 +2506,13 @@ where
 				})
 				.await?;
 
-			let uni = self.session.open_uni().await.map_err(Error::from_transport)?;
-			let mut writer = Writer::new(Ranked::new(uni, Some(ranking.rank(start))), self.version);
+			let mut rank = ranking.rank(start);
+			let uni = self
+				.session
+				.open_uni(rank.options())
+				.await
+				.map_err(Error::from_transport)?;
+			let mut writer = Writer::new(Ranked::new(uni, Some(rank)), self.version);
 			writer.varint(FetchHeader::TYPE).await?;
 			writer
 				.encode(&FetchHeader {
@@ -4035,7 +4044,7 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 		match range.start {
 			Some(start) => track.start_at(start.group),
 			None => {
-				if let Some(latest) = track.latest() {
+				if let Some(latest) = track.latest_sequence() {
 					track.start_at(latest);
 				}
 			}
@@ -4101,7 +4110,7 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 	/// Hold the subscriber's NEW_GROUP_REQUEST until a group answers it; the upstream
 	/// session decides whether it goes further. One a held group answers asks nothing.
 	fn request_new_group(&mut self, value: u64) -> Result<(), Error> {
-		let Some(request) = NewGroup::new(value, self.track.latest()) else {
+		let Some(request) = NewGroup::new(value, self.track.latest_sequence()) else {
 			return Ok(());
 		};
 		let mut subscription = self.track.subscription();
@@ -4139,17 +4148,16 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 	/// Send the original terminal on a separate stream when its group already sent FIN,
 	/// ranked as the group it ends.
 	async fn write_end_of_track(&mut self, end: track::Position) -> Result<(), Error> {
-		let stream = std::future::poll_fn(|cx| self.session.poll_open_uni(cx))
+		let mut rank = self.ranking.rank(Location {
+			group: end.group,
+			object: end.frame,
+		});
+		let options = rank.options();
+		let stream = std::future::poll_fn(|cx| self.session.poll_open_uni(cx, options))
 			.await
 			.map_err(Error::from_transport)?;
 		self.opened.fetch_add(1, Ordering::Relaxed);
-		let stream = Ranked::new(
-			stream,
-			Some(self.ranking.rank(Location {
-				group: end.group,
-				object: end.frame,
-			})),
-		);
+		let stream = Ranked::new(stream, Some(rank));
 		let mut writer = Writer::new(stream, self.version);
 		writer.buffer(&ietf::GroupHeader {
 			track_alias: self.request_id.0,
@@ -4373,8 +4381,11 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 			}
 			// Ranked like a stream carrying the group from its start, so it merges into the
 			// subscription's group order and wins a tie with that group's stream.
-			let order = crate::priority::in_group(sequence, 0, self.ranking.order);
-			let _ = self.session.send_datagram(body, self.ranking.group.as_ref(), order);
+			let options = SendOptions {
+				group: self.ranking.group.as_ref(),
+				priority: crate::priority::in_group(sequence, 0, self.ranking.order),
+			};
+			let _ = self.session.send_datagram(body, options);
 		}
 		Ok(())
 	}
@@ -4430,10 +4441,8 @@ struct Ranked<T: crate::transport::poll::SendStream> {
 }
 
 impl<T: crate::transport::poll::SendStream> Ranked<T> {
-	fn new(mut stream: T, mut rank: Option<Rank<T::Group>>) -> Self {
-		if let Some(rank) = &mut rank {
-			rank.place(&mut stream);
-		}
+	/// Wrap a stream opened with its rank's [options](Rank::options).
+	fn new(stream: T, rank: Option<Rank<T::Group>>) -> Self {
 		Self {
 			stream,
 			rank,
@@ -4517,14 +4526,17 @@ impl<G> Rank<G> {
 		Self::Queue(Queued::solo(priority))
 	}
 
-	/// Put a newly opened stream in its place.
-	fn place<T: crate::transport::poll::SendStream<Group = G>>(&mut self, stream: &mut T) {
+	/// Where a newly opened stream goes.
+	fn options(&mut self) -> SendOptions<'_, G> {
 		match self {
-			Self::Group { group, order } => {
-				stream.set_group(group);
-				stream.set_priority(*order);
-			}
-			Self::Queue(queued) => stream.set_priority(queued.handle.send_order().into()),
+			Self::Group { group, order } => SendOptions {
+				group: Some(&*group),
+				priority: *order,
+			},
+			Self::Queue(queued) => SendOptions {
+				group: None,
+				priority: queued.handle.send_order().into(),
+			},
 		}
 	}
 
@@ -4691,7 +4703,8 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 						self.state = GroupState::Done;
 						return Poll::Ready(Err(Error::Old));
 					}
-					let stream = match ready!(self.session.poll_open_uni(&mut cx)) {
+					// The current rank, which already includes anything `moved` saw.
+					let stream = match ready!(self.session.poll_open_uni(&mut cx, self.rank.options())) {
 						Ok(stream) => stream,
 						Err(err) => {
 							self.state = GroupState::Done;
@@ -4699,9 +4712,6 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 						}
 					};
 					self.opened.fetch_add(1, Ordering::Relaxed);
-					let mut stream = stream;
-					// The current rank, which already includes anything `moved` saw.
-					self.rank.place(&mut stream);
 					moved = None;
 
 					let mut writer = Writer::new(stream, self.version);
@@ -6537,6 +6547,17 @@ mod serve_tests {
 			Served::UpdateFailed(Error::Unauthorized).status(Version::Draft14).0,
 			ietf::PublishDoneStatus::Unauthorized
 		);
+		// A revocation bridged from upstream, however it was received, is still one.
+		for err in [
+			Error::Unauthorized,
+			Error::Session(crate::SessionError::Unauthorized),
+			Error::Stream(crate::StreamError::Unauthorized),
+		] {
+			assert_eq!(
+				Served::Track(Err(err)).status(Version::Draft16).0,
+				ietf::PublishDoneStatus::Unauthorized
+			);
+		}
 	}
 
 	/// Draft-21 §9.5: a failed REQUEST_UPDATE is answered with REQUEST_ERROR, then the
@@ -14258,7 +14279,7 @@ struct LiveEdge {
 
 /// Snapshot the live edge of a track.
 fn live_edge(track: &track::Consumer) -> LiveEdge {
-	let Some(latest) = track.latest() else {
+	let Some(latest) = track.latest_sequence() else {
 		return LiveEdge::default();
 	};
 

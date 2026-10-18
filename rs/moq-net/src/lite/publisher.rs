@@ -17,7 +17,7 @@ use crate::{
 	lite,
 	priority::{Priority, PriorityHandle, PriorityQueue},
 	track::Order,
-	transport::poll::{GroupOf, SendGroup as _},
+	transport::poll::{GroupOf, SendGroup as _, SendOptions},
 };
 
 use super::Version;
@@ -1942,7 +1942,7 @@ impl<S: crate::transport::poll::Session> Request<S> for SubscribeServe<S> {
 		// best-effort datagrams from this single cursor, so a group-only or datagram-only
 		// track opens exactly one subscription (no duplicate demand).
 		let track = broadcast.track(&msg.track)?;
-		let latest = track.latest();
+		let latest = track.latest_sequence();
 		let subscribing = track.subscribe(subscription).into_inner();
 		Ok(Self::Confirm {
 			msg: Box::new(msg),
@@ -2294,20 +2294,20 @@ mod test {
 		);
 
 		let mut legacy = served(Version::Lite01);
-		position_cursor(&mut legacy, Version::Lite01, None, producer.latest());
+		position_cursor(&mut legacy, Version::Lite01, None, producer.latest_sequence());
 		assert_eq!(drain(&mut legacy), vec![2]);
 
 		// Lite03-05 declare a budget, but their drafts define it as a staleness tolerance
 		// and an absent start as the latest group, so they are pinned all the same.
 		let mut tolerant =
 			producer.subscribe(track::Subscription::default().with_max_delay(std::time::Duration::from_secs(5)));
-		position_cursor(&mut tolerant, Version::Lite05, None, producer.latest());
+		position_cursor(&mut tolerant, Version::Lite05, None, producer.latest_sequence());
 		assert_eq!(drain(&mut tolerant), vec![2]);
 
 		// On lite-06 the declared budget is what resolves the start, so it stands.
 		let mut declared =
 			producer.subscribe(track::Subscription::default().with_max_delay(std::time::Duration::from_secs(5)));
-		position_cursor(&mut declared, Version::Lite06, None, producer.latest());
+		position_cursor(&mut declared, Version::Lite06, None, producer.latest_sequence());
 		assert_eq!(drain(&mut declared), vec![0, 1, 2]);
 	}
 
@@ -3268,8 +3268,12 @@ impl<S: crate::transport::poll::Session> Subscription<S> {
 		}
 
 		// The run loop may not have served a group since the last SUBSCRIBE_UPDATE.
-		let order = crate::priority::in_group(datagram.sequence, 0, self.steer_current().order);
-		let _ = self.session.send_datagram(body, self.group.as_ref(), order);
+		let priority = crate::priority::in_group(datagram.sequence, 0, self.steer_current().order);
+		let options = SendOptions {
+			group: self.group.as_ref(),
+			priority,
+		};
+		let _ = self.session.send_datagram(body, options);
 		true
 	}
 
@@ -3431,7 +3435,9 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 		// update that drops a named floor re-pins there too. On an empty track the next
 		// group is the latest, whatever its sequence.
 		let floor = match lowered {
-			None if requested.is_some() && !self.ctx.version.resolves_start() => Some(self.track.latest().unwrap_or(0)),
+			None if requested.is_some() && !self.ctx.version.resolves_start() => {
+				Some(self.track.latest_sequence().unwrap_or(0))
+			}
 			floor => floor,
 		};
 		if let Some(start) = floor {
@@ -3870,7 +3876,21 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 						return Poll::Ready(Err(Error::Old));
 					}
 					let mut cx = waiter.context();
-					let stream = match ready!(self.ctx.session.poll_open_uni(&mut cx)) {
+					let options = match &mut self.rank {
+						Rank::Group(group) => SendOptions {
+							group: Some(&*group),
+							priority: crate::priority::in_group(
+								self.sequence,
+								self.frame_start,
+								self.ctx.steer_seen.order,
+							),
+						},
+						Rank::Queue(handle) => SendOptions {
+							group: None,
+							priority: handle.send_order().into(),
+						},
+					};
+					let stream = match ready!(self.ctx.session.poll_open_uni(&mut cx, options)) {
 						Ok(stream) => stream,
 						Err(err) => {
 							self.settle_open(false);
@@ -3880,14 +3900,6 @@ impl<S: crate::transport::poll::Session> GroupServe<S> {
 					};
 					self.settle_open(true);
 					let mut writer = Writer::new(stream, self.ctx.version);
-					match &mut self.rank {
-						Rank::Group(group) => {
-							writer.set_group(group);
-							let order = self.ctx.steer_seen.order;
-							writer.set_priority(crate::priority::in_group(self.sequence, self.frame_start, order));
-						}
-						Rank::Queue(handle) => writer.set_priority(handle.send_order().into()),
-					}
 
 					let msg = lite::Group {
 						subscribe: self.ctx.id,
@@ -6218,7 +6230,7 @@ mod tests {
 			.unwrap();
 		let mut session = ScriptedSession::new(script);
 		let (send, recv) = futures::future::poll_fn(|cx| {
-			<ScriptedSession as crate::transport::poll::Session>::poll_open_bi(&mut session, cx)
+			<ScriptedSession as crate::transport::poll::Session>::poll_open_bi(&mut session, cx, Default::default())
 		})
 		.await
 		.unwrap();
@@ -6357,7 +6369,11 @@ mod tests {
 					.unwrap();
 					let mut session = ScriptedSession::new(script);
 					let (_, recv) = futures::future::poll_fn(|cx| {
-						<ScriptedSession as crate::transport::poll::Session>::poll_open_bi(&mut session, cx)
+						<ScriptedSession as crate::transport::poll::Session>::poll_open_bi(
+							&mut session,
+							cx,
+							Default::default(),
+						)
 					})
 					.await
 					.unwrap();
@@ -6446,7 +6462,7 @@ mod tests {
 		.unwrap();
 		let mut session = ScriptedSession::new(script);
 		let (send, recv) = futures::future::poll_fn(|cx| {
-			<ScriptedSession as crate::transport::poll::Session>::poll_open_bi(&mut session, cx)
+			<ScriptedSession as crate::transport::poll::Session>::poll_open_bi(&mut session, cx, Default::default())
 		})
 		.await
 		.unwrap();
@@ -6539,7 +6555,7 @@ mod tests {
 		.unwrap();
 		let mut session = ScriptedSession::new(script);
 		let (send, recv) = futures::future::poll_fn(|cx| {
-			<ScriptedSession as crate::transport::poll::Session>::poll_open_bi(&mut session, cx)
+			<ScriptedSession as crate::transport::poll::Session>::poll_open_bi(&mut session, cx, Default::default())
 		})
 		.await
 		.unwrap();
@@ -6732,7 +6748,7 @@ mod tests {
 		.unwrap();
 		let mut session = ScriptedSession::new(script);
 		let (send, recv) = futures::future::poll_fn(|cx| {
-			<ScriptedSession as crate::transport::poll::Session>::poll_open_bi(&mut session, cx)
+			<ScriptedSession as crate::transport::poll::Session>::poll_open_bi(&mut session, cx, Default::default())
 		})
 		.await
 		.unwrap();
@@ -6802,7 +6818,7 @@ mod tests {
 		for count in 0..3 {
 			let mut session = ScriptedSession::new(script.clone());
 			let (send, recv) = futures::future::poll_fn(|cx| {
-				<ScriptedSession as crate::transport::poll::Session>::poll_open_bi(&mut session, cx)
+				<ScriptedSession as crate::transport::poll::Session>::poll_open_bi(&mut session, cx, Default::default())
 			})
 			.await
 			.unwrap();

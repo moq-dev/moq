@@ -125,6 +125,7 @@ def test_protocol_error_helper_covers_known_app_and_unknown():
     cases = [
         (moq.ErrorScope.SESSION, 0x2, moq.ProtocolKind.UNAUTHORIZED, True),
         (moq.ErrorScope.SESSION, 0x18, moq.ProtocolKind.EXPIRED, True),
+        (moq.ErrorScope.STREAM, 0x3B, moq.ProtocolKind.UNAUTHORIZED, True),
         (moq.ErrorScope.SESSION, 0x7, moq.ProtocolKind.TOO_MANY_REQUESTS, False),
         (moq.ErrorScope.SESSION, 64 + 404, moq.ProtocolKind.APP, False),
         (moq.ErrorScope.SESSION, 0x1F, moq.ProtocolKind.UNKNOWN, False),

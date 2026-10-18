@@ -41,6 +41,10 @@
 //! wall clock: each empty group is handed out like any other, so a walk over the rest of
 //! the run per group shows up as a slope over it.
 //!
+//! `track_fanout_frame` writes frames into an open group while every subscriber is parked
+//! on the next one, re-polling whichever reader the write woke: a frame wakes no track
+//! reader, so waking them shows up as a slope over the subscribers.
+//!
 //! `track_fetch_expiry` polls budgeted fetched readers over independent fanout and
 //! retained-history axes, so expiry work that scans either table appears as a slope.
 //!
@@ -468,6 +472,77 @@ fn bench_fanout(c: &mut Criterion) {
 			|b, &subscribers| {
 				let mut fanout = Fanout::new(subscribers);
 				b.iter(|| fanout.cycle());
+			},
+		);
+	}
+	group.finish();
+}
+
+/// Frames written per group in `track_fanout_frame`, after which the group rolls and every
+/// subscriber takes the next one: enough that the roll's cost per frame stays small.
+const FRAMES_PER_GROUP: usize = 256;
+
+/// Queues its reader's index when woken, so only woken readers are re-polled.
+struct Fired {
+	index: usize,
+	queue: Arc<std::sync::Mutex<Vec<usize>>>,
+}
+
+impl futures::task::ArcWake for Fired {
+	fn wake_by_ref(fired: &Arc<Self>) {
+		fired.queue.lock().unwrap().push(fired.index);
+	}
+}
+
+fn bench_fanout_frame(c: &mut Criterion) {
+	let mut group = c.benchmark_group("track_fanout_frame");
+	for subscribers in FANOUT {
+		group.bench_with_input(
+			BenchmarkId::from_parameter(subscribers),
+			&subscribers,
+			|b, &subscribers| {
+				let mut fanout = Fanout::new(subscribers);
+				let queue = Arc::new(std::sync::Mutex::new(Vec::new()));
+				let waiters: Vec<_> = (0..subscribers)
+					.map(|index| {
+						let fired = Arc::new(Fired {
+							index,
+							queue: queue.clone(),
+						});
+						kio::Waiter::new(futures::task::waker(fired))
+					})
+					.collect();
+				let mut open: Option<moq_net::group::Producer> = None;
+				let mut written = FRAMES_PER_GROUP;
+				// Only the frame write and the re-polls it causes are timed, not the group roll.
+				b.iter_custom(|iterations| {
+					let mut elapsed = Duration::ZERO;
+					for _ in 0..iterations {
+						if written == FRAMES_PER_GROUP {
+							if let Some(open) = open.take() {
+								open.finish().unwrap();
+							}
+							open = Some(fanout.track.append_group().unwrap());
+							written = 0;
+							for (subscriber, waiter) in fanout.subscribers.iter_mut().zip(&waiters) {
+								assert!(matches!(subscriber.poll_recv_group(waiter), Poll::Ready(Ok(Some(_)))));
+								assert!(subscriber.poll_recv_group(waiter).is_pending());
+							}
+							queue.lock().unwrap().clear();
+						}
+						let group = open.as_mut().unwrap();
+						let start = Instant::now();
+						group.write_frame(Timestamp::ZERO, fanout.payload.clone()).unwrap();
+						// A woken reader re-polls, as its task would.
+						let woken = std::mem::take(&mut *queue.lock().unwrap());
+						for index in woken {
+							black_box(fanout.subscribers[index].poll_recv_group(&waiters[index]).is_pending());
+						}
+						elapsed += start.elapsed();
+						written += 1;
+					}
+					elapsed
+				});
 			},
 		);
 	}
@@ -1128,6 +1203,7 @@ criterion_group!(
 	benches,
 	bench_parked_abort,
 	bench_fanout,
+	bench_fanout_frame,
 	bench_fetch_expiry,
 	bench_parallel_write,
 	bench_aborted_scan,

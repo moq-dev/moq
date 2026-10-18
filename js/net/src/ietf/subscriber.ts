@@ -43,7 +43,7 @@ import {
 	ObjectIdGap,
 } from "./object.ts";
 import { fromWire, toWire } from "./priority.ts";
-import { type Publish, PublishDone, PublishError, publishDoneClean } from "./publish.ts";
+import { type Publish, PublishDone, PublishDoneStatus, PublishError, publishDoneClean } from "./publish.ts";
 import {
 	type PublishNamespace,
 	PublishNamespaceCancel,
@@ -823,7 +823,7 @@ export class Subscriber {
 			// unsubscribe, a revoked grant); race them once so the demand loop doesn't
 			// re-subscribe each pass.
 			const done = race([
-				this.#runPublishDone(stream, subscription).then(() => publisherEnded),
+				this.#runPublishDone(stream, subscription, broadcast).then(() => publisherEnded),
 				producer.closed.then(() => localEnded),
 				revoked,
 			]);
@@ -881,7 +881,7 @@ export class Subscriber {
 	 * is only a hint: a peer may send 0 regardless, so 0 waits out the grace. A request
 	 * stream that FINs without PUBLISH_DONE is a protocol violation.
 	 */
-	async #runPublishDone(stream: Stream, subscription: Subscription): Promise<void> {
+	async #runPublishDone(stream: Stream, subscription: Subscription, broadcast: Path.Valid): Promise<void> {
 		const version = this.#session.version;
 		if (await stream.reader.done()) throw new ProtocolViolation("subscribe stream ended without PUBLISH_DONE");
 		const typeId = await stream.reader.u53();
@@ -889,6 +889,8 @@ export class Subscriber {
 			throw new ProtocolViolation(`unexpected message on a subscription: 0x${typeId.toString(16)}`);
 		}
 		const done = await PublishDone.decode(stream.reader, version);
+		// A revocation reads the same as one from a moq-lite peer.
+		if (done.statusCode === PublishDoneStatus.UNAUTHORIZED) throw unauthorized(broadcast);
 		if (!publishDoneClean(done.statusCode, version)) {
 			throw new Error(`publish done: status=0x${done.statusCode.toString(16)} reason=${done.reasonPhrase}`);
 		}
@@ -1005,6 +1007,14 @@ export class Subscriber {
 			priority: fromWire(ok.properties.priority ?? 128),
 			maxAge: maxCacheDuration === undefined ? undefined : Milli(Number(maxCacheDuration)),
 		});
+		if (ok.largest) {
+			if (ok.largest.groupId > BigInt(Number.MAX_SAFE_INTEGER)) {
+				throw new RangeError("largest group exceeds safe integers");
+			}
+			// Object IDs can start past zero or skip, while readers see frame ordinals, so only
+			// the group carries over: its first frame is the edge a reader can count on.
+			hooks.reportedLargest(subscription.track, { group: Number(ok.largest.groupId), frame: 0 });
+		}
 
 		try {
 			this.#aliases.set(ok.trackAlias, subscription, { broadcast, name: request.name });

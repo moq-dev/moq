@@ -4,6 +4,11 @@ How to update your invocation and config for each breaking change, newest first.
 
 ## Unreleased
 
+### A fixed `--connect-bind` refuses a WAN cluster (#5674)
+
+`--connect` and `--cluster-connect` or `--cluster-connect-api` used to share one client; now each binds its own, so a fixed `--connect-bind` port with both stops startup.
+Use port 0, or drop `--connect`.
+
 ### `moq export ts --delay` defaults to 1 s and includes the send-ahead (#5553)
 
 The output trails a TS source by the delay instead of twice it.

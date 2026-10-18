@@ -434,6 +434,10 @@ class TrackState {
 	update: Signal<Subscription | undefined>;
 	/** Resolved once the producer commits the immutable properties. */
 	info = new Signal<Info | undefined>(undefined);
+	/** Greatest real frame reported by the publisher, including a wire answer. */
+	largest = new Signal<Location | undefined>(undefined);
+	// Set once {@link largest} can no longer advance while the track stays open.
+	largestEnded = new Signal(false);
 
 	constructor(subscription?: Subscription) {
 		this.update = new Signal(subscription === undefined ? undefined : subscriptionDefaults(subscription));
@@ -464,6 +468,25 @@ async function resolveInfo(state: TrackState): Promise<Info> {
 		if (closed !== undefined) throw new Error("track closed before info was known");
 
 		await Signal.race(state.info, state.closed);
+	}
+}
+
+async function nextLargest(
+	state: TrackState,
+	seen: Location | undefined,
+	commit: (largest: Location) => void,
+): Promise<Location | undefined> {
+	for (;;) {
+		const largest = state.largest.peek();
+		if (
+			largest &&
+			(!seen || largest.group > seen.group || (largest.group === seen.group && largest.frame > seen.frame))
+		) {
+			commit(largest);
+			return largest;
+		}
+		if (state.closed.peek() !== undefined || state.largestEnded.peek()) return undefined;
+		await Signal.race(state.largest, state.closed, state.largestEnded);
 	}
 }
 
@@ -636,6 +659,10 @@ export class Producer {
 	// Whether any subscriber is currently attached, watched through {@link demand}.
 	#used = new Signal<boolean>(false);
 	#demand: Demand;
+	#largestSeen?: Location;
+	// The largest group's content may still grow: it has not closed cleanly, and it is not a
+	// datagram. An aborted one stays open, since it can be recreated.
+	#largestOpen = false;
 
 	constructor(name: string) {
 		this.name = name;
@@ -665,7 +692,8 @@ export class Producer {
 			sequence.holders++;
 		};
 		hooks.bindSequence = bindProducerSequence;
-		hooks.cachedLargest = (producer) => producer.#largest();
+		hooks.cachedLargest = (producer) => producer.#cachedLargest();
+		hooks.reportedLargest = (producer, largest) => producer.#advanceLargest(largest);
 		hooks.dropTrackGroups = (producer, start, end) => producer.#drop(start, end);
 	}
 
@@ -775,6 +803,8 @@ export class Producer {
 		sink.producer = this;
 		const info = this.#state.info.peek();
 		if (info) sink.info.set(info);
+		sink.largest.set(this.#state.largest.peek());
+		sink.largestEnded.set(this.#state.largestEnded.peek());
 
 		const closed = this.#state.closed.peek();
 		if (closed === undefined) {
@@ -952,7 +982,7 @@ export class Producer {
 
 	// The newest frame in the cache, as {@link Subscriber.largest} reads it from a sink:
 	// unknown once the newest group is evicted, since what is left cannot say where the edge is.
-	#largest(): Location | undefined {
+	#cachedLargest(): Location | undefined {
 		const latest = this.#state.latest;
 		if (latest === undefined || !this.#cached.has(latest)) return undefined;
 
@@ -964,6 +994,25 @@ export class Producer {
 			}
 		}
 		return largest;
+	}
+
+	#advanceLargest(largest: Location | undefined): void {
+		if (!largest) return;
+		const current = this.#state.largest.peek();
+		if (
+			current &&
+			(current.group > largest.group || (current.group === largest.group && current.frame >= largest.frame))
+		) {
+			return;
+		}
+		this.#largestOpen = true;
+		this.#state.largest.set(largest);
+		for (const sink of this.#sinks) sink.largest.set(largest);
+	}
+
+	/** The track's largest location, as {@link Subscriber.largest} follows it. */
+	async largest(): Promise<Location | undefined> {
+		return nextLargest(this.#state, this.#largestSeen, (largest) => (this.#largestSeen = largest));
 	}
 
 	// Evict cached groups idle for longer than the cache window. Idle means nothing
@@ -1065,15 +1114,26 @@ export class Producer {
 		this.#advance(group.sequence);
 		this.#state.latest = Math.max(this.#state.latest ?? 0, group.sequence);
 		for (const sink of this.#sinks) this.#mirror(entry, sink);
+		// Follow the group's frames as they land, past the head `#advance` already named.
+		const stop = hooks.groupProgress(group, (total) => {
+			if (total > 0) this.#advanceLargest({ group: group.sequence, frame: total - 1 });
+		});
+		void group.closed.then((closed) => {
+			stop();
+			if (closed === null) this.#finishLargest(group.sequence);
+		});
 		// Give held mirrors the new live edge before pruning their timeline entry,
 		// so their latency guard can preserve a terminal expiry verdict.
 		this.#prune();
 	}
 
-	// Record a written sequence, here and in the name's namespace.
+	// Record a written sequence, here and in the name's namespace. It raises the largest too,
+	// at the head of an empty group, so a later group below it never changes it.
 	#advance(sequence: number): void {
 		this.#received = Math.max(this.#received, sequence + 1);
 		this.#sequence.next = Math.max(this.#sequence.next, sequence + 1);
+		this.#advanceLargest({ group: sequence, frame: 0 });
+		this.#endLargest();
 	}
 
 	// The sequence the next append takes: one past this producer's own writes. The
@@ -1173,6 +1233,7 @@ export class Producer {
 	// Late subscribers do NOT replay old datagrams (best-effort, unlike the group cache).
 	#publishDatagram(datagram: Datagram): void {
 		this.#advance(datagram.sequence);
+		this.#finishLargest(datagram.sequence);
 		for (const sink of this.#sinks) {
 			sink.received.set(this.#received);
 			sink.datagrams.mutate((list) => {
@@ -1269,6 +1330,25 @@ export class Producer {
 		end = { group, frame };
 		this.#state.end.set(end);
 		for (const sink of this.#sinks) sink.end.set(end);
+		this.#endLargest();
+	}
+
+	// Group `sequence` holds every frame it will have: it closed cleanly, or it is a datagram.
+	// A group name fixes its content, so no legal write raises the largest past it.
+	#finishLargest(sequence: number): void {
+		if (this.#state.largest.peek()?.group === sequence) this.#largestOpen = false;
+		this.#endLargest();
+	}
+
+	// End the largest stream while the track stays open, once it can no longer advance: the
+	// declared end is reached, and the largest group's content is final. Every sequence below
+	// the end raised it already, so neither a late group below it nor a recreated copy of it
+	// moves it after this.
+	#endLargest(): void {
+		if (this.#state.largestEnded.peek() || this.#largestOpen) return;
+		const end = this.#state.end.peek();
+		if (end === undefined || this.#received < finalSequence(end)) return;
+		for (const state of [this.#state, ...this.#sinks]) state.largestEnded.set(true);
 	}
 
 	/**
@@ -1342,6 +1422,7 @@ export class Subscriber {
 	readonly name: string;
 
 	#state: TrackState;
+	#largestSeen?: Location;
 	#nextSequence = 0;
 	#cursor = new Signal<{ start: number; end?: number }>({ start: 0 });
 	// A FETCH's own budget in place of the subscription's; unlike SUBSCRIBE's zero
@@ -1514,6 +1595,8 @@ export class Subscriber {
 	static {
 		makeSubscriber = (name, state) => new Subscriber(name, state);
 		hooks.tryRecvGroup = (subscriber, started) => subscriber.#tryRecvGroup(started);
+		hooks.latestSequence = (subscriber) => subscriber.#state.latest;
+		hooks.bufferedLargest = (subscriber) => subscriber.#bufferedLargest();
 		hooks.groupChanged = (subscriber, fn) => subscriber.#groupChanged(fn);
 		hooks.fetchBudget = (subscriber, maxDelay) => {
 			subscriber.#fetchBudget = maxDelay ?? Number.POSITIVE_INFINITY;
@@ -1559,16 +1642,11 @@ export class Subscriber {
 		return this.#state.update;
 	}
 
-	/** Return the latest group sequence observed on this track, if any. */
-	latest(): number | undefined {
-		return this.#state.latest;
-	}
-
 	/**
 	 * The track's exclusive end: the one {@link Producer.finishAt} declared, which can be
 	 * ahead of the live edge, or the head of the sequence after the highest produced once the
 	 * producer closes cleanly (`{ group: 0, frame: 0 }` for a track that produced none).
-	 * Groups and datagrams share the sequence namespace, so it can sit past `latest() + 1`.
+	 * Groups and datagrams share the sequence namespace, so it can sit past the last group.
 	 * Undefined until declared, and after an abort that declared none. Mirrors the Rust `end`.
 	 */
 	end(): Location | undefined {
@@ -1596,14 +1674,20 @@ export class Subscriber {
 	}
 
 	/**
-	 * The newest frame this track has produced, or `undefined` while it has none.
-	 *
-	 * Read from the groups buffered for this subscriber, so nothing is consumed. A newest
-	 * group that has no frames yet falls back to the newest older group that does. It
-	 * reads as `undefined` once the newest group has been evicted or received: what is
-	 * left can no longer say where the edge is.
+	 * The track's largest location, its newest group or datagram at the newest frame (0 while
+	 * empty): the current one at first, then each newer one (skipping any in between), and
+	 * `undefined` once the track ends. Seeded by the publisher's report, so it can name a frame
+	 * before its group arrives.
 	 */
-	largest(): Location | undefined {
+	async largest(): Promise<Location | undefined> {
+		return nextLargest(this.#state, this.#largestSeen, (largest) => (this.#largestSeen = largest));
+	}
+
+	// The newest frame buffered for this subscriber, which a wire answer names as its edge:
+	// a newest group with no frames yet falls back to the newest older group that does, and it
+	// reads as undefined once the newest group was evicted or received, since what is left can
+	// no longer say where the edge is.
+	#bufferedLargest(): Location | undefined {
 		const latest = this.#state.latest;
 		if (latest === undefined) return undefined;
 
@@ -2073,9 +2157,9 @@ export class Ordered {
 		return this.#subscriber.subscription;
 	}
 
-	/** The latest group sequence observed on this track, if any. */
-	latest(): number | undefined {
-		return this.#subscriber.latest();
+	/** The track's largest location; see {@link Subscriber.largest}. */
+	largest(): Promise<Location | undefined> {
+		return this.#subscriber.largest();
 	}
 
 	/** The track's exclusive end; see {@link Subscriber.end}. */

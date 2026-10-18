@@ -1067,12 +1067,14 @@ mod tests {
 		fn poll_open_bi(
 			&mut self,
 			_cx: &mut std::task::Context<'_>,
+			_: crate::transport::poll::SendOptions<'_, crate::transport::poll::Ungrouped>,
 		) -> std::task::Poll<Result<(Self::SendStream, Self::RecvStream), Self::Error>> {
 			std::task::Poll::Pending
 		}
 		fn poll_open_uni(
 			&mut self,
 			_cx: &mut std::task::Context<'_>,
+			_: crate::transport::poll::SendOptions<'_, crate::transport::poll::Ungrouped>,
 		) -> std::task::Poll<Result<Self::SendStream, Self::Error>> {
 			std::task::Poll::Pending
 		}
@@ -1083,8 +1085,7 @@ mod tests {
 		fn send_datagram(
 			&mut self,
 			_: Bytes,
-			_: Option<&crate::transport::poll::Ungrouped>,
-			_: i64,
+			_: crate::transport::poll::SendOptions<'_, crate::transport::poll::Ungrouped>,
 		) -> Result<(), Self::Error> {
 			Ok(())
 		}

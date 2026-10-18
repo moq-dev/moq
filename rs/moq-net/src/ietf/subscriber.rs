@@ -474,7 +474,7 @@ fn accepted_info(properties: &ietf::Properties) -> track::Info {
 
 /// The Largest Group a subscription knows: its SUBSCRIBE_OK's, or a newer one since.
 fn largest_group(track: &track::Producer, answer: Option<ietf::Location>) -> Option<u64> {
-	answer.map(|largest| largest.group).max(track.latest())
+	answer.map(|largest| largest.group).max(track.latest_sequence())
 }
 
 /// A copy with no subscription upstream, kept for fetches and a returning subscriber.
@@ -2868,6 +2868,14 @@ where
 			true => track.start_at(largest.map_or(0, |largest| largest.group)),
 			false => track.start_at(start.map(|start| start.group)),
 		};
+		// Object IDs can start past zero or skip, while readers see frame ordinals, so only
+		// the group carries over: its first frame is the edge a reader can count on.
+		if let Some(largest) = largest {
+			track.report_largest(track::Position {
+				group: largest.group,
+				frame: 0,
+			});
+		}
 		let mut fetching: Option<JoiningTask> = None;
 		{
 			let mut state = self.state.lock();
@@ -5473,7 +5481,7 @@ mod tests {
 		use crate::lite::test_transport::ScriptedSession;
 		use crate::transport::poll::Session as _;
 		let mut session = ScriptedSession::eof(responses);
-		let (_, recv) = session.open_bi().await.unwrap();
+		let (_, recv) = session.open_bi(Default::default()).await.unwrap();
 		let mut reader = Reader::new(recv, Version::Draft19);
 		let result =
 			Subscriber::<ScriptedSession>::read_publish_done(&mut reader, Version::Draft19, &AtomicU64::new(0)).await;
@@ -5505,7 +5513,7 @@ mod tests {
 			.unwrap();
 
 		let mut session = ScriptedSession::new(wire);
-		let (_, recv) = session.open_bi().await.unwrap();
+		let (_, recv) = session.open_bi(Default::default()).await.unwrap();
 		let mut reader = Reader::new(recv, VERSION);
 		let result = decode_fetch_object(&mut reader, VERSION, true)
 			.now_or_never()
@@ -6989,6 +6997,20 @@ mod tests {
 				track.producer.as_ref().unwrap().publisher_priority(),
 				255 - priority.unwrap_or(128),
 				"SUBSCRIBE_OK priority must be committed before alias registration"
+			);
+			// The answer's largest is known before any group arrives.
+			let mut reader = track.producer.clone().unwrap();
+			let reported = match reader.poll_largest(&kio::Waiter::noop()) {
+				Poll::Ready(reported) => reported,
+				Poll::Pending => None,
+			};
+			assert_eq!(
+				reported,
+				largest.map(|largest| track::Position {
+					group: largest.group,
+					frame: 0,
+				}),
+				"only the group carries over, since Object IDs are not frame ordinals"
 			);
 			let fill = track.fill.read();
 			fill.outstanding()
@@ -11167,7 +11189,7 @@ mod stitch_tests {
 		session: &ScriptedSession,
 	) -> Reader<<ScriptedSession as crate::transport::poll::Session>::RecvStream, Version> {
 		let mut session = session.clone();
-		let (_, recv) = session.open_bi().await.unwrap();
+		let (_, recv) = session.open_bi(Default::default()).await.unwrap();
 		Reader::new(recv, Version::Draft18)
 	}
 
@@ -11280,7 +11302,7 @@ mod stitch_tests {
 		/// A reader over the next scripted stream, standing in for one the peer opened.
 		async fn stream(&self) -> Reader<<ScriptedSession as crate::transport::poll::Session>::RecvStream, Version> {
 			let mut session = self.session.clone();
-			let (_, recv) = session.open_bi().await.unwrap();
+			let (_, recv) = session.open_bi(Default::default()).await.unwrap();
 			Reader::new(recv, VERSION)
 		}
 	}
@@ -12198,7 +12220,7 @@ mod stitch_tests {
 			let mut consumer = h.track.subscribe(None);
 			let mut stream = h.stream().await.with_version(version);
 			h.subscriber.clone().recv_group(&mut stream).await.unwrap();
-			assert_eq!(h.track.latest(), Some(SEQUENCE));
+			assert_eq!(h.track.latest_sequence(), Some(SEQUENCE));
 			assert_eq!(read_group(&mut consumer).await, (SEQUENCE, vec![(None, vec![42])]));
 			let mut stream = h.stream().await.with_version(version);
 			h.subscriber.clone().recv_group(&mut stream).await.unwrap();
@@ -12284,12 +12306,20 @@ mod stitch_tests {
 			let mut stream = h.stream().await.with_version(version);
 			let result = h.subscriber.clone().recv_group(&mut stream).await;
 			assert!(matches!(result, Err(Error::Unsupported)), "{version}: {result:?}");
-			assert_eq!(h.track.latest(), None, "{version}: the refused subgroup opened a group");
+			assert_eq!(
+				h.track.latest_sequence(),
+				None,
+				"{version}: the refused subgroup opened a group"
+			);
 
 			let mut stream = h.stream().await.with_version(version);
 			let result = h.subscriber.clone().recv_group(&mut stream).await;
 			assert!(matches!(result, Err(Error::Unsupported)), "{version}: {result:?}");
-			assert_eq!(h.track.latest(), None, "{version}: a truncated subgroup opened a group");
+			assert_eq!(
+				h.track.latest_sequence(),
+				None,
+				"{version}: a truncated subgroup opened a group"
+			);
 
 			let mut stream = h.stream().await.with_version(version);
 			h.subscriber.clone().recv_group(&mut stream).await.unwrap();
@@ -12540,7 +12570,11 @@ mod stitch_tests {
 		let mut stream = h.stream().await;
 		h.subscriber.clone().recv_group(&mut stream).await.unwrap();
 		assert_eq!(h.track.end(), Some(track::Position { group: 5, frame: 5 }));
-		assert_eq!(h.track.latest(), None, "a terminal marker creates no payload group");
+		assert_eq!(
+			h.track.latest_sequence(),
+			None,
+			"a terminal marker creates no payload group"
+		);
 	}
 
 	/// A group at or past the end an END_OF_TRACK declared contradicts that end, which no
@@ -12573,7 +12607,7 @@ mod stitch_tests {
 
 		h.subscriber.clone().recv_group(&mut stream).await.unwrap();
 		assert_eq!(h.track.end(), Some(track::Position::group(SEQUENCE)));
-		assert_eq!(h.track.latest(), None, "no group was created");
+		assert_eq!(h.track.latest_sequence(), None, "no group was created");
 	}
 
 	/// The group ended exactly where we joined it, so the subscription's stream carries no
@@ -13545,7 +13579,7 @@ mod stitch_tests {
 				tasks.0.clone(),
 				Default::default(),
 			);
-			let (_, recv) = session.open_bi().await.unwrap();
+			let (_, recv) = session.open_bi(Default::default()).await.unwrap();
 			let track = track::Producer::new(
 				std::sync::Arc::new(crate::broadcast::Info::default()),
 				"video",
@@ -14094,7 +14128,7 @@ mod joining_fetch_tests {
 			}
 			w.bytes(b"x").unwrap();
 			let data = ScriptedSession::new(objects);
-			let (_, recv) = data.clone().open_bi().await.unwrap();
+			let (_, recv) = data.clone().open_bi(Default::default()).await.unwrap();
 			let mut reader = Reader::new(recv, version);
 			let mut receiving = run.subscriber.clone();
 			let mut fill = Box::pin(receiving.recv_fill(&mut reader));
@@ -14248,7 +14282,7 @@ mod joining_fetch_tests {
 					.unwrap();
 				objects.push(b'x');
 				let data = ScriptedSession::new(objects);
-				let (_, recv) = data.clone().open_bi().await.unwrap();
+				let (_, recv) = data.clone().open_bi(Default::default()).await.unwrap();
 				let mut reader = Reader::new(recv, version);
 				let mut receiving = subscriber.clone();
 				let mut fill = Box::pin(receiving.recv_group_fetch(&mut reader, slot.clone()));
@@ -14596,7 +14630,7 @@ mod joining_fetch_tests {
 		settle().await;
 
 		// The fetch stream, as the peer would open it.
-		let (_, recv) = session.clone().open_bi().await.unwrap();
+		let (_, recv) = session.clone().open_bi(Default::default()).await.unwrap();
 		let mut stream = Reader::new(recv, version);
 		subscriber.clone().recv_fill(&mut stream).await.expect("group fetch");
 		serving.await.expect("run_group_fetch");

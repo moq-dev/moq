@@ -47,6 +47,21 @@ usable_cpus() {
     env -u OMP_NUM_THREADS -u OMP_THREAD_LIMIT nproc
 }
 case $MODE in
+    --criterion)
+        BASE=
+        CRITERION_CARGO_ARGS=()
+        CRITERION_FILTER_ARGS=()
+        parsing_filters=false
+        for argument in "${@:2}"; do
+            if [[ $argument == -- && $parsing_filters == false ]]; then
+                parsing_filters=true
+            elif [[ $parsing_filters == true ]]; then
+                CRITERION_FILTER_ARGS+=("$argument")
+            else
+                CRITERION_CARGO_ARGS+=("$argument")
+            fi
+        done
+        ;;
     --audio)
         BASE=
         ;;
@@ -710,7 +725,17 @@ run_profile() {
 
 cd "$ROOT"
 
-if [[ $MODE == --audio ]]; then
+if [[ $MODE == --criterion ]]; then
+    # Each invocation owns fresh results; previous runs cannot become new points.
+    python3 -c 'import json,sys; from pathlib import Path; Path(sys.argv[1]).write_text(json.dumps(sys.argv[2:]))' \
+        "$RUN/criterion-command.json" "${@:2}"
+    if [[ -n ${MOQ_BENCH_RUNS:-} ]]; then
+        printf '%s\n' "$RUN" >>"$MOQ_BENCH_RUNS"
+    fi
+    CARGO_TARGET_DIR=$CURRENT_TARGET cargo bench --locked ${CRITERION_CARGO_ARGS[@]+"${CRITERION_CARGO_ARGS[@]}"} -- \
+        --quick --warm-up-time 0.05 --measurement-time 0.2 --noplot ${CRITERION_FILTER_ARGS[@]+"${CRITERION_FILTER_ARGS[@]}"}
+    exit 0
+elif [[ $MODE == --audio ]]; then
     run_audio_comparison
     exit 0
 elif [[ $MODE == --runtime ]]; then

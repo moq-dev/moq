@@ -42,10 +42,14 @@ impl<'a> Streams<'a> {
         Self { state, conn_state }
     }
 
-    /// Open a single stream if possible
+    /// Open a single stream if possible, its sending half scheduled by `options`
     ///
     /// Returns `None` if the streams in the given direction are currently exhausted.
-    pub fn open(&mut self, dir: Dir) -> Option<StreamId> {
+    ///
+    /// # Panics
+    /// - when `options.group` was opened on another connection
+    pub fn open(&mut self, dir: Dir, options: SendOptions<'_>) -> Option<StreamId> {
+        let group = options.group.map(|g| g.index(self.state.tag));
         if self.conn_state.is_closed() {
             return None;
         }
@@ -60,6 +64,21 @@ impl<'a> Streams<'a> {
         let id = StreamId::new(self.state.side, dir, self.state.next[dir as usize] - 1);
         self.state.insert_local(id);
         self.state.send_streams += 1;
+
+        // Send state is allocated on first use, so the default schedule needs none.
+        if group.is_some() || options.priority != 0 {
+            let max_send_data = self.state.max_send_data(id);
+            let stream = self
+                .state
+                .send
+                .get_mut(&id)
+                .unwrap()
+                .insert(Send::new(max_send_data));
+            stream.priority = options.priority;
+            self.state
+                .pending
+                .join(id, &mut stream.slot, group, stream.priority);
+        }
         Some(id)
     }
 
@@ -350,29 +369,68 @@ impl<'a> SendStream<'a> {
     /// # Panics
     /// - when applied to a receive stream
     pub fn reset(&mut self, error_code: VarInt) -> Result<(), ClosedStream> {
-        self.reset_to(error_code, 0)
+        self.reset_at(0, error_code)
     }
 
-    /// Mark the data written so far, so a later [`Checkpoint::reset`] still delivers it
+    /// How many bytes were written to the stream so far, the offset the next write starts at
+    ///
+    /// After a reset, the bytes the reset still delivers. Zero before the first write, or once
+    /// the stream is gone.
     ///
     /// # Panics
     /// - when applied to a receive stream
-    pub fn checkpoint(&self) -> Checkpoint {
-        let offset = match self.state.send.get(&self.id) {
+    pub fn offset(&self) -> u64 {
+        match self.state.send.get(&self.id) {
             Some(Some(stream)) => stream.offset(),
-            // Not written yet, or already closed, where the reset fails anyway
             _ => 0,
-        };
-        Checkpoint {
-            id: self.id,
-            tag: self.state.tag,
-            generation: self.state.generation,
-            offset,
         }
     }
 
-    /// Reset the stream, still delivering its first `reliable_size` bytes
-    fn reset_to(&mut self, error_code: VarInt, reliable_size: u64) -> Result<(), ClosedStream> {
+    /// Whether the peer acknowledged every byte before `offset`
+    ///
+    /// A `false` notes to report a [`StreamEvent::Acked`] once the answer changes, so poll again
+    /// then. The stream holds only its lowest waiting offset, so every waiter on it polls again
+    /// on that event. Like a [`StreamEvent::Finished`] stream, an acknowledgment only means the
+    /// peer's QUIC stack holds the data, not that its application read it.
+    ///
+    /// Fails with [`ClosedStream`] once the peer will never acknowledge it, or no longer reads
+    /// it: a reset dropped the data before `offset`, the peer sent STOP_SENDING, or the
+    /// connection closed. It also fails once the stream is freed, after its
+    /// [`StreamEvent::Finished`], which means every byte was acknowledged.
+    ///
+    /// # Panics
+    /// - when applied to a receive stream
+    /// - when `offset` is past the data written to a stream that was not reset
+    pub fn acked(&mut self, offset: u64) -> Result<bool, ClosedStream> {
+        if self.conn_state.is_closed() {
+            return Err(ClosedStream { _private: () });
+        }
+        match self.state.send.get_mut(&self.id) {
+            Some(Some(stream)) => stream.acked(offset),
+            Some(None) => {
+                assert_eq!(offset, 0, "acked past the data written");
+                Ok(true)
+            }
+            None => Err(ClosedStream { _private: () }),
+        }
+    }
+
+    /// Abandon the stream, but still deliver its first `offset` bytes
+    ///
+    /// Nothing past `offset` is sent or retransmitted. A peer that accepts RESET_STREAM_AT gets
+    /// it at once, and reads the data before the error. Otherwise the data keeps being
+    /// retransmitted, and a plain RESET_STREAM follows once the peer has acknowledged all of it, a
+    /// round trip later. An acknowledgment only means the peer's QUIC stack holds the data:
+    /// RFC 9000 lets it discard data its application has not read yet on RESET_STREAM, so this
+    /// only reliably delivers data the peer parses on arrival, like a WebTransport stream header.
+    /// A peer that asked us to stop sending gets the reset at once, without the data.
+    ///
+    /// Fails with [`ClosedStream`] if the stream was already reset or is gone.
+    ///
+    /// # Panics
+    /// - when applied to a receive stream
+    /// - when `offset` is past the data written
+    pub fn reset_at(&mut self, offset: u64, error_code: VarInt) -> Result<(), ClosedStream> {
         let max_send_data = self.state.max_send_data(self.id);
         let at = self.state.peer_reset_stream_at;
         let stream = self
@@ -386,12 +444,11 @@ impl<'a> SendStream<'a> {
             // Redundant reset call
             return Err(ClosedStream { _private: () });
         }
-        // A checkpoint names its stream's connection and generation, so it never runs past the data
-        debug_assert!(reliable_size <= stream.offset());
+        assert!(offset <= stream.offset(), "reset past the data written");
         // The peer that sent STOP_SENDING will not read the prefix
         let reliable_size = match stream.stop_reason {
             Some(_) => 0,
-            None => reliable_size,
+            None => offset,
         };
 
         // Restore the portion of the send window consumed by the data that we aren't about to
@@ -400,6 +457,12 @@ impl<'a> SendStream<'a> {
         let buffered = stream.pending.buffered();
         let send = stream.reset(error_code, reliable_size, at);
         self.state.buffered_data -= buffered - stream.pending.buffered();
+        if let Some(offset) = stream.take_waiting() {
+            self.state.events.push_back(StreamEvent::Acked {
+                id: self.id,
+                offset,
+            });
+        }
         // Only data below the Reliable Size is left to send
         if !stream.is_pending() {
             self.state.pending.remove(&mut stream.slot);
@@ -471,72 +534,37 @@ impl<'a> SendStream<'a> {
     }
 }
 
-/// The data written to a send stream up to some point, which a reset can still deliver
-///
-/// Taken with [`SendStream::checkpoint`], and only valid on the connection it came from.
-#[derive(Debug)]
-pub struct Checkpoint {
-    id: StreamId,
-    tag: ConnectionTag,
-    generation: u64,
-    offset: u64,
-}
-
-impl Checkpoint {
-    /// Abandon the stream, but still deliver everything written before the checkpoint
-    ///
-    /// Nothing past the checkpoint is sent or retransmitted. A peer that accepts RESET_STREAM_AT
-    /// gets it at once, and reads the data before the error. Otherwise the data keeps being
-    /// retransmitted, and a plain RESET_STREAM follows once the peer has acknowledged all of it, a
-    /// round trip later. An acknowledgment only means the peer's QUIC stack holds the data:
-    /// RFC 9000 lets it discard data its application has not read yet on RESET_STREAM, so this
-    /// only reliably delivers data the peer parses on arrival, like a WebTransport stream header.
-    /// A peer that asked us to stop sending gets the reset at once, without the data.
-    ///
-    /// Fails with [`ClosedStream`] if the stream was already reset or is gone, including one
-    /// rejected 0-RTT discarded, even if a new stream has since taken its id.
-    ///
-    /// # Panics
-    /// If the checkpoint came from another connection.
-    pub fn reset(
-        self,
-        conn: &mut crate::Connection,
-        error_code: VarInt,
-    ) -> Result<(), ClosedStream> {
-        let mut stream = conn.send_stream(self.id);
-        assert!(
-            self.tag == stream.state.tag,
-            "checkpoint used on another connection"
-        );
-        // Rejected 0-RTT discarded the stream, and a new one may have its id
-        if self.generation != stream.state.generation {
-            return Err(ClosedStream { _private: () });
-        }
-        stream.reset_to(error_code, self.offset)
-    }
-}
-
 /// Scheduling of outgoing streams between send groups
 ///
-/// A send group shares bytes with the other groups of its domain: a higher priority group
-/// preempts every lower one, and groups of equal priority get an equal share of bytes no
-/// matter how many streams each has queued. Domains share bytes equally whatever their
-/// groups' priorities. Streams outside any group go before all of it. A group's datagrams,
-/// from [`Datagrams::send`](crate::Datagrams::send), share its bytes in the same order.
+/// A higher priority group preempts every lower one, and groups of equal priority get an
+/// equal share of bytes no matter how many streams each has queued. Streams outside any group
+/// go before all of it. A group's datagrams, from [`Datagrams::send`](crate::Datagrams::send),
+/// share its bytes in the same order.
 pub struct SendGroups<'a> {
     pub(super) state: &'a mut StreamsState,
 }
 
 impl SendGroups<'_> {
-    /// Open a send group at `priority` in `domain`, or in the default domain
+    /// Open a send group at `priority`
+    pub fn open(&mut self, priority: i64) -> SendGroup {
+        SendGroup {
+            index: self.state.pending.open_group(priority, None),
+            tag: self.state.tag,
+        }
+    }
+
+    /// Open a send group at `priority` in `domain`
     ///
     /// # Panics
     /// - when `domain` was opened on another connection
-    pub fn open(&mut self, priority: i64, domain: Option<&SendDomain>) -> SendGroup {
+    #[cfg(test)]
+    pub(crate) fn open_in(&mut self, priority: i64, domain: &SendDomain) -> SendGroup {
         let tag = self.state.tag;
-        let domain = domain.map(|d| d.index(tag));
         SendGroup {
-            index: self.state.pending.open_group(priority, domain),
+            index: self
+                .state
+                .pending
+                .open_group(priority, Some(domain.index(tag))),
             tag,
         }
     }
@@ -570,7 +598,8 @@ impl SendGroups<'_> {
     }
 
     /// Open a domain, which gets an equal share of bytes with every other domain
-    pub fn open_domain(&mut self) -> SendDomain {
+    #[cfg(test)]
+    pub(crate) fn open_domain(&mut self) -> SendDomain {
         SendDomain {
             index: self.state.pending.open_domain(),
             tag: self.state.tag,
@@ -581,30 +610,30 @@ impl SendGroups<'_> {
     ///
     /// # Panics
     /// - when `domain` was opened on another connection
-    pub fn close_domain(&mut self, domain: SendDomain) {
+    #[cfg(test)]
+    pub(crate) fn close_domain(&mut self, domain: SendDomain) {
         let index = domain.index(self.state.tag);
         self.state.pending.close_domain(index);
     }
 }
 
 impl StreamsState {
-    /// Queue a datagram in `group` at `order`, within `budget` bytes of queued datagrams.
+    /// Queue a datagram scheduled by `options`, within `budget` bytes of queued datagrams.
     ///
     /// Returns whether it stayed queued rather than being evicted itself.
     ///
     /// # Panics
-    /// - when `group` was opened on another connection
+    /// - when `options.group` was opened on another connection
     pub(crate) fn queue_datagram(
         &mut self,
         datagram: frame::Datagram,
-        group: Option<&SendGroup>,
-        order: i64,
+        options: SendOptions<'_>,
         budget: usize,
     ) -> bool {
-        let group = group.map(|g| g.index(self.tag));
+        let group = options.group.map(|g| g.index(self.tag));
         let frame = datagram.size(true);
         self.pending
-            .push_datagram(group, order, datagram, frame, budget)
+            .push_datagram(group, options.priority, datagram, frame, budget)
     }
 
     /// Drop queued datagrams with a payload over `max_payload` bytes, returning whether any was.
@@ -628,6 +657,36 @@ impl StreamsState {
     }
 }
 
+/// How an outgoing stream or datagram is scheduled, like W3C WebTransport's send options
+///
+/// The default is ungrouped at priority 0. Generic so the drivers can carry their own group
+/// handle in the same shape.
+#[derive(Debug)]
+pub struct SendOptions<'a, G = SendGroup> {
+    /// The send group to join, or `None` for the ungrouped streams that go before every group
+    pub group: Option<&'a G>,
+    /// The priority within the group: higher goes first, and a datagram goes ahead of a
+    /// stream of equal priority
+    pub priority: i64,
+}
+
+impl<G> Default for SendOptions<'_, G> {
+    fn default() -> Self {
+        Self {
+            group: None,
+            priority: 0,
+        }
+    }
+}
+
+impl<G> Clone for SendOptions<'_, G> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<G> Copy for SendOptions<'_, G> {}
+
 /// A send group, from [`SendGroups::open`]
 ///
 /// Release it with [`SendGroups::close`] on the connection that opened it.
@@ -648,13 +707,15 @@ impl SendGroup {
 /// A domain of send groups, from [`SendGroups::open_domain`]
 ///
 /// Release it with [`SendGroups::close_domain`] on the connection that opened it.
+#[cfg(test)]
 #[derive(Debug, PartialEq, Eq)]
 #[must_use = "a domain lives until it is closed"]
-pub struct SendDomain {
+pub(crate) struct SendDomain {
     index: usize,
     tag: ConnectionTag,
 }
 
+#[cfg(test)]
 impl SendDomain {
     fn index(&self, tag: ConnectionTag) -> usize {
         assert_eq!(self.tag, tag, "send domain used on another connection");
@@ -688,6 +749,18 @@ pub enum StreamEvent {
     Finished {
         /// Which stream has been finished
         id: StreamId,
+    },
+    /// The answer changed for the lowest offset a [`SendStream::acked`] call is waiting for
+    ///
+    /// The stream's contiguous acknowledged prefix reached it, or a reset or STOP_SENDING may have
+    /// failed any waiter. Every waiter on the stream polls again: one at or below `offset` is
+    /// acknowledged, and one past it learns its error or registers again. Reported before a [`StreamEvent::Finished`] from the same ACK.
+    /// Not reported when the connection closes, which fails [`SendStream::acked`] instead.
+    Acked {
+        /// Which stream was acknowledged
+        id: StreamId,
+        /// The end of the stream's contiguous acknowledged prefix
+        offset: u64,
     },
     /// The peer asked us to stop sending on an outgoing stream
     Stopped {

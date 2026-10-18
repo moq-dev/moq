@@ -38,13 +38,13 @@ async fn connect_protected(version: Version, track: &str) -> Fixture {
 	.unwrap();
 	let generation = cred.produce();
 	let path = cred.path("meeting.hang").unwrap();
-	let name = generation.name(track).unwrap();
 
 	let publisher = produce_origin(1);
 	let consumer_origin = produce_origin(2);
 
 	let broadcast = publisher.create_broadcast(&path).unwrap();
-	let net = broadcast.create_track(name.as_str(), timed()).unwrap();
+	let protected = moq_e2ee::broadcast::Producer::new(broadcast.clone(), generation.clone());
+	let producer = protected.create_track(track, timed()).unwrap();
 	broadcast
 		.announce(moq_net::origin::Route::default().with_epoch(generation.epoch().clone()))
 		.unwrap();
@@ -66,20 +66,19 @@ async fn connect_protected(version: Version, track: &str) -> Fixture {
 		);
 	}
 	let epoch = route.epoch.unwrap_or_else(|| generation.epoch().clone());
-	let consuming = cred.consume(epoch);
 	let remote = consumer.request_broadcast(&path, None).await.unwrap();
-	let subscriber = remote
-		.track(name.as_str())
-		.unwrap()
-		.subscribe(Some(
+	let consumer = moq_e2ee::broadcast::Consumer::new(remote, cred.consume(epoch))
+		.subscribe(
+			track,
 			moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(60)),
-		))
+		)
+		.unwrap()
 		.await
 		.unwrap();
 
 	Fixture {
-		producer: generation.produce(net).unwrap(),
-		consumer: consuming.consume(subscriber).unwrap(),
+		producer,
+		consumer,
 		_broadcast: broadcast,
 		_pair: pair,
 	}

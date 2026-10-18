@@ -1213,9 +1213,8 @@ mod tests {
 		let rung = consumer.track("video/120p").unwrap();
 		let mut query = rung.query();
 		(&mut query).await.unwrap();
-		while rung.latest() != Some(0) {
-			tokio::task::yield_now().await;
-		}
+		let mut edge = rung.clone();
+		assert_eq!(edge.largest().await.map(|position| position.group), Some(0));
 		let mut fetched = rung.fetch_group(0, None).await.unwrap();
 
 		// Group 0 is still being written from a source group that is still open, so

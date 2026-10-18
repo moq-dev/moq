@@ -48,7 +48,7 @@ symbol stripping. Prefix direct calls with
 - A stream ID keeps the initiator, direction, and index it was built from.
 - ACK ranges walk downward without overlapping.
 - `connection` handshakes a client and server over TLS, then applies opens, accepts,
-  writes, finishes, resets (plain and from a checkpoint), stops, reads that hold or
+  writes, finishes, resets (plain and at an offset), acknowledgment queries, stops, reads that hold or
   release credit, runtime limit and window changes, datagrams, key updates, and time
   jumps, while dropping, duplicating, reordering, corrupting, and injecting datagrams.
   Every stream read is in order, never past what was written, byte-for-byte what was

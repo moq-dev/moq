@@ -80,8 +80,8 @@ pub(crate) use crate::quic::driver::runtime::send_failed;
 #[cfg(test)]
 pub(crate) use crate::quic::driver::runtime::wrap_udp_socket;
 pub use crate::quic::driver::runtime::{AsyncUdpSocket, UdpSender};
-pub use crate::quic::driver::send_group::SendGroup;
-pub use crate::quic::driver::send_stream::{Checkpoint, SendStream, StoppedError, WriteError};
+pub use crate::quic::driver::send_group::{SendGroup, SendOptions};
+pub use crate::quic::driver::send_stream::{SendStream, StoppedError, WriteError};
 
 #[cfg(test)]
 mod tests;

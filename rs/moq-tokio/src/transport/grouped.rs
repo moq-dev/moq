@@ -4,6 +4,8 @@
 //! implement them: `pub(crate)` is refused (E0446) because the public adapter's
 //! `type Group` projects through [`GroupedSend`].
 
+use moq_net::transport::poll::SendOptions;
+
 /// A backend session whose send streams may join send groups, as native QUIC's do.
 ///
 /// The async interface has no groups or wire counters, so moq-net's
@@ -22,14 +24,13 @@ pub trait Grouped: web_transport_trait::Session<SendStream: GroupedSend> {
 		None
 	}
 
-	/// Send a datagram in `group` at `order`; a backend without groups ignores both.
+	/// Send a datagram scheduled by `options`; a backend without groups ignores them.
 	fn send_datagram(
 		&self,
 		payload: bytes::Bytes,
-		group: Option<&<Self::SendStream as GroupedSend>::Group>,
-		order: i64,
+		options: SendOptions<'_, <Self::SendStream as GroupedSend>::Group>,
 	) -> Result<(), Self::Error> {
-		let _ = (group, order);
+		let _ = options;
 		web_transport_trait::Session::send_datagram(self, payload)
 	}
 }

@@ -67,6 +67,7 @@ jobs:
             recipe: bench-ffi
             artifact: bench-ffi
             artifact-path: target/bench/ffi
+            benchmark: true
           # Keeps the BoltFFI and UniFFI slice building and running for the
           # browser generator comparison, which reuses it. It skips the size
           # step, whose moq-ffi and moq-wasm builds double the time and are
@@ -91,8 +92,14 @@ jobs:
             recipe: gh nightly rust-test
           - name: Rust bench targets
             recipe: gh nightly rust-bench
+            artifact: bench-rust
+            artifact-path: target/bench/nightly/rust-bench
+            benchmark: true
           - name: JS benchmarks
             recipe: gh nightly js
+            artifact: bench-js
+            artifact-path: target/bench/nightly/js
+            benchmark: true
             uncached: true
           - name: BBB rendition alignment
             recipe: pub check-bbb
@@ -160,9 +167,14 @@ jobs:
         run: nix develop --command bash -c "bun install --frozen-lockfile && bunx playwright install --with-deps chromium"
 
       - name: Run workload
+        id: workload
         run: nix develop ${{ matrix.shell }} --command just ${{ matrix.recipe }}
         env:
           NEXTEST_PROFILE: ${{ matrix.profile || 'default' }}
+
+      - name: Record benchmark outcome
+        if: ${{ matrix.benchmark && !cancelled() }}
+        run: nix develop --command just gh benchmark-report status "${{ steps.workload.outcome }}" "${{ matrix.artifact-path }}"
 
       - name: Preserve results
         if: ${{ matrix.artifact && !cancelled() }}
@@ -171,6 +183,78 @@ jobs:
           name: ${{ matrix.artifact }}
           path: ${{ matrix.artifact-path }}
           retention-days: 45
+
+  # One writer owns gh-pages, including future Criterion regression history.
+  # Explicit Pages deployment works with GITHUB_TOKEN; a branch push alone does not.
+  benchmark-site:
+    name: Benchmark site
+    needs: nightly
+    if: ${{ !cancelled() && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 15
+    concurrency:
+      group: benchmark-pages
+      cancel-in-progress: false
+    permissions:
+      contents: write
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Only this main-branch publisher pushes the shared history branch.
+          persist-credentials: true
+      - uses: DeterminateSystems/nix-installer-action@1d87d45818068401a10cf16bdc5f00b24994a83f # main
+        with:
+          determinate: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          pattern: bench-*
+          path: benchmark-inputs
+      - name: Validate completed reports
+        id: reports
+        run: nix develop --command just gh benchmark-report prepare benchmark-inputs benchmark-reports
+      - name: Prepare history
+        run: nix develop --command just gh benchmark-publish init
+      - name: Store time, CPU and ratio history
+        if: steps.reports.outputs.costs == 'true'
+        uses: benchmark-action/github-action-benchmark@4322e5726e6334590d251fc4f92bec0efafc45dc # v1.22.2
+        with:
+          name: MoQ nightly costs
+          tool: customSmallerIsBetter
+          output-file-path: benchmark-reports/costs.json
+          benchmark-data-dir-path: bench/costs
+          skip-fetch-gh-pages: true
+          github-token: ${{ github.token }}
+          ref: ${{ github.sha }}
+          auto-push: false
+          comment-on-alert: false
+          fail-on-alert: false
+      - name: Store throughput history
+        if: steps.reports.outputs.rates == 'true'
+        uses: benchmark-action/github-action-benchmark@4322e5726e6334590d251fc4f92bec0efafc45dc # v1.22.2
+        with:
+          name: MoQ nightly throughput
+          tool: customBiggerIsBetter
+          output-file-path: benchmark-reports/rates.json
+          benchmark-data-dir-path: bench/rates
+          skip-fetch-gh-pages: true
+          github-token: ${{ github.token }}
+          ref: ${{ github.sha }}
+          auto-push: false
+          comment-on-alert: false
+          fail-on-alert: false
+      - name: Publish shared history
+        run: nix develop --command just gh benchmark-publish finish benchmark-site
+      - uses: actions/upload-pages-artifact@7b1f4a764d45c48632c6b24a0339c27f5614fb0b # v4
+        with:
+          path: benchmark-site
+      - name: Deploy charts
+        id: deploy
+        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4
 
   tests:
     name: Tests (${{ matrix.recipe }})

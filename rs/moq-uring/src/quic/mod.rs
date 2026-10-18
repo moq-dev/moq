@@ -30,7 +30,7 @@ pub mod web;
 
 mod driver;
 
-pub use driver::{Connection, Credit, RecvStream, SendGroup, SendStream};
+pub use driver::{Connection, Credit, RecvStream, SendGroup, SendOptions, SendStream};
 pub use endpoint::Endpoint;
 /// The flow-control limits a live connection can change; see [`Connection::set_limits`].
 pub use moq_quic::{Limits, LimitsError};

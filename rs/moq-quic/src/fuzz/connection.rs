@@ -69,7 +69,7 @@ enum Who {
     Server,
 }
 
-/// One step of a run. Stream and checkpoint indexes wrap around what that side has.
+/// One step of a run. Stream indexes wrap around what that side has.
 #[derive(Arbitrary, Debug)]
 enum Op {
     Open {
@@ -94,14 +94,18 @@ enum Op {
         stream: u8,
         code: u32,
     },
-    Checkpoint {
+    /// Reset a stream, still delivering a prefix of what was written
+    ResetAt {
         who: Who,
         stream: u8,
-    },
-    ResetCheckpoint {
-        who: Who,
-        checkpoint: u8,
+        offset: u16,
         code: u32,
+    },
+    /// Ask whether a prefix of what was written is acknowledged
+    Acked {
+        who: Who,
+        stream: u8,
+        offset: u16,
     },
     Priority {
         who: Who,
@@ -138,7 +142,7 @@ enum Op {
     Datagram {
         who: Who,
         len: u16,
-        order: i8,
+        priority: i8,
     },
     Ping {
         who: Who,
@@ -198,7 +202,6 @@ struct Peer {
     recv: Vec<StreamId>,
     /// How far each stream has been read, in order.
     read: HashMap<StreamId, u64>,
-    checkpoints: Vec<crate::Checkpoint>,
     held: Vec<Credit>,
     /// The length of each datagram this side sent, indexed by the sequence number it carries.
     datagrams_sent: Vec<usize>,
@@ -223,7 +226,6 @@ impl Peer {
             send: Vec::new(),
             recv: Vec::new(),
             read: HashMap::new(),
-            checkpoints: Vec::new(),
             held: Vec::new(),
             datagrams_sent: Vec::new(),
             datagrams_received: HashSet::new(),
@@ -443,7 +445,10 @@ impl Pair {
             Op::Open { who, uni } => {
                 let peer = self.peer(who);
                 let dir = dir(uni);
-                let Some(id) = peer.conn().and_then(|conn| conn.streams().open(dir)) else {
+                let Some(id) = peer
+                    .conn()
+                    .and_then(|conn| conn.streams().open(dir, Default::default()))
+                else {
                     return;
                 };
                 peer.send.push(id);
@@ -478,26 +483,27 @@ impl Pair {
                     let _ = conn.send_stream(id).reset(code.into());
                 }
             }
-            Op::Checkpoint { who, stream } => {
-                let peer = self.peer(who);
-                if let Some((id, conn)) = send_stream(peer, stream) {
-                    let checkpoint = conn.send_stream(id).checkpoint();
-                    peer.checkpoints.push(checkpoint);
-                }
-            }
-            Op::ResetCheckpoint {
+            Op::ResetAt {
                 who,
-                checkpoint,
+                stream,
+                offset,
                 code,
             } => {
-                let peer = self.peer(who);
-                if peer.checkpoints.is_empty() {
-                    return;
+                if let Some((id, conn)) = send_stream(self.peer(who), stream) {
+                    let mut stream = conn.send_stream(id);
+                    let offset = u64::from(offset) % (stream.offset() + 1);
+                    let _ = stream.reset_at(offset, code.into());
                 }
-                let index = checkpoint as usize % peer.checkpoints.len();
-                let checkpoint = peer.checkpoints.swap_remove(index);
-                if let Some(conn) = peer.conn() {
-                    let _ = checkpoint.reset(conn, code.into());
+            }
+            Op::Acked {
+                who,
+                stream,
+                offset,
+            } => {
+                if let Some((id, conn)) = send_stream(self.peer(who), stream) {
+                    let mut stream = conn.send_stream(id);
+                    let offset = u64::from(offset) % (stream.offset() + 1);
+                    let _ = stream.acked(offset);
                 }
             }
             Op::Priority {
@@ -554,7 +560,7 @@ impl Pair {
                     conn.set_send_window(window.into());
                 }
             }
-            Op::Datagram { who, len, order } => {
+            Op::Datagram { who, len, priority } => {
                 let peer = self.peer(who);
                 let seq = peer.datagrams_sent.len() as u64;
                 let Some(conn) = peer.conn() else {
@@ -566,7 +572,17 @@ impl Pair {
                     .chain((0..len).map(|i| datagram_byte(seq, i.into())))
                     .collect();
                 let size = data.len();
-                if conn.datagrams().send(data, None, order.into()).is_ok() {
+                if conn
+                    .datagrams()
+                    .send(
+                        data,
+                        crate::SendOptions {
+                            group: None,
+                            priority: priority.into(),
+                        },
+                    )
+                    .is_ok()
+                {
                     peer.datagrams_sent.push(size);
                 }
             }
@@ -820,7 +836,7 @@ pub(super) fn datagrams() -> Vec<Vec<u8>> {
         Op::Datagram {
             who: Who::Server,
             len: 10,
-            order: 0,
+            priority: 0,
         },
         Op::KeyUpdate { who: Who::Client },
         Op::Ping { who: Who::Client },

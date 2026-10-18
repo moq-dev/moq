@@ -67,12 +67,12 @@ export class Consumer<T> {
 				// full snapshot, so switching mid-group loses nothing but stale state (mirrors the Rust
 				// consumer). Older groups only hold superseded state too, so raise the floor to the
 				// newest instead of replaying each one.
-				const latest = this.#track.latest();
-				if (this.#group !== undefined && latest !== undefined && latest > this.#group.sequence) {
+				const latest = await this.#track.largest();
+				if (this.#group !== undefined && latest !== undefined && latest.group > this.#group.sequence) {
 					this.#group.close();
 					this.#group = undefined;
 				}
-				if (!this.#group && latest !== undefined) this.#track.setGroups({ start: { included: latest } });
+				if (!this.#group && latest !== undefined) this.#track.setGroups({ start: { included: latest.group } });
 			}
 
 			if (!this.#group) {

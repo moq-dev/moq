@@ -180,7 +180,7 @@ pub fn streams(data: &[u8]) -> bool {
         };
         match op {
             StreamOp::Open => {
-                Streams::new(&mut state, &conn_state).open(dir);
+                Streams::new(&mut state, &conn_state).open(dir, Default::default());
             }
             StreamOp::Accept { uni } => {
                 let dir = if uni { Dir::Uni } else { Dir::Bi };

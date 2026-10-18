@@ -1333,7 +1333,7 @@ impl Cluster {
 			)));
 		}
 
-		let stats = self.stats.tier(token.tier.clone()).session(&token.root);
+		let stats = self.stats.tier(token.tier.clone()).session(&token.label);
 		tracing::info!(transport = %request.transport, ?request.role, tier = %token.tier, root = %token.root,
 			publish = ?publisher.as_ref().map(origin::Producer::allowed),
 			subscribe = ?subscriber.as_ref().map(origin::Producer::allowed),

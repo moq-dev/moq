@@ -18,3 +18,4 @@ Existing plaintext commands remain the default; an explicit application credenti
 ## Required
 
 - [Rust protected publisher seams](/quest/m2/e2ee/rust-publish.md) - prevents native convenience publishers from leaking semantic names or catalogs
+- [Encrypted consumer shape](/quest/m2/e2ee/consumer.md) - playback uses the shared consumer instead of its own decryption
