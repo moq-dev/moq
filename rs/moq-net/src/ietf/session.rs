@@ -155,7 +155,17 @@ where
 
 	// One SUBSCRIBE_NAMESPACE per permitted prefix, like `lite::Subscriber`: the
 	// scope is what we may ask for, and it is not the origin's root.
-	let namespaces = subscribe.as_ref().map(subscribe_prefixes).unwrap_or_default();
+	// Each holds a snapshot from now, so the origin's announce consumers never read as
+	// synced before the request goes out.
+	let namespaces: Vec<_> = subscribe
+		.as_ref()
+		.map(|origin| {
+			subscribe_prefixes(origin)
+				.into_iter()
+				.map(|prefix| (origin.snapshot(&prefix), prefix))
+				.collect()
+		})
+		.unwrap_or_default();
 
 	let withdrawal = crate::session::Withdrawal::default();
 	let withdrawing = withdrawal.clone();
@@ -311,7 +321,7 @@ where
 				let mut pub_ns_run = std::pin::pin!(err_only(publisher.clone().run_publish_namespaces()));
 				let mut sub_ns_run = std::pin::pin!(err_only(async {
 					let mut prefixes = futures::stream::FuturesUnordered::new();
-					for prefix in namespaces {
+					for (snapshot, prefix) in namespaces {
 						let mut sub_ns = sub_ns.clone();
 						let sub_ns_adapter = sub_ns_adapter.clone();
 						prefixes.push(async move {
@@ -326,7 +336,7 @@ where
 								}
 								_ => Stream::open(&mut sub_ns_adapter.clone(), version).await?,
 							};
-							if let Err(err) = sub_ns.run_subscribe_namespace(stream, prefix).await {
+							if let Err(err) = sub_ns.run_subscribe_namespace(stream, prefix, snapshot).await {
 								// The peer breaking the protocol is fatal, and the driver
 								// below turns this into the session close the draft wants.
 								if is_protocol_violation(&err) {
@@ -525,13 +535,13 @@ where
 				let mut pub_ns_run = std::pin::pin!(err_only(publisher.clone().run_publish_namespaces()));
 				let mut sub_ns_run = std::pin::pin!(err_only(async {
 					let mut prefixes = futures::stream::FuturesUnordered::new();
-					for prefix in namespaces {
+					for (snapshot, prefix) in namespaces {
 						let mut sub_ns = sub_ns.clone();
 						let sub_ns_session = sub_ns_session.clone();
 						prefixes.push(async move {
 							let mut sub_ns_session = sub_ns_session;
 							let stream = Stream::open(&mut sub_ns_session, version).await?;
-							if let Err(err) = sub_ns.run_subscribe_namespace(stream, prefix).await {
+							if let Err(err) = sub_ns.run_subscribe_namespace(stream, prefix, snapshot).await {
 								// The peer breaking the protocol is fatal, and the driver
 								// below turns this into the session close the draft wants.
 								if is_protocol_violation(&err) {

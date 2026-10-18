@@ -998,17 +998,7 @@ impl Admission {
 /// The `moq_auth::Request` for an accepted transport request: every fact the
 /// transport knows, nothing parsed on the server's behalf.
 pub fn request_for(auth: &Auth, request: &moq_tokio::server::Request) -> Request {
-	let transport = match request.transport() {
-		moq_tokio::Transport::Quic => moq_auth::Transport::Quic,
-		moq_tokio::Transport::WebTransport => moq_auth::Transport::WebTransport,
-		moq_tokio::Transport::Iroh => moq_auth::Transport::Iroh,
-		moq_tokio::Transport::WebSocket => moq_auth::Transport::WebSocket,
-		moq_tokio::Transport::Tcp => moq_auth::Transport::Tcp,
-		moq_tokio::Transport::Unix => moq_auth::Transport::Unix,
-		// A transport this build does not know is still a session on the wire; the
-		// server sees the same facts either way.
-		other => unreachable!("unknown transport {other}"),
-	};
+	let transport = transport(request.transport());
 	// A URL-less transport reports its root as empty; the contract says what was dialed.
 	let path = match request.path() {
 		"" => "/".to_string(),
@@ -1030,6 +1020,22 @@ pub fn request_for(auth: &Auth, request: &moq_tokio::server::Request) -> Request
 	out.role = request.role().and_then(role);
 	out.tls = request.peer_identity().as_ref().and_then(peer);
 	out
+}
+
+/// The auth transport for a session's transport.
+fn transport(transport: moq_tokio::Transport) -> moq_auth::Transport {
+	match transport {
+		moq_tokio::Transport::Quic => moq_auth::Transport::Quic,
+		moq_tokio::Transport::WebTransport => moq_auth::Transport::WebTransport,
+		moq_tokio::Transport::Iroh => moq_auth::Transport::Iroh,
+		moq_tokio::Transport::WebSocket => moq_auth::Transport::WebSocket,
+		moq_tokio::Transport::Tcp => moq_auth::Transport::Tcp,
+		moq_tokio::Transport::Unix => moq_auth::Transport::Unix,
+		moq_tokio::Transport::WebRtc => moq_auth::Transport::WebRtc,
+		// A transport this build does not know is still a session on the wire; the
+		// server sees the same facts either way.
+		other => unreachable!("unknown transport {other}"),
+	}
 }
 
 /// The auth role for a session role, `None` for one `moq-auth` cannot name yet.
@@ -1118,6 +1124,22 @@ mod tests {
 		capped.subscribe.rate = Some(moq_auth::Rate::from_bps(8000).unwrap());
 		producer.update(capped);
 		assert!(lease.ended().await.to_string().contains("cannot enforce bitrate caps"));
+	}
+
+	#[test]
+	fn every_transport_has_an_auth_name() {
+		use moq_tokio::Transport as T;
+		for transport in [
+			T::Quic,
+			T::WebTransport,
+			T::Iroh,
+			T::WebSocket,
+			T::Tcp,
+			T::Unix,
+			T::WebRtc,
+		] {
+			assert_eq!(super::transport(transport).as_str(), transport.as_str());
+		}
 	}
 
 	#[test]

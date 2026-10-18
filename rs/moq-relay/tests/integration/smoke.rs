@@ -12,6 +12,8 @@ use std::time::Duration;
 use moq_relay::{Config, Connection, Relay, auth, cluster, web};
 use moq_tokio::moq_net;
 
+use crate::logs::Logs;
+
 /// A millisecond track: the frames written here carry timestamps.
 fn timed() -> moq_net::track::Info {
 	moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
@@ -214,47 +216,6 @@ async fn relay_websocket_round_trip_uses_newest_version() {
 	web_handle.abort();
 }
 
-/// Relay log output as text, waking every waiter on each write.
-#[derive(Clone, Default)]
-struct Logs {
-	text: std::sync::Arc<std::sync::Mutex<String>>,
-	written: std::sync::Arc<tokio::sync::Notify>,
-}
-
-impl Logs {
-	/// Wait until the output contains `needle`.
-	async fn wait_for(&self, needle: &str) {
-		loop {
-			// Created before the check, so a write in between still wakes it.
-			let written = self.written.notified();
-			if self.text.lock().unwrap().contains(needle) {
-				return;
-			}
-			written.await;
-		}
-	}
-}
-
-impl std::io::Write for Logs {
-	fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
-		self.text.lock().unwrap().push_str(&String::from_utf8_lossy(data));
-		self.written.notify_waiters();
-		Ok(data.len())
-	}
-
-	fn flush(&mut self) -> std::io::Result<()> {
-		Ok(())
-	}
-}
-
-impl tracing_subscriber::fmt::MakeWriter<'_> for Logs {
-	type Writer = Self;
-
-	fn make_writer(&self) -> Self {
-		self.clone()
-	}
-}
-
 /// A WebSocket session takes its id from the cluster-wide counter and logs its close, like
 /// a QUIC one, so the interop harness can pair its `conn{id=N}` span with that close.
 #[tokio::test]
@@ -300,6 +261,7 @@ async fn relay_websocket_logs_its_close_under_a_cluster_id() {
 		.await
 		.expect("the WebSocket session's close was not logged");
 
+	assert!(logs.text().contains("connection closed"));
 	web_handle.abort();
 }
 

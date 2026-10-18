@@ -22,7 +22,7 @@ if ((all)); then
     cargo clippy --locked -p moq-tokio --no-default-features --features quic,aws-lc-rs -- -D warnings
     cargo clippy --locked -p moq-tokio --no-default-features --features quic,ring -- -D warnings
 
-    for feature in aws-lc-rs ring tcp uds websocket; do
+    for feature in aws-lc-rs ring tcp uds websocket webrtc; do
         cargo clippy --locked -p moq-tokio --no-default-features --features "$feature" -- -D warnings
     done
 fi

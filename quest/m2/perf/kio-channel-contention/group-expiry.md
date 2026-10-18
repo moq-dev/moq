@@ -4,14 +4,14 @@
 
 A group poll decides whether its group expired without locking the track's
 `TrackState`. Lands with the contended bench (`rs/kio/benches/contended.rs`)
-and `just bench-lock` before and after, both run on a quiet host; a measured
+and `just bench-profile lock` before and after, both run on a quiet host; a measured
 no-win abandons it.
 
 ## Plan
 
 - `GroupExpiry::is_expired` (`rs/moq-net/src/model/track.rs:3744`) reads the
   track state (`self.state.read()`, `track.rs:3760`) on every group poll.
-  That read is 32% of all mutex wait at 16 workers in both `just bench-lock`
+  That read is 32% of all mutex wait at 16 workers in both `just bench-profile lock`
   shapes, per the
   [epic](/quest/m2/perf/kio-channel-contention/README.md)'s baseline.
 - Suggested direction: an atomic mirror of the verdict, like `Alive::aborted`

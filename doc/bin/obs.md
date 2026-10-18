@@ -10,7 +10,7 @@ OBS Studio install.
 
 - **Publish**: Settings > Stream, choose "MoQ", enter the relay URL (with `?jwt=` if needed) and broadcast path, Start Streaming.
 - **Subscribe**: add a "MoQ Source", enter the relay URL and broadcast path, and the stream appears in the scene.
-- **Dock**: a **MoQ** dock with Go Live, encoding that uses the OBS Output settings or custom settings for this stream only, and live stats (RTT, bandwidth, loss).
+- **Dock**: a **MoQ** dock with Go Live, encoding that uses the OBS Output settings or custom settings for this stream only, and live stats (protocol, RTT, bandwidth, loss), and the reason while a stream reconnects.
 
 Each Start Streaming publishes a fresh epoch, shown in the dock's Stats tab.
 The client's automatic reconnects keep the same epoch. A stop/start, or an OBS
@@ -77,9 +77,11 @@ Xcode or Visual Studio 2022, plus Rust and
 ## Advanced settings
 
 Off by default; the defaults suit a normal relay. They cover what you would
-otherwise pass to `moq` on the command line: the local bind address,
-trusting a self-signed relay or private CA, reconnect pacing, the QUIC
-stream limit, and the WebSocket fallback race. A rejected value stops the
+otherwise pass to `moq` on the command line: pinning a protocol version, the
+local bind address and connect timing, trusting a self-signed relay or private
+CA, reconnect pacing, QUIC tuning (congestion control, idle timeout,
+keep-alive, segmentation offload, MTU discovery, and qlog traces when the build
+supports them), and the WebSocket fallback race. A rejected value stops the
 stream with the reason in the log rather than silently using a default.
 
 The plugin is C++ over the [generated C++ bindings](/lib/cpp/) and ships with

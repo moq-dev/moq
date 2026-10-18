@@ -115,6 +115,39 @@ void main() {
     broadcast.close();
   });
 
+  test(
+    'an ascending subscription reads a cached backlog oldest first',
+    () async {
+      final broadcast = BroadcastProducer();
+      final track = broadcast.publishTrack(
+        name: 'backlog',
+        info: TrackInfo(timescale: 1000000),
+      );
+      for (var ms = 0; ms < 3; ms++) {
+        final group = track.appendGroup();
+        group.writeFrame(
+          frame: Frame(payload: utf8.encode('x'), timestampUs: ms * 1000),
+        );
+        group.finish();
+      }
+
+      final consumer = track.consume(
+        subscription: Subscription(
+          maxDelayUs: 10000000,
+          ranges: [Range(start: RelativeMoqAnchor(2))],
+          order: Order.ascending,
+        ),
+      );
+      final sequences = <int>[];
+      for (var i = 0; i < 3; i++) {
+        final group = await consumer.recvGroup().timeout(timeout);
+        sequences.add(group!.sequence());
+      }
+      expect(sequences, [0, 1, 2]);
+      broadcast.close();
+    },
+  );
+
   test('connects, announces, subscribes, and delivers a frame', () async {
     final relay = MoqOriginProducer(config: MoqOriginConfig());
     final server = MoqServer(
@@ -201,7 +234,17 @@ void main() {
       'https://${server.localAddr}',
       options: ConnectOptions(
         tlsVerify: false,
+        tlsHostName: 'localhost',
         bind: '127.0.0.1:0',
+        versions: versions(),
+        timeout: Duration(seconds: 5),
+        race: Duration.zero,
+        resolutionDelay: Duration.zero,
+        idleTimeout: Duration(seconds: 5),
+        keepAlive: Duration.zero,
+        gso: false,
+        mtuDiscovery: true,
+        congestionControl: CongestionControl.loss,
         reconnect: false,
         backoff: Backoff(initialUs: 1000, maxUs: 2000, timeoutUs: 3000),
         websocketEnabled: false,

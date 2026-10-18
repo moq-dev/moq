@@ -1,5 +1,7 @@
 import importlib.util
 import pathlib
+import subprocess
+import tempfile
 import unittest
 from fractions import Fraction
 
@@ -56,6 +58,24 @@ class Cuts(unittest.TestCase):
     def test_lost_prefix(self):
         capture = (Fraction(10), *self.SOURCE[1:])
         self.assertEqual(len(holes.cuts(self.SOURCE, capture, self.FRAME)), 1)
+
+
+class Probe(unittest.TestCase):
+    def test_audio_starting_past_the_default_probe(self):
+        # Intra-only video ahead of an MP2 stream that starts 3 s in, past FFmpeg's default 5 MB
+        # probe: probed that far only, its first PES reads as a hole.
+        with tempfile.TemporaryDirectory() as tmp:
+            path = str(pathlib.Path(tmp, "late.ts"))
+            subprocess.run([
+                "ffmpeg", "-v", "error",
+                "-f", "lavfi", "-i", "testsrc2=size=1280x720:rate=25:duration=4",
+                "-itsoffset", "3", "-f", "lavfi", "-i", "sine=sample_rate=48000:duration=1",
+                "-map", "0:v", "-map", "1:a", "-c:v", "mpeg2video", "-g", "1", "-q:v", "1",
+                "-c:a", "mp2", "-f", "mpegts", path,
+            ], check=True)
+            streams = holes.probe(path)
+        _, dts, _ = streams["0x101"]
+        self.assertEqual(holes.holes(dts, holes.step(dts)), [])
 
 if __name__ == "__main__":
     unittest.main()

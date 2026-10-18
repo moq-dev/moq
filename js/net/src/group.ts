@@ -69,6 +69,9 @@ class GroupState {
 	timestamp?: Timestamp;
 	// The newest frame's timestamp: where a reader that has taken every frame sits.
 	latest?: Timestamp;
+	// Accepted below the track's eviction watermark, where nothing proves where it starts,
+	// so this mirror drives no media-time expiry.
+	unverified = false;
 	// When the group joined the track this mirror belongs to, at this hop: the wall clock a
 	// superseded predecessor ages from. Per track, since one group can join several.
 	arrived = Instant.zero;
@@ -159,6 +162,10 @@ export class Producer {
 	// not from its creation, so a group still being filled is never reclaimed.
 	#activity = now();
 
+	// The tracks this group joined before its first frame, each checking that frame's
+	// timestamp against its neighbors' starts.
+	#admits?: ((start: Timestamp) => () => void)[];
+
 	constructor(sequence: number) {
 		this.#state = new GroupState(sequence);
 		this.sequence = sequence;
@@ -174,6 +181,11 @@ export class Producer {
 			for (const frame of state.frames.peek()) checkTimed(timed, frame);
 			state.timed = timed;
 		};
+		hooks.admitGroupStart = (group, admit) => {
+			group.#admits ??= [];
+			group.#admits.push(admit);
+		};
+		hooks.groupStart = (group) => (group.#state.total.peek() > 0 ? group.#state.timestamp : undefined);
 		hooks.limitGroup = (group, frames) => {
 			// A closed group takes no more frames, but one already past the cap still
 			// contradicts the end.
@@ -206,6 +218,7 @@ export class Producer {
 		return makeConsumer(this.#state);
 	}
 
+	// pending: /quest/m1/public-model/deferred.md
 	/**
 	 * Create an independent read handle that receives every frame written here.
 	 *
@@ -265,6 +278,13 @@ export class Producer {
 		if (this.#limit !== undefined && this.#state.total.peek() >= this.#limit) {
 			throw new Error(`frame ${this.#state.total.peek()} is past the track's end`);
 		}
+		// Frame 0 must fit between its neighbors in every track it joined, checked before
+		// any of them records it, so a refusal leaves the group and its tracks as they were.
+		let commits: (() => void)[] | undefined;
+		if (this.#admits && frame.timestamp !== undefined && this.#state.total.peek() === 0) {
+			const start = frame.timestamp;
+			commits = this.#admits.map((admit) => admit(start));
+		}
 		if (
 			this.#state.total.peek() >= MAX_GROUP_FRAMES ||
 			this.#state.cacheBytes + frame.payload.byteLength > MAX_GROUP_CACHE_BYTES
@@ -284,6 +304,10 @@ export class Producer {
 
 		this.#activity = now();
 		appendFrame(this.#state, frame);
+		if (commits) {
+			this.#admits = undefined;
+			for (const commit of commits) commit();
+		}
 
 		if (this.#mirrors) {
 			for (const mirror of this.#mirrors) {
@@ -430,8 +454,11 @@ export class Consumer {
 
 	static {
 		makeConsumer = (state) => new Consumer(state);
-		hooks.groupTimestamp = (group) => group.#state.timestamp;
-		hooks.groupLatest = (group) => group.#state.latest;
+		hooks.groupTimestamp = (group) => (group.#state.unverified ? undefined : group.#state.timestamp);
+		hooks.groupLatest = (group) => (group.#state.unverified ? undefined : group.#state.latest);
+		hooks.unverifyGroup = (group) => {
+			group.#state.unverified = true;
+		};
 		hooks.groupArrived = (group) => group.#state.arrived;
 		hooks.arriveGroup = (group, at) => {
 			group.#state.arrived = at;

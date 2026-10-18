@@ -46,8 +46,9 @@ use moq_nvenc::{Encoder, EncoderInitParams, Session};
 
 use super::super::encoder::{Applied, Codec, Config, Gop, Preset};
 use super::{Backend, Encoded, keyframe_annexb};
+use crate::color::{Matrix, Primaries, Range, Transfer};
 use crate::frame::{Surface, cuda, interleave_uv, vulkan};
-use crate::{Color, Error, Frame};
+use crate::{Error, Frame};
 
 pub(crate) const NAME: &str = "nvenc";
 
@@ -142,22 +143,24 @@ impl Nvenc {
 		//     random-access point), so each GOP boundary is joinable.
 
 		// State the color space in the SPS so a decoder doesn't fall back to
-		// guessing it from the frame height. BT.601 goes out as SMPTE 170M primaries
-		// and matrix (code point 6) with the BT.709 transfer curve (1): the two
-		// curves are defined identically, and 1 is the only one CoreVideo and Media
-		// Foundation can name, so every backend emits the same triple.
+		// guessing it from the frame height. The SDR curve goes out as BT.709 (1)
+		// whatever the matrix, as every backend emits it; see `Color::code_points`.
 		let color = config.resolved_color();
-		let (primaries, transfer, matrix) = match color {
-			Color::Bt601Limited | Color::Bt601Full => (
-				NV_ENC_VUI_COLOR_PRIMARIES::NV_ENC_VUI_COLOR_PRIMARIES_SMPTE170M,
-				NV_ENC_VUI_TRANSFER_CHARACTERISTIC::NV_ENC_VUI_TRANSFER_CHARACTERISTIC_BT709,
-				NV_ENC_VUI_MATRIX_COEFFS::NV_ENC_VUI_MATRIX_COEFFS_SMPTE170M,
-			),
-			Color::Bt709Limited | Color::Bt709Full => (
-				NV_ENC_VUI_COLOR_PRIMARIES::NV_ENC_VUI_COLOR_PRIMARIES_BT709,
-				NV_ENC_VUI_TRANSFER_CHARACTERISTIC::NV_ENC_VUI_TRANSFER_CHARACTERISTIC_BT709,
-				NV_ENC_VUI_MATRIX_COEFFS::NV_ENC_VUI_MATRIX_COEFFS_BT709,
-			),
+		let primaries = match color.primaries {
+			Primaries::Smpte170m => NV_ENC_VUI_COLOR_PRIMARIES::NV_ENC_VUI_COLOR_PRIMARIES_SMPTE170M,
+			Primaries::Bt470bg => NV_ENC_VUI_COLOR_PRIMARIES::NV_ENC_VUI_COLOR_PRIMARIES_BT470BG,
+			Primaries::Bt709 => NV_ENC_VUI_COLOR_PRIMARIES::NV_ENC_VUI_COLOR_PRIMARIES_BT709,
+			Primaries::Bt2020 => NV_ENC_VUI_COLOR_PRIMARIES::NV_ENC_VUI_COLOR_PRIMARIES_BT2020,
+		};
+		let transfer = match color.transfer {
+			Transfer::Bt709 => NV_ENC_VUI_TRANSFER_CHARACTERISTIC::NV_ENC_VUI_TRANSFER_CHARACTERISTIC_BT709,
+			Transfer::Pq => NV_ENC_VUI_TRANSFER_CHARACTERISTIC::NV_ENC_VUI_TRANSFER_CHARACTERISTIC_SMPTE2084,
+			Transfer::Hlg => NV_ENC_VUI_TRANSFER_CHARACTERISTIC::NV_ENC_VUI_TRANSFER_CHARACTERISTIC_ARIB_STD_B67,
+		};
+		let matrix = match color.matrix {
+			Matrix::Bt601 => NV_ENC_VUI_MATRIX_COEFFS::NV_ENC_VUI_MATRIX_COEFFS_SMPTE170M,
+			Matrix::Bt709 => NV_ENC_VUI_MATRIX_COEFFS::NV_ENC_VUI_MATRIX_COEFFS_BT709,
+			Matrix::Bt2020 => NV_ENC_VUI_MATRIX_COEFFS::NV_ENC_VUI_MATRIX_COEFFS_BT2020_NCL,
 		};
 
 		// SAFETY: the preset config's codec union was initialized by
@@ -173,7 +176,7 @@ impl Nvenc {
 					let vui = &mut cfg.encodeCodecConfig.h264Config.h264VUIParameters;
 					vui.videoSignalTypePresentFlag = 1;
 					vui.videoFormat = NV_ENC_VUI_VIDEO_FORMAT::NV_ENC_VUI_VIDEO_FORMAT_UNSPECIFIED;
-					vui.videoFullRangeFlag = u32::from(!color.limited());
+					vui.videoFullRangeFlag = u32::from(color.range == Range::Full);
 					vui.colourDescriptionPresentFlag = 1;
 					vui.colourPrimaries = primaries;
 					vui.transferCharacteristics = transfer;
@@ -186,7 +189,7 @@ impl Nvenc {
 					let vui = &mut cfg.encodeCodecConfig.hevcConfig.hevcVUIParameters;
 					vui.videoSignalTypePresentFlag = 1;
 					vui.videoFormat = NV_ENC_VUI_VIDEO_FORMAT::NV_ENC_VUI_VIDEO_FORMAT_UNSPECIFIED;
-					vui.videoFullRangeFlag = u32::from(!color.limited());
+					vui.videoFullRangeFlag = u32::from(color.range == Range::Full);
 					vui.colourDescriptionPresentFlag = 1;
 					vui.colourPrimaries = primaries;
 					vui.transferCharacteristics = transfer;

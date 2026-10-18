@@ -607,3 +607,20 @@ test("pooled probe readers share demand and carry it through reconnects", async 
 		await settle();
 	}
 });
+
+test("a handle's announcements sync with the shared origin", async () => {
+	stubTransports();
+
+	const handle = new Connection({ url });
+	const watch = handle.announced();
+	expect(watch.synced.peek()).toBe(false);
+
+	await advance();
+	expect(handle.status.peek()).toBe("connected");
+	// The session's announce request answers after it establishes.
+	await advance();
+	expect(watch.synced.peek()).toBe(true);
+
+	watch.close();
+	handle.close();
+});

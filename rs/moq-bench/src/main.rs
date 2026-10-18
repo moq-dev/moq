@@ -108,6 +108,11 @@ async fn main() -> anyhow::Result<()> {
 		res = &mut reporter => res??,
 	}
 
+	// Tell the relay the sessions ended, rather than leaving it to wait out the idle
+	// timeout, so anything measured after the load sees the relay's teardown.
+	tasks.shutdown().await;
+	client.close().await;
+
 	stats.ensure_delivery(config.expects_delivery())
 }
 

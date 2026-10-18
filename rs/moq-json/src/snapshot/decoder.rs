@@ -81,6 +81,8 @@ impl<T> Decoder<T> {
 		{
 			return Err(Error::TooLarge(limit));
 		}
+		// A `Value` keeps only the last of a repeated key, so refuse one before parsing, as deltas do.
+		crate::merge::check(plain, &self.check)?;
 		self.current = Some(serde_json::from_slice(plain)?);
 		self.check_size()
 	}
@@ -224,6 +226,18 @@ mod test {
 			out.push(decoder.decode().unwrap().unwrap());
 		}
 		out
+	}
+
+	/// A snapshot that repeats a key is refused rather than resolved to the last copy, the same as a
+	/// delta, so a reader can't be handed a different value than a stricter parser would see.
+	#[test]
+	fn duplicate_snapshot_keys_are_rejected() {
+		for payload in [br#"{"version":5,"version":3}"#.as_slice(), br#"{"a":{"b":1,"b":2}}"#] {
+			let mut decoder = Decoder::<Value>::new(consume(Compression::None));
+			let err = decoder.snapshot(payload).unwrap_err();
+			assert!(err.to_string().contains("duplicate JSON object key"), "{err}");
+			assert!(decoder.value().is_none());
+		}
 	}
 
 	#[test]
