@@ -178,7 +178,7 @@ jobs:
 
       - name: Preserve results
         if: ${{ matrix.artifact && !cancelled() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: ${{ matrix.artifact }}
           path: ${{ matrix.artifact-path }}
@@ -249,12 +249,12 @@ jobs:
           fail-on-alert: false
       - name: Publish shared history
         run: nix develop --command just gh benchmark-publish finish benchmark-site
-      - uses: actions/upload-pages-artifact@7b1f4a764d45c48632c6b24a0339c27f5614fb0b # v4
+      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         with:
           path: benchmark-site
       - name: Deploy charts
         id: deploy
-        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
 
   tests:
     name: Tests (${{ matrix.recipe }})
@@ -336,7 +336,7 @@ jobs:
           PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS: 1
       - name: Preserve measurements and traces
         if: ${{ failure() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: media-${{ matrix.engine }}
           path: ${{ runner.temp }}/moq-test-runs
@@ -409,7 +409,7 @@ jobs:
       # counters, the raw samples, and every row's summary.
       - name: Keep the run
         if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: audio-quality-run
           path: ${{ runner.temp }}/moq-test-runs/
@@ -524,7 +524,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
       - name: Preserve sizes and attribution
         if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: nightly-size-history
           path: |
@@ -568,7 +568,7 @@ jobs:
         run: nix develop --command just rs fuzz ${{ matrix.target }} -- -max_total_time=300
       - name: Preserve failure inputs
         if: ${{ failure() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: fuzz-${{ matrix.target }}
           path: rs/*/fuzz/artifacts/
