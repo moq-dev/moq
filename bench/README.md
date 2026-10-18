@@ -359,8 +359,8 @@ The charts include these measurements:
   wrapper's ratio to `rust-ffi`. Ratios above 1 mean more cost than Rust on the
   same host, including for throughput, where the ratio is Rust/wrapper.
 - Rust Criterion mean ns per iteration, with the measured confidence interval.
-  The `net-cpu` source uses the optional thread CPU clock; other sources use
-  elapsed time. The Rust bench targets job measures them with a short warmup
+  The `net-cpu` source and the moq-quic targets time thread CPU; the others
+  time elapsed time. The Rust bench targets job measures them with a short warmup
   and Criterion's quick mode. Per-group benchmark settings can override the default warmup. Quick estimates
   trade precision for nightly runtime; use full paired runs to assess a change.
 - JS benchmark CSV time columns (`ns`, `us`, `ms`, and their per-operation

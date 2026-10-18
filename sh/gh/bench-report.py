@@ -65,11 +65,11 @@ def rust(directory):
             estimate = json.loads(path.read_text())['mean']
             interval = estimate['confidence_interval']
             low, high = value(interval['lower_bound']), value(interval['upper_bound'])
-            clock = 'thread CPU' if metadata['environment'].get('SESSION_CPU') else 'elapsed time'
             entries.append({
                 'name': f'rust/{label}/{benchmark["full_id"]}', 'unit': 'ns',
                 'value': value(estimate['point_estimate']), 'range': f'{low:.4g}..{high:.4g}',
-                'extra': f'Mean nanoseconds per iteration ({clock}); {metadata["revision"]}',
+                # Criterion does not record a target's measurement, so the clock is left to the README.
+                'extra': f'Mean nanoseconds per iteration; {metadata["revision"]}',
             })
     return checked(entries)
 

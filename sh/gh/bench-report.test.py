@@ -60,7 +60,7 @@ class ReportTest(unittest.TestCase):
         entry = report.rust(self.root)[0]
         self.assertEqual(entry['name'], 'rust/net-cpu/delivery/4/8')
         self.assertEqual(entry['value'], 20)
-        self.assertIn('thread CPU', entry['extra'])
+        self.assertIn('abc', entry['extra'])
 
     def test_only_successful_sources_are_published(self):
         source = self.root / 'bench-ffi'
