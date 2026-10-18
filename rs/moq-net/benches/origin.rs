@@ -30,7 +30,9 @@
 #[path = "../tests/integration/support/mod.rs"]
 mod support;
 
-use std::task::Poll;
+use std::pin::Pin;
+use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll, Wake, Waker};
 use std::time::Duration;
 
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
@@ -491,9 +493,69 @@ fn bench_request(c: &mut Criterion) {
 	group.finish();
 }
 
+/// Records which request a wake belongs to, so only woken requests are polled again.
+struct Woken {
+	id: usize,
+	list: Arc<Mutex<Vec<usize>>>,
+}
+
+impl Wake for Woken {
+	fn wake(self: Arc<Self>) {
+		self.list.lock().unwrap().push(self.id);
+	}
+}
+
+/// Waiting requests, polled only once woken, the way an executor polls tasks.
+struct Waiting<F> {
+	requests: Vec<Pin<Box<F>>>,
+	wakers: Vec<Waker>,
+	woken: Arc<Mutex<Vec<usize>>>,
+}
+
+impl<F: Future> Waiting<F> {
+	/// Every request starts woken, so the first drain polls each once.
+	fn new(requests: Vec<F>) -> Self {
+		let woken = Arc::new(Mutex::new((0..requests.len()).collect()));
+		let wakers = (0..requests.len())
+			.map(|id| {
+				Waker::from(Arc::new(Woken {
+					id,
+					list: woken.clone(),
+				}))
+			})
+			.collect();
+		Self {
+			requests: requests.into_iter().map(Box::pin).collect(),
+			wakers,
+			woken,
+		}
+	}
+
+	fn is_woken(&self) -> bool {
+		!self.woken.lock().unwrap().is_empty()
+	}
+
+	/// Polls the woken requests until none are, asserting each is still waiting.
+	fn drain(&mut self) {
+		loop {
+			let mut ids = std::mem::take(&mut *self.woken.lock().unwrap());
+			if ids.is_empty() {
+				return;
+			}
+			ids.sort_unstable();
+			ids.dedup();
+			for id in ids {
+				let mut cx = Context::from_waker(&self.wakers[id]);
+				assert!(self.requests[id].as_mut().poll(&mut cx).is_pending());
+			}
+		}
+	}
+}
+
 /// Waiting requests have already received an unroutable verdict. Repricing a
-/// covering route wakes them; repricing an unrelated route must leave them parked.
+/// covering route wakes them; repricing an unrelated route must leave them asleep.
 /// Shared paths isolate requester fan-out from the cost of minting one front per path.
+/// Only woken requests are polled, so harness polling does not scale with requesters.
 fn bench_unroutable_churn(c: &mut Criterion) {
 	let mut group = c.benchmark_group("origin/unroutable_churn");
 	group.sample_size(20);
@@ -513,19 +575,17 @@ fn bench_unroutable_churn(c: &mut Criterion) {
 						let consumer = producer.consume();
 						let server = producer.dynamic("room", origin::Route::default()).unwrap();
 						let unrelated = producer.dynamic("other", origin::Route::default()).unwrap();
-						let mut waiting: Vec<_> = (0..requesters)
-							.map(|i| {
-								Box::pin(
-									consumer.routed_broadcast(format!("room/job-{}", if distinct { i } else { 0 })),
-								)
-							})
-							.collect();
+						let mut waiting = Waiting::new(
+							(0..requesters)
+								.map(|i| {
+									consumer.routed_broadcast(format!("room/job-{}", if distinct { i } else { 0 }))
+								})
+								.collect(),
+						);
 						let waiter = kio::Waiter::noop();
 						let now = moq_net::time::Instant::now();
 						// Drive the first requests to refusal before measuring any route churn.
-						for request in &mut waiting {
-							assert!(request.as_mut().now_or_never().is_none());
-						}
+						waiting.drain();
 						driver.poll(now, &waiter).unwrap();
 						let expected = if distinct {
 							requesters
@@ -539,9 +599,7 @@ fn bench_unroutable_churn(c: &mut Criterion) {
 							request.reject(moq_net::Error::Unroutable);
 						}
 						driver.poll(now, &waiter).unwrap();
-						for request in &mut waiting {
-							assert!(request.as_mut().now_or_never().is_none());
-						}
+						waiting.drain();
 						assert!(server.poll_requested_broadcast(&waiter).is_pending());
 						let changed = if covering { &server } else { &unrelated };
 						let mut cost = 1;
@@ -549,9 +607,8 @@ fn bench_unroutable_churn(c: &mut Criterion) {
 							for _ in 0..changes {
 								cost = 3 - cost;
 								changed.update(origin::Route::default().with_cost(cost)).unwrap();
-								for request in &mut waiting {
-									assert!(request.as_mut().now_or_never().is_none());
-								}
+								assert!(covering || !waiting.is_woken(), "unrelated churn wakes no request");
+								waiting.drain();
 								driver.poll(now, &waiter).unwrap();
 								for _ in 0..if covering { expected } else { 0 } {
 									let Poll::Ready(Ok(request)) = server.poll_requested_broadcast(&waiter) else {
@@ -561,9 +618,8 @@ fn bench_unroutable_churn(c: &mut Criterion) {
 								}
 								assert!(server.poll_requested_broadcast(&waiter).is_pending());
 								driver.poll(now, &waiter).unwrap();
-								for request in &mut waiting {
-									assert!(request.as_mut().now_or_never().is_none());
-								}
+								assert!(covering || !waiting.is_woken(), "unrelated churn wakes no request");
+								waiting.drain();
 							}
 						});
 					});

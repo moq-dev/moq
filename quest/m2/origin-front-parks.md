@@ -35,7 +35,9 @@ The `origin/viewer_*` benches do not cover the retry loop.
 requesters against 1 and 32 repricings after a covering handler refuses.
 Shared and distinct paths separate requester fan-out from front count;
 unrelated repricings and zero requesters provide controls. Each change is
-driven through refusal and back to waiting, without sleeps or spawned tasks.
+driven through refusal and back to waiting, without sleeps or spawned tasks,
+polling only the requests a change woke so harness polling does not scale with
+requesters; unrelated repricings assert they wake none.
 It runs under the existing Rust benchmark nightly.
 
 Measure repeated A/A runs on a quiet host before choosing whether to park.
