@@ -54,8 +54,8 @@ fn timestamp_lt(left: moq_net::Timestamp, right: moq_net::Timestamp) -> bool {
 /// sequences wherever each started. A group opens at the first start in each one-second cell of the
 /// catalog clock and takes that cell's index as its sequence: a video keyframe, any audio frame, or
 /// a keyframe on a data track. Later starts in the cell join it, and a cell with no start gets an
-/// empty group, so sequences stay consecutive (see the `grid` module). [`cut`](Self::cut) and
-/// [`seek`](Self::seek) do nothing.
+/// empty group, so sequences stay consecutive (see the `grid` module). [`seek`](Self::seek) does
+/// nothing, and [`cut`](Self::cut) closes no group.
 pub struct Producer<C: Container, R = ()> {
 	inner: moq_net::track::Producer,
 	container: C,
@@ -111,8 +111,9 @@ pub struct Producer<C: Container, R = ()> {
 	/// Set when the timeline decides the groups; see [`with_grid`](Self::with_grid).
 	grid: Option<super::grid::Grid>,
 
-	/// On the grid, a break cut the open group and nothing has continued it since: it closes
-	/// without a bound, and a video track waits for a keyframe.
+	/// On the grid, a break or a video [`cut`](Self::cut) ended the open group's content and
+	/// nothing has continued it since: it closes without a bound, and a video track waits for a
+	/// keyframe.
 	broken: bool,
 }
 
@@ -671,9 +672,15 @@ where
 	/// does not bound the last frame in decode order. The next [`write`](Self::write)
 	/// must be a keyframe. An explicit bound before the last ordered video frame
 	/// returns [`InvalidEnd`](super::InvalidEnd) without flushing or closing the group.
-	/// On the [grid](Self#grid) this does nothing.
+	/// On the [grid](Self#grid) the open group stays open, since only a start in a later cell
+	/// closes it, and an audio or data track's cut does nothing. On a video track the next frame
+	/// must still be a keyframe, as after a break: the pictures before it may reference what the
+	/// cut left out, and the group closes at the next start without a bound.
 	pub fn cut(&mut self, end: Option<moq_net::Timestamp>) -> crate::Result<()> {
 		if self.grid.is_some() {
+			if self.container.kind() == Kind::Video {
+				self.broken = true;
+			}
 			return Ok(());
 		}
 		self.bound(end)
@@ -1932,7 +1939,8 @@ mod tests {
 		groups
 	}
 
-	/// A grid-mode producer of `kind` fed `frames`, skipping what a mid-stream join skips.
+	/// A grid-mode producer of `kind` fed `frames`, skipping what a mid-stream join skips. Audio and
+	/// data are cut after every frame, as the importers that send each frame at once cut them.
 	async fn on_grid(kind: crate::container::Kind, frames: &[Frame]) -> Vec<(u64, Vec<(u128, usize)>)> {
 		let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer = track.subscribe(replay());
@@ -1942,7 +1950,9 @@ mod tests {
 				Err(crate::Error::MissingKeyframe(_)) => {}
 				result => result.unwrap(),
 			}
-			producer.cut(None).unwrap();
+			if kind != crate::container::Kind::Video {
+				producer.cut(None).unwrap();
+			}
 		}
 		producer.finish().unwrap();
 		grid_groups(consumer).await
@@ -1950,7 +1960,7 @@ mod tests {
 
 	/// On the grid, video producers started anywhere in one stream publish the same groups, frames
 	/// and bounds under the same sequences, from the later one's first group on: keyframes 600 ms
-	/// apart share their second's group, and an importer's per-frame `cut` changes nothing.
+	/// apart share their second's group.
 	#[tokio::test]
 	async fn on_the_grid_video_producers_started_apart_publish_the_same_groups() {
 		let frames: Vec<Frame> = (0..200u64)
@@ -2034,6 +2044,39 @@ mod tests {
 			.map(|(sequence, _)| *sequence)
 			.collect();
 		assert_eq!(sequences, [11, 12, 20, 21]);
+	}
+
+	/// On the grid a video cut, such as an importer's after lost packets, keeps the cell's group open
+	/// but takes no delta until the next keyframe; one in the same cell joins the group, and one in a
+	/// later cell closes it without a bound.
+	#[tokio::test]
+	async fn on_the_grid_a_video_cut_waits_for_a_keyframe() {
+		let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
+		let consumer = track.subscribe(replay());
+		let mut producer = Producer::new(track, Container::Legacy(crate::container::Kind::Video)).with_grid();
+		producer.write(frame(10_000_000, true)).unwrap();
+		producer.write(frame(11_000_000, true)).unwrap();
+		producer.write(frame(11_040_000, false)).unwrap();
+		for at in [11_500_000, 12_000_000] {
+			producer.cut(None).unwrap();
+			assert!(matches!(
+				producer.write(frame(at - 420_000, false)),
+				Err(crate::Error::MissingKeyframe(_))
+			));
+			producer.write(frame(at, true)).unwrap();
+			producer.write(frame(at + 40_000, false)).unwrap();
+		}
+		producer.finish().unwrap();
+		let groups = grid_groups(consumer).await;
+		assert_eq!(
+			groups[0],
+			(
+				11,
+				vec![(11_000_000, 2), (11_040_000, 2), (11_500_000, 2), (11_540_000, 2)]
+			)
+		);
+		assert_eq!(groups[1].0, 12);
+		assert_eq!(groups[1].1[..2], [(12_000_000, 2), (12_040_000, 2)]);
 	}
 
 	/// On the grid a sparse track ticked by the media clock gets each empty second's group as the

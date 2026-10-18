@@ -317,6 +317,12 @@ With more programs or video streams the random access points can stagger, so a g
 Both indicators sit in the adaptation field, which TS-level scrambling leaves in the clear, so a scrambled multiplex groups like its clear twin.
 A publisher parses the PAT and the PMT and nothing else past the adaptation field.
 
+Publishers that share an epoch and number each group by the second of the catalog clock it starts in, so that each publishes the same groups under the same sequences, differ from the rules above in four ways.
+The grid lines are the catalog clock's whole seconds.
+A group opens only at the first start in a second no group has taken, and later starts in that second join it, a flagged jump's included: such a group can contain a PCR discontinuity, and no discontinuity marker precedes the jump, which a consumer sees as the timestamps' step, or as a sequence hole ({{hang}}) when the jump skips whole seconds.
+A second with no start gets an empty group.
+A group that reaches the size bound ends the track with an error, since it cannot be split.
+
 ## Timestamps {#m2ts-timestamps}
 A frame's timestamp is the PCR time of its first byte, in microseconds rounded down.
 A PCR gives the time of the byte holding the last bit of its `program_clock_reference_base` ({{mpeg2}}), ten bytes into its packet.
@@ -324,7 +330,7 @@ A byte between two PCRs is placed at the rate between them; a byte past the last
 
 PCRs are unwrapped into a 64-bit count of 27 MHz ticks, and timestamps never decrease.
 Each PCR takes the number of 2^33 × 300 tick wraps that lands it nearest the current time on the catalog clock ({{hang}}), so the count runs on across the wrap, which is not a discontinuity, and a PCR more than half a wrap ahead of that time lands a wrap back.
-A PCR with `discontinuity_indicator` set that lands at or past the one before it adds its step too, after the bytes before it are timed at the rate before it, and the group it starts MUST follow hang's discontinuity marker ({{hang}}).
+A PCR with `discontinuity_indicator` set that lands at or past the one before it adds its step too, after the bytes before it are timed at the rate before it, and the group it starts MUST follow hang's discontinuity marker ({{hang}}), unless the publisher numbers groups by the second ({{m2ts-groups}}).
 A PCR that steps backwards MUST end the track with an error, flagged or not: a flagged one is a restart, which is new content, so a publisher that carries on publishes it as a new broadcast.
 
 The count therefore depends only on the bytes and the catalog clock, so publishers of one input whose catalog clocks agree publish identical frames, group boundaries, and sections wherever each started, from the later one's first group on.
@@ -449,6 +455,7 @@ A broadcast demultiplexed from a DVB transport stream: video and audio described
 - Added the `pesPacket` record: each frame one whole PES packet, timestamped with its placement. A consumer that predates it drops the track rather than refusing the catalog.
 - A flagged PCR jump on an `m2ts` track follows hang's discontinuity marker rather than a skipped group sequence.
 - An `m2ts` track's fallback cut falls on whole seconds of a PCR count whose wraps follow the catalog clock, and `randomAccess` and `muxRate` describe the latest two-second window rather than the whole track, so publishers sharing a clock cut and describe the multiplex alike.
+- Publishers sharing an epoch may number `m2ts` groups by the catalog clock's second, which lets a flagged PCR jump join a group without a discontinuity marker.
 
 ## draft-lcurley-moq-mpegts-00
 {:numbered="false"}

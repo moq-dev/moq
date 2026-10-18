@@ -132,6 +132,11 @@ struct Fmp4Track<E: crate::catalog::hang::CatalogExt> {
 	// (see `container::Producer`'s grid) and `seek` does nothing.
 	grid: Option<crate::container::grid::Grid>,
 
+	// On the grid, the time of the latest fragment that started a segment and of the one before it:
+	// no start may go below the first, and no other fragment below the second.
+	start: Option<Timestamp>,
+	floor: Option<Timestamp>,
+
 	// Measures the track's catalog jitter and bitrate from the fragments; the descriptor's own
 	// bitrate, when it declares one, still wins over what this measures.
 	estimator: Estimator,
@@ -355,6 +360,8 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 					group: None,
 					segment: None,
 					grid: self.timebase.aligned().then(Default::default),
+					start: None,
+					floor: None,
 					recorder: Some(recorder),
 					last_decode_time: None,
 					sample_duration: None,
@@ -1005,6 +1012,22 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			track.segment = Some(self.segment);
 			let mut fill = 0..0;
 			if let Some(grid) = track.grid.as_mut() {
+				// A fragment below the start before it ends the import, as it would off the grid by
+				// opening a group below the previous one, rather than joining the open group. Every
+				// start raises the floor, opened, joined or dropped, so importers end alike.
+				let floor = match start_group {
+					true => track.start,
+					false => track.floor,
+				};
+				if let Some(floor) = floor
+					&& timestamp.as_micros() < floor.as_micros()
+				{
+					return Err(crate::container::TimestampRewind { timestamp, floor }.into());
+				}
+				if start_group {
+					track.floor = track.start;
+					track.start = Some(timestamp);
+				}
 				match grid.place(timestamp, start_group, track.group.is_some()) {
 					Place::Drop => continue,
 					Place::Join => start_group = false,

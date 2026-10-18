@@ -2636,3 +2636,33 @@ async fn importers_sharing_an_epoch_number_segments_alike() {
 		}
 	}
 }
+
+/// On a shared epoch's timebase a segment that starts below the one before ends the import, as it
+/// does off the grid, rather than joining the open group of the second it falls in, across a
+/// discontinuity too.
+#[tokio::test]
+async fn a_rewound_segment_on_a_shared_epoch_ends_the_import() {
+	let epoch = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_millis(1_760_000_000_000);
+	crate::clock::fake_host_wall(epoch + std::time::Duration::from_secs(600));
+	let (init, (id, scale), _) = bbb_init();
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+	let timebase = catalog.timebase();
+	timebase.place(moq_net::Timestamp::ZERO, epoch).unwrap();
+	timebase.align_groups();
+	let mut fmp4 = super::Import::new(broadcast, timebase.reserve());
+	fmp4.decode(&init).unwrap();
+	let segment = |fmp4: &mut super::Import, i: u32, at: u64| {
+		fmp4.decode(&styp())?;
+		let frames = [sample(600_000_000 + at * 1_000, true, Some(200_000))];
+		fmp4.decode(&super::encode_fragment(info(id, scale, i), &frames).unwrap())
+	};
+	for (i, at) in [0, 1_000, 1_500].into_iter().enumerate() {
+		segment(&mut fmp4, i as u32, at).unwrap();
+	}
+	fmp4.discontinuity();
+	assert!(matches!(
+		segment(&mut fmp4, 3, 1_200),
+		Err(crate::Error::TimestampRewind(_))
+	));
+}

@@ -2213,14 +2213,16 @@ impl<E: catalog::Catalog> Stream<E> {
 	/// The program clock restarted: mark the break on this track.
 	fn discontinuity(&mut self, published: bool) -> anyhow::Result<()> {
 		match self {
+			// On the grid a delta before the first keyframe moves the watch without counting as
+			// published, so the break restarts it either way.
 			Stream::H264 { import, .. } => {
-				if published {
+				if published || import.on_grid() {
 					import.discontinuity()?;
 				}
 				Ok(())
 			}
 			Stream::H265 { import, .. } => {
-				if published {
+				if published || import.on_grid() {
 					import.discontinuity()?;
 				}
 				Ok(())
@@ -7515,6 +7517,79 @@ pub(super) mod test {
 				first_groups[&name]
 			);
 		}
+	}
+
+	/// A video importer that joined mid-GOP has published nothing when a flagged jump comes, though
+	/// its deltas moved its grid's watch; the jump restarts that watch as it does one that has
+	/// published, so neither gives the seconds the jump skipped an empty group.
+	#[tokio::test(start_paused = true)]
+	async fn a_video_importer_joined_mid_gop_agrees_across_a_jump() {
+		const VIDEO: u16 = 0x0061;
+		const PICTURE: u64 = 3_600;
+		let epoch = epoch_time();
+		let start = epoch + Duration::from_secs(600);
+		let placed = |host: std::time::SystemTime| {
+			crate::clock::fake_host_wall(host);
+			let mut broadcast = moq_net::broadcast::Info::new().produce();
+			let consumer = broadcast.consume();
+			let config = crate::catalog::Config::default().with_max_age(Duration::from_secs(86_400));
+			let catalog = crate::catalog::Producer::new(&mut broadcast, config).unwrap();
+			let timebase = catalog.timebase();
+			timebase
+				.place(Timestamp::ZERO, epoch - Duration::from_micros(WRAP_MICROS))
+				.unwrap();
+			timebase.align_groups();
+			let mut import = super::Import::new(broadcast, timebase.reserve());
+			let pmt = synth_pmt(&[(StreamType::H264, VIDEO)], false);
+			import.decode(&bytes::BytesMut::from(&pmt[..])).unwrap();
+			(consumer, catalog, import)
+		};
+		async fn sequences(consumer: &moq_net::broadcast::Consumer, catalog: &crate::catalog::Producer) -> Vec<u64> {
+			let name = catalog.snapshot().video.renditions.into_keys().next().unwrap();
+			let subscription = moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(3600));
+			let mut track = consumer.track(&name).unwrap().subscribe(subscription).await.unwrap();
+			let mut sequences = Vec::new();
+			while let Ok(Ok(Some(group))) = tokio::time::timeout(Duration::from_millis(50), track.recv_group()).await {
+				sequences.push(group.sequence);
+			}
+			sequences
+		}
+
+		// A keyframe every second, the jump five seconds on at picture 40, before the joiner's first
+		// keyframe, and a keyframe right behind it.
+		let first = WRAP - 300 * 90_000;
+		let jump = 5 * 90_000;
+		let (consumer, catalog, mut import) = placed(start);
+		let mut joined = None;
+		let mut mux = Mux::default();
+		for i in 0..140u64 {
+			if i == 30 {
+				joined = Some(placed(start + Duration::from_millis(i * 40)));
+			}
+			let mut data = Vec::new();
+			if i == 40 {
+				data.extend(clock_break_packet(VIDEO));
+			}
+			let keyframe = if i < 40 { i % 25 == 0 } else { (i - 40) % 25 == 0 };
+			let pts = (first + i * PICTURE + if i >= 40 { jump } else { 0 }) % WRAP;
+			let cc = mux.cc(VIDEO);
+			data.extend(video_pes(VIDEO, cc, pts, None, &annexb_au(keyframe)));
+			import.decode(&data).unwrap();
+			if let Some((_, _, joined)) = joined.as_mut() {
+				joined.decode(&data).unwrap();
+			}
+			tokio::time::advance(Duration::from_millis(40)).await;
+		}
+		import.finish().unwrap();
+		let first_groups = sequences(&consumer, &catalog).await;
+		let (consumer, joined_catalog, mut joined) = joined.unwrap();
+		joined.finish().unwrap();
+		let joined_groups = sequences(&consumer, &joined_catalog).await;
+		assert!(!joined_groups.is_empty());
+		assert!(
+			first_groups.ends_with(&joined_groups),
+			"{joined_groups:?} are not the first importer's {first_groups:?}"
+		);
 	}
 
 	/// A flagged jump carrying the source more than half a wrap from the epoch's clock reads as a

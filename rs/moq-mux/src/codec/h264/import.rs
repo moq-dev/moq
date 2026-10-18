@@ -158,6 +158,11 @@ impl Import {
 		Ok(())
 	}
 
+	/// Whether the track groups on the catalog clock's grid.
+	pub(crate) fn on_grid(&self) -> bool {
+		self.track.on_grid()
+	}
+
 	/// Close the current group and open the next one at `sequence`.
 	pub fn seek(&mut self, sequence: u64) -> Result<()> {
 		self.track.seek(sequence)?;
