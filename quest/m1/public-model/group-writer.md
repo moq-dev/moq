@@ -72,10 +72,19 @@ frames) runs today only when the last clone drops, and the cache slot holds
 one, so a writer that drops an unfinished group leaves its readers waiting
 until the slot goes. After the split it runs when the writer drops. Split
 `Alive` so the handle shares the atomics (`aborted`, `cut`, `checked`,
-`access`) but not the drop guard. Then check, each with a mock-time test:
+`access`) but not the drop guard. The guard must now mark the group dead,
+not only release its frames: today it leaves `aborted` false and
+`GroupState::abort` unset, which was harmless because no handle outlived
+it. A surviving `Handle` would then keep serving the released group
+(`Slot::is_live`), and `covering_group` would refuse a same-sequence
+replacement as `Duplicate`. So a writer dropped unfinished commits an abort
+(`Dropped`) through the same path as `abort`. Then check, each with a
+mock-time test:
 
 - A reader of an unfinished group sees `Dropped` when its writer drops, and
   the cache releases the frames.
+- After that drop, a new reader does not get the dead group, and the
+  publisher can recreate the same sequence.
 - A route that dies mid-group still resumes on its replacement from the
   committed frame (`resume_frame`, `resume_position`), which reads the count
   that outlives the released cache.
@@ -100,7 +109,11 @@ Decided by the maintainer on 2026-10-18 (#5892):
 
 Landing: breaking public API (no `Clone`, no `FrameOpen`, `finish` takes
 `&mut self`), so `rs/moq-net/MIGRATE.md` gets an entry under
-`## Unreleased` naming the `Info` pitfall, plus moq-ffi's if
+`## Unreleased` that says how to migrate: keep the one writer, and watch
+readers or closure through `demand()` (its `closed()`), read through
+`consume()`, and move a writer that several places used into one owner
+(pass it by value, or guard it with a lock). It also names the `Info`
+pitfall, `FrameOpen`'s removal, and `finish(&mut self)`. moq-ffi's gets one if
 its exported surface changes (it should not). JS has no equivalent: a JS
 `Group.Producer` is a single object and needs no change. Docs: none beyond
 MIGRATE, since `doc/` never documents cloning a group producer.
