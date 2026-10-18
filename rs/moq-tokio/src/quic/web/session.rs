@@ -276,7 +276,7 @@ impl Session {
 
 		// Reset the stream priority back to the default of 0.
 		send.set_priority(0).ok();
-		let header = send.checkpoint();
+		let header = self.header_uni.len() as u64;
 		Ok(SendStream::new(send, self.close.clone(), Some(header)))
 	}
 
@@ -295,7 +295,7 @@ impl Session {
 
 		// Reset the stream priority back to the default of 0.
 		send.set_priority(0).ok();
-		let header = send.checkpoint();
+		let header = self.header_bi.len() as u64;
 		Ok((
 			SendStream::new(send, self.close.clone(), Some(header)),
 			RecvStream::new(recv, self.close.clone()),

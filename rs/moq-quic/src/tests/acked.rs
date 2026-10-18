@@ -1,4 +1,4 @@
-//! Tests for [`Checkpoint::acked`], which reports whether the peer acknowledged a send stream's prefix
+//! Tests for [`SendStream::acked`], which reports whether the peer acknowledged a send stream's prefix
 
 use super::*;
 
@@ -27,9 +27,10 @@ fn open(pair: &mut Pair, client_ch: ConnectionHandle, server_ch: ConnectionHandl
 fn acked(
     pair: &mut Pair,
     ch: ConnectionHandle,
-    checkpoint: &Checkpoint,
+    s: StreamId,
+    offset: u64,
 ) -> Result<bool, ClosedStream> {
-    checkpoint.acked(pair.client_conn_mut(ch))
+    pair.client_send(ch, s).acked(offset)
 }
 
 /// The prefix the client last reported acknowledged on `s`, draining its events
@@ -52,8 +53,8 @@ fn lose_client_packets(pair: &mut Pair) {
     pair.client.outbound.clear();
 }
 
-/// A checkpoint is acknowledged only once every byte before it is, and the event that reports it
-/// fires only for a checkpoint someone polled.
+/// An offset is acknowledged only once every byte before it is, and the event that reports it
+/// fires only for an offset someone polled.
 #[test]
 fn waits_for_contiguous_prefix() {
     let _guard = subscribe();
@@ -64,17 +65,17 @@ fn waits_for_contiguous_prefix() {
     reported(&mut pair, client_ch, s);
 
     pair.client_send(client_ch, s).write(b"lost").unwrap();
-    let lost = pair.client_send(client_ch, s).checkpoint();
+    let lost = pair.client_send(client_ch, s).offset();
     lose_client_packets(&mut pair);
 
     // Acknowledged, but behind the lost packet: the middle of the stream, not its prefix
     pair.client_send(client_ch, s).write(b"after").unwrap();
-    let after = pair.client_send(client_ch, s).checkpoint();
+    let after = pair.client_send(client_ch, s).offset();
     let acks = pair.client_conn_mut(client_ch).stats().frame_rx.acks;
     while pair.client_conn_mut(client_ch).stats().frame_rx.acks == acks {
         assert!(pair.step(), "never acknowledged");
     }
-    assert_eq!(acked(&mut pair, client_ch, &after), Ok(false));
+    assert_eq!(acked(&mut pair, client_ch, s, after), Ok(false));
 
     // The retransmission fills the gap, which acknowledges both at once
     pair.drive();
@@ -82,8 +83,8 @@ fn waits_for_contiguous_prefix() {
         reported(&mut pair, client_ch, s),
         Some(b"headerlostafter".len() as u64)
     );
-    assert_eq!(acked(&mut pair, client_ch, &lost), Ok(true));
-    assert_eq!(acked(&mut pair, client_ch, &after), Ok(true));
+    assert_eq!(acked(&mut pair, client_ch, s, lost), Ok(true));
+    assert_eq!(acked(&mut pair, client_ch, s, after), Ok(true));
     assert!(pair.client_conn_mut(client_ch).stats().path.lost_packets > 0);
 }
 
@@ -96,13 +97,13 @@ fn unpolled_is_not_reported() {
     let s = open(&mut pair, client_ch, server_ch);
 
     pair.client_send(client_ch, s).write(b"payload").unwrap();
-    let checkpoint = pair.client_send(client_ch, s).checkpoint();
+    let offset = pair.client_send(client_ch, s).offset();
     pair.drive();
     assert_eq!(reported(&mut pair, client_ch, s), None);
-    assert_eq!(acked(&mut pair, client_ch, &checkpoint), Ok(true));
+    assert_eq!(acked(&mut pair, client_ch, s, offset), Ok(true));
 }
 
-/// A checkpoint taken before anything was written, or once everything was acknowledged, is
+/// An offset taken before anything was written, or once everything was acknowledged, is
 /// acknowledged at once.
 #[test]
 fn already_acked() {
@@ -110,16 +111,16 @@ fn already_acked() {
     let mut pair = pair(true);
     let (client_ch, _) = pair.connect();
     let s = pair.client_streams(client_ch).open(Dir::Uni).unwrap();
-    let empty = pair.client_send(client_ch, s).checkpoint();
-    assert_eq!(acked(&mut pair, client_ch, &empty), Ok(true));
+    let empty = pair.client_send(client_ch, s).offset();
+    assert_eq!(acked(&mut pair, client_ch, s, empty), Ok(true));
 
     pair.client_send(client_ch, s).write(b"payload").unwrap();
     pair.drive();
-    let all = pair.client_send(client_ch, s).checkpoint();
-    assert_eq!(acked(&mut pair, client_ch, &all), Ok(true));
+    let all = pair.client_send(client_ch, s).offset();
+    assert_eq!(acked(&mut pair, client_ch, s, all), Ok(true));
 }
 
-/// A finished stream is freed by the ACK that completes it, which reports a waiting checkpoint
+/// A finished stream is freed by the ACK that completes it, which reports a waiting offset
 /// before the stream finishes.
 #[test]
 fn finished_stream_reports_before_freed() {
@@ -131,8 +132,8 @@ fn finished_stream_reports_before_freed() {
     reported(&mut pair, client_ch, s);
 
     pair.client_send(client_ch, s).write(b"payload").unwrap();
-    let checkpoint = pair.client_send(client_ch, s).checkpoint();
-    assert_eq!(acked(&mut pair, client_ch, &checkpoint), Ok(false));
+    let offset = pair.client_send(client_ch, s).offset();
+    assert_eq!(acked(&mut pair, client_ch, s, offset), Ok(false));
     pair.client_send(client_ch, s).finish().unwrap();
     pair.drive();
 
@@ -150,12 +151,12 @@ fn finished_stream_reports_before_freed() {
         ]
     );
     assert_eq!(
-        acked(&mut pair, client_ch, &checkpoint),
+        acked(&mut pair, client_ch, s, offset),
         Err(ClosedStream::default())
     );
 }
 
-/// A reset fails the checkpoints past its Reliable Size at once, while those before it are
+/// A reset fails the offsets past its Reliable Size at once, while those before it are
 /// still acknowledged once the prefix arrives.
 #[test]
 fn reset_fails_past_reliable_size() {
@@ -165,21 +166,21 @@ fn reset_fails_past_reliable_size() {
     let s = open(&mut pair, client_ch, server_ch);
 
     pair.client_send(client_ch, s).write(b"kept").unwrap();
-    let kept = pair.client_send(client_ch, s).checkpoint();
-    let reset = pair.client_send(client_ch, s).checkpoint();
+    let kept = pair.client_send(client_ch, s).offset();
+    let reset = pair.client_send(client_ch, s).offset();
     pair.client_send(client_ch, s).write(b"dropped").unwrap();
-    let dropped = pair.client_send(client_ch, s).checkpoint();
+    let dropped = pair.client_send(client_ch, s).offset();
     lose_client_packets(&mut pair);
     reported(&mut pair, client_ch, s);
 
-    reset
-        .reset(pair.client_conn_mut(client_ch), VarInt(42))
+    pair.client_send(client_ch, s)
+        .reset_at(reset, VarInt(42))
         .unwrap();
     assert_eq!(
-        acked(&mut pair, client_ch, &dropped),
+        acked(&mut pair, client_ch, s, dropped),
         Err(ClosedStream::default())
     );
-    assert_eq!(acked(&mut pair, client_ch, &kept), Ok(false));
+    assert_eq!(acked(&mut pair, client_ch, s, kept), Ok(false));
 
     // The retransmitted prefix is acknowledged before the reset frees the stream
     pair.drive();
@@ -191,7 +192,7 @@ fn reset_fails_past_reliable_size() {
 }
 
 /// A peer that stopped reading will not read what it acknowledges, before or after the
-/// checkpoint was taken.
+/// offset was taken.
 #[test]
 fn stop_sending_fails() {
     let _guard = subscribe();
@@ -200,9 +201,9 @@ fn stop_sending_fails() {
     let s = open(&mut pair, client_ch, server_ch);
 
     pair.client_send(client_ch, s).write(b"unread").unwrap();
-    let before = pair.client_send(client_ch, s).checkpoint();
+    let before = pair.client_send(client_ch, s).offset();
     lose_client_packets(&mut pair);
-    assert_eq!(acked(&mut pair, client_ch, &before), Ok(false));
+    assert_eq!(acked(&mut pair, client_ch, s, before), Ok(false));
 
     pair.server_recv(server_ch, s).stop(VarInt(7)).unwrap();
     pair.drive();
@@ -210,11 +211,11 @@ fn stop_sending_fails() {
         pair.client_send(client_ch, s).stopped(),
         Ok(Some(VarInt(7)))
     );
-    let after = pair.client_send(client_ch, s).checkpoint();
+    let after = pair.client_send(client_ch, s).offset();
     assert_eq!(reported(&mut pair, client_ch, s), None);
-    for checkpoint in [&before, &after] {
+    for offset in [before, after] {
         assert_eq!(
-            acked(&mut pair, client_ch, checkpoint),
+            acked(&mut pair, client_ch, s, offset),
             Err(ClosedStream::default())
         );
     }
@@ -229,14 +230,38 @@ fn close_fails() {
     let s = open(&mut pair, client_ch, server_ch);
 
     pair.client_send(client_ch, s).write(b"unacked").unwrap();
-    let checkpoint = pair.client_send(client_ch, s).checkpoint();
+    let offset = pair.client_send(client_ch, s).offset();
     lose_client_packets(&mut pair);
 
     let now = pair.time;
     pair.client_conn_mut(client_ch)
         .close(now, VarInt(0), Bytes::new());
     assert_eq!(
-        acked(&mut pair, client_ch, &checkpoint),
+        acked(&mut pair, client_ch, s, offset),
         Err(ClosedStream::default())
     );
+}
+
+/// Asking about data never written is a caller bug.
+#[test]
+#[should_panic(expected = "acked past the data written")]
+fn acked_past_written_panics() {
+    let _guard = subscribe();
+    let mut pair = pair(true);
+    let (client_ch, server_ch) = pair.connect();
+    let s = open(&mut pair, client_ch, server_ch);
+    let past = pair.client_send(client_ch, s).offset() + 1;
+    let _ = acked(&mut pair, client_ch, s, past);
+}
+
+/// Resetting past the data written is a caller bug.
+#[test]
+#[should_panic(expected = "reset past the data written")]
+fn reset_past_written_panics() {
+    let _guard = subscribe();
+    let mut pair = pair(true);
+    let (client_ch, server_ch) = pair.connect();
+    let s = open(&mut pair, client_ch, server_ch);
+    let past = pair.client_send(client_ch, s).offset() + 1;
+    let _ = pair.client_send(client_ch, s).reset_at(past, VarInt(42));
 }

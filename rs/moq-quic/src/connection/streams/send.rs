@@ -21,7 +21,7 @@ pub(super) struct Send {
     pub(super) data_blocked_limit: Option<u64>,
     /// The reason the peer wants us to stop, if `STOP_SENDING` was received
     pub(super) stop_reason: Option<VarInt>,
-    /// The lowest offset a [`Checkpoint::acked`](super::Checkpoint::acked) call is waiting for
+    /// The lowest offset a [`SendStream::acked`](super::SendStream::acked) call is waiting for
     pub(super) notify: Option<u64>,
 }
 
@@ -248,6 +248,11 @@ impl Send {
 
     /// Whether the peer acknowledged everything before `offset`, noting to report it if not
     pub(super) fn acked(&mut self, offset: u64) -> Result<bool, ClosedStream> {
+        // A reset cuts the buffer short, so only an unreset stream knows how much was written
+        assert!(
+            self.is_reset() || offset <= self.pending.offset(),
+            "acked past the data written"
+        );
         // An acknowledgment no longer means the peer reads the data, and a reset dropped the rest
         if self.stop_reason.is_some() || offset > self.pending.offset() {
             return Err(ClosedStream::default());

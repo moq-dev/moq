@@ -6,12 +6,12 @@ How to update your code for each breaking change, newest first.
 
 ### `StreamEvent::Acked`
 
-`StreamEvent` gained `Acked { id, offset }`, reported when a send stream's acknowledged prefix reaches a `Checkpoint` that `Checkpoint::acked` was polled on.
+`StreamEvent` gained `Acked { id, offset }`, reported when a send stream's acknowledged prefix reaches an offset that `SendStream::acked` was polled on.
 An exhaustive `match` needs an arm for it.
 
 ```rust
 // After
-StreamEvent::Acked { id, offset } => wake_checkpoint_waiters(id, offset),
+StreamEvent::Acked { id, offset } => wake_ack_waiters(id, offset),
 ```
 
 ### `Datagrams::send` takes a send group and order (#5770)

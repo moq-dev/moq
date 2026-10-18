@@ -14,9 +14,8 @@ browser, keep the grace.
 
 Split from the transport half, which landed in `moq-quic`,
 `moq_tokio::quic::web`, and moq-uring's WebTransport adapter (#5690). There,
-`SendStream::checkpoint()` marks the data written so far and
-`Checkpoint::reset(code)` sends `RESET_STREAM_AT` with that offset as the
-Reliable Size. A peer without the extension instead gets a plain
+`SendStream::reset_at(offset, code)` sends `RESET_STREAM_AT` with that
+offset as the Reliable Size. A peer without the extension instead gets a plain
 `RESET_STREAM` once it has acknowledged the data before the checkpoint, a round
 trip later. The WebTransport adapters already keep their own stream header
 this way.
@@ -29,9 +28,11 @@ read by the application, so check whether Chrome hands it to JS when a plain
 `RESET_STREAM` follows the ACK, and treat a peer without `reset_stream_at` as
 unable to keep the header unless it does.
 
-- Give moq-net's `transport::poll::SendStream` a reset that keeps a
-  checkpoint, using `Checkpoint` rather than a byte count, so a size past the
-  written data cannot be asked for. Implement it in the moq-tokio and
+- Give moq-net's `transport::poll::SendStream` a reset that keeps the first
+  `offset` bytes, matching `moq-quic`'s `reset_at(offset, code)`. Decided
+  2026-10-17 on #5817: a byte offset rather than a `Checkpoint` handle; an
+  offset past the written data panics instead of being unrepresentable.
+  Implement it in the moq-tokio and
   moq-uring adapters. Backends that cannot do it (browser, qmux, iroh) report
   that rather than silently sending a plain reset.
 - The lite publisher checkpoints right after writing a group header and

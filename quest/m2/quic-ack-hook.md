@@ -39,17 +39,15 @@ unsupported has to live in the return type rather than the error, and a
 consumer must treat `None` as unknown, never as delivered.
 
 Implement it in the moq-tokio and moq-uring adapters over `moq-quic`'s
-`Checkpoint::acked`, a plain stream id and offset that returns whether
-everything before it is acknowledged and fails once it never will be. A
-`false` asks `moq-quic` to report `StreamEvent::Acked { id, offset }` when
-the stream's acknowledged prefix reaches it, so the adapter wakes waiters at
-or below that offset; moq-uring's `sweep_stream` currently ignores the event.
-`acked` fails once the stream is freed, after `StreamEvent::Finished`, which
-means everything was acknowledged, so the adapter answers from that. A
-checkpoint is taken at the current write offset, so the adapter checkpoints
-each offset as it is written rather than naming an arbitrary one later;
-settle whether the trait method takes an offset or returns a handle from a
-`checkpoint()` like the reset one. Leave the browser transport on the default; the browser's `WebTransportSendStream.getStats()` is
+`SendStream::acked(offset)`, which returns whether every byte before the
+offset is acknowledged and fails once it never will be. A `false` asks
+`moq-quic` to report `StreamEvent::Acked { id, offset }` when the stream's
+acknowledged prefix reaches it, so the adapter wakes waiters at or below that
+offset; moq-uring's `sweep_stream` currently ignores the event. `acked` fails
+once the stream is freed, after `StreamEvent::Finished`, which means
+everything was acknowledged, so the adapter answers from that. The trait
+method takes a byte offset, like `moq-quic` (decided 2026-10-17 on #5817);
+the starvation quest's writer counts the bytes it writes. Leave the browser transport on the default; the browser's `WebTransportSendStream.getStats()` is
 unimplemented in shipping Chrome and its `bytesAcknowledged` is at risk in the
 W3C draft. qmux over a reliable transport may treat serialization as
 acknowledgment only if the qmux quest decides that is honest; until then it
