@@ -1,10 +1,12 @@
 # Migrating moq-quic
 
+How to update your code for each breaking change, newest first.
+
 ## Unreleased
 
 Each entry is a change from `quinn-proto`.
 
-### Streams and datagrams take `SendOptions`
+### Streams and datagrams take `SendOptions` (#5770, #5872)
 
 `Streams::open` and `Datagrams::send` take a `SendOptions { group, priority }`,
 the send group from `Connection::send_groups` and the priority within it.
@@ -41,11 +43,3 @@ targets run through the hidden `fuzz` module behind the `fuzz` feature; see
 
 `congestion::NewReno` and `congestion::NewRenoConfig` are gone.
 Use `Bbr3Config` (the default) or `CubicConfig` instead.
-
-```rust
-// Before
-config.congestion_controller_factory(Arc::new(congestion::NewRenoConfig::default()));
-
-// After
-config.congestion_controller_factory(Arc::new(congestion::CubicConfig::default()));
-```

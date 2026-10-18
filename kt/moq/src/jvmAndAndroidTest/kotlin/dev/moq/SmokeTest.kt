@@ -257,6 +257,27 @@ class SmokeTest {
     }
 
     @Test
+    fun `an ascending subscription reads a cached backlog oldest first`() = runTest {
+        BroadcastProducer().use { broadcast ->
+            val track = broadcast.publishTrack("backlog", TrackInfo(timescale = 1_000_000uL))
+            for (ms in 0uL until 3uL) {
+                val group = track.appendGroup()
+                group.writeFrame(Frame(payload = "x".encodeToByteArray(), timestampUs = ms * 1_000uL))
+                group.finish()
+            }
+            val consumer = track.consume(
+                Subscription(
+                    maxDelayUs = 10_000_000uL,
+                    ranges = listOf(Range(start = AnchorRelative(groups = 2uL))),
+                    order = Order.ASCENDING,
+                ),
+            )
+            val sequences = List(3) { checkNotNull(consumer.recvGroup()).sequence() }
+            assertEquals(listOf(0uL, 1uL, 2uL), sequences)
+        }
+    }
+
+    @Test
     fun `readFrame skips empty then populated groups`() = runTest {
         BroadcastProducer().use { broadcast ->
             val track = broadcast.publishTrack("status", TrackInfo(timescale = 1_000_000uL))
@@ -375,7 +396,6 @@ class SmokeTest {
         fun stats(rttUs: ULong?) = ConnectionStats(
             rttUs = rttUs,
             estimatedSendRateBps = null,
-            estimatedRecvRateBps = null,
             bytesSent = null,
             bytesReceived = null,
             bytesLost = null,

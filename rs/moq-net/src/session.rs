@@ -50,11 +50,6 @@ pub struct Stats {
 	/// Estimated send bandwidth from the congestion controller.
 	pub estimated_send_rate: Option<bandwidth::Rate>,
 
-	/// Estimated receive bandwidth from MoQ PROBE.
-	///
-	/// `None` unless the negotiated version supports PROBE (moq-lite-03+).
-	pub estimated_recv_rate: Option<bandwidth::Rate>,
-
 	/// Total bytes sent over the connection, including retransmissions and overhead.
 	pub bytes_sent: Option<u64>,
 
@@ -125,7 +120,7 @@ pub struct Session {
 	version: Version,
 	// Weak, so the sampler runs only while a caller holds a consumer.
 	send_bandwidth: Option<bandwidth::Weak>,
-	recv_bandwidth: Option<bandwidth::Consumer>,
+	recv_bandwidth: Option<bandwidth::Weak>,
 	goaway: Arc<goaway::Handle>,
 	auth: auth::Handle,
 }
@@ -145,9 +140,10 @@ impl Session {
 
 	/// Returns a consumer for the estimated receive bitrate (from PROBE).
 	///
+	/// Holding the consumer requests PROBE; dropping the last one stops it.
 	/// Returns `None` if the MoQ version doesn't support PROBE (requires moq-lite-03+).
 	pub fn recv_bandwidth(&self) -> Option<bandwidth::Consumer> {
-		self.recv_bandwidth.clone()
+		self.recv_bandwidth.as_ref().map(bandwidth::Weak::consume)
 	}
 
 	/// Returns a snapshot of the current connection statistics.
@@ -157,17 +153,13 @@ impl Session {
 	/// fresh counters (100ms cadence). See [`Stats`] for which
 	/// metrics each backend reports.
 	pub fn stats(&self) -> Stats {
-		let mut stats = {
-			let mut state = self.stats.lock();
-			// A read is demand: wake the sampler, but only mutate (and so wake)
-			// when the flag actually flips.
-			if !state.demanded {
-				state.demanded = true;
-			}
-			state.sample
-		};
-		stats.estimated_recv_rate = self.recv_bandwidth.as_ref().and_then(bandwidth::Consumer::peek);
-		stats
+		let mut state = self.stats.lock();
+		// A read is demand: wake the sampler, but only mutate (and so wake)
+		// when the flag actually flips.
+		if !state.demanded {
+			state.demanded = true;
+		}
+		state.sample
 	}
 
 	/// Close the transport with an explicit error, instead of waiting for the last
@@ -302,7 +294,7 @@ impl Session {
 		runtime: crate::time::Deadlines,
 		session: S,
 		version: Version,
-		recv_bandwidth: Option<bandwidth::Consumer>,
+		recv_bandwidth: Option<bandwidth::Weak>,
 		protocol: crate::driver::Protocol<S>,
 		handles: Handles,
 	) -> (Self, crate::Driver<S>)
@@ -646,9 +638,6 @@ impl<S: crate::transport::poll::Session> Supervisor<S> {
 }
 
 /// A [`Stats`] snapshot of the transport's counters.
-///
-/// `estimated_recv_rate` is filled in at the [`Session`] level (it comes from
-/// MoQ PROBE, not the transport), so it stays `None` here.
 fn snapshot<S: crate::transport::poll::Session>(session: &S) -> Stats {
 	let stats = session.stats();
 	Stats {

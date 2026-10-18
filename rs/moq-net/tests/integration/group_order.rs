@@ -11,7 +11,7 @@ use crate::support;
 
 use std::time::Duration;
 
-use moq_net::track::{Info, Order, Position, Subscription};
+use moq_net::track::{Info, Order, Subscription};
 use moq_net::{Hop, Timescale, Timestamp, Version};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
@@ -57,7 +57,7 @@ fn read_arrivals(origin: moq_net::origin::Producer, order: Order) -> moq_clock::
 			.expect("broadcast resolves");
 		let subscription = Subscription::default()
 			.with_max_delay(FOREVER)
-			.with_start(Position::group(0))
+			.with_groups(0..)
 			.with_order(order);
 		let mut sub = remote
 			.track("ordered")

@@ -26,7 +26,8 @@ def test_a_pending_timer_waits_for_advance() -> None:
             # The origin's driver runs the timers that judge a group stale.
             origin = moq.OriginProducer()
             track = origin.create_broadcast("clock").publish_track("track")
-            consumer = track.consume(moq.Subscription(max_delay=timedelta(seconds=1), group_start=0))
+            from_group_0 = [moq.Range(start=moq.Anchor.ABSOLUTE(group=0, frame=0))]
+            consumer = track.consume(moq.Subscription(max_delay=timedelta(seconds=1), ranges=from_group_0))
 
             # Group 0 stalls with no frame, so the in-order read waits on it until
             # group 1 has been out for max_delay: a native timer is pending.

@@ -124,6 +124,50 @@ async fn ietf_stats_refresh_costs_one_driver_poll() {
 	}
 }
 
+/// The session and stats snapshots are not demand; only held consumers open PROBE.
+#[moq_clock::test]
+async fn probe_follows_consumer_lifetime() {
+	for version in VERSIONS {
+		let mut options = MockConnectOptions::new(version.parse::<Version>().unwrap());
+		options.stats = STATS;
+		let pair = connect_mock(options).await;
+		let probe_count = || {
+			pair.client_transport
+				.bidi_types()
+				.iter()
+				.filter(|&&kind| kind == 4)
+				.count()
+		};
+		let _ = pair.client.stats();
+		moq_clock::sleep(Duration::from_secs(1)).await;
+		assert_eq!(probe_count(), 0, "{version}: an idle session must not open PROBE");
+
+		let mut first = pair.client.recv_bandwidth().unwrap();
+		assert_eq!(first.changed().await.unwrap(), Some(Rate::from_bps(1_000_000)));
+		assert_eq!(probe_count(), 1, "{version}");
+		let second = first.clone();
+		let resets = pair.client_transport.resets().len();
+		drop(first);
+		moq_clock::sleep(Duration::from_secs(1)).await;
+		assert_eq!(
+			pair.client_transport.resets().len(),
+			resets,
+			"{version}: a clone still needs PROBE"
+		);
+		drop(second);
+		moq_clock::sleep(Duration::from_secs(1)).await;
+		assert!(
+			pair.client_transport.resets().len() > resets,
+			"{version}: last drop resets PROBE"
+		);
+		let mut resumed = pair.client.recv_bandwidth().unwrap();
+		assert_eq!(resumed.peek(), None, "{version}: an unused estimate is cleared");
+		assert_eq!(resumed.changed().await.unwrap(), Some(Rate::from_bps(1_000_000)));
+		moq_clock::sleep(Duration::from_secs(1)).await;
+		assert_eq!(probe_count(), 2, "{version}: demand can resume");
+	}
+}
+
 /// A stats tick reads the transport's wire counters and adds no sampler timer or session wake.
 #[moq_clock::test]
 async fn wire_collection_never_arms_the_idle_sampler() {

@@ -22,7 +22,7 @@ fn raw_frame(frame: moq_net::frame::Frame) -> Result<MoqFrame, MoqError> {
 /// Subscriber-side delivery preferences, mirroring [`moq_net::track::Subscription`].
 ///
 /// Construct with the fields you care about; the rest default to moq-net's defaults
-/// (priority 0, no staleness tolerance, full group range).
+/// (priority 0, no staleness tolerance, everything still fresh, newest first).
 #[derive(Clone, uniffi::Record)]
 pub struct MoqSubscription {
 	/// Delivery priority; higher values preempt lower ones under bandwidth contention.
@@ -32,19 +32,79 @@ pub struct MoqSubscription {
 	/// `0` skips immediately; a larger value tolerates that much reordering.
 	///
 	/// Enforced both by the publisher's cache (sent on the wire) and by any local
-	/// buffering, such as [`MoqMediaTrackConsumer`]'s jitter buffer.
+	/// buffering, such as [`MoqMediaTrackConsumer`]'s jitter buffer. It caps every range.
 	#[uniffi(default = 0)]
 	pub max_delay_us: u64,
-	/// The lowest group to deliver (a floor), or null for none. A floor is not a
-	/// request: `max_delay_us` is what asks for data, and delivery starts at the oldest
-	/// group at or above the floor within that budget (the latest group at the default
-	/// budget of 0).
+	/// The spans of the track to deliver, or null for everything `max_delay_us` still
+	/// considers fresh. An empty list asks for nothing.
+	///
+	/// A request to the publisher, aggregated across every subscriber. The one place it
+	/// touches this subscription's reads is where they start: at the lowest group any
+	/// range starts at.
 	#[uniffi(default = None)]
-	pub group_start: Option<u64>,
-	/// First group not to deliver (exclusive), or null for no end. `Some(0)` is the
-	/// empty range.
+	pub ranges: Option<Vec<MoqRange>>,
+	/// Which pending group the publisher sends first, or null for newest first.
 	#[uniffi(default = None)]
-	pub group_end: Option<u64>,
+	pub order: Option<MoqOrder>,
+}
+
+/// A span of a track to deliver: from `start` up to `end`, or onward when `end` is null.
+///
+/// A relative start is the first frame of its group, and a relative end includes its whole
+/// group. An absolute end is exclusive.
+#[derive(Clone, Copy, uniffi::Record)]
+pub struct MoqRange {
+	/// Where delivery starts.
+	pub start: MoqAnchor,
+	/// Where delivery stops, or null to keep following the live edge.
+	#[uniffi(default = None)]
+	pub end: Option<MoqAnchor>,
+}
+
+/// Where one end of a [`MoqRange`] falls, mirroring [`moq_net::track::Anchor`].
+#[derive(Clone, Copy, uniffi::Enum)]
+pub enum MoqAnchor {
+	/// This exact group and frame.
+	Absolute { group: u64, frame: u64 },
+	/// The group this many before the latest, clamped to group 0: `0` is the latest group.
+	Relative { groups: u64 },
+}
+
+/// Which of a subscription's pending groups the publisher sends first, mirroring
+/// [`moq_net::track::Order`].
+#[derive(Clone, Copy, uniffi::Enum)]
+pub enum MoqOrder {
+	/// Oldest first, draining a backlog in sequence order.
+	Ascending,
+	/// Newest first, so congestion sheds the backlog rather than the live edge.
+	Descending,
+}
+
+impl From<MoqAnchor> for moq_net::track::Anchor {
+	fn from(anchor: MoqAnchor) -> Self {
+		match anchor {
+			MoqAnchor::Absolute { group, frame } => Self::Absolute(moq_net::track::Position { group, frame }),
+			MoqAnchor::Relative { groups } => Self::Relative(groups),
+		}
+	}
+}
+
+impl From<MoqRange> for moq_net::track::Range {
+	fn from(range: MoqRange) -> Self {
+		Self {
+			start: range.start.into(),
+			end: range.end.map(Into::into),
+		}
+	}
+}
+
+impl From<MoqOrder> for moq_net::track::Order {
+	fn from(order: MoqOrder) -> Self {
+		match order {
+			MoqOrder::Ascending => Self::Ascending,
+			MoqOrder::Descending => Self::Descending,
+		}
+	}
 }
 
 /// Options for fetching one past group by sequence.
@@ -70,11 +130,16 @@ impl From<MoqFetchGroupOptions> for moq_net::group::Fetch {
 
 impl From<MoqSubscription> for moq_net::track::Subscription {
 	fn from(s: MoqSubscription) -> Self {
-		moq_net::track::Subscription::default()
+		let mut subscription = moq_net::track::Subscription::default()
 			.with_priority(s.priority)
-			.with_max_delay(std::time::Duration::from_micros(s.max_delay_us))
-			.with_start(s.group_start.map(moq_net::track::Position::group))
-			.with_end(s.group_end.map(moq_net::track::Position::group))
+			.with_max_delay(std::time::Duration::from_micros(s.max_delay_us));
+		if let Some(ranges) = s.ranges {
+			subscription = subscription.with_ranges(ranges.into_iter().map(Into::into));
+		}
+		if let Some(order) = s.order {
+			subscription = subscription.with_order(order.into());
+		}
+		subscription
 	}
 }
 

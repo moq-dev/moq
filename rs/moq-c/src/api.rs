@@ -557,7 +557,7 @@ pub enum moq_demand {
 /// Subscriber-side raw track delivery preferences.
 ///
 /// A null [moq_consume_track] or [moq_consume_track_update] `subscription`
-/// pointer uses the moq-net defaults.
+/// pointer uses the moq-net defaults, and so does a zeroed struct.
 #[repr(C)]
 #[allow(non_camel_case_types)]
 pub struct moq_subscription {
@@ -566,35 +566,114 @@ pub struct moq_subscription {
 
 	/// How far a non-latest group may fall behind the live edge before it is skipped, in microseconds.
 	/// Zero skips immediately. Enforced by the publisher's cache and by any local buffering.
+	/// It caps every range.
 	pub max_delay_us: u64,
 
-	/// The lowest group to deliver (a floor). A floor is not a request: `max_delay_us` is
-	/// what asks for data, and delivery starts at the oldest group at or above the floor
-	/// within that budget (the latest group at the default budget of 0).
-	pub group_start: u64,
-	/// Whether `group_start` is present. When false, there is no floor.
-	pub group_start_present: bool,
+	/// The spans of the track to deliver, or NULL for everything `max_delay_us` still
+	/// considers fresh. A non-NULL pointer with `ranges_len` 0 asks for nothing.
+	///
+	/// A request to the publisher, aggregated across every subscriber. Reads start at the
+	/// lowest group a range starts at, and stop past the last absolute end.
+	pub ranges: *const moq_range,
+	pub ranges_len: usize,
 
-	/// First group not to deliver (exclusive), or ignored when `group_end_present` is
-	/// false. `0` is the empty range.
-	pub group_end: u64,
-	/// Whether `group_end` is present. When false, there is no end cap.
-	pub group_end_present: bool,
+	/// `moq_order` discriminant: which pending group the publisher sends first.
+	pub order: u32,
 }
 
-impl From<&moq_subscription> for moq_net::track::Subscription {
-	fn from(subscription: &moq_subscription) -> Self {
-		let mut out = moq_net::track::Subscription::default()
-			.with_priority(subscription.priority)
-			.with_max_delay(std::time::Duration::from_micros(subscription.max_delay_us));
-		if subscription.group_start_present {
-			out = out.with_start(moq_net::track::Position::group(subscription.group_start));
+/// A span of a track to deliver: from `start` up to `end`, or onward without one.
+///
+/// A relative start is the first frame of its group, and a relative end includes its whole
+/// group. An absolute end is exclusive.
+#[repr(C)]
+#[allow(non_camel_case_types)]
+#[derive(Clone, Copy)]
+pub struct moq_range {
+	/// Where delivery starts.
+	pub start: moq_anchor,
+	/// Where delivery stops, read only when `end_present` is true.
+	pub end: moq_anchor,
+	/// Whether `end` is present. When false, the range follows the live edge.
+	pub end_present: bool,
+}
+
+/// Where one end of a [moq_range] falls. Zeroing it means group 0, frame 0.
+#[repr(C)]
+#[allow(non_camel_case_types)]
+#[derive(Clone, Copy)]
+pub struct moq_anchor {
+	/// `moq_anchor_kind` discriminant.
+	pub kind: u32,
+	/// The group, or with `MOQ_ANCHOR_RELATIVE` how many groups before the latest one
+	/// (0 is the latest, and an offset past the first group clamps to it).
+	pub group: u64,
+	/// The frame within `group`, read only with `MOQ_ANCHOR_ABSOLUTE`.
+	pub frame: u64,
+}
+
+/// How a [moq_anchor] names its position.
+#[repr(C)]
+#[allow(non_camel_case_types)]
+#[derive(Clone, Copy, Debug)]
+pub enum moq_anchor_kind {
+	/// A fixed group and frame.
+	MOQ_ANCHOR_ABSOLUTE = 0,
+	/// A count of groups back from the latest one.
+	MOQ_ANCHOR_RELATIVE = 1,
+}
+
+/// Which of a subscription's pending groups the publisher sends first. Zero is the default.
+#[repr(C)]
+#[allow(non_camel_case_types)]
+#[derive(Clone, Copy, Debug)]
+pub enum moq_order {
+	/// Newest first, so congestion sheds the backlog rather than the live edge.
+	MOQ_ORDER_DESCENDING = 0,
+	/// Oldest first, draining a backlog in sequence order.
+	MOQ_ORDER_ASCENDING = 1,
+}
+
+fn parse_anchor(anchor: &moq_anchor) -> Result<moq_net::track::Anchor, Error> {
+	Ok(match anchor.kind {
+		v if v == moq_anchor_kind::MOQ_ANCHOR_ABSOLUTE as u32 => {
+			moq_net::track::Anchor::Absolute(moq_net::track::Position {
+				group: anchor.group,
+				frame: anchor.frame,
+			})
 		}
-		if subscription.group_end_present {
-			out = out.with_end(moq_net::track::Position::group(subscription.group_end));
-		}
-		out
+		v if v == moq_anchor_kind::MOQ_ANCHOR_RELATIVE as u32 => moq_net::track::Anchor::Relative(anchor.group),
+		_ => return Err(Error::InvalidCode),
+	})
+}
+
+/// # Safety
+/// - `subscription->ranges` must be NULL or point to `subscription->ranges_len` ranges.
+pub(crate) unsafe fn parse_subscription(
+	subscription: &moq_subscription,
+) -> Result<moq_net::track::Subscription, Error> {
+	let order = match subscription.order {
+		v if v == moq_order::MOQ_ORDER_DESCENDING as u32 => moq_net::track::Order::Descending,
+		v if v == moq_order::MOQ_ORDER_ASCENDING as u32 => moq_net::track::Order::Ascending,
+		_ => return Err(Error::InvalidCode),
+	};
+	let mut out = moq_net::track::Subscription::default()
+		.with_priority(subscription.priority)
+		.with_max_delay(std::time::Duration::from_micros(subscription.max_delay_us))
+		.with_order(order);
+	if !subscription.ranges.is_null() {
+		let ranges = unsafe { std::slice::from_raw_parts(subscription.ranges, subscription.ranges_len) };
+		let ranges = ranges
+			.iter()
+			.map(|range| {
+				Ok(moq_net::track::Range {
+					start: parse_anchor(&range.start)?,
+					end: range.end_present.then(|| parse_anchor(&range.end)).transpose()?,
+				})
+			})
+			.collect::<Result<Vec<_>, Error>>()?;
+		out = out.with_ranges(ranges);
 	}
+	Ok(out)
 }
 
 /// A borrowed UTF-8 string slice, NOT NULL terminated.
@@ -772,10 +851,6 @@ pub struct moq_connection_stats {
 	pub estimated_send_rate_bps: u64,
 	pub estimated_send_rate_valid: bool,
 
-	/// Estimated receive bandwidth from MoQ PROBE, in bits per second.
-	pub estimated_recv_rate_bps: u64,
-	pub estimated_recv_rate_valid: bool,
-
 	/// Total bytes sent, including retransmissions and overhead.
 	pub bytes_sent: u64,
 	pub bytes_sent_valid: bool,
@@ -811,8 +886,6 @@ impl From<&moq_net::session::Stats> for moq_connection_stats {
 		let (rtt_us, rtt_valid) = split(stats.rtt.map(|d| d.as_micros() as u64));
 		let (estimated_send_rate_bps, estimated_send_rate_valid) =
 			split(stats.estimated_send_rate.map(moq_net::bandwidth::Rate::as_bps));
-		let (estimated_recv_rate_bps, estimated_recv_rate_valid) =
-			split(stats.estimated_recv_rate.map(moq_net::bandwidth::Rate::as_bps));
 		let (bytes_sent, bytes_sent_valid) = split(stats.bytes_sent);
 		let (bytes_received, bytes_received_valid) = split(stats.bytes_received);
 		let (bytes_lost, bytes_lost_valid) = split(stats.bytes_lost);
@@ -825,8 +898,6 @@ impl From<&moq_net::session::Stats> for moq_connection_stats {
 			rtt_valid,
 			estimated_send_rate_bps,
 			estimated_send_rate_valid,
-			estimated_recv_rate_bps,
-			estimated_recv_rate_valid,
 			bytes_sent,
 			bytes_sent_valid,
 			bytes_received,
@@ -3582,7 +3653,8 @@ pub extern "C" fn moq_consume_close(consume: u32) -> i32 {
 ///
 /// # Safety
 /// - The caller must ensure that name is a valid pointer to name_len bytes of data.
-/// - The caller must ensure that subscription is either NULL or a valid pointer to a [moq_subscription] struct.
+/// - The caller must ensure that subscription is either NULL or a valid pointer to a [moq_subscription] struct,
+///   whose `ranges` is NULL or points to `ranges_len` ranges.
 /// - The caller must keep `user_data` valid until the terminal (`<= 0`) `on_frame` callback.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn moq_consume_track(
@@ -3596,7 +3668,9 @@ pub unsafe extern "C" fn moq_consume_track(
 	ffi::enter(move || {
 		let broadcast = ffi::parse_id(broadcast)?;
 		let name = unsafe { ffi::parse_str(name, name_len)? };
-		let subscription = unsafe { subscription.as_ref() }.map(moq_net::track::Subscription::from);
+		let subscription = unsafe { subscription.as_ref() }
+			.map(|subscription| unsafe { parse_subscription(subscription) })
+			.transpose()?;
 		let on_frame = unsafe { ffi::OnStatus::new(user_data, on_frame)? };
 		State::lock().consume.raw_track(broadcast, name, subscription, on_frame)
 	})
@@ -3609,12 +3683,15 @@ pub unsafe extern "C" fn moq_consume_track(
 /// Returns a zero on success, or a negative code on failure.
 ///
 /// # Safety
-/// - The caller must ensure that subscription is either NULL or a valid pointer to a [moq_subscription] struct.
+/// - The caller must ensure that subscription is either NULL or a valid pointer to a [moq_subscription] struct,
+///   whose `ranges` is NULL or points to `ranges_len` ranges.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn moq_consume_track_update(track: u32, subscription: *const moq_subscription) -> i32 {
 	ffi::enter(move || {
 		let track = ffi::parse_id(track)?;
-		let subscription = unsafe { subscription.as_ref() }.map(moq_net::track::Subscription::from);
+		let subscription = unsafe { subscription.as_ref() }
+			.map(|subscription| unsafe { parse_subscription(subscription) })
+			.transpose()?;
 		State::lock().consume.raw_track_update(track, subscription)
 	})
 }

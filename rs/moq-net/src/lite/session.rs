@@ -12,7 +12,7 @@ use super::{
 };
 
 pub(crate) struct SessionStart<S: crate::transport::poll::Session> {
-	pub recv_bandwidth: Option<bandwidth::Consumer>,
+	pub recv_bandwidth: Option<bandwidth::Weak>,
 	/// The estimate PROBE reports, published by the session's supervisor.
 	pub estimate: kio::Producer<crate::session::Estimate>,
 	/// The session's protocol machine, named so its `Send`-ness stays inferred
@@ -217,7 +217,7 @@ where
 
 	let recv_bw_consumer = match version {
 		Version::Lite01 | Version::Lite02 => None,
-		_ => Some(recv_bw.consume()),
+		_ => Some(recv_bw.weak()),
 	};
 
 	let recv_bw_for_sub = match version {
@@ -1255,7 +1255,7 @@ mod tests {
 				early: Vec::new(),
 			};
 			let mut started = raw_session(transport, version, true, Some(peer_setup));
-			let _bandwidth = started.recv_bandwidth.take().unwrap();
+			let _bandwidth = started.recv_bandwidth.take().unwrap().consume();
 			let _ = started.driver.poll(&kio::Waiter::noop());
 			assert!(
 				log.closes()

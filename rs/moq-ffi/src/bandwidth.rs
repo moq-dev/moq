@@ -4,6 +4,7 @@
 use std::sync::Arc;
 
 use crate::demand::MoqTrackDemand;
+use crate::error::MoqError;
 
 /// Divides one connection's send estimate among the tracks sharing it.
 ///
@@ -238,5 +239,114 @@ mod tests {
 			.unwrap();
 		let grant = handle.join().expect("follow thread panicked").expect("share closed");
 		assert_eq!(grant, Some(moq_net::bandwidth::Rate::from_bps(1_000_000)));
+	}
+}
+
+/// An owned bandwidth estimate; holding it requests estimates until released.
+#[derive(uniffi::Object)]
+pub struct MoqBandwidthConsumer {
+	inner: std::sync::Mutex<Option<moq_net::bandwidth::Consumer>>,
+	changed: crate::ffi::Task<()>,
+}
+
+impl MoqBandwidthConsumer {
+	pub(crate) fn new(inner: moq_net::bandwidth::Consumer) -> Self {
+		Self {
+			inner: std::sync::Mutex::new(Some(inner)),
+			changed: crate::ffi::Task::new(()),
+		}
+	}
+}
+
+#[uniffi::export]
+impl MoqBandwidthConsumer {
+	/// Read the current estimate in bits per second, or None while unavailable.
+	pub fn peek(&self) -> Option<u64> {
+		self.inner
+			.lock()
+			.unwrap()
+			.as_ref()
+			.and_then(moq_net::bandwidth::Consumer::peek)
+			.map(moq_net::bandwidth::Rate::as_bps)
+	}
+
+	/// Wait for the estimate to change, returning an error when its producer closes.
+	pub async fn changed(&self) -> Result<Option<u64>, MoqError> {
+		self.changed
+			.run(|_guard| async move {
+				moq_net::kio::wait(|waiter| {
+					let mut inner = self.inner.lock().unwrap();
+					let inner = inner.as_mut().ok_or(MoqError::Cancelled)?;
+					inner.poll_changed(waiter).map(|result| {
+						result
+							.map(|rate| rate.map(moq_net::bandwidth::Rate::as_bps))
+							.map_err(Into::into)
+					})
+				})
+				.await
+			})
+			.await
+	}
+
+	/// Release this consumer's demand, including a pending wait.
+	pub fn cancel(&self) {
+		self.inner.lock().unwrap().take();
+		self.changed.cancel();
+	}
+}
+
+#[cfg(test)]
+mod consumer_tests {
+	use super::*;
+	use std::{
+		future::Future,
+		task::{Context, Waker},
+	};
+
+	#[tokio::test]
+	async fn owned_consumer_peeks_while_waiting_and_cancel_releases_demand() {
+		tokio::time::pause();
+		let producer = moq_net::bandwidth::Producer::new();
+		let consumer = MoqBandwidthConsumer::new(producer.consume());
+		assert!(producer.is_used());
+		let mut changed = std::pin::pin!(consumer.changed());
+		assert!(
+			changed
+				.as_mut()
+				.poll(&mut Context::from_waker(Waker::noop()))
+				.is_pending()
+		);
+		producer.set(Some(moq_net::bandwidth::Rate::from_bps(123))).unwrap();
+		assert_eq!(consumer.peek(), Some(123));
+		assert_eq!(changed.await.unwrap(), Some(123));
+		let mut changed = std::pin::pin!(consumer.changed());
+		assert!(
+			changed
+				.as_mut()
+				.poll(&mut Context::from_waker(Waker::noop()))
+				.is_pending()
+		);
+		consumer.cancel();
+		assert!(!producer.is_used());
+		assert_eq!(consumer.peek(), None);
+		assert!(matches!(changed.await, Err(MoqError::Cancelled)));
+	}
+
+	#[test]
+	fn dropping_the_owned_consumer_releases_demand() {
+		let producer = moq_net::bandwidth::Producer::new();
+		let consumer = MoqBandwidthConsumer::new(producer.consume());
+		assert!(producer.is_used());
+		drop(consumer);
+		assert!(!producer.is_used());
+	}
+
+	#[tokio::test]
+	async fn producer_closure_ends_changed() {
+		tokio::time::pause();
+		let producer = moq_net::bandwidth::Producer::new();
+		let consumer = MoqBandwidthConsumer::new(producer.consume());
+		producer.abort(moq_net::Error::Cancel).unwrap();
+		assert!(matches!(consumer.changed().await, Err(MoqError::Cancelled)));
 	}
 }
