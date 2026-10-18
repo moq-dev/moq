@@ -595,17 +595,20 @@ async fn run_stages(moq: MoqSide, stages: Vec<Command>, net: Net) -> anyhow::Res
 					if import.source.stdin_format().is_some() {
 						claim("stdin", &mut stdin, &name)?;
 					}
-					let monitor = connection.as_ref().map(moq_tokio::Connection::monitor);
-					if let Some(publish) = spawn_import(
+					let stats = import.stats;
+					if let Some(mut publish) = spawn_import(
 						&origin,
 						import,
 						name,
 						epoch.clone(),
 						shared,
 						bandwidth.clone(),
-						monitor,
 						&mut tasks,
 					)? {
+						// Before `run` declares a track, so the stats section rides the first catalog.
+						if stats {
+							publish = publish.with_stats(connection.as_ref().map(moq_tokio::Connection::monitor))?;
+						}
 						locals.push(publish);
 					}
 				}
@@ -699,8 +702,7 @@ fn display_name(name: &str) -> &str {
 /// one redundant publishers were given, also places the importers' clock.
 ///
 /// Returns the pipeline that has to run on the caller's thread, for the sources
-/// that have one (the stdin containers and capture). `connection` supplies a
-/// `--stats` report's transport measurements.
+/// that have one (the stdin containers and capture).
 fn spawn_import(
 	origin: &moq_net::origin::Producer,
 	import: Import,
@@ -708,7 +710,6 @@ fn spawn_import(
 	epoch: moq_net::Epoch,
 	shared: bool,
 	bandwidth: moq_net::bandwidth::Allocator,
-	connection: Option<moq_tokio::connection::Monitor>,
 	tasks: &mut JoinSet<anyhow::Result<()>>,
 ) -> anyhow::Result<Option<Publish>> {
 	if let ImportSource::Rtc(rtc) = &import.source
@@ -745,9 +746,6 @@ fn spawn_import(
 			let broadcast = origin.create_broadcast(&name).context("failed to create broadcast")?;
 			Publish::new(broadcast, &format, config, shared.then_some(&epoch))?
 		};
-		if import.stats {
-			publish = publish.with_stats(connection)?;
-		}
 		publish.announce(epoch)?;
 		local = Some(publish);
 	} else {
