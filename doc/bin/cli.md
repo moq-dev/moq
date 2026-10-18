@@ -403,15 +403,13 @@ so the other formats refuse `--linger`.
 `import --stats` names a stats track in the catalog and reports what each
 rendition has written, about once a second while someone subscribes, with the
 connection's RTT, estimated send rate, and loss. It covers the stdin imports;
-capture, the gateways, `archive`, and `ts --program all` refuse it.
+capture, the gateways, `archive`, `ts --program all`, and `--epoch` refuse it.
 
 `export --echo <name>` answers a publisher that solicits feedback: under the
 catalog's `echo` path it publishes `<name>.echo`, reporting what each rendition
 the export reads has received and its newest arrival, until the export ends.
-The name is one path segment, not starting with `.`, which would hide it from
-discovery. It covers the stdout container exports and reads the solicitation
-from the hang catalog, so an MSF catalog, named or detected from a `.msf`
-broadcast, refuses it.
+It covers the stdout container exports and needs a hang catalog, so MSF
+refuses it.
 
 The `stats` and `echo` sinks print reports as JSON lines. `export stats`
 follows one broadcast's stats track until the broadcast ends; `export echo`
@@ -427,9 +425,7 @@ moq ... --broadcast viewers export echo
 
 Counters are cumulative for the life of the process: a rendition that ends
 keeps its final counts, and one that returns under the same ID continues them.
-An fMP4 import counts samples as frames. Encoder counters (`skipped`,
-`bitrate`) and playback feedback (`decoded`, `late`, `stalls`) are not reported
-yet. [Stats](/concept/stats#media-reports) has the schema.
+[Stats](/concept/stats#media-reports) has the schema.
 
 ## Debugging
 

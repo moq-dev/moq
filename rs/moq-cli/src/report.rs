@@ -208,6 +208,13 @@ impl std::str::FromStr for EchoName {
 	}
 }
 
+/// Where an `export --echo` publishes its feedback, under what name, and over which connection.
+pub struct EchoTarget {
+	pub origin: moq_net::origin::Producer,
+	pub name: EchoName,
+	pub connection: Option<Monitor>,
+}
+
 /// The feedback broadcast in force: where it is published and its snapshot tracks.
 struct Feedback {
 	path: moq_net::PathOwned,
@@ -222,29 +229,19 @@ struct Feedback {
 /// removed section or a changed path retracts the broadcast it replaces. It follows the catalog
 /// of the instance the export first reads, and ends when the export does.
 pub struct Echo {
-	origin: moq_net::origin::Producer,
+	target: EchoTarget,
 	source: moq_mux::Source,
 	format: CatalogFormat,
-	name: EchoName,
-	connection: Option<Monitor>,
 	feedback: Option<Feedback>,
 }
 
 impl Echo {
-	/// Feedback for the export reading `source`, published into `origin`.
-	pub fn new(
-		origin: moq_net::origin::Producer,
-		source: moq_mux::Source,
-		format: CatalogFormat,
-		name: EchoName,
-		connection: Option<Monitor>,
-	) -> Self {
+	/// Feedback at `target` for the export reading `source` through a `format` catalog.
+	pub fn new(target: EchoTarget, source: moq_mux::Source, format: CatalogFormat) -> Self {
 		Self {
-			origin,
+			target,
 			source,
 			format,
-			name,
-			connection,
 			feedback: None,
 		}
 	}
@@ -284,7 +281,7 @@ impl Echo {
 			if prefix.is_none() {
 				tracing::warn!(path = %echo.path.as_str(), "the catalog solicits feedback above the connection root");
 			}
-			Some(prefix?.join(format!("{}{}", self.name.0, hang::echo::SUFFIX).as_str()))
+			Some(prefix?.join(format!("{}{}", self.target.name.0, hang::echo::SUFFIX).as_str()))
 		});
 		if self.feedback.as_ref().map(|feedback| &feedback.path) == target.as_ref() {
 			return;
@@ -304,9 +301,10 @@ impl Echo {
 	}
 
 	fn publish(&self, path: &moq_net::PathOwned) -> anyhow::Result<Feedback> {
-		let mut broadcast = self.origin.create_broadcast(path)?;
+		let mut broadcast = self.target.origin.create_broadcast(path)?;
 		let tracks = Pair::create(&mut broadcast, hang::echo::TRACK)?;
-		broadcast.announce(moq_net::origin::Route::default())?;
+		// A fresh instance, so a reader sees a replaced feedback broadcast as a restart.
+		broadcast.announce(moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint()))?;
 		Ok(Feedback {
 			path: path.clone(),
 			_broadcast: broadcast,
@@ -319,7 +317,7 @@ impl Echo {
 			return;
 		};
 		let mut snapshot = hang::echo::Snapshot::default();
-		snapshot.transport = transport(self.connection.as_ref(), Direction::Receive);
+		snapshot.transport = transport(self.target.connection.as_ref(), Direction::Receive);
 		snapshot.renditions = self.source.stats();
 		feedback.tracks.update(&snapshot);
 	}

@@ -323,6 +323,10 @@ impl Invocation {
 						if let Some(reason) = import.source.epoch_refusal() {
 							anyhow::bail!("--epoch makes instances one publisher of identical tracks, but {reason}");
 						}
+						anyhow::ensure!(
+							!import.stats,
+							"--epoch makes instances one publisher of identical tracks, but --stats reports this instance's own counts"
+						);
 						publishes = true;
 					}
 					#[cfg(feature = "transcode")]
@@ -782,7 +786,8 @@ pub struct Import {
 	latency_max: Option<crate::duration::Duration>,
 
 	/// Name a stats track in the catalog and fill it with what each track has written, about
-	/// once a second while subscribed. The stdin imports only.
+	/// once a second while subscribed. The stdin imports only, without --epoch: the counts are
+	/// this instance's own.
 	#[usage(long)]
 	pub stats: bool,
 
@@ -1731,6 +1736,7 @@ mod tests {
 			&["import", "ts", "--program", "all"],
 			&["import", "avc3"],
 			&["import", "archive", "file:///tmp/recording"],
+			&["import", "--stats", "ts"],
 			#[cfg(feature = "capture")]
 			&["import", "capture"],
 			#[cfg(feature = "transcode")]

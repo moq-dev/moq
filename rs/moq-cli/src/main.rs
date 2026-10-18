@@ -800,7 +800,11 @@ fn spawn_export(
 			select: export.select,
 		};
 		let consumer = origin.consume();
-		let echo = export.echo.map(|echo| (origin.clone(), echo, connection));
+		let echo = export.echo.map(|name| report::EchoTarget {
+			origin: origin.clone(),
+			name,
+			connection,
+		});
 		tasks.spawn(async move { run_stdout(consumer, name, args, echo).await });
 	} else {
 		match export.sink {
@@ -864,20 +868,13 @@ fn spawn_export(
 	Ok(())
 }
 
-/// Where an `export --echo` publishes its feedback, under what name, and over which connection.
-type EchoTarget = (
-	moq_net::origin::Producer,
-	report::EchoName,
-	Option<moq_tokio::connection::Monitor>,
-);
-
 /// Subscribe to `name` from the Origin and write it to stdout, publishing feedback beside it
 /// where the catalog solicits it when `echo` is set.
 async fn run_stdout(
 	consumer: moq_net::origin::Consumer,
 	name: String,
 	args: SubscribeArgs,
-	echo: Option<EchoTarget>,
+	echo: Option<report::EchoTarget>,
 ) -> anyhow::Result<()> {
 	let catalog = args.catalog_format(&name);
 
@@ -890,10 +887,10 @@ async fn run_stdout(
 		.ok_or_else(|| anyhow::anyhow!("origin closed before broadcast `{name}` was announced"))?;
 
 	let subscribe = Subscribe::new(consumer, &name, catalog, args).await?;
-	let Some((origin, echo, connection)) = echo else {
+	let Some(echo) = echo else {
 		return subscribe.run().await;
 	};
-	let mut echo = report::Echo::new(origin, subscribe.source().clone(), catalog, echo, connection);
+	let mut echo = report::Echo::new(echo, subscribe.source().clone(), catalog);
 	let result = tokio::select! {
 		result = subscribe.run() => result,
 		never = echo.run() => match never {},
