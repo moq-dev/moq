@@ -23,22 +23,18 @@ Decided 2026-10-17:
   concrete `moq_net::broadcast::Producer` (about 108 `create_track` call
   sites). flate and json take a concrete `track::Producer`, but each already
   splits a codec layer (`Encoder`/`Decoder`) from track ownership.
-- **Interim design (#5822).** The approved e2ee design composes through a
-  bridge:
-  - Writers fill a local plaintext broadcast.
-  - A new add-only `broadcast::Producer::tracks()` watcher lets the e2ee
-    bridge carry each track through `moq_e2ee::broadcast` under its physical
-    name.
-  - This quest compares the trait against that bridge, not against a blank
-    slate.
+- **Interim design.** E2EE composes through a bridge: the
+  `moq_e2ee::broadcast::{Producer, Consumer}` wrappers (#5876) wrap a concrete
+  moq-net broadcast and see every track creation themselves. The e2ee mux path
+  (#5822) is on hold to be rebuilt on them. `moq-net` gains no track listing
+  for it (#5880 was abandoned). This quest compares the trait against that
+  bridge, not against a blank slate.
 - **Design-only, with a gate.** Implementation splits into follow-up quests
   only after the decision is reviewed.
 - **Rust and JS together.** Names mirror across both. The browser e2ee
   publisher has the same concrete-broadcast problem as moq-mux.
-- **If a trait wins:**
-  - A follow-up quest moves the e2ee mux path onto it and deletes the bridge.
-  - `broadcast::Producer::tracks()` stays only if something else uses it.
-    Otherwise it is deleted.
+- **If a trait wins,** a follow-up quest moves the e2ee mux path onto it and
+  deletes the bridge.
 - **Placement.** This is Related to the e2ee epic, not Required. E2EE ships on
   the bridge.
 
