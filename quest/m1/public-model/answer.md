@@ -83,11 +83,6 @@ Rust items (`rs/moq-net/src/model/`), as they stood at b4eab0db1:
 - `origin::Producer::stats`, `origin::Consumer::stats` (sessions): remove
   the need; the caller keeps the `stats::Session` it passed to the public
   `with_stats`.
-- `bandwidth::Producer::weak`, `bandwidth::Weak`, `Weak::consume` (session
-  handle): public. A session hands out estimate consumers without the
-  handle itself counting as demand, which
-  [Rust PROBE on demand](/quest/m1/probe-on-demand-rs.md) extends to the
-  receive side.
 - Test-only: `origin::Producer::announce`, `AnnounceProducer`,
   `ProduceTest`, `origin::Consumer::get_broadcast`.
 
@@ -187,5 +182,4 @@ cover the behavior.
 
 ## Related
 
-- [Rust PROBE on demand](/quest/m1/probe-on-demand-rs.md) - the receive side of the bandwidth handle
 - [Public model after ranges, handover, and the JS tail](/quest/m1/public-model/deferred.md) - the track info and fetch answers, split out of this quest

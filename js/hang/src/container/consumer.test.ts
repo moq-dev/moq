@@ -526,10 +526,16 @@ function encodeLegacy(timestamp: Micro): Uint8Array {
 	return data;
 }
 
-function writeGroupWithLegacyFrames(track: Track.Producer, sequence: number, timestamps: Micro[]) {
+// `stamp` is the transport timestamp, the container's own by default.
+function writeGroupWithLegacyFrames(
+	track: Track.Producer,
+	sequence: number,
+	timestamps: Micro[],
+	stamp: (ts: Micro) => Time.Timestamp = (ts) => Time.Timestamp.fromMicros(ts),
+) {
 	const group = new Group.Producer(sequence);
 	for (const ts of timestamps) {
-		group.writeFrame({ payload: encodeLegacy(ts), timestamp: Time.Timestamp.now() });
+		group.writeFrame({ payload: encodeLegacy(ts), timestamp: stamp(ts) });
 	}
 	group.close();
 	track.writeGroup(group);
@@ -953,12 +959,16 @@ async function nextFrame(consumer: Consumer) {
 	}
 }
 
+// The track refuses a transport timestamp that rewinds, so these rewind only the container's
+// own timestamps, under wall-clock transport stamps that rise in write order.
+const wallClock = () => Time.Timestamp.now();
+
 test("Consumer aborts a group below the previous group start", async () => {
 	const track = new Track.Producer("test");
 	const consumer = new Consumer(replay(track), { format: new LegacyFormat("data"), maxDelay: 30_000 as Milli });
 
-	writeGroupWithLegacyFrames(track, 0, [10_000_000 as Micro]);
-	writeGroupWithLegacyFrames(track, 1, [0 as Micro, 100_000 as Micro]);
+	writeGroupWithLegacyFrames(track, 0, [10_000_000 as Micro], wallClock);
+	writeGroupWithLegacyFrames(track, 1, [0 as Micro, 100_000 as Micro], wallClock);
 	await settle();
 
 	expect((await nextFrame(consumer))?.frame?.timestamp).toBe(10_000_000 as Micro);
@@ -971,13 +981,13 @@ test("Consumer aborts a rewind carried by a later arrival", async () => {
 	const track = new Track.Producer("test");
 	const consumer = new Consumer(replay(track), { format: new LegacyFormat("data"), maxDelay: 30_000 as Milli });
 
-	writeGroupWithLegacyFrames(track, 0, [10_000_000 as Micro]);
+	writeGroupWithLegacyFrames(track, 0, [10_000_000 as Micro], wallClock);
 	await settle();
 	expect((await nextFrame(consumer))?.frame?.timestamp).toBe(10_000_000 as Micro);
 
 	const pending = nextFrame(consumer);
 	await settle();
-	writeGroupWithLegacyFrames(track, 1, [0 as Micro, 100_000 as Micro]);
+	writeGroupWithLegacyFrames(track, 1, [0 as Micro, 100_000 as Micro], wallClock);
 
 	await expect(pending).rejects.toThrow("below the previous group start");
 
@@ -1047,10 +1057,10 @@ test("Consumer reads no gap when retiring a group holding only its endpoint", as
 	const consumer = new Consumer(replay(track), { format: new LegacyFormat("video"), maxDelay: 150 as Milli });
 
 	const group = new Group.Producer(0);
-	group.writeFrame({ payload: encodeLegacy(0 as Micro), timestamp: Time.Timestamp.now() });
+	group.writeFrame({ payload: encodeLegacy(0 as Micro), timestamp: Time.Timestamp.fromMicros(0) });
 	group.writeFrame({
 		payload: encodeLegacyFrame(33_000 as Micro, new Uint8Array()),
-		timestamp: Time.Timestamp.now(),
+		timestamp: Time.Timestamp.fromMicros(33_000),
 	});
 	group.close();
 	track.writeGroup(group);
@@ -1073,7 +1083,7 @@ test("Consumer reads a gap when retiring a truncated group", async () => {
 	const consumer = new Consumer(replay(track), { format: new LegacyFormat("audio"), maxDelay: 150 as Milli });
 
 	const group = new Group.Producer(0);
-	group.writeFrame({ payload: encodeLegacy(0 as Micro), timestamp: Time.Timestamp.now() });
+	group.writeFrame({ payload: encodeLegacy(0 as Micro), timestamp: Time.Timestamp.fromMicros(0) });
 	track.writeGroup(group);
 	await settle();
 	expect(frameOf(await consumer.next()).timestamp).toBe(0 as Micro);
@@ -1096,7 +1106,7 @@ test("Consumer reads a gap when retiring an open group", async () => {
 	const consumer = new Consumer(replay(track), { format: new LegacyFormat("audio"), maxDelay: 150 as Milli });
 
 	const group = new Group.Producer(0);
-	group.writeFrame({ payload: encodeLegacy(0 as Micro), timestamp: Time.Timestamp.now() });
+	group.writeFrame({ payload: encodeLegacy(0 as Micro), timestamp: Time.Timestamp.fromMicros(0) });
 	track.writeGroup(group);
 	await settle();
 	expect(frameOf(await consumer.next()).timestamp).toBe(0 as Micro);
@@ -1723,7 +1733,7 @@ test("Consumer reads a shed marker group as a gap", async () => {
 	track.writeGroup(group0);
 	group0.writeFrame({
 		payload: encodeLegacy(0 as Micro),
-		timestamp: Time.Timestamp.now(),
+		timestamp: Time.Timestamp.fromMicros(0),
 	});
 	await settle();
 	expect((await nextFrame(consumer))?.frame?.timestamp).toBe(0 as Micro);

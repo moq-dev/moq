@@ -25,6 +25,8 @@ export const SetupOption = {
 	Hidden: 0x40b5cn,
 	/** AUTH, from the MoQ Auth extension. See `auth.ts`. */
 	Auth: 0x40b60n,
+	/** ACTIVE_COUNT, from the MoQ Active Count extension. See `active_count.ts`. */
+	ActiveCount: 0x40b64n,
 } as const;
 
 // Unknown SETUP options may repeat, including GREASE (draft-21 section 9.1).
@@ -550,6 +552,19 @@ export class Parameters {
 	set hidden(v: boolean) {
 		if (v) this.vars.set(MSG_PARAM_HIDDEN, 1n);
 		else this.vars.delete(MSG_PARAM_HIDDEN);
+	}
+
+	/** How many NAMESPACE messages follow a REQUEST_OK before the subscription is synced (MoQ Active Count). */
+	get activeCount(): number | undefined {
+		const v = this.vars.get(MSG_PARAM_ACTIVE_COUNT);
+		if (v === undefined) return undefined;
+		if (v > BigInt(Number.MAX_SAFE_INTEGER)) throw new ProtocolViolation(`ACTIVE_COUNT too large: ${v}`);
+		return Number(v);
+	}
+
+	set activeCount(v: number | undefined) {
+		if (v === undefined) this.vars.delete(MSG_PARAM_ACTIVE_COUNT);
+		else this.vars.set(MSG_PARAM_ACTIVE_COUNT, BigInt(v));
 	}
 
 	// --- Bytes accessors ---

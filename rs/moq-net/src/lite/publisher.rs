@@ -269,7 +269,9 @@ impl<S: crate::transport::poll::Session> Publisher<S> {
 		auth: Option<crate::auth::Handle>,
 	) -> Result<(), Error> {
 		let mut run = AnnounceRun::new(crate::PathOwned::default(), self_origin, version);
-		run.auth = auth;
+		run.auth = auth.map(|handle| {
+			crate::auth::Gate::new(handle, crate::Path::empty().to_owned(), crate::auth::Direction::Publish)
+		});
 		kio::wait(|waiter| run.poll(stream, origin, announced, waiter)).await
 	}
 }
@@ -947,7 +949,11 @@ impl<S: crate::transport::poll::Session> AnnounceServe<S> {
 		};
 		let announced = origin.announced();
 		let mut run = AnnounceRun::new(prefix, self.shared.self_origin, self.shared.version);
-		run.auth = Some(self.shared.auth.clone());
+		run.auth = Some(crate::auth::Gate::new(
+			self.shared.auth.clone(),
+			run.prefix.clone(),
+			crate::auth::Direction::Publish,
+		));
 		self.state = AnnounceState::Run { origin, announced, run };
 	}
 }
@@ -971,7 +977,7 @@ struct AnnounceRun {
 	phase: AnnouncePhase,
 	// Our grant and the ceiling on the peer: only what both let us publish is
 	// announced, and a shrink withdraws what they no longer cover.
-	auth: Option<crate::auth::Handle>,
+	auth: Option<crate::auth::Gate>,
 	epoch: u64,
 	// What we may announce right now.
 	permit: crate::auth::Permit,
@@ -1311,8 +1317,7 @@ impl AnnounceRun {
 			// advertises something it would withdraw, or abort over, a moment later.
 			if let Some(auth) = &self.auth {
 				ready!(auth.poll_setup_answered(waiter));
-				if let Poll::Ready(permit) = auth.poll_permit(crate::auth::Direction::Publish, &mut self.epoch, waiter)
-				{
+				if let Poll::Ready(permit) = auth.poll_permit(&mut self.epoch, waiter) {
 					self.permit = permit;
 				}
 			}
@@ -1336,7 +1341,7 @@ impl AnnounceRun {
 			// A grant change applies before the next update, so a route it no longer
 			// covers is withdrawn rather than re-sent.
 			if let Some(auth) = &self.auth
-				&& let Poll::Ready(permit) = auth.poll_permit(crate::auth::Direction::Publish, &mut self.epoch, waiter)
+				&& let Poll::Ready(permit) = auth.poll_permit(&mut self.epoch, waiter)
 				&& self.permit != permit
 			{
 				self.regrant(stream, origin, permit)?;
@@ -2592,6 +2597,39 @@ mod announce_test {
 		harness_with(version, None).await
 	}
 
+	/// A relay answers with what it holds now: an upstream still delivering its own
+	/// initial set never delays the ANNOUNCE_OK, so a peer syncs with this relay.
+	#[moq_clock::test]
+	async fn a_silent_upstream_never_delays_the_answer() {
+		let origin = Hop::new(1).unwrap().produce();
+		let _route = origin.announce("cam", crate::origin::Route::default()).unwrap();
+		// An upstream that never answers its announce request.
+		let _silent = origin.clone().upstream().snapshot("");
+
+		let log = Log::default();
+		let writes = log.writes.clone();
+		let consumer = origin.consume();
+		assert!(!consumer.announced().is_synced(), "the relay itself is still syncing");
+		let mut stream = Stream::<SinkSession, Version> {
+			writer: Writer::new(SinkSend::new(log), VERSION),
+			reader: Reader::new(PendingRecv, VERSION),
+		};
+		let _task = moq_clock::sim::spawn(async move {
+			let mut announced = consumer.announced();
+			let self_origin = consumer.hop();
+			TestPublisher::run_announce(&mut stream, &consumer, &mut announced, self_origin, VERSION, None).await
+		});
+		settle().await;
+
+		let mut wire = Wire {
+			writes,
+			cursor: 0,
+			version: VERSION,
+		};
+		assert_eq!(wire.take_ok().active, 1, "answered with the current view");
+		assert_eq!(wire.take_announces().len(), 1);
+	}
+
 	/// [`harness_on`], announcing under `auth`'s grant.
 	async fn harness_with(version: Version, auth: Option<crate::auth::Handle>) -> Harness {
 		let origin = Hop::new(1).unwrap().produce();
@@ -3367,7 +3405,7 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 		// Feed the full update into the model subscriber so the producer's
 		// aggregate reflects it (and a relay re-forwards it upstream).
 		// Read first: `update` replaces these preferences.
-		let requested = self.track.subscription().start.map(|start| start.group);
+		let requested = self.track.subscription().start().map(|start| start.group);
 		let floored = requested.is_some_and(|group| group > 0);
 		let bounds = Bounds::from(&upd);
 		let _ = self.track.update(crate::track::Subscription {
@@ -3472,7 +3510,7 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 		if self.emit_range
 			&& self.start.is_none()
 			&& self.ctx.version.has_largest()
-			&& let Some(start) = self.track.subscription().start
+			&& let Some(start) = self.track.subscription().start()
 			&& let Poll::Ready(Some(largest)) = self.track.poll_live(waiter)
 			&& start > largest
 		{
@@ -3630,7 +3668,7 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 			return Ok(());
 		};
 		// A cap below the end bounds what the subscriber is owed, as on its side.
-		let end = final_sequence(self.track.subscription().end.map_or(fin, |end| end.min(fin)));
+		let end = final_sequence(self.track.subscription().end().map_or(fin, |end| end.min(fin)));
 		self.drop_range(start..end, writer)
 	}
 }
@@ -3678,7 +3716,7 @@ impl<S: crate::transport::poll::Session> TrackRun<S> {
 		// floor. Lite-06 encodes a floor of group 0 as 0, which decodes as no named floor;
 		// that 0 is group 0, so it is not pinned. Raised, not assigned: an update that
 		// landed while the group was held may already have raised it past.
-		if self.track.subscription().start.is_none() && !self.ctx.version.resolves_start() {
+		if self.track.subscription().start().is_none() && !self.ctx.version.resolves_start() {
 			self.track.raise_start_to(start);
 		}
 		self.serve(group);
@@ -4067,13 +4105,13 @@ mod serve_group_test {
 			end_group: Some(5),
 			end_frame: None,
 		};
-		assert_eq!(whole.positions().end, Some(track::Position::group(6)));
+		assert_eq!(whole.positions().end(), Some(track::Position::group(6)));
 
 		let capped = Bounds {
 			end_frame: Some(2),
 			..whole
 		};
-		assert_eq!(capped.positions().end, Some(track::Position { group: 5, frame: 3 }));
+		assert_eq!(capped.positions().end(), Some(track::Position { group: 5, frame: 3 }));
 
 		let started = Bounds {
 			start_group: Some(5),
@@ -4082,8 +4120,8 @@ mod serve_group_test {
 			end_frame: None,
 		};
 		let positions = started.positions();
-		assert_eq!(positions.start, Some(track::Position { group: 5, frame: 3 }));
-		assert_eq!(positions.end, None);
+		assert_eq!(positions.start(), Some(track::Position { group: 5, frame: 3 }));
+		assert_eq!(positions.end(), None);
 
 		// A frame bound the peer sent without its group has nothing to count from, so it
 		// cannot reach the model at all.
@@ -4093,7 +4131,7 @@ mod serve_group_test {
 			end_group: None,
 			end_frame: Some(7),
 		};
-		assert_eq!((orphan.positions().start, orphan.positions().end), (None, None));
+		assert_eq!((orphan.positions().start(), orphan.positions().end()), (None, None));
 	}
 
 	/// A group whose head the publisher no longer holds is skipped, not served short:

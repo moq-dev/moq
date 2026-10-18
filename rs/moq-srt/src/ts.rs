@@ -139,7 +139,8 @@ impl Publisher {
 				import.finish().map_err(moq_mux::Error::from)?;
 				broadcast.close();
 			}
-			Importer::All(programs) => programs.finish().map_err(moq_mux::Error::from)?,
+			// Dropping the handles closes every program now, as `close` does for one.
+			Importer::All(programs) => drop(programs.finish().map_err(moq_mux::Error::from)?),
 		}
 		// The drain at end of input can publish a frame nothing vouched for.
 		self.span.in_scope(|| self.log.finish(&self.stats()));

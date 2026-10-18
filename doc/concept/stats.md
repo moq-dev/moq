@@ -162,6 +162,13 @@ A presence track's entries are cumulative from when it was first held: a
 session that ends stays counted, and so does every one after it, while
 anyone holds the track. A track held again starts over.
 
+Wire bytes start at zero on every hold, including the first. Other presence
+fields seed from the root's current live-session counters; they do not recover
+closed roots from before the hold. Node totals keep the full group epoch's
+history. Each recreated track starts a fresh snapshot group using the
+broadcast's shared, increasing group sequence, so relay caches can distinguish
+it from an earlier hold. Plain and compressed tracks share that allocator.
+
 ### Prefix
 
 ```json
@@ -237,7 +244,8 @@ should prefer the canonical name and fall back to the legacy one.
     "sent_bytes": 1048576, "received_bytes": 524288,
     "sessions_refused": { "refused": 0, "unavailable": 0, "request": 0, "forbidden": 0, "lan": 0 },
     "sessions_failed": { "idle_timeout": 1, "transport": 0, "application": 0, "expired": 0 },
-    "announces_peak": 40, "subscriptions_peak": 900
+    "announces_peak": 40, "subscriptions_peak": 900,
+    "wire_tx": 2048, "wire_rx": 1024
   }
 }
 ```
@@ -256,6 +264,21 @@ and newer readers default missing fields to zero.
 The label is the grant's `label`, a path the auth server picks to attribute
 usage, independent of the root that scopes what the session may access. A grant
 without a `label` counts under the empty label, never under its root.
+
+`wire_tx` and `wire_rx` count transport bytes sent and received, separately
+from `Traffic.bytes`, which counts media payload. QUIC and WebTransport count
+UDP bytes, including retransmissions and transport overhead. The transport
+updates a connection's counters as it sends and receives, and a stats tick reads
+them without polling the session or activating its periodic sampler. A retag
+flushes the old tier and label first; closing a session records its final delta.
+An embedder creates a `transport::Wire`, registers it with `stats::Handle::wire`
+or `stats::Session::wire`, records its connection's cumulative totals on it, and
+holds the returned guard. Dropping the guard records the final reading.
+
+Unsupported transports, including browsers and the current WebSocket/qmux
+adapter, contribute zero. WebSocket wire accounting requires the separate
+qmux counter source; unavailable counters are never estimated from payload.
+Readers default missing wire fields to zero for older relays.
 
 `sessions_refused` counts sessions turned away before admission, by reason.
 They never start a session. The relay's own refusals have no resolved label, so

@@ -64,8 +64,8 @@ Decided 2026-10-16 (see the [epic](/quest/m1/refresh/README.md)).
   on append, `refresh: None`, and a replaced producer. A benchmark sweeps
   tracks against subscribers per track, so the join check stays on the
   touched track.
-- Update the Unreleased section of `doc/setup/upgrade.md` for the `Demand`
-  break, and `doc/concept/standard.md` for the IETF mapping.
+- Add a `MIGRATE.md` entry in each affected package for the `Demand`
+  break, and update `doc/concept/standard.md` for the IETF mapping.
 
 Public API: breaking (`Demand` in Rust, JS, moq-ffi, and every binding;
 `track::Info::refresh` and `MoqTrackInfo::refresh` added). Wire: none in this quest. IETF fields are

@@ -20,3 +20,6 @@ Reproduce it the same way first: a publisher bursting one-frame groups over
 budget from the start and keep the warmup reach local, as the export now picks its live
 edge in the consumer instead of on the wire.
 
+## Related
+
+- [TS MP2 join hole](/quest/m1/test-flakes-2/ts-mp2-join-hole.md) - the TS export still loses MP2 groups after its live join; it may share this race

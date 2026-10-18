@@ -19,6 +19,7 @@ mod play;
 mod publish;
 mod rtc;
 mod rtmp;
+mod rtsp;
 mod srt;
 mod subscribe;
 #[cfg(test)]
@@ -713,7 +714,7 @@ fn spawn_import(
 		let config = moq_mux::catalog::Config::default()
 			.with_max_age(max_age)
 			.with_bandwidth(bandwidth.clone());
-		let publish = if let ImportSource::Ts(TsImport {
+		let mut publish = if let ImportSource::Ts(TsImport {
 			program: Some(TsProgram::All),
 			..
 		}) = &import.source
@@ -724,8 +725,6 @@ fn spawn_import(
 			let broadcast = origin.create_broadcast(&name).context("failed to create broadcast")?;
 			Publish::new(broadcast, &format, config)?
 		};
-		// Media stays servable at EOF until it goes stale, the same max-age relays retain it for.
-		let mut publish = publish.linger(max_age.unwrap_or(hang::container::MAX_AGE));
 		publish.announce(epoch)?;
 		local = Some(publish);
 	} else {
@@ -751,6 +750,9 @@ fn spawn_import(
 				} else if let Some(url) = srt.connect {
 					tasks.spawn(srt::connect_import(target(name), url, srt.latency.into_std(), program));
 				}
+			}
+			ImportSource::Rtsp(rtsp) => {
+				tasks.spawn(rtsp::connect_import(target(name), rtsp.connect));
 			}
 			ImportSource::Rtc(rtc) => {
 				if let Some(addr) = rtc.listen {

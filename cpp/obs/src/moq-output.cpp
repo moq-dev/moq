@@ -282,6 +282,7 @@ void MoQOutput::OnConnect(const std::shared_ptr<Attempt> &current, moq::expected
 	{
 		std::lock_guard<std::mutex> lock(mutex);
 		session = current->session;
+		recv_bandwidth = session->recv_bandwidth();
 		connected = true;
 		live = true;
 		last_failure_code = MoQError::None;
@@ -354,6 +355,7 @@ void MoQOutput::Fail(const std::shared_ptr<Attempt> &current, const moq::Error &
 	attempt.reset();
 	{
 		std::lock_guard<std::mutex> lock(mutex);
+		recv_bandwidth.reset();
 		session.reset();
 		connected = false;
 		live = false;
@@ -395,6 +397,7 @@ void MoQOutput::Reset()
 
 	{
 		std::lock_guard<std::mutex> lock(mutex);
+		recv_bandwidth.reset();
 		session.reset();
 		connected = false;
 		live = false;
@@ -465,6 +468,7 @@ bool MoQOutput::TryGetConnectionStats(ConnectionStats *out)
 		return false;
 
 	std::shared_ptr<moq::Session> current;
+	std::shared_ptr<moq::BandwidthConsumer> receive;
 	std::string dial_url;
 	bool current_live = false;
 	{
@@ -472,6 +476,7 @@ bool MoQOutput::TryGetConnectionStats(ConnectionStats *out)
 		if (!session)
 			return false;
 		current = session;
+		receive = recv_bandwidth;
 		dial_url = url;
 		current_live = live;
 	}
@@ -490,9 +495,9 @@ bool MoQOutput::TryGetConnectionStats(ConnectionStats *out)
 	snapshot.estimated_send_rate_valid = raw.estimated_send_rate_bps.has_value();
 	snapshot.estimated_send_rate_bps =
 		raw.estimated_send_rate_bps ? static_cast<double>(*raw.estimated_send_rate_bps) : 0;
-	snapshot.estimated_recv_rate_valid = raw.estimated_recv_rate_bps.has_value();
-	snapshot.estimated_recv_rate_bps =
-		raw.estimated_recv_rate_bps ? static_cast<double>(*raw.estimated_recv_rate_bps) : 0;
+	const auto recv_rate = receive ? receive->peek() : std::nullopt;
+	snapshot.estimated_recv_rate_valid = recv_rate.has_value();
+	snapshot.estimated_recv_rate_bps = recv_rate ? static_cast<double>(*recv_rate) : 0;
 	snapshot.bytes_sent_valid = raw.bytes_sent.has_value();
 	snapshot.bytes_sent = raw.bytes_sent.value_or(0);
 	if (raw.packets_sent && raw.packets_lost && *raw.packets_sent > 0) {

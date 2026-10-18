@@ -228,7 +228,8 @@ final class Moq {
     AnnounceOptions options = const AnnounceOptions(),
   }) => session.consume().announced(config: options._ffi);
 
-  /// Wait for a broadcast announced at exactly [path].
+  /// Follow the broadcast at exactly [path]: each `available()` resolves the
+  /// next publisher instance serving it, such as a restarted publisher.
   AnnouncedBroadcast announcedBroadcast(String path) =>
       session.consume().announcedBroadcast(path: path);
 
