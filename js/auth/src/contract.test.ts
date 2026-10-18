@@ -109,6 +109,7 @@ test("a grant round trips and is validated", () => {
 		expires: 4102444800,
 		revalidate: 60,
 		tier: "websocket",
+		label: "project/key/123",
 	});
 	expect(grant.publish?.toJSON()).toEqual(["alice/**"]);
 
@@ -119,6 +120,7 @@ test("a grant round trips and is validated", () => {
 	expect(() => GrantSchema.parse({ publish: ["**"], expires: 4102444800, revalidate: 0.5 })).toThrow();
 	expect(() => GrantSchema.parse({ publish: ["**"], expires: 4102444800.5 })).toThrow();
 	expect(() => GrantSchema.parse({ publish: ["a/**/b/**"] })).toThrow();
+	expect(() => GrantSchema.parse({ publish: ["**"], label: "project/*" })).toThrow(/invalid path/);
 });
 
 test("an auth endpoint grant accepts a capped role", () => {

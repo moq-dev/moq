@@ -27,7 +27,10 @@ fn open(
     server_ch: ConnectionHandle,
     data: &[u8],
 ) -> StreamId {
-    let s = pair.client_streams(client_ch).open(Dir::Uni).unwrap();
+    let s = pair
+        .client_streams(client_ch)
+        .open(Dir::Uni, Default::default())
+        .unwrap();
     pair.client_send(client_ch, s).write(data).unwrap();
     pair.drive();
     assert_eq!(pair.server_streams(server_ch).accept(Dir::Uni), Some(s));
@@ -177,11 +180,19 @@ fn reset_returns_stream_credit_once_observed() {
     let s = open(&mut pair, client_ch, server_ch, b"hello");
     pair.client_send(client_ch, s).reset(CODE).unwrap();
     pair.drive();
-    assert_eq!(pair.client_streams(client_ch).open(Dir::Uni), None);
+    assert_eq!(
+        pair.client_streams(client_ch)
+            .open(Dir::Uni, Default::default()),
+        None
+    );
 
     assert_eq!(read_all(&mut pair, server_ch, s).1, ReadError::Reset(CODE));
     pair.drive();
-    assert!(pair.client_streams(client_ch).open(Dir::Uni).is_some());
+    assert!(
+        pair.client_streams(client_ch)
+            .open(Dir::Uni, Default::default())
+            .is_some()
+    );
 }
 
 /// The connection window used by `s`'s unread bytes, which fill it
@@ -193,7 +204,10 @@ fn blocked() -> (Pair, ConnectionHandle, ConnectionHandle, StreamId) {
         connected_with(|t| _ = t.receive_window(VarInt::from_u32(WINDOW)), |_| {});
     let s = open(&mut pair, client_ch, server_ch, &[0; WINDOW as usize]);
     // The window is spent, so nothing more can be written
-    let other = pair.client_streams(client_ch).open(Dir::Uni).unwrap();
+    let other = pair
+        .client_streams(client_ch)
+        .open(Dir::Uni, Default::default())
+        .unwrap();
     assert_eq!(
         pair.client_send(client_ch, other).write(b"x"),
         Err(WriteError::Blocked)
@@ -203,7 +217,10 @@ fn blocked() -> (Pair, ConnectionHandle, ConnectionHandle, StreamId) {
 
 /// How many bytes a fresh client stream can write
 fn writable(pair: &mut Pair, ch: ConnectionHandle) -> usize {
-    let s = pair.client_streams(ch).open(Dir::Uni).unwrap();
+    let s = pair
+        .client_streams(ch)
+        .open(Dir::Uni, Default::default())
+        .unwrap();
     pair.client_send(ch, s)
         .write(&[0; 2 * WINDOW as usize])
         .unwrap_or(0)

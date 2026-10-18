@@ -7,8 +7,23 @@
  * @module
  */
 
+import { Pattern } from "@moq/pattern";
 import * as z from "@zod/mini";
 import { AccessSchema } from "./access.ts";
+
+const PathSchema = z.string().check(
+	z.refine(
+		(path) => {
+			try {
+				Pattern.literal(path);
+				return true;
+			} catch {
+				return false;
+			}
+		},
+		{ message: "invalid path" },
+	),
+);
 
 /** How a session reached the relay; `http` is a one-shot request on the relay's web listener. */
 export const TransportSchema = z.pipe(
@@ -153,6 +168,8 @@ export const GrantSchema = z
 		revalidate: z.optional(z.int().check(z.positive())),
 		/** An opaque label handed to stats, so traffic can be bucketed. */
 		tier: z.optional(z.string()),
+		/** The literal path this session's stats record under, independent of its root. Absent records under the empty label. */
+		label: z.optional(PathSchema),
 		/** The session is a cluster peer (another relay): what it announces entered the cluster elsewhere. */
 		peer: z.optional(z.boolean()),
 		/** The peer is upstream: the relay never offers it a route learned from another upstream. Requires `peer`. */

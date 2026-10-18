@@ -11,7 +11,7 @@
  * Per-node tracks we read:
  *   publisher.json   egress  (relay -> downstream viewers)
  *   subscriber.json  ingress (upstream publishers -> relay)
- *   sessions.json    sessions by auth root
+ *   sessions.json    sessions by stats label
  *
  * Each frame is `{ "<broadcast path>": Snapshot }`. Counters are cumulative;
  * "active" = started - ended. The relay includes every entry it still holds
@@ -525,15 +525,15 @@ ui.run((effect) => {
 			};
 		});
 
-	// Sessions connected under each auth root, counted regardless of data flow.
+	// Sessions connected under each stats label, counted regardless of data flow.
 	const sessionRows = Object.keys(stats.sessions)
 		.sort()
-		.map((root) => {
-			const s = stats.sessions[root] ?? {};
+		.map((label) => {
+			const s = stats.sessions[label] ?? {};
 			return {
-				key: root,
+				key: label,
 				cells: [
-					root || "(none)",
+					label || "(none)",
 					String(active(sessionsStarted(s), sessionsEnded(s))),
 					String(sessionsStarted(s)),
 				],
@@ -550,7 +550,7 @@ ui.run((effect) => {
 		["broadcast", "viewers", "tracks", "egress", "frames", "groups", "datagrams", "fetches", "announce"],
 		egressRows(stats.egress),
 	);
-	renderTable($("node-session-roots"), ["auth root", "connected", "total"], sessionRows);
+	renderTable($("node-session-labels"), ["label", "connected", "total"], sessionRows);
 
 	const sessions = countSessions(stats.sessions);
 	$("node-sessions").textContent = `${sessions} session${sessions === 1 ? "" : "s"}`;

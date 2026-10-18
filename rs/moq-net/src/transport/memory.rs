@@ -13,7 +13,7 @@
 //! with a code and drops what it queued. Closing the session keeps queued messages
 //! readable, and leaves streams as they were, so the peer reads them, then the close.
 //!
-//! Datagrams ignore their send group and order, and are dropped when oversized or when the
+//! Datagrams ignore their send options, and are dropped when oversized or when the
 //! peer's queue is full, as a network would.
 
 use std::{
@@ -282,12 +282,20 @@ impl poll::Session for Session {
 		Self::poll_accept(&self.side.incoming().bi, &self.side.conn.close, waiter)
 	}
 
-	fn poll_open_uni(&mut self, _cx: &mut Context<'_>) -> Poll<Result<SendStream, Error>> {
+	fn poll_open_uni(
+		&mut self,
+		_cx: &mut Context<'_>,
+		_: poll::SendOptions<'_, poll::Ungrouped>,
+	) -> Poll<Result<SendStream, Error>> {
 		let (send, recv) = self.conn().stream();
 		Poll::Ready(self.open(&self.side.outgoing().uni, recv).map(|()| send))
 	}
 
-	fn poll_open_bi(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(SendStream, RecvStream), Error>> {
+	fn poll_open_bi(
+		&mut self,
+		_cx: &mut Context<'_>,
+		_: poll::SendOptions<'_, poll::Ungrouped>,
+	) -> Poll<Result<(SendStream, RecvStream), Error>> {
 		let (send, peer_recv) = self.conn().stream();
 		let (peer_send, recv) = self.conn().stream();
 		let opened = self.open(&self.side.outgoing().bi, (peer_send, peer_recv));
@@ -298,7 +306,7 @@ impl poll::Session for Session {
 		None
 	}
 
-	fn send_datagram(&mut self, payload: Bytes, _: Option<&poll::Ungrouped>, _: i64) -> Result<(), Error> {
+	fn send_datagram(&mut self, payload: Bytes, _: poll::SendOptions<'_, poll::Ungrouped>) -> Result<(), Error> {
 		if let Some(err) = closed(&self.conn().close) {
 			return Err(err);
 		}
@@ -638,7 +646,7 @@ mod tests {
 	}
 
 	fn uni(a: &mut Session, b: &mut Session) -> (SendStream, RecvStream) {
-		let send = ready(a.poll_open_uni(&mut noop())).unwrap();
+		let send = ready(a.poll_open_uni(&mut noop(), Default::default())).unwrap();
 		let recv = ready(b.poll_accept_uni(&mut noop())).unwrap();
 		(send, recv)
 	}
@@ -814,7 +822,7 @@ mod tests {
 	#[test]
 	fn bidi_streams_pair_up() {
 		let (mut a, mut b) = pair(Config::default());
-		let (mut a_send, mut a_recv) = ready(a.poll_open_bi(&mut noop())).unwrap();
+		let (mut a_send, mut a_recv) = ready(a.poll_open_bi(&mut noop(), Default::default())).unwrap();
 		let (mut b_send, mut b_recv) = ready(b.poll_accept_bi(&mut noop())).unwrap();
 
 		ready(write(&mut a_send, &Bytes::from_static(b"ping"))).unwrap();
@@ -832,7 +840,7 @@ mod tests {
 		assert_eq!(b.protocol(), Some("moq"));
 		let (mut send, mut recv) = uni(&mut a, &mut b);
 		let (mut unfinished, mut unfinished_recv) = uni(&mut a, &mut b);
-		let late = ready(a.poll_open_uni(&mut noop())).unwrap();
+		let late = ready(a.poll_open_uni(&mut noop(), Default::default())).unwrap();
 
 		ready(write(&mut send, &Bytes::from_static(b"last"))).unwrap();
 		send.finish().unwrap();
@@ -842,7 +850,9 @@ mod tests {
 		a.close(4, "bye");
 		let closed = |err: Error| matches!(err, Error::Session { code: 4, ref reason } if reason == "bye");
 		assert!(closed(ready(b.poll_closed(&mut noop()))));
-		assert!(closed(ready(a.poll_open_uni(&mut noop())).err().unwrap()));
+		assert!(closed(
+			ready(a.poll_open_uni(&mut noop(), Default::default())).err().unwrap()
+		));
 		assert!(closed(
 			ready(write(&mut unfinished, &Bytes::from_static(b"x"))).unwrap_err()
 		));
@@ -877,12 +887,13 @@ mod tests {
 	#[test]
 	fn datagrams() {
 		let (mut a, mut b) = pair(Config::default());
-		a.send_datagram(vec![0; MAX_DATAGRAM_SIZE + 1].into(), None, 0).unwrap();
+		a.send_datagram(vec![0; MAX_DATAGRAM_SIZE + 1].into(), Default::default())
+			.unwrap();
 		for _ in 0..DATAGRAM_QUEUE {
-			a.send_datagram("one".into(), None, 0).unwrap();
+			a.send_datagram("one".into(), Default::default()).unwrap();
 		}
 		// The peer's queue is full, so this one is lost, like the oversized one.
-		a.send_datagram("two".into(), None, 0).unwrap();
+		a.send_datagram("two".into(), Default::default()).unwrap();
 		for _ in 0..DATAGRAM_QUEUE {
 			assert_eq!(ready(b.poll_recv_datagram(&mut noop())).unwrap(), "one");
 		}

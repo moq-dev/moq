@@ -17,6 +17,7 @@ This file is split into nested `AGENTS.md` files based on the language/situation
 - Fail loud and early. Error on unsupported or malformed input rather than warn and continue: supported or refused.
 - Reproduce bugs before fixing them. Land each fix with a regression test that fails without it, when one is easy.
 - Unit tests mock time instead of depending on wall-clock timing or sleeps.
+- Impair a network with bufferbloat (a rate limit below the media bitrate, behind a deep but finite queue), whose overflow drops packets too. Random loss may prove correctness, such as retransmits happening, but never gates acceptance or performance.
 - Keep the PR focused. No unrelated refactors, formatting churn, or drive-by changes; split when in doubt.
 - Refactor aggressively for long-term maintainability, but re-evaluate the direction as you learn.
 - Propose a course change, even suggest abandoning a PR, rather than finish a half-solution.

@@ -13,3 +13,7 @@ Existing plaintext operation remains the default; an explicit application creden
 - Derive the opaque broadcast name from the semantic one, discover the newest epoch under that prefix, derive the encrypted catalog name from that generation, decrypt it before existing Hang selection, then subscribe to its opaque media and timeline tracks. Publish every catalog representation and semantic track name through the same protected naming contract.
 - Refuse the stats track and the `echo` attribute while a credential is set: they would publish rendition IDs and per-track counters in plaintext beside the protected broadcast. This quest owns the refusal (decided 2026-10-08), since the stats quests have no encrypted mode to refuse until this credential exists.
 - Cover camera/microphone publication, the stats and `echo` refusal, audio/video playback, late subscription, WebCrypto backpressure through awaited writes, a restarted publisher under a new epoch, bad-group termination, and bad-datagram events in browser tests.
+
+## Required
+
+- [Encrypted consumer shape](/quest/m2/e2ee/consumer.md) - watch uses the shared consumer instead of its own decryption
