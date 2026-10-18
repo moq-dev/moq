@@ -55,7 +55,7 @@ fn abort(pair: MockPair) {
 
 /// Let every task settle. Time is paused, so this returns once the runtime is idle.
 async fn settle() {
-	moq_net_sim::sleep(Duration::from_millis(500)).await;
+	moq_clock::sleep(Duration::from_millis(500)).await;
 }
 
 /// How the serving route changes.
@@ -167,11 +167,11 @@ impl Topology {
 
 	/// A new reader on `R`: a fresh broadcast request and a floorless subscription.
 	async fn reader(&self) -> Reader {
-		let remote = moq_net_sim::timeout(READ_TIMEOUT, self.subscriber.consume().request_broadcast("live", None))
+		let remote = moq_clock::timeout(READ_TIMEOUT, self.subscriber.consume().request_broadcast("live", None))
 			.await
 			.expect("request hung")
 			.expect("request refused");
-		let sub = moq_net_sim::timeout(READ_TIMEOUT, remote.track("catalog.json").unwrap().subscribe(None))
+		let sub = moq_clock::timeout(READ_TIMEOUT, remote.track("catalog.json").unwrap().subscribe(None))
 			.await
 			.expect("subscribe hung")
 			.expect("subscribe refused");
@@ -184,7 +184,7 @@ impl Topology {
 struct Reader {
 	rx: mpsc::UnboundedReceiver<Result<String, String>>,
 	/// Owns the subscription, so dropping the reader leaves the track.
-	task: moq_net_sim::JoinHandle<()>,
+	task: moq_clock::sim::JoinHandle<()>,
 }
 
 impl Drop for Reader {
@@ -196,7 +196,7 @@ impl Drop for Reader {
 impl Reader {
 	fn new(mut sub: track::Subscriber) -> Self {
 		let (tx, rx) = mpsc::unbounded();
-		let task = moq_net_sim::spawn(async move {
+		let task = moq_clock::sim::spawn(async move {
 			loop {
 				let mut group = match sub.recv_group().await {
 					Ok(Some(group)) => group,
@@ -232,7 +232,7 @@ impl Reader {
 	async fn take(&mut self, n: usize, who: &str) -> Vec<String> {
 		let mut frames = Vec::new();
 		while frames.len() < n {
-			match moq_net_sim::timeout(READ_TIMEOUT, self.rx.next()).await {
+			match moq_clock::timeout(READ_TIMEOUT, self.rx.next()).await {
 				Ok(Some(Ok(frame))) => frames.push(frame),
 				Ok(Some(Err(err))) => panic!("{who}: failed after {frames:?}: {err}"),
 				Ok(None) => panic!("{who}: ended after {frames:?}"),
@@ -250,7 +250,7 @@ impl Reader {
 
 	/// The subscription fails or ends, rather than hanging or delivering more.
 	async fn expect_end(&mut self, who: &str) {
-		match moq_net_sim::timeout(READ_TIMEOUT, self.rx.next()).await {
+		match moq_clock::timeout(READ_TIMEOUT, self.rx.next()).await {
 			Ok(None | Some(Err(_))) => {}
 			Ok(Some(Ok(frame))) => panic!("{who}: delivered {frame:?} past its route"),
 			Err(_) => panic!("{who}: hung instead of ending"),
@@ -322,7 +322,7 @@ async fn handover(version: &str, trigger: Trigger, holder: Holder) {
 		assert_eq!(viewer.take(1, &tag).await, ["0:delta3"], "{tag}: viewer continues");
 	}
 	// Returning well past the relays' idle linger, so no copy of the head is warm.
-	moq_net_sim::sleep(RETURN_AFTER).await;
+	moq_clock::sleep(RETURN_AFTER).await;
 	let mut returning = topology.reader().await;
 	returning.expect_all(&topology, &format!("{tag}: returning")).await;
 
@@ -365,14 +365,14 @@ async fn late_reader(version: &str, before: Before) {
 		Before::Resume => {
 			settle().await;
 			drop(first);
-			moq_net_sim::sleep(Duration::from_secs(5)).await;
+			moq_clock::sleep(Duration::from_secs(5)).await;
 			let mut resumed = topology.reader().await;
 			resumed.expect_all(&topology, &format!("{tag}: resumed")).await;
 			resumed
 		}
 	};
 
-	moq_net_sim::sleep(RETURN_AFTER).await;
+	moq_clock::sleep(RETURN_AFTER).await;
 	let mut late = topology.reader().await;
 	late.expect_all(&topology, &format!("{tag}: late")).await;
 }
@@ -389,7 +389,7 @@ async fn fetch_after_leave(version: &str, pause: Duration) {
 	reader.expect_all(&topology, &format!("{tag}: reader")).await;
 	topology.write("delta1");
 	drop(reader);
-	moq_net_sim::sleep(pause).await;
+	moq_clock::sleep(pause).await;
 
 	let remote = topology
 		.subscriber
@@ -398,13 +398,13 @@ async fn fetch_after_leave(version: &str, pause: Duration) {
 		.await
 		.unwrap();
 	let fetch = remote.track("catalog.json").unwrap().fetch_group(0, None);
-	let mut group = moq_net_sim::timeout(READ_TIMEOUT, fetch)
+	let mut group = moq_clock::timeout(READ_TIMEOUT, fetch)
 		.await
 		.unwrap_or_else(|_| panic!("{tag}: fetch hung"))
 		.unwrap_or_else(|err| panic!("{tag}: fetch refused: {err}"));
 	let mut got = Vec::new();
 	while got.len() < topology.written.len() {
-		match moq_net_sim::timeout(READ_TIMEOUT, group.read_frame()).await {
+		match moq_clock::timeout(READ_TIMEOUT, group.read_frame()).await {
 			Ok(Ok(Some(frame))) => got.push(String::from_utf8_lossy(&frame.payload).to_string()),
 			Ok(Ok(None)) => panic!("{tag}: fetch ended after {got:?}"),
 			Ok(Err(err)) => panic!("{tag}: fetch failed after {got:?}: {err}"),
@@ -421,61 +421,61 @@ macro_rules! handover_tests {
 				use super::*;
 
 				async fn run(trigger: Trigger, holder: Holder) {
-					moq_net_sim::timeout(TEST_TIMEOUT, handover($version, trigger, holder))
+					moq_clock::timeout(TEST_TIMEOUT, handover($version, trigger, holder))
 						.await
 						.expect("timed out");
 				}
 
-				#[moq_net_sim::test]
+				#[moq_clock::test]
 				async fn disconnect_with_viewer() {
 					run(Trigger::Disconnect, Holder::Viewer).await;
 				}
 
-				#[moq_net_sim::test]
+				#[moq_clock::test]
 				async fn disconnect_parked() {
 					run(Trigger::Disconnect, Holder::Parked).await;
 				}
 
-				#[moq_net_sim::test]
+				#[moq_clock::test]
 				async fn unannounce_with_viewer() {
 					run(Trigger::Unannounce, Holder::Viewer).await;
 				}
 
-				#[moq_net_sim::test]
+				#[moq_clock::test]
 				async fn unannounce_parked() {
 					run(Trigger::Unannounce, Holder::Parked).await;
 				}
 
-				#[moq_net_sim::test]
+				#[moq_clock::test]
 				async fn better_route_with_viewer() {
 					run(Trigger::BetterRoute, Holder::Viewer).await;
 				}
 
-				#[moq_net_sim::test]
+				#[moq_clock::test]
 				async fn better_route_parked() {
 					run(Trigger::BetterRoute, Holder::Parked).await;
 				}
 
-				#[moq_net_sim::test]
+				#[moq_clock::test]
 				async fn reconnect_with_viewer() {
 					run(Trigger::Reconnect, Holder::Viewer).await;
 				}
 
-				#[moq_net_sim::test]
+				#[moq_clock::test]
 				async fn reconnect_parked() {
 					run(Trigger::Reconnect, Holder::Parked).await;
 				}
 
-				#[moq_net_sim::test]
+				#[moq_clock::test]
 				async fn late_reader_after_route_change() {
-					moq_net_sim::timeout(TEST_TIMEOUT, late_reader($version, Before::RouteChange))
+					moq_clock::timeout(TEST_TIMEOUT, late_reader($version, Before::RouteChange))
 						.await
 						.expect("timed out");
 				}
 
-				#[moq_net_sim::test]
+				#[moq_clock::test]
 				async fn late_reader_after_resume() {
-					moq_net_sim::timeout(TEST_TIMEOUT, late_reader($version, Before::Resume))
+					moq_clock::timeout(TEST_TIMEOUT, late_reader($version, Before::Resume))
 						.await
 						.expect("timed out");
 				}
@@ -496,16 +496,16 @@ macro_rules! fetch_tests {
 			mod $name {
 				use super::*;
 
-				#[moq_net_sim::test]
+				#[moq_clock::test]
 				async fn fetch_right_after_leave() {
-					moq_net_sim::timeout(TEST_TIMEOUT, fetch_after_leave($version, Duration::ZERO))
+					moq_clock::timeout(TEST_TIMEOUT, fetch_after_leave($version, Duration::ZERO))
 						.await
 						.expect("timed out");
 				}
 
-				#[moq_net_sim::test]
+				#[moq_clock::test]
 				async fn fetch_after_leave_settles() {
-					moq_net_sim::timeout(TEST_TIMEOUT, fetch_after_leave($version, Duration::from_millis(500)))
+					moq_clock::timeout(TEST_TIMEOUT, fetch_after_leave($version, Duration::from_millis(500)))
 						.await
 						.expect("timed out");
 				}
