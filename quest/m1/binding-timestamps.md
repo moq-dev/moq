@@ -32,7 +32,8 @@ Decided with the maintainer on 2026-10-18:
   interim microsecond fields; this quest converts every site at once,
   `MoqJsonValue` included.
 - **Shape mirrors the core:** one `{value, scale}` per value, `value` at most
-  `2^62 - 1` and `scale` non-zero. The FFI boundary refuses anything else with
+  `2^62 - 1` and `scale` non-zero and at most `2^62 - 1`, matching
+  `Timestamp::new` and `Timescale::new`. The FFI boundary refuses anything else with
   an error. Rejected: raw ticks at the track scale beside
   `MoqTrackInfo.timescale`, because a producer argument needs its own scale
   and per-value records match the core and JS.
@@ -51,8 +52,8 @@ Decided with the maintainer on 2026-10-18:
   and `doc/bin/obs.md` update in the same PR.
 
 Verification: round-trip a 90 kHz tick, a present zero, and untimed through
-moq-ffi, moq-c, C++ and every wrapper's tests; refuse scale 0 and an
-out-of-range value; `just test interop --all`.
+moq-ffi, moq-c, C++ and every wrapper's tests; refuse scale 0, an
+out-of-range scale, and an out-of-range value; `just test interop --all`.
 
 ## Related
 
