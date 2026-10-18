@@ -1,5 +1,5 @@
 use std::{
-    collections::VecDeque,
+    collections::{BTreeMap, VecDeque},
     mem,
     ops::Range,
     sync::{Arc, OnceLock, Weak},
@@ -32,11 +32,13 @@ pub(super) struct SendBuffer {
     /// offset in `unacked`
     // TODO: Recover storage from these by compacting (#700)
     acks: RangeSet,
+    /// When each range in `acks` was acknowledged, keyed by its start; the first ACK of a start wins
+    ack_instants: BTreeMap<u64, Instant>,
     /// Previously transmitted ranges deemed lost
     retransmits: RangeSet,
     /// Checkpoints waiting for the acknowledged prefix to reach them
     watches: Watches,
-    /// When the ACK that last advanced the acknowledged prefix was received, less its ACK delay
+    /// When the acknowledged prefix became complete: the latest instant among its ranges
     acked_at: Option<Instant>,
 }
 
@@ -61,15 +63,24 @@ impl SendBuffer {
         let base_offset = self.offset - self.unacked_len as u64;
         range.start = base_offset.max(range.start);
         range.end = base_offset.max(range.end).min(self.offset);
-        if !range.is_empty() {
-            self.acks.insert(range);
-            self.advance(at);
+        if range.is_empty() {
+            // Nothing new, but a FIN-only ACK still reaches a checkpoint at the prefix
+            let at = self.acked_at.map_or(at, |acked_at| acked_at.max(at));
+            self.watches.ack(self.acked(), at);
+            return;
         }
-        self.watches.ack(self.acked(), at);
+        self.acks.insert(range.clone());
+        self.ack_instants.entry(range.start).or_insert(at);
+        self.advance();
     }
 
-    /// Discard the acknowledged ranges that extend the acknowledged prefix
-    fn advance(&mut self, at: Instant) {
+    /// Discard the acknowledged ranges that extend the acknowledged prefix, resolving the
+    /// checkpoints they reach
+    ///
+    /// The prefix up to an offset is complete only once every range below it is acknowledged,
+    /// so a checkpoint takes the latest instant among them, even when one ACK covers ranges
+    /// with different instants or a range waited behind a gap.
+    fn advance(&mut self) {
         while self.acks.min() == Some(self.offset - self.unacked_len as u64) {
             let prefix = self.acks.pop_min().unwrap();
             let mut to_advance = (prefix.end - prefix.start) as usize;
@@ -95,8 +106,21 @@ impl SendBuffer {
                     to_advance = 0;
                 }
             }
-            self.acked_at = Some(at);
         }
+
+        let acked = self.acked();
+        let held = self.ack_instants.split_off(&acked);
+        let mut at = self.acked_at;
+        for (start, instant) in mem::replace(&mut self.ack_instants, held) {
+            if let Some(at) = at {
+                self.watches.ack(start, at);
+            }
+            at = Some(at.map_or(instant, |at| at.max(instant)));
+        }
+        if let Some(at) = at {
+            self.watches.ack(acked, at);
+        }
+        self.acked_at = at;
     }
 
     /// The end of the contiguous acknowledged prefix
@@ -108,7 +132,7 @@ impl SendBuffer {
     pub(super) fn watch(&mut self) -> Arc<AckSlot> {
         let slot = Arc::new(AckSlot::new());
         match self.acked_at {
-            // The ACK that last advanced the prefix is the one that reached the end
+            // Everything written is already acknowledged
             Some(at) if self.acked() == self.offset => {
                 let _ = slot.set(Ok(at));
             }
@@ -253,6 +277,7 @@ impl SendBuffer {
         self.offset = end;
         self.unsent = self.unsent.min(end);
         self.acks.remove(end..u64::MAX);
+        self.ack_instants.split_off(&end);
         self.retransmits.remove(end..u64::MAX);
     }
 
@@ -623,6 +648,33 @@ mod tests {
 
         // Everything written is acknowledged, by the ACK that got there
         assert_eq!(buf.watch().get(), Some(&Ok(late)));
+    }
+
+    #[test]
+    fn watch_takes_the_latest_instant_below_it() {
+        let mut buf = SendBuffer::new();
+        buf.write(Bytes::from_static(b"Hello, "));
+        let first = buf.watch();
+        buf.write(Bytes::from_static(b"world!"));
+        let second = buf.watch();
+        assert_eq!(buf.poll_transmit(16), (0..8, true));
+        assert_eq!(buf.poll_transmit(16), (8..13, true));
+
+        // One ACK, in packet order: the held range came in a packet before the largest, so it
+        // keeps the receive time, while the largest fills the gap less its ACK delay
+        let early = Instant::now();
+        let late = early + Duration::from_millis(1);
+        buf.ack(8..13, late);
+        buf.ack(0..8, early);
+        assert_eq!(first.get(), Some(&Ok(early)));
+        assert_eq!(second.get(), Some(&Ok(late)));
+
+        // A later range acknowledged at an earlier instant can't complete the prefix before it
+        buf.write(Bytes::from_static(b"!"));
+        let third = buf.watch();
+        assert_eq!(buf.poll_transmit(16), (13..14, true));
+        buf.ack(13..14, early);
+        assert_eq!(third.get(), Some(&Ok(late)));
     }
 
     #[test]
