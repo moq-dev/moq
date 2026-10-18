@@ -324,11 +324,14 @@ impl SendBuffer {
 /// Checkpoints waiting for the acknowledged prefix to reach their offset, in offset order
 ///
 /// A dropped [`Checkpoint`](super::Checkpoint) leaves its entry behind until the prefix reaches
-/// it or the next checkpoint is taken behind it, so dead entries only outnumber the live ones by
-/// one. Dropping the stream fails the rest, so no waiter hangs on a stream that is gone.
+/// it, the next checkpoint is taken behind it, or the queue doubles past the live entries the
+/// last sweep kept, so it holds at most about twice the live checkpoints. Dropping the stream
+/// fails the rest, so no waiter hangs on a stream that is gone.
 #[derive(Default, Debug)]
 struct Watches {
     pending: VecDeque<(u64, Weak<AckSlot>)>,
+    /// The length at which `push` next sweeps out dead entries
+    sweep_at: usize,
     /// Whether a checkpoint somebody still holds resolved since the stream last reported it
     resolved: bool,
 }
@@ -344,6 +347,12 @@ impl Watches {
             .is_some_and(|(_, slot)| slot.strong_count() == 0)
         {
             self.pending.pop_back();
+        }
+        // A checkpoint replaced by the next one dies after it is pushed, behind a live entry
+        if self.pending.len() >= self.sweep_at {
+            self.pending.retain(|(_, slot)| slot.strong_count() > 0);
+            // Doubling keeps each sweep's cost covered by the pushes since the last one
+            self.sweep_at = 2 * self.pending.len() + 1;
         }
         self.pending.push_back((offset, Arc::downgrade(slot)));
     }
@@ -732,6 +741,27 @@ mod tests {
         buf.ack(0..5, Instant::now());
         assert!(held.get().is_some());
         assert!(buf.watches.pending.is_empty());
+    }
+
+    #[test]
+    fn replaced_watches_are_pruned() {
+        // `last = stream.checkpoint()` takes the new checkpoint before dropping the old one, so
+        // each dead entry sits behind a live one while nothing is acknowledged
+        let mut buf = SendBuffer::new();
+        let mut last = buf.watch();
+        for _ in 0..1000 {
+            buf.write(Bytes::from_static(b"x"));
+            last = buf.watch();
+        }
+        assert!(
+            buf.watches.pending.len() <= 3,
+            "{}",
+            buf.watches.pending.len()
+        );
+
+        assert_eq!(buf.poll_transmit(2000), (0..1000, true));
+        buf.ack(0..1000, Instant::now());
+        assert!(last.get().is_some());
     }
 
     #[test]
