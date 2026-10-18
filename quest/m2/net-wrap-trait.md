@@ -2,10 +2,11 @@
 
 ## Goal
 
-Decide how a wrapper (e2ee, flate, json, or a future one) sits between any
-moq-net writer or reader and the network without rewriting each writer per
-wrapper. Writers and readers include the moq-mux importers, json, flate, and
-applications.
+Decide how a wrapper (e2ee, json, or a future one) sits between any moq-net
+writer or reader and the network without rewriting each writer per wrapper.
+Writers and readers include the moq-mux importers, json, and applications.
+Compression is not a wrapper: it moves into moq-net as a track flag
+([Compressed tracks](/quest/m1/compress/README.md)).
 
 The outcome is a reviewed decision record plus a prototype benchmark, not a
 port. It ends by splitting the implementation into follow-up quests sized by
@@ -21,8 +22,8 @@ Decided 2026-10-17:
 
 - **Why now.** E2EE is the first wrapper. moq-mux importers write into a
   concrete `moq_net::broadcast::Producer` (about 108 `create_track` call
-  sites). flate and json take a concrete `track::Producer`, but each already
-  splits a codec layer (`Encoder`/`Decoder`) from track ownership.
+  sites). json takes a concrete `track::Producer`, but already splits a codec
+  layer (`Encoder`/`Decoder`) from track ownership.
 - **Interim design.** E2EE composes through a bridge: the
   `moq_e2ee::broadcast::{Producer, Consumer}` wrappers (#5876) wrap a concrete
   moq-net broadcast and see every track creation themselves. The e2ee mux path
@@ -47,14 +48,13 @@ Open, for the design:
   they have their own append and receive APIs and drop rules.
 - Generic or `dyn` in the frame write hot path. No `Send` bounds that native
   needs and wasm can't satisfy (see `rs/AGENTS.md`).
-- Group lifecycle hooks. flate's DEFLATE is group-scoped and stateful, and
-  e2ee's nonce binds the group and frame sequence, so a per-frame map is not
-  enough.
+- Group lifecycle hooks. e2ee's nonce binds the group and frame sequence, so
+  a per-frame map is not enough.
 - Terminal propagation. Finish, typed aborts (such as e2ee's authentication
   error), and handle teardown must cross the wrapper at the broadcast, track,
   and group levels, not collapse into `Error::Dropped` or keep a producer
   alive.
-- Whether flate and json become wrappers or stay codecs above a track.
+- Whether json becomes a wrapper or stays a codec above a track.
 - Demand and preference propagation. moq-mux and the browser publisher gate
   output on `track::Demand`, so a wrapper must not keep encoders active with
   no downstream viewer or drop downstream preference updates. Compare both
@@ -68,5 +68,5 @@ Open, for the design:
 ## Related
 
 - [E2EE](/quest/m2/e2ee/README.md) - the first wrapper; it ships on the bridge
-- [Compressed tracks](/quest/m2/flate.md) - flate's track modes, a candidate wrapper
+- [Compressed tracks](/quest/m1/compress/README.md) - compression moves into moq-net as a track flag, so it is not a wrapper
 - [Runtime trait](/quest/m2/runtime-trait.md) - a separate seam, out of scope here
