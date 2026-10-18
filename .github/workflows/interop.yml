@@ -20,7 +20,7 @@ on:
       - "test/interop/**"
       - "test/max-age/**"
       - "test/portrait/**"
-      - "rs/moq-tokio/tests/max_age.rs"
+      - "rs/moq-tokio/tests/integration/max_age.rs"
       # The interop job also depends on the recipe that invokes it and the
       # workspace membership that links the JS clients to source.
       - "test/justfile"

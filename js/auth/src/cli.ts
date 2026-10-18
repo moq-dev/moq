@@ -4,7 +4,7 @@ import { closeSync, fchmodSync, openSync, readFileSync, writeFileSync } from "no
 import * as base64 from "@hexagon/base64";
 import { Command, Option } from "commander";
 import type { Algorithm } from "./algorithm.ts";
-import { authorize, type Claims, type Scope, ScopeSchema } from "./claims.ts";
+import { authorize, ClaimsSchema, type Scope, ScopeSchema } from "./claims.ts";
 import { Key } from "./key.ts";
 import { encodeGrants } from "./wire.ts";
 
@@ -77,13 +77,13 @@ program
 			const keyEncoded = readFileSync(options.key, "utf-8");
 			const key = Key.parse(keyEncoded);
 
-			const claims: Claims = {
+			const claims = ClaimsSchema.parse({
 				root: options.root,
 				...(options.publish && { publish: options.publish }),
 				...(options.subscribe && { subscribe: options.subscribe }),
 				...(options.expires && { exp: options.expires }),
 				...(options.issued && { iat: options.issued }),
-			};
+			});
 
 			const token = await Key.sign(key, claims);
 			console.log(token);

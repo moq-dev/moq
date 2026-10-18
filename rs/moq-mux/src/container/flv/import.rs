@@ -735,6 +735,7 @@ fn config_from_avcc(avcc_bytes: &[u8]) -> anyhow::Result<VideoConfig> {
 	config.description = Some(Bytes::copy_from_slice(avcc_bytes));
 	config.coded_width = avcc.coded_width;
 	config.coded_height = avcc.coded_height;
+	config.color = avcc.sps.first().and_then(|sps| crate::codec::h264::sps_color(sps));
 	Ok(config)
 }
 

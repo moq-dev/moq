@@ -190,7 +190,7 @@ mod tests {
 
 	/// The follower's next event, which must arrive within the origin's update hold.
 	async fn followed(follow: &mut Follow) -> (&'static str, String) {
-		let event = moq_net_sim::timeout(Duration::from_secs(1), follow.next())
+		let event = moq_clock::timeout(Duration::from_secs(1), follow.next())
 			.await
 			.expect("no event")
 			.expect("the origin closed");
@@ -204,7 +204,7 @@ mod tests {
 
 	/// The follower stays quiet past the origin's update hold.
 	async fn quiet(follow: &mut Follow) {
-		if let Ok(event) = moq_net_sim::timeout(Duration::from_secs(1), follow.next()).await {
+		if let Ok(event) = moq_clock::timeout(Duration::from_secs(1), follow.next()).await {
 			panic!("expected nothing, got {event:?}");
 		}
 	}
@@ -213,7 +213,7 @@ mod tests {
 		Route::default().with_epoch(epoch.clone())
 	}
 
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn follow_reports_the_route_serving_the_path() {
 		let origin = Hop::new(1).unwrap().produce();
 		let mut follow = origin.consume().follow("pool/job").unwrap();
@@ -252,7 +252,7 @@ mod tests {
 
 	/// A follower that joins late starts on the route serving the path, not on whichever
 	/// covering route the replay happened to reach first.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn follow_starts_on_the_serving_route_when_joining_late() {
 		let origin = Hop::new(1).unwrap().produce();
 		let _pool = origin.dynamic("pool", Route::default()).unwrap();
@@ -265,7 +265,7 @@ mod tests {
 
 	/// A gap with nothing serving the path ends any request on it, so a covering route that
 	/// arrives after it is a start of its own, even under the same epoch.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn follow_keeps_a_gap_between_routes_of_one_epoch() {
 		let origin = Hop::new(1).unwrap().produce();
 		let epoch = Epoch::mint();
@@ -289,7 +289,7 @@ mod tests {
 
 	/// A prefix that started before the serving route's last change stood before the route's
 	/// end, so it takes over in place even when the cursor never ran dry in between.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn follow_hands_over_to_a_prefix_that_started_before_the_last_change() {
 		let origin = Hop::new(1).unwrap().produce();
 		let exact = origin.publish("pool/job", route(&Epoch::mint())).unwrap();
@@ -306,7 +306,7 @@ mod tests {
 	}
 
 	/// Without an epoch nothing says two routes serve the same bytes.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn follow_restarts_onto_a_more_specific_route_without_an_epoch() {
 		let origin = Hop::new(1).unwrap().produce();
 		let mut follow = origin.consume().follow("pool/job").unwrap();
@@ -320,7 +320,7 @@ mod tests {
 
 	/// A route whose claim covers only paths beneath the followed one never serves it, so it
 	/// cannot mask the route that does, even when it would win the prefix on cost.
-	#[moq_net_sim::test]
+	#[moq_clock::test]
 	async fn follow_ignores_a_route_scoped_beneath_the_path() {
 		let origin = Hop::new(1).unwrap().produce();
 		let chat = Patterns::from("room/*/chat".parse::<Pattern>().unwrap());
@@ -332,7 +332,7 @@ mod tests {
 		let mut follow = origin.consume().follow("room/alice").unwrap();
 
 		let first = origin.publish("room/alice", Route::default().with_cost(5)).unwrap();
-		let event = moq_net_sim::timeout(Duration::from_secs(1), follow.next())
+		let event = moq_clock::timeout(Duration::from_secs(1), follow.next())
 			.await
 			.unwrap()
 			.unwrap();
@@ -344,7 +344,7 @@ mod tests {
 		// A republish is another instance of the route that serves the path.
 		let _second = origin.publish("room/alice", Route::default().with_cost(5)).unwrap();
 		drop(first);
-		let event = moq_net_sim::timeout(Duration::from_secs(1), follow.next())
+		let event = moq_clock::timeout(Duration::from_secs(1), follow.next())
 			.await
 			.unwrap()
 			.unwrap();

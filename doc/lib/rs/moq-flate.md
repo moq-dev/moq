@@ -39,8 +39,8 @@ set that budget when following a playhead behind live. Use `latest()` to skip
 to the newest buffered state. Skipped states are gone, and a later `next()`
 continues after them.
 
-When upgrading, replace `Timed<P, T>` with `Timed<P>` and pass capture times
-explicitly instead of relying on a write-time default.
+Upgrading from an older release: see moq-flate's
+[MIGRATE.md](https://github.com/moq-dev/moq/blob/main/rs/moq-flate/MIGRATE.md).
 
 A stream rides one group, so the whole log shares moq-net's group budget:
 32 MiB of payload and 8192 payloads. An `append` that might not fit returns

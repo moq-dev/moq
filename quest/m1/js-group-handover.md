@@ -76,4 +76,3 @@ subscriptions across a swap. Report it in the PR.
 
 - [Retired requests](https://github.com/moq-dev/moq/pull/5294) - old handles cannot open unpinned requests after an identity change
 - [SUBSCRIBE_DROP](/quest/m1/subscribe-drop.md) - a terminal group disposition stops recovery even for the newest group
-- [FETCH max-delay](/quest/m1/fetch-max-delay.md) - recovery fetches retain the reader's budget

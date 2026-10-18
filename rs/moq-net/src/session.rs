@@ -50,11 +50,6 @@ pub struct Stats {
 	/// Estimated send bandwidth from the congestion controller.
 	pub estimated_send_rate: Option<bandwidth::Rate>,
 
-	/// Estimated receive bandwidth from MoQ PROBE.
-	///
-	/// `None` unless the negotiated version supports PROBE (moq-lite-03+).
-	pub estimated_recv_rate: Option<bandwidth::Rate>,
-
 	/// Total bytes sent over the connection, including retransmissions and overhead.
 	pub bytes_sent: Option<u64>,
 
@@ -125,7 +120,7 @@ pub struct Session {
 	version: Version,
 	// Weak, so the sampler runs only while a caller holds a consumer.
 	send_bandwidth: Option<bandwidth::Weak>,
-	recv_bandwidth: Option<bandwidth::Consumer>,
+	recv_bandwidth: Option<bandwidth::Weak>,
 	goaway: Arc<goaway::Handle>,
 	auth: auth::Handle,
 }
@@ -145,9 +140,10 @@ impl Session {
 
 	/// Returns a consumer for the estimated receive bitrate (from PROBE).
 	///
+	/// Holding the consumer requests PROBE; dropping the last one stops it.
 	/// Returns `None` if the MoQ version doesn't support PROBE (requires moq-lite-03+).
 	pub fn recv_bandwidth(&self) -> Option<bandwidth::Consumer> {
-		self.recv_bandwidth.clone()
+		self.recv_bandwidth.as_ref().map(bandwidth::Weak::consume)
 	}
 
 	/// Returns a snapshot of the current connection statistics.
@@ -157,17 +153,13 @@ impl Session {
 	/// fresh counters (100ms cadence). See [`Stats`] for which
 	/// metrics each backend reports.
 	pub fn stats(&self) -> Stats {
-		let mut stats = {
-			let mut state = self.stats.lock();
-			// A read is demand: wake the sampler, but only mutate (and so wake)
-			// when the flag actually flips.
-			if !state.demanded {
-				state.demanded = true;
-			}
-			state.sample
-		};
-		stats.estimated_recv_rate = self.recv_bandwidth.as_ref().and_then(bandwidth::Consumer::peek);
-		stats
+		let mut state = self.stats.lock();
+		// A read is demand: wake the sampler, but only mutate (and so wake)
+		// when the flag actually flips.
+		if !state.demanded {
+			state.demanded = true;
+		}
+		state.sample
 	}
 
 	/// Close the transport with an explicit error, instead of waiting for the last
@@ -226,10 +218,11 @@ impl Session {
 	///
 	/// A close code the peer sent is decoded through the session registry (so an auth
 	/// rejection arrives as `Error::Session(SessionError::Unauthorized)`); every peer code is
-	/// preserved as [`Error::Session`], and a close carrying no application code surfaces as
-	/// [`Error::Transport`]. See [`Error::from_transport`]. If the runtime drops
-	/// the driver instead of running it to completion, this resolves with
-	/// [`Error::Cancel`].
+	/// preserved as [`Error::Session`]. A close carrying no application code surfaces as
+	/// [`Error::IdleTimeout`] for an idle timeout, `Error::Session(SessionError::Cancel)`
+	/// for a local close, and [`Error::Transport`] otherwise. See [`Error::from_transport`].
+	/// If the runtime drops the driver instead of running it to completion, this resolves
+	/// with [`Error::Cancel`].
 	pub async fn closed(&self) -> Error {
 		match self
 			.closed
@@ -288,6 +281,7 @@ impl Session {
 
 /// The handles a protocol driver shares with its [`Session`].
 pub(super) struct Handles {
+	pub stats: crate::stats::Session,
 	pub goaway: goaway::Handle,
 	pub auth: auth::Handle,
 	/// Where the driver publishes [`Estimate`] changes, for a protocol that reports
@@ -297,17 +291,23 @@ pub(super) struct Handles {
 
 impl Session {
 	pub(super) fn new<S>(
-		runtime: crate::time::Clock,
+		runtime: crate::time::Deadlines,
 		session: S,
 		version: Version,
-		recv_bandwidth: Option<bandwidth::Consumer>,
+		recv_bandwidth: Option<bandwidth::Weak>,
 		protocol: crate::driver::Protocol<S>,
 		handles: Handles,
 	) -> (Self, crate::Driver<S>)
 	where
 		S: crate::transport::poll::Session,
 	{
-		let Handles { goaway, auth, estimate } = handles;
+		let Handles {
+			goaway,
+			auth,
+			estimate,
+			stats: context,
+		} = handles;
+		let wire = session.wire().map(|counters| context.wire(counters));
 		let sample = snapshot(&session);
 		if let Some(estimate) = &estimate
 			&& let Ok(mut current) = estimate.write()
@@ -340,6 +340,7 @@ impl Session {
 			close: Some(close.consume()),
 			closed,
 			stats: stats.clone(),
+			wire,
 			send_bandwidth: send_producer,
 			estimate,
 			sampled: None,
@@ -379,7 +380,7 @@ impl Session {
 pub(crate) struct Supervisor<S> {
 	version: Version,
 	local_close: Arc<std::sync::atomic::AtomicBool>,
-	runtime: crate::time::Clock,
+	runtime: crate::time::Deadlines,
 	session: S,
 	// A dedicated clone for the close watch, since each pending poll operation
 	// needs its own handle.
@@ -400,6 +401,8 @@ pub(crate) struct Supervisor<S> {
 	sampled: Option<crate::time::Instant>,
 	mode: SamplerMode,
 	drain: Drain,
+	/// The transport's wire counters, registered under the session's root; dropping records the last reading.
+	wire: Option<crate::stats::Wire>,
 }
 
 /// A [`Session::close`] waiting for the protocol to deliver what it queued.
@@ -435,6 +438,7 @@ impl<S: crate::transport::poll::Session> Supervisor<S> {
 			// this cell, so leave it holding the session's final counters
 			// rather than whichever sample the last demand happened to catch.
 			self.stats.lock().sample = snapshot(&self.session);
+			self.wire.take();
 			let drain = match std::mem::replace(&mut self.drain, Drain::Idle) {
 				Drain::Done(res) => Some(res),
 				_ => None,
@@ -634,9 +638,6 @@ impl<S: crate::transport::poll::Session> Supervisor<S> {
 }
 
 /// A [`Stats`] snapshot of the transport's counters.
-///
-/// `estimated_recv_rate` is filled in at the [`Session`] level (it comes from
-/// MoQ PROBE, not the transport), so it stays `None` here.
 fn snapshot<S: crate::transport::poll::Session>(session: &S) -> Stats {
 	let stats = session.stats();
 	Stats {

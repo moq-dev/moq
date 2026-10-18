@@ -5,7 +5,7 @@
 The maintainer decides whether the import-side
 `MoqMediaContainerStreamProducer` (`media.ContainerStreamProducer` in the
 wrappers) is named by role, and any rename lands before the binding release
-that [Codecs](/quest/m1/ffi-shape/codec.md) gates, so the bindings break once.
+that the codec namespace reshape gates, so the bindings break once.
 
 ## Plan
 
@@ -17,5 +17,5 @@ had owned this review.
 
 Ask with 2-3 candidate names and a recommendation. A rename touches moq-ffi,
 every wrapper, `cpp/moq`'s alias list, the `doc/lib` samples, and the
-Unreleased section of `doc/setup/upgrade.md`; keeping the name deletes this
+`## Unreleased` of each affected `MIGRATE.md`; keeping the name deletes this
 quest.

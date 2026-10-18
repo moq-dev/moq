@@ -139,7 +139,8 @@ impl Publisher {
 				import.finish().map_err(moq_mux::Error::from)?;
 				broadcast.close();
 			}
-			Importer::All(programs) => programs.finish().map_err(moq_mux::Error::from)?,
+			// Dropping the handles closes every program now, as `close` does for one.
+			Importer::All(programs) => drop(programs.finish().map_err(moq_mux::Error::from)?),
 		}
 		// The drain at end of input can publish a frame nothing vouched for.
 		self.span.in_scope(|| self.log.finish(&self.stats()));
@@ -658,7 +659,13 @@ mod tests {
 		let expected_cue = cue.payload;
 		assert_eq!(expected_cue[0], 0xFC, "a verbatim splice_info_section (table_id 0xFC)");
 
-		let mut subscriber = Subscriber::new(&origin.consume(), "ingest", Options::default())
+		// The egress joins the clip's last group, read at once and two seconds long. Under the
+		// default delay its keyframe is stale, and the egress waits on the next one.
+		let options = Options {
+			latency: Duration::from_secs(3),
+			..Default::default()
+		};
+		let mut subscriber = Subscriber::new(&origin.consume(), "ingest", options)
 			.await
 			.unwrap()
 			.expect("the ingest broadcast is available for SRT egress");

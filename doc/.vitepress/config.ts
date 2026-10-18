@@ -205,6 +205,7 @@ export default defineConfig({
 						{ text: "Dart", link: "/lib/dart/" },
 						{ text: "C++", link: "/lib/cpp/" },
 						{ text: "C", link: "/lib/c/" },
+						{ text: "Layers", link: "/lib/layers" },
 					],
 				},
 			],

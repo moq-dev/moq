@@ -29,7 +29,7 @@
 //! elements/s across a sweep means the cost per track stays constant.
 //!
 //! `session_idle` times one second of idle viewer sessions, swept over sessions.
-//! Lite viewers hold PROBE open; IETF sessions demand their local transport estimate.
+//! Sweep held consumers per session too: only held consumers request PROBE or transport estimates.
 //! Nothing else happens, so it measures the sessions' own work. Paused time skips waiting.
 //!
 //! `session_churn_*` times one request opened and closed by a session that already
@@ -42,7 +42,10 @@
 //!
 //! Run with `cargo bench -p moq-net --bench session`.
 
-#[path = "../tests/support/mod.rs"]
+// Custom timings measure the real time the work took, not the ambient clock.
+#![allow(clippy::disallowed_methods)]
+
+#[path = "../tests/integration/support/mod.rs"]
 mod support;
 
 use std::alloc::{GlobalAlloc, Layout, System};
@@ -1012,11 +1015,11 @@ fn churn(c: &mut Criterion, name: &str, shapes: impl IntoIterator<Item = Churn>)
 
 /// Idle sessions to one relay, holding PROBE or their local transport estimate.
 struct IdleRoom {
-	_viewers: Vec<(MockPair, moq_net::bandwidth::Consumer)>,
+	_viewers: Vec<(MockPair, Vec<moq_net::bandwidth::Consumer>)>,
 }
 
 impl IdleRoom {
-	async fn new(version: &str, sessions: usize) -> Self {
+	async fn new(version: &str, sessions: usize, consumers: usize) -> Self {
 		let (relay, driver) = origin::Producer::new(origin::Config::new(Hop::new(1).unwrap()));
 		support::harness::spawn(driver);
 		let mut viewers = Vec::new();
@@ -1029,13 +1032,17 @@ impl IdleRoom {
 				rtt: Some(Duration::from_millis(40)),
 			};
 			let pair = connect_mock(options).await;
-			let mut probe = if version.parse::<Version>().unwrap().is_lite() {
-				pair.client.recv_bandwidth().unwrap()
-			} else {
-				pair.server.send_bandwidth().unwrap()
-			};
-			probe.changed().await.unwrap();
-			viewers.push((pair, probe));
+			let mut probes = Vec::new();
+			for _ in 0..consumers {
+				let mut probe = if version.parse::<Version>().unwrap().is_lite() {
+					pair.client.recv_bandwidth().unwrap()
+				} else {
+					pair.server.send_bandwidth().unwrap()
+				};
+				probe.changed().await.unwrap();
+				probes.push(probe);
+			}
+			viewers.push((pair, probes));
 		}
 		Self { _viewers: viewers }
 	}
@@ -1044,7 +1051,7 @@ impl IdleRoom {
 	async fn measure(&self, iters: u64) -> Duration {
 		let start = Instant::now();
 		for _ in 0..iters {
-			tokio::time::sleep(Duration::from_secs(1)).await;
+			moq_clock::sleep(Duration::from_secs(1)).await;
 		}
 		start.elapsed()
 	}
@@ -1054,19 +1061,21 @@ fn idle(c: &mut Criterion) {
 	let mut group = c.benchmark_group("session_idle");
 	for version in ["moq-lite-06", "moq-transport-16", "moq-transport-22"] {
 		for sessions in [1, 64, 1024] {
-			group.throughput(Throughput::Elements(sessions as u64));
-			// Its own runtime, so its paused clock and sessions end with the shape.
-			let rt = runtime();
-			let mut room = None;
-			group.bench_function(format!("{version}/sessions={sessions}"), |b| {
-				let room = room.get_or_insert_with(|| {
-					rt.block_on(async {
-						tokio::time::pause();
-						IdleRoom::new(version, sessions).await
-					})
+			for consumers in [0, 1, 8] {
+				group.throughput(Throughput::Elements(sessions as u64));
+				// Its own runtime, so its paused clock and sessions end with the shape.
+				let rt = runtime();
+				let mut room = None;
+				group.bench_function(format!("{version}/sessions={sessions}/consumers={consumers}"), |b| {
+					let room = room.get_or_insert_with(|| {
+						rt.block_on(async {
+							tokio::time::pause();
+							IdleRoom::new(version, sessions, consumers).await
+						})
+					});
+					b.iter_custom(|iters| rt.block_on(room.measure(iters)))
 				});
-				b.iter_custom(|iters| rt.block_on(room.measure(iters)))
-			});
+			}
 		}
 	}
 	group.finish();
@@ -1101,7 +1110,7 @@ fn withdrawal(c: &mut Criterion) {
 										.unwrap()
 								})
 								.collect();
-							while tokio::time::timeout(Duration::from_secs(1), announced.next())
+							while moq_clock::timeout(Duration::from_secs(1), announced.next())
 								.await
 								.is_ok()
 							{}
@@ -1109,7 +1118,7 @@ fn withdrawal(c: &mut Criterion) {
 							drop(live);
 							let mut retracted = 0;
 							while let Ok(Some(event)) =
-								tokio::time::timeout(Duration::from_secs(1), announced.next()).await
+								moq_clock::timeout(Duration::from_secs(1), announced.next()).await
 							{
 								assert!(matches!(event, moq_net::announce::Event::End(_)), "{event:?}");
 								retracted += 1;

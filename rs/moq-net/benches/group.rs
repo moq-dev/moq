@@ -8,9 +8,16 @@
 //! cached group, swept over cache depth so a per-delivery scan shows up as a slope.
 //! It also covers the steady-state path after a subscriber has reached the edge.
 //!
+//! `track_stamp_groups` covers stamping a group's first frame, which checks it
+//! against its neighbors' starts, swept over cache depth so a scan shows as a slope:
+//! `append` among stamped groups, `sparse` among groups created but not yet stamped.
+//!
 //! Run with `cargo bench -p moq-net`.
 
-use std::{hint::black_box, time::Duration};
+use std::{
+	hint::black_box,
+	time::{Duration, Instant},
+};
 
 use bytes::Bytes;
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
@@ -216,7 +223,7 @@ fn filled_track(n: usize, payload: &Bytes) -> TrackCtx {
 fn replay() -> track::Subscription {
 	track::Subscription::default()
 		.with_max_delay(Duration::MAX)
-		.with_start(track::Position::group(0))
+		.with_groups(0..)
 }
 
 /// Drain N cached groups from a track, in arrival order and in sequence order.
@@ -354,12 +361,65 @@ fn bench_relay_frames(c: &mut Criterion) {
 	let _ = c;
 }
 
+/// Append and stamp groups on a track already holding N cached groups.
+///
+/// A group's first frame is checked against the nearest stamped starts on either side,
+/// once per group. Each fresh track takes at most N more groups, so the cache stays
+/// within 2N for the whole measurement.
+fn bench_stamp(c: &mut Criterion) {
+	let payload = Bytes::from(vec![0u8; PAYLOAD]);
+	let mut g = c.benchmark_group("track_stamp_groups");
+	for &n in &DEPTHS {
+		g.bench_with_input(BenchmarkId::new("append", n), &n, |b, &n| {
+			b.iter_custom(|iters| {
+				let mut total = Duration::ZERO;
+				let mut left = iters;
+				while left > 0 {
+					let ctx = filled_track(n, &payload);
+					let batch = left.min(n as u64);
+					let start = Instant::now();
+					for _ in 0..batch {
+						let mut group = ctx.track.append_group().unwrap();
+						group.write_frame(Timestamp::ZERO, payload.clone()).unwrap();
+						group.finish().unwrap();
+					}
+					total += start.elapsed();
+					left -= batch;
+				}
+				total
+			});
+		});
+		// N groups created before any is stamped, then stamped in order: each one's upper
+		// neighbor is a run of unstamped groups, which a slot scan walks.
+		g.bench_with_input(BenchmarkId::new("sparse", n), &n, |b, &n| {
+			b.iter_custom(|iters| {
+				let mut total = Duration::ZERO;
+				let mut left = iters;
+				while left > 0 {
+					let ctx = filled_track(0, &payload);
+					let mut groups: Vec<_> = (0..n).map(|_| ctx.track.append_group().unwrap()).collect();
+					let batch = left.min(n as u64);
+					let start = Instant::now();
+					for group in groups.iter_mut().take(batch as usize) {
+						group.write_frame(Timestamp::ZERO, payload.clone()).unwrap();
+					}
+					total += start.elapsed();
+					left -= batch;
+				}
+				total
+			});
+		});
+	}
+	g.finish();
+}
+
 criterion_group!(
 	benches,
 	bench_write,
 	bench_read,
 	bench_roundtrip,
 	bench_track_recv,
+	bench_stamp,
 	bench_relay_frames
 );
 criterion_main!(benches);

@@ -1,13 +1,10 @@
 # A consumer of the installed package: `just cpp check` installs cpp/moq to a prefix, then
-# builds this with find_package(moq-cpp) at C++17 and C++23, the standard given as
-# -DCMAKE_CXX_STANDARD or as -DPROBE_CXX_STANDARD, which sets it in the project and also
-# requires it on the app's own target, the way a consumer following doc/lib/cpp would.
+# builds this with find_package(moq-cpp) at the -DCMAKE_CXX_STANDARD it is given.
+# -DPROBE_CXX_STANDARD raises only the probe's own target, leaving the bindings, which
+# compile in this project, at CMAKE_CXX_STANDARD.
 cmake_minimum_required(VERSION 3.21)
 project(moq-probe LANGUAGES CXX)
 
-if(PROBE_CXX_STANDARD)
-    set(CMAKE_CXX_STANDARD ${PROBE_CXX_STANDARD})
-endif()
 if(NOT CMAKE_CXX_STANDARD)
     set(CMAKE_CXX_STANDARD 17)
 endif()

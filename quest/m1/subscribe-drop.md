@@ -19,10 +19,9 @@ loop. Once a track ends, the Rust
 publisher on lite-05 and lite-06 names every sequence from its
 SUBSCRIBE_START to the end that the subscription never got (skipped,
 stale, or missing its head), just before its FIN. Still missing: groups
-reset before their header. JS publishers and drops sent as soon as a group is
-given up belong to [Early drops](/quest/m1/subscribe-drop-early.md), which
-also stops the end-of-track drops missing a gap the publisher aged out of its
-grace. lite-07 (still `moq-lite-07-wip`,
+reset before their header. Rust and JS publishers now send drops as soon as a
+group is given up, including gaps the publisher aged out of its grace.
+lite-07 (still `moq-lite-07-wip`,
 unpublished) removed SUBSCRIBE_DROP for a `Stream Count` on SUBSCRIBE_END
 (#4224).
 
@@ -31,7 +30,7 @@ Decided:
 - lite-07 restores SUBSCRIBE_DROP and removes `Stream Count`. With every
   sequence accounted for, the count is redundant; one mechanism instead of two.
   A reset whose header may be lost is covered by a DROP.
-- A reliable reset ([Reliable stream reset](/quest/m1/quic/reliable-reset.md))
+- A reliable reset ([A reset group keeps its header](/quest/m1/quic/group-reset.md))
   that keeps the stream header acts as a one-group drop, an optimization over
   sending the DROP.
 - Publishers send SUBSCRIBE_DROP on lite-05 and lite-06 too: for every group
@@ -96,12 +95,6 @@ publisher skipped or never opened ends the track without waiting out the
 grace. Decided in the 2026-09-30 audit: the case moved here so the basic
 tail interop could land first.
 
-## Required
-
-- [Early drops](/quest/m1/subscribe-drop-early.md) - Rust and JS publishers drop a sequence the moment they give it up, and forward an upstream drop
-
 ## Related
 
-- [Tail arrivals](/quest/m1/tail-arrivals.md) - per-track live dispositions survive cache eviction
 - [Resume reorder](/quest/m1/resume-reorder.md) - late stream headers are not proof that a group was dropped
-- [FETCH max-delay](/quest/m1/fetch-max-delay.md) - age expiry and DROP independently settle pending recovery

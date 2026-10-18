@@ -255,7 +255,7 @@ impl Session {
 		} else {
 			let (send, recv) = self.conn.accept_bi().await.map_err(|e| self.map_error(e))?;
 			Ok((
-				SendStream::new(send, self.close.clone()),
+				SendStream::new(send, self.close.clone(), None),
 				RecvStream::new(recv, self.close.clone()),
 			))
 		}
@@ -269,14 +269,15 @@ impl Session {
 		// Otherwise the application could write data with lower priority than the header, resulting
 		// in queuing. Also the header is very important for determining the session ID
 		// without reliable reset.
-		send.set_priority(i32::MAX).ok();
+		send.set_priority(i64::MAX).ok();
 		Self::write_full(&mut send, &self.header_uni)
 			.await
 			.map_err(|e| self.map_error(e))?;
 
 		// Reset the stream priority back to the default of 0.
 		send.set_priority(0).ok();
-		Ok(SendStream::new(send, self.close.clone()))
+		let header = send.checkpoint();
+		Ok(SendStream::new(send, self.close.clone(), Some(header)))
 	}
 
 	/// Open a new bidirectional stream. See [`crate::quic::driver::Connection::open_bi`].
@@ -287,15 +288,16 @@ impl Session {
 		// Otherwise the application could write data with lower priority than the header, resulting
 		// in queuing. Also the header is very important for determining the session ID
 		// without reliable reset.
-		send.set_priority(i32::MAX).ok();
+		send.set_priority(i64::MAX).ok();
 		Self::write_full(&mut send, &self.header_bi)
 			.await
 			.map_err(|e| self.map_error(e))?;
 
 		// Reset the stream priority back to the default of 0.
 		send.set_priority(0).ok();
+		let header = send.checkpoint();
 		Ok((
-			SendStream::new(send, self.close.clone()),
+			SendStream::new(send, self.close.clone(), Some(header)),
 			RecvStream::new(recv, self.close.clone()),
 		))
 	}
@@ -324,11 +326,18 @@ impl Session {
 		Ok(datagram)
 	}
 
-	/// Sends an application datagram to the remote peer.
+	/// Sends an application datagram to the remote peer in `group` at `order`.
 	///
 	/// Datagrams are unreliable and may be dropped or delivered out of order.
 	/// The data must be smaller than [`max_datagram_size`](Self::max_datagram_size).
-	pub fn send_datagram(&self, data: Bytes) -> Result<(), SessionError> {
+	/// See [`Connection::send_datagram`](crate::quic::driver::Connection::send_datagram) for how
+	/// `group` and `order` schedule it.
+	pub fn send_datagram(
+		&self,
+		data: Bytes,
+		group: Option<&crate::quic::driver::SendGroup>,
+		order: i64,
+	) -> Result<(), SessionError> {
 		let result = if !self.header_datagram.is_empty() {
 			// Unfortunately, we need to allocate/copy each datagram because of the driver API.
 			// Pls go +1 if you care: https://github.com/quinn-rs/quinn/issues/1724
@@ -338,36 +347,21 @@ impl Session {
 			buf.extend_from_slice(&self.header_datagram);
 			buf.extend_from_slice(&data);
 
-			self.conn.send_datagram(buf.into())
+			self.conn.send_datagram(buf.into(), group, order)
 		} else {
-			self.conn.send_datagram(data)
+			self.conn.send_datagram(data, group, order)
 		};
 
 		result.map_err(|e| self.map_error(e))?;
 		Ok(())
 	}
 
-	/// Sends an application datagram to the remote peer, waiting for buffer space if needed.
+	/// Open a send group at `priority`, for streams to join with [`SendStream::set_group`].
 	///
-	/// Datagrams are unreliable and may be dropped or delivered out of order.
-	/// The data must be smaller than [`max_datagram_size`](Self::max_datagram_size).
-	pub async fn send_datagram_wait(&self, data: Bytes) -> Result<(), SessionError> {
-		let result = if !self.header_datagram.is_empty() {
-			// Unfortunately, we need to allocate/copy each datagram because of the driver API.
-			// Pls go +1 if you care: https://github.com/quinn-rs/quinn/issues/1724
-			let mut buf = BytesMut::with_capacity(self.header_datagram.len() + data.len());
-
-			// Prepend the datagram with the header indicating the session ID.
-			buf.extend_from_slice(&self.header_datagram);
-			buf.extend_from_slice(&data);
-
-			self.conn.send_datagram_wait(buf.into()).await
-		} else {
-			self.conn.send_datagram_wait(data).await
-		};
-
-		result.map_err(|e| self.map_error(e))?;
-		Ok(())
+	/// See [`crate::quic::driver::SendGroup`]. The HTTP/3 streams stay outside every group,
+	/// so they go first.
+	pub fn send_group(&self, priority: i64) -> crate::quic::driver::SendGroup {
+		self.conn.send_group(priority)
 	}
 
 	/// Computes the maximum size of datagrams that may be passed to
@@ -887,7 +881,8 @@ impl SessionAccept {
 
 			if let Some((send, recv)) = res {
 				// Wrap the streams in our own types for correct error codes.
-				let send = SendStream::new(send, self.close.clone());
+				// The peer opened it, so this half carries no header.
+				let send = SendStream::new(send, self.close.clone(), None);
 				let recv = RecvStream::new(recv, self.close.clone());
 				return Poll::Ready(Ok((send, recv)));
 			}
@@ -1012,7 +1007,7 @@ impl web_transport_trait::Session for Session {
 	}
 
 	fn send_datagram(&self, data: Bytes) -> Result<(), Self::Error> {
-		Self::send_datagram(self, data)
+		Self::send_datagram(self, data, None, 0)
 	}
 
 	async fn recv_datagram(&self) -> Result<Bytes, Self::Error> {
@@ -1292,6 +1287,35 @@ mod tests {
 		let (send, recv) = server.accept_bi().await.unwrap();
 		let err = SessionAccept::decode_bi(send, recv, SESSION).await.err().unwrap();
 		assert_reset(err);
+	}
+
+	/// A stream reset before any payload still delivers its header, so the peer attributes the
+	/// reset to the session instead of dropping a stream it cannot place.
+	#[tokio::test]
+	async fn reset_delivers_header() {
+		let (client_conn, server_conn, _endpoints) = pair().await;
+		let (client, server) = tokio::join!(
+			Session::connect(client_conn, url::Url::parse("https://localhost/").unwrap()),
+			async { crate::quic::web::Request::accept(server_conn).await.unwrap().ok().await },
+		);
+		let (client, server) = (client.unwrap(), server.unwrap());
+
+		client.open_uni().await.unwrap().reset(7).unwrap();
+		let (mut send, _recv) = client.open_bi().await.unwrap();
+		send.reset(8).unwrap();
+
+		let read = async {
+			let mut uni = server.accept_uni().await.unwrap();
+			let (_send, mut bi) = server.accept_bi().await.unwrap();
+			(
+				uni.read_chunk(usize::MAX).await.unwrap_err(),
+				bi.read_chunk(usize::MAX).await.unwrap_err(),
+			)
+		};
+		// Without the header the server never surfaces the streams, so bound the wait.
+		let (uni, bi) = tokio::time::timeout(Duration::from_secs(10), read).await.unwrap();
+		assert!(matches!(uni, crate::quic::web::ReadError::Reset(7)), "{uni:?}");
+		assert!(matches!(bi, crate::quic::web::ReadError::Reset(8)), "{bi:?}");
 	}
 
 	/// A stream that names another session is still reported as `UnknownSession`.

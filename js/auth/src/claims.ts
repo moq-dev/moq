@@ -4,40 +4,21 @@
  * @module
  */
 
-import { Pattern, Patterns } from "@moq/pattern";
+import { Patterns } from "@moq/pattern";
 import * as z from "@zod/mini";
+import { Access, AccessSchema, normalizeAccess, patterns, ScopeAccessSchema } from "./access.ts";
 import * as Path from "./path.ts";
 import { decodeGrants } from "./wire.ts";
 
-/** A list of pattern texts, each validated by `Pattern.parse`. */
-export const PatternListSchema = z.array(
-	z.string().check(
-		z.refine(
-			(text) => {
-				try {
-					Pattern.parse(text);
-					return true;
-				} catch {
-					return false;
-				}
-			},
-			{ message: "invalid path pattern" },
-		),
-	),
-);
-
-/** Parse a list of pattern texts into a reduced union. */
-export function patterns(texts: readonly string[] | undefined): Patterns {
-	return new Patterns((texts ?? []).map((text) => Pattern.parse(text)));
-}
+export { PatternListSchema, patterns } from "./access.ts";
 
 const ScopeFields = {
 	/** The root that `publish` and `subscribe` are relative to. Defaults to the empty string. */
 	root: z._default(z.string(), ""),
 	/** Patterns this key may grant to publishers, relative to `root`. */
-	publish: z.optional(PatternListSchema),
+	publish: z.optional(ScopeAccessSchema),
 	/** Patterns this key may grant to subscribers, relative to `root`. */
-	subscribe: z.optional(PatternListSchema),
+	subscribe: z.optional(ScopeAccessSchema),
 };
 
 /**
@@ -54,7 +35,14 @@ export const ScopeSchema = z
 			put: z.optional(z.array(z.string())),
 			get: z.optional(z.array(z.string())),
 		}),
-		z.transform(decodeGrants),
+		z.transform((wire, ctx) => {
+			const { publish, subscribe, ...grants } = decodeGrants(wire, ctx);
+			return {
+				...grants,
+				...(publish !== undefined && { publish: normalizeAccess(publish).path.toJSON() }),
+				...(subscribe !== undefined && { subscribe: normalizeAccess(subscribe).path.toJSON() }),
+			};
+		}),
 	)
 	.check(
 		z.refine((data) => (data.publish?.length ?? 0) > 0 || (data.subscribe?.length ?? 0) > 0, {
@@ -66,6 +54,8 @@ export type Scope = z.output<typeof ScopeSchema>;
 
 const ClaimsFields = {
 	...ScopeFields,
+	publish: z.optional(AccessSchema),
+	subscribe: z.optional(AccessSchema),
 	/** Expiration time, as a whole unix timestamp in seconds. */
 	exp: z.optional(z.int()),
 	/** Issued-at time, as a whole unix timestamp in seconds. */
@@ -104,13 +94,20 @@ export const ClaimsSchema = z
 			put: z.optional(PrefixListSchema),
 			get: z.optional(PrefixListSchema),
 		}),
-		z.transform(({ iss: _iss, sub: _sub, jti: _jti, ...claims }, ctx) => decodeGrants(claims, ctx)),
+		z.transform(({ iss: _iss, sub: _sub, jti: _jti, ...claims }, ctx) => {
+			const { publish, subscribe, ...grants } = decodeGrants(claims, ctx);
+			return {
+				...grants,
+				...(publish !== undefined && { publish: normalizeAccess(publish) }),
+				...(subscribe !== undefined && { subscribe: normalizeAccess(subscribe) }),
+			};
+		}),
 	)
 	.check(
 		// Emptiness, not just presence: `publish: []` grants nothing, and the Rust crate
 		// rejects such a token as useless. Checking `!== undefined` here would mint
 		// tokens that Rust then refuses to verify.
-		z.refine((data) => (data.publish?.length ?? 0) > 0 || (data.subscribe?.length ?? 0) > 0, {
+		z.refine((data) => (data.publish?.path.size ?? 0) > 0 || (data.subscribe?.path.size ?? 0) > 0, {
 			message: "Either publish or subscribe must grant at least one pattern",
 		}),
 	);
@@ -128,10 +125,10 @@ export type Claims = z.output<typeof ClaimsSchema>;
  * it; the empty pattern grants exactly the path.
  */
 export interface Permissions {
-	/** Patterns the holder may subscribe to, relative to the authorized path. */
-	subscribe: Patterns;
-	/** Patterns the holder may publish to, relative to the authorized path. */
-	publish: Patterns;
+	/** Subscribe paths and an optional download cap, relative to the authorized path. */
+	subscribe: Access;
+	/** Publish paths and an optional upload cap, relative to the authorized path. */
+	publish: Access;
 }
 
 /**
@@ -177,10 +174,10 @@ export function authorize(claims: Claims, path: string): Permissions {
 	}
 
 	const permissions: Permissions = {
-		subscribe: scope(patterns(claims.subscribe)),
-		publish: scope(patterns(claims.publish)),
+		subscribe: new Access({ path: scope(claims.subscribe?.path ?? new Patterns()), rate: claims.subscribe?.rate }),
+		publish: new Access({ path: scope(claims.publish?.path ?? new Patterns()), rate: claims.publish?.rate }),
 	};
-	if (permissions.subscribe.size === 0 && permissions.publish.size === 0) {
+	if (permissions.subscribe.path.size === 0 && permissions.publish.path.size === 0) {
 		throw new Error(`token grants no access to path "${target}"`);
 	}
 
@@ -200,9 +197,11 @@ export function authorize(claims: Claims, path: string): Permissions {
  * checks the same keys.
  */
 export function scopeAllows(scope: Scope, claims: Claims): boolean {
-	const covers = (granted: string[] | undefined, requested: string[] | undefined) => {
+	const covers = (granted: string[] | undefined, requested: Access | undefined) => {
 		try {
-			return patterns(granted).rooted(scope.root).covers(patterns(requested).rooted(claims.root));
+			return patterns(granted)
+				.rooted(scope.root)
+				.covers((requested?.path ?? new Patterns()).rooted(claims.root));
 		} catch {
 			// A root too deep to place the patterns beneath cannot be granted either way.
 			return false;

@@ -21,6 +21,9 @@ under the same names.
 - A release workflow and nightly/CI jobs follow the C++ package's, on the same
   generator pin; `v0.11.0-kixelated.4+v0.32.2` already carries the C backend
   (`--lang c`).
+- Ship a `MIGRATE.md` with the package, since it is what C users install.
+  Carry over `rs/moq-c/MIGRATE.md`'s history and add an `## Unreleased`
+  entry mapping the hand-written ABI to the generated one.
 - Ship a hand-written `moq_shutdown` that calls `moq_ffi_shutdown`, then
   `moq_shutdown_dispatcher`.
 - moq-c and moq-cpp each embed the moq-ffi staticlib, so one program can't link

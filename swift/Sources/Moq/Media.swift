@@ -83,9 +83,11 @@ public enum Media {
         }
         var ffi: MoqContainerStreamInit { MoqContainerStreamInit(format: format, timebase: timebase?.ffi) }
     }
-    /// A track name, its container, and live delivery options.
+    /// A catalog rendition: its ID (catalog key) and its video or audio config.
+    public typealias Rendition = MoqRendition
+    /// A catalog rendition and live delivery options.
     public typealias TrackConfig = MoqMediaTrackConfig
-    /// A fetched group's name, sequence, container, and delivery options.
+    /// A catalog rendition's group sequence and fetch delivery options.
     public typealias GroupConfig = MoqMediaGroupConfig
 
     /// Updates a catalog without keeping its broadcast open.
@@ -145,7 +147,7 @@ public enum Media {
 
         let ffi: MoqMediaTrackConsumer
 
-        /// Subscribe to a track and decode its container.
+        /// Subscribe to a catalog rendition and decode its container, following its broadcast and track.
         public static func subscribe(broadcast: BroadcastConsumer, config: TrackConfig) async throws -> TrackConsumer {
             TrackConsumer(try await MoqMediaTrackConsumer.subscribe(broadcast: broadcast.ffi, config: config))
         }
@@ -179,7 +181,7 @@ public enum Media {
 
         let ffi: MoqMediaGroupConsumer
 
-        /// Fetch and decode exactly one media group.
+        /// Fetch and decode exactly one group of a catalog rendition, following its broadcast and track.
         public static func fetch(broadcast: BroadcastConsumer, config: GroupConfig) async throws -> GroupConsumer {
             GroupConsumer(try await MoqMediaGroupConsumer.fetch(broadcast: broadcast.ffi, config: config))
         }

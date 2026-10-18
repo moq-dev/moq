@@ -191,6 +191,13 @@ impl Consume {
 		self.broadcast.insert(ConsumeBroadcast { broadcast, origin })
 	}
 
+	/// Whether the caller still holds `id` as a handle to `broadcast`.
+	pub fn holds(&self, id: Id, broadcast: &moq_net::broadcast::Consumer) -> bool {
+		self.broadcast
+			.get(id)
+			.is_some_and(|held| held.broadcast.is_clone(broadcast))
+	}
+
 	pub fn catalog(&mut self, broadcast: Id, on_catalog: OnStatus) -> Result<Id, Error> {
 		let ConsumeBroadcast { broadcast, origin } =
 			self.broadcast.get(broadcast).ok_or(Error::BroadcastNotFound)?.clone();
@@ -692,12 +699,32 @@ impl Consume {
 
 	fn apply_raw_subscription(track: &mut moq_net::track::Ordered, subscription: Option<moq_net::track::Subscription>) {
 		let subscription = subscription.unwrap_or_default();
-		let start = subscription.start.map(|start| start.group).or_else(|| track.latest());
+		// Reads start where the lowest range does. Without a floor of its own (the oldest
+		// range, the default) a raw reader joins at the latest group.
+		let latest = track.latest();
+		let start = subscription
+			.ranges
+			.iter()
+			.map(|range| match range.start {
+				moq_net::track::Anchor::Absolute(start) => Some(start.group),
+				moq_net::track::Anchor::Relative(u64::MAX) => latest,
+				moq_net::track::Anchor::Relative(back) => latest.map(|latest| latest.saturating_sub(back)),
+			})
+			.min()
+			.flatten();
+		// They stop past the last absolute end; an open or relative one follows the live edge.
+		let end = subscription
+			.ranges
+			.iter()
+			.map(|range| match range.end {
+				Some(moq_net::track::Anchor::Absolute(end)) => Some(end),
+				_ => None,
+			})
+			.collect::<Option<Vec<_>>>()
+			.map(|ends| ends.into_iter().max().unwrap_or_default());
 		track.set_groups((
 			start.map_or(Bound::Unbounded, Bound::Included),
-			subscription
-				.end
-				.map_or(Bound::Unbounded, moq_net::track::Position::group_end),
+			end.map_or(Bound::Unbounded, moq_net::track::Position::group_end),
 		));
 		// A closed track makes the update meaningless; the reader already sees the close.
 		let _ = track.update(subscription);

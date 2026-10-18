@@ -56,14 +56,14 @@ Transport tuning, applied to accepted and dialed connections alike.
 ```toml
 [quic]
 congestion_control = "delay"         # "delay" (BBR, the default) or "loss" (CUBIC).
-max_streams = 10000                  # Concurrent streams per connection, bidi and uni. Default.
+max_streams = 10000                  # Concurrent streams per connection, bidi and uni; 0 is refused. Default.
 idle_timeout = "10s"                 # Drop a connection after this long with nothing on it. Default.
 keep_alive = "3s"                    # Ping interval; "0s" disables it. iroh still pings at least every 5s. Default.
 gso = true                           # UDP segmentation offload. iroh cannot turn it off.
 mtu_discovery = false                # Path MTU discovery. Default.
 receive_window = 67108864            # Whole-connection window, in bytes. Default (64 MiB).
-stream_receive_window = 8388608      # Per-stream window. Omit for the backend default.
-send_window = 33554432               # Unacknowledged outgoing data. Omit for the backend default.
+stream_receive_window = 4194304      # Per-stream window, in bytes. Default (4 MiB).
+send_window = 16777216               # Unacknowledged outgoing data, in bytes. Default (16 MiB).
 qlog = "/var/log/moq/qlog"           # Existing directory. Needs the `qlog` build feature.
 ```
 
@@ -95,7 +95,20 @@ fetches = 10000                      # Independent simultaneous FETCH requests.
 announces = 100000
 subscriptions = 10000
 fetches = 10000
+
+[peer.quic]
+max_streams = 100000                 # Concurrent QUIC streams per direction.
+receive_window = 671088640           # Connection-wide receive window (640 MiB).
+send_window = 671088640              # Unacknowledged outgoing data (640 MiB).
 ```
+
+`[peer.quic]` takes only `max_streams`, `receive_window`, and `send_window`;
+any other `[quic]` key is refused. They replace the `[quic]` values for a
+peer's QUIC connection once its grant is known, before the SETUP reply. Links
+the relay dials get them from the handshake on. A link carrying a whole cluster is then
+not throttled by `[quic]` limits sized for one viewer, for example
+`--peer-quic-max-streams=200000`. Peers over WebSocket, TCP, or iroh keep
+their transport's own limits.
 
 These are the defaults. For example, `--peer-subscriptions=50000` raises the
 subscription cap on cluster links. `--session-fetches` and `--peer-fetches`
@@ -110,14 +123,15 @@ window, so very small values can prevent other requests from progressing.
 ## \[runtime]
 
 By default one work-stealing runtime serves every connection off one UDP
-socket. On Linux, QUIC can instead run on pinned single-threaded workers, each
-with its own socket on the listen address (`SO_REUSEPORT`), so a connection is
-handled start to finish by one thread and its packets never cross cores.
+socket. On Linux, QUIC can instead run on single-threaded workers, each with
+its own socket on the listen address (`SO_REUSEPORT`), so a connection is
+handled start to finish by one worker thread and its packets never cross
+threads. `pin = true` also keeps that thread on one core.
 
 ```toml
 [runtime]
 workers = 8                          # Single-threaded QUIC workers. Omit for the shared runtime.
-pin = true                           # Pin each worker to a core. Default.
+pin = false                          # Pin each worker to a core. Off by default.
 io_uring = false                     # Drive them with io_uring instead of tokio.
 ```
 
@@ -126,9 +140,13 @@ worker. `workers` needs the `quic` feature. Every worker and the TLS stream
 listener serve one shared identity, generated or file-backed, so a certificate
 rotation reaches them together and `/certificate.sha256` stays accurate.
 
+Pinning is off by default because every relay pins its workers to the same
+first cores, so two relays on one host, or one limited to fewer CPUs than the
+host has, would crowd onto them. Turn it on for a host the relay has to itself.
+
 `io_uring` additionally needs Linux 6.12+ and the `io-uring` cargo feature; it
-shares the same reloadable TLS identity, serves moq-lite only, and refuses
-`mtu_discovery`. A setting the build or host cannot deliver refuses to
+shares the same reloadable TLS identity, serves every configured version
+like the shared runtime, and refuses `mtu_discovery`. A setting the build or host cannot deliver refuses to
 start rather than being ignored. If io\_uring workers fail to start naming
 `RLIMIT_MEMLOCK`, raise it (`LimitMEMLOCK=` under systemd).
 
@@ -140,7 +158,7 @@ listen = "[::]:4443"                 # HTTP: fingerprint, announced, fetch, heal
 
 [web.https]
 listen = "[::]:443"                  # HTTPS plus the WebSocket fallback.
-cert = "cert.pem"                    # cert, key, and root need listen.
+cert = "cert.pem"                    # cert, key, and root need listen. Omit cert and key with [acme].
 key = "key.pem"
 
 [internal]
@@ -153,6 +171,34 @@ and HTTP/2 peers that acknowledge keep-alive PINGs. Active response bodies
 keep the connection open; a WebSocket upgrade hands its lifetime to MoQ.
 
 See [HTTP endpoints](/bin/relay/http).
+
+## \[acme]
+
+The relay provisions and renews a publicly trusted certificate itself, for QUIC
+and HTTPS alike (Unix only, where the key can be kept owner-only):
+
+```toml
+[acme]
+domains = ["relay.example.com"]      # Enables ACME. No wildcards.
+contact = ["mailto:ops@example.com"] # Optional account contact.
+dir = "/var/lib/moq-relay/acme"      # Required: account key and certificate, kept owner-only.
+# directory = "https://acme-staging-v02.api.letsencrypt.org/directory"  # Default: Let's Encrypt production.
+# timeout = "5m"                     # How long the first issuance may take before startup fails.
+```
+
+Validation is TLS-ALPN-01 only: the directory connects to TCP port 443 of each
+domain, so `web.https.listen` is required and must be reachable there, directly
+or forwarded. `[acme]` cannot be combined with `listen.tls.cert`, `key`, or
+`generate`, or with `web.https.cert` and `key`.
+
+With no usable certificate in `dir` (missing, expired, missing a domain, or
+from another directory), startup answers only the challenge until one is
+issued; QUIC, the other routes, and readiness wait for it, and startup fails
+with the ACME error once `timeout` runs out. It also fails after 3 failed
+validations within an hour, counting earlier starts recorded in `dir`, so a
+restart loop stops short of Let's Encrypt's limit of 5 per hostname per hour. Renewal runs in the background
+well before expiry and reaches every listener on its next handshake. A failed
+renewal keeps the current certificate serving and retries.
 
 ## \[stun]
 

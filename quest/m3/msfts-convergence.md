@@ -37,7 +37,7 @@ does not establish wire interoperability.
 Update `drafts/draft-lcurley-moq-mpegts.md` and `doc/concept` with whatever
 lands. [#4577](https://github.com/moq-dev/moq/pull/4577) (per-ES access
 units at export) has merged, and [#4579](https://github.com/moq-dev/moq/pull/4579)
-(export on the mux rate) closed in favour of the
-[T-STD line](/quest/m1/tstd/README.md).
+(export on the mux rate) closed in favour of the T-STD export
+([#4645](https://github.com/moq-dev/moq/pull/4645)).
 [#4580](https://github.com/moq-dev/moq/pull/4580) (per-program SI) merged on
 2026-10-01 and touches the same area.

@@ -16,6 +16,7 @@
 //! Grants and claims name paths with [`Pattern`]s from `moq-pattern`, re-exported here:
 //! `foo` is one broadcast, `foo/**` is a subtree, `**` is everything.
 
+mod access;
 mod algorithm;
 mod claims;
 mod error;
@@ -36,6 +37,7 @@ pub mod serve;
 #[cfg(feature = "client")]
 mod client;
 
+pub use access::*;
 pub use algorithm::*;
 pub use claims::*;
 #[cfg(feature = "client")]

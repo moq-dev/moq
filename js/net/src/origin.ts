@@ -241,6 +241,7 @@ class CoveringRoot {
 	}
 }
 
+// pending: /quest/m1/public-model/answer.md
 /**
  * One requested path: the notify node for everything watching it.
  *
@@ -608,6 +609,27 @@ class OriginState {
 	// How many sessions are attached, and how many of those support broadcast discovery.
 	// What backs the public `discovery` getter.
 	sessions = new Signal({ total: 0, discovery: 0 });
+
+	// The prefixes whose initial announcements a session is still delivering, counted. An
+	// announcement stream overlapping one has not synced yet.
+	snapshots = new Signal(new Map<Path.Valid, number>());
+
+	/** Hold an initial set in flight under the absolute `prefix` until the returned dispose. */
+	addSnapshot(prefix: Path.Valid): Dispose {
+		this.snapshots.mutate((counts) => {
+			counts.set(prefix, (counts.get(prefix) ?? 0) + 1);
+		});
+		let landed = false;
+		return () => {
+			if (landed) return;
+			landed = true;
+			this.snapshots.mutate((counts) => {
+				const count = (counts.get(prefix) ?? 0) - 1;
+				if (count > 0) counts.set(prefix, count);
+				else counts.delete(prefix);
+			});
+		};
+	}
 
 	// The literal heads readers are watching, counted, as a trie: announcement streams and
 	// announced requests. Sessions ask their peer for announcements under the broadest of
@@ -1075,7 +1097,7 @@ export interface Table {
 	/** Advertise a prefix and serve requests under it; see {@link Producer.dynamic}. */
 	dynamic(
 		prefix: Path.Valid,
-		route?: Route | { epoch?: Route["epoch"]; hops?: Route["hops"]; cost?: Route["cost"] },
+		route?: Route | { epoch?: Route["epoch"]; hops?: Route["hops"]; cost?: Route["cost"]; auth?: Route["auth"] },
 	): Dynamic;
 }
 
@@ -1127,6 +1149,7 @@ export class Producer implements Table {
 			accepts: (prefix) => this.#scope.overlaps(Path.join(this.#scope.root, prefix)),
 			attach: (discovery) => this.#attach(discovery),
 			expect: () => this.#expect(),
+			snapshot: (prefix) => this.#state.addSnapshot(this.#scope.prefix(prefix)),
 			get requests() {
 				if (thisProducer.#scope === Scope.all) return thisProducer.#state.requests;
 				thisProducer.#requests ??= new Derived([thisProducer.#state.requests], (requests) =>
@@ -1268,7 +1291,14 @@ export class Producer implements Table {
 	 */
 	dynamic(
 		prefix: Path.Valid,
-		route: Route | { epoch?: Route["epoch"]; hops?: Route["hops"]; cost?: Route["cost"] } = Route.default,
+		route:
+			| Route
+			| {
+					epoch?: Route["epoch"];
+					hops?: Route["hops"];
+					cost?: Route["cost"];
+					auth?: Route["auth"];
+			  } = Route.default,
 	): Dynamic {
 		return this.#insertRoute(prefix, Route.normalize(route), true);
 	}
@@ -1281,7 +1311,14 @@ export class Producer implements Table {
 	 */
 	#receive(
 		prefix: Path.Valid,
-		route: Route | { epoch?: Route["epoch"]; hops?: Route["hops"]; cost?: Route["cost"] } = Route.default,
+		route:
+			| Route
+			| {
+					epoch?: Route["epoch"];
+					hops?: Route["hops"];
+					cost?: Route["cost"];
+					auth?: Route["auth"];
+			  } = Route.default,
 	): Dynamic {
 		return this.#insertRoute(prefix, Route.normalize(route), false);
 	}
@@ -2017,7 +2054,26 @@ export class Consumer {
 				}
 				active = next;
 
-				await Signal.race(this.#state.local, this.#state.advertisedLocal, this.#state.routes, producer.closed);
+				// Synced once no session is still delivering an initial set this stream could
+				// list: one under a hidden segment holds only a reader that opts in.
+				let behind = false;
+				for (const prefix of this.#state.snapshots.peek().keys()) {
+					for (const pattern of patterns) {
+						if (!pattern.overlaps(Path.Pattern.subtree(prefix))) continue;
+						if (hidden || !hiddenBelow(scopeHead(pattern), prefix)) behind = true;
+					}
+				}
+				if (behind) producer.behind();
+				else producer.synced();
+
+				await Signal.race(
+					this.#state.local,
+					this.#state.advertisedLocal,
+					this.#state.routes,
+					this.#state.snapshots,
+					producer.closed,
+				);
+
 				if (producer.closed.peek() !== undefined) return;
 			}
 		} catch {
@@ -2189,7 +2245,9 @@ export class Dynamic {
 	 * Route selection still applies: another route still at the old epoch outranks one
 	 * without. To re-price, start from the current route, `update({ ...dynamic.route, cost })`.
 	 */
-	update(route: Route | { epoch?: Route["epoch"]; hops?: Route["hops"]; cost?: Route["cost"] }): void {
+	update(
+		route: Route | { epoch?: Route["epoch"]; hops?: Route["hops"]; cost?: Route["cost"]; auth?: Route["auth"] },
+	): void {
 		if (this.#closed) throw new Error("dynamic is closed");
 		const next = Route.normalize(route);
 		const previous = this.#entry.route.peek().epoch;

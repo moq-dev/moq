@@ -89,6 +89,9 @@ macro_rules! make_struct {
             /// Frequency
             pub(crate) min_ack_delay: Option<VarInt>,
 
+            /// The endpoint accepts RESET_STREAM_AT frames
+            pub(crate) reset_stream_at: bool,
+
             // Server-only
             /// The value of the Destination Connection ID field from the first Initial packet sent
             /// by the client
@@ -126,6 +129,7 @@ macro_rules! make_struct {
                     initial_src_cid: None,
                     grease_quic_bit: false,
                     min_ack_delay: None,
+                    reset_stream_at: false,
 
                     original_dst_cid: None,
                     retry_src_cid: None,
@@ -174,6 +178,7 @@ impl TransportParameters {
             min_ack_delay: Some(
                 VarInt::from_u64(u64::try_from(TIMER_GRANULARITY.as_micros()).unwrap()).unwrap(),
             ),
+            reset_stream_at: config.reset_stream_at,
             grease_transport_parameter: Some(ReservedTransportParameter::random(rng)),
             write_order: Some({
                 let mut order = std::array::from_fn(|i| i as u8);
@@ -196,6 +201,7 @@ impl TransportParameters {
             || cached.initial_max_streams_uni > self.initial_max_streams_uni
             || cached.max_datagram_frame_size > self.max_datagram_frame_size
             || cached.grease_quic_bit && !self.grease_quic_bit
+            || cached.reset_stream_at && !self.reset_stream_at
         {
             return Err(TransportError::PROTOCOL_VIOLATION(
                 "0-RTT accepted with incompatible transport parameters",
@@ -381,6 +387,12 @@ impl TransportParameters {
                         w.write(x);
                     }
                 }
+                TransportParameterId::ResetStreamAt => {
+                    if self.reset_stream_at {
+                        w.write_var(id as u64);
+                        w.write_var(0);
+                    }
+                }
                 id => {
                     macro_rules! write_params {
                         {$($(#[$doc:meta])* $name:ident ($id:ident) = $default:expr,)*} => {
@@ -485,6 +497,12 @@ impl TransportParameters {
                         return Err(Error::Malformed);
                     }
                     params.min_ack_delay = Some(r.get()?);
+                }
+                TransportParameterId::ResetStreamAt => {
+                    if len != 0 || params.reset_stream_at {
+                        return Err(Error::Malformed);
+                    }
+                    params.reset_stream_at = true;
                 }
                 _ => {
                     macro_rules! parse {
@@ -641,6 +659,9 @@ pub(crate) enum TransportParameterId {
     InitialSourceConnectionId = 0x0F,
     RetrySourceConnectionId = 0x10,
 
+    // https://datatracker.ietf.org/doc/html/draft-ietf-quic-reliable-stream-reset#section-3
+    ResetStreamAt = 0x1D,
+
     // Smallest possible ID of reserved transport parameter https://datatracker.ietf.org/doc/html/rfc9000#section-22.3
     ReservedTransportParameter = 0x1B,
 
@@ -656,7 +677,7 @@ pub(crate) enum TransportParameterId {
 
 impl TransportParameterId {
     /// Array with all supported transport parameter IDs
-    const SUPPORTED: [Self; 21] = [
+    const SUPPORTED: [Self; 22] = [
         Self::MaxIdleTimeout,
         Self::MaxUdpPayloadSize,
         Self::InitialMaxData,
@@ -678,6 +699,7 @@ impl TransportParameterId {
         Self::RetrySourceConnectionId,
         Self::GreaseQuicBit,
         Self::MinAckDelayDraft07,
+        Self::ResetStreamAt,
     ];
 }
 
@@ -717,6 +739,7 @@ impl TryFrom<u64> for TransportParameterId {
             id if Self::RetrySourceConnectionId == id => Self::RetrySourceConnectionId,
             id if Self::GreaseQuicBit == id => Self::GreaseQuicBit,
             id if Self::MinAckDelayDraft07 == id => Self::MinAckDelayDraft07,
+            id if Self::ResetStreamAt == id => Self::ResetStreamAt,
             _ => return Err(()),
         };
         Ok(param)
@@ -758,6 +781,7 @@ mod test {
             }),
             grease_quic_bit: true,
             min_ack_delay: Some(2_000u32.into()),
+            reset_stream_at: true,
             ..TransportParameters::default()
         };
         params.write(&mut buf);
@@ -946,6 +970,10 @@ mod test {
                 min_ack_delay: Some(2_000u32.into()),
                 ..TransportParameters::default()
             },
+            TransportParameters {
+                reset_stream_at: true,
+                ..TransportParameters::default()
+            },
         ];
         for params in cases {
             let mut once = Vec::new();
@@ -977,5 +1005,30 @@ mod test {
         };
         high_limit.validate_resumption_from(&low_limit).unwrap();
         low_limit.validate_resumption_from(&high_limit).unwrap_err();
+    }
+
+    /// A non-empty `reset_stream_at` is a TRANSPORT_PARAMETER_ERROR.
+    #[test]
+    fn read_reset_stream_at_with_value() {
+        let mut buf = Vec::new();
+        buf.write_var(TransportParameterId::ResetStreamAt as u64);
+        buf.write_var(1);
+        buf.write_var(0);
+        assert_eq!(
+            TransportParameters::read(Side::Client, &mut buf.as_slice()),
+            Err(Error::Malformed)
+        );
+    }
+
+    /// A server that accepts 0-RTT must keep RESET_STREAM_AT enabled.
+    #[test]
+    fn resumption_keeps_reset_stream_at() {
+        let enabled = TransportParameters {
+            reset_stream_at: true,
+            ..TransportParameters::default()
+        };
+        let disabled = TransportParameters::default();
+        enabled.validate_resumption_from(&disabled).unwrap();
+        disabled.validate_resumption_from(&enabled).unwrap_err();
     }
 }

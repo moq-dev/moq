@@ -15,7 +15,7 @@
 use std::ffi::{c_char, c_void};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use tokio::sync::oneshot;
 
@@ -232,7 +232,7 @@ async fn follow_reservation(
 			max = next;
 			control = Control::new(Policy::new(max));
 		}
-		let Some(bitrate) = control.update(estimate, Instant::now()) else {
+		let Some(bitrate) = control.update(estimate, moq_net::time::now()) else {
 			continue;
 		};
 
@@ -447,7 +447,10 @@ impl Video {
 		rendition: hang::catalog::VideoConfig,
 		encoder: moq_video::encode::Sink,
 	) -> Result<Id, Error> {
-		let producer = moq_video::encode::Producer::new(broadcast.clone(), catalog, rendition)?;
+		let reserved = catalog
+			.reserve()
+			.with_timeline_hint(config.gop.duration(config.framerate));
+		let producer = moq_video::encode::Producer::new(broadcast.clone(), reserved, rendition)?;
 		self.producers.insert(Shared::new(VideoEncoder {
 			encoder,
 			producer,
@@ -1028,11 +1031,12 @@ mod tests {
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, config).unwrap();
 		let consumer = broadcast.consume();
 		// Probed rather than hand-built, so the test track carries what a real one would.
-		let rendition = moq_video::encode::Config::new(320, 240, moq_video::Rate::new(30, 1).unwrap())
-			.probe()
-			.await
-			.unwrap();
-		let producer = moq_video::encode::Producer::new(broadcast, catalog, rendition).unwrap();
+		let encode = moq_video::encode::Config::new(320, 240, moq_video::Rate::new(30, 1).unwrap());
+		let rendition = encode.probe().await.unwrap();
+		let reserved = catalog
+			.reserve()
+			.with_timeline_hint(encode.gop.duration(encode.framerate));
+		let producer = moq_video::encode::Producer::new(broadcast, reserved, rendition).unwrap();
 
 		let name = producer.demand().name().to_string();
 		let track = consumer.track(&name).unwrap().subscribe(None).await.unwrap();

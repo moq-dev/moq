@@ -2,9 +2,9 @@
 //!
 //! The `mpegts` section carries everything needed to faithfully re-mux a broadcast
 //! back to MPEG-TS that doesn't belong in the codec-neutral media configs: one
-//! entry per track (its original PID and PMT descriptors), a `verbatim` carriage
-//! record for every elementary stream we don't decode (SCTE-35, teletext, DVB
-//! subtitles, private data, ...), the program-level PMT descriptors, the program
+//! entry per track (its original PID and PMT descriptors), a `verbatim` or
+//! `pesPacket` carriage record for every elementary stream we don't decode (SCTE-35,
+//! teletext, DVB subtitles, private data, ...), the program-level PMT descriptors, the program
 //! identity ([`Program`]), and the standalone SI table map ([`SiEntry`]).
 //! Demuxed media tracks keep their codec config in the base `video`/`audio`
 //! sections; only their MPEG-TS identity lands here. A constant-rate source also
@@ -86,7 +86,8 @@ pub(super) fn si_interval(table_id: u8) -> Option<Duration> {
 #[non_exhaustive]
 pub struct Mpegts {
 	/// Per-track MPEG-TS info, keyed by MoQ track name. Media tracks record their
-	/// PID and PMT descriptors; undecoded tracks add a [`Verbatim`] carriage record.
+	/// PID and PMT descriptors; undecoded tracks add a [`Verbatim`] or [`PesPacket`]
+	/// carriage record.
 	#[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
 	pub tracks: BTreeMap<String, Track>,
 
@@ -147,6 +148,16 @@ impl Mpegts {
 			&& self.program.is_none()
 			&& self.si.is_empty()
 			&& self.mux_rate.is_none()
+	}
+
+	/// Whether the section lists a track it carries itself: a verbatim stream or an SI table.
+	pub(crate) fn has_track(&self) -> bool {
+		self.tracks.values().any(|track| track.verbatim.is_some())
+			|| self
+				.si
+				.values()
+				.flat_map(BTreeMap::values)
+				.any(|entry| !entry.track.is_empty())
 	}
 }
 
@@ -306,6 +317,11 @@ pub struct Track {
 	/// Present when the stream is carried verbatim (not decoded into `video`/`audio`).
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub verbatim: Option<Verbatim>,
+
+	/// Present when each frame is one whole PES packet, sent at its timestamp. An entry
+	/// carries this or [`Self::verbatim`], never both.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub pes_packet: Option<PesPacket>,
 }
 
 impl Track {
@@ -315,6 +331,7 @@ impl Track {
 			pid,
 			descriptors: Vec::new(),
 			verbatim: None,
+			pes_packet: None,
 		}
 	}
 }
@@ -324,8 +341,7 @@ impl Track {
 #[serde(rename_all = "camelCase")]
 #[non_exhaustive]
 pub struct Verbatim {
-	/// PMT `stream_type` to re-announce (0x86 SCTE-35, 0x06 private PES, 0x05
-	/// private sections, ...).
+	/// Raw PMT `stream_type` to re-announce, including types the muxer does not recognize.
 	pub stream_type: u8,
 
 	/// How the verbatim payload is framed, so export knows how to repacketize it.
@@ -349,6 +365,29 @@ impl Verbatim {
 			framing,
 			stream_id: None,
 		}
+	}
+}
+
+/// Carriage record for an undecoded elementary stream whose frames are whole PES packets.
+///
+/// Each frame is one complete PES packet, start code through payload, with its PTS, DTS
+/// and every other header field already on the catalog clock. Its timestamp is the
+/// packet's placement: the program clock at its first byte, which export sends it at.
+/// A member beside [`Verbatim`] rather than a [`Framing`], so a consumer that predates it
+/// ignores the track instead of refusing the catalog.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
+#[serde(rename_all = "camelCase")]
+#[non_exhaustive]
+pub struct PesPacket {
+	/// PMT `stream_type` to re-announce (0x06 private PES, ...). The `stream_id` rides
+	/// in each packet.
+	pub stream_type: u8,
+}
+
+impl PesPacket {
+	/// A new whole-PES carriage record of the given `stream_type`.
+	pub fn new(stream_type: u8) -> Self {
+		Self { stream_type }
 	}
 }
 
@@ -464,6 +503,7 @@ mod test {
 					data: Bytes::from_static(b"eng\x00"),
 				}],
 				verbatim: None,
+				pes_packet: None,
 			},
 		);
 		// A verbatim SCTE-35 track.
@@ -473,6 +513,17 @@ mod test {
 				pid: 0x102,
 				descriptors: Vec::new(),
 				verbatim: Some(Verbatim::new(0x86, Framing::Section)),
+				pes_packet: None,
+			},
+		);
+		// A whole-PES private data track.
+		mpegts.tracks.insert(
+			"0.ts".to_string(),
+			Track {
+				pid: 0x103,
+				descriptors: Vec::new(),
+				verbatim: None,
+				pes_packet: Some(PesPacket::new(0x06)),
 			},
 		);
 		mpegts.program_descriptors.push(Descriptor {
@@ -487,6 +538,10 @@ mod test {
 		assert!(
 			json.contains("\"muxRate\":2500000"),
 			"mux rate is a bare integer: {json}"
+		);
+		assert!(
+			json.contains("\"pesPacket\":{\"streamType\":6}"),
+			"the whole-PES member is camelCase: {json}"
 		);
 
 		let parsed: Ext = serde_json::from_str(&json).unwrap();
@@ -654,6 +709,7 @@ mod test {
 					data: Bytes::from_static(b"CUEI"),
 				}],
 				verbatim: Some(Verbatim::new(0x86, Framing::Section)),
+				pes_packet: None,
 			},
 		);
 		let expected = guard.ext.mpegts.clone();

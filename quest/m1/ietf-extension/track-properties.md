@@ -18,9 +18,10 @@ Decided 2026-10-13 (see the [epic](/quest/m1/ietf-extension/README.md)).
   fields applies to track properties too.
 - Unknown properties include those the draft defines but moq-net does not
   implement, such as OBJECT_DELIVERY_TIMEOUT and SUBGROUP_DELIVERY_TIMEOUT.
-  They are forwarded, not interpreted. DYNAMIC_GROUPS is handled by
-  [dynamic groups](/quest/m1/ietf-extension/dynamic-groups.md), so it is
-  advertised only when the upstream request path supports it.
+  They are forwarded, not interpreted. DYNAMIC_GROUPS is already
+  interpreted (#5708) and advertised only when the upstream request path
+  supports it. One found inside Immutable Properties is re-emitted today as
+  a mutable property; keeping those bytes verbatim fixes that too.
 - An unknown Mandatory Track Property (0x4000-0x7FFF) refuses the track with
   UNSUPPORTED_EXTENSION, as the draft requires, instead of forwarding it.
 - Group order stays as today. The model owns serving order.
@@ -31,7 +32,3 @@ on draft 22 and one older draft, and an unknown mandatory property refuses
 the track.
 
 Public API: none. Wire: none new.
-
-## Required
-
-- [Dynamic groups](/quest/m1/ietf-extension/dynamic-groups.md) - makes DYNAMIC_GROUPS advertising truthful by carrying NEW_GROUP_REQUEST upstream

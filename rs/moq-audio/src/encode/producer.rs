@@ -1,7 +1,5 @@
 //! Encode raw PCM and publish it as a moq audio track.
 
-use std::time::Instant;
-
 use bytes::Bytes;
 
 use moq_mux::catalog::hang::CatalogExt;
@@ -442,7 +440,7 @@ impl<E: CatalogExt> Producer<E> {
 		if self.grouped >= self.group_samples {
 			self.track.cut(None)?;
 		}
-		self.track.flush(timestamp, Instant::now())?;
+		self.track.flush(timestamp, moq_net::time::now())?;
 		Ok(())
 	}
 
@@ -468,7 +466,7 @@ impl<E: CatalogExt> Producer<E> {
 				keyframe: false,
 				duration: None,
 			})?;
-			track.flush(timestamp, Instant::now())?;
+			track.flush(timestamp, moq_net::time::now())?;
 		}
 
 		track.cut(Some(terminal.end))?;
@@ -559,6 +557,16 @@ impl<E: CatalogExt> Producer<E> {
 
 #[cfg(test)]
 mod tests {
+	async fn decoded_frame(consumer: &mut crate::decode::Consumer) -> Result<Option<Frame>, Error> {
+		loop {
+			match consumer.read().await? {
+				Some(crate::decode::Read::Frame { frame, .. }) => return Ok(Some(frame)),
+				Some(crate::decode::Read::End { .. }) => {}
+				None => return Ok(None),
+			}
+		}
+	}
+
 	use std::time::Duration;
 
 	use super::*;
@@ -661,7 +669,7 @@ mod tests {
 			producer.finish().unwrap();
 
 			let mut decoded = Vec::new();
-			while let Some(frame) = audio.read().await.unwrap() {
+			while let Some(frame) = decoded_frame(&mut audio).await.unwrap() {
 				let pcm = Format::F32.as_interleaved_f32(&frame.data, 1).unwrap();
 				decoded.extend_from_slice(&pcm);
 			}
@@ -834,7 +842,10 @@ mod tests {
 		.unwrap();
 
 		producer.write(&full_frame(0)).unwrap();
-		let first = audio.read().await.unwrap().expect("first packet before the reanchor");
+		let first = decoded_frame(&mut audio)
+			.await
+			.unwrap()
+			.expect("first packet before the reanchor");
 		assert_eq!(first.data.len() / size_of::<f32>(), 960 - 312);
 
 		producer.reanchor();
@@ -842,7 +853,7 @@ mod tests {
 		producer.finish().unwrap();
 
 		let mut resumed_frames = 0;
-		while let Some(frame) = audio.read().await.unwrap() {
+		while let Some(frame) = decoded_frame(&mut audio).await.unwrap() {
 			if frame.timestamp.as_micros() >= 1_000_000 {
 				resumed_frames += frame.data.len() / size_of::<f32>();
 			}
@@ -883,7 +894,7 @@ mod tests {
 		let mut entered_dtx = false;
 		for index in 0..100 {
 			producer.write(&pcm_frame(&silence, index * 20_000)).unwrap();
-			let consumed = consumer.read().await.unwrap().expect("one decoded frame");
+			let consumed = decoded_frame(&mut consumer).await.unwrap().expect("one decoded frame");
 			assert_eq!(producer.activity(), consumed.activity);
 			if consumed.activity.is_dtx() {
 				entered_dtx = true;
@@ -899,7 +910,7 @@ mod tests {
 			})
 			.collect();
 		producer.write(&pcm_frame(&active, 2_000_000)).unwrap();
-		let consumed = consumer.read().await.unwrap().expect("one decoded frame");
+		let consumed = decoded_frame(&mut consumer).await.unwrap().expect("one decoded frame");
 		assert_eq!(producer.activity(), Activity::Active);
 		assert_eq!(consumed.activity, Activity::Active);
 	}

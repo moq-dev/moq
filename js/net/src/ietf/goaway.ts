@@ -1,5 +1,6 @@
 import { Milli } from "@moq/clock";
 import type { Drain } from "../connection/goaway.ts";
+import { ProtocolViolation } from "../error.ts";
 import { Reader, type Writer } from "../stream.ts";
 import * as Message from "./message.ts";
 import { type IetfVersion, Version } from "./version.ts";
@@ -9,10 +10,21 @@ export class GoAway {
 
 	newSessionUri: string;
 	timeout: bigint;
+	/**
+	 * Draft-18 only (#1559): required on the control stream, absent on a request stream.
+	 * It names the receiver's Request IDs, so a client sends an odd one and a server an even one.
+	 * Draft-19 removed the field again (#1623).
+	 */
+	requestId?: bigint;
 
-	constructor({ newSessionUri, timeout = 0n }: { newSessionUri: string; timeout?: bigint }) {
+	constructor({
+		newSessionUri,
+		timeout = 0n,
+		requestId,
+	}: { newSessionUri: string; timeout?: bigint; requestId?: bigint }) {
 		this.newSessionUri = newSessionUri;
 		this.timeout = timeout;
+		this.requestId = requestId;
 	}
 
 	async #encode(w: Writer, version: IetfVersion): Promise<void> {
@@ -20,12 +32,8 @@ export class GoAway {
 		if (version !== Version.DRAFT_14 && version !== Version.DRAFT_15 && version !== Version.DRAFT_16) {
 			await w.u62(this.timeout);
 		}
-		// Draft-18 (#1559) requires a Request ID on the control stream (the only
-		// place GOAWAY is sent); omitting it is a length mismatch a conformant
-		// peer must reject. We advertise 0 ("no requests processed"), matching
-		// the Rust encoder. Draft-19 removed the field again (#1623).
-		if (version === Version.DRAFT_18) {
-			await w.u62(0n);
+		if (version === Version.DRAFT_18 && this.requestId !== undefined) {
+			await w.u62(this.requestId);
 		}
 	}
 
@@ -61,18 +69,16 @@ export class GoAway {
 		// All drafts cap the New Session URI at 8,192 bytes; a longer one is a
 		// protocol violation. Matches the Rust decoder.
 		if (new TextEncoder().encode(newSessionUri).byteLength > 8192) {
-			throw new Error("GOAWAY new session URI exceeds 8,192 bytes");
+			throw new ProtocolViolation("GOAWAY new session URI exceeds 8,192 bytes");
 		}
 		let timeout = 0n;
 		if (version !== Version.DRAFT_14 && version !== Version.DRAFT_15 && version !== Version.DRAFT_16) {
 			timeout = await r.u62();
 		}
-		// Draft-18 optional trailing Request ID (#1559). Drain remaining bytes
-		// so the outer message-frame size check passes.
-		// Draft-19 removed this field again (#1623).
-		if (version === Version.DRAFT_18) {
-			await r.readAll();
+		let requestId: bigint | undefined;
+		if (version === Version.DRAFT_18 && !(await r.done())) {
+			requestId = await r.u62();
 		}
-		return new GoAway({ newSessionUri, timeout });
+		return new GoAway({ newSessionUri, timeout, requestId });
 	}
 }

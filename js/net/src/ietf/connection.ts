@@ -7,7 +7,7 @@ import type { Established } from "../connection/established.ts";
 import type { Drain } from "../connection/goaway.ts";
 import { type Probe, type Stats, transportStats } from "../connection/stats.ts";
 import { type Transport, transportOf } from "../connection/transport.ts";
-import { error, fromClose, ProtocolViolation, StreamCode, StreamError } from "../error.ts";
+import { error, fromClose, ProtocolViolation, SessionCode, StreamCode, StreamError } from "../error.ts";
 import type { Consumer as OriginConsumer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { type Reader, Readers, type Stream } from "../stream.ts";
@@ -26,6 +26,7 @@ import { Publish, PublishError } from "./publish.ts";
 import { PublishNamespace, PublishNamespaceError } from "./publish_namespace.ts";
 import { Publisher } from "./publisher.ts";
 import { RequestError } from "./request.ts";
+import { malformed } from "./request_stream.ts";
 import { Subscribe, SubscribeError, SubscribeUpdate } from "./subscribe.ts";
 import {
 	SUBSCRIBE_TRACKS_ID,
@@ -62,7 +63,7 @@ export class Connection implements Established {
 	readonly probe: Getter<Probe> = new Signal<Probe>({});
 
 	/** Our tokens and grants, when the peer negotiated MoQ Auth; see {@link Established.auth}. */
-	get auth(): Auth.Auth {
+	get auth(): Auth.Handle {
 		return this.#auth;
 	}
 
@@ -122,6 +123,7 @@ export class Connection implements Established {
 		publish,
 		solicit,
 		hidden = false,
+		activeCount = false,
 		cluster,
 		auth = false,
 		early = [],
@@ -144,6 +146,8 @@ export class Connection implements Established {
 		solicit?: boolean;
 		/** Whether the peer understands the HIDDEN parameter (MoQ Hidden). */
 		hidden?: boolean;
+		/** Whether both SETUPs declared MoQ Active Count. */
+		activeCount?: boolean;
 		/**
 		 * The Hop IDs this session declared (MoQ Cluster). `undefined` on a version that
 		 * cannot negotiate the extension, as is a `peer` the peer never declared.
@@ -191,6 +195,7 @@ export class Connection implements Established {
 		const session = this.#session;
 		this.#auth = new AuthSession({
 			wire: auth && authSupported(version) ? new IetfAuthWire(session) : undefined,
+			requests: true,
 			peerGrant: {
 				publish: new Path.Patterns([Path.Pattern.all()]),
 				subscribe: new Path.Patterns(publish ? [Path.Pattern.all()] : []),
@@ -208,8 +213,10 @@ export class Connection implements Established {
 			publish,
 			requiresSolicitation: solicit ?? false,
 			hidden,
+			activeCount,
 			cluster,
 			grant: this.#auth.grant,
+			auth: this.#auth,
 			ready: this.#auth.setupAnswered(),
 		});
 		this.#solicit = solicit;
@@ -220,6 +227,7 @@ export class Connection implements Established {
 			quic,
 			cluster,
 			hidden,
+			activeCount,
 			solicit,
 			goaway: this.#goaway,
 			grant: this.#auth.grant,
@@ -360,7 +368,8 @@ export class Connection implements Established {
 				try {
 					legacy = await SubscribeNamespaceLegacy.decode(stream.reader, this.#session.version);
 				} catch (err) {
-					if (!(err instanceof MalformedAuthToken) || err.requestId === undefined) throw err;
+					if (!(err instanceof MalformedAuthToken) || err.requestId === undefined)
+						throw malformed(err, "subscribe_namespace");
 					adapter?.admitRequest(err.requestId);
 					this.#spend(err.requestId);
 					try {
@@ -410,6 +419,8 @@ export class Connection implements Established {
 					const namespace = await Namespace.decode(reader);
 					await reader.readAll();
 					return { requestId, namespace };
+				}).catch((err: unknown) => {
+					throw malformed(err, "subscribe_tracks");
 				});
 				this.#session.spendRequest(request.requestId);
 				await this.#publisher.runSubscribeTracks(stream, request.namespace);
@@ -494,7 +505,7 @@ export class Connection implements Established {
 		try {
 			msg = await decoded;
 		} catch (err) {
-			if (!(err instanceof MalformedAuthToken) || err.requestId === undefined) throw err;
+			if (!(err instanceof MalformedAuthToken) || err.requestId === undefined) throw malformed(err, kind);
 			this.#spend(err.requestId);
 			await this.#refuseToken(stream, kind, err.requestId);
 			return undefined;
@@ -608,27 +619,41 @@ export class Connection implements Established {
 				const done = await controlStream.reader.done();
 				if (done) return;
 
-				const typeId = await controlStream.reader.u53();
-				if (typeId !== GoAway.id) {
-					console.warn(`unexpected message on setup stream: 0x${typeId.toString(16)}`);
-					return;
-				}
-
-				const msg = await GoAway.decode(controlStream.reader, version);
+				const msg = await this.#readGoAway(controlStream, version).catch((err: unknown) => {
+					throw malformed(err, "setup stream message");
+				});
 				if (this.#goaway.peek() !== undefined) throw new ProtocolViolation("duplicate GOAWAY");
 				// A client may leave, but only the server may name where to go.
 				if (!this.#client && msg.newSessionUri !== "") {
 					throw new ProtocolViolation("client GOAWAY must not name a redirect");
 				}
+				// Draft-18's Request ID names our IDs: even when we are the client, odd for a server.
+				// It is required here, on the control stream.
+				if (version === Version.DRAFT_18 && msg.requestId === undefined) {
+					throw new ProtocolViolation("draft-18 GOAWAY on the control stream lacks a Request ID");
+				}
+				if (msg.requestId !== undefined && msg.requestId % 2n !== (this.#client ? 0n : 1n)) {
+					throw new ProtocolViolation("GOAWAY Request ID has the wrong parity", {
+						code: SessionCode.InvalidRequestId,
+					});
+				}
 				this.#goaway.set(msg.drain());
 			}
 		} catch (err) {
-			if (!this.#closed) {
-				console.error("error reading setup stream", err);
-			}
+			if (err instanceof ProtocolViolation) this.#violated(err);
+			else if (!this.#closed) console.error("error reading setup stream", err);
 		} finally {
 			this.#close();
 		}
+	}
+
+	// The setup stream carries nothing but GOAWAY after SETUP.
+	async #readGoAway(controlStream: Stream, version: IetfVersion): Promise<GoAway> {
+		const typeId = await controlStream.reader.u53();
+		if (typeId !== GoAway.id) {
+			throw new ProtocolViolation(`unexpected message on setup stream: 0x${typeId.toString(16)}`);
+		}
+		return GoAway.decode(controlStream.reader, version);
 	}
 
 	/** Resolves when the session closes, decoding the peer's close code; see {@link Established.closed}. */

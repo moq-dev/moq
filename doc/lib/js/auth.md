@@ -14,7 +14,11 @@ contract with one import. It also generates keys, signs and verifies JWTs, and
 checks a connection path against a token's claims exactly as `moq auth serve`
 does. Tokens are interchangeable with the Rust side. Grants and claims are
 [`Pattern`](https://www.npmjs.com/package/@moq/pattern) unions: `foo` is one
-broadcast, `foo/**` is a subtree, `**` is everything.
+broadcast, `foo/**` is a subtree, `**` is everything. Parsed roles are `Access`
+values with path patterns and an optional bitrate cap; authorization preserves
+both. The relay currently refuses capped grants. An auth server may mint them,
+but a gateway must enforce them or refuse them; see
+[relay authentication](/bin/relay/auth#claims) before using them.
 
 ```bash
 bun add @moq/auth

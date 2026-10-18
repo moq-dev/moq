@@ -58,6 +58,12 @@ pub fn object_group(frames: usize, properties: bool) -> (broadcast::Producer, tr
 	(broadcast, track, group)
 }
 
+/// Declare a received track's end while the wire may still owe groups below it, as a
+/// subscriber does on SUBSCRIBE_END, for the pending-tail benchmark.
+pub fn finish_at_pending(track: &mut track::Producer, end: track::Position) -> crate::Result<()> {
+	track.finish_at_pending(end)
+}
+
 /// Every target, keyed by the name of its `fuzz_targets/<name>.rs` shim.
 pub const TARGETS: &[(&str, Target)] = &[
 	("lite", lite_wire),
@@ -260,6 +266,15 @@ impl AnnounceWriter {
 /// `origin` as a session connected to `peer` serves it, for the viewers bench.
 pub fn excluding(origin: crate::origin::Consumer, peer: crate::Hop) -> crate::origin::Consumer {
 	origin.excluding(peer)
+}
+
+/// A session's snapshot of its peer's initial announcements, for the synced bench.
+/// Drop it to land the snapshot.
+pub struct Snapshot(#[allow(dead_code)] crate::model::Snapshot);
+
+/// Start a snapshot under `prefix`, as a session requesting announcements there does.
+pub fn snapshot(origin: &crate::origin::Producer, prefix: &str) -> Snapshot {
+	Snapshot(origin.snapshot(prefix))
 }
 
 /// Add `n` publisher-side payload bytes on `(path, tier)`, creating the entry
@@ -598,6 +613,7 @@ impl Default for Messages {
 				frame_start: 0,
 			},
 			ietf_subscribe: ietf::Subscribe {
+				new_group: None,
 				request_id: ietf::RequestId(2),
 				track_namespace: Path::new("room/alice"),
 				track_name: "video".into(),
@@ -1243,6 +1259,47 @@ impl RequestValidity {
 		match self.0.start() {
 			crate::model::broadcast::RequestValidity::Period(route, _) => route,
 			_ => unreachable!("a source watch always captures a route lease"),
+		}
+	}
+}
+
+/// A relay's tracks, each with its downstream subscribers, for the private
+/// NEW_GROUP_REQUEST benchmark.
+pub struct NewGroups {
+	tracks: Vec<(track::Producer, Vec<track::Subscriber>, Option<crate::model::NewGroup>)>,
+	_broadcast: broadcast::Producer,
+}
+
+impl NewGroups {
+	/// `tracks` tracks of `subscribers` subscribers each, none of them asking for a group.
+	pub fn new(tracks: usize, subscribers: usize) -> Self {
+		let broadcast = broadcast::Producer::new(broadcast::Info::default());
+		let tracks = (0..tracks)
+			.map(|i| {
+				let track = broadcast.create_track(format!("{i}"), None).unwrap();
+				let subscribers = (0..subscribers).map(|_| track.subscribe(None)).collect();
+				(track, subscribers, None)
+			})
+			.collect();
+		Self {
+			tracks,
+			_broadcast: broadcast,
+		}
+	}
+
+	/// One subscriber of one track asks for `value`, returning the request its upstream
+	/// subscription now sees, or `None` if that did not change.
+	pub fn request(&mut self, track: usize, subscriber: usize, value: u64) -> Option<u64> {
+		let (producer, subscribers, asked) = &mut self.tracks[track];
+		subscribers[subscriber]
+			.update(track::Subscription {
+				new_group: crate::model::NewGroup::new(value, None),
+				..Default::default()
+			})
+			.unwrap();
+		match producer.poll_new_group(asked, &kio::Waiter::noop()) {
+			std::task::Poll::Ready(Ok(new_group)) => new_group.map(|new_group| new_group.value),
+			_ => None,
 		}
 	}
 }

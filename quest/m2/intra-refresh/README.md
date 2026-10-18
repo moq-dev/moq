@@ -48,8 +48,8 @@ make these presentation guarantees true even when sweep lengths change.
 
 ## Required
 
+- [Join earlier group](/quest/m2/intra-refresh/join-earlier-group.md) - max-delay decoders, native and browser, start a group before the live edge even when the live edge arrives first
 - [Dual decoder](/quest/m2/intra-refresh/dual-decoder.md) - js/watch runs a min-delay and a max-delay decoder and shows the max-delay picture whenever it has caught up
-- [Native dual decoder](/quest/m2/intra-refresh/native-dual-decoder.md) - moq-ffi and moq-c players get the same two-decoder live playback through `decode::Consumer`
 - [Play dual decoder](/quest/m2/intra-refresh/play-dual-decoder.md) - `moq play`'s paced pipeline reuses that pair
 - [Plan: recovery boundaries](/quest/m2/intra-refresh/plan-boundary.md) - settle safe precision and publication ordering before consumers rely on a duration
 - [Consumer warmup](/quest/m2/intra-refresh/consumer-warmup.md) - the transcoder decodes the groups covering `warmup` as history before each group, except at a true IDR
