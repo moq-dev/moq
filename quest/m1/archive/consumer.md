@@ -44,8 +44,9 @@ Guidance:
   remains ([History from the retained floor](/quest/m1/archive/history-floor.md)).
 - Keep a byte-bounded object LRU so neighbouring groups come from one GET.
 - When [Dynamic range requests](/quest/m1/subscribe-ranges/dynamic.md) lands, the
-  `track::Dynamic` handler resolves `Time(pts)` ends from the key listing,
-  whichever quest lands second.
+  `track::Dynamic` handler resolves a `Time(pts)` end by picking the object
+  from the key listing, then the group containing pts from that object's
+  group timestamps, whichever quest lands second.
 - Move `rs/moq-hls/src/export/archive_tests.rs` onto a consumer broadcast with
   its archived catalog, deleting the hand-built catalog.
 - Update `doc/bin/cli.md` and `doc/bin/hls.md` inline with an export, import,
