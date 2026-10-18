@@ -264,11 +264,12 @@ impl Send {
         Ok(false)
     }
 
-    /// The acknowledged prefix to report, once it reaches the offset a waiter is waiting for
+    /// The acknowledged prefix to report once the answer for the offset a waiter is waiting for
+    /// changes: the prefix reached it, or STOP_SENDING or a reset made it fail
     pub(super) fn take_acked(&mut self) -> Option<u64> {
+        let notify = self.notify?;
         let acked = self.pending.acked();
-        // A stopped stream fails its waiters instead
-        if self.stop_reason.is_some() || self.notify.is_none_or(|notify| acked < notify) {
+        if acked < notify && self.stop_reason.is_none() && notify <= self.pending.offset() {
             return None;
         }
         self.notify = None;

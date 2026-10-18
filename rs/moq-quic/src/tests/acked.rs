@@ -91,6 +91,41 @@ fn waits_for_contiguous_prefix() {
     assert!(pair.client_conn_mut(client_ch).stats().path.lost_packets > 0);
 }
 
+/// A waiter past the offset an event reports polls again and registers anew, so it learns of
+/// a later ACK too.
+#[test]
+fn later_waiter_registers_again() {
+    let _guard = subscribe();
+    let mut pair = pair(true);
+    let (client_ch, server_ch) = pair.connect();
+    let s = open(&mut pair, client_ch, server_ch);
+    pair.drive();
+    reported(&mut pair, client_ch, s);
+
+    // The first packet is held, and the second lost
+    pair.client_send(client_ch, s).write(b"first").unwrap();
+    let first = pair.client_send(client_ch, s).offset();
+    pair.client.drive(pair.time, pair.server.addr);
+    pair.client.delay_outbound();
+    pair.client_send(client_ch, s).write(b"second").unwrap();
+    let second = pair.client_send(client_ch, s).offset();
+    lose_client_packets(&mut pair);
+    assert_eq!(acked(&mut pair, client_ch, s, second), Ok(false));
+    assert_eq!(acked(&mut pair, client_ch, s, first), Ok(false));
+
+    // Only the first arrives at first
+    pair.client.finish_delay();
+    while acked(&mut pair, client_ch, s, first) != Ok(true) {
+        assert!(pair.step(), "never acknowledged");
+    }
+    assert_eq!(reported(&mut pair, client_ch, s), Some(first));
+    assert_eq!(acked(&mut pair, client_ch, s, second), Ok(false));
+
+    // The retransmission reports the second
+    pair.drive();
+    assert_eq!(reported(&mut pair, client_ch, s), Some(second));
+}
+
 /// Without a poll waiting on it, an acknowledgment is not reported.
 #[test]
 fn unpolled_is_not_reported() {
@@ -187,6 +222,7 @@ fn reset_fails_past_reliable_size() {
         Err(ClosedStream::default())
     );
     assert_eq!(acked(&mut pair, client_ch, s, kept), Ok(false));
+    assert_eq!(reported(&mut pair, client_ch, s), None);
 
     // The retransmitted prefix is acknowledged before the reset frees the stream
     pair.drive();
@@ -197,8 +233,33 @@ fn reset_fails_past_reliable_size() {
     );
 }
 
+/// A waiter whose offset a later reset drops learns so from the event.
+#[test]
+fn reset_reports_a_dropped_waiter() {
+    let _guard = subscribe();
+    let mut pair = pair(true);
+    let (client_ch, server_ch) = pair.connect();
+    let s = open(&mut pair, client_ch, server_ch);
+
+    let kept = pair.client_send(client_ch, s).offset();
+    pair.client_send(client_ch, s).write(b"dropped").unwrap();
+    let dropped = pair.client_send(client_ch, s).offset();
+    lose_client_packets(&mut pair);
+    reported(&mut pair, client_ch, s);
+    assert_eq!(acked(&mut pair, client_ch, s, dropped), Ok(false));
+
+    pair.client_send(client_ch, s)
+        .reset_at(kept, VarInt(42))
+        .unwrap();
+    assert!(reported(&mut pair, client_ch, s).is_some());
+    assert_eq!(
+        acked(&mut pair, client_ch, s, dropped),
+        Err(ClosedStream::default())
+    );
+}
+
 /// A peer that stopped reading will not read what it acknowledges, before or after the
-/// offset was taken.
+/// offset was taken, and a waiter learns so from the event.
 #[test]
 fn stop_sending_fails() {
     let _guard = subscribe();
@@ -218,7 +279,10 @@ fn stop_sending_fails() {
         Ok(Some(VarInt(7)))
     );
     let after = pair.client_send(client_ch, s).offset();
-    assert_eq!(reported(&mut pair, client_ch, s), None);
+    assert_eq!(
+        reported(&mut pair, client_ch, s),
+        Some(b"header".len() as u64)
+    );
     for offset in [before, after] {
         assert_eq!(
             acked(&mut pair, client_ch, s, offset),

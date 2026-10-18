@@ -113,7 +113,7 @@ pub(crate) struct StreamsState {
     /// Streams with outgoing data queued and outgoing datagrams, in the order to send them
     pub(super) pending: Schedule<StreamId, frame::Datagram>,
 
-    events: VecDeque<StreamEvent>,
+    pub(super) events: VecDeque<StreamEvent>,
     /// Streams blocked on connection-level flow control or stream window space
     ///
     /// Streams are only added to this list when a write fails.
@@ -420,6 +420,9 @@ impl StreamsState {
         let buffered = stream.pending.buffered();
         let reset = stream.abandon_reliable();
         self.buffered_data -= buffered - stream.pending.buffered();
+        if let Some(offset) = stream.take_acked() {
+            self.events.push_back(StreamEvent::Acked { id, offset });
+        }
         if !stream.is_pending() {
             self.pending.remove(&mut stream.slot);
         }

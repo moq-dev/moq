@@ -387,11 +387,10 @@ impl<'a> SendStream<'a> {
 
     /// Whether the peer acknowledged every byte before `offset`
     ///
-    /// A `false` notes to report a [`StreamEvent::Acked`] once the stream's contiguous
-    /// acknowledged prefix reaches `offset`, so poll again then. One event answers every offset
-    /// at or below the one it carries. Like a [`StreamEvent::Finished`] stream, an
-    /// acknowledgment only means the peer's QUIC stack holds the data, not that its application
-    /// read it.
+    /// A `false` notes to report a [`StreamEvent::Acked`] once the answer changes, so poll again
+    /// then. The stream holds only its lowest waiting offset, so every waiter on it polls again
+    /// on that event. Like a [`StreamEvent::Finished`] stream, an acknowledgment only means the
+    /// peer's QUIC stack holds the data, not that its application read it.
     ///
     /// Fails with [`ClosedStream`] once the peer will never acknowledge it, or no longer reads
     /// it: a reset dropped the data before `offset`, the peer sent STOP_SENDING, or the
@@ -457,6 +456,12 @@ impl<'a> SendStream<'a> {
         let buffered = stream.pending.buffered();
         let send = stream.reset(error_code, reliable_size, at);
         self.state.buffered_data -= buffered - stream.pending.buffered();
+        if let Some(offset) = stream.take_acked() {
+            self.state.events.push_back(StreamEvent::Acked {
+                id: self.id,
+                offset,
+            });
+        }
         // Only data below the Reliable Size is left to send
         if !stream.is_pending() {
             self.state.pending.remove(&mut stream.slot);
@@ -744,12 +749,12 @@ pub enum StreamEvent {
         /// Which stream has been finished
         id: StreamId,
     },
-    /// A send stream's contiguous acknowledged prefix reached an offset [`SendStream::acked`] is
-    /// waiting for
+    /// The answer changed for the lowest offset a [`SendStream::acked`] call is waiting for
     ///
-    /// Reported before a [`StreamEvent::Finished`] from the same ACK. Not reported after
-    /// STOP_SENDING, a reset that drops the data, or the connection closing, which fail
-    /// [`SendStream::acked`] instead.
+    /// The stream's contiguous acknowledged prefix reached it, or STOP_SENDING or a reset made it
+    /// fail. Every waiter on the stream polls again: one at or below `offset` is acknowledged, and
+    /// one past it registers again. Reported before a [`StreamEvent::Finished`] from the same ACK.
+    /// Not reported when the connection closes, which fails [`SendStream::acked`] instead.
     Acked {
         /// Which stream was acknowledged
         id: StreamId,
