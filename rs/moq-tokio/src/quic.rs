@@ -294,6 +294,22 @@ pub struct Config {
 	#[usage(value_hint = usage::ValueHint::DirPath)]
 	pub qlog: Option<PathBuf>,
 
+	/// Danger: write TLS session secrets to the file `SSLKEYLOGFILE` names. Defaults to off.
+	///
+	/// Anyone holding that file can decrypt captured traffic, so keep it to debugging.
+	/// Setting it without `SSLKEYLOGFILE` errors at init.
+	#[serde(skip_serializing_if = "Option::is_none")]
+	#[usage(
+		name = "quic-keylog",
+		long = "quic-keylog",
+		env = "MOQ_QUIC_KEYLOG",
+		setting = "quic.keylog",
+		default_missing = "true",
+		num_args = 0..=1,
+		require_equals = true,
+	)]
+	pub keylog: Option<bool>,
+
 	/// The old role-prefixed spellings, kept parsing but hidden. Never read as
 	/// settings: [`Config::deprecated`] names what replaced each one so a process
 	/// can say so and stop. Not a TOML surface (config files use the canonical
@@ -318,6 +334,7 @@ impl Default for Config {
 			stream_receive_window: None,
 			send_window: None,
 			qlog: None,
+			keylog: None,
 			legacy: Default::default(),
 		}
 	}
@@ -555,6 +572,10 @@ impl Config {
 			Some(_) if cfg!(not(feature = "qlog")) => Err(crate::Error::QlogUnsupported),
 			_ => Ok(()),
 		}?;
+		// rustls logs nothing without a path, which would hide the mistake the same way.
+		if self.keylog == Some(true) && std::env::var_os("SSLKEYLOGFILE").is_none_or(|path| path.is_empty()) {
+			return Err(crate::Error::KeylogUnset);
+		}
 		validate_idle_timeout(Some(self.resolve().idle_timeout))?;
 		validate_streams(self.max_streams)?;
 		validate_windows(self)
@@ -591,6 +612,7 @@ impl Config {
 			stream_receive_window: self.stream_receive_window.unwrap_or(DEFAULT_STREAM_RECEIVE_WINDOW),
 			send_window: self.send_window.unwrap_or(DEFAULT_SEND_WINDOW),
 			qlog: self.qlog.clone(),
+			keylog: self.keylog.unwrap_or(false),
 		}
 	}
 }
@@ -698,6 +720,8 @@ pub struct Resolved {
 	pub send_window: u64,
 	/// Directory to write qlog traces into, or `None` to not capture them.
 	pub qlog: Option<PathBuf>,
+	/// Whether to write TLS session secrets to `SSLKEYLOGFILE`.
+	pub keylog: bool,
 }
 
 impl Resolved {
@@ -759,6 +783,7 @@ mod tests {
 		assert!(!quic.mtu_discovery);
 		assert_eq!(quic.gso, None);
 		assert!(!quic.gso_disabled());
+		assert!(!quic.keylog);
 	}
 
 	#[test]
@@ -800,11 +825,13 @@ mod tests {
 			"delay",
 			"--quic-qlog",
 			"/tmp/qlog",
+			"--quic-keylog",
 		]);
 		assert_eq!(quic.max_streams, Some(5000));
 		assert_eq!(quic.gso, Some(false));
 		assert_eq!(quic.congestion_control, Some(CongestionControl::Delay));
 		assert_eq!(quic.qlog.as_deref(), Some(std::path::Path::new("/tmp/qlog")));
+		assert_eq!(quic.keylog, Some(true));
 	}
 
 	/// Every old role-prefixed spelling parses into a hidden field and is reported,
@@ -904,6 +931,25 @@ mod tests {
 		} else {
 			assert!(matches!(set.validate(), Err(crate::Error::QlogUnsupported)));
 		}
+	}
+
+	/// Asking for a key log nobody can read back fails instead of logging nothing.
+	#[cfg(feature = "_transport")]
+	#[test]
+	fn keylog_requires_a_path() {
+		// SAFETY: nextest runs each test in its own process, so nothing else reads the environment.
+		unsafe { std::env::remove_var("SSLKEYLOGFILE") };
+		assert!(Config::default().validate().is_ok());
+
+		let set = Config {
+			keylog: Some(true),
+			..Default::default()
+		};
+		assert!(matches!(set.validate(), Err(crate::Error::KeylogUnset)));
+
+		// SAFETY: as above.
+		unsafe { std::env::set_var("SSLKEYLOGFILE", "/tmp/keys.log") };
+		assert!(set.validate().is_ok());
 	}
 
 	/// The backends convert this duration with an infallible-by-panic `expect`, and the

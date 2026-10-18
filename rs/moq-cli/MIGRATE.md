@@ -4,6 +4,11 @@ How to update your invocation and config for each breaking change, newest first.
 
 ## Unreleased
 
+### Key logging is opt-in
+
+`SSLKEYLOGFILE` alone no longer writes TLS session secrets.
+Add `--quic-keylog` (`MOQ_QUIC_KEYLOG`, `[quic] keylog = true`) to capture them; without `SSLKEYLOGFILE` it stops startup.
+
 ### A fixed `--connect-bind` refuses a WAN cluster (#5674)
 
 `--connect` and `--cluster-connect` or `--cluster-connect-api` used to share one client; now each binds its own, so a fixed `--connect-bind` port with both stops startup.

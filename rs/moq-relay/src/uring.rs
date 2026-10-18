@@ -198,8 +198,13 @@ impl Workers {
 			.map(|alpn| alpn.as_bytes().to_vec())
 			.chain([b"h3".to_vec()])
 			.collect();
-		let mut server = moq_uring::quic::server::Config::new(tls.config(alpn)?);
 		let quic = quic.resolve();
+		let mut tls = tls.config(alpn)?;
+		if quic.keylog {
+			let tls = Arc::make_mut(&mut tls);
+			tls.key_log = Arc::new(rustls::KeyLogFile::new());
+		}
+		let mut server = moq_uring::quic::server::Config::new(tls);
 		server.transport = transport(&quic)?;
 
 		// GSO is a property of the socket, not the connection, so it rides the
