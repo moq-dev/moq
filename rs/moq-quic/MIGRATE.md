@@ -8,7 +8,7 @@ Each entry is a change from `quinn-proto`.
 
 ### `StreamEvent::Acked` (#5817)
 
-`StreamEvent` gained `Acked { id, offset }`, reported when the answer changes for the lowest offset a `SendStream::acked` call is waiting for: the stream's acknowledged prefix reached it, or STOP_SENDING or a reset made it fail.
+`StreamEvent` gained `Acked { id, offset }`, reported when the answer changes for the lowest offset a `SendStream::acked` call is waiting for: the stream's acknowledged prefix reached it, or `STOP_SENDING` or a reset made it fail.
 An exhaustive `match` needs an arm for it.
 
 ```rust
