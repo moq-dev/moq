@@ -257,8 +257,8 @@ export class GroupTooLarge extends Stream {
 }
 
 /**
- * A frame's timedness doesn't match its track: a timestamp on a track with no timescale, or
- * none on a track that has one.
+ * A frame's timestamp doesn't fit its track: a timestamp on a track with no timescale, none
+ * on a track that has one, or a group's first frame starting before the group below it.
  *
  * Raised locally by a frame or datagram write, and decoded from a moq-lite peer's
  * `TIMESTAMP_MISMATCH` reset. Mirrors the Rust `Error::TimestampMismatch`.
@@ -269,7 +269,7 @@ export class TimestampMismatch extends Stream {
 	constructor(options?: { cause?: unknown }) {
 		super(StreamCode.TimestampMismatch, {
 			...options,
-			message: "frame timestamp doesn't match track timescale",
+			message: "frame timestamp doesn't fit its track",
 		});
 		this.name = "TimestampMismatch";
 	}
@@ -376,6 +376,18 @@ function localStreamCode(err: unknown): StreamCode {
 	// Session-scoped: the peer learns which rule it broke from the session close, not from here.
 	if (err instanceof ProtocolViolation) return StreamCode.SessionClosed;
 	return StreamCode.Internal;
+}
+
+/**
+ * The transport refused a request stream or failed to grant stream credit before its deadline.
+ *
+ * This local failure is terminal and has no wire code. The request is not retried.
+ */
+export class NoStreamCredit extends Error {
+	constructor(options?: ErrorOptions) {
+		super("no stream credit", options);
+		this.name = "NoStreamCredit";
+	}
 }
 
 /**

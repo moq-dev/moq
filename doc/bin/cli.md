@@ -62,7 +62,8 @@ each session can publish or subscribe to, including stats; see the relay's
 [statistics configuration](/bin/relay/config#stats).
 
 `moq import --help` lists the sources and `moq import rtmp --help` a specific
-one; every flag is documented there.
+one; every flag is documented there. Flags renamed between releases are listed in
+[MIGRATE.md](https://github.com/moq-dev/moq/blob/main/rs/moq-cli/MIGRATE.md).
 
 ```bash
 # Publish a file (remux to MPEG-TS without re-encoding)
@@ -335,7 +336,11 @@ moq --cluster-lan --cluster-lan-secret /etc/moq/cluster.key import capture
 MoQ process and `moq-relay` on the LAN, with no other configuration. Without
 `--cluster-lan-secret`, anyone who can reach the listener joins, so leave it
 unset only on networks you trust. `--cluster-connect` is a MoQ side on its own,
-so it needs no `--connect`.
+so it needs no `--connect`. WAN cluster dials (`--cluster-connect`,
+`--cluster-connect-api`) share `--connect-bind` with `--connect`, and each binds
+it, while LAN dials take an ephemeral port. So a fixed `--connect-bind` port with
+both `--connect` and a WAN cluster peer is refused at startup: use port 0, or drop
+`--connect` (unset `MOQ_CONNECT` if it supplies the URL).
 
 ## Auth
 

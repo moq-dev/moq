@@ -27,7 +27,7 @@ that never merges; its numbers and a recommendation go in the
   stream lags and its stale groups reset; the publisher and other workers
   never wait.
 - Measure against the [epic](/quest/m2/perf/kio-channel-contention/README.md)'s
-  baseline: `just bench-lock` fanout and chat at 1, 4, and 16 workers, plus
+  baseline: `just bench-profile lock` fanout and chat at 1, 4, and 16 workers, plus
   relay CPU, resident memory (replicated group state), and glass-to-glass
   latency added by the hop. Lower lock wait alone is not a win; weigh it
   against the CPU, memory, and latency. Chat (`bench/workloads/chat.toml`)

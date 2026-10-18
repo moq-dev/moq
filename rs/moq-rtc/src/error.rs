@@ -62,10 +62,6 @@ pub enum Error {
 	#[error("rtc error: {0}")]
 	Rtc(String),
 
-	/// Error feeding a received UDP datagram into the WebRTC engine.
-	#[error("rtc input error: {0}")]
-	RtcInput(String),
-
 	/// An internal video bridge could not be initialized.
 	#[error("video bridge initialization failed")]
 	BridgeFailed,
@@ -82,10 +78,6 @@ impl From<reqwest::Error> for Error {
 impl Error {
 	pub(crate) fn rtc(err: impl std::fmt::Display) -> Self {
 		Self::Rtc(err.to_string())
-	}
-
-	pub(crate) fn rtc_input(err: impl std::fmt::Display) -> Self {
-		Self::RtcInput(err.to_string())
 	}
 }
 

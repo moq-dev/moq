@@ -71,7 +71,7 @@ revised in the #5734 review.
   `doc/lib/*`. The ratio reaches them through `MoqTrackInfo::refresh` from
   [core](/quest/m1/refresh/core.md), and the moq-ffi driver above refreshes
   their producers with no wrapper change. Update the moq-json and `@moq/json`
-  READMEs and the Unreleased section of `doc/setup/upgrade.md`.
+  READMEs and add an entry to each affected package's `MIGRATE.md`.
 - moq-flate is unchanged. Its snapshot mode already opens a group per
   update, and its stream mode keeps one group by design.
 

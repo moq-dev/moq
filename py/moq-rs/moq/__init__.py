@@ -11,7 +11,7 @@ from . import audio as audio
 from . import flate as flate
 from . import json as json
 from . import video as video
-from .client import Client, connect
+from .client import Client, CongestionControl, connect, qlog_supported, versions
 from .epoch import epoch_time, mint_epoch
 from .errors import is_auth, is_shutdown, protocol_error
 from .log import log_level
@@ -48,6 +48,7 @@ from .subscribe import (
     TrackConsumer,
 )
 from .types import (
+    Anchor,
     AudioCodec,
     AudioEncoderInput,
     AudioSampleFormat,
@@ -58,8 +59,10 @@ from .types import (
     ErrorScope,
     FetchGroupOptions,
     Frame,
+    Order,
     ProtocolError,
     ProtocolKind,
+    Range,
     Route,
     Subscription,
     TrackInfo,
@@ -72,6 +75,7 @@ from .types import (
 )
 
 __all__ = [
+    "Anchor",
     "Announce",
     "AnnounceConsumer",
     "AnnouncedBroadcast",
@@ -90,6 +94,7 @@ __all__ = [
     "BroadcastProducer",
     "BroadcastRequest",
     "Client",
+    "CongestionControl",
     "ConnectionStats",
     "ConnectionStatus",
     "Datagram",
@@ -106,6 +111,8 @@ __all__ = [
     "OriginConsumer",
     "OriginDynamic",
     "OriginProducer",
+    "Order",
+    "Range",
     "Request",
     "Reservation",
     "Route",
@@ -132,6 +139,8 @@ __all__ = [
     "log_level",
     "mint_epoch",
     "protocol_error",
+    "qlog_supported",
+    "versions",
 ]
 
 from . import media as media

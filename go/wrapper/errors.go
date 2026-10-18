@@ -85,6 +85,8 @@ var (
 	ErrInvalidPattern = ffi.ErrMoqErrorInvalidPattern
 	// ErrUnresolvableBroadcast is returned when a referenced sibling broadcast cannot be resolved without an origin.
 	ErrUnresolvableBroadcast = ffi.ErrMoqErrorUnresolvableBroadcast
+	// ErrUnsupportedCatalog is returned when a catalog needs a newer moq-hang draft than this build reads; upgrade to read it.
+	ErrUnsupportedCatalog = ffi.ErrMoqErrorUnsupportedCatalog
 	// ErrLog is returned when installing or configuring the native log subscriber fails.
 	ErrLog = ffi.ErrMoqErrorLog
 	// ErrConfig is returned when Dial or Listen is given a value the native side cannot use.

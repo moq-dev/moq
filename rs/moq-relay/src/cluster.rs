@@ -9,6 +9,7 @@ use std::{
 };
 
 use anyhow::Context;
+use futures::FutureExt as _;
 use moq_net::origin;
 use moq_net::{Hop, stats::Tier};
 use reqwest_middleware::ClientWithMiddleware;
@@ -433,16 +434,27 @@ impl DialSources {
 	}
 }
 
+/// A dial task that ends once its [`DialEntry`] is replaced or the [`DialMap`]
+/// drops, so a cancelled `run` takes the dynamic dials, spawned outside its
+/// `JoinSet`, down with it.
+struct DialTask(AbortHandle);
+
+impl Drop for DialTask {
+	fn drop(&mut self) {
+		self.0.abort();
+	}
+}
+
 /// One entry in [`DialMap`].
 struct DialEntry {
-	handle: AbortHandle,
+	task: DialTask,
 	sources: DialSources,
 	active: DialSource,
 }
 
-/// Map of in-flight cluster dials, keyed by canonical peer identity. Cloneable: the inner
-/// map is shared via `Arc<Mutex<_>>` so the discovery tasks and the static-seed
-/// phase write to the same set of entries.
+/// Map of in-flight cluster dials, keyed by canonical peer identity, owning each
+/// dial's task. Cloneable: the inner map is shared via `Arc<Mutex<_>>` so the
+/// discovery tasks and the static-seed phase write to the same set of entries.
 #[derive(Clone, Default)]
 struct DialMap {
 	inner: Arc<Mutex<HashMap<String, DialEntry>>>,
@@ -479,20 +491,19 @@ impl DialMap {
 			let replace = entry.active == source && entry.sources.get(source) != Some(&target);
 			entry.sources.set(source, target.clone());
 			if replace {
-				entry.handle.abort();
-				entry.handle = spawn(target);
+				entry.task = DialTask(spawn(target));
 			}
 			return;
 		}
 
 		let key = target.key.clone();
-		let handle = spawn(target.clone());
+		let task = DialTask(spawn(target.clone()));
 		let mut sources = DialSources::default();
 		sources.set(source, target);
 		map.insert(
 			key,
 			DialEntry {
-				handle,
+				task,
 				sources,
 				active: source,
 			},
@@ -520,14 +531,12 @@ impl DialMap {
 			let next_target = next_target.clone();
 			entry.active = next_source;
 			if active_target.as_ref() != Some(&next_target) {
-				entry.handle.abort();
-				entry.handle = spawn(next_target);
+				entry.task = DialTask(spawn(next_target));
 			}
 			return;
 		}
 
-		let entry = map.remove(peer).expect("entry exists");
-		entry.handle.abort();
+		map.remove(peer);
 	}
 
 	/// Reconcile the API source against `desired`, including changes to a peer's
@@ -550,6 +559,148 @@ impl DialMap {
 			.collect();
 		for peer in removed {
 			self.release(&peer, DialSource::Api, &mut spawn);
+		}
+	}
+}
+
+/// Every dial task and QUIC client the cluster dials peers with, so
+/// [`Cluster::close`] can end each link and send the peer its close before the
+/// runtime stops: a dropped QUIC link only queues the close, and the peer then
+/// keeps the link and its routes until its idle timeout.
+#[derive(Clone)]
+struct Dialers {
+	state: Arc<Mutex<DialersPhase>>,
+	/// Set on close. Each dial task holds a receiver, so [`watch::Sender::closed`]
+	/// waits for every one of them to end.
+	///
+	/// [`watch::Sender::closed`]: tokio::sync::watch::Sender::closed
+	stop: Arc<tokio::sync::watch::Sender<bool>>,
+}
+
+struct DialersPhase {
+	/// `None` once closed, which refuses any further dial.
+	open: Option<DialersState>,
+	/// The shutdown the first close started, which every close awaits, so none
+	/// returns before it is done.
+	closing: Option<futures::future::Shared<futures::future::BoxFuture<'static, ()>>>,
+}
+
+struct DialersState {
+	clients: HashMap<u64, moq_tokio::Client>,
+	next: u64,
+	/// Cloned into each background close, so `finished` ends once they all have.
+	closing: tokio::sync::mpsc::Sender<()>,
+	finished: tokio::sync::mpsc::Receiver<()>,
+}
+
+impl Dialers {
+	fn new() -> Self {
+		let (closing, finished) = tokio::sync::mpsc::channel(1);
+		Self {
+			state: Arc::new(Mutex::new(DialersPhase {
+				open: Some(DialersState {
+					clients: HashMap::new(),
+					next: 0,
+					closing,
+					finished,
+				}),
+				closing: None,
+			})),
+			stop: Arc::new(tokio::sync::watch::Sender::new(false)),
+		}
+	}
+
+	fn lock(&self) -> std::sync::MutexGuard<'_, DialersPhase> {
+		self.state.lock().unwrap_or_else(PoisonError::into_inner)
+	}
+
+	/// Keep `client` until [`Self::close`].
+	fn insert(&self, client: &moq_tokio::Client) -> anyhow::Result<u64> {
+		let mut phase = self.lock();
+		let state = phase.open.as_mut().context("cluster closed")?;
+		let id = state.next;
+		state.next += 1;
+		state.clients.insert(id, client.clone());
+		Ok(id)
+	}
+
+	/// Keep `client` until [`Self::close`] or until the guard drops, which closes it
+	/// in the background.
+	fn hold(&self, client: &moq_tokio::Client) -> anyhow::Result<Held> {
+		Ok(Held {
+			id: self.insert(client)?,
+			dialers: self.clone(),
+		})
+	}
+
+	/// Run one dial task until it ends or [`Self::close`] stops it.
+	async fn supervise(&self, dial: impl std::future::Future<Output = ()>) {
+		let mut stop = self.stop.subscribe();
+		tokio::select! {
+			// First, so a dial spawned just before the close never starts.
+			biased;
+			_ = stop.wait_for(|stopped| *stopped) => {}
+			() = dial => {}
+		}
+	}
+
+	/// Stop every dial task and close every client, including those a dropped
+	/// guard is still closing, and refuse further dials.
+	async fn close(&self) {
+		let closing = {
+			let mut phase = self.lock();
+			let phase = &mut *phase;
+			phase
+				.closing
+				.get_or_insert_with(|| {
+					let state = phase.open.take().expect("open until the first close");
+					Self::shutdown(state, self.stop.clone()).boxed().shared()
+				})
+				.clone()
+		};
+		closing.await;
+	}
+
+	async fn shutdown(state: DialersState, stop: Arc<tokio::sync::watch::Sender<bool>>) {
+		stop.send_replace(true);
+		let DialersState {
+			clients,
+			closing,
+			mut finished,
+			..
+		} = state;
+		futures::future::join_all(clients.into_values().map(moq_tokio::Client::close)).await;
+		drop(closing);
+		// Nothing is ever sent: this returns `None` once every sender has dropped.
+		let _ = finished.recv().await;
+		// Each stopped task dropped its link, which ends a non-QUIC one.
+		stop.closed().await;
+	}
+}
+
+/// A dial's claim on its client in [`Dialers`].
+struct Held {
+	dialers: Dialers,
+	id: u64,
+}
+
+impl Drop for Held {
+	fn drop(&mut self) {
+		let mut phase = self.dialers.lock();
+		// Already taken by `Dialers::close`, which closes the client itself.
+		let Some(state) = phase.open.as_mut() else {
+			return;
+		};
+		let Some(client) = state.clients.remove(&self.id) else {
+			return;
+		};
+		let closing = state.closing.clone();
+		// Without a runtime nothing could send the close anyway.
+		if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+			runtime.spawn(async move {
+				client.close().await;
+				drop(closing);
+			});
 		}
 	}
 }
@@ -811,14 +962,14 @@ struct LanAuth {
 /// Construction settings for a [`Cluster`]: identity, discovery, and the origin cache.
 ///
 /// The origin is built once from these, so cache settings cannot detach a handle
-/// taken after construction. Independent services ([`Cluster::with_client`],
+/// taken after construction. Independent services ([`Cluster::with_connect`],
 /// [`Cluster::with_stats`]) attach afterwards without rebuilding it.
 #[derive(Default)]
 #[non_exhaustive]
 pub struct Options {
 	/// Request caps for ordinary client sessions.
 	pub session: crate::limits::Session,
-	/// Request caps for authenticated peers and outbound cluster links.
+	/// Request caps and QUIC limits for authenticated peers and outbound cluster links.
 	pub peer: crate::limits::Peer,
 	/// Cluster identity, peers, and discovery.
 	pub config: Config,
@@ -872,19 +1023,34 @@ impl Started {
 	/// Run the cluster until it stops, or until a task it cannot serve without (its
 	/// origin driver, cache governor, or certificate reload) panics.
 	///
-	/// Standalone, this only waits for such a panic.
+	/// Standalone, this only waits for such a panic. Returning, a failure
+	/// included, closes every dial as [`Cluster::close`] does. A cancelled `run`
+	/// starts each link's close but cannot wait for it, so a caller that must have
+	/// peers told before exiting awaits [`Cluster::close`] or lets `run` return.
 	pub async fn run(self) -> anyhow::Result<()> {
+		// Registered only now, so a start that fails or never runs drops its client
+		// and frees the bind. A closed cluster has nothing left to run.
+		if let Some(dial) = &self.cluster.dial
+			&& self.cluster.dialers.insert(dial).is_err()
+		{
+			return Ok(());
+		}
 		let critical = self.cluster.critical.clone();
+		let dialers = self.cluster.dialers.clone();
 		let work = async move {
 			match self.work {
 				Some(work) => self.cluster.run_work(work).await,
 				None => std::future::pending().await,
 			}
 		};
-		tokio::select! {
+		let result = tokio::select! {
 			res = work => res,
 			err = critical.failed() => Err(err),
-		}
+		};
+		// The dial tasks went with `work`, and a caller that consumed the cluster
+		// has no handle left to close it, so each peer gets its close here.
+		dialers.close().await;
+		result
 	}
 }
 
@@ -915,20 +1081,27 @@ struct Work {
 /// origin. Loop prevention and route preference come from the hop list carried
 /// on each announced route (see [`moq_net::origin::Route`]).
 ///
-/// Construct with [`Cluster::new`], then attach a QUIC client and (optionally)
+/// Construct with [`Cluster::new`], then attach a dial template and (optionally)
 /// a [`stats::Registry`](moq_net::stats::Registry) with the `with_*` builder
 /// methods. Those builders do not rebuild the origin. A cluster without a
-/// client can serve local sessions but cannot dial remote peers.
+/// dial template can serve local sessions but cannot dial remote peers.
 #[derive(Clone)]
 pub struct Cluster {
 	session_limits: moq_net::session::Limits,
 	peer_limits: moq_net::session::Limits,
+	peer_quic: crate::limits::Quic,
 	config: Config,
-	client: Option<moq_tokio::Client>,
-	/// Dial template for LAN peers that pin a fingerprint; static and API
-	/// dials keep [`Self::client`].
+	/// Dial template every peer dial is built from; see [`Self::peer_client`].
 	connect: Option<moq_tokio::connect::Config>,
 	quic: Option<moq_tokio::quic::Config>,
+	#[cfg(feature = "iroh")]
+	iroh: Option<moq_tokio::iroh::Endpoint>,
+	/// The client static and API peers share, on the template's bind address, so
+	/// a fixed `[connect]` bind port stays the cluster's egress port. Built by
+	/// [`Self::start`] and joins [`Self::dialers`] once [`Started::run`] begins.
+	dial: Option<moq_tokio::Client>,
+	/// Every dial client, shared by all clones, for [`Self::close`].
+	dialers: Dialers,
 	/// Bound listen port and optional generated-certificate fingerprint.
 	advertise: Option<LanAdvertise>,
 	/// Set by [`Self::start`] when LAN discovery is on, so inbound
@@ -997,6 +1170,12 @@ impl Cluster {
 		}
 	}
 
+	/// The QUIC limits an admitted session widens to, if any: only a `peer` grant does.
+	#[cfg(any(feature = "quic", all(target_os = "linux", feature = "_uring")))]
+	pub(crate) fn quic_limits(&self, lease: &auth::Lease) -> Option<moq_quic::Limits> {
+		lease.token().peer.then(|| self.peer_quic.limits())
+	}
+
 	/// The origin ID used by this relay on the wire.
 	pub fn id(&self) -> u64 {
 		self.origin.hop().id()
@@ -1005,7 +1184,7 @@ impl Cluster {
 	/// Creates a cluster with one origin, using [`Options`] for identity
 	/// and cache.
 	///
-	/// Use [`with_client`](Self::with_client) to enable dialing remote peers
+	/// Use [`with_connect`](Self::with_connect) to enable dialing remote peers
 	/// (required when `config.connect` is non-empty), and
 	/// [`with_stats`](Self::with_stats) to enable metrics publishing. Those
 	/// builders do not rebuild the origin.
@@ -1016,6 +1195,7 @@ impl Cluster {
 	///
 	/// Errors if `config.id` is set but invalid: it must be non-zero and below
 	/// 2^62 (the wire varint limit). An unset id picks a fresh random origin.
+	/// Errors too if the `peer.quic` receive window does not fit a QUIC varint.
 	pub fn new(options: Options) -> anyhow::Result<Self> {
 		let Options {
 			config,
@@ -1037,6 +1217,7 @@ impl Cluster {
 		// matching the `--cluster-connect-api` validation, instead of silently
 		// keeping the first entry when dials spawn.
 		parse_peer_list(config.connect.clone(), None).context("invalid --cluster-connect peer list")?;
+		peer.quic.validate()?;
 		let critical = crate::critical::Critical::default();
 		let mut origin_config = origin::Config::new(id);
 		if let Some(cache) = cache {
@@ -1055,10 +1236,14 @@ impl Cluster {
 		Ok(Cluster {
 			session_limits: session.resolve(),
 			peer_limits: peer.resolve(),
+			peer_quic: peer.quic,
 			config,
-			client: None,
 			connect: None,
 			quic: None,
+			dial: None,
+			dialers: Dialers::new(),
+			#[cfg(feature = "iroh")]
+			iroh: None,
 			advertise: None,
 			#[cfg(feature = "cluster-lan")]
 			lan_auth: Arc::new(std::sync::OnceLock::new()),
@@ -1175,23 +1360,22 @@ impl Cluster {
 		})
 	}
 
-	/// Attach a QUIC client used to dial cluster peers.
+	/// Attach the dial template every peer dial is built from, with the
+	/// [`Options::peer`] QUIC limits. Static and API peers share one socket on its
+	/// bind address; each LAN dial takes an ephemeral port.
 	///
-	/// Required when `config.connect` is non-empty; [`start`](Self::start) returns
-	/// an error otherwise.
-	pub fn with_client(mut self, client: moq_tokio::Client) -> Self {
-		self.client = Some(client);
-		self
-	}
-
-	/// Attach the dial template used to build a per-peer client for LAN mesh
-	/// dials (fingerprint pinning, request-path versions, ephemeral bind).
-	///
-	/// Required when `--cluster-lan` is on; [`start`](Self::start) returns an
+	/// Required when any peer is configured; [`start`](Self::start) returns an
 	/// error otherwise.
 	pub fn with_connect(mut self, connect: moq_tokio::connect::Config, quic: moq_tokio::quic::Config) -> Self {
 		self.connect = Some(connect);
 		self.quic = Some(quic);
+		self
+	}
+
+	/// Dial `iroh://` peers through this endpoint.
+	#[cfg(feature = "iroh")]
+	pub fn with_iroh(mut self, iroh: moq_tokio::iroh::Endpoint) -> Self {
+		self.iroh = Some(iroh);
 		self
 	}
 
@@ -1207,9 +1391,9 @@ impl Cluster {
 
 	/// Attach the client TLS config used for `--cluster-connect-api` peer-list
 	/// fetches. Only its client identity is shared; the API has separate server
-	/// trust and verifies the hostname in its URL. Required for an HTTP(S) API; pass the same config
-	/// used to build the QUIC [`with_client`](Self::with_client) so the endpoint
-	/// sees this relay's cluster certificate.
+	/// trust and verifies the hostname in its URL. Required for an HTTP(S) API; pass the TLS config of
+	/// the [`with_connect`](Self::with_connect) template so the endpoint sees this
+	/// relay's cluster certificate.
 	pub fn with_client_tls(mut self, tls: rustls::ClientConfig) -> Self {
 		self.client_tls = Some(Arc::new(tls));
 		self
@@ -1358,6 +1542,16 @@ impl Cluster {
 		Ok(())
 	}
 
+	/// Close every peer link this cluster dialed, on any transport, and wait until
+	/// each peer has been sent its close. Call it before the runtime stops: a
+	/// dropped link only queues its close, so the peer would keep the link and its
+	/// routes until its idle timeout. Dialing stops for good, on every clone, and
+	/// every caller waits for the same shutdown. [`Relay::run`](crate::Relay::run)
+	/// calls it on the way out.
+	pub async fn close(&self) {
+		self.dialers.close().await;
+	}
+
 	/// Validate the cluster config and bind anything that can fail, returning a
 	/// [`Started`] to run.
 	///
@@ -1367,9 +1561,9 @@ impl Cluster {
 	/// would release systemd's dependent units on a relay that is about to exit.
 	/// Call this before signalling readiness, and hand the result to `run`.
 	///
-	/// Bails when peers are configured to dial but no client was attached via
-	/// [`with_client`](Self::with_client).
-	pub async fn start(self) -> anyhow::Result<Started> {
+	/// Bails when peers are configured to dial but no usable dial template was
+	/// attached via [`with_connect`](Self::with_connect).
+	pub async fn start(mut self) -> anyhow::Result<Started> {
 		let node = self.config.node.clone();
 		let lan = self.lan();
 		#[cfg(feature = "cluster-lan")]
@@ -1406,11 +1600,6 @@ impl Cluster {
 			});
 		}
 
-		anyhow::ensure!(
-			self.client.is_some(),
-			"cluster peers configured but no QUIC client attached (call Cluster::with_client)"
-		);
-
 		// Build here so malformed API roots fail startup, before background work.
 		let http = if self.config.connect_api.as_deref().is_some_and(connect_api_is_http) {
 			let tls = self
@@ -1445,14 +1634,28 @@ impl Cluster {
 					.expect("--cluster-lan needs Cluster::with_advertise");
 				let secret = self.config.lan.secret.as_deref();
 				let app = self.config.lan.app.clone().unwrap_or_default();
-				let discovery = lan_discovery(advertise, node.as_deref(), secret, app).await?;
-				let _ = self.lan_auth.set(LanAuth {
-					credential: discovery.credential().to_string(),
-				});
-				Some(discovery)
+				Some(lan_discovery(advertise, node.as_deref(), secret, app).await?)
 			}
 			false => None,
 		};
+
+		// Built here, so a bad template fails startup rather than every dial, and
+		// last, so a start that fails earlier never binds a fixed `[connect]` port.
+		// Static and API peers share this client; LAN dials each build their own,
+		// so a LAN-only node builds one only to check the template.
+		let statics = !self.config.connect.is_empty() || self.config.connect_api.is_some();
+		let client = self
+			.peer_client(!statics, None)
+			.context("cluster peers configured but the dial template is unusable")?;
+		self.dial = statics.then_some(client);
+
+		// After everything fallible, so a failed start leaves no credential behind.
+		#[cfg(feature = "cluster-lan")]
+		if let Some(discovery) = &discovery {
+			let _ = self.lan_auth.set(LanAuth {
+				credential: discovery.credential().to_string(),
+			});
+		}
 
 		Ok(Started {
 			work: Some(Work {
@@ -1720,9 +1923,14 @@ impl Cluster {
 
 	async fn supervise_remote(self, target: DialTarget, token: String) {
 		let log_peer = target.key.clone();
-		if let Err(err) = self.run_remote(&target, token).await {
-			tracing::warn!(%err, peer = %log_peer, "cluster peer connection ended");
-		}
+		let dialers = self.dialers.clone();
+		dialers
+			.supervise(async move {
+				if let Err(err) = self.run_remote(&target, token).await {
+					tracing::warn!(%err, peer = %log_peer, "cluster peer connection ended");
+				}
+			})
+			.await;
 	}
 
 	#[tracing::instrument("remote", skip_all, err, fields(remote = %target.key))]
@@ -1792,12 +2000,19 @@ impl Cluster {
 		let redacted = moq_tokio::RedactedUrl::new(first);
 		tracing::info!(url = %redacted, "dialing cluster peer");
 
-		let client = if target.lan {
-			self.lan_client(target.fingerprint.as_deref())?
-		} else {
-			self.client
-				.clone()
-				.context("internal: cluster peer dial without an attached QUIC client")?
+		// A LAN client is this dial's alone, so it closes when the dial ends.
+		let (client, _held) = match target.lan {
+			true => {
+				let client = self.peer_client(true, target.fingerprint.as_deref())?;
+				let held = self.dialers.hold(&client)?;
+				(client, Some(held))
+			}
+			false => (
+				self.dial
+					.clone()
+					.context("internal: cluster peer dial before Cluster::start")?,
+				None,
+			),
 		};
 
 		// Cluster dials use their configured stats tier. Cluster peers carry no auth
@@ -1845,31 +2060,42 @@ impl Cluster {
 		}
 	}
 
-	/// A client for one LAN dial: request-path versions, ephemeral bind, and
-	/// the advertised fingerprint pinned on a clean TLS config so the relay's
-	/// CA roots cannot combine with it.
-	fn lan_client(&self, fingerprint: Option<&str>) -> anyhow::Result<moq_tokio::Client> {
+	/// A peer client from the dial template, with the [`Options::peer`] QUIC
+	/// limits, since every dial is a peer. A LAN client is built per dial, so it
+	/// takes an ephemeral port beside the shared static client, keeps only
+	/// request-path versions, and pins the advertised fingerprint on a clean TLS
+	/// config, so the relay's CA roots cannot combine with it.
+	fn peer_client(&self, lan: bool, fingerprint: Option<&str>) -> anyhow::Result<moq_tokio::Client> {
 		let mut connect = self
 			.connect
 			.clone()
-			.context("internal: LAN dial without Cluster::with_connect")?;
-		connect.backoff.timeout = Some(std::time::Duration::ZERO);
-		connect.once = Some(false);
-		let mut bind = connect.resolve().bind;
-		bind.set_port(0);
-		connect.bind = Some(bind);
-		connect.version = connect
-			.versions()
-			.iter()
-			.filter(|version| Self::carries_request_path(version))
-			.copied()
-			.collect();
+			.context("cluster dial without a dial template (call Cluster::with_connect)")?;
+		if lan {
+			let mut bind = connect.resolve().bind;
+			bind.set_port(0);
+			connect.bind = Some(bind);
+			connect.backoff.timeout = Some(std::time::Duration::ZERO);
+			connect.once = Some(false);
+			connect.version = connect
+				.versions()
+				.iter()
+				.filter(|version| Self::carries_request_path(version))
+				.copied()
+				.collect();
+		}
 		if let Some(fingerprint) = fingerprint {
 			connect.tls = moq_tokio::tls::Connect::default();
 			connect.tls.fingerprint = vec![fingerprint.to_string()];
 		}
-		let quic = self.quic.clone().unwrap_or_default();
-		Ok(connect.init(quic)?)
+		let mut quic = self.quic.clone().unwrap_or_default();
+		self.peer_quic.dial(&mut quic);
+		let client = connect.init(quic)?;
+		#[cfg(feature = "iroh")]
+		let client = match &self.iroh {
+			Some(iroh) => client.with_iroh(iroh.clone()),
+			None => client,
+		};
+		Ok(client)
 	}
 
 	/// Start a reconnecting LAN session from discovered details. Tests wire this
@@ -1878,7 +2104,7 @@ impl Cluster {
 	fn dial_lan_target(&self, target: &DialTarget) -> anyhow::Result<moq_tokio::Connection> {
 		let addrs = moq_tokio::Addrs::collect(target.addrs()).context("peer advertised no reachable address")?;
 		let mut client = self
-			.lan_client(target.fingerprint.as_deref())?
+			.peer_client(true, target.fingerprint.as_deref())?
 			.with_origin(self.origin.clone().peer());
 		if let Some(cost) = target.cost {
 			client = client.with_cost(cost);
@@ -3354,6 +3580,296 @@ mod tests {
 			try_next_announced(&mut local).is_none(),
 			"a peer's broadcast is not local"
 		);
+	}
+
+	/// A start that fails binds no dial socket, so a corrected start on the same
+	/// fixed `[connect]` port succeeds. One that never runs registers nothing, so
+	/// dropping it releases its client rather than leaving it to `close`.
+	#[tokio::test]
+	async fn a_failed_start_leaves_the_dial_bind_free() {
+		let _ = moq_tokio::crypto::install_default();
+		let dir = tempfile::tempdir().expect("tempdir");
+		let token = dir.path().join("token");
+		let config = Config {
+			connect: vec![Peer::new("moql://127.0.0.1:9/")],
+			token: Some(token.clone()),
+			..Default::default()
+		};
+		let mut connect = moq_tokio::connect::Config::default();
+		// Borrow a free port from the OS, then hand it to the dial template.
+		connect.bind = Some(
+			std::net::UdpSocket::bind("127.0.0.1:0")
+				.expect("probe socket")
+				.local_addr()
+				.expect("probe addr"),
+		);
+		let cluster = new_cluster(config)
+			.expect("cluster")
+			.with_connect(connect, Default::default());
+
+		let err = cluster.clone().start().await.expect_err("the token file is missing");
+		assert!(format!("{err:#}").contains("cluster token"), "{err:#}");
+		std::fs::write(&token, "secret").expect("write token");
+		let _started = cluster.clone().start().await.expect("a corrected start binds the port");
+		let registered = cluster.dialers.lock().open.as_ref().expect("open").clients.len();
+		assert_eq!(registered, 0, "a start registers its client only once it runs");
+	}
+
+	/// A QUIC endpoint that accepts the ALPNs of `connect` and speaks no MoQ, so a
+	/// test sees the transport close of the dial itself. `idle` outlasts any wait.
+	#[cfg(feature = "quic")]
+	fn bare_quic_server(
+		connect: &moq_tokio::connect::Config,
+		idle: std::time::Duration,
+	) -> moq_tokio::quic::driver::Endpoint {
+		use moq_tokio::quic::driver;
+		let key = rcgen::KeyPair::generate().expect("keypair");
+		let cert = rcgen::CertificateParams::new(vec!["localhost".to_string()])
+			.expect("cert params")
+			.self_signed(&key)
+			.expect("self-signed cert");
+		let mut tls = rustls::ServerConfig::builder()
+			.with_no_client_auth()
+			.with_single_cert(
+				vec![cert.der().clone()],
+				rustls::pki_types::PrivateKeyDer::Pkcs8(key.serialize_der().into()),
+			)
+			.expect("server tls");
+		tls.alpn_protocols = connect
+			.versions()
+			.alpns()
+			.iter()
+			.map(|alpn| alpn.as_bytes().to_vec())
+			.collect();
+		let crypto = driver::crypto::rustls::QuicServerConfig::try_from(tls).expect("quic crypto");
+		let mut transport = driver::TransportConfig::default();
+		transport.max_idle_timeout(Some(idle.try_into().expect("idle timeout")));
+		let mut server_config = driver::ServerConfig::with_crypto(Arc::new(crypto));
+		server_config.transport_config(Arc::new(transport));
+		driver::Endpoint::server(server_config, "127.0.0.1:0".parse().unwrap()).expect("server")
+	}
+
+	/// Cancelling `run` aborts the dials a peer list started, which run outside
+	/// the tasks of `run` itself, so none keeps redialing with nothing left to close it.
+	#[cfg(feature = "quic")]
+	#[tokio::test]
+	async fn cancelling_run_stops_its_dynamic_dials() {
+		const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+		const IDLE: std::time::Duration = std::time::Duration::from_secs(300);
+		let _ = moq_tokio::crypto::install_default();
+
+		let mut connect = moq_tokio::connect::Config::default();
+		connect.tls.insecure = Some(true);
+		let server = bare_quic_server(&connect, IDLE);
+		let port = server.local_addr().expect("server addr").port();
+		let dir = tempfile::tempdir().expect("tempdir");
+		let peers = dir.path().join("peers.json");
+		std::fs::write(&peers, format!(r#"["moql://127.0.0.1:{port}/"]"#)).expect("write peers");
+
+		let config = Config {
+			connect_api: Some(peers.display().to_string()),
+			..Default::default()
+		};
+		let mut quic = moq_tokio::quic::Config::default();
+		quic.idle_timeout = Some(IDLE);
+		let cluster = new_cluster(config).expect("cluster").with_connect(connect, quic);
+		let started = cluster.clone().start().await.expect("start");
+		let running = tokio::spawn(started.run());
+
+		let _conn = tokio::time::timeout(TIMEOUT, server.accept())
+			.await
+			.expect("dial timeout")
+			.expect("incoming")
+			.await
+			.expect("handshake");
+		running.abort();
+		let _ = running.await;
+		// Each dial holds a stop receiver until its task ends.
+		tokio::time::timeout(TIMEOUT, cluster.dialers.stop.closed())
+			.await
+			.expect("a peer-list dial outlived its cancelled run");
+	}
+
+	/// A critical failure ends `run`, which closes the dials on the way out: the
+	/// caller consumed the cluster, so nothing else could. The dialing runtime stops
+	/// right after, as a process exit would, and the peer's idle timeout is far past
+	/// the wait, so only the close explains the link ending.
+	#[cfg(feature = "quic")]
+	#[tokio::test]
+	async fn a_critical_failure_closes_the_dials() {
+		use moq_tokio::quic::driver;
+		const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+		const IDLE: std::time::Duration = std::time::Duration::from_secs(300);
+		let _ = moq_tokio::crypto::install_default();
+
+		let mut connect = moq_tokio::connect::Config::default();
+		connect.tls.insecure = Some(true);
+		let server = bare_quic_server(&connect, IDLE);
+		let port = server.local_addr().expect("server addr").port();
+
+		let config = Config {
+			connect: vec![Peer::new(format!("moql://127.0.0.1:{port}/"))],
+			..Default::default()
+		};
+		let mut quic = moq_tokio::quic::Config::default();
+		quic.idle_timeout = Some(IDLE);
+		let runtime = tokio::runtime::Builder::new_multi_thread()
+			.worker_threads(1)
+			.enable_all()
+			.build()
+			.expect("dialer runtime");
+		let (cluster, running) = runtime
+			.spawn(async move {
+				let cluster = new_cluster(config).expect("cluster").with_connect(connect, quic);
+				let started = cluster.clone().start().await.expect("start");
+				(cluster, tokio::spawn(started.run()))
+			})
+			.await
+			.expect("dialer task");
+
+		let conn = tokio::time::timeout(TIMEOUT, server.accept())
+			.await
+			.expect("dial timeout")
+			.expect("incoming")
+			.await
+			.expect("handshake");
+		cluster
+			.critical
+			.spawn("injected", async { panic!("injected critical failure") });
+		let result = tokio::time::timeout(TIMEOUT, running)
+			.await
+			.expect("run returns on a critical failure")
+			.expect("run task");
+		assert!(result.is_err(), "a critical failure fails run");
+		runtime.shutdown_background();
+
+		let err = tokio::time::timeout(TIMEOUT, conn.closed())
+			.await
+			.expect("the peer heard no close before its idle timeout");
+		match err {
+			driver::ConnectionError::ApplicationClosed(close) => assert_eq!(&close.reason[..], b"client shutdown"),
+			other => panic!("the link ended with {other:?}, not the shutdown close"),
+		}
+	}
+
+	/// A second close awaits the shutdown the first started, and still finishes it
+	/// when the first caller gives up, so no caller returns while links are open.
+	#[tokio::test]
+	async fn concurrent_closes_share_one_shutdown() {
+		let dialers = Dialers::new();
+		// Stands in for a dropped guard's background close, which holds the shutdown open.
+		let background = dialers.lock().open.as_ref().expect("open").closing.clone();
+		let first = tokio::spawn({
+			let dialers = dialers.clone();
+			async move { dialers.close().await }
+		});
+		while dialers.lock().open.is_some() {
+			tokio::task::yield_now().await;
+		}
+
+		let mut second = std::pin::pin!(dialers.close());
+		assert!(
+			futures::poll!(second.as_mut()).is_pending(),
+			"a second close returned before the shutdown finished"
+		);
+		first.abort();
+		let _ = first.await;
+		drop(background);
+		tokio::time::timeout(std::time::Duration::from_secs(5), second)
+			.await
+			.expect("the second close finishes the shutdown");
+	}
+
+	/// A LAN dial owns its client, so closing the cluster closes that too: the peer
+	/// drops the dialer's routes at once, though the dialing runtime stops right
+	/// after, as a process exit would. Both idle timeouts are far past the wait.
+	#[cfg(feature = "cluster-lan")]
+	#[tokio::test]
+	async fn closing_a_cluster_closes_its_lan_dials() {
+		const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+		const IDLE: std::time::Duration = std::time::Duration::from_secs(300);
+		let _ = moq_tokio::crypto::install_default();
+		let mut quic = moq_tokio::quic::Config::default();
+		quic.idle_timeout = Some(IDLE);
+
+		let node = new_cluster(Config::default()).expect("node cluster");
+		let mut listen = moq_tokio::listen::Config::default();
+		listen.bind = Some("127.0.0.1:0".parse().unwrap());
+		listen.tls.generate = vec!["moq-cluster-lan".to_string()];
+		let server = listen.init(quic.clone()).expect("bind");
+		let port = server.local_addr().expect("local addr").port();
+		let fp = server
+			.certificates()
+			.fingerprints()
+			.into_iter()
+			.next()
+			.expect("generated fingerprint");
+		let listener = server.listen().await.expect("listen");
+		node.set_lan_credential("listener-proof");
+		let accept = node.clone();
+		tokio::spawn(async move {
+			let mut listener = listener;
+			while let Some(request) = listener.accept().await {
+				let conn = crate::Connection::new(request, accept.clone(), crate::auth::Auth::refuse("test"));
+				tokio::spawn(conn.run());
+			}
+		});
+
+		let url: Url = format!("moqt://127.0.0.1:{port}{CLUSTER_PATH}/listener-proof")
+			.parse()
+			.expect("url");
+		let target = DialTarget {
+			key: format!("moqt://127.0.0.1:{port}/"),
+			url: url.clone(),
+			urls: vec![url],
+			cost: None,
+			fingerprint: Some(fp),
+			lan: true,
+			upstream: false,
+		};
+		let runtime = tokio::runtime::Builder::new_multi_thread()
+			.worker_threads(1)
+			.enable_all()
+			.build()
+			.expect("dialer runtime");
+		let (dialer, broadcast) = runtime
+			.spawn(async move {
+				let dialer = new_cluster(Config::default())
+					.expect("dialer cluster")
+					.with_connect(Default::default(), quic);
+				let broadcast = dialer.origin.create_broadcast("from-dialer").expect("create");
+				broadcast.announce(Default::default()).expect("announce");
+				tokio::spawn(dialer.clone().supervise_remote(target, String::new()));
+				(dialer, broadcast)
+			})
+			.await
+			.expect("dialer task");
+
+		let mut announced = node.origin.consume().announced();
+		loop {
+			let (update, active) = tokio::time::timeout(TIMEOUT, next_update(&mut announced))
+				.await
+				.expect("timed out waiting for from-dialer")
+				.expect("origin closed");
+			if update.prefix.as_str() == "from-dialer" && active {
+				break;
+			}
+		}
+
+		runtime.spawn(async move { dialer.close().await }).await.expect("close");
+		runtime.shutdown_background();
+		// Held throughout: dropping it would unannounce over a live link instead.
+		let _broadcast = broadcast;
+
+		loop {
+			let (update, active) = tokio::time::timeout(TIMEOUT, next_update(&mut announced))
+				.await
+				.expect("the peer kept the dialer's route past the close")
+				.expect("origin closed");
+			if update.prefix.as_str() == "from-dialer" && !active {
+				break;
+			}
+		}
 	}
 
 	/// A grant naming a cluster peer marks the session's routes as a peer's, so the

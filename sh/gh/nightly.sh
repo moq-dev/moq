@@ -60,6 +60,7 @@ case "${1:-}" in
         run just js catalog-bench
         run just js arrivals-bench
         run just js p2p-bench
+        run just js e2ee-bench
         run just js signals-bench
         ;;
     *)

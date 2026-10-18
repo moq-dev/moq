@@ -98,8 +98,8 @@ impl Default for MaxFilter {
 
 #[derive(Debug, Copy, Clone, Default)]
 struct MaxSample {
-    /// `round` count, not a timestamp as per <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.5.1>
-    /// can also be a count of cycle as per <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-05.html#section-5.5.6>
+    /// `round` count, not a timestamp as per <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.5.1>
+    /// can also be a count of cycle as per <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.5.6>
     round: u64,
     value: Option<u64>,
 }

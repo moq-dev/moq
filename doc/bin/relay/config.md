@@ -56,14 +56,14 @@ Transport tuning, applied to accepted and dialed connections alike.
 ```toml
 [quic]
 congestion_control = "delay"         # "delay" (BBR, the default) or "loss" (CUBIC).
-max_streams = 10000                  # Concurrent streams per connection, bidi and uni. Default.
+max_streams = 10000                  # Concurrent streams per connection, bidi and uni; 0 is refused. Default.
 idle_timeout = "10s"                 # Drop a connection after this long with nothing on it. Default.
 keep_alive = "3s"                    # Ping interval; "0s" disables it. iroh still pings at least every 5s. Default.
 gso = true                           # UDP segmentation offload. iroh cannot turn it off.
 mtu_discovery = false                # Path MTU discovery. Default.
 receive_window = 67108864            # Whole-connection window, in bytes. Default (64 MiB).
-stream_receive_window = 8388608      # Per-stream window. Omit for the backend default.
-send_window = 33554432               # Unacknowledged outgoing data. Omit for the backend default.
+stream_receive_window = 4194304      # Per-stream window, in bytes. Default (4 MiB).
+send_window = 16777216               # Unacknowledged outgoing data, in bytes. Default (16 MiB).
 qlog = "/var/log/moq/qlog"           # Existing directory. Needs the `qlog` build feature.
 ```
 
@@ -95,7 +95,20 @@ fetches = 10000                      # Independent simultaneous FETCH requests.
 announces = 100000
 subscriptions = 10000
 fetches = 10000
+
+[peer.quic]
+max_streams = 100000                 # Concurrent QUIC streams per direction.
+receive_window = 671088640           # Connection-wide receive window (640 MiB).
+send_window = 671088640              # Unacknowledged outgoing data (640 MiB).
 ```
+
+`[peer.quic]` takes only `max_streams`, `receive_window`, and `send_window`;
+any other `[quic]` key is refused. They replace the `[quic]` values for a
+peer's QUIC connection once its grant is known, before the SETUP reply. Links
+the relay dials get them from the handshake on. A link carrying a whole cluster is then
+not throttled by `[quic]` limits sized for one viewer, for example
+`--peer-quic-max-streams=200000`. Peers over WebSocket, TCP, or iroh keep
+their transport's own limits.
 
 These are the defaults. For example, `--peer-subscriptions=50000` raises the
 subscription cap on cluster links. `--session-fetches` and `--peer-fetches`
@@ -132,8 +145,8 @@ first cores, so two relays on one host, or one limited to fewer CPUs than the
 host has, would crowd onto them. Turn it on for a host the relay has to itself.
 
 `io_uring` additionally needs Linux 6.12+ and the `io-uring` cargo feature; it
-shares the same reloadable TLS identity, serves moq-lite only, and refuses
-`mtu_discovery`. A setting the build or host cannot deliver refuses to
+shares the same reloadable TLS identity, serves every configured version
+like the shared runtime, and refuses `mtu_discovery`. A setting the build or host cannot deliver refuses to
 start rather than being ignored. If io\_uring workers fail to start naming
 `RLIMIT_MEMLOCK`, raise it (`LimitMEMLOCK=` under systemd).
 

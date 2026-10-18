@@ -1,4 +1,8 @@
 import importlib.util
+import json
+import os
+import signal
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -145,18 +149,123 @@ class Reduce(unittest.TestCase):
                 profile.reduce({'1': 'moq-quic-0'}, records, {'1': 0}, {'1': 1})
 
 
+CPU_FIXTURE = '''\
+11 100.000000001: cpu-clock:
+	    ffffffff81000000 [unknown] ([kernel.kallsyms])
+	    ffffffff81000100 [unknown] ([kernel.kallsyms])
+	    7ffff7d2c07a sendmsg (/nix/store/glibc/lib/libc.so.6)
+	    5555569d8ae4 <moq_quic::Endpoint>::send (/moq/moq-relay)
+	    5555569d8608 std::thread::run (/moq/moq-relay)
+12 100.001000001: cpu-clock:
+	    5555569d8ae4 <moq_net::Session>::poll (/moq/moq-relay)
+	    5555569d8608 std::thread::run (/moq/moq-relay)
+13 100.002000001: cpu-clock:
+	    5555569d8608 std::thread::run (/moq/moq-relay)
+'''
+
+
+class Cpu(unittest.TestCase):
+    def test_kernel_time_is_a_leaf_under_its_user_stack(self):
+        [(_, _, event, frames), *_] = profile.parse(CPU_FIXTURE, kernel=True)
+        self.assertEqual(event, 'cpu-clock')
+        self.assertEqual(frames[:2], ['[kernel]', 'sendmsg'])
+        # Lock waits keep dropping kernel frames outright.
+        self.assertEqual(profile.parse(CPU_FIXTURE)[0][3][0], 'sendmsg')
+
+    def test_workers_fold_into_their_role(self):
+        names = {'11': 'moq-quic-0', '12': 'moq-quic-1'}
+        result, folded = profile.fold(names, profile.parse(CPU_FIXTURE, kernel=True), 0.5)
+        self.assertEqual(result['samples'], 3)
+        self.assertEqual(result['threads'], {'moq-quic-0': 1, 'moq-quic-1': 1, 'tid-13': 1})
+        self.assertAlmostEqual(result['sampled_cores'], 3 / 999 / 0.5)
+        self.assertEqual(folded['moq-quic;std::thread::run;<moq_quic::Endpoint>::send;sendmsg;[kernel]'], 1)
+        self.assertEqual(folded['moq-quic;std::thread::run;<moq_net::Session>::poll'], 1)
+
+    def test_empty_or_unresolved_refused(self):
+        with self.assertRaisesRegex(ValueError, 'no CPU samples'):
+            profile.fold({}, [], 1)
+        unresolved = [('1', 0, 'cpu-clock', ['[kernel]', 'syscall'])]
+        with self.assertRaisesRegex(ValueError, 'no CPU sample has resolved MoQ frames'):
+            profile.fold({}, unresolved, 1)
+
+    def test_lost_samples_refused(self):
+        with self.assertRaises(ValueError):
+            profile.parse(CPU_FIXTURE + '11 100.003000000: PERF_RECORD_LOST_SAMPLES lost 3\n', kernel=True)
+
+
+class Heap(unittest.TestCase):
+    def test_usr1_handler_detected(self):
+        previous = signal.signal(signal.SIGUSR1, signal.SIG_DFL)
+        try:
+            self.assertFalse(profile.catches_usr1(os.getpid()))
+            signal.signal(signal.SIGUSR1, lambda *_: None)
+            self.assertTrue(profile.catches_usr1(os.getpid()))
+        finally:
+            signal.signal(signal.SIGUSR1, previous)
+
+    def test_report_scales_churn_by_the_steady_window(self):
+        def jeprof(binary, dump, *args):
+            if '--collapsed' in args:
+                return 'moq_relay::main;<moq_net::Session>::run;alloc 4096\nmoq_relay::main;freed 0\n'
+            totals = {'--inuse_space': {'before.heap': 1 << 20, 'steady-end.heap': 3 << 20},
+                      '--alloc_space': {'steady-end.heap': 20 << 20}, '--alloc_objects': {'steady-end.heap': 1000}}
+            kind = next(arg for arg in args if arg in totals)
+            return f'Total: {totals[kind].get(dump.name, 2 << 20)} B\n'
+
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            (directory / 'snapshots.tsv').write_text(
+                'before\t0\nsteady-start\t1000000000\nsteady-end\t6000000000\nteardown\t8000000000\n')
+            with patch.object(profile, 'jeprof', side_effect=jeprof) as calls:
+                profile.heap(Path('relay'), directory)
+            result = json.loads((directory / 'heap.json').read_text())
+            self.assertEqual(result['window_s'], 5)
+            self.assertEqual(result['retained_bytes'], {'before': 1 << 20, 'steady-start': 2 << 20,
+                                                        'steady-end': 3 << 20, 'teardown': 2 << 20})
+            self.assertEqual(result['churn_bytes_per_s'], 4 << 20)
+            self.assertEqual(result['churn_allocs_per_s'], 200)
+            # Churn is the steady-end accumulation net of steady-start's.
+            churn = [call.args for call in calls.call_args_list if '--alloc_space' in call.args]
+            self.assertTrue(all(f'--base={directory / "steady-start.heap"}' in args for args in churn))
+            # A stack the base cancelled out is dropped from the flame graph.
+            self.assertEqual((directory / 'churn.folded').read_text(), 'moq_relay::main;<moq_net::Session>::run;alloc 4096\n')
+
+    def test_teardown_waits_for_the_relay_to_drop_every_session(self):
+        clock = iter(range(0, 100, 1))
+        with patch.object(profile.time, 'monotonic', side_effect=lambda: next(clock)), \
+                patch.object(profile.time, 'sleep'), \
+                patch.object(profile, 'sessions', return_value=1), \
+                patch.object(profile.os, 'kill') as kill:
+            with self.assertRaisesRegex(ValueError, 'still holds sessions'):
+                profile.snapshot(1, Path('.'), ['teardown'], 0, 0, settled='http://relay/sessions')
+            # A teardown snapshot of live sessions would read as a leak; none is taken.
+            kill.assert_not_called()
+
+    def test_missing_snapshot_refused(self):
+        with tempfile.TemporaryDirectory() as directory:
+            (Path(directory) / 'snapshots.tsv').write_text('before\t0\n')
+            with self.assertRaisesRegex(ValueError, 'missing heap snapshots: steady-start, steady-end, teardown'):
+                profile.heap(Path('relay'), Path(directory))
+
+
 class Require(unittest.TestCase):
-    def check(self, paranoid):
+    def check(self, mode, paranoid):
         with patch.object(profile.Path, 'read_text', return_value=paranoid + '\n'):
-            profile.require()
+            profile.require(mode)
 
     def test_refusal_names_the_command(self):
         # Ubuntu's default is 4; 2 forbids kernel samples; 1 and 0 cap the locked buffer.
-        for paranoid in ['4', '2', '1', '0']:
-            with self.assertRaises(ValueError) as refused:
-                self.check(paranoid)
-            self.assertIn('sudo sysctl -w kernel.perf_event_paranoid=-1', str(refused.exception))
-        self.check('-1')
+        for mode in ['lock', 'cpu']:
+            for paranoid in ['4', '2', '1', '0']:
+                with self.assertRaises(ValueError) as refused:
+                    self.check(mode, paranoid)
+                self.assertIn('sudo sysctl -w kernel.perf_event_paranoid=-1', str(refused.exception))
+            self.check(mode, '-1')
+
+    def test_heap_needs_jeprof(self):
+        with patch.object(profile.shutil, 'which', return_value=None):
+            with self.assertRaisesRegex(ValueError, 'jeprof'):
+                profile.require('heap')
 
 
 if __name__ == '__main__':

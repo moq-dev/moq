@@ -23,7 +23,7 @@ Decided with the maintainer on 2026-10-15:
   the added nightly runtime, and check each JS bench reports a measurement
   before charting it. Nightly size history (today a 45-day
   artifact) is a natural extra series if it fits cheaply. The relay load
-  benches (`bench-audio`, `bench-lock`) and the audio-quality job's
+  benches (`bench-audio`, `bench-profile`) and the audio-quality job's
   benchmarks are out of scope here; they can join later through the same
   input format.
 - **One branch for everything**: [bench-ci](/quest/m2/bench-ci.md) records

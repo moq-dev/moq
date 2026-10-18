@@ -95,6 +95,12 @@ name = "announce"
 harness = false
 required-features = ["fuzz"]
 
+# Reaches the crate-private session snapshot through the hidden `fuzz` module.
+[[bench]]
+name = "synced"
+harness = false
+required-features = ["fuzz"]
+
 # Reaches the private message codecs through the hidden `fuzz` module.
 [[bench]]
 name = "codec"

@@ -1644,56 +1644,6 @@ mod tests {
 		);
 	}
 
-	#[tokio::test]
-	async fn a_decreasing_timestamp_fails_the_recording() {
-		let source = broadcast::Info::new().produce();
-		let video = track(&source, "video");
-
-		let store = Store::new(InMemory::new(), "rec");
-		let writer = Writer::new(store, source.consume(), Config::default()).await.unwrap();
-		writer.control().track("video", media()).await.unwrap();
-
-		group(&video, 0, &[1000]);
-		group(&video, 1, &[500]);
-		video.finish().unwrap();
-		source.close();
-
-		assert_eq!(
-			writer.run().await,
-			Err(Error::Source("track video group 1: timestamp 500 precedes 1000".into()))
-		);
-	}
-
-	/// A malformed group fails the recording only after committing everything reported before
-	/// it, including the open record, so the archive stays readable up to the bad frame.
-	#[tokio::test]
-	async fn a_failed_recording_flushes_what_was_reported() {
-		let source = broadcast::Info::new().produce();
-		let video = track(&source, "video");
-
-		let store = Store::new(InMemory::new(), "rec");
-		let writer = Writer::new(store.clone(), source.consume(), Config::default())
-			.await
-			.unwrap();
-		writer.control().track("video", media()).await.unwrap();
-
-		group(&video, 0, &[0]);
-		group(&video, 1, &[1000]);
-		// Under the minimum, so groups 1 and 2 share the record still open at the failure.
-		group(&video, 2, &[1500]);
-		group(&video, 3, &[1200]);
-
-		assert_eq!(
-			writer.run().await,
-			Err(Error::Source(
-				"track video group 3: timestamp 1200 precedes 1500".into()
-			))
-		);
-		let records = window(&store, "video").await;
-		assert_eq!(groups(&records), vec![(0, 0), (1, 2)]);
-		check_objects(&store, "video", &records).await;
-	}
-
 	/// Stopping a recording whose source is still live finishes every timeline and ends `run`.
 	#[tokio::test]
 	async fn stopping_ends_without_the_source() {
