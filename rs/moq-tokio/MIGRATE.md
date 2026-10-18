@@ -6,7 +6,7 @@ How to update your code for each breaking change, newest first.
 
 ### Dropping an unfinished send stream resets it
 
-`quic::driver::SendStream` and `quic::web::SendStream` send RESET_STREAM with code 0 when dropped before `finish()`, instead of finishing implicitly.
+`quic::driver::SendStream` and `quic::web::SendStream` send `RESET_STREAM` with code 0 when dropped before `finish()`, instead of finishing implicitly.
 Call `finish()` before dropping a stream whose data should arrive whole.
 
 ### Key logging is opt-in (#5907)
