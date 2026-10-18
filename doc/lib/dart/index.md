@@ -19,6 +19,8 @@ and a `Named` or `Requested` target. `CatalogProducer(broadcast: ...)` owns cata
 and sections; it holds the broadcast weakly and fails after the broadcast closes.
 `package:moq/flate.dart` exposes opaque `SnapshotProducer` / `StreamProducer` with an optional `timestampUs`.
 A missing data timestamp stays untimed; the library never substitutes zero or now.
+`package:moq/json.dart` consumers return `Value` (`value`, `timestampUs`) from `next()`; a snapshot consumer
+yields each state in order, and `latest()` skips to the newest. Read timestamps are rounded down to a whole microsecond.
 Raw tracks with a `null` timescale are untimed on both publish and receive.
 Whole-frame media writes require caller time; container imports keep their own timeline handling.
 Timed raw/data tracks require caller-supplied timestamps. Use `CatalogProducer.now()` to stamp a locally
