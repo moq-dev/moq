@@ -714,6 +714,23 @@ mod tests {
     }
 
     #[test]
+    fn watch_ignores_a_redundant_ack() {
+        let mut buf = SendBuffer::new();
+        buf.write(Bytes::from_static(b"Hello, world!"));
+        let end = buf.watch();
+        assert_eq!(buf.poll_transmit(16), (0..8, true));
+        assert_eq!(buf.poll_transmit(16), (8..13, true));
+
+        // Repeating a held range adds no bytes, so its later instant doesn't count
+        let early = Instant::now();
+        let late = early + Duration::from_millis(1);
+        buf.ack(8..13, early);
+        buf.ack(8..13, late);
+        buf.ack(0..8, early);
+        assert_eq!(end.get(), Some(&Ok(early)));
+    }
+
+    #[test]
     fn watch_fails_past_truncation() {
         let mut buf = SendBuffer::new();
         buf.write(Bytes::from_static(b"Hello, "));
