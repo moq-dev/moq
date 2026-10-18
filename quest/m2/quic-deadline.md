@@ -21,7 +21,7 @@ Implement in `moq-quic`.
 - On loss detection, before queueing a retransmission for a stream with a
   deadline, estimate the arrival instant as now plus the forward one-way
   delay. Start with `min_rtt / 2`, corrected by the peer's reported ACK delay;
-  the [receive-timestamps spike](/quest/m3/quic-gcc.md) measures whether
+  the [receive-timestamps spike](/quest/m2/quic-realtime/receive-ts.md) measures whether
   receive-time differences can improve that estimate, accounting for clock
   offset, drift, and uncertainty. They do not alone measure absolute one-way
   delay. If the estimate is past the deadline,
@@ -53,7 +53,7 @@ Decided in the 2026-09-30 audit: moved to m2. No m1 quest consumes it.
 
 ## Related
 
-- [QUIC receive-timestamps spike](/quest/m3/quic-gcc.md) - measures whether
+- [QUIC receive-timestamps spike](/quest/m2/quic-realtime/receive-ts.md) - measures whether
   receive-time differences improve an explicit delay estimator over half-RTT
 - [ACK hook](/quest/m2/quic-ack-hook.md) - the same pattern for a moq-net method backed by `moq-quic`
 - [Discover media headroom](/quest/m2/quic-probe.md) - can reuse
