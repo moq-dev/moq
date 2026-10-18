@@ -278,6 +278,11 @@ impl Future for ConnectionDriver {
         conn.forward_endpoint_events();
         conn.forward_app_events(&self.conn.shared);
 
+        // Every datagram sent or received passes through this poll.
+        let stats = conn.inner.stats();
+        self.conn.shared.wire.set_sent_bytes(stats.udp_tx.bytes);
+        self.conn.shared.wire.set_received_bytes(stats.udp_rx.bytes);
+
         if !conn.inner.is_drained() {
             if keep_going {
                 // If the connection hasn't processed all tasks, schedule it again
@@ -629,6 +634,11 @@ impl Connection {
         self.0.state.lock("stats").inner.stats()
     }
 
+    /// The wire counters the driver updates as it sends and receives.
+    pub(crate) fn wire(&self) -> moq_net::transport::Wire {
+        self.0.shared.wire.clone()
+    }
+
     /// Current state of the congestion control algorithm, for debugging purposes
     pub fn congestion_state(&self) -> Box<dyn Controller> {
         self.0
@@ -775,6 +785,15 @@ impl Connection {
         conn.inner.set_max_concurrent_streams(Dir::Bi, count);
         // May need to send MAX_STREAMS to make progress
         conn.wake();
+    }
+
+    /// See [`moq_quic::Connection::set_limits`]
+    pub fn set_limits(&self, limits: moq_quic::Limits) -> Result<(), moq_quic::LimitsError> {
+        let mut conn = self.0.state.lock("set_limits");
+        conn.inner.set_limits(limits)?;
+        // May need to send MAX_DATA or MAX_STREAMS to make progress
+        conn.wake();
+        Ok(())
     }
 }
 
@@ -1025,6 +1044,8 @@ pub(crate) struct Shared {
     connected: Arc<Notify>,
     /// Number of live handles that can used to initiate or handle I/O; excludes the driver
     ref_count: AtomicUsize,
+    /// Refreshed by every driver poll, so readers never wake the driver to sample.
+    wire: moq_net::transport::Wire,
 }
 
 pub(crate) struct State {

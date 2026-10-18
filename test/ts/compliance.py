@@ -449,6 +449,8 @@ AC3_ATSC_BS = 2592
 EAC3_ATSC_BS = 12896
 # ATSC A/52 Annex A 5.4: AC-3 carried as DVB private data.
 AC3_DVB_BS = 5696
+# ETSI TS 101 154 V2.9.1 4.1.6.11 gives Enhanced AC-3 the same DVB buffer.
+EAC3_DVB_BS = 5696
 
 MPEG_AUDIO_KBPS = {
     (1, 1): (0, 32, 64, 96, 128, 160, 192, 224, 256, 288, 320, 352, 384, 416, 448),
@@ -764,16 +766,26 @@ def mpeg_audio_frame(es: bytes, pos: int) -> tuple[int, float]:
 
 
 def ac3_frame(es: bytes, pos: int) -> tuple[int, float]:
-    """(length, duration) of the AC-3 or E-AC-3 frame at `pos`; 0 duration for a dependent substream."""
+    """(length, duration) of the AC-3 or E-AC-3 frame at `pos`; 0 duration for any substream after
+    independent substream 0, which shares its access unit's interval (ETSI TS 102 366 E.1.3.1.2)."""
     h = es[pos : pos + 6]
     if len(h) < 6 or h[0] != 0x0B or h[1] != 0x77:
         raise Refused(f"no AC-3 sync at ES offset {pos}")
-    if h[5] >> 3 > 10:  # bsid 11-16: E-AC-3 (A/52 Annex E)
+    # bsid 8 or less is AC-3 and 11-16 E-AC-3 (A/52 Annex E); 9 and 10 are low-rate AC-3
+    # variants the export does not parse, and the rest are reserved.
+    bsid = h[5] >> 3
+    if bsid in (9, 10) or bsid > 16:
+        raise Refused(f"unsupported bsid {bsid} at ES offset {pos}")
+    if bsid > 10:
+        if h[2] >> 6 == 3:
+            raise Refused(f"E-AC-3 strmtyp reserved at ES offset {pos}")
+        if h[4] >> 6 == 3 and (h[4] >> 4) & 0x03 == 3:
+            raise Refused(f"E-AC-3 fscod2 reserved at ES offset {pos}")
         blocks = (1, 2, 3, 6)[(h[4] >> 4) & 0x03] if h[4] >> 6 != 3 else 6
         fscod = h[4] >> 6
         rate = (48000, 44100, 32000)[fscod] if fscod != 3 else (24000, 22050, 16000)[(h[4] >> 4) & 0x03]
-        dependent = h[2] >> 6 == 1
-        return ((((h[2] & 0x07) << 8) | h[3]) + 1) * 2, 0.0 if dependent else 256 * blocks / rate
+        extends = h[2] >> 6 == 1 or (h[2] >> 3) & 0x07 != 0
+        return ((((h[2] & 0x07) << 8) | h[3]) + 1) * 2, 0.0 if extends else 256 * blocks / rate
     fscod, code = h[4] >> 6, h[4] & 0x3F
     if fscod == 3 or code >> 1 >= len(AC3_KBPS):
         raise Refused(f"AC-3 fscod/frmsizecod reserved at ES offset {pos}")
@@ -822,7 +834,7 @@ def stream_kind(stream: Stream) -> str | None:
     if kind == 0x06 and f"registration:{int.from_bytes(b'Opus', 'big')}" in tags:
         return "opus"
     if kind == 0x06 and tags & {"DVB_enhanced_AC3_descriptor", "enhanced_AC3_descriptor"}:
-        raise Refused("E-AC-3 as DVB private data takes its buffer from ETSI TS 101 154, not modelled")
+        return "eac3-dvb"
     if kind in (0x01, 0x02, 0x10, 0x11, 0x1C, 0x20, 0x21, 0x42, 0xD1, 0xEA):
         raise Refused(f"stream_type 0x{kind:02X} is audio/video this model has no parameters for")
     return None
@@ -860,6 +872,7 @@ def stream_params(kind: str, stream: Stream) -> tuple[Params, object]:
         "ac3-atsc": ("AC-3 (ATSC)", AC3_ATSC_BS, ac3_frame),
         "eac3-atsc": ("E-AC-3 (ATSC)", EAC3_ATSC_BS, ac3_frame),
         "ac3-dvb": ("AC-3 (DVB)", AC3_DVB_BS, ac3_frame),
+        "eac3-dvb": ("E-AC-3 (DVB)", EAC3_DVB_BS, ac3_frame),
     }[kind]
     return Params(label=label, rx=AUDIO_RX, b=bs), parse
 

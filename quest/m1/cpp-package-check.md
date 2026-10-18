@@ -16,6 +16,3 @@ The first publication and released-download proof stay in release execution.
 
 Public API: none beyond the binding changes owned by their quests. Wire: none.
 
-## Required
-
-- [Generated C++ shape](/quest/m1/cpp-generated-shape.md) - the final generated names

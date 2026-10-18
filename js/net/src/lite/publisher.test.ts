@@ -205,7 +205,7 @@ async function subscribeEnd(sequences: number[], version: Version = Version.DRAF
 	// track ending rather than resolving a subscribe against an already-closed one.
 	for (const sequence of sequences) {
 		const group = new GroupProducer(sequence);
-		group.writeFrame(textFrame("hello"));
+		group.writeFrame(textFrame("hello", Timestamp.fromMillis(sequence)));
 		group.close();
 		track.writeGroup(group);
 
@@ -641,9 +641,10 @@ async function servedSubscription(
 		serving,
 		parked: gate.parked,
 		release: gate.release,
+		// Stamped by sequence, so a group served out of order still starts in order.
 		serve(sequence: number) {
 			const group = new GroupProducer(sequence);
-			for (const frame of frames) group.writeFrame(textFrame(frame));
+			for (const frame of frames) group.writeFrame(textFrame(frame, Timestamp.fromMillis(sequence)));
 			group.close();
 			track.writeGroup(group);
 		},

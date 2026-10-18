@@ -35,7 +35,7 @@ a live track's Largest Object, and test both cases.
 
 ## Required
 
-- [Model ranges](/quest/m1/subscribe-ranges/model.md) - the range requests this answers
+- [Dynamic range requests](/quest/m1/subscribe-ranges/dynamic.md) - the range requests this answers
 
 ## Related
 

@@ -44,7 +44,11 @@ What an update can carry, and this quest sends:
 - Forward stays 1. Pausing is not part of this.
 - The subscription filter is updatable from draft-15 on. Narrowing upstream
   ranges belongs to [moq-transport ranges](/quest/m1/subscribe-ranges/ietf.md),
-  which can reuse this update path.
+  which can reuse this update path. Widening is a bug today: on draft-20 and
+  later, a subscriber from a future group puts its absolute start in the
+  SUBSCRIBE filter, and a live subscriber merged in after it never gets the
+  current group. `rs/moq-net/tests/subscribe_ranges.rs` leaves draft-20+ out
+  for that reason; add it back once the update carries the widened filter.
 
 Implementation: the IETF subscriber watches the aggregate the way
 `lite/subscriber.rs` does (`buffer_update`), sending one update per change

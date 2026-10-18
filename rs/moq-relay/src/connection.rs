@@ -109,10 +109,12 @@ impl Connection {
 		} = admitted;
 
 		// A peer's QUIC limits widen before SETUP OK, so its first requests see them.
+		// Other transports keep their own limits.
+		#[cfg(feature = "quic")]
 		if let Some(limits) = lifecycle.cluster.quic_limits(&lease)
-			&& let Err(err) = request.set_quic_limits(limits)
+			&& let Some(quic) = request.quic()
 		{
-			tracing::debug!(%err, "cluster peer keeps its transport's limits");
+			quic.set_limits(limits)?;
 		}
 
 		// Accept the connection.

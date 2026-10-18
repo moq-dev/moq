@@ -15,7 +15,7 @@ Have at least these sections:
 
 - **Problem**: a summary of the problem and why this PR is needed.
 - **Approach**: a summary of the approach taken to solve the problem.
-- **Impact**: a bullet point for every public API/wire change made.
+- **Impact**: a bullet point for every public API/wire change made. A breaking one also gets a `MIGRATE.md` entry in each affected package.
 - **Alternatives**: any alternative approaches considered.
 - **Follow-ups**: any issues encountered or quests created.
 
@@ -83,6 +83,7 @@ For an advisory against Quinn, follow the advisory triage in [`rs/moq-quic/READM
 `main` is the trunk; `release` is what ships, and release-plz and every branch-triggered publish run only there.
 
 - A release is cut by hand: a PR merging `main` into `release`, with a merge commit.
+- A breaking cut first renames, on `main`, each changed `MIGRATE.md`'s `## Unreleased` to its version transition (`## 0.3 -> 0.4`), leaving an empty `## Unreleased` above it.
 - Suggest a `release` backport for any serious bug fix (crash, security, data loss, broken interop), whether found on `main` or reported against a release. Land it on `main` first, then port it onto `release` as a separate PR that keeps the published API, so it ships as a patch.
 - After any release publishes, patch or breaking, run `just test wire-compat --remeasure` on `main` and land the rewritten `test/interop/compat/planned-breaks.json` with refreshed reasons. Otherwise the nightly wire-compat check fails on the stale pins.
 - Nothing merges `release` into `main` automatically. Before cutting a minor or breaking release, the maintainer merges `release` into `main` once, so trunk carries the published versions, CHANGELOGs, and any `release`-only commits. It lands as a merge commit with `--admin`, never squashed, so the cut starts from an advanced merge base.

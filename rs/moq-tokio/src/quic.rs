@@ -17,9 +17,12 @@ use crate::cli::Duration as CliDuration;
 #[cfg(feature = "quic")]
 mod backend;
 #[cfg(feature = "quic")]
-pub use backend::Error;
-#[cfg(feature = "quic")]
 pub(crate) use backend::{Client, Closer, Options, Server, accept};
+#[cfg(feature = "quic")]
+pub use backend::{Connection, Error};
+/// The flow-control limits a live QUIC connection can change; see [`Connection::set_limits`].
+#[cfg(feature = "quic")]
+pub use moq_quic::{Limits, LimitsError};
 
 // The async QUIC layer driving `moq-quic` on tokio, forked from quinn (see its module docs).
 // Public only so the workspace's tests can dial a bare endpoint; not a stable API.
@@ -112,6 +115,16 @@ pub const DEFAULT_MAX_STREAMS: u64 = 10_000;
 /// shares one connection, can still sustain several Gbps at intercontinental RTTs.
 pub const DEFAULT_RECEIVE_WINDOW: u64 = 64 << 20;
 
+/// Default per-stream receive window, used when [`Config::stream_receive_window`] is unset.
+///
+/// A quarter of [`DEFAULT_RECEIVE_WINDOW`], so one slow group can't take the whole
+/// connection, and enough for a single group stream to reach a few hundred Mbps at a
+/// 100 ms RTT.
+pub const DEFAULT_STREAM_RECEIVE_WINDOW: u64 = 4 << 20;
+
+/// Default cap on unacknowledged outgoing data, used when [`Config::send_window`] is unset.
+pub const DEFAULT_SEND_WINDOW: u64 = 16 << 20;
+
 /// Default idle timeout before an inactive connection is dropped.
 ///
 /// A peer that dies or drops off the network sends no close, so this is how long
@@ -125,33 +138,6 @@ pub(crate) const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(10);
 /// another (plus QUIC's probe retransmits) before the peer's timer runs out.
 pub(crate) const DEFAULT_KEEP_ALIVE: Duration = Duration::from_secs(3);
 
-/// The flow-control limits a QUIC connection can be widened to, such as by a
-/// relay once it knows the peer is another relay.
-///
-/// Each is non-zero because zero streams or a zero window credits nothing and
-/// wedges the connection. [`Limits::validate`] refuses the values QUIC cannot
-/// advertise, as [`Config`] does, and every setter taking one checks it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Limits {
-	/// Max concurrent streams the peer may open, per direction.
-	pub max_streams: std::num::NonZeroU64,
-	/// Connection-wide receive window, in bytes.
-	pub receive_window: std::num::NonZeroU64,
-	/// Cap on unacknowledged outgoing data, in bytes.
-	pub send_window: std::num::NonZeroU64,
-}
-
-impl Limits {
-	/// Refuse a stream count past 2^60 or a receive window past a QUIC varint.
-	pub fn validate(&self) -> crate::Result<()> {
-		validate_streams(Some(self.max_streams.get()))?;
-		match self.receive_window.get() {
-			window if window > MAX_VARINT => Err(crate::Error::WindowRange("receive_window")),
-			_ => Ok(()),
-		}
-	}
-}
-
 /// The `--quic-*` transport section, applied to dialed and accepted connections alike.
 #[derive(Clone, Debug, usage::Args, serde::Serialize, serde::Deserialize)]
 #[usage(unknown_flags = "error", args_override_self = false)]
@@ -159,7 +145,8 @@ impl Limits {
 #[non_exhaustive]
 pub struct Config {
 	/// Maximum number of concurrent QUIC streams per connection (both bidi and uni).
-	/// Defaults to 10,000. MoQ opens a stream per group, so busy endpoints want this high.
+	/// Defaults to 10,000; zero is refused. MoQ opens a stream per group, so busy
+	/// endpoints want this high.
 	#[serde(skip_serializing_if = "Option::is_none")]
 	#[usage(
 		name = "quic-max-streams",
@@ -271,7 +258,7 @@ pub struct Config {
 	)]
 	pub receive_window: Option<u64>,
 
-	/// Per-stream receive window, in bytes. Unset leaves the backend default.
+	/// Per-stream receive window, in bytes. Defaults to 4 MiB.
 	///
 	/// Keep it below [`receive_window`](Self::receive_window) so one slow group
 	/// can't starve the rest of the connection.
@@ -285,7 +272,7 @@ pub struct Config {
 	pub stream_receive_window: Option<u64>,
 
 	/// Cap on unacknowledged outgoing data, in bytes, regardless of what the peer
-	/// allows. Unset leaves the backend default.
+	/// allows. Defaults to 16 MiB.
 	///
 	/// This bounds the transport send buffer.
 	#[serde(skip_serializing_if = "Option::is_none")]
@@ -600,9 +587,9 @@ impl Config {
 			keep_alive,
 			mtu_discovery: self.mtu_discovery.unwrap_or(false),
 			congestion_control: self.congestion_control,
-			receive_window: self.receive_window,
-			stream_receive_window: self.stream_receive_window,
-			send_window: self.send_window,
+			receive_window: self.receive_window.unwrap_or(DEFAULT_RECEIVE_WINDOW),
+			stream_receive_window: self.stream_receive_window.unwrap_or(DEFAULT_STREAM_RECEIVE_WINDOW),
+			send_window: self.send_window.unwrap_or(DEFAULT_SEND_WINDOW),
 			qlog: self.qlog.clone(),
 		}
 	}
@@ -627,15 +614,20 @@ fn validate_idle_timeout(idle_timeout: Option<Duration>) -> crate::Result<()> {
 
 /// The largest value a QUIC varint can carry, which bounds every flow-control
 /// limit that goes on the wire as a transport parameter.
+#[cfg(feature = "_transport")]
 const MAX_VARINT: u64 = (1 << 62) - 1;
 
 /// The largest stream limit QUIC can advertise: a stream ID is a varint whose
 /// low two bits are its type, so RFC 9000 caps the count at 2^60.
+#[cfg(feature = "_transport")]
 const MAX_STREAMS: u64 = 1 << 60;
 
-/// Reject a stream limit a peer would refuse with FRAME_ENCODING_ERROR.
+/// Reject a stream limit no connection can honor: zero lets the peer open
+/// nothing, and past 2^60 a peer refuses it with FRAME_ENCODING_ERROR.
+#[cfg(feature = "_transport")]
 fn validate_streams(max_streams: Option<u64>) -> crate::Result<()> {
 	match max_streams {
+		Some(0) => Err(crate::Error::StreamsRange),
 		Some(streams) if streams > MAX_STREAMS => Err(crate::Error::StreamsRange),
 		_ => Ok(()),
 	}
@@ -694,12 +686,16 @@ pub struct Resolved {
 	pub mtu_discovery: bool,
 	/// Congestion control override, or `None` for the default.
 	pub congestion_control: Option<CongestionControl>,
-	/// Connection-wide receive window in bytes, or `None` for the 64 MiB default.
-	pub receive_window: Option<u64>,
-	/// Per-stream receive window in bytes, or `None` for the backend default.
-	pub stream_receive_window: Option<u64>,
-	/// Cap on unacknowledged outgoing data in bytes, or `None` for the backend default.
-	pub send_window: Option<u64>,
+	/// Connection-wide receive window in bytes, defaulting to [`DEFAULT_RECEIVE_WINDOW`].
+	///
+	/// The windows are resolved here rather than by each backend, whose own defaults
+	/// differ (moq-quic's and iroh's connection window is unlimited), so every runtime
+	/// honors the same `[quic]` section.
+	pub receive_window: u64,
+	/// Per-stream receive window in bytes, defaulting to [`DEFAULT_STREAM_RECEIVE_WINDOW`].
+	pub stream_receive_window: u64,
+	/// Cap on unacknowledged outgoing data in bytes, defaulting to [`DEFAULT_SEND_WINDOW`].
+	pub send_window: u64,
 	/// Directory to write qlog traces into, or `None` to not capture them.
 	pub qlog: Option<PathBuf>,
 }
@@ -934,14 +930,13 @@ mod tests {
 		assert!(at_limit.validate().is_ok());
 	}
 
-	/// Each window reaches `Resolved` untouched, and stays `None` when unset so each
-	/// backend applies the default itself (and the io_uring workers can tell it was unset).
+	/// An unset window resolves to our default, so every backend applies the same one.
 	#[test]
 	fn windows_resolve_per_field() {
 		let unset = Config::default().resolve();
-		assert_eq!(unset.receive_window, None);
-		assert_eq!(unset.stream_receive_window, None);
-		assert_eq!(unset.send_window, None);
+		assert_eq!(unset.receive_window, DEFAULT_RECEIVE_WINDOW);
+		assert_eq!(unset.stream_receive_window, DEFAULT_STREAM_RECEIVE_WINDOW);
+		assert_eq!(unset.send_window, DEFAULT_SEND_WINDOW);
 
 		let set = Config {
 			receive_window: Some(64 << 20),
@@ -950,9 +945,9 @@ mod tests {
 			..Default::default()
 		}
 		.resolve();
-		assert_eq!(set.receive_window, Some(64 << 20));
-		assert_eq!(set.stream_receive_window, Some(8 << 20));
-		assert_eq!(set.send_window, Some(32 << 20));
+		assert_eq!(set.receive_window, 64 << 20);
+		assert_eq!(set.stream_receive_window, 8 << 20);
+		assert_eq!(set.send_window, 32 << 20);
 	}
 
 	/// A zero window credits nothing, so it would wedge the connection rather than
@@ -1020,36 +1015,28 @@ mod tests {
 		assert!(at_limit.validate().is_ok());
 	}
 
-	/// A MAX_STREAMS past 2^60 is a frame encoding error at the peer, so `[quic]`
-	/// and the runtime limits both refuse it.
+	/// A MAX_STREAMS past 2^60 is a frame encoding error at the peer, and zero lets
+	/// the peer open nothing, so `[quic]` refuses both.
 	#[cfg(feature = "_transport")]
 	#[test]
 	fn stream_limits_must_fit_a_stream_id() {
-		let over = Config {
-			max_streams: Some(MAX_STREAMS + 1),
-			..Default::default()
-		};
-		assert!(matches!(over.validate(), Err(crate::Error::StreamsRange)));
-		let at_limit = Config {
-			max_streams: Some(MAX_STREAMS),
-			..Default::default()
-		};
-		assert!(at_limit.validate().is_ok());
-
-		let limit = |max_streams: u64, receive_window: u64| Limits {
-			max_streams: std::num::NonZeroU64::new(max_streams).unwrap(),
-			receive_window: std::num::NonZeroU64::new(receive_window).unwrap(),
-			send_window: std::num::NonZeroU64::MAX,
-		};
-		assert!(limit(MAX_STREAMS, MAX_VARINT).validate().is_ok());
-		assert!(matches!(
-			limit(MAX_STREAMS + 1, MAX_VARINT).validate(),
-			Err(crate::Error::StreamsRange)
-		));
-		assert!(matches!(
-			limit(MAX_STREAMS, MAX_VARINT + 1).validate(),
-			Err(crate::Error::WindowRange("receive_window"))
-		));
+		for max_streams in [0, MAX_STREAMS + 1] {
+			let over = Config {
+				max_streams: Some(max_streams),
+				..Default::default()
+			};
+			assert!(
+				matches!(over.validate(), Err(crate::Error::StreamsRange)),
+				"{max_streams}"
+			);
+		}
+		for max_streams in [1, MAX_STREAMS] {
+			let at_limit = Config {
+				max_streams: Some(max_streams),
+				..Default::default()
+			};
+			assert!(at_limit.validate().is_ok(), "{max_streams}");
+		}
 	}
 
 	#[test]

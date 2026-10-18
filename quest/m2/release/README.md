@@ -17,8 +17,9 @@ bumps and tags happen at this cut, not in the milestone-planning PR.
 Run the release's compatibility, package, draft, and all-language interop
 checks on the candidate. Publish finalized lite-07 with first-party clients
 preferring it and falling back to supported older versions. Verify artifacts
-from their registries before downstream pin migrations. Existing upgrade and
-identity guides describe public API, wire, archive-format, and legacy limits.
+from their registries before downstream pin migrations. Package `MIGRATE.md`
+files describe public API breaks; the upgrade and identity guides describe
+wire, archive-format, and legacy limits.
 
 Downstream staging, mixed-version upgrade/rollback, canaries, and broad rollout
 follow publication and require their own operator authorization. Do not mark
