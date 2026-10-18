@@ -233,7 +233,8 @@ fn reset_fails_past_reliable_size() {
     );
 }
 
-/// A waiter whose offset a later reset drops learns so from the event.
+/// A waiter whose offset a later reset drops learns so from the event, even beside a lower
+/// waiter the reset keeps.
 #[test]
 fn reset_reports_a_dropped_waiter() {
     let _guard = subscribe();
@@ -241,11 +242,14 @@ fn reset_reports_a_dropped_waiter() {
     let (client_ch, server_ch) = pair.connect();
     let s = open(&mut pair, client_ch, server_ch);
 
+    // A lower waiter the reset keeps doesn't hide the one it drops
+    pair.client_send(client_ch, s).write(b"kept").unwrap();
     let kept = pair.client_send(client_ch, s).offset();
     pair.client_send(client_ch, s).write(b"dropped").unwrap();
     let dropped = pair.client_send(client_ch, s).offset();
     lose_client_packets(&mut pair);
     reported(&mut pair, client_ch, s);
+    assert_eq!(acked(&mut pair, client_ch, s, kept), Ok(false));
     assert_eq!(acked(&mut pair, client_ch, s, dropped), Ok(false));
 
     pair.client_send(client_ch, s)

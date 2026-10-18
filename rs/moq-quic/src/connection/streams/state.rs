@@ -420,7 +420,7 @@ impl StreamsState {
         let buffered = stream.pending.buffered();
         let reset = stream.abandon_reliable();
         self.buffered_data -= buffered - stream.pending.buffered();
-        if let Some(offset) = stream.take_acked() {
+        if let Some(offset) = stream.take_waiting() {
             self.events.push_back(StreamEvent::Acked { id, offset });
         }
         if !stream.is_pending() {

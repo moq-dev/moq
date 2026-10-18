@@ -264,16 +264,21 @@ impl Send {
         Ok(false)
     }
 
-    /// The acknowledged prefix to report once the answer for the offset a waiter is waiting for
-    /// changes: the prefix reached it, or STOP_SENDING or a reset made it fail
+    /// The acknowledged prefix to report once it reaches the offset a waiter is waiting for
     pub(super) fn take_acked(&mut self) -> Option<u64> {
-        let notify = self.notify?;
         let acked = self.pending.acked();
-        if acked < notify && self.stop_reason.is_none() && notify <= self.pending.offset() {
+        if self.notify.is_none_or(|notify| acked < notify) {
             return None;
         }
         self.notify = None;
         Some(acked)
+    }
+
+    /// The acknowledged prefix to report to every waiter after a reset or STOP_SENDING, which may
+    /// fail any of them
+    pub(super) fn take_waiting(&mut self) -> Option<u64> {
+        self.notify.take()?;
+        Some(self.pending.acked())
     }
 
     /// Handle increase to stream-level flow control limit

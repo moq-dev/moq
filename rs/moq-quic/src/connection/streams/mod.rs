@@ -456,7 +456,7 @@ impl<'a> SendStream<'a> {
         let buffered = stream.pending.buffered();
         let send = stream.reset(error_code, reliable_size, at);
         self.state.buffered_data -= buffered - stream.pending.buffered();
-        if let Some(offset) = stream.take_acked() {
+        if let Some(offset) = stream.take_waiting() {
             self.state.events.push_back(StreamEvent::Acked {
                 id: self.id,
                 offset,
@@ -751,9 +751,9 @@ pub enum StreamEvent {
     },
     /// The answer changed for the lowest offset a [`SendStream::acked`] call is waiting for
     ///
-    /// The stream's contiguous acknowledged prefix reached it, or STOP_SENDING or a reset made it
-    /// fail. Every waiter on the stream polls again: one at or below `offset` is acknowledged, and
-    /// one past it registers again. Reported before a [`StreamEvent::Finished`] from the same ACK.
+    /// The stream's contiguous acknowledged prefix reached it, or a reset or STOP_SENDING may have
+    /// failed any waiter. Every waiter on the stream polls again: one at or below `offset` is
+    /// acknowledged, and one past it learns its error or registers again. Reported before a [`StreamEvent::Finished`] from the same ACK.
     /// Not reported when the connection closes, which fails [`SendStream::acked`] instead.
     Acked {
         /// Which stream was acknowledged
